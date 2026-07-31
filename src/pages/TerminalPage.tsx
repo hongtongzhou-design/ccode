@@ -179,8 +179,8 @@ function TerminalView({
       scrollback: 5000,
       // VS Code Dark+ 风格调色板，让 ANSI 高亮有足够的色彩层次
       theme: {
-        background: '#171111', // 主题令牌 --color-canvas
-        foreground: '#C7C6C4', // 主题令牌 --color-l2
+        background: '#11131a', // 主题令牌 --color-canvas
+        foreground: '#aeb6c6', // 主题令牌 --color-l2
         cursor: '#aeafad',
         selectionBackground: '#264f78',
         black: '#000000',
@@ -641,7 +641,7 @@ function TerminalView({
       <div className="flex min-h-0 flex-1 gap-2">
         <div
           ref={containerRef}
-          className="min-w-0 flex-1 overflow-hidden rounded bg-black p-1"
+          className="min-w-0 flex-1 overflow-hidden rounded border border-hairline bg-canvas p-1"
         />
       </div>
     </div>
@@ -871,13 +871,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     }
   }
 
-  const railBtn = "text-xs text-l4 hover:text-l2";
+  const railBtn =
+    "flex h-7 w-7 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l2";
 
   return (
     <div className="flex h-full">
       {/* 左栏：工作树 + 运行中总览 */}
       {railCollapsed ? (
-        <div className="flex w-8 shrink-0 flex-col items-center bg-rail py-1.5">
+        <div className="flex w-8 shrink-0 flex-col items-center bg-rail2 py-1.5">
           <button
             onClick={() => setRailCollapsed(false)}
             title="展开工作树"
@@ -887,13 +888,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           </button>
         </div>
       ) : (
-        <div className="flex w-60 shrink-0 flex-col bg-rail">
+        <div className="flex w-60 shrink-0 flex-col bg-rail2">
           <div className="flex shrink-0 items-center gap-2 px-2 py-1.5">
             <span className="mr-auto text-xs font-medium text-l3">工作树</span>
             <button
               onClick={() => setShowHidden((v) => !v)}
               title={showHidden ? "隐藏隐藏文件" : "显示隐藏文件"}
-              className={`text-xs ${showHidden ? "text-l1" : "text-l4"} hover:text-l2`}
+              className={`flex h-7 w-7 items-center justify-center rounded text-xs hover:bg-white/5 ${
+                showHidden ? "text-l1" : "text-l4 hover:text-l2"
+              }`}
             >
               .*
             </button>

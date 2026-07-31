@@ -10,14 +10,17 @@ import type { Profile, ProfileInput } from "../types";
 
 function ProfileModal({
   initial,
+  presetAgent,
   onClose,
 }: {
   initial: Profile | null;
+  /** 从某个 agent 组的「+ 添加配置」打开时预选该 agent */
+  presetAgent?: string;
   onClose: () => void;
 }) {
   const saveProfile = useAppStore((s) => s.saveProfile);
   const [form, setForm] = useState({
-    agent: initial?.agent ?? "claude-code",
+    agent: initial?.agent ?? presetAgent ?? "claude-code",
     name: initial?.name ?? "",
     protocol: (initial?.protocol ??
       AGENT_PROTOCOLS[initial?.agent ?? "claude-code"]?.default ??
@@ -423,9 +426,14 @@ export default function ProfilesPage() {
   const removeProfile = useAppStore((s) => s.removeProfile);
   const duplicateProfile = useAppStore((s) => s.duplicateProfile);
   const loadAll = useAppStore((s) => s.loadAll);
-  const [modal, setModal] = useState<{ initial: Profile | null } | null>(null);
+  const [modal, setModal] = useState<{ initial: Profile | null; presetAgent?: string } | null>(null);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; profile: Profile } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 过滤条：按安装状态过滤 agent 组；按名称/端点/模型过滤配置行
+  const [statusFilter, setStatusFilter] = useState<"all" | "installed" | "uninstalled">("all");
+  const [search, setSearch] = useState("");
+  // 组展开状态：默认「有配置展开 / 无配置收起」，手动点击后取反
+  const [toggledGroups, setToggledGroups] = useState<Set<string>>(new Set());
   const [globalBackups, setGlobalBackups] = useState<Record<string, boolean>>({});
   // 各 agent 的升级/安装进行态、实时输出与最近结果（可并发操作多个 agent）
   const [updating, setUpdating] = useState<Record<string, boolean>>({});
@@ -617,210 +625,308 @@ export default function ProfilesPage() {
     }
   }
 
+  const q = search.trim().toLowerCase();
+  const matchProfile = (p: Profile) =>
+    !q ||
+    [p.name, p.baseUrl ?? "", ...p.models].join("\n").toLowerCase().includes(q);
+  const visibleAgents = AGENTS.filter((a) => {
+    const installed = !!agents.find((x) => x.id === a.id)?.binaryPath;
+    if (statusFilter === "installed") return installed;
+    if (statusFilter === "uninstalled") return !installed;
+    return true;
+  });
+
   return (
-    <div className="mx-auto max-w-3xl p-6">
-      <div className="mb-5 flex items-baseline justify-between">
-        <div className="flex items-baseline gap-3">
-          <h1 className="text-lg font-semibold text-l1">配置中心</h1>
-          <span className="text-xs text-l3">
-            {profiles.length} 个配置 · {new Set(profiles.map((p) => p.agent)).size} 个
-            agent
-          </span>
+    <div className="min-h-full bg-pg">
+      <div className="mx-auto max-w-[1200px] px-8 py-6">
+        {/* 命令栏：标题 + 元信息，右侧动作 */}
+        <div className="flex items-baseline justify-between">
+          <div className="flex items-baseline gap-3">
+            <h1 className="text-lg font-semibold text-pl1">配置中心</h1>
+            <span className="text-xs text-pl2">
+              {profiles.length} 个配置 · {new Set(profiles.map((p) => p.agent)).size} 个
+              agent
+            </span>
+          </div>
+          <div className="flex gap-1">
+            <button
+              onClick={onImport}
+              className="rounded px-2 py-1 text-sm text-pl2 hover:bg-white/5"
+            >
+              导入
+            </button>
+            <button
+              onClick={onExport}
+              className="rounded px-2 py-1 text-sm text-pl2 hover:bg-white/5"
+            >
+              导出
+            </button>
+            <button
+              onClick={() => setModal({ initial: null })}
+              className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110"
+            >
+              + 新建配置
+            </button>
+          </div>
         </div>
-        <div className="flex gap-1">
-          <button
-            onClick={onImport}
-            className="rounded px-2 py-1 text-sm text-l2 hover:bg-white/5"
-          >
-            导入
-          </button>
-          <button
-            onClick={onExport}
-            className="rounded px-2 py-1 text-sm text-l2 hover:bg-white/5"
-          >
-            导出
-          </button>
-          <button
-            onClick={() => setModal({ initial: null })}
-            className="rounded px-2 py-1 text-sm text-l1 hover:bg-white/5"
-          >
-            新建配置
-          </button>
-        </div>
-      </div>
-      {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
-      {AGENTS.map((agent) => {
-        const det = agents.find((a) => a.id === agent.id);
-        const list = profiles.filter((p) => p.agent === agent.id);
-        return (
-          <section key={agent.id} className="mb-6">
-            <div className="mb-2 flex items-baseline gap-2">
-              <h2 className="text-sm font-medium text-l1">{agent.label}</h2>
-              {det?.binaryPath ? (
-                <span className="text-xs text-ok-text">
-                  已安装{det.version ? ` · ${det.version}` : ""}
-                </span>
-              ) : (
-                <span className="text-xs text-l4">
-                  未安装（{agent.binary} 不在 PATH）
-                </span>
-              )}
-              {det?.binaryPath ? (
-                <button
-                  onClick={() => onUpdate(agent.id)}
-                  disabled={updating[agent.id]}
-                  className="ml-auto rounded bg-btn px-2 py-0.5 text-xs text-l1 hover:bg-white/10 disabled:opacity-50"
-                >
-                  {updating[agent.id] ? "更新中…" : "更新"}
-                </button>
-              ) : (
-                <button
-                  onClick={() => onInstall(agent.id)}
-                  disabled={updating[agent.id]}
-                  className="ml-auto rounded border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
-                >
-                  {updating[agent.id] ? "安装中…" : "安装"}
-                </button>
-              )}
-            </div>
-            {updating[agent.id] && (
-              <div className="mb-2">
-                <pre
-                  // callback ref：每次渲染都把滚动条钉在底部，实现跟随输出自动滚动
-                  ref={(el) => {
-                    if (el) el.scrollTop = el.scrollHeight;
-                  }}
-                  className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-t border border-field border-b-0 bg-canvas p-2 font-mono text-xs text-l2"
-                >
-                  {liveOutput[agent.id] || "运行中，等待输出…"}
-                </pre>
-                {(() => {
-                  // 120s 无新输出给提示；新块到达（时间戳刷新）或 run 结束（整块隐藏）自动消失
-                  const last = lastChunkAtRef.current[agent.id];
-                  const idleMin = last ? Math.floor((Date.now() - last) / 60000) : 0;
-                  if (idleMin < 2) return null;
-                  return (
-                    <div className="bg-warn px-2 py-1 text-xs text-warn-text">
-                      已 {idleMin} 分钟无新输出：可能是网络慢，或命令在等待输入（在下方输入行回答）。若持续异常可把当前内容发给开发者。
-                    </div>
-                  );
-                })()}
-                <div className="flex items-center gap-1.5 rounded-b border border-field bg-canvas px-2 py-1.5">
-                  <span className="font-mono text-xs text-l4">&gt;</span>
-                  <input
-                    value={cmdInput[agent.id] ?? ""}
-                    onChange={(e) =>
-                      setCmdInput((prev) => ({ ...prev, [agent.id]: e.target.value }))
-                    }
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void sendUpdaterInput(agent.id);
-                    }}
-                    placeholder="需要交互时在此输入（如 y），Enter 发送"
-                    className="flex-1 bg-transparent font-mono text-xs text-l2 outline-none placeholder:text-l4"
-                  />
-                </div>
-              </div>
-            )}
-            {updateResults[agent.id] && (
-              <div
-                className={`mb-2 rounded p-2 text-xs ${
-                  updateResults[agent.id].ok
-                    ? "bg-ok text-ok-text"
-                    : "bg-err text-err-text"
+
+        {/* 过滤条：状态分段 + 搜索 */}
+        <div className="mt-4 flex items-center justify-between">
+          <div className="flex gap-1">
+            {(
+              [
+                ["all", "全部"],
+                ["installed", "已安装"],
+                ["uninstalled", "未安装"],
+              ] as const
+            ).map(([k, label]) => (
+              <button
+                key={k}
+                onClick={() => setStatusFilter(k)}
+                className={`rounded px-2.5 py-1 text-xs ${
+                  statusFilter === k
+                    ? "bg-grp text-pl1"
+                    : "text-pl2 hover:text-pl1"
                 }`}
               >
-                <span>
-                  {updateResults[agent.id].ok ? "✓ 更新完成" : "✗ 更新失败"}
-                  {updateResults[agent.id].method &&
-                    `（${updateResults[agent.id].method}）`}
-                  {updateResults[agent.id].versionAfter &&
-                    `：${updateResults[agent.id].versionBefore ?? "?"} → ${updateResults[agent.id].versionAfter}`}
-                </span>
-                {updateResults[agent.id].output && (
-                  <details className="mt-1">
-                    <summary className="cursor-pointer text-l3">输出</summary>
-                    <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono">
-                      {updateResults[agent.id].output}
-                    </pre>
-                  </details>
-                )}
-                {(() => {
-                  const r = updateResults[agent.id];
-                  const hint = r.ok ? null : diagnose(r.output, r.method);
-                  return hint ? (
-                    <p className="mt-1 text-xs text-l3">💡 建议：{hint}</p>
-                  ) : null;
-                })()}
-              </div>
-            )}
-            {list.length === 0 ? (
-              <p className="rounded border border-dashed border-field p-4 text-sm text-l4">
-                暂无配置
-              </p>
-            ) : (
-              <ul className="divide-y divide-hairline">
-                {list.map((p) => (
-                  <li key={p.id} className="flex items-center gap-3 py-2.5 text-sm">
-                    <span className="font-medium text-l1">{p.name}</span>
-                    <span className="truncate text-l3">
-                      {p.baseUrl ?? "默认端点"}
+                {label}
+              </button>
+            ))}
+          </div>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="搜索名称 / 端点 / 模型"
+            className="w-56 rounded border border-hl2 bg-pg px-2 py-1 text-xs text-pl2 outline-none placeholder:text-l4 focus:border-l4"
+          />
+        </div>
+
+        {error && <p className="mt-4 text-sm text-err-text">{error}</p>}
+
+        {/* agent 分组（可折叠） */}
+        <div className="mt-5">
+          {visibleAgents.map((agent) => {
+            const det = agents.find((a) => a.id === agent.id);
+            const list = profiles.filter((p) => p.agent === agent.id && matchProfile(p));
+            if (q && list.length === 0) return null;
+            const defaultCollapsed = profiles.filter((p) => p.agent === agent.id).length === 0;
+            const isCollapsed = toggledGroups.has(agent.id)
+              ? !defaultCollapsed
+              : defaultCollapsed;
+            return (
+              <section key={agent.id} className="mb-8">
+                {/* 组头 48px */}
+                <div className="flex h-12 items-center gap-2 rounded-t bg-grp px-3">
+                  <button
+                    onClick={() =>
+                      setToggledGroups((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(agent.id)) next.delete(agent.id);
+                        else next.add(agent.id);
+                        return next;
+                      })
+                    }
+                    aria-label={isCollapsed ? "展开" : "收起"}
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-sm text-pl2 hover:bg-white/5 hover:text-pl1"
+                  >
+                    {isCollapsed ? "▸" : "▾"}
+                  </button>
+                  <h2 className="text-sm font-medium text-pl1">{agent.label}</h2>
+                  {det?.binaryPath ? (
+                    <span className="text-xs text-okb">
+                      已安装{det.version ? ` · ${det.version}` : ""}
                     </span>
-                    {p.models.length > 0 && (
-                      <span className="flex flex-wrap gap-1">
-                        {p.models.slice(0, 3).map((m, i) => (
-                          <span
-                            key={m}
-                            className={`rounded px-1.5 py-0.5 text-xs ${
-                              i === 0
-                                ? "bg-seg-sel text-l1"
-                                : "bg-inset text-l3"
-                            }`}
-                          >
-                            {m}
-                          </span>
-                        ))}
-                        {p.models.length > 3 && (
-                          <span className="text-xs text-l4">
-                            +{p.models.length - 3}
-                          </span>
-                        )}
-                      </span>
-                    )}
-                    <span
-                      className={`text-xs ${p.hasKey ? "text-ok-text" : "text-l4"}`}
+                  ) : (
+                    <span className="text-xs text-pl2">
+                      未安装（{agent.binary} 不在 PATH）
+                    </span>
+                  )}
+                  {det?.binaryPath ? (
+                    <button
+                      onClick={() => onUpdate(agent.id)}
+                      disabled={updating[agent.id]}
+                      className="ml-auto text-xs text-pl2 hover:text-pl1 disabled:opacity-50"
                     >
-                      {p.hasKey ? `已存密钥 ${p.keyHint ?? ""}` : "无密钥"}
-                    </span>
-                    <span className="text-xs text-l4">
-                      {p.lastUsedAt ? `${relTime(p.lastUsedAt)}使用` : "从未使用"}
-                    </span>
-                    <span className="ml-auto flex shrink-0 items-center gap-1.5">
-                      <button
-                        onClick={() => setModal({ initial: p })}
-                        className="text-xs text-l2 hover:text-l1"
+                      {updating[agent.id] ? "更新中…" : "更新"}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => onInstall(agent.id)}
+                      disabled={updating[agent.id]}
+                      className="ml-auto h-8 rounded border border-cta-bd bg-cta px-2.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+                    >
+                      {updating[agent.id] ? "安装中…" : "安装"}
+                    </button>
+                  )}
+                </div>
+
+                {!isCollapsed && (
+                  <>
+                    {/* 安装/更新实时输出（全宽，行为不变） */}
+                    {updating[agent.id] && (
+                      <div className="mt-2">
+                        <pre
+                          // callback ref：每次渲染都把滚动条钉在底部，实现跟随输出自动滚动
+                          ref={(el) => {
+                            if (el) el.scrollTop = el.scrollHeight;
+                          }}
+                          className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-t border border-hl2 border-b-0 bg-pg p-2 font-mono text-xs text-pl2"
+                        >
+                          {liveOutput[agent.id] || "运行中，等待输出…"}
+                        </pre>
+                        {(() => {
+                          // 120s 无新输出给提示；新块到达（时间戳刷新）或 run 结束（整块隐藏）自动消失
+                          const last = lastChunkAtRef.current[agent.id];
+                          const idleMin = last ? Math.floor((Date.now() - last) / 60000) : 0;
+                          if (idleMin < 2) return null;
+                          return (
+                            <div className="bg-warn px-2 py-1 text-xs text-warn-text">
+                              已 {idleMin} 分钟无新输出：可能是网络慢，或命令在等待输入（在下方输入行回答）。若持续异常可把当前内容发给开发者。
+                            </div>
+                          );
+                        })()}
+                        <div className="flex items-center gap-1.5 rounded-b border border-hl2 bg-pg px-2 py-1.5">
+                          <span className="font-mono text-xs text-l4">&gt;</span>
+                          <input
+                            value={cmdInput[agent.id] ?? ""}
+                            onChange={(e) =>
+                              setCmdInput((prev) => ({ ...prev, [agent.id]: e.target.value }))
+                            }
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") void sendUpdaterInput(agent.id);
+                            }}
+                            placeholder="需要交互时在此输入（如 y），Enter 发送"
+                            className="flex-1 bg-transparent font-mono text-xs text-pl2 outline-none placeholder:text-l4"
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {updateResults[agent.id] && (
+                      <div
+                        className={`mt-2 rounded p-2 text-xs ${
+                          updateResults[agent.id].ok
+                            ? "bg-ok text-ok-text"
+                            : "bg-err text-err-text"
+                        }`}
                       >
-                        编辑
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          const r = e.currentTarget.getBoundingClientRect();
-                          setRowMenu({ x: r.left, y: r.bottom + 4, profile: p });
-                        }}
-                        aria-label="更多操作"
-                        className="rounded px-1 text-l4 hover:bg-white/5 hover:text-l1"
-                      >
-                        ⋯
-                      </button>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        );
-      })}
+                        <span>
+                          {updateResults[agent.id].ok ? "✓ 更新完成" : "✗ 更新失败"}
+                          {updateResults[agent.id].method &&
+                            `（${updateResults[agent.id].method}）`}
+                          {updateResults[agent.id].versionAfter &&
+                            `：${updateResults[agent.id].versionBefore ?? "?"} → ${updateResults[agent.id].versionAfter}`}
+                        </span>
+                        {updateResults[agent.id].output && (
+                          <details className="mt-1">
+                            <summary className="cursor-pointer text-l3">输出</summary>
+                            <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono">
+                              {updateResults[agent.id].output}
+                            </pre>
+                          </details>
+                        )}
+                        {(() => {
+                          const r = updateResults[agent.id];
+                          const hint = r.ok ? null : diagnose(r.output, r.method);
+                          return hint ? (
+                            <p className="mt-1 text-xs text-l3">💡 建议：{hint}</p>
+                          ) : null;
+                        })()}
+                      </div>
+                    )}
+
+                    {list.length === 0 ? (
+                      <div className="flex h-12 items-center justify-between border-b border-hl2">
+                        <span className="text-sm text-l4">暂无配置</span>
+                        <button
+                          onClick={() => setModal({ initial: null, presetAgent: agent.id })}
+                          className="text-xs text-pl2 hover:text-pl1"
+                        >
+                          + 添加配置
+                        </button>
+                      </div>
+                    ) : (
+                      <ul className="divide-y divide-hl2 overflow-x-auto">
+                        {list.map((p) => (
+                          <li
+                            key={p.id}
+                            className="grid h-16 grid-cols-[130px_minmax(140px,1fr)_240px_150px_112px] items-center gap-2 text-sm"
+                          >
+                            {/* 名称 + 上次使用 */}
+                            <span className="flex h-full flex-col justify-center overflow-hidden">
+                              <span className="truncate font-medium text-pl1">{p.name}</span>
+                              <span className="truncate text-xs text-l4">
+                                {p.lastUsedAt ? `${relTime(p.lastUsedAt)}使用` : "从未使用"}
+                              </span>
+                            </span>
+                            {/* Endpoint */}
+                            <span className="truncate text-pl2">
+                              {p.baseUrl ?? "默认端点"}
+                            </span>
+                            {/* 模型标签 */}
+                            <span className="flex flex-wrap items-center gap-1 overflow-hidden">
+                              {p.models.slice(0, 3).map((m, i) => (
+                                <span
+                                  key={m}
+                                  className={`rounded-md px-1.5 py-0.5 text-xs ${
+                                    i === 0
+                                      ? "bg-grp text-pl1"
+                                      : "text-pl2 opacity-70"
+                                  }`}
+                                >
+                                  {m}
+                                </span>
+                              ))}
+                              {p.models.length > 3 && (
+                                <span
+                                  className="text-xs text-l4"
+                                  title={p.models.join("\n")}
+                                >
+                                  +{p.models.length - 3}
+                                </span>
+                              )}
+                            </span>
+                            {/* 密钥状态 */}
+                            <span
+                              className={`text-xs ${p.hasKey ? "text-okb" : "text-pl2"}`}
+                            >
+                              {p.hasKey ? `已存密钥 ${p.keyHint ?? ""}` : "无密钥"}
+                            </span>
+                            {/* 操作 */}
+                            <span className="flex items-center justify-end gap-2 whitespace-nowrap">
+                              <button
+                                onClick={() => setModal({ initial: p })}
+                                className="h-8 text-xs text-pl2 hover:text-pl1"
+                              >
+                                编辑
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  const r = e.currentTarget.getBoundingClientRect();
+                                  setRowMenu({ x: r.left, y: r.bottom + 4, profile: p });
+                                }}
+                                aria-label="更多操作"
+                                className="h-8 rounded px-1 text-l4 hover:bg-white/5 hover:text-pl1"
+                              >
+                                ⋯
+                              </button>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </>
+                )}
+              </section>
+            );
+          })}
+        </div>
+      </div>
       {modal && (
-        <ProfileModal initial={modal.initial} onClose={() => setModal(null)} />
+        <ProfileModal
+          initial={modal.initial}
+          presetAgent={modal.presetAgent}
+          onClose={() => setModal(null)}
+        />
       )}
       {rowMenu && (
         <ContextMenu

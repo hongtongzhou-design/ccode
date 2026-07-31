@@ -6,44 +6,58 @@
  * （bg-rail / text-l2 / border-hairline / divide-hairline …）。
  */
 @theme {
-  /* 暖调近黑五级阶梯 */
-  --color-rail: #302f2d; /* 侧栏 / 树栏底 */
-  --color-rail-sel: #3a3937; /* 侧栏选中行 */
-  --color-strip: #1f1e1c; /* 顶栏 / 面板头条 / 输入区 */
-  --color-canvas: #171111; /* 主内容底 */
-  --color-inset: #2a1e1e; /* 卡片 / 气泡 / 结果块 */
-  --color-seg-sel: #2c2827; /* 分段控件选中 */
-  --color-hairline: #2a2424; /* 区间与行间 1px 细线 */
-  --color-field: #363231; /* 输入框 / 弹层边线 */
+  /* 沉浸工作台：侧栏沉入近虚无 → 页面左栏 → 内容面 → 内嵌层逐级浮起
+     冷调深黑 + 冷白灰蓝文字，绿色为唯一强调 */
+  --color-rail: #08090d; /* 应用侧栏（近虚无，最暗） */
+  --color-rail2: #0d0f15; /* 页面左栏（会话树 / 终端工作栏） */
+  --color-rail-sel: #1f2533; /* 侧栏选中行 */
+  --color-strip: #151823; /* 顶栏 / 面板头条 / 输入区 */
+  --color-canvas: #11131a; /* 主内容底（黑基底） */
+  --color-inset: #181c27; /* 卡片 / 气泡 / 结果块（微微浮起） */
+  --color-seg-sel: #242a3a; /* 分段控件选中 */
+  --color-hairline: #202532; /* 隐式 1px 细线 */
+  --color-field: #2e3546; /* 输入框 / 弹层边线 */
 
-  /* 文本四级（层级靠颜色不靠字号） */
-  --color-l1: #fffefd; /* 标题 / 选中 */
-  --color-l2: #c7c6c4; /* 正文 / 次级 */
-  --color-l3: #b9b4b1; /* 元信息 / 非选中页签 */
-  --color-l4: #7c7877; /* 淡 */
+  /* 文本四级：冷白 → 灰蓝（层级靠颜色不靠字号） */
+  --color-l1: #eef2fa; /* 标题 / 选中 */
+  --color-l2: #aeb6c6; /* 正文 / 次级 */
+  --color-l3: #767e90; /* 元信息 / 非选中页签 */
+  --color-l4: #525a6b; /* 淡 */
 
-  /* 主 CTA（绿）：每个视图只允许一个 */
+  /* 主 CTA（绿，保留）：每个视图只允许一个 */
   --color-cta: #16a349;
   --color-cta-text: #ceffdf;
   --color-cta-bd: #06491e;
 
   /* 状态 pill：深底 + 同色相浅字 */
-  --color-ok: #133a23;
-  --color-ok-text: #8ee3b1;
-  --color-err: #3a1b1e;
-  --color-err-text: #d5989f;
-  --color-warn: #3a2e1b;
-  --color-warn-text: #e0c6a1;
+  --color-ok: #10331f;
+  --color-ok-text: #7fe3a8;
+  --color-err: #381e24;
+  --color-err-text: #e3949b;
+  --color-warn: #37300f;
+  --color-warn-text: #e3c98a;
 
   /* diff 增删 */
-  --color-add: #9acfb0;
-  --color-del: #cd7c86;
+  --color-add: #8fd3a8;
+  --color-del: #d98a93;
+
+  /* 交互蓝：仅用于链接 / 可点提示，克制使用 */
+  --color-link: #7ea2e8;
 
   /* 页签选中下划线 */
-  --color-tabline: #e0c6c1;
+  --color-tabline: #c9cfda;
 
   /* 次级实心按钮 */
   --color-btn: #464543;
+
+  /* 配置页专属（不改全局 rail/canvas 令牌） */
+  --color-pg: #11131a; /* 页底（= canvas） */
+  --color-grp: #151823; /* 组头 / 选中填充（= strip） */
+  --color-hl2: #202532; /* 页内 hairline（= hairline） */
+  --color-pl1: #eef2fa; /* 页内一级文本（= l1） */
+  --color-pl2: #aeb6c6; /* 页内二级文本（= l2） */
+  --color-okb: #7fe3a8; /* 成功（已安装 / 已存密钥 / 安装） */
+  --color-warnb: #e3c98a; /* 警告 */
 }
 
 html,

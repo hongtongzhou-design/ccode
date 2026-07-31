@@ -384,7 +384,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   return (
     <div className="flex h-full">
       {/* 左栏：分类树 */}
-      <div className="flex w-[230px] shrink-0 flex-col bg-rail">
+      <div className="flex w-[230px] shrink-0 flex-col bg-rail2">
         <div className="p-2">
           <input
             className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
@@ -421,7 +421,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     toggleCollapsed(g.agent);
                     selectFilter({ kind: "agent", agent: g.agent });
                   }}
-                  className="mr-1 shrink-0 text-l4"
+                  className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-l4 hover:bg-white/5 hover:text-l2"
                   title={collapsed.has(g.agent) ? "展开" : "收起"}
                 >
                   {collapsed.has(g.agent) ? "▸" : "▾"}
