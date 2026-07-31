@@ -46,6 +46,7 @@ pub fn run() {
             sessions::set_session_meta,
             sessions::delete_session,
             sessions::delete_project_sessions,
+            sessions::session_tail_state,
             fs_tree::list_dir,
             fs_tree::read_file_preview,
             git_info::git_status,

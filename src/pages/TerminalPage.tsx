@@ -33,6 +33,8 @@ interface TabStatus {
   cwd: string;
   /** 当前 PTY id（可见性门控用；无存活 PTY 时为 null） */
   ptyId: string | null;
+  /** 会话尾部状态（P3c 注意力标记）；无联动/shell/已退出/未知时为 null */
+  attention: "done" | "working" | "confirm" | null;
 }
 
 /** TerminalView 上报的会话联动数据（右侧「会话」页签渲染用） */
@@ -142,6 +144,7 @@ function TerminalView({
   // 向标签条上报标题/运行状态；值没变就不惊动父组件
   const title = initialTitle ?? selectedProfile?.name ?? agentLabel(agentId);
   const [activePtyId, setActivePtyId] = useState<string | null>(null);
+  const [attention, setAttention] = useState<TabStatus["attention"]>(null);
   const lastReportRef = useRef("");
   useEffect(() => {
     const s: TabStatus = {
@@ -153,13 +156,15 @@ function TerminalView({
       model,
       cwd,
       ptyId: activePtyId,
+      // 注意力标记只在 agent 运行中且已联动会话时有意义
+      attention: running && !shellActive && sessionFile ? attention : null,
     };
     const key = JSON.stringify(s);
     if (key !== lastReportRef.current) {
       lastReportRef.current = key;
       onStatus(s);
     }
-  }, [title, running, shellActive, agentId, model, cwd, activePtyId, onStatus]);
+  }, [title, running, shellActive, agentId, model, cwd, activePtyId, attention, sessionFile, onStatus]);
 
   // 会话联动数据镜像给页面级右侧面板
   useEffect(() => {
@@ -347,6 +352,7 @@ function TerminalView({
     ptyKindRef.current = null;
     setActivePtyId(null);
     setRunning(false);
+    setAttention(null); // agent 退出：清除注意力标记
     if (kind === "agent") {
       // agent 退出（含手动停止）→ 同一终端自动回落到登录 shell
       termRef.current?.write("\r\n\x1b[90m── agent 已退出，进入 shell ──\x1b[0m\r\n");
@@ -419,6 +425,18 @@ function TerminalView({
     } catch {
       // 会话文件可能写到一半，下轮再试
     }
+    // P3c：同一路径顺带轮询会话尾部状态（done/working/confirm/unknown）
+    try {
+      const state = await invoke<string>("session_tail_state", {
+        agent: ctx.agentId,
+        filePath: ctx.filePath,
+      });
+      setAttention(
+        state === "done" || state === "working" || state === "confirm" ? state : null,
+      );
+    } catch {
+      setAttention(null);
+    }
   }
 
   /** 会话文件锁定：登记 liveSessions（会话页「进行中」+ 反向跳转） */
@@ -467,6 +485,7 @@ function TerminalView({
     linkCtxRef.current = null;
     setSessionFile(null);
     setConv([]);
+    setAttention(null);
   }
 
   async function launch() {
@@ -1012,7 +1031,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               const s = statuses[t.id];
               const active = t.id === activeId;
               const dot = s?.running
-                ? "text-ok-text"
+                ? `text-ok-text${s.attention === "working" ? " animate-pulse" : ""}`
                 : s?.shell
                   ? "text-l3"
                   : "text-l4";
@@ -1037,6 +1056,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       {s
                         ? `${agentLabel(s.agentId)}${s.model ? ` · ${s.model}` : ""} · ${basename(s.cwd)}`
                         : ""}
+                      {s?.attention === "done" && (
+                        <span className="text-link"> · 已完成</span>
+                      )}
+                      {s?.attention === "confirm" && (
+                        <span className="text-warn-text"> · 待确认</span>
+                      )}
                     </span>
                   </span>
                 </button>
@@ -1063,11 +1088,35 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 }`}
               >
                 <span
-                  className={`text-[10px] ${s?.alive ? "text-ok-text" : "text-l4"}`}
-                  title={s?.alive ? "进程运行中" : "未运行 / 已退出"}
+                  className={`text-[10px] ${
+                    s?.running
+                      ? `text-ok-text${s.attention === "working" ? " animate-pulse" : ""}`
+                      : s?.shell
+                        ? "text-l3"
+                        : "text-l4"
+                  }`}
+                  title={
+                    s?.running
+                      ? s.attention === "working"
+                        ? "工作中"
+                        : "agent 运行中"
+                      : s?.shell
+                        ? "shell 模式"
+                        : "未运行 / 已退出"
+                  }
                 >
                   ●
                 </span>
+                {s?.attention === "done" && (
+                  <span className="text-[10px] text-link" title="已完成，等待输入">
+                    ●
+                  </span>
+                )}
+                {s?.attention === "confirm" && (
+                  <span className="text-[10px] text-warn-text" title="等待确认">
+                    ●
+                  </span>
+                )}
                 <span className="max-w-40 truncate">{s?.title ?? "终端"}</span>
                 <button
                   onClick={(e) => {

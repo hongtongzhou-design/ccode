@@ -2539,6 +2539,254 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
     map
 }
 
+// ===== 注意力标记 v1（§6.11）：读尾部 ~64KB 分类最后一个有意义的记录 =====
+// 返回 "done" | "working" | "confirm" | "unknown"
+
+/// 读文件最后 budget 字节并对齐到换行；小文件全读
+fn last_lines(path: &Path, budget: usize) -> Vec<String> {
+    let Some(bytes) = read_session_bytes(path) else {
+        return Vec::new();
+    };
+    if bytes.len() <= budget {
+        return to_lines(&String::from_utf8_lossy(&bytes));
+    }
+    let from = bytes.len() - budget;
+    let from = bytes[from..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| from + i + 1)
+        .unwrap_or(bytes.len());
+    to_lines(&String::from_utf8_lossy(&bytes[from..]))
+}
+
+fn ends_with_question(text: &str) -> bool {
+    let t = text.trim_end();
+    t.ends_with('?') || t.ends_with('？')
+}
+
+fn claude_tail_state(lines: &[String]) -> &'static str {
+    for line in lines.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(|x| x.as_bool()) == Some(true)
+            || v.get("isMeta").and_then(|x| x.as_bool()) == Some(true)
+        {
+            continue;
+        }
+        match get_str(&v, "type") {
+            Some("user") => return "working", // 发了 prompt 还没等到回答（或 tool_result 刚回）
+            Some("assistant") => {
+                let Some(arr) = v.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) else {
+                    continue;
+                };
+                if arr.iter().any(|b| get_str(b, "type") == Some("tool_use")) {
+                    return "working"; // 尾部有待执行的工具调用
+                }
+                let last_text = arr
+                    .iter()
+                    .rev()
+                    .find_map(|b| if get_str(b, "type") == Some("text") { get_str(b, "text") } else { None });
+                match last_text {
+                    None => continue,
+                    Some(t) if ends_with_question(t) => return "confirm", // 文本以问句收尾，保守判定待确认
+                    Some(_) => return "done",
+                }
+            }
+            _ => continue,
+        }
+    }
+    "unknown"
+}
+
+fn codex_tail_state(lines: &[String]) -> &'static str {
+    for line in lines.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match get_str(&v, "type") {
+            Some("response_item") => {
+                let Some(p) = v.get("payload") else {
+                    continue;
+                };
+                match get_str(p, "type") {
+                    Some("message") => match get_str(p, "role") {
+                        Some("user") => return "working",
+                        Some("assistant") => {
+                            let text = codex_message_text(p).unwrap_or_default();
+                            return if ends_with_question(&text) { "confirm" } else { "done" };
+                        }
+                        _ => continue,
+                    },
+                    // 调用未回/刚回，都还在一轮当中
+                    Some("function_call") | Some("custom_tool_call") => return "working",
+                    Some("function_call_output") | Some("custom_tool_call_output") => return "working",
+                    _ => continue,
+                }
+            }
+            Some("event_msg") => {
+                let Some(p) = v.get("payload") else {
+                    continue;
+                };
+                match get_str(p, "type") {
+                    Some("user_message") => return "working",
+                    Some("agent_message") | Some("task_complete") => return "done",
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        }
+    }
+    "unknown"
+}
+
+fn gemini_tail_state(lines: &[String]) -> &'static str {
+    for line in lines.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("$set").is_some() || v.get("$rewindTo").is_some() {
+            continue;
+        }
+        match get_str(&v, "type") {
+            Some("user") => return "working",
+            Some("gemini") => {
+                let text = v.get("content").and_then(gemini_content_text).unwrap_or_default();
+                return if ends_with_question(&text) { "confirm" } else { "done" };
+            }
+            _ => continue, // metadata / info / error / warning 不算数
+        }
+    }
+    "unknown"
+}
+
+fn qwen_tail_state(lines: &[String]) -> &'static str {
+    for line in lines.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
+            continue;
+        }
+        match get_str(&v, "type") {
+            Some("user") => return "working",
+            Some("assistant") => return "done",
+            Some("tool_result") => return "working",
+            _ => continue, // system 等
+        }
+    }
+    "unknown"
+}
+
+fn kimi_tail_state(lines: &[String]) -> &'static str {
+    for line in lines.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match get_str(&v, "type") {
+            Some("turn.prompt") => {
+                if v.get("origin").and_then(|o| get_str(o, "kind")) == Some("user") {
+                    return "working";
+                }
+            }
+            Some("context.append_message") => {
+                match v.get("message").and_then(|m| get_str(m, "role")) {
+                    Some("assistant") => return "done",
+                    Some("user") | Some("tool") => return "working",
+                    _ => continue,
+                }
+            }
+            Some("context.append_loop_event") => {
+                let Some(e) = v.get("event") else {
+                    continue;
+                };
+                match get_str(e, "type") {
+                    Some("step.end") => return "done",
+                    // step 进行中（开始/内容流/工具调用与结果）都在工作
+                    Some("step.begin") | Some("content.part") | Some("tool.call") | Some("tool.result") => {
+                        return "working"
+                    }
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        }
+    }
+    "unknown"
+}
+
+fn opencode_tail_state(db_path: &Path, session_id: &str) -> &'static str {
+    let Some(conn) = open_opencode_db(db_path) else {
+        return "unknown";
+    };
+    let sid = session_id.to_string();
+    let last_part = query_rows(&conn, "SELECT * FROM part WHERE session_id=? ORDER BY time_created DESC LIMIT 1", &[&sid])
+        .into_iter()
+        .next();
+    let last_msg = query_rows(&conn, "SELECT * FROM message WHERE session_id=? ORDER BY time_created DESC LIMIT 1", &[&sid])
+        .into_iter()
+        .next();
+    let part_ts = last_part.as_ref().and_then(|r| DbRow { names: r.0.clone(), vals: r.1.clone() }.as_i64("time_created")).unwrap_or(0);
+    let msg_ts = last_msg.as_ref().and_then(|r| DbRow { names: r.0.clone(), vals: r.1.clone() }.as_i64("time_created")).unwrap_or(0);
+    if part_ts == 0 && msg_ts == 0 {
+        return "unknown";
+    }
+    if part_ts >= msg_ts {
+        let row = DbRow { names: last_part.as_ref().unwrap().0.clone(), vals: last_part.unwrap().1 };
+        let data = row.as_str("data").and_then(|d| serde_json::from_str::<Value>(&d).ok());
+        match data.as_ref().and_then(|d| get_str(d, "type")) {
+            Some("tool") => {
+                let status = data
+                    .as_ref()
+                    .and_then(|d| d.get("state"))
+                    .and_then(|s| get_str(s, "status"))
+                    .unwrap_or("");
+                // 待执行/执行中 → 工作；已完成/失败也仍在一轮里
+                return match status {
+                    "pending" | "running" => "working",
+                    _ => "working",
+                };
+            }
+            Some("text") | Some("reasoning") => return "done",
+            _ => {} // 其他 part 类型回落到消息角色判断
+        }
+    }
+    let Some(row) = last_msg else {
+        return "unknown";
+    };
+    let row = DbRow { names: row.0, vals: row.1 };
+    let role = row
+        .as_str("data")
+        .and_then(|d| serde_json::from_str::<Value>(&d).ok())
+        .and_then(|v| get_str(&v, "role").map(String::from));
+    match role.as_deref() {
+        Some("user") => "working",
+        Some("assistant") => "done",
+        _ => "unknown",
+    }
+}
+
+fn tail_state_impl(agent: &str, file_path: &str) -> String {
+    if agent == "opencode" {
+        let Some((db, sid)) = file_path.split_once('#') else {
+            return "unknown".into();
+        };
+        return opencode_tail_state(Path::new(db), sid).into();
+    }
+    let lines = last_lines(Path::new(file_path), 64 * 1024);
+    if lines.is_empty() {
+        return "unknown".into();
+    }
+    match agent {
+        "codex" => codex_tail_state(&lines),
+        "gemini" => gemini_tail_state(&lines),
+        "qwen" => qwen_tail_state(&lines),
+        "kimi" => kimi_tail_state(&lines),
+        _ => claude_tail_state(&lines),
+    }
+    .into()
+}
+
 // ===== Tauri commands =====
 
 /// 扫描结果缓存 10 秒：同步 command 跑在主线程上，列表每 5 秒全量扫几百个文件会卡 UI
@@ -2618,6 +2866,14 @@ pub async fn find_session_for(
         .filter(|s| s.agent == agent && s.project_path == cwd)
         .filter(|s| s.updated_at.as_deref().unwrap_or("") >= since_iso.as_str())
         .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+}
+
+/// 注意力标记 v1（§6.11）：读会话文件尾部分类 done/working/confirm/unknown
+#[tauri::command]
+pub async fn session_tail_state(agent: String, file_path: String) -> String {
+    tauri::async_runtime::spawn_blocking(move || tail_state_impl(&agent, &file_path))
+        .await
+        .unwrap_or_else(|_| "unknown".into())
 }
 
 #[tauri::command]
@@ -3683,7 +3939,109 @@ mod tests {
         assert_eq!(msgs[1].blocks[0].text, "旧回答");
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // ===== 注意力标记 v1 =====
+
+    #[test]
+    fn tail_state_claude_variants() {
+        // 文本收尾 → done；问句收尾 → confirm
+        let done = s(&[
+            r#"{"type":"user","message":{"role":"user","content":"问"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"已完成修复。"}]}}"#,
+        ]);
+        assert_eq!(claude_tail_state(&done), "done");
+        let confirm = s(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"我需要删除这个文件，可以继续吗？"}]}}"#,
+        ]);
+        assert_eq!(claude_tail_state(&confirm), "confirm");
+        // 尾部工具调用未回 → working；user 刚发 → working；meta/支线不算
+        let tool = s(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}"#,
+        ]);
+        assert_eq!(claude_tail_state(&tool), "working");
+        let user = s(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"好"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"再改一下"}}"#,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-stdout>x</local-command-stdout>"}}"#,
+        ]);
+        assert_eq!(claude_tail_state(&user), "working");
+    }
+
+    #[test]
+    fn tail_state_codex_variants() {
+        let done = s(&[
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"完成"}]}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{}}}"#, // token_count 等事件不算
+        ]);
+        assert_eq!(codex_tail_state(&done), "done");
+        let working = s(&[
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"好"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}"#,
+        ]);
+        assert_eq!(codex_tail_state(&working), "working");
+        let user = s(&[
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"干活"}]}}"#,
+        ]);
+        assert_eq!(codex_tail_state(&user), "working");
+    }
+
+    #[test]
+    fn tail_state_gemini_qwen_kimi() {
+        let g_user = s(&[r#"{"id":"m1","type":"user","content":"在吗"}"#]);
+        assert_eq!(gemini_tail_state(&g_user), "working");
+        let g_done = s(&[
+            r#"{"id":"m1","type":"gemini","content":"做完了"}"#,
+            r#"{"$set":{"lastUpdated":"x"}}"#, // 控制记录跳过
+        ]);
+        assert_eq!(gemini_tail_state(&g_done), "done");
+        let g_confirm = s(&[r#"{"id":"m1","type":"gemini","content":"要我继续吗？"}"#]);
+        assert_eq!(gemini_tail_state(&g_confirm), "confirm");
+
+        let q_user = s(&[r#"{"type":"user","message":{"role":"user","parts":[{"text":"问"}]}}"#]);
+        assert_eq!(qwen_tail_state(&q_user), "working");
+        let q_done = s(&[r#"{"type":"assistant","message":{"role":"model","parts":[{"text":"答"}]}}"#]);
+        assert_eq!(qwen_tail_state(&q_done), "done");
+
+        let k_working = s(&[
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"干活"}],"origin":{"kind":"user"},"time":1}"#,
+        ]);
+        assert_eq!(kimi_tail_state(&k_working), "working");
+        let k_done = s(&[
+            r#"{"type":"context.append_loop_event","event":{"type":"step.end","usage":{}},"time":2}"#,
+        ]);
+        assert_eq!(kimi_tail_state(&k_done), "done");
+        let k_tool = s(&[
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Bash","args":{}},"time":2}"#,
+        ]);
+        assert_eq!(kimi_tail_state(&k_tool), "working");
+    }
+
+    #[test]
+    fn tail_state_opencode_and_unknown() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = opencode_fixture_db(&dir);
+        // fixture：最后一条 part 是 step-start（回落到消息角色），最后消息是 assistant → done
+        assert_eq!(opencode_tail_state(&db, "ses_1"), "done");
+        // 加一条 pending 工具 → working
+        let conn = Connection::open(&db).unwrap();
+        conn.execute("INSERT INTO part VALUES('prt_9','msg_2','ses_1',1785307071300,'{\"type\":\"tool\",\"tool\":\"bash\",\"state\":{\"status\":\"running\",\"input\":{}}}')", []).unwrap();
+        drop(conn);
+        assert_eq!(opencode_tail_state(&db, "ses_1"), "working");
+        // 最后消息是 user → working
+        let conn = Connection::open(&db).unwrap();
+        conn.execute("INSERT INTO message VALUES('msg_9','ses_1',1785307071400,'{\"role\":\"user\",\"summary\":{\"body\":\"再来\"}}')", []).unwrap();
+        drop(conn);
+        assert_eq!(opencode_tail_state(&db, "ses_1"), "working");
+        // 不存在的会话 / 不存在的库 → unknown
+        assert_eq!(opencode_tail_state(&db, "ses_none"), "unknown");
+        assert_eq!(opencode_tail_state(&dir.join("none.db"), "ses_1"), "unknown");
+        std::fs::remove_dir_all(&dir).ok();
+        // 文件缺失 → unknown
+        assert_eq!(tail_state_impl("claude-code", "/nonexistent/x.jsonl"), "unknown");
+    }
 }
+
 
 
 
