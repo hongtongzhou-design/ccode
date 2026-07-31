@@ -208,6 +208,8 @@ pub fn shell_spawn(
     app: AppHandle,
     manager: tauri::State<'_, PtyManager>,
     cwd: String,
+    // 附加环境变量（如工作区 CCODE_PORT 段），run 脚本场景必须传入
+    extra_env: Option<std::collections::HashMap<String, String>>,
 ) -> Result<String, String> {
     let shell = std::env::var("SHELL")
         .ok()
@@ -215,6 +217,11 @@ pub fn shell_spawn(
         .unwrap_or_else(|| "/bin/zsh".into());
     let mut cmd = CommandBuilder::new(&shell);
     cmd.arg("-l");
+    if let Some(env) = extra_env {
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+    }
     spawn_tracked(&app, manager.inner(), cmd, &expand_tilde(&cwd))
 }
 

@@ -244,7 +244,10 @@ function TerminalView({
     autoStartedRef.current = true;
     void (async () => {
       try {
-        const ptyId = await invoke<string>("shell_spawn", { cwd });
+        const ptyId = await invoke<string>("shell_spawn", {
+          cwd,
+          extraEnv: initialExtraEnv ?? null,
+        });
         await attach(ptyId, "shell", { reset: true });
         setExited(false);
         setShellActive(true);
@@ -291,7 +294,10 @@ function TerminalView({
       // agent 退出（含手动停止）→ 同一终端自动回落到登录 shell
       termRef.current?.write("\r\n\x1b[90m── agent 已退出，进入 shell ──\x1b[0m\r\n");
       try {
-        const id = await invoke<string>("shell_spawn", { cwd });
+        const id = await invoke<string>("shell_spawn", {
+          cwd,
+          extraEnv: initialExtraEnv ?? null,
+        });
         await attach(id, "shell");
         setShellActive(true);
       } catch (e) {
@@ -438,7 +444,10 @@ function TerminalView({
     setError(null);
     await cleanupPty();
     try {
-      const ptyId = await invoke<string>("shell_spawn", { cwd });
+      const ptyId = await invoke<string>("shell_spawn", {
+        cwd,
+        extraEnv: initialExtraEnv ?? null,
+      });
       await attach(ptyId, "shell", { reset: true });
       setExited(false);
       setShellActive(true);
