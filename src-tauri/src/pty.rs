@@ -170,9 +170,14 @@ pub fn pty_spawn(
         .or_else(|| profile.models.first().cloned());
     let plan = agents::launch_plan(&profile, key, model.as_deref());
     let session_hint = session_id_for(&agent_id);
+    // 每-agent 启动前文件准备（codex：写模型 catalog，让 /model 选择器列出全部模型）
+    let extra_args = agents::prepare_launch(&profile)?;
 
     let mut cmd = CommandBuilder::new(&binary_path);
     for arg in &plan.args {
+        cmd.arg(arg);
+    }
+    for arg in &extra_args {
         cmd.arg(arg);
     }
     // 确定性关联：会话文件名 = 该 uuid，启动即锁定（architecture §6.7）

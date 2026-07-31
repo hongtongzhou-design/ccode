@@ -217,8 +217,93 @@ pub(crate) fn opencode_provider_json(
     })
 }
 
-pub fn binary_for(agent_id: &str) -> Option<&'static str> {
-    AGENTS
+// ===== codex 模型 catalog：TUI /model 选择器的数据源（仅启动时读取一次） =====
+
+/// catalog 文件路径：<config dir>/ccode/catalogs/codex-<profile_id>.json
+pub fn codex_catalog_path(profile_id: &str) -> Option<std::path::PathBuf> {
+    Some(
+        dirs::config_dir()?
+            .join("ccode")
+            .join("catalogs")
+            .join(format!("codex-{profile_id}.json")),
+    )
+}
+
+/// 单个 catalog 条目：字段拼写与标量值照抄 codex-rs/models-manager/models.json 的打包条目
+/// （slug/display_name 换成模型 id；reasoning levels 取其 low/medium/high 子集）
+fn codex_catalog_entry(model: &str) -> serde_json::Value {
+    serde_json::json!({
+        "slug": model,
+        "display_name": model,
+        "description": null,
+        "supported_reasoning_levels": [
+            { "effort": "low", "description": "Fast responses with lighter reasoning" },
+            { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
+            { "effort": "high", "description": "Greater reasoning depth for complex problems" },
+        ],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 1,
+        "availability_nux": null,
+        "upgrade": null,
+        "base_instructions": "You are a coding agent.",
+        "support_verbosity": true,
+        "default_verbosity": "low",
+        "apply_patch_tool_type": "freeform",
+        "truncation_policy": { "mode": "tokens", "limit": 10000 },
+        "supports_parallel_tool_calls": true,
+        // v0.146 起为必填（无 serde default），空数组即可
+        "experimental_supported_tools": [],
+    })
+}
+
+/// ModelsResponse { models: [ModelInfo] }：每个 profile 模型一条目
+pub fn codex_catalog_json(models: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "models": models.iter().map(|m| codex_catalog_entry(m)).collect::<Vec<_>>(),
+    })
+}
+
+fn write_codex_catalog_to(path: &std::path::Path, models: &[String]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建 catalog 目录失败: {e}"))?;
+    }
+    let text =
+        serde_json::to_string_pretty(&codex_catalog_json(models)).map_err(|e| e.to_string())?;
+    crate::profiles::atomic_write(path, &text)
+}
+
+/// 把 profile 的模型列表写成 codex catalog 文件（原子写）；无模型时返回 None
+pub fn write_codex_catalog(profile: &Profile) -> Result<Option<std::path::PathBuf>, String> {
+    if profile.models.is_empty() {
+        return Ok(None);
+    }
+    let path = codex_catalog_path(&profile.id).ok_or("无法确定平台配置目录")?;
+    write_codex_catalog_to(&path, &profile.models)?;
+    Ok(Some(path))
+}
+
+/// -c 注入的 catalog 路径参数：-c 的值是 TOML，路径必须带引号成 TOML 字符串
+fn catalog_args(path: &std::path::Path) -> Vec<String> {
+    vec![
+        "-c".into(),
+        format!(r#"model_catalog_json="{}""#, path.to_string_lossy()),
+    ]
+}
+
+/// 启动前的每-agent 文件准备，返回需追加到 CLI 的参数。
+/// codex：写模型 catalog 并用 -c 指过去，让 TUI /model 选择器列出 profile 的全部模型
+pub fn prepare_launch(profile: &Profile) -> Result<Vec<String>, String> {
+    if profile.agent == "codex" {
+        if let Some(path) = write_codex_catalog(profile)? {
+            return Ok(catalog_args(&path));
+        }
+    }
+    Ok(vec![])
+}
+
+pub fn binary_for(agent_id: &str) -> Option<&'static str> {    AGENTS
         .iter()
         .find(|(id, _)| *id == agent_id)
         .map(|(_, bin)| *bin)
@@ -236,24 +321,31 @@ fn kimi_variant_hint() -> Option<&'static str> {
     }
 }
 
+/// 检测结果按进程缓存一次（要 spawn 6 个子进程跑 --version，没必要每次重算）
+static DETECT_CACHE: std::sync::OnceLock<Vec<DetectResult>> = std::sync::OnceLock::new();
+
 #[tauri::command]
-pub fn detect_agents() -> Vec<DetectResult> {
-    AGENTS
-        .iter()
-        .map(|(id, binary)| {
-            let (binary_path, mut version) = detect(binary);
-            if *id == "kimi" {
-                if let (Some(v), Some(hint)) = (&version, kimi_variant_hint()) {
-                    version = Some(format!("{v} ({hint})"));
-                }
-            }
-            DetectResult {
-                id: id.to_string(),
-                binary_path,
-                version,
-            }
+pub async fn detect_agents() -> Vec<DetectResult> {
+    DETECT_CACHE
+        .get_or_init(|| {
+            AGENTS
+                .iter()
+                .map(|(id, binary)| {
+                    let (binary_path, mut version) = detect(binary);
+                    if *id == "kimi" {
+                        if let (Some(v), Some(hint)) = (&version, kimi_variant_hint()) {
+                            version = Some(format!("{v} ({hint})"));
+                        }
+                    }
+                    DetectResult {
+                        id: id.to_string(),
+                        binary_path,
+                        version,
+                    }
+                })
+                .collect()
         })
-        .collect()
+        .clone()
 }
 
 #[cfg(test)]
@@ -511,5 +603,73 @@ mod tests {
         assert!(plan
             .env
             .contains(&("KIMI_BASE_URL".into(), "https://api.moonshot.cn/v1".into())));
+    }
+
+    #[test]
+    fn opencode_inject_json_registers_every_profile_model() {
+        let mut p = profile("opencode", Some("https://openrouter.ai/api/v1"));
+        p.models = vec!["m1".into(), "m2".into(), "m3".into()];
+        let plan = launch_plan(&p, None, Some("m2"));
+        let (_, v) = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(v).unwrap();
+        let models = config["provider"]["ccode"]["models"].as_object().unwrap();
+        for m in ["m1", "m2", "m3"] {
+            assert!(models.contains_key(m), "provider.ccode.models 缺 {m}");
+        }
+    }
+
+    #[test]
+    fn codex_catalog_contains_every_model_with_template_shape() {
+        let v = codex_catalog_json(&["gpt-5-codex".into(), "gpt-5.1".into()]);
+        let models = v["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        let e = &models[0];
+        assert_eq!(e["slug"], "gpt-5-codex");
+        assert_eq!(e["display_name"], "gpt-5-codex");
+        assert_eq!(models[1]["slug"], "gpt-5.1");
+        // 关键枚举拼写与打包条目一致（codex-rs models-manager/models.json）
+        assert_eq!(e["shell_type"], "shell_command");
+        assert_eq!(e["visibility"], "list");
+        assert_eq!(e["apply_patch_tool_type"], "freeform");
+        assert_eq!(e["truncation_policy"]["mode"], "tokens");
+        assert_eq!(e["default_verbosity"], "low");
+        assert_eq!(e["supported_in_api"], true);
+        let efforts: Vec<&str> = e["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|l| l["effort"].as_str())
+            .collect();
+        assert_eq!(efforts, ["low", "medium", "high"]);
+    }
+
+    #[test]
+    fn codex_catalog_written_atomically() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("catalogs").join("codex-p1.json");
+        write_codex_catalog_to(&path, &["m1".into()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["models"][0]["slug"], "m1");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn codex_catalog_arg_is_toml_quoted() {
+        let args = catalog_args(std::path::Path::new(
+            "/Users/x/Library/Application Support/ccode/catalogs/codex-1.json",
+        ));
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-c");
+        assert!(
+            args[1].starts_with(r#"model_catalog_json=""#) && args[1].ends_with('"'),
+            "路径必须是 TOML 字符串（带引号）: {}",
+            args[1]
+        );
+        assert!(args[1].contains("codex-1.json"));
     }
 }

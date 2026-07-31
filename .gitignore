@@ -26,3 +26,6 @@ dist-ssr
 # Rust / Tauri
 src-tauri/target
 src-tauri/gen
+
+# 参考实现镜像（不提交）
+.reference/

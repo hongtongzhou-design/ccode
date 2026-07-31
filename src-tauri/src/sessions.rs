@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 // ===== 前端 DTO =====
 
@@ -1080,10 +1082,539 @@ fn parse_qwen(lines: &[String]) -> Vec<ChatMessageDto> {
     msgs
 }
 
+// ===== Kimi Code（新版 kimi-code + 旧版 kimi-cli，统一 agent id "kimi"） =====
+
+/// wire/context 记录的时间是 epoch 毫秒（容忍字符串形式）
+fn kimi_time(v: &Value) -> Option<String> {
+    match v {
+        Value::Number(n) => n.as_u64().map(|ms| iso_from_unix(ms / 1000)),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// content 可能是字符串或 parts 数组 [{type:"text",text},{type:"think",think}]
+fn kimi_content_text(c: &Value) -> Option<String> {
+    let text = match c {
+        Value::String(s) => s.clone(),
+        Value::Array(arr) => arr
+            .iter()
+            .filter(|p| get_str(p, "type") != Some("think"))
+            .filter_map(|p| get_str(p, "text"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn kimi_content_blocks(c: &Value) -> Vec<BlockDto> {
+    let mut blocks = Vec::new();
+    match c {
+        Value::String(s) => {
+            if !s.trim().is_empty() {
+                blocks.push(text_block(s.clone()));
+            }
+        }
+        Value::Array(arr) => {
+            for p in arr {
+                match get_str(p, "type") {
+                    Some("think") => {
+                        if let Some(t) = get_str(p, "think") {
+                            blocks.push(BlockDto {
+                                kind: "thinking".into(),
+                                text: t.to_string(),
+                                tool_name: None,
+                            });
+                        }
+                    }
+                    _ => {
+                        if let Some(t) = get_str(p, "text") {
+                            blocks.push(text_block(t.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    blocks
+}
+
+/// toolCalls/tool_calls（两个变体拼写不同）→ tool_use 块；arguments 是 JSON 字符串原样保留
+fn kimi_tool_call_blocks(m: &Value) -> Vec<BlockDto> {
+    let calls = m
+        .get("toolCalls")
+        .or_else(|| m.get("tool_calls"))
+        .and_then(|t| t.as_array());
+    let Some(calls) = calls else {
+        return Vec::new();
+    };
+    calls
+        .iter()
+        .map(|c| {
+            let f = c.get("function");
+            BlockDto {
+                kind: "tool_use".into(),
+                text: f
+                    .and_then(|f| get_str(f, "arguments"))
+                    .unwrap_or("")
+                    .to_string(),
+                tool_name: f.and_then(|f| get_str(f, "name")).map(String::from),
+            }
+        })
+        .collect()
+}
+
+fn kimi_usage(u: &Value) -> TokenUsageDto {
+    let num = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    // inputOther 是非缓存输入；缓存读/写单列，与 Claude 口径一致
+    TokenUsageDto {
+        input: num("inputOther"),
+        output: num("output"),
+        cache_read: num("inputCacheRead"),
+        cache_write: num("inputCacheCreation"),
+    }
+}
+
+/// 新版 kimi-code：session_index.jsonl 给 (sessionId, sessionDir, workDir)，
+/// 会话本体在 sessionDir/agents/main/wire.jsonl（agents/agent-* 是子 agent，不读）
+fn kimi_wire_file_meta(
+    path: &Path,
+    alive: bool,
+    session_id: &str,
+    project_path: String,
+    state: Option<&Value>,
+) -> Option<SessionMetaDto> {
+    let bytes = read_session_bytes(path)?;
+    let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
+    let (mut created, mut title) = (None, None);
+    for line in &head {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match get_str(&v, "type") {
+            Some("metadata") => {
+                if created.is_none() {
+                    created = v.get("created_at").and_then(kimi_time);
+                }
+            }
+            Some("turn.prompt") => {
+                if title.is_none()
+                    && v.get("origin").and_then(|o| get_str(o, "kind")) == Some("user")
+                {
+                    if let Some(t) = v.get("input").and_then(kimi_content_text) {
+                        title = title_from_text(&t);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let tail_src = if tail.is_empty() { &head } else { &tail };
+    let token_usage = tail_src.iter().rev().find_map(|line| {
+        let v = serde_json::from_str::<Value>(line).ok()?;
+        if get_str(&v, "type") == Some("usage.record") {
+            v.get("usage").map(kimi_usage)
+        } else {
+            None
+        }
+    });
+    // 标题以 state.json 为准（CLI 自己维护，含 AI 起题），否则首条用户输入
+    let state_title = state
+        .and_then(|s| get_str(s, "title"))
+        .filter(|t| !t.trim().is_empty())
+        .map(truncate_title);
+    if created.is_none() {
+        created = state.and_then(|s| s.get("createdAt")).and_then(kimi_time);
+    }
+    Some(SessionMetaDto {
+        agent: "kimi".into(),
+        session_id: session_id.to_string(),
+        project_path,
+        title: state_title.or(title),
+        created_at: created,
+        updated_at: mtime_iso(path),
+        file_path: path.to_string_lossy().into_owned(),
+        token_usage,
+        cli_version: None,
+        pinned: false,
+        archived: false,
+        custom_title: None,
+        tags: Vec::new(),
+        alive,
+        chain_count: 1,
+    })
+}
+
+fn parse_kimi(lines: &[String]) -> Vec<ChatMessageDto> {
+    let mut msgs: Vec<ChatMessageDto> = Vec::new();
+    let mut last_usage = None;
+    let mut last_prompt: Option<String> = None; // 用于去掉 append_message 对 prompt 的回显
+    // 新协议里 assistant 的输出走 append_loop_event 流式事件；cur 是当前 step 打开的 assistant 消息
+    let mut cur: Option<usize> = None;
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let ts = v.get("time").and_then(kimi_time);
+        match get_str(&v, "type") {
+            Some("turn.prompt") => {
+                cur = None;
+                if v.get("origin").and_then(|o| get_str(o, "kind")) != Some("user") {
+                    continue; // slash 命令等非用户来源不进对话
+                }
+                if let Some(text) = v.get("input").and_then(kimi_content_text) {
+                    msgs.push(ChatMessageDto {
+                        role: "user".into(),
+                        blocks: vec![text_block(text.clone())],
+                        timestamp: ts,
+                        usage: None,
+                    });
+                    last_prompt = Some(text);
+                }
+            }
+            Some("context.append_loop_event") => {
+                let Some(e) = v.get("event") else {
+                    continue;
+                };
+                match get_str(e, "type") {
+                    // 一个 step = 一次 LLM 响应 = 一条 assistant 消息
+                    Some("step.begin") => {
+                        msgs.push(ChatMessageDto {
+                            role: "assistant".into(),
+                            blocks: Vec::new(),
+                            timestamp: ts,
+                            usage: None,
+                        });
+                        cur = Some(msgs.len() - 1);
+                    }
+                    Some("content.part") => {
+                        let Some(i) = cur else { continue };
+                        let Some(p) = e.get("part") else { continue };
+                        match get_str(p, "type") {
+                            Some("think") => {
+                                if let Some(t) = get_str(p, "think") {
+                                    msgs[i].blocks.push(BlockDto {
+                                        kind: "thinking".into(),
+                                        text: t.to_string(),
+                                        tool_name: None,
+                                    });
+                                }
+                            }
+                            _ => {
+                                if let Some(t) = get_str(p, "text") {
+                                    msgs[i].blocks.push(text_block(t.to_string()));
+                                }
+                            }
+                        }
+                    }
+                    // args 是对象（不同于 append_message 的 JSON 字符串）
+                    Some("tool.call") => {
+                        let Some(i) = cur else { continue };
+                        msgs[i].blocks.push(BlockDto {
+                            kind: "tool_use".into(),
+                            text: e.get("args").map(|a| a.to_string()).unwrap_or_default(),
+                            tool_name: get_str(e, "name").map(String::from),
+                        });
+                    }
+                    Some("tool.result") => {
+                        let r = e.get("result");
+                        let text = {
+                            let via_output = stringify_payload(r.and_then(|r| r.get("output")));
+                            if via_output.is_empty() {
+                                stringify_payload(r)
+                            } else {
+                                via_output
+                            }
+                        };
+                        let block = BlockDto {
+                            kind: "tool_result".into(),
+                            text,
+                            tool_name: None,
+                        };
+                        match cur {
+                            Some(i) => msgs[i].blocks.push(block),
+                            None => push_tool_result(&mut msgs, vec![block], ts),
+                        }
+                    }
+                    Some("step.end") => {
+                        if let Some(i) = cur.take() {
+                            if let Some(u) = e.get("usage").map(kimi_usage) {
+                                msgs[i].usage = Some(u);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("context.append_message") => {
+                let Some(m) = v.get("message") else {
+                    continue;
+                };
+                match get_str(m, "role") {
+                    Some("user") => {
+                        // 注入内容（system-reminder 等）跳过
+                        let kind = m.get("origin").and_then(|o| get_str(o, "kind"));
+                        if kind.is_some() && kind != Some("user") {
+                            continue;
+                        }
+                        let Some(text) = m.get("content").and_then(kimi_content_text) else {
+                            continue;
+                        };
+                        if last_prompt.take().as_deref() == Some(text.as_str()) {
+                            continue; // turn.prompt 的回显，已发过
+                        }
+                        msgs.push(ChatMessageDto {
+                            role: "user".into(),
+                            blocks: vec![text_block(text)],
+                            timestamp: ts,
+                            usage: None,
+                        });
+                    }
+                    Some("assistant") => {
+                        let mut blocks = kimi_content_blocks(
+                            m.get("content").unwrap_or(&Value::Null),
+                        );
+                        blocks.extend(kimi_tool_call_blocks(m));
+                        if blocks.is_empty() {
+                            continue;
+                        }
+                        msgs.push(ChatMessageDto {
+                            role: "assistant".into(),
+                            blocks,
+                            timestamp: ts,
+                            usage: None,
+                        });
+                    }
+                    Some("tool") => {
+                        let text = m
+                            .get("content")
+                            .and_then(kimi_content_text)
+                            .unwrap_or_default();
+                        push_tool_result(
+                            &mut msgs,
+                            vec![BlockDto {
+                                kind: "tool_result".into(),
+                                text,
+                                tool_name: None,
+                            }],
+                            ts,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Some("usage.record") => {
+                if let Some(u) = v.get("usage").map(kimi_usage) {
+                    last_usage = Some(u);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(u) = last_usage {
+        if let Some(m) = msgs.iter_mut().rev().find(|m| m.role == "assistant") {
+            if m.usage.is_none() {
+                m.usage = Some(u);
+            }
+        }
+    }
+    // step.begin 后没有任何内容的空 assistant 消息（被中断的 step）不出现在视图里
+    msgs.retain(|m| !m.blocks.is_empty() || m.usage.is_some());
+    msgs
+}
+
+/// 旧版 kimi-cli：~/.kimi/sessions/<md5(workDir)>/<uuid>/context.jsonl，
+/// bucket → 项目路径靠 kimi.json 的 work_dirs[].path 逐个 md5 反查
+fn kimi_workdir_buckets(kimi_json: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(text) = fs::read_to_string(kimi_json) else {
+        return map;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return map;
+    };
+    if let Some(dirs) = v.get("work_dirs").and_then(|d| d.as_array()) {
+        for d in dirs {
+            if let Some(path) = get_str(d, "path") {
+                let bucket = format!("{:x}", md5::compute(path.as_bytes()));
+                map.insert(bucket, path.to_string());
+            }
+        }
+    }
+    map
+}
+
+fn kimi_legacy_file_meta(
+    path: &Path,
+    alive: bool,
+    session_id: &str,
+    project_path: String,
+    state: Option<&Value>,
+) -> Option<SessionMetaDto> {
+    let bytes = read_session_bytes(path)?;
+    let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
+    let mut title = None;
+    for line in &head {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if get_str(&v, "role") == Some("user") {
+            if let Some(t) = v.get("content").and_then(kimi_content_text) {
+                title = title_from_text(&t);
+                break;
+            }
+        }
+    }
+    let tail_src = if tail.is_empty() { &head } else { &tail };
+    let token_usage = tail_src.iter().rev().find_map(|line| {
+        let v = serde_json::from_str::<Value>(line).ok()?;
+        if get_str(&v, "role") == Some("_usage") {
+            kimi_legacy_usage(&v)
+        } else {
+            None
+        }
+    });
+    let state_title = state
+        .and_then(|s| get_str(s, "title"))
+        .filter(|t| !t.trim().is_empty())
+        .map(truncate_title);
+    let created = state.and_then(|s| s.get("createdAt")).and_then(kimi_time);
+    Some(SessionMetaDto {
+        agent: "kimi".into(),
+        session_id: session_id.to_string(),
+        project_path,
+        title: state_title.or(title),
+        created_at: created,
+        updated_at: mtime_iso(path),
+        file_path: path.to_string_lossy().into_owned(),
+        token_usage,
+        cli_version: None,
+        pinned: false,
+        archived: false,
+        custom_title: None,
+        tags: Vec::new(),
+        alive,
+        chain_count: 1,
+    })
+}
+
+/// 旧版 _usage 记录是累计 token 数；字段位置未核实，usage 对象或 content JSON 字符串都试
+fn kimi_legacy_usage(v: &Value) -> Option<TokenUsageDto> {
+    let u = v.get("usage").cloned().or_else(|| {
+        v.get("content")
+            .and_then(|c| c.as_str())
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+    })?;
+    let num = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| u.get(*k).and_then(|x| x.as_u64()))
+            .unwrap_or(0)
+    };
+    Some(TokenUsageDto {
+        input: num(&["input_tokens", "prompt_tokens"]),
+        output: num(&["output_tokens", "completion_tokens"]),
+        cache_read: num(&["cached_tokens", "cache_read"]),
+        cache_write: num(&["cache_write"]),
+    })
+}
+
+fn parse_kimi_legacy(lines: &[String]) -> Vec<ChatMessageDto> {
+    let mut msgs = Vec::new();
+    let mut last_usage = None;
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let role = get_str(&v, "role").unwrap_or("");
+        if role == "_usage" {
+            if let Some(u) = kimi_legacy_usage(&v) {
+                last_usage = Some(u);
+            }
+            continue;
+        }
+        if role.starts_with('_') {
+            continue; // 内部记录不进对话
+        }
+        match role {
+            "user" => {
+                if let Some(text) = v.get("content").and_then(kimi_content_text) {
+                    msgs.push(ChatMessageDto {
+                        role: "user".into(),
+                        blocks: vec![text_block(text)],
+                        timestamp: None,
+                        usage: None,
+                    });
+                }
+            }
+            "assistant" => {
+                let mut blocks =
+                    kimi_content_blocks(v.get("content").unwrap_or(&Value::Null));
+                blocks.extend(kimi_tool_call_blocks(&v));
+                if blocks.is_empty() {
+                    continue;
+                }
+                msgs.push(ChatMessageDto {
+                    role: "assistant".into(),
+                    blocks,
+                    timestamp: None,
+                    usage: None,
+                });
+            }
+            "tool" => {
+                let text = v
+                    .get("content")
+                    .and_then(kimi_content_text)
+                    .unwrap_or_default();
+                push_tool_result(
+                    &mut msgs,
+                    vec![BlockDto {
+                        kind: "tool_result".into(),
+                        text,
+                        tool_name: None,
+                    }],
+                    None,
+                );
+            }
+            _ => {}
+        }
+    }
+    if let Some(u) = last_usage {
+        if let Some(m) = msgs.iter_mut().rev().find(|m| m.role == "assistant") {
+            if m.usage.is_none() {
+                m.usage = Some(u);
+            }
+        }
+    }
+    msgs
+}
+
+/// 快照文件名丢失变体线索（wire.jsonl / context.jsonl 都变成 <id>.jsonl），
+/// 按内容首行判别：新版 wire 记录带 type 字段，旧版 context 记录顶层是 role
+fn kimi_looks_like_wire(lines: &[String]) -> bool {
+    lines.iter().find_map(|l| serde_json::from_str::<Value>(l).ok()).map_or(false, |v| {
+        v.get("type").is_some()
+    })
+}
+
 // ===== 扫描 =====
 
-pub fn scan_sessions() -> Vec<SessionMetaDto> {
+#[derive(Debug, Clone, Default)]
+pub struct ScanResult {
+    pub sessions: Vec<SessionMetaDto>,
+    /// codex 链代表 id → 全部成员 id（含代表自己）；链代表随新 resume 换人时，
+    /// 用户写在任一成员 id 上的 pinned/tags 等整理数据仍能找回来
+    pub chain_members: HashMap<String, Vec<String>>,
+}
+
+pub fn scan_sessions() -> ScanResult {
     let mut out = Vec::new();
+    let mut chain_members = HashMap::new();
     // Gemini 的 slug → 项目路径映射在扫描与快照补全时都要用
     let gemini_map = dirs::home_dir()
         .map(|h| gemini_slug_map(&h.join(".gemini").join("tmp")))
@@ -1112,7 +1643,9 @@ pub fn scan_sessions() -> Vec<SessionMetaDto> {
                 codex_metas.push(pair);
             }
         }
-        out.extend(merge_codex_chains(codex_metas));
+        let (reps, members) = merge_codex_chains(codex_metas);
+        out.extend(reps);
+        chain_members = members;
         // Gemini：深度 3 恰好到 chats/*.jsonl，chats/<parentId>/ 下的子 agent 会话被排除；
         // 旧版单 JSON .json 文件不匹配 .jsonl 后缀，自然跳过（如需兼容再单开解析器）
         let mut gemini_files = Vec::new();
@@ -1134,6 +1667,63 @@ pub fn scan_sessions() -> Vec<SessionMetaDto> {
                 out.push(m);
             }
         }
+        // Kimi 新版：session_index.jsonl 是枚举入口（workDir 即项目归属）
+        let index = home.join(".kimi-code").join("session_index.jsonl");
+        if let Ok(text) = fs::read_to_string(&index) {
+            for line in to_lines(&text) {
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let (Some(sid), Some(dir), Some(wd)) = (
+                    get_str(&v, "sessionId"),
+                    get_str(&v, "sessionDir"),
+                    get_str(&v, "workDir"),
+                ) else {
+                    continue;
+                };
+                let dir = PathBuf::from(dir);
+                let wire = dir.join("agents").join("main").join("wire.jsonl");
+                if !wire.exists() {
+                    continue;
+                }
+                let state = fs::read_to_string(dir.join("state.json"))
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+                if let Some(m) = kimi_wire_file_meta(&wire, true, sid, wd.to_string(), state.as_ref()) {
+                    out.push(m);
+                }
+            }
+        }
+        // Kimi 旧版：sessions/<md5(workDir)>/<uuid>/context.jsonl
+        let buckets = kimi_workdir_buckets(&home.join(".kimi").join("kimi.json"));
+        if !buckets.is_empty() {
+            let mut kimi_files = Vec::new();
+            collect_files(&home.join(".kimi").join("sessions"), 3, &mut kimi_files);
+            for f in kimi_files {
+                let Some(bucket) = f
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                else {
+                    continue;
+                };
+                let Some(project) = buckets.get(&bucket) else {
+                    continue; // 反查不到项目归属的会话不猜
+                };
+                let sid = f
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let state = fs::read_to_string(f.parent().unwrap_or(&f).join("state.json"))
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+                if let Some(m) = kimi_legacy_file_meta(&f, true, &sid, project.clone(), state.as_ref()) {
+                    out.push(m);
+                }
+            }
+        }
     }
     // pin 即保留：源文件已消失的会话从快照补齐（§6.5）
     let seen: HashSet<(String, String)> = out
@@ -1141,7 +1731,7 @@ pub fn scan_sessions() -> Vec<SessionMetaDto> {
         .map(|m| (m.agent.clone(), m.session_id.clone()))
         .collect();
     if let Some(dir) = snapshots_root() {
-        for agent in ["claude-code", "codex", "gemini", "qwen"] {
+        for agent in ["claude-code", "codex", "gemini", "qwen", "kimi"] {
             let mut files = Vec::new();
             collect_files(&dir.join(agent), 1, &mut files);
             for f in files {
@@ -1153,6 +1743,18 @@ pub fn scan_sessions() -> Vec<SessionMetaDto> {
                     "codex" => codex_file_meta(&f, false, false).map(|(m, _)| m),
                     "gemini" => gemini_file_meta(&f, false, &gemini_map),
                     "qwen" => qwen_file_meta(&f, false, false),
+                    "kimi" => {
+                        // 快照脱离了原目录结构（无 state.json / bucket），项目归属不可知
+                        let bytes = read_session_bytes(&f);
+                        bytes.and_then(|b| {
+                            let lines = to_lines(&String::from_utf8_lossy(&b));
+                            if kimi_looks_like_wire(&lines) {
+                                kimi_wire_file_meta(&f, false, &stem, String::new(), None)
+                            } else {
+                                kimi_legacy_file_meta(&f, false, &stem, String::new(), None)
+                            }
+                        })
+                    }
                     _ => claude_file_meta(&f, false),
                 };
                 if let Some(mut m) = meta {
@@ -1163,13 +1765,19 @@ pub fn scan_sessions() -> Vec<SessionMetaDto> {
             }
         }
     }
-    out
+    ScanResult {
+        sessions: out,
+        chain_members,
+    }
 }
 
 /// Codex resume/fork 会产生新 rollout 文件（session_meta.forked_from_id 指向父线程），
 /// 新文件已拷入完整历史——同一条链只保留 updated_at 最新的文件作为代表条目。
 /// 用并查集按「线程 id ↔ forked_from_id」分组；父线程文件已被清理时链仍然成立。
-fn merge_codex_chains(metas: Vec<(SessionMetaDto, Option<String>)>) -> Vec<SessionMetaDto> {
+/// 返回值附带 代表 id → 成员 id 列表，供 db meta 按任一成员查找。
+fn merge_codex_chains(
+    metas: Vec<(SessionMetaDto, Option<String>)>,
+) -> (Vec<SessionMetaDto>, HashMap<String, Vec<String>>) {
     fn find(parent: &mut HashMap<String, String>, x: &str) -> String {
         let mut root = x.to_string();
         while let Some(p) = parent.get(&root) {
@@ -1205,16 +1813,20 @@ fn merge_codex_chains(metas: Vec<(SessionMetaDto, Option<String>)>) -> Vec<Sessi
         let root = find(&mut parent, &m.session_id);
         groups.entry(root).or_default().push(m);
     }
-    groups
-        .into_values()
-        .map(|mut g| {
-            g.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-            let n = g.len();
-            let mut rep = g.into_iter().next().unwrap_or_else(|| unreachable!());
-            rep.chain_count = n;
-            rep
-        })
-        .collect()
+    let mut reps = Vec::new();
+    let mut members = HashMap::new();
+    for mut g in groups.into_values() {
+        g.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let n = g.len();
+        let member_ids: Vec<String> = g.iter().map(|m| m.session_id.clone()).collect();
+        let mut rep = g.into_iter().next().unwrap_or_else(|| unreachable!());
+        rep.chain_count = n;
+        if n > 1 {
+            members.insert(rep.session_id.clone(), member_ids);
+        }
+        reps.push(rep);
+    }
+    (reps, members)
 }
 
 fn snapshot_stem(path: &Path) -> String {
@@ -1339,20 +1951,62 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
 
 // ===== Tauri commands =====
 
+/// 扫描结果缓存 10 秒：同步 command 跑在主线程上，列表每 5 秒全量扫几百个文件会卡 UI
+static SCAN_CACHE: OnceLock<Mutex<Option<(Instant, ScanResult)>>> = OnceLock::new();
+
+fn cached_scan() -> ScanResult {
+    let m = SCAN_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = m.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, res)) = &*guard {
+        if at.elapsed() < std::time::Duration::from_secs(10) {
+            return res.clone();
+        }
+    }
+    let res = scan_sessions();
+    *guard = Some((Instant::now(), res.clone()));
+    res
+}
+
+/// pin/unpin/删除/改整理数据后立刻失效，下一次列表拿到新结果
+fn invalidate_scan_cache() {
+    if let Some(m) = SCAN_CACHE.get() {
+        if let Ok(mut g) = m.lock() {
+            *g = None;
+        }
+    }
+}
+
+/// 把 session_meta 表的整理数据合并进扫描结果；codex 链代表自身没有行时按任一成员 id 找
+fn apply_meta(
+    sessions: &mut [SessionMetaDto],
+    chain_members: &HashMap<String, Vec<String>>,
+    meta: &HashMap<(String, String), MetaRow>,
+) {
+    for s in sessions {
+        let row = meta.get(&(s.agent.clone(), s.session_id.clone())).or_else(|| {
+            chain_members.get(&s.session_id).and_then(|members| {
+                members
+                    .iter()
+                    .find_map(|id| meta.get(&(s.agent.clone(), id.clone())))
+            })
+        });
+        if let Some(row) = row {
+            s.pinned = row.pinned;
+            // 扫描侧已标归档的（Codex archived_sessions 目录）不能被 db 行覆盖掉
+            s.archived = s.archived || row.archived;
+            s.custom_title = row.custom_title.clone();
+            s.tags = row.tags.clone();
+        }
+    }
+}
+
 #[tauri::command]
-pub fn list_sessions() -> Vec<SessionMetaDto> {
-    let mut sessions = scan_sessions();
+pub async fn list_sessions() -> Vec<SessionMetaDto> {
+    let scan = cached_scan();
+    let mut sessions = scan.sessions;
     if let Ok(conn) = open_db() {
         let meta = read_all_meta(&conn);
-        for s in &mut sessions {
-            if let Some(row) = meta.get(&(s.agent.clone(), s.session_id.clone())) {
-                s.pinned = row.pinned;
-                // 扫描侧已标归档的（Codex archived_sessions 目录）不能被 db 行覆盖掉
-                s.archived = s.archived || row.archived;
-                s.custom_title = row.custom_title.clone();
-                s.tags = row.tags.clone();
-            }
-        }
+        apply_meta(&mut sessions, &scan.chain_members, &meta);
     }
     // 最近活跃在前；ISO 字符串可直接字典序比较
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -1362,9 +2016,14 @@ pub fn list_sessions() -> Vec<SessionMetaDto> {
 /// 终端联动兜底（architecture §6.7）：无 --session-id 的 agent，
 /// 按 (agent, 项目目录, 启动时间) 找最新会话；updated_at 为 ISO 字符串可字典序比较
 #[tauri::command]
-pub fn find_session_for(agent: String, cwd: String, since_iso: String) -> Option<SessionMetaDto> {
+pub async fn find_session_for(
+    agent: String,
+    cwd: String,
+    since_iso: String,
+) -> Option<SessionMetaDto> {
     let cwd = expand_tilde(&cwd);
-    scan_sessions()
+    cached_scan()
+        .sessions
         .into_iter()
         .filter(|s| s.agent == agent && s.project_path == cwd)
         .filter(|s| s.updated_at.as_deref().unwrap_or("") >= since_iso.as_str())
@@ -1372,7 +2031,7 @@ pub fn find_session_for(agent: String, cwd: String, since_iso: String) -> Option
 }
 
 #[tauri::command]
-pub fn get_session_conversation(agent: String, file_path: String) -> Vec<ChatMessageDto> {
+pub async fn get_session_conversation(agent: String, file_path: String) -> Vec<ChatMessageDto> {
     let path = PathBuf::from(&file_path);
     let bytes = read_session_bytes(&path)
         .or_else(|| find_snapshot(&agent, &path).and_then(|p| read_session_bytes(&p)));
@@ -1384,6 +2043,13 @@ pub fn get_session_conversation(agent: String, file_path: String) -> Vec<ChatMes
         "codex" => parse_codex(&lines),
         "gemini" => parse_gemini(&lines),
         "qwen" => parse_qwen(&lines),
+        "kimi" => {
+            if kimi_looks_like_wire(&lines) {
+                parse_kimi(&lines)
+            } else {
+                parse_kimi_legacy(&lines)
+            }
+        }
         _ => parse_claude(&lines),
     }
 }
@@ -1407,6 +2073,7 @@ pub fn pin_session(agent: String, session_id: String, file_path: String) -> Resu
         params![agent, session_id, now_iso()],
     )
     .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
+    invalidate_scan_cache();
     Ok(())
 }
 
@@ -1431,6 +2098,7 @@ pub fn unpin_session(
             }
         }
     }
+    invalidate_scan_cache();
     Ok(())
 }
 
@@ -1451,7 +2119,110 @@ pub fn set_session_meta(
         params![agent, session_id, custom_title, tags_json, archived],
     )
     .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
+    invalidate_scan_cache();
     Ok(())
+}
+
+// ===== 删除（用户显式发起，是只读原则的唯一例外） =====
+
+/// 删除只允许落在已知会话根目录内（各 CLI 会话目录 + 我们的快照目录），防误删
+fn session_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        for name in [".claude", ".codex", ".gemini", ".qwen", ".kimi", ".kimi-code"] {
+            roots.push(home.join(name));
+        }
+    }
+    if let Some(snap) = snapshots_root() {
+        roots.push(snap);
+    }
+    roots
+}
+
+fn is_under_session_root(path: &Path) -> bool {
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    session_roots().iter().any(|root| {
+        root.canonicalize()
+            .map(|r| path.starts_with(r))
+            .unwrap_or(false)
+    })
+}
+
+/// 删除源文件（不存在的候选跳过），返回是否真的删到了文件
+fn delete_source_file(file_path: &str) -> Result<bool, String> {
+    let mut deleted = false;
+    let mut candidates = vec![file_path.to_string()];
+    if !file_path.ends_with(".zst") {
+        candidates.push(format!("{file_path}.zst")); // Codex 后台压缩后源文件名会变
+    }
+    for c in candidates {
+        let p = PathBuf::from(&c);
+        if !p.exists() {
+            continue;
+        }
+        if !is_under_session_root(&p) {
+            return Err(format!("拒绝删除会话根目录之外的文件: {c}"));
+        }
+        fs::remove_file(&p).map_err(|e| format!("删除 {c} 失败: {e}"))?;
+        deleted = true;
+    }
+    Ok(deleted)
+}
+
+#[tauri::command]
+pub async fn delete_session(
+    agent: String,
+    session_id: String,
+    file_path: String,
+) -> Result<(), String> {
+    delete_source_file(&file_path)?;
+    for zst in [false, true] {
+        if let Some(p) = snapshot_path(&agent, &session_id, zst) {
+            if p.exists() {
+                let _ = fs::remove_file(p);
+            }
+        }
+    }
+    let conn = open_db()?;
+    conn.execute(
+        "DELETE FROM session_meta WHERE agent=?1 AND session_id=?2",
+        params![agent, session_id],
+    )
+    .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
+    invalidate_scan_cache();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_project_sessions(agent: String, project_path: String) -> Result<usize, String> {
+    let project_path = expand_tilde(&project_path);
+    let targets: Vec<SessionMetaDto> = cached_scan()
+        .sessions
+        .into_iter()
+        .filter(|s| s.agent == agent && s.project_path == project_path)
+        .collect();
+    let mut count = 0;
+    for s in targets {
+        delete_source_file(&s.file_path)?;
+        for zst in [false, true] {
+            if let Some(p) = snapshot_path(&s.agent, &s.session_id, zst) {
+                if p.exists() {
+                    let _ = fs::remove_file(p);
+                }
+            }
+        }
+        let conn = open_db()?;
+        conn.execute(
+            "DELETE FROM session_meta WHERE agent=?1 AND session_id=?2",
+            params![s.agent, s.session_id],
+        )
+        .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
+        count += 1;
+    }
+    invalidate_scan_cache();
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -1707,13 +2478,19 @@ mod tests {
             codex_meta("t3", "2026-07-03T00:00:00Z", Some("t2")),
             codex_meta("u1", "2026-07-01T12:00:00Z", None), // 无关会话不受影响
         ];
-        let merged = merge_codex_chains(metas);
+        let (merged, members) = merge_codex_chains(metas);
         assert_eq!(merged.len(), 2);
         let rep = merged.iter().find(|m| m.chain_count == 3).unwrap();
         assert_eq!(rep.session_id, "t3", "代表是 updated_at 最新的文件");
         assert_eq!(rep.file_path, "/rollout-t3.jsonl");
         let single = merged.iter().find(|m| m.session_id == "u1").unwrap();
         assert_eq!(single.chain_count, 1);
+        assert_eq!(
+            members.get("t3").map(|v| v.len()),
+            Some(3),
+            "成员表记录链上全部 id 供 db meta 反查"
+        );
+        assert!(!members.contains_key("u1"), "单文件会话不进成员表");
     }
 
     #[test]
@@ -1723,10 +2500,36 @@ mod tests {
             codex_meta("t2", "2026-07-02T00:00:00Z", Some("t1")),
             codex_meta("t3", "2026-07-01T00:00:00Z", Some("t2")),
         ];
-        let merged = merge_codex_chains(metas);
+        let (merged, _) = merge_codex_chains(metas);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].chain_count, 2);
         assert_eq!(merged[0].session_id, "t2");
+    }
+
+    #[test]
+    fn meta_written_for_chain_member_applies_to_rep() {
+        // 用户归档了旧代表 t2，链换人后代表变 t3：t3 没有自己的 meta 行时要按成员 id 找回
+        let metas = vec![
+            codex_meta("t2", "2026-07-02T00:00:00Z", Some("t1")),
+            codex_meta("t3", "2026-07-03T00:00:00Z", Some("t2")),
+        ];
+        let (mut merged, members) = merge_codex_chains(metas);
+        let mut meta: HashMap<(String, String), MetaRow> = HashMap::new();
+        meta.insert(
+            ("codex".to_string(), "t2".to_string()),
+            MetaRow {
+                pinned: true,
+                archived: true,
+                custom_title: Some("旧代表上的标题".into()),
+                tags: vec!["重要".into()],
+            },
+        );
+        apply_meta(&mut merged, &members, &meta);
+        let rep = merged.iter().find(|m| m.session_id == "t3").unwrap();
+        assert!(rep.pinned);
+        assert!(rep.archived);
+        assert_eq!(rep.custom_title.as_deref(), Some("旧代表上的标题"));
+        assert_eq!(rep.tags, vec!["重要".to_string()]);
     }
 
     // ===== zstd / 路径 / 时间 =====
@@ -1909,7 +2712,176 @@ mod tests {
         assert_eq!((u.input, u.output), (9, 3));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // ===== Kimi =====
+
+    #[test]
+    fn kimi_wire_parse_dedup_injection_tools_usage() {
+        let lines = s(&[
+            r#"{"type":"metadata","protocol_version":"1.4","created_at":1785307071000}"#,
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"第一问"}],"origin":{"kind":"user"},"time":1785307072000}"#,
+            r#"{"type":"context.append_message","message":{"role":"user","origin":{"kind":"user"},"content":[{"type":"text","text":"第一问"}]},"time":1785307072001}"#, // prompt 回显，去重
+            r#"{"type":"context.append_message","message":{"role":"user","origin":{"kind":"injection"},"content":[{"type":"text","text":"<system-reminder>注入</system-reminder>"}]},"time":1785307072002}"#,
+            r#"{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"think","think":"想想"},{"type":"text","text":"好的"}],"toolCalls":[{"function":{"name":"Read","arguments":"{\"path\":\"/a\"}"}}]},"time":1785307073000}"#,
+            r#"{"type":"context.append_message","message":{"role":"tool","content":[{"type":"text","text":"file body"}]},"time":1785307074000}"#,
+            r#"{"type":"usage.record","usage":{"inputOther":100,"output":20,"inputCacheRead":10,"inputCacheCreation":5},"time":1785307075000}"#,
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"slash 命令"}],"origin":{"kind":"slash"},"time":1785307076000}"#, // 非 user 来源跳过
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"截断"#, // 截断末行
+        ]);
+        let msgs = parse_kimi(&lines);
+        assert_eq!(msgs.len(), 2, "回显/注入/slash/截断行都要处理掉");
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].blocks[0].text, "第一问");
+        assert_eq!(msgs[0].timestamp.as_deref(), Some("2026-07-29T06:37:52Z"));
+        let a = &msgs[1];
+        assert_eq!(a.role, "assistant");
+        assert_eq!(a.blocks[0].kind, "thinking");
+        assert_eq!(a.blocks[1].kind, "text");
+        assert_eq!(a.blocks[2].kind, "tool_use");
+        assert_eq!(a.blocks[2].tool_name.as_deref(), Some("Read"));
+        assert_eq!(a.blocks[2].text, "{\"path\":\"/a\"}");
+        assert_eq!(a.blocks[3].kind, "tool_result");
+        assert_eq!(a.blocks[3].text, "file body");
+        let u = a.usage.as_ref().unwrap();
+        assert_eq!((u.input, u.output, u.cache_read, u.cache_write), (100, 20, 10, 5));
+    }
+
+    #[test]
+    fn kimi_wire_parse_loop_events() {
+        // 新协议：assistant 输出走 append_loop_event 流式事件（step.begin/content.part/tool.call/tool.result/step.end）
+        let lines = s(&[
+            r#"{"type":"metadata","protocol_version":"1.4","created_at":1785307071000}"#,
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"跑一下测试"}],"origin":{"kind":"user"},"time":1785307072000}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"step.begin","step":1},"time":1785307072100}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"think","think":"先想"}},"time":1785307072200}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"我来跑"}},"time":1785307072300}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Bash","args":{"command":"cargo test"}},"time":1785307072400}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.result","result":{"output":"ok 70 passed"}},"time":1785307072500}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"step.end","usage":{"inputOther":500,"output":60,"inputCacheRead":7,"inputCacheCreation":3}},"time":1785307072600}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"step.begin","step":2},"time":1785307072700}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"全绿"}},"time":1785307072800}"#,
+        ]);
+        let msgs = parse_kimi(&lines);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].role, "user");
+        let a1 = &msgs[1];
+        assert_eq!(a1.blocks[0].kind, "thinking");
+        assert_eq!(a1.blocks[1].kind, "text");
+        assert_eq!(a1.blocks[2].kind, "tool_use");
+        assert_eq!(a1.blocks[2].tool_name.as_deref(), Some("Bash"));
+        assert_eq!(a1.blocks[2].text, "{\"command\":\"cargo test\"}");
+        assert_eq!(a1.blocks[3].kind, "tool_result");
+        assert_eq!(a1.blocks[3].text, "ok 70 passed");
+        let u = a1.usage.as_ref().unwrap();
+        assert_eq!((u.input, u.output, u.cache_read, u.cache_write), (500, 60, 7, 3));
+        assert_eq!(msgs[2].blocks[0].text, "全绿", "第二个 step 是独立的一条 assistant 消息");
+    }
+
+    #[test]
+    fn kimi_wire_meta_title_from_state_json() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let main = dir.join("session_abc").join("agents").join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let wire = main.join("wire.jsonl");
+        std::fs::write(
+            &wire,
+            concat!(
+                r#"{"type":"metadata","protocol_version":"1.4","created_at":1785307071000}"#,
+                "\n",
+                r#"{"type":"turn.prompt","input":[{"type":"text","text":"首条输入"}],"origin":{"kind":"user"},"time":1785307072000}"#,
+                "\n",
+                r#"{"type":"usage.record","usage":{"inputOther":7,"output":3}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("session_abc").join("state.json"),
+            r#"{"createdAt":1785307071000,"title":"AI 起的标题"}"#,
+        )
+        .unwrap();
+        let state: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("session_abc").join("state.json")).unwrap(),
+        )
+        .unwrap();
+        let m = kimi_wire_file_meta(&wire, true, "abc", "/proj/x".into(), Some(&state)).unwrap();
+        assert_eq!(m.agent, "kimi");
+        assert_eq!(m.project_path, "/proj/x");
+        assert_eq!(m.title.as_deref(), Some("AI 起的标题"), "state.json 标题优先");
+        assert_eq!(m.created_at.as_deref(), Some("2026-07-29T06:37:51Z"));
+        let u = m.token_usage.unwrap();
+        assert_eq!((u.input, u.output), (7, 3));
+        // 无 state 时回落首条用户输入
+        let m2 = kimi_wire_file_meta(&wire, true, "abc", "/proj/x".into(), None).unwrap();
+        assert_eq!(m2.title.as_deref(), Some("首条输入"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn kimi_legacy_parse_and_buckets() {
+        // md5("/tmp/proj") 预计算值，验证 bucket 反查规则
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kimi_json = dir.join("kimi.json");
+        std::fs::write(&kimi_json, r#"{"work_dirs":[{"path":"/tmp/proj"}]}"#).unwrap();
+        let buckets = kimi_workdir_buckets(&kimi_json);
+        assert_eq!(
+            buckets.get("d5ebc5292b750d2bb41a2557ca31bcac").map(String::as_str),
+            Some("/tmp/proj")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        let lines = s(&[
+            r#"{"role":"_init","content":"内部记录"}"#,
+            r#"{"role":"user","content":"旧版提问"}"#,
+            r#"{"role":"assistant","content":[{"type":"text","text":"旧版回答"}],"tool_calls":[{"function":{"name":"Bash","arguments":"{\"cmd\":\"ls\"}"}}]}"#,
+            r#"{"role":"tool","content":"total 0"}"#,
+            r#"{"role":"_usage","usage":{"input_tokens":42,"output_tokens":9}}"#,
+        ]);
+        let msgs = parse_kimi_legacy(&lines);
+        assert_eq!(msgs.len(), 2, "_ 开头的内部角色跳过，tool 并入上一条");
+        assert_eq!(msgs[0].blocks[0].text, "旧版提问");
+        let a = &msgs[1];
+        assert_eq!(a.blocks[1].kind, "tool_use");
+        assert_eq!(a.blocks[1].tool_name.as_deref(), Some("Bash"));
+        assert_eq!(a.blocks[2].kind, "tool_result");
+        let u = a.usage.as_ref().unwrap();
+        assert_eq!((u.input, u.output), (42, 9));
+    }
+
+    #[test]
+    fn kimi_variant_sniffing() {
+        assert!(kimi_looks_like_wire(&s(&[r#"{"type":"metadata"}"#])));
+        assert!(!kimi_looks_like_wire(&s(&[r#"{"role":"user","content":"x"}"#])));
+    }
+
+    // ===== 删除路径校验 =====
+
+    #[test]
+    fn delete_refuses_paths_outside_session_roots() {
+        assert!(!is_under_session_root(Path::new("/etc/passwd")));
+        assert!(!is_under_session_root(Path::new("/tmp/whatever.jsonl")));
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.jsonl");
+        std::fs::write(&f, "{}").unwrap();
+        let err = delete_source_file(f.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("拒绝删除"), "根目录外的文件必须拒绝: {err}");
+        assert!(f.exists(), "被拒绝的文件不能被删");
+        std::fs::remove_dir_all(&dir).ok();
+        // 根目录内的路径放行（用真实 home 下的 .claude 构造，不实际创建）
+        if let Some(home) = dirs::home_dir() {
+            let inside = home.join(".claude").join("projects").join("x.jsonl");
+            if inside.canonicalize().is_ok() {
+                assert!(is_under_session_root(&inside));
+            }
+        }
+    }
 }
+
+
+
+
 
 
 

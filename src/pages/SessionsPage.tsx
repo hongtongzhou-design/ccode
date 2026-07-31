@@ -8,7 +8,8 @@ import type { ChatMessageDto, SessionMetaDto, TokenUsageDto } from "../types";
 type Filter =
   | { kind: "all" }
   | { kind: "agent"; agent: string }
-  | { kind: "project"; path: string };
+  // 项目挂在 agent 下，筛选必须同时限定 agent 和路径（同名目录可能跨 agent）
+  | { kind: "project"; agent: string; path: string };
 
 function relTime(iso: string | null): string {
   if (!iso) return "";
@@ -63,6 +64,12 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     title: string;
     tags: string;
   } | null>(null);
+  // 右键菜单：会话行或树里的项目节点
+  const [menu, setMenu] = useState<
+    | { x: number; y: number; kind: "session"; session: SessionMetaDto }
+    | { x: number; y: number; kind: "project"; agent: string; path: string; count: number }
+    | null
+  >(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const editingRef = useRef(false);
   editingRef.current = editing !== null;
@@ -114,7 +121,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     let src = searched;
     if (filter.kind === "agent") src = src.filter((s) => s.agent === filter.agent);
     else if (filter.kind === "project")
-      src = src.filter((s) => s.projectPath === filter.path);
+      src = src.filter(
+        (s) => s.agent === filter.agent && s.projectPath === filter.path,
+      );
     return src.filter((s) => showArchived || !s.archived);
   }, [searched, filter, showArchived]);
 
@@ -129,7 +138,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     filter.kind === "agent"
       ? agentLabel(filter.agent)
       : filter.kind === "project"
-        ? basename(filter.path)
+        ? `${agentLabel(filter.agent)} · ${basename(filter.path)}`
         : "全部会话";
 
   async function openSession(s: SessionMetaDto) {
@@ -155,7 +164,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  // 页面可见时每 5s 轮询；当前打开的会话 updatedAt 变了就重拉对话
+  // 页面可见时每 8s 轮询（后端扫描结果缓存 10s，更密的轮询无意义）；
+  // 当前打开的会话 updatedAt 变了就重拉对话
   useEffect(() => {
     if (!visible) return;
     let stopped = false;
@@ -179,12 +189,27 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       } catch {
         // 轮询失败静默，下轮再试
       }
-    }, 5000);
+    }, 8000);
     return () => {
       stopped = true;
       clearInterval(timer);
     };
   }, [visible, loadSessions]);
+
+  // 右键菜单打开时：Escape / 任意滚动关闭；点击空白由遮罩处理
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    const onScroll = () => setMenu(null);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [menu]);
 
   async function togglePin(s: SessionMetaDto) {
     setError(null);
@@ -233,6 +258,52 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  /** 删除单个会话（源文件+快照+整理数据，后端一并处理）；正在回放的被删则退出回放 */
+  async function deleteSession(s: SessionMetaDto) {
+    setError(null);
+    if (
+      !window.confirm("删除该会话的本地文件？保留的快照和整理数据会一并删除，不可恢复。")
+    )
+      return;
+    try {
+      await invoke("delete_session", {
+        agent: s.agent,
+        sessionId: s.sessionId,
+        filePath: s.filePath,
+      });
+      const cur = selectedRef.current;
+      if (cur && cur.agent === s.agent && cur.sessionId === s.sessionId) {
+        setSelected(null);
+        setMessages([]);
+      }
+      await loadSessions();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** 删除某 agent 下某项目的全部会话 */
+  async function deleteProjectSessions(agent: string, path: string, count: number) {
+    setError(null);
+    if (
+      !window.confirm(
+        `将删除 ${agentLabel(agent)} 下 ${basename(path)} 的 ${count} 个会话文件，不可恢复。继续？`,
+      )
+    )
+      return;
+    try {
+      await invoke("delete_project_sessions", { agent, projectPath: path });
+      const cur = selectedRef.current;
+      if (cur && cur.agent === agent && cur.projectPath === path) {
+        setSelected(null);
+        setMessages([]);
+      }
+      await loadSessions();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function saveEdit() {
     if (!editing) return;
     setError(null);
@@ -268,11 +339,15 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   const input =
     "w-full rounded border border-neutral-300 bg-white px-2 py-1.5 text-sm outline-none focus:border-blue-500";
+  const menuItem = "block w-full px-3 py-1.5 text-left hover:bg-neutral-100";
 
   const filterActive = (f: Filter) =>
     (filter.kind === "all" && f.kind === "all") ||
     (filter.kind === "agent" && f.kind === "agent" && filter.agent === f.agent) ||
-    (filter.kind === "project" && f.kind === "project" && filter.path === f.path);
+    (filter.kind === "project" &&
+      f.kind === "project" &&
+      filter.agent === f.agent &&
+      filter.path === f.path);
 
   return (
     <div className="flex h-full">
@@ -330,10 +405,23 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 g.projects.map((p) => (
                   <button
                     key={p.path}
-                    onClick={() => selectFilter({ kind: "project", path: p.path })}
+                    onClick={() =>
+                      selectFilter({ kind: "project", agent: g.agent, path: p.path })
+                    }
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMenu({
+                        x: e.clientX,
+                        y: e.clientY,
+                        kind: "project",
+                        agent: g.agent,
+                        path: p.path,
+                        count: p.list.length,
+                      });
+                    }}
                     title={p.path}
                     className={`flex w-full items-center justify-between gap-2 py-1.5 pl-8 pr-3 text-left text-sm ${
-                      filterActive({ kind: "project", path: p.path })
+                      filterActive({ kind: "project", agent: g.agent, path: p.path })
                         ? "bg-blue-50 text-blue-700"
                         : "hover:bg-neutral-100"
                     }`}
@@ -410,6 +498,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 <div
                   key={s.sessionId}
                   onClick={() => openSession(s)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMenu({ x: e.clientX, y: e.clientY, kind: "session", session: s });
+                  }}
                   className={`group border-b border-neutral-200 bg-white px-4 py-3 text-sm ${
                     clickable ? "cursor-pointer hover:bg-neutral-50" : "opacity-60"
                   }`}
@@ -527,6 +619,82 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           </div>
         )}
       </div>
+
+      {/* 右键菜单：fixed 遮罩 + 光标处浮层 */}
+      {menu && (
+        <div
+          className="fixed inset-0 z-20"
+          onClick={() => setMenu(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setMenu(null);
+          }}
+        >
+          <div
+            className="absolute min-w-36 rounded border border-neutral-200 bg-white py-1 text-sm shadow-lg"
+            style={{ left: menu.x, top: menu.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {menu.kind === "session" ? (
+              <>
+                <button
+                  className={menuItem}
+                  onClick={() => {
+                    setMenu(null);
+                    void togglePin(menu.session);
+                  }}
+                >
+                  {menu.session.pinned ? "取消保留" : "保留"}
+                </button>
+                <button
+                  className={menuItem}
+                  onClick={() => {
+                    setMenu(null);
+                    void toggleArchive(menu.session);
+                  }}
+                >
+                  {menu.session.archived ? "取消归档" : "归档"}
+                </button>
+                <button
+                  className={menuItem}
+                  onClick={() => {
+                    setMenu(null);
+                    // 编辑表单在列表栏，先退出回放态
+                    setSelected(null);
+                    setEditing({
+                      agent: menu.session.agent,
+                      sessionId: menu.session.sessionId,
+                      title: menu.session.customTitle ?? "",
+                      tags: menu.session.tags.join(", "),
+                    });
+                  }}
+                >
+                  编辑
+                </button>
+                <button
+                  className={`${menuItem} text-red-600`}
+                  onClick={() => {
+                    setMenu(null);
+                    void deleteSession(menu.session);
+                  }}
+                >
+                  删除会话
+                </button>
+              </>
+            ) : (
+              <button
+                className={`${menuItem} text-red-600`}
+                onClick={() => {
+                  setMenu(null);
+                  void deleteProjectSessions(menu.agent, menu.path, menu.count);
+                }}
+              >
+                删除该项目全部会话
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

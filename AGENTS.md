@@ -9,6 +9,14 @@ Ccode 是一个「AI 编码 Agent 统一启动器 + 配置中心 + 会话监控�
 **设计文档即规格**：改架构/适配逻辑前先读 `docs/architecture.md`（总体设计）和
 `docs/agent-integration-matrix.md`（六个 CLI 的 env/配置/会话格式，源码级调研结论，勿凭印象写 env 变量名）。
 
+**参考实现（长期有效）**：`.reference/` 下有三个开源项目的浅克隆，实现新功能前先查它们有没有成熟方案可借鉴：
+
+- `.reference/cc-switch`（farion1231/cc-switch，Tauri2+React+SQLite）：provider 预设与一键导入、双向同步/回写保护（写活文件 vs 编辑时回填）、本地代理与故障转移、原子写入、测速、托盘速切、导入导出
+- `.reference/waveterm`（wavetermdev/waveterm，Electron+Go+SQLite）：block/workspace 对象模型与持久化、"named = saved" 留存语义、badge 注意力标记与 Claude Code hooks 联动、滚动缓冲区序列化恢复、namespaced meta 键体系
+- `.reference/vscode`（microsoft/vscode，Electron+TS，blobless 浅克隆，读文件会按需拉取）：Explorer 文件树（懒加载/预览 vs 固定打开）、编辑器区 tab 与 split、面板布局（活动栏/侧栏/编辑器区/面板/状态栏）、终端标签列表。目录索引在 `src/vs/workbench/contrib/`
+
+借鉴原则：学机制和取舍，不抄代码；与我们架构冲突时以 `docs/architecture.md` 为准（例：不走本地代理主线、会话解析坚持只读）。三个镜像可随时 `git -C .reference/<repo> pull` 更新。
+
 **已确认的产品决策**（用户拍板，勿擅自更改）：
 
 - 应用名 **Ccode**；MVP 六个 agent 全部支持
@@ -45,7 +53,7 @@ src-tauri/src/
   profiles.rs                # ProfileStore：profiles.json + 系统钥匙串存密钥（service "ccode"）
   agents.rs                  # 适配器：detect + launch_plan（env/args 注入规则，差异全在这里）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起逻辑，agent/shell 复用
-  sessions.rs                # 会话浏览：扫描/解析 Claude+Codex+Gemini+Qwen 会话（含 .zst）、app.db session_meta、pin 快照
+  sessions.rs                # 会话浏览：扫描/解析五个 agent 会话（Claude/Codex/Gemini/Qwen/Kimi，含 .zst）、app.db session_meta、pin 快照、用户发起的删除
   lib.rs                     # 模块与 Tauri command 注册
 ```
 
@@ -63,7 +71,7 @@ src-tauri/src/
     不允许死在最终画面；用户手动 `exit` shell 不自动重开；
   - 回落的 shell 不携带任何 profile 环境变量（密钥只在 agent 进程内）；
   - agent 与 shell 共用 `pty.rs` 的 `spawn_tracked`，退出事件按 PTY 类型区分处理。
-- **各 CLI 会话/配置目录一律只读**；唯一允许的写操作是「设为全局默认」，且写前必须备份。
+- **各 CLI 会话/配置目录一律只读**；例外只有两处：「设为全局默认」（写前必须备份）和用户显式发起的会话删除（delete_session/delete_project_sessions，且路径必须落在已知会话根目录内）。
 - 解析各 CLI 内部格式时**防御式**：跳过未知类型、容忍缺字段、容忍末行截断（格式随版本漂移）。
 - 三平台兼容：禁写平台特定路径，用 `dirs`/`keyring`/`portable-pty` 的抽象。
 - UI 文案用中文；代码注释用中文、只在非显而易见处写（参照现有文件风格）。

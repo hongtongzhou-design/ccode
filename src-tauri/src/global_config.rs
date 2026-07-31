@@ -83,7 +83,7 @@ fn patch_claude_settings(
     existing: Option<&str>,
     base_url: Option<&str>,
     key: Option<&str>,
-    model: Option<&str>,
+    models: &[String],
 ) -> Result<String, String> {
     let mut v = parse_json_doc(existing)?;
     let env = ensure_obj(&mut v, &["env"])?;
@@ -93,8 +93,18 @@ fn patch_claude_settings(
     if let Some(k) = key {
         env.insert("ANTHROPIC_AUTH_TOKEN".into(), json!(k));
     }
-    if let Some(m) = model {
+    if let Some(m) = models.first() {
         env.insert("ANTHROPIC_MODEL".into(), json!(m));
+    }
+    // 与注入模式一致：模型列表注册进 /model 选择器（前 4 个别名槽 + 第 5 个自定义槽）
+    const SLOTS: [&str; 4] = ["SONNET", "OPUS", "HAIKU", "FABLE"];
+    for (m, slot) in models.iter().take(4).zip(SLOTS) {
+        env.insert(format!("ANTHROPIC_DEFAULT_{slot}_MODEL"), json!(m));
+        env.insert(format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"), json!(m));
+    }
+    if let Some(fifth) = models.get(4) {
+        env.insert("ANTHROPIC_CUSTOM_MODEL_OPTION".into(), json!(fifth));
+        env.insert("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(), json!(fifth));
     }
     to_pretty(&v)
 }
@@ -105,22 +115,25 @@ fn patch_qwen_settings(
     base_url: Option<&str>,
     key: Option<&str>,
     model: Option<&str>,
+    models: &[String],
 ) -> Result<String, String> {
     let mut v = parse_json_doc(existing)?;
     ensure_obj(&mut v, &["security", "auth"])?.insert("selectedType".into(), json!(protocol));
     let env = ensure_obj(&mut v, &["env"])?;
     // gemini/vertex-ai 协议暂不支持，按 openai 处理（与 launch_plan 一致）
-    let triple: [(&str, Option<&str>); 3] = match protocol {
-        "anthropic" => [
+    let is_anthropic = protocol == "anthropic";
+    let triple: [(&str, Option<&str>); 3] = if is_anthropic {
+        [
             ("ANTHROPIC_API_KEY", key),
             ("ANTHROPIC_BASE_URL", base_url),
             ("ANTHROPIC_MODEL", model),
-        ],
-        _ => [
+        ]
+    } else {
+        [
             ("OPENAI_API_KEY", key),
             ("OPENAI_BASE_URL", base_url),
             ("OPENAI_MODEL", model),
-        ],
+        ]
     };
     for (k, val) in triple {
         if let Some(val) = val {
@@ -129,6 +142,27 @@ fn patch_qwen_settings(
     }
     if let Some(m) = model {
         ensure_obj(&mut v, &["model"])?.insert("name".into(), json!(m));
+    }
+    // TUI /model 对话框列出的就是 modelProviders.<协议>.models 里的条目；
+    // 只覆盖本协议的 models 数组，其他协议/字段原样保留
+    if !models.is_empty() {
+        let env_key = if is_anthropic {
+            "ANTHROPIC_API_KEY"
+        } else {
+            "OPENAI_API_KEY"
+        };
+        let entries: Vec<Value> = models
+            .iter()
+            .map(|m| {
+                let mut e = json!({ "id": m, "name": m, "envKey": env_key });
+                if let Some(u) = base_url {
+                    e["baseUrl"] = json!(u);
+                }
+                e
+            })
+            .collect();
+        ensure_obj(&mut v, &["modelProviders", protocol])?
+            .insert("models".into(), json!(entries));
     }
     to_pretty(&v)
 }
@@ -182,6 +216,7 @@ fn patch_codex_config(
     existing: Option<&str>,
     base_url: Option<&str>,
     model: Option<&str>,
+    catalog: Option<&std::path::Path>,
 ) -> Result<String, String> {
     use toml_edit::value;
     let mut doc = parse_toml_doc(existing)?;
@@ -198,7 +233,25 @@ fn patch_codex_config(
     if let Some(m) = model {
         doc["model"] = value(m);
     }
+    // /model 选择器的模型目录（仅启动时读取）
+    if let Some(p) = catalog {
+        doc["model_catalog_json"] = value(p.to_string_lossy().as_ref());
+    }
     Ok(doc.to_string())
+}
+
+/// kimi 模型别名：清洗为 TOML 裸键字符集 [A-Za-z0-9_-]，无需引号
+fn kimi_model_alias(model: &str) -> String {
+    model
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn patch_kimi_config(
@@ -206,7 +259,7 @@ fn patch_kimi_config(
     provider_type: &str,
     base_url: Option<&str>,
     key: Option<&str>,
-    model: Option<&str>,
+    models: &[String],
 ) -> Result<String, String> {
     use toml_edit::value;
     let mut doc = parse_toml_doc(existing)?;
@@ -219,13 +272,21 @@ fn patch_kimi_config(
     if let Some(k) = key {
         ccode["api_key"] = value(k);
     }
-    // 无模型时不写 models.ccode/default_model，否则指向一个没有模型名的空条目
-    if let Some(m) = model {
-        let models = sub_table(doc.as_item_mut(), "models")?;
-        let mc = sub_table(models, "ccode")?;
+    // 选择器按 [models.*] 别名列出模型：每个 profile 模型一个别名表
+    if models.is_empty() {
+        // 向后兼容：无模型列表时仍写单个 models.ccode 占位
+        let models_tbl = sub_table(doc.as_item_mut(), "models")?;
+        let mc = sub_table(models_tbl, "ccode")?;
         mc["provider"] = value("ccode");
-        mc["model"] = value(m);
         doc["default_model"] = value("ccode");
+    } else {
+        let models_tbl = sub_table(doc.as_item_mut(), "models")?;
+        for m in models {
+            let t = sub_table(models_tbl, &kimi_model_alias(m))?;
+            t["provider"] = value("ccode");
+            t["model"] = value(m.as_str());
+        }
+        doc["default_model"] = value(kimi_model_alias(&models[0]));
     }
     Ok(doc.to_string())
 }
@@ -261,9 +322,11 @@ fn plan_writes(
     home: &Path,
     profile: &Profile,
     key: Option<&str>,
-    model: Option<&str>,
+    models: &[String],
 ) -> Result<Vec<PlannedWrite>, String> {
     let base_url = profile.base_url.as_deref();
+    // 全局模式没有运行时模型选择，默认取模型列表首个（与启动注入的兜底一致）
+    let model = models.first().map(|s| s.as_str());
     let mut plans = Vec::new();
     let mut push = |tag: &'static str, path: PathBuf, content: String| {
         plans.push(PlannedWrite { tag, path, content });
@@ -271,12 +334,20 @@ fn plan_writes(
     match profile.agent.as_str() {
         "claude-code" => {
             let path = home.join(".claude/settings.json");
-            let content = patch_claude_settings(read_existing(&path).as_deref(), base_url, key, model)?;
+            let content =
+                patch_claude_settings(read_existing(&path).as_deref(), base_url, key, models)?;
             push("settings.json", path, content);
         }
         "codex" => {
+            // /model 选择器的模型目录：先写 catalog 文件，再把路径写进 config.toml
+            let catalog = agents::write_codex_catalog(profile)?;
             let path = home.join(".codex/config.toml");
-            let content = patch_codex_config(read_existing(&path).as_deref(), base_url, model)?;
+            let content = patch_codex_config(
+                read_existing(&path).as_deref(),
+                base_url,
+                model,
+                catalog.as_deref(),
+            )?;
             push("config.toml", path, content);
             // 密钥不写 config.toml，走 auth.json 合并
             if let Some(k) = key {
@@ -304,8 +375,14 @@ fn plan_writes(
         "qwen" => {
             let protocol = profile.protocol.as_deref().unwrap_or("openai");
             let path = home.join(".qwen/settings.json");
-            let content =
-                patch_qwen_settings(read_existing(&path).as_deref(), protocol, base_url, key, model)?;
+            let content = patch_qwen_settings(
+                read_existing(&path).as_deref(),
+                protocol,
+                base_url,
+                key,
+                model,
+                &profile.models,
+            )?;
             push("settings.json", path, content);
         }
         "opencode" => {
@@ -330,8 +407,13 @@ fn plan_writes(
                 targets.push(("config.toml", new_path));
             }
             for (tag, path) in targets {
-                let content =
-                    patch_kimi_config(read_existing(&path).as_deref(), provider_type, base_url, key, model)?;
+                let content = patch_kimi_config(
+                    read_existing(&path).as_deref(),
+                    provider_type,
+                    base_url,
+                    key,
+                    &profile.models,
+                )?;
                 push(tag, path, content);
             }
         }
@@ -455,9 +537,7 @@ pub fn apply_profile_global(
     let profile = store.get(&profile_id)?;
     let key = profiles::get_key(&profile_id);
     let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
-    // 全局模式没有运行时模型选择，取模型列表首个（与启动注入的兜底一致）
-    let model = profile.models.first().map(|s| s.as_str());
-    let plans = plan_writes(&home, &profile, key.as_deref(), model)?;
+    let plans = plan_writes(&home, &profile, key.as_deref(), &profile.models)?;
     let backups_dir = backups_root()?.join(&profile.agent);
     apply_plans(&backups_dir, &home, &plans)
 }
@@ -515,20 +595,23 @@ mod tests {
             Some(existing),
             Some("https://relay.example.com"),
             Some("sk-secret"),
-            Some("claude-sonnet-4"),
+            &["claude-sonnet-4".to_string(), "m2".to_string()],
         )
         .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["env"]["ANTHROPIC_BASE_URL"], "https://relay.example.com");
         assert_eq!(v["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-secret");
         assert_eq!(v["env"]["ANTHROPIC_MODEL"], "claude-sonnet-4");
+        // 模型列表注册进 /model 选择器的别名槽
+        assert_eq!(v["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-4");
+        assert_eq!(v["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"], "m2");
         assert_eq!(v["env"]["OTHER"], "1");
         assert_eq!(v["theme"], "dark");
     }
 
     #[test]
     fn claude_patch_from_missing_file_creates_env_only() {
-        let out = patch_claude_settings(None, None, None, None).unwrap();
+        let out = patch_claude_settings(None, None, None, &[]).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v["env"].is_object());
         assert_eq!(v["env"].as_object().unwrap().len(), 0);
@@ -537,7 +620,13 @@ mod tests {
     #[test]
     fn codex_config_patch_preserves_other_tables() {
         let existing = "[other]\nkeep = 1\n\n[model_providers.ccode]\nold = \"x\"\n";
-        let out = patch_codex_config(Some(existing), Some("https://r.example.com/v1"), Some("gpt-5")).unwrap();
+        let out = patch_codex_config(
+            Some(existing),
+            Some("https://r.example.com/v1"),
+            Some("gpt-5"),
+            Some(std::path::Path::new("/cfg/ccode/catalogs/codex-p1.json")),
+        )
+        .unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
         assert_eq!(doc["other"]["keep"].as_integer(), Some(1));
         let ccode = &doc["model_providers"]["ccode"];
@@ -549,6 +638,10 @@ mod tests {
         assert_eq!(ccode["old"].as_str(), Some("x"));
         assert_eq!(doc["model_provider"].as_str(), Some("ccode"));
         assert_eq!(doc["model"].as_str(), Some("gpt-5"));
+        assert_eq!(
+            doc["model_catalog_json"].as_str(),
+            Some("/cfg/ccode/catalogs/codex-p1.json")
+        );
         // 密钥绝不进 config.toml
         assert!(!out.contains("sk-secret"));
     }
@@ -586,6 +679,7 @@ mod tests {
             Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
             Some("sk-secret"),
             Some("qwen3-coder"),
+            &["qwen3-coder".into(), "qwen3-max".into()],
         )
         .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -595,16 +689,58 @@ mod tests {
         assert_eq!(v["env"]["OPENAI_MODEL"], "qwen3-coder");
         assert_eq!(v["model"]["name"], "qwen3-coder");
         assert!(v["env"].get("ANTHROPIC_API_KEY").is_none());
+        // modelProviders.openai.models：TUI /model 对话框的数据源
+        let models = v["modelProviders"]["openai"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["id"], "qwen3-coder");
+        assert_eq!(models[0]["name"], "qwen3-coder");
+        assert_eq!(
+            models[0]["baseUrl"],
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(models[0]["envKey"], "OPENAI_API_KEY");
+        assert_eq!(models[1]["id"], "qwen3-max");
     }
 
     #[test]
     fn qwen_patch_anthropic_protocol() {
-        let out = patch_qwen_settings(None, "anthropic", Some("https://r.example.com"), Some("k"), None).unwrap();
+        let out = patch_qwen_settings(
+            None,
+            "anthropic",
+            Some("https://r.example.com"),
+            Some("k"),
+            None,
+            &[],
+        )
+        .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["security"]["auth"]["selectedType"], "anthropic");
         assert_eq!(v["env"]["ANTHROPIC_API_KEY"], "k");
         assert!(v["env"].get("OPENAI_API_KEY").is_none());
         assert!(v.get("model").is_none());
+        assert!(v.get("modelProviders").is_none());
+    }
+
+    #[test]
+    fn qwen_patch_model_providers_preserves_other_protocols() {
+        let existing = r#"{"modelProviders": {"gemini": {"models": [{"id": "g1"}]}, "openai": {"extra": 1}}}"#;
+        let out = patch_qwen_settings(
+            Some(existing),
+            "openai",
+            None,
+            None,
+            None,
+            &["qwen3-coder".into()],
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        // 其他协议原样保留，本协议的既有字段不清掉
+        assert_eq!(v["modelProviders"]["gemini"]["models"][0]["id"], "g1");
+        assert_eq!(v["modelProviders"]["openai"]["extra"], 1);
+        let models = v["modelProviders"]["openai"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "qwen3-coder");
+        assert!(models[0].get("baseUrl").is_none(), "无 base_url 时不写该字段");
     }
 
     #[test]
@@ -623,14 +759,14 @@ mod tests {
     }
 
     #[test]
-    fn kimi_patch_both_tables() {
+    fn kimi_patch_writes_alias_table_per_model() {
         let existing = "[providers.other]\ntype = \"openai\"\n";
         let out = patch_kimi_config(
             Some(existing),
             "kimi",
             Some("https://api.moonshot.cn/v1"),
             Some("sk-secret"),
-            Some("kimi-k2"),
+            &["kimi-k2".into(), "kimi.k2.5 turbo".into()],
         )
         .unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
@@ -639,18 +775,30 @@ mod tests {
         assert_eq!(ccode["type"].as_str(), Some("kimi"));
         assert_eq!(ccode["base_url"].as_str(), Some("https://api.moonshot.cn/v1"));
         assert_eq!(ccode["api_key"].as_str(), Some("sk-secret"));
+        // 每个模型一个 [models.<alias>] 表；非法字符清洗为 _
+        assert_eq!(doc["models"]["kimi-k2"]["provider"].as_str(), Some("ccode"));
+        assert_eq!(doc["models"]["kimi-k2"]["model"].as_str(), Some("kimi-k2"));
+        assert_eq!(
+            doc["models"]["kimi_k2_5_turbo"]["model"].as_str(),
+            Some("kimi.k2.5 turbo")
+        );
+        // default_model = 首个模型的别名
+        assert_eq!(doc["default_model"].as_str(), Some("kimi-k2"));
+    }
+
+    #[test]
+    fn kimi_patch_without_models_keeps_single_ccode_alias() {
+        let out = patch_kimi_config(None, "openai", None, None, &[]).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["providers"]["ccode"]["type"].as_str(), Some("openai"));
         assert_eq!(doc["models"]["ccode"]["provider"].as_str(), Some("ccode"));
-        assert_eq!(doc["models"]["ccode"]["model"].as_str(), Some("kimi-k2"));
         assert_eq!(doc["default_model"].as_str(), Some("ccode"));
     }
 
     #[test]
-    fn kimi_patch_without_model_skips_models_table() {
-        let out = patch_kimi_config(None, "openai", None, None, None).unwrap();
-        let doc: toml_edit::DocumentMut = out.parse().unwrap();
-        assert_eq!(doc["providers"]["ccode"]["type"].as_str(), Some("openai"));
-        assert!(doc.get("models").is_none());
-        assert!(doc.get("default_model").is_none());
+    fn kimi_alias_sanitizes_to_bare_key_charset() {
+        assert_eq!(kimi_model_alias("kimi-k2"), "kimi-k2");
+        assert_eq!(kimi_model_alias("a.b/c d"), "a_b_c_d");
     }
 
     #[test]
@@ -658,17 +806,17 @@ mod tests {
         let home = tmpdir("kimi-dirs");
         let p = profile("kimi");
         // 都不存在 → 只写新版目录
-        let plans = plan_writes(&home, &p, None, Some("m1")).unwrap();
+        let plans = plan_writes(&home, &p, None, &["m1".to_string()]).unwrap();
         assert_eq!(plans.len(), 1);
         assert!(plans[0].path.ends_with(".kimi-code/config.toml"));
         // 只有旧版目录 → 只写旧版
         fs::create_dir_all(home.join(".kimi")).unwrap();
-        let plans = plan_writes(&home, &p, None, Some("m1")).unwrap();
+        let plans = plan_writes(&home, &p, None, &["m1".to_string()]).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].tag, "legacy-config.toml");
         // 两者都有 → 都写
         fs::create_dir_all(home.join(".kimi-code")).unwrap();
-        let plans = plan_writes(&home, &p, None, Some("m1")).unwrap();
+        let plans = plan_writes(&home, &p, None, &["m1".to_string()]).unwrap();
         assert_eq!(plans.len(), 2);
         fs::remove_dir_all(&home).ok();
     }
@@ -683,7 +831,7 @@ mod tests {
         fs::write(&target, r#"{"env": {"OTHER": "1"}}"#).unwrap();
 
         let p = profile("claude-code");
-        let plans = plan_writes(&home, &p, Some("sk-secret"), Some("m1")).unwrap();
+        let plans = plan_writes(&home, &p, Some("sk-secret"), &["m1".to_string()]).unwrap();
         let written = apply_plans(&backups, &home, &plans).unwrap();
         assert_eq!(written, vec!["~/.claude/settings.json".to_string()]);
         // 原文件被备份，新内容已写入

@@ -1,4 +1,6 @@
 mod agents;
+mod fs_tree;
+mod git_info;
 mod global_config;
 mod models;
 mod profiles;
@@ -36,6 +38,13 @@ pub fn run() {
             sessions::pin_session,
             sessions::unpin_session,
             sessions::set_session_meta,
+            sessions::delete_session,
+            sessions::delete_project_sessions,
+            fs_tree::list_dir,
+            fs_tree::read_file_preview,
+            git_info::git_status,
+            git_info::git_commit,
+            git_info::git_push,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
