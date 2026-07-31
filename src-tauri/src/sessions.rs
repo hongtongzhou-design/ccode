@@ -1,0 +1,1915 @@
+use rusqlite::{params, Connection};
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+// ===== 前端 DTO =====
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsageDto {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMetaDto {
+    pub agent: String, // "claude-code" | "codex"
+    pub session_id: String,
+    pub project_path: String,
+    pub title: Option<String>,
+    pub created_at: Option<String>, // 文件里的 ISO 时间戳，或文件 mtime
+    pub updated_at: Option<String>,
+    pub file_path: String,
+    pub token_usage: Option<TokenUsageDto>,
+    pub cli_version: Option<String>,
+    // 以下来自 app.db 的 session_meta 表
+    pub pinned: bool,
+    pub archived: bool,
+    pub custom_title: Option<String>,
+    pub tags: Vec<String>,
+    pub alive: bool, // 源文件是否还在（不在则回放走快照）
+    /// Codex resume/fork 链长度（同一对话的多个 rollout 文件合并为一个条目）；非 Codex 恒为 1
+    pub chain_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockDto {
+    pub kind: String, // text | thinking | tool_use | tool_result
+    pub text: String,
+    pub tool_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessageDto {
+    pub role: String, // user | assistant
+    pub blocks: Vec<BlockDto>,
+    pub timestamp: Option<String>,
+    pub usage: Option<TokenUsageDto>,
+}
+
+// ===== 通用小工具 =====
+
+fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(|x| x.as_str())
+}
+
+fn text_block(text: String) -> BlockDto {
+    BlockDto {
+        kind: "text".into(),
+        text,
+        tool_name: None,
+    }
+}
+
+/// 列表标题：取首条真实用户消息，截断到约 60 字符
+fn truncate_title(text: &str) -> String {
+    const MAX: usize = 60;
+    let t = text.trim();
+    if t.chars().count() <= MAX {
+        t.to_string()
+    } else {
+        format!("{}…", t.chars().take(MAX).collect::<String>())
+    }
+}
+
+/// 工具结果尽量并入上一条 assistant（视觉上跟随发起调用的那条）；没有则单发一条 user
+fn push_tool_result(msgs: &mut Vec<ChatMessageDto>, blocks: Vec<BlockDto>, ts: Option<String>) {
+    if let Some(last) = msgs.last_mut() {
+        if last.role == "assistant" {
+            last.blocks.extend(blocks);
+            return;
+        }
+    }
+    msgs.push(ChatMessageDto {
+        role: "user".into(),
+        blocks,
+        timestamp: ts,
+        usage: None,
+    });
+}
+
+/// payload 字段可能是字符串也可能是对象，统一成文本
+fn stringify_payload(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+fn to_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+// ===== 时间格式化（避免仅为 mtime 格式化引入 chrono） =====
+
+/// Unix 秒 → ISO8601 UTC 字符串（Howard Hinnant 的 civil_from_days 算法）
+fn iso_from_unix(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (h, m, s) = (rem / 3600, rem % 3600 / 60, rem % 60);
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+fn now_iso() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    iso_from_unix(secs)
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}{}", home.to_string_lossy(), &path[1..]);
+        }
+    }
+    path.to_string()
+}
+
+fn mtime_iso(path: &Path) -> Option<String> {
+    let m = fs::metadata(path).ok()?.modified().ok()?;
+    let secs = m.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    Some(iso_from_unix(secs))
+}
+
+// ===== 文件读取（含 zstd） =====
+
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+/// 按 magic 识别 zstd（Codex 旧会话会被后台压缩成 .jsonl.zst）；截断的压缩流保留已解码部分
+fn maybe_decompress(bytes: &[u8]) -> Vec<u8> {
+    if !bytes.starts_with(&ZSTD_MAGIC) {
+        return bytes.to_vec();
+    }
+    let Ok(mut decoder) = zstd::stream::read::Decoder::new(bytes) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        match decoder.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+fn read_session_bytes(path: &Path) -> Option<Vec<u8>> {
+    let raw = fs::read(path).ok()?;
+    Some(maybe_decompress(&raw))
+}
+
+/// 扫描只读头部（cwd/时间戳/标题）+ 尾部（ai-title / token_count），各有字节上限；
+/// 文件小于两倍上限时全读进头部。切片按换行对齐，半行丢弃。
+fn head_tail_lines(bytes: &[u8], budget: usize) -> (Vec<String>, Vec<String>) {
+    if bytes.len() <= budget * 2 {
+        return (to_lines(&String::from_utf8_lossy(bytes)), Vec::new());
+    }
+    let head_end = bytes[..budget]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let tail_from = bytes.len() - budget;
+    let tail_from = bytes[tail_from..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| tail_from + i + 1)
+        .unwrap_or(bytes.len());
+    (
+        to_lines(&String::from_utf8_lossy(&bytes[..head_end])),
+        to_lines(&String::from_utf8_lossy(&bytes[tail_from..])),
+    )
+}
+
+/// max_depth 限制递归深度：Claude 会话文件直接在项目目录下（更深处的 subagents/workflows
+/// 目录是支线副本，不能当会话列出）；Codex 有 YYYY/MM/DD 分层，需要多几层
+fn collect_files(dir: &Path, max_depth: usize, out: &mut Vec<PathBuf>) {
+    if max_depth == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_files(&p, max_depth - 1, out);
+        } else {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if name.ends_with(".jsonl") || name.ends_with(".jsonl.zst") {
+                out.push(p);
+            }
+        }
+    }
+}
+
+// ===== Claude Code =====
+
+/// 从 user 行提取标题候选；命令输出/meta 样式（XML 标签开头）不算
+fn claude_user_title(v: &Value) -> Option<String> {
+    let content = v.get("message")?.get("content")?;
+    let text = match content {
+        Value::String(s) => s.clone(),
+        Value::Array(arr) => arr.iter().find_map(|b| {
+            if get_str(b, "type") == Some("text") {
+                get_str(b, "text").map(String::from)
+            } else {
+                None
+            }
+        })?,
+        _ => return None,
+    };
+    let t = text.trim();
+    if t.is_empty() || t.starts_with('<') {
+        None
+    } else {
+        Some(truncate_title(t))
+    }
+}
+
+fn claude_usage(u: &Value) -> TokenUsageDto {
+    let num = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    TokenUsageDto {
+        input: num("input_tokens"),
+        output: num("output_tokens"),
+        cache_read: num("cache_read_input_tokens"),
+        cache_write: num("cache_creation_input_tokens"),
+    }
+}
+
+fn claude_tool_result_text(b: &Value) -> String {
+    match b.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|p| get_str(p, "text"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => stringify_payload(other),
+    }
+}
+
+fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
+    let bytes = read_session_bytes(path)?;
+    let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
+    let (mut cwd, mut created, mut session_id, mut version) = (None, None, None, None);
+    let (mut title, mut ai_title) = (None, None);
+    for line in head.iter().chain(&tail) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if cwd.is_none() {
+            cwd = get_str(&v, "cwd").map(String::from);
+        }
+        if created.is_none() {
+            created = get_str(&v, "timestamp").map(String::from);
+        }
+        if session_id.is_none() {
+            session_id = get_str(&v, "sessionId").map(String::from);
+        }
+        if version.is_none() {
+            version = get_str(&v, "version").map(String::from);
+        }
+        if get_str(&v, "type") == Some("ai-title") {
+            if let Some(t) = get_str(&v, "aiTitle") {
+                ai_title = Some(truncate_title(t)); // 尾部后出现的覆盖先出现的
+            }
+        }
+        if title.is_none()
+            && get_str(&v, "type") == Some("user")
+            && v.get("isSidechain").and_then(|x| x.as_bool()) != Some(true)
+            && v.get("isMeta").and_then(|x| x.as_bool()) != Some(true)
+        {
+            title = claude_user_title(&v);
+        }
+    }
+    // 目录名是 sanitize 后的项目路径（有损），不解码；读不到 cwd 时原样兜底
+    let project_path = cwd.unwrap_or_else(|| {
+        path.parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    let session_id = session_id
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    Some(SessionMetaDto {
+        agent: "claude-code".into(),
+        session_id,
+        project_path,
+        title: ai_title.or(title),
+        created_at: created,
+        updated_at: mtime_iso(path),
+        file_path: path.to_string_lossy().into_owned(),
+        token_usage: None, // Claude 的用量分散在每行，全量统计留给 P3
+        cli_version: version,
+        pinned: false,
+        archived: false,
+        custom_title: None,
+        tags: Vec::new(),
+        alive,
+        chain_count: 1,
+    })
+}
+
+fn parse_claude(lines: &[String]) -> Vec<ChatMessageDto> {
+    let mut msgs = Vec::new();
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue; // 末行截断等坏行直接跳过
+        };
+        if v.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
+            continue; // 子 agent 支线消息不进主对话
+        }
+        if v.get("isMeta").and_then(|x| x.as_bool()) == Some(true) {
+            continue;
+        }
+        let ts = get_str(&v, "timestamp").map(String::from);
+        match get_str(&v, "type") {
+            Some("user") => {
+                let Some(content) = v.get("message").and_then(|m| m.get("content")) else {
+                    continue;
+                };
+                match content {
+                    Value::String(s) => {
+                        if !s.trim().is_empty() {
+                            msgs.push(ChatMessageDto {
+                                role: "user".into(),
+                                blocks: vec![text_block(s.clone())],
+                                timestamp: ts,
+                                usage: None,
+                            });
+                        }
+                    }
+                    Value::Array(arr) => {
+                        let mut blocks = Vec::new();
+                        for b in arr {
+                            match get_str(b, "type") {
+                                Some("text") => {
+                                    if let Some(t) = get_str(b, "text") {
+                                        blocks.push(text_block(t.to_string()));
+                                    }
+                                }
+                                Some("tool_result") => blocks.push(BlockDto {
+                                    kind: "tool_result".into(),
+                                    text: claude_tool_result_text(b),
+                                    tool_name: None,
+                                }),
+                                _ => {}
+                            }
+                        }
+                        if blocks.is_empty() {
+                            continue;
+                        }
+                        if blocks.iter().all(|b| b.kind == "tool_result") {
+                            push_tool_result(&mut msgs, blocks, ts);
+                        } else {
+                            msgs.push(ChatMessageDto {
+                                role: "user".into(),
+                                blocks,
+                                timestamp: ts,
+                                usage: None,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("assistant") => {
+                let Some(msg) = v.get("message") else {
+                    continue;
+                };
+                let mut blocks = Vec::new();
+                if let Some(arr) = msg.get("content").and_then(|c| c.as_array()) {
+                    for b in arr {
+                        match get_str(b, "type") {
+                            Some("text") => {
+                                if let Some(t) = get_str(b, "text") {
+                                    blocks.push(text_block(t.to_string()));
+                                }
+                            }
+                            Some("thinking") => {
+                                if let Some(t) = get_str(b, "thinking") {
+                                    blocks.push(BlockDto {
+                                        kind: "thinking".into(),
+                                        text: t.to_string(),
+                                        tool_name: None,
+                                    });
+                                }
+                            }
+                            Some("tool_use") => blocks.push(BlockDto {
+                                kind: "tool_use".into(),
+                                text: b.get("input").map(|i| i.to_string()).unwrap_or_default(),
+                                tool_name: get_str(b, "name").map(String::from),
+                            }),
+                            _ => {}
+                        }
+                    }
+                }
+                if blocks.is_empty() {
+                    continue;
+                }
+                msgs.push(ChatMessageDto {
+                    role: "assistant".into(),
+                    blocks,
+                    timestamp: ts,
+                    usage: msg.get("usage").map(claude_usage),
+                });
+            }
+            _ => {} // summary / ai-title / file-history-snapshot 等非对话类型
+        }
+    }
+    msgs
+}
+
+// ===== Codex CLI =====
+
+fn codex_message_text(p: &Value) -> Option<String> {
+    if get_str(p, "type") != Some("message") {
+        return None;
+    }
+    let parts = p.get("content")?.as_array()?;
+    let text = parts
+        .iter()
+        .filter_map(|c| match get_str(c, "type") {
+            Some("input_text") | Some("output_text") => get_str(c, "text"),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn codex_token_usage(v: &Value) -> Option<TokenUsageDto> {
+    if get_str(v, "type") != Some("event_msg") {
+        return None;
+    }
+    let p = v.get("payload")?;
+    if get_str(p, "type") != Some("token_count") {
+        return None;
+    }
+    let t = p.get("info")?.get("total_token_usage")?;
+    let num = |k: &str| t.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    Some(TokenUsageDto {
+        input: num("input_tokens"),
+        // reasoning token 计入输出侧，与计费口径一致
+        output: num("output_tokens") + num("reasoning_output_tokens"),
+        cache_read: num("cached_input_tokens"),
+        cache_write: num("cache_write_input_tokens"),
+    })
+}
+
+/// 返回值附带 forked_from_id（resume/fork 链的父线程 id，可能不存在），供扫描时合并链
+fn codex_file_meta(
+    path: &Path,
+    alive: bool,
+    archived: bool,
+) -> Option<(SessionMetaDto, Option<String>)> {
+    let bytes = read_session_bytes(path)?;
+    // Codex 开头的 user_instructions 块可能很大，头部放宽到 256KB 才更常拿到真实首条提问
+    let (head, tail) = head_tail_lines(&bytes, 256 * 1024);
+    let (mut cwd, mut created, mut session_id, mut version, mut title) =
+        (None, None, None, None, None);
+    let mut forked_from_id = None;
+    for line in &head {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if created.is_none() {
+            created = get_str(&v, "timestamp").map(String::from);
+        }
+        if get_str(&v, "type") == Some("session_meta") {
+            if let Some(p) = v.get("payload") {
+                cwd = get_str(p, "cwd").map(String::from);
+                session_id = get_str(p, "id")
+                    .or_else(|| get_str(p, "session_id"))
+                    .map(String::from);
+                version = get_str(p, "cli_version").map(String::from);
+                forked_from_id = get_str(p, "forked_from_id").map(String::from);
+                if let Some(t) = get_str(p, "timestamp") {
+                    created = Some(t.to_string());
+                }
+            }
+        }
+        if title.is_none() && get_str(&v, "type") == Some("response_item") {
+            if let Some(p) = v.get("payload") {
+                if get_str(p, "role") == Some("user") {
+                    if let Some(t) = codex_message_text(p) {
+                        let t = t.trim();
+                        // 跳过注入的指令块和粘贴的导出历史，取第一条真实提问作标题
+                        if !t.starts_with('<')
+                            && !t.starts_with("# AGENTS.md")
+                            && !t.starts_with("The following is the ")
+                        {
+                            title = Some(truncate_title(t));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 小文件全在头部、tail 为空，此时从头部找最后一条 token_count
+    let tail_src = if tail.is_empty() { &head } else { &tail };
+    let token_usage = tail_src.iter().rev().find_map(|line| {
+        serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|v| codex_token_usage(&v))
+    });
+    let session_id = session_id
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    Some((
+        SessionMetaDto {
+            agent: "codex".into(),
+            session_id,
+            project_path: cwd.unwrap_or_default(),
+            title,
+            created_at: created,
+            updated_at: mtime_iso(path),
+            file_path: path.to_string_lossy().into_owned(),
+            token_usage,
+            cli_version: version,
+            pinned: false,
+            archived,
+            custom_title: None,
+            tags: Vec::new(),
+            alive,
+            chain_count: 1,
+        },
+        forked_from_id,
+    ))
+}
+
+fn parse_codex(lines: &[String]) -> Vec<ChatMessageDto> {
+    let mut msgs = Vec::new();
+    let mut legacy = Vec::new();
+    let mut has_response_message = false;
+    let mut last_usage = None;
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let ts = get_str(&v, "timestamp").map(String::from);
+        match get_str(&v, "type") {
+            Some("response_item") => {
+                let Some(p) = v.get("payload") else {
+                    continue;
+                };
+                match get_str(p, "type") {
+                    Some("message") => {
+                        let role = get_str(p, "role").unwrap_or("");
+                        if role != "user" && role != "assistant" {
+                            continue; // developer/system 指令不进对话视图
+                        }
+                        if let Some(text) = codex_message_text(p) {
+                            has_response_message = true;
+                            msgs.push(ChatMessageDto {
+                                role: role.into(),
+                                blocks: vec![text_block(text)],
+                                timestamp: ts,
+                                usage: None,
+                            });
+                        }
+                    }
+                    Some("function_call") | Some("custom_tool_call") => msgs.push(ChatMessageDto {
+                        role: "assistant".into(),
+                        blocks: vec![BlockDto {
+                            kind: "tool_use".into(),
+                            text: get_str(p, "arguments")
+                                .or_else(|| get_str(p, "input"))
+                                .unwrap_or("")
+                                .to_string(),
+                            tool_name: get_str(p, "name").map(String::from),
+                        }],
+                        timestamp: ts,
+                        usage: None,
+                    }),
+                    Some("function_call_output") | Some("custom_tool_call_output") => {
+                        let text = stringify_payload(p.get("output"));
+                        push_tool_result(
+                            &mut msgs,
+                            vec![BlockDto {
+                                kind: "tool_result".into(),
+                                text,
+                                tool_name: None,
+                            }],
+                            ts,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Some("event_msg") => {
+                let Some(p) = v.get("payload") else {
+                    continue;
+                };
+                match get_str(p, "type") {
+                    // 旧格式兜底：新文件里它与 response_item 重复，只在没有 response_item 消息时采用
+                    Some("user_message") | Some("agent_message") => {
+                        if let Some(t) = get_str(p, "message") {
+                            let role = if get_str(p, "type") == Some("user_message") {
+                                "user"
+                            } else {
+                                "assistant"
+                            };
+                            legacy.push(ChatMessageDto {
+                                role: role.into(),
+                                blocks: vec![text_block(t.to_string())],
+                                timestamp: ts,
+                                usage: None,
+                            });
+                        }
+                    }
+                    Some("token_count") => {
+                        if let Some(u) = codex_token_usage(&v) {
+                            last_usage = Some(u);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut msgs = if has_response_message { msgs } else { legacy };
+    // token_count 的总量挂在最后一条 assistant 消息上，代表整场用量
+    if let Some(u) = last_usage {
+        if let Some(m) = msgs.iter_mut().rev().find(|m| m.role == "assistant") {
+            if m.usage.is_none() {
+                m.usage = Some(u);
+            }
+        }
+    }
+    msgs
+}
+
+// ===== Gemini CLI =====
+
+/// slug → 项目绝对路径映射。绝不自己推导 slug：
+/// 优先 ~/.gemini/projects.json（{"projects": {"<abs path>": "<slug>"}}）反向，
+/// 再以各 slug 目录里的 .project_root 标记文件兜底
+fn gemini_slug_map(tmp_root: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Some(cfg) = tmp_root.parent() {
+        if let Ok(text) = fs::read_to_string(cfg.join("projects.json")) {
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                if let Some(projects) = v.get("projects").and_then(|p| p.as_object()) {
+                    for (path, slug) in projects {
+                        if let Some(slug) = slug.as_str() {
+                            map.insert(slug.to_string(), path.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir(tmp_root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let Some(slug) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if map.contains_key(&slug) {
+                continue;
+            }
+            if let Ok(root) = fs::read_to_string(p.join(".project_root")) {
+                let root = root.trim().to_string();
+                if !root.is_empty() {
+                    map.insert(slug, root);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// content 可能是字符串或 parts 数组（[{text}]）
+fn gemini_content_text(c: &Value) -> Option<String> {
+    let text = match c {
+        Value::String(s) => s.clone(),
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|p| get_str(p, "text"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn gemini_usage(t: &Value) -> TokenUsageDto {
+    let num = |k: &str| t.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    TokenUsageDto {
+        input: num("input"),
+        output: num("output"),
+        cache_read: num("cached"),
+        cache_write: 0, // gemini 的 tokens 没有写缓存概念
+    }
+}
+
+/// 列表标题候选：空白或 XML 标签开头（注入内容）的不算
+fn title_from_text(text: &str) -> Option<String> {
+    let t = text.trim();
+    if t.is_empty() || t.starts_with('<') {
+        None
+    } else {
+        Some(truncate_title(t))
+    }
+}
+
+fn gemini_file_meta(
+    path: &Path,
+    alive: bool,
+    slug_to_path: &HashMap<String, String>,
+) -> Option<SessionMetaDto> {
+    let bytes = read_session_bytes(path)?;
+    let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
+    let (mut session_id, mut created, mut title, mut summary, mut directories) =
+        (None, None, None, None, None);
+    for line in head.iter().chain(&tail) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        // $set 控制记录：补丁元数据，summary 可作标题（后出现覆盖先出现）
+        if let Some(set) = v.get("$set") {
+            if let Some(s) = get_str(set, "summary") {
+                summary = Some(truncate_title(s));
+            }
+            continue;
+        }
+        // 首行 metadata（无 type 字段）
+        if v.get("type").is_none() {
+            if session_id.is_none() {
+                session_id = get_str(&v, "sessionId").map(String::from);
+            }
+            if created.is_none() {
+                created = get_str(&v, "startTime").map(String::from);
+            }
+            if directories.is_none() {
+                directories = v
+                    .get("directories")
+                    .and_then(|d| d.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|x| x.as_str())
+                    .map(String::from);
+            }
+            if summary.is_none() {
+                summary = get_str(&v, "summary").map(truncate_title);
+            }
+            continue;
+        }
+        if title.is_none() && get_str(&v, "type") == Some("user") {
+            if let Some(t) = v.get("content").and_then(gemini_content_text) {
+                title = title_from_text(&t);
+            }
+        }
+    }
+    let tail_src = if tail.is_empty() { &head } else { &tail };
+    let token_usage = tail_src.iter().rev().find_map(|line| {
+        let v = serde_json::from_str::<Value>(line).ok()?;
+        if get_str(&v, "type") == Some("gemini") {
+            v.get("tokens").map(gemini_usage)
+        } else {
+            None
+        }
+    });
+    // 项目归属：slug 映射 → metadata.directories，都拿不到就跳过该会话（不猜 slug）
+    let slug = path.parent()?.parent()?.file_name()?.to_string_lossy().into_owned();
+    let project_path = slug_to_path.get(&slug).cloned().or(directories)?;
+    let session_id = session_id
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    Some(SessionMetaDto {
+        agent: "gemini".into(),
+        session_id,
+        project_path,
+        title: summary.or(title),
+        created_at: created,
+        updated_at: mtime_iso(path),
+        file_path: path.to_string_lossy().into_owned(),
+        token_usage,
+        cli_version: None,
+        pinned: false,
+        archived: false,
+        custom_title: None,
+        tags: Vec::new(),
+        alive,
+        chain_count: 1,
+    })
+}
+
+fn parse_gemini(lines: &[String]) -> Vec<ChatMessageDto> {
+    let mut msgs: Vec<ChatMessageDto> = Vec::new();
+    let mut ids: Vec<Option<String>> = Vec::new(); // 与 msgs 平行，供 $rewindTo 定位
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        // $rewindTo 控制记录：删除该消息 id 起的全部消息
+        if let Some(rewind) = get_str(&v, "$rewindTo") {
+            if let Some(pos) = ids.iter().position(|id| id.as_deref() == Some(rewind)) {
+                msgs.truncate(pos);
+                ids.truncate(pos);
+            }
+            continue;
+        }
+        if v.get("$set").is_some() {
+            continue;
+        }
+        let ts = get_str(&v, "timestamp").map(String::from);
+        let id = get_str(&v, "id").map(String::from);
+        match get_str(&v, "type") {
+            Some("user") => {
+                if let Some(text) = v.get("content").and_then(gemini_content_text) {
+                    msgs.push(ChatMessageDto {
+                        role: "user".into(),
+                        blocks: vec![text_block(text)],
+                        timestamp: ts,
+                        usage: None,
+                    });
+                    ids.push(id);
+                }
+            }
+            Some("gemini") => {
+                let mut blocks = Vec::new();
+                if let Some(text) = v.get("content").and_then(gemini_content_text) {
+                    blocks.push(text_block(text));
+                }
+                if let Some(calls) = v.get("toolCalls").and_then(|t| t.as_array()) {
+                    for c in calls {
+                        blocks.push(BlockDto {
+                            kind: "tool_use".into(),
+                            text: c.get("args").map(|a| a.to_string()).unwrap_or_default(),
+                            tool_name: get_str(c, "name").map(String::from),
+                        });
+                        if let Some(result) = c.get("result") {
+                            blocks.push(BlockDto {
+                                kind: "tool_result".into(),
+                                text: stringify_payload(Some(result)),
+                                tool_name: None,
+                            });
+                        }
+                    }
+                }
+                if blocks.is_empty() {
+                    continue;
+                }
+                msgs.push(ChatMessageDto {
+                    role: "assistant".into(),
+                    blocks,
+                    timestamp: ts,
+                    usage: v.get("tokens").map(gemini_usage),
+                });
+                ids.push(id);
+            }
+            _ => {} // metadata / info / error / warning 不进对话视图
+        }
+    }
+    msgs
+}
+
+// ===== Qwen Code =====
+
+fn qwen_usage(u: &Value) -> TokenUsageDto {
+    let num = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    TokenUsageDto {
+        input: num("promptTokenCount"),
+        output: num("candidatesTokenCount"),
+        cache_read: num("cachedContentTokenCount"),
+        cache_write: 0,
+    }
+}
+
+/// genai Content {role, parts[]} → 块列表；thought 部分映射为 thinking
+fn qwen_parts_blocks(msg: &Value) -> Vec<BlockDto> {
+    let mut blocks = Vec::new();
+    let Some(parts) = msg.get("parts").and_then(|p| p.as_array()) else {
+        return blocks;
+    };
+    for p in parts {
+        if let Some(fc) = p.get("functionCall") {
+            blocks.push(BlockDto {
+                kind: "tool_use".into(),
+                text: fc.get("args").map(|a| a.to_string()).unwrap_or_default(),
+                tool_name: get_str(fc, "name").map(String::from),
+            });
+        } else if let Some(fr) = p.get("functionResponse") {
+            let text = stringify_payload(fr.get("response"));
+            blocks.push(BlockDto {
+                kind: "tool_result".into(),
+                text: if text.is_empty() { fr.to_string() } else { text },
+                tool_name: None,
+            });
+        } else if let Some(t) = get_str(p, "text") {
+            let kind = if p.get("thought").and_then(|x| x.as_bool()) == Some(true) {
+                "thinking"
+            } else {
+                "text"
+            };
+            blocks.push(BlockDto {
+                kind: kind.into(),
+                text: t.to_string(),
+                tool_name: None,
+            });
+        }
+    }
+    blocks
+}
+
+fn qwen_content_text(msg: &Value) -> Option<String> {
+    let parts = msg.get("parts")?.as_array()?;
+    let text = parts
+        .iter()
+        .filter(|p| p.get("thought").and_then(|x| x.as_bool()) != Some(true))
+        .filter_map(|p| get_str(p, "text"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMetaDto> {
+    let bytes = read_session_bytes(path)?;
+    let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
+    let (mut cwd, mut created, mut session_id, mut version, mut title, mut custom_title) =
+        (None, None, None, None, None, None);
+    for line in head.iter().chain(&tail) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
+            continue;
+        }
+        if cwd.is_none() {
+            cwd = get_str(&v, "cwd").map(String::from);
+        }
+        if created.is_none() {
+            created = get_str(&v, "timestamp").map(String::from);
+        }
+        if session_id.is_none() {
+            session_id = get_str(&v, "sessionId").map(String::from);
+        }
+        if version.is_none() {
+            version = get_str(&v, "version").map(String::from);
+        }
+        // system 记录只关心 custom_title（目录名会碰撞，标题以它为准）
+        if get_str(&v, "type") == Some("system") && get_str(&v, "subtype") == Some("custom_title")
+        {
+            if let Some(t) = v.get("systemPayload").and_then(|p| get_str(p, "customTitle")) {
+                custom_title = Some(truncate_title(t));
+            }
+        }
+        if title.is_none() && get_str(&v, "type") == Some("user") {
+            if let Some(t) = v.get("message").and_then(qwen_content_text) {
+                title = title_from_text(&t);
+            }
+        }
+    }
+    let tail_src = if tail.is_empty() { &head } else { &tail };
+    let token_usage = tail_src.iter().rev().find_map(|line| {
+        serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|v| v.get("usageMetadata").map(qwen_usage))
+    });
+    let session_id = session_id
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    Some(SessionMetaDto {
+        agent: "qwen".into(),
+        session_id,
+        project_path: cwd.unwrap_or_default(),
+        title: custom_title.or(title),
+        created_at: created,
+        updated_at: mtime_iso(path),
+        file_path: path.to_string_lossy().into_owned(),
+        token_usage,
+        cli_version: version,
+        pinned: false,
+        archived,
+        custom_title: None,
+        tags: Vec::new(),
+        alive,
+        chain_count: 1,
+    })
+}
+
+fn parse_qwen(lines: &[String]) -> Vec<ChatMessageDto> {
+    let mut msgs = Vec::new();
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
+            continue;
+        }
+        let ts = get_str(&v, "timestamp").map(String::from);
+        match get_str(&v, "type") {
+            Some(role @ ("user" | "assistant")) => {
+                let Some(msg) = v.get("message") else {
+                    continue;
+                };
+                let blocks = qwen_parts_blocks(msg);
+                if blocks.is_empty() {
+                    continue;
+                }
+                msgs.push(ChatMessageDto {
+                    role: role.into(),
+                    blocks,
+                    timestamp: ts,
+                    usage: v.get("usageMetadata").map(qwen_usage),
+                });
+            }
+            // 独立 tool_result 记录并入上一条 assistant（视觉跟随调用）
+            Some("tool_result") => {
+                let blocks: Vec<BlockDto> = v
+                    .get("message")
+                    .map(qwen_parts_blocks)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|b| b.kind == "tool_result")
+                    .collect();
+                if !blocks.is_empty() {
+                    push_tool_result(&mut msgs, blocks, ts);
+                }
+            }
+            _ => {} // system 等记录不进对话（custom_title 只用于列表标题）
+        }
+    }
+    msgs
+}
+
+// ===== 扫描 =====
+
+pub fn scan_sessions() -> Vec<SessionMetaDto> {
+    let mut out = Vec::new();
+    // Gemini 的 slug → 项目路径映射在扫描与快照补全时都要用
+    let gemini_map = dirs::home_dir()
+        .map(|h| gemini_slug_map(&h.join(".gemini").join("tmp")))
+        .unwrap_or_default();
+    if let Some(home) = dirs::home_dir() {
+        let mut claude_files = Vec::new();
+        collect_files(&home.join(".claude").join("projects"), 2, &mut claude_files);
+        for f in claude_files {
+            if let Some(m) = claude_file_meta(&f, true) {
+                out.push(m);
+            }
+        }
+        // archived_sessions 里的文件是 alive 的归档，不是「已失效」
+        let mut codex_metas = Vec::new();
+        let mut active_files = Vec::new();
+        collect_files(&home.join(".codex").join("sessions"), 5, &mut active_files);
+        for f in active_files {
+            if let Some(pair) = codex_file_meta(&f, true, false) {
+                codex_metas.push(pair);
+            }
+        }
+        let mut archived_files = Vec::new();
+        collect_files(&home.join(".codex").join("archived_sessions"), 5, &mut archived_files);
+        for f in archived_files {
+            if let Some(pair) = codex_file_meta(&f, true, true) {
+                codex_metas.push(pair);
+            }
+        }
+        out.extend(merge_codex_chains(codex_metas));
+        // Gemini：深度 3 恰好到 chats/*.jsonl，chats/<parentId>/ 下的子 agent 会话被排除；
+        // 旧版单 JSON .json 文件不匹配 .jsonl 后缀，自然跳过（如需兼容再单开解析器）
+        let mut gemini_files = Vec::new();
+        collect_files(&home.join(".gemini").join("tmp"), 3, &mut gemini_files);
+        for f in gemini_files {
+            if let Some(m) = gemini_file_meta(&f, true, &gemini_map) {
+                out.push(m);
+            }
+        }
+        // Qwen：深度 4 覆盖 chats/archive/；archive 目录下的是归档（alive 但 archived）
+        let mut qwen_files = Vec::new();
+        collect_files(&home.join(".qwen").join("projects"), 4, &mut qwen_files);
+        for f in qwen_files {
+            let archived = f
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == "archive");
+            if let Some(m) = qwen_file_meta(&f, true, archived) {
+                out.push(m);
+            }
+        }
+    }
+    // pin 即保留：源文件已消失的会话从快照补齐（§6.5）
+    let seen: HashSet<(String, String)> = out
+        .iter()
+        .map(|m| (m.agent.clone(), m.session_id.clone()))
+        .collect();
+    if let Some(dir) = snapshots_root() {
+        for agent in ["claude-code", "codex", "gemini", "qwen"] {
+            let mut files = Vec::new();
+            collect_files(&dir.join(agent), 1, &mut files);
+            for f in files {
+                let stem = snapshot_stem(&f);
+                if seen.contains(&(agent.to_string(), stem.clone())) {
+                    continue; // 源文件还在，快照不重复列出
+                }
+                let meta = match agent {
+                    "codex" => codex_file_meta(&f, false, false).map(|(m, _)| m),
+                    "gemini" => gemini_file_meta(&f, false, &gemini_map),
+                    "qwen" => qwen_file_meta(&f, false, false),
+                    _ => claude_file_meta(&f, false),
+                };
+                if let Some(mut m) = meta {
+                    m.session_id = stem; // 快照文件名即 pin 时的 session_id
+                    m.alive = false;
+                    out.push(m);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Codex resume/fork 会产生新 rollout 文件（session_meta.forked_from_id 指向父线程），
+/// 新文件已拷入完整历史——同一条链只保留 updated_at 最新的文件作为代表条目。
+/// 用并查集按「线程 id ↔ forked_from_id」分组；父线程文件已被清理时链仍然成立。
+fn merge_codex_chains(metas: Vec<(SessionMetaDto, Option<String>)>) -> Vec<SessionMetaDto> {
+    fn find(parent: &mut HashMap<String, String>, x: &str) -> String {
+        let mut root = x.to_string();
+        while let Some(p) = parent.get(&root) {
+            if *p == root {
+                break;
+            }
+            root = p.clone();
+        }
+        let mut cur = x.to_string();
+        while let Some(p) = parent.get(&cur).cloned() {
+            if p == cur || p == root {
+                break;
+            }
+            parent.insert(cur.clone(), root.clone());
+            cur = p;
+        }
+        root
+    }
+    let mut parent: HashMap<String, String> = HashMap::new();
+    for (m, fork) in &metas {
+        parent.entry(m.session_id.clone()).or_insert_with(|| m.session_id.clone());
+        if let Some(f) = fork {
+            parent.entry(f.clone()).or_insert_with(|| f.clone());
+            let ra = find(&mut parent, &m.session_id);
+            let rb = find(&mut parent, f);
+            if ra != rb {
+                parent.insert(ra, rb);
+            }
+        }
+    }
+    let mut groups: HashMap<String, Vec<SessionMetaDto>> = HashMap::new();
+    for (m, _) in metas {
+        let root = find(&mut parent, &m.session_id);
+        groups.entry(root).or_default().push(m);
+    }
+    groups
+        .into_values()
+        .map(|mut g| {
+            g.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            let n = g.len();
+            let mut rep = g.into_iter().next().unwrap_or_else(|| unreachable!());
+            rep.chain_count = n;
+            rep
+        })
+        .collect()
+}
+
+fn snapshot_stem(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name.strip_suffix(".jsonl.zst")
+        .or_else(|| name.strip_suffix(".jsonl"))
+        .unwrap_or(&name)
+        .to_string()
+}
+
+// ===== 快照与 app.db =====
+
+fn snapshots_root() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("ccode").join("snapshots"))
+}
+
+/// session_id/agent 来自前端参数，进路径前收敛字符集，防目录穿越
+fn sanitize_id(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn snapshot_path(agent: &str, session_id: &str, zst: bool) -> Option<PathBuf> {
+    let name = format!(
+        "{}.jsonl{}",
+        sanitize_id(session_id),
+        if zst { ".zst" } else { "" }
+    );
+    Some(snapshots_root()?.join(sanitize_id(agent)).join(name))
+}
+
+/// 源文件消失时找快照：Claude 文件名即 session_id；Codex 是 rollout-<时间>-<uuid>，取尾部 uuid
+fn find_snapshot(agent: &str, source: &Path) -> Option<PathBuf> {
+    let stem = source.file_stem()?.to_string_lossy().into_owned();
+    let mut stems = vec![stem.clone()];
+    if stem.len() > 36 {
+        if let Some(tail) = stem.get(stem.len() - 36..) {
+            if tail.chars().filter(|c| *c == '-').count() == 4 {
+                stems.push(tail.to_string());
+            }
+        }
+    }
+    for s in stems {
+        for zst in [false, true] {
+            if let Some(p) = snapshot_path(agent, &s, zst) {
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn open_db() -> Result<Connection, String> {
+    let dir = dirs::config_dir()
+        .ok_or("无法确定平台配置目录")?
+        .join("ccode");
+    fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    let conn = Connection::open(dir.join("app.db")).map_err(|e| format!("打开 app.db 失败: {e}"))?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_meta(
+          agent TEXT NOT NULL, session_id TEXT NOT NULL,
+          pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+          custom_title TEXT, tags TEXT NOT NULL DEFAULT '[]',
+          note TEXT, pinned_at TEXT,
+          PRIMARY KEY(agent, session_id));",
+    )
+    .map_err(|e| format!("初始化 session_meta 表失败: {e}"))?;
+    Ok(conn)
+}
+
+struct MetaRow {
+    pinned: bool,
+    archived: bool,
+    custom_title: Option<String>,
+    tags: Vec<String>,
+}
+
+fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
+    let mut map = HashMap::new();
+    let Ok(mut stmt) = conn
+        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags FROM session_meta")
+    else {
+        return map;
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, String>(5)?,
+        ))
+    });
+    if let Ok(rows) = rows {
+        for (agent, sid, pinned, archived, custom_title, tags) in rows.flatten() {
+            map.insert(
+                (agent, sid),
+                MetaRow {
+                    pinned: pinned != 0,
+                    archived: archived != 0,
+                    custom_title,
+                    tags: serde_json::from_str(&tags).unwrap_or_default(),
+                },
+            );
+        }
+    }
+    map
+}
+
+// ===== Tauri commands =====
+
+#[tauri::command]
+pub fn list_sessions() -> Vec<SessionMetaDto> {
+    let mut sessions = scan_sessions();
+    if let Ok(conn) = open_db() {
+        let meta = read_all_meta(&conn);
+        for s in &mut sessions {
+            if let Some(row) = meta.get(&(s.agent.clone(), s.session_id.clone())) {
+                s.pinned = row.pinned;
+                // 扫描侧已标归档的（Codex archived_sessions 目录）不能被 db 行覆盖掉
+                s.archived = s.archived || row.archived;
+                s.custom_title = row.custom_title.clone();
+                s.tags = row.tags.clone();
+            }
+        }
+    }
+    // 最近活跃在前；ISO 字符串可直接字典序比较
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions
+}
+
+/// 终端联动兜底（architecture §6.7）：无 --session-id 的 agent，
+/// 按 (agent, 项目目录, 启动时间) 找最新会话；updated_at 为 ISO 字符串可字典序比较
+#[tauri::command]
+pub fn find_session_for(agent: String, cwd: String, since_iso: String) -> Option<SessionMetaDto> {
+    let cwd = expand_tilde(&cwd);
+    scan_sessions()
+        .into_iter()
+        .filter(|s| s.agent == agent && s.project_path == cwd)
+        .filter(|s| s.updated_at.as_deref().unwrap_or("") >= since_iso.as_str())
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+}
+
+#[tauri::command]
+pub fn get_session_conversation(agent: String, file_path: String) -> Vec<ChatMessageDto> {
+    let path = PathBuf::from(&file_path);
+    let bytes = read_session_bytes(&path)
+        .or_else(|| find_snapshot(&agent, &path).and_then(|p| read_session_bytes(&p)));
+    let Some(bytes) = bytes else {
+        return Vec::new();
+    };
+    let lines = to_lines(&String::from_utf8_lossy(&bytes));
+    match agent.as_str() {
+        "codex" => parse_codex(&lines),
+        "gemini" => parse_gemini(&lines),
+        "qwen" => parse_qwen(&lines),
+        _ => parse_claude(&lines),
+    }
+}
+
+#[tauri::command]
+pub fn pin_session(agent: String, session_id: String, file_path: String) -> Result<(), String> {
+    let src = PathBuf::from(&file_path);
+    if !src.exists() {
+        return Err("源会话文件已不存在，无法 pin".into());
+    }
+    let dst = snapshot_path(&agent, &session_id, file_path.ends_with(".zst"))
+        .ok_or("无法确定平台配置目录")?;
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建快照目录失败: {e}"))?;
+    }
+    fs::copy(&src, &dst).map_err(|e| format!("复制快照失败: {e}"))?;
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO session_meta(agent, session_id, pinned, pinned_at) VALUES(?1, ?2, 1, ?3)
+         ON CONFLICT(agent, session_id) DO UPDATE SET pinned=1, pinned_at=?3",
+        params![agent, session_id, now_iso()],
+    )
+    .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unpin_session(
+    agent: String,
+    session_id: String,
+    delete_snapshot: bool,
+) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "UPDATE session_meta SET pinned=0 WHERE agent=?1 AND session_id=?2",
+        params![agent, session_id],
+    )
+    .map_err(|e| format!("更新 session_meta 失败: {e}"))?;
+    if delete_snapshot {
+        for zst in [false, true] {
+            if let Some(p) = snapshot_path(&agent, &session_id, zst) {
+                if p.exists() {
+                    let _ = fs::remove_file(p);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_session_meta(
+    agent: String,
+    session_id: String,
+    custom_title: Option<String>,
+    tags: Vec<String>,
+    archived: bool,
+) -> Result<(), String> {
+    let conn = open_db()?;
+    let tags_json = serde_json::to_string(&tags).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO session_meta(agent, session_id, custom_title, tags, archived)
+         VALUES(?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent, session_id) DO UPDATE SET custom_title=?3, tags=?4, archived=?5",
+        params![agent, session_id, custom_title, tags_json, archived],
+    )
+    .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    // ===== Claude 解析 =====
+
+    #[test]
+    fn claude_parse_user_assistant_tool_flow() {
+        let lines = s(&[
+            r#"{"type":"summary","summary":"忽略我"}"#,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-stdout>x</local-command-stdout>"}}"#,
+            r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":"支线"}}"#,
+            r#"{"type":"user","cwd":"/tmp/proj","sessionId":"s1","version":"1.0.0","message":{"role":"user","content":"帮我修 bug"},"timestamp":"2026-07-01T00:00:01Z"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"想想"},{"type":"text","text":"好的"},{"type":"tool_use","name":"Read","input":{"file_path":"/a"}}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}},"timestamp":"2026-07-01T00:00:02Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"file body"}]},"timestamp":"2026-07-01T00:00:03Z"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":"#, // 截断末行
+        ]);
+        let msgs = parse_claude(&lines);
+        assert_eq!(msgs.len(), 2, "summary/isMeta/sidechain/截断行都要跳过");
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].blocks[0].text, "帮我修 bug");
+        assert_eq!(msgs[0].timestamp.as_deref(), Some("2026-07-01T00:00:01Z"));
+        assert_eq!(msgs[1].role, "assistant");
+        // thinking + text + tool_use + 并入的 tool_result
+        assert_eq!(msgs[1].blocks.len(), 4);
+        assert_eq!(msgs[1].blocks[0].kind, "thinking");
+        assert_eq!(msgs[1].blocks[1].kind, "text");
+        assert_eq!(msgs[1].blocks[2].kind, "tool_use");
+        assert_eq!(msgs[1].blocks[2].tool_name.as_deref(), Some("Read"));
+        assert_eq!(msgs[1].blocks[3].kind, "tool_result");
+        assert_eq!(msgs[1].blocks[3].text, "file body");
+        let u = msgs[1].usage.as_ref().unwrap();
+        assert_eq!((u.input, u.output, u.cache_read, u.cache_write), (10, 5, 3, 2));
+    }
+
+    #[test]
+    fn claude_mixed_user_blocks_stay_user_message() {
+        let lines = s(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"out"},{"type":"text","text":"补充说明"}]}}"#,
+        ]);
+        let msgs = parse_claude(&lines);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].blocks.len(), 2);
+        assert_eq!(msgs[0].blocks[0].kind, "tool_result");
+    }
+
+    #[test]
+    fn claude_tool_result_without_prior_assistant_becomes_user() {
+        let lines = s(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"out"}]}}"#,
+        ]);
+        let msgs = parse_claude(&lines);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].blocks[0].kind, "tool_result");
+    }
+
+    #[test]
+    fn claude_meta_reads_cwd_title_and_ai_title_override() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("11111111-2222-3333-4444-555555555555.jsonl");
+        let content = concat!(
+            r#"{"type":"user","cwd":"/tmp/proj","sessionId":"sid-1","version":"1.2.3","timestamp":"2026-07-01T00:00:00Z","message":{"role":"user","content":"<command-name>/init</command-name>"}}"#,
+            "\n",
+            r#"{"type":"user","timestamp":"2026-07-01T00:01:00Z","message":{"role":"user","content":"真正的第一条消息"}}"#,
+            "\n",
+            r#"{"type":"ai-title","aiTitle":"AI 起的标题","sessionId":"sid-1"}"#,
+            "\n",
+        );
+        std::fs::write(&file, content).unwrap();
+        let m = claude_file_meta(&file, true).unwrap();
+        assert_eq!(m.project_path, "/tmp/proj");
+        assert_eq!(m.session_id, "sid-1");
+        assert_eq!(m.cli_version.as_deref(), Some("1.2.3"));
+        assert_eq!(m.created_at.as_deref(), Some("2026-07-01T00:00:00Z"));
+        assert_eq!(m.title.as_deref(), Some("AI 起的标题"), "ai-title 应覆盖首条用户消息");
+        assert!(m.updated_at.is_some());
+        assert!(m.alive);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn title_truncates_to_60_chars() {
+        let long = "啊".repeat(100);
+        let t = truncate_title(&long);
+        assert_eq!(t.chars().count(), 61); // 60 + 省略号
+    }
+
+    // ===== Codex 解析 =====
+
+    #[test]
+    fn codex_parse_messages_tools_and_usage() {
+        let lines = s(&[
+            r#"{"timestamp":"2026-07-20T00:00:00Z","type":"session_meta","payload":{"id":"019f-test","timestamp":"2026-07-20T00:00:00Z","cwd":"/tmp/proj","cli_version":"0.20.0"}}"#,
+            r#"{"timestamp":"2026-07-20T00:00:01Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"指令跳过"}]}}"#,
+            r#"{"timestamp":"2026-07-20T00:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi codex"}]}}"#,
+            r#"{"timestamp":"2026-07-20T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}"#,
+            r#"{"timestamp":"2026-07-20T00:00:04Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls\"}"}}"#,
+            r#"{"timestamp":"2026-07-20T00:00:05Z","type":"response_item","payload":{"type":"function_call_output","output":"total 0"}}"#,
+            r#"{"timestamp":"2026-07-20T00:00:06Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":20,"reasoning_output_tokens":5,"cached_input_tokens":10,"cache_write_input_tokens":0}}}}"#,
+        ]);
+        let msgs = parse_codex(&lines);
+        assert_eq!(msgs.len(), 3, "developer 消息跳过，tool_result 并入上一条");
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].blocks[0].text, "hi codex");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].blocks[0].text, "hello");
+        assert_eq!(msgs[2].role, "assistant");
+        assert_eq!(msgs[2].blocks[0].kind, "tool_use");
+        assert_eq!(msgs[2].blocks[0].tool_name.as_deref(), Some("shell"));
+        assert_eq!(msgs[2].blocks[1].kind, "tool_result");
+        assert_eq!(msgs[2].blocks[1].text, "total 0");
+        // 最后一条 token_count 的总量挂在最后一条 assistant 上；reasoning 计入 output
+        let u = msgs[2].usage.as_ref().unwrap();
+        assert_eq!((u.input, u.output, u.cache_read, u.cache_write), (100, 25, 10, 0));
+    }
+
+    #[test]
+    fn codex_legacy_event_msg_fallback() {
+        let lines = s(&[
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"老格式提问"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"agent_message","message":"老格式回答"}}"#,
+        ]);
+        let msgs = parse_codex(&lines);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[1].role, "assistant");
+    }
+
+    #[test]
+    fn codex_response_item_wins_over_legacy_dup() {
+        let lines = s(&[
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"重复的"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"新的"}]}}"#,
+        ]);
+        let msgs = parse_codex(&lines);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].blocks[0].text, "新的");
+    }
+
+    #[test]
+    fn codex_meta_reads_session_meta_and_tail_usage() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("rollout-2026-07-20T00-00-00-019f8039-8bed-7323-8c9d-853c1e7a9edf.jsonl");
+        let content = concat!(
+            r#"{"timestamp":"2026-07-20T00:00:00Z","type":"session_meta","payload":{"id":"019f8039-8bed-7323-8c9d-853c1e7a9edf","timestamp":"2026-07-20T00:00:00Z","cwd":"/tmp/proj","cli_version":"0.20.0"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-20T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"做点事"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-20T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":8,"cached_input_tokens":4,"cache_write_input_tokens":2}}}}"#,
+            "\n",
+        );
+        std::fs::write(&file, content).unwrap();
+        let (m, fork) = codex_file_meta(&file, true, false).unwrap();
+        assert_eq!(m.project_path, "/tmp/proj");
+        assert_eq!(m.session_id, "019f8039-8bed-7323-8c9d-853c1e7a9edf");
+        assert_eq!(m.cli_version.as_deref(), Some("0.20.0"));
+        assert_eq!(m.title.as_deref(), Some("做点事"));
+        assert_eq!(m.chain_count, 1);
+        assert!(!m.archived);
+        assert_eq!(fork, None);
+        let u = m.token_usage.unwrap();
+        assert_eq!((u.input, u.output, u.cache_read, u.cache_write), (50, 8, 4, 2));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn codex_archived_flag_comes_from_directory() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("rollout-x.jsonl");
+        std::fs::write(
+            &file,
+            r#"{"type":"session_meta","payload":{"id":"t1","cwd":"/tmp/p","forked_from_id":"t0"}}"#,
+        )
+        .unwrap();
+        let (m, fork) = codex_file_meta(&file, true, true).unwrap();
+        assert!(m.archived, "archived_sessions 目录扫描出的文件必须带 archived 标记");
+        assert!(m.alive, "归档不等于已失效");
+        assert_eq!(fork.as_deref(), Some("t0"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn codex_title_skips_pasted_history_blob() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("rollout-x.jsonl");
+        let content = concat!(
+            r#"{"type":"session_meta","payload":{"id":"t1","cwd":"/tmp/p"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"The following is the Codex agent history whose request actions..."}]}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"真正的提问"}]}}"#,
+            "\n",
+        );
+        std::fs::write(&file, content).unwrap();
+        let (m, _) = codex_file_meta(&file, true, false).unwrap();
+        assert_eq!(m.title.as_deref(), Some("真正的提问"), "粘贴的导出历史不能作标题");
+
+        let file2 = dir.join("rollout-y.jsonl");
+        let content2 = concat!(
+            r#"{"type":"session_meta","payload":{"id":"t2","cwd":"/tmp/p"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"The following is the Claude Code history..."}]}}"#,
+            "\n",
+        );
+        std::fs::write(&file2, content2).unwrap();
+        let (m2, _) = codex_file_meta(&file2, true, false).unwrap();
+        assert_eq!(m2.title, None, "全是粘贴历史时标题为空");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== Codex resume/fork 链合并 =====
+
+    fn codex_meta(id: &str, updated: &str, fork: Option<&str>) -> (SessionMetaDto, Option<String>) {
+        (
+            SessionMetaDto {
+                agent: "codex".into(),
+                session_id: id.into(),
+                project_path: "/tmp/p".into(),
+                title: None,
+                created_at: None,
+                updated_at: Some(updated.into()),
+                file_path: format!("/rollout-{id}.jsonl"),
+                token_usage: None,
+                cli_version: None,
+                pinned: false,
+                archived: false,
+                custom_title: None,
+                tags: Vec::new(),
+                alive: true,
+                chain_count: 1,
+            },
+            fork.map(String::from),
+        )
+    }
+
+    #[test]
+    fn codex_chain_merges_to_newest_representative() {
+        let metas = vec![
+            codex_meta("t1", "2026-07-01T00:00:00Z", None),
+            codex_meta("t2", "2026-07-02T00:00:00Z", Some("t1")),
+            codex_meta("t3", "2026-07-03T00:00:00Z", Some("t2")),
+            codex_meta("u1", "2026-07-01T12:00:00Z", None), // 无关会话不受影响
+        ];
+        let merged = merge_codex_chains(metas);
+        assert_eq!(merged.len(), 2);
+        let rep = merged.iter().find(|m| m.chain_count == 3).unwrap();
+        assert_eq!(rep.session_id, "t3", "代表是 updated_at 最新的文件");
+        assert_eq!(rep.file_path, "/rollout-t3.jsonl");
+        let single = merged.iter().find(|m| m.session_id == "u1").unwrap();
+        assert_eq!(single.chain_count, 1);
+    }
+
+    #[test]
+    fn codex_chain_survives_missing_parent_file() {
+        // 父线程文件已被清理：forked_from_id 指向不存在的线程，链内剩余文件仍合并
+        let metas = vec![
+            codex_meta("t2", "2026-07-02T00:00:00Z", Some("t1")),
+            codex_meta("t3", "2026-07-01T00:00:00Z", Some("t2")),
+        ];
+        let merged = merge_codex_chains(metas);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].chain_count, 2);
+        assert_eq!(merged[0].session_id, "t2");
+    }
+
+    // ===== zstd / 路径 / 时间 =====
+
+    #[test]
+    fn zstd_roundtrip_parses() {
+        let raw = b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello zst\"}}\n".to_vec();
+        let compressed = zstd::stream::encode_all(&raw[..], 3).unwrap();
+        assert!(compressed.starts_with(&ZSTD_MAGIC));
+        let bytes = maybe_decompress(&compressed);
+        let msgs = parse_claude(&to_lines(&String::from_utf8_lossy(&bytes)));
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].blocks[0].text, "hello zst");
+    }
+
+    #[test]
+    fn snapshot_path_sanitizes_and_keeps_zst() {
+        let p = snapshot_path("codex", "abc/def.json", true).unwrap();
+        assert!(p.ends_with("snapshots/codex/abc_def_json.jsonl.zst"));
+        let p2 = snapshot_path("claude-code", "sid-1", false).unwrap();
+        assert!(p2.ends_with("snapshots/claude-code/sid-1.jsonl"));
+    }
+
+    #[test]
+    fn iso_from_unix_formats_utc() {
+        assert_eq!(iso_from_unix(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_from_unix(1700000000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn head_tail_splits_large_files() {
+        let mut bytes = Vec::new();
+        for i in 0..1000 {
+            bytes.extend_from_slice(format!("{{\"n\":{i}}}\n").as_bytes());
+        }
+        let (head, tail) = head_tail_lines(&bytes, 1024);
+        assert!(head.len() < 1000 && !head.is_empty());
+        assert!(tail.len() < 1000 && !tail.is_empty());
+        assert!(head.iter().all(|l| serde_json::from_str::<Value>(l).is_ok()));
+        assert!(tail.iter().all(|l| serde_json::from_str::<Value>(l).is_ok()));
+    }
+
+    // ===== Gemini =====
+
+    #[test]
+    fn gemini_parse_rewind_truncates_and_tokens_map() {
+        let lines = s(&[
+            r#"{"sessionId":"g1","startTime":"2026-07-21T02:46:00Z","lastUpdated":"..."}"#,
+            r#"{"id":"m1","timestamp":"2026-07-21T02:46:01Z","type":"user","content":"第一问"}"#,
+            r#"{"id":"m2","timestamp":"2026-07-21T02:46:02Z","type":"gemini","content":"第一答","tokens":{"input":100,"output":20,"cached":10,"thoughts":5,"tool":0,"total":135},"model":"gemini-3"}"#,
+            r#"{"id":"m3","timestamp":"2026-07-21T02:46:03Z","type":"user","content":"第二问（被回滚）"}"#,
+            r#"{"$rewindTo":"m2"}"#,
+            r#"{"id":"m4","timestamp":"2026-07-21T02:46:04Z","type":"user","content":"改问这个"}"#,
+            r#"{"id":"m5","timestamp":"2026-07-21T02:46:05Z","type":"gemini","content":[{"text":"part1"},{"text":"part2"}],"toolCalls":[{"name":"read_file","args":{"path":"/a"},"result":"file body"}]}"#,
+            r#"{"id":"m6","timestamp":"2026-07-21T02:46:06Z","type":"info","content":"忽略"}"#,
+            r#"{"id":"m7","timestamp":"2026-07-21T02:46:07Z","type":"gemini","content":"截断"#, // 截断末行
+        ]);
+        let msgs = parse_gemini(&lines);
+        // m2 起的消息被 $rewindTo 删除，之后 m4/m5 正常接续
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].blocks[0].text, "第一问");
+        assert_eq!(msgs[1].blocks[0].text, "改问这个");
+        let g = &msgs[2];
+        assert_eq!(g.role, "assistant");
+        assert_eq!(g.blocks[0].text, "part1\npart2");
+        assert_eq!(g.blocks[1].kind, "tool_use");
+        assert_eq!(g.blocks[1].tool_name.as_deref(), Some("read_file"));
+        assert_eq!(g.blocks[2].kind, "tool_result");
+        assert_eq!(g.blocks[2].text, "file body");
+        // tokens 映射来自被回滚前 m2 之外——这里验证 m5 无 tokens 时 usage 为空，
+        // 另起一条只含 tokens 的场景验证映射
+        assert!(g.usage.is_none());
+        let with_tokens = parse_gemini(&s(&[
+            r#"{"id":"a","type":"gemini","content":"答","tokens":{"input":100,"output":20,"cached":10,"thoughts":5,"tool":0,"total":135}}"#,
+        ]));
+        let u = with_tokens[0].usage.as_ref().unwrap();
+        assert_eq!((u.input, u.output, u.cache_read, u.cache_write), (100, 20, 10, 0));
+    }
+
+    #[test]
+    fn gemini_slug_map_from_projects_json_and_marker() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let tmp = dir.join(".gemini").join("tmp");
+        std::fs::create_dir_all(tmp.join("slug-a")).unwrap();
+        std::fs::create_dir_all(tmp.join("slug-b")).unwrap();
+        std::fs::write(
+            dir.join(".gemini").join("projects.json"),
+            r#"{"projects":{"/abs/path/a":"slug-a"}}"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.join("slug-b").join(".project_root"), "/abs/path/b\n").unwrap();
+        let map = gemini_slug_map(&tmp);
+        assert_eq!(map.get("slug-a").map(String::as_str), Some("/abs/path/a"));
+        assert_eq!(map.get("slug-b").map(String::as_str), Some("/abs/path/b"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gemini_meta_summary_title_and_directories_fallback() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let chats = dir.join("tmp").join("some-slug").join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        let file = chats.join("session-x.jsonl");
+        let content = concat!(
+            r#"{"sessionId":"g1","startTime":"2026-07-21T02:46:00Z","directories":["/abs/proj"]}"#,
+            "\n",
+            r#"{"id":"m1","timestamp":"2026-07-21T02:46:01Z","type":"user","content":"问点什么"}"#,
+            "\n",
+            r#"{"$set":{"summary":"AI 摘要标题","lastUpdated":"2026-07-21T03:00:00Z"}}"#,
+            "\n",
+        );
+        std::fs::write(&file, content).unwrap();
+        // 空映射 → 走 metadata.directories 兜底
+        let m = gemini_file_meta(&file, true, &HashMap::new()).unwrap();
+        assert_eq!(m.project_path, "/abs/proj");
+        assert_eq!(m.session_id, "g1");
+        assert_eq!(m.title.as_deref(), Some("AI 摘要标题"), "$set 的 summary 优先于首条用户消息");
+        assert_eq!(m.created_at.as_deref(), Some("2026-07-21T02:46:00Z"));
+        // slug 映射命中时优先于 directories；映射和 directories 都没有则跳过该会话
+        let mut map = HashMap::new();
+        map.insert("some-slug".to_string(), "/mapped/proj".to_string());
+        let m2 = gemini_file_meta(&file, true, &map).unwrap();
+        assert_eq!(m2.project_path, "/mapped/proj");
+        let file2 = chats.join("session-y.jsonl");
+        std::fs::write(&file2, r#"{"sessionId":"g2","startTime":"t"}"#).unwrap();
+        assert!(gemini_file_meta(&file2, true, &HashMap::new()).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== Qwen =====
+
+    #[test]
+    fn qwen_parse_blocks_usage_and_sidechain() {
+        let lines = s(&[
+            r#"{"uuid":"1","sessionId":"q1","timestamp":"2026-07-01T00:00:00Z","type":"user","cwd":"/tmp/proj","version":"0.10.0","message":{"role":"user","parts":[{"text":"帮我写代码"}]}}"#,
+            r#"{"uuid":"2","sessionId":"q1","type":"assistant","message":{"role":"model","parts":[{"text":"想想","thought":true},{"text":"好的"},{"functionCall":{"name":"write_file","args":{"path":"/a"}}}]},"usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":10,"cachedContentTokenCount":5}}"#,
+            r#"{"uuid":"3","sessionId":"q1","type":"tool_result","message":{"role":"tool","parts":[{"functionResponse":{"name":"write_file","response":{"ok":true}}}]}}"#,
+            r#"{"uuid":"4","sessionId":"q1","type":"user","isSidechain":true,"message":{"role":"user","parts":[{"text":"支线"}]}}"#,
+            r#"{"uuid":"5","sessionId":"q1","type":"system","subtype":"custom_title","systemPayload":{"customTitle":"自定义标题"}}"#,
+            r#"{"uuid":"6","sessionId":"q1","type":"assistant","message":{"role":"model","parts":[{"text":"截断"#, // 截断末行
+        ]);
+        let msgs = parse_qwen(&lines);
+        assert_eq!(msgs.len(), 2, "sidechain/system/截断行跳过，tool_result 并入上一条");
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].blocks[0].text, "帮我写代码");
+        let a = &msgs[1];
+        assert_eq!(a.role, "assistant");
+        assert_eq!(a.blocks[0].kind, "thinking");
+        assert_eq!(a.blocks[1].kind, "text");
+        assert_eq!(a.blocks[2].kind, "tool_use");
+        assert_eq!(a.blocks[2].tool_name.as_deref(), Some("write_file"));
+        assert_eq!(a.blocks[3].kind, "tool_result");
+        let u = a.usage.as_ref().unwrap();
+        assert_eq!((u.input, u.output, u.cache_read, u.cache_write), (50, 10, 5, 0));
+    }
+
+    #[test]
+    fn qwen_meta_custom_title_cwd_version_and_archive() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let chats = dir.join("projects").join("-tmp-proj").join("chats").join("archive");
+        std::fs::create_dir_all(&chats).unwrap();
+        let file = chats.join("q1.jsonl");
+        let content = concat!(
+            r#"{"uuid":"1","sessionId":"q1","timestamp":"2026-07-01T00:00:00Z","type":"user","cwd":"/tmp/proj","version":"0.10.0","message":{"role":"user","parts":[{"text":"首条提问"}]}}"#,
+            "\n",
+            r#"{"uuid":"2","sessionId":"q1","type":"system","subtype":"custom_title","systemPayload":{"customTitle":"我的会话"}}"#,
+            "\n",
+            r#"{"uuid":"3","sessionId":"q1","type":"assistant","message":{"role":"model","parts":[{"text":"答"}]},"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":3}}"#,
+            "\n",
+        );
+        std::fs::write(&file, content).unwrap();
+        let m = qwen_file_meta(&file, true, true).unwrap();
+        assert_eq!(m.project_path, "/tmp/proj", "项目归属以首条记录 cwd 为准，不解码目录名");
+        assert_eq!(m.session_id, "q1");
+        assert_eq!(m.cli_version.as_deref(), Some("0.10.0"));
+        assert_eq!(m.title.as_deref(), Some("我的会话"), "custom_title 覆盖首条用户消息");
+        assert!(m.archived);
+        assert!(m.alive);
+        let u = m.token_usage.unwrap();
+        assert_eq!((u.input, u.output), (9, 3));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+
+
