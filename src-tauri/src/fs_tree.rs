@@ -140,6 +140,87 @@ pub async fn read_file_preview(path: String, root: String) -> Result<FilePreview
         .map_err(|e| format!("读取文件失败: {e}"))?
 }
 
+/// 保存预览编辑：与 read_file_preview 相同的根目录约束；超 256KB 暂拒；原子写入
+fn save_file_preview_sync(path: &str, root: &str, text: &str) -> Result<(), String> {
+    if text.len() > PREVIEW_CAP {
+        return Err("文件超过 256 KB，暂不支持在预览里保存".into());
+    }
+    let root_c = PathBuf::from(expand_tilde(root))
+        .canonicalize()
+        .map_err(|e| format!("项目根目录无效: {e}"))?;
+    let path_c = PathBuf::from(expand_tilde(path))
+        .canonicalize()
+        .map_err(|e| format!("文件不存在或不可读: {e}"))?;
+    if !path_c.starts_with(&root_c) {
+        return Err("路径超出项目根目录，拒绝写入".into());
+    }
+    crate::profiles::atomic_write(&path_c, text)
+}
+
+#[tauri::command]
+pub async fn save_file_preview(path: String, root: String, text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || save_file_preview_sync(&path, &root, &text))
+        .await
+        .map_err(|e| format!("保存文件失败: {e}"))?
+}
+
+// ===== 目录监听（P4）：notify 递归监听 + 500ms 防抖，事件 fs-changed-<id> =====
+
+struct WatchEntry {
+    _watcher: notify::RecommendedWatcher,
+}
+
+static WATCHERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, WatchEntry>>> =
+    std::sync::OnceLock::new();
+
+fn watchers() -> &'static std::sync::Mutex<std::collections::HashMap<String, WatchEntry>> {
+    WATCHERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[tauri::command]
+pub fn watch_dir(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    use tauri::Emitter;
+    let id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let mut watcher = notify::recommended_watcher(move |_res| {
+        let _ = tx.send(());
+    })
+    .map_err(|e| format!("创建文件监听失败: {e}"))?;
+    notify::Watcher::watch(
+        &mut watcher,
+        std::path::Path::new(&expand_tilde(&path)),
+        notify::RecursiveMode::Recursive,
+    )
+    .map_err(|e| format!("监听目录失败: {e}"))?;
+
+    // 防抖线程：事件涌入时等静默 500ms 再发一次
+    let event = format!("fs-changed-{id}");
+    std::thread::spawn(move || loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            Ok(_) => {
+                while rx
+                    .recv_timeout(std::time::Duration::from_millis(500))
+                    .is_ok()
+                {
+                    // 持续有事件，继续等静默
+                }
+                let _ = app.emit(&event, ());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break, // watcher 已 drop
+        }
+    });
+
+    watchers().lock().unwrap().insert(id.clone(), WatchEntry { _watcher: watcher });
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn unwatch_dir(id: String) -> Result<(), String> {
+    watchers().lock().unwrap().remove(&id);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +293,33 @@ mod tests {
         assert!(!p2.truncated);
         assert_eq!(p2.text, "hello");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_within_root_writes_content() {
+        let dir = tmpdir("save");
+        let f = dir.join("edit.txt");
+        fs::write(&f, "old").unwrap();
+        save_file_preview_sync(f.to_str().unwrap(), dir.to_str().unwrap(), "new content\n").unwrap();
+        assert_eq!(fs::read_to_string(&f).unwrap(), "new content\n");
+        // 超限拒绝且不改动文件
+        let big = "x".repeat(PREVIEW_CAP + 1);
+        assert!(save_file_preview_sync(f.to_str().unwrap(), dir.to_str().unwrap(), &big).is_err());
+        assert_eq!(fs::read_to_string(&f).unwrap(), "new content\n");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_rejects_path_escape() {
+        let root = tmpdir("save-root");
+        let outside = tmpdir("save-outside");
+        let secret = outside.join("s.txt");
+        fs::write(&secret, "nope").unwrap();
+        let err =
+            save_file_preview_sync(secret.to_str().unwrap(), root.to_str().unwrap(), "x").unwrap_err();
+        assert!(err.contains("超出项目根目录"), "{err}");
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "nope");
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
     }
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import ContextMenu from "./ContextMenu";
 
 export interface DirEntryDto {
@@ -9,6 +10,15 @@ export interface DirEntryDto {
   size: number;
   modified: string | null;
 }
+
+/** git 状态字母配色（M 改 / A·?? 增 / D 删 / R 改名） */
+const STATUS_COLOR: Record<string, string> = {
+  M: "text-warn-text",
+  A: "text-ok-text",
+  "??": "text-ok-text",
+  D: "text-err-text",
+  R: "text-l3",
+};
 
 function basenameOf(p: string): string {
   const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
@@ -36,12 +46,15 @@ export default function FileTree({
   refreshKey,
   onOpenFile,
   onOpenTerminal,
+  onFsEvent,
 }: {
   cwd: string;
   showHidden: boolean;
   refreshKey: number;
   onOpenFile: (path: string, name: string) => void;
   onOpenTerminal: (path: string) => void;
+  /** 文件系统变化回调（fs-changed 防抖后触发，供 GitPanel 等联动刷新） */
+  onFsEvent?: () => void;
 }) {
   // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动
   const [root, setRoot] = useState(cwd);
@@ -49,6 +62,7 @@ export default function FileTree({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [gitMap, setGitMap] = useState<Record<string, string>>({});
 
   // 切换活动标签（cwd 变化）时重置回该标签的 cwd
   useEffect(() => {
@@ -67,6 +81,47 @@ export default function FileTree({
     },
     [showHidden],
   );
+
+  // git 装饰：变更文件状态表（非仓库 → 空）
+  const loadGitMap = useCallback(async () => {
+    try {
+      setGitMap(await invoke<Record<string, string>>("git_status_map", { cwd: root }));
+    } catch {
+      setGitMap({});
+    }
+  }, [root]);
+  useEffect(() => {
+    void loadGitMap();
+  }, [loadGitMap, refreshKey]);
+
+  // 文件监听（P4）：根目录变化时重挂 watcher；fs-changed → 缓存失效 + git 装饰刷新
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    let watchId: string | null = null;
+    void (async () => {
+      try {
+        watchId = await invoke<string>("watch_dir", { path: root });
+        if (cancelled) {
+          invoke("unwatch_dir", { id: watchId }).catch(() => {});
+          return;
+        }
+        unlisten = await listen(`fs-changed-${watchId}`, () => {
+          setCache({});
+          void loadGitMap();
+          onFsEvent?.();
+        });
+      } catch {
+        // 监听失败（目录不可读等）退回手动刷新
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      if (watchId) invoke("unwatch_dir", { id: watchId }).catch(() => {});
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [root, loadGitMap]);
 
   // 重定根 / 显隐切换：清空缓存与展开状态
   useEffect(() => {
@@ -94,10 +149,15 @@ export default function FileTree({
   }
 
   const parent = parentDir(root);
+  /** 目录内是否有变更文件（文件夹装饰点） */
+  const changedInside = (dirPath: string) =>
+    Object.keys(gitMap).some((p) => p.startsWith(`${dirPath}/`));
 
   function Node({ entry, depth }: { entry: DirEntryDto; depth: number }) {
     const isOpen = expanded.has(entry.path);
     const children = cache[entry.path];
+    const gitStatus = entry.isDir ? undefined : gitMap[entry.path];
+    const dirtyDir = entry.isDir && changedInside(entry.path);
     // 展开才读取子目录（懒加载）
     useEffect(() => {
       if (entry.isDir && isOpen && !children) void load(entry.path);
@@ -125,18 +185,33 @@ export default function FileTree({
           </span>
           <span className="shrink-0">{entry.isDir ? "📁" : "📄"}</span>
           <span className="truncate text-l3">{entry.name}</span>
-          {entry.isDir && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenTerminal(entry.path);
-              }}
-              title="在此打开新终端"
-              className="ml-auto hidden shrink-0 text-l4 hover:text-l1 group-hover:block"
-            >
-              ↗
-            </button>
-          )}
+          <span className="ml-auto flex shrink-0 items-center gap-1">
+            {gitStatus && (
+              <span
+                className={`font-mono ${STATUS_COLOR[gitStatus] ?? "text-l3"}`}
+                title={`git: ${gitStatus}`}
+              >
+                {gitStatus === "??" ? "?" : gitStatus}
+              </span>
+            )}
+            {dirtyDir && (
+              <span className="text-l4" title="包含变更文件">
+                ●
+              </span>
+            )}
+            {entry.isDir && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenTerminal(entry.path);
+                }}
+                title="在此打开新终端"
+                className="hidden shrink-0 text-l4 hover:text-l1 group-hover:block"
+              >
+                ↗
+              </button>
+            )}
+          </span>
         </div>
         {entry.isDir && isOpen && !children && (
           <div

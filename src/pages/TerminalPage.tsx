@@ -8,6 +8,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useAppStore } from "../store";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
+import FilePreviewEditor from "../components/FilePreviewEditor";
 import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
 import type { ChatMessageDto, SessionMetaDto } from "../types";
@@ -772,13 +773,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [focusMode, setFocusMode] = useState(false);
   const [rightTab, setRightTab] = useState<"session" | "preview" | "git">("session");
   const [gitTotals, setGitTotals] = useState<{ add: number; del: number } | null>(null);
-  const [preview, setPreview] = useState<{
-    path: string;
-    name: string;
-    text: string;
-    truncated: boolean;
-  } | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{ path: string; name: string } | null>(null);
+  /** 预览编辑器脏状态（预览页签的脏点） */
+  const [previewDirty, setPreviewDirty] = useState(false);
+  /** 文件系统变化信号：FileTree 的 fs-changed 事件触发 GitPanel 一并刷新 */
+  const [fsChangeTick, setFsChangeTick] = useState(0);
   const sessionScrollRef = useRef<HTMLDivElement>(null);
 
   const activeCwd = statuses[activeId]?.cwd ?? "~";
@@ -810,21 +809,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setGitTotals((prev) => (prev && prev.add === t.add && prev.del === t.del ? prev : t));
   }, []);
 
-  /** 工作树单击文件 → 右侧「预览」页签（路径限制在活动标签 cwd 内，后端校验） */
-  async function openPreview(path: string, name: string) {
+  /** 工作树单击文件 → 右侧「预览」页签（编辑器自行加载内容；路径限制在后端校验） */
+  function openPreview(path: string, name: string) {
     setRightOpen(true);
     setRightTab("preview");
-    setPreviewError(null);
-    try {
-      const p = await invoke<{ text: string; truncated: boolean }>(
-        "read_file_preview",
-        { path, root: activeCwd },
-      );
-      setPreview({ path, name, text: p.text, truncated: p.truncated });
-    } catch (e) {
-      setPreview({ path, name, text: "", truncated: false });
-      setPreviewError(String(e));
-    }
+    setPreview({ path, name });
+    setPreviewDirty(false);
   }
 
   // 会话页签内容更新时滚到底部
@@ -1022,6 +1012,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               refreshKey={refreshKey}
               onOpenFile={openPreview}
               onOpenTerminal={openTerminalAt}
+              onFsEvent={() => setFsChangeTick((t) => t + 1)}
             />
           </div>
           {/* 运行中总览：全部终端标签的状态一览，点击激活 */}
@@ -1201,6 +1192,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   }`}
                 >
                   {k === "session" ? "会话" : k === "preview" ? "预览" : "改动"}
+                  {k === "preview" && previewDirty && (
+                    <span className="ml-1 text-l3" title="有未保存的修改">
+                      ●
+                    </span>
+                  )}
                   {gitBadge && (
                     <span className="ml-1 rounded bg-ok px-1 text-ok-text">
                       +{gitBadge}
@@ -1230,25 +1226,22 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           )}
           {rightTab === "preview" && (
             <div className="flex min-h-0 flex-1 flex-col">
-              <div className="flex shrink-0 items-center bg-strip px-3 py-1.5 text-xs text-l3">
-                <span className="truncate">{preview?.name ?? "未选择文件"}</span>
-                {preview?.truncated && (
-                  <span className="ml-2 shrink-0 rounded bg-warn px-1 text-warn-text">
-                    已截断
-                  </span>
-                )}
-              </div>
-              <div className="min-h-0 flex-1 overflow-auto p-3">
-                {previewError ? (
-                  <p className="text-sm text-err-text">{previewError}</p>
-                ) : preview ? (
-                  <pre className="whitespace-pre-wrap break-all font-mono text-xs text-l2">
-                    {preview.text}
-                  </pre>
-                ) : (
-                  <p className="text-sm text-l4">在左侧工作树中单击文件预览</p>
-                )}
-              </div>
+              {preview ? (
+                <FilePreviewEditor
+                  path={preview.path}
+                  root={activeCwd}
+                  onDirtyChange={setPreviewDirty}
+                />
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <div className="flex shrink-0 items-center bg-strip px-3 py-1.5 text-xs text-l3">
+                    未选择文件
+                  </div>
+                  <div className="p-3">
+                    <p className="text-sm text-l4">在左侧工作树中单击文件预览</p>
+                  </div>
+                </div>
+              )}
             </div>
           )}
           {/* 改动面板保持挂载：右栏打开期间持续轮询，页签徽标才有数据 */}
@@ -1256,6 +1249,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             <GitPanel
               cwd={activeCwd}
               visible={visible && rightOpen}
+              refreshKey={fsChangeTick}
               onTotals={reportGitTotals}
             />
           </div>

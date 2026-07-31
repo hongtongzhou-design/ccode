@@ -192,8 +192,27 @@ fn git_status_sync(cwd: &str) -> Result<GitStatusDto, String> {
     })
 }
 
-fn branch_name(cwd: &str) -> Option<String> {
-    let o = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
+/// 文件树 git 装饰（P4）：变更/未跟踪文件的绝对路径 → 状态字母；非仓库返回空表
+fn git_status_map_sync(cwd: &str) -> Result<std::collections::HashMap<String, String>, String> {
+    let cwd = expand_tilde(cwd);
+    let check = run_git(&cwd, &["rev-parse", "--is-inside-work-tree"])?;
+    if !check.status.success() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let out = run_git(&cwd, &["status", "--porcelain=v1"])?;
+    if !out.status.success() {
+        return Err(output_tail(&out));
+    }
+    let (_, _, _, files) = parse_porcelain(&String::from_utf8_lossy(&out.stdout));
+    let mut map = std::collections::HashMap::new();
+    for (status, rel) in files {
+        let abs = Path::new(&cwd).join(&rel).to_string_lossy().into_owned();
+        map.insert(abs, status);
+    }
+    Ok(map)
+}
+
+fn branch_name(cwd: &str) -> Option<String> {    let o = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
     if !o.status.success() {
         return None;
     }
@@ -259,6 +278,13 @@ fn git_push_sync(cwd: &str) -> Result<String, String> {
 #[tauri::command]
 pub async fn git_status(cwd: String) -> Result<GitStatusDto, String> {
     tauri::async_runtime::spawn_blocking(move || git_status_sync(&cwd))
+        .await
+        .map_err(|e| format!("查询 git 状态失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn git_status_map(cwd: String) -> Result<std::collections::HashMap<String, String>, String> {
+    tauri::async_runtime::spawn_blocking(move || git_status_map_sync(&cwd))
         .await
         .map_err(|e| format!("查询 git 状态失败: {e}"))?
 }
@@ -483,8 +509,29 @@ mod tests {
     }
 
     #[test]
-    fn porcelain_header_parses_branch_ahead_behind() {
-        let (branch, ahead, behind, files) =
+    fn status_map_marks_changed_and_untracked() {
+        if !git_available() {
+            return;
+        }
+        let dir = init_repo("status-map");
+        fs::write(dir.join("a.txt"), "l1\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["-c", "commit.gpgsign=false", "commit", "-m", "init"]);
+        fs::write(dir.join("a.txt"), "l1\nl2\n").unwrap();
+        fs::write(dir.join("b.txt"), "new\n").unwrap();
+        let map = git_status_map_sync(dir.to_str().unwrap()).unwrap();
+        assert_eq!(map.get(dir.join("a.txt").to_str().unwrap()), Some(&"M".to_string()));
+        assert_eq!(map.get(dir.join("b.txt").to_str().unwrap()), Some(&"??".to_string()));
+        assert!(!map.contains_key(dir.join("c.txt").to_str().unwrap()));
+        // 非仓库 → 空表
+        let plain = tmpdir("status-map-plain");
+        assert!(git_status_map_sync(plain.to_str().unwrap()).unwrap().is_empty());
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&plain).ok();
+    }
+
+    #[test]
+    fn porcelain_header_parses_branch_ahead_behind() {        let (branch, ahead, behind, files) =
             parse_porcelain("## main...origin/main [ahead 2, behind 3]\n M a.rs\n?? new.txt\n");
         assert_eq!((branch.as_str(), ahead, behind), ("main", 2, 3));
         assert_eq!(files.len(), 2);

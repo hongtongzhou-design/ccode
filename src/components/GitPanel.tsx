@@ -27,11 +27,14 @@ const STATUS_STYLE: Record<string, string> = {
 export default function GitPanel({
   cwd,
   visible,
+  refreshKey,
   onTotals,
 }: {
   cwd: string;
   /** 右侧面板打开且页面可见；不可见时暂停轮询 */
   visible: boolean;
+  /** 外部刷新信号（如 fs-changed 文件监听事件），变化时立即刷新 */
+  refreshKey?: number;
   onTotals: (t: { add: number; del: number }) => void;
 }) {
   const [status, setStatus] = useState<GitStatusDto | null>(null);
@@ -69,13 +72,13 @@ export default function GitPanel({
     );
   }, [cwd, onTotals]);
 
-  // cwd / 可见性变化立即刷新；可见时每 8s 轮询
+  // cwd / 可见性 / 外部信号变化立即刷新；可见时每 8s 轮询
   useEffect(() => {
     void refresh();
     if (!visible) return;
     const timer = setInterval(() => void refresh(), 8000);
     return () => clearInterval(timer);
-  }, [refresh, visible]);
+  }, [refresh, visible, refreshKey]);
 
   async function doCommit(push: boolean) {
     setRunning(push ? "push" : "commit");
