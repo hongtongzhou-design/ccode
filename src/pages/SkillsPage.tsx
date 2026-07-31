@@ -26,6 +26,29 @@ const GITHUB_PRESETS = ["anthropics/skills", "ComposioHQ/awesome-claude-skills"]
 const field =
   "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
+/** 把用户粘贴的 GitHub 网址/简写统一解析为 { repo, branch, subdir }：
+ *  支持 owner/repo、github.com/owner/repo、https://github.com/owner/repo.git、
+ *  /tree/<branch>/<subdir> 形式 */
+function parseGithubInput(raw: string): {
+  repo: string;
+  branch: string | null;
+  subdir: string | null;
+} {
+  let s = raw.trim().replace(/\/+$/, "").replace(/\.git$/, "");
+  s = s.replace(/^https?:\/\//, "").replace(/^github\.com\//, "");
+  const parts = s.split("/").filter(Boolean);
+  const repo = parts.slice(0, 2).join("/");
+  let branch: string | null = null;
+  let subdir: string | null = null;
+  if (parts[2] === "tree" && parts.length > 3) {
+    branch = parts[3];
+    if (parts.length > 4) subdir = parts.slice(4).join("/");
+  } else if (parts.length > 2) {
+    subdir = parts.slice(2).join("/");
+  }
+  return { repo, branch, subdir };
+}
+
 function ImportModal({
   onClose,
   onDone,
@@ -137,7 +160,7 @@ function ImportModal({
               <span className="mb-1 block text-xs text-l3">仓库</span>
               <input
                 className={field}
-                placeholder="anthropics/skills"
+                placeholder="anthropics/skills 或 https://github.com/owner/repo"
                 value={repo}
                 onChange={(e) => setRepo(e.target.value)}
               />
@@ -164,13 +187,14 @@ function ImportModal({
             </div>
             <div className="mt-3 flex justify-end">
               <button
-                onClick={() =>
+                onClick={() => {
+                  const parsed = parseGithubInput(repo);
                   run("import_skills_from_github", {
-                    repo: repo.trim(),
-                    branch: branch.trim() || null,
-                    subdir: subdir.trim() || null,
-                  })
-                }
+                    repo: parsed.repo,
+                    branch: branch.trim() || parsed.branch,
+                    subdir: subdir.trim() || parsed.subdir,
+                  });
+                }}
                 disabled={busy || !repo.trim()}
                 className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
               >
