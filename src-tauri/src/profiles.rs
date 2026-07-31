@@ -24,6 +24,9 @@ pub struct Profile {
     /// 旧版单模型字段，仅用于读取时迁移，写回后即消失；不作为业务字段使用
     #[serde(default, skip_serializing)]
     pub model: Option<String>,
+    /// 上次用于启动的时间（ISO），配置页据此识别活跃/闲置配置（§6.12 E）
+    #[serde(default)]
+    pub last_used_at: Option<String>,
     /// 密钥本体在系统钥匙串里，这里只反映「钥匙串中是否存在」
     pub has_key: bool,
 }
@@ -124,6 +127,7 @@ impl ProfileStore {
             extra_env: input.extra_env,
             key_hint: None,
             model: None,
+            last_used_at: None,
             has_key: false,
         };
         if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
@@ -149,6 +153,7 @@ impl ProfileStore {
             extra_env: src.extra_env,
             key_hint: src.key_hint,
             model: None,
+            last_used_at: None,
             has_key: false,
         };
         if let Some(key) = get_key(id) {
@@ -189,6 +194,18 @@ impl ProfileStore {
         self.write_all(&profiles)?;
         delete_key(id);
         Ok(())
+    }
+
+    /// 每次用于启动即刷新 last_used_at（§6.12 E）；失败静默，不影响启动
+    pub fn touch_last_used(&self, id: &str) {
+        let _ = (|| -> Result<(), String> {
+            let mut profiles = self.read_all()?;
+            if let Some(p) = profiles.iter_mut().find(|p| p.id == id) {
+                p.last_used_at = Some(crate::sessions::now_iso());
+                self.write_all(&profiles)?;
+            }
+            Ok(())
+        })();
     }
 }
 

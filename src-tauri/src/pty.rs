@@ -158,6 +158,8 @@ pub fn pty_spawn(
     model: Option<String>,
     // 工作区端口段（CCODE_PORT 块）等附加 env：在 launch_plan env 之后、TERM 三元组之前注入
     extra_env: Option<HashMap<String, String>>,
+    // 恢复已有会话（§6.12 A）：注入各 CLI 的恢复参数，跳过 --session-id，hint 直接锁定该会话
+    resume_session_id: Option<String>,
 ) -> Result<SpawnResult, String> {
     let profile = store.get(&profile_id)?;
     if profile.agent != agent_id {
@@ -171,21 +173,45 @@ pub fn pty_spawn(
         .filter(|m| !m.trim().is_empty())
         .or_else(|| profile.models.first().cloned());
     let plan = agents::launch_plan(&profile, key, model.as_deref());
-    let session_hint = session_id_for(&agent_id);
+    // 恢复模式：hint = 被恢复的会话；普通模式：claude/qwen 生成新 id 固定文件名
+    let session_hint = match &resume_session_id {
+        Some(sid) => Some(sid.clone()),
+        None => session_id_for(&agent_id),
+    };
     // 每-agent 启动前文件准备（codex：写模型 catalog，让 /model 选择器列出全部模型）
     let extra_args = agents::prepare_launch(&profile)?;
 
     let mut cmd = CommandBuilder::new(&binary_path);
-    for arg in &plan.args {
-        cmd.arg(arg);
-    }
-    for arg in &extra_args {
-        cmd.arg(arg);
-    }
-    // 确定性关联：会话文件名 = 该 uuid，启动即锁定（architecture §6.7）
-    if let Some(sid) = &session_hint {
-        cmd.arg("--session-id");
-        cmd.arg(sid);
+    if let Some(sid) = &resume_session_id {
+        let (prepend, args) = agents::resume_args(&agent_id, sid);
+        if prepend {
+            for arg in &args {
+                cmd.arg(arg);
+            }
+        }
+        for arg in &plan.args {
+            cmd.arg(arg);
+        }
+        for arg in &extra_args {
+            cmd.arg(arg);
+        }
+        if !prepend {
+            for arg in &args {
+                cmd.arg(arg);
+            }
+        }
+    } else {
+        for arg in &plan.args {
+            cmd.arg(arg);
+        }
+        for arg in &extra_args {
+            cmd.arg(arg);
+        }
+        // 确定性关联：会话文件名 = 该 uuid，启动即锁定（architecture §6.7）
+        if let Some(sid) = &session_hint {
+            cmd.arg("--session-id");
+            cmd.arg(sid);
+        }
     }
     for (k, v) in &plan.env {
         cmd.env(k, v);
@@ -196,6 +222,7 @@ pub fn pty_spawn(
         }
     }
     let pty_id = spawn_tracked(&app, manager.inner(), cmd, &expand_tilde(&cwd))?;
+    store.touch_last_used(&profile_id);
     Ok(SpawnResult {
         pty_id,
         session_hint,

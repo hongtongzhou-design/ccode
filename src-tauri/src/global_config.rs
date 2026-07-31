@@ -584,6 +584,7 @@ mod tests {
             extra_env: Default::default(),
             key_hint: None,
             model: None,
+            last_used_at: None,
             has_key: false,
         }
     }

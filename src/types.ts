@@ -11,6 +11,8 @@ export interface Profile {
   /** 密钥尾号提示（如 "···abc1"），用于区分多个 key */
   keyHint: string | null;
   hasKey: boolean;
+  /** 最近一次用该配置启动的时间（ISO）；null = 从未使用 */
+  lastUsedAt: string | null;
 }
 
 export interface ProfileInput {

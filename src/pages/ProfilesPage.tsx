@@ -377,6 +377,20 @@ interface AgentCmdResult {
   versionAfter: string | null;
 }
 
+function relTime(iso: string | null): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const min = Math.floor((Date.now() - t) / 60000);
+  if (min < 1) return "刚刚";
+  if (min < 60) return `${min} 分钟前`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h} 小时前`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d} 天前`;
+  return new Date(t).toLocaleDateString("zh-CN");
+}
+
 /** 失败诊断：按输出/方式文本给一条下一步建议，无匹配则不提示（纯函数，可单测） */
 function diagnose(output: string, method: string): string | null {
   const lower = output.toLowerCase();
@@ -776,6 +790,9 @@ export default function ProfilesPage() {
                       className={`text-xs ${p.hasKey ? "text-ok-text" : "text-l4"}`}
                     >
                       {p.hasKey ? `已存密钥 ${p.keyHint ?? ""}` : "无密钥"}
+                    </span>
+                    <span className="text-xs text-l4">
+                      {p.lastUsedAt ? `${relTime(p.lastUsedAt)}使用` : "从未使用"}
                     </span>
                     <span className="ml-auto flex shrink-0 items-center gap-1.5">
                       <button

@@ -24,7 +24,7 @@ function sanitizeBranch(name: string): string {
   return name.replace(/[^A-Za-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
 }
 
-/** 工作区 → 终端的交接：取端口段 env，交给终端页开新标签 */
+/** 工作区 → 终端的交接：取端口段 env，交给终端页开新标签；预填该目录上次使用的配置（W3-C） */
 function useOpenInTerminal() {
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
@@ -32,10 +32,22 @@ function useOpenInTerminal() {
     const pairs = await invoke<[string, string][]>("workspace_env_for", {
       worktreePath: ws.worktreePath,
     });
+    const last = (() => {
+      try {
+        return JSON.parse(
+          localStorage.getItem(`ccode.wsLast.${ws.worktreePath}`) ?? "{}",
+        ) as Partial<{ agentId: string; profileId: string; model: string }>;
+      } catch {
+        return {};
+      }
+    })();
     setPendingTerminal({
       cwd: ws.worktreePath,
       extraEnv: Object.fromEntries(pairs),
       title: ws.name,
+      agentId: last.agentId,
+      profileId: last.profileId,
+      model: last.model,
     });
     setPage("terminal");
   };
@@ -297,6 +309,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const openInTerminal = useOpenInTerminal();
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
+  const setSessionsQuery = useAppStore((s) => s.setSessionsQuery);
   const runningScripts = useAppStore((s) => s.runningScripts);
 
   async function refresh() {
@@ -617,6 +630,16 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                           恢复
                         </button>
                       )}
+                      <button
+                        title="在会话页查看该工作区的会话"
+                        onClick={() => {
+                          setSessionsQuery(ws.name);
+                          setPage("sessions");
+                        }}
+                        className={actionBtn}
+                      >
+                        会话
+                      </button>
                       <button
                         onClick={() => onDelete(ws)}
                         className="rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5"

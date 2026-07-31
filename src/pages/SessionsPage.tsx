@@ -48,6 +48,12 @@ function sessionTitle(s: SessionMetaDto): string {
 export default function SessionsPage({ visible }: { visible: boolean }) {
   const sessions = useAppStore((s) => s.sessions);
   const loadSessions = useAppStore((s) => s.loadSessions);
+  const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const setPage = useAppStore((s) => s.setPage);
+  const liveSessions = useAppStore((s) => s.liveSessions);
+  const focusTab = useAppStore((s) => s.focusTab);
+  const sessionsQuery = useAppStore((s) => s.sessionsQuery);
+  const setSessionsQuery = useAppStore((s) => s.setSessionsQuery);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [showArchived, setShowArchived] = useState(false);
@@ -77,15 +83,41 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   selectedRef.current = selected;
 
   const q = query.trim().toLowerCase();
+  // 工作区页「会话」跳转：接管搜索词（消费并清空）
+  useEffect(() => {
+    if (sessionsQuery != null) {
+      setQuery(sessionsQuery);
+      setSessionsQuery(null);
+    }
+  }, [sessionsQuery, setSessionsQuery]);
   const searched = useMemo(() => {
     if (!q) return sessions;
     return sessions.filter((s) =>
-      [s.projectPath, s.title ?? "", s.customTitle ?? "", ...s.tags]
+      [s.projectPath, s.title ?? "", s.customTitle ?? "", s.workspace ?? "", ...s.tags]
         .join("\n")
         .toLowerCase()
         .includes(q),
     );
   }, [sessions, q]);
+
+  /** A. 会话恢复：把会话交给终端页以 resume 语义自动重启 */
+  function resumeInTerminal(s: SessionMetaDto) {
+    setPendingTerminal({
+      cwd: s.projectPath,
+      extraEnv: {},
+      title: s.customTitle || s.title || s.sessionId.slice(0, 8),
+      resume: { agentId: s.agent, sessionId: s.sessionId },
+    });
+    setPage("terminal");
+  }
+
+  /** B. 「进行中」反向跳转：聚焦该会话所在的终端标签 */
+  function jumpToLive(sessionId: string) {
+    const tabId = liveSessions[sessionId];
+    if (!tabId) return;
+    setPage("terminal");
+    focusTab(tabId);
+  }
 
   // 分类树：agent → 项目分组；sessions 已按 updatedAt 降序，组内第一条即最近会话
   const tree = useMemo(() => {
@@ -526,6 +558,18 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   <div className="flex items-center gap-1.5">
                     {s.pinned && <span title="已保留">📌</span>}
                     <span className="truncate font-medium text-l1">{sessionTitle(s)}</span>
+                    {liveSessions[s.sessionId] && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          jumpToLive(s.sessionId);
+                        }}
+                        title="该会话正在终端里进行，点击跳转到对应标签"
+                        className="shrink-0 rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text"
+                      >
+                        🟢 进行中
+                      </button>
+                    )}
                     {s.chainCount > 1 && (
                       <span className="shrink-0 rounded bg-inset px-1 text-xs text-l3">
                         {s.chainCount} 次继续
@@ -592,6 +636,21 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     >
                       编辑
                     </button>
+                    <button
+                      disabled={!s.alive && !s.pinned}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        resumeInTerminal(s);
+                      }}
+                      title={
+                        s.alive || s.pinned
+                          ? "在终端里恢复这个会话"
+                          : "会话文件已失效且无快照，无法恢复"
+                      }
+                      className="text-l3 hover:text-l1 disabled:opacity-50"
+                    >
+                      恢复
+                    </button>
                   </div>
                 </div>
               );
@@ -624,6 +683,12 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 {agentLabel(selected.agent)} · {relTime(selected.updatedAt)}
                 {selected.tokenUsage ? ` · ${fmtTokens(selected.tokenUsage)}` : ""}
               </span>
+              <button
+                onClick={() => resumeInTerminal(selected)}
+                className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
+              >
+                在终端恢复
+              </button>
               <button
                 onClick={() => void togglePin(selected)}
                 className="ml-auto shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
@@ -696,6 +761,17 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 >
                   编辑
                 </button>
+                {(menu.session.alive || menu.session.pinned) && (
+                  <button
+                    className={menuItem}
+                    onClick={() => {
+                      setMenu(null);
+                      resumeInTerminal(menu.session);
+                    }}
+                  >
+                    在终端恢复
+                  </button>
+                )}
                 <button
                   className={`${menuItem} text-err-text`}
                   onClick={() => {

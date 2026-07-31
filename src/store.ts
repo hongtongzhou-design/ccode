@@ -13,6 +13,14 @@ export interface PendingTerminal {
   shellOnly?: boolean;
   /** run 脚本来源的工作区 id（nonconcurrent 互斥追踪用） */
   wsId?: string;
+  /** 会话恢复：以 --resume/--continue 语义重启该会话（SessionLink 确定性锁定） */
+  resume?: { agentId: string; sessionId: string };
+  /** 指定启动配置（未给则按 ccode.lastProfile → 该 agent 首个配置兜底） */
+  autoLaunchProfileId?: string;
+  /** 预填启动栏（工作区记住上次配置） */
+  agentId?: string;
+  profileId?: string;
+  model?: string;
 }
 
 interface AppState {
@@ -28,6 +36,15 @@ interface AppState {
   /** 运行中的 run 脚本：工作区 id → 终端标签 id（nonconcurrent 互斥） */
   runningScripts: Record<string, string>;
   setRunningScript: (wsId: string, tabId: string | null) => void;
+  /** 终端里正在进行的会话：sessionId → 标签 id（会话页「进行中」标记 + 反向跳转） */
+  liveSessions: Record<string, string>;
+  setLiveSession: (sessionId: string, tabId: string | null) => void;
+  /** 会话页 → 终端页的焦点跳转请求（终端页消费并清空） */
+  focusTabId: string | null;
+  focusTab: (tabId: string | null) => void;
+  /** 工作区页 → 会话页的搜索词交接（会话页消费并清空） */
+  sessionsQuery: string | null;
+  setSessionsQuery: (q: string | null) => void;
   loadAll: () => Promise<void>;
   /** 拉取全部会话元数据（Claude Code + Codex），返回最新列表供轮询比对 */
   loadSessions: () => Promise<SessionMetaDto[]>;
@@ -52,6 +69,18 @@ export const useAppStore = create<AppState>((set) => ({
       else delete next[wsId];
       return { runningScripts: next };
     }),
+  liveSessions: {},
+  setLiveSession: (sessionId, tabId) =>
+    set((s) => {
+      const next = { ...s.liveSessions };
+      if (tabId) next[sessionId] = tabId;
+      else delete next[sessionId];
+      return { liveSessions: next };
+    }),
+  focusTabId: null,
+  focusTab: (tabId) => set({ focusTabId: tabId }),
+  sessionsQuery: null,
+  setSessionsQuery: (q) => set({ sessionsQuery: q }),
 
   loadAll: async () => {
     const [profiles, agents] = await Promise.all([

@@ -44,9 +44,15 @@ const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 function TerminalView({
   visible,
   rightOpen,
+  tabId,
   initialCwd,
   initialExtraEnv,
   initialTitle,
+  initialAgentId,
+  initialProfileId,
+  initialModel,
+  resumeSessionId,
+  autoStart,
   prefillCommand,
   shellOnly,
   onStatus,
@@ -56,12 +62,22 @@ function TerminalView({
   visible: boolean;
   /** 右侧面板开关影响 xterm 可用宽度，变化时需要重新 fit */
   rightOpen: boolean;
+  /** 本标签 id（liveSessions 登记用） */
+  tabId: string;
   /** 从工作树「在此打开」/ 工作区创建的标签：启动栏 cwd 预填为该目录 */
   initialCwd?: string;
   /** 工作区交接的附加 env（如 CCODE_PORT 端口段），launch 时注入 */
   initialExtraEnv?: Record<string, string>;
   /** 工作区交接的标签标题（工作区名 / run: 脚本名），优先于 profile/agent 名 */
   initialTitle?: string;
+  /** 预填启动栏（会话恢复 / 工作区记住配置） */
+  initialAgentId?: string;
+  initialProfileId?: string;
+  initialModel?: string;
+  /** 会话恢复：pty_spawn 的 resumeSessionId */
+  resumeSessionId?: string;
+  /** 首次可见时自动启动（会话恢复；有 profile 才启动，否则只预填） */
+  autoStart?: boolean;
   /** run 脚本：进入 shell 后立即写入的命令行 */
   prefillCommand?: string;
   /** run 脚本标签：挂载后自动开 shell 并执行 prefillCommand（不走 agent 启动流程） */
@@ -84,9 +100,9 @@ function TerminalView({
       return {};
     }
   })();
-  const [agentId, setAgentId] = useState<string>(saved.agentId ?? "claude-code");
-  const [profileId, setProfileId] = useState(saved.profileId ?? "");
-  const [model, setModel] = useState(saved.model ?? "");
+  const [agentId, setAgentId] = useState<string>(initialAgentId ?? saved.agentId ?? "claude-code");
+  const [profileId, setProfileId] = useState(initialProfileId ?? saved.profileId ?? "");
+  const [model, setModel] = useState(initialModel ?? saved.model ?? "");
   const [cwd, setCwd] = useState(initialCwd ?? saved.cwd ?? "~");
   const [running, setRunning] = useState(false); // agent 正在运行
   const [shellActive, setShellActive] = useState(false); // 当前接的是 shell
@@ -109,8 +125,11 @@ function TerminalView({
     hint: string | null;
     sinceIso: string;
     filePath: string | null;
+    /** 锁定的会话 id（liveSessions 登记用） */
+    sessionId: string | null;
   } | null>(null);
   const linkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const setLiveSession = useAppStore((s) => s.setLiveSession);
 
   const agentProfiles = profiles.filter((p) => p.agent === agentId);
   const selectedProfile = profiles.find((p) => p.id === profileId);
@@ -216,6 +235,9 @@ function TerminalView({
       window.removeEventListener("resize", onWinResize);
       subs.forEach((s) => s.dispose());
       stopLinkTimer();
+      // 释放 liveSessions 登记（「进行中」标记随标签消失）
+      const sid = linkCtxRef.current?.sessionId;
+      if (sid) setLiveSession(sid, null);
       const id = ptyIdRef.current;
       ptyIdRef.current = null;
       ptyKindRef.current = null;
@@ -260,6 +282,17 @@ function TerminalView({
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, everVisible, shellOnly]);
+
+  // 会话恢复标签：首次可见且找得到配置时自动启动一次（找不到则只预填，由用户处理）
+  const autoLaunchedRef = useRef(false);
+  useEffect(() => {
+    if (!autoStart || !visible || !everVisible || autoLaunchedRef.current) return;
+    autoLaunchedRef.current = true;
+    if (profiles.some((p) => p.id === profileId)) {
+      void launch();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, everVisible, autoStart, profileId, profiles]);
 
   /** 把一个 PTY 接到 xterm 上；agent 退出时自动回落到 shell */
   async function attach(ptyId: string, kind: PtyKind, opts?: { reset?: boolean }) {
@@ -330,23 +363,21 @@ function TerminalView({
   }
 
   /** 找当前 agent 进程对应的会话文件：有 hint 按 sessionId 精确匹配，否则按目录+启动时间兜底 */
-  async function findSessionFile(): Promise<string | null> {
+  async function findSessionFile(): Promise<{ filePath: string; sessionId: string } | null> {
     const ctx = linkCtxRef.current;
     if (!ctx) return null;
     try {
       if (ctx.hint) {
         const list = await invoke<SessionMetaDto[]>("list_sessions");
-        return (
-          list.find((s) => s.agent === ctx.agentId && s.sessionId === ctx.hint)
-            ?.filePath ?? null
-        );
+        const hit = list.find((s) => s.agent === ctx.agentId && s.sessionId === ctx.hint);
+        return hit ? { filePath: hit.filePath, sessionId: ctx.hint! } : null;
       }
       const meta = await invoke<SessionMetaDto | null>("find_session_for", {
         agent: ctx.agentId,
         cwd: ctx.cwd,
         sinceIso: ctx.sinceIso,
       });
-      return meta?.filePath ?? null;
+      return meta ? { filePath: meta.filePath, sessionId: meta.sessionId } : null;
     } catch {
       return null;
     }
@@ -366,14 +397,23 @@ function TerminalView({
     }
   }
 
+  /** 会话文件锁定：登记 liveSessions（会话页「进行中」+ 反向跳转） */
+  function lockLink(filePath: string, sessionId: string) {
+    const ctx = linkCtxRef.current;
+    if (!ctx || ctx.filePath) return;
+    ctx.filePath = filePath;
+    ctx.sessionId = sessionId;
+    setSessionFile(filePath);
+    setLiveSession(sessionId, tabId);
+  }
+
   async function linkTick() {
     const ctx = linkCtxRef.current;
     if (!ctx) return;
     if (!ctx.filePath) {
-      const fp = await findSessionFile();
-      if (!fp) return;
-      ctx.filePath = fp;
-      setSessionFile(fp);
+      const hit = await findSessionFile();
+      if (!hit) return;
+      lockLink(hit.filePath, hit.sessionId);
     }
     await fetchConversation();
   }
@@ -390,14 +430,16 @@ function TerminalView({
     const ctx = linkCtxRef.current;
     if (!ctx) return;
     if (!ctx.filePath) {
-      ctx.filePath = await findSessionFile();
-      if (ctx.filePath) setSessionFile(ctx.filePath);
+      const hit = await findSessionFile();
+      if (hit) lockLink(hit.filePath, hit.sessionId);
     }
     await fetchConversation();
   }
 
   function resetLink() {
     stopLinkTimer();
+    const sid = linkCtxRef.current?.sessionId;
+    if (sid) setLiveSession(sid, null);
     linkCtxRef.current = null;
     setSessionFile(null);
     setConv([]);
@@ -416,12 +458,23 @@ function TerminalView({
           model: model || null,
           // 工作区交接的附加 env（端口段），与 profile env 叠加
           extraEnv: initialExtraEnv ?? null,
+          // 会话恢复（无则全新会话）
+          resumeSessionId: resumeSessionId ?? null,
         },
       );
       localStorage.setItem(
         "ccode.lastLaunch",
         JSON.stringify({ agentId, profileId, model, cwd }),
       );
+      // 记住各 agent 上次使用的配置（会话恢复的兜底选择）
+      localStorage.setItem(`ccode.lastProfile.${agentId}`, profileId);
+      // 工作区记住上次配置（W3：worktree 目录下的启动）
+      if (cwd.includes("/ccode/workspaces/")) {
+        localStorage.setItem(
+          `ccode.wsLast.${cwd}`,
+          JSON.stringify({ agentId, profileId, model }),
+        );
+      }
       // SessionLink：记录启动上下文，开始轮询会话文件
       linkCtxRef.current = {
         agentId,
@@ -429,6 +482,7 @@ function TerminalView({
         hint: res.sessionHint,
         sinceIso: new Date().toISOString(),
         filePath: null,
+        sessionId: null,
       };
       startLinkPolling();
       await attach(res.ptyId, "agent", { reset: true });
@@ -581,6 +635,9 @@ function TerminalView({
           该 agent 暂无配置，请先在「配置」页创建。
         </p>
       )}
+      {autoStart && profileId && !profiles.some((p) => p.id === profileId) && (
+        <p className="mb-2 text-sm text-l3">请先为该 agent 创建配置</p>
+      )}
       <div className="flex min-h-0 flex-1 gap-2">
         <div
           ref={containerRef}
@@ -599,6 +656,14 @@ interface Tab {
   initialExtraEnv?: Record<string, string>;
   /** 工作区交接的标签标题（工作区名 / run: 脚本名） */
   initialTitle?: string;
+  /** 预填启动栏（会话恢复 / 工作区记住配置） */
+  initialAgentId?: string;
+  initialProfileId?: string;
+  initialModel?: string;
+  /** 会话恢复：pty_spawn 的 resumeSessionId */
+  resumeSessionId?: string;
+  /** 首次可见自动启动（会话恢复） */
+  autoStart?: boolean;
   /** run 脚本：进入 shell 后立即写入的命令行 */
   prefillCommand?: string;
   /** run 脚本标签：自动开 shell 执行 prefillCommand */
@@ -687,6 +752,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     cwd?: string;
     extraEnv?: Record<string, string>;
     title?: string;
+    agentId?: string;
+    profileId?: string;
+    model?: string;
+    resumeSessionId?: string;
+    autoStart?: boolean;
     prefillCommand?: string;
     shellOnly?: boolean;
   }): string {
@@ -695,6 +765,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       initialCwd: init?.cwd,
       initialExtraEnv: init?.extraEnv,
       initialTitle: init?.title,
+      initialAgentId: init?.agentId,
+      initialProfileId: init?.profileId,
+      initialModel: init?.model,
+      resumeSessionId: init?.resumeSessionId,
+      autoStart: init?.autoStart,
       prefillCommand: init?.prefillCommand,
       shellOnly: init?.shellOnly,
     };
@@ -708,7 +783,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     addTab({ cwd: path });
   }
 
-  // 消费工作区页交来的终端启动请求（可见时才消费，保证标签能立刻聚焦启动栏）
+  // 消费工作区页/会话页交来的终端启动请求（可见时才消费，保证标签能立刻聚焦启动栏）
   const pendingTerminal = useAppStore((s) => s.pendingTerminal);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setRunningScript = useAppStore((s) => s.setRunningScript);
@@ -716,21 +791,50 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const runningScripts = useAppStore((s) => s.runningScripts);
   const runningScriptsRef = useRef(runningScripts);
   runningScriptsRef.current = runningScripts;
+  const profiles = useAppStore((s) => s.profiles);
   useEffect(() => {
     if (visible && pendingTerminal) {
       setPendingTerminal(null);
+      const pt = pendingTerminal;
+      // 会话恢复：profile 依次 autoLaunchProfileId → ccode.lastProfile → 该 agent 首个配置
+      const agentId = pt.agentId ?? pt.resume?.agentId;
+      let profileId = pt.profileId;
+      let model = pt.model;
+      if (pt.resume) {
+        profileId =
+          pt.autoLaunchProfileId ??
+          localStorage.getItem(`ccode.lastProfile.${pt.resume.agentId}`) ??
+          profiles.find((p) => p.agent === pt.resume!.agentId)?.id ??
+          "";
+        model = profiles.find((p) => p.id === profileId)?.models[0] ?? "";
+      }
       const tabId = addTab({
-        cwd: pendingTerminal.cwd,
-        extraEnv: pendingTerminal.extraEnv,
-        title: pendingTerminal.title,
-        prefillCommand: pendingTerminal.prefillCommand,
-        shellOnly: pendingTerminal.shellOnly,
+        cwd: pt.cwd,
+        extraEnv: pt.extraEnv,
+        title: pt.title,
+        agentId,
+        profileId,
+        model,
+        resumeSessionId: pt.resume?.sessionId,
+        autoStart: !!pt.resume,
+        prefillCommand: pt.prefillCommand,
+        shellOnly: pt.shellOnly,
       });
       // run 脚本标签：登记 nonconcurrent 互斥追踪
-      if (pendingTerminal.wsId) setRunningScript(pendingTerminal.wsId, tabId);
+      if (pt.wsId) setRunningScript(pt.wsId, tabId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, pendingTerminal, setPendingTerminal, setRunningScript]);
+
+  // 会话页「进行中」反向跳转：聚焦指定标签
+  const focusTabId = useAppStore((s) => s.focusTabId);
+  const focusTab = useAppStore((s) => s.focusTab);
+  useEffect(() => {
+    if (visible && focusTabId) {
+      if (tabs.some((t) => t.id === focusTabId)) setActiveId(focusTabId);
+      focusTab(null);
+    }
+  }, [visible, focusTabId, tabs, focusTab]);
 
   function closeTab(id: string) {
     const s = statuses[id];
@@ -911,9 +1015,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 <TerminalView
                   visible={tabVisible}
                   rightOpen={rightOpen}
+                  tabId={t.id}
                   initialCwd={t.initialCwd}
                   initialExtraEnv={t.initialExtraEnv}
                   initialTitle={t.initialTitle}
+                  initialAgentId={t.initialAgentId}
+                  initialProfileId={t.initialProfileId}
+                  initialModel={t.initialModel}
+                  resumeSessionId={t.resumeSessionId}
+                  autoStart={t.autoStart}
                   prefillCommand={t.prefillCommand}
                   shellOnly={t.shellOnly}
                   onStatus={(s) => reportStatus(t.id, s)}

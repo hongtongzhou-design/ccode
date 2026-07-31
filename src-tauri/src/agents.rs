@@ -310,6 +310,18 @@ pub fn binary_for(agent_id: &str) -> Option<&'static str> {
         .map(|(_, bin)| *bin)
 }
 
+/// 各 CLI 的按 ID 恢复会话参数（§6.12 A）。
+/// 返回 (prepend, args)：codex 的 resume 是子命令需放最前，其余是位置无关的 flag。
+pub(crate) fn resume_args(agent_id: &str, session_id: &str) -> (bool, Vec<String>) {
+    match agent_id {
+        "codex" => (true, vec!["resume".into(), session_id.into()]),
+        "claude-code" | "gemini" | "qwen" => (false, vec!["-r".into(), session_id.into()]),
+        "kimi" => (false, vec!["-S".into(), session_id.into()]),
+        "opencode" => (false, vec!["--session".into(), session_id.into()]),
+        _ => (false, vec![]),
+    }
+}
+
 /// kimi 新旧两个产品共用命令，按数据目录推断装的是哪个变体（"new" | "legacy"）
 pub(crate) fn kimi_variant() -> Option<&'static str> {
     let home = dirs::home_dir()?;
@@ -378,6 +390,7 @@ mod tests {
             extra_env: std::collections::HashMap::new(),
             key_hint: None,
             model: None,
+            last_used_at: None,
             has_key: false,
         }
     }
