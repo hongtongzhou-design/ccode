@@ -5,7 +5,7 @@
 
 Ccode 是一个 AI 编码 Agent 的统一工作台：在一个应用里管理多个 CLI agent（Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code）的 API 配置，内嵌终端一键启动，并行任务工作区（git worktree 隔离），会话历史回放。
 
-侧栏四个页面：**配置 / 工作区 / 终端 / 会话**。
+侧栏五个页面：**配置 / 工作区 / 终端 / 会话 / 技能**。
 
 **四个页面是打通的**：配置页建的 profile 在终端页一键启动；终端里跑的会话在会话页实时可见（🟢 点一下跳回终端）；会话页的历史可以「在终端恢复」续聊（自动预填目录/agent/profile）；工作区页的任务自动完成装依赖、起服务、评审合并，并记住你上次用的配置。典型动线：**配置 →（工作区）→ 终端 ⇄ 会话**。
 
@@ -182,7 +182,19 @@ test = { command = "npm run test" }
 
 ---
 
-## 五、常见问题（FAQ）
+## 五、技能页：管理 agent 技能（Skills）
+
+技能 = 一个含 `SKILL.md` 的目录（开放标准），教会 agent 特定能力。本页是技能的统一仓库：先入库，再按需分发到各 CLI。
+
+- **应用开关**：技能行有六个 agent 的药丸开关（claude/codex/gemini/qwen/oc/kimi），点亮即把技能链接/复制到对应 CLI 的技能目录（如 `~/.claude/skills/`），下次启动该 agent 即可用；关闭则移除（只清理由 Ccode 分发的，不碰你自己的目录）
+- **导入**（四路）：本地目录（递归找 SKILL.md）/ ZIP 文件 / GitHub 仓库（`owner/repo`，预设 anthropics/skills）/ 「发现未纳管」（扫描各 CLI 目录里还没入库的技能一键收编）
+- **导出**：单行导出为 ZIP；顶部导出打包全部
+- **查看**：点「查看」右侧预览 SKILL.md 全文
+- **删除**：确认后从各 agent 取消应用并删除库文件（自动备份到 `skill-backups/`，保留 5 份）
+
+注意：技能目录的修改不会自动同步——symlink 分发的是实时生效，copy 分发（Windows 或 symlink 失败时）需关闭再打开开关刷新。
+
+## 六、常见问题（FAQ）
 
 **Q：agent 回复了但不真正执行操作（不创建文件等）？**
 A：是中转模型不支持工具调用（实测 zetatechs 的部分模型只会文字糊弄）。换真 Claude 系模型或换个支持工具调用的中转。

@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import "./App.css";
 import ProfilesPage from "./pages/ProfilesPage";
 import SessionsPage from "./pages/SessionsPage";
+import SkillsPage from "./pages/SkillsPage";
 import TerminalPage from "./pages/TerminalPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
 import { useAppStore } from "./store";
@@ -11,6 +12,7 @@ const NAV: { id: string; label: string }[] = [
   { id: "workspaces", label: "工作区" },
   { id: "terminal", label: "终端" },
   { id: "sessions", label: "会话" },
+  { id: "skills", label: "技能" },
 ];
 
 function App() {
@@ -57,6 +59,9 @@ function App() {
         </div>
         <div className={page === "sessions" ? "h-full" : "hidden"}>
           <SessionsPage visible={page === "sessions"} />
+        </div>
+        <div className={page === "skills" ? "h-full" : "hidden"}>
+          <SkillsPage visible={page === "skills"} />
         </div>
       </main>
     </div>

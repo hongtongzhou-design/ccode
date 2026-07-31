@@ -6,6 +6,7 @@ mod models;
 mod profiles;
 mod pty;
 mod sessions;
+mod skills;
 mod updater;
 mod workspaces;
 mod ws_settings;
@@ -65,6 +66,16 @@ pub fn run() {
             workspaces::create_pr,
             workspaces::list_repos,
             ws_settings::workspace_settings,
+            skills::list_skills,
+            skills::apply_skill,
+            skills::delete_skill,
+            skills::import_skills_from_dir,
+            skills::import_skills_from_zip,
+            skills::import_skills_from_github,
+            skills::discover_unmanaged,
+            skills::import_discovered,
+            skills::export_skills,
+            skills::read_skill_md,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

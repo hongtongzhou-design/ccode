@@ -144,6 +144,26 @@ export interface WorkspaceHealthDto {
   readyToMerge: boolean;
 }
 
+/** 技能库条目（技能页）：apps 记录各 agent 的应用开关 */
+export interface SkillDto {
+  id: string;
+  name: string;
+  description: string;
+  /** local | zip | github | discovered */
+  source: string;
+  repo: string | null;
+  apps: Record<string, boolean>;
+  installedAt: string;
+}
+
+/** 未被纳管的已发现技能（各 agent 目录里已存在但不在库中） */
+export interface DiscoveredSkillDto {
+  name: string;
+  description: string;
+  path: string;
+  fromAgent: string;
+}
+
 export const AGENTS = [
   { id: "claude-code", label: "Claude Code", binary: "claude" },
   { id: "codex", label: "Codex", binary: "codex" },
