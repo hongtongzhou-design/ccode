@@ -156,6 +156,8 @@ pub fn pty_spawn(
     cwd: String,
     // 启动时选中的模型；None 时取 profile 模型列表的首个
     model: Option<String>,
+    // 工作区端口段（CCODE_PORT 块）等附加 env：在 launch_plan env 之后、TERM 三元组之前注入
+    extra_env: Option<HashMap<String, String>>,
 ) -> Result<SpawnResult, String> {
     let profile = store.get(&profile_id)?;
     if profile.agent != agent_id {
@@ -187,6 +189,11 @@ pub fn pty_spawn(
     }
     for (k, v) in &plan.env {
         cmd.env(k, v);
+    }
+    if let Some(extra) = &extra_env {
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
     }
     let pty_id = spawn_tracked(&app, manager.inner(), cmd, &expand_tilde(&cwd))?;
     Ok(SpawnResult {

@@ -2,10 +2,23 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { DetectResult, Profile, ProfileInput, SessionMetaDto } from "./types";
 
+/** 工作区页 → 终端页的交接：新开一个标签，预填 cwd + 注入 env（如端口段） */
+export interface PendingTerminal {
+  cwd: string;
+  extraEnv: Record<string, string>;
+  title?: string;
+}
+
 interface AppState {
   profiles: Profile[];
   agents: DetectResult[];
   sessions: SessionMetaDto[];
+  /** 当前页面（nav id），放 store 里让任意页面可跳转 */
+  page: string;
+  setPage: (p: string) => void;
+  /** 待消费的终端启动请求；终端页可见时消费并清空 */
+  pendingTerminal: PendingTerminal | null;
+  setPendingTerminal: (p: PendingTerminal | null) => void;
   loadAll: () => Promise<void>;
   /** 拉取全部会话元数据（Claude Code + Codex），返回最新列表供轮询比对 */
   loadSessions: () => Promise<SessionMetaDto[]>;
@@ -18,6 +31,10 @@ export const useAppStore = create<AppState>((set) => ({
   profiles: [],
   agents: [],
   sessions: [],
+  page: "profiles",
+  setPage: (p) => set({ page: p }),
+  pendingTerminal: null,
+  setPendingTerminal: (p) => set({ pendingTerminal: p }),
 
   loadAll: async () => {
     const [profiles, agents] = await Promise.all([

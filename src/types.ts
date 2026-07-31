@@ -55,6 +55,8 @@ export interface SessionMetaDto {
   alive: boolean;
   /** Codex resume/fork 链长度（同一对话合并为一个条目）；非 Codex 恒为 1 */
   chainCount: number;
+  /** 会话发生在任务工作区（git worktree）里时的工作区名；此时 projectPath 已改写为真实仓库 */
+  workspace: string | null;
 }
 
 export interface BlockDto {
@@ -68,6 +70,21 @@ export interface ChatMessageDto {
   blocks: BlockDto[];
   timestamp: string | null;
   usage: TokenUsageDto | null;
+}
+
+/** 任务工作区（§6.10）：一条 ccode/<name> 分支 + 一个 git worktree */
+export interface WorkspaceDto {
+  id: string;
+  repoPath: string;
+  repoName: string;
+  name: string;
+  branch: string;
+  worktreePath: string;
+  baseBranch: string;
+  portBase: number;
+  status: "active" | "archived";
+  createdAt: string;
+  archivedAt: string | null;
 }
 
 export const AGENTS = [

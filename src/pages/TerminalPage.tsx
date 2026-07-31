@@ -45,6 +45,8 @@ function TerminalView({
   visible,
   rightOpen,
   initialCwd,
+  initialExtraEnv,
+  initialTitle,
   onStatus,
   onSessionUpdate,
   onOpenSessionPanel,
@@ -52,8 +54,12 @@ function TerminalView({
   visible: boolean;
   /** 右侧面板开关影响 xterm 可用宽度，变化时需要重新 fit */
   rightOpen: boolean;
-  /** 从工作树「在此打开」创建的标签：启动栏 cwd 预填为该目录 */
+  /** 从工作树「在此打开」/ 工作区创建的标签：启动栏 cwd 预填为该目录 */
   initialCwd?: string;
+  /** 工作区交接的附加 env（如 CCODE_PORT 端口段），launch 时注入 */
+  initialExtraEnv?: Record<string, string>;
+  /** 工作区交接的标签标题（工作区名），优先于 profile/agent 名 */
+  initialTitle?: string;
   onStatus: (s: TabStatus) => void;
   onSessionUpdate: (s: SessionLinkState) => void;
   onOpenSessionPanel: () => void;
@@ -104,7 +110,7 @@ function TerminalView({
   const selectedProfile = profiles.find((p) => p.id === profileId);
 
   // 向标签条上报标题/运行状态；值没变就不惊动父组件
-  const title = selectedProfile?.name ?? agentLabel(agentId);
+  const title = initialTitle ?? selectedProfile?.name ?? agentLabel(agentId);
   const lastReportRef = useRef("");
   useEffect(() => {
     const s: TabStatus = {
@@ -374,6 +380,8 @@ function TerminalView({
           profileId,
           cwd,
           model: model || null,
+          // 工作区交接的附加 env（端口段），与 profile env 叠加
+          extraEnv: initialExtraEnv ?? null,
         },
       );
       localStorage.setItem(
@@ -474,6 +482,16 @@ function TerminalView({
             ))}
           </select>
         )}
+        {initialExtraEnv && Object.keys(initialExtraEnv).length > 0 && (
+          <span
+            className="rounded bg-inset px-1.5 py-0.5 text-xs text-l3"
+            title={`启动时注入：\n${Object.entries(initialExtraEnv)
+              .map(([k, v]) => `${k}=${v}`)
+              .join("\n")}`}
+          >
+            工作区 · 端口段已注入
+          </span>
+        )}
         <input
           className={`${select} w-64`}
           value={cwd}
@@ -538,8 +556,12 @@ function TerminalView({
 
 interface Tab {
   id: string;
-  /** 从工作树「在此打开」创建时预填的启动目录 */
+  /** 从工作树「在此打开」/ 工作区创建时预填的启动目录 */
   initialCwd?: string;
+  /** 工作区交接的附加 env（端口段） */
+  initialExtraEnv?: Record<string, string>;
+  /** 工作区交接的标签标题（工作区名） */
+  initialTitle?: string;
 }
 
 const INITIAL_TAB: Tab = { id: crypto.randomUUID() };
@@ -620,16 +642,40 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [activeSession?.conv, rightTab, rightOpen, activeId]);
 
-  function addTab(initialCwd?: string) {
-    const t: Tab = { id: crypto.randomUUID(), initialCwd };
+  function addTab(init?: {
+    cwd?: string;
+    extraEnv?: Record<string, string>;
+    title?: string;
+  }) {
+    const t: Tab = {
+      id: crypto.randomUUID(),
+      initialCwd: init?.cwd,
+      initialExtraEnv: init?.extraEnv,
+      initialTitle: init?.title,
+    };
     setTabs((prev) => [...prev, t]);
     setActiveId(t.id);
   }
 
   /** 工作树「在此打开新终端」：新建标签并预填 cwd，用户选 agent/profile 后启动 */
   function openTerminalAt(path: string) {
-    addTab(path);
+    addTab({ cwd: path });
   }
+
+  // 消费工作区页交来的终端启动请求（可见时才消费，保证标签能立刻聚焦启动栏）
+  const pendingTerminal = useAppStore((s) => s.pendingTerminal);
+  const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  useEffect(() => {
+    if (visible && pendingTerminal) {
+      setPendingTerminal(null);
+      addTab({
+        cwd: pendingTerminal.cwd,
+        extraEnv: pendingTerminal.extraEnv,
+        title: pendingTerminal.title,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, pendingTerminal, setPendingTerminal]);
 
   function closeTab(id: string) {
     const s = statuses[id];
@@ -807,6 +853,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   visible={tabVisible}
                   rightOpen={rightOpen}
                   initialCwd={t.initialCwd}
+                  initialExtraEnv={t.initialExtraEnv}
+                  initialTitle={t.initialTitle}
                   onStatus={(s) => reportStatus(t.id, s)}
                   onSessionUpdate={(s) => reportSession(t.id, s)}
                   onOpenSessionPanel={() => {

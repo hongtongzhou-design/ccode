@@ -66,6 +66,7 @@ src-tauri/src/
   agents.rs                  # 适配器：detect + launch_plan（env/args 注入规则，差异全在这里）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起逻辑，agent/shell 复用
   sessions.rs                # 会话浏览：扫描/解析五个 agent 会话（Claude/Codex/Gemini/Qwen/Kimi，含 .zst）、app.db session_meta、pin 快照、用户发起的删除
+  workspaces.rs              # 任务工作区（§6.10）：git worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT 端口段
   lib.rs                     # 模块与 Tauri command 注册
 ```
 
@@ -102,5 +103,8 @@ src-tauri/src/
   多标签终端、三平台 CI 工作流（.github/workflows/build.yml）
 - P2 ✅ 会话可视化：Claude/Codex/Gemini/Qwen 解析器、resume 链合并、项目聚合、
   pin 快照保留、tags/归档/搜索、SessionLink 终端↔会话联动（--session-id + 探测）
-- P3 OpenCode/Kimi 会话解析（SQLite/wire 协议）、token/费用统计、注意力标记（badge 思路）
+- P3 OpenCode/Kimi 会话解析（SQLite/wire 协议，**Kimi 已完成**）、token/费用统计、注意力标记（badge 思路）
 - P4 IDE 形态（文件树、Monaco）、本地 API 代理（可选）
+- W1 任务工作区核心闭环（§6.10 阶段 A：worktree 创建/归档/恢复、files-to-copy、端口注入、工作区页面）
+- W2 工作区自动化（阶段 B：.ccode/settings.toml、setup/archive/run 脚本）
+- W3 评审流（阶段 C：merge-base diff、合并回 base、gh PR、状态机）

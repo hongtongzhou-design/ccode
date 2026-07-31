@@ -39,6 +39,8 @@ pub struct SessionMetaDto {
     pub alive: bool, // 源文件是否还在（不在则回放走快照）
     /// Codex resume/fork 链长度（同一对话的多个 rollout 文件合并为一个条目）；非 Codex 恒为 1
     pub chain_count: usize,
+    /// 会话发生在任务工作区（git worktree）里时的工作区名（§6.10）；project_path 同时改写为真实仓库
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,7 +138,7 @@ fn iso_from_unix(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -144,7 +146,7 @@ fn now_iso() -> String {
     iso_from_unix(secs)
 }
 
-fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
             return format!("{}{}", home.to_string_lossy(), &path[1..]);
@@ -339,6 +341,7 @@ fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         tags: Vec::new(),
         alive,
         chain_count: 1,
+        workspace: None,
     })
 }
 
@@ -569,6 +572,7 @@ fn codex_file_meta(
             tags: Vec::new(),
             alive,
             chain_count: 1,
+            workspace: None,
         },
         forked_from_id,
     ))
@@ -836,6 +840,7 @@ fn gemini_file_meta(
         tags: Vec::new(),
         alive,
         chain_count: 1,
+        workspace: None,
     })
 }
 
@@ -1034,6 +1039,7 @@ fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMet
         tags: Vec::new(),
         alive,
         chain_count: 1,
+        workspace: None,
     })
 }
 
@@ -1248,6 +1254,7 @@ fn kimi_wire_file_meta(
         tags: Vec::new(),
         alive,
         chain_count: 1,
+        workspace: None,
     })
 }
 
@@ -1501,6 +1508,7 @@ fn kimi_legacy_file_meta(
         tags: Vec::new(),
         alive,
         chain_count: 1,
+        workspace: None,
     })
 }
 
@@ -1765,10 +1773,39 @@ pub fn scan_sessions() -> ScanResult {
             }
         }
     }
+    // 工作区 worktree 里的会话归并回「真实仓库 + 工作区名」（§6.10 ProjectAggregator 咬合点）
+    let wt_rows = crate::workspaces::worktree_rows();
+    if !wt_rows.is_empty() {
+        for s in &mut out {
+            if let Some((repo, ws)) = resolve_worktree_project(&s.project_path, &wt_rows) {
+                s.project_path = repo;
+                s.workspace = Some(ws);
+            }
+        }
+    }
     ScanResult {
         sessions: out,
         chain_members,
     }
+}
+
+/// 会话的项目路径落在某个工作区 worktree 内（含子目录）时，返回 (真实仓库路径, 工作区名)；
+/// 最长前缀优先，找不到返回 None（保持原样）
+fn resolve_worktree_project(
+    project_path: &str,
+    rows: &[crate::workspaces::WorktreeRow],
+) -> Option<(String, String)> {
+    let mut best: Option<&crate::workspaces::WorktreeRow> = None;
+    for r in rows {
+        let wt = r.worktree_path.trim_end_matches('/');
+        if project_path == wt || project_path.starts_with(&format!("{wt}/")) {
+            let len = wt.len();
+            if best.map_or(true, |b| len > b.worktree_path.trim_end_matches('/').len()) {
+                best = Some(r);
+            }
+        }
+    }
+    best.map(|r| (r.repo_path.clone(), r.name.clone()))
 }
 
 /// Codex resume/fork 会产生新 rollout 文件（session_meta.forked_from_id 指向父线程），
@@ -2465,6 +2502,7 @@ mod tests {
                 tags: Vec::new(),
                 alive: true,
                 chain_count: 1,
+                workspace: None,
             },
             fork.map(String::from),
         )
@@ -2876,6 +2914,32 @@ mod tests {
                 assert!(is_under_session_root(&inside));
             }
         }
+    }
+
+    #[test]
+    fn worktree_sessions_rewrite_to_real_repo() {
+        let rows = vec![
+            crate::workspaces::WorktreeRow {
+                worktree_path: "/home/u/ccode/workspaces/myrepo/feat-x".into(),
+                repo_path: "/home/u/code/myrepo".into(),
+                name: "feat-x".into(),
+            },
+            crate::workspaces::WorktreeRow {
+                worktree_path: "/home/u/ccode/workspaces/other/task".into(),
+                repo_path: "/home/u/code/other".into(),
+                name: "task".into(),
+            },
+        ];
+        // worktree 根命中
+        let hit = resolve_worktree_project("/home/u/ccode/workspaces/myrepo/feat-x", &rows);
+        assert_eq!(hit, Some(("/home/u/code/myrepo".into(), "feat-x".into())));
+        // worktree 子目录也命中
+        let sub = resolve_worktree_project("/home/u/ccode/workspaces/other/task/src", &rows);
+        assert_eq!(sub, Some(("/home/u/code/other".into(), "task".into())));
+        // 普通项目路径不受影响；相似前缀（feat-xy）不误判
+        assert!(resolve_worktree_project("/home/u/code/myrepo", &rows).is_none());
+        assert!(resolve_worktree_project("/home/u/ccode/workspaces/myrepo/feat-xy", &rows).is_none());
+        assert!(resolve_worktree_project("/anywhere", &[]).is_none());
     }
 }
 

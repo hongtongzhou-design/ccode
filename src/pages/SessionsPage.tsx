@@ -540,6 +540,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   <div className="mt-1 flex items-center gap-2 text-xs text-l3">
                     <span>{relTime(s.updatedAt)}</span>
                     <span>{agentLabel(s.agent)}</span>
+                    {s.workspace && (
+                      <span
+                        className="rounded bg-inset px-1 text-l3"
+                        title={`工作区「${s.workspace}」的会话`}
+                      >
+                        ⎇ {s.workspace}
+                      </span>
+                    )}
                     <span className="truncate">{basename(s.projectPath)}</span>
                     {s.tokenUsage && <span>{fmtTokens(s.tokenUsage)}</span>}
                     {s.tags.map((t) => (

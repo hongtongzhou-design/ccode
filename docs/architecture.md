@@ -125,6 +125,18 @@ struct Project {               // 聚合后的项目条目
     pinned: bool, hidden: bool, tags: Vec<String>,  // 用户可整理
 }
 
+struct Workspace {             // 任务工作区（借鉴 Conductor，§6.10）
+    id: Uuid,
+    repo_path: PathBuf,        // 所属 git 仓库（主工作树）
+    name: String,              // 任务名（目录名 <repo>/<name>）
+    branch: String,            // ccode/<name>，评审与合并单元
+    worktree_path: PathBuf,    // ~/ccode/workspaces/<repo>/<name>
+    base_branch: String,       // 创建时的基准分支（如 origin/main）
+    port_base: u16,            // 分配的端口段起点（CCODE_PORT..+9）
+    status: Active | ReadyToMerge | Archived,
+    created_at: DateTime, archived_at: Option<DateTime>,
+}
+
 struct SessionMeta {           // 索引条目，列表页用
     agent: AgentId,
     session_id: String,
@@ -226,6 +238,47 @@ VS Code 的五区布局（活动栏/侧栏/编辑器区/面板/状态栏）映�
 - **改动面板（借鉴 VS Code Source Control 与 Codex 环境信息）**：右栏第三页签，量化 agent 的工作成果——当前分支、领先/落后远程、对比 HEAD 的 `+/-` 行数（含未跟踪文件）、文件级列表；提交信息输入 + 「提交」「提交并推送」一键操作（`git add -A`），8 秒轮询刷新，非 git 仓库明确提示。git 写操作只由用户点击触发，命令输出与错误回显。
 - **明确不借鉴**：VS Code 服务化 workbench 架构（过重）；文件树 git 装饰（标改动）留 P4；真正的编辑器留 P4 Monaco，预览只读先行。
 
+### 6.10 任务工作区编排（借鉴 Conductor，全量整合）
+
+Conductor 的核心模型「工作区 = git worktree + 分支」解决我们的并行冲突隐患：现在多个终端标签在同一目录跑 agent 会共享文件与 git 状态。整合方案：
+
+**工作区模型与位置**
+- 位置：`~/ccode/workspaces/<repo名>/<任务名>/`（worktree 实体）；元数据存 `app.db` 的 `workspaces` 表
+- 一个工作区 = 一条 `ccode/<任务名>` 分支 + 一个 worktree；分支是评审与合并单元
+- worktree 与主仓库共享对象库，创建是秒级；归档只移除 worktree 不删分支，可恢复（含会话历史）
+
+**生命周期**
+1. **创建**：选仓库（项目聚合列表或手选）→ `git fetch`（best effort）→ 从 `origin/<base>` 拉分支 `ccode/<name>` → `git worktree add` → **files-to-copy**（`.env*` 等 gitignored 文件按 `.ccode/settings.toml` 的 `files_to_copy` 复制进 worktree）→ **setup 脚本** → 自动开终端标签（cwd = worktree，注入端口段 `CCODE_PORT..CCODE_PORT+9`）
+2. **工作**：现有三带工作区全部适用；git 面板的 diff 基准从 HEAD 改为 `merge-base(base, branch)`，能看到任务累计改动
+3. **合并**：改动面板扩展——提交后可选「合并回 `<base>`」（本地 merge）或「创建 PR」（复用机器上的 `gh` CLI 认证，不做应用内 GitHub 登录）；冲突时提示让 agent 解决
+4. **归档**：跑 archive 脚本 → `git worktree remove --force`（保留分支）→ 状态 Archived；恢复 = 从分支重新 `worktree add`
+
+**项目级配置**（三层合并：用户级 `~/.config/ccode/settings.toml` → 仓库 `.ccode/settings.toml`（可提交共享）→ `.ccode/settings.local.toml`（本地覆盖））：
+```toml
+files_to_copy = [".env", ".env.local"]
+run_mode = "concurrent"            # nonconcurrent 时 run 按钮互斥
+[scripts]
+setup = "pnpm install"
+archive = "docker compose down"
+[scripts.run]
+web = { command = "pnpm dev", default = true }
+test = { command = "pnpm test" }
+```
+run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=nonconcurrent 保证单实例。
+
+**与现有架构的咬合点**
+- ProjectAggregator：worktree 路径（`~/ccode/workspaces/...`）的会话归并到「仓库 + 工作区名」标签下，不散落成独立项目
+- 终端标签：携带 workspace 徽标；「运行中」面板可按工作区分组
+- 会话/pin/回放：无变化（路径自然落进 worktree 目录的会话记录里）
+- 端口注入走 pty 的 spawn env，与 profile env 叠加
+
+**分阶段实施**
+- **阶段 A（核心闭环）**：Workspace 模型与 app.db 表、创建/归档/恢复/删除、files-to-copy、端口注入、ProjectAggregator 归并、新「工作区」页面（仓库 → 工作区列表 + 状态 + 打开终端）
+- **阶段 B（自动化）**：`.ccode/settings.toml` 三层合并、setup/archive 脚本执行、run 脚本按钮
+- **阶段 C（评审流）**：diff 基准改 merge-base、合并回 base、gh PR 创建、状态机（ReadyToMerge 判定：无未提交改动且与 base 无冲突）
+
+**明确不做**：云工作区、多人协作、应用内 GitHub 登录、城市命名游戏化、agent 系统提示注入（后续按需）。
+
 ## 7. 技术选型清单
 
 | 层 | 选型 | 理由 |
@@ -249,8 +302,11 @@ VS Code 的五区布局（活动栏/侧栏/编辑器区/面板/状态栏）映�
 - **P0 — 骨架跑通**：Tauri 工程 + Profile CRUD（含钥匙串）+ Claude Code / Codex 两个 adapter 的 detect + 注入式 launch + 单标签内嵌终端。验收：在 app 里用「中转 profile」拉起 claude 并对话。
 - **P1 — 配置中心完整**：其余四个 adapter 的 detect + launch；全局写入模式（含备份/恢复）；多标签终端；启动面板；**接入 GitHub Actions 三平台构建**。
 - **P2 — 会话可视化**：SessionIndexer + 四个 jsonl 系 parser（Claude/Codex/Gemini/Qwen）+ **ProjectAggregator** + 项目 → 会话 → 回放三级页面 + **会话分类与保留（session_meta 表 + pin 快照，§6.5）** + 全局搜索 + 文件监听准实时刷新 + **SessionLink 终端联动**。
-- **P3 — 会话可视化补全**：OpenCode（SQLite + legacy JSON 双解析）、Kimi 双版本 wire 协议解析、**token/费用统计面板**。
+- **P3 — 会话可视化补全**：OpenCode（SQLite + legacy JSON 双解析）、Kimi 双版本 wire 协议解析（**已提前完成**）、**token/费用统计面板**。
 - **P4 — IDE 形态**：项目文件树、Monaco 编辑器、（可选）本地 API 代理用于精确计费/实时结构化对话。
+- **W1 — 任务工作区核心闭环（§6.10 阶段 A）**：Workspace 模型、创建/归档/恢复、files-to-copy、端口注入、工作区页面、ProjectAggregator 归并。
+- **W2 — 工作区自动化（阶段 B）**：`.ccode/settings.toml` 三层配置、setup/archive/run 脚本。
+- **W3 — 评审流（阶段 C）**：merge-base diff、合并回 base、gh PR 创建、工作区状态机。
 
 ## 9. 主要风险与对策
 
@@ -273,3 +329,4 @@ VS Code 的五区布局（活动栏/侧栏/编辑器区/面板/状态栏）映�
 | v0.3 | 密钥存储弃用系统钥匙串，改 0600 `keys.json`（macOS 钥匙串 ACL 与未签名开发构建冲突导致密钥丢失）；借鉴 CC Switch 落地：原子写入（tmp+rename）、内置端点预设（只收官方/公开端点）、profile 导入导出（不含密钥）；Claude 多模型经 `ANTHROPIC_DEFAULT_*_MODEL` 别名槽注册进 `/model` 选择器（最多 5 槽） |
 | v0.4 | 借鉴 Wave Terminal 细化会话设计（§6.5）：pin 即保留（快照拷贝到自家目录，对抗 CLI 自动清除/格式迁移）；整理数据（pinned/tags/custom_title）存 app.db 不碰源文件；分类 = 项目聚合 + tags + 状态三维度；全局搜索作为差异化做透。明确不借鉴：序列化终端缓冲区快照（与解析路线重复）、AI 会话内存存储（不可靠） |
 | v0.5 | 参考实现扩展为三个（+ VS Code，长期有效）；新增 §6.9 工作区设计：工作树（懒加载+只读预览）+ 运行中总览面板 + 终端页三带布局；多模型切换按各 CLI 机制实现（claude 别名槽 / codex model_catalog_json / qwen modelProviders / kimi [models.*] / opencode provider.models / gemini 手输）；会话删除为用户显式指令的只读原则例外 |
+| v0.6 | 全站暖黑主题（Conductor 风，令牌集中 `src/App.css` @theme，禁蓝色系，用户否决浅色+渐变方案）；安装/更新命令必须 PTY 执行（管道块缓冲坑）；brew 走 TUNA 镜像；**全量采纳 Conductor 工作区编排**（§6.10）：任务工作区 = git worktree + 分支，分 A/B/C 三阶段实施（W1/W2/W3）；明确不做云工作区/多人协作/应用内 GitHub 登录；重大改变沉淀规则到 AGENTS.md + 本节（用户指令） |

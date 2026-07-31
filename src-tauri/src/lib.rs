@@ -7,6 +7,7 @@ mod profiles;
 mod pty;
 mod sessions;
 mod updater;
+mod workspaces;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -50,6 +51,12 @@ pub fn run() {
             updater::install_agent,
             updater::install_method_preview,
             updater::updater_write,
+            workspaces::create_workspace,
+            workspaces::list_workspaces,
+            workspaces::archive_workspace,
+            workspaces::restore_workspace,
+            workspaces::delete_workspace,
+            workspaces::workspace_env_for,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
