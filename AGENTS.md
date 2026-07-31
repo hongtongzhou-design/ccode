@@ -109,8 +109,8 @@ src-tauri/src/
   多标签终端、三平台 CI 工作流（.github/workflows/build.yml）
 - P2 ✅ 会话可视化：Claude/Codex/Gemini/Qwen 解析器、resume 链合并、项目聚合、
   pin 快照保留、tags/归档/搜索、SessionLink 终端↔会话联动（--session-id + 探测）
-- P3 OpenCode/Kimi 会话解析（SQLite/wire 协议，**Kimi 已完成**）、token/费用统计、注意力标记（badge 思路）
-- P4 IDE 形态（文件树、Monaco）、本地 API 代理（可选）
+- P3 OpenCode/Kimi 会话解析（SQLite/wire 协议，**全部完成**）✅、token/费用统计（统计页）✅、注意力标记（终端标签/运行中面板）✅
+- P4 IDE 形态 ✅（Monaco 编辑器可编辑保存、文件树 git 装饰、notify 文件监听自动刷新）；本地 API 代理（可选，未做）
 - W1 任务工作区核心闭环 ✅（worktree 创建/归档/恢复、files-to-copy、端口注入、工作区页面、会话归并；用户验收通过）
 - W2 工作区自动化 ✅（.ccode/settings.toml 三层合并、setup/archive 脚本钩子、run 脚本按钮 + nonconcurrent 互斥）
 - W3 评审流 ✅（merge-base 任务 diff、workspace_health 状态机、本地合并+归档、gh PR 创建）
