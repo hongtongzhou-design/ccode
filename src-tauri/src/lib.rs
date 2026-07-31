@@ -58,6 +58,7 @@ pub fn run() {
             workspaces::restore_workspace,
             workspaces::delete_workspace,
             workspaces::workspace_env_for,
+            workspaces::list_repos,
             ws_settings::workspace_settings,
         ])
         .run(tauri::generate_context!())

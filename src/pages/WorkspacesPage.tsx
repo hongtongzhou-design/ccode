@@ -2,12 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
-import type { RunScriptDto, WorkspaceDto, WsSettingsDto } from "../types";
-
-function basename(p: string): string {
-  const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
-  return parts[parts.length - 1] || p;
-}
+import type { RepoDto, RunScriptDto, WorkspaceDto, WsSettingsDto } from "../types";
 
 function relTime(iso: string | null): string {
   if (!iso) return "";
@@ -55,14 +50,22 @@ function NewWorkspaceModal({
   onClose: () => void;
   onCreated: (ws: WorkspaceDto) => void;
 }) {
-  const sessions = useAppStore((s) => s.sessions);
-  // 候选仓库：会话里出现过的项目路径（去重保序）
-  const repoOptions = [...new Set(sessions.map((s) => s.projectPath))];
-  const [repoChoice, setRepoChoice] = useState(repoOptions[0] ?? "");
+  const [repoOptions, setRepoOptions] = useState<RepoDto[]>([]);
+  const [repoChoice, setRepoChoice] = useState("");
   const [customPath, setCustomPath] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+
+  // 候选仓库：后端聚合的会话目录，已过滤为真实存在的 git 仓库（排除 home 与 worktree 路径）
+  useEffect(() => {
+    invoke<RepoDto[]>("list_repos")
+      .then((repos) => {
+        setRepoOptions(repos);
+        setRepoChoice((c) => c || repos[0]?.path || "__custom__");
+      })
+      .catch(() => setRepoChoice("__custom__"));
+  }, []);
 
   const repoPath = repoChoice === "__custom__" ? customPath.trim() : repoChoice;
   const branch = `ccode/${sanitizeBranch(name)}`;
@@ -102,9 +105,9 @@ function NewWorkspaceModal({
             value={repoChoice}
             onChange={(e) => setRepoChoice(e.target.value)}
           >
-            {repoOptions.map((p) => (
-              <option key={p} value={p} title={p}>
-                {basename(p)}（{p}）
+            {repoOptions.map((r) => (
+              <option key={r.path} value={r.path} title={r.path}>
+                {r.name}（{r.path}）
               </option>
             ))}
             <option value="__custom__">其他目录…</option>
@@ -191,7 +194,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       setSettings((prev) => {
         const next = { ...prev };
         for (const e of entries) {
-          if (e && !(e[0] in next)) next[e[0]] = e[1];
+          // 每次刷新无条件覆盖：settings.toml 新建/修改后回到本页即生效
+          if (e) next[e[0]] = e[1];
         }
         return next;
       });

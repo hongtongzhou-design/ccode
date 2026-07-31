@@ -94,6 +94,11 @@ export interface WorkspaceDto {
   setupResult: SetupResultDto | null;
 }
 
+export interface RepoDto {
+  path: string;
+  name: string;
+}
+
 /** 项目级 .ccode/settings.toml 三层合并结果（W2） */
 export interface RunScriptDto {
   name: string;

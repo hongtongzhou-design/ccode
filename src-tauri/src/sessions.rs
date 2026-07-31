@@ -1991,7 +1991,7 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
 /// 扫描结果缓存 10 秒：同步 command 跑在主线程上，列表每 5 秒全量扫几百个文件会卡 UI
 static SCAN_CACHE: OnceLock<Mutex<Option<(Instant, ScanResult)>>> = OnceLock::new();
 
-fn cached_scan() -> ScanResult {
+pub(crate) fn cached_scan() -> ScanResult {
     let m = SCAN_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = m.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, res)) = &*guard {

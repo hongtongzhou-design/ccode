@@ -1,0 +1,12 @@
+# Ccode 工作区配置（本项目自用）
+# 文档见 docs/architecture.md §6.10
+
+run_mode = "concurrent"
+
+[scripts]
+setup = "npm install"
+
+[scripts.run]
+dev = { command = "npm run tauri dev -- --config \"{\\\"build\\\":{\\\"devUrl\\\":\\\"http://localhost:$CCODE_PORT\\\"}}\"", default = true }
+test = { command = "cd src-tauri && cargo test" }
+build = { command = "npm run build" }

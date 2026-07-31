@@ -578,6 +578,47 @@ pub async fn workspace_env_for(worktree_path: String) -> Vec<(String, String)> {
     .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoDto {
+    pub path: String,
+    pub name: String,
+}
+
+/// 新建工作区的仓库候选：来自会话聚合目录，只保留真实存在的 git 仓库，
+/// 排除 home 目录与 worktree 路径（非 git 仓库创建必失败，混杂会误导用户）
+#[tauri::command]
+pub async fn list_repos() -> Vec<RepoDto> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let home = dirs::home_dir();
+        let ws_root = workspaces_root().unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        crate::sessions::cached_scan()
+            .sessions
+            .into_iter()
+            .filter_map(|s| std::fs::canonicalize(&s.project_path).ok())
+            .filter(|p| {
+                p.is_dir()
+                    && Some(p.clone()) != home
+                    && !p.starts_with(&ws_root)
+                    && seen.insert(p.clone())
+            })
+            .filter(|p| {
+                run_git(p, &["rev-parse", "--git-dir"], Duration::from_secs(5)).is_ok()
+            })
+            .map(|p| RepoDto {
+                name: p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "repo".into()),
+                path: p.to_string_lossy().into_owned(),
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
