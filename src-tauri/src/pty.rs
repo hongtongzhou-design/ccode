@@ -3,13 +3,24 @@ use crate::profiles::{self, ProfileStore};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+
+/// 输出合帧周期：每个 PTY 每 50ms 最多一个 IPC 事件
+const FRAME: Duration = Duration::from_millis(50);
+/// 隐藏标签的输出缓冲上限（1 MB）
+const BACKLOG_CAP: usize = 1024 * 1024;
+const TRUNC_MARK: &str = "[…输出过多已截断]\n";
 
 struct PtyEntry {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
+    /// 标签可见才推流；不可见时输出进 backlog（优化 2）
+    visible: Arc<AtomicBool>,
+    backlog: Arc<Mutex<Vec<u8>>>,
 }
 
 #[derive(Default)]
@@ -32,6 +43,124 @@ pub(crate) fn split_utf8(buf: &[u8]) -> (String, usize) {
                 (String::new(), 0)
             }
         }
+    }
+}
+
+/// 输出合帧（优化 1）：读取线程只负责 append，发送线程按帧合并发出。
+/// 帧内唤醒会重新评估等待时长；距上次发送已满一帧则立即发（回显无延迟）。
+struct FrameCoalescer {
+    pending: Mutex<Vec<u8>>,
+    cond: Condvar,
+    done: AtomicBool,
+}
+
+impl FrameCoalescer {
+    fn new() -> Self {
+        Self {
+            pending: Mutex::new(Vec::new()),
+            cond: Condvar::new(),
+            done: AtomicBool::new(false),
+        }
+    }
+
+    fn append(&self, bytes: &[u8]) {
+        self.pending.lock().unwrap().extend_from_slice(bytes);
+        self.cond.notify_one();
+    }
+
+    /// 输出流结束：最后一帧立即发，之后 take_frame 返回 None
+    fn finish(&self) {
+        self.done.store(true, Ordering::Relaxed);
+        self.cond.notify_one();
+    }
+
+    /// 取下一帧文本；EOF 且缓冲清空后返回 None（发送线程据此退出）
+    fn take_frame(&self, last_emit: Instant, frame: Duration) -> Option<(String, Instant)> {
+        let mut pending = self.pending.lock().unwrap();
+        loop {
+            let done = self.done.load(Ordering::Relaxed);
+            if pending.is_empty() {
+                if done {
+                    return None;
+                }
+                pending = self.cond.wait(pending).unwrap();
+                continue;
+            }
+            let elapsed = last_emit.elapsed();
+            if done || elapsed >= frame {
+                let (text, used) = split_utf8(&pending);
+                if used > 0 {
+                    pending.drain(..used);
+                    return Some((text, Instant::now()));
+                }
+                // 只剩残缺的 UTF-8 尾部：EOF 时按 lossy 全发，否则等更多数据
+                if done {
+                    let text = String::from_utf8_lossy(&pending).into_owned();
+                    pending.clear();
+                    return Some((text, Instant::now()));
+                }
+                pending = self.cond.wait(pending).unwrap();
+                continue;
+            }
+            // 帧内：睡到帧尾再合并发；新数据唤醒会重算剩余时长
+            let (guard, _) = self
+                .cond
+                .wait_timeout(pending, frame - elapsed)
+                .unwrap();
+            pending = guard;
+        }
+    }
+}
+
+fn is_utf8_boundary(b: u8) -> bool {
+    b < 0x80 || b >= 0xc0
+}
+
+/// 追加到 backlog；超上限时从头部按 UTF-8 边界丢弃，并加一次性截断标记
+fn backlog_push(backlog: &mut Vec<u8>, bytes: &[u8]) {
+    backlog.extend_from_slice(bytes);
+    if backlog.len() > BACKLOG_CAP {
+        let mut drop = backlog.len() - BACKLOG_CAP;
+        while drop < backlog.len() && !is_utf8_boundary(backlog[drop]) {
+            drop += 1;
+        }
+        backlog.drain(..drop);
+        if !backlog.starts_with(TRUNC_MARK.as_bytes()) {
+            let mut marked = TRUNC_MARK.as_bytes().to_vec();
+            marked.extend_from_slice(backlog);
+            *backlog = marked;
+        }
+    }
+}
+
+/// 补发 backlog 中完整的 UTF-8 前缀（残缺尾部留到下次）；空或无完整内容返回 None
+fn drain_backlog(backlog: &mut Vec<u8>) -> Option<String> {
+    let (text, used) = split_utf8(backlog);
+    if used == 0 {
+        return None;
+    }
+    let rest = backlog.split_off(used);
+    *backlog = rest;
+    Some(text)
+}
+
+/// 可见性门控发送（优化 2）：可见 → 先补发 backlog 再发本块；不可见 → 进 backlog。
+/// 与 pty_set_visible 共用同一把 backlog 锁，保证补发严格先于实时块。
+fn gated_emit(
+    app: &AppHandle,
+    event: &str,
+    visible: &AtomicBool,
+    backlog: &Mutex<Vec<u8>>,
+    text: &str,
+) {
+    let mut bl = backlog.lock().unwrap();
+    if visible.load(Ordering::Relaxed) {
+        if let Some(back) = drain_backlog(&mut bl) {
+            let _ = app.emit(event, back);
+        }
+        let _ = app.emit(event, text.to_string());
+    } else {
+        backlog_push(&mut bl, text.as_bytes());
     }
 }
 
@@ -100,41 +229,53 @@ fn spawn_tracked(
         .map_err(|e| format!("写入 PTY 失败: {e}"))?;
 
     let pty_id = uuid::Uuid::new_v4().to_string();
+    let visible = Arc::new(AtomicBool::new(false)); // 默认不可见：前端随即按标签状态标记
+    let backlog = Arc::new(Mutex::new(Vec::new()));
     manager.entries.lock().unwrap().insert(
         pty_id.clone(),
         PtyEntry {
             writer,
             master: pair.master,
             child,
+            visible: visible.clone(),
+            backlog: backlog.clone(),
         },
     );
+
+    let coalescer = Arc::new(FrameCoalescer::new());
+    let out_event = format!("pty-output-{pty_id}");
+    let exit_event = format!("pty-exit-{pty_id}");
+
+    // 发送线程：按 50ms 帧合并发出（优化 1），经可见性门控（优化 2）
+    let emitter = {
+        let coalescer = coalescer.clone();
+        let app = app.clone();
+        let out_event = out_event.clone();
+        std::thread::spawn(move || {
+            let mut last_emit = Instant::now() - FRAME; // 首字节立即发
+            while let Some((text, at)) = coalescer.take_frame(last_emit, FRAME) {
+                gated_emit(&app, &out_event, &visible, &backlog, &text);
+                last_emit = at;
+            }
+        })
+    };
 
     let entries = manager.entries.clone();
     let id = pty_id.clone();
     let app = app.clone();
-    let out_event = format!("pty-output-{pty_id}");
-    let exit_event = format!("pty-exit-{pty_id}");
     std::thread::spawn(move || {
         let mut reader = reader;
-        let mut pending: Vec<u8> = Vec::new();
         loop {
             let mut buf = [0u8; 8192];
             match reader.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => {
-                    pending.extend_from_slice(&buf[..n]);
-                    let (text, used) = split_utf8(&pending);
-                    if used > 0 {
-                        let _ = app.emit(&out_event, text);
-                        pending.drain(..used);
-                    }
-                }
+                Ok(n) => coalescer.append(&buf[..n]),
                 Err(_) => break,
             }
         }
-        if !pending.is_empty() {
-            let _ = app.emit(&out_event, String::from_utf8_lossy(&pending).into_owned());
-        }
+        coalescer.finish();
+        // 等发送线程把尾帧发完，再发退出事件，保证输出先于退出到达
+        let _ = emitter.join();
         // 输出流结束视为进程结束；谁先移除 entry 谁负责回收并发退出事件
         let entry = entries.lock().unwrap().remove(&id);
         if let Some(mut entry) = entry {
@@ -287,6 +428,29 @@ pub fn pty_resize(
         .map_err(|e| format!("调整终端尺寸失败: {e}"))
 }
 
+/// 标记标签可见性（优化 2）：翻转为可见时在同一把 backlog 锁内补发积压输出，
+/// 与发送线程的 gated_emit 互斥，保证补发严格先于之后的实时输出
+#[tauri::command]
+pub fn pty_set_visible(
+    app: AppHandle,
+    manager: tauri::State<'_, PtyManager>,
+    pty_id: String,
+    visible: bool,
+) -> Result<(), String> {
+    let entries = manager.entries.lock().unwrap();
+    let entry = entries.get(&pty_id).ok_or("终端不存在或已退出")?;
+    if visible {
+        let mut bl = entry.backlog.lock().unwrap();
+        entry.visible.store(true, Ordering::Relaxed);
+        if let Some(text) = drain_backlog(&mut bl) {
+            let _ = app.emit(&format!("pty-output-{pty_id}"), text);
+        }
+    } else {
+        entry.visible.store(false, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn pty_kill(
     app: AppHandle,
@@ -332,5 +496,95 @@ mod tests {
         for agent in ["codex", "gemini", "opencode", "kimi", "unknown"] {
             assert!(session_id_for(agent).is_none(), "{agent} 不支持 --session-id");
         }
+    }
+
+    // ===== 优化 1：输出合帧 =====
+
+    #[test]
+    fn coalescer_emits_immediately_when_idle() {
+        let c = FrameCoalescer::new();
+        c.append(b"a");
+        let frame = Duration::from_millis(40);
+        let last = Instant::now() - Duration::from_secs(1);
+        let start = Instant::now();
+        let (text, _) = c.take_frame(last, frame).unwrap();
+        assert_eq!(text, "a");
+        assert!(start.elapsed() < Duration::from_millis(30), "空闲后应立即发送");
+    }
+
+    #[test]
+    fn coalescer_merges_within_frame_and_flushes_tail() {
+        let c = FrameCoalescer::new();
+        let frame = Duration::from_millis(40);
+        c.append(b"burst-1;");
+        let (_, at) = c.take_frame(Instant::now() - Duration::from_secs(1), frame).unwrap();
+        // 帧内连续到达：应等待到帧尾合并发出
+        c.append(b"burst-2;");
+        c.append(b"burst-3");
+        let start = Instant::now();
+        let (text, _) = c.take_frame(at, frame).unwrap();
+        let waited = start.elapsed();
+        assert_eq!(text, "burst-2;burst-3");
+        assert!(
+            waited >= Duration::from_millis(25),
+            "帧内不应立即发送（应合帧），实际等了 {waited:?}"
+        );
+        // 尾部无新数据：下一帧在帧尾前内必须发出
+        c.append(b"tail");
+        let start = Instant::now();
+        let (text, _) = c.take_frame(Instant::now(), frame).unwrap();
+        assert_eq!(text, "tail");
+        assert!(start.elapsed() <= frame * 2, "尾部 flush 不得超过一帧");
+    }
+
+    #[test]
+    fn coalescer_finish_flushes_then_returns_none() {
+        let c = FrameCoalescer::new();
+        c.append("中文结尾".as_bytes());
+        c.finish();
+        let (text, _) = c
+            .take_frame(Instant::now(), Duration::from_millis(40))
+            .expect("EOF 应立即 flush，不等帧");
+        assert_eq!(text, "中文结尾");
+        assert!(c.take_frame(Instant::now(), Duration::from_millis(40)).is_none());
+    }
+
+    // ===== 优化 2：隐藏标签缓冲 =====
+
+    #[test]
+    fn backlog_cap_truncates_on_utf8_boundary_with_marker() {
+        let mut bl = Vec::new();
+        // 反复推入含多字节字符的内容直到超限
+        let chunk = "数据块-中文-".repeat(1000);
+        while bl.len() <= BACKLOG_CAP {
+            backlog_push(&mut bl, chunk.as_bytes());
+        }
+        assert!(bl.len() <= BACKLOG_CAP + TRUNC_MARK.len());
+        assert!(bl.starts_with(TRUNC_MARK.as_bytes()), "应有截断标记");
+        // 去掉标记后必须是合法 UTF-8（从字符边界截断）
+        let body = &bl[TRUNC_MARK.len()..];
+        assert!(std::str::from_utf8(body).is_ok(), "截断后必须是合法 UTF-8");
+    }
+
+    #[test]
+    fn visibility_flip_drains_backlog_before_live_emit() {
+        // 模拟：隐藏期积压 → 翻转为可见（pty_set_visible 的锁内补发）→ 实时块
+        let visible = AtomicBool::new(false);
+        let mut bl: Vec<u8> = Vec::new();
+        // 隐藏期：两块输出进 backlog（含末尾残缺多字节，应留到下次）
+        backlog_push(&mut bl, "hidden-中".as_bytes());
+        backlog_push(&mut bl, "文".as_bytes()[..2].as_ref());
+        assert!(!visible.load(Ordering::Relaxed));
+        // 翻转为可见：先置 flag 再补发（与命令同序）
+        visible.store(true, Ordering::Relaxed);
+        let drained = drain_backlog(&mut bl);
+        assert_eq!(drained.as_deref(), Some("hidden-中"));
+        // 残缺尾部（"文" 的前 2 字节）仍在 backlog，等补齐后随下一块发出
+        assert!(!bl.is_empty());
+        backlog_push(&mut bl, "文".as_bytes()[2..].as_ref());
+        backlog_push(&mut bl, b"-live");
+        let drained2 = drain_backlog(&mut bl);
+        assert_eq!(drained2.as_deref(), Some("文-live"));
+        assert!(bl.is_empty());
     }
 }

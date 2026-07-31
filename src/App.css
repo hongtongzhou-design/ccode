@@ -66,3 +66,16 @@ body,
   height: 100%;
   margin: 0;
 }
+
+/* Ghostty 风格细滚动条：透明轨道 + 低对比拇指 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
