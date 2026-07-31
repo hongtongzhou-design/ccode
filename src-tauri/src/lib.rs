@@ -8,6 +8,7 @@ mod pty;
 mod sessions;
 mod skills;
 mod updater;
+mod usage;
 mod workspaces;
 mod ws_settings;
 
@@ -76,6 +77,8 @@ pub fn run() {
             skills::import_discovered,
             skills::export_skills,
             skills::read_skill_md,
+            usage::rebuild_usage_index,
+            usage::get_usage_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

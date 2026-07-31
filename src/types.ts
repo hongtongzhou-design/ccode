@@ -164,6 +164,43 @@ export interface DiscoveredSkillDto {
   fromAgent: string;
 }
 
+/** 用量统计（统计页） */
+export interface UsageCardsDto {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  sessions: number;
+  costUsd: number | null;
+}
+
+export interface AgentUsageDto {
+  agent: string;
+  tokens: number;
+  costUsd: number | null;
+}
+
+export interface ProjectUsageDto {
+  projectPath: string;
+  tokens: number;
+  sessions: number;
+  costUsd: number | null;
+}
+
+export interface ModelUsageDto {
+  model: string;
+  input: number;
+  output: number;
+  costUsd: number | null;
+}
+
+export interface UsageStatsDto {
+  cards: UsageCardsDto;
+  byAgent: AgentUsageDto[];
+  byProject: ProjectUsageDto[];
+  byModel: ModelUsageDto[];
+}
+
 export const AGENTS = [
   { id: "claude-code", label: "Claude Code", binary: "claude" },
   { id: "codex", label: "Codex", binary: "codex" },

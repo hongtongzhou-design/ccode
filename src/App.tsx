@@ -3,6 +3,7 @@ import "./App.css";
 import ProfilesPage from "./pages/ProfilesPage";
 import SessionsPage from "./pages/SessionsPage";
 import SkillsPage from "./pages/SkillsPage";
+import StatsPage from "./pages/StatsPage";
 import TerminalPage from "./pages/TerminalPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
 import { useAppStore } from "./store";
@@ -13,6 +14,7 @@ const NAV: { id: string; label: string }[] = [
   { id: "terminal", label: "终端" },
   { id: "sessions", label: "会话" },
   { id: "skills", label: "技能" },
+  { id: "stats", label: "统计" },
 ];
 
 function App() {
@@ -62,6 +64,9 @@ function App() {
         </div>
         <div className={page === "skills" ? "h-full" : "hidden"}>
           <SkillsPage visible={page === "skills"} />
+        </div>
+        <div className={page === "stats" ? "h-full" : "hidden"}>
+          <StatsPage visible={page === "stats"} />
         </div>
       </main>
     </div>

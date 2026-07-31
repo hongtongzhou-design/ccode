@@ -110,7 +110,7 @@ fn stringify_payload(v: Option<&Value>) -> String {
     }
 }
 
-fn to_lines(text: &str) -> Vec<String> {
+pub(crate) fn to_lines(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -121,7 +121,7 @@ fn to_lines(text: &str) -> Vec<String> {
 // ===== 时间格式化（避免仅为 mtime 格式化引入 chrono） =====
 
 /// Unix 秒 → ISO8601 UTC 字符串（Howard Hinnant 的 civil_from_days 算法）
-fn iso_from_unix(secs: u64) -> String {
+pub(crate) fn iso_from_unix(secs: u64) -> String {
     let days = (secs / 86400) as i64;
     let rem = secs % 86400;
     let (h, m, s) = (rem / 3600, rem % 3600 / 60, rem % 60);
@@ -185,7 +185,7 @@ fn maybe_decompress(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-fn read_session_bytes(path: &Path) -> Option<Vec<u8>> {
+pub(crate) fn read_session_bytes(path: &Path) -> Option<Vec<u8>> {
     let raw = fs::read(path).ok()?;
     Some(maybe_decompress(&raw))
 }
@@ -1610,6 +1610,518 @@ fn kimi_looks_like_wire(lines: &[String]) -> bool {
     })
 }
 
+// ===== OpenCode（v1.2+ 单一 SQLite；旧版 storage/ 扁平 JSON；agent id "opencode"） =====
+
+/// OPENCODE_DB 环境变量优先，其次 ~/.local/share/opencode/opencode.db
+fn opencode_db_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("OPENCODE_DB") {
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".local").join("share").join("opencode").join("opencode.db"))
+}
+
+/// WAL 模式只读打开 + busy_timeout；库不存在/打不开都返回 None（扫描时跳过）
+pub(crate) fn open_opencode_db(path: &Path) -> Option<Connection> {
+    if !path.exists() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(3));
+    Some(conn)
+}
+
+// drizzle 迁移频繁，列级防御：SELECT * 后按列名取值，缺列给默认值而不是报错
+pub(crate) fn query_rows(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> Vec<(Vec<String>, Vec<rusqlite::types::Value>)> {
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return Vec::new();
+    };
+    let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let Ok(rows) = stmt.query(params) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut rows = rows;
+    while let Ok(Some(row)) = rows.next() {
+        let mut vals = Vec::new();
+        for i in 0..names.len() {
+            vals.push(row.get::<_, rusqlite::types::Value>(i).unwrap_or(rusqlite::types::Value::Null));
+        }
+        out.push((names.clone(), vals));
+    }
+    out
+}
+
+// 行 -> 按名取值的小包装，复用 col_string/col_i64 的防御逻辑
+pub(crate) struct DbRow {
+    pub names: Vec<String>,
+    pub vals: Vec<rusqlite::types::Value>,
+}
+
+impl DbRow {
+    pub(crate) fn as_str(&self, key: &str) -> Option<String> {
+        self.names.iter().position(|n| n == key).and_then(|i| match &self.vals[i] {
+            rusqlite::types::Value::Text(s) => Some(s.clone()),
+            rusqlite::types::Value::Integer(n) => Some(n.to_string()),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn as_i64(&self, key: &str) -> Option<i64> {
+        self.names.iter().position(|n| n == key).and_then(|i| match &self.vals[i] {
+            rusqlite::types::Value::Integer(n) => Some(*n),
+            rusqlite::types::Value::Real(f) => Some(*f as i64),
+            _ => None,
+        })
+    }
+}
+
+fn opencode_ms_to_iso(ms: i64) -> String {
+    iso_from_unix(if ms >= 0 { (ms / 1000) as u64 } else { 0 })
+}
+
+fn opencode_usage(input: i64, output: i64, reasoning: i64, cache_read: i64, cache_write: i64) -> TokenUsageDto {
+    TokenUsageDto {
+        input: input as u64,
+        // reasoning 计入输出侧，与 Codex 口径一致
+        output: (output + reasoning) as u64,
+        cache_read: cache_read as u64,
+        cache_write: cache_write as u64,
+    }
+}
+
+fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
+    let Some(conn) = open_opencode_db(db_path) else {
+        return Vec::new();
+    };
+    // project_id → worktree（"global" 项目没有 worktree，回落 session.directory）
+    let mut worktrees: HashMap<String, String> = HashMap::new();
+    for row in query_rows(&conn, "SELECT * FROM project", &[]) {
+        let row = DbRow { names: row.0, vals: row.1 };
+        if let (Some(id), Some(wt)) = (row.as_str("id"), row.as_str("worktree")) {
+            worktrees.insert(id, wt);
+        }
+    }
+    let mut out = Vec::new();
+    for row in query_rows(&conn, "SELECT * FROM session", &[]) {
+        let row = DbRow { names: row.0, vals: row.1 };
+        let Some(id) = row.as_str("id") else {
+            continue;
+        };
+        let project_id = row.as_str("project_id").unwrap_or_default();
+        let directory = row.as_str("directory").unwrap_or_default();
+        let project_path = if project_id.is_empty() || project_id == "global" {
+            directory
+        } else {
+            worktrees.get(&project_id).cloned().unwrap_or(directory)
+        };
+        let t = |k: &str| row.as_i64(k).unwrap_or(0);
+        let token_usage = if t("tokens_input") + t("tokens_output") + t("tokens_reasoning") > 0 {
+            Some(opencode_usage(
+                t("tokens_input"),
+                t("tokens_output"),
+                t("tokens_reasoning"),
+                t("tokens_cache_read"),
+                t("tokens_cache_write"),
+            ))
+        } else {
+            None
+        };
+        out.push(SessionMetaDto {
+            agent: "opencode".into(),
+            session_id: id.clone(),
+            project_path,
+            title: row.as_str("title").filter(|t| !t.trim().is_empty()).map(|t| truncate_title(&t)),
+            created_at: row.as_i64("time_created").map(opencode_ms_to_iso),
+            updated_at: row.as_i64("time_updated").map(opencode_ms_to_iso),
+            // 没有单会话文件：db 路径 + "#" + session_id，pin/回放据此定位
+            file_path: format!("{}#{}", db_path.display(), id),
+            token_usage,
+            cli_version: row.as_str("version"),
+            pinned: false,
+            archived: false,
+            custom_title: None,
+            tags: Vec::new(),
+            alive: true, // 行在即在
+            chain_count: 1,
+            workspace: None,
+        });
+    }
+    out
+}
+
+/// part.data → 块：text / reasoning→thinking / tool→tool_use(+tool_result)；
+/// step-start/finish、file、snapshot、agent、retry、subtask、compaction 等一律跳过
+fn opencode_part_blocks(data: &Value) -> Vec<BlockDto> {
+    let mut blocks = Vec::new();
+    match get_str(data, "type") {
+        Some("text") => {
+            if let Some(t) = get_str(data, "text") {
+                if !t.trim().is_empty() {
+                    blocks.push(text_block(t.to_string()));
+                }
+            }
+        }
+        Some("reasoning") => {
+            if let Some(t) = get_str(data, "text") {
+                if !t.trim().is_empty() {
+                    blocks.push(BlockDto {
+                        kind: "thinking".into(),
+                        text: t.to_string(),
+                        tool_name: None,
+                    });
+                }
+            }
+        }
+        Some("tool") => {
+            let state = data.get("state");
+            let input = state.and_then(|s| s.get("input"));
+            blocks.push(BlockDto {
+                kind: "tool_use".into(),
+                text: input.map(|i| i.to_string()).unwrap_or_default(),
+                tool_name: get_str(data, "tool").map(String::from),
+            });
+            // 完成给 output、失败给 error；进行中的调用只有 tool_use
+            let result = state.and_then(|s| s.get("output")).map(|v| stringify_payload(Some(v)));
+            let error = state.and_then(|s| s.get("error")).map(|v| stringify_payload(Some(v)));
+            let text = match (result, error) {
+                (Some(o), _) if !o.is_empty() => o,
+                (_, Some(e)) if !e.is_empty() => e,
+                _ => String::new(),
+            };
+            if !text.is_empty() {
+                blocks.push(BlockDto {
+                    kind: "tool_result".into(),
+                    text,
+                    tool_name: None,
+                });
+            }
+        }
+        _ => {}
+    }
+    blocks
+}
+
+/// 用户消息文本：summary.body（或字符串 summary）→ parts 里的 text
+fn opencode_user_text(data: &Value, parts: &[&Value]) -> Option<String> {
+    let summary = data.get("summary");
+    let from_summary = summary
+        .and_then(|s| get_str(s, "body").or_else(|| s.as_str()))
+        .filter(|t| !t.trim().is_empty())
+        .map(String::from);
+    from_summary.or_else(|| {
+        let text = parts
+            .iter()
+            .filter_map(|p| {
+                if get_str(p, "type") == Some("text") {
+                    get_str(p, "text")
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    })
+}
+
+/// message.data + 其 parts → ChatMessageDto；非 user/assistant 返回 None
+fn opencode_message(data: &Value, parts: Vec<&Value>, ts_ms: Option<i64>) -> Option<ChatMessageDto> {
+    let ts = ts_ms
+        .or_else(|| data.get("time").and_then(|t| t.get("created")).and_then(|t| t.as_i64()))
+        .map(opencode_ms_to_iso);
+    match get_str(data, "role") {
+        Some("user") => {
+            let text = opencode_user_text(data, &parts)?;
+            Some(ChatMessageDto {
+                role: "user".into(),
+                blocks: vec![text_block(text)],
+                timestamp: ts,
+                usage: None,
+            })
+        }
+        Some("assistant") => {
+            let mut blocks = Vec::new();
+            for p in parts {
+                blocks.extend(opencode_part_blocks(p));
+            }
+            if blocks.is_empty() {
+                return None;
+            }
+            let usage = data.get("tokens").map(|t| {
+                let num = |k: &str| t.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+                let cache = t.get("cache");
+                let cnum = |k: &str| cache.and_then(|c| c.get(k)).and_then(|x| x.as_i64()).unwrap_or(0);
+                opencode_usage(num("input"), num("output"), num("reasoning"), cnum("read"), cnum("write"))
+            });
+            Some(ChatMessageDto {
+                role: "assistant".into(),
+                blocks,
+                timestamp: ts,
+                usage,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn opencode_parse_db(db_path: &Path, session_id: &str) -> Vec<ChatMessageDto> {
+    let Some(conn) = open_opencode_db(db_path) else {
+        return Vec::new();
+    };
+    let sid = session_id.to_string();
+    // parts 按 message_id 分组（part 表带 session_id 列，按时间序）
+    let mut parts_by_msg: HashMap<String, Vec<Value>> = HashMap::new();
+    for row in query_rows(&conn, "SELECT * FROM part WHERE session_id=? ORDER BY time_created ASC", &[&sid]) {
+        let row = DbRow { names: row.0, vals: row.1 };
+        let (Some(msg_id), Some(data)) = (row.as_str("message_id"), row.as_str("data")) else {
+            continue;
+        };
+        if let Ok(v) = serde_json::from_str::<Value>(&data) {
+            parts_by_msg.entry(msg_id).or_default().push(v);
+        }
+    }
+    let mut msgs = Vec::new();
+    for row in query_rows(&conn, "SELECT * FROM message WHERE session_id=? ORDER BY time_created ASC", &[&sid]) {
+        let row = DbRow { names: row.0, vals: row.1 };
+        let Some(data) = row.as_str("data") else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        let parts = row
+            .as_str("id")
+            .and_then(|id| parts_by_msg.remove(&id))
+            .unwrap_or_default();
+        let ts = row.as_i64("time_created");
+        if let Some(m) = opencode_message(&v, parts.iter().collect(), ts) {
+            msgs.push(m);
+        }
+    }
+    msgs
+}
+
+/// pin 导出：{session:{列...}, messages:[{id,time_created,data}], parts:[{message_id,data}]}
+///（自包含且保留 id 关联，回放不依赖原库）
+fn opencode_export_session(db_path: &Path, session_id: &str) -> Result<Value, String> {
+    let conn = open_opencode_db(db_path).ok_or("OpenCode 数据库不可读")?;
+    let sid = session_id.to_string();
+    let mut session_json = serde_json::json!({ "id": sid });
+    for row in query_rows(&conn, "SELECT * FROM session WHERE id=?", &[&sid]) {
+        let row = DbRow { names: row.0, vals: row.1 };
+        let mut obj = serde_json::Map::new();
+        for (i, name) in row.names.iter().enumerate() {
+            let v = match &row.vals[i] {
+                rusqlite::types::Value::Null => Value::Null,
+                rusqlite::types::Value::Integer(n) => serde_json::json!(n),
+                rusqlite::types::Value::Real(f) => serde_json::json!(f),
+                rusqlite::types::Value::Text(s) => serde_json::json!(s),
+                rusqlite::types::Value::Blob(_) => continue,
+            };
+            obj.insert(name.clone(), v);
+        }
+        session_json = Value::Object(obj);
+        break;
+    }
+    let messages: Vec<Value> = query_rows(&conn, "SELECT * FROM message WHERE session_id=? ORDER BY time_created ASC", &[&sid])
+        .into_iter()
+        .filter_map(|r| {
+            let row = DbRow { names: r.0, vals: r.1 };
+            let data = row.as_str("data").and_then(|d| serde_json::from_str::<Value>(&d).ok())?;
+            Some(serde_json::json!({
+                "id": row.as_str("id"),
+                "time_created": row.as_i64("time_created"),
+                "data": data,
+            }))
+        })
+        .collect();
+    let parts: Vec<Value> = query_rows(&conn, "SELECT * FROM part WHERE session_id=? ORDER BY time_created ASC", &[&sid])
+        .into_iter()
+        .filter_map(|r| {
+            let row = DbRow { names: r.0, vals: r.1 };
+            let data = row.as_str("data").and_then(|d| serde_json::from_str::<Value>(&d).ok())?;
+            Some(serde_json::json!({
+                "message_id": row.as_str("message_id"),
+                "data": data,
+            }))
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "session": session_json,
+        "messages": messages,
+        "parts": parts,
+    }))
+}
+
+/// 快照 JSON → 消息列表：按导出时保留的 message_id 分组 parts
+fn opencode_parse_snapshot(v: &Value) -> Vec<ChatMessageDto> {
+    let messages = v.get("messages").and_then(|m| m.as_array());
+    let parts = v.get("parts").and_then(|p| p.as_array());
+    let (Some(messages), Some(parts)) = (messages, parts) else {
+        return Vec::new();
+    };
+    let mut parts_by_msg: HashMap<String, Vec<&Value>> = HashMap::new();
+    for p in parts {
+        if let Some(mid) = get_str(p, "message_id") {
+            if let Some(data) = p.get("data") {
+                parts_by_msg.entry(mid.to_string()).or_default().push(data);
+            }
+        }
+    }
+    let mut msgs = Vec::new();
+    for m in messages {
+        let Some(data) = m.get("data") else {
+            continue;
+        };
+        let owned = get_str(m, "id")
+            .and_then(|id| parts_by_msg.remove(id))
+            .unwrap_or_default();
+        let ts = m.get("time_created").and_then(|t| t.as_i64());
+        if let Some(msg) = opencode_message(data, owned, ts) {
+            msgs.push(msg);
+        }
+    }
+    msgs
+}
+
+// ----- 旧版（pre-v1.2）storage/ 扁平 JSON -----
+// 更老的 project/<slug>/storage/... 布局不兼容（此处只读 v1.1 的 storage/ 结构）
+
+fn opencode_legacy_root() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".local").join("share").join("opencode").join("storage"))
+}
+
+/// legacy 目录下的一层 .json 文件（collect_files 只认 .jsonl[.zst]，不能复用）
+fn collect_json_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("json") {
+            out.push(p);
+        }
+    }
+}
+
+fn read_json_file(path: &Path) -> Option<Value> {
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+/// Session Info 的时间字段：顶层 epoch ms 或嵌套 time.{created,updated}
+fn legacy_time(v: &Value, flat: &str, nested: &str) -> Option<i64> {
+    v.get(flat)
+        .and_then(|t| t.as_i64())
+        .or_else(|| v.get("time").and_then(|t| t.get(nested)).and_then(|t| t.as_i64()))
+}
+
+fn legacy_tokens(v: &Value) -> Option<TokenUsageDto> {
+    let t = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+    if t("tokens_input") + t("tokens_output") + t("tokens_reasoning") > 0 {
+        Some(opencode_usage(
+            t("tokens_input"),
+            t("tokens_output"),
+            t("tokens_reasoning"),
+            t("tokens_cache_read"),
+            t("tokens_cache_write"),
+        ))
+    } else {
+        None
+    }
+}
+
+fn opencode_scan_legacy(storage: &Path) -> Vec<SessionMetaDto> {
+    // legacy 是 .json 文件，不能用 collect_files（只认 .jsonl[.zst]）
+    let mut files = Vec::new();
+    if let Ok(projects) = fs::read_dir(storage.join("session")) {
+        for p in projects.flatten() {
+            let Ok(entries) = fs::read_dir(p.path()) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.extension().and_then(|x| x.to_str()) == Some("json") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for f in files {
+        let Some(v) = read_json_file(&f) else {
+            continue;
+        };
+        let id = get_str(&v, "id")
+            .map(String::from)
+            .or_else(|| f.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        out.push(SessionMetaDto {
+            agent: "opencode".into(),
+            session_id: id,
+            project_path: get_str(&v, "directory").unwrap_or("").to_string(),
+            title: get_str(&v, "title").filter(|t| !t.trim().is_empty()).map(truncate_title),
+            created_at: legacy_time(&v, "time_created", "created").map(opencode_ms_to_iso),
+            updated_at: legacy_time(&v, "time_updated", "updated").map(opencode_ms_to_iso),
+            file_path: f.to_string_lossy().into_owned(),
+            token_usage: legacy_tokens(&v),
+            cli_version: get_str(&v, "version").map(String::from),
+            pinned: false,
+            archived: false,
+            custom_title: None,
+            tags: Vec::new(),
+            alive: true,
+            chain_count: 1,
+            workspace: None,
+        });
+    }
+    out
+}
+
+fn opencode_parse_legacy(session_json: &Path) -> Vec<ChatMessageDto> {
+    let storage = session_json.parent().and_then(|p| p.parent()).and_then(|p| p.parent());
+    let Some(storage) = storage else {
+        return Vec::new();
+    };
+    let sid = session_json.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    // message/<sid>/<msgID>.json 按 data.time.created 排序
+    let mut msg_files = Vec::new();
+    collect_json_files(&storage.join("message").join(&sid), &mut msg_files);
+    let mut messages: Vec<(i64, String, Value)> = Vec::new();
+    for f in msg_files {
+        let Some(v) = read_json_file(&f) else {
+            continue;
+        };
+        let ts = legacy_time(&v, "time_created", "created").unwrap_or(0);
+        let mid = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        messages.push((ts, mid, v));
+    }
+    messages.sort_by_key(|(ts, _, _)| *ts);
+    let mut msgs = Vec::new();
+    for (ts, mid, v) in messages {
+        let mut part_files = Vec::new();
+        collect_json_files(&storage.join("part").join(&mid), &mut part_files);
+        part_files.sort();
+        let parts: Vec<Value> = part_files.iter().filter_map(|f| read_json_file(f)).collect();
+        if let Some(m) = opencode_message(&v, parts.iter().collect(), Some(ts)) {
+            msgs.push(m);
+        }
+    }
+    msgs
+}
+
 // ===== 扫描 =====
 
 #[derive(Debug, Clone, Default)]
@@ -1732,6 +2244,16 @@ pub fn scan_sessions() -> ScanResult {
                 }
             }
         }
+        // OpenCode：v1.2+ 读共享 SQLite（WAL 只读）；旧版读 storage/ 扁平 JSON
+        if let Some(db) = opencode_db_path() {
+            if db.exists() {
+                out.extend(opencode_scan_db(&db));
+            } else if let Some(storage) = opencode_legacy_root() {
+                out.extend(opencode_scan_legacy(&storage));
+            }
+        } else if let Some(storage) = opencode_legacy_root() {
+            out.extend(opencode_scan_legacy(&storage));
+        }
     }
     // pin 即保留：源文件已消失的会话从快照补齐（§6.5）
     let seen: HashSet<(String, String)> = out
@@ -1739,7 +2261,7 @@ pub fn scan_sessions() -> ScanResult {
         .map(|m| (m.agent.clone(), m.session_id.clone()))
         .collect();
     if let Some(dir) = snapshots_root() {
-        for agent in ["claude-code", "codex", "gemini", "qwen", "kimi"] {
+        for agent in ["claude-code", "codex", "gemini", "qwen", "kimi", "opencode"] {
             let mut files = Vec::new();
             collect_files(&dir.join(agent), 1, &mut files);
             for f in files {
@@ -1751,6 +2273,27 @@ pub fn scan_sessions() -> ScanResult {
                     "codex" => codex_file_meta(&f, false, false).map(|(m, _)| m),
                     "gemini" => gemini_file_meta(&f, false, &gemini_map),
                     "qwen" => qwen_file_meta(&f, false, false),
+                    "opencode" => read_json_file(&f).and_then(|v| {
+                        let s = v.get("session")?;
+                        Some(SessionMetaDto {
+                            agent: "opencode".into(),
+                            session_id: stem.clone(),
+                            project_path: get_str(s, "directory").unwrap_or("").to_string(),
+                            title: get_str(s, "title").filter(|t| !t.trim().is_empty()).map(truncate_title),
+                            created_at: s.get("time_created").and_then(|t| t.as_i64()).map(opencode_ms_to_iso),
+                            updated_at: s.get("time_updated").and_then(|t| t.as_i64()).map(opencode_ms_to_iso),
+                            file_path: f.to_string_lossy().into_owned(),
+                            token_usage: legacy_tokens(s),
+                            cli_version: get_str(s, "version").map(String::from),
+                            pinned: false,
+                            archived: false,
+                            custom_title: None,
+                            tags: Vec::new(),
+                            alive: false,
+                            chain_count: 1,
+                            workspace: None,
+                        })
+                    }),
                     "kimi" => {
                         // 快照脱离了原目录结构（无 state.json / bucket），项目归属不可知
                         let bytes = read_session_bytes(&f);
@@ -1873,6 +2416,7 @@ fn snapshot_stem(path: &Path) -> String {
         .unwrap_or_default();
     name.strip_suffix(".jsonl.zst")
         .or_else(|| name.strip_suffix(".jsonl"))
+        .or_else(|| name.strip_suffix(".json")) // opencode 快照是导出的 JSON
         .unwrap_or(&name)
         .to_string()
 }
@@ -1905,6 +2449,19 @@ fn snapshot_path(agent: &str, session_id: &str, zst: bool) -> Option<PathBuf> {
     Some(snapshots_root()?.join(sanitize_id(agent)).join(name))
 }
 
+/// opencode 的会话存在共享 SQLite 里，pin 时导出为 JSON 快照（.json 扩展名）
+fn snapshot_json_path(agent: &str, session_id: &str) -> Option<PathBuf> {
+    let name = format!("{}.json", sanitize_id(session_id));
+    Some(snapshots_root()?.join(sanitize_id(agent)).join(name))
+}
+
+fn snapshot_candidates(agent: &str, session_id: &str) -> Vec<PathBuf> {
+    [snapshot_path(agent, session_id, false), snapshot_path(agent, session_id, true), snapshot_json_path(agent, session_id)]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 /// 源文件消失时找快照：Claude 文件名即 session_id；Codex 是 rollout-<时间>-<uuid>，取尾部 uuid
 fn find_snapshot(agent: &str, source: &Path) -> Option<PathBuf> {
     let stem = source.file_stem()?.to_string_lossy().into_owned();
@@ -1917,18 +2474,14 @@ fn find_snapshot(agent: &str, source: &Path) -> Option<PathBuf> {
         }
     }
     for s in stems {
-        for zst in [false, true] {
-            if let Some(p) = snapshot_path(agent, &s, zst) {
-                if p.exists() {
-                    return Some(p);
-                }
-            }
+        if let Some(p) = snapshot_candidates(agent, &s).into_iter().find(|p| p.exists()) {
+            return Some(p);
         }
     }
     None
 }
 
-fn open_db() -> Result<Connection, String> {
+pub(crate) fn open_db() -> Result<Connection, String> {
     let dir = dirs::config_dir()
         .ok_or("无法确定平台配置目录")?
         .join("ccode");
@@ -2069,6 +2622,28 @@ pub async fn find_session_for(
 
 #[tauri::command]
 pub async fn get_session_conversation(agent: String, file_path: String) -> Vec<ChatMessageDto> {
+    if agent == "opencode" {
+        // "<db路径>#<session_id>"：db 在就直接读库；db 不在了读 pin 快照
+        if let Some((db, sid)) = file_path.split_once('#') {
+            if Path::new(db).exists() {
+                return opencode_parse_db(Path::new(db), sid);
+            }
+            return snapshot_json_path("opencode", sid)
+                .filter(|p| p.exists())
+                .and_then(|p| read_json_file(&p))
+                .map(|v| opencode_parse_snapshot(&v))
+                .unwrap_or_default();
+        }
+        // 快照导出 JSON（含 messages 键）或 legacy session JSON
+        let path = PathBuf::from(&file_path);
+        let Some(v) = read_json_file(&path) else {
+            return Vec::new();
+        };
+        if v.get("messages").is_some() {
+            return opencode_parse_snapshot(&v);
+        }
+        return opencode_parse_legacy(&path);
+    }
     let path = PathBuf::from(&file_path);
     let bytes = read_session_bytes(&path)
         .or_else(|| find_snapshot(&agent, &path).and_then(|p| read_session_bytes(&p)));
@@ -2093,6 +2668,28 @@ pub async fn get_session_conversation(agent: String, file_path: String) -> Vec<C
 
 #[tauri::command]
 pub fn pin_session(agent: String, session_id: String, file_path: String) -> Result<(), String> {
+    if agent == "opencode" {
+        // OpenCode 没有单会话文件：从共享 db 导出自包含 JSON 快照
+        let Some((db, sid)) = file_path.split_once('#') else {
+            return Err("OpenCode 会话定位格式应为 <db路径>#<session_id>".into());
+        };
+        let data = opencode_export_session(Path::new(db), sid)?;
+        let dst = snapshot_json_path(&agent, sid).ok_or("无法确定平台配置目录")?;
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建快照目录失败: {e}"))?;
+        }
+        let text = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+        fs::write(&dst, text).map_err(|e| format!("写入快照失败: {e}"))?;
+        let conn = open_db()?;
+        conn.execute(
+            "INSERT INTO session_meta(agent, session_id, pinned, pinned_at) VALUES(?1, ?2, 1, ?3)
+             ON CONFLICT(agent, session_id) DO UPDATE SET pinned=1, pinned_at=?3",
+            params![agent, session_id, now_iso()],
+        )
+        .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
+        invalidate_scan_cache();
+        return Ok(());
+    }
     let src = PathBuf::from(&file_path);
     if !src.exists() {
         return Err("源会话文件已不存在，无法 pin".into());
@@ -2127,11 +2724,9 @@ pub fn unpin_session(
     )
     .map_err(|e| format!("更新 session_meta 失败: {e}"))?;
     if delete_snapshot {
-        for zst in [false, true] {
-            if let Some(p) = snapshot_path(&agent, &session_id, zst) {
-                if p.exists() {
-                    let _ = fs::remove_file(p);
-                }
+        for p in snapshot_candidates(&agent, &session_id) {
+            if p.exists() {
+                let _ = fs::remove_file(p);
             }
         }
     }
@@ -2215,11 +2810,9 @@ pub async fn delete_session(
     file_path: String,
 ) -> Result<(), String> {
     delete_source_file(&file_path)?;
-    for zst in [false, true] {
-        if let Some(p) = snapshot_path(&agent, &session_id, zst) {
-            if p.exists() {
-                let _ = fs::remove_file(p);
-            }
+    for p in snapshot_candidates(&agent, &session_id) {
+        if p.exists() {
+            let _ = fs::remove_file(p);
         }
     }
     let conn = open_db()?;
@@ -2243,11 +2836,9 @@ pub async fn delete_project_sessions(agent: String, project_path: String) -> Res
     let mut count = 0;
     for s in targets {
         delete_source_file(&s.file_path)?;
-        for zst in [false, true] {
-            if let Some(p) = snapshot_path(&s.agent, &s.session_id, zst) {
-                if p.exists() {
-                    let _ = fs::remove_file(p);
-                }
+        for p in snapshot_candidates(&s.agent, &s.session_id) {
+            if p.exists() {
+                let _ = fs::remove_file(p);
             }
         }
         let conn = open_db()?;
@@ -2942,6 +3533,155 @@ mod tests {
         assert!(resolve_worktree_project("/home/u/code/myrepo", &rows).is_none());
         assert!(resolve_worktree_project("/home/u/ccode/workspaces/myrepo/feat-xy", &rows).is_none());
         assert!(resolve_worktree_project("/anywhere", &[]).is_none());
+    }
+
+    // ===== OpenCode =====
+
+    /// 按 matrix §5 模式建临时 SQLite：project/session/message/part 四表 + fixture 行
+    fn opencode_fixture_db(dir: &Path) -> PathBuf {
+        let db = dir.join("opencode.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE project(id TEXT PRIMARY KEY, worktree TEXT);
+             CREATE TABLE session(id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, directory TEXT,
+               title TEXT, cost REAL, tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
+               tokens_cache_read INTEGER, tokens_cache_write INTEGER, agent TEXT, model TEXT,
+               version TEXT, time_created INTEGER, time_updated INTEGER);
+             CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+             INSERT INTO project VALUES('p1','/repo/x'),('global','');
+             INSERT INTO session VALUES('ses_1','p1',NULL,'/fallback','修复登录 bug',0.1,100,20,5,10,2,'build','{}','0.9.0',1785307071000,1785307072000);
+             INSERT INTO session VALUES('ses_2','global',NULL,'/tmp/dir2','',0,0,0,0,0,0,'build','{}',NULL,1785307080000,1785307080000);
+             INSERT INTO message VALUES('msg_1','ses_1',1785307071100,'{\"role\":\"user\",\"summary\":{\"body\":\"帮我修 bug\"}}');
+             INSERT INTO message VALUES('msg_2','ses_1',1785307071200,'{\"role\":\"assistant\",\"tokens\":{\"input\":100,\"output\":20,\"reasoning\":5,\"cache\":{\"read\":10,\"write\":2}}}');
+             INSERT INTO part VALUES('prt_1','msg_2','ses_1',1785307071201,'{\"type\":\"reasoning\",\"text\":\"想想\"}');
+             INSERT INTO part VALUES('prt_2','msg_2','ses_1',1785307071202,'{\"type\":\"text\",\"text\":\"好的\"}');
+             INSERT INTO part VALUES('prt_3','msg_2','ses_1',1785307071203,'{\"type\":\"tool\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{\"cmd\":\"ls\"},\"output\":\"ok\"}}');
+             INSERT INTO part VALUES('prt_4','msg_2','ses_1',1785307071204,'{\"type\":\"tool\",\"tool\":\"edit\",\"state\":{\"status\":\"error\",\"input\":{\"file\":\"/a\"},\"error\":\"写入失败\"}}');
+             INSERT INTO part VALUES('prt_5','msg_2','ses_1',1785307071205,'{\"type\":\"step-start\"}');",
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn opencode_scan_maps_db_rows() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = opencode_fixture_db(&dir);
+        let metas = opencode_scan_db(&db);
+        assert_eq!(metas.len(), 2);
+        let m1 = metas.iter().find(|m| m.session_id == "ses_1").unwrap();
+        assert_eq!(m1.agent, "opencode");
+        assert_eq!(m1.project_path, "/repo/x", "project_id → project.worktree");
+        assert_eq!(m1.title.as_deref(), Some("修复登录 bug"));
+        assert_eq!(m1.created_at.as_deref(), Some("2026-07-29T06:37:51Z"), "epoch ms → ISO");
+        assert_eq!(m1.cli_version.as_deref(), Some("0.9.0"));
+        assert!(m1.file_path.ends_with("#ses_1"));
+        assert!(m1.alive);
+        let u = m1.token_usage.as_ref().unwrap();
+        assert_eq!((u.input, u.output, u.cache_read, u.cache_write), (100, 25, 10, 2));
+        let m2 = metas.iter().find(|m| m.session_id == "ses_2").unwrap();
+        assert_eq!(m2.project_path, "/tmp/dir2", "global 项目回落 session.directory");
+        assert_eq!(m2.title, None, "空标题按 None 处理");
+        assert!(m2.token_usage.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opencode_parse_db_messages_blocks_usage() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = opencode_fixture_db(&dir);
+        let msgs = opencode_parse_db(&db, "ses_1");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].blocks[0].text, "帮我修 bug");
+        let a = &msgs[1];
+        let kinds: Vec<&str> = a.blocks.iter().map(|b| b.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["thinking", "text", "tool_use", "tool_result", "tool_use", "tool_result"]);
+        assert_eq!(a.blocks[2].tool_name.as_deref(), Some("bash"));
+        assert_eq!(a.blocks[3].text, "ok");
+        assert_eq!(a.blocks[5].text, "写入失败", "error 状态的 state.error 进 tool_result");
+        let u = a.usage.as_ref().unwrap();
+        assert_eq!((u.input, u.output, u.cache_read, u.cache_write), (100, 25, 10, 2), "reasoning 计入 output");
+        assert_eq!(a.timestamp.as_deref(), Some("2026-07-29T06:37:51Z"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opencode_scan_tolerates_minimal_columns() {
+        // drizzle 迁移漂移：只有最小列集也得能扫
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+             INSERT INTO session VALUES('ses_min','只有标题','/dir');",
+        )
+        .unwrap();
+        drop(conn);
+        let metas = opencode_scan_db(&db);
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].project_path, "/dir");
+        assert!(metas[0].created_at.is_none());
+        assert!(metas[0].token_usage.is_none());
+        assert!(opencode_parse_db(&db, "ses_min").is_empty(), "缺 message/part 表 → 空消息列表");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opencode_export_snapshot_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = opencode_fixture_db(&dir);
+        let exported = opencode_export_session(&db, "ses_1").unwrap();
+        assert_eq!(get_str(exported.get("session").unwrap(), "title"), Some("修复登录 bug"));
+        let msgs = opencode_parse_snapshot(&exported);
+        let db_msgs = opencode_parse_db(&db, "ses_1");
+        assert_eq!(msgs.len(), db_msgs.len());
+        assert_eq!(msgs[1].blocks.len(), db_msgs[1].blocks.len(), "快照回放与读库一致");
+        assert_eq!(msgs[1].blocks[3].text, "ok");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opencode_legacy_flat_json_scan_and_parse() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let storage = dir.join("storage");
+        std::fs::create_dir_all(storage.join("session/p1")).unwrap();
+        std::fs::create_dir_all(storage.join("message/ses_9")).unwrap();
+        std::fs::create_dir_all(storage.join("part/msg_2")).unwrap();
+        std::fs::write(
+            storage.join("session/p1/ses_9.json"),
+            r#"{"id":"ses_9","title":"旧会话","directory":"/old/dir","time":{"created":1785307071000,"updated":1785307072000},"tokens_input":7,"tokens_output":3}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            storage.join("message/ses_9/msg_1.json"),
+            r#"{"role":"user","time":{"created":1785307071100},"summary":{"body":"旧问题"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            storage.join("message/ses_9/msg_2.json"),
+            r#"{"role":"assistant","time":{"created":1785307071200},"tokens":{"input":7,"output":3}}"#,
+        )
+        .unwrap();
+        std::fs::write(storage.join("part/msg_2/prt_1.json"), r#"{"type":"text","text":"旧回答"}"#).unwrap();
+        let metas = opencode_scan_legacy(&storage);
+        assert_eq!(metas.len(), 1);
+        let m = &metas[0];
+        assert_eq!(m.session_id, "ses_9");
+        assert_eq!(m.project_path, "/old/dir");
+        assert_eq!(m.title.as_deref(), Some("旧会话"));
+        assert_eq!(m.created_at.as_deref(), Some("2026-07-29T06:37:51Z"));
+        assert_eq!(m.token_usage.as_ref().map(|u| (u.input, u.output)), Some((7, 3)));
+        let msgs = opencode_parse_legacy(&storage.join("session/p1/ses_9.json"));
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].blocks[0].text, "旧问题");
+        assert_eq!(msgs[1].blocks[0].text, "旧回答");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
