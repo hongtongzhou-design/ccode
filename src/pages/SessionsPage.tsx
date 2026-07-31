@@ -338,8 +338,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   }
 
   const input =
-    "w-full rounded border border-neutral-300 bg-white px-2 py-1.5 text-sm outline-none focus:border-blue-500";
-  const menuItem = "block w-full px-3 py-1.5 text-left hover:bg-neutral-100";
+    "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
+  const menuItem = "block w-full px-3 py-1.5 text-left text-l2 hover:bg-white/5";
 
   const filterActive = (f: Filter) =>
     (filter.kind === "all" && f.kind === "all") ||
@@ -352,10 +352,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   return (
     <div className="flex h-full">
       {/* 左栏：分类树 */}
-      <div className="flex w-[230px] shrink-0 flex-col border-r border-neutral-200 bg-white">
-        <div className="border-b border-neutral-200 p-2">
+      <div className="flex w-[230px] shrink-0 flex-col bg-rail">
+        <div className="p-2">
           <input
-            className={input}
+            className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
             placeholder="搜索项目 / 会话 / 标签"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -364,23 +364,23 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         <div className="min-h-0 flex-1 overflow-auto py-1">
           <button
             onClick={() => selectFilter({ kind: "all" })}
-            className={`block w-full px-3 py-1.5 text-left text-sm ${
+            className={`mx-1 block w-[calc(100%-8px)] rounded-md px-3 py-2 text-left text-sm ${
               filterActive({ kind: "all" })
-                ? "bg-blue-50 text-blue-700"
-                : "hover:bg-neutral-100"
+                ? "bg-rail-sel text-l1"
+                : "text-l3 hover:bg-white/5"
             }`}
           >
             全部会话
-            <span className="ml-1 text-xs text-neutral-400">{searched.length}</span>
+            <span className={`ml-1 text-xs ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}>{searched.length}</span>
           </button>
           {tree.map((g) => (
             <div key={g.agent}>
               <div
                 onClick={() => selectFilter({ kind: "agent", agent: g.agent })}
-                className={`flex w-full cursor-pointer items-center px-3 py-1.5 text-left text-sm ${
+                className={`mx-1 flex w-[calc(100%-8px)] cursor-pointer items-center rounded-md px-3 py-2 text-left text-sm ${
                   filterActive({ kind: "agent", agent: g.agent })
-                    ? "bg-blue-50 text-blue-700"
-                    : "hover:bg-neutral-100"
+                    ? "bg-rail-sel text-l1"
+                    : "text-l3 hover:bg-white/5"
                 }`}
               >
                 <button
@@ -389,72 +389,89 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     toggleCollapsed(g.agent);
                     selectFilter({ kind: "agent", agent: g.agent });
                   }}
-                  className="mr-1 shrink-0 text-neutral-400"
+                  className="mr-1 shrink-0 text-l4"
                   title={collapsed.has(g.agent) ? "展开" : "收起"}
                 >
                   {collapsed.has(g.agent) ? "▸" : "▾"}
                 </button>
                 <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
                   <span className="truncate font-medium">{agentLabel(g.agent)}</span>
-                  <span className="shrink-0 text-xs text-neutral-400">
+                  <span
+                    className={`shrink-0 text-xs ${
+                      filterActive({ kind: "agent", agent: g.agent })
+                        ? "text-l2"
+                        : "text-l4"
+                    }`}
+                  >
                     {g.list.length}
                   </span>
                 </span>
               </div>
               {!collapsed.has(g.agent) &&
-                g.projects.map((p) => (
-                  <button
-                    key={p.path}
-                    onClick={() =>
-                      selectFilter({ kind: "project", agent: g.agent, path: p.path })
-                    }
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setMenu({
-                        x: e.clientX,
-                        y: e.clientY,
-                        kind: "project",
-                        agent: g.agent,
-                        path: p.path,
-                        count: p.list.length,
-                      });
-                    }}
-                    title={p.path}
-                    className={`flex w-full items-center justify-between gap-2 py-1.5 pl-8 pr-3 text-left text-sm ${
-                      filterActive({ kind: "project", agent: g.agent, path: p.path })
-                        ? "bg-blue-50 text-blue-700"
-                        : "hover:bg-neutral-100"
-                    }`}
-                  >
-                    <span className="truncate">{basename(p.path)}</span>
-                    <span className="shrink-0 text-xs text-neutral-400">
-                      {p.list.length}
-                    </span>
-                  </button>
-                ))}
+                g.projects.map((p) => {
+                  const active = filterActive({
+                    kind: "project",
+                    agent: g.agent,
+                    path: p.path,
+                  });
+                  return (
+                    <button
+                      key={p.path}
+                      onClick={() =>
+                        selectFilter({ kind: "project", agent: g.agent, path: p.path })
+                      }
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setMenu({
+                          x: e.clientX,
+                          y: e.clientY,
+                          kind: "project",
+                          agent: g.agent,
+                          path: p.path,
+                          count: p.list.length,
+                        });
+                      }}
+                      title={p.path}
+                      className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-2 rounded-md py-1.5 pl-8 pr-3 text-left text-sm ${
+                        active
+                          ? "bg-rail-sel text-l1"
+                          : "text-l3 hover:bg-white/5"
+                      }`}
+                    >
+                      <span className="truncate">{basename(p.path)}</span>
+                      <span
+                        className={`shrink-0 text-xs ${active ? "text-l2" : "text-l4"}`}
+                      >
+                        {p.list.length}
+                      </span>
+                    </button>
+                  );
+                })}
             </div>
           ))}
           {tree.length === 0 && (
-            <p className="p-3 text-sm text-neutral-400">暂无会话</p>
+            <p className="p-3 text-sm text-l4">暂无会话</p>
           )}
         </div>
-        <label className="flex items-center gap-1.5 border-t border-neutral-200 px-3 py-2 text-xs text-neutral-500">
-          <input
-            type="checkbox"
-            checked={showArchived}
-            onChange={(e) => setShowArchived(e.target.checked)}
-          />
-          显示已归档
-        </label>
       </div>
 
       {/* 右栏：列表 / 回放 二选一（列表保持挂载以保留滚动与筛选） */}
-      <div className="flex min-w-0 flex-1 flex-col bg-neutral-50">
+      <div className="flex min-w-0 flex-1 flex-col bg-canvas">
         {/* 会话列表 */}
         <div className={`flex min-h-0 flex-1 flex-col ${selected ? "hidden" : ""}`}>
-          {error && <p className="px-4 py-1 text-xs text-red-600">{error}</p>}
-          <div className="border-b border-neutral-200 bg-white px-4 py-2 text-xs text-neutral-500">
-            {filterLabel} · {sessionList.length} 个会话
+          {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
+          <div className="flex items-baseline justify-between bg-strip px-4 py-2">
+            <span className="text-xs text-l3">
+              {filterLabel} · {sessionList.length} 个会话
+            </span>
+            <label className="flex cursor-pointer items-center gap-1.5 rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5">
+              <input
+                type="checkbox"
+                checked={showArchived}
+                onChange={(e) => setShowArchived(e.target.checked)}
+              />
+              显示已归档
+            </label>
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             {sessionList.map((s) => {
@@ -464,7 +481,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 return (
                   <div
                     key={s.sessionId}
-                    className="space-y-2 border-b border-neutral-200 bg-white p-4"
+                    className="space-y-2 border-b border-hairline bg-inset p-4"
                   >
                     <input
                       className={input}
@@ -482,11 +499,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     <div className="flex justify-end gap-2 text-sm">
                       <button
                         onClick={() => setEditing(null)}
-                        className="text-neutral-600 hover:underline"
+                        className="text-l3 hover:text-l1"
                       >
                         取消
                       </button>
-                      <button onClick={saveEdit} className="text-blue-600 hover:underline">
+                      <button onClick={saveEdit} className="text-l1 hover:underline">
                         保存
                       </button>
                     </div>
@@ -502,25 +519,25 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     e.preventDefault();
                     setMenu({ x: e.clientX, y: e.clientY, kind: "session", session: s });
                   }}
-                  className={`group border-b border-neutral-200 bg-white px-4 py-3 text-sm ${
-                    clickable ? "cursor-pointer hover:bg-neutral-50" : "opacity-60"
+                  className={`group border-b border-hairline px-4 py-2.5 text-sm ${
+                    clickable ? "cursor-pointer hover:bg-white/5" : "opacity-60"
                   }`}
                 >
                   <div className="flex items-center gap-1.5">
                     {s.pinned && <span title="已保留">📌</span>}
-                    <span className="truncate font-medium">{sessionTitle(s)}</span>
+                    <span className="truncate font-medium text-l1">{sessionTitle(s)}</span>
                     {s.chainCount > 1 && (
-                      <span className="shrink-0 rounded bg-neutral-100 px-1 text-xs text-neutral-600">
+                      <span className="shrink-0 rounded bg-inset px-1 text-xs text-l3">
                         {s.chainCount} 次继续
                       </span>
                     )}
                     {!s.alive && (
-                      <span className="shrink-0 rounded bg-amber-100 px-1 text-xs text-amber-700">
+                      <span className="shrink-0 rounded bg-warn px-1 text-xs text-warn-text">
                         已失效
                       </span>
                     )}
                   </div>
-                  <div className="mt-1 flex items-center gap-2 text-xs text-neutral-400">
+                  <div className="mt-1 flex items-center gap-2 text-xs text-l3">
                     <span>{relTime(s.updatedAt)}</span>
                     <span>{agentLabel(s.agent)}</span>
                     <span className="truncate">{basename(s.projectPath)}</span>
@@ -528,7 +545,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     {s.tags.map((t) => (
                       <span
                         key={t}
-                        className="rounded bg-neutral-100 px-1 text-neutral-500"
+                        className="rounded bg-inset px-1 text-l3"
                       >
                         {t}
                       </span>
@@ -540,7 +557,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         e.stopPropagation();
                         void togglePin(s);
                       }}
-                      className="text-neutral-600 hover:underline"
+                      className="text-l3 hover:text-l1"
                     >
                       {s.pinned ? "取消保留" : "保留"}
                     </button>
@@ -549,7 +566,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         e.stopPropagation();
                         void toggleArchive(s);
                       }}
-                      className="text-neutral-600 hover:underline"
+                      className="text-l3 hover:text-l1"
                     >
                       {s.archived ? "取消归档" : "归档"}
                     </button>
@@ -563,7 +580,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                           tags: s.tags.join(", "),
                         });
                       }}
-                      className="text-blue-600 hover:underline"
+                      className="text-l2 hover:text-l1"
                     >
                       编辑
                     </button>
@@ -572,7 +589,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               );
             })}
             {sessionList.length === 0 && (
-              <p className="p-4 text-sm text-neutral-400">
+              <p className="p-4 text-sm text-l4">
                 {showArchived ? "暂无会话" : "暂无会话（已归档的被隐藏）"}
               </p>
             )}
@@ -582,36 +599,36 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         {/* 对话回放 */}
         {selected && (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center gap-3 border-b border-neutral-200 bg-white px-4 py-2">
+            <div className="flex items-center gap-3 bg-strip px-4 py-2">
               <button
                 onClick={() => {
                   setSelected(null);
                   setMessages([]);
                 }}
-                className="shrink-0 rounded border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-100"
+                className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
               >
                 ← 返回
               </button>
-              <span className="truncate text-sm font-medium">
+              <span className="truncate text-sm font-medium text-l1">
                 {sessionTitle(selected)}
               </span>
-              <span className="shrink-0 text-xs text-neutral-400">
+              <span className="shrink-0 text-xs text-l3">
                 {agentLabel(selected.agent)} · {relTime(selected.updatedAt)}
                 {selected.tokenUsage ? ` · ${fmtTokens(selected.tokenUsage)}` : ""}
               </span>
               <button
                 onClick={() => void togglePin(selected)}
-                className="ml-auto shrink-0 rounded border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-100"
+                className="ml-auto shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
               >
                 {selected.pinned ? "取消保留" : "📌 保留"}
               </button>
             </div>
-            {error && <p className="px-4 py-1 text-xs text-red-600">{error}</p>}
+            {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
             <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-4">
               {loadingConv ? (
-                <p className="text-sm text-neutral-400">加载中…</p>
+                <p className="text-sm text-l4">加载中…</p>
               ) : messages.length === 0 ? (
-                <p className="text-sm text-neutral-400">没有可回放的对话内容</p>
+                <p className="text-sm text-l4">没有可回放的对话内容</p>
               ) : (
                 <ConversationView messages={messages} />
               )}
@@ -631,7 +648,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           }}
         >
           <div
-            className="absolute min-w-36 rounded border border-neutral-200 bg-white py-1 text-sm shadow-lg"
+            className="absolute min-w-36 rounded border border-field bg-strip py-1 text-sm"
             style={{ left: menu.x, top: menu.y }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -672,7 +689,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   编辑
                 </button>
                 <button
-                  className={`${menuItem} text-red-600`}
+                  className={`${menuItem} text-err-text`}
                   onClick={() => {
                     setMenu(null);
                     void deleteSession(menu.session);
@@ -683,7 +700,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               </>
             ) : (
               <button
-                className={`${menuItem} text-red-600`}
+                className={`${menuItem} text-err-text`}
                 onClick={() => {
                   setMenu(null);
                   void deleteProjectSessions(menu.agent, menu.path, menu.count);

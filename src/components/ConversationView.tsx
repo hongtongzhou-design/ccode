@@ -35,7 +35,7 @@ export default function ConversationView({
         {isOpen ? text : `${text.slice(0, TEXT_CAP)}…`}
         <button
           onClick={() => toggleExpand(key)}
-          className="ml-2 text-blue-600 hover:underline"
+          className="ml-2 text-l3 hover:text-l1"
         >
           {isOpen ? "收起" : "展开全部"}
         </button>
@@ -50,12 +50,12 @@ export default function ConversationView({
         <div key={key} className="my-1">
           <button
             onClick={() => toggleExpand(key)}
-            className="text-xs text-neutral-400 hover:text-neutral-600"
+            className="text-xs text-l4 hover:text-l2"
           >
             {isOpen ? "▾" : "▸"} 思考过程
           </button>
           {isOpen && (
-            <div className="mt-1 whitespace-pre-wrap rounded bg-neutral-50 p-2 text-xs italic text-neutral-500">
+            <div className="mt-1 whitespace-pre-wrap rounded bg-inset p-2 text-xs italic text-l3">
               {b.text}
             </div>
           )}
@@ -68,16 +68,16 @@ export default function ConversationView({
       return (
         <div
           key={key}
-          className="my-1 inline-block max-w-full rounded bg-neutral-100 px-2 py-1 font-mono text-xs text-neutral-600"
+          className="my-1 inline-block max-w-full rounded bg-inset px-2 py-1 font-mono text-xs text-l3"
         >
-          <span className="mr-1 rounded bg-neutral-200 px-1">{b.toolName ?? "tool"}</span>
+          <span className="mr-1 rounded bg-seg-sel px-1 text-l2">{b.toolName ?? "tool"}</span>
           <span className="whitespace-pre-wrap break-all">
             {isOpen || !long ? b.text : `${b.text.slice(0, 120)}…`}
           </span>
           {long && (
             <button
               onClick={() => toggleExpand(key)}
-              className="ml-1 text-blue-600 hover:underline"
+              className="ml-1 text-l3 hover:text-l1"
             >
               {isOpen ? "收起" : "展开"}
             </button>
@@ -91,13 +91,13 @@ export default function ConversationView({
       return (
         <div
           key={key}
-          className="my-1 whitespace-pre-wrap break-all rounded border border-neutral-200 bg-neutral-50 p-2 font-mono text-xs text-neutral-500"
+          className="my-1 whitespace-pre-wrap break-all rounded border border-hairline bg-strip p-2 font-mono text-xs text-l3"
         >
           {isOpen || !long ? b.text : `${b.text.slice(0, 200)}…`}
           {long && (
             <button
               onClick={() => toggleExpand(key)}
-              className="ml-1 text-blue-600 hover:underline"
+              className="ml-1 text-l3 hover:text-l1"
             >
               {isOpen ? "收起" : "展开"}
             </button>
@@ -126,7 +126,7 @@ export default function ConversationView({
         m.role === "user" ? (
           <div key={mi} className="mb-3 flex justify-end">
             <div
-              className={`max-w-[80%] rounded-lg bg-blue-100 px-3 py-2 ${compact ? "text-xs" : "text-sm"}`}
+              className={`max-w-[80%] rounded bg-inset px-3 py-2 ${compact ? "text-xs" : "text-sm"}`}
             >
               {m.blocks.map((b, bi) => renderBlock(b, `${mi}:${bi}`, true))}
             </div>

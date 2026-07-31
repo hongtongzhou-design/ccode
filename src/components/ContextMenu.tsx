@@ -50,7 +50,7 @@ export default function ContextMenu({
       }}
     >
       <div
-        className="absolute min-w-40 rounded border border-neutral-200 bg-white py-1 shadow-lg"
+        className="absolute min-w-40 rounded border border-field bg-strip py-1"
         style={style}
         onClick={(e) => e.stopPropagation()}
       >
@@ -61,7 +61,7 @@ export default function ContextMenu({
               onClose();
               it.onSelect();
             }}
-            className="block w-full px-3 py-1.5 text-left text-sm text-neutral-700 hover:bg-neutral-100"
+            className="block w-full px-3 py-1.5 text-left text-sm text-l2 hover:bg-white/5"
           >
             {it.label}
           </button>

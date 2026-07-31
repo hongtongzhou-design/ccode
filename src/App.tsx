@@ -24,17 +24,19 @@ function App() {
   }, [loadAll, loadSessions]);
 
   return (
-    <div className="flex h-full bg-neutral-100 text-neutral-800">
-      <aside className="flex w-40 shrink-0 flex-col bg-neutral-900">
-        <div className="px-4 py-4 text-lg font-semibold text-white">Ccode</div>
+    <div className="flex h-full bg-canvas text-l2">
+      <aside className="flex w-36 shrink-0 flex-col bg-rail">
+        <div className="px-4 py-4 text-base font-semibold tracking-wide text-l1">
+          Ccode
+        </div>
         {NAV.map((n) => (
           <button
             key={n.id}
             onClick={() => setPage(n.id)}
-            className={`mx-2 mb-1 rounded px-3 py-2 text-left text-sm ${
+            className={`mx-1 mb-0.5 block w-[calc(100%-8px)] rounded-md px-3 py-2.5 text-left text-sm ${
               page === n.id
-                ? "bg-neutral-700 text-white"
-                : "text-neutral-300 hover:bg-neutral-800"
+                ? "bg-rail-sel text-l1"
+                : "text-l3 hover:bg-white/5"
             }`}
           >
             {n.label}

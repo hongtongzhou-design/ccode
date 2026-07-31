@@ -19,7 +19,7 @@ pub struct PtyManager {
 
 /// 从缓冲头部取出尽可能多的完整 UTF-8 文本，返回 (文本, 消耗字节数)。
 /// 末尾残缺的多字节序列留给下一轮，避免把中文等字符切成乱码。
-fn split_utf8(buf: &[u8]) -> (String, usize) {
+pub(crate) fn split_utf8(buf: &[u8]) -> (String, usize) {
     match std::str::from_utf8(buf) {
         Ok(_) => (String::from_utf8_lossy(buf).into_owned(), buf.len()),
         Err(e) => {

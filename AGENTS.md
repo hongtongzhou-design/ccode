@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> **变更记录规矩（用户指令）**：每完成一次重大改动，必须记录到 `docs/CHANGELOG.md`（改了什么/为什么/关键文件/坑）；架构决策同步 `docs/architecture.md` §10，阶段完成同步本文件路线图。
+
 ## 项目简介
 
 Ccode 是一个「AI 编码 Agent 统一启动器 + 配置中心 + 会话监控台」桌面应用（Tauri v2 + React/TS）。
@@ -40,6 +42,16 @@ npm run tauri build    # 打包
 
 环境：Node 22 + npm（无 pnpm）；Rust stable（minimal profile）；crates 走 rsproxy 镜像（`~/.cargo/config.toml`）。
 
+## 本机环境档案（踩坑记录，新会话必读）
+
+- **网络：访问 GitHub/raw/formulae.brew.sh 很慢**。必须用镜像：crates → rsproxy（已配）；rustup → TUNA；brew → `HOMEBREW_API_DOMAIN`/`HOMEBREW_BOTTLE_DOMAIN` 指 TUNA（已在 updater.rs 内置）；npm 如变慢 → `registry.npmmirror.com`。
+- **brew 曾整体损坏**（卡在拉 `formulae.brew.sh` 内部 API 元数据）：重装 brew 后恢复。遇到 brew 异常先 `brew doctor`，别先怀疑应用代码。
+- **macOS 钥匙串对未签名开发构建会因 cdhash 失配丢条目**——密钥存储因此弃用钥匙串，改 0600 `keys.json`（勿改回）。
+- **管道输出块缓冲**：brew/npm 等检测到非 TTY 会块缓冲导致"无输出"假象——安装/更新命令必须在 PTY 里跑（updater.rs 已如此，别退回管道）。
+- **GUI 应用 PATH 很短**：Finder 启动的打包应用可能找不到 npm 装的 CLI；开发模式（`npm run tauri dev`）继承终端 PATH 不受影响。
+- **本机 CLI 安装情况**：claude/codex/gemini/qwen 为 brew 或 npm 安装（检测见 updater.rs 报告）；opencode 未装；kimi 为新版（~/.kimi-code）。
+- **git 提交**：用户要求 CI 耗时久，常规提交加 `[skip ci]`，里程碑提交才跑三平台 CI。
+
 ## 代码结构
 
 ```
@@ -76,6 +88,12 @@ src-tauri/src/
 - 三平台兼容：禁写平台特定路径，用 `dirs`/`keyring`/`portable-pty` 的抽象。
 - UI 文案用中文；代码注释用中文、只在非显而易见处写（参照现有文件风格）。
 - 前端不直接碰文件系统，一切经 Tauri command；流式输出走 `pty-output-<id>` 等事件。
+
+## 主题与设计系统
+
+- 全站暖黑主题（Conductor 风），令牌集中在 `src/App.css` 的 `@theme`（`bg-rail`/`bg-canvas`/`text-l2` 等语义类），**改主题只动这一个文件**；不要在组件里散落 hex。
+- 五级暖灰阶梯（`rail #302F2D` → `strip #1F1E1C` → `canvas #171111` → `inset #2A1E1E` → `rail-sel #3A3937`）；文字四档（l1-l4）；每视图仅一个绿色 CTA（`#16A349`）；状态用「深底浅字」pill 对；零阴影、1px hairline `#2A2424`；**禁用蓝色系**。
+- 用户明确否决过的设计：多栏嵌套的会话页（三栏 → 两栏树+列表/回放）、浅色 + 蓝紫渐变侧边栏、按钮排排坐的 profile 行。不要改回去。
 
 ## 路线图（见 docs/architecture.md §8）
 

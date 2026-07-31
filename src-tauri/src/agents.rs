@@ -303,49 +303,64 @@ pub fn prepare_launch(profile: &Profile) -> Result<Vec<String>, String> {
     Ok(vec![])
 }
 
-pub fn binary_for(agent_id: &str) -> Option<&'static str> {    AGENTS
+pub fn binary_for(agent_id: &str) -> Option<&'static str> {
+    AGENTS
         .iter()
         .find(|(id, _)| *id == agent_id)
         .map(|(_, bin)| *bin)
 }
 
-/// kimi 新旧两个产品共用命令，按数据目录推断装的是哪个变体
-fn kimi_variant_hint() -> Option<&'static str> {
+/// kimi 新旧两个产品共用命令，按数据目录推断装的是哪个变体（"new" | "legacy"）
+pub(crate) fn kimi_variant() -> Option<&'static str> {
     let home = dirs::home_dir()?;
     if home.join(".kimi-code").exists() {
-        Some("新版")
+        Some("new")
     } else if home.join(".kimi").exists() {
-        Some("旧版")
+        Some("legacy")
     } else {
         None
     }
 }
 
-/// 检测结果按进程缓存一次（要 spawn 6 个子进程跑 --version，没必要每次重算）
-static DETECT_CACHE: std::sync::OnceLock<Vec<DetectResult>> = std::sync::OnceLock::new();
+fn kimi_variant_hint() -> Option<&'static str> {
+    match kimi_variant() {
+        Some("new") => Some("新版"),
+        Some("legacy") => Some("旧版"),
+        _ => None,
+    }
+}
+
+/// 检测结果按进程缓存一次（要 spawn 6 个子进程跑 --version，没必要每次重算）；
+/// 更新成功后由 updater 调 invalidate_detect_cache 清空
+static DETECT_CACHE: std::sync::Mutex<Option<Vec<DetectResult>>> = std::sync::Mutex::new(None);
+
+pub(crate) fn invalidate_detect_cache() {
+    *DETECT_CACHE.lock().unwrap() = None;
+}
 
 #[tauri::command]
 pub async fn detect_agents() -> Vec<DetectResult> {
-    DETECT_CACHE
-        .get_or_init(|| {
-            AGENTS
-                .iter()
-                .map(|(id, binary)| {
-                    let (binary_path, mut version) = detect(binary);
-                    if *id == "kimi" {
-                        if let (Some(v), Some(hint)) = (&version, kimi_variant_hint()) {
-                            version = Some(format!("{v} ({hint})"));
-                        }
-                    }
-                    DetectResult {
-                        id: id.to_string(),
-                        binary_path,
-                        version,
-                    }
-                })
-                .collect()
+    if let Some(cached) = DETECT_CACHE.lock().unwrap().clone() {
+        return cached;
+    }
+    let results: Vec<DetectResult> = AGENTS
+        .iter()
+        .map(|(id, binary)| {
+            let (binary_path, mut version) = detect(binary);
+            if *id == "kimi" {
+                if let (Some(v), Some(hint)) = (&version, kimi_variant_hint()) {
+                    version = Some(format!("{v} ({hint})"));
+                }
+            }
+            DetectResult {
+                id: id.to_string(),
+                binary_path,
+                version,
+            }
         })
-        .clone()
+        .collect();
+    *DETECT_CACHE.lock().unwrap() = Some(results.clone());
+    results
 }
 
 #[cfg(test)]

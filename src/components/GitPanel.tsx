@@ -19,11 +19,11 @@ interface GitStatusDto {
 }
 
 const STATUS_STYLE: Record<string, string> = {
-  M: "bg-amber-100 text-amber-700",
-  A: "bg-green-100 text-green-700",
-  "??": "bg-green-100 text-green-700",
-  D: "bg-red-100 text-red-700",
-  R: "bg-blue-100 text-blue-700",
+  M: "bg-warn text-warn-text",
+  A: "bg-ok text-ok-text",
+  "??": "bg-ok text-ok-text",
+  D: "bg-err text-err-text",
+  R: "bg-inset text-l3",
 };
 
 /**
@@ -90,38 +90,38 @@ export default function GitPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* 头部：分支 / 上游差距 / 总增删 */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-neutral-100 px-3 py-2 text-xs">
+      <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-2 text-xs">
         {status?.isRepo ? (
           <>
-            <span className="font-medium text-neutral-700">⑂ {status.branch}</span>
+            <span className="font-medium text-l1">⑂ {status.branch}</span>
             {(status.ahead > 0 || status.behind > 0) && (
-              <span className="text-neutral-500">
+              <span className="text-l3">
                 {status.ahead > 0 && `↑${status.ahead}`}
                 {status.behind > 0 && ` ↓${status.behind}`}
               </span>
             )}
             {(status.totalAdd > 0 || status.totalDel > 0) && (
               <span className="ml-auto font-mono">
-                <span className="text-green-600">+{status.totalAdd}</span>{" "}
-                <span className="text-red-600">-{status.totalDel}</span>
+                <span className="text-add">+{status.totalAdd}</span>{" "}
+                <span className="text-del">-{status.totalDel}</span>
               </span>
             )}
           </>
         ) : (
-          <span className="text-neutral-400">git</span>
+          <span className="text-l4">git</span>
         )}
       </div>
 
       {/* 文件列表 */}
       <div className="min-h-0 flex-1 overflow-auto p-2">
         {error ? (
-          <p className="p-1 text-xs text-red-600">{error}</p>
+          <p className="p-1 text-xs text-err-text">{error}</p>
         ) : !status ? (
-          <p className="p-1 text-xs text-neutral-400">加载中…</p>
+          <p className="p-1 text-xs text-l4">加载中…</p>
         ) : !status.isRepo ? (
-          <p className="p-1 text-sm text-neutral-400">当前目录不是 git 仓库</p>
+          <p className="p-1 text-sm text-l4">当前目录不是 git 仓库</p>
         ) : status.files.length === 0 ? (
-          <p className="p-1 text-sm text-neutral-400">工作区干净 ✓</p>
+          <p className="p-1 text-sm text-l4">工作区干净 ✓</p>
         ) : (
           status.files.map((f) => (
             <div
@@ -130,20 +130,20 @@ export default function GitPanel({
               className="flex items-center gap-1.5 px-1 py-1 text-xs"
             >
               <span
-                className={`shrink-0 rounded px-1 font-mono ${STATUS_STYLE[f.status] ?? "bg-neutral-100 text-neutral-600"}`}
+                className={`shrink-0 rounded px-1 font-mono ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
               >
                 {f.status}
               </span>
-              <span className="min-w-0 flex-1 truncate font-mono text-neutral-700">
+              <span className="min-w-0 flex-1 truncate font-mono text-l2">
                 {f.path}
               </span>
               {(f.additions !== null || f.deletions !== null) && (
                 <span className="shrink-0 font-mono">
                   {f.additions !== null && (
-                    <span className="text-green-600">+{f.additions}</span>
+                    <span className="text-add">+{f.additions}</span>
                   )}{" "}
                   {f.deletions !== null && f.deletions > 0 && (
-                    <span className="text-red-600">-{f.deletions}</span>
+                    <span className="text-del">-{f.deletions}</span>
                   )}
                 </span>
               )}
@@ -154,7 +154,7 @@ export default function GitPanel({
 
       {/* 提交区 */}
       {status?.isRepo && (
-        <div className="shrink-0 border-t border-neutral-200 p-2">
+        <div className="shrink-0 border-t border-hairline p-2">
           <input
             value={message}
             onChange={(e) => setMessage(e.target.value)}
@@ -163,20 +163,20 @@ export default function GitPanel({
             }}
             placeholder="提交信息（Enter 提交）"
             disabled={running !== null}
-            className="mb-2 w-full rounded border border-neutral-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500 disabled:opacity-50"
+            className="mb-2 w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
           />
           <div className="flex gap-2">
             <button
               onClick={() => void doCommit(false)}
               disabled={!canCommit}
-              className="flex-1 rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+              className="flex-1 rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
             >
               {running === "commit" ? "提交中…" : "提交"}
             </button>
             <button
               onClick={() => void doCommit(true)}
               disabled={!canCommit}
-              className="flex-1 rounded border border-blue-600 px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 disabled:opacity-50"
+              className="flex-1 rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               {running === "push" ? "推送中…" : "提交并推送"}
             </button>
@@ -184,7 +184,7 @@ export default function GitPanel({
           {output && (
             <pre
               className={`mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded p-2 font-mono text-xs ${
-                output.ok ? "bg-neutral-50 text-neutral-600" : "bg-red-50 text-red-700"
+                output.ok ? "bg-inset text-l2" : "bg-err text-err-text"
               }`}
             >
               {output.text}

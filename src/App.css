@@ -1,5 +1,51 @@
 @import "tailwindcss";
 
+/**
+ * Conductor 暖黑主题令牌 —— 全应用唯一出处。
+ * Tailwind v4 @theme 会为每个 --color-* 自动生成同名工具类
+ * （bg-rail / text-l2 / border-hairline / divide-hairline …）。
+ */
+@theme {
+  /* 暖调近黑五级阶梯 */
+  --color-rail: #302f2d; /* 侧栏 / 树栏底 */
+  --color-rail-sel: #3a3937; /* 侧栏选中行 */
+  --color-strip: #1f1e1c; /* 顶栏 / 面板头条 / 输入区 */
+  --color-canvas: #171111; /* 主内容底 */
+  --color-inset: #2a1e1e; /* 卡片 / 气泡 / 结果块 */
+  --color-seg-sel: #2c2827; /* 分段控件选中 */
+  --color-hairline: #2a2424; /* 区间与行间 1px 细线 */
+  --color-field: #363231; /* 输入框 / 弹层边线 */
+
+  /* 文本四级（层级靠颜色不靠字号） */
+  --color-l1: #fffefd; /* 标题 / 选中 */
+  --color-l2: #c7c6c4; /* 正文 / 次级 */
+  --color-l3: #b9b4b1; /* 元信息 / 非选中页签 */
+  --color-l4: #7c7877; /* 淡 */
+
+  /* 主 CTA（绿）：每个视图只允许一个 */
+  --color-cta: #16a349;
+  --color-cta-text: #ceffdf;
+  --color-cta-bd: #06491e;
+
+  /* 状态 pill：深底 + 同色相浅字 */
+  --color-ok: #133a23;
+  --color-ok-text: #8ee3b1;
+  --color-err: #3a1b1e;
+  --color-err-text: #d5989f;
+  --color-warn: #3a2e1b;
+  --color-warn-text: #e0c6a1;
+
+  /* diff 增删 */
+  --color-add: #9acfb0;
+  --color-del: #cd7c86;
+
+  /* 页签选中下划线 */
+  --color-tabline: #e0c6c1;
+
+  /* 次级实心按钮 */
+  --color-btn: #464543;
+}
+
 html,
 body,
 #root {

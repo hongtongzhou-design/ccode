@@ -148,8 +148,8 @@ function TerminalView({
       scrollback: 5000,
       // VS Code Dark+ 风格调色板，让 ANSI 高亮有足够的色彩层次
       theme: {
-        background: '#1e1e1e',
-        foreground: '#d4d4d4',
+        background: '#171111', // 主题令牌 --color-canvas
+        foreground: '#C7C6C4', // 主题令牌 --color-l2
         cursor: '#aeafad',
         selectionBackground: '#264f78',
         black: '#000000',
@@ -418,7 +418,7 @@ function TerminalView({
   }
 
   const select =
-    "rounded border border-neutral-300 bg-white px-2 py-1.5 text-sm outline-none focus:border-blue-500";
+    "rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
   return (
     <div className="flex h-full flex-col p-4">
@@ -484,7 +484,7 @@ function TerminalView({
         {running ? (
           <button
             onClick={stop}
-            className="rounded bg-red-600 px-3 py-1.5 text-sm text-white hover:bg-red-700"
+            className="rounded bg-err px-3 py-1.5 text-sm text-err-text hover:brightness-110"
           >
             停止
           </button>
@@ -493,13 +493,13 @@ function TerminalView({
             <button
               onClick={launch}
               disabled={!profileId}
-              className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+              className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
             >
               启动
             </button>
             <button
               onClick={openShell}
-              className="rounded border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-100"
+              className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
             >
               打开 Shell
             </button>
@@ -509,20 +509,20 @@ function TerminalView({
           onClick={onOpenSessionPanel}
           disabled={!running && !sessionFile}
           title="查看当前会话的结构化对话"
-          className="rounded border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-100 disabled:opacity-50"
+          className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5 disabled:opacity-50"
         >
           会话
         </button>
         {shellActive && !running && (
-          <span className="text-sm text-neutral-500">shell 模式</span>
+          <span className="text-sm text-l3">shell 模式</span>
         )}
         {exited && !running && !shellActive && (
-          <span className="text-sm text-neutral-500">进程已退出</span>
+          <span className="text-sm text-l3">进程已退出</span>
         )}
-        {error && <span className="text-sm text-red-600">{error}</span>}
+        {error && <span className="text-sm text-err-text">{error}</span>}
       </div>
       {agentProfiles.length === 0 && (
-        <p className="mb-2 text-sm text-neutral-500">
+        <p className="mb-2 text-sm text-l3">
           该 agent 暂无配置，请先在「配置」页创建。
         </p>
       )}
@@ -662,13 +662,13 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     });
   }
 
-  const railBtn = "text-xs text-neutral-400 hover:text-neutral-600";
+  const railBtn = "text-xs text-l4 hover:text-l2";
 
   return (
     <div className="flex h-full">
       {/* 左栏：工作树 + 运行中总览 */}
       {railCollapsed ? (
-        <div className="flex w-8 shrink-0 flex-col items-center border-r border-neutral-200 bg-white py-1.5">
+        <div className="flex w-8 shrink-0 flex-col items-center bg-rail py-1.5">
           <button
             onClick={() => setRailCollapsed(false)}
             title="展开工作树"
@@ -678,13 +678,13 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           </button>
         </div>
       ) : (
-        <div className="flex w-60 shrink-0 flex-col border-r border-neutral-200 bg-white">
-          <div className="flex shrink-0 items-center gap-2 border-b border-neutral-200 px-2 py-1.5">
-            <span className="mr-auto text-xs font-medium text-neutral-600">工作树</span>
+        <div className="flex w-60 shrink-0 flex-col bg-rail">
+          <div className="flex shrink-0 items-center gap-2 px-2 py-1.5">
+            <span className="mr-auto text-xs font-medium text-l3">工作树</span>
             <button
               onClick={() => setShowHidden((v) => !v)}
               title={showHidden ? "隐藏隐藏文件" : "显示隐藏文件"}
-              className={`text-xs ${showHidden ? "text-blue-600" : "text-neutral-400"} hover:text-neutral-600`}
+              className={`text-xs ${showHidden ? "text-l1" : "text-l4"} hover:text-l2`}
             >
               .*
             </button>
@@ -713,29 +713,34 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             />
           </div>
           {/* 运行中总览：全部终端标签的状态一览，点击激活 */}
-          <div className="max-h-56 shrink-0 overflow-auto border-t border-neutral-200">
-            <div className="px-2 pt-1.5 text-xs text-neutral-400">运行中</div>
+          <div className="max-h-56 shrink-0 overflow-auto bg-strip">
+            <div className="px-2 pt-1.5 text-xs text-l4">运行中</div>
             {tabs.map((t) => {
               const s = statuses[t.id];
+              const active = t.id === activeId;
               const dot = s?.running
-                ? "text-green-600"
+                ? "text-ok-text"
                 : s?.shell
-                  ? "text-blue-600"
-                  : "text-neutral-300";
+                  ? "text-l3"
+                  : "text-l4";
               return (
                 <button
                   key={t.id}
                   onClick={() => setActiveId(t.id)}
-                  className={`flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs hover:bg-neutral-100 ${
-                    t.id === activeId ? "bg-blue-50" : ""
+                  className={`mx-1 flex w-[calc(100%-8px)] items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs hover:bg-white/5 ${
+                    active ? "bg-rail-sel" : ""
                   }`}
                 >
                   <span className={`shrink-0 text-[10px] ${dot}`}>●</span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate font-medium text-neutral-700">
+                    <span
+                      className={`block truncate font-medium ${active ? "text-l1" : "text-l2"}`}
+                    >
                       {s?.title ?? "终端"}
                     </span>
-                    <span className="block truncate text-neutral-400">
+                    <span
+                      className={`block truncate ${active ? "text-l2" : "text-l4"}`}
+                    >
                       {s
                         ? `${agentLabel(s.agentId)}${s.model ? ` · ${s.model}` : ""} · ${basename(s.cwd)}`
                         : ""}
@@ -750,7 +755,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
       {/* 中带：终端标签区 */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-1 overflow-x-auto border-b border-neutral-200 bg-neutral-50 px-2 pt-1.5">
+        <div className="flex items-center gap-1 overflow-x-auto bg-strip px-2 pt-1.5">
           {tabs.map((t) => {
             const s = statuses[t.id];
             const active = t.id === activeId;
@@ -758,14 +763,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               <div
                 key={t.id}
                 onClick={() => setActiveId(t.id)}
-                className={`flex shrink-0 cursor-pointer items-center gap-1.5 rounded-t px-3 py-1.5 text-sm ${
+                className={`flex shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-3 py-1.5 text-sm ${
                   active
-                    ? "-mb-px border border-b-0 border-neutral-200 bg-white"
-                    : "text-neutral-500 hover:bg-neutral-100"
+                    ? "border-tabline text-l1"
+                    : "border-transparent text-l3 hover:text-l1"
                 }`}
               >
                 <span
-                  className={`text-[10px] ${s?.alive ? "text-green-600" : "text-neutral-300"}`}
+                  className={`text-[10px] ${s?.alive ? "text-ok-text" : "text-l4"}`}
                   title={s?.alive ? "进程运行中" : "未运行 / 已退出"}
                 >
                   ●
@@ -777,7 +782,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     closeTab(t.id);
                   }}
                   aria-label="关闭标签"
-                  className="text-neutral-400 hover:text-red-600"
+                  className="text-l4 hover:text-err-text"
                 >
                   ×
                 </button>
@@ -787,7 +792,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           <button
             onClick={() => addTab()}
             title="新建终端标签"
-            className="ml-1 shrink-0 rounded px-2 py-1 text-sm text-neutral-500 hover:bg-neutral-100"
+            className="ml-1 shrink-0 rounded px-2 py-1 text-sm text-l3 hover:bg-white/5"
           >
             ＋
           </button>
@@ -817,8 +822,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
       {/* 右侧面板：会话联动 / 文件预览 页签切换 */}
       {rightOpen && (
-        <div className="flex w-[380px] shrink-0 flex-col border-l border-neutral-200 bg-white">
-          <div className="flex shrink-0 items-center gap-1 border-b border-neutral-200 px-2 py-1.5">
+        <div className="flex w-[380px] shrink-0 flex-col border-l border-hairline bg-canvas">
+          <div className="flex shrink-0 items-center gap-1 bg-strip px-2 py-1.5">
             {(["session", "preview", "git"] as const).map((k) => {
               const gitBadge =
                 k === "git" && gitTotals && gitTotals.add + gitTotals.del > 0
@@ -830,15 +835,13 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   onClick={() => setRightTab(k)}
                   className={`rounded px-2.5 py-1 text-xs ${
                     rightTab === k
-                      ? "bg-neutral-800 text-white"
-                      : "text-neutral-500 hover:bg-neutral-100"
+                      ? "bg-seg-sel text-l1"
+                      : "text-l3 hover:text-l1"
                   }`}
                 >
                   {k === "session" ? "会话" : k === "preview" ? "预览" : "改动"}
                   {gitBadge && (
-                    <span
-                      className={`ml-1 rounded px-1 ${rightTab === k ? "bg-white/20" : "bg-green-100 text-green-700"}`}
-                    >
+                    <span className="ml-1 rounded bg-ok px-1 text-ok-text">
                       +{gitBadge}
                     </span>
                   )}
@@ -848,7 +851,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             <button
               onClick={() => setRightOpen(false)}
               title="收起面板"
-              className="ml-auto text-xs text-neutral-400 hover:text-neutral-600"
+              className="ml-auto text-xs text-l4 hover:text-l1"
             >
               ×
             </button>
@@ -856,9 +859,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           {rightTab === "session" && (
             <div ref={sessionScrollRef} className="min-h-0 flex-1 overflow-auto p-3">
               {!activeSession?.file ? (
-                <p className="text-sm text-neutral-400">等待会话文件产生…</p>
+                <p className="text-sm text-l4">等待会话文件产生…</p>
               ) : activeSession.conv.length === 0 ? (
-                <p className="text-sm text-neutral-400">暂无对话内容</p>
+                <p className="text-sm text-l4">暂无对话内容</p>
               ) : (
                 <ConversationView messages={activeSession.conv} compact />
               )}
@@ -866,23 +869,23 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           )}
           {rightTab === "preview" && (
             <div className="flex min-h-0 flex-1 flex-col">
-              <div className="flex shrink-0 items-center border-b border-neutral-100 px-3 py-1.5 text-xs text-neutral-500">
+              <div className="flex shrink-0 items-center bg-strip px-3 py-1.5 text-xs text-l3">
                 <span className="truncate">{preview?.name ?? "未选择文件"}</span>
                 {preview?.truncated && (
-                  <span className="ml-2 shrink-0 rounded bg-amber-100 px-1 text-amber-700">
+                  <span className="ml-2 shrink-0 rounded bg-warn px-1 text-warn-text">
                     已截断
                   </span>
                 )}
               </div>
               <div className="min-h-0 flex-1 overflow-auto p-3">
                 {previewError ? (
-                  <p className="text-sm text-red-600">{previewError}</p>
+                  <p className="text-sm text-err-text">{previewError}</p>
                 ) : preview ? (
-                  <pre className="whitespace-pre-wrap break-all font-mono text-xs text-neutral-700">
+                  <pre className="whitespace-pre-wrap break-all font-mono text-xs text-l2">
                     {preview.text}
                   </pre>
                 ) : (
-                  <p className="text-sm text-neutral-400">在左侧工作树中单击文件预览</p>
+                  <p className="text-sm text-l4">在左侧工作树中单击文件预览</p>
                 )}
               </div>
             </div>

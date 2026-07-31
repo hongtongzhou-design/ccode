@@ -117,14 +117,14 @@ export default function FileTree({
             setMenu({ x: e.clientX, y: e.clientY, path: entry.path });
           }}
           title={entry.isDir ? `${entry.path}\n双击进入，右键在此打开终端` : entry.path}
-          className="group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-neutral-100"
+          className="group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-white/5"
           style={{ paddingLeft: 6 + depth * 12 }}
         >
-          <span className="w-3 shrink-0 text-neutral-400">
+          <span className="w-3 shrink-0 text-l4">
             {entry.isDir ? (isOpen ? "▾" : "▸") : ""}
           </span>
           <span className="shrink-0">{entry.isDir ? "📁" : "📄"}</span>
-          <span className="truncate text-neutral-700">{entry.name}</span>
+          <span className="truncate text-l3">{entry.name}</span>
           {entry.isDir && (
             <button
               onClick={(e) => {
@@ -132,7 +132,7 @@ export default function FileTree({
                 onOpenTerminal(entry.path);
               }}
               title="在此打开新终端"
-              className="ml-auto hidden shrink-0 text-neutral-400 hover:text-blue-600 group-hover:block"
+              className="ml-auto hidden shrink-0 text-l4 hover:text-l1 group-hover:block"
             >
               ↗
             </button>
@@ -140,7 +140,7 @@ export default function FileTree({
         </div>
         {entry.isDir && isOpen && !children && (
           <div
-            className="py-0.5 text-xs text-neutral-400"
+            className="py-0.5 text-xs text-l4"
             style={{ paddingLeft: 6 + (depth + 1) * 12 }}
           >
             加载中…
@@ -158,25 +158,25 @@ export default function FileTree({
     <div>
       {/* 当前根：加粗 basename + 完整路径 tooltip */}
       <div
-        className="border-b border-neutral-100 px-2 py-1 text-xs font-semibold text-neutral-700"
+        className="px-2 py-1 text-xs font-semibold text-l1"
         title={root}
       >
         <span className="truncate">{basenameOf(root)}</span>
       </div>
-      {error && <p className="px-2 py-1 text-xs text-red-600">{error}</p>}
+      {error && <p className="px-2 py-1 text-xs text-err-text">{error}</p>}
       {parent && (
         <div
           onClick={() => setRoot(parent)}
           title={parent}
-          className="cursor-pointer px-2 py-0.5 text-xs text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600"
+          className="cursor-pointer px-2 py-0.5 text-xs text-l4 hover:bg-white/5 hover:text-l2"
         >
           ‥ 上级目录
         </div>
       )}
       {!children ? (
-        <p className="px-2 py-1 text-xs text-neutral-400">加载中…</p>
+        <p className="px-2 py-1 text-xs text-l4">加载中…</p>
       ) : children.length === 0 ? (
-        <p className="px-2 py-1 text-xs text-neutral-400">空目录</p>
+        <p className="px-2 py-1 text-xs text-l4">空目录</p>
       ) : (
         children.map((c) => <Node key={c.path} entry={c} depth={0} />)
       )}

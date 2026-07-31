@@ -6,6 +6,7 @@ mod models;
 mod profiles;
 mod pty;
 mod sessions;
+mod updater;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -45,6 +46,10 @@ pub fn run() {
             git_info::git_status,
             git_info::git_commit,
             git_info::git_push,
+            updater::update_agent,
+            updater::install_agent,
+            updater::install_method_preview,
+            updater::updater_write,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

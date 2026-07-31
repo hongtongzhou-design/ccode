@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS } from "../presets";
+import ContextMenu from "../components/ContextMenu";
 import type { Profile, ProfileInput } from "../types";
 
 function ProfileModal({
@@ -122,19 +124,19 @@ function ProfileModal({
   }
 
   const field =
-    "w-full rounded border border-neutral-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500";
+    "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
       onClick={onClose}
     >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-96 rounded-lg bg-white p-5 shadow-xl"
+        className="w-[26rem] rounded-md border border-field bg-strip p-5"
       >
-        <h2 className="mb-4 text-base font-semibold">
+        <h2 className="mb-4 text-base font-semibold text-l1">
           {initial ? "编辑配置" : "新建配置"}
         </h2>
         <div className="mb-4">
@@ -167,7 +169,7 @@ function ProfileModal({
           </select>
         </div>
         <label className="mb-3 block text-sm">
-          <span className="mb-1 block text-neutral-600">Agent</span>
+          <span className="mb-1 block text-xs text-l3">Agent</span>
           <select
             className={field}
             value={form.agent}
@@ -188,7 +190,7 @@ function ProfileModal({
         </label>
         {AGENT_PROTOCOLS[form.agent] && (
           <label className="mb-3 block text-sm">
-            <span className="mb-1 block text-neutral-600">协议</span>
+            <span className="mb-1 block text-xs text-l3">协议</span>
             <select
               className={field}
               value={form.protocol ?? AGENT_PROTOCOLS[form.agent].default}
@@ -203,7 +205,7 @@ function ProfileModal({
           </label>
         )}
         <label className="mb-3 block text-sm">
-          <span className="mb-1 block text-neutral-600">名称</span>
+          <span className="mb-1 block text-xs text-l3">名称</span>
           <input
             className={field}
             required
@@ -213,7 +215,7 @@ function ProfileModal({
           />
         </label>
         <label className="mb-1 block text-sm">
-          <span className="mb-1 block text-neutral-600">Base URL（可选）</span>
+          <span className="mb-1 block text-xs text-l3">Base URL（可选）</span>
           <input
             className={field}
             placeholder="https://api.example.com"
@@ -227,18 +229,18 @@ function ProfileModal({
             onClick={testConnection}
             disabled={testing || !form.baseUrl.trim()}
             title={form.baseUrl.trim() ? "验证端点与密钥连通性" : "先填写 Base URL"}
-            className="shrink-0 rounded border border-neutral-300 px-2.5 py-1 text-xs hover:bg-neutral-100 disabled:opacity-50"
+            className="shrink-0 rounded bg-btn px-2.5 py-1 text-xs text-l1 hover:bg-white/10 disabled:opacity-50"
           >
             {testing ? "测试中…" : "测试连接"}
           </button>
           {testResult && (
-            <span className={`text-xs ${testResult.ok ? "text-green-700" : "text-red-600"}`}>
+            <span className={`text-xs ${testResult.ok ? "text-ok-text" : "text-err-text"}`}>
               {testResult.text}
             </span>
           )}
         </div>
         <label className="mb-3 block text-sm">
-          <span className="mb-1 block text-neutral-600">API Key</span>
+          <span className="mb-1 block text-xs text-l3">API Key</span>
           <input
             className={field}
             type="password"
@@ -249,7 +251,7 @@ function ProfileModal({
           />
         </label>
         <div className="mb-4 text-sm">
-          <span className="mb-1 block text-neutral-600">
+          <span className="mb-1 block text-xs text-l3">
             模型列表（可选，首个为默认）
           </span>
           <div className="mb-2 flex items-center gap-2">
@@ -258,7 +260,7 @@ function ProfileModal({
               onClick={fetchModels}
               disabled={fetching || !form.baseUrl.trim()}
               title={form.baseUrl.trim() ? "从 Base URL 拉取可用模型" : "先填写 Base URL"}
-              className="shrink-0 rounded border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-100 disabled:opacity-50"
+              className="shrink-0 rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               {fetching ? "获取中…" : "获取模型"}
             </button>
@@ -284,26 +286,26 @@ function ProfileModal({
               </select>
             )}
             {fetchedModels && fetchedModels.length === 0 && (
-              <span className="text-xs text-neutral-400">接口返回 0 个模型</span>
+              <span className="text-xs text-l4">接口返回 0 个模型</span>
             )}
           </div>
-          {fetchError && <p className="mb-2 text-xs text-red-600">{fetchError}</p>}
+          {fetchError && <p className="mb-2 text-xs text-err-text">{fetchError}</p>}
           {form.models.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
               {form.models.map((m, i) => (
                 <span
                   key={m}
-                  className="flex items-center gap-1 rounded bg-neutral-100 px-2 py-0.5 text-xs text-neutral-700"
+                  className="flex items-center gap-1 rounded bg-inset px-2 py-0.5 text-xs text-l2"
                 >
                   {m}
-                  {i === 0 && <span className="text-blue-600">默认</span>}
+                  {i === 0 && <span className="text-l1">默认</span>}
                   <button
                     type="button"
                     aria-label={`移除 ${m}`}
                     onClick={() =>
                       setForm({ ...form, models: form.models.filter((x) => x !== m) })
                     }
-                    className="text-neutral-400 hover:text-red-600"
+                    className="text-l4 hover:text-err-text"
                   >
                     ×
                   </button>
@@ -328,14 +330,14 @@ function ProfileModal({
               type="button"
               onClick={addModel}
               disabled={!modelInput.trim()}
-              className="shrink-0 rounded border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-100 disabled:opacity-50"
+              className="shrink-0 rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               添加
             </button>
           </div>
         </div>
         <label className="mb-4 block text-sm">
-          <span className="mb-1 block text-neutral-600">
+          <span className="mb-1 block text-xs text-l3">
             附加环境变量（可选，每行 KEY=VALUE，# 开头为注释；可覆盖内置注入值）
           </span>
           <textarea
@@ -345,19 +347,19 @@ function ProfileModal({
             onChange={(e) => setForm({ ...form, extraEnvText: e.target.value })}
           />
         </label>
-        {error && <p className="mb-3 text-sm text-red-600">{error}</p>}
+        {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
         <div className="flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100"
+            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={saving}
-            className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             保存
           </button>
@@ -367,6 +369,40 @@ function ProfileModal({
   );
 }
 
+interface AgentCmdResult {
+  ok: boolean;
+  output: string;
+  method: string;
+  versionBefore: string | null;
+  versionAfter: string | null;
+}
+
+/** 失败诊断：按输出/方式文本给一条下一步建议，无匹配则不提示（纯函数，可单测） */
+function diagnose(output: string, method: string): string | null {
+  const lower = output.toLowerCase();
+  if (
+    method.includes("brew") &&
+    (output.includes("formulae.brew.sh") || output.includes("Downloading"))
+  ) {
+    return "brew 元数据下载异常：先在系统终端跑 `brew doctor` 检查 brew 状态，或重试（会走 TUNA 镜像）";
+  }
+  if (
+    lower.includes("timed out") ||
+    lower.includes("timeout") ||
+    output.includes("Could not resolve") ||
+    output.includes("Failed to connect")
+  ) {
+    return "网络连接问题：检查代理设置；如在国内网络，brew 已自动走 TUNA 镜像，npm 可配置 registry.npmmirror.com 镜像";
+  }
+  if (output.includes("EACCES") || lower.includes("permission denied")) {
+    return "权限不足：该命令需要写入全局目录，检查安装目录权限";
+  }
+  if (output.includes("命令超时")) {
+    return "命令超过 15 分钟未完成被终止：通常是下载过慢，重试或检查网络";
+  }
+  return null;
+}
+
 export default function ProfilesPage() {
   const profiles = useAppStore((s) => s.profiles);
   const agents = useAppStore((s) => s.agents);
@@ -374,8 +410,103 @@ export default function ProfilesPage() {
   const duplicateProfile = useAppStore((s) => s.duplicateProfile);
   const loadAll = useAppStore((s) => s.loadAll);
   const [modal, setModal] = useState<{ initial: Profile | null } | null>(null);
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; profile: Profile } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [globalBackups, setGlobalBackups] = useState<Record<string, boolean>>({});
+  // 各 agent 的升级/安装进行态、实时输出与最近结果（可并发操作多个 agent）
+  const [updating, setUpdating] = useState<Record<string, boolean>>({});
+  const [liveOutput, setLiveOutput] = useState<Record<string, string>>({});
+  const [updateResults, setUpdateResults] = useState<Record<string, AgentCmdResult>>({});
+  // 运行中 run 的交互输入（如回答 brew 的 [y/n]）
+  const [cmdInput, setCmdInput] = useState<Record<string, string>>({});
+  // 各 run 最近一次收到输出块的时间戳（ref 即可，渲染时按当前时间算闲置分钟数）
+  const lastChunkAtRef = useRef<Record<string, number>>({});
+  // 仅用于让闲置提醒每 15s 重算一次
+  const [, setIdleTick] = useState(0);
+
+  /** 向运行中的安装/更新进程写一行输入（Enter 发送，自动补 \n） */
+  async function sendUpdaterInput(agentId: string) {
+    const text = cmdInput[agentId] ?? "";
+    if (!text) return;
+    setCmdInput((prev) => ({ ...prev, [agentId]: "" }));
+    try {
+      await invoke("updater_write", { agentId, data: `${text}\n` });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** 跑更新/安装命令：先挂事件监听再 invoke；结果以 done 事件为准，invoke 返回值兜底 */
+  async function runAgentCmd(agentId: string, command: "update_agent" | "install_agent") {
+    setUpdating((prev) => ({ ...prev, [agentId]: true }));
+    setLiveOutput((prev) => ({ ...prev, [agentId]: "" }));
+    lastChunkAtRef.current[agentId] = Date.now();
+    // 闲置提醒用的节拍器：每 15s 触发一次重渲染，run 结束即清
+    const idleTimer = setInterval(() => setIdleTick((t) => t + 1), 15000);
+    const unOut = await listen<string>(`agent-update-output-${agentId}`, (e) => {
+      lastChunkAtRef.current[agentId] = Date.now();
+      setLiveOutput((prev) => ({
+        ...prev,
+        [agentId]: (prev[agentId] ?? "") + e.payload,
+      }));
+    });
+    let doneArrived = false;
+    const unDone = await listen<AgentCmdResult>(`agent-update-done-${agentId}`, (e) => {
+      doneArrived = true;
+      setUpdateResults((prev) => ({ ...prev, [agentId]: e.payload }));
+    });
+    try {
+      const res = await invoke<AgentCmdResult>(command, { agentId });
+      if (!doneArrived) {
+        setUpdateResults((prev) => ({ ...prev, [agentId]: res }));
+      }
+      await loadAll();
+    } catch (e) {
+      if (!doneArrived) {
+        setUpdateResults((prev) => ({
+          ...prev,
+          [agentId]: {
+            ok: false,
+            output: String(e),
+            method: "",
+            versionBefore: null,
+            versionAfter: null,
+          },
+        }));
+      }
+    } finally {
+      clearInterval(idleTimer);
+      unOut();
+      unDone();
+      setUpdating((prev) => ({ ...prev, [agentId]: false }));
+    }
+  }
+
+  /** 升级某个 agent 的 CLI；完成后重新 detect 刷新版本号 */
+  async function onUpdate(agentId: string) {
+    await runAgentCmd(agentId, "update_agent");
+  }
+
+  /** 安装未装的 agent：先亮出将执行的命令，用户确认后才跑 */
+  async function onInstall(agentId: string) {
+    try {
+      const method = await invoke<string | null>("install_method_preview", { agentId });
+      if (!method) {
+        setError("未找到可用的安装工具（brew / npm / uv / curl 都不在 PATH）");
+        return;
+      }
+      if (
+        !window.confirm(
+          `将通过以下命令安装 ${labelOf(agentId)}：\n\n${method}\n\n继续？`,
+        )
+      )
+        return;
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    await runAgentCmd(agentId, "install_agent");
+  }
 
   const labelOf = (agentId: string) =>
     AGENTS.find((a) => a.id === agentId)?.label ?? agentId;
@@ -474,57 +605,150 @@ export default function ProfilesPage() {
 
   return (
     <div className="mx-auto max-w-3xl p-6">
-      <div className="mb-5 flex items-center justify-between">
-        <h1 className="text-xl font-semibold">配置中心</h1>
-        <div className="flex gap-2">
+      <div className="mb-5 flex items-baseline justify-between">
+        <div className="flex items-baseline gap-3">
+          <h1 className="text-lg font-semibold text-l1">配置中心</h1>
+          <span className="text-xs text-l3">
+            {profiles.length} 个配置 · {new Set(profiles.map((p) => p.agent)).size} 个
+            agent
+          </span>
+        </div>
+        <div className="flex gap-1">
           <button
             onClick={onImport}
-            className="rounded border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-100"
+            className="rounded px-2 py-1 text-sm text-l2 hover:bg-white/5"
           >
             导入
           </button>
           <button
             onClick={onExport}
-            className="rounded border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-100"
+            className="rounded px-2 py-1 text-sm text-l2 hover:bg-white/5"
           >
             导出
           </button>
           <button
             onClick={() => setModal({ initial: null })}
-            className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700"
+            className="rounded px-2 py-1 text-sm text-l1 hover:bg-white/5"
           >
             新建配置
           </button>
         </div>
       </div>
-      {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
+      {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
       {AGENTS.map((agent) => {
         const det = agents.find((a) => a.id === agent.id);
         const list = profiles.filter((p) => p.agent === agent.id);
         return (
           <section key={agent.id} className="mb-6">
             <div className="mb-2 flex items-baseline gap-2">
-              <h2 className="text-base font-medium">{agent.label}</h2>
+              <h2 className="text-sm font-medium text-l1">{agent.label}</h2>
               {det?.binaryPath ? (
-                <span className="text-xs text-green-700">
+                <span className="text-xs text-ok-text">
                   已安装{det.version ? ` · ${det.version}` : ""}
                 </span>
               ) : (
-                <span className="text-xs text-neutral-400">
+                <span className="text-xs text-l4">
                   未安装（{agent.binary} 不在 PATH）
                 </span>
               )}
+              {det?.binaryPath ? (
+                <button
+                  onClick={() => onUpdate(agent.id)}
+                  disabled={updating[agent.id]}
+                  className="ml-auto rounded bg-btn px-2 py-0.5 text-xs text-l1 hover:bg-white/10 disabled:opacity-50"
+                >
+                  {updating[agent.id] ? "更新中…" : "更新"}
+                </button>
+              ) : (
+                <button
+                  onClick={() => onInstall(agent.id)}
+                  disabled={updating[agent.id]}
+                  className="ml-auto rounded border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+                >
+                  {updating[agent.id] ? "安装中…" : "安装"}
+                </button>
+              )}
             </div>
+            {updating[agent.id] && (
+              <div className="mb-2">
+                <pre
+                  // callback ref：每次渲染都把滚动条钉在底部，实现跟随输出自动滚动
+                  ref={(el) => {
+                    if (el) el.scrollTop = el.scrollHeight;
+                  }}
+                  className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-t border border-field border-b-0 bg-canvas p-2 font-mono text-xs text-l2"
+                >
+                  {liveOutput[agent.id] || "运行中，等待输出…"}
+                </pre>
+                {(() => {
+                  // 120s 无新输出给提示；新块到达（时间戳刷新）或 run 结束（整块隐藏）自动消失
+                  const last = lastChunkAtRef.current[agent.id];
+                  const idleMin = last ? Math.floor((Date.now() - last) / 60000) : 0;
+                  if (idleMin < 2) return null;
+                  return (
+                    <div className="bg-warn px-2 py-1 text-xs text-warn-text">
+                      已 {idleMin} 分钟无新输出：可能是网络慢，或命令在等待输入（在下方输入行回答）。若持续异常可把当前内容发给开发者。
+                    </div>
+                  );
+                })()}
+                <div className="flex items-center gap-1.5 rounded-b border border-field bg-canvas px-2 py-1.5">
+                  <span className="font-mono text-xs text-l4">&gt;</span>
+                  <input
+                    value={cmdInput[agent.id] ?? ""}
+                    onChange={(e) =>
+                      setCmdInput((prev) => ({ ...prev, [agent.id]: e.target.value }))
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void sendUpdaterInput(agent.id);
+                    }}
+                    placeholder="需要交互时在此输入（如 y），Enter 发送"
+                    className="flex-1 bg-transparent font-mono text-xs text-l2 outline-none placeholder:text-l4"
+                  />
+                </div>
+              </div>
+            )}
+            {updateResults[agent.id] && (
+              <div
+                className={`mb-2 rounded p-2 text-xs ${
+                  updateResults[agent.id].ok
+                    ? "bg-ok text-ok-text"
+                    : "bg-err text-err-text"
+                }`}
+              >
+                <span>
+                  {updateResults[agent.id].ok ? "✓ 更新完成" : "✗ 更新失败"}
+                  {updateResults[agent.id].method &&
+                    `（${updateResults[agent.id].method}）`}
+                  {updateResults[agent.id].versionAfter &&
+                    `：${updateResults[agent.id].versionBefore ?? "?"} → ${updateResults[agent.id].versionAfter}`}
+                </span>
+                {updateResults[agent.id].output && (
+                  <details className="mt-1">
+                    <summary className="cursor-pointer text-l3">输出</summary>
+                    <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono">
+                      {updateResults[agent.id].output}
+                    </pre>
+                  </details>
+                )}
+                {(() => {
+                  const r = updateResults[agent.id];
+                  const hint = r.ok ? null : diagnose(r.output, r.method);
+                  return hint ? (
+                    <p className="mt-1 text-xs text-l3">💡 建议：{hint}</p>
+                  ) : null;
+                })()}
+              </div>
+            )}
             {list.length === 0 ? (
-              <p className="rounded border border-dashed border-neutral-300 p-4 text-sm text-neutral-400">
+              <p className="rounded border border-dashed border-field p-4 text-sm text-l4">
                 暂无配置
               </p>
             ) : (
-              <ul className="divide-y divide-neutral-200 rounded border border-neutral-200 bg-white">
+              <ul className="divide-y divide-hairline">
                 {list.map((p) => (
-                  <li key={p.id} className="flex items-center gap-3 px-4 py-3 text-sm">
-                    <span className="font-medium">{p.name}</span>
-                    <span className="truncate text-neutral-500">
+                  <li key={p.id} className="flex items-center gap-3 py-2.5 text-sm">
+                    <span className="font-medium text-l1">{p.name}</span>
+                    <span className="truncate text-l3">
                       {p.baseUrl ?? "默认端点"}
                     </span>
                     {p.models.length > 0 && (
@@ -534,66 +758,42 @@ export default function ProfilesPage() {
                             key={m}
                             className={`rounded px-1.5 py-0.5 text-xs ${
                               i === 0
-                                ? "bg-blue-50 text-blue-700"
-                                : "bg-neutral-100 text-neutral-600"
+                                ? "bg-seg-sel text-l1"
+                                : "bg-inset text-l3"
                             }`}
                           >
                             {m}
                           </span>
                         ))}
                         {p.models.length > 3 && (
-                          <span className="text-xs text-neutral-400">
+                          <span className="text-xs text-l4">
                             +{p.models.length - 3}
                           </span>
                         )}
                       </span>
                     )}
                     <span
-                      className={`text-xs ${p.hasKey ? "text-green-700" : "text-neutral-400"}`}
+                      className={`text-xs ${p.hasKey ? "text-ok-text" : "text-l4"}`}
                     >
                       {p.hasKey ? `已存密钥 ${p.keyHint ?? ""}` : "无密钥"}
                     </span>
-                    <span className="ml-auto flex shrink-0 gap-2">
-                      <button
-                        onClick={() => onApplyGlobal(p)}
-                        title="写入该 CLI 的全局配置文件（自动备份原文件）"
-                        className="text-emerald-700 hover:underline"
-                      >
-                        设为全局
-                      </button>
+                    <span className="ml-auto flex shrink-0 items-center gap-1.5">
                       <button
                         onClick={() => setModal({ initial: p })}
-                        className="text-blue-600 hover:underline"
+                        className="text-xs text-l2 hover:text-l1"
                       >
                         编辑
                       </button>
                       <button
-                        onClick={async () => {
-                          try {
-                            await duplicateProfile(p.id);
-                          } catch (e) {
-                            setError(String(e));
-                          }
+                        onClick={(e) => {
+                          const r = e.currentTarget.getBoundingClientRect();
+                          setRowMenu({ x: r.left, y: r.bottom + 4, profile: p });
                         }}
-                        className="text-neutral-600 hover:underline"
+                        aria-label="更多操作"
+                        className="rounded px-1 text-l4 hover:bg-white/5 hover:text-l1"
                       >
-                        复制
+                        ⋯
                       </button>
-                      <button
-                        onClick={() => onDelete(p)}
-                        className="text-red-600 hover:underline"
-                      >
-                        删除
-                      </button>
-                      {globalBackups[p.agent] && (
-                        <button
-                          onClick={() => onRestoreBackup(p.agent)}
-                          title="恢复最近一次备份的全局配置文件"
-                          className="text-neutral-600 hover:underline"
-                        >
-                          恢复备份
-                        </button>
-                      )}
                     </span>
                   </li>
                 ))}
@@ -604,6 +804,38 @@ export default function ProfilesPage() {
       })}
       {modal && (
         <ProfileModal initial={modal.initial} onClose={() => setModal(null)} />
+      )}
+      {rowMenu && (
+        <ContextMenu
+          x={rowMenu.x}
+          y={rowMenu.y}
+          onClose={() => setRowMenu(null)}
+          items={[
+            {
+              label: "复制",
+              onSelect: () => {
+                const p = rowMenu.profile;
+                void (async () => {
+                  try {
+                    await duplicateProfile(p.id);
+                  } catch (e) {
+                    setError(String(e));
+                  }
+                })();
+              },
+            },
+            { label: "设为全局", onSelect: () => void onApplyGlobal(rowMenu.profile) },
+            ...(globalBackups[rowMenu.profile.agent]
+              ? [
+                  {
+                    label: "恢复备份",
+                    onSelect: () => void onRestoreBackup(rowMenu.profile.agent),
+                  },
+                ]
+              : []),
+            { label: "删除", onSelect: () => void onDelete(rowMenu.profile) },
+          ]}
+        />
       )}
     </div>
   );
