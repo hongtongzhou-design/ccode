@@ -8,6 +8,7 @@ mod pty;
 mod sessions;
 mod updater;
 mod workspaces;
+mod ws_settings;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -57,6 +58,7 @@ pub fn run() {
             workspaces::restore_workspace,
             workspaces::delete_workspace,
             workspaces::workspace_env_for,
+            ws_settings::workspace_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

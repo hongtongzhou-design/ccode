@@ -66,7 +66,8 @@ src-tauri/src/
   agents.rs                  # 适配器：detect + launch_plan（env/args 注入规则，差异全在这里）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起逻辑，agent/shell 复用
   sessions.rs                # 会话浏览：扫描/解析五个 agent 会话（Claude/Codex/Gemini/Qwen/Kimi，含 .zst）、app.db session_meta、pin 快照、用户发起的删除
-  workspaces.rs              # 任务工作区（§6.10）：git worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT 端口段
+  workspaces.rs              # 任务工作区（§6.10）：git worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT 端口段、setup/archive 脚本钩子
+  ws_settings.rs             # 项目级 .ccode/settings.toml 三层合并（用户→仓库→local）：files_to_copy/run_mode/scripts
   lib.rs                     # 模块与 Tauri command 注册
 ```
 
@@ -105,6 +106,6 @@ src-tauri/src/
   pin 快照保留、tags/归档/搜索、SessionLink 终端↔会话联动（--session-id + 探测）
 - P3 OpenCode/Kimi 会话解析（SQLite/wire 协议，**Kimi 已完成**）、token/费用统计、注意力标记（badge 思路）
 - P4 IDE 形态（文件树、Monaco）、本地 API 代理（可选）
-- W1 任务工作区核心闭环（§6.10 阶段 A：worktree 创建/归档/恢复、files-to-copy、端口注入、工作区页面）
-- W2 工作区自动化（阶段 B：.ccode/settings.toml、setup/archive/run 脚本）
+- W1 任务工作区核心闭环 ✅（worktree 创建/归档/恢复、files-to-copy、端口注入、工作区页面、会话归并；用户验收通过）
+- W2 工作区自动化 ✅（.ccode/settings.toml 三层合并、setup/archive 脚本钩子、run 脚本按钮 + nonconcurrent 互斥）
 - W3 评审流（阶段 C：merge-base diff、合并回 base、gh PR、状态机）

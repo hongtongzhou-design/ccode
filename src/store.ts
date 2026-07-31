@@ -7,6 +7,12 @@ export interface PendingTerminal {
   cwd: string;
   extraEnv: Record<string, string>;
   title?: string;
+  /** run 脚本：进入 shell 后立即写入的命令行 */
+  prefillCommand?: string;
+  /** run 脚本标签：只开 shell，不走 agent 启动流程 */
+  shellOnly?: boolean;
+  /** run 脚本来源的工作区 id（nonconcurrent 互斥追踪用） */
+  wsId?: string;
 }
 
 interface AppState {
@@ -19,6 +25,9 @@ interface AppState {
   /** 待消费的终端启动请求；终端页可见时消费并清空 */
   pendingTerminal: PendingTerminal | null;
   setPendingTerminal: (p: PendingTerminal | null) => void;
+  /** 运行中的 run 脚本：工作区 id → 终端标签 id（nonconcurrent 互斥） */
+  runningScripts: Record<string, string>;
+  setRunningScript: (wsId: string, tabId: string | null) => void;
   loadAll: () => Promise<void>;
   /** 拉取全部会话元数据（Claude Code + Codex），返回最新列表供轮询比对 */
   loadSessions: () => Promise<SessionMetaDto[]>;
@@ -35,6 +44,14 @@ export const useAppStore = create<AppState>((set) => ({
   setPage: (p) => set({ page: p }),
   pendingTerminal: null,
   setPendingTerminal: (p) => set({ pendingTerminal: p }),
+  runningScripts: {},
+  setRunningScript: (wsId, tabId) =>
+    set((s) => {
+      const next = { ...s.runningScripts };
+      if (tabId) next[wsId] = tabId;
+      else delete next[wsId];
+      return { runningScripts: next };
+    }),
 
   loadAll: async () => {
     const [profiles, agents] = await Promise.all([

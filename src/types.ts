@@ -73,6 +73,11 @@ export interface ChatMessageDto {
 }
 
 /** 任务工作区（§6.10）：一条 ccode/<name> 分支 + 一个 git worktree */
+export interface SetupResultDto {
+  ok: boolean;
+  outputTail: string;
+}
+
 export interface WorkspaceDto {
   id: string;
   repoPath: string;
@@ -85,6 +90,23 @@ export interface WorkspaceDto {
   status: "active" | "archived";
   createdAt: string;
   archivedAt: string | null;
+  /** 仅创建时返回：setup 脚本执行结果（失败不阻断创建） */
+  setupResult: SetupResultDto | null;
+}
+
+/** 项目级 .ccode/settings.toml 三层合并结果（W2） */
+export interface RunScriptDto {
+  name: string;
+  command: string;
+  default: boolean;
+}
+
+export interface WsSettingsDto {
+  filesToCopy: string[];
+  runMode: string;
+  setup: string | null;
+  archive: string | null;
+  run: RunScriptDto[];
 }
 
 export const AGENTS = [

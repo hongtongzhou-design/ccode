@@ -47,6 +47,8 @@ function TerminalView({
   initialCwd,
   initialExtraEnv,
   initialTitle,
+  prefillCommand,
+  shellOnly,
   onStatus,
   onSessionUpdate,
   onOpenSessionPanel,
@@ -58,8 +60,12 @@ function TerminalView({
   initialCwd?: string;
   /** 工作区交接的附加 env（如 CCODE_PORT 端口段），launch 时注入 */
   initialExtraEnv?: Record<string, string>;
-  /** 工作区交接的标签标题（工作区名），优先于 profile/agent 名 */
+  /** 工作区交接的标签标题（工作区名 / run: 脚本名），优先于 profile/agent 名 */
   initialTitle?: string;
+  /** run 脚本：进入 shell 后立即写入的命令行 */
+  prefillCommand?: string;
+  /** run 脚本标签：挂载后自动开 shell 并执行 prefillCommand（不走 agent 启动流程） */
+  shellOnly?: boolean;
   onStatus: (s: TabStatus) => void;
   onSessionUpdate: (s: SessionLinkState) => void;
   onOpenSessionPanel: () => void;
@@ -229,6 +235,28 @@ function TerminalView({
       } catch {}
     });
   }, [visible, rightOpen]);
+
+  // run 脚本标签：终端就绪后自动开 shell 并写入脚本命令（tty 会缓冲输入直到 shell 读取）。
+  // 声明在终端创建 effect 之后，保证 attach 时 termRef 已就位
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (!shellOnly || !visible || !everVisible || autoStartedRef.current) return;
+    autoStartedRef.current = true;
+    void (async () => {
+      try {
+        const ptyId = await invoke<string>("shell_spawn", { cwd });
+        await attach(ptyId, "shell", { reset: true });
+        setExited(false);
+        setShellActive(true);
+        if (prefillCommand) {
+          await invoke("pty_write", { ptyId, data: `${prefillCommand}\n` });
+        }
+      } catch (e) {
+        setError(String(e));
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, everVisible, shellOnly]);
 
   /** 把一个 PTY 接到 xterm 上；agent 退出时自动回落到 shell */
   async function attach(ptyId: string, kind: PtyKind, opts?: { reset?: boolean }) {
@@ -560,8 +588,12 @@ interface Tab {
   initialCwd?: string;
   /** 工作区交接的附加 env（端口段） */
   initialExtraEnv?: Record<string, string>;
-  /** 工作区交接的标签标题（工作区名） */
+  /** 工作区交接的标签标题（工作区名 / run: 脚本名） */
   initialTitle?: string;
+  /** run 脚本：进入 shell 后立即写入的命令行 */
+  prefillCommand?: string;
+  /** run 脚本标签：自动开 shell 执行 prefillCommand */
+  shellOnly?: boolean;
 }
 
 const INITIAL_TAB: Tab = { id: crypto.randomUUID() };
@@ -646,15 +678,20 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     cwd?: string;
     extraEnv?: Record<string, string>;
     title?: string;
-  }) {
+    prefillCommand?: string;
+    shellOnly?: boolean;
+  }): string {
     const t: Tab = {
       id: crypto.randomUUID(),
       initialCwd: init?.cwd,
       initialExtraEnv: init?.extraEnv,
       initialTitle: init?.title,
+      prefillCommand: init?.prefillCommand,
+      shellOnly: init?.shellOnly,
     };
     setTabs((prev) => [...prev, t]);
     setActiveId(t.id);
+    return t.id;
   }
 
   /** 工作树「在此打开新终端」：新建标签并预填 cwd，用户选 agent/profile 后启动 */
@@ -665,17 +702,26 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   // 消费工作区页交来的终端启动请求（可见时才消费，保证标签能立刻聚焦启动栏）
   const pendingTerminal = useAppStore((s) => s.pendingTerminal);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const setRunningScript = useAppStore((s) => s.setRunningScript);
+  // closeTab 里取最新互斥登记表（避免闭包过期）
+  const runningScripts = useAppStore((s) => s.runningScripts);
+  const runningScriptsRef = useRef(runningScripts);
+  runningScriptsRef.current = runningScripts;
   useEffect(() => {
     if (visible && pendingTerminal) {
       setPendingTerminal(null);
-      addTab({
+      const tabId = addTab({
         cwd: pendingTerminal.cwd,
         extraEnv: pendingTerminal.extraEnv,
         title: pendingTerminal.title,
+        prefillCommand: pendingTerminal.prefillCommand,
+        shellOnly: pendingTerminal.shellOnly,
       });
+      // run 脚本标签：登记 nonconcurrent 互斥追踪
+      if (pendingTerminal.wsId) setRunningScript(pendingTerminal.wsId, tabId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, pendingTerminal, setPendingTerminal]);
+  }, [visible, pendingTerminal, setPendingTerminal, setRunningScript]);
 
   function closeTab(id: string) {
     const s = statuses[id];
@@ -706,6 +752,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       delete n[id];
       return n;
     });
+    // run 脚本互斥登记随标签关闭释放
+    for (const [wsId, tabId] of Object.entries(runningScriptsRef.current)) {
+      if (tabId === id) setRunningScript(wsId, null);
+    }
   }
 
   const railBtn = "text-xs text-l4 hover:text-l2";
@@ -855,6 +905,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   initialCwd={t.initialCwd}
                   initialExtraEnv={t.initialExtraEnv}
                   initialTitle={t.initialTitle}
+                  prefillCommand={t.prefillCommand}
+                  shellOnly={t.shellOnly}
                   onStatus={(s) => reportStatus(t.id, s)}
                   onSessionUpdate={(s) => reportSession(t.id, s)}
                   onOpenSessionPanel={() => {

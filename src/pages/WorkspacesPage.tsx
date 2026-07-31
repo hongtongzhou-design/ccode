@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
-import type { WorkspaceDto } from "../types";
+import ContextMenu from "../components/ContextMenu";
+import type { RunScriptDto, WorkspaceDto, WsSettingsDto } from "../types";
 
 function basename(p: string): string {
   const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
@@ -160,18 +161,60 @@ function NewWorkspaceModal({
 
 export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [workspaces, setWorkspaces] = useState<WorkspaceDto[]>([]);
+  const [settings, setSettings] = useState<Record<string, WsSettingsDto>>({});
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState(false);
   const [created, setCreated] = useState<WorkspaceDto | null>(null);
+  const [runMenu, setRunMenu] = useState<{ x: number; y: number; ws: WorkspaceDto } | null>(null);
   const openInTerminal = useOpenInTerminal();
+  const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const setPage = useAppStore((s) => s.setPage);
+  const runningScripts = useAppStore((s) => s.runningScripts);
 
   async function refresh() {
     try {
-      setWorkspaces(await invoke<WorkspaceDto[]>("list_workspaces"));
+      const list = await invoke<WorkspaceDto[]>("list_workspaces");
+      setWorkspaces(list);
+      // 活跃工作区所在仓库的 settings（按 repoPath 缓存，不重复拉取）
+      const repos = [
+        ...new Set(list.filter((w) => w.status === "active").map((w) => w.repoPath)),
+      ];
+      const entries = await Promise.all(
+        repos.map(async (r) => {
+          try {
+            return [r, await invoke<WsSettingsDto>("workspace_settings", { repoPath: r })] as const;
+          } catch {
+            return null; // 无 settings.toml / 读取失败的仓库静默跳过
+          }
+        }),
+      );
+      setSettings((prev) => {
+        const next = { ...prev };
+        for (const e of entries) {
+          if (e && !(e[0] in next)) next[e[0]] = e[1];
+        }
+        return next;
+      });
       setError(null);
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  /** run 脚本：开 shell 标签并立即执行命令；wsId 用于 nonconcurrent 互斥 */
+  async function runScript(ws: WorkspaceDto, script: RunScriptDto) {
+    const pairs = await invoke<[string, string][]>("workspace_env_for", {
+      worktreePath: ws.worktreePath,
+    });
+    setPendingTerminal({
+      cwd: ws.worktreePath,
+      extraEnv: Object.fromEntries(pairs),
+      title: `run: ${script.name}`,
+      prefillCommand: script.command,
+      shellOnly: true,
+      wsId: ws.id,
+    });
+    setPage("terminal");
   }
 
   useEffect(() => {
@@ -242,10 +285,26 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       </div>
       {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
       {created && (
-        <div className="mb-4 flex items-center gap-3 rounded bg-ok p-2 text-xs text-ok-text">
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded bg-ok p-2 text-xs text-ok-text">
           <span>
             已创建「{created.name}」（{created.branch}）— 已在终端就绪：打开终端开始使用
           </span>
+          {created.setupResult &&
+            (created.setupResult.ok ? (
+              <span className="rounded bg-ok px-1.5 py-0.5 text-ok-text">
+                setup 脚本完成
+              </span>
+            ) : (
+              <span className="rounded bg-err px-1.5 py-0.5 text-err-text">
+                setup 脚本失败
+                <details className="mt-1">
+                  <summary className="cursor-pointer">输出</summary>
+                  <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono">
+                    {created.setupResult.outputTail}
+                  </pre>
+                </details>
+              </span>
+            ))}
           <button
             onClick={() => {
               const ws = created;
@@ -292,6 +351,42 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   <span className="ml-auto flex shrink-0 items-center gap-1.5">
                     {ws.status === "active" && (
                       <>
+                        {(() => {
+                          const wsSettings = settings[ws.repoPath];
+                          const scripts = wsSettings?.run ?? [];
+                          if (scripts.length === 0) return null;
+                          const defaultScript =
+                            scripts.find((s) => s.default) ?? scripts[0];
+                          const blocked =
+                            wsSettings?.runMode === "nonconcurrent" &&
+                            !!runningScripts[ws.id];
+                          const blockedTip = "已有运行中的脚本（nonconcurrent）";
+                          return (
+                            <>
+                              <button
+                                disabled={blocked}
+                                title={blocked ? blockedTip : `运行 ${defaultScript.name}：${defaultScript.command}`}
+                                onClick={() => void runScript(ws, defaultScript)}
+                                className={`${actionBtn} disabled:opacity-50`}
+                              >
+                                ▶
+                              </button>
+                              {scripts.length > 1 && (
+                                <button
+                                  disabled={blocked}
+                                  title={blocked ? blockedTip : "选择脚本"}
+                                  onClick={(e) => {
+                                    const r = e.currentTarget.getBoundingClientRect();
+                                    setRunMenu({ x: r.left, y: r.bottom + 4, ws });
+                                  }}
+                                  className={`${actionBtn} disabled:opacity-50`}
+                                >
+                                  ▾
+                                </button>
+                              )}
+                            </>
+                          );
+                        })()}
                         <button
                           onClick={() => void openInTerminal(ws)}
                           className={actionBtn}
@@ -329,6 +424,17 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             setCreated(ws);
             void refresh();
           }}
+        />
+      )}
+      {runMenu && (
+        <ContextMenu
+          x={runMenu.x}
+          y={runMenu.y}
+          onClose={() => setRunMenu(null)}
+          items={(settings[runMenu.ws.repoPath]?.run ?? []).map((s) => ({
+            label: `${s.name}（${s.command}）`,
+            onSelect: () => void runScript(runMenu.ws, s),
+          }))}
         />
       )}
     </div>

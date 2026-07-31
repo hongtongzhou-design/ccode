@@ -9,6 +9,13 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SetupResultDto {
+    pub ok: bool,
+    pub output_tail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceDto {
     pub id: String,
     pub repo_path: String,
@@ -21,10 +28,12 @@ pub struct WorkspaceDto {
     pub status: String, // active | archived
     pub created_at: String,
     pub archived_at: Option<String>,
+    /// 仅创建时填充：setup 脚本的执行结果（W2）；查询路径一律 None
+    pub setup_result: Option<SetupResultDto>,
 }
 
-/// W1 固定清单（W2 才接 .ccode/settings.toml 的 files_to_copy）
-const FILES_TO_COPY: [&str; 4] = [".env", ".env.local", ".env.development.local", ".envrc"];
+/// 无任何设置层定义 files_to_copy 时的回落清单（W1 固定值）
+pub(crate) const FILES_TO_COPY: [&str; 4] = [".env", ".env.local", ".env.development.local", ".envrc"];
 
 const PORT_LOW: i64 = 4000;
 const PORT_HIGH: i64 = 4300; // 块起点上限，每块 10 个端口
@@ -92,6 +101,7 @@ fn row_to_dto(
         status,
         created_at,
         archived_at,
+        setup_result: None,
     }
 }
 
@@ -327,14 +337,24 @@ fn create_impl(
         Duration::from_secs(60),
     )
     .map_err(|e| format!("创建 worktree 失败: {e}"))?;
-    // files-to-copy：gitignored 的本地配置不进版本库，worktree 里要补一份
-    for f in FILES_TO_COPY {
+    // 项目级配置（三层合并）：files_to_copy 并集；没有设置层时用 W1 固定清单
+    let settings = crate::ws_settings::merged_settings(&repo);
+    let files = settings
+        .files_to_copy
+        .clone()
+        .unwrap_or_else(|| FILES_TO_COPY.iter().map(|s| s.to_string()).collect());
+    for f in &files {
         let src = repo.join(f);
         if src.is_file() {
             let _ = fs::copy(&src, worktree_path.join(f));
         }
     }
     let port_base = alloc_port_base(conn)?;
+    // setup 脚本失败不阻断创建，结果记进 DTO 给 UI 展示
+    let setup_result = settings.setup.as_ref().map(|script| {
+        let (ok, output_tail) = run_hook(&worktree_path, script, port_base, Duration::from_secs(600));
+        SetupResultDto { ok, output_tail }
+    });
     let id = uuid::Uuid::new_v4().to_string();
     let created_at = crate::sessions::now_iso();
     conn.execute(
@@ -353,13 +373,23 @@ fn create_impl(
         ],
     )
     .map_err(|e| format!("写入 workspaces 失败: {e}"))?;
-    get_workspace(conn, &id)
+    let mut dto = get_workspace(conn, &id)?;
+    dto.setup_result = setup_result;
+    Ok(dto)
 }
 
 fn archive_impl(conn: &Connection, id: &str) -> Result<(), String> {
     let w = get_workspace(conn, id)?;
     let wt = PathBuf::from(&w.worktree_path);
     if wt.exists() {
+        // archive 脚本在移除前跑（如 docker compose down）；失败则保留 worktree 并报错给 UI
+        let settings = crate::ws_settings::merged_settings(Path::new(&w.repo_path));
+        if let Some(script) = &settings.archive {
+            let (ok, tail) = run_hook(&wt, script, w.port_base, Duration::from_secs(300));
+            if !ok {
+                return Err(format!("archive 脚本执行失败，worktree 未移除:\n{tail}"));
+            }
+        }
         run_git(
             Path::new(&w.repo_path),
             &["worktree", "remove", "--force", &w.worktree_path],
@@ -425,6 +455,19 @@ fn delete_impl(conn: &Connection, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn port_env(port_base: i64) -> Vec<(String, String)> {
+    (0..10)
+        .map(|i| {
+            let key = if i == 0 {
+                "CCODE_PORT".to_string()
+            } else {
+                format!("CCODE_PORT_{i}")
+            };
+            (key, (port_base + i).to_string())
+        })
+        .collect()
+}
+
 fn workspace_env_impl(conn: &Connection, worktree_path: &str) -> Vec<(String, String)> {
     let Ok(w) = query_workspaces(conn).and_then(|rows| {
         rows.into_iter()
@@ -433,16 +476,46 @@ fn workspace_env_impl(conn: &Connection, worktree_path: &str) -> Vec<(String, St
     }) else {
         return Vec::new();
     };
-    (0..10)
-        .map(|i| {
-            let key = if i == 0 {
-                "CCODE_PORT".to_string()
-            } else {
-                format!("CCODE_PORT_{i}")
-            };
-            (key, (w.port_base + i).to_string())
-        })
-        .collect()
+    port_env(w.port_base)
+}
+
+// ===== 项目级脚本钩子（§6.10 阶段 B；脚本来自仓库自己的 .ccode 配置） =====
+
+#[cfg(windows)]
+fn shell_cmd(script: &str) -> Command {
+    let mut c = Command::new("cmd");
+    c.args(["/C", script]);
+    c
+}
+
+#[cfg(not(windows))]
+fn shell_cmd(script: &str) -> Command {
+    let mut c = Command::new("bash");
+    c.args(["-c", script]);
+    c
+}
+
+/// 输出尾部（按字符截取，保留换行），给失败提示用
+fn output_tail(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        text.to_string()
+    } else {
+        chars[chars.len() - max..].iter().collect()
+    }
+}
+
+/// cwd = worktree，注入端口段；成功返 stdout、失败返 stderr，统一截尾部 4000 字符
+fn run_hook(dir: &Path, script: &str, port_base: i64, timeout: Duration) -> (bool, String) {
+    let mut cmd = shell_cmd(script);
+    cmd.current_dir(dir).stdout(Stdio::piped()).stderr(Stdio::piped());
+    for (k, v) in port_env(port_base) {
+        cmd.env(k, v);
+    }
+    match run_cmd(cmd, timeout) {
+        Ok(out) => (true, output_tail(&out, 4000)),
+        Err(err) => (false, output_tail(&err, 4000)),
+    }
 }
 
 // ===== Tauri commands（全部 async + spawn_blocking，git/DB 不阻塞主线程） =====
@@ -721,5 +794,84 @@ mod tests {
         let _ = delete_impl(&conn, &w.id);
         let _ = run_git(&repo, &["worktree", "prune"], Duration::from_secs(10));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ===== W2：项目级脚本钩子 =====
+
+    #[test]
+    fn create_runs_setup_script_and_custom_files_to_copy() {
+        let Some(fx) = Fixture::new() else { return };
+        fs::create_dir_all(fx.repo.join(".ccode")).unwrap();
+        fs::write(
+            fx.repo.join(".ccode/settings.toml"),
+            "files_to_copy = [\".env\"]\n[scripts]\nsetup = \"echo ran > setup-mark.txt && echo port=$CCODE_PORT\"\n",
+        )
+        .unwrap();
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "hooked").unwrap();
+        let res = w.setup_result.as_ref().expect("setup 结果应记录进 DTO");
+        assert!(res.ok, "setup 输出: {}", res.output_tail);
+        assert!(res.output_tail.contains("port=4000"), "脚本应拿到端口段 env: {}", res.output_tail);
+        assert_eq!(
+            fs::read_to_string(Path::new(&w.worktree_path).join("setup-mark.txt")).unwrap().trim(),
+            "ran"
+        );
+        // 自定义 files_to_copy 生效：只复制 .env，不再复制 .envrc
+        assert!(Path::new(&w.worktree_path).join(".env").exists());
+        assert!(!Path::new(&w.worktree_path).join(".envrc").exists());
+    }
+
+    #[test]
+    fn create_survives_setup_failure() {
+        let Some(fx) = Fixture::new() else { return };
+        fs::create_dir_all(fx.repo.join(".ccode")).unwrap();
+        fs::write(
+            fx.repo.join(".ccode/settings.toml"),
+            "[scripts]\nsetup = \"echo boom >&2 && exit 1\"\n",
+        )
+        .unwrap();
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "failsetup").unwrap();
+        let res = w.setup_result.as_ref().unwrap();
+        assert!(!res.ok, "exit 1 的 setup 应记录为失败");
+        assert!(res.output_tail.contains("boom"), "stderr 尾部应保留: {}", res.output_tail);
+        // 失败不阻断创建
+        assert_eq!(w.status, "active");
+        assert!(Path::new(&w.worktree_path).exists());
+    }
+
+    #[test]
+    fn archive_script_failure_blocks_removal() {
+        let Some(fx) = Fixture::new() else { return };
+        let marker = fx.dir.join("archived-mark");
+        fs::create_dir_all(fx.repo.join(".ccode")).unwrap();
+        fs::write(
+            fx.repo.join(".ccode/settings.toml"),
+            "[scripts]\narchive = \"exit 1\"\n",
+        )
+        .unwrap();
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "blockarc").unwrap();
+        let err = archive_impl(&fx.conn, &w.id).unwrap_err();
+        assert!(err.contains("archive 脚本执行失败"), "{err}");
+        assert!(Path::new(&w.worktree_path).exists(), "脚本失败时 worktree 不得移除");
+        assert_eq!(get_workspace(&fx.conn, &w.id).unwrap().status, "active");
+        // 脚本改成成功后归档照常
+        fs::write(
+            fx.repo.join(".ccode/settings.toml"),
+            &format!("[scripts]\narchive = \"touch {}\"\n", marker.display()),
+        )
+        .unwrap();
+        archive_impl(&fx.conn, &w.id).unwrap();
+        assert!(!Path::new(&w.worktree_path).exists());
+        assert!(marker.exists(), "archive 脚本应在移除前执行");
+        assert_eq!(get_workspace(&fx.conn, &w.id).unwrap().status, "archived");
+    }
+
+    #[test]
+    fn no_settings_repo_keeps_w1_behavior() {
+        let Some(fx) = Fixture::new() else { return };
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "plain").unwrap();
+        assert!(w.setup_result.is_none(), "无 setup 脚本时 setup_result 为 None");
+        // 固定清单仍然生效
+        assert!(Path::new(&w.worktree_path).join(".env").exists());
+        assert!(Path::new(&w.worktree_path).join(".envrc").exists());
     }
 }

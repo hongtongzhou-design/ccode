@@ -450,6 +450,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "toml 0.8.2",
  "toml_edit 0.22.27",
  "uuid",
  "which",
