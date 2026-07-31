@@ -2923,11 +2923,13 @@ mod tests {
                 worktree_path: "/home/u/ccode/workspaces/myrepo/feat-x".into(),
                 repo_path: "/home/u/code/myrepo".into(),
                 name: "feat-x".into(),
+                base_branch: "main".into(),
             },
             crate::workspaces::WorktreeRow {
                 worktree_path: "/home/u/ccode/workspaces/other/task".into(),
                 repo_path: "/home/u/code/other".into(),
                 name: "task".into(),
+                base_branch: "main".into(),
             },
         ];
         // worktree 根命中

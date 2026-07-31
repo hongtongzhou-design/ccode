@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-
-interface GitFileDto {
-  path: string;
-  status: string; // "M" | "A" | "D" | "R" | "??"
-  additions: number | null;
-  deletions: number | null;
-}
+import type { GitFileDto, WorkspaceDiffDto } from "../types";
 
 interface GitStatusDto {
   isRepo: boolean;
@@ -41,20 +35,38 @@ export default function GitPanel({
   onTotals: (t: { add: number; del: number }) => void;
 }) {
   const [status, setStatus] = useState<GitStatusDto | null>(null);
+  /** 活动标签 cwd 落在工作区里时为任务累计 diff（W3），否则为 null */
+  const [wsDiff, setWsDiff] = useState<WorkspaceDiffDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [running, setRunning] = useState<"commit" | "push" | null>(null);
   const [output, setOutput] = useState<{ ok: boolean; text: string } | null>(null);
 
   const refresh = useCallback(async () => {
+    let s: GitStatusDto | null = null;
     try {
-      const s = await invoke<GitStatusDto>("git_status", { cwd });
+      s = await invoke<GitStatusDto>("git_status", { cwd });
       setStatus(s);
-      onTotals({ add: s.totalAdd, del: s.totalDel });
       setError(null);
     } catch (e) {
       setError(String(e));
     }
+    // 工作区探测：cwd 落在 worktree 里时切任务 diff 视图；失败/非工作区保持普通视图
+    let d: WorkspaceDiffDto | null = null;
+    try {
+      const diff = await invoke<WorkspaceDiffDto>("workspace_diff", {
+        worktreePath: cwd,
+      });
+      if (diff.inWorkspace) d = diff;
+    } catch {
+      // 保持普通 git 视图
+    }
+    setWsDiff(d);
+    onTotals(
+      d
+        ? { add: d.totalAdd, del: d.totalDel }
+        : { add: s?.totalAdd ?? 0, del: s?.totalDel ?? 0 },
+    );
   }, [cwd, onTotals]);
 
   // cwd / 可见性变化立即刷新；可见时每 8s 轮询
@@ -86,27 +98,44 @@ export default function GitPanel({
 
   const hasChanges = (status?.files.length ?? 0) > 0;
   const canCommit = hasChanges && message.trim().length > 0 && running === null;
+  const inWs = wsDiff?.inWorkspace === true;
+  const files = inWs ? wsDiff!.files : (status?.files ?? []);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 头部：分支 / 上游差距 / 总增删 */}
+      {/* 头部：分支 / 上游差距（工作区模式：任务基准）/ 总增删 */}
       <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-2 text-xs">
         {status?.isRepo ? (
-          <>
-            <span className="font-medium text-l1">⑂ {status.branch}</span>
-            {(status.ahead > 0 || status.behind > 0) && (
+          inWs ? (
+            <>
+              <span className="font-medium text-l1">⑂ {status.branch}</span>
               <span className="text-l3">
-                {status.ahead > 0 && `↑${status.ahead}`}
-                {status.behind > 0 && ` ↓${status.behind}`}
+                → 基准 {wsDiff!.baseBranch}（{wsDiff!.mergeBase.slice(0, 7)}）
               </span>
-            )}
-            {(status.totalAdd > 0 || status.totalDel > 0) && (
-              <span className="ml-auto font-mono">
-                <span className="text-add">+{status.totalAdd}</span>{" "}
-                <span className="text-del">-{status.totalDel}</span>
-              </span>
-            )}
-          </>
+              {(wsDiff!.totalAdd > 0 || wsDiff!.totalDel > 0) && (
+                <span className="ml-auto font-mono">
+                  <span className="text-add">+{wsDiff!.totalAdd}</span>{" "}
+                  <span className="text-del">-{wsDiff!.totalDel}</span>
+                </span>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="font-medium text-l1">⑂ {status.branch}</span>
+              {(status.ahead > 0 || status.behind > 0) && (
+                <span className="text-l3">
+                  {status.ahead > 0 && `↑${status.ahead}`}
+                  {status.behind > 0 && ` ↓${status.behind}`}
+                </span>
+              )}
+              {(status.totalAdd > 0 || status.totalDel > 0) && (
+                <span className="ml-auto font-mono">
+                  <span className="text-add">+{status.totalAdd}</span>{" "}
+                  <span className="text-del">-{status.totalDel}</span>
+                </span>
+              )}
+            </>
+          )
         ) : (
           <span className="text-l4">git</span>
         )}
@@ -120,10 +149,12 @@ export default function GitPanel({
           <p className="p-1 text-xs text-l4">加载中…</p>
         ) : !status.isRepo ? (
           <p className="p-1 text-sm text-l4">当前目录不是 git 仓库</p>
-        ) : status.files.length === 0 ? (
-          <p className="p-1 text-sm text-l4">工作区干净 ✓</p>
+        ) : files.length === 0 ? (
+          <p className="p-1 text-sm text-l4">
+            {inWs ? "任务无改动 ✓" : "工作区干净 ✓"}
+          </p>
         ) : (
-          status.files.map((f) => (
+          files.map((f) => (
             <div
               key={`${f.status}:${f.path}`}
               title={f.path}

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
-import type { RepoDto, RunScriptDto, WorkspaceDto, WsSettingsDto } from "../types";
+import type { RepoDto, RunScriptDto, WorkspaceDto, WorkspaceHealthDto, WsSettingsDto } from "../types";
 
 function relTime(iso: string | null): string {
   if (!iso) return "";
@@ -162,13 +163,137 @@ function NewWorkspaceModal({
   );
 }
 
+function PrModal({ ws, onClose }: { ws: WorkspaceDto; onClose: () => void }) {
+  const [title, setTitle] = useState(ws.name);
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [prUrl, setPrUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const url = await invoke<string>("create_pr", {
+        id: ws.id,
+        title: title.trim(),
+        body: body.trim() || null,
+      });
+      setPrUrl(url);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      onClick={onClose}
+    >
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="w-[26rem] rounded-md border border-field bg-strip p-5"
+      >
+        <h2 className="mb-4 text-base font-semibold text-l1">
+          创建 PR（{ws.branch} → {ws.baseBranch}）
+        </h2>
+        {prUrl ? (
+          <div className="mb-4">
+            <p className="mb-2 text-sm text-ok-text">✓ PR 已创建</p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void openUrl(prUrl)}
+                title={prUrl}
+                className="truncate text-sm text-l1 underline decoration-l4 underline-offset-2 hover:decoration-l1"
+              >
+                {prUrl}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void navigator.clipboard.writeText(prUrl).then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1500);
+                  });
+                }}
+                className="shrink-0 rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+              >
+                {copied ? "已复制" : "复制"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <label className="mb-3 block text-sm">
+              <span className="mb-1 block text-xs text-l3">标题</span>
+              <input
+                className={field}
+                required
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+              />
+            </label>
+            <label className="mb-4 block text-sm">
+              <span className="mb-1 block text-xs text-l3">描述</span>
+              <textarea
+                className={`${field} h-20`}
+                placeholder="留空自动生成提交摘要"
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+              />
+            </label>
+            {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
+          </>
+        )}
+        <div className="flex justify-end gap-2">
+          {prUrl ? (
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            >
+              关闭
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={busy || !title.trim()}
+                className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+              >
+                {busy ? "创建中…" : "创建 PR"}
+              </button>
+            </>
+          )}
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [workspaces, setWorkspaces] = useState<WorkspaceDto[]>([]);
   const [settings, setSettings] = useState<Record<string, WsSettingsDto>>({});
+  const [health, setHealth] = useState<Record<string, WorkspaceHealthDto>>({});
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState(false);
   const [created, setCreated] = useState<WorkspaceDto | null>(null);
   const [runMenu, setRunMenu] = useState<{ x: number; y: number; ws: WorkspaceDto } | null>(null);
+  const [mergeResults, setMergeResults] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const [prModal, setPrModal] = useState<WorkspaceDto | null>(null);
   const openInTerminal = useOpenInTerminal();
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
@@ -199,9 +324,44 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         }
         return next;
       });
+      // 活跃工作区的健康度（每次刷新覆盖，ReadyToMerge 判定随提交/合并变化）
+      const activeIds = list.filter((w) => w.status === "active").map((w) => w.id);
+      const healthEntries = await Promise.all(
+        activeIds.map(async (id) => {
+          try {
+            return [id, await invoke<WorkspaceHealthDto>("workspace_health", { id })] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      setHealth((prev) => {
+        const next = { ...prev };
+        for (const e of healthEntries) {
+          if (e) next[e[0]] = e[1];
+        }
+        return next;
+      });
       setError(null);
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  /** 合并回 base 并归档：输出显示在行内结果条（可关闭） */
+  async function onMerge(ws: WorkspaceDto) {
+    if (
+      !window.confirm(
+        `将把 ${ws.branch} 合并进 ${ws.baseBranch} 并归档工作区（worktree 将被移除）。继续？`,
+      )
+    )
+      return;
+    try {
+      const out = await invoke<string>("merge_workspace", { id: ws.id });
+      setMergeResults((prev) => ({ ...prev, [ws.id]: { ok: true, text: out } }));
+      await refresh();
+    } catch (e) {
+      setMergeResults((prev) => ({ ...prev, [ws.id]: { ok: false, text: String(e) } }));
     }
   }
 
@@ -334,86 +494,161 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             </h2>
             <ul className="divide-y divide-hairline">
               {g.list.map((ws) => (
-                <li key={ws.id} className="flex items-center gap-3 py-2.5 text-sm">
-                  <span className="font-medium text-l1">{ws.name}</span>
-                  <span className="text-xs text-l3">
-                    {ws.branch} → {ws.baseBranch}
-                  </span>
-                  <span className="text-xs text-l4">
-                    端口 {ws.portBase}–{ws.portBase + 9}
-                  </span>
-                  <span className="text-xs text-l4">{relTime(ws.createdAt)}</span>
-                  {ws.status === "active" ? (
-                    <span className="rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text">
-                      活跃
+                <li key={ws.id} className="py-2.5 text-sm">
+                  <div className="flex items-center gap-3">
+                    <span className="font-medium text-l1">{ws.name}</span>
+                    <span className="text-xs text-l3">
+                      {ws.branch} → {ws.baseBranch}
                     </span>
-                  ) : (
-                    <span className="rounded bg-inset px-1.5 py-0.5 text-xs text-l3">
-                      已归档
+                    <span className="text-xs text-l4">
+                      端口 {ws.portBase}–{ws.portBase + 9}
                     </span>
-                  )}
-                  <span className="ml-auto flex shrink-0 items-center gap-1.5">
-                    {ws.status === "active" && (
-                      <>
-                        {(() => {
-                          const wsSettings = settings[ws.repoPath];
-                          const scripts = wsSettings?.run ?? [];
-                          if (scripts.length === 0) return null;
-                          const defaultScript =
-                            scripts.find((s) => s.default) ?? scripts[0];
-                          const blocked =
-                            wsSettings?.runMode === "nonconcurrent" &&
-                            !!runningScripts[ws.id];
-                          const blockedTip = "已有运行中的脚本（nonconcurrent）";
-                          return (
-                            <>
-                              <button
-                                disabled={blocked}
-                                title={blocked ? blockedTip : `运行 ${defaultScript.name}：${defaultScript.command}`}
-                                onClick={() => void runScript(ws, defaultScript)}
-                                className={`${actionBtn} disabled:opacity-50`}
-                              >
-                                ▶
-                              </button>
-                              {scripts.length > 1 && (
+                    <span className="text-xs text-l4">{relTime(ws.createdAt)}</span>
+                    {ws.status === "active" ? (
+                      <span className="rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text">
+                        活跃
+                      </span>
+                    ) : (
+                      <span className="rounded bg-inset px-1.5 py-0.5 text-xs text-l3">
+                        已归档
+                      </span>
+                    )}
+                    {ws.status === "active" &&
+                      (() => {
+                        const h = health[ws.id];
+                        if (!h) return null;
+                        return (
+                          <>
+                            {h.readyToMerge && (
+                              <span className="rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text">
+                                可合并
+                              </span>
+                            )}
+                            {h.conflict === true && (
+                              <span className="rounded bg-err px-1.5 py-0.5 text-xs text-err-text">
+                                有冲突
+                              </span>
+                            )}
+                            {h.uncommitted > 0 && (
+                              <span className="rounded bg-warn px-1.5 py-0.5 text-xs text-warn-text">
+                                有未提交
+                              </span>
+                            )}
+                            {h.ahead > 0 && (
+                              <span className="rounded bg-inset px-1.5 py-0.5 text-xs text-l3">
+                                ↑{h.ahead}
+                              </span>
+                            )}
+                            {h.behind > 0 && (
+                              <span className="rounded bg-inset px-1.5 py-0.5 text-xs text-l3">
+                                ↓{h.behind}
+                              </span>
+                            )}
+                          </>
+                        );
+                      })()}
+                    <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                      {ws.status === "active" && (
+                        <>
+                          {(() => {
+                            const wsSettings = settings[ws.repoPath];
+                            const scripts = wsSettings?.run ?? [];
+                            if (scripts.length === 0) return null;
+                            const defaultScript =
+                              scripts.find((s) => s.default) ?? scripts[0];
+                            const blocked =
+                              wsSettings?.runMode === "nonconcurrent" &&
+                              !!runningScripts[ws.id];
+                            const blockedTip = "已有运行中的脚本（nonconcurrent）";
+                            return (
+                              <>
                                 <button
                                   disabled={blocked}
-                                  title={blocked ? blockedTip : "选择脚本"}
-                                  onClick={(e) => {
-                                    const r = e.currentTarget.getBoundingClientRect();
-                                    setRunMenu({ x: r.left, y: r.bottom + 4, ws });
-                                  }}
+                                  title={blocked ? blockedTip : `运行 ${defaultScript.name}：${defaultScript.command}`}
+                                  onClick={() => void runScript(ws, defaultScript)}
                                   className={`${actionBtn} disabled:opacity-50`}
                                 >
-                                  ▾
+                                  ▶
                                 </button>
-                              )}
-                            </>
-                          );
-                        })()}
-                        <button
-                          onClick={() => void openInTerminal(ws)}
-                          className={actionBtn}
-                        >
-                          打开终端
+                                {scripts.length > 1 && (
+                                  <button
+                                    disabled={blocked}
+                                    title={blocked ? blockedTip : "选择脚本"}
+                                    onClick={(e) => {
+                                      const r = e.currentTarget.getBoundingClientRect();
+                                      setRunMenu({ x: r.left, y: r.bottom + 4, ws });
+                                    }}
+                                    className={`${actionBtn} disabled:opacity-50`}
+                                  >
+                                    ▾
+                                  </button>
+                                )}
+                              </>
+                            );
+                          })()}
+                          <button
+                            onClick={() => void openInTerminal(ws)}
+                            className={actionBtn}
+                          >
+                            打开终端
+                          </button>
+                          <button
+                            disabled={!health[ws.id]?.readyToMerge}
+                            title={
+                              health[ws.id]?.readyToMerge
+                                ? `合并 ${ws.branch} 进 ${ws.baseBranch} 并归档`
+                                : "尚不可合并（有未提交改动或与基准冲突）"
+                            }
+                            onClick={() => onMerge(ws)}
+                            className={`${actionBtn} disabled:opacity-50`}
+                          >
+                            合并
+                          </button>
+                          <button onClick={() => setPrModal(ws)} className={actionBtn}>
+                            创建 PR
+                          </button>
+                          <button onClick={() => onArchive(ws)} className={actionBtn}>
+                            归档
+                          </button>
+                        </>
+                      )}
+                      {ws.status === "archived" && (
+                        <button onClick={() => onRestore(ws)} className={actionBtn}>
+                          恢复
                         </button>
-                        <button onClick={() => onArchive(ws)} className={actionBtn}>
-                          归档
-                        </button>
-                      </>
-                    )}
-                    {ws.status === "archived" && (
-                      <button onClick={() => onRestore(ws)} className={actionBtn}>
-                        恢复
+                      )}
+                      <button
+                        onClick={() => onDelete(ws)}
+                        className="rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5"
+                      >
+                        删除
                       </button>
-                    )}
-                    <button
-                      onClick={() => onDelete(ws)}
-                      className="rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5"
+                    </span>
+                  </div>
+                  {mergeResults[ws.id] && (
+                    <div
+                      className={`mt-1.5 flex items-start gap-2 rounded p-2 text-xs ${
+                        mergeResults[ws.id].ok ? "bg-ok text-ok-text" : "bg-err text-err-text"
+                      }`}
                     >
-                      删除
-                    </button>
-                  </span>
+                      <pre className="whitespace-pre-wrap break-all font-mono">
+                        {mergeResults[ws.id].text}
+                      </pre>
+                      <button
+                        onClick={() =>
+                          setMergeResults((prev) => {
+                            const n = { ...prev };
+                            delete n[ws.id];
+                            return n;
+                          })
+                        }
+                        aria-label="关闭"
+                        className="ml-auto shrink-0"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -441,6 +676,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           }))}
         />
       )}
+      {prModal && <PrModal ws={prModal} onClose={() => setPrModal(null)} />}
     </div>
   );
 }

@@ -48,6 +48,7 @@ pub fn run() {
             git_info::git_status,
             git_info::git_commit,
             git_info::git_push,
+            git_info::workspace_diff,
             updater::update_agent,
             updater::install_agent,
             updater::install_method_preview,
@@ -58,6 +59,9 @@ pub fn run() {
             workspaces::restore_workspace,
             workspaces::delete_workspace,
             workspaces::workspace_env_for,
+            workspaces::workspace_health,
+            workspaces::merge_workspace,
+            workspaces::create_pr,
             workspaces::list_repos,
             ws_settings::workspace_settings,
         ])

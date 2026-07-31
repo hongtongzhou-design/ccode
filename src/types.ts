@@ -114,6 +114,34 @@ export interface WsSettingsDto {
   run: RunScriptDto[];
 }
 
+export interface GitFileDto {
+  path: string;
+  /** "M" | "A" | "D" | "R" | "??" */
+  status: string;
+  additions: number | null;
+  deletions: number | null;
+}
+
+/** 工作区任务累计 diff（merge-base(base, branch) 为基准，W3） */
+export interface WorkspaceDiffDto {
+  inWorkspace: boolean;
+  baseBranch: string;
+  mergeBase: string;
+  files: GitFileDto[];
+  totalAdd: number;
+  totalDel: number;
+}
+
+/** 工作区健康度（ReadyToMerge 判定输入，W3） */
+export interface WorkspaceHealthDto {
+  uncommitted: number;
+  ahead: number;
+  behind: number;
+  /** 与 base 是否冲突；无法判定时为 null */
+  conflict: boolean | null;
+  readyToMerge: boolean;
+}
+
 export const AGENTS = [
   { id: "claude-code", label: "Claude Code", binary: "claude" },
   { id: "codex", label: "Codex", binary: "codex" },

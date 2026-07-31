@@ -277,6 +277,116 @@ pub async fn git_push(cwd: String) -> Result<String, String> {
         .map_err(|e| format!("推送失败: {e}"))?
 }
 
+// ===== 工作区任务 diff（§6.10 阶段 C：基准从 HEAD 改为 merge-base） =====
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDiffDto {
+    pub in_workspace: bool,
+    pub base_branch: String,
+    pub merge_base: String,
+    pub files: Vec<GitFileDto>,
+    pub total_add: u64,
+    pub total_del: u64,
+}
+
+/// 累计任务改动 = diff merge-base（已提交 + 未提交的已跟踪部分）+ 未跟踪文件行数。
+/// rows 参数化以便测试注入；命中不到工作区时返回默认（前端回落普通 git_status）
+fn workspace_diff_with_rows(
+    worktree_path: &str,
+    rows: &[crate::workspaces::WorktreeRow],
+) -> Result<WorkspaceDiffDto, String> {
+    let wt = expand_tilde(worktree_path);
+    let Some(row) = rows.iter().find(|r| {
+        let p = r.worktree_path.trim_end_matches('/');
+        wt == p || wt.starts_with(&format!("{p}/"))
+    }) else {
+        return Ok(WorkspaceDiffDto::default());
+    };
+    // 与 §6.10 生命周期一致：基准引用优先 origin/<base>
+    let base_ref = if run_git(&wt, &["rev-parse", "--verify", "--quiet", &format!("origin/{}", row.base_branch)])
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        format!("origin/{}", row.base_branch)
+    } else {
+        row.base_branch.clone()
+    };
+    let mb = run_git(&wt, &["merge-base", &base_ref, "HEAD"])?;
+    if !mb.status.success() {
+        return Err(output_tail(&mb));
+    }
+    let merge_base = String::from_utf8_lossy(&mb.stdout).trim().to_string();
+    let numstat = run_git(&wt, &["diff", "--numstat", &merge_base])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_numstat(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    // name-status 给每个文件的改动类型（R 取新名）
+    let mut status_map: HashMap<String, String> = HashMap::new();
+    if let Ok(ns) = run_git(&wt, &["diff", "--name-status", &merge_base]) {
+        if ns.status.success() {
+            for line in String::from_utf8_lossy(&ns.stdout).lines() {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() >= 2 {
+                    let letter = parts[0].chars().next().unwrap_or('M').to_string();
+                    let path = parts.last().map_or("", |v| v).to_string();
+                    status_map.insert(path, letter);
+                }
+            }
+        }
+    }
+    let mut files = Vec::new();
+    let (mut total_add, mut total_del) = (0u64, 0u64);
+    for (path, (a, d)) in &numstat {
+        total_add += a;
+        total_del += d;
+        files.push(GitFileDto {
+            path: path.clone(),
+            status: status_map.get(path).cloned().unwrap_or_else(|| "M".into()),
+            additions: Some(*a),
+            deletions: Some(*d),
+        });
+    }
+    // 未跟踪文件：numstat 覆盖不到，行数当 additions（与 git_status 同一口径）
+    if let Ok(porc) = run_git(&wt, &["status", "--porcelain=v1"]) {
+        if porc.status.success() {
+            let (_, _, _, raw) = parse_porcelain(&String::from_utf8_lossy(&porc.stdout));
+            for (status, path) in raw {
+                if status != "??" {
+                    continue;
+                }
+                let additions = count_lines(&wt, &path);
+                total_add += additions.unwrap_or(0);
+                files.push(GitFileDto {
+                    path,
+                    status: "??".into(),
+                    additions,
+                    deletions: Some(0),
+                });
+            }
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(WorkspaceDiffDto {
+        in_workspace: true,
+        base_branch: row.base_branch.clone(),
+        merge_base,
+        files,
+        total_add,
+        total_del,
+    })
+}
+
+#[tauri::command]
+pub async fn workspace_diff(worktree_path: String) -> Result<WorkspaceDiffDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_diff_with_rows(&worktree_path, &crate::workspaces::worktree_rows())
+    })
+    .await
+    .map_err(|e| format!("计算工作区 diff 失败: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +495,54 @@ mod tests {
 
         let (_, _, _, files3) = parse_porcelain("R  old.rs -> new.rs\n");
         assert_eq!(files3[0], ("R".to_string(), "new.rs".to_string()));
+    }
+
+    #[test]
+    fn workspace_diff_accumulates_committed_uncommitted_untracked() {
+        if !git_available() {
+            return;
+        }
+        let dir = tmpdir("wsdiff");
+        let repo = dir.join("repo");
+        git(&dir, &["init", "-b", "main", "repo"]);
+        git(&repo, &["config", "user.email", "t@t.dev"]);
+        git(&repo, &["config", "user.name", "t"]);
+        fs::write(repo.join("a.txt"), "l1\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        let origin = dir.join("origin.git");
+        git(&dir, &["init", "--bare", "origin.git"]);
+        git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&repo, &["push", "-u", "origin", "main"]);
+        let wt = dir.join("wt");
+        git(&repo, &["worktree", "add", wt.to_str().unwrap(), "-b", "ccode/t1", "origin/main"]);
+        // 累计改动：已提交 +2 行、未提交 +1 行、未跟踪 3 行
+        fs::write(wt.join("a.txt"), "l1\nl2\nl3\n").unwrap();
+        git(&wt, &["add", "."]);
+        git(&wt, &["commit", "-m", "task"]);
+        fs::write(wt.join("a.txt"), "l1\nl2\nl3\nl4\n").unwrap();
+        fs::write(wt.join("new.txt"), "x\ny\nz\n").unwrap();
+        let rows = vec![crate::workspaces::WorktreeRow {
+            worktree_path: wt.to_string_lossy().into_owned(),
+            repo_path: repo.to_string_lossy().into_owned(),
+            name: "t1".into(),
+            base_branch: "main".into(),
+        }];
+        let d = workspace_diff_with_rows(wt.to_str().unwrap(), &rows).unwrap();
+        assert!(d.in_workspace);
+        assert_eq!(d.base_branch, "main");
+        assert!(!d.merge_base.is_empty());
+        let a = d.files.iter().find(|f| f.path == "a.txt").unwrap();
+        assert_eq!(a.additions, Some(3), "merge-base 起累计：已提交 2 行 + 未提交 1 行");
+        assert_eq!(a.status, "M");
+        let n = d.files.iter().find(|f| f.path == "new.txt").unwrap();
+        assert_eq!(n.status, "??");
+        assert_eq!(n.additions, Some(3));
+        assert_eq!(d.total_add, 6);
+        // 非工作区路径：in_workspace=false，前端回落普通 git_status
+        let outside = workspace_diff_with_rows(repo.to_str().unwrap(), &rows).unwrap();
+        assert!(!outside.in_workspace);
+        git(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        fs::remove_dir_all(&dir).ok();
     }
 }

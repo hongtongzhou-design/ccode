@@ -145,6 +145,7 @@ pub(crate) struct WorktreeRow {
     pub worktree_path: String,
     pub repo_path: String,
     pub name: String,
+    pub base_branch: String,
 }
 
 pub(crate) fn worktree_rows() -> Vec<WorktreeRow> {
@@ -158,6 +159,7 @@ pub(crate) fn worktree_rows() -> Vec<WorktreeRow> {
             worktree_path: w.worktree_path,
             repo_path: w.repo_path,
             name: w.name,
+            base_branch: w.base_branch,
         })
         .collect()
 }
@@ -518,6 +520,158 @@ fn run_hook(dir: &Path, script: &str, port_base: i64, timeout: Duration) -> (boo
     }
 }
 
+// ===== 评审与合并（§6.10 阶段 C；merge_workspace 是 git 写操作，仅由用户显式触发） =====
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsHealthDto {
+    pub uncommitted: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    /// Some(false)=可干净合并，Some(true)=有冲突，None=git 版本不支持探测
+    pub conflict: Option<bool>,
+    pub ready_to_merge: bool,
+}
+
+/// 优先 origin/<base>（与远端同步的基准），不存在用本地分支
+fn base_ref(repo: &Path, base: &str) -> String {
+    if run_git(
+        repo,
+        &["rev-parse", "--verify", "--quiet", &format!("origin/{base}")],
+        Duration::from_secs(10),
+    )
+    .is_ok()
+    {
+        format!("origin/{base}")
+    } else {
+        base.to_string()
+    }
+}
+
+/// git ≥2.38 的 merge-tree --write-tree：0=干净 1=冲突；只写对象库，不碰工作区/索引/引用
+fn conflict_probe(repo: &Path, base: &str, branch: &str) -> Option<bool> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["merge-tree", "--write-tree", base, branch])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    match status.code() {
+        Some(0) => Some(false),
+        Some(1) => Some(true),
+        _ => None, // 旧版 git 没有该参数（退出码 129 等）
+    }
+}
+
+fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
+    let w = get_workspace(conn, id)?;
+    let wt = PathBuf::from(&w.worktree_path);
+    let uncommitted = !run_git(&wt, &["status", "--porcelain"], Duration::from_secs(30))?.is_empty();
+    let base = base_ref(&wt, &w.base_branch);
+    // A...B 的左侧 = 只在 base（behind），右侧 = 只在 HEAD（ahead）
+    let counts = run_git(
+        &wt,
+        &["rev-list", "--left-right", "--count", &format!("{base}...HEAD")],
+        Duration::from_secs(30),
+    )?;
+    let mut parts = counts.split_whitespace();
+    let behind = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let ahead = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let conflict = conflict_probe(&wt, &base, "HEAD");
+    Ok(WsHealthDto {
+        uncommitted,
+        ahead,
+        behind,
+        conflict,
+        ready_to_merge: !uncommitted && conflict == Some(false),
+    })
+}
+
+fn merge_impl(conn: &Connection, id: &str) -> Result<String, String> {
+    let w = get_workspace(conn, id)?;
+    let repo = PathBuf::from(&w.repo_path);
+    // 前置条件：主仓库必须停在基准分支且工作区干净，否则合并会搅乱用户手头的工作
+    let cur = run_git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"], Duration::from_secs(10))?;
+    if cur != w.base_branch {
+        return Err(format!(
+            "主仓库当前分支是 {cur}，不在基准分支 {} 上；请先在主仓库切换分支，或改用 PR 流程",
+            w.base_branch
+        ));
+    }
+    if !run_git(&repo, &["status", "--porcelain"], Duration::from_secs(30))?.is_empty() {
+        return Err("主仓库有未提交改动，请先提交或 stash 再合并（或改用 PR 流程）".into());
+    }
+    let mut log = match run_git(&repo, &["merge", "--no-ff", &w.branch], Duration::from_secs(60)) {
+        Ok(out) => out,
+        Err(e) => {
+            // 冲突留给用户在主仓库手动解决，不自动 abort（用户可能想就地处理）
+            let files = run_git(&repo, &["diff", "--name-only", "--diff-filter=U"], Duration::from_secs(10))
+                .unwrap_or_default();
+            return Err(format!(
+                "合并发生冲突，请到主仓库手动解决（git merge --abort 可回退）:\n{e}\n冲突文件:\n{files}"
+            ));
+        }
+    };
+    // 合并成功后走标准归档生命周期（archive 钩子 + worktree 移除 + 状态翻转）
+    archive_impl(conn, id)?;
+    if !log.is_empty() {
+        log.push('\n');
+    }
+    log.push_str("已合并并归档工作区");
+    Ok(log)
+}
+
+fn pr_impl(conn: &Connection, id: &str, title: &str, body: Option<String>) -> Result<String, String> {
+    // 复用机器上的 gh CLI 认证，不做应用内 GitHub 登录
+    let gh_ok = Command::new("gh")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !gh_ok {
+        return Err("需要安装 gh CLI".into());
+    }
+    let w = get_workspace(conn, id)?;
+    let wt = PathBuf::from(&w.worktree_path);
+    run_git(&wt, &["push", "-u", "origin", &w.branch], Duration::from_secs(120))
+        .map_err(|e| format!("推送分支失败: {e}"))?;
+    let body = match body.filter(|b| !b.trim().is_empty()) {
+        Some(b) => b,
+        // 自动 body = 任务分支上的提交清单（cap 50 行）
+        None => {
+            let base = base_ref(&wt, &w.base_branch);
+            let log = run_git(
+                &wt,
+                &["log", "--oneline", &format!("{base}..{}", w.branch)],
+                Duration::from_secs(30),
+            )
+            .unwrap_or_default();
+            let lines: Vec<&str> = log.lines().take(50).collect();
+            if lines.is_empty() {
+                "由 Ccode 创建".to_string()
+            } else {
+                lines.join("\n")
+            }
+        }
+    };
+    let mut cmd = Command::new("gh");
+    cmd.current_dir(&wt)
+        .args(["pr", "create", "--base", &w.base_branch, "--head", &w.branch, "--title", title, "--body", &body])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let out = run_cmd(cmd, Duration::from_secs(120)).map_err(|e| format!("gh pr create 失败: {e}"))?;
+    // gh 成功输出的末行是 PR URL
+    Ok(out
+        .lines()
+        .rev()
+        .find(|l| l.contains("http"))
+        .unwrap_or(out.trim())
+        .trim()
+        .to_string())
+}
+
 // ===== Tauri commands（全部 async + spawn_blocking，git/DB 不阻塞主线程） =====
 
 #[tauri::command]
@@ -576,6 +730,29 @@ pub async fn workspace_env_for(worktree_path: String) -> Vec<(String, String)> {
     })
     .await
     .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn workspace_health(id: String) -> Result<WsHealthDto, String> {
+    tauri::async_runtime::spawn_blocking(move || health_impl(&db()?, &id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 合并回基准分支（本地 merge，git 写操作）：前置条件不满足直接报错，不动任何东西
+#[tauri::command]
+pub async fn merge_workspace(id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || merge_impl(&db()?, &id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 推送分支并用 gh CLI 创建 PR（复用机器上的 gh 认证）
+#[tauri::command]
+pub async fn create_pr(id: String, title: String, body: Option<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || pr_impl(&db()?, &id, &title, body))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -914,5 +1091,86 @@ mod tests {
         // 固定清单仍然生效
         assert!(Path::new(&w.worktree_path).join(".env").exists());
         assert!(Path::new(&w.worktree_path).join(".envrc").exists());
+    }
+
+    // ===== W3：评审与合并 =====
+
+    /// 把 worktree 里的全部改动（含复制进来的 .env*）提交掉，返回提交数基准外的 ahead=1
+    fn commit_all_in_worktree(wt: &Path, msg: &str) {
+        sh(wt, &["add", "-A"]);
+        sh(wt, &["-c", "commit.gpgsign=false", "commit", "-m", msg]);
+    }
+
+    #[test]
+    fn health_ready_then_dirty_then_conflicting() {
+        let Some(fx) = Fixture::new() else { return };
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "health").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("feature.txt"), "v1\n").unwrap();
+        commit_all_in_worktree(&wt, "任务改动");
+        let h = health_impl(&fx.conn, &w.id).unwrap();
+        assert!(!h.uncommitted);
+        assert_eq!(h.ahead, 1);
+        assert_eq!(h.behind, 0);
+        assert_eq!(h.conflict, Some(false), "merge-tree 探测应为干净（git 2.55）");
+        assert!(h.ready_to_merge);
+        // 未提交改动 → 不再 ready
+        fs::write(wt.join("feature.txt"), "v2\n").unwrap();
+        let h = health_impl(&fx.conn, &w.id).unwrap();
+        assert!(h.uncommitted);
+        assert!(!h.ready_to_merge);
+        commit_all_in_worktree(&wt, "v2");
+        // 主仓库推进同一文件的同一行并推到 origin → behind + 冲突探测命中
+        fs::write(fx.repo.join("feature.txt"), "main 版本\n").unwrap();
+        sh(&fx.repo, &["add", "feature.txt"]);
+        sh(&fx.repo, &["-c", "commit.gpgsign=false", "commit", "-m", "主线改动"]);
+        sh(&fx.repo, &["push", "origin", "main"]);
+        let h = health_impl(&fx.conn, &w.id).unwrap();
+        assert_eq!(h.behind, 1);
+        assert_eq!(h.conflict, Some(true), "同一文件同一行应探出冲突");
+        assert!(!h.ready_to_merge);
+    }
+
+    #[test]
+    fn merge_workspace_happy_path_merges_and_archives() {
+        let Some(fx) = Fixture::new() else { return };
+        // 主仓库保持干净（把 fixture 里未跟踪的 .env* 提交掉）
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(&fx.repo, &["-c", "commit.gpgsign=false", "commit", "-m", "env"]);
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "mergeme").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("feature.txt"), "done\n").unwrap();
+        commit_all_in_worktree(&wt, "任务完成");
+        let out = merge_impl(&fx.conn, &w.id).unwrap();
+        assert!(out.contains("已合并并归档"), "{out}");
+        // 改动进了主仓库的 main
+        assert_eq!(fs::read_to_string(fx.repo.join("feature.txt")).unwrap(), "done\n");
+        // 工作区已归档、worktree 已移除
+        let w2 = get_workspace(&fx.conn, &w.id).unwrap();
+        assert_eq!(w2.status, "archived");
+        assert!(!wt.exists());
+    }
+
+    #[test]
+    fn merge_workspace_refuses_dirty_or_wrong_branch_main_repo() {
+        let Some(fx) = Fixture::new() else { return };
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "guard").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("x.txt"), "x\n").unwrap();
+        commit_all_in_worktree(&wt, "x");
+        // 主仓库有未跟踪文件（fixture 的 .env*）→ 脏，拒绝
+        let err = merge_impl(&fx.conn, &w.id).unwrap_err();
+        assert!(err.contains("未提交改动"), "{err}");
+        assert_eq!(get_workspace(&fx.conn, &w.id).unwrap().status, "active", "拒绝后工作区状态不变");
+        assert!(wt.exists());
+        // 清掉脏文件但切到别的分支 → 同样拒绝
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(&fx.repo, &["-c", "commit.gpgsign=false", "commit", "-m", "env"]);
+        sh(&fx.repo, &["checkout", "-b", "other"]);
+        let err = merge_impl(&fx.conn, &w.id).unwrap_err();
+        assert!(err.contains("不在基准分支"), "{err}");
+        // 主仓库 main 上不应有 x.txt（merge 没发生）
+        sh(&fx.repo, &["checkout", "main"]);
+        assert!(!fx.repo.join("x.txt").exists());
     }
 }
