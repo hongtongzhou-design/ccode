@@ -183,6 +183,7 @@ function TerminalView({
   // —— 会话联动（SessionLink）：轮询在本地，展示数据上报给页面级右侧面板 ——
   const [sessionFile, setSessionFile] = useState<string | null>(null);
   const [conv, setConv] = useState<ChatMessageDto[]>([]);
+  const lastResumeRef = useRef<string | null>(null);
   const linkCtxRef = useRef<{
     agentId: string;
     cwd: string;
@@ -412,8 +413,10 @@ function TerminalView({
     setRunning(false);
     setAttention(null); // agent 退出：清除注意力标记
     if (kind === "agent") {
+      // 记录可恢复的会话 id（一键恢复按钮用）
+      lastResumeRef.current = linkCtxRef.current?.sessionId ?? null;
       // agent 退出（含手动停止）→ 同一终端自动回落到登录 shell
-      termRef.current?.write("\r\n\x1b[90m── agent 已退出，进入 shell ──\x1b[0m\r\n");
+      termRef.current?.write("\r\n\x1b[90m── agent 已结束（会话已保存，可一键恢复）── 当前为 shell ──\x1b[0m\r\n");
       try {
         const id = await invoke<string>("shell_spawn", {
           cwd,
@@ -546,7 +549,7 @@ function TerminalView({
     setAttention(null);
   }
 
-  async function launch() {
+  async function launch(resumeId?: string) {
     setError(null);
     await cleanupPty();
     try {
@@ -560,7 +563,7 @@ function TerminalView({
           // 工作区交接的附加 env（端口段），与 profile env 叠加
           extraEnv: initialExtraEnv ?? null,
           // 会话恢复（无则全新会话）
-          resumeSessionId: resumeSessionId ?? null,
+          resumeSessionId: resumeId ?? resumeSessionId ?? null,
         },
       );
       localStorage.setItem(
@@ -713,7 +716,7 @@ function TerminalView({
         ) : (
           <>
             <button
-              onClick={launch}
+              onClick={() => launch()}
               disabled={!profileId}
               className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
             >
@@ -736,7 +739,18 @@ function TerminalView({
           会话
         </button>
         {shellActive && !running && (
-          <span className="text-sm text-l3">shell 模式</span>
+          <>
+            <span className="text-sm text-l3">shell 模式</span>
+            {lastResumeRef.current && (
+              <button
+                onClick={() => launch(lastResumeRef.current ?? undefined)}
+                title="恢复到刚才的会话继续对话"
+                className="rounded border border-field px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+              >
+                ⟳ 恢复会话
+              </button>
+            )}
+          </>
         )}
         {exited && !running && !shellActive && (
           <span className="text-sm text-l3">进程已退出</span>
