@@ -5,10 +5,12 @@ import type { DetectResult, Profile, ProfileInput, SessionMetaDto } from "./type
 /** 应用设置（SettingsPage；后端 get_settings/update_settings 契约） */
 export interface AppSettings {
   terminalFontSize: number;
+  terminalFontFamily?: string;
+  terminalPalette?: string; // dark-plus | solarized | one-dark | catppuccin
   scrollback: number;
   rateUsdCny: number;
   brewMirror: boolean;
-  theme: string; // "midnight" | "warm" | "forest" | "violet"
+  theme: string;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效 */

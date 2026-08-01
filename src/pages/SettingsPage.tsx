@@ -3,6 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
 
 /** 四款深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
+const PALETTES = [
+  { id: "dark-plus", name: "Dark+", dots: ["#0dbc79", "#2472c8", "#f14c4c", "#e5e510"] },
+  { id: "solarized", name: "Solarized", dots: ["#859900", "#268bd2", "#dc322f", "#b58900"] },
+  { id: "one-dark", name: "One Dark", dots: ["#98c379", "#61afef", "#e06c75", "#d19a66"] },
+  { id: "catppuccin", name: "Catppuccin", dots: ["#a6e3a1", "#89b4fa", "#f38ba8", "#f9e2af"] },
+] as const;
+
 const THEMES = [
   { id: "midnight", name: "沉浸黑", rail: "#08090d", canvas: "#11131a", accent: "#16a349" },
   { id: "terracotta", name: "陶土", rail: "#232322", canvas: "#2d2d2b", accent: "#cc7d5e" },
@@ -42,6 +49,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [notice, setNotice] = useState<string | null>(null);
   // 数值输入的本地草稿（失焦/回车才提交，避免每击键一次 IPC）
   const [fontSize, setFontSize] = useState("");
+  const [fontFamily, setFontFamily] = useState("JetBrains Mono");
+  const [customFont, setCustomFont] = useState("");
   const [scrollback, setScrollback] = useState("");
   const [rate, setRate] = useState("");
   const [pricing, setPricing] = useState("");
@@ -66,6 +75,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setFontSize(String(settings.terminalFontSize));
       setScrollback(String(settings.scrollback));
       setRate(String(settings.rateUsdCny));
+      const fam = settings.terminalFontFamily ?? "JetBrains Mono";
+      if (["JetBrains Mono", "SF Mono", "Menlo", "Consolas"].includes(fam)) {
+        setFontFamily(fam);
+      } else {
+        setFontFamily("__custom__");
+        setCustomFont(fam);
+      }
     }
   }, [settings]);
 
@@ -159,6 +175,60 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             commitNumber(fontSize, 11, 18, (n) => patch({ terminalFontSize: n }))
           }
         />
+      </Row>
+
+      <Row label="终端字体" hint="立即生效；选「自定义」可输入系统已装字体名">
+        <div className="flex items-center gap-2">
+          <select
+            className={field}
+            value={fontFamily}
+            onChange={(e) => {
+              setFontFamily(e.target.value);
+              if (e.target.value !== "__custom__") patch({ terminalFontFamily: e.target.value });
+            }}
+          >
+            <option value="JetBrains Mono">JetBrains Mono（内置）</option>
+            <option value="SF Mono">SF Mono（macOS）</option>
+            <option value="Menlo">Menlo（macOS）</option>
+            <option value="Consolas">Consolas</option>
+            <option value="__custom__">自定义…</option>
+          </select>
+          {fontFamily === "__custom__" && (
+            <input
+              className={`${field} w-40`}
+              placeholder="字体名，如 Fira Code"
+              value={customFont}
+              onChange={(e) => setCustomFont(e.target.value)}
+              onBlur={() => customFont.trim() && patch({ terminalFontFamily: customFont.trim() })}
+              onKeyDown={(e) =>
+                e.key === "Enter" && customFont.trim() && patch({ terminalFontFamily: customFont.trim() })
+              }
+            />
+          )}
+        </div>
+      </Row>
+
+      <Row label="终端调色板" hint="终端内 16 种 ANSI 颜色风格，立即生效">
+        <div className="flex gap-2">
+          {PALETTES.map((pl) => (
+            <button
+              key={pl.id}
+              onClick={() => patch({ terminalPalette: pl.id })}
+              title={pl.name}
+              className={`rounded-md border p-1.5 text-xs ${
+                (settings?.terminalPalette ?? "dark-plus") === pl.id
+                  ? "border-cta-bd text-l1"
+                  : "border-field text-l3 hover:text-l1"
+              }`}
+            >
+              <span className="flex h-3 gap-0.5">
+                {pl.dots.map((d) => (
+                  <span key={d} className="h-3 w-3 rounded-sm" style={{ background: d }} />
+                ))}
+              </span>
+            </button>
+          ))}
+        </div>
       </Row>
 
       <Row label="滚动缓冲行数" hint="新开标签生效（1000–20000）">

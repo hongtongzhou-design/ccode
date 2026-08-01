@@ -9,6 +9,7 @@ pub const DEFAULT_SCROLLBACK: u32 = 5000;
 pub const DEFAULT_RATE_USD_CNY: f64 = 7.2;
 pub const DEFAULT_BREW_MIRROR: bool = true;
 pub const DEFAULT_THEME: &str = "midnight";
+pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
 const KNOWN_THEMES: [&str; 7] = [
     "midnight", "terracotta", "ayu", "mocha", "neutral", "dracula", "shadcn",
 ];
@@ -17,6 +18,9 @@ const KNOWN_THEMES: [&str; 7] = [
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettingsDto {
     pub terminal_font_size: Option<u16>,
+    pub terminal_font_family: Option<String>,
+    /// 终端 16 色调色板预设：dark-plus（默认）| solarized | one-dark | catppuccin
+    pub terminal_palette: Option<String>,
     pub scrollback: Option<u32>,
     pub rate_usd_cny: Option<f64>,
     pub brew_mirror: Option<bool>,
@@ -47,6 +51,12 @@ fn write_to(path: &Path, settings: &AppSettingsDto) -> Result<(), String> {
 fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
     AppSettingsDto {
         terminal_font_size: s.terminal_font_size.or(Some(DEFAULT_TERMINAL_FONT_SIZE)),
+        terminal_font_family: s
+            .terminal_font_family
+            .or_else(|| Some(DEFAULT_TERMINAL_FONT_FAMILY.to_string())),
+        terminal_palette: s.terminal_palette.filter(|p| {
+            ["dark-plus", "solarized", "one-dark", "catppuccin"].contains(&p.as_str())
+        }),
         scrollback: s.scrollback.or(Some(DEFAULT_SCROLLBACK)),
         rate_usd_cny: s.rate_usd_cny.or(Some(DEFAULT_RATE_USD_CNY)),
         brew_mirror: s.brew_mirror.or(Some(DEFAULT_BREW_MIRROR)),
@@ -62,6 +72,12 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
 fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     if patch.terminal_font_size.is_some() {
         cur.terminal_font_size = patch.terminal_font_size;
+    }
+    if patch.terminal_font_family.is_some() {
+        cur.terminal_font_family = patch.terminal_font_family;
+    }
+    if patch.terminal_palette.is_some() {
+        cur.terminal_palette = patch.terminal_palette;
     }
     if patch.scrollback.is_some() {
         cur.scrollback = patch.scrollback;
