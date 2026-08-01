@@ -53,6 +53,8 @@ npm run tauri build    # 打包
 - **GUI 应用 PATH 很短**：Finder 启动的打包应用可能找不到 npm 装的 CLI；开发模式（`npm run tauri dev`）继承终端 PATH 不受影响。
 - **本机 CLI 安装情况**：claude/codex/gemini/qwen 为 brew 或 npm 安装（检测见 updater.rs 报告）；opencode 未装；kimi 为新版（~/.kimi-code）。
 - **git 提交**：用户要求 CI 耗时久，常规提交加 `[skip ci]`，里程碑提交才跑三平台 CI。
+- **git 推送走 SSH:443 + repo deploy key**（HTTPS 网络不稳）；**deploy key 推送不触发 GitHub Actions**——发版必须 `gh api repos/<owner>/<repo>/actions/workflows/build.yml/dispatches -f ref=<tag>` 手动触发；workflow 已配 `permissions: contents: write`（tauri-action 建 Release 草稿必需，缺了报 Resource not accessible by integration）。
+- **CI 测试教训**：单元测试禁墙钟时序硬断言（共享 runner 调度延迟不可控，只留内容语义断言 + 防挂死宽松兜底）；unix 专属语义（symlink/PTY 交互/脚本）测试加 `#[cfg(unix)]`；路径断言用 `Path::ends_with` 不用字符串相等（Windows `\`）。
 
 ## 代码结构
 
@@ -91,7 +93,8 @@ src-tauri/src/
     不允许死在最终画面；用户手动 `exit` shell 不自动重开；
   - 回落的 shell 不携带任何 profile 环境变量（密钥只在 agent 进程内）；
   - agent 与 shell 共用 `pty.rs` 的 `spawn_tracked`，退出事件按 PTY 类型区分处理。
-- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：「设为全局默认」（写前必须备份）、会话删除（delete_session/delete_project_sessions，路径必须落在已知会话根内）、工作树文件删除（限定树当前根目录 + 重要路径黑名单兜底：系统目录/关键用户目录/CLI 配置/.git 一律拒绝）。
+- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：「设为全局默认」（写前必须备份）、会话删除（delete_session/delete_project_sessions，路径必须落在已知会话根内）、工作树文件删除（限定树当前根目录 + 重要路径黑名单兜底：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单判断必须 canonicalize 双校验，堵符号链接绕过）。
+- **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录），AI 无头调用 `-s read-only`；用户可用 extra_env/参数覆盖。
 - 解析各 CLI 内部格式时**防御式**：跳过未知类型、容忍缺字段、容忍末行截断（格式随版本漂移）。
 - 三平台兼容：禁写平台特定路径，用 `dirs`/`keyring`/`portable-pty` 的抽象。
 - UI 文案用中文；代码注释用中文、只在非显而易见处写（参照现有文件风格）。
