@@ -8,6 +8,12 @@ const THEMES = [
   { id: "warm", name: "暖夜", rail: "#120d0b", canvas: "#150f0c" },
   { id: "forest", name: "墨绿", rail: "#070c0a", canvas: "#0e1511" },
   { id: "violet", name: "深紫", rail: "#0b0912", canvas: "#130f1f" },
+  { id: "terracotta", name: "陶土", rail: "#232322", canvas: "#2d2d2b" },
+  { id: "ayu", name: "Ayu 琥珀", rail: "#0b0e14", canvas: "#10141c" },
+  { id: "mocha", name: "Catppuccin", rail: "#181824", canvas: "#1e1e2e" },
+  { id: "neutral", name: "极简灰蓝", rail: "#0d0d0d", canvas: "#111111" },
+  { id: "dracula", name: "Dracula", rail: "#1e2029", canvas: "#282a36" },
+  { id: "shadcn", name: "灰蓝正红", rail: "#0d1420", canvas: "#111827" },
 ] as const;
 
 const field =

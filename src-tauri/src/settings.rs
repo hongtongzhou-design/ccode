@@ -9,7 +9,10 @@ pub const DEFAULT_SCROLLBACK: u32 = 5000;
 pub const DEFAULT_RATE_USD_CNY: f64 = 7.2;
 pub const DEFAULT_BREW_MIRROR: bool = true;
 pub const DEFAULT_THEME: &str = "midnight";
-const KNOWN_THEMES: [&str; 4] = ["midnight", "warm", "forest", "violet"];
+const KNOWN_THEMES: [&str; 10] = [
+    "midnight", "warm", "forest", "violet",
+    "terracotta", "ayu", "mocha", "neutral", "dracula", "shadcn",
+];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
