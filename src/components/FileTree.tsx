@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ContextMenu from "./ContextMenu";
@@ -60,6 +60,8 @@ export default function FileTree({
   const [root, setRoot] = useState(cwd);
   const [cache, setCache] = useState<Record<string, DirEntryDto[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
   const [error, setError] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const [gitMap, setGitMap] = useState<Record<string, string>>({});
@@ -107,7 +109,8 @@ export default function FileTree({
           return;
         }
         unlisten = await listen(`fs-changed-${watchId}`, () => {
-          setCache({});
+          // 就地重载根与已展开目录（不清缓存，旧内容保持显示直到新数据到达，避免闪烁）
+          for (const p of [root, ...expandedRef.current]) void load(p);
           void loadGitMap();
           onFsEvent?.();
         });

@@ -183,7 +183,7 @@ fn watchers() -> &'static std::sync::Mutex<std::collections::HashMap<String, Wat
 /// agent 会话文件和应用 db 都写在隐藏目录，home 根监听时不过滤会形成刷新风暴
 fn fs_noise_skip(path: &std::path::Path) -> bool {
     let s = path.to_string_lossy();
-    if s.contains("/.git/") || s.contains("/node_modules/") {
+    if s.contains("/.git/") || s.contains("/node_modules/") || s.contains("/target/") || s.contains("/dist/") {
         return true;
     }
     let mut idx = 0;
@@ -383,6 +383,8 @@ mod fix_tests {
         assert!(fs_noise_skip(Path::new("/home/u/proj/.git/index")));
         assert!(fs_noise_skip(Path::new("/home/u/proj/node_modules/x/index.js")));
         assert!(!fs_noise_skip(Path::new("/home/u/proj/src/main.rs")));
+        assert!(fs_noise_skip(Path::new("/home/u/proj/target/debug/build/x")));
+        assert!(fs_noise_skip(Path::new("/home/u/proj/dist/assets/index.js")));
         assert!(!fs_noise_skip(Path::new("/home/u/proj/.env")));
     }
 }
