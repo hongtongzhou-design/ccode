@@ -397,9 +397,12 @@ pub struct SearchResultDto {
     pub path: String,
     pub name: String,
     pub is_dir: bool,
+    /// 相对搜索根的路径（前端展示用，避免前端按根长截断出错）
+    pub rel: String,
 }
 
 fn search_walk(
+    root: &std::path::Path,
     dir: &std::path::Path,
     query: &str,
     depth: usize,
@@ -429,13 +432,17 @@ fn search_walk(
         }
         if name.to_lowercase().contains(query) {
             out.push(SearchResultDto {
+                rel: path
+                    .strip_prefix(root)
+                    .map(|r| r.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| name.clone()),
                 path: path.to_string_lossy().into_owned(),
                 name,
                 is_dir,
             });
         }
         if is_dir {
-            search_walk(&path, query, depth + 1, visited, out);
+            search_walk(root, &path, query, depth + 1, visited, out);
         }
     }
 }
@@ -449,13 +456,8 @@ pub async fn search_files(root: String, query: String) -> Result<Vec<SearchResul
         }
         let mut out = Vec::new();
         let mut visited = 0;
-        search_walk(
-            std::path::Path::new(&expand_tilde(&root)),
-            &q,
-            0,
-            &mut visited,
-            &mut out,
-        );
+        let root_path = std::path::PathBuf::from(expand_tilde(&root));
+        search_walk(&root_path, &root_path, &q, 0, &mut visited, &mut out);
         Ok(out)
     })
     .await
@@ -476,9 +478,16 @@ mod search_tests {
         fs::write(dir.join("banana.md"), "").unwrap();
         let mut out = Vec::new();
         let mut visited = 0;
-        search_walk(&dir, "apple", 0, &mut visited, &mut out);
+        search_walk(&dir, &dir, "apple", 0, &mut visited, &mut out);
         assert_eq!(out.len(), 1);
         assert!(out[0].path.ends_with("src/deep/apple.rs"));
+        assert_eq!(out[0].rel, "src/deep/apple.rs");
+        // 预览：root 传未展开的 "~" 也应通过词法检查
+        let home_file = dirs::home_dir().unwrap().join("ccode-test-tilde.txt");
+        fs::write(&home_file, "x").unwrap();
+        let r = read_file_preview_sync(home_file.to_str().unwrap(), "~");
+        assert!(r.is_ok(), "{r:?}");
+        let _ = fs::remove_file(&home_file);
         let _ = fs::remove_dir_all(&dir);
     }
 }

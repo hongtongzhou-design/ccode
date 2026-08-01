@@ -12,6 +12,8 @@ export interface SearchResultDto {
   path: string;
   name: string;
   isDir: boolean;
+  /** 相对搜索根的路径（后端算好，直接展示） */
+  rel: string;
 }
 
 export interface DirEntryDto {
@@ -343,7 +345,7 @@ export default function FileTree({
                 title={r.path}
                 className="cursor-pointer truncate px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
               >
-                {r.isDir ? "📁" : "📄"} {r.path.slice(root.length + 1)}
+                {r.isDir ? "📁" : "📄"} {r.rel}
               </div>
             ))
           )}
