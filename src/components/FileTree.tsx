@@ -3,6 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ContextMenu from "./ContextMenu";
 
+export interface SearchResultDto {
+  path: string;
+  name: string;
+  isDir: boolean;
+}
+
 export interface DirEntryDto {
   name: string;
   path: string;
@@ -152,6 +158,23 @@ export default function FileTree({
   }
 
   const parent = parentDir(root);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResultDto[] | null>(null);
+
+  // 搜索防抖：300ms 后在项目根内按文件名查找
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setResults(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      invoke<SearchResultDto[]>("search_files", { path: root, query: q })
+        .then(setResults)
+        .catch(() => setResults([]));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [query, root]);
   /** 目录内是否有变更文件（文件夹装饰点） */
   const changedInside = (dirPath: string) =>
     Object.keys(gitMap).some((p) => p.startsWith(`${dirPath}/`));
@@ -233,7 +256,7 @@ export default function FileTree({
 
   const children = cache[root];
   return (
-    <div>
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* 当前根：加粗 basename + 完整路径 tooltip */}
       <div
         className="px-2 py-1 text-xs font-semibold text-l1"
@@ -242,7 +265,7 @@ export default function FileTree({
         <span className="truncate">{basenameOf(root)}</span>
       </div>
       {error && <p className="px-2 py-1 text-xs text-err-text">{error}</p>}
-      {parent && (
+      {parent && parent.startsWith(cwd) && (
         <div
           onClick={() => setRoot(parent)}
           title={parent}
@@ -251,13 +274,40 @@ export default function FileTree({
           ‥ 上级目录
         </div>
       )}
-      {!children ? (
+      {results !== null ? (
+        <div className="min-h-0 flex-1 overflow-auto">
+          {results.length === 0 ? (
+            <p className="px-2 py-1 text-xs text-l4">无匹配文件</p>
+          ) : (
+            results.map((r) => (
+              <div
+                key={r.path}
+                onClick={() => onOpenFile(r.path, r.name, root)}
+                title={r.path}
+                className="cursor-pointer truncate px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+              >
+                {r.isDir ? "📁" : "📄"} {r.path.slice(root.length + 1)}
+              </div>
+            ))
+          )}
+        </div>
+      ) : !children ? (
         <p className="px-2 py-1 text-xs text-l4">加载中…</p>
       ) : children.length === 0 ? (
         <p className="px-2 py-1 text-xs text-l4">空目录</p>
       ) : (
         children.map((c) => <Node key={c.path} entry={c} depth={0} />)
       )}
+      {/* 找文件搜索框（项目根内按文件名搜索） */}
+      <div className="shrink-0 border-t border-hairline px-2 py-1.5">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+          placeholder="按文件名搜索…"
+          className="w-full rounded border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
+        />
+      </div>
       {menu && (
         <ContextMenu
           x={menu.x}

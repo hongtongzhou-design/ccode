@@ -388,3 +388,94 @@ mod fix_tests {
         assert!(!fs_noise_skip(Path::new("/home/u/proj/.env")));
     }
 }
+
+// ===== 项目内文件搜索（P4 补充）：限定根目录内，跳过隐藏/噪声目录 =====
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResultDto {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+}
+
+fn search_walk(
+    dir: &std::path::Path,
+    query: &str,
+    depth: usize,
+    visited: &mut usize,
+    out: &mut Vec<SearchResultDto>,
+) {
+    const MAX_DEPTH: usize = 10;
+    const MAX_VISITED: usize = 20000;
+    const MAX_RESULTS: usize = 50;
+    if depth > MAX_DEPTH || *visited >= MAX_VISITED || out.len() >= MAX_RESULTS {
+        return;
+    }
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        if out.len() >= MAX_RESULTS || *visited >= MAX_VISITED {
+            return;
+        }
+        *visited += 1;
+        let name = e.file_name().to_string_lossy().into_owned();
+        let path = e.path();
+        let is_dir = path.is_dir();
+        if is_dir && (name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | "dist")) {
+            continue;
+        }
+        if name.to_lowercase().contains(query) {
+            out.push(SearchResultDto {
+                path: path.to_string_lossy().into_owned(),
+                name,
+                is_dir,
+            });
+        }
+        if is_dir {
+            search_walk(&path, query, depth + 1, visited, out);
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn search_files(root: String, query: String) -> Result<Vec<SearchResultDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut visited = 0;
+        search_walk(
+            std::path::Path::new(&expand_tilde(&root)),
+            &q,
+            0,
+            &mut visited,
+            &mut out,
+        );
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("搜索失败: {e}"))?
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn search_finds_nested_and_skips_noise() {
+        let dir = std::env::temp_dir().join(format!("ccode-search-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("src/deep")).unwrap();
+        fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        fs::write(dir.join("src/deep/apple.rs"), "").unwrap();
+        fs::write(dir.join("node_modules/pkg/apple.js"), "").unwrap();
+        fs::write(dir.join("banana.md"), "").unwrap();
+        let mut out = Vec::new();
+        let mut visited = 0;
+        search_walk(&dir, "apple", 0, &mut visited, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].path.ends_with("src/deep/apple.rs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
