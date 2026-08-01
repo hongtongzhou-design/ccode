@@ -1016,6 +1016,7 @@ mod tests {
 
     // ===== W2：项目级脚本钩子 =====
 
+    #[cfg(unix)]
     #[test]
     fn create_runs_setup_script_and_custom_files_to_copy() {
         let Some(fx) = Fixture::new() else { return };
@@ -1056,6 +1057,7 @@ mod tests {
         assert!(Path::new(&w.worktree_path).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn archive_script_failure_blocks_removal() {
         let Some(fx) = Fixture::new() else { return };
@@ -1131,6 +1133,7 @@ mod tests {
         assert!(!h.ready_to_merge);
     }
 
+    #[cfg(unix)]
     #[test]
     fn merge_workspace_happy_path_merges_and_archives() {
         let Some(fx) = Fixture::new() else { return };

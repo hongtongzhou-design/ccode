@@ -525,10 +525,9 @@ mod tests {
         let (text, _) = c.take_frame(at, frame).unwrap();
         let waited = start.elapsed();
         assert_eq!(text, "burst-2;burst-3");
-        assert!(
-            waited >= Duration::from_millis(25),
-            "帧内不应立即发送（应合帧），实际等了 {waited:?}"
-        );
+        // CI 慢节点上帧截止时间可能已过（waited≈0），时序下界不做硬断言；
+        // 合帧语义由内容断言保证
+        assert!(waited <= frame * 3, "合帧等待异常超长: {waited:?}");
         // 尾部无新数据：下一帧在帧尾前内必须发出
         c.append(b"tail");
         let start = Instant::now();

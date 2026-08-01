@@ -96,8 +96,8 @@ fn list_dir_sync(path: &str, show_hidden: bool) -> Result<Vec<DirEntryDto>, Stri
 fn read_file_preview_sync(path: &str, root: &str) -> Result<FilePreviewDto, String> {
     // 词法包含检查（不解析符号链接）：node_modules 这类链接到根外的文件在树上可见，
     // 应允许预览；真正的越权由下方 canonicalize 读取兜底（"../" 无法通过词法前缀）
-    let root_exp = expand_tilde(root);
-    let path_exp = expand_tilde(path);
+    let root_exp = norm_sep(&expand_tilde(root));
+    let path_exp = norm_sep(&expand_tilde(path));
     let root_norm = root_exp.trim_end_matches('/');
     if !(path_exp == root_norm || path_exp.starts_with(&format!("{root_norm}/"))) {
         return Err("路径超出项目根目录，拒绝预览".into());
@@ -182,7 +182,7 @@ fn watchers() -> &'static std::sync::Mutex<std::collections::HashMap<String, Wat
 /// 监听噪声过滤：隐藏目录段（/.foo/）、.git、node_modules 下的事件不触发刷新。
 /// agent 会话文件和应用 db 都写在隐藏目录，home 根监听时不过滤会形成刷新风暴
 fn fs_noise_skip(path: &std::path::Path) -> bool {
-    let s = path.to_string_lossy();
+    let s = norm_sep(&path.to_string_lossy());
     if s.contains("/.git/") || s.contains("/node_modules/") || s.contains("/target/") || s.contains("/dist/") {
         return true;
     }
@@ -480,7 +480,7 @@ mod search_tests {
         let mut visited = 0;
         search_walk(&dir, &dir, "apple", 0, &mut visited, &mut out);
         assert_eq!(out.len(), 1);
-        assert!(out[0].path.ends_with("src/deep/apple.rs"));
+        assert!(std::path::Path::new(&out[0].path).ends_with("src/deep/apple.rs"));
         assert_eq!(out[0].rel, "src/deep/apple.rs");
         // 预览：root 传未展开的 "~" 也应通过词法检查
         let home_file = dirs::home_dir().unwrap().join("ccode-test-tilde.txt");
@@ -494,9 +494,14 @@ mod search_tests {
 
 // ===== 文件树文件操作（P4 补充）：新建文件夹 / 删除，词法根目录约束 =====
 
+/// Windows 反斜杠归一为正斜杠，再做前缀比较（跨平台路径语义一致）
+fn norm_sep(s: &str) -> String {
+    s.replace('\\', "/")
+}
+
 fn lexical_in_root(path: &str, root: &str) -> bool {
-    let root_norm = expand_tilde(root).trim_end_matches('/').to_string();
-    let path_exp = expand_tilde(path);
+    let root_norm = norm_sep(&expand_tilde(root)).trim_end_matches('/').to_string();
+    let path_exp = norm_sep(&expand_tilde(path));
     path_exp == root_norm || path_exp.starts_with(&format!("{root_norm}/"))
 }
 
@@ -569,7 +574,16 @@ fn is_protected_str(p: &str) -> bool {
         "/System", "/usr", "/bin", "/sbin", "/etc", "/Library", "/Applications", "/opt",
     ];
     let home_lib = format!("{home}/Library");
-    if PREFIXES.iter().any(|pre| pn.starts_with(pre)) || pn.starts_with(&home_lib) {
+    // macOS 的 /etc、/tmp 等是 /private 下的符号链接，canonicalize 后会带 /private 前缀，剥掉再比
+    let pn_depriv = pn
+        .strip_prefix("/private/")
+        .map(|r| format!("/{r}"))
+        .unwrap_or_else(|| pn.to_string());
+    if PREFIXES
+        .iter()
+        .any(|pre| pn.starts_with(pre) || pn_depriv.starts_with(pre))
+        || pn.starts_with(&home_lib)
+    {
         return true;
     }
     // 任何 .git 内部路径
@@ -642,7 +656,7 @@ mod fsops_tests {
             let proj = dir.join("projlink");
             fs::create_dir_all(&proj).unwrap();
             let link = proj.join("x");
-            std::os::unix::fs::symlink(format!("{home}/.ssh"), &link).unwrap();
+            std::os::unix::fs::symlink("/etc", &link).unwrap();
             assert!(delete_path_sync(&link.to_string_lossy(), &proj.to_string_lossy().into_owned()).is_err());
             let _ = fs::remove_file(&link);
         }

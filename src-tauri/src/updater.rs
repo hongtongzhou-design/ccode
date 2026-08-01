@@ -630,6 +630,7 @@ mod tests {
 
     /// 冒烟测试：验证 PTY 流式输出——3 行各自间隔 1s 到达，而非退出时一次性到齐。
     /// 这正是修复前管道块缓冲的症状（"运行中，等待输出…" 卡住不动）。
+    #[cfg(unix)]
     #[test]
     fn pty_streaming_delivers_lines_incrementally() {
         let chunks: Arc<Mutex<Vec<(std::time::Instant, String)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -667,6 +668,7 @@ mod tests {
 
     /// 交互测试：run 中途经 writers map 写入（模拟 brew [y/n] 确认），
     /// 子进程读到输入并把回显行吐出来；run 结束后 writer 已从 map 移除。
+    #[cfg(unix)]
     #[test]
     fn pty_run_is_interactive_via_writers_map() {
         let chunks: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
