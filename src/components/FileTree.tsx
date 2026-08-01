@@ -188,6 +188,22 @@ export default function FileTree({
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResultDto[] | null>(null);
   const [highlight, setHighlight] = useState<string | null>(null);
+  const [newFolderFor, setNewFolderFor] = useState<string | null>(null);
+  const [newFolderName, setNewFolderName] = useState("");
+
+  async function submitNewFolder() {
+    const parent = newFolderFor;
+    const name = newFolderName.trim();
+    setNewFolderFor(null);
+    setNewFolderName("");
+    if (!parent || !name) return;
+    try {
+      await invoke("fs_create_dir", { root: parent, name });
+      for (const p of [root, ...expandedRef.current]) void load(p);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   /** 搜索结果定位：跳到所在目录并高亮（不打开预览） */
   function locate(r: SearchResultDto) {
@@ -374,6 +390,23 @@ export default function FileTree({
           </button>
         )}
       </div>
+      {newFolderFor && (
+        <div className="flex items-center gap-1 px-2 py-1">
+          <span className="shrink-0 text-xs text-l4">新建于 {basenameOf(newFolderFor)}:</span>
+          <input
+            autoFocus
+            value={newFolderName}
+            onChange={(e) => setNewFolderName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void submitNewFolder();
+              if (e.key === "Escape") setNewFolderFor(null);
+            }}
+            onBlur={() => void submitNewFolder()}
+            placeholder="文件夹名称"
+            className="min-w-0 flex-1 rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
+          />
+        </div>
+      )}
       {error && <p className="px-2 py-1 text-xs text-err-text">{error}</p>}
 
       {results !== null ? (
@@ -416,14 +449,7 @@ export default function FileTree({
                   {
                     label: "新建文件夹",
                     onSelect: async () => {
-                      const name = window.prompt("新建文件夹名称：");
-                      if (!name?.trim()) return;
-                      try {
-                        await invoke("fs_create_dir", { root: menu.path, name: name.trim() });
-                        for (const p of [root, ...expandedRef.current]) void load(p);
-                      } catch (e) {
-                        setError(String(e));
-                      }
+                      setNewFolderFor(menu.path);
                     },
                   },
                 ]
