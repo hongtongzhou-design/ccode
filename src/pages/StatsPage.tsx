@@ -39,6 +39,27 @@ function basename(p: string): string {
 
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
+/**
+ * 每个 agent 的进度条色相：从现有设计令牌取色（低饱和、状态色系的浅字档），
+ * 未知 agent 按列表序循环兜底。随主题切换联动的令牌用 CSS 变量引用。
+ */
+const AGENT_COLORS: Record<string, string> = {
+  "claude-code": "var(--color-ok-text)",
+  codex: "var(--color-link)",
+  gemini: "var(--color-warn-text)",
+  qwen: "var(--color-err-text)",
+  opencode: "var(--color-add)",
+  kimi: "var(--color-tabline)",
+};
+const FALLBACK_COLORS = [
+  "var(--color-ok-text)",
+  "var(--color-link)",
+  "var(--color-warn-text)",
+  "var(--color-err-text)",
+];
+const agentColor = (id: string, i: number) =>
+  AGENT_COLORS[id] ?? FALLBACK_COLORS[i % FALLBACK_COLORS.length];
+
 export default function StatsPage({ visible }: { visible: boolean }) {
   const [range, setRange] = useState<Range>("week");
   const [currency, setCurrency] = useState<"$" | "¥">(
@@ -91,7 +112,10 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     stats.byProject.length === 0 &&
     stats.byModel.length === 0 &&
     stats.cards.sessions === 0;
-  const maxAgentTokens = Math.max(1, ...(stats?.byAgent.map((a) => a.tokens) ?? [1]));
+  const totalAgentTokens = Math.max(
+    1,
+    stats?.byAgent.reduce((s, a) => s + a.tokens, 0) ?? 1,
+  );
   const rate = stats?.rateUsdCny ?? 7.2;
   const th = "px-2 py-1.5 text-left text-xs font-normal text-l4";
 
@@ -181,28 +205,41 @@ export default function StatsPage({ visible }: { visible: boolean }) {
             </div>
           </div>
 
-          {/* 按 agent：横向条形 */}
+          {/* 按 agent：用量占比进度条（占比 = 该 agent tokens / 全部合计） */}
           {stats.byAgent.length > 0 && (
             <section className="mb-6">
               <h2 className="mb-2 text-sm font-medium text-l1">按 Agent</h2>
               <ul className="divide-y divide-hairline">
-                {stats.byAgent.map((a) => (
-                  <li key={a.agent} className="flex items-center gap-3 py-2 text-sm">
-                    <span className="w-24 shrink-0 text-l2">{agentLabel(a.agent)}</span>
-                    <span className="h-2 min-w-0 flex-1 rounded bg-hairline">
+                {stats.byAgent.map((a, i) => {
+                  const share = a.tokens / totalAgentTokens;
+                  return (
+                    <li key={a.agent} className="flex items-center gap-3 py-2 text-sm">
                       <span
-                        className="block h-2 rounded bg-field"
-                        style={{ width: `${Math.max(2, (a.tokens / maxAgentTokens) * 100)}%` }}
+                        className="size-2 shrink-0 rounded-full"
+                        style={{ backgroundColor: agentColor(a.agent, i) }}
                       />
-                    </span>
-                    <span className="w-16 shrink-0 text-right font-mono text-xs text-l2">
-                      {compact(a.tokens)}
-                    </span>
-                    <span className="w-14 shrink-0 text-right text-xs text-l3">
-                      {fmtCost(a.costUsd, currency, rate, a.costPartial)}
-                    </span>
-                  </li>
-                ))}
+                      <span className="w-24 shrink-0 text-l2">{agentLabel(a.agent)}</span>
+                      <span className="h-2 min-w-0 flex-1 rounded bg-hairline">
+                        <span
+                          className="block h-2 rounded"
+                          style={{
+                            width: `${Math.max(1.5, share * 100)}%`,
+                            backgroundColor: agentColor(a.agent, i),
+                          }}
+                        />
+                      </span>
+                      <span className="w-16 shrink-0 text-right font-mono text-xs text-l2">
+                        {compact(a.tokens)}
+                      </span>
+                      <span className="w-12 shrink-0 text-right font-mono text-xs text-l3">
+                        {(share * 100).toFixed(1)}%
+                      </span>
+                      <span className="w-14 shrink-0 text-right text-xs text-l3">
+                        {fmtCost(a.costUsd, currency, rate, a.costPartial)}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             </section>
           )}

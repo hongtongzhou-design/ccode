@@ -480,9 +480,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               <div key={cat}>
                 <button
                   onClick={() => toggleCat(cat)}
+                  aria-label={catCollapsed.has(cat) ? "展开" : "收起"}
                   className="mt-4 mb-1 flex items-center gap-1.5 px-1 text-xs font-medium text-l3 hover:text-l1"
                 >
-                  <span className="inline-flex h-5 w-5 items-center justify-center rounded text-l4 hover:bg-white/5">
+                  {/* 点击区 ≥28px（h-7 w-7），同 ProfilesPage 折叠按钮 */}
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded text-l4 hover:bg-white/5">
                     {catCollapsed.has(cat) ? "▸" : "▾"}
                   </span>
                   {cat}
@@ -607,7 +609,8 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             <button
               onClick={() => setPreview(null)}
               title="关闭预览"
-              className="ml-auto text-xs text-l4 hover:text-l1"
+              aria-label="关闭预览"
+              className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
             >
               ×
             </button>

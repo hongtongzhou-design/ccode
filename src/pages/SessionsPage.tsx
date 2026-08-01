@@ -65,6 +65,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [showArchived, setShowArchived] = useState(false);
   // 分类树里收起的 agent（默认全部展开）
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // 批量删除：选择模式 + 勾选集合（键为 agent+sessionId 复合键，防跨 agent 撞 id）
+  const [selecting, setSelecting] = useState(false);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [confirmBatch, setConfirmBatch] = useState(false);
+  const [batchDeleting, setBatchDeleting] = useState(false);
   const [selected, setSelected] = useState<SessionMetaDto | null>(null);
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
   const [loadingConv, setLoadingConv] = useState(false);
@@ -288,6 +293,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     };
   }, [menu]);
 
+  // 批量删除二次确认 4s 后自动复原
+  useEffect(() => {
+    if (!confirmBatch) return;
+    const t = setTimeout(() => setConfirmBatch(false), 4000);
+    return () => clearTimeout(t);
+  }, [confirmBatch]);
+
   async function togglePin(s: SessionMetaDto) {
     setError(null);
     try {
@@ -379,6 +391,71 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  const skey = (s: SessionMetaDto) => `${s.agent}\n${s.sessionId}`;
+
+  function toggleChecked(s: SessionMetaDto) {
+    setConfirmBatch(false);
+    setChecked((prev) => {
+      const next = new Set(prev);
+      const k = skey(s);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  }
+
+  /** 全选/取消全选当前筛选结果（sessionList 已含搜索、树筛选、归档开关） */
+  const allChecked =
+    sessionList.length > 0 && sessionList.every((s) => checked.has(skey(s)));
+  // 只统计/删除当前筛选结果内的勾选项，防止误删不可见行
+  const checkedInView = sessionList.reduce(
+    (n, s) => n + (checked.has(skey(s)) ? 1 : 0),
+    0,
+  );
+  function toggleSelectAll() {
+    setConfirmBatch(false);
+    setChecked(allChecked ? new Set() : new Set(sessionList.map(skey)));
+  }
+
+  function exitSelectMode() {
+    setSelecting(false);
+    setChecked(new Set());
+    setConfirmBatch(false);
+  }
+
+  /** 批量删除：逐个走 delete_session，语义与单个删除一致（pin 快照/整理数据由后端一并清理） */
+  async function batchDelete() {
+    const targets = sessionList.filter((s) => checked.has(skey(s)));
+    if (targets.length === 0) return;
+    setBatchDeleting(true);
+    setError(null);
+    const failed: string[] = [];
+    for (const s of targets) {
+      try {
+        await invoke("delete_session", {
+          agent: s.agent,
+          sessionId: s.sessionId,
+          filePath: s.filePath,
+        });
+      } catch {
+        failed.push(sessionTitle(s));
+      }
+    }
+    // 正在回放的会话被删则退出回放
+    const cur = selectedRef.current;
+    if (cur && checked.has(skey(cur))) {
+      setSelected(null);
+      setMessages([]);
+    }
+    setBatchDeleting(false);
+    exitSelectMode();
+    await loadSessions();
+    if (failed.length > 0)
+      setError(
+        `已删除 ${targets.length - failed.length} 项，${failed.length} 项失败：${failed.join("、")}`,
+      );
   }
 
   async function saveEdit() {
@@ -538,17 +615,65 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         <div className={`flex min-h-0 flex-1 flex-col ${selected ? "hidden" : ""}`}>
           {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
           <div className="flex items-baseline justify-between bg-strip px-4 py-2">
-            <span className="text-xs text-l3">
-              {filterLabel} · {sessionList.length} 个会话
-            </span>
-            <label className="flex cursor-pointer items-center gap-1.5 rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5">
-              <input
-                type="checkbox"
-                checked={showArchived}
-                onChange={(e) => setShowArchived(e.target.checked)}
-              />
-              显示已归档
-            </label>
+            {selecting ? (
+              <>
+                <span className="text-xs text-l3">已选 {checkedInView} 项</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={toggleSelectAll}
+                    className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                  >
+                    {allChecked ? "取消全选" : "全选（当前筛选结果）"}
+                  </button>
+                  <button
+                    disabled={checkedInView === 0 || batchDeleting}
+                    onClick={() => {
+                      if (confirmBatch) {
+                        setConfirmBatch(false);
+                        void batchDelete();
+                      } else {
+                        setConfirmBatch(true);
+                      }
+                    }}
+                    className="rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5 disabled:opacity-50"
+                  >
+                    {batchDeleting
+                      ? "删除中…"
+                      : confirmBatch
+                        ? `确认删除 ${checkedInView} 项？`
+                        : `删除 ${checkedInView} 项`}
+                  </button>
+                  <button
+                    onClick={exitSelectMode}
+                    className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                  >
+                    取消
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <span className="text-xs text-l3">
+                  {filterLabel} · {sessionList.length} 个会话
+                </span>
+                <div className="flex items-center gap-1">
+                  <label className="flex cursor-pointer items-center gap-1.5 rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5">
+                    <input
+                      type="checkbox"
+                      checked={showArchived}
+                      onChange={(e) => setShowArchived(e.target.checked)}
+                    />
+                    显示已归档
+                  </label>
+                  <button
+                    onClick={() => setSelecting(true)}
+                    className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                  >
+                    选择
+                  </button>
+                </div>
+              </>
+            )}
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             {sessionList.map((s) => {
@@ -591,16 +716,26 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               return (
                 <div
                   key={s.sessionId}
-                  onClick={() => openSession(s)}
+                  onClick={() => (selecting ? toggleChecked(s) : openSession(s))}
                   onContextMenu={(e) => {
                     e.preventDefault();
+                    if (selecting) return;
                     setMenu({ x: e.clientX, y: e.clientY, kind: "session", session: s });
                   }}
                   className={`group border-b border-hairline px-4 py-2.5 text-sm ${
-                    clickable ? "cursor-pointer hover:bg-white/5" : "opacity-60"
+                    selecting || clickable ? "cursor-pointer hover:bg-white/5" : "opacity-60"
                   }`}
                 >
                   <div className="flex items-center gap-1.5">
+                    {selecting && (
+                      <input
+                        type="checkbox"
+                        checked={checked.has(skey(s))}
+                        onChange={() => toggleChecked(s)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="mr-1 shrink-0"
+                      />
+                    )}
                     {s.pinned && <span title="已保留">⚑</span>}
                     <span className="truncate font-medium text-l1">{sessionTitle(s)}</span>
                     {(s.live || liveSessions[s.sessionId]) && (
@@ -653,7 +788,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       </span>
                     ))}
                   </div>
-                  <div className="mt-1 hidden gap-3 text-xs group-hover:flex">
+                  <div className={`mt-1 gap-3 text-xs ${selecting ? "hidden" : "hidden group-hover:flex"}`}>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

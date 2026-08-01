@@ -372,6 +372,22 @@ function ProfileModal({
   );
 }
 
+/** 分组折叠状态持久化的 localStorage key：值为折叠中的 agent id 数组 */
+const COLLAPSED_KEY = "ccode.profiles.collapsed";
+
+/** 读取已持久化的折叠分组；无记录（首次使用）或数据损坏时返回空集（全部展开） */
+function loadCollapsedGroups(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_KEY);
+    if (!raw) return new Set();
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return new Set();
+    return new Set(arr.filter((x): x is string => typeof x === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
 interface AgentCmdResult {
   ok: boolean;
   output: string;
@@ -458,8 +474,21 @@ export default function ProfilesPage() {
   // 过滤条：按安装状态过滤 agent 组；按名称/端点/模型过滤配置行
   const [statusFilter, setStatusFilter] = useState<"all" | "installed" | "uninstalled">("all");
   const [search, setSearch] = useState("");
-  // 组展开状态：默认「有配置展开 / 无配置收起」，手动点击后取反
-  const [toggledGroups, setToggledGroups] = useState<Set<string>>(new Set());
+  // 组折叠状态：首次使用默认全部展开，手动折叠后持久化到 localStorage
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(loadCollapsedGroups);
+
+  /** 更新折叠集合并同步写入 localStorage */
+  function updateCollapsed(updater: (prev: Set<string>) => Set<string>) {
+    setCollapsedGroups((prev) => {
+      const next = updater(prev);
+      try {
+        localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...next]));
+      } catch {
+        // 存储不可用时静默降级为仅本次会话生效
+      }
+      return next;
+    });
+  }
   const [globalBackups, setGlobalBackups] = useState<Record<string, boolean>>({});
   // 各 agent 的升级/安装进行态、实时输出与最近结果（可并发操作多个 agent）
   const [updating, setUpdating] = useState<Record<string, boolean>>({});
@@ -661,6 +690,8 @@ export default function ProfilesPage() {
     if (statusFilter === "uninstalled") return !installed;
     return true;
   });
+  // 可见分组中存在展开项 → 按钮显示「全部折叠」，否则「全部展开」
+  const anyExpanded = visibleAgents.some((a) => !collapsedGroups.has(a.id));
 
   return (
     <div className="min-h-full bg-pg">
@@ -718,6 +749,22 @@ export default function ProfilesPage() {
                 {label}
               </button>
             ))}
+            <button
+              onClick={() =>
+                updateCollapsed((prev) => {
+                  const next = new Set(prev);
+                  if (anyExpanded) {
+                    for (const a of visibleAgents) next.add(a.id);
+                  } else {
+                    for (const a of visibleAgents) next.delete(a.id);
+                  }
+                  return next;
+                })
+              }
+              className="ml-2 flex h-7 items-center rounded px-2 text-xs text-pl2 hover:bg-white/5 hover:text-pl1"
+            >
+              {anyExpanded ? "全部折叠" : "全部展开"}
+            </button>
           </div>
           <input
             value={search}
@@ -735,17 +782,14 @@ export default function ProfilesPage() {
             const det = agents.find((a) => a.id === agent.id);
             const list = profiles.filter((p) => p.agent === agent.id && matchProfile(p));
             if (q && list.length === 0) return null;
-            const defaultCollapsed = profiles.filter((p) => p.agent === agent.id).length === 0;
-            const isCollapsed = toggledGroups.has(agent.id)
-              ? !defaultCollapsed
-              : defaultCollapsed;
+            const isCollapsed = collapsedGroups.has(agent.id);
             return (
               <section key={agent.id} className="mb-8">
                 {/* 组头 48px */}
                 <div className="flex h-12 items-center gap-2 rounded-t bg-grp px-3">
                   <button
                     onClick={() =>
-                      setToggledGroups((prev) => {
+                      updateCollapsed((prev) => {
                         const next = new Set(prev);
                         if (next.has(agent.id)) next.delete(agent.id);
                         else next.add(agent.id);

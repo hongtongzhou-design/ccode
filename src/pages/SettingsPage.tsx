@@ -23,6 +23,37 @@ const THEMES = [
 const field =
   "rounded border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none focus:border-l4";
 
+/** 分区折叠状态在 localStorage 的键（只记被折叠的分区，默认全部展开） */
+const SECTIONS_KEY = "ccode.settings.sections";
+
+/** 可折叠分区：标题行整行可点（高 32px），▸/▾ 指示展开状态 */
+function Section({
+  title,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="mt-4 first:mt-0">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="flex h-8 w-full items-center gap-1.5 rounded px-1 text-left text-sm font-medium text-l1 hover:bg-white/5"
+      >
+        <span className="w-3 text-xs text-l4">{open ? "▾" : "▸"}</span>
+        {title}
+      </button>
+      {open && <div>{children}</div>}
+    </section>
+  );
+}
+
 function Row({
   label,
   hint,
@@ -58,6 +89,23 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [pricing, setPricing] = useState("");
   const [pricingDirty, setPricingDirty] = useState(false);
   const [savingPricing, setSavingPricing] = useState(false);
+  // 分区折叠状态：默认全部展开，切换时写 localStorage
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(SECTIONS_KEY) ?? "{}");
+    } catch {
+      return {};
+    }
+  });
+  function toggleSection(id: string) {
+    setCollapsed((prev) => {
+      const next = { ...prev, [id]: !prev[id] };
+      try {
+        localStorage.setItem(SECTIONS_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }
 
   useEffect(() => {
     if (visible) {
@@ -132,6 +180,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 
+      <Section title="外观" open={!collapsed.appearance} onToggle={() => toggleSection("appearance")}>
       {/* 主题 */}
       <div className="border-b border-hairline py-3">
         <div className="mb-2 text-sm text-l2">主题</div>
@@ -250,7 +299,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           }
         />
       </Row>
+      </Section>
 
+      <Section title="统计" open={!collapsed.stats} onToggle={() => toggleSection("stats")}>
       <Row label="汇率（USD→CNY）" hint="统计页下次查询生效">
         <input
           type="number"
@@ -264,29 +315,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             e.key === "Enter" && commitNumber(rate, 0, 100, (n) => patch({ rateUsdCny: n }))
           }
         />
-      </Row>
-
-      <Row label="brew 镜像" hint="安装/更新走清华 TUNA 镜像">
-        <input
-          type="checkbox"
-          checked={settings?.brewMirror ?? false}
-          onChange={(e) => patch({ brewMirror: e.target.checked })}
-        />
-      </Row>
-
-      <Row label="AI 专用配置" hint="◈ 生成（提交信息/摘要/PR）固定走此配置，建议选快模型；默认自动=最近使用">
-        <select
-          className={field}
-          value={settings?.aiProfileId ?? ""}
-          onChange={(e) => patch({ aiProfileId: e.target.value })}
-        >
-          <option value="">自动（最近使用）</option>
-          {profiles.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}（{p.agent}{p.models[0] ? ` · ${p.models[0]}` : ""}）
-            </option>
-          ))}
-        </select>
       </Row>
 
       {/* 自定义定价 */}
@@ -312,6 +340,32 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           }}
         />
       </div>
+      </Section>
+
+      <Section title="集成" open={!collapsed.integration} onToggle={() => toggleSection("integration")}>
+      <Row label="brew 镜像" hint="安装/更新走清华 TUNA 镜像">
+        <input
+          type="checkbox"
+          checked={settings?.brewMirror ?? false}
+          onChange={(e) => patch({ brewMirror: e.target.checked })}
+        />
+      </Row>
+
+      <Row label="AI 专用配置" hint="◈ 生成（提交信息/摘要/PR）固定走此配置，建议选快模型；默认自动=最近使用">
+        <select
+          className={field}
+          value={settings?.aiProfileId ?? ""}
+          onChange={(e) => patch({ aiProfileId: e.target.value })}
+        >
+          <option value="">自动（最近使用）</option>
+          {profiles.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}（{p.agent}{p.models[0] ? ` · ${p.models[0]}` : ""}）
+            </option>
+          ))}
+        </select>
+      </Row>
+      </Section>
     </div>
   );
 }

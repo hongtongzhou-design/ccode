@@ -57,28 +57,28 @@ const field =
   "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
 function NewWorkspaceModal({
+  repos,
+  reposLoading,
   onClose,
   onCreated,
 }: {
+  /** 页面级预热的候选仓库（后端聚合的会话目录，已过滤为真实存在的 git 仓库） */
+  repos: RepoDto[];
+  reposLoading: boolean;
   onClose: () => void;
   onCreated: (ws: WorkspaceDto) => void;
 }) {
-  const [repoOptions, setRepoOptions] = useState<RepoDto[]>([]);
   const [repoChoice, setRepoChoice] = useState("");
   const [customPath, setCustomPath] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
-  // 候选仓库：后端聚合的会话目录，已过滤为真实存在的 git 仓库（排除 home 与 worktree 路径）
+  // 仓库列表由页面预热传入；就绪后默认选中第一个，为空/加载失败兜底手动输入
   useEffect(() => {
-    invoke<RepoDto[]>("list_repos")
-      .then((repos) => {
-        setRepoOptions(repos);
-        setRepoChoice((c) => c || repos[0]?.path || "__custom__");
-      })
-      .catch(() => setRepoChoice("__custom__"));
-  }, []);
+    if (reposLoading) return;
+    setRepoChoice((c) => c || repos[0]?.path || "__custom__");
+  }, [repos, reposLoading]);
 
   const repoPath = repoChoice === "__custom__" ? customPath.trim() : repoChoice;
   const branch = `ccode/${sanitizeBranch(name)}`;
@@ -116,9 +116,11 @@ function NewWorkspaceModal({
           <select
             className={field}
             value={repoChoice}
+            disabled={reposLoading}
             onChange={(e) => setRepoChoice(e.target.value)}
           >
-            {repoOptions.map((r) => (
+            {reposLoading && <option value="">加载仓库列表…</option>}
+            {repos.map((r) => (
               <option key={r.path} value={r.path} title={r.path}>
                 {r.name}（{r.path}）
               </option>
@@ -335,6 +337,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [runMenu, setRunMenu] = useState<{ x: number; y: number; ws: WorkspaceDto } | null>(null);
   const [mergeResults, setMergeResults] = useState<Record<string, { ok: boolean; text: string }>>({});
   const [prModal, setPrModal] = useState<WorkspaceDto | null>(null);
+  // 新建弹窗的仓库候选在页面可见时预热（list_repos 扫描慢，避免弹窗内空等）
+  const [repos, setRepos] = useState<RepoDto[]>([]);
+  const [reposLoading, setReposLoading] = useState(false);
   const openInTerminal = useOpenInTerminal();
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
@@ -424,7 +429,14 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
 
   useEffect(() => {
-    if (visible) void refresh();
+    if (!visible) return;
+    void refresh();
+    // 预热新建弹窗的仓库候选；失败保持空列表，弹窗兜底 __custom__ 手动输入
+    setReposLoading(true);
+    invoke<RepoDto[]>("list_repos")
+      .then(setRepos)
+      .catch(() => {})
+      .finally(() => setReposLoading(false));
   }, [visible]);
 
   async function onArchive(ws: WorkspaceDto) {
@@ -432,6 +444,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       return;
     try {
       await invoke("archive_workspace", { id: ws.id });
+      // 清掉指向该工作区的「已创建」横幅，避免归档后残留
+      setCreated((c) => (c?.id === ws.id ? null : c));
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -456,6 +470,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       return;
     try {
       await invoke("delete_workspace", { id: ws.id });
+      // 清掉指向该工作区的「已创建」横幅，避免删除后残留
+      setCreated((c) => (c?.id === ws.id ? null : c));
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -520,6 +536,13 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             className="ml-auto shrink-0 rounded border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110"
           >
             打开终端
+          </button>
+          <button
+            onClick={() => setCreated(null)}
+            aria-label="关闭"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-ok-text hover:bg-white/10"
+          >
+            ×
           </button>
         </div>
       )}
@@ -709,6 +732,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       )}
       {modal && (
         <NewWorkspaceModal
+          repos={repos}
+          reposLoading={reposLoading}
           onClose={() => setModal(false)}
           onCreated={(ws) => {
             setModal(false);
