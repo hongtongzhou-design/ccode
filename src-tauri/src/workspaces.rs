@@ -69,7 +69,7 @@ fn db_at(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-fn db() -> Result<Connection, String> {
+pub(crate) fn db() -> Result<Connection, String> {
     db_at(&app_db_path()?)
 }
 
@@ -131,7 +131,7 @@ fn query_workspaces(conn: &Connection) -> Result<Vec<WorkspaceDto>, String> {
     Ok(rows.flatten().collect())
 }
 
-fn get_workspace(conn: &Connection, id: &str) -> Result<WorkspaceDto, String> {
+pub(crate) fn get_workspace(conn: &Connection, id: &str) -> Result<WorkspaceDto, String> {
     query_workspaces(conn)?
         .into_iter()
         .find(|w| w.id == id)
@@ -166,7 +166,7 @@ pub(crate) fn worktree_rows() -> Vec<WorktreeRow> {
 
 // ===== git 调用（参数数组 + 超时；输出走管道防阻塞） =====
 
-fn run_git(repo: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
+pub(crate) fn run_git(repo: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(repo)
@@ -534,7 +534,7 @@ pub struct WsHealthDto {
 }
 
 /// 优先 origin/<base>（与远端同步的基准），不存在用本地分支
-fn base_ref(repo: &Path, base: &str) -> String {
+pub(crate) fn base_ref(repo: &Path, base: &str) -> String {
     if run_git(
         repo,
         &["rev-parse", "--verify", "--quiet", &format!("origin/{base}")],

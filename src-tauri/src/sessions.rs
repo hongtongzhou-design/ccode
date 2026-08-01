@@ -41,6 +41,9 @@ pub struct SessionMetaDto {
     pub chain_count: usize,
     /// 会话发生在任务工作区（git worktree）里时的工作区名（§6.10）；project_path 同时改写为真实仓库
     pub workspace: Option<String>,
+    /// AI 生成的会话摘要（session_meta.summary 列）
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -342,6 +345,7 @@ fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         alive,
         chain_count: 1,
         workspace: None,
+        summary: None,
     })
 }
 
@@ -573,6 +577,7 @@ fn codex_file_meta(
             alive,
             chain_count: 1,
             workspace: None,
+            summary: None,
         },
         forked_from_id,
     ))
@@ -841,6 +846,7 @@ fn gemini_file_meta(
         alive,
         chain_count: 1,
         workspace: None,
+        summary: None,
     })
 }
 
@@ -1040,6 +1046,7 @@ fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMet
         alive,
         chain_count: 1,
         workspace: None,
+        summary: None,
     })
 }
 
@@ -1255,6 +1262,7 @@ fn kimi_wire_file_meta(
         alive,
         chain_count: 1,
         workspace: None,
+        summary: None,
     })
 }
 
@@ -1509,6 +1517,7 @@ fn kimi_legacy_file_meta(
         alive,
         chain_count: 1,
         workspace: None,
+        summary: None,
     })
 }
 
@@ -1750,6 +1759,7 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             alive: true, // 行在即在
             chain_count: 1,
             workspace: None,
+            summary: None,
         });
     }
     out
@@ -2085,6 +2095,7 @@ fn opencode_scan_legacy(storage: &Path) -> Vec<SessionMetaDto> {
             alive: true,
             chain_count: 1,
             workspace: None,
+            summary: None,
         });
     }
     out
@@ -2292,6 +2303,7 @@ pub fn scan_sessions() -> ScanResult {
                             alive: false,
                             chain_count: 1,
                             workspace: None,
+                            summary: None,
                         })
                     }),
                     "kimi" => {
@@ -2496,7 +2508,15 @@ pub(crate) fn open_db() -> Result<Connection, String> {
           PRIMARY KEY(agent, session_id));",
     )
     .map_err(|e| format!("初始化 session_meta 表失败: {e}"))?;
+    migrate_session_meta(&conn);
     Ok(conn)
+}
+
+/// 老库补列（AI 摘要）：已存在则报错忽略，幂等
+pub(crate) fn migrate_session_meta(conn: &Connection) {
+    for col in ["summary TEXT", "summary_at TEXT"] {
+        let _ = conn.execute_batch(&format!("ALTER TABLE session_meta ADD COLUMN {col}"));
+    }
 }
 
 struct MetaRow {
@@ -2504,12 +2524,13 @@ struct MetaRow {
     archived: bool,
     custom_title: Option<String>,
     tags: Vec<String>,
+    summary: Option<String>,
 }
 
 fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
     let mut map = HashMap::new();
     let Ok(mut stmt) = conn
-        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags FROM session_meta")
+        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary FROM session_meta")
     else {
         return map;
     };
@@ -2521,10 +2542,11 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
             r.get::<_, i64>(3)?,
             r.get::<_, Option<String>>(4)?,
             r.get::<_, String>(5)?,
+            r.get::<_, Option<String>>(6)?,
         ))
     });
     if let Ok(rows) = rows {
-        for (agent, sid, pinned, archived, custom_title, tags) in rows.flatten() {
+        for (agent, sid, pinned, archived, custom_title, tags, summary) in rows.flatten() {
             map.insert(
                 (agent, sid),
                 MetaRow {
@@ -2532,11 +2554,24 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
                     archived: archived != 0,
                     custom_title,
                     tags: serde_json::from_str(&tags).unwrap_or_default(),
+                    summary,
                 },
             );
         }
     }
     map
+}
+
+/// AI 摘要落库（ai_summarize_session 用）
+pub(crate) fn set_session_summary(agent: &str, session_id: &str, summary: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO session_meta(agent, session_id, summary, summary_at) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(agent, session_id) DO UPDATE SET summary=?3, summary_at=?4",
+        params![agent, session_id, summary, now_iso()],
+    )
+    .map_err(|e| format!("写入摘要失败: {e}"))?;
+    Ok(())
 }
 
 // ===== 注意力标记 v1（§6.11）：读尾部 ~64KB 分类最后一个有意义的记录 =====
@@ -2834,6 +2869,7 @@ fn apply_meta(
             s.archived = s.archived || row.archived;
             s.custom_title = row.custom_title.clone();
             s.tags = row.tags.clone();
+            s.summary = row.summary.clone();
         }
     }
 }
@@ -2878,6 +2914,11 @@ pub async fn session_tail_state(agent: String, file_path: String) -> String {
 
 #[tauri::command]
 pub async fn get_session_conversation(agent: String, file_path: String) -> Vec<ChatMessageDto> {
+    conversation_impl(&agent, &file_path)
+}
+
+/// 会话全文解析（get_session_conversation 与 ai_summarize_session 共用）
+pub(crate) fn conversation_impl(agent: &str, file_path: &str) -> Vec<ChatMessageDto> {
     if agent == "opencode" {
         // "<db路径>#<session_id>"：db 在就直接读库；db 不在了读 pin 快照
         if let Some((db, sid)) = file_path.split_once('#') {
@@ -2907,7 +2948,7 @@ pub async fn get_session_conversation(agent: String, file_path: String) -> Vec<C
         return Vec::new();
     };
     let lines = to_lines(&String::from_utf8_lossy(&bytes));
-    match agent.as_str() {
+    match agent {
         "codex" => parse_codex(&lines),
         "gemini" => parse_gemini(&lines),
         "qwen" => parse_qwen(&lines),
@@ -3350,6 +3391,7 @@ mod tests {
                 alive: true,
                 chain_count: 1,
                 workspace: None,
+                summary: None,
             },
             fork.map(String::from),
         )
@@ -3407,6 +3449,7 @@ mod tests {
                 archived: true,
                 custom_title: Some("旧代表上的标题".into()),
                 tags: vec!["重要".into()],
+                summary: None,
             },
         );
         apply_meta(&mut merged, &members, &meta);
@@ -3789,6 +3832,40 @@ mod tests {
         assert!(resolve_worktree_project("/home/u/code/myrepo", &rows).is_none());
         assert!(resolve_worktree_project("/home/u/ccode/workspaces/myrepo/feat-xy", &rows).is_none());
         assert!(resolve_worktree_project("/anywhere", &[]).is_none());
+    }
+
+    #[test]
+    fn session_meta_summary_migration_and_merge() {
+        // 模拟旧库：没有 summary/summary_at 列，迁移应幂等补上
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = Connection::open(dir.join("app.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_meta(
+              agent TEXT NOT NULL, session_id TEXT NOT NULL,
+              pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+              custom_title TEXT, tags TEXT NOT NULL DEFAULT '[]',
+              note TEXT, pinned_at TEXT,
+              PRIMARY KEY(agent, session_id));",
+        )
+        .unwrap();
+        migrate_session_meta(&conn);
+        migrate_session_meta(&conn); // 第二次不报错（幂等）
+        conn.execute(
+            "INSERT INTO session_meta(agent, session_id, summary, summary_at)
+             VALUES('codex', 's1', 'AI 摘要内容', '2026-07-30T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let meta = read_all_meta(&conn);
+        let row = meta.get(&("codex".to_string(), "s1".to_string())).unwrap();
+        assert_eq!(row.summary.as_deref(), Some("AI 摘要内容"));
+        // apply_meta 合并进 DTO
+        let (mut merged, _) = merge_codex_chains(vec![codex_meta("s1", "2026-07-03T00:00:00Z", None)]);
+        apply_meta(&mut merged, &HashMap::new(), &meta);
+        assert_eq!(merged[0].summary.as_deref(), Some("AI 摘要内容"));
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ===== OpenCode =====

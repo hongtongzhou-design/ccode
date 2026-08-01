@@ -148,14 +148,14 @@ mod tests {
         merge(
             &mut cur,
             AppSettingsDto {
-                theme: Some("forest".into()),
+                theme: Some("dracula".into()),
                 ..Default::default()
             },
         );
         write_to(&p, &cur).unwrap();
         let full = with_defaults(read_from(&p));
         assert_eq!(full.terminal_font_size, Some(15), "前次写入的字段不被后续 patch 覆盖");
-        assert_eq!(full.theme.as_deref(), Some("forest"));
+        assert_eq!(full.theme.as_deref(), Some("dracula"));
         assert_eq!(full.brew_mirror, Some(true));
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }

@@ -38,7 +38,7 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
-fn run_git(cwd: &str, args: &[&str]) -> Result<Output, String> {
+pub(crate) fn run_git(cwd: &str, args: &[&str]) -> Result<Output, String> {
     Command::new("git")
         .arg("-C")
         .arg(cwd)

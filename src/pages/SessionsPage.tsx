@@ -173,10 +173,34 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         ? `${agentLabel(filter.agent)} · ${basename(filter.path)}`
         : "全部会话";
 
+  const [summary, setSummary] = useState<string | null>(null);
+  const [aiSummarizing, setAiSummarizing] = useState(false);
+
+  /** ✨ AI 摘要：生成/重新生成当前回放会话的摘要块 */
+  async function onSummarize() {
+    if (!selected) return;
+    setAiSummarizing(true);
+    try {
+      const text = await invoke<string>("ai_summarize_session", {
+        agent: selected.agent,
+        sessionId: selected.sessionId,
+        filePath: selected.filePath,
+      });
+      setSummary(text);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAiSummarizing(false);
+    }
+  }
+
   async function openSession(s: SessionMetaDto) {
     // 源文件已删除且无快照，无法回放
     if (!s.alive && !s.pinned) return;
     setSelected(s);
+    // 摘要缓存命中：已有 summary 直接展示，不再调用 AI
+    setSummary(s.summary ?? null);
     setLoadingConv(true);
     setError(null);
     try {
@@ -671,6 +695,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 onClick={() => {
                   setSelected(null);
                   setMessages([]);
+                  setSummary(null);
                 }}
                 className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
               >
@@ -690,6 +715,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 在终端恢复
               </button>
               <button
+                onClick={onSummarize}
+                disabled={aiSummarizing}
+                title="AI 生成会话摘要"
+                className={`shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${
+                  aiSummarizing ? "animate-pulse" : ""
+                }`}
+              >
+                {aiSummarizing ? "✨ 摘要中…" : "✨ 摘要"}
+              </button>
+              <button
                 onClick={() => void togglePin(selected)}
                 className="ml-auto shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
               >
@@ -697,6 +732,12 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               </button>
             </div>
             {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
+            {summary && (
+              <div className="mx-4 mt-2 rounded bg-inset p-3 text-sm text-l2">
+                <span className="mr-1">✨</span>
+                <span className="whitespace-pre-wrap">{summary}</span>
+              </div>
+            )}
             <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-4">
               {loadingConv ? (
                 <p className="text-sm text-l4">加载中…</p>

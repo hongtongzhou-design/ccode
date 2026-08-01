@@ -182,6 +182,22 @@ function PrModal({ ws, onClose }: { ws: WorkspaceDto; onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [prUrl, setPrUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [aiDrafting, setAiDrafting] = useState(false);
+
+  /** ✨ AI 起草 PR 描述：body 为空直接起草；非空先确认覆盖 */
+  async function onDraft() {
+    if (body.trim() && !window.confirm("将用 AI 起草覆盖当前描述，继续？")) return;
+    setAiDrafting(true);
+    setError(null);
+    try {
+      const md = await invoke<string>("ai_draft_pr", { id: ws.id });
+      setBody(md);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAiDrafting(false);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -252,7 +268,20 @@ function PrModal({ ws, onClose }: { ws: WorkspaceDto; onClose: () => void }) {
               />
             </label>
             <label className="mb-4 block text-sm">
-              <span className="mb-1 block text-xs text-l3">描述</span>
+              <span className="mb-1 flex items-center justify-between">
+                <span className="text-xs text-l3">描述</span>
+                <button
+                  type="button"
+                  onClick={onDraft}
+                  disabled={aiDrafting}
+                  title="AI 起草 PR 描述"
+                  className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${
+                    aiDrafting ? "animate-pulse" : ""
+                  }`}
+                >
+                  {aiDrafting ? "✨ 起草中…" : "✨ AI 起草"}
+                </button>
+              </span>
               <textarea
                 className={`${field} h-20`}
                 placeholder="留空自动生成提交摘要"

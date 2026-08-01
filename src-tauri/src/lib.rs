@@ -1,4 +1,5 @@
 mod agents;
+mod ai;
 mod fs_tree;
 mod git_info;
 mod global_config;
@@ -92,6 +93,10 @@ pub fn run() {
             usage::get_usage_stats,
             settings::get_settings,
             settings::update_settings,
+            ai::ai_prompt,
+            ai::ai_commit_message,
+            ai::ai_summarize_session,
+            ai::ai_draft_pr,
             pricing::read_pricing_file,
             pricing::write_pricing_file,
         ])

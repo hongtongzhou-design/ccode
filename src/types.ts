@@ -59,6 +59,8 @@ export interface SessionMetaDto {
   chainCount: number;
   /** 会话发生在任务工作区（git worktree）里时的工作区名；此时 projectPath 已改写为真实仓库 */
   workspace: string | null;
+  /** AI 生成的会话摘要（命中缓存；null = 尚未生成） */
+  summary: string | null;
 }
 
 export interface BlockDto {

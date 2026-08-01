@@ -44,6 +44,21 @@ export default function GitPanel({
   const [message, setMessage] = useState("");
   const [running, setRunning] = useState<"commit" | "push" | null>(null);
   const [output, setOutput] = useState<{ ok: boolean; text: string } | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+
+  /** ✨ AI 生成提交信息：填入输入框由用户审阅后再提交（不自动提交） */
+  async function genMessage() {
+    setAiBusy(true);
+    try {
+      const text = await invoke<string>("ai_commit_message", { cwd });
+      setMessage(text.trim());
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAiBusy(false);
+    }
+  }
 
   const refresh = useCallback(async () => {
     let s: GitStatusDto | null = null;
@@ -189,16 +204,28 @@ export default function GitPanel({
       {/* 提交区 */}
       {status?.isRepo && (
         <div className="shrink-0 border-t border-hairline p-2">
-          <input
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && canCommit) void doCommit(false);
-            }}
-            placeholder="提交信息（Enter 提交）"
-            disabled={running !== null}
-            className="mb-2 w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
-          />
+          <div className="mb-2 flex items-center gap-1.5">
+            <input
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && canCommit) void doCommit(false);
+              }}
+              placeholder="提交信息（Enter 提交）"
+              disabled={running !== null}
+              className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
+            />
+            <button
+              onClick={genMessage}
+              disabled={!hasChanges || aiBusy || running !== null}
+              title="AI 生成提交信息"
+              className={`shrink-0 rounded px-2 py-1.5 text-sm text-l2 hover:bg-white/5 disabled:opacity-50 ${
+                aiBusy ? "animate-pulse" : ""
+              }`}
+            >
+              {aiBusy ? "✨…" : "✨"}
+            </button>
+          </div>
           <div className="flex gap-2">
             <button
               onClick={() => void doCommit(false)}
