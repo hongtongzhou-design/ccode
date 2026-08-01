@@ -86,6 +86,7 @@ function buildXtermTheme(themeId: string) {
 function TerminalView({
   visible,
   rightOpen,
+  layoutKey,
   gitTotals,
   tabId,
   initialCwd,
@@ -108,6 +109,8 @@ function TerminalView({
   visible: boolean;
   /** 右侧面板开关影响 xterm 可用宽度，变化时需要重新 fit */
   rightOpen: boolean;
+  /** 布局版本号（工作树收缩/专注模式等宽度变化时递增，触发 xterm 重新 fit） */
+  layoutKey?: string;
   /** 该标签 cwd 的 git 变更统计（Codex 风：状态行常驻 +N -N） */
   gitTotals?: { add: number; del: number } | null;
   /** 本标签 id（liveSessions 登记用） */
@@ -338,7 +341,7 @@ function TerminalView({
         fitRef.current?.fit();
       } catch {}
     });
-  }, [visible, rightOpen]);
+  }, [visible, rightOpen, layoutKey]);
 
   // 最近项目「真进入」：外部注入的 cwd 落地到启动栏（空闲时），状态上报后父级清空
   useEffect(() => {
@@ -1276,6 +1279,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 <TerminalView
                   visible={tabVisible}
                   rightOpen={rightOpen}
+                  layoutKey={`${railCollapsed}-${focusMode}-${rightOpen}`}
                   gitTotals={t.id === activeId ? gitTotals : null}
                   tabId={t.id}
                   skipSeed={t.skipSeed}
@@ -1345,7 +1349,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               ×
             </button>
           </div>
-          {rightTab === "session" && (
+          <div className={rightTab === "session" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
             <div ref={sessionScrollRef} className="min-h-0 flex-1 overflow-auto p-3">
               {!activeSession?.file ? (
                 <p className="text-sm text-l4">等待会话文件产生…</p>
@@ -1355,9 +1359,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 <ConversationView messages={activeSession.conv} compact />
               )}
             </div>
-          )}
-          {rightTab === "preview" && (
-            <div className="flex min-h-0 flex-1 flex-col">
+          </div>
+          <div className={rightTab === "preview" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
               {preview ? (
                 <FilePreviewEditor
                   path={preview.path}
@@ -1375,7 +1378,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 </div>
               )}
             </div>
-          )}
           {/* 改动面板保持挂载：右栏打开期间持续轮询，页签徽标才有数据 */}
           <div className={rightTab === "git" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
             <GitPanel
