@@ -296,25 +296,9 @@ fn create_impl(
     }
     // 基准分支：origin/HEAD → main/master 候选 → 当前分支
     let base_branch = detect_base_branch(&repo);
-    // best effort：离线/无网络时照常继续，本地引用是旧的无妨
-    let _ = run_git(&repo, &["fetch", "origin", &base_branch], Duration::from_secs(30));
-    // 无远端（origin/<base> 不存在）时从本地分支拉，否则 worktree add 必败
-    let start_point = if run_git(
-        &repo,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("origin/{base_branch}"),
-        ],
-        Duration::from_secs(10),
-    )
-    .is_ok()
-    {
-        format!("origin/{base_branch}")
-    } else {
-        base_branch.clone()
-    };
+    // 起点固定用本地基准分支：工作区应镜像「本地项目现状」，
+    // 含未推送的提交——用 origin/<base> 会把本地未推送的工作丢掉（实测踩坑）
+    let start_point = base_branch.clone();
     let repo_name = repo
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -533,19 +517,10 @@ pub struct WsHealthDto {
     pub ready_to_merge: bool,
 }
 
-/// 优先 origin/<base>（与远端同步的基准），不存在用本地分支
-pub(crate) fn base_ref(repo: &Path, base: &str) -> String {
-    if run_git(
-        repo,
-        &["rev-parse", "--verify", "--quiet", &format!("origin/{base}")],
-        Duration::from_secs(10),
-    )
-    .is_ok()
-    {
-        format!("origin/{base}")
-    } else {
-        base.to_string()
-    }
+/// 基准引用固定用本地分支：与 create_impl 的起点一致（工作区从本地基准拉出，
+/// 评审 diff 也应相对本地基准——用 origin 会把基准分支上未推送的提交误算进任务改动）
+pub(crate) fn base_ref(_repo: &Path, base: &str) -> String {
+    base.to_string()
 }
 
 /// git ≥2.38 的 merge-tree --write-tree：0=干净 1=冲突；只写对象库，不碰工作区/索引/引用
@@ -1000,14 +975,24 @@ mod tests {
         let repo = setup_master_repo(&dir);
 
         assert_eq!(detect_base_branch(&repo), "master");
+        // 本地未推送的提交：工作区必须带上（从本地基准拉，不用 origin）
+        fs::write(repo.join("local-only.txt"), "unpushed").unwrap();
+        sh(&repo, &["add", "local-only.txt"]);
+        sh(&repo, &["commit", "-m", "local only"]);
         let w = create_impl(&conn, &ws_root, repo.to_str().unwrap(), "on-master").unwrap();
         assert_eq!(w.base_branch, "master");
         assert_eq!(w.branch, "ccode/on-master");
         assert!(Path::new(&w.worktree_path).join("README.md").exists());
-        // worktree 是从 origin/master 拉出来的
+        assert!(
+            Path::new(&w.worktree_path).join("local-only.txt").exists(),
+            "未推送的本地提交必须出现在工作区"
+        );
+        // worktree 从本地 master 拉出（此时领先 origin/master 一个提交）
         let start = run_git(&repo, &["rev-parse", "ccode/on-master"], Duration::from_secs(10)).unwrap();
-        let base = run_git(&repo, &["rev-parse", "origin/master"], Duration::from_secs(10)).unwrap();
-        assert_eq!(start, base);
+        let local = run_git(&repo, &["rev-parse", "master"], Duration::from_secs(10)).unwrap();
+        let origin = run_git(&repo, &["rev-parse", "origin/master"], Duration::from_secs(10)).unwrap();
+        assert_eq!(start, local);
+        assert_ne!(start, origin);
 
         let _ = delete_impl(&conn, &w.id);
         let _ = run_git(&repo, &["worktree", "prune"], Duration::from_secs(10));

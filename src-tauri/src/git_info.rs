@@ -329,15 +329,9 @@ fn workspace_diff_with_rows(
     }) else {
         return Ok(WorkspaceDiffDto::default());
     };
-    // 与 §6.10 生命周期一致：基准引用优先 origin/<base>
-    let base_ref = if run_git(&wt, &["rev-parse", "--verify", "--quiet", &format!("origin/{}", row.base_branch)])
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        format!("origin/{}", row.base_branch)
-    } else {
-        row.base_branch.clone()
-    };
+    // 与 §6.10 生命周期一致：基准固定为本地分支（worktree 即从本地基准拉出，
+    // 用 origin 会把基准上未推送的提交误算进任务改动）
+    let base_ref = row.base_branch.clone();
     let mb = run_git(&wt, &["merge-base", &base_ref, "HEAD"])?;
     if !mb.status.success() {
         return Err(output_tail(&mb));
