@@ -199,6 +199,8 @@ export interface UsageStatsDto {
   byAgent: AgentUsageDto[];
   byProject: ProjectUsageDto[];
   byModel: ModelUsageDto[];
+  /** 美元→人民币汇率（官方价换算用，默认 7.2） */
+  rateUsdCny: number;
 }
 
 export const AGENTS = [

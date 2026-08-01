@@ -65,7 +65,7 @@ function App() {
         <div className={page === "skills" ? "h-full" : "hidden"}>
           <SkillsPage visible={page === "skills"} />
         </div>
-        <div className={page === "stats" ? "h-full" : "hidden"}>
+        <div className={page === "stats" ? "h-full overflow-auto" : "hidden"}>
           <StatsPage visible={page === "stats"} />
         </div>
       </main>

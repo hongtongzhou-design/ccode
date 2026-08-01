@@ -19,8 +19,9 @@ function compact(n: number): string {
   return String(n);
 }
 
-function fmtCost(c: number | null): string {
-  return c == null ? "~" : `$${c.toFixed(2)}`;
+function fmtCost(c: number | null, currency: "$" | "¥", rate: number): string {
+  if (c == null) return "~";
+  return currency === "¥" ? `¥${(c * rate).toFixed(2)}` : `$${c.toFixed(2)}`;
 }
 
 function basename(p: string): string {
@@ -32,6 +33,9 @@ const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
 export default function StatsPage({ visible }: { visible: boolean }) {
   const [range, setRange] = useState<Range>("week");
+  const [currency, setCurrency] = useState<"$" | "¥">(
+    () => (localStorage.getItem("ccode.statsCurrency") as "$" | "¥") || "$",
+  );
   const [stats, setStats] = useState<UsageStatsDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -80,13 +84,27 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     stats.byModel.length === 0 &&
     stats.cards.sessions === 0;
   const maxAgentTokens = Math.max(1, ...(stats?.byAgent.map((a) => a.tokens) ?? [1]));
+  const rate = stats?.rateUsdCny ?? 7.2;
   const th = "px-2 py-1.5 text-left text-xs font-normal text-l4";
 
+  function toggleCurrency() {
+    const next = currency === "$" ? "¥" : "$";
+    setCurrency(next);
+    localStorage.setItem("ccode.statsCurrency", next);
+  }
+
   return (
-    <div className="mx-auto max-w-3xl p-6">
+    <div className="mx-auto min-h-full max-w-3xl bg-canvas p-6">
       <div className="mb-5 flex items-center justify-between">
         <h1 className="text-lg font-semibold text-l1">用量统计</h1>
         <div className="flex items-center gap-2">
+          <button
+            onClick={toggleCurrency}
+            title="切换货币（$ 美元 / ¥ 人民币，按官方价换算）"
+            className="w-7 rounded px-1 py-1 text-xs text-l3 hover:text-l1"
+          >
+            {currency}
+          </button>
           <div className="flex gap-1">
             {RANGES.map((r) => (
               <button
@@ -149,7 +167,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                 {compact(stats.cards.sessions)}
               </div>
               <div className="mt-0.5 text-xs text-l4">
-                估算费用 {fmtCost(stats.cards.costUsd)}
+                估算费用（官方价） {fmtCost(stats.cards.costUsd, currency, rate)}
               </div>
             </div>
           </div>
@@ -172,7 +190,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                       {compact(a.tokens)}
                     </span>
                     <span className="w-14 shrink-0 text-right text-xs text-l3">
-                      {fmtCost(a.costUsd)}
+                      {fmtCost(a.costUsd, currency, rate)}
                     </span>
                   </li>
                 ))}
@@ -190,7 +208,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                     <th className={th}>项目</th>
                     <th className={`${th} text-right`}>会话数</th>
                     <th className={`${th} text-right`}>tokens</th>
-                    <th className={`${th} text-right`}>费用</th>
+                    <th className={`${th} text-right`}>费用(官方价)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -204,7 +222,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                         {compact(p.tokens)}
                       </td>
                       <td className="px-2 py-2 text-right text-xs text-l3">
-                        {fmtCost(p.costUsd)}
+                        {fmtCost(p.costUsd, currency, rate)}
                       </td>
                     </tr>
                   ))}
@@ -223,7 +241,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                     <th className={th}>模型</th>
                     <th className={`${th} text-right`}>输入</th>
                     <th className={`${th} text-right`}>输出</th>
-                    <th className={`${th} text-right`}>费用</th>
+                    <th className={`${th} text-right`}>费用(官方价)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -239,7 +257,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                         {compact(m.output)}
                       </td>
                       <td className="px-2 py-2 text-right text-xs text-l3">
-                        {fmtCost(m.costUsd)}
+                        {fmtCost(m.costUsd, currency, rate)}
                       </td>
                     </tr>
                   ))}
@@ -247,6 +265,9 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               </table>
             </section>
           )}
+          <p className="mt-6 text-xs text-l4">
+            按模型官方公开价估算，非中转实际账单
+          </p>
         </>
       )}
     </div>

@@ -419,18 +419,45 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
 
 // ===== 定价 =====
 
-/// 内置前缀价目（美元 / 每百万 token）；最长前缀匹配（gpt-5-codex 优先于 gpt-5）
-const BUILTIN_PRICING: [(&str, (f64, f64)); 9] = [
+/// 内置前缀价目（美元 / 每百万 token）；最长前缀匹配（gpt-5-codex 优先于 gpt-5、
+/// grok-4.1-fast 优先于 grok-4、qwen3-coder 优先于 qwen3）
+const BUILTIN_PRICING: [(&str, (f64, f64)); 23] = [
     ("claude-opus", (15.0, 75.0)),
     ("claude-sonnet", (3.0, 15.0)),
     ("claude-haiku", (0.8, 4.0)),
     ("gpt-5-codex", (1.25, 10.0)),
     ("gpt-5", (1.25, 10.0)),
+    ("kimi-k3", (0.6, 3.0)),
     ("kimi-k2", (0.6, 2.5)),
+    ("moonshot", (0.6, 3.0)),
+    ("gemini-3.6-flash", (0.3, 2.5)),
+    ("gemini-3-pro", (2.0, 12.0)),
+    ("gemini-3-flash", (0.3, 2.5)),
     ("gemini-2.5-pro", (1.25, 10.0)),
     ("gemini-2.5-flash", (0.3, 2.5)),
+    ("grok-4.1-fast", (0.2, 0.5)),
+    ("grok-4", (3.0, 15.0)),
+    ("grok-3-mini", (0.3, 0.5)),
+    ("grok-3", (3.0, 15.0)),
+    ("grok-code-fast", (0.2, 1.5)),
+    ("glm-4.6", (0.6, 2.2)),
+    ("glm-4.5", (0.6, 2.2)),
+    ("qwen3-coder", (0.5, 2.0)),
+    ("qwen3", (0.5, 2.0)),
     ("deepseek", (0.27, 1.1)),
 ];
+
+/// pricing.json 的 "_rate" 键覆盖 USD→CNY 汇率
+const DEFAULT_RATE_USD_CNY: f64 = 7.2;
+
+fn load_rate(override_path: Option<&Path>) -> f64 {
+    override_path
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|v| v.get("_rate").and_then(|r| r.as_f64()))
+        .filter(|r| *r > 0.0)
+        .unwrap_or(DEFAULT_RATE_USD_CNY)
+}
 
 fn load_pricing(override_path: Option<&Path>) -> Vec<(String, (f64, f64))> {
     let mut table: Vec<(String, (f64, f64))> = BUILTIN_PRICING
@@ -625,6 +652,7 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
         by_agent: agent_rows,
         by_project: project_rows,
         by_model: model_rows,
+        rate_usd_cny: load_rate(pricing_path.as_deref()),
     })
 }
 
@@ -681,6 +709,8 @@ pub struct UsageStatsDto {
     pub by_agent: Vec<UsageAgentRowDto>,
     pub by_project: Vec<UsageProjectRowDto>,
     pub by_model: Vec<UsageModelRowDto>,
+    /// USD→CNY 汇率（pricing.json 的 "_rate" 可覆盖，默认 7.2）
+    pub rate_usd_cny: f64,
 }
 
 #[tauri::command]
@@ -758,6 +788,31 @@ mod tests {
         assert_eq!(price_of("claude-sonnet-4-5", &table), Some((3.0, 15.0)));
         assert_eq!(price_of("some-relay-model", &table), None);
         assert_eq!(price_of("", &table), None, "未知模型无价格");
+        // 扩充的中转/聚合模型走官方价
+        assert_eq!(price_of("grok-4.5", &table), Some((3.0, 15.0)), "grok-4 前缀");
+        assert_eq!(price_of("grok-4.1-fast-mini", &table), Some((0.2, 0.5)), "更长前缀优先于 grok-4");
+        assert_eq!(price_of("grok-3-mini-128k", &table), Some((0.3, 0.5)));
+        assert_eq!(price_of("grok-code-fast-1", &table), Some((0.2, 1.5)));
+        assert_eq!(price_of("glm-4.6-air", &table), Some((0.6, 2.2)));
+        assert_eq!(price_of("qwen3-coder-plus", &table), Some((0.5, 2.0)), "qwen3-coder 优先于 qwen3");
+        assert_eq!(price_of("qwen3-max", &table), Some((0.5, 2.0)));
+        assert_eq!(price_of("moonshot-v1-8k", &table), Some((0.6, 3.0)));
+        assert_eq!(price_of("gemini-3-pro-preview", &table), Some((2.0, 12.0)));
+        assert_eq!(price_of("gemini-3.6-flash-lite", &table), Some((0.3, 2.5)));
+        assert_eq!(price_of("gemini-2.5-pro", &table), Some((1.25, 10.0)), "旧条目保留");
+    }
+
+    #[test]
+    fn rate_default_and_override() {
+        assert_eq!(load_rate(None), 7.2);
+        let dir = std::env::temp_dir().join(format!("ccode-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("pricing.json");
+        std::fs::write(&p, r#"{"_rate": 7.05, "claude-sonnet": [1.0, 5.0]}"#).unwrap();
+        assert_eq!(load_rate(Some(&p)), 7.05, "_rate 键覆盖默认汇率");
+        std::fs::write(&p, r#"{"_rate": -1}"#).unwrap();
+        assert_eq!(load_rate(Some(&p)), 7.2, "非法汇率回落默认");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
