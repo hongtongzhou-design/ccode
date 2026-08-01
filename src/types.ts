@@ -154,6 +154,8 @@ export interface SkillDto {
   repo: string | null;
   apps: Record<string, boolean>;
   installedAt: string;
+  /** 用户自定义分类（null = 未分类） */
+  category: string | null;
 }
 
 /** 未被纳管的已发现技能（各 agent 目录里已存在但不在库中） */

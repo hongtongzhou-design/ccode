@@ -357,6 +357,19 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  async function onSetCategory(skill: SkillDto) {
+    const input = window.prompt(
+      "设置分类（留空归为未分类）：",
+      skill.category ?? "",
+    );
+    if (input === null) return;
+    await invoke("set_skill_category", {
+      id: skill.id,
+      category: input.trim() || null,
+    }).catch((e) => setError(String(e)));
+    await refresh();
+  }
+
   async function onView(skill: SkillDto) {
     try {
       const content = await invoke<string>("read_skill_md", { id: skill.id });
@@ -444,8 +457,18 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           {skills.length === 0 ? (
             <p className="py-8 text-sm text-l4">还没有技能，点右上角导入</p>
           ) : (
-            <ul className="divide-y divide-hairline">
-              {skills.map((s) => (
+            [...new Set(skills.map((s) => s.category ?? "未分类"))].map((cat) => (
+              <div key={cat}>
+                <div className="mt-4 mb-1 flex items-center gap-2 px-1 text-xs font-medium text-l3">
+                  {cat}
+                  <span className="text-l4">
+                    {skills.filter((s) => (s.category ?? "未分类") === cat).length}
+                  </span>
+                </div>
+                <ul className="divide-y divide-hairline">
+                  {skills
+                    .filter((s) => (s.category ?? "未分类") === cat)
+                    .map((s) => (
                 <li key={s.id} className="py-2.5 text-sm">
                   <div className="flex items-center gap-3">
                     <span className="shrink-0 font-medium text-l1">{s.name}</span>
@@ -462,6 +485,13 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                       {SOURCE_LABEL[s.source] ?? s.source}
                       {s.repo ? ` · ${s.repo}` : ""}
                     </span>
+                    <button
+                      onClick={() => onSetCategory(s)}
+                      title="点击设置分类"
+                      className="shrink-0 rounded border border-field px-1.5 py-0.5 text-xs text-l3 hover:text-l1"
+                    >
+                      {s.category ?? "未分类"}
+                    </button>
                     <span className="ml-auto flex shrink-0 items-center gap-1">
                       <button onClick={() => onView(s)} className="rounded px-2 py-0.5 text-xs text-l2 hover:text-l1">
                         查看
@@ -502,9 +532,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                       );
                     })}
                   </div>
-                </li>
-              ))}
-            </ul>
+                    </li>
+                    ))}
+                </ul>
+              </div>
+            ))
           )}
         </div>
       </div>

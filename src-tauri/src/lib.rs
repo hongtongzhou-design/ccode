@@ -78,6 +78,7 @@ pub fn run() {
             workspaces::list_repos,
             ws_settings::workspace_settings,
             skills::list_skills,
+            skills::set_skill_category,
             skills::apply_skill,
             skills::delete_skill,
             skills::import_skills_from_dir,

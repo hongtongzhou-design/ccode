@@ -25,6 +25,9 @@ pub struct SkillDto {
     #[serde(default)]
     pub apps: HashMap<String, bool>,
     pub installed_at: String,
+    /// 用户自定义分类（None = 未分类）
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +104,7 @@ fn new_skill(name: String, description: Option<String>, source: &str, repo: Opti
         repo,
         apps,
         installed_at: crate::sessions::now_iso(),
+        category: None,
     }
 }
 
@@ -485,6 +489,24 @@ fn export_impl(store: &SkillStore, ids: &[String], dest_path: &str) -> Result<St
 }
 
 // ===== Tauri commands =====
+
+#[tauri::command]
+pub async fn set_skill_category(id: String, category: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = SkillStore::default_paths()?;
+        let mut skills = store.read();
+        let s = skills
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| format!("技能不存在: {id}"))?;
+        s.category = category
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| c.trim().to_string());
+        store.write(&skills)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
 #[tauri::command]
 pub async fn list_skills() -> Vec<SkillDto> {
