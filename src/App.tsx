@@ -10,7 +10,7 @@ import WorkspacesPage from "./pages/WorkspacesPage";
 import { useAppStore } from "./store";
 
 const NAV: { id: string; label: string; icon: string }[] = [
-  { id: "profiles", label: "配置", icon: "🔌" },
+  { id: "profiles", label: "配置", icon: "⇄" },
   { id: "workspaces", label: "工作区", icon: "⛁" },
   { id: "terminal", label: "终端", icon: "⌨" },
   { id: "sessions", label: "会话", icon: "◔" },

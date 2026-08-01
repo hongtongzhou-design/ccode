@@ -317,6 +317,15 @@ function DiscoverModal({
 
 export default function SkillsPage({ visible }: { visible: boolean }) {
   const [skills, setSkills] = useState<SkillDto[]>([]);
+  const [catCollapsed, setCatCollapsed] = useState<Set<string>>(new Set());
+  function toggleCat(cat: string) {
+    setCatCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat);
+      else next.add(cat);
+      return next;
+    });
+  }
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [modal, setModal] = useState<"import" | "discover" | null>(null);
@@ -459,13 +468,19 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           ) : (
             [...new Set(skills.map((s) => s.category ?? "未分类"))].map((cat) => (
               <div key={cat}>
-                <div className="mt-4 mb-1 flex items-center gap-2 px-1 text-xs font-medium text-l3">
+                <button
+                  onClick={() => toggleCat(cat)}
+                  className="mt-4 mb-1 flex items-center gap-1.5 px-1 text-xs font-medium text-l3 hover:text-l1"
+                >
+                  <span className="inline-flex h-5 w-5 items-center justify-center rounded text-l4 hover:bg-white/5">
+                    {catCollapsed.has(cat) ? "▸" : "▾"}
+                  </span>
                   {cat}
                   <span className="text-l4">
                     {skills.filter((s) => (s.category ?? "未分类") === cat).length}
                   </span>
-                </div>
-                <ul className="divide-y divide-hairline">
+                </button>
+                <ul className={`divide-y divide-hairline ${catCollapsed.has(cat) ? "hidden" : ""}`}>
                   {skills
                     .filter((s) => (s.category ?? "未分类") === cat)
                     .map((s) => (
