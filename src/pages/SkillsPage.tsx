@@ -500,14 +500,14 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                       {SOURCE_LABEL[s.source] ?? s.source}
                       {s.repo ? ` · ${s.repo}` : ""}
                     </span>
-                    <button
-                      onClick={() => onSetCategory(s)}
-                      title="点击设置分类"
-                      className="shrink-0 rounded border border-field px-1.5 py-0.5 text-xs text-l3 hover:text-l1"
-                    >
-                      {s.category ?? "未分类"}
-                    </button>
                     <span className="ml-auto flex shrink-0 items-center gap-1">
+                      <button
+                        onClick={() => onSetCategory(s)}
+                        title="设置该技能的分类"
+                        className="rounded px-2 py-0.5 text-xs text-l3 hover:text-l1"
+                      >
+                        分类: {s.category ?? "未分类"}
+                      </button>
                       <button onClick={() => onView(s)} className="rounded px-2 py-0.5 text-xs text-l2 hover:text-l1">
                         查看
                       </button>
