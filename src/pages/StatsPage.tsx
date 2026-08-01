@@ -19,9 +19,17 @@ function compact(n: number): string {
   return String(n);
 }
 
-function fmtCost(c: number | null, currency: "$" | "¥", rate: number): string {
+function fmtCost(
+  c: number | null,
+  currency: "$" | "¥",
+  rate: number,
+  partial: boolean,
+): string {
   if (c == null) return "~";
-  return currency === "¥" ? `¥${(c * rate).toFixed(2)}` : `$${c.toFixed(2)}`;
+  const prefix = partial ? "≥" : "";
+  return currency === "¥"
+    ? `${prefix}¥${(c * rate).toFixed(2)}`
+    : `${prefix}$${c.toFixed(2)}`;
 }
 
 function basename(p: string): string {
@@ -167,7 +175,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                 {compact(stats.cards.sessions)}
               </div>
               <div className="mt-0.5 text-xs text-l4">
-                估算费用（官方价） {fmtCost(stats.cards.costUsd, currency, rate)}
+                估算费用（官方价）{" "}
+                {fmtCost(stats.cards.costUsd, currency, rate, stats.cards.costPartial)}
               </div>
             </div>
           </div>
@@ -190,7 +199,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                       {compact(a.tokens)}
                     </span>
                     <span className="w-14 shrink-0 text-right text-xs text-l3">
-                      {fmtCost(a.costUsd, currency, rate)}
+                      {fmtCost(a.costUsd, currency, rate, a.costPartial)}
                     </span>
                   </li>
                 ))}
@@ -222,7 +231,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                         {compact(p.tokens)}
                       </td>
                       <td className="px-2 py-2 text-right text-xs text-l3">
-                        {fmtCost(p.costUsd, currency, rate)}
+                        {fmtCost(p.costUsd, currency, rate, p.costPartial)}
                       </td>
                     </tr>
                   ))}
@@ -257,7 +266,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                         {compact(m.output)}
                       </td>
                       <td className="px-2 py-2 text-right text-xs text-l3">
-                        {fmtCost(m.costUsd, currency, rate)}
+                        {fmtCost(m.costUsd, currency, rate, m.costPartial)}
                       </td>
                     </tr>
                   ))}
@@ -266,7 +275,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
             </section>
           )}
           <p className="mt-6 text-xs text-l4">
-            按模型官方公开价估算，非中转实际账单
+            按模型官方公开价估算，非中转实际账单；≥ 表示另含未计价模型的用量
           </p>
         </>
       )}

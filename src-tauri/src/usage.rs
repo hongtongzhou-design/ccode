@@ -421,16 +421,19 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
 
 /// 内置前缀价目（美元 / 每百万 token）；最长前缀匹配（gpt-5-codex 优先于 gpt-5、
 /// grok-4.1-fast 优先于 grok-4、qwen3-coder 优先于 qwen3）
-const BUILTIN_PRICING: [(&str, (f64, f64)); 23] = [
+const BUILTIN_PRICING: [(&str, (f64, f64)); 27] = [
     ("claude-opus", (15.0, 75.0)),
     ("claude-sonnet", (3.0, 15.0)),
     ("claude-haiku", (0.8, 4.0)),
+    ("claude-fable", (15.0, 75.0)),
     ("gpt-5-codex", (1.25, 10.0)),
     ("gpt-5", (1.25, 10.0)),
     ("kimi-k3", (0.6, 3.0)),
     ("kimi-k2", (0.6, 2.5)),
     ("moonshot", (0.6, 3.0)),
     ("gemini-3.6-flash", (0.3, 2.5)),
+    ("gemini-3.5-flash", (0.3, 2.5)),
+    ("gemini-3.1-pro", (2.0, 12.0)),
     ("gemini-3-pro", (2.0, 12.0)),
     ("gemini-3-flash", (0.3, 2.5)),
     ("gemini-2.5-pro", (1.25, 10.0)),
@@ -442,6 +445,8 @@ const BUILTIN_PRICING: [(&str, (f64, f64)); 23] = [
     ("grok-code-fast", (0.2, 1.5)),
     ("glm-4.6", (0.6, 2.2)),
     ("glm-4.5", (0.6, 2.2)),
+    // 中转里的 glm-5 系（如 glm-5p2）暂按 4.6 同价估算，官方价出来后单列
+    ("glm-5", (0.6, 2.2)),
     ("qwen3-coder", (0.5, 2.0)),
     ("qwen3", (0.5, 2.0)),
     ("deepseek", (0.27, 1.1)),
@@ -485,7 +490,8 @@ fn load_pricing(override_path: Option<&Path>) -> Vec<(String, (f64, f64))> {
 }
 
 fn price_of(model: &str, table: &[(String, (f64, f64))]) -> Option<(f64, f64)> {
-    let model = model.to_lowercase();
+    // 中转/聚合的 provider 前缀（accounts/fireworks/models/x、zetatechs/x）剥掉，按末段模型名匹配
+    let model = model.rsplit('/').next().unwrap_or(model).to_lowercase();
     table
         .iter()
         .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
@@ -544,16 +550,25 @@ impl Bucket {
         m.cache_write += acc.cache_write;
     }
 
-    /// 任一贡献模型价格不明 → 整体费用 None（前端显示 ~）
-    fn cost(&self, table: &[(String, (f64, f64))]) -> Option<f64> {
+    /// 部分计价：只累加有价格的模型份额；(费用, 是否含未计价模型用量)。
+    /// 全部不明价 → 费用 None（前端显示 ~）；混有不明价 → costPartial=true（前端显示 ≥）
+    fn cost(&self, table: &[(String, (f64, f64))]) -> (Option<f64>, bool) {
         let mut total = 0.0;
+        let mut has_priced = false;
+        let mut has_unpriced = false;
         for (model, acc) in &self.by_model {
             if acc.input + acc.output + acc.cache_read + acc.cache_write == 0 {
                 continue;
             }
-            total += cost_of(acc, price_of(model, table)?);
+            match price_of(model, table) {
+                Some(price) => {
+                    has_priced = true;
+                    total += cost_of(acc, price);
+                }
+                None => has_unpriced = true,
+            }
         }
-        Some(total)
+        (if has_priced { Some(total) } else { None }, has_unpriced)
     }
 }
 
@@ -610,36 +625,49 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
     let total = |b: &Bucket| b.tokens.input + b.tokens.output;
     let mut agent_rows: Vec<UsageAgentRowDto> = by_agent
         .into_iter()
-        .map(|(agent, b)| UsageAgentRowDto {
-            tokens: total(&b),
-            cost_usd: b.cost(&table),
-            agent,
+        .map(|(agent, b)| {
+            let (cost_usd, cost_partial) = b.cost(&table);
+            UsageAgentRowDto {
+                tokens: total(&b),
+                cost_usd,
+                cost_partial,
+                agent,
+            }
         })
         .collect();
     agent_rows.sort_by(|a, b| b.tokens.cmp(&a.tokens));
     agent_rows.truncate(LIST_CAP);
     let mut project_rows: Vec<UsageProjectRowDto> = by_project
         .into_iter()
-        .map(|(project_path, b)| UsageProjectRowDto {
-            tokens: total(&b),
-            sessions: b.sessions.len() as u64,
-            cost_usd: b.cost(&table),
-            project_path,
+        .map(|(project_path, b)| {
+            let (cost_usd, cost_partial) = b.cost(&table);
+            UsageProjectRowDto {
+                tokens: total(&b),
+                sessions: b.sessions.len() as u64,
+                cost_usd,
+                cost_partial,
+                project_path,
+            }
         })
         .collect();
     project_rows.sort_by(|a, b| b.tokens.cmp(&a.tokens));
     project_rows.truncate(LIST_CAP);
     let mut model_rows: Vec<UsageModelRowDto> = by_model
         .into_iter()
-        .map(|(model, b)| UsageModelRowDto {
-            model: if model.is_empty() { "(未知)".into() } else { model },
-            input: b.tokens.input,
-            output: b.tokens.output,
-            cost_usd: b.cost(&table),
+        .map(|(model, b)| {
+            let (cost_usd, cost_partial) = b.cost(&table);
+            UsageModelRowDto {
+                model: if model.is_empty() { "(未知)".into() } else { model },
+                input: b.tokens.input,
+                output: b.tokens.output,
+                cost_usd,
+                cost_partial,
+            }
         })
         .collect();
     model_rows.sort_by(|a, b| (b.input + b.output).cmp(&(a.input + a.output)));
     model_rows.truncate(LIST_CAP);
+    let (cards_cost, cards_partial) = cards.cost(&table);
     Ok(UsageStatsDto {
         cards: UsageCardsDto {
             input: cards.tokens.input,
@@ -647,7 +675,8 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
             cache_read: cards.tokens.cache_read,
             cache_write: cards.tokens.cache_write,
             sessions: cards.sessions.len() as u64,
-            cost_usd: cards.cost(&table),
+            cost_usd: cards_cost,
+            cost_partial: cards_partial,
         },
         by_agent: agent_rows,
         by_project: project_rows,
@@ -673,7 +702,10 @@ pub struct UsageCardsDto {
     pub cache_read: u64,
     pub cache_write: u64,
     pub sessions: u64,
+    /// 已计价模型的份额合计；全部不明价时为 None
     pub cost_usd: Option<f64>,
+    /// 桶里还混有不明价模型的用量（费用应显示为 ≥）
+    pub cost_partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -682,6 +714,7 @@ pub struct UsageAgentRowDto {
     pub agent: String,
     pub tokens: u64,
     pub cost_usd: Option<f64>,
+    pub cost_partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -691,6 +724,7 @@ pub struct UsageProjectRowDto {
     pub tokens: u64,
     pub sessions: u64,
     pub cost_usd: Option<f64>,
+    pub cost_partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -700,6 +734,7 @@ pub struct UsageModelRowDto {
     pub input: u64,
     pub output: u64,
     pub cost_usd: Option<f64>,
+    pub cost_partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -800,6 +835,20 @@ mod tests {
         assert_eq!(price_of("gemini-3-pro-preview", &table), Some((2.0, 12.0)));
         assert_eq!(price_of("gemini-3.6-flash-lite", &table), Some((0.3, 2.5)));
         assert_eq!(price_of("gemini-2.5-pro", &table), Some((1.25, 10.0)), "旧条目保留");
+        // 新增条目
+        assert_eq!(price_of("claude-fable-2", &table), Some((15.0, 75.0)));
+        assert_eq!(price_of("gemini-3.5-flash-tts", &table), Some((0.3, 2.5)));
+        assert_eq!(price_of("gemini-3.1-pro-preview", &table), Some((2.0, 12.0)));
+    }
+
+    #[test]
+    fn pricing_strips_provider_prefix() {
+        let table = load_pricing(None);
+        // 中转/聚合的 provider 前缀：按最后一个 / 之后的末段匹配
+        assert_eq!(price_of("accounts/fireworks/models/glm-5p2", &table), Some((0.6, 2.2)), "glm 前缀命中");
+        assert_eq!(price_of("zetatechs/kimi-k3", &table), Some((0.6, 3.0)));
+        assert_eq!(price_of("openrouter/claude-sonnet-4", &table), Some((3.0, 15.0)));
+        assert_eq!(price_of("relay/mystery-x", &table), None, "末段不明依然不明价");
     }
 
     #[test]
@@ -839,13 +888,21 @@ mod tests {
     }
 
     #[test]
-    fn bucket_cost_none_when_any_model_unpriced() {
+    fn bucket_cost_partial_semantics() {
         let table = load_pricing(None);
+        // 全计价 → 精确费用，非 partial
         let mut b = Bucket::default();
         b.add("gpt-5", "s1", TokenAcc { input: 1_000_000, output: 1_000_000, cache_read: 0, cache_write: 0 });
-        assert_eq!(b.cost(&table), Some(1.25 + 10.0));
+        assert_eq!(b.cost(&table), (Some(1.25 + 10.0), false));
+        // 混有不明价 → 只算已计价份额，partial=true
         b.add("mystery", "s2", TokenAcc { input: 5, output: 5, cache_read: 0, cache_write: 0 });
-        assert_eq!(b.cost(&table), None, "有不明价模型贡献时整体不明");
+        let (cost, partial) = b.cost(&table);
+        assert_eq!(cost, Some(11.25), "不明价模型不再毒化整桶");
+        assert!(partial);
+        // 全不明价 → None（partial 也置位，前端显示 ~）
+        let mut c = Bucket::default();
+        c.add("mystery", "s1", TokenAcc { input: 5, output: 5, cache_read: 0, cache_write: 0 });
+        assert_eq!(c.cost(&table), (None, true));
     }
 
     #[test]
@@ -878,4 +935,5 @@ mod tests {
         assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read, evs[0].cache_write), (50, 9, 4, 1));
     }
 }
+
 

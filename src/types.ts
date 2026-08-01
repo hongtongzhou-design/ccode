@@ -172,12 +172,15 @@ export interface UsageCardsDto {
   cacheWrite: number;
   sessions: number;
   costUsd: number | null;
+  /** true = 桶里另含未计价模型的用量，costUsd 只是已计价份额 */
+  costPartial: boolean;
 }
 
 export interface AgentUsageDto {
   agent: string;
   tokens: number;
   costUsd: number | null;
+  costPartial: boolean;
 }
 
 export interface ProjectUsageDto {
@@ -185,6 +188,7 @@ export interface ProjectUsageDto {
   tokens: number;
   sessions: number;
   costUsd: number | null;
+  costPartial: boolean;
 }
 
 export interface ModelUsageDto {
@@ -192,6 +196,7 @@ export interface ModelUsageDto {
   input: number;
   output: number;
   costUsd: number | null;
+  costPartial: boolean;
 }
 
 export interface UsageStatsDto {
