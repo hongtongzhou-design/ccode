@@ -177,6 +177,20 @@ export default function FileTree({
   const parent = parentDir(root);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResultDto[] | null>(null);
+  const [highlight, setHighlight] = useState<string | null>(null);
+
+  /** 搜索结果定位：跳到所在目录并高亮（不打开预览） */
+  function locate(r: SearchResultDto) {
+    const target = r.isDir ? r.path : parentDir(r.path);
+    if (target) {
+      setRoot(target);
+      setResults(null);
+      setQuery("");
+      setHighlight(r.path);
+      setExpanded((prev) => new Set(prev).add(target));
+      setTimeout(() => setHighlight(null), 2000);
+    }
+  }
 
   // 搜索防抖：300ms 后在项目根内按文件名查找
   useEffect(() => {
@@ -219,7 +233,9 @@ export default function FileTree({
             setMenu({ x: e.clientX, y: e.clientY, path: entry.path, isDir: entry.isDir });
           }}
           title={entry.isDir ? `${entry.path}\n双击进入，右键在此打开终端` : entry.path}
-          className="group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-white/5"
+          className={`group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-white/5 ${
+            highlight === entry.path ? "bg-white/10" : ""
+          }`}
           style={{ paddingLeft: 6 + depth * 12 }}
         >
           <span className="w-3 shrink-0 text-l4">
@@ -364,7 +380,7 @@ export default function FileTree({
             results.map((r) => (
               <div
                 key={r.path}
-                onClick={() => onOpenFile(r.path, r.name, root)}
+                onClick={() => locate(r)}
                 title={r.path}
                 className="cursor-pointer truncate px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
               >
