@@ -429,6 +429,15 @@ function fmtTokens(n: number): string {
 export default function ProfilesPage() {
   const profiles = useAppStore((s) => s.profiles);
   const [usageMap, setUsageMap] = useState<Record<string, ProfileUsageDto>>({});
+  const [usageOpen, setUsageOpen] = useState<Set<string>>(new Set());
+  function toggleUsage(id: string) {
+    setUsageOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   // 各 profile 用量（按模型近似归属；模型跨 profile 共享时会重复计入）
   useEffect(() => {
@@ -876,13 +885,27 @@ export default function ProfilesPage() {
                             key={p.id}
                             className="grid h-16 grid-cols-[130px_minmax(140px,1fr)_240px_150px_112px] items-center gap-2 text-sm"
                           >
-                            {/* 名称 + 上次使用 */}
+                            {/* 名称（+用量展开按钮）+ 上次使用 */}
                             <span className="flex h-full flex-col justify-center overflow-hidden">
-                              <span className="truncate font-medium text-pl1">{p.name}</span>
+                              <span className="flex items-center gap-1 overflow-hidden">
+                                <span className="truncate font-medium text-pl1">{p.name}</span>
+                                {usageMap[p.id] && usageMap[p.id]!.input > 0 && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleUsage(p.id);
+                                    }}
+                                    title="查看用量/费用"
+                                    className="shrink-0 text-xs text-l4 hover:text-pl1"
+                                  >
+                                    {usageOpen.has(p.id) ? "▾" : "▸"}用量
+                                  </button>
+                                )}
+                              </span>
                               <span className="truncate text-xs text-l4">
                                 {p.lastUsedAt ? `${relTime(p.lastUsedAt)}使用` : "从未使用"}
                               </span>
-                              {usageMap[p.id] && usageMap[p.id]!.input > 0 && (
+                              {usageOpen.has(p.id) && usageMap[p.id] && (
                                 <span
                                   className="truncate text-xs text-l4"
                                   title="按模型近似归属的用量/官方价费用（模型跨配置共享时会重复计入）"
