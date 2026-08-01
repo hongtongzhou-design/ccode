@@ -196,6 +196,14 @@ function TerminalView({
   const setLiveSession = useAppStore((s) => s.setLiveSession);
 
   const agentProfiles = profiles.filter((p) => p.agent === agentId);
+  const [skillCount, setSkillCount] = useState(0);
+
+  // 当前 agent 已启用的技能数（技能页开关同步）
+  useEffect(() => {
+    invoke<number>("count_enabled_skills", { agent: agentId })
+      .then(setSkillCount)
+      .catch(() => setSkillCount(0));
+  }, [agentId]);
   const selectedProfile = profiles.find((p) => p.id === profileId);
 
   // 向标签条上报标题/运行状态；值没变就不惊动父组件
@@ -635,6 +643,14 @@ function TerminalView({
             </option>
           ))}
         </select>
+        {skillCount > 0 && (
+          <span
+            className="rounded bg-inset px-1.5 py-1 text-xs text-l3"
+            title={`该 agent 已启用 ${skillCount} 个技能（技能页管理）`}
+          >
+            ◈ {skillCount} 技能
+          </span>
+        )}
         <select
           ref={profileSelectRef}
           className={select}

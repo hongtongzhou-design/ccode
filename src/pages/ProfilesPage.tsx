@@ -6,7 +6,7 @@ import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS } from "../presets";
 import ContextMenu from "../components/ContextMenu";
-import type { Profile, ProfileInput } from "../types";
+import type { Profile, ProfileInput, ProfileUsageDto } from "../types";
 
 function ProfileModal({
   initial,
@@ -420,8 +420,33 @@ function diagnose(output: string, method: string): string | null {
   return null;
 }
 
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
 export default function ProfilesPage() {
   const profiles = useAppStore((s) => s.profiles);
+  const [usageMap, setUsageMap] = useState<Record<string, ProfileUsageDto>>({});
+
+  // 各 profile 用量（按模型近似归属；模型跨 profile 共享时会重复计入）
+  useEffect(() => {
+    if (!profiles.length) return;
+    Promise.all(
+      profiles.map(async (p) => {
+        try {
+          return [p.id, await invoke<ProfileUsageDto>("profile_usage", { profileId: p.id })] as const;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((entries) => {
+      const m: Record<string, ProfileUsageDto> = {};
+      for (const e of entries) if (e) m[e[0]] = e[1];
+      setUsageMap(m);
+    });
+  }, [profiles]);
   const agents = useAppStore((s) => s.agents);
   const removeProfile = useAppStore((s) => s.removeProfile);
   const duplicateProfile = useAppStore((s) => s.duplicateProfile);
@@ -856,6 +881,13 @@ export default function ProfilesPage() {
                               <span className="truncate font-medium text-pl1">{p.name}</span>
                               <span className="truncate text-xs text-l4">
                                 {p.lastUsedAt ? `${relTime(p.lastUsedAt)}使用` : "从未使用"}
+                                {usageMap[p.id] && usageMap[p.id].input > 0 && (
+                                  <span title="按模型近似归属的用量/官方价费用（模型跨配置共享时会重复计入）">
+                                    {` · ↑${fmtTokens(usageMap[p.id]!.input)} ↓${fmtTokens(usageMap[p.id]!.output)}`}
+                                    {usageMap[p.id]!.costUsd != null &&
+                                      ` · ${usageMap[p.id]!.costPartial ? "≥" : ""}$${usageMap[p.id]!.costUsd!.toFixed(2)}`}
+                                  </span>
+                                )}
                               </span>
                             </span>
                             {/* Endpoint */}

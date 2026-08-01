@@ -490,6 +490,20 @@ fn export_impl(store: &SkillStore, ids: &[String], dest_path: &str) -> Result<St
 
 // ===== Tauri commands =====
 
+/// 某 agent 已启用的技能数（启动栏提示用）
+#[tauri::command]
+pub async fn count_enabled_skills(agent: String) -> usize {
+    let store = match SkillStore::default_paths() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    store
+        .read()
+        .iter()
+        .filter(|s| s.apps.get(&agent).copied().unwrap_or(false))
+        .count()
+}
+
 #[tauri::command]
 pub async fn set_skill_category(id: String, category: Option<String>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {

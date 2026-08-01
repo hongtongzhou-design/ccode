@@ -226,3 +226,10 @@ export const AGENT_PROTOCOLS: Record<string, { options: string[]; default: strin
   qwen: { options: ["openai", "anthropic"], default: "openai" },
   kimi: { options: ["kimi", "anthropic", "openai"], default: "kimi" },
 };
+
+export interface ProfileUsageDto {
+  input: number;
+  output: number;
+  costUsd: number | null;
+  costPartial: boolean;
+}

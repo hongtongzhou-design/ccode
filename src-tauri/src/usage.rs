@@ -945,3 +945,107 @@ mod tests {
 }
 
 
+
+// ===== profile 用量近似归属（按模型名匹配，含 provider 前缀剥离）=====
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileUsageDto {
+    pub input: i64,
+    pub output: i64,
+    pub cost_usd: Option<f64>,
+    pub cost_partial: bool,
+}
+
+/// 近似归属规则：usage_daily.model == m 或以 "/m" 结尾（剥离供应商前缀后与 profile 模型匹配）
+fn profile_usage_impl(conn: &rusqlite::Connection, models: &[String]) -> Result<ProfileUsageDto, String> {
+    if models.is_empty() {
+        return Ok(ProfileUsageDto {
+            input: 0,
+            output: 0,
+            cost_usd: None,
+            cost_partial: false,
+        });
+    }
+    let mut stmt = conn
+        .prepare("SELECT model, session_id, input, output, cache_read, cache_write FROM usage_daily")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut bucket = Bucket::default();
+    for (model, session_id, input, output, cache_read, cache_write) in rows.flatten() {
+        let hit = models
+            .iter()
+            .any(|m| model == *m || model.ends_with(&format!("/{m}")));
+        if hit {
+            bucket.add(
+                &model,
+                &session_id,
+                TokenAcc {
+                    input: input as u64,
+                    output: output as u64,
+                    cache_read: cache_read as u64,
+                    cache_write: cache_write as u64,
+                },
+            );
+        }
+    }
+    let table = load_pricing(None);
+    let (cost_usd, cost_partial) = bucket.cost(&table);
+    Ok(ProfileUsageDto {
+        input: bucket.tokens.input as i64,
+        output: bucket.tokens.output as i64,
+        cost_usd,
+        cost_partial,
+    })
+}
+
+#[tauri::command]
+pub async fn profile_usage(
+    store: tauri::State<'_, crate::profiles::ProfileStore>,
+    profile_id: String,
+) -> Result<ProfileUsageDto, String> {
+    let models = store.get(&profile_id)?.models;
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = usage_db()?;
+        profile_usage_impl(&conn, &models)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod profile_usage_tests {
+    use super::*;
+
+    #[test]
+    fn profile_usage_matches_exact_and_prefixed_models() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_daily(day TEXT, agent TEXT, model TEXT, project_path TEXT, session_id TEXT,
+             input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER,
+             PRIMARY KEY(day, agent, model, project_path, session_id));
+             INSERT INTO usage_daily VALUES
+             ('2026-08-01','claude-code','kimi-k3','/p','s1',1000,100,0,0),
+             ('2026-08-01','claude-code','zetatechs/kimi-k3','/p','s2',2000,200,0,0),
+             ('2026-08-01','codex','gpt-5.6','/p','s3',9999,999,0,0);",
+        )
+        .unwrap();
+        let dto = profile_usage_impl(&conn, &["kimi-k3".to_string()]).unwrap();
+        assert_eq!(dto.input, 3000);
+        assert_eq!(dto.output, 300);
+        // kimi-k3 在定价表（0.6/3），应有费用且不 partial
+        assert!(dto.cost_usd.is_some());
+        assert!(!dto.cost_partial);
+    }
+}
