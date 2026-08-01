@@ -8,7 +8,7 @@ self.MonacoEnvironment = {
   getWorker: () => new editorWorker(),
 };
 
-// 与暖黑主题一致的 monaco 主题（定义一次）
+// 与沉浸冷黑主题一致的 monaco 主题（定义一次；base vs-dark 继承语法高亮配色）
 monaco.editor.defineTheme("ccode-dark", {
   base: "vs-dark",
   inherit: true,
@@ -19,6 +19,18 @@ monaco.editor.defineTheme("ccode-dark", {
     "editorLineNumber.foreground": "#525a6b",
   },
 });
+
+/** 按文件扩展名/文件名推断 Monaco 语言（无匹配则 plaintext） */
+function languageFor(path: string): string | undefined {
+  const name = path.split(/[\\/]/).pop() ?? "";
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot).toLowerCase() : "";
+  for (const lang of monaco.languages.getLanguages()) {
+    if (lang.filenames?.includes(name)) return lang.id;
+    if (ext && lang.extensions?.includes(ext)) return lang.id;
+  }
+  return undefined;
+}
 
 /**
  * 文件预览编辑器（P4）：Monaco 取代只读 pre。
@@ -73,6 +85,7 @@ export default function FilePreviewEditor({
     if (text === null || !hostRef.current) return;
     const ed = monaco.editor.create(hostRef.current, {
       value: text,
+      language: languageFor(path),
       theme: "ccode-dark",
       readOnly: truncated,
       minimap: { enabled: false },
