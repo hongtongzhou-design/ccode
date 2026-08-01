@@ -86,6 +86,7 @@ function buildXtermTheme(themeId: string) {
 function TerminalView({
   visible,
   rightOpen,
+  gitTotals,
   tabId,
   initialCwd,
   skipSeed,
@@ -107,6 +108,8 @@ function TerminalView({
   visible: boolean;
   /** 右侧面板开关影响 xterm 可用宽度，变化时需要重新 fit */
   rightOpen: boolean;
+  /** 该标签 cwd 的 git 变更统计（Codex 风：状态行常驻 +N -N） */
+  gitTotals?: { add: number; del: number } | null;
   /** 本标签 id（liveSessions 登记用） */
   tabId: string;
   /** 不继承「上次启动」记录（兜底空标签） */
@@ -765,6 +768,12 @@ function TerminalView({
             {selectedProfile ? ` · ${selectedProfile.name}` : ""}
             {model ? ` · ${model}` : ""}
             {` · ${basename(cwd)}`}
+            {gitTotals && (gitTotals.add > 0 || gitTotals.del > 0) && (
+              <span className="ml-1 font-mono" title="变更（git diff vs HEAD / 任务累计）">
+                <span className="text-add">+{gitTotals.add}</span>
+                <span className="text-del">-{gitTotals.del}</span>
+              </span>
+            )}
             {shellActive && !running ? " · shell 模式" : ""}
             {exited && !running && !shellActive ? " · 已退出" : ""}
           </span>
@@ -1284,6 +1293,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 <TerminalView
                   visible={tabVisible}
                   rightOpen={rightOpen}
+                  gitTotals={t.id === activeId ? gitTotals : null}
                   tabId={t.id}
                   skipSeed={t.skipSeed}
                   initialCwd={t.initialCwd}
