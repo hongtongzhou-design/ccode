@@ -881,14 +881,17 @@ export default function ProfilesPage() {
                               <span className="truncate font-medium text-pl1">{p.name}</span>
                               <span className="truncate text-xs text-l4">
                                 {p.lastUsedAt ? `${relTime(p.lastUsedAt)}使用` : "从未使用"}
-                                {usageMap[p.id] && usageMap[p.id].input > 0 && (
-                                  <span title="按模型近似归属的用量/官方价费用（模型跨配置共享时会重复计入）">
-                                    {` · ↑${fmtTokens(usageMap[p.id]!.input)} ↓${fmtTokens(usageMap[p.id]!.output)}`}
-                                    {usageMap[p.id]!.costUsd != null &&
-                                      ` · ${usageMap[p.id]!.costPartial ? "≥" : ""}$${usageMap[p.id]!.costUsd!.toFixed(2)}`}
-                                  </span>
-                                )}
                               </span>
+                              {usageMap[p.id] && usageMap[p.id]!.input > 0 && (
+                                <span
+                                  className="truncate text-xs text-l4"
+                                  title="按模型近似归属的用量/官方价费用（模型跨配置共享时会重复计入）"
+                                >
+                                  {`↑${fmtTokens(usageMap[p.id]!.input)} ↓${fmtTokens(usageMap[p.id]!.output)}`}
+                                  {usageMap[p.id]!.costUsd != null &&
+                                    ` · ${usageMap[p.id]!.costPartial ? "≥" : ""}$${usageMap[p.id]!.costUsd!.toFixed(2)}`}
+                                </span>
+                              )}
                             </span>
                             {/* Endpoint */}
                             <span className="truncate text-pl2">
