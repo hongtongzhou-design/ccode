@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
+import GitPanel from "../components/GitPanel";
 import type { ChatMessageDto, SessionMetaDto, TokenUsageDto } from "../types";
 
 type Filter =
@@ -177,6 +178,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   const [summary, setSummary] = useState<string | null>(null);
   const [aiSummarizing, setAiSummarizing] = useState(false);
+  /** 回放区页签：对话 / 改动（改动 = 该会话项目的 git diff 面板） */
+  const [replayTab, setReplayTab] = useState<"chat" | "diff">("chat");
 
   /** ◈ AI 摘要：生成/重新生成当前回放会话的摘要块 */
   async function onSummarize() {
@@ -213,6 +216,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     // 源文件已删除且无快照，无法回放
     if (!s.alive && !s.pinned) return;
     setSelected(s);
+    setReplayTab("chat");
     // 摘要缓存命中：已有 summary 直接展示，不再调用 AI
     setSummary(s.summary ?? null);
     setLoadingConv(true);
@@ -596,14 +600,19 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   <div className="flex items-center gap-1.5">
                     {s.pinned && <span title="已保留">⚑</span>}
                     <span className="truncate font-medium text-l1">{sessionTitle(s)}</span>
-                    {liveSessions[s.sessionId] && (
+                    {(s.live || liveSessions[s.sessionId]) && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           jumpToLive(s.sessionId);
                         }}
-                        title="该会话正在终端里进行，点击跳转到对应标签"
-                        className="shrink-0 rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text"
+                        disabled={!liveSessions[s.sessionId]}
+                        title={
+                          liveSessions[s.sessionId]
+                            ? "该会话正在终端里进行，点击跳转到对应标签"
+                            : "该会话的 CLI 进程仍在运行（外部探测，无本地标签）"
+                        }
+                        className="shrink-0 rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text disabled:opacity-80"
                       >
                         🟢 进行中
                       </button>
@@ -710,6 +719,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   setSelected(null);
                   setMessages([]);
                   setSummary(null);
+                  setReplayTab("chat");
                 }}
                 className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
               >
@@ -718,6 +728,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               <span className="truncate text-sm font-medium text-l1">
                 {sessionTitle(selected)}
               </span>
+              {selected.live && (
+                <span
+                  className="shrink-0 rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text"
+                  title="该会话的 CLI 进程仍在运行（外部探测）"
+                >
+                  🟢 进行中
+                </span>
+              )}
               <span className="shrink-0 text-xs text-l3">
                 {agentLabel(selected.agent)} · {relTime(selected.updatedAt)}
                 {selected.tokenUsage ? ` · ${fmtTokens(selected.tokenUsage)}` : ""}
@@ -744,23 +762,47 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               >
                 {selected.pinned ? "取消保留" : "⚑ 保留"}
               </button>
+              {/* 对话 / 改动 页签 */}
+              <div className="flex shrink-0 gap-1">
+                {(["chat", "diff"] as const).map((k) => (
+                  <button
+                    key={k}
+                    onClick={() => setReplayTab(k)}
+                    className={`rounded px-2.5 py-1 text-xs ${
+                      replayTab === k ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
+                    }`}
+                  >
+                    {k === "chat" ? "对话" : "改动"}
+                  </button>
+                ))}
+              </div>
             </div>
             {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
-            {summary && (
-              <div className="mx-4 mt-2 rounded bg-inset p-3 text-sm text-l2">
-                <span className="mr-1">◈</span>
-                <span className="whitespace-pre-wrap">{summary}</span>
-              </div>
+            {replayTab === "diff" ? (
+              <GitPanel
+                cwd={selected.projectPath}
+                visible={replayTab === "diff"}
+                onTotals={() => {}}
+              />
+            ) : (
+              <>
+                {summary && (
+                  <div className="mx-4 mt-2 rounded bg-inset p-3 text-sm text-l2">
+                    <span className="mr-1">◈</span>
+                    <span className="whitespace-pre-wrap">{summary}</span>
+                  </div>
+                )}
+                <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-4">
+                  {loadingConv ? (
+                    <p className="text-sm text-l4">加载中…</p>
+                  ) : messages.length === 0 ? (
+                    <p className="text-sm text-l4">没有可回放的对话内容</p>
+                  ) : (
+                    <ConversationView messages={messages} />
+                  )}
+                </div>
+              </>
             )}
-            <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-4">
-              {loadingConv ? (
-                <p className="text-sm text-l4">加载中…</p>
-              ) : messages.length === 0 ? (
-                <p className="text-sm text-l4">没有可回放的对话内容</p>
-              ) : (
-                <ConversationView messages={messages} />
-              )}
-            </div>
           </div>
         )}
       </div>

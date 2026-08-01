@@ -90,6 +90,7 @@ pub fn run() {
             skills::import_discovered,
             skills::export_skills,
             skills::read_skill_md,
+            skills::resync_skill_copies,
             usage::rebuild_usage_index,
             usage::get_usage_stats,
             usage::profile_usage,

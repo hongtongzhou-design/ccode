@@ -68,7 +68,7 @@ src-tauri/src/
   agents.rs                  # 适配器：detect + launch_plan（env/args 注入规则，差异全在这里）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起逻辑，agent/shell 复用
   sessions.rs                # 会话浏览：扫描/解析全部六个 agent 会话（含 Codex .zst、OpenCode SQLite/legacy JSON）、app.db session_meta、pin 快照、用户发起的删除、注意力状态分类（session_tail_state）
-  skills.rs                  # 技能库（§6.13）：SSOT 库 + 六 CLI symlink/copy 分发、四路导入（目录/ZIP/GitHub/发现）、ZIP 导出、卸载备份
+  skills.rs                  # 技能库（§6.13）：SSOT 库 + 六 CLI symlink/copy 分发、四路导入（目录/ZIP/GitHub/发现）、ZIP 导出、卸载备份、copy 漂移检测与 resync
   usage.rs                   # 用量统计（§6.11）：六 agent usage 事件提取、usage_daily 按天聚合、内置定价表 + pricing.json 覆盖
   settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/brew 镜像/主题，get/update 两个 command
   ai.rs                      # 无头 AI 调用层：一次性 prompt（launch_plan 注入）+ 提交信息/会话摘要/PR 描述生成

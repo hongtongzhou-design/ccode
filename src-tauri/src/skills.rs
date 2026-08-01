@@ -28,6 +28,9 @@ pub struct SkillDto {
     /// 用户自定义分类（None = 未分类）
     #[serde(default)]
     pub category: Option<String>,
+    /// copy 分发后库已更新、副本还是旧内容的 agent（不入库，list 时现算）
+    #[serde(default, skip_serializing)]
+    pub stale_copies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +108,7 @@ fn new_skill(name: String, description: Option<String>, source: &str, repo: Opti
         apps,
         installed_at: crate::sessions::now_iso(),
         category: None,
+        stale_copies: Vec::new(),
     }
 }
 
@@ -488,6 +492,52 @@ fn export_impl(store: &SkillStore, ids: &[String], dest_path: &str) -> Result<St
     Ok(dest_path.to_string())
 }
 
+// ===== copy 分发漂移检测（symlink 永远新，只有带标记的副本会旧） =====
+
+/// 内容哈希（md5，与 kimi bucket 同一既有依赖；漂移检测不需要抗碰撞）
+fn content_hash(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(format!("{:x}", md5::compute(&bytes)))
+}
+
+fn stale_agents(store: &SkillStore, dirs: &HashMap<String, PathBuf>, skill: &SkillDto) -> Vec<String> {
+    let Some(lib_hash) = content_hash(&store.skill_dir(&skill.name).join("SKILL.md")) else {
+        return Vec::new();
+    };
+    let mut stale = Vec::new();
+    for (agent, enabled) in &skill.apps {
+        if !enabled {
+            continue;
+        }
+        let Some(root) = dirs.get(agent) else {
+            continue;
+        };
+        let target = root.join(&skill.name);
+        if !target.join(MARKER_FILE).exists() {
+            continue; // symlink 或用户自有目录不在漂移检测范围
+        }
+        if content_hash(&target.join("SKILL.md")).as_deref() != Some(lib_hash.as_str()) {
+            stale.push(agent.clone());
+        }
+    }
+    stale.sort();
+    stale
+}
+
+/// 把 stale 的 copy 全部重新分发（保持 copy 形态），返回修复的 agent 列表
+fn resync_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>, id: &str) -> Result<Vec<String>, String> {
+    let skills = store.read();
+    let skill = skills
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| format!("技能不存在: {id}"))?;
+    let stale = stale_agents(store, dirs, skill);
+    for agent in &stale {
+        apply_impl(store, dirs, id, agent, true, false)?;
+    }
+    Ok(stale)
+}
+
 // ===== Tauri commands =====
 
 /// 某 agent 已启用的技能数（启动栏提示用）
@@ -524,7 +574,21 @@ pub async fn set_skill_category(id: String, category: Option<String>) -> Result<
 
 #[tauri::command]
 pub async fn list_skills() -> Vec<SkillDto> {
-    SkillStore::default_paths().map(|s| s.read()).unwrap_or_default()
+    let Ok(store) = SkillStore::default_paths() else {
+        return Vec::new();
+    };
+    let dirs = agent_dirs();
+    let mut skills = store.read();
+    for s in &mut skills {
+        s.stale_copies = stale_agents(&store, &dirs, s);
+    }
+    skills
+}
+
+#[tauri::command]
+pub async fn resync_skill_copies(id: String) -> Result<Vec<String>, String> {
+    let store = SkillStore::default_paths()?;
+    resync_impl(&store, &agent_dirs(), &id)
 }
 
 #[tauri::command]
@@ -899,5 +963,30 @@ mod tests {
         assert!(fx2.store.skill_dir("docx").join("SKILL.md").exists());
         // 空选择报错
         assert!(export_impl(&fx.store, &["nonexistent".into()], dest.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn stale_copy_detected_and_resynced() {
+        let fx = Fx::new();
+        let skill = fx.add_lib_skill("pdf", "处理 PDF");
+        // codex 走 copy（强制），gemini 走 symlink
+        apply_impl(&fx.store, &fx.agents, &skill.id, "codex", true, false).unwrap();
+        apply_impl(&fx.store, &fx.agents, &skill.id, "gemini", true, true).unwrap();
+        let skill = fx.store.read().into_iter().find(|s| s.id == skill.id).unwrap();
+        assert!(stale_agents(&fx.store, &fx.agents, &skill).is_empty(), "刚分发完不应有漂移");
+        // 库更新 → copy 副本漂移，symlink 不受影响
+        fs::write(
+            fx.store.skill_dir("pdf").join("SKILL.md"),
+            "---\nname: pdf\ndescription: 新版\n---\nbody v2\n",
+        )
+        .unwrap();
+        let stale = stale_agents(&fx.store, &fx.agents, &skill);
+        assert_eq!(stale, vec!["codex".to_string()], "symlink 的 gemini 不算漂移");
+        let fixed = resync_impl(&fx.store, &fx.agents, &skill.id).unwrap();
+        assert_eq!(fixed, vec!["codex".to_string()]);
+        assert!(stale_agents(&fx.store, &fx.agents, &skill).is_empty(), "resync 后漂移清零");
+        let copied = fs::read_to_string(fx.agents["codex"].join("pdf").join("SKILL.md")).unwrap();
+        assert!(copied.contains("新版"), "副本内容已追平库");
+        assert!(fx.agents["codex"].join("pdf").join(MARKER_FILE).exists(), "仍保持 copy 形态");
     }
 }

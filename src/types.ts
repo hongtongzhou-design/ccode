@@ -61,6 +61,8 @@ export interface SessionMetaDto {
   workspace: string | null;
   /** AI 生成的会话摘要（命中缓存；null = 尚未生成） */
   summary: string | null;
+  /** 后端探测到该会话的 CLI 进程仍存活（外部 live；无终端标签可跳转） */
+  live: boolean;
 }
 
 export interface BlockDto {
@@ -158,6 +160,8 @@ export interface SkillDto {
   installedAt: string;
   /** 用户自定义分类（null = 未分类） */
   category: string | null;
+  /** 内容已与库版本不一致的副本（所在 agent id 列表；空 = 无漂移） */
+  staleCopies: string[];
 }
 
 /** 未被纳管的已发现技能（各 agent 目录里已存在但不在库中） */

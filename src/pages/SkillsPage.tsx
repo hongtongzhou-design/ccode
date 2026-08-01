@@ -387,6 +387,18 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  /** 副本过期：把库里的最新版本重新分发到漂移的 agent 副本 */
+  async function onResync(skill: SkillDto) {
+    try {
+      const agents = await invoke<string[]>("resync_skill_copies", { id: skill.id });
+      setNotice(`已同步: ${agents.join(", ")}`);
+      setError(null);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function onDelete(skill: SkillDto) {
     if (
       !window.confirm(
@@ -498,6 +510,23 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                       {SOURCE_LABEL[s.source] ?? s.source}
                       {s.repo ? ` · ${s.repo}` : ""}
                     </span>
+                    {s.staleCopies.length > 0 && (
+                      <>
+                        <span
+                          className="shrink-0 rounded bg-warn px-1.5 py-0.5 text-xs text-warn-text"
+                          title={`以下 agent 的副本内容已过期：${s.staleCopies.join(", ")}`}
+                        >
+                          副本过期
+                        </span>
+                        <button
+                          onClick={() => onResync(s)}
+                          title="把库里的最新版本重新分发到这些 agent"
+                          className="shrink-0 rounded px-2 py-0.5 text-xs text-l2 hover:text-l1"
+                        >
+                          重新分发
+                        </button>
+                      </>
+                    )}
                     <span className="ml-auto flex shrink-0 items-center gap-1">
                       {catEdit?.id === s.id ? (
                         <input

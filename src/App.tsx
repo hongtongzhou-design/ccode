@@ -42,6 +42,29 @@ function App() {
     loadSettings().catch((e) => console.error(e));
   }, [loadAll, loadSessions, loadSettings]);
 
+  // 跨实例同步：窗口重新聚焦/可见时重拉配置、设置与会话（2s 节流）。
+  // 双开场景（worktree 演示）里另一个实例的改动能即时反映过来。
+  useEffect(() => {
+    let last = 0;
+    const sync = () => {
+      const now = Date.now();
+      if (now - last < 2000) return;
+      last = now;
+      loadAll().catch(() => {});
+      loadSettings().catch(() => {});
+      loadSessions().catch(() => {});
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") sync();
+    };
+    window.addEventListener("focus", sync);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", sync);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [loadAll, loadSessions, loadSettings]);
+
   return (
     <div className="flex h-full bg-canvas text-l2">
       <aside

@@ -44,6 +44,9 @@ pub struct SessionMetaDto {
     /// AI 生成的会话摘要（session_meta.summary 列）
     #[serde(default)]
     pub summary: Option<String>,
+    /// 进行中：源文件 mtime（opencode 为 time_updated）在最近 60 秒内
+    #[serde(default)]
+    pub live: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +165,16 @@ fn mtime_iso(path: &Path) -> Option<String> {
     let m = fs::metadata(path).ok()?.modified().ok()?;
     let secs = m.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     Some(iso_from_unix(secs))
+}
+
+/// live 判定：mtime 距现在不超过 within_secs（文件正在被 agent 写入）
+fn mtime_fresh(path: &Path, within_secs: u64) -> bool {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|e| e.as_secs() <= within_secs)
+        .unwrap_or(false)
 }
 
 // ===== 文件读取（含 zstd） =====
@@ -346,6 +359,7 @@ fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         chain_count: 1,
         workspace: None,
         summary: None,
+        live: alive && mtime_fresh(path, 60),
     })
 }
 
@@ -578,6 +592,7 @@ fn codex_file_meta(
             chain_count: 1,
             workspace: None,
             summary: None,
+            live: alive && mtime_fresh(path, 60),
         },
         forked_from_id,
     ))
@@ -847,6 +862,7 @@ fn gemini_file_meta(
         chain_count: 1,
         workspace: None,
         summary: None,
+        live: alive && mtime_fresh(path, 60),
     })
 }
 
@@ -983,6 +999,13 @@ fn qwen_content_text(msg: &Value) -> Option<String> {
     }
 }
 
+/// qwen 运行时标记：会话目录里存在 <sessionId>.runtime.json sidecar 视为进行中
+fn qwen_runtime_sidecar(path: &Path) -> Option<PathBuf> {
+    let sid = path.file_stem()?.to_string_lossy();
+    let candidate = path.parent()?.join(format!("{sid}.runtime.json"));
+    candidate.exists().then_some(candidate)
+}
+
 fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMetaDto> {
     let bytes = read_session_bytes(path)?;
     let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
@@ -1047,6 +1070,7 @@ fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMet
         chain_count: 1,
         workspace: None,
         summary: None,
+        live: alive && (mtime_fresh(path, 60) || qwen_runtime_sidecar(path).is_some()),
     })
 }
 
@@ -1263,6 +1287,7 @@ fn kimi_wire_file_meta(
         chain_count: 1,
         workspace: None,
         summary: None,
+        live: alive && mtime_fresh(path, 60),
     })
 }
 
@@ -1518,6 +1543,7 @@ fn kimi_legacy_file_meta(
         chain_count: 1,
         workspace: None,
         summary: None,
+        live: alive && mtime_fresh(path, 60),
     })
 }
 
@@ -1741,6 +1767,17 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
         } else {
             None
         };
+        // opencode 没有单会话文件：用行的 time_updated 判活（60 秒内被写过即在跑）
+        let live = row
+            .as_i64("time_updated")
+            .map(|ms| {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                (now_ms - ms).abs() <= 60_000
+            })
+            .unwrap_or(false);
         out.push(SessionMetaDto {
             agent: "opencode".into(),
             session_id: id.clone(),
@@ -1760,6 +1797,7 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             chain_count: 1,
             workspace: None,
             summary: None,
+            live,
         });
     }
     out
@@ -2096,6 +2134,7 @@ fn opencode_scan_legacy(storage: &Path) -> Vec<SessionMetaDto> {
             chain_count: 1,
             workspace: None,
             summary: None,
+            live: mtime_fresh(&f, 60),
         });
     }
     out
@@ -2304,6 +2343,7 @@ pub fn scan_sessions() -> ScanResult {
                             chain_count: 1,
                             workspace: None,
                             summary: None,
+                            live: false,
                         })
                     }),
                     "kimi" => {
@@ -3392,6 +3432,7 @@ mod tests {
                 chain_count: 1,
                 workspace: None,
                 summary: None,
+                live: false,
             },
             fork.map(String::from),
         )
@@ -3832,6 +3873,60 @@ mod tests {
         assert!(resolve_worktree_project("/home/u/code/myrepo", &rows).is_none());
         assert!(resolve_worktree_project("/home/u/ccode/workspaces/myrepo/feat-xy", &rows).is_none());
         assert!(resolve_worktree_project("/anywhere", &[]).is_none());
+    }
+
+    #[test]
+    fn live_flag_from_fresh_mtime() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s1.jsonl");
+        std::fs::write(
+            &file,
+            r#"{"type":"user","cwd":"/tmp/p","sessionId":"s1","timestamp":"2026-07-01T00:00:00Z","message":{"role":"user","content":"hi"}}"#,
+        )
+        .unwrap();
+        // 刚写的文件 → live
+        let m = claude_file_meta(&file, true).unwrap();
+        assert!(m.live, "60 秒内的 mtime 应判 live");
+        // 把 mtime 拨到一小时前 → 不 live
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let m = claude_file_meta(&file, true).unwrap();
+        assert!(!m.live);
+        // 死会话（alive=false）即使 mtime 新也不 live
+        let m = claude_file_meta(&file, false).unwrap();
+        assert!(!m.live);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn qwen_live_via_runtime_sidecar() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("q1.jsonl");
+        std::fs::write(
+            &file,
+            r#"{"uuid":"1","sessionId":"q1","type":"user","cwd":"/tmp/p","message":{"role":"user","parts":[{"text":"hi"}]}}"#,
+        )
+        .unwrap();
+        // 旧 mtime + 无 sidecar → 不 live
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(!qwen_file_meta(&file, true, false).unwrap().live);
+        // sidecar 出现 → live
+        std::fs::write(dir.join("q1.runtime.json"), "{}").unwrap();
+        assert!(qwen_file_meta(&file, true, false).unwrap().live, "runtime sidecar 应判 live");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
