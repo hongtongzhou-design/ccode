@@ -31,7 +31,8 @@ fn resolve_profile_from(profiles: Vec<Profile>, profile_id: Option<String>) -> R
 fn headless_args(agent: &str, prompt: &str) -> Vec<String> {
     match agent {
         "claude-code" => vec!["-p".into(), prompt.into(), "--output-format".into(), "text".into()],
-        "codex" => vec!["exec".into(), "--skip-git-repo-check".into(), prompt.into()],
+        // AI 无头调用只读沙箱（只生成文本，不需要写权限）
+        "codex" => vec!["exec".into(), "--skip-git-repo-check".into(), "-s".into(), "read-only".into(), prompt.into()],
         "gemini" => vec!["-p".into(), prompt.into()],
         "kimi" => vec!["-p".into(), prompt.into()],
         "opencode" => vec!["run".into(), prompt.into()],
@@ -355,7 +356,7 @@ mod tests {
             headless_args("claude-code", "你好"),
             vec!["-p", "你好", "--output-format", "text"]
         );
-        assert_eq!(headless_args("codex", "你好"), vec!["exec", "--skip-git-repo-check", "你好"]);
+        assert_eq!(headless_args("codex", "你好"), vec!["exec", "--skip-git-repo-check", "-s", "read-only", "你好"]);
         assert_eq!(headless_args("gemini", "你好"), vec!["-p", "你好"]);
         assert_eq!(headless_args("qwen", "你好"), vec!["你好"]);
         assert_eq!(headless_args("kimi", "你好"), vec!["-p", "你好"]);

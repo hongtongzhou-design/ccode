@@ -97,6 +97,9 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                 plan.args.push("-m".into());
                 plan.args.push(model.into());
             }
+            // 默认沙箱：只能写当前工作目录（需全权限时在系统终端自行启动）
+            plan.args.push("-s".into());
+            plan.args.push("workspace-write".into());
         }
         "gemini" => {
             if let Some(key) = key {
@@ -477,7 +480,8 @@ mod tests {
     fn codex_plan_without_base_url_has_no_provider_args() {
         let p = profile("codex", None);
         let plan = launch_plan(&p, None, None);
-        assert!(plan.args.is_empty());
+        // 无 provider 参数，只有默认沙箱参数
+        assert_eq!(plan.args, vec!["-s", "workspace-write"]);
         assert!(plan.env.is_empty());
     }
 

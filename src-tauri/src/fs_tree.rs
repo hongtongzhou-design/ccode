@@ -515,7 +515,16 @@ fn create_dir_sync(root: &str, name: &str) -> Result<String, String> {
 
 /// 重要系统/用户路径保护：无论根目录范围如何都拒绝删除
 fn is_protected_path(path: &str) -> bool {
-    let p = expand_tilde(path);
+    // 词法形式与 canonicalize 后形式双重校验：堵住「项目内符号链接指向受保护目录」的绕过
+    let lex = expand_tilde(path);
+    let canon = std::path::PathBuf::from(&lex)
+        .canonicalize()
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| lex.clone());
+    is_protected_str(&lex) || (canon != lex && is_protected_str(&canon))
+}
+
+fn is_protected_str(p: &str) -> bool {
     let home = dirs::home_dir()
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -627,6 +636,16 @@ mod fsops_tests {
         assert!(delete_path_sync(&format!("{home}/.claude/projects"), &home).is_err());
         assert!(delete_path_sync("/System", &home).is_err());
         assert!(delete_path_sync(&format!("{home}/proj/.git/index"), &home).is_err());
+        // 符号链接绕过：项目内链接指向 ~/.ssh，按词法路径删除时也应被拦截
+        #[cfg(unix)]
+        {
+            let proj = dir.join("projlink");
+            fs::create_dir_all(&proj).unwrap();
+            let link = proj.join("x");
+            std::os::unix::fs::symlink(format!("{home}/.ssh"), &link).unwrap();
+            assert!(delete_path_sync(&link.to_string_lossy(), &proj.to_string_lossy().into_owned()).is_err());
+            let _ = fs::remove_file(&link);
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }
