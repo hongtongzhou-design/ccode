@@ -407,7 +407,7 @@ fn search_walk(
     out: &mut Vec<SearchResultDto>,
 ) {
     const MAX_DEPTH: usize = 10;
-    const MAX_VISITED: usize = 20000;
+    const MAX_VISITED: usize = 50000;
     const MAX_RESULTS: usize = 50;
     if depth > MAX_DEPTH || *visited >= MAX_VISITED || out.len() >= MAX_RESULTS {
         return;
@@ -421,7 +421,10 @@ fn search_walk(
         let name = e.file_name().to_string_lossy().into_owned();
         let path = e.path();
         let is_dir = path.is_dir();
-        if is_dir && (name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | "dist")) {
+        if is_dir
+            && (name.starts_with('.')
+                || matches!(name.as_str(), "node_modules" | "target" | "dist" | "Library"))
+        {
             continue;
         }
         if name.to_lowercase().contains(query) {
@@ -476,6 +479,81 @@ mod search_tests {
         search_walk(&dir, "apple", 0, &mut visited, &mut out);
         assert_eq!(out.len(), 1);
         assert!(out[0].path.ends_with("src/deep/apple.rs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+// ===== 文件树文件操作（P4 补充）：新建文件夹 / 删除，词法根目录约束 =====
+
+fn lexical_in_root(path: &str, root: &str) -> bool {
+    let root_norm = expand_tilde(root).trim_end_matches('/').to_string();
+    let path_exp = expand_tilde(path);
+    path_exp == root_norm || path_exp.starts_with(&format!("{root_norm}/"))
+}
+
+fn create_dir_sync(root: &str, name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() || name.contains(['/', '\\', '.']) {
+        return Err("文件夹名称无效（不能含 / 或 .）".into());
+    }
+    let dir = PathBuf::from(expand_tilde(root)).join(name);
+    if dir.exists() {
+        return Err("已存在同名文件或目录".into());
+    }
+    fs::create_dir_all(&dir).map_err(|e| format!("创建文件夹失败: {e}"))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+fn delete_path_sync(path: &str, root: &str) -> Result<(), String> {
+    if !lexical_in_root(path, root) {
+        return Err("路径超出项目根目录，拒绝删除".into());
+    }
+    let root_norm = expand_tilde(root).trim_end_matches('/').to_string();
+    let p = expand_tilde(path);
+    if p == root_norm {
+        return Err("不能删除项目根目录本身".into());
+    }
+    let pb = PathBuf::from(&p);
+    if pb.is_dir() {
+        fs::remove_dir_all(&pb).map_err(|e| format!("删除目录失败: {e}"))
+    } else {
+        fs::remove_file(&pb).map_err(|e| format!("删除文件失败: {e}"))
+    }
+}
+
+#[tauri::command]
+pub async fn fs_create_dir(root: String, name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || create_dir_sync(&root, &name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn fs_delete_path(path: String, root: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_path_sync(&path, &root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod fsops_tests {
+    use super::*;
+
+    #[test]
+    fn create_and_delete_ops() {
+        let dir = std::env::temp_dir().join(format!("ccode-fsops-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_str().unwrap().to_string();
+        let created = create_dir_sync(&root, "newfolder").unwrap();
+        assert!(std::path::Path::new(&created).is_dir());
+        assert!(create_dir_sync(&root, "a/b").is_err());
+        assert!(create_dir_sync(&root, "newfolder").is_err()); // 重名
+        fs::write(dir.join("f.txt"), "x").unwrap();
+        delete_path_sync(&dir.join("f.txt").to_string_lossy(), &root).unwrap();
+        delete_path_sync(&created, &root).unwrap();
+        assert!(!std::path::Path::new(&created).exists());
+        assert!(delete_path_sync("/tmp", &root).is_err());
+        assert!(delete_path_sync(&root, &root).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 }

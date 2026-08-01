@@ -53,6 +53,8 @@ pub fn run() {
             fs_tree::watch_dir,
             fs_tree::unwatch_dir,
             fs_tree::search_files,
+            fs_tree::fs_create_dir,
+            fs_tree::fs_delete_path,
             git_info::git_status,
             git_info::git_commit,
             git_info::git_push,

@@ -67,8 +67,9 @@ export default function FileTree({
   /** 文件系统变化回调（fs-changed 防抖后触发，供 GitPanel 等联动刷新） */
   onFsEvent?: () => void;
 }) {
-  // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动
+  // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动；base = 可导航范围上限
   const [root, setRoot] = useState(cwd);
+  const [base, setBase] = useState(cwd);
   const [recent, setRecent] = useState<RepoDto[]>([]);
 
   // 最近项目：来自会话聚合的 git 仓库（按最近活跃排序），点击直接进入
@@ -82,12 +83,13 @@ export default function FileTree({
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
   const [error, setError] = useState<string | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
   const [gitMap, setGitMap] = useState<Record<string, string>>({});
 
   // 切换活动标签（cwd 变化）时重置回该标签的 cwd
   useEffect(() => {
     setRoot(cwd);
+    setBase(cwd);
   }, [cwd]);
 
   const load = useCallback(
@@ -211,9 +213,8 @@ export default function FileTree({
             if (entry.isDir) setRoot(entry.path);
           }}
           onContextMenu={(e) => {
-            if (!entry.isDir) return;
             e.preventDefault();
-            setMenu({ x: e.clientX, y: e.clientY, path: entry.path });
+            setMenu({ x: e.clientX, y: e.clientY, path: entry.path, isDir: entry.isDir });
           }}
           title={entry.isDir ? `${entry.path}\n双击进入，右键在此打开终端` : entry.path}
           className="group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-white/5"
@@ -287,11 +288,28 @@ export default function FileTree({
           {recent.map((r) => (
             <div
               key={r.path}
-              onClick={() => onOpenTerminal(r.path)}
-              title={`${r.path}（点击打开新终端）`}
-              className="cursor-pointer truncate px-2 py-0.5 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+              onClick={() => {
+                setRoot(r.path);
+                setBase(r.path);
+                setResults(null);
+                setQuery("");
+              }}
+              title={`${r.path}（点击进入；↗ 打开新终端）`}
+              className="group cursor-pointer px-2 py-0.5 text-xs text-l2 hover:bg-white/5 hover:text-l1"
             >
-              ⏱ {r.name}
+              <span className="flex items-center gap-1">
+                <span className="min-w-0 flex-1 truncate">⏱ {r.name}</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenTerminal(r.path);
+                  }}
+                  title="在此打开新终端"
+                  className="hidden shrink-0 text-l4 hover:text-l1 group-hover:block"
+                >
+                  ↗
+                </button>
+              </span>
             </div>
           ))}
         </div>
@@ -304,7 +322,7 @@ export default function FileTree({
         <span className="truncate">{basenameOf(root)}</span>
       </div>
       {error && <p className="px-2 py-1 text-xs text-err-text">{error}</p>}
-      {parent && parent.startsWith(cwd) && (
+      {parent && parent.startsWith(base) && (
         <div
           onClick={() => setRoot(parent)}
           title={parent}
@@ -344,9 +362,39 @@ export default function FileTree({
           y={menu.y}
           onClose={() => setMenu(null)}
           items={[
+            ...(menu.isDir
+              ? [
+                  {
+                    label: "在此打开新终端",
+                    onSelect: () => onOpenTerminal(menu.path),
+                  },
+                  {
+                    label: "新建文件夹",
+                    onSelect: async () => {
+                      const name = window.prompt("新建文件夹名称：");
+                      if (!name?.trim()) return;
+                      try {
+                        await invoke("fs_create_dir", { root: menu.path, name: name.trim() });
+                        for (const p of [root, ...expandedRef.current]) void load(p);
+                      } catch (e) {
+                        setError(String(e));
+                      }
+                    },
+                  },
+                ]
+              : []),
             {
-              label: "在此打开新终端",
-              onSelect: () => onOpenTerminal(menu.path),
+              label: menu.isDir ? "删除目录" : "删除文件",
+              onSelect: async () => {
+                if (!window.confirm(`删除「${menu.path}」${menu.isDir ? "（含全部内容）" : ""}？不可恢复。`))
+                  return;
+                try {
+                  await invoke("fs_delete_path", { path: menu.path, root: base });
+                  for (const p of [root, ...expandedRef.current]) void load(p);
+                } catch (e) {
+                  setError(String(e));
+                }
+              },
             },
           ]}
         />
