@@ -72,16 +72,14 @@ export default function FileTree({
   // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动；base = 可导航范围上限
   const [root, setRoot] = useState(cwd);
   const [base, setBase] = useState(cwd);
-  const historyRef = useRef<string[]>([]);
-
-  /** 带历史的导航：所有主动跳转都走这里，「←」可返回 */
+  /** 所有主动跳转统一走 nav（语义标记，保持单点） */
   function nav(path: string) {
-    historyRef.current.push(root);
     setRoot(path);
   }
-  function navBack() {
-    const prev = historyRef.current.pop();
-    if (prev) setRoot(prev);
+  /** 返回上一级目录（不受项目范围限制） */
+  function goUp() {
+    const p = parentDir(root);
+    if (p) setRoot(p);
   }
   const [recent, setRecent] = useState<RepoDto[]>([]);
 
@@ -103,7 +101,6 @@ export default function FileTree({
   useEffect(() => {
     setRoot(cwd);
     setBase(cwd);
-    historyRef.current = [];
   }, [cwd]);
 
   const load = useCallback(
@@ -356,10 +353,10 @@ export default function FileTree({
         className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-l1"
         title={root}
       >
-        {historyRef.current.length > 0 && (
+        {parent && (
           <button
-            onClick={navBack}
-            title={`返回 ${historyRef.current[historyRef.current.length - 1]}`}
+            onClick={goUp}
+            title={`上一级：${parent}`}
             className="shrink-0 text-l4 hover:text-l1"
           >
             ←
@@ -376,7 +373,6 @@ export default function FileTree({
                 setRoot(cwd);
                 setBase(cwd);
                 setError(null);
-                historyRef.current = [];
               }}
               className="mt-0.5 text-xs text-link hover:underline"
             >
@@ -385,15 +381,7 @@ export default function FileTree({
           )}
         </div>
       )}
-      {parent && parent.startsWith(base) && (
-        <div
-          onClick={() => nav(parent)}
-          title={parent}
-          className="cursor-pointer px-2 py-0.5 text-xs text-l4 hover:bg-white/5 hover:text-l2"
-        >
-          ‥ 上级目录
-        </div>
-      )}
+
       {results !== null ? (
         <div className="min-h-0 flex-1 overflow-auto">
           {results.length === 0 ? (
