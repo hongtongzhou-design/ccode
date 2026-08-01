@@ -3190,6 +3190,24 @@ pub async fn delete_project_sessions(agent: String, project_path: String) -> Res
     Ok(count)
 }
 
+/// 会话文件签名（mtime_ms, size）：轮询时先比对签名，没变就不重解析
+#[tauri::command]
+pub async fn session_file_sig(file_path: String) -> Option<(u64, u64)> {
+    let p = if let Some(stripped) = file_path.strip_prefix("~/") {
+        dirs::home_dir()?.join(stripped)
+    } else {
+        std::path::PathBuf::from(&file_path)
+    };
+    let md = std::fs::metadata(p).ok()?;
+    let mtime_ms = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    Some((mtime_ms, md.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

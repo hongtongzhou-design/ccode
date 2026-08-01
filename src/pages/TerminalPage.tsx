@@ -484,9 +484,19 @@ const TerminalView = memo(function TerminalView({
     }
   }
 
-  async function fetchConversation() {
+  const convSigRef = useRef("");
+
+  async function fetchConversation(force = false) {
     const ctx = linkCtxRef.current;
     if (!ctx?.filePath) return;
+    // 签名门控：文件 mtime/size 没变就跳过本轮（避免每 3 秒全量重解析长会话）
+    if (!force) {
+      const sig = await invoke<[number, number] | null>("session_file_sig", {
+        filePath: ctx.filePath,
+      }).catch(() => null);
+      if (sig && `${sig[0]}:${sig[1]}` === convSigRef.current) return;
+      if (sig) convSigRef.current = `${sig[0]}:${sig[1]}`;
+    }
     try {
       const msgs = await invoke<ChatMessageDto[]>("get_session_conversation", {
         agent: ctx.agentId,
@@ -546,7 +556,7 @@ const TerminalView = memo(function TerminalView({
       const hit = await findSessionFile();
       if (hit) lockLink(hit.filePath, hit.sessionId);
     }
-    await fetchConversation();
+    await fetchConversation(true);
   }
 
   function resetLink() {
@@ -554,6 +564,7 @@ const TerminalView = memo(function TerminalView({
     const sid = linkCtxRef.current?.sessionId;
     if (sid) setLiveSession(sid, null);
     linkCtxRef.current = null;
+    convSigRef.current = "";
     setSessionFile(null);
     setConv([]);
     setAttention(null);
