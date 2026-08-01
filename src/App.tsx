@@ -1,14 +1,25 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import ErrorBoundary from "./components/ErrorBoundary";
 import "./App.css";
-import ProfilesPage from "./pages/ProfilesPage";
-import SessionsPage from "./pages/SessionsPage";
-import SettingsPage from "./pages/SettingsPage";
-import SkillsPage from "./pages/SkillsPage";
-import StatsPage from "./pages/StatsPage";
-import TerminalPage from "./pages/TerminalPage";
-import WorkspacesPage from "./pages/WorkspacesPage";
 import { useAppStore } from "./store";
+
+// 页面懒加载：首屏只拉当前页 chunk，其余页首次访问时才加载
+const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
+const SessionsPage = lazy(() => import("./pages/SessionsPage"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage"));
+const SkillsPage = lazy(() => import("./pages/SkillsPage"));
+const StatsPage = lazy(() => import("./pages/StatsPage"));
+const TerminalPage = lazy(() => import("./pages/TerminalPage"));
+const WorkspacesPage = lazy(() => import("./pages/WorkspacesPage"));
+
+function PageLoading() {
+  return (
+    <div className="flex h-full items-center justify-center text-sm text-l3">
+      加载中…
+    </div>
+  );
+}
 
 const NAV: { id: string; label: string; icon: string }[] = [
   { id: "profiles", label: "配置", icon: "⇄" },
@@ -36,12 +47,45 @@ function App() {
   const loadSessions = useAppStore((s) => s.loadSessions);
   const loadSettings = useAppStore((s) => s.loadSettings);
 
+  // 记录访问过的页面：懒加载的页面首次访问后才挂载，之后保持挂载（切回状态不丢、终端不断线）
+  const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set([page]));
+  useEffect(() => {
+    setVisited((v) => (v.has(page) ? v : new Set(v).add(page)));
+  }, [page]);
+
   useEffect(() => {
     loadAll().catch((e) => console.error(e));
     loadSessions().catch((e) => console.error(e));
     // 设置（含主题）在启动时加载并应用
     loadSettings().catch((e) => console.error(e));
   }, [loadAll, loadSessions, loadSettings]);
+
+  // 前端未捕获异常上报到进程内日志缓冲（设置页「诊断」可见）；同消息 5s 去重防刷屏
+  useEffect(() => {
+    const last = new Map<string, number>();
+    const report = (source: string, message: string) => {
+      const now = Date.now();
+      if (now - (last.get(message) ?? 0) < 5000) return;
+      last.set(message, now);
+      invoke("log_event", { level: "error", source, message }).catch(() => {});
+    };
+    const onError = (e: ErrorEvent) => {
+      report("onerror", `${e.message} @ ${e.filename}:${e.lineno}`);
+    };
+    const onRejection = (e: PromiseRejectionEvent) => {
+      const r = e.reason;
+      report(
+        "unhandledrejection",
+        r instanceof Error ? (r.stack ?? r.message) : String(r),
+      );
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+  }, []);
 
   // 跨实例同步：窗口重新聚焦/可见时重拉配置、设置与会话（2s 节流）。
   // 双开场景（worktree 演示）里另一个实例的改动能即时反映过来。
@@ -112,27 +156,55 @@ function App() {
         </button>
       </aside>
       <main className="min-w-0 flex-1">
-        {/* 页面保持挂载，切换标签不销毁终端 */}
+        {/* 页面保持挂载，切换标签不销毁终端；未访问过的页不挂载（懒加载） */}
         <div className={page === "profiles" ? "h-full overflow-auto" : "hidden"}>
-          <ProfilesPage />
+          {visited.has("profiles") && (
+            <Suspense fallback={<PageLoading />}>
+              <ProfilesPage />
+            </Suspense>
+          )}
         </div>
         <div className={page === "workspaces" ? "h-full" : "hidden"}>
-          <WorkspacesPage visible={page === "workspaces"} />
+          {visited.has("workspaces") && (
+            <Suspense fallback={<PageLoading />}>
+              <WorkspacesPage visible={page === "workspaces"} />
+            </Suspense>
+          )}
         </div>
         <div className={page === "terminal" ? "h-full" : "hidden"}>
-          <TerminalPage visible={page === "terminal"} />
+          {visited.has("terminal") && (
+            <Suspense fallback={<PageLoading />}>
+              <TerminalPage visible={page === "terminal"} />
+            </Suspense>
+          )}
         </div>
         <div className={page === "sessions" ? "h-full" : "hidden"}>
-          <SessionsPage visible={page === "sessions"} />
+          {visited.has("sessions") && (
+            <Suspense fallback={<PageLoading />}>
+              <SessionsPage visible={page === "sessions"} />
+            </Suspense>
+          )}
         </div>
         <div className={page === "skills" ? "h-full" : "hidden"}>
-          <SkillsPage visible={page === "skills"} />
+          {visited.has("skills") && (
+            <Suspense fallback={<PageLoading />}>
+              <SkillsPage visible={page === "skills"} />
+            </Suspense>
+          )}
         </div>
         <div className={page === "stats" ? "h-full overflow-auto" : "hidden"}>
-          <StatsPage visible={page === "stats"} />
+          {visited.has("stats") && (
+            <Suspense fallback={<PageLoading />}>
+              <StatsPage visible={page === "stats"} />
+            </Suspense>
+          )}
         </div>
         <div className={page === "settings" ? "h-full overflow-auto" : "hidden"}>
-          <SettingsPage visible={page === "settings"} />
+          {visited.has("settings") && (
+            <Suspense fallback={<PageLoading />}>
+              <SettingsPage visible={page === "settings"} />
+            </Suspense>
+          )}
         </div>
       </main>
       </div>

@@ -3,7 +3,8 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 // ===== DTO =====
 
@@ -361,6 +362,8 @@ fn create_impl(
     .map_err(|e| format!("写入 workspaces 失败: {e}"))?;
     let mut dto = get_workspace(conn, &id)?;
     dto.setup_result = setup_result;
+    // 新工作区会改变 list_repos 的聚合结果（worktree 路径需被排除），主动失效
+    invalidate_repo_cache();
     Ok(dto)
 }
 
@@ -600,7 +603,8 @@ fn merge_impl(conn: &Connection, id: &str) -> Result<String, String> {
 
 fn pr_impl(conn: &Connection, id: &str, title: &str, body: Option<String>) -> Result<String, String> {
     // 复用机器上的 gh CLI 认证，不做应用内 GitHub 登录
-    let gh_ok = Command::new("gh")
+    let gh = crate::agents::resolve_binary("gh").ok_or("需要安装 gh CLI")?;
+    let gh_ok = Command::new(&gh)
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -631,7 +635,7 @@ fn pr_impl(conn: &Connection, id: &str, title: &str, body: Option<String>) -> Re
             }
         }
     };
-    let mut cmd = Command::new("gh");
+    let mut cmd = Command::new(&gh);
     cmd.current_dir(&wt)
         .args(["pr", "create", "--base", &w.base_branch, "--head", &w.branch, "--title", title, "--body", &body])
         .stdout(Stdio::piped())
@@ -737,15 +741,45 @@ pub struct RepoDto {
     pub name: String,
 }
 
+// ===== list_repos 进程内缓存：全量扫描要逐目录跑 git，TTL 内直接复用 =====
+
+const REPO_CACHE_TTL: Duration = Duration::from_secs(60);
+static REPO_CACHE: OnceLock<Mutex<Option<(Instant, Vec<RepoDto>)>>> = OnceLock::new();
+
+fn repo_cache() -> &'static Mutex<Option<(Instant, Vec<RepoDto>)>> {
+    REPO_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// 缓存命中判断（纯函数，注入 now 便于测试）；时钟回拨按过期处理
+fn repo_cache_hit(cached: &Option<(Instant, Vec<RepoDto>)>, now: Instant, ttl: Duration) -> Option<Vec<RepoDto>> {
+    cached.as_ref().and_then(|(ts, repos)| {
+        now.checked_duration_since(*ts)
+            .filter(|elapsed| *elapsed < ttl)
+            .map(|_| repos.clone())
+    })
+}
+
+/// 主动失效：新建工作区会改变聚合结果（新增 worktree 路径），成功后必须清掉
+fn invalidate_repo_cache() {
+    if let Ok(mut guard) = repo_cache().lock() {
+        *guard = None;
+    }
+}
+
 /// 新建工作区的仓库候选：来自会话聚合目录，只保留真实存在的 git 仓库，
 /// 排除 home 目录与 worktree 路径（非 git 仓库创建必失败，混杂会误导用户）
 #[tauri::command]
 pub async fn list_repos() -> Vec<RepoDto> {
     tauri::async_runtime::spawn_blocking(|| {
+        if let Ok(guard) = repo_cache().lock() {
+            if let Some(hit) = repo_cache_hit(&guard, Instant::now(), REPO_CACHE_TTL) {
+                return hit;
+            }
+        }
         let home = dirs::home_dir();
         let ws_root = workspaces_root().unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
-        crate::sessions::cached_scan()
+        let repos: Vec<RepoDto> = crate::sessions::cached_scan()
             .sessions
             .into_iter()
             .filter_map(|s| std::fs::canonicalize(&s.project_path).ok())
@@ -765,7 +799,12 @@ pub async fn list_repos() -> Vec<RepoDto> {
                     .unwrap_or_else(|| "repo".into()),
                 path: p.to_string_lossy().into_owned(),
             })
-            .collect()
+            .collect();
+        // 时间戳取扫描完成后，TTL 从最新数据起算
+        if let Ok(mut guard) = repo_cache().lock() {
+            *guard = Some((Instant::now(), repos.clone()));
+        }
+        repos
     })
     .await
     .unwrap_or_default()
@@ -854,6 +893,38 @@ mod tests {
         assert_eq!(sanitize_name("fix bug!").unwrap(), "fix-bug");
         assert_eq!(sanitize_name("feat-x").unwrap(), "feat-x");
         assert!(sanitize_name("我的").is_err(), "全非允许字符清洗后为空要拒绝");
+    }
+
+    #[test]
+    fn repo_cache_hit_within_ttl_and_expired() {
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(60);
+        let cached = Some((t0, vec![RepoDto { path: "/r".into(), name: "r".into() }]));
+        // TTL 内命中，返回缓存副本
+        let hit = repo_cache_hit(&cached, t0 + Duration::from_secs(59), ttl).unwrap();
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].path, "/r");
+        // 到期（含恰好在边界）视为过期 → None，走重扫
+        assert!(repo_cache_hit(&cached, t0 + ttl, ttl).is_none());
+        assert!(repo_cache_hit(&cached, t0 + Duration::from_secs(120), ttl).is_none());
+        // 空缓存 → None
+        assert!(repo_cache_hit(&None, t0, ttl).is_none());
+        // 时钟回拨按过期处理，不命中也不 panic
+        if let Some(earlier) = t0.checked_sub(Duration::from_secs(1)) {
+            assert!(repo_cache_hit(&cached, earlier, ttl).is_none());
+        }
+    }
+
+    #[test]
+    fn create_workspace_invalidates_repo_cache() {
+        let Some(fx) = Fixture::new() else { return };
+        *repo_cache().lock().unwrap() =
+            Some((Instant::now(), vec![RepoDto { path: "/r".into(), name: "r".into() }]));
+        create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "cache-inv").unwrap();
+        assert!(
+            repo_cache().lock().unwrap().is_none(),
+            "create_workspace 成功后 list_repos 缓存必须失效"
+        );
     }
 
     #[test]

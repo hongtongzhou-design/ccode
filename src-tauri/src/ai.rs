@@ -118,7 +118,8 @@ fn ai_prompt_impl(profiles: Vec<Profile>, profile_id: Option<String>, prompt: St
     let profile = resolve_profile_from(profiles, profile_id, dedicated)?;
     let binary = agents::binary_for(&profile.agent)
         .ok_or_else(|| format!("profile 所属 agent 不支持无头调用: {}", profile.agent))?;
-    let binary_path = which::which(binary).map_err(|_| format!("未在 PATH 找到 {binary}"))?;
+    let binary_path = agents::resolve_binary(binary)
+        .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
     // 密钥只在调用瞬间读出注入子进程，与终端启动同一约束
     let key = profiles::get_key(&profile.id);
     let plan = agents::launch_plan(&profile, key, profile.models.first().map(|s| s.as_str()));

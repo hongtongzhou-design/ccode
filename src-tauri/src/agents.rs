@@ -26,10 +26,66 @@ const AGENTS: [(&str, &str); 6] = [
     ("kimi", "kimi"),
 ];
 
+/// 解析 CLI 二进制的绝对路径：先 which（继承进程 PATH），miss 时按平台查常见
+/// 安装目录兜底。背景：macOS 打包版从 Finder 启动时 PATH 很短（/usr/bin:/bin），
+/// brew/npm 装的 CLI 不在其中（AGENTS.md 本机环境档案「GUI 应用 PATH 很短」）。
+/// 所有二进制定位一律走这里，不再直接 which / 裸名 spawn。
+pub fn resolve_binary(name: &str) -> Option<std::path::PathBuf> {
+    if let Ok(p) = which::which(name) {
+        return Some(p);
+    }
+    find_in_dirs(name, &candidate_dirs())
+}
+
+/// 在候选目录里按序找第一个存在的文件；Windows 下 npm 全局包是 .cmd shim，补扩展名匹配
+fn find_in_dirs(name: &str, dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let names: Vec<String> = if cfg!(windows) {
+        vec![name.into(), format!("{name}.exe"), format!("{name}.cmd")]
+    } else {
+        vec![name.into()]
+    };
+    dirs.iter()
+        .flat_map(|d| names.iter().map(move |n| d.join(n)))
+        .find(|p| p.is_file())
+}
+
+/// which miss 后的兜底候选目录（按优先级排序）；用户目录一律走 dirs 抽象，禁写死
+fn candidate_dirs() -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        out.push("/opt/homebrew/bin".into()); // Apple Silicon brew
+        out.push("/usr/local/bin".into()); // Intel brew / 手动安装
+        if let Some(h) = dirs::home_dir() {
+            out.push(h.join(".npm-global/bin"));
+            out.push(h.join(".local/bin"));
+            out.push(h.join("bin"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(h) = dirs::home_dir() {
+            out.push(h.join(".local/bin"));
+        }
+        out.push("/usr/local/bin".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // %LOCALAPPDATA%\Programs、%APPDATA%\npm（npm 全局 bin 目录）
+        if let Some(local) = dirs::data_local_dir() {
+            out.push(local.join("Programs"));
+        }
+        if let Some(roaming) = dirs::data_dir() {
+            out.push(roaming.join("npm"));
+        }
+    }
+    out
+}
+
 fn detect(binary: &str) -> (Option<String>, Option<String>) {
-    let path = match which::which(binary) {
-        Ok(p) => p,
-        Err(_) => return (None, None),
+    let path = match resolve_binary(binary) {
+        Some(p) => p,
+        None => return (None, None),
     };
     let version = Command::new(&path)
         .arg("--version")
@@ -703,5 +759,58 @@ mod tests {
             args[1]
         );
         assert!(args[1].contains("codex-1.json"));
+    }
+
+    #[test]
+    fn find_in_dirs_picks_first_existing_candidate() {
+        let base = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let d1 = base.join("d1");
+        let d2 = base.join("d2");
+        std::fs::create_dir_all(&d1).unwrap();
+        std::fs::create_dir_all(&d2).unwrap();
+        std::fs::write(d1.join("tool"), "x").unwrap();
+        std::fs::write(d2.join("tool"), "x").unwrap();
+        // 两个目录都有同名文件时排前的目录胜出
+        assert_eq!(
+            find_in_dirs("tool", &[d1.clone(), d2.clone()]),
+            Some(d1.join("tool"))
+        );
+        // 只在后一个候选目录存在也能找到（前面的目录 miss 不阻断）
+        assert_eq!(
+            find_in_dirs("tool", &[base.join("nope"), d2.clone()]),
+            Some(d2.join("tool"))
+        );
+        // 目录不存在 / 文件不存在 → None
+        assert_eq!(find_in_dirs("tool", &[base.join("nope")]), None);
+        assert_eq!(find_in_dirs("ghost", &[d1.clone(), d2.clone()]), None);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_in_dirs_matches_exe_and_cmd_shims_on_windows() {
+        let base = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        // npm 全局包在 Windows 上是 .cmd shim：裸名找不到、带扩展名能命中
+        std::fs::write(base.join("tool.cmd"), "x").unwrap();
+        assert_eq!(
+            find_in_dirs("tool", &[base.clone()]),
+            Some(base.join("tool.cmd"))
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn resolve_binary_returns_none_for_unknown_name() {
+        // 名字足够独特：PATH 与各平台候选目录都不会有
+        assert!(resolve_binary("ccode-no-such-binary-9f8e7d6c").is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_dirs_cover_homebrew_prefixes() {
+        let dirs = candidate_dirs();
+        assert!(dirs.iter().any(|d| d == std::path::Path::new("/opt/homebrew/bin")));
+        assert!(dirs.iter().any(|d| d == std::path::Path::new("/usr/local/bin")));
     }
 }

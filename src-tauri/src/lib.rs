@@ -3,6 +3,7 @@ mod ai;
 mod fs_tree;
 mod git_info;
 mod global_config;
+mod logbuf;
 mod models;
 mod pricing;
 mod profiles;
@@ -51,6 +52,10 @@ pub fn run() {
             sessions::delete_session,
             sessions::delete_project_sessions,
             sessions::session_tail_state,
+            sessions::export_session_markdown,
+            logbuf::get_app_log,
+            logbuf::clear_app_log,
+            logbuf::log_event,
             fs_tree::list_dir,
             fs_tree::read_file_preview,
             fs_tree::save_file_preview,

@@ -3003,6 +3003,127 @@ pub(crate) fn conversation_impl(agent: &str, file_path: &str) -> Vec<ChatMessage
     }
 }
 
+// ===== 导出 Markdown =====
+
+/// 文件名安全化：过滤各平台非法字符与路径分隔符/控制字符，限长，空则兜底
+fn sanitize_export_name(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    if trimmed.is_empty() {
+        return "session".into();
+    }
+    trimmed.chars().take(60).collect()
+}
+
+/// 代码围栏长度取内容中最长反引号串 +1（最少 3），防内容里的 ``` 提前闭合围栏
+fn fence_for(text: &str) -> String {
+    let mut max_run = 0usize;
+    let mut run = 0usize;
+    for c in text.chars() {
+        if c == '`' {
+            run += 1;
+            max_run = max_run.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat((max_run + 1).max(3))
+}
+
+/// 会话渲染为 Markdown：标题/时间/agent 信息头 + 对话正文，工具调用与思考折叠为代码块
+pub(crate) fn render_markdown(
+    agent: &str,
+    session_id: &str,
+    title: &str,
+    msgs: &[ChatMessageDto],
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {title}\n\n"));
+    out.push_str(&format!("- Agent: {agent}\n"));
+    out.push_str(&format!("- Session: {session_id}\n"));
+    let first_ts = msgs.iter().find_map(|m| m.timestamp.clone());
+    let last_ts = msgs.iter().rev().find_map(|m| m.timestamp.clone());
+    if let Some(t0) = &first_ts {
+        let range = match &last_ts {
+            Some(t1) if t1 != t0 => format!("{t0} → {t1}"),
+            _ => t0.clone(),
+        };
+        out.push_str(&format!("- 时间: {range}\n"));
+    }
+    out.push_str(&format!("- 消息数: {}\n\n---\n", msgs.len()));
+
+    for m in msgs {
+        let role = if m.role == "user" { "用户" } else { "助手" };
+        let ts = m
+            .timestamp
+            .as_deref()
+            .map(|t| format!(" · {t}"))
+            .unwrap_or_default();
+        out.push_str(&format!("\n## {role}{ts}\n"));
+        for b in &m.blocks {
+            match b.kind.as_str() {
+                "text" => out.push_str(&format!("\n{}\n", b.text)),
+                "thinking" => {
+                    let f = fence_for(&b.text);
+                    out.push_str(&format!("\n**思考**\n\n{f}text\n{}\n{f}\n", b.text));
+                }
+                "tool_use" => {
+                    let name = b.tool_name.as_deref().unwrap_or("tool");
+                    let f = fence_for(&b.text);
+                    out.push_str(&format!(
+                        "\n**工具调用: {name}**\n\n{f}\n{}\n{f}\n",
+                        b.text
+                    ));
+                }
+                "tool_result" => {
+                    let f = fence_for(&b.text);
+                    out.push_str(&format!("\n**工具结果**\n\n{f}\n{}\n{f}\n", b.text));
+                }
+                // 未知块类型防御式跳过（解析器随 CLI 版本漂移）
+                _ => {}
+            }
+        }
+        if let Some(u) = &m.usage {
+            out.push_str(&format!(
+                "\n<sub>tokens: ↑{} ↓{}</sub>\n",
+                u.input, u.output
+            ));
+        }
+    }
+    out
+}
+
+/// 导出当前会话为 Markdown 到 ~/Downloads/ccode-exports/，返回导出文件路径
+#[tauri::command]
+pub fn export_session_markdown(
+    agent: String,
+    session_id: String,
+    file_path: String,
+    title: String,
+) -> Result<String, String> {
+    let msgs = conversation_impl(&agent, &file_path);
+    if msgs.is_empty() {
+        return Err("会话没有可导出的内容".into());
+    }
+    let md = render_markdown(&agent, &session_id, &title, &msgs);
+    let downloads = dirs::download_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+        .ok_or("无法确定下载目录")?;
+    let dir = downloads.join("ccode-exports");
+    fs::create_dir_all(&dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
+    let id8: String = session_id.chars().take(8).collect();
+    let path = dir.join(format!("{}-{id8}.md", sanitize_export_name(&title)));
+    fs::write(&path, md).map_err(|e| format!("写入导出文件失败: {e}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub fn pin_session(agent: String, session_id: String, file_path: String) -> Result<(), String> {
     if agent == "opencode" {
@@ -4229,6 +4350,76 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         // 文件缺失 → unknown
         assert_eq!(tail_state_impl("claude-code", "/nonexistent/x.jsonl"), "unknown");
+    }
+
+    // ===== 导出 Markdown =====
+
+    fn msg(role: &str, blocks: Vec<(&str, &str, Option<&str>)>, ts: Option<&str>) -> ChatMessageDto {
+        ChatMessageDto {
+            role: role.into(),
+            blocks: blocks
+                .into_iter()
+                .map(|(kind, text, tool)| BlockDto {
+                    kind: kind.into(),
+                    text: text.into(),
+                    tool_name: tool.map(|t| t.into()),
+                })
+                .collect(),
+            timestamp: ts.map(|t| t.into()),
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn render_markdown_header_and_sections() {
+        let msgs = vec![
+            msg("user", vec![("text", "帮我修 bug", None)], Some("2026-07-01T00:00:01Z")),
+            msg(
+                "assistant",
+                vec![
+                    ("thinking", "想想", None),
+                    ("text", "好的", None),
+                    ("tool_use", "{\"file_path\":\"/a\"}", Some("Read")),
+                    ("tool_result", "file body", None),
+                ],
+                Some("2026-07-01T00:00:02Z"),
+            ),
+        ];
+        let md = render_markdown("claude-code", "abcdef123456", "修 bug", &msgs);
+        assert!(md.starts_with("# 修 bug\n"));
+        assert!(md.contains("- Agent: claude-code\n"));
+        assert!(md.contains("- Session: abcdef123456\n"));
+        assert!(md.contains("- 时间: 2026-07-01T00:00:01Z → 2026-07-01T00:00:02Z\n"));
+        assert!(md.contains("- 消息数: 2\n"));
+        assert!(md.contains("## 用户 · 2026-07-01T00:00:01Z\n"));
+        assert!(md.contains("## 助手 · 2026-07-01T00:00:02Z\n"));
+        assert!(md.contains("**思考**\n\n```text\n想想\n```\n"));
+        assert!(md.contains("**工具调用: Read**\n\n```\n{\"file_path\":\"/a\"}\n```\n"));
+        assert!(md.contains("**工具结果**\n\n```\nfile body\n```\n"));
+    }
+
+    #[test]
+    fn render_markdown_fence_grows_with_backticks() {
+        let msgs = vec![msg(
+            "assistant",
+            vec![("tool_result", "```js\ncode\n```", None)],
+            None,
+        )];
+        let md = render_markdown("claude-code", "s", "t", &msgs);
+        // 内容含 ``` 时围栏必须是 ````，保证原样保留
+        assert!(md.contains("````\n```js\ncode\n```\n````\n"));
+        // 无时间戳时头部不出现时间行，消息头不带时间
+        assert!(!md.contains("- 时间:"));
+        assert!(md.contains("## 助手\n"));
+    }
+
+    #[test]
+    fn sanitize_export_name_filters_illegal_chars() {
+        assert_eq!(sanitize_export_name("修 bug"), "修 bug");
+        assert_eq!(sanitize_export_name("a/b\\c:d*e?f\"g<h>i|j"), "a-b-c-d-e-f-g-h-i-j");
+        assert_eq!(sanitize_export_name(""), "session");
+        assert_eq!(sanitize_export_name("..."), "session");
+        assert_eq!(sanitize_export_name("x".repeat(100).as_str()).chars().count(), 60);
     }
 }
 

@@ -1,17 +1,20 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { useAppStore } from "../store";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
-import FilePreviewEditor from "../components/FilePreviewEditor";
 import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
 import type { ChatMessageDto, SessionMetaDto } from "../types";
+
+// Monaco 体积大，首次打开文件预览时才加载
+const FilePreviewEditor = lazy(() => import("../components/FilePreviewEditor"));
 
 type PtyKind = "agent" | "shell";
 
@@ -203,9 +206,70 @@ const TerminalView = memo(function TerminalView({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
   const ptyIdRef = useRef<string | null>(null);
   const ptyKindRef = useRef<PtyKind | null>(null);
   const unlistenRef = useRef<(() => void)[]>([]);
+
+  // —— 输出搜索（SearchAddon）：搜索条只作用于本标签的 xterm 实例 ——
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  /** xterm 画布内的匹配高亮色（与主题无关，参照 VS Code Dark+ 查找高亮） */
+  const SEARCH_OPTS = {
+    decorations: {
+      matchBackground: "#3a5a8a",
+      matchOverviewRuler: "#3a5a8a",
+      activeMatchBackground: "#5a7ba8",
+      activeMatchColorOverviewRuler: "#5a7ba8",
+    },
+  };
+
+  const findNext = useCallback(
+    (q?: string) => {
+      const query = q ?? searchQuery;
+      if (query) searchRef.current?.findNext(query, SEARCH_OPTS);
+    },
+    // SEARCH_OPTS 为渲染期常量，无需入依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [searchQuery],
+  );
+
+  const findPrev = useCallback(() => {
+    if (searchQuery) searchRef.current?.findPrevious(searchQuery, SEARCH_OPTS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
+
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    searchRef.current?.clearDecorations();
+    termRef.current?.focus();
+  }, []);
+
+  // 切走标签（或整页隐藏）时收起搜索条，避免隐藏标签残留查找态
+  useEffect(() => {
+    if (!visible) setSearchOpen(false);
+  }, [visible]);
+
+  // 搜索条打开时聚焦输入框并选中已有文本
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.select();
+  }, [searchOpen]);
+
+  // Cmd/Ctrl+F 呼出搜索条：只挂当前可见标签，保证只作用于活跃终端。
+  // 终端聚焦时按键经 xterm 的 customKeyEventHandler 拦截（见创建 effect），这里兜底页面其余焦点。
+  useEffect(() => {
+    if (!visible) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [visible]);
 
   // —— 会话联动（SessionLink）：轮询在本地，展示数据上报给页面级右侧面板 ——
   const [sessionFile, setSessionFile] = useState<string | null>(null);
@@ -301,6 +365,8 @@ const TerminalView = memo(function TerminalView({
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    const search = new SearchAddon();
+    term.loadAddon(search);
     term.open(containerRef.current!);
     try {
       fit.fit();
@@ -309,6 +375,16 @@ const TerminalView = memo(function TerminalView({
     }
     termRef.current = term;
     fitRef.current = fit;
+    searchRef.current = search;
+
+    // Cmd/Ctrl+F 在终端聚焦时也呼出搜索条（拦在 xterm 之前，避免 Ctrl+F 字符进 PTY）
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === "keydown" && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        setSearchOpen(true);
+        return false;
+      }
+      return true;
+    });
 
     // WebGL 渲染（优化 3）：加载失败/上下文丢失时退回默认 DOM 渲染
     try {
@@ -781,6 +857,13 @@ const TerminalView = memo(function TerminalView({
         >
           会话
         </button>
+        <button
+          onClick={() => setSearchOpen(true)}
+          title="查找终端输出（Cmd/Ctrl+F）"
+          className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+        >
+          ◎ 查找
+        </button>
         {shellActive && !running && (
           <span className="text-sm text-l3">shell 模式</span>
         )}
@@ -854,6 +937,13 @@ const TerminalView = memo(function TerminalView({
               会话
             </button>
             <button
+              onClick={() => setSearchOpen(true)}
+              title="查找终端输出（Cmd/Ctrl+F）"
+              className="text-l3 hover:text-l1"
+            >
+              ◎查找
+            </button>
+            <button
               onClick={() => setBarExpanded(true)}
               title="重新展开启动栏"
               className="text-l3 hover:text-l1"
@@ -861,6 +951,52 @@ const TerminalView = memo(function TerminalView({
               修改
             </button>
           </span>
+        </div>
+      )}
+      {/* 输出搜索条：Cmd/Ctrl+F 或「查找」按钮呼出；只作用于本标签的 xterm */}
+      {searchOpen && (
+        <div className="mb-1 flex items-center gap-1 rounded border border-hairline bg-strip px-2 py-1">
+          <input
+            ref={searchInputRef}
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              findNext(e.target.value);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (e.shiftKey) findPrev();
+                else findNext();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                closeSearch();
+              }
+            }}
+            placeholder="查找终端输出"
+            className="w-56 rounded border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+          />
+          <button
+            onClick={findPrev}
+            title="上一个（Shift+Enter）"
+            className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+          >
+            ↑
+          </button>
+          <button
+            onClick={() => findNext()}
+            title="下一个（Enter）"
+            className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+          >
+            ↓
+          </button>
+          <button
+            onClick={closeSearch}
+            title="关闭（Esc）"
+            className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+          >
+            ×
+          </button>
         </div>
       )}
       <div className="flex min-h-0 flex-1">
@@ -1407,11 +1543,19 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           </div>
           <div className={rightTab === "preview" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
               {preview ? (
-                <FilePreviewEditor
-                  path={preview.path}
-                  root={preview.root ?? activeCwd}
-                  onDirtyChange={setPreviewDirty}
-                />
+                <Suspense
+                  fallback={
+                    <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-l3">
+                      加载中…
+                    </div>
+                  }
+                >
+                  <FilePreviewEditor
+                    path={preview.path}
+                    root={preview.root ?? activeCwd}
+                    onDirtyChange={setPreviewDirty}
+                  />
+                </Suspense>
               ) : (
                 <div className="flex min-h-0 flex-1 flex-col">
                   <div className="flex shrink-0 items-center bg-strip px-3 py-1.5 text-xs text-l3">

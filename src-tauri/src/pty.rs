@@ -307,7 +307,8 @@ pub fn pty_spawn(
         return Err("profile 与所选 agent 不匹配".into());
     }
     let binary = agents::binary_for(&agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
-    let binary_path = which::which(binary).map_err(|_| format!("未在 PATH 找到 {binary}"))?;
+    let binary_path = agents::resolve_binary(binary)
+        .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
     // 密钥只在启动瞬间从钥匙串读出，注入子进程环境后即丢弃
     let key = profiles::get_key(&profile_id);
     let model = model

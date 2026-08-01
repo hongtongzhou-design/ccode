@@ -12,6 +12,28 @@ const port = Number(process.env.CCODE_PORT ?? 1420);
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
 
+  build: {
+    rollupOptions: {
+      output: {
+        // 大依赖拆独立 vendor chunk：首屏只载 react + 当前页，
+        // xterm 随终端页懒加载，monaco 随文件预览懒加载
+        manualChunks(id: string) {
+          if (!id.includes("node_modules")) return undefined;
+          if (/node_modules\/(react|react-dom|scheduler)\//.test(id)) return "react";
+          if (id.includes("node_modules/@xterm/")) return "xterm";
+          if (id.includes("node_modules/monaco-editor/")) {
+            // 语言定义/语言服务由 monaco 内部动态 import 按需加载，保持独立小 chunk
+            if (/monaco-editor\/esm\/vs\/(languages|language)\//.test(id)) {
+              return undefined;
+            }
+            return "monaco";
+          }
+          return undefined;
+        },
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

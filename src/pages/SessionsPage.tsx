@@ -186,6 +186,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   const [summary, setSummary] = useState<string | null>(null);
   const [aiSummarizing, setAiSummarizing] = useState(false);
+  // 导出 Markdown 结果路径（小字提示，随切换会话清空）
+  const [exporting, setExporting] = useState(false);
+  const [exportPath, setExportPath] = useState<string | null>(null);
   /** 回放区页签：对话 / 改动（改动 = 该会话项目的 git diff 面板） */
   const [replayTab, setReplayTab] = useState<"chat" | "diff">("chat");
 
@@ -208,6 +211,27 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  /** 导出当前回放会话为 Markdown（落 ~/Downloads/ccode-exports/，路径由后端返回） */
+  async function onExport() {
+    if (!selected) return;
+    setExporting(true);
+    setExportPath(null);
+    try {
+      const path = await invoke<string>("export_session_markdown", {
+        agent: selected.agent,
+        sessionId: selected.sessionId,
+        filePath: selected.filePath,
+        title: sessionTitle(selected),
+      });
+      setExportPath(path);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   // 终端页「⤴对话」跳转：按 sessionId 直接打开回放（列表加载完成后消费一次）
   useEffect(() => {
     if (!openSessionReq || sessions.length === 0) return;
@@ -227,6 +251,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setReplayTab("chat");
     // 摘要缓存命中：已有 summary 直接展示，不再调用 AI
     setSummary(s.summary ?? null);
+    setExportPath(null);
     setLoadingConv(true);
     setError(null);
     try {
@@ -857,6 +882,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   setSelected(null);
                   setMessages([]);
                   setSummary(null);
+                  setExportPath(null);
                   setReplayTab("chat");
                 }}
                 className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
@@ -895,6 +921,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 {aiSummarizing ? "◈ 摘要中…" : "◈ 摘要"}
               </button>
               <button
+                onClick={onExport}
+                disabled={exporting}
+                title="导出会话为 Markdown 到 ~/Downloads/ccode-exports/"
+                className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+              >
+                {exporting ? "导出中…" : "导出"}
+              </button>
+              <button
                 onClick={() => void togglePin(selected)}
                 className="ml-auto shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
               >
@@ -916,6 +950,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               </div>
             </div>
             {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
+            {exportPath && (
+              <p className="truncate px-4 py-1 text-xs text-l4" title={exportPath}>
+                已导出：{exportPath}
+              </p>
+            )}
             {replayTab === "diff" ? (
               <div className="flex min-h-0 flex-1 flex-col">
                 <GitPanel

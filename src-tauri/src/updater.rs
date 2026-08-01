@@ -233,6 +233,10 @@ pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String
 /// 带 900s 超时（杀直接子进程）；reader 在子进程退出后最多等 1 秒 drain，
 /// 其子孙（curl 等）可能持有 slave 导致永远无 EOF，绝不无限 join。
 fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program: &str, args: &[String], emit: F) -> (bool, String) {
+    // GUI 短 PATH 下 brew/npm 可能不在继承 PATH 里：先解析成绝对路径再 spawn
+    // （找不到时保留裸名，沿用原来的「启动失败」报错路径）
+    let program_path =
+        agents::resolve_binary(program).unwrap_or_else(|| std::path::PathBuf::from(program));
     let pair = match native_pty_system().openpty(PtySize {
         rows: 24,
         cols: 120,
@@ -242,7 +246,7 @@ fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program: &str, arg
         Ok(p) => p,
         Err(e) => return (false, format!("创建 PTY 失败: {e}")),
     };
-    let mut cmd = CommandBuilder::new(program);
+    let mut cmd = CommandBuilder::new(&program_path);
     for a in args {
         cmd.arg(a);
     }
@@ -349,12 +353,12 @@ fn run_streaming(app: &AppHandle, agent_id: &str, program: &str, args: &[String]
 
 fn update_agent_sync(app: &AppHandle, agent_id: &str) -> Result<UpdateResultDto, String> {
     let binary = agents::binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
-    let path = match which::which(binary) {
-        Ok(p) => p,
-        Err(_) => {
+    let path = match agents::resolve_binary(binary) {
+        Some(p) => p,
+        None => {
             return Ok(UpdateResultDto {
                 ok: false,
-                output: format!("未在 PATH 找到 {binary}，无法更新（请先在「配置」页确认安装）"),
+                output: format!("未找到 {binary}，无法更新（请先在「配置」页确认安装）"),
                 method: "none".into(),
                 version_before: None,
                 version_after: None,
@@ -482,7 +486,7 @@ fn pick_install(agent_id: &str, available: &dyn Fn(&str) -> bool) -> Option<Inst
 
 /// 展示用：选中的安装方式描述（UI 在确认框里先亮出来）
 fn install_method_for(agent_id: &str) -> Option<String> {
-    let available = |tool: &str| which::which(tool).is_ok();
+    let available = |tool: &str| agents::resolve_binary(tool).is_some();
     let s = pick_install(agent_id, &available)?;
     Some(format!("{}: {} {}", s.method, s.program, s.args.join(" ")))
 }
@@ -494,20 +498,20 @@ pub fn install_method_preview(agent_id: String) -> Option<String> {
 
 fn install_agent_sync(app: &AppHandle, agent_id: &str) -> Result<UpdateResultDto, String> {
     let binary = agents::binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
-    if which::which(binary).is_ok() {
+    if agents::resolve_binary(binary).is_some() {
         return Ok(UpdateResultDto {
             ok: false,
-            output: format!("{binary} 已在 PATH 中，无需安装（要升级请用「更新」）"),
+            output: format!("{binary} 已安装，无需重复安装（要升级请用「更新」）"),
             method: "none".into(),
             version_before: None,
             version_after: None,
         });
     }
-    let available = |tool: &str| which::which(tool).is_ok();
+    let available = |tool: &str| agents::resolve_binary(tool).is_some();
     let Some(s) = pick_install(agent_id, &available) else {
         return Ok(UpdateResultDto {
             ok: false,
-            output: "未找到可用的安装工具（brew / npm / uv / curl 都不在 PATH）".into(),
+            output: "未找到可用的安装工具（brew / npm / uv / curl 均不可用）".into(),
             method: "none".into(),
             version_before: None,
             version_after: None,
@@ -515,7 +519,7 @@ fn install_agent_sync(app: &AppHandle, agent_id: &str) -> Result<UpdateResultDto
     };
     let (ok, output) = run_streaming(app, agent_id, &s.program, &s.args);
     let version_after = if ok {
-        which::which(binary).ok().and_then(|p| version_of(&p))
+        agents::resolve_binary(binary).and_then(|p| version_of(&p))
     } else {
         None
     };

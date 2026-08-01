@@ -23,6 +23,9 @@ const THEMES = [
 const field =
   "rounded border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none focus:border-l4";
 
+/** 诊断日志条目（与后端 logbuf::LogEntryDto 对应） */
+type LogEntry = { ts: string; level: string; source: string; message: string };
+
 /** 分区折叠状态在 localStorage 的键（只记被折叠的分区，默认全部展开） */
 const SECTIONS_KEY = "ccode.settings.sections";
 
@@ -89,6 +92,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [pricing, setPricing] = useState("");
   const [pricingDirty, setPricingDirty] = useState(false);
   const [savingPricing, setSavingPricing] = useState(false);
+  // 诊断日志（进程内环形缓冲，分区展开时拉最近 100 条）
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   // 分区折叠状态：默认全部展开，切换时写 localStorage
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
     try {
@@ -169,6 +174,43 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setError(String(e));
     } finally {
       setSavingPricing(false);
+    }
+  }
+
+  async function loadLogs() {
+    try {
+      setLogs(await invoke<LogEntry[]>("get_app_log", { limit: 100 }));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  // 「诊断」分区展开（且页面可见）时拉取日志
+  useEffect(() => {
+    if (visible && !collapsed.diag) loadLogs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, collapsed.diag]);
+
+  async function clearLogs() {
+    setError(null);
+    try {
+      await invoke("clear_app_log");
+      setLogs([]);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function copyLogs() {
+    const text = logs
+      .map((l) => `${l.ts} [${l.level}] ${l.source}: ${l.message}`)
+      .join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setNotice("已复制到剪贴板");
+      setTimeout(() => setNotice(null), 3000);
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -365,6 +407,60 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           ))}
         </select>
       </Row>
+      </Section>
+
+      <Section title="诊断" open={!collapsed.diag} onToggle={() => toggleSection("diag")}>
+      <div className="py-3">
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-xs text-l4">
+            最近 100 条应用日志（进程内缓冲，重启即清空）
+          </span>
+          <button
+            onClick={loadLogs}
+            className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+          >
+            刷新
+          </button>
+          <button
+            onClick={copyLogs}
+            disabled={logs.length === 0}
+            className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+          >
+            复制全部
+          </button>
+          <button
+            onClick={clearLogs}
+            disabled={logs.length === 0}
+            className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+          >
+            清空
+          </button>
+        </div>
+        {logs.length === 0 ? (
+          <p className="text-xs text-l4">暂无日志</p>
+        ) : (
+          <div className="max-h-64 overflow-auto rounded bg-inset p-2 font-mono text-xs leading-5">
+            {logs.map((l, i) => (
+              <div key={i} className="break-all">
+                <span className="text-l4">{l.ts.replace("T", " ").replace("Z", "")} </span>
+                <span
+                  className={
+                    l.level === "error"
+                      ? "text-err-text"
+                      : l.level === "warn"
+                        ? "text-warn-text"
+                        : "text-l3"
+                  }
+                >
+                  [{l.level}]
+                </span>{" "}
+                <span className="text-l3">{l.source}:</span>{" "}
+                <span className="text-l2">{l.message}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
       </Section>
     </div>
   );
