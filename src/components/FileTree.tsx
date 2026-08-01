@@ -290,11 +290,18 @@ export default function FileTree({
           {recent.map((r) => (
             <div
               key={r.path}
-              onClick={() => {
-                setRoot(r.path);
-                setBase(r.path);
-                setResults(null);
-                setQuery("");
+              onClick={async () => {
+                try {
+                  // 目录可能已归档/移动，先验证再切换，避免树卡进无效根
+                  await invoke("list_dir", { path: r.path, showHidden: false });
+                  setRoot(r.path);
+                  setBase(r.path);
+                  setResults(null);
+                  setQuery("");
+                  setError(null);
+                } catch {
+                  setError(`目录不存在或已移动：${r.path}`);
+                }
               }}
               title={`${r.path}（点击进入；↗ 打开新终端）`}
               className="group cursor-pointer px-2 py-0.5 text-xs text-l2 hover:bg-white/5 hover:text-l1"
@@ -323,7 +330,23 @@ export default function FileTree({
       >
         <span className="truncate">{basenameOf(root)}</span>
       </div>
-      {error && <p className="px-2 py-1 text-xs text-err-text">{error}</p>}
+      {error && (
+        <div className="px-2 py-1">
+          <p className="text-xs text-err-text">{error}</p>
+          {root !== cwd && (
+            <button
+              onClick={() => {
+                setRoot(cwd);
+                setBase(cwd);
+                setError(null);
+              }}
+              className="mt-0.5 text-xs text-link hover:underline"
+            >
+              ← 回到 {basenameOf(cwd)}
+            </button>
+          )}
+        </div>
+      )}
       {parent && parent.startsWith(base) && (
         <div
           onClick={() => setRoot(parent)}
