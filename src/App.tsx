@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
 import ProfilesPage from "./pages/ProfilesPage";
 import SessionsPage from "./pages/SessionsPage";
@@ -8,18 +8,27 @@ import TerminalPage from "./pages/TerminalPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
 import { useAppStore } from "./store";
 
-const NAV: { id: string; label: string }[] = [
-  { id: "profiles", label: "配置" },
-  { id: "workspaces", label: "工作区" },
-  { id: "terminal", label: "终端" },
-  { id: "sessions", label: "会话" },
-  { id: "skills", label: "技能" },
-  { id: "stats", label: "统计" },
+const NAV: { id: string; label: string; icon: string }[] = [
+  { id: "profiles", label: "配置", icon: "⚙" },
+  { id: "workspaces", label: "工作区", icon: "⛁" },
+  { id: "terminal", label: "终端", icon: "⌨" },
+  { id: "sessions", label: "会话", icon: "◔" },
+  { id: "skills", label: "技能", icon: "✦" },
+  { id: "stats", label: "统计", icon: "◫" },
 ];
 
 function App() {
   const page = useAppStore((s) => s.page);
   const setPage = useAppStore((s) => s.setPage);
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem("ccode.navCollapsed") === "1",
+  );
+  function toggleCollapsed() {
+    setCollapsed((c) => {
+      localStorage.setItem("ccode.navCollapsed", c ? "0" : "1");
+      return !c;
+    });
+  }
   const loadAll = useAppStore((s) => s.loadAll);
   const loadSessions = useAppStore((s) => s.loadSessions);
 
@@ -30,23 +39,47 @@ function App() {
 
   return (
     <div className="flex h-full bg-canvas text-l2">
-      <aside className="flex w-36 shrink-0 flex-col bg-rail">
-        <div className="px-4 py-4 text-base font-semibold tracking-wide text-l1">
-          Ccode
+      <aside
+        className={`flex shrink-0 flex-col bg-rail transition-[width] duration-150 ${
+          collapsed ? "w-12" : "w-36"
+        }`}
+      >
+        <div
+          className={`py-4 text-base font-semibold tracking-wide text-l1 ${
+            collapsed ? "text-center text-sm" : "px-4"
+          }`}
+          title="Ccode"
+        >
+          {collapsed ? "C" : "Ccode"}
         </div>
         {NAV.map((n) => (
           <button
             key={n.id}
             onClick={() => setPage(n.id)}
-            className={`mx-1 mb-0.5 block w-[calc(100%-8px)] rounded-md px-3 py-2.5 text-left text-sm ${
+            title={n.label}
+            className={`mx-1 mb-0.5 flex items-center rounded-md text-sm ${
+              collapsed ? "h-9 w-10 justify-center self-center" : "px-3 py-2.5"
+            } ${
               page === n.id
                 ? "bg-rail-sel text-l1"
                 : "text-l3 hover:bg-white/5"
             }`}
           >
-            {n.label}
+            <span className={collapsed ? "text-base" : "mr-2 w-5 text-center"}>
+              {n.icon}
+            </span>
+            {!collapsed && n.label}
           </button>
         ))}
+        <button
+          onClick={toggleCollapsed}
+          title={collapsed ? "展开侧栏" : "收起为图标"}
+          className={`mt-auto mb-2 flex items-center justify-center self-center rounded-md text-l4 hover:bg-white/5 hover:text-l2 ${
+            collapsed ? "h-8 w-10" : "h-8 w-[calc(100%-8px)] mx-1"
+          }`}
+        >
+          {collapsed ? "»" : "«"}
+        </button>
       </aside>
       <main className="min-w-0 flex-1">
         {/* 页面保持挂载，切换标签不销毁终端 */}
