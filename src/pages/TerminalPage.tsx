@@ -245,6 +245,12 @@ function TerminalView({
     const term = new Terminal({
       fontFamily: "'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace",
       fontSize: settingsRef.current?.terminalFontSize ?? 13,
+      // 显示质感微调：字形加实、盒绘对齐、粗体增亮、平滑滚动（对比度保持默认）
+      fontWeight: 500,
+      fontWeightBold: 700,
+      rescaleOverlappingGlyphs: true,
+      drawBoldTextInBrightColors: true,
+      smoothScrollDuration: 150,
       lineHeight: 1.25,
       letterSpacing: 0.2,
       cursorStyle: "bar",
