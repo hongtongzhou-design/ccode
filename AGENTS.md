@@ -89,7 +89,7 @@ src-tauri/src/
     不允许死在最终画面；用户手动 `exit` shell 不自动重开；
   - 回落的 shell 不携带任何 profile 环境变量（密钥只在 agent 进程内）；
   - agent 与 shell 共用 `pty.rs` 的 `spawn_tracked`，退出事件按 PTY 类型区分处理。
-- **各 CLI 会话/配置目录一律只读**；例外只有两处：「设为全局默认」（写前必须备份）和用户显式发起的会话删除（delete_session/delete_project_sessions，且路径必须落在已知会话根目录内）。
+- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：「设为全局默认」（写前必须备份）、会话删除（delete_session/delete_project_sessions，路径必须落在已知会话根内）、工作树文件删除（限定树当前根目录 + 重要路径黑名单兜底：系统目录/关键用户目录/CLI 配置/.git 一律拒绝）。
 - 解析各 CLI 内部格式时**防御式**：跳过未知类型、容忍缺字段、容忍末行截断（格式随版本漂移）。
 - 三平台兼容：禁写平台特定路径，用 `dirs`/`keyring`/`portable-pty` 的抽象。
 - UI 文案用中文；代码注释用中文、只在非显而易见处写（参照现有文件风格）。
