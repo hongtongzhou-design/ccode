@@ -504,7 +504,64 @@ fn create_dir_sync(root: &str, name: &str) -> Result<String, String> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
+/// 重要系统/用户路径保护：无论根目录范围如何都拒绝删除
+fn is_protected_path(path: &str) -> bool {
+    let p = expand_tilde(path);
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let exact: Vec<String> = [
+        home.clone(),
+        format!("{home}/Documents"),
+        format!("{home}/Desktop"),
+        format!("{home}/Downloads"),
+        format!("{home}/.zshrc"),
+        format!("{home}/.bashrc"),
+        format!("{home}/.zprofile"),
+        format!("{home}/.bash_profile"),
+        format!("{home}/.gitconfig"),
+    ]
+    .into_iter()
+    .map(|s| s.trim_end_matches('/').to_string())
+    .collect();
+    let pn = p.trim_end_matches('/');
+    // 精确匹配保护 home 与 shell 配置；关键目录（Library/ssh/CLI 配置/Ccode 数据）连同子路径一并保护
+    let dir_prefixes: Vec<String> = [
+        format!("{home}/Library"),
+        format!("{home}/.ssh"),
+        format!("{home}/.claude"),
+        format!("{home}/.codex"),
+        format!("{home}/.gemini"),
+        format!("{home}/.qwen"),
+        format!("{home}/.kimi"),
+        format!("{home}/.kimi-code"),
+        format!("{home}/Library/Application Support/ccode"),
+    ]
+    .into_iter()
+    .map(|s| s.trim_end_matches('/').to_string())
+    .collect();
+    if exact.iter().any(|e| pn == e)
+        || dir_prefixes
+            .iter()
+            .any(|e| pn == e || pn.starts_with(&format!("{e}/")))
+    {
+        return true;
+    }
+    const PREFIXES: [&str; 8] = [
+        "/System", "/usr", "/bin", "/sbin", "/etc", "/Library", "/Applications", "/opt",
+    ];
+    let home_lib = format!("{home}/Library");
+    if PREFIXES.iter().any(|pre| pn.starts_with(pre)) || pn.starts_with(&home_lib) {
+        return true;
+    }
+    // 任何 .git 内部路径
+    pn.contains("/.git")
+}
+
 fn delete_path_sync(path: &str, root: &str) -> Result<(), String> {
+    if is_protected_path(path) {
+        return Err("系统/重要目录受保护，拒绝删除".into());
+    }
     if !lexical_in_root(path, root) {
         return Err("路径超出项目根目录，拒绝删除".into());
     }
@@ -554,6 +611,13 @@ mod fsops_tests {
         assert!(!std::path::Path::new(&created).exists());
         assert!(delete_path_sync("/tmp", &root).is_err());
         assert!(delete_path_sync(&root, &root).is_err());
+        // 保护路径：root 是 home 时系统/关键目录一律拒绝
+        let home = dirs::home_dir().unwrap().to_string_lossy().into_owned();
+        assert!(delete_path_sync(&format!("{home}/Library"), &home).is_err());
+        assert!(delete_path_sync(&format!("{home}/.ssh"), &home).is_err());
+        assert!(delete_path_sync(&format!("{home}/.claude/projects"), &home).is_err());
+        assert!(delete_path_sync("/System", &home).is_err());
+        assert!(delete_path_sync(&format!("{home}/proj/.git/index"), &home).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 }
