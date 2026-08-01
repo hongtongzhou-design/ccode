@@ -166,7 +166,12 @@ export default function GitPanel({
         ) : !status ? (
           <p className="p-1 text-xs text-l4">加载中…</p>
         ) : !status.isRepo ? (
-          <p className="p-1 text-sm text-l4">当前目录不是 git 仓库</p>
+          <p className="p-1 text-sm text-l4">
+            该目录不是 git 仓库，无改动可显示
+            <span className="block text-xs text-l4" title={cwd}>
+              {cwd}
+            </span>
+          </p>
         ) : files.length === 0 ? (
           <p className="p-1 text-sm text-l4">
             {inWs ? "任务无改动 ✓" : "工作区干净 ✓"}
