@@ -72,6 +72,17 @@ export default function FileTree({
   // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动；base = 可导航范围上限
   const [root, setRoot] = useState(cwd);
   const [base, setBase] = useState(cwd);
+  const historyRef = useRef<string[]>([]);
+
+  /** 带历史的导航：所有主动跳转都走这里，「←」可返回 */
+  function nav(path: string) {
+    historyRef.current.push(root);
+    setRoot(path);
+  }
+  function navBack() {
+    const prev = historyRef.current.pop();
+    if (prev) setRoot(prev);
+  }
   const [recent, setRecent] = useState<RepoDto[]>([]);
 
   // 最近项目：来自会话聚合的 git 仓库（按最近活跃排序），点击直接进入
@@ -92,6 +103,7 @@ export default function FileTree({
   useEffect(() => {
     setRoot(cwd);
     setBase(cwd);
+    historyRef.current = [];
   }, [cwd]);
 
   const load = useCallback(
@@ -183,7 +195,7 @@ export default function FileTree({
   function locate(r: SearchResultDto) {
     const target = r.isDir ? r.path : parentDir(r.path);
     if (target) {
-      setRoot(target);
+      nav(target);
       setResults(null);
       setQuery("");
       setHighlight(r.path);
@@ -226,7 +238,7 @@ export default function FileTree({
             entry.isDir ? toggle(entry.path) : onOpenFile(entry.path, entry.name, root)
           }
           onDoubleClick={() => {
-            if (entry.isDir) setRoot(entry.path);
+            if (entry.isDir) nav(entry.path);
           }}
           onContextMenu={(e) => {
             e.preventDefault();
@@ -310,7 +322,7 @@ export default function FileTree({
                 try {
                   // 目录可能已归档/移动，先验证再切换，避免树卡进无效根
                   await invoke("list_dir", { path: r.path, showHidden: false });
-                  setRoot(r.path);
+                  nav(r.path);
                   setBase(r.path);
                   setResults(null);
                   setQuery("");
@@ -341,9 +353,18 @@ export default function FileTree({
       )}
       {/* 当前根：加粗 basename + 完整路径 tooltip */}
       <div
-        className="px-2 py-1 text-xs font-semibold text-l1"
+        className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-l1"
         title={root}
       >
+        {historyRef.current.length > 0 && (
+          <button
+            onClick={navBack}
+            title={`返回 ${historyRef.current[historyRef.current.length - 1]}`}
+            className="shrink-0 text-l4 hover:text-l1"
+          >
+            ←
+          </button>
+        )}
         <span className="truncate">{basenameOf(root)}</span>
       </div>
       {error && (
@@ -355,6 +376,7 @@ export default function FileTree({
                 setRoot(cwd);
                 setBase(cwd);
                 setError(null);
+                historyRef.current = [];
               }}
               className="mt-0.5 text-xs text-link hover:underline"
             >
@@ -365,7 +387,7 @@ export default function FileTree({
       )}
       {parent && parent.startsWith(base) && (
         <div
-          onClick={() => setRoot(parent)}
+          onClick={() => nav(parent)}
           title={parent}
           className="cursor-pointer px-2 py-0.5 text-xs text-l4 hover:bg-white/5 hover:text-l2"
         >
