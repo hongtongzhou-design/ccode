@@ -25,6 +25,8 @@ pub struct AppSettingsDto {
     pub rate_usd_cny: Option<f64>,
     pub brew_mirror: Option<bool>,
     pub theme: Option<String>,
+    /// ◈ AI 功能（提交信息/摘要/PR 描述）固定使用的 profile id；None = 自动（最近使用）
+    pub ai_profile_id: Option<String>,
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -65,6 +67,7 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
                 .filter(|t| KNOWN_THEMES.contains(&t.as_str()))
                 .unwrap_or_else(|| DEFAULT_THEME.to_string()),
         ),
+        ai_profile_id: s.ai_profile_id.filter(|v| !v.trim().is_empty()),
     }
 }
 
@@ -90,6 +93,10 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.theme.is_some() {
         cur.theme = patch.theme;
+    }
+    // 支持清空：传空字符串 → None（回到「自动=最近使用」）
+    if patch.ai_profile_id.is_some() {
+        cur.ai_profile_id = patch.ai_profile_id.filter(|v| !v.trim().is_empty());
     }
 }
 
@@ -183,5 +190,29 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(full.theme.as_deref(), Some("midnight"));
+    }
+
+    #[test]
+    fn ai_profile_id_empty_string_clears_to_auto() {
+        let p = tmp();
+        let mut cur = read_from(&p);
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                ai_profile_id: Some("p-1".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cur.ai_profile_id.as_deref(), Some("p-1"));
+        // 传空字符串 = 清空回「自动」
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                ai_profile_id: Some("".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cur.ai_profile_id, None);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 }

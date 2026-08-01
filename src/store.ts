@@ -11,6 +11,8 @@ export interface AppSettings {
   rateUsdCny: number;
   brewMirror: boolean;
   theme: string;
+  /** ◈ AI 功能固定使用的 profile id；null/undefined = 自动（最近使用） */
+  aiProfileId?: string | null;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效 */

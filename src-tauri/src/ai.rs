@@ -13,13 +13,20 @@ const DIFF_CAP: usize = 8 * 1024;
 
 // ===== profile 解析与无头参数 =====
 
-/// 显式 id 优先；否则最近使用（last_used_at 最新）的 profile；一个都没有才报错
-fn resolve_profile_from(profiles: Vec<Profile>, profile_id: Option<String>) -> Result<Profile, String> {
-    if let Some(id) = profile_id.filter(|id| !id.trim().is_empty()) {
+/// 显式 id 优先；其次设置页指定的 AI 专用 profile；否则最近使用（last_used_at 最新）；一个都没有才报错
+fn resolve_profile_from(
+    profiles: Vec<Profile>,
+    profile_id: Option<String>,
+    dedicated_id: Option<String>,
+) -> Result<Profile, String> {
+    for id in [profile_id, dedicated_id].into_iter().flatten() {
+        if id.trim().is_empty() {
+            continue;
+        }
         return profiles
             .into_iter()
             .find(|p| p.id == id)
-            .ok_or_else(|| format!("profile 不存在: {id}"));
+            .ok_or_else(|| format!("profile 不存在: {id}（如来自设置页的 AI 专用配置，请到设置页重选）"));
     }
     profiles
         .into_iter()
@@ -106,7 +113,9 @@ fn run_capture(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
 }
 
 fn ai_prompt_impl(profiles: Vec<Profile>, profile_id: Option<String>, prompt: String) -> Result<String, String> {
-    let profile = resolve_profile_from(profiles, profile_id)?;
+    // 设置页的 AI 专用 profile 作为显式 id 之外的默认（每次现读，改动即时生效）
+    let dedicated = crate::settings::read_current().ai_profile_id;
+    let profile = resolve_profile_from(profiles, profile_id, dedicated)?;
     let binary = agents::binary_for(&profile.agent)
         .ok_or_else(|| format!("profile 所属 agent 不支持无头调用: {}", profile.agent))?;
     let binary_path = which::which(binary).map_err(|_| format!("未在 PATH 找到 {binary}"))?;
@@ -335,19 +344,36 @@ mod tests {
             profile("c", "gemini", None),
         ];
         // 显式 id 优先
-        let p = resolve_profile_from(profiles.clone(), Some("a".into())).unwrap();
+        let p = resolve_profile_from(profiles.clone(), Some("a".into()), None).unwrap();
         assert_eq!(p.id, "a");
         // 否则 last_used_at 最新者；None 排最后
-        let p = resolve_profile_from(profiles.clone(), None).unwrap();
+        let p = resolve_profile_from(profiles.clone(), None, None).unwrap();
         assert_eq!(p.id, "b");
         // 全都没用过：取其一（max_by 的稳定首个），不报错
         let fresh = vec![profile("x", "codex", None), profile("y", "gemini", None)];
-        assert!(resolve_profile_from(fresh, None).is_ok());
+        assert!(resolve_profile_from(fresh, None, None).is_ok());
         // 空列表报错
-        let err = resolve_profile_from(vec![], None).unwrap_err();
+        let err = resolve_profile_from(vec![], None, None).unwrap_err();
         assert!(err.contains("请先在配置页创建并保存一个 profile"), "{err}");
         // 不存在的 id 报错
-        assert!(resolve_profile_from(profiles, Some("zzz".into())).is_err());
+        assert!(resolve_profile_from(profiles, Some("zzz".into()), None).is_err());
+    }
+
+    #[test]
+    fn profile_resolution_dedicated_beats_last_used_but_not_explicit() {
+        let profiles = vec![
+            profile("a", "codex", Some("2026-07-01T00:00:00Z")),
+            profile("b", "claude-code", Some("2026-07-30T00:00:00Z")),
+        ];
+        // 设置页专用 profile 盖过最近使用
+        let p = resolve_profile_from(profiles.clone(), None, Some("a".into())).unwrap();
+        assert_eq!(p.id, "a");
+        // 显式 id 仍最优先
+        let p = resolve_profile_from(profiles.clone(), Some("b".into()), Some("a".into())).unwrap();
+        assert_eq!(p.id, "b");
+        // 专用 id 已被删除：明确报错（提示去设置页重选），不静默回落
+        let err = resolve_profile_from(profiles, None, Some("gone".into())).unwrap_err();
+        assert!(err.contains("profile 不存在"), "{err}");
     }
 
     #[test]

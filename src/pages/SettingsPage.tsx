@@ -45,6 +45,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const settings = useAppStore((s) => s.settings);
   const loadSettings = useAppStore((s) => s.loadSettings);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  const profiles = useAppStore((s) => s.profiles);
+  const loadAll = useAppStore((s) => s.loadAll);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // 数值输入的本地草稿（失焦/回车才提交，避免每击键一次 IPC）
@@ -60,6 +62,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (visible) {
       loadSettings().catch((e) => setError(String(e)));
+      // AI 专用配置下拉需要 profile 列表
+      if (profiles.length === 0) loadAll().catch(() => {});
       invoke<string>("read_pricing_file")
         .then((t) => {
           setPricing(t);
@@ -268,6 +272,21 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           checked={settings?.brewMirror ?? false}
           onChange={(e) => patch({ brewMirror: e.target.checked })}
         />
+      </Row>
+
+      <Row label="AI 专用配置" hint="◈ 生成（提交信息/摘要/PR）固定走此配置，建议选快模型；默认自动=最近使用">
+        <select
+          className={field}
+          value={settings?.aiProfileId ?? ""}
+          onChange={(e) => patch({ aiProfileId: e.target.value })}
+        >
+          <option value="">自动（最近使用）</option>
+          {profiles.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}（{p.agent}{p.models[0] ? ` · ${p.models[0]}` : ""}）
+            </option>
+          ))}
+        </select>
       </Row>
 
       {/* 自定义定价 */}
