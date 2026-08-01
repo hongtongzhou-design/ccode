@@ -62,6 +62,8 @@ function TerminalView({
   autoStart,
   prefillCommand,
   shellOnly,
+  externalCwd,
+  onConsumeExternalCwd,
   onStatus,
   onSessionUpdate,
   onOpenSessionPanel,
@@ -91,6 +93,9 @@ function TerminalView({
   prefillCommand?: string;
   /** run 脚本标签：挂载后自动开 shell 并执行 prefillCommand（不走 agent 启动流程） */
   shellOnly?: boolean;
+  /** 最近项目「真进入」：把目标目录注入活动标签的启动栏（TerminalView 消费后清空） */
+  externalCwd?: string | null;
+  onConsumeExternalCwd?: () => void;
   onStatus: (s: TabStatus) => void;
   onSessionUpdate: (s: SessionLinkState) => void;
   onOpenSessionPanel: () => void;
@@ -288,6 +293,15 @@ function TerminalView({
       } catch {}
     });
   }, [visible, rightOpen]);
+
+  // 最近项目「真进入」：外部注入的 cwd 落地到启动栏（空闲时），状态上报后父级清空
+  useEffect(() => {
+    if (visible && externalCwd && !running) {
+      setCwd(externalCwd);
+      onConsumeExternalCwd?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, externalCwd, running]);
 
   // run 脚本标签：终端就绪后自动开 shell 并写入脚本命令（tty 会缓冲输入直到 shell 读取）。
   // 声明在终端创建 effect 之后，保证 attach 时 termRef 已就位
@@ -772,6 +786,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  /** 最近项目「真进入」：待注入活动标签启动栏的目录 */
+  const [enterCwd, setEnterCwd] = useState<string | null>(null);
+  // 运行中总览：默认折叠；首次有 agent 运行时自动展开一次
+  const [railRunOpen, setRailRunOpen] = useState(false);
+  const runAutoOpenedRef = useRef(false);
   // 右侧面板：默认收起，点「会话」或预览文件时打开
   const [rightOpen, setRightOpen] = useState(false);
   // 专注模式：隐藏左栏与右面板，终端全宽（页级开关，默认关）
@@ -917,6 +936,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     }
   }, [visible, focusTabId, tabs, focusTab]);
 
+  // 运行中总览：首次有 agent 运行时自动展开一次，之后尊重用户手动开关
+  useEffect(() => {
+    if (!runAutoOpenedRef.current && Object.values(statuses).some((s) => s.running)) {
+      runAutoOpenedRef.current = true;
+      setRailRunOpen(true);
+    }
+  }, [statuses]);
+
   // 可见性门控（优化 2）：只有活动标签的 PTY 推流，其余（含整页隐藏时全部）进后台缓冲。
   // PTY 被替换（agent→shell 回落换新 id）时 statuses 变化会触发重新标记。
   useEffect(() => {
@@ -1018,12 +1045,21 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               onOpenFile={openPreview}
               onOpenTerminal={openTerminalAt}
               onFsEvent={() => setFsChangeTick((t) => t + 1)}
+              onEnterProject={setEnterCwd}
             />
           </div>
-          {/* 运行中总览：全部终端标签的状态一览，点击激活 */}
-          <div className="max-h-56 shrink-0 overflow-auto bg-strip">
-            <div className="px-2 pt-1.5 text-xs text-l4">运行中</div>
-            {tabs.map((t) => {
+          {/* 运行中总览：全部终端标签的状态一览，点击激活；默认折叠 */}
+          <div className="shrink-0 bg-strip">
+            <button
+              onClick={() => setRailRunOpen((v) => !v)}
+              className="flex w-full items-center gap-1 px-2 py-1.5 text-left text-xs text-l4 hover:text-l2"
+            >
+              <span>{railRunOpen ? "▾" : "▸"}</span>
+              <span>运行中 ({tabs.length})</span>
+            </button>
+            {railRunOpen && (
+              <div className="max-h-56 overflow-auto">
+                {tabs.map((t) => {
               const s = statuses[t.id];
               const active = t.id === activeId;
               const dot = s?.running
@@ -1061,8 +1097,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     </span>
                   </span>
                 </button>
-              );
-            })}
+                );
+              })}
+              </div>
+            )}
           </div>
         </div>
       ))}
@@ -1165,6 +1203,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   autoStart={t.autoStart}
                   prefillCommand={t.prefillCommand}
                   shellOnly={t.shellOnly}
+                  externalCwd={t.id === activeId ? enterCwd : null}
+                  onConsumeExternalCwd={() => setEnterCwd(null)}
                   onStatus={(s) => reportStatus(t.id, s)}
                   onSessionUpdate={(s) => reportSession(t.id, s)}
                   onOpenSessionPanel={() => {

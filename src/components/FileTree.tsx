@@ -60,6 +60,7 @@ export default function FileTree({
   onOpenFile,
   onOpenTerminal,
   onFsEvent,
+  onEnterProject,
 }: {
   cwd: string;
   showHidden: boolean;
@@ -68,10 +69,11 @@ export default function FileTree({
   onOpenTerminal: (path: string) => void;
   /** 文件系统变化回调（fs-changed 防抖后触发，供 GitPanel 等联动刷新） */
   onFsEvent?: () => void;
+  /** 最近项目「真进入」：切树根 + 切换活动标签启动栏 cwd */
+  onEnterProject?: (path: string) => void;
 }) {
-  // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动；base = 可导航范围上限
+  // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动
   const [root, setRoot] = useState(cwd);
-  const [base, setBase] = useState(cwd);
   /** 所有主动跳转统一走 nav（语义标记，保持单点） */
   function nav(path: string) {
     setRoot(path);
@@ -100,7 +102,6 @@ export default function FileTree({
   // 切换活动标签（cwd 变化）时重置回该标签的 cwd
   useEffect(() => {
     setRoot(cwd);
-    setBase(cwd);
   }, [cwd]);
 
   const load = useCallback(
@@ -304,11 +305,11 @@ export default function FileTree({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Escape" && setQuery("")}
-          placeholder="按文件名搜索…"
+          placeholder={`搜索 ${basenameOf(root)}…`}
           className="w-full rounded border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
         />
       </div>
-      {/* 最近项目：点击直接进入（新开终端标签） */}
+      {/* 最近项目：点击真进入（切树根 + 切换启动栏 cwd）；↗ 另开新终端标签 */}
       {recent.length > 0 && (
         <div className="shrink-0 border-b border-hairline py-1">
           <p className="px-2 pb-0.5 text-[10px] text-l4">最近项目</p>
@@ -320,7 +321,7 @@ export default function FileTree({
                   // 目录可能已归档/移动，先验证再切换，避免树卡进无效根
                   await invoke("list_dir", { path: r.path, showHidden: false });
                   nav(r.path);
-                  setBase(r.path);
+                  onEnterProject?.(r.path);
                   setResults(null);
                   setQuery("");
                   setError(null);
@@ -348,7 +349,7 @@ export default function FileTree({
           ))}
         </div>
       )}
-      {/* 当前根：加粗 basename + 完整路径 tooltip */}
+      {/* 当前根：加粗 basename + 完整路径 tooltip；偏离锚点时给「回到当前项目」 */}
       <div
         className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-l1"
         title={root}
@@ -363,24 +364,17 @@ export default function FileTree({
           </button>
         )}
         <span className="truncate">{basenameOf(root)}</span>
+        {root !== cwd && (
+          <button
+            onClick={() => nav(cwd)}
+            title="回到当前项目"
+            className="ml-auto shrink-0 text-l4 hover:text-l1"
+          >
+            ⌂
+          </button>
+        )}
       </div>
-      {error && (
-        <div className="px-2 py-1">
-          <p className="text-xs text-err-text">{error}</p>
-          {root !== cwd && (
-            <button
-              onClick={() => {
-                setRoot(cwd);
-                setBase(cwd);
-                setError(null);
-              }}
-              className="mt-0.5 text-xs text-link hover:underline"
-            >
-              ← 回到 {basenameOf(cwd)}
-            </button>
-          )}
-        </div>
-      )}
+      {error && <p className="px-2 py-1 text-xs text-err-text">{error}</p>}
 
       {results !== null ? (
         <div className="min-h-0 flex-1 overflow-auto">
@@ -440,7 +434,7 @@ export default function FileTree({
                 if (!window.confirm(`删除「${menu.path}」${menu.isDir ? "（含全部内容）" : ""}？不可恢复。`))
                   return;
                 try {
-                  await invoke("fs_delete_path", { path: menu.path, root: base });
+                  await invoke("fs_delete_path", { path: menu.path, root });
                   for (const p of [root, ...expandedRef.current]) void load(p);
                 } catch (e) {
                   setError(String(e));
