@@ -3,6 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ContextMenu from "./ContextMenu";
 
+interface RepoDto {
+  path: string;
+  name: string;
+}
+
 export interface SearchResultDto {
   path: string;
   name: string;
@@ -64,6 +69,14 @@ export default function FileTree({
 }) {
   // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动
   const [root, setRoot] = useState(cwd);
+  const [recent, setRecent] = useState<RepoDto[]>([]);
+
+  // 最近项目：来自会话聚合的 git 仓库（按最近活跃排序），点击直接进入
+  useEffect(() => {
+    invoke<RepoDto[]>("list_repos")
+      .then((r) => setRecent(r.slice(0, 5)))
+      .catch(() => {});
+  }, []);
   const [cache, setCache] = useState<Record<string, DirEntryDto[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const expandedRef = useRef(expanded);
@@ -257,6 +270,32 @@ export default function FileTree({
   const children = cache[root];
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* 顶部：文件名搜索 */}
+      <div className="shrink-0 border-b border-hairline px-2 py-1.5">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+          placeholder="按文件名搜索…"
+          className="w-full rounded border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
+        />
+      </div>
+      {/* 最近项目：点击直接进入（新开终端标签） */}
+      {recent.length > 0 && (
+        <div className="shrink-0 border-b border-hairline py-1">
+          <p className="px-2 pb-0.5 text-[10px] text-l4">最近项目</p>
+          {recent.map((r) => (
+            <div
+              key={r.path}
+              onClick={() => onOpenTerminal(r.path)}
+              title={`${r.path}（点击打开新终端）`}
+              className="cursor-pointer truncate px-2 py-0.5 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+            >
+              ⏱ {r.name}
+            </div>
+          ))}
+        </div>
+      )}
       {/* 当前根：加粗 basename + 完整路径 tooltip */}
       <div
         className="px-2 py-1 text-xs font-semibold text-l1"
@@ -298,16 +337,7 @@ export default function FileTree({
       ) : (
         children.map((c) => <Node key={c.path} entry={c} depth={0} />)
       )}
-      {/* 找文件搜索框（项目根内按文件名搜索） */}
-      <div className="shrink-0 border-t border-hairline px-2 py-1.5">
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === "Escape" && setQuery("")}
-          placeholder="按文件名搜索…"
-          className="w-full rounded border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
-        />
-      </div>
+
       {menu && (
         <ContextMenu
           x={menu.x}
