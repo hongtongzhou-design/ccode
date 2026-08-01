@@ -94,15 +94,17 @@ fn list_dir_sync(path: &str, show_hidden: bool) -> Result<Vec<DirEntryDto>, Stri
 }
 
 fn read_file_preview_sync(path: &str, root: &str) -> Result<FilePreviewDto, String> {
-    let root_c = PathBuf::from(expand_tilde(root))
-        .canonicalize()
-        .map_err(|e| format!("项目根目录无效: {e}"))?;
-    let path_c = PathBuf::from(expand_tilde(path))
-        .canonicalize()
-        .map_err(|e| format!("文件不存在或不可读: {e}"))?;
-    if !path_c.starts_with(&root_c) {
+    // 词法包含检查（不解析符号链接）：node_modules 这类链接到根外的文件在树上可见，
+    // 应允许预览；真正的越权由下方 canonicalize 读取兜底（"../" 无法通过词法前缀）
+    let root_exp = expand_tilde(root);
+    let path_exp = expand_tilde(path);
+    let root_norm = root_exp.trim_end_matches('/');
+    if !(path_exp == root_norm || path_exp.starts_with(&format!("{root_norm}/"))) {
         return Err("路径超出项目根目录，拒绝预览".into());
     }
+    let path_c = PathBuf::from(&path_exp)
+        .canonicalize()
+        .map_err(|e| format!("文件不存在或不可读: {e}"))?;
     let md = fs::metadata(&path_c).map_err(|e| format!("读取文件失败: {e}"))?;
     if md.is_dir() {
         return Err("目录不支持预览".into());
@@ -177,13 +179,39 @@ fn watchers() -> &'static std::sync::Mutex<std::collections::HashMap<String, Wat
     WATCHERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// 监听噪声过滤：隐藏目录段（/.foo/）、.git、node_modules 下的事件不触发刷新。
+/// agent 会话文件和应用 db 都写在隐藏目录，home 根监听时不过滤会形成刷新风暴
+fn fs_noise_skip(path: &std::path::Path) -> bool {
+    let s = path.to_string_lossy();
+    if s.contains("/.git/") || s.contains("/node_modules/") {
+        return true;
+    }
+    let mut idx = 0;
+    while let Some(pos) = s[idx..].find("/.") {
+        let abs = idx + pos;
+        // "/.foo/" 形式 = 隐藏目录段；路径末尾的隐藏文件（如 .env）放行
+        if s[abs + 2..].contains('/') {
+            return true;
+        }
+        idx = abs + 2;
+        if idx >= s.len() {
+            break;
+        }
+    }
+    false
+}
+
 #[tauri::command]
 pub fn watch_dir(app: tauri::AppHandle, path: String) -> Result<String, String> {
     use tauri::Emitter;
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let mut watcher = notify::recommended_watcher(move |_res| {
-        let _ = tx.send(());
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(ev) = res {
+            if ev.paths.iter().any(|p| !fs_noise_skip(p)) {
+                let _ = tx.send(());
+            }
+        }
     })
     .map_err(|e| format!("创建文件监听失败: {e}"))?;
     notify::Watcher::watch(
@@ -321,5 +349,40 @@ mod tests {
         assert_eq!(fs::read_to_string(&secret).unwrap(), "nope");
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&outside).ok();
+    }
+}
+
+#[cfg(test)]
+mod fix_tests {
+    use super::*;
+
+    #[test]
+    fn preview_allows_symlink_escaping_root_lexically() {
+        let dir = std::env::temp_dir().join(format!("ccode-fx-{}", uuid::Uuid::new_v4()));
+        let outside = dir.join("outside");
+        let root = dir.join("root");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(outside.join("real.txt"), "hello").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.join("real.txt"), root.join("link.txt")).unwrap();
+        // 符号链接解析到根外：词法检查应放行
+        let r = read_file_preview_sync(root.join("link.txt").to_str().unwrap(), root.to_str().unwrap());
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(r.unwrap().text, "hello");
+        // 根外路径仍拒绝
+        let r2 = read_file_preview_sync(outside.join("real.txt").to_str().unwrap(), root.to_str().unwrap());
+        assert!(r2.is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn noise_skip_rules() {
+        use std::path::Path;
+        assert!(fs_noise_skip(Path::new("/home/u/.claude/projects/x.jsonl")));
+        assert!(fs_noise_skip(Path::new("/home/u/proj/.git/index")));
+        assert!(fs_noise_skip(Path::new("/home/u/proj/node_modules/x/index.js")));
+        assert!(!fs_noise_skip(Path::new("/home/u/proj/src/main.rs")));
+        assert!(!fs_noise_skip(Path::new("/home/u/proj/.env")));
     }
 }
