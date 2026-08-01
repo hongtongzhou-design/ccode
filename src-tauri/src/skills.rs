@@ -28,8 +28,9 @@ pub struct SkillDto {
     /// 用户自定义分类（None = 未分类）
     #[serde(default)]
     pub category: Option<String>,
-    /// copy 分发后库已更新、副本还是旧内容的 agent（不入库，list 时现算）
-    #[serde(default, skip_serializing)]
+    /// copy 分发后库已更新、副本还是旧内容的 agent（不入库文件，list 时现算；
+    /// 空数组时序列化省略——前端需用 ?? [] 兜底）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stale_copies: Vec<String>,
 }
 

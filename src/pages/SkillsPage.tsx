@@ -510,11 +510,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                       {SOURCE_LABEL[s.source] ?? s.source}
                       {s.repo ? ` · ${s.repo}` : ""}
                     </span>
-                    {s.staleCopies.length > 0 && (
+                    {(s.staleCopies ?? []).length > 0 && (
                       <>
                         <span
                           className="shrink-0 rounded bg-warn px-1.5 py-0.5 text-xs text-warn-text"
-                          title={`以下 agent 的副本内容已过期：${s.staleCopies.join(", ")}`}
+                          title={`以下 agent 的副本内容已过期：${(s.staleCopies ?? []).join(", ")}`}
                         >
                           副本过期
                         </span>

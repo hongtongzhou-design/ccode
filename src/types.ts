@@ -161,7 +161,8 @@ export interface SkillDto {
   /** 用户自定义分类（null = 未分类） */
   category: string | null;
   /** 内容已与库版本不一致的副本（所在 agent id 列表；空 = 无漂移） */
-  staleCopies: string[];
+  /** 副本过期的 agent（后端空数组时省略该字段） */
+  staleCopies?: string[];
 }
 
 /** 未被纳管的已发现技能（各 agent 目录里已存在但不在库中） */
