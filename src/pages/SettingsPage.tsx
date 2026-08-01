@@ -4,16 +4,13 @@ import { useAppStore } from "../store";
 
 /** 四款深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
 const THEMES = [
-  { id: "midnight", name: "沉浸黑", rail: "#08090d", canvas: "#11131a" },
-  { id: "warm", name: "暖夜", rail: "#120d0b", canvas: "#150f0c" },
-  { id: "forest", name: "墨绿", rail: "#070c0a", canvas: "#0e1511" },
-  { id: "violet", name: "深紫", rail: "#0b0912", canvas: "#130f1f" },
-  { id: "terracotta", name: "陶土", rail: "#232322", canvas: "#2d2d2b" },
-  { id: "ayu", name: "Ayu 琥珀", rail: "#0b0e14", canvas: "#10141c" },
-  { id: "mocha", name: "Catppuccin", rail: "#181824", canvas: "#1e1e2e" },
-  { id: "neutral", name: "极简灰蓝", rail: "#0d0d0d", canvas: "#111111" },
-  { id: "dracula", name: "Dracula", rail: "#1e2029", canvas: "#282a36" },
-  { id: "shadcn", name: "灰蓝正红", rail: "#0d1420", canvas: "#111827" },
+  { id: "midnight", name: "沉浸黑", rail: "#08090d", canvas: "#11131a", accent: "#16a349" },
+  { id: "terracotta", name: "陶土", rail: "#232322", canvas: "#2d2d2b", accent: "#cc7d5e" },
+  { id: "ayu", name: "Ayu 琥珀", rail: "#0b0e14", canvas: "#10141c", accent: "#e6b450" },
+  { id: "mocha", name: "Catppuccin", rail: "#181824", canvas: "#1e1e2e", accent: "#cba6f7" },
+  { id: "neutral", name: "极简灰蓝", rail: "#0d0d0d", canvas: "#111111", accent: "#0169cc" },
+  { id: "dracula", name: "Dracula", rail: "#1e2029", canvas: "#282a36", accent: "#ff79c6" },
+  { id: "shadcn", name: "灰蓝正红", rail: "#0d1420", canvas: "#111827", accent: "#ff5c5c" },
 ] as const;
 
 const field =
@@ -133,6 +130,11 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               <span className="mb-1 flex h-8 overflow-hidden rounded">
                 <span className="h-full w-1/2" style={{ background: t.rail }} />
                 <span className="h-full w-1/2" style={{ background: t.canvas }} />
+                <span
+                  className="h-full w-1.5"
+                  style={{ background: t.accent }}
+                  title="强调色"
+                />
               </span>
               {t.name}
               {settings?.theme === t.id && <span className="ml-0.5 text-ok-text">✓</span>}

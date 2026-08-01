@@ -47,6 +47,10 @@
   /* 页签选中下划线 */
   --color-tabline: #c9cfda;
 
+  /* 强调色 pill（活跃 / 可合并等少数状态点，深底浅字） */
+  --color-cta-pill: #10331f;
+  --color-cta-pill-text: #7fe3a8;
+
   /* 次级实心按钮 */
   --color-btn: #464543;
 
@@ -64,56 +68,8 @@
    覆盖同名 CSS 变量即可；状态/CTA/diff/tabline/link 颜色各主题共享 */
 
 /* 暖夜 */
-[data-theme="warm"] {
-  --color-rail: #120d0b;
-  --color-rail2: #1a1310;
-  --color-rail-sel: #2b1f19;
-  --color-strip: #201713;
-  --color-canvas: #150f0c;
-  --color-inset: #241a15;
-  --color-seg-sel: #2e211a;
-  --color-hairline: #2b211b;
-  --color-field: #3a2c23;
-  --color-l1: #f5ede4;
-  --color-l2: #c4b3a4;
-  --color-l3: #94816f;
-  --color-l4: #6b5847;
-}
-
 /* 墨绿 */
-[data-theme="forest"] {
-  --color-rail: #070c0a;
-  --color-rail2: #0c1310;
-  --color-rail-sel: #18251e;
-  --color-strip: #121b16;
-  --color-canvas: #0e1511;
-  --color-inset: #16211b;
-  --color-seg-sel: #1c2a22;
-  --color-hairline: #1d2a23;
-  --color-field: #28382f;
-  --color-l1: #e8f2ec;
-  --color-l2: #a8bfb2;
-  --color-l3: #748f80;
-  --color-l4: #4e6459;
-}
-
 /* 深紫 */
-[data-theme="violet"] {
-  --color-rail: #0b0912;
-  --color-rail2: #100e1a;
-  --color-rail-sel: #201a33;
-  --color-strip: #171325;
-  --color-canvas: #130f1f;
-  --color-inset: #1c1729;
-  --color-seg-sel: #262038;
-  --color-hairline: #241d36;
-  --color-field: #332a4a;
-  --color-l1: #efecf8;
-  --color-l2: #b3aed0;
-  --color-l3: #7f78a3;
-  --color-l4: #585173;
-}
-
 
 [data-theme="terracotta"] {
   --color-rail: #232322; --color-rail2: #262624; --color-rail-sel: #3d3d3a;
@@ -121,6 +77,8 @@
   --color-seg-sel: #41413e; --color-hairline: #474745; --color-field: #4f4f4c;
   --color-l1: #f9f9f7; --color-l2: #c9c9c4; --color-l3: #94948f; --color-l4: #6a6a66;
   --color-cta: #cc7d5e; --color-cta-text: #f9f9f7; --color-cta-bd: #8f4f38;
+  --color-cta-pill: #3d211a;
+  --color-cta-pill-text: #eda586;
 }
 [data-theme="ayu"] {
   --color-rail: #0b0e14; --color-rail2: #0d1118; --color-rail-sel: #1e232e;
@@ -128,6 +86,8 @@
   --color-seg-sel: #22272f; --color-hairline: #27292f; --color-field: #31353f;
   --color-l1: #d9d7d2; --color-l2: #bfbdb6; --color-l3: #878580; --color-l4: #5f5e59;
   --color-cta: #e6b450; --color-cta-text: #1d1608; --color-cta-bd: #8a6a26;
+  --color-cta-pill: #3a2e10;
+  --color-cta-pill-text: #eec363;
 }
 [data-theme="mocha"] {
   --color-rail: #181824; --color-rail2: #1a1a28; --color-rail-sel: #2e2e44;
@@ -135,6 +95,8 @@
   --color-seg-sel: #30304a; --color-hairline: #343547; --color-field: #3f3f56;
   --color-l1: #cdd6f4; --color-l2: #aeb8dc; --color-l3: #7c86b0; --color-l4: #565e83;
   --color-cta: #cba6f7; --color-cta-text: #2a1b3d; --color-cta-bd: #6b4d94;
+  --color-cta-pill: #2e2145;
+  --color-cta-pill-text: #d3b3fa;
 }
 [data-theme="neutral"] {
   --color-rail: #0d0d0d; --color-rail2: #101010; --color-rail-sel: #262626;
@@ -142,6 +104,8 @@
   --color-seg-sel: #262626; --color-hairline: #2e2e2e; --color-field: #3a3a3a;
   --color-l1: #fcfcfc; --color-l2: #c9c9c9; --color-l3: #8f8f8f; --color-l4: #616161;
   --color-cta: #0169cc; --color-cta-text: #eaf4ff; --color-cta-bd: #014a8f;
+  --color-cta-pill: #0d2d4d;
+  --color-cta-pill-text: #63a9ef;
 }
 [data-theme="dracula"] {
   --color-rail: #1e2029; --color-rail2: #22242e; --color-rail-sel: #3d3f4e;
@@ -149,6 +113,8 @@
   --color-seg-sel: #3a3c4a; --color-hairline: #43444e; --color-field: #4e505e;
   --color-l1: #f8f8f2; --color-l2: #cfcfc9; --color-l3: #94948f; --color-l4: #68686a;
   --color-cta: #ff79c6; --color-cta-text: #38102a; --color-cta-bd: #a64a80;
+  --color-cta-pill: #401a35;
+  --color-cta-pill-text: #ff8fd0;
 }
 [data-theme="shadcn"] {
   --color-rail: #0d1420; --color-rail2: #101827; --color-rail-sel: #232c3c;
@@ -156,6 +122,8 @@
   --color-seg-sel: #232c3d; --color-hairline: #2b323f; --color-field: #37404f;
   --color-l1: #e4e4e7; --color-l2: #b9b9c0; --color-l3: #7d7d8a; --color-l4: #55555f;
   --color-cta: #ff5c5c; --color-cta-text: #3d0f0f; --color-cta-bd: #a83232;
+  --color-cta-pill: #3d1414;
+  --color-cta-pill-text: #ff8080;
 }
 
 html,

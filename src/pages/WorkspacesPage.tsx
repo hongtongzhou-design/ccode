@@ -518,7 +518,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                     </span>
                     <span className="text-xs text-l4">{relTime(ws.createdAt)}</span>
                     {ws.status === "active" ? (
-                      <span className="rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text">
+                      <span className="rounded bg-cta-pill px-1.5 py-0.5 text-xs text-cta-pill-text">
                         活跃
                       </span>
                     ) : (
@@ -533,7 +533,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                         return (
                           <>
                             {h.readyToMerge && (
-                              <span className="rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text">
+                              <span className="rounded bg-cta-pill px-1.5 py-0.5 text-xs text-cta-pill-text">
                                 可合并
                               </span>
                             )}

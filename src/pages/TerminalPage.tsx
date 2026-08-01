@@ -49,9 +49,6 @@ const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 /** 四款深色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板；调色板其余部分共享） */
 const XTERM_BG_FG: Record<string, { background: string; foreground: string }> = {
   midnight: { background: "#11131a", foreground: "#aeb6c6" },
-  warm: { background: "#150f0c", foreground: "#c4b3a4" },
-  forest: { background: "#0e1511", foreground: "#a8bfb2" },
-  violet: { background: "#130f1f", foreground: "#b3aed0" },
   terracotta: { background: "#2d2d2b", foreground: "#c9c9c4" },
   ayu: { background: "#10141c", foreground: "#bfbdb6" },
   mocha: { background: "#1e1e2e", foreground: "#aeb8dc" },
