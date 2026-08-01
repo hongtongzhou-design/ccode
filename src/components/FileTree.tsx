@@ -184,7 +184,7 @@ export default function FileTree({
       return;
     }
     const t = setTimeout(() => {
-      invoke<SearchResultDto[]>("search_files", { path: root, query: q })
+      invoke<SearchResultDto[]>("search_files", { root, query: q })
         .then(setResults)
         .catch(() => setResults([]));
     }, 300);
