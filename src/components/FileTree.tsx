@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ContextMenu from "./ContextMenu";
@@ -53,7 +53,7 @@ function parentDir(p: string): string | null {
  * 用户可双击目录钻取重定根（manual root），切换标签时重置回该标签 cwd。
  * 单击目录 = 展开/收起；双击目录 = 进入（重定根）；右键 / 悬停按钮 = 在此打开新终端。
  */
-export default function FileTree({
+function FileTree({
   cwd,
   showHidden,
   refreshKey,
@@ -473,3 +473,6 @@ export default function FileTree({
     </div>
   );
 }
+
+/** memo：父级重渲染（启动栏状态变化等）不级联到文件树 */
+export default memo(FileTree);

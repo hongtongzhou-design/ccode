@@ -6,6 +6,9 @@ import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
 import type { ChatMessageDto, SessionMetaDto, TokenUsageDto } from "../types";
 
+/** GitPanel 的 onTotals 占位（会话页不消费改动总量；稳定引用避免击穿 memo） */
+const NOOP_TOTALS = () => {};
+
 type Filter =
   | { kind: "all" }
   | { kind: "agent"; agent: string }
@@ -783,7 +786,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 <GitPanel
                   cwd={selected.projectPath}
                   visible={replayTab === "diff"}
-                  onTotals={() => {}}
+                  onTotals={NOOP_TOTALS}
                 />
               </div>
             ) : (

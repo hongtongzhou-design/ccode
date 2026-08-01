@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/editor/editor.worker.js?worker";
@@ -37,7 +37,7 @@ function languageFor(path: string): string | undefined {
  * 内容经 read_file_preview 加载（根目录约束、二进制/截断处理沿用后端），
  * 脏状态上报给调用方（预览页签的脏点），保存走 save_file_preview（原子写）。
  */
-export default function FilePreviewEditor({
+function FilePreviewEditor({
   path,
   root,
   onDirtyChange,
@@ -148,3 +148,6 @@ export default function FilePreviewEditor({
     </div>
   );
 }
+
+/** memo：父级重渲染不级联到 Monaco 编辑器 */
+export default memo(FilePreviewEditor);

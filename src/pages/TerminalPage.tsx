@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
@@ -82,8 +82,9 @@ function buildXtermTheme(themeId: string) {
   };
 }
 
-/** 单个终端：独立持有 xterm 实例、PTY 引用和启动栏状态；隐藏时只 display:none，不杀进程 */
-function TerminalView({
+/** 单个终端：独立持有 xterm 实例、PTY 引用和启动栏状态；隐藏时只 display:none，不杀进程。
+ *  memo 化：启动栏自己的状态变化只重渲染本组件，不级联到兄弟标签/文件树/编辑器。 */
+const TerminalView = memo(function TerminalView({
   visible,
   rightOpen,
   layoutKey,
@@ -138,8 +139,9 @@ function TerminalView({
   /** 最近项目「真进入」：把目标目录注入活动标签的启动栏（TerminalView 消费后清空） */
   externalCwd?: string | null;
   onConsumeExternalCwd?: () => void;
-  onStatus: (s: TabStatus) => void;
-  onSessionUpdate: (s: SessionLinkState) => void;
+  /** 上报回调带 tabId（父级共享 useCallback，memo 稳定） */
+  onStatus: (id: string, s: TabStatus) => void;
+  onSessionUpdate: (id: string, s: SessionLinkState) => void;
   onOpenSessionPanel: () => void;
 }) {
   const profiles = useAppStore((s) => s.profiles);
@@ -236,13 +238,13 @@ function TerminalView({
     const key = JSON.stringify(s);
     if (key !== lastReportRef.current) {
       lastReportRef.current = key;
-      onStatus(s);
+      onStatus(tabId, s);
     }
   }, [title, running, shellActive, agentId, model, cwd, activePtyId, attention, sessionFile, onStatus]);
 
   // 会话联动数据镜像给页面级右侧面板
   useEffect(() => {
-    onSessionUpdate({ file: sessionFile, conv });
+    onSessionUpdate(tabId, { file: sessionFile, conv });
   }, [sessionFile, conv, onSessionUpdate]);
 
   // 从工作树带入目录创建的标签：聚焦配置选择，选好即可启动
@@ -836,7 +838,7 @@ function TerminalView({
       </div>
     </div>
   );
-}
+});
 
 interface Tab {
   id: string;
@@ -921,13 +923,23 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setGitTotals((prev) => (prev && prev.add === t.add && prev.del === t.del ? prev : t));
   }, []);
 
+  /** FileTree 的 fs-changed 事件 → GitPanel 一并刷新（稳定回调） */
+  const bumpFsChangeTick = useCallback(() => setFsChangeTick((t) => t + 1), []);
+
   /** 工作树单击文件 → 右侧「预览」页签（编辑器自行加载内容；路径限制在后端校验） */
-  function openPreview(path: string, name: string, root?: string) {
+  const openPreview = useCallback((path: string, name: string, root?: string) => {
     setRightOpen(true);
     setRightTab("preview");
     setPreview({ path, name, root: root ?? null });
     setPreviewDirty(false);
-  }
+  }, []);
+
+  /** 全部子组件共享的稳定回调（memo 不被行内箭头击穿） */
+  const openSessionPanel = useCallback(() => {
+    setRightTab("session");
+    setRightOpen(true);
+  }, []);
+  const consumeExternalCwd = useCallback(() => setEnterCwd(null), []);
 
   // 会话页签内容更新时滚到底部
   const activeSession = sessionByTab[activeId];
@@ -936,7 +948,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [activeSession?.conv, rightTab, rightOpen, activeId]);
 
-  function addTab(init?: {
+  const addTab = useCallback((init?: {
     cwd?: string;
     extraEnv?: Record<string, string>;
     title?: string;
@@ -947,7 +959,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     autoStart?: boolean;
     prefillCommand?: string;
     shellOnly?: boolean;
-  }): string {
+  }): string => {
     const t: Tab = {
       id: crypto.randomUUID(),
       initialCwd: init?.cwd,
@@ -964,12 +976,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setTabs((prev) => [...prev, t]);
     setActiveId(t.id);
     return t.id;
-  }
+  }, []);
 
   /** 工作树「在此打开新终端」：新建标签并预填 cwd，用户选 agent/profile 后启动 */
-  function openTerminalAt(path: string) {
-    addTab({ cwd: path });
-  }
+  const openTerminalAt = useCallback(
+    (path: string) => {
+      addTab({ cwd: path });
+    },
+    [addTab],
+  );
 
   // 消费工作区页/会话页交来的终端启动请求（可见时才消费，保证标签能立刻聚焦启动栏）
   const pendingTerminal = useAppStore((s) => s.pendingTerminal);
@@ -1132,7 +1147,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               refreshKey={refreshKey}
               onOpenFile={openPreview}
               onOpenTerminal={openTerminalAt}
-              onFsEvent={() => setFsChangeTick((t) => t + 1)}
+              onFsEvent={bumpFsChangeTick}
               onEnterProject={setEnterCwd}
             />
           </div>
@@ -1294,13 +1309,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   prefillCommand={t.prefillCommand}
                   shellOnly={t.shellOnly}
                   externalCwd={t.id === activeId ? enterCwd : null}
-                  onConsumeExternalCwd={() => setEnterCwd(null)}
-                  onStatus={(s) => reportStatus(t.id, s)}
-                  onSessionUpdate={(s) => reportSession(t.id, s)}
-                  onOpenSessionPanel={() => {
-                    setRightTab("session");
-                    setRightOpen(true);
-                  }}
+                  onConsumeExternalCwd={consumeExternalCwd}
+                  onStatus={reportStatus}
+                  onSessionUpdate={reportSession}
+                  onOpenSessionPanel={openSessionPanel}
                 />
               </div>
             );

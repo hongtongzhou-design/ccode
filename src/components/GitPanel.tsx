@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { GitFileDto, WorkspaceDiffDto } from "../types";
 
@@ -24,7 +24,7 @@ const STATUS_STYLE: Record<string, string> = {
  * 改动面板：活动标签 cwd 的 git 状态（8s 轮询）+ 提交/推送。
  * 输入提交信息并显式点击即视为用户同意，不再二次确认。
  */
-export default function GitPanel({
+function GitPanel({
   cwd,
   visible,
   refreshKey,
@@ -261,3 +261,6 @@ export default function GitPanel({
     </div>
   );
 }
+
+/** memo：父级重渲染不级联到 git 面板（其内部轮询/状态自更新不受影响） */
+export default memo(GitPanel);
