@@ -7,6 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# tauri-action 创建 Release 草稿需要写权限
+permissions:
+  contents: write
+
 jobs:
   test:
     name: cargo test (${{ matrix.os }})
@@ -56,5 +60,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'Ccode v${{ github.ref_name }}'
+          releaseName: 'Ccode ${{ github.ref_name }}'
           releaseDraft: true
