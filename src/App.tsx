@@ -41,7 +41,7 @@ function App() {
     <div className="flex h-full bg-canvas text-l2">
       <aside
         className={`flex shrink-0 flex-col bg-rail transition-[width] duration-150 ${
-          collapsed ? "w-12" : "w-36"
+          collapsed ? "w-14" : "w-36"
         }`}
       >
         <div
@@ -58,14 +58,14 @@ function App() {
             onClick={() => setPage(n.id)}
             title={n.label}
             className={`mx-1 mb-0.5 flex items-center rounded-md text-sm ${
-              collapsed ? "h-9 w-10 justify-center self-center" : "px-3 py-2.5"
+              collapsed ? "h-10 w-12 justify-center self-center" : "px-3 py-2.5"
             } ${
               page === n.id
                 ? "bg-rail-sel text-l1"
                 : "text-l3 hover:bg-white/5"
             }`}
           >
-            <span className={collapsed ? "text-base" : "mr-2 w-5 text-center"}>
+            <span className={collapsed ? "text-lg" : "mr-2 w-5 text-center"}>
               {n.icon}
             </span>
             {!collapsed && n.label}
@@ -75,7 +75,7 @@ function App() {
           onClick={toggleCollapsed}
           title={collapsed ? "展开侧栏" : "收起为图标"}
           className={`mt-auto mb-2 flex items-center justify-center self-center rounded-md text-l4 hover:bg-white/5 hover:text-l2 ${
-            collapsed ? "h-8 w-10" : "h-8 w-[calc(100%-8px)] mx-1"
+            collapsed ? "h-9 w-12" : "h-8 w-[calc(100%-8px)] mx-1"
           }`}
         >
           {collapsed ? "»" : "«"}
