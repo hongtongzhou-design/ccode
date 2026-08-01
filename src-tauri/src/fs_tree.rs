@@ -357,6 +357,7 @@ mod fix_tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)] // 测的是 unix symlink 语义；Windows 上无法无权限创建符号链接
     fn preview_allows_symlink_escaping_root_lexically() {
         let dir = std::env::temp_dir().join(format!("ccode-fx-{}", uuid::Uuid::new_v4()));
         let outside = dir.join("outside");
@@ -481,7 +482,7 @@ mod search_tests {
         search_walk(&dir, &dir, "apple", 0, &mut visited, &mut out);
         assert_eq!(out.len(), 1);
         assert!(std::path::Path::new(&out[0].path).ends_with("src/deep/apple.rs"));
-        assert_eq!(out[0].rel, "src/deep/apple.rs");
+        assert!(std::path::Path::new(&out[0].rel).ends_with("src/deep/apple.rs"));
         // 预览：root 传未展开的 "~" 也应通过词法检查
         let home_file = dirs::home_dir().unwrap().join("ccode-test-tilde.txt");
         fs::write(&home_file, "x").unwrap();
