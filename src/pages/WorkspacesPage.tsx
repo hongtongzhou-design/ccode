@@ -184,7 +184,7 @@ function PrModal({ ws, onClose }: { ws: WorkspaceDto; onClose: () => void }) {
   const [copied, setCopied] = useState(false);
   const [aiDrafting, setAiDrafting] = useState(false);
 
-  /** ✨ AI 起草 PR 描述：body 为空直接起草；非空先确认覆盖 */
+  /** ◈ AI 起草 PR 描述：body 为空直接起草；非空先确认覆盖 */
   async function onDraft() {
     if (body.trim() && !window.confirm("将用 AI 起草覆盖当前描述，继续？")) return;
     setAiDrafting(true);
@@ -279,7 +279,7 @@ function PrModal({ ws, onClose }: { ws: WorkspaceDto; onClose: () => void }) {
                     aiDrafting ? "animate-pulse" : ""
                   }`}
                 >
-                  {aiDrafting ? "✨ 起草中…" : "✨ AI 起草"}
+                  {aiDrafting ? "◈ 起草中…" : "◈ AI 起草"}
                 </button>
               </span>
               <textarea

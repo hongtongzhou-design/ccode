@@ -176,7 +176,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [summary, setSummary] = useState<string | null>(null);
   const [aiSummarizing, setAiSummarizing] = useState(false);
 
-  /** ✨ AI 摘要：生成/重新生成当前回放会话的摘要块 */
+  /** ◈ AI 摘要：生成/重新生成当前回放会话的摘要块 */
   async function onSummarize() {
     if (!selected) return;
     setAiSummarizing(true);
@@ -580,7 +580,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   }`}
                 >
                   <div className="flex items-center gap-1.5">
-                    {s.pinned && <span title="已保留">📌</span>}
+                    {s.pinned && <span title="已保留">⚑</span>}
                     <span className="truncate font-medium text-l1">{sessionTitle(s)}</span>
                     {liveSessions[s.sessionId] && (
                       <button
@@ -722,19 +722,19 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   aiSummarizing ? "animate-pulse" : ""
                 }`}
               >
-                {aiSummarizing ? "✨ 摘要中…" : "✨ 摘要"}
+                {aiSummarizing ? "◈ 摘要中…" : "◈ 摘要"}
               </button>
               <button
                 onClick={() => void togglePin(selected)}
                 className="ml-auto shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
               >
-                {selected.pinned ? "取消保留" : "📌 保留"}
+                {selected.pinned ? "取消保留" : "⚑ 保留"}
               </button>
             </div>
             {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
             {summary && (
               <div className="mx-4 mt-2 rounded bg-inset p-3 text-sm text-l2">
-                <span className="mr-1">✨</span>
+                <span className="mr-1">◈</span>
                 <span className="whitespace-pre-wrap">{summary}</span>
               </div>
             )}

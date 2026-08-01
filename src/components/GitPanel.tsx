@@ -46,7 +46,7 @@ export default function GitPanel({
   const [output, setOutput] = useState<{ ok: boolean; text: string } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
 
-  /** ✨ AI 生成提交信息：填入输入框由用户审阅后再提交（不自动提交） */
+  /** ◈ AI 生成提交信息：填入输入框由用户审阅后再提交（不自动提交） */
   async function genMessage() {
     setAiBusy(true);
     try {
@@ -223,7 +223,7 @@ export default function GitPanel({
                 aiBusy ? "animate-pulse" : ""
               }`}
             >
-              {aiBusy ? "✨…" : "✨"}
+              {aiBusy ? "◈…" : "◈"}
             </button>
           </div>
           <div className="flex gap-2">
