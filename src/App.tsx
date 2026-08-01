@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import ErrorBoundary from "./components/ErrorBoundary";
 import "./App.css";
 import ProfilesPage from "./pages/ProfilesPage";
 import SessionsPage from "./pages/SessionsPage";
@@ -66,7 +67,8 @@ function App() {
   }, [loadAll, loadSessions, loadSettings]);
 
   return (
-    <div className="flex h-full bg-canvas text-l2">
+    <ErrorBoundary>
+      <div className="flex h-full bg-canvas text-l2">
       <aside
         className={`flex shrink-0 flex-col bg-rail transition-[width] duration-150 ${
           collapsed ? "w-14" : "w-36"
@@ -133,7 +135,8 @@ function App() {
           <SettingsPage visible={page === "settings"} />
         </div>
       </main>
-    </div>
+      </div>
+    </ErrorBoundary>
   );
 }
 
