@@ -14,11 +14,47 @@
         height: 100%;
         background: #11131a;
       }
+      /* 加载占位：呼吸感，React 挂载后自动被替换 */
+      .boot-splash {
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #767e90;
+        font-family: -apple-system, "SF Pro", sans-serif;
+        font-size: 15px;
+        letter-spacing: 0.35em;
+        text-indent: 0.35em;
+        animation: boot-breathe 1.4s ease-in-out infinite;
+      }
+      @keyframes boot-breathe {
+        0%,
+        100% {
+          opacity: 0.25;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+      /* 应用挂载后整体淡入 */
+      #root > * {
+        animation: boot-fadein 0.3s ease-out;
+      }
+      @keyframes boot-fadein {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
     </style>
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot-splash">CCODE</div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
