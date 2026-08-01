@@ -429,15 +429,7 @@ function fmtTokens(n: number): string {
 export default function ProfilesPage() {
   const profiles = useAppStore((s) => s.profiles);
   const [usageMap, setUsageMap] = useState<Record<string, ProfileUsageDto>>({});
-  const [usageOpen, setUsageOpen] = useState<Set<string>>(new Set());
-  function toggleUsage(id: string) {
-    setUsageOpen((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
+  const [usagePop, setUsagePop] = useState<{ x: number; y: number; id: string } | null>(null);
 
   // 各 profile 用量（按模型近似归属；模型跨 profile 共享时会重复计入）
   useEffect(() => {
@@ -885,7 +877,7 @@ export default function ProfilesPage() {
                             key={p.id}
                             className="grid h-16 grid-cols-[130px_minmax(140px,1fr)_240px_150px_112px] items-center gap-2 text-sm"
                           >
-                            {/* 名称（+用量展开按钮）+ 上次使用 */}
+                            {/* 名称（+用量悬浮按钮）+ 上次使用 */}
                             <span className="flex h-full flex-col justify-center overflow-hidden">
                               <span className="flex items-center gap-1 overflow-hidden">
                                 <span className="truncate font-medium text-pl1">{p.name}</span>
@@ -893,28 +885,19 @@ export default function ProfilesPage() {
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      toggleUsage(p.id);
+                                      const r = e.currentTarget.getBoundingClientRect();
+                                      setUsagePop({ x: r.left, y: r.bottom + 4, id: p.id });
                                     }}
                                     title="查看用量/费用"
                                     className="shrink-0 text-xs text-l4 hover:text-pl1"
                                   >
-                                    {usageOpen.has(p.id) ? "▾" : "▸"}用量
+                                    ▸用量
                                   </button>
                                 )}
                               </span>
                               <span className="truncate text-xs text-l4">
                                 {p.lastUsedAt ? `${relTime(p.lastUsedAt)}使用` : "从未使用"}
                               </span>
-                              {usageOpen.has(p.id) && usageMap[p.id] && (
-                                <span
-                                  className="truncate text-xs text-l4"
-                                  title="按模型近似归属的用量/官方价费用（模型跨配置共享时会重复计入）"
-                                >
-                                  {`↑${fmtTokens(usageMap[p.id]!.input)} ↓${fmtTokens(usageMap[p.id]!.output)}`}
-                                  {usageMap[p.id]!.costUsd != null &&
-                                    ` · ${usageMap[p.id]!.costPartial ? "≥" : ""}$${usageMap[p.id]!.costUsd!.toFixed(2)}`}
-                                </span>
-                              )}
                             </span>
                             {/* Endpoint */}
                             <span className="truncate text-pl2">
@@ -979,6 +962,44 @@ export default function ProfilesPage() {
           })}
         </div>
       </div>
+      {usagePop && usageMap[usagePop.id] && (
+        <div
+          className="fixed inset-0 z-20"
+          onClick={() => setUsagePop(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="absolute w-56 rounded-md border border-field bg-strip p-3 text-xs shadow-xl"
+            style={{ left: usagePop.x, top: usagePop.y }}
+          >
+            {(() => {
+              const u = usageMap[usagePop.id]!;
+              return (
+                <>
+                  <div className="mb-1 font-medium text-pl1">用量 / 费用（官方价）</div>
+                  <div className="flex justify-between py-0.5 text-pl2">
+                    <span>输入</span>
+                    <span>{fmtTokens(u.input)}</span>
+                  </div>
+                  <div className="flex justify-between py-0.5 text-pl2">
+                    <span>输出</span>
+                    <span>{fmtTokens(u.output)}</span>
+                  </div>
+                  <div className="flex justify-between py-0.5 text-pl2">
+                    <span>费用</span>
+                    <span>
+                      {u.costUsd != null
+                        ? `${u.costPartial ? "≥" : ""}$${u.costUsd.toFixed(2)}`
+                        : "~"}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-l4">按模型近似归属；模型跨配置共享时会重复计入</p>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
       {modal && (
         <ProfileModal
           initial={modal.initial}
