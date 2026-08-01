@@ -51,7 +51,7 @@ export default function FileTree({
   cwd: string;
   showHidden: boolean;
   refreshKey: number;
-  onOpenFile: (path: string, name: string) => void;
+  onOpenFile: (path: string, name: string, root: string) => void;
   onOpenTerminal: (path: string) => void;
   /** 文件系统变化回调（fs-changed 防抖后触发，供 GitPanel 等联动刷新） */
   onFsEvent?: () => void;
@@ -166,7 +166,7 @@ export default function FileTree({
       <>
         <div
           onClick={() =>
-            entry.isDir ? toggle(entry.path) : onOpenFile(entry.path, entry.name)
+            entry.isDir ? toggle(entry.path) : onOpenFile(entry.path, entry.name, root)
           }
           onDoubleClick={() => {
             if (entry.isDir) setRoot(entry.path);

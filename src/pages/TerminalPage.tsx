@@ -52,6 +52,7 @@ function TerminalView({
   rightOpen,
   tabId,
   initialCwd,
+  skipSeed,
   initialExtraEnv,
   initialTitle,
   initialAgentId,
@@ -70,6 +71,8 @@ function TerminalView({
   rightOpen: boolean;
   /** 本标签 id（liveSessions 登记用） */
   tabId: string;
+  /** 不继承「上次启动」记录（兜底空标签） */
+  skipSeed?: boolean;
   /** 从工作树「在此打开」/ 工作区创建的标签：启动栏 cwd 预填为该目录 */
   initialCwd?: string;
   /** 工作区交接的附加 env（如 CCODE_PORT 端口段），launch 时注入 */
@@ -93,8 +96,8 @@ function TerminalView({
   onOpenSessionPanel: () => void;
 }) {
   const profiles = useAppStore((s) => s.profiles);
-  // 记住上次启动选择（agent/profile/模型/目录），每个新标签以此为初始值
-  const saved = (() => {
+  // 记住上次启动选择（agent/profile/模型/目录），每个新标签以此为初始值（skipSeed 标签除外）
+  const saved = skipSeed ? {} : (() => {
     try {
       return JSON.parse(localStorage.getItem("ccode.lastLaunch") ?? "{}") as Partial<{
         agentId: string;
@@ -735,6 +738,8 @@ function TerminalView({
 
 interface Tab {
   id: string;
+  /** 兜底空标签：不继承「上次启动」记录（关闭最后标签时使用） */
+  skipSeed?: boolean;
   /** 从工作树「在此打开」/ 工作区创建时预填的启动目录 */
   initialCwd?: string;
   /** 工作区交接的附加 env（端口段） */
@@ -773,7 +778,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [focusMode, setFocusMode] = useState(false);
   const [rightTab, setRightTab] = useState<"session" | "preview" | "git">("session");
   const [gitTotals, setGitTotals] = useState<{ add: number; del: number } | null>(null);
-  const [preview, setPreview] = useState<{ path: string; name: string } | null>(null);
+  const [preview, setPreview] = useState<{ path: string; name: string; root: string | null } | null>(null);
   /** 预览编辑器脏状态（预览页签的脏点） */
   const [previewDirty, setPreviewDirty] = useState(false);
   /** 文件系统变化信号：FileTree 的 fs-changed 事件触发 GitPanel 一并刷新 */
@@ -810,10 +815,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   }, []);
 
   /** 工作树单击文件 → 右侧「预览」页签（编辑器自行加载内容；路径限制在后端校验） */
-  function openPreview(path: string, name: string) {
+  function openPreview(path: string, name: string, root?: string) {
     setRightOpen(true);
     setRightTab("preview");
-    setPreview({ path, name });
+    setPreview({ path, name, root: root ?? null });
     setPreviewDirty(false);
   }
 
@@ -936,7 +941,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     const next = tabs.filter((t) => t.id !== id);
     if (next.length === 0) {
       // 至少保留一个标签
-      const fresh: Tab = { id: crypto.randomUUID() };
+      const fresh: Tab = { id: crypto.randomUUID(), skipSeed: true };
       setTabs([fresh]);
       setActiveId(fresh.id);
     } else {
@@ -1149,6 +1154,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   visible={tabVisible}
                   rightOpen={rightOpen}
                   tabId={t.id}
+                  skipSeed={t.skipSeed}
                   initialCwd={t.initialCwd}
                   initialExtraEnv={t.initialExtraEnv}
                   initialTitle={t.initialTitle}
@@ -1229,7 +1235,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               {preview ? (
                 <FilePreviewEditor
                   path={preview.path}
-                  root={activeCwd}
+                  root={preview.root ?? activeCwd}
                   onDirtyChange={setPreviewDirty}
                 />
               ) : (
