@@ -366,16 +366,14 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  async function onSetCategory(skill: SkillDto) {
-    const input = window.prompt(
-      "设置分类（留空归为未分类）：",
-      skill.category ?? "",
-    );
-    if (input === null) return;
+  const [catEdit, setCatEdit] = useState<{ id: string; value: string } | null>(null);
+
+  async function submitCategory(id: string, value: string) {
     await invoke("set_skill_category", {
-      id: skill.id,
-      category: input.trim() || null,
+      id,
+      category: value.trim() || null,
     }).catch((e) => setError(String(e)));
+    setCatEdit(null);
     await refresh();
   }
 
@@ -501,13 +499,28 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                       {s.repo ? ` · ${s.repo}` : ""}
                     </span>
                     <span className="ml-auto flex shrink-0 items-center gap-1">
-                      <button
-                        onClick={() => onSetCategory(s)}
-                        title="设置该技能的分类"
-                        className="rounded px-2 py-0.5 text-xs text-l3 hover:text-l1"
-                      >
-                        分类: {s.category ?? "未分类"}
-                      </button>
+                      {catEdit?.id === s.id ? (
+                        <input
+                          autoFocus
+                          value={catEdit.value}
+                          onChange={(e) => setCatEdit({ id: s.id, value: e.target.value })}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void submitCategory(s.id, catEdit.value);
+                            if (e.key === "Escape") setCatEdit(null);
+                          }}
+                          onBlur={() => void submitCategory(s.id, catEdit.value)}
+                          placeholder="分类名（留空=未分类）"
+                          className="w-28 rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
+                        />
+                      ) : (
+                        <button
+                          onClick={() => setCatEdit({ id: s.id, value: s.category ?? "" })}
+                          title="设置该技能的分类"
+                          className="rounded px-2 py-0.5 text-xs text-l3 hover:text-l1"
+                        >
+                          分类: {s.category ?? "未分类"}
+                        </button>
+                      )}
                       <button onClick={() => onView(s)} className="rounded px-2 py-0.5 text-xs text-l2 hover:text-l1">
                         查看
                       </button>
