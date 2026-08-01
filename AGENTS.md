@@ -120,3 +120,10 @@ src-tauri/src/
 - W1 任务工作区核心闭环 ✅（worktree 创建/归档/恢复、files-to-copy、端口注入、工作区页面、会话归并；用户验收通过）
 - W2 工作区自动化 ✅（.ccode/settings.toml 三层合并、setup/archive 脚本钩子、run 脚本按钮 + nonconcurrent 互斥）
 - W3 评审流 ✅（merge-base 任务 diff、workspace_health 状态机、本地合并+归档、gh PR 创建）
+
+**当前待办（backlog）**：
+
+- macOS 签名公证（暂缓，需 Apple Developer 会员 + CI 配 6 个 APPLE_* secrets，见架构 v1.3）
+- Skills 更新检测与在线编辑（v2 口子，见架构 v0.9 / §6.13）
+- Claude Code hooks 精确化注意力标记（v2 评估项，需写用户配置，见架构 v0.7）
+- 本地 API 代理（P4 可选项，未做）
