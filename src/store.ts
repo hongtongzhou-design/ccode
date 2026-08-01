@@ -2,6 +2,20 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { DetectResult, Profile, ProfileInput, SessionMetaDto } from "./types";
 
+/** 应用设置（SettingsPage；后端 get_settings/update_settings 契约） */
+export interface AppSettings {
+  terminalFontSize: number;
+  scrollback: number;
+  rateUsdCny: number;
+  brewMirror: boolean;
+  theme: string; // "midnight" | "warm" | "forest" | "violet"
+}
+
+/** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效 */
+export function applyTheme(id: string) {
+  document.documentElement.dataset.theme = id || "midnight";
+}
+
 /** 工作区页 → 终端页的交接：新开一个标签，预填 cwd + 注入 env（如端口段） */
 export interface PendingTerminal {
   cwd: string;
@@ -45,6 +59,10 @@ interface AppState {
   /** 工作区页 → 会话页的搜索词交接（会话页消费并清空） */
   sessionsQuery: string | null;
   setSessionsQuery: (q: string | null) => void;
+  /** 应用设置（启动时加载；update 合并写回并即时应用主题） */
+  settings: AppSettings | null;
+  loadSettings: () => Promise<void>;
+  updateSettings: (patch: Partial<AppSettings>) => Promise<void>;
   loadAll: () => Promise<void>;
   /** 拉取全部会话元数据（Claude Code + Codex），返回最新列表供轮询比对 */
   loadSessions: () => Promise<SessionMetaDto[]>;
@@ -81,6 +99,17 @@ export const useAppStore = create<AppState>((set) => ({
   focusTab: (tabId) => set({ focusTabId: tabId }),
   sessionsQuery: null,
   setSessionsQuery: (q) => set({ sessionsQuery: q }),
+  settings: null,
+  loadSettings: async () => {
+    const s = await invoke<AppSettings>("get_settings");
+    set({ settings: s });
+    applyTheme(s.theme);
+  },
+  updateSettings: async (patch) => {
+    const s = await invoke<AppSettings>("update_settings", { patch });
+    set({ settings: s });
+    applyTheme(s.theme);
+  },
 
   loadAll: async () => {
     const [profiles, agents] = await Promise.all([

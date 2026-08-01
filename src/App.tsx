@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import "./App.css";
 import ProfilesPage from "./pages/ProfilesPage";
 import SessionsPage from "./pages/SessionsPage";
+import SettingsPage from "./pages/SettingsPage";
 import SkillsPage from "./pages/SkillsPage";
 import StatsPage from "./pages/StatsPage";
 import TerminalPage from "./pages/TerminalPage";
@@ -15,6 +16,7 @@ const NAV: { id: string; label: string; icon: string }[] = [
   { id: "sessions", label: "会话", icon: "◔" },
   { id: "skills", label: "技能", icon: "✦" },
   { id: "stats", label: "统计", icon: "◫" },
+  { id: "settings", label: "设置", icon: "⛭" },
 ];
 
 function App() {
@@ -31,11 +33,14 @@ function App() {
   }
   const loadAll = useAppStore((s) => s.loadAll);
   const loadSessions = useAppStore((s) => s.loadSessions);
+  const loadSettings = useAppStore((s) => s.loadSettings);
 
   useEffect(() => {
     loadAll().catch((e) => console.error(e));
     loadSessions().catch((e) => console.error(e));
-  }, [loadAll, loadSessions]);
+    // 设置（含主题）在启动时加载并应用
+    loadSettings().catch((e) => console.error(e));
+  }, [loadAll, loadSessions, loadSettings]);
 
   return (
     <div className="flex h-full bg-canvas text-l2">
@@ -100,6 +105,9 @@ function App() {
         </div>
         <div className={page === "stats" ? "h-full overflow-auto" : "hidden"}>
           <StatsPage visible={page === "stats"} />
+        </div>
+        <div className={page === "settings" ? "h-full overflow-auto" : "hidden"}>
+          <SettingsPage visible={page === "settings"} />
         </div>
       </main>
     </div>

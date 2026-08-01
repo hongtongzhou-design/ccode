@@ -452,16 +452,21 @@ const BUILTIN_PRICING: [(&str, (f64, f64)); 27] = [
     ("deepseek", (0.27, 1.1)),
 ];
 
-/// pricing.json 的 "_rate" 键覆盖 USD→CNY 汇率
-const DEFAULT_RATE_USD_CNY: f64 = 7.2;
-
-fn load_rate(override_path: Option<&Path>) -> f64 {
+/// 汇率取值链：settings.json 的 rate_usd_cny > pricing.json 的 "_rate" > 默认 7.2
+fn load_rate_with(settings_rate: Option<f64>, override_path: Option<&Path>) -> f64 {
+    if let Some(r) = settings_rate.filter(|r| *r > 0.0) {
+        return r;
+    }
     override_path
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|v| v.get("_rate").and_then(|r| r.as_f64()))
         .filter(|r| *r > 0.0)
-        .unwrap_or(DEFAULT_RATE_USD_CNY)
+        .unwrap_or(crate::settings::DEFAULT_RATE_USD_CNY)
+}
+
+fn load_rate(override_path: Option<&Path>) -> f64 {
+    load_rate_with(crate::settings::rate_setting(), override_path)
 }
 
 fn load_pricing(override_path: Option<&Path>) -> Vec<(String, (f64, f64))> {
@@ -852,15 +857,18 @@ mod tests {
     }
 
     #[test]
-    fn rate_default_and_override() {
-        assert_eq!(load_rate(None), 7.2);
+    fn rate_priority_chain() {
+        assert_eq!(load_rate_with(None, None), 7.2, "默认 7.2");
         let dir = std::env::temp_dir().join(format!("ccode-usage-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("pricing.json");
         std::fs::write(&p, r#"{"_rate": 7.05, "claude-sonnet": [1.0, 5.0]}"#).unwrap();
-        assert_eq!(load_rate(Some(&p)), 7.05, "_rate 键覆盖默认汇率");
+        assert_eq!(load_rate_with(None, Some(&p)), 7.05, "_rate 键覆盖默认汇率");
+        assert_eq!(load_rate_with(Some(7.3), Some(&p)), 7.3, "settings.json 优先于 pricing.json _rate");
+        assert_eq!(load_rate_with(Some(7.3), None), 7.3);
         std::fs::write(&p, r#"{"_rate": -1}"#).unwrap();
-        assert_eq!(load_rate(Some(&p)), 7.2, "非法汇率回落默认");
+        assert_eq!(load_rate_with(None, Some(&p)), 7.2, "非法 _rate 回落默认");
+        assert_eq!(load_rate_with(Some(-2.0), None), 7.2, "非法 settings 汇率同样回落");
         std::fs::remove_dir_all(&dir).ok();
     }
 

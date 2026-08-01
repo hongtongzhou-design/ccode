@@ -46,6 +46,39 @@ interface SessionLinkState {
 
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
+/** 四款深色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板；调色板其余部分共享） */
+const XTERM_BG_FG: Record<string, { background: string; foreground: string }> = {
+  midnight: { background: "#11131a", foreground: "#aeb6c6" },
+  warm: { background: "#150f0c", foreground: "#c4b3a4" },
+  forest: { background: "#0e1511", foreground: "#a8bfb2" },
+  violet: { background: "#130f1f", foreground: "#b3aed0" },
+};
+
+/** VS Code Dark+ 风格 16 色调色板（各主题共享，只换底/字色） */
+function buildXtermTheme(themeId: string) {
+  return {
+    ...(XTERM_BG_FG[themeId] ?? XTERM_BG_FG.midnight),
+    cursor: "#aeafad",
+    selectionBackground: "#264f78",
+    black: "#000000",
+    red: "#cd3131",
+    green: "#0dbc79",
+    yellow: "#e5e510",
+    blue: "#2472c8",
+    magenta: "#bc3fbc",
+    cyan: "#11a8cd",
+    white: "#e5e5e5",
+    brightBlack: "#666666",
+    brightRed: "#f14c4c",
+    brightGreen: "#23d18b",
+    brightYellow: "#f5f543",
+    brightBlue: "#3b8eea",
+    brightMagenta: "#d670d6",
+    brightCyan: "#29b8db",
+    brightWhite: "#ffffff",
+  };
+}
+
 /** 单个终端：独立持有 xterm 实例、PTY 引用和启动栏状态；隐藏时只 display:none，不杀进程 */
 function TerminalView({
   visible,
@@ -101,6 +134,18 @@ function TerminalView({
   onOpenSessionPanel: () => void;
 }) {
   const profiles = useAppStore((s) => s.profiles);
+  const settings = useAppStore((s) => s.settings);
+  // 终端创建 effect 依赖 [everVisible]，创建时参数经 ref 取最新设置
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  // 设置即时应用：字号与主题色随设置页修改实时生效（scrollback 只对新终端生效）
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term || !settings) return;
+    term.options.fontSize = settings.terminalFontSize;
+    term.options.theme = buildXtermTheme(settings.theme);
+  }, [settings]);
   // 记住上次启动选择（agent/profile/模型/目录），每个新标签以此为初始值（skipSeed 标签除外）
   const saved = skipSeed ? {} : (() => {
     try {
@@ -196,35 +241,13 @@ function TerminalView({
     if (!everVisible) return;
     const term = new Terminal({
       fontFamily: "'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace",
-      fontSize: 13,
+      fontSize: settingsRef.current?.terminalFontSize ?? 13,
       lineHeight: 1.25,
       letterSpacing: 0.2,
       cursorStyle: "bar",
       cursorBlink: true,
-      scrollback: 5000,
-      // VS Code Dark+ 风格调色板，让 ANSI 高亮有足够的色彩层次
-      theme: {
-        background: '#11131a', // 主题令牌 --color-canvas
-        foreground: '#aeb6c6', // 主题令牌 --color-l2
-        cursor: '#aeafad',
-        selectionBackground: '#264f78',
-        black: '#000000',
-        red: '#cd3131',
-        green: '#0dbc79',
-        yellow: '#e5e510',
-        blue: '#2472c8',
-        magenta: '#bc3fbc',
-        cyan: '#11a8cd',
-        white: '#e5e5e5',
-        brightBlack: '#666666',
-        brightRed: '#f14c4c',
-        brightGreen: '#23d18b',
-        brightYellow: '#f5f543',
-        brightBlue: '#3b8eea',
-        brightMagenta: '#d670d6',
-        brightCyan: '#29b8db',
-        brightWhite: '#ffffff',
-      },
+      scrollback: settingsRef.current?.scrollback ?? 5000,
+      theme: buildXtermTheme(settingsRef.current?.theme ?? "midnight"),
     });
     const fit = new FitAddon();
     term.loadAddon(fit);

@@ -202,6 +202,32 @@ pub(crate) fn strip_ansi(input: &str) -> String {
 
 /// 在 PTY 里跑命令并流式转发输出（emit 收到剥离 ANSI 后的文本块）。
 /// 为什么用 PTY 而不是管道：brew（Ruby）/curl 检测到 stdout 是管道会切到块缓冲，
+/// brew 的环境变量：跳过自动元数据更新；settings.brew_mirror 开启时（默认）
+/// API 与 bottle 走清华 TUNA 镜像（用户显式设置过的变量不动）。
+/// 抽成纯函数便于测试镜像开关。
+pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String)> {
+    let mut env = vec![(
+        "HOMEBREW_NO_AUTO_UPDATE".to_string(),
+        "1".to_string(),
+    )];
+    if program == "brew" && mirror {
+        // formulae.brew.sh 托管在 GitHub Pages，国内拉几十 MB 元数据要几分钟
+        if std::env::var_os("HOMEBREW_API_DOMAIN").is_none() {
+            env.push((
+                "HOMEBREW_API_DOMAIN".to_string(),
+                "https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles/api".to_string(),
+            ));
+        }
+        if std::env::var_os("HOMEBREW_BOTTLE_DOMAIN").is_none() {
+            env.push((
+                "HOMEBREW_BOTTLE_DOMAIN".to_string(),
+                "https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles".to_string(),
+            ));
+        }
+    }
+    env
+}
+
 /// 运行期间一个字节都到不了我们手里；接 PTY 后它们按 TTY 行缓冲，输出实时可见。
 /// TERM=dumb 让 brew/npm 放弃彩色和花式重绘，但保留 TTY 行为。
 /// 带 900s 超时（杀直接子进程）；reader 在子进程退出后最多等 1 秒 drain，
@@ -220,23 +246,8 @@ fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program: &str, arg
     for a in args {
         cmd.arg(a);
     }
-    // 跳过 brew 的自动元数据更新（慢网络下这一步就要几分钟），对非 brew 命令无害
-    cmd.env("HOMEBREW_NO_AUTO_UPDATE", "1");
-    if program == "brew" {
-        // formulae.brew.sh 托管在 GitHub Pages，国内拉几十 MB 元数据要几分钟；
-        // API 与 bottle 走清华 TUNA 镜像（用户显式设置过时以用户为准）
-        if std::env::var_os("HOMEBREW_API_DOMAIN").is_none() {
-            cmd.env(
-                "HOMEBREW_API_DOMAIN",
-                "https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles/api",
-            );
-        }
-        if std::env::var_os("HOMEBREW_BOTTLE_DOMAIN").is_none() {
-            cmd.env(
-                "HOMEBREW_BOTTLE_DOMAIN",
-                "https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles",
-            );
-        }
+    for (k, v) in brew_env_pairs(program, crate::settings::brew_mirror_enabled()) {
+        cmd.env(&k, &v);
     }
     cmd.env("TERM", "dumb");
     cmd.env_remove("NO_COLOR");
@@ -535,6 +546,19 @@ pub async fn install_agent(app: AppHandle, agent_id: String) -> Result<UpdateRes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brew_mirror_off_skips_tuna_domains() {
+        let on = brew_env_pairs("brew", true);
+        assert!(on.iter().any(|(k, _)| k == "HOMEBREW_API_DOMAIN"));
+        assert!(on.iter().any(|(k, _)| k == "HOMEBREW_BOTTLE_DOMAIN"));
+        let off = brew_env_pairs("brew", false);
+        assert!(!off.iter().any(|(k, _)| k == "HOMEBREW_API_DOMAIN"), "镜像关闭时不注入镜像域名");
+        assert!(!off.iter().any(|(k, _)| k == "HOMEBREW_BOTTLE_DOMAIN"));
+        // NO_AUTO_UPDATE 无论开关都保留；非 brew 命令不注入镜像
+        assert!(off.iter().any(|(k, _)| k == "HOMEBREW_NO_AUTO_UPDATE"));
+        assert!(!brew_env_pairs("npm", true).iter().any(|(k, _)| k == "HOMEBREW_API_DOMAIN"));
+    }
 
     #[test]
     fn method_detection_from_resolved_path() {

@@ -3,9 +3,11 @@ mod fs_tree;
 mod git_info;
 mod global_config;
 mod models;
+mod pricing;
 mod profiles;
 mod pty;
 mod sessions;
+mod settings;
 mod skills;
 mod updater;
 mod usage;
@@ -87,6 +89,10 @@ pub fn run() {
             skills::read_skill_md,
             usage::rebuild_usage_index,
             usage::get_usage_stats,
+            settings::get_settings,
+            settings::update_settings,
+            pricing::read_pricing_file,
+            pricing::write_pricing_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

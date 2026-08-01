@@ -70,6 +70,7 @@ src-tauri/src/
   sessions.rs                # 会话浏览：扫描/解析全部六个 agent 会话（含 Codex .zst、OpenCode SQLite/legacy JSON）、app.db session_meta、pin 快照、用户发起的删除、注意力状态分类（session_tail_state）
   skills.rs                  # 技能库（§6.13）：SSOT 库 + 六 CLI symlink/copy 分发、四路导入（目录/ZIP/GitHub/发现）、ZIP 导出、卸载备份
   usage.rs                   # 用量统计（§6.11）：六 agent usage 事件提取、usage_daily 按天聚合、内置定价表 + pricing.json 覆盖
+  settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/brew 镜像/主题，get/update 两个 command
   workspaces.rs              # 任务工作区（§6.10）：git worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT 端口段、setup/archive 脚本钩子、评审合并（health/merge/PR）
   ws_settings.rs             # 项目级 .ccode/settings.toml 三层合并（用户→仓库→local）：files_to_copy/run_mode/scripts
   lib.rs                     # 模块与 Tauri command 注册

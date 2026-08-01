@@ -50,14 +50,68 @@
   /* 次级实心按钮 */
   --color-btn: #464543;
 
-  /* 配置页专属（不改全局 rail/canvas 令牌） */
-  --color-pg: #11131a; /* 页底（= canvas） */
-  --color-grp: #151823; /* 组头 / 选中填充（= strip） */
-  --color-hl2: #202532; /* 页内 hairline（= hairline） */
-  --color-pl1: #eef2fa; /* 页内一级文本（= l1） */
-  --color-pl2: #aeb6c6; /* 页内二级文本（= l2） */
+  /* 配置页专属（别名引用语义变量，随主题切换联动） */
+  --color-pg: var(--color-canvas); /* 页底 */
+  --color-grp: var(--color-strip); /* 组头 / 选中填充 */
+  --color-hl2: var(--color-hairline); /* 页内 hairline */
+  --color-pl1: var(--color-l1); /* 页内一级文本 */
+  --color-pl2: var(--color-l2); /* 页内二级文本 */
   --color-okb: #7fe3a8; /* 成功（已安装 / 已存密钥 / 安装） */
   --color-warnb: #e3c98a; /* 警告 */
+}
+
+/* 多主题（仅深色）：运行时 document.documentElement.dataset.theme 切换，
+   覆盖同名 CSS 变量即可；状态/CTA/diff/tabline/link 颜色各主题共享 */
+
+/* 暖夜 */
+[data-theme="warm"] {
+  --color-rail: #120d0b;
+  --color-rail2: #1a1310;
+  --color-rail-sel: #2b1f19;
+  --color-strip: #201713;
+  --color-canvas: #150f0c;
+  --color-inset: #241a15;
+  --color-seg-sel: #2e211a;
+  --color-hairline: #2b211b;
+  --color-field: #3a2c23;
+  --color-l1: #f5ede4;
+  --color-l2: #c4b3a4;
+  --color-l3: #94816f;
+  --color-l4: #6b5847;
+}
+
+/* 墨绿 */
+[data-theme="forest"] {
+  --color-rail: #070c0a;
+  --color-rail2: #0c1310;
+  --color-rail-sel: #18251e;
+  --color-strip: #121b16;
+  --color-canvas: #0e1511;
+  --color-inset: #16211b;
+  --color-seg-sel: #1c2a22;
+  --color-hairline: #1d2a23;
+  --color-field: #28382f;
+  --color-l1: #e8f2ec;
+  --color-l2: #a8bfb2;
+  --color-l3: #748f80;
+  --color-l4: #4e6459;
+}
+
+/* 深紫 */
+[data-theme="violet"] {
+  --color-rail: #0b0912;
+  --color-rail2: #100e1a;
+  --color-rail-sel: #201a33;
+  --color-strip: #171325;
+  --color-canvas: #130f1f;
+  --color-inset: #1c1729;
+  --color-seg-sel: #262038;
+  --color-hairline: #241d36;
+  --color-field: #332a4a;
+  --color-l1: #efecf8;
+  --color-l2: #b3aed0;
+  --color-l3: #7f78a3;
+  --color-l4: #585173;
 }
 
 html,
