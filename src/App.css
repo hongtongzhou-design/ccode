@@ -5,6 +5,26 @@
  * Tailwind v4 @theme 会为每个 --color-* 自动生成同名工具类
  * （bg-rail / text-l2 / border-hairline / divide-hairline …）。
  */
+/* JetBrains Mono（打包进应用，等宽代码字体） */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("./assets/fonts/JetBrainsMono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("./assets/fonts/JetBrainsMono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("./assets/fonts/JetBrainsMono-700.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+
 @theme {
   /* 沉浸工作台：侧栏沉入近虚无 → 页面左栏 → 内容面 → 内嵌层逐级浮起
      冷调深黑 + 冷白灰蓝文字，绿色为唯一强调 */
