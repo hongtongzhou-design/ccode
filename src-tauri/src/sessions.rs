@@ -3190,42 +3190,6 @@ pub async fn delete_project_sessions(agent: String, project_path: String) -> Res
     Ok(count)
 }
 
-/// 会话期间被 agent 修改过的文件（从工具调用参数提取，尽力而为）
-/// claude: Edit/Write/MultiEdit/NotebookEdit 的 file_path；其他 agent：已知写文件工具名 + 参数里的 file_path/path 字段
-#[tauri::command]
-pub async fn session_touched_files(agent: String, file_path: String) -> Vec<String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        const WRITE_TOOLS: [&str; 8] = [
-            "Edit", "Write", "MultiEdit", "NotebookEdit", "edit", "write", "write_file", "apply_patch",
-        ];
-        conversation_impl(&agent, &file_path)
-            .iter()
-            .flat_map(|m| m.blocks.iter())
-            .filter(|b| b.kind == "tool_use")
-            .filter(|b| {
-                b.tool_name
-                    .as_deref()
-                    .map(|n| WRITE_TOOLS.iter().any(|t| t.eq_ignore_ascii_case(n)))
-                    .unwrap_or(false)
-            })
-            .filter_map(|b| {
-                let v: serde_json::Value = serde_json::from_str(&b.text).ok()?;
-                v.get("file_path")
-                    .or_else(|| v.get("path"))
-                    .and_then(|x| x.as_str())
-                    .map(|s| s.to_string())
-            })
-            .fold(Vec::new(), |mut acc, p| {
-                if !acc.contains(&p) {
-                    acc.push(p);
-                }
-                acc
-            })
-    })
-    .await
-    .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

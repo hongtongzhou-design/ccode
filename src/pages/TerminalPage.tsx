@@ -928,23 +928,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   // 会话页签内容更新时滚到底部
   const activeSession = sessionByTab[activeId];
-  const [activeTouched, setActiveTouched] = useState<string[]>([]);
-
-  // 当前标签会话涉及文件（改动页顶部展示；无会话文件时为空）
-  const activeAgentId = statuses[activeId]?.agentId;
-  useEffect(() => {
-    const file = activeSession?.file;
-    if (!file || !activeAgentId) {
-      setActiveTouched([]);
-      return;
-    }
-    invoke<string[]>("session_touched_files", {
-      agent: activeAgentId,
-      filePath: file,
-    })
-      .then(setActiveTouched)
-      .catch(() => setActiveTouched([]));
-  }, [activeSession?.file, activeAgentId]);
   useEffect(() => {
     const el = sessionScrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -1395,24 +1378,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           )}
           {/* 改动面板保持挂载：右栏打开期间持续轮询，页签徽标才有数据 */}
           <div className={rightTab === "git" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-            {activeTouched.length > 0 && (
-              <div className="shrink-0 border-b border-hairline px-3 py-2">
-                <div className="mb-1 text-xs text-l3">
-                  会话涉及文件（{activeTouched.length}）
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {activeTouched.map((f) => (
-                    <span
-                      key={f}
-                      title={f}
-                      className="rounded bg-inset px-1.5 py-0.5 font-mono text-xs text-l2"
-                    >
-                      {f.split(/[\/]/).pop()}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
             <GitPanel
               cwd={activeCwd}
               visible={visible && rightOpen}

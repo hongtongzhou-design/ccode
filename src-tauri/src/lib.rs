@@ -44,7 +44,6 @@ pub fn run() {
             sessions::list_sessions,
             sessions::find_session_for,
             sessions::get_session_conversation,
-            sessions::session_touched_files,
             sessions::pin_session,
             sessions::unpin_session,
             sessions::set_session_meta,
