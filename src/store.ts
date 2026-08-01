@@ -58,6 +58,9 @@ interface AppState {
   focusTab: (tabId: string | null) => void;
   /** 工作区页 → 会话页的搜索词交接（会话页消费并清空） */
   sessionsQuery: string | null;
+  /** 请求会话页打开指定会话（终端页「⤴对话」跳转用） */
+  openSessionReq: { sessionId: string } | null;
+  setOpenSessionReq: (r: { sessionId: string } | null) => void;
   setSessionsQuery: (q: string | null) => void;
   /** 应用设置（启动时加载；update 合并写回并即时应用主题） */
   settings: AppSettings | null;
@@ -98,7 +101,9 @@ export const useAppStore = create<AppState>((set) => ({
   focusTabId: null,
   focusTab: (tabId) => set({ focusTabId: tabId }),
   sessionsQuery: null,
+  openSessionReq: null,
   setSessionsQuery: (q) => set({ sessionsQuery: q }),
+  setOpenSessionReq: (r) => set({ openSessionReq: r }),
   settings: null,
   loadSettings: async () => {
     const s = await invoke<AppSettings>("get_settings");

@@ -50,6 +50,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const loadSessions = useAppStore((s) => s.loadSessions);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
+  const openSessionReq = useAppStore((s) => s.openSessionReq);
+  const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   const liveSessions = useAppStore((s) => s.liveSessions);
   const focusTab = useAppStore((s) => s.focusTab);
   const sessionsQuery = useAppStore((s) => s.sessionsQuery);
@@ -194,6 +196,18 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       setAiSummarizing(false);
     }
   }
+
+  // 终端页「⤴对话」跳转：按 sessionId 直接打开回放（列表加载完成后消费一次）
+  useEffect(() => {
+    if (!openSessionReq || sessions.length === 0) return;
+    const hit = sessions.find((x) => x.sessionId === openSessionReq.sessionId);
+    setOpenSessionReq(null);
+    if (hit) {
+      setFilter({ kind: "all" });
+      void openSession(hit);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openSessionReq, sessions]);
 
   async function openSession(s: SessionMetaDto) {
     // 源文件已删除且无快照，无法回放

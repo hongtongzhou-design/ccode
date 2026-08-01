@@ -195,6 +195,8 @@ function TerminalView({
   } | null>(null);
   const linkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const setLiveSession = useAppStore((s) => s.setLiveSession);
+  const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
+  const setPage = useAppStore((s) => s.setPage);
 
   const agentProfiles = profiles.filter((p) => p.agent === agentId);
   const [skillCount, setSkillCount] = useState(0);
@@ -739,18 +741,7 @@ function TerminalView({
           会话
         </button>
         {shellActive && !running && (
-          <>
-            <span className="text-sm text-l3">shell 模式</span>
-            {lastResumeRef.current && (
-              <button
-                onClick={() => launch(lastResumeRef.current ?? undefined)}
-                title="恢复到刚才的会话继续对话"
-                className="rounded border border-field px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1"
-              >
-                ⟳ 恢复会话
-              </button>
-            )}
-          </>
+          <span className="text-sm text-l3">shell 模式</span>
         )}
         {exited && !running && !shellActive && (
           <span className="text-sm text-l3">进程已退出</span>
@@ -782,6 +773,29 @@ function TerminalView({
             {running && (
               <button onClick={stop} className="text-err-text hover:underline">
                 停止
+              </button>
+            )}
+            {lastResumeRef.current && shellActive && (
+              <button
+                onClick={() => launch(lastResumeRef.current ?? undefined)}
+                title="恢复到刚才的会话继续对话"
+                className="text-l3 hover:text-l1"
+              >
+                ⟳恢复
+              </button>
+            )}
+            {(sessionFile || lastResumeRef.current) && (
+              <button
+                onClick={() => {
+                  const sid = linkCtxRef.current?.sessionId ?? lastResumeRef.current;
+                  if (!sid) return;
+                  setOpenSessionReq({ sessionId: sid });
+                  setPage("sessions");
+                }}
+                title="在会话页打开该对话（可标记/保留）"
+                className="text-l3 hover:text-l1"
+              >
+                ⤴对话
               </button>
             )}
             <button
