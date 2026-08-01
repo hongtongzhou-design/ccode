@@ -180,6 +180,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [aiSummarizing, setAiSummarizing] = useState(false);
   /** 回放区页签：对话 / 改动（改动 = 该会话项目的 git diff 面板） */
   const [replayTab, setReplayTab] = useState<"chat" | "diff">("chat");
+  const [touchedFiles, setTouchedFiles] = useState<string[]>([]);
 
   /** ◈ AI 摘要：生成/重新生成当前回放会话的摘要块 */
   async function onSummarize() {
@@ -222,6 +223,12 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setLoadingConv(true);
     setError(null);
     try {
+      void invoke<string[]>("session_touched_files", {
+        agent: s.agent,
+        filePath: s.filePath,
+      })
+        .then(setTouchedFiles)
+        .catch(() => setTouchedFiles([]));
       const conv = await invoke<ChatMessageDto[]>("get_session_conversation", {
         agent: s.agent,
         filePath: s.filePath,
@@ -779,11 +786,31 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             </div>
             {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
             {replayTab === "diff" ? (
-              <GitPanel
-                cwd={selected.projectPath}
-                visible={replayTab === "diff"}
-                onTotals={() => {}}
-              />
+              <div className="flex min-h-0 flex-1 flex-col">
+                {touchedFiles.length > 0 && (
+                  <div className="shrink-0 border-b border-hairline px-4 py-2">
+                    <div className="mb-1 text-xs text-l3">
+                      会话涉及文件（{touchedFiles.length}）
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {touchedFiles.map((f) => (
+                        <span
+                          key={f}
+                          title={f}
+                          className="rounded bg-inset px-1.5 py-0.5 font-mono text-xs text-l2"
+                        >
+                          {f.split(/[\/]/).pop()}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <GitPanel
+                  cwd={selected.projectPath}
+                  visible={replayTab === "diff"}
+                  onTotals={() => {}}
+                />
+              </div>
             ) : (
               <>
                 {summary && (
