@@ -256,14 +256,14 @@ function TerminalView({
     const term = new Terminal({
       fontFamily: "'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace",
       fontSize: settingsRef.current?.terminalFontSize ?? 13,
-      // 显示质感微调：字形加实、盒绘对齐、粗体增亮、平滑滚动（对比度保持默认）
-      fontWeight: 500,
-      fontWeightBold: 700,
+      // 显示质感微调：清瘦锐利（向 Ghostty 靠）、盒绘对齐、粗体增亮、平滑滚动
+      fontWeight: 400,
+      fontWeightBold: 600,
       rescaleOverlappingGlyphs: true,
       drawBoldTextInBrightColors: true,
       smoothScrollDuration: 150,
-      lineHeight: 1.25,
-      letterSpacing: 0.2,
+      lineHeight: 1.2,
+      letterSpacing: 0,
       cursorStyle: "bar",
       cursorBlink: true,
       scrollback: settingsRef.current?.scrollback ?? 5000,
