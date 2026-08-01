@@ -24,6 +24,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -31,5 +32,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdCMjg0MDE1RUI3RDI4OTMKUldTVEtIM3JGVUFvZTM4TXBPV0hpaThON3Y1aWtmWWZEUDRaZFVNMlEwbnROY2daRDJiWitYMEMK",
+      "endpoints": [
+        "https://github.com/hongtongzhou-design/ccode/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

@@ -46,6 +46,7 @@ function App() {
   const loadAll = useAppStore((s) => s.loadAll);
   const loadSessions = useAppStore((s) => s.loadSessions);
   const loadSettings = useAppStore((s) => s.loadSettings);
+  const checkAppUpdate = useAppStore((s) => s.checkAppUpdate);
 
   // 记录访问过的页面：懒加载的页面首次访问后才挂载，之后保持挂载（切回状态不丢、终端不断线）
   const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set([page]));
@@ -58,7 +59,9 @@ function App() {
     loadSessions().catch((e) => console.error(e));
     // 设置（含主题）在启动时加载并应用
     loadSettings().catch((e) => console.error(e));
-  }, [loadAll, loadSessions, loadSettings]);
+    // 启动时静默检查应用更新（内部已吞错，命中后在设置页「更新」分区提示）
+    checkAppUpdate().catch(() => {});
+  }, [loadAll, loadSessions, loadSettings, checkAppUpdate]);
 
   // 前端未捕获异常上报到进程内日志缓冲（设置页「诊断」可见）；同消息 5s 去重防刷屏
   useEffect(() => {

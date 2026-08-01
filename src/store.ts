@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import type { DetectResult, Profile, ProfileInput, SessionMetaDto } from "./types";
 
 /** 应用设置（SettingsPage；后端 get_settings/update_settings 契约） */
@@ -70,6 +71,10 @@ interface AppState {
   settings: AppSettings | null;
   loadSettings: () => Promise<void>;
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  /** 应用自更新：check() 命中的可用更新（null=已是最新/未检查完/检查失败） */
+  appUpdate: Update | null;
+  /** 启动时静默检查应用更新；失败（无网络/dev 模式）吞掉不打扰 */
+  checkAppUpdate: () => Promise<void>;
   loadAll: () => Promise<void>;
   /** 拉取全部会话元数据（Claude Code + Codex），返回最新列表供轮询比对 */
   loadSessions: () => Promise<SessionMetaDto[]>;
@@ -118,6 +123,15 @@ export const useAppStore = create<AppState>((set) => ({
     const s = await invoke<AppSettings>("update_settings", { patch });
     set({ settings: s });
     applyTheme(s.theme);
+  },
+
+  appUpdate: null,
+  checkAppUpdate: async () => {
+    try {
+      set({ appUpdate: await check() });
+    } catch {
+      // 静默：dev 模式/无网络/未发布 latest.json 时检查失败不打扰
+    }
   },
 
   loadAll: async () => {

@@ -58,6 +58,10 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # updater 签名密钥（私钥内容 + 密码，需在 repo Settings → Secrets 配置；
+          # 私钥本地存于 ~/.tauri/ccode-updater.key，勿提交 git）
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Ccode ${{ github.ref_name }}'

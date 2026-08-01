@@ -21,6 +21,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 应用自更新（tauri-plugin-updater）+ 安装后重启（tauri-plugin-process）
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(profiles::ProfileStore::new().expect("初始化 ProfileStore 失败"))
         .manage(pty::PtyManager::default())
         .invoke_handler(tauri::generate_handler![

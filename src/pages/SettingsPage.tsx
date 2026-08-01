@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { useAppStore } from "../store";
 
 /** 四款深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
@@ -81,6 +82,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const updateSettings = useAppStore((s) => s.updateSettings);
   const profiles = useAppStore((s) => s.profiles);
   const loadAll = useAppStore((s) => s.loadAll);
+  const appUpdate = useAppStore((s) => s.appUpdate);
+  const checkAppUpdate = useAppStore((s) => s.checkAppUpdate);
+  const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // 数值输入的本地草稿（失焦/回车才提交，避免每击键一次 IPC）
@@ -198,6 +202,20 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setLogs([]);
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  // 下载并安装应用更新：成功后 relaunch 进新版本；失败恢复按钮可重试
+  async function installUpdate() {
+    if (!appUpdate || installing) return;
+    setInstalling(true);
+    setError(null);
+    try {
+      await appUpdate.downloadAndInstall();
+      await relaunch();
+    } catch (e) {
+      setError(String(e));
+      setInstalling(false);
     }
   }
 
@@ -407,6 +425,43 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           ))}
         </select>
       </Row>
+      </Section>
+
+      <Section title="更新" open={!collapsed.update} onToggle={() => toggleSection("update")}>
+      <div className="py-3">
+        {appUpdate ? (
+          <>
+            <div className="mb-2 flex items-center gap-2">
+              <span className="text-sm text-l2">
+                发现新版本 <span className="text-l1">v{appUpdate.version}</span>
+                <span className="ml-2 text-xs text-l4">当前 v{appUpdate.currentVersion}</span>
+              </span>
+              <button
+                onClick={installUpdate}
+                disabled={installing}
+                className="ml-auto h-8 rounded border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+              >
+                {installing ? "下载安装中…" : "下载并安装"}
+              </button>
+            </div>
+            {appUpdate.body && (
+              <div className="max-h-48 overflow-auto whitespace-pre-line rounded bg-inset p-2 text-xs leading-5 text-l3">
+                {appUpdate.body}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-l4">未发现新版本（启动时已自动检查）</span>
+            <button
+              onClick={() => checkAppUpdate()}
+              className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+            >
+              重新检查
+            </button>
+          </div>
+        )}
+      </div>
       </Section>
 
       <Section title="诊断" open={!collapsed.diag} onToggle={() => toggleSection("diag")}>
