@@ -20,7 +20,19 @@
 
 ## 安装
 
-从 [Releases](../../releases) 下载对应平台安装包（macOS dmg / Windows msi·exe / Linux AppImage·deb·rpm）。
+从 [Releases](../../releases) 下载，按你的平台选择：
+
+| 平台 | 选哪个 | 说明 |
+|---|---|---|
+| macOS（Apple 芯片 M1/M2/M3/M4） | `Ccode_x.x.x_aarch64.dmg` | 目前唯一 macOS 包；Intel Mac 暂需自行 `npm run tauri build` 构建 |
+| Windows | `Ccode_x.x.x_x64-setup.exe` | 推荐，安装向导简单；`x64_en-US.msi` 适合企业批量部署，二选一即可 |
+| Linux（Debian/Ubuntu） | `Ccode_x.x.x_amd64.deb` | `sudo dpkg -i` 安装 |
+| Linux（Fedora/RHEL/openSUSE） | `Ccode-x.x.x-1.x86_64.rpm` | `sudo rpm -i` 安装 |
+| Linux（其他发行版） | `Ccode_x.x.x_amd64.AppImage` | 免安装，chmod +x 后直接运行 |
+
+其余 `.sig`、`latest.json`、`.app.tar.gz` 是应用内自动更新用的签名文件，**不用手动下载**。
+
+不确定自己的芯片？macOS：左上角  → 关于本机，看「芯片」一栏；Windows：设置 → 系统 → 关于，看「系统类型」（基本都是 x64）。
 
 > **macOS 注意**：应用暂未做 Apple 签名公证，首次打开如提示「已损坏」，终端执行：
 > ```bash
