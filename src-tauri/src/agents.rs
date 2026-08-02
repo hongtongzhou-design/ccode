@@ -17,7 +17,7 @@ pub struct LaunchPlan {
     pub args: Vec<String>,
 }
 
-const AGENTS: [(&str, &str); 6] = [
+pub(crate) const AGENTS: [(&str, &str); 6] = [
     ("claude-code", "claude"),
     ("codex", "codex"),
     ("gemini", "gemini"),
@@ -60,12 +60,14 @@ fn candidate_dirs() -> Vec<std::path::PathBuf> {
             out.push(h.join(".npm-global/bin"));
             out.push(h.join(".local/bin"));
             out.push(h.join("bin"));
+            out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
         }
     }
     #[cfg(target_os = "linux")]
     {
         if let Some(h) = dirs::home_dir() {
             out.push(h.join(".local/bin"));
+            out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
         }
         out.push("/usr/local/bin".into());
     }
@@ -77,6 +79,9 @@ fn candidate_dirs() -> Vec<std::path::PathBuf> {
         }
         if let Some(roaming) = dirs::data_dir() {
             out.push(roaming.join("npm"));
+        }
+        if let Some(h) = dirs::home_dir() {
+            out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
         }
     }
     out
@@ -379,6 +384,194 @@ pub(crate) fn resume_args(agent_id: &str, session_id: &str) -> (bool, Vec<String
         "opencode" => (false, vec!["--session".into(), session_id.into()]),
         _ => (false, vec![]),
     }
+}
+
+/// shell 单引号转义（POSIX）；仅含安全字符时不加引号，保持 cc-switch 风格的干净命令行
+fn sh_quote_if_needed(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-._/".contains(c))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// 会话恢复的完整命令行（cd 到项目目录 + CLI resume 参数）。
+/// 供「复制恢复命令」和「外部终端恢复」共用；刻意不带 profile env——密钥只在
+/// Ccode 自家拉起时注入（关键约定），外部恢复用的是用户全局配置。
+pub fn resume_command_line(agent_id: &str, session_id: &str, cwd: &str) -> Result<String, String> {
+    let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
+    let (_, args) = resume_args(agent_id, session_id);
+    if args.is_empty() {
+        return Err(format!("{agent_id} 不支持按 ID 恢复"));
+    }
+    let mut cmd = format!("cd {} && {binary}", sh_quote_if_needed(cwd));
+    for a in &args {
+        cmd.push(' ');
+        cmd.push_str(&sh_quote_if_needed(a));
+    }
+    Ok(cmd)
+}
+
+/// 复制用：返回该会话的恢复命令行
+#[tauri::command]
+pub fn session_resume_command(
+    agent_id: &str,
+    session_id: &str,
+    cwd: &str,
+) -> Result<String, String> {
+    resume_command_line(agent_id, session_id, cwd)
+}
+
+/// 在外部终端应用中恢复会话（macOS: Ghostty → iTerm → Terminal.app；Windows: cmd 新窗口；
+/// Linux: 常见终端模拟器）。终端选择读设置页「外部终端」，auto = 上述优先级探测。
+#[tauri::command]
+pub fn resume_external_terminal(
+    agent_id: &str,
+    session_id: &str,
+    cwd: &str,
+) -> Result<(), String> {
+    let pref = crate::settings::read_current()
+        .external_terminal
+        .unwrap_or_else(|| "auto".into());
+    open_external_terminal(&resume_command_line(agent_id, session_id, cwd)?, &pref)
+}
+
+#[cfg(target_os = "macos")]
+fn open_external_terminal(cmd: &str, pref: &str) -> Result<(), String> {
+    match pref {
+        "ghostty" => open_ghostty(cmd),
+        "iterm" => open_iterm(cmd),
+        "terminal" => open_terminal_app(cmd),
+        // auto：Ghostty → iTerm → Terminal.app
+        _ if std::path::Path::new("/Applications/Ghostty.app").exists() => open_ghostty(cmd),
+        _ if std::path::Path::new("/Applications/iTerm.app").exists() => open_iterm(cmd),
+        _ => open_terminal_app(cmd),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_ghostty(cmd: &str) -> Result<(), String> {
+    if !std::path::Path::new("/Applications/Ghostty.app").exists() {
+        return Err("未安装 Ghostty（设置页改选其他终端）".into());
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    // Ghostty：-e 之后的参数整体作为命令执行；包 login shell 让 PATH 含 npm/brew 全局 bin
+    spawn_status(
+        Command::new("open").args(["-na", "Ghostty", "--args", "-e", &shell, "-l", "-c", cmd]),
+        "Ghostty",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn open_iterm(cmd: &str) -> Result<(), String> {
+    if !std::path::Path::new("/Applications/iTerm.app").exists() {
+        return Err("未安装 iTerm2（设置页改选其他终端）".into());
+    }
+    let escaped = applescript_escape(cmd);
+    spawn_status(
+        Command::new("osascript").args([
+            "-e",
+            "tell application \"iTerm\"",
+            "-e",
+            "activate",
+            "-e",
+            "create window with default profile",
+            "-e",
+            &format!("tell current session of current window to write text \"{escaped}\""),
+            "-e",
+            "end tell",
+        ]),
+        "iTerm",
+    )
+}
+
+/// 系统自带 Terminal.app 兜底（do script 本身跑在 login shell 里）
+#[cfg(target_os = "macos")]
+fn open_terminal_app(cmd: &str) -> Result<(), String> {
+    spawn_status(
+        Command::new("osascript").args([
+            "-e",
+            "tell application \"Terminal\"",
+            "-e",
+            "activate",
+            "-e",
+            &format!("do script \"{}\"", applescript_escape(cmd)),
+            "-e",
+            "end tell",
+        ]),
+        "Terminal",
+    )
+}
+
+/// AppleScript 字符串字面量转义（\ 和 "）
+#[cfg(target_os = "macos")]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_status(cmd: &mut Command, what: &str) -> Result<(), String> {
+    let status = cmd.status().map_err(|e| format!("启动 {what} 失败: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("启动 {what} 失败: {status}"))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_external_terminal(cmd: &str, _pref: &str) -> Result<(), String> {
+    // resume_command_line 是 POSIX 语法，cmd.exe 不认单引号，换 cmd 方言重建
+    let cmd = windows_command_line(cmd)?;
+    // start 开新窗口；/K 让窗口在 agent 退出后保留；内层引号 doubling 是 cmd 的转义方式
+    let inner = cmd.replace('"', "\"\"");
+    Command::new("cmd")
+        .args(["/C", &format!("start \"\" cmd /K \"{inner}\"")])
+        .spawn()
+        .map_err(|e| format!("启动外部终端失败: {e}"))?;
+    Ok(())
+}
+
+/// 把 POSIX 版恢复命令行改写成 cmd 方言（双引号 + cd /d）
+#[cfg(target_os = "windows")]
+fn windows_command_line(posix: &str) -> Result<String, String> {
+    // 结构固定为 cd <quoted-cwd> && <bin> <args...>，逐段把单引号换成双引号、cd 加 /d
+    let rest = posix
+        .strip_prefix("cd ")
+        .ok_or_else(|| "意外的命令格式".to_string())?;
+    let (cwd, tail) = rest
+        .split_once(" && ")
+        .ok_or_else(|| "意外的命令格式".to_string())?;
+    let cwd = cwd.trim_matches('\'');
+    Ok(format!("cd /d \"{cwd}\" && {}", tail.replace('\'', "\"")))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_external_terminal(cmd: &str, pref: &str) -> Result<(), String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    // auto 按优先级探测；显式选择只试指定终端，未装则报错（设置页可改选）
+    let candidates: Vec<&str> = match pref {
+        "auto" | "" => vec!["gnome-terminal", "konsole", "xfce4-terminal", "x-terminal-emulator", "xterm"],
+        other => vec![other],
+    };
+    for term in candidates {
+        if let Some(bin) = resolve_binary(term) {
+            let mut c = Command::new(bin);
+            if term == "gnome-terminal" {
+                c.args(["--", &shell, "-l", "-c", cmd]);
+            } else {
+                c.args(["-e", &shell, "-l", "-c", cmd]);
+            }
+            c.spawn().map_err(|e| format!("启动 {term} 失败: {e}"))?;
+            return Ok(());
+        }
+    }
+    Err(match pref {
+        "auto" | "" => "未找到可用的终端模拟器（gnome-terminal/konsole/xterm）".into(),
+        other => format!("未安装所选终端 {other}（设置页改选其他终端）"),
+    })
 }
 
 /// kimi 新旧两个产品共用命令，按数据目录推断装的是哪个变体（"new" | "legacy"）
@@ -804,6 +997,40 @@ mod tests {
     fn resolve_binary_returns_none_for_unknown_name() {
         // 名字足够独特：PATH 与各平台候选目录都不会有
         assert!(resolve_binary("ccode-no-such-binary-9f8e7d6c").is_none());
+    }
+
+    #[test]
+    fn resume_command_line_formats_per_agent() {
+        // 安全字符不加引号（cc-switch 风格）；codex 的 resume 子命令在最前
+        assert_eq!(
+            resume_command_line("codex", "019fbd46-bdc5", "/tmp/proj").unwrap(),
+            "cd /tmp/proj && codex resume 019fbd46-bdc5"
+        );
+        assert_eq!(
+            resume_command_line("claude-code", "abc", "/tmp/proj").unwrap(),
+            "cd /tmp/proj && claude -r abc"
+        );
+        assert_eq!(
+            resume_command_line("kimi", "abc", "/tmp/proj").unwrap(),
+            "cd /tmp/proj && kimi -S abc"
+        );
+        assert_eq!(
+            resume_command_line("opencode", "abc", "/tmp/proj").unwrap(),
+            "cd /tmp/proj && opencode --session abc"
+        );
+        // 路径含空格/中文 → 单引号包裹
+        assert_eq!(
+            resume_command_line("codex", "abc", "/tmp/我的 项目").unwrap(),
+            "cd '/tmp/我的 项目' && codex resume abc"
+        );
+        // 未知 agent 报错
+        assert!(resume_command_line("no-such", "abc", "/tmp").is_err());
+    }
+
+    #[test]
+    fn sh_quote_if_needed_escapes_single_quote() {
+        assert_eq!(sh_quote_if_needed("plain-1.x"), "plain-1.x");
+        assert_eq!(sh_quote_if_needed("it's"), "'it'\\''s'");
     }
 
     #[cfg(target_os = "macos")]

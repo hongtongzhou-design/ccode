@@ -29,6 +29,8 @@ pub struct WorkspaceDto {
     pub status: String, // active | archived
     pub created_at: String,
     pub archived_at: Option<String>,
+    /// 已合并进基准分支的时间（仅「合并（保留工作区）」后置位；继续提交后前端按 ahead>0 隐藏）
+    pub merged_at: Option<String>,
     /// 仅创建时填充：setup 脚本的执行结果（W2）；查询路径一律 None
     pub setup_result: Option<SetupResultDto>,
 }
@@ -67,6 +69,8 @@ fn db_at(path: &Path) -> Result<Connection, String> {
           status TEXT NOT NULL DEFAULT 'active', created_at TEXT, archived_at TEXT);",
     )
     .map_err(|e| format!("初始化 workspaces 表失败: {e}"))?;
+    // 轻量迁移：老库补 merged_at 列（已存在则忽略错误）
+    let _ = conn.execute_batch("ALTER TABLE workspaces ADD COLUMN merged_at TEXT;");
     Ok(conn)
 }
 
@@ -85,6 +89,7 @@ fn row_to_dto(
     status: String,
     created_at: String,
     archived_at: Option<String>,
+    merged_at: Option<String>,
 ) -> WorkspaceDto {
     let repo_name = Path::new(&repo_path)
         .file_name()
@@ -102,6 +107,7 @@ fn row_to_dto(
         status,
         created_at,
         archived_at,
+        merged_at,
         setup_result: None,
     }
 }
@@ -110,7 +116,7 @@ fn query_workspaces(conn: &Connection) -> Result<Vec<WorkspaceDto>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, repo_path, name, branch, worktree_path, base_branch,
-                    port_base, status, created_at, archived_at FROM workspaces",
+                    port_base, status, created_at, archived_at, merged_at FROM workspaces",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -126,6 +132,7 @@ fn query_workspaces(conn: &Connection) -> Result<Vec<WorkspaceDto>, String> {
                 r.get(7)?,
                 r.get(8)?,
                 r.get(9)?,
+                r.get(10)?,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -407,7 +414,7 @@ fn restore_impl(conn: &Connection, id: &str) -> Result<(), String> {
         .map_err(|e| format!("恢复 worktree 失败: {e}"))?;
     }
     conn.execute(
-        "UPDATE workspaces SET status='active', archived_at=NULL WHERE id=?1",
+        "UPDATE workspaces SET status='active', archived_at=NULL, merged_at=NULL WHERE id=?1",
         params![id],
     )
     .map_err(|e| format!("更新 workspaces 失败: {e}"))?;
@@ -517,6 +524,12 @@ pub struct WsHealthDto {
     pub behind: u32,
     /// Some(false)=可干净合并，Some(true)=有冲突，None=git 版本不支持探测
     pub conflict: Option<bool>,
+    /// 冲突文件清单（conflict==Some(true) 时非空，评审面板展示用）
+    pub conflict_files: Vec<String>,
+    /// 主仓库未停在基准分支（本地合并前置条件之一；原为 merge 时才校验，前置到健康度）
+    pub main_off_base: bool,
+    /// 主仓库有未提交改动（本地合并会被拒）
+    pub main_dirty: bool,
     pub ready_to_merge: bool,
 }
 
@@ -526,21 +539,35 @@ pub(crate) fn base_ref(_repo: &Path, base: &str) -> String {
     base.to_string()
 }
 
-/// git ≥2.38 的 merge-tree --write-tree：0=干净 1=冲突；只写对象库，不碰工作区/索引/引用
-fn conflict_probe(repo: &Path, base: &str, branch: &str) -> Option<bool> {
-    let status = Command::new("git")
+/// git ≥2.38 的 merge-tree --write-tree：退出码 0=干净 1=冲突；只写对象库，不碰工作区/索引/
+/// 引用。--name-only 时 stdout 首行是树 OID，其余行是冲突文件路径
+fn conflict_probe(repo: &Path, base: &str, branch: &str) -> (Option<bool>, Vec<String>) {
+    let out = Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["merge-tree", "--write-tree", base, branch])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()?;
-    match status.code() {
+        .args(["merge-tree", "--write-tree", "--name-only", base, branch])
+        .output();
+    let Ok(out) = out else {
+        return (None, vec![]);
+    };
+    let conflict = match out.status.code() {
         Some(0) => Some(false),
         Some(1) => Some(true),
         _ => None, // 旧版 git 没有该参数（退出码 129 等）
-    }
+    };
+    let files = if conflict == Some(true) {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .skip(1) // 首行树 OID
+            .map(|l| l.trim().to_string())
+            .filter(|l| {
+                !l.is_empty() && !l.starts_with("Auto-merging") && !l.starts_with("CONFLICT")
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    (conflict, files)
 }
 
 fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
@@ -557,17 +584,28 @@ fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
     let mut parts = counts.split_whitespace();
     let behind = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
     let ahead = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-    let conflict = conflict_probe(&wt, &base, "HEAD");
+    let (conflict, conflict_files) = conflict_probe(&wt, &base, "HEAD");
+    // 主仓库状态也是本地合并的前置条件：提前暴露，别等点了「合并」才报错
+    let repo = PathBuf::from(&w.repo_path);
+    let main_off_base = run_git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"], Duration::from_secs(10))
+        .map(|cur| cur != w.base_branch)
+        .unwrap_or(false);
+    let main_dirty = run_git(&repo, &["status", "--porcelain"], Duration::from_secs(30))
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
     Ok(WsHealthDto {
         uncommitted,
         ahead,
         behind,
         conflict,
-        ready_to_merge: !uncommitted && conflict == Some(false),
+        conflict_files,
+        main_off_base,
+        main_dirty,
+        ready_to_merge: !uncommitted && conflict == Some(false) && !main_off_base && !main_dirty,
     })
 }
 
-fn merge_impl(conn: &Connection, id: &str) -> Result<String, String> {
+fn merge_impl(conn: &Connection, id: &str, archive: bool) -> Result<String, String> {
     let w = get_workspace(conn, id)?;
     let repo = PathBuf::from(&w.repo_path);
     // 前置条件：主仓库必须停在基准分支且工作区干净，否则合并会搅乱用户手头的工作
@@ -578,8 +616,24 @@ fn merge_impl(conn: &Connection, id: &str) -> Result<String, String> {
             w.base_branch
         ));
     }
-    if !run_git(&repo, &["status", "--porcelain"], Duration::from_secs(30))?.is_empty() {
-        return Err("主仓库有未提交改动，请先提交或 stash 再合并（或改用 PR 流程）".into());
+    let dirty = run_git(&repo, &["status", "--porcelain"], Duration::from_secs(30))?;
+    if !dirty.is_empty() {
+        // porcelain 前两列是状态码，第三列起是路径；列出前 5 个帮用户定位
+        let lines: Vec<&str> = dirty.lines().collect();
+        let names = lines
+            .iter()
+            .take(5)
+            .map(|l| l.get(3..).unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("、");
+        let suffix = if lines.len() > 5 {
+            format!(" 等 {} 个文件", lines.len())
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "主仓库有未提交改动（{names}{suffix}），请先提交或 stash 再合并（或改用 PR 流程）"
+        ));
     }
     let mut log = match run_git(&repo, &["merge", "--no-ff", &w.branch], Duration::from_secs(60)) {
         Ok(out) => out,
@@ -592,12 +646,25 @@ fn merge_impl(conn: &Connection, id: &str) -> Result<String, String> {
             ));
         }
     };
-    // 合并成功后走标准归档生命周期（archive 钩子 + worktree 移除 + 状态翻转）
-    archive_impl(conn, id)?;
-    if !log.is_empty() {
-        log.push('\n');
+    if archive {
+        // 合并成功后走标准归档生命周期（archive 钩子 + worktree 移除 + 状态翻转）
+        archive_impl(conn, id)?;
+        if !log.is_empty() {
+            log.push('\n');
+        }
+        log.push_str("已合并并归档工作区");
+    } else {
+        // 只合并：记录 merged_at（前端显示「已合并」pill；继续提交后按 ahead>0 隐藏）
+        conn.execute(
+            "UPDATE workspaces SET merged_at=?1 WHERE id=?2",
+            params![crate::sessions::now_iso(), id],
+        )
+        .map_err(|e| e.to_string())?;
+        if !log.is_empty() {
+            log.push('\n');
+        }
+        log.push_str("已合并（工作区保留，可继续干活或之后归档）");
     }
-    log.push_str("已合并并归档工作区");
     Ok(log)
 }
 
@@ -680,11 +747,27 @@ pub async fn list_workspaces() -> Result<Vec<WorkspaceDto>, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// 归档/删除/合并成功后广播（前端把还留在被移除工作树里的终端标签切回主仓库）
+fn emit_ws_archived(app: &tauri::AppHandle, worktree_path: &str, repo_path: &str) {
+    use tauri::Emitter;
+    let _ = app.emit(
+        "ws-archived",
+        serde_json::json!({ "worktreePath": worktree_path, "repoPath": repo_path }),
+    );
+}
+
 #[tauri::command]
-pub async fn archive_workspace(id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || archive_impl(&db()?, &id))
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn archive_workspace(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let paths = tauri::async_runtime::spawn_blocking(move || -> Result<(String, String), String> {
+        let conn = db()?;
+        let w = get_workspace(&conn, &id)?;
+        archive_impl(&conn, &id)?;
+        Ok((w.worktree_path, w.repo_path))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    emit_ws_archived(&app, &paths.0, &paths.1);
+    Ok(())
 }
 
 #[tauri::command]
@@ -695,10 +778,17 @@ pub async fn restore_workspace(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn delete_workspace(id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || delete_impl(&db()?, &id))
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn delete_workspace(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let paths = tauri::async_runtime::spawn_blocking(move || -> Result<(String, String), String> {
+        let conn = db()?;
+        let w = get_workspace(&conn, &id)?;
+        delete_impl(&conn, &id)?;
+        Ok((w.worktree_path, w.repo_path))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    emit_ws_archived(&app, &paths.0, &paths.1);
+    Ok(())
 }
 
 #[tauri::command]
@@ -718,12 +808,238 @@ pub async fn workspace_health(id: String) -> Result<WsHealthDto, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// 合并回基准分支（本地 merge，git 写操作）：前置条件不满足直接报错，不动任何东西
+/// 合并回基准分支（本地 merge，git 写操作）：前置条件不满足直接报错，不动任何东西。
+/// archive=false 只合并（工作区保留，终端可继续用）；archive=true 合并并归档
 #[tauri::command]
-pub async fn merge_workspace(id: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || merge_impl(&db()?, &id))
+pub async fn merge_workspace(
+    app: tauri::AppHandle,
+    id: String,
+    archive: bool,
+) -> Result<String, String> {
+    let (out, paths) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+            let conn = db()?;
+            let w = get_workspace(&conn, &id)?;
+            let out = merge_impl(&conn, &id, archive)?;
+            Ok((out, (w.worktree_path, w.repo_path)))
+        })
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    // 只有归档了才广播（前端把留在被移除工作树里的终端标签切回主仓库）
+    if archive {
+        emit_ws_archived(&app, &paths.0, &paths.1);
+    }
+    Ok(out)
+}
+
+// ===== 路径归属（预览编辑器标识「主仓库/工作区分支」用） =====
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchTargetDto {
+    pub workspace_name: String,
+    pub branch: String,
+    pub worktree_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathContextDto {
+    /// "worktree"（活跃工作区的工作树内）| "main"（活跃工作区的主仓库内）| "other"
+    pub kind: String,
+    pub workspace_name: Option<String>,
+    pub branch: Option<String>,
+    /// 命中工作区的工作树绝对路径（切换「分支」用）
+    pub worktree_path: Option<String>,
+    /// 命中工作区的主仓库绝对路径（切换「主项目」用）
+    pub repo_path: Option<String>,
+    /// 同仓库的其他活跃工作区（主项目⇄多分支的切换列表）
+    pub siblings: Vec<SwitchTargetDto>,
+}
+
+/// 判断路径落在哪个上下文，供预览编辑器提示「你在改主仓库还是分支」。
+/// 双方都 canonicalize 再比前缀（防 symlink 误判）；工作树优先于主仓库命中
+///（工作树在 ~/ccode/workspaces/ 下不在主仓库内，理论上不会重叠，取确定语义）
+fn path_context_impl(conn: &Connection, path: &str) -> Result<PathContextDto, String> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    let actives: Vec<WorkspaceDto> = query_workspaces(conn)?
+        .into_iter()
+        .filter(|w| w.status == "active")
+        .collect();
+    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+    let to_target = |o: &WorkspaceDto| SwitchTargetDto {
+        workspace_name: o.name.clone(),
+        branch: o.branch.clone(),
+        worktree_path: o.worktree_path.clone(),
+    };
+    // 工作树命中（优先）：同仓库其他活跃工作区作为切换目标
+    for w in &actives {
+        if target.starts_with(canon(&w.worktree_path)) {
+            return Ok(PathContextDto {
+                kind: "worktree".into(),
+                workspace_name: Some(w.name.clone()),
+                branch: Some(w.branch.clone()),
+                worktree_path: Some(w.worktree_path.clone()),
+                repo_path: Some(w.repo_path.clone()),
+                siblings: actives
+                    .iter()
+                    .filter(|o| o.id != w.id && o.repo_path == w.repo_path)
+                    .map(to_target)
+                    .collect(),
+            });
+        }
+    }
+    // 主仓库命中：该仓库全部活跃工作区都是切换目标
+    if let Some(w) = actives.iter().find(|w| target.starts_with(canon(&w.repo_path))) {
+        return Ok(PathContextDto {
+            kind: "main".into(),
+            workspace_name: Some(w.name.clone()),
+            branch: Some(w.base_branch.clone()),
+            worktree_path: Some(w.worktree_path.clone()),
+            repo_path: Some(w.repo_path.clone()),
+            siblings: actives
+                .iter()
+                .filter(|o| o.repo_path == w.repo_path)
+                .map(to_target)
+                .collect(),
+        });
+    }
+    Ok(PathContextDto {
+        kind: "other".into(),
+        workspace_name: None,
+        branch: None,
+        worktree_path: None,
+        repo_path: None,
+        siblings: vec![],
+    })
+}
+
+#[tauri::command]
+pub fn path_context(path: String) -> Result<PathContextDto, String> {
+    path_context_impl(&db()?, &path)
+}
+
+/// 把基准分支并入任务分支（`git merge <base>` 在工作树里执行）：冲突留在工作区就地解决，
+/// 不碰主仓库——解决并提交后「合并」自然解锁
+#[tauri::command]
+pub async fn workspace_sync_base(id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db()?;
+        let w = get_workspace(&conn, &id)?;
+        let wt = PathBuf::from(&w.worktree_path);
+        // 工作树有未提交改动时 git 会拒绝合并，先说清楚
+        if !run_git(&wt, &["status", "--porcelain"], Duration::from_secs(30))?.is_empty() {
+            return Err("工作区有未提交改动，请先在「改动」面板提交，再并入主分支".into());
+        }
+        match run_git(&wt, &["merge", &w.base_branch], Duration::from_secs(60)) {
+            Ok(out) => Ok(format!(
+                "已把 {} 并入 {}：\n{}",
+                w.base_branch,
+                w.branch,
+                if out.trim().is_empty() { "已是最新" } else { out.trim() }
+            )),
+            Err(e) => {
+                let files =
+                    run_git(&wt, &["diff", "--name-only", "--diff-filter=U"], Duration::from_secs(10))
+                        .unwrap_or_default();
+                Err(format!(
+                    "并入产生冲突——冲突留在工作区，不影响主仓库：\n{e}\n冲突文件:\n{files}\n逐文件选择版本解决后在「改动」面板提交，再点「合并」"
+                ))
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ===== 工作区内冲突解决（评审面板闭环：选边 → 提交，不用去终端） =====
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnmergedDto {
+    /// 工作树处于 MERGING 状态（有未完成的并入）
+    pub merging: bool,
+    /// 仍未解决的冲突文件（UU）
+    pub files: Vec<String>,
+}
+
+fn unmerged_impl(wt: &Path) -> Result<UnmergedDto, String> {
+    let merging = run_git(wt, &["rev-parse", "--verify", "-q", "MERGE_HEAD"], Duration::from_secs(10))
+        .is_ok();
+    let out = run_git(wt, &["diff", "--name-only", "--diff-filter=U"], Duration::from_secs(10))?;
+    Ok(UnmergedDto {
+        merging,
+        files: out.lines().map(|l| l.to_string()).filter(|l| !l.is_empty()).collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn workspace_unmerged_files(id: String) -> Result<UnmergedDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db()?;
+        let w = get_workspace(&conn, &id)?;
+        unmerged_impl(&PathBuf::from(&w.worktree_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 单边解决实现（worktree 直给，便于测试）
+fn resolve_file_impl(wt: &Path, path: &str, side: &str) -> Result<UnmergedDto, String> {
+    let flag = match side {
+        "ours" => "--ours",
+        "theirs" => "--theirs",
+        _ => return Err(format!("未知选边: {side}")),
+    };
+    if run_git(wt, &["checkout", flag, "--", path], Duration::from_secs(30)).is_ok() {
+        run_git(wt, &["add", "--", path], Duration::from_secs(30))?;
+    } else {
+        // 删/改冲突中选定侧是「已删除」：checkout 失败，git rm 即选定该侧
+        run_git(wt, &["rm", "-q", "--ignore-unmatch", "--", path], Duration::from_secs(30))?;
+    }
+    unmerged_impl(wt)
+}
+
+/// 单边解决一个冲突文件：side = "ours"（分支版）| "theirs"（基准/main 版）。
+/// 返回剩余未解决清单
+#[tauri::command]
+pub async fn workspace_resolve_file(
+    id: String,
+    path: String,
+    side: String,
+) -> Result<UnmergedDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db()?;
+        let w = get_workspace(&conn, &id)?;
+        resolve_file_impl(&PathBuf::from(&w.worktree_path), &path, &side)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 完成并入提交的实现（worktree 直给，便于测试）
+fn finish_merge_impl(wt: &Path) -> Result<String, String> {
+    let st = unmerged_impl(wt)?;
+    if !st.merging {
+        return Err("当前没有进行中的并入".into());
+    }
+    if !st.files.is_empty() {
+        return Err(format!("还有未解决的冲突文件：{}", st.files.join("、")));
+    }
+    run_git(wt, &["commit", "--no-edit"], Duration::from_secs(60))?;
+    Ok("冲突解决完成，已提交并入——健康度刷新后「合并」解锁".to_string())
+}
+
+/// 全部冲突解决完后完成并入提交（--no-edit 用 git 生成的 merge 信息）
+#[tauri::command]
+pub async fn workspace_finish_merge(id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db()?;
+        let w = get_workspace(&conn, &id)?;
+        finish_merge_impl(&PathBuf::from(&w.worktree_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 推送分支并用 gh CLI 创建 PR（复用机器上的 gh 认证）
@@ -1162,16 +1478,26 @@ mod tests {
     #[test]
     fn health_ready_then_dirty_then_conflicting() {
         let Some(fx) = Fixture::new() else { return };
+        // 主仓库保持干净（把 fixture 里未跟踪的 .env* 提交掉，否则 main_dirty 不 ready）
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(&fx.repo, &["-c", "commit.gpgsign=false", "commit", "-m", "env"]);
         let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "health").unwrap();
         let wt = PathBuf::from(&w.worktree_path);
         fs::write(wt.join("feature.txt"), "v1\n").unwrap();
         commit_all_in_worktree(&wt, "任务改动");
         let h = health_impl(&fx.conn, &w.id).unwrap();
         assert!(!h.uncommitted);
+        assert!(!h.main_dirty && !h.main_off_base);
         assert_eq!(h.ahead, 1);
         assert_eq!(h.behind, 0);
         assert_eq!(h.conflict, Some(false), "merge-tree 探测应为干净（git 2.55）");
         assert!(h.ready_to_merge);
+        // 主仓库未提交改动 → 不再 ready（删文件恢复干净，不影响后面 behind 计数）
+        fs::write(fx.repo.join("main-dirty.txt"), "x\n").unwrap();
+        let h = health_impl(&fx.conn, &w.id).unwrap();
+        assert!(h.main_dirty);
+        assert!(!h.ready_to_merge);
+        fs::remove_file(fx.repo.join("main-dirty.txt")).unwrap();
         // 未提交改动 → 不再 ready
         fs::write(wt.join("feature.txt"), "v2\n").unwrap();
         let h = health_impl(&fx.conn, &w.id).unwrap();
@@ -1186,7 +1512,65 @@ mod tests {
         let h = health_impl(&fx.conn, &w.id).unwrap();
         assert_eq!(h.behind, 1);
         assert_eq!(h.conflict, Some(true), "同一文件同一行应探出冲突");
+        assert_eq!(h.conflict_files, vec!["feature.txt".to_string()]);
         assert!(!h.ready_to_merge);
+    }
+
+    #[test]
+    fn resolve_flow_sync_conflict_pick_side_finish() {
+        let Some(fx) = Fixture::new() else { return };
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(&fx.repo, &["-c", "commit.gpgsign=false", "commit", "-m", "env"]);
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "resolve").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        // 分支改 feature.txt 并提交；main 改同一行 → 并入冲突
+        fs::write(wt.join("feature.txt"), "branch\n").unwrap();
+        commit_all_in_worktree(&wt, "分支改动");
+        fs::write(fx.repo.join("feature.txt"), "main\n").unwrap();
+        sh(&fx.repo, &["add", "feature.txt"]);
+        sh(&fx.repo, &["-c", "commit.gpgsign=false", "commit", "-m", "主线改动"]);
+        assert!(run_git(&wt, &["merge", "main"], Duration::from_secs(60)).is_err(), "应产生冲突");
+        // 未解决清单；未解决前拒绝 finish
+        let st = unmerged_impl(&wt).unwrap();
+        assert!(st.merging);
+        assert_eq!(st.files, vec!["feature.txt".to_string()]);
+        assert!(finish_merge_impl(&wt).unwrap_err().contains("未解决"));
+        // 选分支版（ours）→ 清单清空，文件内容是分支版
+        let st = resolve_file_impl(&wt, "feature.txt", "ours").unwrap();
+        assert!(st.files.is_empty());
+        assert_eq!(fs::read_to_string(wt.join("feature.txt")).unwrap(), "branch\n");
+        // finish → merge 提交完成，冲突探测转干净
+        finish_merge_impl(&wt).unwrap();
+        assert!(!unmerged_impl(&wt).unwrap().merging);
+        let (conflict, _) = conflict_probe(&wt, "main", "HEAD");
+        assert_eq!(conflict, Some(false));
+    }
+
+    #[test]
+    fn path_context_classifies_worktree_main_and_other() {
+        let Some(fx) = Fixture::new() else { return };
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "ctx").unwrap();
+        let w2 = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "ctx2").unwrap();
+        // 工作树内 → worktree（带工作区名与分支）；siblings = 同仓库其他活跃工作区
+        let wt_readme = PathBuf::from(&w.worktree_path).join("README.md");
+        let c = path_context_impl(&fx.conn, wt_readme.to_str().unwrap()).unwrap();
+        assert_eq!(c.kind, "worktree");
+        assert_eq!(c.workspace_name.as_deref(), Some("ctx"));
+        assert_eq!(c.branch.as_deref(), Some("ccode/ctx"));
+        assert_eq!(c.siblings.len(), 1);
+        assert_eq!(c.siblings[0].workspace_name, "ctx2");
+        // 主仓库内 → main（分支给的是基准分支）；siblings = 全部活跃工作区
+        let c = path_context_impl(&fx.conn, fx.repo.join("README.md").to_str().unwrap()).unwrap();
+        assert_eq!(c.kind, "main");
+        assert_eq!(c.branch.as_deref(), Some("main"));
+        assert_eq!(c.siblings.len(), 2);
+        // 不相关路径 → other；归档后不再命中
+        let c = path_context_impl(&fx.conn, "/tmp").unwrap();
+        assert_eq!(c.kind, "other");
+        archive_impl(&fx.conn, &w.id).unwrap();
+        archive_impl(&fx.conn, &w2.id).unwrap();
+        let c = path_context_impl(&fx.conn, fx.repo.join("README.md").to_str().unwrap()).unwrap();
+        assert_eq!(c.kind, "other", "已归档工作区的主仓库不再标记");
     }
 
     #[cfg(unix)]
@@ -1200,13 +1584,37 @@ mod tests {
         let wt = PathBuf::from(&w.worktree_path);
         fs::write(wt.join("feature.txt"), "done\n").unwrap();
         commit_all_in_worktree(&wt, "任务完成");
-        let out = merge_impl(&fx.conn, &w.id).unwrap();
+        let out = merge_impl(&fx.conn, &w.id, true).unwrap();
         assert!(out.contains("已合并并归档"), "{out}");
         // 改动进了主仓库的 main
         assert_eq!(fs::read_to_string(fx.repo.join("feature.txt")).unwrap(), "done\n");
         // 工作区已归档、worktree 已移除
         let w2 = get_workspace(&fx.conn, &w.id).unwrap();
         assert_eq!(w2.status, "archived");
+        assert!(!wt.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_without_archive_keeps_workspace_active() {
+        let Some(fx) = Fixture::new() else { return };
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(&fx.repo, &["-c", "commit.gpgsign=false", "commit", "-m", "env"]);
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "keepme").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("feature.txt"), "done\n").unwrap();
+        commit_all_in_worktree(&wt, "任务完成");
+        let out = merge_impl(&fx.conn, &w.id, false).unwrap();
+        assert!(out.contains("工作区保留"), "{out}");
+        // 改动进了 main，但工作区仍活跃、worktree 还在，merged_at 已置位
+        assert_eq!(fs::read_to_string(fx.repo.join("feature.txt")).unwrap(), "done\n");
+        let w2 = get_workspace(&fx.conn, &w.id).unwrap();
+        assert_eq!(w2.status, "active");
+        assert!(w2.merged_at.is_some(), "只合并应记录 merged_at");
+        assert!(wt.exists());
+        // 之后「合并并归档」：merge 变 no-op，归档照常发生
+        let out = merge_impl(&fx.conn, &w.id, true).unwrap();
+        assert!(out.contains("已合并并归档"), "{out}");
         assert!(!wt.exists());
     }
 
@@ -1218,7 +1626,7 @@ mod tests {
         fs::write(wt.join("x.txt"), "x\n").unwrap();
         commit_all_in_worktree(&wt, "x");
         // 主仓库有未跟踪文件（fixture 的 .env*）→ 脏，拒绝
-        let err = merge_impl(&fx.conn, &w.id).unwrap_err();
+        let err = merge_impl(&fx.conn, &w.id, false).unwrap_err();
         assert!(err.contains("未提交改动"), "{err}");
         assert_eq!(get_workspace(&fx.conn, &w.id).unwrap().status, "active", "拒绝后工作区状态不变");
         assert!(wt.exists());
@@ -1226,7 +1634,7 @@ mod tests {
         sh(&fx.repo, &["add", ".env", ".envrc"]);
         sh(&fx.repo, &["-c", "commit.gpgsign=false", "commit", "-m", "env"]);
         sh(&fx.repo, &["checkout", "-b", "other"]);
-        let err = merge_impl(&fx.conn, &w.id).unwrap_err();
+        let err = merge_impl(&fx.conn, &w.id, false).unwrap_err();
         assert!(err.contains("不在基准分支"), "{err}");
         // 主仓库 main 上不应有 x.txt（merge 没发生）
         sh(&fx.repo, &["checkout", "main"]);

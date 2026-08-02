@@ -96,6 +96,8 @@ export interface WorkspaceDto {
   status: "active" | "archived";
   createdAt: string;
   archivedAt: string | null;
+  /** 「合并（保留工作区）」后置位：已合并进基准分支的时间；继续提交后按 ahead>0 隐藏 */
+  mergedAt: string | null;
   /** 仅创建时返回：setup 脚本执行结果（失败不阻断创建） */
   setupResult: SetupResultDto | null;
 }
@@ -145,6 +147,12 @@ export interface WorkspaceHealthDto {
   behind: number;
   /** 与 base 是否冲突；无法判定时为 null */
   conflict: boolean | null;
+  /** 冲突文件清单（conflict 为 true 时非空） */
+  conflictFiles: string[];
+  /** 主仓库未停在基准分支 */
+  mainOffBase: boolean;
+  /** 主仓库有未提交改动 */
+  mainDirty: boolean;
   readyToMerge: boolean;
 }
 

@@ -48,6 +48,17 @@ function parentDir(p: string): string | null {
   return trimmed.slice(0, idx);
 }
 
+/** 路径归属（workspaces::path_context）：根目录落在主仓库还是工作区分支 */
+interface PathContext {
+  kind: "worktree" | "main" | "other";
+  workspaceName: string | null;
+  branch: string | null;
+  worktreePath: string | null;
+  repoPath: string | null;
+  /** 同仓库其他活跃工作区（主项目⇄多分支的切换列表） */
+  siblings: { workspaceName: string; branch: string; worktreePath: string }[];
+}
+
 /**
  * 工作树（借鉴 VS Code Explorer 的懒加载）：外部锚点是活动终端标签的 cwd，
  * 用户可双击目录钻取重定根（manual root），切换标签时重置回该标签 cwd。
@@ -98,6 +109,29 @@ function FileTree({
   const [error, setError] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
   const [gitMap, setGitMap] = useState<Record<string, string>>({});
+  // 当前根的路径归属（主仓库/工作区分支）；other 或查询失败不显示徽标
+  const [ctx, setCtx] = useState<PathContext | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    invoke<PathContext>("path_context", { path: root })
+      .then((c) => {
+        if (!cancelled) setCtx(c.kind === "other" ? null : c);
+      })
+      .catch(() => {
+        if (!cancelled) setCtx(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [root]);
+
+  /** 主项目 ⇄ 分支互切：重定树根 + 终端真进入（同最近项目语义） */
+  function switchTo(path: string) {
+    nav(path);
+    onEnterProject?.(path);
+  }
+  // ⇄ 下拉：主项目 + 同仓库全部活跃工作区（多工作区时不再只能两点互切）
+  const [switchMenu, setSwitchMenu] = useState<{ x: number; y: number } | null>(null);
 
   // 切换活动标签（cwd 变化）时重置回该标签的 cwd
   useEffect(() => {
@@ -380,6 +414,37 @@ function FileTree({
           </button>
         )}
         <span className="truncate">{basenameOf(root)}</span>
+        {ctx?.kind === "worktree" && (
+          <span
+            className="flex shrink-0 items-center gap-1 font-normal text-l3"
+            title={`工作区「${ctx.workspaceName}」的工作树，改动属于分支 ${ctx.branch}`}
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-okb" />
+            分支
+          </span>
+        )}
+        {ctx?.kind === "main" && (
+          <span
+            className="flex shrink-0 items-center gap-1 font-normal text-warnb"
+            title={`主仓库（${ctx.branch}），这里的改动不属于任何工作区分支`}
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
+            主仓库
+          </span>
+        )}
+        {((ctx?.kind === "worktree" && ctx.repoPath) ||
+          (ctx?.kind === "main" && ctx.siblings.length > 0)) && (
+          <button
+            onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              setSwitchMenu({ x: r.left, y: r.bottom + 4 });
+            }}
+            title="切换主项目 / 分支工作树"
+            className="shrink-0 text-l4 hover:text-l1"
+          >
+            ⇄
+          </button>
+        )}
         {root !== cwd && (
           <button
             onClick={() => nav(cwd)}
@@ -467,6 +532,29 @@ function FileTree({
                 }
               },
             },
+          ]}
+        />
+      )}
+
+      {/* ⇄ 切换下拉：主项目 + 同仓库全部活跃工作区 */}
+      {switchMenu && ctx && (
+        <ContextMenu
+          x={switchMenu.x}
+          y={switchMenu.y}
+          onClose={() => setSwitchMenu(null)}
+          items={[
+            ...(ctx.kind === "worktree" && ctx.repoPath
+              ? [
+                  {
+                    label: `主项目（${basenameOf(ctx.repoPath)}）`,
+                    onSelect: () => switchTo(ctx.repoPath!),
+                  },
+                ]
+              : []),
+            ...ctx.siblings.map((s) => ({
+              label: `分支「${s.workspaceName}」`,
+              onSelect: () => switchTo(s.worktreePath),
+            })),
           ]}
         />
       )}

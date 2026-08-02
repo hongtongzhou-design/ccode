@@ -14,6 +14,8 @@ export interface AppSettings {
   theme: string;
   /** ◈ AI 功能固定使用的 profile id；null/undefined = 自动（最近使用） */
   aiProfileId?: string | null;
+  /** 会话页「⇗ 外部恢复」的终端应用；auto/undefined = 按优先级探测 */
+  externalTerminal?: string;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效 */
@@ -49,6 +51,9 @@ interface AppState {
   /** 当前页面（nav id），放 store 里让任意页面可跳转 */
   page: string;
   setPage: (p: string) => void;
+  /** 侧栏收缩状态（App 导航与终端专注栏共用；localStorage 持久化） */
+  navCollapsed: boolean;
+  toggleNavCollapsed: () => void;
   /** 待消费的终端启动请求；终端页可见时消费并清空 */
   pendingTerminal: PendingTerminal | null;
   setPendingTerminal: (p: PendingTerminal | null) => void;
@@ -89,6 +94,12 @@ export const useAppStore = create<AppState>((set) => ({
   sessions: [],
   page: "profiles",
   setPage: (p) => set({ page: p }),
+  navCollapsed: localStorage.getItem("ccode.navCollapsed") === "1",
+  toggleNavCollapsed: () =>
+    set((s) => {
+      localStorage.setItem("ccode.navCollapsed", s.navCollapsed ? "0" : "1");
+      return { navCollapsed: !s.navCollapsed };
+    }),
   pendingTerminal: null,
   setPendingTerminal: (p) => set({ pendingTerminal: p }),
   runningScripts: {},

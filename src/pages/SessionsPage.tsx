@@ -71,6 +71,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [confirmBatch, setConfirmBatch] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [selected, setSelected] = useState<SessionMetaDto | null>(null);
+  // 「复制恢复命令」按钮的已复制反馈（存 sessionId，1.5s 后复位）
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
   const [loadingConv, setLoadingConv] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -120,6 +122,35 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       resume: { agentId: s.agent, sessionId: s.sessionId },
     });
     setPage("terminal");
+  }
+
+  /** A2. 复制恢复命令（cc-switch 风格）：粘贴到任意终端即可恢复该会话 */
+  async function copyResumeCommand(s: SessionMetaDto) {
+    try {
+      const cmd = await invoke<string>("session_resume_command", {
+        agentId: s.agent,
+        sessionId: s.sessionId,
+        cwd: s.projectPath,
+      });
+      await navigator.clipboard.writeText(cmd);
+      setCopiedId(s.sessionId);
+      setTimeout(() => setCopiedId(null), 1500);
+    } catch (e) {
+      window.alert(`复制失败：${e}`);
+    }
+  }
+
+  /** A3. 在外部终端应用（Ghostty/iTerm/终端）中恢复会话 */
+  async function resumeExternal(s: SessionMetaDto) {
+    try {
+      await invoke("resume_external_terminal", {
+        agentId: s.agent,
+        sessionId: s.sessionId,
+        cwd: s.projectPath,
+      });
+    } catch (e) {
+      window.alert(`打开外部终端失败：${e}`);
+    }
   }
 
   /** B. 「进行中」反向跳转：聚焦该会话所在的终端标签 */
@@ -519,6 +550,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const input =
     "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
   const menuItem = "block w-full px-3 py-1.5 text-left text-l2 hover:bg-white/5";
+  // 回放头部「恢复 ▾」下拉（外部恢复/复制命令），坐标定位 + 全屏遮罩点击关闭
+  const [resumeMenu, setResumeMenu] = useState<{ x: number; y: number } | null>(null);
 
   const filterActive = (f: Filter) =>
     (filter.kind === "all" && f.kind === "all") ||
@@ -861,6 +894,28 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     >
                       恢复
                     </button>
+                    <button
+                      disabled={!s.alive && !s.pinned}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void resumeExternal(s);
+                      }}
+                      title="在外部终端应用（Ghostty/终端）中恢复这个会话"
+                      className="text-l3 hover:text-l1 disabled:opacity-50"
+                    >
+                      ⇗
+                    </button>
+                    <button
+                      disabled={!s.alive && !s.pinned}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void copyResumeCommand(s);
+                      }}
+                      title="复制恢复命令，粘贴到任意终端执行"
+                      className="text-l3 hover:text-l1 disabled:opacity-50"
+                    >
+                      {copiedId === s.sessionId ? "已复制" : "⧉"}
+                    </button>
                   </div>
                 </div>
               );
@@ -876,7 +931,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         {/* 对话回放 */}
         {selected && (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center gap-3 bg-strip px-4 py-2">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-strip px-4 py-2">
               <button
                 onClick={() => {
                   setSelected(null);
@@ -904,12 +959,24 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 {agentLabel(selected.agent)} · {relTime(selected.updatedAt)}
                 {selected.tokenUsage ? ` · ${fmtTokens(selected.tokenUsage)}` : ""}
               </span>
-              <button
-                onClick={() => resumeInTerminal(selected)}
-                className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
-              >
-                在终端恢复
-              </button>
+              <span className="flex shrink-0 items-center">
+                <button
+                  onClick={() => resumeInTerminal(selected)}
+                  className="rounded-l px-2 py-1 text-xs text-l2 hover:bg-white/5"
+                >
+                  在终端恢复
+                </button>
+                <button
+                  onClick={(e) => {
+                    const r = e.currentTarget.getBoundingClientRect();
+                    setResumeMenu({ x: r.right - 176, y: r.bottom + 4 });
+                  }}
+                  title="更多恢复方式（外部终端 / 复制命令）"
+                  className="rounded-r px-1 py-1 text-xs text-l4 hover:bg-white/5 hover:text-l1"
+                >
+                  ▾
+                </button>
+              </span>
               <button
                 onClick={onSummarize}
                 disabled={aiSummarizing}
@@ -986,9 +1053,35 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         )}
       </div>
 
+      {/* 回放头部「恢复 ▾」下拉：fixed 遮罩 + 按钮下方浮层 */}
+      {resumeMenu && selected && (
+        <div className="fixed inset-0 z-20" onClick={() => setResumeMenu(null)}>
+          <div
+            className="absolute w-44 rounded border border-field bg-strip py-1 text-sm"
+            style={{ left: resumeMenu.x, top: resumeMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              className={menuItem}
+              onClick={() => {
+                setResumeMenu(null);
+                void resumeExternal(selected);
+              }}
+            >
+              ⇗ 在外部终端恢复
+            </button>
+            <button
+              className={menuItem}
+              onClick={() => void copyResumeCommand(selected)}
+            >
+              {copiedId === selected.sessionId ? "已复制" : "⧉ 复制恢复命令"}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 右键菜单：fixed 遮罩 + 光标处浮层 */}
-      {menu && (
-        <div
+      {menu && (        <div
           className="fixed inset-0 z-20"
           onClick={() => setMenu(null)}
           onContextMenu={(e) => {
@@ -1038,15 +1131,35 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   编辑
                 </button>
                 {(menu.session.alive || menu.session.pinned) && (
-                  <button
-                    className={menuItem}
-                    onClick={() => {
-                      setMenu(null);
-                      resumeInTerminal(menu.session);
-                    }}
-                  >
-                    在终端恢复
-                  </button>
+                  <>
+                    <button
+                      className={menuItem}
+                      onClick={() => {
+                        setMenu(null);
+                        resumeInTerminal(menu.session);
+                      }}
+                    >
+                      在终端恢复
+                    </button>
+                    <button
+                      className={menuItem}
+                      onClick={() => {
+                        setMenu(null);
+                        void resumeExternal(menu.session);
+                      }}
+                    >
+                      在外部终端恢复
+                    </button>
+                    <button
+                      className={menuItem}
+                      onClick={() => {
+                        setMenu(null);
+                        void copyResumeCommand(menu.session);
+                      }}
+                    >
+                      复制恢复命令
+                    </button>
+                  </>
                 )}
                 <button
                   className={`${menuItem} text-err-text`}

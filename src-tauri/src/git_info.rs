@@ -318,15 +318,22 @@ pub struct WorkspaceDiffDto {
 
 /// 累计任务改动 = diff merge-base（已提交 + 未提交的已跟踪部分）+ 未跟踪文件行数。
 /// rows 参数化以便测试注入；命中不到工作区时返回默认（前端回落普通 git_status）
+fn find_worktree_row<'a>(
+    wt: &str,
+    rows: &'a [crate::workspaces::WorktreeRow],
+) -> Option<&'a crate::workspaces::WorktreeRow> {
+    rows.iter().find(|r| {
+        let p = r.worktree_path.trim_end_matches('/');
+        wt == p || wt.starts_with(&format!("{p}/"))
+    })
+}
+
 fn workspace_diff_with_rows(
     worktree_path: &str,
     rows: &[crate::workspaces::WorktreeRow],
 ) -> Result<WorkspaceDiffDto, String> {
     let wt = expand_tilde(worktree_path);
-    let Some(row) = rows.iter().find(|r| {
-        let p = r.worktree_path.trim_end_matches('/');
-        wt == p || wt.starts_with(&format!("{p}/"))
-    }) else {
+    let Some(row) = find_worktree_row(&wt, rows) else {
         return Ok(WorkspaceDiffDto::default());
     };
     // 与 §6.10 生命周期一致：基准固定为本地分支（worktree 即从本地基准拉出，
@@ -405,6 +412,52 @@ pub async fn workspace_diff(worktree_path: String) -> Result<WorkspaceDiffDto, S
     })
     .await
     .map_err(|e| format!("计算工作区 diff 失败: {e}"))?
+}
+
+/// 单文件任务 diff 的实现（worktree 路径 + 基准分支直给，便于测试）：
+/// 未跟踪新文件 git diff 为空 → 读全文按全新增返回（400 行截断）；大 diff 200KB 截断
+fn file_diff_impl(wt: &str, base_branch: &str, path: &str) -> Result<String, String> {
+    let mb = run_git(wt, &["merge-base", base_branch, "HEAD"])?;
+    if !mb.status.success() {
+        return Err(output_tail(&mb));
+    }
+    let mb = String::from_utf8_lossy(&mb.stdout).trim().to_string();
+    let out = run_git(wt, &["diff", &mb, "--", path])?;
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    if text.trim().is_empty() {
+        let full = std::path::Path::new(wt).join(path);
+        let content =
+            std::fs::read_to_string(&full).map_err(|e| format!("读取 {path} 失败: {e}"))?;
+        let lines: Vec<&str> = content.lines().collect();
+        text = lines
+            .iter()
+            .take(400)
+            .map(|l| format!("+{l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if lines.len() > 400 {
+            text.push_str(&format!("\n…（共 {} 行，已截断）", lines.len()));
+        }
+    }
+    const CAP: usize = 200_000;
+    if text.len() > CAP {
+        text.truncate(CAP);
+        text.push_str("\n…（diff 过大已截断）");
+    }
+    Ok(text)
+}
+
+/// 单文件任务 diff 内容（工作区「评审」面板展开用）
+#[tauri::command]
+pub async fn workspace_file_diff(worktree_path: String, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let wt = expand_tilde(&worktree_path);
+        let rows = crate::workspaces::worktree_rows();
+        let row = find_worktree_row(&wt, &rows).ok_or("该目录不在任何工作区内")?;
+        file_diff_impl(&wt, &row.base_branch, &path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
@@ -583,6 +636,33 @@ mod tests {
         // 非工作区路径：in_workspace=false，前端回落普通 git_status
         let outside = workspace_diff_with_rows(repo.to_str().unwrap(), &rows).unwrap();
         assert!(!outside.in_workspace);
+        git(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_diff_shows_tracked_changes_and_untracked_as_all_added() {
+        if !git_available() {
+            return;
+        }
+        let dir = tmpdir("wsfdiff");
+        let repo = dir.join("repo");
+        git(&dir, &["init", "-b", "main", "repo"]);
+        git(&repo, &["config", "user.email", "t@t.dev"]);
+        git(&repo, &["config", "user.name", "t"]);
+        fs::write(repo.join("a.txt"), "l1\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        let wt = dir.join("wt");
+        git(&repo, &["worktree", "add", wt.to_str().unwrap(), "-b", "ccode/t1", "main"]);
+        // 已跟踪文件：改一行 → diff 含 +/-；未跟踪文件 → 全文按新增
+        fs::write(wt.join("a.txt"), "l1\nl2\n").unwrap();
+        fs::write(wt.join("new.txt"), "x\ny\n").unwrap();
+        let tracked = file_diff_impl(wt.to_str().unwrap(), "main", "a.txt").unwrap();
+        assert!(tracked.contains("-l1") || tracked.contains(" l1"), "{tracked}");
+        assert!(tracked.contains("+l2"), "{tracked}");
+        let untracked = file_diff_impl(wt.to_str().unwrap(), "main", "new.txt").unwrap();
+        assert_eq!(untracked, "+x\n+y");
         git(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
         fs::remove_dir_all(&dir).ok();
     }

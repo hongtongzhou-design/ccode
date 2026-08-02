@@ -396,6 +396,7 @@ fn update_agent_sync(app: &AppHandle, agent_id: &str) -> Result<UpdateResultDto,
     let version_after = if ok { version_of(&path) } else { None };
     if ok {
         agents::invalidate_detect_cache();
+        invalidate_check_cache();
     }
     Ok(UpdateResultDto {
         ok,
@@ -525,6 +526,7 @@ fn install_agent_sync(app: &AppHandle, agent_id: &str) -> Result<UpdateResultDto
     };
     if ok {
         agents::invalidate_detect_cache();
+        invalidate_check_cache();
     }
     Ok(UpdateResultDto {
         ok,
@@ -547,9 +549,145 @@ pub async fn install_agent(app: AppHandle, agent_id: String) -> Result<UpdateRes
     Ok(emit_done(&app, &agent_id, result))
 }
 
+// ===== 更新检查（配置页组头「新版/已更新」状态） =====
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUpdateInfoDto {
+    pub id: String,
+    pub installed: Option<String>,
+    /// 查不到最新版（自更新渠道无轻量查询口 / 网络失败）→ None，UI 回退普通「更新」按钮
+    pub latest: Option<String>,
+    pub outdated: bool,
+}
+
+/// 提取首个 x.y.z 形式版本串用于相等比较（--version 输出常带产品名尾巴，如
+/// "2.1.212 (Claude Code)"）
+fn semver_token(s: &str) -> Option<String> {
+    for tok in s.split(|c: char| !(c.is_ascii_digit() || c == '.')) {
+        let t = tok.trim_matches('.');
+        if t.contains('.') && t.split('.').all(|p| !p.is_empty()) {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+fn npm_latest(pkg: &str) -> Option<String> {
+    let npm = agents::resolve_binary("npm")?;
+    let out = Command::new(npm)
+        .args(["view", pkg, "version", "--fetch-retries=0", "--fetch-timeout=8000"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+fn brew_latest(pkg: &str, cask: bool) -> Option<String> {
+    let brew = agents::resolve_binary("brew")?;
+    let mut c = Command::new(brew);
+    c.args(["info", "--json=v2"]);
+    if cask {
+        c.arg("--cask");
+    }
+    c.arg(pkg);
+    for (k, v) in brew_env_pairs("brew", crate::settings::brew_mirror_enabled()) {
+        c.env(k, v);
+    }
+    let out = c.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let v = if cask {
+        json["casks"][0]["version"].as_str()
+    } else {
+        json["formulae"][0]["versions"]["stable"].as_str()
+    };
+    v.map(|s| s.to_string())
+}
+
+/// 最新版查询口与 update_commands 同渠道（包管理器装的查包管理器）；
+/// 自更新渠道（claude/kimi 自更新、opencode 非 npm）没有轻量查询口，返回 None
+fn latest_version(agent_id: &str, method: &str) -> Option<String> {
+    match (agent_id, method) {
+        ("claude-code", "brew") => brew_latest("claude-code", true),
+        ("codex", "brew") => brew_latest("codex", true),
+        ("gemini", "brew") => brew_latest("gemini-cli", false),
+        ("qwen", "brew") => brew_latest("qwen-code", false),
+        ("codex", _) => npm_latest("@openai/codex"),
+        ("gemini", _) => npm_latest("@google/gemini-cli"),
+        ("qwen", _) => npm_latest("@qwen-code/qwen-code"),
+        ("opencode", "npm") => npm_latest("opencode-ai"),
+        _ => None,
+    }
+}
+
+fn check_one(agent_id: &str) -> AgentUpdateInfoDto {
+    let (installed, latest) = match agents::binary_for(agent_id).and_then(agents::resolve_binary) {
+        Some(path) => {
+            let installed = version_of(&path);
+            let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let method = detect_method(&resolved.to_string_lossy());
+            (installed, latest_version(agent_id, method))
+        }
+        None => (None, None),
+    };
+    let outdated = match (&installed, &latest) {
+        (Some(i), Some(l)) => match (semver_token(i), semver_token(l)) {
+            (Some(a), Some(b)) => a != b,
+            _ => false,
+        },
+        _ => false,
+    };
+    AgentUpdateInfoDto { id: agent_id.into(), installed, latest, outdated }
+}
+
+/// 与 DETECT_CACHE 同模式：检查要起 6 组子进程，按进程缓存一次；更新/安装成功后失效
+static CHECK_CACHE: std::sync::Mutex<Option<Vec<AgentUpdateInfoDto>>> = std::sync::Mutex::new(None);
+
+pub(crate) fn invalidate_check_cache() {
+    *CHECK_CACHE.lock().unwrap() = None;
+}
+
+/// 6 个 agent 并行查最新版（brew info 走本地元数据；npm view 限 8s fetch-timeout）
+#[tauri::command]
+pub async fn check_agent_updates() -> Vec<AgentUpdateInfoDto> {
+    if let Some(cached) = CHECK_CACHE.lock().unwrap().clone() {
+        return cached;
+    }
+    let out = tauri::async_runtime::spawn_blocking(|| {
+        let handles: Vec<_> = agents::AGENTS
+            .iter()
+            .map(|(id, _)| {
+                let id = *id;
+                std::thread::spawn(move || check_one(id))
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    *CHECK_CACHE.lock().unwrap() = Some(out.clone());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semver_token_extracts_first_version_like_token() {
+        assert_eq!(semver_token("2.1.212 (Claude Code)"), Some("2.1.212".into()));
+        assert_eq!(semver_token("0.31.1"), Some("0.31.1".into()));
+        assert_eq!(semver_token("v0.46.0-beta"), Some("0.46.0".into()));
+        // 没有 x.y 形式 → None
+        assert_eq!(semver_token("unknown"), None);
+        assert_eq!(semver_token(""), None);
+    }
 
     #[test]
     fn brew_mirror_off_skips_tuna_domains() {

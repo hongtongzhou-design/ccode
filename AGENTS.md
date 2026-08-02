@@ -86,6 +86,8 @@ src-tauri/src/
   只在拉起瞬间读出注入子进程 env；`profiles.json` 里只允许存尾号提示（key_hint）；
   `NO_COLOR` 必须 `env_remove`，
   `TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Ccode` 必须显式设置（否则 CLI 输出黑白）。
+  由此推论：**外部恢复/复制恢复命令不携带 profile env**（`agents::resume_command_line`，
+  会话页 ⇗/⧉ 两个入口共用）——密钥不进剪贴板、不进外部 shell，恢复时用的是用户全局 CLI 配置。
 - **Profile 的 extra_env 排在 adapter 内置 env 之后注入**，供用户覆盖内置值（CommandBuilder 后者生效）。
 - **终端行为**（用户明确要求）：
   - 终端配色使用 VS Code Dark+ 风格调色板，集中在 `TerminalPage.tsx` 的 `theme` 一处，换主题只改这里；
@@ -93,6 +95,9 @@ src-tauri/src/
     不允许死在最终画面；用户手动 `exit` shell 不自动重开；
   - 回落的 shell 不携带任何 profile 环境变量（密钥只在 agent 进程内）；
   - agent 与 shell 共用 `pty.rs` 的 `spawn_tracked`，退出事件按 PTY 类型区分处理。
+  - **预览编辑器 = 稳定文档**：打开哪个文件就停在哪个文件，绝不随树根/标签切换静默换文件
+    （同名文件在主仓库/各工作区各有一份，「预览跟随」曾导致误改主仓库，已移除并禁止复活）；
+    主仓库文件的保存按钮必须警示色 + 保存前二次确认。
 - **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：「设为全局默认」（写前必须备份）、会话删除（delete_session/delete_project_sessions，路径必须落在已知会话根内）、工作树文件删除（限定树当前根目录 + 重要路径黑名单兜底：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单判断必须 canonicalize 双校验，堵符号链接绕过）。
 - **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录），AI 无头调用 `-s read-only`；用户可用 extra_env/参数覆盖。
 - **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底（macOS `/opt/homebrew/bin` 等、Linux `~/.local/bin`、Windows `%LOCALAPPDATA%\Programs`/`%APPDATA%\npm`）——打包版 GUI 短 PATH 下检测/启动/更新/安装不再失灵；新增 CLI/工具调用点一律用它，禁直接 `which::which` 或裸名 spawn。
@@ -104,7 +109,7 @@ src-tauri/src/
 ## 主题与设计系统
 
 - 全站**沉浸冷黑主题**，令牌集中在 `src/App.css` 的 `@theme` + `[data-theme]` 变体（**七套深色**：沉浸黑(默认)/陶土/Ayu琥珀/Catppuccin/极简灰蓝/Dracula/灰蓝正红），运行时 `document.documentElement.dataset.theme` 切换，**改主题只动这一个文件**；不要在组件里散落 hex。
-- 四层「浮起」结构（rail/rail2/canvas/inset 逐级变亮）；文字冷白→灰四档；每主题有独立 CTA 强调色（按钮/选中/「活跃」「可合并」pill 用 `cta-pill` 同步）；**状态语义色独立于主题**（ok/err/warn 不随主题变，避免花哨）；零阴影、隐式 hairline。
+- 四层「浮起」结构（rail/rail2/canvas/inset 逐级变亮）；文字冷白→灰四档；每主题有独立 CTA 强调色（按钮/选中用 `cta`；可操作状态如「可合并」用**按钮本身的 cta 高亮**表达，不另挂 pill；纯状态 pill 如「活跃」「有冲突」用 inset 灰底 + 语义色小圆点，不用强调色，避免页面花哨）；**状态语义色独立于主题**（ok/err/warn 不随主题变）；**结果横幅（成功/失败）一律 bg-strip/inset 底 + ✓/✗ 语义色文字**，不用整块 bg-ok/bg-err（bg-err 仅保留给需交互警惕的小 pill，如 setup 失败）；零阴影、隐式 hairline。
 - **符号语言统一**：导航与图标用单色几何符号（⚙⛁⌨◔✦◫⛭⇄），◈=AI 功能、⚑=pin/保留；**禁用彩色 emoji**（✨📌 已清除）。
 - 用户明确否决过的设计：多栏嵌套的会话页、浅色 + 蓝紫渐变侧边栏、按钮排排坐的 profile 行、暖棕色系整体主题、**浅色模式**、emoji 图标。不要改回去。
 - 配置页结构（用户详版规格）：可折叠 agent 分组 + 五列网格行 + 顶部筛选与搜索 + 无大面积虚线空状态；图标按钮点击区 ≥28px；**WKWebView 不支持 window.prompt**——一切输入用内联输入框。

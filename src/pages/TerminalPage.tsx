@@ -1,4 +1,5 @@
 import { memo, lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
@@ -9,6 +10,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useAppStore } from "../store";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
+import ContextMenu from "../components/ContextMenu";
 import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
 import type { ChatMessageDto, SessionMetaDto } from "../types";
@@ -39,6 +41,17 @@ interface TabStatus {
   ptyId: string | null;
   /** 会话尾部状态（P3c 注意力标记）；无联动/shell/已退出/未知时为 null */
   attention: "done" | "working" | "confirm" | null;
+  /** shell 模式下存在可恢复的会话（专注栏「⟳ 恢复」可用性） */
+  canResume: boolean;
+}
+
+/** TerminalView 暴露给专注栏的动作表（回调经 ref 转发，始终最新） */
+export interface FocusTabActions {
+  stop: () => void;
+  resume: () => void;
+  openConversationPage: () => void;
+  search: () => void;
+  modify: () => void;
 }
 
 /** TerminalView 上报的会话联动数据（右侧「会话」页签渲染用） */
@@ -48,6 +61,9 @@ interface SessionLinkState {
 }
 
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
+
+/** shell 单引号转义（向 PTY 写 cd 命令用） */
+const shQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
 /** 四款深色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板；调色板其余部分共享） */
 const XTERM_BG_FG: Record<string, { background: string; foreground: string }> = {
@@ -127,6 +143,8 @@ const TerminalView = memo(function TerminalView({
   onStatus,
   onSessionUpdate,
   onOpenSessionPanel,
+  focusMode,
+  onActions,
 }: {
   visible: boolean;
   /** 右侧面板开关影响 xterm 可用宽度，变化时需要重新 fit */
@@ -164,6 +182,10 @@ const TerminalView = memo(function TerminalView({
   onStatus: (id: string, s: TabStatus) => void;
   onSessionUpdate: (id: string, s: SessionLinkState) => void;
   onOpenSessionPanel: () => void;
+  /** 专注模式：隐藏标签内状态条（动作移到侧栏 ⋯ 菜单） */
+  focusMode?: boolean;
+  /** 向父级注册本标签的动作表（专注栏 ⋯ 菜单调用） */
+  onActions?: (id: string, a: FocusTabActions) => void;
 }) {
   const profiles = useAppStore((s) => s.profiles);
   const settings = useAppStore((s) => s.settings);
@@ -303,6 +325,30 @@ const TerminalView = memo(function TerminalView({
   // 向标签条上报标题/运行状态；值没变就不惊动父组件
   const title = initialTitle ?? selectedProfile?.name ?? agentLabel(agentId);
   const [activePtyId, setActivePtyId] = useState<string | null>(null);
+  // 真实 cwd 跟随：进程存活期间每 4s 问一次后端 PTY 进程的真实 cwd——shell 内 cd 后
+  // 文件树/git 面板也能跟上（此前只认启动栏路径，切标签「不跟随」的根源之一）。
+  // 启动栏输入框聚焦时不覆盖，避免打断用户编辑
+  const cwdInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!visible || !activePtyId || (!running && !shellActive)) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const real = await invoke<string | null>("pty_get_cwd", { ptyId: activePtyId });
+        if (!cancelled && real && document.activeElement !== cwdInputRef.current) {
+          setCwd((cur) => (cur === real ? cur : real));
+        }
+      } catch {
+        /* PTY 已退出 / 平台不支持（Windows 返回 null 走不到这）：静默 */
+      }
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [visible, activePtyId, running, shellActive]);
   const [attention, setAttention] = useState<TabStatus["attention"]>(null);
   const lastReportRef = useRef("");
   useEffect(() => {
@@ -317,6 +363,7 @@ const TerminalView = memo(function TerminalView({
       ptyId: activePtyId,
       // 注意力标记只在 agent 运行中且已联动会话时有意义
       attention: running && !shellActive && sessionFile ? attention : null,
+      canResume: shellActive && lastResumeRef.current != null,
     };
     const key = JSON.stringify(s);
     if (key !== lastReportRef.current) {
@@ -443,14 +490,45 @@ const TerminalView = memo(function TerminalView({
     });
   }, [visible, rightOpen, layoutKey]);
 
-  // 最近项目「真进入」：外部注入的 cwd 落地到启动栏（空闲时），状态上报后父级清空
+  // 最近项目/⇄「真进入」：外部注入的 cwd 落地到启动栏；shell 存活时写 cd 让终端真正跟上
+  //（否则树走了 shell 还在原地，真实 cwd 轮询会把路径拉回旧目录）
   useEffect(() => {
     if (visible && externalCwd && !running) {
       setCwd(externalCwd);
+      if (shellActive && activePtyId) {
+        invoke("pty_write", {
+          ptyId: activePtyId,
+          data: `cd ${shQuote(externalCwd)}\n`,
+        }).catch(() => {});
+      }
       onConsumeExternalCwd?.();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, externalCwd, running]);
+
+  // 工作区合并/归档/删除后：本标签还留在被移除的工作树里时切回主仓库（shell 写 cd +
+  // 启动栏更新），避免目录被删后终端/文件树烂尾
+  const cwdRef = useRef(cwd);
+  cwdRef.current = cwd;
+  const shellRef = useRef({ shellActive, running, activePtyId });
+  shellRef.current = { shellActive, running, activePtyId };
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    listen<{ worktreePath: string; repoPath: string }>("ws-archived", (e) => {
+      const { worktreePath, repoPath } = e.payload;
+      const cur = cwdRef.current;
+      if (cur !== worktreePath && !cur.startsWith(`${worktreePath}/`)) return;
+      setCwd(repoPath);
+      const s = shellRef.current;
+      if (s.shellActive && !s.running && s.activePtyId) {
+        invoke("pty_write", {
+          ptyId: s.activePtyId,
+          data: `cd ${shQuote(repoPath)}\n`,
+        }).catch(() => {});
+      }
+    }).then((u) => (un = u));
+    return () => un?.();
+  }, []);
 
   // run 脚本标签：终端就绪后自动开 shell 并写入脚本命令（tty 会缓冲输入直到 shell 读取）。
   // 声明在终端创建 effect 之后，保证 attach 时 termRef 已就位
@@ -741,6 +819,32 @@ const TerminalView = memo(function TerminalView({
     if (id) await invoke("pty_kill", { ptyId: id }).catch(() => {});
   }
 
+  // 专注栏动作表：经 ref 转发保证菜单里调到的永远是最新闭包；注册一次
+  const actionsRef = useRef<FocusTabActions>({
+    stop: () => {},
+    resume: () => {},
+    openConversationPage: () => {},
+    search: () => {},
+    modify: () => {},
+  });
+  actionsRef.current = {
+    stop: () => void stop(),
+    resume: () => {
+      if (lastResumeRef.current) void launch(lastResumeRef.current ?? undefined);
+    },
+    openConversationPage: () => {
+      const sid = linkCtxRef.current?.sessionId ?? lastResumeRef.current;
+      if (!sid) return;
+      setOpenSessionReq({ sessionId: sid });
+      setPage("sessions");
+    },
+    search: () => setSearchOpen(true),
+    modify: () => setBarExpanded(true),
+  };
+  useEffect(() => {
+    onActions?.(tabId, actionsRef.current);
+  }, [onActions, tabId]);
+
   const select =
     "rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
@@ -819,6 +923,7 @@ const TerminalView = memo(function TerminalView({
           </span>
         )}
         <input
+          ref={cwdInputRef}
           className={`${select} w-64`}
           value={cwd}
           onChange={(e) => setCwd(e.target.value)}
@@ -881,8 +986,8 @@ const TerminalView = memo(function TerminalView({
         <p className="mb-2 text-sm text-l3">请先为该 agent 创建配置</p>
       )}
         </>
-      ) : (
-        /* 收缩态：一行状态条（agent · profile · model · cwd），右侧动作 */
+      ) : focusMode ? null : (
+        /* 收缩态：一行状态条（agent · profile · model · cwd），右侧动作（专注模式下隐藏，动作在侧栏 ⋯ 菜单） */
         <div className="mb-1 flex h-7 items-center gap-2 text-xs text-l4">
           <span className="truncate">
             {agentLabel(agentId)}
@@ -1054,6 +1159,42 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [rightOpen, setRightOpen] = useState(false);
   // 专注模式：隐藏左栏与右面板，终端全宽（页级开关，默认关）
   const [focusMode, setFocusMode] = useState(false);
+  // 专注栏：各标签动作表（TerminalView 挂载时注册，⋯ 菜单调用）与菜单坐标
+  const tabActionsRef = useRef(new Map<string, FocusTabActions>());
+  const registerActions = useCallback((id: string, a: FocusTabActions) => {
+    tabActionsRef.current.set(id, a);
+  }, []);
+  const [focusMenu, setFocusMenu] = useState<{ x: number; y: number } | null>(null);
+
+  /** 专注栏 ⋯ 菜单项：按活动标签状态裁剪（不可用的动作不出现） */
+  function focusMenuItems() {
+    const s = statuses[activeId];
+    const acts = tabActionsRef.current.get(activeId);
+    const sessFile = sessionByTab[activeId]?.file;
+    return [
+      ...(s?.running
+        ? [{ label: "停止（回落 shell）", onSelect: () => acts?.stop() }]
+        : []),
+      ...(s?.canResume ? [{ label: "⟳ 恢复会话", onSelect: () => acts?.resume() }] : []),
+      ...(sessFile || s?.canResume
+        ? [{ label: "⤴ 在会话页打开对话", onSelect: () => acts?.openConversationPage() }]
+        : []),
+      ...(s?.running || sessFile
+        ? [
+            {
+              label: "会话面板",
+              onSelect: () => {
+                setFocusMode(false); // 右面板在专注模式下隐藏，先退出专注
+                openSessionPanel();
+              },
+            },
+          ]
+        : []),
+      { label: "◎ 查找终端输出", onSelect: () => acts?.search() },
+      { label: "修改启动配置", onSelect: () => acts?.modify() },
+      { label: "⤢ 退出专注", onSelect: () => setFocusMode(false) },
+    ];
+  }
   const [rightTab, setRightTab] = useState<"session" | "preview" | "git">("session");
   const [gitTotals, setGitTotals] = useState<{ add: number; del: number } | null>(null);
   const [preview, setPreview] = useState<{ path: string; name: string; root: string | null } | null>(null);
@@ -1102,6 +1243,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setPreview({ path, name, root: root ?? null });
     setPreviewDirty(false);
   }, []);
+
+  // 预览 = 稳定的文档：打开哪个文件就停在哪个文件，不随树根/标签切换改变。
+  // （曾有「预览跟随」：同名文件在主仓库/各工作区各有一份，静默切换导致用户误改主仓库，
+  //  已移除——要看另一个根下的文件，在文件树里点开它）
 
   /** 全部子组件共享的稳定回调（memo 不被行内箭头击穿） */
   const openSessionPanel = useCallback(() => {
@@ -1158,6 +1303,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   // 消费工作区页/会话页交来的终端启动请求（可见时才消费，保证标签能立刻聚焦启动栏）
   const pendingTerminal = useAppStore((s) => s.pendingTerminal);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const navCollapsed = useAppStore((s) => s.navCollapsed);
   const setRunningScript = useAppStore((s) => s.setRunningScript);
   // closeTab 里取最新互斥登记表（避免闭包过期）
   const runningScripts = useAppStore((s) => s.runningScripts);
@@ -1379,6 +1525,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
       {/* 中带：终端标签区 */}
       <div className="flex min-w-0 flex-1 flex-col">
+        {/* 顶部标签条：专注模式下隐藏（标签移到 App 侧栏专注插槽） */}
+        {!focusMode && (
         <div className="flex h-8 items-center gap-1 overflow-x-auto bg-strip px-2">
           {tabs.map((t) => {
             const s = statuses[t.id];
@@ -1454,6 +1602,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             ⤢ 专注
           </button>
         </div>
+        )}
         <div className="min-h-0 flex-1">
           {/* 所有标签保持挂载，仅隐藏非活动标签，运行中的会话与 scrollback 得以保留 */}
           {tabs.map((t) => {
@@ -1482,6 +1631,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   onStatus={reportStatus}
                   onSessionUpdate={reportSession}
                   onOpenSessionPanel={openSessionPanel}
+                  focusMode={focusMode}
+                  onActions={registerActions}
                 />
               </div>
             );
@@ -1577,6 +1728,93 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             />
           </div>
         </div>
+      )}
+
+      {/* 专注栏：portal 到 App 侧栏插槽——纵向标签列表 + ⋯ 集成动作按钮。
+          侧栏收缩到最小时只显示状态点/符号（悬浮 tooltip 显示名称） */}
+      {focusMode &&
+        visible &&
+        createPortal(
+          <div className="flex flex-col gap-0.5 px-1 pb-2">
+            {!navCollapsed && <div className="px-2 pb-1 pt-1 text-[10px] text-l4">终端</div>}
+            {tabs.map((t) => {
+              const s = statuses[t.id];
+              const active = t.id === activeId;
+              return (
+                <div
+                  key={t.id}
+                  onClick={() => setActiveId(t.id)}
+                  title={s ? `${s.title} · ${s.cwd}` : undefined}
+                  className={`group/ftab flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-xs ${
+                    navCollapsed ? "justify-center" : ""
+                  } ${active ? "bg-rail-sel text-l1" : "text-l3 hover:bg-white/5"}`}
+                >
+                  <span
+                    className={`shrink-0 text-[9px] ${
+                      s?.running
+                        ? `text-ok-text${s.attention === "working" ? " animate-pulse" : ""}`
+                        : s?.shell
+                          ? "text-l3"
+                          : "text-l4"
+                    }`}
+                  >
+                    ●
+                  </span>
+                  {s?.attention === "done" && (
+                    <span className="shrink-0 text-[9px] text-link">●</span>
+                  )}
+                  {s?.attention === "confirm" && (
+                    <span className="shrink-0 text-[9px] text-warn-text">●</span>
+                  )}
+                  {!navCollapsed && (
+                    <span className="min-w-0 flex-1 truncate">{s?.title ?? "终端"}</span>
+                  )}
+                  {!navCollapsed && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        closeTab(t.id);
+                      }}
+                      aria-label="关闭标签"
+                      className="invisible shrink-0 text-l4 hover:text-err-text group-hover/ftab:visible"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            <button
+              onClick={() => addTab()}
+              title="新建终端标签"
+              className={`rounded-md px-2 py-1.5 text-xs text-l4 hover:bg-white/5 hover:text-l2 ${
+                navCollapsed ? "text-center" : "text-left"
+              }`}
+            >
+              {navCollapsed ? "＋" : "＋ 新终端"}
+            </button>
+            <button
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setFocusMenu({ x: r.right + 6, y: r.top });
+              }}
+              title="终端操作（停止/恢复/对话/会话/查找/修改）"
+              className={`rounded-md px-2 py-1.5 text-xs text-l4 hover:bg-white/5 hover:text-l2 ${
+                navCollapsed ? "text-center" : "text-left"
+              }`}
+            >
+              {navCollapsed ? "⋯" : "⋯ 操作"}
+            </button>
+          </div>,
+          document.getElementById("app-rail-focus-slot") as HTMLElement,
+        )}
+      {focusMenu && (
+        <ContextMenu
+          x={focusMenu.x}
+          y={focusMenu.y}
+          onClose={() => setFocusMenu(null)}
+          items={focusMenuItems()}
+        />
       )}
     </div>
   );

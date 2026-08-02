@@ -34,15 +34,8 @@ const NAV: { id: string; label: string; icon: string }[] = [
 function App() {
   const page = useAppStore((s) => s.page);
   const setPage = useAppStore((s) => s.setPage);
-  const [collapsed, setCollapsed] = useState(
-    () => localStorage.getItem("ccode.navCollapsed") === "1",
-  );
-  function toggleCollapsed() {
-    setCollapsed((c) => {
-      localStorage.setItem("ccode.navCollapsed", c ? "0" : "1");
-      return !c;
-    });
-  }
+  const collapsed = useAppStore((s) => s.navCollapsed);
+  const toggleCollapsed = useAppStore((s) => s.toggleNavCollapsed);
   const loadAll = useAppStore((s) => s.loadAll);
   const loadSessions = useAppStore((s) => s.loadSessions);
   const loadSettings = useAppStore((s) => s.loadSettings);
@@ -121,11 +114,13 @@ function App() {
           collapsed ? "w-14" : "w-36"
         }`}
       >
+        {/* 图标即侧栏开关：直接点击文字收起为图标 / 展开（原底部 « 按钮并入此处） */}
         <div
-          className={`py-4 text-base font-semibold tracking-wide text-l1 ${
+          onClick={toggleCollapsed}
+          title={collapsed ? "展开侧栏" : "收起为图标"}
+          className={`cursor-pointer select-none py-4 text-base font-semibold tracking-wide text-l1 ${
             collapsed ? "text-center text-sm" : "px-4"
           }`}
-          title="Ccode"
         >
           {collapsed ? "C" : "Ccode"}
         </div>
@@ -148,15 +143,8 @@ function App() {
             {!collapsed && n.label}
           </button>
         ))}
-        <button
-          onClick={toggleCollapsed}
-          title={collapsed ? "展开侧栏" : "收起为图标"}
-          className={`mt-auto mb-2 flex items-center justify-center self-center rounded-md text-l4 hover:bg-white/5 hover:text-l2 ${
-            collapsed ? "h-9 w-12" : "h-8 w-[calc(100%-8px)] mx-1"
-          }`}
-        >
-          {collapsed ? "»" : "«"}
-        </button>
+        {/* 专注模式插槽：终端页专注时把纵向标签列表 + ⋯ 操作按钮 portal 到这里 */}
+        <div id="app-rail-focus-slot" className="mt-1 flex min-h-0 flex-col overflow-y-auto" />
       </aside>
       <main className="min-w-0 flex-1">
         {/* 页面保持挂载，切换标签不销毁终端；未访问过的页不挂载（懒加载） */}

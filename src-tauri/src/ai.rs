@@ -201,6 +201,40 @@ fn build_pr_prompt(log: &str, numstat: &str) -> String {
     )
 }
 
+fn build_conflict_prompt(branch: &str, base: &str, files: &[(String, String)]) -> String {
+    let mut body = String::new();
+    for (path, content) in files {
+        body.push_str(&format!("## 文件 {path}\n{}\n\n", cap_text(content, 4000)));
+    }
+    format!(
+        "你在帮用户解决 git 合并冲突：分支 {branch} 正在把 {base} 并入。\
+         下面文件中 <<<<<<< HEAD 与 ======= 之间是「分支侧」内容，======= 与 >>>>>>> 之间是「{base} 侧」内容。\n\
+         请逐个文件判断该选哪侧：ours（分支侧合理）、theirs（{base} 侧合理）、\
+         manual（两边需要各保留一部分，建议人工逐行合并）。\n\
+         只输出 JSON 数组，不要解释、不要代码块：\n\
+         [{{\"path\":\"文件路径\",\"choice\":\"ours|theirs|manual\",\"reason\":\"一句话中文理由\"}}]\n\n{body}"
+    )
+}
+
+/// 从 AI 输出里抠出 JSON 数组解析（模型可能裹 markdown/废话，防御式；失败则全部 manual）
+fn parse_conflict_advice(raw: &str, files: &[String]) -> Vec<ConflictAdviceDto> {
+    if let (Some(s), Some(e)) = (raw.find('['), raw.rfind(']')) {
+        if let Ok(list) = serde_json::from_str::<Vec<ConflictAdviceDto>>(&raw[s..=e]) {
+            if !list.is_empty() {
+                return list;
+            }
+        }
+    }
+    files
+        .iter()
+        .map(|f| ConflictAdviceDto {
+            path: f.clone(),
+            choice: "manual".into(),
+            reason: format!("AI 输出无法解析：{}", raw.chars().take(80).collect::<String>()),
+        })
+        .collect()
+}
+
 // ===== git 材料收集 =====
 
 fn git_text(cwd: &str, args: &[&str]) -> Result<String, String> {
@@ -236,6 +270,15 @@ fn conversation_text(msgs: &[crate::sessions::ChatMessageDto]) -> String {
 }
 
 // ===== Tauri commands =====
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictAdviceDto {
+    pub path: String,
+    /// "ours"（选分支侧）| "theirs"（选 base 侧）| "manual"（建议人工逐行合并）
+    pub choice: String,
+    pub reason: String,
+}
 
 /// 无头一次性 prompt（供前端调试与未来功能复用）
 #[tauri::command]
@@ -311,6 +354,42 @@ pub async fn ai_draft_pr(store: tauri::State<'_, ProfileStore>, id: String) -> R
         )
         .unwrap_or_default();
         ai_prompt_impl(profiles, None, build_pr_prompt(&log, &numstat))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// AI 冲突审查：读取工作区里待解决的冲突文件，逐个给出选侧建议 + 理由
+#[tauri::command]
+pub async fn ai_conflict_advice(
+    store: tauri::State<'_, ProfileStore>,
+    id: String,
+) -> Result<Vec<ConflictAdviceDto>, String> {
+    let profiles = store.list()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = crate::workspaces::db()?;
+        let w = crate::workspaces::get_workspace(&conn, &id)?;
+        let wt = PathBuf::from(&w.worktree_path);
+        let unmerged = crate::workspaces::run_git(
+            &wt,
+            &["diff", "--name-only", "--diff-filter=U"],
+            Duration::from_secs(10),
+        )?;
+        let files: Vec<String> = unmerged
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        if files.is_empty() {
+            return Err("没有待解决的冲突文件（先「并入主分支」产生冲突后再来）".into());
+        }
+        let mut contents = Vec::new();
+        for f in &files {
+            let text = fs::read_to_string(wt.join(f)).map_err(|e| format!("读取 {f} 失败: {e}"))?;
+            contents.push((f.clone(), text));
+        }
+        let raw = ai_prompt_impl(profiles, None, build_conflict_prompt(&w.branch, &w.base_branch, &contents))?;
+        Ok(parse_conflict_advice(&raw, &files))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -409,6 +488,20 @@ mod tests {
         assert!(capped.contains("...（中间省略）..."));
         assert!(capped.starts_with('首'));
         assert!(capped.ends_with('尾'));
+    }
+
+    #[test]
+    fn parse_conflict_advice_extracts_json_and_falls_back() {
+        let files = vec!["a.txt".to_string(), "b.txt".to_string()];
+        // 裹了废话/markdown 的输出也能抠出 JSON
+        let raw = "好的，分析如下：\n```json\n[{\"path\":\"a.txt\",\"choice\":\"ours\",\"reason\":\"分支侧更新\"}]\n```";
+        let list = parse_conflict_advice(raw, &files);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].choice, "ours");
+        // 无 JSON → 全部 manual 兜底
+        let list = parse_conflict_advice("我不知道", &files);
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|a| a.choice == "manual"));
     }
 
     #[test]

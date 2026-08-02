@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { GitFileDto, WorkspaceDiffDto } from "../types";
 
@@ -45,6 +45,18 @@ function GitPanel({
   const [running, setRunning] = useState<"commit" | "push" | null>(null);
   const [output, setOutput] = useState<{ ok: boolean; text: string } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
+  // 成功 toast（主题 CTA 绿，右下角浮出 2.5s 自动淡出）；失败仍走 output 红字详情
+  const [toast, setToast] = useState<{ text: string; hiding: boolean } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showToast(text: string) {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast({ text, hiding: false });
+    toastTimerRef.current = setTimeout(() => {
+      setToast((t) => (t ? { ...t, hiding: true } : t));
+      toastTimerRef.current = setTimeout(() => setToast(null), 300);
+    }, 2200);
+  }
 
   /** ◈ AI 生成提交信息：填入输入框由用户审阅后再提交（不自动提交） */
   async function genMessage() {
@@ -104,7 +116,11 @@ function GitPanel({
         message: message.trim(),
         push,
       });
-      setOutput({ ok: true, text: out });
+      // 提交输出首行形如 [branch abc1234] msg，提取出来让 toast 带提交号
+      const bracket = out.match(/\[([^\]]+)\]/)?.[1];
+      showToast(
+        `${push ? "提交并推送成功" : "提交成功"}${bracket ? ` · ${bracket}` : ""}`,
+      );
       setMessage("");
     } catch (e) {
       setOutput({ ok: false, text: String(e) });
@@ -247,15 +263,22 @@ function GitPanel({
               {running === "push" ? "推送中…" : "提交并推送"}
             </button>
           </div>
-          {output && (
-            <pre
-              className={`mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded p-2 font-mono text-xs ${
-                output.ok ? "bg-inset text-l2" : "bg-err text-err-text"
-              }`}
-            >
+          {output && !output.ok && (
+            <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-inset p-2 font-mono text-xs text-err-text">
               {output.text}
             </pre>
           )}
+        </div>
+      )}
+      {/* 提交/推送成功 toast：主题 CTA 绿，右下角浮出，2.5s 自动淡出 */}
+      {toast && (
+        <div
+          className={`fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-md border border-cta-bd bg-cta px-3 py-2 text-sm text-cta-text transition-all duration-300 ${
+            toast.hiding ? "translate-y-1 opacity-0" : "translate-y-0 opacity-100"
+          }`}
+        >
+          <span>✓</span>
+          <span>{toast.text}</span>
         </div>
       )}
     </div>

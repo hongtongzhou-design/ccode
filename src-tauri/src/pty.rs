@@ -429,6 +429,42 @@ pub fn pty_resize(
         .map_err(|e| format!("调整终端尺寸失败: {e}"))
 }
 
+/// 进程的真实 cwd：macOS 走 lsof，Linux 读 /proc，Windows 无轻量途径返回 None
+///（前端对 None 回落启动栏 cwd）
+#[cfg(target_os = "macos")]
+fn process_cwd(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix('n').map(|s| s.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn process_cwd(_pid: u32) -> Option<String> {
+    None
+}
+
+/// 活动 PTY 进程的真实工作目录（文件树/git 面板跟随 shell 内的 cd）
+#[tauri::command]
+pub fn pty_get_cwd(manager: tauri::State<'_, PtyManager>, pty_id: String) -> Option<String> {
+    let mut entries = manager.entries.lock().unwrap();
+    let entry = entries.get_mut(&pty_id)?;
+    process_cwd(entry.child.process_id()?)
+}
+
 /// 标记标签可见性（优化 2）：翻转为可见时在同一把 backlog 锁内补发积压输出，
 /// 与发送线程的 gated_emit 互斥，保证补发严格先于之后的实时输出
 #[tauri::command]
@@ -470,6 +506,18 @@ pub fn pty_kill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_cwd_reads_own_process() {
+        // lsof//proc 读自己进程的 cwd，与 current_dir 一致（canonicalize 归一化）
+        let got = process_cwd(std::process::id()).expect("应能读取本进程 cwd");
+        let expect = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(
+            std::path::Path::new(&got).canonicalize().unwrap(),
+            expect
+        );
+    }
 
     #[test]
     fn split_utf8_keeps_incomplete_multibyte_tail() {

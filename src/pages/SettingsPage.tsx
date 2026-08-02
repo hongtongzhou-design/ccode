@@ -24,6 +24,26 @@ const THEMES = [
 const field =
   "rounded border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none focus:border-l4";
 
+/** 「外部终端」下拉的选项按平台给（navigator.platform 在 WKWebView/Chromium 均可用） */
+const EXTERNAL_TERMINALS: { id: string; label: string }[] = (() => {
+  const p = navigator.platform || "";
+  if (p.startsWith("Mac"))
+    return [
+      { id: "auto", label: "自动（Ghostty → iTerm → 终端）" },
+      { id: "ghostty", label: "Ghostty" },
+      { id: "iterm", label: "iTerm2" },
+      { id: "terminal", label: "终端 Terminal.app" },
+    ];
+  if (p.startsWith("Win")) return [{ id: "cmd", label: "cmd 新窗口" }];
+  return [
+    { id: "auto", label: "自动（按优先级探测）" },
+    { id: "gnome-terminal", label: "GNOME Terminal" },
+    { id: "konsole", label: "Konsole" },
+    { id: "xfce4-terminal", label: "Xfce Terminal" },
+    { id: "xterm", label: "XTerm" },
+  ];
+})();
+
 /** 诊断日志条目（与后端 logbuf::LogEntryDto 对应） */
 type LogEntry = { ts: string; level: string; source: string; message: string };
 
@@ -421,6 +441,20 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           {profiles.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}（{p.agent}{p.models[0] ? ` · ${p.models[0]}` : ""}）
+            </option>
+          ))}
+        </select>
+      </Row>
+
+      <Row label="外部终端" hint="会话页「⇗ 外部恢复」使用的终端应用，立即生效">
+        <select
+          className={field}
+          value={settings?.externalTerminal ?? "auto"}
+          onChange={(e) => patch({ externalTerminal: e.target.value })}
+        >
+          {EXTERNAL_TERMINALS.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.label}
             </option>
           ))}
         </select>

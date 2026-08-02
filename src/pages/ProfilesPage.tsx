@@ -257,6 +257,19 @@ function ProfileModal({
           <span className="mb-1 block text-xs text-l3">
             模型列表（可选，首个为默认）
           </span>
+          {(() => {
+            const sw = MODEL_SWITCH[form.agent];
+            if (!sw) return null;
+            const over = sw.max != null && form.models.length > sw.max;
+            return (
+              <p className={`mb-2 text-xs ${over ? "text-warn-text" : "text-l4"}`}>
+                {sw.max != null
+                  ? `该 agent 的模型切换页最多可用 ${sw.max} 个模型——${sw.hint}`
+                  : `该 agent 的模型切换页不限数量——${sw.hint}`}
+                {over && `（当前 ${form.models.length} 个，后 ${form.models.length - (sw.max ?? 0)} 个不会生效）`}
+              </p>
+            );
+          })()}
           <div className="mb-2 flex items-center gap-2">
             <button
               type="button"
@@ -396,6 +409,28 @@ interface AgentCmdResult {
   versionAfter: string | null;
 }
 
+/** 最新版检查结果（check_agent_updates）；latest 为 null 表示该渠道查不到 */
+interface AgentUpdateInfo {
+  id: string;
+  installed: string | null;
+  latest: string | null;
+  outdated: boolean;
+}
+
+/** 各 agent 在 TUI 模型切换页可用的模型数上限（注入模式；matrix 调研结论）。
+ *  max = null 表示不限（选择器列出全部已配置模型） */
+const MODEL_SWITCH: Record<string, { max: number | null; hint: string }> = {
+  "claude-code": {
+    max: 5,
+    hint: "前 4 个占 SONNET/OPUS/HAIKU/FABLE 别名槽，第 5 个占自定义槽；超出的只能 /model <id> 手输",
+  },
+  codex: { max: null, hint: "启动时生成模型 catalog，/model 选择器列出全部已配置模型" },
+  gemini: { max: 1, hint: "CLI 无多模型注入机制，多模型只能在 TUI 里 /model set 手动切换" },
+  qwen: { max: 1, hint: "多模型需「⋯ → 设为全局」写入配置后才能在 /model 里切换" },
+  opencode: { max: null, hint: "全部已配置模型都会注册，可在 TUI 自由切换" },
+  kimi: { max: 1, hint: "多模型需「⋯ → 设为全局」写入配置后才能在模型页切换" },
+};
+
 function relTime(iso: string | null): string {
   if (!iso) return "";
   const t = Date.parse(iso);
@@ -494,6 +529,21 @@ export default function ProfilesPage() {
   const [updating, setUpdating] = useState<Record<string, boolean>>({});
   const [liveOutput, setLiveOutput] = useState<Record<string, string>>({});
   const [updateResults, setUpdateResults] = useState<Record<string, AgentCmdResult>>({});
+  // 各 agent 最新版检查（组头「新版/已更新」状态；查不到渠道的组头回退普通「更新」按钮）
+  const [updateInfo, setUpdateInfo] = useState<Record<string, AgentUpdateInfo>>({});
+
+  async function refreshUpdateInfo() {
+    try {
+      const list = await invoke<AgentUpdateInfo[]>("check_agent_updates");
+      setUpdateInfo(Object.fromEntries(list.map((i) => [i.id, i])));
+    } catch {
+      /* 检查失败（网络等）不影响页面 */
+    }
+  }
+  // 挂载查一次；更新/安装跑完（后端缓存已失效）后重查
+  useEffect(() => {
+    void refreshUpdateInfo();
+  }, [updateResults]);
   // 运行中 run 的交互输入（如回答 brew 的 [y/n]）
   const [cmdInput, setCmdInput] = useState<Record<string, string>>({});
   // 各 run 最近一次收到输出块的时间戳（ref 即可，渲染时按当前时间算闲置分钟数）
@@ -802,23 +852,40 @@ export default function ProfilesPage() {
                     {isCollapsed ? "▸" : "▾"}
                   </button>
                   <h2 className="text-sm font-medium text-pl1">{agent.label}</h2>
+                  {/* 已安装只显示版本号；右侧三态：新版（可点更新）/ 已更新 / 更新（查不到最新版时的回退） */}
                   {det?.binaryPath ? (
-                    <span className="text-xs text-okb">
-                      已安装{det.version ? ` · ${det.version}` : ""}
-                    </span>
+                    <span className="text-xs text-pl2">{det.version ?? ""}</span>
                   ) : (
                     <span className="text-xs text-pl2">
                       未安装（{agent.binary} 不在 PATH）
                     </span>
                   )}
                   {det?.binaryPath ? (
-                    <button
-                      onClick={() => onUpdate(agent.id)}
-                      disabled={updating[agent.id]}
-                      className="ml-auto text-xs text-pl2 hover:text-pl1 disabled:opacity-50"
-                    >
-                      {updating[agent.id] ? "更新中…" : "更新"}
-                    </button>
+                    (() => {
+                      if (updating[agent.id])
+                        return <span className="ml-auto text-xs text-pl2">更新中…</span>;
+                      const info = updateInfo[agent.id];
+                      if (updateResults[agent.id]?.ok || (info && !info.outdated && info.latest))
+                        return <span className="ml-auto text-xs text-okb">已更新</span>;
+                      if (info?.outdated)
+                        return (
+                          <button
+                            onClick={() => onUpdate(agent.id)}
+                            title={`有新版本 ${info.latest ?? ""}，点击更新`}
+                            className="ml-auto text-xs text-cta hover:brightness-125"
+                          >
+                            新版
+                          </button>
+                        );
+                      return (
+                        <button
+                          onClick={() => onUpdate(agent.id)}
+                          className="ml-auto text-xs text-pl2 hover:text-pl1"
+                        >
+                          更新
+                        </button>
+                      );
+                    })()
                   ) : (
                     <button
                       onClick={() => onInstall(agent.id)}
@@ -872,15 +939,15 @@ export default function ProfilesPage() {
                       </div>
                     )}
                     {updateResults[agent.id] && (
-                      <div
-                        className={`mt-2 rounded p-2 text-xs ${
-                          updateResults[agent.id].ok
-                            ? "bg-ok text-ok-text"
-                            : "bg-err text-err-text"
-                        }`}
-                      >
-                        <span>
+                      <div className="mt-2 rounded bg-strip p-2 text-xs text-l2">
+                        <span
+                          className={
+                            updateResults[agent.id].ok ? "text-okb" : "text-err-text"
+                          }
+                        >
                           {updateResults[agent.id].ok ? "✓ 更新完成" : "✗ 更新失败"}
+                        </span>
+                        <span>
                           {updateResults[agent.id].method &&
                             `（${updateResults[agent.id].method}）`}
                           {updateResults[agent.id].versionAfter &&
@@ -919,7 +986,7 @@ export default function ProfilesPage() {
                         {list.map((p) => (
                           <li
                             key={p.id}
-                            className="grid h-16 grid-cols-[130px_minmax(140px,1fr)_240px_150px_112px] items-center gap-2 text-sm"
+                            className="grid h-16 grid-cols-[130px_minmax(200px,1fr)_150px_112px] items-center gap-2 text-sm"
                           >
                             {/* 名称（+用量悬浮按钮）+ 上次使用 */}
                             <span className="flex h-full flex-col justify-center overflow-hidden">
@@ -943,13 +1010,9 @@ export default function ProfilesPage() {
                                 {p.lastUsedAt ? `${relTime(p.lastUsedAt)}使用` : "从未使用"}
                               </span>
                             </span>
-                            {/* Endpoint */}
-                            <span className="truncate text-pl2">
-                              {p.baseUrl ?? "默认端点"}
-                            </span>
-                            {/* 模型标签 */}
+                            {/* 模型标签（不显示 API 地址，行内只留模型；端点仍可被搜索命中） */}
                             <span className="flex flex-wrap items-center gap-1 overflow-hidden">
-                              {p.models.slice(0, 3).map((m, i) => (
+                              {p.models.slice(0, 4).map((m, i) => (
                                 <span
                                   key={m}
                                   className={`rounded-md px-1.5 py-0.5 text-xs ${
@@ -961,12 +1024,12 @@ export default function ProfilesPage() {
                                   {m}
                                 </span>
                               ))}
-                              {p.models.length > 3 && (
+                              {p.models.length > 4 && (
                                 <span
                                   className="text-xs text-l4"
                                   title={p.models.join("\n")}
                                 >
-                                  +{p.models.length - 3}
+                                  +{p.models.length - 4}
                                 </span>
                               )}
                             </span>

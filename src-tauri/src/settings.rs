@@ -13,6 +13,11 @@ pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
 const KNOWN_THEMES: [&str; 7] = [
     "midnight", "terracotta", "ayu", "mocha", "neutral", "dracula", "shadcn",
 ];
+/// 会话页「⇗ 外部恢复」可选的终端应用；auto = 按平台优先级探测
+const KNOWN_EXTERNAL_TERMINALS: [&str; 9] = [
+    "auto", "ghostty", "iterm", "terminal", "cmd",
+    "gnome-terminal", "konsole", "xfce4-terminal", "xterm",
+];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -27,6 +32,8 @@ pub struct AppSettingsDto {
     pub theme: Option<String>,
     /// ◈ AI 功能（提交信息/摘要/PR 描述）固定使用的 profile id；None = 自动（最近使用）
     pub ai_profile_id: Option<String>,
+    /// 会话页「⇗ 外部恢复」使用的终端应用（KNOWN_EXTERNAL_TERMINALS）；None/auto = 自动探测
+    pub external_terminal: Option<String>,
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -68,6 +75,11 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
                 .unwrap_or_else(|| DEFAULT_THEME.to_string()),
         ),
         ai_profile_id: s.ai_profile_id.filter(|v| !v.trim().is_empty()),
+        external_terminal: Some(
+            s.external_terminal
+                .filter(|v| KNOWN_EXTERNAL_TERMINALS.contains(&v.as_str()))
+                .unwrap_or_else(|| "auto".to_string()),
+        ),
     }
 }
 
@@ -97,6 +109,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     // 支持清空：传空字符串 → None（回到「自动=最近使用」）
     if patch.ai_profile_id.is_some() {
         cur.ai_profile_id = patch.ai_profile_id.filter(|v| !v.trim().is_empty());
+    }
+    if patch.external_terminal.is_some() {
+        cur.external_terminal = patch.external_terminal;
     }
 }
 
@@ -190,6 +205,24 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(full.theme.as_deref(), Some("midnight"));
+    }
+
+    #[test]
+    fn external_terminal_defaults_to_auto_and_rejects_unknown() {
+        // 缺失 → auto
+        let full = with_defaults(AppSettingsDto::default());
+        assert_eq!(full.external_terminal.as_deref(), Some("auto"));
+        // 未知值 → auto；已知值保留
+        let full = with_defaults(AppSettingsDto {
+            external_terminal: Some("warp".into()),
+            ..Default::default()
+        });
+        assert_eq!(full.external_terminal.as_deref(), Some("auto"));
+        let full = with_defaults(AppSettingsDto {
+            external_terminal: Some("ghostty".into()),
+            ..Default::default()
+        });
+        assert_eq!(full.external_terminal.as_deref(), Some("ghostty"));
     }
 
     #[test]
