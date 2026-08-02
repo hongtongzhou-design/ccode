@@ -1,5 +1,9 @@
 # Ccode
 
+<p>
+  <img src="icon/icon-v3-01-emerald-mint.png" width="96" alt="Ccode icon" />
+</p>
+
 **AI 编码 Agent 统一启动器 + 配置中心 + 会话监控台**（桌面应用，Tauri v2 + React/TS + Rust）。
 
 为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code 六个终端 agent 管理多套 API 配置（端点/密钥/模型），内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览与工作区编排。
@@ -28,6 +32,7 @@
 ## 文档
 
 - [docs/user-guide.md](docs/user-guide.md) — 使用手册（完整操作流程）
+- [CHANGELOG.md](CHANGELOG.md) — 版本更新日志
 - [docs/architecture.md](docs/architecture.md) — 架构设计与决策记录
 - [docs/agent-integration-matrix.md](docs/agent-integration-matrix.md) — 六个 CLI 的 env/配置/会话格式调研
 - [AGENTS.md](AGENTS.md) — 开发约定与踩坑记录
