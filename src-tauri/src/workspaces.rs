@@ -1535,10 +1535,13 @@ mod tests {
         assert!(st.merging);
         assert_eq!(st.files, vec!["feature.txt".to_string()]);
         assert!(finish_merge_impl(&wt).unwrap_err().contains("未解决"));
-        // 选分支版（ours）→ 清单清空，文件内容是分支版
+        // 选分支版（ours）→ 清单清空，文件内容是分支版（Windows 上 checkout 落盘为 CRLF，断言归一化）
         let st = resolve_file_impl(&wt, "feature.txt", "ours").unwrap();
         assert!(st.files.is_empty());
-        assert_eq!(fs::read_to_string(wt.join("feature.txt")).unwrap(), "branch\n");
+        assert_eq!(
+            fs::read_to_string(wt.join("feature.txt")).unwrap().replace("\r\n", "\n"),
+            "branch\n"
+        );
         // finish → merge 提交完成，冲突探测转干净
         finish_merge_impl(&wt).unwrap();
         assert!(!unmerged_impl(&wt).unwrap().merging);
