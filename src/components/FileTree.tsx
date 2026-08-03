@@ -33,6 +33,15 @@ const STATUS_COLOR: Record<string, string> = {
   R: "text-l3",
 };
 
+/** git 状态字母的悬停完整文字（低对比深色下字母辨识度有限） */
+const STATUS_WORD: Record<string, string> = {
+  M: "已修改",
+  A: "新增（已暂存）",
+  "??": "未跟踪",
+  D: "已删除",
+  R: "已重命名",
+};
+
 function basenameOf(p: string): string {
   const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || p;
@@ -307,7 +316,7 @@ function FileTree({
             {gitStatus && (
               <span
                 className={`font-mono ${STATUS_COLOR[gitStatus] ?? "text-l3"}`}
-                title={`git: ${gitStatus}`}
+                title={`git：${STATUS_WORD[gitStatus] ?? gitStatus}`}
               >
                 {gitStatus === "??" ? "?" : gitStatus}
               </span>

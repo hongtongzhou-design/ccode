@@ -171,6 +171,8 @@ export interface SkillDto {
   /** 内容已与库版本不一致的副本（所在 agent id 列表；空 = 无漂移） */
   /** 副本过期的 agent（后端空数组时省略该字段） */
   staleCopies?: string[];
+  /** 各 agent 的分发形态（"symlink" | "copy"；仅启用的 agent 有键） */
+  appModes?: Record<string, string>;
 }
 
 /** 未被纳管的已发现技能（各 agent 目录里已存在但不在库中） */
@@ -198,6 +200,8 @@ export interface AgentUsageDto {
   tokens: number;
   costUsd: number | null;
   costPartial: boolean;
+  /** 统计范围内该 agent 用过的不同模型数 */
+  modelCount: number;
 }
 
 export interface ProjectUsageDto {

@@ -254,12 +254,26 @@ fn kimi_model_alias(model: &str) -> String {
         .collect()
 }
 
+/// [models.*] 的 max_context_size（kimi 0.31+ 必填）：已知模型按官方上下文映射，
+/// 第三方/未知给 128K 保守默认（特殊模型用户可手改 config.toml）
+fn kimi_context_size(model: &str) -> i64 {
+    let m = model.to_lowercase();
+    if m.starts_with("kimi-k3") {
+        1_048_576 // k3 官方 1M 上下文
+    } else if m.starts_with("kimi-k2.6") || m.starts_with("kimi-k2.7") {
+        262_144 // k2.6/k2.7 官方 256K
+    } else {
+        131_072 // k2 128K；未知按保守默认
+    }
+}
+
 fn patch_kimi_config(
     existing: Option<&str>,
     provider_type: &str,
     base_url: Option<&str>,
     key: Option<&str>,
     models: &[String],
+    require_context_size: bool,
 ) -> Result<String, String> {
     use toml_edit::value;
     let mut doc = parse_toml_doc(existing)?;
@@ -278,6 +292,9 @@ fn patch_kimi_config(
         let models_tbl = sub_table(doc.as_item_mut(), "models")?;
         let mc = sub_table(models_tbl, "ccode")?;
         mc["provider"] = value("ccode");
+        if require_context_size {
+            mc["max_context_size"] = value(131_072);
+        }
         doc["default_model"] = value("ccode");
     } else {
         let models_tbl = sub_table(doc.as_item_mut(), "models")?;
@@ -285,6 +302,10 @@ fn patch_kimi_config(
             let t = sub_table(models_tbl, &kimi_model_alias(m))?;
             t["provider"] = value("ccode");
             t["model"] = value(m.as_str());
+            // 新版 0.31+ 必填 max_context_size；旧版 kimi-cli 不写（未知字段可能报错）
+            if require_context_size {
+                t["max_context_size"] = value(kimi_context_size(m));
+            }
         }
         doc["default_model"] = value(kimi_model_alias(&models[0]));
     }
@@ -407,12 +428,14 @@ fn plan_writes(
                 targets.push(("config.toml", new_path));
             }
             for (tag, path) in targets {
+                // 新版 0.31+ 要求 max_context_size；旧版 kimi-cli 不写（未知字段可能报错）
                 let content = patch_kimi_config(
                     read_existing(&path).as_deref(),
                     provider_type,
                     base_url,
                     key,
                     &profile.models,
+                    tag == "config.toml",
                 )?;
                 push(tag, path, content);
             }
@@ -767,7 +790,8 @@ mod tests {
             "kimi",
             Some("https://api.moonshot.cn/v1"),
             Some("sk-secret"),
-            &["kimi-k2".into(), "kimi.k2.5 turbo".into()],
+            &["kimi-k3".into(), "kimi.k2.5 turbo".into()],
+            true,
         )
         .unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
@@ -777,23 +801,44 @@ mod tests {
         assert_eq!(ccode["base_url"].as_str(), Some("https://api.moonshot.cn/v1"));
         assert_eq!(ccode["api_key"].as_str(), Some("sk-secret"));
         // 每个模型一个 [models.<alias>] 表；非法字符清洗为 _
-        assert_eq!(doc["models"]["kimi-k2"]["provider"].as_str(), Some("ccode"));
-        assert_eq!(doc["models"]["kimi-k2"]["model"].as_str(), Some("kimi-k2"));
+        assert_eq!(doc["models"]["kimi-k3"]["provider"].as_str(), Some("ccode"));
+        assert_eq!(doc["models"]["kimi-k3"]["model"].as_str(), Some("kimi-k3"));
+        // 0.31+ 必填 max_context_size：k3 = 1M，未知模型 = 128K 保守默认
+        assert_eq!(
+            doc["models"]["kimi-k3"]["max_context_size"].as_integer(),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            doc["models"]["kimi_k2_5_turbo"]["max_context_size"].as_integer(),
+            Some(131_072)
+        );
         assert_eq!(
             doc["models"]["kimi_k2_5_turbo"]["model"].as_str(),
             Some("kimi.k2.5 turbo")
         );
         // default_model = 首个模型的别名
-        assert_eq!(doc["default_model"].as_str(), Some("kimi-k2"));
+        assert_eq!(doc["default_model"].as_str(), Some("kimi-k3"));
     }
 
     #[test]
     fn kimi_patch_without_models_keeps_single_ccode_alias() {
-        let out = patch_kimi_config(None, "openai", None, None, &[]).unwrap();
+        let out = patch_kimi_config(None, "openai", None, None, &[], true).unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
         assert_eq!(doc["providers"]["ccode"]["type"].as_str(), Some("openai"));
         assert_eq!(doc["models"]["ccode"]["provider"].as_str(), Some("ccode"));
+        assert_eq!(
+            doc["models"]["ccode"]["max_context_size"].as_integer(),
+            Some(131_072)
+        );
         assert_eq!(doc["default_model"].as_str(), Some("ccode"));
+    }
+
+    #[test]
+    fn kimi_patch_legacy_variant_omits_context_size() {
+        // 旧版 kimi-cli（~/.kimi）：不写 max_context_size，防止老版本解析未知字段报错
+        let out = patch_kimi_config(None, "kimi", None, None, &["kimi-k3".into()], false).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert!(doc["models"]["kimi-k3"].get("max_context_size").is_none());
     }
 
     #[test]

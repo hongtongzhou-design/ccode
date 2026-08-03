@@ -4,12 +4,20 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { useAppStore } from "../store";
 
 /** 四款深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
+import { XTERM_PALETTES, PALETTE_PREVIEW_KEYS } from "../terminal-palettes";
+
 const PALETTES = [
-  { id: "dark-plus", name: "Dark+", dots: ["#0dbc79", "#2472c8", "#f14c4c", "#e5e510"] },
-  { id: "solarized", name: "Solarized", dots: ["#859900", "#268bd2", "#dc322f", "#b58900"] },
-  { id: "one-dark", name: "One Dark", dots: ["#98c379", "#61afef", "#e06c75", "#d19a66"] },
-  { id: "catppuccin", name: "Catppuccin", dots: ["#a6e3a1", "#89b4fa", "#f38ba8", "#f9e2af"] },
+  { id: "dark-plus", name: "Dark+" },
+  { id: "solarized", name: "Solarized" },
+  { id: "one-dark", name: "One Dark" },
+  { id: "catppuccin", name: "Catppuccin" },
 ] as const;
+
+/** 色卡预览：取共享调色板表的前 8 个 ANSI 标准色（与终端实际生效色一致） */
+function paletteDots(id: string): string[] {
+  const p = XTERM_PALETTES[id] ?? XTERM_PALETTES["dark-plus"];
+  return PALETTE_PREVIEW_KEYS.map((k) => p[k]);
+}
 
 const THEMES = [
   { id: "midnight", name: "沉浸黑", rail: "#08090d", canvas: "#11131a", accent: "#16a349" },
@@ -341,7 +349,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         </div>
       </Row>
 
-      <Row label="终端调色板" hint="终端内 16 种 ANSI 颜色风格，立即生效">
+      <Row label="终端调色板" hint="立即生效">
         <div className="flex gap-2">
           {PALETTES.map((pl) => (
             <button
@@ -354,9 +362,10 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                   : "border-field text-l3 hover:text-l1"
               }`}
             >
-              <span className="flex h-3 gap-0.5">
-                {pl.dots.map((d) => (
-                  <span key={d} className="h-3 w-3 rounded-sm" style={{ background: d }} />
+              {/* 8 色无缝色条：分段 flex-1 自适应固定宽度，色数变化也不撑破布局 */}
+              <span className="flex h-3 w-16 overflow-hidden rounded-sm">
+                {paletteDots(pl.id).map((d) => (
+                  <span key={d} className="flex-1" style={{ background: d }} />
                 ))}
               </span>
             </button>
@@ -516,6 +525,23 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
           >
             复制全部
+          </button>
+          <button
+            onClick={async () => {
+              setError(null);
+              try {
+                const path = await invoke<string>("export_app_log");
+                setNotice(`已导出：${path}`);
+                setTimeout(() => setNotice(null), 4000);
+              } catch (e) {
+                setError(String(e));
+              }
+            }}
+            disabled={logs.length === 0}
+            title="导出为 txt 到 ~/Downloads/ccode-exports/，反馈问题时发给开发者"
+            className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+          >
+            导出
           </button>
           <button
             onClick={clearLogs}

@@ -117,6 +117,7 @@ impl ProfileStore {
     }
 
     pub fn create(&self, input: ProfileInput) -> Result<Profile, String> {
+        let _g = store_lock();
         let mut profile = Profile {
             id: uuid::Uuid::new_v4().to_string(),
             agent: input.agent,
@@ -142,6 +143,7 @@ impl ProfileStore {
 
     /// 复制配置：字段全部拷贝，钥匙串密钥一并复制到新 id，名称加「副本」
     pub fn duplicate(&self, id: &str) -> Result<Profile, String> {
+        let _g = store_lock();
         let src = self.get(id)?;
         let mut copy = Profile {
             id: uuid::Uuid::new_v4().to_string(),
@@ -167,6 +169,7 @@ impl ProfileStore {
     }
 
     pub fn update(&self, id: &str, input: ProfileInput) -> Result<Profile, String> {
+        let _g = store_lock();
         let mut profiles = self.read_all()?;
         let profile = profiles
             .iter_mut()
@@ -189,6 +192,7 @@ impl ProfileStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), String> {
+        let _g = store_lock();
         let mut profiles = self.read_all()?;
         profiles.retain(|p| p.id != id);
         self.write_all(&profiles)?;
@@ -198,6 +202,7 @@ impl ProfileStore {
 
     /// 每次用于启动即刷新 last_used_at（§6.12 E）；失败静默，不影响启动
     pub fn touch_last_used(&self, id: &str) {
+        let _g = store_lock();
         let _ = (|| -> Result<(), String> {
             let mut profiles = self.read_all()?;
             if let Some(p) = profiles.iter_mut().find(|p| p.id == id) {
@@ -251,11 +256,20 @@ pub(crate) fn atomic_write(path: &std::path::Path, text: &str) -> Result<(), Str
     fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
 }
 
+/// profiles.json / keys.json 的读-改-写序列化锁：多标签页并发保存时防互相覆盖
+/// （原子写只保证单文件不碎，不保证 A读-B读-A写-B写 的丢失更新）
+static STORE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn store_lock() -> std::sync::MutexGuard<'static, ()> {
+    STORE_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn key_entry(id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYRING_SERVICE, id).map_err(|e| format!("钥匙串不可用: {e}"))
 }
 
 fn set_key(id: &str, key: &str) -> Result<(), String> {
+    let _g = store_lock();
     let path = keys_path()?;
     let mut keys = read_keys_at(&path);
     keys.insert(id.to_string(), key.to_string());

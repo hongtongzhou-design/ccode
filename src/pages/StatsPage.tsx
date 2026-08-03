@@ -219,6 +219,12 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                         style={{ backgroundColor: agentColor(a.agent, i) }}
                       />
                       <span className="w-24 shrink-0 text-l2">{agentLabel(a.agent)}</span>
+                      <span
+                        className="shrink-0 text-xs text-l4"
+                        title={`统计范围内使用了 ${a.modelCount} 个不同模型`}
+                      >
+                        {a.modelCount} 模型
+                      </span>
                       <span className="h-2 min-w-0 flex-1 rounded bg-hairline">
                         <span
                           className="block h-2 rounded"

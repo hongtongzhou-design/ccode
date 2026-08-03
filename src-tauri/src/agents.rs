@@ -476,11 +476,49 @@ fn open_ghostty(cmd: &str) -> Result<(), String> {
         return Err("未安装 Ghostty（设置页改选其他终端）".into());
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    // Ghostty：-e 之后的参数整体作为命令执行；-l -i 交互登录 shell（非交互模式
-    // zsh 不加载 .zshrc / bash 不加载 .bashrc，brew/nvm/官方安装器的 PATH 会丢）
+    let running = Command::new("pgrep")
+        .args(["-x", "ghostty"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !running {
+        // 未运行：open -na 拉起（仅此一次产生实例）；Ghostty -e 之后的参数整体作为命令
+        // 执行；-l -i 交互登录 shell（非交互模式 zsh 不加载 .zshrc / bash 不加载 .bashrc）
+        return spawn_status(
+            Command::new("open")
+                .args(["-na", "Ghostty", "--args", "-e", &shell, "-l", "-i", "-c", cmd]),
+            "Ghostty",
+        );
+    }
+    // 已运行：open -n 会再开新实例（程序坞每点一次多一个图标），且 open 对运行中的实例
+    // 不投递 --args（实测）——改走 AppleScript：激活 → ⌘N 开新窗 → 剪贴板粘贴命令
+    // （keystroke 逐字输入对中文路径/键盘布局不可靠，故走剪贴板，用后还原）
+    let escaped = applescript_escape(cmd);
     spawn_status(
-        Command::new("open")
-            .args(["-na", "Ghostty", "--args", "-e", &shell, "-l", "-i", "-c", cmd]),
+        Command::new("osascript").args([
+            "-e",
+            "set oldClip to the clipboard",
+            "-e",
+            &format!("set the clipboard to \"{escaped}\""),
+            "-e",
+            "tell application \"Ghostty\" to activate",
+            "-e",
+            "delay 0.3",
+            "-e",
+            "tell application \"System Events\" to keystroke \"n\" using command down",
+            "-e",
+            "delay 0.4",
+            "-e",
+            "tell application \"System Events\" to keystroke \"v\" using command down",
+            "-e",
+            "delay 0.2",
+            "-e",
+            "tell application \"System Events\" to key code 36",
+            "-e",
+            "delay 0.2",
+            "-e",
+            "set the clipboard to oldClip",
+        ]),
         "Ghostty",
     )
 }

@@ -240,7 +240,7 @@ function PrModal({ ws, onClose }: { ws: WorkspaceDto; onClose: () => void }) {
       const md = await invoke<string>("ai_draft_pr", { id: ws.id });
       setBody(md);
     } catch (e) {
-      setError(String(e));
+      setError(`${e}（检查设置页「AI 专用配置」是否可用，或换更快的模型）`);
     } finally {
       setAiDrafting(false);
     }
@@ -827,6 +827,15 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             <h2 className="mb-1 text-sm font-medium text-l1" title={g.repoPath}>
               {g.repoName}
               <span className="ml-2 text-xs font-normal text-l4">{g.repoPath}</span>
+              {g.list.some((w) => w.status === "active" && health[w.id]?.mainDirty) && (
+                <span
+                  className="ml-2 inline-flex items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs font-normal text-l3"
+                  title="主仓库有未提交改动——本地合并会被拒；建议先提交/stash，或新工作直接建工作区隔离"
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
+                  主仓有改动
+                </span>
+              )}
             </h2>
             <ul className="divide-y divide-hairline">
               {g.list.map((ws) => (
@@ -1127,7 +1136,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                                   {unmerged.files.map((f) => {
                                     const sd = sides[f];
                                     return (
-                                      <div key={f} className="py-0.5">
+                                      <div key={f} className="border-l-2 border-err-text py-0.5 pl-1.5">
                                         <div className="flex items-center gap-2">
                                           <span className="min-w-0 flex-1 truncate font-mono text-err-text">
                                             {f}
@@ -1227,7 +1236,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                                     与 {ws.baseBranch} 冲突——以下文件两边改了同一处：
                                   </div>
                                   {(health[ws.id]?.conflictFiles ?? []).map((f) => (
-                                    <p key={f} className="font-mono text-err-text">
+                                    <p key={f} className="border-l-2 border-err-text pl-1.5 font-mono text-err-text">
                                       {f}
                                     </p>
                                   ))}

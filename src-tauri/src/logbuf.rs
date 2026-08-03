@@ -59,6 +59,27 @@ pub fn clear_app_log() {
     }
 }
 
+/// 导出当前缓冲到 ~/Downloads/ccode-logs-<时间戳>.txt，返回文件路径
+#[tauri::command]
+pub fn export_app_log() -> Result<String, String> {
+    let entries = get_app_log(CAP);
+    let text = entries
+        .iter()
+        .map(|l| format!("{} [{}] {}: {}", l.ts, l.level, l.source, l.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let dir = dirs::download_dir()
+        .ok_or("无法确定下载目录")?
+        .join("ccode-exports");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
+    let path = dir.join(format!(
+        "ccode-logs-{}.txt",
+        now_iso().replace([':', '.'], "-")
+    ));
+    crate::profiles::atomic_write(&path, &text)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// 前端上报入口（window.onerror / unhandledrejection）
 #[tauri::command]
 pub fn log_event(level: String, source: String, message: String) {

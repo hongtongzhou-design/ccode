@@ -574,12 +574,17 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                     {AGENTS.map((a) => {
                       const on = !!s.apps[a.id];
                       const key = `${s.id}:${a.id}`;
+                      const mode = on ? (s.appModes ?? {})[a.id] : undefined;
                       return (
                         <button
                           key={a.id}
                           onClick={() => toggleApp(s, a.id)}
                           disabled={applying[key]}
-                          title={`${on ? "取消" : "应用"}到 ${a.label}`}
+                          title={
+                            on
+                              ? `已分发到 ${a.label}：${mode === "copy" ? "copy（有漂移检测）" : "symlink"}；点击取消`
+                              : `应用到 ${a.label}`
+                          }
                           className={`rounded px-1.5 py-0.5 text-xs disabled:opacity-50 ${
                             on
                               ? "bg-ok text-ok-text"
@@ -587,6 +592,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                           }`}
                         >
                           {applying[key] ? "…" : AGENT_SHORT[a.id] ?? a.id}
+                          {on && mode && (
+                            <span className="ml-0.5 opacity-70">
+                              {mode === "copy" ? "·c" : "·s"}
+                            </span>
+                          )}
                         </button>
                       );
                     })}

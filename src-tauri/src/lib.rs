@@ -61,6 +61,7 @@ pub fn run() {
             sessions::export_session_markdown,
             logbuf::get_app_log,
             logbuf::clear_app_log,
+            logbuf::export_app_log,
             logbuf::log_event,
             fs_tree::list_dir,
             fs_tree::read_file_preview,

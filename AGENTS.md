@@ -53,7 +53,7 @@ npm run tauri build    # 打包
 - **GUI 应用 PATH 很短**：Finder 启动的打包应用可能找不到 npm 装的 CLI；开发模式（`npm run tauri dev`）继承终端 PATH 不受影响。打包版统一经 `agents::resolve_binary` 候选目录兜底解析（见关键约定）。
 - **本机 CLI 安装情况**：claude/codex/gemini/qwen 为 brew 或 npm 安装（检测见 updater.rs 报告）；opencode 未装；kimi 为新版（~/.kimi-code）。
 - **git 提交**：用户要求 CI 耗时久，常规提交加 `[skip ci]`，里程碑提交才跑三平台 CI。
-- **git 推送走 SSH:443 + repo deploy key**（HTTPS 网络不稳）；**deploy key 推送不触发 GitHub Actions**——发版必须 `gh api repos/<owner>/<repo>/actions/workflows/build.yml/dispatches -f ref=<tag>` 手动触发；workflow 已配 `permissions: contents: write`（tauri-action 建 Release 草稿必需，缺了报 Resource not accessible by integration）。
+- **git 推送走 SSH:443 + repo deploy key**（HTTPS 网络不稳）；**deploy key 推送不触发 GitHub Actions**——发版必须 `gh api repos/hongtongzhou-design/ccode/actions/workflows/build.yml/dispatches -f ref=<tag>` 手动触发；workflow 已配 `permissions: contents: write`（tauri-action 建 Release 草稿必需，缺了报 Resource not accessible by integration）。**仓库 owner 与 tauri.conf 升级端点绑定**（同为 `hongtongzhou-design/ccode`）：仓库若转移，本命令、tauri.conf.json 的 updater endpoint、README 链接三处必须同步改。
 - **CI 测试教训**：单元测试禁墙钟时序硬断言（共享 runner 调度延迟不可控，只留内容语义断言 + 防挂死宽松兜底）；unix 专属语义（symlink/PTY 交互/脚本）测试加 `#[cfg(unix)]`；路径断言用 `Path::ends_with` 不用字符串相等（Windows `\`）。
 
 ## 代码结构
@@ -91,6 +91,10 @@ src-tauri/src/
   **⇗ 外部拉起的两个硬要求**：CLI 用绝对路径（`resolve_binary` 结果，⧉ 复制命令才用裸名）；
   shell 必须 `-l -i` 交互登录模式——非交互 `zsh -l -c` 不加载 `.zshrc`（`~/.kimi-code/bin` 这类
   官方安装器 PATH 只写在交互 rc 里，裸名/非交互都会 command not found，Ghostty 报 failed to launch）。
+  **Ghostty 单实例约束**：`open -n` 每次开新实例（程序坞堆图标）、`open` 不带 `-n` 不投递 `--args`
+  （实测）；Ghostty 已在运行时改走 AppleScript——激活 → ⌘N 新窗 → 剪贴板粘贴命令 + 回车
+  （keystroke 逐字输入对中文路径/键盘布局不可靠，故走剪贴板且用后还原；首次需用户同意
+  「控制 System Events」自动化授权一次）。
 - **Profile 的 extra_env 排在 adapter 内置 env 之后注入**，供用户覆盖内置值（CommandBuilder 后者生效）。
 - **终端行为**（用户明确要求）：
   - 终端配色使用 VS Code Dark+ 风格调色板，集中在 `TerminalPage.tsx` 的 `theme` 一处，换主题只改这里；
@@ -134,6 +138,8 @@ src-tauri/src/
 **当前待办（backlog）**：
 
 - macOS 签名公证（暂缓，需 Apple Developer 会员 + CI 配 6 个 APPLE_* secrets，见架构 v1.3）
+- Intel macOS 安装包（暂缓：CI macos-latest 只出 aarch64；加 `x86_64-apple-darwin` target 构建时间翻倍，真有 Intel 用户再加，见架构 v1.3 / README 安装节）
+- OpenCode Windows 数据路径未核实（matrix 标注「文档与源码不一致」），Windows 用户验证会话/用量统计后修正
 - Skills 更新检测与在线编辑（v2 口子，见架构 v0.9 / §6.13）
 - Claude Code hooks 精确化注意力标记（v2 评估项，需写用户配置，见架构 v0.7）
 - 本地 API 代理（P4 可选项，未做）

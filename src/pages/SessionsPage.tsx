@@ -106,7 +106,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const searched = useMemo(() => {
     if (!q) return sessions;
     return sessions.filter((s) =>
-      [s.projectPath, s.title ?? "", s.customTitle ?? "", s.workspace ?? "", ...s.tags]
+      [s.projectPath, s.title ?? "", s.customTitle ?? "", s.workspace ?? "", s.summary ?? "", ...s.tags]
         .join("\n")
         .toLowerCase()
         .includes(q),
@@ -236,7 +236,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       setSummary(text);
       setError(null);
     } catch (e) {
-      setError(String(e));
+      setError(`${e}（检查设置页「AI 专用配置」是否可用，或换更快的模型）`);
     } finally {
       setAiSummarizing(false);
     }
@@ -693,12 +693,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         setConfirmBatch(true);
                       }
                     }}
-                    className="rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5 disabled:opacity-50"
+                    className={
+                      confirmBatch
+                        ? "rounded bg-err px-2 py-0.5 text-xs text-err-text hover:brightness-110 disabled:opacity-50"
+                        : "rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5 disabled:opacity-50"
+                    }
                   >
                     {batchDeleting
                       ? "删除中…"
                       : confirmBatch
-                        ? `确认删除 ${checkedInView} 项？`
+                        ? `确认删除 ${checkedInView} 项（含 pin 快照）？`
                         : `删除 ${checkedInView} 项`}
                   </button>
                   <button
@@ -900,7 +904,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         e.stopPropagation();
                         void resumeExternal(s);
                       }}
-                      title="在外部终端应用（Ghostty/终端）中恢复这个会话"
+                      title="在外部终端应用（Ghostty/终端）中恢复这个会话——使用你的全局 CLI 配置（不携带 Ccode profile 的密钥）"
                       className="text-l3 hover:text-l1 disabled:opacity-50"
                     >
                       ⇗
@@ -911,7 +915,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         e.stopPropagation();
                         void copyResumeCommand(s);
                       }}
-                      title="复制恢复命令，粘贴到任意终端执行"
+                      title="复制恢复命令，粘贴到任意终端执行——使用你的全局 CLI 配置（不携带 Ccode profile 的密钥）"
                       className="text-l3 hover:text-l1 disabled:opacity-50"
                     >
                       {copiedId === s.sessionId ? "已复制" : "⧉"}
@@ -923,6 +927,20 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             {sessionList.length === 0 && (
               <p className="p-4 text-sm text-l4">
                 {showArchived ? "暂无会话" : "暂无会话（已归档的被隐藏）"}
+                {(q || filter.kind !== "all") && (
+                  <>
+                    —— 当前筛选/搜索无结果
+                    <button
+                      onClick={() => {
+                        setQuery("");
+                        setFilter({ kind: "all" });
+                      }}
+                      className="ml-2 rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1"
+                    >
+                      清除筛选
+                    </button>
+                  </>
+                )}
               </p>
             )}
           </div>
@@ -971,7 +989,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     const r = e.currentTarget.getBoundingClientRect();
                     setResumeMenu({ x: r.right - 176, y: r.bottom + 4 });
                   }}
-                  title="更多恢复方式（外部终端 / 复制命令）"
+                  title="更多恢复方式（外部终端 / 复制命令——均使用全局 CLI 配置，不携带本 profile 密钥）"
                   className="rounded-r px-1 py-1 text-xs text-l4 hover:bg-white/5 hover:text-l1"
                 >
                   ▾
@@ -1024,6 +1042,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             )}
             {replayTab === "diff" ? (
               <div className="flex min-h-0 flex-1 flex-col">
+                {selected.live && (
+                  <p className="shrink-0 bg-warn px-3 py-1.5 text-xs text-warn-text">
+                    该会话的 agent 正在运行中，可能正在写入文件——提交/推送前确认没有进行中的改动，避免提交半成品或与 agent 撞车
+                  </p>
+                )}
                 <GitPanel
                   cwd={selected.projectPath}
                   visible={replayTab === "diff"}

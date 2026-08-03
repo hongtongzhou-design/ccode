@@ -639,6 +639,7 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
                 cost_usd,
                 cost_partial,
                 agent,
+                model_count: b.by_model.len() as u32,
             }
         })
         .collect();
@@ -722,6 +723,8 @@ pub struct UsageAgentRowDto {
     pub tokens: u64,
     pub cost_usd: Option<f64>,
     pub cost_partial: bool,
+    /// 该 agent 在统计范围内使用过的不同模型数
+    pub model_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

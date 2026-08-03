@@ -206,8 +206,81 @@ pub(crate) fn read_session_bytes(path: &Path) -> Option<Vec<u8>> {
     Some(maybe_decompress(&raw))
 }
 
-/// 扫描只读头部（cwd/时间戳/标题）+ 尾部（ai-title / token_count），各有字节上限；
-/// 文件小于两倍上限时全读进头部。切片按换行对齐，半行丢弃。
+/// 扫描用窗口化读取：大文件不再全量读入内存——普通文件 seek 读头/尾窗；
+/// zstd（Codex 压缩会话）流式解码一遍，只保留头窗 + 尾窗环形缓冲，峰值内存 ~2×budget。
+/// 小文件（≤2×budget）照旧全读（含解压）。切片对齐与 head_tail_lines 同语义
+fn read_head_tail(path: &Path, budget: usize) -> Option<(Vec<String>, Vec<String>)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = fs::File::open(path).ok()?;
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).ok()?;
+    if magic == ZSTD_MAGIC {
+        // zstd：解压后大小可能远超压缩文件（重复内容压到几 KB），不能按压缩体积走
+        // 小文件阈值——一律流式解码一遍，只保留头窗 + 尾窗环形缓冲，峰值内存 ~2×budget
+        let f2 = fs::File::open(path).ok()?;
+        let mut dec = zstd::stream::read::Decoder::new(f2).ok()?;
+        let mut head: Vec<u8> = Vec::with_capacity(budget);
+        let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::with_capacity(budget);
+        let mut total = 0usize;
+        let mut buf = [0u8; 65536];
+        loop {
+            match dec.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    total += n;
+                    let chunk = &buf[..n];
+                    if head.len() < budget {
+                        let take = (budget - head.len()).min(chunk.len());
+                        head.extend_from_slice(&chunk[..take]);
+                    }
+                    tail.extend(chunk.iter().copied());
+                    while tail.len() > budget {
+                        tail.pop_front();
+                    }
+                }
+            }
+        }
+        let tail_v: Vec<u8> = tail.into_iter().collect();
+        if total <= budget {
+            // 解压后不足一窗：head 即全量
+            return Some((to_lines(&String::from_utf8_lossy(&head)), Vec::new()));
+        }
+        if total <= budget * 2 {
+            // 两窗之间：head=前 budget 字节，尾部缺口 = tail 的最后 (total-budget) 字节，拼出全量
+            let mut all = head;
+            all.extend_from_slice(&tail_v[2 * budget - total..]);
+            return Some((to_lines(&String::from_utf8_lossy(&all)), Vec::new()));
+        }
+        Some((align_head(&head), align_tail(&tail_v)))
+    } else {
+        let len = f.metadata().ok()?.len() as usize;
+        if len <= budget * 2 {
+            let raw = fs::read(path).ok()?;
+            return Some((to_lines(&String::from_utf8_lossy(&raw)), Vec::new()));
+        }
+        f.seek(SeekFrom::Start(0)).ok()?;
+        let mut head = vec![0u8; budget];
+        let n = f.read(&mut head).ok()?;
+        head.truncate(n);
+        f.seek(SeekFrom::Start((len - budget) as u64)).ok()?;
+        let mut tail = vec![0u8; budget];
+        let n = f.read(&mut tail).ok()?;
+        tail.truncate(n);
+        Some((align_head(&head), align_tail(&tail)))
+    }
+}
+
+/// 头窗对齐：截到最后一个换行（丢弃末尾半行）
+fn align_head(bytes: &[u8]) -> Vec<String> {
+    let end = bytes.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+    to_lines(&String::from_utf8_lossy(&bytes[..end]))
+}
+
+/// 尾窗对齐：从第一个换行之后起（丢弃开头半行）
+fn align_tail(bytes: &[u8]) -> Vec<String> {
+    let from = bytes.iter().position(|&b| b == b'\n').map(|i| i + 1).unwrap_or(bytes.len());
+    to_lines(&String::from_utf8_lossy(&bytes[from..]))
+}
 fn head_tail_lines(bytes: &[u8], budget: usize) -> (Vec<String>, Vec<String>) {
     if bytes.len() <= budget * 2 {
         return (to_lines(&String::from_utf8_lossy(bytes)), Vec::new());
@@ -298,8 +371,7 @@ fn claude_tool_result_text(b: &Value) -> String {
 }
 
 fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
-    let bytes = read_session_bytes(path)?;
-    let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
+    let (head, tail) = read_head_tail(path, 64 * 1024)?;
     let (mut cwd, mut created, mut session_id, mut version) = (None, None, None, None);
     let (mut title, mut ai_title) = (None, None);
     for line in head.iter().chain(&tail) {
@@ -520,9 +592,8 @@ fn codex_file_meta(
     alive: bool,
     archived: bool,
 ) -> Option<(SessionMetaDto, Option<String>)> {
-    let bytes = read_session_bytes(path)?;
     // Codex 开头的 user_instructions 块可能很大，头部放宽到 256KB 才更常拿到真实首条提问
-    let (head, tail) = head_tail_lines(&bytes, 256 * 1024);
+    let (head, tail) = read_head_tail(path, 256 * 1024)?;
     let (mut cwd, mut created, mut session_id, mut version, mut title) =
         (None, None, None, None, None);
     let mut forked_from_id = None;
@@ -787,8 +858,7 @@ fn gemini_file_meta(
     alive: bool,
     slug_to_path: &HashMap<String, String>,
 ) -> Option<SessionMetaDto> {
-    let bytes = read_session_bytes(path)?;
-    let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
+    let (head, tail) = read_head_tail(path, 64 * 1024)?;
     let (mut session_id, mut created, mut title, mut summary, mut directories) =
         (None, None, None, None, None);
     for line in head.iter().chain(&tail) {
@@ -1007,8 +1077,7 @@ fn qwen_runtime_sidecar(path: &Path) -> Option<PathBuf> {
 }
 
 fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMetaDto> {
-    let bytes = read_session_bytes(path)?;
-    let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
+    let (head, tail) = read_head_tail(path, 64 * 1024)?;
     let (mut cwd, mut created, mut session_id, mut version, mut title, mut custom_title) =
         (None, None, None, None, None, None);
     for line in head.iter().chain(&tail) {
@@ -1227,8 +1296,7 @@ fn kimi_wire_file_meta(
     project_path: String,
     state: Option<&Value>,
 ) -> Option<SessionMetaDto> {
-    let bytes = read_session_bytes(path)?;
-    let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
+    let (head, tail) = read_head_tail(path, 64 * 1024)?;
     let (mut created, mut title) = (None, None);
     for line in &head {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -1497,8 +1565,7 @@ fn kimi_legacy_file_meta(
     project_path: String,
     state: Option<&Value>,
 ) -> Option<SessionMetaDto> {
-    let bytes = read_session_bytes(path)?;
-    let (head, tail) = head_tail_lines(&bytes, 64 * 1024);
+    let (head, tail) = read_head_tail(path, 64 * 1024)?;
     let mut title = None;
     for line in &head {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -2916,7 +2983,10 @@ fn apply_meta(
 
 #[tauri::command]
 pub async fn list_sessions() -> Vec<SessionMetaDto> {
-    let scan = cached_scan();
+    // cached_scan 是 CPU 密集的全量扫描，移出 async worker（10s 缓存命中时也走这里，开销可忽略）
+    let Ok(scan) = tauri::async_runtime::spawn_blocking(cached_scan).await else {
+        return Vec::new();
+    };
     let mut sessions = scan.sessions;
     if let Ok(conn) = open_db() {
         let meta = read_all_meta(&conn);
@@ -2936,8 +3006,8 @@ pub async fn find_session_for(
     since_iso: String,
 ) -> Option<SessionMetaDto> {
     let cwd = expand_tilde(&cwd);
-    cached_scan()
-        .sessions
+    let scan = tauri::async_runtime::spawn_blocking(cached_scan).await.ok()?;
+    scan.sessions
         .into_iter()
         .filter(|s| s.agent == agent && s.project_path == cwd)
         .filter(|s| s.updated_at.as_deref().unwrap_or("") >= since_iso.as_str())
@@ -3222,6 +3292,8 @@ fn session_roots() -> Vec<PathBuf> {
         for name in [".claude", ".codex", ".gemini", ".qwen", ".kimi", ".kimi-code"] {
             roots.push(home.join(name));
         }
+        // OpenCode：SQLite 库与 legacy storage 都在这一个根下
+        roots.push(home.join(".local").join("share").join("opencode"));
     }
     if let Some(snap) = snapshots_root() {
         roots.push(snap);
@@ -3286,11 +3358,17 @@ pub async fn delete_session(
 #[tauri::command]
 pub async fn delete_project_sessions(agent: String, project_path: String) -> Result<usize, String> {
     let project_path = expand_tilde(&project_path);
-    let targets: Vec<SessionMetaDto> = cached_scan()
+    let scan = tauri::async_runtime::spawn_blocking(cached_scan)
+        .await
+        .map_err(|e| e.to_string())?;
+    let targets: Vec<SessionMetaDto> = scan
         .sessions
         .into_iter()
         .filter(|s| s.agent == agent && s.project_path == project_path)
         .collect();
+    // 单连接 + 事务批量删除（原实现逐项 open_db + 逐条 DELETE，大量会话时明显慢）
+    let mut conn = open_db()?;
+    let tx = conn.transaction().map_err(|e| format!("开启事务失败: {e}"))?;
     let mut count = 0;
     for s in targets {
         delete_source_file(&s.file_path)?;
@@ -3299,14 +3377,14 @@ pub async fn delete_project_sessions(agent: String, project_path: String) -> Res
                 let _ = fs::remove_file(p);
             }
         }
-        let conn = open_db()?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM session_meta WHERE agent=?1 AND session_id=?2",
             params![s.agent, s.session_id],
         )
         .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
         count += 1;
     }
+    tx.commit().map_err(|e| format!("提交事务失败: {e}"))?;
     invalidate_scan_cache();
     Ok(count)
 }
@@ -3678,6 +3756,41 @@ mod tests {
         assert!(tail.len() < 1000 && !tail.is_empty());
         assert!(head.iter().all(|l| serde_json::from_str::<Value>(l).is_ok()));
         assert!(tail.iter().all(|l| serde_json::from_str::<Value>(l).is_ok()));
+    }
+
+    #[test]
+    fn read_head_tail_matches_full_read_plain_and_zstd() {
+        // 构造 >2×budget 的文件：前 100 行小行 + 中间大行 + 后 100 行
+        let mut text = String::new();
+        for i in 0..100 {
+            text.push_str(&format!("{{\"n\":{i}}}\n"));
+        }
+        text.push_str(&"x".repeat(600 * 1024));
+        text.push('\n');
+        for i in 100..200 {
+            text.push_str(&format!("{{\"n\":{i}}}\n"));
+        }
+        let dir = std::env::temp_dir().join(format!("ccode-ht-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 普通文件：窗口化读取的头尾与全量读取的头尾一致
+        let plain = dir.join("a.jsonl");
+        std::fs::write(&plain, &text).unwrap();
+        let (h1, t1) = read_head_tail(&plain, 64 * 1024).unwrap();
+        let full = std::fs::read(&plain).unwrap();
+        let (h2, t2) = head_tail_lines(&full, 64 * 1024);
+        assert_eq!(h1, h2);
+        assert_eq!(t1, t2);
+        // zstd 压缩：流式解码的头尾与全量解压的头尾一致
+        let zst = dir.join("a.jsonl.zst");
+        let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        std::io::Write::write_all(&mut enc, text.as_bytes()).unwrap();
+        let compressed = enc.finish().unwrap();
+        std::fs::write(&zst, &compressed).unwrap();
+        let (h3, t3) = read_head_tail(&zst, 64 * 1024).unwrap();
+        let (h4, t4) = head_tail_lines(&maybe_decompress(&compressed), 64 * 1024);
+        assert_eq!(h3, h4, "zstd 头窗应与全量解压一致");
+        assert_eq!(t3, t4, "zstd 尾窗应与全量解压一致");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ===== Gemini =====

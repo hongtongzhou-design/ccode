@@ -36,6 +36,8 @@ function App() {
   const setPage = useAppStore((s) => s.setPage);
   const collapsed = useAppStore((s) => s.navCollapsed);
   const toggleCollapsed = useAppStore((s) => s.toggleNavCollapsed);
+  // 终端里运行中的 agent 数（任意页面可见，徽标挂在「终端」图标上）
+  const runningCount = useAppStore((s) => Object.keys(s.liveSessions).length);
   const loadAll = useAppStore((s) => s.loadAll);
   const loadSessions = useAppStore((s) => s.loadSessions);
   const loadSettings = useAppStore((s) => s.loadSettings);
@@ -128,7 +130,7 @@ function App() {
           <button
             key={n.id}
             onClick={() => setPage(n.id)}
-            title={n.label}
+            title={n.id === "terminal" && runningCount > 0 ? `${n.label}（${runningCount} 个 agent 运行中）` : n.label}
             className={`mx-1 mb-0.5 flex items-center rounded-md text-sm ${
               collapsed ? "h-10 w-12 justify-center self-center" : "px-3 py-2.5"
             } ${
@@ -137,8 +139,13 @@ function App() {
                 : "text-l3 hover:bg-white/5"
             }`}
           >
-            <span className={collapsed ? "text-lg" : "mr-2 w-5 text-center"}>
+            <span className={`relative ${collapsed ? "text-lg" : "mr-2 w-5 text-center"}`}>
               {n.icon}
+              {n.id === "terminal" && runningCount > 0 && (
+                <span className="absolute -right-1.5 -top-1 rounded-full bg-ok px-1 text-[9px] leading-3 text-ok-text">
+                  {runningCount}
+                </span>
+              )}
             </span>
             {!collapsed && n.label}
           </button>

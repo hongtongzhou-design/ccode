@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -734,6 +734,13 @@ export default function ProfilesPage() {
   const matchProfile = (p: Profile) =>
     !q ||
     [p.name, p.baseUrl ?? "", ...p.models].join("\n").toLowerCase().includes(q);
+  // 跨配置共享的模型（>1 个 profile 配置了同名模型）——用量按模型近似归属会重复计入，行内可见标记
+  const sharedModels = useMemo(() => {
+    const count = new Map<string, number>();
+    for (const p of profiles)
+      for (const m of p.models) count.set(m, (count.get(m) ?? 0) + 1);
+    return new Set([...count].filter(([, n]) => n > 1).map(([m]) => m));
+  }, [profiles]);
   const visibleAgents = AGENTS.filter((a) => {
     const installed = !!agents.find((x) => x.id === a.id)?.binaryPath;
     if (statusFilter === "installed") return installed;
@@ -999,10 +1006,19 @@ export default function ProfilesPage() {
                                       const r = e.currentTarget.getBoundingClientRect();
                                       setUsagePop({ x: r.left, y: r.bottom + 4, id: p.id });
                                     }}
-                                    title="查看用量/费用"
+                                    title={
+                                      p.models.some((m) => sharedModels.has(m))
+                                        ? "查看用量/费用（含共享模型——同一模型配置在多个 profile，用量会重复计入）"
+                                        : "查看用量/费用"
+                                    }
                                     className="shrink-0 text-xs text-l4 hover:text-pl1"
                                   >
                                     ▸用量
+                                    {p.models.some((m) => sharedModels.has(m)) && (
+                                      <span className="text-warnb" title="含共享模型">
+                                        ⚠
+                                      </span>
+                                    )}
                                   </button>
                                 )}
                               </span>

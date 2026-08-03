@@ -66,7 +66,7 @@ function GitPanel({
       setMessage(text.trim());
       setError(null);
     } catch (e) {
-      setError(String(e));
+      setError(`${e}（检查设置页「AI 专用配置」是否可用，或换更快的模型）`);
     } finally {
       setAiBusy(false);
     }

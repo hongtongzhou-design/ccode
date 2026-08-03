@@ -32,6 +32,9 @@ pub struct SkillDto {
     /// 空数组时序列化省略——前端需用 ?? [] 兜底）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stale_copies: Vec<String>,
+    /// 各 agent 的分发形态（"symlink" | "copy"，list 时现算，仅启用的 agent 有键）
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub app_modes: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +113,7 @@ fn new_skill(name: String, description: Option<String>, source: &str, repo: Opti
         installed_at: crate::sessions::now_iso(),
         category: None,
         stale_copies: Vec::new(),
+        app_modes: HashMap::new(),
     }
 }
 
@@ -573,6 +577,28 @@ pub async fn set_skill_category(id: String, category: Option<String>) -> Result<
     .map_err(|e| e.to_string())?
 }
 
+/// 各启用 agent 的分发形态：带 .ccode-copy 标记 = copy，否则 symlink（apps=true 的都是我们分发的）
+fn app_modes(dirs: &HashMap<String, PathBuf>, skill: &SkillDto) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for (agent, enabled) in &skill.apps {
+        if !enabled {
+            continue;
+        }
+        let Some(root) = dirs.get(agent) else {
+            continue;
+        };
+        let target = root.join(&skill.name);
+        if !target.exists() && !target.is_symlink() {
+            continue; // 目标已被用户手动删掉
+        }
+        out.insert(
+            agent.clone(),
+            if target.join(MARKER_FILE).exists() { "copy".into() } else { "symlink".into() },
+        );
+    }
+    out
+}
+
 #[tauri::command]
 pub async fn list_skills() -> Vec<SkillDto> {
     let Ok(store) = SkillStore::default_paths() else {
@@ -582,6 +608,7 @@ pub async fn list_skills() -> Vec<SkillDto> {
     let mut skills = store.read();
     for s in &mut skills {
         s.stale_copies = stale_agents(&store, &dirs, s);
+        s.app_modes = app_modes(&dirs, s);
     }
     skills
 }
