@@ -2,6 +2,15 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)管理。架构级决策记录见 [docs/architecture.md](docs/architecture.md) §10。
 
+## Unreleased（未发布）
+
+**修复**
+
+- ⇗ 外部终端恢复对 kimi 等官方安装器 CLI 失败（Ghostty 报 failed to launch）：外部拉起的命令改用二进制绝对路径 + shell 改交互登录模式（`-l -i`）——非交互 `zsh -l -c` 不加载 `.zshrc`，`~/.kimi-code/bin` 这类 PATH 会丢
+- codex 更新失败/无效：同机多份 node/npm 时，二进制候选目录改为用户目录优先（与应用外终端的解析一致），npm 更新改用与目标二进制同目录的 npm（`updater::npm_for`），不再装错 prefix
+- opencode 更新卡在交互选择框：brew 安装的 opencode 改走 `brew upgrade`（自更新 TUI 行输入无法应答）
+- kimi-k3 定价修正：内置价从 $0.6/$3.0 改为官方价 ¥20/¥100（输入缓存未命中/输出，每 1M，折 $2.78/$13.89）；缓存命中一折口径不变
+
 ## v0.1.0（首个发布版本）
 
 **模块**

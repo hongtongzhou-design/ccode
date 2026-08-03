@@ -428,7 +428,9 @@ const BUILTIN_PRICING: [(&str, (f64, f64)); 27] = [
     ("claude-fable", (15.0, 75.0)),
     ("gpt-5-codex", (1.25, 10.0)),
     ("gpt-5", (1.25, 10.0)),
-    ("kimi-k3", (0.6, 3.0)),
+    // kimi-k3 官方价 ¥20/¥100（输入缓存未命中/输出，每 1M；缓存命中 ¥2 = 一折，
+    // 与 cost_of 的 cache_read×0.1 系数一致），按默认汇率 7.2 折美元
+    ("kimi-k3", (2.78, 13.89)),
     ("kimi-k2", (0.6, 2.5)),
     ("moonshot", (0.6, 3.0)),
     ("gemini-3.6-flash", (0.3, 2.5)),
@@ -851,7 +853,7 @@ mod tests {
         let table = load_pricing(None);
         // 中转/聚合的 provider 前缀：按最后一个 / 之后的末段匹配
         assert_eq!(price_of("accounts/fireworks/models/glm-5p2", &table), Some((0.6, 2.2)), "glm 前缀命中");
-        assert_eq!(price_of("zetatechs/kimi-k3", &table), Some((0.6, 3.0)));
+        assert_eq!(price_of("zetatechs/kimi-k3", &table), Some((2.78, 13.89)));
         assert_eq!(price_of("openrouter/claude-sonnet-4", &table), Some((3.0, 15.0)));
         assert_eq!(price_of("relay/mystery-x", &table), None, "末段不明依然不明价");
     }
@@ -1044,7 +1046,7 @@ mod profile_usage_tests {
         let dto = profile_usage_impl(&conn, &["kimi-k3".to_string()]).unwrap();
         assert_eq!(dto.input, 3000);
         assert_eq!(dto.output, 300);
-        // kimi-k3 在定价表（0.6/3），应有费用且不 partial
+        // kimi-k3 在定价表（官方 ¥20/¥100 ≈ $2.78/$13.89），应有费用且不 partial
         assert!(dto.cost_usd.is_some());
         assert!(!dto.cost_partial);
     }

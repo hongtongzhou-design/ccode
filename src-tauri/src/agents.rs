@@ -49,19 +49,21 @@ fn find_in_dirs(name: &str, dirs: &[std::path::PathBuf]) -> Option<std::path::Pa
         .find(|p| p.is_file())
 }
 
-/// which miss 后的兜底候选目录（按优先级排序）；用户目录一律走 dirs 抽象，禁写死
+/// which miss 后的兜底候选目录（按优先级排序）；用户目录一律走 dirs 抽象，禁写死。
+/// 用户目录排在系统目录前——与用户交互终端的 PATH 解析习惯一致（~/.local/bin 里的
+/// 自装副本应优先于 /opt/homebrew/bin 里的同名旧副本，避免检测到非自用的那份）
 fn candidate_dirs() -> Vec<std::path::PathBuf> {
     let mut out: Vec<std::path::PathBuf> = Vec::new();
     #[cfg(target_os = "macos")]
     {
-        out.push("/opt/homebrew/bin".into()); // Apple Silicon brew
-        out.push("/usr/local/bin".into()); // Intel brew / 手动安装
         if let Some(h) = dirs::home_dir() {
             out.push(h.join(".npm-global/bin"));
             out.push(h.join(".local/bin"));
             out.push(h.join("bin"));
             out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
         }
+        out.push("/opt/homebrew/bin".into()); // Apple Silicon brew
+        out.push("/usr/local/bin".into()); // Intel brew / 手动安装
     }
     #[cfg(target_os = "linux")]
     {
@@ -398,10 +400,14 @@ fn sh_quote_if_needed(s: &str) -> String {
 }
 
 /// 会话恢复的完整命令行（cd 到项目目录 + CLI resume 参数）。
-/// 供「复制恢复命令」和「外部终端恢复」共用；刻意不带 profile env——密钥只在
-/// Ccode 自家拉起时注入（关键约定），外部恢复用的是用户全局配置。
-pub fn resume_command_line(agent_id: &str, session_id: &str, cwd: &str) -> Result<String, String> {
-    let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
+/// 刻意不带 profile env——密钥只在 Ccode 自家拉起时注入（关键约定），
+/// 外部恢复用的是用户全局配置。binary 参数允许外部拉起时传绝对路径（见下）。
+fn resume_command_line_with(
+    agent_id: &str,
+    session_id: &str,
+    cwd: &str,
+    binary: &str,
+) -> Result<String, String> {
     let (_, args) = resume_args(agent_id, session_id);
     if args.is_empty() {
         return Err(format!("{agent_id} 不支持按 ID 恢复"));
@@ -412,6 +418,12 @@ pub fn resume_command_line(agent_id: &str, session_id: &str, cwd: &str) -> Resul
         cmd.push_str(&sh_quote_if_needed(a));
     }
     Ok(cmd)
+}
+
+/// 复制用命令行：裸命令名（用户真实交互终端 rc 齐全，且 cc-switch 风格干净）
+pub fn resume_command_line(agent_id: &str, session_id: &str, cwd: &str) -> Result<String, String> {
+    let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
+    resume_command_line_with(agent_id, session_id, cwd, binary)
 }
 
 /// 复制用：返回该会话的恢复命令行
@@ -426,6 +438,8 @@ pub fn session_resume_command(
 
 /// 在外部终端应用中恢复会话（macOS: Ghostty → iTerm → Terminal.app；Windows: cmd 新窗口；
 /// Linux: 常见终端模拟器）。终端选择读设置页「外部终端」，auto = 上述优先级探测。
+/// 二进制用绝对路径：外部 shell 是非交互启动时可能不加载 .zshrc/.bashrc（kimi 这类
+/// 官方安装器目录只写在交互 rc 里），裸命令名会 command not found
 #[tauri::command]
 pub fn resume_external_terminal(
     agent_id: &str,
@@ -435,7 +449,12 @@ pub fn resume_external_terminal(
     let pref = crate::settings::read_current()
         .external_terminal
         .unwrap_or_else(|| "auto".into());
-    open_external_terminal(&resume_command_line(agent_id, session_id, cwd)?, &pref)
+    let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
+    let binary = resolve_binary(binary)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| binary.into());
+    let cmd = resume_command_line_with(agent_id, session_id, cwd, &binary)?;
+    open_external_terminal(&cmd, &pref)
 }
 
 #[cfg(target_os = "macos")]
@@ -457,9 +476,11 @@ fn open_ghostty(cmd: &str) -> Result<(), String> {
         return Err("未安装 Ghostty（设置页改选其他终端）".into());
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    // Ghostty：-e 之后的参数整体作为命令执行；包 login shell 让 PATH 含 npm/brew 全局 bin
+    // Ghostty：-e 之后的参数整体作为命令执行；-l -i 交互登录 shell（非交互模式
+    // zsh 不加载 .zshrc / bash 不加载 .bashrc，brew/nvm/官方安装器的 PATH 会丢）
     spawn_status(
-        Command::new("open").args(["-na", "Ghostty", "--args", "-e", &shell, "-l", "-c", cmd]),
+        Command::new("open")
+            .args(["-na", "Ghostty", "--args", "-e", &shell, "-l", "-i", "-c", cmd]),
         "Ghostty",
     )
 }
@@ -559,10 +580,11 @@ fn open_external_terminal(cmd: &str, pref: &str) -> Result<(), String> {
     for term in candidates {
         if let Some(bin) = resolve_binary(term) {
             let mut c = Command::new(bin);
+            // -l -i 交互登录 shell：非交互模式不加载 .zshrc/.bashrc，用户 PATH 会丢
             if term == "gnome-terminal" {
-                c.args(["--", &shell, "-l", "-c", cmd]);
+                c.args(["--", &shell, "-l", "-i", "-c", cmd]);
             } else {
-                c.args(["-e", &shell, "-l", "-c", cmd]);
+                c.args(["-e", &shell, "-l", "-i", "-c", cmd]);
             }
             c.spawn().map_err(|e| format!("启动 {term} 失败: {e}"))?;
             return Ok(());
@@ -1025,6 +1047,11 @@ mod tests {
         );
         // 未知 agent 报错
         assert!(resume_command_line("no-such", "abc", "/tmp").is_err());
+        // 外部拉起变体：给定绝对路径直接用
+        assert_eq!(
+            resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/.kimi-code/bin/kimi").unwrap(),
+            "cd /tmp && /Users/x/.kimi-code/bin/kimi -S abc"
+        );
     }
 
     #[test]

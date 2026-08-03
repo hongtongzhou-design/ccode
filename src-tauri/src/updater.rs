@@ -57,10 +57,30 @@ fn cmd(method: &'static str, program: String, args: &[&str]) -> UpdateCmd {
     }
 }
 
+/// npm 全局包更新用的 npm：优先与目标二进制同目录的 npm（更新哪家的包装哪家的 npm——
+/// 同机多份 node/npm 时，用错 npm 会把包装到另一个 prefix，目标副本纹丝不动），
+/// 没有则回落全局解析
+fn npm_for(binary_path: &str) -> String {
+    if let Some(dir) = std::path::Path::new(binary_path).parent() {
+        for name in ["npm", "npm.cmd", "npm.exe"] {
+            let p = dir.join(name);
+            if p.is_file() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+    }
+    agents::resolve_binary("npm")
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "npm".into())
+}
+
 /// 升级命令候选（按序尝试，首个成功即止）。
 /// 有对应包管理器路径时优先包管理器，否则用 CLI 自更新
 fn update_commands(agent_id: &str, method: &str, binary_path: &str) -> Vec<UpdateCmd> {
-    let npm = |pkg: &str| cmd("npm", "npm".into(), &["install", "-g", &format!("{pkg}@latest")]);
+    let npm_cmd = |pkg: &str| {
+        let npm = npm_for(binary_path);
+        cmd("npm", npm, &["install", "-g", &format!("{pkg}@latest")])
+    };
     let bin = || binary_path.to_string();
     match (agent_id, method) {
         ("claude-code", "brew") => vec![cmd("brew", "brew".into(), &["upgrade", "--cask", "claude-code"])],
@@ -69,15 +89,17 @@ fn update_commands(agent_id: &str, method: &str, binary_path: &str) -> Vec<Updat
             cmd("brew", "brew".into(), &["upgrade", "--cask", "claude-code"]),
         ],
         ("codex", "brew") => vec![cmd("brew", "brew".into(), &["upgrade", "--cask", "codex"])],
-        ("codex", _) => vec![npm("@openai/codex")],
+        ("codex", _) => vec![npm_cmd("@openai/codex")],
         ("gemini", "brew") => vec![cmd("brew", "brew".into(), &["upgrade", "gemini-cli"])],
-        ("gemini", _) => vec![npm("@google/gemini-cli")],
+        ("gemini", _) => vec![npm_cmd("@google/gemini-cli")],
         ("qwen", "brew") => vec![cmd("brew", "brew".into(), &["upgrade", "qwen-code"])],
-        ("qwen", _) => vec![npm("@qwen-code/qwen-code")],
-        ("opencode", "npm") => vec![npm("opencode-ai")],
+        ("qwen", _) => vec![npm_cmd("@qwen-code/qwen-code")],
+        // brew 安装的 opencode 走 brew（自更新是交互 TUI，行输入无法应答，且会与 brew 管理冲突）
+        ("opencode", "brew") => vec![cmd("brew", "brew".into(), &["upgrade", "opencode"])],
+        ("opencode", "npm") => vec![npm_cmd("opencode-ai")],
         ("opencode", _) => vec![
             cmd("self", bin(), &["upgrade"]),
-            npm("opencode-ai"),
+            npm_cmd("opencode-ai"),
         ],
         ("kimi", "uv") => vec![cmd("uv", "uv".into(), &["tool", "upgrade", "kimi-cli"])],
         ("kimi", _) => match agents::kimi_variant() {
@@ -687,6 +709,30 @@ mod tests {
         // 没有 x.y 形式 → None
         assert_eq!(semver_token("unknown"), None);
         assert_eq!(semver_token(""), None);
+    }
+
+    #[test]
+    fn npm_for_prefers_same_dir_as_target_binary() {
+        // 与目标二进制同目录有 npm → 用它（更新哪家的包装哪家的 npm）
+        let base = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("npm"), "x").unwrap();
+        let target = bin.join("codex").to_string_lossy().into_owned();
+        let got = npm_for(&target);
+        assert_eq!(got, bin.join("npm").to_string_lossy());
+        // 同目录没有 npm → 回落全局解析（结果非空即可）
+        std::fs::remove_file(bin.join("npm")).unwrap();
+        assert!(!npm_for(&target).is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn opencode_brew_method_uses_brew_upgrade_not_self_tui() {
+        let cmds = update_commands("opencode", "brew", "/opt/homebrew/bin/opencode");
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].program, "brew");
+        assert_eq!(cmds[0].args, vec!["upgrade", "opencode"]);
     }
 
     #[test]
