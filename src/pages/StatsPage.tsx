@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
 import type { UsageStatsDto } from "../types";
+import { Checkbox, LoadingRows, PageFrame, PageHeader } from "../components/PageFrame";
 
 type Range = "today" | "week" | "month" | "all";
 
@@ -37,6 +38,24 @@ function basename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
+function isInternalProject(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/").toLowerCase();
+  const name = basename(normalized);
+  return (
+    name.startsWith("ccode-ai-") ||
+    normalized.includes("<synthetic>") ||
+    normalized === "/private/tmp" ||
+    normalized.startsWith("/private/tmp/") ||
+    normalized === "/tmp" ||
+    normalized.startsWith("/tmp/")
+  );
+}
+
+function isInternalModel(model: string): boolean {
+  const m = model.trim().toLowerCase();
+  return !m || m === "<synthetic>" || m === "__kimi_env_model__";
+}
+
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
 /**
@@ -70,6 +89,9 @@ export default function StatsPage({ visible }: { visible: boolean }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
+  const [showInternal, setShowInternal] = useState(
+    () => localStorage.getItem("ccode.stats.showInternal") === "1",
+  );
 
   async function load(r: Range) {
     setLoading(true);
@@ -117,7 +139,45 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     stats?.byAgent.reduce((s, a) => s + a.tokens, 0) ?? 1,
   );
   const rate = stats?.rateUsdCny ?? 7.2;
-  const th = "px-2 py-1.5 text-left text-xs font-normal text-l4";
+  const th = "px-2 py-1.5 text-left text-xs font-normal text-l3";
+
+  const projectRows = useMemo(() => {
+    if (!stats || showInternal) return stats?.byProject ?? [];
+    const normal = stats.byProject.filter((p) => !isInternalProject(p.projectPath));
+    const internal = stats.byProject.filter((p) => isInternalProject(p.projectPath));
+    if (internal.length === 0) return normal;
+    return [
+      ...normal,
+      {
+        projectPath: "Ccode 内部 AI 任务",
+        tokens: internal.reduce((n, p) => n + p.tokens, 0),
+        sessions: internal.reduce((n, p) => n + p.sessions, 0),
+        costUsd: internal.some((p) => p.costUsd != null)
+          ? internal.reduce((n, p) => n + (p.costUsd ?? 0), 0)
+          : null,
+        costPartial: internal.some((p) => p.costPartial || p.costUsd == null),
+      },
+    ].sort((a, b) => b.tokens - a.tokens);
+  }, [showInternal, stats]);
+
+  const modelRows = useMemo(() => {
+    if (!stats || showInternal) return stats?.byModel ?? [];
+    const normal = stats.byModel.filter((m) => !isInternalModel(m.model));
+    const internal = stats.byModel.filter((m) => isInternalModel(m.model));
+    if (internal.length === 0) return normal;
+    return [
+      ...normal,
+      {
+        model: "Ccode 内部 / 未识别模型",
+        input: internal.reduce((n, m) => n + m.input, 0),
+        output: internal.reduce((n, m) => n + m.output, 0),
+        costUsd: internal.some((m) => m.costUsd != null)
+          ? internal.reduce((n, m) => n + (m.costUsd ?? 0), 0)
+          : null,
+        costPartial: internal.some((m) => m.costPartial || m.costUsd == null),
+      },
+    ].sort((a, b) => b.input + b.output - (a.input + a.output));
+  }, [showInternal, stats]);
 
   function toggleCurrency() {
     const next = currency === "$" ? "¥" : "$";
@@ -126,10 +186,11 @@ export default function StatsPage({ visible }: { visible: boolean }) {
   }
 
   return (
-    <div className="mx-auto min-h-full max-w-3xl bg-canvas p-6">
-      <div className="mb-5 flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-l1">用量统计</h1>
-        <div className="flex items-center gap-2">
+    <PageFrame width="standard">
+      <PageHeader
+        title="用量统计"
+        actions={
+          <div className="flex items-center gap-2">
           <button
             onClick={toggleCurrency}
             title="切换货币（$ 美元 / ¥ 人民币，按官方价换算）"
@@ -157,13 +218,14 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           >
             {rebuilding ? "索引中…" : "刷新"}
           </button>
-        </div>
-      </div>
+          </div>
+        }
+      />
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 
       {!stats || loading ? (
-        <p className="py-8 text-sm text-l4">{loading ? "加载中…" : ""}</p>
+        <LoadingRows />
       ) : empty ? (
         <p className="py-8 text-sm text-l4">
           暂无用量数据——用 agent 跑几个任务后再来
@@ -171,7 +233,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
       ) : (
         <>
           {/* 概览卡片 */}
-          <div className="mb-6 grid grid-cols-4 gap-3">
+          <div className="mb-6 grid grid-cols-5 gap-2">
             <div className="rounded bg-inset p-3">
               <div className="text-xs text-l4">输入 tokens</div>
               <div className="mt-1 text-lg font-semibold text-l1">
@@ -198,10 +260,13 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               <div className="mt-1 text-lg font-semibold text-l1">
                 {compact(stats.cards.sessions)}
               </div>
-              <div className="mt-0.5 text-xs text-l4">
-                估算费用（官方价）{" "}
+            </div>
+            <div className="rounded bg-inset p-3">
+              <div className="text-xs text-l4">估算费用</div>
+              <div className="mt-1 text-lg font-semibold text-l1">
                 {fmtCost(stats.cards.costUsd, currency, rate, stats.cards.costPartial)}
               </div>
+              <div className="mt-0.5 text-xs text-l3">官方公开价</div>
             </div>
           </div>
 
@@ -251,9 +316,20 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           )}
 
           {/* 按项目 */}
-          {stats.byProject.length > 0 && (
+          {projectRows.length > 0 && (
             <section className="mb-6">
-              <h2 className="mb-2 text-sm font-medium text-l1">按项目（前 20）</h2>
+              <div className="mb-2 flex items-center justify-between">
+                <h2 className="text-sm font-medium text-l1">按项目（前 20）</h2>
+                <Checkbox
+                  checked={showInternal}
+                  onChange={(checked) => {
+                    setShowInternal(checked);
+                    localStorage.setItem("ccode.stats.showInternal", checked ? "1" : "0");
+                  }}
+                  label="显示内部活动"
+                  className="text-xs text-l3"
+                />
+              </div>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-hairline">
@@ -264,7 +340,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {stats.byProject.slice(0, 20).map((p) => (
+                  {projectRows.slice(0, 20).map((p) => (
                     <tr key={p.projectPath} className="border-b border-hairline">
                       <td className="max-w-0 truncate px-2 py-2 text-l2" title={p.projectPath}>
                         {basename(p.projectPath)}
@@ -284,7 +360,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           )}
 
           {/* 按模型 */}
-          {stats.byModel.length > 0 && (
+          {modelRows.length > 0 && (
             <section className="mb-6">
               <h2 className="mb-2 text-sm font-medium text-l1">按模型</h2>
               <table className="w-full text-sm">
@@ -297,7 +373,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {stats.byModel.map((m) => (
+                  {modelRows.map((m) => (
                     <tr key={m.model} className="border-b border-hairline">
                       <td className="max-w-0 truncate px-2 py-2 text-l2" title={m.model}>
                         {m.model || "（未知）"}
@@ -317,11 +393,11 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               </table>
             </section>
           )}
-          <p className="mt-6 text-xs text-l4">
-            按模型官方公开价估算，非中转实际账单；≥ 表示另含未计价模型的用量
+          <p className="mt-6 text-xs text-l3">
+            官方公开价估算，非中转实际账单；≥ 表示另含未计价用量，~ 表示没有可用价格
           </p>
         </>
       )}
-    </div>
+    </PageFrame>
   );
 }

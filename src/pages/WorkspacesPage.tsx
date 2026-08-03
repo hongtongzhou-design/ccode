@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
+import { PageFrame, PageHeader, primaryActionClass } from "../components/PageFrame";
 import type { RepoDto, RunScriptDto, WorkspaceDto, WorkspaceDiffDto, WorkspaceHealthDto, WsSettingsDto } from "../types";
 
 /** 评审面板文件状态字母（与 GitPanel 同款小徽章） */
@@ -762,21 +763,19 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const actionBtn = "rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5";
 
   return (
-    <div className="mx-auto max-w-3xl p-6">
-      <div className="mb-5 flex items-baseline justify-between">
-        <div className="flex items-baseline gap-3">
-          <h1 className="text-lg font-semibold text-l1">工作区</h1>
-          <span className="text-xs text-l3">
-            {active.length} 个活跃 · {repoCount} 个仓库
-          </span>
-        </div>
-        <button
-          onClick={() => setModal(true)}
-          className="rounded px-2 py-1 text-sm text-l1 hover:bg-white/5"
-        >
-          新建工作区
-        </button>
-      </div>
+    <PageFrame width="standard">
+      <PageHeader
+        title="工作区"
+        meta={`${active.length} 个活跃 · ${repoCount} 个仓库`}
+        actions={
+          <button
+            onClick={() => setModal(true)}
+            className={primaryActionClass}
+          >
+            + 新建工作区
+          </button>
+        }
+      />
       {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
       {created && (
         <div className="mb-4 flex flex-wrap items-center gap-3 rounded bg-strip p-2 text-xs text-l2">
@@ -818,9 +817,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         </div>
       )}
       {groups.length === 0 ? (
-        <p className="rounded border border-dashed border-field p-4 text-sm text-l4">
-          还没有工作区——新建一个，让 agent 在隔离的 worktree 里干活
-        </p>
+        <div className="py-12 text-center">
+          <p className="text-sm text-l3">暂无工作区</p>
+        </div>
       ) : (
         groups.map((g) => (
           <section key={g.repoPath} className="mb-5">
@@ -1383,6 +1382,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         />
       )}
       {prModal && <PrModal ws={prModal} onClose={() => setPrModal(null)} />}
-    </div>
+    </PageFrame>
   );
 }

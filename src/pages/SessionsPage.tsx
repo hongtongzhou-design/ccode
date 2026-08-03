@@ -4,6 +4,7 @@ import { useAppStore } from "../store";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
+import { Checkbox, LoadingRows } from "../components/PageFrame";
 import type { ChatMessageDto, SessionMetaDto, TokenUsageDto } from "../types";
 
 /** GitPanel 的 onTotals 占位（会话页不消费改动总量；稳定引用避免击穿 memo） */
@@ -564,7 +565,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   return (
     <div className="flex h-full">
       {/* 左栏：分类树 */}
-      <div className="flex w-[230px] shrink-0 flex-col bg-rail2">
+      <div className="flex w-[clamp(190px,22vw,230px)] shrink-0 flex-col bg-rail2">
         <div className="p-2">
           <input
             className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
@@ -576,7 +577,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         <div className="min-h-0 flex-1 overflow-auto py-1">
           <button
             onClick={() => selectFilter({ kind: "all" })}
-            className={`mx-1 block w-[calc(100%-8px)] rounded-md px-3 py-2 text-left text-sm ${
+            className={`mx-1 block w-[calc(100%-8px)] rounded-md px-3 py-1.5 text-left text-sm ${
               filterActive({ kind: "all" })
                 ? "bg-rail-sel text-l1"
                 : "text-l3 hover:bg-white/5"
@@ -589,7 +590,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             <div key={g.agent}>
               <div
                 onClick={() => selectFilter({ kind: "agent", agent: g.agent })}
-                className={`mx-1 flex w-[calc(100%-8px)] cursor-pointer items-center rounded-md px-3 py-2 text-left text-sm ${
+                className={`mx-1 flex w-[calc(100%-8px)] cursor-pointer items-center rounded-md px-2 py-1.5 text-left text-sm ${
                   filterActive({ kind: "agent", agent: g.agent })
                     ? "bg-rail-sel text-l1"
                     : "text-l3 hover:bg-white/5"
@@ -644,7 +645,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         });
                       }}
                       title={p.path}
-                      className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-2 rounded-md py-1.5 pl-8 pr-3 text-left text-sm ${
+                      className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-2 rounded-md py-1 pl-8 pr-2 text-left text-sm ${
                         active
                           ? "bg-rail-sel text-l1"
                           : "text-l3 hover:bg-white/5"
@@ -716,22 +717,21 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             ) : (
               <>
                 <span className="text-xs text-l3">
-                  {filterLabel} · {sessionList.length} 个会话
+                  {filterLabel} · 当前 {sessionList.length}
+                  {q ? ` · 搜索命中 ${searched.length}` : ""} · 总计 {sessions.length}
                 </span>
                 <div className="flex items-center gap-1">
-                  <label className="flex cursor-pointer items-center gap-1.5 rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5">
-                    <input
-                      type="checkbox"
-                      checked={showArchived}
-                      onChange={(e) => setShowArchived(e.target.checked)}
-                    />
-                    显示已归档
-                  </label>
+                  <Checkbox
+                    checked={showArchived}
+                    onChange={setShowArchived}
+                    label="显示已归档"
+                    className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5"
+                  />
                   <button
                     onClick={() => setSelecting(true)}
                     className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
                   >
-                    选择
+                    批量管理
                   </button>
                 </div>
               </>
@@ -790,13 +790,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 >
                   <div className="flex items-center gap-1.5">
                     {selecting && (
-                      <input
-                        type="checkbox"
-                        checked={checked.has(skey(s))}
-                        onChange={() => toggleChecked(s)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="mr-1 shrink-0"
-                      />
+                      <span onClick={(e) => e.stopPropagation()} className="mr-1 shrink-0">
+                        <Checkbox
+                          checked={checked.has(skey(s))}
+                          onChange={() => toggleChecked(s)}
+                          label={<span className="sr-only">选择 {sessionTitle(s)}</span>}
+                        />
+                      </span>
                     )}
                     {s.pinned && <span title="已保留">⚑</span>}
                     <span className="truncate font-medium text-l1">{sessionTitle(s)}</span>
@@ -812,9 +812,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                             ? "该会话正在终端里进行，点击跳转到对应标签"
                             : "该会话的 CLI 进程仍在运行（外部探测，无本地标签）"
                         }
-                        className="shrink-0 rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text disabled:opacity-80"
+                        className="flex shrink-0 items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l2 disabled:opacity-80"
                       >
-                        🟢 进行中
+                        <span className="size-1.5 rounded-full bg-ok-text" />
+                        进行中
                       </button>
                     )}
                     {s.chainCount > 1 && (
@@ -967,10 +968,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               </span>
               {selected.live && (
                 <span
-                  className="shrink-0 rounded bg-ok px-1.5 py-0.5 text-xs text-ok-text"
+                  className="flex shrink-0 items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l2"
                   title="该会话的 CLI 进程仍在运行（外部探测）"
                 >
-                  🟢 进行中
+                  <span className="size-1.5 rounded-full bg-ok-text" />
+                  进行中
                 </span>
               )}
               <span className="shrink-0 text-xs text-l3">
@@ -1063,7 +1065,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 )}
                 <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-4">
                   {loadingConv ? (
-                    <p className="text-sm text-l4">加载中…</p>
+                    <LoadingRows compact />
                   ) : messages.length === 0 ? (
                     <p className="text-sm text-l4">没有可回放的对话内容</p>
                   ) : (

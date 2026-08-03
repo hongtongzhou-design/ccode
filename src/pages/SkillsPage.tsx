@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { AGENTS } from "../types";
+import ContextMenu from "../components/ContextMenu";
+import { Checkbox, PageFrame, PageHeader, primaryActionClass } from "../components/PageFrame";
 import type { DiscoveredSkillDto, SkillDto } from "../types";
 
 /** 行内开关的短标签（六 agent 顺序与全局 AGENTS 一致） */
@@ -262,24 +264,20 @@ function DiscoverModal({
         ) : (
           <div className="mb-4 max-h-64 overflow-auto">
             {items.map((it) => (
-              <label
+              <Checkbox
                 key={it.path}
-                className="flex items-start gap-2 border-b border-hairline py-2 text-sm"
-              >
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={checked.has(it.path)}
-                  onChange={(e) => {
-                    setChecked((prev) => {
-                      const next = new Set(prev);
-                      if (e.target.checked) next.add(it.path);
-                      else next.delete(it.path);
-                      return next;
-                    });
-                  }}
-                />
-                <span className="min-w-0">
+                checked={checked.has(it.path)}
+                onChange={(isChecked) => {
+                  setChecked((prev) => {
+                    const next = new Set(prev);
+                    if (isChecked) next.add(it.path);
+                    else next.delete(it.path);
+                    return next;
+                  });
+                }}
+                align="start"
+                className="border-b border-hairline py-2 text-sm"
+                label={<span className="min-w-0">
                   <span className="mr-2 text-l1">{it.name}</span>
                   <span className="rounded bg-inset px-1 text-xs text-l3">
                     {it.fromAgent}
@@ -287,8 +285,8 @@ function DiscoverModal({
                   <span className="block truncate text-xs text-l3" title={it.description}>
                     {it.description}
                   </span>
-                </span>
-              </label>
+                </span>}
+              />
             ))}
           </div>
         )}
@@ -332,6 +330,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   const [discovered, setDiscovered] = useState<DiscoveredSkillDto[]>([]);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
   const [preview, setPreview] = useState<{ id: string; name: string; content: string } | null>(null);
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; skill: SkillDto } | null>(null);
 
   async function refresh() {
     try {
@@ -447,17 +446,14 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   return (
     <div className="flex h-full">
       <div className="min-w-0 flex-1 overflow-auto">
-        <div className="mx-auto max-w-3xl p-6">
-          <div className="mb-5 flex items-baseline justify-between">
-            <div className="flex items-baseline gap-3">
-              <h1 className="text-lg font-semibold text-l1">技能</h1>
-              <span className="text-xs text-l3">
-                {skills.length} 个技能 · {appliedCount} 个已应用
-              </span>
-            </div>
-            <div className="flex gap-1">
-              <button onClick={() => setModal("import")} className={ghostBtn}>
-                导入
+        <PageFrame width="standard">
+          <PageHeader
+            title="技能"
+            meta={`${skills.length} 个技能 · ${appliedCount} 个已应用`}
+            actions={
+              <>
+              <button onClick={() => setModal("import")} className={primaryActionClass}>
+                + 导入
               </button>
               <button
                 onClick={() => onExport(skills.map((s) => s.id), "ccode-skills.zip")}
@@ -469,12 +465,21 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               <button onClick={onDiscover} className={ghostBtn}>
                 发现未纳管
               </button>
-            </div>
-          </div>
+              </>
+            }
+          />
           {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
           {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
           {skills.length === 0 ? (
-            <p className="py-8 text-sm text-l4">还没有技能，点右上角导入</p>
+            <div className="py-12 text-center">
+              <p className="text-sm text-l2">还没有技能</p>
+              <button
+                onClick={() => setModal("import")}
+                className="mt-3 text-sm text-cta hover:brightness-125"
+              >
+                导入第一个技能
+              </button>
+            </div>
           ) : (
             [...new Set(skills.map((s) => s.category ?? "未分类"))].map((cat) => (
               <div key={cat}>
@@ -556,21 +561,19 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         查看
                       </button>
                       <button
-                        onClick={() => onExport([s.id], `${s.name}.zip`)}
-                        className="rounded px-2 py-0.5 text-xs text-l2 hover:text-l1"
+                        onClick={(e) => {
+                          const r = e.currentTarget.getBoundingClientRect();
+                          setRowMenu({ x: r.right, y: r.bottom + 4, skill: s });
+                        }}
+                        aria-label={`${s.name} 更多操作`}
+                        className="flex h-7 w-7 items-center justify-center rounded text-l3 hover:bg-white/5 hover:text-l1"
                       >
-                        导出
-                      </button>
-                      <button
-                        onClick={() => onDelete(s)}
-                        className="rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5"
-                      >
-                        删除
+                        ⋯
                       </button>
                     </span>
                   </div>
                   {/* 六 agent 应用开关 */}
-                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  <div className="mt-1 flex flex-wrap gap-1">
                     {AGENTS.map((a) => {
                       const on = !!s.apps[a.id];
                       const key = `${s.id}:${a.id}`;
@@ -585,7 +588,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                               ? `已分发到 ${a.label}：${mode === "copy" ? "copy（有漂移检测）" : "symlink"}；点击取消`
                               : `应用到 ${a.label}`
                           }
-                          className={`rounded px-1.5 py-0.5 text-xs disabled:opacity-50 ${
+                          className={`min-w-12 rounded px-1.5 py-0.5 text-[11px] disabled:opacity-50 ${
                             on
                               ? "bg-ok text-ok-text"
                               : "bg-inset text-l3 hover:text-l1"
@@ -607,7 +610,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               </div>
             ))
           )}
-        </div>
+        </PageFrame>
       </div>
 
       {/* SKILL.md 预览面板 */}
@@ -650,6 +653,20 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             setNotice(msg);
             void refresh();
           }}
+        />
+      )}
+      {rowMenu && (
+        <ContextMenu
+          x={rowMenu.x}
+          y={rowMenu.y}
+          onClose={() => setRowMenu(null)}
+          items={[
+            {
+              label: "导出 ZIP",
+              onSelect: () => void onExport([rowMenu.skill.id], `${rowMenu.skill.name}.zip`),
+            },
+            { label: "删除", onSelect: () => void onDelete(rowMenu.skill) },
+          ]}
         />
       )}
     </div>

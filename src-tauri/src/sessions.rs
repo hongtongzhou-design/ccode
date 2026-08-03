@@ -91,6 +91,95 @@ fn truncate_title(text: &str) -> String {
     }
 }
 
+fn masked_secret(secret: &str) -> String {
+    let tail: String = secret
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("[已隐藏密钥 ···{tail}]")
+}
+
+fn common_secret_token(token: &str) -> Option<String> {
+    let start = token
+        .char_indices()
+        .find(|(_, c)| c.is_ascii_alphanumeric())
+        .map(|(i, _)| i)?;
+    let end = token
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_ascii_alphanumeric())
+        .map(|(i, c)| i + c.len_utf8())?;
+    let core = &token[start..end];
+    let value = core.rsplit_once('=').map(|(_, v)| v).unwrap_or(core);
+    let lower = value.to_ascii_lowercase();
+    let known_prefix = lower.starts_with("sk-")
+        || lower.starts_with("sk_")
+        || lower.starts_with("ghp_")
+        || lower.starts_with("github_pat_")
+        || lower.starts_with("xoxb-")
+        || lower.starts_with("xoxp-")
+        || value.starts_with("AIza")
+        || value.starts_with("AKIA");
+    if !known_prefix || value.chars().count() < 12 {
+        return None;
+    }
+    let value_at = core.rfind(value).unwrap_or(0);
+    Some(format!(
+        "{}{}{}{}",
+        &token[..start],
+        &core[..value_at],
+        masked_secret(value),
+        &token[end..]
+    ))
+}
+
+fn redact_sensitive_text_with(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    for secret in secrets {
+        if secret.chars().count() >= 8 && out.contains(secret) {
+            out = out.replace(secret, &masked_secret(secret));
+        }
+    }
+    out.split_inclusive(char::is_whitespace)
+        .map(|part| common_secret_token(part).unwrap_or_else(|| part.to_string()))
+        .collect()
+}
+
+pub(crate) fn redact_sensitive_text(text: &str) -> String {
+    redact_sensitive_text_with(text, &crate::profiles::stored_secrets())
+}
+
+fn redact_session_meta(sessions: &mut [SessionMetaDto]) {
+    let secrets = crate::profiles::stored_secrets();
+    for session in sessions {
+        session.title = session
+            .title
+            .take()
+            .map(|t| redact_sensitive_text_with(&t, &secrets));
+        session.custom_title = session
+            .custom_title
+            .take()
+            .map(|t| redact_sensitive_text_with(&t, &secrets));
+        session.summary = session
+            .summary
+            .take()
+            .map(|t| redact_sensitive_text_with(&t, &secrets));
+    }
+}
+
+fn redact_conversation(messages: &mut [ChatMessageDto]) {
+    let secrets = crate::profiles::stored_secrets();
+    for message in messages {
+        for block in &mut message.blocks {
+            block.text = redact_sensitive_text_with(&block.text, &secrets);
+        }
+    }
+}
+
 /// 工具结果尽量并入上一条 assistant（视觉上跟随发起调用的那条）；没有则单发一条 user
 fn push_tool_result(msgs: &mut Vec<ChatMessageDto>, blocks: Vec<BlockDto>, ts: Option<String>) {
     if let Some(last) = msgs.last_mut() {
@@ -281,6 +370,9 @@ fn align_tail(bytes: &[u8]) -> Vec<String> {
     let from = bytes.iter().position(|&b| b == b'\n').map(|i| i + 1).unwrap_or(bytes.len());
     to_lines(&String::from_utf8_lossy(&bytes[from..]))
 }
+
+/// 全量读取下的头/尾切分（read_head_tail 的参照实现，仅测试对照用）
+#[cfg(test)]
 fn head_tail_lines(bytes: &[u8], budget: usize) -> (Vec<String>, Vec<String>) {
     if bytes.len() <= budget * 2 {
         return (to_lines(&String::from_utf8_lossy(bytes)), Vec::new());
@@ -2994,6 +3086,7 @@ pub async fn list_sessions() -> Vec<SessionMetaDto> {
     }
     // 最近活跃在前；ISO 字符串可直接字典序比较
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    redact_session_meta(&mut sessions);
     sessions
 }
 
@@ -3007,11 +3100,16 @@ pub async fn find_session_for(
 ) -> Option<SessionMetaDto> {
     let cwd = expand_tilde(&cwd);
     let scan = tauri::async_runtime::spawn_blocking(cached_scan).await.ok()?;
-    scan.sessions
+    let mut found = scan
+        .sessions
         .into_iter()
         .filter(|s| s.agent == agent && s.project_path == cwd)
         .filter(|s| s.updated_at.as_deref().unwrap_or("") >= since_iso.as_str())
-        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
+    if let Some(session) = &mut found {
+        redact_session_meta(std::slice::from_mut(session));
+    }
+    found
 }
 
 /// 注意力标记 v1（§6.11）：读会话文件尾部分类 done/working/confirm/unknown
@@ -3029,6 +3127,12 @@ pub async fn get_session_conversation(agent: String, file_path: String) -> Vec<C
 
 /// 会话全文解析（get_session_conversation 与 ai_summarize_session 共用）
 pub(crate) fn conversation_impl(agent: &str, file_path: &str) -> Vec<ChatMessageDto> {
+    let mut messages = conversation_impl_raw(agent, file_path);
+    redact_conversation(&mut messages);
+    messages
+}
+
+fn conversation_impl_raw(agent: &str, file_path: &str) -> Vec<ChatMessageDto> {
     if agent == "opencode" {
         // "<db路径>#<session_id>"：db 在就直接读库；db 不在了读 pin 快照
         if let Some((db, sid)) = file_path.split_once('#') {
@@ -3182,6 +3286,7 @@ pub fn export_session_markdown(
     if msgs.is_empty() {
         return Err("会话没有可导出的内容".into());
     }
+    let title = redact_sensitive_text(&title);
     let md = render_markdown(&agent, &session_id, &title, &msgs);
     let downloads = dirs::download_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
@@ -3499,6 +3604,26 @@ mod tests {
         let long = "啊".repeat(100);
         let t = truncate_title(&long);
         assert_eq!(t.chars().count(), 61); // 60 + 省略号
+    }
+
+    #[test]
+    fn redaction_masks_saved_secrets_everywhere() {
+        let secret = "sk-stored-secret-123456".to_string();
+        let text = format!("标题 {secret}，正文再次出现 {secret}");
+        let redacted = redact_sensitive_text_with(&text, &[secret.clone()]);
+        assert!(!redacted.contains(&secret));
+        assert_eq!(redacted.matches("[已隐藏密钥 ···3456]").count(), 2);
+    }
+
+    #[test]
+    fn redaction_masks_common_secret_prefixes_without_saved_key() {
+        let text = "Bearer sk-live-secret-987654, OPENAI_API_KEY=sk_second_secret_123456";
+        let redacted = redact_sensitive_text_with(text, &[]);
+        assert!(!redacted.contains("sk-live-secret-987654"));
+        assert!(!redacted.contains("sk_second_secret_123456"));
+        assert!(redacted.contains("Bearer [已隐藏密钥 ···7654],"));
+        assert!(redacted.contains("OPENAI_API_KEY=[已隐藏密钥 ···3456]"));
+        assert_eq!(redact_sensitive_text_with("sk-short", &[]), "sk-short");
     }
 
     // ===== Codex 解析 =====
@@ -4535,11 +4660,6 @@ mod tests {
         assert_eq!(sanitize_export_name("x".repeat(100).as_str()).chars().count(), 60);
     }
 }
-
-
-
-
-
 
 
 

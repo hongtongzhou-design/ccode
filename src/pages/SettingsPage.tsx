@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAppStore } from "../store";
+import { PageFrame, PageHeader, Toggle } from "../components/PageFrame";
 
 /** 四款深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
 import { XTERM_PALETTES, PALETTE_PREVIEW_KEYS } from "../terminal-palettes";
@@ -99,7 +100,7 @@ function Row({
     <div className="flex items-center gap-3 border-b border-hairline py-3">
       <span className="w-32 shrink-0 text-sm text-l2">{label}</span>
       <div className="flex items-center gap-2">{children}</div>
-      {hint && <span className="text-xs text-l4">{hint}</span>}
+      {hint && <span className="text-xs text-l3">{hint}</span>}
     </div>
   );
 }
@@ -261,10 +262,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   }
 
   return (
-    <div className="mx-auto max-w-2xl p-6">
-      <div className="mb-5 flex items-baseline gap-3">
-        <h1 className="text-lg font-semibold text-l1">设置</h1>
-      </div>
+    <PageFrame width="narrow">
+      <PageHeader title="设置" />
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 
@@ -433,10 +432,10 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
       <Section title="集成" open={!collapsed.integration} onToggle={() => toggleSection("integration")}>
       <Row label="brew 镜像" hint="安装/更新走清华 TUNA 镜像">
-        <input
-          type="checkbox"
+        <Toggle
+          label="brew 镜像"
           checked={settings?.brewMirror ?? false}
-          onChange={(e) => patch({ brewMirror: e.target.checked })}
+          onChange={(checked) => patch({ brewMirror: checked })}
         />
       </Row>
 
@@ -577,6 +576,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         )}
       </div>
       </Section>
-    </div>
+    </PageFrame>
   );
 }

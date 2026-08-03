@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { GitFileDto, WorkspaceDiffDto } from "../types";
+import { LoadingRows } from "./PageFrame";
 
 interface GitStatusDto {
   isRepo: boolean;
@@ -180,7 +181,7 @@ function GitPanel({
         {error ? (
           <p className="p-1 text-xs text-err-text">{error}</p>
         ) : !status ? (
-          <p className="p-1 text-xs text-l4">加载中…</p>
+          <LoadingRows compact />
         ) : !status.isRepo ? (
           <p className="p-1 text-sm text-l4">
             该目录不是 git 仓库，无改动可显示

@@ -13,6 +13,7 @@ import ConversationView from "../components/ConversationView";
 import ContextMenu from "../components/ContextMenu";
 import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
+import { LoadingRows } from "../components/PageFrame";
 import { XTERM_PALETTES } from "../terminal-palettes";
 import type { ChatMessageDto, SessionMetaDto } from "../types";
 
@@ -823,139 +824,139 @@ const TerminalView = memo(function TerminalView({
     <div className="flex h-full flex-col px-2 pt-1">
       {barExpanded ? (
         <>
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <select
-          className={select}
-          value={agentId}
-          onChange={(e) => {
-            setAgentId(e.target.value);
-            setProfileId("");
-            setModel("");
-          }}
-          disabled={running}
-        >
-          {AGENTS.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.label}
-            </option>
-          ))}
-        </select>
-        {skillCount > 0 && (
-          <span
-            className="rounded bg-inset px-1.5 py-1 text-xs text-l3"
-            title={`该 agent 已启用 ${skillCount} 个技能（技能页管理）`}
-          >
-            ◈ {skillCount} 技能
-          </span>
-        )}
-        <select
-          ref={profileSelectRef}
-          className={select}
-          value={profileId}
-          onChange={(e) => {
-            setProfileId(e.target.value);
-            const prof = profiles.find((p) => p.id === e.target.value);
-            setModel(prof?.models[0] ?? "");
-          }}
-          disabled={running}
-        >
-          <option value="" disabled>
-            选择配置
-          </option>
-          {agentProfiles.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-        {selectedProfile && selectedProfile.models.length > 0 && (
-          <select
-            className={select}
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            disabled={running}
-            title="选择本次启动使用的模型"
-          >
-            {selectedProfile.models.map((m) => (
-              <option key={m} value={m}>
-                {m}
+          <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
+            <select
+              className={`${select} w-32 shrink-0`}
+              value={agentId}
+              onChange={(e) => {
+                setAgentId(e.target.value);
+                setProfileId("");
+                setModel("");
+              }}
+              disabled={running}
+            >
+              {AGENTS.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
+            <select
+              ref={profileSelectRef}
+              className={`${select} w-36 shrink-0`}
+              value={profileId}
+              onChange={(e) => {
+                setProfileId(e.target.value);
+                const prof = profiles.find((p) => p.id === e.target.value);
+                setModel(prof?.models[0] ?? "");
+              }}
+              disabled={running}
+            >
+              <option value="" disabled>
+                选择配置
               </option>
-            ))}
-          </select>
-        )}
-        {initialExtraEnv && Object.keys(initialExtraEnv).length > 0 && (
-          <span
-            className="rounded bg-inset px-1.5 py-0.5 text-xs text-l3"
-            title={`启动时注入：\n${Object.entries(initialExtraEnv)
-              .map(([k, v]) => `${k}=${v}`)
-              .join("\n")}`}
-          >
-            工作区 · 端口段已注入
-          </span>
-        )}
-        <input
-          ref={cwdInputRef}
-          className={`${select} w-64`}
-          value={cwd}
-          onChange={(e) => setCwd(e.target.value)}
-          placeholder="工作目录，如 ~/work/myproject"
-          disabled={running}
-        />
-        {running ? (
-          <button
-            onClick={stop}
-            className="rounded bg-err px-3 py-1.5 text-sm text-err-text hover:brightness-110"
-          >
-            停止
-          </button>
-        ) : (
-          <>
+              {agentProfiles.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            {selectedProfile && selectedProfile.models.length > 0 && (
+              <select
+                className={`${select} w-44 shrink-0`}
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                disabled={running}
+                title="选择本次启动使用的模型"
+              >
+                {selectedProfile.models.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            )}
+            <input
+              ref={cwdInputRef}
+              className={`${select} min-w-40 flex-1`}
+              value={cwd}
+              onChange={(e) => setCwd(e.target.value)}
+              placeholder="工作目录，如 ~/work/myproject"
+              disabled={running}
+            />
+            {running ? (
+              <button
+                onClick={stop}
+                className="shrink-0 rounded bg-err px-3 py-1.5 text-sm text-err-text hover:brightness-110"
+              >
+                停止
+              </button>
+            ) : (
+              <button
+                onClick={() => launch()}
+                disabled={!profileId}
+                className="shrink-0 rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+              >
+                启动
+              </button>
+            )}
+          </div>
+          <div className="mb-2 flex min-h-7 flex-wrap items-center gap-2 border-t border-hairline pt-1 text-xs">
+            {skillCount > 0 && (
+              <span
+                className="rounded bg-inset px-1.5 py-0.5 text-l3"
+                title={`该 agent 已启用 ${skillCount} 个技能（技能页管理）`}
+              >
+                ◈ {skillCount} 技能
+              </span>
+            )}
+            {initialExtraEnv && Object.keys(initialExtraEnv).length > 0 && (
+              <span
+                className="rounded bg-inset px-1.5 py-0.5 text-l3"
+                title={`启动时注入：\n${Object.entries(initialExtraEnv)
+                  .map(([k, v]) => `${k}=${v}`)
+                  .join("\n")}`}
+              >
+                工作区 · 端口段已注入
+              </span>
+            )}
+            {shellActive && !running && <span className="text-l3">shell 模式</span>}
+            {exited && !running && !shellActive && <span className="text-l3">进程已退出</span>}
+            {error && <span className="truncate text-err-text">{error}</span>}
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              {!running && (
+                <button
+                  onClick={openShell}
+                  className="rounded px-2 py-1 text-l2 hover:bg-white/5 hover:text-l1"
+                >
+                  打开 Shell
+                </button>
+              )}
             <button
-              onClick={() => launch()}
-              disabled={!profileId}
-              className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                onClick={onOpenSessionPanel}
+                disabled={!running && !sessionFile}
+                title="查看当前会话的结构化对话"
+                className="rounded px-2 py-1 text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
             >
-              启动
+                会话
             </button>
             <button
-              onClick={openShell}
-              className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+                onClick={() => setSearchOpen(true)}
+                title="查找终端输出（Cmd/Ctrl+F）"
+                className="rounded px-2 py-1 text-l2 hover:bg-white/5 hover:text-l1"
             >
-              打开 Shell
+                ◎ 查找
             </button>
-          </>
-        )}
-        <button
-          onClick={onOpenSessionPanel}
-          disabled={!running && !sessionFile}
-          title="查看当前会话的结构化对话"
-          className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5 disabled:opacity-50"
-        >
-          会话
-        </button>
-        <button
-          onClick={() => setSearchOpen(true)}
-          title="查找终端输出（Cmd/Ctrl+F）"
-          className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
-        >
-          ◎ 查找
-        </button>
-        {shellActive && !running && (
-          <span className="text-sm text-l3">shell 模式</span>
-        )}
-        {exited && !running && !shellActive && (
-          <span className="text-sm text-l3">进程已退出</span>
-        )}
-        {error && <span className="text-sm text-err-text">{error}</span>}
-      </div>
-      {agentProfiles.length === 0 && (
-        <p className="mb-2 text-sm text-l3">
-          该 agent 暂无配置，请先在「配置」页创建。
-        </p>
-      )}
-      {autoStart && profileId && !profiles.some((p) => p.id === profileId) && (
-        <p className="mb-2 text-sm text-l3">请先为该 agent 创建配置</p>
-      )}
+            </span>
+          </div>
+          {agentProfiles.length === 0 && (
+            <p className="mb-2 text-sm text-l3">
+              该 agent 暂无配置，请先在「配置」页创建。
+            </p>
+          )}
+          {autoStart && profileId && !profiles.some((p) => p.id === profileId) && (
+            <p className="mb-2 text-sm text-l3">请先为该 agent 创建配置</p>
+          )}
         </>
       ) : focusMode ? null : (
         /* 收缩态：一行状态条（agent · profile · model · cwd），右侧动作（专注模式下隐藏，动作在侧栏 ⋯ 菜单） */
@@ -1667,8 +1668,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               {preview ? (
                 <Suspense
                   fallback={
-                    <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-l3">
-                      加载中…
+                    <div className="min-h-0 flex-1 px-4">
+                      <LoadingRows />
                     </div>
                   }
                 >

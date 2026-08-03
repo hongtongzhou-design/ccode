@@ -290,6 +290,17 @@ pub fn get_key(id: &str) -> Option<String> {
     Some(key)
 }
 
+/// 仅供后端展示脱敏使用；调用方不得把返回值序列化给前端或写入日志。
+pub(crate) fn stored_secrets() -> Vec<String> {
+    let Ok(path) = keys_path() else {
+        return Vec::new();
+    };
+    read_keys_at(&path)
+        .into_values()
+        .filter(|v| v.chars().count() >= 8)
+        .collect()
+}
+
 fn has_key(id: &str) -> bool {
     get_key(id).is_some()
 }

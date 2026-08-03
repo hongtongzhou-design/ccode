@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { LoadingRows } from "./components/PageFrame";
 import "./App.css";
 import { useAppStore } from "./store";
 
@@ -15,8 +16,8 @@ const WorkspacesPage = lazy(() => import("./pages/WorkspacesPage"));
 
 function PageLoading() {
   return (
-    <div className="flex h-full items-center justify-center text-sm text-l3">
-      加载中…
+    <div className="mx-auto w-full max-w-3xl px-8 py-10">
+      <LoadingRows />
     </div>
   );
 }

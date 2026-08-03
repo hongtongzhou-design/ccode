@@ -6,6 +6,7 @@ import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS } from "../presets";
 import ContextMenu from "../components/ContextMenu";
+import { PageFrame, PageHeader, primaryActionClass } from "../components/PageFrame";
 import type { Profile, ProfileInput, ProfileUsageDto } from "../types";
 
 function ProfileModal({
@@ -137,12 +138,12 @@ function ProfileModal({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-[26rem] rounded-md border border-field bg-strip p-5"
+        className="max-h-[90vh] w-[36rem] overflow-y-auto rounded-md border border-field bg-strip p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">
           {initial ? "编辑配置" : "新建配置"}
         </h2>
-        <div className="mb-4">
+        <div className="mb-4 grid grid-cols-2 items-end gap-3">
           <select
             className={field}
             value=""
@@ -170,43 +171,27 @@ function ProfileModal({
               </option>
             ))}
           </select>
-        </div>
-        <label className="mb-3 block text-sm">
-          <span className="mb-1 block text-xs text-l3">Agent</span>
-          <select
-            className={field}
-            value={form.agent}
-            onChange={(e) =>
-              setForm({
-                ...form,
-                agent: e.target.value,
-                protocol: AGENT_PROTOCOLS[e.target.value]?.default ?? null,
-              })
-            }
-          >
-            {AGENTS.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        {AGENT_PROTOCOLS[form.agent] && (
-          <label className="mb-3 block text-sm">
-            <span className="mb-1 block text-xs text-l3">协议</span>
+          <label className="block text-sm">
+            <span className="mb-1 block text-xs text-l3">Agent</span>
             <select
               className={field}
-              value={form.protocol ?? AGENT_PROTOCOLS[form.agent].default}
-              onChange={(e) => setForm({ ...form, protocol: e.target.value })}
+              value={form.agent}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  agent: e.target.value,
+                  protocol: AGENT_PROTOCOLS[e.target.value]?.default ?? null,
+                })
+              }
             >
-              {AGENT_PROTOCOLS[form.agent].options.map((p) => (
-                <option key={p} value={p}>
-                  {p}
+              {AGENTS.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.label}
                 </option>
               ))}
             </select>
           </label>
-        )}
+        </div>
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">名称</span>
           <input
@@ -217,38 +202,38 @@ function ProfileModal({
             onChange={(e) => setForm({ ...form, name: e.target.value })}
           />
         </label>
-        <label className="mb-1 block text-sm">
+        <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">Base URL（可选）</span>
-          <input
-            className={field}
-            placeholder="https://api.example.com"
-            value={form.baseUrl}
-            onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
-          />
+          <div className="flex gap-2">
+            <input
+              className={field}
+              placeholder="https://api.example.com"
+              value={form.baseUrl}
+              onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
+            />
+            <button
+              type="button"
+              onClick={testConnection}
+              disabled={testing || !form.baseUrl.trim()}
+              title={form.baseUrl.trim() ? "验证端点与密钥连通性" : "先填写 Base URL"}
+              className="w-20 shrink-0 rounded bg-btn px-2 py-1 text-xs text-l1 hover:bg-white/10 disabled:opacity-50"
+            >
+              {testing ? "测试中…" : "测试"}
+            </button>
+          </div>
         </label>
-        <div className="mb-3 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={testConnection}
-            disabled={testing || !form.baseUrl.trim()}
-            title={form.baseUrl.trim() ? "验证端点与密钥连通性" : "先填写 Base URL"}
-            className="shrink-0 rounded bg-btn px-2.5 py-1 text-xs text-l1 hover:bg-white/10 disabled:opacity-50"
-          >
-            {testing ? "测试中…" : "测试连接"}
-          </button>
-          {testResult && (
-            <span className={`text-xs ${testResult.ok ? "text-ok-text" : "text-err-text"}`}>
-              {testResult.text}
-            </span>
-          )}
-        </div>
+        {testResult && (
+          <p className={`-mt-2 mb-3 text-xs ${testResult.ok ? "text-ok-text" : "text-err-text"}`}>
+            {testResult.text}
+          </p>
+        )}
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">API Key</span>
           <input
             className={field}
             type="password"
             autoComplete="new-password"
-            placeholder={initial ? "留空则不修改" : "存入系统钥匙串，不回显"}
+            placeholder={initial ? "留空则不修改" : "存入本地受限文件（0600），不回显"}
             value={form.apiKey}
             onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
           />
@@ -262,11 +247,12 @@ function ProfileModal({
             if (!sw) return null;
             const over = sw.max != null && form.models.length > sw.max;
             return (
-              <p className={`mb-2 text-xs ${over ? "text-warn-text" : "text-l4"}`}>
-                {sw.max != null
-                  ? `该 agent 的模型切换页最多可用 ${sw.max} 个模型——${sw.hint}`
-                  : `该 agent 的模型切换页不限数量——${sw.hint}`}
-                {over && `（当前 ${form.models.length} 个，后 ${form.models.length - (sw.max ?? 0)} 个不会生效）`}
+              <p
+                title={sw.hint}
+                className={`mb-2 text-xs ${over ? "text-warn-text" : "text-l3"}`}
+              >
+                {sw.max != null ? `最多 ${sw.max} 个模型可进入 CLI 选择器` : "模型数量不限"}
+                {over && `；当前超出 ${form.models.length - (sw.max ?? 0)} 个`}
               </p>
             );
           })()}
@@ -352,17 +338,38 @@ function ProfileModal({
             </button>
           </div>
         </div>
-        <label className="mb-4 block text-sm">
-          <span className="mb-1 block text-xs text-l3">
-            附加环境变量（可选，每行 KEY=VALUE，# 开头为注释；可覆盖内置注入值）
-          </span>
-          <textarea
-            className={`${field} h-20 font-mono text-xs`}
-            placeholder={"HTTPS_PROXY=http://127.0.0.1:7890\nANTHROPIC_SMALL_FAST_MODEL=claude-haiku"}
-            value={form.extraEnvText}
-            onChange={(e) => setForm({ ...form, extraEnvText: e.target.value })}
-          />
-        </label>
+        <details className="mb-4 border-t border-hairline pt-3">
+          <summary className="cursor-pointer select-none text-xs font-medium text-l2">
+            高级配置
+          </summary>
+          <div className="mt-3">
+            {AGENT_PROTOCOLS[form.agent] && (
+              <label className="mb-3 block text-sm">
+                <span className="mb-1 block text-xs text-l3">协议</span>
+                <select
+                  className={field}
+                  value={form.protocol ?? AGENT_PROTOCOLS[form.agent].default}
+                  onChange={(e) => setForm({ ...form, protocol: e.target.value })}
+                >
+                  {AGENT_PROTOCOLS[form.agent].options.map((p) => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <label className="block text-sm">
+              <span className="mb-1 block text-xs text-l3">
+                附加环境变量（每行 KEY=VALUE，可覆盖内置值）
+              </span>
+              <textarea
+                className={`${field} h-20 font-mono text-xs`}
+                placeholder={"HTTPS_PROXY=http://127.0.0.1:7890\nANTHROPIC_SMALL_FAST_MODEL=claude-haiku"}
+                value={form.extraEnvText}
+                onChange={(e) => setForm({ ...form, extraEnvText: e.target.value })}
+              />
+            </label>
+          </div>
+        </details>
         {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
         <div className="flex justify-end gap-2">
           <button
@@ -443,6 +450,21 @@ function relTime(iso: string | null): string {
   const d = Math.floor(h / 24);
   if (d < 30) return `${d} 天前`;
   return new Date(t).toLocaleDateString("zh-CN");
+}
+
+function displayHost(baseUrl: string): string {
+  const value = baseUrl.trim();
+  if (!value) return "";
+  try {
+    return new URL(value).host || "自定义端点";
+  } catch {
+    const parts = value
+      .replace(/^[a-z][a-z\d+.-]*:\/\//i, "")
+      .split(/[/?#\s]/)[0]
+      .split("@");
+    const authority = parts[parts.length - 1];
+    return authority && /^[\w.:[\]-]+$/.test(authority) ? authority : "自定义端点";
+  }
 }
 
 /** 失败诊断：按输出/方式文本给一条下一步建议，无匹配则不提示（纯函数，可单测） */
@@ -752,17 +774,13 @@ export default function ProfilesPage() {
 
   return (
     <div className="min-h-full bg-pg">
-      <div className="mx-auto max-w-[1200px] px-8 py-6">
+      <PageFrame>
         {/* 命令栏：标题 + 元信息，右侧动作 */}
-        <div className="flex items-baseline justify-between">
-          <div className="flex items-baseline gap-3">
-            <h1 className="text-lg font-semibold text-pl1">配置中心</h1>
-            <span className="text-xs text-pl2">
-              {profiles.length} 个配置 · {new Set(profiles.map((p) => p.agent)).size} 个
-              agent
-            </span>
-          </div>
-          <div className="flex gap-1">
+        <PageHeader
+          title="配置中心"
+          meta={`${profiles.length} 个配置 · ${new Set(profiles.map((p) => p.agent)).size} 个 agent`}
+          actions={
+            <>
             <button
               onClick={onImport}
               className="rounded px-2 py-1 text-sm text-pl2 hover:bg-white/5"
@@ -777,12 +795,13 @@ export default function ProfilesPage() {
             </button>
             <button
               onClick={() => setModal({ initial: null })}
-              className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110"
+              className={primaryActionClass}
             >
               + 新建配置
             </button>
-          </div>
-        </div>
+            </>
+          }
+        />
 
         {/* 过滤条：状态分段 + 搜索 */}
         <div className="mt-4 flex items-center justify-between">
@@ -841,9 +860,8 @@ export default function ProfilesPage() {
             if (q && list.length === 0) return null;
             const isCollapsed = collapsedGroups.has(agent.id);
             return (
-              <section key={agent.id} className="mb-8">
-                {/* 组头 48px */}
-                <div className="flex h-12 items-center gap-2 rounded-t bg-grp px-3">
+              <section key={agent.id} className="mb-3">
+                <div className="flex h-10 items-center gap-2 rounded-t bg-grp px-3">
                   <button
                     onClick={() =>
                       updateCollapsed((prev) => {
@@ -873,7 +891,7 @@ export default function ProfilesPage() {
                         return <span className="ml-auto text-xs text-pl2">更新中…</span>;
                       const info = updateInfo[agent.id];
                       if (updateResults[agent.id]?.ok || (info && !info.outdated && info.latest))
-                        return <span className="ml-auto text-xs text-okb">已更新</span>;
+                        return null;
                       if (info?.outdated)
                         return (
                           <button
@@ -1014,11 +1032,6 @@ export default function ProfilesPage() {
                                     className="shrink-0 text-xs text-l4 hover:text-pl1"
                                   >
                                     ▸用量
-                                    {p.models.some((m) => sharedModels.has(m)) && (
-                                      <span className="text-warnb" title="含共享模型">
-                                        ⚠
-                                      </span>
-                                    )}
                                   </button>
                                 )}
                               </span>
@@ -1026,28 +1039,38 @@ export default function ProfilesPage() {
                                 {p.lastUsedAt ? `${relTime(p.lastUsedAt)}使用` : "从未使用"}
                               </span>
                             </span>
-                            {/* 模型标签（不显示 API 地址，行内只留模型；端点仍可被搜索命中） */}
-                            <span className="flex flex-wrap items-center gap-1 overflow-hidden">
-                              {p.models.slice(0, 4).map((m, i) => (
+                            {/* 仅展示端点域名，不暴露路径或查询参数 */}
+                            <span className="flex min-w-0 flex-col justify-center overflow-hidden">
+                              {p.baseUrl && (
                                 <span
-                                  key={m}
-                                  className={`rounded-md px-1.5 py-0.5 text-xs ${
-                                    i === 0
-                                      ? "bg-grp text-pl1"
-                                      : "text-pl2 opacity-70"
-                                  }`}
+                                  className="mb-1 truncate text-xs text-pl2"
+                                  title={displayHost(p.baseUrl)}
                                 >
-                                  {m}
-                                </span>
-                              ))}
-                              {p.models.length > 4 && (
-                                <span
-                                  className="text-xs text-l4"
-                                  title={p.models.join("\n")}
-                                >
-                                  +{p.models.length - 4}
+                                  {displayHost(p.baseUrl)}
                                 </span>
                               )}
+                              <span className="flex flex-wrap items-center gap-1 overflow-hidden">
+                                {p.models.slice(0, 4).map((m, i) => (
+                                  <span
+                                    key={m}
+                                    className={`rounded-md px-1.5 py-0.5 text-xs ${
+                                      i === 0
+                                        ? "bg-grp text-pl1"
+                                        : "text-pl2 opacity-70"
+                                    }`}
+                                  >
+                                    {m}
+                                  </span>
+                                ))}
+                                {p.models.length > 4 && (
+                                  <span
+                                    className="text-xs text-l4"
+                                    title={p.models.join("\n")}
+                                  >
+                                    +{p.models.length - 4}
+                                  </span>
+                                )}
+                              </span>
                             </span>
                             {/* 密钥状态 */}
                             <span
@@ -1084,7 +1107,7 @@ export default function ProfilesPage() {
             );
           })}
         </div>
-      </div>
+      </PageFrame>
       {usagePop && usageMap[usagePop.id] && (
         <div
           className="fixed inset-0 z-20"

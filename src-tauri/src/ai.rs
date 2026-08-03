@@ -322,7 +322,12 @@ pub async fn ai_summarize_session(
         if text.trim().is_empty() {
             return Err("会话内容为空，无法概括".into());
         }
-        let summary = ai_prompt_impl(profiles, None, build_summary_prompt(&cap_text_middle(&text, DIFF_CAP)))?;
+        let summary = ai_prompt_impl(
+            profiles,
+            None,
+            build_summary_prompt(&cap_text_middle(&text, DIFF_CAP)),
+        )?;
+        let summary = crate::sessions::redact_sensitive_text(&summary);
         crate::sessions::set_session_summary(&agent, &session_id, &summary)?;
         Ok(summary)
     })

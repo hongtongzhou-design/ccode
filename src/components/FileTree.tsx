@@ -1,7 +1,9 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { File, FolderClosed, FolderOpen } from "lucide-react";
 import ContextMenu from "./ContextMenu";
+import { LoadingRows } from "./PageFrame";
 
 interface RepoDto {
   path: string;
@@ -310,7 +312,15 @@ function FileTree({
           <span className="w-3 shrink-0 text-l4">
             {entry.isDir ? (isOpen ? "▾" : "▸") : ""}
           </span>
-          <span className="shrink-0">{entry.isDir ? "📁" : "📄"}</span>
+          {entry.isDir ? (
+            isOpen ? (
+              <FolderOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+            ) : (
+              <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+            )
+          ) : (
+            <File aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+          )}
           <span className="truncate text-l3">{entry.name}</span>
           <span className="ml-auto flex shrink-0 items-center gap-1">
             {gitStatus && (
@@ -342,10 +352,10 @@ function FileTree({
         </div>
         {entry.isDir && isOpen && !children && (
           <div
-            className="py-0.5 text-xs text-l4"
+            className="py-1"
             style={{ paddingLeft: 6 + (depth + 1) * 12 }}
           >
-            加载中…
+            <span className="block h-1.5 w-16 animate-pulse rounded bg-inset" />
           </div>
         )}
         {entry.isDir &&
@@ -495,13 +505,26 @@ function FileTree({
                 title={r.path}
                 className="cursor-pointer truncate px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
               >
-                {r.isDir ? "📁" : "📄"} {r.rel}
+                {r.isDir ? (
+                  <FolderClosed
+                    aria-hidden="true"
+                    className="mr-1 inline-block h-3.5 w-3.5 text-l4"
+                  />
+                ) : (
+                  <File
+                    aria-hidden="true"
+                    className="mr-1 inline-block h-3.5 w-3.5 text-l4"
+                  />
+                )}
+                {r.rel}
               </div>
             ))
           )}
         </div>
       ) : !children ? (
-        <p className="px-2 py-1 text-xs text-l4">加载中…</p>
+        <div className="px-2">
+          <LoadingRows compact />
+        </div>
       ) : children.length === 0 ? (
         <p className="px-2 py-1 text-xs text-l4">空目录</p>
       ) : (
