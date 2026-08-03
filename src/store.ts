@@ -44,6 +44,11 @@ export interface PendingTerminal {
   model?: string;
 }
 
+/** 工作区页 / 改动面板 → 终端全宽审阅视图的一次性交接。 */
+export interface WorkspaceReviewRequest {
+  worktreePath: string;
+}
+
 interface AppState {
   profiles: Profile[];
   agents: DetectResult[];
@@ -57,6 +62,11 @@ interface AppState {
   /** 待消费的终端启动请求；终端页可见时消费并清空 */
   pendingTerminal: PendingTerminal | null;
   setPendingTerminal: (p: PendingTerminal | null) => void;
+  workspaceReviewRequest: WorkspaceReviewRequest | null;
+  setWorkspaceReviewRequest: (request: WorkspaceReviewRequest | null) => void;
+  /** 全宽审阅发现冲突后，工作区页消费并展开原有冲突处理面板。 */
+  workspaceConflictRequest: string | null;
+  setWorkspaceConflictRequest: (workspaceId: string | null) => void;
   /** 运行中的 run 脚本：工作区 id → 终端标签 id（nonconcurrent 互斥） */
   runningScripts: Record<string, string>;
   setRunningScript: (wsId: string, tabId: string | null) => void;
@@ -102,6 +112,10 @@ export const useAppStore = create<AppState>((set) => ({
     }),
   pendingTerminal: null,
   setPendingTerminal: (p) => set({ pendingTerminal: p }),
+  workspaceReviewRequest: null,
+  setWorkspaceReviewRequest: (request) => set({ workspaceReviewRequest: request }),
+  workspaceConflictRequest: null,
+  setWorkspaceConflictRequest: (workspaceId) => set({ workspaceConflictRequest: workspaceId }),
   runningScripts: {},
   setRunningScript: (wsId, tabId) =>
     set((s) => {

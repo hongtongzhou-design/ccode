@@ -309,6 +309,10 @@ pub async fn git_push(cwd: String) -> Result<String, String> {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDiffDto {
     pub in_workspace: bool,
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub branch: String,
+    pub worktree_path: String,
     pub base_branch: String,
     pub merge_base: String,
     pub files: Vec<GitFileDto>,
@@ -397,6 +401,10 @@ fn workspace_diff_with_rows(
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(WorkspaceDiffDto {
         in_workspace: true,
+        workspace_id: row.id.clone(),
+        workspace_name: row.name.clone(),
+        branch: row.branch.clone(),
+        worktree_path: row.worktree_path.clone(),
         base_branch: row.base_branch.clone(),
         merge_base,
         files,
@@ -617,13 +625,18 @@ mod tests {
         fs::write(wt.join("a.txt"), "l1\nl2\nl3\nl4\n").unwrap();
         fs::write(wt.join("new.txt"), "x\ny\nz\n").unwrap();
         let rows = vec![crate::workspaces::WorktreeRow {
+            id: "ws-1".into(),
             worktree_path: wt.to_string_lossy().into_owned(),
             repo_path: repo.to_string_lossy().into_owned(),
             name: "t1".into(),
+            branch: "ccode/t1".into(),
             base_branch: "main".into(),
         }];
         let d = workspace_diff_with_rows(wt.to_str().unwrap(), &rows).unwrap();
         assert!(d.in_workspace);
+        assert_eq!(d.workspace_id, "ws-1");
+        assert_eq!(d.workspace_name, "t1");
+        assert_eq!(d.branch, "ccode/t1");
         assert_eq!(d.base_branch, "main");
         assert!(!d.merge_base.is_empty());
         let a = d.files.iter().find(|f| f.path == "a.txt").unwrap();

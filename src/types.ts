@@ -133,6 +133,10 @@ export interface GitFileDto {
 /** 工作区任务累计 diff（merge-base(base, branch) 为基准，W3） */
 export interface WorkspaceDiffDto {
   inWorkspace: boolean;
+  workspaceId: string;
+  workspaceName: string;
+  branch: string;
+  worktreePath: string;
   baseBranch: string;
   mergeBase: string;
   files: GitFileDto[];

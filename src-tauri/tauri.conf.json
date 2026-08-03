@@ -5,7 +5,7 @@
   "identifier": "com.ccode.dev",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:17575",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },

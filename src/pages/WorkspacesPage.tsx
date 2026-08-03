@@ -65,6 +65,11 @@ function relTime(iso: string | null): string {
   return new Date(t).toLocaleDateString("zh-CN");
 }
 
+/** 保留工作区的合并已完成，且分支尚未产生新的待合并提交。 */
+function isMerged(ws: WorkspaceDto, health: WorkspaceHealthDto | undefined): boolean {
+  return ws.status === "active" && !!ws.mergedAt && health?.ahead === 0;
+}
+
 /** 与后端 sanitize 一致：非 [A-Za-z0-9-] → -，去掉首尾 - */
 function sanitizeBranch(name: string): string {
   return name.replace(/[^A-Za-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
@@ -409,6 +414,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [reposLoading, setReposLoading] = useState(false);
   const openInTerminal = useOpenInTerminal();
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const setWorkspaceReviewRequest = useAppStore((s) => s.setWorkspaceReviewRequest);
+  const workspaceConflictRequest = useAppStore((s) => s.workspaceConflictRequest);
+  const setWorkspaceConflictRequest = useAppStore((s) => s.setWorkspaceConflictRequest);
   const setPage = useAppStore((s) => s.setPage);
   const setSessionsQuery = useAppStore((s) => s.setSessionsQuery);
   const runningScripts = useAppStore((s) => s.runningScripts);
@@ -645,23 +653,73 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     }
   }
 
-  /** 全部选完后完成并入提交，随后刷新健康度与任务 diff */
-  async function finishResolve(ws: WorkspaceDto) {
+  /** 全部选完后提交冲突解决；默认继续合并，次级动作只保存解决结果。 */
+  async function finishResolve(ws: WorkspaceDto, mergeAfter: boolean) {
+    if (
+      mergeAfter &&
+      !window.confirm(
+        `将提交冲突解决结果，然后把 ${ws.branch} 合并进 ${ws.baseBranch}（工作区保留，不推送远程）。继续？`,
+      )
+    )
+      return;
     setSyncing(true);
+    setSyncMsg(null);
+    let resolvedCommitted = false;
     try {
-      const out = await invoke<string>("workspace_finish_merge", { id: ws.id });
-      setSyncMsg({ ok: true, text: out });
+      const finishOut = await invoke<string>("workspace_finish_merge", { id: ws.id });
+      resolvedCommitted = true;
       setUnmerged(null);
       setAiAdvice(null);
+
+      if (!mergeAfter) {
+        setSyncMsg({ ok: true, text: finishOut });
+        setMergeResults((prev) => ({
+          ...prev,
+          [ws.id]: { ok: true, text: "冲突解决结果已提交，可稍后合并" },
+        }));
+      } else {
+        const latest = await invoke<WorkspaceHealthDto>("workspace_health", { id: ws.id });
+        if (!latest.readyToMerge) {
+          const reasons: string[] = [];
+          if (latest.uncommitted) reasons.push("工作区仍有未提交改动");
+          if (latest.conflict === true) reasons.push("与基准分支仍有冲突");
+          if (latest.conflict === null) reasons.push("当前 Git 版本无法预检冲突");
+          if (latest.mainDirty) reasons.push("主仓库有未提交改动");
+          if (latest.mainOffBase) reasons.push(`主仓库不在 ${ws.baseBranch} 分支`);
+          if (latest.ahead === 0) reasons.push("没有待合并提交");
+          throw new Error(reasons.join("；") || "健康检查未通过");
+        }
+        await invoke<string>("merge_workspace", { id: ws.id, archive: false });
+        setSyncMsg({
+          ok: true,
+          text: `冲突解决完成，已合并进 ${ws.baseBranch}（工作区保留，未推送远程）`,
+        });
+        setMergeResults((prev) => ({
+          ...prev,
+          [ws.id]: {
+            ok: true,
+            text: `冲突解决完成，已合并进 ${ws.baseBranch}（工作区保留，未推送远程）`,
+          },
+        }));
+      }
+    } catch (e) {
+      const text = resolvedCommitted
+        ? `解决结果已提交，但合并未完成：${e}`
+        : String(e);
+      setSyncMsg({
+        ok: false,
+        text,
+      });
+      if (resolvedCommitted) {
+        setMergeResults((prev) => ({ ...prev, [ws.id]: { ok: false, text } }));
+      }
+    } finally {
       await refresh();
       setReview(
         await invoke<WorkspaceDiffDto>("workspace_diff", { worktreePath: ws.worktreePath }).catch(
           () => review,
         ),
       );
-    } catch (e) {
-      setSyncMsg({ ok: false, text: String(e) });
-    } finally {
       setSyncing(false);
     }
   }
@@ -711,6 +769,15 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       .catch(() => {})
       .finally(() => setReposLoading(false));
   }, [visible]);
+
+  // 全宽审阅检测到冲突后回到这里：精确展开对应任务的既有冲突处理面板。
+  useEffect(() => {
+    if (!visible || !workspaceConflictRequest) return;
+    const ws = workspaces.find((item) => item.id === workspaceConflictRequest);
+    if (!ws) return;
+    setWorkspaceConflictRequest(null);
+    void toggleReview(ws);
+  }, [visible, workspaceConflictRequest, workspaces, setWorkspaceConflictRequest]);
 
   async function onArchive(ws: WorkspaceDto) {
     if (!window.confirm("归档后 worktree 将被移除（分支保留，可随时恢复）。继续？"))
@@ -960,11 +1027,20 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             打开终端
                           </button>
                           <button
-                            onClick={() => void toggleReview(ws)}
+                            onClick={() => {
+                              if (health[ws.id]?.conflict) {
+                                void toggleReview(ws);
+                                return;
+                              }
+                              setWorkspaceReviewRequest({
+                                worktreePath: ws.worktreePath,
+                              });
+                              setPage("terminal");
+                            }}
                             title={
                               health[ws.id]?.conflict
-                                ? "有冲突待处理——查看任务改动详情并解决"
-                                : "查看任务改动详情（逐文件 diff），审完再决定合并/PR/归档"
+                                ? "有冲突待处理——在此展开并解决"
+                                : "打开全宽任务审阅，完成提交与合并"
                             }
                             className={`${actionBtn} ${
                               reviewId === ws.id ? "bg-white/10 text-l1" : ""
@@ -974,10 +1050,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                           </button>
                           <span className="flex shrink-0 items-center">
                             <button
-                              disabled={!health[ws.id]?.readyToMerge}
+                              disabled={isMerged(ws, health[ws.id]) || !health[ws.id]?.readyToMerge}
                               title={(() => {
                                 const h = health[ws.id];
                                 if (!h) return "健康度检查中…";
+                                if (isMerged(ws, h))
+                                  return `已合并进 ${ws.baseBranch}；产生新提交后可再次合并`;
                                 if (h.readyToMerge)
                                   return `合并 ${ws.branch} 进 ${ws.baseBranch}（保留工作区；▾ 可选合并并归档）`;
                                 // 逐条列出不可合并的原因（含主仓库状态）
@@ -991,22 +1069,22 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                               onClick={() => void onMerge(ws, false)}
                               className={
                                 // 可合并状态用按钮本身的强调色高亮表达（不再用单独 pill）
-                                health[ws.id]?.readyToMerge
+                                !isMerged(ws, health[ws.id]) && health[ws.id]?.readyToMerge
                                   ? "rounded-l border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110"
                                   : `${actionBtn} disabled:opacity-50`
                               }
                             >
-                              合并
+                              {isMerged(ws, health[ws.id]) ? "已合并" : "合并"}
                             </button>
                             <button
-                              disabled={!health[ws.id]?.readyToMerge}
-                              title="合并方式"
+                              disabled={isMerged(ws, health[ws.id]) || !health[ws.id]?.readyToMerge}
+                              title={isMerged(ws, health[ws.id]) ? "当前没有新的待合并提交" : "合并方式"}
                               onClick={(e) => {
                                 const r = e.currentTarget.getBoundingClientRect();
                                 setMergeMenu({ x: r.right - 176, y: r.bottom + 4, ws });
                               }}
                               className={
-                                health[ws.id]?.readyToMerge
+                                !isMerged(ws, health[ws.id]) && health[ws.id]?.readyToMerge
                                   ? "rounded-r border-y border-r border-cta-bd bg-cta px-1 py-0.5 text-xs text-cta-text hover:brightness-110"
                                   : `${actionBtn} disabled:opacity-50`
                               }
@@ -1085,7 +1163,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                                 <>
                                   <div className="mb-1 flex items-center gap-1 text-l3">
                                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-err-text" />
-                                    并入冲突待解决——每个文件下方列出两边内容，点对应按钮选哪边：
+                                    冲突待解决——每个文件下方列出两边内容，点对应按钮选哪边：
                                     <button
                                       onClick={() => void onAiAdvice(ws)}
                                       disabled={advising}
@@ -1212,14 +1290,22 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                                     );
                                   })}
                                   {unmerged.files.length === 0 && (
-                                    <div className="mt-1 flex items-center gap-2">
+                                    <div className="mt-1 flex flex-wrap items-center gap-2">
                                       <span className="text-okb">✓ 已全部选定</span>
                                       <button
-                                        onClick={() => void finishResolve(ws)}
+                                        onClick={() => void finishResolve(ws, true)}
                                         disabled={syncing}
                                         className="rounded border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110 disabled:opacity-50"
                                       >
-                                        {syncing ? "提交中…" : "完成解决并提交"}
+                                        {syncing ? "提交并合并中…" : "完成解决并合并"}
+                                      </button>
+                                      <button
+                                        onClick={() => void finishResolve(ws, false)}
+                                        disabled={syncing}
+                                        title="只提交本次冲突解决，稍后再手动合并"
+                                        className="rounded bg-inset px-2 py-0.5 text-l2 hover:bg-white/10 disabled:opacity-50"
+                                      >
+                                        仅保存解决结果
                                       </button>
                                     </div>
                                   )}
@@ -1243,12 +1329,13 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                                     <button
                                       onClick={() => void onSyncBase(ws)}
                                       disabled={syncing}
+                                      title={`在隔离工作区同步 ${ws.baseBranch}，不会改动主仓库`}
                                       className="rounded border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110 disabled:opacity-50"
                                     >
-                                      {syncing ? "并入中…" : `把 ${ws.baseBranch} 并入本工作区`}
+                                      {syncing ? "准备中…" : "开始解决冲突"}
                                     </button>
                                     <span className="text-l4">
-                                      点这里开始解决：并入后此处变成逐文件选边界面（也可全部选边），选完提交即解锁「合并」；全程不碰主仓库
+                                      应用会在隔离工作区准备两边内容；逐文件选定后可直接完成解决并合并，全程不改动主仓库
                                     </span>
                                   </div>
                                 </>

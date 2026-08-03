@@ -4228,15 +4228,19 @@ mod tests {
     fn worktree_sessions_rewrite_to_real_repo() {
         let rows = vec![
             crate::workspaces::WorktreeRow {
+                id: "ws-1".into(),
                 worktree_path: "/home/u/ccode/workspaces/myrepo/feat-x".into(),
                 repo_path: "/home/u/code/myrepo".into(),
                 name: "feat-x".into(),
+                branch: "ccode/feat-x".into(),
                 base_branch: "main".into(),
             },
             crate::workspaces::WorktreeRow {
+                id: "ws-2".into(),
                 worktree_path: "/home/u/ccode/workspaces/other/task".into(),
                 repo_path: "/home/u/code/other".into(),
                 name: "task".into(),
+                branch: "ccode/task".into(),
                 base_branch: "main".into(),
             },
         ];

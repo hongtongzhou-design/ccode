@@ -36,13 +36,17 @@ Ccode 是一个「AI 编码 Agent 统一启动器 + 配置中心 + 会话监控�
 # Rust 不在默认 PATH，每个新 shell 都要先 export
 export PATH="$HOME/.cargo/bin:$PATH"
 
-npm run tauri dev      # 开发（前端 HMR + Rust 改动自动重启）
+npm run tauri:dev      # 开发（独立 Ccode Dev 窗口；前端 HMR + Rust 改动自动重启）
 npm run build          # 前端构建（tsc + vite）
 cd src-tauri && cargo build / cargo test
 npm run tauri build    # 打包
 ```
 
 环境：Node 22 + npm（无 pnpm）；Rust stable（minimal profile）；crates 走 rsproxy 镜像（`~/.cargo/config.toml`）。
+
+开发预览必须使用 `npm run tauri:dev`：它通过 `src-tauri/tauri.dev.conf.json` 使用独立产品名 **Ccode Dev**、
+窗口标题 **Ccode Dev - 热更新** 和 bundle ID `com.ccode.dev.hmr`，避免自动化或人工验收误连同名的正式/打包调试版。
+界面验证必须按该窗口标题或明确 `.app` 绝对路径定位，禁止再用模糊应用名 `Ccode`。
 
 ## 本机环境档案（踩坑记录，新会话必读）
 
@@ -52,6 +56,7 @@ npm run tauri build    # 打包
 - **管道输出块缓冲**：brew/npm 等检测到非 TTY 会块缓冲导致"无输出"假象——安装/更新命令必须在 PTY 里跑（updater.rs 已如此，别退回管道）。
 - **GUI 应用 PATH 很短**：Finder 启动的打包应用可能找不到 npm 装的 CLI；开发模式（`npm run tauri dev`）继承终端 PATH 不受影响。打包版统一经 `agents::resolve_binary` 候选目录兜底解析（见关键约定）。
 - **本机 CLI 安装情况**：claude/codex/gemini/qwen 为 brew 或 npm 安装（检测见 updater.rs 报告）；opencode 未装；kimi 为新版（~/.kimi-code）。
+- **Codex 桌面版的 NetworkService 会占用 1420**（Tauri 惯例端口，本机实测）：vite 与已占端口碰撞后静默退出；且 **vite 检测 stdin EOF 也会自杀**（后台拉起必须 `tail -f /dev/null | npm run tauri dev`）。dev 端口因此从 1420 改为 **17575**（`vite.config.ts` 默认端口 + `tauri.conf.json` devUrl 两处同步）。
 - **git 提交**：用户要求 CI 耗时久，常规提交加 `[skip ci]`，里程碑提交才跑三平台 CI。
 - **git 推送走 SSH:443 + repo deploy key**（HTTPS 网络不稳）；**deploy key 推送不触发 GitHub Actions**——发版必须 `gh api repos/hongtongzhou-design/ccode/actions/workflows/build.yml/dispatches -f ref=<tag>` 手动触发；workflow 已配 `permissions: contents: write`（tauri-action 建 Release 草稿必需，缺了报 Resource not accessible by integration）。**仓库 owner 与 tauri.conf 升级端点绑定**（同为 `hongtongzhou-design/ccode`）：仓库若转移，本命令、tauri.conf.json 的 updater endpoint、README 链接三处必须同步改。
 - **CI 测试教训**：单元测试禁墙钟时序硬断言（共享 runner 调度延迟不可控，只留内容语义断言 + 防挂死宽松兜底）；unix 专属语义（symlink/PTY 交互/脚本）测试加 `#[cfg(unix)]`；路径断言用 `Path::ends_with` 不用字符串相等（Windows `\`）。
@@ -105,9 +110,20 @@ src-tauri/src/
     不允许死在最终画面；用户手动 `exit` shell 不自动重开；
   - 回落的 shell 不携带任何 profile 环境变量（密钥只在 agent 进程内）；
   - agent 与 shell 共用 `pty.rs` 的 `spawn_tracked`，退出事件按 PTY 类型区分处理。
-  - **预览编辑器 = 稳定文档**：打开哪个文件就停在哪个文件，绝不随树根/标签切换静默换文件
-    （同名文件在主仓库/各工作区各有一份，「预览跟随」曾导致误改主仓库，已移除并禁止复活）；
-    主仓库文件的保存按钮必须警示色 + 保存前二次确认。
+  - **预览编辑器不映射同名文件**：同一文件树根内保持已打开文件；切换项目、工作区、标签 cwd 或树根时清空旧预览，
+    由用户在新根重新选文件，禁止自动打开新根下的同相对路径文件（曾因此误改主仓库）。预览有未保存改动时先确认，
+    取消则根目录也不切换；主仓库文件的保存按钮必须警示色 + 保存前二次确认。
+  - **任务审阅 = 终端全宽覆盖层**：工作区行「评审」（无冲突）与终端右侧「改动 → 审阅」进入同一视图，
+    连续浏览累计 diff，并可「提交并合并 / 仅提交 / 合并并归档」；覆盖层底下的终端标签与 PTY 必须保持挂载。
+    默认合并只落本地主分支并保留工作区，不自动推送。原「提交 / 提交并推送」及工作区行的合并、创建 PR、
+    归档、会话操作继续保留；保留的工作区在 `merged_at && ahead == 0` 时，合并按钮必须显示禁用的「已合并」，
+    新提交令 `ahead > 0` 后恢复「合并」。有冲突时必须回到工作区页既有的逐文件选边与 AI 建议流程，禁止另造一套
+    冲突解决器；入口使用「开始解决冲突」等任务语言，不把“把 main 并入工作区”作为主按钮文案。全部选边后的默认动作
+    必须串联「提交解决结果 → 健康检查 → 合并（保留工作区）」并保留「仅保存解决结果」。
+    提交成功而最终合并失败时必须明确提示部分成功，且不得自动重做 merge commit。
+  - **改动面板空信息走本地快速提交**：提交信息非空时原样提交；为空时按文件状态/数量即时生成中性默认信息，直接执行
+    原 `git_commit`，不得为了默认提交额外启动 AI。Git 阶段失败时保留默认信息供重试。独立 ◈ 生成按钮与手动输入继续保留，
+    仅在用户主动点 ◈ 时调用 AI。
 - **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：「设为全局默认」（写前必须备份）、会话删除（delete_session/delete_project_sessions，路径必须落在已知会话根内）、工作树文件删除（限定树当前根目录 + 重要路径黑名单兜底：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单判断必须 canonicalize 双校验，堵符号链接绕过）。
 - **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录），AI 无头调用 `-s read-only`；用户可用 extra_env/参数覆盖。
 - **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底（macOS 用户目录 `~/.npm-global/bin`/`~/.local/bin`/`~/bin`/`~/.kimi-code/bin` **先于** `/opt/homebrew/bin`——与用户交互终端的 PATH 解析习惯一致，防止检测到系统目录里的同名旧副本；Linux `~/.local/bin`，Windows `%LOCALAPPDATA%\Programs`/`%APPDATA%\npm`）——打包版 GUI 短 PATH 下检测/启动/更新/安装不再失灵；新增 CLI/工具调用点一律用它，禁直接 `which::which` 或裸名 spawn。

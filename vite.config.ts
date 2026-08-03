@@ -4,9 +4,10 @@ import tailwindcss from "@tailwindcss/vite";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
-// 工作区（git worktree）里跑第二个实例时，用注入的 CCODE_PORT 避免与主实例撞 1420
+// 工作区（git worktree）里跑第二个实例时，用注入的 CCODE_PORT 避免与主实例撞端口
+// 默认 17575：Codex 桌面版的 NetworkService 会占用 Tauri 惯例端口 1420（本机实测冲突）
 // @ts-expect-error process is a nodejs global
-const port = Number(process.env.CCODE_PORT ?? 1420);
+const port = Number(process.env.CCODE_PORT ?? 17575);
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({

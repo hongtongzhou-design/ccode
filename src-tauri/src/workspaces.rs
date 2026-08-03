@@ -150,9 +150,11 @@ pub(crate) fn get_workspace(conn: &Connection, id: &str) -> Result<WorkspaceDto,
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorktreeRow {
+    pub id: String,
     pub worktree_path: String,
     pub repo_path: String,
     pub name: String,
+    pub branch: String,
     pub base_branch: String,
 }
 
@@ -164,9 +166,11 @@ pub(crate) fn worktree_rows() -> Vec<WorktreeRow> {
         .unwrap_or_default()
         .into_iter()
         .map(|w| WorktreeRow {
+            id: w.id,
             worktree_path: w.worktree_path,
             repo_path: w.repo_path,
             name: w.name,
+            branch: w.branch,
             base_branch: w.base_branch,
         })
         .collect()
@@ -920,7 +924,7 @@ pub fn path_context(path: String) -> Result<PathContextDto, String> {
 }
 
 /// 把基准分支并入任务分支（`git merge <base>` 在工作树里执行）：冲突留在工作区就地解决，
-/// 不碰主仓库——解决并提交后「合并」自然解锁
+/// 不碰主仓库——前端在解决后串联提交与最终合并
 #[tauri::command]
 pub async fn workspace_sync_base(id: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -943,7 +947,7 @@ pub async fn workspace_sync_base(id: String) -> Result<String, String> {
                     run_git(&wt, &["diff", "--name-only", "--diff-filter=U"], Duration::from_secs(10))
                         .unwrap_or_default();
                 Err(format!(
-                    "并入产生冲突——冲突留在工作区，不影响主仓库：\n{e}\n冲突文件:\n{files}\n逐文件选择版本解决后在「改动」面板提交，再点「合并」"
+                    "并入产生冲突——冲突留在工作区，不影响主仓库：\n{e}\n冲突文件:\n{files}\n逐文件选择版本后可直接「完成解决并合并」"
                 ))
             }
         }
@@ -1027,7 +1031,7 @@ fn finish_merge_impl(wt: &Path) -> Result<String, String> {
         return Err(format!("还有未解决的冲突文件：{}", st.files.join("、")));
     }
     run_git(wt, &["commit", "--no-edit"], Duration::from_secs(60))?;
-    Ok("冲突解决完成，已提交并入——健康度刷新后「合并」解锁".to_string())
+    Ok("冲突解决完成，已提交并入".to_string())
 }
 
 /// 全部冲突解决完后完成并入提交（--no-edit 用 git 生成的 merge 信息）
@@ -1542,11 +1546,16 @@ mod tests {
             fs::read_to_string(wt.join("feature.txt")).unwrap().replace("\r\n", "\n"),
             "branch\n"
         );
-        // finish → merge 提交完成，冲突探测转干净
+        // finish → merge 提交完成，健康检查通过后可直接合入主仓库
         finish_merge_impl(&wt).unwrap();
         assert!(!unmerged_impl(&wt).unwrap().merging);
         let (conflict, _) = conflict_probe(&wt, "main", "HEAD");
         assert_eq!(conflict, Some(false));
+        assert!(health_impl(&fx.conn, &w.id).unwrap().ready_to_merge);
+        merge_impl(&fx.conn, &w.id, false).unwrap();
+        let merged = get_workspace(&fx.conn, &w.id).unwrap();
+        assert!(merged.merged_at.is_some());
+        assert_eq!(health_impl(&fx.conn, &w.id).unwrap().ahead, 0);
     }
 
     #[test]

@@ -83,6 +83,7 @@ function FileTree({
   onOpenTerminal,
   onFsEvent,
   onEnterProject,
+  onRootChange,
 }: {
   cwd: string;
   showHidden: boolean;
@@ -93,17 +94,26 @@ function FileTree({
   onFsEvent?: () => void;
   /** 最近项目「真进入」：切树根 + 切换活动标签启动栏 cwd */
   onEnterProject?: (path: string) => void;
+  /** 根目录切换前通知；返回 false 时保留当前根（用于保护未保存预览）。 */
+  onRootChange?: (path: string) => boolean;
 }) {
   // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动
   const [root, setRoot] = useState(cwd);
-  /** 所有主动跳转统一走 nav（语义标记，保持单点） */
-  function nav(path: string) {
+  const rootRef = useRef(root);
+  rootRef.current = root;
+  const onRootChangeRef = useRef(onRootChange);
+  onRootChangeRef.current = onRootChange;
+  /** 所有主动跳转统一走 nav；未保存预览可阻止切换。 */
+  function nav(path: string): boolean {
+    if (path === root) return true;
+    if (onRootChange?.(path) === false) return false;
     setRoot(path);
+    return true;
   }
   /** 返回上一级目录（不受项目范围限制） */
   function goUp() {
     const p = parentDir(root);
-    if (p) setRoot(p);
+    if (p) nav(p);
   }
   const [recent, setRecent] = useState<RepoDto[]>([]);
 
@@ -138,14 +148,15 @@ function FileTree({
 
   /** 主项目 ⇄ 分支互切：重定树根 + 终端真进入（同最近项目语义） */
   function switchTo(path: string) {
-    nav(path);
-    onEnterProject?.(path);
+    if (nav(path)) onEnterProject?.(path);
   }
   // ⇄ 下拉：主项目 + 同仓库全部活跃工作区（多工作区时不再只能两点互切）
   const [switchMenu, setSwitchMenu] = useState<{ x: number; y: number } | null>(null);
 
   // 切换活动标签（cwd 变化）时重置回该标签的 cwd
   useEffect(() => {
+    if (cwd === rootRef.current) return;
+    if (onRootChangeRef.current?.(cwd) === false) return;
     setRoot(cwd);
   }, [cwd]);
 
@@ -254,7 +265,7 @@ function FileTree({
   function locate(r: SearchResultDto) {
     const target = r.isDir ? r.path : parentDir(r.path);
     if (target) {
-      nav(target);
+      if (!nav(target)) return;
       setResults(null);
       setQuery("");
       setHighlight(r.path);
@@ -389,7 +400,7 @@ function FileTree({
                 try {
                   // 目录可能已归档/移动，先验证再切换，避免树卡进无效根
                   await invoke("list_dir", { path: r.path, showHidden: false });
-                  nav(r.path);
+                  if (!nav(r.path)) return;
                   onEnterProject?.(r.path);
                   setResults(null);
                   setQuery("");

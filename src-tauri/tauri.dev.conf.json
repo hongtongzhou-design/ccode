@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ccode Dev",
+  "identifier": "com.ccode.dev.hmr",
+  "app": {
+    "windows": [
+      {
+        "title": "Ccode Dev - 热更新",
+        "width": 1100,
+        "height": 720
+      }
+    ]
+  }
+}

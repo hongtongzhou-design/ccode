@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Maximize2 } from "lucide-react";
 import type { GitFileDto, WorkspaceDiffDto } from "../types";
 import { LoadingRows } from "./PageFrame";
 
@@ -21,15 +22,26 @@ const STATUS_STYLE: Record<string, string> = {
   R: "bg-inset text-l3",
 };
 
+/** 空输入时使用本地规则即时生成，避免为一次提交额外启动 AI。 */
+function defaultCommitMessage(files: GitFileDto[]): string {
+  if (files.length !== 1) return `chore: 更新 ${files.length} 个文件`;
+  const file = files[0];
+  if (file.status === "A" || file.status === "??") return `chore: 添加 ${file.path}`;
+  if (file.status === "D") return `chore: 删除 ${file.path}`;
+  if (file.status === "R") return `chore: 重命名 ${file.path}`;
+  return `chore: 更新 ${file.path}`;
+}
+
 /**
  * 改动面板：活动标签 cwd 的 git 状态（8s 轮询）+ 提交/推送。
- * 输入提交信息并显式点击即视为用户同意，不再二次确认。
+ * 输入提交信息时直接使用；留空点击则用本地规则生成默认信息。显式点击即视为用户同意，不再二次确认。
  */
 function GitPanel({
   cwd,
   visible,
   refreshKey,
   onTotals,
+  onOpenReview,
 }: {
   cwd: string;
   /** 右侧面板打开且页面可见；不可见时暂停轮询 */
@@ -37,6 +49,8 @@ function GitPanel({
   /** 外部刷新信号（如 fs-changed 文件监听事件），变化时立即刷新 */
   refreshKey?: number;
   onTotals: (t: { add: number; del: number }) => void;
+  /** 工作区任务进入全宽审阅；普通仓库不显示入口。 */
+  onOpenReview?: (cwd: string) => void;
 }) {
   const [status, setStatus] = useState<GitStatusDto | null>(null);
   /** 活动标签 cwd 落在工作区里时为任务累计 diff（W3），否则为 null */
@@ -109,18 +123,22 @@ function GitPanel({
   }, [refresh, visible, refreshKey]);
 
   async function doCommit(push: boolean) {
+    const commitMessage = message.trim() || defaultCommitMessage(status?.files ?? []);
     setRunning(push ? "push" : "commit");
     setOutput(null);
+    // Git 阶段失败时保留本地生成结果，用户可直接重试或编辑。
+    if (!message.trim()) setMessage(commitMessage);
     try {
       const out = await invoke<string>("git_commit", {
         cwd,
-        message: message.trim(),
+        message: commitMessage,
         push,
       });
       // 提交输出首行形如 [branch abc1234] msg，提取出来让 toast 带提交号
       const bracket = out.match(/\[([^\]]+)\]/)?.[1];
+      const title = commitMessage.split(/\r?\n/, 1)[0];
       showToast(
-        `${push ? "提交并推送成功" : "提交成功"}${bracket ? ` · ${bracket}` : ""}`,
+        `${push ? "提交并推送成功" : "提交成功"}${bracket ? ` · ${bracket}` : ""} · ${title}`,
       );
       setMessage("");
     } catch (e) {
@@ -132,7 +150,7 @@ function GitPanel({
   }
 
   const hasChanges = (status?.files.length ?? 0) > 0;
-  const canCommit = hasChanges && message.trim().length > 0 && running === null;
+  const canCommit = hasChanges && running === null && !aiBusy;
   const inWs = wsDiff?.inWorkspace === true;
   const files = inWs ? wsDiff!.files : (status?.files ?? []);
 
@@ -152,6 +170,17 @@ function GitPanel({
                   <span className="text-add">+{wsDiff!.totalAdd}</span>{" "}
                   <span className="text-del">-{wsDiff!.totalDel}</span>
                 </span>
+              )}
+              {onOpenReview && (
+                <button
+                  type="button"
+                  onClick={() => onOpenReview(cwd)}
+                  title="展开任务审阅"
+                  className={`${wsDiff!.totalAdd > 0 || wsDiff!.totalDel > 0 ? "" : "ml-auto"} flex h-7 items-center gap-1 rounded px-1.5 text-l2 hover:bg-white/5 hover:text-l1`}
+                >
+                  <Maximize2 aria-hidden="true" className="h-3.5 w-3.5" />
+                  审阅
+                </button>
               )}
             </>
           ) : (
@@ -233,14 +262,14 @@ function GitPanel({
               onKeyDown={(e) => {
                 if (e.key === "Enter" && canCommit) void doCommit(false);
               }}
-              placeholder="提交信息（Enter 提交）"
-              disabled={running !== null}
+              placeholder="提交信息（可选，留空快速提交）"
+              disabled={running !== null || aiBusy}
               className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
             />
             <button
               onClick={genMessage}
               disabled={!hasChanges || aiBusy || running !== null}
-              title="AI 生成提交信息"
+              title="AI 生成更完整的提交信息（可选，速度取决于模型）"
               className={`shrink-0 rounded px-2 py-1.5 text-sm text-l2 hover:bg-white/5 disabled:opacity-50 ${
                 aiBusy ? "animate-pulse" : ""
               }`}
@@ -254,14 +283,22 @@ function GitPanel({
               disabled={!canCommit}
               className="flex-1 rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
             >
-              {running === "commit" ? "提交中…" : "提交"}
+              {running === "commit"
+                ? "提交中…"
+                : message.trim()
+                  ? "提交"
+                  : "快速提交"}
             </button>
             <button
               onClick={() => void doCommit(true)}
               disabled={!canCommit}
               className="flex-1 rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
-              {running === "push" ? "推送中…" : "提交并推送"}
+              {running === "push"
+                ? "推送中…"
+                : message.trim()
+                  ? "提交并推送"
+                  : "快速提交并推送"}
             </button>
           </div>
           {output && !output.ok && (

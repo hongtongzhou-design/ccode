@@ -14,6 +14,7 @@ import ContextMenu from "../components/ContextMenu";
 import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
 import { LoadingRows } from "../components/PageFrame";
+import WorkspaceReviewView from "../components/WorkspaceReviewView";
 import { XTERM_PALETTES } from "../terminal-palettes";
 import type { ChatMessageDto, SessionMetaDto } from "../types";
 
@@ -1174,6 +1175,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [previewDirty, setPreviewDirty] = useState(false);
   /** 文件系统变化信号：FileTree 的 fs-changed 事件触发 GitPanel 一并刷新 */
   const [fsChangeTick, setFsChangeTick] = useState(0);
+  /** 全宽任务审阅覆盖层；底下所有 TerminalView 继续挂载。 */
+  const [reviewPath, setReviewPath] = useState<string | null>(null);
   const sessionScrollRef = useRef<HTMLDivElement>(null);
 
   const activeCwd = statuses[activeId]?.cwd ?? "~";
@@ -1216,9 +1219,19 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setPreviewDirty(false);
   }, []);
 
-  // 预览 = 稳定的文档：打开哪个文件就停在哪个文件，不随树根/标签切换改变。
-  // （曾有「预览跟随」：同名文件在主仓库/各工作区各有一份，静默切换导致用户误改主仓库，
-  //  已移除——要看另一个根下的文件，在文件树里点开它）
+  /** 切换文件树根时关闭旧预览；脏文件先确认，且绝不映射新根下的同名文件。 */
+  const closePreviewForRootChange = useCallback(() => {
+    if (!preview) return true;
+    if (
+      previewDirty &&
+      !window.confirm("当前预览文件有未保存改动。切换文件树根目录将放弃这些改动，继续？")
+    ) {
+      return false;
+    }
+    setPreview(null);
+    setPreviewDirty(false);
+    return true;
+  }, [preview, previewDirty]);
 
   /** 全部子组件共享的稳定回调（memo 不被行内箭头击穿） */
   const openSessionPanel = useCallback(() => {
@@ -1275,6 +1288,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   // 消费工作区页/会话页交来的终端启动请求（可见时才消费，保证标签能立刻聚焦启动栏）
   const pendingTerminal = useAppStore((s) => s.pendingTerminal);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const workspaceReviewRequest = useAppStore((s) => s.workspaceReviewRequest);
+  const setWorkspaceReviewRequest = useAppStore((s) => s.setWorkspaceReviewRequest);
+  const setWorkspaceConflictRequest = useAppStore((s) => s.setWorkspaceConflictRequest);
+  const setPage = useAppStore((s) => s.setPage);
   const navCollapsed = useAppStore((s) => s.navCollapsed);
   const setRunningScript = useAppStore((s) => s.setRunningScript);
   // closeTab 里取最新互斥登记表（避免闭包过期）
@@ -1285,6 +1302,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (visible && pendingTerminal) {
       setPendingTerminal(null);
+      // 显式打开另一任务的终端时，不让上一次任务审阅继续盖住新标签。
+      setReviewPath(null);
       const pt = pendingTerminal;
       // 会话恢复：profile 依次 autoLaunchProfileId → ccode.lastProfile → 该 agent 首个配置
       const agentId = pt.agentId ?? pt.resume?.agentId;
@@ -1315,6 +1334,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, pendingTerminal, setPendingTerminal, setRunningScript]);
+
+  // 工作区页交来的评审请求：只打开覆盖层，不新建/切换/卸载终端标签。
+  useEffect(() => {
+    if (!visible || !workspaceReviewRequest) return;
+    setReviewPath(workspaceReviewRequest.worktreePath);
+    setFocusMode(false);
+    setWorkspaceReviewRequest(null);
+  }, [visible, workspaceReviewRequest, setWorkspaceReviewRequest]);
 
   // 会话页「进行中」反向跳转：聚焦指定标签
   const focusTabId = useAppStore((s) => s.focusTabId);
@@ -1386,7 +1413,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     "flex h-7 w-7 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l2";
 
   return (
-    <div className="flex h-full">
+    <div className="relative flex h-full">
       {/* 左栏：工作树 + 运行中总览（专注模式下整体隐藏） */}
       {!focusMode &&
         (railCollapsed ? (
@@ -1436,6 +1463,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               onOpenTerminal={openTerminalAt}
               onFsEvent={bumpFsChangeTick}
               onEnterProject={setEnterCwd}
+              onRootChange={closePreviewForRootChange}
             />
           </div>
           {/* 运行中总览：全部终端标签的状态一览，点击激活；默认折叠 */}
@@ -1697,9 +1725,22 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               visible={visible && rightOpen}
               refreshKey={fsChangeTick}
               onTotals={reportGitTotals}
+              onOpenReview={setReviewPath}
             />
           </div>
         </div>
+      )}
+
+      {reviewPath && (
+        <WorkspaceReviewView
+          worktreePath={reviewPath}
+          onClose={() => setReviewPath(null)}
+          onOpenConflict={(workspaceId) => {
+            setWorkspaceConflictRequest(workspaceId);
+            setReviewPath(null);
+            setPage("workspaces");
+          }}
+        />
       )}
 
       {/* 专注栏：portal 到 App 侧栏插槽——纵向标签列表 + ⋯ 集成动作按钮。
