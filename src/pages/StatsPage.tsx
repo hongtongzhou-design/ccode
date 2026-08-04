@@ -38,24 +38,6 @@ function basename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
-function isInternalProject(path: string): boolean {
-  const normalized = path.replace(/\\/g, "/").toLowerCase();
-  const name = basename(normalized);
-  return (
-    name.startsWith("ccode-ai-") ||
-    normalized.includes("<synthetic>") ||
-    normalized === "/private/tmp" ||
-    normalized.startsWith("/private/tmp/") ||
-    normalized === "/tmp" ||
-    normalized.startsWith("/tmp/")
-  );
-}
-
-function isInternalModel(model: string): boolean {
-  const m = model.trim().toLowerCase();
-  return !m || m === "<synthetic>" || m === "__kimi_env_model__";
-}
-
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
 /**
@@ -143,8 +125,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
   const projectRows = useMemo(() => {
     if (!stats || showInternal) return stats?.byProject ?? [];
-    const normal = stats.byProject.filter((p) => !isInternalProject(p.projectPath));
-    const internal = stats.byProject.filter((p) => isInternalProject(p.projectPath));
+    const normal = stats.byProject.filter((p) => !p.internal);
+    const internal = stats.byProject.filter((p) => p.internal);
     if (internal.length === 0) return normal;
     return [
       ...normal,
@@ -156,14 +138,16 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           ? internal.reduce((n, p) => n + (p.costUsd ?? 0), 0)
           : null,
         costPartial: internal.some((p) => p.costPartial || p.costUsd == null),
+        source: "ccode-ai",
+        internal: true,
       },
     ].sort((a, b) => b.tokens - a.tokens);
   }, [showInternal, stats]);
 
   const modelRows = useMemo(() => {
     if (!stats || showInternal) return stats?.byModel ?? [];
-    const normal = stats.byModel.filter((m) => !isInternalModel(m.model));
-    const internal = stats.byModel.filter((m) => isInternalModel(m.model));
+    const normal = stats.byModel.filter((m) => !m.internal);
+    const internal = stats.byModel.filter((m) => m.internal);
     if (internal.length === 0) return normal;
     return [
       ...normal,
@@ -175,6 +159,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           ? internal.reduce((n, m) => n + (m.costUsd ?? 0), 0)
           : null,
         costPartial: internal.some((m) => m.costPartial || m.costUsd == null),
+        source: "ccode-ai",
+        internal: true,
       },
     ].sort((a, b) => b.input + b.output - (a.input + a.output));
   }, [showInternal, stats]);
@@ -341,7 +327,10 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                 </thead>
                 <tbody>
                   {projectRows.slice(0, 20).map((p) => (
-                    <tr key={p.projectPath} className="border-b border-hairline">
+                    <tr
+                      key={`${p.internal}-${p.source}-${p.projectPath}`}
+                      className="border-b border-hairline"
+                    >
                       <td className="max-w-0 truncate px-2 py-2 text-l2" title={p.projectPath}>
                         {basename(p.projectPath)}
                       </td>
@@ -374,7 +363,10 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                 </thead>
                 <tbody>
                   {modelRows.map((m) => (
-                    <tr key={m.model} className="border-b border-hairline">
+                    <tr
+                      key={`${m.internal}-${m.source}-${m.model}`}
+                      className="border-b border-hairline"
+                    >
                       <td className="max-w-0 truncate px-2 py-2 text-l2" title={m.model}>
                         {m.model || "（未知）"}
                       </td>

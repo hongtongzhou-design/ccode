@@ -4,7 +4,12 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { AGENTS } from "../types";
 import ContextMenu from "../components/ContextMenu";
 import { Checkbox, PageFrame, PageHeader, primaryActionClass } from "../components/PageFrame";
-import type { DiscoveredSkillDto, SkillDto } from "../types";
+import type {
+  DiscoveredSkillDto,
+  SkillDto,
+  SkillImportResultDto,
+  SkillUpdateDto,
+} from "../types";
 
 /** 行内开关的短标签（六 agent 顺序与全局 AGENTS 一致） */
 const AGENT_SHORT: Record<string, string> = {
@@ -52,31 +57,93 @@ function parseGithubInput(raw: string): {
 }
 
 function ImportModal({
+  initialGithub,
   onClose,
   onDone,
 }: {
+  initialGithub?: { repo: string; branch: string; subdir: string };
   onClose: () => void;
   onDone: (msg: string) => void;
 }) {
-  const [tab, setTab] = useState<"dir" | "zip" | "github">("dir");
-  const [repo, setRepo] = useState("");
-  const [branch, setBranch] = useState("");
-  const [subdir, setSubdir] = useState("");
+  const [tab, setTab] = useState<"dir" | "zip" | "github">(
+    initialGithub ? "github" : "dir",
+  );
+  const [repo, setRepo] = useState(initialGithub?.repo ?? "");
+  const [branch, setBranch] = useState(initialGithub?.branch ?? "");
+  const [subdir, setSubdir] = useState(initialGithub?.subdir ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<SkillImportResultDto | null>(null);
+  const [lastRequest, setLastRequest] = useState<{
+    cmd: string;
+    args: Record<string, unknown>;
+  } | null>(null);
+  const [renameTargets, setRenameTargets] = useState<Record<string, string>>({});
 
-  async function run(cmd: string, args: Record<string, unknown>) {
+  function summary(value: SkillImportResultDto): string {
+    const parts = [
+      value.added.length ? `新增 ${value.added.length}` : "",
+      value.updated.length ? `覆盖更新 ${value.updated.length}` : "",
+      value.skipped.length ? `跳过 ${value.skipped.length}` : "",
+      value.conflicts.length ? `冲突 ${value.conflicts.length}` : "",
+    ].filter(Boolean);
+    return parts.length ? parts.join(" · ") : "未发现可导入技能";
+  }
+
+  async function run(
+    cmd: string,
+    args: Record<string, unknown>,
+    resolutions: Record<string, string> | null = null,
+  ) {
     setBusy(true);
     setError(null);
     try {
-      const n = await invoke<number>(cmd, args);
-      onDone(`已导入 ${n} 个技能`);
-      onClose();
+      const next = await invoke<SkillImportResultDto>(cmd, { ...args, resolutions });
+      setLastRequest({ cmd, args });
+      const combined = result
+        ? {
+            added: result.added,
+            updated: [...new Set([...result.updated, ...next.updated])],
+            skipped: next.skipped.filter((name) => !result.added.includes(name)),
+            conflicts: next.conflicts,
+          }
+        : next;
+      setResult(combined);
+      setRenameTargets(
+        Object.fromEntries(
+          combined.conflicts.map((conflict) => [
+            conflict.name,
+            renameTargets[conflict.name] ?? `${conflict.name}-copy`,
+          ]),
+        ),
+      );
+      if (combined.added.length > 0 || combined.updated.length > 0) {
+        onDone(summary(combined));
+      }
+      if (combined.conflicts.length === 0) {
+        if (combined.added.length === 0 && combined.updated.length === 0) {
+          onDone(summary(combined));
+        }
+        onClose();
+      }
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function resolveConflicts(action: "overwrite" | "skip" | "rename") {
+    if (!lastRequest || !result) return;
+    const resolutions: Record<string, string> = {};
+    for (const name of result.added) resolutions[name] = "skip";
+    for (const conflict of result.conflicts) {
+      resolutions[conflict.name] =
+        action === "rename"
+          ? `rename:${(renameTargets[conflict.name] ?? "").trim()}`
+          : action;
+    }
+    await run(lastRequest.cmd, lastRequest.args, resolutions);
   }
 
   async function pickDir() {
@@ -206,6 +273,67 @@ function ImportModal({
           </div>
         )}
         {busy && tab !== "github" && <p className="mb-2 text-xs text-l3">导入中…</p>}
+        {result && (
+          <div className="mb-3 rounded border border-field bg-inset p-3 text-xs">
+            <p className="text-l2">{summary(result)}</p>
+            {result.added.length > 0 && (
+              <p className="mt-1 break-words text-ok-text">新增：{result.added.join("、")}</p>
+            )}
+            {result.updated.length > 0 && (
+              <p className="mt-1 break-words text-ok-text">已覆盖：{result.updated.join("、")}</p>
+            )}
+            {result.conflicts.length > 0 && (
+              <div className="mt-2 space-y-2 border-t border-hairline pt-2">
+                {result.conflicts.map((conflict) => (
+                  <div key={conflict.name} className="grid grid-cols-[1fr_150px] items-center gap-2">
+                    <span className="min-w-0 truncate text-warn-text" title={conflict.name}>
+                      {conflict.name}
+                      {conflict.updateAvailable ? " · GitHub 更新" : " · 同名冲突"}
+                    </span>
+                    <input
+                      value={renameTargets[conflict.name] ?? ""}
+                      onChange={(event) =>
+                        setRenameTargets((current) => ({
+                          ...current,
+                          [conflict.name]: event.target.value,
+                        }))
+                      }
+                      aria-label={`${conflict.name} 另存为名称`}
+                      className="rounded border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none focus:border-l4"
+                    />
+                  </div>
+                ))}
+                <p className="text-l4">覆盖会先备份旧库目录；另存为使用右侧名称。</p>
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void resolveConflicts("skip")}
+                    disabled={busy}
+                    className="rounded px-2 py-1 text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                  >
+                    跳过冲突
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void resolveConflicts("rename")}
+                    disabled={busy || result.conflicts.some((item) => !renameTargets[item.name]?.trim())}
+                    className="rounded bg-btn px-2 py-1 text-l1 hover:bg-white/10 disabled:opacity-50"
+                  >
+                    全部另存为
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void resolveConflicts("overwrite")}
+                    disabled={busy}
+                    className="rounded border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
+                  >
+                    备份并覆盖
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
         {error && <p className="mb-2 text-sm text-err-text">{error}</p>}
         <div className="flex justify-end">
           <button
@@ -326,11 +454,17 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   }
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [modal, setModal] = useState<"import" | "discover" | null>(null);
+  const [modal, setModal] = useState<
+    | { kind: "import"; github?: { repo: string; branch: string; subdir: string } }
+    | { kind: "discover" }
+    | null
+  >(null);
   const [discovered, setDiscovered] = useState<DiscoveredSkillDto[]>([]);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
   const [preview, setPreview] = useState<{ id: string; name: string; content: string } | null>(null);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; skill: SkillDto } | null>(null);
+  const [updates, setUpdates] = useState<Record<string, SkillUpdateDto>>({});
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
 
   async function refresh() {
     try {
@@ -433,10 +567,24 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     try {
       const items = await invoke<DiscoveredSkillDto[]>("discover_unmanaged");
       setDiscovered(items);
-      setModal("discover");
+      setModal({ kind: "discover" });
       setError(null);
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function onCheckUpdates() {
+    setCheckingUpdates(true);
+    try {
+      const items = await invoke<SkillUpdateDto[]>("check_skill_updates");
+      setUpdates(Object.fromEntries(items.map((item) => [item.id, item])));
+      setNotice(items.length ? "GitHub 技能更新检查完成" : "没有可检查的 GitHub 技能");
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setCheckingUpdates(false);
     }
   }
 
@@ -452,7 +600,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             meta={`${skills.length} 个技能 · ${appliedCount} 个已应用`}
             actions={
               <>
-              <button onClick={() => setModal("import")} className={primaryActionClass}>
+              <button onClick={() => setModal({ kind: "import" })} className={primaryActionClass}>
                 + 导入
               </button>
               <button
@@ -465,6 +613,13 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               <button onClick={onDiscover} className={ghostBtn}>
                 发现未纳管
               </button>
+              <button
+                onClick={() => void onCheckUpdates()}
+                disabled={checkingUpdates}
+                className={`${ghostBtn} disabled:opacity-50`}
+              >
+                {checkingUpdates ? "检查中…" : "检查 GitHub 更新"}
+              </button>
               </>
             }
           />
@@ -474,7 +629,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             <div className="py-12 text-center">
               <p className="text-sm text-l2">还没有技能</p>
               <button
-                onClick={() => setModal("import")}
+                onClick={() => setModal({ kind: "import" })}
                 className="mt-3 text-sm text-cta hover:brightness-125"
               >
                 导入第一个技能
@@ -533,6 +688,16 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                           重新分发
                         </button>
                       </>
+                    )}
+                    {updates[s.id] && (
+                      <span
+                        className={`shrink-0 rounded bg-inset px-1.5 py-0.5 text-xs ${
+                          updates[s.id].updateAvailable ? "text-warn-text" : "text-l3"
+                        }`}
+                        title={updates[s.id].message}
+                      >
+                        {updates[s.id].updateAvailable ? "GitHub 可更新" : "GitHub 已最新"}
+                      </span>
                     )}
                     <span className="ml-auto flex shrink-0 items-center gap-1">
                       {catEdit?.id === s.id ? (
@@ -636,8 +801,9 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
         </div>
       )}
 
-      {modal === "import" && (
+      {modal?.kind === "import" && (
         <ImportModal
+          initialGithub={modal.github}
           onClose={() => setModal(null)}
           onDone={(msg) => {
             setNotice(msg);
@@ -645,7 +811,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           }}
         />
       )}
-      {modal === "discover" && (
+      {modal?.kind === "discover" && (
         <DiscoverModal
           items={discovered}
           onClose={() => setModal(null)}
@@ -665,6 +831,24 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               label: "导出 ZIP",
               onSelect: () => void onExport([rowMenu.skill.id], `${rowMenu.skill.name}.zip`),
             },
+            ...(rowMenu.skill.repo
+              ? [
+                  {
+                    label: updates[rowMenu.skill.id]?.updateAvailable
+                      ? "导入 GitHub 更新"
+                      : "重新从 GitHub 导入",
+                    onSelect: () =>
+                      setModal({
+                        kind: "import",
+                        github: {
+                          repo: rowMenu.skill.repo!,
+                          branch: rowMenu.skill.repoRef ?? "",
+                          subdir: rowMenu.skill.repoSubdir ?? "",
+                        },
+                      }),
+                  },
+                ]
+              : []),
             { label: "删除", onSelect: () => void onDelete(rowMenu.skill) },
           ]}
         />

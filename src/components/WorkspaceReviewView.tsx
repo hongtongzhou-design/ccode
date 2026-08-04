@@ -7,11 +7,19 @@ import {
   File,
   FolderClosed,
   FolderOpen,
+  GitBranch,
   RefreshCw,
+  Search,
 } from "lucide-react";
 import ContextMenu from "./ContextMenu";
 import { LoadingRows } from "./PageFrame";
-import type { GitFileDto, WorkspaceDiffDto, WorkspaceHealthDto } from "../types";
+import type {
+  GitCommitResultDto,
+  GitFileDto,
+  WorkspaceDiffDto,
+  WorkspaceHealthDto,
+  WorkspaceMergeResultDto,
+} from "../types";
 
 interface GitStatusDto {
   isRepo: boolean;
@@ -22,6 +30,27 @@ interface GitStatusDto {
   totalAdd: number;
   totalDel: number;
 }
+
+interface UnmergedDto {
+  merging: boolean;
+  files: string[];
+  staleBase: boolean;
+}
+
+interface ConflictContentDto {
+  ours: string | null;
+  theirs: string | null;
+  diff: string;
+  truncated: boolean;
+}
+
+interface ConflictAdviceDto {
+  path: string;
+  choice: "ours" | "theirs" | "manual";
+  reason: string;
+}
+
+type ConflictChoice = "ours" | "theirs";
 
 type FinishMode = "commit" | "merge" | "merge-archive";
 
@@ -35,6 +64,14 @@ interface DiffLine {
   oldKind: "context" | "delete" | "blank";
   newKind: "context" | "add" | "blank";
 }
+
+interface FoldedDiffBlock {
+  kind: "fold";
+  id: string;
+  rows: DiffLine[];
+}
+
+type DisplayDiffRow = DiffLine | FoldedDiffBlock;
 
 interface ChangeTreeNode {
   name: string;
@@ -201,6 +238,92 @@ function DiffSide({
   );
 }
 
+function foldContextRows(rows: DiffLine[], expanded: ReadonlySet<string>): DisplayDiffRow[] {
+  const output: DisplayDiffRow[] = [];
+  let context: DiffLine[] = [];
+  let foldIndex = 0;
+  const flush = () => {
+    if (context.length <= 12) {
+      output.push(...context);
+    } else {
+      const id = `fold-${foldIndex++}`;
+      if (expanded.has(id)) {
+        output.push(...context);
+      } else {
+        output.push(...context.slice(0, 3));
+        output.push({ kind: "fold", id, rows: context.slice(3, -3) });
+        output.push(...context.slice(-3));
+      }
+    }
+    context = [];
+  };
+
+  for (const row of rows) {
+    if (row.kind === "line" && row.oldKind === "context" && row.newKind === "context") {
+      context.push(row);
+    } else {
+      flush();
+      output.push(row);
+    }
+  }
+  flush();
+  return output;
+}
+
+function DiffTable({ rows, minWidth = 720 }: { rows: DiffLine[]; minWidth?: number }) {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const displayRows = useMemo(() => foldContextRows(rows, expanded), [expanded, rows]);
+
+  useEffect(() => {
+    setExpanded(new Set());
+  }, [rows]);
+
+  return (
+    <div className="overflow-x-auto bg-canvas font-mono text-[11px] leading-5">
+      {displayRows.map((row, index) => {
+        if (row.kind === "fold") {
+          return (
+            <button
+              key={row.id}
+              type="button"
+              onClick={() =>
+                setExpanded((current) => {
+                  const next = new Set(current);
+                  next.add(row.id);
+                  return next;
+                })
+              }
+              className="flex h-7 w-full items-center justify-center border-y border-hairline bg-inset text-l4 hover:bg-seg-sel hover:text-l2"
+            >
+              展开 {row.rows.length} 行未修改内容
+            </button>
+          );
+        }
+        if (row.kind === "hunk") {
+          return (
+            <div
+              key={`${row.header}-${index}`}
+              className="flex h-6 items-center border-y border-hairline bg-inset px-3 text-l4"
+            >
+              {row.header}
+            </div>
+          );
+        }
+        return (
+          <div
+            key={index}
+            className="grid grid-cols-2 divide-x divide-hairline"
+            style={{ minWidth }}
+          >
+            <DiffSide lineNo={row.oldNo} text={row.oldText} kind={row.oldKind} />
+            <DiffSide lineNo={row.newNo} text={row.newText} kind={row.newKind} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function DiffFileSection({
   file,
   worktreePath,
@@ -257,13 +380,13 @@ function DiffFileSection({
       ref={(element) => {
         sectionRef.current = element;
       }}
-      className="border-b border-hairline"
+      className="border-b-4 border-strip bg-canvas"
     >
-      <div className="sticky top-0 z-[1] flex h-9 items-center gap-2 border-b border-hairline bg-strip px-3 text-xs">
+      <div className="sticky top-0 z-[1] flex h-10 items-center gap-2 border-b border-hairline bg-strip px-3 text-xs">
         <span className={`font-mono ${STATUS_STYLE[file.status] ?? "text-l3"}`}>
           {file.status === "??" ? "U" : file.status}
         </span>
-        <span className="min-w-0 flex-1 truncate font-mono text-l2">{file.path}</span>
+        <span className="min-w-0 flex-1 truncate font-mono font-medium text-l1">{file.path}</span>
         {file.additions !== null && <span className="font-mono text-add">+{file.additions}</span>}
         {file.deletions !== null && file.deletions > 0 && (
           <span className="font-mono text-del">-{file.deletions}</span>
@@ -276,20 +399,7 @@ function DiffFileSection({
       ) : rows.length === 0 ? (
         <p className="px-4 py-5 text-xs text-l4">无可显示的文本差异</p>
       ) : (
-        <div className="overflow-x-auto bg-canvas font-mono text-[11px] leading-5">
-          {rows.map((row, index) =>
-            row.kind === "hunk" ? (
-              <div key={`${row.header}-${index}`} className="border-y border-hairline bg-inset px-3 text-l4">
-                {row.header}
-              </div>
-            ) : (
-              <div key={index} className="grid min-w-[620px] grid-cols-2 divide-x divide-hairline">
-                <DiffSide lineNo={row.oldNo} text={row.oldText} kind={row.oldKind} />
-                <DiffSide lineNo={row.newNo} text={row.newText} kind={row.newKind} />
-              </div>
-            ),
-          )}
-        </div>
+        <DiffTable rows={rows} minWidth={680} />
       )}
     </section>
   );
@@ -298,10 +408,12 @@ function DiffFileSection({
 function ChangeTree({
   nodes,
   onSelect,
+  activePath,
   depth = 0,
 }: {
   nodes: ChangeTreeNode[];
   onSelect: (path: string) => void;
+  activePath: string | null;
   depth?: number;
 }) {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -327,7 +439,11 @@ function ChangeTree({
                 }
               }}
               title={node.path}
-              className="flex h-7 w-full items-center gap-1.5 pr-2 text-left text-xs text-l2 hover:bg-white/5"
+              className={`flex h-7 w-full items-center gap-1.5 border-l-2 pr-2 text-left text-xs hover:bg-white/5 ${
+                !isDir && activePath === node.path
+                  ? "border-cta bg-rail-sel text-l1"
+                  : "border-transparent text-l2"
+              }`}
               style={{ paddingLeft: 8 + depth * 14 }}
             >
               {isDir ? (
@@ -360,7 +476,12 @@ function ChangeTree({
               )}
             </button>
             {isDir && !isClosed && (
-              <ChangeTree nodes={node.children} onSelect={onSelect} depth={depth + 1} />
+              <ChangeTree
+                nodes={node.children}
+                onSelect={onSelect}
+                activePath={activePath}
+                depth={depth + 1}
+              />
             )}
           </div>
         );
@@ -369,14 +490,154 @@ function ChangeTree({
   );
 }
 
+function ConflictFileSection({
+  path,
+  content,
+  contentError,
+  branch,
+  baseBranch,
+  unresolved,
+  choice,
+  advice,
+  busy,
+  register,
+  onChoose,
+  onRetry,
+}: {
+  path: string;
+  content: ConflictContentDto | null;
+  contentError: string | undefined;
+  branch: string;
+  baseBranch: string;
+  unresolved: boolean;
+  choice: ConflictChoice | undefined;
+  advice: ConflictAdviceDto | undefined;
+  busy: boolean;
+  register: (path: string, element: HTMLElement | null) => void;
+  onChoose: (path: string, choice: ConflictChoice) => void;
+  onRetry: (path: string) => void;
+}) {
+  const rows = useMemo(() => (content ? parseDiff(content.diff) : []), [content]);
+  return (
+    <section
+      ref={(element) => register(path, element)}
+      className="border-b-4 border-strip bg-canvas"
+    >
+      <div className="sticky top-0 z-[2] border-b border-hairline bg-strip">
+        <div className="flex h-10 items-center gap-2 px-3 text-xs">
+          <span className={`font-mono ${unresolved ? "text-err-text" : "text-okb"}`}>
+            {unresolved ? "U" : "✓"}
+          </span>
+          <span className="min-w-0 flex-1 truncate font-mono font-medium text-l1">{path}</span>
+          {choice && (
+            <span className="rounded bg-inset px-2 py-0.5 text-l2">
+              已选 {choice === "ours" ? "任务版" : baseBranch}
+            </span>
+          )}
+        </div>
+        <div className="grid grid-cols-2 divide-x divide-hairline border-t border-hairline text-xs">
+          <div
+            className={`flex min-w-0 items-center gap-2 border-t-2 px-3 py-1.5 ${
+              choice === "ours" ? "border-cta bg-cta-pill" : "border-transparent"
+            }`}
+          >
+            <span className="min-w-0 flex-1 truncate text-l2">任务分支 · {branch}</span>
+            <button
+              type="button"
+              onClick={() => onChoose(path, "ours")}
+              disabled={!content || !unresolved || busy}
+              className={`rounded border px-2 py-0.5 disabled:opacity-50 ${
+                choice === "ours"
+                  ? "border-cta-bd bg-cta text-cta-text"
+                  : "border-field bg-inset text-l2 hover:bg-seg-sel hover:text-l1"
+              }`}
+            >
+              {choice === "ours" ? "已选" : "选用"}
+            </button>
+          </div>
+          <div
+            className={`flex min-w-0 items-center gap-2 border-t-2 px-3 py-1.5 ${
+              choice === "theirs" ? "border-cta bg-cta-pill" : "border-transparent"
+            }`}
+          >
+            <span className="min-w-0 flex-1 truncate text-l2">基准分支 · {baseBranch}</span>
+            <button
+              type="button"
+              onClick={() => onChoose(path, "theirs")}
+              disabled={!content || !unresolved || busy}
+              className={`rounded border px-2 py-0.5 disabled:opacity-50 ${
+                choice === "theirs"
+                  ? "border-cta-bd bg-cta text-cta-text"
+                  : "border-field bg-inset text-l2 hover:bg-seg-sel hover:text-l1"
+              }`}
+            >
+              {choice === "theirs" ? "已选" : "选用"}
+            </button>
+          </div>
+        </div>
+        {advice && (
+          <div className="flex min-h-8 items-center gap-2 border-t border-hairline bg-inset px-3 py-1 text-xs">
+            <span className="shrink-0 text-l1">◈</span>
+            <span className="shrink-0 text-l2">
+              {advice.choice === "ours"
+                ? "建议任务版"
+                : advice.choice === "theirs"
+                  ? `建议 ${baseBranch}`
+                  : "建议人工合并"}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-l4" title={advice.reason}>
+              {advice.reason}
+            </span>
+            {unresolved && (advice.choice === "ours" || advice.choice === "theirs") && (
+              <button
+                type="button"
+                onClick={() => onChoose(path, advice.choice as ConflictChoice)}
+                disabled={busy}
+                className="shrink-0 rounded px-2 py-0.5 text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+              >
+                按建议
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {contentError ? (
+        <div className="min-h-36 px-4 py-5 text-xs text-err-text">
+          <p>加载两侧内容失败：{contentError}</p>
+          <button
+            type="button"
+            onClick={() => onRetry(path)}
+            className="mt-2 rounded bg-btn px-2 py-1 text-l1 hover:bg-white/10"
+          >
+            重试加载
+          </button>
+        </div>
+      ) : !content ? (
+        <div className="min-h-36 px-4 py-4"><LoadingRows compact /></div>
+      ) : rows.length === 0 ? (
+        <div className="grid min-h-36 grid-cols-2 divide-x divide-hairline font-mono text-[11px] leading-5">
+          <pre className="overflow-auto whitespace-pre p-3 text-l2">{content.ours ?? "（此侧已删除）"}</pre>
+          <pre className="overflow-auto whitespace-pre p-3 text-l2">{content.theirs ?? "（此侧已删除）"}</pre>
+        </div>
+      ) : (
+        <DiffTable rows={rows} />
+      )}
+      {content?.truncated && (
+        <div className="border-t border-hairline bg-inset px-3 py-2 text-xs text-warn-text">
+          文件较大，当前只显示前 512 KB；需要逐行编辑时请在预览编辑器中打开该文件。
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function WorkspaceReviewView({
   worktreePath,
   onClose,
-  onOpenConflict,
 }: {
   worktreePath: string;
   onClose: () => void;
-  onOpenConflict: (workspaceId: string) => void;
 }) {
   const [diff, setDiff] = useState<WorkspaceDiffDto | null>(null);
   const [status, setStatus] = useState<GitStatusDto | null>(null);
@@ -386,12 +647,25 @@ export default function WorkspaceReviewView({
   const [revision, setRevision] = useState(0);
   const signatureRef = useRef("");
   const sectionRefs = useRef(new Map<string, HTMLElement>());
+  const reviewMainRef = useRef<HTMLElement | null>(null);
+  const scrollFrameRef = useRef<number | null>(null);
+  const autoConflictRef = useRef<string | null>(null);
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [finishMenu, setFinishMenu] = useState<{ x: number; y: number } | null>(null);
+  const [unmerged, setUnmerged] = useState<UnmergedDto | null>(null);
+  const [conflictFiles, setConflictFiles] = useState<string[]>([]);
+  const [conflictContents, setConflictContents] = useState<Record<string, ConflictContentDto>>({});
+  const [conflictContentErrors, setConflictContentErrors] = useState<Record<string, string>>({});
+  const [conflictChoices, setConflictChoices] = useState<Record<string, ConflictChoice>>({});
+  const [conflictAdvice, setConflictAdvice] = useState<Record<string, ConflictAdviceDto>>({});
+  const [conflictBusy, setConflictBusy] = useState(false);
+  const [adviceBusy, setAdviceBusy] = useState(false);
+  const [fileQuery, setFileQuery] = useState("");
+  const [activePath, setActivePath] = useState<string | null>(null);
 
   const refresh = useCallback(
     async (quiet = false) => {
@@ -402,9 +676,10 @@ export default function WorkspaceReviewView({
           invoke<GitStatusDto>("git_status", { cwd: worktreePath }),
         ]);
         if (!nextDiff.inWorkspace) throw new Error("该目录不属于活动工作区");
-        const nextHealth = await invoke<WorkspaceHealthDto>("workspace_health", {
-          id: nextDiff.workspaceId,
-        });
+        const [nextHealth, nextUnmerged] = await Promise.all([
+          invoke<WorkspaceHealthDto>("workspace_health", { id: nextDiff.workspaceId }),
+          invoke<UnmergedDto>("workspace_unmerged_files", { id: nextDiff.workspaceId }),
+        ]);
         const signature = JSON.stringify({
           files: nextDiff.files,
           status: nextStatus.files,
@@ -417,7 +692,13 @@ export default function WorkspaceReviewView({
         setDiff(nextDiff);
         setStatus(nextStatus);
         setHealth(nextHealth);
-        setError(null);
+        setUnmerged(nextUnmerged);
+        if (nextUnmerged.merging && nextUnmerged.files.length > 0) {
+          setConflictFiles((current) =>
+            current.length > 0 ? current : nextUnmerged.files,
+          );
+        }
+        if (!quiet) setError(null);
       } catch (reason) {
         setError(String(reason));
       } finally {
@@ -433,14 +714,94 @@ export default function WorkspaceReviewView({
   }, [refresh]);
 
   useEffect(() => {
+    signatureRef.current = "";
+    autoConflictRef.current = null;
+    sectionRefs.current.clear();
+    setUnmerged(null);
+    setConflictFiles([]);
+    setConflictContents({});
+    setConflictContentErrors({});
+    setConflictChoices({});
+    setConflictAdvice({});
+    setFileQuery("");
+    setActivePath(null);
+  }, [worktreePath]);
+
+  // 「解决冲突」本身就是明确操作：工作区干净时直接准备最新基准两侧，
+  // 不先展示容易被误认为当前 main 的普通 merge-base diff。
+  useEffect(() => {
+    if (
+      !diff ||
+      health?.conflict !== true ||
+      !status ||
+      !unmerged ||
+      unmerged.merging ||
+      status.files.length > 0 ||
+      busy ||
+      conflictBusy
+    ) {
+      return;
+    }
+    if (autoConflictRef.current === diff.workspaceId) return;
+    autoConflictRef.current = diff.workspaceId;
+    void startConflictResolution(false);
+  }, [busy, conflictBusy, diff, health?.conflict, status, unmerged]);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
-      if (!busy) void refresh(true);
+      if (!busy && !conflictBusy) void refresh(true);
     }, 8000);
     return () => window.clearInterval(timer);
-  }, [busy, refresh]);
+  }, [busy, conflictBusy, refresh]);
 
-  const tree = useMemo(() => buildChangeTree(diff?.files ?? []), [diff?.files]);
+  useEffect(() => {
+    if (!diff || !unmerged?.merging || unmerged.staleBase) return;
+    const paths = conflictFiles.length > 0 ? conflictFiles : unmerged.files;
+    const missing = paths.filter(
+      (path) => !conflictContents[path] && !conflictContentErrors[path],
+    );
+    if (missing.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      missing.map(async (path) => {
+        try {
+          const content = await invoke<ConflictContentDto>("workspace_conflict_content", {
+            id: diff.workspaceId,
+            path,
+          });
+          return { path, content, error: null };
+        } catch (reason) {
+          return { path, content: null, error: String(reason) };
+        }
+      }),
+    )
+      .then((results) => {
+        if (cancelled) return;
+        const entries = results
+          .filter((item): item is typeof item & { content: ConflictContentDto } => !!item.content)
+          .map((item) => [item.path, item.content] as const);
+        const errors = results
+          .filter((item) => item.error)
+          .map((item) => [item.path, item.error!] as const);
+        if (entries.length > 0) {
+          setConflictContents((current) => ({ ...current, ...Object.fromEntries(entries) }));
+        }
+        if (errors.length > 0) {
+          setConflictContentErrors((current) => ({ ...current, ...Object.fromEntries(errors) }));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [conflictContentErrors, conflictContents, conflictFiles, diff, unmerged]);
+
   const blockers = blockerText(health);
+  const conflictMode = unmerged?.merging === true;
+  const staleBase = unmerged?.staleBase === true;
+  const unresolvedFiles = unmerged?.files ?? [];
+  const unresolvedSet = useMemo(() => new Set(unresolvedFiles), [unresolvedFiles]);
+  const allConflictContentsLoaded =
+    conflictFiles.length > 0 && conflictFiles.every((path) => !!conflictContents[path]);
   const hasUncommitted = (status?.files.length ?? 0) > 0;
   const hasCommitted = (health?.ahead ?? 0) > 0;
   const hasTaskChanges = (diff?.files.length ?? 0) > 0;
@@ -456,6 +817,30 @@ export default function WorkspaceReviewView({
     !busy &&
     !hardBlocked &&
     (hasUncommitted ? message.trim().length > 0 : hasCommitted);
+  const normalizedQuery = fileQuery.trim().toLocaleLowerCase();
+  const filteredFiles = useMemo(
+    () =>
+      (diff?.files ?? []).filter(
+        (file) => !normalizedQuery || file.path.toLocaleLowerCase().includes(normalizedQuery),
+      ),
+    [diff?.files, normalizedQuery],
+  );
+  const tree = useMemo(() => buildChangeTree(filteredFiles), [filteredFiles]);
+  const filteredConflictFiles = useMemo(
+    () =>
+      conflictFiles.filter(
+        (path) => !normalizedQuery || path.toLocaleLowerCase().includes(normalizedQuery),
+      ),
+    [conflictFiles, normalizedQuery],
+  );
+  const displayedPaths = conflictMode
+    ? filteredConflictFiles
+    : filteredFiles.map((file) => file.path);
+
+  useEffect(() => {
+    if (displayedPaths.length === 0) return;
+    if (!activePath || !displayedPaths.includes(activePath)) setActivePath(displayedPaths[0]);
+  }, [activePath, displayedPaths]);
 
   const registerSection = useCallback((path: string, element: HTMLElement | null) => {
     if (element) sectionRefs.current.set(path, element);
@@ -463,7 +848,241 @@ export default function WorkspaceReviewView({
   }, []);
 
   function selectFile(path: string) {
+    setActivePath(path);
     sectionRefs.current.get(path)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  const trackActiveFile = useCallback(() => {
+    if (scrollFrameRef.current !== null) return;
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const host = reviewMainRef.current;
+      if (!host) return;
+      const threshold = host.getBoundingClientRect().top + 56;
+      let next: string | null = null;
+      for (const [path, element] of sectionRefs.current) {
+        const top = element.getBoundingClientRect().top;
+        if (top <= threshold) next = path;
+        else if (!next) {
+          next = path;
+          break;
+        }
+      }
+      if (next) setActivePath((current) => (current === next ? current : next));
+    });
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current);
+    },
+    [],
+  );
+
+  function retryConflictContent(path: string) {
+    setConflictContentErrors((current) => {
+      const next = { ...current };
+      delete next[path];
+      return next;
+    });
+    setConflictContents((current) => {
+      const next = { ...current };
+      delete next[path];
+      return next;
+    });
+  }
+
+  async function startConflictResolution(restart = false) {
+    if (!diff) return;
+    if (
+      restart &&
+      !window.confirm(
+        `${diff.baseBranch} 已在冲突开始后更新。重新同步会放弃当前尚未提交的选边结果，并用最新 ${diff.baseBranch} 重新生成冲突。继续？`,
+      )
+    ) {
+      return;
+    }
+    setConflictBusy(true);
+    setFinishMenu(null);
+    setError(null);
+    setResult(null);
+    if (restart) {
+      setConflictFiles([]);
+      setConflictContents({});
+      setConflictContentErrors({});
+      setConflictChoices({});
+      setConflictAdvice({});
+    }
+    try {
+      const output = await invoke<string>("workspace_sync_base", {
+        id: diff.workspaceId,
+        restart,
+      });
+      setResult(output);
+    } catch (reason) {
+      const state = await invoke<UnmergedDto>("workspace_unmerged_files", {
+        id: diff.workspaceId,
+      }).catch(() => null);
+      if (!state?.merging) {
+        setError(String(reason));
+        return;
+      }
+      setUnmerged(state);
+      setConflictFiles(state.files);
+      setResult(`冲突已放在隔离工作区中，请逐个比较 ${diff.branch} 与 ${diff.baseBranch} 后选定版本`);
+    } finally {
+      await refresh(true);
+      setConflictBusy(false);
+    }
+  }
+
+  async function chooseConflict(path: string, choice: ConflictChoice) {
+    if (!diff) return;
+    setConflictBusy(true);
+    setError(null);
+    try {
+      const state = await invoke<UnmergedDto>("workspace_resolve_file", {
+        id: diff.workspaceId,
+        path,
+        side: choice,
+      });
+      setUnmerged(state);
+      setConflictChoices((current) => ({ ...current, [path]: choice }));
+      await refresh(true);
+    } catch (reason) {
+      setError(String(reason));
+      await refresh(true);
+    } finally {
+      setConflictBusy(false);
+    }
+  }
+
+  async function chooseAll(choice: ConflictChoice) {
+    if (!diff || unresolvedFiles.length === 0) return;
+    if (
+      choice === "theirs" &&
+      !window.confirm(`将全部冲突文件改为 ${diff.baseBranch} 版本，任务分支对应改动会被放弃。继续？`)
+    ) return;
+    setConflictBusy(true);
+    setError(null);
+    try {
+      let state = unmerged;
+      const chosen: Record<string, ConflictChoice> = {};
+      for (const path of unresolvedFiles) {
+        state = await invoke<UnmergedDto>("workspace_resolve_file", {
+          id: diff.workspaceId,
+          path,
+          side: choice,
+        });
+        chosen[path] = choice;
+      }
+      setUnmerged(state);
+      setConflictChoices((current) => ({ ...current, ...chosen }));
+      await refresh(true);
+    } catch (reason) {
+      setError(String(reason));
+      await refresh(true);
+    } finally {
+      setConflictBusy(false);
+    }
+  }
+
+  async function requestConflictAdvice() {
+    if (!diff) return;
+    setAdviceBusy(true);
+    setError(null);
+    try {
+      const list = await invoke<ConflictAdviceDto[]>("ai_conflict_advice", {
+        id: diff.workspaceId,
+      });
+      setConflictAdvice(Object.fromEntries(list.map((item) => [item.path, item])));
+    } catch (reason) {
+      setError(`${reason}（AI 只给建议，不会自动选择版本）`);
+    } finally {
+      setAdviceBusy(false);
+    }
+  }
+
+  async function applyConflictAdvice() {
+    if (!diff) return;
+    const choices = unresolvedFiles
+      .map((path) => [path, conflictAdvice[path]?.choice] as const)
+      .filter((entry): entry is readonly [string, ConflictChoice] =>
+        entry[1] === "ours" || entry[1] === "theirs",
+      );
+    if (choices.length === 0) return;
+    setConflictBusy(true);
+    setError(null);
+    try {
+      let state = unmerged;
+      const chosen: Record<string, ConflictChoice> = {};
+      for (const [path, choice] of choices) {
+        state = await invoke<UnmergedDto>("workspace_resolve_file", {
+          id: diff.workspaceId,
+          path,
+          side: choice,
+        });
+        chosen[path] = choice;
+      }
+      setUnmerged(state);
+      setConflictChoices((current) => ({ ...current, ...chosen }));
+      await refresh(true);
+    } catch (reason) {
+      setError(String(reason));
+      await refresh(true);
+    } finally {
+      setConflictBusy(false);
+    }
+  }
+
+  async function finishConflict(mergeAfter: boolean) {
+    if (!diff) return;
+    if (unresolvedFiles.length > 0) {
+      setError(`还有 ${unresolvedFiles.length} 个冲突文件未选择版本`);
+      return;
+    }
+    if (
+      mergeAfter &&
+      !window.confirm(`将提交冲突解决结果并合并进本地 ${diff.baseBranch}，工作区保留且不推送。继续？`)
+    ) return;
+    setConflictBusy(true);
+    setError(null);
+    setResult(null);
+    let resolvedCommitted = false;
+    try {
+      await invoke<string>("workspace_finish_merge", { id: diff.workspaceId });
+      resolvedCommitted = true;
+      if (!mergeAfter) {
+        setResult("冲突解决结果已提交，可稍后继续审阅并合并");
+        await refresh();
+        return;
+      }
+      const latest = await invoke<WorkspaceHealthDto>("workspace_health", {
+        id: diff.workspaceId,
+      });
+      if (!latest.readyToMerge) {
+        const reasons = blockerText(latest);
+        if (latest.uncommitted) reasons.unshift("工作区仍有未提交改动");
+        throw new Error(reasons.join("；") || "健康检查未通过");
+      }
+      const merged = await invoke<WorkspaceMergeResultDto>("merge_workspace", {
+        id: diff.workspaceId,
+        archive: false,
+      });
+      if (merged.failedPhase) throw new Error(merged.message);
+      setResult(merged.message);
+      setConflictFiles([]);
+      setConflictContents({});
+      setConflictContentErrors({});
+      setConflictChoices({});
+      setConflictAdvice({});
+      await refresh();
+    } catch (reason) {
+      setError(`${resolvedCommitted ? "解决结果已提交，但最终合并未完成：" : ""}${reason}`);
+      await refresh(true);
+    } finally {
+      setConflictBusy(false);
+    }
   }
 
   async function generateMessage() {
@@ -503,11 +1122,12 @@ export default function WorkspaceReviewView({
     let committed = false;
     try {
       if (shouldCommit) {
-        await invoke<string>("git_commit", {
+        const commitResult = await invoke<GitCommitResultDto>("git_commit", {
           cwd: worktreePath,
           message: message.trim(),
           push: false,
         });
+        if (!commitResult.committed) throw new Error(commitResult.message);
         committed = true;
         setMessage("");
       }
@@ -520,9 +1140,17 @@ export default function WorkspaceReviewView({
           if (latest.uncommitted) reasons.unshift("工作区仍有未提交改动");
           throw new Error(`提交已完成，但尚不可合并：${reasons.join("；") || "健康检查未通过"}`);
         }
-        await invoke<string>("merge_workspace", { id: diff.workspaceId, archive });
-        setResult(archive ? "任务已提交、合并并归档" : "任务已提交并合并，工作区已保留");
-        if (archive) {
+        const mergeResult = await invoke<WorkspaceMergeResultDto>("merge_workspace", {
+          id: diff.workspaceId,
+          archive,
+        });
+        if (mergeResult.failedPhase) {
+          setError(mergeResult.message);
+          await refresh(true);
+          return;
+        }
+        setResult(mergeResult.message);
+        if (mergeResult.archived) {
           onClose();
           return;
         }
@@ -540,45 +1168,237 @@ export default function WorkspaceReviewView({
 
   return (
     <div className="absolute inset-0 z-30 flex min-h-0 flex-col bg-canvas">
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-hairline bg-strip px-3">
-        <button
-          type="button"
-          onClick={onClose}
-          title="返回终端"
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-l3 hover:bg-white/5 hover:text-l1"
-        >
-          <ArrowLeft aria-hidden="true" className="h-4 w-4" />
-        </button>
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="truncate font-medium text-l1">{diff?.workspaceName ?? "任务审阅"}</span>
-            {diff && (
-              <span className="truncate font-mono text-xs text-l3">
-                {diff.branch} → {diff.baseBranch}
-              </span>
-            )}
+      <header className="shrink-0 border-b border-hairline bg-strip">
+        <div className="flex h-12 items-center gap-3 px-3">
+          <button
+            type="button"
+            onClick={onClose}
+            title="返回终端"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-l3 hover:bg-white/5 hover:text-l1"
+          >
+            <ArrowLeft aria-hidden="true" className="h-4 w-4" />
+          </button>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="shrink-0 text-sm font-medium text-l1">
+              {conflictMode || health?.conflict ? "解决冲突" : "审阅"}
+            </span>
+            <span className="text-l4">/</span>
+            <span className="truncate text-sm text-l2">{diff?.workspaceName ?? "加载中"}</span>
           </div>
-          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-l4">
-            <span>{diff?.files.length ?? 0} 个文件</span>
-            <span className="font-mono text-add">+{diff?.totalAdd ?? 0}</span>
-            <span className="font-mono text-del">-{diff?.totalDel ?? 0}</span>
-            {health && (
-              <span>
-                ↑{health.ahead} ↓{health.behind}
-              </span>
+
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              disabled={refreshing || busy || conflictBusy}
+              title="刷新审阅数据"
+              className="flex h-8 w-8 items-center justify-center rounded text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+            >
+              <RefreshCw
+                aria-hidden="true"
+                className={["h-4 w-4", refreshing ? "animate-spin" : ""].join(" ")}
+              />
+            </button>
+
+            {diff && health?.conflict && !conflictMode ? (
+              <button
+                type="button"
+                onClick={() =>
+                  hasUncommitted ? void finish("commit") : void startConflictResolution()
+                }
+                disabled={conflictBusy || busy || (hasUncommitted && !message.trim())}
+                className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+              >
+                {busy || conflictBusy
+                  ? "处理中…"
+                  : hasUncommitted
+                    ? "先提交改动"
+                    : "开始解决冲突"}
+              </button>
+            ) : conflictMode ? (
+              staleBase ? (
+                <button
+                  type="button"
+                  onClick={() => void startConflictResolution(true)}
+                  disabled={conflictBusy}
+                  className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                >
+                  {conflictBusy
+                    ? "重新同步中…"
+                    : `重新同步最新 ${diff?.baseBranch ?? "基准分支"}`}
+                </button>
+              ) : (
+                <div className="flex">
+                  <button
+                    type="button"
+                    onClick={() => void finishConflict(true)}
+                    disabled={conflictBusy || unresolvedFiles.length > 0}
+                    className="min-w-36 rounded-l border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                  >
+                    {conflictBusy
+                      ? "处理中…"
+                      : unresolvedFiles.length > 0
+                        ? <>还剩 {unresolvedFiles.length} 个冲突</>
+                        : "完成解决并合并"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      setFinishMenu({ x: rect.right - 190, y: rect.bottom + 4 });
+                    }}
+                    disabled={conflictBusy || unresolvedFiles.length > 0}
+                    title="更多完成方式"
+                    className="flex w-8 items-center justify-center rounded-r border-y border-r border-cta-bd bg-cta text-cta-text hover:brightness-110 disabled:opacity-50"
+                  >
+                    <ChevronDown aria-hidden="true" className="h-4 w-4" />
+                  </button>
+                </div>
+              )
+            ) : (
+              <div className="flex">
+                <button
+                  type="button"
+                  onClick={() => void finish("merge")}
+                  disabled={!canPrimary}
+                  className="min-w-32 rounded-l border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                >
+                  {busy ? "处理中…" : primaryLabel}
+                </button>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setFinishMenu({ x: rect.right - 190, y: rect.bottom + 4 });
+                  }}
+                  disabled={busy || (!hasUncommitted && (!hasCommitted || hardBlocked))}
+                  title="更多完成方式"
+                  className="flex w-8 items-center justify-center rounded-r border-y border-r border-cta-bd bg-cta text-cta-text hover:brightness-110 disabled:opacity-50"
+                >
+                  <ChevronDown aria-hidden="true" className="h-4 w-4" />
+                </button>
+              </div>
             )}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          disabled={refreshing || busy}
-          title="刷新审阅数据"
-          className="ml-auto flex h-8 w-8 shrink-0 items-center justify-center rounded text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
-        >
-          <RefreshCw aria-hidden="true" className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-        </button>
+
+        {diff && (
+          <div className="flex min-h-9 items-center gap-3 border-t border-hairline px-3 py-1.5 text-xs">
+            <div className="flex min-w-0 items-center gap-2 text-l3">
+              <GitBranch aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+              <span className="max-w-44 truncate font-mono text-l2">{diff.branch}</span>
+              <span className="text-l4">→</span>
+              <span className="max-w-32 truncate font-mono">{diff.baseBranch}</span>
+              <span className="ml-1 text-l4">{diff.files.length} 个文件</span>
+              <span className="font-mono text-add">+{diff.totalAdd}</span>
+              <span className="font-mono text-del">-{diff.totalDel}</span>
+              {health && (
+                <span className="font-mono text-l4">
+                  ↑{health.ahead} ↓{health.behind}
+                </span>
+              )}
+            </div>
+
+            {conflictMode ? (
+              <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                <span className="mr-1 text-l4">
+                  {conflictFiles.length - unresolvedFiles.length}/{conflictFiles.length} 已选择
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void chooseAll("ours")}
+                  disabled={staleBase || conflictBusy || unresolvedFiles.length === 0 || !allConflictContentsLoaded}
+                  className="rounded border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
+                >
+                  全部任务版
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void chooseAll("theirs")}
+                  disabled={staleBase || conflictBusy || unresolvedFiles.length === 0 || !allConflictContentsLoaded}
+                  className="rounded border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
+                >
+                  全部 {diff.baseBranch}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void requestConflictAdvice()}
+                  disabled={staleBase || adviceBusy || conflictBusy || unresolvedFiles.length === 0}
+                  className="rounded border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
+                >
+                  {adviceBusy ? "◈ 分析中…" : "◈ AI 建议"}
+                </button>
+                {Object.keys(conflictAdvice).length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void applyConflictAdvice()}
+                    disabled={staleBase || conflictBusy || !allConflictContentsLoaded}
+                    className="rounded px-2 py-1 text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                  >
+                    按建议选择
+                  </button>
+                )}
+              </div>
+            ) : hasUncommitted ? (
+              <div className="ml-auto flex w-[360px] shrink-0 items-center gap-1.5">
+                <input
+                  value={message}
+                  onChange={(event) => setMessage(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && canPrimary) void finish("merge");
+                  }}
+                  disabled={busy}
+                  placeholder="提交信息"
+                  className="min-w-0 flex-1 rounded border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
+                />
+                <button
+                  type="button"
+                  onClick={() => void generateMessage()}
+                  disabled={aiBusy || busy}
+                  title="AI 生成提交信息"
+                  className="flex h-7 min-w-7 items-center justify-center rounded px-1.5 text-l2 hover:bg-white/5 disabled:opacity-50"
+                >
+                  {aiBusy ? "◈…" : "◈"}
+                </button>
+              </div>
+            ) : (
+              <span className="ml-auto text-l4">
+                默认合并到本地 {diff.baseBranch}，工作区保留
+              </span>
+            )}
+          </div>
+        )}
       </header>
+
+      {diff && !conflictMode && blockers.length > 0 && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb" />
+          <span className="min-w-0 flex-1 truncate">
+            {blockers.join(" · ")}
+            {health?.conflict && health.conflictFiles.length > 0 && (
+              <>：{health.conflictFiles.join("、")}</>
+            )}
+          </span>
+        </div>
+      )}
+      {diff && conflictMode && staleBase && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb" />
+          <span>
+            {diff.baseBranch} 已在本次冲突开始后更新；旧的基准侧已停止显示，请从右上角重新同步。
+          </span>
+        </div>
+      )}
+      {result && (
+        <div className="shrink-0 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-ok-text">
+          ✓ {result}
+        </div>
+      )}
+      {error && (
+        <div className="shrink-0 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-err-text">
+          ✗ {error}
+        </div>
+      )}
 
       {loading && !diff ? (
         <div className="mx-auto w-full max-w-3xl px-8 py-8">
@@ -588,13 +1408,73 @@ export default function WorkspaceReviewView({
         <div className="p-6 text-sm text-err-text">{error ?? "无法加载工作区审阅数据"}</div>
       ) : (
         <div className="flex min-h-0 flex-1">
-          <main className="min-w-0 flex-1 overflow-auto bg-canvas">
-            {!hasTaskChanges ? (
+          <main
+            ref={reviewMainRef}
+            onScroll={trackActiveFile}
+            className="min-w-0 flex-1 overflow-auto bg-canvas"
+          >
+            {conflictMode ? (
+              staleBase ? (
+                <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
+                  <p className="text-sm text-l2">当前冲突使用的是旧基准，已暂停展示两侧内容</p>
+                  <p className="max-w-xl text-xs text-l4">
+                    重新同步后会基于最新 {diff.baseBranch} 生成新的任务版 / 基准版对照，避免看到一套内容、实际选择另一套内容。
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void startConflictResolution(true)}
+                    disabled={conflictBusy}
+                    className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                  >
+                    {conflictBusy ? "重新同步中…" : `重新同步最新 ${diff.baseBranch}`}
+                  </button>
+                </div>
+              ) : conflictFiles.length === 0 ? (
+                <div className="flex h-full items-center justify-center text-sm text-l4">
+                  正在读取冲突文件…
+                </div>
+              ) : filteredConflictFiles.length === 0 ? (
+                <div className="flex h-full items-center justify-center text-sm text-l4">
+                  没有匹配的冲突文件
+                </div>
+              ) : (
+                filteredConflictFiles.map((path) => (
+                  <ConflictFileSection
+                    key={path}
+                    path={path}
+                    content={conflictContents[path] ?? null}
+                    contentError={conflictContentErrors[path]}
+                    branch={diff.branch}
+                    baseBranch={diff.baseBranch}
+                    unresolved={unresolvedSet.has(path)}
+                    choice={conflictChoices[path]}
+                    advice={conflictAdvice[path]}
+                    busy={conflictBusy || staleBase}
+                    register={registerSection}
+                    onChoose={(file, choice) => void chooseConflict(file, choice)}
+                    onRetry={retryConflictContent}
+                  />
+                ))
+              )
+            ) : health?.conflict ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
+                <p className="text-sm text-l2">
+                  {hasUncommitted ? "先提交工作区改动，再准备最新基准" : `正在同步最新 ${diff.baseBranch}…`}
+                </p>
+                <p className="max-w-xl text-xs text-l4">
+                  冲突模式只会展示本次同步后真实的任务版和基准版，不再用普通 merge-base diff 代替当前基准内容。
+                </p>
+              </div>
+            ) : !hasTaskChanges ? (
               <div className="flex h-full items-center justify-center text-sm text-l4">
                 当前任务相对 {diff.baseBranch} 没有改动
               </div>
+            ) : filteredFiles.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-l4">
+                没有匹配的改动文件
+              </div>
             ) : (
-              diff.files.map((file) => (
+              filteredFiles.map((file) => (
                 <DiffFileSection
                   key={file.path}
                   file={file}
@@ -606,107 +1486,134 @@ export default function WorkspaceReviewView({
             )}
           </main>
 
-          <aside className="flex w-[300px] shrink-0 flex-col border-l border-hairline bg-strip">
-            <div className="flex h-10 shrink-0 items-center border-b border-hairline px-3 text-xs font-medium text-l2">
-              改动文件
-              <span className="ml-auto text-l4">{diff.files.length}</span>
+          <aside className="flex w-[292px] shrink-0 flex-col border-l border-hairline bg-rail2">
+            <div className="shrink-0 border-b border-hairline p-3">
+              <div className="flex h-8 items-center gap-2 rounded border border-field bg-canvas px-2">
+                <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+                <input
+                  value={fileQuery}
+                  onChange={(event) => setFileQuery(event.target.value)}
+                  placeholder="筛选文件…"
+                  className="min-w-0 flex-1 bg-transparent text-xs text-l2 outline-none placeholder:text-l4"
+                />
+                {fileQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setFileQuery("")}
+                    className="text-l4 hover:text-l2"
+                    title="清除筛选"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+              <div className="mt-2 flex items-center text-[11px] text-l4">
+                <span>{conflictMode ? "冲突文件" : "改动文件"}</span>
+                <span className="ml-auto">
+                  {conflictMode ? filteredConflictFiles.length : filteredFiles.length}/
+                  {conflictMode ? conflictFiles.length : diff.files.length}
+                </span>
+              </div>
             </div>
+
             <div className="min-h-0 flex-1 overflow-auto py-1">
-              {tree.length === 0 ? (
-                <p className="px-3 py-2 text-xs text-l4">没有改动文件</p>
+              {conflictMode ? (
+                filteredConflictFiles.length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-l4">没有匹配文件</p>
+                ) : (
+                  filteredConflictFiles.map((path) => {
+                    const unresolved = unresolvedSet.has(path);
+                    const choice = conflictChoices[path];
+                    return (
+                      <button
+                        key={path}
+                        type="button"
+                        onClick={() => selectFile(path)}
+                        title={path}
+                        className={[
+                          "flex min-h-8 w-full items-center gap-2 border-l-2 px-3 py-1.5 text-left text-xs hover:bg-white/5",
+                          activePath === path
+                            ? "border-cta bg-rail-sel"
+                            : "border-transparent",
+                        ].join(" ")}
+                      >
+                        <span className={["font-mono", unresolved ? "text-err-text" : "text-okb"].join(" ")}>
+                          {unresolved ? "U" : "✓"}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-l2">{path}</span>
+                        {choice && (
+                          <span className="shrink-0 text-l4">
+                            {choice === "ours" ? "任务" : diff.baseBranch}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })
+                )
+              ) : tree.length === 0 ? (
+                <p className="px-3 py-2 text-xs text-l4">没有匹配文件</p>
               ) : (
-                <ChangeTree nodes={tree} onSelect={selectFile} />
+                <ChangeTree nodes={tree} onSelect={selectFile} activePath={activePath} />
               )}
             </div>
 
-            <div className="shrink-0 border-t border-hairline bg-canvas p-3">
-              {blockers.length > 0 && (
-                <div className="mb-3 bg-inset p-2 text-xs text-warn-text">
-                  {blockers.map((blocker) => (
-                    <div key={blocker}>• {blocker}</div>
-                  ))}
-                  {health?.conflict && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenConflict(diff.workspaceId)}
-                      className="mt-2 rounded bg-btn px-2 py-1 text-l1 hover:bg-white/10"
-                    >
-                      处理冲突
-                    </button>
-                  )}
-                </div>
-              )}
-              {hasUncommitted && (
-                <div className="mb-2 flex items-center gap-1.5">
-                  <input
-                    value={message}
-                    onChange={(event) => setMessage(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && canPrimary) void finish("merge");
-                    }}
-                    disabled={busy}
-                    placeholder="提交信息"
-                    className="min-w-0 flex-1 rounded border border-field bg-inset px-2 py-1.5 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
+            <div className="shrink-0 border-t border-hairline bg-strip px-3 py-2 text-[11px] text-l4">
+              {conflictMode ? (
+                <div className="flex items-center gap-2">
+                  <span
+                    className={[
+                      "h-1.5 w-1.5 rounded-full",
+                      staleBase
+                        ? "bg-warnb"
+                        : unresolvedFiles.length
+                          ? "bg-err-text"
+                          : "bg-okb",
+                    ].join(" ")}
                   />
-                  <button
-                    type="button"
-                    onClick={() => void generateMessage()}
-                    disabled={aiBusy || busy}
-                    title="AI 生成提交信息"
-                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-l2 hover:bg-white/5 disabled:opacity-50"
-                  >
-                    {aiBusy ? "◈…" : "◈"}
-                  </button>
+                  <span>
+                    {staleBase
+                      ? `${diff.baseBranch} 已更新，等待重新同步`
+                      : unresolvedFiles.length
+                      ? <>还剩 {unresolvedFiles.length} 个文件未选择</>
+                      : "全部冲突文件已选择"}
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span
+                    className={[
+                      "h-1.5 w-1.5 rounded-full",
+                      hardBlocked ? "bg-warnb" : "bg-okb",
+                    ].join(" ")}
+                  />
+                  <span>{hardBlocked ? "处理顶部提示后继续" : "从右上角提交或合并"}</span>
                 </div>
               )}
-              <div className="flex">
-                <button
-                  type="button"
-                  onClick={() => void finish("merge")}
-                  disabled={!canPrimary}
-                  className="min-w-0 flex-1 rounded-l border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
-                >
-                  {busy ? "处理中…" : primaryLabel}
-                </button>
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    setFinishMenu({ x: rect.right - 190, y: rect.top - 78 });
-                  }}
-                  disabled={busy || (!hasUncommitted && (!hasCommitted || hardBlocked))}
-                  title="更多完成方式"
-                  className="flex w-8 items-center justify-center rounded-r border-y border-r border-cta-bd bg-cta text-cta-text hover:brightness-110 disabled:opacity-50"
-                >
-                  <ChevronDown aria-hidden="true" className="h-4 w-4" />
-                </button>
-              </div>
-              <p className="mt-2 text-[11px] text-l4">
-                默认合并到本地 {diff.baseBranch}，工作区保留；不会自动推送远程
-              </p>
-              {result && <div className="mt-2 bg-inset p-2 text-xs text-ok-text">✓ {result}</div>}
-              {error && <div className="mt-2 bg-inset p-2 text-xs text-err-text">✗ {error}</div>}
             </div>
           </aside>
         </div>
       )}
 
-      {finishMenu && (
+      {finishMenu && !staleBase && (
         <ContextMenu
           x={finishMenu.x}
           y={finishMenu.y}
           onClose={() => setFinishMenu(null)}
-          items={[
-            ...(hasUncommitted
-              ? [{ label: "仅提交", onSelect: () => void finish("commit") }]
-              : []),
-            ...(!hardBlocked
-              ? [
-                  { label: "合并（保留工作区）", onSelect: () => void finish("merge") },
-                  { label: "合并并归档", onSelect: () => void finish("merge-archive") },
+          items={
+            conflictMode
+              ? [{ label: "仅保存解决结果", onSelect: () => void finishConflict(false) }]
+              : [
+                  ...(hasUncommitted
+                    ? [{ label: "仅提交", onSelect: () => void finish("commit") }]
+                    : []),
+                  ...(!hardBlocked
+                    ? [
+                        { label: "合并（保留工作区）", onSelect: () => void finish("merge") },
+                        { label: "合并并归档", onSelect: () => void finish("merge-archive") },
+                      ]
+                    : []),
                 ]
-              : []),
-          ]}
+          }
         />
       )}
     </div>

@@ -26,6 +26,25 @@ export interface ProfileInput {
   apiKey: string | null;
 }
 
+export interface ValidationCheckDto {
+  status: "passed" | "failed" | "skipped";
+  message: string;
+  latencyMs: number | null;
+}
+
+export interface ProfileValidationDto {
+  ok: boolean;
+  checkedAt: string;
+  local: ValidationCheckDto;
+  cli: ValidationCheckDto;
+  api: ValidationCheckDto;
+}
+
+export interface GlobalApplyResultDto {
+  files: string[];
+  validation: ProfileValidationDto;
+}
+
 export interface DetectResult {
   id: string;
   binaryPath: string | null;
@@ -93,7 +112,7 @@ export interface WorkspaceDto {
   worktreePath: string;
   baseBranch: string;
   portBase: number;
-  status: "active" | "archived";
+  status: "creating" | "active" | "archived";
   createdAt: string;
   archivedAt: string | null;
   /** 「合并（保留工作区）」后置位：已合并进基准分支的时间；继续提交后按 ahead>0 隐藏 */
@@ -146,7 +165,7 @@ export interface WorkspaceDiffDto {
 
 /** 工作区健康度（ReadyToMerge 判定输入，W3） */
 export interface WorkspaceHealthDto {
-  uncommitted: number;
+  uncommitted: boolean;
   ahead: number;
   behind: number;
   /** 与 base 是否冲突；无法判定时为 null */
@@ -160,6 +179,56 @@ export interface WorkspaceHealthDto {
   readyToMerge: boolean;
 }
 
+export interface WorkspaceDriftIssueDto {
+  code:
+    | "creating_incomplete"
+    | "repo_missing"
+    | "branch_missing"
+    | "worktree_missing"
+    | "worktree_unregistered"
+    | "worktree_branch_mismatch"
+    | "archived_worktree_present"
+    | "merge_in_progress";
+  message: string;
+}
+
+export interface WorkspaceDriftDto {
+  healthy: boolean;
+  issues: WorkspaceDriftIssueDto[];
+  canRemount: boolean;
+  canRelocate: boolean;
+  canMarkArchived: boolean;
+  canCleanRecord: boolean;
+  canResolveMerge: boolean;
+}
+
+/** git 提交/推送的分阶段结果；push 失败时 committed 仍为 true。 */
+export interface GitCommitResultDto {
+  committed: boolean;
+  pushed: boolean;
+  failedPhase: "push" | null;
+  message: string;
+  output: string;
+}
+
+/** 本地合并/归档的分阶段结果；归档失败时 merged 仍为 true。 */
+export interface WorkspaceMergeResultDto {
+  merged: boolean;
+  archived: boolean;
+  failedPhase: "state" | "archive" | null;
+  message: string;
+  output: string;
+}
+
+/** 推送分支/创建 PR 的分阶段结果。 */
+export interface WorkspacePrResultDto {
+  pushed: boolean;
+  prCreated: boolean;
+  prUrl: string | null;
+  failedPhase: "push" | "pr" | null;
+  message: string;
+}
+
 /** 技能库条目（技能页）：apps 记录各 agent 的应用开关 */
 export interface SkillDto {
   id: string;
@@ -168,6 +237,9 @@ export interface SkillDto {
   /** local | zip | github | discovered */
   source: string;
   repo: string | null;
+  repoRef: string | null;
+  repoSubdir: string | null;
+  sourceRevision: string | null;
   apps: Record<string, boolean>;
   installedAt: string;
   /** 用户自定义分类（null = 未分类） */
@@ -177,6 +249,28 @@ export interface SkillDto {
   staleCopies?: string[];
   /** 各 agent 的分发形态（"symlink" | "copy"；仅启用的 agent 有键） */
   appModes?: Record<string, string>;
+}
+
+export interface SkillImportConflictDto {
+  name: string;
+  existingId: string | null;
+  source: string;
+  updateAvailable: boolean;
+}
+
+export interface SkillImportResultDto {
+  added: string[];
+  updated: string[];
+  skipped: string[];
+  conflicts: SkillImportConflictDto[];
+}
+
+export interface SkillUpdateDto {
+  id: string;
+  updateAvailable: boolean;
+  currentRevision: string | null;
+  latestRevision: string | null;
+  message: string;
 }
 
 /** 未被纳管的已发现技能（各 agent 目录里已存在但不在库中） */
@@ -214,6 +308,9 @@ export interface ProjectUsageDto {
   sessions: number;
   costUsd: number | null;
   costPartial: boolean;
+  /** 后端登记的来源，例如 cli / ccode-ai。 */
+  source: string;
+  internal: boolean;
 }
 
 export interface ModelUsageDto {
@@ -222,6 +319,8 @@ export interface ModelUsageDto {
   output: number;
   costUsd: number | null;
   costPartial: boolean;
+  source: string;
+  internal: boolean;
 }
 
 export interface UsageStatsDto {

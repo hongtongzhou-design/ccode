@@ -2,8 +2,8 @@
 //! 全部走 std::process::Command 参数数组（无 shell），阻塞调用放 spawn_blocking。
 
 use serde::Serialize;
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path};
 use std::process::{Command, Output};
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -105,7 +105,10 @@ fn parse_porcelain(text: &str) -> (String, u32, u32, Vec<(String, String)>) {
         let status = if xy == "??" {
             "??".to_string()
         } else {
-            xy.chars().find(|c| !c.is_whitespace()).unwrap_or('M').to_string()
+            xy.chars()
+                .find(|c| !c.is_whitespace())
+                .unwrap_or('M')
+                .to_string()
         };
         let mut path = line[3..].to_string();
         // 重命名条目形如 "old -> new"，取新名
@@ -212,12 +215,17 @@ fn git_status_map_sync(cwd: &str) -> Result<std::collections::HashMap<String, St
     Ok(map)
 }
 
-fn branch_name(cwd: &str) -> Option<String> {    let o = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
+fn branch_name(cwd: &str) -> Option<String> {
+    let o = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
     if !o.status.success() {
         return None;
     }
     let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
-    if b.is_empty() { None } else { Some(b) }
+    if b.is_empty() {
+        None
+    } else {
+        Some(b)
+    }
 }
 
 fn do_push(cwd: &str) -> Result<String, String> {
@@ -232,23 +240,99 @@ fn do_push(cwd: &str) -> Result<String, String> {
         let branch = branch_name(cwd).unwrap_or_else(|| "HEAD".into());
         let p2 = run_git(cwd, &["push", "-u", "origin", &branch])?;
         let text2 = output_tail(&p2);
-        return if p2.status.success() { Ok(text2) } else { Err(text2) };
+        return if p2.status.success() {
+            Ok(text2)
+        } else {
+            Err(text2)
+        };
     }
     Err(text)
 }
 
-fn git_commit_sync(cwd: &str, message: &str, push: bool) -> Result<String, String> {
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitResultDto {
+    pub committed: bool,
+    pub pushed: bool,
+    pub failed_phase: Option<String>,
+    pub message: String,
+    pub output: String,
+}
+
+pub(crate) fn validate_selected_paths(cwd: &str, paths: &[String]) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Err("请至少选择一个要提交的文件".into());
+    }
+    let changed: HashSet<String> = git_status_sync(cwd)?.files.into_iter().map(|f| f.path).collect();
+    let mut seen = HashSet::new();
+    let mut validated = Vec::new();
+    for path in paths {
+        let candidate = Path::new(path);
+        if path.trim().is_empty()
+            || candidate.is_absolute()
+            || candidate.components().any(|part| {
+                matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+            })
+        {
+            return Err(format!("提交路径必须是仓库内相对路径: {path:?}"));
+        }
+        if !changed.contains(path) {
+            return Err(format!("文件已不在当前改动清单中，请刷新后重试: {path}"));
+        }
+        if seen.insert(path.clone()) {
+            validated.push(path.clone());
+        }
+    }
+    Ok(validated)
+}
+
+fn run_git_owned(cwd: &str, args: &[String]) -> Result<Output, String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .map_err(|e| format!("执行 git 失败: {e}"))
+}
+
+fn git_commit_sync(
+    cwd: &str,
+    message: &str,
+    push: bool,
+    paths: Option<&[String]>,
+) -> Result<GitCommitResultDto, String> {
     let message = message.trim();
     if message.is_empty() {
         return Err("提交信息不能为空".into());
     }
     let cwd = expand_tilde(cwd);
     let mut log = String::new();
-    let add = run_git(&cwd, &["add", "-A"])?;
+    let selected = paths
+        .map(|paths| validate_selected_paths(&cwd, paths))
+        .transpose()?;
+    let add = if let Some(selected) = &selected {
+        let mut args = vec!["--literal-pathspecs".into(), "add".into(), "-A".into(), "--".into()];
+        args.extend(selected.iter().cloned());
+        run_git_owned(&cwd, &args)?
+    } else {
+        run_git(&cwd, &["add", "-A"])?
+    };
     if !add.status.success() {
         return Err(output_tail(&add));
     }
-    let commit = run_git(&cwd, &["commit", "-m", message])?;
+    let commit = if let Some(selected) = &selected {
+        let mut args = vec![
+            "--literal-pathspecs".into(),
+            "commit".into(),
+            "-m".into(),
+            message.into(),
+            "--".into(),
+        ];
+        args.extend(selected.iter().cloned());
+        run_git_owned(&cwd, &args)?
+    } else {
+        run_git(&cwd, &["commit", "-m", message])?
+    };
     log.push_str(&output_tail(&commit));
     if !commit.status.success() {
         return Err(tail_lines(&log, 20));
@@ -264,11 +348,30 @@ fn git_commit_sync(cwd: &str, message: &str, push: bool) -> Result<String, Strin
             Err(t) => {
                 log.push('\n');
                 log.push_str(&t);
-                return Err(tail_lines(&log, 20));
+                let output = tail_lines(&log, 20);
+                return Ok(GitCommitResultDto {
+                    committed: true,
+                    pushed: false,
+                    failed_phase: Some("push".into()),
+                    message: "提交已完成，但推送失败；可直接重试推送，无需再次提交".into(),
+                    output,
+                });
             }
         }
     }
-    Ok(tail_lines(&log, 20))
+    let output = tail_lines(&log, 20);
+    Ok(GitCommitResultDto {
+        committed: true,
+        pushed: push,
+        failed_phase: None,
+        message: if push {
+            "提交并推送成功"
+        } else {
+            "提交成功"
+        }
+        .into(),
+        output,
+    })
 }
 
 fn git_push_sync(cwd: &str) -> Result<String, String> {
@@ -283,15 +386,24 @@ pub async fn git_status(cwd: String) -> Result<GitStatusDto, String> {
 }
 
 #[tauri::command]
-pub async fn git_status_map(cwd: String) -> Result<std::collections::HashMap<String, String>, String> {
+pub async fn git_status_map(
+    cwd: String,
+) -> Result<std::collections::HashMap<String, String>, String> {
     tauri::async_runtime::spawn_blocking(move || git_status_map_sync(&cwd))
         .await
         .map_err(|e| format!("查询 git 状态失败: {e}"))?
 }
 
 #[tauri::command]
-pub async fn git_commit(cwd: String, message: String, push: bool) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || git_commit_sync(&cwd, &message, push))
+pub async fn git_commit(
+    cwd: String,
+    message: String,
+    push: bool,
+    paths: Option<Vec<String>>,
+) -> Result<GitCommitResultDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_commit_sync(&cwd, &message, push, paths.as_deref())
+    })
         .await
         .map_err(|e| format!("提交失败: {e}"))?
 }
@@ -519,7 +631,10 @@ mod tests {
         let dir = init_repo("status");
         fs::write(dir.join("a.txt"), "l1\n").unwrap();
         git(&dir, &["add", "."]);
-        git(&dir, &["-c", "commit.gpgsign=false", "commit", "-m", "init"]);
+        git(
+            &dir,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
         fs::write(dir.join("a.txt"), "l1\nl2\n").unwrap();
         fs::write(dir.join("b.txt"), "x\ny\nz\n").unwrap();
 
@@ -545,11 +660,86 @@ mod tests {
         }
         let dir = init_repo("commit");
         fs::write(dir.join("a.txt"), "hello\n").unwrap();
-        git_commit_sync(dir.to_str().unwrap(), "初始提交", false).unwrap();
+        let result = git_commit_sync(dir.to_str().unwrap(), "初始提交", false, None).unwrap();
+        assert!(result.committed);
+        assert!(!result.pushed);
+        assert!(result.failed_phase.is_none());
         let s = git_status_sync(dir.to_str().unwrap()).unwrap();
         assert!(s.is_repo);
         assert!(s.files.is_empty(), "提交后工作区应干净: {:?}", s.files);
-        assert!(git_commit_sync(dir.to_str().unwrap(), "   ", false).is_err());
+        assert!(git_commit_sync(dir.to_str().unwrap(), "   ", false, None).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn commit_success_push_failure_is_partial_success() {
+        if !git_available() {
+            return;
+        }
+        let dir = init_repo("commit-push-partial");
+        fs::write(dir.join("a.txt"), "hello\n").unwrap();
+        let result = git_commit_sync(dir.to_str().unwrap(), "提交但无远端", true, None).unwrap();
+        assert!(result.committed);
+        assert!(!result.pushed);
+        assert_eq!(result.failed_phase.as_deref(), Some("push"));
+        assert!(result.message.contains("无需再次提交"));
+        assert!(git_status_sync(dir.to_str().unwrap())
+            .unwrap()
+            .files
+            .is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn selective_commit_leaves_unselected_changes_untouched() {
+        if !git_available() {
+            return;
+        }
+        let dir = init_repo("selective-commit");
+        fs::write(dir.join("a.txt"), "base-a\n").unwrap();
+        fs::write(dir.join("b.txt"), "base-b\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(
+            &dir,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        fs::write(dir.join("a.txt"), "changed-a\n").unwrap();
+        fs::write(dir.join("b.txt"), "changed-b\n").unwrap();
+
+        let selected = vec!["a.txt".to_string()];
+        let result = git_commit_sync(
+            dir.to_str().unwrap(),
+            "只提交 a",
+            false,
+            Some(&selected),
+        )
+        .unwrap();
+        assert!(result.committed);
+        let status = git_status_sync(dir.to_str().unwrap()).unwrap();
+        assert_eq!(status.files.len(), 1);
+        assert_eq!(status.files[0].path, "b.txt");
+        let head_a = run_git(dir.to_str().unwrap(), &["show", "HEAD:a.txt"]).unwrap();
+        let head_b = run_git(dir.to_str().unwrap(), &["show", "HEAD:b.txt"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&head_a.stdout), "changed-a\n");
+        assert_eq!(String::from_utf8_lossy(&head_b.stdout), "base-b\n");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn selective_commit_rejects_path_escape_and_stale_file() {
+        if !git_available() {
+            return;
+        }
+        let dir = init_repo("selective-invalid");
+        fs::write(dir.join("a.txt"), "a\n").unwrap();
+        let escape = vec!["../outside".to_string()];
+        assert!(git_commit_sync(dir.to_str().unwrap(), "bad", false, Some(&escape))
+            .unwrap_err()
+            .contains("相对路径"));
+        let stale = vec!["missing.txt".to_string()];
+        assert!(git_commit_sync(dir.to_str().unwrap(), "bad", false, Some(&stale))
+            .unwrap_err()
+            .contains("不在当前改动清单"));
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -571,22 +761,34 @@ mod tests {
         let dir = init_repo("status-map");
         fs::write(dir.join("a.txt"), "l1\n").unwrap();
         git(&dir, &["add", "."]);
-        git(&dir, &["-c", "commit.gpgsign=false", "commit", "-m", "init"]);
+        git(
+            &dir,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
         fs::write(dir.join("a.txt"), "l1\nl2\n").unwrap();
         fs::write(dir.join("b.txt"), "new\n").unwrap();
         let map = git_status_map_sync(dir.to_str().unwrap()).unwrap();
-        assert_eq!(map.get(dir.join("a.txt").to_str().unwrap()), Some(&"M".to_string()));
-        assert_eq!(map.get(dir.join("b.txt").to_str().unwrap()), Some(&"??".to_string()));
+        assert_eq!(
+            map.get(dir.join("a.txt").to_str().unwrap()),
+            Some(&"M".to_string())
+        );
+        assert_eq!(
+            map.get(dir.join("b.txt").to_str().unwrap()),
+            Some(&"??".to_string())
+        );
         assert!(!map.contains_key(dir.join("c.txt").to_str().unwrap()));
         // 非仓库 → 空表
         let plain = tmpdir("status-map-plain");
-        assert!(git_status_map_sync(plain.to_str().unwrap()).unwrap().is_empty());
+        assert!(git_status_map_sync(plain.to_str().unwrap())
+            .unwrap()
+            .is_empty());
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&plain).ok();
     }
 
     #[test]
-    fn porcelain_header_parses_branch_ahead_behind() {        let (branch, ahead, behind, files) =
+    fn porcelain_header_parses_branch_ahead_behind() {
+        let (branch, ahead, behind, files) =
             parse_porcelain("## main...origin/main [ahead 2, behind 3]\n M a.rs\n?? new.txt\n");
         assert_eq!((branch.as_str(), ahead, behind), ("main", 2, 3));
         assert_eq!(files.len(), 2);
@@ -614,10 +816,23 @@ mod tests {
         git(&repo, &["commit", "-m", "init"]);
         let origin = dir.join("origin.git");
         git(&dir, &["init", "--bare", "origin.git"]);
-        git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
         git(&repo, &["push", "-u", "origin", "main"]);
         let wt = dir.join("wt");
-        git(&repo, &["worktree", "add", wt.to_str().unwrap(), "-b", "ccode/t1", "origin/main"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().unwrap(),
+                "-b",
+                "ccode/t1",
+                "origin/main",
+            ],
+        );
         // 累计改动：已提交 +2 行、未提交 +1 行、未跟踪 3 行
         fs::write(wt.join("a.txt"), "l1\nl2\nl3\n").unwrap();
         git(&wt, &["add", "."]);
@@ -640,7 +855,11 @@ mod tests {
         assert_eq!(d.base_branch, "main");
         assert!(!d.merge_base.is_empty());
         let a = d.files.iter().find(|f| f.path == "a.txt").unwrap();
-        assert_eq!(a.additions, Some(3), "merge-base 起累计：已提交 2 行 + 未提交 1 行");
+        assert_eq!(
+            a.additions,
+            Some(3),
+            "merge-base 起累计：已提交 2 行 + 未提交 1 行"
+        );
         assert_eq!(a.status, "M");
         let n = d.files.iter().find(|f| f.path == "new.txt").unwrap();
         assert_eq!(n.status, "??");
@@ -649,7 +868,10 @@ mod tests {
         // 非工作区路径：in_workspace=false，前端回落普通 git_status
         let outside = workspace_diff_with_rows(repo.to_str().unwrap(), &rows).unwrap();
         assert!(!outside.in_workspace);
-        git(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        git(
+            &repo,
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -667,16 +889,32 @@ mod tests {
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-m", "init"]);
         let wt = dir.join("wt");
-        git(&repo, &["worktree", "add", wt.to_str().unwrap(), "-b", "ccode/t1", "main"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().unwrap(),
+                "-b",
+                "ccode/t1",
+                "main",
+            ],
+        );
         // 已跟踪文件：改一行 → diff 含 +/-；未跟踪文件 → 全文按新增
         fs::write(wt.join("a.txt"), "l1\nl2\n").unwrap();
         fs::write(wt.join("new.txt"), "x\ny\n").unwrap();
         let tracked = file_diff_impl(wt.to_str().unwrap(), "main", "a.txt").unwrap();
-        assert!(tracked.contains("-l1") || tracked.contains(" l1"), "{tracked}");
+        assert!(
+            tracked.contains("-l1") || tracked.contains(" l1"),
+            "{tracked}"
+        );
         assert!(tracked.contains("+l2"), "{tracked}");
         let untracked = file_diff_impl(wt.to_str().unwrap(), "main", "new.txt").unwrap();
         assert_eq!(untracked, "+x\n+y");
-        git(&repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+        git(
+            &repo,
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
         fs::remove_dir_all(&dir).ok();
     }
 }

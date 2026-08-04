@@ -7,6 +7,7 @@ mod logbuf;
 mod models;
 mod pricing;
 mod profiles;
+mod profile_validation;
 mod pty;
 mod sessions;
 mod settings;
@@ -34,6 +35,7 @@ pub fn run() {
             profiles::duplicate_profile,
             profiles::export_profiles,
             profiles::import_profiles,
+            profile_validation::validate_profile,
             agents::detect_agents,
             agents::session_resume_command,
             agents::resume_external_terminal,
@@ -89,9 +91,15 @@ pub fn run() {
             workspaces::delete_workspace,
             workspaces::workspace_env_for,
             workspaces::workspace_health,
+            workspaces::workspace_drift,
+            workspaces::workspace_repair_remount,
+            workspaces::workspace_relocate_repo,
+            workspaces::workspace_mark_archived,
+            workspaces::workspace_clean_record,
             workspaces::merge_workspace,
             workspaces::workspace_sync_base,
             workspaces::workspace_unmerged_files,
+            workspaces::workspace_conflict_content,
             workspaces::workspace_resolve_file,
             workspaces::workspace_finish_merge,
             workspaces::path_context,
@@ -106,6 +114,7 @@ pub fn run() {
             skills::import_skills_from_dir,
             skills::import_skills_from_zip,
             skills::import_skills_from_github,
+            skills::check_skill_updates,
             skills::discover_unmanaged,
             skills::import_discovered,
             skills::export_skills,

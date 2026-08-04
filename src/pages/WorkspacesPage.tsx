@@ -1,55 +1,21 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
 import { PageFrame, PageHeader, primaryActionClass } from "../components/PageFrame";
-import type { RepoDto, RunScriptDto, WorkspaceDto, WorkspaceDiffDto, WorkspaceHealthDto, WsSettingsDto } from "../types";
-
-/** 评审面板文件状态字母（与 GitPanel 同款小徽章） */
-const STATUS_STYLE: Record<string, string> = {
-  M: "bg-warn text-warn-text",
-  A: "bg-ok text-ok-text",
-  "??": "bg-ok text-ok-text",
-  D: "bg-err text-err-text",
-  R: "bg-inset text-l3",
-};
-
-/** 冲突两侧内容预览（HEAD=分支侧 / base 侧） */
-interface ConflictSides {
-  ours: string[];
-  theirs: string[];
-  /** 冲突块总数（>1 时提示预览仅为首块） */
-  blocks: number;
-}
-
-/** 解析冲突文件的首个冲突块（<<<<<<< HEAD … ======= … >>>>>>> main） */
-function parseConflictSides(text: string): ConflictSides | null {
-  const lines = text.split("\n");
-  let start = -1,
-    mid = -1,
-    end = -1,
-    blocks = 0;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].startsWith("<<<<<<<")) {
-      blocks++;
-      if (start === -1) start = i;
-    } else if (lines[i].startsWith("=======") && start !== -1 && mid === -1) {
-      mid = i;
-    } else if (lines[i].startsWith(">>>>>>>") && mid !== -1 && end === -1) {
-      end = i;
-      break;
-    }
-  }
-  if (start === -1 || mid === -1 || end === -1) return null;
-  return { ours: lines.slice(start + 1, mid), theirs: lines.slice(mid + 1, end), blocks };
-}
-
-/** 按钮标签里的内容摘要（超 12 字符截断） */
-function short(lines: string[] | undefined, fallback: string): string {
-  const s = (lines ?? []).join(" ").trim() || fallback;
-  return s.length > 12 ? `${s.slice(0, 12)}…` : s;
-}
+import type {
+  GitCommitResultDto,
+  RepoDto,
+  RunScriptDto,
+  WorkspaceDto,
+  WorkspaceDriftDto,
+  WorkspaceHealthDto,
+  WorkspaceMergeResultDto,
+  WorkspacePrResultDto,
+  WsSettingsDto,
+} from "../types";
 
 function relTime(iso: string | null): string {
   if (!iso) return "";
@@ -236,6 +202,7 @@ function PrModal({ ws, onClose }: { ws: WorkspaceDto; onClose: () => void }) {
   const [prUrl, setPrUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [aiDrafting, setAiDrafting] = useState(false);
+  const [pushed, setPushed] = useState(false);
 
   /** ◈ AI 起草 PR 描述：body 为空直接起草；非空先确认覆盖 */
   async function onDraft() {
@@ -257,12 +224,15 @@ function PrModal({ ws, onClose }: { ws: WorkspaceDto; onClose: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      const url = await invoke<string>("create_pr", {
+      const result = await invoke<WorkspacePrResultDto>("create_pr", {
         id: ws.id,
         title: title.trim(),
         body: body.trim() || null,
+        skipPush: pushed,
       });
-      setPrUrl(url);
+      setPushed(result.pushed);
+      if (result.prCreated && result.prUrl) setPrUrl(result.prUrl);
+      else setError(result.message);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -368,10 +338,87 @@ function PrModal({ ws, onClose }: { ws: WorkspaceDto; onClose: () => void }) {
                 disabled={busy || !title.trim()}
                 className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
               >
-                {busy ? "创建中…" : "创建 PR"}
+                {busy ? "创建中…" : pushed ? "重试创建 PR" : "创建 PR"}
               </button>
             </>
           )}
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ArchiveModal({
+  ws,
+  onClose,
+  onDone,
+}: {
+  ws: WorkspaceDto;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [message, setMessage] = useState(`chore: 保存 ${ws.name}`);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [committed, setCommitted] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!message.trim()) return;
+    setBusy(true);
+    setError(null);
+    let commitCompleted = committed;
+    try {
+      if (!committed) {
+        const result = await invoke<GitCommitResultDto>("git_commit", {
+          cwd: ws.worktreePath,
+          message: message.trim(),
+          push: false,
+        });
+        if (!result.committed) throw new Error(result.message);
+        commitCompleted = result.committed;
+        setCommitted(result.committed);
+      }
+      await invoke("archive_workspace", { id: ws.id });
+      onDone();
+    } catch (reason) {
+      setError(`${commitCompleted ? "提交已完成，仅归档未完成：" : ""}${reason}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="w-[26rem] rounded-md border border-field bg-strip p-5"
+      >
+        <h2 className="mb-2 text-base font-semibold text-l1">提交并归档</h2>
+        <p className="mb-4 text-xs text-l3">工作区有未提交改动。先提交到 {ws.branch}，再移除工作树；分支仍可恢复。</p>
+        <label className="mb-4 block">
+          <span className="mb-1 block text-xs text-l3">提交信息</span>
+          <input
+            autoFocus
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            disabled={committed}
+            className={field}
+          />
+        </label>
+        {error && <div className="mb-3 bg-inset p-2 text-xs text-err-text">✗ {error}</div>}
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5">
+            取消
+          </button>
+          <button
+            type="submit"
+            disabled={busy || (!committed && !message.trim())}
+            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+          >
+            {busy ? "处理中…" : committed ? "重试归档" : "提交并归档"}
+          </button>
         </div>
       </form>
     </div>
@@ -382,41 +429,26 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [workspaces, setWorkspaces] = useState<WorkspaceDto[]>([]);
   const [settings, setSettings] = useState<Record<string, WsSettingsDto>>({});
   const [health, setHealth] = useState<Record<string, WorkspaceHealthDto>>({});
+  const [drift, setDrift] = useState<Record<string, WorkspaceDriftDto>>({});
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState(false);
   const [created, setCreated] = useState<WorkspaceDto | null>(null);
   const [runMenu, setRunMenu] = useState<{ x: number; y: number; ws: WorkspaceDto } | null>(null);
-  const [mergeResults, setMergeResults] = useState<Record<string, { ok: boolean; text: string }>>({});
-  // 评审面板：展开的工作区 + 任务 diff + 逐文件 diff 内容（看完再决定合并/PR/归档）
-  const [reviewId, setReviewId] = useState<string | null>(null);
-  const [review, setReview] = useState<WorkspaceDiffDto | null>(null);
-  const [reviewLoading, setReviewLoading] = useState(false);
-  const [diffFor, setDiffFor] = useState<string | null>(null);
-  const [fileDiff, setFileDiff] = useState<string | null>(null);
-  const [diffLoading, setDiffLoading] = useState(false);
-  // 并入主分支（解冲突）的进行态与结果
-  const [syncing, setSyncing] = useState(false);
-  const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [mergeResults, setMergeResults] = useState<
+    Record<string, { status: "ok" | "partial" | "error"; text: string }>
+  >({});
   // 「合并 ▾」下拉（只合并 / 合并并归档）
   const [mergeMenu, setMergeMenu] = useState<{ x: number; y: number; ws: WorkspaceDto } | null>(
     null,
   );
-  // 并入后的未解决冲突清单（merging=处于并入状态；逐文件选边后缩减）
-  const [unmerged, setUnmerged] = useState<{ merging: boolean; files: string[] } | null>(null);
-  // 各冲突文件两侧内容预览（选边按钮旁展示，解决「不知道哪个对应哪个」）
-  const [sides, setSides] = useState<Record<string, ConflictSides | null>>({});
-  // ◈ AI 冲突审查建议（path → 选侧+理由）
-  const [aiAdvice, setAiAdvice] = useState<Record<string, { choice: string; reason: string }> | null>(null);
-  const [advising, setAdvising] = useState(false);
   const [prModal, setPrModal] = useState<WorkspaceDto | null>(null);
+  const [archiveModal, setArchiveModal] = useState<WorkspaceDto | null>(null);
   // 新建弹窗的仓库候选在页面可见时预热（list_repos 扫描慢，避免弹窗内空等）
   const [repos, setRepos] = useState<RepoDto[]>([]);
   const [reposLoading, setReposLoading] = useState(false);
   const openInTerminal = useOpenInTerminal();
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setWorkspaceReviewRequest = useAppStore((s) => s.setWorkspaceReviewRequest);
-  const workspaceConflictRequest = useAppStore((s) => s.workspaceConflictRequest);
-  const setWorkspaceConflictRequest = useAppStore((s) => s.setWorkspaceConflictRequest);
   const setPage = useAppStore((s) => s.setPage);
   const setSessionsQuery = useAppStore((s) => s.setSessionsQuery);
   const runningScripts = useAppStore((s) => s.runningScripts);
@@ -425,6 +457,19 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     try {
       const list = await invoke<WorkspaceDto[]>("list_workspaces");
       setWorkspaces(list);
+      const driftEntries = await Promise.all(
+        list.map(async (workspace) => {
+          try {
+            return [
+              workspace.id,
+              await invoke<WorkspaceDriftDto>("workspace_drift", { id: workspace.id }),
+            ] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      setDrift(Object.fromEntries(driftEntries.filter((entry) => entry !== null)));
       // 活跃工作区所在仓库的 settings（按 repoPath 缓存，不重复拉取）
       const repos = [
         ...new Set(list.filter((w) => w.status === "active").map((w) => w.repoPath)),
@@ -481,265 +526,17 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     )
       return;
     try {
-      const out = await invoke<string>("merge_workspace", { id: ws.id, archive });
-      setMergeResults((prev) => ({ ...prev, [ws.id]: { ok: true, text: out } }));
+      const out = await invoke<WorkspaceMergeResultDto>("merge_workspace", { id: ws.id, archive });
+      setMergeResults((prev) => ({
+        ...prev,
+        [ws.id]: {
+          status: out.failedPhase ? "partial" : "ok",
+          text: out.failedPhase ? out.message : out.output,
+        },
+      }));
       await refresh();
     } catch (e) {
-      setMergeResults((prev) => ({ ...prev, [ws.id]: { ok: false, text: String(e) } }));
-    }
-  }
-
-  /** 拉取各冲突文件的两侧内容预览（选边界面用） */
-  async function loadSides(ws: WorkspaceDto, files: string[]) {
-    const entries = await Promise.all(
-      files.map(async (f) => {
-        try {
-          const p = await invoke<{ text: string }>("read_file_preview", {
-            path: `${ws.worktreePath}/${f}`,
-            root: ws.worktreePath,
-          });
-          return [f, parseConflictSides(p.text)] as const;
-        } catch {
-          return [f, null] as const;
-        }
-      }),
-    );
-    setSides(Object.fromEntries(entries));
-  }
-
-  /** 评审面板：展开/收起该工作区的任务改动清单 */
-  async function toggleReview(ws: WorkspaceDto) {
-    if (reviewId === ws.id) {
-      setReviewId(null);
-      setReview(null);
-      setDiffFor(null);
-      setFileDiff(null);
-      setSyncMsg(null);
-      setUnmerged(null);
-      setSides({});
-      setAiAdvice(null);
-      return;
-    }
-    setReviewId(ws.id);
-    setReview(null);
-    setDiffFor(null);
-    setFileDiff(null);
-    setSyncMsg(null);
-    setUnmerged(null);
-    setSides({});
-    setAiAdvice(null);
-    setReviewLoading(true);
-    try {
-      setReview(await invoke<WorkspaceDiffDto>("workspace_diff", { worktreePath: ws.worktreePath }));
-      // 顺带查并入状态：之前并入到一半（冲突未解决）时直接进解决界面
-      const u = await invoke<{ merging: boolean; files: string[] }>("workspace_unmerged_files", {
-        id: ws.id,
-      }).catch(() => null);
-      if (u?.merging) {
-        setUnmerged(u);
-        if (u.files.length > 0) void loadSides(ws, u.files);
-      }
-    } catch (e) {
-      setError(String(e));
-      setReviewId(null);
-    } finally {
-      setReviewLoading(false);
-    }
-  }
-
-  /** 把基准分支并入本工作区：冲突留在工作区就地解（不碰主仓库），解完提交后合并解锁 */
-  async function onSyncBase(ws: WorkspaceDto) {
-    setSyncing(true);
-    setSyncMsg(null);
-    try {
-      const out = await invoke<string>("workspace_sync_base", { id: ws.id });
-      setSyncMsg({ ok: true, text: out });
-      await refresh();
-    } catch (e) {
-      // 冲突也是预期结果之一：拉取未解决清单与两侧内容，进入逐文件选边界面
-      setSyncMsg({ ok: false, text: String(e) });
-      const u = await invoke<{ merging: boolean; files: string[] }>("workspace_unmerged_files", {
-        id: ws.id,
-      }).catch(() => null);
-      if (u?.merging) {
-        setUnmerged(u);
-        if (u.files.length > 0) void loadSides(ws, u.files);
-      }
-      await refresh();
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  /** 单边解决一个冲突文件：ours=分支版 / theirs=基准版 */
-  async function resolveSide(ws: WorkspaceDto, path: string, side: "ours" | "theirs") {
-    try {
-      setUnmerged(
-        await invoke<{ merging: boolean; files: string[] }>("workspace_resolve_file", {
-          id: ws.id,
-          path,
-          side,
-        }),
-      );
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  /** 一键全选边：全部冲突文件用同一侧版本（theirs 会放弃分支改动，先确认） */
-  async function resolveAll(ws: WorkspaceDto, side: "ours" | "theirs") {
-    if (
-      side === "theirs" &&
-      !window.confirm(
-        `将用 ${ws.baseBranch} 的版本覆盖全部冲突文件，分支上的对应改动会被放弃。继续？`,
-      )
-    )
-      return;
-    setSyncing(true);
-    try {
-      let u = unmerged;
-      for (const f of unmerged?.files ?? []) {
-        u = await invoke<{ merging: boolean; files: string[] }>("workspace_resolve_file", {
-          id: ws.id,
-          path: f,
-          side,
-        });
-      }
-      setUnmerged(u);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  /** ◈ AI 冲突审查：逐文件给选侧建议 + 理由（建议不自动执行，由用户点「按建议」确认） */
-  async function onAiAdvice(ws: WorkspaceDto) {
-    setAdvising(true);
-    setError(null);
-    try {
-      const list = await invoke<{ path: string; choice: string; reason: string }[]>(
-        "ai_conflict_advice",
-        { id: ws.id },
-      );
-      setAiAdvice(Object.fromEntries(list.map((a) => [a.path, { choice: a.choice, reason: a.reason }])));
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setAdvising(false);
-    }
-  }
-
-  /** 按 AI 建议全部执行（choice=manual 的文件跳过，留人工） */
-  async function applyAllAdvice(ws: WorkspaceDto) {
-    setSyncing(true);
-    try {
-      let u = unmerged;
-      for (const f of unmerged?.files ?? []) {
-        const a = aiAdvice?.[f];
-        if (a && (a.choice === "ours" || a.choice === "theirs")) {
-          u = await invoke<{ merging: boolean; files: string[] }>("workspace_resolve_file", {
-            id: ws.id,
-            path: f,
-            side: a.choice,
-          });
-        }
-      }
-      setUnmerged(u);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  /** 全部选完后提交冲突解决；默认继续合并，次级动作只保存解决结果。 */
-  async function finishResolve(ws: WorkspaceDto, mergeAfter: boolean) {
-    if (
-      mergeAfter &&
-      !window.confirm(
-        `将提交冲突解决结果，然后把 ${ws.branch} 合并进 ${ws.baseBranch}（工作区保留，不推送远程）。继续？`,
-      )
-    )
-      return;
-    setSyncing(true);
-    setSyncMsg(null);
-    let resolvedCommitted = false;
-    try {
-      const finishOut = await invoke<string>("workspace_finish_merge", { id: ws.id });
-      resolvedCommitted = true;
-      setUnmerged(null);
-      setAiAdvice(null);
-
-      if (!mergeAfter) {
-        setSyncMsg({ ok: true, text: finishOut });
-        setMergeResults((prev) => ({
-          ...prev,
-          [ws.id]: { ok: true, text: "冲突解决结果已提交，可稍后合并" },
-        }));
-      } else {
-        const latest = await invoke<WorkspaceHealthDto>("workspace_health", { id: ws.id });
-        if (!latest.readyToMerge) {
-          const reasons: string[] = [];
-          if (latest.uncommitted) reasons.push("工作区仍有未提交改动");
-          if (latest.conflict === true) reasons.push("与基准分支仍有冲突");
-          if (latest.conflict === null) reasons.push("当前 Git 版本无法预检冲突");
-          if (latest.mainDirty) reasons.push("主仓库有未提交改动");
-          if (latest.mainOffBase) reasons.push(`主仓库不在 ${ws.baseBranch} 分支`);
-          if (latest.ahead === 0) reasons.push("没有待合并提交");
-          throw new Error(reasons.join("；") || "健康检查未通过");
-        }
-        await invoke<string>("merge_workspace", { id: ws.id, archive: false });
-        setSyncMsg({
-          ok: true,
-          text: `冲突解决完成，已合并进 ${ws.baseBranch}（工作区保留，未推送远程）`,
-        });
-        setMergeResults((prev) => ({
-          ...prev,
-          [ws.id]: {
-            ok: true,
-            text: `冲突解决完成，已合并进 ${ws.baseBranch}（工作区保留，未推送远程）`,
-          },
-        }));
-      }
-    } catch (e) {
-      const text = resolvedCommitted
-        ? `解决结果已提交，但合并未完成：${e}`
-        : String(e);
-      setSyncMsg({
-        ok: false,
-        text,
-      });
-      if (resolvedCommitted) {
-        setMergeResults((prev) => ({ ...prev, [ws.id]: { ok: false, text } }));
-      }
-    } finally {
-      await refresh();
-      setReview(
-        await invoke<WorkspaceDiffDto>("workspace_diff", { worktreePath: ws.worktreePath }).catch(
-          () => review,
-        ),
-      );
-      setSyncing(false);
-    }
-  }
-
-  /** 评审面板里逐文件展开/收起 diff 内容 */
-  async function toggleFileDiff(ws: WorkspaceDto, path: string) {
-    if (diffFor === path) {
-      setDiffFor(null);
-      setFileDiff(null);
-      return;
-    }
-    setDiffFor(path);
-    setFileDiff(null);
-    setDiffLoading(true);
-    try {
-      setFileDiff(await invoke<string>("workspace_file_diff", { worktreePath: ws.worktreePath, path }));
-    } catch (e) {
-      setFileDiff(`加载失败：${e}`);
-    } finally {
-      setDiffLoading(false);
+      setMergeResults((prev) => ({ ...prev, [ws.id]: { status: "error", text: String(e) } }));
     }
   }
 
@@ -770,16 +567,36 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       .finally(() => setReposLoading(false));
   }, [visible]);
 
-  // 全宽审阅检测到冲突后回到这里：精确展开对应任务的既有冲突处理面板。
-  useEffect(() => {
-    if (!visible || !workspaceConflictRequest) return;
-    const ws = workspaces.find((item) => item.id === workspaceConflictRequest);
-    if (!ws) return;
-    setWorkspaceConflictRequest(null);
-    void toggleReview(ws);
-  }, [visible, workspaceConflictRequest, workspaces, setWorkspaceConflictRequest]);
-
   async function onArchive(ws: WorkspaceDto) {
+    if (runningScripts[ws.id]) {
+      setError("该工作区仍有 run 脚本在运行，请先停止或关闭对应终端标签");
+      return;
+    }
+    try {
+      const mergeState = await invoke<{ merging: boolean; files: string[] }>(
+        "workspace_unmerged_files",
+        { id: ws.id },
+      );
+      if (mergeState.merging || mergeState.files.length > 0) {
+        setError("工作区存在未完成的合并或冲突，请先完成或中止冲突处理后再归档");
+        return;
+      }
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    let latestHealth: WorkspaceHealthDto;
+    try {
+      latestHealth = await invoke<WorkspaceHealthDto>("workspace_health", { id: ws.id });
+      setHealth((prev) => ({ ...prev, [ws.id]: latestHealth }));
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    if (latestHealth.uncommitted) {
+      setArchiveModal(ws);
+      return;
+    }
     if (!window.confirm("归档后 worktree 将被移除（分支保留，可随时恢复）。继续？"))
       return;
     try {
@@ -815,6 +632,59 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       await refresh();
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function onRepairRemount(ws: WorkspaceDto) {
+    try {
+      await invoke<WorkspaceDto>("workspace_repair_remount", { id: ws.id });
+      await refresh();
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function onRelocate(ws: WorkspaceDto) {
+    const selected = await open({ directory: true, multiple: false });
+    if (!selected || Array.isArray(selected)) return;
+    try {
+      await invoke<WorkspaceDto>("workspace_relocate_repo", {
+        id: ws.id,
+        newRepoPath: selected,
+      });
+      await refresh();
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function onMarkArchived(ws: WorkspaceDto) {
+    if (!window.confirm("仅把 Ccode 记录标记为已归档，不删除分支。继续？")) return;
+    try {
+      await invoke("workspace_mark_archived", { id: ws.id });
+      await refresh();
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function onCleanRecord(ws: WorkspaceDto) {
+    if (
+      !window.confirm(
+        `只清理 Ccode 中「${ws.name}」的记录并释放端口，不删除磁盘目录或 Git 分支。继续？`,
+      )
+    )
+      return;
+    try {
+      await invoke("workspace_clean_record", { id: ws.id });
+      setCreated((current) => (current?.id === ws.id ? null : current));
+      await refresh();
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
     }
   }
 
@@ -920,9 +790,23 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                         <span className="h-1.5 w-1.5 rounded-full bg-okb" />
                         活跃
                       </span>
+                    ) : ws.status === "creating" ? (
+                      <span className="flex items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-warn-text">
+                        <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
+                        创建未完成
+                      </span>
                     ) : (
                       <span className="rounded bg-inset px-1.5 py-0.5 text-xs text-l3">
                         已归档
+                      </span>
+                    )}
+                    {drift[ws.id] && !drift[ws.id].healthy && (
+                      <span
+                        className="flex items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-warn-text"
+                        title={drift[ws.id].issues.map((issue) => issue.message).join("\n")}
+                      >
+                        <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
+                        状态需修复
                       </span>
                     )}
                     {ws.status === "active" && ws.mergedAt && health[ws.id]?.ahead === 0 && (
@@ -945,15 +829,15 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                                 className="flex items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l3"
                                 title={
                                   h.conflictFiles.length
-                                    ? `冲突文件：${h.conflictFiles.join("、")}——点「评审」查看并处理`
-                                    : "与基准分支冲突——点「评审」查看并处理"
+                                    ? `冲突文件：${h.conflictFiles.join("、")}——点「解决冲突」进入全屏审阅`
+                                    : "与基准分支冲突——点「解决冲突」进入全屏审阅"
                                 }
                               >
                                 <span className="h-1.5 w-1.5 rounded-full bg-err-text" />
                                 有冲突
                               </span>
                             )}
-                            {h.uncommitted > 0 && (
+                            {h.uncommitted && (
                               <span className="flex items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l3">
                                 <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
                                 有未提交
@@ -982,7 +866,45 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                         );
                       })()}
                     <span className="ml-auto flex shrink-0 items-center gap-1.5">
-                      {ws.status === "active" && (
+                      {drift[ws.id] && !drift[ws.id].healthy && (
+                        <>
+                          {drift[ws.id].canResolveMerge && (
+                            <button
+                              onClick={() => {
+                                setWorkspaceReviewRequest({ worktreePath: ws.worktreePath });
+                                setPage("terminal");
+                              }}
+                              className={`${actionBtn} text-warnb`}
+                            >
+                              继续解决
+                            </button>
+                          )}
+                          {drift[ws.id].canRemount && (
+                            <button onClick={() => void onRepairRemount(ws)} className={actionBtn}>
+                              重新挂载
+                            </button>
+                          )}
+                          {drift[ws.id].canRelocate && (
+                            <button onClick={() => void onRelocate(ws)} className={actionBtn}>
+                              重新定位
+                            </button>
+                          )}
+                          {drift[ws.id].canMarkArchived && (
+                            <button onClick={() => void onMarkArchived(ws)} className={actionBtn}>
+                              标记归档
+                            </button>
+                          )}
+                          {drift[ws.id].canCleanRecord && (
+                            <button
+                              onClick={() => void onCleanRecord(ws)}
+                              className="rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5"
+                            >
+                              清理记录
+                            </button>
+                          )}
+                        </>
+                      )}
+                      {ws.status === "active" && drift[ws.id]?.healthy === true && (
                         <>
                           {(() => {
                             const wsSettings = settings[ws.repoPath];
@@ -1028,10 +950,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                           </button>
                           <button
                             onClick={() => {
-                              if (health[ws.id]?.conflict) {
-                                void toggleReview(ws);
-                                return;
-                              }
                               setWorkspaceReviewRequest({
                                 worktreePath: ws.worktreePath,
                               });
@@ -1039,14 +957,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             }}
                             title={
                               health[ws.id]?.conflict
-                                ? "有冲突待处理——在此展开并解决"
+                                ? "进入全屏冲突审阅，比较两侧内容并选择版本"
                                 : "打开全宽任务审阅，完成提交与合并"
                             }
-                            className={`${actionBtn} ${
-                              reviewId === ws.id ? "bg-white/10 text-l1" : ""
-                            } ${health[ws.id]?.conflict ? "text-warnb" : ""}`}
+                            className={`${actionBtn} ${health[ws.id]?.conflict ? "text-warnb" : ""}`}
                           >
-                            评审
+                            {health[ws.id]?.conflict ? "解决冲突" : "评审"}
                           </button>
                           <span className="flex shrink-0 items-center">
                             <button
@@ -1060,6 +976,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                                   return `合并 ${ws.branch} 进 ${ws.baseBranch}（保留工作区；▾ 可选合并并归档）`;
                                 // 逐条列出不可合并的原因（含主仓库状态）
                                 const reasons: string[] = [];
+                                if (h.ahead === 0) reasons.push("没有待合并提交");
                                 if (h.uncommitted) reasons.push("分支有未提交改动");
                                 if (h.conflict) reasons.push("与基准分支冲突");
                                 if (h.mainDirty) reasons.push("主仓库有未提交改动");
@@ -1100,7 +1017,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                           </button>
                         </>
                       )}
-                      {ws.status === "archived" && (
+                      {ws.status === "archived" && drift[ws.id]?.healthy === true && (
                         <button onClick={() => onRestore(ws)} className={actionBtn}>
                           恢复
                         </button>
@@ -1115,22 +1032,37 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                       >
                         会话
                       </button>
-                      <button
-                        onClick={() => onDelete(ws)}
-                        className="rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5"
-                      >
-                        删除
-                      </button>
+                      {drift[ws.id]?.healthy === true && (
+                        <button
+                          onClick={() => onDelete(ws)}
+                          className="rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5"
+                        >
+                          删除
+                        </button>
+                      )}
                     </span>
                   </div>
+                  {drift[ws.id] && !drift[ws.id].healthy && (
+                    <div className="mt-1.5 rounded bg-inset px-2 py-1.5 text-xs text-warn-text">
+                      {drift[ws.id].issues.map((issue) => issue.message).join(" · ")}
+                    </div>
+                  )}
                   {mergeResults[ws.id] && (
                     <div className="mt-1.5 flex items-start gap-2 rounded bg-strip p-2 text-xs text-l2">
                       <span
                         className={
-                          mergeResults[ws.id].ok ? "text-okb" : "text-err-text"
+                          mergeResults[ws.id].status === "ok"
+                            ? "text-okb"
+                            : mergeResults[ws.id].status === "partial"
+                              ? "text-warn-text"
+                              : "text-err-text"
                         }
                       >
-                        {mergeResults[ws.id].ok ? "✓" : "✗"}
+                        {mergeResults[ws.id].status === "ok"
+                          ? "✓"
+                          : mergeResults[ws.id].status === "partial"
+                            ? "!"
+                            : "✗"}
                       </span>
                       <pre className="whitespace-pre-wrap break-all font-mono">
                         {mergeResults[ws.id].text}
@@ -1150,278 +1082,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                       </button>
                     </div>
                   )}
-                  {/* 评审面板：任务改动清单 + 逐文件彩色 diff；审完在行上决定合并/PR/归档 */}
-                  {reviewId === ws.id && ws.status === "active" && (
-                    <div className="mt-1.5 rounded bg-strip p-2 text-xs">
-                      {reviewLoading || !review ? (
-                        <p className="text-l4">计算任务改动…</p>
-                      ) : (
-                        <>
-                          {(health[ws.id]?.conflict || unmerged?.merging) && (
-                            <div className="mb-2 rounded bg-canvas p-2">
-                              {unmerged?.merging ? (
-                                <>
-                                  <div className="mb-1 flex items-center gap-1 text-l3">
-                                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-err-text" />
-                                    冲突待解决——每个文件下方列出两边内容，点对应按钮选哪边：
-                                    <button
-                                      onClick={() => void onAiAdvice(ws)}
-                                      disabled={advising}
-                                      title="AI 逐个文件审查冲突，给出选侧建议与理由（建议需你确认后执行）"
-                                      className={`ml-auto shrink-0 rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50 ${
-                                        advising ? "animate-pulse" : ""
-                                      }`}
-                                    >
-                                      {advising ? "◈ 分析中…" : "◈ AI 建议"}
-                                    </button>
-                                  </div>
-                                  {aiAdvice && unmerged.files.some((f) => {
-                                    const c = aiAdvice[f]?.choice;
-                                    return c === "ours" || c === "theirs";
-                                  }) && (
-                                    <div className="mb-1">
-                                      <button
-                                        onClick={() => void applyAllAdvice(ws)}
-                                        disabled={syncing}
-                                        title="按 AI 建议逐个执行（建议人工合并的文件跳过）"
-                                        className="rounded bg-inset px-1.5 py-0.5 text-l2 hover:bg-white/10 disabled:opacity-50"
-                                      >
-                                        全部按 AI 建议执行
-                                      </button>
-                                    </div>
-                                  )}
-                                  {unmerged.files.length > 1 && (
-                                    <div className="mb-1 flex items-center gap-2">
-                                      <button
-                                        onClick={() => void resolveAll(ws, "ours")}
-                                        disabled={syncing}
-                                        title="全部冲突文件保留本工作区（分支）的版本"
-                                        className="rounded bg-inset px-1.5 py-0.5 text-l2 hover:bg-white/10 disabled:opacity-50"
-                                      >
-                                        全部选分支版
-                                      </button>
-                                      <button
-                                        onClick={() => void resolveAll(ws, "theirs")}
-                                        disabled={syncing}
-                                        title={`全部冲突文件用 ${ws.baseBranch} 的版本覆盖（放弃分支对应改动，有确认）`}
-                                        className="rounded bg-inset px-1.5 py-0.5 text-l2 hover:bg-white/10 disabled:opacity-50"
-                                      >
-                                        全部选 {ws.baseBranch} 版
-                                      </button>
-                                    </div>
-                                  )}
-                                  {unmerged.files.map((f) => {
-                                    const sd = sides[f];
-                                    return (
-                                      <div key={f} className="border-l-2 border-err-text py-0.5 pl-1.5">
-                                        <div className="flex items-center gap-2">
-                                          <span className="min-w-0 flex-1 truncate font-mono text-err-text">
-                                            {f}
-                                          </span>
-                                          <button
-                                            onClick={() => void resolveSide(ws, f, "ours")}
-                                            title="保留本工作区（分支）的改动"
-                                            className="shrink-0 rounded bg-inset px-1.5 py-0.5 font-mono text-l2 hover:bg-white/10"
-                                          >
-                                            选「{short(sd?.ours, "分支版")}」
-                                          </button>
-                                          <button
-                                            onClick={() => void resolveSide(ws, f, "theirs")}
-                                            title={`用 ${ws.baseBranch} 的版本覆盖`}
-                                            className="shrink-0 rounded bg-inset px-1.5 py-0.5 font-mono text-l2 hover:bg-white/10"
-                                          >
-                                            选「{short(sd?.theirs, `${ws.baseBranch} 版`)}」
-                                          </button>
-                                        </div>
-                                        {sd && (
-                                          <div className="ml-1 mt-0.5 space-y-0.5 text-[11px] text-l4">
-                                            <div className="flex gap-1">
-                                              <span className="shrink-0">分支：</span>
-                                              <span className="min-w-0 truncate font-mono text-l2">
-                                                {sd.ours.join(" / ") || "（空）"}
-                                              </span>
-                                            </div>
-                                            <div className="flex gap-1">
-                                              <span className="shrink-0">{ws.baseBranch}：</span>
-                                              <span className="min-w-0 truncate font-mono text-l2">
-                                                {sd.theirs.join(" / ") || "（空）"}
-                                              </span>
-                                            </div>
-                                            {sd.blocks > 1 && (
-                                              <div>
-                                                （共 {sd.blocks} 处冲突，以上仅第 1
-                                                处预览；逐行取舍请用预览编辑器）
-                                              </div>
-                                            )}
-                                          </div>
-                                        )}
-                                        {(() => {
-                                          const a = aiAdvice?.[f];
-                                          if (!a) return null;
-                                          if (a.choice !== "ours" && a.choice !== "theirs")
-                                            return (
-                                              <div className="ml-1 mt-0.5 text-[11px] text-warnb">
-                                                ◈ 建议人工逐行合并：{a.reason}
-                                              </div>
-                                            );
-                                          const label =
-                                            a.choice === "ours"
-                                              ? short(sd?.ours, "分支版")
-                                              : short(sd?.theirs, `${ws.baseBranch} 版`);
-                                          return (
-                                            <div className="ml-1 mt-0.5 flex items-center gap-2 text-[11px]">
-                                              <span className="text-l4">◈</span>
-                                              <span className="min-w-0 flex-1 truncate text-l3">
-                                                建议选「{label}」：{a.reason}
-                                              </span>
-                                              <button
-                                                onClick={() =>
-                                                  void resolveSide(ws, f, a.choice as "ours" | "theirs")
-                                                }
-                                                title={`按 AI 建议选「${label}」`}
-                                                className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-l2 hover:bg-white/10"
-                                              >
-                                                按建议
-                                              </button>
-                                            </div>
-                                          );
-                                        })()}
-                                      </div>
-                                    );
-                                  })}
-                                  {unmerged.files.length === 0 && (
-                                    <div className="mt-1 flex flex-wrap items-center gap-2">
-                                      <span className="text-okb">✓ 已全部选定</span>
-                                      <button
-                                        onClick={() => void finishResolve(ws, true)}
-                                        disabled={syncing}
-                                        className="rounded border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110 disabled:opacity-50"
-                                      >
-                                        {syncing ? "提交并合并中…" : "完成解决并合并"}
-                                      </button>
-                                      <button
-                                        onClick={() => void finishResolve(ws, false)}
-                                        disabled={syncing}
-                                        title="只提交本次冲突解决，稍后再手动合并"
-                                        className="rounded bg-inset px-2 py-0.5 text-l2 hover:bg-white/10 disabled:opacity-50"
-                                      >
-                                        仅保存解决结果
-                                      </button>
-                                    </div>
-                                  )}
-                                  <p className="mt-1 text-l4">
-                                    需要逐行取舍的文件：去工作区预览编辑器手动改（文件树里标
-                                    U），改完在「改动」提交即可
-                                  </p>
-                                </>
-                              ) : (
-                                <>
-                                  <div className="mb-1 flex items-center gap-1 text-l3">
-                                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-err-text" />
-                                    与 {ws.baseBranch} 冲突——以下文件两边改了同一处：
-                                  </div>
-                                  {(health[ws.id]?.conflictFiles ?? []).map((f) => (
-                                    <p key={f} className="border-l-2 border-err-text pl-1.5 font-mono text-err-text">
-                                      {f}
-                                    </p>
-                                  ))}
-                                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                                    <button
-                                      onClick={() => void onSyncBase(ws)}
-                                      disabled={syncing}
-                                      title={`在隔离工作区同步 ${ws.baseBranch}，不会改动主仓库`}
-                                      className="rounded border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110 disabled:opacity-50"
-                                    >
-                                      {syncing ? "准备中…" : "开始解决冲突"}
-                                    </button>
-                                    <span className="text-l4">
-                                      应用会在隔离工作区准备两边内容；逐文件选定后可直接完成解决并合并，全程不改动主仓库
-                                    </span>
-                                  </div>
-                                </>
-                              )}
-                              {syncMsg && (
-                                <pre
-                                  className={`mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-inset p-1.5 font-mono ${
-                                    syncMsg.ok ? "text-l2" : "text-err-text"
-                                  }`}
-                                >
-                                  {syncMsg.text}
-                                </pre>
-                              )}
-                            </div>
-                          )}
-                          <div className="mb-1 flex items-center gap-2 text-l3">
-                            <span>任务改动（基准 {review.baseBranch}）</span>
-                            <span className="font-mono">
-                              <span className="text-add">+{review.totalAdd}</span>{" "}
-                              <span className="text-del">-{review.totalDel}</span>
-                            </span>
-                            <span className="text-l4">{review.files.length} 个文件</span>
-                          </div>
-                          {review.files.length === 0 ? (
-                            <p className="text-l4">
-                              相对基准无改动——确认任务已提交后再点「合并」
-                            </p>
-                          ) : (
-                            review.files.map((f) => (
-                              <div key={`${f.status}:${f.path}`}>
-                                <button
-                                  onClick={() => void toggleFileDiff(ws, f.path)}
-                                  className="flex w-full items-center gap-1.5 rounded px-1 py-1 text-left hover:bg-white/5"
-                                >
-                                  <span
-                                    className={`shrink-0 rounded px-1 font-mono ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
-                                  >
-                                    {f.status}
-                                  </span>
-                                  <span className="min-w-0 flex-1 truncate font-mono text-l2">
-                                    {f.path}
-                                  </span>
-                                  {f.additions !== null && (
-                                    <span className="shrink-0 font-mono text-add">
-                                      +{f.additions}
-                                    </span>
-                                  )}
-                                  {f.deletions !== null && f.deletions > 0 && (
-                                    <span className="shrink-0 font-mono text-del">
-                                      -{f.deletions}
-                                    </span>
-                                  )}
-                                  <span className="shrink-0 text-l4">
-                                    {diffFor === f.path ? "▾" : "▸"}
-                                  </span>
-                                </button>
-                                {diffFor === f.path &&
-                                  (diffLoading && !fileDiff ? (
-                                    <p className="px-2 py-1 text-l4">加载 diff…</p>
-                                  ) : (
-                                    <pre className="mb-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-canvas p-2 font-mono text-[11px] leading-4">
-                                      {(fileDiff ?? "").split("\n").map((l, i) => (
-                                        <div
-                                          key={i}
-                                          className={
-                                            l.startsWith("+") && !l.startsWith("+++")
-                                              ? "text-add"
-                                              : l.startsWith("-") && !l.startsWith("---")
-                                                ? "text-del"
-                                                : l.startsWith("@@")
-                                                  ? "text-l4"
-                                                  : "text-l3"
-                                          }
-                                        >
-                                          {l || " "}
-                                        </div>
-                                      ))}
-                                    </pre>
-                                  ))}
-                              </div>
-                            ))
-                          )}
-                        </>
-                      )}
-                    </div>
-                  )}
                 </li>
               ))}
             </ul>
@@ -1436,6 +1096,17 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           onCreated={(ws) => {
             setModal(false);
             setCreated(ws);
+            void refresh();
+          }}
+        />
+      )}
+      {archiveModal && (
+        <ArchiveModal
+          ws={archiveModal}
+          onClose={() => setArchiveModal(null)}
+          onDone={() => {
+            setArchiveModal(null);
+            setCreated((c) => (c?.id === archiveModal.id ? null : c));
             void refresh();
           }}
         />

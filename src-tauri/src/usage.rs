@@ -10,6 +10,9 @@ use std::path::Path;
 /// 单文件解析上限：过大的会话文件跳过（ comment：避免一次刷新把 IO 打满）
 const MAX_PARSE_BYTES: u64 = 10 * 1024 * 1024;
 const LIST_CAP: usize = 20;
+const USAGE_SCHEMA_VERSION: &str = "2";
+const SOURCE_CLI: &str = "cli";
+const SOURCE_CCODE_AI: &str = "ccode-ai";
 
 // ===== 事件提取（每个 agent 一个小提取器，只拿 时间/模型/usage） =====
 
@@ -21,6 +24,9 @@ pub(crate) struct UsageEvent {
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    /// 事件来源由后端运行来源登记决定，不由路径或模型名猜测。
+    pub source: String,
+    pub internal: bool,
 }
 
 fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -63,6 +69,8 @@ fn claude_events(lines: &[String]) -> Vec<UsageEvent> {
             output: num("output_tokens"),
             cache_read: num("cache_read_input_tokens"),
             cache_write: num("cache_creation_input_tokens"),
+            source: SOURCE_CLI.into(),
+            internal: false,
         });
     }
     out
@@ -100,6 +108,8 @@ fn codex_events(lines: &[String]) -> Vec<UsageEvent> {
                     output: num("output_tokens") + num("reasoning_output_tokens"),
                     cache_read: num("cached_input_tokens"),
                     cache_write: num("cache_write_input_tokens"),
+                    source: SOURCE_CLI.into(),
+                    internal: false,
                 });
             }
             _ => {}
@@ -128,6 +138,8 @@ fn gemini_events(lines: &[String]) -> Vec<UsageEvent> {
             output: num("output") + num("thoughts"),
             cache_read: num("cached"),
             cache_write: 0,
+            source: SOURCE_CLI.into(),
+            internal: false,
         });
     }
     out
@@ -153,6 +165,8 @@ fn qwen_events(lines: &[String]) -> Vec<UsageEvent> {
             output: num("candidatesTokenCount"),
             cache_read: num("cachedContentTokenCount"),
             cache_write: 0,
+            source: SOURCE_CLI.into(),
+            internal: false,
         });
     }
     out
@@ -178,6 +192,8 @@ fn kimi_events(lines: &[String]) -> Vec<UsageEvent> {
             output: num("output"),
             cache_read: num("inputCacheRead"),
             cache_write: num("inputCacheCreation"),
+            source: SOURCE_CLI.into(),
+            internal: false,
         });
     }
     out
@@ -222,6 +238,8 @@ fn opencode_events(db_path: &Path, session_id: &str) -> Vec<UsageEvent> {
             output: (num("output") + num("reasoning")) as u64,
             cache_read: cnum("read") as u64,
             cache_write: cnum("write") as u64,
+            source: SOURCE_CLI.into(),
+            internal: false,
         });
     }
     out
@@ -276,11 +294,14 @@ pub(crate) struct DailyRow {
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    pub source: String,
+    pub internal: bool,
 }
 
-/// 按 (day, agent, model, project, session) 聚合；无 usage 事件的会话不产生行
+/// 按 (day, agent, model, project, session, source, internal) 聚合；无 usage 事件的会话不产生行
 pub(crate) fn aggregate(contribs: &[SessionContrib]) -> Vec<DailyRow> {
-    let mut map: HashMap<(String, String, String, String, String), DailyRow> = HashMap::new();
+    let mut map: HashMap<(String, String, String, String, String, String, bool), DailyRow> =
+        HashMap::new();
     for c in contribs {
         for e in &c.events {
             let key = (
@@ -289,6 +310,8 @@ pub(crate) fn aggregate(contribs: &[SessionContrib]) -> Vec<DailyRow> {
                 e.model.clone(),
                 c.project_path.clone(),
                 c.session_id.clone(),
+                e.source.clone(),
+                e.internal,
             );
             let row = map.entry(key.clone()).or_insert_with(|| DailyRow {
                 day: key.0,
@@ -300,6 +323,8 @@ pub(crate) fn aggregate(contribs: &[SessionContrib]) -> Vec<DailyRow> {
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
+                source: key.5,
+                internal: key.6,
             });
             row.input += e.input;
             row.output += e.output;
@@ -314,17 +339,145 @@ pub(crate) fn aggregate(contribs: &[SessionContrib]) -> Vec<DailyRow> {
 
 fn usage_db() -> Result<Connection, String> {
     let conn = crate::sessions::open_db()?;
+    ensure_usage_schema(&conn)?;
+    Ok(conn)
+}
+
+fn usage_columns(conn: &Connection) -> Result<HashSet<String>, String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(usage_daily)")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+fn ensure_usage_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS usage_daily(
           day TEXT NOT NULL, agent TEXT NOT NULL, model TEXT NOT NULL,
           project_path TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',
           input INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0,
           cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
+          source TEXT NOT NULL DEFAULT 'cli', internal INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY(day, agent, model, project_path, session_id));
-         CREATE TABLE IF NOT EXISTS usage_meta(key TEXT PRIMARY KEY, value TEXT);",
+         CREATE TABLE IF NOT EXISTS usage_meta(key TEXT PRIMARY KEY, value TEXT);
+         CREATE TABLE IF NOT EXISTS usage_provenance(
+           agent TEXT NOT NULL, project_path TEXT NOT NULL,
+           source TEXT NOT NULL, internal INTEGER NOT NULL DEFAULT 0,
+           created_at TEXT NOT NULL,
+           PRIMARY KEY(agent, project_path));",
     )
     .map_err(|e| format!("初始化用量表失败: {e}"))?;
-    Ok(conn)
+    let columns = usage_columns(conn)?;
+    if !columns.contains("source") {
+        conn.execute(
+            "ALTER TABLE usage_daily ADD COLUMN source TEXT NOT NULL DEFAULT 'cli'",
+            [],
+        )
+        .map_err(|e| format!("升级用量来源字段失败: {e}"))?;
+    }
+    if !columns.contains("internal") {
+        conn.execute(
+            "ALTER TABLE usage_daily ADD COLUMN internal INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("升级内部活动字段失败: {e}"))?;
+    }
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT value FROM usage_meta WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    if current.as_deref() != Some(USAGE_SCHEMA_VERSION) {
+        // 旧索引没有可靠来源，清空后由会话源重新生成，避免把历史猜测伪装成权威分类。
+        conn.execute_batch(
+            "DELETE FROM usage_daily;
+             DELETE FROM usage_meta WHERE key LIKE 'seen:%' OR key='initialized';",
+        )
+        .map_err(|e| format!("重置旧用量索引失败: {e}"))?;
+        conn.execute(
+            "INSERT INTO usage_meta(key, value) VALUES('schema_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![USAGE_SCHEMA_VERSION],
+        )
+        .map_err(|e| format!("记录用量表版本失败: {e}"))?;
+    }
+    Ok(())
+}
+
+fn register_provenance_impl(
+    conn: &Connection,
+    agent: &str,
+    project_path: &str,
+    source: &str,
+    internal: bool,
+) -> Result<(), String> {
+    let project_path = normalize_provenance_path(project_path);
+    conn.execute(
+        "INSERT INTO usage_provenance(agent, project_path, source, internal, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent, project_path) DO UPDATE SET
+           source=excluded.source, internal=excluded.internal, created_at=excluded.created_at",
+        params![
+            agent,
+            project_path,
+            source,
+            i64::from(internal),
+            crate::sessions::now_iso()
+        ],
+    )
+    .map_err(|e| format!("记录用量来源失败: {e}"))?;
+    Ok(())
+}
+
+fn normalize_provenance_path(path: &str) -> String {
+    let expanded = crate::sessions::expand_tilde(path);
+    let resolved = std::fs::canonicalize(&expanded)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&expanded));
+    let mut normalized = resolved.to_string_lossy().replace('\\', "/");
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 的 std::env::temp_dir 常返回 /var，CLI 会话通常记录真实的 /private/var。
+        if normalized == "/var" || normalized.starts_with("/var/") {
+            normalized = format!("/private{normalized}");
+        } else if normalized == "/tmp" || normalized.starts_with("/tmp/") {
+            normalized = format!("/private{normalized}");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        normalized = normalized.to_lowercase();
+    }
+    if normalized.len() > 1 {
+        normalized.truncate(normalized.trim_end_matches('/').len());
+    }
+    normalized
+}
+
+/// Ccode 自己发起无头 AI 调用时登记精确来源；普通终端启动不调用本函数。
+pub(crate) fn register_internal_ai_run(agent: &str, project_path: &Path) -> Result<(), String> {
+    let conn = usage_db()?;
+    register_provenance_impl(
+        &conn,
+        agent,
+        &project_path.to_string_lossy(),
+        SOURCE_CCODE_AI,
+        true,
+    )
+}
+
+fn session_provenance(conn: &Connection, agent: &str, project_path: &str) -> (String, bool) {
+    let project_path = normalize_provenance_path(project_path);
+    conn.query_row(
+        "SELECT source, internal FROM usage_provenance WHERE agent=?1 AND project_path=?2",
+        params![agent, project_path],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
+    )
+    .unwrap_or_else(|_| (SOURCE_CLI.into(), false))
 }
 
 fn meta_get(conn: &Connection, key: &str) -> Option<String> {
@@ -355,7 +508,12 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
         if meta_get(&conn, &key).as_deref() == Some(marker.as_str()) && !marker.is_empty() {
             continue;
         }
-        let events = extract_events(s);
+        let (source, internal) = session_provenance(&conn, &s.agent, &s.project_path);
+        let mut events = extract_events(s);
+        for event in &mut events {
+            event.source.clone_from(&source);
+            event.internal = internal;
+        }
         conn.execute(
             "DELETE FROM usage_daily WHERE agent=?1 AND session_id=?2",
             params![s.agent, s.session_id],
@@ -370,14 +528,16 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
         for row in aggregate(&[contrib]) {
             conn.execute(
                 "INSERT INTO usage_daily(day, agent, model, project_path, session_id,
-                                        input, output, cache_read, cache_write)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                                        input, output, cache_read, cache_write, source, internal)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT(day, agent, model, project_path, session_id) DO UPDATE SET
                    input=input+excluded.input, output=output+excluded.output,
-                   cache_read=cache_read+excluded.cache_read, cache_write=cache_write+excluded.cache_write",
+                   cache_read=cache_read+excluded.cache_read, cache_write=cache_write+excluded.cache_write,
+                   source=excluded.source, internal=excluded.internal",
                 params![
                     row.day, row.agent, row.model, row.project_path, row.session_id,
                     row.input as i64, row.output as i64, row.cache_read as i64, row.cache_write as i64,
+                    row.source, i64::from(row.internal),
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -579,45 +739,30 @@ impl Bucket {
     }
 }
 
-fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
-    let conn = usage_db()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (sql, cutoff) = match cutoff_day(range, now) {
-        Some(c) => (
-            "SELECT day, agent, model, project_path, session_id, input, output, cache_read, cache_write
-             FROM usage_daily WHERE day >= ?1",
-            Some(c),
-        ),
-        None => (
-            "SELECT day, agent, model, project_path, session_id, input, output, cache_read, cache_write
-             FROM usage_daily",
-            None,
-        ),
-    };
-    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-    let rows: Vec<(String, String, String, String, String, i64, i64, i64, i64)> = {
-        let map_row = |r: &rusqlite::Row| {
-            Ok((
-                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?,
-            ))
-        };
-        let collected: rusqlite::Result<Vec<_>> = match &cutoff {
-            Some(c) => stmt.query_map(params![c], map_row).map_err(|e| e.to_string())?.collect(),
-            None => stmt.query_map([], map_row).map_err(|e| e.to_string())?.collect(),
-        };
-        collected.map_err(|e| e.to_string())?
-    };
-    let pricing_path = dirs::config_dir().map(|d| d.join("ccode").join("pricing.json"));
-    let table = load_pricing(pricing_path.as_deref());
+type StoredUsageRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    String,
+    bool,
+);
+
+fn build_stats(
+    rows: Vec<StoredUsageRow>,
+    table: &[(String, (f64, f64))],
+    rate_usd_cny: f64,
+) -> UsageStatsDto {
     let mut cards = Bucket::default();
     let mut by_agent: HashMap<String, Bucket> = HashMap::new();
-    let mut by_project: HashMap<String, Bucket> = HashMap::new();
-    let mut by_model: HashMap<String, Bucket> = HashMap::new();
-    for (_day, agent, model, project, sid, i, o, cr, cw) in rows {
+    let mut by_project: HashMap<(String, String, bool), Bucket> = HashMap::new();
+    let mut by_model: HashMap<(String, String, bool), Bucket> = HashMap::new();
+    for (_day, agent, model, project, sid, i, o, cr, cw, source, internal) in rows {
         let acc = TokenAcc {
             input: i as u64,
             output: o as u64,
@@ -626,14 +771,20 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
         };
         cards.add(&model, &sid, acc);
         by_agent.entry(agent).or_default().add(&model, &sid, acc);
-        by_project.entry(project).or_default().add(&model, &sid, acc);
-        by_model.entry(model.clone()).or_default().add(&model, &sid, acc);
+        by_project
+            .entry((project, source.clone(), internal))
+            .or_default()
+            .add(&model, &sid, acc);
+        by_model
+            .entry((model.clone(), source, internal))
+            .or_default()
+            .add(&model, &sid, acc);
     }
     let total = |b: &Bucket| b.tokens.input + b.tokens.output;
     let mut agent_rows: Vec<UsageAgentRowDto> = by_agent
         .into_iter()
         .map(|(agent, b)| {
-            let (cost_usd, cost_partial) = b.cost(&table);
+            let (cost_usd, cost_partial) = b.cost(table);
             UsageAgentRowDto {
                 tokens: total(&b),
                 cost_usd,
@@ -647,14 +798,16 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
     agent_rows.truncate(LIST_CAP);
     let mut project_rows: Vec<UsageProjectRowDto> = by_project
         .into_iter()
-        .map(|(project_path, b)| {
-            let (cost_usd, cost_partial) = b.cost(&table);
+        .map(|((project_path, source, internal), b)| {
+            let (cost_usd, cost_partial) = b.cost(table);
             UsageProjectRowDto {
                 tokens: total(&b),
                 sessions: b.sessions.len() as u64,
                 cost_usd,
                 cost_partial,
                 project_path,
+                source,
+                internal,
             }
         })
         .collect();
@@ -662,21 +815,23 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
     project_rows.truncate(LIST_CAP);
     let mut model_rows: Vec<UsageModelRowDto> = by_model
         .into_iter()
-        .map(|(model, b)| {
-            let (cost_usd, cost_partial) = b.cost(&table);
+        .map(|((model, source, internal), b)| {
+            let (cost_usd, cost_partial) = b.cost(table);
             UsageModelRowDto {
                 model: if model.is_empty() { "(未知)".into() } else { model },
                 input: b.tokens.input,
                 output: b.tokens.output,
                 cost_usd,
                 cost_partial,
+                source,
+                internal,
             }
         })
         .collect();
     model_rows.sort_by(|a, b| (b.input + b.output).cmp(&(a.input + a.output)));
     model_rows.truncate(LIST_CAP);
-    let (cards_cost, cards_partial) = cards.cost(&table);
-    Ok(UsageStatsDto {
+    let (cards_cost, cards_partial) = cards.cost(table);
+    UsageStatsDto {
         cards: UsageCardsDto {
             input: cards.tokens.input,
             output: cards.tokens.output,
@@ -689,8 +844,52 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
         by_agent: agent_rows,
         by_project: project_rows,
         by_model: model_rows,
-        rate_usd_cny: load_rate(pricing_path.as_deref()),
-    })
+        rate_usd_cny,
+    }
+}
+
+fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
+    let conn = usage_db()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (sql, cutoff) = match cutoff_day(range, now) {
+        Some(c) => (
+            "SELECT day, agent, model, project_path, session_id, input, output, cache_read, cache_write,
+                    source, internal
+             FROM usage_daily WHERE day >= ?1",
+            Some(c),
+        ),
+        None => (
+            "SELECT day, agent, model, project_path, session_id, input, output, cache_read, cache_write,
+                    source, internal
+             FROM usage_daily",
+            None,
+        ),
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows: Vec<StoredUsageRow> = {
+        let map_row = |r: &rusqlite::Row| {
+            Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
+                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
+                r.get::<_, i64>(10)? != 0,
+            ))
+        };
+        let collected: rusqlite::Result<Vec<_>> = match &cutoff {
+            Some(c) => stmt.query_map(params![c], map_row).map_err(|e| e.to_string())?.collect(),
+            None => stmt.query_map([], map_row).map_err(|e| e.to_string())?.collect(),
+        };
+        collected.map_err(|e| e.to_string())?
+    };
+    let pricing_path = dirs::config_dir().map(|d| d.join("ccode").join("pricing.json"));
+    let table = load_pricing(pricing_path.as_deref());
+    Ok(build_stats(
+        rows,
+        &table,
+        load_rate(pricing_path.as_deref()),
+    ))
 }
 
 // ===== DTO 与 commands =====
@@ -735,6 +934,8 @@ pub struct UsageProjectRowDto {
     pub sessions: u64,
     pub cost_usd: Option<f64>,
     pub cost_partial: bool,
+    pub source: String,
+    pub internal: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -745,6 +946,8 @@ pub struct UsageModelRowDto {
     pub output: u64,
     pub cost_usd: Option<f64>,
     pub cost_partial: bool,
+    pub source: String,
+    pub internal: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -793,6 +996,8 @@ mod tests {
             output,
             cache_read: 0,
             cache_write: 0,
+            source: SOURCE_CLI.into(),
+            internal: false,
         }
     }
 
@@ -824,6 +1029,128 @@ mod tests {
         assert_eq!((d1s1.input, d1s1.output), (30, 10));
         let d2 = rows.iter().find(|r| r.day == "2026-07-02").unwrap();
         assert_eq!((d2.input, d2.session_id.as_str()), (1, "s1"));
+    }
+
+    #[test]
+    fn usage_schema_migration_resets_unclassified_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_daily(
+               day TEXT, agent TEXT, model TEXT, project_path TEXT, session_id TEXT,
+               input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER,
+               PRIMARY KEY(day, agent, model, project_path, session_id));
+             CREATE TABLE usage_meta(key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO usage_daily VALUES('2026-08-01','codex','gpt-5','/tmp/manual','s1',1,1,0,0);
+             INSERT INTO usage_meta VALUES('initialized','old'),('seen:codex:s1','old');",
+        )
+        .unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        let columns = usage_columns(&conn).unwrap();
+        assert!(columns.contains("source"));
+        assert!(columns.contains("internal"));
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM usage_daily", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "没有来源证据的旧索引必须重建"
+        );
+        assert_eq!(meta_get(&conn, "schema_version").as_deref(), Some(USAGE_SCHEMA_VERSION));
+        assert!(meta_get(&conn, "initialized").is_none());
+    }
+
+    #[test]
+    fn internal_provenance_is_exact_not_tmp_path_heuristic() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        register_provenance_impl(
+            &conn,
+            "codex",
+            "/private/tmp/ccode-ai-known",
+            SOURCE_CCODE_AI,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            session_provenance(&conn, "codex", "/private/tmp/ccode-ai-known"),
+            (SOURCE_CCODE_AI.into(), true)
+        );
+        assert_eq!(
+            session_provenance(&conn, "codex", "/tmp/user-task"),
+            (SOURCE_CLI.into(), false),
+            "用户主动在 /tmp 运行不得被判成内部活动"
+        );
+        assert_eq!(
+            session_provenance(&conn, "codex", "/tmp/ccode-ai-unregistered"),
+            (SOURCE_CLI.into(), false),
+            "仅路径长得像 Ccode 临时任务也不是来源证据"
+        );
+        assert_eq!(
+            session_provenance(&conn, "claude-code", "/private/tmp/ccode-ai-known"),
+            (SOURCE_CLI.into(), false),
+            "来源登记同时绑定 agent"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            register_provenance_impl(
+                &conn,
+                "kimi",
+                "/var/folders/test/ccode-ai-canonical",
+                SOURCE_CCODE_AI,
+                true,
+            )
+            .unwrap();
+            assert_eq!(
+                session_provenance(
+                    &conn,
+                    "kimi",
+                    "/private/var/folders/test/ccode-ai-canonical"
+                ),
+                (SOURCE_CCODE_AI.into(), true),
+                "macOS 临时目录别名只做路径归一化，不影响来源判定"
+            );
+        }
+    }
+
+    #[test]
+    fn stats_keep_internal_dimension_for_same_model() {
+        let rows: Vec<StoredUsageRow> = vec![
+            (
+                "2026-08-01".into(),
+                "codex".into(),
+                "gpt-5-codex".into(),
+                "/tmp/user-task".into(),
+                "normal".into(),
+                100,
+                10,
+                0,
+                0,
+                SOURCE_CLI.into(),
+                false,
+            ),
+            (
+                "2026-08-01".into(),
+                "codex".into(),
+                "gpt-5-codex".into(),
+                "/private/tmp/ccode-ai-known".into(),
+                "internal".into(),
+                20,
+                5,
+                0,
+                0,
+                SOURCE_CCODE_AI.into(),
+                true,
+            ),
+        ];
+        let stats = build_stats(rows, &load_pricing(None), 7.2);
+        assert_eq!(stats.by_project.len(), 2);
+        assert!(stats
+            .by_project
+            .iter()
+            .any(|row| row.project_path == "/tmp/user-task" && !row.internal && row.source == SOURCE_CLI));
+        assert!(stats.by_project.iter().any(|row| row.internal && row.source == SOURCE_CCODE_AI));
+        assert_eq!(stats.by_model.len(), 2, "相同模型的普通与内部用量不得混成一行");
+        assert!(stats.by_model.iter().any(|row| !row.internal));
+        assert!(stats.by_model.iter().any(|row| row.internal));
     }
 
     #[test]

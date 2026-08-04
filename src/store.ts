@@ -64,9 +64,6 @@ interface AppState {
   setPendingTerminal: (p: PendingTerminal | null) => void;
   workspaceReviewRequest: WorkspaceReviewRequest | null;
   setWorkspaceReviewRequest: (request: WorkspaceReviewRequest | null) => void;
-  /** 全宽审阅发现冲突后，工作区页消费并展开原有冲突处理面板。 */
-  workspaceConflictRequest: string | null;
-  setWorkspaceConflictRequest: (workspaceId: string | null) => void;
   /** 运行中的 run 脚本：工作区 id → 终端标签 id（nonconcurrent 互斥） */
   runningScripts: Record<string, string>;
   setRunningScript: (wsId: string, tabId: string | null) => void;
@@ -114,8 +111,6 @@ export const useAppStore = create<AppState>((set) => ({
   setPendingTerminal: (p) => set({ pendingTerminal: p }),
   workspaceReviewRequest: null,
   setWorkspaceReviewRequest: (request) => set({ workspaceReviewRequest: request }),
-  workspaceConflictRequest: null,
-  setWorkspaceConflictRequest: (workspaceId) => set({ workspaceConflictRequest: workspaceId }),
   runningScripts: {},
   setRunningScript: (wsId, tabId) =>
     set((s) => {

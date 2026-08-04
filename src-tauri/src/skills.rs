@@ -23,6 +23,12 @@ pub struct SkillDto {
     pub source: String, // local | zip | github | discovered
     pub repo: Option<String>,
     #[serde(default)]
+    pub repo_ref: Option<String>,
+    #[serde(default)]
+    pub repo_subdir: Option<String>,
+    #[serde(default)]
+    pub source_revision: Option<String>,
+    #[serde(default)]
     pub apps: HashMap<String, bool>,
     pub installed_at: String,
     /// 用户自定义分类（None = 未分类）
@@ -44,6 +50,34 @@ pub struct DiscoveredDto {
     pub description: String,
     pub path: String,
     pub from_agent: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImportConflictDto {
+    pub name: String,
+    pub existing_id: Option<String>,
+    pub source: String,
+    pub update_available: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImportResultDto {
+    pub added: Vec<String>,
+    pub updated: Vec<String>,
+    pub skipped: Vec<String>,
+    pub conflicts: Vec<SkillImportConflictDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillUpdateDto {
+    pub id: String,
+    pub update_available: bool,
+    pub current_revision: Option<String>,
+    pub latest_revision: Option<String>,
+    pub message: String,
 }
 
 const AGENT_IDS: [&str; 6] = ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi"];
@@ -109,6 +143,9 @@ fn new_skill(name: String, description: Option<String>, source: &str, repo: Opti
         description: description.unwrap_or_default(),
         source: source.to_string(),
         repo,
+        repo_ref: None,
+        repo_subdir: None,
+        source_revision: None,
         apps,
         installed_at: crate::sessions::now_iso(),
         category: None,
@@ -196,25 +233,180 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 入库一个技能目录：名字拍平为末段；同名（库里已有目录或元数据已有条目）跳过。返回是否新增
+fn validate_skill_name(name: &str) -> Result<(), String> {
+    let path = Path::new(name);
+    if name.trim().is_empty()
+        || name == "."
+        || name == ".."
+        || path.is_absolute()
+        || path.components().count() != 1
+        || name.contains(['/', '\\', '\0'])
+    {
+        return Err(format!("技能名称必须是单个安全目录名: {name:?}"));
+    }
+    Ok(())
+}
+
+fn backup_library_dir(store: &SkillStore, name: &str) -> Result<Option<PathBuf>, String> {
+    let src = store.skill_dir(name);
+    if !src.exists() {
+        return Ok(None);
+    }
+    let root = store
+        .json_path
+        .parent()
+        .ok_or("无法确定技能备份目录")?
+        .join("skill-backups");
+    fs::create_dir_all(&root).map_err(|e| format!("创建技能备份目录失败: {e}"))?;
+    let mut dst = root.join(format!("{name}.{}", now_compact()));
+    if dst.exists() {
+        dst = root.join(format!(
+            "{name}.{}-{}",
+            now_compact(),
+            &uuid::Uuid::new_v4().to_string()[..8]
+        ));
+    }
+    fs::rename(&src, &dst).map_err(|e| format!("覆盖前备份技能 {name} 失败: {e}"))?;
+    prune_backups(&root, name);
+    Ok(Some(dst))
+}
+
+enum ImportDecision {
+    Add(String),
+    Overwrite,
+    Skip,
+    Conflict,
+}
+
+fn import_decision(
+    store: &SkillStore,
+    skills: &[SkillDto],
+    name: &str,
+    resolutions: Option<&HashMap<String, String>>,
+) -> Result<ImportDecision, String> {
+    validate_skill_name(name)?;
+    let exists = skills.iter().any(|skill| skill.name == name) || store.skill_dir(name).exists();
+    if !exists {
+        return Ok(ImportDecision::Add(name.to_string()));
+    }
+    match resolutions.and_then(|items| items.get(name)).map(String::as_str) {
+        Some("overwrite") => Ok(ImportDecision::Overwrite),
+        Some("skip") => Ok(ImportDecision::Skip),
+        Some(value) if value.starts_with("rename:") => {
+            let target = value.trim_start_matches("rename:").trim();
+            validate_skill_name(target)?;
+            if skills.iter().any(|skill| skill.name == target) || store.skill_dir(target).exists() {
+                return Err(format!("另存为名称已存在: {target}"));
+            }
+            Ok(ImportDecision::Add(target.to_string()))
+        }
+        Some(value) => Err(format!("未知冲突处理方式: {value}")),
+        None => Ok(ImportDecision::Conflict),
+    }
+}
+
+fn add_skill_from_dir(
+    store: &SkillStore,
+    skills: &mut Vec<SkillDto>,
+    src_dir: &Path,
+    install_name: &str,
+    source: &str,
+    repo: Option<String>,
+) -> Result<(), String> {
+    let dst = store.skill_dir(install_name);
+    copy_dir_recursive(src_dir, &dst)?;
+    let (_, description) = parse_skill_md(&dst.join("SKILL.md"));
+    skills.push(new_skill(install_name.to_string(), description, source, repo));
+    if let Err(e) = store.write(skills) {
+        skills.pop();
+        let _ = fs::remove_dir_all(&dst);
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn overwrite_skill_from_dir(
+    store: &SkillStore,
+    skills: &mut Vec<SkillDto>,
+    src_dir: &Path,
+    name: &str,
+    source: &str,
+    repo: Option<String>,
+) -> Result<(), String> {
+    let existing_pos = skills.iter().position(|skill| skill.name == name);
+    let previous = existing_pos.map(|pos| skills[pos].clone());
+    let backup = backup_library_dir(store, name)?;
+    let dst = store.skill_dir(name);
+    if let Err(e) = copy_dir_recursive(src_dir, &dst) {
+        let _ = fs::remove_dir_all(&dst);
+        if let Some(backup) = &backup {
+            let _ = fs::rename(backup, &dst);
+        }
+        return Err(e);
+    }
+    let (_, description) = parse_skill_md(&dst.join("SKILL.md"));
+    match existing_pos {
+        Some(pos) => {
+            skills[pos].description = description.unwrap_or_default();
+            skills[pos].source = source.into();
+            skills[pos].repo = repo;
+            skills[pos].installed_at = crate::sessions::now_iso();
+        }
+        None => skills.push(new_skill(name.to_string(), description, source, repo)),
+    }
+    if let Err(e) = store.write(skills) {
+        let _ = fs::remove_dir_all(&dst);
+        if let Some(backup) = &backup {
+            let _ = fs::rename(backup, &dst);
+        }
+        match (existing_pos, previous) {
+            (Some(pos), Some(previous)) => skills[pos] = previous,
+            (None, _) => {
+                skills.pop();
+            }
+            _ => {}
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn import_one_dir(
     store: &SkillStore,
     skills: &mut Vec<SkillDto>,
     src_dir: &Path,
+    requested_name: Option<&str>,
     source: &str,
     repo: Option<String>,
-) -> Result<bool, String> {
-    let Some(name) = src_dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-        return Ok(false);
-    };
-    if name.is_empty() || skills.iter().any(|s| s.name == name) || store.skill_dir(&name).exists() {
-        return Ok(false);
+    resolutions: Option<&HashMap<String, String>>,
+    result: &mut SkillImportResultDto,
+) -> Result<(), String> {
+    let name = requested_name
+        .map(ToOwned::to_owned)
+        .or_else(|| src_dir.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .ok_or("无法确定技能名称")?;
+    match import_decision(store, skills, &name, resolutions)? {
+        ImportDecision::Add(target) => {
+            add_skill_from_dir(store, skills, src_dir, &target, source, repo)?;
+            result.added.push(target);
+        }
+        ImportDecision::Overwrite => {
+            overwrite_skill_from_dir(store, skills, src_dir, &name, source, repo)?;
+            result.updated.push(name);
+        }
+        ImportDecision::Skip => result.skipped.push(name),
+        ImportDecision::Conflict => {
+            let existing = skills.iter().find(|skill| skill.name == name);
+            result.conflicts.push(SkillImportConflictDto {
+                name,
+                existing_id: existing.map(|skill| skill.id.clone()),
+                source: source.into(),
+                update_available: source == "github"
+                    && existing.and_then(|skill| skill.repo.as_ref()) == repo.as_ref(),
+            });
+        }
     }
-    let dst = store.skill_dir(&name);
-    copy_dir_recursive(src_dir, &dst)?;
-    let (_, description) = parse_skill_md(&dst.join("SKILL.md"));
-    skills.push(new_skill(name, description, source, repo));
-    Ok(true)
+    Ok(())
 }
 
 // ===== 分发：symlink 优先，失败回退 copy（带标记文件） =====
@@ -371,7 +563,8 @@ fn import_zip_impl(
     subdir: Option<&str>,
     source: &str,
     repo: Option<String>,
-) -> Result<usize, String> {
+    resolutions: Option<&HashMap<String, String>>,
+) -> Result<SkillImportResultDto, String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("打开 ZIP 失败: {e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解析 ZIP 失败: {e}"))?;
     if archive.len() > ZIP_MAX_ENTRIES {
@@ -403,56 +596,66 @@ fn import_zip_impl(
     roots.dedup();
     let all = roots.clone();
     roots.retain(|r| !all.iter().any(|o| o != r && r.starts_with(o)));
-    let mut count = 0;
-    for root in roots {
-        let install_name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| {
-                // SKILL.md 在 ZIP 根：用压缩包文件名兜底
-                zip_path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "skill".into())
-            });
-        if skills.iter().any(|s| s.name == install_name) || store.skill_dir(&install_name).exists() {
-            continue;
+    let temp = std::env::temp_dir().join(format!("ccode-skill-import-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&temp).map_err(|e| format!("创建技能导入临时目录失败: {e}"))?;
+    let imported = (|| {
+        let mut result = SkillImportResultDto::default();
+        for (index, root) in roots.into_iter().enumerate() {
+            let install_name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| {
+                    zip_path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "skill".into())
+                });
+            let extracted = temp.join(index.to_string());
+            for i in 0..archive.len() {
+                let Ok(mut entry) = archive.by_index(i) else { continue };
+                let Some(name) = entry.enclosed_name() else { continue };
+                if name != root && !name.starts_with(&root) {
+                    continue;
+                }
+                let rel = match name.strip_prefix(&root) {
+                    Ok(rel) if !rel.as_os_str().is_empty() => rel.to_path_buf(),
+                    _ => continue,
+                };
+                let out_path = extracted.join(&rel);
+                if entry.is_dir() {
+                    fs::create_dir_all(&out_path)
+                        .map_err(|e| format!("创建 ZIP 目录失败: {e}"))?;
+                    continue;
+                }
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("创建 ZIP 文件目录失败: {e}"))?;
+                }
+                let mut buf = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut buf)
+                    .map_err(|e| format!("读取 ZIP 条目失败: {e}"))?;
+                fs::write(&out_path, &buf)
+                    .map_err(|e| format!("写入 {} 失败: {e}", out_path.display()))?;
+            }
+            if !extracted.join("SKILL.md").is_file() {
+                return Err(format!("ZIP 中技能 {install_name} 缺少 SKILL.md"));
+            }
+            import_one_dir(
+                store,
+                skills,
+                &extracted,
+                Some(&install_name),
+                source,
+                repo.clone(),
+                resolutions,
+                &mut result,
+            )?;
         }
-        let dst = store.skill_dir(&install_name);
-        let mut description = None;
-        for i in 0..archive.len() {
-            let Ok(mut entry) = archive.by_index(i) else { continue };
-            let Some(name) = entry.enclosed_name() else { continue };
-            if name != root && !name.starts_with(&root) {
-                continue;
-            }
-            let rel = match name.strip_prefix(&root) {
-                Ok(r) if !r.as_os_str().is_empty() => r.to_path_buf(),
-                _ => continue,
-            };
-            let out_path = dst.join(&rel);
-            if entry.is_dir() {
-                fs::create_dir_all(&out_path).ok();
-                continue;
-            }
-            if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent).ok();
-            }
-            // symlink 物化为普通文件（读得到内容就写，否则跳过）
-            let mut buf = Vec::new();
-            if std::io::Read::read_to_end(&mut entry, &mut buf).is_err() {
-                continue;
-            }
-            fs::write(&out_path, &buf).map_err(|e| format!("写入 {} 失败: {e}", out_path.display()))?;
-            if rel == Path::new("SKILL.md") {
-                description = parse_skill_md(&out_path).1;
-            }
-        }
-        skills.push(new_skill(install_name, description, source, repo.clone()));
-        count += 1;
-    }
-    Ok(count)
+        Ok(result)
+    })();
+    let _ = fs::remove_dir_all(&temp);
+    imported
 }
 
 // ===== 导出 =====
@@ -632,7 +835,10 @@ pub async fn delete_skill(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn import_skills_from_dir(path: String) -> Result<usize, String> {
+pub async fn import_skills_from_dir(
+    path: String,
+    resolutions: Option<HashMap<String, String>>,
+) -> Result<SkillImportResultDto, String> {
     let store = SkillStore::default_paths()?;
     let root = PathBuf::from(crate::sessions::expand_tilde(&path));
     if !root.is_dir() {
@@ -641,23 +847,38 @@ pub async fn import_skills_from_dir(path: String) -> Result<usize, String> {
     let mut found = Vec::new();
     find_skill_dirs(&root, &mut found);
     let mut skills = store.read();
-    let mut count = 0;
+    let mut result = SkillImportResultDto::default();
     for dir in found {
-        if import_one_dir(&store, &mut skills, &dir, "local", None)? {
-            count += 1;
-        }
+        import_one_dir(
+            &store,
+            &mut skills,
+            &dir,
+            None,
+            "local",
+            None,
+            resolutions.as_ref(),
+            &mut result,
+        )?;
     }
-    store.write(&skills)?;
-    Ok(count)
+    Ok(result)
 }
 
 #[tauri::command]
-pub async fn import_skills_from_zip(path: String) -> Result<usize, String> {
+pub async fn import_skills_from_zip(
+    path: String,
+    resolutions: Option<HashMap<String, String>>,
+) -> Result<SkillImportResultDto, String> {
     let store = SkillStore::default_paths()?;
     let mut skills = store.read();
-    let count = import_zip_impl(&store, &mut skills, Path::new(&path), None, "zip", None)?;
-    store.write(&skills)?;
-    Ok(count)
+    import_zip_impl(
+        &store,
+        &mut skills,
+        Path::new(&path),
+        None,
+        "zip",
+        None,
+        resolutions.as_ref(),
+    )
 }
 
 #[tauri::command]
@@ -665,12 +886,14 @@ pub async fn import_skills_from_github(
     repo: String,
     branch: Option<String>,
     subdir: Option<String>,
-) -> Result<usize, String> {
+    resolutions: Option<HashMap<String, String>>,
+) -> Result<SkillImportResultDto, String> {
     let repo = repo.trim().trim_matches('/').to_string();
     if repo.split('/').count() != 2 {
         return Err("仓库格式应为 owner/name".into());
     }
-    let refs: Vec<String> = match branch.filter(|b| !b.trim().is_empty()) {
+    let branch = branch.filter(|b| !b.trim().is_empty());
+    let refs: Vec<String> = match branch.clone() {
         Some(b) => vec![b],
         // 未指定分支：先默认分支（不带 ref），再 main/master 回退
         None => vec![String::new(), "main".into(), "master".into()],
@@ -704,11 +927,126 @@ pub async fn import_skills_from_github(
     fs::write(&tmp, &bytes).map_err(|e| format!("写入临时文件失败: {e}"))?;
     let store = SkillStore::default_paths()?;
     let mut skills = store.read();
-    let result = import_zip_impl(&store, &mut skills, &tmp, subdir.as_deref(), "github", Some(repo));
+    let result = import_zip_impl(
+        &store,
+        &mut skills,
+        &tmp,
+        subdir.as_deref(),
+        "github",
+        Some(repo.clone()),
+        resolutions.as_ref(),
+    );
     let _ = fs::remove_file(&tmp);
-    let count = result?;
-    store.write(&skills)?;
-    Ok(count)
+    let result = result?;
+    if !result.added.is_empty() || !result.updated.is_empty() {
+        let revision = github_latest_revision(&client, &repo, branch.as_deref())
+            .await
+            .ok();
+        let changed: std::collections::HashSet<&str> = result
+            .added
+            .iter()
+            .chain(result.updated.iter())
+            .map(String::as_str)
+            .collect();
+        let mut recorded = store.read();
+        for skill in &mut recorded {
+            if changed.contains(skill.name.as_str()) {
+                skill.repo_ref = branch.clone();
+                skill.repo_subdir = subdir.clone();
+                skill.source_revision = revision.clone();
+            }
+        }
+        store
+            .write(&recorded)
+            .map_err(|e| format!("技能已导入，但记录 GitHub 版本失败，重试导入即可补全: {e}"))?;
+    }
+    Ok(result)
+}
+
+async fn github_latest_revision(
+    client: &reqwest::Client,
+    repo: &str,
+    reference: Option<&str>,
+) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(&format!("https://api.github.com/repos/{repo}/commits/"))
+        .map_err(|e| e.to_string())?;
+    url.path_segments_mut()
+        .map_err(|_| "无法构造 GitHub commit URL".to_string())?
+        .pop_if_empty()
+        .push(reference.unwrap_or("HEAD"));
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("检查 GitHub 版本失败: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("GitHub 版本接口返回 {}", response.status()));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("解析 GitHub 版本失败: {e}"))?;
+    value
+        .get("sha")
+        .and_then(|sha| sha.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "GitHub 响应缺少 commit SHA".into())
+}
+
+#[tauri::command]
+pub async fn check_skill_updates() -> Result<Vec<SkillUpdateDto>, String> {
+    let store = SkillStore::default_paths()?;
+    let skills: Vec<SkillDto> = store
+        .read()
+        .into_iter()
+        .filter(|skill| skill.source == "github" && skill.repo.is_some())
+        .collect();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("ccode-skills")
+        .build()
+        .map_err(|e| format!("创建 GitHub 客户端失败: {e}"))?;
+    let mut cache: HashMap<(String, Option<String>), Result<String, String>> = HashMap::new();
+    let mut out = Vec::new();
+    for skill in skills {
+        let repo = skill.repo.clone().unwrap_or_default();
+        let key = (repo.clone(), skill.repo_ref.clone());
+        let latest = if let Some(cached) = cache.get(&key) {
+            cached.clone()
+        } else {
+            let value = github_latest_revision(&client, &repo, skill.repo_ref.as_deref()).await;
+            cache.insert(key, value.clone());
+            value
+        };
+        match latest {
+            Ok(latest) => {
+                let update_available = skill.source_revision.as_deref() != Some(latest.as_str());
+                out.push(SkillUpdateDto {
+                    id: skill.id,
+                    update_available,
+                    current_revision: skill.source_revision.clone(),
+                    latest_revision: Some(latest),
+                    message: if skill.source_revision.is_some() {
+                        if update_available {
+                            "GitHub 有新提交，可重新导入并选择覆盖".into()
+                        } else {
+                            "已是 GitHub 最新版本".into()
+                        }
+                    } else {
+                        "旧记录没有安装版本；建议重新导入一次以建立更新基线".into()
+                    },
+                });
+            }
+            Err(message) => out.push(SkillUpdateDto {
+                id: skill.id,
+                update_available: false,
+                current_revision: skill.source_revision,
+                latest_revision: None,
+                message,
+            }),
+        }
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -750,17 +1088,23 @@ pub async fn discover_unmanaged() -> Vec<DiscoveredDto> {
 pub async fn import_discovered(paths: Vec<String>) -> Result<usize, String> {
     let store = SkillStore::default_paths()?;
     let mut skills = store.read();
-    let mut count = 0;
+    let mut result = SkillImportResultDto::default();
     for p in paths {
         let dir = PathBuf::from(&p);
-        if dir.join("SKILL.md").is_file()
-            && import_one_dir(&store, &mut skills, &dir, "discovered", None)?
-        {
-            count += 1;
+        if dir.join("SKILL.md").is_file() {
+            import_one_dir(
+                &store,
+                &mut skills,
+                &dir,
+                None,
+                "discovered",
+                None,
+                None,
+                &mut result,
+            )?;
         }
     }
-    store.write(&skills)?;
-    Ok(count)
+    Ok(result.added.len())
 }
 
 #[tauri::command]
@@ -858,11 +1202,112 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].file_name().unwrap(), "docx");
         let mut skills = Vec::new();
-        assert!(import_one_dir(&fx.store, &mut skills, &found[0], "local", None).unwrap());
+        let mut first = SkillImportResultDto::default();
+        import_one_dir(
+            &fx.store,
+            &mut skills,
+            &found[0],
+            None,
+            "local",
+            None,
+            None,
+            &mut first,
+        )
+        .unwrap();
+        assert_eq!(first.added, vec!["docx"]);
         assert_eq!(skills[0].name, "docx", "拍平为末段目录名");
         assert!(fx.store.skill_dir("docx").join("SKILL.md").exists());
-        // 同名再导入跳过
-        assert!(!import_one_dir(&fx.store, &mut skills, &found[0], "local", None).unwrap());
+        // 同名再导入必须返回结构化冲突，不能静默跳过
+        let mut second = SkillImportResultDto::default();
+        import_one_dir(
+            &fx.store,
+            &mut skills,
+            &found[0],
+            None,
+            "local",
+            None,
+            None,
+            &mut second,
+        )
+        .unwrap();
+        assert_eq!(second.conflicts.len(), 1);
+        assert_eq!(second.conflicts[0].name, "docx");
+    }
+
+    #[test]
+    fn import_conflict_can_overwrite_with_backup() {
+        let fx = Fx::new();
+        fx.add_lib_skill("pdf", "旧版本");
+        let incoming = fx.dir.join("incoming/pdf");
+        fs::create_dir_all(&incoming).unwrap();
+        fs::write(
+            incoming.join("SKILL.md"),
+            "---\nname: pdf\ndescription: 新版本\n---\nnew body\n",
+        )
+        .unwrap();
+        let mut skills = fx.store.read();
+        let resolutions = HashMap::from([("pdf".to_string(), "overwrite".to_string())]);
+        let mut result = SkillImportResultDto::default();
+        import_one_dir(
+            &fx.store,
+            &mut skills,
+            &incoming,
+            None,
+            "local",
+            None,
+            Some(&resolutions),
+            &mut result,
+        )
+        .unwrap();
+        assert_eq!(result.updated, vec!["pdf"]);
+        assert_eq!(fx.store.read()[0].description, "新版本");
+        assert!(fs::read_to_string(fx.store.skill_dir("pdf").join("SKILL.md"))
+            .unwrap()
+            .contains("new body"));
+        let backup_root = fx.dir.join("skill-backups");
+        let backup = fs::read_dir(&backup_root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.file_name().unwrap().to_string_lossy().starts_with("pdf."))
+            .expect("覆盖前必须留下备份");
+        assert!(fs::read_to_string(backup.join("SKILL.md"))
+            .unwrap()
+            .contains("旧版本"));
+    }
+
+    #[test]
+    fn import_conflict_can_save_as_new_name() {
+        let fx = Fx::new();
+        fx.add_lib_skill("pdf", "旧版本");
+        let incoming = fx.dir.join("incoming/pdf");
+        fs::create_dir_all(&incoming).unwrap();
+        fs::write(
+            incoming.join("SKILL.md"),
+            "---\nname: pdf\ndescription: 另一个版本\n---\n",
+        )
+        .unwrap();
+        let mut skills = fx.store.read();
+        let resolutions = HashMap::from([(
+            "pdf".to_string(),
+            "rename:pdf-alternative".to_string(),
+        )]);
+        let mut result = SkillImportResultDto::default();
+        import_one_dir(
+            &fx.store,
+            &mut skills,
+            &incoming,
+            None,
+            "zip",
+            None,
+            Some(&resolutions),
+            &mut result,
+        )
+        .unwrap();
+        assert_eq!(result.added, vec!["pdf-alternative"]);
+        assert_eq!(fx.store.read().len(), 2);
+        assert!(fx.store.skill_dir("pdf").exists());
+        assert!(fx.store.skill_dir("pdf-alternative").exists());
     }
 
     #[test]
@@ -947,15 +1392,25 @@ mod tests {
             ],
         );
         let mut skills = Vec::new();
-        let n = import_zip_impl(&fx.store, &mut skills, &zip_path, None, "zip", None).unwrap();
-        assert_eq!(n, 2);
+        let result =
+            import_zip_impl(&fx.store, &mut skills, &zip_path, None, "zip", None, None).unwrap();
+        assert_eq!(result.added.len(), 2);
         assert!(fx.store.skill_dir("docx").join("template.bin").exists());
         assert_eq!(skills.iter().find(|s| s.name == "docx").unwrap().description, "word");
         assert!(!fx.dir.join("evil").exists(), "路径穿越条目不得落盘");
         // subdir 过滤
         let fx2 = Fx::new();
-        let n = import_zip_impl(&fx2.store, &mut Vec::new(), &zip_path, Some("skills/pdf"), "zip", None).unwrap();
-        assert_eq!(n, 1);
+        let result = import_zip_impl(
+            &fx2.store,
+            &mut Vec::new(),
+            &zip_path,
+            Some("skills/pdf"),
+            "zip",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.added.len(), 1);
         assert!(fx2.store.skill_dir("pdf").exists());
         assert!(!fx2.store.skill_dir("docx").exists());
     }
@@ -971,7 +1426,16 @@ mod tests {
             w.start_file(format!("f{i}.txt"), opt).unwrap();
         }
         w.finish().unwrap();
-        let err = import_zip_impl(&fx.store, &mut Vec::new(), &zip_path, None, "zip", None).unwrap_err();
+        let err = import_zip_impl(
+            &fx.store,
+            &mut Vec::new(),
+            &zip_path,
+            None,
+            "zip",
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("条目过多"), "{err}");
     }
 
@@ -985,8 +1449,9 @@ mod tests {
         export_impl(&fx.store, &ids, dest.to_str().unwrap()).unwrap();
         // 再按 ZIP 导入流程进另一个库，验证往返一致
         let fx2 = Fx::new();
-        let n = import_zip_impl(&fx2.store, &mut Vec::new(), &dest, None, "zip", None).unwrap();
-        assert_eq!(n, 2);
+        let result =
+            import_zip_impl(&fx2.store, &mut Vec::new(), &dest, None, "zip", None, None).unwrap();
+        assert_eq!(result.added.len(), 2);
         assert!(fx2.store.skill_dir("pdf").join("SKILL.md").exists());
         assert!(fx2.store.skill_dir("docx").join("SKILL.md").exists());
         // 空选择报错

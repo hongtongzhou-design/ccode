@@ -3,15 +3,49 @@
 
 use crate::agents;
 use crate::profiles::{self, Profile, ProfileStore};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// 一次计划好的写入：tag 用于备份文件命名（kimi 两个 config.toml 靠它区分）
 struct PlannedWrite {
     tag: &'static str,
     path: PathBuf,
     content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupEntry {
+    tag: String,
+    target: String,
+    existed: bool,
+    backup_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupManifest {
+    batch_id: String,
+    operation: String,
+    entries: Vec<BackupEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct TxAction {
+    tag: String,
+    path: PathBuf,
+    content: Option<Vec<u8>>,
+}
+
+static GLOBAL_CONFIG_MUTEX: Mutex<()> = Mutex::new(());
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalApplyResultDto {
+    pub files: Vec<String>,
+    pub validation: crate::profile_validation::ProfileValidationDto,
 }
 
 /// 每个 agent 的全局配置目标文件（tag, 相对 home 路径），restore/has_backup 共用
@@ -161,8 +195,7 @@ fn patch_qwen_settings(
                 e
             })
             .collect();
-        ensure_obj(&mut v, &["modelProviders", protocol])?
-            .insert("models".into(), json!(entries));
+        ensure_obj(&mut v, &["modelProviders", protocol])?.insert("models".into(), json!(entries));
     }
     to_pretty(&v)
 }
@@ -200,7 +233,10 @@ fn parse_toml_doc(existing: Option<&str>) -> Result<toml_edit::DocumentMut, Stri
 }
 
 /// 取子表；已存在但不是表时报错停止，避免覆盖用户数据
-fn sub_table<'a>(item: &'a mut toml_edit::Item, key: &str) -> Result<&'a mut toml_edit::Item, String> {
+fn sub_table<'a>(
+    item: &'a mut toml_edit::Item,
+    key: &str,
+) -> Result<&'a mut toml_edit::Item, String> {
     if let Some(existing) = item.as_table().and_then(|t| t.get(key)) {
         if !existing.is_table() {
             return Err(format!("配置项 {key} 不是表，已停止写入"));
@@ -315,11 +351,7 @@ fn patch_kimi_config(
 // ===== .env 补丁（gemini） =====
 
 fn patch_env_file(existing: Option<&str>, pairs: &[(String, String)]) -> String {
-    let mut lines: Vec<String> = existing
-        .unwrap_or("")
-        .lines()
-        .map(String::from)
-        .collect();
+    let mut lines: Vec<String> = existing.unwrap_or("").lines().map(String::from).collect();
     for (k, v) in pairs {
         let prefix = format!("{k}=");
         match lines.iter_mut().find(|l| l.starts_with(&prefix)) {
@@ -361,7 +393,17 @@ fn plan_writes(
         }
         "codex" => {
             // /model 选择器的模型目录：先写 catalog 文件，再把路径写进 config.toml
-            let catalog = agents::write_codex_catalog(profile)?;
+            let catalog = if profile.models.is_empty() {
+                None
+            } else {
+                let path = agents::codex_catalog_path(&profile.id).ok_or("无法确定平台配置目录")?;
+                let mut content =
+                    serde_json::to_string_pretty(&agents::codex_catalog_json(&profile.models))
+                        .map_err(|e| e.to_string())?;
+                content.push('\n');
+                push("model-catalog.json", path.clone(), content);
+                Some(path)
+            };
             let path = home.join(".codex/config.toml");
             let content = patch_codex_config(
                 read_existing(&path).as_deref(),
@@ -494,55 +536,389 @@ fn list_backups(dir: &Path, tag: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn backup_file_with_ts(dir: &Path, tag: &str, path: &Path, ts: &str) -> Result<PathBuf, String> {
+fn backup_file_raw(dir: &Path, tag: &str, path: &Path, ts: &str) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
     let bak = dir.join(format!("{tag}.{ts}.bak"));
     fs::copy(path, &bak).map_err(|e| format!("备份 {} 失败: {e}", path.display()))?;
-    // 每个 agent+文件只保留最新 5 份（文件名含时间戳，字典序即时间序）
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bak, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("设置备份权限失败: {e}"))?;
+    }
+    Ok(bak)
+}
+
+fn prune_tag_backups(dir: &Path, tag: &str) {
     let mut baks = list_backups(dir, tag);
     baks.sort();
     while baks.len() > 5 {
         let oldest = baks.remove(0);
         let _ = fs::remove_file(dir.join(oldest));
     }
+}
+
+fn backup_file_with_ts(dir: &Path, tag: &str, path: &Path, ts: &str) -> Result<PathBuf, String> {
+    let bak = backup_file_raw(dir, tag, path, ts)?;
+    prune_tag_backups(dir, tag);
     Ok(bak)
 }
 
-fn backup_file(dir: &Path, tag: &str, path: &Path) -> Result<PathBuf, String> {
-    backup_file_with_ts(dir, tag, path, &timestamp_now())
+fn batch_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    format!("{}-{nanos:09}-{}", timestamp_now(), &id[..8])
 }
 
-fn apply_plans(backups_dir: &Path, home: &Path, plans: &[PlannedWrite]) -> Result<Vec<String>, String> {
-    let mut written = Vec::new();
-    for plan in plans {
-        if plan.path.exists() {
-            backup_file(backups_dir, plan.tag, &plan.path)?;
+fn manifest_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("batch.{id}.json"))
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| format!("同步 {} 失败: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("设置 {} 权限失败: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn write_manifest(dir: &Path, manifest: &BackupManifest) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
+    let mut text = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
+    text.push('\n');
+    let path = manifest_path(dir, &manifest.batch_id);
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = write_private_file(&tmp, text.as_bytes()) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("写入批次备份清单失败: {e}"));
+    }
+    Ok(())
+}
+
+fn remove_batch_artifacts(dir: &Path, id: &str) {
+    let _ = fs::remove_file(manifest_path(dir, id));
+    let suffix = format!(".{id}.bak");
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().ends_with(&suffix) {
+                let _ = fs::remove_file(entry.path());
+            }
         }
-        if let Some(parent) = plan.path.parent() {
+    }
+}
+
+fn backup_actions(
+    backups_dir: &Path,
+    id: &str,
+    operation: &str,
+    actions: &[TxAction],
+) -> Result<Vec<Option<Vec<u8>>>, String> {
+    let mut entries = Vec::new();
+    let mut originals = Vec::new();
+    let mut created_backups = Vec::new();
+    for action in actions {
+        let original = match fs::read(&action.path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                for path in &created_backups {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(format!("读取现有配置 {} 失败: {e}", action.path.display()));
+            }
+        };
+        let backup_file = if original.is_some() {
+            match backup_file_raw(backups_dir, &action.tag, &action.path, id) {
+                Ok(path) => {
+                    created_backups.push(path.clone());
+                    Some(path.file_name().unwrap().to_string_lossy().into_owned())
+                }
+                Err(e) => {
+                    for path in &created_backups {
+                        let _ = fs::remove_file(path);
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+        entries.push(BackupEntry {
+            tag: action.tag.clone(),
+            target: action.path.to_string_lossy().into_owned(),
+            existed: original.is_some(),
+            backup_file,
+        });
+        originals.push(original);
+    }
+    if let Err(e) = write_manifest(
+        backups_dir,
+        &BackupManifest {
+            batch_id: id.to_string(),
+            operation: operation.to_string(),
+            entries,
+        },
+    ) {
+        for path in &created_backups {
+            let _ = fs::remove_file(path);
+        }
+        return Err(e);
+    }
+    Ok(originals)
+}
+
+fn stage_actions(actions: &[TxAction], id: &str) -> Result<Vec<Option<PathBuf>>, String> {
+    let mut staged: Vec<Option<PathBuf>> = Vec::new();
+    for (i, action) in actions.iter().enumerate() {
+        if let Some(parent) = action.path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
         }
-        profiles::atomic_write(&plan.path, &plan.content)?;
-        written.push(display_path(home, &plan.path));
+        if let Some(content) = &action.content {
+            let name = action
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "config".into());
+            let tmp = action
+                .path
+                .with_file_name(format!(".{name}.ccode-{id}-{i}.tmp"));
+            if let Err(e) = write_private_file(&tmp, content) {
+                for path in staged.iter().flatten() {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(e);
+            }
+            staged.push(Some(tmp));
+        } else {
+            staged.push(None);
+        }
     }
-    Ok(written)
+    Ok(staged)
+}
+
+fn restore_original(path: &Path, original: &Option<Vec<u8>>, id: &str) -> Result<(), String> {
+    match original {
+        Some(bytes) => {
+            let tmp = path.with_file_name(format!(
+                ".{}.ccode-{id}-rollback.tmp",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            write_private_file(&tmp, bytes)?;
+            replace_staged(&tmp, path)
+                .map_err(|e| format!("回滚 {} 失败: {e}", path.display()))
+        }
+        None => match fs::remove_file(path) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("回滚新建文件 {} 失败: {e}", path.display())),
+        },
+    }
+}
+
+/// Unix rename 可原子覆盖；Windows 不允许覆盖已有文件，先移除后替换，失败时由事务回滚恢复。
+fn replace_staged(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        if to.exists() {
+            fs::remove_file(to)?;
+        }
+    }
+    fs::rename(from, to)
+}
+
+fn commit_actions_with<F>(
+    actions: &[TxAction],
+    staged: &[Option<PathBuf>],
+    originals: &[Option<Vec<u8>>],
+    id: &str,
+    mut rename: F,
+) -> Result<(), String>
+where
+    F: FnMut(&Path, &Path, usize) -> std::io::Result<()>,
+{
+    for (i, action) in actions.iter().enumerate() {
+        let result = if let Some(tmp) = &staged[i] {
+            rename(tmp, &action.path, i)
+        } else {
+            match fs::remove_file(&action.path) {
+                Ok(_) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = result {
+            let mut rollback_errors = Vec::new();
+            for (action, original) in actions.iter().zip(originals) {
+                if let Err(err) = restore_original(&action.path, original, id) {
+                    rollback_errors.push(err);
+                }
+            }
+            for path in staged.iter().flatten() {
+                let _ = fs::remove_file(path);
+            }
+            let suffix = if rollback_errors.is_empty() {
+                "已自动回滚全部目标文件".to_string()
+            } else {
+                format!("自动回滚不完整：{}", rollback_errors.join("；"))
+            };
+            return Err(format!(
+                "替换 {} 失败: {e}；{suffix}",
+                action.path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn manifest_files(dir: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .map(|n| {
+                            let n = n.to_string_lossy();
+                            n.starts_with("batch.") && n.ends_with(".json")
+                        })
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+    paths
+}
+
+fn prune_manifests(dir: &Path) {
+    let mut paths = manifest_files(dir);
+    while paths.len() > 5 {
+        let _ = fs::remove_file(paths.remove(0));
+    }
+}
+
+fn transact(
+    backups_dir: &Path,
+    home: &Path,
+    actions: &[TxAction],
+    operation: &str,
+) -> Result<Vec<String>, String> {
+    if actions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let id = batch_id();
+    let originals = backup_actions(backups_dir, &id, operation, actions)?;
+    let staged = match stage_actions(actions, &id) {
+        Ok(staged) => staged,
+        Err(e) => {
+            remove_batch_artifacts(backups_dir, &id);
+            return Err(e);
+        }
+    };
+    commit_actions_with(actions, &staged, &originals, &id, |from, to, _| {
+        replace_staged(from, to)
+    })?;
+    for action in actions {
+        prune_tag_backups(backups_dir, &action.tag);
+    }
+    prune_manifests(backups_dir);
+    Ok(actions
+        .iter()
+        .map(|a| display_path(home, &a.path))
+        .collect())
+}
+
+fn apply_plans(
+    backups_dir: &Path,
+    home: &Path,
+    plans: &[PlannedWrite],
+) -> Result<Vec<String>, String> {
+    let actions: Vec<TxAction> = plans
+        .iter()
+        .map(|plan| TxAction {
+            tag: plan.tag.to_string(),
+            path: plan.path.clone(),
+            content: Some(plan.content.as_bytes().to_vec()),
+        })
+        .collect();
+    transact(backups_dir, home, &actions, "apply")
+}
+
+fn latest_valid_manifest(dir: &Path) -> Option<BackupManifest> {
+    manifest_files(dir).into_iter().rev().find_map(|path| {
+        let manifest: BackupManifest =
+            serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+        manifest
+            .entries
+            .iter()
+            .all(|entry| {
+                !entry.existed
+                    || entry
+                        .backup_file
+                        .as_ref()
+                        .is_some_and(|name| dir.join(name).is_file())
+            })
+            .then_some(manifest)
+    })
 }
 
 fn restore_from(backups_dir: &Path, home: &Path, agent: &str) -> Result<Vec<String>, String> {
-    let mut restored = Vec::new();
-    for (tag, rel) in target_specs(agent) {
-        let mut baks = list_backups(backups_dir, tag);
-        baks.sort();
-        if let Some(newest) = baks.pop() {
-            let to = home.join(rel);
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    let actions = if let Some(manifest) = latest_valid_manifest(backups_dir) {
+        manifest
+            .entries
+            .into_iter()
+            .map(|entry| {
+                let content = match entry.backup_file {
+                    Some(name) => Some(
+                        fs::read(backups_dir.join(name))
+                            .map_err(|e| format!("读取恢复备份失败: {e}"))?,
+                    ),
+                    None => None,
+                };
+                Ok(TxAction {
+                    tag: entry.tag,
+                    path: PathBuf::from(entry.target),
+                    content,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        let mut actions = Vec::new();
+        for (tag, rel) in target_specs(agent) {
+            let mut baks = list_backups(backups_dir, tag);
+            baks.sort();
+            if let Some(newest) = baks.pop() {
+                actions.push(TxAction {
+                    tag: tag.to_string(),
+                    path: home.join(rel),
+                    content: Some(
+                        fs::read(backups_dir.join(newest))
+                            .map_err(|e| format!("读取恢复备份失败: {e}"))?,
+                    ),
+                });
             }
-            fs::rename(backups_dir.join(&newest), &to)
-                .map_err(|e| format!("恢复 {} 失败: {e}", to.display()))?;
-            restored.push(display_path(home, &to));
         }
-    }
-    Ok(restored)
+        actions
+    };
+    transact(backups_dir, home, &actions, "restore")
 }
 
 fn display_path(home: &Path, path: &Path) -> String {
@@ -553,20 +929,33 @@ fn display_path(home: &Path, path: &Path) -> String {
 }
 
 #[tauri::command]
-pub fn apply_profile_global(
+pub async fn apply_profile_global(
     store: tauri::State<'_, ProfileStore>,
     profile_id: String,
-) -> Result<Vec<String>, String> {
+) -> Result<GlobalApplyResultDto, String> {
     let profile = store.get(&profile_id)?;
     let key = profiles::get_key(&profile_id);
-    let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
-    let plans = plan_writes(&home, &profile, key.as_deref(), &profile.models)?;
-    let backups_dir = backups_root()?.join(&profile.agent);
-    apply_plans(&backups_dir, &home, &plans)
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = GLOBAL_CONFIG_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
+        let plans = plan_writes(&home, &profile, key.as_deref(), &profile.models)?;
+        let backups_dir = backups_root()?.join(&profile.agent);
+        let files = apply_plans(&backups_dir, &home, &plans)?;
+        let validation =
+            crate::profile_validation::validate_after_global_write(&profile, key.as_deref());
+        Ok(GlobalApplyResultDto { files, validation })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub fn restore_global_backup(agent: String) -> Result<Vec<String>, String> {
+    let _guard = GLOBAL_CONFIG_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
     let dir = backups_root()?.join(&agent);
     restore_from(&dir, &home, &agent)
@@ -578,7 +967,8 @@ pub fn has_global_backup(agent: String) -> bool {
         Ok(r) => r.join(&agent),
         Err(_) => return false,
     };
-    fs::read_dir(dir)
+    latest_valid_manifest(&dir).is_some()
+        || fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()
                 .any(|e| e.file_name().to_string_lossy().ends_with(".bak"))
@@ -627,7 +1017,10 @@ mod tests {
         assert_eq!(v["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-secret");
         assert_eq!(v["env"]["ANTHROPIC_MODEL"], "claude-sonnet-4");
         // 模型列表注册进 /model 选择器的别名槽
-        assert_eq!(v["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-4");
+        assert_eq!(
+            v["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+            "claude-sonnet-4"
+        );
         assert_eq!(v["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"], "m2");
         assert_eq!(v["env"]["OTHER"], "1");
         assert_eq!(v["theme"], "dark");
@@ -747,7 +1140,8 @@ mod tests {
 
     #[test]
     fn qwen_patch_model_providers_preserves_other_protocols() {
-        let existing = r#"{"modelProviders": {"gemini": {"models": [{"id": "g1"}]}, "openai": {"extra": 1}}}"#;
+        let existing =
+            r#"{"modelProviders": {"gemini": {"models": [{"id": "g1"}]}, "openai": {"extra": 1}}}"#;
         let out = patch_qwen_settings(
             Some(existing),
             "openai",
@@ -764,7 +1158,10 @@ mod tests {
         let models = v["modelProviders"]["openai"]["models"].as_array().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["id"], "qwen3-coder");
-        assert!(models[0].get("baseUrl").is_none(), "无 base_url 时不写该字段");
+        assert!(
+            models[0].get("baseUrl").is_none(),
+            "无 base_url 时不写该字段"
+        );
     }
 
     #[test]
@@ -798,7 +1195,10 @@ mod tests {
         assert_eq!(doc["providers"]["other"]["type"].as_str(), Some("openai"));
         let ccode = &doc["providers"]["ccode"];
         assert_eq!(ccode["type"].as_str(), Some("kimi"));
-        assert_eq!(ccode["base_url"].as_str(), Some("https://api.moonshot.cn/v1"));
+        assert_eq!(
+            ccode["base_url"].as_str(),
+            Some("https://api.moonshot.cn/v1")
+        );
         assert_eq!(ccode["api_key"].as_str(), Some("sk-secret"));
         // 每个模型一个 [models.<alias>] 表；非法字符清洗为 _
         assert_eq!(doc["models"]["kimi-k3"]["provider"].as_str(), Some("ccode"));
@@ -885,14 +1285,70 @@ mod tests {
         assert_eq!(baks.len(), 1);
         let new_content = fs::read_to_string(&target).unwrap();
         assert!(new_content.contains("ANTHROPIC_AUTH_TOKEN"));
-        // 再改一次（原地制造第二份备份），restore 应恢复最近的那份
+        // 再改一次并重新应用：第二批清单记录 v2，restore 应按完整批次恢复它
         fs::write(&target, r#"{"v": 2}"#).unwrap();
-        backup_file_with_ts(&backups, "settings.json", &target, "20990101-000000").unwrap();
+        let plans = plan_writes(&home, &p, Some("sk-secret-2"), &["m1".to_string()]).unwrap();
+        apply_plans(&backups, &home, &plans).unwrap();
         let restored = restore_from(&backups, &home, "claude-code").unwrap();
         assert_eq!(restored.len(), 1);
         assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"v": 2}"#);
-        // 用过的 .bak 被移除，只剩最早那份
-        assert_eq!(list_backups(&backups, "settings.json").len(), 1);
+        // 恢复前的当前状态也生成一批备份；原恢复点不会被消费，可再次恢复撤销本次操作
+        assert!(list_backups(&backups, "settings.json").len() >= 3);
+        assert!(manifest_files(&backups).len() >= 3);
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&backups).ok();
+    }
+
+    #[test]
+    fn transaction_rolls_back_all_targets_when_later_replace_fails() {
+        let dir = tmpdir("rollback");
+        let a = dir.join("a.json");
+        let b = dir.join("b.json");
+        fs::write(&a, "old-a").unwrap();
+        fs::write(&b, "old-b").unwrap();
+        let actions = vec![
+            TxAction {
+                tag: "a".into(),
+                path: a.clone(),
+                content: Some(b"new-a".to_vec()),
+            },
+            TxAction {
+                tag: "b".into(),
+                path: b.clone(),
+                content: Some(b"new-b".to_vec()),
+            },
+        ];
+        let id = batch_id();
+        let originals = actions
+            .iter()
+            .map(|a| fs::read(&a.path).ok())
+            .collect::<Vec<_>>();
+        let staged = stage_actions(&actions, &id).unwrap();
+        let err = commit_actions_with(&actions, &staged, &originals, &id, |from, to, i| {
+            if i == 1 {
+                Err(std::io::Error::other("injected failure"))
+            } else {
+                fs::rename(from, to)
+            }
+        })
+        .unwrap_err();
+        assert!(err.contains("已自动回滚全部目标文件"), "{err}");
+        assert_eq!(fs::read_to_string(&a).unwrap(), "old-a");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "old-b");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_removes_file_that_did_not_exist_before_apply() {
+        let home = tmpdir("restore-absent-home");
+        let backups = tmpdir("restore-absent-bak");
+        let target = home.join(".gemini/.env");
+        let p = profile("gemini");
+        let plans = plan_writes(&home, &p, Some("secret"), &["m1".to_string()]).unwrap();
+        apply_plans(&backups, &home, &plans).unwrap();
+        assert!(target.exists());
+        restore_from(&backups, &home, "gemini").unwrap();
+        assert!(!target.exists(), "应用前不存在的文件恢复时应被移除");
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&backups).ok();
     }

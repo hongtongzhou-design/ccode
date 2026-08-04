@@ -16,6 +16,11 @@ import GitPanel from "../components/GitPanel";
 import { LoadingRows } from "../components/PageFrame";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
 import { XTERM_PALETTES } from "../terminal-palettes";
+import {
+  parseRecoverableTerminalState,
+  serializeRecoverableTerminalState,
+  TERMINAL_TABS_STORAGE_KEY,
+} from "../terminal-tab-persistence";
 import type { ChatMessageDto, SessionMetaDto } from "../types";
 
 // Monaco 体积大，首次打开文件预览时才加载
@@ -38,6 +43,7 @@ interface TabStatus {
   /** 当前接的是登录 shell（agent 退出回落或手动打开） */
   shell: boolean;
   agentId: string;
+  profileId: string;
   model: string;
   cwd: string;
   /** 当前 PTY id（可见性门控用；无存活 PTY 时为 null） */
@@ -46,6 +52,8 @@ interface TabStatus {
   attention: "done" | "working" | "confirm" | null;
   /** shell 模式下存在可恢复的会话（专注栏「⟳ 恢复」可用性） */
   canResume: boolean;
+  /** 当前或最近一次关联的会话 id；只用于标签恢复元数据，不含会话文件内容。 */
+  sessionId: string | null;
 }
 
 /** TerminalView 暴露给专注栏的动作表（回调经 ref 转发，始终最新） */
@@ -111,6 +119,7 @@ const TerminalView = memo(function TerminalView({
   autoStart,
   prefillCommand,
   shellOnly,
+  restored,
   externalCwd,
   onConsumeExternalCwd,
   onStatus,
@@ -118,6 +127,7 @@ const TerminalView = memo(function TerminalView({
   onOpenSessionPanel,
   focusMode,
   onActions,
+  onRestoreComplete,
 }: {
   visible: boolean;
   /** 右侧面板开关影响 xterm 可用宽度，变化时需要重新 fit */
@@ -148,6 +158,8 @@ const TerminalView = memo(function TerminalView({
   prefillCommand?: string;
   /** run 脚本标签：挂载后自动开 shell 并执行 prefillCommand（不走 agent 启动流程） */
   shellOnly?: boolean;
+  /** 应用重启后恢复出的占位标签；用户明确操作前不启动 PTY。 */
+  restored?: boolean;
   /** 最近项目「真进入」：把目标目录注入活动标签的启动栏（TerminalView 消费后清空） */
   externalCwd?: string | null;
   onConsumeExternalCwd?: () => void;
@@ -159,6 +171,7 @@ const TerminalView = memo(function TerminalView({
   focusMode?: boolean;
   /** 向父级注册本标签的动作表（专注栏 ⋯ 菜单调用） */
   onActions?: (id: string, a: FocusTabActions) => void;
+  onRestoreComplete?: (id: string) => void;
 }) {
   const profiles = useAppStore((s) => s.profiles);
   const settings = useAppStore((s) => s.settings);
@@ -293,7 +306,7 @@ const TerminalView = memo(function TerminalView({
       .then(setSkillCount)
       .catch(() => setSkillCount(0));
   }, [agentId]);
-  const selectedProfile = profiles.find((p) => p.id === profileId);
+  const selectedProfile = profiles.find((p) => p.id === profileId && p.agent === agentId);
 
   // 向标签条上报标题/运行状态；值没变就不惊动父组件
   const title = initialTitle ?? selectedProfile?.name ?? agentLabel(agentId);
@@ -331,19 +344,26 @@ const TerminalView = memo(function TerminalView({
       running,
       shell: shellActive,
       agentId,
+      profileId,
       model,
       cwd,
       ptyId: activePtyId,
       // 注意力标记只在 agent 运行中且已联动会话时有意义
       attention: running && !shellActive && sessionFile ? attention : null,
       canResume: shellActive && lastResumeRef.current != null,
+      sessionId:
+        linkCtxRef.current?.sessionId ??
+        linkCtxRef.current?.hint ??
+        lastResumeRef.current ??
+        resumeSessionId ??
+        null,
     };
     const key = JSON.stringify(s);
     if (key !== lastReportRef.current) {
       lastReportRef.current = key;
       onStatus(tabId, s);
     }
-  }, [title, running, shellActive, agentId, model, cwd, activePtyId, attention, sessionFile, onStatus]);
+  }, [title, running, shellActive, agentId, profileId, model, cwd, activePtyId, attention, sessionFile, resumeSessionId, onStatus]);
 
   // 会话联动数据镜像给页面级右侧面板
   useEffect(() => {
@@ -514,6 +534,7 @@ const TerminalView = memo(function TerminalView({
         const ptyId = await invoke<string>("shell_spawn", {
           cwd,
           extraEnv: initialExtraEnv ?? null,
+          purpose: "script",
         });
         await attach(ptyId, "shell", { reset: true });
         setExited(false);
@@ -764,6 +785,7 @@ const TerminalView = memo(function TerminalView({
       setShellActive(false);
       setRunning(true);
       setBarExpanded(false);
+      if (restored) onRestoreComplete?.(tabId);
     } catch (e) {
       setError(String(e));
     }
@@ -784,6 +806,23 @@ const TerminalView = memo(function TerminalView({
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  /** 重启占位标签只在用户点击后恢复；目录失效时保留表单供修改，不盲目回落到其他目录。 */
+  async function restoreTask() {
+    if (!selectedProfile) {
+      setError("上次使用的配置已不存在，请重新选择配置");
+      setBarExpanded(true);
+      return;
+    }
+    try {
+      await invoke("list_dir", { path: cwd, showHidden: false });
+    } catch {
+      setError("上次工作目录不存在或不可读，请修改目录后再恢复");
+      setBarExpanded(true);
+      return;
+    }
+    await launch();
   }
 
   /** 停止 agent：杀掉 PTY 后由退出事件自动回落到 shell */
@@ -856,6 +895,9 @@ const TerminalView = memo(function TerminalView({
               <option value="" disabled>
                 选择配置
               </option>
+              {profileId && !selectedProfile && (
+                <option value={profileId}>上次配置已不存在</option>
+              )}
               {agentProfiles.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -894,11 +936,11 @@ const TerminalView = memo(function TerminalView({
               </button>
             ) : (
               <button
-                onClick={() => launch()}
+                onClick={() => (restored ? void restoreTask() : void launch())}
                 disabled={!profileId}
                 className="shrink-0 rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
               >
-                启动
+                {restored ? "恢复任务" : "启动"}
               </button>
             )}
           </div>
@@ -923,6 +965,9 @@ const TerminalView = memo(function TerminalView({
             )}
             {shellActive && !running && <span className="text-l3">shell 模式</span>}
             {exited && !running && !shellActive && <span className="text-l3">进程已退出</span>}
+            {restored && !running && !shellActive && (
+              <span className="text-link">上次任务，可恢复</span>
+            )}
             {error && <span className="truncate text-err-text">{error}</span>}
             <span className="ml-auto flex shrink-0 items-center gap-1">
               {!running && (
@@ -1109,13 +1154,36 @@ interface Tab {
   prefillCommand?: string;
   /** run 脚本标签：自动开 shell 执行 prefillCommand */
   shellOnly?: boolean;
+  /** 应用重启后恢复出的元数据占位标签。 */
+  restored?: boolean;
 }
 
-const INITIAL_TAB: Tab = { id: crypto.randomUUID() };
-
 export default function TerminalPage({ visible }: { visible: boolean }) {
-  const [tabs, setTabs] = useState<Tab[]>([INITIAL_TAB]);
-  const [activeId, setActiveId] = useState(INITIAL_TAB.id);
+  const [initialState] = useState(() => {
+    const saved = parseRecoverableTerminalState(
+      localStorage.getItem(TERMINAL_TABS_STORAGE_KEY),
+    );
+    if (saved.tabs.length === 0) {
+      const tab: Tab = { id: crypto.randomUUID() };
+      return { tabs: [tab], activeId: tab.id };
+    }
+    const restoredTabs: Tab[] = saved.tabs.map((tab) => ({
+      id: crypto.randomUUID(),
+      initialCwd: tab.cwd,
+      initialTitle: tab.label,
+      initialAgentId: tab.agentId,
+      initialProfileId: tab.profileId,
+      initialModel: tab.model,
+      resumeSessionId: tab.sessionId ?? undefined,
+      restored: true,
+    }));
+    return {
+      tabs: restoredTabs,
+      activeId: restoredTabs[saved.activeIndex]?.id ?? restoredTabs[0].id,
+    };
+  });
+  const [tabs, setTabs] = useState<Tab[]>(initialState.tabs);
+  const [activeId, setActiveId] = useState(initialState.activeId);
   const [statuses, setStatuses] = useState<Record<string, TabStatus>>({});
   // 各标签的会话联动数据（TerminalView 轮询后镜像上来）
   const [sessionByTab, setSessionByTab] = useState<Record<string, SessionLinkState>>({});
@@ -1202,6 +1270,53 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       return { ...prev, [id]: s };
     });
   }, []);
+
+  /** 成功拉起新 PTY 后，占位标签转为普通运行标签。 */
+  const finishRestore = useCallback((id: string) => {
+    setTabs((current) =>
+      current.map((tab) => (tab.id === id ? { ...tab, restored: false } : tab)),
+    );
+  }, []);
+
+  // 只持久化可重新启动所需的白名单元数据；PTY、环境变量与脚本命令都不进入 localStorage。
+  useEffect(() => {
+    const snapshots = tabs.flatMap((tab) => {
+      if (tab.shellOnly || tab.prefillCommand) return [];
+      const status = statuses[tab.id];
+      const profileId = status?.profileId ?? tab.initialProfileId ?? "";
+      const sessionId = status?.sessionId ?? tab.resumeSessionId ?? null;
+      const representsTask = tab.restored || status?.alive || !!sessionId;
+      if (!representsTask || (!profileId && !sessionId)) return [];
+      return [
+        {
+          tabId: tab.id,
+          value: {
+            label:
+              status?.title ??
+              tab.initialTitle ??
+              agentLabel(status?.agentId ?? tab.initialAgentId ?? "claude-code"),
+            cwd: status?.cwd ?? tab.initialCwd ?? "~",
+            agentId: status?.agentId ?? tab.initialAgentId ?? "claude-code",
+            profileId,
+            model: status?.model ?? tab.initialModel ?? "",
+            sessionId,
+          },
+        },
+      ];
+    });
+    if (snapshots.length === 0) {
+      localStorage.removeItem(TERMINAL_TABS_STORAGE_KEY);
+      return;
+    }
+    const activeIndex = Math.max(0, snapshots.findIndex((item) => item.tabId === activeId));
+    localStorage.setItem(
+      TERMINAL_TABS_STORAGE_KEY,
+      serializeRecoverableTerminalState({
+        tabs: snapshots.map((item) => item.value),
+        activeIndex,
+      }),
+    );
+  }, [activeId, statuses, tabs]);
 
   /** GitPanel 上报改动总量（改动页签的 +N 徽标）；没变就不更新 */
   const reportGitTotals = useCallback((t: { add: number; del: number }) => {
@@ -1290,8 +1405,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const workspaceReviewRequest = useAppStore((s) => s.workspaceReviewRequest);
   const setWorkspaceReviewRequest = useAppStore((s) => s.setWorkspaceReviewRequest);
-  const setWorkspaceConflictRequest = useAppStore((s) => s.setWorkspaceConflictRequest);
-  const setPage = useAppStore((s) => s.setPage);
   const navCollapsed = useAppStore((s) => s.navCollapsed);
   const setRunningScript = useAppStore((s) => s.setRunningScript);
   // closeTab 里取最新互斥登记表（避免闭包过期）
@@ -1512,6 +1625,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       {s?.attention === "confirm" && (
                         <span className="text-warn-text"> · 待确认</span>
                       )}
+                      {t.restored && (
+                        <span className="text-link"> · 上次任务，可恢复</span>
+                      )}
                     </span>
                   </span>
                 </button>
@@ -1572,6 +1688,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   </span>
                 )}
                 <span className="max-w-40 truncate">{s?.title ?? "终端"}</span>
+                {t.restored && (
+                  <span className="rounded bg-inset px-1 text-[10px] text-link">可恢复</span>
+                )}
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
@@ -1626,6 +1745,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   autoStart={t.autoStart}
                   prefillCommand={t.prefillCommand}
                   shellOnly={t.shellOnly}
+                  restored={t.restored}
                   externalCwd={t.id === activeId ? enterCwd : null}
                   onConsumeExternalCwd={consumeExternalCwd}
                   onStatus={reportStatus}
@@ -1633,6 +1753,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   onOpenSessionPanel={openSessionPanel}
                   focusMode={focusMode}
                   onActions={registerActions}
+                  onRestoreComplete={finishRestore}
                 />
               </div>
             );
@@ -1735,11 +1856,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         <WorkspaceReviewView
           worktreePath={reviewPath}
           onClose={() => setReviewPath(null)}
-          onOpenConflict={(workspaceId) => {
-            setWorkspaceConflictRequest(workspaceId);
-            setReviewPath(null);
-            setPage("workspaces");
-          }}
         />
       )}
 

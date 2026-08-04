@@ -136,6 +136,11 @@ fn ai_prompt_impl(profiles: Vec<Profile>, profile_id: Option<String>, prompt: St
     // 隔离的临时 cwd：防止 agent 把当前项目环境（AGENTS.md 等）混进生成结果
     let cwd = std::env::temp_dir().join(format!("ccode-ai-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&cwd).map_err(|e| format!("创建临时目录失败: {e}"))?;
+    // 在启动前登记精确来源；usage 只认该登记，不再把用户主动在 /tmp 运行的任务误判为内部活动。
+    if let Err(error) = crate::usage::register_internal_ai_run(&profile.agent, &cwd) {
+        let _ = fs::remove_dir_all(&cwd);
+        return Err(error);
+    }
     cmd.current_dir(&cwd);
     let result = run_capture(&mut cmd, AI_TIMEOUT);
     let _ = fs::remove_dir_all(&cwd);
@@ -245,13 +250,45 @@ fn git_text(cwd: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn collect_commit_material(cwd: &str) -> Result<(String, String, String), String> {
-    let status = git_text(cwd, &["status", "--porcelain"])?;
+fn git_text_selected(cwd: &str, command: &[&str], paths: &[String]) -> Result<String, String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(cwd)
+        .arg("--literal-pathspecs")
+        .args(command)
+        .arg("--")
+        .args(paths);
+    let out = cmd.output().map_err(|e| format!("执行 git 失败: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn collect_commit_material(
+    cwd: &str,
+    paths: Option<&[String]>,
+) -> Result<(String, String, String), String> {
+    let selected = paths
+        .map(|paths| crate::git_info::validate_selected_paths(cwd, paths))
+        .transpose()?;
+    let status = match &selected {
+        Some(paths) => git_text_selected(cwd, &["status", "--porcelain"], paths)?,
+        None => git_text(cwd, &["status", "--porcelain"])?
+    };
     if status.trim().is_empty() {
         return Err("工作区干净，没有可提交的变更".into());
     }
-    let numstat = git_text(cwd, &["diff", "--numstat", "HEAD"]).unwrap_or_default();
-    let diff = git_text(cwd, &["diff", "HEAD"]).unwrap_or_default();
+    let numstat = match &selected {
+        Some(paths) => git_text_selected(cwd, &["diff", "--numstat", "HEAD"], paths),
+        None => git_text(cwd, &["diff", "--numstat", "HEAD"]),
+    }
+    .unwrap_or_default();
+    let diff = match &selected {
+        Some(paths) => git_text_selected(cwd, &["diff", "HEAD"], paths),
+        None => git_text(cwd, &["diff", "HEAD"]),
+    }
+    .unwrap_or_default();
     Ok((status, numstat, diff))
 }
 
@@ -297,11 +334,12 @@ pub async fn ai_prompt(
 pub async fn ai_commit_message(
     store: tauri::State<'_, ProfileStore>,
     cwd: String,
+    paths: Option<Vec<String>>,
 ) -> Result<String, String> {
     let profiles = store.list()?;
     tauri::async_runtime::spawn_blocking(move || {
         let cwd = crate::sessions::expand_tilde(&cwd);
-        let (status, numstat, diff) = collect_commit_material(&cwd)?;
+        let (status, numstat, diff) = collect_commit_material(&cwd, paths.as_deref())?;
         ai_prompt_impl(profiles, None, build_commit_prompt(&status, &numstat, &diff))
     })
     .await

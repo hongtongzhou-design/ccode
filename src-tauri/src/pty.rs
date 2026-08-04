@@ -21,11 +21,45 @@ struct PtyEntry {
     /// 标签可见才推流；不可见时输出进 backlog（优化 2）
     visible: Arc<AtomicBool>,
     backlog: Arc<Mutex<Vec<u8>>>,
+    /// 启动用途：归档工作区时只阻止仍在运行的 agent / run 脚本，普通 shell 可自动切回主仓库。
+    purpose: PtyPurpose,
+    /// 启动目录用于工作区生命周期保护；不用实时 cwd，避免 agent 子命令短暂切目录造成漏判。
+    initial_cwd: String,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PtyPurpose {
+    Agent,
+    Shell,
+    Script,
+}
+
+#[derive(Default, Clone)]
 pub struct PtyManager {
     entries: Arc<Mutex<HashMap<String, PtyEntry>>>,
+}
+
+fn path_within(path: &str, root: &str) -> bool {
+    let path = std::path::Path::new(path);
+    let root = std::path::Path::new(root);
+    path == root || path.starts_with(root)
+}
+
+impl PtyManager {
+    /// 返回指定工作区里仍存活的 agent/run 脚本类型；普通登录 shell 不阻止归档。
+    pub(crate) fn active_workspace_tasks(&self, worktree_path: &str) -> Vec<&'static str> {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| path_within(&entry.initial_cwd, worktree_path))
+            .filter_map(|entry| match entry.purpose {
+                PtyPurpose::Agent => Some("agent"),
+                PtyPurpose::Script => Some("run 脚本"),
+                PtyPurpose::Shell => None,
+            })
+            .collect()
+    }
 }
 
 /// 从缓冲头部取出尽可能多的完整 UTF-8 文本，返回 (文本, 消耗字节数)。
@@ -103,10 +137,7 @@ impl FrameCoalescer {
                 continue;
             }
             // 帧内：睡到帧尾再合并发；新数据唤醒会重算剩余时长
-            let (guard, _) = self
-                .cond
-                .wait_timeout(pending, frame - elapsed)
-                .unwrap();
+            let (guard, _) = self.cond.wait_timeout(pending, frame - elapsed).unwrap();
             pending = guard;
         }
     }
@@ -196,6 +227,7 @@ fn spawn_tracked(
     manager: &PtyManager,
     mut cmd: CommandBuilder,
     cwd: &str,
+    purpose: PtyPurpose,
 ) -> Result<String, String> {
     // 声明现代终端能力：缺少这些时 CLI 会按哑终端处理，输出退化为黑白
     cmd.env("TERM", "xterm-256color");
@@ -239,6 +271,8 @@ fn spawn_tracked(
             child,
             visible: visible.clone(),
             backlog: backlog.clone(),
+            purpose,
+            initial_cwd: cwd.to_string(),
         },
     );
 
@@ -363,7 +397,13 @@ pub fn pty_spawn(
             cmd.env(k, v);
         }
     }
-    let pty_id = spawn_tracked(&app, manager.inner(), cmd, &expand_tilde(&cwd))?;
+    let pty_id = spawn_tracked(
+        &app,
+        manager.inner(),
+        cmd,
+        &expand_tilde(&cwd),
+        PtyPurpose::Agent,
+    )?;
     store.touch_last_used(&profile_id);
     Ok(SpawnResult {
         pty_id,
@@ -379,6 +419,8 @@ pub fn shell_spawn(
     cwd: String,
     // 附加环境变量（如工作区 CCODE_PORT 段），run 脚本场景必须传入
     extra_env: Option<std::collections::HashMap<String, String>>,
+    // script = 工作区 run 脚本；其他/缺省 = 普通登录 shell
+    purpose: Option<String>,
 ) -> Result<String, String> {
     let shell = std::env::var("SHELL")
         .ok()
@@ -391,7 +433,12 @@ pub fn shell_spawn(
             cmd.env(k, v);
         }
     }
-    spawn_tracked(&app, manager.inner(), cmd, &expand_tilde(&cwd))
+    let purpose = if purpose.as_deref() == Some("script") {
+        PtyPurpose::Script
+    } else {
+        PtyPurpose::Shell
+    };
+    spawn_tracked(&app, manager.inner(), cmd, &expand_tilde(&cwd), purpose)
 }
 
 #[tauri::command]
@@ -507,16 +554,20 @@ pub fn pty_kill(
 mod tests {
     use super::*;
 
+    #[test]
+    fn workspace_path_matching_is_segment_safe() {
+        assert!(path_within("/repo/task", "/repo/task"));
+        assert!(path_within("/repo/task/src", "/repo/task"));
+        assert!(!path_within("/repo/task-two", "/repo/task"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn process_cwd_reads_own_process() {
         // lsof//proc 读自己进程的 cwd，与 current_dir 一致（canonicalize 归一化）
         let got = process_cwd(std::process::id()).expect("应能读取本进程 cwd");
         let expect = std::env::current_dir().unwrap().canonicalize().unwrap();
-        assert_eq!(
-            std::path::Path::new(&got).canonicalize().unwrap(),
-            expect
-        );
+        assert_eq!(std::path::Path::new(&got).canonicalize().unwrap(), expect);
     }
 
     #[test]
@@ -543,7 +594,10 @@ mod tests {
             assert!(uuid::Uuid::parse_str(&id).is_ok(), "会话 ID 应为 uuid");
         }
         for agent in ["codex", "gemini", "opencode", "kimi", "unknown"] {
-            assert!(session_id_for(agent).is_none(), "{agent} 不支持 --session-id");
+            assert!(
+                session_id_for(agent).is_none(),
+                "{agent} 不支持 --session-id"
+            );
         }
     }
 
@@ -560,7 +614,10 @@ mod tests {
         assert_eq!(text, "a");
         // 语义断言：超过截止时间应立即返回（不阻塞到帧尾）。
         // CI 慢节点上线程调度延迟不可控，时序上界只做防挂死的宽松兜底
-        assert!(start.elapsed() < Duration::from_secs(1), "空闲后发送疑似阻塞");
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "空闲后发送疑似阻塞"
+        );
     }
 
     #[test]
@@ -568,7 +625,9 @@ mod tests {
         let c = FrameCoalescer::new();
         let frame = Duration::from_millis(40);
         c.append(b"burst-1;");
-        let (_, at) = c.take_frame(Instant::now() - Duration::from_secs(1), frame).unwrap();
+        let (_, at) = c
+            .take_frame(Instant::now() - Duration::from_secs(1), frame)
+            .unwrap();
         // 帧内连续到达：应等待到帧尾合并发出
         c.append(b"burst-2;");
         c.append(b"burst-3");
@@ -591,7 +650,9 @@ mod tests {
             .take_frame(Instant::now(), Duration::from_millis(40))
             .expect("EOF 应立即 flush，不等帧");
         assert_eq!(text, "中文结尾");
-        assert!(c.take_frame(Instant::now(), Duration::from_millis(40)).is_none());
+        assert!(c
+            .take_frame(Instant::now(), Duration::from_millis(40))
+            .is_none());
     }
 
     // ===== 优化 2：隐藏标签缓冲 =====

@@ -1,8 +1,8 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Maximize2 } from "lucide-react";
-import type { GitFileDto, WorkspaceDiffDto } from "../types";
-import { LoadingRows } from "./PageFrame";
+import type { GitCommitResultDto, GitFileDto, WorkspaceDiffDto } from "../types";
+import { Checkbox, LoadingRows } from "./PageFrame";
 
 interface GitStatusDto {
   isRepo: boolean;
@@ -57,8 +57,12 @@ function GitPanel({
   const [wsDiff, setWsDiff] = useState<WorkspaceDiffDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [running, setRunning] = useState<"commit" | "push" | null>(null);
-  const [output, setOutput] = useState<{ ok: boolean; text: string } | null>(null);
+  const [output, setOutput] = useState<{
+    phase: "push" | "error";
+    text: string;
+  } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   // 成功 toast（主题 CTA 绿，右下角浮出 2.5s 自动淡出）；失败仍走 output 红字详情
   const [toast, setToast] = useState<{ text: string; hiding: boolean } | null>(null);
@@ -75,9 +79,14 @@ function GitPanel({
 
   /** ◈ AI 生成提交信息：填入输入框由用户审阅后再提交（不自动提交） */
   async function genMessage() {
+    const paths = wsDiff?.inWorkspace
+      ? null
+      : (status?.files ?? [])
+          .filter((file) => selectedPaths.has(file.path))
+          .map((file) => file.path);
     setAiBusy(true);
     try {
-      const text = await invoke<string>("ai_commit_message", { cwd });
+      const text = await invoke<string>("ai_commit_message", { cwd, paths });
       setMessage(text.trim());
       setError(null);
     } catch (e) {
@@ -107,6 +116,14 @@ function GitPanel({
       // 保持普通 git 视图
     }
     setWsDiff(d);
+    if (d) {
+      setSelectedPaths(new Set());
+    } else if (s) {
+      const current = new Set(s.files.map((file) => file.path));
+      setSelectedPaths((selected) =>
+        new Set([...selected].filter((path) => current.has(path))),
+      );
+    }
     onTotals(
       d
         ? { add: d.totalAdd, del: d.totalDel }
@@ -116,6 +133,7 @@ function GitPanel({
 
   // cwd / 可见性 / 外部信号变化立即刷新；可见时每 8s 轮询
   useEffect(() => {
+    setSelectedPaths(new Set());
     void refresh();
     if (!visible) return;
     const timer = setInterval(() => void refresh(), 8000);
@@ -123,26 +141,49 @@ function GitPanel({
   }, [refresh, visible, refreshKey]);
 
   async function doCommit(push: boolean) {
-    const commitMessage = message.trim() || defaultCommitMessage(status?.files ?? []);
+    const selectedFiles = wsDiff?.inWorkspace
+      ? (status?.files ?? [])
+      : (status?.files ?? []).filter((file) => selectedPaths.has(file.path));
+    const commitMessage = message.trim() || defaultCommitMessage(selectedFiles);
     setRunning(push ? "push" : "commit");
     setOutput(null);
     // Git 阶段失败时保留本地生成结果，用户可直接重试或编辑。
     if (!message.trim()) setMessage(commitMessage);
     try {
-      const out = await invoke<string>("git_commit", {
+      const out = await invoke<GitCommitResultDto>("git_commit", {
         cwd,
         message: commitMessage,
         push,
+        paths: wsDiff?.inWorkspace ? null : selectedFiles.map((file) => file.path),
       });
       // 提交输出首行形如 [branch abc1234] msg，提取出来让 toast 带提交号
-      const bracket = out.match(/\[([^\]]+)\]/)?.[1];
+      const bracket = out.output.match(/\[([^\]]+)\]/)?.[1];
       const title = commitMessage.split(/\r?\n/, 1)[0];
-      showToast(
-        `${push ? "提交并推送成功" : "提交成功"}${bracket ? ` · ${bracket}` : ""} · ${title}`,
-      );
       setMessage("");
+      setSelectedPaths(new Set());
+      if (out.failedPhase === "push") {
+        setOutput({ phase: "push", text: `${out.message}\n${out.output}`.trim() });
+      } else {
+        showToast(`${out.message}${bracket ? ` · ${bracket}` : ""} · ${title}`);
+      }
     } catch (e) {
-      setOutput({ ok: false, text: String(e) });
+      setOutput({ phase: "error", text: String(e) });
+    } finally {
+      setRunning(null);
+      void refresh();
+    }
+  }
+
+  /** 提交已成功但 push 失败时，只重试 push，避免再次提交。 */
+  async function retryPush() {
+    setRunning("push");
+    setOutput(null);
+    try {
+      await invoke<string>("git_push", { cwd });
+      showToast("推送成功");
+      setError(null);
+    } catch (e) {
+      setOutput({ phase: "push", text: `推送仍未完成：${e}` });
     } finally {
       setRunning(null);
       void refresh();
@@ -150,9 +191,22 @@ function GitPanel({
   }
 
   const hasChanges = (status?.files.length ?? 0) > 0;
-  const canCommit = hasChanges && running === null && !aiBusy;
   const inWs = wsDiff?.inWorkspace === true;
   const files = inWs ? wsDiff!.files : (status?.files ?? []);
+  const selectedFiles = inWs
+    ? (status?.files ?? [])
+    : (status?.files ?? []).filter((file) => selectedPaths.has(file.path));
+  const canCommit = selectedFiles.length > 0 && running === null && !aiBusy;
+  const allSelected = !inWs && files.length > 0 && selectedPaths.size === files.length;
+
+  function togglePath(path: string, checked: boolean) {
+    setSelectedPaths((current) => {
+      const next = new Set(current);
+      if (checked) next.add(path);
+      else next.delete(path);
+      return next;
+    });
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -229,6 +283,13 @@ function GitPanel({
               title={f.path}
               className="flex items-center gap-1.5 px-1 py-1 text-xs"
             >
+              {!inWs && (
+                <Checkbox
+                  checked={selectedPaths.has(f.path)}
+                  onChange={(checked) => togglePath(f.path, checked)}
+                  label={<span className="sr-only">选择 {f.path}</span>}
+                />
+              )}
               <span
                 className={`shrink-0 rounded px-1 font-mono ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
               >
@@ -255,6 +316,28 @@ function GitPanel({
       {/* 提交区 */}
       {status?.isRepo && (
         <div className="shrink-0 border-t border-hairline p-2">
+          {hasChanges && (
+            <div className="mb-2 flex items-center justify-between text-xs text-l3">
+              <span>
+                {inWs
+                  ? `将提交全部 ${selectedFiles.length} 个未提交文件`
+                  : `将提交 ${selectedFiles.length} / ${files.length} 个文件`}
+              </span>
+              {!inWs && (
+                <span className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSelectedPaths(allSelected ? new Set() : new Set(files.map((file) => file.path)))
+                    }
+                    className="text-l3 hover:text-l1"
+                  >
+                    {allSelected ? "清空" : "全选"}
+                  </button>
+                </span>
+              )}
+            </div>
+          )}
           <div className="mb-2 flex items-center gap-1.5">
             <input
               value={message}
@@ -268,7 +351,7 @@ function GitPanel({
             />
             <button
               onClick={genMessage}
-              disabled={!hasChanges || aiBusy || running !== null}
+              disabled={!canCommit || aiBusy || running !== null}
               title="AI 生成更完整的提交信息（可选，速度取决于模型）"
               className={`shrink-0 rounded px-2 py-1.5 text-sm text-l2 hover:bg-white/5 disabled:opacity-50 ${
                 aiBusy ? "animate-pulse" : ""
@@ -301,10 +384,26 @@ function GitPanel({
                   : "快速提交并推送"}
             </button>
           </div>
-          {output && !output.ok && (
-            <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-inset p-2 font-mono text-xs text-err-text">
-              {output.text}
-            </pre>
+          {output && (
+            <div className="mt-2 rounded bg-inset p-2 text-xs">
+              <pre
+                className={`max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono ${
+                  output.phase === "push" ? "text-warn-text" : "text-err-text"
+                }`}
+              >
+                {output.text}
+              </pre>
+              {output.phase === "push" && (
+                <button
+                  type="button"
+                  onClick={() => void retryPush()}
+                  disabled={running !== null}
+                  className="mt-2 rounded border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
+                >
+                  {running === "push" ? "推送中…" : "重试推送"}
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}

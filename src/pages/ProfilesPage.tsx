@@ -7,7 +7,14 @@ import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS } from "../presets";
 import ContextMenu from "../components/ContextMenu";
 import { PageFrame, PageHeader, primaryActionClass } from "../components/PageFrame";
-import type { Profile, ProfileInput, ProfileUsageDto } from "../types";
+import type {
+  GlobalApplyResultDto,
+  Profile,
+  ProfileInput,
+  ProfileUsageDto,
+  ProfileValidationDto,
+  ValidationCheckDto,
+} from "../types";
 
 function ProfileModal({
   initial,
@@ -499,6 +506,79 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
+function validationTone(status: ValidationCheckDto["status"]): string {
+  if (status === "passed") return "text-ok-text";
+  if (status === "failed") return "text-err-text";
+  return "text-l4";
+}
+
+function ValidationDialog({
+  profile,
+  result,
+  running,
+  onClose,
+}: {
+  profile: Profile;
+  result: ProfileValidationDto | null;
+  running: boolean;
+  onClose: () => void;
+}) {
+  const rows: Array<[string, ValidationCheckDto | null]> = [
+    ["本地配置解析", result?.local ?? null],
+    ["CLI 预检", result?.cli ?? null],
+    ["API / 模型", result?.api ?? null],
+  ];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6" onClick={onClose}>
+      <section
+        className="w-full max-w-xl rounded-lg border border-field bg-strip"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-medium text-l1">验证配置 · {profile.name}</h2>
+            <p className="mt-0.5 text-xs text-l4">密钥只在后端用于预检，不会返回界面</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto h-8 rounded px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+          >
+            关闭
+          </button>
+        </header>
+        <div className="divide-y divide-hairline">
+          {rows.map(([label, item], index) => (
+            <div key={label} className="grid grid-cols-[24px_112px_1fr] gap-2 px-4 py-3 text-xs">
+              <span className={item ? validationTone(item.status) : "text-l4"}>
+                {item?.status === "passed" ? "✓" : item?.status === "failed" ? "✗" : "—"}
+              </span>
+              <span className="font-medium text-l2">{label}</span>
+              <div className="min-w-0 text-l3">
+                <p className="break-words">
+                  {item?.message ?? (running && index === 0 ? "正在检查…" : "等待检查")}
+                </p>
+                {item?.latencyMs != null && (
+                  <span className="mt-1 block font-mono text-l4">{item.latencyMs}ms</span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        <footer className="border-t border-hairline px-4 py-3 text-xs">
+          {running ? (
+            <span className="text-l3">正在执行 CLI 与最小模型列表请求，最长约 35 秒…</span>
+          ) : result ? (
+            <span className={result.ok ? "text-ok-text" : "text-err-text"}>
+              {result.ok ? "✓ 三层验证完成" : "✗ 存在未通过项目，请按上方信息修复后重试"}
+            </span>
+          ) : null}
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 export default function ProfilesPage() {
   const profiles = useAppStore((s) => s.profiles);
   const [usageMap, setUsageMap] = useState<Record<string, ProfileUsageDto>>({});
@@ -527,6 +607,11 @@ export default function ProfilesPage() {
   const loadAll = useAppStore((s) => s.loadAll);
   const [modal, setModal] = useState<{ initial: Profile | null; presetAgent?: string } | null>(null);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; profile: Profile } | null>(null);
+  const [validationDialog, setValidationDialog] = useState<{
+    profile: Profile;
+    result: ProfileValidationDto | null;
+    running: boolean;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 过滤条：按安装状态过滤 agent 组；按名称/端点/模型过滤配置行
   const [statusFilter, setStatusFilter] = useState<"all" | "installed" | "uninstalled">("all");
@@ -660,7 +745,7 @@ export default function ProfilesPage() {
   const labelOf = (agentId: string) =>
     AGENTS.find((a) => a.id === agentId)?.label ?? agentId;
 
-  /** 每个 agent 是否有可恢复的全局配置备份（控制「恢复备份」按钮显隐） */
+  /** 每个 agent 是否有可恢复的完整全局配置批次（控制「恢复备份」按钮显隐） */
   async function refreshGlobalBackups() {
     const entries = await Promise.all(
       AGENTS.map(
@@ -675,36 +760,60 @@ export default function ProfilesPage() {
     refreshGlobalBackups().catch(() => {});
   }, [profiles]);
 
-  /** 把 profile 写入该 CLI 的全局配置文件（带备份），UI 明示影响范围 */
+  /** 把 profile 事务化写入该 CLI 的全部目标文件，UI 明示影响范围 */
   async function onApplyGlobal(p: Profile) {
     if (
       !window.confirm(
-        `将把该配置写入 ${labelOf(p.agent)} 的全局配置文件（影响其他终端里的使用），原文件会自动备份。继续？`,
+        `将把该配置写入 ${labelOf(p.agent)} 的全局配置文件（影响其他终端里的使用）。全部文件会作为一个批次写入，失败会自动回滚；当前内容会先备份。继续？`,
       )
     )
       return;
     try {
-      const files = await invoke<string[]>("apply_profile_global", { profileId: p.id });
+      const applied = await invoke<GlobalApplyResultDto>("apply_profile_global", {
+        profileId: p.id,
+      });
       await refreshGlobalBackups();
-      window.alert(`已写入全局配置：\n${files.join("\n")}`);
+      const cli = applied.validation.cli;
+      window.alert(
+        `已写入全局配置：\n${applied.files.join("\n")}\n\nCLI 配置检查：${
+          cli.status === "passed" ? "通过" : "未通过"
+        }\n${cli.message}`,
+      );
+      if (!applied.validation.ok) {
+        setValidationDialog({ profile: p, result: applied.validation, running: false });
+      }
       setError(null);
     } catch (e) {
       setError(String(e));
     }
   }
 
-  /** 恢复该 agent 最近一次的备份（每个目标文件取最新 .bak） */
+  async function onValidate(p: Profile) {
+    setValidationDialog({ profile: p, result: null, running: true });
+    try {
+      const result = await invoke<ProfileValidationDto>("validate_profile", {
+        profileId: p.id,
+      });
+      setValidationDialog({ profile: p, result, running: false });
+      setError(null);
+    } catch (e) {
+      setValidationDialog(null);
+      setError(String(e));
+    }
+  }
+
+  /** 恢复该 agent 最近一个完整备份批次；恢复前先备份当前状态。 */
   async function onRestoreBackup(agentId: string) {
     if (
       !window.confirm(
-        `将恢复 ${labelOf(agentId)} 最近一次备份的全局配置文件，当前内容会被覆盖。继续？`,
+        `将恢复 ${labelOf(agentId)} 最近一个完整备份批次。当前状态会先另存为新备份，原恢复点不会被消耗。继续？`,
       )
     )
       return;
     try {
       const files = await invoke<string[]>("restore_global_backup", { agent: agentId });
       await refreshGlobalBackups();
-      window.alert(files.length ? `已恢复：\n${files.join("\n")}` : "没有可恢复的备份");
+      window.alert(files.length ? `已恢复完整批次：\n${files.join("\n")}` : "没有可恢复的完整备份批次");
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -1011,7 +1120,7 @@ export default function ProfilesPage() {
                         {list.map((p) => (
                           <li
                             key={p.id}
-                            className="grid h-16 grid-cols-[130px_minmax(200px,1fr)_150px_112px] items-center gap-2 text-sm"
+                            className="grid h-16 grid-cols-[130px_minmax(200px,1fr)_150px_150px] items-center gap-2 text-sm"
                           >
                             {/* 名称（+用量悬浮按钮）+ 上次使用 */}
                             <span className="flex h-full flex-col justify-center overflow-hidden">
@@ -1080,6 +1189,12 @@ export default function ProfilesPage() {
                             </span>
                             {/* 操作 */}
                             <span className="flex items-center justify-end gap-2 whitespace-nowrap">
+                              <button
+                                onClick={() => void onValidate(p)}
+                                className="h-8 text-xs text-pl2 hover:text-pl1"
+                              >
+                                验证
+                              </button>
                               <button
                                 onClick={() => setModal({ initial: p })}
                                 className="h-8 text-xs text-pl2 hover:text-pl1"
@@ -1172,6 +1287,7 @@ export default function ProfilesPage() {
                 })();
               },
             },
+            { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
             { label: "设为全局", onSelect: () => void onApplyGlobal(rowMenu.profile) },
             ...(globalBackups[rowMenu.profile.agent]
               ? [
@@ -1183,6 +1299,16 @@ export default function ProfilesPage() {
               : []),
             { label: "删除", onSelect: () => void onDelete(rowMenu.profile) },
           ]}
+        />
+      )}
+      {validationDialog && (
+        <ValidationDialog
+          profile={validationDialog.profile}
+          result={validationDialog.result}
+          running={validationDialog.running}
+          onClose={() => {
+            if (!validationDialog.running) setValidationDialog(null);
+          }}
         />
       )}
     </div>
