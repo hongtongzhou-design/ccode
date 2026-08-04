@@ -175,6 +175,8 @@ src-tauri/src/
 - **统计内部活动只认后端 provenance**：Ccode 无头 AI 启动前登记精确 agent+项目路径，usage 事件与项目/模型 DTO 显式携带
   `source/internal`；禁止再按 `/tmp`、`ccode-ai-*` 名称、空模型或 `<synthetic>` 猜测。跨平台路径处理只能做等价规范化，不能
   产生分类。统计页默认归并 `internal=true`，并提供“显示内部活动”开关；开关只改变展示分组，不得改写原始用量索引。
+- **usage 长会话必须流式解析并按本机日期聚合**：普通 JSONL 与 Codex zstd 会话逐行消费，禁止因整个文件超过固定大小而跳过；
+  “今日/近 7 天/近 30 天”及事件日桶都使用系统本地时区。改变解析或日桶语义时必须升级 usage schema 并自动重建旧索引。
 
 ## 路线图（见 docs/architecture.md §8）
 

@@ -477,6 +477,7 @@ dependencies = [
 name = "ccode"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dirs",
  "keyring",
  "md5",

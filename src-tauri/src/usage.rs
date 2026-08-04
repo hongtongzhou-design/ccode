@@ -1,24 +1,26 @@
 //! 用量与费用统计（§6.11）：六个 agent 的会话 usage 按天聚合进 app.db，
 //! 内置定价表（可被 <config>/ccode/pricing.json 覆盖）估算 USD 费用；价格不明的只显示 token。
 
+use chrono::{DateTime, Days, Local, NaiveDate, TimeZone};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// 单文件解析上限：过大的会话文件跳过（ comment：避免一次刷新把 IO 打满）
-const MAX_PARSE_BYTES: u64 = 10 * 1024 * 1024;
 const LIST_CAP: usize = 20;
-const USAGE_SCHEMA_VERSION: &str = "2";
+const USAGE_SCHEMA_VERSION: &str = "3";
 const SOURCE_CLI: &str = "cli";
 const SOURCE_CCODE_AI: &str = "ccode-ai";
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
 // ===== 事件提取（每个 agent 一个小提取器，只拿 时间/模型/usage） =====
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct UsageEvent {
-    pub day: String, // ISO 日期（UTC）
+    pub day: String, // 本机时区日期
     pub model: String, // 未知为 ""
     pub input: u64,
     pub output: u64,
@@ -34,20 +36,30 @@ fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn day_of_iso(ts: &str) -> String {
-    ts.chars().take(10).collect()
+    DateTime::parse_from_rfc3339(ts)
+        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|_| ts.chars().take(10).collect())
 }
 
 fn day_of_ms(ms: i64) -> String {
     if ms <= 0 {
         return String::new();
     }
-    day_of_iso(&crate::sessions::iso_from_unix((ms / 1000) as u64))
+    Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
 }
 
-fn claude_events(lines: &[String]) -> Vec<UsageEvent> {
+fn claude_events<I, S>(lines: I) -> Vec<UsageEvent>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut out = Vec::new();
     for line in lines {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+        let Ok(v) = serde_json::from_str::<Value>(line.as_ref()) else {
             continue;
         };
         if get_str(&v, "type") != Some("assistant")
@@ -76,11 +88,15 @@ fn claude_events(lines: &[String]) -> Vec<UsageEvent> {
     out
 }
 
-fn codex_events(lines: &[String]) -> Vec<UsageEvent> {
+fn codex_events<I, S>(lines: I) -> Vec<UsageEvent>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut out = Vec::new();
     let mut model = String::new(); // turn_context 的 model，取最后出现的（每轮会刷新）
     for line in lines {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+        let Ok(v) = serde_json::from_str::<Value>(line.as_ref()) else {
             continue;
         };
         match get_str(&v, "type") {
@@ -118,10 +134,14 @@ fn codex_events(lines: &[String]) -> Vec<UsageEvent> {
     out
 }
 
-fn gemini_events(lines: &[String]) -> Vec<UsageEvent> {
+fn gemini_events<I, S>(lines: I) -> Vec<UsageEvent>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut out = Vec::new();
     for line in lines {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+        let Ok(v) = serde_json::from_str::<Value>(line.as_ref()) else {
             continue;
         };
         if get_str(&v, "type") != Some("gemini") {
@@ -145,10 +165,14 @@ fn gemini_events(lines: &[String]) -> Vec<UsageEvent> {
     out
 }
 
-fn qwen_events(lines: &[String]) -> Vec<UsageEvent> {
+fn qwen_events<I, S>(lines: I) -> Vec<UsageEvent>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut out = Vec::new();
     for line in lines {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+        let Ok(v) = serde_json::from_str::<Value>(line.as_ref()) else {
             continue;
         };
         if v.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
@@ -172,10 +196,14 @@ fn qwen_events(lines: &[String]) -> Vec<UsageEvent> {
     out
 }
 
-fn kimi_events(lines: &[String]) -> Vec<UsageEvent> {
+fn kimi_events<I, S>(lines: I) -> Vec<UsageEvent>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut out = Vec::new();
     for line in lines {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+        let Ok(v) = serde_json::from_str::<Value>(line.as_ref()) else {
             continue;
         };
         if get_str(&v, "type") != Some("usage.record") {
@@ -245,7 +273,38 @@ fn opencode_events(db_path: &Path, session_id: &str) -> Vec<UsageEvent> {
     out
 }
 
-/// 会话 → usage 事件流；超过 10MB 的文件跳过
+fn usage_line_reader(path: &Path) -> Option<Box<dyn BufRead>> {
+    let mut file = File::open(path).ok()?;
+    let mut magic = [0u8; 4];
+    let read = file.read(&mut magic).ok()?;
+    file.seek(SeekFrom::Start(0)).ok()?;
+    if read == magic.len() && magic == ZSTD_MAGIC {
+        let decoder = zstd::stream::read::Decoder::new(file).ok()?;
+        Some(Box::new(BufReader::new(decoder)))
+    } else {
+        Some(Box::new(BufReader::new(file)))
+    }
+}
+
+fn extract_file_events(agent: &str, path: &Path) -> Vec<UsageEvent> {
+    let Some(reader) = usage_line_reader(path) else {
+        return Vec::new();
+    };
+    // JSONL 逐行解析，峰值内存由单条记录而非整个会话大小决定；压缩会话也边解码边消费。
+    let lines = reader
+        .split(b'\n')
+        .map_while(Result::ok)
+        .map(|line| String::from_utf8_lossy(&line).into_owned());
+    match agent {
+        "codex" => codex_events(lines),
+        "gemini" => gemini_events(lines),
+        "qwen" => qwen_events(lines),
+        "kimi" => kimi_events(lines),
+        _ => claude_events(lines),
+    }
+}
+
+/// 会话 → usage 事件流；普通 JSONL 与 zstd 会话均流式读取。
 fn extract_events(session: &crate::sessions::SessionMetaDto) -> Vec<UsageEvent> {
     if session.agent == "opencode" {
         let Some((db, sid)) = session.file_path.split_once('#') else {
@@ -254,23 +313,7 @@ fn extract_events(session: &crate::sessions::SessionMetaDto) -> Vec<UsageEvent> 
         return opencode_events(Path::new(db), sid);
     }
     let path = Path::new(&session.file_path);
-    let Ok(meta) = std::fs::metadata(path) else {
-        return Vec::new();
-    };
-    if meta.len() > MAX_PARSE_BYTES {
-        return Vec::new();
-    }
-    let Some(bytes) = crate::sessions::read_session_bytes(path) else {
-        return Vec::new();
-    };
-    let lines = crate::sessions::to_lines(&String::from_utf8_lossy(&bytes));
-    match session.agent.as_str() {
-        "codex" => codex_events(&lines),
-        "gemini" => gemini_events(&lines),
-        "qwen" => qwen_events(&lines),
-        "kimi" => kimi_events(&lines),
-        _ => claude_events(&lines),
-    }
+    extract_file_events(&session.agent, path)
 }
 
 // ===== 聚合 =====
@@ -684,16 +727,20 @@ fn cost_of(acc: &TokenAcc, price: (f64, f64)) -> f64 {
 
 // ===== 查询 =====
 
-fn cutoff_day(range: &str, now_secs: u64) -> Option<String> {
+fn cutoff_day_from(range: &str, today: NaiveDate) -> Option<String> {
     let days_back = match range {
         "today" => 0,
         "week" => 6,
         "month" => 29,
         _ => return None, // "all" 不过滤
     };
-    Some(day_of_iso(&crate::sessions::iso_from_unix(
-        now_secs.saturating_sub(days_back * 86400),
-    )))
+    today
+        .checked_sub_days(Days::new(days_back))
+        .map(|day| day.format("%Y-%m-%d").to_string())
+}
+
+fn cutoff_day(range: &str) -> Option<String> {
+    cutoff_day_from(range, Local::now().date_naive())
 }
 
 #[derive(Debug, Default)]
@@ -850,11 +897,7 @@ fn build_stats(
 
 fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
     let conn = usage_db()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (sql, cutoff) = match cutoff_day(range, now) {
+    let (sql, cutoff) = match cutoff_day(range) {
         Some(c) => (
             "SELECT day, agent, model, project_path, session_id, input, output, cache_read, cache_write,
                     source, internal
@@ -1219,12 +1262,11 @@ mod tests {
 
     #[test]
     fn range_cutoff_days() {
-        // 2026-07-30T10:00:00Z = 1785405600
-        let now = 1785405600u64;
-        assert_eq!(cutoff_day("today", now).as_deref(), Some("2026-07-30"));
-        assert_eq!(cutoff_day("week", now).as_deref(), Some("2026-07-24"));
-        assert_eq!(cutoff_day("month", now).as_deref(), Some("2026-07-01"));
-        assert_eq!(cutoff_day("all", now), None);
+        let today = NaiveDate::from_ymd_opt(2026, 7, 30).unwrap();
+        assert_eq!(cutoff_day_from("today", today).as_deref(), Some("2026-07-30"));
+        assert_eq!(cutoff_day_from("week", today).as_deref(), Some("2026-07-24"));
+        assert_eq!(cutoff_day_from("month", today).as_deref(), Some("2026-07-01"));
+        assert_eq!(cutoff_day_from("all", today), None);
     }
 
     #[test]
@@ -1254,7 +1296,10 @@ mod tests {
         ];
         let evs = claude_events(&lines);
         assert_eq!(evs.len(), 1);
-        assert_eq!((evs[0].day.as_str(), evs[0].model.as_str()), ("2026-07-29", "claude-sonnet-4-5"));
+        assert_eq!(
+            (evs[0].day.as_str(), evs[0].model.as_str()),
+            (day_of_iso("2026-07-29T01:00:00Z").as_str(), "claude-sonnet-4-5")
+        );
         assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read, evs[0].cache_write), (10, 5, 3, 2));
         // codex：turn_context 定 model，token_count 的 last_token_usage 是本轮增量
         let lines = vec![
@@ -1271,8 +1316,36 @@ mod tests {
         ];
         let evs = kimi_events(&lines);
         assert_eq!(evs.len(), 1);
-        assert_eq!(evs[0].day, "2026-07-29");
+        assert_eq!(evs[0].day, day_of_ms(1785307071000));
         assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read, evs[0].cache_write), (50, 9, 4, 1));
+    }
+
+    #[test]
+    fn large_jsonl_and_zstd_sessions_are_streamed() {
+        use std::io::{BufWriter, Write};
+
+        let dir = std::env::temp_dir().join(format!("ccode-usage-stream-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("large.jsonl");
+        let mut writer = BufWriter::new(File::create(&plain).unwrap());
+        writeln!(writer, r#"{{"timestamp":"2026-08-04T04:00:00Z","type":"turn_context","payload":{{"model":"gpt-5-codex"}}}}"#).unwrap();
+        let ignored = format!("{}\n", "x".repeat(1024));
+        for _ in 0..10_300 {
+            writer.write_all(ignored.as_bytes()).unwrap();
+        }
+        writeln!(writer, r#"{{"timestamp":"2026-08-04T04:01:00Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":100,"output_tokens":20,"reasoning_output_tokens":5,"cached_input_tokens":10}}}}}}}}"#).unwrap();
+        writer.flush().unwrap();
+        assert!(std::fs::metadata(&plain).unwrap().len() > 10 * 1024 * 1024);
+        let events = extract_file_events("codex", &plain);
+        assert_eq!(events.len(), 1, "大于旧 10 MB 上限的会话不得整份跳过");
+        assert_eq!((events[0].input, events[0].output, events[0].cache_read), (100, 25, 10));
+
+        let compressed = dir.join("small.jsonl.zst");
+        let raw = std::fs::read(&plain).unwrap();
+        std::fs::write(&compressed, zstd::stream::encode_all(&raw[..], 1).unwrap()).unwrap();
+        let compressed_events = extract_file_events("codex", &compressed);
+        assert_eq!(compressed_events, events, "zstd 会话必须同样流式解码并提取用量");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
