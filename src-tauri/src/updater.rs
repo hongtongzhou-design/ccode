@@ -268,11 +268,12 @@ pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String
 /// 带 900s 超时（unix 下杀整个进程组）；reader 在子进程退出后最多等 1 秒 drain，
 /// 其子孙（curl 等）可能持有 slave 导致永远无 EOF，绝不无限 join。
 /// 同一 key 同时只允许一个 run：入口抢占，并发请求直接拒绝。
-fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program: &str, args: &[String], emit: F) -> (bool, String) {
+/// updater（key=agent_id）与 fonts（key="fonts"）共用本函数。
+pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program: &str, args: &[String], emit: F) -> (bool, String) {
     {
         let mut set = running_keys().lock().unwrap();
         if !set.insert(key.to_string()) {
-            return (false, "该 agent 已有正在运行的安装/更新，请等待其完成".into());
+            return (false, "已有正在运行的安装/更新任务，请等待其完成".into());
         }
     }
     let _run_guard = RunGuard(key.to_string());

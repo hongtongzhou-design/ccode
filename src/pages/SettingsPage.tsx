@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAppStore } from "../store";
 import { PageFrame, PageHeader, Toggle } from "../components/PageFrame";
@@ -75,6 +76,17 @@ const EXTERNAL_TERMINALS: { id: string; label: string }[] = (() => {
 /** 诊断日志条目（与后端 logbuf::LogEntryDto 对应） */
 type LogEntry = { ts: string; level: string; source: string; message: string };
 
+/** 可一键安装的字体预设：下拉字体名 → 后端字体 id（内置/系统/自定义不在安装范围） */
+const INSTALLABLE_FONTS: Record<string, string> = {
+  "Maple Mono NF CN": "maple",
+  "Sarasa Mono SC": "sarasa",
+  Iosevka: "iosevka",
+};
+
+/** 与后端 fonts::FontStatusDto / FontInstallDto 对应 */
+type FontStatus = { id: string; family: string; installed: boolean };
+type FontInstallResult = { ok: boolean; output: string };
+
 /** 分区折叠状态在 localStorage 的键。首次仅展开高频外观，长说明按需展开。 */
 const SECTIONS_KEY = "ccode.settings.sections";
 const DEFAULT_COLLAPSED: Record<string, boolean> = {
@@ -118,10 +130,13 @@ function Section({
 function Row({
   label,
   hint,
+  extra,
   children,
 }: {
   label: string;
   hint?: string;
+  /** 行下方全宽区域（如字体安装的流式输出），不传不渲染 */
+  extra?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -132,6 +147,7 @@ function Row({
       </div>
       {/* WKWebView/macOS 不渲染 title tooltip，说明必须常驻可见 */}
       {hint && <p className="mt-1 text-xs text-l3">{hint}</p>}
+      {extra}
     </div>
   );
 }
@@ -165,6 +181,16 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [savingPricing, setSavingPricing] = useState(false);
   // 诊断日志（进程内环形缓冲，分区展开时拉最近 100 条）
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  // 可安装字体预设的安装状态（id → installed）：进页面查一次缓存，安装成功后刷新
+  const [fontStatus, setFontStatus] = useState<Record<string, boolean>>({});
+  // 字体安装进行态 / 实时输出 / 最近结果；target 记录本次安装的字体 id（切换选择后隐藏旧输出）
+  const [fontInstalling, setFontInstalling] = useState(false);
+  const [fontInstallOutput, setFontInstallOutput] = useState("");
+  const [fontInstallResult, setFontInstallResult] =
+    useState<FontInstallResult | null>(null);
+  const [fontInstallTarget, setFontInstallTarget] = useState<string | null>(
+    null,
+  );
   // 分区折叠状态：首次仅展开高频外观，切换后持久化。
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
     try {
@@ -189,6 +215,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       loadSettings().catch((e) => setError(String(e)));
       // AI 专用配置下拉需要 profile 列表
       if (profiles.length === 0) loadAll().catch(() => {});
+      refreshFontStatus();
       // 有未保存草稿时保留，不用文件内容覆盖
       if (!pricingDirtyRef.current) {
         invoke<string>("read_pricing_file")
@@ -211,7 +238,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       if (!dirty.has("rate")) setRate(String(settings.rateUsdCny));
       if (!dirty.has("customFont")) {
         const fam = settings.terminalFontFamily ?? "JetBrains Mono";
-        if (["JetBrains Mono", "SF Mono", "Menlo", "Consolas"].includes(fam)) {
+        if (["JetBrains Mono", "Maple Mono NF CN", "Sarasa Mono SC", "Iosevka", "SF Mono", "Menlo", "Consolas"].includes(fam)) {
           setFontFamily(fam);
         } else {
           setFontFamily("__custom__");
@@ -267,6 +294,45 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setLogs(await invoke<LogEntry[]>("get_app_log", { limit: 100 }));
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function refreshFontStatus() {
+    try {
+      const list = await invoke<FontStatus[]>("font_status");
+      setFontStatus(Object.fromEntries(list.map((f) => [f.id, f.installed])));
+    } catch {
+      /* 字体检测失败不阻断设置页 */
+    }
+  }
+
+  /** 一键安装字体：先挂事件监听再 invoke；结果以 done 事件为准，invoke 返回值兜底
+      （同 ProfilesPage runAgentCmd 模式；brew cask 无需交互，不挂输入行） */
+  async function installFont(fontId: string) {
+    setFontInstalling(true);
+    setFontInstallTarget(fontId);
+    setFontInstallOutput("");
+    setFontInstallResult(null);
+    const unOut = await listen<string>("font-install-output", (e) => {
+      setFontInstallOutput((prev) => prev + e.payload);
+    });
+    let doneArrived = false;
+    const unDone = await listen<FontInstallResult>("font-install-done", (e) => {
+      doneArrived = true;
+      setFontInstallResult(e.payload);
+    });
+    try {
+      const res = await invoke<FontInstallResult>("install_font", { fontId });
+      if (!doneArrived) setFontInstallResult(res);
+      // emit_done 推送与 invoke 返回的是同一份结果，ok 以 res 为准即可
+      if (res.ok) await refreshFontStatus();
+    } catch (e) {
+      if (!doneArrived)
+        setFontInstallResult({ ok: false, output: String(e) });
+    } finally {
+      unOut();
+      unDone();
+      setFontInstalling(false);
     }
   }
 
@@ -390,7 +456,46 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           />
         </Row>
 
-        <Row label="终端字体" hint="立即生效；选「自定义」可输入系统已装字体名">
+        <Row
+          label="终端字体"
+          hint="立即生效；Maple/Sarasa/Iosevka 未安装时可在行内一键安装（走 Homebrew）；选「自定义」可输入系统已装字体名"
+          extra={
+            fontInstallTarget &&
+            fontInstallTarget === INSTALLABLE_FONTS[fontFamily] &&
+            (fontInstalling || fontInstallResult) ? (
+              <div className="mt-2">
+                {fontInstalling && (
+                  <pre
+                    // callback ref：每次渲染都把滚动条钉在底部，跟随输出自动滚动
+                    ref={(el) => {
+                      if (el) el.scrollTop = el.scrollHeight;
+                    }}
+                    className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-inset p-2 font-mono text-xs text-l3"
+                  >
+                    {fontInstallOutput || "安装中，等待输出…"}
+                  </pre>
+                )}
+                {!fontInstalling && fontInstallResult && (
+                  <div className="rounded bg-strip p-2 text-xs text-l2">
+                    <span
+                      className={
+                        fontInstallResult.ok ? "text-ok-text" : "text-err-text"
+                      }
+                    >
+                      {fontInstallResult.ok ? "✓ 安装完成" : "✗ 安装失败"}
+                    </span>
+                    {/* 后端只回传尾部 ~30 行，直接展示不折叠 */}
+                    {fontInstallResult.output && (
+                      <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-l3">
+                        {fontInstallResult.output}
+                      </pre>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : undefined
+          }
+        >
           <div className="flex items-center gap-2">
             <select
               className={field}
@@ -407,6 +512,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               }}
             >
               <option value="JetBrains Mono">JetBrains Mono（内置）</option>
+              <option value="Maple Mono NF CN">Maple Mono NF CN（中文+Nerd Font）</option>
+              <option value="Sarasa Mono SC">Sarasa Mono SC（中文）</option>
+              <option value="Iosevka">Iosevka</option>
               <option value="SF Mono">SF Mono（macOS）</option>
               <option value="Menlo">Menlo（macOS）</option>
               <option value="Consolas">Consolas</option>
@@ -435,6 +543,21 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 }}
               />
             )}
+            {/* 选中可安装预设且检测未安装时显示一键安装（已装/内置/系统/自定义不显示） */}
+            {INSTALLABLE_FONTS[fontFamily] &&
+              fontStatus[INSTALLABLE_FONTS[fontFamily]] === false && (
+                <button
+                  onClick={() => installFont(INSTALLABLE_FONTS[fontFamily])}
+                  disabled={fontInstalling}
+                  title="通过 Homebrew 安装该字体"
+                  className="h-7 shrink-0 rounded border border-cta-bd bg-cta px-2.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+                >
+                  {fontInstalling &&
+                  fontInstallTarget === INSTALLABLE_FONTS[fontFamily]
+                    ? "安装中…"
+                    : "安装"}
+                </button>
+              )}
           </div>
         </Row>
 

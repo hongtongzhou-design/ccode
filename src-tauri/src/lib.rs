@@ -1,5 +1,6 @@
 mod agents;
 mod ai;
+mod fonts;
 mod fs_tree;
 mod git_info;
 mod global_config;
@@ -87,6 +88,8 @@ pub fn run() {
             updater::install_method_preview,
             updater::updater_write,
             updater::check_agent_updates,
+            fonts::font_status,
+            fonts::install_font,
             workspaces::create_workspace,
             workspaces::list_workspaces,
             workspaces::archive_workspace,
