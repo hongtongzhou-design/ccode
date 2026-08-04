@@ -28,6 +28,9 @@ const STATUS_STYLE: Record<string, string> = {
   R: "bg-inset text-l3",
 };
 
+/** 内联 diff 渲染行数上限：超出只渲染前 N 行并提示，防超大 diff 的全量 span 拖垮面板 */
+const DIFF_LINE_CAP = 2000;
+
 /** 空输入时使用本地规则即时生成，避免为一次提交额外启动 AI。 */
 function defaultCommitMessage(files: GitFileDto[]): string {
   if (files.length !== 1) return `chore: 更新 ${files.length} 个文件`;
@@ -145,7 +148,7 @@ function GitPanel({
     );
   }, [cwd, onTotals]);
 
-  // cwd / 可见性 / 外部信号变化立即刷新；可见时每 8s 轮询
+  // cwd / 可见性变化：重置勾选与展开的 diff 并立即刷新；可见时每 8s 轮询
   useEffect(() => {
     diffRequestRef.current += 1;
     setSelectedPaths(new Set());
@@ -156,7 +159,22 @@ function GitPanel({
     if (!visible) return;
     const timer = setInterval(() => void refresh(), 8000);
     return () => clearInterval(timer);
-  }, [refresh, visible, refreshKey]);
+  }, [refresh, visible]);
+
+  // 外部刷新信号（fs-changed 文件监听等）：只刷新数据，不动勾选与展开的 diff；
+  // refresh 自身会把已失效的勾选安全剪枝
+  useEffect(() => {
+    if (!refreshKey) return;
+    void refresh();
+  }, [refreshKey, refresh]);
+
+  // 卸载时清理 toast 定时器，避免组件销毁后 setState
+  useEffect(
+    () => () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    },
+    [],
+  );
 
   async function doCommit(push: boolean) {
     const selectedFiles = wsDiff?.inWorkspace
@@ -357,6 +375,7 @@ function GitPanel({
         ) : (
           files.map((f) => {
             const expanded = diffPath === f.path;
+            const diffLines = expanded && diffDetail ? diffDetail.text.split("\n") : null;
             return (
               <div key={`${f.status}:${f.path}`} className="border-b border-hairline/60 last:border-b-0">
                 <div className="flex items-center gap-1 px-1 py-0.5 text-xs">
@@ -405,17 +424,24 @@ function GitPanel({
                       <div className="p-2"><LoadingRows compact /></div>
                     ) : diffError ? (
                       <p className="p-2 text-xs text-err-text">{diffError}</p>
-                    ) : diffDetail ? (
-                      <pre className="max-h-80 overflow-auto py-1 font-mono text-[11px] leading-5">
-                        {diffDetail.text.split("\n").map((line, index) => (
-                          <span
-                            key={`${index}:${line.slice(0, 24)}`}
-                            className={`block min-w-max whitespace-pre px-2 ${diffLineClass(line)}`}
-                          >
-                            {line || " "}
-                          </span>
-                        ))}
-                      </pre>
+                    ) : diffLines ? (
+                      <>
+                        <pre className="max-h-80 overflow-auto py-1 font-mono text-[11px] leading-5">
+                          {diffLines.slice(0, DIFF_LINE_CAP).map((line, index) => (
+                            <span
+                              key={`${index}:${line.slice(0, 24)}`}
+                              className={`block min-w-max whitespace-pre px-2 ${diffLineClass(line)}`}
+                            >
+                              {line || " "}
+                            </span>
+                          ))}
+                        </pre>
+                        {diffLines.length > DIFF_LINE_CAP && (
+                          <p className="border-t border-hairline px-2 py-1 text-[11px] text-l4">
+                            仅渲染前 {DIFF_LINE_CAP} 行（共 {diffLines.length} 行），完整内容见审阅视图
+                          </p>
+                        )}
+                      </>
                     ) : null}
                   </div>
                 )}

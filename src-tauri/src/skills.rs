@@ -10,7 +10,12 @@ const MARKER_FILE: &str = ".ccode-copy"; // copy 分发的标记，删除时据�
 const MAX_READ_PREVIEW: u64 = 64 * 1024;
 const ZIP_MAX_ENTRIES: usize = 10_000;
 const ZIP_MAX_UNCOMPRESSED: u64 = 128 * 1024 * 1024;
+const ZIP_MAX_DOWNLOAD: u64 = 256 * 1024 * 1024;
 const BACKUP_KEEP: usize = 5;
+/// 目录遍历深度上限：防符号链接环或异常嵌套导致无限递归。
+/// 必须低于各平台 OS 的符号链接解析上限（macOS 实测 16 跳即 ELOOP），
+/// 保证先命中我们自己的上限而不是依赖 OS 行为
+const MAX_WALK_DEPTH: usize = 8;
 
 // ===== DTO =====
 
@@ -192,7 +197,11 @@ fn parse_skill_md(path: &Path) -> (Option<String>, Option<String>) {
 // ===== 发现：含 SKILL.md 的目录即技能，找到不下钻，跳过 . 开头目录 =====
 
 fn find_skill_dirs(root: &Path, out: &mut Vec<PathBuf>) {
-    if !root.is_dir() {
+    find_skill_dirs_at(root, out, 0);
+}
+
+fn find_skill_dirs_at(root: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+    if depth > MAX_WALK_DEPTH || !root.is_dir() {
         return;
     }
     if root.join("SKILL.md").is_file() {
@@ -212,12 +221,19 @@ fn find_skill_dirs(root: &Path, out: &mut Vec<PathBuf>) {
             .map(|n| n.to_string_lossy().starts_with('.'))
             .unwrap_or(true);
         if !skip {
-            find_skill_dirs(&p, out);
+            find_skill_dirs_at(&p, out, depth + 1);
         }
     }
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    copy_dir_recursive_at(src, dst, 0)
+}
+
+fn copy_dir_recursive_at(src: &Path, dst: &Path, depth: usize) -> Result<(), String> {
+    if depth > MAX_WALK_DEPTH {
+        return Err(format!("目录嵌套超过 {MAX_WALK_DEPTH} 层（疑似符号链接环）: {}", src.display()));
+    }
     fs::create_dir_all(dst).map_err(|e| format!("创建目录 {} 失败: {e}", dst.display()))?;
     let entries = fs::read_dir(src).map_err(|e| format!("读取目录 {} 失败: {e}", src.display()))?;
     for e in entries.flatten() {
@@ -225,7 +241,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         let to = dst.join(e.file_name());
         // fs::copy 跟随符号链接复制内容（物化），与导入语义一致
         if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
+            copy_dir_recursive_at(&from, &to, depth + 1)?;
         } else if from.is_file() {
             fs::copy(&from, &to).map_err(|e| format!("复制 {} 失败: {e}", from.display()))?;
         }
@@ -470,6 +486,8 @@ fn apply_impl(
         .ok_or_else(|| format!("未知 agent: {agent}"))?;
     let target = agent_root.join(&name);
     if enabled {
+        // 先备好父目录再做删旧建新，缩短「旧分发已删、新分发未建」的窗口
+        fs::create_dir_all(agent_root).map_err(|e| format!("创建目录失败: {e}"))?;
         if target.exists() || fs::read_link(&target).is_ok() {
             if !is_ours(&target, &store.lib) {
                 return Err(format!(
@@ -479,13 +497,19 @@ fn apply_impl(
             }
             remove_ours(&target, &store.lib)?; // 重复应用 = 先清掉旧分发
         }
-        fs::create_dir_all(agent_root).map_err(|e| format!("创建目录失败: {e}"))?;
         let linked = allow_symlink && try_symlink(&lib_dir, &target).is_ok();
         if !linked {
             // Windows 无权限等场景回退为副本，标记以便日后区分用户自有内容
-            copy_dir_recursive(&lib_dir, &target)?;
-            fs::write(target.join(MARKER_FILE), lib_dir.to_string_lossy().as_ref())
-                .map_err(|e| format!("写入标记失败: {e}"))?;
+            let distribute = copy_dir_recursive(&lib_dir, &target).and_then(|_| {
+                fs::write(target.join(MARKER_FILE), lib_dir.to_string_lossy().as_ref())
+                    .map_err(|e| format!("写入标记失败: {e}"))
+            });
+            if let Err(e) = distribute {
+                // 旧分发已删、新分发未建成：元数据回落为未启用，避免「显示启用但盘上无物」
+                skills[pos].apps.insert(agent.to_string(), false);
+                let _ = store.write(&skills);
+                return Err(e);
+            }
         }
     } else {
         remove_ours(&target, &store.lib)?;
@@ -505,9 +529,17 @@ fn backups_root() -> Result<PathBuf, String> {
 
 /// now_iso "2026-07-30T10:13:37Z" → "20260730-101337"
 fn now_compact() -> String {
-    let iso = crate::sessions::now_iso();
+    compact_iso(&crate::sessions::now_iso())
+}
+
+/// 数字不足 9 位（格式漂移）时原样返回，不做硬切片 panic
+fn compact_iso(iso: &str) -> String {
     let digits: String = iso.chars().filter(|c| c.is_ascii_digit()).collect();
-    format!("{}-{}", &digits[..8], &digits[8..])
+    if digits.len() > 8 {
+        format!("{}-{}", &digits[..8], &digits[8..])
+    } else {
+        digits
+    }
 }
 
 fn prune_backups(backups: &Path, name: &str) {
@@ -565,14 +597,41 @@ fn import_zip_impl(
     repo: Option<String>,
     resolutions: Option<&HashMap<String, String>>,
 ) -> Result<SkillImportResultDto, String> {
+    import_zip_limited(store, skills, zip_path, subdir, source, repo, resolutions, ZIP_MAX_UNCOMPRESSED)
+}
+
+/// 按实际解压出的字节数累计计费，超过预算即中止（中央目录声明值不可信，防 zip 炸弹）
+fn charge_bytes(extracted_total: &mut u64, bytes: usize, budget: u64) -> Result<(), String> {
+    *extracted_total += bytes as u64;
+    if *extracted_total > budget {
+        return Err(format!(
+            "ZIP 实际解压体积超过 {}MB 预算，中止解压",
+            budget / 1024 / 1024
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_zip_limited(
+    store: &SkillStore,
+    skills: &mut Vec<SkillDto>,
+    zip_path: &Path,
+    subdir: Option<&str>,
+    source: &str,
+    repo: Option<String>,
+    resolutions: Option<&HashMap<String, String>>,
+    max_uncompressed: u64,
+) -> Result<SkillImportResultDto, String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("打开 ZIP 失败: {e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解析 ZIP 失败: {e}"))?;
     if archive.len() > ZIP_MAX_ENTRIES {
         return Err(format!("ZIP 条目过多（{} > {ZIP_MAX_ENTRIES}），拒绝解压", archive.len()));
     }
+    // 中央目录声明值只做快速预检；真实预算靠解压时逐字节累计（声明可能撒谎）
     let total: u64 = (0..archive.len()).map(|i| archive.by_index(i).map(|e| e.size()).unwrap_or(0)).sum();
-    if total > ZIP_MAX_UNCOMPRESSED {
-        return Err("ZIP 解压后体积超过 128MB，拒绝解压".into());
+    if total > max_uncompressed {
+        return Err(format!("ZIP 解压后体积超过 {}MB，拒绝解压", max_uncompressed / 1024 / 1024));
     }
     // 找技能根：含 SKILL.md 的目录；嵌套命中的只保留最外层；子目录过滤（github subdir 参数）
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -600,6 +659,7 @@ fn import_zip_impl(
     fs::create_dir_all(&temp).map_err(|e| format!("创建技能导入临时目录失败: {e}"))?;
     let imported = (|| {
         let mut result = SkillImportResultDto::default();
+        let mut extracted_total: u64 = 0;
         for (index, root) in roots.into_iter().enumerate() {
             let install_name = root
                 .file_name()
@@ -633,8 +693,11 @@ fn import_zip_impl(
                         .map_err(|e| format!("创建 ZIP 文件目录失败: {e}"))?;
                 }
                 let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut entry, &mut buf)
+                // 多读 1 字节探测超限，不按声明大小分配
+                let probe = max_uncompressed.saturating_sub(extracted_total) + 1;
+                std::io::Read::read_to_end(&mut std::io::Read::take(&mut entry, probe), &mut buf)
                     .map_err(|e| format!("读取 ZIP 条目失败: {e}"))?;
+                charge_bytes(&mut extracted_total, buf.len(), max_uncompressed)?;
                 fs::write(&out_path, &buf)
                     .map_err(|e| format!("写入 {} 失败: {e}", out_path.display()))?;
             }
@@ -702,14 +765,48 @@ fn export_impl(store: &SkillStore, ids: &[String], dest_path: &str) -> Result<St
 
 // ===== copy 分发漂移检测（symlink 永远新，只有带标记的副本会旧） =====
 
-/// 内容哈希（md5，与 kimi bucket 同一既有依赖；漂移检测不需要抗碰撞）
-fn content_hash(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    Some(format!("{:x}", md5::compute(&bytes)))
+/// 目录清单哈希：相对路径 + 大小 + 内容哈希（md5）逐文件计入后整体取 md5。
+/// 漂移检测不需要抗碰撞；.ccode-copy 标记只有副本侧有，比较时统一排除。
+fn dir_manifest_hash(root: &Path) -> Option<String> {
+    if !root.is_dir() {
+        return None;
+    }
+    let mut entries: Vec<(String, u64, String)> = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > MAX_WALK_DEPTH {
+            continue; // 符号链接环等异常嵌套：超出部分不计入清单
+        }
+        for e in fs::read_dir(&dir).ok()?.flatten() {
+            let p = e.path();
+            let Ok(rel) = p.strip_prefix(root) else { continue };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if p.is_dir() {
+                stack.push((p, depth + 1));
+            } else if p.is_file() {
+                if rel == MARKER_FILE {
+                    continue;
+                }
+                let bytes = fs::read(&p).ok()?;
+                entries.push((rel, bytes.len() as u64, format!("{:x}", md5::compute(&bytes))));
+            }
+        }
+    }
+    entries.sort();
+    let mut ctx = md5::Context::new();
+    for (rel, size, hash) in entries {
+        ctx.consume(rel.as_bytes());
+        ctx.consume(b"\0");
+        ctx.consume(size.to_string().as_bytes());
+        ctx.consume(b"\0");
+        ctx.consume(hash.as_bytes());
+        ctx.consume(b"\0");
+    }
+    Some(format!("{:x}", ctx.compute()))
 }
 
 fn stale_agents(store: &SkillStore, dirs: &HashMap<String, PathBuf>, skill: &SkillDto) -> Vec<String> {
-    let Some(lib_hash) = content_hash(&store.skill_dir(&skill.name).join("SKILL.md")) else {
+    let Some(lib_hash) = dir_manifest_hash(&store.skill_dir(&skill.name)) else {
         return Vec::new();
     };
     let mut stale = Vec::new();
@@ -724,7 +821,7 @@ fn stale_agents(store: &SkillStore, dirs: &HashMap<String, PathBuf>, skill: &Ski
         if !target.join(MARKER_FILE).exists() {
             continue; // symlink 或用户自有目录不在漂移检测范围
         }
-        if content_hash(&target.join("SKILL.md")).as_deref() != Some(lib_hash.as_str()) {
+        if dir_manifest_hash(&target).as_deref() != Some(lib_hash.as_str()) {
             stale.push(agent.clone());
         }
     }
@@ -912,10 +1009,13 @@ pub async fn import_skills_from_github(
             format!("https://api.github.com/repos/{repo}/zipball/{r}")
         };
         match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                zip_bytes = Some(resp.bytes().await.map_err(|e| format!("下载失败: {e}"))?);
-                break;
-            }
+            Ok(resp) if resp.status().is_success() => match download_limited(resp).await {
+                Ok(bytes) => {
+                    zip_bytes = Some(bytes);
+                    break;
+                }
+                Err(e) => last_err = e,
+            },
             Ok(resp) => last_err = format!("GitHub 返回 {}", resp.status()),
             Err(e) => last_err = format!("请求 GitHub 失败: {e}"),
         }
@@ -961,6 +1061,26 @@ pub async fn import_skills_from_github(
             .map_err(|e| format!("技能已导入，但记录 GitHub 版本失败，重试导入即可补全: {e}"))?;
     }
     Ok(result)
+}
+
+/// 边下边计数：content_length 预检 + 实际字节超限即中止（防 zipball 内存炸弹）
+async fn download_limited(mut resp: reqwest::Response) -> Result<Vec<u8>, String> {
+    if let Some(len) = resp.content_length() {
+        if len > ZIP_MAX_DOWNLOAD {
+            return Err(format!(
+                "ZIP 体积 {}MB 超过 256MB 上限，拒绝下载",
+                len / 1024 / 1024
+            ));
+        }
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("下载失败: {e}"))? {
+        buf.extend_from_slice(&chunk);
+        if buf.len() as u64 > ZIP_MAX_DOWNLOAD {
+            return Err("ZIP 下载超过 256MB 上限，中止下载".into());
+        }
+    }
+    Ok(buf)
 }
 
 async fn github_latest_revision(
@@ -1085,7 +1205,7 @@ pub async fn discover_unmanaged() -> Vec<DiscoveredDto> {
 }
 
 #[tauri::command]
-pub async fn import_discovered(paths: Vec<String>) -> Result<usize, String> {
+pub async fn import_discovered(paths: Vec<String>) -> Result<SkillImportResultDto, String> {
     let store = SkillStore::default_paths()?;
     let mut skills = store.read();
     let mut result = SkillImportResultDto::default();
@@ -1104,7 +1224,8 @@ pub async fn import_discovered(paths: Vec<String>) -> Result<usize, String> {
             )?;
         }
     }
-    Ok(result.added.len())
+    // 同名冲突不静默吞：随结果透出给前端提示
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1481,5 +1602,110 @@ mod tests {
         let copied = fs::read_to_string(fx.agents["codex"].join("pdf").join("SKILL.md")).unwrap();
         assert!(copied.contains("新版"), "副本内容已追平库");
         assert!(fx.agents["codex"].join("pdf").join(MARKER_FILE).exists(), "仍保持 copy 形态");
+    }
+
+    #[test]
+    fn stale_detection_covers_whole_manifest() {
+        let fx = Fx::new();
+        let skill = fx.add_lib_skill("pdf", "处理 PDF");
+        fs::write(fx.store.skill_dir("pdf").join("template.txt"), "v1").unwrap();
+        apply_impl(&fx.store, &fx.agents, &skill.id, "codex", true, false).unwrap();
+        let skill = fx.store.read().into_iter().find(|s| s.id == skill.id).unwrap();
+        assert!(
+            stale_agents(&fx.store, &fx.agents, &skill).is_empty(),
+            "副本与库一致时不漂移（.ccode-copy 标记不参与比较）"
+        );
+        // 只改 SKILL.md 之外的辅助文件也必须检出漂移
+        fs::write(fx.store.skill_dir("pdf").join("template.txt"), "v2").unwrap();
+        assert_eq!(stale_agents(&fx.store, &fx.agents, &skill), vec!["codex".to_string()]);
+        // 库新增文件同样检出
+        resync_impl(&fx.store, &fx.agents, &skill.id).unwrap();
+        fs::write(fx.store.skill_dir("pdf").join("extra.txt"), "new").unwrap();
+        assert_eq!(
+            stale_agents(&fx.store, &fx.agents, &skill),
+            vec!["codex".to_string()],
+            "库新增文件也算漂移"
+        );
+    }
+
+    #[test]
+    fn compact_iso_defensive_on_malformed() {
+        assert_eq!(compact_iso("2026-07-30T10:13:37Z"), "20260730-101337");
+        // 格式漂移（数字不足 9 位）不得 panic，原样返回已有数字
+        assert_eq!(compact_iso("abc"), "");
+        assert_eq!(compact_iso("2026"), "2026");
+        assert_eq!(compact_iso("2026-07-30"), "20260730");
+    }
+
+    #[test]
+    fn find_skill_dirs_respects_depth_limit() {
+        let fx = Fx::new();
+        // 18 层嵌套深处藏一个技能：超过 MAX_WALK_DEPTH 不得被发现
+        let deep = (0..18).fold(fx.dir.join("deep"), |p, i| p.join(format!("d{i}")));
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("SKILL.md"), "---\nname: too-deep\n---\n").unwrap();
+        let mut found = Vec::new();
+        find_skill_dirs(&fx.dir.join("deep"), &mut found);
+        assert!(found.is_empty(), "超过深度上限的目录不得下钻");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walks_survive_symlink_loops() {
+        let fx = Fx::new();
+        // 真实空目录 a + 回指根目录的链接 up：路径解析次数随深度线性增长，
+        // 保证命中我们自己的深度上限，而不是依赖 OS 的 ELOOP 行为
+        let root = fx.dir.join("loop");
+        fs::create_dir_all(root.join("a")).unwrap();
+        std::os::unix::fs::symlink(&root, root.join("up")).unwrap();
+        let mut found = Vec::new();
+        find_skill_dirs(&root, &mut found); // 无深度上限时这里会无限递归
+        assert!(found.is_empty());
+        let err = copy_dir_recursive(&root, &fx.dir.join("loop-copy")).unwrap_err();
+        assert!(err.contains("嵌套超过"), "{err}");
+    }
+
+    #[test]
+    fn charge_bytes_aborts_over_budget() {
+        let mut total = 0;
+        charge_bytes(&mut total, 100, 250).unwrap();
+        charge_bytes(&mut total, 100, 250).unwrap();
+        let err = charge_bytes(&mut total, 100, 250).unwrap_err();
+        assert!(err.contains("预算"), "{err}");
+    }
+
+    #[test]
+    fn zip_budget_uses_injected_limit() {
+        let fx = Fx::new();
+        let zip_path = fx.dir.join("big.zip");
+        build_zip(
+            &zip_path,
+            &[("skill-a/SKILL.md", b"---\nname: a\n---\n"), ("skill-a/blob.bin", &[0u8; 200])],
+        );
+        // 声明总量 ~215 超过注入预算 100：预检拒绝
+        let err = import_zip_limited(&fx.store, &mut Vec::new(), &zip_path, None, "zip", None, None, 100)
+            .unwrap_err();
+        assert!(err.contains("拒绝解压"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_failure_rolls_back_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = Fx::new();
+        let skill = fx.add_lib_skill("pdf", "处理 PDF");
+        apply_impl(&fx.store, &fx.agents, &skill.id, "codex", true, false).unwrap();
+        assert!(fx.store.read()[0].apps["codex"]);
+        // 库文件不可读 → 重复应用（先删旧分发再建新）的复制阶段必然失败
+        let lib_file = fx.store.skill_dir("pdf").join("SKILL.md");
+        fs::set_permissions(&lib_file, fs::Permissions::from_mode(0o000)).unwrap();
+        let err = apply_impl(&fx.store, &fx.agents, &skill.id, "codex", true, false).unwrap_err();
+        fs::set_permissions(&lib_file, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(err.contains("复制"), "{err}");
+        assert!(
+            !fx.store.read()[0].apps["codex"],
+            "失败后元数据必须回落为未启用，不能显示启用但盘上无物"
+        );
+        assert!(!fx.agents["codex"].join("pdf").join(MARKER_FILE).exists());
     }
 }

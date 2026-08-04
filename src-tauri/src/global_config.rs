@@ -350,9 +350,13 @@ fn patch_kimi_config(
 
 // ===== .env 补丁（gemini） =====
 
-fn patch_env_file(existing: Option<&str>, pairs: &[(String, String)]) -> String {
+fn patch_env_file(existing: Option<&str>, pairs: &[(String, String)]) -> Result<String, String> {
     let mut lines: Vec<String> = existing.unwrap_or("").lines().map(String::from).collect();
     for (k, v) in pairs {
+        // 值含换行会拆出额外 KEY=VALUE 行，既破坏 .env 也可能注入别的变量
+        if v.contains('\n') || v.contains('\r') {
+            return Err(format!("环境变量 {k} 的值包含换行符，已停止写入"));
+        }
         let prefix = format!("{k}=");
         match lines.iter_mut().find(|l| l.starts_with(&prefix)) {
             Some(l) => *l = format!("{k}={v}"),
@@ -361,7 +365,7 @@ fn patch_env_file(existing: Option<&str>, pairs: &[(String, String)]) -> String 
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    out
+    Ok(out)
 }
 
 // ===== 计划与执行 =====
@@ -431,7 +435,7 @@ fn plan_writes(
             let path = home.join(".gemini/.env");
             // 没有任何可写值且文件不存在时，不创建空文件
             if !pairs.is_empty() || path.exists() {
-                let content = patch_env_file(read_existing(&path).as_deref(), &pairs);
+                let content = patch_env_file(read_existing(&path).as_deref(), &pairs)?;
                 push(".env", path, content);
             }
         }
@@ -558,6 +562,8 @@ fn prune_tag_backups(dir: &Path, tag: &str) {
     }
 }
 
+// 仅测试用来快速制造多份带时间戳的备份验证轮换；生产路径走 backup_actions 的事务备份
+#[cfg(test)]
 fn backup_file_with_ts(dir: &Path, tag: &str, path: &Path, ts: &str) -> Result<PathBuf, String> {
     let bak = backup_file_raw(dir, tag, path, ts)?;
     prune_tag_backups(dir, tag);
@@ -934,7 +940,7 @@ pub async fn apply_profile_global(
     profile_id: String,
 ) -> Result<GlobalApplyResultDto, String> {
     let profile = store.get(&profile_id)?;
-    let key = profiles::get_key(&profile_id);
+    let key = profiles::get_key(&profile_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = GLOBAL_CONFIG_MUTEX
             .lock()
@@ -952,28 +958,36 @@ pub async fn apply_profile_global(
 }
 
 #[tauri::command]
-pub fn restore_global_backup(agent: String) -> Result<Vec<String>, String> {
-    let _guard = GLOBAL_CONFIG_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
-    let dir = backups_root()?.join(&agent);
-    restore_from(&dir, &home, &agent)
+pub async fn restore_global_backup(agent: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = GLOBAL_CONFIG_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
+        let dir = backups_root()?.join(&agent);
+        restore_from(&dir, &home, &agent)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn has_global_backup(agent: String) -> bool {
-    let dir = match backups_root() {
-        Ok(r) => r.join(&agent),
-        Err(_) => return false,
-    };
-    latest_valid_manifest(&dir).is_some()
-        || fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .any(|e| e.file_name().to_string_lossy().ends_with(".bak"))
-        })
-        .unwrap_or(false)
+pub async fn has_global_backup(agent: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = match backups_root() {
+            Ok(r) => r.join(&agent),
+            Err(_) => return false,
+        };
+        latest_valid_manifest(&dir).is_some()
+            || fs::read_dir(dir)
+                .map(|rd| {
+                    rd.flatten()
+                        .any(|e| e.file_name().to_string_lossy().ends_with(".bak"))
+                })
+                .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1079,12 +1093,21 @@ mod tests {
             ("GEMINI_API_KEY".to_string(), "new-key".to_string()),
             ("GEMINI_MODEL".to_string(), "gemini-3-pro".to_string()),
         ];
-        let out = patch_env_file(Some(existing), &pairs);
+        let out = patch_env_file(Some(existing), &pairs).unwrap();
         assert!(out.contains("GEMINI_API_KEY=new-key"));
         assert!(out.contains("GEMINI_MODEL=gemini-3-pro"));
         assert!(out.contains("OTHER=1"));
         assert!(out.contains("# comment"));
         assert!(!out.contains("old"));
+    }
+
+    #[test]
+    fn gemini_env_patch_rejects_multiline_values() {
+        let pairs = vec![("GEMINI_API_KEY".to_string(), "k1\nINJECTED=1".to_string())];
+        let err = patch_env_file(None, &pairs).unwrap_err();
+        assert!(err.contains("换行符"), "{err}");
+        let pairs_cr = vec![("GEMINI_MODEL".to_string(), "m\rx".to_string())];
+        assert!(patch_env_file(None, &pairs_cr).is_err());
     }
 
     #[test]

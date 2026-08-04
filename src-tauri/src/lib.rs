@@ -51,7 +51,6 @@ pub fn run() {
             pty::pty_set_visible,
             pty::pty_get_cwd,
             sessions::list_sessions,
-            sessions::find_session_for,
             sessions::claim_session_for,
             sessions::release_session_claim,
             sessions::get_session_conversation,

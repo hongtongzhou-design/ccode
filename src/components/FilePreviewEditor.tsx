@@ -81,6 +81,8 @@ function FilePreviewEditor({
 
   // 磁盘上的最新内容（加载/保存时更新）：外部变化重载时用于比对，避免自己保存触发的回环
   const lastSavedRef = useRef<string | null>(null);
+  // executeEdits 做外部内容替换期间置位，dirty 监听跳过这次程序性改动
+  const applyingExternalRef = useRef(false);
 
   // 加载文件内容
   useEffect(() => {
@@ -151,7 +153,8 @@ function FilePreviewEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, root, dirty, ready]);
 
-  // 创建/更新编辑器（截断文件只读，避免保存出不完整内容）
+  // 创建/销毁编辑器（截断文件只读，避免保存出不完整内容）。
+  // 同路径的外部内容更新不重建编辑器，由下方同步 effect 走 executeEdits，保住滚动/光标/undo。
   useEffect(() => {
     if (!ready || !hostRef.current) return;
     const ed = monaco.editor.create(hostRef.current, {
@@ -167,6 +170,7 @@ function FilePreviewEditor({
     });
     editorRef.current = ed;
     const sub = ed.onDidChangeModelContent(() => {
+      if (applyingExternalRef.current) return;
       setDirty(true);
       onDirtyChange?.(true);
     });
@@ -176,7 +180,19 @@ function FilePreviewEditor({
       editorRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, text, truncated]);
+  }, [ready, truncated]);
+
+  // 外部变化重载（合并/agent 写盘等）：整文替换但保留视图状态与 undo 栈。
+  // 仅在非 dirty 时外部内容才会进来（上方监听 effect 的订阅条件），不会覆盖用户编辑
+  useEffect(() => {
+    const ed = editorRef.current;
+    if (!ed || text === null) return;
+    const model = ed.getModel();
+    if (!model || model.getValue() === text) return;
+    applyingExternalRef.current = true;
+    ed.executeEdits("external-reload", [{ range: model.getFullModelRange(), text }]);
+    applyingExternalRef.current = false;
+  }, [text]);
 
   async function onSave() {
     const ed = editorRef.current;

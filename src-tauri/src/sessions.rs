@@ -278,7 +278,8 @@ pub(crate) fn now_iso() -> String {
 }
 
 pub(crate) fn expand_tilde(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
+    // Windows 上用户常写 ~\（cmd/PowerShell 不展开 ~），与 ~/ 同等处理
+    if path == "~" || path.starts_with("~/") || path.starts_with("~\\") {
         if let Some(home) = dirs::home_dir() {
             return format!("{}{}", home.to_string_lossy(), &path[1..]);
         }
@@ -1943,28 +1944,6 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             worktrees.insert(id, wt);
         }
     }
-    // OpenCode 新会话常暂存为 "New Session"；从首条真实用户消息补一个可读标题。
-    let mut first_user_titles: HashMap<String, String> = HashMap::new();
-    for row in query_rows(&conn, "SELECT * FROM message ORDER BY time_created ASC", &[]) {
-        let row = DbRow { names: row.0, vals: row.1 };
-        let (Some(session_id), Some(data)) = (row.as_str("session_id"), row.as_str("data")) else {
-            continue;
-        };
-        if first_user_titles.contains_key(&session_id) {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&data) else {
-            continue;
-        };
-        if get_str(&value, "role") != Some("user") {
-            continue;
-        }
-        if let Some(text) = opencode_user_text(&value, &[]) {
-            if let Some(title) = usable_title(&text) {
-                first_user_titles.insert(session_id, title);
-            }
-        }
-    }
     let mut out = Vec::new();
     for row in query_rows(&conn, "SELECT * FROM session", &[]) {
         let row = DbRow { names: row.0, vals: row.1 };
@@ -2005,8 +1984,7 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             agent: "opencode".into(),
             session_id: id.clone(),
             project_path,
-            title: row.as_str("title").and_then(|t| usable_title(&t))
-                .or_else(|| first_user_titles.get(&id).cloned()),
+            title: row.as_str("title").and_then(|t| usable_title(&t)),
             created_at: row.as_i64("time_created").map(opencode_ms_to_iso),
             updated_at: row.as_i64("time_updated").map(opencode_ms_to_iso),
             // 没有单会话文件：db 路径 + "#" + session_id，pin/回放据此定位
@@ -2025,6 +2003,34 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             source: default_session_source(),
             internal: false,
         });
+    }
+    // OpenCode 新会话常暂存为 "New Session"：只对占位标题的会话惰性补标题——
+    // 按 session_id 限量查最早的消息，不再全表扫 message 逐行解析 JSON。
+    // LIMIT 是防御兜底：首条真实用户消息通常就是最前面几条之一
+    for m in out.iter_mut().filter(|m| m.title.is_none()) {
+        let sid = m.session_id.clone();
+        for row in query_rows(
+            &conn,
+            "SELECT * FROM message WHERE session_id=? ORDER BY time_created ASC LIMIT 20",
+            &[&sid],
+        ) {
+            let row = DbRow { names: row.0, vals: row.1 };
+            let Some(data) = row.as_str("data") else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<Value>(&data) else {
+                continue;
+            };
+            if get_str(&value, "role") != Some("user") {
+                continue;
+            }
+            if let Some(text) = opencode_user_text(&value, &[]) {
+                if let Some(title) = usable_title(&text) {
+                    m.title = Some(title);
+                    break;
+                }
+            }
+        }
     }
     out
 }
@@ -2408,6 +2414,9 @@ pub struct ScanResult {
     /// codex 链代表 id → 全部成员 id（含代表自己）；链代表随新 resume 换人时，
     /// 用户写在任一成员 id 上的 pinned/tags 等整理数据仍能找回来
     pub chain_members: HashMap<String, Vec<String>>,
+    /// 项目路径 → provenance 规范化结果（含 canonicalize），随扫描缓存一轮，
+    /// apply_provenance 不再每个会话每轮都 canonicalize
+    pub provenance_paths: HashMap<String, String>,
 }
 
 pub fn scan_sessions() -> ScanResult {
@@ -2540,9 +2549,7 @@ pub fn scan_sessions() -> ScanResult {
         .collect();
     if let Some(dir) = snapshots_root() {
         for agent in ["claude-code", "codex", "gemini", "qwen", "kimi", "opencode"] {
-            let mut files = Vec::new();
-            collect_files(&dir.join(agent), 1, &mut files);
-            for f in files {
+            for f in snapshot_files(&dir, agent) {
                 let stem = snapshot_stem(&f);
                 if seen.contains(&(agent.to_string(), stem.clone())) {
                     continue; // 源文件还在，快照不重复列出
@@ -2551,31 +2558,7 @@ pub fn scan_sessions() -> ScanResult {
                     "codex" => codex_file_meta(&f, false, false).map(|(m, _)| m),
                     "gemini" => gemini_file_meta(&f, false, &gemini_map),
                     "qwen" => qwen_file_meta(&f, false, false),
-                    "opencode" => read_json_file(&f).and_then(|v| {
-                        let s = v.get("session")?;
-                        Some(SessionMetaDto {
-                            agent: "opencode".into(),
-                            session_id: stem.clone(),
-                            project_path: get_str(s, "directory").unwrap_or("").to_string(),
-                            title: get_str(s, "title").and_then(usable_title),
-                            created_at: s.get("time_created").and_then(|t| t.as_i64()).map(opencode_ms_to_iso),
-                            updated_at: s.get("time_updated").and_then(|t| t.as_i64()).map(opencode_ms_to_iso),
-                            file_path: f.to_string_lossy().into_owned(),
-                            token_usage: legacy_tokens(s),
-                            cli_version: get_str(s, "version").map(String::from),
-                            pinned: false,
-                            archived: false,
-                            custom_title: None,
-                            tags: Vec::new(),
-                            alive: false,
-                            chain_count: 1,
-                            workspace: None,
-                            summary: None,
-                            live: false,
-                            source: default_session_source(),
-                            internal: false,
-                        })
-                    }),
+                    "opencode" => opencode_snapshot_meta(&f, &stem),
                     "kimi" => {
                         // 快照脱离了原目录结构（无 state.json / bucket），项目归属不可知
                         let bytes = read_session_bytes(&f);
@@ -2611,6 +2594,7 @@ pub fn scan_sessions() -> ScanResult {
     ScanResult {
         sessions: out,
         chain_members,
+        provenance_paths: HashMap::new(), // 由 cached_scan 按项目去重填充
     }
 }
 
@@ -2620,12 +2604,17 @@ fn resolve_worktree_project(
     project_path: &str,
     rows: &[crate::workspaces::WorktreeRow],
 ) -> Option<(String, String)> {
+    // Windows 上 worktree 路径与会话记录的 cwd 都用 '\'，两种分隔符都认
     let mut best: Option<&crate::workspaces::WorktreeRow> = None;
     for r in rows {
-        let wt = r.worktree_path.trim_end_matches('/');
-        if project_path == wt || project_path.starts_with(&format!("{wt}/")) {
+        let wt = r.worktree_path.trim_end_matches(&['/', '\\'][..]);
+        let under = project_path == wt
+            || project_path
+                .strip_prefix(wt)
+                .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'));
+        if under {
             let len = wt.len();
-            if best.map_or(true, |b| len > b.worktree_path.trim_end_matches('/').len()) {
+            if best.map_or(true, |b| len > b.worktree_path.trim_end_matches(&['/', '\\'][..]).len()) {
                 best = Some(r);
             }
         }
@@ -2701,6 +2690,45 @@ fn snapshot_stem(path: &Path) -> String {
         .or_else(|| name.strip_suffix(".json")) // opencode 快照是导出的 JSON
         .unwrap_or(&name)
         .to_string()
+}
+
+/// pin 快照目录下的文件：opencode 快照是导出的 .json（collect_files 只认 .jsonl[.zst]，单收）
+fn snapshot_files(root: &Path, agent: &str) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if agent == "opencode" {
+        collect_json_files(&root.join(agent), &mut files);
+    } else {
+        collect_files(&root.join(agent), 1, &mut files);
+    }
+    files
+}
+
+/// opencode pin 快照（opencode_export_session 导出的自包含 JSON）→ 列表条目
+fn opencode_snapshot_meta(path: &Path, session_id: &str) -> Option<SessionMetaDto> {
+    let v = read_json_file(path)?;
+    let s = v.get("session")?;
+    Some(SessionMetaDto {
+        agent: "opencode".into(),
+        session_id: session_id.to_string(),
+        project_path: get_str(s, "directory").unwrap_or("").to_string(),
+        title: get_str(s, "title").and_then(usable_title),
+        created_at: s.get("time_created").and_then(|t| t.as_i64()).map(opencode_ms_to_iso),
+        updated_at: s.get("time_updated").and_then(|t| t.as_i64()).map(opencode_ms_to_iso),
+        file_path: path.to_string_lossy().into_owned(),
+        token_usage: legacy_tokens(s),
+        cli_version: get_str(s, "version").map(String::from),
+        pinned: false,
+        archived: false,
+        custom_title: None,
+        tags: Vec::new(),
+        alive: false,
+        chain_count: 1,
+        workspace: None,
+        summary: None,
+        live: false,
+        source: default_session_source(),
+        internal: false,
+    })
 }
 
 // ===== 快照与 app.db =====
@@ -2847,21 +2875,20 @@ pub(crate) fn set_session_summary(agent: &str, session_id: &str, summary: &str) 
 // ===== 注意力标记 v1（§6.11）：读尾部 ~64KB 分类最后一个有意义的记录 =====
 // 返回 "done" | "working" | "confirm" | "unknown"
 
-/// 读文件最后 budget 字节并对齐到换行；小文件全读
+/// 读文件最后 budget 字节的完整行：走 read_head_tail 的尾窗——普通文件 seek 只读尾部，
+/// zstd 流式解码只留尾窗环形缓冲；不再为分类全量读入/解压整个文件
 fn last_lines(path: &Path, budget: usize) -> Vec<String> {
-    let Some(bytes) = read_session_bytes(path) else {
-        return Vec::new();
-    };
-    if bytes.len() <= budget {
-        return to_lines(&String::from_utf8_lossy(&bytes));
+    match read_head_tail(path, budget) {
+        // 小文件（≤2×budget）head 即全量；大文件取对齐后的尾窗
+        Some((head, tail)) => {
+            if tail.is_empty() {
+                head
+            } else {
+                tail
+            }
+        }
+        None => Vec::new(),
     }
-    let from = bytes.len() - budget;
-    let from = bytes[from..]
-        .iter()
-        .position(|&b| b == b'\n')
-        .map(|i| from + i + 1)
-        .unwrap_or(bytes.len());
-    to_lines(&String::from_utf8_lossy(&bytes[from..]))
 }
 
 fn ends_with_question(text: &str) -> bool {
@@ -3041,16 +3068,10 @@ fn opencode_tail_state(db_path: &Path, session_id: &str) -> &'static str {
         let data = row.as_str("data").and_then(|d| serde_json::from_str::<Value>(&d).ok());
         match data.as_ref().and_then(|d| get_str(d, "type")) {
             Some("tool") => {
-                let status = data
-                    .as_ref()
-                    .and_then(|d| d.get("state"))
-                    .and_then(|s| get_str(s, "status"))
-                    .unwrap_or("");
-                // 待执行/执行中 → 工作；已完成/失败也仍在一轮里
-                return match status {
-                    "pending" | "running" => "working",
-                    _ => "working",
-                };
+                // 单条工具 part 无法判断一轮是否结束：pending/running 显然在工作；
+                // completed/error 之后 agent 通常还要继续输出，保守同样判 working。
+                // 真正结束时随后的 assistant text part 落库，下一轮轮询会改判 done
+                return "working";
             }
             Some("text") | Some("reasoning") => return "done",
             _ => {} // 其他 part 类型回落到消息角色判断
@@ -3105,7 +3126,15 @@ pub(crate) fn cached_scan() -> ScanResult {
             return res.clone();
         }
     }
-    let res = scan_sessions();
+    let mut res = scan_sessions();
+    // provenance 路径规范化（含 canonicalize）按项目去重算一次，随扫描结果缓存一轮
+    let mut provenance_paths = HashMap::new();
+    for s in &res.sessions {
+        provenance_paths
+            .entry(s.project_path.clone())
+            .or_insert_with(|| crate::usage::normalize_provenance_path(&s.project_path));
+    }
+    res.provenance_paths = provenance_paths;
     *guard = Some((Instant::now(), res.clone()));
     res
 }
@@ -3151,7 +3180,11 @@ fn apply_meta(
     }
 }
 
-fn apply_provenance(conn: &Connection, sessions: &mut [SessionMetaDto]) {
+fn apply_provenance(
+    conn: &Connection,
+    sessions: &mut [SessionMetaDto],
+    norm_paths: &HashMap<String, String>,
+) {
     let Ok(mut stmt) = conn.prepare(
         "SELECT agent, project_path, source, internal FROM usage_provenance",
     ) else {
@@ -3171,7 +3204,11 @@ fn apply_provenance(conn: &Connection, sessions: &mut [SessionMetaDto]) {
         .map(|(agent, path, source, internal)| ((agent, path), (source, internal)))
         .collect();
     for session in sessions {
-        let path = crate::usage::normalize_provenance_path(&session.project_path);
+        // 规范化结果随 ScanResult 缓存一轮；缓存外路径（理论上不会出现）现算兜底
+        let path = norm_paths
+            .get(&session.project_path)
+            .cloned()
+            .unwrap_or_else(|| crate::usage::normalize_provenance_path(&session.project_path));
         if let Some((source, internal)) = map.get(&(session.agent.clone(), path)) {
             session.source.clone_from(source);
             session.internal = *internal;
@@ -3189,34 +3226,12 @@ pub async fn list_sessions() -> Vec<SessionMetaDto> {
     if let Ok(conn) = open_db() {
         let meta = read_all_meta(&conn);
         apply_meta(&mut sessions, &scan.chain_members, &meta);
-        apply_provenance(&conn, &mut sessions);
+        apply_provenance(&conn, &mut sessions, &scan.provenance_paths);
     }
     // 最近活跃在前；ISO 字符串可直接字典序比较
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     redact_session_meta(&mut sessions);
     sessions
-}
-
-/// 终端联动兜底（architecture §6.7）：无 --session-id 的 agent，
-/// 按 (agent, 项目目录, 启动时间) 找最新会话；updated_at 为 ISO 字符串可字典序比较
-#[tauri::command]
-pub async fn find_session_for(
-    agent: String,
-    cwd: String,
-    since_iso: String,
-) -> Option<SessionMetaDto> {
-    let cwd = expand_tilde(&cwd);
-    let scan = tauri::async_runtime::spawn_blocking(cached_scan).await.ok()?;
-    let mut found = scan
-        .sessions
-        .into_iter()
-        .filter(|s| s.agent == agent && s.project_path == cwd)
-        .filter(|s| s.updated_at.as_deref().unwrap_or("") >= since_iso.as_str())
-        .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
-    if let Some(session) = &mut found {
-        redact_session_meta(std::slice::from_mut(session));
-    }
-    found
 }
 
 #[derive(Clone)]
@@ -3252,10 +3267,7 @@ fn link_project_path(cwd: &str) -> String {
 pub(crate) fn register_session_claim(claim_id: &str, agent: &str, cwd: &str) {
     let project_path = link_project_path(cwd);
     // 启动命令是同步路径，只读取已有缓存，禁止为关联声明阻塞扫描数百个历史文件。
-    let excluded = recent_cached_scan().unwrap_or_else(|| ScanResult {
-        sessions: Vec::new(),
-        chain_members: HashMap::new(),
-    }).sessions.into_iter()
+    let excluded = recent_cached_scan().unwrap_or_default().sessions.into_iter()
         .filter(|session| session.agent == agent && session.project_path == project_path)
         .map(|session| session.session_id)
         .collect();
@@ -3632,18 +3644,32 @@ pub(crate) fn render_markdown(
 
 /// 导出当前会话为 Markdown 到 ~/Downloads/ccode-exports/，返回导出文件路径
 #[tauri::command]
-pub fn export_session_markdown(
+pub async fn export_session_markdown(
     agent: String,
     session_id: String,
     file_path: String,
     title: String,
 ) -> Result<String, String> {
-    let msgs = conversation_impl(&agent, &file_path);
+    // 解析+渲染是阻塞 IO/CPU，移出 async worker 防卡 UI
+    tauri::async_runtime::spawn_blocking(move || {
+        export_session_markdown_impl(&agent, &session_id, &file_path, &title)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn export_session_markdown_impl(
+    agent: &str,
+    session_id: &str,
+    file_path: &str,
+    title: &str,
+) -> Result<String, String> {
+    let msgs = conversation_impl(agent, file_path);
     if msgs.is_empty() {
         return Err("会话没有可导出的内容".into());
     }
-    let title = redact_sensitive_text(&title);
-    let md = render_markdown(&agent, &session_id, &title, &msgs);
+    let title = redact_sensitive_text(title);
+    let md = render_markdown(agent, session_id, &title, &msgs);
     let downloads = dirs::download_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
         .ok_or("无法确定下载目录")?;
@@ -3656,14 +3682,21 @@ pub fn export_session_markdown(
 }
 
 #[tauri::command]
-pub fn pin_session(agent: String, session_id: String, file_path: String) -> Result<(), String> {
+pub async fn pin_session(agent: String, session_id: String, file_path: String) -> Result<(), String> {
+    // 复制快照/导出 opencode 库行是阻塞 IO，移出 async worker
+    tauri::async_runtime::spawn_blocking(move || pin_session_impl(&agent, &session_id, &file_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn pin_session_impl(agent: &str, session_id: &str, file_path: &str) -> Result<(), String> {
     if agent == "opencode" {
         // OpenCode 没有单会话文件：从共享 db 导出自包含 JSON 快照
         let Some((db, sid)) = file_path.split_once('#') else {
             return Err("OpenCode 会话定位格式应为 <db路径>#<session_id>".into());
         };
         let data = opencode_export_session(Path::new(db), sid)?;
-        let dst = snapshot_json_path(&agent, sid).ok_or("无法确定平台配置目录")?;
+        let dst = snapshot_json_path(agent, sid).ok_or("无法确定平台配置目录")?;
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("创建快照目录失败: {e}"))?;
         }
@@ -3679,11 +3712,11 @@ pub fn pin_session(agent: String, session_id: String, file_path: String) -> Resu
         invalidate_scan_cache();
         return Ok(());
     }
-    let src = PathBuf::from(&file_path);
+    let src = PathBuf::from(file_path);
     if !src.exists() {
         return Err("源会话文件已不存在，无法 pin".into());
     }
-    let dst = snapshot_path(&agent, &session_id, file_path.ends_with(".zst"))
+    let dst = snapshot_path(agent, session_id, file_path.ends_with(".zst"))
         .ok_or("无法确定平台配置目录")?;
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建快照目录失败: {e}"))?;
@@ -3746,30 +3779,54 @@ pub fn set_session_meta(
 
 // ===== 删除（用户显式发起，是只读原则的唯一例外） =====
 
-/// 删除只允许落在已知会话根目录内（各 CLI 会话目录 + 我们的快照目录），防误删
-fn session_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
+/// 允许删除的会话数据目录：(目录, 是否同时允许 .json)。
+/// 必须是各 CLI 实际存放会话文件的子目录，而不是 CLI 家目录整根——
+/// 整根放行会让 file_path 指向同根的 auth.json、session_index.jsonl 等非会话文件
+fn session_data_dirs() -> Vec<(PathBuf, bool)> {
+    let mut dirs = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        for name in [".claude", ".codex", ".gemini", ".qwen", ".kimi", ".kimi-code"] {
-            roots.push(home.join(name));
-        }
-        // OpenCode：SQLite 库与 legacy storage 都在这一个根下
-        roots.push(home.join(".local").join("share").join("opencode"));
+        // claude: projects/<dir>/<uuid>.jsonl；codex: sessions|archived_sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]
+        dirs.push((home.join(".claude").join("projects"), false));
+        dirs.push((home.join(".codex").join("sessions"), false));
+        dirs.push((home.join(".codex").join("archived_sessions"), false));
+        // gemini: tmp/<slug>/chats/*.jsonl；qwen: projects/**/chats/**/*.jsonl
+        dirs.push((home.join(".gemini").join("tmp"), false));
+        dirs.push((home.join(".qwen").join("projects"), false));
+        // kimi 旧版 sessions/<md5>/<uuid>/context.jsonl（同目录 state.json 不许删 → .json 不放行）
+        dirs.push((home.join(".kimi").join("sessions"), false));
+        // kimi 新版 sessions/<wd_*>/<id>/agents/main/wire.jsonl；
+        // 枚举入口 session_index.jsonl 在 ~/.kimi-code 根上，限定 sessions/ 子目录后自然排除
+        dirs.push((home.join(".kimi-code").join("sessions"), false));
+        // OpenCode legacy storage：session/message/part 都是 .json（v1.2+ 的共享 SQLite 走删行，不在这里）
+        dirs.push((home.join(".local").join("share").join("opencode").join("storage"), true));
     }
     if let Some(snap) = snapshots_root() {
-        roots.push(snap);
+        // pin 快照：.jsonl/.jsonl.zst，opencode 快照是导出的 .json
+        dirs.push((snap, true));
     }
-    roots
+    dirs
 }
 
-fn is_under_session_root(path: &Path) -> bool {
-    let Ok(path) = path.canonicalize() else {
+/// 删除目标两道闸：canonicalize 后必须落在已知会话数据目录内（防符号链接绕过），
+/// 且后缀是会话文件（.jsonl/.jsonl.zst；仅明确允许的目录放行 .json）
+fn deletable_session_file(path: &Path, dirs: &[(PathBuf, bool)]) -> bool {
+    let Ok(canon) = path.canonicalize() else {
         return false;
     };
-    session_roots().iter().any(|root| {
-        root.canonicalize()
-            .map(|r| path.starts_with(r))
-            .unwrap_or(false)
+    let Some(name) = canon.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return false;
+    };
+    let jsonl = name.ends_with(".jsonl") || name.ends_with(".jsonl.zst");
+    let json = name.ends_with(".json");
+    if !jsonl && !json {
+        return false;
+    }
+    dirs.iter().any(|(dir, allow_json)| {
+        (jsonl || (*allow_json && json))
+            && dir
+                .canonicalize()
+                .map(|d| canon.starts_with(d))
+                .unwrap_or(false)
     })
 }
 
@@ -3780,18 +3837,165 @@ fn delete_source_file(file_path: &str) -> Result<bool, String> {
     if !file_path.ends_with(".zst") {
         candidates.push(format!("{file_path}.zst")); // Codex 后台压缩后源文件名会变
     }
+    let dirs = session_data_dirs();
     for c in candidates {
         let p = PathBuf::from(&c);
         if !p.exists() {
             continue;
         }
-        if !is_under_session_root(&p) {
-            return Err(format!("拒绝删除会话根目录之外的文件: {c}"));
+        if !deletable_session_file(&p, &dirs) {
+            return Err(format!("拒绝删除非会话文件（不在会话数据目录或后缀不符）: {c}"));
         }
         fs::remove_file(&p).map_err(|e| format!("删除 {c} 失败: {e}"))?;
         deleted = true;
     }
     Ok(deleted)
+}
+
+/// OpenCode v1.2+ 的会话在共享 SQLite 里：读写连接 + 事务删 session/message/part 行
+/// （只读扫描路径不变，仅删除开读写连接）。db_path 来自前端，只接受 opencode_db_path()
+/// 指向的库，防把任意 SQLite 文件当会话库删
+fn delete_opencode_rows(db_path: &Path, session_id: &str) -> Result<(), String> {
+    let expected = opencode_db_path().ok_or("无法确定 OpenCode 数据库路径")?;
+    let canon = db_path
+        .canonicalize()
+        .map_err(|e| format!("OpenCode 数据库不可访问: {e}"))?;
+    let expected = expected.canonicalize().unwrap_or(expected);
+    if canon != expected {
+        return Err("拒绝操作未知的 OpenCode 数据库".into());
+    }
+    delete_opencode_rows_impl(db_path, session_id)
+}
+
+fn delete_opencode_rows_impl(db_path: &Path, session_id: &str) -> Result<(), String> {
+    let mut conn = Connection::open(db_path).map_err(|e| format!("打开 OpenCode 数据库失败: {e}"))?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(3));
+    let tx = conn.transaction().map_err(|e| format!("开启事务失败: {e}"))?;
+    for sql in [
+        "DELETE FROM part WHERE session_id=?1",
+        "DELETE FROM message WHERE session_id=?1",
+        "DELETE FROM session WHERE id=?1",
+    ] {
+        tx.execute(sql, params![session_id])
+            .map_err(|e| format!("删除 OpenCode 会话失败: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("提交事务失败: {e}"))?;
+    Ok(())
+}
+
+/// Codex 链成员文件：rollout-<时间>-<uuid>.jsonl[.zst]，按文件名尾部 uuid 精确匹配
+/// （与 find_snapshot 取尾部 uuid 的约定一致；payload id 与文件名 uuid 不一致的极端情况不覆盖）
+fn codex_member_files(member_ids: &[String]) -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let roots = [
+        home.join(".codex").join("sessions"),
+        home.join(".codex").join("archived_sessions"),
+    ];
+    codex_member_files_in(&roots, member_ids)
+}
+
+fn codex_member_files_in(roots: &[PathBuf], member_ids: &[String]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if member_ids.is_empty() {
+        return out;
+    }
+    let mut files = Vec::new();
+    for root in roots {
+        collect_files(root, 5, &mut files);
+    }
+    for f in files {
+        let Some(name) = f.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let stem = name
+            .strip_suffix(".jsonl.zst")
+            .or_else(|| name.strip_suffix(".jsonl"))
+            .unwrap_or(&name);
+        let hit = member_ids.iter().any(|id| {
+            stem == id
+                || (stem.len() > id.len()
+                    && stem.ends_with(id.as_str())
+                    && stem.as_bytes()[stem.len() - id.len() - 1] == b'-')
+        });
+        if hit {
+            out.push(f);
+        }
+    }
+    out
+}
+
+/// 删除一个会话的全部磁盘痕迹：源文件（opencode 删库行；codex 连带链成员文件）+ pin 快照。
+/// 返回需要一并清 meta 的额外 session id（codex 链成员，不含自身）
+fn delete_session_files(
+    agent: &str,
+    session_id: &str,
+    file_path: &str,
+    chain_members: &HashMap<String, Vec<String>>,
+) -> Result<Vec<String>, String> {
+    let mut extra_meta_ids = Vec::new();
+    if agent == "opencode" {
+        match file_path.split_once('#') {
+            // v1.2+：会话是共享库里的行，文件层面没有东西可删
+            Some((db, sid)) => delete_opencode_rows(Path::new(db), sid)?,
+            // legacy storage 的 .json（或快照路径兜底）
+            None => {
+                delete_source_file(file_path)?;
+            }
+        }
+    } else {
+        delete_source_file(file_path)?;
+        if agent == "codex" {
+            // resume/fork 链：只删代表文件会让链换个代表重新出现，成员文件一并删除
+            let members = chain_members.get(session_id).cloned().unwrap_or_default();
+            for f in codex_member_files(&members) {
+                delete_source_file(&f.to_string_lossy())?;
+            }
+            extra_meta_ids = members.into_iter().filter(|id| *id != session_id).collect();
+        }
+    }
+    for p in snapshot_candidates(agent, session_id) {
+        if p.exists() {
+            let _ = fs::remove_file(p);
+        }
+    }
+    for id in &extra_meta_ids {
+        for p in snapshot_candidates(agent, id) {
+            if p.exists() {
+                let _ = fs::remove_file(p);
+            }
+        }
+    }
+    Ok(extra_meta_ids)
+}
+
+fn delete_session_impl(agent: &str, session_id: &str, file_path: &str) -> Result<(), String> {
+    // 链成员表只有 codex 用得到；走缓存，不额外触发全量扫描之外的 IO
+    let chain_members = if agent == "codex" {
+        cached_scan().chain_members
+    } else {
+        HashMap::new()
+    };
+    let member_ids = delete_session_files(agent, session_id, file_path, &chain_members)?;
+    let mut conn = open_db()?;
+    let tx = conn.transaction().map_err(|e| format!("开启事务失败: {e}"))?;
+    tx.execute(
+        "DELETE FROM session_meta WHERE agent=?1 AND session_id=?2",
+        params![agent, session_id],
+    )
+    .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
+    for id in &member_ids {
+        // 链成员 id 上的整理数据一并清掉，避免换代表后冒出幽灵行
+        tx.execute(
+            "DELETE FROM session_meta WHERE agent=?1 AND session_id=?2",
+            params![agent, id],
+        )
+        .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("提交事务失败: {e}"))?;
+    invalidate_scan_cache();
+    Ok(())
 }
 
 #[tauri::command]
@@ -3800,20 +4004,10 @@ pub async fn delete_session(
     session_id: String,
     file_path: String,
 ) -> Result<(), String> {
-    delete_source_file(&file_path)?;
-    for p in snapshot_candidates(&agent, &session_id) {
-        if p.exists() {
-            let _ = fs::remove_file(p);
-        }
-    }
-    let conn = open_db()?;
-    conn.execute(
-        "DELETE FROM session_meta WHERE agent=?1 AND session_id=?2",
-        params![agent, session_id],
-    )
-    .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
-    invalidate_scan_cache();
-    Ok(())
+    // 文件/库删除是阻塞 IO，移出 async worker
+    tauri::async_runtime::spawn_blocking(move || delete_session_impl(&agent, &session_id, &file_path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -3822,32 +4016,59 @@ pub async fn delete_project_sessions(agent: String, project_path: String) -> Res
     let scan = tauri::async_runtime::spawn_blocking(cached_scan)
         .await
         .map_err(|e| e.to_string())?;
+    let chain_members = scan.chain_members;
     let targets: Vec<SessionMetaDto> = scan
         .sessions
         .into_iter()
         .filter(|s| s.agent == agent && s.project_path == project_path)
         .collect();
+    tauri::async_runtime::spawn_blocking(move || delete_project_sessions_impl(targets, chain_members))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 逐会话先删文件/库行，成功才在同一事务里删 meta：删不掉的会话文件与 meta 都保留，
+/// 不会出现文件已删/meta 残留（或相反）的幽灵状态；失败逐个列出并明示已删数量
+fn delete_project_sessions_impl(
+    targets: Vec<SessionMetaDto>,
+    chain_members: HashMap<String, Vec<String>>,
+) -> Result<usize, String> {
     // 单连接 + 事务批量删除（原实现逐项 open_db + 逐条 DELETE，大量会话时明显慢）
     let mut conn = open_db()?;
     let tx = conn.transaction().map_err(|e| format!("开启事务失败: {e}"))?;
     let mut count = 0;
-    for s in targets {
-        delete_source_file(&s.file_path)?;
-        for p in snapshot_candidates(&s.agent, &s.session_id) {
-            if p.exists() {
-                let _ = fs::remove_file(p);
+    let mut failed: Vec<String> = Vec::new();
+    for s in &targets {
+        match delete_session_files(&s.agent, &s.session_id, &s.file_path, &chain_members) {
+            Ok(member_ids) => {
+                tx.execute(
+                    "DELETE FROM session_meta WHERE agent=?1 AND session_id=?2",
+                    params![s.agent, s.session_id],
+                )
+                .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
+                for id in &member_ids {
+                    tx.execute(
+                        "DELETE FROM session_meta WHERE agent=?1 AND session_id=?2",
+                        params![s.agent, id],
+                    )
+                    .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
+                }
+                count += 1;
             }
+            Err(e) => failed.push(format!("{}（{e}）", s.session_id)),
         }
-        tx.execute(
-            "DELETE FROM session_meta WHERE agent=?1 AND session_id=?2",
-            params![s.agent, s.session_id],
-        )
-        .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
-        count += 1;
     }
     tx.commit().map_err(|e| format!("提交事务失败: {e}"))?;
     invalidate_scan_cache();
-    Ok(count)
+    if failed.is_empty() {
+        Ok(count)
+    } else {
+        Err(format!(
+            "已删除 {count} 个会话，{} 个删除失败（文件与整理数据均已保留）：{}",
+            failed.len(),
+            failed.join("；")
+        ))
+    }
 }
 
 /// 会话文件签名（mtime_ms, size）：轮询时先比对签名，没变就不重解析
@@ -4315,6 +4536,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn last_lines_reads_tail_window_for_large_files() {
+        let dir = std::env::temp_dir().join(format!("ccode-ll-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 大文件（>2×budget）：返回对齐后的尾窗，不是全量
+        let big = dir.join("big.jsonl");
+        let mut text = String::new();
+        for i in 0..4000 {
+            text.push_str(&format!("{{\"n\":{i},\"pad\":\"{}\"}}\n", "x".repeat(60)));
+        }
+        std::fs::write(&big, &text).unwrap();
+        assert!(text.len() > 128 * 1024);
+        let lines = last_lines(&big, 64 * 1024);
+        assert!(!lines.is_empty());
+        assert!(lines.len() < 4000, "大文件只回尾窗，不全量");
+        assert!(
+            lines.iter().all(|l| serde_json::from_str::<Value>(l).is_ok()),
+            "尾窗对齐后每行都是完整 JSON"
+        );
+        assert!(lines.last().is_some_and(|l| l.contains("\"n\":3999")), "尾窗必须含文件末尾");
+        // 小文件照旧全量
+        let small = dir.join("small.jsonl");
+        std::fs::write(&small, "{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n").unwrap();
+        assert_eq!(last_lines(&small, 64 * 1024).len(), 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // ===== Gemini =====
 
     #[test]
@@ -4601,24 +4849,113 @@ mod tests {
     // ===== 删除路径校验 =====
 
     #[test]
-    fn delete_refuses_paths_outside_session_roots() {
-        assert!(!is_under_session_root(Path::new("/etc/passwd")));
-        assert!(!is_under_session_root(Path::new("/tmp/whatever.jsonl")));
+    fn delete_refuses_paths_outside_session_data_dirs() {
         let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("x.jsonl");
         std::fs::write(&f, "{}").unwrap();
         let err = delete_source_file(f.to_str().unwrap()).unwrap_err();
-        assert!(err.contains("拒绝删除"), "根目录外的文件必须拒绝: {err}");
+        assert!(err.contains("拒绝删除"), "会话数据目录外的文件必须拒绝: {err}");
         assert!(f.exists(), "被拒绝的文件不能被删");
         std::fs::remove_dir_all(&dir).ok();
-        // 根目录内的路径放行（用真实 home 下的 .claude 构造，不实际创建）
-        if let Some(home) = dirs::home_dir() {
-            let inside = home.join(".claude").join("projects").join("x.jsonl");
-            if inside.canonicalize().is_ok() {
-                assert!(is_under_session_root(&inside));
-            }
+    }
+
+    #[test]
+    fn deletable_session_file_requires_data_dir_and_session_suffix() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        // 模拟 ~/.codex、~/.kimi-code、opencode legacy storage 的布局
+        let codex_chats = dir.join(".codex").join("sessions").join("2026").join("08").join("04");
+        std::fs::create_dir_all(&codex_chats).unwrap();
+        let rollout = codex_chats.join("rollout-x.jsonl");
+        std::fs::write(&rollout, "{}").unwrap();
+        let auth = dir.join(".codex").join("auth.json");
+        std::fs::write(&auth, "{}").unwrap();
+        let kimi_main = dir.join(".kimi-code").join("sessions").join("s1").join("agents").join("main");
+        std::fs::create_dir_all(&kimi_main).unwrap();
+        let wire = kimi_main.join("wire.jsonl");
+        std::fs::write(&wire, "{}").unwrap();
+        let index = dir.join(".kimi-code").join("session_index.jsonl");
+        std::fs::write(&index, "{}").unwrap();
+        let state = dir.join(".kimi-code").join("sessions").join("s1").join("state.json");
+        std::fs::write(&state, "{}").unwrap();
+        let storage = dir.join("storage").join("session").join("p1");
+        std::fs::create_dir_all(&storage).unwrap();
+        let ses_json = storage.join("ses_1.json");
+        std::fs::write(&ses_json, "{}").unwrap();
+        let notes = codex_chats.join("notes.txt");
+        std::fs::write(&notes, "x").unwrap();
+        let dirs = vec![
+            (dir.join(".codex").join("sessions"), false),
+            (dir.join(".kimi-code").join("sessions"), false),
+            (dir.join("storage"), true),
+        ];
+        assert!(deletable_session_file(&rollout, &dirs));
+        assert!(deletable_session_file(&wire, &dirs));
+        assert!(deletable_session_file(&ses_json, &dirs), "legacy storage 放行 .json");
+        assert!(!deletable_session_file(&auth, &dirs), "同 CLI 根下的 auth.json 必须拒绝");
+        assert!(!deletable_session_file(&index, &dirs), "根上的 session_index.jsonl 必须拒绝");
+        assert!(!deletable_session_file(&state, &dirs), "未放行 .json 的目录里 state.json 必须拒绝");
+        assert!(!deletable_session_file(&notes, &dirs), "后缀不符必须拒绝");
+        assert!(
+            !deletable_session_file(&codex_chats.join("ghost.jsonl"), &dirs),
+            "不存在的路径（canonicalize 失败）必须拒绝"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn codex_member_files_match_rollout_tail_uuid() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let chats = dir.join("sessions").join("2026").join("08").join("04");
+        std::fs::create_dir_all(&chats).unwrap();
+        let id = "019f8039-8bed-7323-8c9d-853c1e7a9edf";
+        let f1 = chats.join(format!("rollout-2026-08-04T00-00-00-{id}.jsonl"));
+        let f2 = chats.join(format!("rollout-2026-08-04T01-00-00-{id}.jsonl.zst"));
+        let other = chats.join("rollout-2026-08-04T00-00-00-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
+        for f in [&f1, &f2, &other] {
+            std::fs::write(f, "{}").unwrap();
         }
+        let roots = vec![dir.join("sessions")];
+        let found = codex_member_files_in(&roots, &[id.to_string()]);
+        assert_eq!(found.len(), 2, "同 uuid 的 .jsonl 与 .jsonl.zst 都命中: {found:?}");
+        assert!(found.contains(&f1) && found.contains(&f2));
+        assert!(!found.contains(&other), "无关 uuid 不能命中");
+        assert!(codex_member_files_in(&roots, &[]).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opencode_delete_removes_rows_and_rejects_unknown_db() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = opencode_fixture_db(&dir);
+        // 非 opencode_db_path() 指向的库：整批拒绝且行不动
+        let err = delete_opencode_rows(&db, "ses_1").unwrap_err();
+        assert!(err.contains("拒绝"), "未知库必须拒绝: {err}");
+        assert!(!opencode_parse_db(&db, "ses_1").is_empty(), "被拒绝后行必须还在");
+        // 删行本身：session/message/part 三表清掉目标会话，其他会话不受影响
+        delete_opencode_rows_impl(&db, "ses_1").unwrap();
+        let conn = open_opencode_db(&db).unwrap();
+        assert!(query_rows(&conn, "SELECT * FROM session WHERE id='ses_1'", &[]).is_empty());
+        assert!(query_rows(&conn, "SELECT * FROM message WHERE session_id='ses_1'", &[]).is_empty());
+        assert!(query_rows(&conn, "SELECT * FROM part WHERE session_id='ses_1'", &[]).is_empty());
+        assert_eq!(
+            query_rows(&conn, "SELECT * FROM session WHERE id='ses_2'", &[]).len(),
+            1,
+            "其他会话不受影响"
+        );
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expand_tilde_accepts_forward_and_backslash() {
+        let home = dirs::home_dir().unwrap().to_string_lossy().into_owned();
+        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(expand_tilde("~/x"), format!("{home}/x"));
+        assert_eq!(expand_tilde("~\\x"), format!("{home}\\x"), "Windows 风格 ~\\ 也要展开");
+        assert_eq!(expand_tilde("/abs/path"), "/abs/path");
+        assert_eq!(expand_tilde("~other"), "~other", "~other 不是当前用户家目录，不展开");
     }
 
     #[test]
@@ -4651,6 +4988,24 @@ mod tests {
         assert!(resolve_worktree_project("/home/u/code/myrepo", &rows).is_none());
         assert!(resolve_worktree_project("/home/u/ccode/workspaces/myrepo/feat-xy", &rows).is_none());
         assert!(resolve_worktree_project("/anywhere", &[]).is_none());
+    }
+
+    #[test]
+    fn worktree_resolve_accepts_backslash_separator() {
+        // Windows：worktree 路径与会话 cwd 都用 '\'（且 worktree 路径可能带尾部分隔符）
+        let rows = vec![crate::workspaces::WorktreeRow {
+            id: "ws-w".into(),
+            worktree_path: "C:\\ccode\\workspaces\\myrepo\\feat-x\\".into(),
+            repo_path: "C:\\code\\myrepo".into(),
+            name: "feat-x".into(),
+            branch: "ccode/feat-x".into(),
+            base_branch: "main".into(),
+        }];
+        let hit = resolve_worktree_project("C:\\ccode\\workspaces\\myrepo\\feat-x\\src", &rows);
+        assert_eq!(hit, Some(("C:\\code\\myrepo".into(), "feat-x".into())));
+        let root = resolve_worktree_project("C:\\ccode\\workspaces\\myrepo\\feat-x", &rows);
+        assert!(root.is_some(), "尾部 '\\' 已归一，根路径本身也命中");
+        assert!(resolve_worktree_project("C:\\ccode\\workspaces\\myrepo\\feat-xy", &rows).is_none());
     }
 
     #[test]
@@ -4791,6 +5146,65 @@ mod tests {
         assert_eq!(m2.project_path, "/tmp/dir2", "global 项目回落 session.directory");
         assert_eq!(m2.title, None, "空标题按 None 处理");
         assert!(m2.token_usage.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opencode_scan_backfills_placeholder_title_lazily() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = opencode_fixture_db(&dir);
+        // 占位标题的会话：从首条真实用户消息补标题
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO session VALUES('ses_new','p1',NULL,'/repo/x','New Session',0,0,0,0,0,0,'build','{}','0.9.0',1785307090000,1785307090000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES('msg_n','ses_new',1785307090100,'{\"role\":\"user\",\"summary\":{\"body\":\"帮我写个脚本\"}}')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let metas = opencode_scan_db(&db);
+        let m = metas.iter().find(|m| m.session_id == "ses_new").unwrap();
+        assert_eq!(m.title.as_deref(), Some("帮我写个脚本"), "占位标题应惰性回补");
+        let m1 = metas.iter().find(|m| m.session_id == "ses_1").unwrap();
+        assert_eq!(m1.title.as_deref(), Some("修复登录 bug"), "真实标题不走回补");
+        let m2 = metas.iter().find(|m| m.session_id == "ses_2").unwrap();
+        assert_eq!(m2.title, None, "没有用户消息的占位会话回补不到也不编");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opencode_snapshot_collected_and_mapped() {
+        // pin 快照回补：opencode 快照是 .json，必须进收集与解析
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let snap_root = dir.join("snapshots");
+        std::fs::create_dir_all(snap_root.join("opencode")).unwrap();
+        std::fs::create_dir_all(snap_root.join("codex")).unwrap();
+        let json = snap_root.join("opencode").join("ses_x.json");
+        std::fs::write(
+            &json,
+            r#"{"session":{"id":"ses_x","title":"快照标题","directory":"/proj/x","time_created":1785307071000,"time_updated":1785307072000,"tokens_input":7,"tokens_output":3}}"#,
+        )
+        .unwrap();
+        let codex_snap = snap_root.join("codex").join("rollout-y.jsonl");
+        std::fs::write(&codex_snap, "{}").unwrap();
+        let oc_files = snapshot_files(&snap_root, "opencode");
+        assert_eq!(oc_files.len(), 1, "opencode 的 .json 快照必须被收集");
+        assert_eq!(oc_files[0], json);
+        let cx_files = snapshot_files(&snap_root, "codex");
+        assert_eq!(cx_files.len(), 1, "其他 agent 仍只收 .jsonl[.zst]");
+        let m = opencode_snapshot_meta(&json, "ses_x").unwrap();
+        assert_eq!(m.session_id, "ses_x");
+        assert_eq!(m.title.as_deref(), Some("快照标题"));
+        assert_eq!(m.project_path, "/proj/x");
+        assert!(!m.alive);
+        assert_eq!(m.created_at.as_deref(), Some("2026-07-29T06:37:51Z"));
+        assert_eq!(m.token_usage.map(|u| (u.input, u.output)), Some((7, 3)));
+        assert!(opencode_snapshot_meta(&codex_snap, "y").is_none(), "非导出 JSON 不产生条目");
         std::fs::remove_dir_all(&dir).ok();
     }
 

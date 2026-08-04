@@ -1,10 +1,16 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { File, FolderClosed, FolderOpen } from "lucide-react";
 import ContextMenu from "./ContextMenu";
 import { LoadingRows } from "./PageFrame";
 import { useAppStore } from "../store";
+import {
+  hasChangedInside,
+  normSep,
+  normalizeStatusKeys,
+  parentDir,
+} from "../path-utils";
 
 export interface SearchResultDto {
   path: string;
@@ -51,15 +57,120 @@ function pathWithin(path: string, base: string): boolean {
   return normalizedPath === normalizedBase || normalizedPath.startsWith(`${normalizedBase}/`);
 }
 
-/** 上一级目录；已到文件系统根（或无法再上）时返回 null */
-function parentDir(p: string): string | null {
-  const trimmed = p.replace(/[\\/]+$/, "");
-  if (!trimmed) return null;
-  const idx = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  if (idx < 0) return null; // 形如 "~" 或 "C:"，无法再上
-  if (idx === 0) return trimmed[0] === "/" ? "/" : null;
-  return trimmed.slice(0, idx);
+/** FileTreeNode 的下传上下文：父组件需保证这些回调/引用稳定，memo 才有效 */
+interface TreeNodeCtx {
+  root: string;
+  expanded: Set<string>;
+  cache: Record<string, DirEntryDto[]>;
+  /** 键已 normalizeStatusKeys 归一（/ 分隔） */
+  gitMap: Record<string, string>;
+  highlight: string | null;
+  load: (path: string) => Promise<void>;
+  toggle: (path: string) => void;
+  nav: (path: string) => boolean;
+  onOpenFile: (path: string, name: string, root: string) => void;
+  onOpenTerminal: (path: string) => void;
+  onMenu: (menu: { x: number; y: number; path: string; isDir: boolean }) => void;
 }
+
+/**
+ * 树节点（模块级 + memo）：定义在 FileTree 外的稳定组件类型，
+ * 父组件因搜索框输入等无关状态重渲染时不会整树 remount / 重渲染。
+ */
+const FileTreeNode = memo(function FileTreeNode({
+  entry,
+  depth,
+  ctx,
+}: {
+  entry: DirEntryDto;
+  depth: number;
+  ctx: TreeNodeCtx;
+}) {
+  const { expanded, cache, gitMap, highlight, root, load, toggle, nav } = ctx;
+  const isOpen = expanded.has(entry.path);
+  const children = cache[entry.path];
+  const gitStatus = entry.isDir ? undefined : gitMap[normSep(entry.path)];
+  const dirtyDir = entry.isDir && hasChangedInside(gitMap, entry.path);
+  // 展开才读取子目录（懒加载）
+  useEffect(() => {
+    if (entry.isDir && isOpen && !children) void load(entry.path);
+  }, [isOpen, entry.isDir, entry.path, children, load]);
+  return (
+    <>
+      <div
+        onClick={() =>
+          entry.isDir ? toggle(entry.path) : ctx.onOpenFile(entry.path, entry.name, root)
+        }
+        onDoubleClick={() => {
+          if (entry.isDir) nav(entry.path);
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          ctx.onMenu({ x: e.clientX, y: e.clientY, path: entry.path, isDir: entry.isDir });
+        }}
+        title={entry.isDir ? `${entry.path}\n双击进入，右键在此打开终端` : entry.path}
+        className={`group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-white/5 ${
+          highlight === entry.path ? "bg-white/10" : ""
+        }`}
+        style={{ paddingLeft: 6 + depth * 12 }}
+      >
+        <span className="w-3 shrink-0 text-l4">
+          {entry.isDir ? (isOpen ? "▾" : "▸") : ""}
+        </span>
+        {entry.isDir ? (
+          isOpen ? (
+            <FolderOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+          ) : (
+            <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+          )
+        ) : (
+          <File aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+        )}
+        <span className="truncate text-l3">{entry.name}</span>
+        <span className="ml-auto flex shrink-0 items-center gap-1">
+          {gitStatus && (
+            <span
+              className={`font-mono ${STATUS_COLOR[gitStatus] ?? "text-l3"}`}
+              title={`git：${STATUS_WORD[gitStatus] ?? gitStatus}`}
+            >
+              {gitStatus === "??" ? "?" : gitStatus}
+            </span>
+          )}
+          {dirtyDir && (
+            <span className="text-l4" title="包含变更文件">
+              ●
+            </span>
+          )}
+          {entry.isDir && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                ctx.onOpenTerminal(entry.path);
+              }}
+              title="在此打开新终端"
+              className="hidden shrink-0 text-l4 hover:text-l1 group-hover:block"
+            >
+              ↗
+            </button>
+          )}
+        </span>
+      </div>
+      {entry.isDir && isOpen && !children && (
+        <div
+          className="py-1"
+          style={{ paddingLeft: 6 + (depth + 1) * 12 }}
+        >
+          <span className="block h-1.5 w-16 animate-pulse rounded bg-inset" />
+        </div>
+      )}
+      {entry.isDir &&
+        isOpen &&
+        children?.map((c) => (
+          <FileTreeNode key={c.path} entry={c} depth={depth + 1} ctx={ctx} />
+        ))}
+    </>
+  );
+});
 
 /** 路径归属（workspaces::path_context）：根目录落在主仓库还是工作区分支 */
 interface PathContext {
@@ -105,13 +216,13 @@ function FileTree({
   rootRef.current = root;
   const onRootChangeRef = useRef(onRootChange);
   onRootChangeRef.current = onRootChange;
-  /** 所有主动跳转统一走 nav；未保存预览可阻止切换。 */
-  function nav(path: string): boolean {
-    if (path === root) return true;
-    if (onRootChange?.(path) === false) return false;
+  /** 所有主动跳转统一走 nav；未保存预览可阻止切换。走 ref 保持稳定身份（树节点 memo 依赖） */
+  const nav = useCallback((path: string): boolean => {
+    if (path === rootRef.current) return true;
+    if (onRootChangeRef.current?.(path) === false) return false;
     setRoot(path);
     return true;
-  }
+  }, []);
   /** 返回上一级目录（不受项目范围限制） */
   function goUp() {
     const p = parentDir(root);
@@ -177,9 +288,14 @@ function FileTree({
   );
 
   // git 装饰：变更文件状态表（非仓库 → 空）
+  // Windows 下后端键是混合分隔符的 join 路径，归一成 / 后与 entry.path 同口径匹配
   const loadGitMap = useCallback(async () => {
     try {
-      setGitMap(await invoke<Record<string, string>>("git_status_map", { cwd: root }));
+      setGitMap(
+        normalizeStatusKeys(
+          await invoke<Record<string, string>>("git_status_map", { cwd: root }),
+        ),
+      );
     } catch {
       setGitMap({});
     }
@@ -215,8 +331,7 @@ function FileTree({
       unlisten?.();
       if (watchId) invoke("unwatch_dir", { id: watchId }).catch(() => {});
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [root, loadGitMap]);
+  }, [root, load, loadGitMap, onFsEvent]);
 
   // 重定根 / 显隐切换：清空缓存与展开状态
   useEffect(() => {
@@ -234,19 +349,27 @@ function FileTree({
     if (!cache[root]) void load(root);
   }, [cache, root, load]);
 
-  function toggle(path: string) {
+  const toggle = useCallback((path: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
       return next;
     });
-  }
+  }, []);
 
   const parent = parentDir(root);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResultDto[] | null>(null);
   const [highlight, setHighlight] = useState<string | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 卸载时清掉高亮定时器，避免组件销毁后 setState
+  useEffect(
+    () => () => {
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    },
+    [],
+  );
   const [newFolderFor, setNewFolderFor] = useState<string | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
 
@@ -273,7 +396,9 @@ function FileTree({
       setQuery("");
       setHighlight(r.path);
       setExpanded((prev) => new Set(prev).add(target));
-      setTimeout(() => setHighlight(null), 2000);
+      // 连续定位先清旧定时器，避免旧计时提前熄灭新高亮
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = setTimeout(() => setHighlight(null), 2000);
     }
   }
 
@@ -291,93 +416,23 @@ function FileTree({
     }, 300);
     return () => clearTimeout(t);
   }, [query, root]);
-  /** 目录内是否有变更文件（文件夹装饰点） */
-  const changedInside = (dirPath: string) =>
-    Object.keys(gitMap).some((p) => p.startsWith(`${dirPath}/`));
-
-  function Node({ entry, depth }: { entry: DirEntryDto; depth: number }) {
-    const isOpen = expanded.has(entry.path);
-    const children = cache[entry.path];
-    const gitStatus = entry.isDir ? undefined : gitMap[entry.path];
-    const dirtyDir = entry.isDir && changedInside(entry.path);
-    // 展开才读取子目录（懒加载）
-    useEffect(() => {
-      if (entry.isDir && isOpen && !children) void load(entry.path);
-    }, [isOpen, entry.isDir, entry.path, children, load]);
-    return (
-      <>
-        <div
-          onClick={() =>
-            entry.isDir ? toggle(entry.path) : onOpenFile(entry.path, entry.name, root)
-          }
-          onDoubleClick={() => {
-            if (entry.isDir) nav(entry.path);
-          }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            setMenu({ x: e.clientX, y: e.clientY, path: entry.path, isDir: entry.isDir });
-          }}
-          title={entry.isDir ? `${entry.path}\n双击进入，右键在此打开终端` : entry.path}
-          className={`group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-white/5 ${
-            highlight === entry.path ? "bg-white/10" : ""
-          }`}
-          style={{ paddingLeft: 6 + depth * 12 }}
-        >
-          <span className="w-3 shrink-0 text-l4">
-            {entry.isDir ? (isOpen ? "▾" : "▸") : ""}
-          </span>
-          {entry.isDir ? (
-            isOpen ? (
-              <FolderOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
-            ) : (
-              <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
-            )
-          ) : (
-            <File aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
-          )}
-          <span className="truncate text-l3">{entry.name}</span>
-          <span className="ml-auto flex shrink-0 items-center gap-1">
-            {gitStatus && (
-              <span
-                className={`font-mono ${STATUS_COLOR[gitStatus] ?? "text-l3"}`}
-                title={`git：${STATUS_WORD[gitStatus] ?? gitStatus}`}
-              >
-                {gitStatus === "??" ? "?" : gitStatus}
-              </span>
-            )}
-            {dirtyDir && (
-              <span className="text-l4" title="包含变更文件">
-                ●
-              </span>
-            )}
-            {entry.isDir && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onOpenTerminal(entry.path);
-                }}
-                title="在此打开新终端"
-                className="hidden shrink-0 text-l4 hover:text-l1 group-hover:block"
-              >
-                ↗
-              </button>
-            )}
-          </span>
-        </div>
-        {entry.isDir && isOpen && !children && (
-          <div
-            className="py-1"
-            style={{ paddingLeft: 6 + (depth + 1) * 12 }}
-          >
-            <span className="block h-1.5 w-16 animate-pulse rounded bg-inset" />
-          </div>
-        )}
-        {entry.isDir &&
-          isOpen &&
-          children?.map((c) => <Node key={c.path} entry={c} depth={depth + 1} />)}
-      </>
-    );
-  }
+  // 树节点上下文：useMemo 保持身份稳定，搜索输入等无关状态变化时令 memo 节点跳过重渲染
+  const nodeCtx = useMemo<TreeNodeCtx>(
+    () => ({
+      root,
+      expanded,
+      cache,
+      gitMap,
+      highlight,
+      load,
+      toggle,
+      nav,
+      onOpenFile,
+      onOpenTerminal,
+      onMenu: setMenu,
+    }),
+    [root, expanded, cache, gitMap, highlight, load, toggle, nav, onOpenFile, onOpenTerminal],
+  );
 
   const children = cache[root];
   // 当前项目已在下方文件树中，不在“最近”里重复；最多保留四个真正可切换的目标。
@@ -553,7 +608,7 @@ function FileTree({
       ) : children.length === 0 ? (
         <p className="px-2 py-1 text-xs text-l4">空目录</p>
       ) : (
-        children.map((c) => <Node key={c.path} entry={c} depth={0} />)
+        children.map((c) => <FileTreeNode key={c.path} entry={c} depth={0} ctx={nodeCtx} />)
       )}
 
       {menu && (

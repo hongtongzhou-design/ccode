@@ -112,13 +112,7 @@ fn update_commands(agent_id: &str, method: &str, binary_path: &str) -> Vec<Updat
 }
 
 fn version_of(binary: &std::path::Path) -> Option<String> {
-    let out = Command::new(binary).arg("--version").output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.lines().next().unwrap_or("").to_string())
-    }
+    agents::version_with_timeout(binary, agents::VERSION_QUERY_TIMEOUT)
 }
 
 /// stdout+stderr 合并取尾部 ~30 行
@@ -153,6 +147,23 @@ struct WriterGuard(String);
 impl Drop for WriterGuard {
     fn drop(&mut self) {
         writers().lock().unwrap().remove(&self.0);
+    }
+}
+
+/// 正在运行的 key 集合：writers 要等 spawn 成功才注册，覆盖不了「正在启动」窗口，
+/// 故并发互斥单独维护——run_streaming_pty 入口抢占，同 key 并发直接拒绝
+static RUNNING_KEYS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+fn running_keys() -> &'static Mutex<std::collections::HashSet<String>> {
+    RUNNING_KEYS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 与 WriterGuard 同模式：任何返回路径都释放 key
+struct RunGuard(String);
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        running_keys().lock().unwrap().remove(&self.0);
     }
 }
 
@@ -201,6 +212,8 @@ pub(crate) fn strip_ansi(input: &str) -> String {
                 }
                 _ => i += 2, // 两字节序列（如 ESC ( B）
             },
+            // 末尾孤立 ESC：半个序列无从解析，原样输出会污染展示文本，直接丢弃
+            0x1b => i += 1,
             b'\r' => {
                 if i + 1 < b.len() && b[i + 1] == b'\n' {
                     i += 1; // \r\n：跳过 \r，\n 照常处理
@@ -252,9 +265,17 @@ pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String
 
 /// 运行期间一个字节都到不了我们手里；接 PTY 后它们按 TTY 行缓冲，输出实时可见。
 /// TERM=dumb 让 brew/npm 放弃彩色和花式重绘，但保留 TTY 行为。
-/// 带 900s 超时（杀直接子进程）；reader 在子进程退出后最多等 1 秒 drain，
+/// 带 900s 超时（unix 下杀整个进程组）；reader 在子进程退出后最多等 1 秒 drain，
 /// 其子孙（curl 等）可能持有 slave 导致永远无 EOF，绝不无限 join。
+/// 同一 key 同时只允许一个 run：入口抢占，并发请求直接拒绝。
 fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program: &str, args: &[String], emit: F) -> (bool, String) {
+    {
+        let mut set = running_keys().lock().unwrap();
+        if !set.insert(key.to_string()) {
+            return (false, "该 agent 已有正在运行的安装/更新，请等待其完成".into());
+        }
+    }
+    let _run_guard = RunGuard(key.to_string());
     // GUI 短 PATH 下 brew/npm 可能不在继承 PATH 里：先解析成绝对路径再 spawn
     // （找不到时保留裸名，沿用原来的「启动失败」报错路径）
     let program_path =
@@ -282,14 +303,23 @@ fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program: &str, arg
         Ok(c) => c,
         Err(e) => return (false, format!("启动 {program} 失败: {e}")),
     };
+    // spawn 已成功：后续任一步失败都必须先杀子进程，否则它脱离管理成为孤儿
     // writer 先取出供交互输入（updater_write），再配置读端
     let writer = match pair.master.take_writer() {
         Ok(w) => w,
-        Err(e) => return (false, format!("写入 PTY 失败: {e}")),
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (false, format!("写入 PTY 失败: {e}"));
+        }
     };
     let reader = match pair.master.try_clone_reader() {
         Ok(r) => r,
-        Err(e) => return (false, format!("读取 PTY 失败: {e}")),
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (false, format!("读取 PTY 失败: {e}"));
+        }
     };
     // slave 必须立刻 drop：子进程退出后 reader 才能看到 EOF
     drop(pair.slave);
@@ -338,6 +368,11 @@ fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program: &str, arg
             Ok(Some(s)) => break Some(s),
             Ok(None) => {
                 if start.elapsed() > TIMEOUT {
+                    // unix 下杀整个进程组：brew/npm 拉起的子孙（curl 等）与父同组
+                    #[cfg(unix)]
+                    if let Some(pid) = child.process_id() {
+                        crate::pty::kill_process_group(pid);
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     timed_out = true;
@@ -812,6 +847,9 @@ mod tests {
         assert_eq!(strip_ansi("a\r\nb"), "a\nb");
         // 多字节字符不受剥离影响
         assert_eq!(strip_ansi("中\x1b[1m文"), "中文");
+        // 末尾孤立 ESC 丢弃（半个序列无从解析，原样输出会污染文本）
+        assert_eq!(strip_ansi("abc\x1b"), "abc");
+        assert_eq!(strip_ansi("abc\x1b["), "abc");
         // 纯文本原样
         assert_eq!(strip_ansi("plain text\n"), "plain text\n");
     }
@@ -896,5 +934,51 @@ mod tests {
             !writers().lock().unwrap().contains_key(&key),
             "run 结束后 writer 应从 map 移除"
         );
+    }
+
+    /// 并发互斥：同 key 的第二个 run 入口即拒绝；第一个 run 结束后 key 释放可再跑
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_run_with_same_key_is_rejected() {
+        let chunks: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let c = chunks.clone();
+        let key = "test-concurrency".to_string();
+        let key2 = key.clone();
+        let handle = std::thread::spawn(move || {
+            run_streaming_pty(
+                &key2,
+                "bash",
+                &["-c".into(), "read x; echo done-$x".into()],
+                move |t| {
+                    c.lock().unwrap().push_str(t);
+                },
+            )
+        });
+        // 等第一个 run 跑起来（writer 注册说明已抢占 key；最多 5s 防挂死兜底）
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if writers().lock().unwrap().contains_key(&key) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "第一个 run 未启动");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // 同 key 并发：立即拒绝
+        let (ok, msg) =
+            run_streaming_pty(&key, "bash", &["-c".into(), "echo should-not-run".into()], |_| {});
+        assert!(!ok);
+        assert!(msg.contains("正在运行"), "应提示已有运行中的任务: {msg}");
+        // 放行第一个 run
+        {
+            let mut map = writers().lock().unwrap();
+            let w = map.get_mut(&key).unwrap();
+            w.write_all(b"go\n").unwrap();
+            w.flush().unwrap();
+        }
+        let (ok1, _) = handle.join().unwrap();
+        assert!(ok1);
+        // 第一个 run 结束后 key 已释放：同 key 可再次运行
+        let (ok2, _) = run_streaming_pty(&key, "bash", &["-c".into(), "true".into()], |_| {});
+        assert!(ok2);
     }
 }

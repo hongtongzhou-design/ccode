@@ -12,6 +12,9 @@ use tauri::{AppHandle, Emitter};
 const FRAME: Duration = Duration::from_millis(50);
 /// 隐藏标签的输出缓冲上限（1 MB）
 const BACKLOG_CAP: usize = 1024 * 1024;
+/// 可见时合帧缓冲的宽松上限（4 MB）：超限无视帧周期立即 flush，
+/// 防止高速输出叠加慢 IPC 时 pending 无限增长
+const PENDING_CAP: usize = 4 * 1024 * 1024;
 const TRUNC_MARK: &str = "[…输出过多已截断]\n";
 
 struct PtyEntry {
@@ -121,7 +124,7 @@ impl FrameCoalescer {
                 continue;
             }
             let elapsed = last_emit.elapsed();
-            if done || elapsed >= frame {
+            if done || elapsed >= frame || pending.len() >= PENDING_CAP {
                 let (text, used) = split_utf8(&pending);
                 if used > 0 {
                     pending.drain(..used);
@@ -247,18 +250,27 @@ fn spawn_tracked(
         })
         .map_err(|e| format!("创建 PTY 失败: {e}"))?;
 
-    let child = pair
+    let mut child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("启动进程失败: {e}"))?;
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("读取 PTY 失败: {e}"))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("写入 PTY 失败: {e}"))?;
+    // spawn 已成功：后续任一步失败都必须先杀子进程，否则它脱离管理器成为孤儿
+    let reader = match pair.master.try_clone_reader() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("读取 PTY 失败: {e}"));
+        }
+    };
+    let writer = match pair.master.take_writer() {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("写入 PTY 失败: {e}"));
+        }
+    };
 
     let pty_id = uuid::Uuid::new_v4().to_string();
     let visible = Arc::new(AtomicBool::new(false)); // 默认不可见：前端随即按标签状态标记
@@ -313,7 +325,8 @@ fn spawn_tracked(
         // 输出流结束视为进程结束；谁先移除 entry 谁负责回收并发退出事件
         let entry = entries.lock().unwrap().remove(&id);
         if let Some(mut entry) = entry {
-            let code = entry.child.wait().map(|s| s.exit_code()).unwrap_or(0);
+            // wait 失败按异常退出（-1）上报，不误报正常退出
+            let code = entry.child.wait().map(|s| s.exit_code() as i64).unwrap_or(-1);
             let _ = app.emit(&exit_event, code);
         }
     });
@@ -345,8 +358,8 @@ pub fn pty_spawn(
     let binary = agents::binary_for(&agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
     let binary_path = agents::resolve_binary(binary)
         .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
-    // 密钥只在启动瞬间从钥匙串读出，注入子进程环境后即丢弃
-    let key = profiles::get_key(&profile_id);
+    // 密钥只在启动瞬间从钥匙串读出，注入子进程环境后即丢弃；keys.json 损坏时报错阻断启动
+    let key = profiles::get_key(&profile_id)?;
     let model = model
         .filter(|m| !m.trim().is_empty())
         .or_else(|| profile.models.first().cloned());
@@ -554,6 +567,20 @@ pub fn pty_set_visible(
     Ok(())
 }
 
+/// unix 下终止子进程的整个进程组：portable-pty spawn 时子进程已 setsid
+///（pid == pgid），kill 负 pgid 连带杀掉 agent 拉起的子孙。只杀直接子进程
+/// 会让持有 PTY slave 的子孙成孤儿，reader 线程永远等不到 EOF。
+/// Windows（ConPTY）无进程组语义，保持 child.kill() 原路径。
+/// 已知边角：交互 shell 的作业控制会把每个作业放进新进程组，不在此覆盖——
+/// entry 随本函数 drop 时 master 关闭，内核会向 slave 前台进程组发 SIGHUP 兜底。
+#[cfg(unix)]
+pub(crate) fn kill_process_group(pid: u32) {
+    // 用 /bin/kill 绝对路径：打包版 GUI 的 PATH 很短；负 pid 表示整个进程组
+    let _ = std::process::Command::new("/bin/kill")
+        .args(["-KILL", &format!("-{pid}")])
+        .status();
+}
+
 #[tauri::command]
 pub fn pty_kill(
     app: AppHandle,
@@ -562,6 +589,10 @@ pub fn pty_kill(
 ) -> Result<(), String> {
     let entry = manager.entries.lock().unwrap().remove(&pty_id);
     if let Some(mut entry) = entry {
+        #[cfg(unix)]
+        if let Some(pid) = entry.child.process_id() {
+            kill_process_group(pid);
+        }
         let _ = entry.child.kill();
         let _ = entry.child.wait();
         let _ = app.emit(&format!("pty-exit-{pty_id}"), -1);
@@ -658,6 +689,31 @@ mod tests {
         c.append(b"tail");
         let (text, _) = c.take_frame(Instant::now(), frame).unwrap();
         assert_eq!(text, "tail");
+    }
+
+    #[test]
+    fn coalescer_flushes_immediately_when_pending_exceeds_cap() {
+        // 帧远未到期时超限也必须立即 flush（防止高速输出下 pending 无限增长）。
+        // 用 1 小时的帧周期：若无超限路径，take_frame 会睡到帧尾（测试由 10s 兜底判负）
+        let c = Arc::new(FrameCoalescer::new());
+        let big = vec![b'a'; PENDING_CAP + 1];
+        c.append(&big);
+        let c2 = c.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let got = c2.take_frame(Instant::now(), Duration::from_secs(3600));
+            let _ = tx.send(got);
+        });
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Some((text, _))) => assert_eq!(text.len(), PENDING_CAP + 1),
+            other => {
+                // 唤醒被卡住的线程再判负，避免泄漏一个睡在 condvar 上的线程
+                c.finish();
+                let _ = handle.join();
+                panic!("超限未触发立即 flush: {other:?}");
+            }
+        }
+        handle.join().unwrap();
     }
 
     #[test]

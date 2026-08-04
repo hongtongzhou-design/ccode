@@ -60,7 +60,8 @@ fn tail_chars(text: &str, max: usize) -> String {
 }
 
 fn run_capture(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // stdin 置空：GUI 环境无控制终端，子进程若读 stdin 会永久挂起
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("启动 agent 失败: {e}"))?;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -107,7 +108,14 @@ fn run_capture(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(e) => return Err(format!("等待 agent 失败: {e}")),
+            Err(e) => {
+                // try_wait 失败时子进程状态未知：必须 kill + 等读线程收尾，不允许泄漏
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_handle.join();
+                let _ = err_handle.join();
+                return Err(format!("等待 agent 失败: {e}"));
+            }
         }
     }
 }
@@ -121,7 +129,7 @@ fn ai_prompt_impl(profiles: Vec<Profile>, profile_id: Option<String>, prompt: St
     let binary_path = agents::resolve_binary(binary)
         .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
     // 密钥只在调用瞬间读出注入子进程，与终端启动同一约束
-    let key = profiles::get_key(&profile.id);
+    let key = profiles::get_key(&profile.id)?;
     let plan = agents::launch_plan(&profile, key, profile.models.first().map(|s| s.as_str()));
     let mut cmd = Command::new(&binary_path);
     for a in &plan.args {
@@ -251,7 +259,9 @@ fn git_text(cwd: &str, args: &[&str]) -> Result<String, String> {
 }
 
 fn git_text_selected(cwd: &str, command: &[&str], paths: &[String]) -> Result<String, String> {
-    let mut cmd = Command::new("git");
+    // 统一走二进制解析（GUI 打包版短 PATH 兜底），解析不到再退回裸名
+    let git = agents::resolve_binary("git").unwrap_or_else(|| PathBuf::from("git"));
+    let mut cmd = Command::new(git);
     cmd.arg("-C")
         .arg(cwd)
         .arg("--literal-pathspecs")

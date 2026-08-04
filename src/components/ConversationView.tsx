@@ -105,11 +105,11 @@ export default function ConversationView({
         </div>
       );
     }
-    // text
+    // text（用户消息同样截断：超大粘贴不全量渲染）
     if (isUser) {
       return (
-        <div key={key} className="my-1 whitespace-pre-wrap">
-          {b.text}
+        <div key={key} className="my-1">
+          {cappedText(key, b.text, "whitespace-pre-wrap")}
         </div>
       );
     }

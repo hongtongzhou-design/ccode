@@ -6,6 +6,9 @@ import tailwindcss from "@tailwindcss/vite";
 const host = process.env.TAURI_DEV_HOST;
 // 工作区（git worktree）里跑第二个实例时，用注入的 CCODE_PORT 避免与主实例撞端口
 // 默认 17575：Codex 桌面版的 NetworkService 会占用 Tauri 惯例端口 1420（本机实测冲突）
+// 注意：CCODE_PORT 只改 vite 监听端口；tauri dev 加载的 devUrl（tauri.conf.json，固定
+// 17575）不支持环境变量。worktree 里二次开发 Ccode 时必须同步覆盖 devUrl，例如：
+// npm run tauri:dev -- --config "{\"build\":{\"devUrl\":\"http://localhost:$CCODE_PORT\"}}"
 // @ts-expect-error process is a nodejs global
 const port = Number(process.env.CCODE_PORT ?? 17575);
 

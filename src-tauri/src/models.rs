@@ -8,9 +8,13 @@ pub async fn fetch_models(
     api_key: Option<String>,
     profile_id: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let key = api_key
-        .filter(|k| !k.trim().is_empty())
-        .or_else(|| profile_id.as_deref().and_then(profiles::get_key));
+    let key = match api_key.filter(|k| !k.trim().is_empty()) {
+        Some(k) => Some(k),
+        None => match profile_id.as_deref() {
+            Some(id) => profiles::get_key(id)?,
+            None => None,
+        },
+    };
 
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {

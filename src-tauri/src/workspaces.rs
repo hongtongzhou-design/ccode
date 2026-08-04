@@ -202,7 +202,8 @@ pub(crate) fn worktree_rows() -> Vec<WorktreeRow> {
 // ===== git 调用（参数数组 + 超时；输出走管道防阻塞） =====
 
 pub(crate) fn run_git(repo: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
-    let mut cmd = Command::new("git");
+    let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
+    let mut cmd = Command::new(git);
     cmd.arg("-C")
         .arg(repo)
         .args(args)
@@ -211,8 +212,17 @@ pub(crate) fn run_git(repo: &Path, args: &[&str], timeout: Duration) -> Result<S
     run_cmd(cmd, timeout)
 }
 
+/// 子进程原始结果：conflict_probe 需要区分退出码 0/1，run_git_raw 需要未 trim 的 stdout
+struct CmdOutput {
+    success: bool,
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+}
+
 /// 子进程的 stdout/stderr 各放线程读空（管道容量有限，不读会死锁），主线程轮询退出，超时则 kill
-fn run_cmd(mut cmd: Command, timeout: Duration) -> Result<String, String> {
+fn run_cmd_full(mut cmd: Command, timeout: Duration) -> Result<CmdOutput, String> {
     let mut child = cmd.spawn().map_err(|e| format!("无法启动进程: {e}"))?;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -234,24 +244,45 @@ fn run_cmd(mut cmd: Command, timeout: Duration) -> Result<String, String> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = out_handle.join().unwrap_or_default();
-                let err = err_handle.join().unwrap_or_default();
-                if status.success() {
-                    return Ok(String::from_utf8_lossy(&out).trim().to_string());
-                }
-                return Err(String::from_utf8_lossy(&err).trim().to_string());
+                return Ok(CmdOutput {
+                    success: status.success(),
+                    code: status.code(),
+                    stdout: out_handle.join().unwrap_or_default(),
+                    stderr: err_handle.join().unwrap_or_default(),
+                    timed_out: false,
+                });
             }
             Ok(None) => {
                 if std::time::Instant::now() > deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err("操作超时".into());
+                    let _ = out_handle.join();
+                    let _ = err_handle.join();
+                    return Ok(CmdOutput {
+                        success: false,
+                        code: None,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        timed_out: true,
+                    });
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => return Err(format!("等待进程失败: {e}")),
         }
     }
+}
+
+/// 成功返回 trim 后 stdout，失败返回 trim 后 stderr
+fn run_cmd(cmd: Command, timeout: Duration) -> Result<String, String> {
+    let out = run_cmd_full(cmd, timeout)?;
+    if out.timed_out {
+        return Err("操作超时".into());
+    }
+    if out.success {
+        return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
 // ===== 核心逻辑（命令的同步实现，参数化 db/根目录便于测试） =====
@@ -333,6 +364,61 @@ fn validate_copy_paths(files: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// files_to_copy 写入 worktree 前的目标安全检查：rel 必须是树内相对路径，且父链上
+/// 已存在的目录与目标自身都不得是符号链接。工作区可被 agent 任意写入，仓库也可能
+/// 跟踪指向树外的符号链接——fs::copy/create_dir_all 跟随符号链接会把文件写到树外。
+fn ensure_copy_dest_safe(worktree: &Path, rel: &str) -> Result<(), String> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute()
+        || rel_path.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!("复制目标必须是工作区内相对路径: {rel}"));
+    }
+    let mut cursor = worktree.to_path_buf();
+    if let Some(parent_rel) = rel_path.parent() {
+        for comp in parent_rel.components() {
+            cursor.push(comp.as_os_str());
+            match fs::symlink_metadata(&cursor) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(format!(
+                        "复制目标路径经过符号链接 {}，为避免写出工作区已拒绝: {rel}",
+                        cursor.display()
+                    ));
+                }
+                Ok(_) => {}
+                // 缺失的分量由后面 create_dir_all 补建，更深层级无需再查
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) => return Err(format!("检查复制目标路径失败: {e}")),
+            }
+        }
+    }
+    let dest = worktree.join(rel);
+    if let Ok(meta) = fs::symlink_metadata(&dest) {
+        if meta.file_type().is_symlink() {
+            return Err(format!("复制目标是符号链接，为避免写出工作区已拒绝: {rel}"));
+        }
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("复制 {rel} 前创建目录失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// files_to_copy 落到 worktree 的统一入口：先过 ensure_copy_dest_safe 再复制
+fn safe_copy_into_worktree(worktree: &Path, rel: &str, src: &Path) -> Result<(), String> {
+    ensure_copy_dest_safe(worktree, rel)?;
+    fs::copy(src, worktree.join(rel))
+        .map(|_| ())
+        .map_err(|e| format!("复制文件 {rel} 失败: {e}"))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn reserve_creating_workspace(
     conn: &Connection,
@@ -391,6 +477,8 @@ fn rollback_creating_workspace(
 ) -> Vec<String> {
     let mut issues = Vec::new();
     if worktree_path.exists() {
+        // --force 例外理由（对照归档禁用 --force 的约定）：这个 worktree 是应用秒前自建的，
+        // 里面只可能有 git 刚检出 + 本进程刚复制的未跟踪 files_to_copy 文件，不存在用户劳动成果
         if let Err(e) = run_git(
             repo,
             &[
@@ -517,12 +605,10 @@ where
             if !src.is_file() {
                 continue;
             }
-            let dest = worktree_path.join(file);
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("复制 {file} 前创建目录失败: {e}"))?;
-            }
-            copy_file(&src, &dest).map_err(|e| format!("复制配置文件 {file} 失败: {e}"))?;
+            // 安全检查在注入的复制函数之外：防 dest/父链符号链接穿透对三处复制点统一生效
+            ensure_copy_dest_safe(&worktree_path, file)?;
+            copy_file(&src, &worktree_path.join(file))
+                .map_err(|e| format!("复制配置文件 {file} 失败: {e}"))?;
         }
         // setup 脚本失败不阻断创建，结果记进 DTO 给 UI 展示
         let setup_result = settings.setup.as_ref().map(|script| {
@@ -562,7 +648,19 @@ where
     Ok(dto)
 }
 
+// 生产路径一律走带 guard 的变体（归档前复查运行中任务）；本包装仅供测试免传 guard
+#[cfg(test)]
 fn archive_impl(conn: &Connection, id: &str) -> Result<(), String> {
+    archive_impl_with_guard(conn, id, &|_| Ok(()))
+}
+
+/// ensure_no_active_tasks：紧邻 worktree remove 前复查工作区内是否仍有运行中的
+/// agent/run 脚本（命令层的预检与移除之间隔着脚本钩子，TOCTOU 窗口必须在这里再关一次）
+fn archive_impl_with_guard(
+    conn: &Connection,
+    id: &str,
+    ensure_no_active_tasks: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<(), String> {
     let w = get_workspace(conn, id)?;
     let wt = PathBuf::from(&w.worktree_path);
     let settings = crate::ws_settings::merged_settings(Path::new(&w.repo_path));
@@ -600,6 +698,8 @@ fn archive_impl(conn: &Connection, id: &str) -> Result<(), String> {
                 return Err(format!("archive 脚本执行失败，worktree 未移除:\n{tail}"));
             }
         }
+        // 钩子可能跑了很久，期间用户可能又在工作区启动了任务；移除前必须再确认无人占用
+        ensure_no_active_tasks(&w.worktree_path)?;
         // files-to-copy 若与主仓库原件完全一致，可安全移除后用非 --force 归档；修改过的副本已被上面拦截。
         for path in &removable_copies {
             fs::remove_file(wt.join(path))
@@ -610,10 +710,22 @@ fn archive_impl(conn: &Connection, id: &str) -> Result<(), String> {
             &["worktree", "remove", &w.worktree_path],
             Duration::from_secs(60),
         ) {
+            // 回写先前删除的可恢复副本；回写失败必须并入错误信息，不能静默吞掉
+            let mut restore_errors = Vec::new();
             for path in &removable_copies {
-                let _ = fs::copy(Path::new(&w.repo_path).join(path), wt.join(path));
+                let src = Path::new(&w.repo_path).join(path);
+                if let Err(re) = safe_copy_into_worktree(&wt, path, &src) {
+                    restore_errors.push(re);
+                }
             }
-            return Err(format!("移除 worktree 失败，工作区已保留: {e}"));
+            return Err(if restore_errors.is_empty() {
+                format!("移除 worktree 失败，工作区已保留: {e}")
+            } else {
+                format!(
+                    "移除 worktree 失败，工作区已保留: {e}；回写副本失败: {}",
+                    restore_errors.join("；")
+                )
+            });
         }
     }
     // worktree 目录已不存在时跳过 git 调用直接翻状态
@@ -629,14 +741,23 @@ fn archive_impl(conn: &Connection, id: &str) -> Result<(), String> {
             );
             return Err(match restored {
                 Ok(_) => {
+                    let mut copy_errors = Vec::new();
                     for path in &copied_files {
                         let src = Path::new(&w.repo_path).join(path);
-                        let dst = wt.join(path);
-                        if src.is_file() && !dst.exists() {
-                            let _ = fs::copy(src, dst);
+                        if src.is_file() && !wt.join(path).exists() {
+                            if let Err(ce) = safe_copy_into_worktree(&wt, path, &src) {
+                                copy_errors.push(ce);
+                            }
                         }
                     }
-                    format!("归档状态写入失败，已恢复工作树，未丢失内容: {e}")
+                    if copy_errors.is_empty() {
+                        format!("归档状态写入失败，已恢复工作树，未丢失内容: {e}")
+                    } else {
+                        format!(
+                            "归档状态写入失败，已恢复工作树: {e}；回写副本失败: {}",
+                            copy_errors.join("；")
+                        )
+                    }
                 }
                 Err(restore_err) => format!(
                     "工作树已移除，但归档状态写入失败；分支仍保留，请手动恢复工作树: {e}; {restore_err}"
@@ -666,10 +787,8 @@ fn restore_impl(conn: &Connection, id: &str) -> Result<(), String> {
             let src = Path::new(&w.repo_path).join(&path);
             let dst = Path::new(&w.worktree_path).join(&path);
             if src.is_file() && !dst.exists() {
-                if let Some(parent) = dst.parent() {
-                    fs::create_dir_all(parent).map_err(|e| format!("恢复复制文件目录失败: {e}"))?;
-                }
-                fs::copy(&src, &dst).map_err(|e| format!("恢复复制文件 {path} 失败: {e}"))?;
+                safe_copy_into_worktree(Path::new(&w.worktree_path), &path, &src)
+                    .map_err(|e| format!("恢复复制文件失败: {e}"))?;
             }
         }
     }
@@ -725,10 +844,11 @@ fn port_env(port_base: i64) -> Vec<(String, String)> {
 }
 
 fn workspace_env_impl(conn: &Connection, worktree_path: &str) -> Vec<(String, String)> {
+    // 只有 active 工作区占用端口段；creating/archived 不下发端口 env
     let Ok(w) = query_workspaces(conn).and_then(|rows| {
         rows.into_iter()
-            .find(|w| w.worktree_path == worktree_path)
-            .ok_or_else(|| "工作区不存在".to_string())
+            .find(|w| w.worktree_path == worktree_path && w.status == "active")
+            .ok_or_else(|| "工作区不存在或未激活".to_string())
     }) else {
         return Vec::new();
     };
@@ -738,17 +858,20 @@ fn workspace_env_impl(conn: &Connection, worktree_path: &str) -> Vec<(String, St
 // ===== 项目级脚本钩子（§6.10 阶段 B；脚本来自仓库自己的 .ccode 配置） =====
 
 #[cfg(windows)]
-fn shell_cmd(script: &str) -> Command {
+fn shell_cmd(script: &str) -> Result<Command, String> {
+    // cmd 是 Windows 系统组件，固定在 System32 且不受用户 PATH 影响，无需 resolve_binary
     let mut c = Command::new("cmd");
     c.args(["/C", script]);
-    c
+    Ok(c)
 }
 
 #[cfg(not(windows))]
-fn shell_cmd(script: &str) -> Command {
-    let mut c = Command::new("bash");
+fn shell_cmd(script: &str) -> Result<Command, String> {
+    let bash = crate::agents::resolve_binary("bash")
+        .ok_or("找不到 bash 可执行文件，无法运行项目脚本钩子")?;
+    let mut c = Command::new(bash);
     c.args(["-c", script]);
-    c
+    Ok(c)
 }
 
 /// 输出尾部（按字符截取，保留换行），给失败提示用
@@ -763,7 +886,10 @@ fn output_tail(text: &str, max: usize) -> String {
 
 /// cwd = worktree，注入端口段；成功返 stdout、失败返 stderr，统一截尾部 4000 字符
 fn run_hook(dir: &Path, script: &str, port_base: i64, timeout: Duration) -> (bool, String) {
-    let mut cmd = shell_cmd(script);
+    let mut cmd = match shell_cmd(script) {
+        Ok(cmd) => cmd,
+        Err(e) => return (false, e),
+    };
     cmd.current_dir(dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -804,18 +930,22 @@ pub(crate) fn base_ref(_repo: &Path, base: &str) -> String {
 /// git ≥2.38 的 merge-tree --write-tree：退出码 0=干净 1=冲突；只写对象库，不碰工作区/索引/
 /// 引用。--name-only 时 stdout 首行是树 OID，其余行是冲突文件路径
 fn conflict_probe(repo: &Path, base: &str, branch: &str) -> (Option<bool>, Vec<String>) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["merge-tree", "--write-tree", "--name-only", base, branch])
-        .output();
-    let Ok(out) = out else {
+    let Some(git) = crate::agents::resolve_binary("git") else {
         return (None, vec![]);
     };
-    let conflict = match out.status.code() {
-        Some(0) => Some(false),
-        Some(1) => Some(true),
-        _ => None, // 旧版 git 没有该参数（退出码 129 等）
+    let mut cmd = Command::new(git);
+    cmd.arg("-C")
+        .arg(repo)
+        .args(["merge-tree", "--write-tree", "--name-only", base, branch])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let Ok(out) = run_cmd_full(cmd, Duration::from_secs(30)) else {
+        return (None, vec![]);
+    };
+    let conflict = match (out.timed_out, out.code) {
+        (false, Some(0)) => Some(false),
+        (false, Some(1)) => Some(true),
+        _ => None, // 旧版 git 没有该参数（退出码 129 等），或超时/启动失败
     };
     let files = if conflict == Some(true) {
         String::from_utf8_lossy(&out.stdout)
@@ -881,10 +1011,22 @@ fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
     })
 }
 
+// 生产路径一律走带 guard 的变体（归档前复查运行中任务）；本包装仅供测试免传 guard
+#[cfg(test)]
 fn merge_impl(
     conn: &Connection,
     id: &str,
     archive: bool,
+) -> Result<WorkspaceMergeResultDto, String> {
+    merge_impl_with_guard(conn, id, archive, &|_| Ok(()))
+}
+
+/// ensure_no_active_tasks 透传给归档阶段：merge 成功后、worktree remove 前复查运行中任务
+fn merge_impl_with_guard(
+    conn: &Connection,
+    id: &str,
+    archive: bool,
+    ensure_no_active_tasks: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<WorkspaceMergeResultDto, String> {
     let w = get_workspace(conn, id)?;
     let repo = PathBuf::from(&w.repo_path);
@@ -919,9 +1061,10 @@ fn merge_impl(
             "主仓库有未提交改动（{names}{suffix}），请先提交或 stash 再合并（或改用 PR 流程）"
         ));
     }
+    // 应用内自动 merge commit 必须绕过用户全局 commit.gpgsign：无头环境调 gpg 会卡住或失败
     let mut log = match run_git(
         &repo,
-        &["merge", "--no-ff", &w.branch],
+        &["-c", "commit.gpgsign=false", "merge", "--no-ff", &w.branch],
         Duration::from_secs(60),
     ) {
         Ok(out) => out,
@@ -969,7 +1112,7 @@ fn merge_impl(
     }
     if archive {
         // 合并成功后走标准归档生命周期（archive 钩子 + worktree 移除 + 状态翻转）
-        if let Err(e) = archive_impl(conn, id) {
+        if let Err(e) = archive_impl_with_guard(conn, id, ensure_no_active_tasks) {
             return Ok(WorkspaceMergeResultDto {
                 merged: true,
                 archived: false,
@@ -1151,14 +1294,19 @@ pub async fn archive_workspace(
         tauri::async_runtime::spawn_blocking(move || -> Result<(String, String), String> {
         let conn = db()?;
         let w = get_workspace(&conn, &id)?;
-            let active = manager.active_workspace_tasks(&w.worktree_path);
-            if !active.is_empty() {
-                return Err(format!(
+        let ensure_idle = |worktree_path: &str| {
+            let active = manager.active_workspace_tasks(worktree_path);
+            if active.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
                     "工作区仍有 {} 个 agent/run 脚本在运行，请先停止或关闭对应终端标签",
                     active.len()
-                ));
+                ))
             }
-        archive_impl(&conn, &id)?;
+        };
+        ensure_idle(&w.worktree_path)?; // 快速预检；归档内部在移除 worktree 前还会复查
+        archive_impl_with_guard(&conn, &id, &ensure_idle)?;
         Ok((w.worktree_path, w.repo_path))
     })
     .await
@@ -1219,16 +1367,21 @@ pub async fn merge_workspace(
     let (out, paths) = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
             let conn = db()?;
             let w = get_workspace(&conn, &id)?;
-        if archive {
-            let active = manager.active_workspace_tasks(&w.worktree_path);
-            if !active.is_empty() {
-                return Err(format!(
+        let ensure_idle = |worktree_path: &str| {
+            let active = manager.active_workspace_tasks(worktree_path);
+            if active.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
                     "工作区仍有 {} 个 agent/run 脚本在运行，请先停止或关闭对应终端标签",
                     active.len()
-                ));
+                ))
             }
+        };
+        if archive {
+            ensure_idle(&w.worktree_path)?; // 快速预检；归档内部在移除 worktree 前还会复查
         }
-            let out = merge_impl(&conn, &id, archive)?;
+            let out = merge_impl_with_guard(&conn, &id, archive, &ensure_idle)?;
             Ok((out, (w.worktree_path, w.repo_path)))
         })
         .await
@@ -1326,8 +1479,10 @@ fn path_context_impl(conn: &Connection, path: &str) -> Result<PathContextDto, St
 }
 
 #[tauri::command]
-pub fn path_context(path: String) -> Result<PathContextDto, String> {
-    path_context_impl(&db()?, &path)
+pub async fn path_context(path: String) -> Result<PathContextDto, String> {
+    tauri::async_runtime::spawn_blocking(move || path_context_impl(&db()?, &path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ===== 工作区状态漂移与修复 =====
@@ -1494,15 +1649,12 @@ fn copy_workspace_restore_files(w: &WorkspaceDto) -> Result<(), String> {
         .files_to_copy
         .unwrap_or_else(|| FILES_TO_COPY.iter().map(|s| s.to_string()).collect());
     validate_copy_paths(&files)?;
+    let worktree = Path::new(&w.worktree_path);
     for path in files {
         let src = Path::new(&w.repo_path).join(&path);
-        let dst = Path::new(&w.worktree_path).join(&path);
-        if src.is_file() && !dst.exists() {
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("重新挂载时创建文件目录失败: {e}"))?;
-            }
-            fs::copy(&src, &dst).map_err(|e| format!("重新挂载时复制 {path} 失败: {e}"))?;
+        if src.is_file() && !worktree.join(&path).exists() {
+            safe_copy_into_worktree(worktree, &path, &src)
+                .map_err(|e| format!("重新挂载时复制失败: {e}"))?;
         }
     }
     Ok(())
@@ -1699,13 +1851,31 @@ fn sync_base_impl(wt: &Path, base_branch: &str, restart: bool) -> Result<String,
     if !run_git(wt, &["status", "--porcelain"], Duration::from_secs(30))?.is_empty() {
         return Err("工作区有未提交改动，请先在「改动」面板提交，再并入主分支".into());
     }
-    match run_git(wt, &["merge", base_branch], Duration::from_secs(60)) {
+    // 干净并入会产生 merge commit，同样要绕过用户全局 commit.gpgsign
+    match run_git(
+        wt,
+        &["-c", "commit.gpgsign=false", "merge", base_branch],
+        Duration::from_secs(60),
+    ) {
         Ok(out) => Ok(format!(
             "已把 {} 并入当前任务分支：\n{}",
             base_branch,
             if out.trim().is_empty() { "已是最新" } else { out.trim() }
         )),
         Err(e) => {
+            // 只有真的进入 MERGING 才是冲突；其余失败（引用不存在、钩子失败等）如实透出，
+            // 不能一律谎报「并入产生冲突」误导用户去解决不存在的冲突
+            let merging = run_git(
+                wt,
+                &["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+                Duration::from_secs(10),
+            )
+            .is_ok();
+            if !merging {
+                return Err(format!(
+                    "并入 {base_branch} 失败（非冲突），工作区未留下合并现场：\n{e}"
+                ));
+            }
             let files = run_git(
                 wt,
                 &["diff", "--name-only", "--diff-filter=U"],
@@ -1773,13 +1943,18 @@ fn cap_conflict_text(mut text: String) -> (String, bool) {
 
 /// 冲突审阅必须保留文件首尾空白，不能复用会 trim 输出的 run_git。
 fn run_git_raw(repo: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
+    let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
+    let mut cmd = Command::new(git);
+    cmd.arg("-C")
         .arg(repo)
         .args(args)
-        .output()
-        .map_err(|e| format!("无法启动 git: {e}"))?;
-    if out.status.success() {
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let out = run_cmd_full(cmd, Duration::from_secs(30))?;
+    if out.timed_out {
+        return Err("操作超时".into());
+    }
+    if out.success {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
@@ -1924,7 +2099,25 @@ fn resolve_file_impl(wt: &Path, path: &str, side: &str) -> Result<UnmergedDto, S
     if run_git(wt, &["checkout", flag, "--", path], Duration::from_secs(30)).is_ok() {
         run_git(wt, &["add", "--", path], Duration::from_secs(30))?;
     } else {
-        // 删/改冲突中选定侧是「已删除」：checkout 失败，git rm 即选定该侧
+        // checkout 失败只在「选定侧已删除」的删/改冲突下才该落到 git rm；先用 ls-files -u
+        // 确认该路径确为未合并、另一侧内容还在且选定侧 stage 缺失，避免其他原因
+        //（索引损坏、路径异常等）导致 checkout 失败时把文件误删
+        let chosen_stage = if side == "ours" { "2" } else { "3" };
+        let other_stage = if side == "ours" { "3" } else { "2" };
+        let unmerged = run_git(wt, &["ls-files", "-u", "--", path], Duration::from_secs(10))?;
+        let stages: Vec<&str> = unmerged
+            .lines()
+            .filter_map(|line| line.split('\t').next())
+            .filter_map(|meta| meta.split_whitespace().nth(2))
+            .collect();
+        let is_delete_side = !stages.is_empty()
+            && !stages.contains(&chosen_stage)
+            && stages.contains(&other_stage);
+        if !is_delete_side {
+            return Err(format!(
+                "无法解决 {path}：该文件的冲突形态不是「选定侧已删除」，请检查冲突状态"
+            ));
+        }
         run_git(
             wt,
             &["rm", "-q", "--ignore-unmatch", "--", path],
@@ -1965,7 +2158,12 @@ fn finish_merge_impl(wt: &Path) -> Result<String, String> {
     if !st.files.is_empty() {
         return Err(format!("还有未解决的冲突文件：{}", st.files.join("、")));
     }
-    run_git(wt, &["commit", "--no-edit"], Duration::from_secs(60))?;
+    // 与 merge 路径一致：应用内自动提交绕过用户全局 commit.gpgsign
+    run_git(
+        wt,
+        &["-c", "commit.gpgsign=false", "commit", "--no-edit"],
+        Duration::from_secs(60),
+    )?;
     Ok("冲突解决完成，已提交并入".to_string())
 }
 
@@ -2104,16 +2302,25 @@ pub async fn list_repos() -> Vec<RepoDto> {
 mod tests {
     use super::*;
 
+    /// 测试也统一走 resolve_binary（与生产代码同一解析路径）
+    fn git_bin() -> PathBuf {
+        crate::agents::resolve_binary("git").expect("测试环境找不到 git 可执行文件")
+    }
+
     fn git_available() -> bool {
-        Command::new("git")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
+        crate::agents::resolve_binary("git")
+            .map(|git| {
+                Command::new(git)
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            })
             .unwrap_or(false)
     }
 
     fn sh(dir: &Path, args: &[&str]) {
-        let out = Command::new("git")
+        let out = Command::new(git_bin())
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -2131,12 +2338,12 @@ mod tests {
     fn setup_repo(dir: &Path) -> PathBuf {
         let origin = dir.join("origin.git");
         let repo = dir.join("myrepo");
-        Command::new("git")
+        Command::new(git_bin())
             .args(["init", "--bare"])
             .arg(&origin)
             .output()
             .unwrap();
-        Command::new("git")
+        Command::new(git_bin())
             .args(["-c", "init.defaultBranch=main", "init"])
             .arg(&repo)
             .output()
@@ -2400,6 +2607,63 @@ mod tests {
         assert!(!fx.ws_root.join("myrepo/escape").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_symlink_escape_in_copy_dest_parent() {
+        let Some(fx) = Fixture::new() else { return };
+        // 仓库跟踪一个指向树外的符号链接，files_to_copy 引用链接内路径：
+        // 复制若不检查会跟随符号链接把文件覆写到 worktree 外
+        let outside = fx.dir.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("payload.env"), "ORIGINAL\n").unwrap();
+        std::os::unix::fs::symlink(&outside, fx.repo.join("linked")).unwrap();
+        sh(&fx.repo, &["add", "linked"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "add symlink"],
+        );
+        fs::create_dir_all(fx.repo.join(".ccode")).unwrap();
+        fs::write(
+            fx.repo.join(".ccode/settings.toml"),
+            "files_to_copy = [\"linked/payload.env\"]\n",
+        )
+        .unwrap();
+        let err = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "symlnk").unwrap_err();
+        assert!(err.contains("符号链接"), "{err}");
+        assert!(err.contains("已回滚"), "{err}");
+        // 树外文件未被覆写，创建已整体回滚
+        assert_eq!(
+            fs::read_to_string(outside.join("payload.env")).unwrap(),
+            "ORIGINAL\n"
+        );
+        assert!(query_workspaces(&fx.conn).unwrap().is_empty());
+        assert!(!fx.ws_root.join("myrepo/symlnk").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_symlink_at_copy_dest_itself() {
+        let Some(fx) = Fixture::new() else { return };
+        // files_to_copy 的目标自身是仓库跟踪的符号链接（指向树外文件）
+        let outside = fx.dir.join("outside-dst");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("target.env"), "ORIGINAL\n").unwrap();
+        fs::remove_file(fx.repo.join(".env")).unwrap(); // fixture 预置的实体文件让位给符号链接
+        std::os::unix::fs::symlink(outside.join("target.env"), fx.repo.join(".env")).unwrap();
+        sh(&fx.repo, &["add", ".env"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "env as symlink"],
+        );
+        let err = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "dstsym").unwrap_err();
+        assert!(err.contains("符号链接"), "{err}");
+        assert_eq!(
+            fs::read_to_string(outside.join("target.env")).unwrap(),
+            "ORIGINAL\n"
+        );
+        assert!(query_workspaces(&fx.conn).unwrap().is_empty());
+    }
+
     #[test]
     fn archive_restore_delete_lifecycle() {
         let Some(fx) = Fixture::new() else { return };
@@ -2469,6 +2733,12 @@ mod tests {
         assert_eq!(env[0], ("CCODE_PORT".to_string(), "4000".to_string()));
         assert_eq!(env[9], ("CCODE_PORT_9".to_string(), "4009".to_string()));
         assert!(workspace_env_impl(&fx.conn, "/nonexistent").is_empty());
+        // 归档后不再占用端口段，不下发端口 env
+        archive_impl(&fx.conn, &w.id).unwrap();
+        assert!(
+            workspace_env_impl(&fx.conn, &w.worktree_path).is_empty(),
+            "归档工作区不得再返回端口 env"
+        );
     }
 
     #[test]
@@ -2494,12 +2764,12 @@ mod tests {
     fn setup_master_repo(dir: &Path) -> PathBuf {
         let origin = dir.join("origin.git");
         let repo = dir.join("masterrepo");
-        Command::new("git")
+        Command::new(git_bin())
             .args(["init", "--bare"])
             .arg(&origin)
             .output()
             .unwrap();
-        Command::new("git")
+        Command::new(git_bin())
             .args(["-c", "init.defaultBranch=master", "init"])
             .arg(&repo)
             .output()
@@ -3198,5 +3468,101 @@ mod tests {
         // 主仓库 main 上不应有 x.txt（merge 没发生）
         sh(&fx.repo, &["checkout", "main"]);
         assert!(!fx.repo.join("x.txt").exists());
+    }
+
+    /// 打开 commit.gpgsign 且 gpg 程序不存在：应用内自动 merge/commit 必须仍能完成
+    #[test]
+    fn auto_merge_and_commit_bypass_gpgsign_config() {
+        let Some(fx) = Fixture::new() else { return };
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "env"],
+        );
+        // 配置共享给所有 worktree：不带 -c commit.gpgsign=false 的提交必失败
+        sh(&fx.repo, &["config", "commit.gpgsign", "true"]);
+        sh(&fx.repo, &["config", "gpg.program", "definitely-missing-gpg"]);
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "gpg").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("feature.txt"), "v1\n").unwrap();
+        commit_all_in_worktree(&wt, "任务改动");
+        // 主仓库推进别的文件形成分叉，sync_base 的干净并入会产生 merge commit
+        fs::write(fx.repo.join("other.txt"), "main\n").unwrap();
+        sh(&fx.repo, &["add", "other.txt"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "主线改动"],
+        );
+        sync_base_impl(&wt, "main", false).expect("干净并入应绕过 gpgsign");
+        assert!(!unmerged_impl(&wt).unwrap().merging);
+        // 冲突并入 → 选边 → finish_merge 的 --no-edit 提交同样绕过 gpgsign
+        fs::write(wt.join("feature.txt"), "branch\n").unwrap();
+        commit_all_in_worktree(&wt, "分支改动");
+        fs::write(fx.repo.join("feature.txt"), "main\n").unwrap();
+        sh(&fx.repo, &["add", "feature.txt"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "主线再改"],
+        );
+        assert!(sync_base_impl(&wt, "main", false).is_err());
+        resolve_file_impl(&wt, "feature.txt", "ours").unwrap();
+        finish_merge_impl(&wt).expect("完成并入的提交应绕过 gpgsign");
+        // 最终 merge --no-ff 进主仓库也绕过 gpgsign
+        let out = merge_impl(&fx.conn, &w.id, false).unwrap();
+        assert!(out.merged, "{}", out.message);
+        assert_eq!(
+            fs::read_to_string(fx.repo.join("feature.txt")).unwrap(),
+            "branch\n"
+        );
+    }
+
+    /// 非冲突的 merge 失败（基准引用不存在）不得谎报「并入产生冲突」
+    #[test]
+    fn sync_base_non_conflict_failure_reports_git_error() {
+        let Some(fx) = Fixture::new() else { return };
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "badref").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        // 复制进来的 .env* 是未跟踪文件，先提交掉让工作区干净，才能走到 merge 一步
+        commit_all_in_worktree(&wt, "副本");
+        let err = sync_base_impl(&wt, "no-such-branch", false).unwrap_err();
+        assert!(!err.contains("并入产生冲突"), "{err}");
+        assert!(err.contains("非冲突"), "{err}");
+        assert!(!unmerged_impl(&wt).unwrap().merging);
+    }
+
+    /// 删/改冲突：选定「已删除」侧时 git rm 兜底必须经 ls-files -u 确认后生效
+    #[test]
+    fn resolve_modify_delete_conflict_picks_deleted_side() {
+        let Some(fx) = Fixture::new() else { return };
+        // merge-base 必须先含有 feature.txt：任务分支修改、基准分支删除才构成删/改冲突
+        fs::write(fx.repo.join("feature.txt"), "base\n").unwrap();
+        sh(&fx.repo, &["add", ".env", ".envrc", "feature.txt"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "env"],
+        );
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "moddel").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        // 任务分支修改 feature.txt；基准分支删除它 → 并入产生 modify/delete 冲突
+        fs::write(wt.join("feature.txt"), "branch\n").unwrap();
+        commit_all_in_worktree(&wt, "分支改动");
+        sh(&fx.repo, &["rm", "-q", "feature.txt"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "主线删除"],
+        );
+        assert!(sync_base_impl(&wt, "main", false).is_err());
+        let st = unmerged_impl(&wt).unwrap();
+        assert_eq!(st.files, vec!["feature.txt".to_string()]);
+        // 选定 theirs（基准侧 = 已删除）：经确认后 git rm 生效，文件从工作区移除
+        let st = resolve_file_impl(&wt, "feature.txt", "theirs").unwrap();
+        assert!(st.files.is_empty());
+        assert!(!wt.join("feature.txt").exists());
+        finish_merge_impl(&wt).unwrap();
+        assert!(
+            run_git(&wt, &["cat-file", "-e", "HEAD:feature.txt"], Duration::from_secs(10))
+                .is_err(),
+            "选定删除侧后文件不得留在提交里"
+        );
     }
 }

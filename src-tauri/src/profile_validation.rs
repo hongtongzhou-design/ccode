@@ -491,7 +491,7 @@ pub async fn validate_profile(
     profile_id: String,
 ) -> Result<ProfileValidationDto, String> {
     let profile = store.get(&profile_id)?;
-    let key = profiles::get_key(&profile_id);
+    let key = profiles::get_key(&profile_id)?;
     let local_profile = profile.clone();
     let local = tauri::async_runtime::spawn_blocking(move || match dirs::home_dir() {
         Some(home) => local_check_at(&home, &local_profile),

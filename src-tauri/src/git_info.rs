@@ -42,7 +42,8 @@ fn expand_tilde(path: &str) -> String {
 }
 
 pub(crate) fn run_git(cwd: &str, args: &[&str]) -> Result<Output, String> {
-    Command::new("git")
+    let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
+    Command::new(git)
         .arg("-C")
         .arg(cwd)
         .args(args)
@@ -293,7 +294,8 @@ pub(crate) fn validate_selected_paths(cwd: &str, paths: &[String]) -> Result<Vec
 }
 
 fn run_git_owned(cwd: &str, args: &[String]) -> Result<Output, String> {
-    Command::new("git")
+    let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
+    Command::new(git)
         .arg("-C")
         .arg(cwd)
         .args(args)
@@ -706,11 +708,20 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    /// 测试也统一走 resolve_binary（与生产代码同一解析路径）
+    fn git_bin() -> PathBuf {
+        crate::agents::resolve_binary("git").expect("测试环境找不到 git 可执行文件")
+    }
+
     fn git_available() -> bool {
-        Command::new("git")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
+        crate::agents::resolve_binary("git")
+            .map(|git| {
+                Command::new(git)
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            })
             .unwrap_or(false)
     }
 
@@ -721,7 +732,7 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let out = Command::new("git")
+        let out = Command::new(git_bin())
             .arg("-C")
             .arg(dir)
             .args(args)

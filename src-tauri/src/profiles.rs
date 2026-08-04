@@ -95,7 +95,8 @@ impl ProfileStore {
         atomic_write(&self.path, &text)
     }
 
-    pub fn list(&self) -> Result<Vec<Profile>, String> {
+    /// list 的锁内版本：调用方须已持 store_lock
+    fn list_locked(&self) -> Result<Vec<Profile>, String> {
         let mut profiles = self.read_all()?;
         for p in &mut profiles {
             // 旧版单模型字段迁移进列表
@@ -104,13 +105,27 @@ impl ProfileStore {
                     p.models = vec![m];
                 }
             }
-            p.has_key = has_key(&p.id);
+            // keys.json 损坏时向上报错，不能把全部 profile 谎报成「无密钥」
+            p.has_key = has_key_locked(&p.id)?;
         }
         Ok(profiles)
     }
 
+    pub fn list(&self) -> Result<Vec<Profile>, String> {
+        let _g = store_lock();
+        self.list_locked()
+    }
+
     pub fn get(&self, id: &str) -> Result<Profile, String> {
         self.list()?
+            .into_iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| format!("profile 不存在: {id}"))
+    }
+
+    /// get 的锁内版本：调用方须已持 store_lock
+    fn get_locked(&self, id: &str) -> Result<Profile, String> {
+        self.list_locked()?
             .into_iter()
             .find(|p| p.id == id)
             .ok_or_else(|| format!("profile 不存在: {id}"))
@@ -134,6 +149,7 @@ impl ProfileStore {
         if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
             set_key(&profile.id, &key)?;
             profile.key_hint = Some(key_hint_of(&key));
+            profile.has_key = true;
         }
         let mut profiles = self.read_all()?;
         profiles.push(profile.clone());
@@ -144,7 +160,7 @@ impl ProfileStore {
     /// 复制配置：字段全部拷贝，钥匙串密钥一并复制到新 id，名称加「副本」
     pub fn duplicate(&self, id: &str) -> Result<Profile, String> {
         let _g = store_lock();
-        let src = self.get(id)?;
+        let src = self.get_locked(id)?;
         let mut copy = Profile {
             id: uuid::Uuid::new_v4().to_string(),
             agent: src.agent,
@@ -158,7 +174,7 @@ impl ProfileStore {
             last_used_at: None,
             has_key: false,
         };
-        if let Some(key) = get_key(id) {
+        if let Some(key) = get_key_locked(id)? {
             set_key(&copy.id, &key)?;
             copy.has_key = true;
         }
@@ -227,11 +243,32 @@ fn keys_path() -> Result<PathBuf, String> {
         .join("keys.json"))
 }
 
-fn read_keys_at(path: &std::path::Path) -> std::collections::HashMap<String, String> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+/// 读取 keys.json：文件缺失视为空表；解析失败说明文件损坏——改名备份为
+/// keys.json.corrupt-<ts> 并返回错误，绝不当作空表继续（否则下次写回会静默清空其余密钥）
+fn read_keys_at(
+    path: &std::path::Path,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(e) => return Err(format!("读取 {} 失败: {e}", path.display())),
+    };
+    serde_json::from_str(&text).map_err(|e| {
+        let backup = corrupt_backup_path(path);
+        let _ = fs::rename(path, &backup);
+        format!("keys.json 已损坏，已备份为 {}: {e}", backup.display())
+    })
+}
+
+/// 损坏文件备份名：keys.json.corrupt-<unix 秒>（不用 ISO 时间，冒号在 Windows 文件名非法）
+fn corrupt_backup_path(path: &std::path::Path) -> PathBuf {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".corrupt-{ts}"));
+    PathBuf::from(name)
 }
 
 fn write_keys_at(
@@ -239,14 +276,23 @@ fn write_keys_at(
     keys: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     let text = serde_json::to_string_pretty(keys).map_err(|e| e.to_string())?;
-    atomic_write(path, &text)?;
+    let tmp = path.with_extension("tmp");
+    // 崩溃残留的 keys.tmp 可能带着半截密钥与宽松权限，先清掉
+    match fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("清理 {} 失败: {e}", tmp.display())),
+    }
+    fs::write(&tmp, &text).map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
     #[cfg(unix)]
     {
+        // rename 前先把权限收窄到 0600，消除新文件以默认 0644 短暂暴露密钥的窗口；
+        // Windows 无 0600 语义，文件权限由配置目录 ACL 控制，无需对应分支
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("设置 keys.json 权限失败: {e}"))?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("设置 {} 权限失败: {e}", tmp.display()))?;
     }
-    Ok(())
+    fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
 }
 
 /// 原子写入：先写临时文件再 rename，避免中途崩溃留下半截 JSON（借鉴 CC Switch）
@@ -268,48 +314,65 @@ fn key_entry(id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYRING_SERVICE, id).map_err(|e| format!("钥匙串不可用: {e}"))
 }
 
+/// 写入密钥；调用方须已持 store_lock（create/update/duplicate 均持锁调用，本函数不再重复加锁）
 fn set_key(id: &str, key: &str) -> Result<(), String> {
-    let _g = store_lock();
     let path = keys_path()?;
-    let mut keys = read_keys_at(&path);
+    let mut keys = read_keys_at(&path)?;
     keys.insert(id.to_string(), key.to_string());
     write_keys_at(&path, &keys)
 }
 
-pub fn get_key(id: &str) -> Option<String> {
-    let path = keys_path().ok()?;
-    let keys = read_keys_at(&path);
+/// get_key 的锁内版本：调用方须已持 store_lock
+fn get_key_locked(id: &str) -> Result<Option<String>, String> {
+    let path = keys_path()?;
+    let keys = read_keys_at(&path)?;
     if let Some(k) = keys.get(id) {
-        return Some(k.clone());
+        return Ok(Some(k.clone()));
     }
-    // 一次性迁移：旧版本写入钥匙串的条目读回文件
-    let key = key_entry(id).ok()?.get_password().ok()?;
+    // 一次性迁移：旧版本写入钥匙串的条目读回文件（回写在锁内进行，防并发丢更新）
+    let Some(key) = key_entry(id).ok().and_then(|e| e.get_password().ok()) else {
+        return Ok(None);
+    };
     let mut keys = keys;
     keys.insert(id.to_string(), key.clone());
     let _ = write_keys_at(&path, &keys);
-    Some(key)
+    Ok(Some(key))
+}
+
+/// 读取密钥；keys.json 损坏时返回错误而非谎报「无密钥」
+pub fn get_key(id: &str) -> Result<Option<String>, String> {
+    let _g = store_lock();
+    get_key_locked(id)
 }
 
 /// 仅供后端展示脱敏使用；调用方不得把返回值序列化给前端或写入日志。
+/// 阈值 ≥8 的取舍：更短的「密钥」与普通单词/标识符碰撞率高，全文替换脱敏会误伤会话正文；
+/// 漏遮极短密钥的风险低于破坏全部回放文本，故不收录（如确需覆盖短密钥，降到 6 是下限）。
+/// keys.json 损坏时按空表尽力脱敏：损坏文件已被 read_keys_at 改名备份，
+/// 读写主路径会向用户报错，这里不阻断会话浏览。
 pub(crate) fn stored_secrets() -> Vec<String> {
     let Ok(path) = keys_path() else {
         return Vec::new();
     };
     read_keys_at(&path)
+        .unwrap_or_default()
         .into_values()
         .filter(|v| v.chars().count() >= 8)
         .collect()
 }
 
-fn has_key(id: &str) -> bool {
-    get_key(id).is_some()
+/// has_key 的锁内版本：调用方须已持 store_lock
+fn has_key_locked(id: &str) -> Result<bool, String> {
+    Ok(get_key_locked(id)?.is_some())
 }
 
+/// 删除密钥；调用方须已持 store_lock（delete 持锁调用）；损坏文件上的清理尽力而为
 fn delete_key(id: &str) {
     if let Ok(path) = keys_path() {
-        let mut keys = read_keys_at(&path);
-        if keys.remove(id).is_some() {
-            let _ = write_keys_at(&path, &keys);
+        if let Ok(mut keys) = read_keys_at(&path) {
+            if keys.remove(id).is_some() {
+                let _ = write_keys_at(&path, &keys);
+            }
         }
     }
     // 顺带清理旧版本可能残留在钥匙串里的条目
@@ -369,6 +432,8 @@ pub fn export_profiles(store: tauri::State<'_, ProfileStore>, path: String) -> R
 /// 密钥不包含在文件里，导入后需逐个补填。返回新增数量。
 #[tauri::command]
 pub fn import_profiles(store: tauri::State<'_, ProfileStore>, path: String) -> Result<usize, String> {
+    // 读-改-写全程持锁，与 create/update 互斥，防并发保存互相覆盖
+    let _g = store_lock();
     let text = fs::read_to_string(&path).map_err(|e| format!("读取导入文件失败: {e}"))?;
     let incoming: Vec<Profile> =
         serde_json::from_str(&text).map_err(|e| format!("导入文件格式不正确: {e}"))?;
@@ -413,8 +478,63 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
-        let loaded = read_keys_at(&path);
+        let loaded = read_keys_at(&path).unwrap();
         assert_eq!(loaded.get("p1").map(|s| s.as_str()), Some("sk-secret"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_keys_file_reads_as_empty() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("keys.json");
+        let loaded = read_keys_at(&path).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn corrupt_keys_file_is_backed_up_and_errors() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        std::fs::write(&path, "{ 不是合法 json").unwrap();
+
+        let err = read_keys_at(&path).unwrap_err();
+        assert!(err.contains("已损坏"), "报错须说明损坏: {err}");
+        assert!(!path.exists(), "原损坏文件应已改名备份");
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("keys.json.corrupt-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "应生成唯一 corrupt 备份: {backups:?}");
+        // 损坏内容完整保留在备份里，可被人工恢复
+        let kept = std::fs::read_to_string(dir.join(&backups[0])).unwrap();
+        assert_eq!(kept, "{ 不是合法 json");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_keys_cleans_stale_tmp_before_rename() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, "崩溃残留").unwrap();
+
+        let mut keys = std::collections::HashMap::new();
+        keys.insert("p1".to_string(), "sk-secret".to_string());
+        write_keys_at(&path, &keys).unwrap();
+
+        assert!(!tmp.exists(), "写入后不得残留 keys.tmp");
+        let loaded = read_keys_at(&path).unwrap();
+        assert_eq!(loaded.get("p1").map(|s| s.as_str()), Some("sk-secret"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "rename 后即 0600，无 0644 暴露窗口");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

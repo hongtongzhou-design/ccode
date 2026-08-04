@@ -89,23 +89,51 @@ fn candidate_dirs() -> Vec<std::path::PathBuf> {
     out
 }
 
+/// --version 探测的统一超时：正常 CLI 毫秒级返回，卡死的 CLI 不能拖住检测/更新流程
+pub(crate) const VERSION_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 带超时跑 `<binary> --version` 并取首行输出；超时或失败杀掉子进程返回 None。
+/// agents::detect 与 updater::version_of 共用（原实现无超时，CLI 卡死会无限阻塞）
+pub(crate) fn version_with_timeout(
+    path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let mut child = Command::new(path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+    // 进程已退出：输出躺在管道缓冲里，读到 EOF 不会阻塞（--version 输出远小于缓冲）
+    let out = child.wait_with_output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.lines().next().unwrap_or("").to_string())
+    }
+}
+
 fn detect(binary: &str) -> (Option<String>, Option<String>) {
     let path = match resolve_binary(binary) {
         Some(p) => p,
         None => return (None, None),
     };
-    let version = Command::new(&path)
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| {
-            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if text.is_empty() {
-                None
-            } else {
-                Some(text.lines().next().unwrap_or("").to_string())
-            }
-        });
+    let version = version_with_timeout(&path, VERSION_QUERY_TIMEOUT);
     (Some(path.to_string_lossy().into_owned()), version)
 }
 
@@ -412,10 +440,40 @@ fn resume_command_line_with(
     if args.is_empty() {
         return Err(format!("{agent_id} 不支持按 ID 恢复"));
     }
-    let mut cmd = format!("cd {} && {binary}", sh_quote_if_needed(cwd));
+    // binary 可能是含空格的绝对路径（外部拉起场景），与 cwd 一样必须 shell 转义
+    let mut cmd = format!(
+        "cd {} && {}",
+        sh_quote_if_needed(cwd),
+        sh_quote_if_needed(binary)
+    );
     for a in &args {
         cmd.push(' ');
         cmd.push_str(&sh_quote_if_needed(a));
+    }
+    Ok(cmd)
+}
+
+/// cmd.exe 方言的恢复命令行（cd /d + 双引号）。从结构化参数直接生成，
+/// 不做 POSIX 串解析——POSIX 转义（'it'\''s'）无法靠替换引号正确还原。
+/// 已知边角：cwd 含 %VAR% 形式子串时 cmd 仍会做变量展开（交互式 cmd 没有
+/// 转义 % 的手段），这类目录名需要在系统终端手工恢复。
+#[cfg(target_os = "windows")]
+fn windows_resume_command_line(
+    agent_id: &str,
+    session_id: &str,
+    cwd: &str,
+    binary: &str,
+) -> Result<String, String> {
+    let (_, args) = resume_args(agent_id, session_id);
+    if args.is_empty() {
+        return Err(format!("{agent_id} 不支持按 ID 恢复"));
+    }
+    // 一律双引号包裹（含空格路径与裸名统一处理）；内嵌 " doubling 是 cmd 的转义方式
+    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    let mut cmd = format!("cd /d {} && {}", q(cwd), q(binary));
+    for a in &args {
+        cmd.push(' ');
+        cmd.push_str(&q(a));
     }
     Ok(cmd)
 }
@@ -453,6 +511,10 @@ pub fn resume_external_terminal(
     let binary = resolve_binary(binary)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| binary.into());
+    // Windows 直接生成 cmd 方言（POSIX 串解析无法正确还原引号转义）
+    #[cfg(target_os = "windows")]
+    let cmd = windows_resume_command_line(agent_id, session_id, cwd, &binary)?;
+    #[cfg(not(target_os = "windows"))]
     let cmd = resume_command_line_with(agent_id, session_id, cwd, &binary)?;
     open_external_terminal(&cmd, &pref)
 }
@@ -492,12 +554,24 @@ fn open_ghostty(cmd: &str) -> Result<(), String> {
     }
     // 已运行：open -n 会再开新实例（程序坞每点一次多一个图标），且 open 对运行中的实例
     // 不投递 --args（实测）——改走 AppleScript：激活 → ⌘N 开新窗 → 剪贴板粘贴命令
-    // （keystroke 逐字输入对中文路径/键盘布局不可靠，故走剪贴板，用后还原）
+    // （keystroke 逐字输入对中文路径/键盘布局不可靠，故走剪贴板，用后还原）。
+    // 剪贴板读取用 try 容错（图片等非文本内容 as string 会抛错）；主体包在 try/on error
+    // 里，中途失败（如「控制 System Events」未授权）也先还原剪贴板再原样报错
     let escaped = applescript_escape(cmd);
     spawn_status(
         Command::new("osascript").args([
             "-e",
-            "set oldClip to the clipboard",
+            "set oldClip to \"\"",
+            "-e",
+            "try",
+            "-e",
+            "set oldClip to the clipboard as string",
+            "-e",
+            "end try",
+            "-e",
+            "set errMsg to \"\"",
+            "-e",
+            "try",
             "-e",
             &format!("set the clipboard to \"{escaped}\""),
             "-e",
@@ -517,7 +591,17 @@ fn open_ghostty(cmd: &str) -> Result<(), String> {
             "-e",
             "delay 0.2",
             "-e",
+            "on error errMsg",
+            "-e",
+            "end try",
+            "-e",
+            "try",
+            "-e",
             "set the clipboard to oldClip",
+            "-e",
+            "end try",
+            "-e",
+            "if errMsg is not \"\" then error errMsg",
         ]),
         "Ghostty",
     )
@@ -582,8 +666,7 @@ fn spawn_status(cmd: &mut Command, what: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn open_external_terminal(cmd: &str, _pref: &str) -> Result<(), String> {
-    // resume_command_line 是 POSIX 语法，cmd.exe 不认单引号，换 cmd 方言重建
-    let cmd = windows_command_line(cmd)?;
+    // cmd 已是 cmd.exe 方言（windows_resume_command_line 生成）；
     // start 开新窗口；/K 让窗口在 agent 退出后保留；内层引号 doubling 是 cmd 的转义方式
     let inner = cmd.replace('"', "\"\"");
     Command::new("cmd")
@@ -591,20 +674,6 @@ fn open_external_terminal(cmd: &str, _pref: &str) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("启动外部终端失败: {e}"))?;
     Ok(())
-}
-
-/// 把 POSIX 版恢复命令行改写成 cmd 方言（双引号 + cd /d）
-#[cfg(target_os = "windows")]
-fn windows_command_line(posix: &str) -> Result<String, String> {
-    // 结构固定为 cd <quoted-cwd> && <bin> <args...>，逐段把单引号换成双引号、cd 加 /d
-    let rest = posix
-        .strip_prefix("cd ")
-        .ok_or_else(|| "意外的命令格式".to_string())?;
-    let (cwd, tail) = rest
-        .split_once(" && ")
-        .ok_or_else(|| "意外的命令格式".to_string())?;
-    let cwd = cwd.trim_matches('\'');
-    Ok(format!("cd /d \"{cwd}\" && {}", tail.replace('\'', "\"")))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -662,27 +731,42 @@ pub(crate) fn invalidate_detect_cache() {
     *DETECT_CACHE.lock().unwrap() = None;
 }
 
+fn detect_one(id: &str, binary: &str) -> DetectResult {
+    let (binary_path, mut version) = detect(binary);
+    if id == "kimi" {
+        if let (Some(v), Some(hint)) = (&version, kimi_variant_hint()) {
+            version = Some(format!("{v} ({hint})"));
+        }
+    }
+    DetectResult {
+        id: id.to_string(),
+        binary_path,
+        version,
+    }
+}
+
 #[tauri::command]
 pub async fn detect_agents() -> Vec<DetectResult> {
     if let Some(cached) = DETECT_CACHE.lock().unwrap().clone() {
         return cached;
     }
-    let results: Vec<DetectResult> = AGENTS
-        .iter()
-        .map(|(id, binary)| {
-            let (binary_path, mut version) = detect(binary);
-            if *id == "kimi" {
-                if let (Some(v), Some(hint)) = (&version, kimi_variant_hint()) {
-                    version = Some(format!("{v} ({hint})"));
-                }
-            }
-            DetectResult {
-                id: id.to_string(),
-                binary_path,
-                version,
-            }
-        })
-        .collect();
+    // --version 要 spawn 6 个子进程，放阻塞线程池并并行跑（与 updater 的更新检查同模式；
+    // 单个 CLI 卡死由 version_with_timeout 的 5s 超时兜底）
+    let results = tauri::async_runtime::spawn_blocking(|| {
+        let handles: Vec<_> = AGENTS
+            .iter()
+            .map(|(id, binary)| {
+                let (id, binary) = (*id, *binary);
+                std::thread::spawn(move || detect_one(id, binary))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
     *DETECT_CACHE.lock().unwrap() = Some(results.clone());
     results
 }
@@ -1090,6 +1174,69 @@ mod tests {
             resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/.kimi-code/bin/kimi").unwrap(),
             "cd /tmp && /Users/x/.kimi-code/bin/kimi -S abc"
         );
+        // 绝对路径含空格 → binary 也必须 shell 转义（否则命令行在空格处断裂）
+        assert_eq!(
+            resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/My Apps/bin/kimi").unwrap(),
+            "cd /tmp && '/Users/x/My Apps/bin/kimi' -S abc"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_resume_line_uses_cmd_dialect() {
+        // cmd 方言：cd /d + 双引号；裸名与含空格路径统一包裹
+        assert_eq!(
+            windows_resume_command_line("claude-code", "abc", r"C:\work\my proj", r"C:\tools\claude.cmd").unwrap(),
+            r#"cd /d "C:\work\my proj" && "C:\tools\claude.cmd" -r "abc""#
+        );
+        // cwd 含单引号：从结构化参数生成，不受 POSIX 转义影响
+        let line = windows_resume_command_line("kimi", "abc", r"C:\it's\proj", "kimi").unwrap();
+        assert_eq!(line, r#"cd /d "C:\it's\proj" && "kimi" -S "abc""#);
+        assert!(windows_resume_command_line("no-such", "abc", r"C:\x", "x").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_with_timeout_reads_first_line() {
+        let base = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let bin = base.join("fake-cli");
+        std::fs::write(&bin, "#!/bin/sh\necho '1.2.3 (Fake CLI)'\necho second\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            version_with_timeout(&bin, std::time::Duration::from_secs(5)),
+            Some("1.2.3 (Fake CLI)".into())
+        );
+        // 空输出 → None
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        assert_eq!(
+            version_with_timeout(&bin, std::time::Duration::from_secs(5)),
+            None
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_with_timeout_kills_hung_cli() {
+        let base = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let bin = base.join("hung-cli");
+        // --version 永不返回：超时后必须杀掉并返回 None（不能无限阻塞）
+        std::fs::write(&bin, "#!/bin/sh\nsleep 60\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            version_with_timeout(&bin, std::time::Duration::from_millis(300)),
+            None
+        );
+        // 子进程已被杀掉（防挂死兜底之外不做墙钟时序硬断言）
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

@@ -31,6 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: npm ci
+      - run: npm test
       - run: cargo test
         working-directory: src-tauri
       - run: npm run build
@@ -38,6 +39,9 @@ jobs:
   package:
     name: tauri build (${{ matrix.os }})
     needs: test
+    # 仅 tag 推送（含手动 dispatch 选择 tag ref）才打包建 Release 草稿；
+    # 否则主线推送会以 tagName=main 建草稿甚至创建 main tag
+    if: startsWith(github.ref, 'refs/tags/')
     strategy:
       fail-fast: false
       matrix:

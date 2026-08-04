@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 const LIST_CAP: usize = 20;
-const USAGE_SCHEMA_VERSION: &str = "3";
+const USAGE_SCHEMA_VERSION: &str = "4";
 const SOURCE_CLI: &str = "cli";
 const SOURCE_CCODE_AI: &str = "ccode-ai";
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -231,17 +231,32 @@ fn opencode_events(db_path: &Path, session_id: &str) -> Vec<UsageEvent> {
     let Some(conn) = crate::sessions::open_opencode_db(db_path) else {
         return Vec::new();
     };
-    let sid = session_id.to_string();
+    // 逐行流式消费：message.data 可能很大，整会话一次性入内存在长会话下峰值过高。
+    // 列级防御沿用 SELECT * + 按列名取索引（drizzle 迁移频繁，缺列给默认而不是报错）
+    let Ok(mut stmt) = conn
+        .prepare("SELECT * FROM message WHERE session_id=? ORDER BY time_created ASC")
+    else {
+        return Vec::new();
+    };
+    let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let Some(data_idx) = names.iter().position(|n| n == "data") else {
+        return Vec::new();
+    };
+    let time_idx = names.iter().position(|n| n == "time_created");
+    let Ok(mut rows) = stmt.query(rusqlite::params![session_id]) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for r in crate::sessions::query_rows(
-        &conn,
-        "SELECT * FROM message WHERE session_id=? ORDER BY time_created ASC",
-        &[&sid],
-    ) {
-        let row = crate::sessions::DbRow { names: r.0, vals: r.1 };
-        let Some(data) = row.as_str("data") else {
-            continue;
-        };
+    while let Ok(Some(row)) = rows.next() {
+        let data = row.get::<_, String>(data_idx).unwrap_or_default();
+        // 与旧 DbRow::as_i64 同口径：Integer 直取，Real 截断，其余视为缺失
+        let time_created = time_idx.and_then(|i| {
+            row.get::<_, rusqlite::types::Value>(i).ok().and_then(|v| match v {
+                rusqlite::types::Value::Integer(n) => Some(n),
+                rusqlite::types::Value::Real(f) => Some(f as i64),
+                _ => None,
+            })
+        });
         let Ok(v) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
@@ -260,7 +275,7 @@ fn opencode_events(db_path: &Path, session_id: &str) -> Vec<UsageEvent> {
             .or_else(|| v.get("model").and_then(|m| get_str(m, "modelID")).map(String::from))
             .unwrap_or_default();
         out.push(UsageEvent {
-            day: row.as_i64("time_created").map(day_of_ms).unwrap_or_default(),
+            day: time_created.map(day_of_ms).unwrap_or_default(),
             model,
             input: num("input") as u64,
             output: (num("output") + num("reasoning")) as u64,
@@ -347,6 +362,9 @@ pub(crate) fn aggregate(contribs: &[SessionContrib]) -> Vec<DailyRow> {
         HashMap::new();
     for c in contribs {
         for e in &c.events {
+            if e.day.is_empty() {
+                continue; // 时间戳缺失的事件无法归入任何日桶，直接丢弃而不是产出 day="" 噪声行
+            }
             let key = (
                 e.day.clone(),
                 c.agent.clone(),
@@ -482,6 +500,11 @@ pub(crate) fn normalize_provenance_path(path: &str) -> String {
     let resolved = std::fs::canonicalize(&expanded)
         .unwrap_or_else(|_| std::path::PathBuf::from(&expanded));
     let mut normalized = resolved.to_string_lossy().replace('\\', "/");
+    // canonicalize 在 Windows 返回 \\?\ 前缀的 verbatim 形式（替换分隔符后为 //?/），
+    // 登记/查询两侧统一剥离再归一化；非 Windows 平台该前缀不会出现，剥离是恒等操作
+    if let Some(rest) = normalized.strip_prefix("//?/") {
+        normalized = rest.to_string();
+    }
     #[cfg(target_os = "macos")]
     {
         // macOS 的 std::env::temp_dir 常返回 /var，CLI 会话通常记录真实的 /private/var。
@@ -536,18 +559,84 @@ fn meta_set(conn: &Connection, key: &str, value: &str) {
     );
 }
 
+/// usage_provenance 只增不减：无头 AI 用的临时工作区（系统临时目录下）用完即删，
+/// 登记行会越积越多。清理「临时目录下、目录已不存在、且登记超过 7 天」的行；
+/// 真实项目目录的行一律不动（可能暂时未挂载，不能误清）。created_at 是 ISO 字符串可字典序比较
+fn prune_stale_provenance(conn: &Connection) {
+    const PRUNE_AFTER_SECS: u64 = 7 * 24 * 3600;
+    let Some(now) = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+    else {
+        return;
+    };
+    let cutoff = crate::sessions::iso_from_unix(now.saturating_sub(PRUNE_AFTER_SECS));
+    let tmp = normalize_provenance_path(&std::env::temp_dir().to_string_lossy());
+    // 先收集再删：活跃 SELECT 语句上直接写同连接可能撞 SQLITE_LOCKED
+    let rows = {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT agent, project_path FROM usage_provenance WHERE created_at < ?1",
+        ) else {
+            return;
+        };
+        stmt.query_map(params![cutoff], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map(|rows| rows.flatten().collect::<Vec<_>>())
+        .unwrap_or_default()
+    };
+    for (agent, path) in rows {
+        let under_tmp = path == tmp || path.starts_with(&format!("{tmp}/"));
+        if under_tmp && !std::path::Path::new(&path).exists() {
+            let _ = conn.execute(
+                "DELETE FROM usage_provenance WHERE agent=?1 AND project_path=?2",
+                params![agent, path],
+            );
+        }
+    }
+}
+
 // ===== 增量重建 =====
+
+/// 快照与活会话可共用 session_id：marker 键必须区分来源，
+/// 否则来源切换时两边 marker 互顶，每轮都全量重解析
+fn seen_key(s: &crate::sessions::SessionMetaDto) -> String {
+    format!(
+        "seen:{}:{}:{}",
+        s.agent,
+        s.session_id,
+        if s.alive { "live" } else { "snap" }
+    )
+}
+
+/// 从 seen 键反解 (agent, session_id)，供清理已消失会话的行；旧格式/损坏键返回 None
+fn parse_seen_key(key: &str) -> Option<(String, String)> {
+    let rest = key.strip_prefix("seen:")?;
+    let (agent_sid, _kind) = rest.rsplit_once(':')?;
+    let (agent, sid) = agent_sid.split_once(':')?;
+    Some((agent.to_string(), sid.to_string()))
+}
 
 fn rebuild_impl() -> Result<UsageBuildResult, String> {
     let conn = usage_db()?;
+    prune_stale_provenance(&conn);
     let scan = crate::sessions::scan_sessions();
     let mut indexed = 0usize;
     let mut seen: HashSet<String> = HashSet::new();
     for s in &scan.sessions {
-        let key = format!("seen:{}:{}", s.agent, s.session_id);
+        let key = seen_key(s);
         seen.insert(key.clone());
-        let marker = s.updated_at.clone().unwrap_or_default();
-        // 快照补出的会话（alive=false）file_path 指向快照，内容稳定，marker 恒定即可跳过
+        // 快照补出的会话（alive=false）file_path 指向快照，内容稳定；
+        // updated_at 缺失时用 created_at 兜底，保持 marker 恒定可跳过
+        let marker = if s.alive {
+            s.updated_at.clone().unwrap_or_default()
+        } else {
+            s.updated_at
+                .clone()
+                .or_else(|| s.created_at.clone())
+                .unwrap_or_default()
+        };
         if meta_get(&conn, &key).as_deref() == Some(marker.as_str()) && !marker.is_empty() {
             continue;
         }
@@ -602,7 +691,7 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
         }
     }
     for k in stale {
-        if let Some((agent, sid)) = k.strip_prefix("seen:").and_then(|s| s.split_once(':')) {
+        if let Some((agent, sid)) = parse_seen_key(&k) {
             let _ = conn.execute(
                 "DELETE FROM usage_daily WHERE agent=?1 AND session_id=?2",
                 params![agent, sid],
@@ -684,6 +773,10 @@ fn load_pricing(override_path: Option<&Path>) -> Vec<(String, (f64, f64))> {
             if let Ok(v) = serde_json::from_str::<Value>(&text) {
                 if let Some(obj) = v.as_object() {
                     for (prefix, price) in obj {
+                        // 空前缀会匹配一切模型名，视为配置错误直接忽略
+                        if prefix.trim().is_empty() {
+                            continue;
+                        }
                         if let Some(pair) = price.as_array() {
                             if pair.len() == 2 {
                                 if let (Some(i), Some(o)) = (pair[0].as_f64(), pair[1].as_f64()) {
@@ -1075,6 +1168,81 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_drops_events_without_day() {
+        let contribs = vec![SessionContrib {
+            agent: "kimi".into(),
+            session_id: "s1".into(),
+            project_path: "/p".into(),
+            events: vec![ev("", "kimi-k2", 10, 5), ev("2026-08-01", "kimi-k2", 1, 1)],
+        }];
+        let rows = aggregate(&contribs);
+        assert_eq!(rows.len(), 1, "时间戳缺失的事件不得产出 day=\"\" 噪声行");
+        assert_eq!(rows[0].day, "2026-08-01");
+        assert_eq!((rows[0].input, rows[0].output), (1, 1));
+    }
+
+    #[test]
+    fn seen_key_parse_roundtrips_new_format_only() {
+        assert_eq!(
+            parse_seen_key("seen:codex:s1:live"),
+            Some(("codex".into(), "s1".into()))
+        );
+        assert_eq!(
+            parse_seen_key("seen:claude-code:abc:snap"),
+            Some(("claude-code".into(), "abc".into()))
+        );
+        // 旧格式（无来源后缀）与损坏键反解失败，避免误删其他会话的行
+        assert_eq!(parse_seen_key("seen:codex:s1"), None);
+        assert_eq!(parse_seen_key("seen:onlyone"), None);
+        assert_eq!(parse_seen_key("other:x"), None);
+    }
+
+    #[test]
+    fn opencode_events_streamed_from_db() {
+        let dir = std::env::temp_dir().join(format!("ccode-usage-oc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE message(id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+            )
+            .unwrap();
+            let rows = [
+                ("m1", "s1", 1785307071000i64, r#"{"role":"user"}"#),
+                ("m2", "s1", 1785307072000, r#"{"role":"assistant","modelID":"grok-4","tokens":{"input":10,"output":5,"reasoning":2,"cache":{"read":3,"write":1}}}"#),
+                ("m3", "s2", 1785307073000, r#"{"role":"assistant","tokens":{"input":99,"output":9}}"#),
+            ];
+            for (id, sid, t, data) in rows {
+                conn.execute("INSERT INTO message VALUES(?1,?2,?3,?4)", params![id, sid, t, data])
+                    .unwrap();
+            }
+        }
+        let events = opencode_events(&db, "s1");
+        assert_eq!(events.len(), 1, "只取本会话的 assistant 行");
+        assert_eq!(events[0].day, day_of_ms(1785307072000));
+        assert_eq!(
+            (events[0].input, events[0].output, events[0].cache_read, events[0].cache_write),
+            (10, 7, 3, 1),
+            "reasoning 计入输出侧"
+        );
+        assert_eq!(events[0].model, "grok-4");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pricing_override_ignores_empty_prefix() {
+        let dir = std::env::temp_dir().join(format!("ccode-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("pricing.json");
+        std::fs::write(&p, r#"{"": [9.0, 9.0], "relay-y": [0.5, 0.5]}"#).unwrap();
+        let table = load_pricing(Some(&p));
+        assert_eq!(price_of("totally-unknown-model", &table), None, "空前缀不得匹配一切模型");
+        assert_eq!(price_of("relay-y-x", &table), Some((0.5, 0.5)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn usage_schema_migration_resets_unclassified_index() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -1152,6 +1320,43 @@ mod tests {
                 "macOS 临时目录别名只做路径归一化，不影响来源判定"
             );
         }
+    }
+
+    #[test]
+    fn prune_stale_provenance_removes_only_old_gone_tmp_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        let tmp = normalize_provenance_path(&std::env::temp_dir().to_string_lossy());
+        let gone_old = format!("{tmp}/ccode-prune-gone-{}", uuid::Uuid::new_v4());
+        let gone_recent = format!("{tmp}/ccode-prune-recent-{}", uuid::Uuid::new_v4());
+        // 固定选一个永远早于「现在-7 天」的日期（2020 年），不做墙钟硬断言
+        let old = "2020-01-01T00:00:00Z";
+        let recent = crate::sessions::now_iso();
+        for (path, at) in [
+            (gone_old.as_str(), old),               // tmp 下 + 不存在 + 老 → 删
+            (gone_recent.as_str(), recent.as_str()), // tmp 下 + 不存在 + 新 → 留
+            (tmp.as_str(), old),                    // tmp 下 + 老但目录还在 → 留
+            ("/ccode-test-real-project", old),      // 不在 tmp 下 → 留
+        ] {
+            conn.execute(
+                "INSERT INTO usage_provenance(agent, project_path, source, internal, created_at)
+                 VALUES('kimi', ?1, ?2, 1, ?3)",
+                params![path, SOURCE_CCODE_AI, at],
+            )
+            .unwrap();
+        }
+        prune_stale_provenance(&conn);
+        let mut rows: Vec<String> = conn
+            .prepare("SELECT project_path FROM usage_provenance")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        rows.sort();
+        let mut expected = vec!["/ccode-test-real-project".to_string(), gone_recent, tmp];
+        expected.sort();
+        assert_eq!(rows, expected, "只有「tmp 下 + 目录已消失 + 超 7 天」的行被清");
     }
 
     #[test]

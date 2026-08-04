@@ -140,6 +140,9 @@ pub async fn get_settings() -> AppSettingsDto {
 
 #[tauri::command]
 pub async fn update_settings(patch: AppSettingsDto) -> Result<AppSettingsDto, String> {
+    // 与 profiles 共用同一把读-改-写锁，防并发 patch 互相覆盖；
+    // 本函数持锁期间不再获取其他锁，与全局写入（GLOBAL_CONFIG_MUTEX 内不调 profiles）锁序一致
+    let _g = crate::profiles::store_lock();
     let path = settings_path()?;
     let mut cur = read_from(&path);
     merge(&mut cur, patch);

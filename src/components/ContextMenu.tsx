@@ -8,6 +8,9 @@ export interface ContextMenuItem {
   title?: string;
 }
 
+/** 面板最大宽度（px，对应 max-w-80）：超长 label 截断，防止菜单被顶出屏幕 */
+const MENU_MAX_WIDTH = 320;
+
 /**
  * 轻量右键菜单：全屏 overlay + 浮动面板，
  * 点击空白 / Escape / 滚动任一发生即关闭。
@@ -46,23 +49,25 @@ export default function ContextMenu({
     };
   }, [onClose]);
 
-  // 右对齐需实测面板宽度；useLayoutEffect 保证绘制前完成修正，不闪动
+  // 实测面板宽高后钳制在视口内；useLayoutEffect 保证绘制前完成修正，不闪动
   useLayoutEffect(() => {
-    if (!alignRight) return;
     const el = panelRef.current;
     if (!el) return;
     const { offsetWidth: w, offsetHeight: h } = el;
     setMeasured({
-      left: Math.max(4, Math.min(x - w, window.innerWidth - w - 4)),
+      left: Math.max(
+        4,
+        Math.min(alignRight ? x - w : x, window.innerWidth - w - 4),
+      ),
       top: Math.max(4, Math.min(y, window.innerHeight - h - 4)),
     });
   }, [alignRight, x, y, items.length]);
 
-  // 防出屏：简单往左/往上收（右对齐时先按估算渲染，随后由实测修正）
+  // 首帧按估算摆放（useLayoutEffect 绘制前即被实测值取代，用户看不到）
   const style = measured ?? {
     left: Math.max(
       4,
-      Math.min(alignRight ? x - 160 : x, window.innerWidth - 180),
+      Math.min(alignRight ? x - 160 : x, window.innerWidth - MENU_MAX_WIDTH - 8),
     ),
     top: Math.max(4, Math.min(y, window.innerHeight - items.length * 32 - 16)),
   };
@@ -78,7 +83,7 @@ export default function ContextMenu({
     >
       <div
         ref={panelRef}
-        className="absolute min-w-40 rounded border border-field bg-strip py-1"
+        className="absolute min-w-40 max-w-80 rounded border border-field bg-strip py-1"
         style={style}
         onClick={(e) => e.stopPropagation()}
       >
@@ -92,7 +97,7 @@ export default function ContextMenu({
               onClose();
               it.onSelect?.();
             }}
-            className={`block w-full px-3 py-1.5 text-left text-sm ${
+            className={`block w-full truncate px-3 py-1.5 text-left text-sm ${
               it.disabled
                 ? "cursor-not-allowed text-l4"
                 : "text-l2 hover:bg-white/5"

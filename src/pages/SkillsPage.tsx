@@ -417,10 +417,13 @@ function DiscoverModal({
     setBusy(true);
     setError(null);
     try {
-      const n = await invoke<number>("import_discovered", {
+      const r = await invoke<SkillImportResultDto>("import_discovered", {
         paths: [...checked],
       });
-      onDone(`已导入 ${n} 个技能`);
+      const conflictNote = r.conflicts.length
+        ? `，${r.conflicts.length} 个与库中同名被跳过（可在「导入」中选择覆盖或另存为）`
+        : "";
+      onDone(`已导入 ${r.added.length} 个技能${conflictNote}`);
       onClose();
     } catch (e) {
       setError(String(e));
