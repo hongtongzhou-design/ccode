@@ -1,9 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { AGENTS } from "../types";
 import ContextMenu from "../components/ContextMenu";
-import { Checkbox, PageFrame, PageHeader, primaryActionClass } from "../components/PageFrame";
+import {
+  Checkbox,
+  LoadingRows,
+  PageFrame,
+  PageHeader,
+  primaryActionClass,
+} from "../components/PageFrame";
 import type {
   DiscoveredSkillDto,
   SkillDto,
@@ -28,7 +34,10 @@ const SOURCE_LABEL: Record<string, string> = {
   discovered: "发现",
 };
 
-const GITHUB_PRESETS = ["anthropics/skills", "ComposioHQ/awesome-claude-skills"];
+const GITHUB_PRESETS = [
+  "anthropics/skills",
+  "ComposioHQ/awesome-claude-skills",
+];
 
 const field =
   "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
@@ -41,7 +50,10 @@ function parseGithubInput(raw: string): {
   branch: string | null;
   subdir: string | null;
 } {
-  let s = raw.trim().replace(/\/+$/, "").replace(/\.git$/, "");
+  let s = raw
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\.git$/, "");
   s = s.replace(/^https?:\/\//, "").replace(/^github\.com\//, "");
   const parts = s.split("/").filter(Boolean);
   const repo = parts.slice(0, 2).join("/");
@@ -78,7 +90,9 @@ function ImportModal({
     cmd: string;
     args: Record<string, unknown>;
   } | null>(null);
-  const [renameTargets, setRenameTargets] = useState<Record<string, string>>({});
+  const [renameTargets, setRenameTargets] = useState<Record<string, string>>(
+    {},
+  );
 
   function summary(value: SkillImportResultDto): string {
     const parts = [
@@ -98,13 +112,19 @@ function ImportModal({
     setBusy(true);
     setError(null);
     try {
-      const next = await invoke<SkillImportResultDto>(cmd, { ...args, resolutions });
+      const next = await invoke<SkillImportResultDto>(cmd, {
+        ...args,
+        resolutions,
+      });
       setLastRequest({ cmd, args });
+      // 冲突「另存为」成功的技能计入 next.added，必须并入首轮新增
       const combined = result
         ? {
-            added: result.added,
+            added: [...new Set([...result.added, ...next.added])],
             updated: [...new Set([...result.updated, ...next.updated])],
-            skipped: next.skipped.filter((name) => !result.added.includes(name)),
+            skipped: next.skipped.filter(
+              (name) => !result.added.includes(name),
+            ),
             conflicts: next.conflicts,
           }
         : next;
@@ -190,7 +210,9 @@ function ImportModal({
         </div>
         {tab === "dir" && (
           <div className="mb-4">
-            <p className="mb-3 text-xs text-l3">选择包含技能（SKILL.md）的目录。</p>
+            <p className="mb-3 text-xs text-l3">
+              选择包含技能（SKILL.md）的目录。
+            </p>
             <button
               onClick={pickDir}
               disabled={busy}
@@ -245,7 +267,9 @@ function ImportModal({
                 />
               </label>
               <label className="block flex-1 text-sm">
-                <span className="mb-1 block text-xs text-l3">子目录（可选）</span>
+                <span className="mb-1 block text-xs text-l3">
+                  子目录（可选）
+                </span>
                 <input
                   className={field}
                   placeholder="skills/pdf"
@@ -272,23 +296,42 @@ function ImportModal({
             </div>
           </div>
         )}
-        {busy && tab !== "github" && <p className="mb-2 text-xs text-l3">导入中…</p>}
+        {busy && tab !== "github" && (
+          <p className="mb-2 text-xs text-l3">导入中…</p>
+        )}
         {result && (
           <div className="mb-3 rounded border border-field bg-inset p-3 text-xs">
             <p className="text-l2">{summary(result)}</p>
             {result.added.length > 0 && (
-              <p className="mt-1 break-words text-ok-text">新增：{result.added.join("、")}</p>
+              <p className="mt-1 break-words text-ok-text">
+                新增：{result.added.join("、")}
+              </p>
             )}
             {result.updated.length > 0 && (
-              <p className="mt-1 break-words text-ok-text">已覆盖：{result.updated.join("、")}</p>
+              <p className="mt-1 break-words text-ok-text">
+                已覆盖：{result.updated.join("、")}
+              </p>
+            )}
+            {result.skipped.length > 0 && (
+              <p className="mt-1 break-words text-l3">
+                已跳过：{result.skipped.join("、")}
+              </p>
             )}
             {result.conflicts.length > 0 && (
               <div className="mt-2 space-y-2 border-t border-hairline pt-2">
                 {result.conflicts.map((conflict) => (
-                  <div key={conflict.name} className="grid grid-cols-[1fr_150px] items-center gap-2">
-                    <span className="min-w-0 truncate text-warn-text" title={conflict.name}>
+                  <div
+                    key={conflict.name}
+                    className="grid grid-cols-[1fr_150px] items-center gap-2"
+                  >
+                    <span
+                      className="min-w-0 truncate text-warn-text"
+                      title={conflict.name}
+                    >
                       {conflict.name}
-                      {conflict.updateAvailable ? " · GitHub 更新" : " · 同名冲突"}
+                      {conflict.updateAvailable
+                        ? " · GitHub 更新"
+                        : " · 同名冲突"}
                     </span>
                     <input
                       value={renameTargets[conflict.name] ?? ""}
@@ -303,7 +346,9 @@ function ImportModal({
                     />
                   </div>
                 ))}
-                <p className="text-l4">覆盖会先备份旧库目录；另存为使用右侧名称。</p>
+                <p className="text-l4">
+                  覆盖会先备份旧库目录；另存为使用右侧名称。
+                </p>
                 <div className="flex justify-end gap-2">
                   <button
                     type="button"
@@ -316,7 +361,12 @@ function ImportModal({
                   <button
                     type="button"
                     onClick={() => void resolveConflicts("rename")}
-                    disabled={busy || result.conflicts.some((item) => !renameTargets[item.name]?.trim())}
+                    disabled={
+                      busy ||
+                      result.conflicts.some(
+                        (item) => !renameTargets[item.name]?.trim(),
+                      )
+                    }
                     className="rounded bg-btn px-2 py-1 text-l1 hover:bg-white/10 disabled:opacity-50"
                   >
                     全部另存为
@@ -357,7 +407,9 @@ function DiscoverModal({
   onClose: () => void;
   onDone: (msg: string) => void;
 }) {
-  const [checked, setChecked] = useState<Set<string>>(new Set(items.map((i) => i.path)));
+  const [checked, setChecked] = useState<Set<string>>(
+    new Set(items.map((i) => i.path)),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -388,7 +440,9 @@ function DiscoverModal({
       >
         <h2 className="mb-3 text-base font-semibold text-l1">发现未纳管技能</h2>
         {items.length === 0 ? (
-          <p className="mb-4 text-sm text-l4">各 agent 目录里没有发现未纳管的技能</p>
+          <p className="mb-4 text-sm text-l4">
+            各 agent 目录里没有发现未纳管的技能
+          </p>
         ) : (
           <div className="mb-4 max-h-64 overflow-auto">
             {items.map((it) => (
@@ -405,15 +459,20 @@ function DiscoverModal({
                 }}
                 align="start"
                 className="border-b border-hairline py-2 text-sm"
-                label={<span className="min-w-0">
-                  <span className="mr-2 text-l1">{it.name}</span>
-                  <span className="rounded bg-inset px-1 text-xs text-l3">
-                    {it.fromAgent}
+                label={
+                  <span className="min-w-0">
+                    <span className="mr-2 text-l1">{it.name}</span>
+                    <span className="rounded bg-inset px-1 text-xs text-l3">
+                      {it.fromAgent}
+                    </span>
+                    <span
+                      className="block truncate text-xs text-l3"
+                      title={it.description}
+                    >
+                      {it.description}
+                    </span>
                   </span>
-                  <span className="block truncate text-xs text-l3" title={it.description}>
-                    {it.description}
-                  </span>
-                </span>}
+                }
               />
             ))}
           </div>
@@ -443,6 +502,7 @@ function DiscoverModal({
 
 export default function SkillsPage({ visible }: { visible: boolean }) {
   const [skills, setSkills] = useState<SkillDto[]>([]);
+  const [loading, setLoading] = useState(true);
   const [catCollapsed, setCatCollapsed] = useState<Set<string>>(new Set());
   function toggleCat(cat: string) {
     setCatCollapsed((prev) => {
@@ -455,23 +515,43 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [modal, setModal] = useState<
-    | { kind: "import"; github?: { repo: string; branch: string; subdir: string } }
+    | {
+        kind: "import";
+        github?: { repo: string; branch: string; subdir: string };
+      }
     | { kind: "discover" }
     | null
   >(null);
   const [discovered, setDiscovered] = useState<DiscoveredSkillDto[]>([]);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
-  const [preview, setPreview] = useState<{ id: string; name: string; content: string } | null>(null);
-  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; skill: SkillDto } | null>(null);
+  const [preview, setPreview] = useState<{
+    skill: SkillDto;
+    content: string;
+  } | null>(null);
+  const [rowMenu, setRowMenu] = useState<{
+    x: number;
+    y: number;
+    skill: SkillDto;
+  } | null>(null);
+  const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
   const [updates, setUpdates] = useState<Record<string, SkillUpdateDto>>({});
   const [checkingUpdates, setCheckingUpdates] = useState(false);
 
   async function refresh() {
     try {
-      setSkills(await invoke<SkillDto[]>("list_skills"));
+      const list = await invoke<SkillDto[]>("list_skills");
+      setSkills(list);
+      // 预览面板跟随最新数据（resync/分类等变化），技能消失时关闭预览
+      setPreview((prev) => {
+        if (!prev) return prev;
+        const fresh = list.find((item) => item.id === prev.skill.id);
+        return fresh ? { ...prev, skill: fresh } : null;
+      });
       setError(null);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -485,12 +565,20 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     if (applying[key]) return;
     setApplying((prev) => ({ ...prev, [key]: true }));
     try {
-      await invoke("apply_skill", { id: skill.id, agent, enabled: !skill.apps[agent] });
+      await invoke("apply_skill", {
+        id: skill.id,
+        agent,
+        enabled: !skill.apps[agent],
+      });
       setSkills((prev) =>
         prev.map((s) =>
-          s.id === skill.id ? { ...s, apps: { ...s.apps, [agent]: !s.apps[agent] } } : s,
+          s.id === skill.id
+            ? { ...s, apps: { ...s.apps, [agent]: !s.apps[agent] } }
+            : s,
         ),
       );
+      // 乐观更新后拉取最新 appModes/staleCopies
+      await refresh();
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -499,21 +587,31 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  const [catEdit, setCatEdit] = useState<{ id: string; value: string } | null>(null);
+  const [catEdit, setCatEdit] = useState<{ id: string; value: string } | null>(
+    null,
+  );
+  // Enter 提交未完成时 input 失焦会触发第二次提交，用 guard 挡住
+  const catSubmitting = useRef(false);
 
   async function submitCategory(id: string, value: string) {
-    await invoke("set_skill_category", {
-      id,
-      category: value.trim() || null,
-    }).catch((e) => setError(String(e)));
-    setCatEdit(null);
-    await refresh();
+    if (catSubmitting.current) return;
+    catSubmitting.current = true;
+    try {
+      await invoke("set_skill_category", {
+        id,
+        category: value.trim() || null,
+      }).catch((e) => setError(String(e)));
+      setCatEdit(null);
+      await refresh();
+    } finally {
+      catSubmitting.current = false;
+    }
   }
 
   async function onView(skill: SkillDto) {
     try {
       const content = await invoke<string>("read_skill_md", { id: skill.id });
-      setPreview({ id: skill.id, name: skill.name, content });
+      setPreview({ skill, content });
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -523,8 +621,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   /** 副本过期：把库里的最新版本重新分发到漂移的 agent 副本 */
   async function onResync(skill: SkillDto) {
     try {
-      const agents = await invoke<string[]>("resync_skill_copies", { id: skill.id });
-      setNotice(`已同步: ${agents.join(", ")}`);
+      const agents = await invoke<string[]>("resync_skill_copies", {
+        id: skill.id,
+      });
+      setNotice(agents.length ? `已同步：${agents.join("、")}` : "副本已同步");
       setError(null);
       await refresh();
     } catch (e) {
@@ -541,7 +641,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
       return;
     try {
       await invoke("delete_skill", { id: skill.id });
-      if (preview?.id === skill.id) setPreview(null);
+      if (preview?.skill.id === skill.id) setPreview(null);
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -576,20 +676,25 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
 
   async function onCheckUpdates() {
     setCheckingUpdates(true);
+    setNotice("正在检查 GitHub 更新…");
     try {
       const items = await invoke<SkillUpdateDto[]>("check_skill_updates");
       setUpdates(Object.fromEntries(items.map((item) => [item.id, item])));
-      setNotice(items.length ? "GitHub 技能更新检查完成" : "没有可检查的 GitHub 技能");
+      setNotice(
+        items.length ? "GitHub 技能更新检查完成" : "没有可检查的 GitHub 技能",
+      );
       setError(null);
     } catch (reason) {
+      setNotice(null);
       setError(String(reason));
     } finally {
       setCheckingUpdates(false);
     }
   }
 
-  const appliedCount = skills.filter((s) => Object.values(s.apps).some(Boolean)).length;
-  const ghostBtn = "rounded px-2 py-1 text-sm text-l2 hover:bg-white/5";
+  const appliedCount = skills.filter((s) =>
+    Object.values(s.apps).some(Boolean),
+  ).length;
 
   return (
     <div className="flex h-full">
@@ -600,35 +705,37 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             meta={`${skills.length} 个技能 · ${appliedCount} 个已应用`}
             actions={
               <>
-              <button onClick={() => setModal({ kind: "import" })} className={primaryActionClass}>
-                + 导入
-              </button>
-              <button
-                onClick={() => onExport(skills.map((s) => s.id), "ccode-skills.zip")}
-                disabled={skills.length === 0}
-                className={`${ghostBtn} disabled:opacity-50`}
-              >
-                导出
-              </button>
-              <button onClick={onDiscover} className={ghostBtn}>
-                发现未纳管
-              </button>
-              <button
-                onClick={() => void onCheckUpdates()}
-                disabled={checkingUpdates}
-                className={`${ghostBtn} disabled:opacity-50`}
-              >
-                {checkingUpdates ? "检查中…" : "检查 GitHub 更新"}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setModal({ kind: "import" })}
+                  className={primaryActionClass}
+                >
+                  + 导入
+                </button>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setTopMenu({ x: rect.right - 176, y: rect.bottom + 4 });
+                  }}
+                  title="更多技能操作"
+                  aria-label="更多技能操作"
+                  className="flex h-8 w-8 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+                >
+                  ⋯
+                </button>
               </>
             }
           />
           {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
           {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
-          {skills.length === 0 ? (
+          {loading ? (
+            <LoadingRows />
+          ) : skills.length === 0 ? (
             <div className="py-12 text-center">
               <p className="text-sm text-l2">还没有技能</p>
               <button
+                type="button"
                 onClick={() => setModal({ kind: "import" })}
                 className="mt-3 text-sm text-cta hover:brightness-125"
               >
@@ -636,144 +743,182 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               </button>
             </div>
           ) : (
-            [...new Set(skills.map((s) => s.category ?? "未分类"))].map((cat) => (
-              <div key={cat}>
-                <button
-                  onClick={() => toggleCat(cat)}
-                  aria-label={catCollapsed.has(cat) ? "展开" : "收起"}
-                  className="mt-4 mb-1 flex items-center gap-1.5 px-1 text-xs font-medium text-l3 hover:text-l1"
-                >
-                  {/* 点击区 ≥28px（h-7 w-7），同 ProfilesPage 折叠按钮 */}
-                  <span className="inline-flex h-7 w-7 items-center justify-center rounded text-l4 hover:bg-white/5">
-                    {catCollapsed.has(cat) ? "▸" : "▾"}
-                  </span>
-                  {cat}
-                  <span className="text-l4">
-                    {skills.filter((s) => (s.category ?? "未分类") === cat).length}
-                  </span>
-                </button>
-                <ul className={`divide-y divide-hairline ${catCollapsed.has(cat) ? "hidden" : ""}`}>
-                  {skills
-                    .filter((s) => (s.category ?? "未分类") === cat)
-                    .map((s) => (
-                <li key={s.id} className="py-2.5 text-sm">
-                  <div className="flex items-center gap-3">
-                    <span className="shrink-0 font-medium text-l1">{s.name}</span>
+            <div className="mt-4 overflow-x-auto">
+              <div className="min-w-[620px]">
+                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_repeat(6,42px)_84px] items-center gap-1 border-b border-hairline bg-canvas py-2 text-xs text-l4">
+                  <span className="px-1">技能</span>
+                  {AGENTS.map((agent) => (
                     <span
-                      className="min-w-0 truncate text-xs text-l2"
-                      title={s.description}
+                      key={agent.id}
+                      className="text-center"
+                      title={agent.label}
                     >
-                      {s.description}
+                      {AGENT_SHORT[agent.id] ?? agent.id}
                     </span>
-                    <span
-                      className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-xs text-l3"
-                      title={s.repo ?? s.source}
-                    >
-                      {SOURCE_LABEL[s.source] ?? s.source}
-                      {s.repo ? ` · ${s.repo}` : ""}
-                    </span>
-                    {(s.staleCopies ?? []).length > 0 && (
-                      <>
-                        <span
-                          className="shrink-0 rounded bg-warn px-1.5 py-0.5 text-xs text-warn-text"
-                          title={`以下 agent 的副本内容已过期：${(s.staleCopies ?? []).join(", ")}`}
-                        >
-                          副本过期
-                        </span>
-                        <button
-                          onClick={() => onResync(s)}
-                          title="把库里的最新版本重新分发到这些 agent"
-                          className="shrink-0 rounded px-2 py-0.5 text-xs text-l2 hover:text-l1"
-                        >
-                          重新分发
-                        </button>
-                      </>
-                    )}
-                    {updates[s.id] && (
-                      <span
-                        className={`shrink-0 rounded bg-inset px-1.5 py-0.5 text-xs ${
-                          updates[s.id].updateAvailable ? "text-warn-text" : "text-l3"
-                        }`}
-                        title={updates[s.id].message}
-                      >
-                        {updates[s.id].updateAvailable ? "GitHub 可更新" : "GitHub 已最新"}
-                      </span>
-                    )}
-                    <span className="ml-auto flex shrink-0 items-center gap-1">
-                      {catEdit?.id === s.id ? (
-                        <input
-                          autoFocus
-                          value={catEdit.value}
-                          onChange={(e) => setCatEdit({ id: s.id, value: e.target.value })}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") void submitCategory(s.id, catEdit.value);
-                            if (e.key === "Escape") setCatEdit(null);
-                          }}
-                          onBlur={() => void submitCategory(s.id, catEdit.value)}
-                          placeholder="分类名（留空=未分类）"
-                          className="w-28 rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
-                        />
-                      ) : (
-                        <button
-                          onClick={() => setCatEdit({ id: s.id, value: s.category ?? "" })}
-                          title="设置该技能的分类"
-                          className="rounded px-2 py-0.5 text-xs text-l3 hover:text-l1"
-                        >
-                          分类: {s.category ?? "未分类"}
-                        </button>
-                      )}
-                      <button onClick={() => onView(s)} className="rounded px-2 py-0.5 text-xs text-l2 hover:text-l1">
-                        查看
-                      </button>
+                  ))}
+                  <span />
+                </div>
+                {[
+                  ...new Set(skills.map((skill) => skill.category ?? "未分类")),
+                ].map((category) => {
+                  const categorySkills = skills.filter(
+                    (skill) => (skill.category ?? "未分类") === category,
+                  );
+                  return (
+                    <section key={category}>
                       <button
-                        onClick={(e) => {
-                          const r = e.currentTarget.getBoundingClientRect();
-                          setRowMenu({ x: r.right, y: r.bottom + 4, skill: s });
-                        }}
-                        aria-label={`${s.name} 更多操作`}
-                        className="flex h-7 w-7 items-center justify-center rounded text-l3 hover:bg-white/5 hover:text-l1"
+                        type="button"
+                        onClick={() => toggleCat(category)}
+                        aria-label={
+                          catCollapsed.has(category) ? "展开" : "收起"
+                        }
+                        className="mt-3 flex h-8 items-center gap-1.5 px-1 text-xs font-medium text-l3 hover:text-l1"
                       >
-                        ⋯
+                        <span className="inline-flex h-7 w-7 items-center justify-center rounded text-l4 hover:bg-white/5">
+                          {catCollapsed.has(category) ? "▸" : "▾"}
+                        </span>
+                        {category}
+                        <span className="text-l4">{categorySkills.length}</span>
                       </button>
-                    </span>
-                  </div>
-                  {/* 六 agent 应用开关 */}
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {AGENTS.map((a) => {
-                      const on = !!s.apps[a.id];
-                      const key = `${s.id}:${a.id}`;
-                      const mode = on ? (s.appModes ?? {})[a.id] : undefined;
-                      return (
-                        <button
-                          key={a.id}
-                          onClick={() => toggleApp(s, a.id)}
-                          disabled={applying[key]}
-                          title={
-                            on
-                              ? `已分发到 ${a.label}：${mode === "copy" ? "copy（有漂移检测）" : "symlink"}；点击取消`
-                              : `应用到 ${a.label}`
-                          }
-                          className={`min-w-12 rounded px-1.5 py-0.5 text-[11px] disabled:opacity-50 ${
-                            on
-                              ? "bg-ok text-ok-text"
-                              : "bg-inset text-l3 hover:text-l1"
-                          }`}
-                        >
-                          {applying[key] ? "…" : AGENT_SHORT[a.id] ?? a.id}
-                          {on && mode && (
-                            <span className="ml-0.5 opacity-70">
-                              {mode === "copy" ? "·c" : "·s"}
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                    </li>
-                    ))}
-                </ul>
+                      {!catCollapsed.has(category) && (
+                        <ul className="divide-y divide-hairline">
+                          {categorySkills.map((skill) => {
+                            const stale = (skill.staleCopies ?? []).length > 0;
+                            const update = updates[skill.id];
+                            return (
+                              <li
+                                key={skill.id}
+                                className="grid min-h-14 grid-cols-[minmax(220px,1fr)_repeat(6,42px)_84px] items-center gap-1"
+                              >
+                                <div className="min-w-0 px-1">
+                                  <div className="flex min-w-0 items-center gap-1.5">
+                                    <span className="min-w-0 truncate text-sm font-medium text-l1">
+                                      {skill.name}
+                                    </span>
+                                    {stale && (
+                                      <span
+                                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb"
+                                        title={`副本过期：${(skill.staleCopies ?? []).join("、")}`}
+                                      />
+                                    )}
+                                    {update?.updateAvailable && (
+                                      <span
+                                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb"
+                                        title={update.message}
+                                      />
+                                    )}
+                                  </div>
+                                  {catEdit?.id === skill.id ? (
+                                    <input
+                                      autoFocus
+                                      value={catEdit.value}
+                                      onChange={(event) =>
+                                        setCatEdit({
+                                          id: skill.id,
+                                          value: event.target.value,
+                                        })
+                                      }
+                                      onKeyDown={(event) => {
+                                        if (event.key === "Enter")
+                                          void submitCategory(
+                                            skill.id,
+                                            catEdit.value,
+                                          );
+                                        if (event.key === "Escape")
+                                          setCatEdit(null);
+                                      }}
+                                      onBlur={() =>
+                                        void submitCategory(
+                                          skill.id,
+                                          catEdit.value,
+                                        )
+                                      }
+                                      placeholder="分类名（留空=未分类）"
+                                      className="mt-1 w-full rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
+                                    />
+                                  ) : (
+                                    <p
+                                      className="truncate text-xs text-l3"
+                                      title={skill.description}
+                                    >
+                                      {skill.description}
+                                    </p>
+                                  )}
+                                </div>
+                                {AGENTS.map((agent) => {
+                                  const enabled = !!skill.apps[agent.id];
+                                  const key = `${skill.id}:${agent.id}`;
+                                  const mode = enabled
+                                    ? (skill.appModes ?? {})[agent.id]
+                                    : undefined;
+                                  return (
+                                    <button
+                                      key={agent.id}
+                                      type="button"
+                                      onClick={() =>
+                                        void toggleApp(skill, agent.id)
+                                      }
+                                      disabled={applying[key]}
+                                      title={
+                                        enabled
+                                          ? `已分发到 ${agent.label}：${
+                                              mode === "copy"
+                                                ? "copy（有漂移检测）"
+                                                : "symlink"
+                                            }；点击取消`
+                                          : `应用到 ${agent.label}`
+                                      }
+                                      className="flex h-8 w-8 items-center justify-center rounded hover:bg-white/5 disabled:opacity-50"
+                                    >
+                                      {applying[key] ? (
+                                        <span className="text-xs text-l3">
+                                          …
+                                        </span>
+                                      ) : (
+                                        <span
+                                          className={`h-2 w-2 rounded-full ${
+                                            enabled ? "bg-okb" : "bg-l4"
+                                          }`}
+                                        />
+                                      )}
+                                    </button>
+                                  );
+                                })}
+                                <div className="flex items-center justify-end gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => void onView(skill)}
+                                    className="rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                                  >
+                                    查看
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      const rect =
+                                        event.currentTarget.getBoundingClientRect();
+                                      setRowMenu({
+                                        x: rect.right - 176,
+                                        y: rect.bottom + 4,
+                                        skill,
+                                      });
+                                    }}
+                                    aria-label={`${skill.name} 更多操作`}
+                                    className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+                                  >
+                                    ⋯
+                                  </button>
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </section>
+                  );
+                })}
               </div>
-            ))
+            </div>
           )}
         </PageFrame>
       </div>
@@ -782,7 +927,9 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
       {preview && (
         <div className="flex w-[420px] shrink-0 flex-col border-l border-hairline bg-canvas">
           <div className="flex shrink-0 items-center gap-2 bg-strip px-3 py-2">
-            <span className="truncate text-sm font-medium text-l1">{preview.name}</span>
+            <span className="truncate text-sm font-medium text-l1">
+              {preview.skill.name}
+            </span>
             <span className="text-xs text-l3">SKILL.md</span>
             <button
               onClick={() => setPreview(null)}
@@ -792,6 +939,35 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             >
               ×
             </button>
+          </div>
+          <div className="shrink-0 border-b border-hairline px-3 py-2 text-xs text-l3">
+            <span>
+              {SOURCE_LABEL[preview.skill.source] ?? preview.skill.source}
+            </span>
+            {preview.skill.repo && (
+              <span
+                className="ml-2 font-mono text-l2"
+                title={preview.skill.repo}
+              >
+                {preview.skill.repo}
+              </span>
+            )}
+            {(preview.skill.staleCopies ?? []).length > 0 && (
+              <span
+                className="ml-2 text-warn-text"
+                title={`副本过期：${(preview.skill.staleCopies ?? []).join("、")}`}
+              >
+                副本需同步
+              </span>
+            )}
+            {updates[preview.skill.id]?.updateAvailable && (
+              <span
+                className="ml-2 text-warn-text"
+                title={updates[preview.skill.id].message}
+              >
+                GitHub 可更新
+              </span>
+            )}
           </div>
           <div className="min-h-0 flex-1 overflow-auto p-3">
             <pre className="whitespace-pre-wrap break-all font-mono text-xs text-l2">
@@ -821,15 +997,63 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           }}
         />
       )}
+      {topMenu && (
+        <ContextMenu
+          x={topMenu.x}
+          y={topMenu.y}
+          onClose={() => setTopMenu(null)}
+          items={[
+            ...(skills.length
+              ? [
+                  {
+                    label: "导出全部 ZIP",
+                    onSelect: () =>
+                      void onExport(
+                        skills.map((skill) => skill.id),
+                        "ccode-skills.zip",
+                      ),
+                  },
+                ]
+              : []),
+            { label: "发现未纳管技能", onSelect: () => void onDiscover() },
+            {
+              label: checkingUpdates
+                ? "正在检查 GitHub 更新…"
+                : "检查 GitHub 更新",
+              onSelect: () => {
+                if (!checkingUpdates) void onCheckUpdates();
+              },
+            },
+          ]}
+        />
+      )}
       {rowMenu && (
         <ContextMenu
           x={rowMenu.x}
           y={rowMenu.y}
           onClose={() => setRowMenu(null)}
           items={[
+            { label: "查看详情", onSelect: () => void onView(rowMenu.skill) },
+            {
+              label: "设置分类",
+              onSelect: () =>
+                setCatEdit({
+                  id: rowMenu.skill.id,
+                  value: rowMenu.skill.category ?? "",
+                }),
+            },
+            ...((rowMenu.skill.staleCopies ?? []).length > 0
+              ? [
+                  {
+                    label: "重新分发副本",
+                    onSelect: () => void onResync(rowMenu.skill),
+                  },
+                ]
+              : []),
             {
               label: "导出 ZIP",
-              onSelect: () => void onExport([rowMenu.skill.id], `${rowMenu.skill.name}.zip`),
+              onSelect: () =>
+                void onExport([rowMenu.skill.id], `${rowMenu.skill.name}.zip`),
             },
             ...(rowMenu.skill.repo
               ? [

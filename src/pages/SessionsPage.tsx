@@ -4,7 +4,7 @@ import { sessionRuntimeKey, useAppStore } from "../store";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
-import { Checkbox, LoadingRows } from "../components/PageFrame";
+import { Checkbox, LoadingRows, Toggle } from "../components/PageFrame";
 import type {
   ChatMessageDto,
   ConversationPageDto,
@@ -78,10 +78,12 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [confirmBatch, setConfirmBatch] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [selected, setSelected] = useState<SessionMetaDto | null>(null);
-  // 「复制恢复命令」按钮的已复制反馈（存 sessionId，1.5s 后复位）
+  // 「复制恢复命令」按钮的已复制反馈以 agent+sessionId 区分，避免跨 CLI 同 id 误显示。
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
-  const [conversationCursor, setConversationCursor] = useState<number | null>(null);
+  const [conversationCursor, setConversationCursor] = useState<number | null>(
+    null,
+  );
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingConv, setLoadingConv] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,7 +97,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   // 右键菜单：会话行或树里的项目节点
   const [menu, setMenu] = useState<
     | { x: number; y: number; kind: "session"; session: SessionMetaDto }
-    | { x: number; y: number; kind: "project"; agent: string; path: string; count: number }
+    | {
+        x: number;
+        y: number;
+        kind: "project";
+        agent: string;
+        path: string;
+        // count 与列表所见口径一致；extra 为口径外但后端会一并删除的数量（归档/内部）
+        count: number;
+        extra: number;
+      }
     | null
   >(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -116,7 +127,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const searched = useMemo(() => {
     if (!q) return sessions;
     return sessions.filter((s) =>
-      [s.projectPath, s.title ?? "", s.customTitle ?? "", s.workspace ?? "", s.summary ?? "", ...s.tags]
+      [
+        s.projectPath,
+        s.title ?? "",
+        s.customTitle ?? "",
+        s.workspace ?? "",
+        s.summary ?? "",
+        ...s.tags,
+      ]
         .join("\n")
         .toLowerCase()
         .includes(q),
@@ -143,8 +161,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         cwd: s.projectPath,
       });
       await navigator.clipboard.writeText(cmd);
-      setCopiedId(s.sessionId);
-      setTimeout(() => setCopiedId(null), 1500);
+      setCopiedId(sessionRuntimeKey(s.agent, s.sessionId));
+      window.setTimeout(() => setCopiedId(null), 1500);
     } catch (e) {
       window.alert(`复制失败：${e}`);
     }
@@ -203,7 +221,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         const projects = [...byProject.entries()]
           .map(([path, pl]) => ({ path, list: pl }))
           .sort((a, b) =>
-            (b.list[0]?.updatedAt ?? "").localeCompare(a.list[0]?.updatedAt ?? ""),
+            (b.list[0]?.updatedAt ?? "").localeCompare(
+              a.list[0]?.updatedAt ?? "",
+            ),
           );
         return { agent, list, projects };
       })
@@ -216,7 +236,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   const sessionList = useMemo(() => {
     let src = filter.kind === "internal" ? internalVisible : regularVisible;
-    if (filter.kind === "agent") src = src.filter((s) => s.agent === filter.agent);
+    if (filter.kind === "agent")
+      src = src.filter((s) => s.agent === filter.agent);
     else if (filter.kind === "project")
       src = src.filter(
         (s) => s.agent === filter.agent && s.projectPath === filter.path,
@@ -230,16 +251,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setFilter(f);
     setSelected(null);
   }
-
-  /** 当前筛选的可读描述，显示在列表头部，便于确认右栏与所选节点一致 */
-  const filterLabel =
-    filter.kind === "internal"
-      ? "Ccode 内部 AI"
-      : filter.kind === "agent"
-      ? agentLabel(filter.agent)
-      : filter.kind === "project"
-        ? `${agentLabel(filter.agent)} · ${basename(filter.path)}`
-        : "全部会话";
 
   const [summary, setSummary] = useState<string | null>(null);
   const [aiSummarizing, setAiSummarizing] = useState(false);
@@ -304,6 +315,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         setOpenSessionReq(null);
         if (hit) {
           setFilter(hit.internal ? { kind: "internal" } : { kind: "all" });
+          // 目标已归档时同步打开归档开关，保证跳转后在列表中可见
+          if (hit.archived) setShowArchived(true);
           void openSession(hit);
         } else {
           setError("未找到该对话，可能尚未写入完成或已被 CLI 清理");
@@ -331,11 +344,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setError(null);
     const request = ++conversationRequestRef.current;
     try {
-      const page = await invoke<ConversationPageDto>("get_session_conversation_page", {
-        agent: s.agent,
-        filePath: s.filePath,
-        before: null,
-      });
+      const page = await invoke<ConversationPageDto>(
+        "get_session_conversation_page",
+        {
+          agent: s.agent,
+          filePath: s.filePath,
+          before: null,
+        },
+      );
       if (request !== conversationRequestRef.current) return;
       setMessages(page.messages);
       setConversationCursor(page.cursor);
@@ -358,11 +374,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       const scroller = scrollRef.current;
       const previousHeight = scroller?.scrollHeight ?? 0;
       const previousTop = scroller?.scrollTop ?? 0;
-      const page = await invoke<ConversationPageDto>("get_session_conversation_page", {
-        agent: selected.agent,
-        filePath: selected.filePath,
-        before: conversationCursor,
-      });
+      const page = await invoke<ConversationPageDto>(
+        "get_session_conversation_page",
+        {
+          agent: selected.agent,
+          filePath: selected.filePath,
+          before: conversationCursor,
+        },
+      );
       const currentSelected = selectedRef.current;
       if (
         !currentSelected ||
@@ -373,7 +392,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       setConversationCursor(page.cursor);
       requestAnimationFrame(() => {
         const current = scrollRef.current;
-        if (current) current.scrollTop = previousTop + current.scrollHeight - previousHeight;
+        if (current)
+          current.scrollTop =
+            previousTop + current.scrollHeight - previousHeight;
       });
       setError(null);
     } catch (e) {
@@ -399,11 +420,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         );
         if (updated && updated.updatedAt !== cur.updatedAt) {
           setSelected(updated);
-          const page = await invoke<ConversationPageDto>("get_session_conversation_page", {
-            agent: updated.agent,
-            filePath: updated.filePath,
-            before: null,
-          });
+          const page = await invoke<ConversationPageDto>(
+            "get_session_conversation_page",
+            {
+              agent: updated.agent,
+              filePath: updated.filePath,
+              before: null,
+            },
+          );
           const stillSelected = selectedRef.current;
           if (
             !stopped &&
@@ -468,8 +492,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       const cur = selectedRef.current;
       if (cur) {
         setSelected(
-          fresh.find((x) => x.agent === cur.agent && x.sessionId === cur.sessionId) ??
-            cur,
+          fresh.find(
+            (x) => x.agent === cur.agent && x.sessionId === cur.sessionId,
+          ) ?? cur,
         );
       }
     } catch (e) {
@@ -497,7 +522,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   async function deleteSession(s: SessionMetaDto) {
     setError(null);
     if (
-      !window.confirm("删除该会话的本地文件？保留的快照和整理数据会一并删除，不可恢复。")
+      !window.confirm(
+        "删除该对话的本地文件？保留的快照和整理数据会一并删除，不可恢复。",
+      )
     )
       return;
     try {
@@ -518,12 +545,21 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  /** 删除某 agent 下某项目的全部会话 */
-  async function deleteProjectSessions(agent: string, path: string, count: number) {
+  /** 删除某 agent 下某项目的全部会话（后端按 agent+path 全删，extra 提示口径外数量） */
+  async function deleteProjectSessions(
+    agent: string,
+    path: string,
+    count: number,
+    extra: number,
+  ) {
     setError(null);
     if (
       !window.confirm(
-        `将删除 ${agentLabel(agent)} 下 ${basename(path)} 的 ${count} 个会话文件，不可恢复。继续？`,
+        `将删除 ${agentLabel(agent)} 下 ${basename(path)} 的 ${count} 个对话文件，不可恢复。${
+          extra > 0
+            ? `该项目另有 ${extra} 个已归档/内部对话不在当前列表中，也会被一并删除。`
+            : ""
+        }继续？`,
       )
     )
       return;
@@ -642,18 +678,46 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   const input =
     "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
-  const menuItem = "block w-full px-3 py-1.5 text-left text-l2 hover:bg-white/5";
+  const menuItem =
+    "block w-full px-3 py-1.5 text-left text-l2 hover:bg-white/5";
   // 回放头部「恢复 ▾」下拉（外部恢复/复制命令），坐标定位 + 全屏遮罩点击关闭
-  const [resumeMenu, setResumeMenu] = useState<{ x: number; y: number } | null>(null);
+  const [resumeMenu, setResumeMenu] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+
+  // 与右键菜单一致：Escape / 任意滚动关闭，避免滚动后浮层错位
+  useEffect(() => {
+    if (!resumeMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setResumeMenu(null);
+    };
+    const onScroll = () => setResumeMenu(null);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [resumeMenu]);
 
   const filterActive = (f: Filter) =>
     (filter.kind === "all" && f.kind === "all") ||
     (filter.kind === "internal" && f.kind === "internal") ||
-    (filter.kind === "agent" && f.kind === "agent" && filter.agent === f.agent) ||
+    (filter.kind === "agent" &&
+      f.kind === "agent" &&
+      filter.agent === f.agent) ||
     (filter.kind === "project" &&
       f.kind === "project" &&
       filter.agent === f.agent &&
       filter.path === f.path);
+  const filterChipLabel =
+    filter.kind === "internal"
+      ? "Ccode 内部 AI"
+      : filter.kind === "agent"
+        ? agentLabel(filter.agent)
+        : filter.kind === "project"
+          ? `${agentLabel(filter.agent)} · ${basename(filter.path)}`
+          : null;
 
   return (
     <div className="flex h-full">
@@ -662,7 +726,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         <div className="p-2">
           <input
             className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
-            placeholder="搜索项目 / 会话 / 标签"
+            placeholder="搜索项目 / 对话 / 标签"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -676,13 +740,17 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 : "text-l3 hover:bg-white/5"
             }`}
           >
-            全部会话
-            <span className={`ml-1 text-xs ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}>{regularVisible.length}</span>
+            全部对话
+            <span
+              className={`ml-1 text-xs ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}
+            >
+              {regularVisible.length}
+            </span>
           </button>
           {internalVisible.length > 0 && (
             <button
               onClick={() => selectFilter({ kind: "internal" })}
-              title="Ccode 自己调用 AI 生成提交信息、摘要等产生的内部会话"
+              title="Ccode 自己调用 AI 生成提交信息、摘要等产生的内部对话"
               className={`mx-1 mb-1 flex w-[calc(100%-8px)] items-center justify-between rounded-md px-3 py-1.5 text-left text-sm ${
                 filterActive({ kind: "internal" })
                   ? "bg-rail-sel text-l1"
@@ -690,7 +758,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               }`}
             >
               <span className="truncate">Ccode 内部 AI</span>
-              <span className={`shrink-0 text-xs ${filterActive({ kind: "internal" }) ? "text-l2" : "text-l4"}`}>
+              <span
+                className={`shrink-0 text-xs ${filterActive({ kind: "internal" }) ? "text-l2" : "text-l4"}`}
+              >
                 {internalVisible.length}
               </span>
             </button>
@@ -717,7 +787,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   {collapsed.has(g.agent) ? "▸" : "▾"}
                 </button>
                 <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
-                  <span className="truncate font-medium">{agentLabel(g.agent)}</span>
+                  <span className="truncate font-medium">
+                    {agentLabel(g.agent)}
+                  </span>
                   <span
                     className={`shrink-0 text-xs ${
                       filterActive({ kind: "agent", agent: g.agent })
@@ -740,21 +812,34 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     <button
                       key={p.path}
                       onClick={() =>
-                        selectFilter({ kind: "project", agent: g.agent, path: p.path })
+                        selectFilter({
+                          kind: "project",
+                          agent: g.agent,
+                          path: p.path,
+                        })
                       }
                       onContextMenu={(e) => {
                         e.preventDefault();
+                        // count 与列表所见口径一致（排除 internal、跟随归档开关）；
+                        // 后端按 agent+path 全删，口径外数量单独透出给确认文案
+                        const all = sessions.filter(
+                          (session) =>
+                            session.agent === g.agent &&
+                            session.projectPath === p.path,
+                        );
+                        const visible = all.filter(
+                          (session) =>
+                            !session.internal &&
+                            (showArchived || !session.archived),
+                        );
                         setMenu({
                           x: e.clientX,
                           y: e.clientY,
                           kind: "project",
                           agent: g.agent,
                           path: p.path,
-                          count: sessions.filter(
-                            (session) =>
-                              session.agent === g.agent &&
-                              session.projectPath === p.path,
-                          ).length,
+                          count: visible.length,
+                          extra: all.length - visible.length,
                         });
                       }}
                       title={p.path}
@@ -776,7 +861,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             </div>
           ))}
           {tree.length === 0 && internalVisible.length === 0 && (
-            <p className="p-3 text-sm text-l4">暂无会话</p>
+            <p className="p-3 text-sm text-l4">暂无对话</p>
           )}
         </div>
       </div>
@@ -784,9 +869,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       {/* 右栏：列表 / 回放 二选一（列表保持挂载以保留滚动与筛选） */}
       <div className="flex min-w-0 flex-1 flex-col bg-canvas">
         {/* 会话列表 */}
-        <div className={`flex min-h-0 flex-1 flex-col ${selected ? "hidden" : ""}`}>
+        <div
+          className={`flex min-h-0 flex-1 flex-col ${selected ? "hidden" : ""}`}
+        >
           {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
-          <div className="flex items-baseline justify-between bg-strip px-4 py-2">
+          <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 bg-strip px-4 py-2">
             {selecting ? (
               <>
                 <span className="text-xs text-l3">已选 {checkedInView} 项</span>
@@ -829,17 +916,42 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               </>
             ) : (
               <>
-                <span className="text-xs text-l3">
-                  {filterLabel} · 当前 {sessionList.length}
-                  {q ? ` · 搜索命中 ${archiveVisible.length}` : ""} · 总计 {filter.kind === "internal" ? internalVisible.length : regularVisible.length}
-                </span>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="shrink-0 text-xs text-l3">
+                    当前 {sessionList.length}
+                    {q ? ` · 搜索命中 ${searched.length}` : ""} · 总计{" "}
+                    {sessions.length}
+                  </span>
+                  {filterChipLabel && (
+                    <button
+                      type="button"
+                      onClick={() => selectFilter({ kind: "all" })}
+                      className="max-w-48 truncate rounded bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
+                      title="清除分类筛选"
+                    >
+                      {filterChipLabel} ×
+                    </button>
+                  )}
+                  {q && (
+                    <button
+                      type="button"
+                      onClick={() => setQuery("")}
+                      className="max-w-48 truncate rounded bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
+                      title="清除搜索"
+                    >
+                      搜索：{query.trim()} ×
+                    </button>
+                  )}
+                </div>
                 <div className="flex items-center gap-1">
-                  <Checkbox
-                    checked={showArchived}
-                    onChange={setShowArchived}
-                    label="显示已归档"
-                    className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5"
-                  />
+                  <label className="flex cursor-pointer items-center gap-1.5 text-xs text-l3">
+                    显示已归档
+                    <Toggle
+                      checked={showArchived}
+                      onChange={setShowArchived}
+                      label="显示已归档"
+                    />
+                  </label>
                   <button
                     onClick={() => setSelecting(true)}
                     className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
@@ -857,21 +969,25 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               if (isEditing && editing) {
                 return (
                   <div
-                    key={s.sessionId}
+                    key={skey(s)}
                     className="space-y-2 border-b border-hairline bg-inset p-4"
                   >
                     <input
                       className={input}
                       placeholder="自定义标题（留空则用原标题）"
                       value={editing.title}
-                      onChange={(e) => setEditing({ ...editing, title: e.target.value })}
+                      onChange={(e) =>
+                        setEditing({ ...editing, title: e.target.value })
+                      }
                       autoFocus
                     />
                     <input
                       className={input}
                       placeholder="标签，逗号分隔"
                       value={editing.tags}
-                      onChange={(e) => setEditing({ ...editing, tags: e.target.value })}
+                      onChange={(e) =>
+                        setEditing({ ...editing, tags: e.target.value })
+                      }
                     />
                     <div className="flex justify-end gap-2 text-sm">
                       <button
@@ -880,7 +996,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       >
                         取消
                       </button>
-                      <button onClick={saveEdit} className="text-l1 hover:underline">
+                      <button
+                        onClick={saveEdit}
+                        className="text-l1 hover:underline"
+                      >
                         保存
                       </button>
                     </div>
@@ -888,159 +1007,163 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 );
               }
               const clickable = s.alive || s.pinned;
+              const isLive =
+                s.live ||
+                !!liveSessions[sessionRuntimeKey(s.agent, s.sessionId)];
               return (
                 <div
-                  key={s.sessionId}
-                  onClick={() => (selecting ? toggleChecked(s) : openSession(s))}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    if (selecting) return;
-                    setMenu({ x: e.clientX, y: e.clientY, kind: "session", session: s });
+                  key={skey(s)}
+                  onClick={() => {
+                    if (selecting) toggleChecked(s);
+                    else if (clickable) void openSession(s);
                   }}
-                  className={`group border-b border-hairline px-4 py-2.5 text-sm ${
-                    selecting || clickable ? "cursor-pointer hover:bg-white/5" : "opacity-60"
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    if (selecting) return;
+                    setMenu({
+                      x: event.clientX,
+                      y: event.clientY,
+                      kind: "session",
+                      session: s,
+                    });
+                  }}
+                  className={`border-b border-hairline px-4 py-2.5 text-sm ${
+                    selecting || clickable
+                      ? "cursor-pointer hover:bg-white/5"
+                      : "opacity-60"
                   }`}
                 >
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex min-w-0 items-center gap-1.5">
                     {selecting && (
-                      <span onClick={(e) => e.stopPropagation()} className="mr-1 shrink-0">
+                      <span
+                        onClick={(event) => event.stopPropagation()}
+                        className="mr-1 shrink-0"
+                      >
                         <Checkbox
                           checked={checked.has(skey(s))}
                           onChange={() => toggleChecked(s)}
-                          label={<span className="sr-only">选择 {sessionTitle(s)}</span>}
+                          label={
+                            <span className="sr-only">
+                              选择 {sessionTitle(s)}
+                            </span>
+                          }
                         />
                       </span>
                     )}
-                    {s.pinned && <span title="已保留">⚑</span>}
-                    <span className="truncate font-medium text-l1">{sessionTitle(s)}</span>
-                    {(s.live || liveSessions[sessionRuntimeKey(s.agent, s.sessionId)]) && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          jumpToLive(s);
-                        }}
-                        disabled={!liveSessions[sessionRuntimeKey(s.agent, s.sessionId)]}
-                        title={
-                          liveSessions[sessionRuntimeKey(s.agent, s.sessionId)]
-                            ? "该会话正在终端里进行，点击跳转到对应标签"
-                            : "该会话的 CLI 进程仍在运行（外部探测，无本地标签）"
-                        }
-                        className="flex shrink-0 items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l2 disabled:opacity-80"
-                      >
-                        <span className="size-1.5 rounded-full bg-ok-text" />
-                        进行中
-                      </button>
+                    {s.pinned && (
+                      <span className="shrink-0 text-l2" title="已保留">
+                        ⚑
+                      </span>
                     )}
+                    <span className="min-w-0 flex-1 truncate font-medium text-l1">
+                      {sessionTitle(s)}
+                    </span>
                     {s.chainCount > 1 && (
-                      <span className="shrink-0 rounded bg-inset px-1 text-xs text-l3">
+                      <span
+                        className="shrink-0 rounded bg-inset px-1 text-xs text-l3"
+                        title="Codex resume 链合并为一条"
+                      >
                         {s.chainCount} 次继续
                       </span>
                     )}
+                    {isLive && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          jumpToLive(s);
+                        }}
+                        disabled={
+                          !liveSessions[sessionRuntimeKey(s.agent, s.sessionId)]
+                        }
+                        title={
+                          liveSessions[sessionRuntimeKey(s.agent, s.sessionId)]
+                            ? "正在终端中进行，点击跳转"
+                            : "CLI 仍在外部终端中运行"
+                        }
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded disabled:cursor-default"
+                      >
+                        <span className="size-1.5 rounded-full bg-ok-text" />
+                      </button>
+                    )}
                     {!s.alive && (
-                      <span className="shrink-0 rounded bg-warn px-1 text-xs text-warn-text">
-                        已失效
+                      <span
+                        className="shrink-0 rounded bg-warn px-1 text-xs text-warn-text"
+                        title="源文件已失效"
+                      >
+                        失效
                       </span>
                     )}
+                    {!selecting && (
+                      <div className="ml-1 flex shrink-0 items-center gap-1">
+                        {clickable && (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              resumeInTerminal(s);
+                            }}
+                            className="rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                          >
+                            恢复
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setMenu({
+                              x: event.clientX - 160,
+                              y: event.clientY + 4,
+                              kind: "session",
+                              session: s,
+                            });
+                          }}
+                          title="更多操作"
+                          aria-label={`更多操作：${sessionTitle(s)}`}
+                          className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+                        >
+                          ⋯
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  <div className="mt-1 flex items-center gap-2 text-xs text-l3">
-                    <span>{relTime(s.updatedAt)}</span>
-                    <span>{agentLabel(s.agent)}</span>
+                  <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-l3">
+                    <span className="shrink-0">{relTime(s.updatedAt)}</span>
+                    <span className="shrink-0">{agentLabel(s.agent)}</span>
                     {s.workspace && (
                       <span
-                        className="rounded bg-inset px-1 text-l3"
-                        title={`工作区「${s.workspace}」的会话`}
+                        className="max-w-28 truncate rounded bg-inset px-1 text-l3"
+                        title={`任务工作区：${s.workspace}`}
                       >
                         ⎇ {s.workspace}
                       </span>
                     )}
-                    <span className="truncate">{basename(s.projectPath)}</span>
-                    {s.tokenUsage && <span>{fmtTokens(s.tokenUsage)}</span>}
-                    {s.tags.map((t) => (
+                    {s.tokenUsage && (
+                      <span className="shrink-0">
+                        {fmtTokens(s.tokenUsage)}
+                      </span>
+                    )}
+                    {s.tags.slice(0, 2).map((tag) => (
                       <span
-                        key={t}
-                        className="rounded bg-inset px-1 text-l3"
+                        key={tag}
+                        className="max-w-28 truncate rounded bg-inset px-1 text-l3"
                       >
-                        {t}
+                        {tag}
                       </span>
                     ))}
-                  </div>
-                  <div className={`mt-1 gap-3 text-xs ${selecting ? "hidden" : "hidden group-hover:flex"}`}>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void togglePin(s);
-                      }}
-                      className="text-l3 hover:text-l1"
-                    >
-                      {s.pinned ? "取消保留" : "保留"}
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void toggleArchive(s);
-                      }}
-                      className="text-l3 hover:text-l1"
-                    >
-                      {s.archived ? "取消归档" : "归档"}
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditing({
-                          agent: s.agent,
-                          sessionId: s.sessionId,
-                          title: s.customTitle ?? "",
-                          tags: s.tags.join(", "),
-                        });
-                      }}
-                      className="text-l2 hover:text-l1"
-                    >
-                      编辑
-                    </button>
-                    <button
-                      disabled={!s.alive && !s.pinned}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        resumeInTerminal(s);
-                      }}
-                      title={
-                        s.alive || s.pinned
-                          ? "在终端里恢复这个会话"
-                          : "会话文件已失效且无快照，无法恢复"
-                      }
-                      className="text-l3 hover:text-l1 disabled:opacity-50"
-                    >
-                      恢复
-                    </button>
-                    <button
-                      disabled={!s.alive && !s.pinned}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void resumeExternal(s);
-                      }}
-                      title="在外部终端应用（Ghostty/终端）中恢复这个会话——使用你的全局 CLI 配置（不携带 Ccode profile 的密钥）"
-                      className="text-l3 hover:text-l1 disabled:opacity-50"
-                    >
-                      ⇗
-                    </button>
-                    <button
-                      disabled={!s.alive && !s.pinned}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void copyResumeCommand(s);
-                      }}
-                      title="复制恢复命令，粘贴到任意终端执行——使用你的全局 CLI 配置（不携带 Ccode profile 的密钥）"
-                      className="text-l3 hover:text-l1 disabled:opacity-50"
-                    >
-                      {copiedId === s.sessionId ? "已复制" : "⧉"}
-                    </button>
+                    {s.tags.length > 2 && (
+                      <span className="shrink-0 text-l4">
+                        +{s.tags.length - 2}
+                      </span>
+                    )}
                   </div>
                 </div>
               );
             })}
             {sessionList.length === 0 && (
               <p className="p-4 text-sm text-l4">
-                {showArchived ? "暂无会话" : "暂无会话（已归档的被隐藏）"}
+                {showArchived ? "暂无对话" : "暂无对话（已归档的被隐藏）"}
                 {(q || filter.kind !== "all") && (
                   <>
                     —— 当前筛选/搜索无结果
@@ -1084,7 +1207,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               {selected.live && (
                 <span
                   className="flex shrink-0 items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l2"
-                  title="该会话的 CLI 进程仍在运行（外部探测）"
+                  title="该对话的 CLI 进程仍在运行（外部探测）"
                 >
                   <span className="size-1.5 rounded-full bg-ok-text" />
                   进行中
@@ -1092,50 +1215,29 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               )}
               <span className="shrink-0 text-xs text-l3">
                 {agentLabel(selected.agent)} · {relTime(selected.updatedAt)}
-                {selected.tokenUsage ? ` · ${fmtTokens(selected.tokenUsage)}` : ""}
+                {selected.tokenUsage
+                  ? ` · ${fmtTokens(selected.tokenUsage)}`
+                  : ""}
               </span>
-              <span className="flex shrink-0 items-center">
+              <span className="ml-auto flex shrink-0 items-center">
                 <button
                   onClick={() => resumeInTerminal(selected)}
-                  className="rounded-l px-2 py-1 text-xs text-l2 hover:bg-white/5"
+                  disabled={!selected.alive && !selected.pinned}
+                  className="rounded-l px-2 py-1 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
                 >
-                  在终端恢复
+                  恢复
                 </button>
                 <button
                   onClick={(e) => {
                     const r = e.currentTarget.getBoundingClientRect();
                     setResumeMenu({ x: r.right - 176, y: r.bottom + 4 });
                   }}
-                  title="更多恢复方式（外部终端 / 复制命令——均使用全局 CLI 配置，不携带本 profile 密钥）"
+                  title="更多对话操作"
                   className="rounded-r px-1 py-1 text-xs text-l4 hover:bg-white/5 hover:text-l1"
                 >
-                  ▾
+                  ⋯
                 </button>
               </span>
-              <button
-                onClick={onSummarize}
-                disabled={aiSummarizing}
-                title="AI 生成会话摘要"
-                className={`shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${
-                  aiSummarizing ? "animate-pulse" : ""
-                }`}
-              >
-                {aiSummarizing ? "◈ 摘要中…" : "◈ 摘要"}
-              </button>
-              <button
-                onClick={onExport}
-                disabled={exporting}
-                title="导出会话为 Markdown 到 ~/Downloads/ccode-exports/"
-                className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
-              >
-                {exporting ? "导出中…" : "导出"}
-              </button>
-              <button
-                onClick={() => void togglePin(selected)}
-                className="ml-auto shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
-              >
-                {selected.pinned ? "取消保留" : "⚑ 保留"}
-              </button>
               {/* 对话 / 当前项目改动 页签 */}
               <div className="flex shrink-0 gap-1">
                 {(["chat", "diff"] as const).map((k) => (
@@ -1143,7 +1245,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     key={k}
                     onClick={() => setReplayTab(k)}
                     className={`rounded px-2.5 py-1 text-xs ${
-                      replayTab === k ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
+                      replayTab === k
+                        ? "bg-seg-sel text-l1"
+                        : "text-l3 hover:text-l1"
                     }`}
                   >
                     {k === "chat" ? "对话" : "当前项目改动"}
@@ -1151,9 +1255,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 ))}
               </div>
             </div>
-            {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
+            {error && (
+              <p className="px-4 py-1 text-xs text-err-text">{error}</p>
+            )}
             {exportPath && (
-              <p className="truncate px-4 py-1 text-xs text-l4" title={exportPath}>
+              <p
+                className="truncate px-4 py-1 text-xs text-l4"
+                title={exportPath}
+              >
                 已导出：{exportPath}
               </p>
             )}
@@ -1161,7 +1270,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               <div className="flex min-h-0 flex-1 flex-col">
                 <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-l3">
                   <span className="min-w-0 flex-1 truncate">
-                    当前磁盘状态，不是该历史会话的改动快照
+                    当前磁盘状态，不是该历史对话的改动快照
                   </span>
                   <button
                     type="button"
@@ -1193,7 +1302,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     <span className="whitespace-pre-wrap">{summary}</span>
                   </div>
                 )}
-                <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-4">
+                <div
+                  ref={scrollRef}
+                  className="min-h-0 flex-1 overflow-auto p-4"
+                >
                   {loadingConv ? (
                     <LoadingRows compact />
                   ) : messages.length === 0 ? (
@@ -1222,7 +1334,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         )}
       </div>
 
-      {/* 回放头部「恢复 ▾」下拉：fixed 遮罩 + 按钮下方浮层 */}
+      {/* 回放头部更多操作：固定遮罩 + 按钮下方浮层 */}
       {resumeMenu && selected && (
         <div className="fixed inset-0 z-20" onClick={() => setResumeMenu(null)}>
           <div
@@ -1231,7 +1343,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             onClick={(e) => e.stopPropagation()}
           >
             <button
-              className={menuItem}
+              className={`${menuItem} disabled:opacity-50`}
+              disabled={!selected.alive && !selected.pinned}
               onClick={() => {
                 setResumeMenu(null);
                 void resumeExternal(selected);
@@ -1240,17 +1353,54 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               ⇗ 在外部终端恢复
             </button>
             <button
-              className={menuItem}
-              onClick={() => void copyResumeCommand(selected)}
+              className={`${menuItem} disabled:opacity-50`}
+              disabled={!selected.alive && !selected.pinned}
+              onClick={() => {
+                setResumeMenu(null);
+                void copyResumeCommand(selected);
+              }}
             >
-              {copiedId === selected.sessionId ? "已复制" : "⧉ 复制恢复命令"}
+              {copiedId ===
+              sessionRuntimeKey(selected.agent, selected.sessionId)
+                ? "已复制"
+                : "⧉ 复制恢复命令"}
+            </button>
+            <button
+              className={`${menuItem} disabled:opacity-50`}
+              disabled={aiSummarizing || (!selected.alive && !selected.pinned)}
+              onClick={() => {
+                setResumeMenu(null);
+                void onSummarize();
+              }}
+            >
+              {aiSummarizing ? "◈ 摘要中…" : "◈ 生成摘要"}
+            </button>
+            <button
+              className={`${menuItem} disabled:opacity-50`}
+              disabled={exporting || (!selected.alive && !selected.pinned)}
+              onClick={() => {
+                setResumeMenu(null);
+                void onExport();
+              }}
+            >
+              {exporting ? "导出中…" : "导出 Markdown"}
+            </button>
+            <button
+              className={menuItem}
+              onClick={() => {
+                setResumeMenu(null);
+                void togglePin(selected);
+              }}
+            >
+              {selected.pinned ? "取消保留" : "⚑ 保留"}
             </button>
           </div>
         </div>
       )}
 
       {/* 右键菜单：fixed 遮罩 + 光标处浮层 */}
-      {menu && (        <div
+      {menu && (
+        <div
           className="fixed inset-0 z-20"
           onClick={() => setMenu(null)}
           onContextMenu={(e) => {
@@ -1337,7 +1487,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     void deleteSession(menu.session);
                   }}
                 >
-                  删除会话
+                  删除对话
                 </button>
               </>
             ) : (
@@ -1345,10 +1495,15 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 className={`${menuItem} text-err-text`}
                 onClick={() => {
                   setMenu(null);
-                  void deleteProjectSessions(menu.agent, menu.path, menu.count);
+                  void deleteProjectSessions(
+                    menu.agent,
+                    menu.path,
+                    menu.count,
+                    menu.extra,
+                  );
                 }}
               >
-                删除该项目全部会话
+                删除该项目全部对话
               </button>
             )}
           </div>

@@ -26,7 +26,7 @@ const NAV: { id: string; label: string; icon: string }[] = [
   { id: "profiles", label: "配置", icon: "⇄" },
   { id: "workspaces", label: "工作区", icon: "⛁" },
   { id: "terminal", label: "终端", icon: "⌨" },
-  { id: "sessions", label: "会话", icon: "◔" },
+  { id: "sessions", label: "对话", icon: "◔" },
   { id: "skills", label: "技能", icon: "✦" },
   { id: "stats", label: "统计", icon: "◫" },
   { id: "settings", label: "设置", icon: "⛭" },
@@ -46,7 +46,9 @@ function App() {
   const checkAppUpdate = useAppStore((s) => s.checkAppUpdate);
 
   // 记录访问过的页面：懒加载的页面首次访问后才挂载，之后保持挂载（切回状态不丢、终端不断线）
-  const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set([page]));
+  const [visited, setVisited] = useState<ReadonlySet<string>>(
+    () => new Set([page]),
+  );
   useEffect(() => {
     setVisited((v) => (v.has(page) ? v : new Set(v).add(page)));
   }, [page]);
@@ -68,6 +70,10 @@ function App() {
       const now = Date.now();
       if (now - (last.get(message) ?? 0) < 5000) return;
       last.set(message, now);
+      // 顺手淘汰 1 分钟前的旧条目，避免 Map 只增不清
+      for (const [m, t] of last) {
+        if (now - t > 60_000) last.delete(m);
+      }
       invoke("log_event", { level: "error", source, message }).catch(() => {});
     };
     const onError = (e: ErrorEvent) => {
@@ -114,101 +120,117 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <div className="flex h-full bg-canvas text-l2">
-      <aside
-        className={`flex shrink-0 flex-col bg-rail transition-[width] duration-150 ${
-          collapsed ? "w-14" : "w-36"
-        }`}
-      >
-        {/* 图标即侧栏开关：直接点击文字收起为图标 / 展开（原底部 « 按钮并入此处） */}
-        <div
-          onClick={toggleCollapsed}
-          title={collapsed ? "展开侧栏" : "收起为图标"}
-          className={`cursor-pointer select-none py-4 text-base font-semibold tracking-wide text-l1 ${
-            collapsed ? "text-center text-sm" : "px-4"
+      <div className="flex h-full overflow-hidden bg-canvas text-l2">
+        <aside
+          className={`flex shrink-0 flex-col bg-rail transition-[width] duration-150 ${
+            collapsed ? "w-14" : "w-36"
           }`}
         >
-          {collapsed ? "C" : "Ccode"}
-        </div>
-        {NAV.map((n) => (
-          <button
-            key={n.id}
-            onClick={() => setPage(n.id)}
-            title={n.id === "terminal" && runningCount > 0 ? `${n.label}（${runningCount} 个 agent 运行中）` : n.label}
-            className={`mx-1 mb-0.5 flex items-center rounded-md text-sm ${
-              collapsed ? "h-10 w-12 justify-center self-center" : "px-3 py-2.5"
-            } ${
-              page === n.id
-                ? "bg-rail-sel text-l1"
-                : "text-l3 hover:bg-white/5"
+          {/* 图标即侧栏开关：直接点击文字收起为图标 / 展开（原底部 « 按钮并入此处） */}
+          <div
+            onClick={toggleCollapsed}
+            title={collapsed ? "展开侧栏" : "收起为图标"}
+            className={`cursor-pointer select-none py-4 text-base font-semibold tracking-wide text-l1 ${
+              collapsed ? "text-center text-sm" : "px-4"
             }`}
           >
-            <span className={`relative ${collapsed ? "text-lg" : "mr-2 w-5 text-center"}`}>
-              {n.icon}
-              {n.id === "terminal" && runningCount > 0 && (
-                <span className="absolute -right-1.5 -top-1 rounded-full bg-ok px-1 text-[9px] leading-3 text-ok-text">
-                  {runningCount}
-                </span>
-              )}
-            </span>
-            {!collapsed && n.label}
-          </button>
-        ))}
-        {/* 专注模式插槽：终端页专注时把纵向标签列表 + ⋯ 操作按钮 portal 到这里 */}
-        <div id="app-rail-focus-slot" className="mt-1 flex min-h-0 flex-col overflow-y-auto" />
-      </aside>
-      <main className="min-w-0 flex-1">
-        {/* 页面保持挂载，切换标签不销毁终端；未访问过的页不挂载（懒加载） */}
-        <div className={page === "profiles" ? "h-full overflow-auto" : "hidden"}>
-          {visited.has("profiles") && (
-            <Suspense fallback={<PageLoading />}>
-              <ProfilesPage />
-            </Suspense>
-          )}
-        </div>
-        <div className={page === "workspaces" ? "h-full" : "hidden"}>
-          {visited.has("workspaces") && (
-            <Suspense fallback={<PageLoading />}>
-              <WorkspacesPage visible={page === "workspaces"} />
-            </Suspense>
-          )}
-        </div>
-        <div className={page === "terminal" ? "h-full" : "hidden"}>
-          {visited.has("terminal") && (
-            <Suspense fallback={<PageLoading />}>
-              <TerminalPage visible={page === "terminal"} />
-            </Suspense>
-          )}
-        </div>
-        <div className={page === "sessions" ? "h-full" : "hidden"}>
-          {visited.has("sessions") && (
-            <Suspense fallback={<PageLoading />}>
-              <SessionsPage visible={page === "sessions"} />
-            </Suspense>
-          )}
-        </div>
-        <div className={page === "skills" ? "h-full" : "hidden"}>
-          {visited.has("skills") && (
-            <Suspense fallback={<PageLoading />}>
-              <SkillsPage visible={page === "skills"} />
-            </Suspense>
-          )}
-        </div>
-        <div className={page === "stats" ? "h-full overflow-auto" : "hidden"}>
-          {visited.has("stats") && (
-            <Suspense fallback={<PageLoading />}>
-              <StatsPage visible={page === "stats"} />
-            </Suspense>
-          )}
-        </div>
-        <div className={page === "settings" ? "h-full overflow-auto" : "hidden"}>
-          {visited.has("settings") && (
-            <Suspense fallback={<PageLoading />}>
-              <SettingsPage visible={page === "settings"} />
-            </Suspense>
-          )}
-        </div>
-      </main>
+            {collapsed ? "C" : "Ccode"}
+          </div>
+          {NAV.map((n) => (
+            <button
+              key={n.id}
+              onClick={() => setPage(n.id)}
+              title={
+                n.id === "terminal" && runningCount > 0
+                  ? `${n.label}（${runningCount} 个 agent 运行中）`
+                  : n.label
+              }
+              className={`mx-1 mb-0.5 flex items-center rounded-md text-sm ${
+                collapsed
+                  ? "h-10 w-12 justify-center self-center"
+                  : "px-3 py-2.5"
+              } ${
+                page === n.id
+                  ? "bg-rail-sel text-l1"
+                  : "text-l3 hover:bg-white/5"
+              }`}
+            >
+              <span
+                className={`relative ${collapsed ? "text-lg" : "mr-2 w-5 text-center"}`}
+              >
+                {n.icon}
+                {n.id === "terminal" && runningCount > 0 && (
+                  <span className="absolute -right-1.5 -top-1 flex items-center gap-0.5 rounded-full bg-inset px-1 text-[9px] leading-3 text-l2">
+                    <span className="size-1 rounded-full bg-ok-text" />
+                    {runningCount}
+                  </span>
+                )}
+              </span>
+              {!collapsed && n.label}
+            </button>
+          ))}
+          {/* 专注模式插槽：终端页专注时把纵向标签列表 + ⋯ 操作按钮 portal 到这里 */}
+          <div
+            id="app-rail-focus-slot"
+            className="mt-1 flex min-h-0 flex-col overflow-y-auto"
+          />
+        </aside>
+        <main className="h-full min-h-0 min-w-0 flex-1">
+          {/* 页面保持挂载，切换标签不销毁终端；未访问过的页不挂载（懒加载） */}
+          <div
+            className={page === "profiles" ? "h-full overflow-auto" : "hidden"}
+          >
+            {visited.has("profiles") && (
+              <Suspense fallback={<PageLoading />}>
+                <ProfilesPage />
+              </Suspense>
+            )}
+          </div>
+          <div className={page === "workspaces" ? "h-full" : "hidden"}>
+            {visited.has("workspaces") && (
+              <Suspense fallback={<PageLoading />}>
+                <WorkspacesPage visible={page === "workspaces"} />
+              </Suspense>
+            )}
+          </div>
+          <div className={page === "terminal" ? "h-full" : "hidden"}>
+            {visited.has("terminal") && (
+              <Suspense fallback={<PageLoading />}>
+                <TerminalPage visible={page === "terminal"} />
+              </Suspense>
+            )}
+          </div>
+          <div className={page === "sessions" ? "h-full" : "hidden"}>
+            {visited.has("sessions") && (
+              <Suspense fallback={<PageLoading />}>
+                <SessionsPage visible={page === "sessions"} />
+              </Suspense>
+            )}
+          </div>
+          <div className={page === "skills" ? "h-full" : "hidden"}>
+            {visited.has("skills") && (
+              <Suspense fallback={<PageLoading />}>
+                <SkillsPage visible={page === "skills"} />
+              </Suspense>
+            )}
+          </div>
+          <div className={page === "stats" ? "h-full overflow-auto" : "hidden"}>
+            {visited.has("stats") && (
+              <Suspense fallback={<PageLoading />}>
+                <StatsPage visible={page === "stats"} />
+              </Suspense>
+            )}
+          </div>
+          <div
+            className={page === "settings" ? "h-full overflow-auto" : "hidden"}
+          >
+            {visited.has("settings") && (
+              <Suspense fallback={<PageLoading />}>
+                <SettingsPage visible={page === "settings"} />
+              </Suspense>
+            )}
+          </div>
+        </main>
       </div>
     </ErrorBoundary>
   );

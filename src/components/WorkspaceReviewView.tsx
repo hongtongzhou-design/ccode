@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ArrowLeft,
   ChevronDown,
@@ -17,8 +18,10 @@ import type {
   GitCommitResultDto,
   GitFileDto,
   WorkspaceDiffDto,
+  WorkspaceDto,
   WorkspaceHealthDto,
   WorkspaceMergeResultDto,
+  WorkspacePrResultDto,
 } from "../types";
 
 interface GitStatusDto {
@@ -52,7 +55,7 @@ interface ConflictAdviceDto {
 
 type ConflictChoice = "ours" | "theirs";
 
-type FinishMode = "commit" | "merge" | "merge-archive";
+type FinishMode = "commit" | "merge" | "merge-archive" | "archive";
 
 interface DiffLine {
   kind: "line" | "hunk";
@@ -88,7 +91,9 @@ const STATUS_STYLE: Record<string, string> = {
   R: "text-l2",
 };
 
-function parseHunkStart(line: string): { oldStart: number; newStart: number } | null {
+function parseHunkStart(
+  line: string,
+): { oldStart: number; newStart: number } | null {
   const match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
   if (!match) return null;
   return { oldStart: Number(match[1]), newStart: Number(match[2]) };
@@ -229,7 +234,9 @@ function DiffSide({
           ? "bg-inset/40 text-l4"
           : "text-l2";
   return (
-    <div className={`grid min-w-0 grid-cols-[44px_minmax(max-content,1fr)] ${tone}`}>
+    <div
+      className={`grid min-w-0 grid-cols-[44px_minmax(max-content,1fr)] ${tone}`}
+    >
       <span className="select-none border-r border-hairline px-2 text-right text-l4">
         {lineNo ?? ""}
       </span>
@@ -238,7 +245,10 @@ function DiffSide({
   );
 }
 
-function foldContextRows(rows: DiffLine[], expanded: ReadonlySet<string>): DisplayDiffRow[] {
+function foldContextRows(
+  rows: DiffLine[],
+  expanded: ReadonlySet<string>,
+): DisplayDiffRow[] {
   const output: DisplayDiffRow[] = [];
   let context: DiffLine[] = [];
   let foldIndex = 0;
@@ -259,7 +269,11 @@ function foldContextRows(rows: DiffLine[], expanded: ReadonlySet<string>): Displ
   };
 
   for (const row of rows) {
-    if (row.kind === "line" && row.oldKind === "context" && row.newKind === "context") {
+    if (
+      row.kind === "line" &&
+      row.oldKind === "context" &&
+      row.newKind === "context"
+    ) {
       context.push(row);
     } else {
       flush();
@@ -270,9 +284,18 @@ function foldContextRows(rows: DiffLine[], expanded: ReadonlySet<string>): Displ
   return output;
 }
 
-function DiffTable({ rows, minWidth = 720 }: { rows: DiffLine[]; minWidth?: number }) {
+function DiffTable({
+  rows,
+  minWidth = 720,
+}: {
+  rows: DiffLine[];
+  minWidth?: number;
+}) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  const displayRows = useMemo(() => foldContextRows(rows, expanded), [expanded, rows]);
+  const displayRows = useMemo(
+    () => foldContextRows(rows, expanded),
+    [expanded, rows],
+  );
 
   useEffect(() => {
     setExpanded(new Set());
@@ -315,8 +338,16 @@ function DiffTable({ rows, minWidth = 720 }: { rows: DiffLine[]; minWidth?: numb
             className="grid grid-cols-2 divide-x divide-hairline"
             style={{ minWidth }}
           >
-            <DiffSide lineNo={row.oldNo} text={row.oldText} kind={row.oldKind} />
-            <DiffSide lineNo={row.newNo} text={row.newText} kind={row.newKind} />
+            <DiffSide
+              lineNo={row.oldNo}
+              text={row.oldText}
+              kind={row.oldKind}
+            />
+            <DiffSide
+              lineNo={row.newNo}
+              text={row.newText}
+              kind={row.newKind}
+            />
           </div>
         );
       })}
@@ -355,7 +386,7 @@ function DiffFileSection({
       observer.disconnect();
       register(file.path, null);
     };
-  }, [file.path, register]);
+  }, [file.path, register, worktreePath]);
 
   useEffect(() => {
     if (!visible) return;
@@ -386,15 +417,23 @@ function DiffFileSection({
         <span className={`font-mono ${STATUS_STYLE[file.status] ?? "text-l3"}`}>
           {file.status === "??" ? "U" : file.status}
         </span>
-        <span className="min-w-0 flex-1 truncate font-mono font-medium text-l1">{file.path}</span>
-        {file.additions !== null && <span className="font-mono text-add">+{file.additions}</span>}
+        <span className="min-w-0 flex-1 truncate font-mono font-medium text-l1">
+          {file.path}
+        </span>
+        {file.additions !== null && (
+          <span className="font-mono text-add">+{file.additions}</span>
+        )}
         {file.deletions !== null && file.deletions > 0 && (
           <span className="font-mono text-del">-{file.deletions}</span>
         )}
       </div>
       {!visible || text === null ? (
         <div className="min-h-28 px-4 py-3">
-          {error ? <p className="text-xs text-err-text">{error}</p> : <LoadingRows compact />}
+          {error ? (
+            <p className="text-xs text-err-text">{error}</p>
+          ) : (
+            <LoadingRows compact />
+          )}
         </div>
       ) : rows.length === 0 ? (
         <p className="px-4 py-5 text-xs text-l4">无可显示的文本差异</p>
@@ -449,26 +488,43 @@ function ChangeTree({
               {isDir ? (
                 <>
                   {isClosed ? (
-                    <ChevronRight aria-hidden="true" className="h-3 w-3 shrink-0 text-l4" />
+                    <ChevronRight
+                      aria-hidden="true"
+                      className="h-3 w-3 shrink-0 text-l4"
+                    />
                   ) : (
-                    <ChevronDown aria-hidden="true" className="h-3 w-3 shrink-0 text-l4" />
+                    <ChevronDown
+                      aria-hidden="true"
+                      className="h-3 w-3 shrink-0 text-l4"
+                    />
                   )}
                   {isClosed ? (
-                    <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l3" />
+                    <FolderClosed
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5 shrink-0 text-l3"
+                    />
                   ) : (
-                    <FolderOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l3" />
+                    <FolderOpen
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5 shrink-0 text-l3"
+                    />
                   )}
                 </>
               ) : (
                 <>
                   <span className="w-3 shrink-0" />
-                  <File aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l3" />
+                  <File
+                    aria-hidden="true"
+                    className="h-3.5 w-3.5 shrink-0 text-l3"
+                  />
                 </>
               )}
               <span className="min-w-0 flex-1 truncate">{node.name}</span>
               {node.file && (
                 <>
-                  <span className={`font-mono ${STATUS_STYLE[node.file.status] ?? "text-l3"}`}>
+                  <span
+                    className={`font-mono ${STATUS_STYLE[node.file.status] ?? "text-l3"}`}
+                  >
                     {node.file.status === "??" ? "U" : node.file.status}
                   </span>
                   <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
@@ -517,7 +573,10 @@ function ConflictFileSection({
   onChoose: (path: string, choice: ConflictChoice) => void;
   onRetry: (path: string) => void;
 }) {
-  const rows = useMemo(() => (content ? parseDiff(content.diff) : []), [content]);
+  const rows = useMemo(
+    () => (content ? parseDiff(content.diff) : []),
+    [content],
+  );
   return (
     <section
       ref={(element) => register(path, element)}
@@ -525,10 +584,14 @@ function ConflictFileSection({
     >
       <div className="sticky top-0 z-[2] border-b border-hairline bg-strip">
         <div className="flex h-10 items-center gap-2 px-3 text-xs">
-          <span className={`font-mono ${unresolved ? "text-err-text" : "text-okb"}`}>
+          <span
+            className={`font-mono ${unresolved ? "text-err-text" : "text-okb"}`}
+          >
             {unresolved ? "U" : "✓"}
           </span>
-          <span className="min-w-0 flex-1 truncate font-mono font-medium text-l1">{path}</span>
+          <span className="min-w-0 flex-1 truncate font-mono font-medium text-l1">
+            {path}
+          </span>
           {choice && (
             <span className="rounded bg-inset px-2 py-0.5 text-l2">
               已选 {choice === "ours" ? "任务版" : baseBranch}
@@ -538,10 +601,14 @@ function ConflictFileSection({
         <div className="grid grid-cols-2 divide-x divide-hairline border-t border-hairline text-xs">
           <div
             className={`flex min-w-0 items-center gap-2 border-t-2 px-3 py-1.5 ${
-              choice === "ours" ? "border-cta bg-cta-pill" : "border-transparent"
+              choice === "ours"
+                ? "border-cta bg-cta-pill"
+                : "border-transparent"
             }`}
           >
-            <span className="min-w-0 flex-1 truncate text-l2">任务分支 · {branch}</span>
+            <span className="min-w-0 flex-1 truncate text-l2">
+              任务分支 · {branch}
+            </span>
             <button
               type="button"
               onClick={() => onChoose(path, "ours")}
@@ -557,10 +624,14 @@ function ConflictFileSection({
           </div>
           <div
             className={`flex min-w-0 items-center gap-2 border-t-2 px-3 py-1.5 ${
-              choice === "theirs" ? "border-cta bg-cta-pill" : "border-transparent"
+              choice === "theirs"
+                ? "border-cta bg-cta-pill"
+                : "border-transparent"
             }`}
           >
-            <span className="min-w-0 flex-1 truncate text-l2">基准分支 · {baseBranch}</span>
+            <span className="min-w-0 flex-1 truncate text-l2">
+              基准分支 · {baseBranch}
+            </span>
             <button
               type="button"
               onClick={() => onChoose(path, "theirs")}
@@ -585,19 +656,25 @@ function ConflictFileSection({
                   ? `建议 ${baseBranch}`
                   : "建议人工合并"}
             </span>
-            <span className="min-w-0 flex-1 truncate text-l4" title={advice.reason}>
+            <span
+              className="min-w-0 flex-1 truncate text-l4"
+              title={advice.reason}
+            >
               {advice.reason}
             </span>
-            {unresolved && (advice.choice === "ours" || advice.choice === "theirs") && (
-              <button
-                type="button"
-                onClick={() => onChoose(path, advice.choice as ConflictChoice)}
-                disabled={busy}
-                className="shrink-0 rounded px-2 py-0.5 text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
-              >
-                按建议
-              </button>
-            )}
+            {unresolved &&
+              (advice.choice === "ours" || advice.choice === "theirs") && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onChoose(path, advice.choice as ConflictChoice)
+                  }
+                  disabled={busy}
+                  className="shrink-0 rounded px-2 py-0.5 text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                >
+                  按建议
+                </button>
+              )}
           </div>
         )}
       </div>
@@ -614,18 +691,25 @@ function ConflictFileSection({
           </button>
         </div>
       ) : !content ? (
-        <div className="min-h-36 px-4 py-4"><LoadingRows compact /></div>
+        <div className="min-h-36 px-4 py-4">
+          <LoadingRows compact />
+        </div>
       ) : rows.length === 0 ? (
         <div className="grid min-h-36 grid-cols-2 divide-x divide-hairline font-mono text-[11px] leading-5">
-          <pre className="overflow-auto whitespace-pre p-3 text-l2">{content.ours ?? "（此侧已删除）"}</pre>
-          <pre className="overflow-auto whitespace-pre p-3 text-l2">{content.theirs ?? "（此侧已删除）"}</pre>
+          <pre className="overflow-auto whitespace-pre p-3 text-l2">
+            {content.ours ?? "（此侧已删除）"}
+          </pre>
+          <pre className="overflow-auto whitespace-pre p-3 text-l2">
+            {content.theirs ?? "（此侧已删除）"}
+          </pre>
         </div>
       ) : (
         <DiffTable rows={rows} />
       )}
       {content?.truncated && (
         <div className="border-t border-hairline bg-inset px-3 py-2 text-xs text-warn-text">
-          文件较大，当前只显示前 512 KB；需要逐行编辑时请在预览编辑器中打开该文件。
+          文件较大，当前只显示前 512
+          KB；需要逐行编辑时请在预览编辑器中打开该文件。
         </div>
       )}
     </section>
@@ -634,9 +718,15 @@ function ConflictFileSection({
 
 export default function WorkspaceReviewView({
   worktreePath,
+  initialAction = null,
+  initialActionKey = null,
   onClose,
 }: {
   worktreePath: string;
+  /** pr/archive 定位对应弹层；resolve-conflict 表示「解决冲突」入口，允许自动准备冲突两侧。 */
+  initialAction?: "pr" | "archive" | "resolve-conflict" | null;
+  /** 同一工作区的重复“更多操作”请求也必须重新打开相应弹层。 */
+  initialActionKey?: string | null;
   onClose: () => void;
 }) {
   const [diff, setDiff] = useState<WorkspaceDiffDto | null>(null);
@@ -650,18 +740,44 @@ export default function WorkspaceReviewView({
   const reviewMainRef = useRef<HTMLElement | null>(null);
   const scrollFrameRef = useRef<number | null>(null);
   const autoConflictRef = useRef<string | null>(null);
+  const prTitleInitRef = useRef<string | null>(null);
+  // 点击树定位后短暂抑制滚动同步，避免 smooth 滚动途中 activePath 被改回
+  const suppressTrackRef = useRef(false);
+  const suppressTrackTimerRef = useRef<number | null>(null);
+  const [mergedAt, setMergedAt] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
-  const [finishMenu, setFinishMenu] = useState<{ x: number; y: number } | null>(null);
+  const [finishMenu, setFinishMenu] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  const [showBlockers, setShowBlockers] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [prOpen, setPrOpen] = useState(false);
+  const [prTitle, setPrTitle] = useState("");
+  const [prBody, setPrBody] = useState("");
+  const [prBusy, setPrBusy] = useState(false);
+  const [prDrafting, setPrDrafting] = useState(false);
+  const [prPushed, setPrPushed] = useState(false);
+  const [prUrl, setPrUrl] = useState<string | null>(null);
+  const [prCopied, setPrCopied] = useState(false);
+  const initialActionRef = useRef<string | null>(null);
   const [unmerged, setUnmerged] = useState<UnmergedDto | null>(null);
   const [conflictFiles, setConflictFiles] = useState<string[]>([]);
-  const [conflictContents, setConflictContents] = useState<Record<string, ConflictContentDto>>({});
-  const [conflictContentErrors, setConflictContentErrors] = useState<Record<string, string>>({});
-  const [conflictChoices, setConflictChoices] = useState<Record<string, ConflictChoice>>({});
-  const [conflictAdvice, setConflictAdvice] = useState<Record<string, ConflictAdviceDto>>({});
+  const [conflictContents, setConflictContents] = useState<
+    Record<string, ConflictContentDto>
+  >({});
+  const [conflictContentErrors, setConflictContentErrors] = useState<
+    Record<string, string>
+  >({});
+  const [conflictChoices, setConflictChoices] = useState<
+    Record<string, ConflictChoice>
+  >({});
+  const [conflictAdvice, setConflictAdvice] = useState<
+    Record<string, ConflictAdviceDto>
+  >({});
   const [conflictBusy, setConflictBusy] = useState(false);
   const [adviceBusy, setAdviceBusy] = useState(false);
   const [fileQuery, setFileQuery] = useState("");
@@ -677,8 +793,12 @@ export default function WorkspaceReviewView({
         ]);
         if (!nextDiff.inWorkspace) throw new Error("该目录不属于活动工作区");
         const [nextHealth, nextUnmerged] = await Promise.all([
-          invoke<WorkspaceHealthDto>("workspace_health", { id: nextDiff.workspaceId }),
-          invoke<UnmergedDto>("workspace_unmerged_files", { id: nextDiff.workspaceId }),
+          invoke<WorkspaceHealthDto>("workspace_health", {
+            id: nextDiff.workspaceId,
+          }),
+          invoke<UnmergedDto>("workspace_unmerged_files", {
+            id: nextDiff.workspaceId,
+          }),
         ]);
         const signature = JSON.stringify({
           files: nextDiff.files,
@@ -700,7 +820,8 @@ export default function WorkspaceReviewView({
         }
         if (!quiet) setError(null);
       } catch (reason) {
-        setError(String(reason));
+        // 静默轮询失败不覆盖用户正在看的错误，避免留下清不掉的粘性横幅
+        if (!quiet) setError(String(reason));
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -716,7 +837,14 @@ export default function WorkspaceReviewView({
   useEffect(() => {
     signatureRef.current = "";
     autoConflictRef.current = null;
+    prTitleInitRef.current = null;
+    suppressTrackRef.current = false;
+    if (suppressTrackTimerRef.current !== null) {
+      window.clearTimeout(suppressTrackTimerRef.current);
+      suppressTrackTimerRef.current = null;
+    }
     sectionRefs.current.clear();
+    setMergedAt(null);
     setUnmerged(null);
     setConflictFiles([]);
     setConflictContents({});
@@ -725,12 +853,46 @@ export default function WorkspaceReviewView({
     setConflictAdvice({});
     setFileQuery("");
     setActivePath(null);
+    initialActionRef.current = null;
   }, [worktreePath]);
+
+  // merged_at 不在 diff/health DTO 上，按工作区单独取一次，用于「已合并」按钮态
+  useEffect(() => {
+    const workspaceId = diff?.workspaceId;
+    if (!workspaceId) return;
+    invoke<WorkspaceDto[]>("list_workspaces")
+      .then((list) => {
+        setMergedAt(
+          list.find((workspace) => workspace.id === workspaceId)?.mergedAt ??
+            null,
+        );
+      })
+      .catch(() => {});
+  }, [diff?.workspaceId]);
+
+  // 工作区列表的“在评审中创建 PR / 归档”只负责定位到此处；真正执行仍要求在覆盖层内确认。
+  useEffect(() => {
+    if (!initialAction || !diff) return;
+    const key = `${initialActionKey ?? initialAction}:${initialAction}:${diff.workspaceId}`;
+    if (initialActionRef.current === key) return;
+    initialActionRef.current = key;
+    if (initialAction === "pr") setPrOpen(true);
+    else if (initialAction === "archive") setArchiveOpen(true);
+  }, [diff, initialAction, initialActionKey]);
+
+  // PR 标题只按工作区初始化一次，之后允许用户清空重写
+  useEffect(() => {
+    if (!diff || prTitleInitRef.current === diff.workspaceId) return;
+    prTitleInitRef.current = diff.workspaceId;
+    setPrTitle(diff.workspaceName);
+  }, [diff]);
 
   // 「解决冲突」本身就是明确操作：工作区干净时直接准备最新基准两侧，
   // 不先展示容易被误认为当前 main 的普通 merge-base diff。
+  // 自动准备只绑定「解决冲突」入口；普通「审阅」入口不得仅因打开就把 worktree 置入 MERGING。
   useEffect(() => {
     if (
+      initialAction !== "resolve-conflict" ||
       !diff ||
       health?.conflict !== true ||
       !status ||
@@ -745,7 +907,7 @@ export default function WorkspaceReviewView({
     if (autoConflictRef.current === diff.workspaceId) return;
     autoConflictRef.current = diff.workspaceId;
     void startConflictResolution(false);
-  }, [busy, conflictBusy, diff, health?.conflict, status, unmerged]);
+  }, [busy, conflictBusy, diff, health?.conflict, initialAction, status, unmerged]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -765,31 +927,42 @@ export default function WorkspaceReviewView({
     Promise.all(
       missing.map(async (path) => {
         try {
-          const content = await invoke<ConflictContentDto>("workspace_conflict_content", {
-            id: diff.workspaceId,
-            path,
-          });
+          const content = await invoke<ConflictContentDto>(
+            "workspace_conflict_content",
+            {
+              id: diff.workspaceId,
+              path,
+            },
+          );
           return { path, content, error: null };
         } catch (reason) {
           return { path, content: null, error: String(reason) };
         }
       }),
-    )
-      .then((results) => {
-        if (cancelled) return;
-        const entries = results
-          .filter((item): item is typeof item & { content: ConflictContentDto } => !!item.content)
-          .map((item) => [item.path, item.content] as const);
-        const errors = results
-          .filter((item) => item.error)
-          .map((item) => [item.path, item.error!] as const);
-        if (entries.length > 0) {
-          setConflictContents((current) => ({ ...current, ...Object.fromEntries(entries) }));
-        }
-        if (errors.length > 0) {
-          setConflictContentErrors((current) => ({ ...current, ...Object.fromEntries(errors) }));
-        }
-      });
+    ).then((results) => {
+      if (cancelled) return;
+      const entries = results
+        .filter(
+          (item): item is typeof item & { content: ConflictContentDto } =>
+            !!item.content,
+        )
+        .map((item) => [item.path, item.content] as const);
+      const errors = results
+        .filter((item) => item.error)
+        .map((item) => [item.path, item.error!] as const);
+      if (entries.length > 0) {
+        setConflictContents((current) => ({
+          ...current,
+          ...Object.fromEntries(entries),
+        }));
+      }
+      if (errors.length > 0) {
+        setConflictContentErrors((current) => ({
+          ...current,
+          ...Object.fromEntries(errors),
+        }));
+      }
+    });
     return () => {
       cancelled = true;
     };
@@ -799,19 +972,25 @@ export default function WorkspaceReviewView({
   const conflictMode = unmerged?.merging === true;
   const staleBase = unmerged?.staleBase === true;
   const unresolvedFiles = unmerged?.files ?? [];
-  const unresolvedSet = useMemo(() => new Set(unresolvedFiles), [unresolvedFiles]);
+  const unresolvedSet = useMemo(
+    () => new Set(unresolvedFiles),
+    [unresolvedFiles],
+  );
   const allConflictContentsLoaded =
-    conflictFiles.length > 0 && conflictFiles.every((path) => !!conflictContents[path]);
+    conflictFiles.length > 0 &&
+    conflictFiles.every((path) => !!conflictContents[path]);
   const hasUncommitted = (status?.files.length ?? 0) > 0;
   const hasCommitted = (health?.ahead ?? 0) > 0;
   const hasTaskChanges = (diff?.files.length ?? 0) > 0;
   const hardBlocked = blockers.length > 0;
+  // 约定：merged_at && ahead == 0 时合并按钮显示禁用的「已合并」，
+  // 新提交令 ahead > 0 后恢复「合并」
   const primaryLabel = hasUncommitted
     ? "提交并合并"
     : hasCommitted
       ? "合并"
-      : result
-        ? "已完成"
+      : mergedAt
+        ? "已合并"
         : "无待合并提交";
   const canPrimary =
     !busy &&
@@ -821,7 +1000,9 @@ export default function WorkspaceReviewView({
   const filteredFiles = useMemo(
     () =>
       (diff?.files ?? []).filter(
-        (file) => !normalizedQuery || file.path.toLocaleLowerCase().includes(normalizedQuery),
+        (file) =>
+          !normalizedQuery ||
+          file.path.toLocaleLowerCase().includes(normalizedQuery),
       ),
     [diff?.files, normalizedQuery],
   );
@@ -829,7 +1010,9 @@ export default function WorkspaceReviewView({
   const filteredConflictFiles = useMemo(
     () =>
       conflictFiles.filter(
-        (path) => !normalizedQuery || path.toLocaleLowerCase().includes(normalizedQuery),
+        (path) =>
+          !normalizedQuery ||
+          path.toLocaleLowerCase().includes(normalizedQuery),
       ),
     [conflictFiles, normalizedQuery],
   );
@@ -839,20 +1022,34 @@ export default function WorkspaceReviewView({
 
   useEffect(() => {
     if (displayedPaths.length === 0) return;
-    if (!activePath || !displayedPaths.includes(activePath)) setActivePath(displayedPaths[0]);
+    if (!activePath || !displayedPaths.includes(activePath))
+      setActivePath(displayedPaths[0]);
   }, [activePath, displayedPaths]);
 
-  const registerSection = useCallback((path: string, element: HTMLElement | null) => {
-    if (element) sectionRefs.current.set(path, element);
-    else sectionRefs.current.delete(path);
-  }, []);
+  const registerSection = useCallback(
+    (path: string, element: HTMLElement | null) => {
+      if (element) sectionRefs.current.set(path, element);
+      else sectionRefs.current.delete(path);
+    },
+    [],
+  );
 
   function selectFile(path: string) {
     setActivePath(path);
-    sectionRefs.current.get(path)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    suppressTrackRef.current = true;
+    if (suppressTrackTimerRef.current !== null)
+      window.clearTimeout(suppressTrackTimerRef.current);
+    suppressTrackTimerRef.current = window.setTimeout(() => {
+      suppressTrackRef.current = false;
+      suppressTrackTimerRef.current = null;
+    }, 600);
+    sectionRefs.current
+      .get(path)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   const trackActiveFile = useCallback(() => {
+    if (suppressTrackRef.current) return;
     if (scrollFrameRef.current !== null) return;
     scrollFrameRef.current = window.requestAnimationFrame(() => {
       scrollFrameRef.current = null;
@@ -874,7 +1071,10 @@ export default function WorkspaceReviewView({
 
   useEffect(
     () => () => {
-      if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current);
+      if (scrollFrameRef.current !== null)
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      if (suppressTrackTimerRef.current !== null)
+        window.clearTimeout(suppressTrackTimerRef.current);
     },
     [],
   );
@@ -906,7 +1106,9 @@ export default function WorkspaceReviewView({
     setFinishMenu(null);
     setError(null);
     setResult(null);
-    if (restart) {
+    // 新一轮同步（restart，或从非 MERGING 状态首次进入）一律清掉上一轮
+    // 选边与两侧内容，避免把上一轮的选边徽标带进新冲突
+    if (restart || !unmerged?.merging) {
       setConflictFiles([]);
       setConflictContents({});
       setConflictContentErrors({});
@@ -929,7 +1131,9 @@ export default function WorkspaceReviewView({
       }
       setUnmerged(state);
       setConflictFiles(state.files);
-      setResult(`冲突已放在隔离工作区中，请逐个比较 ${diff.branch} 与 ${diff.baseBranch} 后选定版本`);
+      setResult(
+        `冲突已放在隔离工作区中，请逐个比较 ${diff.branch} 与 ${diff.baseBranch} 后选定版本`,
+      );
     } finally {
       await refresh(true);
       setConflictBusy(false);
@@ -961,23 +1165,25 @@ export default function WorkspaceReviewView({
     if (!diff || unresolvedFiles.length === 0) return;
     if (
       choice === "theirs" &&
-      !window.confirm(`将全部冲突文件改为 ${diff.baseBranch} 版本，任务分支对应改动会被放弃。继续？`)
-    ) return;
+      !window.confirm(
+        `将全部冲突文件改为 ${diff.baseBranch} 版本，任务分支对应改动会被放弃。继续？`,
+      )
+    )
+      return;
     setConflictBusy(true);
     setError(null);
     try {
       let state = unmerged;
-      const chosen: Record<string, ConflictChoice> = {};
       for (const path of unresolvedFiles) {
         state = await invoke<UnmergedDto>("workspace_resolve_file", {
           id: diff.workspaceId,
           path,
           side: choice,
         });
-        chosen[path] = choice;
+        // 逐条更新选边，中途失败时已解决的文件仍保留徽标
+        setConflictChoices((current) => ({ ...current, [path]: choice }));
       }
       setUnmerged(state);
-      setConflictChoices((current) => ({ ...current, ...chosen }));
       await refresh(true);
     } catch (reason) {
       setError(String(reason));
@@ -995,7 +1201,9 @@ export default function WorkspaceReviewView({
       const list = await invoke<ConflictAdviceDto[]>("ai_conflict_advice", {
         id: diff.workspaceId,
       });
-      setConflictAdvice(Object.fromEntries(list.map((item) => [item.path, item])));
+      setConflictAdvice(
+        Object.fromEntries(list.map((item) => [item.path, item])),
+      );
     } catch (reason) {
       setError(`${reason}（AI 只给建议，不会自动选择版本）`);
     } finally {
@@ -1007,25 +1215,25 @@ export default function WorkspaceReviewView({
     if (!diff) return;
     const choices = unresolvedFiles
       .map((path) => [path, conflictAdvice[path]?.choice] as const)
-      .filter((entry): entry is readonly [string, ConflictChoice] =>
-        entry[1] === "ours" || entry[1] === "theirs",
+      .filter(
+        (entry): entry is readonly [string, ConflictChoice] =>
+          entry[1] === "ours" || entry[1] === "theirs",
       );
     if (choices.length === 0) return;
     setConflictBusy(true);
     setError(null);
     try {
       let state = unmerged;
-      const chosen: Record<string, ConflictChoice> = {};
       for (const [path, choice] of choices) {
         state = await invoke<UnmergedDto>("workspace_resolve_file", {
           id: diff.workspaceId,
           path,
           side: choice,
         });
-        chosen[path] = choice;
+        // 逐条更新选边，中途失败时已解决的文件仍保留徽标
+        setConflictChoices((current) => ({ ...current, [path]: choice }));
       }
       setUnmerged(state);
-      setConflictChoices((current) => ({ ...current, ...chosen }));
       await refresh(true);
     } catch (reason) {
       setError(String(reason));
@@ -1043,8 +1251,11 @@ export default function WorkspaceReviewView({
     }
     if (
       mergeAfter &&
-      !window.confirm(`将提交冲突解决结果并合并进本地 ${diff.baseBranch}，工作区保留且不推送。继续？`)
-    ) return;
+      !window.confirm(
+        `将提交冲突解决结果并合并进本地 ${diff.baseBranch}，工作区保留且不推送。继续？`,
+      )
+    )
+      return;
     setConflictBusy(true);
     setError(null);
     setResult(null);
@@ -1071,6 +1282,7 @@ export default function WorkspaceReviewView({
       });
       if (merged.failedPhase) throw new Error(merged.message);
       setResult(merged.message);
+      setMergedAt(new Date().toISOString());
       setConflictFiles([]);
       setConflictContents({});
       setConflictContentErrors({});
@@ -1078,7 +1290,9 @@ export default function WorkspaceReviewView({
       setConflictAdvice({});
       await refresh();
     } catch (reason) {
-      setError(`${resolvedCommitted ? "解决结果已提交，但最终合并未完成：" : ""}${reason}`);
+      setError(
+        `${resolvedCommitted ? "解决结果已提交，但最终合并未完成：" : ""}${reason}`,
+      );
       await refresh(true);
     } finally {
       setConflictBusy(false);
@@ -1089,7 +1303,11 @@ export default function WorkspaceReviewView({
     setAiBusy(true);
     setError(null);
     try {
-      setMessage((await invoke<string>("ai_commit_message", { cwd: worktreePath })).trim());
+      setMessage(
+        (
+          await invoke<string>("ai_commit_message", { cwd: worktreePath })
+        ).trim(),
+      );
     } catch (reason) {
       setError(`${reason}（检查设置页「AI 专用配置」是否可用）`);
     } finally {
@@ -1097,10 +1315,62 @@ export default function WorkspaceReviewView({
     }
   }
 
+  async function draftPr() {
+    if (!diff) return;
+    if (
+      prBody.trim() &&
+      !window.confirm("将用 AI 起草覆盖当前 PR 描述，继续？")
+    )
+      return;
+    setPrDrafting(true);
+    setError(null);
+    try {
+      setPrBody(await invoke<string>("ai_draft_pr", { id: diff.workspaceId }));
+    } catch (reason) {
+      setError(`${reason}（检查设置页“AI 专用配置”是否可用）`);
+    } finally {
+      setPrDrafting(false);
+    }
+  }
+
+  async function submitPr() {
+    if (!diff || !prTitle.trim()) return;
+    setPrBusy(true);
+    setError(null);
+    try {
+      const created = await invoke<WorkspacePrResultDto>("create_pr", {
+        id: diff.workspaceId,
+        title: prTitle.trim(),
+        body: prBody.trim() || null,
+        skipPush: prPushed,
+      });
+      setPrPushed(created.pushed);
+      if (created.prCreated && created.prUrl) {
+        setPrUrl(created.prUrl);
+        setResult("PR 已创建");
+      } else {
+        setError(created.message);
+      }
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setPrBusy(false);
+    }
+  }
+
+  function closePrDialog() {
+    setPrOpen(false);
+    setPrBody("");
+    setPrPushed(false);
+    setPrUrl(null);
+    setPrCopied(false);
+  }
+
   async function finish(mode: FinishMode) {
     if (!diff || !status || !health) return;
     const shouldCommit = status.files.length > 0;
-    const shouldMerge = mode !== "commit";
+    const shouldMerge = mode === "merge" || mode === "merge-archive";
+    const shouldArchive = mode === "archive";
     const archive = mode === "merge-archive";
     if (shouldCommit && !message.trim()) {
       setError("请先填写提交信息");
@@ -1112,6 +1382,15 @@ export default function WorkspaceReviewView({
         `${shouldCommit ? "将提交当前全部改动，然后" : "将"}把 ${diff.branch} 合并进 ${diff.baseBranch}${
           archive ? "并归档工作区" : "（保留工作区）"
         }。继续？`,
+      )
+    ) {
+      return;
+    }
+    if (
+      shouldArchive &&
+      !archiveOpen &&
+      !window.confirm(
+        `${shouldCommit ? "将提交当前全部改动，然后" : "将"}归档工作区。worktree 会被移除，分支仍保留以便恢复。继续？`,
       )
     ) {
       return;
@@ -1138,14 +1417,19 @@ export default function WorkspaceReviewView({
         if (!latest.readyToMerge) {
           const reasons = blockerText(latest);
           if (latest.uncommitted) reasons.unshift("工作区仍有未提交改动");
-          throw new Error(`提交已完成，但尚不可合并：${reasons.join("；") || "健康检查未通过"}`);
+          throw new Error(
+            `提交已完成，但尚不可合并：${reasons.join("；") || "健康检查未通过"}`,
+          );
         }
-        const mergeResult = await invoke<WorkspaceMergeResultDto>("merge_workspace", {
-          id: diff.workspaceId,
-          archive,
-        });
+        const mergeResult = await invoke<WorkspaceMergeResultDto>(
+          "merge_workspace",
+          {
+            id: diff.workspaceId,
+            archive,
+          },
+        );
         if (mergeResult.failedPhase) {
-          setError(mergeResult.message);
+          setError(`${committed ? "提交已完成；" : ""}${mergeResult.message}`);
           await refresh(true);
           return;
         }
@@ -1154,12 +1438,20 @@ export default function WorkspaceReviewView({
           onClose();
           return;
         }
+        setMergedAt(new Date().toISOString());
+      } else if (shouldArchive) {
+        await invoke("archive_workspace", { id: diff.workspaceId });
+        setResult("工作区已归档，分支仍可恢复");
+        onClose();
+        return;
       } else {
         setResult("改动已提交，可继续审阅或稍后合并");
       }
       await refresh();
     } catch (reason) {
-      setError(`${committed && !String(reason).includes("提交已完成") ? "提交已完成；" : ""}${reason}`);
+      setError(
+        `${committed && !String(reason).includes("提交已完成") ? "提交已完成；" : ""}${reason}`,
+      );
       await refresh(true);
     } finally {
       setBusy(false);
@@ -1183,7 +1475,9 @@ export default function WorkspaceReviewView({
               {conflictMode || health?.conflict ? "解决冲突" : "审阅"}
             </span>
             <span className="text-l4">/</span>
-            <span className="truncate text-sm text-l2">{diff?.workspaceName ?? "加载中"}</span>
+            <span className="truncate text-sm text-l2">
+              {diff?.workspaceName ?? "加载中"}
+            </span>
           </div>
 
           <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -1196,7 +1490,9 @@ export default function WorkspaceReviewView({
             >
               <RefreshCw
                 aria-hidden="true"
-                className={["h-4 w-4", refreshing ? "animate-spin" : ""].join(" ")}
+                className={["h-4 w-4", refreshing ? "animate-spin" : ""].join(
+                  " ",
+                )}
               />
             </button>
 
@@ -1204,9 +1500,13 @@ export default function WorkspaceReviewView({
               <button
                 type="button"
                 onClick={() =>
-                  hasUncommitted ? void finish("commit") : void startConflictResolution()
+                  hasUncommitted
+                    ? void finish("commit")
+                    : void startConflictResolution()
                 }
-                disabled={conflictBusy || busy || (hasUncommitted && !message.trim())}
+                disabled={
+                  conflictBusy || busy || (hasUncommitted && !message.trim())
+                }
                 className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
               >
                 {busy || conflictBusy
@@ -1235,17 +1535,22 @@ export default function WorkspaceReviewView({
                     disabled={conflictBusy || unresolvedFiles.length > 0}
                     className="min-w-36 rounded-l border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                   >
-                    {conflictBusy
-                      ? "处理中…"
-                      : unresolvedFiles.length > 0
-                        ? <>还剩 {unresolvedFiles.length} 个冲突</>
-                        : "完成解决并合并"}
+                    {conflictBusy ? (
+                      "处理中…"
+                    ) : unresolvedFiles.length > 0 ? (
+                      <>还剩 {unresolvedFiles.length} 个冲突</>
+                    ) : (
+                      "完成解决并合并"
+                    )}
                   </button>
                   <button
                     type="button"
                     onClick={(event) => {
                       const rect = event.currentTarget.getBoundingClientRect();
-                      setFinishMenu({ x: rect.right - 190, y: rect.bottom + 4 });
+                      setFinishMenu({
+                        x: rect.right - 190,
+                        y: rect.bottom + 4,
+                      });
                     }}
                     disabled={conflictBusy || unresolvedFiles.length > 0}
                     title="更多完成方式"
@@ -1271,7 +1576,7 @@ export default function WorkspaceReviewView({
                     const rect = event.currentTarget.getBoundingClientRect();
                     setFinishMenu({ x: rect.right - 190, y: rect.bottom + 4 });
                   }}
-                  disabled={busy || (!hasUncommitted && (!hasCommitted || hardBlocked))}
+                  disabled={busy}
                   title="更多完成方式"
                   className="flex w-8 items-center justify-center rounded-r border-y border-r border-cta-bd bg-cta text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
@@ -1286,9 +1591,13 @@ export default function WorkspaceReviewView({
           <div className="flex min-h-9 items-center gap-3 border-t border-hairline px-3 py-1.5 text-xs">
             <div className="flex min-w-0 items-center gap-2 text-l3">
               <GitBranch aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-              <span className="max-w-44 truncate font-mono text-l2">{diff.branch}</span>
+              <span className="max-w-44 truncate font-mono text-l2">
+                {diff.branch}
+              </span>
               <span className="text-l4">→</span>
-              <span className="max-w-32 truncate font-mono">{diff.baseBranch}</span>
+              <span className="max-w-32 truncate font-mono">
+                {diff.baseBranch}
+              </span>
               <span className="ml-1 text-l4">{diff.files.length} 个文件</span>
               <span className="font-mono text-add">+{diff.totalAdd}</span>
               <span className="font-mono text-del">-{diff.totalDel}</span>
@@ -1302,12 +1611,18 @@ export default function WorkspaceReviewView({
             {conflictMode ? (
               <div className="ml-auto flex shrink-0 items-center gap-1.5">
                 <span className="mr-1 text-l4">
-                  {conflictFiles.length - unresolvedFiles.length}/{conflictFiles.length} 已选择
+                  {conflictFiles.length - unresolvedFiles.length}/
+                  {conflictFiles.length} 已选择
                 </span>
                 <button
                   type="button"
                   onClick={() => void chooseAll("ours")}
-                  disabled={staleBase || conflictBusy || unresolvedFiles.length === 0 || !allConflictContentsLoaded}
+                  disabled={
+                    staleBase ||
+                    conflictBusy ||
+                    unresolvedFiles.length === 0 ||
+                    !allConflictContentsLoaded
+                  }
                   className="rounded border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
                 >
                   全部任务版
@@ -1315,7 +1630,12 @@ export default function WorkspaceReviewView({
                 <button
                   type="button"
                   onClick={() => void chooseAll("theirs")}
-                  disabled={staleBase || conflictBusy || unresolvedFiles.length === 0 || !allConflictContentsLoaded}
+                  disabled={
+                    staleBase ||
+                    conflictBusy ||
+                    unresolvedFiles.length === 0 ||
+                    !allConflictContentsLoaded
+                  }
                   className="rounded border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
                 >
                   全部 {diff.baseBranch}
@@ -1323,7 +1643,12 @@ export default function WorkspaceReviewView({
                 <button
                   type="button"
                   onClick={() => void requestConflictAdvice()}
-                  disabled={staleBase || adviceBusy || conflictBusy || unresolvedFiles.length === 0}
+                  disabled={
+                    staleBase ||
+                    adviceBusy ||
+                    conflictBusy ||
+                    unresolvedFiles.length === 0
+                  }
                   className="rounded border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
                 >
                   {adviceBusy ? "◈ 分析中…" : "◈ AI 建议"}
@@ -1332,7 +1657,9 @@ export default function WorkspaceReviewView({
                   <button
                     type="button"
                     onClick={() => void applyConflictAdvice()}
-                    disabled={staleBase || conflictBusy || !allConflictContentsLoaded}
+                    disabled={
+                      staleBase || conflictBusy || !allConflictContentsLoaded
+                    }
                     className="rounded px-2 py-1 text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
                   >
                     按建议选择
@@ -1345,7 +1672,8 @@ export default function WorkspaceReviewView({
                   value={message}
                   onChange={(event) => setMessage(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && canPrimary) void finish("merge");
+                    if (event.key === "Enter" && canPrimary)
+                      void finish("merge");
                   }}
                   disabled={busy}
                   placeholder="提交信息"
@@ -1362,8 +1690,11 @@ export default function WorkspaceReviewView({
                 </button>
               </div>
             ) : (
-              <span className="ml-auto text-l4">
-                默认合并到本地 {diff.baseBranch}，工作区保留
+              <span
+                title={`默认只合并到本地 ${diff.baseBranch} 并保留工作区；不会自动推送远程`}
+                className="ml-auto flex h-7 w-7 items-center justify-center rounded text-l4"
+              >
+                ⓘ
               </span>
             )}
           </div>
@@ -1371,21 +1702,38 @@ export default function WorkspaceReviewView({
       </header>
 
       {diff && !conflictMode && blockers.length > 0 && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
-          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb" />
-          <span className="min-w-0 flex-1 truncate">
-            {blockers.join(" · ")}
-            {health?.conflict && health.conflictFiles.length > 0 && (
-              <>：{health.conflictFiles.join("、")}</>
-            )}
-          </span>
+        <div className="shrink-0 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
+          <div className="flex items-center gap-2">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb" />
+            <span className="min-w-0 flex-1">
+              {blockers.length} 项问题需要处理
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowBlockers((value) => !value)}
+              className="rounded px-2 py-0.5 text-warn-text hover:bg-white/5"
+            >
+              {showBlockers ? "收起" : "查看"}
+            </button>
+          </div>
+          {showBlockers && (
+            <ul className="mt-1.5 space-y-1 border-t border-hairline pt-1.5 text-l3">
+              {blockers.map((blocker) => (
+                <li key={blocker}>• {blocker}</li>
+              ))}
+              {health?.conflict && health.conflictFiles.length > 0 && (
+                <li>• 冲突文件：{health.conflictFiles.join("、")}</li>
+              )}
+            </ul>
+          )}
         </div>
       )}
       {diff && conflictMode && staleBase && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
           <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb" />
           <span>
-            {diff.baseBranch} 已在本次冲突开始后更新；旧的基准侧已停止显示，请从右上角重新同步。
+            {diff.baseBranch}{" "}
+            已在本次冲突开始后更新；旧的基准侧已停止显示，请从右上角重新同步。
           </span>
         </div>
       )}
@@ -1405,7 +1753,9 @@ export default function WorkspaceReviewView({
           <LoadingRows />
         </div>
       ) : !diff ? (
-        <div className="p-6 text-sm text-err-text">{error ?? "无法加载工作区审阅数据"}</div>
+        <div className="p-6 text-sm text-err-text">
+          {error ?? "无法加载工作区审阅数据"}
+        </div>
       ) : (
         <div className="flex min-h-0 flex-1">
           <main
@@ -1416,9 +1766,12 @@ export default function WorkspaceReviewView({
             {conflictMode ? (
               staleBase ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
-                  <p className="text-sm text-l2">当前冲突使用的是旧基准，已暂停展示两侧内容</p>
+                  <p className="text-sm text-l2">
+                    当前冲突使用的是旧基准，已暂停展示两侧内容
+                  </p>
                   <p className="max-w-xl text-xs text-l4">
-                    重新同步后会基于最新 {diff.baseBranch} 生成新的任务版 / 基准版对照，避免看到一套内容、实际选择另一套内容。
+                    重新同步后会基于最新 {diff.baseBranch} 生成新的任务版 /
+                    基准版对照，避免看到一套内容、实际选择另一套内容。
                   </p>
                   <button
                     type="button"
@@ -1426,7 +1779,9 @@ export default function WorkspaceReviewView({
                     disabled={conflictBusy}
                     className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                   >
-                    {conflictBusy ? "重新同步中…" : `重新同步最新 ${diff.baseBranch}`}
+                    {conflictBusy
+                      ? "重新同步中…"
+                      : `重新同步最新 ${diff.baseBranch}`}
                   </button>
                 </div>
               ) : conflictFiles.length === 0 ? (
@@ -1451,7 +1806,9 @@ export default function WorkspaceReviewView({
                     advice={conflictAdvice[path]}
                     busy={conflictBusy || staleBase}
                     register={registerSection}
-                    onChoose={(file, choice) => void chooseConflict(file, choice)}
+                    onChoose={(file, choice) =>
+                      void chooseConflict(file, choice)
+                    }
                     onRetry={retryConflictContent}
                   />
                 ))
@@ -1459,10 +1816,17 @@ export default function WorkspaceReviewView({
             ) : health?.conflict ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
                 <p className="text-sm text-l2">
-                  {hasUncommitted ? "先提交工作区改动，再准备最新基准" : `正在同步最新 ${diff.baseBranch}…`}
+                  {hasUncommitted
+                    ? "先提交工作区改动，再准备最新基准"
+                    : conflictBusy
+                      ? `正在同步最新 ${diff.baseBranch}…`
+                      : error
+                        ? "同步失败，请从右上角重试"
+                        : `与 ${diff.baseBranch} 存在冲突，可从右上角开始解决`}
                 </p>
                 <p className="max-w-xl text-xs text-l4">
-                  冲突模式只会展示本次同步后真实的任务版和基准版，不再用普通 merge-base diff 代替当前基准内容。
+                  冲突模式只会展示本次同步后真实的任务版和基准版，不再用普通
+                  merge-base diff 代替当前基准内容。
                 </p>
               </div>
             ) : !hasTaskChanges ? (
@@ -1489,7 +1853,10 @@ export default function WorkspaceReviewView({
           <aside className="flex w-[292px] shrink-0 flex-col border-l border-hairline bg-rail2">
             <div className="shrink-0 border-b border-hairline p-3">
               <div className="flex h-8 items-center gap-2 rounded border border-field bg-canvas px-2">
-                <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+                <Search
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5 shrink-0 text-l4"
+                />
                 <input
                   value={fileQuery}
                   onChange={(event) => setFileQuery(event.target.value)}
@@ -1510,8 +1877,10 @@ export default function WorkspaceReviewView({
               <div className="mt-2 flex items-center text-[11px] text-l4">
                 <span>{conflictMode ? "冲突文件" : "改动文件"}</span>
                 <span className="ml-auto">
-                  {conflictMode ? filteredConflictFiles.length : filteredFiles.length}/
-                  {conflictMode ? conflictFiles.length : diff.files.length}
+                  {conflictMode
+                    ? filteredConflictFiles.length
+                    : filteredFiles.length}
+                  /{conflictMode ? conflictFiles.length : diff.files.length}
                 </span>
               </div>
             </div>
@@ -1537,10 +1906,17 @@ export default function WorkspaceReviewView({
                             : "border-transparent",
                         ].join(" ")}
                       >
-                        <span className={["font-mono", unresolved ? "text-err-text" : "text-okb"].join(" ")}>
+                        <span
+                          className={[
+                            "font-mono",
+                            unresolved ? "text-err-text" : "text-okb",
+                          ].join(" ")}
+                        >
                           {unresolved ? "U" : "✓"}
                         </span>
-                        <span className="min-w-0 flex-1 truncate font-mono text-l2">{path}</span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-l2">
+                          {path}
+                        </span>
                         {choice && (
                           <span className="shrink-0 text-l4">
                             {choice === "ours" ? "任务" : diff.baseBranch}
@@ -1553,7 +1929,11 @@ export default function WorkspaceReviewView({
               ) : tree.length === 0 ? (
                 <p className="px-3 py-2 text-xs text-l4">没有匹配文件</p>
               ) : (
-                <ChangeTree nodes={tree} onSelect={selectFile} activePath={activePath} />
+                <ChangeTree
+                  nodes={tree}
+                  onSelect={selectFile}
+                  activePath={activePath}
+                />
               )}
             </div>
 
@@ -1571,11 +1951,13 @@ export default function WorkspaceReviewView({
                     ].join(" ")}
                   />
                   <span>
-                    {staleBase
-                      ? `${diff.baseBranch} 已更新，等待重新同步`
-                      : unresolvedFiles.length
-                      ? <>还剩 {unresolvedFiles.length} 个文件未选择</>
-                      : "全部冲突文件已选择"}
+                    {staleBase ? (
+                      `${diff.baseBranch} 已更新，等待重新同步`
+                    ) : unresolvedFiles.length ? (
+                      <>还剩 {unresolvedFiles.length} 个文件未选择</>
+                    ) : (
+                      "全部冲突文件已选择"
+                    )}
                   </span>
                 </div>
               ) : (
@@ -1586,7 +1968,9 @@ export default function WorkspaceReviewView({
                       hardBlocked ? "bg-warnb" : "bg-okb",
                     ].join(" ")}
                   />
-                  <span>{hardBlocked ? "处理顶部提示后继续" : "从右上角提交或合并"}</span>
+                  <span>
+                    {hardBlocked ? "处理顶部提示后继续" : "从右上角提交或合并"}
+                  </span>
                 </div>
               )}
             </div>
@@ -1601,20 +1985,217 @@ export default function WorkspaceReviewView({
           onClose={() => setFinishMenu(null)}
           items={
             conflictMode
-              ? [{ label: "仅保存解决结果", onSelect: () => void finishConflict(false) }]
+              ? [
+                  {
+                    label: "仅保存解决结果",
+                    onSelect: () => void finishConflict(false),
+                  },
+                ]
               : [
                   ...(hasUncommitted
-                    ? [{ label: "仅提交", onSelect: () => void finish("commit") }]
+                    ? [
+                        {
+                          label: "仅提交",
+                          onSelect: () => void finish("commit"),
+                        },
+                      ]
                     : []),
                   ...(!hardBlocked
                     ? [
-                        { label: "合并（保留工作区）", onSelect: () => void finish("merge") },
-                        { label: "合并并归档", onSelect: () => void finish("merge-archive") },
+                        {
+                          label: "合并（保留工作区）",
+                          onSelect: () => void finish("merge"),
+                        },
+                        {
+                          label: "合并并归档",
+                          onSelect: () => void finish("merge-archive"),
+                        },
+                      ]
+                    : []),
+                  ...(hasCommitted
+                    ? [{ label: "创建 PR", onSelect: () => setPrOpen(true) }]
+                    : []),
+                  ...(!health?.conflict && !unmerged?.merging
+                    ? [
+                        {
+                          label: "归档工作区",
+                          onSelect: () => setArchiveOpen(true),
+                        },
                       ]
                     : []),
                 ]
           }
         />
+      )}
+
+      {prOpen && diff && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+          onClick={() => {
+            // 请求在途时不响应遮罩关闭，避免关框重开导致重复建 PR
+            if (!prBusy) closePrDialog();
+          }}
+        >
+          <form
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitPr();
+            }}
+            className="w-full max-w-[26rem] rounded-md border border-field bg-strip p-5"
+          >
+            <h2 className="mb-1 text-base font-semibold text-l1">创建 PR</h2>
+            <p
+              className="mb-4 truncate font-mono text-xs text-l4"
+              title={`${diff.branch} → ${diff.baseBranch}`}
+            >
+              {diff.branch} → {diff.baseBranch}
+            </p>
+            {prUrl ? (
+              <div className="mb-4">
+                <p className="mb-2 text-sm text-ok-text">✓ PR 已创建</p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void openUrl(prUrl)}
+                    title={prUrl}
+                    className="min-w-0 flex-1 truncate text-left text-sm text-l1 underline decoration-l4 underline-offset-2 hover:decoration-l1"
+                  >
+                    {prUrl}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(prUrl).then(() => {
+                        setPrCopied(true);
+                        window.setTimeout(() => setPrCopied(false), 1500);
+                      });
+                    }}
+                    className="shrink-0 rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+                  >
+                    {prCopied ? "已复制" : "复制"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <label className="mb-3 block text-sm">
+                  <span className="mb-1 block text-xs text-l3">标题</span>
+                  <input
+                    autoFocus
+                    required
+                    value={prTitle}
+                    onChange={(event) => setPrTitle(event.target.value)}
+                    className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+                  />
+                </label>
+                <label className="mb-4 block text-sm">
+                  <span className="mb-1 flex items-center justify-between">
+                    <span className="text-xs text-l3">描述</span>
+                    <button
+                      type="button"
+                      onClick={() => void draftPr()}
+                      disabled={prDrafting}
+                      title="AI 起草 PR 描述"
+                      className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+                    >
+                      {prDrafting ? "◈ 起草中…" : "◈ AI 起草"}
+                    </button>
+                  </span>
+                  <textarea
+                    value={prBody}
+                    onChange={(event) => setPrBody(event.target.value)}
+                    placeholder="留空自动生成提交摘要"
+                    className="h-24 w-full resize-y rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+                  />
+                </label>
+                {error && <p className="mb-3 text-xs text-err-text">{error}</p>}
+              </>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closePrDialog}
+                className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+              >
+                {prUrl ? "关闭" : "取消"}
+              </button>
+              {!prUrl && (
+                <button
+                  type="submit"
+                  disabled={prBusy || !prTitle.trim()}
+                  className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                >
+                  {prBusy ? "创建中…" : prPushed ? "重试创建 PR" : "创建 PR"}
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+      )}
+
+      {archiveOpen && diff && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+          onClick={() => {
+            // 请求在途时不响应遮罩关闭，避免关框重开导致重复提交/归档
+            if (!busy) setArchiveOpen(false);
+          }}
+        >
+          <form
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void finish("archive");
+            }}
+            className="w-full max-w-[26rem] rounded-md border border-field bg-strip p-5"
+          >
+            <h2 className="mb-2 text-base font-semibold text-l1">
+              {hasUncommitted ? "提交并归档" : "归档工作区"}
+            </h2>
+            <p className="mb-4 text-xs text-l3">
+              {hasUncommitted
+                ? `先将改动提交到 ${diff.branch}，再移除工作树；分支仍保留以便恢复。`
+                : "worktree 会被移除，分支仍保留以便恢复。"}
+            </p>
+            {hasUncommitted && (
+              <label className="mb-4 block">
+                <span className="mb-1 block text-xs text-l3">提交信息</span>
+                <input
+                  autoFocus
+                  required
+                  value={message}
+                  onChange={(event) => setMessage(event.target.value)}
+                  disabled={busy}
+                  placeholder={`chore: 保存 ${diff.workspaceName}`}
+                  className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+                />
+              </label>
+            )}
+            {error && <p className="mb-3 text-xs text-err-text">✗ {error}</p>}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setArchiveOpen(false)}
+                disabled={busy}
+                className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5 disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={busy || (hasUncommitted && !message.trim())}
+                className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+              >
+                {busy
+                  ? "处理中…"
+                  : hasUncommitted
+                    ? "提交并归档"
+                    : "归档工作区"}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
     </div>
   );

@@ -1,13 +1,21 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import type { DetectResult, Profile, ProfileInput, RepoDto, SessionMetaDto } from "./types";
+import type {
+  DetectResult,
+  Profile,
+  ProfileInput,
+  RepoDto,
+  SessionMetaDto,
+} from "./types";
 
 const RECENT_REPOS_CACHE_KEY = "ccode.recentRepos";
 
 function cachedRecentRepos(): RepoDto[] {
   try {
-    const value = JSON.parse(localStorage.getItem(RECENT_REPOS_CACHE_KEY) ?? "[]");
+    const value = JSON.parse(
+      localStorage.getItem(RECENT_REPOS_CACHE_KEY) ?? "[]",
+    );
     return Array.isArray(value)
       ? value.filter(
           (repo): repo is RepoDto =>
@@ -30,7 +38,7 @@ export interface AppSettings {
   theme: string;
   /** ◈ AI 功能固定使用的 profile id；null/undefined = 自动（最近使用） */
   aiProfileId?: string | null;
-  /** 会话页「⇗ 外部恢复」的终端应用；auto/undefined = 按优先级探测 */
+  /** 对话页「⇗ 外部恢复」的终端应用；auto/undefined = 按优先级探测 */
   externalTerminal?: string;
 }
 
@@ -63,6 +71,11 @@ export interface PendingTerminal {
 /** 工作区页 / 改动面板 → 终端全宽审阅视图的一次性交接。 */
 export interface WorkspaceReviewRequest {
   worktreePath: string;
+  /** 工作区列表的更多操作可直接定位到评审中的对应完成动作；
+      resolve-conflict 表示「解决冲突」入口，允许评审层自动准备冲突两侧。 */
+  action?: "pr" | "archive" | "resolve-conflict";
+  /** 同一路径的重复请求也要重新触发评审内的定位动作。 */
+  requestId: string;
 }
 
 export function sessionRuntimeKey(agent: string, sessionId: string): string {
@@ -94,13 +107,17 @@ interface AppState {
   setRunningScript: (wsId: string, tabId: string | null) => void;
   /** 终端里正在进行的会话：agent+sessionId → 标签 id（防止跨 CLI 同 id 串联） */
   liveSessions: Record<string, string>;
-  setLiveSession: (agent: string, sessionId: string, tabId: string | null) => void;
-  /** 会话页 → 终端页的焦点跳转请求（终端页消费并清空） */
+  setLiveSession: (
+    agent: string,
+    sessionId: string,
+    tabId: string | null,
+  ) => void;
+  /** 对话页 → 终端页的焦点跳转请求（终端页消费并清空） */
   focusTabId: string | null;
   focusTab: (tabId: string | null) => void;
-  /** 工作区页 → 会话页的搜索词交接（会话页消费并清空） */
+  /** 工作区页 → 对话页的搜索词交接（对话页消费并清空） */
   sessionsQuery: string | null;
-  /** 请求会话页打开指定会话（终端页「⤴对话」跳转用） */
+  /** 请求对话页打开指定会话（终端页「⤴对话」跳转用） */
   openSessionReq: { agent: string; sessionId: string } | null;
   setOpenSessionReq: (r: { agent: string; sessionId: string } | null) => void;
   setSessionsQuery: (q: string | null) => void;
@@ -113,7 +130,7 @@ interface AppState {
   /** 启动时静默检查应用更新；失败（无网络/dev 模式）吞掉不打扰 */
   checkAppUpdate: () => Promise<void>;
   loadAll: () => Promise<void>;
-  /** 拉取全部会话元数据（Claude Code + Codex），返回最新列表供轮询比对 */
+  /** 拉取全部六个 agent 的会话元数据，返回最新列表供轮询比对 */
   loadSessions: () => Promise<SessionMetaDto[]>;
   saveProfile: (id: string | null, input: ProfileInput) => Promise<void>;
   removeProfile: (id: string) => Promise<void>;
@@ -149,7 +166,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   pendingTerminal: null,
   setPendingTerminal: (p) => set({ pendingTerminal: p }),
   workspaceReviewRequest: null,
-  setWorkspaceReviewRequest: (request) => set({ workspaceReviewRequest: request }),
+  setWorkspaceReviewRequest: (request) =>
+    set({ workspaceReviewRequest: request }),
   runningScripts: {},
   setRunningScript: (wsId, tabId) =>
     set((s) => {

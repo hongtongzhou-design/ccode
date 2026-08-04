@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAppStore } from "../store";
 import { PageFrame, PageHeader, Toggle } from "../components/PageFrame";
 
-/** 四款深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
+/** 七套深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
 import { XTERM_PALETTES, PALETTE_PREVIEW_KEYS } from "../terminal-palettes";
 
 const PALETTES = [
@@ -21,14 +21,33 @@ function paletteDots(id: string): string[] {
 }
 
 const THEMES = [
-  { id: "midnight", name: "沉浸黑", rail: "#08090d", canvas: "#11131a", accent: "#16a349" },
-  { id: "terracotta", name: "陶土", rail: "#232322", canvas: "#2d2d2b", accent: "#cc7d5e" },
-  { id: "ayu", name: "Ayu 琥珀", rail: "#0b0e14", canvas: "#10141c", accent: "#e6b450" },
-  { id: "mocha", name: "Catppuccin", rail: "#181824", canvas: "#1e1e2e", accent: "#cba6f7" },
-  { id: "neutral", name: "极简灰蓝", rail: "#0d0d0d", canvas: "#111111", accent: "#0169cc" },
-  { id: "dracula", name: "Dracula", rail: "#1e2029", canvas: "#282a36", accent: "#ff79c6" },
-  { id: "shadcn", name: "灰蓝正红", rail: "#0d1420", canvas: "#111827", accent: "#ff5c5c" },
+  { id: "midnight", name: "沉浸黑" },
+  { id: "terracotta", name: "陶土" },
+  { id: "ayu", name: "Ayu 琥珀" },
+  { id: "mocha", name: "Catppuccin" },
+  { id: "neutral", name: "极简灰蓝" },
+  { id: "dracula", name: "Dracula" },
+  { id: "shadcn", name: "灰蓝正红" },
 ] as const;
+
+type ThemeSwatch = { rail: string; canvas: string; accent: string };
+
+/** 预览色运行时从 CSS 变量读取：临时切 data-theme 同步读回再还原，
+    避免与 src/App.css 双份维护色值漂移（App.css 无 transition，同步还原不会闪烁） */
+function readThemeSwatch(id: string): ThemeSwatch {
+  const el = document.documentElement;
+  const prev = el.dataset.theme;
+  el.dataset.theme = id;
+  const cs = getComputedStyle(el);
+  const swatch = {
+    rail: cs.getPropertyValue("--color-rail").trim(),
+    canvas: cs.getPropertyValue("--color-canvas").trim(),
+    accent: cs.getPropertyValue("--color-cta").trim(),
+  };
+  if (prev === undefined) el.removeAttribute("data-theme");
+  else el.dataset.theme = prev;
+  return swatch;
+}
 
 const field =
   "rounded border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none focus:border-l4";
@@ -56,19 +75,27 @@ const EXTERNAL_TERMINALS: { id: string; label: string }[] = (() => {
 /** 诊断日志条目（与后端 logbuf::LogEntryDto 对应） */
 type LogEntry = { ts: string; level: string; source: string; message: string };
 
-/** 分区折叠状态在 localStorage 的键（只记被折叠的分区，默认全部展开） */
+/** 分区折叠状态在 localStorage 的键。首次仅展开高频外观，长说明按需展开。 */
 const SECTIONS_KEY = "ccode.settings.sections";
+const DEFAULT_COLLAPSED: Record<string, boolean> = {
+  stats: true,
+  integration: true,
+  update: true,
+  diag: true,
+};
 
-/** 可折叠分区：标题行整行可点（高 32px），▸/▾ 指示展开状态 */
+/** 可折叠分区：标题行整行可点（高 32px），▸/▾ 指示展开状态；badge 为标题右侧状态标记 */
 function Section({
   title,
   open,
   onToggle,
+  badge,
   children,
 }: {
   title: string;
   open: boolean;
   onToggle: () => void;
+  badge?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -81,6 +108,7 @@ function Section({
       >
         <span className="w-3 text-xs text-l4">{open ? "▾" : "▸"}</span>
         {title}
+        {badge}
       </button>
       {open && <div>{children}</div>}
     </section>
@@ -97,10 +125,13 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-3 border-b border-hairline py-3">
-      <span className="w-32 shrink-0 text-sm text-l2">{label}</span>
-      <div className="flex items-center gap-2">{children}</div>
-      {hint && <span className="text-xs text-l3">{hint}</span>}
+    <div className="border-b border-hairline py-3">
+      <div className="flex items-center gap-3">
+        <span className="w-32 shrink-0 text-sm text-l2">{label}</span>
+        <div className="ml-auto flex min-w-0 items-center gap-2">{children}</div>
+      </div>
+      {/* WKWebView/macOS 不渲染 title tooltip，说明必须常驻可见 */}
+      {hint && <p className="mt-1 text-xs text-l3">{hint}</p>}
     </div>
   );
 }
@@ -124,15 +155,23 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [rate, setRate] = useState("");
   const [pricing, setPricing] = useState("");
   const [pricingDirty, setPricingDirty] = useState(false);
+  // 未提交草稿标记（ref 镜像供 effect 内读取）：settings 变化（如切主题）时不覆盖正在编辑的输入框
+  const draftDirty = useRef(new Set<string>());
+  const pricingDirtyRef = useRef(false);
+  function markPricingDirty(d: boolean) {
+    pricingDirtyRef.current = d;
+    setPricingDirty(d);
+  }
   const [savingPricing, setSavingPricing] = useState(false);
   // 诊断日志（进程内环形缓冲，分区展开时拉最近 100 条）
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  // 分区折叠状态：默认全部展开，切换时写 localStorage
+  // 分区折叠状态：首次仅展开高频外观，切换后持久化。
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
     try {
-      return JSON.parse(localStorage.getItem(SECTIONS_KEY) ?? "{}");
+      const raw = localStorage.getItem(SECTIONS_KEY);
+      return raw ? JSON.parse(raw) : DEFAULT_COLLAPSED;
     } catch {
-      return {};
+      return DEFAULT_COLLAPSED;
     }
   });
   function toggleSection(id: string) {
@@ -150,30 +189,43 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       loadSettings().catch((e) => setError(String(e)));
       // AI 专用配置下拉需要 profile 列表
       if (profiles.length === 0) loadAll().catch(() => {});
-      invoke<string>("read_pricing_file")
-        .then((t) => {
-          setPricing(t);
-          setPricingDirty(false);
-        })
-        .catch((e) => setError(String(e)));
+      // 有未保存草稿时保留，不用文件内容覆盖
+      if (!pricingDirtyRef.current) {
+        invoke<string>("read_pricing_file")
+          .then((t) => {
+            setPricing(t);
+            markPricingDirty(false);
+          })
+          .catch((e) => setError(String(e)));
+      }
     }
   }, [visible, loadSettings]);
 
-  // settings 到达后同步草稿
+  // settings 到达后同步草稿（正在编辑、未提交的输入框跳过）
   useEffect(() => {
     if (settings) {
-      setFontSize(String(settings.terminalFontSize));
-      setScrollback(String(settings.scrollback));
-      setRate(String(settings.rateUsdCny));
-      const fam = settings.terminalFontFamily ?? "JetBrains Mono";
-      if (["JetBrains Mono", "SF Mono", "Menlo", "Consolas"].includes(fam)) {
-        setFontFamily(fam);
-      } else {
-        setFontFamily("__custom__");
-        setCustomFont(fam);
+      const dirty = draftDirty.current;
+      if (!dirty.has("fontSize"))
+        setFontSize(String(settings.terminalFontSize));
+      if (!dirty.has("scrollback")) setScrollback(String(settings.scrollback));
+      if (!dirty.has("rate")) setRate(String(settings.rateUsdCny));
+      if (!dirty.has("customFont")) {
+        const fam = settings.terminalFontFamily ?? "JetBrains Mono";
+        if (["JetBrains Mono", "SF Mono", "Menlo", "Consolas"].includes(fam)) {
+          setFontFamily(fam);
+        } else {
+          setFontFamily("__custom__");
+          setCustomFont(fam);
+        }
       }
     }
   }, [settings]);
+
+  // 主题色卡只算一次：七套主题的 CSS 变量在会话内不变
+  const themeSwatches = useMemo(
+    () => THEMES.map((t) => ({ ...t, ...readThemeSwatch(t.id) })),
+    [],
+  );
 
   async function patch(p: Parameters<typeof updateSettings>[0]) {
     setError(null);
@@ -200,7 +252,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     setError(null);
     try {
       await invoke("write_pricing_file", { text: pricing });
-      setPricingDirty(false);
+      markPricingDirty(false);
       setNotice("已保存，下一次统计查询生效");
       setTimeout(() => setNotice(null), 3000);
     } catch (e) {
@@ -267,314 +319,417 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 
-      <Section title="外观" open={!collapsed.appearance} onToggle={() => toggleSection("appearance")}>
-      {/* 主题 */}
-      <div className="border-b border-hairline py-3">
-        <div className="mb-2 text-sm text-l2">主题</div>
-        <div className="flex gap-2">
-          {THEMES.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => patch({ theme: t.id })}
-              title={`切换到${t.name}`}
-              className={`w-20 rounded-md border p-1.5 text-center text-xs ${
-                settings?.theme === t.id
-                  ? "border-cta-bd text-l1"
-                  : "border-field text-l3 hover:text-l1"
-              }`}
-            >
-              <span className="mb-1 flex h-8 overflow-hidden rounded">
-                <span className="h-full w-1/2" style={{ background: t.rail }} />
-                <span className="h-full w-1/2" style={{ background: t.canvas }} />
-                <span
-                  className="h-full w-1.5"
-                  style={{ background: t.accent }}
-                  title="强调色"
-                />
-              </span>
-              {t.name}
-              {settings?.theme === t.id && <span className="ml-0.5 text-ok-text">✓</span>}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <Row label="终端字号" hint="立即生效（11–18）">
-        <input
-          type="number"
-          min={11}
-          max={18}
-          className={`${field} w-20`}
-          value={fontSize}
-          onChange={(e) => setFontSize(e.target.value)}
-          onBlur={() =>
-            commitNumber(fontSize, 11, 18, (n) => patch({ terminalFontSize: n }))
-          }
-          onKeyDown={(e) =>
-            e.key === "Enter" &&
-            commitNumber(fontSize, 11, 18, (n) => patch({ terminalFontSize: n }))
-          }
-        />
-      </Row>
-
-      <Row label="终端字体" hint="立即生效；选「自定义」可输入系统已装字体名">
-        <div className="flex items-center gap-2">
-          <select
-            className={field}
-            value={fontFamily}
-            onChange={(e) => {
-              setFontFamily(e.target.value);
-              if (e.target.value !== "__custom__") patch({ terminalFontFamily: e.target.value });
-            }}
-          >
-            <option value="JetBrains Mono">JetBrains Mono（内置）</option>
-            <option value="SF Mono">SF Mono（macOS）</option>
-            <option value="Menlo">Menlo（macOS）</option>
-            <option value="Consolas">Consolas</option>
-            <option value="__custom__">自定义…</option>
-          </select>
-          {fontFamily === "__custom__" && (
-            <input
-              className={`${field} w-40`}
-              placeholder="字体名，如 Fira Code"
-              value={customFont}
-              onChange={(e) => setCustomFont(e.target.value)}
-              onBlur={() => customFont.trim() && patch({ terminalFontFamily: customFont.trim() })}
-              onKeyDown={(e) =>
-                e.key === "Enter" && customFont.trim() && patch({ terminalFontFamily: customFont.trim() })
-              }
-            />
-          )}
-        </div>
-      </Row>
-
-      <Row label="终端调色板" hint="立即生效">
-        <div className="flex gap-2">
-          {PALETTES.map((pl) => (
-            <button
-              key={pl.id}
-              onClick={() => patch({ terminalPalette: pl.id })}
-              title={pl.name}
-              className={`rounded-md border p-1.5 text-xs ${
-                (settings?.terminalPalette ?? "dark-plus") === pl.id
-                  ? "border-cta-bd text-l1"
-                  : "border-field text-l3 hover:text-l1"
-              }`}
-            >
-              {/* 8 色无缝色条：分段 flex-1 自适应固定宽度，色数变化也不撑破布局 */}
-              <span className="flex h-3 w-16 overflow-hidden rounded-sm">
-                {paletteDots(pl.id).map((d) => (
-                  <span key={d} className="flex-1" style={{ background: d }} />
-                ))}
-              </span>
-            </button>
-          ))}
-        </div>
-      </Row>
-
-      <Row label="滚动缓冲行数" hint="新开标签生效（1000–20000）">
-        <input
-          type="number"
-          min={1000}
-          max={20000}
-          step={1000}
-          className={`${field} w-24`}
-          value={scrollback}
-          onChange={(e) => setScrollback(e.target.value)}
-          onBlur={() => commitNumber(scrollback, 1000, 20000, (n) => patch({ scrollback: n }))}
-          onKeyDown={(e) =>
-            e.key === "Enter" && commitNumber(scrollback, 1000, 20000, (n) => patch({ scrollback: n }))
-          }
-        />
-      </Row>
-      </Section>
-
-      <Section title="统计" open={!collapsed.stats} onToggle={() => toggleSection("stats")}>
-      <Row label="汇率（USD→CNY）" hint="统计页下次查询生效">
-        <input
-          type="number"
-          step={0.01}
-          min={0}
-          className={`${field} w-24`}
-          value={rate}
-          onChange={(e) => setRate(e.target.value)}
-          onBlur={() => commitNumber(rate, 0, 100, (n) => patch({ rateUsdCny: n }))}
-          onKeyDown={(e) =>
-            e.key === "Enter" && commitNumber(rate, 0, 100, (n) => patch({ rateUsdCny: n }))
-          }
-        />
-      </Row>
-
-      {/* 自定义定价 */}
-      <div className="py-3">
-        <div className="mb-1 flex items-center gap-3">
-          <span className="w-32 shrink-0 text-sm text-l2">自定义定价</span>
-          <span className="text-xs text-l4">pricing.json，保存时校验 JSON</span>
-          <button
-            onClick={savePricing}
-            disabled={!pricingDirty || savingPricing}
-            className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
-          >
-            {savingPricing ? "保存中…" : "保存"}
-          </button>
-        </div>
-        <textarea
-          className={`${field} h-40 w-full font-mono text-xs`}
-          placeholder='{"model-id": {"input": 2.5, "output": 10}}'
-          value={pricing}
-          onChange={(e) => {
-            setPricing(e.target.value);
-            setPricingDirty(true);
-          }}
-        />
-      </div>
-      </Section>
-
-      <Section title="集成" open={!collapsed.integration} onToggle={() => toggleSection("integration")}>
-      <Row label="brew 镜像" hint="安装/更新走清华 TUNA 镜像">
-        <Toggle
-          label="brew 镜像"
-          checked={settings?.brewMirror ?? false}
-          onChange={(checked) => patch({ brewMirror: checked })}
-        />
-      </Row>
-
-      <Row label="AI 专用配置" hint="◈ 生成（提交信息/摘要/PR）固定走此配置，建议选快模型；默认自动=最近使用">
-        <select
-          className={field}
-          value={settings?.aiProfileId ?? ""}
-          onChange={(e) => patch({ aiProfileId: e.target.value })}
-        >
-          <option value="">自动（最近使用）</option>
-          {profiles.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}（{p.agent}{p.models[0] ? ` · ${p.models[0]}` : ""}）
-            </option>
-          ))}
-        </select>
-      </Row>
-
-      <Row label="外部终端" hint="会话页「⇗ 外部恢复」使用的终端应用，立即生效">
-        <select
-          className={field}
-          value={settings?.externalTerminal ?? "auto"}
-          onChange={(e) => patch({ externalTerminal: e.target.value })}
-        >
-          {EXTERNAL_TERMINALS.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.label}
-            </option>
-          ))}
-        </select>
-      </Row>
-      </Section>
-
-      <Section title="更新" open={!collapsed.update} onToggle={() => toggleSection("update")}>
-      <div className="py-3">
-        {appUpdate ? (
-          <>
-            <div className="mb-2 flex items-center gap-2">
-              <span className="text-sm text-l2">
-                发现新版本 <span className="text-l1">v{appUpdate.version}</span>
-                <span className="ml-2 text-xs text-l4">当前 v{appUpdate.currentVersion}</span>
-              </span>
+      <Section
+        title="外观"
+        open={!collapsed.appearance}
+        onToggle={() => toggleSection("appearance")}
+      >
+        {/* 主题 */}
+        <div className="border-b border-hairline py-3">
+          <div className="mb-2 text-sm text-l2">主题</div>
+          <div className="flex flex-wrap gap-2">
+            {themeSwatches.map((t) => (
               <button
-                onClick={installUpdate}
-                disabled={installing}
-                className="ml-auto h-8 rounded border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                key={t.id}
+                onClick={() => patch({ theme: t.id })}
+                title={`切换到${t.name}`}
+                className={`w-20 rounded-md border p-1.5 text-center text-xs ${
+                  settings?.theme === t.id
+                    ? "border-cta-bd text-l1"
+                    : "border-field text-l3 hover:text-l1"
+                }`}
               >
-                {installing ? "下载安装中…" : "下载并安装"}
+                <span className="mb-1 flex h-8 overflow-hidden rounded">
+                  <span
+                    className="h-full w-1/2"
+                    style={{ background: t.rail }}
+                  />
+                  <span
+                    className="h-full w-1/2"
+                    style={{ background: t.canvas }}
+                  />
+                  <span
+                    className="h-full w-1.5"
+                    style={{ background: t.accent }}
+                    title="强调色"
+                  />
+                </span>
+                {t.name}
+                {settings?.theme === t.id && (
+                  <span className="ml-0.5 text-ok-text">✓</span>
+                )}
               </button>
-            </div>
-            {appUpdate.body && (
-              <div className="max-h-48 overflow-auto whitespace-pre-line rounded bg-inset p-2 text-xs leading-5 text-l3">
-                {appUpdate.body}
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-l4">未发现新版本（启动时已自动检查）</span>
-            <button
-              onClick={() => checkAppUpdate()}
-              className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
-            >
-              重新检查
-            </button>
-          </div>
-        )}
-      </div>
-      </Section>
-
-      <Section title="诊断" open={!collapsed.diag} onToggle={() => toggleSection("diag")}>
-      <div className="py-3">
-        <div className="mb-2 flex items-center gap-2">
-          <span className="text-xs text-l4">
-            最近 100 条应用日志（进程内缓冲，重启即清空）
-          </span>
-          <button
-            onClick={loadLogs}
-            className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
-          >
-            刷新
-          </button>
-          <button
-            onClick={copyLogs}
-            disabled={logs.length === 0}
-            className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
-          >
-            复制全部
-          </button>
-          <button
-            onClick={async () => {
-              setError(null);
-              try {
-                const path = await invoke<string>("export_app_log");
-                setNotice(`已导出：${path}`);
-                setTimeout(() => setNotice(null), 4000);
-              } catch (e) {
-                setError(String(e));
-              }
-            }}
-            disabled={logs.length === 0}
-            title="导出为 txt 到 ~/Downloads/ccode-exports/，反馈问题时发给开发者"
-            className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
-          >
-            导出
-          </button>
-          <button
-            onClick={clearLogs}
-            disabled={logs.length === 0}
-            className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
-          >
-            清空
-          </button>
-        </div>
-        {logs.length === 0 ? (
-          <p className="text-xs text-l4">暂无日志</p>
-        ) : (
-          <div className="max-h-64 overflow-auto rounded bg-inset p-2 font-mono text-xs leading-5">
-            {logs.map((l, i) => (
-              <div key={i} className="break-all">
-                <span className="text-l4">{l.ts.replace("T", " ").replace("Z", "")} </span>
-                <span
-                  className={
-                    l.level === "error"
-                      ? "text-err-text"
-                      : l.level === "warn"
-                        ? "text-warn-text"
-                        : "text-l3"
-                  }
-                >
-                  [{l.level}]
-                </span>{" "}
-                <span className="text-l3">{l.source}:</span>{" "}
-                <span className="text-l2">{l.message}</span>
-              </div>
             ))}
           </div>
-        )}
-      </div>
+        </div>
+
+        <Row label="终端字号" hint="立即生效（11–18）">
+          <input
+            type="number"
+            min={11}
+            max={18}
+            className={`${field} w-20`}
+            value={fontSize}
+            onChange={(e) => {
+              draftDirty.current.add("fontSize");
+              setFontSize(e.target.value);
+            }}
+            onBlur={() => {
+              draftDirty.current.delete("fontSize");
+              commitNumber(fontSize, 11, 18, (n) =>
+                patch({ terminalFontSize: n }),
+              );
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              draftDirty.current.delete("fontSize");
+              commitNumber(fontSize, 11, 18, (n) =>
+                patch({ terminalFontSize: n }),
+              );
+            }}
+          />
+        </Row>
+
+        <Row label="终端字体" hint="立即生效；选「自定义」可输入系统已装字体名">
+          <div className="flex items-center gap-2">
+            <select
+              className={field}
+              value={fontFamily}
+              onChange={(e) => {
+                setFontFamily(e.target.value);
+                if (e.target.value !== "__custom__") {
+                  draftDirty.current.delete("customFont");
+                  patch({ terminalFontFamily: e.target.value });
+                } else {
+                  // 选中「自定义」但未提交字体名，同属未提交草稿
+                  draftDirty.current.add("customFont");
+                }
+              }}
+            >
+              <option value="JetBrains Mono">JetBrains Mono（内置）</option>
+              <option value="SF Mono">SF Mono（macOS）</option>
+              <option value="Menlo">Menlo（macOS）</option>
+              <option value="Consolas">Consolas</option>
+              <option value="__custom__">自定义…</option>
+            </select>
+            {fontFamily === "__custom__" && (
+              <input
+                className={`${field} w-40`}
+                placeholder="字体名，如 Fira Code"
+                value={customFont}
+                onChange={(e) => {
+                  draftDirty.current.add("customFont");
+                  setCustomFont(e.target.value);
+                }}
+                onBlur={() => {
+                  if (customFont.trim()) {
+                    draftDirty.current.delete("customFont");
+                    patch({ terminalFontFamily: customFont.trim() });
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && customFont.trim()) {
+                    draftDirty.current.delete("customFont");
+                    patch({ terminalFontFamily: customFont.trim() });
+                  }
+                }}
+              />
+            )}
+          </div>
+        </Row>
+
+        <Row label="终端调色板" hint="立即生效">
+          <div className="flex gap-2">
+            {PALETTES.map((pl) => (
+              <button
+                key={pl.id}
+                onClick={() => patch({ terminalPalette: pl.id })}
+                title={pl.name}
+                className={`rounded-md border p-1.5 text-xs ${
+                  (settings?.terminalPalette ?? "dark-plus") === pl.id
+                    ? "border-cta-bd text-l1"
+                    : "border-field text-l3 hover:text-l1"
+                }`}
+              >
+                {/* 8 色无缝色条：分段 flex-1 自适应固定宽度，色数变化也不撑破布局 */}
+                <span className="flex h-3 w-16 overflow-hidden rounded-sm">
+                  {paletteDots(pl.id).map((d) => (
+                    <span
+                      key={d}
+                      className="flex-1"
+                      style={{ background: d }}
+                    />
+                  ))}
+                </span>
+              </button>
+            ))}
+          </div>
+        </Row>
+
+        <Row label="滚动缓冲行数" hint="新开标签生效（1000–20000）">
+          <input
+            type="number"
+            min={1000}
+            max={20000}
+            step={1000}
+            className={`${field} w-24`}
+            value={scrollback}
+            onChange={(e) => {
+              draftDirty.current.add("scrollback");
+              setScrollback(e.target.value);
+            }}
+            onBlur={() => {
+              draftDirty.current.delete("scrollback");
+              commitNumber(scrollback, 1000, 20000, (n) =>
+                patch({ scrollback: n }),
+              );
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              draftDirty.current.delete("scrollback");
+              commitNumber(scrollback, 1000, 20000, (n) =>
+                patch({ scrollback: n }),
+              );
+            }}
+          />
+        </Row>
+      </Section>
+
+      <Section
+        title="统计"
+        open={!collapsed.stats}
+        onToggle={() => toggleSection("stats")}
+      >
+        <Row label="汇率（USD→CNY）" hint="统计页下次查询生效">
+          <input
+            type="number"
+            step={0.01}
+            min={0}
+            className={`${field} w-24`}
+            value={rate}
+            onChange={(e) => {
+              draftDirty.current.add("rate");
+              setRate(e.target.value);
+            }}
+            onBlur={() => {
+              draftDirty.current.delete("rate");
+              commitNumber(rate, 0, 100, (n) => patch({ rateUsdCny: n }));
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              draftDirty.current.delete("rate");
+              commitNumber(rate, 0, 100, (n) => patch({ rateUsdCny: n }));
+            }}
+          />
+        </Row>
+
+        {/* 自定义定价 */}
+        <div className="py-3">
+          <div className="mb-1 flex items-center gap-3">
+            <span className="w-32 shrink-0 text-sm text-l2">自定义定价</span>
+            <span className="text-xs text-l4">
+              pricing.json，保存时校验 JSON
+            </span>
+            <button
+              onClick={savePricing}
+              disabled={!pricingDirty || savingPricing}
+              className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+            >
+              {savingPricing ? "保存中…" : "保存"}
+            </button>
+          </div>
+          <textarea
+            className={`${field} h-40 w-full font-mono text-xs`}
+            placeholder='{"model-id": {"input": 2.5, "output": 10}}'
+            value={pricing}
+            onChange={(e) => {
+              setPricing(e.target.value);
+              markPricingDirty(true);
+            }}
+          />
+        </div>
+      </Section>
+
+      <Section
+        title="集成"
+        open={!collapsed.integration}
+        onToggle={() => toggleSection("integration")}
+      >
+        <Row label="brew 镜像" hint="安装/更新走清华 TUNA 镜像">
+          <Toggle
+            label="brew 镜像"
+            checked={settings?.brewMirror ?? false}
+            onChange={(checked) => patch({ brewMirror: checked })}
+          />
+        </Row>
+
+        <Row
+          label="AI 专用配置"
+          hint="◈ 生成（提交信息/摘要/PR）固定走此配置，建议选快模型；默认自动=最近使用"
+        >
+          <select
+            className={field}
+            value={settings?.aiProfileId ?? ""}
+            onChange={(e) => patch({ aiProfileId: e.target.value })}
+          >
+            <option value="">自动（最近使用）</option>
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}（{p.agent}
+                {p.models[0] ? ` · ${p.models[0]}` : ""}）
+              </option>
+            ))}
+          </select>
+        </Row>
+
+        <Row
+          label="外部终端"
+          hint="对话页「⇗ 外部恢复」使用的终端应用，立即生效"
+        >
+          <select
+            className={field}
+            value={settings?.externalTerminal ?? "auto"}
+            onChange={(e) => patch({ externalTerminal: e.target.value })}
+          >
+            {EXTERNAL_TERMINALS.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </Row>
+      </Section>
+
+      <Section
+        title="更新"
+        open={appUpdate ? true : !collapsed.update}
+        onToggle={() => toggleSection("update")}
+        badge={
+          // 有新版本时强制展开并在标题加标记，避免静默检查结果无人感知
+          appUpdate ? (
+            <span className="ml-1 inline-flex items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs font-normal text-l3">
+              <span className="size-1.5 rounded-full bg-ok-text" />
+              v{appUpdate.version} 可更新
+            </span>
+          ) : undefined
+        }
+      >
+        <div className="py-3">
+          {appUpdate ? (
+            <>
+              <div className="mb-2 flex items-center gap-2">
+                <span className="text-sm text-l2">
+                  发现新版本{" "}
+                  <span className="text-l1">v{appUpdate.version}</span>
+                  <span className="ml-2 text-xs text-l4">
+                    当前 v{appUpdate.currentVersion}
+                  </span>
+                </span>
+                <button
+                  onClick={installUpdate}
+                  disabled={installing}
+                  className="ml-auto h-8 rounded border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                >
+                  {installing ? "下载安装中…" : "下载并安装"}
+                </button>
+              </div>
+              {appUpdate.body && (
+                <div className="max-h-48 overflow-auto whitespace-pre-line rounded bg-inset p-2 text-xs leading-5 text-l3">
+                  {appUpdate.body}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-l4">
+                未发现新版本（启动时已自动检查）
+              </span>
+              <button
+                onClick={() => checkAppUpdate()}
+                className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+              >
+                重新检查
+              </button>
+            </div>
+          )}
+        </div>
+      </Section>
+
+      <Section
+        title="诊断"
+        open={!collapsed.diag}
+        onToggle={() => toggleSection("diag")}
+      >
+        <div className="py-3">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="text-xs text-l4">
+              最近 100 条应用日志（进程内缓冲，重启即清空）
+            </span>
+            <button
+              onClick={loadLogs}
+              className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+            >
+              刷新
+            </button>
+            <button
+              onClick={copyLogs}
+              disabled={logs.length === 0}
+              className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+            >
+              复制全部
+            </button>
+            <button
+              onClick={async () => {
+                setError(null);
+                try {
+                  const path = await invoke<string>("export_app_log");
+                  setNotice(`已导出：${path}`);
+                  setTimeout(() => setNotice(null), 4000);
+                } catch (e) {
+                  setError(String(e));
+                }
+              }}
+              disabled={logs.length === 0}
+              title="导出为 txt 到 ~/Downloads/ccode-exports/，反馈问题时发给开发者"
+              className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+            >
+              导出
+            </button>
+            <button
+              onClick={clearLogs}
+              disabled={logs.length === 0}
+              className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+            >
+              清空
+            </button>
+          </div>
+          {logs.length === 0 ? (
+            <p className="text-xs text-l4">暂无日志</p>
+          ) : (
+            <div className="max-h-64 overflow-auto rounded bg-inset p-2 font-mono text-xs leading-5">
+              {logs.map((l, i) => (
+                <div key={i} className="break-all">
+                  <span className="text-l4">
+                    {l.ts.replace("T", " ").replace("Z", "")}{" "}
+                  </span>
+                  <span
+                    className={
+                      l.level === "error"
+                        ? "text-err-text"
+                        : l.level === "warn"
+                          ? "text-warn-text"
+                          : "text-l3"
+                    }
+                  >
+                    [{l.level}]
+                  </span>{" "}
+                  <span className="text-l3">{l.source}:</span>{" "}
+                  <span className="text-l2">{l.message}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </Section>
     </PageFrame>
   );

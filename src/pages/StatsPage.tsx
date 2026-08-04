@@ -1,8 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
 import type { UsageStatsDto } from "../types";
-import { Checkbox, LoadingRows, PageFrame, PageHeader } from "../components/PageFrame";
+import {
+  Checkbox,
+  LoadingRows,
+  PageFrame,
+  PageHeader,
+} from "../components/PageFrame";
 
 type Range = "today" | "week" | "month" | "all";
 
@@ -15,7 +20,8 @@ const RANGES: { id: Range; label: string }[] = [
 
 /** 紧凑数字：1234567 → 1.2M，12345 → 12K */
 function compact(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (n >= 1_000_000)
+    return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
   return String(n);
 }
@@ -41,8 +47,8 @@ function basename(p: string): string {
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
 /**
- * 每个 agent 的进度条色相：从现有设计令牌取色（低饱和、状态色系的浅字档），
- * 未知 agent 按列表序循环兜底。随主题切换联动的令牌用 CSS 变量引用。
+ * 每个 agent 的进度条色相：从现有设计令牌取色（低饱和、状态色系的浅字档）。
+ * 随主题切换联动的令牌用 CSS 变量引用。
  */
 const AGENT_COLORS: Record<string, string> = {
   "claude-code": "var(--color-ok-text)",
@@ -52,14 +58,14 @@ const AGENT_COLORS: Record<string, string> = {
   opencode: "var(--color-add)",
   kimi: "var(--color-tabline)",
 };
-const FALLBACK_COLORS = [
-  "var(--color-ok-text)",
-  "var(--color-link)",
-  "var(--color-warn-text)",
-  "var(--color-err-text)",
-];
-const agentColor = (id: string, i: number) =>
-  AGENT_COLORS[id] ?? FALLBACK_COLORS[i % FALLBACK_COLORS.length];
+/** 未知 agent 兜底：按 id 哈希取 HSL 色，确定性且不再复用上方令牌池
+    （原按列表序循环同一组令牌，未知 agent 会与已知 agent 固定色撞色） */
+function fallbackColor(id: string): string {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360} 45% 65%)`;
+}
+const agentColor = (id: string) => AGENT_COLORS[id] ?? fallbackColor(id);
 
 export default function StatsPage({ visible }: { visible: boolean }) {
   const [range, setRange] = useState<Range>("week");
@@ -75,15 +81,21 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     () => localStorage.getItem("ccode.stats.showInternal") === "1",
   );
 
+  // 并发守卫：快速切换范围时旧响应不得覆盖新范围
+  const loadSeq = useRef(0);
+
   async function load(r: Range) {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      setStats(await invoke<UsageStatsDto>("get_usage_stats", { range: r }));
+      const res = await invoke<UsageStatsDto>("get_usage_stats", { range: r });
+      if (seq !== loadSeq.current) return;
+      setStats(res);
       setError(null);
     } catch (e) {
-      setError(String(e));
+      if (seq === loadSeq.current) setError(String(e));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }
 
@@ -100,7 +112,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
       const res = await invoke<{ sessionsIndexed: number; rows: number }>(
         "rebuild_usage_index",
       );
-      setNotice(`已索引 ${res.sessionsIndexed} 个会话`);
+      setNotice(`已索引 ${res.sessionsIndexed} 个对话`);
+      setTimeout(() => setNotice(null), 4000);
       setError(null);
       await load(range);
     } catch (e) {
@@ -173,44 +186,66 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
   return (
     <PageFrame width="standard">
-      <PageHeader
-        title="用量统计"
-        actions={
-          <div className="flex items-center gap-2">
+      <PageHeader title="用量统计" />
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-1">
+          {RANGES.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setRange(item.id)}
+              className={`rounded px-2.5 py-1 text-xs ${
+                range === item.id
+                  ? "bg-seg-sel text-l1"
+                  : "text-l3 hover:text-l1"
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1">
+          <Checkbox
+            checked={showInternal}
+            onChange={(checked) => {
+              setShowInternal(checked);
+              localStorage.setItem(
+                "ccode.stats.showInternal",
+                checked ? "1" : "0",
+              );
+            }}
+            label="显示内部活动"
+            className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5"
+          />
           <button
+            type="button"
             onClick={toggleCurrency}
-            title="切换货币（$ 美元 / ¥ 人民币，按官方价换算）"
+            title="切换货币（$ 美元 / ¥ 人民币）"
             className="w-7 rounded px-1 py-1 text-xs text-l3 hover:text-l1"
           >
             {currency}
           </button>
-          <div className="flex gap-1">
-            {RANGES.map((r) => (
-              <button
-                key={r.id}
-                onClick={() => setRange(r.id)}
-                className={`rounded px-2.5 py-1 text-xs ${
-                  range === r.id ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
-                }`}
-              >
-                {r.label}
-              </button>
-            ))}
-          </div>
           <button
-            onClick={onRebuild}
+            type="button"
+            onClick={() => void onRebuild()}
             disabled={rebuilding}
-            className="rounded px-2 py-1 text-sm text-l2 hover:bg-white/5 disabled:opacity-50"
+            className="rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
           >
             {rebuilding ? "索引中…" : "刷新"}
           </button>
-          </div>
-        }
-      />
+          {/* 切换范围时保留旧数据，仅局部提示加载，骨架只用于首载 */}
+          {loading && stats !== null && (
+            <span className="px-1 text-xs text-l4">加载中…</span>
+          )}
+        </div>
+      </div>
+      <p className="mb-3 text-xs text-l4">
+        费用按官方公开价估算；≥ 表示另含未计价用量，~ 表示没有可用价格
+      </p>
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 
-      {!stats || loading ? (
+      {!stats ? (
         <LoadingRows />
       ) : empty ? (
         <p className="py-8 text-sm text-l4">
@@ -219,7 +254,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
       ) : (
         <>
           {/* 概览卡片 */}
-          <div className="mb-6 grid grid-cols-5 gap-2">
+          <div className="mb-6 grid grid-cols-2 gap-2 sm:grid-cols-5">
             <div className="rounded bg-inset p-3">
               <div className="text-xs text-l4">输入 tokens</div>
               <div className="mt-1 text-lg font-semibold text-l1">
@@ -242,17 +277,21 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               </div>
             </div>
             <div className="rounded bg-inset p-3">
-              <div className="text-xs text-l4">会话数</div>
+              <div className="text-xs text-l4">对话数</div>
               <div className="mt-1 text-lg font-semibold text-l1">
                 {compact(stats.cards.sessions)}
               </div>
             </div>
             <div className="rounded bg-inset p-3">
-              <div className="text-xs text-l4">估算费用</div>
+              <div className="text-xs text-l4">费用</div>
               <div className="mt-1 text-lg font-semibold text-l1">
-                {fmtCost(stats.cards.costUsd, currency, rate, stats.cards.costPartial)}
+                {fmtCost(
+                  stats.cards.costUsd,
+                  currency,
+                  rate,
+                  stats.cards.costPartial,
+                )}
               </div>
-              <div className="mt-0.5 text-xs text-l3">官方公开价</div>
             </div>
           </div>
 
@@ -261,27 +300,34 @@ export default function StatsPage({ visible }: { visible: boolean }) {
             <section className="mb-6">
               <h2 className="mb-2 text-sm font-medium text-l1">按 Agent</h2>
               <ul className="divide-y divide-hairline">
-                {stats.byAgent.map((a, i) => {
+                {stats.byAgent.map((a) => {
                   const share = a.tokens / totalAgentTokens;
                   return (
-                    <li key={a.agent} className="flex items-center gap-3 py-2 text-sm">
+                    <li
+                      key={a.agent}
+                      className="flex items-center gap-3 py-2 text-sm"
+                    >
                       <span
                         className="size-2 shrink-0 rounded-full"
-                        style={{ backgroundColor: agentColor(a.agent, i) }}
+                        style={{ backgroundColor: agentColor(a.agent) }}
                       />
-                      <span className="w-24 shrink-0 text-l2">{agentLabel(a.agent)}</span>
-                      <span
-                        className="shrink-0 text-xs text-l4"
-                        title={`统计范围内使用了 ${a.modelCount} 个不同模型`}
-                      >
-                        {a.modelCount} 模型
+                      <span className="w-24 shrink-0">
+                        <span className="block text-l2">
+                          {agentLabel(a.agent)}
+                        </span>
+                        <span
+                          className="block text-xs text-l4"
+                          title={`统计范围内使用了 ${a.modelCount} 个不同模型`}
+                        >
+                          {a.modelCount} 个模型
+                        </span>
                       </span>
                       <span className="h-2 min-w-0 flex-1 rounded bg-hairline">
                         <span
                           className="block h-2 rounded"
                           style={{
                             width: `${Math.max(1.5, share * 100)}%`,
-                            backgroundColor: agentColor(a.agent, i),
+                            backgroundColor: agentColor(a.agent),
                           }}
                         />
                       </span>
@@ -304,25 +350,16 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           {/* 按项目 */}
           {projectRows.length > 0 && (
             <section className="mb-6">
-              <div className="mb-2 flex items-center justify-between">
-                <h2 className="text-sm font-medium text-l1">按项目（前 20）</h2>
-                <Checkbox
-                  checked={showInternal}
-                  onChange={(checked) => {
-                    setShowInternal(checked);
-                    localStorage.setItem("ccode.stats.showInternal", checked ? "1" : "0");
-                  }}
-                  label="显示内部活动"
-                  className="text-xs text-l3"
-                />
-              </div>
+              <h2 className="mb-2 text-sm font-medium text-l1">
+                按项目（前 20）
+              </h2>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-hairline">
                     <th className={th}>项目</th>
-                    <th className={`${th} text-right`}>会话数</th>
+                    <th className={`${th} text-right`}>对话数</th>
                     <th className={`${th} text-right`}>tokens</th>
-                    <th className={`${th} text-right`}>费用(官方价)</th>
+                    <th className={`${th} text-right`}>费用</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -331,10 +368,15 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                       key={`${p.internal}-${p.source}-${p.projectPath}`}
                       className="border-b border-hairline"
                     >
-                      <td className="max-w-0 truncate px-2 py-2 text-l2" title={p.projectPath}>
+                      <td
+                        className="max-w-0 truncate px-2 py-2 text-l2"
+                        title={p.projectPath}
+                      >
                         {basename(p.projectPath)}
                       </td>
-                      <td className="px-2 py-2 text-right text-xs text-l3">{p.sessions}</td>
+                      <td className="px-2 py-2 text-right text-xs text-l3">
+                        {p.sessions}
+                      </td>
                       <td className="px-2 py-2 text-right font-mono text-xs text-l2">
                         {compact(p.tokens)}
                       </td>
@@ -358,7 +400,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                     <th className={th}>模型</th>
                     <th className={`${th} text-right`}>输入</th>
                     <th className={`${th} text-right`}>输出</th>
-                    <th className={`${th} text-right`}>费用(官方价)</th>
+                    <th className={`${th} text-right`}>费用</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -367,7 +409,10 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                       key={`${m.internal}-${m.source}-${m.model}`}
                       className="border-b border-hairline"
                     >
-                      <td className="max-w-0 truncate px-2 py-2 text-l2" title={m.model}>
+                      <td
+                        className="max-w-0 truncate px-2 py-2 text-l2"
+                        title={m.model}
+                      >
                         {m.model || "（未知）"}
                       </td>
                       <td className="px-2 py-2 text-right font-mono text-xs text-l3">
@@ -385,9 +430,6 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               </table>
             </section>
           )}
-          <p className="mt-6 text-xs text-l3">
-            官方公开价估算，非中转实际账单；≥ 表示另含未计价用量，~ 表示没有可用价格
-          </p>
         </>
       )}
     </PageFrame>

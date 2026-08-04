@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -6,7 +6,11 @@ import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS } from "../presets";
 import ContextMenu from "../components/ContextMenu";
-import { PageFrame, PageHeader, primaryActionClass } from "../components/PageFrame";
+import {
+  PageFrame,
+  PageHeader,
+  primaryActionClass,
+} from "../components/PageFrame";
 import type {
   GlobalApplyResultDto,
   Profile,
@@ -45,7 +49,10 @@ function ProfileModal({
   const [fetchedModels, setFetchedModels] = useState<string[] | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [testResult, setTestResult] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -183,13 +190,17 @@ function ProfileModal({
             <select
               className={field}
               value={form.agent}
-              onChange={(e) =>
+              onChange={(e) => {
                 setForm({
                   ...form,
                   agent: e.target.value,
                   protocol: AGENT_PROTOCOLS[e.target.value]?.default ?? null,
-                })
-              }
+                });
+                // 端点测试/模型拉取结果属于旧 agent，切换后一并清空
+                setTestResult(null);
+                setFetchError(null);
+                setFetchedModels(null);
+              }}
             >
               {AGENTS.map((a) => (
                 <option key={a.id} value={a.id}>
@@ -222,7 +233,9 @@ function ProfileModal({
               type="button"
               onClick={testConnection}
               disabled={testing || !form.baseUrl.trim()}
-              title={form.baseUrl.trim() ? "验证端点与密钥连通性" : "先填写 Base URL"}
+              title={
+                form.baseUrl.trim() ? "验证端点与密钥连通性" : "先填写 Base URL"
+              }
               className="w-20 shrink-0 rounded bg-btn px-2 py-1 text-xs text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               {testing ? "测试中…" : "测试"}
@@ -230,7 +243,9 @@ function ProfileModal({
           </div>
         </label>
         {testResult && (
-          <p className={`-mt-2 mb-3 text-xs ${testResult.ok ? "text-ok-text" : "text-err-text"}`}>
+          <p
+            className={`-mt-2 mb-3 text-xs ${testResult.ok ? "text-ok-text" : "text-err-text"}`}
+          >
             {testResult.text}
           </p>
         )}
@@ -240,7 +255,9 @@ function ProfileModal({
             className={field}
             type="password"
             autoComplete="new-password"
-            placeholder={initial ? "留空则不修改" : "存入本地受限文件（0600），不回显"}
+            placeholder={
+              initial ? "留空则不修改" : "存入本地受限文件（0600），不回显"
+            }
             value={form.apiKey}
             onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
           />
@@ -258,7 +275,9 @@ function ProfileModal({
                 title={sw.hint}
                 className={`mb-2 text-xs ${over ? "text-warn-text" : "text-l3"}`}
               >
-                {sw.max != null ? `最多 ${sw.max} 个模型可进入 CLI 选择器` : "模型数量不限"}
+                {sw.max != null
+                  ? `最多 ${sw.max} 个模型可进入 CLI 选择器`
+                  : "模型数量不限"}
                 {over && `；当前超出 ${form.models.length - (sw.max ?? 0)} 个`}
               </p>
             );
@@ -268,7 +287,11 @@ function ProfileModal({
               type="button"
               onClick={fetchModels}
               disabled={fetching || !form.baseUrl.trim()}
-              title={form.baseUrl.trim() ? "从 Base URL 拉取可用模型" : "先填写 Base URL"}
+              title={
+                form.baseUrl.trim()
+                  ? "从 Base URL 拉取可用模型"
+                  : "先填写 Base URL"
+              }
               className="shrink-0 rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               {fetching ? "获取中…" : "获取模型"}
@@ -298,7 +321,9 @@ function ProfileModal({
               <span className="text-xs text-l4">接口返回 0 个模型</span>
             )}
           </div>
-          {fetchError && <p className="mb-2 text-xs text-err-text">{fetchError}</p>}
+          {fetchError && (
+            <p className="mb-2 text-xs text-err-text">{fetchError}</p>
+          )}
           {form.models.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
               {form.models.map((m, i) => (
@@ -312,7 +337,10 @@ function ProfileModal({
                     type="button"
                     aria-label={`移除 ${m}`}
                     onClick={() =>
-                      setForm({ ...form, models: form.models.filter((x) => x !== m) })
+                      setForm({
+                        ...form,
+                        models: form.models.filter((x) => x !== m),
+                      })
                     }
                     className="text-l4 hover:text-err-text"
                   >
@@ -356,10 +384,14 @@ function ProfileModal({
                 <select
                   className={field}
                   value={form.protocol ?? AGENT_PROTOCOLS[form.agent].default}
-                  onChange={(e) => setForm({ ...form, protocol: e.target.value })}
+                  onChange={(e) =>
+                    setForm({ ...form, protocol: e.target.value })
+                  }
                 >
                   {AGENT_PROTOCOLS[form.agent].options.map((p) => (
-                    <option key={p} value={p}>{p}</option>
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
                   ))}
                 </select>
               </label>
@@ -370,9 +402,13 @@ function ProfileModal({
               </span>
               <textarea
                 className={`${field} h-20 font-mono text-xs`}
-                placeholder={"HTTPS_PROXY=http://127.0.0.1:7890\nANTHROPIC_SMALL_FAST_MODEL=claude-haiku"}
+                placeholder={
+                  "HTTPS_PROXY=http://127.0.0.1:7890\nANTHROPIC_SMALL_FAST_MODEL=claude-haiku"
+                }
                 value={form.extraEnvText}
-                onChange={(e) => setForm({ ...form, extraEnvText: e.target.value })}
+                onChange={(e) =>
+                  setForm({ ...form, extraEnvText: e.target.value })
+                }
               />
             </label>
           </div>
@@ -438,26 +474,21 @@ const MODEL_SWITCH: Record<string, { max: number | null; hint: string }> = {
     max: 5,
     hint: "前 4 个占 SONNET/OPUS/HAIKU/FABLE 别名槽，第 5 个占自定义槽；超出的只能 /model <id> 手输",
   },
-  codex: { max: null, hint: "启动时生成模型 catalog，/model 选择器列出全部已配置模型" },
-  gemini: { max: 1, hint: "CLI 无多模型注入机制，多模型只能在 TUI 里 /model set 手动切换" },
-  qwen: { max: 1, hint: "多模型需「⋯ → 设为全局」写入配置后才能在 /model 里切换" },
+  codex: {
+    max: null,
+    hint: "启动时生成模型 catalog，/model 选择器列出全部已配置模型",
+  },
+  gemini: {
+    max: 1,
+    hint: "CLI 无多模型注入机制，多模型只能在 TUI 里 /model set 手动切换",
+  },
+  qwen: {
+    max: 1,
+    hint: "多模型需「⋯ → 设为全局」写入配置后才能在 /model 里切换",
+  },
   opencode: { max: null, hint: "全部已配置模型都会注册，可在 TUI 自由切换" },
   kimi: { max: 1, hint: "多模型需「⋯ → 设为全局」写入配置后才能在模型页切换" },
 };
-
-function relTime(iso: string | null): string {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const min = Math.floor((Date.now() - t) / 60000);
-  if (min < 1) return "刚刚";
-  if (min < 60) return `${min} 分钟前`;
-  const h = Math.floor(min / 60);
-  if (h < 24) return `${h} 小时前`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d} 天前`;
-  return new Date(t).toLocaleDateString("zh-CN");
-}
 
 function displayHost(baseUrl: string): string {
   const value = baseUrl.trim();
@@ -470,7 +501,9 @@ function displayHost(baseUrl: string): string {
       .split(/[/?#\s]/)[0]
       .split("@");
     const authority = parts[parts.length - 1];
-    return authority && /^[\w.:[\]-]+$/.test(authority) ? authority : "自定义端点";
+    return authority && /^[\w.:[\]-]+$/.test(authority)
+      ? authority
+      : "自定义端点";
   }
 }
 
@@ -529,15 +562,22 @@ function ValidationDialog({
     ["API / 模型", result?.api ?? null],
   ];
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+      onClick={onClose}
+    >
       <section
         className="w-full max-w-xl rounded-lg border border-field bg-strip"
         onClick={(event) => event.stopPropagation()}
       >
         <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-medium text-l1">验证配置 · {profile.name}</h2>
-            <p className="mt-0.5 text-xs text-l4">密钥只在后端用于预检，不会返回界面</p>
+            <h2 className="truncate text-sm font-medium text-l1">
+              验证配置 · {profile.name}
+            </h2>
+            <p className="mt-0.5 text-xs text-l4">
+              密钥只在后端用于预检，不会返回界面
+            </p>
           </div>
           <button
             type="button"
@@ -549,17 +589,27 @@ function ValidationDialog({
         </header>
         <div className="divide-y divide-hairline">
           {rows.map(([label, item], index) => (
-            <div key={label} className="grid grid-cols-[24px_112px_1fr] gap-2 px-4 py-3 text-xs">
+            <div
+              key={label}
+              className="grid grid-cols-[24px_112px_1fr] gap-2 px-4 py-3 text-xs"
+            >
               <span className={item ? validationTone(item.status) : "text-l4"}>
-                {item?.status === "passed" ? "✓" : item?.status === "failed" ? "✗" : "—"}
+                {item?.status === "passed"
+                  ? "✓"
+                  : item?.status === "failed"
+                    ? "✗"
+                    : "—"}
               </span>
               <span className="font-medium text-l2">{label}</span>
               <div className="min-w-0 text-l3">
                 <p className="break-words">
-                  {item?.message ?? (running && index === 0 ? "正在检查…" : "等待检查")}
+                  {item?.message ??
+                    (running && index === 0 ? "正在检查…" : "等待检查")}
                 </p>
                 {item?.latencyMs != null && (
-                  <span className="mt-1 block font-mono text-l4">{item.latencyMs}ms</span>
+                  <span className="mt-1 block font-mono text-l4">
+                    {item.latencyMs}ms
+                  </span>
                 )}
               </div>
             </div>
@@ -567,10 +617,14 @@ function ValidationDialog({
         </div>
         <footer className="border-t border-hairline px-4 py-3 text-xs">
           {running ? (
-            <span className="text-l3">正在执行 CLI 与最小模型列表请求，最长约 35 秒…</span>
+            <span className="text-l3">
+              正在执行 CLI 与最小模型列表请求，最长约 35 秒…
+            </span>
           ) : result ? (
             <span className={result.ok ? "text-ok-text" : "text-err-text"}>
-              {result.ok ? "✓ 三层验证完成" : "✗ 存在未通过项目，请按上方信息修复后重试"}
+              {result.ok
+                ? "✓ 三层验证完成"
+                : "✗ 存在未通过项目，请按上方信息修复后重试"}
             </span>
           ) : null}
         </footer>
@@ -579,34 +633,80 @@ function ValidationDialog({
   );
 }
 
+/** 后端恒返回用量 DTO，零用量（全 0）不显示「用量与费用」入口 */
+function hasUsage(u: ProfileUsageDto | undefined): boolean {
+  return !!u && (u.input > 0 || u.output > 0);
+}
+
 export default function ProfilesPage() {
   const profiles = useAppStore((s) => s.profiles);
   const [usageMap, setUsageMap] = useState<Record<string, ProfileUsageDto>>({});
-  const [usagePop, setUsagePop] = useState<{ x: number; y: number; id: string } | null>(null);
+  const [usagePop, setUsagePop] = useState<{
+    x: number;
+    y: number;
+    id: string;
+  } | null>(null);
 
   // 各 profile 用量（按模型近似归属；模型跨 profile 共享时会重复计入）
   useEffect(() => {
-    if (!profiles.length) return;
+    // profiles 清空时同步清表，避免残留已删除 profile 的陈旧条目
+    if (!profiles.length) {
+      setUsageMap({});
+      return;
+    }
+    // profiles 快速变化时旧批次可能晚返回，cancelled 阻止整表覆盖新结果
+    let cancelled = false;
     Promise.all(
       profiles.map(async (p) => {
         try {
-          return [p.id, await invoke<ProfileUsageDto>("profile_usage", { profileId: p.id })] as const;
+          return [
+            p.id,
+            await invoke<ProfileUsageDto>("profile_usage", { profileId: p.id }),
+          ] as const;
         } catch {
           return null;
         }
       }),
     ).then((entries) => {
+      if (cancelled) return;
       const m: Record<string, ProfileUsageDto> = {};
       for (const e of entries) if (e) m[e[0]] = e[1];
       setUsageMap(m);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [profiles]);
+
+  // 用量悬浮卡：Escape / 任意滚动即关闭（同 ContextMenu；滚动关闭也避免与锚点脱离）
+  useEffect(() => {
+    if (!usagePop) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setUsagePop(null);
+    };
+    // capture 阶段的滚动监听能捕获任意容器的滚动
+    const onScroll = () => setUsagePop(null);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [usagePop]);
   const agents = useAppStore((s) => s.agents);
   const removeProfile = useAppStore((s) => s.removeProfile);
   const duplicateProfile = useAppStore((s) => s.duplicateProfile);
   const loadAll = useAppStore((s) => s.loadAll);
-  const [modal, setModal] = useState<{ initial: Profile | null; presetAgent?: string } | null>(null);
-  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; profile: Profile } | null>(null);
+  const [modal, setModal] = useState<{
+    initial: Profile | null;
+    presetAgent?: string;
+  } | null>(null);
+  const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
+  const [rowMenu, setRowMenu] = useState<{
+    x: number;
+    y: number;
+    profile: Profile;
+  } | null>(null);
   const [validationDialog, setValidationDialog] = useState<{
     profile: Profile;
     result: ProfileValidationDto | null;
@@ -614,10 +714,13 @@ export default function ProfilesPage() {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 过滤条：按安装状态过滤 agent 组；按名称/端点/模型过滤配置行
-  const [statusFilter, setStatusFilter] = useState<"all" | "installed" | "uninstalled">("all");
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "installed" | "uninstalled"
+  >("all");
   const [search, setSearch] = useState("");
   // 组折叠状态：首次使用默认全部展开，手动折叠后持久化到 localStorage
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(loadCollapsedGroups);
+  const [collapsedGroups, setCollapsedGroups] =
+    useState<Set<string>>(loadCollapsedGroups);
 
   /** 更新折叠集合并同步写入 localStorage */
   function updateCollapsed(updater: (prev: Set<string>) => Set<string>) {
@@ -631,13 +734,19 @@ export default function ProfilesPage() {
       return next;
     });
   }
-  const [globalBackups, setGlobalBackups] = useState<Record<string, boolean>>({});
+  const [globalBackups, setGlobalBackups] = useState<Record<string, boolean>>(
+    {},
+  );
   // 各 agent 的升级/安装进行态、实时输出与最近结果（可并发操作多个 agent）
   const [updating, setUpdating] = useState<Record<string, boolean>>({});
   const [liveOutput, setLiveOutput] = useState<Record<string, string>>({});
-  const [updateResults, setUpdateResults] = useState<Record<string, AgentCmdResult>>({});
+  const [updateResults, setUpdateResults] = useState<
+    Record<string, AgentCmdResult>
+  >({});
   // 各 agent 最新版检查（组头「新版/已更新」状态；查不到渠道的组头回退普通「更新」按钮）
-  const [updateInfo, setUpdateInfo] = useState<Record<string, AgentUpdateInfo>>({});
+  const [updateInfo, setUpdateInfo] = useState<Record<string, AgentUpdateInfo>>(
+    {},
+  );
 
   async function refreshUpdateInfo() {
     try {
@@ -671,24 +780,33 @@ export default function ProfilesPage() {
   }
 
   /** 跑更新/安装命令：先挂事件监听再 invoke；结果以 done 事件为准，invoke 返回值兜底 */
-  async function runAgentCmd(agentId: string, command: "update_agent" | "install_agent") {
+  async function runAgentCmd(
+    agentId: string,
+    command: "update_agent" | "install_agent",
+  ) {
     setUpdating((prev) => ({ ...prev, [agentId]: true }));
     setLiveOutput((prev) => ({ ...prev, [agentId]: "" }));
     lastChunkAtRef.current[agentId] = Date.now();
     // 闲置提醒用的节拍器：每 15s 触发一次重渲染，run 结束即清
     const idleTimer = setInterval(() => setIdleTick((t) => t + 1), 15000);
-    const unOut = await listen<string>(`agent-update-output-${agentId}`, (e) => {
-      lastChunkAtRef.current[agentId] = Date.now();
-      setLiveOutput((prev) => ({
-        ...prev,
-        [agentId]: (prev[agentId] ?? "") + e.payload,
-      }));
-    });
+    const unOut = await listen<string>(
+      `agent-update-output-${agentId}`,
+      (e) => {
+        lastChunkAtRef.current[agentId] = Date.now();
+        setLiveOutput((prev) => ({
+          ...prev,
+          [agentId]: (prev[agentId] ?? "") + e.payload,
+        }));
+      },
+    );
     let doneArrived = false;
-    const unDone = await listen<AgentCmdResult>(`agent-update-done-${agentId}`, (e) => {
-      doneArrived = true;
-      setUpdateResults((prev) => ({ ...prev, [agentId]: e.payload }));
-    });
+    const unDone = await listen<AgentCmdResult>(
+      `agent-update-done-${agentId}`,
+      (e) => {
+        doneArrived = true;
+        setUpdateResults((prev) => ({ ...prev, [agentId]: e.payload }));
+      },
+    );
     try {
       const res = await invoke<AgentCmdResult>(command, { agentId });
       if (!doneArrived) {
@@ -724,7 +842,9 @@ export default function ProfilesPage() {
   /** 安装未装的 agent：先亮出将执行的命令，用户确认后才跑 */
   async function onInstall(agentId: string) {
     try {
-      const method = await invoke<string | null>("install_method_preview", { agentId });
+      const method = await invoke<string | null>("install_method_preview", {
+        agentId,
+      });
       if (!method) {
         setError("未找到可用的安装工具（brew / npm / uv / curl 都不在 PATH）");
         return;
@@ -750,7 +870,10 @@ export default function ProfilesPage() {
     const entries = await Promise.all(
       AGENTS.map(
         async (a) =>
-          [a.id, await invoke<boolean>("has_global_backup", { agent: a.id })] as const,
+          [
+            a.id,
+            await invoke<boolean>("has_global_backup", { agent: a.id }),
+          ] as const,
       ),
     );
     setGlobalBackups(Object.fromEntries(entries));
@@ -769,9 +892,12 @@ export default function ProfilesPage() {
     )
       return;
     try {
-      const applied = await invoke<GlobalApplyResultDto>("apply_profile_global", {
-        profileId: p.id,
-      });
+      const applied = await invoke<GlobalApplyResultDto>(
+        "apply_profile_global",
+        {
+          profileId: p.id,
+        },
+      );
       await refreshGlobalBackups();
       const cli = applied.validation.cli;
       window.alert(
@@ -780,7 +906,11 @@ export default function ProfilesPage() {
         }\n${cli.message}`,
       );
       if (!applied.validation.ok) {
-        setValidationDialog({ profile: p, result: applied.validation, running: false });
+        setValidationDialog({
+          profile: p,
+          result: applied.validation,
+          running: false,
+        });
       }
       setError(null);
     } catch (e) {
@@ -811,9 +941,15 @@ export default function ProfilesPage() {
     )
       return;
     try {
-      const files = await invoke<string[]>("restore_global_backup", { agent: agentId });
+      const files = await invoke<string[]>("restore_global_backup", {
+        agent: agentId,
+      });
       await refreshGlobalBackups();
-      window.alert(files.length ? `已恢复完整批次：\n${files.join("\n")}` : "没有可恢复的完整备份批次");
+      window.alert(
+        files.length
+          ? `已恢复完整批次：\n${files.join("\n")}`
+          : "没有可恢复的完整备份批次",
+      );
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -853,7 +989,8 @@ export default function ProfilesPage() {
   }
 
   async function onDelete(p: Profile) {
-    if (!window.confirm(`删除配置「${p.name}」？钥匙串中的密钥会一并删除。`)) return;
+    if (!window.confirm(`删除配置「${p.name}」？本地受限存储的密钥会一并删除。`))
+      return;
     try {
       await removeProfile(p.id);
     } catch (e) {
@@ -865,13 +1002,6 @@ export default function ProfilesPage() {
   const matchProfile = (p: Profile) =>
     !q ||
     [p.name, p.baseUrl ?? "", ...p.models].join("\n").toLowerCase().includes(q);
-  // 跨配置共享的模型（>1 个 profile 配置了同名模型）——用量按模型近似归属会重复计入，行内可见标记
-  const sharedModels = useMemo(() => {
-    const count = new Map<string, number>();
-    for (const p of profiles)
-      for (const m of p.models) count.set(m, (count.get(m) ?? 0) + 1);
-    return new Set([...count].filter(([, n]) => n > 1).map(([m]) => m));
-  }, [profiles]);
   const visibleAgents = AGENTS.filter((a) => {
     const installed = !!agents.find((x) => x.id === a.id)?.binaryPath;
     if (statusFilter === "installed") return installed;
@@ -890,24 +1020,25 @@ export default function ProfilesPage() {
           meta={`${profiles.length} 个配置 · ${new Set(profiles.map((p) => p.agent)).size} 个 agent`}
           actions={
             <>
-            <button
-              onClick={onImport}
-              className="rounded px-2 py-1 text-sm text-pl2 hover:bg-white/5"
-            >
-              导入
-            </button>
-            <button
-              onClick={onExport}
-              className="rounded px-2 py-1 text-sm text-pl2 hover:bg-white/5"
-            >
-              导出
-            </button>
-            <button
-              onClick={() => setModal({ initial: null })}
-              className={primaryActionClass}
-            >
-              + 新建配置
-            </button>
+              <button
+                type="button"
+                onClick={() => setModal({ initial: null })}
+                className={primaryActionClass}
+              >
+                + 新建配置
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setTopMenu({ x: rect.right - 176, y: rect.bottom + 4 });
+                }}
+                title="更多配置操作"
+                aria-label="更多配置操作"
+                className="flex h-8 w-8 items-center justify-center rounded text-sm text-pl2 hover:bg-white/5 hover:text-pl1"
+              >
+                ⋯
+              </button>
             </>
           }
         />
@@ -965,30 +1096,38 @@ export default function ProfilesPage() {
         <div className="mt-5">
           {visibleAgents.map((agent) => {
             const det = agents.find((a) => a.id === agent.id);
-            const list = profiles.filter((p) => p.agent === agent.id && matchProfile(p));
+            const list = profiles.filter(
+              (p) => p.agent === agent.id && matchProfile(p),
+            );
             if (q && list.length === 0) return null;
             const isCollapsed = collapsedGroups.has(agent.id);
             return (
               <section key={agent.id} className="mb-3">
                 <div className="flex h-10 items-center gap-2 rounded-t bg-grp px-3">
                   <button
-                    onClick={() =>
+                    onClick={() => {
+                      // 更新/安装进行中禁止折叠，避免交互输入行（如 brew [y/n]）被隐藏
+                      if (updating[agent.id] && !isCollapsed) return;
                       updateCollapsed((prev) => {
                         const next = new Set(prev);
                         if (next.has(agent.id)) next.delete(agent.id);
                         else next.add(agent.id);
                         return next;
-                      })
-                    }
+                      });
+                    }}
                     aria-label={isCollapsed ? "展开" : "收起"}
                     className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-sm text-pl2 hover:bg-white/5 hover:text-pl1"
                   >
                     {isCollapsed ? "▸" : "▾"}
                   </button>
-                  <h2 className="text-sm font-medium text-pl1">{agent.label}</h2>
-                  {/* 已安装只显示版本号；右侧三态：新版（可点更新）/ 已更新 / 更新（查不到最新版时的回退） */}
+                  <h2 className="text-sm font-medium text-pl1">
+                    {agent.label}
+                  </h2>
+                  {/* 已安装只显示版本号；右侧状态：更新中… / 新版（可点更新）/ 更新（查不到最新版时的回退）；已是最新则不显示 */}
                   {det?.binaryPath ? (
-                    <span className="text-xs text-pl2">{det.version ?? ""}</span>
+                    <span className="text-xs text-pl2">
+                      {det.version ?? ""}
+                    </span>
                   ) : (
                     <span className="text-xs text-pl2">
                       未安装（{agent.binary} 不在 PATH）
@@ -997,16 +1136,23 @@ export default function ProfilesPage() {
                   {det?.binaryPath ? (
                     (() => {
                       if (updating[agent.id])
-                        return <span className="ml-auto text-xs text-pl2">更新中…</span>;
+                        return (
+                          <span className="ml-auto text-xs text-pl2">
+                            更新中…
+                          </span>
+                        );
                       const info = updateInfo[agent.id];
-                      if (updateResults[agent.id]?.ok || (info && !info.outdated && info.latest))
+                      if (
+                        updateResults[agent.id]?.ok ||
+                        (info && !info.outdated && info.latest)
+                      )
                         return null;
                       if (info?.outdated)
                         return (
                           <button
                             onClick={() => onUpdate(agent.id)}
                             title={`有新版本 ${info.latest ?? ""}，点击更新`}
-                            className="ml-auto text-xs text-cta hover:brightness-125"
+                            className="ml-auto flex h-8 items-center rounded px-2 text-xs text-cta hover:bg-white/5 hover:brightness-125"
                           >
                             新版
                           </button>
@@ -1014,7 +1160,7 @@ export default function ProfilesPage() {
                       return (
                         <button
                           onClick={() => onUpdate(agent.id)}
-                          className="ml-auto text-xs text-pl2 hover:text-pl1"
+                          className="ml-auto flex h-8 items-center rounded px-2 text-xs text-pl2 hover:bg-white/5 hover:text-pl1"
                         >
                           更新
                         </button>
@@ -1048,23 +1194,32 @@ export default function ProfilesPage() {
                         {(() => {
                           // 120s 无新输出给提示；新块到达（时间戳刷新）或 run 结束（整块隐藏）自动消失
                           const last = lastChunkAtRef.current[agent.id];
-                          const idleMin = last ? Math.floor((Date.now() - last) / 60000) : 0;
+                          const idleMin = last
+                            ? Math.floor((Date.now() - last) / 60000)
+                            : 0;
                           if (idleMin < 2) return null;
                           return (
                             <div className="bg-warn px-2 py-1 text-xs text-warn-text">
-                              已 {idleMin} 分钟无新输出：可能是网络慢，或命令在等待输入（在下方输入行回答）。若持续异常可把当前内容发给开发者。
+                              已 {idleMin}{" "}
+                              分钟无新输出：可能是网络慢，或命令在等待输入（在下方输入行回答）。若持续异常可把当前内容发给开发者。
                             </div>
                           );
                         })()}
                         <div className="flex items-center gap-1.5 rounded-b border border-hl2 bg-pg px-2 py-1.5">
-                          <span className="font-mono text-xs text-l4">&gt;</span>
+                          <span className="font-mono text-xs text-l4">
+                            &gt;
+                          </span>
                           <input
                             value={cmdInput[agent.id] ?? ""}
                             onChange={(e) =>
-                              setCmdInput((prev) => ({ ...prev, [agent.id]: e.target.value }))
+                              setCmdInput((prev) => ({
+                                ...prev,
+                                [agent.id]: e.target.value,
+                              }))
                             }
                             onKeyDown={(e) => {
-                              if (e.key === "Enter") void sendUpdaterInput(agent.id);
+                              if (e.key === "Enter")
+                                void sendUpdaterInput(agent.id);
                             }}
                             placeholder="需要交互时在此输入（如 y），Enter 发送"
                             className="flex-1 bg-transparent font-mono text-xs text-pl2 outline-none placeholder:text-l4"
@@ -1076,10 +1231,14 @@ export default function ProfilesPage() {
                       <div className="mt-2 rounded bg-strip p-2 text-xs text-l2">
                         <span
                           className={
-                            updateResults[agent.id].ok ? "text-okb" : "text-err-text"
+                            updateResults[agent.id].ok
+                              ? "text-okb"
+                              : "text-err-text"
                           }
                         >
-                          {updateResults[agent.id].ok ? "✓ 更新完成" : "✗ 更新失败"}
+                          {updateResults[agent.id].ok
+                            ? "✓ 更新完成"
+                            : "✗ 更新失败"}
                         </span>
                         <span>
                           {updateResults[agent.id].method &&
@@ -1089,7 +1248,9 @@ export default function ProfilesPage() {
                         </span>
                         {updateResults[agent.id].output && (
                           <details className="mt-1">
-                            <summary className="cursor-pointer text-l3">输出</summary>
+                            <summary className="cursor-pointer text-l3">
+                              输出
+                            </summary>
                             <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono">
                               {updateResults[agent.id].output}
                             </pre>
@@ -1097,9 +1258,13 @@ export default function ProfilesPage() {
                         )}
                         {(() => {
                           const r = updateResults[agent.id];
-                          const hint = r.ok ? null : diagnose(r.output, r.method);
+                          const hint = r.ok
+                            ? null
+                            : diagnose(r.output, r.method);
                           return hint ? (
-                            <p className="mt-1 text-xs text-l3">💡 建议：{hint}</p>
+                            <p className="mt-1 text-xs text-l3">
+                              ⓘ 建议：{hint}
+                            </p>
                           ) : null;
                         })()}
                       </div>
@@ -1109,7 +1274,9 @@ export default function ProfilesPage() {
                       <div className="flex h-12 items-center justify-between border-b border-hl2">
                         <span className="text-sm text-l4">暂无配置</span>
                         <button
-                          onClick={() => setModal({ initial: null, presetAgent: agent.id })}
+                          onClick={() =>
+                            setModal({ initial: null, presetAgent: agent.id })
+                          }
                           className="text-xs text-pl2 hover:text-pl1"
                         >
                           + 添加配置
@@ -1117,97 +1284,79 @@ export default function ProfilesPage() {
                       </div>
                     ) : (
                       <ul className="divide-y divide-hl2 overflow-x-auto">
-                        {list.map((p) => (
+                        {list.map((profile) => (
                           <li
-                            key={p.id}
-                            className="grid h-16 grid-cols-[130px_minmax(200px,1fr)_150px_150px] items-center gap-2 text-sm"
+                            key={profile.id}
+                            className="grid min-h-14 grid-cols-[minmax(130px,1fr)_minmax(150px,1fr)_minmax(150px,1fr)_110px_92px] items-center gap-3 text-sm"
                           >
-                            {/* 名称（+用量悬浮按钮）+ 上次使用 */}
-                            <span className="flex h-full flex-col justify-center overflow-hidden">
-                              <span className="flex items-center gap-1 overflow-hidden">
-                                <span className="truncate font-medium text-pl1">{p.name}</span>
-                                {usageMap[p.id] && usageMap[p.id]!.input > 0 && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      const r = e.currentTarget.getBoundingClientRect();
-                                      setUsagePop({ x: r.left, y: r.bottom + 4, id: p.id });
-                                    }}
-                                    title={
-                                      p.models.some((m) => sharedModels.has(m))
-                                        ? "查看用量/费用（含共享模型——同一模型配置在多个 profile，用量会重复计入）"
-                                        : "查看用量/费用"
-                                    }
-                                    className="shrink-0 text-xs text-l4 hover:text-pl1"
-                                  >
-                                    ▸用量
-                                  </button>
-                                )}
-                              </span>
-                              <span className="truncate text-xs text-l4">
-                                {p.lastUsedAt ? `${relTime(p.lastUsedAt)}使用` : "从未使用"}
-                              </span>
-                            </span>
-                            {/* 仅展示端点域名，不暴露路径或查询参数 */}
-                            <span className="flex min-w-0 flex-col justify-center overflow-hidden">
-                              {p.baseUrl && (
-                                <span
-                                  className="mb-1 truncate text-xs text-pl2"
-                                  title={displayHost(p.baseUrl)}
-                                >
-                                  {displayHost(p.baseUrl)}
-                                </span>
-                              )}
-                              <span className="flex flex-wrap items-center gap-1 overflow-hidden">
-                                {p.models.slice(0, 4).map((m, i) => (
-                                  <span
-                                    key={m}
-                                    className={`rounded-md px-1.5 py-0.5 text-xs ${
-                                      i === 0
-                                        ? "bg-grp text-pl1"
-                                        : "text-pl2 opacity-70"
-                                    }`}
-                                  >
-                                    {m}
-                                  </span>
-                                ))}
-                                {p.models.length > 4 && (
-                                  <span
-                                    className="text-xs text-l4"
-                                    title={p.models.join("\n")}
-                                  >
-                                    +{p.models.length - 4}
-                                  </span>
-                                )}
-                              </span>
-                            </span>
-                            {/* 密钥状态 */}
                             <span
-                              className={`text-xs ${p.hasKey ? "text-okb" : "text-pl2"}`}
+                              className="min-w-0 truncate font-medium text-pl1"
+                              title={profile.name}
                             >
-                              {p.hasKey ? `已存密钥 ${p.keyHint ?? ""}` : "无密钥"}
+                              {profile.name}
                             </span>
-                            {/* 操作 */}
-                            <span className="flex items-center justify-end gap-2 whitespace-nowrap">
+                            <span
+                              className={`min-w-0 truncate text-xs ${profile.baseUrl ? "text-pl2" : "text-l4"}`}
+                              title={
+                                profile.baseUrl
+                                  ? displayHost(profile.baseUrl)
+                                  : "使用 CLI 默认端点"
+                              }
+                            >
+                              {profile.baseUrl
+                                ? displayHost(profile.baseUrl)
+                                : "默认端点"}
+                            </span>
+                            <span
+                              className={`min-w-0 truncate font-mono text-xs ${
+                                profile.models[0] ? "text-pl2" : "text-l4"
+                              }`}
+                              title={
+                                profile.models.length > 1
+                                  ? profile.models.join(" · ")
+                                  : profile.models[0]
+                              }
+                            >
+                              {profile.models[0] ?? "未指定模型"}
+                            </span>
+                            <span
+                              className={`flex items-center gap-1 text-xs ${
+                                profile.hasKey ? "text-okb" : "text-pl2"
+                              }`}
+                              title={
+                                profile.hasKey
+                                  ? `密钥已受限存储${profile.keyHint ? `（${profile.keyHint}）` : ""}`
+                                  : "尚未填写密钥"
+                              }
+                            >
+                              <span
+                                className={`h-1.5 w-1.5 rounded-full ${
+                                  profile.hasKey ? "bg-okb" : "bg-l4"
+                                }`}
+                              />
+                              {profile.hasKey ? "已设置" : "未设置"}
+                            </span>
+                            <span className="flex items-center justify-end gap-1 whitespace-nowrap">
                               <button
-                                onClick={() => void onValidate(p)}
-                                className="h-8 text-xs text-pl2 hover:text-pl1"
-                              >
-                                验证
-                              </button>
-                              <button
-                                onClick={() => setModal({ initial: p })}
-                                className="h-8 text-xs text-pl2 hover:text-pl1"
+                                type="button"
+                                onClick={() => setModal({ initial: profile })}
+                                className="h-8 rounded px-2 text-xs text-pl2 hover:bg-white/5 hover:text-pl1"
                               >
                                 编辑
                               </button>
                               <button
-                                onClick={(e) => {
-                                  const r = e.currentTarget.getBoundingClientRect();
-                                  setRowMenu({ x: r.left, y: r.bottom + 4, profile: p });
+                                type="button"
+                                onClick={(event) => {
+                                  const rect =
+                                    event.currentTarget.getBoundingClientRect();
+                                  setRowMenu({
+                                    x: rect.right - 176,
+                                    y: rect.bottom + 4,
+                                    profile,
+                                  });
                                 }}
-                                aria-label="更多操作"
-                                className="h-8 rounded px-1 text-l4 hover:bg-white/5 hover:text-pl1"
+                                aria-label={`更多操作：${profile.name}`}
+                                className="flex h-8 w-8 items-center justify-center rounded text-sm text-l4 hover:bg-white/5 hover:text-pl1"
                               >
                                 ⋯
                               </button>
@@ -1224,20 +1373,23 @@ export default function ProfilesPage() {
         </div>
       </PageFrame>
       {usagePop && usageMap[usagePop.id] && (
-        <div
-          className="fixed inset-0 z-20"
-          onClick={() => setUsagePop(null)}
-        >
+        <div className="fixed inset-0 z-20" onClick={() => setUsagePop(null)}>
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute w-56 rounded-md border border-field bg-strip p-3 text-xs shadow-xl"
-            style={{ left: usagePop.x, top: usagePop.y }}
+            className="absolute w-56 rounded-md border border-field bg-strip p-3 text-xs"
+            // 防出屏：往左/往上收（卡片 w-56 约 224px、高约 170px）
+            style={{
+              left: Math.max(8, Math.min(usagePop.x, window.innerWidth - 240)),
+              top: Math.max(8, Math.min(usagePop.y, window.innerHeight - 180)),
+            }}
           >
             {(() => {
               const u = usageMap[usagePop.id]!;
               return (
                 <>
-                  <div className="mb-1 font-medium text-pl1">用量 / 费用（官方价）</div>
+                  <div className="mb-1 font-medium text-pl1">
+                    用量 / 费用（官方价）
+                  </div>
                   <div className="flex justify-between py-0.5 text-pl2">
                     <span>输入</span>
                     <span>{fmtTokens(u.input)}</span>
@@ -1254,7 +1406,9 @@ export default function ProfilesPage() {
                         : "~"}
                     </span>
                   </div>
-                  <p className="mt-1 text-l4">按模型近似归属；模型跨配置共享时会重复计入</p>
+                  <p className="mt-1 text-l4">
+                    按模型近似归属；模型跨配置共享时会重复计入
+                  </p>
                 </>
               );
             })()}
@@ -1268,14 +1422,38 @@ export default function ProfilesPage() {
           onClose={() => setModal(null)}
         />
       )}
+      {topMenu && (
+        <ContextMenu
+          x={topMenu.x}
+          y={topMenu.y}
+          onClose={() => setTopMenu(null)}
+          items={[
+            { label: "导入配置", onSelect: () => void onImport() },
+            { label: "导出配置", onSelect: () => void onExport() },
+          ]}
+        />
+      )}
       {rowMenu && (
         <ContextMenu
           x={rowMenu.x}
           y={rowMenu.y}
           onClose={() => setRowMenu(null)}
           items={[
+            ...(hasUsage(usageMap[rowMenu.profile.id])
+              ? [
+                  {
+                    label: "用量与费用",
+                    onSelect: () =>
+                      setUsagePop({
+                        x: Math.max(8, rowMenu.x - 232),
+                        y: rowMenu.y,
+                        id: rowMenu.profile.id,
+                      }),
+                  },
+                ]
+              : []),
             {
-              label: "复制",
+              label: "复制配置",
               onSelect: () => {
                 const p = rowMenu.profile;
                 void (async () => {
@@ -1288,7 +1466,10 @@ export default function ProfilesPage() {
               },
             },
             { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
-            { label: "设为全局", onSelect: () => void onApplyGlobal(rowMenu.profile) },
+            {
+              label: "设为全局",
+              onSelect: () => void onApplyGlobal(rowMenu.profile),
+            },
             ...(globalBackups[rowMenu.profile.agent]
               ? [
                   {
