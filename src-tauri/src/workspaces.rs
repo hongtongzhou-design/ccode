@@ -2005,6 +2005,7 @@ pub async fn create_pr(
 pub struct RepoDto {
     pub path: String,
     pub name: String,
+    pub last_active: Option<String>,
 }
 
 // ===== list_repos 进程内缓存：全量扫描要逐目录跑 git，TTL 内直接复用 =====
@@ -2036,6 +2037,14 @@ fn invalidate_repo_cache() {
     }
 }
 
+fn sort_recent_repos(repos: &mut [RepoDto]) {
+    repos.sort_by(|a, b| {
+        b.last_active
+            .cmp(&a.last_active)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+}
+
 /// 新建工作区的仓库候选：来自会话聚合目录，只保留真实存在的 git 仓库，
 /// 排除 home 目录与 worktree 路径（非 git 仓库创建必失败，混杂会误导用户）
 #[tauri::command]
@@ -2048,26 +2057,39 @@ pub async fn list_repos() -> Vec<RepoDto> {
         }
         let home = dirs::home_dir();
         let ws_root = workspaces_root().unwrap_or_default();
-        let mut seen = std::collections::HashSet::new();
-        let repos: Vec<RepoDto> = crate::sessions::cached_scan()
-            .sessions
+        let mut activity = std::collections::HashMap::<PathBuf, Option<String>>::new();
+        for session in crate::sessions::cached_scan().sessions {
+            let Ok(path) = std::fs::canonicalize(&session.project_path) else {
+                continue;
+            };
+            if !path.is_dir() || Some(path.clone()) == home || path.starts_with(&ws_root) {
+                continue;
+            }
+            let updated = session.updated_at;
+            activity
+                .entry(path)
+                .and_modify(|current| {
+                    if updated.as_deref() > current.as_deref() {
+                        current.clone_from(&updated);
+                    }
+                })
+                .or_insert(updated);
+        }
+        let mut repos: Vec<RepoDto> = activity
             .into_iter()
-            .filter_map(|s| std::fs::canonicalize(&s.project_path).ok())
-            .filter(|p| {
-                p.is_dir()
-                    && Some(p.clone()) != home
-                    && !p.starts_with(&ws_root)
-                    && seen.insert(p.clone())
+            .filter(|(path, _)| {
+                run_git(path, &["rev-parse", "--git-dir"], Duration::from_secs(5)).is_ok()
             })
-            .filter(|p| run_git(p, &["rev-parse", "--git-dir"], Duration::from_secs(5)).is_ok())
-            .map(|p| RepoDto {
-                name: p
+            .map(|(path, last_active)| RepoDto {
+                name: path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "repo".into()),
-                path: p.to_string_lossy().into_owned(),
+                path: path.to_string_lossy().into_owned(),
+                last_active,
             })
             .collect();
+        sort_recent_repos(&mut repos);
         // 时间戳取扫描完成后，TTL 从最新数据起算
         if let Ok(mut guard) = repo_cache().lock() {
             *guard = Some((Instant::now(), repos.clone()));
@@ -2188,6 +2210,7 @@ mod tests {
             vec![RepoDto {
                 path: "/r".into(),
                 name: "r".into(),
+                last_active: None,
             }],
         ));
         // TTL 内命中，返回缓存副本
@@ -2206,6 +2229,32 @@ mod tests {
     }
 
     #[test]
+    fn recent_repos_sort_by_latest_activity_then_name() {
+        let mut repos = vec![
+            RepoDto {
+                path: "/older".into(),
+                name: "zeta".into(),
+                last_active: Some("2026-08-01T00:00:00Z".into()),
+            },
+            RepoDto {
+                path: "/newer-b".into(),
+                name: "Beta".into(),
+                last_active: Some("2026-08-04T00:00:00Z".into()),
+            },
+            RepoDto {
+                path: "/newer-a".into(),
+                name: "alpha".into(),
+                last_active: Some("2026-08-04T00:00:00Z".into()),
+            },
+        ];
+        sort_recent_repos(&mut repos);
+        assert_eq!(
+            repos.iter().map(|repo| repo.path.as_str()).collect::<Vec<_>>(),
+            vec!["/newer-a", "/newer-b", "/older"]
+        );
+    }
+
+    #[test]
     fn create_workspace_invalidates_repo_cache() {
         let Some(fx) = Fixture::new() else { return };
         *repo_cache().lock().unwrap() = Some((
@@ -2213,6 +2262,7 @@ mod tests {
             vec![RepoDto {
                 path: "/r".into(),
                 name: "r".into(),
+                last_active: None,
             }],
         ));
         create_impl(

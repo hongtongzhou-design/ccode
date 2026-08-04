@@ -477,7 +477,7 @@ fn register_provenance_impl(
     Ok(())
 }
 
-fn normalize_provenance_path(path: &str) -> String {
+pub(crate) fn normalize_provenance_path(path: &str) -> String {
     let expanded = crate::sessions::expand_tilde(path);
     let resolved = std::fs::canonicalize(&expanded)
         .unwrap_or_else(|_| std::path::PathBuf::from(&expanded));

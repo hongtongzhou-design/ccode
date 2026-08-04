@@ -82,6 +82,10 @@ export interface SessionMetaDto {
   summary: string | null;
   /** 后端探测到该会话的 CLI 进程仍存活（外部 live；无终端标签可跳转） */
   live: boolean;
+  /** 会话来源：普通 CLI 为 cli，Ccode 无头 AI 为 ccode-ai。 */
+  source: string;
+  /** 后端精确标记的 Ccode 内部 AI 会话。 */
+  internal: boolean;
 }
 
 export interface BlockDto {
@@ -95,6 +99,12 @@ export interface ChatMessageDto {
   blocks: BlockDto[];
   timestamp: string | null;
   usage: TokenUsageDto | null;
+}
+
+export interface ConversationPageDto {
+  messages: ChatMessageDto[];
+  /** 下一页上界：文件会话为字节偏移，OpenCode 为 time_created。 */
+  cursor: number | null;
 }
 
 /** 任务工作区（§6.10）：一条 ccode/<name> 分支 + 一个 git worktree */
@@ -124,6 +134,8 @@ export interface WorkspaceDto {
 export interface RepoDto {
   path: string;
   name: string;
+  /** 该仓库最近一条会话的更新时间；用于“最近项目”稳定排序。 */
+  lastActive: string | null;
 }
 
 /** 项目级 .ccode/settings.toml 三层合并结果（W2） */

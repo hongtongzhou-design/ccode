@@ -47,6 +47,12 @@ pub struct SessionMetaDto {
     /// 进行中：源文件 mtime（opencode 为 time_updated）在最近 60 秒内
     #[serde(default)]
     pub live: bool,
+    /// 会话来源；普通 CLI 为 cli，Ccode 无头 AI 为 ccode-ai。
+    #[serde(default = "default_session_source")]
+    pub source: String,
+    /// 仅由后端精确 provenance 标记，前端不得按路径名猜测。
+    #[serde(default)]
+    pub internal: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,6 +72,14 @@ pub struct ChatMessageDto {
     pub usage: Option<TokenUsageDto>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationPageDto {
+    pub messages: Vec<ChatMessageDto>,
+    /// 下一页的上界：文件会话为字节偏移，OpenCode 为 time_created。
+    pub cursor: Option<u64>,
+}
+
 // ===== 通用小工具 =====
 
 fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -80,14 +94,36 @@ fn text_block(text: String) -> BlockDto {
     }
 }
 
-/// 列表标题：取首条真实用户消息，截断到约 60 字符
+fn default_session_source() -> String {
+    "cli".into()
+}
+
+/// 列表标题：折叠空白后截断到约 60 字符，避免多行 prompt 撑高列表。
 fn truncate_title(text: &str) -> String {
     const MAX: usize = 60;
-    let t = text.trim();
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t = normalized.trim();
     if t.chars().count() <= MAX {
         t.to_string()
     } else {
         format!("{}…", t.chars().take(MAX).collect::<String>())
+    }
+}
+
+fn usable_title(text: &str) -> Option<String> {
+    let title = truncate_title(text);
+    let lower = title.trim().to_ascii_lowercase();
+    let generic = matches!(
+        lower.as_str(),
+        "new session" | "untitled" | "untitled session" | "session" | "new chat"
+            | "新会话" | "新对话" | "未命名" | "未命名会话" | "未命名对话"
+    );
+    if title.is_empty() || generic || title.starts_with('<')
+        || title.starts_with("# AGENTS.md") || title.starts_with("The following is the ")
+    {
+        None
+    } else {
+        Some(title)
     }
 }
 
@@ -432,12 +468,7 @@ fn claude_user_title(v: &Value) -> Option<String> {
         })?,
         _ => return None,
     };
-    let t = text.trim();
-    if t.is_empty() || t.starts_with('<') {
-        None
-    } else {
-        Some(truncate_title(t))
-    }
+    usable_title(&text)
 }
 
 fn claude_usage(u: &Value) -> TokenUsageDto {
@@ -484,7 +515,9 @@ fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         }
         if get_str(&v, "type") == Some("ai-title") {
             if let Some(t) = get_str(&v, "aiTitle") {
-                ai_title = Some(truncate_title(t)); // 尾部后出现的覆盖先出现的
+                if let Some(candidate) = usable_title(t) {
+                    ai_title = Some(candidate); // 尾部后出现的有效标题覆盖先出现的
+                }
             }
         }
         if title.is_none()
@@ -524,6 +557,8 @@ fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         workspace: None,
         summary: None,
         live: alive && mtime_fresh(path, 60),
+        source: default_session_source(),
+        internal: false,
     })
 }
 
@@ -719,7 +754,7 @@ fn codex_file_meta(
                             && !t.starts_with("# AGENTS.md")
                             && !t.starts_with("The following is the ")
                         {
-                            title = Some(truncate_title(t));
+                            title = usable_title(t);
                         }
                     }
                 }
@@ -756,6 +791,8 @@ fn codex_file_meta(
             workspace: None,
             summary: None,
             live: alive && mtime_fresh(path, 60),
+            source: default_session_source(),
+            internal: false,
         },
         forked_from_id,
     ))
@@ -937,12 +974,7 @@ fn gemini_usage(t: &Value) -> TokenUsageDto {
 
 /// 列表标题候选：空白或 XML 标签开头（注入内容）的不算
 fn title_from_text(text: &str) -> Option<String> {
-    let t = text.trim();
-    if t.is_empty() || t.starts_with('<') {
-        None
-    } else {
-        Some(truncate_title(t))
-    }
+    usable_title(text)
 }
 
 fn gemini_file_meta(
@@ -960,7 +992,9 @@ fn gemini_file_meta(
         // $set 控制记录：补丁元数据，summary 可作标题（后出现覆盖先出现）
         if let Some(set) = v.get("$set") {
             if let Some(s) = get_str(set, "summary") {
-                summary = Some(truncate_title(s));
+                if let Some(candidate) = usable_title(s) {
+                    summary = Some(candidate);
+                }
             }
             continue;
         }
@@ -981,7 +1015,7 @@ fn gemini_file_meta(
                     .map(String::from);
             }
             if summary.is_none() {
-                summary = get_str(&v, "summary").map(truncate_title);
+                summary = get_str(&v, "summary").and_then(usable_title);
             }
             continue;
         }
@@ -1025,6 +1059,8 @@ fn gemini_file_meta(
         workspace: None,
         summary: None,
         live: alive && mtime_fresh(path, 60),
+        source: default_session_source(),
+        internal: false,
     })
 }
 
@@ -1195,7 +1231,9 @@ fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMet
         if get_str(&v, "type") == Some("system") && get_str(&v, "subtype") == Some("custom_title")
         {
             if let Some(t) = v.get("systemPayload").and_then(|p| get_str(p, "customTitle")) {
-                custom_title = Some(truncate_title(t));
+                if let Some(candidate) = usable_title(t) {
+                    custom_title = Some(candidate);
+                }
             }
         }
         if title.is_none() && get_str(&v, "type") == Some("user") {
@@ -1232,6 +1270,8 @@ fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMet
         workspace: None,
         summary: None,
         live: alive && (mtime_fresh(path, 60) || qwen_runtime_sidecar(path).is_some()),
+        source: default_session_source(),
+        internal: false,
     })
 }
 
@@ -1424,8 +1464,7 @@ fn kimi_wire_file_meta(
     // 标题以 state.json 为准（CLI 自己维护，含 AI 起题），否则首条用户输入
     let state_title = state
         .and_then(|s| get_str(s, "title"))
-        .filter(|t| !t.trim().is_empty())
-        .map(truncate_title);
+        .and_then(usable_title);
     if created.is_none() {
         created = state.and_then(|s| s.get("createdAt")).and_then(kimi_time);
     }
@@ -1448,6 +1487,8 @@ fn kimi_wire_file_meta(
         workspace: None,
         summary: None,
         live: alive && mtime_fresh(path, 60),
+        source: default_session_source(),
+        internal: false,
     })
 }
 
@@ -1681,8 +1722,7 @@ fn kimi_legacy_file_meta(
     });
     let state_title = state
         .and_then(|s| get_str(s, "title"))
-        .filter(|t| !t.trim().is_empty())
-        .map(truncate_title);
+        .and_then(usable_title);
     let created = state.and_then(|s| s.get("createdAt")).and_then(kimi_time);
     Some(SessionMetaDto {
         agent: "kimi".into(),
@@ -1703,6 +1743,8 @@ fn kimi_legacy_file_meta(
         workspace: None,
         summary: None,
         live: alive && mtime_fresh(path, 60),
+        source: default_session_source(),
+        internal: false,
     })
 }
 
@@ -1901,6 +1943,28 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             worktrees.insert(id, wt);
         }
     }
+    // OpenCode 新会话常暂存为 "New Session"；从首条真实用户消息补一个可读标题。
+    let mut first_user_titles: HashMap<String, String> = HashMap::new();
+    for row in query_rows(&conn, "SELECT * FROM message ORDER BY time_created ASC", &[]) {
+        let row = DbRow { names: row.0, vals: row.1 };
+        let (Some(session_id), Some(data)) = (row.as_str("session_id"), row.as_str("data")) else {
+            continue;
+        };
+        if first_user_titles.contains_key(&session_id) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        if get_str(&value, "role") != Some("user") {
+            continue;
+        }
+        if let Some(text) = opencode_user_text(&value, &[]) {
+            if let Some(title) = usable_title(&text) {
+                first_user_titles.insert(session_id, title);
+            }
+        }
+    }
     let mut out = Vec::new();
     for row in query_rows(&conn, "SELECT * FROM session", &[]) {
         let row = DbRow { names: row.0, vals: row.1 };
@@ -1941,7 +2005,8 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             agent: "opencode".into(),
             session_id: id.clone(),
             project_path,
-            title: row.as_str("title").filter(|t| !t.trim().is_empty()).map(|t| truncate_title(&t)),
+            title: row.as_str("title").and_then(|t| usable_title(&t))
+                .or_else(|| first_user_titles.get(&id).cloned()),
             created_at: row.as_i64("time_created").map(opencode_ms_to_iso),
             updated_at: row.as_i64("time_updated").map(opencode_ms_to_iso),
             // 没有单会话文件：db 路径 + "#" + session_id，pin/回放据此定位
@@ -1957,6 +2022,8 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             workspace: None,
             summary: None,
             live,
+            source: default_session_source(),
+            internal: false,
         });
     }
     out
@@ -2279,7 +2346,7 @@ fn opencode_scan_legacy(storage: &Path) -> Vec<SessionMetaDto> {
             agent: "opencode".into(),
             session_id: id,
             project_path: get_str(&v, "directory").unwrap_or("").to_string(),
-            title: get_str(&v, "title").filter(|t| !t.trim().is_empty()).map(truncate_title),
+            title: get_str(&v, "title").and_then(usable_title),
             created_at: legacy_time(&v, "time_created", "created").map(opencode_ms_to_iso),
             updated_at: legacy_time(&v, "time_updated", "updated").map(opencode_ms_to_iso),
             file_path: f.to_string_lossy().into_owned(),
@@ -2294,6 +2361,8 @@ fn opencode_scan_legacy(storage: &Path) -> Vec<SessionMetaDto> {
             workspace: None,
             summary: None,
             live: mtime_fresh(&f, 60),
+            source: default_session_source(),
+            internal: false,
         });
     }
     out
@@ -2488,7 +2557,7 @@ pub fn scan_sessions() -> ScanResult {
                             agent: "opencode".into(),
                             session_id: stem.clone(),
                             project_path: get_str(s, "directory").unwrap_or("").to_string(),
-                            title: get_str(s, "title").filter(|t| !t.trim().is_empty()).map(truncate_title),
+                            title: get_str(s, "title").and_then(usable_title),
                             created_at: s.get("time_created").and_then(|t| t.as_i64()).map(opencode_ms_to_iso),
                             updated_at: s.get("time_updated").and_then(|t| t.as_i64()).map(opencode_ms_to_iso),
                             file_path: f.to_string_lossy().into_owned(),
@@ -2503,6 +2572,8 @@ pub fn scan_sessions() -> ScanResult {
                             workspace: None,
                             summary: None,
                             live: false,
+                            source: default_session_source(),
+                            internal: false,
                         })
                     }),
                     "kimi" => {
@@ -3039,8 +3110,15 @@ pub(crate) fn cached_scan() -> ScanResult {
     res
 }
 
+fn recent_cached_scan() -> Option<ScanResult> {
+    let cache = SCAN_CACHE.get()?;
+    let guard = cache.lock().ok()?;
+    let (at, result) = guard.as_ref()?;
+    (at.elapsed() < std::time::Duration::from_secs(10)).then(|| result.clone())
+}
+
 /// pin/unpin/删除/改整理数据后立刻失效，下一次列表拿到新结果
-fn invalidate_scan_cache() {
+pub(crate) fn invalidate_scan_cache() {
     if let Some(m) = SCAN_CACHE.get() {
         if let Ok(mut g) = m.lock() {
             *g = None;
@@ -3073,6 +3151,34 @@ fn apply_meta(
     }
 }
 
+fn apply_provenance(conn: &Connection, sessions: &mut [SessionMetaDto]) {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT agent, project_path, source, internal FROM usage_provenance",
+    ) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)? != 0,
+        ))
+    }) else {
+        return;
+    };
+    let map: HashMap<(String, String), (String, bool)> = rows.flatten()
+        .map(|(agent, path, source, internal)| ((agent, path), (source, internal)))
+        .collect();
+    for session in sessions {
+        let path = crate::usage::normalize_provenance_path(&session.project_path);
+        if let Some((source, internal)) = map.get(&(session.agent.clone(), path)) {
+            session.source.clone_from(source);
+            session.internal = *internal;
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn list_sessions() -> Vec<SessionMetaDto> {
     // cached_scan 是 CPU 密集的全量扫描，移出 async worker（10s 缓存命中时也走这里，开销可忽略）
@@ -3083,6 +3189,7 @@ pub async fn list_sessions() -> Vec<SessionMetaDto> {
     if let Ok(conn) = open_db() {
         let meta = read_all_meta(&conn);
         apply_meta(&mut sessions, &scan.chain_members, &meta);
+        apply_provenance(&conn, &mut sessions);
     }
     // 最近活跃在前；ISO 字符串可直接字典序比较
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -3112,6 +3219,139 @@ pub async fn find_session_for(
     found
 }
 
+#[derive(Clone)]
+struct SessionClaimContext {
+    agent: String,
+    project_path: String,
+    since_iso: String,
+    excluded: HashSet<String>,
+}
+
+#[derive(Default)]
+struct SessionClaimRegistry {
+    contexts: HashMap<String, SessionClaimContext>,
+    assignments: HashMap<String, (String, String)>,
+    /// 本次应用进程内已分配过的会话不再复用，避免先启动的标签关闭后被另一个并发标签误领。
+    used_sessions: HashSet<(String, String)>,
+}
+
+static SESSION_CLAIMS: OnceLock<Mutex<SessionClaimRegistry>> = OnceLock::new();
+
+fn session_claims() -> &'static Mutex<SessionClaimRegistry> {
+    SESSION_CLAIMS.get_or_init(|| Mutex::new(SessionClaimRegistry::default()))
+}
+
+fn link_project_path(cwd: &str) -> String {
+    let cwd = expand_tilde(cwd);
+    resolve_worktree_project(&cwd, &crate::workspaces::worktree_rows())
+        .map(|(repo, _)| repo)
+        .unwrap_or(cwd)
+}
+
+/// 无固定 session id 的 CLI 在进程启动前登记，记录当时已有会话，避免误绑旧记录。
+pub(crate) fn register_session_claim(claim_id: &str, agent: &str, cwd: &str) {
+    let project_path = link_project_path(cwd);
+    // 启动命令是同步路径，只读取已有缓存，禁止为关联声明阻塞扫描数百个历史文件。
+    let excluded = recent_cached_scan().unwrap_or_else(|| ScanResult {
+        sessions: Vec::new(),
+        chain_members: HashMap::new(),
+    }).sessions.into_iter()
+        .filter(|session| session.agent == agent && session.project_path == project_path)
+        .map(|session| session.session_id)
+        .collect();
+    let mut registry = session_claims().lock().unwrap();
+    if let Some(assignment) = registry.assignments.remove(claim_id) {
+        registry.used_sessions.insert(assignment);
+    }
+    registry.contexts.insert(claim_id.to_string(), SessionClaimContext {
+        agent: agent.to_string(),
+        project_path,
+        since_iso: now_iso(),
+        excluded,
+    });
+}
+
+pub(crate) fn release_session_claim_impl(claim_id: &str) {
+    let mut registry = session_claims().lock().unwrap();
+    registry.contexts.remove(claim_id);
+    if let Some(assignment) = registry.assignments.remove(claim_id) {
+        registry.used_sessions.insert(assignment);
+    }
+}
+
+/// 同 agent+目录的并发启动统一排序后分配；候选不足时宁可继续等待，也不抢占同一会话。
+#[tauri::command]
+pub async fn claim_session_for(claim_id: String) -> Option<SessionMetaDto> {
+    let scan = tauri::async_runtime::spawn_blocking(cached_scan).await.ok()?;
+    let mut registry = session_claims().lock().ok()?;
+    let context = registry.contexts.get(&claim_id)?.clone();
+
+    if let Some((agent, session_id)) = registry.assignments.get(&claim_id).cloned() {
+        let mut found = scan.sessions.into_iter()
+            .find(|session| session.agent == agent && session.session_id == session_id);
+        if let Some(session) = &mut found {
+            redact_session_meta(std::slice::from_mut(session));
+        }
+        return found;
+    }
+
+    let mut pending: Vec<(String, SessionClaimContext)> = registry.contexts.iter()
+        .filter(|(id, candidate)| {
+            !registry.assignments.contains_key(*id)
+                && candidate.agent == context.agent
+                && candidate.project_path == context.project_path
+        })
+        .map(|(id, candidate)| (id.clone(), candidate.clone()))
+        .collect();
+    pending.sort_by(|a, b| a.1.since_iso.cmp(&b.1.since_iso).then(a.0.cmp(&b.0)));
+
+    let mut already_assigned = registry.used_sessions.clone();
+    already_assigned.extend(registry.assignments.values().cloned());
+    let mut candidates: Vec<SessionMetaDto> = scan.sessions.into_iter()
+        .filter(|session| {
+            session.agent == context.agent && session.project_path == context.project_path
+                && !already_assigned.contains(&(session.agent.clone(), session.session_id.clone()))
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        a.created_at.as_deref().unwrap_or(a.updated_at.as_deref().unwrap_or(""))
+            .cmp(b.created_at.as_deref().unwrap_or(b.updated_at.as_deref().unwrap_or("")))
+            .then(a.session_id.cmp(&b.session_id))
+    });
+
+    let mut staged: Vec<(String, String)> = Vec::new();
+    let mut used = HashSet::new();
+    for (id, pending_context) in &pending {
+        let Some(candidate) = candidates.iter().find(|session| {
+            !used.contains(&session.session_id)
+                && !pending_context.excluded.contains(&session.session_id)
+                && session.updated_at.as_deref().unwrap_or("") >= pending_context.since_iso.as_str()
+        }) else {
+            invalidate_scan_cache();
+            return None;
+        };
+        used.insert(candidate.session_id.clone());
+        staged.push((id.clone(), candidate.session_id.clone()));
+    }
+    for (id, session_id) in staged {
+        let assignment = (context.agent.clone(), session_id);
+        registry.used_sessions.insert(assignment.clone());
+        registry.assignments.insert(id, assignment);
+    }
+    let (_, session_id) = registry.assignments.get(&claim_id)?.clone();
+    drop(registry);
+    let mut found = candidates.into_iter().find(|session| session.session_id == session_id);
+    if let Some(session) = &mut found {
+        redact_session_meta(std::slice::from_mut(session));
+    }
+    found
+}
+
+#[tauri::command]
+pub fn release_session_claim(claim_id: String) {
+    release_session_claim_impl(&claim_id);
+}
+
 /// 注意力标记 v1（§6.11）：读会话文件尾部分类 done/working/confirm/unknown
 #[tauri::command]
 pub async fn session_tail_state(agent: String, file_path: String) -> String {
@@ -3123,6 +3363,134 @@ pub async fn session_tail_state(agent: String, file_path: String) -> String {
 #[tauri::command]
 pub async fn get_session_conversation(agent: String, file_path: String) -> Vec<ChatMessageDto> {
     conversation_impl(&agent, &file_path)
+}
+
+const CONVERSATION_PAGE_BYTES: u64 = 192 * 1024;
+const OPENCODE_PAGE_MESSAGES: usize = 80;
+
+fn parse_session_lines(agent: &str, lines: &[String]) -> Vec<ChatMessageDto> {
+    match agent {
+        "codex" => parse_codex(lines),
+        "gemini" => parse_gemini(lines),
+        "qwen" => parse_qwen(lines),
+        "kimi" => {
+            if kimi_looks_like_wire(lines) { parse_kimi(lines) } else { parse_kimi_legacy(lines) }
+        }
+        _ => parse_claude(lines),
+    }
+}
+
+fn plain_conversation_page(agent: &str, path: &Path, before: Option<u64>) -> Result<ConversationPageDto, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).map_err(|e| format!("读取会话失败: {e}"))?;
+    let len = file.metadata().map_err(|e| format!("读取会话信息失败: {e}"))?.len();
+    let end = before.unwrap_or(len).min(len);
+    let start = end.saturating_sub(CONVERSATION_PAGE_BYTES);
+    let mut previous = None;
+    if start > 0 {
+        file.seek(SeekFrom::Start(start - 1)).map_err(|e| format!("定位会话失败: {e}"))?;
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).map_err(|e| format!("读取会话失败: {e}"))?;
+        previous = Some(byte[0]);
+    }
+    file.seek(SeekFrom::Start(start)).map_err(|e| format!("定位会话失败: {e}"))?;
+    let mut bytes = vec![0u8; (end - start) as usize];
+    file.read_exact(&mut bytes).map_err(|e| format!("读取会话失败: {e}"))?;
+    let (from, cursor) = if start == 0 || previous == Some(b'\n') {
+        (0usize, (start > 0).then_some(start))
+    } else if let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
+        let aligned = start + index as u64 + 1;
+        (index + 1, Some(aligned))
+    } else {
+        (bytes.len(), Some(start)) // 单行超过窗口时 cursor 仍前进，避免分页死循环
+    };
+    let lines = to_lines(&String::from_utf8_lossy(&bytes[from..]));
+    let mut messages = parse_session_lines(agent, &lines);
+    redact_conversation(&mut messages);
+    Ok(ConversationPageDto { messages, cursor })
+}
+
+fn opencode_conversation_page(db_path: &Path, session_id: &str, before: Option<u64>) -> Result<ConversationPageDto, String> {
+    let conn = open_opencode_db(db_path).ok_or("OpenCode 数据库不可读")?;
+    let sid = session_id.to_string();
+    let before_i64 = before.map(|value| value.min(i64::MAX as u64) as i64);
+    let rows = if let Some(before) = before_i64 {
+        query_rows(&conn, "SELECT * FROM message WHERE session_id=? AND time_created<? ORDER BY time_created DESC LIMIT 80", &[&sid, &before])
+    } else {
+        query_rows(&conn, "SELECT * FROM message WHERE session_id=? ORDER BY time_created DESC LIMIT 80", &[&sid])
+    };
+    let mut message_rows: Vec<DbRow> = rows.into_iter()
+        .map(|row| DbRow { names: row.0, vals: row.1 }).collect();
+    let cursor = if message_rows.len() == OPENCODE_PAGE_MESSAGES {
+        message_rows.last().and_then(|row| row.as_i64("time_created"))
+            .filter(|time| *time >= 0).map(|time| time as u64)
+    } else { None };
+    message_rows.reverse();
+    let ids: Vec<String> = message_rows.iter().filter_map(|row| row.as_str("id")).collect();
+    let mut parts_by_msg: HashMap<String, Vec<Value>> = HashMap::new();
+    if !ids.is_empty() {
+        let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT * FROM part WHERE message_id IN ({placeholders}) ORDER BY time_created ASC");
+        let params: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        for row in query_rows(&conn, &sql, &params) {
+            let row = DbRow { names: row.0, vals: row.1 };
+            let (Some(message_id), Some(data)) = (row.as_str("message_id"), row.as_str("data")) else { continue };
+            if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                parts_by_msg.entry(message_id).or_default().push(value);
+            }
+        }
+    }
+    let mut messages = Vec::new();
+    for row in message_rows {
+        let Some(data) = row.as_str("data") else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(&data) else { continue };
+        let parts = row.as_str("id").and_then(|id| parts_by_msg.remove(&id)).unwrap_or_default();
+        if let Some(message) = opencode_message(&value, parts.iter().collect(), row.as_i64("time_created")) {
+            messages.push(message);
+        }
+    }
+    redact_conversation(&mut messages);
+    Ok(ConversationPageDto { messages, cursor })
+}
+
+fn conversation_page_impl(agent: &str, file_path: &str, before: Option<u64>) -> Result<ConversationPageDto, String> {
+    if agent == "opencode" {
+        if let Some((db, sid)) = file_path.split_once('#') {
+            if Path::new(db).exists() {
+                return opencode_conversation_page(Path::new(db), sid, before);
+            }
+        }
+        let mut messages = conversation_impl_raw(agent, file_path);
+        let from = messages.len().saturating_sub(OPENCODE_PAGE_MESSAGES);
+        messages.drain(..from);
+        redact_conversation(&mut messages);
+        return Ok(ConversationPageDto { messages, cursor: None });
+    }
+    let source = PathBuf::from(file_path);
+    let path = if source.exists() { source } else {
+        find_snapshot(agent, &source).ok_or("会话文件已不存在，且没有可用快照")?
+    };
+    let mut magic = [0u8; 4];
+    let compressed = fs::File::open(&path).and_then(|mut file| file.read_exact(&mut magic)).is_ok()
+        && magic == ZSTD_MAGIC;
+    if compressed {
+        let (head, tail) = read_head_tail(&path, CONVERSATION_PAGE_BYTES as usize).ok_or("压缩会话不可读")?;
+        let lines = if tail.is_empty() { head } else { tail };
+        let mut messages = parse_session_lines(agent, &lines);
+        let from = messages.len().saturating_sub(OPENCODE_PAGE_MESSAGES);
+        messages.drain(..from);
+        redact_conversation(&mut messages);
+        return Ok(ConversationPageDto { messages, cursor: None });
+    }
+    plain_conversation_page(agent, &path, before)
+}
+
+/// 长会话按尾部窗口分页读取；终端只取最近消息，会话页可按 cursor 向前加载。
+#[tauri::command]
+pub async fn get_session_conversation_page(agent: String, file_path: String, before: Option<u64>) -> Result<ConversationPageDto, String> {
+    tauri::async_runtime::spawn_blocking(move || conversation_page_impl(&agent, &file_path, before))
+        .await
+        .map_err(|e| format!("读取会话分页失败: {e}"))?
 }
 
 /// 会话全文解析（get_session_conversation 与 ai_summarize_session 共用）
@@ -3162,19 +3530,7 @@ fn conversation_impl_raw(agent: &str, file_path: &str) -> Vec<ChatMessageDto> {
         return Vec::new();
     };
     let lines = to_lines(&String::from_utf8_lossy(&bytes));
-    match agent {
-        "codex" => parse_codex(&lines),
-        "gemini" => parse_gemini(&lines),
-        "qwen" => parse_qwen(&lines),
-        "kimi" => {
-            if kimi_looks_like_wire(&lines) {
-                parse_kimi(&lines)
-            } else {
-                parse_kimi_legacy(&lines)
-            }
-        }
-        _ => parse_claude(&lines),
-    }
+    parse_session_lines(agent, &lines)
 }
 
 // ===== 导出 Markdown =====
@@ -3497,6 +3853,16 @@ pub async fn delete_project_sessions(agent: String, project_path: String) -> Res
 /// 会话文件签名（mtime_ms, size）：轮询时先比对签名，没变就不重解析
 #[tauri::command]
 pub async fn session_file_sig(file_path: String) -> Option<(u64, u64)> {
+    if let Some((db, session_id)) = file_path.split_once('#') {
+        let conn = open_opencode_db(Path::new(db))?;
+        let updated = conn.query_row(
+            "SELECT time_updated FROM session WHERE id=?1",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        ).ok()?.max(0) as u64;
+        let wal_len = std::fs::metadata(format!("{db}-wal")).map(|meta| meta.len()).unwrap_or(0);
+        return Some((updated, wal_len));
+    }
     let p = if let Some(stripped) = file_path.strip_prefix("~/") {
         dirs::home_dir()?.join(stripped)
     } else {
@@ -3604,6 +3970,35 @@ mod tests {
         let long = "啊".repeat(100);
         let t = truncate_title(&long);
         assert_eq!(t.chars().count(), 61); // 60 + 省略号
+    }
+
+    #[test]
+    fn title_quality_rejects_placeholders_and_collapses_whitespace() {
+        assert_eq!(usable_title("New Session"), None);
+        assert_eq!(usable_title("未命名对话"), None);
+        assert_eq!(usable_title("  修复统计页\n\n今日用量  ").as_deref(), Some("修复统计页 今日用量"));
+    }
+
+    #[test]
+    fn plain_conversation_page_loads_long_session_in_windows() {
+        let dir = std::env::temp_dir().join(format!("ccode-page-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("long.jsonl");
+        let mut content = String::new();
+        for index in 0..4000 {
+            content.push_str(&format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"消息 {index:04} {}\"}},\"timestamp\":\"2026-07-01T00:00:00Z\"}}\n",
+                "x".repeat(80)
+            ));
+        }
+        std::fs::write(&file, content).unwrap();
+        let latest = plain_conversation_page("claude-code", &file, None).unwrap();
+        assert!(latest.cursor.is_some(), "长会话首屏应提供更早页 cursor");
+        assert!(latest.messages.last().is_some_and(|message| message.blocks[0].text.contains("消息 3999")));
+        let older = plain_conversation_page("claude-code", &file, latest.cursor).unwrap();
+        assert!(!older.messages.is_empty());
+        assert_ne!(older.messages.last().unwrap().blocks[0].text, latest.messages.first().unwrap().blocks[0].text);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -3775,6 +4170,8 @@ mod tests {
                 workspace: None,
                 summary: None,
                 live: false,
+                source: default_session_source(),
+                internal: false,
             },
             fork.map(String::from),
         )
@@ -4664,6 +5061,3 @@ mod tests {
         assert_eq!(sanitize_export_name("x".repeat(100).as_str()).chars().count(), 60);
     }
 }
-
-
-

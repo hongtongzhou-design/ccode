@@ -4,11 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { File, FolderClosed, FolderOpen } from "lucide-react";
 import ContextMenu from "./ContextMenu";
 import { LoadingRows } from "./PageFrame";
-
-interface RepoDto {
-  path: string;
-  name: string;
-}
+import { useAppStore } from "../store";
 
 export interface SearchResultDto {
   path: string;
@@ -47,6 +43,12 @@ const STATUS_WORD: Record<string, string> = {
 function basenameOf(p: string): string {
   const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || p;
+}
+
+function pathWithin(path: string, base: string): boolean {
+  const normalizedPath = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalizedBase = base.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalizedPath === normalizedBase || normalizedPath.startsWith(`${normalizedBase}/`);
 }
 
 /** 上一级目录；已到文件系统根（或无法再上）时返回 null */
@@ -115,14 +117,15 @@ function FileTree({
     const p = parentDir(root);
     if (p) nav(p);
   }
-  const [recent, setRecent] = useState<RepoDto[]>([]);
+  const recentRepos = useAppStore((s) => s.recentRepos);
+  const recentReposLoading = useAppStore((s) => s.recentReposLoading);
+  const recentReposLoaded = useAppStore((s) => s.recentReposLoaded);
+  const loadRecentRepos = useAppStore((s) => s.loadRecentRepos);
 
-  // 最近项目：来自会话聚合的 git 仓库（按最近活跃排序），点击直接进入
+  // App 启动时已预取；终端首次挂载再兜底触发一次，store 会合并并发请求。
   useEffect(() => {
-    invoke<RepoDto[]>("list_repos")
-      .then((r) => setRecent(r.slice(0, 5)))
-      .catch(() => {});
-  }, []);
+    void loadRecentRepos().catch(() => {});
+  }, [loadRecentRepos]);
   const [cache, setCache] = useState<Record<string, DirEntryDto[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const expandedRef = useRef(expanded);
@@ -377,6 +380,10 @@ function FileTree({
   }
 
   const children = cache[root];
+  // 当前项目已在下方文件树中，不在“最近”里重复；最多保留四个真正可切换的目标。
+  const recent = recentRepos
+    .filter((repo) => !pathWithin(root, repo.path))
+    .slice(0, 4);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* 顶部：文件名搜索 */}
@@ -390,10 +397,16 @@ function FileTree({
         />
       </div>
       {/* 最近项目：点击真进入（切树根 + 切换启动栏 cwd）；↗ 另开新终端标签 */}
-      {recent.length > 0 && (
+      {(recent.length > 0 || (!recentReposLoaded && recentReposLoading)) && (
         <div className="shrink-0 border-b border-hairline py-1">
           <p className="px-2 pb-0.5 text-[10px] text-l4">最近项目</p>
-          {recent.map((r) => (
+          {!recentReposLoaded && recent.length === 0 ? (
+            <div className="space-y-1 px-2 py-0.5" aria-label="正在加载最近项目">
+              {[0, 1, 2, 3].map((index) => (
+                <div key={index} className="h-4 animate-pulse rounded bg-inset" />
+              ))}
+            </div>
+          ) : recent.map((r) => (
             <div
               key={r.path}
               onClick={async () => {
@@ -409,11 +422,12 @@ function FileTree({
                   setError(`目录不存在或已移动：${r.path}`);
                 }
               }}
-              title={`${r.path}（点击进入；↗ 打开新终端）`}
+              title={`${r.path}${r.lastActive ? `\n最近活动：${new Date(r.lastActive).toLocaleString("zh-CN")}` : ""}\n点击进入；↗ 打开新终端`}
               className="group cursor-pointer px-2 py-0.5 text-xs text-l2 hover:bg-white/5 hover:text-l1"
             >
               <span className="flex items-center gap-1">
-                <span className="min-w-0 flex-1 truncate">⏱ {r.name}</span>
+                <span className="shrink-0 text-l4">◔</span>
+                <span className="min-w-0 flex-1 truncate">{r.name}</span>
                 <button
                   onClick={(e) => {
                     e.stopPropagation();

@@ -1,7 +1,23 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import type { DetectResult, Profile, ProfileInput, SessionMetaDto } from "./types";
+import type { DetectResult, Profile, ProfileInput, RepoDto, SessionMetaDto } from "./types";
+
+const RECENT_REPOS_CACHE_KEY = "ccode.recentRepos";
+
+function cachedRecentRepos(): RepoDto[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(RECENT_REPOS_CACHE_KEY) ?? "[]");
+    return Array.isArray(value)
+      ? value.filter(
+          (repo): repo is RepoDto =>
+            typeof repo?.path === "string" && typeof repo?.name === "string",
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
 
 /** 应用设置（SettingsPage；后端 get_settings/update_settings 契约） */
 export interface AppSettings {
@@ -49,10 +65,19 @@ export interface WorkspaceReviewRequest {
   worktreePath: string;
 }
 
+export function sessionRuntimeKey(agent: string, sessionId: string): string {
+  return `${agent}\n${sessionId}`;
+}
+
 interface AppState {
   profiles: Profile[];
   agents: DetectResult[];
   sessions: SessionMetaDto[];
+  /** 后端按最近会话活跃度排序的仓库；本地缓存用于终端首开即时展示。 */
+  recentRepos: RepoDto[];
+  recentReposLoading: boolean;
+  recentReposLoaded: boolean;
+  loadRecentRepos: () => Promise<void>;
   /** 当前页面（nav id），放 store 里让任意页面可跳转 */
   page: string;
   setPage: (p: string) => void;
@@ -67,17 +92,17 @@ interface AppState {
   /** 运行中的 run 脚本：工作区 id → 终端标签 id（nonconcurrent 互斥） */
   runningScripts: Record<string, string>;
   setRunningScript: (wsId: string, tabId: string | null) => void;
-  /** 终端里正在进行的会话：sessionId → 标签 id（会话页「进行中」标记 + 反向跳转） */
+  /** 终端里正在进行的会话：agent+sessionId → 标签 id（防止跨 CLI 同 id 串联） */
   liveSessions: Record<string, string>;
-  setLiveSession: (sessionId: string, tabId: string | null) => void;
+  setLiveSession: (agent: string, sessionId: string, tabId: string | null) => void;
   /** 会话页 → 终端页的焦点跳转请求（终端页消费并清空） */
   focusTabId: string | null;
   focusTab: (tabId: string | null) => void;
   /** 工作区页 → 会话页的搜索词交接（会话页消费并清空） */
   sessionsQuery: string | null;
   /** 请求会话页打开指定会话（终端页「⤴对话」跳转用） */
-  openSessionReq: { sessionId: string } | null;
-  setOpenSessionReq: (r: { sessionId: string } | null) => void;
+  openSessionReq: { agent: string; sessionId: string } | null;
+  setOpenSessionReq: (r: { agent: string; sessionId: string } | null) => void;
   setSessionsQuery: (q: string | null) => void;
   /** 应用设置（启动时加载；update 合并写回并即时应用主题） */
   settings: AppSettings | null;
@@ -95,10 +120,24 @@ interface AppState {
   duplicateProfile: (id: string) => Promise<void>;
 }
 
-export const useAppStore = create<AppState>((set) => ({
+export const useAppStore = create<AppState>((set, get) => ({
   profiles: [],
   agents: [],
   sessions: [],
+  recentRepos: cachedRecentRepos(),
+  recentReposLoading: false,
+  recentReposLoaded: false,
+  loadRecentRepos: async () => {
+    if (get().recentReposLoading) return;
+    set({ recentReposLoading: true });
+    try {
+      const recentRepos = await invoke<RepoDto[]>("list_repos");
+      localStorage.setItem(RECENT_REPOS_CACHE_KEY, JSON.stringify(recentRepos));
+      set({ recentRepos, recentReposLoaded: true });
+    } finally {
+      set({ recentReposLoading: false });
+    }
+  },
   page: "profiles",
   setPage: (p) => set({ page: p }),
   navCollapsed: localStorage.getItem("ccode.navCollapsed") === "1",
@@ -120,11 +159,12 @@ export const useAppStore = create<AppState>((set) => ({
       return { runningScripts: next };
     }),
   liveSessions: {},
-  setLiveSession: (sessionId, tabId) =>
+  setLiveSession: (agent, sessionId, tabId) =>
     set((s) => {
       const next = { ...s.liveSessions };
-      if (tabId) next[sessionId] = tabId;
-      else delete next[sessionId];
+      const key = sessionRuntimeKey(agent, sessionId);
+      if (tabId) next[key] = tabId;
+      else delete next[key];
       return { liveSessions: next };
     }),
   focusTabId: null,

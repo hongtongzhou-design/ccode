@@ -1,17 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useAppStore } from "../store";
+import { sessionRuntimeKey, useAppStore } from "../store";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
 import { Checkbox, LoadingRows } from "../components/PageFrame";
-import type { ChatMessageDto, SessionMetaDto, TokenUsageDto } from "../types";
+import type {
+  ChatMessageDto,
+  ConversationPageDto,
+  SessionMetaDto,
+  TokenUsageDto,
+} from "../types";
 
 /** GitPanel 的 onTotals 占位（会话页不消费改动总量；稳定引用避免击穿 memo） */
 const NOOP_TOTALS = () => {};
 
 type Filter =
   | { kind: "all" }
+  | { kind: "internal" }
   | { kind: "agent"; agent: string }
   // 项目挂在 agent 下，筛选必须同时限定 agent 和路径（同名目录可能跨 agent）
   | { kind: "project"; agent: string; path: string };
@@ -47,7 +53,7 @@ function basename(p: string): string {
 }
 
 function sessionTitle(s: SessionMetaDto): string {
-  return s.customTitle || s.title || s.sessionId.slice(0, 8);
+  return s.customTitle || s.title || `未命名对话 · ${s.sessionId.slice(0, 8)}`;
 }
 
 export default function SessionsPage({ visible }: { visible: boolean }) {
@@ -75,6 +81,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   // 「复制恢复命令」按钮的已复制反馈（存 sessionId，1.5s 后复位）
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
+  const [conversationCursor, setConversationCursor] = useState<number | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingConv, setLoadingConv] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // 行内编辑中的会话（编辑期间暂停轮询，避免覆盖输入）
@@ -91,6 +99,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     | null
   >(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const conversationRequestRef = useRef(0);
   const editingRef = useRef(false);
   editingRef.current = editing !== null;
   const selectedRef = useRef<SessionMetaDto | null>(null);
@@ -155,17 +164,30 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   }
 
   /** B. 「进行中」反向跳转：聚焦该会话所在的终端标签 */
-  function jumpToLive(sessionId: string) {
-    const tabId = liveSessions[sessionId];
+  function jumpToLive(s: SessionMetaDto) {
+    const tabId = liveSessions[sessionRuntimeKey(s.agent, s.sessionId)];
     if (!tabId) return;
     setPage("terminal");
     focusTab(tabId);
   }
 
-  // 分类树：agent → 项目分组；sessions 已按 updatedAt 降序，组内第一条即最近会话
+  const archiveVisible = useMemo(
+    () => searched.filter((s) => showArchived || !s.archived),
+    [searched, showArchived],
+  );
+  const regularVisible = useMemo(
+    () => archiveVisible.filter((s) => !s.internal),
+    [archiveVisible],
+  );
+  const internalVisible = useMemo(
+    () => archiveVisible.filter((s) => s.internal),
+    [archiveVisible],
+  );
+
+  // 分类树：agent → 项目分组；内部 AI 会话固定归并到一个独立入口，不污染普通项目树。
   const tree = useMemo(() => {
     const byAgent = new Map<string, SessionMetaDto[]>();
-    for (const s of searched) {
+    for (const s of regularVisible) {
       const g = byAgent.get(s.agent);
       if (g) g.push(s);
       else byAgent.set(s.agent, [s]);
@@ -190,27 +212,30 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           AGENTS.findIndex((x) => x.id === a.agent) -
           AGENTS.findIndex((x) => x.id === b.agent),
       );
-  }, [searched]);
+  }, [regularVisible]);
 
   const sessionList = useMemo(() => {
-    let src = searched;
+    let src = filter.kind === "internal" ? internalVisible : regularVisible;
     if (filter.kind === "agent") src = src.filter((s) => s.agent === filter.agent);
     else if (filter.kind === "project")
       src = src.filter(
         (s) => s.agent === filter.agent && s.projectPath === filter.path,
       );
-    return src.filter((s) => showArchived || !s.archived);
-  }, [searched, filter, showArchived]);
+    return src;
+  }, [regularVisible, internalVisible, filter]);
 
   /** 切换树筛选：同时退出回放态回到列表，保证右栏与所选节点对应 */
   function selectFilter(f: Filter) {
+    conversationRequestRef.current += 1;
     setFilter(f);
     setSelected(null);
   }
 
   /** 当前筛选的可读描述，显示在列表头部，便于确认右栏与所选节点一致 */
   const filterLabel =
-    filter.kind === "agent"
+    filter.kind === "internal"
+      ? "Ccode 内部 AI"
+      : filter.kind === "agent"
       ? agentLabel(filter.agent)
       : filter.kind === "project"
         ? `${agentLabel(filter.agent)} · ${basename(filter.path)}`
@@ -221,7 +246,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   // 导出 Markdown 结果路径（小字提示，随切换会话清空）
   const [exporting, setExporting] = useState(false);
   const [exportPath, setExportPath] = useState<string | null>(null);
-  /** 回放区页签：对话 / 改动（改动 = 该会话项目的 git diff 面板） */
+  /** 回放区页签：对话 / 当前项目改动（只读当前磁盘状态，不是历史快照） */
   const [replayTab, setReplayTab] = useState<"chat" | "diff">("chat");
 
   /** ◈ AI 摘要：生成/重新生成当前回放会话的摘要块 */
@@ -264,17 +289,34 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  // 终端页「⤴对话」跳转：按 sessionId 直接打开回放（列表加载完成后消费一次）
+  // 终端页「⤴对话」/「完整回放」跳转：先刷新索引，再按 agent+sessionId 精确打开。
   useEffect(() => {
-    if (!openSessionReq || sessions.length === 0) return;
-    const hit = sessions.find((x) => x.sessionId === openSessionReq.sessionId);
-    setOpenSessionReq(null);
-    if (hit) {
-      setFilter({ kind: "all" });
-      void openSession(hit);
-    }
+    if (!openSessionReq) return;
+    let cancelled = false;
+    void loadSessions()
+      .then((fresh) => {
+        if (cancelled) return;
+        const hit = fresh.find(
+          (x) =>
+            x.agent === openSessionReq.agent &&
+            x.sessionId === openSessionReq.sessionId,
+        );
+        setOpenSessionReq(null);
+        if (hit) {
+          setFilter(hit.internal ? { kind: "internal" } : { kind: "all" });
+          void openSession(hit);
+        } else {
+          setError("未找到该对话，可能尚未写入完成或已被 CLI 清理");
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openSessionReq, sessions]);
+  }, [openSessionReq, loadSessions]);
 
   async function openSession(s: SessionMetaDto) {
     // 源文件已删除且无快照，无法回放
@@ -284,22 +326,60 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     // 摘要缓存命中：已有 summary 直接展示，不再调用 AI
     setSummary(s.summary ?? null);
     setExportPath(null);
+    setConversationCursor(null);
     setLoadingConv(true);
     setError(null);
+    const request = ++conversationRequestRef.current;
     try {
-      const conv = await invoke<ChatMessageDto[]>("get_session_conversation", {
+      const page = await invoke<ConversationPageDto>("get_session_conversation_page", {
         agent: s.agent,
         filePath: s.filePath,
+        before: null,
       });
-      setMessages(conv);
+      if (request !== conversationRequestRef.current) return;
+      setMessages(page.messages);
+      setConversationCursor(page.cursor);
       requestAnimationFrame(() => {
         const el = scrollRef.current;
         if (el) el.scrollTop = el.scrollHeight;
       });
     } catch (e) {
+      if (request === conversationRequestRef.current) setError(String(e));
+    } finally {
+      if (request === conversationRequestRef.current) setLoadingConv(false);
+    }
+  }
+
+  async function loadOlderMessages() {
+    if (!selected || conversationCursor === null || loadingOlder) return;
+    const selectedKey = `${selected.agent}\n${selected.sessionId}`;
+    setLoadingOlder(true);
+    try {
+      const scroller = scrollRef.current;
+      const previousHeight = scroller?.scrollHeight ?? 0;
+      const previousTop = scroller?.scrollTop ?? 0;
+      const page = await invoke<ConversationPageDto>("get_session_conversation_page", {
+        agent: selected.agent,
+        filePath: selected.filePath,
+        before: conversationCursor,
+      });
+      const currentSelected = selectedRef.current;
+      if (
+        !currentSelected ||
+        `${currentSelected.agent}\n${currentSelected.sessionId}` !== selectedKey
+      )
+        return;
+      setMessages((current) => [...page.messages, ...current]);
+      setConversationCursor(page.cursor);
+      requestAnimationFrame(() => {
+        const current = scrollRef.current;
+        if (current) current.scrollTop = previousTop + current.scrollHeight - previousHeight;
+      });
+      setError(null);
+    } catch (e) {
       setError(String(e));
     } finally {
-      setLoadingConv(false);
+      setLoadingOlder(false);
     }
   }
 
@@ -319,11 +399,20 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         );
         if (updated && updated.updatedAt !== cur.updatedAt) {
           setSelected(updated);
-          const conv = await invoke<ChatMessageDto[]>("get_session_conversation", {
+          const page = await invoke<ConversationPageDto>("get_session_conversation_page", {
             agent: updated.agent,
             filePath: updated.filePath,
+            before: null,
           });
-          if (!stopped) setMessages(conv);
+          const stillSelected = selectedRef.current;
+          if (
+            !stopped &&
+            stillSelected?.agent === updated.agent &&
+            stillSelected.sessionId === updated.sessionId
+          ) {
+            setMessages(page.messages);
+            setConversationCursor(page.cursor);
+          }
         }
       } catch {
         // 轮询失败静默，下轮再试
@@ -421,6 +510,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       if (cur && cur.agent === s.agent && cur.sessionId === s.sessionId) {
         setSelected(null);
         setMessages([]);
+        setConversationCursor(null);
       }
       await loadSessions();
     } catch (e) {
@@ -443,6 +533,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       if (cur && cur.agent === agent && cur.projectPath === path) {
         setSelected(null);
         setMessages([]);
+        setConversationCursor(null);
       }
       await loadSessions();
     } catch (e) {
@@ -505,6 +596,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     if (cur && checked.has(skey(cur))) {
       setSelected(null);
       setMessages([]);
+      setConversationCursor(null);
     }
     setBatchDeleting(false);
     exitSelectMode();
@@ -556,6 +648,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   const filterActive = (f: Filter) =>
     (filter.kind === "all" && f.kind === "all") ||
+    (filter.kind === "internal" && f.kind === "internal") ||
     (filter.kind === "agent" && f.kind === "agent" && filter.agent === f.agent) ||
     (filter.kind === "project" &&
       f.kind === "project" &&
@@ -584,8 +677,24 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             }`}
           >
             全部会话
-            <span className={`ml-1 text-xs ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}>{searched.length}</span>
+            <span className={`ml-1 text-xs ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}>{regularVisible.length}</span>
           </button>
+          {internalVisible.length > 0 && (
+            <button
+              onClick={() => selectFilter({ kind: "internal" })}
+              title="Ccode 自己调用 AI 生成提交信息、摘要等产生的内部会话"
+              className={`mx-1 mb-1 flex w-[calc(100%-8px)] items-center justify-between rounded-md px-3 py-1.5 text-left text-sm ${
+                filterActive({ kind: "internal" })
+                  ? "bg-rail-sel text-l1"
+                  : "text-l3 hover:bg-white/5"
+              }`}
+            >
+              <span className="truncate">Ccode 内部 AI</span>
+              <span className={`shrink-0 text-xs ${filterActive({ kind: "internal" }) ? "text-l2" : "text-l4"}`}>
+                {internalVisible.length}
+              </span>
+            </button>
+          )}
           {tree.map((g) => (
             <div key={g.agent}>
               <div
@@ -641,7 +750,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                           kind: "project",
                           agent: g.agent,
                           path: p.path,
-                          count: p.list.length,
+                          count: sessions.filter(
+                            (session) =>
+                              session.agent === g.agent &&
+                              session.projectPath === p.path,
+                          ).length,
                         });
                       }}
                       title={p.path}
@@ -662,7 +775,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 })}
             </div>
           ))}
-          {tree.length === 0 && (
+          {tree.length === 0 && internalVisible.length === 0 && (
             <p className="p-3 text-sm text-l4">暂无会话</p>
           )}
         </div>
@@ -718,7 +831,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               <>
                 <span className="text-xs text-l3">
                   {filterLabel} · 当前 {sessionList.length}
-                  {q ? ` · 搜索命中 ${searched.length}` : ""} · 总计 {sessions.length}
+                  {q ? ` · 搜索命中 ${archiveVisible.length}` : ""} · 总计 {filter.kind === "internal" ? internalVisible.length : regularVisible.length}
                 </span>
                 <div className="flex items-center gap-1">
                   <Checkbox
@@ -800,15 +913,15 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     )}
                     {s.pinned && <span title="已保留">⚑</span>}
                     <span className="truncate font-medium text-l1">{sessionTitle(s)}</span>
-                    {(s.live || liveSessions[s.sessionId]) && (
+                    {(s.live || liveSessions[sessionRuntimeKey(s.agent, s.sessionId)]) && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          jumpToLive(s.sessionId);
+                          jumpToLive(s);
                         }}
-                        disabled={!liveSessions[s.sessionId]}
+                        disabled={!liveSessions[sessionRuntimeKey(s.agent, s.sessionId)]}
                         title={
-                          liveSessions[s.sessionId]
+                          liveSessions[sessionRuntimeKey(s.agent, s.sessionId)]
                             ? "该会话正在终端里进行，点击跳转到对应标签"
                             : "该会话的 CLI 进程仍在运行（外部探测，无本地标签）"
                         }
@@ -953,8 +1066,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-strip px-4 py-2">
               <button
                 onClick={() => {
+                  conversationRequestRef.current += 1;
                   setSelected(null);
                   setMessages([]);
+                  setConversationCursor(null);
                   setSummary(null);
                   setExportPath(null);
                   setReplayTab("chat");
@@ -1021,7 +1136,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               >
                 {selected.pinned ? "取消保留" : "⚑ 保留"}
               </button>
-              {/* 对话 / 改动 页签 */}
+              {/* 对话 / 当前项目改动 页签 */}
               <div className="flex shrink-0 gap-1">
                 {(["chat", "diff"] as const).map((k) => (
                   <button
@@ -1031,7 +1146,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       replayTab === k ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
                     }`}
                   >
-                    {k === "chat" ? "对话" : "改动"}
+                    {k === "chat" ? "对话" : "当前项目改动"}
                   </button>
                 ))}
               </div>
@@ -1044,15 +1159,30 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             )}
             {replayTab === "diff" ? (
               <div className="flex min-h-0 flex-1 flex-col">
-                {selected.live && (
-                  <p className="shrink-0 bg-warn px-3 py-1.5 text-xs text-warn-text">
-                    该会话的 agent 正在运行中，可能正在写入文件——提交/推送前确认没有进行中的改动，避免提交半成品或与 agent 撞车
-                  </p>
-                )}
+                <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-l3">
+                  <span className="min-w-0 flex-1 truncate">
+                    当前磁盘状态，不是该历史会话的改动快照
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingTerminal({
+                        cwd: selected.projectPath,
+                        extraEnv: {},
+                        title: basename(selected.projectPath),
+                      });
+                      setPage("terminal");
+                    }}
+                    className="shrink-0 rounded px-2 py-1 text-l2 hover:bg-white/5 hover:text-l1"
+                  >
+                    前往终端处理
+                  </button>
+                </div>
                 <GitPanel
                   cwd={selected.projectPath}
                   visible={replayTab === "diff"}
                   onTotals={NOOP_TOTALS}
+                  readOnly
                 />
               </div>
             ) : (
@@ -1069,7 +1199,21 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   ) : messages.length === 0 ? (
                     <p className="text-sm text-l4">没有可回放的对话内容</p>
                   ) : (
-                    <ConversationView messages={messages} />
+                    <>
+                      {conversationCursor !== null && (
+                        <div className="mb-3 flex justify-center">
+                          <button
+                            type="button"
+                            disabled={loadingOlder}
+                            onClick={() => void loadOlderMessages()}
+                            className="rounded border border-field bg-strip px-3 py-1 text-xs text-l3 hover:bg-inset hover:text-l1 disabled:opacity-50"
+                          >
+                            {loadingOlder ? "加载中…" : "加载更早对话"}
+                          </button>
+                        </div>
+                      )}
+                      <ConversationView messages={messages} />
+                    </>
                   )}
                 </div>
               </>

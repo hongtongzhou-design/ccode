@@ -21,7 +21,7 @@ import {
   serializeRecoverableTerminalState,
   TERMINAL_TABS_STORAGE_KEY,
 } from "../terminal-tab-persistence";
-import type { ChatMessageDto, SessionMetaDto } from "../types";
+import type { ChatMessageDto, ConversationPageDto, SessionMetaDto } from "../types";
 
 // Monaco 体积大，首次打开文件预览时才加载
 const FilePreviewEditor = lazy(() => import("../components/FilePreviewEditor"));
@@ -65,13 +65,22 @@ export interface FocusTabActions {
   modify: () => void;
 }
 
-/** TerminalView 上报的会话联动数据（右侧「会话」页签渲染用） */
+/** TerminalView 上报的当前对话联动数据（右侧「对话」页签渲染用） */
 interface SessionLinkState {
   file: string | null;
+  sessionId: string | null;
+  title: string | null;
+  agentId: string | null;
+  state: "idle" | "detecting" | "linked" | "timeout";
   conv: ChatMessageDto[];
 }
 
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
+
+const RIGHT_PANEL_WIDTH_KEY = "ccode.terminalRightWidth";
+const RIGHT_PANEL_DEFAULT_WIDTH = 420;
+const RIGHT_PANEL_MIN_WIDTH = 320;
+const RIGHT_PANEL_MAX_WIDTH = 760;
 
 /** shell 单引号转义（向 PTY 写 cd 命令用） */
 const shQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
@@ -279,20 +288,23 @@ const TerminalView = memo(function TerminalView({
     return () => window.removeEventListener("keydown", onKey);
   }, [visible]);
 
-  // —— 会话联动（SessionLink）：轮询在本地，展示数据上报给页面级右侧面板 ——
+  // —— 当前对话联动（SessionLink）：轮询在本地，展示数据上报给页面级右侧面板 ——
   const [sessionFile, setSessionFile] = useState<string | null>(null);
+  const [linkedSessionId, setLinkedSessionId] = useState<string | null>(null);
+  const [linkedSessionTitle, setLinkedSessionTitle] = useState<string | null>(null);
+  const [linkState, setLinkState] = useState<SessionLinkState["state"]>("idle");
   const [conv, setConv] = useState<ChatMessageDto[]>([]);
   const lastResumeRef = useRef<string | null>(null);
   const linkCtxRef = useRef<{
     agentId: string;
     cwd: string;
     hint: string | null;
-    sinceIso: string;
     filePath: string | null;
     /** 锁定的会话 id（liveSessions 登记用） */
     sessionId: string | null;
   } | null>(null);
   const linkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const linkStartedAtRef = useRef(0);
   const setLiveSession = useAppStore((s) => s.setLiveSession);
   const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   const setPage = useAppStore((s) => s.setPage);
@@ -365,10 +377,17 @@ const TerminalView = memo(function TerminalView({
     }
   }, [title, running, shellActive, agentId, profileId, model, cwd, activePtyId, attention, sessionFile, resumeSessionId, onStatus]);
 
-  // 会话联动数据镜像给页面级右侧面板
+  // 当前对话数据镜像给页面级右侧面板
   useEffect(() => {
-    onSessionUpdate(tabId, { file: sessionFile, conv });
-  }, [sessionFile, conv, onSessionUpdate]);
+    onSessionUpdate(tabId, {
+      file: sessionFile,
+      sessionId: linkedSessionId,
+      title: linkedSessionTitle,
+      agentId: linkState === "idle" ? null : agentId,
+      state: linkState,
+      conv,
+    });
+  }, [sessionFile, linkedSessionId, linkedSessionTitle, linkState, agentId, conv, onSessionUpdate]);
 
   // 从工作树带入目录创建的标签：聚焦配置选择，选好即可启动
   const profileSelectRef = useRef<HTMLSelectElement>(null);
@@ -462,7 +481,9 @@ const TerminalView = memo(function TerminalView({
       stopLinkTimer();
       // 释放 liveSessions 登记（「进行中」标记随标签消失）
       const sid = linkCtxRef.current?.sessionId;
-      if (sid) setLiveSession(sid, null);
+      const linkedAgent = linkCtxRef.current?.agentId;
+      if (sid && linkedAgent) setLiveSession(linkedAgent, sid, null);
+      invoke("release_session_claim", { claimId: tabId }).catch(() => {});
       const id = ptyIdRef.current;
       ptyIdRef.current = null;
       ptyKindRef.current = null;
@@ -633,22 +654,36 @@ const TerminalView = memo(function TerminalView({
     }
   }
 
-  /** 找当前 agent 进程对应的会话文件：有 hint 按 sessionId 精确匹配，否则按目录+启动时间兜底 */
-  async function findSessionFile(): Promise<{ filePath: string; sessionId: string } | null> {
+  /** 找当前 agent 进程对应的会话文件：有 hint 精确匹配，否则走后端排他声明。 */
+  async function findSessionFile(): Promise<{
+    filePath: string;
+    sessionId: string;
+    title: string | null;
+  } | null> {
     const ctx = linkCtxRef.current;
     if (!ctx) return null;
     try {
       if (ctx.hint) {
         const list = await invoke<SessionMetaDto[]>("list_sessions");
         const hit = list.find((s) => s.agent === ctx.agentId && s.sessionId === ctx.hint);
-        return hit ? { filePath: hit.filePath, sessionId: ctx.hint! } : null;
+        return hit
+          ? {
+              filePath: hit.filePath,
+              sessionId: ctx.hint,
+              title: hit.customTitle || hit.title,
+            }
+          : null;
       }
-      const meta = await invoke<SessionMetaDto | null>("find_session_for", {
-        agent: ctx.agentId,
-        cwd: ctx.cwd,
-        sinceIso: ctx.sinceIso,
+      const meta = await invoke<SessionMetaDto | null>("claim_session_for", {
+        claimId: tabId,
       });
-      return meta ? { filePath: meta.filePath, sessionId: meta.sessionId } : null;
+      return meta
+        ? {
+            filePath: meta.filePath,
+            sessionId: meta.sessionId,
+            title: meta.customTitle || meta.title,
+          }
+        : null;
     } catch {
       return null;
     }
@@ -659,20 +694,25 @@ const TerminalView = memo(function TerminalView({
   async function fetchConversation(force = false) {
     const ctx = linkCtxRef.current;
     if (!ctx?.filePath) return;
-    // 签名门控：文件 mtime/size 没变就跳过本轮（避免每 3 秒全量重解析长会话）
+    let nextSig: string | null = null;
+    // 签名门控：文件 mtime/size 没变就跳过本轮；变化时只读取最近的有界窗口。
     if (!force) {
       const sig = await invoke<[number, number] | null>("session_file_sig", {
         filePath: ctx.filePath,
       }).catch(() => null);
       if (sig && `${sig[0]}:${sig[1]}` === convSigRef.current) return;
-      if (sig) convSigRef.current = `${sig[0]}:${sig[1]}`;
+      if (sig) nextSig = `${sig[0]}:${sig[1]}`;
     }
     try {
-      const msgs = await invoke<ChatMessageDto[]>("get_session_conversation", {
+      const page = await invoke<ConversationPageDto>("get_session_conversation_page", {
         agent: ctx.agentId,
         filePath: ctx.filePath,
+        before: null,
       });
-      setConv(msgs);
+      if (linkCtxRef.current !== ctx) return;
+      setConv(page.messages.slice(-50));
+      if (nextSig) convSigRef.current = nextSig;
+      setLinkState("linked");
     } catch {
       // 会话文件可能写到一半，下轮再试
     }
@@ -682,6 +722,7 @@ const TerminalView = memo(function TerminalView({
         agent: ctx.agentId,
         filePath: ctx.filePath,
       });
+      if (linkCtxRef.current !== ctx) return;
       setAttention(
         state === "done" || state === "working" || state === "confirm" ? state : null,
       );
@@ -691,13 +732,16 @@ const TerminalView = memo(function TerminalView({
   }
 
   /** 会话文件锁定：登记 liveSessions（会话页「进行中」+ 反向跳转） */
-  function lockLink(filePath: string, sessionId: string) {
+  function lockLink(filePath: string, sessionId: string, title: string | null) {
     const ctx = linkCtxRef.current;
     if (!ctx || ctx.filePath) return;
     ctx.filePath = filePath;
     ctx.sessionId = sessionId;
     setSessionFile(filePath);
-    setLiveSession(sessionId, tabId);
+    setLinkedSessionId(sessionId);
+    setLinkedSessionTitle(title);
+    setLinkState("linked");
+    setLiveSession(ctx.agentId, sessionId, tabId);
   }
 
   async function linkTick() {
@@ -705,8 +749,11 @@ const TerminalView = memo(function TerminalView({
     if (!ctx) return;
     if (!ctx.filePath) {
       const hit = await findSessionFile();
-      if (!hit) return;
-      lockLink(hit.filePath, hit.sessionId);
+      if (!hit) {
+        if (Date.now() - linkStartedAtRef.current >= 20_000) setLinkState("timeout");
+        return;
+      }
+      lockLink(hit.filePath, hit.sessionId, hit.title);
     }
     await fetchConversation();
   }
@@ -724,18 +771,27 @@ const TerminalView = memo(function TerminalView({
     if (!ctx) return;
     if (!ctx.filePath) {
       const hit = await findSessionFile();
-      if (hit) lockLink(hit.filePath, hit.sessionId);
+      if (hit) lockLink(hit.filePath, hit.sessionId, hit.title);
+      else setLinkState("timeout");
     }
     await fetchConversation(true);
+    const sid = linkCtxRef.current?.sessionId;
+    const linkedAgent = linkCtxRef.current?.agentId;
+    if (sid && linkedAgent) setLiveSession(linkedAgent, sid, null);
   }
 
   function resetLink() {
     stopLinkTimer();
     const sid = linkCtxRef.current?.sessionId;
-    if (sid) setLiveSession(sid, null);
+    const linkedAgent = linkCtxRef.current?.agentId;
+    if (sid && linkedAgent) setLiveSession(linkedAgent, sid, null);
+    invoke("release_session_claim", { claimId: tabId }).catch(() => {});
     linkCtxRef.current = null;
     convSigRef.current = "";
     setSessionFile(null);
+    setLinkedSessionId(null);
+    setLinkedSessionTitle(null);
+    setLinkState("idle");
     setConv([]);
     setAttention(null);
   }
@@ -743,6 +799,8 @@ const TerminalView = memo(function TerminalView({
   async function launch(resumeId?: string) {
     setError(null);
     await cleanupPty();
+    setLinkState("detecting");
+    linkStartedAtRef.current = Date.now();
     try {
       const res = await invoke<{ ptyId: string; sessionHint: string | null }>(
         "pty_spawn",
@@ -755,6 +813,7 @@ const TerminalView = memo(function TerminalView({
           extraEnv: initialExtraEnv ?? null,
           // 会话恢复（无则全新会话）
           resumeSessionId: resumeId ?? resumeSessionId ?? null,
+          linkClaimId: tabId,
         },
       );
       localStorage.setItem(
@@ -775,7 +834,6 @@ const TerminalView = memo(function TerminalView({
         agentId,
         cwd,
         hint: res.sessionHint,
-        sinceIso: new Date().toISOString(),
         filePath: null,
         sessionId: null,
       };
@@ -787,6 +845,8 @@ const TerminalView = memo(function TerminalView({
       setBarExpanded(false);
       if (restored) onRestoreComplete?.(tabId);
     } catch (e) {
+      invoke("release_session_claim", { claimId: tabId }).catch(() => {});
+      setLinkState("idle");
       setError(String(e));
     }
   }
@@ -847,7 +907,10 @@ const TerminalView = memo(function TerminalView({
     openConversationPage: () => {
       const sid = linkCtxRef.current?.sessionId ?? lastResumeRef.current;
       if (!sid) return;
-      setOpenSessionReq({ sessionId: sid });
+      setOpenSessionReq({
+        agent: linkCtxRef.current?.agentId ?? agentId,
+        sessionId: sid,
+      });
       setPage("sessions");
     },
     search: () => setSearchOpen(true),
@@ -980,11 +1043,10 @@ const TerminalView = memo(function TerminalView({
               )}
             <button
                 onClick={onOpenSessionPanel}
-                disabled={!running && !sessionFile}
-                title="查看当前会话的结构化对话"
-                className="rounded px-2 py-1 text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                title="查看当前任务的结构化对话"
+                className="rounded px-2 py-1 text-l2 hover:bg-white/5 hover:text-l1"
             >
-                会话
+                对话
             </button>
             <button
                 onClick={() => setSearchOpen(true)}
@@ -1042,7 +1104,10 @@ const TerminalView = memo(function TerminalView({
                 onClick={() => {
                   const sid = linkCtxRef.current?.sessionId ?? lastResumeRef.current;
                   if (!sid) return;
-                  setOpenSessionReq({ sessionId: sid });
+                  setOpenSessionReq({
+                    agent: linkCtxRef.current?.agentId ?? agentId,
+                    sessionId: sid,
+                  });
                   setPage("sessions");
                 }}
                 title="在会话页打开该对话（可标记/保留）"
@@ -1053,11 +1118,10 @@ const TerminalView = memo(function TerminalView({
             )}
             <button
               onClick={onOpenSessionPanel}
-              disabled={!running && !sessionFile}
-              title="查看当前会话的结构化对话"
-              className="text-l3 hover:text-l1 disabled:opacity-50"
+              title="查看当前任务的结构化对话"
+              className="text-l3 hover:text-l1"
             >
-              会话
+              对话
             </button>
             <button
               onClick={() => setSearchOpen(true)}
@@ -1159,6 +1223,8 @@ interface Tab {
 }
 
 export default function TerminalPage({ visible }: { visible: boolean }) {
+  const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
+  const setPage = useAppStore((s) => s.setPage);
   const [initialState] = useState(() => {
     const saved = parseRecoverableTerminalState(
       localStorage.getItem(TERMINAL_TABS_STORAGE_KEY),
@@ -1185,7 +1251,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [tabs, setTabs] = useState<Tab[]>(initialState.tabs);
   const [activeId, setActiveId] = useState(initialState.activeId);
   const [statuses, setStatuses] = useState<Record<string, TabStatus>>({});
-  // 各标签的会话联动数据（TerminalView 轮询后镜像上来）
+  // 各标签的当前对话数据（TerminalView 轮询后镜像上来）
   const [sessionByTab, setSessionByTab] = useState<Record<string, SessionLinkState>>({});
   // 左栏（工作树 + 运行中总览）
   const [railCollapsed, setRailCollapsed] = useState(false);
@@ -1198,6 +1264,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const runAutoOpenedRef = useRef(false);
   // 右侧面板：默认收起，点「会话」或预览文件时打开
   const [rightOpen, setRightOpen] = useState(false);
+  const [rightWidth, setRightWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(RIGHT_PANEL_WIDTH_KEY));
+    const width = Number.isFinite(saved) && saved > 0 ? saved : RIGHT_PANEL_DEFAULT_WIDTH;
+    return Math.min(RIGHT_PANEL_MAX_WIDTH, Math.max(RIGHT_PANEL_MIN_WIDTH, width));
+  });
+  const [rightExpanded, setRightExpanded] = useState(false);
+  const terminalRootRef = useRef<HTMLDivElement>(null);
+  const normalRightWidthRef = useRef(rightWidth);
   // 专注模式：隐藏左栏与右面板，终端全宽（页级开关，默认关）
   const [focusMode, setFocusMode] = useState(false);
   // 专注栏：各标签动作表（TerminalView 挂载时注册，⋯ 菜单调用）与菜单坐标
@@ -1223,7 +1297,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       ...(s?.running || sessFile
         ? [
             {
-              label: "会话面板",
+              label: "对话面板",
               onSelect: () => {
                 setFocusMode(false); // 右面板在专注模式下隐藏，先退出专注
                 openSessionPanel();
@@ -1236,7 +1310,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       { label: "⤢ 退出专注", onSelect: () => setFocusMode(false) },
     ];
   }
-  const [rightTab, setRightTab] = useState<"session" | "preview" | "git">("session");
+  const [rightTab, setRightTab] = useState<"dialogue" | "preview" | "git">("dialogue");
   const [gitTotals, setGitTotals] = useState<{ add: number; del: number } | null>(null);
   const [preview, setPreview] = useState<{ path: string; name: string; root: string | null } | null>(null);
   /** 预览编辑器脏状态（预览页签的脏点） */
@@ -1246,8 +1320,76 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   /** 全宽任务审阅覆盖层；底下所有 TerminalView 继续挂载。 */
   const [reviewPath, setReviewPath] = useState<string | null>(null);
   const sessionScrollRef = useRef<HTMLDivElement>(null);
+  const dialogueFollowRef = useRef(true);
+  const [dialogueHasNew, setDialogueHasNew] = useState(false);
 
   const activeCwd = statuses[activeId]?.cwd ?? "~";
+
+  function maxRightWidth(expanded = rightExpanded): number {
+    const total = terminalRootRef.current?.clientWidth ?? window.innerWidth;
+    const railWidth = expanded ? 0 : railCollapsed ? 32 : 240;
+    return Math.max(
+      RIGHT_PANEL_MIN_WIDTH,
+      Math.min(RIGHT_PANEL_MAX_WIDTH, total - railWidth - 280),
+    );
+  }
+
+  function clampRightWidth(width: number, expanded = rightExpanded): number {
+    return Math.min(maxRightWidth(expanded), Math.max(RIGHT_PANEL_MIN_WIDTH, width));
+  }
+
+  function toggleRightExpanded() {
+    if (rightExpanded) {
+      setRightExpanded(false);
+      setRightWidth(clampRightWidth(normalRightWidthRef.current, false));
+      return;
+    }
+    normalRightWidthRef.current = rightWidth;
+    const total = terminalRootRef.current?.clientWidth ?? window.innerWidth;
+    setRightExpanded(true);
+    setRightWidth(clampRightWidth(Math.round(total * 0.58), true));
+  }
+
+  function closeRightPanel() {
+    if (rightExpanded) {
+      setRightExpanded(false);
+      setRightWidth(clampRightWidth(normalRightWidthRef.current, false));
+    }
+    setRightOpen(false);
+  }
+
+  function startRightResize(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = rightWidth;
+    const expanded = rightExpanded;
+    const onMove = (moveEvent: PointerEvent) => {
+      setRightWidth(clampRightWidth(startWidth + startX - moveEvent.clientX, expanded));
+    };
+    const onUp = (upEvent: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      const finalWidth = clampRightWidth(startWidth + startX - upEvent.clientX, expanded);
+      setRightWidth(finalWidth);
+      if (!expanded) {
+        normalRightWidthRef.current = finalWidth;
+        localStorage.setItem(RIGHT_PANEL_WIDTH_KEY, String(Math.round(finalWidth)));
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
+  useEffect(() => {
+    const onResize = () => setRightWidth((width) => clampRightWidth(width));
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [railCollapsed, rightExpanded]);
 
   /** TerminalView 上报状态；内容没变就返回原对象，避免无谓重渲染 */
   const reportStatus = useCallback((id: string, s: TabStatus) => {
@@ -1260,11 +1402,19 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     });
   }, []);
 
-  /** TerminalView 镜像会话联动数据；引用没变就不更新 */
+  /** TerminalView 镜像当前对话数据；引用没变就不更新 */
   const reportSession = useCallback((id: string, s: SessionLinkState) => {
     setSessionByTab((prev) => {
       const cur = prev[id];
-      if (cur && cur.file === s.file && cur.conv === s.conv) {
+      if (
+        cur &&
+        cur.file === s.file &&
+        cur.sessionId === s.sessionId &&
+        cur.title === s.title &&
+        cur.agentId === s.agentId &&
+        cur.state === s.state &&
+        cur.conv === s.conv
+      ) {
         return prev;
       }
       return { ...prev, [id]: s };
@@ -1350,17 +1500,40 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   /** 全部子组件共享的稳定回调（memo 不被行内箭头击穿） */
   const openSessionPanel = useCallback(() => {
-    setRightTab("session");
+    setRightTab("dialogue");
     setRightOpen(true);
   }, []);
   const consumeExternalCwd = useCallback(() => setEnterCwd(null), []);
 
-  // 会话页签内容更新时滚到底部
+  function scrollDialogueToBottom() {
+    const el = sessionScrollRef.current;
+    if (!el) return;
+    dialogueFollowRef.current = true;
+    setDialogueHasNew(false);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function onDialogueScroll() {
+    const el = sessionScrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 56;
+    dialogueFollowRef.current = nearBottom;
+    if (nearBottom) setDialogueHasNew(false);
+  }
+
   const activeSession = sessionByTab[activeId];
   useEffect(() => {
-    const el = sessionScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [activeSession?.conv, rightTab, rightOpen, activeId]);
+    if (!rightOpen || rightTab !== "dialogue") return;
+    dialogueFollowRef.current = true;
+    setDialogueHasNew(false);
+    requestAnimationFrame(scrollDialogueToBottom);
+  }, [rightTab, rightOpen, activeId]);
+  useEffect(() => {
+    if (!rightOpen || rightTab !== "dialogue") return;
+    if (dialogueFollowRef.current) requestAnimationFrame(scrollDialogueToBottom);
+    else setDialogueHasNew(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSession?.conv]);
 
   const addTab = useCallback((init?: {
     cwd?: string;
@@ -1526,9 +1699,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     "flex h-7 w-7 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l2";
 
   return (
-    <div className="relative flex h-full">
+    <div ref={terminalRootRef} className="relative flex h-full">
       {/* 左栏：工作树 + 运行中总览（专注模式下整体隐藏） */}
-      {!focusMode &&
+      {!focusMode && !rightExpanded &&
         (railCollapsed ? (
         <div className="flex w-8 shrink-0 flex-col items-center bg-rail2 py-1.5">
           <button
@@ -1731,7 +1904,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 <TerminalView
                   visible={tabVisible}
                   rightOpen={rightOpen}
-                  layoutKey={`${railCollapsed}-${focusMode}-${rightOpen}`}
+                  layoutKey={`${railCollapsed}-${focusMode}-${rightOpen}-${Math.round(rightWidth)}-${rightExpanded}`}
                   gitTotals={t.id === activeId ? gitTotals : null}
                   tabId={t.id}
                   skipSeed={t.skipSeed}
@@ -1761,11 +1934,32 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         </div>
       </div>
 
-      {/* 右侧面板：会话联动 / 文件预览 页签切换（专注模式下隐藏） */}
+      {/* 右侧面板：当前对话 / 文件预览 / 改动（专注模式下隐藏） */}
       {rightOpen && !focusMode && (
-        <div className="flex w-[380px] shrink-0 flex-col border-l border-hairline bg-canvas">
+        <>
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整右侧面板宽度"
+          title="拖动调整宽度；双击恢复默认宽度"
+          onPointerDown={startRightResize}
+          onDoubleClick={() => {
+            const width = clampRightWidth(RIGHT_PANEL_DEFAULT_WIDTH, false);
+            setRightExpanded(false);
+            setRightWidth(width);
+            normalRightWidthRef.current = width;
+            localStorage.setItem(RIGHT_PANEL_WIDTH_KEY, String(Math.round(width)));
+          }}
+          className="group relative w-1.5 shrink-0 cursor-col-resize bg-strip"
+        >
+          <span className="absolute inset-y-0 left-0.5 w-px bg-hairline group-hover:bg-cta" />
+        </div>
+        <div
+          style={{ width: rightWidth }}
+          className="flex shrink-0 flex-col bg-canvas"
+        >
           <div className="flex shrink-0 items-center gap-1 bg-strip px-2 py-1.5">
-            {(["session", "preview", "git"] as const).map((k) => {
+            {(["dialogue", "preview", "git"] as const).map((k) => {
               const gitBadge =
                 k === "git" && gitTotals && gitTotals.add + gitTotals.del > 0
                   ? gitTotals.add + gitTotals.del
@@ -1774,13 +1968,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 <button
                   key={k}
                   onClick={() => setRightTab(k)}
+                  onDoubleClick={toggleRightExpanded}
+                  title={`${k === "dialogue" ? "对话" : k === "preview" ? "预览" : "改动"}；双击${rightExpanded ? "还原" : "宽屏展开"}`}
                   className={`rounded px-2.5 py-1 text-xs ${
                     rightTab === k
                       ? "bg-seg-sel text-l1"
                       : "text-l3 hover:text-l1"
                   }`}
                 >
-                  {k === "session" ? "会话" : k === "preview" ? "预览" : "改动"}
+                  {k === "dialogue" ? "对话" : k === "preview" ? "预览" : "改动"}
                   {k === "preview" && previewDirty && (
                     <span className="ml-1 text-l3" title="有未保存的修改">
                       ●
@@ -1795,21 +1991,98 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               );
             })}
             <button
-              onClick={() => setRightOpen(false)}
+              type="button"
+              onClick={toggleRightExpanded}
+              title={rightExpanded ? "还原分栏（恢复工作树）" : "宽屏展开（暂时隐藏工作树，保留终端）"}
+              className="ml-auto flex size-7 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
+            >
+              {rightExpanded ? "⇲" : "⇱"}
+            </button>
+            <button
+              onClick={closeRightPanel}
               title="收起面板"
-              className="ml-auto text-xs text-l4 hover:text-l1"
+              className="flex size-7 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
             >
               ×
             </button>
           </div>
-          <div className={rightTab === "session" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-            <div ref={sessionScrollRef} className="min-h-0 flex-1 overflow-auto p-3">
-              {!activeSession?.file ? (
-                <p className="text-sm text-l4">等待会话文件产生…</p>
-              ) : activeSession.conv.length === 0 ? (
-                <p className="text-sm text-l4">暂无对话内容</p>
-              ) : (
-                <ConversationView messages={activeSession.conv} compact />
+          <div className={rightTab === "dialogue" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+            <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-2">
+              <span
+                className={`size-1.5 shrink-0 rounded-full ${
+                  statuses[activeId]?.running
+                    ? "bg-ok-text"
+                    : activeSession?.state === "timeout"
+                      ? "bg-warn-text"
+                      : "bg-l4"
+                }`}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-xs font-medium text-l1">
+                  {activeSession?.title || statuses[activeId]?.title || "当前对话"}
+                </span>
+                <span className="block truncate text-[11px] text-l4">
+                  {activeSession?.agentId
+                    ? agentLabel(activeSession.agentId)
+                    : statuses[activeId]?.agentId
+                      ? agentLabel(statuses[activeId].agentId)
+                      : "尚未启动"}
+                  {activeSession?.sessionId
+                    ? ` · ${activeSession.sessionId.slice(0, 8)}`
+                    : ""}
+                  {activeSession?.state === "detecting"
+                    ? " · 识别中"
+                    : activeSession?.state === "timeout"
+                      ? " · 等待关联"
+                      : activeSession?.file
+                        ? statuses[activeId]?.running
+                          ? " · 同步中"
+                          : " · 已结束"
+                        : ""}
+                </span>
+              </span>
+              <button
+                type="button"
+                disabled={!activeSession?.sessionId || !activeSession.agentId}
+                onClick={() => {
+                  if (!activeSession?.sessionId || !activeSession.agentId) return;
+                  setOpenSessionReq({
+                    agent: activeSession.agentId,
+                    sessionId: activeSession.sessionId,
+                  });
+                  setPage("sessions");
+                }}
+                className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-40"
+              >
+                完整回放
+              </button>
+            </div>
+            <div className="relative min-h-0 flex-1">
+              <div
+                ref={sessionScrollRef}
+                onScroll={onDialogueScroll}
+                className="h-full overflow-auto p-3"
+              >
+                {!activeSession || activeSession.state === "idle" ? (
+                  <p className="text-sm text-l4">启动 Agent 后将在这里同步当前对话</p>
+                ) : activeSession.state === "detecting" ? (
+                  <p className="text-sm text-l4">正在识别当前对话…</p>
+                ) : activeSession.state === "timeout" && !activeSession.file ? (
+                  <p className="text-sm text-l4">暂未识别到对话，后台仍会自动重试</p>
+                ) : activeSession.conv.length === 0 ? (
+                  <p className="text-sm text-l4">等待第一条对话…</p>
+                ) : (
+                  <ConversationView messages={activeSession.conv} compact />
+                )}
+              </div>
+              {dialogueHasNew && (
+                <button
+                  type="button"
+                  onClick={scrollDialogueToBottom}
+                  className="absolute bottom-3 right-3 rounded border border-field bg-strip px-2.5 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
+                >
+                  有新消息 ↓
+                </button>
               )}
             </div>
           </div>
@@ -1850,6 +2123,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             />
           </div>
         </div>
+        </>
       )}
 
       {reviewPath && (

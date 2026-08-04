@@ -3,8 +3,11 @@
 
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Component, Path};
 use std::process::{Command, Output};
+
+const FILE_DIFF_CAP: usize = 200_000;
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -151,7 +154,10 @@ fn git_status_sync(cwd: &str) -> Result<GitStatusDto, String> {
     if !check.status.success() {
         return Ok(GitStatusDto::default()); // is_repo = false，其余默认
     }
-    let status_out = run_git(&cwd, &["status", "--porcelain=v1", "-b"])?;
+    let status_out = run_git(
+        &cwd,
+        &["status", "--porcelain=v1", "-b", "--untracked-files=all"],
+    )?;
     if !status_out.status.success() {
         return Err(output_tail(&status_out));
     }
@@ -415,6 +421,109 @@ pub async fn git_push(cwd: String) -> Result<String, String> {
         .map_err(|e| format!("推送失败: {e}"))?
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileDiffDto {
+    pub text: String,
+    pub binary: bool,
+    pub truncated: bool,
+}
+
+fn truncate_utf8(mut text: String, cap: usize) -> (String, bool) {
+    if text.len() <= cap {
+        return (text, false);
+    }
+    let mut end = cap;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str("\n…（diff 过大已截断）");
+    (text, true)
+}
+
+fn synthetic_untracked_diff(path: &str, bytes: &[u8], source_truncated: bool) -> GitFileDiffDto {
+    if bytes.contains(&0) {
+        return GitFileDiffDto {
+            text: "二进制文件，无法显示文本 diff".into(),
+            binary: true,
+            truncated: false,
+        };
+    }
+    let content = String::from_utf8_lossy(bytes);
+    let mut text = format!("--- /dev/null\n+++ b/{path}\n");
+    for line in content.lines() {
+        text.push('+');
+        text.push_str(line);
+        text.push('\n');
+        if text.len() > FILE_DIFF_CAP {
+            break;
+        }
+    }
+    let (text, capped) = truncate_utf8(text, FILE_DIFF_CAP);
+    GitFileDiffDto {
+        text,
+        binary: false,
+        truncated: capped || source_truncated,
+    }
+}
+
+fn git_file_diff_sync(cwd: &str, path: &str) -> Result<GitFileDiffDto, String> {
+    let cwd = expand_tilde(cwd);
+    let validated = validate_selected_paths(&cwd, &[path.to_string()])?;
+    let path = validated.first().ok_or("文件已不在当前改动清单中")?;
+    let status = git_status_sync(&cwd)?.files.into_iter()
+        .find(|file| file.path == *path)
+        .ok_or_else(|| format!("文件已不在当前改动清单中，请刷新后重试: {path}"))?;
+
+    if status.status == "??" {
+        let full = Path::new(&cwd).join(path);
+        let file = std::fs::File::open(&full).map_err(|e| format!("读取 {path} 失败: {e}"))?;
+        let mut bytes = Vec::with_capacity(FILE_DIFF_CAP + 1);
+        file.take((FILE_DIFF_CAP + 1) as u64).read_to_end(&mut bytes)
+            .map_err(|e| format!("读取 {path} 失败: {e}"))?;
+        let source_truncated = bytes.len() > FILE_DIFF_CAP;
+        if source_truncated {
+            bytes.truncate(FILE_DIFF_CAP);
+        }
+        return Ok(synthetic_untracked_diff(path, &bytes, source_truncated));
+    }
+
+    let out = run_git(&cwd, &["diff", "HEAD", "--", path])?;
+    let mut text = if out.status.success() {
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    } else {
+        String::new()
+    };
+    if !out.status.success() || text.trim().is_empty() {
+        let staged = run_git(&cwd, &["diff", "--cached", "--", path])?;
+        if !staged.status.success() {
+            return Err(if out.status.success() { output_tail(&staged) } else { output_tail(&out) });
+        }
+        text = String::from_utf8_lossy(&staged.stdout).into_owned();
+    }
+    let binary = text.lines().any(|line| {
+        line.starts_with("Binary files ") || line.starts_with("GIT binary patch")
+    });
+    if text.trim().is_empty() {
+        return Ok(GitFileDiffDto {
+            text: "该文件没有可显示的文本 diff".into(),
+            binary,
+            truncated: false,
+        });
+    }
+    let (text, truncated) = truncate_utf8(text, FILE_DIFF_CAP);
+    Ok(GitFileDiffDto { text, binary, truncated })
+}
+
+/// 普通仓库单文件 diff：仅允许读取当前 git status 中的安全相对路径。
+#[tauri::command]
+pub async fn git_file_diff(cwd: String, path: String) -> Result<GitFileDiffDto, String> {
+    tauri::async_runtime::spawn_blocking(move || git_file_diff_sync(&cwd, &path))
+        .await
+        .map_err(|e| format!("读取 diff 失败: {e}"))?
+}
+
 // ===== 工作区任务 diff（§6.10 阶段 C：基准从 HEAD 改为 merge-base） =====
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -492,7 +601,7 @@ fn workspace_diff_with_rows(
         });
     }
     // 未跟踪文件：numstat 覆盖不到，行数当 additions（与 git_status 同一口径）
-    if let Ok(porc) = run_git(&wt, &["status", "--porcelain=v1"]) {
+    if let Ok(porc) = run_git(&wt, &["status", "--porcelain=v1", "--untracked-files=all"]) {
         if porc.status.success() {
             let (_, _, _, raw) = parse_porcelain(&String::from_utf8_lossy(&porc.stdout));
             for (status, path) in raw {
@@ -546,8 +655,18 @@ fn file_diff_impl(wt: &str, base_branch: &str, path: &str) -> Result<String, Str
     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
     if text.trim().is_empty() {
         let full = std::path::Path::new(wt).join(path);
-        let content =
-            std::fs::read_to_string(&full).map_err(|e| format!("读取 {path} 失败: {e}"))?;
+        let file = std::fs::File::open(&full).map_err(|e| format!("读取 {path} 失败: {e}"))?;
+        let mut bytes = Vec::with_capacity(FILE_DIFF_CAP + 1);
+        file.take((FILE_DIFF_CAP + 1) as u64).read_to_end(&mut bytes)
+            .map_err(|e| format!("读取 {path} 失败: {e}"))?;
+        let source_truncated = bytes.len() > FILE_DIFF_CAP;
+        if source_truncated {
+            bytes.truncate(FILE_DIFF_CAP);
+        }
+        if bytes.contains(&0) {
+            return Ok("二进制文件，无法显示文本 diff".into());
+        }
+        let content = String::from_utf8_lossy(&bytes);
         let lines: Vec<&str> = content.lines().collect();
         text = lines
             .iter()
@@ -555,16 +674,13 @@ fn file_diff_impl(wt: &str, base_branch: &str, path: &str) -> Result<String, Str
             .map(|l| format!("+{l}"))
             .collect::<Vec<_>>()
             .join("\n");
-        if lines.len() > 400 {
+        if source_truncated {
+            text.push_str("\n…（文件过大，已截断）");
+        } else if lines.len() > 400 {
             text.push_str(&format!("\n…（共 {} 行，已截断）", lines.len()));
         }
     }
-    const CAP: usize = 200_000;
-    if text.len() > CAP {
-        text.truncate(CAP);
-        text.push_str("\n…（diff 过大已截断）");
-    }
-    Ok(text)
+    Ok(truncate_utf8(text, FILE_DIFF_CAP).0)
 }
 
 /// 单文件任务 diff 内容（工作区「评审」面板展开用）
@@ -574,6 +690,10 @@ pub async fn workspace_file_diff(worktree_path: String, path: String) -> Result<
         let wt = expand_tilde(&worktree_path);
         let rows = crate::workspaces::worktree_rows();
         let row = find_worktree_row(&wt, &rows).ok_or("该目录不在任何工作区内")?;
+        let current = workspace_diff_with_rows(&wt, &rows)?;
+        if !current.files.iter().any(|file| file.path == path) {
+            return Err(format!("文件已不在当前任务改动清单中，请刷新后重试: {path}"));
+        }
         file_diff_impl(&wt, &row.base_branch, &path)
     })
     .await
@@ -916,5 +1036,26 @@ mod tests {
             &["worktree", "remove", "--force", wt.to_str().unwrap()],
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn generic_file_diff_is_safe_and_handles_binary_untracked_files() {
+        if !git_available() {
+            return;
+        }
+        let repo = init_repo("generic-file-diff");
+        fs::write(repo.join("a.txt"), "before\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["-c", "commit.gpgsign=false", "commit", "-m", "init"]);
+        fs::write(repo.join("a.txt"), "after\n").unwrap();
+        fs::write(repo.join("image.bin"), [0, 1, 2, 3]).unwrap();
+
+        let tracked = git_file_diff_sync(repo.to_str().unwrap(), "a.txt").unwrap();
+        assert!(tracked.text.contains("-before"));
+        assert!(tracked.text.contains("+after"));
+        let binary = git_file_diff_sync(repo.to_str().unwrap(), "image.bin").unwrap();
+        assert!(binary.binary);
+        assert!(git_file_diff_sync(repo.to_str().unwrap(), "../outside").is_err());
+        fs::remove_dir_all(&repo).ok();
     }
 }

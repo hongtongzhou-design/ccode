@@ -41,6 +41,7 @@ function App() {
   const runningCount = useAppStore((s) => Object.keys(s.liveSessions).length);
   const loadAll = useAppStore((s) => s.loadAll);
   const loadSessions = useAppStore((s) => s.loadSessions);
+  const loadRecentRepos = useAppStore((s) => s.loadRecentRepos);
   const loadSettings = useAppStore((s) => s.loadSettings);
   const checkAppUpdate = useAppStore((s) => s.checkAppUpdate);
 
@@ -53,11 +54,12 @@ function App() {
   useEffect(() => {
     loadAll().catch((e) => console.error(e));
     loadSessions().catch((e) => console.error(e));
+    loadRecentRepos().catch(() => {});
     // 设置（含主题）在启动时加载并应用
     loadSettings().catch((e) => console.error(e));
     // 启动时静默检查应用更新（内部已吞错，命中后在设置页「更新」分区提示）
     checkAppUpdate().catch(() => {});
-  }, [loadAll, loadSessions, loadSettings, checkAppUpdate]);
+  }, [loadAll, loadSessions, loadRecentRepos, loadSettings, checkAppUpdate]);
 
   // 前端未捕获异常上报到进程内日志缓冲（设置页「诊断」可见）；同消息 5s 去重防刷屏
   useEffect(() => {
@@ -97,6 +99,7 @@ function App() {
       loadAll().catch(() => {});
       loadSettings().catch(() => {});
       loadSessions().catch(() => {});
+      loadRecentRepos().catch(() => {});
     };
     const onVis = () => {
       if (document.visibilityState === "visible") sync();
@@ -107,7 +110,7 @@ function App() {
       window.removeEventListener("focus", sync);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [loadAll, loadSessions, loadSettings]);
+  }, [loadAll, loadSessions, loadRecentRepos, loadSettings]);
 
   return (
     <ErrorBoundary>

@@ -14,6 +14,12 @@ interface GitStatusDto {
   totalDel: number;
 }
 
+interface GitFileDiffDto {
+  text: string;
+  binary: boolean;
+  truncated: boolean;
+}
+
 const STATUS_STYLE: Record<string, string> = {
   M: "bg-warn text-warn-text",
   A: "bg-ok text-ok-text",
@@ -42,6 +48,7 @@ function GitPanel({
   refreshKey,
   onTotals,
   onOpenReview,
+  readOnly = false,
 }: {
   cwd: string;
   /** 右侧面板打开且页面可见；不可见时暂停轮询 */
@@ -51,6 +58,8 @@ function GitPanel({
   onTotals: (t: { add: number; del: number }) => void;
   /** 工作区任务进入全宽审阅；普通仓库不显示入口。 */
   onOpenReview?: (cwd: string) => void;
+  /** 会话页只展示当前项目状态，不允许从历史上下文提交或推送。 */
+  readOnly?: boolean;
 }) {
   const [status, setStatus] = useState<GitStatusDto | null>(null);
   /** 活动标签 cwd 落在工作区里时为任务累计 diff（W3），否则为 null */
@@ -64,6 +73,11 @@ function GitPanel({
     text: string;
   } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
+  const [diffPath, setDiffPath] = useState<string | null>(null);
+  const [diffDetail, setDiffDetail] = useState<GitFileDiffDto | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const diffRequestRef = useRef(0);
   // 成功 toast（主题 CTA 绿，右下角浮出 2.5s 自动淡出）；失败仍走 output 红字详情
   const [toast, setToast] = useState<{ text: string; hiding: boolean } | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -133,7 +147,11 @@ function GitPanel({
 
   // cwd / 可见性 / 外部信号变化立即刷新；可见时每 8s 轮询
   useEffect(() => {
+    diffRequestRef.current += 1;
     setSelectedPaths(new Set());
+    setDiffPath(null);
+    setDiffDetail(null);
+    setDiffError(null);
     void refresh();
     if (!visible) return;
     const timer = setInterval(() => void refresh(), 8000);
@@ -199,6 +217,15 @@ function GitPanel({
   const canCommit = selectedFiles.length > 0 && running === null && !aiBusy;
   const allSelected = !inWs && files.length > 0 && selectedPaths.size === files.length;
 
+  useEffect(() => {
+    if (!diffPath || files.some((file) => file.path === diffPath)) return;
+    diffRequestRef.current += 1;
+    setDiffPath(null);
+    setDiffDetail(null);
+    setDiffError(null);
+    setDiffLoading(false);
+  }, [diffPath, files]);
+
   function togglePath(path: string, checked: boolean) {
     setSelectedPaths((current) => {
       const next = new Set(current);
@@ -206,6 +233,57 @@ function GitPanel({
       else next.delete(path);
       return next;
     });
+  }
+
+  async function toggleDiff(file: GitFileDto) {
+    if (diffPath === file.path) {
+      diffRequestRef.current += 1;
+      setDiffPath(null);
+      setDiffDetail(null);
+      setDiffError(null);
+      return;
+    }
+    const request = ++diffRequestRef.current;
+    setDiffPath(file.path);
+    setDiffDetail(null);
+    setDiffError(null);
+    setDiffLoading(true);
+    try {
+      const detail = inWs
+        ? {
+            text: await invoke<string>("workspace_file_diff", {
+              worktreePath: cwd,
+              path: file.path,
+            }),
+            binary: file.additions === null && file.deletions === null,
+            truncated: false,
+          }
+        : await invoke<GitFileDiffDto>("git_file_diff", {
+            cwd,
+            path: file.path,
+          });
+      if (request === diffRequestRef.current) setDiffDetail(detail);
+    } catch (e) {
+      if (request === diffRequestRef.current) setDiffError(String(e));
+    } finally {
+      if (request === diffRequestRef.current) setDiffLoading(false);
+    }
+  }
+
+  function diffLineClass(line: string): string {
+    if (line.startsWith("@@")) return "border-l-2 border-link bg-inset text-link";
+    if (line.startsWith("+") && !line.startsWith("+++"))
+      return "border-l-2 border-add text-add";
+    if (line.startsWith("-") && !line.startsWith("---"))
+      return "border-l-2 border-del text-del";
+    if (
+      line.startsWith("diff --git") ||
+      line.startsWith("index ") ||
+      line.startsWith("---") ||
+      line.startsWith("+++")
+    )
+      return "border-l-2 border-transparent text-l4";
+    return "border-l-2 border-transparent text-l2";
   }
 
   return (
@@ -277,44 +355,78 @@ function GitPanel({
             {inWs ? "任务无改动 ✓" : "工作区干净 ✓"}
           </p>
         ) : (
-          files.map((f) => (
-            <div
-              key={`${f.status}:${f.path}`}
-              title={f.path}
-              className="flex items-center gap-1.5 px-1 py-1 text-xs"
-            >
-              {!inWs && (
-                <Checkbox
-                  checked={selectedPaths.has(f.path)}
-                  onChange={(checked) => togglePath(f.path, checked)}
-                  label={<span className="sr-only">选择 {f.path}</span>}
-                />
-              )}
-              <span
-                className={`shrink-0 rounded px-1 font-mono ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
-              >
-                {f.status}
-              </span>
-              <span className="min-w-0 flex-1 truncate font-mono text-l2">
-                {f.path}
-              </span>
-              {(f.additions !== null || f.deletions !== null) && (
-                <span className="shrink-0 font-mono">
-                  {f.additions !== null && (
-                    <span className="text-add">+{f.additions}</span>
-                  )}{" "}
-                  {f.deletions !== null && f.deletions > 0 && (
-                    <span className="text-del">-{f.deletions}</span>
+          files.map((f) => {
+            const expanded = diffPath === f.path;
+            return (
+              <div key={`${f.status}:${f.path}`} className="border-b border-hairline/60 last:border-b-0">
+                <div className="flex items-center gap-1 px-1 py-0.5 text-xs">
+                  {!inWs && !readOnly && (
+                    <Checkbox
+                      checked={selectedPaths.has(f.path)}
+                      onChange={(checked) => togglePath(f.path, checked)}
+                      label={<span className="sr-only">选择 {f.path}</span>}
+                    />
                   )}
-                </span>
-              )}
-            </div>
-          ))
+                  <button
+                    type="button"
+                    onClick={() => void toggleDiff(f)}
+                    title={`${expanded ? "收起" : "查看"} ${f.path} 的 diff`}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-1 text-left hover:bg-white/5"
+                  >
+                    <span className="w-3 shrink-0 text-center text-l4">{expanded ? "▾" : "▸"}</span>
+                    <span
+                      className={`shrink-0 rounded px-1 font-mono ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
+                    >
+                      {f.status}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-l2">
+                      {f.path}
+                    </span>
+                    {(f.additions !== null || f.deletions !== null) && (
+                      <span className="shrink-0 font-mono">
+                        {f.additions !== null && (
+                          <span className="text-add">+{f.additions}</span>
+                        )}{" "}
+                        {f.deletions !== null && f.deletions > 0 && (
+                          <span className="text-del">-{f.deletions}</span>
+                        )}
+                      </span>
+                    )}
+                  </button>
+                </div>
+                {expanded && (
+                  <div className="mb-1 ml-1 overflow-hidden rounded border border-hairline bg-strip">
+                    <div className="flex items-center gap-2 border-b border-hairline px-2 py-1 text-[11px] text-l4">
+                      <span className="min-w-0 flex-1 truncate font-mono">{f.path}</span>
+                      {diffDetail?.binary && <span>二进制</span>}
+                      {diffDetail?.truncated && <span className="text-warn-text">已截断</span>}
+                    </div>
+                    {diffLoading ? (
+                      <div className="p-2"><LoadingRows compact /></div>
+                    ) : diffError ? (
+                      <p className="p-2 text-xs text-err-text">{diffError}</p>
+                    ) : diffDetail ? (
+                      <pre className="max-h-80 overflow-auto py-1 font-mono text-[11px] leading-5">
+                        {diffDetail.text.split("\n").map((line, index) => (
+                          <span
+                            key={`${index}:${line.slice(0, 24)}`}
+                            className={`block min-w-max whitespace-pre px-2 ${diffLineClass(line)}`}
+                          >
+                            {line || " "}
+                          </span>
+                        ))}
+                      </pre>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
 
       {/* 提交区 */}
-      {status?.isRepo && (
+      {status?.isRepo && !readOnly && (
         <div className="shrink-0 border-t border-hairline p-2">
           {hasChanges && (
             <div className="mb-2 flex items-center justify-between text-xs text-l3">

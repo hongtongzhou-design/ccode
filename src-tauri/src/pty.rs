@@ -335,6 +335,8 @@ pub fn pty_spawn(
     extra_env: Option<HashMap<String, String>>,
     // 恢复已有会话（§6.12 A）：注入各 CLI 的恢复参数，跳过 --session-id，hint 直接锁定该会话
     resume_session_id: Option<String>,
+    // 无固定 session id 的 agent 用终端标签 id 预登记关联声明，避免并发标签抢同一会话
+    link_claim_id: Option<String>,
 ) -> Result<SpawnResult, String> {
     let profile = store.get(&profile_id)?;
     if profile.agent != agent_id {
@@ -397,13 +399,30 @@ pub fn pty_spawn(
             cmd.env(k, v);
         }
     }
-    let pty_id = spawn_tracked(
+    let registered_claim = if session_hint.is_none() {
+        link_claim_id.as_deref().map(|claim_id| {
+            crate::sessions::register_session_claim(claim_id, &agent_id, &cwd);
+            claim_id.to_string()
+        })
+    } else {
+        None
+    };
+    let pty_id = match spawn_tracked(
         &app,
         manager.inner(),
         cmd,
         &expand_tilde(&cwd),
         PtyPurpose::Agent,
-    )?;
+    ) {
+        Ok(pty_id) => pty_id,
+        Err(error) => {
+            if let Some(claim_id) = registered_claim {
+                crate::sessions::release_session_claim_impl(&claim_id);
+            }
+            return Err(error);
+        }
+    };
+    crate::sessions::invalidate_scan_cache();
     store.touch_last_used(&profile_id);
     Ok(SpawnResult {
         pty_id,
