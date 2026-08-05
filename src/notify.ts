@@ -1,0 +1,49 @@
+/**
+ * 长任务 OS 通知的判定纯函数（P3）：与 DOM/Tauri 解耦，供 node --test 直接测。
+ * 触发链路在 TerminalPage：watch 各标签 attention 跃迁 → 窗口未聚焦 → 去抖 → 发系统通知。
+ */
+
+/** 会话尾部注意力状态（与 TabStatus.attention 同型） */
+export type AttentionState = "done" | "working" | "confirm" | null;
+
+/** 通知种类：待确认 / 已完成 */
+export type NotifyKind = "confirm" | "done";
+
+/** 同一标签两次通知的最小间隔 */
+export const NOTIFY_DEBOUNCE_MS = 30_000;
+
+/**
+ * 注意力跃迁判定：非目标态 → 目标态（待确认/已完成）时返回通知种类。
+ * prev 为 undefined 表示标签首次出现（基线），一律不通知，防标签创建误报。
+ */
+export function attentionTransition(
+  prev: AttentionState | undefined,
+  next: AttentionState,
+): NotifyKind | null {
+  if (prev === undefined) return null;
+  if (next === "confirm" && prev !== "confirm") return "confirm";
+  if (next === "done" && prev !== "done") return "done";
+  return null;
+}
+
+/**
+ * 按标签去抖：lastAt 为上次发送时间（undefined = 从未发过）。
+ * 距上次不足 windowMs 则抑制；恰好满 windowMs 放行。
+ */
+export function debounceAllows(
+  lastAt: number | undefined,
+  now: number,
+  windowMs: number = NOTIFY_DEBOUNCE_MS,
+): boolean {
+  return lastAt === undefined || now - lastAt >= windowMs;
+}
+
+/** 通知标题：标签名优先，缺省回落 agent 名 */
+export function notifyTitle(tabTitle: string, agentLabel: string): string {
+  return tabTitle ? `${agentLabel} · ${tabTitle}` : agentLabel;
+}
+
+/** 通知正文 */
+export function notifyBody(kind: NotifyKind): string {
+  return kind === "confirm" ? "等待你的确认" : "任务已完成";
+}

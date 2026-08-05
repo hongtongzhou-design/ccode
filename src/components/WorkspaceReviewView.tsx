@@ -13,6 +13,7 @@ import {
   Search,
 } from "lucide-react";
 import ContextMenu from "./ContextMenu";
+import ImagePairView, { isImagePath } from "./ImagePairView";
 import { LoadingRows } from "./PageFrame";
 import type {
   GitCommitResultDto,
@@ -389,7 +390,8 @@ function DiffFileSection({
   }, [file.path, register, worktreePath]);
 
   useEffect(() => {
-    if (!visible) return;
+    // 图片文件不取文本 diff，渲染期交给 ImagePairView 双栏对比
+    if (!visible || isImagePath(file.path)) return;
     let cancelled = false;
     setText(null);
     setError(null);
@@ -405,6 +407,7 @@ function DiffFileSection({
     };
   }, [file.path, revision, visible, worktreePath]);
 
+  const image = isImagePath(file.path);
   const rows = useMemo(() => (text == null ? [] : parseDiff(text)), [text]);
   return (
     <section
@@ -427,7 +430,15 @@ function DiffFileSection({
           <span className="font-mono text-del">-{file.deletions}</span>
         )}
       </div>
-      {!visible || text === null ? (
+      {image ? (
+        visible ? (
+          <ImagePairView cwd={worktreePath} path={file.path} revision={revision} />
+        ) : (
+          <div className="min-h-28 px-4 py-3">
+            <LoadingRows compact />
+          </div>
+        )
+      ) : !visible || text === null ? (
         <div className="min-h-28 px-4 py-3">
           {error ? (
             <p className="text-xs text-err-text">{error}</p>

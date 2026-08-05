@@ -35,6 +35,8 @@ export interface AppSettings {
   scrollback: number;
   rateUsdCny: number;
   brewMirror: boolean;
+  /** 长任务 OS 通知：注意力跃迁且窗口未聚焦时发系统通知（默认开） */
+  notificationsEnabled: boolean;
   theme: string;
   /** ◈ AI 功能固定使用的 profile id；null/undefined = 自动（最近使用） */
   aiProfileId?: string | null;

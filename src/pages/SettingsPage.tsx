@@ -616,6 +616,17 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             }}
           />
         </Row>
+
+        <Row
+          label="长任务 OS 通知"
+          hint="agent 从工作中转为待确认/已完成且窗口未聚焦时发系统通知（同一标签 30 秒内最多一条）；首次发送需允许系统通知权限"
+        >
+          <Toggle
+            label="长任务 OS 通知"
+            checked={settings?.notificationsEnabled ?? true}
+            onChange={(checked) => patch({ notificationsEnabled: checked })}
+          />
+        </Row>
       </Section>
 
       <Section

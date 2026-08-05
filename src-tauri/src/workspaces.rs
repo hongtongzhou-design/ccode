@@ -2330,6 +2330,261 @@ pub async fn list_repos() -> Vec<RepoDto> {
     .unwrap_or_default()
 }
 
+// ===== 提货单 artifacts.yaml（§11.3 机制五，P3 v1 务实版） =====
+// 大产物（数据/图/PDF）不进 git，只有本清单随分支提交传递；下一步工作区凭清单按路径直读产物。
+// Cargo.toml 未引入 serde_yaml（约定不加新依赖），清单采用手写简化 YAML 子集：
+// 顶层一个 `artifacts:` 数组，每条目六行 `key: "value"`（双引号字符串，反斜杠转义），
+// 解析/渲染只认该子集；其余顶层内容（注释、未知键）在读写往返中原样保留。
+
+const ARTIFACTS_FILE: &str = "artifacts.yaml";
+/// 清单头注释；解析时剔除本行，避免每次重写都再叠一份
+const MANIFEST_HEADER: &str = "# Ccode 提货单：大产物不进 git，本清单随分支提交传递给下一步";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactEntryDto {
+    pub name: String,
+    /// 绝对路径（canonicalize 后）
+    pub path: String,
+    /// md5 hex
+    pub hash: String,
+    pub size: u64,
+    /// 产出工作区名
+    pub produced_by: String,
+    pub created_at: String,
+}
+
+/// 简化 YAML 字符串转义：只处理引号/反斜杠，换行折叠为空格（路径与名称不应含换行）
+fn yaml_escape(value: &str) -> String {
+    value
+        .replace(['\n', '\r'], " ")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
+/// 解析双引号字符串值；未加引号的值原样返回（防御式，容忍手写清单）
+fn yaml_unescape(value: &str) -> String {
+    let v = value.trim();
+    if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+        v[1..v.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+    } else {
+        v.to_string()
+    }
+}
+
+/// 拆分为（保留行， 条目）：`artifacts:` 块外的顶层内容原样保留（头注释行除外）；
+/// 块内无法识别的行直接跳过（格式随版本漂移时不拖垮整个清单）。
+fn parse_manifest(text: &str) -> (Vec<String>, Vec<ArtifactEntryDto>) {
+    let mut preserved = Vec::new();
+    let mut entries = Vec::new();
+    let mut in_block = false;
+    for line in text.lines() {
+        if !in_block {
+            if line.trim() == "artifacts:" {
+                in_block = true;
+            } else if line.trim_end() != MANIFEST_HEADER {
+                preserved.push(line.to_string());
+            }
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue; // 块内空行/注释不保留
+        }
+        // 无缩进的非块内容 = 块结束，回到顶层保留
+        if !line.starts_with(char::is_whitespace) {
+            in_block = false;
+            preserved.push(line.to_string());
+            continue;
+        }
+        let content = trimmed.strip_prefix("- ").unwrap_or_else(|| {
+            // 纯 `-` 行视为新空条目
+            if trimmed == "-" {
+                ""
+            } else {
+                trimmed
+            }
+        });
+        let is_new = trimmed.starts_with('-');
+        if is_new {
+            entries.push(ArtifactEntryDto {
+                name: String::new(),
+                path: String::new(),
+                hash: String::new(),
+                size: 0,
+                produced_by: String::new(),
+                created_at: String::new(),
+            });
+        }
+        let Some(entry) = entries.last_mut() else { continue };
+        let Some((key, value)) = content.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "name" => entry.name = yaml_unescape(value),
+            "path" => entry.path = yaml_unescape(value),
+            "hash" => entry.hash = yaml_unescape(value),
+            "size" => entry.size = value.trim().parse().unwrap_or(0),
+            "produced_by" => entry.produced_by = yaml_unescape(value),
+            "created_at" => entry.created_at = yaml_unescape(value),
+            _ => {} // 未知字段跳过
+        }
+    }
+    // 损坏文件的防御：缺路径或名字的条目没有意义，剔除
+    entries.retain(|e| !e.path.is_empty() && !e.name.is_empty());
+    (preserved, entries)
+}
+
+fn render_manifest(preserved: &[String], entries: &[ArtifactEntryDto]) -> String {
+    let mut out = String::new();
+    out.push_str(MANIFEST_HEADER);
+    out.push_str("\nartifacts:\n");
+    for e in entries {
+        out.push_str(&format!("  - name: \"{}\"\n", yaml_escape(&e.name)));
+        out.push_str(&format!("    path: \"{}\"\n", yaml_escape(&e.path)));
+        out.push_str(&format!("    hash: \"{}\"\n", yaml_escape(&e.hash)));
+        out.push_str(&format!("    size: {}\n", e.size));
+        out.push_str(&format!(
+            "    produced_by: \"{}\"\n",
+            yaml_escape(&e.produced_by)
+        ));
+        out.push_str(&format!(
+            "    created_at: \"{}\"\n",
+            yaml_escape(&e.created_at)
+        ));
+    }
+    for line in preserved {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// 流式 md5 + 大小：产物可能很大（数据/图/PDF），不整文件读入内存
+fn file_md5_and_size(path: &Path) -> Result<(String, u64), String> {
+    use std::io::Read;
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("读取产物失败 {}: {e}", path.display()))?;
+    let mut ctx = md5::Context::new();
+    let mut buf = [0u8; 1024 * 1024];
+    let mut size = 0u64;
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("读取产物失败 {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        ctx.consume(&buf[..n]);
+        size += n as u64;
+    }
+    Ok((format!("{:x}", ctx.compute()), size))
+}
+
+/// 已被 git 跟踪的文件随分支走，不需要提货单；登记它会误导下一步，直接拒绝。
+/// 工作区外的路径谈不上被本仓库跟踪，git 不可用/非仓库时放行（防御式，不阻断登记）。
+fn ensure_artifact_not_tracked(worktree: &Path, artifact: &Path) -> Result<(), String> {
+    // artifact 已 canonicalize，worktree 同步 canonicalize 再比前缀（/var→/private/var 这类符号链接）
+    let worktree = fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    let Ok(rel) = artifact.strip_prefix(&worktree) else {
+        return Ok(());
+    };
+    if run_git(
+        &worktree,
+        &["ls-files", "--error-unmatch", "--", &rel.to_string_lossy()],
+        Duration::from_secs(10),
+    )
+    .is_ok()
+    {
+        return Err(format!(
+            "产物 {} 已被 git 跟踪，随分支提交即可，无需登记提货单",
+            artifact.display()
+        ));
+    }
+    Ok(())
+}
+
+fn register_artifact_impl(
+    worktree: &Path,
+    name: &str,
+    artifact: &Path,
+    produced_by: &str,
+) -> Result<ArtifactEntryDto, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("产物名称不能为空".into());
+    }
+    // canonicalize 同时完成存在性校验与绝对路径化
+    let artifact = fs::canonicalize(artifact)
+        .map_err(|e| format!("产物文件不存在或不可读 {}: {e}", artifact.display()))?;
+    if !artifact.is_file() {
+        return Err(format!("产物路径不是文件: {}", artifact.display()));
+    }
+    ensure_artifact_not_tracked(worktree, &artifact)?;
+    let (hash, size) = file_md5_and_size(&artifact)?;
+    let entry = ArtifactEntryDto {
+        name: name.to_string(),
+        path: artifact.to_string_lossy().into_owned(),
+        hash,
+        size,
+        produced_by: produced_by.to_string(),
+        created_at: chrono::Local::now().to_rfc3339(),
+    };
+    // 读-改-原子写：损坏文件按防御式解析后的结果继续，不清空用户手改的其他内容
+    let manifest = worktree.join(ARTIFACTS_FILE);
+    let existing = fs::read_to_string(&manifest).unwrap_or_default();
+    let (preserved, mut entries) = parse_manifest(&existing);
+    // 同路径重复登记 = 更新（内容/hash/时间都可能变），不产生重复条目
+    match entries.iter_mut().find(|e| e.path == entry.path) {
+        Some(slot) => *slot = entry.clone(),
+        None => entries.push(entry.clone()),
+    }
+    crate::profiles::atomic_write(&manifest, &render_manifest(&preserved, &entries))?;
+    Ok(entry)
+}
+
+/// 读项目根（或工作区根）的清单；缺失返回空，解析全程防御式容错
+fn read_artifacts_manifest_impl(root: &Path) -> Vec<ArtifactEntryDto> {
+    let Ok(text) = fs::read_to_string(root.join(ARTIFACTS_FILE)) else {
+        return Vec::new();
+    };
+    parse_manifest(&text).1
+}
+
+#[tauri::command]
+pub async fn register_artifact(
+    worktree_path: String,
+    name: String,
+    artifact_path: String,
+) -> Result<ArtifactEntryDto, String> {
+    let worktree = PathBuf::from(&worktree_path);
+    // produced_by 取注册工作区名；查不到（普通仓库面板）回落目录名
+    let produced_by = db()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT name FROM workspaces WHERE worktree_path = ?1 AND status != 'archived'",
+                params![&worktree_path],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .unwrap_or_else(|| {
+            worktree
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| worktree_path.clone())
+        });
+    register_artifact_impl(&worktree, &name, Path::new(&artifact_path), &produced_by)
+}
+
+#[tauri::command]
+pub async fn read_artifacts_manifest(repo_path: String) -> Result<Vec<ArtifactEntryDto>, String> {
+    Ok(read_artifacts_manifest_impl(Path::new(&repo_path)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3676,5 +3931,88 @@ mod tests {
                 .is_err(),
             "选定删除侧后文件不得留在提交里"
         );
+    }
+
+    // ===== 提货单 artifacts.yaml =====
+
+    /// 注册往返：条目字段齐全、md5/大小正确，未知顶层内容读写往返原样保留
+    #[test]
+    fn artifact_register_roundtrip_preserves_unknown_keys() {
+        let Some(fx) = Fixture::new() else { return };
+        // 产物保持未跟踪（大产物不进 git）
+        let data = fx.repo.join("result.csv");
+        fs::write(&data, b"a,b\n1,2\n").unwrap();
+        // 预置清单带未知顶层键与注释，验证保留
+        fs::write(
+            fx.repo.join(ARTIFACTS_FILE),
+            "# 手写备注\nupstream: \"https://example.com\"\n",
+        )
+        .unwrap();
+        let entry = register_artifact_impl(&fx.repo, "清洗结果", &data, "data-clean").unwrap();
+        assert_eq!(entry.name, "清洗结果");
+        assert_eq!(entry.produced_by, "data-clean");
+        assert_eq!(entry.size, 8);
+        assert_eq!(entry.hash, format!("{:x}", md5::compute(b"a,b\n1,2\n")));
+        assert!(!entry.created_at.is_empty());
+        assert!(Path::new(&entry.path).is_absolute());
+        let text = fs::read_to_string(fx.repo.join(ARTIFACTS_FILE)).unwrap();
+        assert!(text.contains("upstream: \"https://example.com\""), "{text}");
+        assert!(text.contains("# 手写备注"), "{text}");
+        assert_eq!(text.matches(MANIFEST_HEADER).count(), 1, "{text}");
+        let entries = read_artifacts_manifest_impl(&fx.repo);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "清洗结果");
+        assert_eq!(entries[0].path, entry.path);
+        assert_eq!(entries[0].hash, entry.hash);
+        // 清单缺失时返回空
+        let empty_dir = fx.dir.join("no-manifest");
+        fs::create_dir_all(&empty_dir).unwrap();
+        assert!(read_artifacts_manifest_impl(&empty_dir).is_empty());
+    }
+
+    /// 同路径重复登记 = 更新条目而非追加；已跟踪文件拒绝登记
+    #[test]
+    fn artifact_register_same_path_updates_and_tracked_rejected() {
+        let Some(fx) = Fixture::new() else { return };
+        let data = fx.repo.join("figure.png");
+        fs::write(&data, b"v1").unwrap();
+        let first = register_artifact_impl(&fx.repo, "图一", &data, "plot").unwrap();
+        fs::write(&data, b"v2-longer").unwrap();
+        let second = register_artifact_impl(&fx.repo, "图一（修订）", &data, "plot").unwrap();
+        assert_ne!(first.hash, second.hash);
+        let entries = read_artifacts_manifest_impl(&fx.repo);
+        assert_eq!(entries.len(), 1, "同路径不得重复登记");
+        assert_eq!(entries[0].name, "图一（修订）");
+        assert_eq!(entries[0].hash, second.hash);
+        // 已跟踪文件随分支走，登记提货单会误导下一步
+        let err = register_artifact_impl(&fx.repo, "自述", &fx.repo.join("README.md"), "ws")
+            .unwrap_err();
+        assert!(err.contains("跟踪"), "{err}");
+        // 不存在的文件拒绝
+        assert!(register_artifact_impl(&fx.repo, "缺失", &fx.repo.join("nope.bin"), "ws").is_err());
+    }
+
+    /// 损坏/手写不规范的清单：解析容错不 panic，残缺条目剔除，再登记不清空其他内容
+    #[test]
+    fn artifact_manifest_corrupt_is_tolerated() {
+        let Some(fx) = Fixture::new() else { return };
+        fs::write(
+            fx.repo.join(ARTIFACTS_FILE),
+            "not yaml at all: [{\nartifacts:\n  - name: \"孤儿\"\n  garbage line\n  - name: \"好条目\"\n    path: \"/tmp/ok.bin\"\n    hash: \"abc\"\n    size: not-a-number\n",
+        )
+        .unwrap();
+        let entries = read_artifacts_manifest_impl(&fx.repo);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].name, "好条目");
+        assert_eq!(entries[0].size, 0);
+        // 在损坏清单上继续登记：顶层杂行保留，新条目可解析
+        let data = fx.repo.join("out.parquet");
+        fs::write(&data, b"parquet").unwrap();
+        register_artifact_impl(&fx.repo, "数据集", &data, "etl").unwrap();
+        let text = fs::read_to_string(fx.repo.join(ARTIFACTS_FILE)).unwrap();
+        assert!(text.contains("not yaml at all: [{"), "{text}");
+        let entries = read_artifacts_manifest_impl(&fx.repo);
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert!(entries.iter().any(|e| e.name == "数据集"));
     }
 }

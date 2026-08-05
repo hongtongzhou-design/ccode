@@ -5,6 +5,7 @@ mod fonts;
 mod fs_tree;
 mod git_info;
 mod global_config;
+mod handoff;
 mod logbuf;
 mod models;
 mod pdf;
@@ -29,6 +30,8 @@ pub fn run() {
         // 应用自更新（tauri-plugin-updater）+ 安装后重启（tauri-plugin-process）
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // 长任务 OS 通知（注意力跃迁：工作中→待确认/已完成，窗口未聚焦时）
+        .plugin(tauri_plugin_notification::init())
         .manage(profiles::ProfileStore::new().expect("初始化 ProfileStore 失败"))
         .manage(pty::PtyManager::default())
         .invoke_handler(tauri::generate_handler![
@@ -68,6 +71,9 @@ pub fn run() {
             sessions::delete_project_sessions,
             sessions::session_tail_state,
             sessions::export_session_markdown,
+            handoff::handoff_targets,
+            handoff::build_handoff_brief,
+            handoff::mark_handoff,
             logbuf::get_app_log,
             logbuf::clear_app_log,
             logbuf::export_app_log,
@@ -83,6 +89,7 @@ pub fn run() {
             pdf::read_pdf_bytes,
             git_info::git_status,
             git_info::git_file_diff,
+            git_info::git_image_pair,
             git_info::git_commit,
             git_info::git_push,
             git_info::git_status_map,
@@ -101,6 +108,8 @@ pub fn run() {
             workspaces::restore_workspace,
             workspaces::delete_workspace,
             workspaces::workspace_env_for,
+            workspaces::register_artifact,
+            workspaces::read_artifacts_manifest,
             workspaces::workspace_health,
             workspaces::workspace_drift,
             workspaces::workspace_repair_remount,

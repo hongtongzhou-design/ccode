@@ -10,6 +10,11 @@ import {
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -21,11 +26,18 @@ import ConversationView from "../components/ConversationView";
 import ContextMenu from "../components/ContextMenu";
 import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
+import HandoffPicker, { type HandoffSource } from "../components/HandoffPicker";
 import { LoadingRows } from "../components/PageFrame";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
 import { renderTaskMd } from "../components/ProjectGroup";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
 import { XTERM_PALETTES } from "../terminal-palettes";
+import {
+  attentionTransition,
+  debounceAllows,
+  notifyBody,
+  notifyTitle,
+} from "../notify";
 import {
   parseRecoverableTerminalState,
   serializeRecoverableTerminalState,
@@ -105,6 +117,15 @@ const RIGHT_PANEL_MAX_WIDTH = 760;
 /** shell 单引号转义（向 PTY 写 cd 命令用） */
 const shQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
+/** 发系统通知：macOS 首次发送前必须显式申请权限（系统级弹窗，仅首次）；被拒则静默跳过 */
+async function fireAttentionNotification(title: string, body: string) {
+  let granted = await isPermissionGranted();
+  if (!granted) granted = (await requestPermission()) === "granted";
+  if (!granted) return;
+  // 插件 v2 桌面端不暴露通知正文点击回调（onAction 仅动作按钮），点击聚焦应用 v1 不接
+  sendNotification({ title, body });
+}
+
 /** 四款深色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板；调色板其余部分共享） */
 const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
   {
@@ -157,6 +178,7 @@ const TerminalView = memo(function TerminalView({
   onStatus,
   onSessionUpdate,
   onOpenSessionPanel,
+  onHandoff,
   focusMode,
   onActions,
   onRestoreComplete,
@@ -202,6 +224,8 @@ const TerminalView = memo(function TerminalView({
   onStatus: (id: string, s: TabStatus) => void;
   onSessionUpdate: (id: string, s: SessionLinkState) => void;
   onOpenSessionPanel: () => void;
+  /** 「◈ 接力到…」：把当前关联会话交给父级的接力目标选择器 */
+  onHandoff?: (source: HandoffSource) => void;
   /** 专注模式：隐藏标签内状态条（动作移到侧栏 ⋯ 菜单） */
   focusMode?: boolean;
   /** 向父级注册本标签的动作表（专注栏 ⋯ 菜单调用） */
@@ -1091,6 +1115,21 @@ const TerminalView = memo(function TerminalView({
     ...(sessionFile || lastResumeRef.current
       ? [{ label: "⤴ 在对话页打开", onSelect: openConversationPage }]
       : []),
+    ...(sessionFile && linkedSessionId
+      ? [
+          {
+            label: "◈ 接力到…",
+            onSelect: () =>
+              onHandoff?.({
+                agent: linkCtxRef.current?.agentId ?? agentId,
+                sessionId: linkedSessionId,
+                filePath: sessionFile,
+                cwd,
+                title: linkedSessionTitle,
+              }),
+          },
+        ]
+      : []),
     ...(!running && !shellActive
       ? [{ label: "打开 Shell", onSelect: () => void openShell() }]
       : []),
@@ -1464,18 +1503,39 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [focusMenu, setFocusMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
+  // 「◈ 接力到…」目标选择器：从当前标签的会话生成简报并预填新终端
+  const [handoffSource, setHandoffSource] = useState<HandoffSource | null>(
+    null,
+  );
 
   /** 专注栏 ⋯ 菜单项：按活动标签状态裁剪（不可用的动作不出现） */
   function focusMenuItems() {
     const s = statuses[activeId];
     const acts = tabActionsRef.current.get(activeId);
     const sessFile = sessionByTab[activeId]?.file;
+    const sessId = sessionByTab[activeId]?.sessionId;
+    const sessAgent = sessionByTab[activeId]?.agentId;
     return [
       ...(s?.running
         ? [{ label: "停止（回落 shell）", onSelect: () => acts?.stop() }]
         : []),
       ...(s?.canResume
         ? [{ label: "⟳ 恢复会话", onSelect: () => acts?.resume() }]
+        : []),
+      ...(sessFile && sessId && sessAgent
+        ? [
+            {
+              label: "◈ 接力到…",
+              onSelect: () =>
+                setHandoffSource({
+                  agent: sessAgent,
+                  sessionId: sessId,
+                  filePath: sessFile,
+                  cwd: statuses[activeId]?.cwd ?? "~",
+                  title: sessionByTab[activeId]?.title ?? null,
+                }),
+            },
+          ]
         : []),
       ...(sessFile || s?.canResume
         ? [
@@ -2034,6 +2094,56 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     }
   }, [statuses]);
 
+  // 长任务 OS 通知（P3）：attention 跃迁（非→待确认/已完成）且窗口未聚焦时发系统通知。
+  // 只 watch 终端标签 statuses；对话页/工作区页的状态变化 v1 不通知。
+  const notificationsEnabled = useAppStore(
+    (s) => s.settings?.notificationsEnabled ?? true,
+  );
+  // 每标签上一次 attention（undefined = 基线未建立）与上次通知时间（去抖）
+  const attentionPrevRef = useRef(new Map<string, TabStatus["attention"]>());
+  const notifySentAtRef = useRef(new Map<string, number>());
+  // macOS 切到别的应用时 document.hidden 不变，必须另跟 window focus/blur
+  const windowFocusedRef = useRef(document.hasFocus());
+  useEffect(() => {
+    const onFocus = () => {
+      windowFocusedRef.current = true;
+    };
+    const onBlur = () => {
+      windowFocusedRef.current = false;
+    };
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+  useEffect(() => {
+    // 标签关闭后清掉基线/去抖记录，防 id 复用时沿用旧状态
+    for (const id of [...attentionPrevRef.current.keys()]) {
+      if (!(id in statuses)) {
+        attentionPrevRef.current.delete(id);
+        notifySentAtRef.current.delete(id);
+      }
+    }
+    for (const [tabId, s] of Object.entries(statuses)) {
+      const prev = attentionPrevRef.current.get(tabId);
+      attentionPrevRef.current.set(tabId, s.attention);
+      const kind = attentionTransition(prev, s.attention);
+      if (!kind) continue;
+      // 设置开关关闭时完全不请求权限、不发通知
+      if (!notificationsEnabled) continue;
+      if (!document.hidden && windowFocusedRef.current) continue;
+      const now = Date.now();
+      if (!debounceAllows(notifySentAtRef.current.get(tabId), now)) continue;
+      notifySentAtRef.current.set(tabId, now);
+      void fireAttentionNotification(
+        notifyTitle(s.title, agentLabel(s.agentId)),
+        notifyBody(kind),
+      );
+    }
+  }, [statuses, notificationsEnabled]);
+
   // 可见性门控（优化 2）：只有活动标签的 PTY 推流，其余（含整页隐藏时全部）进后台缓冲。
   // PTY 被替换（agent→shell 回落换新 id）时 statuses 变化会触发重新标记。
   useEffect(() => {
@@ -2332,6 +2442,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   onStatus={reportStatus}
                   onSessionUpdate={reportSession}
                   onOpenSessionPanel={openSessionPanel}
+                  onHandoff={setHandoffSource}
                   focusMode={focusMode}
                   onActions={registerActions}
                   onRestoreComplete={finishRestore}
@@ -2687,6 +2798,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           y={focusMenu.y}
           onClose={() => setFocusMenu(null)}
           items={focusMenuItems()}
+        />
+      )}
+      {handoffSource && (
+        <HandoffPicker
+          source={handoffSource}
+          onClose={() => setHandoffSource(null)}
         />
       )}
     </div>

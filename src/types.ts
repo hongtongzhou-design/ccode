@@ -103,6 +103,23 @@ export interface SessionMetaDto {
   source: string;
   /** 后端精确标记的 Ccode 内部 AI 会话。 */
   internal: boolean;
+  /** 接力来源（P3 机制四）：该会话接自哪个 agent 的哪个会话；非接力会话为 null */
+  handoffFromAgent: string | null;
+  handoffFromSession: string | null;
+}
+
+/** 接力目标（handoff_targets）：六 CLI 的安装与启动注入支持情况 */
+export interface HandoffTargetDto {
+  id: string;
+  installed: boolean;
+  /** false（kimi/opencode）= 无交互注入参数，简报路径需手动发送 */
+  promptSupported: boolean;
+}
+
+/** build_handoff_brief 返回：简报文件路径 + 一句话概述 */
+export interface HandoffBriefDto {
+  filePath: string;
+  summary: string;
 }
 
 export interface BlockDto {
@@ -190,6 +207,19 @@ export interface WorkspaceDiffDto {
   files: GitFileDto[];
   totalAdd: number;
   totalDel: number;
+}
+
+/** 提货单 artifacts.yaml 条目（§11.3 机制五）：产物本体不进 git，清单随分支提交传递 */
+export interface ArtifactEntryDto {
+  name: string;
+  /** 绝对路径 */
+  path: string;
+  /** md5 hex */
+  hash: string;
+  size: number;
+  /** 产出工作区名 */
+  producedBy: string;
+  createdAt: string;
 }
 
 /** 工作区健康度（ReadyToMerge 判定输入，W3） */

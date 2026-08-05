@@ -10,6 +10,7 @@ import {
   RESOURCE_TYPE_LABELS,
 } from "../pipeline-presets";
 import type {
+  ArtifactEntryDto,
   DiscoveredResourceDto,
   EnsureGitDto,
   PipelineTemplateDto,
@@ -101,11 +102,13 @@ function deriveStepStatus(
 }
 
 /** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 预期产物（一键开步落成工作区）。
- *  导出给 TerminalPage 的「整理为笔记」开步链路复用，保持两处 TASK.md 一致。 */
+ *  导出给 TerminalPage 的「整理为笔记」开步链路复用，保持两处 TASK.md 一致。
+ *  artifacts 为项目根提货单（上一步产物），非空时在「项目资源」后追加提货单段。 */
 export function renderTaskMd(
   step: ProjectStepDto,
   cfg: ProjectConfigDto,
   projectPath: string,
+  artifacts?: ArtifactEntryDto[],
 ): string {
   const lines = [`# ${step.name}`, ""];
   // 课题主题放在简报之前：auto 模式的 Agent 据此明确综述主题
@@ -137,6 +140,18 @@ export function renderTaskMd(
         `- [${label}] ${r.name}：${abs}${r.readonly ? "（只读）" : ""}`,
       );
     }
+  }
+  if (artifacts && artifacts.length > 0) {
+    // 提货单（§11.3 机制五）：上一步产物按路径直读，产物本体不进 git
+    lines.push("", "## 上一步产物（提货单）");
+    for (const a of artifacts) {
+      lines.push(
+        `- ${a.name}：${a.path}（md5 ${a.hash.slice(0, 8)}，来自「${a.producedBy}」）`,
+      );
+    }
+    lines.push(
+      "产物文件按路径直接读取，勿复制；新产物请通过改动面板登记进提货单。",
+    );
   }
   if (cfg.artifactDir?.trim()) {
     lines.push(
@@ -373,10 +388,19 @@ export default function ProjectGroup({
       });
       // TASK.md 为 best-effort：write_workspace_task_md 是 P1b 的最小后端补充，
       // 命令就绪前失败不阻断开步，简报仍可在 project.toml 与步骤「编辑简报」中查看
+      // 提货单：项目根已有上一步产物清单时带进 TASK.md（读取失败同样不阻断）
+      let artifacts: ArtifactEntryDto[] = [];
+      try {
+        artifacts = await invoke<ArtifactEntryDto[]>("read_artifacts_manifest", {
+          repoPath: project.path,
+        });
+      } catch {
+        /* 清单缺失或后端未就绪时跳过提货单段 */
+      }
       try {
         await invoke("write_workspace_task_md", {
           worktreePath: ws.worktreePath,
-          content: renderTaskMd(step, cfg, project.path),
+          content: renderTaskMd(step, cfg, project.path, artifacts),
         });
       } catch (reason) {
         onError(`工作区「${ws.name}」已创建，TASK.md 写入失败：${String(reason)}`);

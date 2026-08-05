@@ -4,6 +4,7 @@ import { sessionRuntimeKey, useAppStore } from "../store";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
+import HandoffPicker from "../components/HandoffPicker";
 import { Checkbox, LoadingRows, Toggle } from "../components/PageFrame";
 import type {
   ChatMessageDto,
@@ -684,6 +685,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [resumeMenu, setResumeMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
+  // 「◈ 接力到…」目标选择器（回放头部 ⋯ 菜单进入）
+  const [handoffFor, setHandoffFor] = useState<SessionMetaDto | null>(null);
 
   // 与右键菜单一致：Escape / 任意滚动关闭，避免滚动后浮层错位
   useEffect(() => {
@@ -1139,6 +1142,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         ⎇ {s.workspace}
                       </span>
                     )}
+                    {s.handoffFromAgent && (
+                      <span
+                        className="max-w-36 shrink-0 truncate rounded bg-inset px-1 text-l3"
+                        title={`接自 ${agentLabel(s.handoffFromAgent)} 的对话（简报接力，非记忆转移）`}
+                      >
+                        ⇄ 接自 {agentLabel(s.handoffFromAgent)}
+                      </span>
+                    )}
                     {s.tokenUsage && (
                       <span className="shrink-0">
                         {fmtTokens(s.tokenUsage)}
@@ -1211,6 +1222,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 >
                   <span className="size-1.5 rounded-full bg-ok-text" />
                   进行中
+                </span>
+              )}
+              {selected.handoffFromAgent && (
+                <span
+                  className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-xs text-l2"
+                  title={`该对话由 ${agentLabel(selected.handoffFromAgent)} 会话接力生成（简报接力，非记忆转移）`}
+                >
+                  ⇄ 接自 {agentLabel(selected.handoffFromAgent)}
                 </span>
               )}
               <span className="shrink-0 text-xs text-l3">
@@ -1377,6 +1396,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             </button>
             <button
               className={`${menuItem} disabled:opacity-50`}
+              disabled={!selected.alive && !selected.pinned}
+              onClick={() => {
+                setResumeMenu(null);
+                setHandoffFor(selected);
+              }}
+            >
+              ◈ 接力到…
+            </button>
+            <button
+              className={`${menuItem} disabled:opacity-50`}
               disabled={exporting || (!selected.alive && !selected.pinned)}
               onClick={() => {
                 setResumeMenu(null);
@@ -1396,6 +1425,20 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             </button>
           </div>
         </div>
+      )}
+
+      {/* 「◈ 接力到…」目标选择器 */}
+      {handoffFor && (
+        <HandoffPicker
+          source={{
+            agent: handoffFor.agent,
+            sessionId: handoffFor.sessionId,
+            filePath: handoffFor.filePath,
+            cwd: handoffFor.projectPath,
+            title: handoffFor.customTitle || handoffFor.title,
+          }}
+          onClose={() => setHandoffFor(null)}
+        />
       )}
 
       {/* 右键菜单：fixed 遮罩 + 光标处浮层 */}

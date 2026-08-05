@@ -1,5 +1,5 @@
 //! 应用级设置（<config>/ccode/settings.json）：全部字段可选，读取侧与默认值合并。
-//! 消费点：终端外观（前端）、usage 汇率、updater 的 brew 镜像开关。
+//! 消费点：终端外观（前端）、usage 汇率、updater 的 brew 镜像开关、长任务 OS 通知开关（前端）。
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -8,6 +8,7 @@ pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 13;
 pub const DEFAULT_SCROLLBACK: u32 = 5000;
 pub const DEFAULT_RATE_USD_CNY: f64 = 7.2;
 pub const DEFAULT_BREW_MIRROR: bool = true;
+pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
 pub const DEFAULT_THEME: &str = "midnight";
 pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
 const KNOWN_THEMES: [&str; 7] = [
@@ -29,6 +30,8 @@ pub struct AppSettingsDto {
     pub scrollback: Option<u32>,
     pub rate_usd_cny: Option<f64>,
     pub brew_mirror: Option<bool>,
+    /// 长任务 OS 通知开关（注意力跃迁且窗口未聚焦时发系统通知）
+    pub notifications_enabled: Option<bool>,
     pub theme: Option<String>,
     /// ◈ AI 功能（提交信息/摘要/PR 描述）固定使用的 profile id；None = 自动（最近使用）
     pub ai_profile_id: Option<String>,
@@ -69,6 +72,9 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         scrollback: s.scrollback.or(Some(DEFAULT_SCROLLBACK)),
         rate_usd_cny: s.rate_usd_cny.or(Some(DEFAULT_RATE_USD_CNY)),
         brew_mirror: s.brew_mirror.or(Some(DEFAULT_BREW_MIRROR)),
+        notifications_enabled: s
+            .notifications_enabled
+            .or(Some(DEFAULT_NOTIFICATIONS_ENABLED)),
         theme: Some(
             s.theme
                 .filter(|t| KNOWN_THEMES.contains(&t.as_str()))
@@ -102,6 +108,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.brew_mirror.is_some() {
         cur.brew_mirror = patch.brew_mirror;
+    }
+    if patch.notifications_enabled.is_some() {
+        cur.notifications_enabled = patch.notifications_enabled;
     }
     if patch.theme.is_some() {
         cur.theme = patch.theme;

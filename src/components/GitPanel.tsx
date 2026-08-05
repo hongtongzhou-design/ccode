@@ -1,8 +1,15 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { Maximize2 } from "lucide-react";
-import type { GitCommitResultDto, GitFileDto, WorkspaceDiffDto } from "../types";
+import type {
+  ArtifactEntryDto,
+  GitCommitResultDto,
+  GitFileDto,
+  WorkspaceDiffDto,
+} from "../types";
 import { Checkbox, LoadingRows } from "./PageFrame";
+import ImagePairView, { isImagePath } from "./ImagePairView";
 
 interface GitStatusDto {
   isRepo: boolean;
@@ -30,6 +37,14 @@ const STATUS_STYLE: Record<string, string> = {
 
 /** 内联 diff 渲染行数上限：超出只渲染前 N 行并提示，防超大 diff 的全量 span 拖垮面板 */
 const DIFF_LINE_CAP = 2000;
+
+/** 产物大小的人类可读格式（与 ProjectGroup 的 formatSize 同规则） */
+function formatSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
 
 /** 空输入时使用本地规则即时生成，避免为一次提交额外启动 AI。 */
 function defaultCommitMessage(files: GitFileDto[]): string {
@@ -76,6 +91,9 @@ function GitPanel({
     text: string;
   } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
+  // 提货单（§11.3 机制五）：仅工作区任务视图加载；产物本体不进 git，清单随提交传递
+  const [artifacts, setArtifacts] = useState<ArtifactEntryDto[]>([]);
+  const [registering, setRegistering] = useState(false);
   const [diffPath, setDiffPath] = useState<string | null>(null);
   const [diffDetail, setDiffDetail] = useState<GitFileDiffDto | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
@@ -133,6 +151,20 @@ function GitPanel({
       // 保持普通 git 视图
     }
     setWsDiff(d);
+    // 提货单：工作区根的 artifacts.yaml（未提交也可见，提交后才随分支传递）
+    if (d) {
+      try {
+        setArtifacts(
+          await invoke<ArtifactEntryDto[]>("read_artifacts_manifest", {
+            repoPath: cwd,
+          }),
+        );
+      } catch {
+        setArtifacts([]);
+      }
+    } else {
+      setArtifacts([]);
+    }
     if (d) {
       setSelectedPaths(new Set());
     } else if (s) {
@@ -226,6 +258,33 @@ function GitPanel({
     }
   }
 
+  /** 登记产物：系统对话框选文件 → 写入工作区根 artifacts.yaml（同路径重复登记会更新条目） */
+  async function registerArtifact() {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      title: "选择要登记的产物文件",
+    });
+    if (typeof selected !== "string") return;
+    setRegistering(true);
+    setOutput(null);
+    try {
+      const name = selected.split(/[\\/]/).pop() ?? selected;
+      const entry = await invoke<ArtifactEntryDto>("register_artifact", {
+        worktreePath: cwd,
+        name,
+        artifactPath: selected,
+      });
+      showToast(`已登记产物「${entry.name}」`);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRegistering(false);
+      void refresh();
+    }
+  }
+
   const hasChanges = (status?.files.length ?? 0) > 0;
   const inWs = wsDiff?.inWorkspace === true;
   const files = inWs ? wsDiff!.files : (status?.files ?? []);
@@ -265,6 +324,11 @@ function GitPanel({
     setDiffPath(file.path);
     setDiffDetail(null);
     setDiffError(null);
+    // 图片文件不走文本 diff，展开区改渲染双栏对比（ImagePairView 自行取数）
+    if (isImagePath(file.path)) {
+      setDiffLoading(false);
+      return;
+    }
     setDiffLoading(true);
     try {
       const detail = inWs
@@ -420,7 +484,9 @@ function GitPanel({
                       {diffDetail?.binary && <span>二进制</span>}
                       {diffDetail?.truncated && <span className="text-warn-text">已截断</span>}
                     </div>
-                    {diffLoading ? (
+                    {isImagePath(f.path) ? (
+                      <ImagePairView cwd={cwd} path={f.path} />
+                    ) : diffLoading ? (
                       <div className="p-2"><LoadingRows compact /></div>
                     ) : diffError ? (
                       <p className="p-2 text-xs text-err-text">{diffError}</p>
@@ -450,6 +516,50 @@ function GitPanel({
           })
         )}
       </div>
+
+      {/* 产物区（提货单，仅工作区任务视图）：产物本身不进 git，清单 artifacts.yaml 会随提交传递 */}
+      {inWs && (
+        <div className="shrink-0 border-t border-hairline p-2">
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="text-xs text-l3">产物（提货单）</span>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => void registerArtifact()}
+                disabled={registering}
+                className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+              >
+                {registering ? "登记中…" : "登记产物"}
+              </button>
+            )}
+          </div>
+          {artifacts.length === 0 ? (
+            <p className="text-xs text-l4">
+              暂无登记产物；产物本身不进 git，清单 artifacts.yaml 会随提交传递
+            </p>
+          ) : (
+            <ul className="max-h-32 overflow-auto">
+              {artifacts.map((a) => (
+                <li
+                  key={a.path}
+                  title={`${a.path}\nmd5 ${a.hash} · ${formatSize(a.size)} · 来自「${a.producedBy}」`}
+                  className="px-1 py-0.5 text-xs"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span className="min-w-0 flex-1 truncate text-l2">{a.name}</span>
+                    <span className="shrink-0 font-mono text-l4">
+                      {a.hash.slice(0, 8)}
+                    </span>
+                    <span className="shrink-0 text-l4">{formatSize(a.size)}</span>
+                    <span className="shrink-0 text-l4">← {a.producedBy}</span>
+                  </div>
+                  <div className="truncate font-mono text-[11px] text-l4">{a.path}</div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* 提交区 */}
       {status?.isRepo && !readOnly && (

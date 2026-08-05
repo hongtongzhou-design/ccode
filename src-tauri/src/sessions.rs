@@ -53,6 +53,11 @@ pub struct SessionMetaDto {
     /// 仅由后端精确 provenance 标记，前端不得按路径名猜测。
     #[serde(default)]
     pub internal: bool,
+    /// 接力来源（P3 机制四）：该会话由哪个 agent 的哪个会话接力而来；非接力会话为 None
+    #[serde(default)]
+    pub handoff_from_agent: Option<String>,
+    #[serde(default)]
+    pub handoff_from_session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -560,6 +565,8 @@ fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         live: alive && mtime_fresh(path, 60),
         source: default_session_source(),
         internal: false,
+        handoff_from_agent: None,
+        handoff_from_session: None,
     })
 }
 
@@ -794,6 +801,8 @@ fn codex_file_meta(
             live: alive && mtime_fresh(path, 60),
             source: default_session_source(),
             internal: false,
+            handoff_from_agent: None,
+            handoff_from_session: None,
         },
         forked_from_id,
     ))
@@ -1062,6 +1071,8 @@ fn gemini_file_meta(
         live: alive && mtime_fresh(path, 60),
         source: default_session_source(),
         internal: false,
+        handoff_from_agent: None,
+        handoff_from_session: None,
     })
 }
 
@@ -1273,6 +1284,8 @@ fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMet
         live: alive && (mtime_fresh(path, 60) || qwen_runtime_sidecar(path).is_some()),
         source: default_session_source(),
         internal: false,
+        handoff_from_agent: None,
+        handoff_from_session: None,
     })
 }
 
@@ -1490,6 +1503,8 @@ fn kimi_wire_file_meta(
         live: alive && mtime_fresh(path, 60),
         source: default_session_source(),
         internal: false,
+        handoff_from_agent: None,
+        handoff_from_session: None,
     })
 }
 
@@ -1746,6 +1761,8 @@ fn kimi_legacy_file_meta(
         live: alive && mtime_fresh(path, 60),
         source: default_session_source(),
         internal: false,
+        handoff_from_agent: None,
+        handoff_from_session: None,
     })
 }
 
@@ -2002,6 +2019,8 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             live,
             source: default_session_source(),
             internal: false,
+            handoff_from_agent: None,
+            handoff_from_session: None,
         });
     }
     // OpenCode 新会话常暂存为 "New Session"：只对占位标题的会话惰性补标题——
@@ -2369,6 +2388,8 @@ fn opencode_scan_legacy(storage: &Path) -> Vec<SessionMetaDto> {
             live: mtime_fresh(&f, 60),
             source: default_session_source(),
             internal: false,
+            handoff_from_agent: None,
+            handoff_from_session: None,
         });
     }
     out
@@ -2728,6 +2749,8 @@ fn opencode_snapshot_meta(path: &Path, session_id: &str) -> Option<SessionMetaDt
         live: false,
         source: default_session_source(),
         internal: false,
+        handoff_from_agent: None,
+        handoff_from_session: None,
     })
 }
 
@@ -2810,9 +2833,14 @@ pub(crate) fn open_db() -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// 老库补列（AI 摘要）：已存在则报错忽略，幂等
+/// 老库补列（AI 摘要、接力来源）：已存在则报错忽略，幂等
 pub(crate) fn migrate_session_meta(conn: &Connection) {
-    for col in ["summary TEXT", "summary_at TEXT"] {
+    for col in [
+        "summary TEXT",
+        "summary_at TEXT",
+        "handoff_from_agent TEXT",
+        "handoff_from_session TEXT",
+    ] {
         let _ = conn.execute_batch(&format!("ALTER TABLE session_meta ADD COLUMN {col}"));
     }
 }
@@ -2823,12 +2851,14 @@ struct MetaRow {
     custom_title: Option<String>,
     tags: Vec<String>,
     summary: Option<String>,
+    /// 固化后的接力来源（agent, session_id）
+    handoff_from: Option<(String, String)>,
 }
 
 fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
     let mut map = HashMap::new();
     let Ok(mut stmt) = conn
-        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary FROM session_meta")
+        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session FROM session_meta")
     else {
         return map;
     };
@@ -2841,10 +2871,12 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
             r.get::<_, Option<String>>(4)?,
             r.get::<_, String>(5)?,
             r.get::<_, Option<String>>(6)?,
+            r.get::<_, Option<String>>(7)?,
+            r.get::<_, Option<String>>(8)?,
         ))
     });
     if let Ok(rows) = rows {
-        for (agent, sid, pinned, archived, custom_title, tags, summary) in rows.flatten() {
+        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session) in rows.flatten() {
             map.insert(
                 (agent, sid),
                 MetaRow {
@@ -2853,6 +2885,7 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
                     custom_title,
                     tags: serde_json::from_str(&tags).unwrap_or_default(),
                     summary,
+                    handoff_from: hf_agent.zip(hf_session),
                 },
             );
         }
@@ -3176,6 +3209,10 @@ fn apply_meta(
             s.custom_title = row.custom_title.clone();
             s.tags = row.tags.clone();
             s.summary = row.summary.clone();
+            if let Some((hf_agent, hf_session)) = &row.handoff_from {
+                s.handoff_from_agent = Some(hf_agent.clone());
+                s.handoff_from_session = Some(hf_session.clone());
+            }
         }
     }
 }
@@ -3227,6 +3264,8 @@ pub async fn list_sessions() -> Vec<SessionMetaDto> {
         let meta = read_all_meta(&conn);
         apply_meta(&mut sessions, &scan.chain_members, &meta);
         apply_provenance(&conn, &mut sessions, &scan.provenance_paths);
+        // 接力链：新会话被扫描到后标注并固化「接自 <agent>」
+        crate::handoff::apply_handoff(&conn, &mut sessions);
     }
     // 最近活跃在前；ISO 字符串可直接字典序比较
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -3465,7 +3504,7 @@ fn opencode_conversation_page(db_path: &Path, session_id: &str, before: Option<u
     Ok(ConversationPageDto { messages, cursor })
 }
 
-fn conversation_page_impl(agent: &str, file_path: &str, before: Option<u64>) -> Result<ConversationPageDto, String> {
+pub(crate) fn conversation_page_impl(agent: &str, file_path: &str, before: Option<u64>) -> Result<ConversationPageDto, String> {
     if agent == "opencode" {
         if let Some((db, sid)) = file_path.split_once('#') {
             if Path::new(db).exists() {
@@ -4393,6 +4432,8 @@ mod tests {
                 live: false,
                 source: default_session_source(),
                 internal: false,
+            handoff_from_agent: None,
+            handoff_from_session: None,
             },
             fork.map(String::from),
         )
@@ -4451,6 +4492,7 @@ mod tests {
                 custom_title: Some("旧代表上的标题".into()),
                 tags: vec!["重要".into()],
                 summary: None,
+                handoff_from: None,
             },
         );
         apply_meta(&mut merged, &members, &meta);

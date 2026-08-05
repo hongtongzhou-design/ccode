@@ -149,7 +149,7 @@ fn count_lines(cwd: &str, rel: &str) -> Option<u64> {
     Some(bytes.iter().filter(|b| **b == b'\n').count() as u64)
 }
 
-fn git_status_sync(cwd: &str) -> Result<GitStatusDto, String> {
+pub(crate) fn git_status_sync(cwd: &str) -> Result<GitStatusDto, String> {
     let cwd = expand_tilde(cwd);
     let check = run_git(&cwd, &["rev-parse", "--is-inside-work-tree"])?;
     if !check.status.success() {
@@ -702,6 +702,121 @@ pub async fn workspace_file_diff(worktree_path: String, path: String) -> Result<
     .map_err(|e| e.to_string())?
 }
 
+// ===== 图片双栏评审（P3 图片评审）：基准版 vs 当前版字节对 =====
+
+/// 单文件上限：图片必须完整传输，超限直接拒绝（同 pdf.rs 的「截断无意义」口径）
+const IMAGE_PAIR_CAP: u64 = 20 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitImagePairDto {
+    /// base64 编码的基准版字节；基准中不存在（新增图片）→ None
+    pub base: Option<String>,
+    /// base64 编码的当前版字节；文件已删除 → None
+    pub current: Option<String>,
+    pub base_label: String,
+    pub current_label: String,
+}
+
+/// 图片扩展名判定（与前端 ImagePairView 的 isImagePath 保持同一清单）
+fn is_image_path(path: &str) -> bool {
+    let ext = Path::new(path).extension().map(|e| e.to_string_lossy().to_lowercase());
+    matches!(
+        ext.as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp")
+    )
+}
+
+/// 取 `git show <spec>` 的原始字节；对象不存在 → None（新增图片的基准侧）
+fn git_show_image(cwd: &str, spec: &str) -> Result<Option<Vec<u8>>, String> {
+    // 先查对象大小，避免超大图片整个读进内存才发现超限
+    let size = run_git(cwd, &["cat-file", "-s", spec])?;
+    if !size.status.success() {
+        return Ok(None);
+    }
+    let size: u64 = String::from_utf8_lossy(&size.stdout)
+        .trim()
+        .parse()
+        .map_err(|_| format!("无法解析 {spec} 的对象大小"))?;
+    if size > IMAGE_PAIR_CAP {
+        return Err(format!(
+            "图片超过 20 MB（{:.1} MB），暂不支持双栏查看",
+            size as f64 / 1024.0 / 1024.0
+        ));
+    }
+    let out = run_git(cwd, &["show", spec])?;
+    if !out.status.success() {
+        return Err(output_tail(&out));
+    }
+    Ok(Some(out.stdout))
+}
+
+/// 读工作树当前文件字节；文件不存在 → None（删除图片的当前侧）
+fn read_current_image(root: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    let full = Path::new(root).join(path);
+    if !full.is_file() {
+        return Ok(None);
+    }
+    let size = std::fs::metadata(&full)
+        .map_err(|e| format!("读取 {path} 失败: {e}"))?
+        .len();
+    if size > IMAGE_PAIR_CAP {
+        return Err(format!(
+            "图片超过 20 MB（{:.1} MB），暂不支持双栏查看",
+            size as f64 / 1024.0 / 1024.0
+        ));
+    }
+    std::fs::read(&full)
+        .map(Some)
+        .map_err(|e| format!("读取 {path} 失败: {e}"))
+}
+
+fn encode_base64(bytes: Vec<u8>) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn image_pair_sync(cwd: &str, path: &str) -> Result<GitImagePairDto, String> {
+    let cwd = expand_tilde(cwd);
+    if !is_image_path(path) {
+        return Err(format!("不是可双栏查看的图片文件: {path}"));
+    }
+    let rows = crate::workspaces::worktree_rows();
+    // 白名单沿用 diff 安全规则：工作区 = 任务 diff 清单内；普通仓库 = status 中的安全相对路径
+    let (root, base_spec, base_label) = if let Some(row) = find_worktree_row(&cwd, &rows) {
+        let diff = workspace_diff_with_rows(&cwd, &rows)?;
+        if !diff.files.iter().any(|file| file.path == path) {
+            return Err(format!("文件已不在当前任务改动清单中，请刷新后重试: {path}"));
+        }
+        (
+            row.worktree_path.clone(),
+            format!("{}:{path}", diff.merge_base),
+            format!("基准 {}", row.base_branch),
+        )
+    } else {
+        let validated = validate_selected_paths(&cwd, &[path.to_string()])?;
+        let path = validated.first().ok_or("文件已不在当前改动清单中")?;
+        (cwd.clone(), format!("HEAD:{path}"), "HEAD".to_string())
+    };
+    let base = git_show_image(&cwd, &base_spec)?;
+    let current = read_current_image(&root, path)?;
+    Ok(GitImagePairDto {
+        base: base.map(encode_base64),
+        current: current.map(encode_base64),
+        base_label,
+        current_label: "当前".into(),
+    })
+}
+
+/// 图片文件双栏评审：基准版（普通仓库 = HEAD，工作区 = merge-base）vs 当前版。
+/// base64 传输（macOS Raw 响应退化为逐字节 JSON，理由同 pdf.rs）。
+#[tauri::command]
+pub async fn git_image_pair(cwd: String, path: String) -> Result<GitImagePairDto, String> {
+    tauri::async_runtime::spawn_blocking(move || image_pair_sync(&cwd, &path))
+        .await
+        .map_err(|e| format!("读取图片失败: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,5 +1183,140 @@ mod tests {
         assert!(binary.binary);
         assert!(git_file_diff_sync(repo.to_str().unwrap(), "../outside").is_err());
         fs::remove_dir_all(&repo).ok();
+    }
+
+    fn decode(dto_data: &Option<String>) -> Vec<u8> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(dto_data.as_ref().expect("应有 base64 数据"))
+            .unwrap()
+    }
+
+    #[test]
+    fn image_pair_normal_repo_base_and_current() {
+        if !git_available() {
+            return;
+        }
+        let repo = init_repo("img-pair");
+        fs::write(repo.join("pic.png"), b"\x89PNG-v1").unwrap();
+        git(&repo, &["add", "."]);
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        fs::write(repo.join("pic.png"), b"\x89PNG-v2").unwrap();
+
+        let dto = image_pair_sync(repo.to_str().unwrap(), "pic.png").unwrap();
+        assert_eq!(dto.base_label, "HEAD");
+        assert_eq!(dto.current_label, "当前");
+        assert_eq!(decode(&dto.base), b"\x89PNG-v1");
+        assert_eq!(decode(&dto.current), b"\x89PNG-v2");
+        // 白名单：不在 status 中的路径与逃逸路径都拒绝
+        assert!(image_pair_sync(repo.to_str().unwrap(), "missing.png").is_err());
+        assert!(image_pair_sync(repo.to_str().unwrap(), "../outside.png").is_err());
+        // 非图片扩展名拒绝
+        let err = image_pair_sync(repo.to_str().unwrap(), "notes.txt").unwrap_err();
+        assert!(err.contains("不是可双栏查看的图片文件"), "{err}");
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn image_pair_added_and_deleted_have_single_empty_side() {
+        if !git_available() {
+            return;
+        }
+        let repo = init_repo("img-sides");
+        fs::write(repo.join("old.png"), b"\x89PNG-old").unwrap();
+        git(&repo, &["add", "."]);
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        // 新增（未跟踪）：base 为空
+        fs::write(repo.join("new.png"), b"\x89PNG-new").unwrap();
+        let added = image_pair_sync(repo.to_str().unwrap(), "new.png").unwrap();
+        assert!(added.base.is_none());
+        assert_eq!(decode(&added.current), b"\x89PNG-new");
+        // 删除：current 为空
+        fs::remove_file(repo.join("old.png")).unwrap();
+        let deleted = image_pair_sync(repo.to_str().unwrap(), "old.png").unwrap();
+        assert_eq!(decode(&deleted.base), b"\x89PNG-old");
+        assert!(deleted.current.is_none());
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn image_pair_rejects_oversize() {
+        if !git_available() {
+            return;
+        }
+        let repo = init_repo("img-cap");
+        let f = repo.join("huge.png");
+        // 稀疏文件置长度，避免真的写 20MB
+        let file = fs::File::create(&f).unwrap();
+        file.set_len(IMAGE_PAIR_CAP + 1).unwrap();
+        drop(file);
+        let err = image_pair_sync(repo.to_str().unwrap(), "huge.png").unwrap_err();
+        assert!(err.contains("20 MB"), "{err}");
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn image_pair_workspace_base_is_merge_base() {
+        if !git_available() {
+            return;
+        }
+        let dir = tmpdir("img-ws");
+        let repo = dir.join("repo");
+        git(&dir, &["init", "-b", "main", "repo"]);
+        git(&repo, &["config", "user.email", "t@t.dev"]);
+        git(&repo, &["config", "user.name", "t"]);
+        fs::write(repo.join("pic.png"), b"\x89PNG-v1").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        let wt = dir.join("wt");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().unwrap(),
+                "-b",
+                "ccode/t1",
+                "main",
+            ],
+        );
+        // 任务分支上改图并提交：基准应取 merge-base（即 main 的 v1）
+        fs::write(wt.join("pic.png"), b"\x89PNG-v2").unwrap();
+        git(&wt, &["add", "."]);
+        git(&wt, &["commit", "-m", "task"]);
+        let rows = vec![crate::workspaces::WorktreeRow {
+            id: "ws-1".into(),
+            worktree_path: wt.to_string_lossy().into_owned(),
+            repo_path: repo.to_string_lossy().into_owned(),
+            name: "t1".into(),
+            branch: "ccode/t1".into(),
+            base_branch: "main".into(),
+        }];
+        // image_pair_sync 走全局 worktree_rows()，测试里直接验证内部判定逻辑：
+        // 白名单用任务 diff 清单、基准用 merge-base
+        let diff = workspace_diff_with_rows(wt.to_str().unwrap(), &rows).unwrap();
+        assert!(diff.files.iter().any(|f| f.path == "pic.png"));
+        let base = git_show_image(
+            wt.to_str().unwrap(),
+            &format!("{}:pic.png", diff.merge_base),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(base, b"\x89PNG-v1");
+        let current = read_current_image(&wt.to_string_lossy(), "pic.png")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current, b"\x89PNG-v2");
+        git(
+            &repo,
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 }
