@@ -2,6 +2,8 @@ export interface Profile {
   id: string;
   agent: string;
   name: string;
+  /** 账号类型：api = 端点+密钥；official = CLI 官方账号登录（P1a），缺省 api */
+  accountType: "api" | "official";
   protocol: string | null;
   baseUrl: string | null;
   /** 可用模型列表，首个为默认 */
@@ -18,12 +20,27 @@ export interface Profile {
 export interface ProfileInput {
   agent: string;
   name: string;
+  accountType: "api" | "official";
   protocol: string | null;
   baseUrl: string | null;
   models: string[];
   extraEnv: Record<string, string>;
   /** 明文密钥，仅保存时提交；编辑时留空表示不修改 */
   apiKey: string | null;
+}
+
+/** 官方账号连接状态（official_account_status，P1a） */
+export interface OfficialAccountStatusDto {
+  /** 注册表已填该 agent 的官方账号规格 */
+  supported: boolean;
+  /** auth 文件检出凭证 */
+  connected: boolean;
+  /** 检测说明（漏报场景/文件异常） */
+  detail: string | null;
+  /** 终端内执行的登录命令（含二进制名；不支持时 null） */
+  loginCommand: string | null;
+  /** 配置文件冲突告警（只含文件名与变量名，不含密钥值） */
+  conflicts: string[];
 }
 
 export interface ValidationCheckDto {
@@ -364,4 +381,71 @@ export interface ProfileUsageDto {
   output: number;
   costUsd: number | null;
   costPartial: boolean;
+}
+
+/** 项目注册表条目（§11.4 P1b；app.db projects 表） */
+export interface ProjectDto {
+  /** canonical 绝对路径，注册表主键 */
+  path: string;
+  name: string;
+  createdAt: string | null;
+  lastOpenedAt: string | null;
+}
+
+/** 档案卡 .ccode/project.toml 的资源条目 */
+export interface ProjectResourceDto {
+  name: string;
+  path: string;
+  /** paper | dataset | reference | other */
+  type: string;
+  readonly: boolean;
+  note: string;
+}
+
+export interface ProjectStepRunDto {
+  name: string;
+  command: string;
+  default: boolean;
+}
+
+/** 档案卡流水线步骤：工作区名/简报/技能/预期产物均为可编辑预设 */
+export interface ProjectStepDto {
+  name: string;
+  workspaceName: string;
+  brief: string;
+  expectedArtifacts: string[];
+  skills: string[];
+  run: ProjectStepRunDto[];
+}
+
+export interface ProjectConfigDto {
+  /** 课题主题：一键开步写进 TASK.md「课题主题」段；可空 */
+  topic?: string | null;
+  artifactDir: string;
+  resources: ProjectResourceDto[];
+  steps: ProjectStepDto[];
+}
+
+/** read_project_config 返回：坏字段不阻断，逐条进 warnings */
+export interface ProjectConfigReadDto {
+  config: ProjectConfigDto;
+  warnings: string[];
+}
+
+export interface DiscoveredResourceDto {
+  /** 相对项目根，统一正斜杠 */
+  path: string;
+  /** paper | dataset | reference */
+  type: string;
+  size: number;
+  mtime: string | null;
+  /** 已在 project.toml 资源清单里登记过 */
+  exists: boolean;
+}
+
+export interface EnsureGitDto {
+  /** 本次执行了 git init */
+  initialized: boolean;
+  /** 本次新建了 .gitignore */
+  gitignoreWritten: boolean;
 }

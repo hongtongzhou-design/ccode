@@ -66,6 +66,8 @@ export interface PendingTerminal {
   agentId?: string;
   profileId?: string;
   model?: string;
+  /** 一键开步预填的首条指令：启动时注入 CLI，启动成功后清除（一次性） */
+  initialPrompt?: string;
 }
 
 /** 工作区页 / 改动面板 → 终端全宽审阅视图的一次性交接。 */

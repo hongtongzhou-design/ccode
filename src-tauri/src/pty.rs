@@ -214,14 +214,16 @@ fn expand_tilde(path: &str) -> String {
 pub struct SpawnResult {
     pub pty_id: String,
     pub session_hint: Option<String>,
+    /// 初始 prompt 因 CLI 不支持注入被丢弃（前端提示用户手动发送）
+    pub prompt_dropped: bool,
 }
 
-/// 支持 --session-id <uuid> 的 agent（matrix：claude-code、qwen），会话文件名可预测
+/// 支持 --session-id <uuid> 的 agent（AgentSpec.fixed_session_id；matrix：claude-code、qwen），
+/// 会话文件名可预测
 fn session_id_for(agent_id: &str) -> Option<String> {
-    match agent_id {
-        "claude-code" | "qwen" => Some(uuid::Uuid::new_v4().to_string()),
-        _ => None,
-    }
+    crate::agent_specs::agent_spec(agent_id)
+        .filter(|s| s.fixed_session_id)
+        .map(|_| uuid::Uuid::new_v4().to_string())
 }
 
 /// 在 PTY 中拉起进程并登记到管理器，输出/退出通过 `pty-output-<id>` / `pty-exit-<id>` 事件推送。
@@ -348,6 +350,8 @@ pub fn pty_spawn(
     extra_env: Option<HashMap<String, String>>,
     // 恢复已有会话（§6.12 A）：注入各 CLI 的恢复参数，跳过 --session-id，hint 直接锁定该会话
     resume_session_id: Option<String>,
+    // 初始 prompt（一键开步首条指令）：按注册表形态注入 args；仅全新会话生效，恢复会话不注入
+    initial_prompt: Option<String>,
     // 无固定 session id 的 agent 用终端标签 id 预登记关联声明，避免并发标签抢同一会话
     link_claim_id: Option<String>,
 ) -> Result<SpawnResult, String> {
@@ -363,7 +367,12 @@ pub fn pty_spawn(
     let model = model
         .filter(|m| !m.trim().is_empty())
         .or_else(|| profile.models.first().cloned());
-    let plan = agents::launch_plan(&profile, key, model.as_deref());
+    // 恢复会话不注入初始 prompt（那是既有会话的延续，不是开步）
+    let prompt = match &resume_session_id {
+        Some(_) => None,
+        None => initial_prompt.as_deref(),
+    };
+    let plan = agents::launch_plan_with_prompt(&profile, key, model.as_deref(), prompt);
     // 恢复模式：hint = 被恢复的会话；普通模式：claude/qwen 生成新 id 固定文件名
     let session_hint = match &resume_session_id {
         Some(sid) => Some(sid.clone()),
@@ -403,9 +412,17 @@ pub fn pty_spawn(
             cmd.arg("--session-id");
             cmd.arg(sid);
         }
+        // 初始 prompt 放最后：位置参数形态（claude/codex）必须是命令行最后一个参数
+        for arg in &plan.prompt_args {
+            cmd.arg(arg);
+        }
     }
     for (k, v) in &plan.env {
         cmd.env(k, v);
+    }
+    // 官方账号模式：剔除继承环境里的残留 API 密钥变量（防静默覆盖账号登录）
+    for k in &plan.env_remove {
+        cmd.env_remove(k);
     }
     if let Some(extra) = &extra_env {
         for (k, v) in extra {
@@ -440,6 +457,7 @@ pub fn pty_spawn(
     Ok(SpawnResult {
         pty_id,
         session_hint,
+        prompt_dropped: plan.prompt_dropped,
     })
 }
 

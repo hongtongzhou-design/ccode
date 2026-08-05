@@ -1005,6 +1005,7 @@ mod tests {
             id: "test".into(),
             agent: agent.into(),
             name: "测试".into(),
+            account_type: Default::default(),
             protocol: None,
             base_url: Some("https://relay.example.com".into()),
             models: vec!["m1".into()],

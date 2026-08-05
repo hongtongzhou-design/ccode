@@ -1,3 +1,4 @@
+mod agent_specs;
 mod agents;
 mod ai;
 mod fonts;
@@ -9,6 +10,7 @@ mod models;
 mod pricing;
 mod profiles;
 mod profile_validation;
+mod projects;
 mod pty;
 mod sessions;
 mod settings;
@@ -38,6 +40,7 @@ pub fn run() {
             profiles::import_profiles,
             profile_validation::validate_profile,
             agents::detect_agents,
+            agents::official_account_status,
             agents::session_resume_command,
             agents::resume_external_terminal,
             models::fetch_models,
@@ -112,6 +115,14 @@ pub fn run() {
             workspaces::create_pr,
             workspaces::list_repos,
             ws_settings::workspace_settings,
+            projects::list_projects,
+            projects::register_project,
+            projects::remove_project,
+            projects::read_project_config,
+            projects::write_project_config,
+            projects::discover_resources,
+            projects::ensure_git_repo,
+            projects::write_workspace_task_md,
             skills::list_skills,
             skills::set_skill_category,
             skills::count_enabled_skills,

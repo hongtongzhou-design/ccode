@@ -141,6 +141,10 @@ fn ai_prompt_impl(profiles: Vec<Profile>, profile_id: Option<String>, prompt: St
     for (k, v) in &plan.env {
         cmd.env(k, v);
     }
+    // 官方账号 profile：剔除继承环境里的残留 API 密钥变量（与终端启动同一约束）
+    for k in &plan.env_remove {
+        cmd.env_remove(k);
+    }
     // 隔离的临时 cwd：防止 agent 把当前项目环境（AGENTS.md 等）混进生成结果
     let cwd = std::env::temp_dir().join(format!("ccode-ai-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&cwd).map_err(|e| format!("创建临时目录失败: {e}"))?;
@@ -458,6 +462,7 @@ mod tests {
             id: id.into(),
             agent: agent.into(),
             name: id.into(),
+            account_type: Default::default(),
             protocol: None,
             base_url: None,
             models: vec![],

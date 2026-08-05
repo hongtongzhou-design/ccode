@@ -6,7 +6,9 @@
 
 ## 项目简介
 
-Ccode 是一个「AI 编码 Agent 统一启动器 + 配置中心 + 会话监控台」桌面应用（Tauri v2 + React/TS）。
+Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）——底层是六个 Agent CLI 的统一控制台
+（启动器 + 配置中心 + 会话监控台），表面是科研流水线（读文献→整数据→做图→写论文）：
+AI 负责干活，Ccode 负责管活，人负责拍板。
 为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code 管理多套 API 配置（端点/密钥/模型），
 内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览。
 
@@ -174,6 +176,15 @@ src-tauri/src/
 - 三平台兼容：禁写平台特定路径，用 `dirs`/`keyring`/`portable-pty` 的抽象。
 - UI 文案用中文；代码注释用中文、只在非显而易见处写（参照现有文件风格）。
 - 前端不直接碰文件系统，一切经 Tauri command；流式输出走 `pty-output-<id>` 等事件。
+- **流水线开步是预设参数的组合调用**（见架构 §11）：点「开始」= 建工作区 + 启 Agent + 注入简报 + 落成 TASK.md，
+  全部复用既有工作区创建与终端启动能力；不破坏手动启动栏「Agent → profile → 模型 → 目录 → 启动」主流程。
+- **官方账号 profile 只读检测 + env 净化**：CLI auth 文件只读探测「已连接」，断开引导用户用 CLI 自己的 logout；
+  官方账号拉起不注入 API env，且必须 `env_remove` 同协议残留 API 密钥变量（防静默覆盖账号登录）；
+  统计页官方账号显示「订阅」不计费。
+- **「接力」是唯一的跨 Agent 交接表述**：接力 = 结构化简报落成文件 + 新 Agent 带简报启动 + 记录接力链，
+  明示不是记忆转移；禁用「无缝继续」。
+- **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，
+  不在逻辑里写死「文献/数据/论文」概念。
 
 ## 主题与设计系统
 
@@ -202,24 +213,26 @@ src-tauri/src/
 - **终端布局必须有明确高度与滚动边界**：App 容器、页面主区、终端三带均维持 `h-full/min-h-0`，外层裁切溢出；只有文件树、对话、
   diff 等内容区各自滚动。禁止把页面级滚动或无约束 flex 子项带回终端，以免窗口缩放、拖动或长内容后出现底部黑屏/空白。
 
-## 路线图（见 docs/architecture.md §8）
+## 路线图（见 docs/architecture.md §11 演进线）
 
-- P0 ✅ 骨架：Profile CRUD + Claude/Codex 适配 + 单标签终端 + shell 回落
-- P1 ✅ 六 agent 适配器（Gemini/Qwen/OpenCode/Kimi 双协议）、全局写入模式（备份/恢复）、
-  多标签终端、三平台 CI 工作流（.github/workflows/build.yml）
-- P2 ✅ 会话可视化：Claude/Codex/Gemini/Qwen 解析器、resume 链合并、项目聚合、
-  pin 快照保留、tags/归档/搜索、SessionLink 终端↔会话联动（--session-id + 探测）
-- P3 OpenCode/Kimi 会话解析（SQLite/wire 协议，**全部完成**）✅、token/费用统计（统计页）✅、注意力标记（终端标签/运行中面板）✅
-- P4 IDE 形态 ✅（Monaco 编辑器可编辑保存、文件树 git 装饰、notify 文件监听自动刷新）；本地 API 代理（可选，未做）
-- W1 任务工作区核心闭环 ✅（worktree 创建/归档/恢复、files-to-copy、端口注入、工作区页面、会话归并；用户验收通过）
-- W2 工作区自动化 ✅（.ccode/settings.toml 三层合并、setup/archive 脚本钩子、run 脚本按钮 + nonconcurrent 互斥）
-- W3 评审流 ✅（merge-base 任务 diff、workspace_health 状态机、本地合并+归档、gh PR 创建）
+- 通用控制台阶段 P0–W3 ✅（六 agent 适配器、双模式配置、多标签终端、会话可视化、统计页、IDE 形态、任务工作区与评审流）——2026-08 起演进为「AI 科研工作台」，以下为科研线新阶段。
+- **P0 收尾当前批次**：走查 → [skip ci] 提交 → 可选发版
+- **P1 四条并行线**：
+  - P1a 官方账号：profile 双类型（API/官方账号）；终端内跑 CLI 登录命令连接；只读检测 auth 文件；拉起不注入 API env 且 env_remove 残留密钥变量；统计页显示「订阅」不计费；第一批 Claude/Codex/Gemini
+  - P1b 流水线骨架：`.ccode/project.toml` 读写 + 项目注册、工作区页按项目分组 + 流水线进度条（状态从工作区派生）、一键开步、资源面板一键引用路径、工作区类型驱动默认值（数据类跳端口/建议 .gitignore/挂技能包）、非 git 目录引导 init、资源自动发现（扫描目录把 PDF/CSV/parquet 列入资源候选供勾选）、科研用户首启引导（「示例课题模板」带现成流水线 + 演示数据 + 示例 PDF + git init 引导，P1b 验收门槛之一）
+  - P1c 供应商预设补齐：claude-code 补 DeepSeek/智谱 Anthropic 兼容端点、qwen 补智谱等（按 matrix 核实补录）；此后加供应商 = 预设表加一行
+  - P1d 适配器注册表：per-agent 硬编码 match（detect/launch_plan/resume/env 规则、技能分发目录、安装更新方式、协议与密钥 env 名、官方账号 login/auth/env_remove 字段）收敛为中央声明式 AgentSpec 注册表（一个 CLI 一张规格）；解析器与 usage 提取器不可数据化，保持每 CLI 一个解析器文件，注册表只做分发入口；先行或与 P1a 背靠背（官方账号字段正是规格表字段，先注册表后填数据避免改两遍）；250 个既有测试兜底
+- **P2 文献**：PDF 预览（先 spike 验证 WKWebView，不行才上 pdf.js）、选段问 AI、整理为笔记、文献技能包（notes/*.md + references.bib）
+- **P3 数据 + 接力**：数据处理模板 + 技能包、提货单自动化（artifacts.yaml）、图片评审、长任务 OS 通知、接力包 + 接力链可回溯
+- **P4 论文**：manuscript 模板 + quarto/latex 技能包、渲染 PDF 提货单产物内嵌预览、bib 从文献步提货单联动进简报
+- **P5 通用层打磨（按需穿插）**：逐 hunk 验收、批量验收、跨标签聚合视图、成本按工作区归因、云端会话双源调研
+- **Backlog（记录不动手）**：SSH 远程执行、MCP 配置分发调研、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后评估）
 
-**当前待办（backlog）**：
+**当前待办**：
 
+- P1 四条并行线：P1d 适配器注册表先行或与 P1a 背靠背（官方账号字段正是规格表字段，先注册表后填数据）；P1a 官方账号（第一批 Claude/Codex/Gemini，env 净化按 matrix 逐家核实）、P1b 流水线骨架（project.toml + 一键开步 + 工作区页分组/进度条）、P1c 供应商预设补齐（按 matrix 核实补录）
 - macOS 签名公证（暂缓，需 Apple Developer 会员 + CI 配 6 个 APPLE_* secrets，见架构 v1.3）
 - Intel macOS 安装包（暂缓：CI macos-latest 只出 aarch64；加 `x86_64-apple-darwin` target 构建时间翻倍，真有 Intel 用户再加，见架构 v1.3 / README 安装节）
 - OpenCode Windows 数据路径未核实（matrix 标注「文档与源码不一致」），Windows 用户验证会话/用量统计后修正
 - Skills 更新检测与在线编辑（v2 口子，见架构 v0.9 / §6.13）
 - Claude Code hooks 精确化注意力标记（v2 评估项，需写用户配置，见架构 v0.7）
-- 本地 API 代理（P4 可选项，未做）

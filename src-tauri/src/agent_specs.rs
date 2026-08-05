@@ -1,0 +1,561 @@
+//! 适配器注册表（P1d，架构 §11.4）：一个 CLI 一张声明式 AgentSpec。
+//! 散落在 agents / skills / updater / profile_validation 的 per-agent 硬编码收敛到这里，
+//! 各模块从注册表读规格；会话/usage 解析器不可数据化，保持每 CLI 一段格式代码（sessions.rs / usage.rs）。
+//!
+//! 新增 CLI checklist：
+//! 1. 在 AGENT_SPECS 加一张规格（纯数据）——检测/启动/恢复/技能分发/安装更新/协议校验自动生效
+//! 2. 启动注入形态若 Env / ByProtocol 表达不了，在 SpecialLaunch 加变体并在 agents::launch_plan 加分支
+//! 3. 会话/usage 格式：在 sessions.rs / usage.rs 写该 CLI 的解析器（注册表只做分发入口）
+//! 4. 补本文件完整性测试里的 id 清单
+
+/// 一个 Agent CLI 的完整规格
+pub struct AgentSpec {
+    /// agent id：profile.agent、前端路由键、会话/usage DTO 的 agent 字段
+    pub id: &'static str,
+    /// 展示名（后端错误消息用；前端显示名/图标另行维护，不在本表）
+    pub display_name: &'static str,
+    /// CLI 二进制名（resolve_binary 的解析对象）
+    pub binary: &'static str,
+    /// 版本探测参数（统一超时由 agents::VERSION_QUERY_TIMEOUT 控制）
+    pub version_args: &'static [&'static str],
+    /// profile.protocol 的合法取值，第一个为缺省；空 = 该 CLI 无协议概念（不校验）
+    pub protocols: &'static [&'static str],
+    /// 启动注入规则（launch_plan 的差异化数据来源）
+    pub launch: LaunchSpec,
+    /// 交互模式初始 prompt 注入方式（一键开步的首条指令）
+    pub prompt_inject: PromptInject,
+    /// 支持 --session-id 固定新会话文件名（pty 启动即锁定会话关联，matrix：claude-code、qwen）
+    pub fixed_session_id: bool,
+    /// 按 ID 恢复会话的参数格式
+    pub resume: ResumeSpec,
+    /// 技能分发目录（相对用户 home 的路径段）；symlink/copy 是运行时回退策略，不是 per-agent 数据
+    pub skills_dir: &'static [&'static str],
+    /// 安装与更新渠道
+    pub packaging: PackagingSpec,
+    /// 官方账号（P1a）：终端内登录、只读检测 auth 文件、拉起时净化残留 API env；
+    /// 数据按 matrix / 官方文档逐家核实，第一批 claude-code / codex / gemini
+    pub official_account: Option<OfficialAccountSpec>,
+}
+
+/// 官方账号规格（P1a）：终端内登录、只读检测 auth 文件、拉起时净化残留 API env
+pub struct OfficialAccountSpec {
+    /// 终端内执行的登录子命令（不含二进制名）；空 = 裸启动 CLI 后在 TUI 内操作（gemini 无登录子命令）
+    pub login_cmd: &'static [&'static str],
+    /// 只读探测「已连接」的 auth 文件（相对用户 home）
+    pub auth_file_paths: &'static [&'static str],
+    /// 官方账号拉起时必须 env_remove 的残留 API 密钥变量（防静默覆盖账号登录）
+    pub env_purge_list: &'static [&'static str],
+    /// 冲突探测（P1a 增强）：CLI 自己读的配置文件里残留 API 密钥会静默覆盖官方账号登录，
+    /// env_remove 只清进程环境变量管不到文件，状态检测时逐文件扫描并告警（只读，只报变量名不读值）
+    pub conflict_probes: &'static [ConflictProbe],
+    /// 文件检测的已知漏报场景说明（如凭证存 OS 钥匙串）；文件未检出时随 status 返回给界面
+    pub detection_note: Option<&'static str>,
+}
+
+/// 一条冲突探测：某个配置文件中存在指定变量即视为会覆盖官方账号登录
+pub struct ConflictProbe {
+    /// 配置文件（相对用户 home）；按扩展名分格式：.env 走 KEY=VALUE 行解析，.json 只查顶层 env 对象
+    pub file: &'static str,
+    /// 命中即告警的变量名（大小写敏感，与 CLI 实际读取一致）
+    pub keys: &'static [&'static str],
+    /// 冲突后果说明（拼在每条告警文案后）
+    pub note: &'static str,
+}
+
+/// 启动注入形态
+pub enum LaunchSpec {
+    /// 通用形态：base_url / 密钥 / 选中模型分别注入 EnvInject 指定的 env 名
+    Env(EnvInject),
+    /// 多协议：按 profile.protocol 选一张注入表；不在表内（或缺省）用第一张
+    ByProtocol(&'static [ProtocolEnv]),
+    /// 无法纯数据化的特殊注入（env 名等数据仍在这里，分支逻辑留在 agents::launch_plan）
+    Special(SpecialLaunch),
+}
+
+/// 交互模式初始 prompt 的注入形态（一键开步首条指令）。
+/// 各 CLI 传参方式本机 --help 已核实：claude/codex 吃位置参数，gemini/qwen 用 -i
+///（--prompt-interactive，执行后继续交互）；kimi/opencode 无此参数——不得用 -p
+///（那是非交互模式），填 Unsupported 让注入方跳过并提示用户手动发送。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PromptInject {
+    /// 追加为命令行最后一个位置参数（claude "prompt"、codex "prompt"）
+    Positional,
+    /// 以 flag 传参（gemini/qwen：-i <prompt>）
+    Flag(&'static str),
+    /// 该 CLI 没有交互模式初始 prompt 参数（kimi/opencode）
+    Unsupported,
+}
+
+/// 通用 env 注入：None 表示该 CLI 没有对应 env（跳过）
+pub struct EnvInject {
+    pub base_url: Option<&'static str>,
+    pub key: Option<&'static str>,
+    pub model: Option<&'static str>,
+    /// 无条件注入的固定 env
+    pub fixed_env: &'static [(&'static str, &'static str)],
+    /// 无条件追加的固定启动参数
+    pub fixed_args: &'static [&'static str],
+}
+
+/// 一个协议的注入表（qwen：openai / anthropic）
+pub struct ProtocolEnv {
+    pub protocol: &'static str,
+    pub env: EnvInject,
+    /// 该协议追加的固定参数（如 --auth-type）
+    pub args: &'static [&'static str],
+}
+
+/// 各家特殊注入形态（数据在这里，构造逻辑在 agents::launch_plan 的对应分支）
+pub enum SpecialLaunch {
+    /// claude-code：通用 env 注入 + 模型列表注册进 /model 选择器槽位
+    /// （前 4 个别名槽 + 第 5 个 CUSTOM_MODEL_OPTION，见 matrix §1）
+    ClaudeModelSlots(EnvInject),
+    /// codex：没有 base URL 环境变量，用 -c 内联名为 ccode 的 Responses provider 并指到它
+    CodexInlineProvider {
+        key_env: &'static str,
+        /// 默认沙箱参数（只写当前工作目录）
+        sandbox_args: &'static [&'static str],
+    },
+    /// opencode：OPENCODE_CONFIG_CONTENT 内联配置 JSON（优先级高于 auth.json 和 env）
+    OpenCodeInlineConfig {
+        config_env: &'static str,
+        /// 防自更新启动时替换掉检测到的二进制
+        no_autoupdate_env: &'static str,
+    },
+    /// kimi：新旧两个产品共用 kimi 命令，新版 KIMI_MODEL_* 合成通道与旧版 KIMI_API_KEY 双写
+    KimiDualChannel,
+}
+
+/// 按 ID 恢复会话的参数；args 里 {session} 占位会话 ID
+pub struct ResumeSpec {
+    /// codex 的 resume 是子命令需放最前，其余是位置无关的 flag
+    pub prepend: bool,
+    pub args: &'static [&'static str],
+}
+
+pub struct BrewPackage {
+    pub name: &'static str,
+    pub cask: bool,
+}
+
+/// 更新渠道（update_fallback 的顺序元素）
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum UpdateChannel {
+    Brew,
+    Npm,
+    Uv,
+    SelfUpdate,
+}
+
+/// 新旧双变体（kimi）：同一二进制两个产品，按数据目录探测，旧版走独立更新渠道
+pub struct LegacyVariantSpec {
+    /// 新版数据目录（相对 home，存在即新版）
+    pub new_dir: &'static str,
+    /// 旧版数据目录（相对 home）
+    pub legacy_dir: &'static str,
+    /// 旧版变体的更新渠道
+    pub legacy_channel: UpdateChannel,
+}
+
+/// 安装与更新渠道；安装候选固定按 brew > npm > uv > 官方脚本优先级（脚本兜底）
+pub struct PackagingSpec {
+    /// brew 安装包（install）
+    pub brew_install: Option<BrewPackage>,
+    /// brew 升级包（upgrade；opencode tap 安装后升级用短名，故与安装分开）
+    pub brew_upgrade: Option<BrewPackage>,
+    /// brew 最新版查询包（brew info）；升级用 tap 短名会命中歧义时不查（opencode）
+    pub brew_latest: Option<BrewPackage>,
+    /// npm 全局安装包
+    pub npm_install: Option<&'static str>,
+    /// npm 升级包（kimi 的 npm 包装新二进制但升级走自更新，故与安装分开）
+    pub npm_update: Option<&'static str>,
+    /// uv tool 包（安装与升级同名）
+    pub uv: Option<&'static str>,
+    /// 自更新子命令（不含二进制名）
+    pub self_update: Option<&'static [&'static str]>,
+    /// 官方安装脚本（bash -c 内容）
+    pub install_script: Option<&'static str>,
+    /// 安装方式非 brew/npm/uv 命中包管理器时的更新渠道顺序（首个成功即止）
+    pub update_fallback: &'static [UpdateChannel],
+    /// 新旧双变体（仅 kimi）
+    pub legacy_variant: Option<LegacyVariantSpec>,
+}
+
+const NO_PACKAGING: PackagingSpec = PackagingSpec {
+    brew_install: None,
+    brew_upgrade: None,
+    brew_latest: None,
+    npm_install: None,
+    npm_update: None,
+    uv: None,
+    self_update: None,
+    install_script: None,
+    update_fallback: &[],
+    legacy_variant: None,
+};
+
+const CLAUDE_ENV: EnvInject = EnvInject {
+    base_url: Some("ANTHROPIC_BASE_URL"),
+    key: Some("ANTHROPIC_AUTH_TOKEN"),
+    model: Some("ANTHROPIC_MODEL"),
+    fixed_env: &[],
+    fixed_args: &[],
+};
+
+const OPENAI_ENV: EnvInject = EnvInject {
+    base_url: Some("OPENAI_BASE_URL"),
+    key: Some("OPENAI_API_KEY"),
+    model: Some("OPENAI_MODEL"),
+    fixed_env: &[],
+    fixed_args: &[],
+};
+
+const ANTHROPIC_ENV: EnvInject = EnvInject {
+    base_url: Some("ANTHROPIC_BASE_URL"),
+    key: Some("ANTHROPIC_API_KEY"),
+    model: Some("ANTHROPIC_MODEL"),
+    fixed_env: &[],
+    fixed_args: &[],
+};
+
+static AGENT_SPECS: &[AgentSpec] = &[
+    AgentSpec {
+        id: "claude-code",
+        display_name: "Claude Code",
+        binary: "claude",
+        version_args: &["--version"],
+        protocols: &[],
+        launch: LaunchSpec::Special(SpecialLaunch::ClaudeModelSlots(CLAUDE_ENV)),
+        prompt_inject: PromptInject::Positional,
+        fixed_session_id: true,
+        resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
+        skills_dir: &[".claude", "skills"],
+        packaging: PackagingSpec {
+            brew_install: Some(BrewPackage { name: "claude-code", cask: true }),
+            brew_upgrade: Some(BrewPackage { name: "claude-code", cask: true }),
+            brew_latest: Some(BrewPackage { name: "claude-code", cask: true }),
+            self_update: Some(&["update"]),
+            install_script: Some("curl -fsSL https://claude.ai/install.sh | bash"),
+            update_fallback: &[UpdateChannel::SelfUpdate, UpdateChannel::Brew],
+            ..NO_PACKAGING
+        },
+        // matrix §1 + 官方文档核实：auth 子命令族 login/logout/status；
+        // macOS 凭证存系统钥匙串不落文件，.credentials.json 仅 Linux/Windows 有
+        official_account: Some(OfficialAccountSpec {
+            login_cmd: &["auth", "login"],
+            auth_file_paths: &[".claude/.credentials.json"],
+            env_purge_list: &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"],
+            // matrix §1：settings.json 的 env 块覆盖 shell env；matrix 未确认 claude 读 .claude/.env，不探测
+            conflict_probes: &[ConflictProbe {
+                file: ".claude/settings.json",
+                keys: &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
+                note: "settings.json 的 env 块会覆盖官方账号登录，产生 API 计费",
+            }],
+            detection_note: Some("macOS 上凭证存于系统钥匙串，文件检测可能漏报，以 claude auth status 为准"),
+        }),
+    },
+    AgentSpec {
+        id: "codex",
+        display_name: "Codex",
+        binary: "codex",
+        version_args: &["--version"],
+        protocols: &[],
+        launch: LaunchSpec::Special(SpecialLaunch::CodexInlineProvider {
+            key_env: "CODEX_API_KEY",
+            sandbox_args: &["-s", "workspace-write"],
+        }),
+        prompt_inject: PromptInject::Positional,
+        fixed_session_id: false,
+        resume: ResumeSpec { prepend: true, args: &["resume", "{session}"] },
+        skills_dir: &[".codex", "skills"],
+        packaging: PackagingSpec {
+            brew_install: Some(BrewPackage { name: "codex", cask: true }),
+            brew_upgrade: Some(BrewPackage { name: "codex", cask: true }),
+            brew_latest: Some(BrewPackage { name: "codex", cask: true }),
+            npm_install: Some("@openai/codex"),
+            npm_update: Some("@openai/codex"),
+            update_fallback: &[UpdateChannel::Npm],
+            ..NO_PACKAGING
+        },
+        // matrix §2 已核实；login status / doctor 命令复用同一 login 子命令族
+        official_account: Some(OfficialAccountSpec {
+            login_cmd: &["login"],
+            auth_file_paths: &[".codex/auth.json"],
+            env_purge_list: &["CODEX_API_KEY", "OPENAI_API_KEY"],
+            // matrix §2：config.toml 的 [model_providers.x] 只有显式设了 model_provider 才接管请求，
+            // 无法只靠变量名判定是否覆盖 ChatGPT 登录态，保守留空不探测
+            conflict_probes: &[],
+            detection_note: Some("凭证也可能存于 OS 钥匙串（cli_auth_credentials_store），以 codex login status 为准"),
+        }),
+    },
+    AgentSpec {
+        id: "gemini",
+        display_name: "Gemini",
+        binary: "gemini",
+        version_args: &["--version"],
+        protocols: &[],
+        launch: LaunchSpec::Env(EnvInject {
+            base_url: Some("GOOGLE_GEMINI_BASE_URL"),
+            key: Some("GEMINI_API_KEY"),
+            model: Some("GEMINI_MODEL"),
+            fixed_env: &[],
+            fixed_args: &[],
+        }),
+        prompt_inject: PromptInject::Flag("-i"),
+        fixed_session_id: false,
+        resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
+        skills_dir: &[".gemini", "skills"],
+        packaging: PackagingSpec {
+            brew_install: Some(BrewPackage { name: "gemini-cli", cask: false }),
+            brew_upgrade: Some(BrewPackage { name: "gemini-cli", cask: false }),
+            brew_latest: Some(BrewPackage { name: "gemini-cli", cask: false }),
+            npm_install: Some("@google/gemini-cli"),
+            npm_update: Some("@google/gemini-cli"),
+            update_fallback: &[UpdateChannel::Npm],
+            ..NO_PACKAGING
+        },
+        // matrix §3 + 官方文档/源码核实：无登录子命令，裸启动后 TUI 内 /auth 选 Sign in with Google
+        // （login_cmd 空 = 终端标签只拉起 gemini）；凭证 oauth_creds.json，新版开加密存储时不落盘
+        official_account: Some(OfficialAccountSpec {
+            login_cmd: &[],
+            auth_file_paths: &[".gemini/oauth_creds.json"],
+            env_purge_list: &["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"],
+            // 真实事故：cc-switch 把 GEMINI_API_KEY/GOOGLE_GEMINI_BASE_URL 写进 ~/.gemini/.env，
+            // gemini CLI 启动时自行加载该文件（env 优先级仅次于 CLI 参数），静默覆盖 Google 登录走付费 API
+            conflict_probes: &[ConflictProbe {
+                file: ".gemini/.env",
+                keys: &["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL"],
+                note: "该文件中的密钥会覆盖官方账号登录，产生 API 计费",
+            }],
+            detection_note: Some("新版开启加密存储（GEMINI_FORCE_ENCRYPTED_STORAGE）时凭证不落该文件，可能漏报"),
+        }),
+    },
+    AgentSpec {
+        id: "qwen",
+        display_name: "Qwen",
+        binary: "qwen",
+        version_args: &["--version"],
+        protocols: &["openai", "anthropic"],
+        launch: LaunchSpec::ByProtocol(&[
+            ProtocolEnv { protocol: "openai", env: OPENAI_ENV, args: &["--auth-type", "openai"] },
+            ProtocolEnv {
+                protocol: "anthropic",
+                env: ANTHROPIC_ENV,
+                args: &["--auth-type", "anthropic"],
+            },
+        ]),
+        prompt_inject: PromptInject::Flag("-i"),
+        fixed_session_id: true,
+        resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
+        skills_dir: &[".qwen", "skills"],
+        packaging: PackagingSpec {
+            brew_install: Some(BrewPackage { name: "qwen-code", cask: false }),
+            brew_upgrade: Some(BrewPackage { name: "qwen-code", cask: false }),
+            brew_latest: Some(BrewPackage { name: "qwen-code", cask: false }),
+            npm_install: Some("@qwen-code/qwen-code"),
+            npm_update: Some("@qwen-code/qwen-code"),
+            update_fallback: &[UpdateChannel::Npm],
+            ..NO_PACKAGING
+        },
+        official_account: None,
+    },
+    AgentSpec {
+        id: "opencode",
+        display_name: "OpenCode",
+        binary: "opencode",
+        version_args: &["--version"],
+        protocols: &[],
+        launch: LaunchSpec::Special(SpecialLaunch::OpenCodeInlineConfig {
+            config_env: "OPENCODE_CONFIG_CONTENT",
+            no_autoupdate_env: "OPENCODE_DISABLE_AUTOUPDATE",
+        }),
+        prompt_inject: PromptInject::Unsupported,
+        fixed_session_id: false,
+        resume: ResumeSpec { prepend: false, args: &["--session", "{session}"] },
+        skills_dir: &[".config", "opencode", "skills"],
+        packaging: PackagingSpec {
+            brew_install: Some(BrewPackage { name: "anomalyco/tap/opencode", cask: false }),
+            brew_upgrade: Some(BrewPackage { name: "opencode", cask: false }),
+            npm_install: Some("opencode-ai"),
+            npm_update: Some("opencode-ai"),
+            // 自更新是交互 TUI，仅非 brew/npm 安装时尝试（brew 装的走 brew 防冲突）
+            self_update: Some(&["upgrade"]),
+            update_fallback: &[UpdateChannel::SelfUpdate, UpdateChannel::Npm],
+            ..NO_PACKAGING
+        },
+        official_account: None,
+    },
+    AgentSpec {
+        id: "kimi",
+        display_name: "Kimi",
+        binary: "kimi",
+        version_args: &["--version"],
+        protocols: &["kimi", "openai", "anthropic"],
+        launch: LaunchSpec::Special(SpecialLaunch::KimiDualChannel),
+        prompt_inject: PromptInject::Unsupported,
+        fixed_session_id: false,
+        resume: ResumeSpec { prepend: false, args: &["-S", "{session}"] },
+        skills_dir: &[".kimi-code", "skills"],
+        packaging: PackagingSpec {
+            npm_install: Some("@moonshot-ai/kimi-code"),
+            uv: Some("kimi-cli"),
+            self_update: Some(&["upgrade"]),
+            install_script: Some("curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"),
+            update_fallback: &[UpdateChannel::SelfUpdate],
+            legacy_variant: Some(LegacyVariantSpec {
+                new_dir: ".kimi-code",
+                legacy_dir: ".kimi",
+                legacy_channel: UpdateChannel::Uv,
+            }),
+            ..NO_PACKAGING
+        },
+        official_account: None,
+    },
+];
+
+/// 按 id 查规格
+pub fn agent_spec(id: &str) -> Option<&'static AgentSpec> {
+    AGENT_SPECS.iter().find(|s| s.id == id)
+}
+
+/// 全部规格（detect / 更新检查等遍历入口）
+pub fn all_agent_specs() -> &'static [AgentSpec] {
+    AGENT_SPECS
+}
+
+/// 新旧双变体探测（kimi）：按数据目录存在性返回 "new" | "legacy"，都无 → None
+pub(crate) fn variant_of(spec: &AgentSpec) -> Option<&'static str> {
+    let variant = spec.packaging.legacy_variant.as_ref()?;
+    let home = dirs::home_dir()?;
+    if home.join(variant.new_dir).exists() {
+        Some("new")
+    } else if home.join(variant.legacy_dir).exists() {
+        Some("legacy")
+    } else {
+        None
+    }
+}
+
+/// which miss 后的兜底候选目录（按优先级排序）；用户目录一律走 dirs 抽象，禁写死。
+/// 用户目录排在系统目录前——与用户交互终端的 PATH 解析习惯一致（~/.local/bin 里的
+/// 自装副本应优先于 /opt/homebrew/bin 里的同名旧副本，避免检测到非自用的那份）。
+/// 全部 agent 共用（不是 per-agent 数据），集中在本模块与注册表同维护。
+pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(h) = dirs::home_dir() {
+            out.push(h.join(".npm-global/bin"));
+            out.push(h.join(".local/bin"));
+            out.push(h.join("bin"));
+            out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
+        }
+        out.push("/opt/homebrew/bin".into()); // Apple Silicon brew
+        out.push("/usr/local/bin".into()); // Intel brew / 手动安装
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(h) = dirs::home_dir() {
+            out.push(h.join(".local/bin"));
+            out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
+        }
+        out.push("/usr/local/bin".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // %LOCALAPPDATA%\Programs、%APPDATA%\npm（npm 全局 bin 目录）
+        if let Some(local) = dirs::data_local_dir() {
+            out.push(local.join("Programs"));
+        }
+        if let Some(roaming) = dirs::data_dir() {
+            out.push(roaming.join("npm"));
+        }
+        if let Some(h) = dirs::home_dir() {
+            out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KNOWN_IDS: [&str; 6] = ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi"];
+
+    /// 注册表完整性：六个既有 agent 全部有规格，必填字段非空
+    #[test]
+    fn registry_covers_all_known_agents_with_required_fields() {
+        assert_eq!(all_agent_specs().len(), KNOWN_IDS.len());
+        for id in KNOWN_IDS {
+            let spec = agent_spec(id).unwrap_or_else(|| panic!("缺规格: {id}"));
+            assert!(!spec.display_name.is_empty(), "{id} 缺 display_name");
+            assert!(!spec.binary.is_empty(), "{id} 缺 binary");
+            assert!(!spec.version_args.is_empty(), "{id} 缺 version_args");
+            assert!(!spec.skills_dir.is_empty(), "{id} 缺 skills_dir");
+            assert!(!spec.resume.args.is_empty(), "{id} 缺 resume 参数");
+            assert!(
+                spec.resume.args.iter().any(|a| a.contains("{session}")),
+                "{id} 的 resume 参数缺 {{session}} 占位"
+            );
+            let p = &spec.packaging;
+            assert!(
+                p.brew_install.is_some()
+                    || p.npm_install.is_some()
+                    || p.uv.is_some()
+                    || p.install_script.is_some(),
+                "{id} 没有任何安装渠道"
+            );
+            assert!(
+                p.brew_upgrade.is_some()
+                    || p.npm_update.is_some()
+                    || p.uv.is_some()
+                    || p.self_update.is_some(),
+                "{id} 没有任何更新渠道"
+            );
+            // 多协议 agent：缺省协议（第一个）必须在合法取值内（恒真，防手写错位）
+            if let Some(default) = spec.protocols.first() {
+                assert!(spec.protocols.contains(default), "{id} 协议表错位");
+            }
+            // 官方账号规格（若填）：auth 文件与 env 净化清单不能为空（login_cmd 允许为空 = 裸启动 TUI 登录）
+            if let Some(oa) = &spec.official_account {
+                assert!(!oa.auth_file_paths.is_empty(), "{id} 官方账号缺 auth 文件路径");
+                assert!(!oa.env_purge_list.is_empty(), "{id} 官方账号缺 env 净化清单");
+            }
+        }
+    }
+
+    /// 查找往返一致：遍历注册表拿到的 id 再查回同一张规格，且 id 全局唯一
+    #[test]
+    fn spec_lookup_round_trips_and_ids_are_unique() {
+        for spec in all_agent_specs() {
+            let found = agent_spec(spec.id).expect("按 id 应能查回规格");
+            assert!(std::ptr::eq(spec, found), "{} 查回的不是同一张规格", spec.id);
+        }
+        let mut ids: Vec<&str> = all_agent_specs().iter().map(|s| s.id).collect();
+        let before = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "agent id 重复");
+        // 未知 id → None（binary_for / resume_args 的报错路径依赖它）
+        assert!(agent_spec("no-such-agent").is_none());
+    }
+
+    /// ByProtocol 形态的多协议 agent：注入表的 protocol 键与 protocols 声明一致
+    #[test]
+    fn by_protocol_launch_matches_declared_protocols() {
+        for spec in all_agent_specs() {
+            if let LaunchSpec::ByProtocol(entries) = &spec.launch {
+                assert!(!entries.is_empty(), "{} 协议注入表为空", spec.id);
+                for entry in entries.iter() {
+                    assert!(
+                        spec.protocols.contains(&entry.protocol),
+                        "{} 注入表协议 {} 未在 protocols 声明",
+                        spec.id,
+                        entry.protocol
+                    );
+                }
+            }
+        }
+    }
+}

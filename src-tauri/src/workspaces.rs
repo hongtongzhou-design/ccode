@@ -328,6 +328,35 @@ fn detect_base_branch(repo: &std::path::Path) -> String {
     run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"], T).unwrap_or_else(|_| "main".into())
 }
 
+/// 空仓库（HEAD 为 unborn，尚无任何提交）没有可引用的基准分支，worktree add 必失败：
+/// 先在 HEAD symbolic-ref 指向的分支上补一个空初始提交（分支名由 init.defaultBranch 决定，
+/// 可能是 master，禁止硬编码），提交后继续走正常创建流程。
+/// 身份优先沿用仓库/全局已配置的 user.name/user.email；未配置时仅本次提交用 -c 注入临时身份，
+/// 不写入用户 git config。
+fn ensure_initial_commit(repo: &Path) -> Result<(), String> {
+    const T: Duration = Duration::from_secs(30);
+    // 已有任一提交则不是 unborn，直接返回（非空仓库零行为变化）
+    if run_git(repo, &["rev-parse", "--verify", "--quiet", "HEAD"], T).is_ok() {
+        return Ok(());
+    }
+    let configured = |key: &str| {
+        run_git(repo, &["config", "--get", key], T)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    };
+    // 与 merge/sync_base 一致：应用内自动提交必须绕过用户全局 commit.gpgsign
+    let mut args: Vec<&str> = vec!["-c", "commit.gpgsign=false"];
+    if !configured("user.name") {
+        args.extend(["-c", "user.name=Ccode"]);
+    }
+    if !configured("user.email") {
+        args.extend(["-c", "user.email=ccode@localhost"]);
+    }
+    args.extend(["commit", "--allow-empty", "-m", "初始化空仓库（Ccode 自动创建）"]);
+    run_git(repo, &args, T).map_err(|e| format!("空仓库初始化提交失败: {e}"))?;
+    Ok(())
+}
+
 fn alloc_port_base(conn: &Connection) -> Result<i64, String> {
     let used: Vec<i64> = query_workspaces(conn)?
         .into_iter()
@@ -551,6 +580,9 @@ where
     {
         return Err(format!("分支 {branch} 已存在，请换一个任务名"));
     }
+    // 空仓库（unborn HEAD）先补初始提交：放在端口预留/事务之前，失败无需回滚，
+    // 错误直接透出；成功后 detect_base_branch 才能解析到真实基准分支
+    ensure_initial_commit(&repo)?;
     // 基准分支：origin/HEAD → main/master 候选 → 当前分支
     let base_branch = detect_base_branch(&repo);
     // 起点固定用本地基准分支：工作区应镜像「本地项目现状」，
@@ -2517,6 +2549,86 @@ mod tests {
         let err =
             create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "task one").unwrap_err();
         assert!(err.contains("已存在"), "{err}");
+    }
+
+    /// git init 后的空仓库（unborn HEAD）：创建流程自动补空初始提交，
+    /// 分支名尊重 init.defaultBranch（master 形态），且临时身份不写入本地 config
+    #[test]
+    fn create_on_unborn_repo_bootstraps_initial_commit() {
+        let Some(fx) = Fixture::new() else { return };
+        let repo = fx.dir.join("empty-master");
+        Command::new(git_bin())
+            .args(["-c", "init.defaultBranch=master", "init"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        let w = create_impl(&fx.conn, &fx.ws_root, repo.to_str().unwrap(), "first").unwrap();
+        assert_eq!(w.base_branch, "master");
+        assert_eq!(w.branch, "ccode/first");
+        assert_eq!(w.status, "active");
+        assert!(Path::new(&w.worktree_path).exists());
+        // 初始提交落在 master 上，HEAD 不再是 unborn
+        assert_eq!(
+            run_git(
+                &repo,
+                &["rev-parse", "--abbrev-ref", "HEAD"],
+                Duration::from_secs(10)
+            )
+            .unwrap(),
+            "master"
+        );
+        let subject = run_git(
+            &repo,
+            &["log", "--format=%s", "-1", "master"],
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(subject.contains("初始化空仓库"), "{subject}");
+        // 临时身份只注入本次提交，不得写入仓库本地 config
+        assert!(
+            run_git(
+                &repo,
+                &["config", "--local", "--get", "user.name"],
+                Duration::from_secs(10)
+            )
+            .is_err(),
+            "不得向本地 config 写 user.name"
+        );
+        assert!(
+            run_git(
+                &repo,
+                &["config", "--local", "--get", "user.email"],
+                Duration::from_secs(10)
+            )
+            .is_err(),
+            "不得向本地 config 写 user.email"
+        );
+        // 补偿事务完整：同一仓库再起第二个工作区，端口段顺延
+        let w2 = create_impl(&fx.conn, &fx.ws_root, repo.to_str().unwrap(), "second").unwrap();
+        assert_eq!(w2.port_base, w.port_base + 10);
+    }
+
+    /// 空仓库已配置 user.name/email 时，初始提交沿用该身份，不注入 Ccode 临时身份
+    #[test]
+    fn create_on_unborn_repo_uses_configured_identity() {
+        let Some(fx) = Fixture::new() else { return };
+        let repo = fx.dir.join("empty-main");
+        Command::new(git_bin())
+            .args(["-c", "init.defaultBranch=main", "init"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        sh(&repo, &["config", "user.name", "Config User"]);
+        sh(&repo, &["config", "user.email", "config@example.com"]);
+        let w = create_impl(&fx.conn, &fx.ws_root, repo.to_str().unwrap(), "task").unwrap();
+        assert_eq!(w.base_branch, "main");
+        let author = run_git(
+            &repo,
+            &["log", "--format=%an <%ae>", "-1"],
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(author, "Config User <config@example.com>");
     }
 
     #[test]

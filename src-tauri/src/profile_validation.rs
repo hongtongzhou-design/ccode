@@ -95,16 +95,14 @@ fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, String> {
             return Err("API 地址不得内嵌用户名或密码".into());
         }
     }
-    match profile.agent.as_str() {
-        "qwen" => match profile.protocol.as_deref().unwrap_or("openai") {
-            "openai" | "anthropic" => {}
-            value => return Err(format!("Qwen 不支持协议 {value}")),
-        },
-        "kimi" => match profile.protocol.as_deref().unwrap_or("kimi") {
-            "kimi" | "openai" | "anthropic" => {}
-            value => return Err(format!("Kimi 不支持协议 {value}")),
-        },
-        _ => {}
+    // 协议取值校验：合法值与缺省（第一个）都来自 AgentSpec.protocols；空表 = 无协议概念
+    if let Some(spec) = crate::agent_specs::agent_spec(&profile.agent) {
+        if let Some(default) = spec.protocols.first() {
+            let value = profile.protocol.as_deref().unwrap_or(default);
+            if !spec.protocols.contains(&value) {
+                return Err(format!("{} 不支持协议 {value}", spec.display_name));
+            }
+        }
     }
     for key in profile.extra_env.keys() {
         if key.trim().is_empty() || key.contains('=') || key.contains('\0') {
@@ -523,6 +521,7 @@ mod tests {
             id: "p".into(),
             agent: agent.into(),
             name: "测试".into(),
+            account_type: Default::default(),
             protocol: None,
             base_url: Some("https://relay.example.com/v1".into()),
             models: vec!["model-a".into()],

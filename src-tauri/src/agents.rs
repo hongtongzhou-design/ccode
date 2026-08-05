@@ -1,3 +1,4 @@
+use crate::agent_specs::{agent_spec, AgentSpec, LaunchSpec, SpecialLaunch};
 use crate::profiles::Profile;
 use serde::Serialize;
 use std::process::Command;
@@ -15,16 +16,15 @@ pub struct DetectResult {
 pub struct LaunchPlan {
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
+    /// 必须从继承环境中剔除的变量（官方账号模式：防 shell 残留 API key 静默覆盖账号登录）
+    pub env_remove: Vec<String>,
+    /// 初始 prompt（一键开步首条指令）的参数形态；pty_spawn 追加在全部参数之后，
+    /// 保证位置参数语义（codex 的 -c/-m/-s、claude 的 --session-id 都在它前面）
+    pub prompt_args: Vec<String>,
+    /// 请求了初始 prompt 但该 CLI 不支持注入（PromptInject::Unsupported / 未知 agent），
+    /// 前端据此提示「请手动发送」
+    pub prompt_dropped: bool,
 }
-
-pub(crate) const AGENTS: [(&str, &str); 6] = [
-    ("claude-code", "claude"),
-    ("codex", "codex"),
-    ("gemini", "gemini"),
-    ("qwen", "qwen"),
-    ("opencode", "opencode"),
-    ("kimi", "kimi"),
-];
 
 /// 解析 CLI 二进制的绝对路径：先 which（继承进程 PATH），miss 时按平台查常见
 /// 安装目录兜底。背景：macOS 打包版从 Finder 启动时 PATH 很短（/usr/bin:/bin），
@@ -34,7 +34,7 @@ pub fn resolve_binary(name: &str) -> Option<std::path::PathBuf> {
     if let Ok(p) = which::which(name) {
         return Some(p);
     }
-    find_in_dirs(name, &candidate_dirs())
+    find_in_dirs(name, &crate::agent_specs::binary_candidate_dirs())
 }
 
 /// 在候选目录里按序找第一个存在的文件；Windows 下 npm 全局包是 .cmd shim，补扩展名匹配
@@ -49,46 +49,6 @@ fn find_in_dirs(name: &str, dirs: &[std::path::PathBuf]) -> Option<std::path::Pa
         .find(|p| p.is_file())
 }
 
-/// which miss 后的兜底候选目录（按优先级排序）；用户目录一律走 dirs 抽象，禁写死。
-/// 用户目录排在系统目录前——与用户交互终端的 PATH 解析习惯一致（~/.local/bin 里的
-/// 自装副本应优先于 /opt/homebrew/bin 里的同名旧副本，避免检测到非自用的那份）
-fn candidate_dirs() -> Vec<std::path::PathBuf> {
-    let mut out: Vec<std::path::PathBuf> = Vec::new();
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(h) = dirs::home_dir() {
-            out.push(h.join(".npm-global/bin"));
-            out.push(h.join(".local/bin"));
-            out.push(h.join("bin"));
-            out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
-        }
-        out.push("/opt/homebrew/bin".into()); // Apple Silicon brew
-        out.push("/usr/local/bin".into()); // Intel brew / 手动安装
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(h) = dirs::home_dir() {
-            out.push(h.join(".local/bin"));
-            out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
-        }
-        out.push("/usr/local/bin".into());
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // %LOCALAPPDATA%\Programs、%APPDATA%\npm（npm 全局 bin 目录）
-        if let Some(local) = dirs::data_local_dir() {
-            out.push(local.join("Programs"));
-        }
-        if let Some(roaming) = dirs::data_dir() {
-            out.push(roaming.join("npm"));
-        }
-        if let Some(h) = dirs::home_dir() {
-            out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
-        }
-    }
-    out
-}
-
 /// --version 探测的统一超时：正常 CLI 毫秒级返回，卡死的 CLI 不能拖住检测/更新流程
 pub(crate) const VERSION_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -98,8 +58,17 @@ pub(crate) fn version_with_timeout(
     path: &std::path::Path,
     timeout: std::time::Duration,
 ) -> Option<String> {
+    version_args_with_timeout(path, &["--version"], timeout)
+}
+
+/// 探测参数来自 AgentSpec.version_args（六个 CLI 目前都是 --version）
+fn version_args_with_timeout(
+    path: &std::path::Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<String> {
     let mut child = Command::new(path)
-        .arg("--version")
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -128,158 +97,258 @@ pub(crate) fn version_with_timeout(
     }
 }
 
-fn detect(binary: &str) -> (Option<String>, Option<String>) {
-    let path = match resolve_binary(binary) {
+fn detect(spec: &AgentSpec) -> (Option<String>, Option<String>) {
+    let path = match resolve_binary(spec.binary) {
         Some(p) => p,
         None => return (None, None),
     };
-    let version = version_with_timeout(&path, VERSION_QUERY_TIMEOUT);
+    let version = version_args_with_timeout(&path, spec.version_args, VERSION_QUERY_TIMEOUT);
     (Some(path.to_string_lossy().into_owned()), version)
 }
 
 /// 把 profile + 钥匙串密钥翻译成启动 env/args。key 只在启动时刻读取，不外传。
 /// model 为启动时选中的模型（调用方已兜底为 profile 模型列表的首个）。
+/// env 名/固定参数等差异化数据全部来自 AgentSpec（agent_specs.rs）；
+/// 只有无法纯数据化的注入形态保留分支逻辑（SpecialLaunch 各变体）。
 pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) -> LaunchPlan {
     let mut plan = LaunchPlan::default();
-    match profile.agent.as_str() {
-        "claude-code" => {
-            if let Some(url) = &profile.base_url {
-                plan.env.push(("ANTHROPIC_BASE_URL".into(), url.clone()));
-            }
-            if let Some(key) = key {
-                plan.env.push(("ANTHROPIC_AUTH_TOKEN".into(), key));
-            }
-            if let Some(model) = model {
-                plan.env.push(("ANTHROPIC_MODEL".into(), model.into()));
-            }
-            // 把模型列表注册进 /model 选择器（否则选择器里只有内置别名可用）：
-            // 前 4 个占用 opus/sonnet/haiku/fable 别名槽，_NAME 让选择器显示真实模型名；
-            // 第 5 个走唯一的 CUSTOM_MODEL_OPTION；更多模型只能靠 /model <id> 手输
-            const SLOTS: [&str; 4] = ["SONNET", "OPUS", "HAIKU", "FABLE"];
-            for (m, slot) in profile.models.iter().take(4).zip(SLOTS) {
-                plan.env.push((format!("ANTHROPIC_DEFAULT_{slot}_MODEL"), m.clone()));
-                plan.env.push((format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"), m.clone()));
-            }
-            if let Some(fifth) = profile.models.get(4) {
-                plan.env.push(("ANTHROPIC_CUSTOM_MODEL_OPTION".into(), fifth.clone()));
-                plan.env.push(("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(), fifth.clone()));
-            }
+    // 官方账号模式：不注入 base_url/密钥（用 CLI 自己的账号登录），仅按需注入选中模型；
+    // 并按规格 purge 继承环境里的残留 API 密钥变量（防静默覆盖账号登录，§11.7）
+    if profile.account_type == crate::profiles::AccountType::Official {
+        if let Some(spec) = agent_spec(&profile.agent) {
+            apply_official_inject(&mut plan, spec, profile, model);
         }
-        "codex" => {
-            if let Some(key) = key {
-                plan.env.push(("CODEX_API_KEY".into(), key));
-            }
-            // Codex 没有 base URL 环境变量，且只支持 Responses API：
-            // 用 -c 内联定义一个名为 ccode 的 provider 并指到它
-            if let Some(url) = &profile.base_url {
-                for kv in [
-                    r#"model_providers.ccode.name="Ccode""#.to_string(),
-                    format!(r#"model_providers.ccode.base_url="{url}""#),
-                    r#"model_providers.ccode.env_key="CODEX_API_KEY""#.to_string(),
-                    r#"model_providers.ccode.wire_api="responses""#.to_string(),
-                ] {
-                    plan.args.push("-c".into());
-                    plan.args.push(kv);
-                }
-                plan.args.push("-c".into());
-                plan.args.push(r#"model_provider="ccode""#.into());
-            }
-            if let Some(model) = model {
-                plan.args.push("-m".into());
-                plan.args.push(model.into());
-            }
-            // 默认沙箱：只能写当前工作目录（需全权限时在系统终端自行启动）
-            plan.args.push("-s".into());
-            plan.args.push("workspace-write".into());
+        // extra_env 依旧最后注入（用户显式覆盖的逃生口，与 api 模式一致）
+        for (k, v) in &profile.extra_env {
+            plan.env.push((k.clone(), v.clone()));
         }
-        "gemini" => {
-            if let Some(key) = key {
-                plan.env.push(("GEMINI_API_KEY".into(), key));
+        return plan;
+    }
+    if let Some(spec) = agent_spec(&profile.agent) {
+        match &spec.launch {
+            LaunchSpec::Env(env) => {
+                apply_env_inject(&mut plan, env, profile, key.as_deref(), model)
             }
-            // 设了 GOOGLE_GEMINI_BASE_URL 即进入官方支持的 gateway 模式
-            if let Some(url) = &profile.base_url {
-                plan.env.push(("GOOGLE_GEMINI_BASE_URL".into(), url.clone()));
-            }
-            if let Some(model) = model {
-                plan.env.push(("GEMINI_MODEL".into(), model.into()));
-            }
-        }
-        "qwen" => {
-            // 多协议 agent；gemini/vertex-ai 协议暂不支持，一律按 openai 注入
-            match profile.protocol.as_deref().unwrap_or("openai") {
-                "anthropic" => {
-                    if let Some(key) = key {
-                        plan.env.push(("ANTHROPIC_API_KEY".into(), key));
+            LaunchSpec::ByProtocol(entries) => {
+                // 缺省 = 协议表第一个；未支持的取值（gemini/vertex-ai 暂不支持）也按第一个注入
+                let default = spec.protocols.first().copied().unwrap_or("");
+                let proto = profile.protocol.as_deref().unwrap_or(default);
+                let entry = entries
+                    .iter()
+                    .find(|e| e.protocol == proto)
+                    .or_else(|| entries.first());
+                if let Some(entry) = entry {
+                    apply_env_inject(&mut plan, &entry.env, profile, key.as_deref(), model);
+                    for arg in entry.args {
+                        plan.args.push((*arg).into());
                     }
+                }
+            }
+            LaunchSpec::Special(special) => match special {
+                SpecialLaunch::ClaudeModelSlots(env) => {
+                    apply_env_inject(&mut plan, env, profile, key.as_deref(), model);
+                    // 把模型列表注册进 /model 选择器（否则选择器里只有内置别名可用）：
+                    // 前 4 个占用 opus/sonnet/haiku/fable 别名槽，_NAME 让选择器显示真实模型名；
+                    // 第 5 个走唯一的 CUSTOM_MODEL_OPTION；更多模型只能靠 /model <id> 手输
+                    const SLOTS: [&str; 4] = ["SONNET", "OPUS", "HAIKU", "FABLE"];
+                    for (m, slot) in profile.models.iter().take(4).zip(SLOTS) {
+                        plan.env.push((format!("ANTHROPIC_DEFAULT_{slot}_MODEL"), m.clone()));
+                        plan.env.push((format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"), m.clone()));
+                    }
+                    if let Some(fifth) = profile.models.get(4) {
+                        plan.env.push(("ANTHROPIC_CUSTOM_MODEL_OPTION".into(), fifth.clone()));
+                        plan.env.push(("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(), fifth.clone()));
+                    }
+                }
+                SpecialLaunch::CodexInlineProvider { key_env, sandbox_args } => {
+                    if let Some(key) = key {
+                        plan.env.push(((*key_env).into(), key));
+                    }
+                    // Codex 没有 base URL 环境变量，且只支持 Responses API：
+                    // 用 -c 内联定义一个名为 ccode 的 provider 并指到它
                     if let Some(url) = &profile.base_url {
-                        plan.env.push(("ANTHROPIC_BASE_URL".into(), url.clone()));
+                        for kv in [
+                            r#"model_providers.ccode.name="Ccode""#.to_string(),
+                            format!(r#"model_providers.ccode.base_url="{url}""#),
+                            format!(r#"model_providers.ccode.env_key="{key_env}""#),
+                            r#"model_providers.ccode.wire_api="responses""#.to_string(),
+                        ] {
+                            plan.args.push("-c".into());
+                            plan.args.push(kv);
+                        }
+                        plan.args.push("-c".into());
+                        plan.args.push(r#"model_provider="ccode""#.into());
                     }
                     if let Some(model) = model {
-                        plan.env.push(("ANTHROPIC_MODEL".into(), model.into()));
+                        plan.args.push("-m".into());
+                        plan.args.push(model.into());
                     }
-                    plan.args.push("--auth-type".into());
-                    plan.args.push("anthropic".into());
+                    // 默认沙箱：只能写当前工作目录（需全权限时在系统终端自行启动）
+                    for arg in *sandbox_args {
+                        plan.args.push((*arg).into());
+                    }
                 }
-                _ => {
-                    if let Some(key) = key {
-                        plan.env.push(("OPENAI_API_KEY".into(), key));
+                SpecialLaunch::OpenCodeInlineConfig { config_env, no_autoupdate_env } => {
+                    // OpenCode 没有通用 key/baseURL 环境变量：用 OPENCODE_CONFIG_CONTENT 内联配置注入，
+                    // 该层优先级高于 auth.json 和 env（matrix §5），行为确定
+                    let provider = opencode_provider_json(profile, key.as_deref(), model);
+                    let mut config = serde_json::json!({ "provider": { "ccode": provider } });
+                    if let Some(m) = model {
+                        config["model"] = serde_json::json!(format!("ccode/{m}"));
+                    }
+                    plan.env.push(((*config_env).into(), config.to_string()));
+                    // 防止自更新在启动时替换掉我们检测到的二进制
+                    plan.env.push(((*no_autoupdate_env).into(), "1".into()));
+                }
+                SpecialLaunch::KimiDualChannel => {
+                    // 新旧两个产品共用 kimi 命令：新版故意忽略 shell env 的 API key，只认
+                    // KIMI_MODEL_* 合成通道；旧版读 KIMI_API_KEY/KIMI_BASE_URL。
+                    // 两组都设，各变体忽略自己不读的；KIMI_MODEL_NAME 两边通用。
+                    // 新版通道需模型名才启用：无模型时整组跳过，回落到用户自己的配置。
+                    // env 名留在代码里：双通道的条件结构无法纯数据化
+                    if let Some(model) = model {
+                        plan.env.push(("KIMI_MODEL_NAME".into(), model.into()));
+                        plan.env.push((
+                            "KIMI_MODEL_PROVIDER_TYPE".into(),
+                            profile
+                                .protocol
+                                .clone()
+                                .unwrap_or_else(|| spec.protocols.first().copied().unwrap_or("kimi").into()),
+                        ));
+                        if let Some(key) = &key {
+                            plan.env.push(("KIMI_MODEL_API_KEY".into(), key.clone()));
+                        }
+                        if let Some(url) = &profile.base_url {
+                            plan.env.push(("KIMI_MODEL_BASE_URL".into(), url.clone()));
+                        }
+                    }
+                    if let Some(key) = &key {
+                        plan.env.push(("KIMI_API_KEY".into(), key.clone()));
                     }
                     if let Some(url) = &profile.base_url {
-                        plan.env.push(("OPENAI_BASE_URL".into(), url.clone()));
+                        plan.env.push(("KIMI_BASE_URL".into(), url.clone()));
                     }
-                    if let Some(model) = model {
-                        plan.env.push(("OPENAI_MODEL".into(), model.into()));
-                    }
-                    plan.args.push("--auth-type".into());
-                    plan.args.push("openai".into());
                 }
-            }
+            },
         }
-        "opencode" => {
-            // OpenCode 没有通用 key/baseURL 环境变量：用 OPENCODE_CONFIG_CONTENT 内联配置注入，
-            // 该层优先级高于 auth.json 和 env（matrix §5），行为确定
-            let provider = opencode_provider_json(profile, key.as_deref(), model);
-            let mut config = serde_json::json!({ "provider": { "ccode": provider } });
-            if let Some(m) = model {
-                config["model"] = serde_json::json!(format!("ccode/{m}"));
-            }
-            plan.env
-                .push(("OPENCODE_CONFIG_CONTENT".into(), config.to_string()));
-            // 防止自更新在启动时替换掉我们检测到的二进制
-            plan.env.push(("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into()));
-        }
-        "kimi" => {
-            // 新旧两个产品共用 kimi 命令：新版故意忽略 shell env 的 API key，只认
-            // KIMI_MODEL_* 合成通道；旧版读 KIMI_API_KEY/KIMI_BASE_URL。
-            // 两组都设，各变体忽略自己不读的；KIMI_MODEL_NAME 两边通用。
-            // 新版通道需模型名才启用：无模型时整组跳过，回落到用户自己的配置
-            if let Some(model) = model {
-                plan.env.push(("KIMI_MODEL_NAME".into(), model.into()));
-                plan.env.push((
-                    "KIMI_MODEL_PROVIDER_TYPE".into(),
-                    profile.protocol.clone().unwrap_or_else(|| "kimi".into()),
-                ));
-                if let Some(key) = &key {
-                    plan.env.push(("KIMI_MODEL_API_KEY".into(), key.clone()));
-                }
-                if let Some(url) = &profile.base_url {
-                    plan.env.push(("KIMI_MODEL_BASE_URL".into(), url.clone()));
-                }
-            }
-            if let Some(key) = &key {
-                plan.env.push(("KIMI_API_KEY".into(), key.clone()));
-            }
-            if let Some(url) = &profile.base_url {
-                plan.env.push(("KIMI_BASE_URL".into(), url.clone()));
-            }
-        }
-        _ => {}
     }
     // 附加环境变量放在最后：CommandBuilder 重复 env 后者生效，用户可借此覆盖 adapter 内置值
     for (k, v) in &profile.extra_env {
         plan.env.push((k.clone(), v.clone()));
     }
     plan
+}
+
+/// 带初始 prompt 的启动计划（一键开步首条指令）：api / 官方账号两种模式同样适用。
+/// 注入形态读注册表 prompt_inject：Positional → prompt_args 单元素（pty_spawn 放最后），
+/// Flag → `-i <prompt>`；Unsupported 或未知 agent 不注入并置 prompt_dropped 标记。
+pub fn launch_plan_with_prompt(
+    profile: &Profile,
+    key: Option<String>,
+    model: Option<&str>,
+    initial_prompt: Option<&str>,
+) -> LaunchPlan {
+    let mut plan = launch_plan(profile, key, model);
+    let Some(prompt) = initial_prompt.map(str::trim).filter(|p| !p.is_empty()) else {
+        return plan;
+    };
+    match agent_spec(&profile.agent).map(|s| s.prompt_inject) {
+        Some(crate::agent_specs::PromptInject::Positional) => {
+            plan.prompt_args.push(prompt.into());
+        }
+        Some(crate::agent_specs::PromptInject::Flag(flag)) => {
+            plan.prompt_args.push(flag.into());
+            plan.prompt_args.push(prompt.into());
+        }
+        // 该 CLI 无交互模式初始 prompt 参数（kimi/opencode）：不注入，让前端提示手动发送
+        Some(crate::agent_specs::PromptInject::Unsupported) | None => {
+            plan.prompt_dropped = true;
+        }
+    }
+    plan
+}
+
+/// 官方账号模式的注入：purge 残留密钥 env（规格 env_purge_list），模型非空才注入模型 env/参数。
+/// 凭证与 base URL 一律不注入——认证完全交给 CLI 自己的账号登录
+fn apply_official_inject(
+    plan: &mut LaunchPlan,
+    spec: &AgentSpec,
+    profile: &Profile,
+    model: Option<&str>,
+) {
+    if let Some(oa) = &spec.official_account {
+        for var in oa.env_purge_list {
+            plan.env_remove.push((*var).into());
+        }
+    }
+    match &spec.launch {
+        LaunchSpec::Env(env) => {
+            if let (Some(name), Some(m)) = (env.model, model) {
+                plan.env.push((name.into(), m.into()));
+            }
+        }
+        LaunchSpec::ByProtocol(entries) => {
+            // 与 api 模式同一缺省规则取协议条目，但只注入模型 env；
+            // --auth-type 等凭证参数不注入（官方账号用 CLI 默认认证方式）
+            let default = spec.protocols.first().copied().unwrap_or("");
+            let proto = profile.protocol.as_deref().unwrap_or(default);
+            let entry = entries
+                .iter()
+                .find(|e| e.protocol == proto)
+                .or_else(|| entries.first());
+            if let (Some(entry), Some(m)) = (entry, model) {
+                if let Some(name) = entry.env.model {
+                    plan.env.push((name.into(), m.into()));
+                }
+            }
+        }
+        LaunchSpec::Special(special) => match special {
+            // 模型槽位注册（ANTHROPIC_DEFAULT_*）只在 api 模式做：官方账号的可用模型由订阅决定
+            SpecialLaunch::ClaudeModelSlots(env) => {
+                if let (Some(name), Some(m)) = (env.model, model) {
+                    plan.env.push((name.into(), m.into()));
+                }
+            }
+            SpecialLaunch::CodexInlineProvider { sandbox_args, .. } => {
+                if let Some(m) = model {
+                    plan.args.push("-m".into());
+                    plan.args.push(m.into());
+                }
+                // 默认沙箱与认证方式无关，官方账号同样生效
+                for arg in *sandbox_args {
+                    plan.args.push((*arg).into());
+                }
+            }
+            // opencode 内联配置缺 provider 会指向不存在的节点；kimi 新版刻意忽略 shell env——
+            // 这两家官方账号模式下不注入模型（也不在本批次支持范围）
+            _ => {}
+        },
+    }
+}
+
+/// 通用 env 注入：base_url/密钥/选中模型各自写入规格指定的 env 名（None = 该 CLI 无此 env）
+fn apply_env_inject(
+    plan: &mut LaunchPlan,
+    env: &crate::agent_specs::EnvInject,
+    profile: &Profile,
+    key: Option<&str>,
+    model: Option<&str>,
+) {
+    if let (Some(name), Some(url)) = (env.base_url, &profile.base_url) {
+        plan.env.push((name.into(), url.clone()));
+    }
+    if let (Some(name), Some(k)) = (env.key, key) {
+        plan.env.push((name.into(), k.into()));
+    }
+    if let (Some(name), Some(m)) = (env.model, model) {
+        plan.env.push((name.into(), m.into()));
+    }
+    for (k, v) in env.fixed_env {
+        plan.env.push(((*k).into(), (*v).into()));
+    }
+    for arg in env.fixed_args {
+        plan.args.push((*arg).into());
+    }
 }
 
 /// OpenCode 的 provider 条目（npm + options + models），启动注入与全局写入共用
@@ -389,7 +458,11 @@ fn catalog_args(path: &std::path::Path) -> Vec<String> {
 /// 启动前的每-agent 文件准备，返回需追加到 CLI 的参数。
 /// codex：写模型 catalog 并用 -c 指过去，让 TUI /model 选择器列出 profile 的全部模型
 pub fn prepare_launch(profile: &Profile) -> Result<Vec<String>, String> {
-    if profile.agent == "codex" {
+    let is_codex = matches!(
+        agent_spec(&profile.agent).map(|s| &s.launch),
+        Some(LaunchSpec::Special(SpecialLaunch::CodexInlineProvider { .. }))
+    );
+    if is_codex {
         if let Some(path) = write_codex_catalog(profile)? {
             return Ok(catalog_args(&path));
         }
@@ -398,21 +471,22 @@ pub fn prepare_launch(profile: &Profile) -> Result<Vec<String>, String> {
 }
 
 pub fn binary_for(agent_id: &str) -> Option<&'static str> {
-    AGENTS
-        .iter()
-        .find(|(id, _)| *id == agent_id)
-        .map(|(_, bin)| *bin)
+    agent_spec(agent_id).map(|s| s.binary)
 }
 
-/// 各 CLI 的按 ID 恢复会话参数（§6.12 A）。
+/// 各 CLI 的按 ID 恢复会话参数（§6.12 A），参数格式来自 AgentSpec.resume。
 /// 返回 (prepend, args)：codex 的 resume 是子命令需放最前，其余是位置无关的 flag。
 pub(crate) fn resume_args(agent_id: &str, session_id: &str) -> (bool, Vec<String>) {
-    match agent_id {
-        "codex" => (true, vec!["resume".into(), session_id.into()]),
-        "claude-code" | "gemini" | "qwen" => (false, vec!["-r".into(), session_id.into()]),
-        "kimi" => (false, vec!["-S".into(), session_id.into()]),
-        "opencode" => (false, vec!["--session".into(), session_id.into()]),
-        _ => (false, vec![]),
+    match agent_spec(agent_id) {
+        Some(spec) => (
+            spec.resume.prepend,
+            spec.resume
+                .args
+                .iter()
+                .map(|a| a.replace("{session}", session_id))
+                .collect(),
+        ),
+        None => (false, vec![]),
     }
 }
 
@@ -703,16 +777,10 @@ fn open_external_terminal(cmd: &str, pref: &str) -> Result<(), String> {
     })
 }
 
-/// kimi 新旧两个产品共用命令，按数据目录推断装的是哪个变体（"new" | "legacy"）
+/// kimi 新旧两个产品共用命令，按数据目录推断装的是哪个变体（"new" | "legacy"）。
+/// 目录名来自 AgentSpec.packaging.legacy_variant
 pub(crate) fn kimi_variant() -> Option<&'static str> {
-    let home = dirs::home_dir()?;
-    if home.join(".kimi-code").exists() {
-        Some("new")
-    } else if home.join(".kimi").exists() {
-        Some("legacy")
-    } else {
-        None
-    }
+    crate::agent_specs::variant_of(agent_spec("kimi")?)
 }
 
 fn kimi_variant_hint() -> Option<&'static str> {
@@ -731,15 +799,16 @@ pub(crate) fn invalidate_detect_cache() {
     *DETECT_CACHE.lock().unwrap() = None;
 }
 
-fn detect_one(id: &str, binary: &str) -> DetectResult {
-    let (binary_path, mut version) = detect(binary);
-    if id == "kimi" {
+fn detect_one(spec: &'static AgentSpec) -> DetectResult {
+    let (binary_path, mut version) = detect(spec);
+    // 双变体 CLI（kimi）在版本号后标注装的是新版还是旧版
+    if spec.packaging.legacy_variant.is_some() {
         if let (Some(v), Some(hint)) = (&version, kimi_variant_hint()) {
             version = Some(format!("{v} ({hint})"));
         }
     }
     DetectResult {
-        id: id.to_string(),
+        id: spec.id.to_string(),
         binary_path,
         version,
     }
@@ -753,12 +822,9 @@ pub async fn detect_agents() -> Vec<DetectResult> {
     // --version 要 spawn 6 个子进程，放阻塞线程池并并行跑（与 updater 的更新检查同模式；
     // 单个 CLI 卡死由 version_with_timeout 的 5s 超时兜底）
     let results = tauri::async_runtime::spawn_blocking(|| {
-        let handles: Vec<_> = AGENTS
+        let handles: Vec<_> = crate::agent_specs::all_agent_specs()
             .iter()
-            .map(|(id, binary)| {
-                let (id, binary) = (*id, *binary);
-                std::thread::spawn(move || detect_one(id, binary))
-            })
+            .map(|spec| std::thread::spawn(move || detect_one(spec)))
             .collect();
         handles
             .into_iter()
@@ -771,6 +837,201 @@ pub async fn detect_agents() -> Vec<DetectResult> {
     results
 }
 
+// ===== 官方账号（P1a）：只读检测 auth 文件，绝不写入/删除 =====
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialAccountStatusDto {
+    /// 注册表已填该 agent 的官方账号规格
+    pub supported: bool,
+    /// auth 文件存在且解析出凭证字段
+    pub connected: bool,
+    /// 检测说明（漏报场景/文件异常），界面直接展示
+    pub detail: Option<String>,
+    /// 终端内执行的登录命令（含二进制名；不支持官方账号时 None）
+    pub login_command: Option<String>,
+    /// 配置文件冲突告警（中文可读描述；只含文件名与变量名，绝不含密钥值）
+    pub conflicts: Vec<String>,
+}
+
+/// auth 文件里标识「已登录」的凭证字段名（各家结构不同，命中任一即算）：
+/// codex tokens.access_token / OPENAI_API_KEY、claude claudeAiOauth.accessToken、
+/// gemini access_token / refresh_token
+const CREDENTIAL_FIELD_NAMES: &[&str] = &[
+    "access_token",
+    "accessToken",
+    "refresh_token",
+    "refreshToken",
+    "id_token",
+    "OPENAI_API_KEY",
+];
+
+/// 递归（限深）查找凭证字段：值是非空字符串才命中；防御式——结构随版本漂移时不误判
+fn json_has_credential(value: &serde_json::Value, depth: u8) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(k, v)| {
+            (CREDENTIAL_FIELD_NAMES.contains(&k.as_str())
+                && v.as_str().is_some_and(|s| !s.is_empty()))
+                || json_has_credential(v, depth - 1)
+        }),
+        _ => false,
+    }
+}
+
+/// 单个 auth 文件的只读探测；文件不存在/不可读 → None（按缺失处理）
+fn probe_auth_file(path: &std::path::Path) -> Option<AuthProbe> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) if json_has_credential(&v, 4) => AuthProbe::Connected,
+        Ok(_) => AuthProbe::Unrecognized,
+        Err(_) => AuthProbe::Corrupt,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AuthProbe {
+    Connected,
+    /// 存在但找不到凭证字段（结构可能随版本漂移）
+    Unrecognized,
+    /// 存在但解析失败（可能损坏或末行截断）
+    Corrupt,
+}
+
+// ===== 配置冲突探测（P1a 增强）：CLI 自读配置文件里的残留密钥会覆盖官方账号登录 =====
+// 只读扫描，只报变量名；密钥值只在这一行内存里经过，绝不进 DTO/日志
+
+/// .env 逐行解析：容忍注释/空行/export 前缀与等号两侧空白；
+/// 大小写敏感（env 变量名本身大小写敏感，小写变体不会被 CLI 当作同一变量读取）
+fn dotenv_conflict_keys(text: &str, keys: &[&str]) -> Vec<String> {
+    let mut hits = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((name, _)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if keys.contains(&name) {
+            hits.push(name.to_string());
+        }
+    }
+    hits
+}
+
+/// settings.json 防御式解析：只查顶层 env 对象的键；文件损坏/env 非对象 → 无冲突
+fn settings_env_conflict_keys(text: &str, keys: &[&str]) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(env) = value.get("env").and_then(|e| e.as_object()) else {
+        return Vec::new();
+    };
+    env.keys()
+        .filter(|k| keys.contains(&k.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// 逐条执行注册表的冲突探测；文件缺失/不可读静默跳过（不算冲突）
+fn probe_conflicts(home: &std::path::Path, oa: &crate::agent_specs::OfficialAccountSpec) -> Vec<String> {
+    let mut out = Vec::new();
+    for probe in oa.conflict_probes {
+        let Ok(text) = std::fs::read_to_string(home.join(probe.file)) else {
+            continue;
+        };
+        let hits = if probe.file.ends_with(".json") {
+            settings_env_conflict_keys(&text, probe.keys)
+        } else {
+            dotenv_conflict_keys(&text, probe.keys)
+        };
+        for key in hits {
+            out.push(format!("~/{} 中存在 {}，{}", probe.file, key, probe.note));
+        }
+    }
+    out
+}
+
+/// 官方账号连接状态（P1a）。supported = 注册表有规格；connected = auth 文件检出凭证。
+/// 断开不做文件删除——引导用户用 CLI 自己的 logout（前端文案）
+#[tauri::command]
+pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
+    let Some(spec) = agent_spec(agent_id) else {
+        return OfficialAccountStatusDto {
+            supported: false,
+            connected: false,
+            detail: Some(format!("未知 agent: {agent_id}")),
+            login_command: None,
+            conflicts: Vec::new(),
+        };
+    };
+    let Some(oa) = spec.official_account.as_ref() else {
+        return OfficialAccountStatusDto {
+            supported: false,
+            connected: false,
+            detail: Some("该 CLI 暂未接入官方账号（本批次：Claude Code / Codex / Gemini）".into()),
+            login_command: None,
+            conflicts: Vec::new(),
+        };
+    };
+    // login_cmd 为空 = 裸启动 CLI 后在 TUI 内登录（gemini）
+    let login_command = Some(
+        std::iter::once(spec.binary)
+            .chain(oa.login_cmd.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let home = dirs::home_dir();
+    // 冲突探测与连接状态无关：未登录时残留的 API 配置同样值得告警
+    let conflicts = home
+        .as_ref()
+        .map(|h| probe_conflicts(h, oa))
+        .unwrap_or_default();
+    let mut unrecognized: Option<&str> = None;
+    let mut corrupt: Option<&str> = None;
+    for rel in oa.auth_file_paths {
+        let Some(path) = home.as_ref().map(|h| h.join(rel)) else {
+            break;
+        };
+        match probe_auth_file(&path) {
+            Some(AuthProbe::Connected) => {
+                return OfficialAccountStatusDto {
+                    supported: true,
+                    connected: true,
+                    detail: Some(format!("已检测到登录凭证（~/{rel}）")),
+                    login_command,
+                    conflicts,
+                };
+            }
+            Some(AuthProbe::Unrecognized) => unrecognized = Some(rel),
+            Some(AuthProbe::Corrupt) => corrupt = Some(rel),
+            None => {}
+        }
+    }
+    let detail = if let Some(rel) = corrupt {
+        format!("~/{rel} 存在但无法解析（文件可能损坏）")
+    } else if let Some(rel) = unrecognized {
+        format!("~/{rel} 存在但未识别到凭证字段（格式可能随版本变化）")
+    } else {
+        match oa.detection_note {
+            Some(note) => format!("未检测到凭证文件；{note}"),
+            None => "未检测到凭证文件".into(),
+        }
+    };
+    OfficialAccountStatusDto {
+        supported: true,
+        connected: false,
+        detail: Some(detail),
+        login_command,
+        conflicts,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,6 +1041,7 @@ mod tests {
             id: "test".into(),
             agent: agent.into(),
             name: "测试".into(),
+            account_type: Default::default(),
             protocol: None,
             base_url: base_url.map(|s| s.into()),
             models: vec![],
@@ -900,6 +1162,288 @@ mod tests {
             .contains(&("GOOGLE_GEMINI_BASE_URL".into(), "https://relay.example.com".into())));
         assert!(!bare.env.iter().any(|(k, _)| k == "GEMINI_API_KEY"));
         assert!(!bare.env.iter().any(|(k, _)| k == "GEMINI_MODEL"));
+    }
+
+    // ===== 官方账号模式（P1a）=====
+
+    fn official_profile(agent: &str) -> Profile {
+        let mut p = profile(agent, Some("https://relay.example.com"));
+        p.account_type = crate::profiles::AccountType::Official;
+        p
+    }
+
+    #[test]
+    fn official_plan_injects_no_credentials_and_purges_residual_env() {
+        let p = official_profile("claude-code");
+        let plan = launch_plan(&p, Some("sk-secret".into()), None);
+        // 密钥/base_url 一律不注入，模型为空也不注入模型 env
+        assert!(plan.env.is_empty());
+        assert!(plan.args.is_empty());
+        assert!(!plan.env.iter().any(|(_, v)| v.contains("sk-secret")));
+        assert!(plan.env_remove.contains(&"ANTHROPIC_AUTH_TOKEN".into()));
+        assert!(plan.env_remove.contains(&"ANTHROPIC_API_KEY".into()));
+        assert!(plan.env_remove.contains(&"ANTHROPIC_BASE_URL".into()));
+    }
+
+    #[test]
+    fn official_plan_injects_model_only_when_selected() {
+        let p = official_profile("claude-code");
+        let plan = launch_plan(&p, None, Some("claude-sonnet-4"));
+        assert_eq!(
+            plan.env,
+            vec![("ANTHROPIC_MODEL".to_string(), "claude-sonnet-4".to_string())]
+        );
+        // 模型槽位注册（ANTHROPIC_DEFAULT_*）只在 api 模式做
+        assert!(!plan.env.iter().any(|(k, _)| k.starts_with("ANTHROPIC_DEFAULT_")));
+        // purge 列表照常
+        assert!(!plan.env_remove.is_empty());
+    }
+
+    #[test]
+    fn official_plan_keeps_extra_env_as_escape_hatch() {
+        let mut p = official_profile("claude-code");
+        p.extra_env.insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
+        let plan = launch_plan(&p, None, None);
+        assert_eq!(
+            plan.env,
+            vec![("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string())]
+        );
+    }
+
+    #[test]
+    fn official_codex_plan_has_no_provider_args_but_keeps_sandbox() {
+        let p = official_profile("codex");
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("gpt-5-codex"));
+        assert!(plan.env.is_empty());
+        let joined = plan.args.join(" ");
+        assert!(!joined.contains("model_providers"));
+        assert!(!joined.contains("model_provider="));
+        assert!(joined.contains("-m gpt-5-codex"));
+        // 默认沙箱与认证方式无关，官方账号同样生效
+        assert!(joined.contains("-s workspace-write"));
+        assert!(plan.env_remove.contains(&"CODEX_API_KEY".into()));
+        assert!(plan.env_remove.contains(&"OPENAI_API_KEY".into()));
+        // 模型为空：只剩沙箱参数
+        let bare = launch_plan(&p, None, None);
+        assert_eq!(bare.args, vec!["-s", "workspace-write"]);
+    }
+
+    #[test]
+    fn official_gemini_plan_purges_gateway_env() {
+        let p = official_profile("gemini");
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("gemini-3-pro"));
+        // base URL（GATEWAY 模式）与密钥都不注入，只注入模型
+        assert_eq!(
+            plan.env,
+            vec![("GEMINI_MODEL".to_string(), "gemini-3-pro".to_string())]
+        );
+        assert!(plan.env_remove.contains(&"GEMINI_API_KEY".into()));
+        assert!(plan.env_remove.contains(&"GOOGLE_GEMINI_BASE_URL".into()));
+    }
+
+    #[test]
+    fn official_plan_for_unsupported_agent_is_inert() {
+        // 规格未填官方账号的 agent（opencode）：purge 为空、不注入任何凭证/模型，不崩溃
+        let p = official_profile("opencode");
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("m1"));
+        assert!(plan.env.is_empty());
+        assert!(plan.args.is_empty());
+        assert!(plan.env_remove.is_empty());
+    }
+
+    // ===== 初始 prompt 注入（一键开步首条指令）=====
+
+    #[test]
+    fn prompt_inject_positional_and_flag_shapes() {
+        // claude/codex：位置参数（单元素，pty_spawn 追加在命令行最后）
+        let p = profile("claude-code", None);
+        let plan = launch_plan_with_prompt(&p, None, Some("m1"), Some("读 TASK.md，按简报开始执行"));
+        assert_eq!(plan.prompt_args, vec!["读 TASK.md，按简报开始执行"]);
+        assert!(!plan.prompt_dropped);
+        // 位置参数不在 plan.args 里（保证 codex 沙箱/-c、claude --session-id 都在它前面）
+        assert!(!plan.args.iter().any(|a| a.contains("TASK.md")));
+        // gemini/qwen：-i <prompt>（执行后继续交互）
+        for agent in ["gemini", "qwen"] {
+            let p = profile(agent, None);
+            let plan = launch_plan_with_prompt(&p, None, None, Some("开始干活"));
+            assert_eq!(plan.prompt_args, vec!["-i", "开始干活"], "{agent} 应为 -i 形态");
+            assert!(!plan.prompt_dropped);
+        }
+    }
+
+    #[test]
+    fn prompt_inject_coexists_with_codex_sandbox_args() {
+        // codex 特殊变体：既有 -c/-m/沙箱参数保持原顺序，prompt 单列在 prompt_args 末尾追加
+        let p = profile("codex", Some("https://relay.example.com/v1"));
+        let plan =
+            launch_plan_with_prompt(&p, Some("sk-secret".into()), Some("gpt-5-codex"), Some("开工"));
+        assert_eq!(plan.prompt_args, vec!["开工"]);
+        let joined = plan.args.join(" ");
+        assert!(joined.contains("-s workspace-write"));
+        assert!(joined.contains(r#"model_provider="ccode""#));
+        assert!(joined.contains("-m gpt-5-codex"));
+        assert!(!joined.contains("开工"), "prompt 不得混入既有参数序列");
+    }
+
+    #[test]
+    fn prompt_inject_unsupported_marks_dropped() {
+        // kimi/opencode 无交互模式初始 prompt 参数（-p 是非交互模式，禁用）：不注入 + 标记
+        for agent in ["kimi", "opencode"] {
+            let p = profile(agent, None);
+            let plan = launch_plan_with_prompt(&p, None, None, Some("开工"));
+            assert!(plan.prompt_args.is_empty(), "{agent} 不得注入");
+            assert!(plan.prompt_dropped, "{agent} 应置 dropped 标记");
+        }
+        // 未知 agent：无从注入，同样标记
+        let p = profile("no-such-agent", None);
+        let plan = launch_plan_with_prompt(&p, None, None, Some("开工"));
+        assert!(plan.prompt_dropped);
+    }
+
+    #[test]
+    fn prompt_inject_applies_to_official_account_too() {
+        // api / 官方账号两种模式都注入（prompt 与认证方式无关）；purge/凭证语义不受影响
+        let p = official_profile("claude-code");
+        let plan = launch_plan_with_prompt(&p, Some("sk-secret".into()), None, Some("开工"));
+        assert_eq!(plan.prompt_args, vec!["开工"]);
+        assert!(plan.env_remove.contains(&"ANTHROPIC_AUTH_TOKEN".into()));
+        assert!(!plan.env.iter().any(|(_, v)| v.contains("sk-secret")));
+    }
+
+    #[test]
+    fn prompt_inject_skips_empty_and_blank_prompt() {
+        let p = profile("claude-code", None);
+        for prompt in [None, Some(""), Some("   ")] {
+            let plan = launch_plan_with_prompt(&p, None, None, prompt);
+            assert!(plan.prompt_args.is_empty());
+            assert!(!plan.prompt_dropped);
+        }
+        // 前后空白先裁剪再注入
+        let plan = launch_plan_with_prompt(&p, None, None, Some("  开工  "));
+        assert_eq!(plan.prompt_args, vec!["开工"]);
+    }
+
+    // ===== auth 文件只读探测（防御式）=====
+
+    fn probe_temp(name: &str, content: &str) -> Option<AuthProbe> {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        let probe = probe_auth_file(&path);
+        std::fs::remove_dir_all(&dir).ok();
+        probe
+    }
+
+    #[test]
+    fn auth_probe_detects_codex_chatgpt_and_apikey_shapes() {
+        // ChatGPT 账号：tokens.access_token
+        let probe = probe_temp(
+            "auth.json",
+            r#"{"OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"tok","refresh_token":"r"},"last_refresh":"2026-01-01T00:00:00Z"}"#,
+        );
+        assert_eq!(probe, Some(AuthProbe::Connected));
+        // API key 登录：顶层 OPENAI_API_KEY
+        let probe = probe_temp("auth.json", r#"{"OPENAI_API_KEY":"sk-x","tokens":null}"#);
+        assert_eq!(probe, Some(AuthProbe::Connected));
+    }
+
+    #[test]
+    fn auth_probe_detects_nested_claude_and_flat_gemini_shapes() {
+        // claude：凭证嵌套在 claudeAiOauth 下（camelCase）
+        let probe = probe_temp(
+            ".credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"tok","refreshToken":"r","expiresAt":123}}"#,
+        );
+        assert_eq!(probe, Some(AuthProbe::Connected));
+        // gemini：google-auth-library Credentials 扁平结构
+        let probe = probe_temp(
+            "oauth_creds.json",
+            r#"{"access_token":"tok","refresh_token":"r","scope":"s","token_type":"Bearer","expiry_date":123}"#,
+        );
+        assert_eq!(probe, Some(AuthProbe::Connected));
+    }
+
+    #[test]
+    fn auth_probe_is_defensive_on_missing_corrupt_and_unrecognized() {
+        // 缺失 → None
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        assert_eq!(probe_auth_file(&dir.join("nope.json")), None);
+        // 损坏（截断的 JSON）→ Corrupt，不误判为已连接
+        let probe = probe_temp("auth.json", r#"{"tokens":{"access_token":"to"#);
+        assert_eq!(probe, Some(AuthProbe::Corrupt));
+        // 合法 JSON 但无凭证字段 → Unrecognized
+        let probe = probe_temp("auth.json", r#"{"foo":"bar","n":1}"#);
+        assert_eq!(probe, Some(AuthProbe::Unrecognized));
+        // 空字符串凭证不算命中
+        let probe = probe_temp("auth.json", r#"{"access_token":""}"#);
+        assert_eq!(probe, Some(AuthProbe::Unrecognized));
+    }
+
+    // ===== 配置冲突探测（.env / settings.json）=====
+
+    const CONFLICT_KEYS: &[&str] = &["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL"];
+
+    #[test]
+    fn dotenv_probe_tolerates_comments_blank_lines_and_export_prefix() {
+        let text = "# 注释\n\nGEMINI_API_KEY=sk-live-secret-123\nexport GOOGLE_GEMINI_BASE_URL = https://relay.example.com\n  # 缩进注释\nNOT_A_KEY=x\n";
+        let hits = dotenv_conflict_keys(text, CONFLICT_KEYS);
+        assert_eq!(hits, vec!["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"]);
+        // 只报变量名，密钥值绝不进结果
+        assert!(!hits.iter().any(|h| h.contains("sk-live-secret-123")));
+    }
+
+    #[test]
+    fn dotenv_probe_is_case_sensitive_and_skips_malformed_lines() {
+        // 小写变体不算（env 变量名大小写敏感，CLI 不会把它读成同一变量）
+        assert!(dotenv_conflict_keys("gemini_api_key=x\n", CONFLICT_KEYS).is_empty());
+        // 无等号的行、空键名都不命中
+        assert!(dotenv_conflict_keys("GEMINI_API_KEY\n=value\n", CONFLICT_KEYS).is_empty());
+    }
+
+    #[test]
+    fn settings_json_probe_reads_only_top_level_env_object() {
+        // env 对象内命中；env 之外的同名键（如 mcpServers 里）不命中
+        let text = r#"{"env":{"ANTHROPIC_API_KEY":"sk-ant-secret"},"mcpServers":{"x":{"env":{"ANTHROPIC_API_KEY":"y"}}}}"#;
+        let keys = &["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"];
+        assert_eq!(settings_env_conflict_keys(text, keys), vec!["ANTHROPIC_API_KEY"]);
+    }
+
+    #[test]
+    fn settings_json_probe_is_defensive_on_non_object_corrupt_and_missing_env() {
+        let keys = &["ANTHROPIC_API_KEY"];
+        // env 不是对象
+        assert!(settings_env_conflict_keys(r#"{"env":"ANTHROPIC_API_KEY"}"#, keys).is_empty());
+        // 损坏的 JSON
+        assert!(settings_env_conflict_keys(r#"{"env":{"ANTHROPIC_API_KEY":"x""#, keys).is_empty());
+        // 没有 env 键
+        assert!(settings_env_conflict_keys(r#"{"model":"opus"}"#, keys).is_empty());
+    }
+
+    #[test]
+    fn probe_conflicts_reports_file_and_key_only_and_skips_missing_files() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".gemini")).unwrap();
+        std::fs::write(
+            dir.join(".gemini/.env"),
+            "GEMINI_API_KEY=sk-super-secret-value\n",
+        )
+        .unwrap();
+        let spec = crate::agent_specs::agent_spec("gemini").unwrap();
+        let oa = spec.official_account.as_ref().unwrap();
+        let conflicts = probe_conflicts(&dir, oa);
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].contains("~/.gemini/.env"));
+        assert!(conflicts[0].contains("GEMINI_API_KEY"));
+        // DTO 文案不得含密钥值
+        assert!(!conflicts[0].contains("sk-super-secret-value"));
+        // 文件缺失静默跳过：claude 的 settings.json 探测在该目录无文件，不产生冲突
+        let claude = crate::agent_specs::agent_spec("claude-code").unwrap();
+        assert!(probe_conflicts(&dir, claude.official_account.as_ref().unwrap()).is_empty());
+        // codex 保守留空：永不产生冲突
+        let codex = crate::agent_specs::agent_spec("codex").unwrap();
+        assert!(probe_conflicts(&dir, codex.official_account.as_ref().unwrap()).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1248,7 +1792,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn candidate_dirs_cover_homebrew_prefixes() {
-        let dirs = candidate_dirs();
+        let dirs = crate::agent_specs::binary_candidate_dirs();
         assert!(dirs.iter().any(|d| d == std::path::Path::new("/opt/homebrew/bin")));
         assert!(dirs.iter().any(|d| d == std::path::Path::new("/usr/local/bin")));
     }

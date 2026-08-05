@@ -85,8 +85,6 @@ pub struct SkillUpdateDto {
     pub message: String,
 }
 
-const AGENT_IDS: [&str; 6] = ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi"];
-
 // ===== 库与元数据存储 =====
 
 #[derive(Debug, Clone)]
@@ -123,24 +121,22 @@ impl SkillStore {
     }
 }
 
-/// 六个 agent 的技能目录（§6.13；opencode 配置在 ~/.config 下，与 matrix 一致）
+/// 六个 agent 的技能目录（§6.13；目录来自 AgentSpec.skills_dir，opencode 在 ~/.config 下）
 fn agent_dirs() -> HashMap<String, PathBuf> {
     let mut m = HashMap::new();
     if let Some(home) = dirs::home_dir() {
-        m.insert("claude-code".to_string(), home.join(".claude").join("skills"));
-        m.insert("codex".to_string(), home.join(".codex").join("skills"));
-        m.insert("gemini".to_string(), home.join(".gemini").join("skills"));
-        m.insert("qwen".to_string(), home.join(".qwen").join("skills"));
-        m.insert("opencode".to_string(), home.join(".config").join("opencode").join("skills"));
-        m.insert("kimi".to_string(), home.join(".kimi-code").join("skills"));
+        for spec in crate::agent_specs::all_agent_specs() {
+            let dir = spec.skills_dir.iter().fold(home.clone(), |p, seg| p.join(seg));
+            m.insert(spec.id.to_string(), dir);
+        }
     }
     m
 }
 
 fn new_skill(name: String, description: Option<String>, source: &str, repo: Option<String>) -> SkillDto {
     let mut apps = HashMap::new();
-    for a in AGENT_IDS {
-        apps.insert(a.to_string(), false);
+    for spec in crate::agent_specs::all_agent_specs() {
+        apps.insert(spec.id.to_string(), false);
     }
     SkillDto {
         id: uuid::Uuid::new_v4().to_string(),
@@ -570,8 +566,8 @@ fn delete_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>, backups: &Pa
         .ok_or_else(|| format!("技能不存在: {id}"))?;
     let name = skills[pos].name.clone();
     // 先全量卸载再备份删除
-    for agent in AGENT_IDS {
-        if let Some(root) = dirs.get(agent) {
+    for spec in crate::agent_specs::all_agent_specs() {
+        if let Some(root) = dirs.get(spec.id) {
             let _ = remove_ours(&root.join(&name), &store.lib);
         }
     }
@@ -1270,8 +1266,8 @@ mod tests {
             };
             fs::create_dir_all(&store.lib).unwrap();
             let mut agents = HashMap::new();
-            for a in AGENT_IDS {
-                agents.insert(a.to_string(), dir.join("agents").join(a));
+            for spec in crate::agent_specs::all_agent_specs() {
+                agents.insert(spec.id.to_string(), dir.join("agents").join(spec.id));
             }
             Self { dir, store, agents }
         }

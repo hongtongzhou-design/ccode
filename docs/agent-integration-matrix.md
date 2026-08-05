@@ -1,6 +1,7 @@
 # 六个 CLI Agent 适配参考（调研蒸馏版）
 
 > 供实现 AgentAdapter 时查阅。来源：2026-07-30 对官方文档与源码的调研（多数核到源码行号）。
+> 2026-08-05 补充核实各供应商 Anthropic/OpenAI 兼容端点（见 §1 附注），来源均为官方文档页面。
 > 标记「易漂移」的均为各 CLI 内部格式，解析必须防御式（跳过未知类型、容忍缺字段、容忍末行截断）。
 
 ## 1. Claude Code
@@ -14,6 +15,12 @@
 | 会话格式 | JSONL。envelope：`uuid/parentUuid/timestamp/sessionId/cwd/gitBranch/version/isSidechain/type`；`type=user/assistant`，assistant 的 `message` 是原始 API 响应（content blocks + usage）；另有 `ai-title`（会话标题）、`summary`、`file-history-snapshot` 等类型，未知 type 必须跳过。**易漂移** |
 | 关键启动参数 | `--model`、`-p`（非交互）、`-c/-r`（续会话）、`--session-id`（固定会话 ID=文件名）、`--settings` |
 | 坑 | 非官方 base URL 会禁用 Remote Control 与部分 MCP 行为；CLI 自己会给配置文件做时间戳备份（我们不是唯一写者）；`CLAUDE_CONFIG_DIR` 可整体搬迁配置目录（完全隔离方案，但会话也随之隔离）；`/model` 选择器默认只显示内置别名，Ccode 用 `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL`(+`_NAME`) 注册前 4 个模型、第 5 个走 `ANTHROPIC_CUSTOM_MODEL_OPTION`，更多模型需 `/model <id>` 手输 |
+
+**Anthropic 兼容端点（2026-08-05 核实，来源均为官方文档）**：
+
+- **智谱 GLM**：`ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic` + `ANTHROPIC_AUTH_TOKEN`（国内站；国际站为 `https://api.z.ai/api/anthropic`，两站账号不通用）。官方推荐模型映射 `glm-4.7`（haiku）/ `glm-5.2[1m]`（sonnet/opus）。来源：docs.bigmodel.cn/cn/guide/develop/claude、docs.z.ai/devpack/tool/claude；实测 `POST /api/anthropic/v1/messages` 无 key 返回 401，端点存活。
+- **DeepSeek**：`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic` + `ANTHROPIC_AUTH_TOKEN`。官方推荐 `deepseek-v4-pro[1m]`（opus/sonnet）+ `deepseek-v4-flash`（haiku/subagent，`CLAUDE_CODE_SUBAGENT_MODEL`）；传入 claude 模型名会自动映射。来源：api-docs.deepseek.com/guides/anthropic_api、/quick_start/agent_integrations/claude_code。
+- 两家兼容端点注入方式与官方一致（同一组 env），适配器无需特殊分支；注意「坑」行所述非官方 base URL 的副作用同样适用。
 
 ## 2. Codex CLI
 
@@ -52,6 +59,8 @@
 | 关键启动参数 | `-m`、`--auth-type`、`--openai-api-key/--openai-base-url`（仅有的凭证 flags）、`--session-id`、`--continue/--resume` |
 | 坑 | Qwen OAuth 免费额度已于 2026-04 停；profile 需记录协议类型（多协议 agent）；录制可被关闭（`general.chatRecording:false`），此时无会话文件；TUI `/model` 对话框列出的就是 `modelProviders.<协议>.models` 条目（仅全局写入模式可注入多模型，注入模式单模型是 CLI 限制） |
 
+**兼容端点（2026-08-05 核实）**：openai 协议可接智谱 GLM（`https://open.bigmodel.cn/api/paas/v4`，官方 quick-start 仍在用）；anthropic 协议（`--auth-type anthropic` + `ANTHROPIC_*` 三件套）理论上可接 §1 附注的 GLM/DeepSeek Anthropic 兼容端点，但未实测，接入前需验证。
+
 ## 5. OpenCode
 
 | 项 | 值 |
@@ -74,6 +83,8 @@
 | 会话存储 | `~/.kimi-code/session_index.jsonl`（枚举入口：sessionId/sessionDir/**workDir**）+ `sessions/<wd_*>/<id>/agents/main/wire.jsonl` | `~/.kimi/sessions/<md5(workDir)>/<uuid>/context.jsonl`（无时间戳；时间戳在 `wire.jsonl`，标题在 `state.json`）；项目映射读 `~/.kimi/kimi.json` 的 `work_dirs[]` |
 | 会话格式 | wire.jsonl：版本化 record（`metadata` / `turn.prompt`（用户输入）/ `context.append_message`（assistant/tool）/ `usage.record`（token）），协议 v1.0→v1.4 有迁移 | context.jsonl：`{role, content, tool_calls, tool_call_id}`；`_` 开头的 role 是内部记录（跳过）；content 可能是字符串或 parts 数组；tool_calls.arguments 是 JSON 字符串 |
 | 坑 | 密钥在 config.toml 里是明文；旧版 1.47+ 会催用户升级新版；模型选择器按 `[models.*]` 别名列出（注入模式的 KIMI_MODEL_* 合成通道是单模型设计，多模型需走全局写入） | 正在被新版替代，安装新版会迁移其数据（不改旧数据） |
+
+**兼容端点（2026-08-05 核实）**：`KIMI_MODEL_PROVIDER_TYPE=openai` 可接任意 OpenAI 兼容端点（如智谱 `https://open.bigmodel.cn/api/paas/v4`、DeepSeek `https://api.deepseek.com/v1`）；`=anthropic` 理论上可接 §1 附注的 Anthropic 兼容端点，未实测。
 
 ## 跨 agent 共性结论
 

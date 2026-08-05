@@ -142,6 +142,7 @@ const TerminalView = memo(function TerminalView({
   autoStart,
   prefillCommand,
   shellOnly,
+  initialPrompt: presetPrompt,
   restored,
   externalCwd,
   onConsumeExternalCwd,
@@ -182,6 +183,8 @@ const TerminalView = memo(function TerminalView({
   prefillCommand?: string;
   /** run 脚本标签：挂载后自动开 shell 并执行 prefillCommand（不走 agent 启动流程） */
   shellOnly?: boolean;
+  /** 一键开步预填的首条指令：启动时注入 CLI，成功后清除（一次性）；留空 = 不注入 */
+  initialPrompt?: string;
   /** 应用重启后恢复出的占位标签；用户明确操作前不启动 PTY。 */
   restored?: boolean;
   /** 最近项目「真进入」：把目标目录注入活动标签的启动栏（TerminalView 消费后清空） */
@@ -241,6 +244,9 @@ const TerminalView = memo(function TerminalView({
   );
   const [model, setModel] = useState(initialModel ?? saved.model ?? "");
   const [cwd, setCwd] = useState(initialCwd ?? saved.cwd ?? "~");
+  // 一键开步的首条指令：开步预填过就展示编辑框；注入成功即清除（一次性）
+  const [promptText, setPromptText] = useState(presetPrompt ?? "");
+  const [showPrompt, setShowPrompt] = useState(!!presetPrompt);
   const [running, setRunning] = useState(false); // agent 正在运行
   const [shellActive, setShellActive] = useState(false); // 当前接的是 shell
   const [exited, setExited] = useState(false);
@@ -480,7 +486,8 @@ const TerminalView = memo(function TerminalView({
       fontWeightBold: 600,
       rescaleOverlappingGlyphs: true,
       drawBoldTextInBrightColors: true,
-      smoothScrollDuration: 150,
+      // Ink 类 TUI（Gemini CLI）整片高频重绘时，平滑滚动动画会叠加成闪烁——关闭
+      smoothScrollDuration: 0,
       lineHeight: 1.2,
       letterSpacing: 0,
       cursorStyle: "bar",
@@ -901,20 +908,23 @@ const TerminalView = memo(function TerminalView({
     setLinkState("detecting");
     linkStartedAtRef.current = Date.now();
     try {
-      const res = await invoke<{ ptyId: string; sessionHint: string | null }>(
-        "pty_spawn",
-        {
-          agentId,
-          profileId,
-          cwd,
-          model: model || null,
-          // 工作区交接的附加 env（端口段），与 profile env 叠加
-          extraEnv: initialExtraEnv ?? null,
-          // 会话恢复（无则全新会话）
-          resumeSessionId: resumeId ?? resumeSessionId ?? null,
-          linkClaimId: tabId,
-        },
-      );
+      const res = await invoke<{
+        ptyId: string;
+        sessionHint: string | null;
+        promptDropped: boolean;
+      }>("pty_spawn", {
+        agentId,
+        profileId,
+        cwd,
+        model: model || null,
+        // 工作区交接的附加 env（端口段），与 profile env 叠加
+        extraEnv: initialExtraEnv ?? null,
+        // 会话恢复（无则全新会话）
+        resumeSessionId: resumeId ?? resumeSessionId ?? null,
+        // 一键开步的首条指令（恢复会话由后端忽略注入）
+        initialPrompt: promptText.trim() || null,
+        linkClaimId: tabId,
+      });
       localStorage.setItem(
         "ccode.lastLaunch",
         JSON.stringify({ agentId, profileId, model, cwd }),
@@ -941,7 +951,16 @@ const TerminalView = memo(function TerminalView({
       setExited(false);
       setShellActive(false);
       setRunning(true);
-      setBarExpanded(false);
+      if (res.promptDropped) {
+        // 该 CLI 无交互注入参数（kimi/opencode）：保留启动栏展开与指令文本，
+        // 用户可复制后在终端里手动发送
+        setError("该 CLI 不支持启动注入，请手动发送首条指令");
+      } else {
+        // 一次性：注入成功（或未携带指令）即清除，之后「启动」不再重复发送
+        setPromptText("");
+        setShowPrompt(false);
+        setBarExpanded(false);
+      }
       if (restored) onRestoreComplete?.(tabId);
       // 本次启动已接管会话：清掉标签级 resumeSessionId，之后「启动」不会再接回旧会话
       if (resumeSessionId) onConsumeResume?.(tabId);
@@ -1157,6 +1176,19 @@ const TerminalView = memo(function TerminalView({
                 </button>
               ))}
           </div>
+          {/* 一键开步的首条指令：可编辑，留空 = 不注入；注入成功即清除 */}
+          {showPrompt && !shellOnly && (
+            <div className="mb-2 flex items-center gap-2">
+              <span className="shrink-0 text-xs text-l3">启动后自动发送：</span>
+              <input
+                className={`${select} min-w-0 flex-1 py-1 text-xs`}
+                value={promptText}
+                onChange={(e) => setPromptText(e.target.value)}
+                placeholder="留空则不注入首条指令"
+                disabled={running}
+              />
+            </div>
+          )}
           <div className="mb-2 flex min-h-7 flex-wrap items-center gap-2 border-t border-hairline pt-1 text-xs">
             {skillCount > 0 && (
               <span
@@ -1352,6 +1384,8 @@ interface Tab {
   prefillCommand?: string;
   /** run 脚本标签：自动开 shell 执行 prefillCommand */
   shellOnly?: boolean;
+  /** 一键开步预填的首条指令（启动时注入，一次性；不进重启持久化白名单） */
+  initialPrompt?: string;
   /** 应用重启后恢复出的元数据占位标签。 */
   restored?: boolean;
 }
@@ -1744,6 +1778,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       autoStart?: boolean;
       prefillCommand?: string;
       shellOnly?: boolean;
+      initialPrompt?: string;
     }): string => {
       const t: Tab = {
         id: crypto.randomUUID(),
@@ -1757,6 +1792,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         autoStart: init?.autoStart,
         prefillCommand: init?.prefillCommand,
         shellOnly: init?.shellOnly,
+        initialPrompt: init?.initialPrompt,
       };
       setTabs((prev) => [...prev, t]);
       setActiveId(t.id);
@@ -1816,6 +1852,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         autoStart: !!pt.resume,
         prefillCommand: pt.prefillCommand,
         shellOnly: pt.shellOnly,
+        initialPrompt: pt.initialPrompt,
       });
       // run 脚本标签：登记 nonconcurrent 互斥追踪
       if (pt.wsId) setRunningScript(pt.wsId, tabId);
@@ -2145,6 +2182,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   autoStart={t.autoStart}
                   prefillCommand={t.prefillCommand}
                   shellOnly={t.shellOnly}
+                  initialPrompt={t.initialPrompt}
                   restored={t.restored}
                   externalCwd={t.id === activeId ? enterCwd : null}
                   onConsumeExternalCwd={consumeExternalCwd}

@@ -4,12 +4,25 @@ use std::path::PathBuf;
 
 const KEYRING_SERVICE: &str = "ccode";
 
+/// 账号类型（P1a）：api = 端点+密钥注入；official = CLI 官方账号登录，
+/// 拉起时不注入 API env 并按规格 purge 残留密钥变量。缺省 api 向后兼容旧 profiles.json
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountType {
+    #[default]
+    Api,
+    Official,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
     pub id: String,
     pub agent: String,
     pub name: String,
+    /// 账号类型；旧数据无此字段按 api 处理
+    #[serde(default)]
+    pub account_type: AccountType,
     pub protocol: Option<String>,
     pub base_url: Option<String>,
     /// 可用模型列表，首个为默认；同一端点下通常有多个模型可切换
@@ -36,6 +49,8 @@ pub struct Profile {
 pub struct ProfileInput {
     pub agent: String,
     pub name: String,
+    #[serde(default)]
+    pub account_type: AccountType,
     pub protocol: Option<String>,
     pub base_url: Option<String>,
     #[serde(default)]
@@ -137,6 +152,7 @@ impl ProfileStore {
             id: uuid::Uuid::new_v4().to_string(),
             agent: input.agent,
             name: input.name,
+            account_type: input.account_type,
             protocol: input.protocol,
             base_url: input.base_url.filter(|s| !s.is_empty()),
             models: normalize_models(input.models),
@@ -165,6 +181,7 @@ impl ProfileStore {
             id: uuid::Uuid::new_v4().to_string(),
             agent: src.agent,
             name: format!("{} 副本", src.name),
+            account_type: src.account_type,
             protocol: src.protocol,
             base_url: src.base_url,
             models: src.models,
@@ -193,6 +210,7 @@ impl ProfileStore {
             .ok_or_else(|| format!("profile 不存在: {id}"))?;
         profile.agent = input.agent;
         profile.name = input.name;
+        profile.account_type = input.account_type;
         profile.protocol = input.protocol;
         profile.base_url = input.base_url.filter(|s| !s.is_empty());
         profile.models = normalize_models(input.models);
@@ -542,5 +560,22 @@ mod tests {
     fn key_hint_masks_short_keys() {
         assert_eq!(key_hint_of("sk-1234567"), "···4567");
         assert_eq!(key_hint_of("abc"), "····");
+    }
+
+    #[test]
+    fn profile_without_account_type_defaults_to_api() {
+        // 旧 profiles.json 无 accountType 字段 → api（向后兼容）
+        let old = r#"{"id":"1","agent":"codex","name":"n","protocol":null,"baseUrl":null,"models":[],"extraEnv":{},"hasKey":false}"#;
+        let p: Profile = serde_json::from_str(old).unwrap();
+        assert_eq!(p.account_type, AccountType::Api);
+        // 显式 official 往返
+        let new = r#"{"id":"1","agent":"codex","name":"n","accountType":"official","protocol":null,"baseUrl":null,"models":[],"extraEnv":{},"hasKey":false}"#;
+        let p: Profile = serde_json::from_str(new).unwrap();
+        assert_eq!(p.account_type, AccountType::Official);
+        let text = serde_json::to_string(&p).unwrap();
+        assert!(text.contains("\"accountType\":\"official\""));
+        // api 序列化为 "api"（导出/导入兼容）
+        let p = Profile { account_type: AccountType::Api, ..p };
+        assert!(serde_json::to_string(&p).unwrap().contains("\"accountType\":\"api\""));
     }
 }

@@ -13,6 +13,7 @@ import {
 } from "../components/PageFrame";
 import type {
   GlobalApplyResultDto,
+  OfficialAccountStatusDto,
   Profile,
   ProfileInput,
   ProfileUsageDto,
@@ -23,17 +24,21 @@ import type {
 function ProfileModal({
   initial,
   presetAgent,
+  officialSupported,
   onClose,
 }: {
   initial: Profile | null;
   /** 从某个 agent 组的「+ 添加配置」打开时预选该 agent */
   presetAgent?: string;
+  /** 各 agent 是否支持官方账号（来自 official_account_status） */
+  officialSupported: Record<string, boolean>;
   onClose: () => void;
 }) {
   const saveProfile = useAppStore((s) => s.saveProfile);
   const [form, setForm] = useState({
     agent: initial?.agent ?? presetAgent ?? "claude-code",
     name: initial?.name ?? "",
+    accountType: (initial?.accountType ?? "api") as "api" | "official",
     protocol: (initial?.protocol ??
       AGENT_PROTOCOLS[initial?.agent ?? "claude-code"]?.default ??
       null) as string | null,
@@ -125,11 +130,13 @@ function ProfileModal({
     const input: ProfileInput = {
       agent: form.agent,
       name: form.name.trim(),
+      accountType: form.accountType,
       protocol: AGENT_PROTOCOLS[form.agent] ? form.protocol : null,
-      baseUrl: form.baseUrl.trim(),
+      // 官方账号：认证交给 CLI 登录，不落端点/密钥
+      baseUrl: form.accountType === "official" ? "" : form.baseUrl.trim(),
       models: form.models,
       extraEnv: parseEnvLines(form.extraEnvText),
-      apiKey: form.apiKey || null,
+      apiKey: form.accountType === "official" ? null : form.apiKey || null,
     };
     try {
       await saveProfile(initial?.id ?? null, input);
@@ -194,6 +201,10 @@ function ProfileModal({
                 setForm({
                   ...form,
                   agent: e.target.value,
+                  // 新 agent 不支持官方账号时回落 api
+                  accountType: officialSupported[e.target.value]
+                    ? form.accountType
+                    : "api",
                   protocol: AGENT_PROTOCOLS[e.target.value]?.default ?? null,
                 });
                 // 端点测试/模型拉取结果属于旧 agent，切换后一并清空
@@ -220,6 +231,32 @@ function ProfileModal({
             onChange={(e) => setForm({ ...form, name: e.target.value })}
           />
         </label>
+        {officialSupported[form.agent] && (
+          <label className="mb-3 block text-sm">
+            <span className="mb-1 block text-xs text-l3">账号类型</span>
+            <select
+              className={field}
+              value={form.accountType}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  accountType: e.target.value as "api" | "official",
+                })
+              }
+            >
+              <option value="api">API 端点 + 密钥</option>
+              <option value="official">官方账号（用 CLI 登录，无需密钥）</option>
+            </select>
+          </label>
+        )}
+        {form.accountType === "official" && (
+          <p className="-mt-1 mb-3 text-xs text-l3">
+            官方账号配置启动时不注入端点与密钥，使用 CLI 自身的账号登录；模型可留空（用
+            CLI 默认模型）。请先在组内「官方账号」行完成连接。
+          </p>
+        )}
+        {form.accountType === "api" && (
+          <>
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">Base URL（可选）</span>
           <div className="flex gap-2">
@@ -262,6 +299,8 @@ function ProfileModal({
             onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
           />
         </label>
+          </>
+        )}
         <div className="mb-4 text-sm">
           <span className="mb-1 block text-xs text-l3">
             模型列表（可选，首个为默认）
@@ -282,6 +321,8 @@ function ProfileModal({
               </p>
             );
           })()}
+          {form.accountType === "api" && (
+            <>
           <div className="mb-2 flex items-center gap-2">
             <button
               type="button"
@@ -323,6 +364,8 @@ function ProfileModal({
           </div>
           {fetchError && (
             <p className="mb-2 text-xs text-err-text">{fetchError}</p>
+          )}
+            </>
           )}
           {form.models.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
@@ -488,6 +531,14 @@ const MODEL_SWITCH: Record<string, { max: number | null; hint: string }> = {
   },
   opencode: { max: null, hint: "全部已配置模型都会注册，可在 TUI 自由切换" },
   kimi: { max: 1, hint: "多模型需「⋯ → 设为全局」写入配置后才能在模型页切换" },
+};
+
+/** 各 CLI 断开官方账号的方式（Ccode 不删 auth 文件，引导用 CLI 自己的 logout；
+ *  命令按官方文档/CLI help 核实，见 agent_specs.rs 的 official_account 注释） */
+const OFFICIAL_LOGOUT_HINT: Record<string, string> = {
+  "claude-code": "claude auth logout（或 TUI 内 /logout）",
+  codex: "codex logout",
+  gemini: "TUI 内 /auth signout",
 };
 
 function displayHost(baseUrl: string): string {
@@ -697,6 +748,43 @@ export default function ProfilesPage() {
   const removeProfile = useAppStore((s) => s.removeProfile);
   const duplicateProfile = useAppStore((s) => s.duplicateProfile);
   const loadAll = useAppStore((s) => s.loadAll);
+  const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const setPage = useAppStore((s) => s.setPage);
+  // 各 agent 官方账号连接状态（P1a；仅 supported 的 agent 会展示状态行）
+  const [officialStatus, setOfficialStatus] = useState<
+    Record<string, OfficialAccountStatusDto>
+  >({});
+
+  /** 重新检测某个 agent 的官方账号连接状态（只读 auth 文件，失败不影响页面） */
+  async function refreshOfficial(agentId: string) {
+    try {
+      const st = await invoke<OfficialAccountStatusDto>(
+        "official_account_status",
+        { agentId },
+      );
+      setOfficialStatus((prev) => ({ ...prev, [agentId]: st }));
+    } catch {
+      /* 检测失败不影响页面 */
+    }
+  }
+
+  useEffect(() => {
+    for (const a of AGENTS) void refreshOfficial(a.id);
+  }, []);
+
+  /** 「连接」：在内嵌终端开新标签执行 CLI 登录命令（OAuth 会弹浏览器）；完成后回本页点「刷新」 */
+  function connectOfficial(agentId: string) {
+    const st = officialStatus[agentId];
+    if (!st?.loginCommand) return;
+    setPendingTerminal({
+      cwd: "~",
+      extraEnv: {},
+      title: `登录 ${labelOf(agentId)}`,
+      prefillCommand: st.loginCommand,
+      shellOnly: true,
+    });
+    setPage("terminal");
+  }
   const [modal, setModal] = useState<{
     initial: Profile | null;
     presetAgent?: string;
@@ -1179,6 +1267,65 @@ export default function ProfilesPage() {
 
                 {!isCollapsed && (
                   <>
+                    {/* 官方账号状态行（P1a）：支持官方账号的 agent 固定展示；断开走 CLI 自己的 logout，Ccode 不删 auth 文件 */}
+                    {officialStatus[agent.id]?.supported &&
+                      (() => {
+                        const st = officialStatus[agent.id];
+                        return (
+                          <div className="flex items-center gap-2 border-b border-hl2 py-1.5 text-xs">
+                            <span
+                              className={`h-1.5 w-1.5 shrink-0 rounded-full ${st.connected ? "bg-okb" : "bg-l4"}`}
+                            />
+                            <span className="shrink-0 text-pl2">官方账号</span>
+                            <span
+                              className={`shrink-0 ${st.connected ? "text-okb" : "text-l4"}`}
+                            >
+                              {st.connected ? "已连接" : "未连接"}
+                            </span>
+                            {st.detail && (
+                              <span
+                                className="min-w-0 truncate text-l4"
+                                title={st.detail}
+                              >
+                                {st.detail}
+                              </span>
+                            )}
+                            {st.connected && OFFICIAL_LOGOUT_HINT[agent.id] && (
+                              <span className="shrink-0 text-l4">
+                                断开：{OFFICIAL_LOGOUT_HINT[agent.id]}
+                              </span>
+                            )}
+                            {/* 配置文件冲突警告（P1a）：CLI 自读文件里的残留密钥会覆盖官方账号登录，悬停列出各项 */}
+                            {st.conflicts.length > 0 && (
+                              <span
+                                className="flex shrink-0 items-center gap-1 text-warnb"
+                                title={`${st.conflicts.join("\n")}\n该文件中的密钥会覆盖官方账号登录，产生 API 计费`}
+                              >
+                                <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
+                                {st.conflicts.length} 项配置冲突
+                              </span>
+                            )}
+                            <span className="ml-auto flex shrink-0 items-center gap-1">
+                              {!st.connected && (
+                                <button
+                                  onClick={() => connectOfficial(agent.id)}
+                                  title={`在终端执行 ${st.loginCommand ?? ""}`}
+                                  className="h-7 rounded border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110"
+                                >
+                                  连接
+                                </button>
+                              )}
+                              <button
+                                onClick={() => void refreshOfficial(agent.id)}
+                                title="重新检测连接状态"
+                                className="h-7 rounded px-2 text-xs text-pl2 hover:bg-white/5 hover:text-pl1"
+                              >
+                                刷新
+                              </button>
+                            </span>
+                          </div>
+                        );
+                      })()}
                     {/* 安装/更新实时输出（全宽，行为不变） */}
                     {updating[agent.id] && (
                       <div className="mt-2">
@@ -1296,16 +1443,20 @@ export default function ProfilesPage() {
                               {profile.name}
                             </span>
                             <span
-                              className={`min-w-0 truncate text-xs ${profile.baseUrl ? "text-pl2" : "text-l4"}`}
+                              className={`min-w-0 truncate text-xs ${profile.baseUrl || profile.accountType === "official" ? "text-pl2" : "text-l4"}`}
                               title={
-                                profile.baseUrl
-                                  ? displayHost(profile.baseUrl)
-                                  : "使用 CLI 默认端点"
+                                profile.accountType === "official"
+                                  ? "官方账号登录（CLI 自身认证，不注入端点/密钥）"
+                                  : profile.baseUrl
+                                    ? displayHost(profile.baseUrl)
+                                    : "使用 CLI 默认端点"
                               }
                             >
-                              {profile.baseUrl
-                                ? displayHost(profile.baseUrl)
-                                : "默认端点"}
+                              {profile.accountType === "official"
+                                ? "官方账号"
+                                : profile.baseUrl
+                                  ? displayHost(profile.baseUrl)
+                                  : "默认端点"}
                             </span>
                             <span
                               className={`min-w-0 truncate font-mono text-xs ${
@@ -1319,6 +1470,15 @@ export default function ProfilesPage() {
                             >
                               {profile.models[0] ?? "未指定模型"}
                             </span>
+                            {profile.accountType === "official" ? (
+                              <span
+                                className="flex items-center gap-1 text-xs text-l4"
+                                title="官方账号登录，无需 API 密钥"
+                              >
+                                <span className="h-1.5 w-1.5 rounded-full bg-l4" />
+                                无需密钥
+                              </span>
+                            ) : (
                             <span
                               className={`flex items-center gap-1 text-xs ${
                                 profile.hasKey ? "text-okb" : "text-pl2"
@@ -1336,6 +1496,7 @@ export default function ProfilesPage() {
                               />
                               {profile.hasKey ? "已设置" : "未设置"}
                             </span>
+                            )}
                             <span className="flex items-center justify-end gap-1 whitespace-nowrap">
                               <button
                                 type="button"
@@ -1419,6 +1580,9 @@ export default function ProfilesPage() {
         <ProfileModal
           initial={modal.initial}
           presetAgent={modal.presetAgent}
+          officialSupported={Object.fromEntries(
+            Object.entries(officialStatus).map(([k, v]) => [k, v.supported]),
+          )}
           onClose={() => setModal(null)}
         />
       )}

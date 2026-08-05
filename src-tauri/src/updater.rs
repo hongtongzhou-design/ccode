@@ -2,6 +2,7 @@
 //! 否则用 CLI 自更新命令；命令在 PTY 里跑（brew/curl 对管道会块缓冲，接 PTY 才
 //! 有实时输出），spawn_blocking + 参数数组（无 shell），900 秒超时。
 
+use crate::agent_specs::{agent_spec, BrewPackage, UpdateChannel};
 use crate::agents;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
@@ -75,40 +76,58 @@ fn npm_for(binary_path: &str) -> String {
 }
 
 /// 升级命令候选（按序尝试，首个成功即止）。
-/// 有对应包管理器路径时优先包管理器，否则用 CLI 自更新
+/// 渠道数据全部来自 AgentSpec.packaging：method 精确命中包管理器时优先包管理器，
+/// 否则双变体 CLI 先看旧版变体渠道，最后按 update_fallback 顺序展开
 fn update_commands(agent_id: &str, method: &str, binary_path: &str) -> Vec<UpdateCmd> {
     let npm_cmd = |pkg: &str| {
         let npm = npm_for(binary_path);
         cmd("npm", npm, &["install", "-g", &format!("{pkg}@latest")])
     };
     let bin = || binary_path.to_string();
-    match (agent_id, method) {
-        ("claude-code", "brew") => vec![cmd("brew", "brew".into(), &["upgrade", "--cask", "claude-code"])],
-        ("claude-code", _) => vec![
-            cmd("self", bin(), &["update"]),
-            cmd("brew", "brew".into(), &["upgrade", "--cask", "claude-code"]),
-        ],
-        ("codex", "brew") => vec![cmd("brew", "brew".into(), &["upgrade", "--cask", "codex"])],
-        ("codex", _) => vec![npm_cmd("@openai/codex")],
-        ("gemini", "brew") => vec![cmd("brew", "brew".into(), &["upgrade", "gemini-cli"])],
-        ("gemini", _) => vec![npm_cmd("@google/gemini-cli")],
-        ("qwen", "brew") => vec![cmd("brew", "brew".into(), &["upgrade", "qwen-code"])],
-        ("qwen", _) => vec![npm_cmd("@qwen-code/qwen-code")],
-        // brew 安装的 opencode 走 brew（自更新是交互 TUI，行输入无法应答，且会与 brew 管理冲突）
-        ("opencode", "brew") => vec![cmd("brew", "brew".into(), &["upgrade", "opencode"])],
-        ("opencode", "npm") => vec![npm_cmd("opencode-ai")],
-        ("opencode", _) => vec![
-            cmd("self", bin(), &["upgrade"]),
-            npm_cmd("opencode-ai"),
-        ],
-        ("kimi", "uv") => vec![cmd("uv", "uv".into(), &["tool", "upgrade", "kimi-cli"])],
-        ("kimi", _) => match agents::kimi_variant() {
-            Some("legacy") => vec![cmd("uv", "uv".into(), &["tool", "upgrade", "kimi-cli"])],
-            // 新版（或探测不到目录时按新版处理）走自更新
-            _ => vec![cmd("self", bin(), &["upgrade"])],
-        },
-        _ => vec![],
+    let Some(aspec) = agent_spec(agent_id) else {
+        return vec![];
+    };
+    let p = &aspec.packaging;
+    let brew_upgrade = |b: &BrewPackage| {
+        if b.cask {
+            cmd("brew", "brew".into(), &["upgrade", "--cask", b.name])
+        } else {
+            cmd("brew", "brew".into(), &["upgrade", b.name])
+        }
+    };
+    let expand = |channel: UpdateChannel| -> Vec<UpdateCmd> {
+        match channel {
+            UpdateChannel::Brew => p.brew_upgrade.as_ref().map(brew_upgrade).into_iter().collect(),
+            UpdateChannel::Npm => p.npm_update.map(|pkg| npm_cmd(pkg)).into_iter().collect(),
+            UpdateChannel::Uv => p
+                .uv
+                .map(|pkg| cmd("uv", "uv".into(), &["tool", "upgrade", pkg]))
+                .into_iter()
+                .collect(),
+            UpdateChannel::SelfUpdate => p
+                .self_update
+                .map(|args| cmd("self", bin(), args))
+                .into_iter()
+                .collect(),
+        }
+    };
+    match method {
+        "brew" if p.brew_upgrade.is_some() => {
+            return vec![brew_upgrade(p.brew_upgrade.as_ref().unwrap())];
+        }
+        "npm" if p.npm_update.is_some() => return vec![npm_cmd(p.npm_update.unwrap())],
+        "uv" if p.uv.is_some() => {
+            return vec![cmd("uv", "uv".into(), &["tool", "upgrade", p.uv.unwrap()])];
+        }
+        _ => {}
     }
+    // 新旧双变体（kimi）：旧版变体走独立渠道（新版/探测不到按 update_fallback）
+    if let Some(variant) = &p.legacy_variant {
+        if crate::agent_specs::variant_of(aspec) == Some("legacy") {
+            return expand(variant.legacy_channel);
+        }
+    }
+    p.update_fallback.iter().flat_map(|c| expand(*c)).collect()
 }
 
 fn version_of(binary: &std::path::Path) -> Option<String> {
@@ -502,37 +521,32 @@ fn spec(tool: &'static str, method: &'static str, program: &str, args: &[&str]) 
     }
 }
 
-/// 全部候选，按 brew > npm > uv > 官方脚本 的优先级排序（脚本兜底，仅无其他方式时用）
+/// 全部候选，渠道来自 AgentSpec.packaging，固定按 brew > npm > uv > 官方脚本优先级
+/// 排序（脚本兜底，仅无其他方式时用）
 fn install_specs(agent_id: &str) -> Vec<InstallSpec> {
-    match agent_id {
-        "claude-code" => vec![
-            spec("brew", "brew", "brew", &["install", "--cask", "claude-code"]),
-            spec("script", "script", "bash", &["-c", "curl -fsSL https://claude.ai/install.sh | bash"]),
-        ],
-        "codex" => vec![
-            spec("brew", "brew", "brew", &["install", "--cask", "codex"]),
-            spec("npm", "npm", "npm", &["install", "-g", "@openai/codex"]),
-        ],
-        "gemini" => vec![
-            spec("brew", "brew", "brew", &["install", "gemini-cli"]),
-            spec("npm", "npm", "npm", &["install", "-g", "@google/gemini-cli"]),
-        ],
-        "qwen" => vec![
-            spec("brew", "brew", "brew", &["install", "qwen-code"]),
-            spec("npm", "npm", "npm", &["install", "-g", "@qwen-code/qwen-code"]),
-        ],
-        "opencode" => vec![
-            spec("brew", "brew", "brew", &["install", "anomalyco/tap/opencode"]),
-            spec("npm", "npm", "npm", &["install", "-g", "opencode-ai"]),
-        ],
-        "kimi" => vec![
-            spec("npm", "npm", "npm", &["install", "-g", "@moonshot-ai/kimi-code"]),
-            // uv 装的是旧版 kimi-cli（Python）
-            spec("uv", "uv", "uv", &["tool", "install", "kimi-cli"]),
-            spec("script", "script", "bash", &["-c", "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"]),
-        ],
-        _ => vec![],
+    let Some(aspec) = agent_spec(agent_id) else {
+        return vec![];
+    };
+    let p = &aspec.packaging;
+    let mut out = Vec::new();
+    if let Some(b) = &p.brew_install {
+        if b.cask {
+            out.push(spec("brew", "brew", "brew", &["install", "--cask", b.name]));
+        } else {
+            out.push(spec("brew", "brew", "brew", &["install", b.name]));
+        }
     }
+    if let Some(pkg) = p.npm_install {
+        out.push(spec("npm", "npm", "npm", &["install", "-g", pkg]));
+    }
+    if let Some(pkg) = p.uv {
+        // kimi 的 uv 包装的是旧版 kimi-cli（Python）
+        out.push(spec("uv", "uv", "uv", &["tool", "install", pkg]));
+    }
+    if let Some(script) = p.install_script {
+        out.push(spec("script", "script", "bash", &["-c", script]));
+    }
+    out
 }
 
 /// 按工具可用性挑第一个候选；available 可注入以便测试
@@ -669,19 +683,27 @@ fn brew_latest(pkg: &str, cask: bool) -> Option<String> {
 }
 
 /// 最新版查询口与 update_commands 同渠道（包管理器装的查包管理器）；
-/// 自更新渠道（claude/kimi 自更新、opencode 非 npm）没有轻量查询口，返回 None
+/// 自更新渠道（claude/kimi 自更新、opencode 非 npm）没有轻量查询口，返回 None。
+/// brew 查询名单独声明（brew_latest）：opencode 升级用 tap 短名，brew info 会命中歧义，不查
 fn latest_version(agent_id: &str, method: &str) -> Option<String> {
-    match (agent_id, method) {
-        ("claude-code", "brew") => brew_latest("claude-code", true),
-        ("codex", "brew") => brew_latest("codex", true),
-        ("gemini", "brew") => brew_latest("gemini-cli", false),
-        ("qwen", "brew") => brew_latest("qwen-code", false),
-        ("codex", _) => npm_latest("@openai/codex"),
-        ("gemini", _) => npm_latest("@google/gemini-cli"),
-        ("qwen", _) => npm_latest("@qwen-code/qwen-code"),
-        ("opencode", "npm") => npm_latest("opencode-ai"),
-        _ => None,
+    let p = &agent_spec(agent_id)?.packaging;
+    if method == "brew" {
+        if let Some(b) = &p.brew_latest {
+            return brew_latest(b.name, b.cask);
+        }
     }
+    if method == "npm" {
+        if let Some(pkg) = p.npm_update {
+            return npm_latest(pkg);
+        }
+    }
+    // 有自更新渠道的其余安装方式没有查询口；唯一更新渠道是 npm 的自装方式也查 npm
+    if p.self_update.is_none() {
+        if let Some(pkg) = p.npm_update {
+            return npm_latest(pkg);
+        }
+    }
+    None
 }
 
 fn check_one(agent_id: &str) -> AgentUpdateInfoDto {
@@ -718,10 +740,10 @@ pub async fn check_agent_updates() -> Vec<AgentUpdateInfoDto> {
         return cached;
     }
     let out = tauri::async_runtime::spawn_blocking(|| {
-        let handles: Vec<_> = agents::AGENTS
+        let handles: Vec<_> = crate::agent_specs::all_agent_specs()
             .iter()
-            .map(|(id, _)| {
-                let id = *id;
+            .map(|s| {
+                let id = s.id;
                 std::thread::spawn(move || check_one(id))
             })
             .collect();
