@@ -437,6 +437,7 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 | v3.11 | 否决 keyring 回退：macOS 钥匙串对未签名开发构建因 cdhash 失配丢条目（v0.3 已定论），0600 `keys.json` 不动摇 |
 | v3.12 | 否决「无缝继续」表述：跨 Agent 交接在技术上不存在真正的上下文无缝迁移，一律称「接力」（结构化简报 + 显式接力链，AI 摘要仅可选增强） |
 | v3.13 | 适配器注册表（§11.4 P1d）：「添加新 agent」澄清为新增 CLI 厂商（第七八个终端工具），要求降低接入成本——agents.rs / skills.rs / updater.rs / profiles / 官方账号字段等 per-agent 硬编码 match 收敛为中央声明式 AgentSpec 注册表（一个 CLI 一张规格），各模块从注册表读规格；**边界：会话解析器与 usage 提取器不可纯数据化**（各家格式本质不同），保持每 CLI 一个解析器文件，注册表只做分发入口。效果：加新 CLI = 一张规格表（纯数据）+ 一个解析器文件 + 测试。P1d 先行或与 P1a 背靠背（官方账号字段正是规格表字段，先注册表后填数据避免改两遍），250 个既有测试兜底重构安全；P5 的「适配层标准路径文档」随之撤销 |
+| v3.14 | P2a PDF 内嵌预览落地：**直接上 pdf.js**（跳过 WKWebView spike——原生渲染拿不到选区文本且三平台行为不齐，选段问 AI 是硬需求）；pdfjs-dist 精确 pin，渲染器随 PdfPreview 组件动态 import 拆独立 chunk，worker 走 `?url` 资产；canvas + textLayer 只渲染当前页 ±1。新增 `read_pdf_bytes` command：**四类白名单**（注册项目登记资源 / 注册项目根 / 工作区·仓库根 / 终端标签 cwd hint）之外拒绝，canonicalize 防符号链接绕过，单文件 100 MB 上限；**传输走 base64 字符串而非 raw bytes**——macOS/iOS 的 Raw 响应会退化为逐字节 JSON 数字数组（tauri protocol.rs 实测），大 PDF 下不可用。选段问 AI = pty_write 逐字注入活跃标签输入框，不自动回车 |
 
 ## 11. 演进线（2026-08 定稿）
 

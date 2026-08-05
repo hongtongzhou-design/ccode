@@ -432,6 +432,15 @@ export interface ProjectConfigReadDto {
   warnings: string[];
 }
 
+/** 用户另存的流水线模板（list/save/delete_pipeline_template）；内置模板在前端 pipeline-presets.ts */
+export interface PipelineTemplateDto {
+  id: string;
+  name: string;
+  description: string;
+  steps: ProjectStepDto[];
+  createdAt: string;
+}
+
 export interface DiscoveredResourceDto {
   /** 相对项目根，统一正斜杠 */
   path: string;

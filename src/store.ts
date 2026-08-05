@@ -104,6 +104,9 @@ interface AppState {
   setPendingTerminal: (p: PendingTerminal | null) => void;
   workspaceReviewRequest: WorkspaceReviewRequest | null;
   setWorkspaceReviewRequest: (request: WorkspaceReviewRequest | null) => void;
+  /** 工作区页资源面板「查看」→ 终端页预览的交接（PDF 等绝对路径，终端页消费并清空） */
+  previewReq: { path: string; name: string } | null;
+  setPreviewReq: (r: { path: string; name: string } | null) => void;
   /** 运行中的 run 脚本：工作区 id → 终端标签 id（nonconcurrent 互斥） */
   runningScripts: Record<string, string>;
   setRunningScript: (wsId: string, tabId: string | null) => void;
@@ -170,6 +173,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   workspaceReviewRequest: null,
   setWorkspaceReviewRequest: (request) =>
     set({ workspaceReviewRequest: request }),
+  previewReq: null,
+  setPreviewReq: (r) => set({ previewReq: r }),
   runningScripts: {},
   setRunningScript: (wsId, tabId) =>
     set((s) => {

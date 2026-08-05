@@ -23,6 +23,8 @@ import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
 import { LoadingRows } from "../components/PageFrame";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
+import { renderTaskMd } from "../components/ProjectGroup";
+import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
 import { XTERM_PALETTES } from "../terminal-palettes";
 import {
   parseRecoverableTerminalState,
@@ -32,11 +34,17 @@ import {
 import type {
   ChatMessageDto,
   ConversationPageDto,
+  ProjectConfigReadDto,
+  ProjectDto,
   SessionMetaDto,
+  WorkspaceDto,
 } from "../types";
+import type { PdfActionResult } from "../components/PdfPreview";
 
 // Monaco 体积大，首次打开文件预览时才加载
 const FilePreviewEditor = lazy(() => import("../components/FilePreviewEditor"));
+// pdf.js 同样拆懒加载 chunk，首次打开 PDF 预览时才加载
+const PdfPreview = lazy(() => import("../components/PdfPreview"));
 
 type PtyKind = "agent" | "shell";
 
@@ -1712,6 +1720,24 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     [],
   );
 
+  /** PDF 选段「◈ 问 AI」：注入活跃终端标签的 agent 输入（不自动回车，用户检查后发送）。
+      返回 null 表示已写入；返回字符串为预览区要展示的提示。 */
+  const askAiFromPdf = useCallback(
+    (text: string, page: number, fileName: string): string | null => {
+      const s = statuses[activeId];
+      if (!s?.running || !s.ptyId) {
+        return "当前标签没有运行中的 Agent，请先启动再试";
+      }
+      // 注入上限保护：选段过长时截断正文，避免把整页灌进输入框
+      const body = text.length > 6000 ? `${text.slice(0, 6000)}…` : text;
+      const brief = text.replace(/\s+/g, " ").slice(0, 60);
+      const data = `> 「${brief}${text.length > 60 ? "…" : ""}」（${fileName}，第 ${page} 页）\n\n${body}`;
+      invoke("pty_write", { ptyId: s.ptyId, data }).catch(() => {});
+      return null;
+    },
+    [statuses, activeId],
+  );
+
   /** 切换文件树根时关闭旧预览；脏文件先确认，且绝不映射新根下的同名文件。 */
   const closePreviewForRootChange = useCallback(() => {
     if (!preview) return true;
@@ -1869,6 +1895,123 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setFocusMode(false);
     setWorkspaceReviewRequest(null);
   }, [visible, workspaceReviewRequest, setWorkspaceReviewRequest]);
+
+  // 资源面板「查看」交来的预览请求：绝对路径（未必在任何文件树根内），
+  // root 留空——PDF 走后端白名单校验，不需要预览根
+  const previewReq = useAppStore((s) => s.previewReq);
+  const setPreviewReq = useAppStore((s) => s.setPreviewReq);
+  useEffect(() => {
+    if (!visible || !previewReq) return;
+    setPreviewReq(null);
+    // 评审覆盖层会挡住预览，先关掉（同 pendingTerminal 消费语义）
+    setReviewPath(null);
+    setReviewAction(null);
+    setFocusMode(false);
+    setRightOpen(true);
+    setRightTab("preview");
+    // PDF 是阅读动作：打开时自动宽屏（隐藏工作树），用户可随时 ⇲ 还原
+    if (previewReq.path.toLowerCase().endsWith(".pdf")) setRightExpanded(true);
+    setPreview({ path: previewReq.path, name: previewReq.name, root: null });
+    setPreviewDirty(false);
+  }, [visible, previewReq, setPreviewReq]);
+
+  /** PDF 选段「整理为笔记」（§11.4 P2b）：反查归属项目 → 选段追加到笔记工作区
+      notes/inbox.md（无活跃工作区则走一键开步链路创建）→ 终端预填启动。
+      返回预览区展示的提示；任何失败都以提示形式返回，不静默。 */
+  const organizePdfExcerpt = useCallback(
+    async (
+      text: string,
+      page: number,
+      fileName: string,
+    ): Promise<PdfActionResult> => {
+      const pdfPath = preview?.path;
+      if (!pdfPath) return { ok: false, msg: "预览已关闭，请重新打开 PDF" };
+      const owner = await invoke<ProjectDto | null>("pdf_owner_project", {
+        pdfPath,
+      });
+      if (!owner) {
+        return {
+          ok: false,
+          msg: "该 PDF 未登记为任何项目资源",
+          action: { label: "去工作区页登记", run: () => setPage("workspaces") },
+        };
+      }
+      const read = await invoke<ProjectConfigReadDto>("read_project_config", {
+        path: owner.path,
+      });
+      const cfg = read.config;
+      // 笔记步骤定位规则（简单可靠）：优先 workspaceName === "lit-notes"（默认模板第二步）；
+      // 用户改过工作区名时回落流水线第二步（文献精读通常排在检索之后）
+      const step =
+        cfg.steps.find((s) => s.workspaceName === "lit-notes") ?? cfg.steps[1];
+      if (!step?.workspaceName) {
+        return {
+          ok: false,
+          msg: "该项目流水线中没有笔记步骤：请把工作区名设为 lit-notes 的步骤，或保留流水线前两步",
+        };
+      }
+      // 已有活跃工作区直接追加；没有则走一键开步链路（同 ProjectGroup.startStep）
+      const all = await invoke<WorkspaceDto[]>("list_workspaces");
+      const samePath = (a: string, b: string) =>
+        a.replace(/[\\/]+$/, "") === b.replace(/[\\/]+$/, "");
+      let ws = all.find(
+        (w) =>
+          samePath(w.repoPath, owner.path) &&
+          w.name === step.workspaceName &&
+          w.status === "active",
+      );
+      if (!ws) {
+        await invoke("ensure_git_repo", { path: owner.path });
+        ws = await invoke<WorkspaceDto>("create_workspace", {
+          repoPath: owner.path,
+          name: step.workspaceName,
+        });
+        // TASK.md 为 best-effort（同一键开步语义）：失败不阻断选段写入
+        try {
+          await invoke("write_workspace_task_md", {
+            worktreePath: ws.worktreePath,
+            content: renderTaskMd(step, cfg, owner.path),
+          });
+        } catch {
+          /* 简报仍可在 project.toml 与步骤「编辑简报」中查看 */
+        }
+      }
+      // 出处：文件名 + 页码 + 本机日期（sv-SE 输出本地时区的 YYYY-MM-DD）
+      const date = new Date().toLocaleDateString("sv-SE");
+      const chunk = `\n## ${fileName} · 第 ${page} 页 · ${date}\n\n${text}\n`;
+      await invoke("append_workspace_inbox", {
+        worktreePath: ws.worktreePath,
+        content: chunk,
+      });
+      // 跳终端预填启动（同 useOpenInTerminal：端口段 env + 上次配置 + 一次性 initialPrompt）
+      const pairs = await invoke<[string, string][]>("workspace_env_for", {
+        worktreePath: ws.worktreePath,
+      });
+      const last = (() => {
+        try {
+          return JSON.parse(
+            localStorage.getItem(`ccode.wsLast.${ws.worktreePath}`) ?? "{}",
+          ) as Partial<{ agentId: string; profileId: string; model: string }>;
+        } catch {
+          return {};
+        }
+      })();
+      setPendingTerminal({
+        cwd: ws.worktreePath,
+        extraEnv: Object.fromEntries(pairs),
+        title: ws.name,
+        agentId: last.agentId,
+        profileId: last.profileId,
+        model: last.model,
+        initialPrompt: ORGANIZE_NOTES_PROMPT,
+      });
+      return {
+        ok: true,
+        msg: `已写入工作区「${ws.name}」的 notes/inbox.md，并预填了终端启动（确认配置后点「启动」）`,
+      };
+    },
+    [preview, setPage, setPendingTerminal],
+  );
 
   // 会话页「进行中」反向跳转：聚焦指定标签
   const focusTabId = useAppStore((s) => s.focusTabId);
@@ -2392,11 +2535,20 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     </div>
                   }
                 >
-                  <FilePreviewEditor
-                    path={preview.path}
-                    root={preview.root ?? activeCwd}
-                    onDirtyChange={setPreviewDirty}
-                  />
+                  {/\.pdf$/i.test(preview.path) ? (
+                    <PdfPreview
+                      path={preview.path}
+                      cwdHint={preview.root ?? activeCwd}
+                      onAskAi={askAiFromPdf}
+                      onOrganize={organizePdfExcerpt}
+                    />
+                  ) : (
+                    <FilePreviewEditor
+                      path={preview.path}
+                      root={preview.root ?? activeCwd}
+                      onDirtyChange={setPreviewDirty}
+                    />
+                  )}
                 </Suspense>
               ) : (
                 <div className="flex min-h-0 flex-1 flex-col">

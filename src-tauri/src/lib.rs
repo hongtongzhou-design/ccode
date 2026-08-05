@@ -7,6 +7,7 @@ mod git_info;
 mod global_config;
 mod logbuf;
 mod models;
+mod pdf;
 mod pricing;
 mod profiles;
 mod profile_validation;
@@ -79,6 +80,7 @@ pub fn run() {
             fs_tree::search_files,
             fs_tree::fs_create_dir,
             fs_tree::fs_delete_path,
+            pdf::read_pdf_bytes,
             git_info::git_status,
             git_info::git_file_diff,
             git_info::git_commit,
@@ -123,6 +125,11 @@ pub fn run() {
             projects::discover_resources,
             projects::ensure_git_repo,
             projects::write_workspace_task_md,
+            projects::pdf_owner_project,
+            projects::append_workspace_inbox,
+            projects::list_pipeline_templates,
+            projects::save_pipeline_template,
+            projects::delete_pipeline_template,
             skills::list_skills,
             skills::set_skill_category,
             skills::count_enabled_skills,

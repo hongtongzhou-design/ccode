@@ -84,6 +84,7 @@ src-tauri/src/
   ai.rs                      # 无头 AI 调用层：一次性 prompt（launch_plan 注入）+ 提交信息/会话摘要/PR 描述生成
   workspaces.rs              # 任务工作区（§6.10）：git worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT 端口段、setup/archive 脚本钩子、评审合并（health/merge/PR）
   ws_settings.rs             # 项目级 .ccode/settings.toml 三层合并（用户→仓库→local）：files_to_copy/run_mode/scripts
+  pdf.rs                     # PDF 字节读取（§11.4 P2a）：read_pdf_bytes 四类白名单 + canonicalize 校验 + 100MB 上限，base64 传输
   lib.rs                     # 模块与 Tauri command 注册
 ```
 
@@ -178,6 +179,9 @@ src-tauri/src/
 - 前端不直接碰文件系统，一切经 Tauri command；流式输出走 `pty-output-<id>` 等事件。
 - **流水线开步是预设参数的组合调用**（见架构 §11）：点「开始」= 建工作区 + 启 Agent + 注入简报 + 落成 TASK.md，
   全部复用既有工作区创建与终端启动能力；不破坏手动启动栏「Agent → profile → 模型 → 目录 → 启动」主流程。
+- **流水线模板库**：内置模板集中在 `src/pipeline-presets.ts` 的 `PIPELINE_TEMPLATES`（综述/科研论文/数据处理/毕业论文），
+  新增场景 = 数组加一项，简报必须遵守输入写死/决策写死/交付写死约定（auto 模式无歧义）；用户模板走后端
+  `list/save/delete_pipeline_template`，选择器（TemplatePicker）合并展示，后端命令未就绪时优雅降级为仅内置模板。
 - **官方账号 profile 只读检测 + env 净化**：CLI auth 文件只读探测「已连接」，断开引导用户用 CLI 自己的 logout；
   官方账号拉起不注入 API env，且必须 `env_remove` 同协议残留 API 密钥变量（防静默覆盖账号登录）；
   统计页官方账号显示「订阅」不计费。
@@ -212,6 +216,14 @@ src-tauri/src/
   正在进行的 merge 冲突，必须在工作区行保留直接的「解决冲突」入口，且仍进入同一评审覆盖层。
 - **终端布局必须有明确高度与滚动边界**：App 容器、页面主区、终端三带均维持 `h-full/min-h-0`，外层裁切溢出；只有文件树、对话、
   diff 等内容区各自滚动。禁止把页面级滚动或无约束 flex 子项带回终端，以免窗口缩放、拖动或长内容后出现底部黑屏/空白。
+- **PDF 预览（P2a）**：pdf.js 渲染器必须随 PdfPreview 组件动态 import 拆独立 chunk（禁进主包）；`read_pdf_bytes` 只放行
+  四类白名单（注册项目登记资源/注册项目根/工作区·仓库根/终端标签 cwd hint），canonicalize 后判定，传输用 base64 字符串
+  （macOS 的 Raw 响应会退化为逐字节 JSON 数组，禁改 raw bytes）；选段问 AI 只 pty_write 注入活跃标签输入框，不自动回车。
+- **「整理为笔记」（P2b）**：归属判定只在后端 `pdf_owner_project`（登记资源 canonical 精确命中 → 项目根最长前缀命中，
+  都未命中由前端提示去登记，前端不做路径归属猜测）；写入只走 `append_workspace_inbox`——目标固定为工作区根内
+  `notes/inbox.md`（不接受外部子路径），单次 ≤ 64KB、读-改-原子写、已存在文件 canonicalize 双校验防 symlink 逃逸；
+  笔记步骤定位规则 = `workspaceName === "lit-notes"` 优先、回落流水线第二步；无活跃工作区时复用一键开步链路
+  （ensure_git_repo → create_workspace → TASK.md best-effort → 追加 inbox → pendingTerminal + ORGANIZE_NOTES_PROMPT 预填）。
 
 ## 路线图（见 docs/architecture.md §11 演进线）
 
@@ -222,7 +234,7 @@ src-tauri/src/
   - P1b 流水线骨架：`.ccode/project.toml` 读写 + 项目注册、工作区页按项目分组 + 流水线进度条（状态从工作区派生）、一键开步、资源面板一键引用路径、工作区类型驱动默认值（数据类跳端口/建议 .gitignore/挂技能包）、非 git 目录引导 init、资源自动发现（扫描目录把 PDF/CSV/parquet 列入资源候选供勾选）、科研用户首启引导（「示例课题模板」带现成流水线 + 演示数据 + 示例 PDF + git init 引导，P1b 验收门槛之一）
   - P1c 供应商预设补齐：claude-code 补 DeepSeek/智谱 Anthropic 兼容端点、qwen 补智谱等（按 matrix 核实补录）；此后加供应商 = 预设表加一行
   - P1d 适配器注册表：per-agent 硬编码 match（detect/launch_plan/resume/env 规则、技能分发目录、安装更新方式、协议与密钥 env 名、官方账号 login/auth/env_remove 字段）收敛为中央声明式 AgentSpec 注册表（一个 CLI 一张规格）；解析器与 usage 提取器不可数据化，保持每 CLI 一个解析器文件，注册表只做分发入口；先行或与 P1a 背靠背（官方账号字段正是规格表字段，先注册表后填数据避免改两遍）；250 个既有测试兜底
-- **P2 文献**：PDF 预览（先 spike 验证 WKWebView，不行才上 pdf.js）、选段问 AI、整理为笔记、文献技能包（notes/*.md + references.bib）
+- **P2 文献**：PDF 预览 + 选段问 AI ✅（P2a：直接 pdf.js——WKWebView 拿不到选区文本且三平台不齐，spike 跳过；`read_pdf_bytes` 白名单 + PdfPreview 懒加载 chunk）、整理为笔记 ✅（P2b：`pdf_owner_project` 归属反查 + `append_workspace_inbox` 写 `notes/inbox.md` + 无工作区走一键开步）、文献技能包（notes/*.md + references.bib）
 - **P3 数据 + 接力**：数据处理模板 + 技能包、提货单自动化（artifacts.yaml）、图片评审、长任务 OS 通知、接力包 + 接力链可回溯
 - **P4 论文**：manuscript 模板 + quarto/latex 技能包、渲染 PDF 提货单产物内嵌预览、bib 从文献步提货单联动进简报
 - **P5 通用层打磨（按需穿插）**：逐 hunk 验收、批量验收、跨标签聚合视图、成本按工作区归因、云端会话双源调研

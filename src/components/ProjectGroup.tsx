@@ -2,18 +2,21 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ContextMenu from "./ContextMenu";
+import TemplatePicker, { type TemplatePickItem } from "./TemplatePicker";
 import { Checkbox } from "./PageFrame";
+import { useAppStore } from "../store";
 import {
   DEFAULT_KICKOFF_PROMPT,
-  DEFAULT_PIPELINE_STEPS,
   RESOURCE_TYPE_LABELS,
 } from "../pipeline-presets";
 import type {
   DiscoveredResourceDto,
   EnsureGitDto,
+  PipelineTemplateDto,
   ProjectConfigDto,
   ProjectConfigReadDto,
   ProjectDto,
+  ProjectResourceDto,
   ProjectStepDto,
   WorkspaceDto,
   WorkspaceDriftDto,
@@ -97,8 +100,9 @@ function deriveStepStatus(
   return { key: "active", ws };
 }
 
-/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 预期产物（一键开步落成工作区） */
-function renderTaskMd(
+/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 预期产物（一键开步落成工作区）。
+ *  导出给 TerminalPage 的「整理为笔记」开步链路复用，保持两处 TASK.md 一致。 */
+export function renderTaskMd(
   step: ProjectStepDto,
   cfg: ProjectConfigDto,
   projectPath: string,
@@ -341,6 +345,14 @@ export default function ProjectGroup({
   const [applyingTemplate, setApplyingTemplate] = useState(false);
   // 「使用科研流水线模板」旁的可选课题主题输入，随模板一并落进 project.toml
   const [templateTopic, setTemplateTopic] = useState("");
+  // 模板选择器：首启引导与「重置为模板」共用，列出内置 + 用户模板
+  const [pickerOpen, setPickerOpen] = useState(false);
+  // 另存为模板：内联表单（WKWebView 无 window.prompt），同名覆盖先 confirm
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [tplNameDraft, setTplNameDraft] = useState("");
+  const [tplDescDraft, setTplDescDraft] = useState("");
+  const [tplSaving, setTplSaving] = useState(false);
+  const [tplSavedMsg, setTplSavedMsg] = useState<string | null>(null);
 
   const canOpenWs = (ws: WorkspaceDto) =>
     ws.status === "active" &&
@@ -388,13 +400,13 @@ export default function ProjectGroup({
     }
   }
 
-  async function applyTemplate() {
+  async function applyTemplate(item: TemplatePickItem) {
     if (!cfg) return;
     // 已有步骤时视为「重置为模板」：提示覆盖，绑定的工作区与资源不受影响
     if (
       cfg.steps.length > 0 &&
       !window.confirm(
-        `重置为默认模板？现有 ${cfg.steps.length} 个步骤会被替换，绑定的工作区与资源不受影响。继续？`,
+        `重置为模板「${item.name}」？现有 ${cfg.steps.length} 个步骤会被替换，绑定的工作区与资源不受影响。继续？`,
       )
     )
       return;
@@ -402,12 +414,45 @@ export default function ProjectGroup({
     // 模板只填 steps（+ 可选课题主题）；resources/artifactDir 保持现状，
     // 重置为模板时模板输入框不渲染，topic 为空则保留既有课题主题
     const topic = templateTopic.trim();
-    await saveConfig({
+    const ok = await saveConfig({
       ...cfg,
       topic: topic || cfg.topic || null,
-      steps: DEFAULT_PIPELINE_STEPS.map((s) => ({ ...s })),
+      steps: item.steps.map((s) => ({ ...s })),
     });
     setApplyingTemplate(false);
+    if (ok) setPickerOpen(false);
+  }
+
+  /** 另存为模板：当前 steps 存入用户模板库（后端同名覆盖，先查重 confirm） */
+  async function submitSaveTemplate(e: React.FormEvent) {
+    e.preventDefault();
+    if (!cfg || cfg.steps.length === 0) return;
+    const name = tplNameDraft.trim();
+    if (!name) return;
+    setTplSaving(true);
+    try {
+      // 后端未就绪时列表回落为空，保存本身会报错提示，不阻断内置流程
+      const existing = await invoke<PipelineTemplateDto[]>(
+        "list_pipeline_templates",
+      ).catch(() => [] as PipelineTemplateDto[]);
+      if (
+        existing.some((t) => t.name === name) &&
+        !window.confirm(`已存在同名模板「${name}」，保存将覆盖。继续？`)
+      )
+        return;
+      const saved = await invoke<PipelineTemplateDto>(
+        "save_pipeline_template",
+        { name, description: tplDescDraft.trim(), steps: cfg.steps },
+      );
+      setSavingTemplate(false);
+      setTplNameDraft("");
+      setTplDescDraft("");
+      setTplSavedMsg(`已保存模板「${saved.name}」，可在模板库中选择使用。`);
+    } catch (reason) {
+      onError(String(reason));
+    } finally {
+      setTplSaving(false);
+    }
   }
 
   async function submitRenameStep(e: React.FormEvent) {
@@ -574,6 +619,17 @@ export default function ProjectGroup({
     });
   }
 
+  // PDF 资源「查看」：拼绝对路径交给终端页预览（后端按登记资源白名单放行，可选段问 AI）
+  const setPreviewReq = useAppStore((s) => s.setPreviewReq);
+  const setPage = useAppStore((s) => s.setPage);
+  function viewPdfResource(r: ProjectResourceDto) {
+    setPreviewReq({
+      path: absoluteResourcePath(projectPath, r.path),
+      name: r.name || baseName(r.path),
+    });
+    setPage("terminal");
+  }
+
   function resourceMenuItems(index: number) {
     if (!cfg) return [];
     const r = cfg.resources[index];
@@ -718,6 +774,54 @@ export default function ProjectGroup({
         </form>
       )}
 
+      {savingTemplate && cfg && (
+        <form
+          onSubmit={submitSaveTemplate}
+          className="mb-2 flex flex-wrap items-center gap-1"
+        >
+          <input
+            className={fieldSm}
+            value={tplNameDraft}
+            onChange={(e) => setTplNameDraft(e.target.value)}
+            placeholder="模板名，如 我的综述流程"
+            autoFocus
+            required
+          />
+          <input
+            className={`${fieldSm} min-w-0 flex-1`}
+            value={tplDescDraft}
+            onChange={(e) => setTplDescDraft(e.target.value)}
+            placeholder="描述（可选）：适用场景说明"
+          />
+          <button type="submit" className={ctaSm} disabled={tplSaving}>
+            {tplSaving ? "保存中…" : "保存"}
+          </button>
+          <button
+            type="button"
+            className={actionBtn}
+            onClick={() => setSavingTemplate(false)}
+          >
+            取消
+          </button>
+        </form>
+      )}
+
+      {tplSavedMsg && (
+        <div className="mb-2 flex items-center gap-2 rounded bg-strip p-2 text-xs text-l2">
+          <span className="min-w-0 flex-1">
+            <span className="mr-1 text-okb">✓</span>
+            {tplSavedMsg}
+          </span>
+          <button
+            type="button"
+            className={`${actionBtn} shrink-0`}
+            onClick={() => setTplSavedMsg(null)}
+          >
+            知道了
+          </button>
+        </div>
+      )}
+
       {registered && freshGitGuide && (
         <div className="mb-2 flex flex-wrap items-center gap-2 rounded bg-strip p-2 text-xs text-l2">
           <span>新项目：若目录还不是 git 仓库，初始化后才能创建工作区。</span>
@@ -745,12 +849,12 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {/* 首启引导（轻量版）：注册项目且 steps 为空 → 一键写入默认流水线模板 */}
+      {/* 首启引导（轻量版）：注册项目且 steps 为空 → 从模板库选择写入流水线 */}
       {registered && cfg && cfg.steps.length === 0 && (
         <div className="mb-2 rounded border border-hairline bg-strip p-3">
           <p className="mb-2 text-xs text-l3">
-            该项目还没有流水线步骤。使用模板将写入「文献检索与筛选 → 文献精读与笔记
-            → 综述大纲 → 综述初稿 → 润色与定稿」五步到 .ccode/project.toml，之后可逐步编辑。
+            该项目还没有流水线步骤。从模板库选择（英文综述 / 科研论文 / 数据处理 /
+            毕业论文，以及已另存的自定义模板）写入 .ccode/project.toml，之后可逐步编辑。
           </p>
           <input
             className={`${fieldSm} mb-2 w-full`}
@@ -762,10 +866,9 @@ export default function ProjectGroup({
             <button
               type="button"
               className={ctaSm}
-              disabled={applyingTemplate}
-              onClick={() => void applyTemplate()}
+              onClick={() => setPickerOpen((v) => !v)}
             >
-              {applyingTemplate ? "写入中…" : "使用科研流水线模板"}
+              {pickerOpen ? "收起模板库" : "选择流水线模板"}
             </button>
             <button
               type="button"
@@ -775,6 +878,13 @@ export default function ProjectGroup({
               + 手动添加步骤
             </button>
           </div>
+          {pickerOpen && (
+            <TemplatePicker
+              applying={applyingTemplate}
+              onApply={(item) => void applyTemplate(item)}
+              onError={onError}
+            />
+          )}
           {addingStep && renderAddStepForm()}
         </div>
       )}
@@ -926,14 +1036,20 @@ export default function ProjectGroup({
               <button
                 type="button"
                 className={actionBtn}
-                disabled={applyingTemplate}
-                title="用默认模板替换现有步骤（工作区与资源不受影响）"
-                onClick={() => void applyTemplate()}
+                title="从模板库选择模板替换现有步骤（工作区与资源不受影响）"
+                onClick={() => setPickerOpen((v) => !v)}
               >
-                {applyingTemplate ? "写入中…" : "重置为模板"}
+                {pickerOpen ? "收起模板库" : "重置为模板"}
               </button>
             </li>
           </ol>
+          {pickerOpen && (
+            <TemplatePicker
+              applying={applyingTemplate}
+              onApply={(item) => void applyTemplate(item)}
+              onError={onError}
+            />
+          )}
           {addingStep && renderAddStepForm()}
           {briefEditing && (
             <form
@@ -1036,6 +1152,16 @@ export default function ProjectGroup({
                       >
                         {r.path}
                       </span>
+                      {/\.pdf$/i.test(r.path) && (
+                        <button
+                          type="button"
+                          onClick={() => viewPdfResource(r)}
+                          title="在终端页内嵌预览（可选中文字问 AI）"
+                          className="shrink-0 rounded px-1.5 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                        >
+                          查看
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={(e) => {
@@ -1177,6 +1303,18 @@ export default function ProjectGroup({
               onSelect: () => {
                 setTopicDraft(cfg?.topic ?? "");
                 setEditingTopic(true);
+              },
+            },
+            {
+              label: "另存为模板",
+              disabled: !cfg || cfg.steps.length === 0,
+              title:
+                cfg && cfg.steps.length > 0
+                  ? undefined
+                  : "没有可保存的流水线步骤",
+              onSelect: () => {
+                setTplSavedMsg(null);
+                setSavingTemplate(true);
               },
             },
             {
