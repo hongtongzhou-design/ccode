@@ -197,6 +197,23 @@ export interface GitFileDto {
   deletions: number | null;
 }
 
+/** 保存历史时间线条目（project_history：当前分支 first-parent 主线） */
+export interface HistoryEntryDto {
+  hash: string;
+  /** ISO 8601 提交时间 */
+  time: string;
+  author: string;
+  /** 提交信息首行 */
+  message: string;
+  /** numstat 汇总；merge commit 无 diff，恒为 0 */
+  files: number;
+  additions: number;
+  deletions: number;
+  merge: boolean;
+  /** 并入的分支名（解析不到为空串） */
+  mergedBranch: string;
+}
+
 /** 工作区任务累计 diff（merge-base(base, branch) 为基准，W3） */
 export interface WorkspaceDiffDto {
   inWorkspace: boolean;

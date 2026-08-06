@@ -5,7 +5,8 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS } from "../presets";
-import { upstreamNoteText } from "../upstream-note";
+import { upstreamNoteText, upstreamCommand } from "../upstream-note";
+import { interactiveUpdatePrefill } from "../update-routing";
 import ContextMenu from "../components/ContextMenu";
 import {
   PageFrame,
@@ -511,6 +512,14 @@ interface AgentUpdateInfo {
   outdated: boolean;
   /** brew 渠道滞后提示：上游 npm 已更新的版本号；查不到为 null */
   upstreamNote: string | null;
+  /** 上游 npm 包名（配套 upstreamNote，供复制 npm 安装命令） */
+  upstreamPackage: string | null;
+  /** 渠道切换一体命令（brew 卸载 + npm 安装），配套 upstreamNote */
+  upstreamCommand: string | null;
+  /** 本次更新将走交互式 TUI 自更新（kimi upgrade 方向键选择界面）：更新改在完整终端执行 */
+  interactiveTui: boolean;
+  /** 交互式自更新的终端预填命令（interactiveTui 为 true 时必有值） */
+  interactiveUpdateCommand: string | null;
 }
 
 /** 各 agent 在 TUI 模型切换页可用的模型数上限（注入模式；matrix 调研结论）。
@@ -925,8 +934,22 @@ export default function ProfilesPage() {
     }
   }
 
-  /** 升级某个 agent 的 CLI；完成后重新 detect 刷新版本号 */
+  /** 升级某个 agent 的 CLI；完成后重新 detect 刷新版本号。
+   *  交互式 TUI 自更新（kimi upgrade 方向键选择界面）行输入无法应答，
+   *  与官方账号「连接」同款：开完整终端让用户用方向键操作 */
   async function onUpdate(agentId: string) {
+    const prefill = interactiveUpdatePrefill(updateInfo[agentId]);
+    if (prefill) {
+      setPendingTerminal({
+        cwd: "~",
+        extraEnv: {},
+        title: `更新 ${labelOf(agentId)}`,
+        prefillCommand: prefill,
+        shellOnly: true,
+      });
+      setPage("terminal");
+      return;
+    }
     await runAgentCmd(agentId, "update_agent");
   }
 
@@ -1233,16 +1256,27 @@ export default function ProfilesPage() {
                           </span>
                         );
                       const info = updateInfo[agent.id];
+                      const tuiPrefill = interactiveUpdatePrefill(info);
                       if (updateResults[agent.id]?.ok) return null;
                       if (info && !info.outdated && info.latest) {
                         // 已最新：仅在 brew 渠道滞后于上游 npm 时挂小字提示，否则不显示
                         const note = upstreamNoteText(info);
+                        const cmd = upstreamCommand(info);
                         return note ? (
-                          <span
-                            className="ml-auto text-xs text-l4"
-                            title={note}
-                          >
-                            {note}
+                          <span className="ml-auto flex items-center gap-1 text-xs text-l4">
+                            <span title={note}>{note}</span>
+                            {cmd && (
+                              <button
+                                type="button"
+                                title={`复制渠道切换命令：${cmd}\n含义：卸载 brew 版本并改装 npm 版本（之后更新走 npm 渠道，Ccode 自动按 npm 检查）`}
+                                onClick={() =>
+                                  void navigator.clipboard.writeText(cmd)
+                                }
+                                className="flex size-6 items-center justify-center rounded text-l4 hover:bg-white/5 hover:text-l1"
+                              >
+                                ⧉
+                              </button>
+                            )}
                           </span>
                         ) : null;
                       }
@@ -1250,7 +1284,11 @@ export default function ProfilesPage() {
                         return (
                           <button
                             onClick={() => onUpdate(agent.id)}
-                            title={`有新版本 ${info.latest ?? ""}，点击更新`}
+                            title={
+                              tuiPrefill
+                                ? `有新版本 ${info.latest ?? ""}；交互式更新（${tuiPrefill}），将在终端中打开，需方向键选择`
+                                : `有新版本 ${info.latest ?? ""}，点击更新`
+                            }
                             className="ml-auto flex h-8 items-center rounded px-2 text-xs text-cta hover:bg-white/5 hover:brightness-125"
                           >
                             新版
@@ -1259,6 +1297,11 @@ export default function ProfilesPage() {
                       return (
                         <button
                           onClick={() => onUpdate(agent.id)}
+                          title={
+                            tuiPrefill
+                              ? `交互式更新（${tuiPrefill}），将在终端中打开，需方向键选择`
+                              : undefined
+                          }
                           className="ml-auto flex h-8 items-center rounded px-2 text-xs text-pl2 hover:bg-white/5 hover:text-pl1"
                         >
                           更新

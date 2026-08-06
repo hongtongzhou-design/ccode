@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ContextMenu from "./ContextMenu";
 import PipelineEditor from "./PipelineEditor";
+import HistoryOverlay from "./HistoryOverlay";
 import TemplatePicker, { type TemplatePickItem } from "./TemplatePicker";
 import { Checkbox } from "./PageFrame";
 import type { DirEntryDto } from "./FileTree";
@@ -344,6 +345,13 @@ export default function ProjectGroup({
   // 课题主题：存 project.toml 顶层 topic，一键开步写进 TASK.md
   const [editingTopic, setEditingTopic] = useState(false);
   const [topicDraft, setTopicDraft] = useState("");
+
+  // 保存历史（白话时间线）：全宽覆盖层，同 PipelineEditor 形态
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // 工作区名 → 步骤名：merge commit 的「验收合并」优先显示步骤名
+  const wsStepMap = Object.fromEntries(
+    (cfg?.steps ?? []).map((s) => [s.workspaceName, s.name]),
+  );
 
   async function submitRenameProject(e: React.FormEvent) {
     e.preventDefault();
@@ -997,20 +1005,39 @@ export default function ProjectGroup({
       {/* 流水线 strip：状态从绑定工作区派生，纯展示 */}
       {registered && cfg && cfg.steps.length > 0 && (
         <div className="mb-2 rounded border border-hairline bg-strip p-2">
-          {/* 进度概览：只保留文字计数与校验提示徽标（分段进度条已按精简方案移除） */}
+          {/* 进度概览：分段直线进度条（用户明确要求保留）+ 文字计数 + 校验提示徽标 */}
           {(() => {
-            const doneCount = cfg.steps.filter(
-              (s) =>
-                deriveStepStatus(s, workspaces, health, drift).key === "done",
-            ).length;
+            const keys = cfg.steps.map(
+              (s) => deriveStepStatus(s, workspaces, health, drift).key,
+            );
+            const doneCount = keys.filter((k) => k === "done").length;
+            const seg = (k: StepStatusKey) =>
+              k === "done"
+                ? "bg-okb"
+                : k === "blocked"
+                  ? "bg-err-text"
+                  : k === "review"
+                    ? "bg-cta"
+                    : k === "active"
+                      ? "bg-cta opacity-50"
+                      : "bg-inset";
             return (
               <div className="mb-2 flex items-center gap-2 px-0.5">
-                <span className="text-xs text-l3">
+                <div className="flex h-1.5 flex-1 gap-0.5">
+                  {keys.map((k, i) => (
+                    <span
+                      key={i}
+                      className={`flex-1 rounded-full ${seg(k)}`}
+                      title={`${cfg.steps[i].name}：${STEP_STATUS_STYLE[k].label}`}
+                    />
+                  ))}
+                </div>
+                <span className="shrink-0 text-xs text-l3">
                   研究流程 {doneCount}/{cfg.steps.length}
                 </span>
                 {cfgWarnings.length > 0 && (
                   <span
-                    className="cursor-default text-xs text-warn-text"
+                    className="shrink-0 cursor-default text-xs text-warn-text"
                     title={cfgWarnings.join("\n")}
                   >
                     ⚠ {cfgWarnings.length} 条提示
@@ -1494,6 +1521,11 @@ export default function ProjectGroup({
               },
             },
             {
+              label: "历史",
+              title: "项目的白话保存时间线（只读）",
+              onSelect: () => setHistoryOpen(true),
+            },
+            {
               label: "另存为模板",
               disabled: !cfg || cfg.steps.length === 0,
               title:
@@ -1542,6 +1574,14 @@ export default function ProjectGroup({
           saving={pipelineSaving}
           onSave={(steps) => void savePipeline(steps)}
           onClose={() => setEditorOpen(false)}
+        />
+      )}
+      {historyOpen && project && (
+        <HistoryOverlay
+          projectName={displayName}
+          repoPath={project.path}
+          wsSteps={wsStepMap}
+          onClose={() => setHistoryOpen(false)}
         />
       )}
     </section>

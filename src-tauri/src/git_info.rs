@@ -1339,6 +1339,139 @@ pub async fn git_image_pair(cwd: String, path: String) -> Result<GitImagePairDto
         .map_err(|e| format!("读取图片失败: {e}"))?
 }
 
+// ===== 历史时间线（保存历史视图）：当前分支 --first-parent 提交主线 =====
+// 取舍：只看 first-parent 主线——工作区分支上的过程提交不进主时间线，
+// 它们通过 merge commit 的「验收合并」条目体现，保持时间线简洁可读。
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntryDto {
+    /// 短 hash（技术层信息，前端小字 mono 展示）
+    pub hash: String,
+    /// 提交时间（ISO 8601，%cI）
+    pub time: String,
+    pub author: String,
+    /// 提交信息首行
+    pub message: String,
+    /// numstat 汇总：改动文件数与总增删行（merge commit 无 diff，恒为 0）
+    pub files: u64,
+    pub additions: u64,
+    pub deletions: u64,
+    /// 是否 merge commit（父提交 ≥ 2）
+    pub merge: bool,
+    /// 并入的分支名（从 "Merge branch 'X'" 类信息解析；解析不到为空串）
+    pub merged_branch: String,
+}
+
+/// 从 merge commit 信息首行解析并入的分支名：
+/// "Merge branch 'X'" / "Merge branch 'X' into Y" / "Merge remote-tracking branch 'X'"
+fn parse_merged_branch(subject: &str) -> String {
+    for prefix in ["Merge branch '", "Merge remote-tracking branch '"] {
+        if let Some(rest) = subject.strip_prefix(prefix) {
+            if let Some(end) = rest.find('\'') {
+                return rest[..end].to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// 解析 `git log --format=%x1e... --numstat` 输出：\x1e 分隔提交，\x1f 分隔字段，
+/// 头行之后是 numstat 行（二进制 "-\t-" 计文件数但不计增删）
+fn parse_history_log(text: &str) -> Vec<HistoryEntryDto> {
+    let mut entries = Vec::new();
+    for record in text.split('\x1e') {
+        let record = record.trim_start_matches('\n');
+        if record.is_empty() {
+            continue;
+        }
+        let mut lines = record.lines();
+        let Some(header) = lines.next() else { continue };
+        let fields: Vec<&str> = header.split('\x1f').collect();
+        if fields.len() < 5 {
+            continue; // 防御式：格式漂移时跳过该行提交
+        }
+        let parents: Vec<&str> = fields[4].split_whitespace().collect();
+        let merge = parents.len() >= 2;
+        let (mut files, mut additions, mut deletions) = (0u64, 0u64, 0u64);
+        for line in lines {
+            let mut parts = line.splitn(3, '\t');
+            let (Some(a), Some(d), Some(p)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if p.trim().is_empty() {
+                continue;
+            }
+            files += 1;
+            if let (Ok(a), Ok(d)) = (a.parse::<u64>(), d.parse::<u64>()) {
+                additions += a;
+                deletions += d;
+            }
+        }
+        let message = fields[3].to_string();
+        let merged_branch = if merge {
+            parse_merged_branch(&message)
+        } else {
+            String::new()
+        };
+        entries.push(HistoryEntryDto {
+            hash: fields[0].to_string(),
+            time: fields[1].to_string(),
+            author: fields[2].to_string(),
+            message,
+            files,
+            additions,
+            deletions,
+            merge,
+            merged_branch,
+        });
+    }
+    entries
+}
+
+fn project_history_sync(repo_path: &str, limit: u32) -> Result<Vec<HistoryEntryDto>, String> {
+    let cwd = expand_tilde(repo_path);
+    let check = run_git(&cwd, &["rev-parse", "--is-inside-work-tree"])?;
+    if !check.status.success() {
+        return Err("该目录不是 git 仓库，暂无保存历史".into());
+    }
+    // 空仓库（无 HEAD）：log 会失败，先判 HEAD 再决定空表还是报错
+    let head = run_git(&cwd, &["rev-parse", "--verify", "-q", "HEAD"])?;
+    if !head.status.success() {
+        return Ok(Vec::new());
+    }
+    let limit = limit.clamp(1, 500);
+    let out = run_git(
+        &cwd,
+        &[
+            "log",
+            "--first-parent",
+            "-n",
+            &limit.to_string(),
+            "--format=%x1e%h%x1f%cI%x1f%an%x1f%s%x1f%P",
+            "--numstat",
+        ],
+    )?;
+    if !out.status.success() {
+        return Err(output_tail(&out));
+    }
+    Ok(parse_history_log(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// 项目保存历史：当前分支 first-parent 主线提交（白话时间线的数据层）。
+#[tauri::command]
+pub async fn project_history(
+    repo_path: String,
+    limit: Option<u32>,
+) -> Result<Vec<HistoryEntryDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        project_history_sync(&repo_path, limit.unwrap_or(100))
+    })
+    .await
+    .map_err(|e| format!("读取保存历史失败: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2189,5 +2322,103 @@ mod tests {
         let two_files = format!("{}{}", hunks[0].1, hunks[0].1.replace("f.txt", "g.txt"));
         assert!(patch_targets_single_file(&two_files, "f.txt").is_err());
         assert!(patch_targets_single_file("@@ -1 +1 @@\n+x\n", "f.txt").is_err());
+    }
+
+    #[test]
+    fn history_parses_commits_and_numstat() {
+        if !git_available() {
+            return;
+        }
+        let dir = init_repo("history");
+        fs::write(dir.join("a.txt"), "l1\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["-c", "commit.gpgsign=false", "commit", "-m", "init"]);
+        fs::write(dir.join("a.txt"), "l1\nl2\n").unwrap();
+        fs::write(dir.join("b.txt"), "x\ny\nz\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(
+            &dir,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "Ccode: 项目档案卡与 gitignore 自动提交"],
+        );
+
+        let entries = project_history_sync(dir.to_str().unwrap(), 100).unwrap();
+        assert_eq!(entries.len(), 2);
+        let latest = &entries[0];
+        assert_eq!(latest.message, "Ccode: 项目档案卡与 gitignore 自动提交");
+        assert!(!latest.merge);
+        assert!(latest.merged_branch.is_empty());
+        assert!(!latest.hash.is_empty() && latest.hash.len() < 40, "应为短 hash");
+        assert!(latest.time.contains('T'), "时间应为 ISO 格式: {}", latest.time);
+        // numstat 汇总：a.txt +1、b.txt +3 → 2 个文件 +4 −0
+        assert_eq!(latest.files, 2);
+        assert_eq!(latest.additions, 4);
+        assert_eq!(latest.deletions, 0);
+        assert_eq!(entries[1].message, "init");
+        assert_eq!(entries[1].files, 1);
+        // limit 生效
+        assert_eq!(project_history_sync(dir.to_str().unwrap(), 1).unwrap().len(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_parses_merge_commit_first_parent() {
+        if !git_available() {
+            return;
+        }
+        let dir = init_repo("history-merge");
+        fs::write(dir.join("a.txt"), "base\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["-c", "commit.gpgsign=false", "commit", "-m", "base"]);
+        // 工作区分支上的过程提交：不进 first-parent 主时间线
+        git(&dir, &["checkout", "-b", "ccode/lit-notes"]);
+        fs::write(dir.join("notes.md"), "n1\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["-c", "commit.gpgsign=false", "commit", "-m", "工作区过程提交"]);
+        git(&dir, &["checkout", "main"]);
+        git(
+            &dir,
+            &["-c", "commit.gpgsign=false", "merge", "--no-ff", "ccode/lit-notes"],
+        );
+
+        let entries = project_history_sync(dir.to_str().unwrap(), 100).unwrap();
+        assert_eq!(entries.len(), 2, "工作区分支的过程提交不进主时间线");
+        let merge = &entries[0];
+        assert!(merge.merge);
+        assert_eq!(merge.merged_branch, "ccode/lit-notes");
+        assert!(entries.iter().all(|e| e.message != "工作区过程提交"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_empty_repo_and_non_repo() {
+        if !git_available() {
+            return;
+        }
+        // 空仓库（已 init、无提交）→ 空表
+        let empty = init_repo("history-empty");
+        let entries = project_history_sync(empty.to_str().unwrap(), 100).unwrap();
+        assert!(entries.is_empty());
+        fs::remove_dir_all(&empty).ok();
+        // 非仓库 → 报错
+        let plain = tmpdir("history-plain");
+        assert!(project_history_sync(plain.to_str().unwrap(), 100).is_err());
+        fs::remove_dir_all(&plain).ok();
+    }
+
+    #[test]
+    fn history_parse_merged_branch_variants() {
+        assert_eq!(
+            parse_merged_branch("Merge branch 'ccode/data-clean'"),
+            "ccode/data-clean"
+        );
+        assert_eq!(
+            parse_merged_branch("Merge branch 'ccode/x' into main"),
+            "ccode/x"
+        );
+        assert_eq!(
+            parse_merged_branch("Merge remote-tracking branch 'origin/main'"),
+            "origin/main"
+        );
+        assert!(parse_merged_branch("普通提交信息").is_empty());
     }
 }

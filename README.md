@@ -4,19 +4,19 @@
   <img src="icon/icon-v3-01-emerald-mint.png" width="96" alt="Ccode icon" />
 </p>
 
-**AI 编码 Agent 统一启动器 + 配置中心 + 会话监控台**（桌面应用，Tauri v2 + React/TS + Rust）。
+**AI 科研工作台**（桌面应用，Tauri v2 + React/TS + Rust）：底层是六个终端 agent 的统一控制台（启动器 + 配置中心 + 会话监控台），表面是科研流水线（读文献 → 整数据 → 做图 → 写论文）。AI 负责干活，Ccode 负责管活，人负责拍板。
 
-为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code 六个终端 agent 管理多套 API 配置（端点/密钥/模型），内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览与工作区编排。
+为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code 六个终端 agent 管理多套 API 配置（端点/密钥/模型）与官方账号登录，内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览；在此之上提供项目流水线（模板 + 一键开步）、任务工作区评审、PDF/笔记阅读写作与用量成本统计。
 
 ## 功能
 
-- **配置中心（⇄）**：agent × profile 多配置管理，多模型切换，密钥 0600 本地存储绝不回显；默认启动注入环境变量（零污染），可选「设为全局默认」（写前备份）；CLI 安装/更新一键完成
-- **工作区（⛁）**：任务级 git worktree 隔离（`ccode/<任务名>` 分支），多任务并行互不污染；`.ccode/settings.toml` 项目自动化（files-to-copy、setup/archive 脚本、端口段注入）；评审流：任务 diff、健康状态、本地合并、gh PR
-- **终端（⌨）**：内嵌 xterm.js 多标签终端，agent 退出自动回落登录 shell、会话可一键恢复；Monaco 文件预览/编辑 + git 改动面板 + ⌘F 输出搜索；◈ AI 生成提交信息
-- **会话（◔）**：解析六个 CLI 的本地会话文件做结构化回放（含外部终端里运行的会话）；pin 快照保留、标签/归档/搜索、批量删除、◈ AI 摘要、Markdown 导出
-- **技能（✦）**：Skills 统一库 + 六 CLI 分发（symlink/copy），目录/ZIP/GitHub 四路导入，ZIP 导出
-- **统计（◫）**：token 用量与费用统计（官方价口径，$/¥ 切换），agent 占比进度条、项目/模型分布
-- **设置（⛭）**：七套深色主题、终端字体/调色板、AI 专用配置、应用内自动更新、诊断日志
+- **配置中心（⇄）**：agent × profile 多配置管理（API 配置 + 官方账号双轨），多模型切换，密钥 0600 本地存储绝不回显；默认启动注入环境变量（零污染），可选「设为全局默认」（写前备份）；CLI 安装/更新一键完成
+- **工作区（⛁）**：任务级 git worktree 隔离（`ccode/<任务名>` 分支），多任务并行互不污染；`.ccode/settings.toml` 项目自动化（files-to-copy、setup/archive 脚本、端口段注入）；评审流：任务 diff、逐 hunk 验收、健康状态、本地合并、gh PR；项目注册后按流水线分组（`.ccode/project.toml` 档案卡 + 模板库 + 一键开步 + 资源面板 + 提货单 artifacts.yaml）
+- **终端（⌨）**：内嵌 xterm.js 多标签终端，agent 退出自动回落登录 shell、会话可一键恢复；Monaco 文件预览/编辑 + Markdown 阅读版式与沉浸阅读 + PDF/docx 内嵌预览（选段「◈ 问 AI」「整理为笔记」）+ git 改动面板 + ⌘F 输出搜索；◈ AI 生成提交信息、「◈ 接力到…」跨 Agent 交接
+- **会话（◔）**：解析六个 CLI 的本地会话文件做结构化回放（含外部终端里运行的会话）；按流水线步骤分组、pin 快照保留、标签/归档/搜索、批量删除、◈ AI 摘要、Markdown 导出
+- **技能（✦）**：Skills 统一库 + 六 CLI 分发（symlink/copy），目录/ZIP/GitHub 四路导入，ZIP 导出；新建/编辑与「◈ 优化」让 Agent 迭代技能
+- **统计（◫）**：token 用量与费用统计（官方价口径，官方账号显示「订阅」，$/¥ 切换），agent 占比进度条、项目/模型分布、任务成本按工作区归因
+- **设置（⛭）**：七套深色主题、终端字体/调色板、AI 专用配置、长任务 OS 通知、应用内自动更新、诊断日志
 
 ## 安装
 

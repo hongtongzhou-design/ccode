@@ -173,6 +173,10 @@ pub struct PackagingSpec {
     pub uv: Option<&'static str>,
     /// 自更新子命令（不含二进制名）
     pub self_update: Option<&'static [&'static str]>,
+    /// 自更新是方向键选择的交互式 TUI（kimi upgrade / opencode upgrade），
+    /// 配置页更新的行输入（updater_write，只能应答 [y/n]）无法操作；
+    /// 前端据此把更新路由到完整终端执行，不走 run_streaming_pty
+    pub interactive_tui: bool,
     /// 官方安装脚本（bash -c 内容）
     pub install_script: Option<&'static str>,
     /// 安装方式非 brew/npm/uv 命中包管理器时的更新渠道顺序（首个成功即止）
@@ -189,6 +193,7 @@ const NO_PACKAGING: PackagingSpec = PackagingSpec {
     npm_update: None,
     uv: None,
     self_update: None,
+    interactive_tui: false,
     install_script: None,
     update_fallback: &[],
     legacy_variant: None,
@@ -378,8 +383,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             brew_upgrade: Some(BrewPackage { name: "opencode", cask: false }),
             npm_install: Some("opencode-ai"),
             npm_update: Some("opencode-ai"),
-            // 自更新是交互 TUI，仅非 brew/npm 安装时尝试（brew 装的走 brew 防冲突）
+            // 自更新是交互 TUI（方向键选择），仅非 brew/npm 安装时尝试（brew 装的走 brew 防冲突）
             self_update: Some(&["upgrade"]),
+            interactive_tui: true,
             update_fallback: &[UpdateChannel::SelfUpdate, UpdateChannel::Npm],
             ..NO_PACKAGING
         },
@@ -398,8 +404,12 @@ static AGENT_SPECS: &[AgentSpec] = &[
         skills_dir: &[".kimi-code", "skills"],
         packaging: PackagingSpec {
             npm_install: Some("@moonshot-ai/kimi-code"),
+            // npm registry 与自更新渠道同版本发布：latest 查询口（自更新渠道本身没有轻量查询口）
+            npm_update: Some("@moonshot-ai/kimi-code"),
             uv: Some("kimi-cli"),
+            // kimi upgrade 是方向键选择的交互式 TUI，行输入无法应答（interactive_tui 的注释见 PackagingSpec）
             self_update: Some(&["upgrade"]),
+            interactive_tui: true,
             install_script: Some("curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"),
             update_fallback: &[UpdateChannel::SelfUpdate],
             legacy_variant: Some(LegacyVariantSpec {
@@ -556,6 +566,30 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// 交互式 TUI 自更新标记：kimi/opencode 的 upgrade 是方向键选择界面（行输入无法应答，
+    /// 配置页更新按钮据此改路由到完整终端）；标记必须挂在有 self_update 的规格上
+    #[test]
+    fn interactive_tui_flag_only_on_self_update_specs() {
+        for spec in all_agent_specs() {
+            if spec.packaging.interactive_tui {
+                assert!(
+                    spec.packaging.self_update.is_some(),
+                    "{} 标了 interactive_tui 但没有 self_update",
+                    spec.id
+                );
+            }
+        }
+        assert!(agent_spec("kimi").unwrap().packaging.interactive_tui);
+        assert!(agent_spec("opencode").unwrap().packaging.interactive_tui);
+        // claude update 是普通非交互命令，其余 agent 无自更新渠道，均不得误标
+        for id in ["claude-code", "codex", "gemini", "qwen"] {
+            assert!(
+                !agent_spec(id).unwrap().packaging.interactive_tui,
+                "{id} 不应标 interactive_tui"
+            );
         }
     }
 }

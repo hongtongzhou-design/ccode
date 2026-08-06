@@ -440,6 +440,12 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 | v3.14 | P2a PDF 内嵌预览落地：**直接上 pdf.js**（跳过 WKWebView spike——原生渲染拿不到选区文本且三平台行为不齐，选段问 AI 是硬需求）；pdfjs-dist 精确 pin，渲染器随 PdfPreview 组件动态 import 拆独立 chunk，worker 走 `?url` 资产；canvas + textLayer 只渲染当前页 ±1。新增 `read_pdf_bytes` command：**四类白名单**（注册项目登记资源 / 注册项目根 / 工作区·仓库根 / 终端标签 cwd hint）之外拒绝，canonicalize 防符号链接绕过，单文件 100 MB 上限；**传输走 base64 字符串而非 raw bytes**——macOS/iOS 的 Raw 响应会退化为逐字节 JSON 数字数组（tauri protocol.rs 实测），大 PDF 下不可用。选段问 AI = pty_write 逐字注入活跃标签输入框，不自动回车 |
 | v3.15 | P3 接力 v1 落地（§11.3 机制四，handoff.rs）：`build_handoff_brief` 复用有界尾窗组装结构化简报（任务信息 / 最近 5 条用户要点 + 最后助手回复 / 当前 git 状态 / 接力说明），全文脱敏 + 64KB 上限后原子写 `cwd/.ccode/handoff-<时间>.md`（自定义路径限项目根内，父目录取最近已存在祖先 canonicalize 校验）；v1 不调 AI，AI 摘要保持可选增强。接力链两阶段：发起时按 agent+cwd 登记 `handoff_links` 小表（目标会话尚不存在），列表扫描到「登记后有活动的最新同目录会话」时固化进 `session_meta.handoff_from_*` 并**消费登记**（同目录后续新会话不再误标）；前端「◈ 接力到…」入口 = 终端专注栏 ⋯ 与对话页回放头部 ⋯，目标清单由注册表 prompt_inject + resolve_binary 合成（kimi/opencode 标注需手动并复制简报路径），接力会话在对话页显示「⇄ 接自 <Agent>」 |
 | v3.16 | RX2a 笔记阅读模式：md 文件预览默认「阅读版式」——marked 渲染（pin 版本，静态 import 随 FilePreviewEditor 懒加载 chunk，不进主包）；渲染源为 read_file_preview 根约束内的本地可信文件，**不引 sanitize 重库**。排版样式集中 App.css `.md-body`（全主题令牌），v1 代码块不做语法高亮。「阅读/编辑」切换时 Monaco 保持挂载仅隐藏（脏内容/undo 不丢）；「⛶ 沉浸阅读」为 `fixed inset-0 z-30` 全宽覆盖层（与评审覆盖层同形态，终端/PTY 保持挂载，Esc 退出）；外部写盘自动刷新沿用既有 watcher 链路，编辑中（dirty）不覆盖语义不变 |
+| v3.17 | P1a 官方账号 + P1d 适配器注册表落地：profile 双类型（API/官方账号，第一批 Claude/Codex/Gemini），连接走终端内 CLI 登录命令、断开引导 CLI 自己的 logout（auth 文件只读）；拉起不注入 API env 且 `env_remove` 同协议残留密钥变量；状态行检测 CLI 配置文件残留 API 密钥并黄色提示「N 项配置冲突」。per-agent 硬编码 match 收敛为 `agent_specs.rs` 中央声明式 AgentSpec 注册表（一个 CLI 一张规格：detect/launch_plan/resume/env、技能分发、安装更新、协议与密钥 env 名、官方账号 login/auth/env_remove）；**边界守住**：会话解析器与 usage 提取器不数据化，注册表只做分发入口 |
+| v3.18 | P1b 流水线骨架 + RX1 落地：`.ccode/project.toml` 档案卡（资源清单 + 流水线定义，跟 git 走）与项目注册；工作区页按项目分组 + 步骤胶囊概览（状态从绑定工作区派生，无双状态机；分段进度条收敛为「研究流程 d/t」文字计数）；一键开步 = ensure_git_repo → `commit_project_bootstrap`（只提交 `.ccode`/`.gitignore` 两个自有路径，literal pathspec）→ 建工作区 → TASK.md → 终端预填；**TASK.md 自动加入 `.git/info/exclude`**（脚手架非产物，防全量提交带进分支污染主项目根）；资源面板只登记路径 + 自动发现候选；首启引导做轻量版（空流水线走模板选择器），演示数据完整版留 backlog。RX1：`PipelineEditor` 全宽编辑器为步骤编辑唯一入口（撤销步骤 ⋯ 内联编辑与 + 步骤表单），步骤资源绑定 `resources?: string[]`（空/缺省 = 全部资源，renderTaskMd 只在非空时过滤） |
+| v3.19 | P2b 整理为笔记 + RX2b/RX3a 落地：`pdf_owner_project` 归属反查只在后端（登记资源 canonical 精确命中 → 项目根最长前缀，前端不做路径猜测）；写入只走 `append_workspace_inbox`（固定 `notes/inbox.md`、≤64KB、读-改-原子写、canonicalize 双校验防 symlink 逃逸）；无活跃工作区复用一键开步链路。RX2b：跨页「文件树切根」走 store 一次性 `enterCwdReq`；步骤产物面板打开时 `list_dir` 拉取一次（不进轮询；已完成读项目根 main，其余读工作树）。RX3a：会话步骤化——`session_meta` 附流水线步骤名（工作区名命中档案卡 steps[].workspaceName），对话页 badge/搜索/项目内分组统一走该映射 |
+| v3.20 | P3 数据 + 接力落地：提货单 `artifacts.yaml` v1 务实版（手动登记 + 流式 md5/大小，已 git 跟踪文件拒绝登记，重复登记更新；大产物不进 git、清单随分支提交，下一步 TASK.md 自动带「上一步产物」段）；图片评审 `ImagePairView` 双栏看图（评审与改动面板共用，>20MB 回落提示）；长任务 OS 通知（注意力状态跃迁 + 窗口未聚焦 + 同标签 30s 去抖，设置页可关）；接力 v1 见 v3.15。RX3b：技能新建/编辑（create_skill/update_skill_content，重名拒绝、覆盖前备份、辅助文件保留）+「◈ 优化」开终端让 Agent 直改库文件；步骤可挂 `skills = [...]`，TASK.md 落「本步骤推荐技能」段（技能本体不进简报） |
+| v3.21 | P4 论文 + RX4a + P5 打磨落地：科研论文/毕业论文模板自带 `quarto render` 脚本（开步写入项目 `.ccode/settings.toml`，run 菜单出现 render-draft/render-final；RX4a 追加 export-docx 同 md 导出 docx）；docx 走 mammoth 阅读版式（只读，>50MB 不渲染）；提货单登记的根外产物按精确路径纳入 PDF 白名单（P4 白名单扩展）；bib 联动以模板简报引用 references.bib 的务实形式落地。**逐 hunk 验收 v1 边界 = 仅未提交改动**：hunks 一律取未暂存 diff（工作树 vs 暂存区），丢弃 = `git apply -R`、暂存 = `git apply --cached`（补丁再经 `patch_targets_single_file` 校验只指向该文件）；勾选提交遇部分暂存走临时索引提交（`commit_selected_with_index`，提交后按路径 `git reset -q HEAD --` 同步真实索引）；已提交的累计 diff 禁止逐 hunk；新文件整文件算一块。**订阅口径**：官方账号用量显示「订阅」不计费（usage schema v6）；任务成本按工作区归因（schema v5）；跨标签聚合视图 `run-overview.ts` 纯逻辑按「要你管」排序 |
+| v3.22 | 界面白话双层 + 精简收敛：主文案一律白话（保存到历史 / 多出 N 个保存点 / 改动说明 / 相对主分支），git 技术信息降二级（小字 mono、悬浮 title、详情 popover），**不加任何模式开关**；纯逻辑集中 `git-status-groups.ts`。管理列表只保留识别信息、状态与一到两个高频动作，低频项进「⋯」；工作区 PR/归档收口到统一全宽评审内确认执行（唯一例外：进行中的 merge 冲突保留行内「解决冲突」入口，仍进同一覆盖层）。Monaco 预览关闭 unicode 高亮（WKWebView locale 不命中致全角标点被黄框套住，中文笔记纯噪音） |
 
 ## 11. 演进线（2026-08 定稿）
 
@@ -468,17 +474,17 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 
 | 阶段 | 内容 |
 |---|---|
-| **P0** | 收尾当前批次：走查 → `[skip ci]` 提交 → 可选发版 |
-| **P1a** | 官方账号：profile 双类型（API / 官方账号）；终端内跑 CLI 登录命令连接；只读检测 auth 文件显示已连接；拉起不注入 API env 且 `env_remove` 残留密钥变量；统计页官方账号显示「订阅」不计费；第一批 Claude / Codex / Gemini |
-| **P1b** | 流水线骨架：project.toml 读写 + 项目注册；工作区页按项目分组 + 顶部流水线进度条（状态从工作区派生，无双状态机）；一键开步；资源面板一键引用路径到 Agent 输入；工作区类型驱动默认值（数据类跳过端口分配/建议 .gitignore/挂技能包）；非 git 目录引导 init；资源自动发现（添加项目时扫描目录，PDF/CSV/parquet 等自动列入资源候选清单供勾选确认，免手工逐个登记路径）；科研用户首启引导（首次添加项目提供「示例课题模板」——现成流水线 + 演示数据 + 示例 PDF——与 git init 引导，P1b 验收门槛之一） |
-| **P1c** | 供应商预设补齐：claude-code 补 DeepSeek/智谱 Anthropic 兼容端点、qwen 补智谱等，按 `docs/agent-integration-matrix.md` 核实并补录；此后加供应商 = 预设表加一行 |
-| **P1d** | 适配器注册表：agents.rs（detect/launch_plan/resume/env 规则）、skills.rs（分发目录+模式）、updater.rs（安装/更新方式）、profiles（协议与密钥 env 名）、官方账号字段（login 命令/auth 文件/env_remove 列表）等 per-agent 硬编码 match 收敛为中央声明式 AgentSpec 注册表（一个 CLI 一张规格），各模块从注册表读规格；**边界**：会话解析器与 usage 提取器不可纯数据化（各家格式本质不同），保持每 CLI 一个解析器文件，注册表只做分发入口；效果：加新 CLI = 一张规格表（纯数据）+ 一个解析器文件 + 测试，检测/启动/官方账号/技能分发/更新/前端显示自动生效。**P1d 先行或与 P1a 背靠背**——P1a 官方账号字段正是规格表字段，先注册表后填数据避免改两遍；250 个既有测试兜底重构安全 |
-| **P2** | 文献：PDF 预览（先 spike 验证 WKWebView 原生渲染，不行才上 pdf.js）；选段问 AI（选段 + 出处贴进指定终端标签 Agent 输入，只读不开分支）；整理为笔记（选段一键创建文献工作区预填简报）；文献技能包（结构化笔记模板 + bib 规范，产出 `notes/*.md` + `references.bib`） |
-| **P3** | 数据 + 接力：数据处理模板 + 技能包；提货单自动化（run 脚本结束自动写 artifacts.yaml，下一步简报自动含提货单位置）；图片评审（figure 双栏看图）；长任务 OS 通知；接力包 + 接力链对话页可回溯 |
-| **P4** | 论文：manuscript 模板 + quarto/latex 技能包（含 quarto render run 脚本）；渲染 PDF 作提货单产物内嵌预览；bib 从文献步提货单自动联动进简报 |
-| **P5** | 通用层打磨（按需穿插）：逐 hunk 验收、批量验收、跨标签聚合视图、成本按工作区归因、云端会话双源调研 |
+| **P0** | 收尾当前批次：全量文档同步 → 走查 → `[skip ci]` 提交 → 可选发版 |
+| **P1a ✅** | 官方账号：profile 双类型（API / 官方账号）；终端内跑 CLI 登录命令连接；只读检测 auth 文件显示已连接 + 冲突配置黄色警告；拉起不注入 API env 且 `env_remove` 残留密钥变量；统计页官方账号显示「订阅」不计费；第一批 Claude / Codex / Gemini（随 P1d 注册表落地，v3.17） |
+| **P1b ✅** | 流水线骨架（v3.18）：project.toml 读写 + 项目注册；工作区页按项目分组 + 步骤胶囊概览（状态从工作区派生，无双状态机；进度条收敛为「研究流程 d/t」文字）；一键开步（含 bootstrap 自动提交、TASK.md 进 `.git/info/exclude`）；资源面板登记 + 自动发现；非 git 目录引导 init（默认 .gitignore 含 `*.pdf`）；首启引导为轻量版（模板选择器），演示数据完整版留 backlog；工作区类型驱动默认值（数据类跳端口）未做，留 backlog |
+| **P1c ✅** | 供应商预设补齐：claude-code 补 DeepSeek/智谱 Anthropic 兼容端点、codex/qwen/kimi/opencode 补 DeepSeek/智谱等；此后加供应商 = `src/presets.ts` 预设表加一行 |
+| **P1d ✅** | 适配器注册表（v3.17）：per-agent 硬编码 match 收敛为 `agent_specs.rs` 中央声明式 AgentSpec 注册表（一个 CLI 一张规格）；会话解析器与 usage 提取器保持每 CLI 一个解析器文件，注册表只做分发入口；加新 CLI = 一张规格表 + 一个解析器文件 + 测试 |
+| **P2 ✅** | 文献：PDF 预览（P2a 直接 pdf.js，WKWebView spike 跳过，`read_pdf_bytes` 白名单，v3.14）；选段问 AI（pty_write 注入活跃标签输入框不自动回车）；整理为笔记（P2b，`pdf_owner_project` + `append_workspace_inbox`，v3.19）；文献技能包（lit-search/lit-notes/review-framework/review-writing） |
+| **P3 ✅** | 数据 + 接力（v3.15/v3.20）：数据处理模板 + 技能包（data-clean/data-eda）；提货单 artifacts.yaml v1（手动登记 + md5/大小，下一步 TASK.md 自动带提货单段）；图片评审双栏看图；长任务 OS 通知；接力包 + 接力链对话页可回溯 |
+| **P4 ✅** | 论文（v3.21）：manuscript 模板（科研论文/毕业论文）+ quarto render 脚本（RX4a 追加 export-docx）+ quarto-render 技能；提货单登记的根外 PDF 产物纳入预览白名单；bib 联动以模板简报引用 references.bib 务实落地 |
+| **P5 部分 ✅** | 通用层打磨（v3.21/v3.22）：逐 hunk 验收 ✅（v1 边界=仅未提交）、跨标签聚合视图 ✅、成本按工作区归因 ✅（任务成本）、订阅口径 ✅；批量验收、云端会话双源调研留 backlog；历史时间线视图由并行组实现 |
 
-**Backlog（记录不动手）**：SSH 远程执行（数据集在实验室服务器时启动）、MCP 配置分发调研、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后评估）。
+**Backlog（记录不动手）**：SSH 远程执行（数据集在实验室服务器时启动）、MCP 配置分发调研、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后评估）、批量验收、云端会话双源调研、首启引导完整版（示例课题带演示数据 + 示例 PDF）、工作区类型驱动默认值（数据类跳端口）。
 
 ### 11.5 明确不做（附理由，否决记录见 §10 v3.5–v3.12）
 
@@ -493,7 +499,7 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 
 ### 11.6 主要风险
 
-- **PDF 预览是最大新部件**：P2 前置 spike 验证 WKWebView 原生渲染，不达标才引入 pdf.js。
+- **PDF 预览已落地（v3.14）**：WKWebView spike 跳过，直接 pdf.js + `read_pdf_bytes` 白名单；docx（RX4a）复用同一白名单通道，后续新增二进制预览类型沿用同一模式。
 - **官方账号 env 净化需按 matrix 逐家核实**：各 CLI 账号登录与 API env 的优先级关系不同，以 `docs/agent-integration-matrix.md` 源码级结论为准，勿凭印象。
 - **quarto/latex 可用性**：经 `agents::resolve_binary` 兜底解析，缺失时明示引导安装，不静默失败。
 - **一键开步触碰旧约定**（终端手动启动主流程、工作区创建语义）：以新约定为准——开步是预设参数的组合调用，手动启动栏主流程不变。

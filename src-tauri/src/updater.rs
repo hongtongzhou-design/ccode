@@ -134,6 +134,27 @@ fn version_of(binary: &std::path::Path) -> Option<String> {
     agents::version_with_timeout(binary, agents::VERSION_QUERY_TIMEOUT)
 }
 
+/// 配置页「更新」是否应改路由到完整终端：实际将首先执行的更新命令是自更新渠道，
+/// 且规格标记其为方向键选择的交互式 TUI（kimi upgrade；配置页行输入无法应答）。
+/// 命中时返回预填进终端的自更新命令（裸名，由用户登录 shell 的 PATH 解析）
+fn interactive_self_update(agent_id: &str, method: &str, binary_path: &str) -> Option<String> {
+    let aspec = agent_spec(agent_id)?;
+    if !aspec.packaging.interactive_tui {
+        return None;
+    }
+    let cmds = update_commands(agent_id, method, binary_path);
+    if cmds.first()?.method != "self" {
+        return None;
+    }
+    let args = aspec.packaging.self_update?;
+    Some(
+        std::iter::once(aspec.binary)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
 /// stdout+stderr 合并取尾部 ~30 行
 fn tail_lines(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.trim_end().lines().collect();
@@ -634,6 +655,15 @@ pub struct AgentUpdateInfoDto {
     /// brew 渠道滞后提示：上游 npm 已比 brew 最新版更新时的上游版本号；
     /// 仅 brew 安装且规格表有 npm 包名时查，查询失败静默为 None（UI 不显示）
     pub upstream_note: Option<String>,
+    /// 上游 npm 包名（upstream_note 配套，供 UI 给出可复制的 npm 安装命令）
+    pub upstream_package: Option<String>,
+    /// 渠道切换一体命令（brew 卸载 + npm 安装），upstream_note 配套
+    pub upstream_command: Option<String>,
+    /// 本次更新将走交互式 TUI 自更新（kimi upgrade 方向键选择界面）：
+    /// 配置页行输入无法应答，前端改在完整终端执行 interactive_update_command
+    pub interactive_tui: bool,
+    /// 交互式自更新的终端预填命令（interactive_tui 为 true 时必有值）
+    pub interactive_update_command: Option<String>,
 }
 
 /// 提取首个 x.y.z 形式版本串用于相等比较（--version 输出常带产品名尾巴，如
@@ -720,23 +750,28 @@ fn latest_version(agent_id: &str, method: &str) -> Option<String> {
             return npm_latest(pkg);
         }
     }
-    // 有自更新渠道的其余安装方式没有查询口；唯一更新渠道是 npm 的自装方式也查 npm
-    if p.self_update.is_none() {
-        if let Some(pkg) = p.npm_update {
-            return npm_latest(pkg);
-        }
+    // 有 npm 包名即可作为 latest 查询口：自更新渠道（kimi/opencode）本身没有轻量查询口，
+    // 但 npm registry 与自更新渠道同版本发布，自装方式也据此得到 latest 提示
+    if let Some(pkg) = p.npm_update {
+        return npm_latest(pkg);
     }
     None
 }
 
 fn check_one(agent_id: &str) -> AgentUpdateInfoDto {
     let mut upstream_note = None;
+    let mut upstream_package = None;
+    let mut upstream_command = None;
+    let mut interactive_update_command = None;
     let (installed, latest) = match agents::binary_for(agent_id).and_then(agents::resolve_binary) {
         Some(path) => {
             let installed = version_of(&path);
             let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
             let method = detect_method(&resolved.to_string_lossy());
             let latest = latest_version(agent_id, method);
+            // 与 update_agent 同一套渠道判定：首条命令是交互式 TUI 自更新时给前端改路由
+            interactive_update_command =
+                interactive_self_update(agent_id, method, &path.to_string_lossy());
             // brew 渠道常滞后于上游 npm（如 gemini-cli brew 0.46 vs npm 0.53）：
             // 已查到 brew 最新版时顺带比一次上游版本，提示复用同一次检查、不新增轮询；
             // npm view 失败 → None → 静默不带提示
@@ -747,6 +782,27 @@ fn check_one(agent_id: &str) -> AgentUpdateInfoDto {
                         if let Some(npm_v) = npm_latest(pkg) {
                             if semver_newer(&npm_v, brew_v) {
                                 upstream_note = Some(npm_v);
+                                upstream_package = Some(pkg.to_string());
+                                // 渠道切换一体命令：brew 卸载（cask 带 --cask）+ npm 安装
+                                let brew = agent_spec(agent_id)
+                                    .and_then(|s| {
+                                        s.packaging
+                                            .brew_upgrade
+                                            .as_ref()
+                                            .or(s.packaging.brew_install.as_ref())
+                                    })
+                                    .map(|b| {
+                                        if b.cask {
+                                            format!("brew uninstall --cask {}", b.name)
+                                        } else {
+                                            format!("brew uninstall {}", b.name)
+                                        }
+                                    })
+                                    .unwrap_or_default();
+                                if !brew.is_empty() {
+                                    upstream_command =
+                                        Some(format!("{brew} && npm i -g {pkg}@latest"));
+                                }
                             }
                         }
                     }
@@ -763,7 +819,17 @@ fn check_one(agent_id: &str) -> AgentUpdateInfoDto {
         },
         _ => false,
     };
-    AgentUpdateInfoDto { id: agent_id.into(), installed, latest, outdated, upstream_note }
+    AgentUpdateInfoDto {
+        id: agent_id.into(),
+        installed,
+        latest,
+        outdated,
+        upstream_note,
+        upstream_package,
+        upstream_command,
+        interactive_tui: interactive_update_command.is_some(),
+        interactive_update_command,
+    }
 }
 
 /// 与 DETECT_CACHE 同模式：检查要起 6 组子进程，按进程缓存一次；更新/安装成功后失效
@@ -850,6 +916,48 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].program, "brew");
         assert_eq!(cmds[0].args, vec!["upgrade", "opencode"]);
+    }
+
+    #[test]
+    fn interactive_self_update_routes_tui_self_update_only() {
+        // kimi 自装（~/.kimi-code/bin）：唯一更新渠道是交互 TUI 自更新，给出终端预填命令
+        assert_eq!(
+            interactive_self_update("kimi", "self", "/Users/x/.kimi-code/bin/kimi"),
+            Some("kimi upgrade".into())
+        );
+        // kimi 旧版 uv 变体走 uv tool upgrade（非交互），不路由
+        assert_eq!(
+            interactive_self_update(
+                "kimi",
+                "uv",
+                "/Users/x/.local/share/uv/tools/kimi-cli/bin/kimi"
+            ),
+            None
+        );
+        // opencode 仅「非 brew/npm 安装」命中交互 TUI；brew/npm 渠道行为不变
+        assert_eq!(
+            interactive_self_update("opencode", "self", "/usr/local/bin/opencode"),
+            Some("opencode upgrade".into())
+        );
+        assert_eq!(
+            interactive_self_update("opencode", "brew", "/opt/homebrew/bin/opencode"),
+            None
+        );
+        assert_eq!(
+            interactive_self_update(
+                "opencode",
+                "npm",
+                "/Users/x/.local/lib/node_modules/opencode-ai/bin/opencode"
+            ),
+            None
+        );
+        // claude update 是普通非交互命令，未标 interactive_tui，不路由
+        assert_eq!(
+            interactive_self_update("claude-code", "self", "/usr/local/bin/claude"),
+            None
+        );
+        // 未知 agent → None
+        assert_eq!(interactive_self_update("nope", "self", "/x"), None);
     }
 
     #[test]

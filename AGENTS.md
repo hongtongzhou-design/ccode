@@ -69,22 +69,46 @@ npm run tauri build    # 打包
 ```
 docs/                        # 架构方案 + 六 CLI 适配参考（规格）
 src/                         # 前端 React + TS + Tailwind v4（无 tailwind.config，vite 插件接入）
-  pages/ProfilesPage.tsx     # 配置中心：agent × profile CRUD
-  pages/SessionsPage.tsx     # 对话页：左栏分类树（agent→项目）+ 右栏列表/回放，5s 轮询刷新
-  pages/TerminalPage.tsx     # 内嵌终端（xterm.js），agent 退出自动回落登录 shell
+  pages/                     # 七个页面：配置 ⇄ / 工作区 ⛁ / 终端 ⌨ / 对话 ◔ / 技能 ✦ / 统计 ◫ / 设置 ⛭
+  components/                # 共享组件：评审覆盖层 WorkspaceReviewView、流水线编辑器 PipelineEditor、
+                             # 项目组 ProjectGroup、项目树 ProjectRail、文件树 FileTree、预览编辑 FilePreviewEditor、
+                             # PdfPreview/DocxPreview/ImagePairView、改动面板 GitPanel、接力 HandoffPicker 等
+  pipeline-presets.ts        # 内置流水线模板库 PIPELINE_TEMPLATES（新增场景 = 数组加一项）
+  presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
+  run-overview.ts            # 运行中聚合视图（P5）：全部终端标签按「要你管」排序的纯逻辑
+  notify.ts                  # 长任务 OS 通知（注意力状态跃迁 + 窗口未聚焦 + 30s 去抖）
+  git-status-groups.ts       # 改动列表状态分组/白话双层纯逻辑
+  git-commit-message.ts      # 空提交信息的本地中性默认信息生成
+  terminal-tab-persistence.ts # 终端标签重启恢复白名单（不含 PTY/密钥/env）
+  terminal-palettes.ts       # 终端调色板共享表（设置页色卡与终端生效色同源）
+  upstream-note.ts           # brew 渠道最新但上游 npm 更高版本的提示逻辑
   store.ts                   # zustand 状态
 src-tauri/src/
-  profiles.rs                # ProfileStore：profiles.json + 系统钥匙串存密钥（service "ccode"）
-  agents.rs                  # 适配器：detect + launch_plan（env/args 注入规则，差异全在这里）
+  agent_specs.rs             # AgentSpec 中央注册表（P1d）：一个 CLI 一张规格——detect/launch_plan/env 规则、
+                             # 技能分发目录、安装更新方式、协议与密钥 env 名、官方账号 login/auth/env_remove
+  agents.rs                  # 适配器分发入口 + resolve_binary 统一二进制解析（GUI 短 PATH 候选目录兜底）
+  profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥（不用钥匙串，cdhash 坑）
+  profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（结果脱敏）
+  global_config.rs           # 「设为全局」：agent 级事务批次写入 CLI 配置（备份/回滚/恢复）
+  projects.rs                # 项目档案卡（§11.3）：.ccode/project.toml 读写、项目注册、模板写回、资源登记/发现、
+                             # 一键开步（commit_project_bootstrap + TASK.md 落盘 + .git/info/exclude）、append_workspace_inbox
   pty.rs                     # PtyManager：spawn_tracked 公共拉起逻辑，agent/shell 复用
-  sessions.rs                # 会话浏览：扫描/解析全部六个 agent 会话（含 Codex .zst、OpenCode SQLite/legacy JSON）、app.db session_meta、pin 快照、用户发起的删除、注意力状态分类（session_tail_state）
+  sessions.rs                # 会话浏览：扫描/解析全部六个 agent 会话（含 Codex .zst、OpenCode SQLite/legacy JSON）、app.db session_meta、pin 快照、用户发起的删除、注意力状态分类（session_tail_state）、流水线步骤名映射（RX3a）
   skills.rs                  # 技能库（§6.13）：SSOT 库 + 六 CLI symlink/copy 分发、四路导入（目录/ZIP/GitHub/发现）、ZIP 导出、卸载备份、copy 漂移检测与 resync、新建/编辑（create_skill/update_skill_content，覆盖前备份）
-  usage.rs                   # 用量统计（§6.11）：六 agent usage 事件提取、usage_daily 按天聚合、内置定价表 + pricing.json 覆盖
-  settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/brew 镜像/主题，get/update 两个 command
-  ai.rs                      # 无头 AI 调用层：一次性 prompt（launch_plan 注入）+ 提交信息/会话摘要/PR 描述生成
-  workspaces.rs              # 任务工作区（§6.10）：git worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT 端口段、setup/archive 脚本钩子、评审合并（health/merge/PR）
-  ws_settings.rs             # 项目级 .ccode/settings.toml 三层合并（用户→仓库→local）：files_to_copy/run_mode/scripts
-  pdf.rs                     # PDF 字节读取（§11.4 P2a）：read_pdf_bytes 四类白名单 + canonicalize 校验 + 100MB 上限，base64 传输
+  usage.rs                   # 用量统计（§6.11）：六 agent usage 事件提取、usage_daily 按天聚合、任务成本按工作区归因、官方账号「订阅」口径、内置定价表 + pricing.json 覆盖
+  pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
+  settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/brew 镜像/主题/OS 通知，get/update 两个 command
+  fonts.rs                   # 终端字体打包与 Homebrew 一键安装（Maple/Sarasa/Iosevka）
+  ai.rs                      # 无头 AI 调用层：一次性 prompt（launch_plan 注入）+ 提交信息/会话摘要/PR 描述/冲突建议生成
+  handoff.rs                 # 接力（§11.3 机制四）：结构化简报生成（脱敏 + 64KB）落 .ccode/handoff-<时间>.md、handoff_links 接力链登记/固化
+  workspaces.rs              # 任务工作区（§6.10）：git worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT 端口段、setup/archive 脚本钩子、评审合并（health/merge/PR）、提货单 artifacts.yaml
+  ws_settings.rs             # 项目级 .ccode/settings.toml 三层合并（用户→仓库→local）：files_to_copy/run_mode/scripts；开步自动写入 quarto 渲染脚本
+  git_info.rs                # git 状态/累计 diff/逐 hunk（git_file_hunks/apply_hunk）/勾选提交临时索引（commit_selected_with_index）
+  fs_tree.rs                 # 文件树与文件操作（重要路径删除保护，canonicalize 双校验）
+  pdf.rs                     # PDF/docx 字节读取（§11.4 P2a/RX4a）：read_pdf_bytes 白名单 + canonicalize 校验 + 上限，base64 传输
+  updater.rs                 # CLI 安装/更新（brew TUNA 镜像、npm_for 同目录 npm）+ 应用自身 Tauri updater
+  logbuf.rs                  # 诊断日志环形缓冲（设置页「诊断」分区）
+  models.rs                  # 共享 DTO
   lib.rs                     # 模块与 Tauri command 注册
 ```
 
@@ -182,6 +206,10 @@ src-tauri/src/
 - **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录），AI 无头调用 `-s read-only`；用户可用 extra_env/参数覆盖。
 - **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底（macOS 用户目录 `~/.npm-global/bin`/`~/.local/bin`/`~/bin`/`~/.kimi-code/bin` **先于** `/opt/homebrew/bin`——与用户交互终端的 PATH 解析习惯一致，防止检测到系统目录里的同名旧副本；Linux `~/.local/bin`，Windows `%LOCALAPPDATA%\Programs`/`%APPDATA%\npm`）——打包版 GUI 短 PATH 下检测/启动/更新/安装不再失灵；新增 CLI/工具调用点一律用它，禁直接 `which::which` 或裸名 spawn。
 - **npm 更新用与目标二进制同目录的 npm（`updater::npm_for`）**：同机多份 node/npm 时用错 npm 会把包装进另一个 prefix、目标副本不变；brew 安装的 CLI 一律走 `brew upgrade`（opencode 自更新是交互 TUI，行输入无法应答）。
+- **交互式 TUI 自更新不走 run_streaming_pty**：kimi/opencode 的 `upgrade` 是方向键选择界面，行输入无法应答——
+  规格标 `PackagingSpec.interactive_tui`，`check_agent_updates` 按与 update_agent 同一套渠道判定
+  （`updater::interactive_self_update`，首条命令是自更新渠道才命中）带出预填命令；配置页「新版/更新」命中时
+  改走 `setPendingTerminal`（shellOnly + prefillCommand，同官方账号登录机制）开完整终端让用户方向键操作，普通渠道零变化。
 - 解析各 CLI 内部格式时**防御式**：跳过未知类型、容忍缺字段、容忍末行截断（格式随版本漂移）。
 - 三平台兼容：禁写平台特定路径，用 `dirs`/`keyring`/`portable-pty` 的抽象。
 - UI 文案用中文；代码注释用中文、只在非显而易见处写（参照现有文件风格）。
@@ -191,6 +219,9 @@ src-tauri/src/
   开步在 ensure_git_repo 之后先走 `commit_project_bootstrap`（best-effort）：只把 `.ccode` 与 `.gitignore`
   两个 Ccode 自有路径提交进主仓库（add 与 commit 都带 literal pathspec，用户自行暂存的文件也绝不带走），
   避免评审合并被「主文件夹里还有没保存的改动」（主仓脏）拦截；ensure_git_at 生成的默认 .gitignore 含 `*.pdf`（大文件登记为资源引用）。
+  **TASK.md 不进 git**：落盘时自动把 `TASK.md` 追加进仓库共享的 `.git/info/exclude`（projects.rs `exclude_task_md`，
+  对全部 worktree 与主仓生效，best-effort 不阻断）——TASK.md 是开步脚手架而非任务产物，防止工作区全量提交
+  把它带进分支、合并后旧 TASK.md 污染主项目根目录误导后续 Agent。
 - **流水线模板库**：内置模板集中在 `src/pipeline-presets.ts` 的 `PIPELINE_TEMPLATES`（综述/科研论文/数据处理/毕业论文），
   新增场景 = 数组加一项，简报必须遵守输入写死/决策写死/交付写死约定（auto 模式无歧义）；用户模板走后端
   `list/save/delete_pipeline_template`，选择器（TemplatePicker）合并展示，后端命令未就绪时优雅降级为仅内置模板。
@@ -261,21 +292,21 @@ src-tauri/src/
 ## 路线图（见 docs/architecture.md §11 演进线）
 
 - 通用控制台阶段 P0–W3 ✅（六 agent 适配器、双模式配置、多标签终端、会话可视化、统计页、IDE 形态、任务工作区与评审流）——2026-08 起演进为「AI 科研工作台」，以下为科研线新阶段。
-- **P0 收尾当前批次**：走查 → [skip ci] 提交 → 可选发版
-- **P1 四条并行线**：
-  - P1a 官方账号：profile 双类型（API/官方账号）；终端内跑 CLI 登录命令连接；只读检测 auth 文件；拉起不注入 API env 且 env_remove 残留密钥变量；统计页显示「订阅」不计费；第一批 Claude/Codex/Gemini
-  - P1b 流水线骨架：`.ccode/project.toml` 读写 + 项目注册、工作区页按项目分组 + 流水线进度条（状态从工作区派生）、一键开步、资源面板一键引用路径、工作区类型驱动默认值（数据类跳端口/建议 .gitignore/挂技能包）、非 git 目录引导 init、资源自动发现（扫描目录把 PDF/CSV/parquet 列入资源候选供勾选）、科研用户首启引导（「示例课题模板」带现成流水线 + 演示数据 + 示例 PDF + git init 引导，P1b 验收门槛之一）
-  - P1c 供应商预设补齐：claude-code 补 DeepSeek/智谱 Anthropic 兼容端点、qwen 补智谱等（按 matrix 核实补录）；此后加供应商 = 预设表加一行
-  - P1d 适配器注册表：per-agent 硬编码 match（detect/launch_plan/resume/env 规则、技能分发目录、安装更新方式、协议与密钥 env 名、官方账号 login/auth/env_remove 字段）收敛为中央声明式 AgentSpec 注册表（一个 CLI 一张规格）；解析器与 usage 提取器不可数据化，保持每 CLI 一个解析器文件，注册表只做分发入口；先行或与 P1a 背靠背（官方账号字段正是规格表字段，先注册表后填数据避免改两遍）；250 个既有测试兜底
-- **P2 文献**：PDF 预览 + 选段问 AI ✅（P2a：直接 pdf.js——WKWebView 拿不到选区文本且三平台不齐，spike 跳过；`read_pdf_bytes` 白名单 + PdfPreview 懒加载 chunk）、整理为笔记 ✅（P2b：`pdf_owner_project` 归属反查 + `append_workspace_inbox` 写 `notes/inbox.md` + 无工作区走一键开步）、文献技能包（notes/*.md + references.bib）
-- **P3 数据 + 接力**：数据处理模板 + 技能包、提货单自动化（artifacts.yaml）、图片评审、长任务 OS 通知、接力包 + 接力链可回溯
-- **P4 论文**：manuscript 模板 + quarto/latex 技能包、渲染 PDF 提货单产物内嵌预览、bib 从文献步提货单联动进简报
-- **P5 通用层打磨（按需穿插）**：逐 hunk 验收、批量验收、跨标签聚合视图、成本按工作区归因、云端会话双源调研
-- **Backlog（记录不动手）**：SSH 远程执行、MCP 配置分发调研、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后评估）
+- **P1 四条并行线 ✅**：
+  - P1a 官方账号 ✅：profile 双类型（API/官方账号，第一批 Claude/Codex/Gemini）；终端内跑 CLI 登录命令连接；只读检测 auth 文件 + 冲突配置黄色警告；拉起不注入 API env 且 env_remove 残留密钥变量；统计页显示「订阅」不计费
+  - P1b 流水线骨架 ✅：`.ccode/project.toml` 档案卡 + 项目注册、工作区页按项目分组 + 流水线胶囊概览（状态从工作区派生；分段进度条已收敛为「研究流程 d/t」文字）、一键开步（含 bootstrap 自动提交 + TASK.md exclude）、资源面板与自动发现、非 git 目录引导 init；首启引导为轻量版（空流水线走模板选择器），完整版（演示数据 + 示例 PDF）留 backlog；工作区类型驱动默认值（数据类跳端口）未做，留 backlog
+  - P1c 供应商预设补齐 ✅：claude-code 补 DeepSeek/智谱 Anthropic 兼容端点、codex/qwen/kimi/opencode 补 DeepSeek/智谱等；此后加供应商 = `src/presets.ts` 加一行
+  - P1d 适配器注册表 ✅：per-agent 硬编码 match 收敛为 `agent_specs.rs` 中央声明式 AgentSpec 注册表（一个 CLI 一张规格）；解析器与 usage 提取器保持每 CLI 一个解析器文件，注册表只做分发入口
+- **P2 文献 ✅**：PDF 预览 + 选段问 AI（P2a：pdf.js 懒加载 chunk + `read_pdf_bytes` 白名单）、整理为笔记（P2b：`pdf_owner_project` 归属反查 + `append_workspace_inbox` 写 `notes/inbox.md` + 无工作区走一键开步）、文献技能包（lit-search/lit-notes/review-framework/review-writing，notes/*.md + references.bib 规范）
+- **P3 数据 + 接力 ✅**：数据处理模板 + 技能包（data-clean/data-eda）、提货单 artifacts.yaml v1（手动登记 + md5/大小，下一步 TASK.md 自动带提货单段）、图片评审（ImagePairView 双栏看图）、长任务 OS 通知（notify.ts）、接力包 + 接力链可回溯（handoff.rs，对话页「⇄ 接自」badge）
+- **P4 论文 ✅**：科研论文/毕业论文 manuscript 模板 + quarto render 脚本（render-draft/render-final，RX4a 追加 export-docx）、quarto-render 技能、提货单登记的 PDF 产物纳入预览白名单（根外产物按精确路径放行）；bib 联动以模板简报引用 references.bib 的务实形式落地
+- **RX 体验批 ✅**：RX1 流水线编辑器 + 步骤资源绑定；RX2a md 阅读版式/沉浸、RX2b 步骤胶囊对照（◫ 切根 + 产物面板）；RX3a 对话步骤化（步骤名 badge/分组/搜索）、RX3b 技能新建/编辑/◈ 优化 + 步骤挂载技能；RX4a docx 预览 + export-docx；笔记对话式批改（选段「◈ 讨论/改写此段」）；界面白话双层 + 工作区页/列表精简
+- **P5 通用层打磨（部分 ✅）**：逐 hunk 验收 ✅、跨标签聚合视图 ✅、成本按工作区归因 ✅（任务成本）、历史时间线视图 ✅（first-parent 主线 + 白话翻译：✓ 验收合并/⚙ 自动保存/◔ 保存）；批量验收、云端会话双源调研留 backlog
+- **Backlog（记录不动手）**：SSH 远程执行、MCP 配置分发调研、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后评估）、批量验收、云端会话双源调研、首启引导完整版（示例课题带演示数据 + 示例 PDF）、工作区类型驱动默认值（数据类跳端口）、内置技能种子机制（**等用户把现有技能优化完善后再做**：目前六个技能只在本机库，应用无内置/首启导入机制）
 
 **当前待办**：
 
-- P1 四条并行线：P1d 适配器注册表先行或与 P1a 背靠背（官方账号字段正是规格表字段，先注册表后填数据）；P1a 官方账号（第一批 Claude/Codex/Gemini，env 净化按 matrix 逐家核实）、P1b 流水线骨架（project.toml + 一键开步 + 工作区页分组/进度条）、P1c 供应商预设补齐（按 matrix 核实补录）
+- P0 收尾当前批次：全量文档同步 → 走查 → [skip ci] 提交 → 可选发版；历史时间线视图待并行组合入后补手册条目
 - macOS 签名公证（暂缓，需 Apple Developer 会员 + CI 配 6 个 APPLE_* secrets，见架构 v1.3）
 - Intel macOS 安装包（暂缓：CI macos-latest 只出 aarch64；加 `x86_64-apple-darwin` target 构建时间翻倍，真有 Intel 用户再加，见架构 v1.3 / README 安装节）
 - OpenCode Windows 数据路径未核实（matrix 标注「文档与源码不一致」），Windows 用户验证会话/用量统计后修正

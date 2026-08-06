@@ -96,6 +96,7 @@ pub fn run() {
             git_info::git_commit,
             git_info::git_push,
             git_info::git_status_map,
+            git_info::project_history,
             git_info::workspace_diff,
             git_info::workspace_file_diff,
             updater::update_agent,
