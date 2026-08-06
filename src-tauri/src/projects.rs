@@ -53,6 +53,9 @@ pub struct StepDto {
     pub brief: String,
     pub expected_artifacts: Vec<String>,
     pub skills: Vec<String>,
+    // 资源绑定：[[resources]] 条目的 path 精确匹配（相对/绝对均可）；
+    // 空数组 = 不绑定 = 全部资源（向后兼容旧档案卡）
+    pub resources: Vec<String>,
     pub run: Vec<StepRunDto>,
 }
 
@@ -101,6 +104,13 @@ pub struct DiscoveredResourceDto {
 pub struct EnsureGitDto {
     pub initialized: bool,      // 本次执行了 git init
     pub gitignore_written: bool, // 本次新建了 .gitignore
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapCommitDto {
+    pub committed: bool,    // 本次是否产生了提交
+    pub paths: Vec<String>, // 实际提交的文件（相对仓库根）
 }
 
 // ===== 注册表（app.db projects 表；建表风格同 workspaces::db_at） =====
@@ -343,29 +353,89 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
     if let Some(steps) = value.get("steps").and_then(|v| v.as_array()) {
         for (i, item) in steps.iter().enumerate() {
             match item.clone().try_into::<TomlStep>() {
-                Ok(s) => config.steps.push(StepDto {
-                    name: s.name,
-                    workspace_name: s.workspace_name,
-                    brief: s.brief,
-                    expected_artifacts: s.expected_artifacts,
-                    skills: s.skills,
-                    run: s
-                        .run
-                        .into_iter()
-                        .map(|(name, r)| StepRunDto {
-                            name,
-                            command: r.command,
-                            is_default: r.default,
-                        })
-                        .collect(),
-                }),
+                Ok(s) => {
+                    // resources 不进 TomlStep 由 serde 解析：非数组/非字符串项要逐条容错跳过，
+                    // 避免一个坏绑定拖垮整个步骤（风格同其他字段的 warning 文案）
+                    let mut bound = Vec::new();
+                    match item.get("resources") {
+                        None => {}
+                        Some(toml::Value::Array(arr)) => {
+                            for (j, v) in arr.iter().enumerate() {
+                                match v.as_str() {
+                                    Some(p) if !p.trim().is_empty() => bound.push(p.to_string()),
+                                    _ => warnings.push(format!(
+                                        "steps[{i}] 的 resources[{j}] 不是有效字符串，已跳过"
+                                    )),
+                                }
+                            }
+                        }
+                        Some(_) => warnings
+                            .push(format!("steps[{i}] 的 resources 不是数组，已忽略")),
+                    }
+                    config.steps.push(StepDto {
+                        name: s.name,
+                        workspace_name: s.workspace_name,
+                        brief: s.brief,
+                        expected_artifacts: s.expected_artifacts,
+                        skills: s.skills,
+                        resources: bound,
+                        run: s
+                            .run
+                            .into_iter()
+                            .map(|(name, r)| StepRunDto {
+                                name,
+                                command: r.command,
+                                is_default: r.default,
+                            })
+                            .collect(),
+                    });
+                }
                 Err(e) => warnings.push(format!("steps[{i}] 字段无效，已跳过: {e}")),
             }
         }
     } else if value.get("steps").is_some() {
         warnings.push("steps 不是表数组，已忽略".to_string());
     }
+    // 语义级校验（绑定资源存在性、简报产物引用）并入 warnings，read_project_config 自动产出
+    for step in &config.steps {
+        warnings.extend(validate_step(step, &config.resources));
+    }
     (config, warnings)
+}
+
+// ===== 步骤资源绑定的轻量校验（纯函数，供 read 流程与后续 command 复用） =====
+
+/// brief 里约定俗成的产物路径引用：引用了但 expectedArtifacts 没有对应项时提示
+const BRIEF_ARTIFACT_REFS: [&str; 5] =
+    ["papers/", "notes/", "references.bib", "outline.md", "manuscript/"];
+
+/// 校验单个步骤，返回中文提示文案（不做翻译层）：
+/// ① 绑定值必须在 [[resources]] 的 path 里精确存在；空数组 = 不绑定，不触发；
+/// ② brief 引用了约定产物路径，但 expectedArtifacts 无对应项（同值或以该目录开头）时提示。
+pub(crate) fn validate_step(step: &StepDto, resources: &[ResourceDto]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for bound in &step.resources {
+        if !resources.iter().any(|r| r.path == *bound) {
+            warnings.push(format!(
+                "步骤「{}」绑定的资源不存在：{bound}",
+                step.name
+            ));
+        }
+    }
+    for token in BRIEF_ARTIFACT_REFS {
+        if step.brief.contains(token)
+            && !step
+                .expected_artifacts
+                .iter()
+                .any(|e| e == token || e.starts_with(token))
+        {
+            warnings.push(format!(
+                "步骤「{}」的简报引用了「{token}」，但 expectedArtifacts 未包含对应产物",
+                step.name
+            ));
+        }
+    }
+    warnings
 }
 
 fn read_config_at(project: &Path) -> ProjectConfigReadDto {
@@ -386,6 +456,18 @@ fn read_config_at(project: &Path) -> ProjectConfigReadDto {
             warnings: vec![format!("读取 project.toml 失败，已按空配置处理: {e}")],
         },
     }
+}
+
+/// RX3a 对话步骤化：workspace_name → 步骤名映射（会话列表按步骤标注/搜索/分组用）。
+/// 读不到配置返回空映射，与 read_project_config 的容错风格一致（宁缺勿阻断）。
+pub(crate) fn step_names_at(project: &Path) -> std::collections::HashMap<String, String> {
+    read_config_at(project)
+        .config
+        .steps
+        .into_iter()
+        .filter(|s| !s.workspace_name.is_empty())
+        .map(|s| (s.workspace_name, s.name))
+        .collect()
 }
 
 /// 生成写入文本：以现有文件为底用 toml_edit 打补丁（同 global_config.rs 的 TOML 补丁风格），
@@ -457,6 +539,14 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                     skills.push(k.as_str());
                 }
                 t["skills"] = value(skills);
+            }
+            // 空数组省略不写：空 = 不绑定 = 全部资源，与省略同语义，档案卡更简洁
+            if !s.resources.is_empty() {
+                let mut resources = toml_edit::Array::new();
+                for r in &s.resources {
+                    resources.push(r.as_str());
+                }
+                t["resources"] = value(resources);
             }
             if !s.run.is_empty() {
                 let mut run = Table::new();
@@ -652,6 +742,9 @@ fn ensure_git_at(project: &Path) -> Result<EnsureGitDto, String> {
              /{artifact_dir}/\n\
              .DS_Store\n\
              \n\
+             # 文献 PDF 等大文件登记为资源引用，不进 git\n\
+             *.pdf\n\
+             \n\
              # 常见数据/产物目录（按需取消注释）\n\
              # /data/\n\
              # /output/\n\
@@ -665,6 +758,86 @@ fn ensure_git_at(project: &Path) -> Result<EnsureGitDto, String> {
     Ok(EnsureGitDto {
         initialized: true,
         gitignore_written,
+    })
+}
+
+// ===== 开步自动提交：只把 .ccode 与 .gitignore 两个 Ccode 自有路径提交进主仓库 =====
+// 背景：git init 后档案卡（.ccode/project.toml）与 .gitignore 长期未跟踪，
+// 工作区评审合并会被「主仓库有未提交改动」拦截。此命令只碰这两个路径，
+// 用户其他文件（PDF 等）绝不纳入——commit 同样带 pathspec，防止扫进用户已暂存的内容。
+
+/// 开步自动提交只处理的两个 Ccode 自有路径（literal pathspec，无 glob 展开）
+const BOOTSTRAP_PATHS: [&str; 2] = [".ccode", ".gitignore"];
+
+fn commit_bootstrap_at(repo: &Path) -> Result<BootstrapCommitDto, String> {
+    const T: Duration = Duration::from_secs(30);
+    if !repo.is_dir() {
+        return Err(format!("项目目录不存在或不是目录: {}", repo.display()));
+    }
+    if crate::agents::resolve_binary("git").is_none() {
+        return Err("找不到 git 可执行文件，请先安装 git".to_string());
+    }
+    let inside = crate::workspaces::run_git(repo, &["rev-parse", "--is-inside-work-tree"], T)
+        .map(|out| out.trim() == "true")
+        .unwrap_or(false);
+    if !inside {
+        return Err("不是 git 仓库，请先在项目页执行 git 初始化".to_string());
+    }
+    // 只处理磁盘上存在的路径：git add 对不存在的 pathspec 会整体失败，先过滤
+    let existing: Vec<&str> = BOOTSTRAP_PATHS
+        .into_iter()
+        .filter(|p| repo.join(p).exists())
+        .collect();
+    if existing.is_empty() {
+        return Ok(BootstrapCommitDto {
+            committed: false,
+            paths: Vec::new(),
+        });
+    }
+    // 暂存这两个路径下的全部改动（untracked / modified / 已暂存）
+    let mut add_args: Vec<&str> = vec!["--literal-pathspecs", "add", "--"];
+    add_args.extend(existing.iter().copied());
+    crate::workspaces::run_git(repo, &add_args, T)
+        .map_err(|e| format!("暂存 .ccode/.gitignore 失败: {e}"))?;
+    // 有暂存内容才提交；空仓库（unborn HEAD）下 diff --cached 与空树比较，也能列出新增文件
+    let mut staged_args: Vec<&str> =
+        vec!["--literal-pathspecs", "diff", "--cached", "--name-only", "--"];
+    staged_args.extend(existing.iter().copied());
+    let staged = crate::workspaces::run_git(repo, &staged_args, T)
+        .map_err(|e| format!("检查暂存内容失败: {e}"))?;
+    let paths: Vec<String> = staged
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    if paths.is_empty() {
+        return Ok(BootstrapCommitDto {
+            committed: false,
+            paths: Vec::new(),
+        });
+    }
+    // 与 ensure_initial_commit 同一模式：绕过 gpgsign；git 身份缺失时仅本次提交
+    // 用 -c 注入临时身份，不写入用户 git config
+    let configured = |key: &str| {
+        crate::workspaces::run_git(repo, &["config", "--get", key], T)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    };
+    let mut args: Vec<&str> = vec!["-c", "commit.gpgsign=false", "--literal-pathspecs"];
+    if !configured("user.name") {
+        args.extend(["-c", "user.name=Ccode"]);
+    }
+    if !configured("user.email") {
+        args.extend(["-c", "user.email=ccode@localhost"]);
+    }
+    // pathspec 限定提交范围：用户先前自行暂存的其他文件留在暂存区，不被本次提交带走
+    args.extend(["commit", "-m", "Ccode: 项目档案卡与 gitignore 自动提交", "--"]);
+    args.extend(existing.iter().copied());
+    crate::workspaces::run_git(repo, &args, T).map_err(|e| format!("自动提交失败: {e}"))?;
+    Ok(BootstrapCommitDto {
+        committed: true,
+        paths,
     })
 }
 
@@ -748,6 +921,18 @@ pub async fn ensure_git_repo(path: String) -> Result<EnsureGitDto, String> {
     .map_err(|e| format!("git 初始化失败: {e}"))?
 }
 
+/// 一键开步前置：把 .ccode 与 .gitignore 两个 Ccode 自有路径提交进主仓库。
+/// 幂等：无改动返回 committed=false；非仓库报错（前端开步流程已先走 ensure_git_repo）。
+#[tauri::command]
+pub async fn commit_project_bootstrap(repo_path: String) -> Result<BootstrapCommitDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo = PathBuf::from(crate::sessions::expand_tilde(&repo_path));
+        commit_bootstrap_at(&repo)
+    })
+    .await
+    .map_err(|e| format!("自动提交项目档案卡失败: {e}"))?
+}
+
 /// 一键开步（§11.4 P1b）：把步骤简报落成工作区 TASK.md。
 /// 只写固定文件名且必须位于给定工作树根内；不存在则新建，原子写入。
 #[tauri::command]
@@ -762,10 +947,48 @@ pub async fn write_workspace_task_md(
         }
         let root = fs::canonicalize(crate::sessions::expand_tilde(&worktree_path))
             .map_err(|e| format!("工作区目录无效: {e}"))?;
+        // TASK.md 是开步脚手架而非任务产物：把它加进仓库级 .git/info/exclude，
+        // 防止工作区全量提交把它带进分支、合并后污染主项目根目录（旧 TASK.md 会误导后续 Agent）
+        exclude_task_md(&root);
         crate::profiles::atomic_write(&root.join("TASK.md"), &content)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 把 TASK.md 追加到仓库共享的 .git/info/exclude（对所有 worktree 与主仓生效）。
+/// best-effort：拿不到 git 公共目录（非仓库/异常）时静默跳过，不阻断 TASK.md 写入。
+fn exclude_task_md(worktree_root: &Path) {
+    let Ok(common) = crate::workspaces::run_git(
+        worktree_root,
+        &["rev-parse", "--git-common-dir"],
+        std::time::Duration::from_secs(30),
+    ) else {
+        return;
+    };
+    let common = common.trim();
+    if common.is_empty() {
+        return;
+    }
+    // --git-common-dir 可能返回相对路径（相对 worktree 根）
+    let dir = Path::new(common);
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        worktree_root.join(dir)
+    };
+    let exclude = dir.join("info").join("exclude");
+    let existing = fs::read_to_string(&exclude).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == "TASK.md") {
+        return;
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str("TASK.md\n");
+    let _ = fs::create_dir_all(exclude.parent().unwrap());
+    let _ = crate::profiles::atomic_write(&exclude, &content);
 }
 
 // ===== P2b「整理为笔记」：PDF 选段 → 笔记工作区 notes/inbox.md =====
@@ -1049,6 +1272,7 @@ mod tests {
                 brief: "读文献写笔记".into(),
                 expected_artifacts: vec!["notes/".into()],
                 skills: vec!["paper-notes".into()],
+                resources: Vec::new(),
                 run: vec![
                     StepRunDto {
                         name: "dev".into(),
@@ -1220,6 +1444,185 @@ type = "paper"
         assert_eq!(warnings.len(), 1, "坏 topic 要报告: {warnings:?}");
     }
 
+    // ===== 步骤资源绑定（resources 字段与 validate_step） =====
+
+    #[test]
+    fn step_resources_round_trip_and_default_empty() {
+        // 缺失 resources 的步骤默认空数组；绑定的步骤精确往返（相对与绝对路径混合）
+        let text = r#"[[resources]]
+name = "论文A"
+path = "papers/a.pdf"
+
+[[resources]]
+name = "共享数据"
+path = "/shared/data/x.csv"
+
+[[steps]]
+name = "文献整理"
+brief = "读文献写笔记"
+
+[[steps]]
+name = "数据分析"
+brief = "跑数据"
+resources = ["papers/a.pdf", "/shared/data/x.csv"]
+"#;
+        let (config, warnings) = parse_config(text);
+        assert!(warnings.is_empty(), "合法配置不应有警告: {warnings:?}");
+        assert_eq!(config.steps[0].resources, Vec::<String>::new(), "缺失默认空");
+        assert_eq!(
+            config.steps[1].resources,
+            vec!["papers/a.pdf".to_string(), "/shared/data/x.csv".to_string()]
+        );
+        let rendered = render_config(Some(text), &config).unwrap();
+        assert!(rendered.contains("resources = ["), "绑定必须写回: {rendered}");
+        let (back, back_warnings) = parse_config(&rendered);
+        assert!(back_warnings.is_empty(), "回读不应有警告: {back_warnings:?}");
+        assert_eq!(back, config);
+        // 空数组渲染时省略不写（语义同省略）
+        let cleared = StepDto {
+            resources: Vec::new(),
+            ..config.steps[1].clone()
+        };
+        let mut cfg = config.clone();
+        cfg.steps[1] = cleared;
+        let rendered = render_config(Some(&rendered), &cfg).unwrap();
+        assert!(!rendered.contains("resources ="), "空绑定不应写入: {rendered}");
+        let (back, _) = parse_config(&rendered);
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn step_resources_tolerates_bad_values() {
+        // 非数组 → 整条忽略并告警，步骤本体保留；非字符串/空白项逐条跳过并告警
+        let text = r#"[[steps]]
+name = "坏绑定一"
+resources = "not-an-array"
+
+[[steps]]
+name = "坏绑定二"
+resources = [1, "papers/a.pdf", "", 42]
+"#;
+        let (config, warnings) = parse_config(text);
+        assert_eq!(config.steps.len(), 2, "坏 resources 不得拖垮步骤: {warnings:?}");
+        assert!(config.steps[0].resources.is_empty());
+        assert_eq!(config.steps[1].resources, vec!["papers/a.pdf".to_string()]);
+        let joined = warnings.join("\n");
+        assert!(joined.contains("steps[0] 的 resources 不是数组"), "{joined}");
+        assert!(joined.contains("steps[1] 的 resources[0]"), "{joined}");
+        assert!(joined.contains("steps[1] 的 resources[2]"), "空白项也要报告: {joined}");
+        assert!(joined.contains("steps[1] 的 resources[3]"), "{joined}");
+    }
+
+    #[test]
+    fn validate_step_binding_rules() {
+        let resources = vec![
+            ResourceDto {
+                name: "论文A".into(),
+                path: "papers/a.pdf".into(),
+                kind: "paper".into(),
+                readonly: true,
+                note: String::new(),
+            },
+            ResourceDto {
+                name: "共享数据".into(),
+                path: "/shared/x.csv".into(),
+                kind: "dataset".into(),
+                readonly: false,
+                note: String::new(),
+            },
+        ];
+        // 规则①：绑定 path 不在 [[resources]] 里 → 提示；精确命中（相对/绝对）与空绑定不提示
+        let step = StepDto {
+            name: "分析".into(),
+            resources: vec!["papers/a.pdf".into(), "/shared/x.csv".into(), "missing.pdf".into()],
+            ..StepDto::default()
+        };
+        let warnings = validate_step(&step, &resources);
+        assert_eq!(warnings.len(), 1, "只有不存在的绑定要提示: {warnings:?}");
+        assert!(warnings[0].contains("绑定的资源不存在：missing.pdf"), "{}", warnings[0]);
+        let ok = StepDto {
+            resources: vec!["papers/a.pdf".into()],
+            ..StepDto::default()
+        };
+        assert!(validate_step(&ok, &resources).is_empty(), "精确命中不提示");
+        let unbound = StepDto::default();
+        assert!(
+            validate_step(&unbound, &resources).is_empty(),
+            "空数组 = 不绑定 = 全部资源，不校验"
+        );
+
+        // 规则②：brief 引用约定产物路径但 expectedArtifacts 无对应项 → 提示；有对应项或无引用不提示
+        let miss = StepDto {
+            name: "整理".into(),
+            brief: "通读 papers/ 后把笔记写进 notes/，更新 references.bib".into(),
+            expected_artifacts: vec!["notes/".into()],
+            ..StepDto::default()
+        };
+        let warnings = validate_step(&miss, &resources);
+        assert_eq!(warnings.len(), 2, "papers/ 与 references.bib 各提示一次: {warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("「papers/」")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("「references.bib」")), "{warnings:?}");
+        let hit = StepDto {
+            brief: "把综述草稿写进 manuscript/ 并同步 outline.md".into(),
+            expected_artifacts: vec!["manuscript/draft.md".into(), "outline.md".into()],
+            ..StepDto::default()
+        };
+        assert!(
+            validate_step(&hit, &resources).is_empty(),
+            "目录前缀命中与文件精确命中都不提示"
+        );
+        let no_ref = StepDto {
+            brief: "读文献写笔记".into(),
+            ..StepDto::default()
+        };
+        assert!(validate_step(&no_ref, &resources).is_empty(), "无引用不提示");
+    }
+
+    #[test]
+    fn read_config_merges_validation_warnings() {
+        // read_project_config 的 warnings 自动并入校验结果
+        let dir = temp_dir("validate");
+        let project = dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let text = r#"[[steps]]
+name = "分析"
+brief = "产出进 notes/"
+resources = ["ghost.pdf"]
+"#;
+        write(&config_path(&project), text);
+        let read = read_config_at(&project);
+        let joined = read.warnings.join("\n");
+        assert!(joined.contains("绑定的资源不存在：ghost.pdf"), "{joined}");
+        assert!(joined.contains("「notes/」"), "{joined}");
+        // 无问题的配置 warnings 为空
+        write_config_at(&project, &sample_config()).unwrap();
+        let read = read_config_at(&project);
+        assert!(read.warnings.is_empty(), "干净配置不应有警告: {:?}", read.warnings);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn step_names_at_maps_workspace_to_step() {
+        let dir = temp_dir("stepnames");
+        let project = dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        // 无档案卡：空映射，不报错
+        assert!(step_names_at(&project).is_empty());
+        write_config_at(&project, &sample_config()).unwrap();
+        let map = step_names_at(&project);
+        assert_eq!(map.get("lit").map(String::as_str), Some("文献整理"));
+        // 无 workspace_name 的步骤不进映射
+        let mut config = sample_config();
+        config.steps.push(StepDto {
+            name: "无工作区步骤".into(),
+            ..StepDto::default()
+        });
+        write_config_at(&project, &config).unwrap();
+        let map = step_names_at(&project);
+        assert_eq!(map.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn write_then_read_config_through_fs() {
         let dir = temp_dir("rw");
@@ -1370,6 +1773,147 @@ type = "paper"
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ===== 开步自动提交（commit_bootstrap_at） =====
+
+    fn git_ok(dir: &Path, args: &[&str]) -> String {
+        crate::workspaces::run_git(dir, args, Duration::from_secs(30))
+            .unwrap_or_else(|e| panic!("git {args:?} 失败: {e}"))
+    }
+
+    fn git_has_head(dir: &Path) -> bool {
+        crate::workspaces::run_git(
+            dir,
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            Duration::from_secs(10),
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn bootstrap_commit_only_ccode_paths_and_idempotent() {
+        if crate::agents::resolve_binary("git").is_none() {
+            eprintln!("测试环境无 git，跳过 commit_bootstrap 用例");
+            return;
+        }
+        let dir = temp_dir("bootstrap");
+        let project = dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        ensure_git_at(&project).unwrap(); // git init + 默认 .gitignore
+        write_config_at(&project, &sample_config()).unwrap(); // .ccode/project.toml
+        // 用户文件：必须保持未跟踪，绝不纳入自动提交
+        write(&project.join("paper.pdf"), "pdf");
+        write(&project.join("data/notes.txt"), "n");
+        // 用户自行暂存的文件也不得被本次提交带走（commit 有 pathspec 限定）
+        write(&project.join("staged.txt"), "s");
+        git_ok(&project, &["add", "staged.txt"]);
+
+        let r = commit_bootstrap_at(&project).unwrap();
+        assert!(r.committed, "untracked 的 .ccode/.gitignore 必须提交");
+        assert!(r.paths.contains(&".gitignore".to_string()), "{:?}", r.paths);
+        assert!(
+            r.paths.contains(&".ccode/project.toml".to_string()),
+            "{:?}",
+            r.paths
+        );
+        assert!(
+            !r.paths
+                .iter()
+                .any(|p| p.contains("paper.pdf") || p.contains("notes") || p.contains("staged")),
+            "用户文件绝不进提交清单: {:?}",
+            r.paths
+        );
+
+        // HEAD 树里只有 Ccode 自有路径
+        let tree = git_ok(&project, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(tree.contains(".gitignore") && tree.contains(".ccode/project.toml"), "{tree}");
+        assert!(
+            !tree.contains("paper.pdf") && !tree.contains("notes.txt") && !tree.contains("staged.txt"),
+            "用户文件绝不进树: {tree}"
+        );
+        // 用户文件保持原状态：未跟踪的仍 ??，用户暂存的仍 A
+        let status = git_ok(&project, &["status", "--porcelain=v1", "--untracked-files=all"]);
+        assert!(
+            status.lines().any(|l| l.starts_with("??") && l.contains("notes.txt")),
+            "未跟踪用户文件不动: {status}"
+        );
+        assert!(
+            status.lines().any(|l| l.starts_with("A ") && l.contains("staged.txt")),
+            "用户暂存文件留在暂存区: {status}"
+        );
+
+        // 幂等：第二次 committed=false，用户暂存内容仍不被带走
+        let r2 = commit_bootstrap_at(&project).unwrap();
+        assert!(!r2.committed && r2.paths.is_empty(), "第二次必须幂等: {r2:?}");
+        let status2 = git_ok(&project, &["status", "--porcelain=v1"]);
+        assert!(
+            status2.lines().any(|l| l.starts_with("A ") && l.contains("staged.txt")),
+            "{status2}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bootstrap_commit_picks_up_modified_gitignore() {
+        if crate::agents::resolve_binary("git").is_none() {
+            eprintln!("测试环境无 git，跳过 commit_bootstrap 用例");
+            return;
+        }
+        let dir = temp_dir("bootstrap-mod");
+        let project = dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        ensure_git_at(&project).unwrap();
+        // 只存在 .gitignore（无 .ccode）：只提交存在的路径
+        let r1 = commit_bootstrap_at(&project).unwrap();
+        assert!(r1.committed && r1.paths == [".gitignore".to_string()], "{r1:?}");
+
+        // 修改已跟踪的 .gitignore：modified 也要被提交
+        fs::write(project.join(".gitignore"), "# 用户改过的\n*.pdf\n").unwrap();
+        let r2 = commit_bootstrap_at(&project).unwrap();
+        assert!(r2.committed, "modified 的 .gitignore 必须提交");
+        assert_eq!(r2.paths, [".gitignore".to_string()], "{:?}", r2.paths);
+
+        // 无改动时幂等
+        let r3 = commit_bootstrap_at(&project).unwrap();
+        assert!(!r3.committed && r3.paths.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bootstrap_commit_unborn_repo_and_non_repo() {
+        if crate::agents::resolve_binary("git").is_none() {
+            eprintln!("测试环境无 git，跳过 commit_bootstrap 用例");
+            return;
+        }
+        let dir = temp_dir("bootstrap-unborn");
+        // 非仓库报错（前端开步流程已先走 ensure_git_repo，此处为防御）
+        let plain = dir.join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        assert!(commit_bootstrap_at(&plain).is_err(), "非仓库必须报错");
+
+        // 空仓库（unborn HEAD）：bootstrap 直接落第一个内容提交，无需先跑空初始提交
+        let project = dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        ensure_git_at(&project).unwrap();
+        assert!(!git_has_head(&project), "前置：仓库应为 unborn");
+        write_config_at(&project, &sample_config()).unwrap();
+        let r = commit_bootstrap_at(&project).unwrap();
+        assert!(r.committed);
+        // HEAD 已存在：create_workspace 内的 ensure_initial_commit 见到 HEAD 直接 no-op
+        assert!(git_has_head(&project), "bootstrap 后 HEAD 必须存在");
+        let tree = git_ok(&project, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(tree.contains(".gitignore") && tree.contains(".ccode/project.toml"), "{tree}");
+
+        // 空仓库且两个路径都不存在：committed=false，仓库保持 unborn，
+        // 由 create_workspace 的 ensure_initial_commit 兜底空提交
+        let bare = dir.join("bare");
+        fs::create_dir_all(&bare).unwrap();
+        git_ok(&bare, &["init"]);
+        let r = commit_bootstrap_at(&bare).unwrap();
+        assert!(!r.committed && r.paths.is_empty(), "无内容可提交时必须幂等: {r:?}");
+        assert!(!git_has_head(&bare), "无内容时不得凭空制造提交");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn resolve_owner_rules() {
         let outside_res = PathBuf::from("/shared/paper.pdf");
@@ -1461,6 +2005,7 @@ type = "paper"
                 brief: "整理笔记".into(),
                 expected_artifacts: vec!["notes/".into()],
                 skills: vec!["paper-notes".into()],
+                resources: Vec::new(),
                 run: vec![StepRunDto {
                     name: "dev".into(),
                     command: "echo hi".into(),

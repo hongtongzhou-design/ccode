@@ -143,9 +143,48 @@ fn parse_numstat(text: &str) -> HashMap<String, (u64, u64)> {
     map
 }
 
-/// 未跟踪文件的行数作为 additions（best effort，目录/不可读 → None）
+/// 已知二进制扩展名：内容可能是纯 ASCII 开头（部分 PDF 无 NUL 字节），按扩展名直接排除
+const BINARY_EXTS: &[&str] = &[
+    "pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svgz", "zip", "gz", "tar",
+    "zst", "xz", "bz2", "7z", "rar", "parquet", "xlsx", "xls", "docx", "doc", "pptx", "ppt",
+    "mp4", "mov", "avi", "mp3", "wav", "flac", "ttf", "otf", "woff", "woff2", "eot", "sqlite",
+    "db", "pyc", "so", "dylib", "dll", "exe", "bin", "dat", "sav", "dta", "rds",
+];
+
+/// 未跟踪文件的行数作为 additions（best effort：二进制/超大/目录/不可读 → None。
+/// 二进制必须探测——PDF 这类文件的换行字节会把面板总增删数顶到几十万）
 fn count_lines(cwd: &str, rel: &str) -> Option<u64> {
-    let bytes = std::fs::read(Path::new(cwd).join(rel)).ok()?;
+    use std::io::Read;
+    const MAX_SIZE: u64 = 32 * 1024 * 1024;
+    const SNIFF: usize = 8192;
+    let path = Path::new(cwd).join(rel);
+    // 已知二进制扩展名直接排除（内容探测对纯 ASCII 开头的 PDF 会漏判）
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    if ext.is_some_and(|e| BINARY_EXTS.contains(&e.as_str())) {
+        return None;
+    }
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_SIZE {
+        return None;
+    }
+    // 头部含 NUL 或不是合法 UTF-8（截断的尾字符除外）即按二进制处理，不计行数
+    let mut file = std::fs::File::open(&path).ok()?;
+    let mut head = [0u8; SNIFF];
+    let n = file.read(&mut head).ok()?;
+    let sample = &head[..n];
+    if sample.contains(&0) {
+        return None;
+    }
+    if let Err(e) = std::str::from_utf8(sample) {
+        // 样本末尾截断多字节字符不算二进制；中途出现非法序列才算
+        if e.error_len().is_some() {
+            return None;
+        }
+    }
+    let bytes = std::fs::read(&path).ok()?;
     Some(bytes.iter().filter(|b| **b == b'\n').count() as u64)
 }
 
@@ -896,6 +935,50 @@ mod tests {
         assert_eq!(b.additions, Some(3));
         assert_eq!(b.deletions, Some(0));
         assert_eq!(s.total_add, 4);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn status_untracked_binary_not_counted() {
+        if !git_available() {
+            return;
+        }
+        let dir = init_repo("status-binary");
+        git(&dir, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"]);
+        // 含 NUL 的伪 PDF 二进制：换行字节极多，但不得计入增删统计
+        let mut blob = b"%PDF-1.7 fake".to_vec();
+        blob.extend_from_slice(&[0u8; 16]);
+        blob.extend(std::iter::repeat(b'\n').take(5000));
+        fs::write(dir.join("paper.pdf"), &blob).unwrap();
+        fs::write(dir.join("notes.md"), "a\nb\n").unwrap();
+
+        let s = git_status_sync(dir.to_str().unwrap()).unwrap();
+        let pdf = s.files.iter().find(|f| f.path == "paper.pdf").unwrap();
+        assert_eq!(pdf.additions, None, "二进制未跟踪文件不应计行数");
+        let md = s.files.iter().find(|f| f.path == "notes.md").unwrap();
+        assert_eq!(md.additions, Some(2));
+        assert_eq!(s.total_add, 2, "总数不得被二进制换行字节污染");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn status_untracked_ascii_header_pdf_not_counted() {
+        if !git_available() {
+            return;
+        }
+        let dir = init_repo("status-ascii-pdf");
+        git(&dir, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"]);
+        // 纯 ASCII 开头、无 NUL 的 PDF（真实世界存在）：靠扩展名拦截，内容探测会漏
+        let mut blob = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
+        for _ in 0..1000 {
+            blob.extend_from_slice(b"ascii stream line\n");
+        }
+        fs::write(dir.join("clean.pdf"), &blob).unwrap();
+
+        let s = git_status_sync(dir.to_str().unwrap()).unwrap();
+        let pdf = s.files.iter().find(|f| f.path == "clean.pdf").unwrap();
+        assert_eq!(pdf.additions, None, "ASCII 开头的 PDF 也不应计行数");
+        assert_eq!(s.total_add, 0);
         fs::remove_dir_all(&dir).ok();
     }
 

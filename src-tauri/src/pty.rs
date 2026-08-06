@@ -452,6 +452,11 @@ pub fn pty_spawn(
             return Err(error);
         }
     };
+    // 官方账号（订阅制）启动：登记 usage provenance，统计页费用栏据此显示「订阅」。
+    // 尽力而为：登记失败不阻断启动（与 touch_last_used 同语义）
+    if profile.account_type == profiles::AccountType::Official {
+        let _ = crate::usage::register_official_launch(&agent_id, std::path::Path::new(&cwd));
+    }
     crate::sessions::invalidate_scan_cache();
     store.touch_last_used(&profile_id);
     Ok(SpawnResult {

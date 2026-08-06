@@ -14,7 +14,8 @@ import {
 } from "lucide-react";
 import ContextMenu from "./ContextMenu";
 import ImagePairView, { isImagePath } from "./ImagePairView";
-import { LoadingRows } from "./PageFrame";
+import { Checkbox, LoadingRows } from "./PageFrame";
+import { defaultCommitMessage } from "../git-commit-message";
 import type {
   GitCommitResultDto,
   GitFileDto,
@@ -207,14 +208,31 @@ function buildChangeTree(files: GitFileDto[]): ChangeTreeNode[] {
   return root.children;
 }
 
-function blockerText(health: WorkspaceHealthDto | null): string[] {
+/** 健康检查拦截项：key 用于给「主仓脏」挂快速提交入口，text 为面向用户的白话文案 */
+interface HealthBlocker {
+  key: "conflict" | "conflict-unknown" | "main-dirty" | "main-off-base";
+  text: string;
+}
+
+function blockerList(health: WorkspaceHealthDto | null): HealthBlocker[] {
   if (!health) return [];
-  const blockers: string[] = [];
-  if (health.conflict === true) blockers.push("与基准分支存在冲突");
-  if (health.conflict === null) blockers.push("当前 Git 版本无法预检冲突");
-  if (health.mainDirty) blockers.push("主仓库有未提交改动");
-  if (health.mainOffBase) blockers.push("主仓库不在基准分支");
+  const blockers: HealthBlocker[] = [];
+  if (health.conflict === true)
+    blockers.push({
+      key: "conflict",
+      text: "与主分支存在冲突（两边改了同一个地方，需要选一边）",
+    });
+  if (health.conflict === null)
+    blockers.push({ key: "conflict-unknown", text: "当前 Git 版本无法预检冲突" });
+  if (health.mainDirty)
+    blockers.push({ key: "main-dirty", text: "主文件夹里还有没保存的改动" });
+  if (health.mainOffBase)
+    blockers.push({ key: "main-off-base", text: "主文件夹当前不在主分支上" });
   return blockers;
+}
+
+function blockerText(health: WorkspaceHealthDto | null): string[] {
+  return blockerList(health).map((blocker) => blocker.text);
 }
 
 function DiffSide({
@@ -641,7 +659,7 @@ function ConflictFileSection({
             }`}
           >
             <span className="min-w-0 flex-1 truncate text-l2">
-              基准分支 · {baseBranch}
+              主分支 · {baseBranch}
             </span>
             <button
               type="button"
@@ -727,6 +745,171 @@ function ConflictFileSection({
   );
 }
 
+/**
+ * 主仓脏拦截的内联快速提交面板（评审覆盖层内，不跳转）：
+ * 列主仓库改动，默认不勾选；提交信息留空走本地中性默认信息（不调 AI）。
+ */
+function MainRepoCommitPanel({
+  repoPath,
+  onCommitted,
+  onCancel,
+}: {
+  repoPath: string;
+  onCommitted: () => void;
+  onCancel: () => void;
+}) {
+  const [status, setStatus] = useState<GitStatusDto | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [selectedPaths, setSelectedPaths] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  const [message, setMessage] = useState("");
+  const [committing, setCommitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<GitStatusDto>("git_status", { cwd: repoPath })
+      .then((value) => {
+        if (!cancelled) setStatus(value);
+      })
+      .catch((reason) => {
+        if (!cancelled) setLoadError(String(reason));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repoPath]);
+
+  const files = status?.files ?? [];
+  const selectedFiles = files.filter((file) => selectedPaths.has(file.path));
+  const allSelected = files.length > 0 && selectedPaths.size === files.length;
+
+  async function commit() {
+    if (selectedFiles.length === 0) return;
+    const commitMessage =
+      message.trim() || defaultCommitMessage(selectedFiles);
+    setCommitting(true);
+    setError(null);
+    // Git 阶段失败时保留本地生成的默认信息，用户可直接重试或编辑
+    if (!message.trim()) setMessage(commitMessage);
+    try {
+      const out = await invoke<GitCommitResultDto>("git_commit", {
+        cwd: repoPath,
+        message: commitMessage,
+        push: false,
+        paths: selectedFiles.map((file) => file.path),
+      });
+      if (!out.committed) throw new Error(out.message);
+      onCommitted();
+    } catch (reason) {
+      setError(String(reason));
+      setCommitting(false);
+    }
+  }
+
+  return (
+    <div className="mt-1.5 rounded border border-hairline bg-canvas p-2 text-l2">
+      <p className="mb-2 text-[11px] text-l4">
+        提交 = 把改动保存到项目历史。文件本身不会丢，保存后才能把成果合并回来。
+      </p>
+      {loadError ? (
+        <p className="text-xs text-err-text">{loadError}</p>
+      ) : !status ? (
+        <LoadingRows compact />
+      ) : files.length === 0 ? (
+        <p className="text-xs text-l4">主文件夹当前没有未保存的改动</p>
+      ) : (
+        <>
+          <div className="mb-1 flex items-center justify-between text-[11px] text-l4">
+            <span>
+              将提交 {selectedFiles.length} / {files.length} 个文件
+            </span>
+            <button
+              type="button"
+              onClick={() =>
+                setSelectedPaths(
+                  allSelected
+                    ? new Set()
+                    : new Set(files.map((file) => file.path)),
+                )
+              }
+              className="text-l3 hover:text-l1"
+            >
+              {allSelected ? "清空" : "全选"}
+            </button>
+          </div>
+          <ul className="mb-2 max-h-40 overflow-auto">
+            {files.map((file) => (
+              <li
+                key={`${file.status}:${file.path}`}
+                className="flex items-center gap-1.5 py-0.5 text-xs"
+              >
+                <Checkbox
+                  checked={selectedPaths.has(file.path)}
+                  onChange={(checked) =>
+                    setSelectedPaths((current) => {
+                      const next = new Set(current);
+                      if (checked) next.add(file.path);
+                      else next.delete(file.path);
+                      return next;
+                    })
+                  }
+                  label={<span className="sr-only">选择 {file.path}</span>}
+                />
+                <span
+                  className={`shrink-0 font-mono ${STATUS_STYLE[file.status] ?? "text-l3"}`}
+                >
+                  {file.status === "??" ? "U" : file.status}
+                </span>
+                <span className="min-w-0 flex-1 truncate font-mono text-l2">
+                  {file.path}
+                </span>
+                {file.additions !== null && (
+                  <span className="font-mono text-add">+{file.additions}</span>
+                )}
+                {file.deletions !== null && file.deletions > 0 && (
+                  <span className="font-mono text-del">-{file.deletions}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+          <div className="flex items-center gap-1.5">
+            <input
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && selectedFiles.length > 0)
+                  void commit();
+              }}
+              disabled={committing}
+              placeholder="提交信息（可选，留空快速提交）"
+              className="min-w-0 flex-1 rounded border border-field bg-strip px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
+            />
+            <button
+              type="button"
+              onClick={() => void commit()}
+              disabled={committing || selectedFiles.length === 0}
+              className="shrink-0 rounded border border-cta-bd bg-cta px-3 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+            >
+              {committing ? "提交中…" : message.trim() ? "提交" : "快速提交"}
+            </button>
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={committing}
+              className="shrink-0 rounded px-2 py-1 text-xs text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+            >
+              取消
+            </button>
+          </div>
+          {error && <p className="mt-1.5 text-xs text-err-text">✗ {error}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function WorkspaceReviewView({
   worktreePath,
   initialAction = null,
@@ -765,6 +948,9 @@ export default function WorkspaceReviewView({
     null,
   );
   const [showBlockers, setShowBlockers] = useState(false);
+  // 主仓脏拦截的内联快速提交：repoPath 取工作区所属主仓库，面板不跳转页面
+  const [repoPath, setRepoPath] = useState<string | null>(null);
+  const [mainCommitOpen, setMainCommitOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [prOpen, setPrOpen] = useState(false);
   const [prTitle, setPrTitle] = useState("");
@@ -864,19 +1050,21 @@ export default function WorkspaceReviewView({
     setConflictAdvice({});
     setFileQuery("");
     setActivePath(null);
+    setRepoPath(null);
+    setMainCommitOpen(false);
     initialActionRef.current = null;
   }, [worktreePath]);
 
-  // merged_at 不在 diff/health DTO 上，按工作区单独取一次，用于「已合并」按钮态
+  // merged_at 不在 diff/health DTO 上，按工作区单独取一次，用于「已合并」按钮态；
+  // 顺带取所属主仓库路径，供主仓脏拦截的内联快速提交使用
   useEffect(() => {
     const workspaceId = diff?.workspaceId;
     if (!workspaceId) return;
     invoke<WorkspaceDto[]>("list_workspaces")
       .then((list) => {
-        setMergedAt(
-          list.find((workspace) => workspace.id === workspaceId)?.mergedAt ??
-            null,
-        );
+        const workspace = list.find((entry) => entry.id === workspaceId);
+        setMergedAt(workspace?.mergedAt ?? null);
+        setRepoPath(workspace?.repoPath ?? null);
       })
       .catch(() => {});
   }, [diff?.workspaceId]);
@@ -979,7 +1167,12 @@ export default function WorkspaceReviewView({
     };
   }, [conflictContentErrors, conflictContents, conflictFiles, diff, unmerged]);
 
-  const blockers = blockerText(health);
+  // 主仓脏在外部被处理后（含本面板提交成功），收起内联快速提交面板
+  useEffect(() => {
+    if (mainCommitOpen && health && !health.mainDirty) setMainCommitOpen(false);
+  }, [health, mainCommitOpen]);
+
+  const blockers = blockerList(health);
   const conflictMode = unmerged?.merging === true;
   const staleBase = unmerged?.staleBase === true;
   const unresolvedFiles = unmerged?.files ?? [];
@@ -1284,7 +1477,7 @@ export default function WorkspaceReviewView({
       });
       if (!latest.readyToMerge) {
         const reasons = blockerText(latest);
-        if (latest.uncommitted) reasons.unshift("工作区仍有未提交改动");
+        if (latest.uncommitted) reasons.unshift("任务里还有没保存的改动");
         throw new Error(reasons.join("；") || "健康检查未通过");
       }
       const merged = await invoke<WorkspaceMergeResultDto>("merge_workspace", {
@@ -1427,7 +1620,7 @@ export default function WorkspaceReviewView({
         });
         if (!latest.readyToMerge) {
           const reasons = blockerText(latest);
-          if (latest.uncommitted) reasons.unshift("工作区仍有未提交改动");
+          if (latest.uncommitted) reasons.unshift("任务里还有没保存的改动");
           throw new Error(
             `提交已完成，但尚不可合并：${reasons.join("；") || "健康检查未通过"}`,
           );
@@ -1518,6 +1711,7 @@ export default function WorkspaceReviewView({
                 disabled={
                   conflictBusy || busy || (hasUncommitted && !message.trim())
                 }
+                title="两边改了同一个地方，需要你逐个文件选一边"
                 className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
               >
                 {busy || conflictBusy
@@ -1536,7 +1730,7 @@ export default function WorkspaceReviewView({
                 >
                   {conflictBusy
                     ? "重新同步中…"
-                    : `重新同步最新 ${diff?.baseBranch ?? "基准分支"}`}
+                    : `重新同步最新 ${diff?.baseBranch ?? "主分支"}`}
                 </button>
               ) : (
                 <div className="flex">
@@ -1612,15 +1806,21 @@ export default function WorkspaceReviewView({
               <span className="ml-1 text-l4">{diff.files.length} 个文件</span>
               <span className="font-mono text-add">+{diff.totalAdd}</span>
               <span className="font-mono text-del">-{diff.totalDel}</span>
-              {health && (
-                <span className="font-mono text-l4">
-                  ↑{health.ahead} ↓{health.behind}
+              {health && (health.ahead > 0 || health.behind > 0) && (
+                <span
+                  className="font-mono text-l4"
+                  title={`相对主分支：领先 ${health.ahead} · 落后 ${health.behind}`}
+                >
+                  {health.ahead > 0 && `多出 ${health.ahead} 个保存点`}
+                  {health.ahead > 0 && health.behind > 0 && " · "}
+                  {health.behind > 0 && `主分支新增 ${health.behind} 个保存点`}
                 </span>
               )}
             </div>
 
             {conflictMode ? (
-              <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              <div className="ml-auto flex shrink-0 flex-col gap-0.5">
+                <div className="flex items-center gap-1.5">
                 <span className="mr-1 text-l4">
                   {conflictFiles.length - unresolvedFiles.length}/
                   {conflictFiles.length} 已选择
@@ -1651,6 +1851,7 @@ export default function WorkspaceReviewView({
                 >
                   全部 {diff.baseBranch}
                 </button>
+                {/* ◈ AI 建议提级为主按钮：不确定选哪边时的推荐路径；逻辑不变，只提呈现层级 */}
                 <button
                   type="button"
                   onClick={() => void requestConflictAdvice()}
@@ -1660,7 +1861,7 @@ export default function WorkspaceReviewView({
                     conflictBusy ||
                     unresolvedFiles.length === 0
                   }
-                  className="rounded border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
+                  className="rounded border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
                   {adviceBusy ? "◈ 分析中…" : "◈ AI 建议"}
                 </button>
@@ -1671,34 +1872,43 @@ export default function WorkspaceReviewView({
                     disabled={
                       staleBase || conflictBusy || !allConflictContentsLoaded
                     }
-                    className="rounded px-2 py-1 text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                    className="rounded border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
                   >
                     按建议选择
                   </button>
                 )}
+                </div>
+                <span className="text-[11px] text-l4">
+                  不确定选哪边时可让 AI 按上下文建议；仍可逐文件手动改选
+                </span>
               </div>
             ) : hasUncommitted ? (
-              <div className="ml-auto flex w-[360px] shrink-0 items-center gap-1.5">
-                <input
-                  value={message}
-                  onChange={(event) => setMessage(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && canPrimary)
-                      void finish("merge");
-                  }}
-                  disabled={busy}
-                  placeholder="提交信息"
-                  className="min-w-0 flex-1 rounded border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
-                />
-                <button
-                  type="button"
-                  onClick={() => void generateMessage()}
-                  disabled={aiBusy || busy}
-                  title="AI 生成提交信息"
-                  className="flex h-7 min-w-7 items-center justify-center rounded px-1.5 text-l2 hover:bg-white/5 disabled:opacity-50"
-                >
-                  {aiBusy ? "◈…" : "◈"}
-                </button>
+              <div className="ml-auto flex w-[360px] shrink-0 flex-col gap-0.5">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    value={message}
+                    onChange={(event) => setMessage(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && canPrimary)
+                        void finish("merge");
+                    }}
+                    disabled={busy}
+                    placeholder="提交信息"
+                    className="min-w-0 flex-1 rounded border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void generateMessage()}
+                    disabled={aiBusy || busy}
+                    title="AI 生成提交信息"
+                    className="flex h-7 min-w-7 items-center justify-center rounded px-1.5 text-l2 hover:bg-white/5 disabled:opacity-50"
+                  >
+                    {aiBusy ? "◈…" : "◈"}
+                  </button>
+                </div>
+                <span className="text-[11px] text-l4">
+                  提交 = 保存到历史；合并 = 把成果放回主文件夹
+                </span>
               </div>
             ) : (
               <span
@@ -1728,14 +1938,46 @@ export default function WorkspaceReviewView({
             </button>
           </div>
           {showBlockers && (
-            <ul className="mt-1.5 space-y-1 border-t border-hairline pt-1.5 text-l3">
-              {blockers.map((blocker) => (
-                <li key={blocker}>• {blocker}</li>
-              ))}
-              {health?.conflict && health.conflictFiles.length > 0 && (
-                <li>• 冲突文件：{health.conflictFiles.join("、")}</li>
+            <div className="mt-1.5 border-t border-hairline pt-1.5 text-l3">
+              <ul className="space-y-1">
+                {blockers.map((blocker) => (
+                  <li key={blocker.key}>
+                    <div className="flex items-center gap-2">
+                      <span>• {blocker.text}</span>
+                      {blocker.key === "main-dirty" && repoPath && (
+                        <button
+                          type="button"
+                          onClick={() => setMainCommitOpen((value) => !value)}
+                          className="rounded px-2 py-0.5 text-warn-text hover:bg-white/5"
+                        >
+                          {mainCommitOpen ? "收起提交面板" : "提交主文件夹的改动…"}
+                        </button>
+                      )}
+                    </div>
+                    {blocker.key === "main-dirty" && (
+                      <p className="pl-3 text-[11px] text-l4">
+                        提交 =
+                        把改动保存到项目历史。文件本身不会丢，保存后才能把成果合并回来。
+                      </p>
+                    )}
+                  </li>
+                ))}
+                {health?.conflict && health.conflictFiles.length > 0 && (
+                  <li>• 冲突文件：{health.conflictFiles.join("、")}</li>
+                )}
+              </ul>
+              {mainCommitOpen && repoPath && (
+                <MainRepoCommitPanel
+                  repoPath={repoPath}
+                  onCommitted={() => {
+                    setMainCommitOpen(false);
+                    setResult("主文件夹的改动已保存到项目历史");
+                    void refresh();
+                  }}
+                  onCancel={() => setMainCommitOpen(false)}
+                />
               )}
-            </ul>
+            </div>
           )}
         </div>
       )}
@@ -1745,6 +1987,7 @@ export default function WorkspaceReviewView({
           <span>
             {diff.baseBranch}{" "}
             已在本次冲突开始后更新；旧的基准侧已停止显示，请从右上角重新同步。
+            两边改了同一个地方，同步后逐个文件选一边即可。
           </span>
         </div>
       )}
@@ -1828,7 +2071,7 @@ export default function WorkspaceReviewView({
               <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
                 <p className="text-sm text-l2">
                   {hasUncommitted
-                    ? "先提交工作区改动，再准备最新基准"
+                    ? "先提交任务改动，再准备最新主分支"
                     : conflictBusy
                       ? `正在同步最新 ${diff.baseBranch}…`
                       : error
@@ -1836,8 +2079,8 @@ export default function WorkspaceReviewView({
                         : `与 ${diff.baseBranch} 存在冲突，可从右上角开始解决`}
                 </p>
                 <p className="max-w-xl text-xs text-l4">
-                  冲突模式只会展示本次同步后真实的任务版和基准版，不再用普通
-                  merge-base diff 代替当前基准内容。
+                  两边改了同一个地方，需要你逐个文件选一边。冲突模式只展示本次同步后
+                  真实的任务版和主分支版，不再用普通 merge-base diff 代替当前主分支内容。
                 </p>
               </div>
             ) : !hasTaskChanges ? (

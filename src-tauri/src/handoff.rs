@@ -419,6 +419,7 @@ fn test_session(agent: &str, session_id: &str, project_path: &str, updated_at: &
         alive: true,
         chain_count: 1,
         workspace: None,
+        step_name: None,
         summary: None,
         live: false,
         source: "cli".into(),

@@ -147,6 +147,96 @@ pub async fn workspace_settings(repo_path: String) -> WsSettingsDto {
     .unwrap_or_else(|_| to_dto(MergedSettings::default(), &crate::workspaces::FILES_TO_COPY))
 }
 
+// ===== 项目层 run 脚本写入（P4：一键开步把 step.run 落进仓库层 settings.toml） =====
+
+/// 前端传入的 run 脚本（与 projects.rs StepRunDto 同形：name/command/default）
+#[derive(Debug, Deserialize)]
+pub struct RunScriptInput {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub default: bool,
+}
+
+/// 新建 settings.toml 时的头注释：标明本文件在三层合并中的层级
+const SETTINGS_HEADER: &str = "# Ccode 项目层设置：ws_settings 三层合并的仓库层\n\
+     # 用户层 ~/.config/ccode/settings.toml，本机层 .ccode/settings.local.toml（优先级更高）\n";
+
+/// toml_edit 补丁式 upsert：同名覆盖、其余键原样保留；文件不存在则创建（含头注释）。
+/// 解析失败/路径非法直接报错，不动用户文件；写盘走 atomic_write（tmp+rename）。
+fn upsert_run_scripts_at(repo: &Path, scripts: &[RunScriptInput]) -> Result<(), String> {
+    for s in scripts {
+        let name = s.name.trim();
+        if name.is_empty() || name.chars().any(|c| c.is_control()) {
+            return Err(format!("run 脚本名非法: {:?}", s.name));
+        }
+        if s.command.trim().is_empty() {
+            return Err(format!("run 脚本「{name}」命令为空"));
+        }
+    }
+    let dir = repo.join(".ccode");
+    let path = dir.join("settings.toml");
+    // 新建时头注释在写盘时手动拼到最前：空文档里裸注释会被 toml_edit 当作根表尾饰，
+    // 序列化时排到新建表之后；已存在文件的头注释附着于首个表的前饰，往返不丢
+    let existed = path.exists();
+    let text = if existed {
+        fs::read_to_string(&path).map_err(|e| format!("读取 settings.toml 失败: {e}"))?
+    } else {
+        String::new()
+    };
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("settings.toml 解析失败，未写入: {e}"))?;
+    // scripts / scripts.run 缺失时补建；已存在但不是表时拒绝，避免覆盖用户手误
+    let scripts_item = &mut doc["scripts"];
+    if scripts_item.is_none() {
+        *scripts_item = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let scripts_tbl = scripts_item
+        .as_table_mut()
+        .ok_or("settings.toml 中 scripts 不是表，未写入")?;
+    let run_item = &mut scripts_tbl["run"];
+    if run_item.is_none() {
+        *run_item = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let run_tbl = run_item
+        .as_table_like_mut()
+        .ok_or("settings.toml 中 scripts.run 不是表，未写入")?;
+    for s in scripts {
+        let mut entry = toml_edit::InlineTable::new();
+        entry.insert("command", s.command.trim().into());
+        if s.default {
+            entry.insert("default", true.into());
+        }
+        run_tbl.insert(
+            s.name.trim(),
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(entry)),
+        );
+    }
+    fs::create_dir_all(&dir).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
+    let body = doc.to_string();
+    let out = if existed {
+        body
+    } else {
+        format!("{SETTINGS_HEADER}{body}")
+    };
+    crate::profiles::atomic_write(&path, &out)
+}
+
+/// 一键开步（P4）：把步骤预设的 run 脚本写进仓库层 .ccode/settings.toml，规则见 upsert_run_scripts_at。
+#[tauri::command]
+pub async fn upsert_project_run_scripts(
+    repo_path: String,
+    scripts: Vec<RunScriptInput>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo = PathBuf::from(crate::sessions::expand_tilde(&repo_path));
+        upsert_run_scripts_at(&repo, &scripts)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +323,102 @@ test = { command = "local test" }
         write(&repo.join(".ccode").join("settings.local.toml"), "not [valid toml");
         let m = merged_settings_with_user(&repo, None);
         assert_eq!(m.setup.as_deref(), Some("ok"), "坏掉的 local 层不影响有效层");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== upsert_project_run_scripts（P4） =====
+
+    fn input(name: &str, command: &str, default: bool) -> RunScriptInput {
+        RunScriptInput {
+            name: name.into(),
+            command: command.into(),
+            default,
+        }
+    }
+
+    #[test]
+    fn upsert_creates_file_and_feeds_project_layer() {
+        let dir = std::env::temp_dir().join(format!("ccode-wss-{}", uuid::Uuid::new_v4()));
+        let repo = dir.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        upsert_run_scripts_at(
+            &repo,
+            &[input(
+                "render-draft",
+                "quarto render manuscript/draft.md --to pdf",
+                true,
+            )],
+        )
+        .unwrap();
+        let text = fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap();
+        assert!(text.starts_with("# Ccode 项目层设置"), "新建文件必须带头注释: {text}");
+        // 合并链路确实吃项目层：merged_settings 能读到刚写入的脚本
+        let m = merged_settings_with_user(&repo, None);
+        assert_eq!(m.run.len(), 1);
+        assert_eq!(m.run[0].name, "render-draft");
+        assert_eq!(m.run[0].command, "quarto render manuscript/draft.md --to pdf");
+        assert!(m.run[0].is_default);
+        // 二次 upsert：头注释附着于首个表前饰，往返后仍在顶部
+        upsert_run_scripts_at(&repo, &[input("render-final", "quarto render x.md", false)])
+            .unwrap();
+        let text2 = fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap();
+        assert!(text2.starts_with("# Ccode 项目层设置"), "往返后头注释不得丢失: {text2}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upsert_overwrites_same_name_preserves_others() {
+        let dir = std::env::temp_dir().join(format!("ccode-wss-{}", uuid::Uuid::new_v4()));
+        let repo = dir.join("repo");
+        write(
+            &repo.join(".ccode").join("settings.toml"),
+            r#"files_to_copy = [".env"]
+[scripts]
+setup = "make setup"
+[scripts.run]
+render-draft = { command = "old render", default = true }
+web = { command = "npm run dev" }
+"#,
+        );
+        upsert_run_scripts_at(
+            &repo,
+            &[
+                input("render-draft", "quarto render manuscript/draft.md --to pdf", false),
+                input("render-final", "quarto render manuscript/paper-final.md --to pdf", true),
+            ],
+        )
+        .unwrap();
+        let text = fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap();
+        assert!(text.contains("files_to_copy"), "其余顶层键保留: {text}");
+        assert!(text.contains("make setup"), "scripts 其余键保留: {text}");
+        assert!(text.contains("npm run dev"), "其余 run 条目保留: {text}");
+        assert!(!text.contains("old render"), "同名命令被覆盖: {text}");
+        let m = merged_settings_with_user(&repo, None);
+        assert_eq!(m.run.len(), 3);
+        let draft = m.run.iter().find(|r| r.name == "render-draft").unwrap();
+        assert_eq!(draft.command, "quarto render manuscript/draft.md --to pdf");
+        assert!(!draft.is_default, "覆盖条目整体替换（default 也随之替换）");
+        assert!(m.run.iter().find(|r| r.name == "render-final").unwrap().is_default);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upsert_rejects_invalid_input_and_broken_file() {
+        let dir = std::env::temp_dir().join(format!("ccode-wss-{}", uuid::Uuid::new_v4()));
+        let repo = dir.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        // 空名 / 空命令 / 控制字符一律拒绝，且不落盘
+        assert!(upsert_run_scripts_at(&repo, &[input("", "cmd", false)]).is_err());
+        assert!(upsert_run_scripts_at(&repo, &[input("ok", "  ", false)]).is_err());
+        assert!(upsert_run_scripts_at(&repo, &[input("a\nb", "cmd", false)]).is_err());
+        assert!(!repo.join(".ccode").join("settings.toml").exists());
+        // 坏掉的既有文件：报错且不改写
+        write(&repo.join(".ccode").join("settings.toml"), "not [valid toml");
+        assert!(upsert_run_scripts_at(&repo, &[input("render", "cmd", false)]).is_err());
+        assert_eq!(
+            fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap(),
+            "not [valid toml"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

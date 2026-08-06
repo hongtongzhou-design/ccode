@@ -29,8 +29,9 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "1. 制定纳入/排除标准（年份、语言、来源级别、相关性），写进 papers/screening.md；\n" +
       "2. 检索候选文献（学术数据库/网络），每篇记录标题、作者、年份、来源、链接或 DOI；\n" +
       "3. 按标准逐条筛选，结果写入 papers/screening.md（含每篇的纳入/排除及理由）；拿不准相关性的一律纳入并标注「待确认」；\n" +
-      "4. 纳入的文献清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）。\n" +
-      "完成标准：papers/screening.md 与 papers/included.md 均存在，每条记录无空缺字段（未知则标「待补」）。",
+      "4. 纳入的文献清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；\n" +
+      "5. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的用 WebFetch/curl 直接下载到 papers/ 目录（文件名规范化：作者年份-短标题.pdf）；付费墙的不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI），等用户提供全文。\n" +
+      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md 均存在（无付费文献则 to-fetch.md 注明为空），每条记录无空缺字段（未知则标「待补」）。",
     expectedArtifacts: ["papers/"],
     skills: [],
     run: [],
@@ -41,9 +42,10 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     brief:
       "输入：上一步产物 papers/included.md（已随 main 合并在本工作区内）。\n" +
       "1. 按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题）；\n" +
-      "2. 每篇产出 notes/<序号-短标题>.md，固定结构：研究问题 / 方法 / 主要结果 / 局限 / 可引用点（原文关键句+页码或段落位置）；\n" +
-      "3. 每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」）；\n" +
-      "4. 全文不可得时按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要」。\n" +
+      "2. 全文来源优先级：项目资源/papers/ 已有 PDF → 开放获取补下 → 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」；\n" +
+      "3. 每篇产出 notes/<序号-短标题>.md，固定结构：研究问题 / 方法 / 主要结果 / 局限 / 可引用点（原文关键句+页码或段落位置）；\n" +
+      "4. 每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」）；\n" +
+      "5. 若 notes/ 中「仅摘要」笔记对应的全文已出现在项目资源或 papers/（用户已补），重读全文并更新该笔记、去掉标记。\n" +
       "完成标准：included.md 每篇都有对应笔记与 bib 条目；notes/ 与 references.bib 均已提交。",
     expectedArtifacts: ["notes/", "references.bib"],
     skills: [],
@@ -164,7 +166,20 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "完成标准：manuscript/draft.md 覆盖 IMRaD 四节，引用键全部可在 references.bib 解析，数字与 analysis/ 一致。",
     expectedArtifacts: ["manuscript/"],
     skills: [],
-    run: [],
+    // P4 quarto 渲染：产物为 manuscript/draft.md，渲染输出 draft.pdf 落在同目录（工作区内，PDF 预览白名单覆盖）；
+    // RX4a 追加 export-docx：同一份 md 导出 draft.docx，与 render-draft 并存互不冲突
+    run: [
+      {
+        name: "render-draft",
+        command: "quarto render manuscript/draft.md --to pdf",
+        default: true,
+      },
+      {
+        name: "export-docx",
+        command: "quarto render manuscript/draft.md --to docx",
+        default: true,
+      },
+    ],
   },
   {
     name: "润色与投稿准备",
@@ -178,7 +193,19 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "完成标准：paper-final.md 引用闭环、changelog.md 与 submission/checklist.md 已提交；[待补实验] 全部清除，确无法完成的列入 checklist 投稿前必办项。",
     expectedArtifacts: ["manuscript/paper-final.md", "submission/"],
     skills: [],
-    run: [],
+    // P4 quarto 渲染：定稿 paper-final.md → paper-final.pdf；RX4a 追加 export-docx → paper-final.docx
+    run: [
+      {
+        name: "render-final",
+        command: "quarto render manuscript/paper-final.md --to pdf",
+        default: true,
+      },
+      {
+        name: "export-docx",
+        command: "quarto render manuscript/paper-final.md --to docx",
+        default: true,
+      },
+    ],
   },
 ];
 
@@ -299,7 +326,19 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "完成标准：thesis-draft.md 章节齐全、引用闭环、revision-notes.md 已提交。",
     expectedArtifacts: ["manuscript/"],
     skills: [],
-    run: [],
+    // P4 quarto 渲染：产物为 manuscript/thesis-draft.md → thesis-draft.pdf；RX4a 追加 export-docx → thesis-draft.docx
+    run: [
+      {
+        name: "render-draft",
+        command: "quarto render manuscript/thesis-draft.md --to pdf",
+        default: true,
+      },
+      {
+        name: "export-docx",
+        command: "quarto render manuscript/thesis-draft.md --to docx",
+        default: true,
+      },
+    ],
   },
   {
     name: "格式与定稿",
@@ -314,7 +353,19 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "完成标准：format-check.md 问题逐条有处理结论，thesis-final.md 引用闭环，changelog.md 已提交。",
     expectedArtifacts: ["manuscript/thesis-final.md"],
     skills: [],
-    run: [],
+    // P4 quarto 渲染：定稿 thesis-final.md → thesis-final.pdf；RX4a 追加 export-docx → thesis-final.docx
+    run: [
+      {
+        name: "render-final",
+        command: "quarto render manuscript/thesis-final.md --to pdf",
+        default: true,
+      },
+      {
+        name: "export-docx",
+        command: "quarto render manuscript/thesis-final.md --to docx",
+        default: true,
+      },
+    ],
   },
 ];
 

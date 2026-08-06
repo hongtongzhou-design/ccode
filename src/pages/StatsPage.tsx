@@ -44,6 +44,13 @@ function basename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
+/** 官方账号（订阅制）行的费用格：不按量计费，固定显示「订阅」并注明口径 */
+function SubscriptionCost() {
+  return (
+    <span title="官方账号登录，不按量计费；token 数仍为实际统计">订阅</span>
+  );
+}
+
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
 /**
@@ -153,6 +160,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
         costPartial: internal.some((p) => p.costPartial || p.costUsd == null),
         source: "ccode-ai",
         internal: true,
+        official: false,
       },
     ].sort((a, b) => b.tokens - a.tokens);
   }, [showInternal, stats]);
@@ -176,6 +184,12 @@ export default function StatsPage({ visible }: { visible: boolean }) {
         internal: true,
       },
     ].sort((a, b) => b.input + b.output - (a.input + a.output));
+  }, [showInternal, stats]);
+
+  // 任务成本：与项目排行同一开关口径——默认隐藏 internal 行，打开「显示内部活动」才展示
+  const workspaceRows = useMemo(() => {
+    const rows = stats?.byWorkspace ?? [];
+    return showInternal ? rows : rows.filter((w) => !w.internal);
   }, [showInternal, stats]);
 
   function toggleCurrency() {
@@ -304,7 +318,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                   const share = a.tokens / totalAgentTokens;
                   return (
                     <li
-                      key={a.agent}
+                      key={`${a.agent}-${a.official}`}
                       className="flex items-center gap-3 py-2 text-sm"
                     >
                       <span
@@ -338,7 +352,11 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                         {(share * 100).toFixed(1)}%
                       </span>
                       <span className="w-14 shrink-0 text-right text-xs text-l3">
-                        {fmtCost(a.costUsd, currency, rate, a.costPartial)}
+                        {a.official ? (
+                          <SubscriptionCost />
+                        ) : (
+                          fmtCost(a.costUsd, currency, rate, a.costPartial)
+                        )}
                       </span>
                     </li>
                   );
@@ -365,7 +383,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                 <tbody>
                   {projectRows.slice(0, 20).map((p) => (
                     <tr
-                      key={`${p.internal}-${p.source}-${p.projectPath}`}
+                      key={`${p.internal}-${p.official}-${p.source}-${p.projectPath}`}
                       className="border-b border-hairline"
                     >
                       <td
@@ -381,7 +399,57 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                         {compact(p.tokens)}
                       </td>
                       <td className="px-2 py-2 text-right text-xs text-l3">
-                        {fmtCost(p.costUsd, currency, rate, p.costPartial)}
+                        {p.official ? (
+                          <SubscriptionCost />
+                        ) : (
+                          fmtCost(p.costUsd, currency, rate, p.costPartial)
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
+
+          {/* 任务成本（按工作区归因，仅列出命中工作区的用量） */}
+          {workspaceRows.length > 0 && (
+            <section className="mb-6">
+              <h2 className="mb-2 text-sm font-medium text-l1">任务成本</h2>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-hairline">
+                    <th className={th}>任务</th>
+                    <th className={`${th} text-right`}>tokens</th>
+                    <th className={`${th} text-right`}>费用</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {workspaceRows.map((w) => (
+                    <tr
+                      key={`${w.internal}-${w.official}-${w.repoName}-${w.workspaceName}`}
+                      className="border-b border-hairline"
+                    >
+                      <td className="max-w-0 truncate px-2 py-2 text-l2">
+                        <span className="font-mono">{w.workspaceName}</span>
+                        <span className="ml-2 text-xs text-l4">
+                          {w.repoName}
+                        </span>
+                      </td>
+                      <td
+                        className="px-2 py-2 text-right font-mono text-xs text-l2"
+                        title={`输入 ${compact(w.tokensIn)} / 输出 ${compact(
+                          w.tokensOut,
+                        )}，${w.models} 个模型`}
+                      >
+                        {compact(w.tokensIn + w.tokensOut)}
+                      </td>
+                      <td className="px-2 py-2 text-right text-xs text-l3">
+                        {w.official ? (
+                          <SubscriptionCost />
+                        ) : (
+                          fmtCost(w.cost, currency, rate, w.costPartial)
+                        )}
                       </td>
                     </tr>
                   ))}

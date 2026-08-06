@@ -631,6 +631,9 @@ pub struct AgentUpdateInfoDto {
     /// 查不到最新版（自更新渠道无轻量查询口 / 网络失败）→ None，UI 回退普通「更新」按钮
     pub latest: Option<String>,
     pub outdated: bool,
+    /// brew 渠道滞后提示：上游 npm 已比 brew 最新版更新时的上游版本号；
+    /// 仅 brew 安装且规格表有 npm 包名时查，查询失败静默为 None（UI 不显示）
+    pub upstream_note: Option<String>,
 }
 
 /// 提取首个 x.y.z 形式版本串用于相等比较（--version 输出常带产品名尾巴，如
@@ -643,6 +646,26 @@ fn semver_token(s: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 纯版本号比较：a 是否严格比 b 新。按 . 分段数值比较，短侧缺段按 0；
+/// 任一侧提取不到 x.y.z 形式版本串时判不新（失败静默，不拿垃圾数据吓用户）
+fn semver_newer(a: &str, b: &str) -> bool {
+    let (Some(a), Some(b)) = (semver_token(a), semver_token(b)) else {
+        return false;
+    };
+    let parse = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|p| p.parse().ok()).collect() };
+    let (Some(pa), Some(pb)) = (parse(&a), parse(&b)) else {
+        return false;
+    };
+    for i in 0..pa.len().max(pb.len()) {
+        let x = pa.get(i).copied().unwrap_or(0);
+        let y = pb.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
 }
 
 fn npm_latest(pkg: &str) -> Option<String> {
@@ -707,12 +730,29 @@ fn latest_version(agent_id: &str, method: &str) -> Option<String> {
 }
 
 fn check_one(agent_id: &str) -> AgentUpdateInfoDto {
+    let mut upstream_note = None;
     let (installed, latest) = match agents::binary_for(agent_id).and_then(agents::resolve_binary) {
         Some(path) => {
             let installed = version_of(&path);
             let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
             let method = detect_method(&resolved.to_string_lossy());
-            (installed, latest_version(agent_id, method))
+            let latest = latest_version(agent_id, method);
+            // brew 渠道常滞后于上游 npm（如 gemini-cli brew 0.46 vs npm 0.53）：
+            // 已查到 brew 最新版时顺带比一次上游版本，提示复用同一次检查、不新增轮询；
+            // npm view 失败 → None → 静默不带提示
+            if method == "brew" {
+                if let Some(brew_v) = latest.as_deref() {
+                    if let Some(pkg) = agent_spec(agent_id).and_then(|s| s.packaging.npm_update)
+                    {
+                        if let Some(npm_v) = npm_latest(pkg) {
+                            if semver_newer(&npm_v, brew_v) {
+                                upstream_note = Some(npm_v);
+                            }
+                        }
+                    }
+                }
+            }
+            (installed, latest)
         }
         None => (None, None),
     };
@@ -723,7 +763,7 @@ fn check_one(agent_id: &str) -> AgentUpdateInfoDto {
         },
         _ => false,
     };
-    AgentUpdateInfoDto { id: agent_id.into(), installed, latest, outdated }
+    AgentUpdateInfoDto { id: agent_id.into(), installed, latest, outdated, upstream_note }
 }
 
 /// 与 DETECT_CACHE 同模式：检查要起 6 组子进程，按进程缓存一次；更新/安装成功后失效
@@ -767,6 +807,25 @@ mod tests {
         // 没有 x.y 形式 → None
         assert_eq!(semver_token("unknown"), None);
         assert_eq!(semver_token(""), None);
+    }
+
+    #[test]
+    fn semver_newer_compares_numeric_segments() {
+        // 上游新于渠道 → true（gemini 案例：npm 0.53 vs brew 0.46）
+        assert!(semver_newer("0.53.0", "0.46.0"));
+        assert!(semver_newer("1.0.0", "0.99.9"));
+        assert!(semver_newer("0.46.1", "0.46.0"));
+        // 段数不同：短侧缺段按 0
+        assert!(semver_newer("0.46.0.1", "0.46.0"));
+        assert!(!semver_newer("0.46", "0.46.0.1"));
+        // 同版 / 更旧 → false
+        assert!(!semver_newer("0.46.0", "0.46.0"));
+        assert!(!semver_newer("0.45.9", "0.46.0"));
+        // 带噪音的 --version 输出先走 semver_token 提取
+        assert!(semver_newer("0.53.0 (gemini-cli)", "v0.46.0-beta"));
+        // 提取不到版本串 → 判不新（静默）
+        assert!(!semver_newer("unknown", "0.46.0"));
+        assert!(!semver_newer("0.53.0", ""));
     }
 
     #[test]

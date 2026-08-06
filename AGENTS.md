@@ -78,7 +78,7 @@ src-tauri/src/
   agents.rs                  # 适配器：detect + launch_plan（env/args 注入规则，差异全在这里）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起逻辑，agent/shell 复用
   sessions.rs                # 会话浏览：扫描/解析全部六个 agent 会话（含 Codex .zst、OpenCode SQLite/legacy JSON）、app.db session_meta、pin 快照、用户发起的删除、注意力状态分类（session_tail_state）
-  skills.rs                  # 技能库（§6.13）：SSOT 库 + 六 CLI symlink/copy 分发、四路导入（目录/ZIP/GitHub/发现）、ZIP 导出、卸载备份、copy 漂移检测与 resync
+  skills.rs                  # 技能库（§6.13）：SSOT 库 + 六 CLI symlink/copy 分发、四路导入（目录/ZIP/GitHub/发现）、ZIP 导出、卸载备份、copy 漂移检测与 resync、新建/编辑（create_skill/update_skill_content，覆盖前备份）
   usage.rs                   # 用量统计（§6.11）：六 agent usage 事件提取、usage_daily 按天聚合、内置定价表 + pricing.json 覆盖
   settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/brew 镜像/主题，get/update 两个 command
   ai.rs                      # 无头 AI 调用层：一次性 prompt（launch_plan 注入）+ 提交信息/会话摘要/PR 描述生成
@@ -169,6 +169,8 @@ src-tauri/src/
   密钥仅在 Rust 层参与验证，结果统一脱敏。「设为全局」成功后必须自动执行本地与 CLI 配置复检。
 - **技能同名导入不得静默跳过**：导入返回 added/updated/skipped/conflicts；覆盖前备份、另存为校验单段安全名称，ZIP 先
   staging，元数据保存失败回滚。GitHub 来源保存 repo/ref/subdir/revision，更新检测只提示，重新导入仍走冲突确认。
+  新建/编辑走 `create_skill`/`update_skill_content`：重名拒绝并引导改用「编辑内容」；编辑经临时目录走既有覆盖路径
+  （覆盖前备份、辅助文件保留、source/repo 不改写）；◈ 优化开终端让 Agent 直改库文件，备份兜底仍靠保存/覆盖路径。
 - **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：「设为全局默认」（写前必须备份）、会话删除（delete_session/delete_project_sessions，canonicalize 根校验之上再限定**已知会话数据子目录 + 会话后缀白名单**，同根的 auth.json/settings.json 等一律拒绝；OpenCode 走事务删库行且 db 路径必须等于已知 opencode.db；Codex resume 链删除连带成员文件）、工作树文件删除（限定树当前根目录 + 重要路径黑名单兜底：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单判断必须 canonicalize 双校验，堵符号链接绕过）。
 - **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录），AI 无头调用 `-s read-only`；用户可用 extra_env/参数覆盖。
 - **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底（macOS 用户目录 `~/.npm-global/bin`/`~/.local/bin`/`~/bin`/`~/.kimi-code/bin` **先于** `/opt/homebrew/bin`——与用户交互终端的 PATH 解析习惯一致，防止检测到系统目录里的同名旧副本；Linux `~/.local/bin`，Windows `%LOCALAPPDATA%\Programs`/`%APPDATA%\npm`）——打包版 GUI 短 PATH 下检测/启动/更新/安装不再失灵；新增 CLI/工具调用点一律用它，禁直接 `which::which` 或裸名 spawn。
@@ -179,9 +181,17 @@ src-tauri/src/
 - 前端不直接碰文件系统，一切经 Tauri command；流式输出走 `pty-output-<id>` 等事件。
 - **流水线开步是预设参数的组合调用**（见架构 §11）：点「开始」= 建工作区 + 启 Agent + 注入简报 + 落成 TASK.md，
   全部复用既有工作区创建与终端启动能力；不破坏手动启动栏「Agent → profile → 模型 → 目录 → 启动」主流程。
+  开步在 ensure_git_repo 之后先走 `commit_project_bootstrap`（best-effort）：只把 `.ccode` 与 `.gitignore`
+  两个 Ccode 自有路径提交进主仓库（add 与 commit 都带 literal pathspec，用户自行暂存的文件也绝不带走），
+  避免评审合并被「主文件夹里还有没保存的改动」（主仓脏）拦截；ensure_git_at 生成的默认 .gitignore 含 `*.pdf`（大文件登记为资源引用）。
 - **流水线模板库**：内置模板集中在 `src/pipeline-presets.ts` 的 `PIPELINE_TEMPLATES`（综述/科研论文/数据处理/毕业论文），
   新增场景 = 数组加一项，简报必须遵守输入写死/决策写死/交付写死约定（auto 模式无歧义）；用户模板走后端
   `list/save/delete_pipeline_template`，选择器（TemplatePicker）合并展示，后端命令未就绪时优雅降级为仅内置模板。
+- **流水线编辑器（RX1）是步骤编辑唯一入口**：`src/components/PipelineEditor.tsx` 全宽覆盖层（fixed inset-0 z-30，
+  与评审覆盖层同级），每步一张卡片（名称/工作区名/简报/预期产物/run 脚本/资源绑定），整体写回 steps；
+  旧的步骤 ⋯ 内联重命名/编辑简报/+ 步骤表单已移除，新增步骤相关编辑一律进编辑器，不再开第二套入口。
+  `ProjectStepDto.resources?: string[]` = 资源绑定（`[[resources]]` 条目的 path），**空/缺省 = 全部资源**；
+  `renderTaskMd` 只在绑定非空时过滤「项目资源」段（两处调用 ProjectGroup/TerminalPage 共用函数，无需各自过滤）。
 - **官方账号 profile 只读检测 + env 净化**：CLI auth 文件只读探测「已连接」，断开引导用户用 CLI 自己的 logout；
   官方账号拉起不注入 API env，且必须 `env_remove` 同协议残留 API 密钥变量（防静默覆盖账号登录）；
   统计页官方账号显示「订阅」不计费。
@@ -192,6 +202,10 @@ src-tauri/src/
   kimi/opencode 无启动注入参数，走复制简报路径 + 手动发送，不得伪造注入成功。
 - **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，
   不在逻辑里写死「文献/数据/论文」概念。
+- **界面白话双层呈现（双语义）**：主定位科研工作台，UI 主文案一律白话（保存到历史 / 相对主分支 /
+  多出 N 个保存点 / 改动说明），git 技术信息不删除、降为二级呈现（小字 mono、悬浮 title、详情
+  popover、⋯ 菜单），**不加任何模式开关**；状态分组等纯逻辑集中放 `src/git-status-groups.ts`，
+  新增 git 相关 UI 必须遵守同一双层规则。
 
 ## 主题与设计系统
 
@@ -222,11 +236,20 @@ src-tauri/src/
 - **PDF 预览（P2a）**：pdf.js 渲染器必须随 PdfPreview 组件动态 import 拆独立 chunk（禁进主包）；`read_pdf_bytes` 只放行
   四类白名单（注册项目登记资源/注册项目根/工作区·仓库根/终端标签 cwd hint），canonicalize 后判定，传输用 base64 字符串
   （macOS 的 Raw 响应会退化为逐字节 JSON 数组，禁改 raw bytes）；选段问 AI 只 pty_write 注入活跃标签输入框，不自动回车。
+- **md 阅读模式（RX2a）**：md 文件预览默认「阅读版式」（marked 渲染，pin 版本、随 FilePreviewEditor 懒加载 chunk，
+  禁进主包；本地可信内容不引 sanitize 重库），排版样式集中在 App.css `.md-body`（全主题令牌）；「阅读/编辑」切换时
+  Monaco 保持挂载仅隐藏（未保存改动/undo 不丢）；「⛶ 沉浸阅读」为 `fixed inset-0 z-30` 全宽覆盖层（Esc 退出，
+  终端/PTY 保持挂载）；外部写盘自动刷新沿用现有 watcher 链路，编辑中（dirty）不覆盖。
 - **「整理为笔记」（P2b）**：归属判定只在后端 `pdf_owner_project`（登记资源 canonical 精确命中 → 项目根最长前缀命中，
   都未命中由前端提示去登记，前端不做路径归属猜测）；写入只走 `append_workspace_inbox`——目标固定为工作区根内
   `notes/inbox.md`（不接受外部子路径），单次 ≤ 64KB、读-改-原子写、已存在文件 canonicalize 双校验防 symlink 逃逸；
   笔记步骤定位规则 = `workspaceName === "lit-notes"` 优先、回落流水线第二步；无活跃工作区时复用一键开步链路
   （ensure_git_repo → create_workspace → TASK.md best-effort → 追加 inbox → pendingTerminal + ORGANIZE_NOTES_PROMPT 预填）。
+- **步骤胶囊对照（RX2b）**：跨页「文件树切根」走 store 一次性 `enterCwdReq`（终端页消费后复用 enterCwd/externalCwd
+  「真进入」机制，文件树根随活动标签 cwd）；`previewReq` 可带可选 `root`（文本预览的后端根约束，缺省回落活动标签
+  cwd）。步骤产物面板只在打开时用 `list_dir` 拉取一次（无根约束，目录列一层文件、父目录匹配区分文件/未产出），
+  不进轮询；已完成步骤读项目根（main），其余读工作树。胶囊副行的 agent/profile 读终端页同一键
+  `ccode.wsLast.<worktreePath>`。
 
 ## 路线图（见 docs/architecture.md §11 演进线）
 

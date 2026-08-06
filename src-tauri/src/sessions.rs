@@ -41,6 +41,10 @@ pub struct SessionMetaDto {
     pub chain_count: usize,
     /// 会话发生在任务工作区（git worktree）里时的工作区名（§6.10）；project_path 同时改写为真实仓库
     pub workspace: Option<String>,
+    /// 工作区名命中项目档案卡 steps[].workspaceName 时的流水线步骤名（RX3a 对话步骤化）；
+    /// 不匹配或无工作区为 None，前端回落显示 workspace 原名
+    #[serde(default)]
+    pub step_name: Option<String>,
     /// AI 生成的会话摘要（session_meta.summary 列）
     #[serde(default)]
     pub summary: Option<String>,
@@ -561,6 +565,7 @@ fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         alive,
         chain_count: 1,
         workspace: None,
+        step_name: None,
         summary: None,
         live: alive && mtime_fresh(path, 60),
         source: default_session_source(),
@@ -797,6 +802,7 @@ fn codex_file_meta(
             alive,
             chain_count: 1,
             workspace: None,
+            step_name: None,
             summary: None,
             live: alive && mtime_fresh(path, 60),
             source: default_session_source(),
@@ -1067,6 +1073,7 @@ fn gemini_file_meta(
         alive,
         chain_count: 1,
         workspace: None,
+        step_name: None,
         summary: None,
         live: alive && mtime_fresh(path, 60),
         source: default_session_source(),
@@ -1280,6 +1287,7 @@ fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMet
         alive,
         chain_count: 1,
         workspace: None,
+        step_name: None,
         summary: None,
         live: alive && (mtime_fresh(path, 60) || qwen_runtime_sidecar(path).is_some()),
         source: default_session_source(),
@@ -1499,6 +1507,7 @@ fn kimi_wire_file_meta(
         alive,
         chain_count: 1,
         workspace: None,
+        step_name: None,
         summary: None,
         live: alive && mtime_fresh(path, 60),
         source: default_session_source(),
@@ -1757,6 +1766,7 @@ fn kimi_legacy_file_meta(
         alive,
         chain_count: 1,
         workspace: None,
+        step_name: None,
         summary: None,
         live: alive && mtime_fresh(path, 60),
         source: default_session_source(),
@@ -2015,6 +2025,7 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             alive: true, // 行在即在
             chain_count: 1,
             workspace: None,
+            step_name: None,
             summary: None,
             live,
             source: default_session_source(),
@@ -2384,6 +2395,7 @@ fn opencode_scan_legacy(storage: &Path) -> Vec<SessionMetaDto> {
             alive: true,
             chain_count: 1,
             workspace: None,
+        step_name: None,
             summary: None,
             live: mtime_fresh(&f, 60),
             source: default_session_source(),
@@ -2612,6 +2624,20 @@ pub fn scan_sessions() -> ScanResult {
             }
         }
     }
+    // RX3a 对话步骤化：工作区名命中项目档案卡 steps[].workspaceName 时附带步骤名。
+    // 每轮扫描按仓库只读一次 project.toml；扫描结果本身有 10s 缓存，档案卡改动下轮生效
+    let mut step_maps: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for s in &mut out {
+        let Some(ws) = s.workspace.clone() else {
+            continue;
+        };
+        let map = step_maps
+            .entry(s.project_path.clone())
+            .or_insert_with(|| crate::projects::step_names_at(Path::new(&s.project_path)));
+        if let Some(name) = map.get(&ws) {
+            s.step_name = Some(name.clone());
+        }
+    }
     ScanResult {
         sessions: out,
         chain_members,
@@ -2745,6 +2771,7 @@ fn opencode_snapshot_meta(path: &Path, session_id: &str) -> Option<SessionMetaDt
         alive: false,
         chain_count: 1,
         workspace: None,
+        step_name: None,
         summary: None,
         live: false,
         source: default_session_source(),
@@ -4428,6 +4455,7 @@ mod tests {
                 alive: true,
                 chain_count: 1,
                 workspace: None,
+                step_name: None,
                 summary: None,
                 live: false,
                 source: default_session_source(),

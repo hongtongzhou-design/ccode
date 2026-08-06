@@ -11,7 +11,13 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 const LIST_CAP: usize = 20;
-const USAGE_SCHEMA_VERSION: &str = "4";
+// v5：usage_daily 增加 workspace 列（工作区成本归因）。扫描时 worktree 会话的项目路径
+// 已被改写成真实仓库路径，工作区归属信息无法仅靠既有索引在查询时反推，必须建索引时落库，
+// 因此升版本并自动重建旧索引。
+// v6：usage_daily 与 usage_provenance 增加 official 列（官方账号「订阅」口径）。
+// 建索引时按 provenance 落库，查询期不再反推，升版本自动重建旧索引；
+// provenance 表不在重置范围内，单独走 ALTER 补列。
+const USAGE_SCHEMA_VERSION: &str = "6";
 const SOURCE_CLI: &str = "cli";
 const SOURCE_CCODE_AI: &str = "ccode-ai";
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -29,6 +35,8 @@ pub(crate) struct UsageEvent {
     /// 事件来源由后端运行来源登记决定，不由路径或模型名猜测。
     pub source: String,
     pub internal: bool,
+    /// 官方账号（订阅制）用量：同样由 provenance 登记决定，不由事件本身猜测
+    pub official: bool,
 }
 
 fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -83,6 +91,7 @@ where
             cache_write: num("cache_creation_input_tokens"),
             source: SOURCE_CLI.into(),
             internal: false,
+            official: false,
         });
     }
     out
@@ -126,6 +135,7 @@ where
                     cache_write: num("cache_write_input_tokens"),
                     source: SOURCE_CLI.into(),
                     internal: false,
+                    official: false,
                 });
             }
             _ => {}
@@ -160,6 +170,7 @@ where
             cache_write: 0,
             source: SOURCE_CLI.into(),
             internal: false,
+            official: false,
         });
     }
     out
@@ -191,6 +202,7 @@ where
             cache_write: 0,
             source: SOURCE_CLI.into(),
             internal: false,
+            official: false,
         });
     }
     out
@@ -222,6 +234,7 @@ where
             cache_write: num("inputCacheCreation"),
             source: SOURCE_CLI.into(),
             internal: false,
+            official: false,
         });
     }
     out
@@ -283,6 +296,7 @@ fn opencode_events(db_path: &Path, session_id: &str) -> Vec<UsageEvent> {
             cache_write: cnum("write") as u64,
             source: SOURCE_CLI.into(),
             internal: false,
+            official: false,
         });
     }
     out
@@ -338,6 +352,8 @@ pub(crate) struct SessionContrib {
     pub agent: String,
     pub session_id: String,
     pub project_path: String,
+    /// 会话发生在任务工作区时的工作区名（扫描已识别）；非工作区会话为空串
+    pub workspace: String,
     pub events: Vec<UsageEvent>,
 }
 
@@ -348,17 +364,21 @@ pub(crate) struct DailyRow {
     pub model: String,
     pub project_path: String,
     pub session_id: String,
+    pub workspace: String,
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
     pub source: String,
     pub internal: bool,
+    /// 官方账号（订阅制）用量：不按量计费，统计页费用栏显示「订阅」
+    pub official: bool,
 }
 
-/// 按 (day, agent, model, project, session, source, internal) 聚合；无 usage 事件的会话不产生行
+/// 按 (day, agent, model, project, session, workspace, source, internal, official) 聚合；无 usage 事件的会话不产生行
 pub(crate) fn aggregate(contribs: &[SessionContrib]) -> Vec<DailyRow> {
-    let mut map: HashMap<(String, String, String, String, String, String, bool), DailyRow> =
+    #[allow(clippy::type_complexity)]
+    let mut map: HashMap<(String, String, String, String, String, String, String, bool, bool), DailyRow> =
         HashMap::new();
     for c in contribs {
         for e in &c.events {
@@ -371,8 +391,10 @@ pub(crate) fn aggregate(contribs: &[SessionContrib]) -> Vec<DailyRow> {
                 e.model.clone(),
                 c.project_path.clone(),
                 c.session_id.clone(),
+                c.workspace.clone(),
                 e.source.clone(),
                 e.internal,
+                e.official,
             );
             let row = map.entry(key.clone()).or_insert_with(|| DailyRow {
                 day: key.0,
@@ -380,12 +402,14 @@ pub(crate) fn aggregate(contribs: &[SessionContrib]) -> Vec<DailyRow> {
                 model: key.2,
                 project_path: key.3,
                 session_id: key.4,
+                workspace: key.5,
                 input: 0,
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
-                source: key.5,
-                internal: key.6,
+                source: key.6,
+                internal: key.7,
+                official: key.8,
             });
             row.input += e.input;
             row.output += e.output;
@@ -405,8 +429,12 @@ fn usage_db() -> Result<Connection, String> {
 }
 
 fn usage_columns(conn: &Connection) -> Result<HashSet<String>, String> {
+    table_columns(conn, "usage_daily")
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>, String> {
     let mut stmt = conn
-        .prepare("PRAGMA table_info(usage_daily)")
+        .prepare(&format!("PRAGMA table_info({table})"))
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| row.get::<_, String>(1))
@@ -422,11 +450,13 @@ fn ensure_usage_schema(conn: &Connection) -> Result<(), String> {
           input INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0,
           cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
           source TEXT NOT NULL DEFAULT 'cli', internal INTEGER NOT NULL DEFAULT 0,
+          workspace TEXT NOT NULL DEFAULT '', official INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY(day, agent, model, project_path, session_id));
          CREATE TABLE IF NOT EXISTS usage_meta(key TEXT PRIMARY KEY, value TEXT);
          CREATE TABLE IF NOT EXISTS usage_provenance(
            agent TEXT NOT NULL, project_path TEXT NOT NULL,
            source TEXT NOT NULL, internal INTEGER NOT NULL DEFAULT 0,
+           official INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL,
            PRIMARY KEY(agent, project_path));",
     )
@@ -445,6 +475,29 @@ fn ensure_usage_schema(conn: &Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("升级内部活动字段失败: {e}"))?;
+    }
+    if !columns.contains("workspace") {
+        conn.execute(
+            "ALTER TABLE usage_daily ADD COLUMN workspace TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("升级工作区归因字段失败: {e}"))?;
+    }
+    if !columns.contains("official") {
+        conn.execute(
+            "ALTER TABLE usage_daily ADD COLUMN official INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("升级官方账号标记字段失败: {e}"))?;
+    }
+    // provenance 表不在版本重置范围内（登记行要跨重建保留），单独补列
+    let provenance_columns = table_columns(conn, "usage_provenance")?;
+    if !provenance_columns.contains("official") {
+        conn.execute(
+            "ALTER TABLE usage_provenance ADD COLUMN official INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("升级来源登记官方账号字段失败: {e}"))?;
     }
     let current: Option<String> = conn
         .query_row(
@@ -476,18 +529,21 @@ fn register_provenance_impl(
     project_path: &str,
     source: &str,
     internal: bool,
+    official: bool,
 ) -> Result<(), String> {
     let project_path = normalize_provenance_path(project_path);
     conn.execute(
-        "INSERT INTO usage_provenance(agent, project_path, source, internal, created_at)
-         VALUES(?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO usage_provenance(agent, project_path, source, internal, official, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(agent, project_path) DO UPDATE SET
-           source=excluded.source, internal=excluded.internal, created_at=excluded.created_at",
+           source=excluded.source, internal=excluded.internal,
+           official=excluded.official, created_at=excluded.created_at",
         params![
             agent,
             project_path,
             source,
             i64::from(internal),
+            i64::from(official),
             crate::sessions::now_iso()
         ],
     )
@@ -533,17 +589,40 @@ pub(crate) fn register_internal_ai_run(agent: &str, project_path: &Path) -> Resu
         &project_path.to_string_lossy(),
         SOURCE_CCODE_AI,
         true,
+        false,
     )
 }
 
-fn session_provenance(conn: &Connection, agent: &str, project_path: &str) -> (String, bool) {
+/// 官方账号（订阅制）profile 的终端启动登记：与 internal 同一机制，
+/// source 保持 cli（是用户自己的交互会话），只标 official，统计页费用栏据此显示「订阅」。
+/// 同 agent+项目再以 API profile 启动时不回写本表——official 标记只增不清，
+/// 避免一次启动把历史 official 会话的标记抹掉（与 internal 登记同语义）。
+pub(crate) fn register_official_launch(agent: &str, project_path: &Path) -> Result<(), String> {
+    let conn = usage_db()?;
+    register_provenance_impl(
+        &conn,
+        agent,
+        &project_path.to_string_lossy(),
+        SOURCE_CLI,
+        false,
+        true,
+    )
+}
+
+fn session_provenance(conn: &Connection, agent: &str, project_path: &str) -> (String, bool, bool) {
     let project_path = normalize_provenance_path(project_path);
     conn.query_row(
-        "SELECT source, internal FROM usage_provenance WHERE agent=?1 AND project_path=?2",
+        "SELECT source, internal, official FROM usage_provenance WHERE agent=?1 AND project_path=?2",
         params![agent, project_path],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? != 0,
+                row.get::<_, i64>(2)? != 0,
+            ))
+        },
     )
-    .unwrap_or_else(|_| (SOURCE_CLI.into(), false))
+    .unwrap_or_else(|_| (SOURCE_CLI.into(), false, false))
 }
 
 fn meta_get(conn: &Connection, key: &str) -> Option<String> {
@@ -640,11 +719,12 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
         if meta_get(&conn, &key).as_deref() == Some(marker.as_str()) && !marker.is_empty() {
             continue;
         }
-        let (source, internal) = session_provenance(&conn, &s.agent, &s.project_path);
+        let (source, internal, official) = session_provenance(&conn, &s.agent, &s.project_path);
         let mut events = extract_events(s);
         for event in &mut events {
             event.source.clone_from(&source);
             event.internal = internal;
+            event.official = official;
         }
         conn.execute(
             "DELETE FROM usage_daily WHERE agent=?1 AND session_id=?2",
@@ -655,21 +735,23 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
             agent: s.agent.clone(),
             session_id: s.session_id.clone(),
             project_path: s.project_path.clone(),
+            workspace: s.workspace.clone().unwrap_or_default(),
             events,
         };
         for row in aggregate(&[contrib]) {
             conn.execute(
                 "INSERT INTO usage_daily(day, agent, model, project_path, session_id,
-                                        input, output, cache_read, cache_write, source, internal)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                                        input, output, cache_read, cache_write, source, internal, workspace, official)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(day, agent, model, project_path, session_id) DO UPDATE SET
                    input=input+excluded.input, output=output+excluded.output,
                    cache_read=cache_read+excluded.cache_read, cache_write=cache_write+excluded.cache_write,
-                   source=excluded.source, internal=excluded.internal",
+                   source=excluded.source, internal=excluded.internal, workspace=excluded.workspace,
+                   official=excluded.official",
                 params![
                     row.day, row.agent, row.model, row.project_path, row.session_id,
                     row.input as i64, row.output as i64, row.cache_read as i64, row.cache_write as i64,
-                    row.source, i64::from(row.internal),
+                    row.source, i64::from(row.internal), row.workspace, i64::from(row.official),
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -891,6 +973,8 @@ type StoredUsageRow = (
     i64,
     String,
     bool,
+    String, // workspace：工作区名，非工作区会话为 ""
+    bool,   // official：官方账号（订阅制）用量，不按量计费
 );
 
 fn build_stats(
@@ -899,10 +983,13 @@ fn build_stats(
     rate_usd_cny: f64,
 ) -> UsageStatsDto {
     let mut cards = Bucket::default();
-    let mut by_agent: HashMap<String, Bucket> = HashMap::new();
-    let mut by_project: HashMap<(String, String, bool), Bucket> = HashMap::new();
+    // (agent, official)：官方账号用量与 API 用量分桶，费用栏分别显示「订阅」与估算金额
+    let mut by_agent: HashMap<(String, bool), Bucket> = HashMap::new();
+    let mut by_project: HashMap<(String, String, bool, bool), Bucket> = HashMap::new();
     let mut by_model: HashMap<(String, String, bool), Bucket> = HashMap::new();
-    for (_day, agent, model, project, sid, i, o, cr, cw, source, internal) in rows {
+    // (工作区名, 所属仓库路径, internal, official)：同名工作区在不同仓库下各自成行
+    let mut by_workspace: HashMap<(String, String, bool, bool), Bucket> = HashMap::new();
+    for (_day, agent, model, project, sid, i, o, cr, cw, source, internal, workspace, official) in rows {
         let acc = TokenAcc {
             input: i as u64,
             output: o as u64,
@@ -910,20 +997,29 @@ fn build_stats(
             cache_write: cw as u64,
         };
         cards.add(&model, &sid, acc);
-        by_agent.entry(agent).or_default().add(&model, &sid, acc);
+        by_agent
+            .entry((agent, official))
+            .or_default()
+            .add(&model, &sid, acc);
         by_project
-            .entry((project, source.clone(), internal))
+            .entry((project.clone(), source.clone(), internal, official))
             .or_default()
             .add(&model, &sid, acc);
         by_model
             .entry((model.clone(), source, internal))
             .or_default()
             .add(&model, &sid, acc);
+        if !workspace.is_empty() {
+            by_workspace
+                .entry((workspace, project, internal, official))
+                .or_default()
+                .add(&model, &sid, acc);
+        }
     }
     let total = |b: &Bucket| b.tokens.input + b.tokens.output;
     let mut agent_rows: Vec<UsageAgentRowDto> = by_agent
         .into_iter()
-        .map(|(agent, b)| {
+        .map(|((agent, official), b)| {
             let (cost_usd, cost_partial) = b.cost(table);
             UsageAgentRowDto {
                 tokens: total(&b),
@@ -931,6 +1027,7 @@ fn build_stats(
                 cost_partial,
                 agent,
                 model_count: b.by_model.len() as u32,
+                official,
             }
         })
         .collect();
@@ -938,7 +1035,7 @@ fn build_stats(
     agent_rows.truncate(LIST_CAP);
     let mut project_rows: Vec<UsageProjectRowDto> = by_project
         .into_iter()
-        .map(|((project_path, source, internal), b)| {
+        .map(|((project_path, source, internal, official), b)| {
             let (cost_usd, cost_partial) = b.cost(table);
             UsageProjectRowDto {
                 tokens: total(&b),
@@ -948,6 +1045,7 @@ fn build_stats(
                 project_path,
                 source,
                 internal,
+                official,
             }
         })
         .collect();
@@ -970,6 +1068,30 @@ fn build_stats(
         .collect();
     model_rows.sort_by(|a, b| (b.input + b.output).cmp(&(a.input + a.output)));
     model_rows.truncate(LIST_CAP);
+    let mut workspace_rows: Vec<UsageWorkspaceRowDto> = by_workspace
+        .into_iter()
+        .map(|((workspace, repo_path, internal, official), b)| {
+            let (cost, cost_partial) = b.cost(table);
+            UsageWorkspaceRowDto {
+                workspace_name: workspace,
+                repo_name: Path::new(&repo_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or(repo_path),
+                tokens_in: b.tokens.input,
+                tokens_out: b.tokens.output,
+                cost,
+                cost_partial,
+                models: b.by_model.len() as u32,
+                internal,
+                official,
+            }
+        })
+        .collect();
+    workspace_rows.sort_by(|a, b| {
+        (b.tokens_in + b.tokens_out).cmp(&(a.tokens_in + a.tokens_out))
+    });
+    workspace_rows.truncate(LIST_CAP);
     let (cards_cost, cards_partial) = cards.cost(table);
     UsageStatsDto {
         cards: UsageCardsDto {
@@ -984,6 +1106,7 @@ fn build_stats(
         by_agent: agent_rows,
         by_project: project_rows,
         by_model: model_rows,
+        by_workspace: workspace_rows,
         rate_usd_cny,
     }
 }
@@ -993,13 +1116,13 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
     let (sql, cutoff) = match cutoff_day(range) {
         Some(c) => (
             "SELECT day, agent, model, project_path, session_id, input, output, cache_read, cache_write,
-                    source, internal
+                    source, internal, workspace, official
              FROM usage_daily WHERE day >= ?1",
             Some(c),
         ),
         None => (
             "SELECT day, agent, model, project_path, session_id, input, output, cache_read, cache_write,
-                    source, internal
+                    source, internal, workspace, official
              FROM usage_daily",
             None,
         ),
@@ -1010,7 +1133,7 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
             Ok((
                 r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
                 r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
-                r.get::<_, i64>(10)? != 0,
+                r.get::<_, i64>(10)? != 0, r.get(11)?, r.get::<_, i64>(12)? != 0,
             ))
         };
         let collected: rusqlite::Result<Vec<_>> = match &cutoff {
@@ -1060,6 +1183,8 @@ pub struct UsageAgentRowDto {
     pub cost_partial: bool,
     /// 该 agent 在统计范围内使用过的不同模型数
     pub model_count: u32,
+    /// 官方账号（订阅制）用量：不按量计费，前端费用栏显示「订阅」
+    pub official: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1072,6 +1197,8 @@ pub struct UsageProjectRowDto {
     pub cost_partial: bool,
     pub source: String,
     pub internal: bool,
+    /// 官方账号（订阅制）用量：不按量计费，前端费用栏显示「订阅」
+    pub official: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1086,6 +1213,25 @@ pub struct UsageModelRowDto {
     pub internal: bool,
 }
 
+/// 任务成本（§P5 成本按工作区归因）：usage 落在某工作区 worktree 内的会话按工作区成桶
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageWorkspaceRowDto {
+    pub workspace_name: String,
+    /// 所属项目（仓库）名
+    pub repo_name: String,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    /// 与项目排行同口径：已计价模型份额合计，全部不明价为 None
+    pub cost: Option<f64>,
+    pub cost_partial: bool,
+    /// 统计范围内用过的不同模型数
+    pub models: u32,
+    pub internal: bool,
+    /// 官方账号（订阅制）用量：不按量计费，前端费用栏显示「订阅」
+    pub official: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageStatsDto {
@@ -1093,6 +1239,8 @@ pub struct UsageStatsDto {
     pub by_agent: Vec<UsageAgentRowDto>,
     pub by_project: Vec<UsageProjectRowDto>,
     pub by_model: Vec<UsageModelRowDto>,
+    /// 按工作区/任务归因的成本（仅含命中工作区的用量，按 token 降序）
+    pub by_workspace: Vec<UsageWorkspaceRowDto>,
     /// USD→CNY 汇率（pricing.json 的 "_rate" 可覆盖，默认 7.2）
     pub rate_usd_cny: f64,
 }
@@ -1134,6 +1282,7 @@ mod tests {
             cache_write: 0,
             source: SOURCE_CLI.into(),
             internal: false,
+            official: false,
         }
     }
 
@@ -1144,18 +1293,21 @@ mod tests {
                 agent: "codex".into(),
                 session_id: "s1".into(),
                 project_path: "/p".into(),
+                workspace: String::new(),
                 events: vec![ev("2026-07-01", "gpt-5", 10, 5), ev("2026-07-01", "gpt-5", 20, 5), ev("2026-07-02", "gpt-5", 1, 1)],
             },
             SessionContrib {
                 agent: "codex".into(),
                 session_id: "s2".into(),
                 project_path: "/p".into(),
+                workspace: String::new(),
                 events: vec![ev("2026-07-01", "gpt-5", 7, 3)],
             },
             SessionContrib {
                 agent: "claude-code".into(),
                 session_id: "s3".into(),
                 project_path: "/p".into(),
+                workspace: String::new(),
                 events: vec![], // 无 usage 的会话不产生行
             },
         ];
@@ -1173,6 +1325,7 @@ mod tests {
             agent: "kimi".into(),
             session_id: "s1".into(),
             project_path: "/p".into(),
+            workspace: String::new(),
             events: vec![ev("", "kimi-k2", 10, 5), ev("2026-08-01", "kimi-k2", 1, 1)],
         }];
         let rows = aggregate(&contribs);
@@ -1259,6 +1412,8 @@ mod tests {
         let columns = usage_columns(&conn).unwrap();
         assert!(columns.contains("source"));
         assert!(columns.contains("internal"));
+        assert!(columns.contains("workspace"), "v5 起补工作区归因列");
+        assert!(columns.contains("official"), "v6 起补官方账号标记列");
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM usage_daily", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
@@ -1279,25 +1434,26 @@ mod tests {
             "/private/tmp/ccode-ai-known",
             SOURCE_CCODE_AI,
             true,
+            false,
         )
         .unwrap();
         assert_eq!(
             session_provenance(&conn, "codex", "/private/tmp/ccode-ai-known"),
-            (SOURCE_CCODE_AI.into(), true)
+            (SOURCE_CCODE_AI.into(), true, false)
         );
         assert_eq!(
             session_provenance(&conn, "codex", "/tmp/user-task"),
-            (SOURCE_CLI.into(), false),
+            (SOURCE_CLI.into(), false, false),
             "用户主动在 /tmp 运行不得被判成内部活动"
         );
         assert_eq!(
             session_provenance(&conn, "codex", "/tmp/ccode-ai-unregistered"),
-            (SOURCE_CLI.into(), false),
+            (SOURCE_CLI.into(), false, false),
             "仅路径长得像 Ccode 临时任务也不是来源证据"
         );
         assert_eq!(
             session_provenance(&conn, "claude-code", "/private/tmp/ccode-ai-known"),
-            (SOURCE_CLI.into(), false),
+            (SOURCE_CLI.into(), false, false),
             "来源登记同时绑定 agent"
         );
         #[cfg(target_os = "macos")]
@@ -1308,6 +1464,7 @@ mod tests {
                 "/var/folders/test/ccode-ai-canonical",
                 SOURCE_CCODE_AI,
                 true,
+                false,
             )
             .unwrap();
             assert_eq!(
@@ -1316,10 +1473,59 @@ mod tests {
                     "kimi",
                     "/private/var/folders/test/ccode-ai-canonical"
                 ),
-                (SOURCE_CCODE_AI.into(), true),
+                (SOURCE_CCODE_AI.into(), true, false),
                 "macOS 临时目录别名只做路径归一化，不影响来源判定"
             );
         }
+    }
+
+    #[test]
+    fn official_provenance_marks_rows_and_splits_cost_buckets() {
+        // 登记 → 命中 → official 标记：与 internal 同一精确匹配口径（agent + 归一化项目路径）
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        register_provenance_impl(&conn, "gemini", "/home/u/proj", SOURCE_CLI, false, true).unwrap();
+        assert_eq!(
+            session_provenance(&conn, "gemini", "/home/u/proj"),
+            (SOURCE_CLI.into(), false, true),
+            "官方账号登记：source 保持 cli，只标 official"
+        );
+        assert_eq!(
+            session_provenance(&conn, "gemini", "/home/u/other"),
+            (SOURCE_CLI.into(), false, false),
+            "未登记的项目不受影响"
+        );
+        assert_eq!(
+            session_provenance(&conn, "codex", "/home/u/proj"),
+            (SOURCE_CLI.into(), false, false),
+            "official 登记同样绑定 agent"
+        );
+        // 同一 agent 下 official 与普通用量在 agent/项目/工作区维度分桶，费用互不染指
+        let rows: Vec<StoredUsageRow> = vec![
+            ws_row("/home/u/proj", "s1", "gemini-3-pro", 100, 10, false, ""),
+            {
+                let mut r = ws_row("/home/u/proj", "s2", "gemini-3-pro", 50, 5, false, "");
+                r.12 = true;
+                r
+            },
+            {
+                let mut r = ws_row("/home/u/proj", "s3", "gemini-3-pro", 20, 2, false, "task-x");
+                r.12 = true;
+                r
+            },
+        ];
+        let stats = build_stats(rows, &load_pricing(None), 7.2);
+        let official_agent = stats.by_agent.iter().find(|a| a.official).unwrap();
+        let normal_agent = stats.by_agent.iter().find(|a| !a.official).unwrap();
+        assert_eq!(official_agent.tokens, 50 + 5 + 20 + 2);
+        assert_eq!(normal_agent.tokens, 110);
+        assert!(normal_agent.cost_usd.is_some(), "普通行仍按官方价估算");
+        let official_project = stats.by_project.iter().find(|p| p.official).unwrap();
+        assert_eq!(official_project.sessions, 2);
+        assert!(stats.by_project.iter().any(|p| !p.official));
+        let official_ws = stats.by_workspace.iter().find(|w| w.official).unwrap();
+        assert_eq!(official_ws.workspace_name, "task-x");
+        assert_eq!(official_ws.tokens_in + official_ws.tokens_out, 22);
     }
 
     #[test]
@@ -1374,6 +1580,8 @@ mod tests {
                 0,
                 SOURCE_CLI.into(),
                 false,
+                String::new(),
+                false,
             ),
             (
                 "2026-08-01".into(),
@@ -1387,6 +1595,8 @@ mod tests {
                 0,
                 SOURCE_CCODE_AI.into(),
                 true,
+                String::new(),
+                false,
             ),
         ];
         let stats = build_stats(rows, &load_pricing(None), 7.2);
@@ -1399,6 +1609,103 @@ mod tests {
         assert_eq!(stats.by_model.len(), 2, "相同模型的普通与内部用量不得混成一行");
         assert!(stats.by_model.iter().any(|row| !row.internal));
         assert!(stats.by_model.iter().any(|row| row.internal));
+    }
+
+    /// 造一行 StoredUsageRow（official 默认 false，workspace 之外参数从简）
+    fn ws_row(
+        project: &str,
+        sid: &str,
+        model: &str,
+        input: i64,
+        output: i64,
+        internal: bool,
+        workspace: &str,
+    ) -> StoredUsageRow {
+        (
+            "2026-08-01".into(),
+            "codex".into(),
+            model.into(),
+            project.into(),
+            sid.into(),
+            input,
+            output,
+            0,
+            0,
+            SOURCE_CLI.into(),
+            internal,
+            workspace.into(),
+            false,
+        )
+    }
+
+    #[test]
+    fn workspace_attribution_groups_and_keeps_project_dimension() {
+        let rows: Vec<StoredUsageRow> = vec![
+            // 工作区会话（扫描已把项目路径改写为真实仓库，workspace 列记工作区名）
+            ws_row("/home/u/code/myrepo", "s1", "gpt-5", 100, 10, false, "feat-x"),
+            ws_row("/home/u/code/myrepo", "s2", "gpt-5", 50, 5, false, "feat-x"),
+            // 同名工作区在另一个仓库下：各自成行
+            ws_row("/home/u/code/other", "s3", "gpt-5", 30, 3, false, "feat-x"),
+            // 主仓库 / 非工作区会话：不进 by_workspace，项目维度不受影响
+            ws_row("/home/u/code/myrepo", "s4", "gpt-5", 7, 1, false, ""),
+            ws_row("/elsewhere", "s5", "gpt-5", 9, 1, false, ""),
+        ];
+        let stats = build_stats(rows, &load_pricing(None), 7.2);
+        assert_eq!(stats.by_workspace.len(), 2, "同名不同仓库的工作区不得合并");
+        let feat_myrepo = stats
+            .by_workspace
+            .iter()
+            .find(|r| r.repo_name == "myrepo")
+            .unwrap();
+        assert_eq!(feat_myrepo.workspace_name, "feat-x");
+        assert_eq!((feat_myrepo.tokens_in, feat_myrepo.tokens_out), (150, 15));
+        assert_eq!(feat_myrepo.models, 1);
+        assert!(feat_myrepo.cost.is_some(), "gpt-5 官方价应可估算");
+        assert!(!feat_myrepo.cost_partial);
+        assert!(!feat_myrepo.internal);
+        assert!(stats
+            .by_workspace
+            .iter()
+            .all(|r| !r.workspace_name.is_empty()));
+        // 项目维度保持原样：工作区用量仍计入所属仓库项目行
+        let proj = stats
+            .by_project
+            .iter()
+            .find(|p| p.project_path == "/home/u/code/myrepo")
+            .unwrap();
+        assert_eq!(proj.tokens, 150 + 15 + 7 + 1);
+    }
+
+    #[test]
+    fn workspace_rows_sorted_by_tokens_and_partial_cost() {
+        let rows: Vec<StoredUsageRow> = vec![
+            ws_row("/r/a", "s1", "mystery-model", 10, 10, false, "small"),
+            ws_row("/r/a", "s2", "gpt-5", 1_000_000, 1_000_000, false, "big"),
+            ws_row("/r/a", "s3", "mystery-model", 5, 5, false, "big"),
+            // 内部来源落在工作区时与普通行分桶，开关口径与项目排行一致
+            ws_row("/r/a", "s4", "gpt-5", 60, 6, true, "big"),
+        ];
+        let stats = build_stats(rows, &load_pricing(None), 7.2);
+        assert_eq!(stats.by_workspace.len(), 3);
+        assert_eq!(stats.by_workspace[0].workspace_name, "big", "按 token 降序");
+        assert!(!stats.by_workspace[0].internal);
+        let big = &stats.by_workspace[0];
+        assert!(big.cost.is_some(), "只累加已计价份额");
+        assert!(big.cost_partial, "混有不明价模型必须标记 ≥");
+        assert_eq!(big.models, 2);
+        let big_internal = stats
+            .by_workspace
+            .iter()
+            .find(|r| r.workspace_name == "big" && r.internal)
+            .unwrap();
+        assert!(!big_internal.cost_partial);
+        let small = stats
+            .by_workspace
+            .iter()
+            .find(|r| r.workspace_name == "small")
+            .unwrap();
+        assert_eq!(small.cost, None, "全部不明价 → 费用 None（前端显示 ~）");
+        assert!(small.cost_partial);
     }
 
     #[test]

@@ -1,7 +1,8 @@
-//! PDF 字节读取（§11.4 P2a）：供前端 pdf.js 内嵌预览。
-//! 防任意文件读取——只有四类白名单来源内的路径才放行：
+//! 二进制文件字节读取（§11.4 P2a PDF / RX4a docx）：供前端内嵌预览。
+//! 防任意文件读取——只有白名单来源内的路径才放行：
 //! 已注册项目的登记资源（project.toml resources）、已注册项目根内、
-//! 工作区/仓库根内、终端标签 cwd 根内（前端 hint，风格同 read_file_preview 的 root 约束）。
+//! 工作区/仓库根内、终端标签 cwd 根内（前端 hint，风格同 read_file_preview 的 root 约束），
+//! 以及上述各根 artifacts.yaml 提货单中登记产物的精确路径（P4：登记产物可位于根之外）。
 //! 目标路径 canonicalize 后再判定，堵符号链接绕过。
 
 use base64::Engine;
@@ -9,8 +10,10 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// 单文件上限：超出直接报错（pdf.js 需要完整文件，截断无意义）
+/// 单文件上限：超出直接报错（预览需要完整文件，截断无意义）
 const PDF_CAP: u64 = 100 * 1024 * 1024;
+/// docx 上限比 PDF 紧：mammoth 转 HTML 全在内存里做，超大文件提示不渲染
+const DOCX_CAP: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,7 +35,14 @@ fn path_allowed(target: &Path, roots: &[PathBuf], resources: &[PathBuf]) -> bool
     roots.iter().any(|r| target.starts_with(r)) || resources.iter().any(|r| target == r)
 }
 
-fn read_pdf_sync(path: &str, cwd_hint: Option<&str>) -> Result<PdfBytesDto, String> {
+/// 白名单 + 上限 + 完整读取的公共内核（PDF 与 docx 共用；格式魔数校验与 base64 编码由调用方做）。
+/// cap_exceeded 为超限时的报错文案（按类型定制提示）。
+fn read_whitelisted_sync(
+    path: &str,
+    cwd_hint: Option<&str>,
+    cap: u64,
+    cap_exceeded: impl Fn(f64) -> String,
+) -> Result<(Vec<u8>, u64), String> {
     let target = PathBuf::from(crate::sessions::expand_tilde(path))
         .canonicalize()
         .map_err(|e| format!("文件不存在或不可读: {e}"))?;
@@ -56,28 +66,58 @@ fn read_pdf_sync(path: &str, cwd_hint: Option<&str>) -> Result<PdfBytesDto, Stri
             .flat_map(|w| [w.worktree_path, w.repo_path])
             .filter_map(|p| canon(Path::new(&p))),
     );
+    // 提货单产物（P4）：白名单根内 artifacts.yaml 的登记产物可位于根之外（如产物目录），
+    // 按条目精确路径放行（与登记资源同语义，兄弟文件不放行）
+    for root in roots.clone() {
+        resources.extend(
+            crate::workspaces::artifact_paths_at(&root)
+                .into_iter()
+                .filter_map(|p| canon(&p)),
+        );
+    }
     if !path_allowed(&target, &roots, &resources) {
         return Err("路径不在项目/登记资源/工作区/终端目录范围内，拒绝读取".into());
     }
     let size = fs::metadata(&target)
         .map_err(|e| format!("读取文件失败: {e}"))?
         .len();
-    if size > PDF_CAP {
-        return Err(format!(
-            "PDF 超过 100 MB（{:.1} MB），暂不支持内嵌预览",
-            size as f64 / 1024.0 / 1024.0
-        ));
+    if size > cap {
+        return Err(cap_exceeded(size as f64 / 1024.0 / 1024.0));
     }
     let bytes = fs::read(&target).map_err(|e| format!("读取文件失败: {e}"))?;
+    Ok((bytes, size))
+}
+
+/// 魔数校验通过后统一编码（先校验后编码，避免超限/坏文件也付一遍编码开销）
+fn encode_dto(bytes: &[u8], size: u64) -> PdfBytesDto {
+    PdfBytesDto {
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        size,
+    }
+}
+
+fn read_pdf_sync(path: &str, cwd_hint: Option<&str>) -> Result<PdfBytesDto, String> {
+    let (bytes, size) = read_whitelisted_sync(path, cwd_hint, PDF_CAP, |mb| {
+        format!("PDF 超过 100 MB（{mb:.1} MB），暂不支持内嵌预览")
+    })?;
     // PDF 头允许出现在前 1024 字节内（部分生成器会写前导字节），宽松校验给个明白的错误
     let head = &bytes[..bytes.len().min(1024)];
     if !head.windows(5).any(|w| w == b"%PDF-") {
         return Err("文件内容不是有效的 PDF".into());
     }
-    Ok(PdfBytesDto {
-        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-        size,
-    })
+    Ok(encode_dto(&bytes, size))
+}
+
+fn read_docx_sync(path: &str, cwd_hint: Option<&str>) -> Result<PdfBytesDto, String> {
+    let (bytes, size) = read_whitelisted_sync(path, cwd_hint, DOCX_CAP, |mb| {
+        format!("docx 超过 50 MB（{mb:.1} MB），暂不支持内嵌预览")
+    })?;
+    // docx 是 ZIP 容器（PK 魔数开头；PK\x05\x06 为空压缩包）：宽松校验给个明白的错误。
+    // 注意不能套 PDF 的前 1024 字节窗口校验——ZIP 魔数必须在文件开头
+    if !bytes.starts_with(b"PK\x03\x04") && !bytes.starts_with(b"PK\x05\x06") {
+        return Err("文件内容不是有效的 docx（ZIP 容器）".into());
+    }
+    Ok(encode_dto(&bytes, size))
 }
 
 #[tauri::command]
@@ -85,6 +125,16 @@ pub async fn read_pdf_bytes(path: String, cwd_hint: Option<String>) -> Result<Pd
     tauri::async_runtime::spawn_blocking(move || read_pdf_sync(&path, cwd_hint.as_deref()))
         .await
         .map_err(|e| format!("读取 PDF 失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn read_docx_bytes(
+    path: String,
+    cwd_hint: Option<String>,
+) -> Result<PdfBytesDto, String> {
+    tauri::async_runtime::spawn_blocking(move || read_docx_sync(&path, cwd_hint.as_deref()))
+        .await
+        .map_err(|e| format!("读取 docx 失败: {e}"))?
 }
 
 #[cfg(test)]
@@ -158,6 +208,35 @@ mod tests {
     }
 
     #[test]
+    fn read_via_manifest_entry_ok() {
+        // P4 白名单扩展：hint 根内 artifacts.yaml 登记的产物（在根之外）按精确路径放行
+        let root = tmpdir("mroot");
+        let outside = tmpdir("moutside");
+        let f = outside.join("render.pdf");
+        fs::write(&f, b"%PDF-1.7 fake body").unwrap();
+        // 清单存的是 canonical 绝对路径（register_artifact 语义）
+        let canon_f = f.canonicalize().unwrap();
+        fs::write(
+            root.join("artifacts.yaml"),
+            format!(
+                "artifacts:\n  - name: \"render\"\n    path: \"{}\"\n    hash: \"abc\"\n    size: 18\n    produced_by: \"paper-draft\"\n    created_at: \"2026-08-01\"\n",
+                canon_f.display()
+            ),
+        )
+        .unwrap();
+        let dto = read_pdf_sync(canon_f.to_str().unwrap(), Some(root.to_str().unwrap())).unwrap();
+        assert_eq!(dto.size, 18);
+        // 同目录未登记的兄弟文件仍拒绝（条目是精确匹配，不是前缀）
+        let other = outside.join("other.pdf");
+        fs::write(&other, b"%PDF-1.7 fake").unwrap();
+        let err = read_pdf_sync(other.to_str().unwrap(), Some(root.to_str().unwrap()))
+            .unwrap_err();
+        assert!(err.contains("拒绝读取"), "{err}");
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
     fn read_rejects_oversize() {
         let dir = tmpdir("cap");
         let f = dir.join("huge.pdf");
@@ -185,5 +264,57 @@ mod tests {
         assert!(err.contains("拒绝读取"), "{err}");
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&outside).ok();
+    }
+
+    // ===== RX4a：docx 读取（同白名单，ZIP 魔数校验，50MB 上限） =====
+
+    #[test]
+    fn docx_read_within_hint_ok() {
+        let dir = tmpdir("docx-ok");
+        let f = dir.join("draft.docx");
+        fs::write(&f, b"PK\x03\x04 fake zip body").unwrap();
+        let dto = read_docx_sync(f.to_str().unwrap(), Some(dir.to_str().unwrap())).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&dto.data)
+            .unwrap();
+        assert_eq!(decoded, b"PK\x03\x04 fake zip body");
+        assert_eq!(dto.size, 18);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn docx_rejects_non_zip_content() {
+        let dir = tmpdir("docx-notzip");
+        // PDF 内容走 docx 通道：PDF 的宽松头校验不能套用到 docx
+        let f = dir.join("paper.docx");
+        fs::write(&f, b"%PDF-1.7 fake").unwrap();
+        let err = read_docx_sync(f.to_str().unwrap(), Some(dir.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("不是有效的 docx"), "{err}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn docx_rejects_outside_hint() {
+        let root = tmpdir("docx-root");
+        let outside = tmpdir("docx-outside");
+        let f = outside.join("draft.docx");
+        fs::write(&f, b"PK\x03\x04 fake").unwrap();
+        let err = read_docx_sync(f.to_str().unwrap(), Some(root.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("拒绝读取"), "{err}");
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn docx_rejects_oversize() {
+        let dir = tmpdir("docx-cap");
+        let f = dir.join("huge.docx");
+        // 稀疏文件置长度，避免真的写 50MB
+        let file = fs::File::create(&f).unwrap();
+        file.set_len(DOCX_CAP + 1).unwrap();
+        drop(file);
+        let err = read_docx_sync(f.to_str().unwrap(), Some(dir.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("50 MB"), "{err}");
+        fs::remove_dir_all(&dir).ok();
     }
 }

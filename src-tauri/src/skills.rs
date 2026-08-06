@@ -190,6 +190,17 @@ fn parse_skill_md(path: &Path) -> (Option<String>, Option<String>) {
     (name, description)
 }
 
+/// 由名称/描述/正文组成 SKILL.md 全文（frontmatter 只写 name/description，与解析口径一致）。
+/// 描述强制单行：换行会破坏 frontmatter 的行解析
+fn compose_skill_md(name: &str, description: &str, content: &str) -> String {
+    let desc = description.replace(['\r', '\n'], " ");
+    format!(
+        "---\nname: {name}\ndescription: {}\n---\n\n{}\n",
+        desc.trim(),
+        content.trim()
+    )
+}
+
 // ===== 发现：含 SKILL.md 的目录即技能，找到不下钻，跳过 . 开头目录 =====
 
 fn find_skill_dirs(root: &Path, out: &mut Vec<PathBuf>) {
@@ -1246,6 +1257,124 @@ pub async fn read_skill_md(id: String) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+// ===== 新建 / 编辑（RX3b：用户沉淀自己的工作方法为技能） =====
+
+/// 新建技能：写库目录 SKILL.md + 元数据登记（与 add_skill_from_dir 同口径：
+/// 描述从落盘后的 SKILL.md 解析；元数据写失败回滚库目录）。重名拒绝，引导改用编辑。
+fn create_impl(
+    store: &SkillStore,
+    skills: &mut Vec<SkillDto>,
+    name: &str,
+    description: &str,
+    content: &str,
+) -> Result<(), String> {
+    validate_skill_name(name)?;
+    if skills.iter().any(|skill| skill.name == name) || store.skill_dir(name).exists() {
+        return Err(format!("技能「{name}」已存在，请改用「编辑内容」修改"));
+    }
+    let dst = store.skill_dir(name);
+    fs::create_dir_all(&dst).map_err(|e| format!("创建技能目录失败: {e}"))?;
+    if let Err(e) = fs::write(
+        dst.join("SKILL.md"),
+        compose_skill_md(name, description, content),
+    ) {
+        let _ = fs::remove_dir_all(&dst);
+        return Err(format!("写入 SKILL.md 失败: {e}"));
+    }
+    let (_, parsed_desc) = parse_skill_md(&dst.join("SKILL.md"));
+    skills.push(new_skill(name.to_string(), parsed_desc, "local", None));
+    if let Err(e) = store.write(skills) {
+        skills.pop();
+        let _ = fs::remove_dir_all(&dst);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// 编辑技能内容：经临时目录走既有覆盖路径——SKILL.md 之外的辅助文件（模板等）原样保留，
+/// 覆盖前备份、失败回滚、元数据描述更新全部复用 overwrite_skill_from_dir。
+fn update_content_impl(
+    store: &SkillStore,
+    skills: &mut Vec<SkillDto>,
+    name: &str,
+    content: &str,
+    description: Option<String>,
+) -> Result<(), String> {
+    validate_skill_name(name)?;
+    let existing = skills
+        .iter()
+        .find(|skill| skill.name == name)
+        .cloned()
+        .ok_or_else(|| format!("技能不存在: {name}"))?;
+    let lib_dir = store.skill_dir(name);
+    if !lib_dir.is_dir() {
+        return Err(format!("库目录缺失: {}", lib_dir.display()));
+    }
+    let temp = std::env::temp_dir().join(format!("ccode-skill-edit-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        copy_dir_recursive(&lib_dir, &temp)?;
+        let desc = description.unwrap_or_else(|| existing.description.clone());
+        fs::write(
+            temp.join("SKILL.md"),
+            compose_skill_md(name, &desc, content),
+        )
+        .map_err(|e| format!("写入 SKILL.md 失败: {e}"))?;
+        // source/repo 保持原值：编辑不改写来源信息
+        overwrite_skill_from_dir(store, skills, &temp, name, &existing.source, existing.repo.clone())
+    })();
+    let _ = fs::remove_dir_all(&temp);
+    result
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillPathDto {
+    /// SKILL.md 绝对路径（◈ 优化指令引用）
+    pub md_path: String,
+    /// 技能库目录（◈ 优化开终端的 cwd）
+    pub dir: String,
+}
+
+#[tauri::command]
+pub async fn create_skill(
+    name: String,
+    description: String,
+    content: String,
+) -> Result<(), String> {
+    let store = SkillStore::default_paths()?;
+    let mut skills = store.read();
+    create_impl(&store, &mut skills, name.trim(), &description, &content)
+}
+
+#[tauri::command]
+pub async fn update_skill_content(
+    name: String,
+    content: String,
+    description: Option<String>,
+) -> Result<(), String> {
+    let store = SkillStore::default_paths()?;
+    let mut skills = store.read();
+    update_content_impl(&store, &mut skills, name.trim(), &content, description)
+}
+
+#[tauri::command]
+pub async fn skill_md_path(id: String) -> Result<SkillPathDto, String> {
+    let store = SkillStore::default_paths()?;
+    let skills = store.read();
+    let skill = skills
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| format!("技能不存在: {id}"))?;
+    let dir = store.skill_dir(&skill.name);
+    if !dir.is_dir() {
+        return Err(format!("库目录缺失: {}", dir.display()));
+    }
+    Ok(SkillPathDto {
+        md_path: dir.join("SKILL.md").to_string_lossy().into_owned(),
+        dir: dir.to_string_lossy().into_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1425,6 +1554,66 @@ mod tests {
         assert_eq!(fx.store.read().len(), 2);
         assert!(fx.store.skill_dir("pdf").exists());
         assert!(fx.store.skill_dir("pdf-alternative").exists());
+    }
+
+    #[test]
+    fn create_registers_skill_and_rejects_duplicate() {
+        let fx = Fx::new();
+        let mut skills = fx.store.read();
+        create_impl(&fx.store, &mut skills, "my-method", "我的方法", "第一步……\n第二步……").unwrap();
+        let text = fs::read_to_string(fx.store.skill_dir("my-method").join("SKILL.md")).unwrap();
+        assert!(text.contains("name: my-method"), "{text}");
+        assert!(text.contains("description: 我的方法"), "{text}");
+        assert!(text.contains("第一步……"), "{text}");
+        let saved = fx.store.read();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].name, "my-method");
+        assert_eq!(saved[0].description, "我的方法", "元数据描述从落盘 SKILL.md 解析");
+        assert_eq!(saved[0].source, "local");
+        // 重名拒绝并提示改用编辑（不覆盖、不静默跳过）
+        let mut again = fx.store.read();
+        let err = create_impl(&fx.store, &mut again, "my-method", "x", "y").unwrap_err();
+        assert!(err.contains("已存在"), "{err}");
+        // 非法名称（多段路径）拒绝
+        let err = create_impl(&fx.store, &mut Vec::new(), "a/b", "x", "y").unwrap_err();
+        assert!(err.contains("单个安全目录名"), "{err}");
+        assert!(!fx.store.skill_dir("a").exists(), "非法名称不得落盘");
+    }
+
+    #[test]
+    fn update_content_backs_up_and_preserves_aux_files() {
+        let fx = Fx::new();
+        let skill = fx.add_lib_skill("pdf", "旧描述");
+        // SKILL.md 之外的辅助文件（模板等）编辑后必须保留
+        fs::write(fx.store.skill_dir("pdf").join("template.txt"), "模板内容").unwrap();
+        let mut skills = fx.store.read();
+        update_content_impl(&fx.store, &mut skills, "pdf", "新正文", Some("新描述".into())).unwrap();
+        let dir = fx.store.skill_dir("pdf");
+        assert!(fs::read_to_string(dir.join("SKILL.md")).unwrap().contains("新正文"));
+        assert_eq!(
+            fs::read_to_string(dir.join("template.txt")).unwrap(),
+            "模板内容",
+            "辅助文件必须保留"
+        );
+        let saved = fx.store.read();
+        assert_eq!(saved[0].description, "新描述");
+        assert_eq!(saved[0].id, skill.id, "编辑不换 id");
+        assert_eq!(saved[0].source, "local", "编辑不改写来源信息");
+        // 覆盖前备份沿用库目录机制（备份内含旧版 SKILL.md 与辅助文件）
+        let backup = fs::read_dir(fx.dir.join("skill-backups"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.file_name().unwrap().to_string_lossy().starts_with("pdf."))
+            .expect("覆盖前必须留下备份");
+        assert!(fs::read_to_string(backup.join("SKILL.md")).unwrap().contains("旧描述"));
+        assert!(backup.join("template.txt").exists());
+        // description 缺省 = 保留原描述；不存在的技能报错
+        let mut skills = fx.store.read();
+        update_content_impl(&fx.store, &mut skills, "pdf", "第三版", None).unwrap();
+        assert_eq!(fx.store.read()[0].description, "新描述");
+        let err = update_content_impl(&fx.store, &mut skills, "ghost", "x", None).unwrap_err();
+        assert!(err.contains("不存在"), "{err}");
     }
 
     #[test]

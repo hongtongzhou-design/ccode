@@ -1,8 +1,9 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/editor/editor.worker.js?worker";
+import { marked } from "marked";
 
 // 只用基础 editor worker（不需要语言服务的 intellisense）
 self.MonacoEnvironment = {
@@ -40,6 +41,43 @@ interface PathContext {
   branch: string | null;
 }
 
+/** md 文件默认走阅读版式（RX2a 笔记阅读模式） */
+function isMarkdownPath(path: string): boolean {
+  return /\.(md|markdown)$/i.test(path);
+}
+
+/**
+ * Markdown 阅读视图（RX2a）：marked 渲染本地文件内容。
+ * 渲染源是 read_file_preview 根约束内的用户本地文件（可信内容），
+ * 因此不引入 sanitize 重库；仅关闭与本场景无关的项，GFM 支持表格等。
+ * v1 代码块不做语法高亮（素色块），样式全部走 App.css 的 .md-body 主题令牌。
+ */
+function MarkdownView({ text, large }: { text: string; large?: boolean }) {
+  const html = useMemo(
+    // ⚠️（U+26A0+U+FE0F）在 WKWebView 里渲染成黄色 Apple Color Emoji，
+    // 与沉浸冷黑主题冲突（笔记里大量「⚠️ 仅摘要」提示）；换成文本呈现选择符
+    // FE0E 让其按文字颜色单色渲染。只改显示、不改文件内容；
+    // 实测 font-variant-emoji: text 在 WKWebView 无效，故走字符替换
+    () =>
+      marked.parse(text.replace(/\u26A0\uFE0F/g, "\u26A0\uFE0E"), {
+        gfm: true,
+        breaks: false,
+        async: false,
+      }),
+    [text],
+  );
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div
+        className={`md-body${large ? " md-body-lg" : ""} ${
+          large ? "mx-auto max-w-3xl px-8 py-10" : "px-5 py-4"
+        }`}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    </div>
+  );
+}
+
 /**
  * 文件预览编辑器（P4）：Monaco 取代只读 pre。
  * 内容经 read_file_preview 加载（根目录约束、二进制/截断处理沿用后端），
@@ -54,8 +92,13 @@ function FilePreviewEditor({
   root: string;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
-  const hostRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  // 编辑器宿主节点独立于 React 渲染树：沉浸编辑切换只移动 DOM 节点，
+  // Monaco 实例、undo 栈、dirty 与光标全部保留（React 重挂会丢实例）
+  const hostElRef = useRef<HTMLDivElement | null>(null);
+  if (!hostElRef.current) hostElRef.current = document.createElement("div");
+  const normalSlotRef = useRef<HTMLDivElement>(null);
+  const immersiveSlotRef = useRef<HTMLDivElement>(null);
   const [text, setText] = useState<string | null>(null);
   /** text 对应的文件路径：路径切换后旧内容不等新加载、立即视为无效（防残留误导） */
   const textPathRef = useRef<string | null>(null);
@@ -64,6 +107,35 @@ function FilePreviewEditor({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [ctx, setCtx] = useState<PathContext | null>(null);
+  // 阅读/编辑模式与沉浸覆盖层（仅 md 有阅读态；其他文本固定编辑态）
+  const isMd = isMarkdownPath(path);
+  const [mode, setMode] = useState<"read" | "edit">(isMd ? "read" : "edit");
+  const [immersive, setImmersive] = useState(false);
+
+  // 宿主节点挂到当前槽位（普通位置或沉浸覆盖层），移动不重建编辑器
+  useEffect(() => {
+    const host = hostElRef.current!;
+    const slot =
+      immersive && mode === "edit" ? immersiveSlotRef.current : normalSlotRef.current;
+    slot?.appendChild(host);
+    host.className = `min-h-0 flex-1${mode === "read" ? " hidden" : ""}`;
+  }, [immersive, mode]);
+
+  // 路径切换时按文件类型重置阅读/编辑与沉浸态
+  useEffect(() => {
+    setMode(isMarkdownPath(path) ? "read" : "edit");
+    setImmersive(false);
+  }, [path]);
+
+  // 沉浸覆盖层（阅读/编辑共用）：Esc 退出（终端/PTY 保持挂载，仅视觉覆盖，同评审覆盖层形态）
+  useEffect(() => {
+    if (!immersive) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setImmersive(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [immersive]);
 
   // 路径归属查询（失败/未命中不显示徽标）
   useEffect(() => {
@@ -156,8 +228,8 @@ function FilePreviewEditor({
   // 创建/销毁编辑器（截断文件只读，避免保存出不完整内容）。
   // 同路径的外部内容更新不重建编辑器，由下方同步 effect 走 executeEdits，保住滚动/光标/undo。
   useEffect(() => {
-    if (!ready || !hostRef.current) return;
-    const ed = monaco.editor.create(hostRef.current, {
+    if (!ready) return;
+    const ed = monaco.editor.create(hostElRef.current!, {
       value: text!,
       language: languageFor(path),
       theme: "ccode-dark",
@@ -167,6 +239,15 @@ function FilePreviewEditor({
       automaticLayout: true,
       scrollBeyondLastLine: false,
       renderWhitespace: "none",
+      // 关闭 unicode 高亮（VS Code 式防 Trojan Source 特性）：其 locale 精确匹配
+      // zh-hans 在 WKWebView 里拿不到（_os 得 zh-Hans-CN、_vscode 得 zh-cn，均不命中），
+      // 回落 _default 后全角标点（）：；， 全部被套黄色方框；即使命中，
+      // 科研笔记里大量出现的 −（U+2212）×（U+00D7）也照框不误——对中文笔记纯噪音
+      unicodeHighlight: {
+        ambiguousCharacters: false,
+        invisibleCharacters: false,
+        nonBasicASCII: false,
+      },
     });
     editorRef.current = ed;
     const sub = ed.onDidChangeModelContent(() => {
@@ -247,25 +328,95 @@ function FilePreviewEditor({
           </span>
         )}
         {dirty && <span className="shrink-0 text-l3" title="有未保存的修改">●</span>}
-        {!truncated && (
-          <button
-            onClick={onSave}
-            disabled={!dirty || saving}
-            title={
-              ctx?.kind === "main"
-                ? "直接修改主项目（不属于任何分支），保存前会再确认"
-                : undefined
-            }
-            className={`ml-auto shrink-0 rounded px-2 py-0.5 hover:bg-white/5 disabled:opacity-50 ${
-              ctx?.kind === "main" ? "text-warnb" : "text-l2"
-            }`}
-          >
-            {saving ? "保存中…" : ctx?.kind === "main" ? "保存到主仓库" : "保存"}
-          </button>
+        {isMd && (
+          <div className="flex shrink-0 items-center rounded bg-inset p-0.5 text-[11px]">
+            {(["read", "edit"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={`rounded px-2 py-0.5 ${
+                  mode === m ? "bg-seg-sel text-l1" : "text-l3 hover:text-l2"
+                }`}
+              >
+                {m === "read" ? "阅读" : "编辑"}
+              </button>
+            ))}
+          </div>
         )}
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          {ready && (mode === "edit" || isMd) && (
+            <button
+              onClick={() => setImmersive(true)}
+              title={`全宽沉浸${mode === "read" ? "阅读" : "编辑"}（Esc 退出）`}
+              className="shrink-0 rounded px-2 py-0.5 text-l2 hover:bg-white/5"
+            >
+              ⛶ {mode === "read" ? "沉浸阅读" : "沉浸编辑"}
+            </button>
+          )}
+          {!truncated && mode === "edit" && (
+            <button
+              onClick={onSave}
+              disabled={!dirty || saving}
+              title={
+                ctx?.kind === "main"
+                  ? "直接修改主项目（不属于任何分支），保存前会再确认"
+                  : undefined
+              }
+              className={`shrink-0 rounded px-2 py-0.5 hover:bg-white/5 disabled:opacity-50 ${
+                ctx?.kind === "main" ? "text-warnb" : "text-l2"
+              }`}
+            >
+              {saving ? "保存中…" : ctx?.kind === "main" ? "保存到主仓库" : "保存"}
+            </button>
+          )}
+        </div>
       </div>
       {error && <p className="px-3 py-1 text-xs text-err-text">{error}</p>}
-      <div ref={hostRef} className="min-h-0 flex-1" />
+      {mode === "read" && ready && <MarkdownView text={text!} />}
+      {/* Monaco 宿主槽位（display:contents 不改变布局）：编辑器 DOM 节点由 effect 挂入，
+          阅读态仅隐藏、沉浸编辑时移到覆盖层槽位——未保存改动/光标/undo 全程不丢，
+          外部刷新与 dirty 语义沿用现有 watcher 链路不变 */}
+      <div ref={normalSlotRef} className="contents" />
+      {immersive && (
+        <div className="fixed inset-0 z-30 flex min-h-0 flex-col bg-canvas">
+          <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-strip px-3 py-2 text-xs">
+            <span className="truncate text-sm text-l1">
+              {path.split(/[\\/]/).pop()}
+            </span>
+            <span className="text-l4">
+              沉浸{mode === "read" ? "阅读" : "编辑"} · Esc 退出
+            </span>
+            {mode === "edit" && !truncated && (
+              <button
+                onClick={onSave}
+                disabled={!dirty || saving}
+                title={
+                  ctx?.kind === "main"
+                    ? "直接修改主项目（不属于任何分支），保存前会再确认"
+                    : undefined
+                }
+                className={`ml-auto shrink-0 rounded px-2 py-1 hover:bg-white/5 disabled:opacity-50 ${
+                  ctx?.kind === "main" ? "text-warnb" : "text-l2"
+                }`}
+              >
+                {saving ? "保存中…" : ctx?.kind === "main" ? "保存到主仓库" : "保存"}
+              </button>
+            )}
+            <button
+              onClick={() => setImmersive(false)}
+              title={`退出沉浸${mode === "read" ? "阅读" : "编辑"}（Esc）`}
+              className={`${mode === "edit" && !truncated ? "" : "ml-auto "}shrink-0 rounded px-2 py-1 text-l3 hover:bg-white/5 hover:text-l1`}
+            >
+              ✕ 退出
+            </button>
+          </div>
+          {mode === "read" ? (
+            <MarkdownView text={text ?? ""} large />
+          ) : (
+            <div ref={immersiveSlotRef} className="contents" />
+          )}
+        </div>
+      )}
     </div>
   );
 }

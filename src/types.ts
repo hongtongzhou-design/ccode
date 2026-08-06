@@ -95,6 +95,8 @@ export interface SessionMetaDto {
   chainCount: number;
   /** 会话发生在任务工作区（git worktree）里时的工作区名；此时 projectPath 已改写为真实仓库 */
   workspace: string | null;
+  /** 工作区名命中项目流水线 steps[].workspaceName 时的步骤名；null 时回落显示 workspace 原名 */
+  stepName: string | null;
   /** AI 生成的会话摘要（命中缓存；null = 尚未生成） */
   summary: string | null;
   /** 后端探测到该会话的 CLI 进程仍存活（外部 live；无终端标签可跳转） */
@@ -310,6 +312,12 @@ export interface SkillDto {
   appModes?: Record<string, string>;
 }
 
+/** skill_md_path 返回：SKILL.md 绝对路径 + 技能库目录（◈ 优化开终端的 cwd） */
+export interface SkillPathDto {
+  mdPath: string;
+  dir: string;
+}
+
 export interface SkillImportConflictDto {
   name: string;
   existingId: string | null;
@@ -359,6 +367,8 @@ export interface AgentUsageDto {
   costPartial: boolean;
   /** 统计范围内该 agent 用过的不同模型数 */
   modelCount: number;
+  /** 官方账号（订阅制）用量：不按量计费，费用栏显示「订阅」 */
+  official: boolean;
 }
 
 export interface ProjectUsageDto {
@@ -370,6 +380,8 @@ export interface ProjectUsageDto {
   /** 后端登记的来源，例如 cli / ccode-ai。 */
   source: string;
   internal: boolean;
+  /** 官方账号（订阅制）用量：不按量计费，费用栏显示「订阅」 */
+  official: boolean;
 }
 
 export interface ModelUsageDto {
@@ -382,11 +394,30 @@ export interface ModelUsageDto {
   internal: boolean;
 }
 
+/** 任务成本：usage 落在某工作区 worktree 内的部分按工作区成桶 */
+export interface WorkspaceUsageDto {
+  workspaceName: string;
+  /** 所属项目（仓库）名 */
+  repoName: string;
+  tokensIn: number;
+  tokensOut: number;
+  /** 已计价模型份额合计；全部不明价为 null（显示 ~） */
+  cost: number | null;
+  costPartial: boolean;
+  /** 统计范围内用过的不同模型数 */
+  models: number;
+  internal: boolean;
+  /** 官方账号（订阅制）用量：不按量计费，费用栏显示「订阅」 */
+  official: boolean;
+}
+
 export interface UsageStatsDto {
   cards: UsageCardsDto;
   byAgent: AgentUsageDto[];
   byProject: ProjectUsageDto[];
   byModel: ModelUsageDto[];
+  /** 按工作区/任务归因的成本（仅含命中工作区的用量，按 token 降序） */
+  byWorkspace: WorkspaceUsageDto[];
   /** 美元→人民币汇率（官方价换算用，默认 7.2） */
   rateUsdCny: number;
 }
@@ -446,6 +477,8 @@ export interface ProjectStepDto {
   expectedArtifacts: string[];
   skills: string[];
   run: ProjectStepRunDto[];
+  /** 资源绑定：[[resources]] 条目的 path；空/缺省 = 绑定全部资源（向后兼容旧后端与旧配置） */
+  resources?: string[];
 }
 
 export interface ProjectConfigDto {
@@ -487,4 +520,11 @@ export interface EnsureGitDto {
   initialized: boolean;
   /** 本次新建了 .gitignore */
   gitignoreWritten: boolean;
+}
+
+export interface BootstrapCommitDto {
+  /** 本次是否产生了提交 */
+  committed: boolean;
+  /** 实际提交的文件（相对仓库根，仅 .ccode 与 .gitignore 内） */
+  paths: string[];
 }

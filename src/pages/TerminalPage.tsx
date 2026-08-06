@@ -28,6 +28,7 @@ import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
 import HandoffPicker, { type HandoffSource } from "../components/HandoffPicker";
 import { LoadingRows } from "../components/PageFrame";
+import ProjectRail from "../components/ProjectRail";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
 import { renderTaskMd } from "../components/ProjectGroup";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
@@ -43,12 +44,14 @@ import {
   serializeRecoverableTerminalState,
   TERMINAL_TABS_STORAGE_KEY,
 } from "../terminal-tab-persistence";
+import { buildRunOverview } from "../run-overview";
 import type {
   ChatMessageDto,
   ConversationPageDto,
   ProjectConfigReadDto,
   ProjectDto,
   SessionMetaDto,
+  SkillDto,
   WorkspaceDto,
 } from "../types";
 import type { PdfActionResult } from "../components/PdfPreview";
@@ -57,6 +60,8 @@ import type { PdfActionResult } from "../components/PdfPreview";
 const FilePreviewEditor = lazy(() => import("../components/FilePreviewEditor"));
 // pdf.js 同样拆懒加载 chunk，首次打开 PDF 预览时才加载
 const PdfPreview = lazy(() => import("../components/PdfPreview"));
+// mammoth 拆懒加载 chunk，首次打开 docx 预览时才加载
+const DocxPreview = lazy(() => import("../components/DocxPreview"));
 
 type PtyKind = "agent" | "shell";
 
@@ -1479,6 +1484,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   // 运行中总览：默认折叠；首次有 agent 运行时自动展开一次
   const [railRunOpen, setRailRunOpen] = useState(false);
   const runAutoOpenedRef = useRef(false);
+  // 「已完成」已读集合（P5 聚合视图）：点击跳过的标签不再计入「要你管」，仅本次会话内有效
+  const seenDoneRef = useRef(new Set<string>());
   // 右侧面板：默认收起，点「会话」或预览文件时打开
   const [rightOpen, setRightOpen] = useState(false);
   const [rightWidth, setRightWidth] = useState(() => {
@@ -1971,9 +1978,27 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setRightTab("preview");
     // PDF 是阅读动作：打开时自动宽屏（隐藏工作树），用户可随时 ⇲ 还原
     if (previewReq.path.toLowerCase().endsWith(".pdf")) setRightExpanded(true);
-    setPreview({ path: previewReq.path, name: previewReq.name, root: null });
+    setPreview({
+      path: previewReq.path,
+      name: previewReq.name,
+      root: previewReq.root ?? null,
+    });
     setPreviewDirty(false);
   }, [visible, previewReq, setPreviewReq]);
+
+  // 步骤胶囊「📁」交来的文件树切根请求：复用 enterCwd/externalCwd「真进入」机制，
+  // 落地到活动标签启动栏（shell 存活时写 cd），文件树根随活动标签 cwd 切换
+  const enterCwdReq = useAppStore((s) => s.enterCwdReq);
+  const setEnterCwdReq = useAppStore((s) => s.setEnterCwdReq);
+  useEffect(() => {
+    if (!visible || !enterCwdReq) return;
+    setEnterCwdReq(null);
+    // 评审覆盖层/专注模式会挡住文件树，先退出（同 previewReq 消费语义）
+    setReviewPath(null);
+    setReviewAction(null);
+    setFocusMode(false);
+    setEnterCwd(enterCwdReq);
+  }, [visible, enterCwdReq, setEnterCwdReq]);
 
   /** PDF 选段「整理为笔记」（§11.4 P2b）：反查归属项目 → 选段追加到笔记工作区
       notes/inbox.md（无活跃工作区则走一键开步链路创建）→ 终端预填启动。
@@ -2027,10 +2052,22 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           name: step.workspaceName,
         });
         // TASK.md 为 best-effort（同一键开步语义）：失败不阻断选段写入
+        // 步骤挂载技能（RX3b）：skills 非空时读库元数据渲染推荐技能段，失败只列技能名
+        let skillMeta: Record<string, string> | undefined;
+        if (step.skills.length > 0) {
+          try {
+            const lib = await invoke<SkillDto[]>("list_skills");
+            skillMeta = Object.fromEntries(
+              lib.map((skill) => [skill.name, skill.description]),
+            );
+          } catch {
+            /* 技能库不可读时只列技能名 */
+          }
+        }
         try {
           await invoke("write_workspace_task_md", {
             worktreePath: ws.worktreePath,
-            content: renderTaskMd(step, cfg, owner.path),
+            content: renderTaskMd(step, cfg, owner.path, undefined, skillMeta),
           });
         } catch {
           /* 简报仍可在 project.toml 与步骤「编辑简报」中查看 */
@@ -2091,6 +2128,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     ) {
       runAutoOpenedRef.current = true;
       setRailRunOpen(true);
+    }
+  }, [statuses]);
+
+  // 「已完成」已读集合剪枝：attention 离开 done（重新工作/退出/标签关闭）时复位，
+  // 下次再 done 重新计入「要你管」
+  useEffect(() => {
+    for (const id of [...seenDoneRef.current]) {
+      if (statuses[id]?.attention !== "done") seenDoneRef.current.delete(id);
     }
   }, [statuses]);
 
@@ -2195,6 +2240,36 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const railBtn =
     "flex h-7 w-7 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l2";
 
+  // 运行中总览（P5 聚合视图）：汇总全部终端标签，按「要你管」优先级排序。
+  // 状态全部来自现有 statuses 上报，不新增轮询；无状态的标签（从未展示过）按「已退出」处理。
+  const runOverview = buildRunOverview(
+    tabs.map((t) => {
+      const s = statuses[t.id];
+      return {
+        tabId: t.id,
+        title: s?.title ?? "终端",
+        agentId: s?.agentId ?? "",
+        model: s?.model ?? "",
+        cwd: s?.cwd ?? "",
+        running: s?.running ?? false,
+        shell: s?.shell ?? false,
+        attention: s?.attention ?? null,
+      };
+    }),
+    seenDoneRef.current,
+  );
+  const runSummaryText = [
+    runOverview.summary.confirm > 0
+      ? `${runOverview.summary.confirm} 个待确认`
+      : null,
+    runOverview.summary.done > 0 ? `${runOverview.summary.done} 个已完成` : null,
+    runOverview.summary.working > 0
+      ? `${runOverview.summary.working} 个工作中`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
     <div ref={terminalRootRef} className="relative flex h-full">
       {/* 左栏：工作树 + 运行中总览（专注模式下整体隐藏） */}
@@ -2250,9 +2325,24 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 onFsEvent={bumpFsChangeTick}
                 onEnterProject={setEnterCwd}
                 onRootChange={closePreviewForRootChange}
+                belowRecent={
+                  /* 项目区：当前标签 cwd 所属项目的主文件夹 + 活跃工作区，点击切根复用 enterCwd 链路 */
+                  <ProjectRail
+                    cwd={activeCwd}
+                    pageVisible={visible}
+                    refreshKey={refreshKey}
+                    agentRunning={statuses[activeId]?.running ?? false}
+                    tabs={Object.values(statuses).map((s) => ({
+                      cwd: s.cwd,
+                      running: s.running,
+                      attention: s.attention,
+                    }))}
+                    onEnter={setEnterCwd}
+                  />
+                }
               />
             </div>
-            {/* 运行中总览：全部终端标签的状态一览，点击激活；默认折叠 */}
+            {/* 运行中总览（P5 聚合视图）：全部终端标签按「要你管」排序的一览，点击激活；默认折叠 */}
             <div className="shrink-0 bg-strip">
               <button
                 onClick={() => setRailRunOpen((v) => !v)}
@@ -2263,42 +2353,69 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               </button>
               {railRunOpen && (
                 <div className="max-h-56 overflow-auto">
-                  {tabs.map((t) => {
-                    const s = statuses[t.id];
-                    const active = t.id === activeId;
-                    const dot = s?.running
-                      ? `text-ok-text${s.attention === "working" ? " animate-pulse" : ""}`
-                      : s?.shell
-                        ? "text-l3"
-                        : "text-l4";
+                  {runSummaryText && (
+                    <div className="mx-1 px-2 pb-1 text-[11px] text-l4">
+                      {runSummaryText}
+                    </div>
+                  )}
+                  {runOverview.items.map((item) => {
+                    const active = item.tabId === activeId;
+                    const t = tabs.find((tab) => tab.id === item.tabId);
+                    // 注意力点沿用语义色小点：待确认 warn / 已完成 link / 工作中 ok 脉冲，
+                    // 其余按进程状态（agent ok / shell 灰 / 已退出 淡灰）
+                    const dot =
+                      item.attention === "confirm"
+                        ? "text-warn-text"
+                        : item.attention === "done"
+                          ? "text-link"
+                          : item.attention === "working"
+                            ? "text-ok-text animate-pulse"
+                            : item.running
+                              ? "text-ok-text"
+                              : item.shell
+                                ? "text-l3"
+                                : "text-l4";
+                    // 已退出 / 纯 shell 淡显（排序已在最后）
+                    const faded = !item.running;
                     return (
                       <button
-                        key={t.id}
-                        onClick={() => setActiveId(t.id)}
+                        key={item.tabId}
+                        onClick={() => {
+                          // 「已完成」点击跳过即视为已查看，从「要你管」计数移除
+                          if (item.attention === "done")
+                            seenDoneRef.current.add(item.tabId);
+                          setActiveId(item.tabId);
+                        }}
                         className={`mx-1 flex w-[calc(100%-8px)] items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs hover:bg-white/5 ${
                           active ? "bg-rail-sel" : ""
-                        }`}
+                        } ${faded ? "opacity-60" : ""}`}
                       >
                         <span className={`shrink-0 text-[10px] ${dot}`}>●</span>
                         <span className="min-w-0 flex-1">
                           <span
                             className={`block truncate font-medium ${active ? "text-l1" : "text-l2"}`}
                           >
-                            {s?.title ?? "终端"}
+                            {item.title}
                           </span>
                           <span
                             className={`block truncate ${active ? "text-l2" : "text-l4"}`}
                           >
-                            {s
-                              ? `${agentLabel(s.agentId)}${s.model ? ` · ${s.model}` : ""} · ${basename(s.cwd)}`
+                            {item.agentId
+                              ? `${agentLabel(item.agentId)}${item.model ? ` · ${item.model}` : ""} · ${item.cwdLabel}`
                               : ""}
-                            {s?.attention === "done" && (
-                              <span className="text-link"> · 已完成</span>
+                            {item.attention === "done" && (
+                              <span className="text-link">
+                                {" "}
+                                · 已完成{item.seenDone ? "（已查看）" : ""}
+                              </span>
                             )}
-                            {s?.attention === "confirm" && (
+                            {item.attention === "confirm" && (
                               <span className="text-warn-text"> · 待确认</span>
                             )}
-                            {t.restored && (
+                            {item.attention === "working" && (
+                              <span className="text-ok-text"> · 工作中</span>
+                            )}
+                            {t?.restored && (
                               <span className="text-link">
                                 {" "}
                                 · 上次任务，可恢复
@@ -2652,6 +2769,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       cwdHint={preview.root ?? activeCwd}
                       onAskAi={askAiFromPdf}
                       onOrganize={organizePdfExcerpt}
+                    />
+                  ) : /\.docx$/i.test(preview.path) ? (
+                    <DocxPreview
+                      path={preview.path}
+                      cwdHint={preview.root ?? activeCwd}
                     />
                   ) : (
                     <FilePreviewEditor

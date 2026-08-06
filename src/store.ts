@@ -106,9 +106,13 @@ interface AppState {
   setPendingTerminal: (p: PendingTerminal | null) => void;
   workspaceReviewRequest: WorkspaceReviewRequest | null;
   setWorkspaceReviewRequest: (request: WorkspaceReviewRequest | null) => void;
-  /** 工作区页资源面板「查看」→ 终端页预览的交接（PDF 等绝对路径，终端页消费并清空） */
-  previewReq: { path: string; name: string } | null;
-  setPreviewReq: (r: { path: string; name: string } | null) => void;
+  /** 工作区页资源面板「查看」/ 步骤产物 → 终端页预览的交接（绝对路径，终端页消费并清空）；
+      root 可选：文本预览的后端根约束（不给则回落活动标签 cwd） */
+  previewReq: { path: string; name: string; root?: string } | null;
+  setPreviewReq: (r: { path: string; name: string; root?: string } | null) => void;
+  /** 步骤胶囊「📁」→ 终端页文件树切根的一次性交接（终端页消费并清空） */
+  enterCwdReq: string | null;
+  setEnterCwdReq: (p: string | null) => void;
   /** 运行中的 run 脚本：工作区 id → 终端标签 id（nonconcurrent 互斥） */
   runningScripts: Record<string, string>;
   setRunningScript: (wsId: string, tabId: string | null) => void;
@@ -177,6 +181,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ workspaceReviewRequest: request }),
   previewReq: null,
   setPreviewReq: (r) => set({ previewReq: r }),
+  enterCwdReq: null,
+  setEnterCwdReq: (p) => set({ enterCwdReq: p }),
   runningScripts: {},
   setRunningScript: (wsId, tabId) =>
     set((s) => {

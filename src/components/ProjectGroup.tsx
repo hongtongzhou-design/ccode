@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ContextMenu from "./ContextMenu";
+import PipelineEditor from "./PipelineEditor";
 import TemplatePicker, { type TemplatePickItem } from "./TemplatePicker";
 import { Checkbox } from "./PageFrame";
+import type { DirEntryDto } from "./FileTree";
 import { useAppStore } from "../store";
 import {
   DEFAULT_KICKOFF_PROMPT,
@@ -11,6 +13,7 @@ import {
 } from "../pipeline-presets";
 import type {
   ArtifactEntryDto,
+  BootstrapCommitDto,
   DiscoveredResourceDto,
   EnsureGitDto,
   PipelineTemplateDto,
@@ -19,6 +22,7 @@ import type {
   ProjectDto,
   ProjectResourceDto,
   ProjectStepDto,
+  SkillDto,
   WorkspaceDto,
   WorkspaceDriftDto,
   WorkspaceHealthDto,
@@ -30,11 +34,6 @@ const ctaSm =
   "rounded border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
 const fieldSm =
   "rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
-
-/** 与后端 sanitize 一致：非 [A-Za-z0-9-] → -，去掉首尾 - */
-function sanitizeWsName(name: string): string {
-  return name.replace(/[^A-Za-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
-}
 
 function baseName(path: string): string {
   const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
@@ -54,6 +53,66 @@ function absoluteResourcePath(projectPath: string, resourcePath: string): string
     return resourcePath;
   }
   return `${projectPath.replace(/[\\/]+$/, "")}/${resourcePath}`;
+}
+
+/** 工作区记住的上次启动配置（与终端页 `ccode.wsLast.<worktreePath>` 同一键） */
+function wsLastConfig(
+  worktreePath: string,
+): Partial<{ agentId: string; profileId: string; model: string }> {
+  try {
+    return JSON.parse(
+      localStorage.getItem(`ccode.wsLast.${worktreePath}`) ?? "{}",
+    );
+  } catch {
+    return {};
+  }
+}
+
+/** 步骤产物面板的一行：一个预期产物条目的定位结果 */
+interface ArtifactRow {
+  /** 预期产物条目原文（相对根的路径） */
+  entry: string;
+  files: DirEntryDto[];
+}
+
+/** 步骤产物清单（RX2b）：预期产物条目逐个在 root 下定位——文件单列自身；
+ *  目录列一层文件（只列文件不递归）；找不到返回空 files（UI 显示「尚未产出」）。
+ *  list_dir 无根目录约束（只读列举），直接传绝对路径；仅在面板打开时调用，不进轮询 */
+async function loadArtifactRows(
+  entries: string[],
+  root: string,
+): Promise<ArtifactRow[]> {
+  return Promise.all(
+    entries.map(async (raw) => {
+      const entry = raw.replace(/[\\/]+$/, "");
+      const abs = absoluteResourcePath(root, entry);
+      // 目录条目：list_dir 成功即列一层文件
+      try {
+        const children = await invoke<DirEntryDto[]>("list_dir", {
+          path: abs,
+          showHidden: false,
+        });
+        return { entry, files: children.filter((c) => !c.isDir) };
+      } catch {
+        /* 非目录或不存在，走父目录匹配 */
+      }
+      // 文件条目：列父目录按名称匹配，区分「文件存在」与「尚未产出」
+      const idx = Math.max(abs.lastIndexOf("/"), abs.lastIndexOf("\\"));
+      if (idx > 0) {
+        try {
+          const siblings = await invoke<DirEntryDto[]>("list_dir", {
+            path: abs.slice(0, idx),
+            showHidden: false,
+          });
+          const hit = siblings.find((s) => s.name === abs.slice(idx + 1));
+          if (hit && !hit.isDir) return { entry, files: [hit] };
+        } catch {
+          /* 父目录也不存在 */
+        }
+      }
+      return { entry, files: [] };
+    }),
+  );
 }
 
 /** 步骤状态：从绑定工作区（steps[].workspaceName 匹配工作区名）的 health/drift 派生，纯展示无双状态机 */
@@ -101,14 +160,17 @@ function deriveStepStatus(
   return { key: "active", ws };
 }
 
-/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 预期产物（一键开步落成工作区）。
+/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 预期产物 + 推荐技能 + 项目资源（步骤有资源绑定时只列绑定项，一键开步落成工作区）。
  *  导出给 TerminalPage 的「整理为笔记」开步链路复用，保持两处 TASK.md 一致。
- *  artifacts 为项目根提货单（上一步产物），非空时在「项目资源」后追加提货单段。 */
+ *  artifacts 为项目根提货单（上一步产物），非空时在「项目资源」后追加提货单段。
+ *  skillMeta 为技能库元数据（name → 一句话描述）：步骤 skills 非空时渲染「本步骤推荐技能」段；
+ *  缺省（库读取失败）时只列技能名，不误标未安装。 */
 export function renderTaskMd(
   step: ProjectStepDto,
   cfg: ProjectConfigDto,
   projectPath: string,
   artifacts?: ArtifactEntryDto[],
+  skillMeta?: Record<string, string>,
 ): string {
   const lines = [`# ${step.name}`, ""];
   // 课题主题放在简报之前：auto 模式的 Agent 据此明确综述主题
@@ -127,11 +189,32 @@ export function renderTaskMd(
       ...step.expectedArtifacts.map((a) => `- ${a}`),
     );
   }
-  if (cfg.resources.length > 0) {
+  // 步骤挂载技能（RX3b）：只列名称 + 一句话描述，技能本体不进 TASK.md（保持简报轻量）
+  if (step.skills.length > 0) {
+    lines.push("", "## 本步骤推荐技能");
+    for (const name of step.skills) {
+      if (!skillMeta) {
+        lines.push(`- ${name}`);
+      } else if (name in skillMeta) {
+        const desc = skillMeta[name];
+        lines.push(desc ? `- ${name}：${desc}` : `- ${name}`);
+      } else {
+        lines.push(`- ${name}（未安装，可在技能页新建或导入）`);
+      }
+    }
+    lines.push("已分发到所启动 Agent 的技能自动生效；未分发可在技能页开启。");
+  }
+  // 资源绑定（RX1）：步骤 resources 非空时「项目资源」段只列绑定项；空/缺省保持全部（向后兼容）
+  const boundPaths = step.resources ?? [];
+  const resources =
+    boundPaths.length > 0
+      ? cfg.resources.filter((r) => boundPaths.includes(r.path))
+      : cfg.resources;
+  if (resources.length > 0) {
     // 资源只引用不复制：相对路径按项目根拼成绝对路径，Agent 可直接读取
     const root = projectPath.replace(/[\\/]+$/, "");
     lines.push("", "## 项目资源（只读引用，勿复制到本工作区）");
-    for (const r of cfg.resources) {
+    for (const r of resources) {
       const abs = /^([a-zA-Z]:[\\/]|\/)/.test(r.path)
         ? r.path
         : `${root}/${r.path}`;
@@ -345,18 +428,13 @@ export default function ProjectGroup({
     y: number;
     index: number;
   } | null>(null);
-  const [renamingStep, setRenamingStep] = useState<{
-    index: number;
-    name: string;
-    workspaceName: string;
-  } | null>(null);
-  const [briefEditing, setBriefEditing] = useState<{
-    index: number;
-    text: string;
-  } | null>(null);
-  const [addingStep, setAddingStep] = useState(false);
-  const [newStepName, setNewStepName] = useState("");
-  const [newStepWsName, setNewStepWsName] = useState("");
+  // 步骤产物面板（RX2b）：打开时才拉取文件清单，不进轮询
+  const [artifactPanel, setArtifactPanel] = useState<number | null>(null);
+  const [artifactRows, setArtifactRows] = useState<ArtifactRow[] | null>(null);
+  const [artifactsLoading, setArtifactsLoading] = useState(false);
+  // 流水线编辑器（RX1）：步骤编辑唯一入口，覆盖旧 ⋯ 内联重命名/编辑简报/+ 步骤表单
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [pipelineSaving, setPipelineSaving] = useState(false);
   const [applyingTemplate, setApplyingTemplate] = useState(false);
   // 「使用科研流水线模板」旁的可选课题主题输入，随模板一并落进 project.toml
   const [templateTopic, setTemplateTopic] = useState("");
@@ -375,6 +453,36 @@ export default function ProjectGroup({
       drift[ws.id]?.canResolveMerge === true ||
       !!driftFailed[ws.id]);
 
+  // 步骤产物面板（RX2b）：打开时按步骤状态定位根目录拉取一次清单——
+  // 已完成（已合并）→ 项目根（main）；其余活跃工作区 → 工作树。状态变化不自动刷新，重新打开面板即可
+  useEffect(() => {
+    if (artifactPanel === null || !cfg) return;
+    const step = cfg.steps[artifactPanel];
+    if (!step) return;
+    const st = deriveStepStatus(step, workspaces, health, drift);
+    const root = st.key === "done" ? projectPath : st.ws?.worktreePath;
+    if (!root) {
+      setArtifactRows([]);
+      return;
+    }
+    let stale = false;
+    setArtifactsLoading(true);
+    loadArtifactRows(step.expectedArtifacts, root)
+      .then((rows) => {
+        if (!stale) setArtifactRows(rows);
+      })
+      .catch(() => {
+        if (!stale) setArtifactRows([]);
+      })
+      .finally(() => {
+        if (!stale) setArtifactsLoading(false);
+      });
+    return () => {
+      stale = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [artifactPanel]);
+
   /** 一键开步（§11.3 机制三）：ensure git → 建工作区 → 简报落成 TASK.md → 跳终端预填启动 */
   async function startStep(index: number) {
     if (!project || !cfg) return;
@@ -382,6 +490,16 @@ export default function ProjectGroup({
     setStarting(index);
     try {
       await invoke<EnsureGitDto>("ensure_git_repo", { path: project.path });
+      // 档案卡/gitignore 自动提交为 best-effort（沿用 TASK.md 同款模式）：
+      // git init 后 .ccode 与 .gitignore 未跟踪会被工作区合并的「主文件夹里还有没保存的改动」拦截；
+      // 后端只提交这两个 Ccode 自有路径，用户文件绝不纳入，失败不阻断开步
+      try {
+        await invoke<BootstrapCommitDto>("commit_project_bootstrap", {
+          repoPath: project.path,
+        });
+      } catch (reason) {
+        onError(`档案卡自动提交失败（不影响开步）：${String(reason)}`);
+      }
       const ws = await invoke<WorkspaceDto>("create_workspace", {
         repoPath: project.path,
         name: step.workspaceName,
@@ -397,13 +515,41 @@ export default function ProjectGroup({
       } catch {
         /* 清单缺失或后端未就绪时跳过提货单段 */
       }
+      // 步骤挂载技能（RX3b）：skills 非空时读库元数据渲染「本步骤推荐技能」段，
+      // best-effort——库读取失败只列技能名，不阻断开步
+      let skillMeta: Record<string, string> | undefined;
+      if (step.skills.length > 0) {
+        try {
+          const lib = await invoke<SkillDto[]>("list_skills");
+          skillMeta = Object.fromEntries(
+            lib.map((skill) => [skill.name, skill.description]),
+          );
+        } catch {
+          /* 技能库不可读时只列技能名 */
+        }
+      }
       try {
         await invoke("write_workspace_task_md", {
           worktreePath: ws.worktreePath,
-          content: renderTaskMd(step, cfg, project.path, artifacts),
+          content: renderTaskMd(step, cfg, project.path, artifacts, skillMeta),
         });
       } catch (reason) {
         onError(`工作区「${ws.name}」已创建，TASK.md 写入失败：${String(reason)}`);
+      }
+      // 步骤预设的 run 脚本（P4 quarto 渲染等）落进项目层 .ccode/settings.toml：
+      // 同名覆盖、其余键保留；best-effort 失败不阻断开步。
+      // 写在工作区行刷新之前，「运行脚本」菜单（workspace_settings 按 repoPath 合并）当次即可见
+      if (step.run.length > 0) {
+        try {
+          await invoke("upsert_project_run_scripts", {
+            repoPath: project.path,
+            scripts: step.run,
+          });
+        } catch (reason) {
+          onError(
+            `工作区「${ws.name}」已创建，run 脚本写入失败：${String(reason)}`,
+          );
+        }
       }
       await onRefresh();
       // 预填首条指令：跳到终端后用户确认配置点「启动」即自动注入，无需手动打字
@@ -479,29 +625,25 @@ export default function ProjectGroup({
     }
   }
 
-  async function submitRenameStep(e: React.FormEvent) {
-    e.preventDefault();
-    if (!cfg || !renamingStep) return;
-    const { index, name, workspaceName } = renamingStep;
-    const steps = cfg.steps.map((s, i) =>
-      i === index
-        ? {
-            ...s,
-            name: name.trim() || s.name,
-            workspaceName: workspaceName.trim(),
-          }
-        : s,
-    );
-    if (await saveConfig({ ...cfg, steps })) setRenamingStep(null);
-  }
-
-  async function submitBrief(e: React.FormEvent) {
-    e.preventDefault();
-    if (!cfg || !briefEditing) return;
-    const steps = cfg.steps.map((s, i) =>
-      i === briefEditing.index ? { ...s, brief: briefEditing.text } : s,
-    );
-    if (await saveConfig({ ...cfg, steps })) setBriefEditing(null);
+  /** 编辑器保存：整体写回 steps 后重读配置，刷新资源绑定等校验警告并关闭编辑器 */
+  async function savePipeline(steps: ProjectStepDto[]) {
+    if (!project || !cfg) return;
+    setPipelineSaving(true);
+    const ok = await saveConfig({ ...cfg, steps });
+    if (ok) {
+      try {
+        const read = await invoke<ProjectConfigReadDto>(
+          "read_project_config",
+          { path: project.path },
+        );
+        setCfg(read.config);
+        setCfgWarnings(read.warnings);
+      } catch {
+        /* 重读失败保留刚写入的本地配置 */
+      }
+      setEditorOpen(false);
+    }
+    setPipelineSaving(false);
   }
 
   async function removeStep(index: number) {
@@ -517,47 +659,13 @@ export default function ProjectGroup({
     });
   }
 
-  async function submitAddStep(e: React.FormEvent) {
-    e.preventDefault();
-    if (!cfg || !newStepName.trim()) return;
-    const workspaceName =
-      newStepWsName.trim() ||
-      sanitizeWsName(newStepName) ||
-      `step-${cfg.steps.length + 1}`;
-    const steps = [
-      ...cfg.steps,
-      {
-        name: newStepName.trim(),
-        workspaceName,
-        brief: "",
-        expectedArtifacts: [],
-        skills: [],
-        run: [],
-      },
-    ];
-    if (await saveConfig({ ...cfg, steps })) {
-      setAddingStep(false);
-      setNewStepName("");
-      setNewStepWsName("");
-    }
-  }
-
   function stepMenuItems(index: number) {
     if (!cfg) return [];
     const step = cfg.steps[index];
     return [
       {
-        label: "重命名步骤",
-        onSelect: () =>
-          setRenamingStep({
-            index,
-            name: step.name,
-            workspaceName: step.workspaceName,
-          }),
-      },
-      {
-        label: "编辑简报",
-        onSelect: () => setBriefEditing({ index, text: step.brief }),
+        label: "编辑流水线",
+        onSelect: () => setEditorOpen(true),
       },
       {
         label: "复制工作区名",
@@ -646,6 +754,9 @@ export default function ProjectGroup({
   // PDF 资源「查看」：拼绝对路径交给终端页预览（后端按登记资源白名单放行，可选段问 AI）
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);
   const setPage = useAppStore((s) => s.setPage);
+  // RX2b：步骤胶囊的「◫」切根交接与产物面板的 agent/profile 显示
+  const setEnterCwdReq = useAppStore((s) => s.setEnterCwdReq);
+  const profiles = useAppStore((s) => s.profiles);
   function viewPdfResource(r: ProjectResourceDto) {
     setPreviewReq({
       path: absoluteResourcePath(projectPath, r.path),
@@ -897,7 +1008,7 @@ export default function ProjectGroup({
             <button
               type="button"
               className={actionBtn}
-              onClick={() => setAddingStep((v) => !v)}
+              onClick={() => setEditorOpen(true)}
             >
               + 手动添加步骤
             </button>
@@ -909,65 +1020,74 @@ export default function ProjectGroup({
               onError={onError}
             />
           )}
-          {addingStep && renderAddStepForm()}
         </div>
       )}
 
       {/* 流水线 strip：状态从绑定工作区派生，纯展示 */}
       {registered && cfg && cfg.steps.length > 0 && (
         <div className="mb-2 rounded border border-hairline bg-strip p-2">
+          {/* 直线进度条：分段按步骤状态着色（绿=已完成/cta=进行中·待评审/红=阻塞/灰=待开始） */}
+          {(() => {
+            const keys = cfg.steps.map(
+              (s) => deriveStepStatus(s, workspaces, health, drift).key,
+            );
+            const doneCount = keys.filter((k) => k === "done").length;
+            const seg = (k: StepStatusKey) =>
+              k === "done"
+                ? "bg-okb"
+                : k === "blocked"
+                  ? "bg-err-text"
+                  : k === "review"
+                    ? "bg-cta"
+                    : k === "active"
+                      ? "bg-cta opacity-50"
+                      : "bg-inset";
+            return (
+              <div className="mb-2 flex items-center gap-2 px-0.5">
+                <div className="flex h-1.5 flex-1 gap-0.5">
+                  {keys.map((k, i) => (
+                    <span
+                      key={i}
+                      className={`flex-1 rounded-full ${seg(k)}`}
+                      title={`${cfg.steps[i].name}：${STEP_STATUS_STYLE[k].label}`}
+                    />
+                  ))}
+                </div>
+                <span className="shrink-0 text-xs text-l3">
+                  研究流程 {doneCount}/{cfg.steps.length}
+                </span>
+                {cfgWarnings.length > 0 && (
+                  <span
+                    className="shrink-0 cursor-default text-xs text-warn-text"
+                    title={cfgWarnings.join("\n")}
+                  >
+                    ⚠ {cfgWarnings.length} 条提示
+                  </span>
+                )}
+              </div>
+            );
+          })()}
           <ol className="flex flex-wrap items-center gap-y-2">
             {cfg.steps.map((step, i) => {
               const st = deriveStepStatus(step, workspaces, health, drift);
               const style = STEP_STATUS_STYLE[st.key];
+              // RX2b：胶囊副行与 📁/产物都只对活跃工作区开放（已归档/未创建禁用并注明）
+              const activeWs =
+                st.ws && st.ws.status === "active" ? st.ws : undefined;
+              const last = activeWs
+                ? wsLastConfig(activeWs.worktreePath)
+                : {};
+              const lastProfile = last.profileId
+                ? profiles.find((p) => p.id === last.profileId)
+                : undefined;
               return (
                 <li key={`${i}-${step.name}`} className="flex items-center">
                   {i > 0 && <span className="mx-1.5 text-xs text-l4">→</span>}
-                  <div className="flex items-center gap-1.5 rounded bg-inset px-2 py-1">
-                    {renamingStep?.index === i ? (
-                      <form
-                        onSubmit={submitRenameStep}
-                        className="flex items-center gap-1"
-                      >
-                        <input
-                          className={fieldSm}
-                          value={renamingStep.name}
-                          onChange={(e) =>
-                            setRenamingStep({
-                              ...renamingStep,
-                              name: e.target.value,
-                            })
-                          }
-                          placeholder="步骤名"
-                          autoFocus
-                        />
-                        <input
-                          className={`${fieldSm} font-mono`}
-                          value={renamingStep.workspaceName}
-                          onChange={(e) =>
-                            setRenamingStep({
-                              ...renamingStep,
-                              workspaceName: e.target.value,
-                            })
-                          }
-                          placeholder="工作区名（英文）"
-                        />
-                        <button type="submit" className={actionBtn}>
-                          确定
-                        </button>
-                        <button
-                          type="button"
-                          className={actionBtn}
-                          onClick={() => setRenamingStep(null)}
-                        >
-                          取消
-                        </button>
-                      </form>
-                    ) : (
-                      <span className="text-xs font-medium text-l1">
-                        {step.name}
-                      </span>
-                    )}
+                  <div className="flex flex-col gap-0.5">
+                    <div className="flex items-center gap-1.5 rounded bg-inset px-2 py-1">
+                    <span className="text-xs font-medium text-l1">
+                      {step.name}
+                    </span>
                     <span
                       className={`inline-flex items-center gap-1 text-xs ${style.textClass}`}
                     >
@@ -984,7 +1104,7 @@ export default function ProjectGroup({
                         title={
                           step.workspaceName
                             ? undefined
-                            : "该步骤未配置工作区名，请先在 ⋯ 中补充"
+                            : "该步骤未配置工作区名，请在「编辑流水线」中补充"
                         }
                         onClick={() => void startStep(i)}
                       >
@@ -1015,6 +1135,11 @@ export default function ProjectGroup({
                           className={`${actionBtn} ${
                             st.key === "blocked" ? "text-warn-text" : ""
                           }`}
+                          title={
+                            st.key === "blocked"
+                              ? "两边改了同一个地方，需要你逐个文件选一边"
+                              : "审阅任务改动并合并回主文件夹"
+                          }
                           onClick={() =>
                             onOpenReview(
                               st.ws!,
@@ -1028,6 +1153,42 @@ export default function ProjectGroup({
                         </button>
                       </>
                     )}
+                    <button
+                      type="button"
+                      className={actionBtn}
+                      disabled={!activeWs}
+                      title={
+                        activeWs
+                          ? "跳到终端页，文件树定位到该工作区目录"
+                          : st.ws
+                            ? "工作区已归档，无法定位目录"
+                            : "工作区尚未创建"
+                      }
+                      onClick={() => {
+                        setEnterCwdReq(activeWs!.worktreePath);
+                        setPage("terminal");
+                      }}
+                    >
+                      ◫
+                    </button>
+                    <button
+                      type="button"
+                      className={actionBtn}
+                      disabled={!activeWs}
+                      title={
+                        activeWs
+                          ? "查看该步骤的预期产物清单"
+                          : st.ws
+                            ? "工作区已归档，暂无产物可查"
+                            : "工作区尚未创建，暂无产物"
+                      }
+                      onClick={() => {
+                        setArtifactRows(null);
+                        setArtifactPanel(artifactPanel === i ? null : i);
+                      }}
+                    >
+                      产物
+                    </button>
                     <button
                       type="button"
                       onClick={(e) => {
@@ -1044,6 +1205,23 @@ export default function ProjectGroup({
                     >
                       ⋯
                     </button>
+                    </div>
+                    {activeWs && (
+                      <div
+                        className="flex items-center gap-1 truncate px-1 font-mono text-[11px] text-l4"
+                        title={activeWs.worktreePath}
+                      >
+                        <span className="truncate">
+                          {baseName(activeWs.worktreePath)}
+                        </span>
+                        {last.agentId && (
+                          <span className="shrink-0">
+                            · {last.agentId}
+                            {lastProfile ? ` / ${lastProfile.name}` : ""}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </li>
               );
@@ -1053,9 +1231,10 @@ export default function ProjectGroup({
               <button
                 type="button"
                 className={actionBtn}
-                onClick={() => setAddingStep((v) => !v)}
+                title="编辑步骤名称、简报、预期产物、run 脚本与资源绑定"
+                onClick={() => setEditorOpen(true)}
               >
-                + 步骤
+                编辑流水线
               </button>
               <button
                 type="button"
@@ -1067,54 +1246,95 @@ export default function ProjectGroup({
               </button>
             </li>
           </ol>
+          {/* 步骤产物面板（RX2b）：只在打开时拉取一次；已完成读项目根（main），其余读工作树 */}
+          {artifactPanel !== null &&
+            cfg.steps[artifactPanel] &&
+            (() => {
+              const step = cfg.steps[artifactPanel];
+              const st = deriveStepStatus(step, workspaces, health, drift);
+              const root =
+                st.key === "done" ? projectPath : st.ws?.worktreePath;
+              const rootLabel =
+                st.key === "done" ? "主文件夹（已合并）" : "工作区";
+              return (
+                <div className="mt-2 rounded border border-hairline bg-canvas p-2">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="text-xs text-l2">
+                      「{step.name}」产物
+                    </span>
+                    <span
+                      className="min-w-0 truncate font-mono text-[11px] text-l4"
+                      title={root ?? undefined}
+                    >
+                      {rootLabel}
+                    </span>
+                    <button
+                      type="button"
+                      className={`${actionBtn} ml-auto shrink-0`}
+                      onClick={() => setArtifactPanel(null)}
+                    >
+                      关闭
+                    </button>
+                  </div>
+                  {step.expectedArtifacts.length === 0 ? (
+                    <p className="text-xs text-l4">
+                      该步骤未登记预期产物，可在「编辑流水线」中补充。
+                    </p>
+                  ) : artifactsLoading || !artifactRows ? (
+                    <p className="text-xs text-l4">读取中…</p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {artifactRows.map((row) => (
+                        <li key={row.entry}>
+                          <div className="font-mono text-[11px] text-l3">
+                            {row.entry}
+                          </div>
+                          {row.files.length === 0 ? (
+                            <div className="pl-2 text-xs text-l4">
+                              尚未产出
+                            </div>
+                          ) : (
+                            <ul className="pl-2">
+                              {row.files.map((f) => (
+                                <li key={f.path}>
+                                  <button
+                                    type="button"
+                                    className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                                    title={`在终端页预览 ${f.path}`}
+                                    onClick={() => {
+                                      if (!root) return;
+                                      setPreviewReq({
+                                        path: f.path,
+                                        name: f.name,
+                                        root,
+                                      });
+                                      setPage("terminal");
+                                    }}
+                                  >
+                                    <span className="min-w-0 flex-1 truncate font-mono">
+                                      {f.name}
+                                    </span>
+                                    <span className="shrink-0 text-l4">
+                                      {formatSize(f.size)}
+                                    </span>
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              );
+            })()}
           {pickerOpen && (
             <TemplatePicker
               applying={applyingTemplate}
               onApply={(item) => void applyTemplate(item)}
               onError={onError}
             />
-          )}
-          {addingStep && renderAddStepForm()}
-          {briefEditing && (
-            <form
-              onSubmit={submitBrief}
-              className="mt-2 border-t border-hairline pt-2"
-            >
-              <span className="mb-1 block text-xs text-l3">
-                简报：{cfg.steps[briefEditing.index].name}
-                （一键开步时落成工作区 TASK.md）
-              </span>
-              <textarea
-                className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
-                rows={4}
-                value={briefEditing.text}
-                onChange={(e) =>
-                  setBriefEditing({ ...briefEditing, text: e.target.value })
-                }
-                placeholder="本步骤的目标、背景与交付物要求"
-                autoFocus
-              />
-              <div className="mt-1 flex justify-end gap-1">
-                <button
-                  type="button"
-                  className={actionBtn}
-                  onClick={() => setBriefEditing(null)}
-                >
-                  取消
-                </button>
-                <button type="submit" className={ctaSm}>
-                  保存简报
-                </button>
-              </div>
-            </form>
-          )}
-          {cfgWarnings.length > 0 && (
-            <p
-              className="mt-1 text-xs text-warn-text"
-              title={cfgWarnings.join("\n")}
-            >
-              project.toml 有 {cfgWarnings.length} 条字段警告（悬停查看）
-            </p>
           )}
         </div>
       )}
@@ -1162,8 +1382,8 @@ export default function ProjectGroup({
                         {RESOURCE_TYPE_LABELS[r.type] ?? "其他"}
                       </span>
                       <span
-                        className="shrink-0 text-xs text-l2"
-                        title={r.note || undefined}
+                        className="min-w-0 truncate text-xs text-l2"
+                        title={r.note ? `${r.name}\n${r.note}` : r.name}
                       >
                         {r.name}
                       </span>
@@ -1223,9 +1443,9 @@ export default function ProjectGroup({
                         {discoverState.items.map((d) => (
                           <li key={d.path}>
                             {d.exists ? (
-                              <span className="flex items-center gap-1.5 text-xs text-l4">
-                                <span className="text-okb">✓</span>
-                                <span className="truncate font-mono">
+                              <span className="flex min-w-0 items-center gap-1.5 text-xs text-l4">
+                                <span className="shrink-0 text-okb">✓</span>
+                                <span className="min-w-0 truncate font-mono" title={d.path}>
                                   {d.path}
                                 </span>
                                 <span className="shrink-0">已登记</span>
@@ -1250,7 +1470,10 @@ export default function ProjectGroup({
                                       {RESOURCE_TYPE_LABELS[d.type] ??
                                         "其他"}
                                     </span>
-                                    <span className="truncate font-mono text-l2">
+                                    <span
+                                      className="min-w-0 truncate font-mono text-l2"
+                                      title={d.path}
+                                    >
                                       {d.path}
                                     </span>
                                     <span className="shrink-0 text-l4">
@@ -1330,6 +1553,12 @@ export default function ProjectGroup({
               },
             },
             {
+              label: "编辑流水线",
+              disabled: !cfg,
+              title: cfg ? undefined : "project.toml 尚未加载完成",
+              onSelect: () => setEditorOpen(true),
+            },
+            {
               label: "另存为模板",
               disabled: !cfg || cfg.steps.length === 0,
               title:
@@ -1370,44 +1599,16 @@ export default function ProjectGroup({
           items={resourceMenuItems(resourceMenu.index)}
         />
       )}
+      {editorOpen && project && cfg && (
+        <PipelineEditor
+          projectName={displayName}
+          config={cfg}
+          warnings={cfgWarnings}
+          saving={pipelineSaving}
+          onSave={(steps) => void savePipeline(steps)}
+          onClose={() => setEditorOpen(false)}
+        />
+      )}
     </section>
   );
-
-  function renderAddStepForm() {
-    return (
-      <form
-        onSubmit={submitAddStep}
-        className="mt-2 flex flex-wrap items-center gap-1 border-t border-hairline pt-2"
-      >
-        <input
-          className={fieldSm}
-          value={newStepName}
-          onChange={(e) => setNewStepName(e.target.value)}
-          placeholder="步骤名，如 文献综述"
-          autoFocus
-          required
-        />
-        <input
-          className={`${fieldSm} font-mono`}
-          value={newStepWsName}
-          onChange={(e) => setNewStepWsName(e.target.value)}
-          placeholder={
-            sanitizeWsName(newStepName) ||
-            `step-${(cfg?.steps.length ?? 0) + 1}`
-          }
-          title="绑定工作区名（英文）；留空自动派生"
-        />
-        <button type="submit" className={ctaSm} disabled={!newStepName.trim()}>
-          添加
-        </button>
-        <button
-          type="button"
-          className={actionBtn}
-          onClick={() => setAddingStep(false)}
-        >
-          取消
-        </button>
-      </form>
-    );
-  }
 }

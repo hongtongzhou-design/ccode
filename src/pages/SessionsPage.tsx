@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { AGENTS } from "../types";
@@ -55,6 +55,11 @@ function basename(p: string): string {
 
 function sessionTitle(s: SessionMetaDto): string {
   return s.customTitle || s.title || `未命名对话 · ${s.sessionId.slice(0, 8)}`;
+}
+
+/** 步骤展示名：工作区名命中档案卡步骤时显示步骤名，否则回落工作区原名；无工作区为 null */
+function stepLabel(s: SessionMetaDto): string | null {
+  return s.workspace ? (s.stepName ?? s.workspace) : null;
 }
 
 export default function SessionsPage({ visible }: { visible: boolean }) {
@@ -133,6 +138,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         s.title ?? "",
         s.customTitle ?? "",
         s.workspace ?? "",
+        s.stepName ?? "",
         s.summary ?? "",
         ...s.tags,
       ]
@@ -245,6 +251,29 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       );
     return src;
   }, [regularVisible, internalVisible, filter]);
+
+  // 项目筛选下按步骤分组（RX3a）：组内保持时间降序，组按各自最近活跃排序，
+  // 无工作区会话不带小标题排在最前；其余筛选保持纯时间序（跨项目分组无意义）。
+  // header 只挂在每组首条上，渲染时据此插步骤名小标题。
+  const displayList = useMemo(() => {
+    if (filter.kind !== "project")
+      return sessionList.map((s) => ({ header: null as string | null, s }));
+    const groups = new Map<string | null, SessionMetaDto[]>();
+    for (const s of sessionList) {
+      const k = stepLabel(s);
+      const g = groups.get(k);
+      if (g) g.push(s);
+      else groups.set(k, [s]);
+    }
+    const ordered = [...groups.entries()].sort((a, b) => {
+      if (a[0] === null) return -1;
+      if (b[0] === null) return 1;
+      return (b[1][0]?.updatedAt ?? "").localeCompare(a[1][0]?.updatedAt ?? "");
+    });
+    return ordered.flatMap(([header, list]) =>
+      list.map((s, i) => ({ header: i === 0 ? header : null, s })),
+    );
+  }, [sessionList, filter.kind]);
 
   /** 切换树筛选：同时退出回放态回到列表，保证右栏与所选节点对应 */
   function selectFilter(f: Filter) {
@@ -729,7 +758,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         <div className="p-2">
           <input
             className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
-            placeholder="搜索项目 / 对话 / 标签"
+            placeholder="搜索项目 / 对话 / 步骤 / 标签"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -966,15 +995,18 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             )}
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
-            {sessionList.map((s) => {
+            {displayList.map(({ header, s }) => {
               const isEditing =
                 editing?.agent === s.agent && editing.sessionId === s.sessionId;
               if (isEditing && editing) {
                 return (
-                  <div
-                    key={skey(s)}
-                    className="space-y-2 border-b border-hairline bg-inset p-4"
-                  >
+                  <Fragment key={skey(s)}>
+                    {header && (
+                      <div className="border-b border-hairline bg-strip px-4 pb-1 pt-2 text-xs text-l3">
+                        ⎇ {header}
+                      </div>
+                    )}
+                    <div className="space-y-2 border-b border-hairline bg-inset p-4">
                     <input
                       className={input}
                       placeholder="自定义标题（留空则用原标题）"
@@ -1007,6 +1039,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       </button>
                     </div>
                   </div>
+                  </Fragment>
                 );
               }
               const clickable = s.alive || s.pinned;
@@ -1014,8 +1047,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 s.live ||
                 !!liveSessions[sessionRuntimeKey(s.agent, s.sessionId)];
               return (
+                <Fragment key={skey(s)}>
+                  {header && (
+                    <div className="border-b border-hairline bg-strip px-4 pb-1 pt-2 text-xs text-l3">
+                      ⎇ {header}
+                    </div>
+                  )}
                 <div
-                  key={skey(s)}
                   onClick={() => {
                     if (selecting) toggleChecked(s);
                     else if (clickable) void openSession(s);
@@ -1137,9 +1175,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     {s.workspace && (
                       <span
                         className="max-w-28 truncate rounded bg-inset px-1 text-l3"
-                        title={`任务工作区：${s.workspace}`}
+                        title={
+                          s.stepName
+                            ? `流水线步骤：${s.stepName}（工作区：${s.workspace}）`
+                            : `任务工作区：${s.workspace}`
+                        }
                       >
-                        ⎇ {s.workspace}
+                        ⎇ {s.stepName ?? s.workspace}
                       </span>
                     )}
                     {s.handoffFromAgent && (
@@ -1170,6 +1212,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     )}
                   </div>
                 </div>
+                </Fragment>
               );
             })}
             {sessionList.length === 0 && (
@@ -1222,6 +1265,18 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 >
                   <span className="size-1.5 rounded-full bg-ok-text" />
                   进行中
+                </span>
+              )}
+              {selected.workspace && (
+                <span
+                  className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-xs text-l2"
+                  title={
+                    selected.stepName
+                      ? `流水线步骤：${selected.stepName}（工作区：${selected.workspace}）`
+                      : `任务工作区：${selected.workspace}`
+                  }
+                >
+                  ⎇ {selected.stepName ?? selected.workspace}
                 </span>
               )}
               {selected.handoffFromAgent && (

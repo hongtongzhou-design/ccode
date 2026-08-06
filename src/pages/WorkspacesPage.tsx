@@ -396,11 +396,13 @@ function workspaceState(
       details: [
         ...(health.conflictFiles.length
           ? [`冲突文件：${health.conflictFiles.join("、")}`]
-          : [`与 ${workspace.baseBranch} 存在冲突，请进入评审解决。`]),
+          : [`与 ${workspace.baseBranch} 改了同一处内容，进入评审后选一边保留。`]),
         // 主仓问题与冲突并存时一并列出，避免漏掉合并阻塞项
-        ...(health.mainDirty ? ["主仓库有未提交改动，本地合并会被拒绝。"] : []),
+        ...(health.mainDirty
+          ? ["主文件夹里还有没保存的改动，提交保存后才能合并。"]
+          : []),
         ...(health.mainOffBase
-          ? [`主仓库当前不在 ${workspace.baseBranch} 分支。`]
+          ? [`主文件夹当前不在 ${workspace.baseBranch} 分支上。`]
           : []),
       ],
     };
@@ -411,9 +413,11 @@ function workspaceState(
       dotClass: "bg-warnb",
       textClass: "text-warn-text",
       details: [
-        ...(health.mainDirty ? ["主仓库有未提交改动，本地合并会被拒绝。"] : []),
+        ...(health.mainDirty
+          ? ["主文件夹里还有没保存的改动，提交保存后才能合并。"]
+          : []),
         ...(health.mainOffBase
-          ? [`主仓库当前不在 ${workspace.baseBranch} 分支。`]
+          ? [`主文件夹当前不在 ${workspace.baseBranch} 分支上。`]
           : []),
       ],
     };
@@ -423,7 +427,7 @@ function workspaceState(
       label: "待提交",
       dotClass: "bg-warnb",
       textClass: "text-l2",
-      details: ["工作区有未提交改动，进入评审后可提交。"],
+      details: ["任务里还有没保存的改动，进入评审后可提交。"],
     };
   }
   if (health.readyToMerge) {
@@ -465,11 +469,20 @@ function WorkspaceDetailsPopover({
   state: WorkspaceState;
   onClose: () => void;
 }) {
-  const rows = [
+  // 每行可带白话悬浮 title：↑↓ 等技术记号 hover 时给「保存点」解释（双层呈现，不删技术信息）
+  const rows: [string, string, string?][] = [
     ["分支", `${workspace.branch} → ${workspace.baseBranch}`],
     ["工作树", workspace.worktreePath],
     ["端口", `${workspace.portBase}–${workspace.portBase + 9}`],
-    ...(health ? [["提交", `↑${health.ahead} ↓${health.behind}`]] : []),
+    ...(health
+      ? ([
+          [
+            "提交",
+            `↑${health.ahead} ↓${health.behind}`,
+            `比主分支多出 ${health.ahead} 个保存点；主分支新增 ${health.behind} 个保存点`,
+          ],
+        ] as [string, string, string][])
+      : []),
   ];
   const panelRef = useRef<HTMLElement>(null);
   const [pos, setPos] = useState(() => ({
@@ -514,13 +527,13 @@ function WorkspaceDetailsPopover({
           </span>
         </div>
         <dl className="space-y-1.5 border-t border-hairline pt-2 text-l3">
-          {rows.map(([label, value]) => (
+          {rows.map(([label, value, hint]) => (
             <div
               key={label}
               className="grid grid-cols-[42px_minmax(0,1fr)] gap-2"
             >
               <dt className="text-l4">{label}</dt>
-              <dd className="truncate font-mono text-l2" title={value}>
+              <dd className="truncate font-mono text-l2" title={hint ?? value}>
                 {value}
               </dd>
             </div>
@@ -1129,6 +1142,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                                     ? "resolve-conflict"
                                     : undefined,
                                 )
+                              }
+                              title={
+                                canResolveConflict || workspaceHealth?.conflict
+                                  ? "两边改了同一个地方，需要你逐个文件选一边"
+                                  : "审阅任务改动并合并回主文件夹"
                               }
                               className={`${actionBtn} ${
                                 canResolveConflict || workspaceHealth?.conflict

@@ -10,6 +10,9 @@ import type {
 } from "../types";
 import { Checkbox, LoadingRows } from "./PageFrame";
 import ImagePairView, { isImagePath } from "./ImagePairView";
+import { useAppStore } from "../store";
+import { defaultCommitMessage } from "../git-commit-message";
+import { groupFilesByStatus, statusBadgeTitle } from "../git-status-groups";
 
 interface GitStatusDto {
   isRepo: boolean;
@@ -44,16 +47,6 @@ function formatSize(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
-}
-
-/** 空输入时使用本地规则即时生成，避免为一次提交额外启动 AI。 */
-function defaultCommitMessage(files: GitFileDto[]): string {
-  if (files.length !== 1) return `chore: 更新 ${files.length} 个文件`;
-  const file = files[0];
-  if (file.status === "A" || file.status === "??") return `chore: 添加 ${file.path}`;
-  if (file.status === "D") return `chore: 删除 ${file.path}`;
-  if (file.status === "R") return `chore: 重命名 ${file.path}`;
-  return `chore: 更新 ${file.path}`;
 }
 
 /**
@@ -94,6 +87,9 @@ function GitPanel({
   // 提货单（§11.3 机制五）：仅工作区任务视图加载；产物本体不进 git，清单随提交传递
   const [artifacts, setArtifacts] = useState<ArtifactEntryDto[]>([]);
   const [registering, setRegistering] = useState(false);
+  // PDF 产物「查看」：复用 P2a 预览链路（previewReq → 终端页 PdfPreview）
+  const setPreviewReq = useAppStore((s) => s.setPreviewReq);
+  const setPage = useAppStore((s) => s.setPage);
   const [diffPath, setDiffPath] = useState<string | null>(null);
   const [diffDetail, setDiffDetail] = useState<GitFileDiffDto | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
@@ -376,8 +372,11 @@ function GitPanel({
           inWs ? (
             <>
               <span className="font-medium text-l1">⑂ {status.branch}</span>
-              <span className="text-l3">
-                → 基准 {wsDiff!.baseBranch}（{wsDiff!.mergeBase.slice(0, 7)}）
+              <span
+                className="text-l3"
+                title={`merge-base：任务改动是相对主分支 ${wsDiff!.baseBranch} 的共同起点（${wsDiff!.mergeBase.slice(0, 7)}）计算的`}
+              >
+                相对主分支 {wsDiff!.baseBranch}
               </span>
               {(wsDiff!.totalAdd > 0 || wsDiff!.totalDel > 0) && (
                 <span className="ml-auto font-mono">
@@ -437,7 +436,13 @@ function GitPanel({
             {inWs ? "任务无改动 ✓" : "工作区干净 ✓"}
           </p>
         ) : (
-          files.map((f) => {
+          // 白话分组：组名给中文，状态字母保留为文件名前的小号 mono 徽标（悬浮 title 双语义）
+          groupFilesByStatus(files).map((group) => (
+            <div key={group.key}>
+              <p className="px-1 pb-0.5 pt-1.5 text-[11px] text-l4">
+                {group.label} {group.files.length}
+              </p>
+              {group.files.map((f) => {
             const expanded = diffPath === f.path;
             const diffLines = expanded && diffDetail ? diffDetail.text.split("\n") : null;
             return (
@@ -458,7 +463,8 @@ function GitPanel({
                   >
                     <span className="w-3 shrink-0 text-center text-l4">{expanded ? "▾" : "▸"}</span>
                     <span
-                      className={`shrink-0 rounded px-1 font-mono ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
+                      title={statusBadgeTitle(f.status)}
+                      className={`shrink-0 rounded px-1 font-mono text-[10px] leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
                     >
                       {f.status}
                     </span>
@@ -513,7 +519,9 @@ function GitPanel({
                 )}
               </div>
             );
-          })
+              })}
+            </div>
+          ))
         )}
       </div>
 
@@ -547,6 +555,19 @@ function GitPanel({
                 >
                   <div className="flex items-center gap-1.5">
                     <span className="min-w-0 flex-1 truncate text-l2">{a.name}</span>
+                    {/\.pdf$/i.test(a.path) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPreviewReq({ path: a.path, name: a.name });
+                          setPage("terminal");
+                        }}
+                        title="在终端页内嵌预览该 PDF"
+                        className="shrink-0 rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1"
+                      >
+                        查看
+                      </button>
+                    )}
                     <span className="shrink-0 font-mono text-l4">
                       {a.hash.slice(0, 8)}
                     </span>
@@ -568,8 +589,8 @@ function GitPanel({
             <div className="mb-2 flex items-center justify-between text-xs text-l3">
               <span>
                 {inWs
-                  ? `将提交全部 ${selectedFiles.length} 个未提交文件`
-                  : `将提交 ${selectedFiles.length} / ${files.length} 个文件`}
+                  ? `将保存全部 ${selectedFiles.length} 个未提交文件`
+                  : `将保存 ${selectedFiles.length} / ${files.length} 个文件`}
               </span>
               {!inWs && (
                 <span className="flex items-center gap-2">
@@ -593,14 +614,14 @@ function GitPanel({
               onKeyDown={(e) => {
                 if (e.key === "Enter" && canCommit) void doCommit(false);
               }}
-              placeholder="提交信息（可选，留空快速提交）"
+              placeholder="改动说明（可选，留空自动生成）"
               disabled={running !== null || aiBusy}
               className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
             />
             <button
               onClick={genMessage}
               disabled={!canCommit || aiBusy || running !== null}
-              title="AI 生成更完整的提交信息（可选，速度取决于模型）"
+              title="AI 生成更完整的改动说明（可选，速度取决于模型）"
               className={`shrink-0 rounded px-2 py-1.5 text-sm text-l2 hover:bg-white/5 disabled:opacity-50 ${
                 aiBusy ? "animate-pulse" : ""
               }`}
@@ -612,24 +633,26 @@ function GitPanel({
             <button
               onClick={() => void doCommit(false)}
               disabled={!canCommit}
+              title="git commit：把勾选的改动保存到项目历史"
               className="flex-1 rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
             >
               {running === "commit"
-                ? "提交中…"
+                ? "保存中…"
                 : message.trim()
-                  ? "提交"
-                  : "快速提交"}
+                  ? "保存到历史"
+                  : "快速保存到历史"}
             </button>
             <button
               onClick={() => void doCommit(true)}
               disabled={!canCommit}
+              title="git commit + push：保存到历史并推送到远程"
               className="flex-1 rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               {running === "push"
                 ? "推送中…"
                 : message.trim()
-                  ? "提交并推送"
-                  : "快速提交并推送"}
+                  ? "保存并推送"
+                  : "快速保存并推送"}
             </button>
           </div>
           {output && (

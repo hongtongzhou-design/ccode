@@ -176,3 +176,141 @@ body {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* Markdown 阅读版式（RX2a 笔记阅读模式）：全部走主题令牌，七套深色主题通用；
+   .md-body-lg 为沉浸阅读覆盖层的大号排版 */
+.md-body {
+  color: var(--color-l2);
+  font-size: 13.5px;
+  line-height: 1.75;
+  /* 长 URL / DOI 不断行时允许折行，避免撑出横向滚动 */
+  overflow-wrap: break-word;
+}
+.md-body-lg {
+  font-size: 16px;
+  line-height: 1.9;
+}
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  color: var(--color-l1);
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 1.4em 0 0.6em;
+}
+.md-body h1:first-child,
+.md-body h2:first-child,
+.md-body h3:first-child {
+  margin-top: 0;
+}
+.md-body h1 {
+  font-size: 1.6em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--color-hairline);
+}
+.md-body h2 {
+  font-size: 1.35em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--color-hairline);
+}
+.md-body h3 {
+  font-size: 1.15em;
+}
+.md-body h4 {
+  font-size: 1em;
+}
+.md-body p {
+  margin: 0.7em 0;
+}
+.md-body a {
+  color: var(--color-link);
+  text-decoration: none;
+}
+.md-body a:hover {
+  text-decoration: underline;
+}
+.md-body strong {
+  color: var(--color-l1);
+  font-weight: 600;
+}
+.md-body blockquote {
+  margin: 0.9em 0;
+  padding: 0.45em 0.9em;
+  border-left: 2px solid var(--color-hairline);
+  border-radius: 0 6px 6px 0;
+  /* inset 浅底把引用/提示块从正文里收敛出来（七套主题通用的令牌色） */
+  background: var(--color-inset);
+  color: var(--color-l3);
+}
+/* 引用块带 padding 后，首尾段落不再叠加段距 */
+.md-body blockquote > :first-child {
+  margin-top: 0;
+}
+.md-body blockquote > :last-child {
+  margin-bottom: 0;
+}
+.md-body ul,
+.md-body ol {
+  margin: 0.7em 0;
+  padding-left: 1.6em;
+}
+.md-body li {
+  margin: 0.25em 0;
+}
+.md-body li::marker {
+  color: var(--color-l4);
+}
+.md-body code {
+  background: var(--color-inset);
+  border: 1px solid var(--color-hairline);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+  font-size: 0.88em;
+  color: var(--color-l1);
+}
+.md-body pre {
+  background: var(--color-inset);
+  border: 1px solid var(--color-hairline);
+  border-radius: 6px;
+  padding: 0.8em 1em;
+  margin: 0.9em 0;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+.md-body pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 0.85em;
+  color: inherit;
+}
+/* 上下标不撑高行盒（文献笔记大量化学式/单位上下标） */
+.md-body sub,
+.md-body sup {
+  line-height: 0;
+}
+.md-body table {
+  border-collapse: collapse;
+  margin: 0.9em 0;
+  font-size: 0.92em;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--color-hairline);
+  padding: 0.35em 0.8em;
+  text-align: left;
+}
+.md-body th {
+  background: var(--color-inset);
+  color: var(--color-l1);
+  font-weight: 600;
+}
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--color-hairline);
+  margin: 1.6em 0;
+}
+.md-body img {
+  max-width: 100%;
+}

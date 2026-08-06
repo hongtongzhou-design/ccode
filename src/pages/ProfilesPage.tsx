@@ -5,6 +5,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS } from "../presets";
+import { upstreamNoteText } from "../upstream-note";
 import ContextMenu from "../components/ContextMenu";
 import {
   PageFrame,
@@ -508,6 +509,8 @@ interface AgentUpdateInfo {
   installed: string | null;
   latest: string | null;
   outdated: boolean;
+  /** brew 渠道滞后提示：上游 npm 已更新的版本号；查不到为 null */
+  upstreamNote: string | null;
 }
 
 /** 各 agent 在 TUI 模型切换页可用的模型数上限（注入模式；matrix 调研结论）。
@@ -1230,11 +1233,19 @@ export default function ProfilesPage() {
                           </span>
                         );
                       const info = updateInfo[agent.id];
-                      if (
-                        updateResults[agent.id]?.ok ||
-                        (info && !info.outdated && info.latest)
-                      )
-                        return null;
+                      if (updateResults[agent.id]?.ok) return null;
+                      if (info && !info.outdated && info.latest) {
+                        // 已最新：仅在 brew 渠道滞后于上游 npm 时挂小字提示，否则不显示
+                        const note = upstreamNoteText(info);
+                        return note ? (
+                          <span
+                            className="ml-auto text-xs text-l4"
+                            title={note}
+                          >
+                            {note}
+                          </span>
+                        ) : null;
+                      }
                       if (info?.outdated)
                         return (
                           <button

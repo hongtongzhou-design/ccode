@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { File, FolderClosed, FolderOpen } from "lucide-react";
@@ -37,11 +38,11 @@ const STATUS_COLOR: Record<string, string> = {
   R: "text-l3",
 };
 
-/** git 状态字母的悬停完整文字（低对比深色下字母辨识度有限） */
+/** git 状态字母的悬停白话说明（双层呈现：字母徽标供程序员扫读，悬浮给不懂 git 的用户） */
 const STATUS_WORD: Record<string, string> = {
-  M: "已修改",
-  A: "新增（已暂存）",
-  "??": "未跟踪",
+  M: "有未保存的改动",
+  A: "新文件（待提交）",
+  "??": "新文件",
   D: "已删除",
   R: "已重命名",
 };
@@ -130,14 +131,14 @@ const FileTreeNode = memo(function FileTreeNode({
         <span className="ml-auto flex shrink-0 items-center gap-1">
           {gitStatus && (
             <span
-              className={`font-mono ${STATUS_COLOR[gitStatus] ?? "text-l3"}`}
-              title={`git：${STATUS_WORD[gitStatus] ?? gitStatus}`}
+              className={`font-mono text-[10px] opacity-75 ${STATUS_COLOR[gitStatus] ?? "text-l3"}`}
+              title={STATUS_WORD[gitStatus] ?? gitStatus}
             >
               {gitStatus === "??" ? "?" : gitStatus}
             </span>
           )}
           {dirtyDir && (
-            <span className="text-l4" title="包含变更文件">
+            <span className="text-l4" title="里面有未保存的改动">
               ●
             </span>
           )}
@@ -197,6 +198,7 @@ function FileTree({
   onFsEvent,
   onEnterProject,
   onRootChange,
+  belowRecent,
 }: {
   cwd: string;
   showHidden: boolean;
@@ -209,6 +211,8 @@ function FileTree({
   onEnterProject?: (path: string) => void;
   /** 根目录切换前通知；返回 false 时保留当前根（用于保护未保存预览）。 */
   onRootChange?: (path: string) => boolean;
+  /** 插在「最近项目」与完整树之间的自定义区块（如项目树） */
+  belowRecent?: ReactNode;
 }) {
   // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动
   const [root, setRoot] = useState(cwd);
@@ -498,6 +502,7 @@ function FileTree({
           ))}
         </div>
       )}
+      {belowRecent}
       {/* 当前根：加粗 basename + 完整路径 tooltip；偏离锚点时给「回到当前项目」 */}
       <div
         className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-l1"

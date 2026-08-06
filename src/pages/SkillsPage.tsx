@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { AGENTS } from "../types";
+import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
 import {
   Checkbox,
@@ -14,6 +15,7 @@ import type {
   DiscoveredSkillDto,
   SkillDto,
   SkillImportResultDto,
+  SkillPathDto,
   SkillUpdateDto,
 } from "../types";
 
@@ -503,6 +505,204 @@ function DiscoverModal({
   );
 }
 
+/** 编辑预填：剥掉 SKILL.md 的 frontmatter 只留正文（frontmatter 由表单字段在保存时重新生成） */
+function stripFrontmatter(text: string): string {
+  const m = text.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/);
+  return m ? text.slice(m[0].length).replace(/^(\r?\n)+/, "") : text;
+}
+
+/** 新建/编辑技能（RX3b）：名称=目录名（编辑时锁定）、描述一句话、正文即 SKILL.md 主体。
+ *  保存走后端 create_skill / update_skill_content（覆盖前自动备份旧库目录）。 */
+function SkillEditorModal({
+  mode,
+  skill,
+  initialBody,
+  onClose,
+  onDone,
+}: {
+  mode: "create" | "edit";
+  skill?: SkillDto;
+  initialBody?: string;
+  onClose: () => void;
+  /** editedId 用于保存后刷新正在展示的预览面板 */
+  onDone: (msg: string, editedId?: string) => void;
+}) {
+  const [name, setName] = useState(skill?.name ?? "");
+  const [description, setDescription] = useState(skill?.description ?? "");
+  const [content, setContent] = useState(initialBody ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      if (mode === "create") {
+        await invoke("create_skill", {
+          name: name.trim(),
+          description: description.trim(),
+          content,
+        });
+        onDone(`已创建技能「${name.trim()}」，打开 agent 开关即可分发`);
+      } else if (skill) {
+        await invoke("update_skill_content", {
+          name: skill.name,
+          content,
+          description: description.trim(),
+        });
+        onDone(`已保存「${skill.name}」（旧版本已自动备份）`, skill.id);
+      }
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="flex max-h-[85vh] w-[36rem] flex-col rounded-md border border-field bg-strip p-5"
+      >
+        <h2 className="mb-3 text-base font-semibold text-l1">
+          {mode === "create" ? "新建技能" : `编辑技能：${skill?.name}`}
+        </h2>
+        <label className="mb-2 block text-sm">
+          <span className="mb-1 block text-xs text-l3">
+            名称（即目录名，单个安全名称）
+          </span>
+          <input
+            className={field}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            disabled={mode === "edit"}
+            placeholder="如 paper-notes"
+          />
+        </label>
+        <label className="mb-2 block text-sm">
+          <span className="mb-1 block text-xs text-l3">
+            描述（一句话，列表与步骤推荐里展示）
+          </span>
+          <input
+            className={field}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="这个技能帮 Agent 做什么"
+          />
+        </label>
+        <label className="mb-3 block text-sm">
+          <span className="mb-1 block text-xs text-l3">
+            正文（SKILL.md 主体，frontmatter 由名称/描述自动生成）
+          </span>
+          <textarea
+            className={`${field} h-56 resize-y font-mono text-xs`}
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder="把你的工作方法写在这里：步骤、规范、注意事项……"
+          />
+        </label>
+        {mode === "edit" && (
+          <p className="mb-2 text-xs text-l4">
+            保存会先备份当前版本（保留最近 5 份），SKILL.md 之外的辅助文件不受影响。
+          </p>
+        )}
+        {error && <p className="mb-2 text-sm text-err-text">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+          >
+            取消
+          </button>
+          <button
+            onClick={() => void submit()}
+            disabled={busy || !name.trim() || !content.trim()}
+            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+          >
+            {busy ? "保存中…" : mode === "create" ? "创建" : "保存"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** ◈ 优化技能（RX3b）：内联收集优化意见 → 开终端标签，让 Agent 阅读并直接改写库中的 SKILL.md */
+function OptimizeModal({
+  skill,
+  onClose,
+  onConfirm,
+}: {
+  skill: SkillDto;
+  onClose: () => void;
+  onConfirm: (opinion: string) => Promise<void>;
+}) {
+  const [opinion, setOpinion] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm(opinion.trim());
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[30rem] rounded-md border border-field bg-strip p-5"
+      >
+        <h2 className="mb-1 text-base font-semibold text-l1">
+          ◈ 优化技能：{skill.name}
+        </h2>
+        <p className="mb-3 text-xs text-l3">
+          开终端让 Agent 阅读并按你的意见直接改写该技能的
+          SKILL.md；改写结果请审查后再用，技能页的保存/覆盖都会自动备份旧版本。
+        </p>
+        <textarea
+          autoFocus
+          className={`${field} mb-3 h-24 resize-y`}
+          value={opinion}
+          onChange={(e) => setOpinion(e.target.value)}
+          placeholder="优化意见，如：补充中文输出格式约定；把检查清单精简到 5 条"
+        />
+        {error && <p className="mb-2 text-sm text-err-text">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+          >
+            取消
+          </button>
+          <button
+            onClick={() => void submit()}
+            disabled={busy || !opinion.trim()}
+            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+          >
+            {busy ? "打开中…" : "开终端优化"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function SkillsPage({ visible }: { visible: boolean }) {
   const [skills, setSkills] = useState<SkillDto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -539,6 +739,14 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
   const [updates, setUpdates] = useState<Record<string, SkillUpdateDto>>({});
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  // 技能编辑器（RX3b）：create=空白表单；edit=预填名称/描述/正文（名称锁定）
+  const [editor, setEditor] = useState<
+    { mode: "create" } | { mode: "edit"; skill: SkillDto; body: string } | null
+  >(null);
+  // ◈ 优化：内联收集意见后开终端让 Agent 改写 SKILL.md
+  const [optimize, setOptimize] = useState<SkillDto | null>(null);
+  const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const setPage = useAppStore((s) => s.setPage);
 
   async function refresh() {
     try {
@@ -619,6 +827,29 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  /** 编辑内容：读 SKILL.md 剥掉 frontmatter 预填编辑器表单 */
+  async function onEdit(skill: SkillDto) {
+    try {
+      const full = await invoke<string>("read_skill_md", { id: skill.id });
+      setEditor({ mode: "edit", skill, body: stripFrontmatter(full) });
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** ◈ 优化：以技能库目录为 cwd 开终端，预填「阅读 + 按意见优化」指令（Agent 直接改写库文件） */
+  async function confirmOptimize(skill: SkillDto, opinion: string) {
+    const target = await invoke<SkillPathDto>("skill_md_path", { id: skill.id });
+    setPendingTerminal({
+      cwd: target.dir,
+      extraEnv: {},
+      title: `优化技能 ${skill.name}`,
+      initialPrompt: `阅读 ${target.mdPath}，按以下意见优化它：\n${opinion}`,
+    });
+    setPage("terminal");
   }
 
   /** 副本过期：把库里的最新版本重新分发到漂移的 agent 副本 */
@@ -710,8 +941,15 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               <>
                 <button
                   type="button"
-                  onClick={() => setModal({ kind: "import" })}
+                  onClick={() => setEditor({ mode: "create" })}
                   className={primaryActionClass}
+                >
+                  + 新建技能
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setModal({ kind: "import" })}
+                  className="rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10"
                 >
                   + 导入
                 </button>
@@ -980,6 +1218,29 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
         </div>
       )}
 
+      {editor && (
+        <SkillEditorModal
+          mode={editor.mode}
+          skill={editor.mode === "edit" ? editor.skill : undefined}
+          initialBody={editor.mode === "edit" ? editor.body : undefined}
+          onClose={() => setEditor(null)}
+          onDone={(msg, editedId) => {
+            setNotice(msg);
+            // 正在预览的技能被编辑后，面板内容同步刷新
+            if (editedId && preview?.skill.id === editedId) {
+              void onView(preview.skill);
+            }
+            void refresh();
+          }}
+        />
+      )}
+      {optimize && (
+        <OptimizeModal
+          skill={optimize}
+          onClose={() => setOptimize(null)}
+          onConfirm={(opinion) => confirmOptimize(optimize, opinion)}
+        />
+      )}
       {modal?.kind === "import" && (
         <ImportModal
           initialGithub={modal.github}
@@ -1037,6 +1298,14 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           onClose={() => setRowMenu(null)}
           items={[
             { label: "查看详情", onSelect: () => void onView(rowMenu.skill) },
+            {
+              label: "编辑内容",
+              onSelect: () => void onEdit(rowMenu.skill),
+            },
+            {
+              label: "◈ 优化",
+              onSelect: () => setOptimize(rowMenu.skill),
+            },
             {
               label: "设置分类",
               onSelect: () =>

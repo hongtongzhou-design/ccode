@@ -2553,6 +2553,15 @@ fn read_artifacts_manifest_impl(root: &Path) -> Vec<ArtifactEntryDto> {
     parse_manifest(&text).1
 }
 
+/// P4 PDF 白名单用（pdf.rs）：某根目录 artifacts.yaml 中登记产物的绝对路径。
+/// 登记产物可位于根之外（如 quarto 渲染产物入产物目录），pdf.rs 按条目精确路径放行。
+pub(crate) fn artifact_paths_at(root: &Path) -> Vec<PathBuf> {
+    read_artifacts_manifest_impl(root)
+        .into_iter()
+        .map(|e| PathBuf::from(e.path))
+        .collect()
+}
+
 #[tauri::command]
 pub async fn register_artifact(
     worktree_path: String,
