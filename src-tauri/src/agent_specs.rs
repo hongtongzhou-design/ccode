@@ -33,15 +33,17 @@ pub struct AgentSpec {
     /// 安装与更新渠道
     pub packaging: PackagingSpec,
     /// 官方账号（P1a）：终端内登录、只读检测 auth 文件、拉起时净化残留 API env；
-    /// 数据按 matrix / 官方文档逐家核实，第一批 claude-code / codex / gemini
+    /// 数据按 matrix / 官方文档 / 实机 CLI 逐家核实（opencode 无官方账号语义，保持 None 见注释）
     pub official_account: Option<OfficialAccountSpec>,
 }
 
 /// 官方账号规格（P1a）：终端内登录、只读检测 auth 文件、拉起时净化残留 API env
 pub struct OfficialAccountSpec {
-    /// 终端内执行的登录子命令（不含二进制名）；空 = 裸启动 CLI 后在 TUI 内操作（gemini 无登录子命令）
+    /// 终端内执行的登录子命令（不含二进制名）；空 = 裸启动 CLI 后在 TUI 内操作
+    ///（gemini 无登录子命令；qwen 的 auth 子命令 0.21 起已移除，只能 TUI 内 /auth）
     pub login_cmd: &'static [&'static str],
-    /// 只读探测「已连接」的 auth 文件（相对用户 home）
+    /// 只读探测「已连接」的 auth 文件（相对用户 home）；以 `/*` 结尾 = 扫描该目录的
+    /// 直接子级 *.json（kimi credentials/<name>.json 文件名随 provider 名变化；不进子目录）
     pub auth_file_paths: &'static [&'static str],
     /// 官方账号拉起时必须 env_remove 的残留 API 密钥变量（防静默覆盖账号登录）
     pub env_purge_list: &'static [&'static str],
@@ -369,7 +371,38 @@ static AGENT_SPECS: &[AgentSpec] = &[
             update_fallback: &[UpdateChannel::Npm],
             ..NO_PACKAGING
         },
-        official_account: None,
+        // qwen 0.21.1 实机核实：`qwen auth` 子命令已移除（报 "Configure authentication (removed)"），
+        // Qwen OAuth 只能交互式 TUI 内 /auth 配置（"OAuth cannot be configured with env vars alone"），
+        // login_cmd 空 = 裸拉起进 TUI 操作；凭证 path.join(getGlobalQwenDir(), "oauth_creds.json")
+        //（bundle 内 QWEN_CREDENTIAL_FILENAME 实证，gemini-cli 分叉同构）
+        official_account: Some(OfficialAccountSpec {
+            login_cmd: &[],
+            auth_file_paths: &[".qwen/oauth_creds.json"],
+            // matrix §4 凭证优先级 CLI flags > shell env > .env > settings env：purge 覆盖
+            // Ccode 两条协议注入表的全部变量；DASHSCOPE_*/BAILIAN_* bundle 里存在但
+            // Ccode 不注入、是否压 OAuth 登录态未核实，保守不收
+            env_purge_list: &[
+                "OPENAI_API_KEY",
+                "OPENAI_BASE_URL",
+                "OPENAI_MODEL",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_MODEL",
+            ],
+            // bundle 实证 qwen 读 ~/.qwen/.env（gemini-cli 同构机制），残留密钥会接管 auth 走付费 API
+            conflict_probes: &[ConflictProbe {
+                file: ".qwen/.env",
+                keys: &[
+                    "OPENAI_API_KEY",
+                    "OPENAI_BASE_URL",
+                    "ANTHROPIC_API_KEY",
+                    "ANTHROPIC_BASE_URL",
+                ],
+                note: "该文件中的密钥会覆盖官方账号登录，产生 API 计费",
+            }],
+            // matrix §4：Qwen OAuth 免费额度已于 2026-04 停；OAuth 本身仍在（/auth 可选）
+            detection_note: Some("Qwen OAuth 免费额度 2026-04 已停，登录后按量计费；以 TUI 内 /doctor 的 auth 状态为准"),
+        }),
     },
     AgentSpec {
         id: "opencode",
@@ -396,6 +429,11 @@ static AGENT_SPECS: &[AgentSpec] = &[
             update_fallback: &[UpdateChannel::SelfUpdate, UpdateChannel::Npm],
             ..NO_PACKAGING
         },
+        // opencode 1.18.10 实机调研结论：`opencode auth`（providers 别名）是多 provider 凭证管理器
+        //（auth login/logout/list，凭证 ~/.local/share/opencode/auth.json，本机实测 0 credentials），
+        // 没有单一「官方账号」语义——opencode zen 只是可登录的 provider 之一，auth login 是
+        // 各家 key/OAuth 的通用入口；且 Ccode 的 OpenCodeInlineConfig（OPENCODE_CONFIG_CONTENT）
+        // 优先级高于 auth.json，官方账号模式无从对应——保持 None 不硬加
         official_account: None,
     },
     AgentSpec {
@@ -426,7 +464,31 @@ static AGENT_SPECS: &[AgentSpec] = &[
             }),
             ..NO_PACKAGING
         },
-        official_account: None,
+        // 官方文档 + 本机 `kimi login --help` 核实：login 子命令走 RFC 8628 设备码（非交互可跑，
+        // 验证 URL+user code 打 stderr 轮询），凭证与 TUI /login 同落点：
+        // ~/.kimi-code/credentials/<name>.json（0600/目录 0700；managed provider 名 "managed:kimi-code"）。
+        // 文件名随 provider 名走 → auth_file_paths 用 /* 目录扫描；credentials/mcp/ 子目录是
+        // MCP 服务器凭证，不算 CLI 登录态（扫描不进子目录）。
+        // purge：新版 CLI 明文不读 shell env 的 API key（官方文档），唯一能抢登录态的 env 是
+        // KIMI_MODEL_* 合成通道（见 KimiDualChannel，env 合成的 provider 优先于 config 默认模型）；
+        // 旧版变体读 KIMI_API_KEY/KIMI_BASE_URL——两组都 purge。
+        official_account: Some(OfficialAccountSpec {
+            login_cmd: &["login"],
+            auth_file_paths: &[".kimi-code/credentials/*"],
+            env_purge_list: &[
+                "KIMI_MODEL_NAME",
+                "KIMI_MODEL_PROVIDER_TYPE",
+                "KIMI_MODEL_API_KEY",
+                "KIMI_MODEL_BASE_URL",
+                "KIMI_API_KEY",
+                "KIMI_BASE_URL",
+            ],
+            // config.toml 里手写的 providers.*.api_key 是独立 provider（需模型指向才生效），
+            // 不会静默覆盖 OAuth managed provider；且 config.toml 是 TOML，
+            // 冲突探测只支持 .env/.json 格式——无已核实的静默覆盖场景，留空
+            conflict_probes: &[],
+            detection_note: Some("凭证文件名随 provider 名变化（credentials/<name>.json）；设了 KIMI_CODE_HOME 时数据目录整体搬迁，文件检测可能漏报"),
+        }),
     },
     AgentSpec {
         id: "codebuddy",
@@ -665,6 +727,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 第二批官方账号规格与实机调研结论一致（kimi/qwen 填，opencode 保持 None）
+    #[test]
+    fn second_batch_official_account_specs_match_verified_research() {
+        // kimi：login 子命令（设备码）；凭证目录扫描（文件名随 provider 名变化）；
+        // purge 覆盖 KIMI_MODEL_* 合成通道 + 旧版 KIMI_API_KEY/KIMI_BASE_URL
+        let kimi = agent_spec("kimi").unwrap().official_account.as_ref().unwrap();
+        assert_eq!(kimi.login_cmd, &["login"]);
+        assert_eq!(kimi.auth_file_paths, &[".kimi-code/credentials/*"]);
+        for var in [
+            "KIMI_MODEL_NAME",
+            "KIMI_MODEL_PROVIDER_TYPE",
+            "KIMI_MODEL_API_KEY",
+            "KIMI_MODEL_BASE_URL",
+            "KIMI_API_KEY",
+            "KIMI_BASE_URL",
+        ] {
+            assert!(kimi.env_purge_list.contains(&var), "kimi purge 缺 {var}");
+        }
+        // qwen：auth 子命令已移除 → login_cmd 空（裸拉起 TUI /auth）；凭证 oauth_creds.json
+        let qwen = agent_spec("qwen").unwrap().official_account.as_ref().unwrap();
+        assert!(qwen.login_cmd.is_empty());
+        assert_eq!(qwen.auth_file_paths, &[".qwen/oauth_creds.json"]);
+        assert!(qwen.env_purge_list.contains(&"OPENAI_API_KEY"));
+        assert!(qwen.env_purge_list.contains(&"ANTHROPIC_API_KEY"));
+        assert_eq!(qwen.conflict_probes.len(), 1);
+        assert_eq!(qwen.conflict_probes[0].file, ".qwen/.env");
+        // opencode：无单一官方账号语义（多 provider 凭证管理器），保持 None
+        assert!(agent_spec("opencode").unwrap().official_account.is_none());
     }
 
     /// 交互式 TUI 自更新标记：kimi/opencode 的 upgrade 是方向键选择界面（行输入无法应答，

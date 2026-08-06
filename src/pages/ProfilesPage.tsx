@@ -553,6 +553,8 @@ const OFFICIAL_LOGOUT_HINT: Record<string, string> = {
   gemini: "TUI 内 /auth signout",
   codebuddy: "TUI 内 /logout",
   cursor: "cursor-agent logout",
+  kimi: "TUI 内 /logout",
+  qwen: "TUI 内 /auth",
 };
 
 function displayHost(baseUrl: string): string {

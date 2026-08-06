@@ -340,8 +340,16 @@ fn apply_official_inject(
                     plan.args.push(m.into());
                 }
             }
-            // opencode 内联配置缺 provider 会指向不存在的节点；kimi 新版刻意忽略 shell env——
-            // 这两家官方账号模式下不注入模型（也不在本批次支持范围）
+            // kimi 官方账号：KIMI_MODEL_* env 合成通道会抢 OAuth 登录态（已被 purge 清单移除），
+            // 模型只能走 -m flag（新版 CLI --help 实证，与认证方式无关）
+            SpecialLaunch::KimiDualChannel => {
+                if let Some(m) = model {
+                    plan.args.push("-m".into());
+                    plan.args.push(m.into());
+                }
+            }
+            // opencode 内联配置缺 provider 会指向不存在的节点——官方账号模式下不注入模型
+            //（opencode 无官方账号语义，注册表保持 None，正常不会走到）
             _ => {}
         },
     }
@@ -978,6 +986,40 @@ fn probe_conflicts(home: &std::path::Path, oa: &crate::agent_specs::OfficialAcco
     out
 }
 
+/// 展开 auth 文件候选：(展示路径, 绝对路径)。`/*` 结尾 = 目录扫描（kimi credentials/<name>.json
+/// 文件名随 provider 名变化）：只探直接子级 *.json，不进 mcp/ 等子目录（那是 MCP 服务器凭证，
+/// 不算 CLI 登录态）；目录缺失/不可读 = 无候选（按未检出处理）。扫描结果按文件名排序保证稳定输出
+fn auth_probe_candidates(
+    home: &std::path::Path,
+    oa: &crate::agent_specs::OfficialAccountSpec,
+) -> Vec<(String, std::path::PathBuf)> {
+    let mut out: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for rel in oa.auth_file_paths {
+        if let Some(dir_rel) = rel.strip_suffix("/*") {
+            let Ok(entries) = std::fs::read_dir(home.join(dir_rel)) else {
+                continue;
+            };
+            let mut scanned: Vec<(String, std::path::PathBuf)> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "json"))
+                .map(|p| {
+                    let display = format!(
+                        "{dir_rel}/{}",
+                        p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                    );
+                    (display, p)
+                })
+                .collect();
+            scanned.sort_by(|a, b| a.0.cmp(&b.0));
+            out.extend(scanned);
+        } else {
+            out.push(((*rel).to_string(), home.join(rel)));
+        }
+    }
+    out
+}
+
 /// 官方账号连接状态（P1a）。supported = 注册表有规格；connected = auth 文件检出凭证。
 /// 断开不做文件删除——引导用户用 CLI 自己的 logout（前端文案）
 #[tauri::command]
@@ -995,12 +1037,12 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
         return OfficialAccountStatusDto {
             supported: false,
             connected: false,
-            detail: Some("该 CLI 暂未接入官方账号（本批次：Claude Code / Codex / Gemini）".into()),
+            detail: Some("该 CLI 暂未接入官方账号（不支持或无官方账号语义）".into()),
             login_command: None,
             conflicts: Vec::new(),
         };
     };
-    // login_cmd 为空 = 裸启动 CLI 后在 TUI 内登录（gemini）
+    // login_cmd 为空 = 裸启动 CLI 后在 TUI 内登录（gemini / qwen）
     let login_command = Some(
         std::iter::once(spec.binary)
             .chain(oa.login_cmd.iter().copied())
@@ -1013,13 +1055,14 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
         .as_ref()
         .map(|h| probe_conflicts(h, oa))
         .unwrap_or_default();
-    let mut unrecognized: Option<&str> = None;
-    let mut corrupt: Option<&str> = None;
-    for rel in oa.auth_file_paths {
-        let Some(path) = home.as_ref().map(|h| h.join(rel)) else {
-            break;
-        };
-        match probe_auth_file(&path) {
+    let mut unrecognized: Option<String> = None;
+    let mut corrupt: Option<String> = None;
+    let candidates = home
+        .as_ref()
+        .map(|h| auth_probe_candidates(h, oa))
+        .unwrap_or_default();
+    for (rel, path) in &candidates {
+        match probe_auth_file(path) {
             Some(AuthProbe::Connected) => {
                 return OfficialAccountStatusDto {
                     supported: true,
@@ -1029,8 +1072,16 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
                     conflicts,
                 };
             }
-            Some(AuthProbe::Unrecognized) => unrecognized = Some(rel),
-            Some(AuthProbe::Corrupt) => corrupt = Some(rel),
+            Some(AuthProbe::Unrecognized) => {
+                if unrecognized.is_none() {
+                    unrecognized = Some(rel.clone());
+                }
+            }
+            Some(AuthProbe::Corrupt) => {
+                if corrupt.is_none() {
+                    corrupt = Some(rel.clone());
+                }
+            }
             None => {}
         }
     }
@@ -1275,6 +1326,27 @@ mod tests {
     }
 
     #[test]
+    fn kimi_official_plan_purges_synth_channel_and_uses_model_flag() {
+        let p = official_profile("kimi");
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("kimi-code/k3"));
+        // KIMI_MODEL_* 合成通道会抢 OAuth 登录态：一律 env_remove 且不注入任何 env
+        assert!(plan.env.is_empty());
+        for var in [
+            "KIMI_MODEL_NAME",
+            "KIMI_MODEL_PROVIDER_TYPE",
+            "KIMI_MODEL_API_KEY",
+            "KIMI_MODEL_BASE_URL",
+            "KIMI_API_KEY",
+            "KIMI_BASE_URL",
+        ] {
+            assert!(plan.env_remove.contains(&var.into()), "purge 缺 {var}");
+        }
+        // 模型走 -m flag（与认证方式无关），密钥绝不出现
+        assert_eq!(plan.args, vec!["-m", "kimi-code/k3"]);
+        assert!(!plan.args.iter().any(|a| a.contains("sk-secret")));
+    }
+
+    #[test]
     fn official_plan_injects_model_only_when_selected() {
         let p = official_profile("claude-code");
         let plan = launch_plan(&p, None, Some("claude-sonnet-4"));
@@ -1469,6 +1541,46 @@ mod tests {
         assert_eq!(probe, Some(AuthProbe::Unrecognized));
     }
 
+    // ===== auth 候选展开（/* 目录扫描）=====
+
+    #[test]
+    fn auth_candidates_expand_dir_scan_and_skip_subdirs_and_non_json() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let cred = dir.join(".kimi-code/credentials");
+        std::fs::create_dir_all(cred.join("mcp")).unwrap();
+        std::fs::write(cred.join("managed:kimi-code.json"), "{}").unwrap();
+        std::fs::write(cred.join("notes.txt"), "{}").unwrap();
+        std::fs::write(cred.join("mcp/server.json"), "{}").unwrap();
+        let oa = crate::agent_specs::OfficialAccountSpec {
+            login_cmd: &["login"],
+            auth_file_paths: &[".kimi-code/credentials/*"],
+            env_purge_list: &["KIMI_API_KEY"],
+            conflict_probes: &[],
+            detection_note: None,
+        };
+        let found = auth_probe_candidates(&dir, &oa);
+        // 只命中直接子级 .json：mcp/ 子目录与 .txt 都排除
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, ".kimi-code/credentials/managed:kimi-code.json");
+        assert!(found[0].1.ends_with("managed:kimi-code.json"));
+        // 目录缺失 → 无候选（按未检出处理，不报错）
+        std::fs::remove_dir_all(&cred).ok();
+        assert!(auth_probe_candidates(&dir, &oa).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn auth_candidates_pass_plain_paths_through() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let spec = crate::agent_specs::agent_spec("qwen").unwrap();
+        let oa = spec.official_account.as_ref().unwrap();
+        let found = auth_probe_candidates(&dir, oa);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, ".qwen/oauth_creds.json");
+        assert!(found[0].1.ends_with(".qwen/oauth_creds.json"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // ===== 配置冲突探测（.env / settings.json）=====
 
     const CONFLICT_KEYS: &[&str] = &["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL"];
@@ -1532,6 +1644,27 @@ mod tests {
         // codex 保守留空：永不产生冲突
         let codex = crate::agent_specs::agent_spec("codex").unwrap();
         assert!(probe_conflicts(&dir, codex.official_account.as_ref().unwrap()).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn qwen_conflict_probe_flags_dotenv_residual_keys() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".qwen")).unwrap();
+        std::fs::write(
+            dir.join(".qwen/.env"),
+            "OPENAI_API_KEY=sk-super-secret-value\nDASHSCOPE_API_KEY=sk-other\n",
+        )
+        .unwrap();
+        let spec = crate::agent_specs::agent_spec("qwen").unwrap();
+        let oa = spec.official_account.as_ref().unwrap();
+        let conflicts = probe_conflicts(&dir, oa);
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].contains("~/.qwen/.env"));
+        assert!(conflicts[0].contains("OPENAI_API_KEY"));
+        // DASHSCOPE_API_KEY 不在探测清单（是否压 OAuth 未核实，见注册表注释）
+        assert!(!conflicts[0].contains("DASHSCOPE_API_KEY"));
+        assert!(!conflicts[0].contains("sk-super-secret-value"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
