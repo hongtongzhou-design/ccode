@@ -1874,6 +1874,308 @@ fn kimi_looks_like_wire(lines: &[String]) -> bool {
     })
 }
 
+// ===== CodeBuddy Code（~/.codebuddy/projects/<slug>/<uuid>.jsonl，slug 规则同 Claude） =====
+//
+// 行 schema（v2.132.0 实测）：
+//   {"type":"message","role":"user","content":[{"type":"input_text","text":...}],
+//    "sessionId":"<uuid>","cwd":"<项目路径>","timestamp":<毫秒 epoch>}
+//   assistant 行 content 块为 output_text；file-history-snapshot 等事件行跳过。
+// 与 claude schema 不同构，独立解析器；防御式：未知 type/缺字段/末行截断一律跳过。
+
+/// 时间戳是毫秒 epoch 数字（容错 ISO 字符串），统一转 ISO
+fn codebuddy_time(v: &Value) -> Option<String> {
+    match v.get("timestamp") {
+        Some(Value::Number(n)) => n.as_u64().map(|ms| iso_from_unix(ms / 1000)),
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// content 数组里指定块类型的文本拼接（input_text / output_text）
+fn codebuddy_content_text(v: &Value, block_type: &str) -> Option<String> {
+    let arr = v.get("content")?.as_array()?;
+    let text = arr
+        .iter()
+        .filter_map(|b| {
+            if get_str(b, "type") == Some(block_type) {
+                get_str(b, "text")
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn codebuddy_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
+    let (head, tail) = read_head_tail(path, 64 * 1024)?;
+    let (mut cwd, mut created, mut session_id, mut title) = (None, None, None, None);
+    for line in head.iter().chain(&tail) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if cwd.is_none() {
+            cwd = get_str(&v, "cwd").map(String::from);
+        }
+        if created.is_none() {
+            created = codebuddy_time(&v);
+        }
+        if session_id.is_none() {
+            session_id = get_str(&v, "sessionId").map(String::from);
+        }
+        if title.is_none()
+            && get_str(&v, "type") == Some("message")
+            && get_str(&v, "role") == Some("user")
+        {
+            title = codebuddy_content_text(&v, "input_text").and_then(|t| usable_title(&t));
+        }
+    }
+    // 目录名是 sanitize 后的项目路径（有损），不解码；读不到 cwd 时原样兜底（同 Claude 规则）
+    let project_path = cwd.unwrap_or_else(|| {
+        path.parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    let session_id = session_id
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    Some(SessionMetaDto {
+        agent: "codebuddy".into(),
+        session_id,
+        project_path,
+        title,
+        created_at: created,
+        updated_at: mtime_iso(path),
+        file_path: path.to_string_lossy().into_owned(),
+        token_usage: None,
+        cli_version: None,
+        pinned: false,
+        archived: false,
+        custom_title: None,
+        tags: Vec::new(),
+        alive,
+        chain_count: 1,
+        workspace: None,
+        step_name: None,
+        summary: None,
+        live: alive && mtime_fresh(path, 60),
+        source: default_session_source(),
+        internal: false,
+        handoff_from_agent: None,
+        handoff_from_session: None,
+    })
+}
+
+fn parse_codebuddy(lines: &[String]) -> Vec<ChatMessageDto> {
+    let mut msgs = Vec::new();
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue; // 末行截断等坏行直接跳过
+        };
+        if get_str(&v, "type") != Some("message") {
+            continue; // file-history-snapshot 等事件行
+        }
+        let ts = codebuddy_time(&v);
+        match get_str(&v, "role") {
+            Some("user") => {
+                let Some(text) = codebuddy_content_text(&v, "input_text") else {
+                    continue;
+                };
+                msgs.push(ChatMessageDto {
+                    role: "user".into(),
+                    blocks: vec![text_block(text)],
+                    timestamp: ts,
+                    usage: None,
+                });
+            }
+            Some("assistant") => {
+                let Some(text) = codebuddy_content_text(&v, "output_text") else {
+                    continue;
+                };
+                msgs.push(ChatMessageDto {
+                    role: "assistant".into(),
+                    blocks: vec![text_block(text)],
+                    timestamp: ts,
+                    usage: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    msgs
+}
+
+// ===== Cursor CLI（~/.cursor/projects/<编码cwd>/agent-transcripts/<uuid>/<uuid>.jsonl） =====
+//
+// 目录名=文件名=session id；<编码cwd> 把路径分隔符替换成 '-'（有损，不解码，同 Claude slug 规则）。
+// JSONL 每行带 type 字段，源码枚举（2026.08.04-aaa8809 调研）：
+//   user_message / tool_call / tool_result / turn_ended / turn_id / message_id 等。
+// 完整字段样本未验证——防御式解析：未知 type 跳过，文本/时间戳按多个候选字段名提取，
+// 缺字段/末行截断一律容忍。会话发现只能文件扫描（agent ls 是 Ink TUI，非 TTY 会崩）。
+
+/// 文本提取：字符串直取；数组拼接各块文本；对象取 text 字段。
+/// 候选层级 message.content / content / text 依次尝试（字段名未实证，多候选兜底）
+fn cursor_text_of(x: &Value) -> Option<String> {
+    match x {
+        Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+        Value::Array(arr) => {
+            let text = arr
+                .iter()
+                .filter_map(cursor_text_of)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        }
+        Value::Object(_) => x
+            .get("text")
+            .and_then(cursor_text_of)
+            .or_else(|| x.get("content").and_then(cursor_text_of)),
+        _ => None,
+    }
+}
+
+fn cursor_text(v: &Value) -> Option<String> {
+    v.get("message")
+        .and_then(cursor_text_of)
+        .or_else(|| v.get("content").and_then(cursor_text_of))
+        .or_else(|| v.get("text").and_then(cursor_text_of))
+}
+
+/// 时间戳候选字段名未实证，逐个尝试；数字按量级区分毫秒/秒 epoch，字符串当 ISO 原样透传
+fn cursor_time(v: &Value) -> Option<String> {
+    for key in ["timestamp", "time", "created_at", "createdAt", "ts"] {
+        match v.get(key) {
+            Some(Value::Number(n)) => {
+                let raw = n.as_i64()?;
+                let secs = if raw.abs() >= 1_000_000_000_000 {
+                    raw / 1000
+                } else {
+                    raw
+                };
+                return u64::try_from(secs).ok().map(iso_from_unix);
+            }
+            Some(Value::String(s)) => return Some(s.clone()),
+            _ => continue,
+        }
+    }
+    None
+}
+
+fn cursor_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
+    let (head, tail) = read_head_tail(path, 64 * 1024)?;
+    let (mut cwd, mut created, mut session_id, mut title) = (None, None, None, None);
+    for line in head.iter().chain(&tail) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if cwd.is_none() {
+            // cwd 字段名未实证，多候选兜底；没有就靠目录名（有损）兜底
+            cwd = ["cwd", "project_path", "workingDirectory"]
+                .iter()
+                .find_map(|k| get_str(&v, k))
+                .map(String::from);
+        }
+        if created.is_none() {
+            created = cursor_time(&v);
+        }
+        if session_id.is_none() {
+            // 候选只收明确的会话 id 字段名；泛化的 "id" 会误中 turn_id/message_id 事件行
+            session_id = ["session_id", "sessionId"]
+                .iter()
+                .find_map(|k| get_str(&v, k))
+                .map(String::from);
+        }
+        if title.is_none() && get_str(&v, "type") == Some("user_message") {
+            title = cursor_text(&v).and_then(|t| usable_title(&t));
+        }
+    }
+    // 目录名是编码后的项目路径（分隔符→'-'，有损不解码）；读不到 cwd 时原样兜底（同 Claude 规则）。
+    // 结构 projects/<编码cwd>/agent-transcripts/<uuid>/<uuid>.jsonl：上三级才是编码目录名
+    let project_path = cwd.unwrap_or_else(|| {
+        path.parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    let session_id = session_id
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    Some(SessionMetaDto {
+        agent: "cursor".into(),
+        session_id,
+        project_path,
+        title,
+        created_at: created,
+        updated_at: mtime_iso(path),
+        file_path: path.to_string_lossy().into_owned(),
+        token_usage: None,
+        cli_version: None,
+        pinned: false,
+        archived: false,
+        custom_title: None,
+        tags: Vec::new(),
+        alive,
+        chain_count: 1,
+        workspace: None,
+        step_name: None,
+        summary: None,
+        live: alive && mtime_fresh(path, 60),
+        source: default_session_source(),
+        internal: false,
+        handoff_from_agent: None,
+        handoff_from_session: None,
+    })
+}
+
+fn parse_cursor(lines: &[String]) -> Vec<ChatMessageDto> {
+    let mut msgs = Vec::new();
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue; // 末行截断等坏行直接跳过
+        };
+        let ts = cursor_time(&v);
+        match get_str(&v, "type") {
+            Some("user_message") => {
+                let Some(text) = cursor_text(&v) else {
+                    continue;
+                };
+                msgs.push(ChatMessageDto {
+                    role: "user".into(),
+                    blocks: vec![text_block(text)],
+                    timestamp: ts,
+                    usage: None,
+                });
+            }
+            // 助手正文是否带独立 type 未实证，多候选；tool_call 等事件行不渲染成消息
+            Some("assistant_message") => {
+                let Some(text) = cursor_text(&v) else {
+                    continue;
+                };
+                msgs.push(ChatMessageDto {
+                    role: "assistant".into(),
+                    blocks: vec![text_block(text)],
+                    timestamp: ts,
+                    usage: None,
+                });
+            }
+            _ => {} // tool_call/tool_result/turn_ended/turn_id/message_id 及未知 type 跳过
+        }
+    }
+    msgs
+}
+
 // ===== OpenCode（v1.2+ 单一 SQLite；旧版 storage/ 扁平 JSON；agent id "opencode"） =====
 
 /// OPENCODE_DB 环境变量优先，其次 ~/.local/share/opencode/opencode.db
@@ -2574,6 +2876,26 @@ pub fn scan_sessions() -> ScanResult {
         } else if let Some(storage) = opencode_legacy_root() {
             out.extend(opencode_scan_legacy(&storage));
         }
+        // CodeBuddy：projects/<slug>/<uuid>.jsonl（深度 2 恰好到文件）
+        let mut codebuddy_files = Vec::new();
+        collect_files(&home.join(".codebuddy").join("projects"), 2, &mut codebuddy_files);
+        for f in codebuddy_files {
+            if let Some(m) = codebuddy_file_meta(&f, true) {
+                out.push(m);
+            }
+        }
+        // Cursor：projects/<编码cwd>/agent-transcripts/<uuid>/<uuid>.jsonl（深度 4 到文件）；
+        // ~/.cursor 与 IDE 共享，只收 agent-transcripts 子树（其他位置的 jsonl 不是会话）
+        let mut cursor_files = Vec::new();
+        collect_files(&home.join(".cursor").join("projects"), 4, &mut cursor_files);
+        for f in cursor_files {
+            if !f.components().any(|c| c.as_os_str() == "agent-transcripts") {
+                continue;
+            }
+            if let Some(m) = cursor_file_meta(&f, true) {
+                out.push(m);
+            }
+        }
     }
     // pin 即保留：源文件已消失的会话从快照补齐（§6.5）
     let seen: HashSet<(String, String)> = out
@@ -2581,7 +2903,7 @@ pub fn scan_sessions() -> ScanResult {
         .map(|m| (m.agent.clone(), m.session_id.clone()))
         .collect();
     if let Some(dir) = snapshots_root() {
-        for agent in ["claude-code", "codex", "gemini", "qwen", "kimi", "opencode"] {
+        for agent in ["claude-code", "codex", "gemini", "qwen", "kimi", "opencode", "codebuddy", "cursor"] {
             for f in snapshot_files(&dir, agent) {
                 let stem = snapshot_stem(&f);
                 if seen.contains(&(agent.to_string(), stem.clone())) {
@@ -2592,6 +2914,8 @@ pub fn scan_sessions() -> ScanResult {
                     "gemini" => gemini_file_meta(&f, false, &gemini_map),
                     "qwen" => qwen_file_meta(&f, false, false),
                     "opencode" => opencode_snapshot_meta(&f, &stem),
+                    "codebuddy" => codebuddy_file_meta(&f, false),
+                    "cursor" => cursor_file_meta(&f, false),
                     "kimi" => {
                         // 快照脱离了原目录结构（无 state.json / bucket），项目归属不可知
                         let bytes = read_session_bytes(&f);
@@ -3107,8 +3431,43 @@ fn kimi_tail_state(lines: &[String]) -> &'static str {
     "unknown"
 }
 
-fn opencode_tail_state(db_path: &Path, session_id: &str) -> &'static str {
-    let Some(conn) = open_opencode_db(db_path) else {
+fn codebuddy_tail_state(lines: &[String]) -> &'static str {
+    for line in lines.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if get_str(&v, "type") != Some("message") {
+            continue; // file-history-snapshot 等事件行不算数
+        }
+        match get_str(&v, "role") {
+            Some("user") => return "working", // 发了 prompt 还没等到回答
+            Some("assistant") => {
+                let text = codebuddy_content_text(&v, "output_text").unwrap_or_default();
+                return if ends_with_question(&text) { "confirm" } else { "done" };
+            }
+            _ => continue,
+        }
+    }
+    "unknown"
+}
+
+/// cursor 尾部状态：从后往前找最近一条已知 type 的记录；未知 type 跳过
+fn cursor_tail_state(lines: &[String]) -> &'static str {
+    for line in lines.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match get_str(&v, "type") {
+            Some("turn_ended") => return "done",
+            // 用户消息发出后还没等到回合结束；工具调用/结果都在回合进行中
+            Some("user_message") | Some("tool_call") | Some("tool_result") => return "working",
+            _ => continue,
+        }
+    }
+    "unknown"
+}
+
+fn opencode_tail_state(db_path: &Path, session_id: &str) -> &'static str {    let Some(conn) = open_opencode_db(db_path) else {
         return "unknown";
     };
     let sid = session_id.to_string();
@@ -3168,6 +3527,8 @@ fn tail_state_impl(agent: &str, file_path: &str) -> String {
         "gemini" => gemini_tail_state(&lines),
         "qwen" => qwen_tail_state(&lines),
         "kimi" => kimi_tail_state(&lines),
+        "codebuddy" => codebuddy_tail_state(&lines),
+        "cursor" => cursor_tail_state(&lines),
         _ => claude_tail_state(&lines),
     }
     .into()
@@ -3454,6 +3815,8 @@ fn parse_session_lines(agent: &str, lines: &[String]) -> Vec<ChatMessageDto> {
         "kimi" => {
             if kimi_looks_like_wire(lines) { parse_kimi(lines) } else { parse_kimi_legacy(lines) }
         }
+        "codebuddy" => parse_codebuddy(lines),
+        "cursor" => parse_cursor(lines),
         _ => parse_claude(lines),
     }
 }
@@ -3865,12 +4228,38 @@ fn session_data_dirs() -> Vec<(PathBuf, bool)> {
         dirs.push((home.join(".kimi-code").join("sessions"), false));
         // OpenCode legacy storage：session/message/part 都是 .json（v1.2+ 的共享 SQLite 走删行，不在这里）
         dirs.push((home.join(".local").join("share").join("opencode").join("storage"), true));
+        // codebuddy: projects/<slug>/<uuid>.jsonl（同根的 .credentials.json 等不许删 → 限定 projects 子目录）
+        dirs.push((home.join(".codebuddy").join("projects"), false));
+        // cursor 不进目录级白名单：~/.cursor 与 IDE 共享，projects 下也有非会话 jsonl，
+        // 目录粒度太粗——由 deletable_session_file 里的 cursor_deletable 精确判定
     }
     if let Some(snap) = snapshots_root() {
         // pin 快照：.jsonl/.jsonl.zst，opencode 快照是导出的 .json
         dirs.push((snap, true));
     }
     dirs
+}
+
+/// cursor 会话删除的精确判定（projects_root = ~/.cursor/projects，调用方已 canonicalize）：
+/// 只放行 <编码cwd>/agent-transcripts/**/*.jsonl；同根的 auth.json、IDE 数据、
+/// projects 下 agent-transcripts 之外的 jsonl 一律拒绝
+fn cursor_deletable(canon: &Path, projects_root: &Path) -> bool {
+    let Ok(rel) = canon.strip_prefix(projects_root) else {
+        return false;
+    };
+    let mut segs = rel.components();
+    // 第一段是编码后的 cwd 目录；第二段必须是 agent-transcripts
+    if segs.next().is_none() {
+        return false;
+    }
+    if segs.next().map(|c| c.as_os_str()) != Some(std::ffi::OsStr::new("agent-transcripts")) {
+        return false;
+    }
+    // agent-transcripts 之下必须还有内容，且最终文件是 .jsonl
+    segs.next().is_some()
+        && canon
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with(".jsonl"))
 }
 
 /// 删除目标两道闸：canonicalize 后必须落在已知会话数据目录内（防符号链接绕过），
@@ -3886,6 +4275,16 @@ fn deletable_session_file(path: &Path, dirs: &[(PathBuf, bool)]) -> bool {
     let json = name.ends_with(".json");
     if !jsonl && !json {
         return false;
+    }
+    // cursor 专属闸：目录级白名单粒度不够（~/.cursor 与 IDE 共享），单独精确判定
+    if jsonl {
+        if let Some(root) = dirs::home_dir()
+            .and_then(|h| h.join(".cursor").join("projects").canonicalize().ok())
+        {
+            if cursor_deletable(&canon, &root) {
+                return true;
+            }
+        }
     }
     dirs.iter().any(|(dir, allow_json)| {
         (jsonl || (*allow_json && json))
@@ -4264,6 +4663,175 @@ mod tests {
         assert_eq!(usable_title("New Session"), None);
         assert_eq!(usable_title("未命名对话"), None);
         assert_eq!(usable_title("  修复统计页\n\n今日用量  ").as_deref(), Some("修复统计页 今日用量"));
+    }
+
+    // ===== CodeBuddy 解析（v2.132.0 实测样本行） =====
+
+    #[test]
+    fn codebuddy_parse_messages_skips_event_lines() {
+        let lines = s(&[
+            r#"{"id":"m1","timestamp":1786005441386,"type":"message","role":"user","content":[{"type":"input_text","text":"say hi"}],"providerData":{"agent":"cli"},"sessionId":"sid-cb","cwd":"/private/tmp/cbtest"}"#,
+            r#"{"id":"s1","timestamp":1786005441391,"type":"file-history-snapshot","isSnapshotUpdate":false,"snapshot":{"messageId":"m1","trackedFileBackups":{}},"cwd":"/private/tmp/cbtest"}"#,
+            r#"{"id":"m2","parentId":"m1","timestamp":1786005443775,"type":"message","role":"assistant","content":[{"type":"output_text","text":"你好！"}],"status":"incomplete","sessionId":"sid-cb","cwd":"/private/tmp/cbtest"}"#,
+            r#"{"id":"m3","type":"unknown-future-event","foo":1}"#,
+            r#"{"id":"m4","type":"message","role":"assistant","content":"#, // 截断末行
+        ]);
+        let msgs = parse_codebuddy(&lines);
+        assert_eq!(msgs.len(), 2, "file-history-snapshot/未知类型/截断行都要跳过");
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].blocks[0].text, "say hi");
+        assert_eq!(msgs[0].timestamp.as_deref(), Some("2026-08-06T08:37:21Z"), "毫秒 epoch 应转 ISO");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].blocks[0].text, "你好！");
+    }
+
+    #[test]
+    fn codebuddy_meta_reads_cwd_session_and_title() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let proj = dir.join("-private-tmp-cbtest");
+        std::fs::create_dir_all(&proj).unwrap();
+        let file = proj.join("df3ac35f-6338-4875-bcb8-7ac811794538.jsonl");
+        let content = concat!(
+            r#"{"id":"m1","timestamp":1786005441386,"type":"message","role":"user","content":[{"type":"input_text","text":"say hi"}],"providerData":{"agent":"cli"},"sessionId":"df3ac35f-6338-4875-bcb8-7ac811794538","cwd":"/private/tmp/cbtest"}"#,
+            "\n",
+            r#"{"id":"s1","timestamp":1786005441391,"type":"file-history-snapshot","isSnapshotUpdate":false,"snapshot":{"messageId":"m1","trackedFileBackups":{}},"cwd":"/private/tmp/cbtest"}"#,
+            "\n",
+        );
+        std::fs::write(&file, content).unwrap();
+        let m = codebuddy_file_meta(&file, true).unwrap();
+        assert_eq!(m.agent, "codebuddy");
+        assert_eq!(m.project_path, "/private/tmp/cbtest");
+        assert_eq!(m.session_id, "df3ac35f-6338-4875-bcb8-7ac811794538");
+        assert_eq!(m.title.as_deref(), Some("say hi"));
+        assert!(m.created_at.is_some());
+        assert!(m.alive);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn codebuddy_meta_falls_back_to_slug_dir_name() {
+        // 行里没有 cwd/sessionId 时：项目归属回落 slug 目录名（同 Claude 规则），session id 回落文件名
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let proj = dir.join("-Users-x-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let file = proj.join("aaaaaaaa-0000-0000-0000-000000000000.jsonl");
+        std::fs::write(&file, r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}"#).unwrap();
+        let m = codebuddy_file_meta(&file, true).unwrap();
+        assert_eq!(m.project_path, "-Users-x-proj");
+        assert_eq!(m.session_id, "aaaaaaaa-0000-0000-0000-000000000000");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== cursor 解析器（样本行按源码枚举构造：user_message/tool_call/tool_result/
+    // turn_ended/turn_id/message_id；完整字段样本未验证，防御式）=====
+
+    #[test]
+    fn cursor_parse_skips_event_lines_unknown_types_and_truncation() {
+        let lines = s(&[
+            r#"{"type":"turn_id","id":"t1"}"#,
+            r#"{"type":"user_message","message":{"content":[{"text":"写一个 hello world"}]},"timestamp":1786005441386}"#,
+            r#"{"type":"message_id","id":"m1"}"#,
+            r#"{"type":"tool_call","name":"read_file","timestamp":1786005441400}"#,
+            r#"{"type":"tool_result","timestamp":1786005441450}"#,
+            r#"{"type":"user_message","message":{"content":"纯字符串 content 也要能提取"},"time":1786005441460}"#,
+            r#"{"type":"turn_ended","timestamp":1786005441500}"#,
+            r#"{"type":"future_unknown_type","foo":1}"#,
+            r#"{"type":"user_message","message":{"con"#, // 截断末行
+        ]);
+        let msgs = parse_cursor(&lines);
+        assert_eq!(msgs.len(), 2, "事件行/未知类型/截断行都要跳过");
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].blocks[0].text, "写一个 hello world");
+        assert_eq!(msgs[0].timestamp.as_deref(), Some("2026-08-06T08:37:21Z"), "毫秒 epoch 应转 ISO");
+        assert_eq!(msgs[1].blocks[0].text, "纯字符串 content 也要能提取");
+        assert_eq!(msgs[1].timestamp.as_deref(), Some("2026-08-06T08:37:21Z"));
+    }
+
+    #[test]
+    fn cursor_meta_reads_title_and_falls_back_to_encoded_dir() {
+        // 结构 projects/<编码cwd>/agent-transcripts/<uuid>/<uuid>.jsonl；
+        // 行里没有 cwd 字段时：项目归属回落上三级编码目录名（有损不解码），session id 回落文件名
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let sess = dir
+            .join("-Users-x-proj")
+            .join("agent-transcripts")
+            .join("bbbbbbbb-0000-0000-0000-000000000000");
+        std::fs::create_dir_all(&sess).unwrap();
+        let file = sess.join("bbbbbbbb-0000-0000-0000-000000000000.jsonl");
+        let content = concat!(
+            r#"{"type":"turn_id","id":"t1"}"#,
+            "\n",
+            r#"{"type":"user_message","message":{"content":[{"text":"帮我看这份数据"}]},"timestamp":1786005441386}"#,
+            "\n",
+        );
+        std::fs::write(&file, content).unwrap();
+        let m = cursor_file_meta(&file, true).unwrap();
+        assert_eq!(m.agent, "cursor");
+        assert_eq!(m.project_path, "-Users-x-proj");
+        assert_eq!(m.session_id, "bbbbbbbb-0000-0000-0000-000000000000");
+        assert_eq!(m.title.as_deref(), Some("帮我看这份数据"));
+        assert!(m.created_at.is_some());
+        assert!(m.alive);
+        // 行里带 cwd 字段时优先用真实路径
+        std::fs::write(
+            &file,
+            r#"{"type":"user_message","message":{"content":[{"text":"hi"}]},"cwd":"/Users/x/proj","timestamp":1786005441386}"#,
+        )
+        .unwrap();
+        let m = cursor_file_meta(&file, true).unwrap();
+        assert_eq!(m.project_path, "/Users/x/proj");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tail_state_cursor() {
+        let working = s(&[
+            r#"{"type":"turn_ended"}"#,
+            r#"{"type":"user_message","message":{"content":[{"text":"继续"}]}}"#,
+        ]);
+        assert_eq!(cursor_tail_state(&working), "working", "发了消息还没回合结束");
+        let tool = s(&[r#"{"type":"tool_call","name":"read_file"}"#]);
+        assert_eq!(cursor_tail_state(&tool), "working");
+        let done = s(&[
+            r#"{"type":"user_message","message":{"content":[{"text":"hi"}]}}"#,
+            r#"{"type":"future_unknown_type"}"#, // 未知 type 跳过，不算最新状态
+            r#"{"type":"turn_ended"}"#,
+        ]);
+        assert_eq!(cursor_tail_state(&done), "done");
+        assert_eq!(cursor_tail_state(&[]), "unknown");
+    }
+
+    #[test]
+    fn cursor_deletable_whitelist_limits_to_agent_transcripts() {
+        // projects_root 由调用方 canonicalize；测试里直接用临时目录
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let root = dir.join("projects");
+        let ok = root
+            .join("-tmp-x")
+            .join("agent-transcripts")
+            .join("u1")
+            .join("u1.jsonl");
+        assert!(cursor_deletable(&ok, &root), "agent-transcripts 下的 .jsonl 放行");
+        assert!(
+            !cursor_deletable(&root.join("-tmp-x").join("other.jsonl"), &root),
+            "agent-transcripts 之外的 jsonl 必须拒绝"
+        );
+        assert!(
+            !cursor_deletable(
+                &root.join("-tmp-x").join("agent-transcripts").join("u1").join("meta.json"),
+                &root
+            ),
+            "agent-transcripts 下的非 .jsonl 必须拒绝"
+        );
+        assert!(
+            !cursor_deletable(&root.join("-tmp-x").join("agent-transcripts"), &root),
+            "agent-transcripts 本身（下面没有文件）必须拒绝"
+        );
+        assert!(
+            !cursor_deletable(&dir.join("auth.json"), &root),
+            "projects 之外（同根 auth.json）必须拒绝"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -4952,16 +5520,25 @@ mod tests {
         std::fs::create_dir_all(&storage).unwrap();
         let ses_json = storage.join("ses_1.json");
         std::fs::write(&ses_json, "{}").unwrap();
+        let cb_proj = dir.join(".codebuddy").join("projects").join("-tmp-x");
+        std::fs::create_dir_all(&cb_proj).unwrap();
+        let cb_session = cb_proj.join("u1.jsonl");
+        std::fs::write(&cb_session, "{}").unwrap();
+        let cb_creds = dir.join(".codebuddy").join(".credentials.json");
+        std::fs::write(&cb_creds, "{}").unwrap();
         let notes = codex_chats.join("notes.txt");
         std::fs::write(&notes, "x").unwrap();
         let dirs = vec![
             (dir.join(".codex").join("sessions"), false),
             (dir.join(".kimi-code").join("sessions"), false),
             (dir.join("storage"), true),
+            (dir.join(".codebuddy").join("projects"), false),
         ];
         assert!(deletable_session_file(&rollout, &dirs));
         assert!(deletable_session_file(&wire, &dirs));
         assert!(deletable_session_file(&ses_json, &dirs), "legacy storage 放行 .json");
+        assert!(deletable_session_file(&cb_session, &dirs), "codebuddy projects/<slug>/*.jsonl 放行");
+        assert!(!deletable_session_file(&cb_creds, &dirs), ".codebuddy 根上的凭证文件必须拒绝");
         assert!(!deletable_session_file(&auth, &dirs), "同 CLI 根下的 auth.json 必须拒绝");
         assert!(!deletable_session_file(&index, &dirs), "根上的 session_index.jsonl 必须拒绝");
         assert!(!deletable_session_file(&state, &dirs), "未放行 .json 的目录里 state.json 必须拒绝");
@@ -5448,6 +6025,24 @@ mod tests {
             r#"{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Bash","args":{}},"time":2}"#,
         ]);
         assert_eq!(kimi_tail_state(&k_tool), "working");
+    }
+
+    #[test]
+    fn tail_state_codebuddy() {
+        let working = s(&[
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"干活"}],"timestamp":1786005441386}"#,
+        ]);
+        assert_eq!(codebuddy_tail_state(&working), "working");
+        let done = s(&[
+            r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"做完了"}]}"#,
+            r#"{"type":"file-history-snapshot","snapshot":{}}"#, // 事件行不算数
+        ]);
+        assert_eq!(codebuddy_tail_state(&done), "done");
+        let confirm = s(&[
+            r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"要我继续吗？"}]}"#,
+        ]);
+        assert_eq!(codebuddy_tail_state(&confirm), "confirm");
+        assert_eq!(codebuddy_tail_state(&[]), "unknown");
     }
 
     #[test]

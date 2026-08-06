@@ -153,6 +153,15 @@ fn local_check_at(home: &Path, profile: &Profile) -> ValidationCheckDto {
                 &home.join(".qwen/settings.json"),
                 "~/.qwen/settings.json",
             ))?,
+            "codebuddy" => add(parse_json_file(
+                &home.join(".codebuddy/settings.json"),
+                "~/.codebuddy/settings.json",
+            ))?,
+            // cursor 仅 AGENT_CLI_CREDENTIAL_STORE=file 时落 auth.json（默认在钥匙串）
+            "cursor" => add(parse_json_file(
+                &home.join(".cursor/auth.json"),
+                "~/.cursor/auth.json",
+            ))?,
             "opencode" => add(parse_json_file(
                 &home.join(".config/opencode/opencode.json"),
                 "~/.config/opencode/opencode.json",
@@ -305,6 +314,14 @@ fn cli_check(profile: &Profile, key: Option<&str>, injected: bool) -> Validation
                 cmd.arg("--version");
                 "Qwen 启动预检（CLI 暂无 doctor）"
             }
+            "codebuddy" => {
+                cmd.arg("--version");
+                "CodeBuddy 启动预检（CLI 暂无 doctor）"
+            }
+            "cursor" => {
+                cmd.arg("--version");
+                "Cursor 启动预检（CLI 暂无 doctor）"
+            }
             _ => return Err("该 agent 不支持 CLI 预检".into()),
         };
         cmd.env("NO_COLOR", "1");
@@ -336,7 +353,8 @@ enum ApiKind {
 
 fn api_kind(profile: &Profile) -> ApiKind {
     match profile.agent.as_str() {
-        "claude-code" => ApiKind::Anthropic,
+        // codebuddy 协议 Anthropic 兼容（docs 有 DeepSeek Anthropic 端点对接示例）
+        "claude-code" | "codebuddy" => ApiKind::Anthropic,
         "gemini" => ApiKind::Gemini,
         "qwen" | "kimi" if profile.protocol.as_deref() == Some("anthropic") => {
             ApiKind::Anthropic
@@ -347,6 +365,8 @@ fn api_kind(profile: &Profile) -> ApiKind {
 
 fn default_base(profile: &Profile, kind: ApiKind) -> &'static str {
     match kind {
+        // codebuddy 缺省端点：官方国际站（product.json 的 endpoint 字段）
+        ApiKind::Anthropic if profile.agent == "codebuddy" => "https://www.codebuddy.ai",
         ApiKind::Anthropic => "https://api.anthropic.com/v1",
         ApiKind::Gemini => "https://generativelanguage.googleapis.com/v1beta",
         ApiKind::OpenAi if profile.agent == "kimi" => "https://api.moonshot.cn/v1",
@@ -397,6 +417,15 @@ fn model_ids(value: &serde_json::Value, kind: ApiKind) -> Vec<String> {
 }
 
 async fn api_check(profile: &Profile, key: Option<&str>) -> ValidationCheckDto {
+    // Cursor 是专有协议（非 OpenAI/Anthropic 兼容），models 请求形态无从适配——
+    // 不硬套三种 ApiKind，标记不支持云端验证，只给本地两层检查
+    if profile.agent == "cursor" {
+        return check(
+            "skipped",
+            "Cursor 为专有协议，不支持云端验证；以本地配置解析与 CLI 预检为准",
+            None,
+        );
+    }
     let Some(key) = key.filter(|value| !value.trim().is_empty()) else {
         return check(
             "skipped",

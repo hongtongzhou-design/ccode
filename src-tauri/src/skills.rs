@@ -1,4 +1,4 @@
-//! 技能管理（§6.13）：技能库（SSOT）+ 分发到六个 CLI 的技能目录。
+//! 技能管理（§6.13）：技能库（SSOT）+ 分发到八个 CLI 的技能目录。
 //! 库位置 <config>/ccode/skills/<name>/，元数据 skills.json；分发优先 symlink，失败回退 copy。
 
 use serde::{Deserialize, Serialize};
@@ -121,7 +121,7 @@ impl SkillStore {
     }
 }
 
-/// 六个 agent 的技能目录（§6.13；目录来自 AgentSpec.skills_dir，opencode 在 ~/.config 下）
+/// 八个 agent 的技能目录（§6.13；目录来自 AgentSpec.skills_dir，opencode 在 ~/.config 下）
 fn agent_dirs() -> HashMap<String, PathBuf> {
     let mut m = HashMap::new();
     if let Some(home) = dirs::home_dir() {
@@ -926,10 +926,17 @@ pub async fn resync_skill_copies(id: String) -> Result<Vec<String>, String> {
     resync_impl(&store, &agent_dirs(), &id)
 }
 
+/// 各 agent 是否允许 symlink 分发（False = 强制 copy）。
+/// cursor 的 ~/.cursor/skills-cursor 未验证 CLI 是否真读、且 ~/.cursor 与 IDE 共享，
+/// 保守走 copy（漂移检测/resync 沿用既有 copy 机制），不建 symlink
+fn allow_symlink_for(agent: &str) -> bool {
+    agent != "cursor"
+}
+
 #[tauri::command]
 pub async fn apply_skill(id: String, agent: String, enabled: bool) -> Result<(), String> {
     let store = SkillStore::default_paths()?;
-    apply_impl(&store, &agent_dirs(), &id, &agent, enabled, true)
+    apply_impl(&store, &agent_dirs(), &id, &agent, enabled, allow_symlink_for(&agent))
 }
 
 #[tauri::command]
@@ -1614,6 +1621,15 @@ mod tests {
         assert_eq!(fx.store.read()[0].description, "新描述");
         let err = update_content_impl(&fx.store, &mut skills, "ghost", "x", None).unwrap_err();
         assert!(err.contains("不存在"), "{err}");
+    }
+
+    #[test]
+    fn cursor_distribution_forces_copy_mode() {
+        // cursor 的 skills 目录未验证 CLI 是否真读，强制 copy 不建 symlink
+        assert!(!allow_symlink_for("cursor"));
+        for a in ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi", "codebuddy"] {
+            assert!(allow_symlink_for(a), "{a} 应保持 symlink 优先");
+        }
     }
 
     #[test]

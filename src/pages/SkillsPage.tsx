@@ -19,7 +19,7 @@ import type {
   SkillUpdateDto,
 } from "../types";
 
-/** 行内开关的短标签（六 agent 顺序与全局 AGENTS 一致） */
+/** 行内开关的短标签（agent 顺序与全局 AGENTS 一致） */
 const AGENT_SHORT: Record<string, string> = {
   "claude-code": "claude",
   codex: "codex",
@@ -27,6 +27,8 @@ const AGENT_SHORT: Record<string, string> = {
   qwen: "qwen",
   opencode: "oc",
   kimi: "kimi",
+  codebuddy: "cb",
+  cursor: "cur",
 };
 
 const SOURCE_LABEL: Record<string, string> = {

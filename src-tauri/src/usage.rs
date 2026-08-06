@@ -1,4 +1,4 @@
-//! 用量与费用统计（§6.11）：六个 agent 的会话 usage 按天聚合进 app.db，
+//! 用量与费用统计（§6.11）：八个 agent 的会话 usage 按天聚合进 app.db，
 //! 内置定价表（可被 <config>/ccode/pricing.json 覆盖）估算 USD 费用；价格不明的只显示 token。
 
 use chrono::{DateTime, Days, Local, NaiveDate, TimeZone};
@@ -240,6 +240,99 @@ where
     out
 }
 
+/// CodeBuddy：usage/工具调用字段未实证（实测样本是 401 会话，无 usage 行），
+/// 按 Anthropic 兼容字段名尽力而为；无 usage 字段的行不产生事件（不报错）。
+/// TODO: 拿到真账号样本后补全实际字段名。
+fn codebuddy_events<I, S>(lines: I) -> Vec<UsageEvent>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = Vec::new();
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line.as_ref()) else {
+            continue;
+        };
+        if get_str(&v, "type") != Some("message") || get_str(&v, "role") != Some("assistant") {
+            continue;
+        }
+        let Some(u) = v.get("usage") else {
+            continue;
+        };
+        let num = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        // timestamp 是毫秒 epoch 数字（容错 ISO 字符串）
+        let day = match v.get("timestamp") {
+            Some(Value::Number(n)) => n.as_i64().map(day_of_ms).unwrap_or_default(),
+            Some(Value::String(s)) => day_of_iso(s),
+            _ => String::new(),
+        };
+        out.push(UsageEvent {
+            day,
+            model: get_str(&v, "model").unwrap_or("").to_string(),
+            input: num("input_tokens"),
+            output: num("output_tokens"),
+            cache_read: num("cache_read_input_tokens"),
+            cache_write: num("cache_creation_input_tokens"),
+            source: SOURCE_CLI.into(),
+            internal: false,
+            official: false,
+        });
+    }
+    out
+}
+
+/// Cursor：usage 字段未实证（调研无真账号样本，2026.08.04-aaa8809），
+/// 按常见字段名候选尽力而为；无 usage 字段的行不产生事件（不报错）。
+/// TODO: 拿到真账号样本后补全实际字段名。
+fn cursor_events<I, S>(lines: I) -> Vec<UsageEvent>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = Vec::new();
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line.as_ref()) else {
+            continue;
+        };
+        let Some(u) = v.get("usage") else {
+            continue;
+        };
+        // 字段名候选：snake_case / camelCase / OpenAI 风格
+        let nums = |keys: &[&str]| {
+            keys.iter()
+                .find_map(|k| u.get(k).and_then(|x| x.as_u64()))
+                .unwrap_or(0)
+        };
+        // 时间戳字段名未实证，多候选；数字按量级区分毫秒/秒 epoch，字符串当 ISO
+        let day = ["timestamp", "time", "created_at", "createdAt", "ts"]
+            .iter()
+            .find_map(|k| match v.get(k) {
+                Some(Value::Number(n)) => n.as_i64().map(|raw| {
+                    if raw.abs() >= 1_000_000_000_000 {
+                        day_of_ms(raw)
+                    } else {
+                        day_of_ms(raw * 1000)
+                    }
+                }),
+                Some(Value::String(s)) => Some(day_of_iso(s)),
+                _ => None,
+            })
+            .unwrap_or_default();
+        out.push(UsageEvent {
+            day,
+            model: get_str(&v, "model").unwrap_or("").to_string(),
+            input: nums(&["input_tokens", "inputTokens", "prompt_tokens"]),
+            output: nums(&["output_tokens", "outputTokens", "completion_tokens"]),
+            cache_read: nums(&["cache_read_input_tokens", "cacheReadInputTokens"]),
+            cache_write: nums(&["cache_creation_input_tokens", "cacheCreationInputTokens"]),
+            source: SOURCE_CLI.into(),
+            internal: false,
+            official: false,
+        });
+    }
+    out
+}
+
 fn opencode_events(db_path: &Path, session_id: &str) -> Vec<UsageEvent> {
     let Some(conn) = crate::sessions::open_opencode_db(db_path) else {
         return Vec::new();
@@ -329,6 +422,8 @@ fn extract_file_events(agent: &str, path: &Path) -> Vec<UsageEvent> {
         "gemini" => gemini_events(lines),
         "qwen" => qwen_events(lines),
         "kimi" => kimi_events(lines),
+        "codebuddy" => codebuddy_events(lines),
+        "cursor" => cursor_events(lines),
         _ => claude_events(lines),
     }
 }
@@ -1830,6 +1925,34 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].day, day_of_ms(1785307071000));
         assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read, evs[0].cache_write), (50, 9, 4, 1));
+        // codebuddy：毫秒 epoch 时间戳；无 usage 字段的行（401 实测样本）不产生事件
+        let lines = vec![
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"say hi"}],"timestamp":1786005441386}"#.to_string(),
+            r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"401 Unauthorized"}],"timestamp":1786005443775}"#.to_string(),
+        ];
+        assert!(codebuddy_events(&lines).is_empty(), "无 usage 字段必须零事件不报错");
+        let lines = vec![
+            r#"{"type":"message","role":"assistant","model":"glm-5.0","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":2},"timestamp":1786005443775}"#.to_string(),
+        ];
+        let evs = codebuddy_events(&lines);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].day, day_of_ms(1786005443775));
+        assert_eq!(evs[0].model, "glm-5.0");
+        assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read, evs[0].cache_write), (10, 5, 3, 2));
+        // cursor：usage 字段未实证，按字段名候选尽力而为；无 usage 字段的行必须零事件不报错
+        let lines = vec![
+            r#"{"type":"user_message","message":{"content":[{"text":"hi"}]},"timestamp":1786005441386}"#.to_string(),
+            r#"{"type":"turn_ended","timestamp":1786005441500}"#.to_string(),
+        ];
+        assert!(cursor_events(&lines).is_empty(), "无 usage 字段必须零事件不报错");
+        let lines = vec![
+            r#"{"type":"turn_ended","model":"claude-opus-4-8","usage":{"inputTokens":20,"outputTokens":7},"timestamp":1786005443775}"#.to_string(),
+        ];
+        let evs = cursor_events(&lines);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].day, day_of_ms(1786005443775));
+        assert_eq!(evs[0].model, "claude-opus-4-8");
+        assert_eq!((evs[0].input, evs[0].output), (20, 7), "camelCase 候选字段名也要能取到");
     }
 
     #[test]

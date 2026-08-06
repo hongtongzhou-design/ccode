@@ -218,7 +218,7 @@ pub struct SpawnResult {
     pub prompt_dropped: bool,
 }
 
-/// 支持 --session-id <uuid> 的 agent（AgentSpec.fixed_session_id；matrix：claude-code、qwen），
+/// 支持 --session-id <uuid> 的 agent（AgentSpec.fixed_session_id；matrix：claude-code、qwen、codebuddy），
 /// 会话文件名可预测
 fn session_id_for(agent_id: &str) -> Option<String> {
     crate::agent_specs::agent_spec(agent_id)
@@ -661,8 +661,8 @@ mod tests {
     }
 
     #[test]
-    fn session_id_only_for_claude_and_qwen() {
-        for agent in ["claude-code", "qwen"] {
+    fn session_id_only_for_claude_qwen_and_codebuddy() {
+        for agent in ["claude-code", "qwen", "codebuddy"] {
             let id = session_id_for(agent).expect("应生成会话 ID");
             assert!(uuid::Uuid::parse_str(&id).is_ok(), "会话 ID 应为 uuid");
         }

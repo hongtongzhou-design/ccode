@@ -61,7 +61,7 @@ pub(crate) fn version_with_timeout(
     version_args_with_timeout(path, &["--version"], timeout)
 }
 
-/// 探测参数来自 AgentSpec.version_args（六个 CLI 目前都是 --version）
+/// 探测参数来自 AgentSpec.version_args（八个 CLI 目前都是 --version）
 fn version_args_with_timeout(
     path: &std::path::Path,
     args: &[&str],
@@ -229,6 +229,20 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         plan.env.push(("KIMI_BASE_URL".into(), url.clone()));
                     }
                 }
+                SpecialLaunch::CursorFlags { key_env, endpoint_env, model_flag } => {
+                    // key/端点走 env（CURSOR_API_KEY / CURSOR_API_ENDPOINT，仅非空时注入）；
+                    // 模型没有 env，只能追加 --model <name> flag（bracket 参数化原样透传）
+                    if let Some(key) = key {
+                        plan.env.push(((*key_env).into(), key));
+                    }
+                    if let Some(url) = &profile.base_url {
+                        plan.env.push(((*endpoint_env).into(), url.clone()));
+                    }
+                    if let Some(model) = model {
+                        plan.args.push((*model_flag).into());
+                        plan.args.push(model.into());
+                    }
+                }
             },
         }
     }
@@ -317,6 +331,13 @@ fn apply_official_inject(
                 // 默认沙箱与认证方式无关，官方账号同样生效
                 for arg in *sandbox_args {
                     plan.args.push((*arg).into());
+                }
+            }
+            // cursor 官方账号：不注入密钥/端点，模型 flag 与认证方式无关照常可用
+            SpecialLaunch::CursorFlags { model_flag, .. } => {
+                if let Some(m) = model {
+                    plan.args.push((*model_flag).into());
+                    plan.args.push(m.into());
                 }
             }
             // opencode 内联配置缺 provider 会指向不存在的节点；kimi 新版刻意忽略 shell env——
@@ -791,7 +812,7 @@ fn kimi_variant_hint() -> Option<&'static str> {
     }
 }
 
-/// 检测结果按进程缓存一次（要 spawn 6 个子进程跑 --version，没必要每次重算）；
+/// 检测结果按进程缓存一次（要 spawn 8 个子进程跑 --version，没必要每次重算）；
 /// 更新成功后由 updater 调 invalidate_detect_cache 清空
 static DETECT_CACHE: std::sync::Mutex<Option<Vec<DetectResult>>> = std::sync::Mutex::new(None);
 
@@ -819,7 +840,7 @@ pub async fn detect_agents() -> Vec<DetectResult> {
     if let Some(cached) = DETECT_CACHE.lock().unwrap().clone() {
         return cached;
     }
-    // --version 要 spawn 6 个子进程，放阻塞线程池并并行跑（与 updater 的更新检查同模式；
+    // --version 要 spawn 8 个子进程，放阻塞线程池并并行跑（与 updater 的更新检查同模式；
     // 单个 CLI 卡死由 version_with_timeout 的 5s 超时兜底）
     let results = tauri::async_runtime::spawn_blocking(|| {
         let handles: Vec<_> = crate::agent_specs::all_agent_specs()
@@ -1115,6 +1136,74 @@ mod tests {
         assert!(plan
             .env
             .contains(&("ANTHROPIC_MODEL".into(), "claude-sonnet-4".into())));
+    }
+
+    #[test]
+    fn codebuddy_plan_injects_codebuddy_env() {
+        let p = profile("codebuddy", Some("https://api.deepseek.com/anthropic"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("deepseek-v3-2-volc"));
+        assert!(plan
+            .env
+            .contains(&("CODEBUDDY_BASE_URL".into(), "https://api.deepseek.com/anthropic".into())));
+        assert!(plan
+            .env
+            .contains(&("CODEBUDDY_API_KEY".into(), "sk-secret".into())));
+        assert!(plan
+            .env
+            .contains(&("CODEBUDDY_MODEL".into(), "deepseek-v3-2-volc".into())));
+        // 初始 prompt 是位置参数（一键开步注入）
+        let plan = launch_plan_with_prompt(&p, Some("sk-secret".into()), None, Some("干活"));
+        assert_eq!(plan.prompt_args, vec!["干活"]);
+    }
+
+    #[test]
+    fn codebuddy_official_plan_purges_api_env() {
+        // 官方账号拉起：不注入 API env，且必须 env_remove 残留密钥变量（env 优先压账号，实测 401）
+        let p = official_profile("codebuddy");
+        let plan = launch_plan(&p, None, None);
+        assert!(!plan.env.iter().any(|(k, _)| k.starts_with("CODEBUDDY_")));
+        assert!(plan.env_remove.contains(&"CODEBUDDY_API_KEY".to_string()));
+        assert!(plan.env_remove.contains(&"CODEBUDDY_AUTH_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn cursor_plan_injects_key_endpoint_env_and_model_flag() {
+        let p = profile("cursor", Some("https://cursor.example.com"));
+        let plan = launch_plan(&p, Some("key-secret".into()), Some("claude-opus-4-8[context=1m,effort=high]"));
+        assert!(plan
+            .env
+            .contains(&("CURSOR_API_KEY".into(), "key-secret".into())));
+        assert!(plan
+            .env
+            .contains(&("CURSOR_API_ENDPOINT".into(), "https://cursor.example.com".into())));
+        // 模型走 --model flag（bracket 参数化原样透传），不是 env
+        assert_eq!(
+            plan.args,
+            vec!["--model", "claude-opus-4-8[context=1m,effort=high]"]
+        );
+        assert!(!plan.env.iter().any(|(k, _)| k.contains("MODEL")));
+        // 空字段不注入：无 base_url/密钥/模型时 env 与 args 都为空
+        let bare = launch_plan(&profile("cursor", None), None, None);
+        assert!(bare.env.is_empty());
+        assert!(bare.args.is_empty());
+        // 初始 prompt 是位置参数（一键开步注入）
+        let plan = launch_plan_with_prompt(&p, Some("key-secret".into()), None, Some("干活"));
+        assert_eq!(plan.prompt_args, vec!["干活"]);
+        assert!(!plan.prompt_dropped);
+    }
+
+    #[test]
+    fn cursor_official_plan_purges_key_but_keeps_model_flag() {
+        // 官方账号拉起：不注入 CURSOR_API_KEY（且 env_remove 残留），模型 flag 照常可用
+        let p = official_profile("cursor");
+        let plan = launch_plan(&p, Some("key-secret".into()), Some("gpt-5"));
+        assert!(!plan.env.iter().any(|(k, _)| k.starts_with("CURSOR_")));
+        assert_eq!(plan.args, vec!["--model", "gpt-5"]);
+        assert!(plan.env_remove.contains(&"CURSOR_API_KEY".to_string()));
+        // 模型为空：无任何参数
+        let bare = launch_plan(&p, None, None);
+        assert!(bare.args.is_empty());
+        assert!(bare.env.is_empty());
     }
 
     #[test]
@@ -1705,6 +1794,14 @@ mod tests {
         assert_eq!(
             resume_command_line("opencode", "abc", "/tmp/proj").unwrap(),
             "cd /tmp/proj && opencode --session abc"
+        );
+        assert_eq!(
+            resume_command_line("codebuddy", "abc", "/tmp/proj").unwrap(),
+            "cd /tmp/proj && codebuddy -r abc"
+        );
+        assert_eq!(
+            resume_command_line("cursor", "abc", "/tmp/proj").unwrap(),
+            "cd /tmp/proj && cursor-agent --resume abc"
         );
         // 路径含空格/中文 → 单引号包裹
         assert_eq!(

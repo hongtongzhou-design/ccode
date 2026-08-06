@@ -41,7 +41,7 @@ pub struct HandoffTargetDto {
     pub prompt_supported: bool,
 }
 
-/// 接力目标清单：六 CLI 全量返回，前端按 installed/prompt_supported 排序与标注
+/// 接力目标清单：八 CLI 全量返回，前端按 installed/prompt_supported 排序与标注
 #[tauri::command]
 pub fn handoff_targets() -> Vec<HandoffTargetDto> {
     agent_specs::all_agent_specs()
@@ -607,11 +607,11 @@ mod tests {
         assert_eq!(links[0].from_session_id, "s2");
     }
 
-    /// 接力目标清单覆盖六 CLI，kimi/opencode 标注需手动注入
+    /// 接力目标清单覆盖八 CLI，kimi/opencode 标注需手动注入
     #[test]
     fn handoff_targets_cover_registry() {
         let targets = handoff_targets();
-        assert_eq!(targets.len(), 6);
+        assert_eq!(targets.len(), 8);
         let manual: Vec<&str> = targets
             .iter()
             .filter(|t| !t.prompt_supported)

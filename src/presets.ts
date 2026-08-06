@@ -75,4 +75,21 @@ export const PRESETS: Preset[] = [
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   },
   // Gemini CLI 用 Google 官方时 Base URL 留空即可，不设预设
+  // CodeBuddy 是 Anthropic 兼容协议（CODEBUDDY_API_KEY 鉴权），官方分国际站/中国站
+  { name: "腾讯 CodeBuddy 国际站", agent: "codebuddy", baseUrl: "https://www.codebuddy.ai" },
+  { name: "腾讯 CodeBuddy 中国站", agent: "codebuddy", baseUrl: "https://copilot.tencent.com" },
+  {
+    name: "DeepSeek（Anthropic 兼容）",
+    agent: "codebuddy",
+    baseUrl: "https://api.deepseek.com/anthropic",
+    note: "CODEBUDDY_API_KEY 鉴权",
+  },
+  {
+    name: "智谱 GLM（Anthropic 兼容）",
+    agent: "codebuddy",
+    baseUrl: "https://open.bigmodel.cn/api/anthropic",
+    note: "CODEBUDDY_API_KEY 鉴权",
+  },
+  // Cursor 不设预设：端点是 Cursor 专有协议（CURSOR_API_ENDPOINT），非 OpenAI/Anthropic 兼容，
+  // 第三方供应商端点接上也不通，列出来只会误导
 ];

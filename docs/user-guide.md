@@ -1,9 +1,9 @@
 # Ccode 使用手册
 
 > 本文档随产品功能实时更新（改动功能时必须同步本文档，见 AGENTS.md 规则）。
-> 最后更新：2026-08-06（P1：官方账号 profile、项目注册与流水线骨架、供应商预设扩充；P2：PDF 预览与整理为笔记；P3：提货单产物登记、图片评审、OS 通知、接力；P4：quarto 渲染脚本；P5：逐 hunk 验收、运行中聚合视图、任务成本、订阅口径；RX1：流水线编辑器 + 步骤资源绑定；RX2：md 阅读版式 + 步骤胶囊对照；RX3：对话步骤化 + 技能新建/编辑/◈ 优化；RX4：docx 预览 + export-docx；界面白话双层与列表精简）
+> 最后更新：2026-08-06（P1：官方账号 profile、项目注册与流水线骨架、供应商预设扩充；P2：PDF 预览与整理为笔记；P3：提货单产物登记、图片评审、OS 通知、接力；P4：quarto 渲染脚本；P5：逐 hunk 验收、运行中聚合视图、任务成本、订阅口径；RX1：流水线编辑器 + 步骤资源绑定；RX2：md 阅读版式 + 步骤胶囊对照；RX3：对话步骤化 + 技能新建/编辑/◈ 优化；RX4：docx 预览 + export-docx；界面白话双层与列表精简；Cursor CLI 接入为第八个 agent）
 
-Ccode 是 AI 编码 Agent 的统一工作台：管理六个 CLI agent（Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code）的 API 配置，内嵌终端一键启动，git worktree 任务工作区，会话历史回放，用量统计，技能分发，以及四处 AI 辅助（提交信息/会话摘要/PR 描述/冲突审查建议）。
+Ccode 是 AI 编码 Agent 的统一工作台：管理八个 CLI agent（Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI）的 API 配置，内嵌终端一键启动，git worktree 任务工作区，会话历史回放，用量统计，技能分发，以及四处 AI 辅助（提交信息/会话摘要/PR 描述/冲突审查建议）。
 
 开发预览使用 `npm run tauri:dev`，窗口标题为「Ccode Dev - 热更新」；React/样式修改会自动刷新。它与正式版和打包调试版名称不同，验收时以该标题区分。
 
@@ -42,16 +42,16 @@ Ccode 是 AI 编码 Agent 的统一工作台：管理六个 CLI agent（Claude C
 
 配置列表每行只保留**名称 / 端点主机名 / 默认模型 / 密钥状态**和「编辑、⋯」；完整模型列表与端点细节保留在编辑页或悬浮提示中。导入/导出在页面顶部「⋯」；有用量的 profile 在行内「⋯ → 用量与费用」打开悬浮卡（按模型近似归属，跨配置共享模型会重复计入）。
 
-**预设清单**：Base URL 的「从预设快速填充」收录官方与公开的兼容端点，新建 profile 选预设 → 粘密钥即可，不必手查端点格式。claude-code 含 Anthropic 官方、智谱 GLM 与 DeepSeek（Anthropic 兼容端点）；codex/qwen/kimi/opencode 含 OpenRouter、DeepSeek、Moonshot、智谱 GLM、阿里云百炼等（kimi 兼容端点会自动带上 openai 协议）。Gemini 用 Google 官方时 Base URL 留空即可，不设预设。
+**预设清单**：Base URL 的「从预设快速填充」收录官方与公开的兼容端点，新建 profile 选预设 → 粘密钥即可，不必手查端点格式。claude-code 含 Anthropic 官方、智谱 GLM 与 DeepSeek（Anthropic 兼容端点）；codex/qwen/kimi/opencode 含 OpenRouter、DeepSeek、Moonshot、智谱 GLM、阿里云百炼等（kimi 兼容端点会自动带上 openai 协议）；codebuddy 含腾讯官方国际站/中国站与 DeepSeek、智谱（Anthropic 兼容端点）。Gemini 用 Google 官方时 Base URL 留空即可，不设预设。**Cursor 不设预设**——其端点是 Cursor 专有协议（非 OpenAI/Anthropic 兼容），第三方供应商端点接上也不通；Cursor 的模型经 `--model` 参数注入（支持 `claude-opus-4-8[context=1m,effort=high]` 这类 bracket 参数化），API 密钥走 `CURSOR_API_KEY` 注入。
 
 ### 1.3 官方账号
 
-除 API 配置外，Claude Code / Codex / Gemini 支持「**官方账号**」profile：直接用 CLI 自身的订阅账号登录，不需要 API 密钥。
+除 API 配置外，Claude Code / Codex / Gemini / CodeBuddy / Cursor 支持「**官方账号**」profile：直接用 CLI 自身的订阅账号登录，不需要 API 密钥。
 
-- **建 profile**：表单顶部「账号类型」选「官方账号」——无需填 Base URL 与密钥；模型可留空（= 用 CLI 默认模型）。配置列表端点列显示「官方账号」。目前仅 claude-code / codex / gemini 三个 agent 支持
-- **连接**：支持官方账号的 agent 分组内固定有一行「官方账号」状态行（已连接/未连接，只读检测 CLI 的 auth 文件）。点「**连接**」会在内嵌终端开新标签执行登录命令（`claude auth login` / `codex login`，OAuth 会弹浏览器授权）；Gemini 没有登录子命令，标签直接拉起 gemini，在 TUI 里选 **Sign in with Google**。登录完成后回本页点状态行的「刷新」重新检测
-- **断开**：用 CLI 自己的 logout——`claude auth logout`（或 TUI 内 `/logout`）、`codex logout`、gemini TUI 内 `/auth signout`。Ccode 只读检测，不替你删除 auth 文件
-- **启动行为**：官方账号 profile 启动时不注入端点/密钥，并清除同协议残留的 API 密钥环境变量（防止静默覆盖账号登录）；凭证可能存于系统钥匙串或加密存储（不落文件）时状态行会注明可能漏报，以 CLI 自己的 status 命令为准
+- **建 profile**：表单顶部「账号类型」选「官方账号」——无需填 Base URL 与密钥；模型可留空（= 用 CLI 默认模型）。配置列表端点列显示「官方账号」。目前支持 claude-code / codex / gemini / codebuddy / cursor 五个 agent
+- **连接**：支持官方账号的 agent 分组内固定有一行「官方账号」状态行（已连接/未连接，只读检测 CLI 的 auth 文件）。点「**连接**」会在内嵌终端开新标签执行登录命令（`claude auth login` / `codex login` / `cursor-agent login`，OAuth 会弹浏览器授权）；Gemini 没有登录子命令，标签直接拉起 gemini，在 TUI 里选 **Sign in with Google**；CodeBuddy 在 TUI 内 `/login`。登录完成后回本页点状态行的「刷新」重新检测
+- **断开**：用 CLI 自己的 logout——`claude auth logout`（或 TUI 内 `/logout`）、`codex logout`、gemini TUI 内 `/auth signout`、codebuddy TUI 内 `/logout`、`cursor-agent logout`。Ccode 只读检测，不替你删除 auth 文件
+- **启动行为**：官方账号 profile 启动时不注入端点/密钥，并清除同协议残留的 API 密钥环境变量（防止静默覆盖账号登录）；凭证可能存于系统钥匙串或加密存储（不落文件）时状态行会注明可能漏报（Cursor 凭证默认就在 macOS 钥匙串，仅设 `AGENT_CLI_CREDENTIAL_STORE=file` 时才落 `~/.cursor/auth.json`），以 CLI 自己的 status 命令为准
 - **冲突警告**：状态行检测 CLI 自己读取的配置文件（`~/.gemini/.env`、`~/.claude/settings.json` 的 env 块）——其中残留的 API 密钥会覆盖官方账号登录并产生 API 计费，命中时状态行显示黄色「N 项配置冲突」，悬停查看具体变量名，需自行编辑对应文件删除
 
 ### 1.4 两种生效方式
@@ -209,7 +209,7 @@ WebGL 渲染（失败时自动回退）、清瘦字形（400/600 字重、行高
 技能 = 含 `SKILL.md` 的目录（开放标准）。先入库，再分发到各 CLI。
 
 - **分类分组**：可折叠分类头（▸/▾）；修改分类在行内「⋯ → 设置分类」内联输入（回车保存，留空归未分类）
-- **应用开关**：每行六个 agent 圆点开关（claude/codex/gemini/qwen/oc/kimi），绿点=已分发到对应 CLI 技能目录（symlink 优先 copy 兜底），灰点=未分发，点击即切换；关闭只清理由 Ccode 分发的。形态不再用药丸文本标注，悬浮在开关上显示完整说明（symlink / copy，copy 带漂移检测）
+- **应用开关**：每行八个 agent 圆点开关（claude/codex/gemini/qwen/oc/kimi/cb/cur），绿点=已分发到对应 CLI 技能目录（symlink 优先 copy 兜底；cursor 未验证 CLI 是否真读技能目录，固定 copy），灰点=未分发，点击即切换；关闭只清理由 Ccode 分发的。形态不再用药丸文本标注，悬浮在开关上显示完整说明（symlink / copy，copy 带漂移检测）
 - **副本漂移**：copy 副本与库不一致时，技能名旁显示黄点（悬浮列出漂移的 agent），行内「⋯ → 重新分发副本」把库里的最新版本重新同步过去
 - **导入**：本地目录 / ZIP / GitHub 仓库（`owner/repo` 或完整网址，可另填分支/子目录，预设 anthropics/skills）/「发现未纳管」（页面顶部 ⋯，扫描各 CLI 目录收编）。结果完整分列**新增、覆盖更新、跳过、冲突**四类并逐类列出技能名，不用「已导入 0 个」掩盖冲突；冲突可批量跳过、按右栏名称**全部另存为**、或**备份并覆盖**（覆盖前先备份旧库目录）。ZIP 先在临时目录完整校验再入库，元数据写入失败会回滚库目录
 - **新建 / 编辑**：顶部「+ 新建技能」直接把自己的工作方法写成技能（名称即目录名、描述一句话、正文即 SKILL.md 主体，frontmatter 自动生成）；行内「⋯ → 编辑内容」修改描述与正文，保存前自动备份当前版本（保留最近 5 份），SKILL.md 之外的辅助文件不受影响；重名会被拒绝并提示改用编辑
@@ -268,7 +268,7 @@ A：不是真损坏——未签名应用从网络下载会带 quarantine 隔离�
 A：中转模型不支持工具调用（实测 zetatechs 部分模型只会文字糊弄）。换真 Claude 系模型或支持工具调用的中转。
 
 **Q：配置保存了但调用报空响应/404？**
-A：Base URL 的 `/v1` 约定：OpenAI 协议（kimi/codex/qwen/opencode）**必须带** `/v1`；Anthropic 协议（claude）**不要带**。建完先点「测试连接」。
+A：Base URL 的 `/v1` 约定：OpenAI 协议（kimi/codex/qwen/opencode）**必须带** `/v1`；Anthropic 协议（claude/codebuddy）**不要带**。建完先点「测试连接」。
 
 **Q：按钮点了没反应？**
 A：macOS WKWebView 不支持 `window.prompt`——需要输入的地方已全部改为内联输入；如仍遇到，把位置报给开发者。

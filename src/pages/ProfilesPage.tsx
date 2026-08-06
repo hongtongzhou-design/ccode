@@ -551,6 +551,8 @@ const OFFICIAL_LOGOUT_HINT: Record<string, string> = {
   "claude-code": "claude auth logout（或 TUI 内 /logout）",
   codex: "codex logout",
   gemini: "TUI 内 /auth signout",
+  codebuddy: "TUI 内 /logout",
+  cursor: "cursor-agent logout",
 };
 
 function displayHost(baseUrl: string): string {

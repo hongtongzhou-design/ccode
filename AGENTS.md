@@ -6,14 +6,14 @@
 
 ## 项目简介
 
-Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）——底层是六个 Agent CLI 的统一控制台
+Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）——底层是八个 Agent CLI 的统一控制台
 （启动器 + 配置中心 + 会话监控台），表面是科研流水线（读文献→整数据→做图→写论文）：
 AI 负责干活，Ccode 负责管活，人负责拍板。
-为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code 管理多套 API 配置（端点/密钥/模型），
+为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI 管理多套 API 配置（端点/密钥/模型），
 内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览。
 
 **设计文档即规格**：改架构/适配逻辑前先读 `docs/architecture.md`（总体设计）和
-`docs/agent-integration-matrix.md`（六个 CLI 的 env/配置/会话格式，源码级调研结论，勿凭印象写 env 变量名）。
+`docs/agent-integration-matrix.md`（八个 CLI 的 env/配置/会话格式，源码级调研结论，勿凭印象写 env 变量名）。
 
 **参考实现（长期有效）**：`.reference/` 下有三个开源项目的浅克隆，实现新功能前先查它们有没有成熟方案可借鉴：
 
@@ -25,7 +25,7 @@ AI 负责干活，Ccode 负责管活，人负责拍板。
 
 **已确认的产品决策**（用户拍板，勿擅自更改）：
 
-- 应用名 **Ccode**；MVP 六个 agent 全部支持
+- 应用名 **Ccode**；MVP 六个 agent 全部支持（此后接入第七个 CodeBuddy Code、第八个 Cursor CLI，见 matrix §7/§8）
 - 配置切换**双模式**：默认启动注入环境变量（零污染），另提供「设为全局默认」（写配置文件，先备份）
 - 终端为内嵌形态，且**与结构化会话视图联动**（同一会话双栏观看，P2 实现）
 - 项目列表**从各 agent 历史会话自动聚合并分类**，辅以手动添加（P2 实现）
@@ -67,7 +67,7 @@ npm run tauri build    # 打包
 ## 代码结构
 
 ```
-docs/                        # 架构方案 + 六 CLI 适配参考（规格）
+docs/                        # 架构方案 + 八 CLI 适配参考（规格）
 src/                         # 前端 React + TS + Tailwind v4（无 tailwind.config，vite 插件接入）
   pages/                     # 七个页面：配置 ⇄ / 工作区 ⛁ / 终端 ⌨ / 对话 ◔ / 技能 ✦ / 统计 ◫ / 设置 ⛭
   components/                # 共享组件：评审覆盖层 WorkspaceReviewView、流水线编辑器 PipelineEditor、
@@ -93,8 +93,8 @@ src-tauri/src/
   projects.rs                # 项目档案卡（§11.3）：.ccode/project.toml 读写、项目注册、模板写回、资源登记/发现、
                              # 一键开步（commit_project_bootstrap + TASK.md 落盘 + .git/info/exclude）、append_workspace_inbox
   pty.rs                     # PtyManager：spawn_tracked 公共拉起逻辑，agent/shell 复用
-  sessions.rs                # 会话浏览：扫描/解析全部六个 agent 会话（含 Codex .zst、OpenCode SQLite/legacy JSON）、app.db session_meta、pin 快照、用户发起的删除、注意力状态分类（session_tail_state）、流水线步骤名映射（RX3a）
-  skills.rs                  # 技能库（§6.13）：SSOT 库 + 六 CLI symlink/copy 分发、四路导入（目录/ZIP/GitHub/发现）、ZIP 导出、卸载备份、copy 漂移检测与 resync、新建/编辑（create_skill/update_skill_content，覆盖前备份）
+  sessions.rs                # 会话浏览：扫描/解析全部八个 agent 会话（含 Codex .zst、OpenCode SQLite/legacy JSON）、app.db session_meta、pin 快照、用户发起的删除、注意力状态分类（session_tail_state）、流水线步骤名映射（RX3a）
+  skills.rs                  # 技能库（§6.13）：SSOT 库 + 八 CLI symlink/copy 分发（cursor 固定 copy）、四路导入（目录/ZIP/GitHub/发现）、ZIP 导出、卸载备份、copy 漂移检测与 resync、新建/编辑（create_skill/update_skill_content，覆盖前备份）
   usage.rs                   # 用量统计（§6.11）：六 agent usage 事件提取、usage_daily 按天聚合、任务成本按工作区归因、官方账号「订阅」口径、内置定价表 + pricing.json 覆盖
   pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
   settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/brew 镜像/主题/OS 通知，get/update 两个 command
@@ -130,7 +130,7 @@ src-tauri/src/
   「控制 System Events」自动化授权一次）。
 - **会话文本出站前必须在 Rust 层脱敏**：标题/自定义标题/摘要、结构化回放、AI 摘要响应、
   Markdown 导出均不得把已保存的完整密钥或常见密钥前缀送到 React；脱敏只作用于 DTO/导出副本，
-  不得回写六个 CLI 的会话源文件。前端遮盖不能作为安全边界。
+  不得回写八个 CLI 的会话源文件。前端遮盖不能作为安全边界。
 - **Profile 的 extra_env 排在 adapter 内置 env 之后注入**，供用户覆盖内置值（CommandBuilder 后者生效）。
 - **终端行为**（用户明确要求）：
   - 终端配色使用 VS Code Dark+ 风格调色板，集中在 `TerminalPage.tsx` 的 `theme` 一处，换主题只改这里；
@@ -202,7 +202,7 @@ src-tauri/src/
   staging，元数据保存失败回滚。GitHub 来源保存 repo/ref/subdir/revision，更新检测只提示，重新导入仍走冲突确认。
   新建/编辑走 `create_skill`/`update_skill_content`：重名拒绝并引导改用「编辑内容」；编辑经临时目录走既有覆盖路径
   （覆盖前备份、辅助文件保留、source/repo 不改写）；◈ 优化开终端让 Agent 直改库文件，备份兜底仍靠保存/覆盖路径。
-- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：「设为全局默认」（写前必须备份）、会话删除（delete_session/delete_project_sessions，canonicalize 根校验之上再限定**已知会话数据子目录 + 会话后缀白名单**，同根的 auth.json/settings.json 等一律拒绝；OpenCode 走事务删库行且 db 路径必须等于已知 opencode.db；Codex resume 链删除连带成员文件）、工作树文件删除（限定树当前根目录 + 重要路径黑名单兜底：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单判断必须 canonicalize 双校验，堵符号链接绕过）。
+- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：「设为全局默认」（写前必须备份）、会话删除（delete_session/delete_project_sessions，canonicalize 根校验之上再限定**已知会话数据子目录 + 会话后缀白名单**，同根的 auth.json/settings.json 等一律拒绝；**Cursor 因 ~/.cursor 与 IDE 共享，不走目录级白名单**，由 `cursor_deletable` 精确限定 `projects/*/agent-transcripts/**/*.jsonl`；OpenCode 走事务删库行且 db 路径必须等于已知 opencode.db；Codex resume 链删除连带成员文件）、工作树文件删除（限定树当前根目录 + 重要路径黑名单兜底：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单判断必须 canonicalize 双校验，堵符号链接绕过）。
 - **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录），AI 无头调用 `-s read-only`；用户可用 extra_env/参数覆盖。
 - **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底（macOS 用户目录 `~/.npm-global/bin`/`~/.local/bin`/`~/bin`/`~/.kimi-code/bin` **先于** `/opt/homebrew/bin`——与用户交互终端的 PATH 解析习惯一致，防止检测到系统目录里的同名旧副本；Linux `~/.local/bin`，Windows `%LOCALAPPDATA%\Programs`/`%APPDATA%\npm`）——打包版 GUI 短 PATH 下检测/启动/更新/安装不再失灵；新增 CLI/工具调用点一律用它，禁直接 `which::which` 或裸名 spawn。
 - **npm 更新用与目标二进制同目录的 npm（`updater::npm_for`）**：同机多份 node/npm 时用错 npm 会把包装进另一个 prefix、目标副本不变；brew 安装的 CLI 一律走 `brew upgrade`（opencode 自更新是交互 TUI，行输入无法应答）。

@@ -1,7 +1,8 @@
-# 六个 CLI Agent 适配参考（调研蒸馏版）
+# 八个 CLI Agent 适配参考（调研蒸馏版）
 
 > 供实现 AgentAdapter 时查阅。来源：2026-07-30 对官方文档与源码的调研（多数核到源码行号）。
 > 2026-08-05 补充核实各供应商 Anthropic/OpenAI 兼容端点（见 §1 附注），来源均为官方文档页面。
+> 2026-08-06 新增 §7 CodeBuddy Code（v2.132.0 实机验证，含真实会话样本与 product.json 核实）。
 > 标记「易漂移」的均为各 CLI 内部格式，解析必须防御式（跳过未知类型、容忍缺字段、容忍末行截断）。
 
 ## 1. Claude Code
@@ -86,10 +87,38 @@
 
 **兼容端点（2026-08-05 核实）**：`KIMI_MODEL_PROVIDER_TYPE=openai` 可接任意 OpenAI 兼容端点（如智谱 `https://open.bigmodel.cn/api/paas/v4`、DeepSeek `https://api.deepseek.com/v1`）；`=anthropic` 理论上可接 §1 附注的 Anthropic 兼容端点，未实测。
 
+## 7. CodeBuddy Code（v2.132.0 实机验证）
+
+| 项 | 值 |
+|---|---|
+| 二进制 / 检测 | `codebuddy`（别名 `cbc`，npm 包 `@tencent-ai/codebuddy-code`）；`codebuddy --version` |
+| 注入 env | **`CODEBUDDY_API_KEY` / `CODEBUDDY_BASE_URL` / `CODEBUDDY_MODEL`**（`ANTHROPIC_*` 无效）；协议 Anthropic 兼容（官方 docs 有 DeepSeek 对接示例） |
+| 官方端点 | 国际站 `https://www.codebuddy.ai`（product.json `endpoint`，默认）/ 中国站 `https://copilot.tencent.com`（`officialEndpoints` 同源核实） |
+| 全局配置 | `~/.codebuddy/settings.json`（env 块，同 Claude 形态） |
+| 会话存储 | `~/.codebuddy/projects/<slug>/<uuid>.jsonl`，slug = 项目路径 `/`→`-`（Claude 同款规则，有损不解码；项目归属读行内 `cwd`，兜底目录名） |
+| 会话格式 | `{"type":"message","role":"user","content":[{"type":"input_text","text":...}],"sessionId":...,"cwd":...,"timestamp":<毫秒 epoch>}`；assistant 块为 `output_text`；`file-history-snapshot` 等事件行跳过。**与 Claude schema 不同构，独立解析器**；usage/工具调用字段未实证（防御式跳过） |
+| 关键启动参数 | 交互初始 prompt = 位置参数（`codebuddy "<prompt>"`）；`-p` 无头；`-r|--resume [sessionId]` 按 ID 恢复（`-c` 续最近）；`--session-id <uuid>` 固定会话文件名 |
+| 官方账号 | TUI 内 `/login`（浏览器 OAuth，分国际/中国站）；凭证 `~/.codebuddy/.credentials.json`。**env 优先压账号**（实测 401 提示），官方账号拉起必须 `env_remove CODEBUDDY_API_KEY`（连同 `CODEBUDDY_AUTH_TOKEN`） |
+| 技能 | `~/.codebuddy/skills/<name>/SKILL.md`（frontmatter 与库格式兼容） |
+| 安装 / 更新 | npm `@tencent-ai/codebuddy-code`；自更新 `codebuddy update`（非交互，可走行输入渠道） |
+
+## 8. Cursor CLI（2026.08.04-aaa8809 实机验证）
+
+| 项 | 值 |
+|---|---|
+| 二进制 / 检测 | **`cursor-agent`**（不要用 `agent`——太通用；cursor-agent 是 legacy symlink 但稳定）；安装到 `~/.local/share/cursor-agent/versions/<ver>/`，symlink 在 `~/.local/bin`（resolve_binary 通用候选已覆盖）；`cursor-agent --version` |
+| 注入 | API key = `--api-key <key>` flag 或 env **`CURSOR_API_KEY`**；端点 = `-e/--endpoint` 或 env **`CURSOR_API_ENDPOINT`**（**Cursor 专有协议，非 OpenAI/Anthropic 兼容——第三方供应商预设无意义**）；模型 = **`--model <name>` flag（非 env）**，支持 `claude-opus-4-8[context=1m,effort=high]` bracket 参数化 |
+| 关键启动参数 | 交互初始 prompt = argv 末尾位置参数；非交互 `-p/--print` + `--output-format text|json|stream-json`；`--resume <uuid>` 按 ID 恢复（必须带 id，无参会卡 Ink TUI）；`--continue` 续最近 |
+| 会话存储 | `~/.cursor/projects/<编码cwd>/agent-transcripts/<uuid>/<uuid>.jsonl`（目录名=文件名=session id；cwd 编码=分隔符→`-`，有损不解码）。**`agent ls` 是 Ink TUI 非 TTY 会崩，会话发现只能文件扫描** |
+| 会话格式 | JSONL 带 type 字段，源码枚举：`user_message`/`tool_call`/`tool_result`/`turn_ended`/`turn_id`/`message_id` 等（**完整字段样本未验证——防御式解析，未知 type 跳过**） |
+| 官方账号 | `cursor-agent login`（浏览器 OAuth）；凭证**默认 macOS 钥匙串**，设 `AGENT_CLI_CREDENTIAL_STORE=file` 时落 `~/.cursor/auth.json`（检测需双通道：auth.json + 钥匙串只读查询）；官方账号拉起 `env_remove CURSOR_API_KEY` |
+| 技能 | `~/.cursor/skills-cursor/`（**未验证 CLI 是否真读，分发走 copy 模式**）；`~/.cursor` 与 IDE 共享——**会话删除白名单必须限定 `projects/*/agent-transcripts/**/*.jsonl`** |
+| 安装 / 更新 | 官方安装脚本（`curl -fsSL https://cursor.com/install | bash`）；自更新 `cursor-agent update`（非交互）；无 brew/npm 官方包。**Windows 安装/数据路径未验证** |
+
 ## 跨 agent 共性结论
 
 1. **会话格式全是内部格式**——解析层统一防御式策略，并准备「原始 JSON 视图」作为降级。
-2. **项目归属推导六种六样**——在各自 adapter 的 `list_sessions` 里解决，对上层统一暴露 `project_path`。
-3. **注入模式没有统一三件套**——Claude/Gemini/Qwen(openai 协议）/旧 Kimi 有标准 env；Codex 靠 `-c` 参数；OpenCode 靠 `OPENCODE_CONFIG_CONTENT`；新 Kimi 靠 `KIMI_MODEL_*` 合成通道。`launch_plan { env, args }` 抽象覆盖了全部六种情况。
-4. **都有整体搬迁环境变量**（`CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`GEMINI_CLI_HOME`/`QWEN_HOME`/`KIMI_CODE_HOME`/`KIMI_SHARE_DIR`）——可做「完全隔离 profile」的进阶功能，但会连会话历史一起隔离，MVP 不用。
-5. **六家都支持非交互模式 + JSON 事件流输出**——为 P4 的「绕过终端直接驱动 agent」留了路。
+2. **项目归属推导各家各样**——在各自 adapter 的 `list_sessions` 里解决，对上层统一暴露 `project_path`。
+3. **注入模式没有统一三件套**——Claude/Gemini/Qwen(openai 协议）/旧 Kimi/CodeBuddy 有标准 env；Codex 靠 `-c` 参数；OpenCode 靠 `OPENCODE_CONFIG_CONTENT`；新 Kimi 靠 `KIMI_MODEL_*` 合成通道；Cursor 是 env（key/端点）+ flag（模型）混合。`launch_plan { env, args }` 抽象覆盖了全部八种情况。
+4. **前六家都有整体搬迁环境变量**（`CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`GEMINI_CLI_HOME`/`QWEN_HOME`/`KIMI_CODE_HOME`/`KIMI_SHARE_DIR`；CodeBuddy 未核实）——可做「完全隔离 profile」的进阶功能，但会连会话历史一起隔离，MVP 不用。
+5. **都支持非交互模式**——为「绕过终端直接驱动 agent」留了路。

@@ -919,6 +919,22 @@ mod tests {
     }
 
     #[test]
+    fn cursor_without_packaging_manager_falls_back_to_self_update() {
+        // cursor 无 brew/npm 官方包：无论 method 探测成什么，更新都走非交互自更新 cursor-agent update
+        for method in ["self", "unknown", "npm"] {
+            let cmds = update_commands("cursor", method, "/Users/x/.local/bin/cursor-agent");
+            assert_eq!(cmds.len(), 1, "method={method} 应只有自更新一个候选");
+            assert_eq!(cmds[0].method, "self");
+            assert_eq!(cmds[0].args, vec!["update"]);
+        }
+        // 非交互自更新不得路由到完整终端（interactive_tui=false）
+        assert_eq!(
+            interactive_self_update("cursor", "self", "/Users/x/.local/bin/cursor-agent"),
+            None
+        );
+    }
+
+    #[test]
     fn interactive_self_update_routes_tui_self_update_only() {
         // kimi 自装（~/.kimi-code/bin）：唯一更新渠道是交互 TUI 自更新，给出终端预填命令
         assert_eq!(

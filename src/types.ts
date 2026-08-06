@@ -110,7 +110,7 @@ export interface SessionMetaDto {
   handoffFromSession: string | null;
 }
 
-/** 接力目标（handoff_targets）：六 CLI 的安装与启动注入支持情况 */
+/** 接力目标（handoff_targets）：各 CLI 的安装与启动注入支持情况 */
 export interface HandoffTargetDto {
   id: string;
   installed: boolean;
@@ -446,6 +446,8 @@ export const AGENTS = [
   { id: "qwen", label: "Qwen Code", binary: "qwen" },
   { id: "opencode", label: "OpenCode", binary: "opencode" },
   { id: "kimi", label: "Kimi Code", binary: "kimi" },
+  { id: "codebuddy", label: "CodeBuddy", binary: "codebuddy" },
+  { id: "cursor", label: "Cursor", binary: "cursor-agent" },
 ] as const;
 
 /** 多协议 agent 的协议选项与默认值（其余 agent 返回 null，profile 不存协议） */

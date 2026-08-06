@@ -24,7 +24,7 @@ pub struct AgentSpec {
     pub launch: LaunchSpec,
     /// 交互模式初始 prompt 注入方式（一键开步的首条指令）
     pub prompt_inject: PromptInject,
-    /// 支持 --session-id 固定新会话文件名（pty 启动即锁定会话关联，matrix：claude-code、qwen）
+    /// 支持 --session-id 固定新会话文件名（pty 启动即锁定会话关联，matrix：claude-code、qwen、codebuddy）
     pub fixed_session_id: bool,
     /// 按 ID 恢复会话的参数格式
     pub resume: ResumeSpec,
@@ -124,6 +124,13 @@ pub enum SpecialLaunch {
     },
     /// kimi：新旧两个产品共用 kimi 命令，新版 KIMI_MODEL_* 合成通道与旧版 KIMI_API_KEY 双写
     KimiDualChannel,
+    /// cursor：密钥/端点走 env，模型没有对应 env、只能走 --model flag（支持 bracket 参数化，
+    /// 如 claude-opus-4-8[context=1m,effort=high]）；端点是 Cursor 专有协议，非 OpenAI/Anthropic 兼容
+    CursorFlags {
+        key_env: &'static str,
+        endpoint_env: &'static str,
+        model_flag: &'static str,
+    },
 }
 
 /// 按 ID 恢复会话的参数；args 里 {session} 占位会话 ID
@@ -421,6 +428,88 @@ static AGENT_SPECS: &[AgentSpec] = &[
         },
         official_account: None,
     },
+    AgentSpec {
+        id: "codebuddy",
+        display_name: "CodeBuddy",
+        binary: "codebuddy",
+        version_args: &["--version"],
+        protocols: &[],
+        // v2.132.0 实测：只认 CODEBUDDY_* 环境变量（ANTHROPIC_* 无效），协议 Anthropic 兼容
+        launch: LaunchSpec::Env(EnvInject {
+            base_url: Some("CODEBUDDY_BASE_URL"),
+            key: Some("CODEBUDDY_API_KEY"),
+            model: Some("CODEBUDDY_MODEL"),
+            fixed_env: &[],
+            fixed_args: &[],
+        }),
+        prompt_inject: PromptInject::Positional,
+        // --session-id <uuid> 实测支持固定会话文件名
+        fixed_session_id: true,
+        // -r|--resume [sessionId] 可带 id；-c 是续最近（不带 id 的场景前端不用）
+        resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
+        skills_dir: &[".codebuddy", "skills"],
+        packaging: PackagingSpec {
+            npm_install: Some("@tencent-ai/codebuddy-code"),
+            npm_update: Some("@tencent-ai/codebuddy-code"),
+            // codebuddy update 是非交互自更新
+            self_update: Some(&["update"]),
+            update_fallback: &[UpdateChannel::SelfUpdate, UpdateChannel::Npm],
+            ..NO_PACKAGING
+        },
+        // TUI 内 /login 走浏览器 OAuth（分国际站/中国站）；实测 env 里残留 CODEBUDDY_API_KEY
+        // 会压过账号登录（401 提示），官方账号拉起必须 env_remove
+        official_account: Some(OfficialAccountSpec {
+            login_cmd: &[],
+            auth_file_paths: &[".codebuddy/.credentials.json"],
+            env_purge_list: &["CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"],
+            conflict_probes: &[ConflictProbe {
+                file: ".codebuddy/settings.json",
+                keys: &["CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN", "CODEBUDDY_BASE_URL"],
+                note: "settings.json 的 env 块会覆盖官方账号登录，产生 API 计费",
+            }],
+            detection_note: Some("登录走浏览器 OAuth（国际站 codebuddy.ai / 中国站 copilot.tencent.com），以 TUI 内 /login 后的状态为准"),
+        }),
+    },
+    AgentSpec {
+        id: "cursor",
+        display_name: "Cursor",
+        // 不用 `agent`（太通用）；cursor-agent 是 legacy symlink 但稳定，
+        // symlink 在 ~/.local/bin（resolve_binary 通用候选目录已覆盖）
+        binary: "cursor-agent",
+        version_args: &["--version"],
+        // Cursor 专有协议，无 openai/anthropic 协议概念（第三方供应商预设无意义）
+        protocols: &[],
+        launch: LaunchSpec::Special(SpecialLaunch::CursorFlags {
+            key_env: "CURSOR_API_KEY",
+            endpoint_env: "CURSOR_API_ENDPOINT",
+            model_flag: "--model",
+        }),
+        // 初始 prompt 是 argv 末尾位置参数；非交互模式为 -p/--print + --output-format
+        prompt_inject: PromptInject::Positional,
+        fixed_session_id: false,
+        // --resume <uuid> 必须带 id（无参会卡 Ink TUI）；--continue 续最近（前端不用）
+        resume: ResumeSpec { prepend: false, args: &["--resume", "{session}"] },
+        // 未验证 CLI 是否真读该目录，分发保守走 copy 模式（skills.rs allow_symlink_for）
+        skills_dir: &[".cursor", "skills-cursor"],
+        packaging: PackagingSpec {
+            // 无 brew/npm 官方包：官方安装脚本装到 ~/.local/share/cursor-agent/versions/<ver>/
+            install_script: Some("curl -fsSL https://cursor.com/install | bash"),
+            // cursor-agent update 是非交互自更新
+            self_update: Some(&["update"]),
+            update_fallback: &[UpdateChannel::SelfUpdate],
+            ..NO_PACKAGING
+        },
+        // login 走浏览器 OAuth；凭证默认 macOS 钥匙串，
+        // 仅 AGENT_CLI_CREDENTIAL_STORE=file 时落 ~/.cursor/auth.json（双通道检测说明见 detection_note）
+        official_account: Some(OfficialAccountSpec {
+            login_cmd: &["login"],
+            auth_file_paths: &[".cursor/auth.json"],
+            env_purge_list: &["CURSOR_API_KEY"],
+            // ~/.cursor 与 IDE 共享且 CLI 配置形态未核实，保守不探测配置文件冲突
+            conflict_probes: &[],
+            detection_note: Some("凭证默认存 macOS 钥匙串（仅设 AGENT_CLI_CREDENTIAL_STORE=file 时才落 auth.json），文件检测可能漏报，以 cursor-agent 实际登录态为准"),
+        }),
+    },
 ];
 
 /// 按 id 查规格
@@ -491,9 +580,18 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
 mod tests {
     use super::*;
 
-    const KNOWN_IDS: [&str; 6] = ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi"];
+    const KNOWN_IDS: [&str; 8] = [
+        "claude-code",
+        "codex",
+        "gemini",
+        "qwen",
+        "opencode",
+        "kimi",
+        "codebuddy",
+        "cursor",
+    ];
 
-    /// 注册表完整性：六个既有 agent 全部有规格，必填字段非空
+    /// 注册表完整性：八个既有 agent 全部有规格，必填字段非空
     #[test]
     fn registry_covers_all_known_agents_with_required_fields() {
         assert_eq!(all_agent_specs().len(), KNOWN_IDS.len());
@@ -584,8 +682,8 @@ mod tests {
         }
         assert!(agent_spec("kimi").unwrap().packaging.interactive_tui);
         assert!(agent_spec("opencode").unwrap().packaging.interactive_tui);
-        // claude update 是普通非交互命令，其余 agent 无自更新渠道，均不得误标
-        for id in ["claude-code", "codex", "gemini", "qwen"] {
+        // claude/codebuddy/cursor 的自更新是普通非交互命令，其余 agent 无自更新渠道，均不得误标
+        for id in ["claude-code", "codex", "gemini", "qwen", "codebuddy", "cursor"] {
             assert!(
                 !agent_spec(id).unwrap().packaging.interactive_tui,
                 "{id} 不应标 interactive_tui"

@@ -59,6 +59,7 @@ fn target_specs(agent: &str) -> Vec<(&'static str, &'static str)> {
         "gemini" => vec![(".env", ".gemini/.env")],
         "qwen" => vec![("settings.json", ".qwen/settings.json")],
         "opencode" => vec![("opencode.json", ".config/opencode/opencode.json")],
+        "codebuddy" => vec![("settings.json", ".codebuddy/settings.json")],
         "kimi" => vec![
             ("config.toml", ".kimi-code/config.toml"),
             ("legacy-config.toml", ".kimi/config.toml"),
@@ -348,6 +349,27 @@ fn patch_kimi_config(
     Ok(doc.to_string())
 }
 
+/// CodeBuddy：settings.json 的 env 块写 CODEBUDDY_* 三件套（无模型槽位机制，结构最简单）
+fn patch_codebuddy_settings(
+    existing: Option<&str>,
+    base_url: Option<&str>,
+    key: Option<&str>,
+    model: Option<&str>,
+) -> Result<String, String> {
+    let mut v = parse_json_doc(existing)?;
+    let env = ensure_obj(&mut v, &["env"])?;
+    if let Some(u) = base_url {
+        env.insert("CODEBUDDY_BASE_URL".into(), json!(u));
+    }
+    if let Some(k) = key {
+        env.insert("CODEBUDDY_API_KEY".into(), json!(k));
+    }
+    if let Some(m) = model {
+        env.insert("CODEBUDDY_MODEL".into(), json!(m));
+    }
+    to_pretty(&v)
+}
+
 // ===== .env 补丁（gemini） =====
 
 fn patch_env_file(existing: Option<&str>, pairs: &[(String, String)]) -> Result<String, String> {
@@ -457,6 +479,16 @@ fn plan_writes(
             let path = home.join(".config/opencode/opencode.json");
             let content = patch_opencode_config(read_existing(&path).as_deref(), provider, model)?;
             push("opencode.json", path, content);
+        }
+        "codebuddy" => {
+            let path = home.join(".codebuddy/settings.json");
+            let content = patch_codebuddy_settings(
+                read_existing(&path).as_deref(),
+                base_url,
+                key,
+                model,
+            )?;
+            push("settings.json", path, content);
         }
         "kimi" => {
             // 两个变体共用 kimi 命令：存在的变体目录都写；都不存在时写到新版目录
@@ -1201,6 +1233,29 @@ mod tests {
         assert_eq!(v["model"], "ccode/m1");
         assert_eq!(v["autoupdate"], false);
         assert_eq!(v["theme"], "dark");
+    }
+
+    #[test]
+    fn codebuddy_patch_writes_env_block_and_preserves_rest() {
+        let existing = r#"{"env": {"OTHER": "1"}, "theme": "dark"}"#;
+        let out = patch_codebuddy_settings(
+            Some(existing),
+            Some("https://api.deepseek.com/anthropic"),
+            Some("sk-secret"),
+            Some("deepseek-v3-2-volc"),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["env"]["CODEBUDDY_BASE_URL"], "https://api.deepseek.com/anthropic");
+        assert_eq!(v["env"]["CODEBUDDY_API_KEY"], "sk-secret");
+        assert_eq!(v["env"]["CODEBUDDY_MODEL"], "deepseek-v3-2-volc");
+        assert_eq!(v["env"]["OTHER"], "1", "无关 env 必须保留");
+        assert_eq!(v["theme"], "dark", "无关字段必须保留");
+        // 缺省（文件不存在）：只创建 env 块
+        let out = patch_codebuddy_settings(None, None, Some("sk-secret"), None).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["env"]["CODEBUDDY_API_KEY"], "sk-secret");
+        assert!(v["env"].get("CODEBUDDY_BASE_URL").is_none());
     }
 
     #[test]

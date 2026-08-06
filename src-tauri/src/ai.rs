@@ -42,6 +42,10 @@ fn headless_args(agent: &str, prompt: &str) -> Vec<String> {
         "codex" => vec!["exec".into(), "--skip-git-repo-check".into(), "-s".into(), "read-only".into(), prompt.into()],
         "gemini" => vec!["-p".into(), prompt.into()],
         "kimi" => vec!["-p".into(), prompt.into()],
+        // codebuddy 位置参数是交互模式；无头必须 -p/--print
+        "codebuddy" => vec!["-p".into(), prompt.into()],
+        // cursor 无头：-p/--print + --output-format text（与 claude 同形）
+        "cursor" => vec!["-p".into(), prompt.into(), "--output-format".into(), "text".into()],
         "opencode" => vec!["run".into(), prompt.into()],
         // qwen 与未知 agent 按位置参数兜底
         _ => vec![prompt.into()],
@@ -525,6 +529,8 @@ mod tests {
         assert_eq!(headless_args("qwen", "你好"), vec!["你好"]);
         assert_eq!(headless_args("kimi", "你好"), vec!["-p", "你好"]);
         assert_eq!(headless_args("opencode", "你好"), vec!["run", "你好"]);
+        assert_eq!(headless_args("codebuddy", "你好"), vec!["-p", "你好"]);
+        assert_eq!(headless_args("cursor", "你好"), vec!["-p", "你好", "--output-format", "text"]);
     }
 
     #[test]
