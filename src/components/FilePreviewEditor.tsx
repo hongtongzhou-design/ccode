@@ -1,9 +1,10 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import { marked } from "marked";
+import SelectionFloatBar from "./SelectionFloatBar";
 
 // 只用基础 editor worker（不需要语言服务的 intellisense）
 self.MonacoEnvironment = {
@@ -51,8 +52,21 @@ function isMarkdownPath(path: string): boolean {
  * 渲染源是 read_file_preview 根约束内的用户本地文件（可信内容），
  * 因此不引入 sanitize 重库；仅关闭与本场景无关的项，GFM 支持表格等。
  * v1 代码块不做语法高亮（素色块），样式全部走 App.css 的 .md-body 主题令牌。
+ * 选中文字出现浮动按钮「◈ 讨论/改写此段」（与 PDF 问 AI 共用 SelectionFloatBar），
+ * 点击把选段 + 出处交给调用方写入活跃终端输入（不自动发送）；沉浸阅读覆盖层同款生效。
  */
-function MarkdownView({ text, large }: { text: string; large?: boolean }) {
+function MarkdownView({
+  text,
+  large,
+  fileName,
+  onDiscuss,
+}: {
+  text: string;
+  large?: boolean;
+  fileName: string;
+  /** 返回 null 表示已写入；返回字符串为要给用户看的提示（如无运行中 agent） */
+  onDiscuss?: (text: string, fileName: string) => string | null;
+}) {
   const html = useMemo(
     // ⚠️（U+26A0+U+FE0F）在 WKWebView 里渲染成黄色 Apple Color Emoji，
     // 与沉浸冷黑主题冲突（笔记里大量「⚠️ 仅摘要」提示）；换成文本呈现选择符
@@ -66,14 +80,66 @@ function MarkdownView({ text, large }: { text: string; large?: boolean }) {
       }),
     [text],
   );
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [hint, setHint] = useState<string | null>(null);
+  const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showHint = useCallback((msg: string) => {
+    setHint(msg);
+    if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    hintTimerRef.current = setTimeout(() => setHint(null), 3000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    },
+    [],
+  );
+
+  /** 选段 → 活跃终端 agent 输入（不自动发送）；成功写入后清选区，浮动条随 selectionchange 收起 */
+  function discuss() {
+    const selected = window.getSelection()?.toString().trim() ?? "";
+    if (!selected || !onDiscuss) return;
+    const err = onDiscuss(selected, fileName);
+    showHint(err ?? "已写入活跃终端的输入框，接着输入你的意见后自行发送");
+    if (!err) window.getSelection()?.removeAllRanges();
+  }
+
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <div
-        className={`md-body${large ? " md-body-lg" : ""} ${
-          large ? "mx-auto max-w-3xl px-8 py-10" : "px-5 py-4"
-        }`}
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
+    <div className="flex min-h-0 flex-1 flex-col">
+      {hint && (
+        <p
+          className="shrink-0 truncate bg-inset px-3 py-1 text-xs text-l2"
+          title={hint}
+        >
+          {hint}
+        </p>
+      )}
+      <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-y-auto">
+        <div
+          className={`md-body${large ? " md-body-lg" : ""} ${
+            large ? "mx-auto max-w-3xl px-8 py-10" : "px-5 py-4"
+          }`}
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+        {onDiscuss && (
+          <SelectionFloatBar
+            containerRef={scrollRef}
+            withinSelector=".md-body"
+            reserveWidth={150}
+          >
+            <button
+              type="button"
+              // preventDefault 保住选区，click 时才读文字
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={discuss}
+              className="rounded border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
+            >
+              ◈ 讨论/改写此段
+            </button>
+          </SelectionFloatBar>
+        )}
+      </div>
     </div>
   );
 }
@@ -87,10 +153,13 @@ function FilePreviewEditor({
   path,
   root,
   onDirtyChange,
+  onDiscuss,
 }: {
   path: string;
   root: string;
   onDirtyChange?: (dirty: boolean) => void;
+  /** md 阅读视图选段「◈ 讨论/改写此段」：写入活跃终端输入；返回 null 已写入，否则为提示 */
+  onDiscuss?: (text: string, fileName: string) => string | null;
 }) {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   // 编辑器宿主节点独立于 React 渲染树：沉浸编辑切换只移动 DOM 节点，
@@ -372,7 +441,13 @@ function FilePreviewEditor({
         </div>
       </div>
       {error && <p className="px-3 py-1 text-xs text-err-text">{error}</p>}
-      {mode === "read" && ready && <MarkdownView text={text!} />}
+      {mode === "read" && ready && (
+        <MarkdownView
+          text={text!}
+          fileName={path.split(/[\\/]/).pop() ?? path}
+          onDiscuss={onDiscuss}
+        />
+      )}
       {/* Monaco 宿主槽位（display:contents 不改变布局）：编辑器 DOM 节点由 effect 挂入，
           阅读态仅隐藏、沉浸编辑时移到覆盖层槽位——未保存改动/光标/undo 全程不丢，
           外部刷新与 dirty 语义沿用现有 watcher 链路不变 */}
@@ -411,7 +486,12 @@ function FilePreviewEditor({
             </button>
           </div>
           {mode === "read" ? (
-            <MarkdownView text={text ?? ""} large />
+            <MarkdownView
+              text={text ?? ""}
+              large
+              fileName={path.split(/[\\/]/).pop() ?? path}
+              onDiscuss={onDiscuss}
+            />
           ) : (
             <div ref={immersiveSlotRef} className="contents" />
           )}

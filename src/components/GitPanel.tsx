@@ -30,6 +30,27 @@ interface GitFileDiffDto {
   truncated: boolean;
 }
 
+/** 逐 hunk 验收 v1：未提交改动的单块补丁（含完整文件头，后端可直接 git apply） */
+interface GitHunkDto {
+  index: number;
+  header: string;
+  patch: string;
+}
+
+interface GitFileHunksDto {
+  hunks: GitHunkDto[];
+  staged: boolean;
+}
+
+/** hunk patch 去掉文件头与 @@ 行，只留展示用内容行 */
+function hunkBodyLines(patch: string): string[] {
+  const lines = patch.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("@@"));
+  const body = at >= 0 ? lines.slice(at + 1) : lines;
+  if (body.length > 0 && body[body.length - 1] === "") body.pop();
+  return body;
+}
+
 const STATUS_STYLE: Record<string, string> = {
   M: "bg-warn text-warn-text",
   A: "bg-ok text-ok-text",
@@ -94,6 +115,10 @@ function GitPanel({
   const [diffDetail, setDiffDetail] = useState<GitFileDiffDto | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
+  // 逐 hunk 验收 v1：展开内容优先拉 hunk（可按块操作）；null = 走只读文本 diff
+  const [hunks, setHunks] = useState<GitHunkDto[] | null>(null);
+  const [hunksStaged, setHunksStaged] = useState(false);
+  const [hunkBusy, setHunkBusy] = useState(false);
   const diffRequestRef = useRef(0);
   // 成功 toast（主题 CTA 绿，右下角浮出 2.5s 自动淡出）；失败仍走 output 红字详情
   const [toast, setToast] = useState<{ text: string; hiding: boolean } | null>(null);
@@ -182,6 +207,8 @@ function GitPanel({
     setSelectedPaths(new Set());
     setDiffPath(null);
     setDiffDetail(null);
+    setHunks(null);
+    setHunksStaged(false);
     setDiffError(null);
     void refresh();
     if (!visible) return;
@@ -295,6 +322,8 @@ function GitPanel({
     diffRequestRef.current += 1;
     setDiffPath(null);
     setDiffDetail(null);
+    setHunks(null);
+    setHunksStaged(false);
     setDiffError(null);
     setDiffLoading(false);
   }, [diffPath, files]);
@@ -308,17 +337,13 @@ function GitPanel({
     });
   }
 
-  async function toggleDiff(file: GitFileDto) {
-    if (diffPath === file.path) {
-      diffRequestRef.current += 1;
-      setDiffPath(null);
-      setDiffDetail(null);
-      setDiffError(null);
-      return;
-    }
+  /** 展开内容加载：未提交文件优先拉 hunk（按块丢弃/暂存）；hunk 不可用或为空时回落只读文本 diff */
+  async function loadExpandedDiff(file: GitFileDto) {
     const request = ++diffRequestRef.current;
     setDiffPath(file.path);
     setDiffDetail(null);
+    setHunks(null);
+    setHunksStaged(false);
     setDiffError(null);
     // 图片文件不走文本 diff，展开区改渲染双栏对比（ImagePairView 自行取数）
     if (isImagePath(file.path)) {
@@ -327,6 +352,25 @@ function GitPanel({
     }
     setDiffLoading(true);
     try {
+      // 只读场景（会话页）不拉 hunk；其余让后端白名单裁决——
+      // 工作区视图里只含已提交改动的文件会被拒绝，自然回落只读累计 diff
+      if (!readOnly) {
+        try {
+          const dto = await invoke<GitFileHunksDto>("git_file_hunks", {
+            cwd,
+            path: file.path,
+          });
+          if (request !== diffRequestRef.current) return;
+          setHunksStaged(dto.staged);
+          if (dto.hunks.length > 0) {
+            setHunks(dto.hunks);
+            return;
+          }
+          // hunks 为空（如改动已全部暂存）→ 走只读文本展示
+        } catch {
+          // 二进制/过大/非 UTF-8/不在未提交清单 → 回落只读文本
+        }
+      }
       const detail = inWs
         ? {
             text: await invoke<string>("workspace_file_diff", {
@@ -346,6 +390,62 @@ function GitPanel({
     } finally {
       if (request === diffRequestRef.current) setDiffLoading(false);
     }
+  }
+
+  /** 按块操作：暂存（git apply --cached）/ 丢弃（git apply -R 工作树）。
+   *  成功后一律重新拉取 hunks 与 status，不保留旧 hunk 索引。 */
+  async function applyHunk(hunk: GitHunkDto, mode: "stage" | "discard") {
+    if (!diffPath || hunkBusy) return;
+    if (
+      mode === "discard" &&
+      !window.confirm("丢弃这块改动？不可恢复（除非已提交）")
+    )
+      return;
+    const path = diffPath;
+    setHunkBusy(true);
+    setDiffError(null);
+    try {
+      const s = await invoke<GitStatusDto>("apply_hunk", {
+        cwd,
+        path,
+        patch: hunk.patch,
+        mode,
+      });
+      setStatus(s);
+      showToast(
+        mode === "stage"
+          ? "已暂存这块改动，勾选该文件保存到历史时提交"
+          : "已丢弃这块改动",
+      );
+    } catch (e) {
+      setDiffError(String(e));
+    } finally {
+      setHunkBusy(false);
+      await refresh();
+      // hunk 索引可能已变：展开状态还在就重拉（文件已消失时由剪枝 effect 清理）
+      if (diffPath === path) {
+        const file = files.find((f) => f.path === path) ?? {
+          path,
+          status: "M",
+          additions: null,
+          deletions: null,
+        };
+        await loadExpandedDiff(file);
+      }
+    }
+  }
+
+  async function toggleDiff(file: GitFileDto) {
+    if (diffPath === file.path) {
+      diffRequestRef.current += 1;
+      setDiffPath(null);
+      setDiffDetail(null);
+      setHunks(null);
+      setHunksStaged(false);
+      setDiffError(null);
+      return;
+    }
+    await loadExpandedDiff(file);
   }
 
   function diffLineClass(line: string): string {
@@ -494,10 +594,76 @@ function GitPanel({
                       <ImagePairView cwd={cwd} path={f.path} />
                     ) : diffLoading ? (
                       <div className="p-2"><LoadingRows compact /></div>
+                    ) : hunks && hunks.length > 0 ? (
+                      // 逐 hunk 验收：未暂存改动按块展示，块头右侧「丢弃 / 暂存」
+                      <div>
+                        {diffError && (
+                          <p className="border-b border-hairline px-2 py-1 text-[11px] text-err-text">{diffError}</p>
+                        )}
+                        {hunksStaged && (
+                          <p className="border-b border-hairline px-2 py-1 text-[11px] text-warn-text">
+                            该文件已有部分内容暂存；勾选它「保存到历史」时只提交已暂存的块，下方的块留在工作区
+                          </p>
+                        )}
+                        {hunks.map((h) => {
+                          const body = hunkBodyLines(h.patch);
+                          return (
+                            <div key={`${h.index}:${h.header}`} className="border-b border-hairline/60 last:border-b-0">
+                              <div className="flex items-center gap-1 border-b border-hairline/60 bg-inset px-2 py-0.5">
+                                <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-link" title={h.header}>
+                                  {h.header}
+                                </span>
+                                {!readOnly && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={hunkBusy}
+                                      onClick={() => void applyHunk(h, "discard")}
+                                      title="丢弃这块改动，恢复到暂存区状态（不可恢复，除非已提交）"
+                                      className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-warn-text hover:bg-white/5 disabled:opacity-50"
+                                    >
+                                      丢弃
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={hunkBusy}
+                                      onClick={() => void applyHunk(h, "stage")}
+                                      title="把这块改动放进暂存区；勾选此文件「保存到历史」时只提交已暂存的块"
+                                      className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                                    >
+                                      暂存
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                              <pre className="max-h-60 overflow-auto py-1 font-mono text-[11px] leading-5">
+                                {body.slice(0, DIFF_LINE_CAP).map((line, index) => (
+                                  <span
+                                    key={`${index}:${line.slice(0, 24)}`}
+                                    className={`block min-w-max whitespace-pre px-2 ${diffLineClass(line)}`}
+                                  >
+                                    {line || " "}
+                                  </span>
+                                ))}
+                              </pre>
+                              {body.length > DIFF_LINE_CAP && (
+                                <p className="border-t border-hairline px-2 py-1 text-[11px] text-l4">
+                                  仅渲染前 {DIFF_LINE_CAP} 行（共 {body.length} 行），完整内容见审阅视图
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     ) : diffError ? (
                       <p className="p-2 text-xs text-err-text">{diffError}</p>
                     ) : diffLines ? (
                       <>
+                        {hunksStaged && (
+                          <p className="border-b border-hairline px-2 py-1 text-[11px] text-l3">
+                            改动已全部暂存；勾选后「保存到历史」将提交这些内容
+                          </p>
+                        )}
                         <pre className="max-h-80 overflow-auto py-1 font-mono text-[11px] leading-5">
                           {diffLines.slice(0, DIFF_LINE_CAP).map((line, index) => (
                             <span

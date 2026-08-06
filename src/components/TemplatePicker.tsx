@@ -104,7 +104,7 @@ export default function TemplatePicker({
   }
 
   return (
-    <div className="mt-2 border-t border-hairline pt-2">
+    <div>
       <ul className="space-y-1.5">
         {PIPELINE_TEMPLATES.map((t) => renderRow(t, t.id))}
       </ul>

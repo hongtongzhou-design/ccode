@@ -1787,22 +1787,45 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     [],
   );
 
-  /** PDF 选段「◈ 问 AI」：注入活跃终端标签的 agent 输入（不自动回车，用户检查后发送）。
-      返回 null 表示已写入；返回字符串为预览区要展示的提示。 */
-  const askAiFromPdf = useCallback(
-    (text: string, page: number, fileName: string): string | null => {
+  /** 写入当前活跃终端标签 agent 输入的公共链路（pty_write，不自动回车，用户检查后发送）。
+      PDF 问 AI 与 md 讨论/改写共用；返回 null 表示已写入，返回字符串为预览区要展示的提示。 */
+  const injectToActiveAgent = useCallback(
+    (data: string): string | null => {
       const s = statuses[activeId];
       if (!s?.running || !s.ptyId) {
         return "当前标签没有运行中的 Agent，请先启动再试";
       }
-      // 注入上限保护：选段过长时截断正文，避免把整页灌进输入框
-      const body = text.length > 6000 ? `${text.slice(0, 6000)}…` : text;
-      const brief = text.replace(/\s+/g, " ").slice(0, 60);
-      const data = `> 「${brief}${text.length > 60 ? "…" : ""}」（${fileName}，第 ${page} 页）\n\n${body}`;
       invoke("pty_write", { ptyId: s.ptyId, data }).catch(() => {});
       return null;
     },
     [statuses, activeId],
+  );
+
+  /** PDF 选段「◈ 问 AI」：选段 + 出处格式化后注入活跃终端 */
+  const askAiFromPdf = useCallback(
+    (text: string, page: number, fileName: string): string | null => {
+      // 注入上限保护：选段过长时截断正文，避免把整页灌进输入框
+      const body = text.length > 6000 ? `${text.slice(0, 6000)}…` : text;
+      const brief = text.replace(/\s+/g, " ").slice(0, 60);
+      const data = `> 「${brief}${text.length > 60 ? "…" : ""}」（${fileName}，第 ${page} 页）\n\n${body}`;
+      return injectToActiveAgent(data);
+    },
+    [injectToActiveAgent],
+  );
+
+  /** md 阅读视图选段「◈ 讨论/改写此段」：引用块格式注入，末尾引导行让用户接着补指令 */
+  const discussMdExcerpt = useCallback(
+    (text: string, fileName: string): string | null => {
+      // 注入上限保护：选段超过 4000 字截断
+      const body = text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
+      const quoted = body
+        .split("\n")
+        .map((l) => `> ${l}`)
+        .join("\n");
+      const data = `> 引自《${fileName}》的选段：\n>\n${quoted}\n\n（在这里输入你的意见：讨论、提问或要求改写）`;
+      return injectToActiveAgent(data);
+    },
+    [injectToActiveAgent],
   );
 
   /** 切换文件树根时关闭旧预览；脏文件先确认，且绝不映射新根下的同名文件。 */
@@ -2780,6 +2803,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       path={preview.path}
                       root={preview.root ?? activeCwd}
                       onDirtyChange={setPreviewDirty}
+                      onDiscuss={discussMdExcerpt}
                     />
                   )}
                 </Suspense>

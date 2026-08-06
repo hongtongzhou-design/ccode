@@ -4,6 +4,7 @@ import * as pdfjs from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 // textLayer 的官方样式（选区/定位规则）；随本组件进懒加载 chunk
 import "pdfjs-dist/web/pdf_viewer.css";
+import SelectionFloatBar from "./SelectionFloatBar";
 
 // vite 惯例：worker 走 ?url 资源，不进主包（本组件整体被动态 import）
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -161,7 +162,6 @@ function PdfPreview({
   const [fitScale, setFitScale] = useState(1);
   const [renderKey, setRenderKey] = useState(0);
   const [hint, setHint] = useState<Hint | null>(null);
-  const [askBtn, setAskBtn] = useState<{ x: number; y: number } | null>(null);
   const [organizing, setOrganizing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -178,7 +178,6 @@ function PdfPreview({
     setPageNum(1);
     setPageInput("1");
     setFixedScale(null);
-    setAskBtn(null);
     void (async () => {
       try {
         const dto = await invoke<PdfBytesDto>("read_pdf_bytes", {
@@ -250,40 +249,7 @@ function PdfPreview({
     [],
   );
 
-  // 选区监听：在 PDF 内容区内选中文字 → 跟随选区末端显示「◈ 问 AI」；失选/收起即消失
-  useEffect(() => {
-    const onSelectionChange = () => {
-      const sel = window.getSelection();
-      const scroll = scrollRef.current;
-      if (!sel || sel.isCollapsed || !scroll) {
-        setAskBtn(null);
-        return;
-      }
-      const node = sel.anchorNode;
-      const el =
-        node?.nodeType === Node.ELEMENT_NODE
-          ? (node as Element)
-          : node?.parentElement;
-      if (!el || !scroll.contains(el) || !el.closest("[data-page-num]")) {
-        setAskBtn(null);
-        return;
-      }
-      const range = sel.getRangeAt(0);
-      const r = range.getBoundingClientRect();
-      const sr = scroll.getBoundingClientRect();
-      setAskBtn({
-        // 两个按钮并排的宽度预留约 170px，避免右缘溢出
-        x: Math.max(
-          8,
-          Math.min(r.right - sr.left + scroll.scrollLeft - 72, sr.width - 170),
-        ),
-        y: r.bottom - sr.top + scroll.scrollTop + 6,
-      });
-    };
-    document.addEventListener("selectionchange", onSelectionChange);
-    return () =>
-      document.removeEventListener("selectionchange", onSelectionChange);
-  }, []);
+  // 选区浮动按钮条的监听/定位已抽为共享组件 SelectionFloatBar（md 阅读视图同款复用）
 
   /** 抽取当前选段与所在页码（锚点落在 textLayer 的 data-page-num 节点上） */
   function selectedExcerpt(): { text: string; page: number } | null {
@@ -301,9 +267,9 @@ function PdfPreview({
     return { text, page };
   }
 
+  // 清选区后 selectionchange 会自动收起浮动按钮条，无需手动隐藏
   function clearSelection() {
     window.getSelection()?.removeAllRanges();
-    setAskBtn(null);
   }
 
   function askAi() {
@@ -451,10 +417,12 @@ function PdfPreview({
               />
             ))}
           </div>
-          {askBtn && (onAskAi || onOrganize) && (
-            <div
-              style={{ left: askBtn.x, top: askBtn.y }}
-              className="absolute z-10 flex gap-1"
+          {(onAskAi || onOrganize) && (
+            // 两个按钮并排的宽度预留约 170px，避免右缘溢出
+            <SelectionFloatBar
+              containerRef={scrollRef}
+              withinSelector="[data-page-num]"
+              reserveWidth={170}
             >
               {onAskAi && (
                 <button
@@ -478,7 +446,7 @@ function PdfPreview({
                   {organizing ? "整理中…" : "整理为笔记"}
                 </button>
               )}
-            </div>
+            </SelectionFloatBar>
           )}
         </div>
       )}

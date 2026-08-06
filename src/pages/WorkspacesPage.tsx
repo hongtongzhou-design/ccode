@@ -1050,6 +1050,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
               void openInTerminal(ws, initialPrompt)
             }
             onOpenReview={openReview}
+            onRegisterProject={setAddProjectPath}
             onError={setError}
           >
             {group.list.length === 0 ? (

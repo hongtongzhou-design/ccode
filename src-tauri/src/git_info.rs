@@ -3,9 +3,9 @@
 
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const FILE_DIFF_CAP: usize = 200_000;
 
@@ -357,27 +357,38 @@ fn git_commit_sync(
     let selected = paths
         .map(|paths| validate_selected_paths(&cwd, paths))
         .transpose()?;
-    let add = if let Some(selected) = &selected {
-        let mut args = vec!["--literal-pathspecs".into(), "add".into(), "-A".into(), "--".into()];
-        args.extend(selected.iter().cloned());
-        run_git_owned(&cwd, &args)?
-    } else {
-        run_git(&cwd, &["add", "-A"])?
+    // 勾选文件里含「部分暂存」（暂存区内容 ≠ 工作树内容）时不能用 `commit -- paths`——
+    // 它是工作树语义，会把未暂存的块一起带走，破坏逐 hunk 暂存的粒度；改走临时索引提交
+    let partial = match &selected {
+        Some(sel) => partially_staged_paths(&cwd, sel)?,
+        None => Vec::new(),
     };
-    if !add.status.success() {
-        return Err(output_tail(&add));
-    }
     let commit = if let Some(selected) = &selected {
-        let mut args = vec![
-            "--literal-pathspecs".into(),
-            "commit".into(),
-            "-m".into(),
-            message.into(),
-            "--".into(),
-        ];
-        args.extend(selected.iter().cloned());
-        run_git_owned(&cwd, &args)?
+        if !partial.is_empty() {
+            commit_selected_with_index(&cwd, message, selected, &partial)?
+        } else {
+            let mut args =
+                vec!["--literal-pathspecs".into(), "add".into(), "-A".into(), "--".into()];
+            args.extend(selected.iter().cloned());
+            let add = run_git_owned(&cwd, &args)?;
+            if !add.status.success() {
+                return Err(output_tail(&add));
+            }
+            let mut args = vec![
+                "--literal-pathspecs".into(),
+                "commit".into(),
+                "-m".into(),
+                message.into(),
+                "--".into(),
+            ];
+            args.extend(selected.iter().cloned());
+            run_git_owned(&cwd, &args)?
+        }
     } else {
+        let add = run_git(&cwd, &["add", "-A"])?;
+        if !add.status.success() {
+            return Err(output_tail(&add));
+        }
         run_git(&cwd, &["commit", "-m", message])?
     };
     log.push_str(&output_tail(&commit));
@@ -421,6 +432,177 @@ fn git_commit_sync(
     })
 }
 
+/// 勾选路径中「部分暂存」的子集：已在暂存区有内容、且工作树与暂存区仍有差异。
+/// 整块暂存（工作树 == 暂存区）的不算——按工作树内容提交结果一致，走普通路径即可。
+fn partially_staged_paths(cwd: &str, paths: &[String]) -> Result<Vec<String>, String> {
+    let staged_out = run_git(cwd, &["diff", "--cached", "--name-only"])?;
+    if !staged_out.status.success() {
+        return Err(output_tail(&staged_out));
+    }
+    let staged: HashSet<String> = String::from_utf8_lossy(&staged_out.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    let mut partial = Vec::new();
+    for p in paths {
+        if !staged.contains(p) {
+            continue;
+        }
+        // diff --quiet 退出码 1 = 工作树与暂存区有差异（即只暂存了一部分块）
+        let quiet = run_git(cwd, &["diff", "--quiet", "--", p])?;
+        if !quiet.status.success() {
+            partial.push(p.clone());
+        }
+    }
+    Ok(partial)
+}
+
+/// 含部分暂存文件的选择提交：临时索引从 HEAD 出发组装提交内容——
+/// 普通勾选文件按工作树状态 add；部分暂存文件复制真实索引里的暂存条目——
+/// 然后以临时索引直接 commit（HEAD 前移）。真实索引与工作树全程不动：
+/// 已提交的暂存块随之与 HEAD 相抵，未暂存的块保持未暂存；中途失败不留痕迹。
+fn commit_selected_with_index(
+    cwd: &str,
+    message: &str,
+    paths: &[String],
+    partial: &[String],
+) -> Result<Output, String> {
+    let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
+    let tmp = std::env::temp_dir().join(format!("ccode-index-{}", uuid::Uuid::new_v4()));
+    let index_file = tmp.to_string_lossy().into_owned();
+    let result = (|| {
+        let run = |args: &[&str]| -> Result<Output, String> {
+            Command::new(&git)
+                .arg("-C")
+                .arg(cwd)
+                .env("GIT_INDEX_FILE", &index_file)
+                .args(args)
+                .output()
+                .map_err(|e| format!("执行 git 失败: {e}"))
+        };
+        // 初始提交（无 HEAD）从空索引开始
+        let head = run_git(cwd, &["rev-parse", "--verify", "HEAD"])?;
+        let tree = if head.status.success() {
+            run(&["read-tree", "HEAD"])?
+        } else {
+            run(&["read-tree", "--empty"])?
+        };
+        if !tree.status.success() {
+            return Err(output_tail(&tree));
+        }
+        let partial_set: HashSet<&str> = partial.iter().map(|s| s.as_str()).collect();
+        let fresh: Vec<&String> = paths
+            .iter()
+            .filter(|p| !partial_set.contains(p.as_str()))
+            .collect();
+        if !fresh.is_empty() {
+            let mut args =
+                vec!["--literal-pathspecs".into(), "add".into(), "-A".into(), "--".into()];
+            args.extend(fresh.iter().map(|p| (*p).clone()));
+            let add = Command::new(&git)
+                .arg("-C")
+                .arg(cwd)
+                .env("GIT_INDEX_FILE", &index_file)
+                .args(&args)
+                .output()
+                .map_err(|e| format!("执行 git 失败: {e}"))?;
+            if !add.status.success() {
+                return Err(output_tail(&add));
+            }
+        }
+        for p in partial {
+            // 真实索引的暂存条目复制进临时索引；无条目 = 暂存的删除，从临时索引移除
+            let entries = Command::new(&git)
+                .arg("-C")
+                .arg(cwd)
+                .args(["--literal-pathspecs", "ls-files", "-s", "-z", "--", p])
+                .output()
+                .map_err(|e| format!("执行 git 失败: {e}"))?;
+            if !entries.status.success() {
+                return Err(output_tail(&entries));
+            }
+            // ls-files -s -z 记录形如 "mode sha stage\tpath\0"，转成 --index-info 的 "mode sha\tpath\0"
+            let mut input = Vec::new();
+            for rec in entries.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+                let tab = rec
+                    .iter()
+                    .position(|b| *b == b'\t')
+                    .ok_or("解析暂存条目失败")?;
+                let meta = String::from_utf8_lossy(&rec[..tab]).into_owned();
+                let mut parts = meta.split(' ');
+                let (Some(mode), Some(sha), Some(stage)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    return Err("解析暂存条目失败".into());
+                };
+                if stage != "0" {
+                    return Err(format!("文件存在未解决的冲突，请先在终端解决: {p}"));
+                }
+                input.extend_from_slice(format!("{mode} {sha}\t").as_bytes());
+                input.extend_from_slice(&rec[tab + 1..]);
+                input.push(0);
+            }
+            if input.is_empty() {
+                let rm = run(&["--literal-pathspecs", "rm", "--cached", "--ignore-unmatch", "-q", "--", p])?;
+                if !rm.status.success() {
+                    return Err(output_tail(&rm));
+                }
+            } else {
+                let mut child = Command::new(&git)
+                    .arg("-C")
+                    .arg(cwd)
+                    .env("GIT_INDEX_FILE", &index_file)
+                    .args(["update-index", "-z", "--index-info"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("执行 git 失败: {e}"))?;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin 已接管")
+                    .write_all(&input)
+                    .map_err(|e| format!("写入暂存条目失败: {e}"))?;
+                let out = child
+                    .wait_with_output()
+                    .map_err(|e| format!("执行 git 失败: {e}"))?;
+                if !out.status.success() {
+                    return Err(output_tail(&out));
+                }
+            }
+        }
+        let mut commit = run(&["commit", "-m", message])?;
+        if commit.status.success() {
+            // 真实索引里这些勾选路径仍是旧条目（落后于新 HEAD），status 会出现幻影 MM——
+            // 按路径把真实索引同步回 HEAD（不碰工作树、不碰未勾选文件的暂存内容）
+            let mut args = vec![
+                "--literal-pathspecs".to_string(),
+                "reset".into(),
+                "-q".into(),
+                "HEAD".into(),
+                "--".into(),
+            ];
+            args.extend(paths.iter().cloned());
+            let sync = Command::new(&git)
+                .arg("-C")
+                .arg(cwd)
+                .args(&args)
+                .output()
+                .map_err(|e| format!("执行 git 失败: {e}"))?;
+            if !sync.status.success() {
+                // 提交已成功的事实必须保留；同步失败只追加提示
+                commit.stderr.extend_from_slice(
+                    format!("\n（提交已成功，但同步暂存区状态失败，请刷新检查）\n{}", output_tail(&sync))
+                        .as_bytes(),
+                );
+            }
+        }
+        Ok(commit)
+    })();
+    std::fs::remove_file(&tmp).ok();
+    result
+}
 fn git_push_sync(cwd: &str) -> Result<String, String> {
     do_push(&expand_tilde(cwd))
 }
@@ -563,6 +745,307 @@ pub async fn git_file_diff(cwd: String, path: String) -> Result<GitFileDiffDto, 
     tauri::async_runtime::spawn_blocking(move || git_file_diff_sync(&cwd, &path))
         .await
         .map_err(|e| format!("读取 diff 失败: {e}"))?
+}
+
+// ===== 逐 hunk 验收 v1（§6.9：未提交改动按块丢弃/暂存） =====
+// 口径：只覆盖未提交改动，hunks 一律取「未暂存 diff」（工作树 vs 暂存区）——
+// 丢弃 = git apply -R 回工作树、暂存 = git apply --cached 上暂存区，两种操作都干净。
+// 已提交的累计 diff（评审覆盖层 merge-base diff）不做逐 hunk，那是 rebase/revert 语义。
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHunkDto {
+    pub index: usize,
+    /// @@ 行（前端展示用）
+    pub header: String,
+    /// 含完整文件头（diff --git/---/+++）的单块补丁，可直接喂 git apply
+    pub patch: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileHunksDto {
+    pub hunks: Vec<GitHunkDto>,
+    /// 该文件是否已有暂存内容（部分暂存时前端提示提交粒度）
+    pub staged: bool,
+}
+
+/// 把单文件 unified diff 按 @@ 切成 hunk；每个 patch 都带完整文件头，可单独 git apply。
+/// split_inclusive 保留行尾换行，逐字节回拼不丢内容（含 "\ No newline" 标记行）。
+fn split_hunks(diff: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = diff.split_inclusive('\n').collect();
+    let Some(first) = lines.iter().position(|l| l.starts_with("@@ ")) else {
+        return Vec::new();
+    };
+    let preamble: String = lines[..first].concat();
+    let mut hunks: Vec<(String, String)> = Vec::new();
+    for line in &lines[first..] {
+        if line.starts_with("@@ ") {
+            hunks.push((line.trim_end().to_string(), preamble.clone()));
+        }
+        if let Some((_, patch)) = hunks.last_mut() {
+            patch.push_str(line);
+        }
+    }
+    hunks
+}
+
+/// git diff 风格路径引用：含引号/反斜杠/控制字符/非 ASCII 时按 C 风格转义并加引号
+fn quote_diff_path(p: &str) -> String {
+    let needs = p
+        .bytes()
+        .any(|b| b < 0x20 || b > 0x7e || b == b'"' || b == b'\\');
+    if !needs {
+        return p.to_string();
+    }
+    let mut out = String::from("\"");
+    for b in p.bytes() {
+        match b {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(b as char),
+            _ => out.push_str(&format!("\\{b:03o}")),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// 解析补丁文件头里的路径（可能 C 风格加引号），去引号/反转义还原
+fn unquote_diff_path(s: &str) -> Option<String> {
+    let s = s.trim();
+    if !s.starts_with('"') {
+        return Some(s.to_string());
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'"' {
+            break;
+        }
+        if b == b'\\' && i + 1 < bytes.len() {
+            let n = bytes[i + 1];
+            if n.is_ascii_digit() {
+                // \ooo 三位八进制
+                let oct = std::str::from_utf8(bytes.get(i + 1..i + 4)?).ok()?;
+                out.push(u8::from_str_radix(oct, 8).ok()?);
+                i += 4;
+                continue;
+            }
+            out.push(n);
+            i += 2;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// 校验补丁只针对白名单内的单个文件：只扫描 @@ 之前的文件头（hunk 内容行可能以 --- 开头），
+/// ---/+++ 两侧非 /dev/null 的路径必须等于该文件，且只有一个 diff --git 头。
+/// 防调用方传入指向其他文件的补丁绕过路径白名单。
+fn patch_targets_single_file(patch: &str, path: &str) -> Result<(), String> {
+    // diff --git 头数全补丁扫描（多文件补丁的第二个头在 hunk 之后，只扫文件头会漏）
+    let diff_git = patch
+        .lines()
+        .filter(|l| l.starts_with("diff --git "))
+        .count();
+    if diff_git > 1 {
+        return Err("补丁必须只包含一个文件".into());
+    }
+    // ---/+++ 只扫 @@ 之前的文件头（hunk 内容行可能以 --- 开头，不能误判）
+    let head: String = patch
+        .split_inclusive('\n')
+        .take_while(|l| !l.starts_with("@@ "))
+        .collect();
+    let header_lines: Vec<&str> = head.lines().collect();
+    let mut checked = 0;
+    for line in &header_lines {
+        let Some(rest) = line
+            .strip_prefix("--- ")
+            .or_else(|| line.strip_prefix("+++ "))
+        else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest == "/dev/null" {
+            continue;
+        }
+        let p = unquote_diff_path(rest).ok_or("无法解析补丁中的路径")?;
+        let p = p
+            .strip_prefix("a/")
+            .or_else(|| p.strip_prefix("b/"))
+            .unwrap_or(&p)
+            .to_string();
+        if p != path {
+            return Err(format!("补丁目标 {p} 与文件 {path} 不一致"));
+        }
+        checked += 1;
+    }
+    if checked == 0 {
+        return Err("补丁缺少 ---/+++ 文件头".into());
+    }
+    Ok(())
+}
+
+/// 未跟踪新文件构造合法的新文件补丁（/dev/null 形式），可直接 git apply / -R / --cached
+fn untracked_file_patch(path: &str, content: &str) -> String {
+    let a = quote_diff_path(&format!("a/{path}"));
+    let b = quote_diff_path(&format!("b/{path}"));
+    let mut text = format!("diff --git {a} {b}\nnew file mode 100644\n--- /dev/null\n+++ {b}\n");
+    let lines: Vec<&str> = content.lines().collect();
+    if !lines.is_empty() {
+        text.push_str(&format!("@@ -0,0 +1,{} @@\n", lines.len()));
+        for (i, line) in lines.iter().enumerate() {
+            text.push('+');
+            text.push_str(line);
+            text.push('\n');
+            if i == lines.len() - 1 && !content.ends_with('\n') {
+                text.push_str("\\ No newline at end of file\n");
+            }
+        }
+    }
+    text
+}
+
+fn git_file_hunks_sync(cwd: &str, path: &str) -> Result<GitFileHunksDto, String> {
+    let cwd = expand_tilde(cwd);
+    let validated = validate_selected_paths(&cwd, &[path.to_string()])?;
+    let path = validated.first().ok_or("文件已不在当前改动清单中")?;
+    let status = git_status_sync(&cwd)?
+        .files
+        .into_iter()
+        .find(|file| file.path == *path)
+        .ok_or_else(|| format!("文件已不在当前改动清单中，请刷新后重试: {path}"))?;
+    // 部分暂存提示：暂存区相对 HEAD 有差异（diff --cached --quiet 退出码 1）
+    let staged = run_git(&cwd, &["diff", "--cached", "--quiet", "--", path])
+        .map(|o| !o.status.success())
+        .unwrap_or(false);
+
+    if status.status == "??" {
+        let full = Path::new(&cwd).join(path);
+        // 整个文件视为一个 hunk。非 UTF-8/含 NUL 一律按二进制拒绝——
+        // lossy 转换会让暂存进索引的内容与工作树不一致，必须整块有效
+        let bytes = std::fs::read(&full).map_err(|e| format!("读取 {path} 失败: {e}"))?;
+        if bytes.len() > FILE_DIFF_CAP {
+            return Err("文件过大，不支持按块操作（可整体勾选提交或在终端处理）".into());
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|_| "二进制或非 UTF-8 文件，不支持按块操作".to_string())?;
+        if content.contains('\0') {
+            return Err("二进制或非 UTF-8 文件，不支持按块操作".into());
+        }
+        let patch = untracked_file_patch(path, &content);
+        let header = patch
+            .lines()
+            .find(|l| l.starts_with("@@ "))
+            .unwrap_or("新文件（空文件）")
+            .to_string();
+        return Ok(GitFileHunksDto {
+            hunks: vec![GitHunkDto {
+                index: 0,
+                header,
+                patch,
+            }],
+            staged,
+        });
+    }
+
+    // 已跟踪文件：未暂存 diff（工作树 vs 暂存区），按 @@ 切 hunk
+    let out = run_git(&cwd, &["diff", "--", path])?;
+    if !out.status.success() {
+        return Err(output_tail(&out));
+    }
+    if out.stdout.len() > FILE_DIFF_CAP {
+        return Err("diff 过大，不支持按块操作（请在审阅视图或终端处理）".into());
+    }
+    let text = String::from_utf8(out.stdout)
+        .map_err(|_| "非 UTF-8 编码文件，不支持按块操作".to_string())?;
+    if text
+        .lines()
+        .any(|line| line.starts_with("Binary files ") || line.starts_with("GIT binary patch"))
+    {
+        return Err("二进制文件，不支持按块操作".into());
+    }
+    let hunks = split_hunks(&text)
+        .into_iter()
+        .enumerate()
+        .map(|(index, (header, patch))| GitHunkDto {
+            index,
+            header,
+            patch,
+        })
+        .collect();
+    Ok(GitFileHunksDto { hunks, staged })
+}
+
+/// 未提交改动的逐 hunk 拆分：普通仓库/工作区未提交文件均可，白名单同 git_file_diff。
+#[tauri::command]
+pub async fn git_file_hunks(cwd: String, path: String) -> Result<GitFileHunksDto, String> {
+    tauri::async_runtime::spawn_blocking(move || git_file_hunks_sync(&cwd, &path))
+        .await
+        .map_err(|e| format!("读取改动块失败: {e}"))?
+}
+
+fn apply_hunk_sync(cwd: &str, path: &str, patch: &str, mode: &str) -> Result<GitStatusDto, String> {
+    let flag = match mode {
+        "stage" => "--cached",
+        "discard" => "-R",
+        _ => return Err(format!("未知的按块操作模式: {mode}")),
+    };
+    let cwd = expand_tilde(cwd);
+    // 路径白名单与 git_file_diff 相同：必须在当前 status 改动清单内的安全相对路径
+    let validated = validate_selected_paths(&cwd, &[path.to_string()])?;
+    let path = validated.first().ok_or("文件已不在当前改动清单中")?;
+    if patch.len() > FILE_DIFF_CAP {
+        return Err("补丁过大，已拒绝".into());
+    }
+    // 补丁本身也要校验：git apply 只认补丁里的路径，必须确保它没指向白名单外的文件
+    patch_targets_single_file(patch, path)?;
+    let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
+    let mut child = Command::new(git)
+        .arg("-C")
+        .arg(&cwd)
+        .args(["apply", "--whitespace=nowarn", flag])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("执行 git apply 失败: {e}"))?;
+    child
+        .stdin
+        .take()
+        .expect("stdin 已接管")
+        .write_all(patch.as_bytes())
+        .map_err(|e| format!("写入补丁失败: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("执行 git apply 失败: {e}"))?;
+    if !out.status.success() {
+        // git apply 按文件原子：失败不改动文件，如实透出并引导刷新
+        return Err(format!(
+            "{}\n（应用失败：文件可能已被其他程序改动或这块改动已处理过，请刷新后重试）",
+            output_tail(&out)
+        ));
+    }
+    git_status_sync(&cwd)
+}
+
+/// 按块操作：mode = stage（git apply --cached 上暂存区）/ discard（git apply -R 回工作树）。
+/// 成功后返回最新 status 供前端立即刷新。
+#[tauri::command]
+pub async fn apply_hunk(
+    cwd: String,
+    path: String,
+    patch: String,
+    mode: String,
+) -> Result<GitStatusDto, String> {
+    tauri::async_runtime::spawn_blocking(move || apply_hunk_sync(&cwd, &path, &patch, &mode))
+        .await
+        .map_err(|e| format!("应用改动块失败: {e}"))?
 }
 
 // ===== 工作区任务 diff（§6.10 阶段 C：基准从 HEAD 改为 merge-base） =====
@@ -1401,5 +1884,310 @@ mod tests {
             &["worktree", "remove", "--force", wt.to_str().unwrap()],
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== 逐 hunk 验收 v1 =====
+
+    /// 造一个含两个相距较远 hunk 的修改文件（30 行，改第 2 行与第 28 行），b.txt 附带一处改动
+    fn two_hunk_repo(name: &str) -> PathBuf {
+        let repo = init_repo(name);
+        let base: String = (1..=30).map(|i| format!("l{i:02}\n")).collect();
+        fs::write(repo.join("a.txt"), &base).unwrap();
+        fs::write(repo.join("b.txt"), "base-b\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        let changed = base
+            .replacen("l02\n", "top-changed\n", 1)
+            .replacen("l28\n", "bottom-changed\n", 1);
+        fs::write(repo.join("a.txt"), &changed).unwrap();
+        fs::write(repo.join("b.txt"), "changed-b\n").unwrap();
+        repo
+    }
+
+    fn diff_cached(repo: &Path, path: &str) -> String {
+        let out = run_git(repo.to_str().unwrap(), &["diff", "--cached", "--", path]).unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn diff_unstaged(repo: &Path, path: &str) -> String {
+        let out = run_git(repo.to_str().unwrap(), &["diff", "--", path]).unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn hunks_split_multi_hunk_and_new_file() {
+        if !git_available() {
+            return;
+        }
+        let repo = two_hunk_repo("hunks-split");
+        fs::write(repo.join("new.txt"), "x\ny\n").unwrap();
+
+        let dto = git_file_hunks_sync(repo.to_str().unwrap(), "a.txt").unwrap();
+        assert_eq!(dto.hunks.len(), 2, "相距较远的两处修改应拆成两个 hunk");
+        assert!(!dto.staged);
+        for h in &dto.hunks {
+            assert!(h.header.starts_with("@@ "), "header 应是 @@ 行: {}", h.header);
+            assert!(h.patch.starts_with("diff --git "), "patch 必须带完整文件头");
+            assert!(h.patch.contains("--- a/a.txt"));
+            assert!(h.patch.contains("+++ b/a.txt"));
+            assert_eq!(
+                h.patch.lines().filter(|l| l.starts_with("@@ ")).count(),
+                1,
+                "每个 patch 只含一个 hunk"
+            );
+        }
+        assert!(dto.hunks[0].patch.contains("+top-changed"));
+        assert!(!dto.hunks[0].patch.contains("+bottom-changed"));
+        assert!(dto.hunks[1].patch.contains("+bottom-changed"));
+
+        // 新文件：整个文件一个 hunk，/dev/null 新文件形式
+        let new = git_file_hunks_sync(repo.to_str().unwrap(), "new.txt").unwrap();
+        assert_eq!(new.hunks.len(), 1);
+        assert!(new.hunks[0].patch.contains("--- /dev/null"));
+        assert!(new.hunks[0].patch.contains("+++ b/new.txt"));
+        assert!(new.hunks[0].patch.contains("new file mode"));
+        assert!(new.hunks[0].patch.contains("@@ -0,0 +1,2 @@"));
+        // 白名单：逃逸与未变更路径都拒绝
+        assert!(git_file_hunks_sync(repo.to_str().unwrap(), "../outside").is_err());
+        assert!(git_file_hunks_sync(repo.to_str().unwrap(), "missing.txt").is_err());
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn hunks_empty_file_and_binary_rejected() {
+        if !git_available() {
+            return;
+        }
+        let repo = init_repo("hunks-edge");
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"],
+        );
+        // 空文件：一个 hunk（无 @@ 头的新文件补丁），暂存后应进索引
+        fs::write(repo.join("empty.txt"), "").unwrap();
+        let dto = git_file_hunks_sync(repo.to_str().unwrap(), "empty.txt").unwrap();
+        assert_eq!(dto.hunks.len(), 1);
+        apply_hunk_sync(
+            repo.to_str().unwrap(),
+            "empty.txt",
+            &dto.hunks[0].patch,
+            "stage",
+        )
+        .unwrap();
+        let ls = run_git(repo.to_str().unwrap(), &["ls-files", "--", "empty.txt"]).unwrap();
+        assert!(
+            String::from_utf8_lossy(&ls.stdout).contains("empty.txt"),
+            "空新文件暂存后应出现在索引中"
+        );
+        // 二进制：报错提示
+        fs::write(repo.join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
+        let err = git_file_hunks_sync(repo.to_str().unwrap(), "bin.dat").unwrap_err();
+        assert!(err.contains("二进制"), "{err}");
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn stage_hunk_moves_only_that_hunk_to_index() {
+        if !git_available() {
+            return;
+        }
+        let repo = two_hunk_repo("hunk-stage");
+        let dto = git_file_hunks_sync(repo.to_str().unwrap(), "a.txt").unwrap();
+        let status = apply_hunk_sync(
+            repo.to_str().unwrap(),
+            "a.txt",
+            &dto.hunks[0].patch,
+            "stage",
+        )
+        .unwrap();
+        assert!(status.files.iter().any(|f| f.path == "a.txt"));
+        let staged = diff_cached(&repo, "a.txt");
+        assert!(staged.contains("+top-changed"), "暂存区应含第一块: {staged}");
+        assert!(!staged.contains("+bottom-changed"), "第二块不应进暂存区");
+        let unstaged = diff_unstaged(&repo, "a.txt");
+        assert!(unstaged.contains("+bottom-changed"));
+        assert!(!unstaged.contains("+top-changed"));
+        // 工作树两块改动都还在
+        let content = fs::read_to_string(repo.join("a.txt")).unwrap();
+        assert!(content.contains("top-changed") && content.contains("bottom-changed"));
+        // 再次拉取：staged 标记置位，hunks 只剩未暂存的一块
+        let after = git_file_hunks_sync(repo.to_str().unwrap(), "a.txt").unwrap();
+        assert!(after.staged);
+        assert_eq!(after.hunks.len(), 1);
+        assert!(after.hunks[0].patch.contains("+bottom-changed"));
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn discard_hunk_removes_only_that_hunk() {
+        if !git_available() {
+            return;
+        }
+        let repo = two_hunk_repo("hunk-discard");
+        let dto = git_file_hunks_sync(repo.to_str().unwrap(), "a.txt").unwrap();
+        apply_hunk_sync(
+            repo.to_str().unwrap(),
+            "a.txt",
+            &dto.hunks[0].patch,
+            "discard",
+        )
+        .unwrap();
+        let content = fs::read_to_string(repo.join("a.txt")).unwrap();
+        assert!(!content.contains("top-changed"), "第一块应从工作树消失");
+        assert!(content.contains("bottom-changed"), "第二块必须保留");
+        let unstaged = diff_unstaged(&repo, "a.txt");
+        assert!(unstaged.contains("+bottom-changed"));
+        assert!(!unstaged.contains("+top-changed"));
+        assert!(diff_cached(&repo, "a.txt").is_empty());
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn apply_hunk_rejects_escape_stale_and_foreign_patch() {
+        if !git_available() {
+            return;
+        }
+        let repo = two_hunk_repo("hunk-reject");
+        let dto = git_file_hunks_sync(repo.to_str().unwrap(), "a.txt").unwrap();
+        // 逃逸路径 / 未知模式
+        assert!(
+            apply_hunk_sync(repo.to_str().unwrap(), "../x", &dto.hunks[0].patch, "stage").is_err()
+        );
+        assert!(
+            apply_hunk_sync(repo.to_str().unwrap(), "a.txt", &dto.hunks[0].patch, "bogus").is_err()
+        );
+        // 补丁指向其他文件：b.txt 在改动清单内，但补丁是 a.txt 的
+        let err = apply_hunk_sync(repo.to_str().unwrap(), "b.txt", &dto.hunks[0].patch, "stage")
+            .unwrap_err();
+        assert!(err.contains("不一致"), "{err}");
+        // 过期补丁：丢弃成功后再次丢弃同一块 → 失败且文件不被破坏
+        apply_hunk_sync(
+            repo.to_str().unwrap(),
+            "a.txt",
+            &dto.hunks[0].patch,
+            "discard",
+        )
+        .unwrap();
+        let before = fs::read_to_string(repo.join("a.txt")).unwrap();
+        let err = apply_hunk_sync(
+            repo.to_str().unwrap(),
+            "a.txt",
+            &dto.hunks[0].patch,
+            "discard",
+        )
+        .unwrap_err();
+        assert!(err.contains("应用失败"), "{err}");
+        assert!(err.contains("请刷新"), "{err}");
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), before);
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn untracked_hunk_stage_and_discard() {
+        if !git_available() {
+            return;
+        }
+        let repo = init_repo("hunk-untracked");
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"],
+        );
+        fs::write(repo.join("keep.txt"), "x\ny\n").unwrap();
+        fs::write(repo.join("drop.txt"), "gone\n").unwrap();
+
+        let keep = git_file_hunks_sync(repo.to_str().unwrap(), "keep.txt").unwrap();
+        let status = apply_hunk_sync(
+            repo.to_str().unwrap(),
+            "keep.txt",
+            &keep.hunks[0].patch,
+            "stage",
+        )
+        .unwrap();
+        let k = status.files.iter().find(|f| f.path == "keep.txt").unwrap();
+        assert_eq!(k.status, "A", "新文件暂存后应显示为新增");
+        assert!(repo.join("keep.txt").is_file(), "暂存不动工作树文件");
+        let ls = run_git(repo.to_str().unwrap(), &["ls-files", "--", "keep.txt"]).unwrap();
+        assert!(String::from_utf8_lossy(&ls.stdout).contains("keep.txt"));
+
+        let drop = git_file_hunks_sync(repo.to_str().unwrap(), "drop.txt").unwrap();
+        apply_hunk_sync(
+            repo.to_str().unwrap(),
+            "drop.txt",
+            &drop.hunks[0].patch,
+            "discard",
+        )
+        .unwrap();
+        assert!(!repo.join("drop.txt").exists(), "丢弃新文件 = 删除工作树文件");
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn partial_staging_commit_keeps_unstaged_hunks() {
+        if !git_available() {
+            return;
+        }
+        let repo = two_hunk_repo("hunk-partial-commit");
+        let dto = git_file_hunks_sync(repo.to_str().unwrap(), "a.txt").unwrap();
+        apply_hunk_sync(
+            repo.to_str().unwrap(),
+            "a.txt",
+            &dto.hunks[0].patch,
+            "stage",
+        )
+        .unwrap();
+        // 勾选 a.txt + b.txt 提交：a.txt 只能带走已暂存的第一块
+        let selected = vec!["a.txt".to_string(), "b.txt".to_string()];
+        let result = git_commit_sync(repo.to_str().unwrap(), "部分暂存提交", false, Some(&selected))
+            .unwrap();
+        assert!(result.committed);
+        let head_a = run_git(repo.to_str().unwrap(), &["show", "HEAD:a.txt"]).unwrap();
+        let head_a = String::from_utf8_lossy(&head_a.stdout).into_owned();
+        assert!(head_a.contains("top-changed"), "已暂存块应进提交: {head_a}");
+        assert!(!head_a.contains("bottom-changed"), "未暂存块不得进提交");
+        let head_b = run_git(repo.to_str().unwrap(), &["show", "HEAD:b.txt"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&head_b.stdout), "changed-b\n");
+        // 未暂存块保持未暂存；暂存区已随提交清空；工作树不被改动
+        let unstaged = diff_unstaged(&repo, "a.txt");
+        assert!(unstaged.contains("+bottom-changed"));
+        assert!(diff_cached(&repo, "a.txt").is_empty());
+        let content = fs::read_to_string(repo.join("a.txt")).unwrap();
+        assert!(content.contains("top-changed") && content.contains("bottom-changed"));
+        let status = git_status_sync(repo.to_str().unwrap()).unwrap();
+        assert_eq!(status.files.len(), 1);
+        assert_eq!(status.files[0].path, "a.txt");
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn split_hunks_quote_and_patch_target_checks() {
+        // 纯函数：拆分/引用/补丁目标校验
+        let diff = "diff --git a/f.txt b/f.txt\nindex 111..222 100644\n--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n@@ -8,1 +8,1 @@\n-a\n+b\n";
+        let hunks = split_hunks(diff);
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].0, "@@ -1,2 +1,2 @@");
+        assert!(hunks[0].1.starts_with("diff --git a/f.txt"));
+        assert!(hunks[0].1.contains("+new\n"));
+        assert!(!hunks[0].1.contains("+b\n"));
+        assert!(split_hunks("no hunks here\n").is_empty());
+
+        // 引用往返：空格不引用；引号/反斜杠/非 ASCII 走 C 风格转义
+        assert_eq!(quote_diff_path("a/plain.txt"), "a/plain.txt");
+        assert_eq!(quote_diff_path("a/with space.txt"), "a/with space.txt");
+        let quoted = quote_diff_path("a/引\"号\\中文.txt");
+        assert!(quoted.starts_with('"') && quoted.ends_with('"'));
+        assert_eq!(
+            unquote_diff_path(&quoted).as_deref(),
+            Some("a/引\"号\\中文.txt")
+        );
+
+        // 目标校验：匹配放行；目标不符 / 多文件 / 缺文件头都拒绝
+        patch_targets_single_file(&hunks[0].1, "f.txt").unwrap();
+        assert!(patch_targets_single_file(&hunks[0].1, "other.txt").is_err());
+        let two_files = format!("{}{}", hunks[0].1, hunks[0].1.replace("f.txt", "g.txt"));
+        assert!(patch_targets_single_file(&two_files, "f.txt").is_err());
+        assert!(patch_targets_single_file("@@ -1 +1 @@\n+x\n", "f.txt").is_err());
     }
 }

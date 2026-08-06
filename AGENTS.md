@@ -152,6 +152,13 @@ src-tauri/src/
   当前累计任务 diff 中的路径；未跟踪文件按全新增展示，二进制只提示，单次文本读取/展示设上限并明确截断。对话页只读展示
   “当前项目改动”，必须声明它不是历史快照，禁止在对话页提交或推送。紧凑 diff 禁止整行使用 ok/err 背景铺色，增删只用
   语义色文字与细边标识，hunk 标题才允许轻量 inset 背景。
+- **逐 hunk 验收只覆盖未提交改动，hunks 一律取未暂存 diff（工作树 vs 暂存区）**：丢弃 = `git apply -R` 回工作树、
+  暂存 = `git apply --cached` 上暂存区（`git_file_hunks`/`apply_hunk`，白名单同单文件 diff；补丁必须再经
+  `patch_targets_single_file` 校验只指向该文件，防传入指向他文件的补丁绕过路径白名单）；已提交的累计 diff
+  （评审覆盖层 merge-base diff）禁止做逐 hunk。新文件整个文件算一个块（/dev/null 新文件补丁：暂存 = 跟踪，
+  丢弃 = 删文件）。**勾选提交遇部分暂存文件必须走临时索引提交**（`commit_selected_with_index`：`commit -- paths`
+  是工作树语义会把未暂存块一起带走；提交成功后按路径 `git reset -q HEAD --` 同步真实索引消幻影 MM），
+  未暂存块保持未暂存，未勾选文件的暂存内容不得被波及。
 - **工作区创建是补偿事务**：先以 SQLite `BEGIN IMMEDIATE` 原子预留端口并写 `creating`，再创建 worktree/复制文件/激活；
   worktree、复制或激活任一步失败必须移除 worktree、prune、删分支、删 creating 行并释放端口。复制错误不得忽略；setup 失败
   维持非阻断语义。`ready_to_merge` 必须要求 `ahead > 0`，空工作区禁止合并。
@@ -248,7 +255,7 @@ src-tauri/src/
 - **步骤胶囊对照（RX2b）**：跨页「文件树切根」走 store 一次性 `enterCwdReq`（终端页消费后复用 enterCwd/externalCwd
   「真进入」机制，文件树根随活动标签 cwd）；`previewReq` 可带可选 `root`（文本预览的后端根约束，缺省回落活动标签
   cwd）。步骤产物面板只在打开时用 `list_dir` 拉取一次（无根约束，目录列一层文件、父目录匹配区分文件/未产出），
-  不进轮询；已完成步骤读项目根（main），其余读工作树。胶囊副行的 agent/profile 读终端页同一键
+  不进轮询；已完成步骤读项目根（main），其余读工作树。胶囊悬浮信息（目录/agent/profile）读终端页同一键
   `ccode.wsLast.<worktreePath>`。
 
 ## 路线图（见 docs/architecture.md §11 演进线）
