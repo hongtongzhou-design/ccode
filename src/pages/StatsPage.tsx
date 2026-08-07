@@ -7,6 +7,7 @@ import {
   LoadingRows,
   PageFrame,
   PageHeader,
+  PageToolbar,
 } from "../components/PageFrame";
 
 type Range = "today" | "week" | "month" | "all";
@@ -199,9 +200,12 @@ export default function StatsPage({ visible }: { visible: boolean }) {
   }
 
   return (
-    <PageFrame width="standard">
-      <PageHeader title="用量统计" />
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+    <PageFrame width="wide">
+      <PageHeader
+        title="用量统计"
+        meta="按项目、任务与 Agent 查看投入"
+      />
+      <PageToolbar>
         <div className="flex items-center gap-1">
           {RANGES.map((item) => (
             <button
@@ -252,7 +256,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
             <span className="px-1 text-xs text-l4">加载中…</span>
           )}
         </div>
-      </div>
+      </PageToolbar>
       <p className="mb-3 text-xs text-l4">
         费用按官方公开价估算；≥ 表示另含未计价用量，~ 表示没有可用价格
       </p>
@@ -269,19 +273,19 @@ export default function StatsPage({ visible }: { visible: boolean }) {
         <>
           {/* 概览卡片 */}
           <div className="mb-6 grid grid-cols-2 gap-2 sm:grid-cols-5">
-            <div className="rounded bg-inset p-3">
+            <div className="rounded-md border border-hairline bg-strip p-3">
               <div className="text-xs text-l4">输入 tokens</div>
               <div className="mt-1 text-lg font-semibold text-l1">
                 {compact(stats.cards.input)}
               </div>
             </div>
-            <div className="rounded bg-inset p-3">
+            <div className="rounded-md border border-hairline bg-strip p-3">
               <div className="text-xs text-l4">输出 tokens</div>
               <div className="mt-1 text-lg font-semibold text-l1">
                 {compact(stats.cards.output)}
               </div>
             </div>
-            <div className="rounded bg-inset p-3">
+            <div className="rounded-md border border-hairline bg-strip p-3">
               <div className="text-xs text-l4">缓存读 tokens</div>
               <div className="mt-1 text-lg font-semibold text-l1">
                 {compact(stats.cards.cacheRead)}
@@ -290,13 +294,13 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                 缓存写 {compact(stats.cards.cacheWrite)}
               </div>
             </div>
-            <div className="rounded bg-inset p-3">
+            <div className="rounded-md border border-hairline bg-strip p-3">
               <div className="text-xs text-l4">对话数</div>
               <div className="mt-1 text-lg font-semibold text-l1">
                 {compact(stats.cards.sessions)}
               </div>
             </div>
-            <div className="rounded bg-inset p-3">
+            <div className="rounded-md border border-hairline bg-strip p-3">
               <div className="text-xs text-l4">费用</div>
               <div className="mt-1 text-lg font-semibold text-l1">
                 {fmtCost(
@@ -311,8 +315,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
           {/* 按 agent：用量占比进度条（占比 = 该 agent tokens / 全部合计） */}
           {stats.byAgent.length > 0 && (
-            <section className="mb-6">
-              <h2 className="mb-2 text-sm font-medium text-l1">按 Agent</h2>
+            <section className="mb-4 rounded-md border border-hairline bg-strip p-3">
+              <h2 className="mb-2 text-xs font-medium text-l2">按 Agent</h2>
               <ul className="divide-y divide-hairline">
                 {stats.byAgent.map((a) => {
                   const share = a.tokens / totalAgentTokens;
@@ -367,8 +371,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
           {/* 按项目 */}
           {projectRows.length > 0 && (
-            <section className="mb-6">
-              <h2 className="mb-2 text-sm font-medium text-l1">
+            <section className="mb-4 rounded-md border border-hairline bg-strip p-3">
+              <h2 className="mb-2 text-xs font-medium text-l2">
                 按项目（前 20）
               </h2>
               <table className="w-full text-sm">
@@ -414,8 +418,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
           {/* 任务成本（按工作区归因，仅列出命中工作区的用量） */}
           {workspaceRows.length > 0 && (
-            <section className="mb-6">
-              <h2 className="mb-2 text-sm font-medium text-l1">任务成本</h2>
+            <section className="mb-4 rounded-md border border-hairline bg-strip p-3">
+              <h2 className="mb-2 text-xs font-medium text-l2">任务成本</h2>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-hairline">
@@ -460,8 +464,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
           {/* 按模型 */}
           {modelRows.length > 0 && (
-            <section className="mb-6">
-              <h2 className="mb-2 text-sm font-medium text-l1">按模型</h2>
+            <section className="mb-4 rounded-md border border-hairline bg-strip p-3">
+              <h2 className="mb-2 text-xs font-medium text-l2">按模型</h2>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-hairline">

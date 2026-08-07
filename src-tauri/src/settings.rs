@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 13;
+pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
 pub const DEFAULT_SCROLLBACK: u32 = 5000;
 pub const DEFAULT_RATE_USD_CNY: f64 = 7.2;
 pub const DEFAULT_BREW_MIRROR: bool = true;
@@ -173,7 +173,7 @@ mod tests {
     fn missing_file_merges_to_full_defaults() {
         let p = tmp();
         let full = with_defaults(read_from(&p));
-        assert_eq!(full.terminal_font_size, Some(13));
+        assert_eq!(full.terminal_font_size, Some(14));
         assert_eq!(full.scrollback, Some(5000));
         assert_eq!(full.rate_usd_cny, Some(7.2));
         assert_eq!(full.brew_mirror, Some(true));

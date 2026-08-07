@@ -30,14 +30,14 @@ import type {
 } from "../types";
 
 const actionBtn =
-  "rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1";
+  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1";
 const ctaSm =
-  "rounded border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
-// 步骤胶囊内按钮：点击区 ≥28px（min-h-7）
-const capsuleBtn = `${actionBtn} inline-flex min-h-7 items-center`;
-const capsuleCta = `${ctaSm} inline-flex min-h-7 items-center`;
+  "inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
+// 步骤胶囊内按钮与任务行操作统一为 28px 点击区。
+const capsuleBtn = actionBtn;
+const capsuleCta = ctaSm;
 const fieldSm =
-  "rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
+  "h-7 rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
 function baseName(path: string): string {
   const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
@@ -794,8 +794,8 @@ export default function ProjectGroup({
 
   // ===== 渲染 =====
   return (
-    <section className="mb-5">
-      <div className="mb-1 flex min-w-0 items-center gap-2">
+    <section className="mb-5 overflow-hidden rounded-md border border-hairline bg-canvas">
+      <div className="flex min-h-12 min-w-0 items-center gap-2 border-b border-hairline bg-strip px-4 py-2.5">
         {renamingProject ? (
           <form
             onSubmit={submitRenameProject}
@@ -872,6 +872,7 @@ export default function ProjectGroup({
         </div>
       </div>
 
+      <div className="p-4">
       {editingTopic && cfg && (
         <form onSubmit={submitTopic} className="mb-2 flex items-center gap-1">
           <input
@@ -1004,7 +1005,7 @@ export default function ProjectGroup({
 
       {/* 流水线 strip：状态从绑定工作区派生，纯展示 */}
       {registered && cfg && cfg.steps.length > 0 && (
-        <div className="mb-2 rounded border border-hairline bg-strip p-2">
+        <div className="mb-3 rounded border border-hairline bg-strip p-3">
           {/* 进度概览：分段直线进度条（用户明确要求保留）+ 文字计数 + 校验提示徽标 */}
           {(() => {
             const keys = cfg.steps.map(
@@ -1022,7 +1023,7 @@ export default function ProjectGroup({
                       ? "bg-cta opacity-50"
                       : "bg-inset";
             return (
-              <div className="mb-2 flex items-center gap-2 px-0.5">
+              <div className="mb-3 flex items-center gap-2 px-0.5">
                 <div className="flex h-1.5 flex-1 gap-0.5">
                   {keys.map((k, i) => (
                     <span
@@ -1046,7 +1047,7 @@ export default function ProjectGroup({
               </div>
             );
           })()}
-          <ol className="flex flex-wrap items-center gap-y-2">
+          <ol className="flex flex-wrap items-center gap-x-1 gap-y-3">
             {cfg.steps.map((step, i) => {
               const st = deriveStepStatus(step, workspaces, health, drift);
               const style = STEP_STATUS_STYLE[st.key];
@@ -1496,6 +1497,7 @@ export default function ProjectGroup({
       )}
 
       {children}
+      </div>
 
       {projectMenu && project && (
         <ContextMenu

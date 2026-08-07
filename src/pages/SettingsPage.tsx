@@ -111,18 +111,18 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="mt-4 first:mt-0">
+    <section className="mt-3 overflow-hidden rounded-md border border-hairline bg-strip first:mt-0">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex h-8 w-full items-center gap-1.5 rounded px-1 text-left text-sm font-medium text-l1 hover:bg-white/5"
+        className={`flex h-10 w-full items-center gap-1.5 px-3 text-left text-sm font-medium text-l1 hover:bg-white/5 ${open ? "border-b border-hairline" : ""}`}
       >
         <span className="w-3 text-xs text-l4">{open ? "▾" : "▸"}</span>
         {title}
         {badge}
       </button>
-      {open && <div>{children}</div>}
+      {open && <div className="px-3">{children}</div>}
     </section>
   );
 }
@@ -140,14 +140,13 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="border-b border-hairline py-3">
-      <div className="flex items-center gap-3">
-        <span className="w-32 shrink-0 text-sm text-l2">{label}</span>
-        <div className="ml-auto flex min-w-0 items-center gap-2">{children}</div>
+    <div className="grid grid-cols-[minmax(180px,1fr)_auto] items-center gap-x-5 border-b border-hairline py-3 last:border-b-0">
+      <div className="min-w-0">
+        <div className="text-sm text-l2">{label}</div>
+        {hint && <p className="mt-0.5 max-w-lg text-[11px] leading-4 text-l4">{hint}</p>}
       </div>
-      {/* WKWebView/macOS 不渲染 title tooltip，说明必须常驻可见 */}
-      {hint && <p className="mt-1 text-xs text-l3">{hint}</p>}
-      {extra}
+      <div className="flex min-w-0 items-center justify-end gap-2">{children}</div>
+      {extra && <div className="col-span-2 mt-2">{extra}</div>}
     </div>
   );
 }
@@ -380,8 +379,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   }
 
   return (
-    <PageFrame width="narrow">
-      <PageHeader title="设置" />
+    <PageFrame width="standard">
+      <PageHeader title="设置" meta="外观、终端与应用集成" />
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 

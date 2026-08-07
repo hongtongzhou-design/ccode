@@ -2,8 +2,8 @@ import type { ReactNode } from "react";
 
 const WIDTHS = {
   narrow: "max-w-2xl",
-  standard: "max-w-3xl",
-  wide: "max-w-[1200px]",
+  standard: "max-w-4xl",
+  wide: "max-w-[1440px]",
 } as const;
 
 export function PageFrame({
@@ -16,7 +16,7 @@ export function PageFrame({
   width?: keyof typeof WIDTHS;
 }) {
   return (
-    <div className="min-h-full bg-canvas px-8 py-6">
+    <div className="min-h-full bg-canvas px-6 pb-6 pt-1">
       <div className={`mx-auto w-full ${WIDTHS[width]} ${className}`}>{children}</div>
     </div>
   );
@@ -32,18 +32,60 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <div className="mb-5 flex min-h-8 items-center justify-between gap-4">
-      <div className="flex min-w-0 items-baseline gap-3">
-        <h1 className="shrink-0 text-lg font-semibold text-l1">{title}</h1>
-        {meta && <span className="truncate text-xs text-l3">{meta}</span>}
+    <header className="sticky top-0 z-20 mb-4 flex h-14 items-center justify-between gap-4 border-b border-hairline bg-canvas">
+      <div className="flex min-w-0 items-baseline gap-2.5">
+        <h1 className="shrink-0 text-base font-semibold tracking-tight text-l1">
+          {title}
+        </h1>
+        {meta && <span className="truncate text-[11px] text-l4">{meta}</span>}
       </div>
       {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
-    </div>
+    </header>
   );
 }
 
 export const primaryActionClass =
-  "rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50";
+  "inline-flex h-8 items-center justify-center rounded-md border border-cta-bd bg-cta px-3 text-xs font-medium text-cta-text transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50";
+
+export const secondaryActionClass =
+  "inline-flex h-8 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1 disabled:cursor-not-allowed disabled:opacity-50";
+
+export function PageToolbar({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`mb-5 flex min-h-11 flex-wrap items-center justify-between gap-2 rounded-md border border-hairline bg-strip px-3 py-2 ${className}`}
+    >
+      {children}
+    </div>
+  );
+}
+
+export function EmptyState({
+  title,
+  detail,
+  action,
+}: {
+  title: string;
+  detail?: ReactNode;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-48 flex-col items-center justify-center px-6 py-10 text-center">
+      <div className="mb-3 flex size-9 items-center justify-center rounded-md border border-hairline bg-strip text-l4">
+        ·
+      </div>
+      <p className="text-sm font-medium text-l2">{title}</p>
+      {detail && <div className="mt-1 max-w-md text-xs leading-5 text-l4">{detail}</div>}
+      {action && <div className="mt-4">{action}</div>}
+    </div>
+  );
+}
 
 export function Toggle({
   checked,

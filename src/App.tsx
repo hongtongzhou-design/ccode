@@ -22,15 +22,28 @@ function PageLoading() {
   );
 }
 
-const NAV: { id: string; label: string; icon: string }[] = [
-  { id: "profiles", label: "配置", icon: "⇄" },
-  { id: "workspaces", label: "工作区", icon: "⛁" },
-  { id: "terminal", label: "终端", icon: "⌨" },
-  { id: "sessions", label: "对话", icon: "◔" },
-  { id: "skills", label: "技能", icon: "✦" },
+const NAV_GROUPS = [
+  {
+    label: "工作",
+    items: [
+      { id: "workspaces", label: "工作区", icon: "⛁" },
+      { id: "terminal", label: "终端", icon: "⌨" },
+      { id: "sessions", label: "对话", icon: "◔" },
+    ],
+  },
+  {
+    label: "能力",
+    items: [
+      { id: "profiles", label: "配置", icon: "⇄" },
+      { id: "skills", label: "技能", icon: "✦" },
+    ],
+  },
+] as const;
+
+const NAV_BOTTOM = [
   { id: "stats", label: "统计", icon: "◫" },
   { id: "settings", label: "设置", icon: "⛭" },
-];
+] as const;
 
 function App() {
   const page = useAppStore((s) => s.page);
@@ -120,60 +133,114 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <div className="flex h-full overflow-hidden bg-canvas text-l2">
+      <div className="flex h-full overflow-hidden bg-rail text-l2">
         <aside
-          className={`flex shrink-0 flex-col bg-rail transition-[width] duration-150 ${
-            collapsed ? "w-14" : "w-36"
+          className={`flex shrink-0 flex-col border-r border-hairline bg-rail transition-[width] duration-150 ${
+            collapsed ? "w-14" : "w-40"
           }`}
         >
-          {/* 图标即侧栏开关：直接点击文字收起为图标 / 展开（原底部 « 按钮并入此处） */}
-          <div
+          {/* 品牌区同时承担侧栏收起/展开，避免额外占用一个操作位。 */}
+          <button
+            type="button"
             onClick={toggleCollapsed}
             title={collapsed ? "展开侧栏" : "收起为图标"}
-            className={`cursor-pointer select-none py-4 text-base font-semibold tracking-wide text-l1 ${
-              collapsed ? "text-center text-sm" : "px-4"
+            className={`flex h-14 shrink-0 select-none items-center border-b border-hairline text-left text-l1 ${
+              collapsed ? "justify-center text-sm" : "px-3"
             }`}
           >
-            {collapsed ? "C" : "Ccode"}
-          </div>
-          {NAV.map((n) => (
-            <button
-              key={n.id}
-              onClick={() => setPage(n.id)}
-              title={
-                n.id === "terminal" && runningCount > 0
-                  ? `${n.label}（${runningCount} 个 agent 运行中）`
-                  : n.label
-              }
-              className={`mx-1 mb-0.5 flex items-center rounded-md text-sm ${
-                collapsed
-                  ? "h-10 w-12 justify-center self-center"
-                  : "px-3 py-2.5"
-              } ${
-                page === n.id
-                  ? "bg-rail-sel text-l1"
-                  : "text-l3 hover:bg-white/5"
-              }`}
-            >
-              <span
-                className={`relative ${collapsed ? "text-lg" : "mr-2 w-5 text-center"}`}
-              >
-                {n.icon}
-                {n.id === "terminal" && runningCount > 0 && (
-                  <span className="absolute -right-1.5 -top-1 flex items-center gap-0.5 rounded-full bg-inset px-1 text-[9px] leading-3 text-l2">
-                    <span className="size-1 rounded-full bg-ok-text" />
-                    {runningCount}
-                  </span>
-                )}
+            {collapsed ? (
+              <span className="font-semibold">C</span>
+            ) : (
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold tracking-wide">Ccode</span>
+                <span className="block text-[10px] font-normal tracking-normal text-l4">
+                  AI 科研工作台
+                </span>
               </span>
-              {!collapsed && n.label}
-            </button>
-          ))}
-          {/* 专注模式插槽：终端页专注时把纵向标签列表 + ⋯ 操作按钮 portal 到这里 */}
-          <div
-            id="app-rail-focus-slot"
-            className="mt-1 flex min-h-0 flex-col overflow-y-auto"
-          />
+            )}
+          </button>
+
+          <nav className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
+            {NAV_GROUPS.map((group, groupIndex) => (
+              <div key={group.label} className={groupIndex > 0 ? "mt-3" : ""}>
+                {!collapsed && (
+                  <div className="mb-1 px-2 text-[10px] font-medium tracking-[0.12em] text-l4">
+                    {group.label}
+                  </div>
+                )}
+                {group.items.map((n) => (
+                  <button
+                    key={n.id}
+                    type="button"
+                    onClick={() => setPage(n.id)}
+                    aria-current={page === n.id ? "page" : undefined}
+                    title={
+                      n.id === "terminal" && runningCount > 0
+                        ? `${n.label}（${runningCount} 个 agent 运行中）`
+                        : n.label
+                    }
+                    className={`relative mb-0.5 flex h-9 items-center rounded-md text-sm transition-colors ${
+                      collapsed
+                        ? "w-11 justify-center"
+                        : "w-full px-2.5"
+                    } ${
+                      page === n.id
+                        ? "bg-rail-sel text-l1"
+                        : "text-l3 hover:bg-white/5 hover:text-l2"
+                    }`}
+                  >
+                    {page === n.id && (
+                      <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-cta" />
+                    )}
+                    <span
+                      className={`relative ${collapsed ? "text-base" : "mr-2 w-5 text-center text-base"}`}
+                    >
+                      {n.icon}
+                      {n.id === "terminal" && runningCount > 0 && (
+                        <span className="absolute -right-2 -top-1 flex min-w-3.5 items-center justify-center rounded-full bg-inset px-1 text-[9px] leading-3 text-ok-text">
+                          {runningCount}
+                        </span>
+                      )}
+                    </span>
+                    {!collapsed && <span className="truncate">{n.label}</span>}
+                  </button>
+                ))}
+              </div>
+            ))}
+
+            {/* 专注模式插槽：终端页专注时把纵向标签列表 + ⋯ 操作按钮 portal 到这里 */}
+            <div
+              id="app-rail-focus-slot"
+              className="mt-2 flex min-h-0 flex-col overflow-y-auto"
+            />
+          </nav>
+
+          <div className="shrink-0 border-t border-hairline px-1.5 py-2">
+            {NAV_BOTTOM.map((n) => (
+              <button
+                key={n.id}
+                type="button"
+                onClick={() => setPage(n.id)}
+                aria-current={page === n.id ? "page" : undefined}
+                title={n.label}
+                className={`relative mb-0.5 flex h-9 items-center rounded-md text-sm transition-colors ${
+                  collapsed ? "w-11 justify-center" : "w-full px-2.5"
+                } ${
+                  page === n.id
+                    ? "bg-rail-sel text-l1"
+                    : "text-l3 hover:bg-white/5 hover:text-l2"
+                }`}
+              >
+                {page === n.id && (
+                  <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-cta" />
+                )}
+                <span className={collapsed ? "text-base" : "mr-2 w-5 text-center text-base"}>
+                  {n.icon}
+                </span>
+                {!collapsed && <span>{n.label}</span>}
+              </button>
+            ))}
+          </div>
         </aside>
         <main className="h-full min-h-0 min-w-0 flex-1">
           {/* 页面保持挂载，切换标签不销毁终端；未访问过的页不挂载（懒加载） */}

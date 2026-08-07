@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 /**
- * Conductor 暖黑主题令牌 —— 全应用唯一出处。
+ * Ccode 沉浸冷黑主题令牌 —— 全应用唯一出处。
  * Tailwind v4 @theme 会为每个 --color-* 自动生成同名工具类
  * （bg-rail / text-l2 / border-hairline / divide-hairline …）。
  */
@@ -154,6 +154,13 @@ body {
   overflow: hidden;
   overscroll-behavior: none;
   background: var(--color-canvas);
+  color: var(--color-l2);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+    "PingFang SC", sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 #root {
@@ -162,6 +169,45 @@ body {
   height: 100dvh;
   margin: 0;
   background: var(--color-canvas);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 1px solid var(--color-field);
+  outline-offset: 1px;
+}
+
+::selection {
+  background: var(--color-seg-sel);
+  color: var(--color-l1);
+}
+
+/* 终端是高频主工作台：导航、文件树、标签和右侧面板统一比管理页小字提高一级。
+   xterm 画布仍尊重设置页字号，默认值单独由 settings.rs 管理。 */
+.terminal-workbench .text-xs {
+  font-size: 13px;
+  line-height: 1.15rem;
+}
+.terminal-workbench .text-\[11px\] {
+  font-size: 12px;
+  line-height: 1rem;
+}
+.terminal-workbench .text-\[10px\] {
+  font-size: 11px;
+  line-height: 0.95rem;
 }
 
 /* Ghostty 风格细滚动条：透明轨道 + 低对比拇指 */

@@ -11,6 +11,7 @@ import ContextMenu from "../components/ContextMenu";
 import {
   PageFrame,
   PageHeader,
+  PageToolbar,
   primaryActionClass,
 } from "../components/PageFrame";
 import type {
@@ -1162,7 +1163,7 @@ export default function ProfilesPage() {
         />
 
         {/* 过滤条：状态分段 + 搜索 */}
-        <div className="mt-4 flex items-center justify-between">
+        <PageToolbar>
           <div className="flex gap-1">
             {(
               [
@@ -1204,14 +1205,14 @@ export default function ProfilesPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索名称 / 端点 / 模型"
-            className="w-56 rounded border border-hl2 bg-pg px-2 py-1 text-xs text-pl2 outline-none placeholder:text-l4 focus:border-l4"
+            className="h-7 w-56 rounded border border-field bg-canvas px-2 text-xs text-pl2 outline-none placeholder:text-l4 focus:border-l4"
           />
-        </div>
+        </PageToolbar>
 
         {error && <p className="mt-4 text-sm text-err-text">{error}</p>}
 
         {/* agent 分组（可折叠） */}
-        <div className="mt-5">
+        <div>
           {visibleAgents.map((agent) => {
             const det = agents.find((a) => a.id === agent.id);
             const list = profiles.filter(
@@ -1220,8 +1221,11 @@ export default function ProfilesPage() {
             if (q && list.length === 0) return null;
             const isCollapsed = collapsedGroups.has(agent.id);
             return (
-              <section key={agent.id} className="mb-3">
-                <div className="flex h-10 items-center gap-2 rounded-t bg-grp px-3">
+              <section
+                key={agent.id}
+                className="mb-3 overflow-hidden rounded-md border border-hl2 bg-pg"
+              >
+                <div className="flex h-10 items-center gap-2 border-b border-hl2 bg-grp px-3">
                   <button
                     onClick={() => {
                       // 更新/安装进行中禁止折叠，避免交互输入行（如 brew [y/n]）被隐藏
@@ -1330,7 +1334,7 @@ export default function ProfilesPage() {
                       (() => {
                         const st = officialStatus[agent.id];
                         return (
-                          <div className="flex items-center gap-2 border-b border-hl2 py-1.5 text-xs">
+                          <div className="flex items-center gap-2 border-b border-hl2 px-3 py-1.5 text-xs">
                             <span
                               className={`h-1.5 w-1.5 shrink-0 rounded-full ${st.connected ? "bg-okb" : "bg-l4"}`}
                             />
@@ -1476,7 +1480,7 @@ export default function ProfilesPage() {
                     )}
 
                     {list.length === 0 ? (
-                      <div className="flex h-12 items-center justify-between border-b border-hl2">
+                      <div className="flex h-12 items-center justify-between px-3">
                         <span className="text-sm text-l4">暂无配置</span>
                         <button
                           onClick={() =>
@@ -1492,7 +1496,7 @@ export default function ProfilesPage() {
                         {list.map((profile) => (
                           <li
                             key={profile.id}
-                            className="grid min-h-14 grid-cols-[minmax(130px,1fr)_minmax(150px,1fr)_minmax(150px,1fr)_110px_92px] items-center gap-3 text-sm"
+                            className="grid min-h-14 grid-cols-[minmax(130px,1fr)_minmax(150px,1fr)_minmax(150px,1fr)_110px_92px] items-center gap-3 px-3 text-sm"
                           >
                             <span
                               className="min-w-0 truncate font-medium text-pl1"

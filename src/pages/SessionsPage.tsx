@@ -15,6 +15,8 @@ import type {
 
 /** GitPanel 的 onTotals 占位（会话页不消费改动总量；稳定引用避免击穿 memo） */
 const NOOP_TOTALS = () => {};
+const compactActionClass =
+  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1";
 
 type Filter =
   | { kind: "all" }
@@ -752,12 +754,18 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           : null;
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full bg-canvas">
       {/* 左栏：分类树 */}
-      <div className="flex w-[clamp(190px,22vw,230px)] shrink-0 flex-col bg-rail2">
-        <div className="p-2">
+      <div className="flex w-[clamp(210px,22vw,240px)] shrink-0 flex-col border-r border-hairline bg-rail2">
+        <div className="border-b border-hairline p-2">
+          <div className="mb-2 flex h-7 items-center px-1 text-xs font-medium text-l2">
+            对话记录
+            <span className="ml-auto font-mono text-[10px] text-l4">
+              {regularVisible.length}
+            </span>
+          </div>
           <input
-            className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+            className="h-8 w-full rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
             placeholder="搜索项目 / 对话 / 步骤 / 标签"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -905,14 +913,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           className={`flex min-h-0 flex-1 flex-col ${selected ? "hidden" : ""}`}
         >
           {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
-          <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 bg-strip px-4 py-2">
+          <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 border-b border-hairline bg-strip px-4 py-2">
             {selecting ? (
               <>
                 <span className="text-xs text-l3">已选 {checkedInView} 项</span>
                 <div className="flex items-center gap-1">
                   <button
                     onClick={toggleSelectAll}
-                    className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                    className={compactActionClass}
                   >
                     {allChecked ? "取消全选" : "全选（当前筛选结果）"}
                   </button>
@@ -928,8 +936,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     }}
                     className={
                       confirmBatch
-                        ? "rounded bg-err px-2 py-0.5 text-xs text-err-text hover:brightness-110 disabled:opacity-50"
-                        : "rounded px-2 py-0.5 text-xs text-err-text hover:bg-white/5 disabled:opacity-50"
+                        ? "inline-flex h-7 items-center justify-center rounded-md bg-err px-2 text-xs text-err-text hover:brightness-110 disabled:opacity-50"
+                        : "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-err-text hover:bg-white/5 disabled:opacity-50"
                     }
                   >
                     {batchDeleting
@@ -940,7 +948,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   </button>
                   <button
                     onClick={exitSelectMode}
-                    className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                    className={compactActionClass}
                   >
                     取消
                   </button>
@@ -986,7 +994,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   </label>
                   <button
                     onClick={() => setSelecting(true)}
-                    className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                    className={compactActionClass}
                   >
                     批量管理
                   </button>
@@ -1144,7 +1152,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                               event.stopPropagation();
                               resumeInTerminal(s);
                             }}
-                            className="rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                            className={`${compactActionClass} text-l2`}
                           >
                             恢复
                           </button>
@@ -1251,7 +1259,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   setExportPath(null);
                   setReplayTab("chat");
                 }}
-                className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5"
+                className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5"
               >
                 ← 返回
               </button>
@@ -1297,7 +1305,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 <button
                   onClick={() => resumeInTerminal(selected)}
                   disabled={!selected.alive && !selected.pinned}
-                  className="rounded-l px-2 py-1 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+                  className="inline-flex h-7 items-center justify-center rounded-l-md px-2 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
                 >
                   恢复
                 </button>
@@ -1307,7 +1315,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     setResumeMenu({ x: r.right - 176, y: r.bottom + 4 });
                   }}
                   title="更多对话操作"
-                  className="rounded-r px-1 py-1 text-xs text-l4 hover:bg-white/5 hover:text-l1"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-r-md text-xs text-l4 hover:bg-white/5 hover:text-l1"
                 >
                   ⋯
                 </button>
@@ -1318,7 +1326,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   <button
                     key={k}
                     onClick={() => setReplayTab(k)}
-                    className={`rounded px-2.5 py-1 text-xs ${
+                    className={`inline-flex h-7 items-center justify-center rounded-md px-2.5 text-xs ${
                       replayTab === k
                         ? "bg-seg-sel text-l1"
                         : "text-l3 hover:text-l1"
@@ -1356,7 +1364,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       });
                       setPage("terminal");
                     }}
-                    className="shrink-0 rounded px-2 py-1 text-l2 hover:bg-white/5 hover:text-l1"
+                    className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-l2 hover:bg-white/5 hover:text-l1"
                   >
                     前往终端处理
                   </button>
@@ -1392,7 +1400,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                             type="button"
                             disabled={loadingOlder}
                             onClick={() => void loadOlderMessages()}
-                            className="rounded border border-field bg-strip px-3 py-1 text-xs text-l3 hover:bg-inset hover:text-l1 disabled:opacity-50"
+                            className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l3 hover:bg-inset hover:text-l1 disabled:opacity-50"
                           >
                             {loadingOlder ? "加载中…" : "加载更早对话"}
                           </button>

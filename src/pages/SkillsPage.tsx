@@ -6,6 +6,7 @@ import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
 import {
   Checkbox,
+  EmptyState,
   LoadingRows,
   PageFrame,
   PageHeader,
@@ -18,18 +19,6 @@ import type {
   SkillPathDto,
   SkillUpdateDto,
 } from "../types";
-
-/** 行内开关的短标签（agent 顺序与全局 AGENTS 一致） */
-const AGENT_SHORT: Record<string, string> = {
-  "claude-code": "claude",
-  codex: "codex",
-  gemini: "gemini",
-  qwen: "qwen",
-  opencode: "oc",
-  kimi: "kimi",
-  codebuddy: "cb",
-  cursor: "cur",
-};
 
 const SOURCE_LABEL: Record<string, string> = {
   local: "本地",
@@ -935,7 +924,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   return (
     <div className="flex h-full">
       <div className="min-w-0 flex-1 overflow-auto">
-        <PageFrame width="standard">
+        <PageFrame width="wide">
           <PageHeader
             title="技能"
             meta={`${skills.length} 个技能 · ${appliedCount} 个已应用`}
@@ -975,30 +964,26 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           {loading ? (
             <LoadingRows />
           ) : skills.length === 0 ? (
-            <div className="py-12 text-center">
-              <p className="text-sm text-l2">还没有技能</p>
-              <button
-                type="button"
-                onClick={() => setModal({ kind: "import" })}
-                className="mt-3 text-sm text-cta hover:brightness-125"
-              >
-                导入第一个技能
-              </button>
-            </div>
+            <EmptyState
+              title="还没有技能"
+              detail="导入现有技能，或把自己的研究方法新建为可复用技能。"
+              action={
+                <button
+                  type="button"
+                  onClick={() => setModal({ kind: "import" })}
+                  className={primaryActionClass}
+                >
+                  导入技能
+                </button>
+              }
+            />
           ) : (
-            <div className="mt-4 overflow-x-auto">
-              <div className="min-w-[620px]">
-                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_repeat(6,42px)_84px] items-center gap-1 border-b border-hairline bg-canvas py-2 text-xs text-l4">
-                  <span className="px-1">技能</span>
-                  {AGENTS.map((agent) => (
-                    <span
-                      key={agent.id}
-                      className="text-center"
-                      title={agent.label}
-                    >
-                      {AGENT_SHORT[agent.id] ?? agent.id}
-                    </span>
-                  ))}
+            <div className="mt-4 overflow-hidden rounded-md border border-hairline bg-canvas">
+              <div>
+                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 border-b border-hairline bg-strip px-3 py-2 text-xs text-l4">
+                  <span>技能</span>
+                  <span>来源</span>
+                  <span>应用</span>
                   <span />
                 </div>
                 {[
@@ -1015,7 +1000,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         aria-label={
                           catCollapsed.has(category) ? "展开" : "收起"
                         }
-                        className="mt-3 flex h-8 items-center gap-1.5 px-1 text-xs font-medium text-l3 hover:text-l1"
+                        className="flex h-9 w-full items-center gap-1.5 border-b border-hairline bg-canvas px-2 text-xs font-medium text-l3 hover:bg-white/5 hover:text-l1"
                       >
                         <span className="inline-flex h-7 w-7 items-center justify-center rounded text-l4 hover:bg-white/5">
                           {catCollapsed.has(category) ? "▸" : "▾"}
@@ -1031,11 +1016,16 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                             return (
                               <li
                                 key={skill.id}
-                                className="grid min-h-14 grid-cols-[minmax(220px,1fr)_repeat(6,42px)_84px] items-center gap-1"
+                                onClick={() => void onView(skill)}
+                                className={`grid min-h-16 cursor-pointer grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 px-3 transition-colors hover:bg-white/5 ${
+                                  preview?.skill.id === skill.id
+                                    ? "bg-inset"
+                                    : ""
+                                }`}
                               >
-                                <div className="min-w-0 px-1">
+                                <div className="min-w-0">
                                   <div className="flex min-w-0 items-center gap-1.5">
-                                    <span className="min-w-0 truncate text-sm font-medium text-l1">
+                                    <span className="min-w-0 truncate text-[15px] font-medium text-l1">
                                       {skill.name}
                                     </span>
                                     {stale && (
@@ -1054,6 +1044,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                   {catEdit?.id === skill.id ? (
                                     <input
                                       autoFocus
+                                      onClick={(event) => event.stopPropagation()}
                                       value={catEdit.value}
                                       onChange={(event) =>
                                         setCatEdit({
@@ -1081,63 +1072,40 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     />
                                   ) : (
                                     <p
-                                      className="truncate text-xs text-l3"
+                                      className="mt-0.5 truncate text-[13px] text-l3"
                                       title={skill.description}
                                     >
                                       {skill.description}
                                     </p>
                                   )}
                                 </div>
-                                {AGENTS.map((agent) => {
-                                  const enabled = !!skill.apps[agent.id];
-                                  const key = `${skill.id}:${agent.id}`;
-                                  const mode = enabled
-                                    ? (skill.appModes ?? {})[agent.id]
-                                    : undefined;
-                                  return (
-                                    <button
-                                      key={agent.id}
-                                      type="button"
-                                      onClick={() =>
-                                        void toggleApp(skill, agent.id)
-                                      }
-                                      disabled={applying[key]}
-                                      title={
-                                        enabled
-                                          ? `已分发到 ${agent.label}：${
-                                              mode === "copy"
-                                                ? "copy（有漂移检测）"
-                                                : "symlink"
-                                            }；点击取消`
-                                          : `应用到 ${agent.label}`
-                                      }
-                                      className="flex h-8 w-8 items-center justify-center rounded hover:bg-white/5 disabled:opacity-50"
-                                    >
-                                      {applying[key] ? (
-                                        <span className="text-xs text-l3">
-                                          …
-                                        </span>
-                                      ) : (
-                                        <span
-                                          className={`h-2 w-2 rounded-full ${
-                                            enabled ? "bg-okb" : "bg-l4"
-                                          }`}
-                                        />
-                                      )}
-                                    </button>
-                                  );
-                                })}
-                                <div className="flex items-center justify-end gap-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => void onView(skill)}
-                                    className="rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1"
-                                  >
-                                    查看
-                                  </button>
+                                <span className="truncate text-xs text-l3">
+                                  {SOURCE_LABEL[skill.source] ?? skill.source}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void onView(skill);
+                                  }}
+                                  className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs text-l2 hover:bg-seg-sel hover:text-l1"
+                                  title="在右侧管理该技能应用到哪些 Agent"
+                                >
+                                  <span
+                                    className={`size-1.5 shrink-0 rounded-full ${
+                                      Object.values(skill.apps).some(Boolean)
+                                        ? "bg-ok-text"
+                                        : "bg-l4"
+                                    }`}
+                                  />
+                                  {Object.values(skill.apps).filter(Boolean).length}/
+                                  {AGENTS.length} 个 Agent
+                                </button>
+                                <div className="flex items-center justify-end">
                                   <button
                                     type="button"
                                     onClick={(event) => {
+                                      event.stopPropagation();
                                       const rect =
                                         event.currentTarget.getBoundingClientRect();
                                       setRowMenu({
@@ -1168,12 +1136,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
 
       {/* SKILL.md 预览面板 */}
       {preview && (
-        <div className="flex w-[420px] shrink-0 flex-col border-l border-hairline bg-canvas">
-          <div className="flex shrink-0 items-center gap-2 bg-strip px-3 py-2">
-            <span className="truncate text-sm font-medium text-l1">
+        <div className="flex w-[clamp(360px,34vw,460px)] shrink-0 flex-col border-l border-hairline bg-canvas">
+          <div className="flex h-11 shrink-0 items-center gap-2 border-b border-hairline bg-strip px-3">
+            <span className="truncate text-[15px] font-medium text-l1">
               {preview.skill.name}
             </span>
-            <span className="text-xs text-l3">SKILL.md</span>
             <button
               onClick={() => setPreview(null)}
               title="关闭预览"
@@ -1183,7 +1150,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               ×
             </button>
           </div>
-          <div className="shrink-0 border-b border-hairline px-3 py-2 text-xs text-l3">
+          <div className="shrink-0 border-b border-hairline px-3 py-2.5 text-[13px] text-l3">
             <span>
               {SOURCE_LABEL[preview.skill.source] ?? preview.skill.source}
             </span>
@@ -1212,8 +1179,59 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               </span>
             )}
           </div>
-          <div className="min-h-0 flex-1 overflow-auto p-3">
-            <pre className="whitespace-pre-wrap break-all font-mono text-xs text-l2">
+          <div className="shrink-0 border-b border-hairline bg-strip px-3 py-3">
+            <div className="mb-2 flex items-center gap-2">
+              <span className="text-[13px] font-medium text-l2">
+                应用到 Agent
+              </span>
+              <span className="ml-auto text-xs text-l4">
+                {Object.values(preview.skill.apps).filter(Boolean).length}/
+                {AGENTS.length}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {AGENTS.map((agent) => {
+                const enabled = !!preview.skill.apps[agent.id];
+                const key = `${preview.skill.id}:${agent.id}`;
+                const mode = enabled
+                  ? (preview.skill.appModes ?? {})[agent.id]
+                  : undefined;
+                return (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    onClick={() => void toggleApp(preview.skill, agent.id)}
+                    disabled={applying[key]}
+                    title={
+                      enabled
+                        ? `${mode === "copy" ? "copy（有漂移检测）" : "symlink"}；点击取消应用`
+                        : `应用到 ${agent.label}`
+                    }
+                    className={`flex h-9 items-center gap-2 rounded-md border px-2 text-[13px] transition-colors disabled:opacity-50 ${
+                      enabled
+                        ? "border-cta-bd bg-inset text-l1"
+                        : "border-hairline bg-canvas text-l3 hover:bg-inset hover:text-l1"
+                    }`}
+                  >
+                    <span
+                      className={`size-2 shrink-0 rounded-full ${
+                        enabled ? "bg-ok-text" : "bg-l4"
+                      }`}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-left">
+                      {agent.label}
+                    </span>
+                    {applying[key] && <span className="text-l4">…</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto p-4">
+            <div className="mb-3 text-xs font-medium tracking-wide text-l4">
+              SKILL.md
+            </div>
+            <pre className="whitespace-pre-wrap break-all font-mono text-[13px] leading-6 text-l2">
               {preview.content}
             </pre>
           </div>

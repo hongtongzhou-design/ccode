@@ -5,9 +5,11 @@ import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
 import ProjectGroup from "../components/ProjectGroup";
 import {
+  EmptyState,
   PageFrame,
   PageHeader,
   primaryActionClass,
+  secondaryActionClass,
 } from "../components/PageFrame";
 import type {
   ProjectConfigReadDto,
@@ -580,6 +582,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     y: number;
     ws: WorkspaceDto;
   } | null>(null);
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
   // 新建弹窗的仓库候选在页面可见时预热（list_repos 扫描慢，避免弹窗内空等）
   const [repos, setRepos] = useState<RepoDto[]>([]);
   const [reposLoading, setReposLoading] = useState(false);
@@ -819,8 +822,20 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         list: workspaces.filter((w) => w.repoPath === repoPath),
       })),
   ];
+  const selectedGroup =
+    groups.find((group) => group.key === selectedGroupKey) ?? groups[0] ?? null;
+  const groupKeySignature = groups.map((group) => group.key).join("\n");
+  useEffect(() => {
+    if (groups.length === 0) {
+      if (selectedGroupKey !== null) setSelectedGroupKey(null);
+      return;
+    }
+    if (!groups.some((group) => group.key === selectedGroupKey)) {
+      setSelectedGroupKey(groups[0].key);
+    }
+  }, [groupKeySignature, selectedGroupKey]);
   const actionBtn =
-    "rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1";
+    "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1";
 
   function openReview(
     workspace: WorkspaceDto,
@@ -957,33 +972,92 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
 
   return (
-    <div className="h-full overflow-auto">
-      <PageFrame width="standard">
+    <div className="flex h-full bg-canvas">
+      <aside className="flex w-[230px] shrink-0 flex-col border-r border-hairline bg-rail2">
+        <div className="flex h-12 shrink-0 items-center gap-2 border-b border-hairline px-3">
+          <span className="text-sm font-medium text-l1">项目</span>
+          <span className="ml-auto text-xs text-l4">{groups.length}</span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto py-1.5">
+          {groups.map((group) => {
+            const groupActive = group.list.filter(
+              (workspace) => workspace.status === "active",
+            ).length;
+            const needsAttention = group.list.filter((workspace) => {
+              const state = health[workspace.id];
+              return state?.conflict || state?.readyToMerge;
+            }).length;
+            const selected = selectedGroup?.key === group.key;
+            return (
+              <button
+                key={group.key}
+                type="button"
+                onClick={() => setSelectedGroupKey(group.key)}
+                title={group.repoPath}
+                className={`mx-1.5 mb-1 flex w-[calc(100%-12px)] items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors ${
+                  selected
+                    ? "bg-rail-sel text-l1"
+                    : "text-l3 hover:bg-white/5 hover:text-l2"
+                }`}
+              >
+                <span
+                  className={`mt-1 size-1.5 shrink-0 rounded-full ${
+                    needsAttention > 0
+                      ? "bg-warn-text"
+                      : groupActive > 0
+                        ? "bg-ok-text"
+                        : "bg-l4"
+                  }`}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[13px] font-medium">
+                    {group.project?.name ?? group.repoName}
+                  </span>
+                  <span className="mt-0.5 block truncate text-xs text-l4">
+                    {groupActive > 0 ? `${groupActive} 个活跃任务` : "暂无活跃任务"}
+                    {needsAttention > 0 ? ` · ${needsAttention} 个待处理` : ""}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+          {groups.length === 0 && (
+            <p className="px-3 py-4 text-xs text-l4">还没有项目</p>
+          )}
+        </div>
+        <div className="shrink-0 border-t border-hairline p-2">
+          <button
+            type="button"
+            onClick={() => void onAddProject()}
+            className="flex h-9 w-full items-center justify-center rounded-md text-[13px] text-l2 hover:bg-white/5 hover:text-l1"
+          >
+            + 添加项目
+          </button>
+        </div>
+      </aside>
+
+      <div className="min-w-0 flex-1 overflow-auto">
+        <PageFrame width="wide">
       <PageHeader
         title="工作区"
-        meta={`${active.length} 个活跃 · ${projects.length} 个项目 · ${repoCount} 个仓库`}
+        meta={
+          selectedGroup
+            ? `${selectedGroup.project?.name ?? selectedGroup.repoName} · ${selectedGroup.list.length} 个任务`
+            : `${active.length} 个活跃 · ${projects.length} 个项目 · ${repoCount} 个仓库`
+        }
         actions={
-          <>
-            <button
-              type="button"
-              onClick={() => void onAddProject()}
-              className={primaryActionClass}
-            >
-              + 添加项目
-            </button>
-            <button
-              type="button"
-              onClick={() => setModal(true)}
-              className="rounded border border-field px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
-            >
-              + 新建工作区
-            </button>
-          </>
+          <button
+            type="button"
+            onClick={() => setModal(true)}
+            className={secondaryActionClass}
+          >
+            新建工作区
+          </button>
         }
       />
       {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
       {created && (
-        <div className="mb-4 flex flex-wrap items-center gap-3 rounded bg-strip p-2 text-xs text-l2">
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md border border-hairline bg-strip p-2.5 text-xs text-l2">
           <span>
             <span className="mr-1 text-okb">✓</span>
             工作区「{created.name}」已创建 · 分支 {created.branch}
@@ -1006,7 +1080,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
               setCreated(null);
               void openInTerminal(workspace);
             }}
-            className="ml-auto shrink-0 rounded border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110"
+            className="ml-auto inline-flex h-7 shrink-0 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110"
           >
             打开终端
           </button>
@@ -1021,28 +1095,34 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         </div>
       )}
       {groups.length === 0 ? (
-        <div className="py-12 text-center">
-          <p className="text-sm text-l3">暂无工作区</p>
-          <p className="mt-1 text-xs text-l4">
-            「添加项目」注册课题目录并获得流水线骨架，或直接「新建工作区」。
-          </p>
-        </div>
-      ) : (
-        groups.map((group) => (
+        <EmptyState
+          title="还没有研究项目"
+          detail="先添加一个项目目录，Ccode 会为它建立流水线和隔离任务。"
+          action={
+            <button
+              type="button"
+              onClick={() => void onAddProject()}
+              className={primaryActionClass}
+            >
+              添加项目
+            </button>
+          }
+        />
+      ) : selectedGroup ? (
           <ProjectGroup
-            key={group.key}
-            project={group.project}
-            repoPath={group.repoPath}
-            repoName={group.repoName}
-            workspaces={group.list}
+            key={selectedGroup.key}
+            project={selectedGroup.project}
+            repoPath={selectedGroup.repoPath}
+            repoName={selectedGroup.repoName}
+            workspaces={selectedGroup.list}
             health={health}
             drift={drift}
             driftFailed={driftFailed}
             refreshToken={refreshToken}
             freshGitGuide={
-              !!group.project &&
+              !!selectedGroup.project &&
               !!freshProjectPath &&
-              samePath(group.project.path, freshProjectPath)
+              samePath(selectedGroup.project.path, freshProjectPath)
             }
             onDismissGitGuide={() => setFreshProjectPath(null)}
             onRefresh={refresh}
@@ -1053,13 +1133,13 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             onRegisterProject={setAddProjectPath}
             onError={setError}
           >
-            {group.list.length === 0 ? (
+            {selectedGroup.list.length === 0 ? (
               <p className="py-2 text-xs text-l4">
                 该项目还没有工作区，从上方流水线步骤「开始」一键开步。
               </p>
             ) : (
             <ul className="divide-y divide-hairline">
-              {group.list.map((workspace) => {
+              {selectedGroup.list.map((workspace) => {
                 const workspaceHealth = health[workspace.id];
                 const workspaceDrift = drift[workspace.id];
                 const isDriftFailed = !!driftFailed[workspace.id];
@@ -1080,7 +1160,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                     canResolveConflict ||
                     isDriftFailed);
                 return (
-                  <li key={workspace.id} className="py-2.5">
+                  <li key={workspace.id} className="py-3">
                     <div className="flex min-w-0 items-center gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">
@@ -1098,7 +1178,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                                 ws: workspace,
                               });
                             }}
-                            className={`inline-flex shrink-0 items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs ${state.textClass} hover:bg-seg-sel`}
+                            className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-md bg-inset px-2 text-xs ${state.textClass} hover:bg-seg-sel`}
                             title="查看状态详情"
                           >
                             <span
@@ -1110,7 +1190,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             <button
                               type="button"
                               onClick={() => void refresh()}
-                              className="shrink-0 rounded px-1.5 py-0.5 text-xs text-warn-text hover:bg-white/5"
+                              className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-warn-text hover:bg-white/5"
                               title="状态诊断失败，点击重新检查"
                             >
                               诊断失败 · 重试
@@ -1186,8 +1266,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             </ul>
             )}
           </ProjectGroup>
-        ))
-      )}
+      ) : null}
       {addProjectPath && (
         <AddProjectModal
           path={addProjectPath}
@@ -1195,6 +1274,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           onRegistered={(project) => {
             setAddProjectPath(null);
             setFreshProjectPath(project.path);
+            setSelectedGroupKey(`p:${project.path}`);
             void refresh();
           }}
         />
@@ -1235,7 +1315,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           onClose={() => setDetailsPopover(null)}
         />
       )}
-      </PageFrame>
+        </PageFrame>
+      </div>
     </div>
   );
 }

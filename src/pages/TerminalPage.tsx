@@ -115,7 +115,7 @@ interface SessionLinkState {
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
 const RIGHT_PANEL_WIDTH_KEY = "ccode.terminalRightWidth";
-const RIGHT_PANEL_DEFAULT_WIDTH = 420;
+const RIGHT_PANEL_DEFAULT_WIDTH = 380;
 const RIGHT_PANEL_MIN_WIDTH = 320;
 const RIGHT_PANEL_MAX_WIDTH = 760;
 
@@ -517,7 +517,7 @@ const TerminalView = memo(function TerminalView({
     if (!everVisible) return;
     const term = new Terminal({
       fontFamily: `'${settingsRef.current?.terminalFontFamily ?? "JetBrains Mono"}', 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace`,
-      fontSize: settingsRef.current?.terminalFontSize ?? 13,
+      fontSize: settingsRef.current?.terminalFontSize ?? 14,
       // 显示质感微调：清瘦锐利（向 Ghostty 靠）、盒绘对齐、粗体增亮、平滑滚动
       fontWeight: 400,
       fontWeightBold: 600,
@@ -1098,7 +1098,7 @@ const TerminalView = memo(function TerminalView({
   }, [onActions, tabId]);
 
   const select =
-    "rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
+    "h-8 rounded-md border border-field bg-canvas px-2 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
   function openTerminalActionMenu(event: React.MouseEvent<HTMLButtonElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1147,7 +1147,7 @@ const TerminalView = memo(function TerminalView({
         <>
           <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
             <select
-              className={`${select} w-32 shrink-0`}
+              className={`${select} w-36 shrink-0`}
               value={agentId}
               onChange={(e) => {
                 setAgentId(e.target.value);
@@ -1164,7 +1164,7 @@ const TerminalView = memo(function TerminalView({
             </select>
             <select
               ref={profileSelectRef}
-              className={`${select} w-36 shrink-0`}
+              className={`${select} w-40 shrink-0`}
               value={profileId}
               onChange={(e) => {
                 setProfileId(e.target.value);
@@ -1214,7 +1214,7 @@ const TerminalView = memo(function TerminalView({
               (running ? (
                 <button
                   onClick={stop}
-                  className="shrink-0 rounded bg-err px-3 py-1.5 text-sm text-err-text hover:brightness-110"
+                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-md bg-err px-3 text-sm text-err-text hover:brightness-110"
                 >
                   停止
                 </button>
@@ -1222,7 +1222,7 @@ const TerminalView = memo(function TerminalView({
                 <button
                   onClick={() => (restored ? void restoreTask() : void launch())}
                   disabled={!profileId}
-                  className="shrink-0 rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
                   {restored ? "恢复任务" : "启动"}
                 </button>
@@ -1601,7 +1601,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     const railWidth = expanded ? 0 : railCollapsed ? 32 : 240;
     return Math.max(
       RIGHT_PANEL_MIN_WIDTH,
-      Math.min(RIGHT_PANEL_MAX_WIDTH, total - railWidth - 280),
+      Math.min(RIGHT_PANEL_MAX_WIDTH, total - railWidth - 340),
     );
   }
 
@@ -2294,12 +2294,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     .join(" · ");
 
   return (
-    <div ref={terminalRootRef} className="relative flex h-full">
+    <div
+      ref={terminalRootRef}
+      className="terminal-workbench relative flex h-full bg-canvas"
+    >
       {/* 左栏：工作树 + 运行中总览（专注模式下整体隐藏） */}
       {!focusMode &&
         !rightExpanded &&
         (railCollapsed ? (
-          <div className="flex w-8 shrink-0 flex-col items-center bg-rail2 py-1.5">
+          <div className="flex w-8 shrink-0 flex-col items-center border-r border-hairline bg-rail2 py-1.5">
             <button
               onClick={() => setRailCollapsed(false)}
               title="展开工作树"
@@ -2309,8 +2312,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             </button>
           </div>
         ) : (
-          <div className="flex w-60 shrink-0 flex-col bg-rail2">
-            <div className="flex shrink-0 items-center gap-2 px-2 py-1.5">
+          <div className="flex w-60 shrink-0 flex-col border-r border-hairline bg-rail2">
+            <div className="flex h-9 shrink-0 items-center gap-2 border-b border-hairline px-2">
               <span className="mr-auto text-xs font-medium text-l3">
                 工作树
               </span>
@@ -2459,7 +2462,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       <div className="flex min-w-0 flex-1 flex-col">
         {/* 顶部标签条：专注模式下隐藏（标签移到 App 侧栏专注插槽） */}
         {!focusMode && (
-          <div className="flex h-8 items-center gap-1 overflow-x-auto bg-strip px-2">
+          <div className="flex h-9 items-center gap-1 overflow-x-auto border-b border-hairline bg-strip px-2">
             {tabs.map((t) => {
               const s = statuses[t.id];
               const active = t.id === activeId;
@@ -2467,7 +2470,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 <div
                   key={t.id}
                   onClick={() => setActiveId(t.id)}
-                  className={`group/tab flex h-8 shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-3 text-xs ${
+                  className={`group/tab flex h-9 shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-3 text-xs ${
                     active
                       ? "border-cta text-l1"
                       : "border-transparent text-l3 hover:text-l1"
@@ -2619,7 +2622,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           </div>
           <div
             style={{ width: rightWidth }}
-            className="flex shrink-0 flex-col bg-canvas"
+            className="flex shrink-0 flex-col border-l border-hairline bg-canvas"
           >
             <div className="flex shrink-0 items-center gap-1 bg-strip px-2 py-1.5">
               {(["dialogue", "preview", "git"] as const).map((k) => {

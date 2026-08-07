@@ -166,7 +166,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ recentReposLoading: false });
     }
   },
-  page: "profiles",
+  page: "workspaces",
   setPage: (p) => set({ page: p }),
   navCollapsed: localStorage.getItem("ccode.navCollapsed") === "1",
   toggleNavCollapsed: () =>
