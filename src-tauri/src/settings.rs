@@ -11,6 +11,10 @@ pub const DEFAULT_BREW_MIRROR: bool = true;
 pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
 pub const DEFAULT_THEME: &str = "midnight";
 pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
+/// 全局快捷键默认绑定（前端 hotkeys.ts 解析；mod = macOS ⌘ / 其他平台 Ctrl）
+pub const DEFAULT_HOTKEY_PALETTE: &str = "mod+k";
+pub const DEFAULT_HOTKEY_HIDE_CHROME: &str = "mod+\\";
+pub const DEFAULT_HOTKEY_PAGE_SWITCH: bool = true;
 const KNOWN_THEMES: [&str; 7] = [
     "midnight", "terracotta", "ayu", "mocha", "neutral", "dracula", "shadcn",
 ];
@@ -40,6 +44,11 @@ pub struct AppSettingsDto {
     /// 精确注意力标记（Claude Code hooks）：开启/关闭由 claude_hooks::set_claude_hooks_attention
     /// 统一完成（写 ~/.claude/settings.json hooks 段 + 记本字段），勿单独 patch 本字段
     pub claude_hooks_attention: Option<bool>,
+    /// 快捷键绑定（"mod+shift+k" 格式，mod=⌘/Ctrl；空串 = 禁用该快捷键）
+    pub hotkey_palette: Option<String>,
+    pub hotkey_hide_chrome: Option<String>,
+    /// ⌘1–⌘7 页切是一组七个绑定，按开关处理不逐个自定义
+    pub hotkey_page_switch: Option<bool>,
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -90,6 +99,13 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
                 .unwrap_or_else(|| "auto".to_string()),
         ),
         claude_hooks_attention: s.claude_hooks_attention.or(Some(false)),
+        hotkey_palette: s
+            .hotkey_palette
+            .or_else(|| Some(DEFAULT_HOTKEY_PALETTE.to_string())),
+        hotkey_hide_chrome: s
+            .hotkey_hide_chrome
+            .or_else(|| Some(DEFAULT_HOTKEY_HIDE_CHROME.to_string())),
+        hotkey_page_switch: s.hotkey_page_switch.or(Some(DEFAULT_HOTKEY_PAGE_SWITCH)),
     }
 }
 
@@ -128,6 +144,16 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.claude_hooks_attention.is_some() {
         cur.claude_hooks_attention = patch.claude_hooks_attention;
+    }
+    // 快捷键：Some 即覆盖（含空串=禁用）；读侧 with_defaults 只填 None
+    if patch.hotkey_palette.is_some() {
+        cur.hotkey_palette = patch.hotkey_palette;
+    }
+    if patch.hotkey_hide_chrome.is_some() {
+        cur.hotkey_hide_chrome = patch.hotkey_hide_chrome;
+    }
+    if patch.hotkey_page_switch.is_some() {
+        cur.hotkey_page_switch = patch.hotkey_page_switch;
     }
 }
 

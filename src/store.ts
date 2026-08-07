@@ -45,6 +45,11 @@ export interface AppSettings {
   externalTerminal?: string;
   /** 精确注意力标记（Claude Code hooks，写 ~/.claude/settings.json，默认关） */
   claudeHooksAttention?: boolean;
+  /** 快捷键绑定（"mod+shift+k" 格式，mod=⌘/Ctrl；空串 = 禁用） */
+  hotkeyPalette?: string;
+  hotkeyHideChrome?: string;
+  /** ⌘1–⌘7 页切开关（一组七个绑定，不逐个自定义） */
+  hotkeyPageSwitch?: boolean;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效 */
@@ -108,6 +113,9 @@ interface AppState {
   toggleNavCollapsed: () => void;
   /** 页面自动收展（多列工作页收起）：只改状态，不写 localStorage、不置 navManual */
   setNavCollapsedAuto: (collapsed: boolean) => void;
+  /** 执行态全隐藏侧栏 chrome（⌘\ 切换，session 级不持久化） */
+  chromeHidden: boolean;
+  toggleChromeHidden: () => void;
   /** 待消费的终端启动请求；终端页可见时消费并清空 */
   pendingTerminal: PendingTerminal | null;
   setPendingTerminal: (p: PendingTerminal | null) => void;
@@ -189,6 +197,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { navCollapsed: !s.navCollapsed, navManual: true };
     }),
   setNavCollapsedAuto: (collapsed) => set({ navCollapsed: collapsed }),
+  chromeHidden: false,
+  toggleChromeHidden: () => set((s) => ({ chromeHidden: !s.chromeHidden })),
   pendingTerminal: null,
   setPendingTerminal: (p) => set({ pendingTerminal: p }),
   workspaceReviewRequest: null,

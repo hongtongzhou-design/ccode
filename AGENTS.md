@@ -181,6 +181,12 @@ src-tauri/src/
 - **首页「待你处理」收件箱（v3.39）**：工作区页顶部聚合 工作区冲突/可合并 + 终端注意力（待确认/已完成），
   排序 冲突 > 待确认 > 可合并 > 已完成，为空整块不渲染；终端运行状态经 `terminalRunInputs` 镜像进 store 供跨页只读
   （TerminalPage 是唯一写入方，不新增轮询）；跳终端激活标签走一次性 `focusTabReq`（可见时消费，已关闭标签静默忽略）。
+- **键盘流（v3.40）**：⌘K 命令面板（页面/主题/侧栏显隐，过滤纯逻辑在 `command-palette.ts`）、⌘1–⌘7 页切（顺序同侧栏）、
+  ⌘\ 执行态隐藏侧栏（`chromeHidden`，session 级）；⌘F 已被终端搜索占用、⌘K 与 xterm 无冲突。主题清单单一出处 `src/themes.ts`。
+  通知动作 `ccode.attention`（「去处理」按钮）onAction → 聚焦窗口 + 回首页收件箱。
+  **v3.41**：绑定可自定义（设置页录制，`hotkeys.ts` 组合串，空串=禁用，settings.json 三字段）；
+  通知 extra 带 tabId/cwd/kind，已完成且 cwd 命中工作区直达评审覆盖层，其余聚焦标签；收件箱经 `session_tail_state`
+  直查外部 live 会话（≤10 条），终端页未挂载不再是盲区。
   - **终端分屏（SplitView）只是显隐与排序变化**：全部标签仍在同一容器保持挂载，靠 flex order 把活跃标签（左）与对照标签（右）
     排到分隔条两侧，禁止把标签移进第二棵子树（会重挂载杀 PTY）；右栏/文件树/改动跟随「活跃 pane」（点击 pane 切换，focusedId），
     分屏开启时两个 pane 的 PTY 都推流；分屏状态不进持久化白名单，仅分隔比例本地记忆。

@@ -145,13 +145,18 @@ type RightTab = (typeof RIGHT_TABS)[number]["key"];
 /** shell 单引号转义（向 PTY 写 cd 命令用） */
 const shQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
-/** 发系统通知：macOS 首次发送前必须显式申请权限（系统级弹窗，仅首次）；被拒则静默跳过 */
-async function fireAttentionNotification(title: string, body: string) {
+/** 发系统通知：macOS 首次发送前必须显式申请权限（系统级弹窗，仅首次）；被拒则静默跳过。
+ *  带「去处理」动作按钮（ccode.attention，App.tsx 注册）；extra 携带 tabId/cwd/kind，
+ *  onAction 路由：已完成且 cwd 是任务工作区 → 直达评审覆盖层；待确认/其余 → 聚焦对应标签。 */
+async function fireAttentionNotification(
+  title: string,
+  body: string,
+  extra: { tabId: string; cwd: string; kind: "confirm" | "done" },
+) {
   let granted = await isPermissionGranted();
   if (!granted) granted = (await requestPermission()) === "granted";
   if (!granted) return;
-  // 插件 v2 桌面端不暴露通知正文点击回调（onAction 仅动作按钮），点击聚焦应用 v1 不接
-  sendNotification({ title, body });
+  sendNotification({ title, body, actionTypeId: "ccode.attention", extra });
 }
 
 /** 七套深色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板；调色板其余部分共享） */
@@ -2308,6 +2313,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       void fireAttentionNotification(
         notifyTitle(s.title, agentLabel(s.agentId)),
         notifyBody(kind),
+        { tabId, cwd: s.cwd, kind },
       );
     }
   }, [statuses, notificationsEnabled]);

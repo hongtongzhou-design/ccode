@@ -6,15 +6,18 @@ import { useAppStore } from "../store";
 import type { AppSettings } from "../store";
 import {
   fieldClass,
+  ghostActionClass,
   hoverRevealClass,
   PageFrame,
   PageHeader,
   rowActionClass,
   Toggle,
 } from "../components/PageFrame";
+import { comboFromEvent, comboLabel } from "../hotkeys";
 
 /** 七套深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
 import { XTERM_PALETTES, PALETTE_PREVIEW_KEYS } from "../terminal-palettes";
+import { THEMES } from "../themes";
 
 const PALETTES = [
   { id: "dark-plus", name: "Dark+" },
@@ -29,15 +32,7 @@ function paletteDots(id: string): string[] {
   return PALETTE_PREVIEW_KEYS.map((k) => p[k]);
 }
 
-const THEMES = [
-  { id: "midnight", name: "沉浸黑" },
-  { id: "terracotta", name: "陶土" },
-  { id: "ayu", name: "Ayu 琥珀" },
-  { id: "mocha", name: "Catppuccin" },
-  { id: "neutral", name: "极简灰蓝" },
-  { id: "dracula", name: "Dracula" },
-  { id: "shadcn", name: "灰蓝正红" },
-] as const;
+// 主题清单单一出处在 ../themes（命令面板共用）
 
 type ThemeSwatch = { rail: string; canvas: string; accent: string };
 
@@ -157,6 +152,82 @@ function Row({
       <div className="flex min-w-0 items-center justify-end gap-2">{children}</div>
       {extra && <div className="col-span-2 mt-2">{extra}</div>}
     </div>
+  );
+}
+
+/** 快捷键录制钮：点击进入监听态，按下新组合即保存；Esc 取消，与另一绑定冲突时拒绝并提示 */
+function HotkeyCapture({
+  value,
+  defaultValue,
+  conflictWith,
+  onSave,
+}: {
+  /** 当前绑定（"" = 已禁用） */
+  value: string;
+  defaultValue: string;
+  /** 另一个可编辑绑定的当前值，用于防冲突 */
+  conflictWith: string;
+  onSave: (combo: string) => void;
+}) {
+  const [listening, setListening] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  return (
+    <span className="flex items-center gap-1.5">
+      <button
+        type="button"
+        onClick={() => {
+          setListening(true);
+          setConflict(false);
+        }}
+        onKeyDown={(e) => {
+          if (!listening) return;
+          // 阻断冒泡：录制期间全局快捷键（App.tsx 的 window 监听）不得触发
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.key === "Escape") {
+            setListening(false);
+            return;
+          }
+          const combo = comboFromEvent(e);
+          if (!combo) return;
+          if (conflictWith && combo === conflictWith) {
+            setConflict(true);
+            return;
+          }
+          onSave(combo);
+          setListening(false);
+        }}
+        onBlur={() => setListening(false)}
+        className={`inline-flex h-7 min-w-16 items-center justify-center rounded-md border px-2 font-mono text-xs ${
+          listening
+            ? "border-cta-bd bg-inset text-cta"
+            : conflict
+              ? "border-err-text/50 text-err-text"
+              : "border-field bg-inset text-l2"
+        }`}
+      >
+        {listening ? "按下新快捷键…" : comboLabel(value)}
+      </button>
+      {conflict && <span className="text-xs text-err-text">与另一个快捷键冲突</span>}
+      {value !== defaultValue && (
+        <button
+          type="button"
+          onClick={() => onSave(defaultValue)}
+          className={ghostActionClass}
+        >
+          恢复默认
+        </button>
+      )}
+      {value !== "" && (
+        <button
+          type="button"
+          onClick={() => onSave("")}
+          className={ghostActionClass}
+        >
+          禁用
+        </button>
+      )}
+    </span>
   );
 }
 
@@ -658,6 +729,40 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             label="长任务 OS 通知"
             checked={settings?.notificationsEnabled ?? true}
             onChange={(checked) => patch({ notificationsEnabled: checked })}
+          />
+        </Row>
+      </Section>
+
+      {/* 快捷键：点击绑定钮进入录制态，按下新组合即保存；空串 = 禁用 */}
+      <Section
+        title="快捷键"
+        open={!collapsed.hotkeys}
+        onToggle={() => toggleSection("hotkeys")}
+      >
+        <Row label="命令面板" hint="呼出页面跳转 / 主题切换 / 侧栏显隐">
+          <HotkeyCapture
+            value={settings?.hotkeyPalette ?? "mod+k"}
+            defaultValue="mod+k"
+            conflictWith={settings?.hotkeyHideChrome ?? "mod+\\"}
+            onSave={(combo) => void patch({ hotkeyPalette: combo })}
+          />
+        </Row>
+        <Row label="隐藏 / 显示侧栏" hint="执行态：界面只剩工作内容">
+          <HotkeyCapture
+            value={settings?.hotkeyHideChrome ?? "mod+\\"}
+            defaultValue="mod+\\"
+            conflictWith={settings?.hotkeyPalette ?? "mod+k"}
+            onSave={(combo) => void patch({ hotkeyHideChrome: combo })}
+          />
+        </Row>
+        <Row
+          label="⌘1–⌘7 页面切换"
+          hint="按侧栏顺序直接切页（一组七个绑定，整组开关）"
+        >
+          <Toggle
+            checked={settings?.hotkeyPageSwitch !== false}
+            onChange={(v) => void patch({ hotkeyPageSwitch: v })}
+            label="⌘1–⌘7 页面切换"
           />
         </Row>
       </Section>

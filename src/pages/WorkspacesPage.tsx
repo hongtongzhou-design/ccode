@@ -743,6 +743,45 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   // 终端标签运行状态镜像（TerminalPage 写入）+ 跳终端激活标签请求（首页「待你处理」用）
   const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
   const setFocusTabReq = useAppStore((s) => s.setFocusTabReq);
+  // 会话清单（启动即加载）+ 对话页打开指定会话请求（外部 live 会话的收件箱入口）
+  const sessions = useAppStore((s) => s.sessions);
+  const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
+  // 外部 live 会话（无终端标签可跳）的尾部注意力：后端直查 session_tail_state，
+  // 补齐收件箱在终端页未挂载时的盲区；只查 live 且非内部的少量会话（上限 10 条）
+  const [liveTail, setLiveTail] = useState<Record<string, string>>({});
+  const liveSig = sessions
+    .filter((s) => s.live && !s.internal)
+    .map((s) => `${s.agent}:${s.sessionId}`)
+    .join("\n");
+  useEffect(() => {
+    if (!visible) return;
+    const targets = sessions
+      .filter((s) => s.live && !s.internal)
+      .slice(0, 10);
+    let cancelled = false;
+    void Promise.all(
+      targets.map(async (s) => {
+        try {
+          const state = await invoke<string>("session_tail_state", {
+            agent: s.agent,
+            filePath: s.filePath,
+          });
+          return [`${s.agent}:${s.sessionId}`, state] as const;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      const map: Record<string, string> = {};
+      for (const e of entries) if (e) map[e[0]] = e[1];
+      setLiveTail(map);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, liveSig]);
 
   async function refresh() {
     try {
@@ -1034,6 +1073,24 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         text: `${tabLabel(it.agentId, it.title, it.cwdLabel)} 待你确认`,
         actionLabel: "去处理",
         onClick: () => jumpToTab(it.tabId),
+      })),
+    // 外部运行（无终端标签）的会话：后端直查尾部状态，待确认时进收件箱
+    ...sessions
+      .filter(
+        (s) =>
+          s.live &&
+          !s.internal &&
+          liveTail[`${s.agent}:${s.sessionId}`] === "confirm",
+      )
+      .map((s) => ({
+        key: `live:${s.agent}:${s.sessionId}`,
+        dot: "bg-warn-text",
+        text: `${AGENTS.find((a) => a.id === s.agent)?.label ?? s.agent} · ${s.customTitle ?? s.title ?? "未命名对话"}（${pathBaseName(s.projectPath)}）外部运行中，待你确认`,
+        actionLabel: "去查看",
+        onClick: () => {
+          setOpenSessionReq({ agent: s.agent, sessionId: s.sessionId });
+          setPage("sessions");
+        },
       })),
     ...active
       .filter((w) => health[w.id]?.readyToMerge && !health[w.id]?.conflict)

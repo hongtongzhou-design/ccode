@@ -1,9 +1,16 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  onAction,
+  registerActionTypes,
+} from "@tauri-apps/plugin-notification";
 import ErrorBoundary from "./components/ErrorBoundary";
+import CommandPalette from "./components/CommandPalette";
 import { LoadingRows } from "./components/PageFrame";
 import "./App.css";
 import { useAppStore } from "./store";
+import { eventMatchesCombo } from "./hotkeys";
 
 // 页面懒加载：首屏只拉当前页 chunk，其余页首次访问时才加载
 const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
@@ -45,11 +52,25 @@ const NAV_BOTTOM = [
   { id: "settings", label: "设置", icon: "⛭" },
 ] as const;
 
+/** ⌘1–⌘7 页切顺序（与侧栏工作→能力→管理一致） */
+const PAGE_HOTKEYS = [
+  "workspaces",
+  "terminal",
+  "sessions",
+  "profiles",
+  "skills",
+  "stats",
+  "settings",
+] as const;
+
 function App() {
   const page = useAppStore((s) => s.page);
   const setPage = useAppStore((s) => s.setPage);
   const collapsed = useAppStore((s) => s.navCollapsed);
   const toggleCollapsed = useAppStore((s) => s.toggleNavCollapsed);
+  const chromeHidden = useAppStore((s) => s.chromeHidden);
+  const toggleChromeHidden = useAppStore((s) => s.toggleChromeHidden);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   // 终端里运行中的 agent 数（任意页面可见，徽标挂在「终端」图标上）
   const runningCount = useAppStore((s) => Object.keys(s.liveSessions).length);
   const loadAll = useAppStore((s) => s.loadAll);
@@ -77,6 +98,95 @@ function App() {
       crowded ? true : localStorage.getItem("ccode.navCollapsed") === "1",
     );
   }, [page, navManual, setNavCollapsedAuto]);
+
+  // 全局快捷键（设置页可自定义，存 settings.json）：命令面板（默认 ⌘K）、
+  // 隐藏/显示侧栏（默认 ⌘\）、⌘1–⌘7 页切（开关）。空串 = 禁用；⌘F 已被终端搜索占用故不用。
+  const settings = useAppStore((s) => s.settings);
+  useEffect(() => {
+    const paletteCombo = settings?.hotkeyPalette ?? "mod+k";
+    const chromeCombo = settings?.hotkeyHideChrome ?? "mod+\\";
+    const pageSwitchOn = settings?.hotkeyPageSwitch !== false;
+    const onKey = (e: KeyboardEvent) => {
+      if (eventMatchesCombo(e, paletteCombo)) {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+        return;
+      }
+      if (paletteOpen) return;
+      if (eventMatchesCombo(e, chromeCombo)) {
+        e.preventDefault();
+        toggleChromeHidden();
+        return;
+      }
+      if (pageSwitchOn && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+        const idx = ["1", "2", "3", "4", "5", "6", "7"].indexOf(e.key);
+        if (idx >= 0) {
+          e.preventDefault();
+          setPage(PAGE_HOTKEYS[idx]);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paletteOpen, setPage, toggleChromeHidden, settings]);
+
+  // 通知动作：注册「去处理」按钮类型；点击后的路由按 extra 分级——
+  // 已完成且 cwd 是任务工作区 → 直达评审覆盖层；待确认/其余 → 聚焦对应终端标签；
+  // 无 extra（旧通知）→ 回首页收件箱。横幅样式不显按钮（系统设置决定），正文点击走系统默认激活。
+  const setWorkspaceReviewRequest = useAppStore(
+    (s) => s.setWorkspaceReviewRequest,
+  );
+  const setFocusTabReq = useAppStore((s) => s.setFocusTabReq);
+  useEffect(() => {
+    let unregister: (() => void) | undefined;
+    registerActionTypes([
+      {
+        id: "ccode.attention",
+        actions: [{ id: "open", title: "去处理", foreground: true }],
+      },
+    ]).catch(() => {});
+    onAction((notification) => {
+      getCurrentWindow()
+        .setFocus()
+        .catch(() => {});
+      const extra = (notification.extra ?? {}) as {
+        tabId?: string;
+        cwd?: string;
+        kind?: string;
+      };
+      void (async () => {
+        if (extra.kind === "done" && extra.cwd) {
+          try {
+            const list = await invoke<{ worktreePath: string }[]>(
+              "list_workspaces",
+            );
+            const hit = list.find((w) => w.worktreePath === extra.cwd);
+            if (hit) {
+              setPage("terminal");
+              setWorkspaceReviewRequest({
+                worktreePath: hit.worktreePath,
+                requestId: crypto.randomUUID(),
+              });
+              return;
+            }
+          } catch {
+            /* 工作区查询失败：回落标签聚焦 */
+          }
+        }
+        if (extra.tabId) {
+          setPage("terminal");
+          setFocusTabReq(extra.tabId);
+          return;
+        }
+        setPage("workspaces");
+      })();
+    })
+      .then((listener) => {
+        unregister = () => listener.unregister();
+      })
+      .catch(() => {});
+    return () => unregister?.();
+  }, [setPage, setWorkspaceReviewRequest, setFocusTabReq]);
 
   useEffect(() => {
     loadAll().catch((e) => console.error(e));
@@ -146,6 +256,8 @@ function App() {
   return (
     <ErrorBoundary>
       <div className="ccode-app-shell flex h-full overflow-hidden bg-rail text-l2">
+        {/* 执行态（⌘\）：侧栏整体隐藏，页面 chrome 让位给终端/评审 */}
+        {!chromeHidden && (
         <aside
           className={`ccode-app-rail flex shrink-0 flex-col border-r border-hairline bg-rail transition-[width] duration-150 ${
             collapsed ? "w-14" : "w-40"
@@ -254,6 +366,7 @@ function App() {
             ))}
           </div>
         </aside>
+        )}
         <main className="ccode-app-main h-full min-h-0 min-w-0 flex-1">
           {/* 页面保持挂载，切换标签不销毁终端；未访问过的页不挂载（懒加载） */}
           <div
@@ -310,6 +423,7 @@ function App() {
             )}
           </div>
         </main>
+        {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
       </div>
     </ErrorBoundary>
   );
