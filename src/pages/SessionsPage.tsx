@@ -6,7 +6,7 @@ import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
 import HandoffPicker from "../components/HandoffPicker";
-import { Checkbox, LoadingRows, Toggle } from "../components/PageFrame";
+import { Checkbox, EmptyState, LoadingRows } from "../components/PageFrame";
 import type {
   ChatMessageDto,
   ConversationPageDto,
@@ -18,6 +18,9 @@ import type {
 const NOOP_TOTALS = () => {};
 const compactActionClass =
   "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1";
+// 列表栏头部深色次按钮（28px，与对话列表/回放头部控件同一档）
+const secBtn =
+  "inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-2.5 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1 disabled:opacity-50";
 // hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达（与工作区行同一手法）
 const hoverReveal =
   "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
@@ -68,8 +71,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [showArchived, setShowArchived] = useState(false);
-  // 分类树里收起的 agent（默认全部展开）
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // 分类筛选折叠收进列表栏（默认收起），展开为左右主从栏：左栏 全部/内部/各 agent
+  // 一眼看全，右栏列出聚焦 agent 的项目（计数/右键删除逻辑不变，无嵌套折叠，两击到位）。
+  const [treeOpen, setTreeOpen] = useState(false);
+  // 右栏当前聚焦的 agent：点选左栏时记录；失效（该 agent 已无会话）/未点选时回落
+  const [treeAgent, setTreeAgent] = useState<string | null>(null);
   // 批量删除：选择模式 + 勾选集合（键为 agent+sessionId 复合键，防跨 agent 撞 id）
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -232,6 +238,15 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           AGENTS.findIndex((x) => x.id === b.agent),
       );
   }, [regularVisible]);
+
+  // 右栏聚焦 agent：显式点选优先（该 agent 已无会话即失效回落），其次当前筛选所属，默认列表第一家
+  const focusedAgent = useMemo(() => {
+    if (treeAgent && tree.some((g) => g.agent === treeAgent)) return treeAgent;
+    if (filter.kind === "agent" || filter.kind === "project")
+      return filter.agent;
+    return tree[0]?.agent ?? null;
+  }, [treeAgent, tree, filter]);
+  const focusedGroup = tree.find((g) => g.agent === focusedAgent) ?? null;
 
   const sessionList = useMemo(() => {
     let src = filter.kind === "internal" ? internalVisible : regularVisible;
@@ -689,15 +704,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  function toggleCollapsed(agent: string) {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(agent)) next.delete(agent);
-      else next.add(agent);
-      return next;
-    });
-  }
-
   const input =
     "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
   const menuItem =
@@ -745,258 +751,294 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   return (
     <div className="flex h-full bg-canvas">
-      {/* 左栏：分类树 */}
-      <div className="flex w-[clamp(210px,22vw,240px)] shrink-0 flex-col border-r border-hairline bg-rail2">
-        <div className="border-b border-hairline p-2">
-          <div className="mb-2 flex h-7 items-center px-1 text-xs font-medium text-l2">
-            对话记录
-            <span className="ml-auto font-mono text-[10px] text-l4 opacity-70">
-              {regularVisible.length}
-            </span>
-          </div>
+      {/* 会话列表栏（P1a：375px 固定宽，rail2 底）：标题/计数 + 次按钮 + 搜索 + 折叠分类树 + 会话行 */}
+      <div className="flex w-[375px] shrink-0 flex-col border-r border-hairline bg-rail2">
+        <div className="shrink-0 border-b border-hairline px-3 pb-2.5 pt-3">
+          {selecting ? (
+            <div className="flex min-h-7 flex-wrap items-center justify-between gap-2">
+              <span className="text-xs text-l3">已选 {checkedInView} 项</span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={toggleSelectAll}
+                  className={compactActionClass}
+                >
+                  {allChecked ? "取消全选" : "全选（当前筛选结果）"}
+                </button>
+                <button
+                  disabled={checkedInView === 0 || batchDeleting}
+                  onClick={() => {
+                    if (confirmBatch) {
+                      setConfirmBatch(false);
+                      void batchDelete();
+                    } else {
+                      setConfirmBatch(true);
+                    }
+                  }}
+                  className={
+                    confirmBatch
+                      ? "inline-flex h-7 items-center justify-center rounded-md bg-err px-2 text-xs text-err-text hover:brightness-110 disabled:opacity-50"
+                      : "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-err-text hover:bg-white/5 disabled:opacity-50"
+                  }
+                >
+                  {batchDeleting
+                    ? "删除中…"
+                    : confirmBatch
+                      ? `确认删除 ${checkedInView} 项（含 pin 快照）？`
+                      : `删除 ${checkedInView} 项`}
+                </button>
+                <button
+                  onClick={exitSelectMode}
+                  className={compactActionClass}
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-baseline gap-2">
+                <h1 className="shrink-0 text-base font-semibold text-l1">对话</h1>
+                {/* 计数副题：与既有口径一致，搜索时透出命中数 */}
+                <span className="truncate text-[10px] text-l4">
+                  当前 {sessionList.length}
+                  {q ? ` · 搜索命中 ${searched.length}` : ""} · 总计{" "}
+                  {sessions.length}
+                </span>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  aria-pressed={showArchived}
+                  onClick={() => setShowArchived(!showArchived)}
+                  className={`${secBtn} ${showArchived ? "border-seg-sel bg-seg-sel text-l1" : ""}`}
+                >
+                  显示已归档
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelecting(true)}
+                  className={secBtn}
+                >
+                  批量管理
+                </button>
+              </div>
+            </div>
+          )}
+          {/* 搜索框：inset 底 + hairline 细边 */}
           <input
-            className="h-8 w-full rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
+            className="mt-2 h-8 w-full rounded-md border border-hairline bg-inset px-2.5 text-xs text-l2 outline-none placeholder:text-l4 focus:border-field"
             placeholder="搜索项目 / 对话 / 步骤 / 标签"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto py-1">
-          <button
-            onClick={() => selectFilter({ kind: "all" })}
-            className={`mx-1 block w-[calc(100%-8px)] rounded-md px-3 py-1.5 text-left text-sm ${
-              filterActive({ kind: "all" })
-                ? "bg-rail-sel text-l1"
-                : "text-l3 hover:bg-white/5"
-            }`}
-          >
-            全部对话
-            <span
-              className={`ml-1 text-xs opacity-70 ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}
-            >
-              {regularVisible.length}
-            </span>
-          </button>
-          {internalVisible.length > 0 && (
-            <button
-              onClick={() => selectFilter({ kind: "internal" })}
-              title="Ccode 自己调用 AI 生成提交信息、摘要等产生的内部对话"
-              className={`mx-1 mb-1 flex w-[calc(100%-8px)] items-center justify-between rounded-md px-3 py-1.5 text-left text-sm ${
-                filterActive({ kind: "internal" })
-                  ? "bg-rail-sel text-l1"
-                  : "text-l3 hover:bg-white/5"
-              }`}
-            >
-              <span className="truncate">Ccode 内部 AI</span>
-              <span
-                className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "internal" }) ? "text-l2" : "text-l4"}`}
-              >
-                {internalVisible.length}
-              </span>
-            </button>
-          )}
-          {tree.map((g) => (
-            <div key={g.agent}>
-              <div
-                onClick={() => selectFilter({ kind: "agent", agent: g.agent })}
-                className={`mx-1 flex w-[calc(100%-8px)] cursor-pointer items-center rounded-md px-2 py-1.5 text-left text-sm ${
-                  filterActive({ kind: "agent", agent: g.agent })
-                    ? "bg-rail-sel text-l1"
-                    : "text-l3 hover:bg-white/5"
-                }`}
-              >
+          {!selecting && (filterChipLabel || q) && (
+            <div className="mt-2 flex flex-wrap items-center gap-1">
+              {filterChipLabel && (
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleCollapsed(g.agent);
-                    selectFilter({ kind: "agent", agent: g.agent });
-                  }}
-                  className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-l4 hover:bg-white/5 hover:text-l2"
-                  title={collapsed.has(g.agent) ? "展开" : "收起"}
+                  type="button"
+                  onClick={() => selectFilter({ kind: "all" })}
+                  className="max-w-48 truncate rounded bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
+                  title="清除分类筛选"
                 >
-                  {collapsed.has(g.agent) ? "▸" : "▾"}
+                  {filterChipLabel} ×
                 </button>
-                <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
-                  <span className="truncate font-medium">
-                    {agentLabel(g.agent)}
-                  </span>
-                  <span
-                    className={`shrink-0 text-xs opacity-70 ${
-                      filterActive({ kind: "agent", agent: g.agent })
-                        ? "text-l2"
-                        : "text-l4"
-                    }`}
-                  >
-                    {g.list.length}
-                  </span>
-                </span>
-              </div>
-              {/* 项目层级：左侧 1px 缩进线分层（不靠卡片边框），与 ▸ 按钮中线对齐 */}
-              {!collapsed.has(g.agent) && (
-                <div className="ml-[22px] mr-1 border-l border-white/5 pl-1">
-                  {g.projects.map((p) => {
-                    const active = filterActive({
-                      kind: "project",
-                      agent: g.agent,
-                      path: p.path,
-                    });
-                    return (
-                      <button
-                        key={p.path}
-                        onClick={() =>
-                          selectFilter({
-                            kind: "project",
-                            agent: g.agent,
-                            path: p.path,
-                          })
-                        }
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          // count 与列表所见口径一致（排除 internal、跟随归档开关）；
-                          // 后端按 agent+path 全删，口径外数量单独透出给确认文案
-                          const all = sessions.filter(
-                            (session) =>
-                              session.agent === g.agent &&
-                              session.projectPath === p.path,
-                          );
-                          const visible = all.filter(
-                            (session) =>
-                              !session.internal &&
-                              (showArchived || !session.archived),
-                          );
-                          setMenu({
-                            x: e.clientX,
-                            y: e.clientY,
-                            kind: "project",
-                            agent: g.agent,
-                            path: p.path,
-                            count: visible.length,
-                            extra: all.length - visible.length,
-                          });
-                        }}
-                        title={p.path}
-                        className={`flex w-full items-center justify-between gap-2 rounded-md py-1 pl-2 pr-2 text-left text-sm ${
-                          active
-                            ? "bg-rail-sel text-l1"
-                            : "text-l3 hover:bg-white/5"
-                        }`}
-                      >
-                        <span className="truncate">{basename(p.path)}</span>
-                        <span
-                          className={`shrink-0 text-xs opacity-70 ${active ? "text-l2" : "text-l4"}`}
-                        >
-                          {p.list.length}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
+              )}
+              {q && (
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  className="max-w-48 truncate rounded bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
+                  title="清除搜索"
+                >
+                  搜索：{query.trim()} ×
+                </button>
               )}
             </div>
-          ))}
-          {tree.length === 0 && internalVisible.length === 0 && (
-            <p className="p-3 text-sm text-l4">暂无对话</p>
           )}
         </div>
-      </div>
-
-      {/* 右栏：列表 / 回放 二选一（列表保持挂载以保留滚动与筛选） */}
-      <div className="flex min-w-0 flex-1 flex-col bg-canvas">
-        {/* 会话列表 */}
-        <div
-          className={`flex min-h-0 flex-1 flex-col ${selected ? "hidden" : ""}`}
-        >
-          {error && <p className="px-4 py-1 text-xs text-err-text">{error}</p>}
-          <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 border-b border-hairline bg-strip px-4 py-2">
-            {selecting ? (
-              <>
-                <span className="text-xs text-l3">已选 {checkedInView} 项</span>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={toggleSelectAll}
-                    className={compactActionClass}
+        {/* 分类筛选：默认收起，展开为左右主从栏（左 agent ｜ 右该 agent 的项目），无嵌套折叠 */}
+        <div className="shrink-0 border-b border-hairline">
+          <button
+            type="button"
+            onClick={() => setTreeOpen(!treeOpen)}
+            aria-expanded={treeOpen}
+            className="flex h-8 w-full items-center gap-1.5 px-3 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+          >
+            <span className="w-3 shrink-0 text-[10px] text-l4">
+              {treeOpen ? "▾" : "▸"}
+            </span>
+            分类筛选
+            <span className="min-w-0 flex-1 truncate text-left text-l4">
+              {filterChipLabel ?? "全部对话"}
+            </span>
+          </button>
+          {treeOpen && (
+            // 左栏一眼看全 全部/内部/各 agent 及计数；点 agent 即筛选并在右栏列出其项目，
+            // 再点项目精确筛选——两击到位，两栏各自滚动互不挤压
+            <div className="flex items-stretch border-t border-hairline">
+              {/* 左栏：全部对话 / Ccode 内部 AI / 各 agent */}
+              <div className="max-h-60 w-[140px] shrink-0 overflow-auto py-1">
+                <button
+                  onClick={() => selectFilter({ kind: "all" })}
+                  className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 py-1.5 text-left text-sm ${
+                    filterActive({ kind: "all" })
+                      ? "bg-rail-sel text-l1"
+                      : "text-l3 hover:bg-white/5"
+                  }`}
+                >
+                  <span className="truncate">全部对话</span>
+                  <span
+                    className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}
                   >
-                    {allChecked ? "取消全选" : "全选（当前筛选结果）"}
-                  </button>
-                  <button
-                    disabled={checkedInView === 0 || batchDeleting}
-                    onClick={() => {
-                      if (confirmBatch) {
-                        setConfirmBatch(false);
-                        void batchDelete();
-                      } else {
-                        setConfirmBatch(true);
-                      }
-                    }}
-                    className={
-                      confirmBatch
-                        ? "inline-flex h-7 items-center justify-center rounded-md bg-err px-2 text-xs text-err-text hover:brightness-110 disabled:opacity-50"
-                        : "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-err-text hover:bg-white/5 disabled:opacity-50"
-                    }
-                  >
-                    {batchDeleting
-                      ? "删除中…"
-                      : confirmBatch
-                        ? `确认删除 ${checkedInView} 项（含 pin 快照）？`
-                        : `删除 ${checkedInView} 项`}
-                  </button>
-                  <button
-                    onClick={exitSelectMode}
-                    className={compactActionClass}
-                  >
-                    取消
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <span className="shrink-0 text-xs text-l3">
-                    当前 {sessionList.length}
-                    {q ? ` · 搜索命中 ${searched.length}` : ""} · 总计{" "}
-                    {sessions.length}
+                    {regularVisible.length}
                   </span>
-                  {filterChipLabel && (
-                    <button
-                      type="button"
-                      onClick={() => selectFilter({ kind: "all" })}
-                      className="max-w-48 truncate rounded bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
-                      title="清除分类筛选"
-                    >
-                      {filterChipLabel} ×
-                    </button>
-                  )}
-                  {q && (
-                    <button
-                      type="button"
-                      onClick={() => setQuery("")}
-                      className="max-w-48 truncate rounded bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
-                      title="清除搜索"
-                    >
-                      搜索：{query.trim()} ×
-                    </button>
-                  )}
-                </div>
-                <div className="flex items-center gap-1">
-                  <label className="flex cursor-pointer items-center gap-1.5 text-xs text-l3">
-                    显示已归档
-                    <Toggle
-                      checked={showArchived}
-                      onChange={setShowArchived}
-                      label="显示已归档"
-                    />
-                  </label>
+                </button>
+                {internalVisible.length > 0 && (
                   <button
-                    onClick={() => setSelecting(true)}
-                    className={compactActionClass}
+                    onClick={() => selectFilter({ kind: "internal" })}
+                    title="Ccode 自己调用 AI 生成提交信息、摘要等产生的内部对话"
+                    className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 py-1.5 text-left text-sm ${
+                      filterActive({ kind: "internal" })
+                        ? "bg-rail-sel text-l1"
+                        : "text-l3 hover:bg-white/5"
+                    }`}
                   >
-                    批量管理
+                    <span className="truncate">Ccode 内部 AI</span>
+                    <span
+                      className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "internal" }) ? "text-l2" : "text-l4"}`}
+                    >
+                      {internalVisible.length}
+                    </span>
                   </button>
-                </div>
-              </>
-            )}
-          </div>
-          <div className="min-h-0 flex-1 overflow-auto">
+                )}
+                {tree.length > 0 && (
+                  <div className="mx-2 my-1 border-t border-hairline" />
+                )}
+                {tree.map((g) => {
+                  const active = filterActive({
+                    kind: "agent",
+                    agent: g.agent,
+                  });
+                  // 聚焦（右栏正在展示其项目）但未选中的 agent 用亮字提示，选中才用 rail-sel 填充
+                  const focused = focusedAgent === g.agent;
+                  return (
+                    <button
+                      key={g.agent}
+                      onClick={() => {
+                        setTreeAgent(g.agent);
+                        selectFilter({ kind: "agent", agent: g.agent });
+                      }}
+                      className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 py-1.5 text-left text-sm ${
+                        active
+                          ? "bg-rail-sel text-l1"
+                          : focused
+                            ? "text-l1 hover:bg-white/5"
+                            : "text-l3 hover:bg-white/5"
+                      }`}
+                    >
+                      <span className="truncate">{agentLabel(g.agent)}</span>
+                      <span
+                        className={`shrink-0 text-xs opacity-70 ${active ? "text-l2" : "text-l4"}`}
+                      >
+                        {g.list.length}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              {/* 右栏：聚焦 agent 的项目列表（右键批量删除语义不变） */}
+              <div className="max-h-60 min-w-0 flex-1 overflow-auto border-l border-hairline py-1">
+                {focusedGroup ? (
+                  <>
+                    <div className="truncate px-3 pb-0.5 pt-1 text-[10px] text-l4">
+                      {agentLabel(focusedGroup.agent)} · 项目
+                    </div>
+                    <button
+                      onClick={() =>
+                        selectFilter({ kind: "agent", agent: focusedGroup.agent })
+                      }
+                      className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm ${
+                        filterActive({ kind: "agent", agent: focusedGroup.agent })
+                          ? "bg-rail-sel text-l1"
+                          : "text-l3 hover:bg-white/5"
+                      }`}
+                    >
+                      <span className="truncate">全部项目</span>
+                      <span
+                        className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "agent", agent: focusedGroup.agent }) ? "text-l2" : "text-l4"}`}
+                      >
+                        {focusedGroup.list.length}
+                      </span>
+                    </button>
+                    {focusedGroup.projects.map((p) => {
+                      const active = filterActive({
+                        kind: "project",
+                        agent: focusedGroup.agent,
+                        path: p.path,
+                      });
+                      return (
+                        <button
+                          key={p.path}
+                          onClick={() =>
+                            selectFilter({
+                              kind: "project",
+                              agent: focusedGroup.agent,
+                              path: p.path,
+                            })
+                          }
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            // count 与列表所见口径一致（排除 internal、跟随归档开关）；
+                            // 后端按 agent+path 全删，口径外数量单独透出给确认文案
+                            const all = sessions.filter(
+                              (session) =>
+                                session.agent === focusedGroup.agent &&
+                                session.projectPath === p.path,
+                            );
+                            const visible = all.filter(
+                              (session) =>
+                                !session.internal &&
+                                (showArchived || !session.archived),
+                            );
+                            setMenu({
+                              x: e.clientX,
+                              y: e.clientY,
+                              kind: "project",
+                              agent: focusedGroup.agent,
+                              path: p.path,
+                              count: visible.length,
+                              extra: all.length - visible.length,
+                            });
+                          }}
+                          title={p.path}
+                          className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm ${
+                            active
+                              ? "bg-rail-sel text-l1"
+                              : "text-l3 hover:bg-white/5"
+                          }`}
+                        >
+                          <span className="truncate">{basename(p.path)}</span>
+                          <span
+                            className={`shrink-0 text-xs opacity-70 ${active ? "text-l2" : "text-l4"}`}
+                          >
+                            {p.list.length}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </>
+                ) : (
+                  <p className="p-3 text-sm text-l4">暂无对话</p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+        {error && !selected && (
+          <p className="shrink-0 px-3 py-1 text-xs text-err-text">{error}</p>
+        )}
+        {/* 会话行：标题 + meta 双行，hairline 分行，选中行浅填充 */}
+        <div className="min-h-0 flex-1 overflow-auto">
             {displayList.map(({ header, s }) => {
               const isEditing =
                 editing?.agent === s.agent && editing.sessionId === s.sessionId;
@@ -1048,10 +1090,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               const isLive =
                 s.live ||
                 !!liveSessions[sessionRuntimeKey(s.agent, s.sessionId)];
+              // 选中行浅填充（rail-sel 令牌）
+              const isSelected =
+                selected?.agent === s.agent &&
+                selected?.sessionId === s.sessionId;
               return (
                 <Fragment key={skey(s)}>
                   {header && (
-                    <div className="border-b border-hairline bg-strip px-4 pb-1 pt-2 text-xs text-l3">
+                    <div className="border-b border-hairline bg-strip px-3 pb-1 pt-2 text-xs text-l3">
                       ⎇ {header}
                     </div>
                   )}
@@ -1070,11 +1116,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       session: s,
                     });
                   }}
-                  className={`group border-b border-hairline px-4 py-2.5 text-sm ${
+                  className={`group border-b border-hairline px-3 py-1.5 text-sm ${
                     selecting || clickable
                       ? "cursor-pointer hover:bg-white/5"
                       : "opacity-60"
-                  }`}
+                  } ${isSelected ? "bg-rail-sel" : ""}`}
                 >
                   <div className="flex min-w-0 items-center gap-1.5">
                     {selecting && (
@@ -1098,7 +1144,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         ⚑
                       </span>
                     )}
-                    <span className="min-w-0 flex-1 truncate font-medium text-l1">
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-7 text-l1">
                       {sessionTitle(s)}
                     </span>
                     {s.chainCount > 1 && (
@@ -1172,12 +1218,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         </button>
                       </div>
                     )}
-                  </div>
-                  {/* 副行：10px 灰字，相对时间主显、悬浮给绝对时间（白话双层） */}
-                  <div className="mt-1 flex min-w-0 items-center gap-2 text-[10px] text-l4">
-                    <span className="shrink-0" title={absTime(s.updatedAt)}>
+                    {/* 右侧相对时间：主显相对、悬浮绝对（白话双层） */}
+                    <span
+                      className="shrink-0 font-mono text-[10px] text-l4"
+                      title={absTime(s.updatedAt)}
+                    >
                       {relTime(s.updatedAt)}
                     </span>
+                  </div>
+                  {/* meta 行：agent · token mono 小字 + 步骤/接力/标签 chip，AI 摘要截断尾随 */}
+                  <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] leading-[15px] text-l4">
                     <span className="shrink-0">{agentLabel(s.agent)}</span>
                     {s.workspace && (
                       <span
@@ -1200,7 +1250,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       </span>
                     )}
                     {s.tokenUsage && (
-                      <span className="shrink-0">
+                      <span className="shrink-0 font-mono">
                         {fmtTokens(s.tokenUsage)}
                       </span>
                     )}
@@ -1215,6 +1265,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     {s.tags.length > 2 && (
                       <span className="shrink-0 text-l4">
                         +{s.tags.length - 2}
+                      </span>
+                    )}
+                    {s.summary && (
+                      <span
+                        className="min-w-0 flex-1 truncate text-l3"
+                        title={s.summary}
+                      >
+                        · {s.summary}
                       </span>
                     )}
                   </div>
@@ -1241,13 +1299,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 )}
               </p>
             )}
-          </div>
         </div>
+      </div>
 
-        {/* 对话回放 */}
-        {selected && (
+      {/* 回放区（canvas 底）：与列表栏并列常驻，未选中显示空态 */}
+      <div className="flex min-w-0 flex-1 flex-col bg-canvas">
+        {selected ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-strip px-4 py-2">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-hairline bg-strip px-4 py-2">
               <button
                 onClick={() => {
                   conversationRequestRef.current += 1;
@@ -1381,39 +1440,62 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             ) : (
               <>
                 {summary && (
-                  <div className="mx-4 mt-2 rounded bg-inset p-3 text-sm text-l2">
-                    <span className="mr-1">◈</span>
-                    <span className="whitespace-pre-wrap">{summary}</span>
+                  <div className="px-4">
+                    <div className="mx-auto mt-2 max-w-3xl rounded bg-inset p-3 text-sm text-l2">
+                      <span className="mr-1">◈</span>
+                      <span className="whitespace-pre-wrap">{summary}</span>
+                    </div>
                   </div>
                 )}
-                <div
-                  ref={scrollRef}
-                  className="min-h-0 flex-1 overflow-auto p-4"
-                >
-                  {loadingConv ? (
-                    <LoadingRows compact />
-                  ) : messages.length === 0 ? (
-                    <p className="text-sm text-l4">没有可回放的对话内容</p>
-                  ) : (
-                    <>
-                      {conversationCursor !== null && (
-                        <div className="mb-3 flex justify-center">
-                          <button
-                            type="button"
-                            disabled={loadingOlder}
-                            onClick={() => void loadOlderMessages()}
-                            className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l3 hover:bg-inset hover:text-l1 disabled:opacity-50"
-                          >
-                            {loadingOlder ? "加载中…" : "加载更早对话"}
-                          </button>
-                        </div>
-                      )}
-                      <ConversationView messages={messages} />
-                    </>
-                  )}
+                <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
+                  {/* 阅读栏居中限宽：气泡与排版不随宽窗拉成超长行；scrollRef 仍挂滚动容器，分页语义不变 */}
+                  <div className="mx-auto max-w-3xl p-4">
+                    {loadingConv ? (
+                      <LoadingRows compact />
+                    ) : messages.length === 0 ? (
+                      <p className="text-sm text-l4">没有可回放的对话内容</p>
+                    ) : (
+                      <>
+                        {conversationCursor !== null && (
+                          <div className="mb-3 flex justify-center">
+                            <button
+                              type="button"
+                              disabled={loadingOlder}
+                              onClick={() => void loadOlderMessages()}
+                              className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l3 hover:bg-inset hover:text-l1 disabled:opacity-50"
+                            >
+                              {loadingOlder ? "加载中…" : "加载更早对话"}
+                            </button>
+                          </div>
+                        )}
+                        <ConversationView messages={messages} />
+                      </>
+                    )}
+                  </div>
+                </div>
+                {/* 底部圆角输入条（只读展示态）：chip 取 agent 名（会话 DTO 无模型字段）+ 免责小字 */}
+                <div className="shrink-0 border-t border-hairline px-4 pb-2 pt-2.5">
+                  <div className="mx-auto flex max-w-3xl items-center gap-2 rounded-full border border-hairline bg-inset py-1.5 pl-4 pr-2">
+                    <span className="min-w-0 flex-1 truncate text-xs text-l4">
+                      历史回放只读 · 点右上角「恢复」在终端继续该对话
+                    </span>
+                    <span className="shrink-0 rounded-full bg-raised px-2.5 py-0.5 text-[10px] text-l3">
+                      {agentLabel(selected.agent)}
+                    </span>
+                  </div>
+                  <p className="mt-1.5 text-center text-[10px] text-l4">
+                    内容由 AI 生成，请核对后使用
+                  </p>
                 </div>
               </>
             )}
+          </div>
+        ) : (
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <EmptyState
+              title="从左侧选择一条对话"
+              detail="回放为只读历史记录；选中后可在回放头部恢复、保留、归档或导出。"
+            />
           </div>
         )}
       </div>

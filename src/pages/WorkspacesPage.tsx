@@ -1199,13 +1199,23 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             : `${active.length} 个活跃 · ${projects.length} 个项目 · ${repoCount} 个仓库`
         }
         actions={
-          <button
-            type="button"
-            onClick={() => setModal(true)}
-            className={secondaryActionClass}
-          >
-            新建工作区
-          </button>
+          <>
+            {/* 页头唯一实心 CTA = 添加项目；新建工作区降次级描边（统一页头规格 P3） */}
+            <button
+              type="button"
+              onClick={() => void onAddProject()}
+              className={primaryActionClass}
+            >
+              + 添加项目
+            </button>
+            <button
+              type="button"
+              onClick={() => setModal(true)}
+              className={secondaryActionClass}
+            >
+              新建工作区
+            </button>
+          </>
         }
       />
       {error && <p className="mb-4 text-sm text-err-text">{error}</p>}

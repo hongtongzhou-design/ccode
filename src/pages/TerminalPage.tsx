@@ -55,6 +55,7 @@ import type {
   SessionMetaDto,
   SkillDto,
   WorkspaceDto,
+  WorkspaceHealthDto,
 } from "../types";
 import type { PdfActionResult } from "../components/PdfPreview";
 
@@ -70,6 +71,13 @@ type PtyKind = "agent" | "shell";
 function basename(p: string): string {
   const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || p;
+}
+
+/** 归一化后判断 path 是否落在 base 内（含相等），与 FileTree/ProjectRail 的口径一致 */
+function pathWithin(path: string, base: string): boolean {
+  const p = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const b = base.replace(/\\/g, "/").replace(/\/+$/, "");
+  return p === b || p.startsWith(`${b}/`);
 }
 
 /** 标签页状态：由 TerminalView 上报，标签条 / 运行中总览 / 工作树根目录都用它 */
@@ -1112,8 +1120,9 @@ const TerminalView = memo(function TerminalView({
     });
   }, [onActions, tabId]);
 
+  // P1b：启动栏输入框统一 inset 底（浮起层级），聚焦边线不变
   const select =
-    "h-8 rounded-md border border-field bg-canvas px-2 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
+    "h-8 rounded-md border border-field bg-inset px-2 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
   function openTerminalActionMenu(event: React.MouseEvent<HTMLButtonElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1229,7 +1238,7 @@ const TerminalView = memo(function TerminalView({
               (running ? (
                 <button
                   onClick={stop}
-                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-md bg-err px-3 text-sm text-err-text hover:brightness-110"
+                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-field bg-inset px-3 text-sm text-err-text hover:bg-white/5"
                 >
                   停止
                 </button>
@@ -1371,7 +1380,7 @@ const TerminalView = memo(function TerminalView({
               }
             }}
             placeholder="查找终端输出"
-            className="w-56 rounded border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+            className="w-56 rounded border border-field bg-inset px-2 py-1 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
           />
           <button
             onClick={findPrev}
@@ -1585,6 +1594,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     add: number;
     del: number;
   } | null>(null);
+  // 中带「可合并」状态 pill（P1b 参考图 2）：当前项目可合并工作区名列表，空 = 不显示
+  const [mergeReadyWs, setMergeReadyWs] = useState<string[]>([]);
+  // pill 刷新信号：工作区归档事件（合并保留工作区的场景走 reviewPath 关闭触发刷新）
+  const [wsPillTick, setWsPillTick] = useState(0);
   const [preview, setPreview] = useState<{
     path: string;
     name: string;
@@ -2449,6 +2462,83 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     .filter(Boolean)
     .join(" · ");
 
+  // 可合并 pill 数据：归属口径与 ProjectRail 一致（cwd 落工作树→其 repo；落 repo→该仓；
+  // 注册项目兜底），健康检查只对当前项目的活跃工作区做（同工作区页 Promise.all 模式）
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const active = (await invoke<WorkspaceDto[]>("list_workspaces")).filter(
+          (w) => w.status === "active",
+        );
+        let root: string | null = null;
+        for (const w of active) {
+          if (pathWithin(activeCwd, w.worktreePath)) {
+            root = w.repoPath;
+            break;
+          }
+        }
+        if (!root) {
+          for (const w of active) {
+            if (pathWithin(activeCwd, w.repoPath)) {
+              root = w.repoPath;
+              break;
+            }
+          }
+        }
+        if (!root) {
+          const projects = await invoke<ProjectDto[]>("list_projects").catch(
+            () => [] as ProjectDto[],
+          );
+          for (const p of projects) {
+            if (pathWithin(activeCwd, p.path)) {
+              root = p.path;
+              break;
+            }
+          }
+        }
+        const rootPath = root;
+        const candidates = rootPath
+          ? active.filter(
+              (w) =>
+                pathWithin(w.repoPath, rootPath) &&
+                pathWithin(rootPath, w.repoPath),
+            )
+          : [];
+        const names = (
+          await Promise.all(
+            candidates.map(async (w) => {
+              try {
+                const h = await invoke<WorkspaceHealthDto>("workspace_health", {
+                  id: w.id,
+                });
+                return h.readyToMerge ? w.name : null;
+              } catch {
+                return null;
+              }
+            }),
+          )
+        ).filter((n): n is string => n != null);
+        if (!cancelled) setMergeReadyWs(names);
+      } catch {
+        if (!cancelled) setMergeReadyWs([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCwd, visible, refreshKey, fsChangeTick, reviewPath, wsPillTick]);
+
+  // 工作区归档后刷新 pill（工作区集合已变）
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    listen("ws-archived", () => setWsPillTick((t) => t + 1)).then(
+      (u) => (un = u),
+    );
+    return () => un?.();
+  }, []);
+
   return (
     <div
       ref={terminalRootRef}
@@ -2497,41 +2587,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 «
               </button>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto py-1">
-              <FileTree
-                cwd={activeCwd}
-                showHidden={showHidden}
-                refreshKey={refreshKey}
-                onOpenFile={openPreview}
-                onOpenTerminal={openTerminalAt}
-                onFsEvent={bumpFsChangeTick}
-                onEnterProject={setEnterCwd}
-                onRootChange={closePreviewForRootChange}
-                belowRecent={
-                  /* 项目区：当前标签 cwd 所属项目的主文件夹 + 活跃工作区，点击切根复用 enterCwd 链路 */
-                  <ProjectRail
-                    cwd={activeCwd}
-                    pageVisible={visible}
-                    refreshKey={refreshKey}
-                    agentRunning={statuses[focusedId]?.running ?? false}
-                    tabs={Object.values(statuses).map((s) => ({
-                      cwd: s.cwd,
-                      running: s.running,
-                      attention: s.attention,
-                    }))}
-                    onEnter={setEnterCwd}
-                  />
-                }
-              />
-            </div>
-            {/* 运行中总览（P5 聚合视图）：全部终端标签按「要你管」排序的一览，点击激活；默认折叠 */}
-            <div className="shrink-0 bg-strip">
+            {/* 打开的标签（P5 运行中聚合视图）：全部终端标签按「要你管」排序的一览，点击激活；
+                一行式折叠区标题（默认收起），样式与「最近项目」「项目」区标题统一 */}
+            <div className="shrink-0 border-b border-hairline">
               <button
                 onClick={() => setRailRunOpen((v) => !v)}
-                className="flex w-full items-center gap-1 px-2 py-1.5 text-left text-xs text-l4 hover:text-l2"
+                className="flex w-full items-center gap-1 px-2 py-2 text-left text-[10px] text-l4 hover:text-l2"
               >
                 <span>{railRunOpen ? "▾" : "▸"}</span>
-                <span>运行中 ({tabs.length})</span>
+                <span>打开的标签 ({tabs.length})</span>
               </button>
               {railRunOpen && (
                 <div className="max-h-56 overflow-auto">
@@ -2610,6 +2674,33 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   })}
                 </div>
               )}
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto py-1">
+              <FileTree
+                cwd={activeCwd}
+                showHidden={showHidden}
+                refreshKey={refreshKey}
+                onOpenFile={openPreview}
+                onOpenTerminal={openTerminalAt}
+                onFsEvent={bumpFsChangeTick}
+                onEnterProject={setEnterCwd}
+                onRootChange={closePreviewForRootChange}
+                belowRecent={
+                  /* 项目区：当前标签 cwd 所属项目的主文件夹 + 活跃工作区，点击切根复用 enterCwd 链路 */
+                  <ProjectRail
+                    cwd={activeCwd}
+                    pageVisible={visible}
+                    refreshKey={refreshKey}
+                    agentRunning={statuses[focusedId]?.running ?? false}
+                    tabs={Object.values(statuses).map((s) => ({
+                      cwd: s.cwd,
+                      running: s.running,
+                      attention: s.attention,
+                    }))}
+                    onEnter={setEnterCwd}
+                  />
+                }
+              />
             </div>
           </div>
         ))}
@@ -2692,6 +2783,18 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               ＋
             </button>
             <span className="ml-auto flex shrink-0 items-center gap-1">
+              {/* 当前项目状态 pill（P1b 参考图 2）：有可合并工作区才显示，纯状态不交互（inset 底 + 语义色小点） */}
+              {mergeReadyWs.length > 0 && (
+                <span
+                  className="flex items-center gap-1 rounded bg-inset px-2 py-0.5 text-xs text-l2"
+                  title={`可合并的工作区：${mergeReadyWs.join("、")}\n从右侧「改动」页签或工作区页进入评审合并`}
+                >
+                  <span className="text-[10px] text-ok-text">●</span>
+                  {mergeReadyWs.length > 1
+                    ? `${mergeReadyWs.length} 个可合并`
+                    : "可合并"}
+                </span>
+              )}
               <button
                 type="button"
                 onClick={toggleSplit}
@@ -2820,7 +2923,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                         <select
                           value={splitTabId ?? ""}
                           onChange={(e) => setSplitTabId(e.target.value)}
-                          className="h-6 min-w-0 flex-1 rounded border border-field bg-canvas px-1.5 text-xs text-l2 outline-none focus:border-l4"
+                          className="h-6 min-w-0 flex-1 rounded border border-field bg-inset px-1.5 text-xs text-l2 outline-none focus:border-l4"
                           title="选择右侧对照显示的标签"
                         >
                           {tabs
@@ -2916,42 +3019,20 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           </div>
           <div
             style={{ width: rightWidth }}
-            className="flex shrink-0 flex-col border-l border-hairline bg-canvas"
+            className="flex shrink-0 flex-col border-l border-hairline bg-raised"
           >
-            <div className="flex h-9 shrink-0 items-center gap-2 border-b border-hairline bg-strip px-3">
-              <span className="shrink-0 text-xs font-medium text-l2">工作台</span>
-              <span
-                className="min-w-0 flex-1 truncate font-mono text-[11px] text-l4"
-                title={activeCwd}
-              >
-                {basename(activeCwd)}
-              </span>
-              <button
-                type="button"
-                onClick={toggleRightExpanded}
-                title={
-                  rightExpanded
-                    ? "还原分栏（恢复工作树）"
-                    : "宽屏展开（暂时隐藏工作树，保留终端）"
-                }
-                className="flex size-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
-              >
-                {rightExpanded ? "⇲" : "⇱"}
-              </button>
-              <button
-                onClick={closeRightPanel}
-                title="收起工作台"
-                className="flex size-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
-              >
-                ×
-              </button>
-            </div>
-            <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline bg-canvas px-2">
+            {/* 页签与面板头部合并为一行（走查去重）：左侧页签，右侧按页签透出上下文
+                （对话 = 会话状态小字 + 完整回放入口）与面板动作；不再单设「工作台」标题行，
+                对话区也不再重复一行标题/agent/状态头部（信息仍在，收进本行右侧） */}
+            <div className="flex h-9 shrink-0 items-center gap-1 border-b border-hairline bg-raised px-2">
               {RIGHT_TABS.map(({ key: k, label, symbol }) => {
                 const gitBadge =
                   k === "git" && gitTotals && gitTotals.add + gitTotals.del > 0
                     ? gitTotals.add + gitTotals.del
                     : null;
+                // 对话计数徽标（P1b）：实时视图消息数，有界 50 条封顶时显示 50+
+                const dialogueCount =
+                  k === "dialogue" ? (activeSession?.conv.length ?? 0) : 0;
                 return (
                   <button
                     key={k}
@@ -2966,6 +3047,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   >
                     <span className="text-[11px] text-l4">{symbol}</span>
                     {label}
+                    {k === "dialogue" && dialogueCount > 0 && (
+                      <span
+                        className="ml-1 rounded bg-inset px-1 text-[11px] text-l3"
+                        title="实时视图最多保留最近 50 条"
+                      >
+                        {dialogueCount >= 50 ? "50+" : dialogueCount}
+                      </span>
+                    )}
                     {k === "preview" && previewDirty && (
                       <span className="ml-1 text-l3" title="有未保存的修改">
                         ●
@@ -2979,6 +3068,93 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   </button>
                 );
               })}
+              {/* 右侧上下文区：按页签透出对应信息（对话 = 状态点 + 标题/agent/会话/状态
+                  一行小字 + 完整回放；文件/改动的上下文由各自内容头部承担），
+                  末端固定宽屏与收起按钮；空间不足时小字截断、完整信息在悬浮提示 */}
+              <span className="ml-auto flex min-w-0 items-center gap-1 pl-1">
+                {rightTab === "dialogue" && (
+                  <>
+                    <span
+                      className={`size-1.5 shrink-0 rounded-full ${
+                        statuses[focusedId]?.running
+                          ? "bg-ok-text"
+                          : activeSession?.state === "timeout"
+                            ? "bg-warn-text"
+                            : "bg-l4"
+                      }`}
+                    />
+                    <span
+                      className="min-w-0 truncate text-[11px] text-l4"
+                      title={
+                        activeSession?.sessionId
+                          ? `会话 ${activeSession.sessionId}`
+                          : undefined
+                      }
+                    >
+                      <span className="text-l2">
+                        {activeSession?.title ||
+                          statuses[focusedId]?.title ||
+                          "当前对话"}
+                      </span>
+                      {" · "}
+                      {activeSession?.agentId
+                        ? agentLabel(activeSession.agentId)
+                        : statuses[focusedId]?.agentId
+                          ? agentLabel(statuses[focusedId].agentId)
+                          : "尚未启动"}
+                      {activeSession?.sessionId
+                        ? ` · ${activeSession.sessionId.slice(0, 8)}`
+                        : ""}
+                      {activeSession?.state === "detecting"
+                        ? " · 识别中"
+                        : activeSession?.state === "timeout"
+                          ? " · 等待关联"
+                          : activeSession?.file
+                            ? statuses[focusedId]?.running
+                              ? " · 同步中"
+                              : " · 已结束"
+                            : ""}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={
+                        !activeSession?.sessionId || !activeSession.agentId
+                      }
+                      onClick={() => {
+                        if (!activeSession?.sessionId || !activeSession.agentId)
+                          return;
+                        setOpenSessionReq({
+                          agent: activeSession.agentId,
+                          sessionId: activeSession.sessionId,
+                        });
+                        setPage("sessions");
+                      }}
+                      className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-40"
+                    >
+                      完整回放
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={toggleRightExpanded}
+                  title={
+                    rightExpanded
+                      ? "还原分栏（恢复工作树）"
+                      : "宽屏展开（暂时隐藏工作树，保留终端）"
+                  }
+                  className="flex size-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
+                >
+                  {rightExpanded ? "⇲" : "⇱"}
+                </button>
+                <button
+                  onClick={closeRightPanel}
+                  title="收起工作台"
+                  className="flex size-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
+                >
+                  ×
+                </button>
+              </span>
             </div>
             <div
               className={
@@ -2987,59 +3163,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   : "hidden"
               }
             >
-              <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-2">
-                <span
-                  className={`size-1.5 shrink-0 rounded-full ${
-                    statuses[focusedId]?.running
-                      ? "bg-ok-text"
-                      : activeSession?.state === "timeout"
-                        ? "bg-warn-text"
-                        : "bg-l4"
-                  }`}
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-medium text-l1">
-                    {activeSession?.title ||
-                      statuses[focusedId]?.title ||
-                      "当前对话"}
-                  </span>
-                  <span className="block truncate text-[11px] text-l4">
-                    {activeSession?.agentId
-                      ? agentLabel(activeSession.agentId)
-                      : statuses[focusedId]?.agentId
-                        ? agentLabel(statuses[focusedId].agentId)
-                        : "尚未启动"}
-                    {activeSession?.sessionId
-                      ? ` · ${activeSession.sessionId.slice(0, 8)}`
-                      : ""}
-                    {activeSession?.state === "detecting"
-                      ? " · 识别中"
-                      : activeSession?.state === "timeout"
-                        ? " · 等待关联"
-                        : activeSession?.file
-                          ? statuses[focusedId]?.running
-                            ? " · 同步中"
-                            : " · 已结束"
-                          : ""}
-                  </span>
-                </span>
-                <button
-                  type="button"
-                  disabled={!activeSession?.sessionId || !activeSession.agentId}
-                  onClick={() => {
-                    if (!activeSession?.sessionId || !activeSession.agentId)
-                      return;
-                    setOpenSessionReq({
-                      agent: activeSession.agentId,
-                      sessionId: activeSession.sessionId,
-                    });
-                    setPage("sessions");
-                  }}
-                  className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-40"
-                >
-                  完整回放
-                </button>
-              </div>
               <div className="relative min-h-0 flex-1">
                 <div
                   ref={sessionScrollRef}
@@ -3112,9 +3235,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 </Suspense>
               ) : (
                 <div className="flex min-h-0 flex-1 flex-col">
-                  <div className="flex shrink-0 items-center bg-strip px-3 py-1.5 text-xs text-l3">
-                    未选择文件
-                  </div>
                   <div className="p-3">
                     <p className="text-sm text-l4">
                       在左侧工作树中单击文件预览

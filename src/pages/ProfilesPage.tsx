@@ -14,6 +14,7 @@ import {
   PageHeader,
   PageToolbar,
   primaryActionClass,
+  secondaryActionClass,
 } from "../components/PageFrame";
 import type {
   GlobalApplyResultDto,
@@ -1167,9 +1168,9 @@ export default function ProfilesPage() {
           }
         />
 
-        {/* 过滤条：状态分段 + 搜索 */}
+        {/* 过滤条：状态筛选胶囊（选中=实心 seg-sel）+ 右侧搜索框 */}
         <PageToolbar>
-          <div className="flex gap-1">
+          <div className="flex items-center gap-1">
             {(
               [
                 ["all", "全部"],
@@ -1179,10 +1180,11 @@ export default function ProfilesPage() {
             ).map(([k, label]) => (
               <button
                 key={k}
+                aria-pressed={statusFilter === k}
                 onClick={() => setStatusFilter(k)}
-                className={`rounded px-2.5 py-1 text-xs ${
+                className={`flex h-7 items-center rounded-full px-3 text-xs ${
                   statusFilter === k
-                    ? "bg-grp text-pl1"
+                    ? "bg-seg-sel text-pl1"
                     : "text-pl2 hover:text-pl1"
                 }`}
               >
@@ -1206,11 +1208,12 @@ export default function ProfilesPage() {
               {anyExpanded ? "全部折叠" : "全部展开"}
             </button>
           </div>
+          {/* 搜索框：inset 底 + hairline 细边（同对话页手法） */}
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索名称 / 端点 / 模型"
-            className="h-7 w-56 rounded border border-field bg-canvas px-2 text-xs text-pl2 outline-none placeholder:text-l4 focus:border-l4"
+            className="h-8 w-56 rounded-md border border-hairline bg-inset px-2.5 text-xs text-pl2 outline-none placeholder:text-l4 focus:border-field"
           />
         </PageToolbar>
 
@@ -1248,14 +1251,15 @@ export default function ProfilesPage() {
                   <h2 className="text-sm font-medium text-pl1">
                     {agent.label}
                   </h2>
-                  {/* 已安装只显示版本号；右侧状态：更新中… / 新版（可点更新）/ 更新（查不到最新版时的回退）；已是最新则不显示 */}
+                  {/* 已安装显示包名+版本号（mono）；右侧状态：更新中… / 新版（可点更新）/ 更新（查不到最新版时的回退）；已是最新则不显示 */}
                   {det?.binaryPath ? (
-                    <span className="text-xs text-l4">
-                      {det.version ?? ""}
+                    <span className="font-mono text-xs text-l4">
+                      {agent.binary} {det.version ?? ""}
                     </span>
                   ) : (
                     <span className="text-xs text-pl2">
-                      未安装（{agent.binary} 不在 PATH）
+                      未安装（<span className="font-mono">{agent.binary}</span>{" "}
+                      不在 PATH）
                     </span>
                   )}
                   {det?.binaryPath ? (
@@ -1323,7 +1327,7 @@ export default function ProfilesPage() {
                     <button
                       onClick={() => onInstall(agent.id)}
                       disabled={updating[agent.id]}
-                      className="ml-auto h-8 rounded border border-cta-bd bg-cta px-2.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+                      className={`${secondaryActionClass} ml-auto px-2.5`}
                     >
                       {updating[agent.id] ? "安装中…" : "安装"}
                     </button>
@@ -1375,7 +1379,7 @@ export default function ProfilesPage() {
                                 <button
                                   onClick={() => connectOfficial(agent.id)}
                                   title={`在终端执行 ${st.loginCommand ?? ""}`}
-                                  className="h-7 rounded border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110"
+                                  className="h-7 rounded border border-field bg-strip px-2 text-xs text-pl2 hover:bg-inset hover:text-pl1"
                                 >
                                   连接
                                 </button>

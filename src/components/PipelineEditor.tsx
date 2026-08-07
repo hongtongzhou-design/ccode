@@ -346,7 +346,8 @@ export default function PipelineEditor({
 
   return (
     <div className="fixed inset-0 z-30 flex flex-col bg-canvas">
-      <div className="flex shrink-0 items-center gap-3 border-b border-hairline px-8 py-3">
+      {/* 覆盖层头部统一（P3）：strip 底 + hairline 下缘，标题 + 副题 + 唯一主动作（保存） */}
+      <div className="flex shrink-0 items-center gap-3 border-b border-hairline bg-strip px-8 py-3">
         <h2 className="shrink-0 text-base font-semibold text-l1">
           编辑流水线
         </h2>

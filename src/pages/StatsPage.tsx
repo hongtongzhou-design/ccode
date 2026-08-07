@@ -142,7 +142,11 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     stats?.byAgent.reduce((s, a) => s + a.tokens, 0) ?? 1,
   );
   const rate = stats?.rateUsdCny ?? 7.2;
-  const th = "px-2 py-1.5 text-left text-xs font-normal text-l4";
+  // 分布区表头：caps 式小字加字距（同 SkillsPage 表头规格），弱化只作列定位
+  const th = "px-2 py-1.5 text-left text-[11px] font-normal tracking-wider text-l4";
+  // 工具行次级按钮：28px 深色描边（同 SessionsPage secBtn 一档）
+  const secBtn =
+    "inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-2.5 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1 disabled:opacity-50";
 
   const projectRows = useMemo(() => {
     if (!stats || showInternal) return stats?.byProject ?? [];
@@ -247,7 +251,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
             type="button"
             onClick={() => void onRebuild()}
             disabled={rebuilding}
-            className="rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+            className={secBtn}
           >
             {rebuilding ? "索引中…" : "刷新"}
           </button>

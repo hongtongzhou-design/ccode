@@ -11,6 +11,7 @@ import {
   PageFrame,
   PageHeader,
   primaryActionClass,
+  secondaryActionClass,
 } from "../components/PageFrame";
 import type {
   DiscoveredSkillDto,
@@ -26,6 +27,13 @@ const SOURCE_LABEL: Record<string, string> = {
   github: "GitHub",
   discovered: "发现",
 };
+
+/** 列表描述行：空描述或纯符号/标点（无字母数字）视为异常描述，不展示原文 */
+function displayDescription(desc: string): string | null {
+  const t = desc.trim();
+  if (!t) return null;
+  return /[\p{L}\p{N}]/u.test(t) ? t : null;
+}
 
 const GITHUB_PRESETS = [
   "anthropics/skills",
@@ -931,7 +939,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
         <PageFrame width="wide">
           <PageHeader
             title="技能"
-            meta={`${skills.length} 个技能 · ${appliedCount} 个已应用`}
+            meta={`${skills.length} 个 · 已应用 ${appliedCount}`}
             actions={
               <>
                 <button
@@ -944,9 +952,9 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                 <button
                   type="button"
                   onClick={() => setModal({ kind: "import" })}
-                  className="rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10"
+                  className={secondaryActionClass}
                 >
-                  + 导入
+                  导入
                 </button>
                 <button
                   type="button"
@@ -983,9 +991,9 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             />
           ) : (
             <div className="mt-4">
-              {/* 收敛掉卡片外框：hairline 分隔；sticky 表头用页面底色遮挡滚动内容 */}
+              {/* caps 式小字灰表头：弱化只作列定位，hairline 分隔无卡片外框；sticky 用页面底色遮挡滚动内容 */}
               <div>
-                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 border-b border-hairline bg-canvas px-3 py-2 text-xs text-l4">
+                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 border-b border-hairline bg-canvas px-3 py-2 text-[11px] tracking-wider text-l4">
                   <span>技能</span>
                   <span>来源</span>
                   <span>应用</span>
@@ -1005,12 +1013,12 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         aria-label={
                           catCollapsed.has(category) ? "展开" : "收起"
                         }
-                        className="flex h-9 w-full items-center gap-1.5 border-b border-hairline px-2 text-xs text-l4 hover:bg-white/5 hover:text-l2"
+                        className="flex h-9 w-full items-center gap-1.5 border-b border-hairline px-3 text-xs hover:bg-white/5"
                       >
-                        <span className="inline-flex h-7 w-7 items-center justify-center rounded text-l4 hover:bg-white/5">
+                        <span className="w-3 text-l4">
                           {catCollapsed.has(category) ? "▸" : "▾"}
                         </span>
-                        {category}
+                        <span className="font-medium text-l3">{category}</span>
                         <span className="text-l4">{categorySkills.length}</span>
                       </button>
                       {!catCollapsed.has(category) && (
@@ -1025,7 +1033,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                               <li
                                 key={skill.id}
                                 onClick={() => void onView(skill)}
-                                className={`group grid min-h-16 cursor-pointer grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 px-3 transition-colors hover:bg-white/5 ${
+                                className={`group grid min-h-12 cursor-pointer grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 px-3 transition-colors hover:bg-white/5 ${
                                   preview?.skill.id === skill.id
                                     ? "bg-inset"
                                     : ""
@@ -1033,7 +1041,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                               >
                                 <div className="min-w-0">
                                   <div className="flex min-w-0 items-center gap-1.5">
-                                    <span className="min-w-0 truncate text-[15px] font-medium text-l1">
+                                    <span className="min-w-0 truncate text-sm font-medium text-l1">
                                       {skill.name}
                                     </span>
                                     {/* 状态聚合：副本过期/GitHub 可更新合并为一个警示点，明细在悬浮 */}
@@ -1083,15 +1091,28 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                       className="mt-1 w-full rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
                                     />
                                   ) : (
-                                    <p
-                                      className="mt-0.5 truncate text-[13px] text-l3"
-                                      title={skill.description}
-                                    >
-                                      {skill.description}
-                                    </p>
+                                    (() => {
+                                      const desc = displayDescription(
+                                        skill.description,
+                                      );
+                                      // 单行截断 + title 悬浮全文；异常描述显示占位，不渲染原文
+                                      return desc ? (
+                                        <p
+                                          className="mt-0.5 truncate text-xs text-l3"
+                                          title={desc}
+                                        >
+                                          {desc}
+                                        </p>
+                                      ) : (
+                                        <p className="mt-0.5 text-xs text-l4">
+                                          —
+                                        </p>
+                                      );
+                                    })()
                                   )}
                                 </div>
-                                <span className="truncate text-xs text-l3">
+                                {/* 来源弱化为淡灰，只作识别信息 */}
+                                <span className="truncate text-xs text-l4">
                                   {SOURCE_LABEL[skill.source] ?? skill.source}
                                 </span>
                                 <button
@@ -1100,7 +1121,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     event.stopPropagation();
                                     void onView(skill);
                                   }}
-                                  className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs text-l2 hover:bg-seg-sel hover:text-l1"
+                                  className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs text-l3 hover:bg-seg-sel hover:text-l1"
                                   title="在右侧管理该技能应用到哪些 Agent"
                                 >
                                   {/* 无状态不渲染状态点：未应用时不画灰点，计数文字已表达 */}

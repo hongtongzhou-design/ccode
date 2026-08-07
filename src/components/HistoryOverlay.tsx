@@ -49,7 +49,8 @@ export default function HistoryOverlay({
 
   return (
     <div className="fixed inset-0 z-30 flex flex-col bg-canvas">
-      <div className="flex shrink-0 items-center gap-3 border-b border-hairline px-8 py-3">
+      {/* 覆盖层头部统一（P3）：strip 底 + hairline 下缘；只读视图无主动作，仅「关闭」 */}
+      <div className="flex shrink-0 items-center gap-3 border-b border-hairline bg-strip px-8 py-3">
         <h2 className="shrink-0 text-base font-semibold text-l1">
           {projectName} · 保存历史
         </h2>

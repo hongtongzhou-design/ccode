@@ -144,18 +144,15 @@ function App() {
             type="button"
             onClick={toggleCollapsed}
             title={collapsed ? "展开侧栏" : "收起为图标"}
-            className={`flex h-14 shrink-0 select-none items-center border-b border-hairline text-left text-l1 ${
+            className={`flex h-12 shrink-0 select-none items-center border-b border-hairline text-left text-l1 ${
               collapsed ? "justify-center text-sm" : "px-3"
             }`}
           >
             {collapsed ? (
               <span className="font-semibold">C</span>
             ) : (
-              <span className="min-w-0">
-                <span className="block text-sm font-semibold tracking-wide">Ccode</span>
-                <span className="block text-[10px] font-normal tracking-normal text-l4">
-                  AI 科研工作台
-                </span>
+              <span className="block min-w-0 text-base font-semibold tracking-wide">
+                Ccode
               </span>
             )}
           </button>
@@ -164,7 +161,7 @@ function App() {
             {NAV_GROUPS.map((group, groupIndex) => (
               <div key={group.label} className={groupIndex > 0 ? "mt-3" : ""}>
                 {!collapsed && (
-                  <div className="mb-1 px-2 text-[10px] font-medium tracking-[0.12em] text-l4">
+                  <div className="mb-1 px-2 text-[10px] font-medium uppercase tracking-[0.18em] text-l4">
                     {group.label}
                   </div>
                 )}
@@ -179,7 +176,7 @@ function App() {
                         ? `${n.label}（${runningCount} 个 agent 运行中）`
                         : n.label
                     }
-                    className={`relative mb-0.5 flex h-9 items-center rounded-md text-sm transition-colors ${
+                    className={`relative mb-0.5 flex h-7 items-center rounded-md text-sm transition-colors ${
                       collapsed
                         ? "w-11 justify-center"
                         : "w-full px-2.5"
@@ -190,10 +187,10 @@ function App() {
                     }`}
                   >
                     {page === n.id && (
-                      <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-cta" />
+                      <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
                     )}
                     <span
-                      className={`relative ${collapsed ? "text-base" : "mr-2 w-5 text-center text-base"}`}
+                      className={`relative ${collapsed ? "text-base" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
                     >
                       {n.icon}
                       {n.id === "terminal" && runningCount > 0 && (
@@ -223,7 +220,7 @@ function App() {
                 onClick={() => setPage(n.id)}
                 aria-current={page === n.id ? "page" : undefined}
                 title={n.label}
-                className={`relative mb-0.5 flex h-9 items-center rounded-md text-sm transition-colors ${
+                className={`relative mb-0.5 flex h-7 items-center rounded-md text-sm transition-colors ${
                   collapsed ? "w-11 justify-center" : "w-full px-2.5"
                 } ${
                   page === n.id
@@ -232,9 +229,11 @@ function App() {
                 }`}
               >
                 {page === n.id && (
-                  <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-cta" />
+                  <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
                 )}
-                <span className={collapsed ? "text-base" : "mr-2 w-5 text-center text-base"}>
+                <span
+                  className={`${collapsed ? "text-base" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
+                >
                   {n.icon}
                 </span>
                 {!collapsed && <span>{n.label}</span>}

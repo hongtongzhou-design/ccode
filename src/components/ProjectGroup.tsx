@@ -446,8 +446,10 @@ export default function ProjectGroup({
   const [applyingTemplate, setApplyingTemplate] = useState(false);
   // 「使用科研流水线模板」旁的可选课题主题输入，随模板一并落进 project.toml
   const [templateTopic, setTemplateTopic] = useState("");
-  // 模板选择器：首启引导与「重置为模板」共用，列出内置 + 用户模板
+  // 模板选择器：首启引导与「更换模板」共用，列出内置 + 用户模板
   const [pickerOpen, setPickerOpen] = useState(false);
+  // 校验提示浮层：⚠ 徽标点击展开逐条全文（WKWebView 不显示 title 悬浮）
+  const [warnOpen, setWarnOpen] = useState(false);
   // 另存为模板：内联表单（WKWebView 无 window.prompt），同名覆盖先 confirm
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [tplNameDraft, setTplNameDraft] = useState("");
@@ -580,17 +582,17 @@ export default function ProjectGroup({
 
   async function applyTemplate(item: TemplatePickItem) {
     if (!cfg) return;
-    // 已有步骤时视为「重置为模板」：提示覆盖，绑定的工作区与资源不受影响
+    // 已有步骤时视为「更换模板」：提示覆盖，绑定的工作区与资源不受影响
     if (
       cfg.steps.length > 0 &&
       !window.confirm(
-        `重置为模板「${item.name}」？现有 ${cfg.steps.length} 个步骤会被替换，绑定的工作区与资源不受影响。继续？`,
+        `更换模板「${item.name}」？现有 ${cfg.steps.length} 个步骤会被替换，绑定的工作区与资源不受影响。继续？`,
       )
     )
       return;
     setApplyingTemplate(true);
     // 模板只填 steps（+ 可选课题主题）；resources/artifactDir 保持现状，
-    // 重置为模板时模板输入框不渲染，topic 为空则保留既有课题主题
+    // 更换模板时模板输入框不渲染，topic 为空则保留既有课题主题
     const topic = templateTopic.trim();
     const ok = await saveConfig({
       ...cfg,
@@ -1068,28 +1070,39 @@ export default function ProjectGroup({
       {/* 流水线 strip：状态从绑定工作区派生，纯展示 */}
       {registered && cfg && cfg.steps.length > 0 && (
         <div className="mb-3 rounded border border-hairline bg-strip p-3">
-          {/* 进度概览：文字计数与校验提示；每段进度线在下方与对应步骤同列 */}
-          {(() => {
-            const keys = cfg.steps.map(
-              (s) => deriveStepStatus(s, workspaces, health, drift).key,
-            );
-            const doneCount = keys.filter((k) => k === "done").length;
-            return (
-              <div className="mb-2 flex items-center justify-end gap-2 px-0.5">
-                <span className="shrink-0 text-xs text-l3">
-                  研究流程 {doneCount}/{cfg.steps.length}
-                </span>
-                {cfgWarnings.length > 0 && (
-                  <span
-                    className="shrink-0 cursor-default text-xs text-warn-text"
-                    title={cfgWarnings.join("\n")}
-                  >
-                    ⚠ {cfgWarnings.length} 条提示
-                  </span>
+          {/* 校验提示：⚠ 徽标点击展开逐条全文浮层（WKWebView 不显示 title 悬浮）；
+              进度由下方等分进度段直接表达，不再放文字计数 */}
+          {cfgWarnings.length > 0 && (
+            <div className="mb-2 flex items-center justify-end px-0.5">
+              <div className="relative">
+                <button
+                  type="button"
+                  aria-expanded={warnOpen}
+                  title="查看全部校验提示"
+                  className="shrink-0 rounded px-1 text-xs text-warn-text hover:bg-white/5"
+                  onClick={() => setWarnOpen((v) => !v)}
+                >
+                  ⚠ {cfgWarnings.length} 条提示
+                </button>
+                {warnOpen && (
+                  <>
+                    {/* 点击浮层外任意处关闭 */}
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setWarnOpen(false)}
+                    />
+                    <ul className="absolute right-0 z-50 mt-1 w-72 space-y-1.5 rounded-md border border-hairline bg-raised p-2">
+                      {cfgWarnings.map((w, i) => (
+                        <li key={i} className="break-words text-xs text-l2">
+                          {w}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
                 )}
               </div>
-            );
-          })()}
+            </div>
+          )}
           {/* 等分列网格：列宽下限 9rem 让更多步骤在常规窗口内完整可见；
               窗口过窄放不下全部步骤时保持整体横向滚动（不换行，进度线与胶囊同列对齐） */}
           <ol
@@ -1130,8 +1143,14 @@ export default function ProjectGroup({
                 .join("\n");
               return (
                 <li key={`${i}-${step.name}`} className="min-w-0">
+                  {/* 进度段：状态切换时颜色柔和过渡（transition-all）；
+                      进行中/待评审段加呼吸脉冲，让「正在动」一眼可辨 */}
                   <div
-                    className={`mb-2 h-1.5 rounded-full ${stepSegmentClass(st.key)}`}
+                    className={`mb-2 h-1.5 rounded-full transition-all duration-500 ${stepSegmentClass(st.key)} ${
+                      st.key === "active" || st.key === "review"
+                        ? "animate-pulse"
+                        : ""
+                    }`}
                     title={`${step.name}：${statusLabel}`}
                   />
                   <div className="flex min-w-0 items-center gap-1">
@@ -1566,10 +1585,10 @@ export default function ProjectGroup({
               onSelect: () => setEditorOpen(true),
             },
             {
-              label: pickerOpen ? "收起模板库" : "从模板替换流水线",
+              label: pickerOpen ? "收起模板库" : "更换模板",
               disabled: !cfg,
               title: cfg
-                ? "替换现有步骤，绑定的工作区与资源不受影响"
+                ? "打开模板库另选一个模板；写入时现有步骤被替换，绑定的工作区与资源不受影响"
                 : "project.toml 尚未加载完成",
               onSelect: () => setPickerOpen((v) => !v),
             },

@@ -199,7 +199,7 @@ function ProjectRail({
         style={{ paddingLeft: 6 + (depth + 1) * 12 }}
       >
         {e.isDir ? (
-          <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+          <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-folder" />
         ) : (
           <File aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
         )}
@@ -218,7 +218,7 @@ function ProjectRail({
     <div className="shrink-0 border-b border-hairline">
       <button
         onClick={() => setCollapsed((v) => !v)}
-        className="flex w-full items-center gap-1 px-2 py-1 text-left text-[10px] text-l4 hover:text-l2"
+        className="flex w-full items-center gap-1 px-2 py-2 text-left text-[10px] text-l4 hover:text-l2"
       >
         <span>{collapsed ? "▸" : "▾"}</span>
         <span>项目</span>
@@ -240,9 +240,9 @@ function ProjectRail({
               {expandedDirs.has(root) ? "▾" : "▸"}
             </button>
             {expandedDirs.has(root) ? (
-              <FolderOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+              <FolderOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-folder" />
             ) : (
-              <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+              <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-folder" />
             )}
             <span
               onClick={() => enter(root)}

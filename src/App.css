@@ -26,50 +26,58 @@
 }
 
 @theme {
-  /* 沉浸工作台：侧栏沉入近虚无 → 页面左栏 → 内容面 → 内嵌层逐级浮起
-     冷调深黑 + 冷白灰蓝文字，绿色为唯一强调 */
-  --color-rail: #08090d; /* 应用侧栏（近虚无，最暗） */
-  --color-rail2: #0d0f15; /* 页面左栏（会话树 / 终端工作栏） */
-  --color-rail-sel: #1f2533; /* 侧栏选中行 */
-  --color-strip: #151823; /* 顶栏 / 面板头条 / 输入区 */
-  --color-canvas: #11131a; /* 主内容底（黑基底） */
-  --color-inset: #181c27; /* 卡片 / 气泡 / 结果块（微微浮起） */
-  --color-seg-sel: #242a3a; /* 分段控件选中 */
-  --color-hairline: #202532; /* 隐式 1px 细线 */
-  --color-field: #2e3546; /* 输入框 / 弹层边线 */
+  /* 沉浸工作台（P0 视觉重设计校准）：侧栏沉入近虚无 → 内容面 → 页面左栏/面板头条 → 内嵌层逐级浮起
+     冷调深蓝黑 + 冷白灰蓝文字，粉色为主 CTA（用户拍板） */
+  --color-rail: #060d21; /* 应用侧栏（近虚无，最暗） */
+  --color-canvas: #0a1227; /* 主内容底（深蓝黑基底） */
+  --color-rail2: #131b2f; /* 页面左栏（会话树 / 终端工作栏） */
+  --color-strip: #161e33; /* 顶栏 / 面板头条 / 输入区 */
+  --color-inset: #181f33; /* 卡片 / 结果块（微微浮起） */
+  --color-raised: #1b2337; /* 浮起面板 / 状态 pill 底 */
+  --color-rail-sel: #222a3e; /* 侧栏选中行 */
+  --color-seg-sel: #2a3145; /* 分段控件选中 */
+  --color-bubble: #2c3448; /* 用户消息气泡 */
+  --color-hairline: #282e42; /* 隐式 1px 细线（走查校准：自 #2d3448 调柔一档，避免“亮线”生硬；仍亮于 inset，与 field 保持层级） */
+  --color-field: #3a4258; /* 输入框 / 弹层边线（保持亮于 hairline） */
 
   /* 文本四级：冷白 → 灰蓝（层级靠颜色不靠字号） */
-  --color-l1: #eef2fa; /* 标题 / 选中 */
-  --color-l2: #aeb6c6; /* 正文 / 次级 */
-  --color-l3: #767e90; /* 元信息 / 非选中页签 */
-  --color-l4: #525a6b; /* 淡 */
+  --color-l1: #e8f1f2; /* 标题 / 选中 */
+  --color-l2: #b0c0d0; /* 正文 / 次级 */
+  --color-l3: #8f9bb0; /* 元信息 / 非选中页签 */
+  --color-l4: #5a6478; /* 淡 */
 
-  /* 主 CTA（绿，保留）：每个视图只允许一个 */
-  --color-cta: #16a349;
-  --color-cta-text: #ceffdf;
-  --color-cta-bd: #06491e;
+  /* 主 CTA（粉，P0 拍板）：每个视图只允许一个 */
+  --color-cta: #faa8d4;
+  --color-cta-text: #2a1220;
+  --color-cta-bd: #b06a8e;
 
-  /* 状态 pill：深底 + 同色相浅字 */
+  /* 导航强调（靛蓝）：侧栏选中左条 + 选中图标着色，与粉色 CTA 并列 */
+  --color-nav-accent: #5a51d0;
+
+  /* 文件树文件夹图标着色（每主题一个 muted 色调；文件图标保持 l4 灰） */
+  --color-folder: #7f96b8;
+
+  /* 状态 pill：深底 + 同色相浅字（文字/小点用法不变） */
   --color-ok: #10331f;
-  --color-ok-text: #7fe3a8;
+  --color-ok-text: #40d080;
   --color-err: #381e24;
-  --color-err-text: #e3949b;
+  --color-err-text: #f07070;
   --color-warn: #37300f;
-  --color-warn-text: #e3c98a;
+  --color-warn-text: #f0c010;
 
   /* diff 增删 */
   --color-add: #8fd3a8;
   --color-del: #d98a93;
 
   /* 交互蓝：仅用于链接 / 可点提示，克制使用 */
-  --color-link: #7ea2e8;
+  --color-link: #60a0f0;
 
   /* 页签选中下划线 */
   --color-tabline: #c9cfda;
 
-  /* 强调色 pill（活跃 / 可合并等少数状态点，深底浅字） */
-  --color-cta-pill: #10331f;
-  --color-cta-pill-text: #7fe3a8;
+  /* 强调色 pill（活跃 / 可合并等少数状态点，深底浅字，随 CTA 换粉） */
+  --color-cta-pill: #3d1f31;
+  --color-cta-pill-text: #f6a9d6;
 
   /* 次级实心按钮 */
   --color-btn: #464543;
@@ -80,12 +88,14 @@
   --color-hl2: var(--color-hairline); /* 页内 hairline */
   --color-pl1: var(--color-l1); /* 页内一级文本 */
   --color-pl2: var(--color-l2); /* 页内二级文本 */
-  --color-okb: #7fe3a8; /* 成功（已安装 / 已存密钥 / 安装） */
-  --color-warnb: #e3c98a; /* 警告 */
+  --color-okb: #40d080; /* 成功（已安装 / 已存密钥 / 安装） */
+  --color-warnb: #f0c010; /* 警告 */
 }
 
 /* 多主题（仅深色）：运行时 document.documentElement.dataset.theme 切换，
-   覆盖同名 CSS 变量即可；状态/CTA/diff/tabline/link 颜色各主题共享 */
+   覆盖同名 CSS 变量即可；状态/diff/tabline/link 颜色各主题共享。
+   P0 校准：各变体 hairline 向更亮方向微调，补齐 raised/bubble/nav-accent；
+   nav-accent 默认取各主题 CTA 色，保持各自性格 */
 
 /* 暖夜 */
 /* 墨绿 */
@@ -94,56 +104,74 @@
 [data-theme="terracotta"] {
   --color-rail: #232322; --color-rail2: #262624; --color-rail-sel: #3d3d3a;
   --color-strip: #333331; --color-canvas: #2d2d2b; --color-inset: #373735;
-  --color-seg-sel: #41413e; --color-hairline: #474745; --color-field: #4f4f4c;
+  --color-raised: #3c3c39; --color-bubble: #4a4a46;
+  --color-seg-sel: #41413e; --color-hairline: #4d4d4a; --color-field: #545451;
   --color-l1: #f9f9f7; --color-l2: #c9c9c4; --color-l3: #94948f; --color-l4: #6a6a66;
   --color-cta: #cc7d5e; --color-cta-text: #f9f9f7; --color-cta-bd: #8f4f38;
+  --color-nav-accent: var(--color-cta);
   --color-cta-pill: #3d211a;
   --color-cta-pill-text: #eda586;
+  --color-folder: #ab9a85;
 }
 [data-theme="ayu"] {
   --color-rail: #0b0e14; --color-rail2: #0d1118; --color-rail-sel: #1e232e;
   --color-strip: #181c23; --color-canvas: #10141c; --color-inset: #181c23;
-  --color-seg-sel: #22272f; --color-hairline: #27292f; --color-field: #31353f;
+  --color-raised: #1c2029; --color-bubble: #2b303c;
+  --color-seg-sel: #22272f; --color-hairline: #2f323c; --color-field: #383d48;
   --color-l1: #d9d7d2; --color-l2: #bfbdb6; --color-l3: #878580; --color-l4: #5f5e59;
   --color-cta: #e6b450; --color-cta-text: #1d1608; --color-cta-bd: #8a6a26;
+  --color-nav-accent: var(--color-cta);
   --color-cta-pill: #3a2e10;
   --color-cta-pill-text: #eec363;
+  --color-folder: #9a8a5f;
 }
 [data-theme="mocha"] {
   --color-rail: #181824; --color-rail2: #1a1a28; --color-rail-sel: #2e2e44;
   --color-strip: #262738; --color-canvas: #1e1e2e; --color-inset: #262738;
-  --color-seg-sel: #30304a; --color-hairline: #343547; --color-field: #3f3f56;
+  --color-raised: #2b2c40; --color-bubble: #3a3b56;
+  --color-seg-sel: #30304a; --color-hairline: #3c3d52; --color-field: #464760;
   --color-l1: #cdd6f4; --color-l2: #aeb8dc; --color-l3: #7c86b0; --color-l4: #565e83;
   --color-cta: #cba6f7; --color-cta-text: #2a1b3d; --color-cta-bd: #6b4d94;
+  --color-nav-accent: var(--color-cta);
   --color-cta-pill: #2e2145;
   --color-cta-pill-text: #d3b3fa;
+  --color-folder: #8f97b8;
 }
 [data-theme="neutral"] {
   --color-rail: #0d0d0d; --color-rail2: #101010; --color-rail-sel: #262626;
   --color-strip: #1c1c1c; --color-canvas: #111111; --color-inset: #1c1c1c;
-  --color-seg-sel: #262626; --color-hairline: #2e2e2e; --color-field: #3a3a3a;
+  --color-raised: #212121; --color-bubble: #303030;
+  --color-seg-sel: #262626; --color-hairline: #363636; --color-field: #404040;
   --color-l1: #fcfcfc; --color-l2: #c9c9c9; --color-l3: #8f8f8f; --color-l4: #616161;
   --color-cta: #0169cc; --color-cta-text: #eaf4ff; --color-cta-bd: #014a8f;
+  --color-nav-accent: var(--color-cta);
   --color-cta-pill: #0d2d4d;
   --color-cta-pill-text: #63a9ef;
+  --color-folder: #999999;
 }
 [data-theme="dracula"] {
   --color-rail: #1e2029; --color-rail2: #22242e; --color-rail-sel: #3d3f4e;
   --color-strip: #33343f; --color-canvas: #282a36; --color-inset: #33343f;
-  --color-seg-sel: #3a3c4a; --color-hairline: #43444e; --color-field: #4e505e;
+  --color-raised: #383945; --color-bubble: #484a5c;
+  --color-seg-sel: #3a3c4a; --color-hairline: #4b4c5a; --color-field: #555768;
   --color-l1: #f8f8f2; --color-l2: #cfcfc9; --color-l3: #94948f; --color-l4: #68686a;
   --color-cta: #ff79c6; --color-cta-text: #38102a; --color-cta-bd: #a64a80;
+  --color-nav-accent: var(--color-cta);
   --color-cta-pill: #401a35;
   --color-cta-pill-text: #ff8fd0;
+  --color-folder: #8289b0;
 }
 [data-theme="shadcn"] {
   --color-rail: #0d1420; --color-rail2: #101827; --color-rail-sel: #232c3c;
   --color-strip: #1a2230; --color-canvas: #111827; --color-inset: #1a2230;
-  --color-seg-sel: #232c3d; --color-hairline: #2b323f; --color-field: #37404f;
+  --color-raised: #1f2836; --color-bubble: #2f3b4e;
+  --color-seg-sel: #232c3d; --color-hairline: #343b4a; --color-field: #3e485a;
   --color-l1: #e4e4e7; --color-l2: #b9b9c0; --color-l3: #7d7d8a; --color-l4: #55555f;
   --color-cta: #ff5c5c; --color-cta-text: #3d0f0f; --color-cta-bd: #a83232;
+  --color-nav-accent: var(--color-cta);
   --color-cta-pill: #3d1414;
   --color-cta-pill-text: #ff8080;
+  --color-folder: #8291ab;
 }
 
 html,

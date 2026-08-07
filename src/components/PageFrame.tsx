@@ -32,7 +32,7 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="sticky top-0 z-20 mb-4 flex h-14 items-center justify-between gap-4 border-b border-hairline bg-canvas">
+    <header className="sticky top-0 z-20 mb-4 flex h-12 items-center justify-between gap-4 border-b border-hairline bg-canvas">
       <div className="flex min-w-0 items-baseline gap-2.5">
         <h1 className="shrink-0 text-base font-semibold tracking-tight text-l1">
           {title}

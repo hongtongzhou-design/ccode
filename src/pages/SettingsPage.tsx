@@ -58,6 +58,10 @@ const field =
 const hoverReveal =
   "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
 
+// 分区内常驻次级操作：28px 深色描边（同 SessionsPage secBtn 一档；诊断区低频按钮仍走 hover 才现）
+const secBtn =
+  "inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-2.5 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1 disabled:opacity-50";
+
 /** 「外部终端」下拉的选项按平台给（navigator.platform 在 WKWebView/Chromium 均可用） */
 const EXTERNAL_TERMINALS: { id: string; label: string }[] = (() => {
   const p = navigator.platform || "";
@@ -696,7 +700,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             <button
               onClick={savePricing}
               disabled={!pricingDirty || savingPricing}
-              className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+              className={`ml-auto ${secBtn}`}
             >
               {savingPricing ? "保存中…" : "保存"}
             </button>
@@ -820,7 +824,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               </span>
               <button
                 onClick={() => checkAppUpdate()}
-                className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+                className={`ml-auto ${secBtn}`}
               >
                 重新检查
               </button>
