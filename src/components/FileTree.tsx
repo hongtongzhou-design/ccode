@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { File, FolderClosed, FolderOpen } from "lucide-react";
 import ContextMenu from "./ContextMenu";
-import { LoadingRows } from "./PageFrame";
+import { ghostActionClass, LoadingRows } from "./PageFrame";
 import { useAppStore } from "../store";
 import {
   hasChangedInside,
@@ -211,7 +211,7 @@ function FileTree({
   onEnterProject?: (path: string) => void;
   /** 根目录切换前通知；返回 false 时保留当前根（用于保护未保存预览）。 */
   onRootChange?: (path: string) => boolean;
-  /** 插在「最近项目」与完整树之间的自定义区块（如项目树） */
+  /** 插在搜索行（含最近项目下拉）与完整树之间的自定义区块（如项目树） */
   belowRecent?: ReactNode;
 }) {
   // manual root：默认锚定活动标签 cwd，钻取/上级由用户驱动
@@ -236,8 +236,16 @@ function FileTree({
   const recentReposLoading = useAppStore((s) => s.recentReposLoading);
   const recentReposLoaded = useAppStore((s) => s.recentReposLoaded);
   const loadRecentRepos = useAppStore((s) => s.loadRecentRepos);
-  // 最近项目区折叠：默认收起为一行标题（走查降噪），组件内记忆即可
-  const [recentOpen, setRecentOpen] = useState(false);
+  // 最近项目：搜索框旁 ⌄ 下拉浮层（Esc / 点外部关闭）
+  const [recentMenuOpen, setRecentMenuOpen] = useState(false);
+  useEffect(() => {
+    if (!recentMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setRecentMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [recentMenuOpen]);
 
   // App 启动时已预取；终端首次挂载再兜底触发一次，store 会合并并发请求。
   useEffect(() => {
@@ -447,75 +455,84 @@ function FileTree({
     .slice(0, 4);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 顶部：文件名搜索（无描边，底色分层；区间靠留白不加线） */}
-      <div className="shrink-0 px-2 py-1.5">
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === "Escape" && setQuery("")}
-          placeholder={`搜索 ${basenameOf(root)}…`}
-          className="w-full rounded-md bg-inset px-2 py-1 text-xs text-l2 outline-none transition-colors placeholder:text-l4 focus:bg-raised"
-        />
-      </div>
-      {/* 最近项目：一行式折叠区（默认收起，与「打开的标签」「项目」区标题同一样式，走查降噪）；
-          展开后点击真进入（切树根 + 切换启动栏 cwd）；↗ 另开新终端标签 */}
-      {(recent.length > 0 || (!recentReposLoaded && recentReposLoading)) && (
-        <div className="shrink-0">
-          <button
-            onClick={() => setRecentOpen((v) => !v)}
-            aria-expanded={recentOpen}
-            className="flex w-full items-center gap-1 px-2 py-2 text-left text-[10px] text-l4 hover:text-l2"
-          >
-            <span>{recentOpen ? "▾" : "▸"}</span>
-            <span>最近项目</span>
-          </button>
-          {recentOpen && (
-            <div className="pb-1">
-          {!recentReposLoaded && recent.length === 0 ? (
-            <div className="space-y-1 px-2 py-0.5" aria-label="正在加载最近项目">
-              {[0, 1, 2, 3].map((index) => (
-                <div key={index} className="h-4 animate-pulse rounded bg-inset" />
-              ))}
-            </div>
-          ) : recent.map((r) => (
-            <div
-              key={r.path}
-              onClick={async () => {
-                try {
-                  // 目录可能已归档/移动，先验证再切换，避免树卡进无效根
-                  await invoke("list_dir", { path: r.path, showHidden: false });
-                  if (!nav(r.path)) return;
-                  onEnterProject?.(r.path);
-                  setResults(null);
-                  setQuery("");
-                  setError(null);
-                } catch {
-                  setError(`目录不存在或已移动：${r.path}`);
-                }
-              }}
-              title={`${r.path}${r.lastActive ? `\n最近活动：${new Date(r.lastActive).toLocaleString("zh-CN")}` : ""}\n点击进入；↗ 打开新终端`}
-              className="group cursor-pointer px-2 py-0.5 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+      {/* 顶部：文件名搜索（无描边，底色分层）+ 最近项目 ⌄ 下拉浮层（浮层允许边框） */}
+      <div className="relative shrink-0 px-2 py-1.5">
+        <div className="flex items-center gap-1">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+            placeholder={`搜索 ${basenameOf(root)}…`}
+            className="min-w-0 flex-1 rounded-md bg-inset px-2 py-1 text-xs text-l2 outline-none transition-colors placeholder:text-l4 focus:bg-raised"
+          />
+          {(recent.length > 0 || (!recentReposLoaded && recentReposLoading)) && (
+            <button
+              onClick={() => setRecentMenuOpen((v) => !v)}
+              title="最近项目"
+              aria-expanded={recentMenuOpen}
+              className={`${ghostActionClass} shrink-0`}
             >
-              <span className="flex items-center gap-1">
-                <span className="shrink-0 text-l4">◔</span>
-                <span className="min-w-0 flex-1 truncate">{r.name}</span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onOpenTerminal(r.path);
-                  }}
-                  title="在此打开新终端"
-                  className="hidden shrink-0 text-l4 hover:text-l1 group-hover:block"
-                >
-                  ↗
-                </button>
-              </span>
-            </div>
-          ))}
-            </div>
+              ⌄
+            </button>
           )}
         </div>
-      )}
+        {recentMenuOpen && (
+          <>
+            {/* 透明罩：点浮层外任意处关闭 */}
+            <div
+              className="fixed inset-0 z-40"
+              onClick={() => setRecentMenuOpen(false)}
+            />
+            <div className="absolute inset-x-2 top-full z-50 mt-0.5 max-h-56 overflow-auto rounded-md border border-field bg-raised py-1">
+              {!recentReposLoaded && recent.length === 0 ? (
+                <div className="space-y-1 px-2 py-0.5" aria-label="正在加载最近项目">
+                  {[0, 1, 2, 3].map((index) => (
+                    <div key={index} className="h-4 animate-pulse rounded bg-inset" />
+                  ))}
+                </div>
+              ) : (
+                recent.map((r) => (
+                  <div
+                    key={r.path}
+                    onClick={async () => {
+                      try {
+                        // 目录可能已归档/移动，先验证再切换，避免树卡进无效根
+                        await invoke("list_dir", { path: r.path, showHidden: false });
+                        if (!nav(r.path)) return;
+                        onEnterProject?.(r.path);
+                        setResults(null);
+                        setQuery("");
+                        setError(null);
+                        setRecentMenuOpen(false);
+                      } catch {
+                        setError(`目录不存在或已移动：${r.path}`);
+                      }
+                    }}
+                    title={`${r.path}${r.lastActive ? `\n最近活动：${new Date(r.lastActive).toLocaleString("zh-CN")}` : ""}\n点击进入；↗ 打开新终端`}
+                    className="group cursor-pointer px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                  >
+                    <span className="flex items-center gap-1">
+                      <span className="shrink-0 text-l4">◔</span>
+                      <span className="min-w-0 flex-1 truncate">{r.name}</span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenTerminal(r.path);
+                          setRecentMenuOpen(false);
+                        }}
+                        title="在此打开新终端"
+                        className="hidden shrink-0 text-l4 hover:text-l1 group-hover:block"
+                      >
+                        ↗
+                      </button>
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </>
+        )}
+      </div>
       {belowRecent}
       {/* 当前根：加粗 basename + 完整路径 tooltip；偏离锚点时给「回到当前项目」 */}
       <div

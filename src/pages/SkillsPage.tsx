@@ -515,19 +515,24 @@ function SkillEditorModal({
   mode,
   skill,
   initialBody,
+  draft,
   onClose,
   onDone,
 }: {
   mode: "create" | "edit";
   skill?: SkillDto;
   initialBody?: string;
+  /** 「✦ 沉淀为技能」AI 草稿预填（仅 create） */
+  draft?: { name: string; description: string; content: string };
   onClose: () => void;
   /** editedId 用于保存后刷新正在展示的预览面板 */
   onDone: (msg: string, editedId?: string) => void;
 }) {
-  const [name, setName] = useState(skill?.name ?? "");
-  const [description, setDescription] = useState(skill?.description ?? "");
-  const [content, setContent] = useState(initialBody ?? "");
+  const [name, setName] = useState(draft?.name ?? skill?.name ?? "");
+  const [description, setDescription] = useState(
+    draft?.description ?? skill?.description ?? "",
+  );
+  const [content, setContent] = useState(initialBody ?? draft?.content ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -737,9 +742,14 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
   const [updates, setUpdates] = useState<Record<string, SkillUpdateDto>>({});
   const [checkingUpdates, setCheckingUpdates] = useState(false);
-  // 技能编辑器（RX3b）：create=空白表单；edit=预填名称/描述/正文（名称锁定）
+  // 技能编辑器（RX3b）：create=空白表单（可带 AI 草稿预填）；edit=预填名称/描述/正文（名称锁定）
   const [editor, setEditor] = useState<
-    { mode: "create" } | { mode: "edit"; skill: SkillDto; body: string } | null
+    | {
+        mode: "create";
+        draft?: { name: string; description: string; content: string };
+      }
+    | { mode: "edit"; skill: SkillDto; body: string }
+    | null
   >(null);
   // ◈ 优化：内联收集意见后开终端让 Agent 改写 SKILL.md
   const [optimize, setOptimize] = useState<SkillDto | null>(null);
@@ -767,6 +777,15 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (visible) void refresh();
   }, [visible]);
+
+  // 选段「✦ 沉淀为技能」交来的 AI 草稿：打开新建 modal 预填（同 focusTabReq 一次性消费模式）
+  const skillDraftReq = useAppStore((s) => s.skillDraftReq);
+  const setSkillDraftReq = useAppStore((s) => s.setSkillDraftReq);
+  useEffect(() => {
+    if (!visible || !skillDraftReq) return;
+    setEditor({ mode: "create", draft: skillDraftReq });
+    setSkillDraftReq(null);
+  }, [visible, skillDraftReq, setSkillDraftReq]);
 
   /** 切换某 agent 的应用开关（apply_skill），按钮级 spinner */
   async function toggleApp(skill: SkillDto, agent: string) {
@@ -1267,6 +1286,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           mode={editor.mode}
           skill={editor.mode === "edit" ? editor.skill : undefined}
           initialBody={editor.mode === "edit" ? editor.body : undefined}
+          draft={editor.mode === "create" ? editor.draft : undefined}
           onClose={() => setEditor(null)}
           onDone={(msg, editedId) => {
             setNotice(msg);

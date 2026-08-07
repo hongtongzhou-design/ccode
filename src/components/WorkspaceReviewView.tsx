@@ -16,9 +16,17 @@ import ContextMenu from "./ContextMenu";
 import ImagePairView, { isImagePath } from "./ImagePairView";
 import { Checkbox, LoadingRows } from "./PageFrame";
 import { defaultCommitMessage } from "../git-commit-message";
+import {
+  buildWorkspaceTerminalRequest,
+  startPipelineStep,
+} from "../pipeline-start";
+import { useAppStore } from "../store";
 import type {
   GitCommitResultDto,
   GitFileDto,
+  ProjectConfigDto,
+  ProjectConfigReadDto,
+  ProjectStepDto,
   WorkspaceDiffDto,
   WorkspaceDto,
   WorkspaceHealthDto,
@@ -939,6 +947,17 @@ export default function WorkspaceReviewView({
   const suppressTrackRef = useRef(false);
   const suppressTrackTimerRef = useRef<number | null>(null);
   const [mergedAt, setMergedAt] = useState<string | null>(null);
+  // 合并成功（保留工作区）后的「开始下一步」衔接：横幅入口只挂在本次评审的合并成功态上
+  const [mergeDone, setMergeDone] = useState(false);
+  const [nextStep, setNextStep] = useState<{
+    step: ProjectStepDto;
+    cfg: ProjectConfigDto;
+    projectPath: string;
+  } | null>(null);
+  const [nextBusy, setNextBusy] = useState(false);
+  const [nextError, setNextError] = useState<string | null>(null);
+  const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const setPage = useAppStore((s) => s.setPage);
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1042,6 +1061,9 @@ export default function WorkspaceReviewView({
     }
     sectionRefs.current.clear();
     setMergedAt(null);
+    setMergeDone(false);
+    setNextStep(null);
+    setNextError(null);
     setUnmerged(null);
     setConflictFiles([]);
     setConflictContents({});
@@ -1068,6 +1090,75 @@ export default function WorkspaceReviewView({
       })
       .catch(() => {});
   }, [diff?.workspaceId]);
+
+  // 合并成功后定位流水线下一步：当前步 = 与本工作区同名的步骤；
+  // 下一步 = 其后第一个尚未开步的步骤（同仓库存在同名工作区 = 已开过，含已归档）。
+  // 项目未注册/无流水线/当前步未绑定/无下一步时入口不显示
+  useEffect(() => {
+    if (!mergeDone || !diff) return;
+    let stale = false;
+    void (async () => {
+      try {
+        const list = await invoke<WorkspaceDto[]>("list_workspaces");
+        const current = list.find((w) => w.id === diff.workspaceId);
+        if (!current) throw new Error("工作区记录缺失");
+        const read = await invoke<ProjectConfigReadDto>("read_project_config", {
+          path: current.repoPath,
+        });
+        const steps = read.config.steps;
+        const index = steps.findIndex(
+          (s) => s.workspaceName === current.name,
+        );
+        const taken = new Set(
+          list
+            .filter((w) => w.repoPath === current.repoPath)
+            .map((w) => w.name),
+        );
+        const next =
+          index >= 0
+            ? steps.slice(index + 1).find((s) => !taken.has(s.workspaceName))
+            : undefined;
+        if (!stale) {
+          setNextStep(
+            next
+              ? { step: next, cfg: read.config, projectPath: current.repoPath }
+              : null,
+          );
+        }
+      } catch {
+        if (!stale) setNextStep(null);
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+  }, [mergeDone, diff]);
+
+  /** 「▶ 开始下一步」：与流水线胶囊同一套开步链路，成功即收起入口防重复开同名工作区 */
+  async function startNextStep() {
+    if (!nextStep || nextBusy) return;
+    setNextBusy(true);
+    setNextError(null);
+    try {
+      await startPipelineStep({
+        projectPath: nextStep.projectPath,
+        step: nextStep.step,
+        cfg: nextStep.cfg,
+        onError: (msg) => setNextError(msg),
+        onOpenTerminal: async (ws, initialPrompt) => {
+          setPendingTerminal(
+            await buildWorkspaceTerminalRequest(ws, initialPrompt),
+          );
+          setPage("terminal");
+        },
+      });
+      setNextStep(null);
+    } catch (reason) {
+      setNextError(String(reason));
+    } finally {
+      setNextBusy(false);
+    }
+  }
 
   // 工作区列表的“在评审中创建 PR / 归档”只负责定位到此处；真正执行仍要求在覆盖层内确认。
   useEffect(() => {
@@ -1463,6 +1554,7 @@ export default function WorkspaceReviewView({
     setConflictBusy(true);
     setError(null);
     setResult(null);
+    setMergeDone(false);
     let resolvedCommitted = false;
     try {
       await invoke<string>("workspace_finish_merge", { id: diff.workspaceId });
@@ -1487,6 +1579,7 @@ export default function WorkspaceReviewView({
       if (merged.failedPhase) throw new Error(merged.message);
       setResult(merged.message);
       setMergedAt(new Date().toISOString());
+      setMergeDone(true);
       setConflictFiles([]);
       setConflictContents({});
       setConflictContentErrors({});
@@ -1602,6 +1695,7 @@ export default function WorkspaceReviewView({
     setBusy(true);
     setError(null);
     setResult(null);
+    setMergeDone(false);
     let committed = false;
     try {
       if (shouldCommit) {
@@ -1643,6 +1737,7 @@ export default function WorkspaceReviewView({
           return;
         }
         setMergedAt(new Date().toISOString());
+        setMergeDone(true);
       } else if (shouldArchive) {
         await invoke("archive_workspace", { id: diff.workspaceId });
         setResult("工作区已归档，分支仍可恢复");
@@ -1992,8 +2087,30 @@ export default function WorkspaceReviewView({
         </div>
       )}
       {result && (
-        <div className="shrink-0 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-ok-text">
-          ✓ {result}
+        <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-ok-text">
+          {/* 合并成功用白话固定文案，后端消息（含分支名）降为悬浮二级信息 */}
+          <span
+            className="min-w-0 truncate"
+            title={mergeDone ? result : undefined}
+          >
+            ✓ {mergeDone ? "已合并到主分支" : result}
+          </span>
+          {mergeDone && nextStep && (
+            <button
+              type="button"
+              disabled={nextBusy}
+              onClick={() => void startNextStep()}
+              title={`建工作区并预填「${nextStep.step.name}」简报，跳到终端确认启动`}
+              className="inline-flex h-7 shrink-0 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+            >
+              {nextBusy ? "开步中…" : `▶ 开始下一步：${nextStep.step.name}`}
+            </button>
+          )}
+        </div>
+      )}
+      {nextError && (
+        <div className="shrink-0 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-err-text">
+          ✗ {nextError}
         </div>
       )}
       {error && (

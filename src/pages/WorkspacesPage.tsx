@@ -1235,7 +1235,40 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
 
   return (
-    <div className="flex h-full bg-canvas">
+    <div className="flex h-full flex-col bg-canvas">
+      {/* 待你处理（全局收件箱）：横跨两栏之上，与当前选中项目无关；全空则不渲染 */}
+      {inboxItems.length > 0 && (
+        <section className="shrink-0 px-6 pt-3">
+          <div className="mx-auto w-full max-w-[1440px]">
+            <p className="mb-1.5 text-[11px] text-l4">
+              待你处理 {inboxItems.length}
+            </p>
+            <ul className="divide-y divide-hairline rounded-md bg-strip">
+              {inboxItems.map((item) => (
+                <li
+                  key={item.key}
+                  className="flex items-center gap-2.5 px-3 py-2 text-xs"
+                >
+                  <span
+                    className={`size-1.5 shrink-0 rounded-full ${item.dot}`}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-l2">
+                    {item.text}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={item.onClick}
+                    className={rowActionClass}
+                  >
+                    {item.actionLabel}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
+      <div className="flex min-h-0 flex-1">
       <aside className="flex w-[230px] shrink-0 flex-col border-r border-hairline bg-rail2">
         <div className="flex h-12 shrink-0 items-center gap-2 px-3">
           <span className="text-sm font-medium text-l1">项目</span>
@@ -1328,36 +1361,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           </>
         }
       />
-      {/* 待你处理：打开应用第一眼看到需要你拍板的事；全空则不渲染 */}
-      {inboxItems.length > 0 && (
-        <section className="mb-5">
-          <p className="mb-1.5 text-[11px] text-l4">
-            待你处理 {inboxItems.length}
-          </p>
-          <ul className="divide-y divide-hairline rounded-md bg-strip">
-            {inboxItems.map((item) => (
-              <li
-                key={item.key}
-                className="flex items-center gap-2.5 px-3 py-2 text-xs"
-              >
-                <span
-                  className={`size-1.5 shrink-0 rounded-full ${item.dot}`}
-                />
-                <span className="min-w-0 flex-1 truncate text-l2">
-                  {item.text}
-                </span>
-                <button
-                  type="button"
-                  onClick={item.onClick}
-                  className={rowActionClass}
-                >
-                  {item.actionLabel}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
       {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
       {created && (
         <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md bg-strip px-3 py-2.5 text-xs text-l2">
@@ -1626,6 +1629,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         />
       )}
         </PageFrame>
+      </div>
       </div>
     </div>
   );

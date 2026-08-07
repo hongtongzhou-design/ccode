@@ -833,47 +833,48 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          {!selecting && (filterChipLabel || q) && (
+          {!selecting && q && (
             <div className="mt-2 flex flex-wrap items-center gap-1">
-              {filterChipLabel && (
-                <button
-                  type="button"
-                  onClick={() => selectFilter({ kind: "all" })}
-                  className="max-w-48 truncate rounded bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
-                  title="清除分类筛选"
-                >
-                  {filterChipLabel} ×
-                </button>
-              )}
-              {q && (
-                <button
-                  type="button"
-                  onClick={() => setQuery("")}
-                  className="max-w-48 truncate rounded bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
-                  title="清除搜索"
-                >
-                  搜索：{query.trim()} ×
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                className="max-w-48 truncate rounded bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
+                title="清除搜索"
+              >
+                搜索：{query.trim()} ×
+              </button>
             </div>
           )}
         </div>
-        {/* 分类筛选：默认收起，展开为单列纵向手风琴（点 agent 展开项目子列表，项目行落筛选） */}
+        {/* 分类筛选：默认收起，展开为单列纵向手风琴（点 agent 展开项目子列表，项目行落筛选）。
+            行尾直接承载当前筛选口径与 × 清除（不再单设 chip 行） */}
         <div className="shrink-0 border-b border-hairline">
-          <button
-            type="button"
-            onClick={() => setTreeOpen(!treeOpen)}
-            aria-expanded={treeOpen}
-            className="flex h-8 w-full items-center gap-1.5 px-3 text-xs text-l3 hover:bg-white/5 hover:text-l1"
-          >
-            <span className="w-3 shrink-0 text-[10px] text-l4">
-              {treeOpen ? "▾" : "▸"}
-            </span>
-            分类筛选
-            <span className="min-w-0 flex-1 truncate text-left text-l4">
-              {filterChipLabel ?? "全部对话"}
-            </span>
-          </button>
+          <div className="flex h-8 items-center">
+            <button
+              type="button"
+              onClick={() => setTreeOpen(!treeOpen)}
+              aria-expanded={treeOpen}
+              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+            >
+              <span className="w-3 shrink-0 text-[10px] text-l4">
+                {treeOpen ? "▾" : "▸"}
+              </span>
+              分类筛选
+              <span className="min-w-0 flex-1 truncate text-left text-l4">
+                {filterChipLabel ?? "全部对话"}
+              </span>
+            </button>
+            {filterChipLabel && (
+              <button
+                type="button"
+                onClick={() => selectFilter({ kind: "all" })}
+                title="清除分类筛选"
+                className="flex h-full shrink-0 items-center px-2.5 text-xs text-l4 hover:text-l1"
+              >
+                ×
+              </button>
+            )}
+          </div>
           {treeOpen && (
             // 单列纵向手风琴：点 agent 只展开/收起其项目子列表（不动筛选、不关回放），
             // 「全部项目」/单项目行才落筛选，选中自动收起；层级靠左侧缩进线，不加竖向分栏线

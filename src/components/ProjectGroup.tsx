@@ -5,16 +5,13 @@ import ContextMenu from "./ContextMenu";
 import PipelineEditor from "./PipelineEditor";
 import HistoryOverlay from "./HistoryOverlay";
 import TemplatePicker, { type TemplatePickItem } from "./TemplatePicker";
-import { Checkbox } from "./PageFrame";
+import { Checkbox, rowActionClass } from "./PageFrame";
 import type { DirEntryDto } from "./FileTree";
+import { absTime, relTime } from "../rel-time";
 import { useAppStore } from "../store";
-import {
-  DEFAULT_KICKOFF_PROMPT,
-  RESOURCE_TYPE_LABELS,
-} from "../pipeline-presets";
+import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
+import { startPipelineStep } from "../pipeline-start";
 import type {
-  ArtifactEntryDto,
-  BootstrapCommitDto,
   DiscoveredResourceDto,
   EnsureGitDto,
   PipelineTemplateDto,
@@ -23,7 +20,6 @@ import type {
   ProjectDto,
   ProjectResourceDto,
   ProjectStepDto,
-  SkillDto,
   WorkspaceDto,
   WorkspaceDriftDto,
   WorkspaceHealthDto,
@@ -77,6 +73,15 @@ interface ArtifactRow {
   /** 预期产物条目原文（相对根的路径） */
   entry: string;
   files: DirEntryDto[];
+}
+
+/** 「刚更新」阈值：10 分钟内修改的产物在核验清单上标 ok 色小点 */
+const ARTIFACT_FRESH_MS = 10 * 60_000;
+
+function isFreshMtime(iso: string | null): boolean {
+  if (!iso) return false;
+  const t = Date.parse(iso);
+  return !Number.isNaN(t) && Date.now() - t < ARTIFACT_FRESH_MS;
 }
 
 /** 步骤产物清单（RX2b）：预期产物条目逐个在 root 下定位——文件单列自身；
@@ -172,92 +177,6 @@ function deriveStepStatus(
   if (h.uncommitted) return { key: "active", ws };
   if (h.ahead > 0) return { key: "review", ws };
   return { key: "active", ws };
-}
-
-/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 预期产物 + 推荐技能 + 项目资源（步骤有资源绑定时只列绑定项，一键开步落成工作区）。
- *  导出给 TerminalPage 的「整理为笔记」开步链路复用，保持两处 TASK.md 一致。
- *  artifacts 为项目根提货单（上一步产物），非空时在「项目资源」后追加提货单段。
- *  skillMeta 为技能库元数据（name → 一句话描述）：步骤 skills 非空时渲染「本步骤推荐技能」段；
- *  缺省（库读取失败）时只列技能名，不误标未安装。 */
-export function renderTaskMd(
-  step: ProjectStepDto,
-  cfg: ProjectConfigDto,
-  projectPath: string,
-  artifacts?: ArtifactEntryDto[],
-  skillMeta?: Record<string, string>,
-): string {
-  const lines = [`# ${step.name}`, ""];
-  // 课题主题放在简报之前：auto 模式的 Agent 据此明确综述主题
-  const topic = cfg.topic?.trim();
-  if (topic) {
-    lines.push("## 课题主题", topic, "");
-  }
-  lines.push(
-    step.brief.trim() ||
-      "（在 .ccode/project.toml 的 steps.brief 中补充本步骤任务简报）",
-  );
-  if (step.expectedArtifacts.length > 0) {
-    lines.push(
-      "",
-      "## 预期产物",
-      ...step.expectedArtifacts.map((a) => `- ${a}`),
-    );
-  }
-  // 步骤挂载技能（RX3b）：只列名称 + 一句话描述，技能本体不进 TASK.md（保持简报轻量）
-  if (step.skills.length > 0) {
-    lines.push("", "## 本步骤推荐技能");
-    for (const name of step.skills) {
-      if (!skillMeta) {
-        lines.push(`- ${name}`);
-      } else if (name in skillMeta) {
-        const desc = skillMeta[name];
-        lines.push(desc ? `- ${name}：${desc}` : `- ${name}`);
-      } else {
-        lines.push(`- ${name}（未安装，可在技能页新建或导入）`);
-      }
-    }
-    lines.push("已分发到所启动 Agent 的技能自动生效；未分发可在技能页开启。");
-  }
-  // 资源绑定（RX1）：步骤 resources 非空时「项目资源」段只列绑定项；空/缺省保持全部（向后兼容）
-  const boundPaths = step.resources ?? [];
-  const resources =
-    boundPaths.length > 0
-      ? cfg.resources.filter((r) => boundPaths.includes(r.path))
-      : cfg.resources;
-  if (resources.length > 0) {
-    // 资源只引用不复制：相对路径按项目根拼成绝对路径，Agent 可直接读取
-    const root = projectPath.replace(/[\\/]+$/, "");
-    lines.push("", "## 项目资源（只读引用，勿复制到本工作区）");
-    for (const r of resources) {
-      const abs = /^([a-zA-Z]:[\\/]|\/)/.test(r.path)
-        ? r.path
-        : `${root}/${r.path}`;
-      const label = RESOURCE_TYPE_LABELS[r.type] ?? r.type;
-      lines.push(
-        `- [${label}] ${r.name}：${abs}${r.readonly ? "（只读）" : ""}`,
-      );
-    }
-  }
-  if (artifacts && artifacts.length > 0) {
-    // 提货单（§11.3 机制五）：上一步产物按路径直读，产物本体不进 git
-    lines.push("", "## 上一步产物（提货单）");
-    for (const a of artifacts) {
-      lines.push(
-        `- ${a.name}：${a.path}（md5 ${a.hash.slice(0, 8)}，来自「${a.producedBy}」）`,
-      );
-    }
-    lines.push(
-      "产物文件按路径直接读取，勿复制；新产物请通过改动面板登记进提货单。",
-    );
-  }
-  if (cfg.artifactDir?.trim()) {
-    lines.push(
-      "",
-      "## 产物目录",
-      `大型产物（数据/图/PDF）放入项目产物目录 \`${cfg.artifactDir}\`（相对项目根），不要提交进本分支。`,
-    );
-  }
-  return `${lines.join("\n")}\n`;
 }
 
 /**
@@ -436,10 +355,11 @@ export default function ProjectGroup({
     y: number;
     index: number;
   } | null>(null);
-  // 步骤产物面板（RX2b）：打开时才拉取文件清单，不进轮询
+  // 步骤产物面板（RX2b）：打开时才拉取文件清单，不进轮询；artifactRefresh 为手动「⟳ 刷新」计数
   const [artifactPanel, setArtifactPanel] = useState<number | null>(null);
   const [artifactRows, setArtifactRows] = useState<ArtifactRow[] | null>(null);
   const [artifactsLoading, setArtifactsLoading] = useState(false);
+  const [artifactRefresh, setArtifactRefresh] = useState(0);
   // 流水线编辑器（RX1）：步骤编辑唯一入口，覆盖旧 ⋯ 内联重命名/编辑简报/+ 步骤表单
   const [editorOpen, setEditorOpen] = useState(false);
   const [pipelineSaving, setPipelineSaving] = useState(false);
@@ -491,79 +411,25 @@ export default function ProjectGroup({
       stale = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [artifactPanel]);
+  }, [artifactPanel, artifactRefresh]);
 
-  /** 一键开步（§11.3 机制三）：ensure git → 建工作区 → 简报落成 TASK.md → 跳终端预填启动 */
+  /** 一键开步（§11.3 机制三）：invoke 链路在 pipeline-start.ts 与评审「开始下一步」共用，此处只管组件态 */
   async function startStep(index: number) {
     if (!project || !cfg) return;
     const step = cfg.steps[index];
     setStarting(index);
     try {
-      await invoke<EnsureGitDto>("ensure_git_repo", { path: project.path });
-      // 档案卡/gitignore 自动提交为 best-effort（沿用 TASK.md 同款模式）：
-      // git init 后 .ccode 与 .gitignore 未跟踪会被工作区合并的「主文件夹里还有没保存的改动」拦截；
-      // 后端只提交这两个 Ccode 自有路径，用户文件绝不纳入，失败不阻断开步
-      try {
-        await invoke<BootstrapCommitDto>("commit_project_bootstrap", {
-          repoPath: project.path,
-        });
-      } catch (reason) {
-        onError(`档案卡自动提交失败（不影响开步）：${String(reason)}`);
-      }
-      const ws = await invoke<WorkspaceDto>("create_workspace", {
-        repoPath: project.path,
-        name: step.workspaceName,
+      await startPipelineStep({
+        projectPath: project.path,
+        step,
+        cfg,
+        onError,
+        // 刷新先于跳终端：run 脚本写入在工作区行刷新之前，「运行脚本」菜单当次即可见
+        onOpenTerminal: async (ws, initialPrompt) => {
+          await onRefresh();
+          onOpenTerminal(ws, initialPrompt);
+        },
       });
-      // TASK.md 为 best-effort：write_workspace_task_md 是 P1b 的最小后端补充，
-      // 命令就绪前失败不阻断开步，简报仍可在 project.toml 与步骤「编辑简报」中查看
-      // 提货单：项目根已有上一步产物清单时带进 TASK.md（读取失败同样不阻断）
-      let artifacts: ArtifactEntryDto[] = [];
-      try {
-        artifacts = await invoke<ArtifactEntryDto[]>("read_artifacts_manifest", {
-          repoPath: project.path,
-        });
-      } catch {
-        /* 清单缺失或后端未就绪时跳过提货单段 */
-      }
-      // 步骤挂载技能（RX3b）：skills 非空时读库元数据渲染「本步骤推荐技能」段，
-      // best-effort——库读取失败只列技能名，不阻断开步
-      let skillMeta: Record<string, string> | undefined;
-      if (step.skills.length > 0) {
-        try {
-          const lib = await invoke<SkillDto[]>("list_skills");
-          skillMeta = Object.fromEntries(
-            lib.map((skill) => [skill.name, skill.description]),
-          );
-        } catch {
-          /* 技能库不可读时只列技能名 */
-        }
-      }
-      try {
-        await invoke("write_workspace_task_md", {
-          worktreePath: ws.worktreePath,
-          content: renderTaskMd(step, cfg, project.path, artifacts, skillMeta),
-        });
-      } catch (reason) {
-        onError(`工作区「${ws.name}」已创建，TASK.md 写入失败：${String(reason)}`);
-      }
-      // 步骤预设的 run 脚本（P4 quarto 渲染等）落进项目层 .ccode/settings.toml：
-      // 同名覆盖、其余键保留；best-effort 失败不阻断开步。
-      // 写在工作区行刷新之前，「运行脚本」菜单（workspace_settings 按 repoPath 合并）当次即可见
-      if (step.run.length > 0) {
-        try {
-          await invoke("upsert_project_run_scripts", {
-            repoPath: project.path,
-            scripts: step.run,
-          });
-        } catch (reason) {
-          onError(
-            `工作区「${ws.name}」已创建，run 脚本写入失败：${String(reason)}`,
-          );
-        }
-      }
-      await onRefresh();
-      // 预填首条指令：跳到终端后用户确认配置点「启动」即自动注入，无需手动打字
-      onOpenTerminal(ws, DEFAULT_KICKOFF_PROMPT);
     } catch (reason) {
       onError(String(reason));
     } finally {
@@ -1281,7 +1147,7 @@ export default function ProjectGroup({
               );
             })}
           </ol>
-          {/* 步骤产物面板（RX2b）：只在打开时拉取一次；已完成读项目根（main），其余读工作树 */}
+          {/* 步骤产物核验清单：打开时拉取一次 + 手动 ⟳ 刷新；已完成读项目根（main），其余读工作树 */}
           {artifactPanel !== null &&
             cfg.steps[artifactPanel] &&
             (() => {
@@ -1295,7 +1161,7 @@ export default function ProjectGroup({
                 <div className="mt-2 rounded-md bg-strip p-2">
                   <div className="mb-1 flex items-center gap-2">
                     <span className="text-xs text-l2">
-                      「{step.name}」产物
+                      「{step.name}」产物核验
                     </span>
                     <span
                       className="min-w-0 truncate font-mono text-[11px] text-l4"
@@ -1305,7 +1171,15 @@ export default function ProjectGroup({
                     </span>
                     <button
                       type="button"
-                      className={`${actionBtn} ml-auto shrink-0`}
+                      className={`${rowActionClass} ml-auto shrink-0`}
+                      disabled={artifactsLoading}
+                      onClick={() => setArtifactRefresh((v) => v + 1)}
+                    >
+                      ⟳ 刷新
+                    </button>
+                    <button
+                      type="button"
+                      className={`${actionBtn} shrink-0`}
                       onClick={() => setArtifactPanel(null)}
                     >
                       关闭
@@ -1318,47 +1192,91 @@ export default function ProjectGroup({
                   ) : artifactsLoading || !artifactRows ? (
                     <p className="text-xs text-l4">读取中…</p>
                   ) : (
-                    <ul className="space-y-1">
-                      {artifactRows.map((row) => (
-                        <li key={row.entry}>
-                          <div className="font-mono text-[11px] text-l3">
-                            {row.entry}
-                          </div>
-                          {row.files.length === 0 ? (
-                            <div className="pl-2 text-xs text-l4">
-                              尚未产出
-                            </div>
-                          ) : (
-                            <ul className="pl-2">
-                              {row.files.map((f) => (
-                                <li key={f.path}>
-                                  <button
-                                    type="button"
-                                    className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-xs text-l2 hover:bg-white/5 hover:text-l1"
-                                    title={`在终端页预览 ${f.path}`}
-                                    onClick={() => {
-                                      if (!root) return;
-                                      setPreviewReq({
-                                        path: f.path,
-                                        name: f.name,
-                                        root,
-                                      });
-                                      setPage("terminal");
-                                    }}
-                                  >
-                                    <span className="min-w-0 flex-1 truncate font-mono">
-                                      {f.name}
-                                    </span>
-                                    <span className="shrink-0 text-l4">
-                                      {formatSize(f.size)}
-                                    </span>
-                                  </button>
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </li>
-                      ))}
+                    <ul className="space-y-0.5">
+                      {artifactRows.map((row) => {
+                        const produced = row.files.length > 0;
+                        // 单文件产物：行本身可点击预览；目录产物：行只表状态，文件逐个列在下方
+                        const single = row.files.length === 1 ? row.files[0] : null;
+                        const openFile = (f: DirEntryDto) => {
+                          if (!root) return;
+                          setPreviewReq({ path: f.path, name: f.name, root });
+                          setPage("terminal");
+                        };
+                        const fileMeta = (f: DirEntryDto) => (
+                          <>
+                            {isFreshMtime(f.modified) && (
+                              <span className="flex shrink-0 items-center gap-1 text-[10px] text-ok-text">
+                                <span className="h-1.5 w-1.5 rounded-full bg-ok-text" />
+                                刚更新
+                              </span>
+                            )}
+                            <span
+                              className="shrink-0 text-[10px] text-l4"
+                              title={absTime(f.modified)}
+                            >
+                              {relTime(f.modified)}
+                            </span>
+                            <span className="shrink-0 text-[10px] text-l4">
+                              {formatSize(f.size)}
+                            </span>
+                          </>
+                        );
+                        return (
+                          <li key={row.entry}>
+                            {!produced ? (
+                              <div className="flex h-7 items-center gap-2 rounded px-1 text-xs">
+                                <span className="shrink-0 text-l4">—</span>
+                                <span className="min-w-0 flex-1 truncate font-mono text-l4">
+                                  {row.entry}
+                                </span>
+                                <span className="shrink-0 text-l4">尚未产出</span>
+                              </div>
+                            ) : single ? (
+                              <button
+                                type="button"
+                                className="flex h-7 w-full items-center gap-2 rounded px-1 text-left text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                                title={`在终端页预览 ${single.path}`}
+                                onClick={() => openFile(single)}
+                              >
+                                <span className="shrink-0 text-ok-text">✓</span>
+                                <span className="min-w-0 flex-1 truncate font-mono">
+                                  {single.name}
+                                </span>
+                                {fileMeta(single)}
+                              </button>
+                            ) : (
+                              <>
+                                <div className="flex h-7 items-center gap-2 rounded px-1 text-xs">
+                                  <span className="shrink-0 text-ok-text">✓</span>
+                                  <span className="min-w-0 flex-1 truncate font-mono text-l2">
+                                    {row.entry}
+                                  </span>
+                                  <span className="shrink-0 text-[10px] text-l4">
+                                    {row.files.length} 个文件
+                                  </span>
+                                </div>
+                                <ul className="pl-5">
+                                  {row.files.map((f) => (
+                                    <li key={f.path}>
+                                      <button
+                                        type="button"
+                                        className="flex h-7 w-full items-center gap-2 rounded px-1 text-left text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                                        title={`在终端页预览 ${f.path}`}
+                                        onClick={() => openFile(f)}
+                                      >
+                                        <span className="min-w-0 flex-1 truncate font-mono">
+                                          {f.name}
+                                        </span>
+                                        {fileMeta(f)}
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </>
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>

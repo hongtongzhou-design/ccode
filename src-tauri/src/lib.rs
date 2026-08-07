@@ -178,6 +178,7 @@ pub fn run() {
             ai::ai_summarize_session,
             ai::ai_draft_pr,
             ai::ai_conflict_advice,
+            ai::ai_distill_skill,
             pricing::read_pricing_file,
             pricing::write_pricing_file,
         ])

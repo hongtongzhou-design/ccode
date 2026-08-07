@@ -4,7 +4,7 @@ import * as pdfjs from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 // textLayer 的官方样式（选区/定位规则）；随本组件进懒加载 chunk
 import "pdfjs-dist/web/pdf_viewer.css";
-import SelectionFloatBar from "./SelectionFloatBar";
+import SelectionFloatBar, { DistillSkillButton } from "./SelectionFloatBar";
 
 // vite 惯例：worker 走 ?url 资源，不进主包（本组件整体被动态 import）
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -131,7 +131,7 @@ interface Hint {
  * PDF 内嵌预览（§11.4 P2a）：pdf.js canvas + textLayer（可选区），
  * 只渲染当前页与相邻页（大 PDF 不做整本渲染）。
  * 字节经 read_pdf_bytes 加载（后端四类白名单约束）；选中文字出现浮动按钮：
- * 「◈ 问 AI」把选段 + 出处交给调用方写入活跃终端输入（不自动发送）；
+ * 「◈ 问 AI」把选段 + 出处交给调用方写入活跃终端输入（「↵ 直接发送」立即回车发送）；
  * 「整理为笔记」把选段追加到归属项目的笔记工作区（P2b，由调用方实现）。
  */
 function PdfPreview({
@@ -143,8 +143,13 @@ function PdfPreview({
   path: string;
   /** 终端标签 cwd / 文件树根：后端白名单的第四类来源 */
   cwdHint: string | null;
-  /** 返回 null 表示已写入；返回字符串为要给用户看的提示（如无运行中 agent） */
-  onAskAi?: (text: string, page: number, fileName: string) => string | null;
+  /** 返回 null 表示已写入；返回字符串为要给用户看的提示（如无运行中 agent）。send=true 直接发送 */
+  onAskAi?: (
+    text: string,
+    page: number,
+    fileName: string,
+    send?: boolean,
+  ) => string | null;
   /** P2b：整理为笔记；返回展示给用户的提示（ok 决定是否清空选区） */
   onOrganize?: (
     text: string,
@@ -272,12 +277,17 @@ function PdfPreview({
     window.getSelection()?.removeAllRanges();
   }
 
-  function askAi() {
+  function askAi(send?: boolean) {
     const excerpt = selectedExcerpt();
     if (!excerpt) return;
     const err =
-      onAskAi?.(excerpt.text, excerpt.page, fileName) ?? "当前页面不支持问 AI";
-    showHint({ msg: err ?? "已写入活跃终端的输入框，检查后自行发送" });
+      onAskAi?.(excerpt.text, excerpt.page, fileName, send) ??
+      "当前页面不支持问 AI";
+    showHint({
+      msg:
+        err ??
+        (send ? "已发送到活跃终端" : "已写入活跃终端的输入框，检查后自行发送"),
+    });
     if (!err) clearSelection();
   }
 
@@ -418,22 +428,32 @@ function PdfPreview({
             ))}
           </div>
           {(onAskAi || onOrganize) && (
-            // 两个按钮并排的宽度预留约 170px，避免右缘溢出
+            // 四个按钮并排的宽度预留约 350px，避免右缘溢出
             <SelectionFloatBar
               containerRef={scrollRef}
               withinSelector="[data-page-num]"
-              reserveWidth={170}
+              reserveWidth={350}
             >
               {onAskAi && (
-                <button
-                  type="button"
-                  // preventDefault 保住选区，click 时才读文字
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={askAi}
-                  className="rounded border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
-                >
-                  ◈ 问 AI
-                </button>
+                <>
+                  <button
+                    type="button"
+                    // preventDefault 保住选区，click 时才读文字
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => askAi()}
+                    className="rounded border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
+                  >
+                    ◈ 问 AI
+                  </button>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => askAi(true)}
+                    className="rounded border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
+                  >
+                    ↵ 直接发送
+                  </button>
+                </>
               )}
               {onOrganize && (
                 <button
@@ -446,6 +466,7 @@ function PdfPreview({
                   {organizing ? "整理中…" : "整理为笔记"}
                 </button>
               )}
+              <DistillSkillButton onHint={(m) => showHint({ msg: m })} />
             </SelectionFloatBar>
           )}
         </div>

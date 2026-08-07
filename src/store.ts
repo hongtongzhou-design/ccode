@@ -153,6 +153,11 @@ interface AppState {
   openSessionReq: { agent: string; sessionId: string } | null;
   setOpenSessionReq: (r: { agent: string; sessionId: string } | null) => void;
   setSessionsQuery: (q: string | null) => void;
+  /** 选段「✦ 沉淀为技能」→ 技能页的一次性草稿交接（技能页可见时打开新建 modal 预填并清空） */
+  skillDraftReq: { name: string; description: string; content: string } | null;
+  setSkillDraftReq: (
+    r: { name: string; description: string; content: string } | null,
+  ) => void;
   /** 应用设置（启动时加载；update 合并写回并即时应用主题） */
   settings: AppSettings | null;
   loadSettings: () => Promise<void>;
@@ -235,6 +240,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   openSessionReq: null,
   setSessionsQuery: (q) => set({ sessionsQuery: q }),
   setOpenSessionReq: (r) => set({ openSessionReq: r }),
+  skillDraftReq: null,
+  setSkillDraftReq: (r) => set({ skillDraftReq: r }),
   settings: null,
   loadSettings: async () => {
     const s = await invoke<AppSettings>("get_settings");

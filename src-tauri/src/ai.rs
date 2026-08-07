@@ -222,6 +222,41 @@ fn build_pr_prompt(log: &str, numstat: &str) -> String {
     )
 }
 
+fn build_distill_skill_prompt(excerpt: &str) -> String {
+    format!(
+        "下面这段文字是用户与 AI 助手的一段交互摘录（用户纠正/指导了助手的做法）。\
+         请把其中可复用的经验提炼成一个「技能」草稿，供以后让 AI 遵循。\n\
+         只输出一个 JSON 对象，不要解释、不要代码块：\n\
+         {{\"name\":\"技能目录名（单段安全名称：小写字母/数字/连字符，如 review-paper-notes）\",\
+         \"description\":\"一句话中文描述：这个技能帮 AI 做什么\",\
+         \"content\":\"SKILL.md 正文（markdown）：整理成规则清单/步骤，直接可执行，不复述原文\"}}\n\n\
+         ## 交互摘录\n{excerpt}"
+    )
+}
+
+/// 从 AI 输出里抠 JSON 对象解析（模型可能裹 markdown/废话，防御式：截取首个 {{ 到末个 }}）
+fn parse_skill_draft(raw: &str) -> Result<SkillDraftDto, String> {
+    let parse_err = || {
+        format!(
+            "AI 输出无法解析为技能草稿：{}",
+            raw.chars().take(80).collect::<String>()
+        )
+    };
+    let (s, e) = match (raw.find('{'), raw.rfind('}')) {
+        (Some(s), Some(e)) if s < e => (s, e),
+        _ => return Err(parse_err()),
+    };
+    let draft: SkillDraftDto =
+        serde_json::from_str(&raw[s..=e]).map_err(|_| parse_err())?;
+    let name = draft.name.trim().to_lowercase();
+    let description = draft.description.trim().to_string();
+    let content = draft.content.trim().to_string();
+    if name.is_empty() || content.is_empty() {
+        return Err(parse_err());
+    }
+    Ok(SkillDraftDto { name, description, content })
+}
+
 fn build_conflict_prompt(branch: &str, base: &str, files: &[(String, String)]) -> String {
     let mut body = String::new();
     for (path, content) in files {
@@ -326,6 +361,14 @@ fn conversation_text(msgs: &[crate::sessions::ChatMessageDto]) -> String {
 
 // ===== Tauri commands =====
 
+/// 「✦ 沉淀为技能」的草稿：name/description 进 SKILL.md frontmatter，content 为正文规则清单
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SkillDraftDto {
+    pub name: String,
+    pub description: String,
+    pub content: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConflictAdviceDto {
@@ -415,6 +458,30 @@ pub async fn ai_draft_pr(store: tauri::State<'_, ProfileStore>, id: String) -> R
         )
         .unwrap_or_default();
         ai_prompt_impl(profiles, None, build_pr_prompt(&log, &numstat))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 选段「✦ 沉淀为技能」：把交互摘录提炼成技能草稿（前端预填新建技能 modal，保存仍走 create_skill）
+#[tauri::command]
+pub async fn ai_distill_skill(
+    store: tauri::State<'_, ProfileStore>,
+    excerpt: String,
+) -> Result<SkillDraftDto, String> {
+    let profiles = store.list()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        // 出站前脱敏（与会话摘要同一约束）：选段可能粘到完整密钥
+        let excerpt = crate::sessions::redact_sensitive_text(&excerpt);
+        if excerpt.trim().is_empty() {
+            return Err("选段为空，无法提炼".into());
+        }
+        let raw = ai_prompt_impl(
+            profiles,
+            None,
+            build_distill_skill_prompt(&cap_text_middle(&excerpt, DIFF_CAP)),
+        )?;
+        parse_skill_draft(&raw)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -552,6 +619,19 @@ mod tests {
         assert!(capped.contains("...（中间省略）..."));
         assert!(capped.starts_with('首'));
         assert!(capped.ends_with('尾'));
+    }
+
+    #[test]
+    fn parse_skill_draft_extracts_json_and_normalizes() {
+        // 裹了废话/markdown 的输出也能抠出 JSON；name 归一为小写
+        let raw = "好的：\n```json\n{\"name\":\"Paper-Notes \",\"description\":\"整理论文笔记\",\"content\":\"# 规则\\n- 先摘要\"}\n```";
+        let d = parse_skill_draft(raw).unwrap();
+        assert_eq!(d.name, "paper-notes");
+        assert_eq!(d.description, "整理论文笔记");
+        assert!(d.content.starts_with("# 规则"));
+        // 无 JSON / 缺字段都要报错（前端行内提示，不落半成品）
+        assert!(parse_skill_draft("我不知道").is_err());
+        assert!(parse_skill_draft("{\"name\":\"x\",\"description\":\"\",\"content\":\"\"}").is_err());
     }
 
     #[test]

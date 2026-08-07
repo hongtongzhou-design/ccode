@@ -1,4 +1,57 @@
 import { useEffect, useState, type ReactNode, type RefObject } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useAppStore } from "../store";
+
+/** ai_distill_skill 的返回（SKILL.md frontmatter name/description + 正文规则清单） */
+interface SkillDraftDto {
+  name: string;
+  description: string;
+  content: string;
+}
+
+/** 「✦ 沉淀为技能」：把当前选段交给 AI 提炼成技能草稿 → 跳技能页新建 modal 预填。
+ *  与浮动条其余按钮同风格；提炼期间禁用，失败经 onHint 行内提示（调用方各自的 hint 机制）。 */
+export function DistillSkillButton({
+  onHint,
+}: {
+  onHint: (msg: string) => void;
+}) {
+  const setSkillDraftReq = useAppStore((s) => s.setSkillDraftReq);
+  const setPage = useAppStore((s) => s.setPage);
+  const [distilling, setDistilling] = useState(false);
+
+  async function distill() {
+    const selected = window.getSelection()?.toString().trim() ?? "";
+    if (!selected || distilling) return;
+    setDistilling(true);
+    try {
+      const draft = await invoke<SkillDraftDto>("ai_distill_skill", {
+        excerpt: selected,
+      });
+      setSkillDraftReq(draft);
+      setPage("skills");
+      // 清选区让浮动条随 selectionchange 收起（同其余按钮的收尾）
+      window.getSelection()?.removeAllRanges();
+    } catch (e) {
+      onHint(`提炼技能草稿失败：${e}`);
+    } finally {
+      setDistilling(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      // preventDefault 保住选区，click 时才读文字
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={() => void distill()}
+      disabled={distilling}
+      className="rounded border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-60"
+    >
+      {distilling ? "提炼中…" : "✦ 沉淀为技能"}
+    </button>
+  );
+}
 
 /**
  * 选区浮动动作条（PDF「◈ 问 AI」与 md 阅读「◈ 讨论/改写此段」共用）：

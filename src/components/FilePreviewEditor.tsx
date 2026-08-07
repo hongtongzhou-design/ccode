@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import { marked } from "marked";
-import SelectionFloatBar from "./SelectionFloatBar";
+import SelectionFloatBar, { DistillSkillButton } from "./SelectionFloatBar";
 
 // 只用基础 editor worker（不需要语言服务的 intellisense）
 self.MonacoEnvironment = {
@@ -61,7 +61,8 @@ function isMarkdownPath(path: string): boolean {
  * 因此不引入 sanitize 重库；仅关闭与本场景无关的项，GFM 支持表格等。
  * v1 代码块不做语法高亮（素色块），样式全部走 App.css 的 .md-body 主题令牌。
  * 选中文字出现浮动按钮「◈ 讨论/改写此段」（与 PDF 问 AI 共用 SelectionFloatBar），
- * 点击把选段 + 出处交给调用方写入活跃终端输入（不自动发送）；沉浸阅读覆盖层同款生效。
+ * 点击把选段 + 出处交给调用方写入活跃终端输入（「↵ 直接发送」立即回车发送）；沉浸阅读覆盖层同款生效。
+ * 另有「✦ 沉淀为技能」（DistillSkillButton）：AI 把选段提炼成技能草稿，跳技能页新建表单预填。
  */
 function MarkdownView({
   text,
@@ -72,8 +73,8 @@ function MarkdownView({
   text: string;
   large?: boolean;
   fileName: string;
-  /** 返回 null 表示已写入；返回字符串为要给用户看的提示（如无运行中 agent） */
-  onDiscuss?: (text: string, fileName: string) => string | null;
+  /** 返回 null 表示已写入；返回字符串为要给用户看的提示（如无运行中 agent）。send=true 直接发送 */
+  onDiscuss?: (text: string, fileName: string, send?: boolean) => string | null;
 }) {
   const html = useMemo(
     // ⚠️（U+26A0+U+FE0F）在 WKWebView 里渲染成黄色 Apple Color Emoji，
@@ -104,12 +105,17 @@ function MarkdownView({
     [],
   );
 
-  /** 选段 → 活跃终端 agent 输入（不自动发送）；成功写入后清选区，浮动条随 selectionchange 收起 */
-  function discuss() {
+  /** 选段 → 活跃终端 agent 输入；send=true 直接发送。成功写入后清选区，浮动条随 selectionchange 收起 */
+  function discuss(send?: boolean) {
     const selected = window.getSelection()?.toString().trim() ?? "";
     if (!selected || !onDiscuss) return;
-    const err = onDiscuss(selected, fileName);
-    showHint(err ?? "已写入活跃终端的输入框，接着输入你的意见后自行发送");
+    const err = onDiscuss(selected, fileName, send);
+    showHint(
+      err ??
+        (send
+          ? "已发送到活跃终端"
+          : "已写入活跃终端的输入框，接着输入你的意见后自行发送"),
+    );
     if (!err) window.getSelection()?.removeAllRanges();
   }
 
@@ -134,17 +140,26 @@ function MarkdownView({
           <SelectionFloatBar
             containerRef={scrollRef}
             withinSelector=".md-body"
-            reserveWidth={150}
+            reserveWidth={320}
           >
             <button
               type="button"
               // preventDefault 保住选区，click 时才读文字
               onMouseDown={(e) => e.preventDefault()}
-              onClick={discuss}
+              onClick={() => discuss()}
               className="rounded border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
             >
               ◈ 讨论/改写此段
             </button>
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => discuss(true)}
+              className="rounded border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
+            >
+              ↵ 直接发送
+            </button>
+            <DistillSkillButton onHint={showHint} />
           </SelectionFloatBar>
         )}
       </div>
@@ -166,8 +181,8 @@ function FilePreviewEditor({
   path: string;
   root: string;
   onDirtyChange?: (dirty: boolean) => void;
-  /** md 阅读视图选段「◈ 讨论/改写此段」：写入活跃终端输入；返回 null 已写入，否则为提示 */
-  onDiscuss?: (text: string, fileName: string) => string | null;
+  /** md 阅读视图选段「◈ 讨论/改写此段」：写入活跃终端输入（send=true 直接发送）；返回 null 已写入，否则为提示 */
+  onDiscuss?: (text: string, fileName: string, send?: boolean) => string | null;
 }) {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   // 编辑器宿主节点独立于 React 渲染树：沉浸编辑切换只移动 DOM 节点，
