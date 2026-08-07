@@ -7,11 +7,15 @@ import ContextMenu from "../components/ContextMenu";
 import ProjectGroup from "../components/ProjectGroup";
 import {
   EmptyState,
+  fieldClass,
   PageFrame,
   PageHeader,
   primaryActionClass,
+  rowActionClass,
   secondaryActionClass,
 } from "../components/PageFrame";
+import { buildRunOverview } from "../run-overview";
+import { AGENTS } from "../types";
 import type {
   PortInfoDto,
   ProjectConfigReadDto,
@@ -119,7 +123,7 @@ function AddProjectModal({
         <label className="mb-4 block text-sm">
           <span className="mb-1 block text-xs text-l3">项目名</span>
           <input
-            className={field}
+            className={fieldClass}
             required
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -129,7 +133,7 @@ function AddProjectModal({
         <label className="mb-4 block text-sm">
           <span className="mb-1 block text-xs text-l3">课题主题（可选）</span>
           <input
-            className={field}
+            className={fieldClass}
             value={topic}
             onChange={(e) => setTopic(e.target.value)}
             placeholder="如 GLP-1 受体激动剂的心血管结局"
@@ -187,9 +191,6 @@ function useOpenInTerminal() {
     setPage("terminal");
   };
 }
-
-const field =
-  "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
 function NewWorkspaceModal({
   repos,
@@ -249,7 +250,7 @@ function NewWorkspaceModal({
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">仓库</span>
           <select
-            className={field}
+            className={fieldClass}
             value={repoChoice}
             disabled={reposLoading}
             onChange={(e) => setRepoChoice(e.target.value)}
@@ -267,7 +268,7 @@ function NewWorkspaceModal({
           <label className="mb-3 block text-sm">
             <span className="mb-1 block text-xs text-l3">仓库路径</span>
             <input
-              className={field}
+              className={fieldClass}
               required
               placeholder="~/work/myproject"
               value={customPath}
@@ -278,7 +279,7 @@ function NewWorkspaceModal({
         <label className="mb-4 block text-sm">
           <span className="mb-1 block text-xs text-l3">任务名</span>
           <input
-            className={field}
+            className={fieldClass}
             required
             placeholder="如 fix-login"
             value={name}
@@ -328,7 +329,7 @@ function workspaceState(
   if (workspace.status === "creating") {
     return {
       label: "创建未完成",
-      dotClass: "bg-warnb",
+      dotClass: "bg-warn-text",
       textClass: "text-warn-text",
       details: ["工作区创建流程尚未完成，请在更多操作中修复或清理记录。"],
     };
@@ -348,7 +349,7 @@ function workspaceState(
   if (drift && !drift.healthy) {
     return {
       label: "需要修复",
-      dotClass: "bg-warnb",
+      dotClass: "bg-warn-text",
       textClass: "text-warn-text",
       details: drift.issues.map((issue) => issue.message),
     };
@@ -365,7 +366,7 @@ function workspaceState(
     if (healthFailed) {
       return {
         label: "检查失败",
-        dotClass: "bg-warnb",
+        dotClass: "bg-warn-text",
         textClass: "text-warn-text",
         details: ["无法读取工作区与主仓库状态，请重试。"],
       };
@@ -400,7 +401,7 @@ function workspaceState(
   if (health.mainDirty || health.mainOffBase) {
     return {
       label: "需要处理",
-      dotClass: "bg-warnb",
+      dotClass: "bg-warn-text",
       textClass: "text-warn-text",
       details: [
         ...(health.mainDirty
@@ -415,7 +416,7 @@ function workspaceState(
   if (health.uncommitted) {
     return {
       label: "待提交",
-      dotClass: "bg-warnb",
+      dotClass: "bg-warn-text",
       textClass: "text-l2",
       details: ["任务里还有没保存的改动，进入评审后可提交。"],
     };
@@ -423,7 +424,7 @@ function workspaceState(
   if (health.readyToMerge) {
     return {
       label: "可评审",
-      dotClass: "bg-okb",
+      dotClass: "bg-ok-text",
       textClass: "text-l2",
       details: ["已有待合并提交，可在评审中完成本地合并。"],
     };
@@ -431,14 +432,14 @@ function workspaceState(
   if (isMerged(workspace, health)) {
     return {
       label: "已合并",
-      dotClass: "bg-okb",
+      dotClass: "bg-ok-text",
       textClass: "text-ok-text",
       details: [`已合并进 ${workspace.baseBranch}；有新提交后可再次评审。`],
     };
   }
   return {
     label: "进行中",
-    dotClass: "bg-okb",
+    dotClass: "bg-ok-text",
     textClass: "text-l3",
     details: ["当前没有待提交或待合并的改动。"],
   };
@@ -606,22 +607,22 @@ function PortsSection() {
   }
 
   const dotClass: Record<PortInfoDto["ownerKind"], string> = {
-    workspace: "bg-okb",
-    project: "bg-okb",
-    range: "bg-warnb",
+    workspace: "bg-ok-text",
+    project: "bg-ok-text",
+    range: "bg-warn-text",
     other: "bg-l4",
   };
 
   return (
-    <section className="mt-6 overflow-hidden rounded-md border border-hairline bg-strip">
+    <section className="mt-7">
       <div
-        className={`flex h-10 items-center ${open ? "border-b border-hairline" : ""}`}
+        className={`flex h-8 items-center ${open ? "border-b border-hairline" : ""}`}
       >
         <button
           type="button"
           onClick={toggle}
           aria-expanded={open}
-          className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-sm font-medium text-l1 hover:bg-white/5"
+          className="flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-sm font-medium text-l1"
         >
           <span className="w-3 text-xs text-l4">{open ? "▾" : "▸"}</span>
           端口
@@ -643,7 +644,7 @@ function PortsSection() {
         )}
       </div>
       {open && (
-        <div className="px-3 pb-3">
+        <div className="pb-1">
           <p className="pt-2 text-xs text-l4">
             「终止」发送退出信号（SIGTERM）；进程未退出时可稍候刷新再试。
           </p>
@@ -739,6 +740,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const setPage = useAppStore((s) => s.setPage);
   const setSessionsQuery = useAppStore((s) => s.setSessionsQuery);
   const runningScripts = useAppStore((s) => s.runningScripts);
+  // 终端标签运行状态镜像（TerminalPage 写入）+ 跳终端激活标签请求（首页「待你处理」用）
+  const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
+  const setFocusTabReq = useAppStore((s) => s.setFocusTabReq);
 
   async function refresh() {
     try {
@@ -1002,6 +1006,55 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     setPage("terminal");
   }
 
+  // 「待你处理」首页聚合（v3.39）：打开应用第一眼看到要拍板的事——
+  // 工作区冲突/可合并（health 随页加载）+ 终端标签待确认/已完成（store 镜像，跨页可读）。
+  // 排序：冲突 > 待确认 > 可合并 > 已完成；为空时整个区块不渲染（零噪音）。
+  const runItems = buildRunOverview(terminalRunInputs, new Set<string>()).items;
+  const jumpToTab = (tabId: string) => {
+    setFocusTabReq(tabId);
+    setPage("terminal");
+  };
+  const tabLabel = (agentId: string, title: string, cwdLabel: string) =>
+    `${agentId ? `${AGENTS.find((a) => a.id === agentId)?.label ?? agentId} · ` : ""}${title}（${cwdLabel}）`;
+  const inboxItems = [
+    ...active
+      .filter((w) => health[w.id]?.conflict)
+      .map((w) => ({
+        key: `conflict:${w.id}`,
+        dot: "bg-warn-text",
+        text: `「${w.repoName} / ${w.name}」有合并冲突`,
+        actionLabel: "解决冲突",
+        onClick: () => openReview(w, "resolve-conflict"),
+      })),
+    ...runItems
+      .filter((it) => it.attention === "confirm")
+      .map((it) => ({
+        key: `confirm:${it.tabId}`,
+        dot: "bg-warn-text",
+        text: `${tabLabel(it.agentId, it.title, it.cwdLabel)} 待你确认`,
+        actionLabel: "去处理",
+        onClick: () => jumpToTab(it.tabId),
+      })),
+    ...active
+      .filter((w) => health[w.id]?.readyToMerge && !health[w.id]?.conflict)
+      .map((w) => ({
+        key: `ready:${w.id}`,
+        dot: "bg-ok-text",
+        text: `「${w.repoName} / ${w.name}」可以合并`,
+        actionLabel: "去评审",
+        onClick: () => openReview(w),
+      })),
+    ...runItems
+      .filter((it) => it.attention === "done" && !it.seenDone)
+      .map((it) => ({
+        key: `done:${it.tabId}`,
+        dot: "bg-link",
+        text: `${tabLabel(it.agentId, it.title, it.cwdLabel)} 已完成，等你审阅`,
+        actionLabel: "去查看",
+        onClick: () => jumpToTab(it.tabId),
+      })),
+  ];
+
   function workspaceMenuItems(workspace: WorkspaceDto) {
     const workspaceHealth = health[workspace.id];
     const workspaceDrift = drift[workspace.id];
@@ -1127,7 +1180,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   return (
     <div className="flex h-full bg-canvas">
       <aside className="flex w-[230px] shrink-0 flex-col border-r border-hairline bg-rail2">
-        <div className="flex h-12 shrink-0 items-center gap-2 border-b border-hairline px-3">
+        <div className="flex h-12 shrink-0 items-center gap-2 px-3">
           <span className="text-sm font-medium text-l1">项目</span>
           <span className="ml-auto text-xs text-l4">{groups.length}</span>
         </div>
@@ -1178,7 +1231,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             <p className="px-3 py-4 text-xs text-l4">还没有项目</p>
           )}
         </div>
-        <div className="shrink-0 border-t border-hairline p-2">
+        <div className="shrink-0 p-2">
           <button
             type="button"
             onClick={() => void onAddProject()}
@@ -1218,11 +1271,41 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           </>
         }
       />
+      {/* 待你处理：打开应用第一眼看到需要你拍板的事；全空则不渲染 */}
+      {inboxItems.length > 0 && (
+        <section className="mb-5">
+          <p className="mb-1.5 text-[11px] text-l4">
+            待你处理 {inboxItems.length}
+          </p>
+          <ul className="divide-y divide-hairline rounded-md bg-strip">
+            {inboxItems.map((item) => (
+              <li
+                key={item.key}
+                className="flex items-center gap-2.5 px-3 py-2 text-xs"
+              >
+                <span
+                  className={`size-1.5 shrink-0 rounded-full ${item.dot}`}
+                />
+                <span className="min-w-0 flex-1 truncate text-l2">
+                  {item.text}
+                </span>
+                <button
+                  type="button"
+                  onClick={item.onClick}
+                  className={rowActionClass}
+                >
+                  {item.actionLabel}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
       {created && (
-        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md border border-hairline bg-strip p-2.5 text-xs text-l2">
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md bg-strip px-3 py-2.5 text-xs text-l2">
           <span>
-            <span className="mr-1 text-okb">✓</span>
+            <span className="mr-1 text-ok-text">✓</span>
             工作区「{created.name}」已创建 · 分支 {created.branch}
           </span>
           {created.setupResult?.ok && (

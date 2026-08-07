@@ -11,17 +11,25 @@ self.MonacoEnvironment = {
   getWorker: () => new editorWorker(),
 };
 
-// 与沉浸冷黑主题一致的 monaco 主题（定义一次；base vs-dark 继承语法高亮配色）
-monaco.editor.defineTheme("ccode-dark", {
-  base: "vs-dark",
-  inherit: true,
-  rules: [],
-  colors: {
-    "editor.background": "#11131a",
-    "editor.foreground": "#aeb6c6",
-    "editorLineNumber.foreground": "#525a6b",
-  },
-});
+// Monaco 主题跟随 App.css 令牌：编辑器面色从 --color-editor-* 三个 CSS 变量实时读取
+// （与设置页 readThemeSwatch 同一思路，避免双份维护色值漂移）；base vs-dark 继承语法高亮。
+// 主题切换由 MutationObserver 监听 data-theme 触发重新 define + setTheme（见组件内 effect）。
+function syncMonacoTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  const read = (name: string, fallback: string) =>
+    cs.getPropertyValue(name).trim() || fallback;
+  monaco.editor.defineTheme("ccode-dark", {
+    base: "vs-dark",
+    inherit: true,
+    rules: [],
+    colors: {
+      "editor.background": read("--color-editor-bg", "#11131a"),
+      "editor.foreground": read("--color-editor-fg", "#aeb6c6"),
+      "editorLineNumber.foreground": read("--color-editor-line", "#525a6b"),
+    },
+  });
+}
+syncMonacoTheme();
 
 /** 按文件扩展名/文件名推断 Monaco 语言（无匹配则 plaintext） */
 function languageFor(path: string): string | undefined {
@@ -298,6 +306,7 @@ function FilePreviewEditor({
   // 同路径的外部内容更新不重建编辑器，由下方同步 effect 走 executeEdits，保住滚动/光标/undo。
   useEffect(() => {
     if (!ready) return;
+    syncMonacoTheme(); // 创建前对齐当前 data-theme 的编辑器面色
     const ed = monaco.editor.create(hostElRef.current!, {
       value: text!,
       language: languageFor(path),
@@ -331,6 +340,20 @@ function FilePreviewEditor({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, truncated]);
+
+  // 主题切换跟随：data-theme 变化时按最新 CSS 变量重定义并应用（setTheme 全局生效，
+  // 同时覆盖其他已挂载的编辑器实例；设置页色卡预览的瞬时翻转也只是多余一次重定义）
+  useEffect(() => {
+    const obs = new MutationObserver(() => {
+      syncMonacoTheme();
+      monaco.editor.setTheme("ccode-dark");
+    });
+    obs.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    return () => obs.disconnect();
+  }, []);
 
   // 外部变化重载（合并/agent 写盘等）：整文替换但保留视图状态与 undo 栈。
   // 仅在非 dirty 时外部内容才会进来（上方监听 effect 的订阅条件），不会覆盖用户编辑
@@ -378,16 +401,16 @@ function FilePreviewEditor({
             className="flex shrink-0 items-center gap-1 text-l3"
             title={`该文件在工作区「${ctx.workspaceName}」的工作树里，改动属于分支 ${ctx.branch}`}
           >
-            <span className="h-1.5 w-1.5 rounded-full bg-okb" />
+            <span className="h-1.5 w-1.5 rounded-full bg-ok-text" />
             分支 {ctx.branch}
           </span>
         )}
         {ctx?.kind === "main" && (
           <span
-            className="flex shrink-0 items-center gap-1 text-warnb"
+            className="flex shrink-0 items-center gap-1 text-warn-text"
             title={`该文件在主仓库（${ctx.branch}）里，改动不属于任何工作区分支——要改分支请从工作区进入`}
           >
-            <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
+            <span className="h-1.5 w-1.5 rounded-full bg-warn-text" />
             主仓库（非分支）
           </span>
         )}
@@ -432,7 +455,7 @@ function FilePreviewEditor({
                   : undefined
               }
               className={`shrink-0 rounded px-2 py-0.5 hover:bg-white/5 disabled:opacity-50 ${
-                ctx?.kind === "main" ? "text-warnb" : "text-l2"
+                ctx?.kind === "main" ? "text-warn-text" : "text-l2"
               }`}
             >
               {saving ? "保存中…" : ctx?.kind === "main" ? "保存到主仓库" : "保存"}
@@ -471,7 +494,7 @@ function FilePreviewEditor({
                     : undefined
                 }
                 className={`ml-auto shrink-0 rounded px-2 py-1 hover:bg-white/5 disabled:opacity-50 ${
-                  ctx?.kind === "main" ? "text-warnb" : "text-l2"
+                  ctx?.kind === "main" ? "text-warn-text" : "text-l2"
                 }`}
               >
                 {saving ? "保存中…" : ctx?.kind === "main" ? "保存到主仓库" : "保存"}

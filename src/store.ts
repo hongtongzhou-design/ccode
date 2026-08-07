@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
+import type { RunOverviewInput } from "./run-overview";
 import type {
   DetectResult,
   Profile,
@@ -100,14 +101,24 @@ interface AppState {
   /** 当前页面（nav id），放 store 里让任意页面可跳转 */
   page: string;
   setPage: (p: string) => void;
-  /** 侧栏收缩状态（App 导航与终端专注栏共用；localStorage 持久化） */
+  /** 侧栏收缩状态（App 导航与终端专注栏共用；localStorage 持久化的是手动偏好） */
   navCollapsed: boolean;
+  /** 手动折叠/展开后本 session 内不再按页面自动收展 */
+  navManual: boolean;
   toggleNavCollapsed: () => void;
+  /** 页面自动收展（多列工作页收起）：只改状态，不写 localStorage、不置 navManual */
+  setNavCollapsedAuto: (collapsed: boolean) => void;
   /** 待消费的终端启动请求；终端页可见时消费并清空 */
   pendingTerminal: PendingTerminal | null;
   setPendingTerminal: (p: PendingTerminal | null) => void;
   workspaceReviewRequest: WorkspaceReviewRequest | null;
   setWorkspaceReviewRequest: (request: WorkspaceReviewRequest | null) => void;
+  /** 终端标签运行状态镜像（TerminalPage 写入；工作区首页「待你处理」跨页只读） */
+  terminalRunInputs: RunOverviewInput[];
+  setTerminalRunInputs: (inputs: RunOverviewInput[]) => void;
+  /** 一次性「跳终端页并激活标签」请求（首页待办点击发起），终端页可见时消费并清空 */
+  focusTabReq: string | null;
+  setFocusTabReq: (tabId: string | null) => void;
   /** 工作区页资源面板「查看」/ 步骤产物 → 终端页预览的交接（绝对路径，终端页消费并清空）；
       root 可选：文本预览的后端根约束（不给则回落活动标签 cwd） */
   previewReq: { path: string; name: string; root?: string } | null;
@@ -171,16 +182,22 @@ export const useAppStore = create<AppState>((set, get) => ({
   page: "workspaces",
   setPage: (p) => set({ page: p }),
   navCollapsed: localStorage.getItem("ccode.navCollapsed") === "1",
+  navManual: false,
   toggleNavCollapsed: () =>
     set((s) => {
       localStorage.setItem("ccode.navCollapsed", s.navCollapsed ? "0" : "1");
-      return { navCollapsed: !s.navCollapsed };
+      return { navCollapsed: !s.navCollapsed, navManual: true };
     }),
+  setNavCollapsedAuto: (collapsed) => set({ navCollapsed: collapsed }),
   pendingTerminal: null,
   setPendingTerminal: (p) => set({ pendingTerminal: p }),
   workspaceReviewRequest: null,
   setWorkspaceReviewRequest: (request) =>
     set({ workspaceReviewRequest: request }),
+  terminalRunInputs: [],
+  setTerminalRunInputs: (inputs) => set({ terminalRunInputs: inputs }),
+  focusTabReq: null,
+  setFocusTabReq: (tabId) => set({ focusTabReq: tabId }),
   previewReq: null,
   setPreviewReq: (r) => set({ previewReq: r }),
   enterCwdReq: null,

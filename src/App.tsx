@@ -66,6 +66,18 @@ function App() {
     setVisited((v) => (v.has(page) ? v : new Set(v).add(page)));
   }, [page]);
 
+  // 侧栏按页面自动收展：终端/对话是多列工作页，收成图标栏让出横向空间；
+  // 离开后恢复 localStorage 里的手动偏好；用户手动折叠/展开后本 session 停止自动跟随
+  const navManual = useAppStore((s) => s.navManual);
+  const setNavCollapsedAuto = useAppStore((s) => s.setNavCollapsedAuto);
+  useEffect(() => {
+    if (navManual) return;
+    const crowded = page === "terminal" || page === "sessions";
+    setNavCollapsedAuto(
+      crowded ? true : localStorage.getItem("ccode.navCollapsed") === "1",
+    );
+  }, [page, navManual, setNavCollapsedAuto]);
+
   useEffect(() => {
     loadAll().catch((e) => console.error(e));
     loadSessions().catch((e) => console.error(e));
@@ -133,9 +145,9 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <div className="flex h-full overflow-hidden bg-rail text-l2">
+      <div className="ccode-app-shell flex h-full overflow-hidden bg-rail text-l2">
         <aside
-          className={`flex shrink-0 flex-col border-r border-hairline bg-rail transition-[width] duration-150 ${
+          className={`ccode-app-rail flex shrink-0 flex-col border-r border-hairline bg-rail transition-[width] duration-150 ${
             collapsed ? "w-14" : "w-40"
           }`}
         >
@@ -144,7 +156,7 @@ function App() {
             type="button"
             onClick={toggleCollapsed}
             title={collapsed ? "展开侧栏" : "收起为图标"}
-            className={`flex h-12 shrink-0 select-none items-center border-b border-hairline text-left text-l1 ${
+            className={`ccode-brand-bar flex h-12 shrink-0 select-none items-center text-left text-l1 ${
               collapsed ? "justify-center text-sm" : "px-3"
             }`}
           >
@@ -157,7 +169,7 @@ function App() {
             )}
           </button>
 
-          <nav className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
+          <nav className="ccode-app-nav min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
             {NAV_GROUPS.map((group, groupIndex) => (
               <div key={group.label} className={groupIndex > 0 ? "mt-3" : ""}>
                 {!collapsed && (
@@ -212,7 +224,8 @@ function App() {
             />
           </nav>
 
-          <div className="shrink-0 border-t border-hairline px-1.5 py-2">
+          {/* 底部管理区与导航之间只留一根隐约细线（5% 白 + 0.5px），不完全消失 */}
+          <div className="shrink-0 border-t border-white/5 px-1.5 py-2">
             {NAV_BOTTOM.map((n) => (
               <button
                 key={n.id}
@@ -241,7 +254,7 @@ function App() {
             ))}
           </div>
         </aside>
-        <main className="h-full min-h-0 min-w-0 flex-1">
+        <main className="ccode-app-main h-full min-h-0 min-w-0 flex-1">
           {/* 页面保持挂载，切换标签不销毁终端；未访问过的页不挂载（懒加载） */}
           <div
             className={page === "profiles" ? "h-full overflow-auto" : "hidden"}

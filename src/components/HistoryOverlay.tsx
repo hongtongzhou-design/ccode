@@ -76,7 +76,7 @@ export default function HistoryOverlay({
           ) : entries === null ? (
             <p className="text-xs text-l4">读取中…</p>
           ) : entries.length === 0 ? (
-            <p className="rounded border border-hairline bg-strip p-3 text-xs text-l3">
+            <p className="rounded-md bg-strip p-3 text-xs text-l3">
               还没有保存记录。到终端页右侧「改动」页签点「保存到历史」，
               或合并一个工作区任务，这里就会出现第一条时间线记录。
             </p>
@@ -86,7 +86,7 @@ export default function HistoryOverlay({
                 <h3 className="mb-1 text-xs font-medium text-l4">
                   {group.label}
                 </h3>
-                <ul className="divide-y divide-hairline rounded border border-hairline bg-strip">
+                <ul className="divide-y divide-hairline rounded-md bg-strip">
                   {group.entries.map((entry) => {
                     const item = translateHistoryEntry(entry, wsSteps);
                     return (
@@ -99,7 +99,7 @@ export default function HistoryOverlay({
                         </span>
                         <span
                           className={`w-4 shrink-0 text-xs ${
-                            item.kind === "merge" ? "text-okb" : "text-l3"
+                            item.kind === "merge" ? "text-ok-text" : "text-l3"
                           }`}
                         >
                           {item.icon}

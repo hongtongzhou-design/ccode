@@ -32,9 +32,9 @@
   --color-canvas: #0a1227; /* 主内容底（深蓝黑基底） */
   --color-rail2: #131b2f; /* 页面左栏（会话树 / 终端工作栏） */
   --color-strip: #161e33; /* 顶栏 / 面板头条 / 输入区 */
-  --color-inset: #181f33; /* 卡片 / 结果块（微微浮起） */
-  --color-raised: #1b2337; /* 浮起面板 / 状态 pill 底 */
-  --color-rail-sel: #222a3e; /* 侧栏选中行 */
+  --color-inset: #1b2236; /* 卡片 / 结果块（与 strip 拉开一档，梯度不塌） */
+  --color-raised: #222a40; /* 浮起面板 / 状态 pill 底 */
+  --color-rail-sel: #262e45; /* 侧栏选中行（保持亮于 raised） */
   --color-seg-sel: #2a3145; /* 分段控件选中 */
   --color-bubble: #2c3448; /* 用户消息气泡 */
   --color-hairline: #282e42; /* 隐式 1px 细线（走查校准：自 #2d3448 调柔一档，避免“亮线”生硬；仍亮于 inset，与 field 保持层级） */
@@ -82,14 +82,10 @@
   /* 次级实心按钮 */
   --color-btn: #464543;
 
-  /* 配置页专属（别名引用语义变量，随主题切换联动） */
-  --color-pg: var(--color-canvas); /* 页底 */
-  --color-grp: var(--color-strip); /* 组头 / 选中填充 */
-  --color-hl2: var(--color-hairline); /* 页内 hairline */
-  --color-pl1: var(--color-l1); /* 页内一级文本 */
-  --color-pl2: var(--color-l2); /* 页内二级文本 */
-  --color-okb: #40d080; /* 成功（已安装 / 已存密钥 / 安装） */
-  --color-warnb: #f0c010; /* 警告 */
+  /* 编辑器面（Monaco 经 getComputedStyle 读这三个变量，比 canvas 更暗半档，代码块感） */
+  --color-editor-bg: #11131a;
+  --color-editor-fg: #aeb6c6;
+  --color-editor-line: #525a6b;
 }
 
 /* 多主题（仅深色）：运行时 document.documentElement.dataset.theme 切换，
@@ -103,75 +99,81 @@
 
 [data-theme="terracotta"] {
   --color-rail: #232322; --color-rail2: #262624; --color-rail-sel: #3d3d3a;
-  --color-strip: #333331; --color-canvas: #2d2d2b; --color-inset: #373735;
-  --color-raised: #3c3c39; --color-bubble: #4a4a46;
-  --color-seg-sel: #41413e; --color-hairline: #4d4d4a; --color-field: #545451;
+  --color-strip: #333331; --color-canvas: #2d2d2b; --color-inset: #383836;
+  --color-raised: #3e3e3b; --color-bubble: #4a4a46;
+  --color-seg-sel: #434340; --color-hairline: #444441; --color-field: #4a4a47;
   --color-l1: #f9f9f7; --color-l2: #c9c9c4; --color-l3: #94948f; --color-l4: #6a6a66;
   --color-cta: #cc7d5e; --color-cta-text: #f9f9f7; --color-cta-bd: #8f4f38;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #3d211a;
   --color-cta-pill-text: #eda586;
   --color-folder: #ab9a85;
+  --color-editor-bg: #2d2d2b; --color-editor-fg: #c9c9c4; --color-editor-line: #6a6a66;
 }
 [data-theme="ayu"] {
   --color-rail: #0b0e14; --color-rail2: #0d1118; --color-rail-sel: #1e232e;
-  --color-strip: #181c23; --color-canvas: #10141c; --color-inset: #181c23;
-  --color-raised: #1c2029; --color-bubble: #2b303c;
-  --color-seg-sel: #22272f; --color-hairline: #2f323c; --color-field: #383d48;
+  --color-strip: #181c23; --color-canvas: #10141c; --color-inset: #1c212b;
+  --color-raised: #222834; --color-bubble: #2b303c;
+  --color-seg-sel: #262c37; --color-hairline: #272a33; --color-field: #31353f;
   --color-l1: #d9d7d2; --color-l2: #bfbdb6; --color-l3: #878580; --color-l4: #5f5e59;
   --color-cta: #e6b450; --color-cta-text: #1d1608; --color-cta-bd: #8a6a26;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #3a2e10;
   --color-cta-pill-text: #eec363;
   --color-folder: #9a8a5f;
+  --color-editor-bg: #10141c; --color-editor-fg: #bfbdb6; --color-editor-line: #5f5e59;
 }
 [data-theme="mocha"] {
   --color-rail: #181824; --color-rail2: #1a1a28; --color-rail-sel: #2e2e44;
-  --color-strip: #262738; --color-canvas: #1e1e2e; --color-inset: #262738;
-  --color-raised: #2b2c40; --color-bubble: #3a3b56;
-  --color-seg-sel: #30304a; --color-hairline: #3c3d52; --color-field: #464760;
+  --color-strip: #262738; --color-canvas: #1e1e2e; --color-inset: #2b2c40;
+  --color-raised: #313249; --color-bubble: #3a3b56;
+  --color-seg-sel: #353650; --color-hairline: #34354a; --color-field: #3d3e54;
   --color-l1: #cdd6f4; --color-l2: #aeb8dc; --color-l3: #7c86b0; --color-l4: #565e83;
   --color-cta: #cba6f7; --color-cta-text: #2a1b3d; --color-cta-bd: #6b4d94;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #2e2145;
   --color-cta-pill-text: #d3b3fa;
   --color-folder: #8f97b8;
+  --color-editor-bg: #1e1e2e; --color-editor-fg: #aeb8dc; --color-editor-line: #565e83;
 }
 [data-theme="neutral"] {
   --color-rail: #0d0d0d; --color-rail2: #101010; --color-rail-sel: #262626;
-  --color-strip: #1c1c1c; --color-canvas: #111111; --color-inset: #1c1c1c;
-  --color-raised: #212121; --color-bubble: #303030;
-  --color-seg-sel: #262626; --color-hairline: #363636; --color-field: #404040;
+  --color-strip: #1c1c1c; --color-canvas: #111111; --color-inset: #212121;
+  --color-raised: #272727; --color-bubble: #303030;
+  --color-seg-sel: #2b2b2b; --color-hairline: #2c2c2c; --color-field: #383838;
   --color-l1: #fcfcfc; --color-l2: #c9c9c9; --color-l3: #8f8f8f; --color-l4: #616161;
   --color-cta: #0169cc; --color-cta-text: #eaf4ff; --color-cta-bd: #014a8f;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #0d2d4d;
   --color-cta-pill-text: #63a9ef;
   --color-folder: #999999;
+  --color-editor-bg: #111111; --color-editor-fg: #c9c9c9; --color-editor-line: #616161;
 }
 [data-theme="dracula"] {
   --color-rail: #1e2029; --color-rail2: #22242e; --color-rail-sel: #3d3f4e;
-  --color-strip: #33343f; --color-canvas: #282a36; --color-inset: #33343f;
-  --color-raised: #383945; --color-bubble: #484a5c;
-  --color-seg-sel: #3a3c4a; --color-hairline: #4b4c5a; --color-field: #555768;
+  --color-strip: #33343f; --color-canvas: #282a36; --color-inset: #393a47;
+  --color-raised: #3f404f; --color-bubble: #484a5c;
+  --color-seg-sel: #434453; --color-hairline: #434455; --color-field: #494a5a;
   --color-l1: #f8f8f2; --color-l2: #cfcfc9; --color-l3: #94948f; --color-l4: #68686a;
   --color-cta: #ff79c6; --color-cta-text: #38102a; --color-cta-bd: #a64a80;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #401a35;
   --color-cta-pill-text: #ff8fd0;
   --color-folder: #8289b0;
+  --color-editor-bg: #282a36; --color-editor-fg: #cfcfc9; --color-editor-line: #68686a;
 }
 [data-theme="shadcn"] {
   --color-rail: #0d1420; --color-rail2: #101827; --color-rail-sel: #232c3c;
-  --color-strip: #1a2230; --color-canvas: #111827; --color-inset: #1a2230;
-  --color-raised: #1f2836; --color-bubble: #2f3b4e;
-  --color-seg-sel: #232c3d; --color-hairline: #343b4a; --color-field: #3e485a;
+  --color-strip: #1a2230; --color-canvas: #111827; --color-inset: #202938;
+  --color-raised: #252f41; --color-bubble: #2f3b4e;
+  --color-seg-sel: #293447; --color-hairline: #2b323f; --color-field: #363e4e;
   --color-l1: #e4e4e7; --color-l2: #b9b9c0; --color-l3: #7d7d8a; --color-l4: #55555f;
   --color-cta: #ff5c5c; --color-cta-text: #3d0f0f; --color-cta-bd: #a83232;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #3d1414;
   --color-cta-pill-text: #ff8080;
   --color-folder: #8291ab;
+  --color-editor-bg: #111827; --color-editor-fg: #b9b9c0; --color-editor-line: #55555f;
 }
 
 html,
@@ -186,8 +188,9 @@ body {
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
     "PingFang SC", sans-serif;
+  /* 深色近黑底上用灰度抗锯齿（auto）而非 antialiased——后者在 macOS 深色界面把笔画削薄，
+     用户反馈"字体发白发飘"即源于此；auto 保持次像素渲染，字形更实 */
   font-size: 14px;
-  -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
@@ -197,6 +200,78 @@ body {
   height: 100dvh;
   margin: 0;
   background: var(--color-canvas);
+}
+
+/* 连续工作台层：统一模块边界、曲率与动效节奏，避免页面像一组互不相干的卡片。 */
+:root {
+  --ccode-radius-tight: 5px;
+  --ccode-radius-control: 7px;
+  --ccode-radius-panel: 9px;
+  --ccode-motion-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.ccode-app-shell {
+  background: var(--color-canvas);
+  color: var(--color-l2);
+  isolation: isolate;
+}
+
+.ccode-app-rail {
+  border-color: var(--color-hairline);
+  background: var(--color-rail);
+}
+
+/* 品牌区与侧栏同底不画线（Codex 式：侧栏只有全高竖分界 + 底部栏一根横线，分区间靠留白） */
+.ccode-brand-bar {
+  transition: background-color 150ms var(--ccode-motion-ease);
+}
+
+.ccode-app-nav,
+.ccode-app-main {
+  scrollbar-gutter: stable;
+}
+
+.ccode-app-main {
+  background: var(--color-canvas);
+}
+
+/* 在统一工作台内微调所有常用曲率，使按钮、标签、面板共享同一条视觉曲线。 */
+.ccode-app-shell :where(.rounded-sm) {
+  border-radius: var(--ccode-radius-tight);
+}
+
+.ccode-app-shell :where(.rounded-md) {
+  border-radius: var(--ccode-radius-control);
+}
+
+.ccode-app-shell :where(.rounded-lg) {
+  border-radius: var(--ccode-radius-panel);
+}
+
+.ccode-app-shell :where(button, input, textarea, select) {
+  transition-timing-function: var(--ccode-motion-ease);
+}
+
+.ccode-page-frame {
+  /* 页面内容与侧栏共享横向节奏，小窗口下自动收窄留白。 */
+  padding-inline: clamp(1rem, 2.2vw, 2rem);
+  scrollbar-gutter: stable;
+}
+
+.ccode-page-content {
+  min-height: 100%;
+}
+
+.ccode-page-header {
+  background: var(--color-canvas);
+}
+
+/* 工具栏不再包边成盒：与页头共用 hairline 与留白节奏，保持连续工作台观感。 */
+
+.ccode-action-primary,
+.ccode-action-secondary {
+  transition-duration: 150ms;
+  transition-timing-function: var(--ccode-motion-ease);
 }
 
 button,
@@ -238,7 +313,32 @@ select:focus-visible {
   line-height: 0.95rem;
 }
 
-/* Ghostty 风格细滚动条：透明轨道 + 低对比拇指 */
+/* 全站线条细化（用户反馈"线条再细一点"）：1px → 0.5px。
+   Retina 屏出真·发丝线；1x 屏浏览器把 0.5px 兜底渲染为 1 物理像素，不会消失。
+   焦点 outline（focus-visible 可达性）不受影响，保持 1px。 */
+.ccode-app-shell :where(.border) {
+  border-width: 0.5px;
+}
+.ccode-app-shell :where(.border-t) {
+  border-top-width: 0.5px;
+}
+.ccode-app-shell :where(.border-b) {
+  border-bottom-width: 0.5px;
+}
+.ccode-app-shell :where(.border-l) {
+  border-left-width: 0.5px;
+}
+.ccode-app-shell :where(.border-r) {
+  border-right-width: 0.5px;
+}
+.ccode-app-shell :where(.divide-y) > :where(:not(:last-child)) {
+  border-bottom-width: 0.5px;
+}
+.ccode-app-shell :where(.divide-x) > :where(:not(:last-child)) {
+  border-right-width: 0.5px;
+}
+
+/* Ghostty 风格细滚动条：透明轨道 + 低对比拇指，hover 略提亮 */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -246,6 +346,9 @@ select:focus-visible {
 ::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.12);
   border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
 }
 ::-webkit-scrollbar-track {
   background: transparent;

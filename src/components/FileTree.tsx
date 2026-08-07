@@ -447,20 +447,20 @@ function FileTree({
     .slice(0, 4);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 顶部：文件名搜索 */}
-      <div className="shrink-0 border-b border-hairline px-2 py-1.5">
+      {/* 顶部：文件名搜索（无描边，底色分层；区间靠留白不加线） */}
+      <div className="shrink-0 px-2 py-1.5">
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Escape" && setQuery("")}
           placeholder={`搜索 ${basenameOf(root)}…`}
-          className="w-full rounded border border-field bg-inset px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
+          className="w-full rounded-md bg-inset px-2 py-1 text-xs text-l2 outline-none transition-colors placeholder:text-l4 focus:bg-raised"
         />
       </div>
       {/* 最近项目：一行式折叠区（默认收起，与「打开的标签」「项目」区标题同一样式，走查降噪）；
           展开后点击真进入（切树根 + 切换启动栏 cwd）；↗ 另开新终端标签 */}
       {(recent.length > 0 || (!recentReposLoaded && recentReposLoading)) && (
-        <div className="shrink-0 border-b border-hairline">
+        <div className="shrink-0">
           <button
             onClick={() => setRecentOpen((v) => !v)}
             aria-expanded={recentOpen}
@@ -537,16 +537,16 @@ function FileTree({
             className="flex shrink-0 items-center gap-1 font-normal text-l3"
             title={`工作区「${ctx.workspaceName}」的工作树，改动属于分支 ${ctx.branch}`}
           >
-            <span className="h-1.5 w-1.5 rounded-full bg-okb" />
+            <span className="h-1.5 w-1.5 rounded-full bg-ok-text" />
             分支
           </span>
         )}
         {ctx?.kind === "main" && (
           <span
-            className="flex shrink-0 items-center gap-1 font-normal text-warnb"
+            className="flex shrink-0 items-center gap-1 font-normal text-warn-text"
             title={`主仓库（${ctx.branch}），这里的改动不属于任何工作区分支`}
           >
-            <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
+            <span className="h-1.5 w-1.5 rounded-full bg-warn-text" />
             主仓库
           </span>
         )}

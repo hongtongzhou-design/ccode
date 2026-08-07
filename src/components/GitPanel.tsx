@@ -8,7 +8,7 @@ import type {
   GitFileDto,
   WorkspaceDiffDto,
 } from "../types";
-import { Checkbox, LoadingRows } from "./PageFrame";
+import { Checkbox, hoverRevealClass, LoadingRows } from "./PageFrame";
 import ImagePairView, { isImagePath } from "./ImagePairView";
 import { useAppStore } from "../store";
 import { defaultCommitMessage } from "../git-commit-message";
@@ -448,12 +448,235 @@ function GitPanel({
     await loadExpandedDiff(file);
   }
 
+  // 主从分栏：选中文件后左栏 diff 主区 + 右栏紧凑文件列；未选中时全宽文件列表
+  const diffFile = diffPath
+    ? (files.find((f) => f.path === diffPath) ?? null)
+    : null;
+
+  /** 全宽模式文件行：勾选 + 状态徽标 + 路径 + 增删数 + hover diff 提示 */
+  function renderFullRow(f: GitFileDto) {
+    const expanded = diffPath === f.path;
+    return (
+      <div
+        key={`${f.status}:${f.path}`}
+        className="border-b border-hairline/60 last:border-b-0"
+      >
+        <div className="flex items-center gap-1 px-1 py-0.5 text-xs">
+          {!inWs && !readOnly && (
+            <Checkbox
+              checked={selectedPaths.has(f.path)}
+              onChange={(checked) => togglePath(f.path, checked)}
+              label={<span className="sr-only">选择 {f.path}</span>}
+            />
+          )}
+          <button
+            type="button"
+            onClick={() => void toggleDiff(f)}
+            title={`${expanded ? "收起" : "查看"} ${f.path} 的 diff`}
+            className="group flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-1 text-left hover:bg-white/5"
+          >
+            <span className="w-3 shrink-0 text-center text-l3">
+              {expanded ? "▾" : "▸"}
+            </span>
+            <span
+              title={statusBadgeTitle(f.status)}
+              className={`shrink-0 rounded px-1 font-mono text-[10px] leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
+            >
+              {f.status}
+            </span>
+            <span className="min-w-0 flex-1 truncate font-mono text-l2">
+              {f.path}
+            </span>
+            {(f.additions !== null || f.deletions !== null) && (
+              <span className="shrink-0 font-mono">
+                {f.additions !== null && (
+                  <span className="text-add">+{f.additions}</span>
+                )}{" "}
+                {f.deletions !== null && f.deletions > 0 && (
+                  <span className="text-del">-{f.deletions}</span>
+                )}
+              </span>
+            )}
+            {/* WKWebView 不显示 title 悬浮：diff 入口用可见的 hover 提示代替 */}
+            <span
+              className={`${hoverRevealClass} shrink-0 rounded px-1 text-[10px] text-l4`}
+            >
+              {expanded ? "收起" : "diff"}
+            </span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /** 分栏模式右栏紧凑行：状态徽标 + 文件名（全路径进 title），选中行浅填充 */
+  function renderCompactRow(f: GitFileDto) {
+    const active = diffPath === f.path;
+    return (
+      <div key={`${f.status}:${f.path}`} className="flex items-center gap-1">
+        {!inWs && !readOnly && (
+          <Checkbox
+            checked={selectedPaths.has(f.path)}
+            onChange={(checked) => togglePath(f.path, checked)}
+            label={<span className="sr-only">选择 {f.path}</span>}
+          />
+        )}
+        <button
+          type="button"
+          onClick={() => void toggleDiff(f)}
+          title={f.path}
+          className={`flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left ${
+            active ? "bg-inset text-l1" : "hover:bg-white/5"
+          }`}
+        >
+          <span
+            title={statusBadgeTitle(f.status)}
+            className={`shrink-0 rounded px-1 font-mono text-[10px] leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
+          >
+            {f.status}
+          </span>
+          <span className="min-w-0 flex-1 truncate font-mono text-xs text-l2">
+            {f.path.split(/[\\/]/).pop()}
+          </span>
+        </button>
+      </div>
+    );
+  }
+
+  /** 左栏 diff 主区：文件头（路径 + 二进制/截断标记 + 收起）+ 逐 hunk / 只读文本 / 图片对比 */
+  function renderDiffContent(f: GitFileDto) {
+    const diffLines = diffDetail ? diffDetail.text.split("\n") : null;
+    return (
+      <div className="overflow-hidden rounded-md bg-strip">
+        <div className="flex items-center gap-2 border-b border-hairline px-2 py-1 text-[11px] text-l4">
+          <span className="min-w-0 flex-1 truncate font-mono">{f.path}</span>
+          {diffDetail?.binary && <span>二进制</span>}
+          {diffDetail?.truncated && (
+            <span className="text-warn-text">已截断</span>
+          )}
+          <button
+            type="button"
+            onClick={() => void toggleDiff(f)}
+            title="收起 diff，回到全宽文件列表"
+            className="shrink-0 rounded px-1 text-l3 hover:bg-white/5 hover:text-l1"
+          >
+            ×
+          </button>
+        </div>
+        {isImagePath(f.path) ? (
+          <ImagePairView cwd={cwd} path={f.path} />
+        ) : diffLoading ? (
+          <div className="p-2">
+            <LoadingRows compact />
+          </div>
+        ) : hunks && hunks.length > 0 ? (
+          // 逐 hunk 验收：未暂存改动按块展示，块头右侧「丢弃 / 暂存」
+          <div>
+            {diffError && (
+              <p className="border-b border-hairline px-2 py-1 text-[11px] text-err-text">
+                {diffError}
+              </p>
+            )}
+            {hunksStaged && (
+              <p className="border-b border-hairline px-2 py-1 text-[11px] text-warn-text">
+                该文件已有部分内容暂存；勾选它「保存到历史」时只提交已暂存的块，下方的块留在工作区
+              </p>
+            )}
+            {hunks.map((h) => {
+              const body = hunkBodyLines(h.patch);
+              return (
+                <div
+                  key={`${h.index}:${h.header}`}
+                  className="border-b border-hairline/60 last:border-b-0"
+                >
+                  <div className="flex items-center gap-1 border-b border-hairline/60 bg-inset px-2 py-0.5">
+                    <span
+                      className="min-w-0 flex-1 truncate font-mono text-[11px] text-link"
+                      title={h.header}
+                    >
+                      {h.header}
+                    </span>
+                    {!readOnly && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={hunkBusy}
+                          onClick={() => void applyHunk(h, "discard")}
+                          title="丢弃这块改动，恢复到暂存区状态（不可恢复，除非已提交）"
+                          className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-warn-text hover:bg-white/5 disabled:opacity-50"
+                        >
+                          丢弃
+                        </button>
+                        <button
+                          type="button"
+                          disabled={hunkBusy}
+                          onClick={() => void applyHunk(h, "stage")}
+                          title="把这块改动放进暂存区；勾选此文件「保存到历史」时只提交已暂存的块"
+                          className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                        >
+                          暂存
+                        </button>
+                      </>
+                    )}
+                  </div>
+                  <pre className="overflow-auto py-1 font-mono text-xs leading-5">
+                    {body.slice(0, DIFF_LINE_CAP).map((line, index) => (
+                      <span
+                        key={`${index}:${line.slice(0, 24)}`}
+                        className={`block min-w-max whitespace-pre px-2 ${diffLineClass(line)}`}
+                      >
+                        {line || " "}
+                      </span>
+                    ))}
+                  </pre>
+                  {body.length > DIFF_LINE_CAP && (
+                    <p className="border-t border-hairline px-2 py-1 text-[11px] text-l4">
+                      仅渲染前 {DIFF_LINE_CAP} 行（共 {body.length}{" "}
+                      行），完整内容见审阅视图
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : diffError ? (
+          <p className="p-2 text-xs text-err-text">{diffError}</p>
+        ) : diffLines ? (
+          <>
+            {hunksStaged && (
+              <p className="border-b border-hairline px-2 py-1 text-[11px] text-l3">
+                改动已全部暂存；勾选后「保存到历史」将提交这些内容
+              </p>
+            )}
+            <pre className="overflow-auto py-1 font-mono text-xs leading-5">
+              {diffLines.slice(0, DIFF_LINE_CAP).map((line, index) => (
+                <span
+                  key={`${index}:${line.slice(0, 24)}`}
+                  className={`block min-w-max whitespace-pre px-2 ${diffLineClass(line)}`}
+                >
+                  {line || " "}
+                </span>
+              ))}
+            </pre>
+            {diffLines.length > DIFF_LINE_CAP && (
+              <p className="border-t border-hairline px-2 py-1 text-[11px] text-l4">
+                仅渲染前 {DIFF_LINE_CAP} 行（共 {diffLines.length}{" "}
+                行），完整内容见审阅视图
+              </p>
+            )}
+          </>
+        ) : null}
+      </div>
+    );
+  }
+
+  // 增删整行铺语义深底（bg-ok/bg-err，七主题共享）：用户拍板「可以铺」，比细边更清晰
   function diffLineClass(line: string): string {
-    if (line.startsWith("@@")) return "border-l-2 border-link bg-inset text-link";
+    if (line.startsWith("@@")) return "bg-inset text-link";
     if (line.startsWith("+") && !line.startsWith("+++"))
-      return "border-l-2 border-add text-add";
+      return "bg-ok text-ok-text";
     if (line.startsWith("-") && !line.startsWith("---"))
-      return "border-l-2 border-del text-del";
+      return "bg-err text-err-text";
     if (
       line.startsWith("diff --git") ||
       line.startsWith("index ") ||
@@ -518,176 +741,50 @@ function GitPanel({
         )}
       </div>
 
-      {/* 文件列表 */}
-      <div className="min-h-0 flex-1 overflow-auto p-2">
+      {/* 改动主从视图：未选中全宽文件列表；选中后左栏 diff 主区 + 右栏紧凑文件列 */}
+      <div className="min-h-0 flex-1 overflow-hidden">
         {error ? (
-          <p className="p-1 text-xs text-err-text">{error}</p>
+          <p className="p-3 text-xs text-err-text">{error}</p>
         ) : !status ? (
-          <LoadingRows compact />
+          <div className="p-2"><LoadingRows compact /></div>
         ) : !status.isRepo ? (
-          <p className="p-1 text-sm text-l4">
+          <p className="p-3 text-sm text-l4">
             该目录不是 git 仓库，无改动可显示
             <span className="block text-xs text-l4" title={cwd}>
               {cwd}
             </span>
           </p>
         ) : files.length === 0 ? (
-          <p className="p-1 text-sm text-l4">
+          <p className="p-3 text-sm text-l4">
             {inWs ? "任务无改动 ✓" : "工作区干净 ✓"}
           </p>
         ) : (
           // 白话分组：组名给中文，状态字母保留为文件名前的小号 mono 徽标（悬浮 title 双语义）
-          groupFilesByStatus(files).map((group) => (
-            <div key={group.key}>
-              <p className="px-1 pb-0.5 pt-1.5 text-[11px] text-l4">
-                {group.label} {group.files.length}
-              </p>
-              {group.files.map((f) => {
-            const expanded = diffPath === f.path;
-            const diffLines = expanded && diffDetail ? diffDetail.text.split("\n") : null;
-            return (
-              <div key={`${f.status}:${f.path}`} className="border-b border-hairline/60 last:border-b-0">
-                <div className="flex items-center gap-1 px-1 py-0.5 text-xs">
-                  {!inWs && !readOnly && (
-                    <Checkbox
-                      checked={selectedPaths.has(f.path)}
-                      onChange={(checked) => togglePath(f.path, checked)}
-                      label={<span className="sr-only">选择 {f.path}</span>}
-                    />
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => void toggleDiff(f)}
-                    title={`${expanded ? "收起" : "查看"} ${f.path} 的 diff`}
-                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-1 text-left hover:bg-white/5"
-                  >
-                    <span className="w-3 shrink-0 text-center text-l4">{expanded ? "▾" : "▸"}</span>
-                    <span
-                      title={statusBadgeTitle(f.status)}
-                      className={`shrink-0 rounded px-1 font-mono text-[10px] leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
-                    >
-                      {f.status}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate font-mono text-l2">
-                      {f.path}
-                    </span>
-                    {(f.additions !== null || f.deletions !== null) && (
-                      <span className="shrink-0 font-mono">
-                        {f.additions !== null && (
-                          <span className="text-add">+{f.additions}</span>
-                        )}{" "}
-                        {f.deletions !== null && f.deletions > 0 && (
-                          <span className="text-del">-{f.deletions}</span>
-                        )}
-                      </span>
-                    )}
-                  </button>
-                </div>
-                {expanded && (
-                  <div className="mb-1 ml-1 overflow-hidden rounded border border-hairline bg-strip">
-                    <div className="flex items-center gap-2 border-b border-hairline px-2 py-1 text-[11px] text-l4">
-                      <span className="min-w-0 flex-1 truncate font-mono">{f.path}</span>
-                      {diffDetail?.binary && <span>二进制</span>}
-                      {diffDetail?.truncated && <span className="text-warn-text">已截断</span>}
-                    </div>
-                    {isImagePath(f.path) ? (
-                      <ImagePairView cwd={cwd} path={f.path} />
-                    ) : diffLoading ? (
-                      <div className="p-2"><LoadingRows compact /></div>
-                    ) : hunks && hunks.length > 0 ? (
-                      // 逐 hunk 验收：未暂存改动按块展示，块头右侧「丢弃 / 暂存」
-                      <div>
-                        {diffError && (
-                          <p className="border-b border-hairline px-2 py-1 text-[11px] text-err-text">{diffError}</p>
-                        )}
-                        {hunksStaged && (
-                          <p className="border-b border-hairline px-2 py-1 text-[11px] text-warn-text">
-                            该文件已有部分内容暂存；勾选它「保存到历史」时只提交已暂存的块，下方的块留在工作区
-                          </p>
-                        )}
-                        {hunks.map((h) => {
-                          const body = hunkBodyLines(h.patch);
-                          return (
-                            <div key={`${h.index}:${h.header}`} className="border-b border-hairline/60 last:border-b-0">
-                              <div className="flex items-center gap-1 border-b border-hairline/60 bg-inset px-2 py-0.5">
-                                <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-link" title={h.header}>
-                                  {h.header}
-                                </span>
-                                {!readOnly && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      disabled={hunkBusy}
-                                      onClick={() => void applyHunk(h, "discard")}
-                                      title="丢弃这块改动，恢复到暂存区状态（不可恢复，除非已提交）"
-                                      className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-warn-text hover:bg-white/5 disabled:opacity-50"
-                                    >
-                                      丢弃
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={hunkBusy}
-                                      onClick={() => void applyHunk(h, "stage")}
-                                      title="把这块改动放进暂存区；勾选此文件「保存到历史」时只提交已暂存的块"
-                                      className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
-                                    >
-                                      暂存
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                              <pre className="max-h-60 overflow-auto py-1 font-mono text-[11px] leading-5">
-                                {body.slice(0, DIFF_LINE_CAP).map((line, index) => (
-                                  <span
-                                    key={`${index}:${line.slice(0, 24)}`}
-                                    className={`block min-w-max whitespace-pre px-2 ${diffLineClass(line)}`}
-                                  >
-                                    {line || " "}
-                                  </span>
-                                ))}
-                              </pre>
-                              {body.length > DIFF_LINE_CAP && (
-                                <p className="border-t border-hairline px-2 py-1 text-[11px] text-l4">
-                                  仅渲染前 {DIFF_LINE_CAP} 行（共 {body.length} 行），完整内容见审阅视图
-                                </p>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : diffError ? (
-                      <p className="p-2 text-xs text-err-text">{diffError}</p>
-                    ) : diffLines ? (
-                      <>
-                        {hunksStaged && (
-                          <p className="border-b border-hairline px-2 py-1 text-[11px] text-l3">
-                            改动已全部暂存；勾选后「保存到历史」将提交这些内容
-                          </p>
-                        )}
-                        <pre className="max-h-80 overflow-auto py-1 font-mono text-[11px] leading-5">
-                          {diffLines.slice(0, DIFF_LINE_CAP).map((line, index) => (
-                            <span
-                              key={`${index}:${line.slice(0, 24)}`}
-                              className={`block min-w-max whitespace-pre px-2 ${diffLineClass(line)}`}
-                            >
-                              {line || " "}
-                            </span>
-                          ))}
-                        </pre>
-                        {diffLines.length > DIFF_LINE_CAP && (
-                          <p className="border-t border-hairline px-2 py-1 text-[11px] text-l4">
-                            仅渲染前 {DIFF_LINE_CAP} 行（共 {diffLines.length} 行），完整内容见审阅视图
-                          </p>
-                        )}
-                      </>
-                    ) : null}
-                  </div>
-                )}
+          <div className="flex h-full">
+            {diffFile && (
+              <div className="min-w-0 flex-1 overflow-auto px-2 py-1.5">
+                {renderDiffContent(diffFile)}
               </div>
-            );
-              })}
+            )}
+            <div
+              className={
+                diffFile
+                  ? "w-44 shrink-0 overflow-auto border-l border-hairline p-1"
+                  : "min-w-0 flex-1 overflow-auto p-2"
+              }
+            >
+              {groupFilesByStatus(files).map((group) => (
+                <div key={group.key}>
+                  <p className="px-1 pb-0.5 pt-1.5 text-[11px] text-l4">
+                    {group.label} {group.files.length}
+                  </p>
+                  {group.files.map((f) =>
+                    diffFile ? renderCompactRow(f) : renderFullRow(f),
+                  )}
+                </div>
+              ))}
             </div>
-          ))
+          </div>
         )}
       </div>
 

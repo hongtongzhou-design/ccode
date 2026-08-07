@@ -556,7 +556,7 @@ function ChangeTree({
                   >
                     {node.file.status === "??" ? "U" : node.file.status}
                   </span>
-                  <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-warn-text" />
                 </>
               )}
             </button>
@@ -614,7 +614,7 @@ function ConflictFileSection({
       <div className="sticky top-0 z-[2] border-b border-hairline bg-strip">
         <div className="flex h-10 items-center gap-2 px-3 text-xs">
           <span
-            className={`font-mono ${unresolved ? "text-err-text" : "text-okb"}`}
+            className={`font-mono ${unresolved ? "text-err-text" : "text-ok-text"}`}
           >
             {unresolved ? "U" : "✓"}
           </span>
@@ -809,7 +809,7 @@ function MainRepoCommitPanel({
   }
 
   return (
-    <div className="mt-1.5 rounded border border-hairline bg-canvas p-2 text-l2">
+    <div className="mt-1.5 rounded-md bg-inset p-2 text-l2">
       <p className="mb-2 text-[11px] text-l4">
         提交 = 把改动保存到项目历史。文件本身不会丢，保存后才能把成果合并回来。
       </p>
@@ -1925,7 +1925,7 @@ export default function WorkspaceReviewView({
       {diff && !conflictMode && blockers.length > 0 && (
         <div className="shrink-0 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
           <div className="flex items-center gap-2">
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb" />
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn-text" />
             <span className="min-w-0 flex-1">
               {blockers.length} 项问题需要处理
             </span>
@@ -1983,7 +1983,7 @@ export default function WorkspaceReviewView({
       )}
       {diff && conflictMode && staleBase && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
-          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb" />
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn-text" />
           <span>
             {diff.baseBranch}{" "}
             已在本次冲突开始后更新；旧的基准侧已停止显示，请从右上角重新同步。
@@ -2163,7 +2163,7 @@ export default function WorkspaceReviewView({
                         <span
                           className={[
                             "font-mono",
-                            unresolved ? "text-err-text" : "text-okb",
+                            unresolved ? "text-err-text" : "text-ok-text",
                           ].join(" ")}
                         >
                           {unresolved ? "U" : "✓"}
@@ -2198,10 +2198,10 @@ export default function WorkspaceReviewView({
                     className={[
                       "h-1.5 w-1.5 rounded-full",
                       staleBase
-                        ? "bg-warnb"
+                        ? "bg-warn-text"
                         : unresolvedFiles.length
                           ? "bg-err-text"
-                          : "bg-okb",
+                          : "bg-ok-text",
                     ].join(" ")}
                   />
                   <span>
@@ -2219,7 +2219,7 @@ export default function WorkspaceReviewView({
                   <span
                     className={[
                       "h-1.5 w-1.5 rounded-full",
-                      hardBlocked ? "bg-warnb" : "bg-okb",
+                      hardBlocked ? "bg-warn-text" : "bg-ok-text",
                     ].join(" ")}
                   />
                   <span>

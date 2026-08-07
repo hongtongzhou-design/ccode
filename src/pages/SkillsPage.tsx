@@ -7,6 +7,8 @@ import ContextMenu from "../components/ContextMenu";
 import {
   Checkbox,
   EmptyState,
+  fieldClass,
+  hoverRevealClass,
   LoadingRows,
   PageFrame,
   PageHeader,
@@ -39,13 +41,6 @@ const GITHUB_PRESETS = [
   "anthropics/skills",
   "ComposioHQ/awesome-claude-skills",
 ];
-
-const field =
-  "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
-
-// hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
-const hoverReveal =
-  "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
 
 /** 把用户粘贴的 GitHub 网址/简写统一解析为 { repo, branch, subdir }：
  *  支持 owner/repo、github.com/owner/repo、https://github.com/owner/repo.git、
@@ -255,7 +250,7 @@ function ImportModal({
             <label className="mb-2 block text-sm">
               <span className="mb-1 block text-xs text-l3">仓库</span>
               <input
-                className={field}
+                className={fieldClass}
                 placeholder="anthropics/skills 或 https://github.com/owner/repo"
                 value={repo}
                 onChange={(e) => setRepo(e.target.value)}
@@ -265,7 +260,7 @@ function ImportModal({
               <label className="block flex-1 text-sm">
                 <span className="mb-1 block text-xs text-l3">分支（可选）</span>
                 <input
-                  className={field}
+                  className={fieldClass}
                   placeholder="main"
                   value={branch}
                   onChange={(e) => setBranch(e.target.value)}
@@ -276,7 +271,7 @@ function ImportModal({
                   子目录（可选）
                 </span>
                 <input
-                  className={field}
+                  className={fieldClass}
                   placeholder="skills/pdf"
                   value={subdir}
                   onChange={(e) => setSubdir(e.target.value)}
@@ -580,7 +575,7 @@ function SkillEditorModal({
             名称（即目录名，单个安全名称）
           </span>
           <input
-            className={field}
+            className={fieldClass}
             value={name}
             onChange={(e) => setName(e.target.value)}
             disabled={mode === "edit"}
@@ -592,7 +587,7 @@ function SkillEditorModal({
             描述（一句话，列表与步骤推荐里展示）
           </span>
           <input
-            className={field}
+            className={fieldClass}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="这个技能帮 Agent 做什么"
@@ -603,7 +598,7 @@ function SkillEditorModal({
             正文（SKILL.md 主体，frontmatter 由名称/描述自动生成）
           </span>
           <textarea
-            className={`${field} h-56 resize-y font-mono text-xs`}
+            className={`${fieldClass} h-56 resize-y font-mono text-xs`}
             value={content}
             onChange={(e) => setContent(e.target.value)}
             placeholder="把你的工作方法写在这里：步骤、规范、注意事项……"
@@ -680,7 +675,7 @@ function OptimizeModal({
         </p>
         <textarea
           autoFocus
-          className={`${field} mb-3 h-24 resize-y`}
+          className={`${fieldClass} mb-3 h-24 resize-y`}
           value={opinion}
           onChange={(e) => setOpinion(e.target.value)}
           placeholder="优化意见，如：补充中文输出格式约定；把检查清单精简到 5 条"
@@ -1047,7 +1042,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     {/* 状态聚合：副本过期/GitHub 可更新合并为一个警示点，明细在悬浮 */}
                                     {(stale || update?.updateAvailable) && (
                                       <span
-                                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb"
+                                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn-text"
                                         title={[
                                           stale
                                             ? `副本过期：${(skill.staleCopies ?? []).join("、")}`
@@ -1144,7 +1139,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                       });
                                     }}
                                     aria-label={`${skill.name} 更多操作`}
-                                    className={`flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1 ${hoverReveal}`}
+                                    className={`flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1 ${hoverRevealClass}`}
                                   >
                                     ⋯
                                   </button>

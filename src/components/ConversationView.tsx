@@ -257,7 +257,7 @@ export default function ConversationView({
           type="button"
           onClick={() => toggleExpand(run.key)}
           aria-expanded={isOpen}
-          className="flex h-7 w-full items-center gap-1.5 rounded-md border border-hairline bg-inset px-2 text-left text-xs text-l3 hover:text-l1"
+          className="flex h-7 w-full items-center gap-1.5 rounded-md bg-inset px-2 text-left text-xs text-l3 hover:bg-raised hover:text-l1"
         >
           <span className="shrink-0 text-[10px] text-l4">
             {isOpen ? "▾" : "▸"}

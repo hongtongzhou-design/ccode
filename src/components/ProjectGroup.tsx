@@ -133,15 +133,15 @@ const STEP_STATUS_STYLE: Record<
   { label: string; dotClass: string; textClass: string }
 > = {
   pending: { label: "待开始", dotClass: "bg-l4", textClass: "text-l3" },
-  active: { label: "进行中", dotClass: "bg-okb", textClass: "text-l3" },
-  review: { label: "待评审", dotClass: "bg-okb", textClass: "text-l2" },
+  active: { label: "进行中", dotClass: "bg-ok-text", textClass: "text-l3" },
+  review: { label: "待评审", dotClass: "bg-ok-text", textClass: "text-l2" },
   blocked: { label: "阻塞", dotClass: "bg-err-text", textClass: "text-l2" },
-  done: { label: "已完成", dotClass: "bg-okb", textClass: "text-ok-text" },
+  done: { label: "已完成", dotClass: "bg-ok-text", textClass: "text-ok-text" },
   checking: { label: "检查中", dotClass: "bg-l4", textClass: "text-l3" },
 };
 
 function stepSegmentClass(key: StepStatusKey): string {
-  if (key === "done") return "bg-okb";
+  if (key === "done") return "bg-ok-text";
   if (key === "blocked") return "bg-err-text";
   if (key === "review") return "bg-cta";
   if (key === "active") return "bg-cta opacity-50";
@@ -883,7 +883,7 @@ export default function ProjectGroup({
           <span className="flex shrink-0 items-center gap-2 text-xs text-l3">
             {groupCounts.active > 0 && (
               <span className="flex items-center gap-1">
-                <span className="h-1.5 w-1.5 rounded-full bg-okb" />
+                <span className="h-1.5 w-1.5 rounded-full bg-ok-text" />
                 {groupCounts.active} 进行中
               </span>
             )}
@@ -994,7 +994,7 @@ export default function ProjectGroup({
       {tplSavedMsg && (
         <div className="mb-2 flex items-center gap-2 rounded bg-strip p-2 text-xs text-l2">
           <span className="min-w-0 flex-1">
-            <span className="mr-1 text-okb">✓</span>
+            <span className="mr-1 text-ok-text">✓</span>
             {tplSavedMsg}
           </span>
           <button
@@ -1012,7 +1012,7 @@ export default function ProjectGroup({
           <span>新项目：若目录还不是 git 仓库，初始化后才能创建工作区。</span>
           {gitMsg && (
             <span>
-              <span className="mr-1 text-okb">✓</span>
+              <span className="mr-1 text-ok-text">✓</span>
               {gitMsg}
             </span>
           )}
@@ -1036,7 +1036,7 @@ export default function ProjectGroup({
 
       {/* 首启引导（轻量版）：注册项目且 steps 为空 → 从模板库选择写入流水线 */}
       {registered && cfg && cfg.steps.length === 0 && (
-        <div className="mb-2 rounded border border-hairline bg-strip p-3">
+        <div className="mb-2 rounded-md bg-strip p-3">
           <p className="mb-2 text-xs text-l3">
             该项目还没有流水线步骤。从模板库选择（英文综述 / 科研论文 / 数据处理 /
             毕业论文，以及已另存的自定义模板）写入 .ccode/project.toml，之后可逐步编辑。
@@ -1069,7 +1069,7 @@ export default function ProjectGroup({
 
       {/* 流水线 strip：状态从绑定工作区派生，纯展示 */}
       {registered && cfg && cfg.steps.length > 0 && (
-        <div className="mb-3 rounded border border-hairline bg-strip p-3">
+        <div className="mb-3 rounded-md bg-strip px-3 py-2.5">
           {/* 校验提示：⚠ 徽标点击展开逐条全文浮层（WKWebView 不显示 title 悬浮）；
               进度由下方等分进度段直接表达，不再放文字计数 */}
           {cfgWarnings.length > 0 && (
@@ -1292,7 +1292,7 @@ export default function ProjectGroup({
               const rootLabel =
                 st.key === "done" ? "主文件夹（已合并）" : "工作区";
               return (
-                <div className="mt-2 rounded border border-hairline bg-canvas p-2">
+                <div className="mt-2 rounded-md bg-strip p-2">
                   <div className="mb-1 flex items-center gap-2">
                     <span className="text-xs text-l2">
                       「{step.name}」产物
@@ -1369,7 +1369,7 @@ export default function ProjectGroup({
 
       {/* 模板库选择器：项目菜单与空流水线「选择流水线模板」共用的唯一实例 */}
       {registered && cfg && pickerOpen && (
-        <div className="mb-2 rounded border border-hairline bg-strip p-2">
+        <div className="mb-2 rounded-md bg-strip p-2">
           <TemplatePicker
             applying={applyingTemplate}
             onApply={(item) => void applyTemplate(item)}
@@ -1403,7 +1403,7 @@ export default function ProjectGroup({
             )}
           </div>
           {resOpen && (
-            <div className="mt-1 rounded border border-hairline bg-strip p-2">
+            <div className="mt-1 rounded-md bg-strip p-2">
               {cfg.resources.length === 0 && !discoverState && (
                 <p className="text-xs text-l4">
                   还没有登记资源。点「发现资源」扫描项目目录（PDF / CSV /
@@ -1483,7 +1483,7 @@ export default function ProjectGroup({
                           <li key={d.path}>
                             {d.exists ? (
                               <span className="flex min-w-0 items-center gap-1.5 text-xs text-l4">
-                                <span className="shrink-0 text-okb">✓</span>
+                                <span className="shrink-0 text-ok-text">✓</span>
                                 <span className="min-w-0 truncate font-mono" title={d.path}>
                                   {d.path}
                                 </span>

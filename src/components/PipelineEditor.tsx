@@ -146,7 +146,7 @@ export default function PipelineEditor({
     return (
       <div
         key={i}
-        className="rounded border border-hairline bg-strip p-3"
+        className="rounded-md bg-strip p-3"
       >
         <div className="mb-2 flex items-center gap-2">
           <span className="shrink-0 text-xs text-l4">#{i + 1}</span>
@@ -389,7 +389,7 @@ export default function PipelineEditor({
             </div>
           )}
           {drafts.length === 0 && (
-            <p className="rounded border border-hairline bg-strip p-3 text-xs text-l3">
+            <p className="rounded-md bg-strip p-3 text-xs text-l3">
               还没有流水线步骤。点击下方「+ 添加步骤」逐张卡片填写（名称、简报、
               预期产物与资源绑定），保存后写入 .ccode/project.toml。
             </p>
@@ -397,7 +397,7 @@ export default function PipelineEditor({
           {drafts.map(renderCard)}
           <button
             type="button"
-            className="w-full rounded border border-hairline bg-strip p-3 text-sm text-l3 hover:bg-white/5 hover:text-l1"
+            className="w-full rounded-md bg-strip p-3 text-sm text-l3 hover:bg-inset hover:text-l1"
             onClick={() =>
               setDrafts((list) => [
                 ...list,

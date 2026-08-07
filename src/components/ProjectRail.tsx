@@ -215,7 +215,7 @@ function ProjectRail({
     pathWithin(cwd, root) && !children.some((w) => pathWithin(cwd, w.worktreePath));
 
   return (
-    <div className="shrink-0 border-b border-hairline">
+    <div className="shrink-0">
       <button
         onClick={() => setCollapsed((v) => !v)}
         className="flex w-full items-center gap-1 px-2 py-2 text-left text-[10px] text-l4 hover:text-l2"

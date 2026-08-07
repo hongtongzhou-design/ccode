@@ -4,7 +4,14 @@ import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAppStore } from "../store";
 import type { AppSettings } from "../store";
-import { PageFrame, PageHeader, Toggle } from "../components/PageFrame";
+import {
+  fieldClass,
+  hoverRevealClass,
+  PageFrame,
+  PageHeader,
+  rowActionClass,
+  Toggle,
+} from "../components/PageFrame";
 
 /** 七套深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
 import { XTERM_PALETTES, PALETTE_PREVIEW_KEYS } from "../terminal-palettes";
@@ -51,16 +58,9 @@ function readThemeSwatch(id: string): ThemeSwatch {
   return swatch;
 }
 
-const field =
-  "rounded border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none focus:border-l4";
-
-// hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
-const hoverReveal =
-  "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
-
-// 分区内常驻次级操作：28px 深色描边（同 SessionsPage secBtn 一档；诊断区低频按钮仍走 hover 才现）
-const secBtn =
-  "inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-2.5 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1 disabled:opacity-50";
+// fieldClass 自带 w-full：本页 Row 右列是收缩到内容的 auto 列，定宽控件（w-20/w-24/w-40）
+// 追加的宽度类在 Tailwind 排序中会被 w-full 覆盖，故用去掉 w-full 的本页变体保持原宽度
+const fieldFixed = fieldClass.replace("w-full ", "");
 
 /** 「外部终端」下拉的选项按平台给（navigator.platform 在 WKWebView/Chromium 均可用） */
 const EXTERNAL_TERMINALS: { id: string; label: string }[] = (() => {
@@ -120,18 +120,18 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="mt-3 overflow-hidden rounded-md border border-hairline bg-strip first:mt-0">
+    <section className="mt-7 first:mt-0">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className={`flex h-10 w-full items-center gap-1.5 px-3 text-left text-sm font-medium text-l1 hover:bg-white/5 ${open ? "border-b border-hairline" : ""}`}
+        className={`flex h-8 w-full items-center gap-1.5 text-left text-sm font-medium text-l1 ${open ? "border-b border-hairline" : ""}`}
       >
         <span className="w-3 text-xs text-l4">{open ? "▾" : "▸"}</span>
         {title}
         {badge}
       </button>
-      {open && <div className="px-3">{children}</div>}
+      {open && <div>{children}</div>}
     </section>
   );
 }
@@ -467,7 +467,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             type="number"
             min={11}
             max={18}
-            className={`${field} w-20`}
+            className={`${fieldFixed} w-20`}
             value={fontSize}
             onChange={(e) => {
               draftDirty.current.add("fontSize");
@@ -531,7 +531,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         >
           <div className="flex items-center gap-2">
             <select
-              className={field}
+              className={fieldFixed}
               value={fontFamily}
               onChange={(e) => {
                 setFontFamily(e.target.value);
@@ -555,7 +555,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             </select>
             {fontFamily === "__custom__" && (
               <input
-                className={`${field} w-40`}
+                className={`${fieldFixed} w-40`}
                 placeholder="字体名，如 Fira Code"
                 value={customFont}
                 onChange={(e) => {
@@ -628,7 +628,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             min={1000}
             max={20000}
             step={1000}
-            className={`${field} w-24`}
+            className={`${fieldFixed} w-24`}
             value={scrollback}
             onChange={(e) => {
               draftDirty.current.add("scrollback");
@@ -672,7 +672,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             type="number"
             step={0.01}
             min={0}
-            className={`${field} w-24`}
+            className={`${fieldFixed} w-24`}
             value={rate}
             onChange={(e) => {
               draftDirty.current.add("rate");
@@ -700,13 +700,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             <button
               onClick={savePricing}
               disabled={!pricingDirty || savingPricing}
-              className={`ml-auto ${secBtn}`}
+              className={`ml-auto ${rowActionClass}`}
             >
               {savingPricing ? "保存中…" : "保存"}
             </button>
           </div>
           <textarea
-            className={`${field} h-40 w-full font-mono text-xs`}
+            className={`${fieldClass} h-40 font-mono text-xs`}
             placeholder='{"model-id": {"input": 2.5, "output": 10}}'
             value={pricing}
             onChange={(e) => {
@@ -735,7 +735,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           hint="◈ 生成（提交信息/摘要/PR）固定走此配置，建议选快模型；默认自动=最近使用"
         >
           <select
-            className={field}
+            className={fieldFixed}
             value={settings?.aiProfileId ?? ""}
             onChange={(e) => patch({ aiProfileId: e.target.value })}
           >
@@ -754,7 +754,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           hint="对话页「⇗ 外部恢复」使用的终端应用，立即生效"
         >
           <select
-            className={field}
+            className={fieldFixed}
             value={settings?.externalTerminal ?? "auto"}
             onChange={(e) => patch({ externalTerminal: e.target.value })}
           >
@@ -824,7 +824,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               </span>
               <button
                 onClick={() => checkAppUpdate()}
-                className={`ml-auto ${secBtn}`}
+                className={`ml-auto ${rowActionClass}`}
               >
                 重新检查
               </button>
@@ -846,14 +846,14 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             {/* 诊断是低频区：行内按钮 hover 才现，Tab 聚焦同样显示 */}
             <button
               onClick={loadLogs}
-              className={`ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 ${hoverReveal}`}
+              className={`ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 ${hoverRevealClass}`}
             >
               刷新
             </button>
             <button
               onClick={copyLogs}
               disabled={logs.length === 0}
-              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverReveal}`}
+              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverRevealClass}`}
             >
               复制全部
             </button>
@@ -870,14 +870,14 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               }}
               disabled={logs.length === 0}
               title="导出为 txt 到 ~/Downloads/ccode-exports/，反馈问题时发给开发者"
-              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverReveal}`}
+              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverRevealClass}`}
             >
               导出
             </button>
             <button
               onClick={clearLogs}
               disabled={logs.length === 0}
-              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverReveal}`}
+              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverRevealClass}`}
             >
               清空
             </button>

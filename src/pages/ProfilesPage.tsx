@@ -13,7 +13,12 @@ import {
   PageFrame,
   PageHeader,
   PageToolbar,
+  SegTabs,
+  fieldClass,
+  hoverRevealClass,
   primaryActionClass,
+  rowActionClass,
+  searchFieldClass,
   secondaryActionClass,
 } from "../components/PageFrame";
 import type {
@@ -153,9 +158,6 @@ function ProfileModal({
     }
   }
 
-  const field =
-    "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
-
   return (
     <div
       className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
@@ -171,7 +173,7 @@ function ProfileModal({
         </h2>
         <div className="mb-4 grid grid-cols-2 items-end gap-3">
           <select
-            className={field}
+            className={fieldClass}
             value=""
             onChange={(e) => {
               const preset = PRESETS.find(
@@ -200,7 +202,7 @@ function ProfileModal({
           <label className="block text-sm">
             <span className="mb-1 block text-xs text-l3">Agent</span>
             <select
-              className={field}
+              className={fieldClass}
               value={form.agent}
               onChange={(e) => {
                 setForm({
@@ -229,7 +231,7 @@ function ProfileModal({
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">名称</span>
           <input
-            className={field}
+            className={fieldClass}
             required
             placeholder="官方 / 中转 A"
             value={form.name}
@@ -240,7 +242,7 @@ function ProfileModal({
           <label className="mb-3 block text-sm">
             <span className="mb-1 block text-xs text-l3">账号类型</span>
             <select
-              className={field}
+              className={fieldClass}
               value={form.accountType}
               onChange={(e) =>
                 setForm({
@@ -266,7 +268,7 @@ function ProfileModal({
           <span className="mb-1 block text-xs text-l3">Base URL（可选）</span>
           <div className="flex gap-2">
             <input
-              className={field}
+              className={fieldClass}
               placeholder="https://api.example.com"
               value={form.baseUrl}
               onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
@@ -294,7 +296,7 @@ function ProfileModal({
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">API Key</span>
           <input
-            className={field}
+            className={fieldClass}
             type="password"
             autoComplete="new-password"
             placeholder={
@@ -344,7 +346,7 @@ function ProfileModal({
             </button>
             {fetchedModels && fetchedModels.length > 0 && (
               <select
-                className={field}
+                className={fieldClass}
                 value=""
                 onChange={(e) => {
                   const m = e.target.value;
@@ -400,7 +402,7 @@ function ProfileModal({
           )}
           <div className="flex gap-2">
             <input
-              className={field}
+              className={fieldClass}
               placeholder="输入模型名后回车添加，如 claude-sonnet-4"
               value={modelInput}
               onChange={(e) => setModelInput(e.target.value)}
@@ -430,7 +432,7 @@ function ProfileModal({
               <label className="mb-3 block text-sm">
                 <span className="mb-1 block text-xs text-l3">协议</span>
                 <select
-                  className={field}
+                  className={fieldClass}
                   value={form.protocol ?? AGENT_PROTOCOLS[form.agent].default}
                   onChange={(e) =>
                     setForm({ ...form, protocol: e.target.value })
@@ -449,7 +451,7 @@ function ProfileModal({
                 附加环境变量（每行 KEY=VALUE，可覆盖内置值）
               </span>
               <textarea
-                className={`${field} h-20 font-mono text-xs`}
+                className={`${fieldClass} h-20 font-mono text-xs`}
                 placeholder={
                   "HTTPS_PROXY=http://127.0.0.1:7890\nANTHROPIC_SMALL_FAST_MODEL=claude-haiku"
                 }
@@ -986,10 +988,6 @@ export default function ProfilesPage() {
   const labelOf = (agentId: string) =>
     AGENTS.find((a) => a.id === agentId)?.label ?? agentId;
 
-  // hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
-  const hoverReveal =
-    "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
-
   /** 每个 agent 是否有可恢复的完整全局配置批次（控制「恢复备份」按钮显隐） */
   async function refreshGlobalBackups() {
     const entries = await Promise.all(
@@ -1137,7 +1135,7 @@ export default function ProfilesPage() {
   const anyExpanded = visibleAgents.some((a) => !collapsedGroups.has(a.id));
 
   return (
-    <div className="min-h-full bg-pg">
+    <div className="min-h-full bg-canvas">
       <PageFrame>
         {/* 命令栏：标题 + 元信息，右侧动作 */}
         <PageHeader
@@ -1160,7 +1158,7 @@ export default function ProfilesPage() {
                 }}
                 title="更多配置操作"
                 aria-label="更多配置操作"
-                className="flex h-8 w-8 items-center justify-center rounded text-sm text-pl2 hover:bg-white/5 hover:text-pl1"
+                className="flex h-8 w-8 items-center justify-center rounded text-sm text-l2 hover:bg-white/5 hover:text-l1"
               >
                 ⋯
               </button>
@@ -1171,26 +1169,17 @@ export default function ProfilesPage() {
         {/* 过滤条：状态筛选胶囊（选中=实心 seg-sel）+ 右侧搜索框 */}
         <PageToolbar>
           <div className="flex items-center gap-1">
-            {(
-              [
-                ["all", "全部"],
-                ["installed", "已安装"],
-                ["uninstalled", "未安装"],
-              ] as const
-            ).map(([k, label]) => (
-              <button
-                key={k}
-                aria-pressed={statusFilter === k}
-                onClick={() => setStatusFilter(k)}
-                className={`flex h-7 items-center rounded-full px-3 text-xs ${
-                  statusFilter === k
-                    ? "bg-seg-sel text-pl1"
-                    : "text-pl2 hover:text-pl1"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+            <SegTabs
+              items={(
+                [
+                  ["all", "全部"],
+                  ["installed", "已安装"],
+                  ["uninstalled", "未安装"],
+                ] as const
+              ).map(([id, label]) => ({ id, label }))}
+              value={statusFilter}
+              onChange={setStatusFilter}
+            />
             <button
               onClick={() =>
                 updateCollapsed((prev) => {
@@ -1203,7 +1192,7 @@ export default function ProfilesPage() {
                   return next;
                 })
               }
-              className="ml-2 flex h-7 items-center rounded px-2 text-xs text-pl2 hover:bg-white/5 hover:text-pl1"
+              className="ml-2 flex h-7 items-center rounded px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1"
             >
               {anyExpanded ? "全部折叠" : "全部展开"}
             </button>
@@ -1213,7 +1202,7 @@ export default function ProfilesPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索名称 / 端点 / 模型"
-            className="h-8 w-56 rounded-md border border-hairline bg-inset px-2.5 text-xs text-pl2 outline-none placeholder:text-l4 focus:border-field"
+            className={`${searchFieldClass} w-56`}
           />
         </PageToolbar>
 
@@ -1244,11 +1233,11 @@ export default function ProfilesPage() {
                       });
                     }}
                     aria-label={isCollapsed ? "展开" : "收起"}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-sm text-pl2 hover:bg-white/5 hover:text-pl1"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-sm text-l2 hover:bg-white/5 hover:text-l1"
                   >
                     {isCollapsed ? "▸" : "▾"}
                   </button>
-                  <h2 className="text-sm font-medium text-pl1">
+                  <h2 className="text-sm font-medium text-l1">
                     {agent.label}
                   </h2>
                   {/* 已安装显示包名+版本号（mono）；右侧状态：更新中… / 新版（可点更新）/ 更新（查不到最新版时的回退）；已是最新则不显示 */}
@@ -1257,7 +1246,7 @@ export default function ProfilesPage() {
                       {agent.binary} {det.version ?? ""}
                     </span>
                   ) : (
-                    <span className="text-xs text-pl2">
+                    <span className="text-xs text-l2">
                       未安装（<span className="font-mono">{agent.binary}</span>{" "}
                       不在 PATH）
                     </span>
@@ -1266,7 +1255,7 @@ export default function ProfilesPage() {
                     (() => {
                       if (updating[agent.id])
                         return (
-                          <span className="ml-auto text-xs text-pl2">
+                          <span className="ml-auto text-xs text-l2">
                             更新中…
                           </span>
                         );
@@ -1287,7 +1276,7 @@ export default function ProfilesPage() {
                                 onClick={() =>
                                   void navigator.clipboard.writeText(cmd)
                                 }
-                                className={`flex size-6 items-center justify-center rounded text-l4 hover:bg-white/5 hover:text-l1 ${hoverReveal}`}
+                                className={`flex size-6 items-center justify-center rounded text-l4 hover:bg-white/5 hover:text-l1 ${hoverRevealClass}`}
                               >
                                 ⧉
                               </button>
@@ -1317,7 +1306,7 @@ export default function ProfilesPage() {
                               ? `交互式更新（${tuiPrefill}），将在终端中打开，需方向键选择`
                               : undefined
                           }
-                          className="ml-auto flex h-8 items-center rounded px-2 text-xs text-pl2 hover:bg-white/5 hover:text-pl1"
+                          className="ml-auto flex h-8 items-center rounded px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1"
                         >
                           更新
                         </button>
@@ -1341,13 +1330,13 @@ export default function ProfilesPage() {
                       (() => {
                         const st = officialStatus[agent.id];
                         return (
-                          <div className="flex items-center gap-2 border-b border-hl2 px-3 py-1.5 text-xs">
+                          <div className="flex items-center gap-2 border-b border-hairline px-3 py-1.5 text-xs">
                             <span
-                              className={`h-1.5 w-1.5 shrink-0 rounded-full ${st.connected ? "bg-okb" : "bg-l4"}`}
+                              className={`h-1.5 w-1.5 shrink-0 rounded-full ${st.connected ? "bg-ok-text" : "bg-l4"}`}
                             />
-                            <span className="shrink-0 text-pl2">官方账号</span>
+                            <span className="shrink-0 text-l2">官方账号</span>
                             <span
-                              className={`shrink-0 ${st.connected ? "text-okb" : "text-l4"}`}
+                              className={`shrink-0 ${st.connected ? "text-ok-text" : "text-l4"}`}
                             >
                               {st.connected ? "已连接" : "未连接"}
                             </span>
@@ -1367,10 +1356,10 @@ export default function ProfilesPage() {
                             {/* 配置文件冲突警告（P1a）：CLI 自读文件里的残留密钥会覆盖官方账号登录，悬停列出各项 */}
                             {st.conflicts.length > 0 && (
                               <span
-                                className="flex shrink-0 items-center gap-1 text-warnb"
+                                className="flex shrink-0 items-center gap-1 text-warn-text"
                                 title={`${st.conflicts.join("\n")}\n该文件中的密钥会覆盖官方账号登录，产生 API 计费`}
                               >
-                                <span className="h-1.5 w-1.5 rounded-full bg-warnb" />
+                                <span className="h-1.5 w-1.5 rounded-full bg-warn-text" />
                                 {st.conflicts.length} 项配置冲突
                               </span>
                             )}
@@ -1379,7 +1368,7 @@ export default function ProfilesPage() {
                                 <button
                                   onClick={() => connectOfficial(agent.id)}
                                   title={`在终端执行 ${st.loginCommand ?? ""}`}
-                                  className="h-7 rounded border border-field bg-strip px-2 text-xs text-pl2 hover:bg-inset hover:text-pl1"
+                                  className={rowActionClass}
                                 >
                                   连接
                                 </button>
@@ -1387,7 +1376,7 @@ export default function ProfilesPage() {
                               <button
                                 onClick={() => void refreshOfficial(agent.id)}
                                 title="重新检测连接状态"
-                                className="h-7 rounded px-2 text-xs text-pl2 hover:bg-white/5 hover:text-pl1"
+                                className="h-7 rounded px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1"
                               >
                                 刷新
                               </button>
@@ -1403,7 +1392,7 @@ export default function ProfilesPage() {
                           ref={(el) => {
                             if (el) el.scrollTop = el.scrollHeight;
                           }}
-                          className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-t border border-hl2 border-b-0 bg-pg p-2 font-mono text-xs text-pl2"
+                          className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-t border border-hairline border-b-0 bg-canvas p-2 font-mono text-xs text-l2"
                         >
                           {liveOutput[agent.id] || "运行中，等待输出…"}
                         </pre>
@@ -1421,7 +1410,7 @@ export default function ProfilesPage() {
                             </div>
                           );
                         })()}
-                        <div className="flex items-center gap-1.5 rounded-b border border-hl2 bg-pg px-2 py-1.5">
+                        <div className="flex items-center gap-1.5 rounded-b border border-hairline bg-canvas px-2 py-1.5">
                           <span className="font-mono text-xs text-l4">
                             &gt;
                           </span>
@@ -1438,7 +1427,7 @@ export default function ProfilesPage() {
                                 void sendUpdaterInput(agent.id);
                             }}
                             placeholder="需要交互时在此输入（如 y），Enter 发送"
-                            className="flex-1 bg-transparent font-mono text-xs text-pl2 outline-none placeholder:text-l4"
+                            className="flex-1 bg-transparent font-mono text-xs text-l2 outline-none placeholder:text-l4"
                           />
                         </div>
                       </div>
@@ -1448,7 +1437,7 @@ export default function ProfilesPage() {
                         <span
                           className={
                             updateResults[agent.id].ok
-                              ? "text-okb"
+                              ? "text-ok-text"
                               : "text-err-text"
                           }
                         >
@@ -1493,13 +1482,13 @@ export default function ProfilesPage() {
                           onClick={() =>
                             setModal({ initial: null, presetAgent: agent.id })
                           }
-                          className="text-xs text-pl2 hover:text-pl1"
+                          className="text-xs text-l2 hover:text-l1"
                         >
                           + 添加配置
                         </button>
                       </div>
                     ) : (
-                      <ul className="divide-y divide-hl2 overflow-x-auto">
+                      <ul className="divide-y divide-hairline overflow-x-auto">
                         {list.map((profile) => (
                           <li
                             key={profile.id}
@@ -1507,7 +1496,7 @@ export default function ProfilesPage() {
                           >
                             <span className="min-w-0">
                               <span
-                                className="block truncate font-medium text-pl1"
+                                className="block truncate font-medium text-l1"
                                 title={profile.name}
                               >
                                 {profile.name}
@@ -1523,7 +1512,7 @@ export default function ProfilesPage() {
                               )}
                             </span>
                             <span
-                              className={`min-w-0 truncate text-xs ${profile.baseUrl || profile.accountType === "official" ? "text-pl2" : "text-l4"}`}
+                              className={`min-w-0 truncate text-xs ${profile.baseUrl || profile.accountType === "official" ? "text-l2" : "text-l4"}`}
                               title={
                                 profile.accountType === "official"
                                   ? "官方账号登录（CLI 自身认证，不注入端点/密钥）"
@@ -1540,7 +1529,7 @@ export default function ProfilesPage() {
                             </span>
                             <span
                               className={`min-w-0 truncate font-mono text-xs ${
-                                profile.models[0] ? "text-pl2" : "text-l4"
+                                profile.models[0] ? "text-l2" : "text-l4"
                               }`}
                               title={
                                 profile.models.length > 1
@@ -1561,7 +1550,7 @@ export default function ProfilesPage() {
                             ) : (
                             <span
                               className={`flex items-center gap-1 text-xs ${
-                                profile.hasKey ? "text-okb" : "text-pl2"
+                                profile.hasKey ? "text-ok-text" : "text-l2"
                               }`}
                               title={
                                 profile.hasKey
@@ -1571,7 +1560,7 @@ export default function ProfilesPage() {
                             >
                               <span
                                 className={`h-1.5 w-1.5 rounded-full ${
-                                  profile.hasKey ? "bg-okb" : "bg-l4"
+                                  profile.hasKey ? "bg-ok-text" : "bg-l4"
                                 }`}
                               />
                               {profile.hasKey ? "已设置" : "未设置"}
@@ -1581,7 +1570,7 @@ export default function ProfilesPage() {
                               <button
                                 type="button"
                                 onClick={() => setModal({ initial: profile })}
-                                className="h-8 rounded px-2 text-xs text-pl2 hover:bg-white/5 hover:text-pl1"
+                                className="h-8 rounded px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1"
                               >
                                 编辑
                               </button>
@@ -1597,7 +1586,7 @@ export default function ProfilesPage() {
                                   });
                                 }}
                                 aria-label={`更多操作：${profile.name}`}
-                                className={`flex h-8 w-8 items-center justify-center rounded text-sm text-l4 hover:bg-white/5 hover:text-pl1 ${hoverReveal}`}
+                                className={`flex h-8 w-8 items-center justify-center rounded text-sm text-l4 hover:bg-white/5 hover:text-l1 ${hoverRevealClass}`}
                               >
                                 ⋯
                               </button>
@@ -1628,18 +1617,18 @@ export default function ProfilesPage() {
               const u = usageMap[usagePop.id]!;
               return (
                 <>
-                  <div className="mb-1 font-medium text-pl1">
+                  <div className="mb-1 font-medium text-l1">
                     用量 / 费用（官方价）
                   </div>
-                  <div className="flex justify-between py-0.5 text-pl2">
+                  <div className="flex justify-between py-0.5 text-l2">
                     <span>输入</span>
                     <span>{fmtTokens(u.input)}</span>
                   </div>
-                  <div className="flex justify-between py-0.5 text-pl2">
+                  <div className="flex justify-between py-0.5 text-l2">
                     <span>输出</span>
                     <span>{fmtTokens(u.output)}</span>
                   </div>
-                  <div className="flex justify-between py-0.5 text-pl2">
+                  <div className="flex justify-between py-0.5 text-l2">
                     <span>费用</span>
                     <span>
                       {u.costUsd != null

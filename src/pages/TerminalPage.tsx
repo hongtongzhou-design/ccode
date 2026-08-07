@@ -4,6 +4,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -46,7 +47,7 @@ import {
   serializeRecoverableTerminalState,
   TERMINAL_TABS_STORAGE_KEY,
 } from "../terminal-tab-persistence";
-import { buildRunOverview } from "../run-overview";
+import { buildRunOverview, type RunOverviewInput } from "../run-overview";
 import type {
   ChatMessageDto,
   ConversationPageDto,
@@ -153,7 +154,7 @@ async function fireAttentionNotification(title: string, body: string) {
   sendNotification({ title, body });
 }
 
-/** 四款深色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板；调色板其余部分共享） */
+/** 七套深色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板；调色板其余部分共享） */
 const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
   {
     midnight: { background: "#11131a", foreground: "#aeb6c6" },
@@ -1361,7 +1362,7 @@ const TerminalView = memo(function TerminalView({
       )}
       {/* 输出搜索条：Cmd/Ctrl+F 或「查找」按钮呼出；只作用于本标签的 xterm */}
       {searchOpen && (
-        <div className="mb-1 flex items-center gap-1 rounded border border-hairline bg-strip px-2 py-1">
+        <div className="mb-1 flex items-center gap-1 rounded-md bg-strip px-2 py-1">
           <input
             ref={searchInputRef}
             value={searchQuery}
@@ -2075,6 +2076,16 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setWorkspaceReviewRequest(null);
   }, [visible, workspaceReviewRequest, setWorkspaceReviewRequest]);
 
+  // 首页「待你处理」交来的标签激活请求：跳到终端页并激活该标签（已关闭的标签静默忽略）
+  const focusTabReq = useAppStore((s) => s.focusTabReq);
+  const setFocusTabReq = useAppStore((s) => s.setFocusTabReq);
+  useEffect(() => {
+    if (!visible || !focusTabReq) return;
+    if (tabs.some((t) => t.id === focusTabReq)) activateTab(focusTabReq);
+    setFocusTabReq(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, focusTabReq, tabs, setFocusTabReq]);
+
   // 资源面板「查看」交来的预览请求：绝对路径（未必在任何文件树根内），
   // root 留空——PDF 走后端白名单校验，不需要预览根
   const previewReq = useAppStore((s) => s.previewReq);
@@ -2434,22 +2445,29 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   // 运行中总览（P5 聚合视图）：汇总全部终端标签，按「要你管」优先级排序。
   // 状态全部来自现有 statuses 上报，不新增轮询；无状态的标签（从未展示过）按「已退出」处理。
-  const runOverview = buildRunOverview(
-    tabs.map((t) => {
-      const s = statuses[t.id];
-      return {
-        tabId: t.id,
-        title: s?.title ?? "终端",
-        agentId: s?.agentId ?? "",
-        model: s?.model ?? "",
-        cwd: s?.cwd ?? "",
-        running: s?.running ?? false,
-        shell: s?.shell ?? false,
-        attention: s?.attention ?? null,
-      };
-    }),
-    seenDoneRef.current,
+  // inputs 镜像进 store（terminalRunInputs），供工作区首页「待你处理」跨页只读。
+  const setTerminalRunInputs = useAppStore((s) => s.setTerminalRunInputs);
+  const runInputs: RunOverviewInput[] = useMemo(
+    () =>
+      tabs.map((t) => {
+        const s = statuses[t.id];
+        return {
+          tabId: t.id,
+          title: s?.title ?? "终端",
+          agentId: s?.agentId ?? "",
+          model: s?.model ?? "",
+          cwd: s?.cwd ?? "",
+          running: s?.running ?? false,
+          shell: s?.shell ?? false,
+          attention: s?.attention ?? null,
+        };
+      }),
+    [tabs, statuses],
   );
+  useEffect(() => {
+    setTerminalRunInputs(runInputs);
+  }, [runInputs, setTerminalRunInputs]);
+  const runOverview = buildRunOverview(runInputs, seenDoneRef.current);
   const runSummaryText = [
     runOverview.summary.confirm > 0
       ? `${runOverview.summary.confirm} 个待确认`
@@ -2559,7 +2577,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           </div>
         ) : (
           <div className="flex w-60 shrink-0 flex-col border-r border-hairline bg-rail2">
-            <div className="flex h-9 shrink-0 items-center gap-2 border-b border-hairline px-2">
+            <div className="flex h-9 shrink-0 items-center gap-2 px-2">
               <span className="mr-auto text-xs font-medium text-l3">
                 工作树
               </span>
@@ -2588,8 +2606,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               </button>
             </div>
             {/* 打开的标签（P5 运行中聚合视图）：全部终端标签按「要你管」排序的一览，点击激活；
-                一行式折叠区标题（默认收起），样式与「最近项目」「项目」区标题统一 */}
-            <div className="shrink-0 border-b border-hairline">
+                一行式折叠区标题（默认收起），样式与「最近项目」「项目」区标题统一；区间靠留白分层不加线 */}
+            <div className="shrink-0">
               <button
                 onClick={() => setRailRunOpen((v) => !v)}
                 className="flex w-full items-center gap-1 px-2 py-2 text-left text-[10px] text-l4 hover:text-l2"

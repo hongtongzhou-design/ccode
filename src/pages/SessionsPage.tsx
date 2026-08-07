@@ -6,7 +6,15 @@ import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
 import HandoffPicker from "../components/HandoffPicker";
-import { Checkbox, EmptyState, LoadingRows } from "../components/PageFrame";
+import {
+  Checkbox,
+  EmptyState,
+  ghostActionClass,
+  hoverRevealClass,
+  LoadingRows,
+  rowActionClass,
+  searchFieldClass,
+} from "../components/PageFrame";
 import type {
   ChatMessageDto,
   ConversationPageDto,
@@ -16,14 +24,6 @@ import type {
 
 /** GitPanel 的 onTotals 占位（会话页不消费改动总量；稳定引用避免击穿 memo） */
 const NOOP_TOTALS = () => {};
-const compactActionClass =
-  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1";
-// 列表栏头部深色次按钮（28px，与对话列表/回放头部控件同一档）
-const secBtn =
-  "inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-2.5 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1 disabled:opacity-50";
-// hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达（与工作区行同一手法）
-const hoverReveal =
-  "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
 
 type Filter =
   | { kind: "all" }
@@ -71,11 +71,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [showArchived, setShowArchived] = useState(false);
-  // 分类筛选折叠收进列表栏（默认收起），展开为左右主从栏：左栏 全部/内部/各 agent
-  // 一眼看全，右栏列出聚焦 agent 的项目（计数/右键删除逻辑不变，无嵌套折叠，两击到位）。
+  // 分类筛选折叠收进列表栏（默认收起），展开为单列纵向手风琴：点 agent 只展开/收起其项目
+  // 子列表（不动列表筛选、不关回放），「全部项目」/单项目行才落筛选，选中后自动收起。
   const [treeOpen, setTreeOpen] = useState(false);
-  // 右栏当前聚焦的 agent：点选左栏时记录；失效（该 agent 已无会话）/未点选时回落
-  const [treeAgent, setTreeAgent] = useState<string | null>(null);
+  // 当前展开项目子列表的 agent：点选记录；失效（该 agent 已无会话）/未点选时回落当前筛选所属
+  const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
   // 批量删除：选择模式 + 勾选集合（键为 agent+sessionId 复合键，防跨 agent 撞 id）
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -239,14 +239,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       );
   }, [regularVisible]);
 
-  // 右栏聚焦 agent：显式点选优先（该 agent 已无会话即失效回落），其次当前筛选所属，默认列表第一家
-  const focusedAgent = useMemo(() => {
-    if (treeAgent && tree.some((g) => g.agent === treeAgent)) return treeAgent;
-    if (filter.kind === "agent" || filter.kind === "project")
-      return filter.agent;
-    return tree[0]?.agent ?? null;
-  }, [treeAgent, tree, filter]);
-  const focusedGroup = tree.find((g) => g.agent === focusedAgent) ?? null;
+  // 展开哪个 agent 的项目子列表：显式点开优先（该 agent 已无会话即失效回落），其次当前筛选所属
+  const expandedGroup = useMemo(() => {
+    const id =
+      expandedAgent && tree.some((g) => g.agent === expandedAgent)
+        ? expandedAgent
+        : filter.kind === "agent" || filter.kind === "project"
+          ? filter.agent
+          : null;
+    return tree.find((g) => g.agent === id) ?? null;
+  }, [expandedAgent, tree, filter]);
 
   const sessionList = useMemo(() => {
     let src = filter.kind === "internal" ? internalVisible : regularVisible;
@@ -753,14 +755,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     <div className="flex h-full bg-canvas">
       {/* 会话列表栏（P1a：375px 固定宽，rail2 底）：标题/计数 + 次按钮 + 搜索 + 折叠分类树 + 会话行 */}
       <div className="flex w-[375px] shrink-0 flex-col border-r border-hairline bg-rail2">
-        <div className="shrink-0 border-b border-hairline px-3 pb-2.5 pt-3">
+        <div className="shrink-0 px-3 pb-2.5 pt-3">
           {selecting ? (
             <div className="flex min-h-7 flex-wrap items-center justify-between gap-2">
               <span className="text-xs text-l3">已选 {checkedInView} 项</span>
               <div className="flex items-center gap-1">
                 <button
                   onClick={toggleSelectAll}
-                  className={compactActionClass}
+                  className={ghostActionClass}
                 >
                   {allChecked ? "取消全选" : "全选（当前筛选结果）"}
                 </button>
@@ -788,7 +790,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 </button>
                 <button
                   onClick={exitSelectMode}
-                  className={compactActionClass}
+                  className={ghostActionClass}
                 >
                   取消
                 </button>
@@ -810,23 +812,23 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   type="button"
                   aria-pressed={showArchived}
                   onClick={() => setShowArchived(!showArchived)}
-                  className={`${secBtn} ${showArchived ? "border-seg-sel bg-seg-sel text-l1" : ""}`}
+                  className={`${rowActionClass} ${showArchived ? "border-seg-sel bg-seg-sel text-l1" : ""}`}
                 >
                   显示已归档
                 </button>
                 <button
                   type="button"
                   onClick={() => setSelecting(true)}
-                  className={secBtn}
+                  className={rowActionClass}
                 >
                   批量管理
                 </button>
               </div>
             </div>
           )}
-          {/* 搜索框：inset 底 + hairline 细边 */}
+          {/* 搜索框：inset 底色分层（无描边），共享 searchFieldClass */}
           <input
-            className="mt-2 h-8 w-full rounded-md border border-hairline bg-inset px-2.5 text-xs text-l2 outline-none placeholder:text-l4 focus:border-field"
+            className={`mt-2 w-full ${searchFieldClass}`}
             placeholder="搜索项目 / 对话 / 步骤 / 标签"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -856,7 +858,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             </div>
           )}
         </div>
-        {/* 分类筛选：默认收起，展开为左右主从栏（左 agent ｜ 右该 agent 的项目），无嵌套折叠 */}
+        {/* 分类筛选：默认收起，展开为单列纵向手风琴（点 agent 展开项目子列表，项目行落筛选） */}
         <div className="shrink-0 border-b border-hairline">
           <button
             type="button"
@@ -873,164 +875,167 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             </span>
           </button>
           {treeOpen && (
-            // 左栏一眼看全 全部/内部/各 agent 及计数；点 agent 即筛选并在右栏列出其项目，
-            // 再点项目精确筛选——两击到位，两栏各自滚动互不挤压
-            <div className="flex items-stretch border-t border-hairline">
-              {/* 左栏：全部对话 / Ccode 内部 AI / 各 agent */}
-              <div className="max-h-60 w-[140px] shrink-0 overflow-auto py-1">
+            // 单列纵向手风琴：点 agent 只展开/收起其项目子列表（不动筛选、不关回放），
+            // 「全部项目」/单项目行才落筛选，选中自动收起；层级靠左侧缩进线，不加竖向分栏线
+            <div className="max-h-72 overflow-auto py-1">
+              <button
+                onClick={() => {
+                  selectFilter({ kind: "all" });
+                  setTreeOpen(false);
+                }}
+                className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 text-left text-xs ${
+                  filterActive({ kind: "all" })
+                    ? "bg-rail-sel text-l1"
+                    : "text-l3 hover:bg-white/5"
+                }`}
+              >
+                <span className="truncate">全部对话</span>
+                <span
+                  className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}
+                >
+                  {regularVisible.length}
+                </span>
+              </button>
+              {internalVisible.length > 0 && (
                 <button
-                  onClick={() => selectFilter({ kind: "all" })}
-                  className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 py-1.5 text-left text-sm ${
-                    filterActive({ kind: "all" })
+                  onClick={() => {
+                    selectFilter({ kind: "internal" });
+                    setTreeOpen(false);
+                  }}
+                  title="Ccode 自己调用 AI 生成提交信息、摘要等产生的内部对话"
+                  className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 text-left text-xs ${
+                    filterActive({ kind: "internal" })
                       ? "bg-rail-sel text-l1"
                       : "text-l3 hover:bg-white/5"
                   }`}
                 >
-                  <span className="truncate">全部对话</span>
+                  <span className="truncate">Ccode 内部 AI</span>
                   <span
-                    className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}
+                    className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "internal" }) ? "text-l2" : "text-l4"}`}
                   >
-                    {regularVisible.length}
+                    {internalVisible.length}
                   </span>
                 </button>
-                {internalVisible.length > 0 && (
-                  <button
-                    onClick={() => selectFilter({ kind: "internal" })}
-                    title="Ccode 自己调用 AI 生成提交信息、摘要等产生的内部对话"
-                    className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 py-1.5 text-left text-sm ${
-                      filterActive({ kind: "internal" })
-                        ? "bg-rail-sel text-l1"
-                        : "text-l3 hover:bg-white/5"
-                    }`}
-                  >
-                    <span className="truncate">Ccode 内部 AI</span>
-                    <span
-                      className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "internal" }) ? "text-l2" : "text-l4"}`}
-                    >
-                      {internalVisible.length}
-                    </span>
-                  </button>
-                )}
-                {tree.length > 0 && (
-                  <div className="mx-2 my-1 border-t border-hairline" />
-                )}
-                {tree.map((g) => {
-                  const active = filterActive({
-                    kind: "agent",
-                    agent: g.agent,
-                  });
-                  // 聚焦（右栏正在展示其项目）但未选中的 agent 用亮字提示，选中才用 rail-sel 填充
-                  const focused = focusedAgent === g.agent;
-                  return (
+              )}
+              {tree.length > 0 && (
+                <div className="mx-2 my-1 border-t border-hairline" />
+              )}
+              {tree.map((g) => {
+                // 该 agent 是当前筛选（agent 或其下项目）才用选中填充
+                const active =
+                  (filter.kind === "agent" || filter.kind === "project") &&
+                  filter.agent === g.agent;
+                const open = expandedGroup?.agent === g.agent;
+                return (
+                  <div key={g.agent}>
                     <button
-                      key={g.agent}
-                      onClick={() => {
-                        setTreeAgent(g.agent);
-                        selectFilter({ kind: "agent", agent: g.agent });
-                      }}
-                      className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 py-1.5 text-left text-sm ${
+                      onClick={() => setExpandedAgent(open ? null : g.agent)}
+                      aria-expanded={open}
+                      className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center gap-1.5 rounded-md px-2 text-left text-xs ${
                         active
                           ? "bg-rail-sel text-l1"
-                          : focused
-                            ? "text-l1 hover:bg-white/5"
-                            : "text-l3 hover:bg-white/5"
+                          : "text-l3 hover:bg-white/5"
                       }`}
                     >
-                      <span className="truncate">{agentLabel(g.agent)}</span>
+                      <span className="w-3 shrink-0 text-[10px] text-l4">
+                        {open ? "▾" : "▸"}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">
+                        {agentLabel(g.agent)}
+                      </span>
                       <span
                         className={`shrink-0 text-xs opacity-70 ${active ? "text-l2" : "text-l4"}`}
                       >
                         {g.list.length}
                       </span>
                     </button>
-                  );
-                })}
-              </div>
-              {/* 右栏：聚焦 agent 的项目列表（右键批量删除语义不变） */}
-              <div className="max-h-60 min-w-0 flex-1 overflow-auto border-l border-hairline py-1">
-                {focusedGroup ? (
-                  <>
-                    <div className="truncate px-3 pb-0.5 pt-1 text-[10px] text-l4">
-                      {agentLabel(focusedGroup.agent)} · 项目
-                    </div>
-                    <button
-                      onClick={() =>
-                        selectFilter({ kind: "agent", agent: focusedGroup.agent })
-                      }
-                      className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm ${
-                        filterActive({ kind: "agent", agent: focusedGroup.agent })
-                          ? "bg-rail-sel text-l1"
-                          : "text-l3 hover:bg-white/5"
-                      }`}
-                    >
-                      <span className="truncate">全部项目</span>
-                      <span
-                        className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "agent", agent: focusedGroup.agent }) ? "text-l2" : "text-l4"}`}
-                      >
-                        {focusedGroup.list.length}
-                      </span>
-                    </button>
-                    {focusedGroup.projects.map((p) => {
-                      const active = filterActive({
-                        kind: "project",
-                        agent: focusedGroup.agent,
-                        path: p.path,
-                      });
-                      return (
+                    {open && (
+                      <div className="mx-1 mb-0.5 ml-4 border-l border-white/5 pl-1.5">
                         <button
-                          key={p.path}
-                          onClick={() =>
-                            selectFilter({
-                              kind: "project",
-                              agent: focusedGroup.agent,
-                              path: p.path,
-                            })
-                          }
-                          onContextMenu={(e) => {
-                            e.preventDefault();
-                            // count 与列表所见口径一致（排除 internal、跟随归档开关）；
-                            // 后端按 agent+path 全删，口径外数量单独透出给确认文案
-                            const all = sessions.filter(
-                              (session) =>
-                                session.agent === focusedGroup.agent &&
-                                session.projectPath === p.path,
-                            );
-                            const visible = all.filter(
-                              (session) =>
-                                !session.internal &&
-                                (showArchived || !session.archived),
-                            );
-                            setMenu({
-                              x: e.clientX,
-                              y: e.clientY,
-                              kind: "project",
-                              agent: focusedGroup.agent,
-                              path: p.path,
-                              count: visible.length,
-                              extra: all.length - visible.length,
-                            });
+                          onClick={() => {
+                            selectFilter({ kind: "agent", agent: g.agent });
+                            setTreeOpen(false);
                           }}
-                          title={p.path}
-                          className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm ${
-                            active
+                          className={`flex h-7 w-full items-center justify-between gap-2 rounded-md px-2 text-left text-xs ${
+                            filterActive({ kind: "agent", agent: g.agent })
                               ? "bg-rail-sel text-l1"
                               : "text-l3 hover:bg-white/5"
                           }`}
                         >
-                          <span className="truncate">{basename(p.path)}</span>
+                          <span className="truncate">全部项目</span>
                           <span
-                            className={`shrink-0 text-xs opacity-70 ${active ? "text-l2" : "text-l4"}`}
+                            className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "agent", agent: g.agent }) ? "text-l2" : "text-l4"}`}
                           >
-                            {p.list.length}
+                            {g.list.length}
                           </span>
                         </button>
-                      );
-                    })}
-                  </>
-                ) : (
-                  <p className="p-3 text-sm text-l4">暂无对话</p>
-                )}
-              </div>
+                        {g.projects.map((p) => {
+                          const pActive = filterActive({
+                            kind: "project",
+                            agent: g.agent,
+                            path: p.path,
+                          });
+                          return (
+                            <button
+                              key={p.path}
+                              onClick={() => {
+                                selectFilter({
+                                  kind: "project",
+                                  agent: g.agent,
+                                  path: p.path,
+                                });
+                                setTreeOpen(false);
+                              }}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                // count 与列表所见口径一致（排除 internal、跟随归档开关）；
+                                // 后端按 agent+path 全删，口径外数量单独透出给确认文案
+                                const all = sessions.filter(
+                                  (session) =>
+                                    session.agent === g.agent &&
+                                    session.projectPath === p.path,
+                                );
+                                const visible = all.filter(
+                                  (session) =>
+                                    !session.internal &&
+                                    (showArchived || !session.archived),
+                                );
+                                setMenu({
+                                  x: e.clientX,
+                                  y: e.clientY,
+                                  kind: "project",
+                                  agent: g.agent,
+                                  path: p.path,
+                                  count: visible.length,
+                                  extra: all.length - visible.length,
+                                });
+                              }}
+                              title={p.path}
+                              className={`flex h-7 w-full items-center justify-between gap-2 rounded-md px-2 text-left text-xs ${
+                                pActive
+                                  ? "bg-rail-sel text-l1"
+                                  : "text-l3 hover:bg-white/5"
+                              }`}
+                            >
+                              <span className="truncate">
+                                {basename(p.path)}
+                              </span>
+                              <span
+                                className={`shrink-0 text-xs opacity-70 ${pActive ? "text-l2" : "text-l4"}`}
+                              >
+                                {p.list.length}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {tree.length === 0 && (
+                <p className="p-3 text-xs text-l4">暂无对话</p>
+              )}
             </div>
           )}
         </div>
@@ -1185,7 +1190,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     )}
                     {!selecting && (
                       <div
-                        className={`ml-1 flex shrink-0 items-center gap-1 ${hoverReveal}`}
+                        className={`ml-1 flex shrink-0 items-center gap-1 ${hoverRevealClass}`}
                       >
                         {clickable && (
                           <button
@@ -1194,7 +1199,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                               event.stopPropagation();
                               resumeInTerminal(s);
                             }}
-                            className={`${compactActionClass} text-l2`}
+                            className={`${ghostActionClass} text-l2`}
                           >
                             恢复
                           </button>
@@ -1462,7 +1467,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                               type="button"
                               disabled={loadingOlder}
                               onClick={() => void loadOlderMessages()}
-                              className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l3 hover:bg-inset hover:text-l1 disabled:opacity-50"
+                              className={rowActionClass}
                             >
                               {loadingOlder ? "加载中…" : "加载更早对话"}
                             </button>
