@@ -167,6 +167,19 @@ export interface WorkspaceDto {
   setupResult: SetupResultDto | null;
 }
 
+/** 端口运行时监控（portwatch.rs）：一条 LISTEN 端口及其归属 */
+export interface PortInfoDto {
+  port: number;
+  protocol: string;
+  pid: number;
+  process: string;
+  /** 进程工作目录（Windows 端恒为 null） */
+  cwd: string | null;
+  ownerKind: "workspace" | "project" | "range" | "other";
+  /** 白话归属文案（工作区 · xxx / 项目 · xxx / 端口段 … / 系统/其他），直接展示 */
+  ownerLabel: string;
+}
+
 export interface RepoDto {
   path: string;
   name: string;

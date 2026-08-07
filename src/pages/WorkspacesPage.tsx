@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../store";
+import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
 import ProjectGroup from "../components/ProjectGroup";
 import {
@@ -12,6 +13,7 @@ import {
   secondaryActionClass,
 } from "../components/PageFrame";
 import type {
+  PortInfoDto,
   ProjectConfigReadDto,
   ProjectDto,
   RepoDto,
@@ -21,20 +23,6 @@ import type {
   WorkspaceHealthDto,
   WsSettingsDto,
 } from "../types";
-
-function relTime(iso: string | null): string {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const min = Math.floor((Date.now() - t) / 60000);
-  if (min < 1) return "刚刚";
-  if (min < 60) return `${min} 分钟前`;
-  const h = Math.floor(min / 60);
-  if (h < 24) return `${h} 小时前`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d} 天前`;
-  return new Date(t).toLocaleDateString("zh-CN");
-}
 
 /** 保留工作区的合并已完成，且分支尚未产生新的待合并提交。 */
 function isMerged(
@@ -462,6 +450,8 @@ function WorkspaceDetailsPopover({
   workspace,
   health,
   state,
+  diagFailed,
+  onRetry,
   onClose,
 }: {
   x: number;
@@ -469,6 +459,9 @@ function WorkspaceDetailsPopover({
   workspace: WorkspaceDto;
   health: WorkspaceHealthDto | undefined;
   state: WorkspaceState;
+  /** 漂移诊断/健康检查失败：行内不再放重试按钮，收进本详情层 */
+  diagFailed: boolean;
+  onRetry: () => void;
   onClose: () => void;
 }) {
   // 每行可带白话悬浮 title：↑↓ 等技术记号 hover 时给「保存点」解释（双层呈现，不删技术信息）
@@ -548,8 +541,160 @@ function WorkspaceDetailsPopover({
             ))}
           </ul>
         )}
+        {diagFailed && (
+          <div className="mt-2 border-t border-hairline pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onRetry();
+              }}
+              className="inline-flex h-7 items-center rounded-md px-2 text-xs text-warn-text hover:bg-white/5"
+            >
+              诊断失败 · 重新检查
+            </button>
+          </div>
+        )}
       </section>
     </div>
+  );
+}
+
+/** 端口运行时监控：默认折叠，首次展开才拉取，手动刷新，不轮询。
+ *  归属点色：工作区/项目=绿（已认归属），段归属=琥珀（占了端口段但进程不在树内），其他=灰 */
+function PortsSection() {
+  const [open, setOpen] = useState(false);
+  const [ports, setPorts] = useState<PortInfoDto[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [killing, setKilling] = useState<number | null>(null);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      setPorts(await invoke<PortInfoDto[]>("list_listening_ports"));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function toggle() {
+    if (!open && ports === null) void load();
+    setOpen(!open);
+  }
+
+  async function onKill(port: PortInfoDto) {
+    if (
+      !window.confirm(
+        `将终止 ${port.process}（PID ${port.pid}，端口 ${port.port}）。继续？`,
+      )
+    )
+      return;
+    setKilling(port.pid);
+    setError(null);
+    try {
+      await invoke("kill_port_process", { pid: port.pid });
+      await load();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setKilling(null);
+    }
+  }
+
+  const dotClass: Record<PortInfoDto["ownerKind"], string> = {
+    workspace: "bg-okb",
+    project: "bg-okb",
+    range: "bg-warnb",
+    other: "bg-l4",
+  };
+
+  return (
+    <section className="mt-6 overflow-hidden rounded-md border border-hairline bg-strip">
+      <div
+        className={`flex h-10 items-center ${open ? "border-b border-hairline" : ""}`}
+      >
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={open}
+          className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-sm font-medium text-l1 hover:bg-white/5"
+        >
+          <span className="w-3 text-xs text-l4">{open ? "▾" : "▸"}</span>
+          端口
+          {ports !== null && (
+            <span className="text-xs font-normal text-l4">
+              {ports.length} 个监听中
+            </span>
+          )}
+        </button>
+        {open && (
+          <button
+            type="button"
+            onClick={() => void load()}
+            disabled={loading}
+            className="mr-2 inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+          >
+            {loading ? "刷新中…" : "刷新"}
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="px-3 pb-3">
+          <p className="pt-2 text-xs text-l4">
+            「终止」发送退出信号（SIGTERM）；进程未退出时可稍候刷新再试。
+          </p>
+          {error && <p className="mt-2 text-sm text-err-text">{error}</p>}
+          {ports !== null && ports.length === 0 && !loading && (
+            <p className="py-3 text-xs text-l4">当前没有监听中的端口。</p>
+          )}
+          {ports !== null && ports.length > 0 && (
+            <ul className="mt-1 divide-y divide-hairline">
+              {ports.map((port) => (
+                <li
+                  key={`${port.pid}-${port.port}`}
+                  className="flex items-center gap-3 py-2"
+                >
+                  <span className="w-14 shrink-0 font-mono text-[13px] text-l1">
+                    {port.port}
+                  </span>
+                  <span
+                    className="w-32 shrink-0 truncate text-xs text-l2"
+                    title={`PID ${port.pid}`}
+                  >
+                    {port.process || `PID ${port.pid}`}
+                  </span>
+                  <span className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-inset px-2 text-xs text-l2">
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${dotClass[port.ownerKind]}`}
+                    />
+                    {port.ownerLabel}
+                  </span>
+                  <span
+                    className="min-w-0 flex-1 truncate font-mono text-xs text-l4"
+                    title={port.cwd ?? ""}
+                  >
+                    {port.cwd ?? ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void onKill(port)}
+                    disabled={killing === port.pid}
+                    title={`终止进程（PID ${port.pid}）`}
+                    className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-err-text disabled:opacity-50"
+                  >
+                    {killing === port.pid ? "终止中…" : "终止"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -836,6 +981,14 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }, [groupKeySignature, selectedGroupKey]);
   const actionBtn =
     "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1";
+  // hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
+  const hoverReveal =
+    "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
+  // 行内唯一实心主动作：普通评审 cta 实心；冲突场景 warn 色实心
+  const reviewCta =
+    "inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110";
+  const reviewWarn =
+    "inline-flex h-7 items-center justify-center rounded-md border border-warn-text/40 bg-warn px-2 text-xs text-warn-text hover:brightness-110";
 
   function openReview(
     workspace: WorkspaceDto,
@@ -1153,6 +1306,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                 const canResolveConflict =
                   workspace.status === "active" &&
                   workspaceDrift?.canResolveMerge === true;
+                const merged = isMerged(workspace, workspaceHealth);
                 // drift 诊断失败时降级按健康处理，行内操作不整体消失
                 const canOpenWorkspace =
                   workspace.status === "active" &&
@@ -1160,7 +1314,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                     canResolveConflict ||
                     isDriftFailed);
                 return (
-                  <li key={workspace.id} className="py-3">
+                  <li key={workspace.id} className="group py-3">
                     <div className="flex min-w-0 items-center gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">
@@ -1179,27 +1333,25 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                               });
                             }}
                             className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-md bg-inset px-2 text-xs ${state.textClass} hover:bg-seg-sel`}
-                            title="查看状态详情"
+                            title={
+                              isDriftFailed || isHealthFailed
+                                ? "状态诊断失败，点开查看详情并重试"
+                                : "查看状态详情"
+                            }
                           >
                             <span
                               className={`h-1.5 w-1.5 rounded-full ${state.dotClass}`}
                             />
                             {state.label}
+                            {(isDriftFailed || isHealthFailed) && (
+                              <span className="text-warn-text">⚠</span>
+                            )}
                           </button>
-                          {(isDriftFailed || isHealthFailed) && (
-                            <button
-                              type="button"
-                              onClick={() => void refresh()}
-                              className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-warn-text hover:bg-white/5"
-                              title="状态诊断失败，点击重新检查"
-                            >
-                              诊断失败 · 重试
-                            </button>
-                          )}
                         </div>
+                        {/* 副行：10px 灰字，相对时间主显、悬浮给绝对时间（白话双层） */}
                         <p
-                          className="mt-0.5 truncate font-mono text-xs text-l4"
-                          title={workspace.worktreePath}
+                          className="mt-0.5 truncate font-mono text-[10px] text-l4"
+                          title={`${workspace.worktreePath}\n创建于 ${absTime(workspace.createdAt)}`}
                         >
                           {workspace.branch} · {relTime(workspace.createdAt)}
                         </p>
@@ -1210,35 +1362,37 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             <button
                               type="button"
                               onClick={() => void openInTerminal(workspace)}
-                              className={actionBtn}
+                              className={`${actionBtn} ${hoverReveal}`}
                             >
                               ⌨ 终端
                             </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                openReview(
-                                  workspace,
+                            {!merged && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  openReview(
+                                    workspace,
+                                    canResolveConflict || workspaceHealth?.conflict
+                                      ? "resolve-conflict"
+                                      : undefined,
+                                  )
+                                }
+                                title={
                                   canResolveConflict || workspaceHealth?.conflict
-                                    ? "resolve-conflict"
-                                    : undefined,
-                                )
-                              }
-                              title={
-                                canResolveConflict || workspaceHealth?.conflict
-                                  ? "两边改了同一个地方，需要你逐个文件选一边"
-                                  : "审阅任务改动并合并回主文件夹"
-                              }
-                              className={`${actionBtn} ${
-                                canResolveConflict || workspaceHealth?.conflict
-                                  ? "text-warn-text"
-                                  : ""
-                              }`}
-                            >
-                              {canResolveConflict || workspaceHealth?.conflict
-                                ? "解决冲突"
-                                : "评审"}
-                            </button>
+                                    ? "两边改了同一个地方，需要你逐个文件选一边"
+                                    : "审阅任务改动并合并回主文件夹"
+                                }
+                                className={
+                                  canResolveConflict || workspaceHealth?.conflict
+                                    ? reviewWarn
+                                    : reviewCta
+                                }
+                              >
+                                {canResolveConflict || workspaceHealth?.conflict
+                                  ? "解决冲突"
+                                  : "评审"}
+                              </button>
+                            )}
                           </>
                         )}
                         <button
@@ -1254,7 +1408,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                           }}
                           title="更多操作"
                           aria-label={`更多操作：${workspace.name}`}
-                          className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+                          className={`flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1 ${hoverReveal}`}
                         >
                           ⋯
                         </button>
@@ -1267,6 +1421,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             )}
           </ProjectGroup>
       ) : null}
+      <PortsSection />
       {addProjectPath && (
         <AddProjectModal
           path={addProjectPath}
@@ -1312,6 +1467,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             drift[detailsPopover.ws.id],
             !!healthFailed[detailsPopover.ws.id],
           )}
+          diagFailed={
+            !!driftFailed[detailsPopover.ws.id] ||
+            !!healthFailed[detailsPopover.ws.id]
+          }
+          onRetry={() => void refresh()}
           onClose={() => setDetailsPopover(null)}
         />
       )}

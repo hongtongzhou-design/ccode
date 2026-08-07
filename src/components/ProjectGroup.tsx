@@ -140,6 +140,16 @@ const STEP_STATUS_STYLE: Record<
   checking: { label: "检查中", dotClass: "bg-l4", textClass: "text-l3" },
 };
 
+function stepSegmentClass(key: StepStatusKey): string {
+  if (key === "done") return "bg-okb";
+  if (key === "blocked") return "bg-err-text";
+  if (key === "review") return "bg-cta";
+  if (key === "active") return "bg-cta opacity-50";
+  // 待开始/检查中用 l4 灰：bg-inset 与 strip 容器底色在五套主题里同值，
+  // 进度段会整条隐身；l4 同时是待开始状态点的既有颜色，语义一致
+  return "bg-l4";
+}
+
 function deriveStepStatus(
   step: ProjectStepDto,
   workspaces: WorkspaceDto[],
@@ -664,7 +674,21 @@ export default function ProjectGroup({
     const st = deriveStepStatus(step, workspaces, health, drift);
     const activeWs =
       st.ws && st.ws.status === "active" ? st.ws : undefined;
+    const canViewArtifacts = st.key === "done" || !!activeWs;
     return [
+      {
+        label: artifactPanel === index ? "隐藏产物" : "查看产物",
+        disabled: !canViewArtifacts,
+        title: canViewArtifacts
+          ? "查看该步骤已经产出的文件"
+          : st.ws
+            ? "工作区已归档，暂无产物可查"
+            : "工作区尚未创建，暂无产物",
+        onSelect: () => {
+          setArtifactRows(null);
+          setArtifactPanel(artifactPanel === index ? null : index);
+        },
+      },
       {
         label: "◫ 定位目录",
         disabled: !activeWs,
@@ -793,9 +817,29 @@ export default function ProjectGroup({
   }
 
   // ===== 渲染 =====
+  // 分组头状态聚合（CAO 风格小圆点计数）：只统计活跃工作区，全零不显示
+  const groupCounts = { active: 0, review: 0, blocked: 0 };
+  for (const ws of workspaces) {
+    if (ws.status !== "active") continue;
+    const h = health[ws.id];
+    const d = drift[ws.id];
+    if (d?.canResolveMerge === true || h?.conflict === true) {
+      groupCounts.blocked += 1;
+    } else if (h?.readyToMerge === true) {
+      groupCounts.review += 1;
+    } else {
+      groupCounts.active += 1;
+    }
+  }
+  const groupCountsTotal =
+    groupCounts.active + groupCounts.review + groupCounts.blocked;
+  // 课题主题从常驻小字收进项目名悬浮 title（白话双层）
+  const topicTitle =
+    registered && cfg?.topic?.trim() ? cfg.topic.trim() : undefined;
   return (
-    <section className="mb-5 overflow-hidden rounded-md border border-hairline bg-canvas">
-      <div className="flex min-h-12 min-w-0 items-center gap-2 border-b border-hairline bg-strip px-4 py-2.5">
+    // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给流水线等必要块
+    <section className="mb-5">
+      <div className="flex min-h-12 min-w-0 items-center gap-2 border-b border-hairline px-4 py-2.5">
         {renamingProject ? (
           <form
             onSubmit={submitRenameProject}
@@ -820,17 +864,12 @@ export default function ProjectGroup({
             </button>
           </form>
         ) : (
-          <h2 className="shrink-0 text-sm font-medium text-l1">
+          <h2
+            className="shrink-0 text-sm font-medium text-l1"
+            title={topicTitle}
+          >
             {displayName}
           </h2>
-        )}
-        {registered && cfg?.topic?.trim() && (
-          <span
-            className="min-w-0 max-w-xs truncate text-xs text-l3"
-            title={cfg.topic ?? ""}
-          >
-            {cfg.topic}
-          </span>
         )}
         {!registered && (
           <span className="inline-flex shrink-0 items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l3">
@@ -838,8 +877,30 @@ export default function ProjectGroup({
             未注册
           </span>
         )}
+        {groupCountsTotal > 0 && (
+          <span className="flex shrink-0 items-center gap-2 text-xs text-l3">
+            {groupCounts.active > 0 && (
+              <span className="flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-okb" />
+                {groupCounts.active} 进行中
+              </span>
+            )}
+            {groupCounts.review > 0 && (
+              <span className="flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-cta" />
+                {groupCounts.review} 待评审
+              </span>
+            )}
+            {groupCounts.blocked > 0 && (
+              <span className="flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-err-text" />
+                {groupCounts.blocked} 阻塞
+              </span>
+            )}
+          </span>
+        )}
         <span
-          className="min-w-0 truncate font-mono text-xs text-l4"
+          className="min-w-0 truncate font-mono text-xs text-l4 opacity-70"
           title={projectPath}
         >
           {projectPath}
@@ -872,7 +933,8 @@ export default function ProjectGroup({
         </div>
       </div>
 
-      <div className="p-4">
+      {/* 分组主体：左侧 1px 缩进线 + 透明度分层，保持原 p-4 留白节奏 */}
+      <div className="border-l border-white/5 p-4">
       {editingTopic && cfg && (
         <form onSubmit={submitTopic} className="mb-2 flex items-center gap-1">
           <input
@@ -1006,33 +1068,14 @@ export default function ProjectGroup({
       {/* 流水线 strip：状态从绑定工作区派生，纯展示 */}
       {registered && cfg && cfg.steps.length > 0 && (
         <div className="mb-3 rounded border border-hairline bg-strip p-3">
-          {/* 进度概览：分段直线进度条（用户明确要求保留）+ 文字计数 + 校验提示徽标 */}
+          {/* 进度概览：文字计数与校验提示；每段进度线在下方与对应步骤同列 */}
           {(() => {
             const keys = cfg.steps.map(
               (s) => deriveStepStatus(s, workspaces, health, drift).key,
             );
             const doneCount = keys.filter((k) => k === "done").length;
-            const seg = (k: StepStatusKey) =>
-              k === "done"
-                ? "bg-okb"
-                : k === "blocked"
-                  ? "bg-err-text"
-                  : k === "review"
-                    ? "bg-cta"
-                    : k === "active"
-                      ? "bg-cta opacity-50"
-                      : "bg-inset";
             return (
-              <div className="mb-3 flex items-center gap-2 px-0.5">
-                <div className="flex h-1.5 flex-1 gap-0.5">
-                  {keys.map((k, i) => (
-                    <span
-                      key={i}
-                      className={`flex-1 rounded-full ${seg(k)}`}
-                      title={`${cfg.steps[i].name}：${STEP_STATUS_STYLE[k].label}`}
-                    />
-                  ))}
-                </div>
+              <div className="mb-2 flex items-center justify-end gap-2 px-0.5">
                 <span className="shrink-0 text-xs text-l3">
                   研究流程 {doneCount}/{cfg.steps.length}
                 </span>
@@ -1047,13 +1090,24 @@ export default function ProjectGroup({
               </div>
             );
           })()}
-          <ol className="flex flex-wrap items-center gap-x-1 gap-y-3">
+          {/* 等分列网格：列宽下限 9rem 让更多步骤在常规窗口内完整可见；
+              窗口过窄放不下全部步骤时保持整体横向滚动（不换行，进度线与胶囊同列对齐） */}
+          <ol
+            className="grid gap-2 overflow-x-auto pb-1"
+            style={{
+              gridTemplateColumns: `repeat(${cfg.steps.length}, minmax(9rem, 1fr))`,
+            }}
+          >
             {cfg.steps.map((step, i) => {
               const st = deriveStepStatus(step, workspaces, health, drift);
               const style = STEP_STATUS_STYLE[st.key];
+              const statusLabel =
+                st.key === "pending" && st.ws ? "已归档" : style.label;
               // 「产物」面板只对活跃工作区开放（已归档/未创建禁用并注明）
               const activeWs =
                 st.ws && st.ws.status === "active" ? st.ws : undefined;
+              // 与步骤 ⋯ 菜单「查看产物」同一开放条件（已完成读主文件夹）
+              const canViewArtifacts = st.key === "done" || !!activeWs;
               const last = activeWs
                 ? wsLastConfig(activeWs.worktreePath)
                 : {};
@@ -1062,7 +1116,7 @@ export default function ProjectGroup({
                 : undefined;
               // 原胶囊副行（目录尾段 · agent/profile）并入悬浮全文，一段式展示
               const capsuleTitle = [
-                `${step.name} · ${style.label}`,
+                `${step.name} · ${statusLabel}`,
                 activeWs
                   ? `目录：${activeWs.worktreePath}`
                   : st.ws
@@ -1075,141 +1129,138 @@ export default function ProjectGroup({
                 .filter(Boolean)
                 .join("\n");
               return (
-                <li key={`${i}-${step.name}`} className="flex items-center">
-                  {i > 0 && <span className="mx-1.5 text-xs text-l4">→</span>}
+                <li key={`${i}-${step.name}`} className="min-w-0">
                   <div
-                    className="flex items-center gap-1.5 rounded bg-inset px-2 py-1"
-                    title={capsuleTitle}
-                  >
-                    <span className="text-xs font-medium text-l1">
-                      {step.name}
-                    </span>
-                    <span
-                      className={`inline-flex items-center gap-1 text-xs ${style.textClass}`}
+                    className={`mb-2 h-1.5 rounded-full ${stepSegmentClass(st.key)}`}
+                    title={`${step.name}：${statusLabel}`}
+                  />
+                  <div className="flex min-w-0 items-center gap-1">
+                    <div
+                      className="group min-w-0 flex-1 rounded bg-inset px-2 py-1.5"
+                      title={capsuleTitle}
                     >
-                      <span
-                        className={`h-1.5 w-1.5 rounded-full ${style.dotClass}`}
-                      />
-                      {style.label}
-                    </span>
-                    {/* 主按钮按状态切换：开始 / 恢复 / 解决冲突 / 评审 / ⌨ 终端 */}
-                    {st.key === "pending" && !st.ws && (
-                      <button
-                        type="button"
-                        className={capsuleCta}
-                        disabled={starting === i || !step.workspaceName}
-                        title={
-                          step.workspaceName
-                            ? undefined
-                            : "该步骤未配置工作区名，请在「编辑流水线」中补充"
-                        }
-                        onClick={() => void startStep(i)}
-                      >
-                        {starting === i ? "创建中…" : "开始"}
-                      </button>
-                    )}
-                    {st.key === "pending" && st.ws && (
-                      <button
-                        type="button"
-                        className={capsuleBtn}
-                        title="绑定的工作区已归档，恢复后继续"
-                        onClick={() => void restoreWs(st.ws!)}
-                      >
-                        恢复
-                      </button>
-                    )}
-                    {st.key === "blocked" && st.ws && canOpenWs(st.ws) && (
-                      <button
-                        type="button"
-                        className={`${capsuleBtn} text-warn-text`}
-                        title="两边改了同一个地方，需要你逐个文件选一边"
-                        onClick={() =>
-                          onOpenReview(st.ws!, "resolve-conflict")
-                        }
-                      >
-                        解决冲突
-                      </button>
-                    )}
-                    {st.key === "review" && st.ws && canOpenWs(st.ws) && (
-                      <button
-                        type="button"
-                        className={capsuleBtn}
-                        title="审阅任务改动并合并回主文件夹"
-                        onClick={() => onOpenReview(st.ws!)}
-                      >
-                        评审
-                      </button>
-                    )}
-                    {(st.key === "active" ||
-                      st.key === "checking" ||
-                      st.key === "done") &&
-                      st.ws &&
-                      canOpenWs(st.ws) && (
+                      {/* 第一行：步骤名 + 状态 */}
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span className="min-w-0 flex-1 truncate text-xs font-medium text-l1">
+                          {step.name}
+                        </span>
+                        {!(st.key === "pending" && !st.ws) && (
+                          <span
+                            className={`inline-flex shrink-0 items-center gap-1 text-xs ${style.textClass}`}
+                          >
+                            <span
+                              className={`h-1.5 w-1.5 rounded-full ${style.dotClass}`}
+                            />
+                            {statusLabel}
+                          </span>
+                        )}
+                      </div>
+                      {/* 第二行：主按钮（按状态）+ 产物 + ⋯（用户明确要求操作常驻可见） */}
+                      <div className="mt-1 flex min-w-0 items-center gap-1">
+                        {st.key === "pending" && !st.ws && (
+                          <button
+                            type="button"
+                            className={`${capsuleCta} shrink-0`}
+                            disabled={starting === i || !step.workspaceName}
+                            title={
+                              step.workspaceName
+                                ? undefined
+                                : "该步骤未配置工作区名，请在「编辑流水线」中补充"
+                            }
+                            onClick={() => void startStep(i)}
+                          >
+                            {starting === i ? "创建中…" : "开始"}
+                          </button>
+                        )}
+                        {st.key === "pending" && st.ws && (
+                          <button
+                            type="button"
+                            className={`${capsuleBtn} shrink-0`}
+                            title="绑定的工作区已归档，恢复后继续"
+                            onClick={() => void restoreWs(st.ws!)}
+                          >
+                            恢复
+                          </button>
+                        )}
+                        {st.key === "blocked" && st.ws && canOpenWs(st.ws) && (
+                          <button
+                            type="button"
+                            className={`${capsuleBtn} shrink-0 text-warn-text`}
+                            title="两边改了同一个地方，需要你逐个文件选一边"
+                            onClick={() =>
+                              onOpenReview(st.ws!, "resolve-conflict")
+                            }
+                          >
+                            解决冲突
+                          </button>
+                        )}
+                        {st.key === "review" && st.ws && canOpenWs(st.ws) && (
+                          <button
+                            type="button"
+                            className={`${capsuleBtn} shrink-0`}
+                            title="已提交待合并，进入评审验收"
+                            onClick={() => onOpenReview(st.ws!, undefined)}
+                          >
+                            评审
+                          </button>
+                        )}
+                        {(st.key === "active" ||
+                          st.key === "checking" ||
+                          st.key === "done") &&
+                          st.ws &&
+                          canOpenWs(st.ws) && (
+                            <button
+                              type="button"
+                              className={`${capsuleBtn} shrink-0`}
+                              title="打开该步骤的终端"
+                              onClick={() => onOpenTerminal(st.ws!)}
+                            >
+                              ⌨ 终端
+                            </button>
+                          )}
                         <button
                           type="button"
-                          className={capsuleBtn}
-                          onClick={() => onOpenTerminal(st.ws!)}
+                          className={`${capsuleBtn} shrink-0`}
+                          disabled={!canViewArtifacts}
+                          title={
+                            canViewArtifacts
+                              ? "查看该步骤已经产出的文件"
+                              : st.ws
+                                ? "工作区已归档，暂无产物可查"
+                                : "工作区尚未创建，暂无产物"
+                          }
+                          onClick={() => {
+                            setArtifactRows(null);
+                            setArtifactPanel(artifactPanel === i ? null : i);
+                          }}
                         >
-                          ⌨ 终端
+                          产物
                         </button>
-                      )}
-                    <button
-                      type="button"
-                      className={capsuleBtn}
-                      disabled={!activeWs}
-                      title={
-                        activeWs
-                          ? "查看该步骤的预期产物清单"
-                          : st.ws
-                            ? "工作区已归档，暂无产物可查"
-                            : "工作区尚未创建，暂无产物"
-                      }
-                      onClick={() => {
-                        setArtifactRows(null);
-                        setArtifactPanel(artifactPanel === i ? null : i);
-                      }}
-                    >
-                      产物
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        setStepMenu({
-                          x: rect.right,
-                          y: rect.bottom + 4,
-                          index: i,
-                        });
-                      }}
-                      title="步骤操作"
-                      aria-label={`步骤操作：${step.name}`}
-                      className="flex h-7 w-7 items-center justify-center rounded text-xs text-l3 hover:bg-white/5 hover:text-l1"
-                    >
-                      ⋯
-                    </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setStepMenu({
+                              x: rect.right,
+                              y: rect.bottom + 4,
+                              index: i,
+                            });
+                          }}
+                          title="步骤操作"
+                          aria-label={`步骤操作：${step.name}`}
+                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                        >
+                          ⋯
+                        </button>
+                      </div>
+                    </div>
+                    {i < cfg.steps.length - 1 && (
+                      <span className="shrink-0 text-xs text-l4">→</span>
+                    )}
                   </div>
                 </li>
               );
             })}
-            <li className="flex items-center">
-              <span className="mx-1.5 text-xs text-l4">→</span>
-              <button
-                type="button"
-                className={actionBtn}
-                title="编辑步骤名称、简报、预期产物、run 脚本与资源绑定"
-                onClick={() => setEditorOpen(true)}
-              >
-                编辑流水线
-              </button>
-              <button
-                type="button"
-                className={actionBtn}
-                title="从模板库选择模板替换现有步骤（工作区与资源不受影响）"
-                onClick={() => setPickerOpen((v) => !v)}
-              >
-                {pickerOpen ? "收起模板库" : "重置为模板"}
-              </button>
-            </li>
           </ol>
           {/* 步骤产物面板（RX2b）：只在打开时拉取一次；已完成读项目根（main），其余读工作树 */}
           {artifactPanel !== null &&
@@ -1297,7 +1348,7 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {/* 模板库选择器：strip 尾部「重置为模板」与空流水线「选择流水线模板」共用的唯一实例 */}
+      {/* 模板库选择器：项目菜单与空流水线「选择流水线模板」共用的唯一实例 */}
       {registered && cfg && pickerOpen && (
         <div className="mb-2 rounded border border-hairline bg-strip p-2">
           <TemplatePicker
@@ -1506,6 +1557,22 @@ export default function ProjectGroup({
           alignRight
           onClose={() => setProjectMenu(null)}
           items={[
+            {
+              label: "编辑流水线",
+              disabled: !cfg,
+              title: cfg
+                ? "编辑步骤名称、简报、预期产物和脚本"
+                : "project.toml 尚未加载完成",
+              onSelect: () => setEditorOpen(true),
+            },
+            {
+              label: pickerOpen ? "收起模板库" : "从模板替换流水线",
+              disabled: !cfg,
+              title: cfg
+                ? "替换现有步骤，绑定的工作区与资源不受影响"
+                : "project.toml 尚未加载完成",
+              onSelect: () => setPickerOpen((v) => !v),
+            },
             {
               label: "重命名项目",
               onSelect: () => {

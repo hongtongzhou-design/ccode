@@ -142,7 +142,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     stats?.byAgent.reduce((s, a) => s + a.tokens, 0) ?? 1,
   );
   const rate = stats?.rateUsdCny ?? 7.2;
-  const th = "px-2 py-1.5 text-left text-xs font-normal text-l3";
+  const th = "px-2 py-1.5 text-left text-xs font-normal text-l4";
 
   const projectRows = useMemo(() => {
     if (!stats || showInternal) return stats?.byProject ?? [];
@@ -271,38 +271,44 @@ export default function StatsPage({ visible }: { visible: boolean }) {
         </p>
       ) : (
         <>
-          {/* 概览卡片 */}
-          <div className="mb-6 grid grid-cols-2 gap-2 sm:grid-cols-5">
-            <div className="rounded-md border border-hairline bg-strip p-3">
-              <div className="text-xs text-l4">输入 tokens</div>
-              <div className="mt-1 text-lg font-semibold text-l1">
+          {/* 概览：大数字 + 小号灰标签两档（CAO 手法），不堆卡片边框 */}
+          <div className="mb-8 grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-5">
+            <div>
+              <div className="text-[10px] tracking-wider text-l4">
+                输入 tokens
+              </div>
+              <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
                 {compact(stats.cards.input)}
               </div>
             </div>
-            <div className="rounded-md border border-hairline bg-strip p-3">
-              <div className="text-xs text-l4">输出 tokens</div>
-              <div className="mt-1 text-lg font-semibold text-l1">
+            <div>
+              <div className="text-[10px] tracking-wider text-l4">
+                输出 tokens
+              </div>
+              <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
                 {compact(stats.cards.output)}
               </div>
             </div>
-            <div className="rounded-md border border-hairline bg-strip p-3">
-              <div className="text-xs text-l4">缓存读 tokens</div>
-              <div className="mt-1 text-lg font-semibold text-l1">
+            <div>
+              <div className="text-[10px] tracking-wider text-l4">
+                缓存读 tokens
+              </div>
+              <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
                 {compact(stats.cards.cacheRead)}
               </div>
-              <div className="mt-0.5 text-xs text-l4">
+              <div className="mt-0.5 text-[10px] text-l4">
                 缓存写 {compact(stats.cards.cacheWrite)}
               </div>
             </div>
-            <div className="rounded-md border border-hairline bg-strip p-3">
-              <div className="text-xs text-l4">对话数</div>
-              <div className="mt-1 text-lg font-semibold text-l1">
+            <div>
+              <div className="text-[10px] tracking-wider text-l4">对话数</div>
+              <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
                 {compact(stats.cards.sessions)}
               </div>
             </div>
-            <div className="rounded-md border border-hairline bg-strip p-3">
-              <div className="text-xs text-l4">费用</div>
-              <div className="mt-1 text-lg font-semibold text-l1">
+            <div>
+              <div className="text-[10px] tracking-wider text-l4">费用</div>
+              <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
                 {fmtCost(
                   stats.cards.costUsd,
                   currency,
@@ -315,8 +321,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
           {/* 按 agent：用量占比进度条（占比 = 该 agent tokens / 全部合计） */}
           {stats.byAgent.length > 0 && (
-            <section className="mb-4 rounded-md border border-hairline bg-strip p-3">
-              <h2 className="mb-2 text-xs font-medium text-l2">按 Agent</h2>
+            <section className="mb-6">
+              <h2 className="mb-2 text-xs font-medium text-l3">按 Agent</h2>
               <ul className="divide-y divide-hairline">
                 {stats.byAgent.map((a) => {
                   const share = a.tokens / totalAgentTokens;
@@ -334,7 +340,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                           {agentLabel(a.agent)}
                         </span>
                         <span
-                          className="block text-xs text-l4"
+                          className="block text-[10px] text-l4"
                           title={`统计范围内使用了 ${a.modelCount} 个不同模型`}
                         >
                           {a.modelCount} 个模型
@@ -352,7 +358,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                       <span className="w-16 shrink-0 text-right font-mono text-xs text-l2">
                         {compact(a.tokens)}
                       </span>
-                      <span className="w-12 shrink-0 text-right font-mono text-xs text-l3">
+                      <span className="w-12 shrink-0 text-right font-mono text-xs text-l4">
                         {(share * 100).toFixed(1)}%
                       </span>
                       <span className="w-14 shrink-0 text-right text-xs text-l3">
@@ -371,8 +377,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
           {/* 按项目 */}
           {projectRows.length > 0 && (
-            <section className="mb-4 rounded-md border border-hairline bg-strip p-3">
-              <h2 className="mb-2 text-xs font-medium text-l2">
+            <section className="mb-6">
+              <h2 className="mb-2 text-xs font-medium text-l3">
                 按项目（前 20）
               </h2>
               <table className="w-full text-sm">
@@ -418,8 +424,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
           {/* 任务成本（按工作区归因，仅列出命中工作区的用量） */}
           {workspaceRows.length > 0 && (
-            <section className="mb-4 rounded-md border border-hairline bg-strip p-3">
-              <h2 className="mb-2 text-xs font-medium text-l2">任务成本</h2>
+            <section className="mb-6">
+              <h2 className="mb-2 text-xs font-medium text-l3">任务成本</h2>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-hairline">
@@ -464,8 +470,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
           {/* 按模型 */}
           {modelRows.length > 0 && (
-            <section className="mb-4 rounded-md border border-hairline bg-strip p-3">
-              <h2 className="mb-2 text-xs font-medium text-l2">按模型</h2>
+            <section className="mb-6">
+              <h2 className="mb-2 text-xs font-medium text-l3">按模型</h2>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-hairline">

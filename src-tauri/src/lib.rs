@@ -1,6 +1,7 @@
 mod agent_specs;
 mod agents;
 mod ai;
+mod claude_hooks;
 mod fonts;
 mod fs_tree;
 mod git_info;
@@ -9,6 +10,7 @@ mod handoff;
 mod logbuf;
 mod models;
 mod pdf;
+mod portwatch;
 mod pricing;
 mod profiles;
 mod profile_validation;
@@ -58,6 +60,7 @@ pub fn run() {
             pty::pty_kill,
             pty::pty_set_visible,
             pty::pty_get_cwd,
+            pty::pty_has_running_process,
             sessions::list_sessions,
             sessions::claim_session_for,
             sessions::release_session_claim,
@@ -129,6 +132,8 @@ pub fn run() {
             workspaces::path_context,
             workspaces::create_pr,
             workspaces::list_repos,
+            portwatch::list_listening_ports,
+            portwatch::kill_port_process,
             ws_settings::workspace_settings,
             ws_settings::upsert_project_run_scripts,
             projects::list_projects,
@@ -167,6 +172,7 @@ pub fn run() {
             usage::profile_usage,
             settings::get_settings,
             settings::update_settings,
+            claude_hooks::set_claude_hooks_attention,
             ai::ai_prompt,
             ai::ai_commit_message,
             ai::ai_summarize_session,

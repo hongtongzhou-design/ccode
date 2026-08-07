@@ -35,6 +35,10 @@ const GITHUB_PRESETS = [
 const field =
   "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
+// hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
+const hoverReveal =
+  "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
+
 /** 把用户粘贴的 GitHub 网址/简写统一解析为 { repo, branch, subdir }：
  *  支持 owner/repo、github.com/owner/repo、https://github.com/owner/repo.git、
  *  /tree/<branch>/<subdir> 形式 */
@@ -978,9 +982,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               }
             />
           ) : (
-            <div className="mt-4 overflow-hidden rounded-md border border-hairline bg-canvas">
+            <div className="mt-4">
+              {/* 收敛掉卡片外框：hairline 分隔；sticky 表头用页面底色遮挡滚动内容 */}
               <div>
-                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 border-b border-hairline bg-strip px-3 py-2 text-xs text-l4">
+                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 border-b border-hairline bg-canvas px-3 py-2 text-xs text-l4">
                   <span>技能</span>
                   <span>来源</span>
                   <span>应用</span>
@@ -1000,7 +1005,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         aria-label={
                           catCollapsed.has(category) ? "展开" : "收起"
                         }
-                        className="flex h-9 w-full items-center gap-1.5 border-b border-hairline bg-canvas px-2 text-xs font-medium text-l3 hover:bg-white/5 hover:text-l1"
+                        className="flex h-9 w-full items-center gap-1.5 border-b border-hairline px-2 text-xs text-l4 hover:bg-white/5 hover:text-l2"
                       >
                         <span className="inline-flex h-7 w-7 items-center justify-center rounded text-l4 hover:bg-white/5">
                           {catCollapsed.has(category) ? "▸" : "▾"}
@@ -1013,11 +1018,14 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                           {categorySkills.map((skill) => {
                             const stale = (skill.staleCopies ?? []).length > 0;
                             const update = updates[skill.id];
+                            const applied = Object.values(skill.apps).filter(
+                              Boolean,
+                            ).length;
                             return (
                               <li
                                 key={skill.id}
                                 onClick={() => void onView(skill)}
-                                className={`grid min-h-16 cursor-pointer grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 px-3 transition-colors hover:bg-white/5 ${
+                                className={`group grid min-h-16 cursor-pointer grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 px-3 transition-colors hover:bg-white/5 ${
                                   preview?.skill.id === skill.id
                                     ? "bg-inset"
                                     : ""
@@ -1028,16 +1036,20 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     <span className="min-w-0 truncate text-[15px] font-medium text-l1">
                                       {skill.name}
                                     </span>
-                                    {stale && (
+                                    {/* 状态聚合：副本过期/GitHub 可更新合并为一个警示点，明细在悬浮 */}
+                                    {(stale || update?.updateAvailable) && (
                                       <span
                                         className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb"
-                                        title={`副本过期：${(skill.staleCopies ?? []).join("、")}`}
-                                      />
-                                    )}
-                                    {update?.updateAvailable && (
-                                      <span
-                                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warnb"
-                                        title={update.message}
+                                        title={[
+                                          stale
+                                            ? `副本过期：${(skill.staleCopies ?? []).join("、")}`
+                                            : "",
+                                          update?.updateAvailable
+                                            ? update.message
+                                            : "",
+                                        ]
+                                          .filter(Boolean)
+                                          .join("\n")}
                                       />
                                     )}
                                   </div>
@@ -1091,15 +1103,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                   className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs text-l2 hover:bg-seg-sel hover:text-l1"
                                   title="在右侧管理该技能应用到哪些 Agent"
                                 >
-                                  <span
-                                    className={`size-1.5 shrink-0 rounded-full ${
-                                      Object.values(skill.apps).some(Boolean)
-                                        ? "bg-ok-text"
-                                        : "bg-l4"
-                                    }`}
-                                  />
-                                  {Object.values(skill.apps).filter(Boolean).length}/
-                                  {AGENTS.length} 个 Agent
+                                  {/* 无状态不渲染状态点：未应用时不画灰点，计数文字已表达 */}
+                                  {applied > 0 && (
+                                    <span className="size-1.5 shrink-0 rounded-full bg-ok-text" />
+                                  )}
+                                  {applied}/{AGENTS.length} 个 Agent
                                 </button>
                                 <div className="flex items-center justify-end">
                                   <button
@@ -1115,7 +1123,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                       });
                                     }}
                                     aria-label={`${skill.name} 更多操作`}
-                                    className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+                                    className={`flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1 ${hoverReveal}`}
                                   >
                                     ⋯
                                   </button>

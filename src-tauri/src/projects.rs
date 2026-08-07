@@ -231,6 +231,18 @@ pub(crate) fn project_roots_and_resources() -> (Vec<PathBuf>, Vec<PathBuf>) {
     (roots, resources)
 }
 
+/// portwatch 归属判定用：注册项目 (path, name) 清单；读取失败降级为空（标注缺失不阻断端口列表）
+pub(crate) fn registered_project_rows() -> Vec<(String, String)> {
+    let Ok(conn) = db() else {
+        return Vec::new();
+    };
+    list_projects_in(&conn)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p.path, p.name))
+        .collect()
+}
+
 /// 只删注册记录，磁盘上的项目目录一概不动
 fn remove_project_at(conn: &Connection, path: &Path) -> Result<(), String> {
     let key = canonical_key(path);

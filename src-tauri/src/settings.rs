@@ -37,6 +37,9 @@ pub struct AppSettingsDto {
     pub ai_profile_id: Option<String>,
     /// 会话页「⇗ 外部恢复」使用的终端应用（KNOWN_EXTERNAL_TERMINALS）；None/auto = 自动探测
     pub external_terminal: Option<String>,
+    /// 精确注意力标记（Claude Code hooks）：开启/关闭由 claude_hooks::set_claude_hooks_attention
+    /// 统一完成（写 ~/.claude/settings.json hooks 段 + 记本字段），勿单独 patch 本字段
+    pub claude_hooks_attention: Option<bool>,
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -86,6 +89,7 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
                 .filter(|v| KNOWN_EXTERNAL_TERMINALS.contains(&v.as_str()))
                 .unwrap_or_else(|| "auto".to_string()),
         ),
+        claude_hooks_attention: s.claude_hooks_attention.or(Some(false)),
     }
 }
 
@@ -121,6 +125,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.external_terminal.is_some() {
         cur.external_terminal = patch.external_terminal;
+    }
+    if patch.claude_hooks_attention.is_some() {
+        cur.claude_hooks_attention = patch.claude_hooks_attention;
     }
 }
 
@@ -258,6 +265,25 @@ mod tests {
             },
         );
         assert_eq!(cur.ai_profile_id, None);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn claude_hooks_attention_roundtrip() {
+        let p = tmp();
+        // 缺省 → false
+        assert_eq!(with_defaults(read_from(&p)).claude_hooks_attention, Some(false));
+        let mut cur = read_from(&p);
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                claude_hooks_attention: Some(true),
+                ..Default::default()
+            },
+        );
+        write_to(&p, &cur).unwrap();
+        let full = with_defaults(read_from(&p));
+        assert_eq!(full.claude_hooks_attention, Some(true), "写读往返");
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 }

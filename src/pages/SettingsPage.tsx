@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAppStore } from "../store";
+import type { AppSettings } from "../store";
 import { PageFrame, PageHeader, Toggle } from "../components/PageFrame";
 
 /** 七套深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
@@ -52,6 +53,10 @@ function readThemeSwatch(id: string): ThemeSwatch {
 
 const field =
   "rounded border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none focus:border-l4";
+
+// hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
+const hoverReveal =
+  "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
 
 /** 「外部终端」下拉的选项按平台给（navigator.platform 在 WKWebView/Chromium 均可用） */
 const EXTERNAL_TERMINALS: { id: string; label: string }[] = (() => {
@@ -259,6 +264,31 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       await updateSettings(p);
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  /** 精确注意力标记开关：走专用命令（写/移除 ~/.claude/settings.json hooks 段 + 记设置），
+      不走普通 patch——失败时设置不落库，避免开关显示与实际安装不一致 */
+  const [hooksBusy, setHooksBusy] = useState(false);
+  async function toggleClaudeHooks(enabled: boolean) {
+    if (hooksBusy) return;
+    setError(null);
+    setHooksBusy(true);
+    try {
+      const s = await invoke<AppSettings>("set_claude_hooks_attention", {
+        enabled,
+      });
+      useAppStore.setState({ settings: s });
+      setNotice(
+        enabled
+          ? "已开启：Claude Code hooks 已写入 ~/.claude/settings.json"
+          : "已关闭：Claude Code hooks 已移除",
+      );
+      setTimeout(() => setNotice(null), 3000);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setHooksBusy(false);
     }
   }
 
@@ -731,6 +761,17 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             ))}
           </select>
         </Row>
+
+        <Row
+          label="精确注意力标记（Claude Code）"
+          hint="开启后会向 ~/.claude/settings.json 写入 hooks 配置（写入前自动备份，仅合并 hooks 段、不动其他配置），注意力点由 Claude 事件实时驱动，比默认的会话尾部推断更准；关闭即移除 hooks 并回退推断模式"
+        >
+          <Toggle
+            label="精确注意力标记（Claude Code）"
+            checked={settings?.claudeHooksAttention ?? false}
+            onChange={(checked) => void toggleClaudeHooks(checked)}
+          />
+        </Row>
       </Section>
 
       <Section
@@ -794,20 +835,21 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         onToggle={() => toggleSection("diag")}
       >
         <div className="py-3">
-          <div className="mb-2 flex items-center gap-2">
+          <div className="group mb-2 flex items-center gap-2">
             <span className="text-xs text-l4">
               最近 100 条应用日志（进程内缓冲，重启即清空）
             </span>
+            {/* 诊断是低频区：行内按钮 hover 才现，Tab 聚焦同样显示 */}
             <button
               onClick={loadLogs}
-              className="ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+              className={`ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 ${hoverReveal}`}
             >
               刷新
             </button>
             <button
               onClick={copyLogs}
               disabled={logs.length === 0}
-              className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverReveal}`}
             >
               复制全部
             </button>
@@ -824,14 +866,14 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               }}
               disabled={logs.length === 0}
               title="导出为 txt 到 ~/Downloads/ccode-exports/，反馈问题时发给开发者"
-              className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverReveal}`}
             >
               导出
             </button>
             <button
               onClick={clearLogs}
               disabled={logs.length === 0}
-              className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverReveal}`}
             >
               清空
             </button>

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { sessionRuntimeKey, useAppStore } from "../store";
+import { absTime, relTime } from "../rel-time";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
@@ -17,6 +18,9 @@ import type {
 const NOOP_TOTALS = () => {};
 const compactActionClass =
   "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1";
+// hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达（与工作区行同一手法）
+const hoverReveal =
+  "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
 
 type Filter =
   | { kind: "all" }
@@ -24,20 +28,6 @@ type Filter =
   | { kind: "agent"; agent: string }
   // 项目挂在 agent 下，筛选必须同时限定 agent 和路径（同名目录可能跨 agent）
   | { kind: "project"; agent: string; path: string };
-
-function relTime(iso: string | null): string {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const min = Math.floor((Date.now() - t) / 60000);
-  if (min < 1) return "刚刚";
-  if (min < 60) return `${min} 分钟前`;
-  const h = Math.floor(min / 60);
-  if (h < 24) return `${h} 小时前`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d} 天前`;
-  return new Date(t).toLocaleDateString("zh-CN");
-}
 
 function fmtTokens(u: TokenUsageDto | null): string {
   if (!u) return "";
@@ -760,7 +750,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         <div className="border-b border-hairline p-2">
           <div className="mb-2 flex h-7 items-center px-1 text-xs font-medium text-l2">
             对话记录
-            <span className="ml-auto font-mono text-[10px] text-l4">
+            <span className="ml-auto font-mono text-[10px] text-l4 opacity-70">
               {regularVisible.length}
             </span>
           </div>
@@ -782,7 +772,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           >
             全部对话
             <span
-              className={`ml-1 text-xs ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}
+              className={`ml-1 text-xs opacity-70 ${filterActive({ kind: "all" }) ? "text-l2" : "text-l4"}`}
             >
               {regularVisible.length}
             </span>
@@ -799,7 +789,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             >
               <span className="truncate">Ccode 内部 AI</span>
               <span
-                className={`shrink-0 text-xs ${filterActive({ kind: "internal" }) ? "text-l2" : "text-l4"}`}
+                className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "internal" }) ? "text-l2" : "text-l4"}`}
               >
                 {internalVisible.length}
               </span>
@@ -831,7 +821,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     {agentLabel(g.agent)}
                   </span>
                   <span
-                    className={`shrink-0 text-xs ${
+                    className={`shrink-0 text-xs opacity-70 ${
                       filterActive({ kind: "agent", agent: g.agent })
                         ? "text-l2"
                         : "text-l4"
@@ -841,63 +831,67 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   </span>
                 </span>
               </div>
-              {!collapsed.has(g.agent) &&
-                g.projects.map((p) => {
-                  const active = filterActive({
-                    kind: "project",
-                    agent: g.agent,
-                    path: p.path,
-                  });
-                  return (
-                    <button
-                      key={p.path}
-                      onClick={() =>
-                        selectFilter({
-                          kind: "project",
-                          agent: g.agent,
-                          path: p.path,
-                        })
-                      }
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        // count 与列表所见口径一致（排除 internal、跟随归档开关）；
-                        // 后端按 agent+path 全删，口径外数量单独透出给确认文案
-                        const all = sessions.filter(
-                          (session) =>
-                            session.agent === g.agent &&
-                            session.projectPath === p.path,
-                        );
-                        const visible = all.filter(
-                          (session) =>
-                            !session.internal &&
-                            (showArchived || !session.archived),
-                        );
-                        setMenu({
-                          x: e.clientX,
-                          y: e.clientY,
-                          kind: "project",
-                          agent: g.agent,
-                          path: p.path,
-                          count: visible.length,
-                          extra: all.length - visible.length,
-                        });
-                      }}
-                      title={p.path}
-                      className={`mx-1 flex w-[calc(100%-8px)] items-center justify-between gap-2 rounded-md py-1 pl-8 pr-2 text-left text-sm ${
-                        active
-                          ? "bg-rail-sel text-l1"
-                          : "text-l3 hover:bg-white/5"
-                      }`}
-                    >
-                      <span className="truncate">{basename(p.path)}</span>
-                      <span
-                        className={`shrink-0 text-xs ${active ? "text-l2" : "text-l4"}`}
+              {/* 项目层级：左侧 1px 缩进线分层（不靠卡片边框），与 ▸ 按钮中线对齐 */}
+              {!collapsed.has(g.agent) && (
+                <div className="ml-[22px] mr-1 border-l border-white/5 pl-1">
+                  {g.projects.map((p) => {
+                    const active = filterActive({
+                      kind: "project",
+                      agent: g.agent,
+                      path: p.path,
+                    });
+                    return (
+                      <button
+                        key={p.path}
+                        onClick={() =>
+                          selectFilter({
+                            kind: "project",
+                            agent: g.agent,
+                            path: p.path,
+                          })
+                        }
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          // count 与列表所见口径一致（排除 internal、跟随归档开关）；
+                          // 后端按 agent+path 全删，口径外数量单独透出给确认文案
+                          const all = sessions.filter(
+                            (session) =>
+                              session.agent === g.agent &&
+                              session.projectPath === p.path,
+                          );
+                          const visible = all.filter(
+                            (session) =>
+                              !session.internal &&
+                              (showArchived || !session.archived),
+                          );
+                          setMenu({
+                            x: e.clientX,
+                            y: e.clientY,
+                            kind: "project",
+                            agent: g.agent,
+                            path: p.path,
+                            count: visible.length,
+                            extra: all.length - visible.length,
+                          });
+                        }}
+                        title={p.path}
+                        className={`flex w-full items-center justify-between gap-2 rounded-md py-1 pl-2 pr-2 text-left text-sm ${
+                          active
+                            ? "bg-rail-sel text-l1"
+                            : "text-l3 hover:bg-white/5"
+                        }`}
                       >
-                        {p.list.length}
-                      </span>
-                    </button>
-                  );
-                })}
+                        <span className="truncate">{basename(p.path)}</span>
+                        <span
+                          className={`shrink-0 text-xs opacity-70 ${active ? "text-l2" : "text-l4"}`}
+                        >
+                          {p.list.length}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           ))}
           {tree.length === 0 && internalVisible.length === 0 && (
@@ -1076,7 +1070,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       session: s,
                     });
                   }}
-                  className={`border-b border-hairline px-4 py-2.5 text-sm ${
+                  className={`group border-b border-hairline px-4 py-2.5 text-sm ${
                     selecting || clickable
                       ? "cursor-pointer hover:bg-white/5"
                       : "opacity-60"
@@ -1144,7 +1138,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       </span>
                     )}
                     {!selecting && (
-                      <div className="ml-1 flex shrink-0 items-center gap-1">
+                      <div
+                        className={`ml-1 flex shrink-0 items-center gap-1 ${hoverReveal}`}
+                      >
                         {clickable && (
                           <button
                             type="button"
@@ -1177,8 +1173,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       </div>
                     )}
                   </div>
-                  <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-l3">
-                    <span className="shrink-0">{relTime(s.updatedAt)}</span>
+                  {/* 副行：10px 灰字，相对时间主显、悬浮给绝对时间（白话双层） */}
+                  <div className="mt-1 flex min-w-0 items-center gap-2 text-[10px] text-l4">
+                    <span className="shrink-0" title={absTime(s.updatedAt)}>
+                      {relTime(s.updatedAt)}
+                    </span>
                     <span className="shrink-0">{agentLabel(s.agent)}</span>
                     {s.workspace && (
                       <span
@@ -1295,7 +1294,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   ⇄ 接自 {agentLabel(selected.handoffFromAgent)}
                 </span>
               )}
-              <span className="shrink-0 text-xs text-l3">
+              <span
+                className="shrink-0 text-xs text-l3"
+                title={absTime(selected.updatedAt)}
+              >
                 {agentLabel(selected.agent)} · {relTime(selected.updatedAt)}
                 {selected.tokenUsage
                   ? ` · ${fmtTokens(selected.tokenUsage)}`

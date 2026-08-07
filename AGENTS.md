@@ -93,15 +93,19 @@ src-tauri/src/
   projects.rs                # 项目档案卡（§11.3）：.ccode/project.toml 读写、项目注册、模板写回、资源登记/发现、
                              # 一键开步（commit_project_bootstrap + TASK.md 落盘 + .git/info/exclude）、append_workspace_inbox
   pty.rs                     # PtyManager：spawn_tracked 公共拉起逻辑，agent/shell 复用
-  sessions.rs                # 会话浏览：扫描/解析全部八个 agent 会话（含 Codex .zst、OpenCode SQLite/legacy JSON）、app.db session_meta、pin 快照、用户发起的删除、注意力状态分类（session_tail_state）、流水线步骤名映射（RX3a）
-  skills.rs                  # 技能库（§6.13）：SSOT 库 + 八 CLI symlink/copy 分发（cursor 固定 copy）、四路导入（目录/ZIP/GitHub/发现）、ZIP 导出、卸载备份、copy 漂移检测与 resync、新建/编辑（create_skill/update_skill_content，覆盖前备份）
+  sessions.rs                # 会话浏览：扫描/解析全部八个 agent 会话（含 Codex .zst、OpenCode SQLite/legacy JSON）、app.db session_meta、pin 快照、用户发起的删除、注意力状态分类（session_tail_state）、流水线步骤名映射（RX3a）  skills.rs                  # 技能库（§6.13）：SSOT 库 + 八 CLI symlink/copy 分发（cursor 固定 copy）、四路导入（目录/ZIP/GitHub/发现）、ZIP 导出、卸载备份、copy 漂移检测与 resync、新建/编辑（create_skill/update_skill_content，覆盖前备份）
   usage.rs                   # 用量统计（§6.11）：六 agent usage 事件提取、usage_daily 按天聚合、任务成本按工作区归因、官方账号「订阅」口径、内置定价表 + pricing.json 覆盖
   pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
-  settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/brew 镜像/主题/OS 通知，get/update 两个 command
+  settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/brew 镜像/主题/OS 通知/精确注意力开关，get/update 两个 command
+  claude_hooks.rs            # 精确注意力标记（Claude Code hooks）：开关写/移除 ~/.claude/settings.json hooks 段（备份+原子写、只动 hooks 键、
+                             # 用户 hooks 合并不覆盖、移除只删含状态日志路径的条目）；事件日志 hooks-state/claude-hooks.jsonl 按 session_id 取最新事件，
+                             # tail_state 在 claude-code 上优先读它（缺失/超 10 分钟回落尾部推断）
   fonts.rs                   # 终端字体打包与 Homebrew 一键安装（Maple/Sarasa/Iosevka）
   ai.rs                      # 无头 AI 调用层：一次性 prompt（launch_plan 注入）+ 提交信息/会话摘要/PR 描述/冲突建议生成
   handoff.rs                 # 接力（§11.3 机制四）：结构化简报生成（脱敏 + 64KB）落 .ccode/handoff-<时间>.md、handoff_links 接力链登记/固化
   workspaces.rs              # 任务工作区（§6.10）：git worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT 端口段、setup/archive 脚本钩子、评审合并（health/merge/PR）、提货单 artifacts.yaml
+  portwatch.rs               # 端口运行时监控：LISTEN 端口列表（unix lsof / Windows netstat+tasklist）、归属标注
+                             # （cwd 最长前缀命中 worktree/注册项目优先，回落活跃工作区 CCODE_PORT 段）、校验后 SIGTERM 终止
   ws_settings.rs             # 项目级 .ccode/settings.toml 三层合并（用户→仓库→local）：files_to_copy/run_mode/scripts；开步自动写入 quarto 渲染脚本
   git_info.rs                # git 状态/累计 diff/逐 hunk（git_file_hunks/apply_hunk）/勾选提交临时索引（commit_selected_with_index）
   fs_tree.rs                 # 文件树与文件操作（重要路径删除保护，canonicalize 双校验）
@@ -170,6 +174,12 @@ src-tauri/src/
   - **运行中会话关联必须排他且使用复合键**：固定 session id 的 CLI 精确锁定；其余 CLI 在进程启动前按 agent+归并后项目登记 claim，
     同批并发启动统一排序分配，已分配过的会话在本次应用进程内不得转给另一标签。前端 live/open 请求一律以 agent+sessionId 为键，
     禁止只用 sessionId，完整回放跳转前先刷新索引。
+  - **终端分屏（SplitView）只是显隐与排序变化**：全部标签仍在同一容器保持挂载，靠 flex order 把活跃标签（左）与对照标签（右）
+    排到分隔条两侧，禁止把标签移进第二棵子树（会重挂载杀 PTY）；右栏/文件树/改动跟随「活跃 pane」（点击 pane 切换，focusedId），
+    分屏开启时两个 pane 的 PTY 都推流；分屏状态不进持久化白名单，仅分隔比例本地记忆。
+  - **关标签/关窗进程守卫**：仅 `running && ptyId` 的 agent 标签弹确认（shell/已退出一律不弹），存活判定以后端
+    `pty_has_running_process` 为准，命令不存在/报错时守卫静默跳过不阻塞关闭；关窗前对全部在跑标签统一确认一次，
+    确认后放行（allowWindowCloseRef 防 onCloseRequested 重入）。
 - **普通仓库与工作区提交语义分开**：普通仓库默认不选文件，`git_commit(paths)` 与 AI 提交信息只处理用户勾选且仍在
   当前 status 的安全相对路径（literal pathspec）；工作区任务始终提交全部任务改动，禁止把选择提交扩散到 worktree 流程。
 - **Git 改动列表的单文件 diff 必须安全且可展开**：普通仓库只允许读取当前 status 中经过安全校验的相对路径，工作区只允许读取
@@ -202,7 +212,7 @@ src-tauri/src/
   staging，元数据保存失败回滚。GitHub 来源保存 repo/ref/subdir/revision，更新检测只提示，重新导入仍走冲突确认。
   新建/编辑走 `create_skill`/`update_skill_content`：重名拒绝并引导改用「编辑内容」；编辑经临时目录走既有覆盖路径
   （覆盖前备份、辅助文件保留、source/repo 不改写）；◈ 优化开终端让 Agent 直改库文件，备份兜底仍靠保存/覆盖路径。
-- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：「设为全局默认」（写前必须备份）、会话删除（delete_session/delete_project_sessions，canonicalize 根校验之上再限定**已知会话数据子目录 + 会话后缀白名单**，同根的 auth.json/settings.json 等一律拒绝；**Cursor 因 ~/.cursor 与 IDE 共享，不走目录级白名单**，由 `cursor_deletable` 精确限定 `projects/*/agent-transcripts/**/*.jsonl`；OpenCode 走事务删库行且 db 路径必须等于已知 opencode.db；Codex resume 链删除连带成员文件）、工作树文件删除（限定树当前根目录 + 重要路径黑名单兜底：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单判断必须 canonicalize 双校验，堵符号链接绕过）。
+- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：「设为全局默认」（写前必须备份）、**精确注意力标记开关**（claude_hooks.rs 写 ~/.claude/settings.json 的 hooks 段：写前备份 + 原子写、只动 hooks 键、用户已有 hooks 数组追加而非覆盖、关闭时只删含 `hooks-state/claude-hooks.jsonl` 的条目并回收空壳键、配置损坏拒绝写；开关状态走 `set_claude_hooks_attention` 一个命令同时落应用设置，失败回滚，禁前端单独 patch `claudeHooksAttention`）、会话删除（delete_session/delete_project_sessions，canonicalize 根校验之上再限定**已知会话数据子目录 + 会话后缀白名单**，同根的 auth.json/settings.json 等一律拒绝；**Cursor 因 ~/.cursor 与 IDE 共享，不走目录级白名单**，由 `cursor_deletable` 精确限定 `projects/*/agent-transcripts/**/*.jsonl`；OpenCode 走事务删库行且 db 路径必须等于已知 opencode.db；Codex resume 链删除连带成员文件）、工作树文件删除（限定树当前根目录 + 重要路径黑名单兜底：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单判断必须 canonicalize 双校验，堵符号链接绕过）。
 - **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录），AI 无头调用 `-s read-only`；用户可用 extra_env/参数覆盖。
 - **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底（macOS 用户目录 `~/.npm-global/bin`/`~/.local/bin`/`~/bin`/`~/.kimi-code/bin` **先于** `/opt/homebrew/bin`——与用户交互终端的 PATH 解析习惯一致，防止检测到系统目录里的同名旧副本；Linux `~/.local/bin`，Windows `%LOCALAPPDATA%\Programs`/`%APPDATA%\npm`）——打包版 GUI 短 PATH 下检测/启动/更新/安装不再失灵；新增 CLI/工具调用点一律用它，禁直接 `which::which` 或裸名 spawn。
 - **npm 更新用与目标二进制同目录的 npm（`updater::npm_for`）**：同机多份 node/npm 时用错 npm 会把包装进另一个 prefix、目标副本不变；brew 安装的 CLI 一律走 `brew upgrade`（opencode 自更新是交互 TUI，行输入无法应答）。
@@ -283,8 +293,20 @@ src-tauri/src/
 - **管理列表只展示状态与主路径**：配置、工作区、技能和对话列表的行内只保留识别信息、状态与一到两个高频动作；导入/导出、删除、
   诊断、恢复等低频项进入「⋯」。工作区的 PR 与归档必须在统一全宽评审内确认和执行，避免列表页另起一套完成流程；唯一例外是
   正在进行的 merge 冲突，必须在工作区行保留直接的「解决冲突」入口，且仍进入同一评审覆盖层。
+- **列表行内操作分两级显隐**：每行最多一个常驻主按钮（编辑 / 应用开关 / 评审 / 组头「新版」），其余低频按钮（行内 ⋯、⧉ 复制、
+  设置页诊断行按钮等）统一 hover 才现——行挂 `group`，按钮 `opacity-0 group-hover:opacity-100 focus-visible:opacity-100`
+  （键盘 Tab 聚焦同样可见）；状态聚合成 ●N 计数（明细进悬浮 title），无状态不渲染状态点；次级信息 10px 灰字、时间相对主显
+  （`rel-time`，悬浮 `absTime`）；分组层级靠 hairline + 左侧缩进线（`border-l border-white/5`），不再套卡片外框。
+  工作区/终端/配置/技能/设置五页同一手法。
+- **工作区项目详情按对象职责分层**：流水线步骤条只表达进度，并仅保留「开始 / 恢复 / 解决冲突」这类推进步骤的动作；终端与普通评审
+  统一由下方工作区任务行执行，产物查看与目录定位进入步骤「⋯」。编辑流水线、模板替换等项目级操作统一进入项目头「⋯」，禁止在
+  流程末尾再放第二套入口。未创建步骤只显示「开始」，不再并列同义的「待开始」；已归档步骤显示「已归档 + 恢复」。已合并且没有
+  新提交的任务行只显示左侧「已合并」状态，不再重复显示「评审」；新提交后评审入口恢复。
+- **流程进度与步骤固定对齐**：流水线使用等分列，每个步骤的进度线段必须与下方胶囊处于同一列；窄窗口整体横向滚动，禁止让胶囊
+  自由换行后继续保留一条无法对应的全宽进度线。
 - **终端布局必须有明确高度与滚动边界**：App 容器、页面主区、终端三带均维持 `h-full/min-h-0`，外层裁切溢出；只有文件树、对话、
   diff 等内容区各自滚动。禁止把页面级滚动或无约束 flex 子项带回终端，以免窗口缩放、拖动或长内容后出现底部黑屏/空白。
+- **终端工作台信息架构固定为三段**：左侧只负责项目/工作区/文件树上下文，中间只负责 Agent 终端执行，右侧成果工作台固定为「对话 / 文件 / 改动」三模式并默认可见。终端启动栏不再放重复的「对话」入口；实时对话、预览编辑、Git 改动统一从右侧工作台切换，任务审阅仍从改动进入既有全宽覆盖层。右侧可拖拽记忆宽度，宽屏只隐藏工作树，不得杀终端或改变 PTY/会话挂载语义。
 - **PDF 预览（P2a）**：pdf.js 渲染器必须随 PdfPreview 组件动态 import 拆独立 chunk（禁进主包）；`read_pdf_bytes` 只放行
   四类白名单（注册项目登记资源/注册项目根/工作区·仓库根/终端标签 cwd hint），canonicalize 后判定，传输用 base64 字符串
   （macOS 的 Raw 响应会退化为逐字节 JSON 数组，禁改 raw bytes）；选段问 AI 只 pty_write 注入活跃标签输入框，不自动回车。
@@ -315,7 +337,7 @@ src-tauri/src/
 - **P3 数据 + 接力 ✅**：数据处理模板 + 技能包（data-clean/data-eda）、提货单 artifacts.yaml v1（手动登记 + md5/大小，下一步 TASK.md 自动带提货单段）、图片评审（ImagePairView 双栏看图）、长任务 OS 通知（notify.ts）、接力包 + 接力链可回溯（handoff.rs，对话页「⇄ 接自」badge）
 - **P4 论文 ✅**：科研论文/毕业论文 manuscript 模板 + quarto render 脚本（render-draft/render-final，RX4a 追加 export-docx）、quarto-render 技能、提货单登记的 PDF 产物纳入预览白名单（根外产物按精确路径放行）；bib 联动以模板简报引用 references.bib 的务实形式落地
 - **RX 体验批 ✅**：RX1 流水线编辑器 + 步骤资源绑定；RX2a md 阅读版式/沉浸、RX2b 步骤胶囊对照（◫ 切根 + 产物面板）；RX3a 对话步骤化（步骤名 badge/分组/搜索）、RX3b 技能新建/编辑/◈ 优化 + 步骤挂载技能；RX4a docx 预览 + export-docx；笔记对话式批改（选段「◈ 讨论/改写此段」）；界面白话双层 + 工作区页/列表精简
-- **P5 通用层打磨（部分 ✅）**：逐 hunk 验收 ✅、跨标签聚合视图 ✅、成本按工作区归因 ✅（任务成本）、历史时间线视图 ✅（first-parent 主线 + 白话翻译：✓ 验收合并/⚙ 自动保存/◔ 保存）；批量验收、云端会话双源调研留 backlog
+- **P5 通用层打磨（部分 ✅）**：逐 hunk 验收 ✅、跨标签聚合视图 ✅、成本按工作区归因 ✅（任务成本）、历史时间线视图 ✅（first-parent 主线 + 白话翻译：✓ 验收合并/⚙ 自动保存/◔ 保存）、**Claude Code hooks 精确注意力标记 ✅**（设置页显式开关，claude_hooks.rs，见架构 v3.32）；批量验收、云端会话双源调研留 backlog
 - **Backlog（记录不动手）**：SSH 远程执行、MCP 配置分发调研、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后评估）、批量验收、云端会话双源调研、首启引导完整版（示例课题带演示数据 + 示例 PDF）、工作区类型驱动默认值（数据类跳端口）、内置技能种子机制（**等用户把现有技能优化完善后再做**：目前六个技能只在本机库，应用无内置/首启导入机制）
 
 **当前待办**：
@@ -325,4 +347,3 @@ src-tauri/src/
 - Intel macOS 安装包（暂缓：CI macos-latest 只出 aarch64；加 `x86_64-apple-darwin` target 构建时间翻倍，真有 Intel 用户再加，见架构 v1.3 / README 安装节）
 - OpenCode Windows 数据路径未核实（matrix 标注「文档与源码不一致」），Windows 用户验证会话/用量统计后修正
 - Skills 更新检测与在线编辑（v2 口子，见架构 v0.9 / §6.13）
-- Claude Code hooks 精确化注意力标记（v2 评估项，需写用户配置，见架构 v0.7）

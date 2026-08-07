@@ -3518,6 +3518,13 @@ fn tail_state_impl(agent: &str, file_path: &str) -> String {
         };
         return opencode_tail_state(Path::new(db), sid).into();
     }
+    // 精确注意力标记（设置页显式开启的 Claude Code hooks）：事件日志优先于尾部推断；
+    // 设置未开启/日志缺失/事件过期均返回 None，自动回落下面的尾部推断
+    if agent == "claude-code" {
+        if let Some(state) = crate::claude_hooks::state_for_session_file(file_path) {
+            return state;
+        }
+    }
     let lines = last_lines(Path::new(file_path), 64 * 1024);
     if lines.is_empty() {
         return "unknown".into();

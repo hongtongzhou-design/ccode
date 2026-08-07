@@ -42,6 +42,8 @@ export interface AppSettings {
   aiProfileId?: string | null;
   /** 对话页「⇗ 外部恢复」的终端应用；auto/undefined = 按优先级探测 */
   externalTerminal?: string;
+  /** 精确注意力标记（Claude Code hooks，写 ~/.claude/settings.json，默认关） */
+  claudeHooksAttention?: boolean;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效 */

@@ -7,6 +7,7 @@ import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS } from "../presets";
 import { upstreamNoteText, upstreamCommand } from "../upstream-note";
 import { interactiveUpdatePrefill } from "../update-routing";
+import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
 import {
   PageFrame,
@@ -984,6 +985,10 @@ export default function ProfilesPage() {
   const labelOf = (agentId: string) =>
     AGENTS.find((a) => a.id === agentId)?.label ?? agentId;
 
+  // hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
+  const hoverReveal =
+    "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
+
   /** 每个 agent 是否有可恢复的完整全局配置批次（控制「恢复备份」按钮显隐） */
   async function refreshGlobalBackups() {
     const entries = await Promise.all(
@@ -1220,12 +1225,10 @@ export default function ProfilesPage() {
             );
             if (q && list.length === 0) return null;
             const isCollapsed = collapsedGroups.has(agent.id);
+            // 分组收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层（同工作区项目组手法）
             return (
-              <section
-                key={agent.id}
-                className="mb-3 overflow-hidden rounded-md border border-hl2 bg-pg"
-              >
-                <div className="flex h-10 items-center gap-2 border-b border-hl2 bg-grp px-3">
+              <section key={agent.id} className="mb-5">
+                <div className="group flex h-10 items-center gap-2 border-b border-hairline px-3">
                   <button
                     onClick={() => {
                       // 更新/安装进行中禁止折叠，避免交互输入行（如 brew [y/n]）被隐藏
@@ -1247,7 +1250,7 @@ export default function ProfilesPage() {
                   </h2>
                   {/* 已安装只显示版本号；右侧状态：更新中… / 新版（可点更新）/ 更新（查不到最新版时的回退）；已是最新则不显示 */}
                   {det?.binaryPath ? (
-                    <span className="text-xs text-pl2">
+                    <span className="text-xs text-l4">
                       {det.version ?? ""}
                     </span>
                   ) : (
@@ -1280,7 +1283,7 @@ export default function ProfilesPage() {
                                 onClick={() =>
                                   void navigator.clipboard.writeText(cmd)
                                 }
-                                className="flex size-6 items-center justify-center rounded text-l4 hover:bg-white/5 hover:text-l1"
+                                className={`flex size-6 items-center justify-center rounded text-l4 hover:bg-white/5 hover:text-l1 ${hoverReveal}`}
                               >
                                 ⧉
                               </button>
@@ -1328,7 +1331,7 @@ export default function ProfilesPage() {
                 </div>
 
                 {!isCollapsed && (
-                  <>
+                  <div className="border-l border-white/5">
                     {/* 官方账号状态行（P1a）：支持官方账号的 agent 固定展示；断开走 CLI 自己的 logout，Ccode 不删 auth 文件 */}
                     {officialStatus[agent.id]?.supported &&
                       (() => {
@@ -1496,13 +1499,24 @@ export default function ProfilesPage() {
                         {list.map((profile) => (
                           <li
                             key={profile.id}
-                            className="grid min-h-14 grid-cols-[minmax(130px,1fr)_minmax(150px,1fr)_minmax(150px,1fr)_110px_92px] items-center gap-3 px-3 text-sm"
+                            className="group grid min-h-14 grid-cols-[minmax(130px,1fr)_minmax(150px,1fr)_minmax(150px,1fr)_110px_92px] items-center gap-3 px-3 text-sm"
                           >
-                            <span
-                              className="min-w-0 truncate font-medium text-pl1"
-                              title={profile.name}
-                            >
-                              {profile.name}
+                            <span className="min-w-0">
+                              <span
+                                className="block truncate font-medium text-pl1"
+                                title={profile.name}
+                              >
+                                {profile.name}
+                              </span>
+                              {/* 次级行：10px 灰字，相对时间主显、悬浮给绝对时间（白话双层）；从未使用不渲染 */}
+                              {profile.lastUsedAt && (
+                                <span
+                                  className="mt-0.5 block truncate font-mono text-[10px] text-l4"
+                                  title={`上次使用 ${absTime(profile.lastUsedAt)}`}
+                                >
+                                  上次使用 {relTime(profile.lastUsedAt)}
+                                </span>
+                              )}
                             </span>
                             <span
                               className={`min-w-0 truncate text-xs ${profile.baseUrl || profile.accountType === "official" ? "text-pl2" : "text-l4"}`}
@@ -1579,7 +1593,7 @@ export default function ProfilesPage() {
                                   });
                                 }}
                                 aria-label={`更多操作：${profile.name}`}
-                                className="flex h-8 w-8 items-center justify-center rounded text-sm text-l4 hover:bg-white/5 hover:text-pl1"
+                                className={`flex h-8 w-8 items-center justify-center rounded text-sm text-l4 hover:bg-white/5 hover:text-pl1 ${hoverReveal}`}
                               >
                                 ⋯
                               </button>
@@ -1588,7 +1602,7 @@ export default function ProfilesPage() {
                         ))}
                       </ul>
                     )}
-                  </>
+                  </div>
                 )}
               </section>
             );

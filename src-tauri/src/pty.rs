@@ -8,14 +8,18 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-/// 输出合帧周期：每个 PTY 每 50ms 最多一个 IPC 事件
-const FRAME: Duration = Duration::from_millis(50);
+/// 输出合帧周期：每个 PTY 每 16ms 最多一个 IPC 事件。
+/// 从 50ms 收紧到 16ms（约一帧屏幕刷新）：TUI 高频小块场景下等待窗口更短，
+/// 既减少 IPC 事件数又不让回显有可感延迟
+const FRAME: Duration = Duration::from_millis(16);
 /// 隐藏标签的输出缓冲上限（1 MB）
 const BACKLOG_CAP: usize = 1024 * 1024;
-/// 可见时合帧缓冲的宽松上限（4 MB）：超限无视帧周期立即 flush，
-/// 防止高速输出叠加慢 IPC 时 pending 无限增长
-const PENDING_CAP: usize = 4 * 1024 * 1024;
+/// 可见时合帧缓冲上限（256 KB）：超限无视帧周期立即 flush。
+/// 从 4 MB 收紧：高速输出下更早 flush，pending 不会在大块场景里堆到 MB 级
+const PENDING_CAP: usize = 256 * 1024;
 const TRUNC_MARK: &str = "[…输出过多已截断]\n";
+/// 子进程开启 bracketed paste 模式（DECSET 2004）时输出的序列
+const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
 
 struct PtyEntry {
     writer: Box<dyn Write + Send>,
@@ -24,6 +28,9 @@ struct PtyEntry {
     /// 标签可见才推流；不可见时输出进 backlog（优化 2）
     visible: Arc<AtomicBool>,
     backlog: Arc<Mutex<Vec<u8>>>,
+    /// 子进程是否开过 bracketed paste（输出里出现过 ESC[?2004h，粘性置位）；
+    /// pty_write 据此决定是否给多行输入手工包裹粘贴序列
+    bracketed_paste: Arc<AtomicBool>,
     /// 启动用途：归档工作区时只阻止仍在运行的 agent / run 脚本，普通 shell 可自动切回主仓库。
     purpose: PtyPurpose,
     /// 启动目录用于工作区生命周期保护；不用实时 cwd，避免 agent 子命令短暂切目录造成漏判。
@@ -198,6 +205,34 @@ fn gated_emit(
     }
 }
 
+/// 在子进程输出中扫描 bracketed paste 开启序列（ESC[?2004h）。
+/// tail 保存上一块末尾的 N-1 字节，防止序列恰好跨读取块被漏检。
+/// 返回 true 表示本块（含跨界）出现了开启序列。
+fn scan_bracketed_paste_on(tail: &mut Vec<u8>, chunk: &[u8]) -> bool {
+    let mut hay = std::mem::take(tail);
+    hay.extend_from_slice(chunk);
+    let found = hay
+        .windows(BRACKETED_PASTE_ON.len())
+        .any(|w| w == BRACKETED_PASTE_ON);
+    if !found {
+        let keep = BRACKETED_PASTE_ON.len() - 1;
+        let start = hay.len().saturating_sub(keep);
+        *tail = hay[start..].to_vec();
+    }
+    found
+}
+
+/// 多行输入在子进程已开 bracketed paste 时包裹为一次粘贴（ESC[200~ … ESC[201~），
+/// 避免多行被目标程序逐行提交；单行输入或未开粘贴模式时原样返回——
+/// 未开 2004 的程序会把控制序列原样显示出来，绝不能包裹
+fn wrap_bracketed_paste(data: &str, paste_mode_on: bool) -> std::borrow::Cow<'_, str> {
+    if paste_mode_on && data.contains('\n') {
+        format!("\x1b[200~{data}\x1b[201~").into()
+    } else {
+        data.into()
+    }
+}
+
 fn expand_tilde(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
@@ -277,6 +312,7 @@ fn spawn_tracked(
     let pty_id = uuid::Uuid::new_v4().to_string();
     let visible = Arc::new(AtomicBool::new(false)); // 默认不可见：前端随即按标签状态标记
     let backlog = Arc::new(Mutex::new(Vec::new()));
+    let bracketed_paste = Arc::new(AtomicBool::new(false));
     manager.entries.lock().unwrap().insert(
         pty_id.clone(),
         PtyEntry {
@@ -285,6 +321,7 @@ fn spawn_tracked(
             child,
             visible: visible.clone(),
             backlog: backlog.clone(),
+            bracketed_paste: bracketed_paste.clone(),
             purpose,
             initial_cwd: cwd.to_string(),
         },
@@ -313,11 +350,21 @@ fn spawn_tracked(
     let app = app.clone();
     std::thread::spawn(move || {
         let mut reader = reader;
+        // bracketed paste 检测的跨块尾部（序列可能恰好被 8KB 读取边界切开）
+        let mut scan_tail: Vec<u8> = Vec::new();
         loop {
             let mut buf = [0u8; 8192];
             match reader.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => coalescer.append(&buf[..n]),
+                Ok(n) => {
+                    // 粘性检测：一旦见过 ESC[?2004h 就记住，pty_write 据此包裹多行粘贴
+                    if !bracketed_paste.load(Ordering::Relaxed)
+                        && scan_bracketed_paste_on(&mut scan_tail, &buf[..n])
+                    {
+                        bracketed_paste.store(true, Ordering::Relaxed);
+                    }
+                    coalescer.append(&buf[..n]);
+                }
                 Err(_) => break,
             }
         }
@@ -504,11 +551,38 @@ pub fn pty_write(
 ) -> Result<(), String> {
     let mut entries = manager.entries.lock().unwrap();
     let entry = entries.get_mut(&pty_id).ok_or("终端不存在或已退出")?;
+    let paste_on = entry.bracketed_paste.load(Ordering::Relaxed);
+    let data = wrap_bracketed_paste(&data, paste_on);
     entry
         .writer
         .write_all(data.as_bytes())
         .and_then(|_| entry.writer.flush())
         .map_err(|e| format!("写入终端失败: {e}"))
+}
+
+/// 关窗守卫用：PTY 在管且子进程尚未退出才为 true。
+/// try_wait 是非阻塞探测（unix 走 waitpid WNOHANG，Windows 查进程退出码），
+/// 已退出时会顺带回收并缓存退出状态，不影响清理路径再 wait 取真实退出码；
+/// 探测本身出错按「未在运行」处理（entry 缺失/进程已回收等边界都归到 false）
+#[tauri::command]
+pub fn pty_has_running_process(
+    manager: tauri::State<'_, PtyManager>,
+    pty_id: String,
+) -> bool {
+    has_running_process(manager.inner(), &pty_id)
+}
+
+fn has_running_process(manager: &PtyManager, pty_id: &str) -> bool {
+    let mut entries = manager.entries.lock().unwrap();
+    match entries.get_mut(pty_id) {
+        Some(entry) => child_running(entry.child.as_mut()),
+        None => false,
+    }
+}
+
+/// 子进程仍在运行 = 非阻塞 try_wait 尚未取到退出状态（探测出错按未运行处理）
+fn child_running(child: &mut (dyn Child + Send + Sync)) -> bool {
+    matches!(child.try_wait(), Ok(None))
 }
 
 #[tauri::command]
@@ -790,5 +864,78 @@ mod tests {
         let drained2 = drain_backlog(&mut bl);
         assert_eq!(drained2.as_deref(), Some("文-live"));
         assert!(bl.is_empty());
+    }
+
+    // ===== bracketed paste 手工包裹 =====
+
+    #[test]
+    fn bracketed_paste_scan_detects_across_chunk_boundary() {
+        let mut tail = Vec::new();
+        // 普通输出不命中
+        assert!(!scan_bracketed_paste_on(&mut tail, b"hello \x1b[1mworld"));
+        // 序列跨两块切开也应命中
+        assert!(!scan_bracketed_paste_on(&mut tail, b"prompt \x1b[?20"));
+        assert!(scan_bracketed_paste_on(&mut tail, b"04h rest"));
+    }
+
+    #[test]
+    fn wrap_bracketed_paste_only_multiline_and_only_when_on() {
+        // 已开 2004 + 多行 → 包裹
+        let wrapped = wrap_bracketed_paste("line1\nline2", true);
+        assert_eq!(wrapped, "\x1b[200~line1\nline2\x1b[201~");
+        // 未开 2004 → 原样直写（否则控制序列会被原样显示）
+        assert_eq!(wrap_bracketed_paste("line1\nline2", false), "line1\nline2");
+        // 单行 → 行为不变，即使已开 2004 也不包裹
+        assert_eq!(wrap_bracketed_paste("one-liner", true), "one-liner");
+    }
+
+    // ===== 输出批处理调优（16ms 帧 / 256KB cap） =====
+
+    #[test]
+    fn coalescer_tuning_constants() {
+        // 固化调优目标：高频小块更早合帧、大块更早 flush
+        assert_eq!(FRAME, Duration::from_millis(16));
+        assert_eq!(PENDING_CAP, 256 * 1024);
+    }
+
+    #[test]
+    fn coalescer_merges_small_burst_into_one_frame() {
+        // 帧窗口内到达的多个小块必须合并成一个事件（减少 TUI 高频输出的 IPC 事件数）
+        let c = FrameCoalescer::new();
+        c.append(b"chunk-1;");
+        c.append(b"chunk-2;");
+        c.append(b"chunk-3");
+        let (text, _) = c
+            .take_frame(Instant::now(), FRAME)
+            .expect("帧内应合并发出");
+        assert_eq!(text, "chunk-1;chunk-2;chunk-3");
+    }
+
+    // ===== 进程存活检查 =====
+
+    #[test]
+    fn has_running_process_false_for_unknown_pty() {
+        assert!(!has_running_process(&PtyManager::default(), "no-such-pty"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_running_tracks_lifecycle() {
+        use portable_pty::Child as _;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("应能启动 sleep");
+        assert!(child_running(&mut child), "运行中应判 true");
+        child.kill().expect("应能 kill");
+        // 退出判定靠轮询等待（禁墙钟硬断言）：宽松上限内终应判 false
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child_running(&mut child) {
+            assert!(Instant::now() < deadline, "kill 后 10s 内应判定退出");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // 退出状态被缓存：再次探测仍为 false，且 wait 能取到真实状态
+        assert!(!child_running(&mut child));
+        assert!(child.try_wait().unwrap().is_some());
     }
 }
