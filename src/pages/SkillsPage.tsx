@@ -880,6 +880,28 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  /** 一键应用：把技能分发到所有尚未启用的 agent（仅限该技能 apps 表中列出的，即规格声明了技能目录的） */
+  async function applyAllAgents(skill: SkillDto) {
+    const key = `${skill.id}:__all__`;
+    if (applying[key]) return;
+    const targets = Object.keys(skill.apps).filter((a) => !skill.apps[a]);
+    if (targets.length === 0) return;
+    setApplying((prev) => ({ ...prev, [key]: true }));
+    try {
+      for (const agent of targets) {
+        await invoke("apply_skill", { id: skill.id, agent, enabled: true });
+      }
+      // 乐观更新后拉取最新 appModes/staleCopies
+      await refresh();
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+      await refresh();
+    } finally {
+      setApplying((prev) => ({ ...prev, [key]: false }));
+    }
+  }
+
   const [catEdit, setCatEdit] = useState<{ id: string; value: string } | null>(
     null,
   );
@@ -1358,6 +1380,24 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               <span className="text-[13px] font-medium text-l2">
                 应用到 Agent
               </span>
+              {(() => {
+                const allKey = `${preview.skill.id}:__all__`;
+                const remaining = Object.keys(preview.skill.apps).filter(
+                  (a) => !preview.skill.apps[a],
+                ).length;
+                if (remaining === 0) return null;
+                return (
+                  <button
+                    type="button"
+                    onClick={() => void applyAllAgents(preview.skill)}
+                    disabled={applying[allKey]}
+                    title={`分发到剩余 ${remaining} 个未启用的 Agent`}
+                    className="flex h-7 items-center rounded px-2 text-xs text-cta-text bg-cta hover:opacity-90 disabled:opacity-50"
+                  >
+                    {applying[allKey] ? "应用中…" : "一键应用"}
+                  </button>
+                );
+              })()}
               <span className="ml-auto text-xs text-l4">
                 {Object.values(preview.skill.apps).filter(Boolean).length}/
                 {AGENTS.length}
@@ -1375,7 +1415,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                     key={agent.id}
                     type="button"
                     onClick={() => void toggleApp(preview.skill, agent.id)}
-                    disabled={applying[key]}
+                    disabled={
+                      applying[key] ||
+                      applying[`${preview.skill.id}:__all__`]
+                    }
                     title={
                       enabled
                         ? `${mode === "copy" ? "copy（有漂移检测）" : "symlink"}；点击取消应用`

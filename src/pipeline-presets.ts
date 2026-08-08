@@ -3,7 +3,7 @@ import type { ProjectStepDto } from "./types";
 /**
  * 内置流水线模板库（§11.3 机制二、§11.4 P1b 首启引导轻量版）：
  * 步骤是写在 project.toml 里的可编辑预设，引擎不识别「文献/论文」语义。
- * 四套内置模板覆盖综述/科研论文/数据处理/毕业论文，新增场景 = PIPELINE_TEMPLATES 加一项；
+ * 五套内置模板覆盖综述/科研论文/数据处理/毕业论文/投稿与返修，新增场景 = PIPELINE_TEMPLATES 加一项；
  * 用户另存的模板由后端 list/save/delete_pipeline_template 管理，选择器中与本库合并展示。
  *
  * 简报写作约定（auto 权限模式可无人值守执行）：
@@ -369,6 +369,53 @@ const THESIS_STEPS: ProjectStepDto[] = [
   },
 ];
 
+/** 投稿与返修（submission-rebuttal）：期刊格式适配 → 投稿材料 → 审稿意见逐条回复 */
+const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
+  {
+    name: "期刊格式适配",
+    workspaceName: "journal-format",
+    brief:
+      "输入：manuscript/paper-final.md 或 manuscript/review-final.md（已随 main 合并在本工作区内；两者都不存在时在报告中说明并停止，不自行改用其他草稿）。\n" +
+      "1. 确定目标期刊：项目根已有 submission/target-journal.md 时从其约定；没有则按课题主题给出 2-3 个候选期刊及理由，写入 submission/target-journal.md，选第一个执行并标注「待用户确认」；\n" +
+      "2. 获取目标期刊官方作者指南（WebFetch 期刊官网 Guide for Authors；获取失败时按通用 IMRaD 与 APA 引用格式执行，并在 format-notes.md 说明依据）；\n" +
+      "3. 按指南逐项适配：章节结构、引用与文献列表格式、图表规范、字数与摘要长度；产出 submission/formatted.md，只改格式与表达，不改学术观点与数据；\n" +
+      "4. 引用完整性自查（按 bib-check 技能）：正文引用键全部可在 references.bib 解析、bib 条目字段齐全，问题清单写入 submission/format-notes.md；\n" +
+      "5. 作者单位/基金号/通讯邮箱等未知信息一律占位「待填」，不编造；所有未决项汇总进 submission/format-notes.md。\n" +
+      "完成标准：submission/formatted.md 与 submission/target-journal.md、submission/format-notes.md 均已提交；format-notes.md 逐项给出处理结论。",
+    expectedArtifacts: ["submission/"],
+    skills: ["bib-check"],
+    run: [],
+  },
+  {
+    name: "投稿材料",
+    workspaceName: "submission-materials",
+    brief:
+      "输入：submission/formatted.md、submission/target-journal.md（已随 main 合并在本工作区内）。\n" +
+      "1. 产出 submission/cover-letter.md：编辑称呼占位、研究问题与 3 条亮点、与期刊读者群的契合点、原创性与未一稿多投声明（占位「待填」处不编造）；\n" +
+      "2. 产出 submission/highlights.md：3-5 条期刊格式要点的 highlights（目标期刊无此要求时在该文件注明并跳过）；\n" +
+      "3. 投稿前自查（按 pre-submission-reviewer 技能）formatted.md，问题按 CRITICAL/MAJOR/MINOR 写入 submission/pre-review.md：CRITICAL/MAJOR 逐条处理或写明不处理的理由，MINOR 列出即可；\n" +
+      "4. 产出 submission/checklist.md 投稿清单：投稿系统入口（未知标「待填」）、需上传文件清单、作者信息与利益声明占位、推荐审稿人 2-4 位（只给研究领域与选择理由，具体姓名标「待填」）。\n" +
+      "完成标准：cover-letter.md、highlights.md、pre-review.md、checklist.md 均已提交；pre-review.md 中 CRITICAL/MAJOR 全部有处理结论。",
+    expectedArtifacts: ["submission/cover-letter.md", "submission/checklist.md"],
+    skills: ["pre-submission-reviewer"],
+    run: [],
+  },
+  {
+    name: "审稿意见回复",
+    workspaceName: "rebuttal",
+    brief:
+      "输入：reviews/round-1.md 审稿意见全文（用户把编辑来信粘贴保存为该文件；文件缺失时提示用户提供并停止，不得编造审稿意见）；submission/formatted.md（已随 main 合并在本工作区内）。\n" +
+      "1. 逐条拆分审稿意见并编号（R1.1、R1.2…，多位审稿人分节），不遗漏任何一条；\n" +
+      "2. 产出 rebuttal/response-letter.md，逐条回应：意见摘要 → 回应（接受修改 / 部分接受并说明限制 / 礼貌反驳并给依据）→ 稿件修改位置（节+段落）；语气先谢后答；拿不准如何回应的一律按「部分接受+说明限制」写，并标 [待确认]；\n" +
+      "3. 能改的直接改进稿件，产出 manuscript/revised.md（在 formatted.md 基础上修改，标注各修改对应的意见编号）；无法靠修改解决的（需补实验/补数据）在回应中给出计划并标 [待补实验]；\n" +
+      "4. 产出 rebuttal/revisions.md 修改对照表：每条意见 → 修改点 → revised.md 中的位置，逐条可核对。\n" +
+      "完成标准：response-letter.md 覆盖全部意见编号、revisions.md 与 revised.md 一一对应、均已提交；[待确认]/[待补实验] 在文件末尾汇总。",
+    expectedArtifacts: ["rebuttal/", "manuscript/revised.md"],
+    skills: [],
+    run: [],
+  },
+];
+
 /** 内置模板清单：选择器按此顺序展示，用户模板列在其后 */
 export const PIPELINE_TEMPLATES: PipelineTemplateDef[] = [
   {
@@ -398,6 +445,13 @@ export const PIPELINE_TEMPLATES: PipelineTemplateDef[] = [
     description:
       "开题与综述 → 研究方法 → 实验与结果 → 全文初稿 → 格式与定稿，按学位论文结构逐章产出",
     steps: THESIS_STEPS,
+  },
+  {
+    id: "submission-rebuttal",
+    name: "投稿与返修",
+    description:
+      "期刊格式适配 → cover letter 与投稿清单 → 审稿意见逐条回复与修订稿，覆盖定稿之后的投稿全流程",
+    steps: SUBMISSION_REBUTTAL_STEPS,
   },
 ];
 
