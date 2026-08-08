@@ -13,16 +13,37 @@ const DIFF_CAP: usize = 8 * 1024;
 
 // ===== profile 解析与无头参数 =====
 
-/// 显式 id 优先；其次设置页指定的 AI 专用 profile；否则最近使用（last_used_at 最新）；一个都没有才报错
+/// 内置 AI 功能 key（settings.ai_profiles 的键）：按功能独立指定 profile
+pub const FN_COMMIT: &str = "commit"; // ai_commit_message（◈ 提交信息）
+pub const FN_SUMMARIZE: &str = "summarize"; // ai_summarize_session（会话摘要）
+pub const FN_PR: &str = "pr"; // ai_draft_pr（PR 描述起草）
+pub const FN_DISTILL: &str = "distill"; // ai_distill_skill（✦ 沉淀为技能）
+pub const FN_CONFLICT: &str = "conflict"; // ai_conflict_advice（冲突选侧建议）
+// 「translate」由 JS 侧（技能页翻译）作为 ai_prompt 的 fnKey 显式传入，Rust 无字面引用
+#[allow(dead_code)]
+pub const FN_TRANSLATE: &str = "translate";
+
+/// 显式 id 优先；其次该功能的专属 profile（ai_profiles[fn_key]）；再次设置页 AI 专用 profile；
+/// 最后最近使用（last_used_at 最新）；一个都没有才报错。
+/// 功能专属 id 已失效（被删）视为不存在继续回落；显式/全局专用 id 失效仍明确报错
 fn resolve_profile_from(
     profiles: Vec<Profile>,
     profile_id: Option<String>,
+    fn_profile_id: Option<String>,
     dedicated_id: Option<String>,
 ) -> Result<Profile, String> {
-    for id in [profile_id, dedicated_id].into_iter().flatten() {
-        if id.trim().is_empty() {
-            continue;
+    if let Some(id) = profile_id.filter(|v| !v.trim().is_empty()) {
+        return profiles
+            .into_iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| format!("profile 不存在: {id}"));
+    }
+    if let Some(id) = fn_profile_id.filter(|v| !v.trim().is_empty()) {
+        if let Some(p) = profiles.iter().find(|p| p.id == id) {
+            return Ok(p.clone());
         }
+    }
+    if let Some(id) = dedicated_id.filter(|v| !v.trim().is_empty()) {
         return profiles
             .into_iter()
             .find(|p| p.id == id)
@@ -124,10 +145,21 @@ fn run_capture(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
     }
 }
 
-fn ai_prompt_impl(profiles: Vec<Profile>, profile_id: Option<String>, prompt: String) -> Result<String, String> {
-    // 设置页的 AI 专用 profile 作为显式 id 之外的默认（每次现读，改动即时生效）
-    let dedicated = crate::settings::read_current().ai_profile_id;
-    let profile = resolve_profile_from(profiles, profile_id, dedicated)?;
+fn ai_prompt_impl(
+    profiles: Vec<Profile>,
+    profile_id: Option<String>,
+    fn_key: Option<&str>,
+    prompt: String,
+) -> Result<String, String> {
+    // 设置页的按功能/全局专用 profile 作为显式 id 之外的默认（每次现读，改动即时生效）
+    let settings = crate::settings::read_current();
+    let fn_profile = fn_key.and_then(|k| {
+        settings
+            .ai_profiles
+            .as_ref()
+            .and_then(|m| m.get(k).cloned())
+    });
+    let profile = resolve_profile_from(profiles, profile_id, fn_profile, settings.ai_profile_id)?;
     let binary = agents::binary_for(&profile.agent)
         .ok_or_else(|| format!("profile 所属 agent 不支持无头调用: {}", profile.agent))?;
     let binary_path = agents::resolve_binary(binary)
@@ -378,17 +410,20 @@ pub struct ConflictAdviceDto {
     pub reason: String,
 }
 
-/// 无头一次性 prompt（供前端调试与未来功能复用）
+/// 无头一次性 prompt（供前端调试与未来功能复用）；fn_key = 功能 key（见 FN_* 常量），None 走全局默认
 #[tauri::command]
 pub async fn ai_prompt(
     store: tauri::State<'_, ProfileStore>,
     profile_id: Option<String>,
+    fn_key: Option<String>,
     prompt: String,
 ) -> Result<String, String> {
     let profiles = store.list()?;
-    tauri::async_runtime::spawn_blocking(move || ai_prompt_impl(profiles, profile_id, prompt))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        ai_prompt_impl(profiles, profile_id, fn_key.as_deref(), prompt)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -401,7 +436,7 @@ pub async fn ai_commit_message(
     tauri::async_runtime::spawn_blocking(move || {
         let cwd = crate::sessions::expand_tilde(&cwd);
         let (status, numstat, diff) = collect_commit_material(&cwd, paths.as_deref())?;
-        ai_prompt_impl(profiles, None, build_commit_prompt(&status, &numstat, &diff))
+        ai_prompt_impl(profiles, None, Some(FN_COMMIT), build_commit_prompt(&status, &numstat, &diff))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -424,6 +459,7 @@ pub async fn ai_summarize_session(
         let summary = ai_prompt_impl(
             profiles,
             None,
+            Some(FN_SUMMARIZE),
             build_summary_prompt(&cap_text_middle(&text, DIFF_CAP)),
         )?;
         let summary = crate::sessions::redact_sensitive_text(&summary);
@@ -457,7 +493,7 @@ pub async fn ai_draft_pr(store: tauri::State<'_, ProfileStore>, id: String) -> R
             Duration::from_secs(30),
         )
         .unwrap_or_default();
-        ai_prompt_impl(profiles, None, build_pr_prompt(&log, &numstat))
+        ai_prompt_impl(profiles, None, Some(FN_PR), build_pr_prompt(&log, &numstat))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -479,6 +515,7 @@ pub async fn ai_distill_skill(
         let raw = ai_prompt_impl(
             profiles,
             None,
+            Some(FN_DISTILL),
             build_distill_skill_prompt(&cap_text_middle(&excerpt, DIFF_CAP)),
         )?;
         parse_skill_draft(&raw)
@@ -516,7 +553,7 @@ pub async fn ai_conflict_advice(
             let text = fs::read_to_string(wt.join(f)).map_err(|e| format!("读取 {f} 失败: {e}"))?;
             contents.push((f.clone(), text));
         }
-        let raw = ai_prompt_impl(profiles, None, build_conflict_prompt(&w.branch, &w.base_branch, &contents))?;
+        let raw = ai_prompt_impl(profiles, None, Some(FN_CONFLICT), build_conflict_prompt(&w.branch, &w.base_branch, &contents))?;
         Ok(parse_conflict_advice(&raw, &files))
     })
     .await
@@ -553,19 +590,19 @@ mod tests {
             profile("c", "gemini", None),
         ];
         // 显式 id 优先
-        let p = resolve_profile_from(profiles.clone(), Some("a".into()), None).unwrap();
+        let p = resolve_profile_from(profiles.clone(), Some("a".into()), None, None).unwrap();
         assert_eq!(p.id, "a");
         // 否则 last_used_at 最新者；None 排最后
-        let p = resolve_profile_from(profiles.clone(), None, None).unwrap();
+        let p = resolve_profile_from(profiles.clone(), None, None, None).unwrap();
         assert_eq!(p.id, "b");
         // 全都没用过：取其一（max_by 的稳定首个），不报错
         let fresh = vec![profile("x", "codex", None), profile("y", "gemini", None)];
-        assert!(resolve_profile_from(fresh, None, None).is_ok());
+        assert!(resolve_profile_from(fresh, None, None, None).is_ok());
         // 空列表报错
-        let err = resolve_profile_from(vec![], None, None).unwrap_err();
+        let err = resolve_profile_from(vec![], None, None, None).unwrap_err();
         assert!(err.contains("请先在配置页创建并保存一个 profile"), "{err}");
         // 不存在的 id 报错
-        assert!(resolve_profile_from(profiles, Some("zzz".into()), None).is_err());
+        assert!(resolve_profile_from(profiles, Some("zzz".into()), None, None).is_err());
     }
 
     #[test]
@@ -575,14 +612,34 @@ mod tests {
             profile("b", "claude-code", Some("2026-07-30T00:00:00Z")),
         ];
         // 设置页专用 profile 盖过最近使用
-        let p = resolve_profile_from(profiles.clone(), None, Some("a".into())).unwrap();
+        let p = resolve_profile_from(profiles.clone(), None, None, Some("a".into())).unwrap();
         assert_eq!(p.id, "a");
         // 显式 id 仍最优先
-        let p = resolve_profile_from(profiles.clone(), Some("b".into()), Some("a".into())).unwrap();
+        let p = resolve_profile_from(profiles.clone(), Some("b".into()), None, Some("a".into())).unwrap();
         assert_eq!(p.id, "b");
         // 专用 id 已被删除：明确报错（提示去设置页重选），不静默回落
-        let err = resolve_profile_from(profiles, None, Some("gone".into())).unwrap_err();
+        let err = resolve_profile_from(profiles, None, None, Some("gone".into())).unwrap_err();
         assert!(err.contains("profile 不存在"), "{err}");
+    }
+
+    #[test]
+    fn profile_resolution_fn_specific_beats_dedicated_but_not_explicit() {
+        let profiles = vec![
+            profile("a", "codex", Some("2026-07-01T00:00:00Z")),
+            profile("b", "claude-code", Some("2026-07-30T00:00:00Z")),
+        ];
+        // 功能专属盖过全局专用
+        let p = resolve_profile_from(profiles.clone(), None, Some("b".into()), Some("a".into())).unwrap();
+        assert_eq!(p.id, "b");
+        // 显式 id 仍最优先
+        let p = resolve_profile_from(profiles.clone(), Some("a".into()), Some("b".into()), None).unwrap();
+        assert_eq!(p.id, "a");
+        // 功能专属 id 已失效（被删）：视为不存在，回落全局专用
+        let p = resolve_profile_from(profiles.clone(), None, Some("gone".into()), Some("a".into())).unwrap();
+        assert_eq!(p.id, "a");
+        // 功能专属与全局都失效：继续回落最近使用（不报错）
+        let p = resolve_profile_from(profiles, None, Some("gone".into()), None).unwrap();
+        assert_eq!(p.id, "b");
     }
 
     #[test]

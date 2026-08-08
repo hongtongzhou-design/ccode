@@ -54,8 +54,12 @@ function skillRepoUrl(skill: SkillDto): string | null {
 /** 来源单元格：GitHub 来源渲染为可点小字链接（系统浏览器打开），其余为纯文本 */
 function SourceCell({ skill }: { skill: SkillDto }) {
   const url = skillRepoUrl(skill);
-  const label = SOURCE_LABEL[skill.source] ?? skill.source;
-  if (!url) return <span className="truncate text-xs text-l4">{label}</span>;
+  // GitHub 来源展示具体可分辨的地址（owner/repo[/subdir]），其余来源保留类型标签
+  const label = skill.repo
+    ? skill.repo + (skill.repoSubdir ? `/${skill.repoSubdir}` : "")
+    : (SOURCE_LABEL[skill.source] ?? skill.source);
+  if (!url)
+    return <span className="truncate text-[13px] text-l4">{label}</span>;
   return (
     <button
       type="button"
@@ -64,7 +68,7 @@ function SourceCell({ skill }: { skill: SkillDto }) {
         void openUrl(url);
       }}
       title={`在浏览器打开 ${url}`}
-      className="truncate text-left text-xs text-l4 underline decoration-white/20 underline-offset-2 hover:text-l2"
+      className="truncate text-left font-mono text-[13px] text-l4 underline decoration-white/20 underline-offset-2 hover:text-l2"
     >
       {label}
     </button>
@@ -771,6 +775,38 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
   const [updates, setUpdates] = useState<Record<string, SkillUpdateDto>>({});
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  // ◈ 技能翻译（英文技能友好）：ai_prompt 一次性调用，译文随会话缓存（skill.id → 译文），
+  // 只读展示不写库文件；切换技能各自缓存
+  const [translations, setTranslations] = useState<Record<string, string>>({});
+  const [translating, setTranslating] = useState(false);
+  const [showOriginal, setShowOriginal] = useState(false);
+  const translation = preview
+    ? (translations[preview.skill.id] ?? null)
+    : null;
+
+  async function toggleTranslation() {
+    if (!preview) return;
+    if (translation) {
+      setShowOriginal((v) => !v);
+      return;
+    }
+    setTranslating(true);
+    try {
+      // 超出 8KB 截断（长文档翻核心部分），prompt 显式要求保留 Markdown 结构
+      const text = preview.content.slice(0, 8192);
+      const zh = await invoke<string>("ai_prompt", {
+        profileId: null,
+        fnKey: "translate",
+        prompt: `把以下技能文档翻译为中文，保持 Markdown 结构与代码块原样，只输出译文，不要任何解释：\n\n${text}`,
+      });
+      setTranslations((m) => ({ ...m, [preview.skill.id]: zh.trim() }));
+      setShowOriginal(false);
+    } catch (reason) {
+      setError(`翻译失败：${String(reason)}`);
+    } finally {
+      setTranslating(false);
+    }
+  }
   // 技能编辑器（RX3b）：create=空白表单（可带 AI 草稿预填）；edit=预填名称/描述/正文（名称锁定）
   const [editor, setEditor] = useState<
     | {
@@ -1064,7 +1100,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             <div className="mt-4">
               {/* caps 式小字灰表头：弱化只作列定位，hairline 分隔无卡片外框；sticky 用页面底色遮挡滚动内容 */}
               <div>
-                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 border-b border-hairline bg-canvas px-3 py-2 text-[11px] tracking-wider text-l4">
+                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_36px] items-center gap-3 border-b border-hairline bg-canvas px-3 py-2 text-xs tracking-wider text-l4">
                   <span>技能</span>
                   <span>来源</span>
                   <span>应用</span>
@@ -1084,7 +1120,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         aria-label={
                           catCollapsed.has(category) ? "展开" : "收起"
                         }
-                        className="flex h-9 w-full items-center gap-1.5 border-b border-hairline px-3 text-xs hover:bg-white/5"
+                        className="flex h-9 w-full items-center gap-1.5 border-b border-hairline px-3 text-sm hover:bg-white/5"
                       >
                         <span className="w-3 text-l4">
                           {catCollapsed.has(category) ? "▸" : "▾"}
@@ -1104,7 +1140,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                               <li
                                 key={skill.id}
                                 onClick={() => void onView(skill)}
-                                className={`group grid min-h-12 cursor-pointer grid-cols-[minmax(220px,1fr)_92px_120px_36px] items-center gap-3 px-3 transition-colors hover:bg-white/5 ${
+                                className={`group grid min-h-12 cursor-pointer grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_36px] items-center gap-3 px-3 transition-colors hover:bg-white/5 ${
                                   preview?.skill.id === skill.id
                                     ? "bg-inset"
                                     : ""
@@ -1119,7 +1155,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     {(skill.tags ?? []).slice(0, 4).map((tag) => (
                                       <span
                                         key={tag}
-                                        className="h-4 max-w-24 shrink-0 truncate rounded-full bg-inset px-1.5 text-[10px] leading-4 text-l3"
+                                        className="h-5 max-w-24 shrink-0 truncate rounded-full bg-inset px-1.5 text-xs leading-5 text-l3"
                                       >
                                         {tag}
                                       </span>
@@ -1127,7 +1163,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     {/* 状态聚合：副本过期/GitHub 可更新合并为一个警示点，明细在悬浮 */}
                                     {(stale || update?.updateAvailable) && (
                                       <span
-                                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn-text"
+                                        className="size-2 shrink-0 rounded-full bg-warn-text"
                                         title={[
                                           stale
                                             ? `副本过期：${(skill.staleCopies ?? []).join("、")}`
@@ -1207,12 +1243,12 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     event.stopPropagation();
                                     void onView(skill);
                                   }}
-                                  className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs text-l3 hover:bg-seg-sel hover:text-l1"
+                                  className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-[13px] text-l3 hover:bg-seg-sel hover:text-l1"
                                   title="在右侧管理该技能应用到哪些 Agent"
                                 >
                                   {/* 无状态不渲染状态点：未应用时不画灰点，计数文字已表达 */}
                                   {applied > 0 && (
-                                    <span className="size-1.5 shrink-0 rounded-full bg-ok-text" />
+                                    <span className="size-2 shrink-0 rounded-full bg-ok-text" />
                                   )}
                                   {applied}/{AGENTS.length} 个 Agent
                                 </button>
@@ -1265,13 +1301,15 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               ×
             </button>
           </div>
-          {/* 描述收进详情面板全文展示，不再截断；空或纯符号的异常值显示占位 */}
-          <div className="shrink-0 border-b border-hairline px-3 py-2.5 text-[13px] leading-5 text-l3">
+          {/* 描述/来源/应用网格与 SKILL.md 同在一个滚动区（v3.47：顶部固定区曾挡掉内容上半部分）；
+              描述全文展示，不再截断；空或纯符号的异常值显示占位 */}
+          <div className="min-h-0 flex-1 overflow-auto">
+          <div className="border-b border-hairline px-3 py-2.5 text-[13px] leading-5 text-l3">
             {displayDescription(preview.skill.description) ?? (
               <span className="text-l4">—</span>
             )}
           </div>
-          <div className="shrink-0 border-b border-hairline px-3 py-2.5 text-[13px] text-l3">
+          <div className="border-b border-hairline px-3 py-2.5 text-[13px] text-l3">
             <span>
               {SOURCE_LABEL[preview.skill.source] ?? preview.skill.source}
             </span>
@@ -1286,6 +1324,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                     title={`在浏览器打开 ${url}`}
                   >
                     {preview.skill.repo}
+                    {preview.skill.repoSubdir ? `/${preview.skill.repoSubdir}` : ""}
                   </button>
                 ) : (
                   <span
@@ -1293,6 +1332,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                     title={preview.skill.repo}
                   >
                     {preview.skill.repo}
+                    {preview.skill.repoSubdir ? `/${preview.skill.repoSubdir}` : ""}
                   </span>
                 );
               })()}
@@ -1313,7 +1353,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               </span>
             )}
           </div>
-          <div className="shrink-0 border-b border-hairline bg-strip px-3 py-3">
+          <div className="border-b border-hairline bg-strip px-3 py-3">
             <div className="mb-2 flex items-center gap-2">
               <span className="text-[13px] font-medium text-l2">
                 应用到 Agent
@@ -1361,13 +1401,31 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               })}
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-auto p-4">
-            <div className="mb-3 text-xs font-medium tracking-wide text-l4">
+          <div className="p-4">
+            <div className="mb-3 flex items-center gap-2 text-xs font-medium tracking-wide text-l4">
               SKILL.md
+              {/* 英文技能一键翻译（◈ ai_prompt 一次性调用，结果随会话缓存；不改动库文件） */}
+              <button
+                type="button"
+                disabled={translating}
+                onClick={() => void toggleTranslation()}
+                className="ml-auto rounded px-1.5 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+              >
+                {translating
+                  ? "翻译中…"
+                  : translation
+                    ? showOriginal
+                      ? "显示译文"
+                      : "显示原文"
+                    : "◈ 翻译为中文"}
+              </button>
             </div>
             <pre className="whitespace-pre-wrap break-all font-mono text-[13px] leading-6 text-l2">
-              {preview.content}
+              {translation && !showOriginal
+                ? translation
+                : preview.content}
             </pre>
+          </div>
           </div>
         </div>
       )}

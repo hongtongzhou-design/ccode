@@ -132,7 +132,7 @@ export function EmptyState({
   return (
     <div className="flex min-h-48 flex-col items-center justify-center px-6 py-10 text-center">
       <div className="mb-3 flex size-9 items-center justify-center text-lg text-l4">
-        ·
+        ○
       </div>
       <p className="text-sm font-medium text-l2">{title}</p>
       {detail && <div className="mt-1 max-w-md text-xs leading-5 text-l4">{detail}</div>}

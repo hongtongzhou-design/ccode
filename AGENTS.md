@@ -57,7 +57,7 @@ npm run tauri build    # 打包
 - **管道输出块缓冲**：brew/npm 检测到非 TTY 会块缓冲导致"无输出"假象——安装/更新命令必须在 PTY 里跑（别退回管道）。
 - **GUI 应用 PATH 很短**：打包应用可能找不到 npm 装的 CLI（开发模式不受影响）；统一经 `agents::resolve_binary` 候选目录兜底解析。
 - **本机 CLI 安装情况**：claude/codex/gemini/qwen 为 brew 或 npm 安装（检测见 updater.rs 报告）；opencode 未装；kimi 为新版（~/.kimi-code）。
-- **dev 端口为 17575**（`vite.config.ts` + `tauri.conf.json` devUrl 两处同步；勿改回 1420——Codex 桌面版 NetworkService 占用）。vite 撞已占端口静默退出；**stdin EOF 也自杀**——后台拉起必须 `tail -f /dev/null | npm run tauri dev`。
+- **dev 端口为 17575**（`vite.config.ts` + `tauri.conf.json` devUrl 两处同步；勿改回 1420——Codex 桌面版 NetworkService 占用）。vite 撞已占端口静默退出；**stdin EOF 也自杀**——后台拉起必须 `tail -f /dev/null | npm run tauri:dev`。
 - **git 提交**：常规提交加 `[skip ci]`，里程碑提交才跑三平台 CI。
 - **git 推送走 SSH:443 + repo deploy key**；**deploy key 推送不触发 GitHub Actions**——发版必须 `gh api repos/hongtongzhou-design/ccode/actions/workflows/build.yml/dispatches -f ref=<tag>` 手动触发；workflow 已配 `permissions: contents: write`（tauri-action 建 Release 草稿必需）。**仓库 owner 与 tauri.conf 升级端点绑定**（同为 `hongtongzhou-design/ccode`）：仓库若转移，本命令、updater endpoint、README 链接三处必须同步改。
 - **CI 测试**：禁墙钟时序硬断言（runner 调度延迟不可控；只留内容语义断言 + 防挂死宽松兜底）；unix 专属语义（symlink/PTY/脚本）测试加 `#[cfg(unix)]`；路径断言用 `Path::ends_with`（Windows `\`）。
@@ -70,6 +70,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   pages/                     # 七页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ 统计◫ 设置⛭
   components/                # WorkspaceReviewView、PipelineEditor、ProjectGroup/ProjectRail、ArtifactChecklist、FileTree、
                              # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker 等
+  components/CommandPalette.tsx # ⌘K 面板
   pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES
   pipeline-start.ts          # 一键开步共享链路（三处 TASK.md 同一出处）
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
@@ -80,6 +81,10 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   terminal-tab-persistence.ts # 终端标签重启恢复白名单（不含 PTY/密钥/env）
   terminal-palettes.ts       # 终端调色板共享表（设置页与终端同源）
   upstream-note.ts           # brew 最新但上游 npm 更高版本的提示
+  command-palette.ts         # 命令面板过滤纯逻辑
+  hotkeys.ts                 # 快捷键组合串纯逻辑
+  themes.ts                  # 主题清单单一出处
+  profile-copy.ts            # profile 跨 agent 复制纯逻辑
   store.ts                   # zustand 状态
 src-tauri/src/
   agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login）
@@ -290,7 +295,7 @@ src-tauri/src/
 - 配置页结构（用户详版规格）：可折叠 agent 分组 + 五列网格行 + 顶部筛选与搜索 + 无大面积虚线空状态；图标按钮点击区 ≥28px；
   **WKWebView 不支持 window.prompt**——一切输入用内联输入框。
 - 常规管理页统一共享页面框架/标题层级/主操作样式/主题化开关复选框/加载骨架；页面最大宽度必须显式选择，禁叠加冲突的
-  `max-w-*`。**控件尺寸固定两级**：标题栏主/次操作与终端启动栏 32px；任务行、步骤胶囊、对话列表/回放头部及图标按钮 28px
+  `max-w-*`。**控件尺寸固定两级**：标题栏主/次操作与终端启动栏 32px；任务行、步进器圆/小方块热区、对话列表/回放头部及图标按钮 28px
   （可点击就不得小于 28px；层级靠填充色/边框/文字色区分，不靠按钮忽大忽小）。**留白节拍固定**：统一标题呼吸区/工具栏
   间距/主体内边距；空状态与低对象数量时允许保留连续画布，不为填满窗口堆料；工作区流水线与任务行可增加垂直间距，但不
   改变步骤顺序和操作语义。
@@ -311,7 +316,7 @@ src-tauri/src/
   小字基准 13px，xterm 新用户默认 14px；状态点等微型符号可更小，但文件树、标签、启动栏、对话/改动正文不得退回 11–12px。
 - 终端展开态主流程固定为 Agent → profile → 模型 → 目录 → 启动，辅助动作视觉分组；启动后自动收缩、PTY shell 回落、
   所有终端标签保持挂载的语义不得因布局优化改变。**专注双模式（v3.43）**：中带「⤢ 专注终端」（藏左右栏，标签条
-  留在中带顶部，portal 机制已删）与右栏「⇱ 专注内容」（右栏铺满、中带只压暗不模糊），Esc 退出；左栏不再有 « 收起态。
+  留在中带顶部，portal 机制已删）与右栏「⇱ 专注内容」（右栏铺满、中带不加遮罩），Esc 退出；左栏不再有 « 收起态。
   状态点全局统一 `size-2 rounded-full`；端口区分「本应用/系统其他」两段，终止外部进程必须二次确认。
 - **统计内部活动只认后端 provenance**：Ccode 无头 AI 启动前登记精确 agent+项目路径，usage 事件与项目/模型 DTO 显式携带
   `source/internal`；禁止再按 `/tmp`、`ccode-ai-*` 名称、空模型或 `<synthetic>` 猜测。统计页默认归并 `internal=true`，并提供
@@ -353,7 +358,7 @@ src-tauri/src/
   （不接受外部子路径），单次 ≤ 64KB、读-改-原子写、已存在文件 canonicalize 双校验防 symlink 逃逸；笔记步骤定位 =
   `workspaceName === "lit-notes"` 优先、回落流水线第二步；无活跃工作区时复用一键开步链路（ensure_git_repo → create_workspace
   → TASK.md best-effort → 追加 inbox → pendingTerminal + ORGANIZE_NOTES_PROMPT 预填）。
-- **步骤胶囊对照（RX2b）**：跨页「文件树切根」走 store 一次性 `enterCwdReq`（终端页消费后复用 enterCwd/externalCwd「真进入」
+- **步骤对照（RX2b）**：跨页「文件树切根」走 store 一次性 `enterCwdReq`（终端页消费后复用 enterCwd/externalCwd「真进入」
   机制，文件树根随活动标签 cwd）；`previewReq` 可带可选 `root`（文本预览的后端根约束，缺省回落活动标签 cwd）。产物核验已移到
   任务行手风琴与步进器圆后小方块（见「产物核验清单」条）；大圆悬浮信息（目录/agent/profile）读终端页同一键 `ccode.wsLast.<worktreePath>`。
 - **流水线大圆步进器（v3.46，取代 v3.45 胶囊分层与进度段）**：名称带与步进器带两个同列网格；虚线为**真实 flex 块节律**
@@ -397,9 +402,9 @@ src-tauri/src/
 
 **当前待办**：
 
-- P0 收尾当前批次：全量文档同步 → 走查 → [skip ci] 提交 → 可选发版；历史时间线视图待并行组合入后补手册条目
+- P0 收尾当前批次：全量文档同步 → 走查 → [skip ci] 提交 → 可选发版
 - macOS 签名公证（暂缓，需 Apple Developer 会员 + CI 配 6 个 APPLE_* secrets，见架构 v1.3）
 - Intel macOS 安装包（暂缓：CI macos-latest 只出 aarch64；加 `x86_64-apple-darwin` target 构建时间翻倍，真有 Intel 用户再加，
   见架构 v1.3 / README 安装节）
 - OpenCode Windows 数据路径未核实（matrix 标注「文档与源码不一致」），Windows 用户验证会话/用量统计后修正
-- Skills 更新检测与在线编辑（v2 口子，见架构 v0.9 / §6.13）
+- Skills 一键更新：更新检测（check_skill_updates）与在线编辑（create_skill/update_skill_content）均已落地（见架构 v0.9 / §6.13）；剩余 = 检测后一键应用更新（当前只提示，重新导入走冲突确认）

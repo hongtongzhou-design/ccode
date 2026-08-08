@@ -77,6 +77,16 @@ const EXTERNAL_TERMINALS: { id: string; label: string }[] = (() => {
   ];
 })();
 
+/** 内置 AI 功能按功能独立配置的行（key 与后端 ai.rs FN_* 常量对应） */
+const AI_FN_ROWS: { key: string; label: string }[] = [
+  { key: "commit", label: "提交信息" },
+  { key: "summarize", label: "会话摘要" },
+  { key: "pr", label: "PR 描述" },
+  { key: "distill", label: "沉淀为技能" },
+  { key: "conflict", label: "冲突建议" },
+  { key: "translate", label: "翻译" },
+];
+
 /** 诊断日志条目（与后端 logbuf::LogEntryDto 对应） */
 type LogEntry = { ts: string; level: string; source: string; message: string };
 
@@ -354,6 +364,14 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  /** 按功能 AI 配置：改一键后整图提交；空值 = 删除该键（跟随默认） */
+  function patchAiFnProfile(fnKey: string, profileId: string) {
+    const next = { ...(settings?.aiProfiles ?? {}) };
+    if (profileId) next[fnKey] = profileId;
+    else delete next[fnKey];
+    void patch({ aiProfiles: next });
   }
 
   /** 精确注意力标记开关：走专用命令（写/移除 ~/.claude/settings.json hooks 段 + 记设置），
@@ -867,6 +885,28 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             ))}
           </select>
         </Row>
+
+        {AI_FN_ROWS.map((fn) => (
+          <Row
+            key={fn.key}
+            label={fn.label}
+            hint="留空则跟随默认（上方「AI 专用配置」）"
+          >
+            <select
+              className={fieldFixed}
+              value={settings?.aiProfiles?.[fn.key] ?? ""}
+              onChange={(e) => patchAiFnProfile(fn.key, e.target.value)}
+            >
+              <option value="">跟随默认</option>
+              {profiles.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}（{p.agent}
+                  {p.models[0] ? ` · ${p.models[0]}` : ""}）
+                </option>
+              ))}
+            </select>
+          </Row>
+        ))}
 
         <Row
           label="外部终端"

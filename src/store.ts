@@ -41,6 +41,9 @@ export interface AppSettings {
   theme: string;
   /** ◈ AI 功能固定使用的 profile id；null/undefined = 自动（最近使用） */
   aiProfileId?: string | null;
+  /** ◈ AI 功能按功能独立配置：键 = 功能 key（commit/summarize/pr/distill/conflict/translate，
+      见 ai.rs FN_* 常量），值 = profile id；键缺失 = 跟随默认（aiProfileId） */
+  aiProfiles?: Record<string, string>;
   /** 对话页「⇗ 外部恢复」的终端应用；auto/undefined = 按优先级探测 */
   externalTerminal?: string;
   /** 精确注意力标记（Claude Code hooks，写 ~/.claude/settings.json，默认关） */

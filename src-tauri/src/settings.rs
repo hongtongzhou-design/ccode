@@ -2,6 +2,7 @@
 //! 消费点：终端外观（前端）、usage 汇率、updater 的 brew 镜像开关、长任务 OS 通知开关（前端）。
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
@@ -41,6 +42,9 @@ pub struct AppSettingsDto {
     pub theme: Option<String>,
     /// ◈ AI 功能（提交信息/摘要/PR 描述）固定使用的 profile id；None = 自动（最近使用）
     pub ai_profile_id: Option<String>,
+    /// ◈ AI 功能按功能独立配置：键 = 功能 key（见 ai.rs FN_* 常量），值 = profile id；
+    /// 某功能缺省时回落 ai_profile_id，None = 全部走默认
+    pub ai_profiles: Option<BTreeMap<String, String>>,
     /// 会话页「⇗ 外部恢复」使用的终端应用（KNOWN_EXTERNAL_TERMINALS）；None/auto = 自动探测
     pub external_terminal: Option<String>,
     /// 精确注意力标记（Claude Code hooks）：开启/关闭由 claude_hooks::set_claude_hooks_attention
@@ -95,6 +99,8 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
                 .unwrap_or_else(|| DEFAULT_THEME.to_string()),
         ),
         ai_profile_id: s.ai_profile_id.filter(|v| !v.trim().is_empty()),
+        // 按功能配置不做默认值填充：键缺失即「跟随默认」
+        ai_profiles: s.ai_profiles,
         external_terminal: Some(
             s.external_terminal
                 .filter(|v| KNOWN_EXTERNAL_TERMINALS.contains(&v.as_str()))
@@ -140,6 +146,10 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     // 支持清空：传空字符串 → None（回到「自动=最近使用」）
     if patch.ai_profile_id.is_some() {
         cur.ai_profile_id = patch.ai_profile_id.filter(|v| !v.trim().is_empty());
+    }
+    // 按功能配置整图覆盖（前端每次提交完整 map；空 map = 全部跟随默认）
+    if patch.ai_profiles.is_some() {
+        cur.ai_profiles = patch.ai_profiles;
     }
     if patch.external_terminal.is_some() {
         cur.external_terminal = patch.external_terminal;
@@ -293,6 +303,45 @@ mod tests {
             },
         );
         assert_eq!(cur.ai_profile_id, None);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn ai_profiles_merge_overwrites_whole_map() {
+        let p = tmp();
+        let mut cur = read_from(&p);
+        // 首次写入两个功能键
+        let mut m = BTreeMap::new();
+        m.insert("commit".to_string(), "p-1".to_string());
+        m.insert("summarize".to_string(), "p-2".to_string());
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                ai_profiles: Some(m),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cur.ai_profiles.as_ref().unwrap().len(), 2);
+        // Some 即整图覆盖：改一键后整体提交，旧键按新 map 去留
+        let mut m2 = BTreeMap::new();
+        m2.insert("commit".to_string(), "p-3".to_string());
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                ai_profiles: Some(m2),
+                ..Default::default()
+            },
+        );
+        let map = cur.ai_profiles.as_ref().unwrap();
+        assert_eq!(map.get("commit").map(String::as_str), Some("p-3"));
+        assert!(!map.contains_key("summarize"), "整图覆盖，未提交的键被删除");
+        // patch 缺省（None）不动现有 map
+        merge(&mut cur, AppSettingsDto::default());
+        assert_eq!(cur.ai_profiles.as_ref().unwrap().len(), 1);
+        // with_defaults 原样透传，不填默认
+        let full = with_defaults(cur);
+        assert_eq!(full.ai_profiles.as_ref().unwrap().len(), 1);
+        assert_eq!(with_defaults(AppSettingsDto::default()).ai_profiles, None);
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 

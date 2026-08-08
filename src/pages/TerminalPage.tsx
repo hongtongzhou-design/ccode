@@ -162,7 +162,7 @@ async function fireAttentionNotification(
  *  浅色主题下 ANSI 16 色预设仍偏深色向，用户可在设置页调色板里另行选择。 */
 const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
   {
-    midnight: { background: "#11131a", foreground: "#aeb6c6" },
+    midnight: { background: "#0e1015", foreground: "#b3b0aa" },
     terracotta: { background: "#2d2d2b", foreground: "#c9c9c4" },
     ayu: { background: "#10141c", foreground: "#bfbdb6" },
     mocha: { background: "#1e1e2e", foreground: "#aeb8dc" },

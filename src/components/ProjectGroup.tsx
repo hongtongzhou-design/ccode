@@ -41,7 +41,7 @@ function DashBlock({ k, done }: { k: string; done: boolean }) {
       key={k}
       aria-hidden
       className={`block h-[5px] w-[5px] shrink-0 rounded-[1px] transition-colors duration-300 ${
-        done ? "bg-ok-text group-hover:brightness-110" : "bg-hairline group-hover:bg-l3"
+        done ? "bg-done group-hover:brightness-110" : "bg-hairline group-hover:bg-l3"
       }`}
     />
   );
@@ -77,7 +77,7 @@ function SquareButton({
       onClick={onClick}
       className={`relative block h-[5px] w-[5px] shrink-0 cursor-pointer rounded-[1px] transition-[transform,background-color] duration-300 hover:scale-150 hover:bg-cta focus-visible:scale-150 focus-visible:bg-cta disabled:cursor-not-allowed ${
         done
-          ? "bg-ok-text group-hover:brightness-110"
+          ? "bg-done group-hover:brightness-110"
           : "bg-hairline group-hover:bg-l3"
       }`}
     >
@@ -143,7 +143,7 @@ function StepperCell({
   const left = Math.ceil(dashCount / 2);
   const right = Math.floor(dashCount / 2);
   // done 列整条链变绿（已打通）；进行中/checking 的圆加 cta 外环锁定焦点
-  const done = circleClass.includes("bg-ok-text");
+  const done = circleClass.includes("bg-done");
   const active = circleClass.includes("bg-cta ");
   return (
     <li
@@ -228,8 +228,8 @@ const STEP_STATUS_LABEL: Record<StepStatusKey, string> = {
 
 /** 大圆步进器的圆填色：纯实心无字符，状态只靠颜色区分；进行中/检查中带呼吸脉冲表达「正在动」 */
 function stepCircleClass(key: StepStatusKey): string {
-  // done 用亮绿（bg-ok 深绿底在 strip 上几乎看不见圆），其余为各自语义实心底
-  if (key === "done") return "bg-ok-text";
+  // done 用随主题走的低饱和完成绿（--color-done），与状态 ok 绿解耦（用户反馈亮绿突兀）
+  if (key === "done") return "bg-done";
   if (key === "blocked") return "bg-warn";
   if (key === "review") return "bg-cta-pill";
   if (key === "active" || key === "checking") return "bg-cta animate-pulse";
@@ -754,8 +754,8 @@ export default function ProjectGroup({
   }
   const groupCountsTotal =
     groupCounts.active + groupCounts.review + groupCounts.blocked;
-  // 课题主题从常驻小字收进项目名悬浮 title（白话双层）
-  const topicTitle =
+  // 课题主题直接显示在项目名旁（v3.47：只挂悬浮提示等于不存在——用户反馈看不到）
+  const topicText =
     registered && cfg?.topic?.trim() ? cfg.topic.trim() : undefined;
   // 圆后小方块（产物）手风琴展开项（单开）：无绑定工作区不渲染（方块本身已禁用，此处兜底）
   const artStep =
@@ -793,12 +793,17 @@ export default function ProjectGroup({
             </button>
           </form>
         ) : (
-          <h2
-            className="shrink-0 text-sm font-medium text-l1"
-            title={topicTitle}
-          >
+          <h2 className="shrink-0 text-sm font-medium text-l1">
             {displayName}
           </h2>
+        )}
+        {topicText && (
+          <span
+            className="min-w-0 max-w-72 truncate text-xs text-l3"
+            title={topicText}
+          >
+            {topicText}
+          </span>
         )}
         {!registered && (
           <span className="inline-flex shrink-0 items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l3">

@@ -1555,15 +1555,16 @@ export default function ProfilesPage() {
                             </span>
                             <span
                               className={`min-w-0 truncate font-mono text-xs ${
-                                profile.models[0] ? "text-l2" : "text-l4"
+                                profile.models.length > 0
+                                  ? "text-l2"
+                                  : "text-l4"
                               }`}
-                              title={
-                                profile.models.length > 1
-                                  ? profile.models.join(" · ")
-                                  : profile.models[0]
-                              }
+                              title={profile.models.join(" · ")}
                             >
-                              {profile.models[0] ?? "未指定模型"}
+                              {/* 全量展示该 profile 配置的所有模型（极端超长才截断，悬浮给全文） */}
+                              {profile.models.length > 0
+                                ? profile.models.join(" · ")
+                                : "未指定模型"}
                             </span>
                             {profile.accountType === "official" ? (
                               <span

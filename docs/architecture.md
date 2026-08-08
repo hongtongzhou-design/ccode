@@ -1,8 +1,8 @@
 # Ccode 架构方案 v0.2
 
-> 一个「AI 科研工作台」：底层是六个 Agent CLI 的统一控制台（启动器 + 配置中心 + 会话监控台），
+> 一个「AI 科研工作台」：底层是八个 Agent CLI 的统一控制台（启动器 + 配置中心 + 会话监控台），
 > 表面是科研流水线（读文献 → 整数据 → 做图 → 写论文）——AI 负责干活，Ccode 负责管活，人负责拍板（2026-08 定稿，§11）。
-> 本文档是项目的总体逻辑架构，配合 `docs/agent-integration-matrix.md`（六个 CLI 的适配细节）使用。
+> 本文档是项目的总体逻辑架构，配合 `docs/agent-integration-matrix.md`（八个 CLI 的适配细节）使用。
 > 所有关于各 CLI 的事实均来自 2026-07-30 对官方文档/源码的调研，标注「易漂移」的字段需防御式处理。
 > v0.2：固化五项产品决策（命名 Ccode、项目自动聚合、终端↔对话联动、token 统计留在 P3、三平台同步）。
 > v3.4：定位演进为 AI 科研工作台（§11 演进线）；通用控制台架构（§1–§10）作为其底层继续成立。
@@ -13,7 +13,7 @@
 
 让用户在一个桌面应用里：
 
-1. 为多个终端 AI agent（Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code）管理**多套 API 配置**（端点 + 密钥 + 模型），一键切换；
+1. 为多个终端 AI agent（Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI）管理**多套 API 配置**（端点 + 密钥 + 模型），一键切换；
 2. 在**内嵌终端**里一键拉起任意 agent + 任意配置 + 任意项目目录；
 3. **可视化浏览**各 agent 的历史会话（按项目自动聚合组织），并与内嵌终端联动，实时观看进行中的对话。
 
@@ -34,7 +34,7 @@
 | 切换机制 | 双模式：默认**启动时注入环境变量**（零污染），另提供「设为全局默认」写入 CLI 配置文件 |
 | 终端形态 | 内嵌终端（xterm.js + Rust PTY），**与会话视图联动** |
 | 项目来源 | **从各 agent 历史会话自动聚合「常用项目」并分类**，辅以手动添加 |
-| Agent 范围 | 六个全部进 MVP，通过适配器接口隔离差异 |
+| Agent 范围 | 六个全部进 MVP，通过适配器接口隔离差异（v3.23/v3.24 起八家） |
 | 分发 | **三平台（macOS / Windows / Linux）同步**，代码从第一天起保持跨平台 |
 | token/费用统计 | P3 顺带做（usage 字段已确认可解析） |
 | 实现方式 | 主要由 AI 编码，架构保持简单直接 |
@@ -55,7 +55,7 @@
 ├────────────────── Tauri IPC（commands + events）────────┤
 │ Rust 核心                                               │
 │  ├─ ProfileStore    profile 持久化（JSON + 系统钥匙串） │
-│  ├─ AgentAdapter    trait，六个实现（见 §4）            │
+│  ├─ AgentAdapter    trait，八个实现（见 §4）            │
 │  ├─ PtyManager      portable-pty 拉起/管理 CLI 进程     │
 │  ├─ SessionIndexer  扫描各 agent 会话目录 → 统一索引    │
 │  ├─ SessionParser   每种格式一个 parser（防御式）       │
@@ -91,7 +91,7 @@ trait AgentAdapter {
 }
 ```
 
-六个 agent 的关键适配结论（细节见 matrix 文档，此处只列**影响架构的事实**）：
+八个 agent 的关键适配结论（细节见 matrix 文档，此处只列**影响架构的事实**）：
 
 | Agent | 注入模式可行？ | 注意点 |
 |---|---|---|
@@ -399,7 +399,7 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 | v0.3 | 密钥存储弃用系统钥匙串，改 0600 `keys.json`（macOS 钥匙串 ACL 与未签名开发构建冲突导致密钥丢失）；借鉴 CC Switch 落地：原子写入（tmp+rename）、内置端点预设（只收官方/公开端点）、profile 导入导出（不含密钥）；Claude 多模型经 `ANTHROPIC_DEFAULT_*_MODEL` 别名槽注册进 `/model` 选择器（最多 5 槽） |
 | v0.4 | 借鉴 Wave Terminal 细化会话设计（§6.5）：pin 即保留（快照拷贝到自家目录，对抗 CLI 自动清除/格式迁移）；整理数据（pinned/tags/custom_title）存 app.db 不碰源文件；分类 = 项目聚合 + tags + 状态三维度；全局搜索作为差异化做透。明确不借鉴：序列化终端缓冲区快照（与解析路线重复）、AI 会话内存存储（不可靠） |
 | v0.5 | 参考实现扩展为三个（+ VS Code，长期有效）；新增 §6.9 工作区设计：工作树（懒加载+只读预览）+ 运行中总览面板 + 终端页三带布局；多模型切换按各 CLI 机制实现（claude 别名槽 / codex model_catalog_json / qwen modelProviders / kimi [models.*] / opencode provider.models / gemini 手输）；会话删除为用户显式指令的只读原则例外 |
-| v0.6 | 全站暖黑主题（Conductor 风，令牌集中 `src/App.css` @theme，禁蓝色系，用户否决浅色+渐变方案）；安装/更新命令必须 PTY 执行（管道块缓冲坑）；brew 走 TUNA 镜像；**全量采纳 Conductor 工作区编排**（§6.10）：任务工作区 = git worktree + 分支，分 A/B/C 三阶段实施（W1/W2/W3）；明确不做云工作区/多人协作/应用内 GitHub 登录；重大改变沉淀规则到 AGENTS.md + 本节（用户指令） |
+| v0.6 | 全站暖黑主题（Conductor 风，令牌集中 `src/App.css` @theme，禁蓝色系，用户否决浅色+渐变方案（浅色否决已于 v3.44 作废））；安装/更新命令必须 PTY 执行（管道块缓冲坑）；brew 走 TUNA 镜像；**全量采纳 Conductor 工作区编排**（§6.10）：任务工作区 = git worktree + 分支，分 A/B/C 三阶段实施（W1/W2/W3）；明确不做云工作区/多人协作/应用内 GitHub 登录；重大改变沉淀规则到 AGENTS.md + 本节（用户指令） |
 | v0.7 | P3 设计定稿（§6.11）：侧栏扩为五页（+统计）；OpenCode 直读 SQLite（WAL 只读 + 防御式）；用量按天聚合入 app.db、内置定价表可覆盖、中转不明价只显 token；注意力标记 v1 走零侵入启发式（会话尾态+输出速率），Claude Code hooks 精确化留 v2 单独评估（需写用户配置）；功能增改必须同步 `docs/user-guide.md` |
 | v0.8 | 跨模块闭环 A-E 实施（§6.12）：会话一键恢复（pty_spawn resumeSessionId）、进行中标记 + 反向跳转、工作区记住配置、工作区→会话筛选、profile 上次使用；**主题二次定稿为沉浸冷黑**（四层浮起结构，保留绿 CTA，暖棕色系被用户否决）；配置页按用户详版规格重构（折叠分组 + 五列网格 + 筛选搜索）；图标按钮点击区 ≥28px |
 | v0.9 | 新增技能管理模块（§6.13）：SSOT 技能库 + 六 CLI 分发（Auto symlink/copy），四路导入（本地/ZIP/GitHub 仓库/应用目录发现），ZIP 导出，卸载备份；采纳 Agent Skills 开放标准（SKILL.md 防御式解析）；更新检测与在线编辑留 v2；git 推送改走 SSH:443 通道 + repo deploy key（HTTPS 网络不稳） |
@@ -448,7 +448,7 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 | v3.22 | 界面白话双层 + 精简收敛：主文案一律白话（保存到历史 / 多出 N 个保存点 / 改动说明 / 相对主分支），git 技术信息降二级（小字 mono、悬浮 title、详情 popover），**不加任何模式开关**；纯逻辑集中 `git-status-groups.ts`。管理列表只保留识别信息、状态与一到两个高频动作，低频项进「⋯」；工作区 PR/归档收口到统一全宽评审内确认执行（唯一例外：进行中的 merge 冲突保留行内「解决冲突」入口，仍进同一覆盖层）。Monaco 预览关闭 unicode 高亮（WKWebView locale 不命中致全角标点被黄框套住，中文笔记纯噪音） |
 | v3.23 | 接入第七个 agent **CodeBuddy Code**（v2.132.0 实机验证，matrix §7）：注入只认 `CODEBUDDY_API_KEY/BASE_URL/MODEL`（ANTHROPIC_* 无效），协议 Anthropic 兼容；prompt_inject=位置参数、`-p` 无头、`-r <id>` 恢复、`--session-id` 固定会话名（pty 复用既有固定 ID 链路）。会话 `~/.codebuddy/projects/<slug>/<uuid>.jsonl`（slug 规则同 Claude；行 schema 与 Claude 不同构故独立解析器，时间戳为毫秒 epoch；usage 字段未实证，提取器尽力而为待真账号补全）。官方账号 TUI `/login`（浏览器 OAuth），env 优先压账号（实测 401）故拉起必须 env_remove；设为全局写 `~/.codebuddy/settings.json` env 块。落地形态验证 v3.13 注册表设计：新 CLI = 一张 AgentSpec（纯数据）+ 独立会话/usage 解析器 + 测试，agents/pty/updater/skills 零改动 |
 | v3.24 | 接入第八个 agent **Cursor CLI**（2026.08.04-aaa8809 实机验证，matrix §8）：二进制用 `cursor-agent`（不用太通用的 `agent`）；**首个 env+flag 混合注入**——key/端点走 env（`CURSOR_API_KEY`/`CURSOR_API_ENDPOINT`），模型只能走 `--model` flag（bracket 参数化原样透传），注册表新增 `SpecialLaunch::CursorFlags` 变体（api/official 两路径同形，official 不注入 key 但保留模型 flag）。端点是 **Cursor 专有协议**（非 OpenAI/Anthropic 兼容）：不设供应商预设（presets.ts 注释说明），profile 三层验证的第三层标记「不支持云端验证」只给本地两层（不硬套 ApiKind）。会话 `~/.cursor/projects/<编码cwd>/agent-transcripts/<uuid>/<uuid>.jsonl`（目录名=文件名=session id；`agent ls` 是 Ink TUI 非 TTY 会崩，发现只能文件扫描；type 枚举已知但完整字段样本未验证——独立防御式解析器，未知 type 跳过，文本/时间戳/会话 id 按候选字段名提取）。`~/.cursor` 与 IDE 共享：**会话删除不走目录级白名单**，由 `cursor_deletable` 精确限定 `projects/*/agent-transcripts/**/*.jsonl`（同根 auth.json/IDE 文件拒绝）；凭证默认 macOS 钥匙串（`AGENT_CLI_CREDENTIAL_STORE=file` 才落 auth.json），检测说明标注双通道；技能 `~/.cursor/skills-cursor` 未验证 CLI 是否真读，**强制 copy 分发**（`allow_symlink_for`）；无 brew/npm 包，安装走官方脚本、更新走非交互自更新 `cursor-agent update`；Windows 路径未验证（注释标注）。usage 提取器按字段名候选尽力而为，待真账号样本补全 |
-| v3.25 | 全站界面确立“科研工作台优先”的信息架构：侧栏保留全部页面但按 **工作（工作区/终端/对话）→ 能力（配置/技能）→ 管理（统计/设置）** 分层，首次启动默认进入工作区；不把配置中心继续当首页。视觉借鉴高密度桌面工作台的对象列表、上下文栏和三栏结构，但不照搬 Git 客户端导航；工作区流水线、Agent 执行与人工评审仍是产品主轴。常规页统一使用 `PageFrame/PageHeader/PageToolbar`，标题栏只放当前上下文与唯一主动作，筛选进入独立工具栏；终端、对话和技能预览保留各自分栏与挂载语义。全站继续使用七套沉浸深色主题、零阴影、hairline 分隔与单一 CTA，不新增浅色或彩色图标。 |
+| v3.25 | 全站界面确立“科研工作台优先”的信息架构：侧栏保留全部页面但按 **工作（工作区/终端/对话）→ 能力（配置/技能）→ 管理（统计/设置）** 分层，首次启动默认进入工作区；不把配置中心继续当首页。视觉借鉴高密度桌面工作台的对象列表、上下文栏和三栏结构，但不照搬 Git 客户端导航；工作区流水线、Agent 执行与人工评审仍是产品主轴。常规页统一使用 `PageFrame/PageHeader/PageToolbar`，标题栏只放当前上下文与唯一主动作，筛选进入独立工具栏；终端、对话和技能预览保留各自分栏与挂载语义。全站继续使用七套沉浸深色主题、零阴影、hairline 分隔与单一 CTA，不新增浅色或彩色图标（浅色否决已于 v3.44 作废）。 |
 | v3.26 | 工作台布局进一步按对象规模收敛：工作区页从“所有项目纵向堆叠”改为 **左侧项目导航 + 右侧当前项目流水线/任务详情**，项目状态点直接表达活跃与待处理数量；技能页取消“一个 Agent 一列”的横向矩阵，主列表固定为技能/来源/应用计数/操作，选中后在右侧详情以自动换行网格管理 Agent 分发和阅读 SKILL.md，新增 Agent 不再改变主表列数。终端模块的文件树、标签、启动栏及右侧面板 UI 字号统一提高一级，xterm 新用户默认字号由 13 调为 14（仍尊重设置页 11–18 的用户选择）。 |
 | v3.27 | 工作区、终端、对话三类高频工作页确立两级控件尺寸：标题栏与终端启动表单统一 32px，任务行、步骤胶囊、回放头部和图标操作统一 28px；可点击状态项同样保证 28px 点击区。主次操作只通过 CTA 填充、边框和文字色区分，不再通过同一操作组内的高度差制造层级。终端工作区外层与 xterm 画布共用主题 canvas 背景，避免空终端出现突兀色块。 |
 | v3.28 | 全站页面建立统一留白节拍：常规页标题区、工具栏和主体内边距统一提升一级；工作区项目头、流水线步骤带和任务行增加适度垂直空间，低对象数量时保留连续主题画布，不用额外卡片或说明填空。 |
@@ -469,6 +469,9 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 | v3.43 | **16 条走查批**（用户逐条反馈）：①侧栏自动收展删除（收展全手动）；②统计归入「能力」组、底部只留设置，组标题 11px；③侧栏品牌/图标尺寸随宽度优化；④胶囊/菜单重复入口去重（终端/评审只留任务行，产物只留胶囊按钮）；⑤端口区分本应用/系统其他两段 + 外部进程终止二次确认；⑥ok 绿改深色兼容哑光绿 #4cc38a；⑦「已合并」改行内小字状态；⑧状态点全局统一 size-2；⑨左栏 « 收起态删除；⑩修 chromeHidden 下专注渲染失败（portal 机制随专注收敛整体删除）；⑪专注内容遮罩去模糊；⑫专注收敛为「专注终端/专注内容」双模式 + Esc 退出；⑬筛选选中不再自动收起面板；⑭profile ⋯ 菜单「复制到其他 agent…」（后端 `copy_profile_to_agent` 密钥不出站，同协议族校验，双份口径前端禁用/后端强制）；⑮GitHub 导入技能自动分类（默认仓库名）+ 来源列可点跳原地址（plugin-opener）；⑯修快捷键录制（WKWebView 点击 button 不给焦点 → 改 window capture 监听 + `captureDecision` 纯逻辑） |
 | v3.44 | **五件走查批**：①流水线 strip 收敛（删列间 → 箭头、待开始列也渲染灰点状态补齐五列结构、⚠ 提示改 strip 右上角浮贴不独占行）；②修专注内容"终端黑了"（遮罩 bg-black/50→25 且不遮顶部标签条）；③对话筛选：浏览筛选不收起、**选中具体会话才自动收起**；④技能列表加「分类」列、技能列只显名称（描述收进详情面板）；⑤**主题系统扩容**：七套深色文本对比度按阅读上调一档 + **新增七套对应浅色**（方向翻转配方：rail 略暗于 canvas、面板向白浮起、cta 加深保对比；Catppuccin 浅色直接用官方 Latte、shadcn 用官方浅色骨架；白色半透明 hover/缩进线/滚动条在浅色下统一翻转为黑色半透明；Monaco editor-* 令牌与 xterm bg/fg 表同步补齐；主题清单 themes.ts/settings.rs KNOWN_THEMES/XTERM_BG_FG 三处同步）。「浅色模式否决」就此作废 |
 | v3.45 | **流水线胶囊状态分层 + 产物入口搬家**（用户明确规格）：胶囊只突出当前步骤，全部状态文字（已完成/进行中/待开始）从胶囊撤下——已完成/已合并 = ✓ + 步骤名；当前步骤（进行中/待评审/阻塞/已归档待恢复）= cta 描边高亮 + 第二行按状态展开动作（待评审无动作显示「到下方任务行操作」小字）；未开始 = 编号 + 名称降对比，「开始」hover/focus 才现；步骤 ⋯ 收胶囊右上角 hover 才现；进度段不动。产物核验清单从胶囊移到**任务行行内手风琴**（抽共享组件 `ArtifactChecklist.tsx`，步骤按 workspaceName 反查 project.toml；已合并行保留入口读项目根/main，其余读工作树；打开拉取一次 + 手动 ⟳ 刷新语义不变；展开态按工作区 id 记忆、切项目清空）。开步/评审/合并逻辑零改动 |
+| v3.46 | **流水线大圆步进器**（取代 v3.45 胶囊分层与进度段）：名称带与步进器带两个同列网格；虚线为**真实 flex 块节律**（`StepperCell`：5px 块 + 5px 间隙全是真实元素，块数按列宽 ResizeObserver 现算，与圆心同轴、跨列连续，永无渐变相位残段/双块）；**大圆 24px 纯色实心（内无字符）= 状态色 + 唯一主推进点击**（done=ok、进行中/checking=cta pulse、待评审=cta-pill、阻塞=warn、pending=实心灰；点击按状态 startStep / 恢复归档 / 跳终端——进行中/待评审/阻塞圆均跳终端 / done 开主仓 shell 终端，状态与目录/agent/profile 收进悬浮 title）；**圆前/圆后小方块 = 节律中的普通虚线块 + 28px 透明热区**，视觉混在虚线里、hover/focus 提亮才现——圆前 = 打开流水线编辑器并定位该步骤卡片（聚焦简报框），圆后 = strip 下方就地展开 ArtifactChecklist 产物手风琴（root 口径同任务行：done 读项目根、其余读工作树、无工作区禁用）；解决冲突/评审/合并仍归下方任务行，步进器不再放第二行动作 |
+| v3.47 | 走查零碎批 + 按功能 AI 配置：技能页三修（来源列显示 owner/repo[/subdir] 具体地址并可点跳原地址；详情面板只钉名称行、其余随内容滚动——修"上半部分被挡住"；SKILL.md「◈ 翻译为中文」复用 ai_prompt 一次性调用、译文随会话缓存不写库）；课题主题从悬浮提示改为项目头常驻小字（悬浮只放补充信息的规则确立）；配置页模型列全量展示（`·` 连排）；工作区项目栏右键菜单（重命名/复制路径/移除注册）+ rail 底部占位删除（添加入口收进栏头 + 钮）；**内置 AI 按功能独立配 profile**（`settings.aiProfiles` map：commit/summarize/pr/distill/conflict/translate 六键，解析顺序 显式 > 功能专属 > 全局专用 > 最近使用，专属失效回落）——动因：翻译等轻任务落到大模型太慢；**步进器完成色独立为 `--color-done`**（14 主题各配低饱和绿，与 ok 状态绿解耦，用户反馈亮绿突兀） |
+| v3.48 | **长时工作色彩校准**（用户反馈沉浸黑实为墨蓝、不适合长时间编码/阅读）：默认主题去蓝化——基底从深蓝黑改暖中性炭黑（rail #0a0b0e/canvas #101218），文字从冷白灰蓝改暖纸白（l1 #e9e6e2/l2 #bdbab4），folder/tabline/editor 面同步去蓝；shadcn 深色同步减蓝；midnight-light canvas 调暖（#f4f4f1）；xterm midnight bg/fg 跟随。原则：不纯黑、低蓝光、文字不刺眼 |
 
 ## 11. 演进线（2026-08 定稿）
 
@@ -478,7 +481,7 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 
 1. **科研语义进模板和数据，不进逻辑**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不认识「文献」「论文」这些概念。
 2. **验收层是护城河**：每一步成果必须人工评审才合并进入下一步（沿用 §6.10 评审流与全宽评审覆盖层）。
-3. **跨厂商中立是生存线**：六个 CLI 平等支持；API 与官方账号双轨并行（§11.4 P1a）。
+3. **跨厂商中立是生存线**：八个 CLI 平等支持；API 与官方账号双轨并行（§11.4 P1a）。
 
 ### 11.2 量化目标
 
@@ -499,13 +502,13 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 |---|---|
 | **P0** | 收尾当前批次：全量文档同步 → 走查 → `[skip ci]` 提交 → 可选发版 |
 | **P1a ✅** | 官方账号：profile 双类型（API / 官方账号）；终端内跑 CLI 登录命令连接；只读检测 auth 文件显示已连接 + 冲突配置黄色警告；拉起不注入 API env 且 `env_remove` 残留密钥变量；统计页官方账号显示「订阅」不计费；第一批 Claude / Codex / Gemini（随 P1d 注册表落地，v3.17） |
-| **P1b ✅** | 流水线骨架（v3.18）：project.toml 读写 + 项目注册；工作区页按项目分组 + 步骤胶囊概览（状态从工作区派生，无双状态机；进度条收敛为「研究流程 d/t」文字）；一键开步（含 bootstrap 自动提交、TASK.md 进 `.git/info/exclude`）；资源面板登记 + 自动发现；非 git 目录引导 init（默认 .gitignore 含 `*.pdf`）；首启引导为轻量版（模板选择器），演示数据完整版留 backlog；工作区类型驱动默认值（数据类跳端口）未做，留 backlog |
+| **P1b ✅** | 流水线骨架（v3.18）：project.toml 读写 + 项目注册；工作区页按项目分组 + 步骤胶囊概览（状态从工作区派生，无双状态机；进度条收敛为「研究流程 d/t」文字；后演进为大圆步进器，v3.46）；一键开步（含 bootstrap 自动提交、TASK.md 进 `.git/info/exclude`）；资源面板登记 + 自动发现；非 git 目录引导 init（默认 .gitignore 含 `*.pdf`）；首启引导为轻量版（模板选择器），演示数据完整版留 backlog；工作区类型驱动默认值（数据类跳端口）未做，留 backlog |
 | **P1c ✅** | 供应商预设补齐：claude-code 补 DeepSeek/智谱 Anthropic 兼容端点、codex/qwen/kimi/opencode 补 DeepSeek/智谱等；此后加供应商 = `src/presets.ts` 预设表加一行 |
 | **P1d ✅** | 适配器注册表（v3.17）：per-agent 硬编码 match 收敛为 `agent_specs.rs` 中央声明式 AgentSpec 注册表（一个 CLI 一张规格）；会话解析器与 usage 提取器保持每 CLI 一个解析器文件，注册表只做分发入口；加新 CLI = 一张规格表 + 一个解析器文件 + 测试 |
 | **P2 ✅** | 文献：PDF 预览（P2a 直接 pdf.js，WKWebView spike 跳过，`read_pdf_bytes` 白名单，v3.14）；选段问 AI（pty_write 注入活跃标签输入框不自动回车）；整理为笔记（P2b，`pdf_owner_project` + `append_workspace_inbox`，v3.19）；文献技能包（lit-search/lit-notes/review-framework/review-writing） |
 | **P3 ✅** | 数据 + 接力（v3.15/v3.20）：数据处理模板 + 技能包（data-clean/data-eda）；提货单 artifacts.yaml v1（手动登记 + md5/大小，下一步 TASK.md 自动带提货单段）；图片评审双栏看图；长任务 OS 通知；接力包 + 接力链对话页可回溯 |
 | **P4 ✅** | 论文（v3.21）：manuscript 模板（科研论文/毕业论文）+ quarto render 脚本（RX4a 追加 export-docx）+ quarto-render 技能；提货单登记的根外 PDF 产物纳入预览白名单；bib 联动以模板简报引用 references.bib 务实落地 |
-| **P5 部分 ✅** | 通用层打磨（v3.21/v3.22）：逐 hunk 验收 ✅（v1 边界=仅未提交）、跨标签聚合视图 ✅、成本按工作区归因 ✅（任务成本）、订阅口径 ✅；批量验收、云端会话双源调研留 backlog；历史时间线视图由并行组实现 |
+| **P5 部分 ✅** | 通用层打磨（v3.21/v3.22）：逐 hunk 验收 ✅（v1 边界=仅未提交）、跨标签聚合视图 ✅、成本按工作区归因 ✅（任务成本）、订阅口径 ✅、历史时间线视图 ✅（first-parent 主线 + 白话翻译）；批量验收、云端会话双源调研留 backlog |
 
 **Backlog（记录不动手）**：SSH 远程执行（数据集在实验室服务器时启动）、MCP 配置分发调研、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后评估）、批量验收、云端会话双源调研、首启引导完整版（示例课题带演示数据 + 示例 PDF）、工作区类型驱动默认值（数据类跳端口）。
 

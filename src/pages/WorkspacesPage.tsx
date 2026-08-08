@@ -162,6 +162,82 @@ function AddProjectModal({
   );
 }
 
+/** 重命名项目弹窗（项目导航行右键「重命名项目」）：register_project 是幂等 upsert，同名改不改都行 */
+function RenameProjectModal({
+  path,
+  initialName,
+  onClose,
+  onRenamed,
+}: {
+  path: string;
+  initialName: string;
+  onClose: () => void;
+  onRenamed: () => void;
+}) {
+  const [name, setName] = useState(initialName);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("register_project", { path, name: name.trim() });
+      onRenamed();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      onClick={onClose}
+    >
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="w-[24rem] rounded-md border border-field bg-strip p-5"
+      >
+        <h2 className="mb-4 text-base font-semibold text-l1">重命名项目</h2>
+        <p className="mb-3 truncate font-mono text-xs text-l3" title={path}>
+          {path}
+        </p>
+        <label className="mb-4 block text-sm">
+          <span className="mb-1 block text-xs text-l3">项目名</span>
+          <input
+            className={fieldClass}
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
+        </label>
+        {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            disabled={busy || !name.trim()}
+            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+          >
+            {busy ? "保存中…" : "保存"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 /** 工作区 → 终端的交接：取端口段 env，交给终端页开新标签；预填该目录上次使用的配置（W3-C）。
  *  initialPrompt：一键开步的首条指令，启动时注入 CLI（一次性） */
 function useOpenInTerminal() {
@@ -737,7 +813,16 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   );
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState(false);
-  const [created, setCreated] = useState<WorkspaceDto | null>(null);
+  // 项目导航行右键菜单（重命名/复制路径/移除注册）与改名弹窗
+  const [railMenu, setRailMenu] = useState<{
+    x: number;
+    y: number;
+    groupKey: string;
+  } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{
+    path: string;
+    name: string;
+  } | null>(null);  const [created, setCreated] = useState<WorkspaceDto | null>(null);
   // P1b 项目分组：注册项目列表 + 每次刷新自增的令牌（触发各分组重读 project.toml）
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -1276,6 +1361,51 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     setAddProjectPath(selected);
   }
 
+  /** 项目导航行右键菜单项：重命名/复制路径/移除注册（未注册的分组只留复制路径） */
+  function railMenuItems(group: (typeof groups)[number]) {
+    return [
+      {
+        label: "重命名项目",
+        disabled: !group.project,
+        title: group.project ? undefined : "未注册项目无法重命名",
+        onSelect: () =>
+          group.project &&
+          setRenameTarget({ path: group.repoPath, name: group.project.name }),
+      },
+      {
+        label: "复制项目路径",
+        onSelect: () => {
+          void navigator.clipboard
+            .writeText(group.repoPath)
+            .catch(() => setError("复制项目路径失败"));
+        },
+      },
+      {
+        label: "移除项目注册",
+        disabled: !group.project,
+        title: group.project ? undefined : "未注册项目无法移除",
+        onSelect: () => group.project && void removeRegistration(group),
+      },
+    ];
+  }
+
+  /** 移除项目注册（只删注册记录，不动磁盘目录与工作区） */
+  async function removeRegistration(group: (typeof groups)[number]) {
+    const name = group.project?.name ?? group.repoName;
+    if (
+      !window.confirm(
+        `只移除「${name}」的项目注册，不删除磁盘目录；项目内工作区保留。继续？`,
+      )
+    )
+      return;
+    try {
+      await invoke("remove_project", { path: group.repoPath });
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   return (
     <div className="flex h-full flex-col bg-canvas">
       {/* 待你处理（全局收件箱）：横跨两栏之上，与当前选中项目无关；全空则不渲染 */}
@@ -1314,7 +1444,17 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       <aside className="flex w-[230px] shrink-0 flex-col border-r border-hairline bg-rail2">
         <div className="flex h-12 shrink-0 items-center gap-2 px-3">
           <span className="text-sm font-medium text-l1">项目</span>
-          <span className="ml-auto text-xs text-l4">{groups.length}</span>
+          <span className="text-xs text-l4">{groups.length}</span>
+          {/* 添加项目收进 rail 头部（页头实心 CTA 不变；原底部整块占位已删） */}
+          <button
+            type="button"
+            onClick={() => void onAddProject()}
+            title="添加项目"
+            aria-label="添加项目"
+            className="ml-auto flex h-7 w-7 items-center justify-center rounded-md text-sm text-l3 hover:bg-white/5 hover:text-l1"
+          >
+            +
+          </button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto py-1.5">
           {groups.map((group) => {
@@ -1331,6 +1471,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                 key={group.key}
                 type="button"
                 onClick={() => setSelectedGroupKey(group.key)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setRailMenu({ x: e.clientX, y: e.clientY, groupKey: group.key });
+                }}
                 title={group.repoPath}
                 className={`mx-1.5 mb-1 flex w-[calc(100%-12px)] items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors ${
                   selected
@@ -1362,15 +1506,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           {groups.length === 0 && (
             <p className="px-3 py-4 text-xs text-l4">还没有项目</p>
           )}
-        </div>
-        <div className="shrink-0 p-2">
-          <button
-            type="button"
-            onClick={() => void onAddProject()}
-            className="flex h-9 w-full items-center justify-center rounded-md text-[13px] text-l2 hover:bg-white/5 hover:text-l1"
-          >
-            + 添加项目
-          </button>
         </div>
       </aside>
 
@@ -1662,6 +1797,30 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             setAddProjectPath(null);
             setFreshProjectPath(project.path);
             setSelectedGroupKey(`p:${project.path}`);
+            void refresh();
+          }}
+        />
+      )}
+      {railMenu &&
+        (() => {
+          const group = groups.find((g) => g.key === railMenu.groupKey);
+          if (!group) return null;
+          return (
+            <ContextMenu
+              x={railMenu.x}
+              y={railMenu.y}
+              onClose={() => setRailMenu(null)}
+              items={railMenuItems(group)}
+            />
+          );
+        })()}
+      {renameTarget && (
+        <RenameProjectModal
+          path={renameTarget.path}
+          initialName={renameTarget.name}
+          onClose={() => setRenameTarget(null)}
+          onRenamed={() => {
+            setRenameTarget(null);
             void refresh();
           }}
         />

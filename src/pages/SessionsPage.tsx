@@ -1144,22 +1144,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         />
                       </span>
                     )}
-                    {s.pinned && (
-                      <span className="shrink-0 text-l2" title="已保留">
-                        ⚑
-                      </span>
-                    )}
-                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-7 text-l1">
-                      {sessionTitle(s)}
-                    </span>
-                    {s.chainCount > 1 && (
-                      <span
-                        className="shrink-0 rounded bg-inset px-1 text-xs text-l3"
-                        title="Codex resume 链合并为一条"
-                      >
-                        {s.chainCount} 次继续
-                      </span>
-                    )}
                     {isLive && (
                       <button
                         type="button"
@@ -1177,8 +1161,24 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         }
                         className="flex h-6 w-6 shrink-0 items-center justify-center rounded disabled:cursor-default"
                       >
-                        <span className="size-1.5 rounded-full bg-ok-text" />
+                        <span className="size-2 rounded-full bg-ok-text" />
                       </button>
+                    )}
+                    {s.pinned && (
+                      <span className="shrink-0 text-l2" title="已保留">
+                        ⚑
+                      </span>
+                    )}
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-7 text-l1">
+                      {sessionTitle(s)}
+                    </span>
+                    {s.chainCount > 1 && (
+                      <span
+                        className="shrink-0 rounded bg-inset px-1 text-xs text-l3"
+                        title="Codex resume 链合并为一条"
+                      >
+                        {s.chainCount} 次继续
+                      </span>
                     )}
                     {!s.alive && (
                       <span
@@ -1334,7 +1334,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   className="flex shrink-0 items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l2"
                   title="该对话的 CLI 进程仍在运行（外部探测）"
                 >
-                  <span className="size-1.5 rounded-full bg-ok-text" />
+                  <span className="size-2 rounded-full bg-ok-text" />
                   进行中
                 </span>
               )}
