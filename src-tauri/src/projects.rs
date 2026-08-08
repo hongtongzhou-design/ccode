@@ -251,6 +251,72 @@ fn remove_project_at(conn: &Connection, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 是否在 projects 表有注册记录（读取失败按未注册处理，防护宁严勿宽）
+fn is_registered_at(conn: &Connection, path: &Path) -> bool {
+    let key = canonical_key(path);
+    conn.query_row(
+        "SELECT COUNT(*) FROM projects WHERE path=?1",
+        params![key],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+// ===== 项目目录彻底删除（工作区页右键「删除项目目录…」） =====
+// 与「移除注册」相反：删全部工作区 + 目录本身 + 注册记录。不可逆操作，
+// 防护宁严勿宽：必须是 Ccode 项目、拒绝主目录/文档目录/浅层路径/系统目录。
+
+/// 目录删除防护：拒绝 home/document_dir 本身、少于两级的浅层路径（防误传 ~/Documents
+/// 这类）、系统与关键用户目录（复用 fs_tree 的重要路径黑名单，含 canonicalize 双校验）。
+fn guard_project_dir(dir: &Path) -> Result<(), String> {
+    if dirs::home_dir().is_some_and(|h| dir == h) {
+        return Err("不能删除用户主目录".to_string());
+    }
+    if dirs::document_dir().is_some_and(|d| dir == d) {
+        return Err("不能删除文档目录本身".to_string());
+    }
+    // 规范化路径的有效段数（去掉根/盘符）少于 2 拒绝，如 /tmp、C:\proj
+    let depth = dir
+        .components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .count();
+    if depth < 2 {
+        return Err("路径层级过浅，为避免误删拒绝操作".to_string());
+    }
+    if crate::fs_tree::is_protected_path(&dir.to_string_lossy()) {
+        return Err("系统/重要目录受保护，拒绝删除".to_string());
+    }
+    Ok(())
+}
+
+/// 彻底删除项目目录：全部工作区（含已归档）→ 目录本身 → 注册记录。
+/// 工作区任一删除失败即中止，已删的不回滚（错误信息由 workspaces 层说明已删哪些）。
+fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, String> {
+    let dir = fs::canonicalize(path).map_err(|e| format!("目录不存在或不可访问: {e}"))?;
+    if !dir.is_dir() {
+        return Err("目标不是目录，拒绝删除".to_string());
+    }
+    // Ccode 项目判定：档案卡、注册记录、工作区记录三者有其一
+    let has_card = config_path(&dir).exists();
+    let has_workspaces = !crate::workspaces::workspaces_of_repo(conn, &dir)?.is_empty();
+    if !has_card && !is_registered_at(conn, &dir) && !has_workspaces {
+        return Err(
+            "该目录不是 Ccode 项目（无 .ccode/project.toml、注册或工作区记录），拒绝删除"
+                .to_string(),
+        );
+    }
+    guard_project_dir(&dir)?;
+    let deleted = crate::workspaces::delete_workspaces_for_repo(conn, &dir)?;
+    fs::remove_dir_all(&dir).map_err(|e| format!("删除目录失败: {e}"))?;
+    remove_project_at(conn, &dir)?;
+    if deleted.is_empty() {
+        Ok("已删除目录与注册记录".to_string())
+    } else {
+        Ok(format!("已删除目录与 {} 个工作区", deleted.len()))
+    }
+}
+
 // ===== 档案卡 .ccode/project.toml =====
 
 fn config_path(project: &Path) -> PathBuf {
@@ -887,6 +953,19 @@ pub async fn remove_project(path: String) -> Result<(), String> {
     .map_err(|e| format!("移除项目注册失败: {e}"))?
 }
 
+/// 彻底删除项目目录：该 repo 的全部工作区 + 目录本身 + 注册记录（不可逆，前端已确认）。
+/// 返回中文成功摘要（如「已删除目录与 2 个工作区」）；防护口径见 delete_project_dir_impl。
+#[tauri::command]
+pub async fn delete_project_dir(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project = PathBuf::from(crate::sessions::expand_tilde(&path));
+        let conn = db()?;
+        delete_project_dir_impl(&conn, &project)
+    })
+    .await
+    .map_err(|e| format!("删除项目目录失败: {e}"))?
+}
+
 #[tauri::command]
 pub async fn read_project_config(path: String) -> ProjectConfigReadDto {
     tauri::async_runtime::spawn_blocking(move || {
@@ -943,6 +1022,262 @@ pub async fn commit_project_bootstrap(repo_path: String) -> Result<BootstrapComm
     })
     .await
     .map_err(|e| format!("自动提交项目档案卡失败: {e}"))?
+}
+
+// ===== 示例课题（首启引导最小版落地，§11.4 backlog） =====
+// 在「文档/Ccode 示例课题」生成带演示数据的完整项目：目录骨架、程序生成的一页示例 PDF、
+// references.bib、README、英文综述五步流水线档案卡，然后 git 初始化并注册。
+// 幂等：已注册直接返回现有 project；目录已存在但未注册时只注册，磁盘内容一律不动。
+
+const DEMO_DIR_NAME: &str = "Ccode 示例课题";
+const DEMO_PROJECT_NAME: &str = "示例课题（演示）";
+
+const DEMO_BIB: &str = r#"@article{marso2016liraglutide,
+  author  = {Marso, Steven P. and Daniels, Gilbert H. and others},
+  title   = {Liraglutide and Cardiovascular Outcomes in Type 2 Diabetes},
+  journal = {New England Journal of Medicine},
+  year    = {2016},
+  volume  = {375},
+  number  = {4},
+  pages   = {311--322},
+  doi     = {10.1056/NEJMoa1603827},
+}
+
+@article{marso2016semaglutide,
+  author  = {Marso, Steven P. and Bain, Stephen C. and others},
+  title   = {Semaglutide and Cardiovascular Outcomes in Patients with Type 2 Diabetes},
+  journal = {New England Journal of Medicine},
+  year    = {2016},
+  volume  = {375},
+  number  = {19},
+  pages   = {1834--1844},
+  doi     = {10.1056/NEJMoa1607141},
+}
+"#;
+
+const DEMO_README: &str = r#"# 示例课题（演示）
+
+这是 Ccode 自动创建的演示课题，用来体验「项目 → 流水线 → 工作区」的完整流程：
+
+- `.ccode/project.toml`：课题档案卡，内置英文综述五步流水线（检索筛选 → 精读笔记 → 大纲 → 初稿 → 润色定稿）；
+- `papers/sample-glp1-review.pdf`：一页示例文献摘要（程序生成的演示文件，不是真实论文）；
+- `references.bib`：两条真实示例引文（LEADER / SUSTAIN-6 试验）。
+
+可以在这个项目上随意试验：开步、编辑流水线、建工作区。整个目录可随时删除，
+删除前在工作区页右键项目导航行「移除注册」即可。
+"#;
+
+/// PDF 文本对象的内容串转义（反斜杠与括号在 PDF 字符串里是控制字符）
+fn pdf_escape_text(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
+}
+
+/// 最小合法单页 PDF：程序拼装 5 个对象并记录字节偏移生成 xref 表。
+/// 全部内容为 ASCII，字节偏移 = 字符偏移；演示课题的示例文献，不依赖任何外部库。
+fn build_demo_pdf() -> Vec<u8> {
+    let lines = [
+        "Sample Abstract (Demo): GLP-1 Receptor Agonists and Cardiovascular Outcomes",
+        "",
+        "Background: Glucagon-like peptide-1 (GLP-1) receptor agonists are widely used",
+        "in type 2 diabetes; their cardiovascular effects required dedicated trials.",
+        "Methods: This document stands in for a cardiovascular outcome trial abstract.",
+        "It is generated by Ccode as demonstration content, not a real paper.",
+        "Results: In large randomized trials, liraglutide and semaglutide reduced",
+        "major adverse cardiovascular events versus placebo in high-risk patients.",
+        "Conclusions: GLP-1 receptor agonists show cardiovascular benefit in type 2",
+        "diabetes. Replace this file with real literature for your own project.",
+    ];
+    let mut stream = String::from("BT /F1 11 Tf 72 740 Td 16 TL\n");
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            stream.push_str("T* ");
+        }
+        stream.push_str(&format!("({}) Tj\n", pdf_escape_text(line)));
+    }
+    stream.push_str("ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{}\nendstream", stream.len(), stream),
+    ];
+    let mut out: Vec<u8> = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", i + 1, body).as_bytes());
+    }
+    let xref_pos = out.len();
+    let count = objects.len() + 1;
+    out.extend_from_slice(format!("xref\n0 {count}\n").as_bytes());
+    // 每条 xref 项固定 20 字节（10 位偏移 + 代序号 + f/n + 空格 + LF）
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for off in &offsets {
+        out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {count} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n")
+            .as_bytes(),
+    );
+    out
+}
+
+/// 演示课题档案卡：五步与前端内置「英文综述」模板（pipeline-presets.ts REVIEW_STEPS）逐项对应
+fn demo_project_config() -> ProjectConfigDto {
+    let step = |name: &str, ws: &str, brief: String, artifacts: &[&str]| StepDto {
+        name: name.into(),
+        workspace_name: ws.into(),
+        brief,
+        expected_artifacts: artifacts.iter().map(|a| a.to_string()).collect(),
+        skills: Vec::new(),
+        resources: Vec::new(),
+        run: Vec::new(),
+    };
+    ProjectConfigDto {
+        topic: Some("GLP-1 受体激动剂的心血管结局（演示课题）".into()),
+        artifact_dir: DEFAULT_ARTIFACT_DIR.into(),
+        resources: vec![
+            ResourceDto {
+                name: "示例文献（演示 PDF）".into(),
+                path: "papers/sample-glp1-review.pdf".into(),
+                kind: "paper".into(),
+                readonly: true,
+                note: "程序生成的演示文件，可替换为真实文献".into(),
+            },
+            ResourceDto {
+                name: "引文库".into(),
+                path: "references.bib".into(),
+                kind: "reference".into(),
+                readonly: false,
+                note: String::new(),
+            },
+        ],
+        steps: vec![
+            step(
+                "文献检索与筛选",
+                "lit-search",
+                "围绕课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源自行判断，并把假设写进筛选记录）执行：\n\
+                 1. 制定纳入/排除标准（年份、语言、来源级别、相关性），写进 papers/screening.md；\n\
+                 2. 检索候选文献（学术数据库/网络），每篇记录标题、作者、年份、来源、链接或 DOI；\n\
+                 3. 按标准逐条筛选，结果写入 papers/screening.md（含每篇的纳入/排除及理由）；拿不准相关性的一律纳入并标注「待确认」；\n\
+                 4. 纳入的文献清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；\n\
+                 5. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的用 WebFetch/curl 直接下载到 papers/ 目录（文件名规范化：作者年份-短标题.pdf）；付费墙的不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI），等用户提供全文。\n\
+                 完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md 均存在（无付费文献则 to-fetch.md 注明为空），每条记录无空缺字段（未知则标「待补」）。"
+                    .into(),
+                &["papers/"],
+            ),
+            step(
+                "文献精读与笔记",
+                "lit-notes",
+                "输入：上一步产物 papers/included.md（已随 main 合并在本工作区内）。\n\
+                 1. 按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题）；\n\
+                 2. 全文来源优先级：项目资源/papers/ 已有 PDF → 开放获取补下 → 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」；\n\
+                 3. 每篇产出 notes/<序号-短标题>.md，固定结构：研究问题 / 方法 / 主要结果 / 局限 / 可引用点（原文关键句+页码或段落位置）；\n\
+                 4. 每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」）；\n\
+                 5. 若 notes/ 中「仅摘要」笔记对应的全文已出现在项目资源或 papers/（用户已补），重读全文并更新该笔记、去掉标记。\n\
+                 完成标准：included.md 每篇都有对应笔记与 bib 条目；notes/ 与 references.bib 均已提交。"
+                    .into(),
+                &["notes/", "references.bib"],
+            ),
+            step(
+                "综述大纲",
+                "outline",
+                "输入：notes/ 全部笔记与 references.bib（已随 main 合并在本工作区内）。\n\
+                 1. 通读笔记，按主题聚类归纳研究现状的主要线索（方法/问题/结论的异同）；\n\
+                 2. 产出 outline.md：章节结构（引言 / 背景 / 主题各节 / 讨论 / 结论）、每节要点（3-6 条）、每节拟引用的 bib 键、分类框架的一句话说明；\n\
+                 3. 分类框架优先按主题聚类；主题过于发散时改按时间线；有分歧时选覆盖文献最多的框架，并在 outline.md 末尾记录取舍理由；\n\
+                 4. 只引用 references.bib 中存在的键，不为大纲新造引用。\n\
+                 完成标准：outline.md 结构完整、每节要点与引用键齐全、取舍理由已记录。"
+                    .into(),
+                &["outline.md"],
+            ),
+            step(
+                "综述初稿",
+                "draft",
+                "输入：outline.md、notes/、references.bib（已随 main 合并在本工作区内）。\n\
+                 1. 按 outline.md 用规范学术英文撰写综述初稿，产出 manuscript/draft.md（目标 6000-8000 词，课题主题段另有约定时从其约定）；\n\
+                 2. 引用一律用 [@bib键] 形式，且只能引用 references.bib 中已存在的键——严禁编造文献；\n\
+                 3. 图表以占位形式给出（「图 1：…（待绘制）」「表 1：…」），不虚构数据；\n\
+                 4. 没有文献支撑的论断不得下；必须保留的判断在句末标 [待核实]。\n\
+                 完成标准：manuscript/draft.md 覆盖大纲全部章节，引用键全部可在 references.bib 中解析。"
+                    .into(),
+                &["manuscript/"],
+            ),
+            step(
+                "润色与定稿",
+                "polish",
+                "输入：manuscript/draft.md、references.bib（已随 main 合并在本工作区内）。\n\
+                 1. 语言润色：语法、用词、句式与段落衔接，保持学术语气；只改表达，不改学术观点；\n\
+                 2. 一致性核对：每个论断都有引用、每个 bib 条目都被引用（未用的在报告中列出）、图表占位编号连续；发现内容性错误标 [待核实]，不得自行改写事实；\n\
+                 3. 产出 manuscript/review-final.md 定稿，并附 manuscript/changelog.md（逐条列出主要修改点）；\n\
+                 4. 文末 References 节按 references.bib 生成完整文献列表。\n\
+                 完成标准：review-final.md 无语法硬伤、引用闭环、changelog.md 已提交。"
+                    .into(),
+                &["manuscript/review-final.md"],
+            ),
+        ],
+    }
+}
+
+/// 按 canonical 主键查注册表；未注册返回 None
+fn demo_registered(conn: &Connection, key: &str) -> Result<Option<ProjectDto>, String> {
+    match conn.query_row(
+        "SELECT path, name, created_at, last_opened_at FROM projects WHERE path=?1",
+        params![key],
+        |r| {
+            Ok(ProjectDto {
+                path: r.get(0)?,
+                name: r.get(1)?,
+                created_at: r.get(2)?,
+                last_opened_at: r.get(3)?,
+            })
+        },
+    ) {
+        Ok(p) => Ok(Some(p)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("查询项目注册表失败: {e}")),
+    }
+}
+
+fn create_demo_at(base: &Path, conn: &Connection) -> Result<ProjectDto, String> {
+    let dir = base.join(DEMO_DIR_NAME);
+    if dir.is_dir() {
+        let key = canonical_key(&dir);
+        if let Some(existing) = demo_registered(conn, &key)? {
+            return Ok(existing); // 幂等：重复点不重复建
+        }
+        // 目录在但未注册：只注册，目录里可能已有用户改过的内容，一律不动
+        return register_at(conn, &dir, DEMO_PROJECT_NAME, &crate::sessions::now_iso());
+    }
+    fs::create_dir_all(dir.join("papers")).map_err(|e| format!("创建示例课题目录失败: {e}"))?;
+    fs::create_dir_all(dir.join("notes")).map_err(|e| format!("创建示例课题目录失败: {e}"))?;
+    fs::write(
+        dir.join("papers").join("sample-glp1-review.pdf"),
+        build_demo_pdf(),
+    )
+    .map_err(|e| format!("写入示例 PDF 失败: {e}"))?;
+    crate::profiles::atomic_write(&dir.join("references.bib"), DEMO_BIB)?;
+    crate::profiles::atomic_write(&dir.join("README.md"), DEMO_README)?;
+    write_config_at(&dir, &demo_project_config())?;
+    ensure_git_at(&dir)?;
+    // best-effort：自动提交失败不阻断演示课题创建（档案卡未提交只影响后续评审合并提示）
+    let _ = commit_bootstrap_at(&dir);
+    register_at(conn, &dir, DEMO_PROJECT_NAME, &crate::sessions::now_iso())
+}
+
+/// 首启引导最小版：一键创建带演示数据的示例课题（目录固定限系统文档目录下）。
+#[tauri::command]
+pub async fn create_demo_project() -> Result<ProjectDto, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let base = dirs::document_dir().ok_or_else(|| "无法确定系统文档目录".to_string())?;
+        let conn = db()?;
+        create_demo_at(&base, &conn)
+    })
+    .await
+    .map_err(|e| format!("创建示例课题失败: {e}"))?
 }
 
 /// 一键开步（§11.4 P1b）：把步骤简报落成工作区 TASK.md。
@@ -2109,6 +2444,149 @@ resources = ["ghost.pdf"]
         assert!(err.contains("至少需要一个步骤"), "{err}");
         // 校验失败不落盘
         assert!(!path.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== 示例课题（create_demo_at / build_demo_pdf） =====
+
+    #[test]
+    fn demo_pdf_xref_offsets_are_valid() {
+        let pdf = build_demo_pdf();
+        assert!(pdf.starts_with(b"%PDF-1.4\n"), "PDF 魔数头");
+        assert!(pdf.ends_with(b"%%EOF\n"), "EOF 收尾");
+        // 全 ASCII：字节偏移可直接按文本解析
+        let text = String::from_utf8(pdf.clone()).unwrap();
+        let sx = text.rfind("startxref").expect("缺 startxref");
+        let xref_pos: usize = text[sx..]
+            .lines()
+            .nth(1)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(&pdf[xref_pos..xref_pos + 4], b"xref", "startxref 必须指向 xref 表");
+        // 逐条 n 项的偏移必须精确指向 "N 0 obj"
+        let xref = &text[xref_pos..];
+        let entries: Vec<&str> = xref.lines().skip(2).take(6).collect();
+        assert_eq!(entries.len(), 6, "xref 应有 0..=5 共 6 项");
+        assert!(entries[0].ends_with(" f "), "0 号为 free 项");
+        for (i, entry) in entries.iter().enumerate().skip(1) {
+            // lines() 不含换行符：19 字符 + LF = 固定的 20 字节 xref 项
+            assert_eq!(entry.len(), 19, "xref 项固定 20 字节（含 LF）: {entry:?}");
+            let off: usize = entry[..10].trim().parse().unwrap();
+            assert!(
+                pdf[off..].starts_with(format!("{i} 0 obj").as_bytes()),
+                "对象 {i} 的 xref 偏移错位"
+            );
+        }
+        assert!(text.contains("trailer\n<< /Size 6 /Root 1 0 R >>"));
+    }
+
+    #[test]
+    fn create_demo_flow_and_idempotency() {
+        if crate::agents::resolve_binary("git").is_none() {
+            eprintln!("测试环境无 git，跳过 create_demo 用例");
+            return;
+        }
+        let dir = temp_dir("demo");
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        let base = dir.join("documents");
+        let root = base.join(DEMO_DIR_NAME);
+
+        let p = create_demo_at(&base, &conn).unwrap();
+        assert_eq!(p.name, DEMO_PROJECT_NAME);
+        assert!(root.join("papers").join("sample-glp1-review.pdf").exists());
+        assert!(root.join("notes").is_dir());
+        assert!(root.join("references.bib").exists());
+        assert!(root.join("README.md").exists());
+        let pdf = fs::read(root.join("papers").join("sample-glp1-review.pdf")).unwrap();
+        assert!(pdf.starts_with(b"%PDF-") && pdf.ends_with(b"%%EOF\n"), "PDF 结构完整");
+        // 档案卡可读回：topic + 五步流水线 + 两条资源登记
+        // （简报引用上一步产物路径属正常，parse_config 的引用提示类 warnings 不阻断，这里不断言为空）
+        let text = fs::read_to_string(config_path(&root)).unwrap();
+        let (config, _) = parse_config(&text);
+        assert_eq!(config.topic.as_deref(), Some("GLP-1 受体激动剂的心血管结局（演示课题）"));
+        assert_eq!(config.steps.len(), 5);
+        assert_eq!(config.steps[0].workspace_name, "lit-search");
+        assert_eq!(config.steps[4].workspace_name, "polish");
+        assert_eq!(config.resources.len(), 2);
+        assert!(git_has_head(&root), "bootstrap 应已产生初始提交");
+
+        // 幂等：二次调用返回同一项目，且不覆盖用户改过的内容
+        write(&root.join("README.md"), "user edit");
+        let p2 = create_demo_at(&base, &conn).unwrap();
+        assert_eq!(p2.path, p.path);
+        assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "user edit");
+
+        // 目录已存在但未注册：只注册，不补建任何文件
+        remove_project_at(&conn, &root).unwrap();
+        fs::remove_file(root.join("references.bib")).unwrap();
+        let p3 = create_demo_at(&base, &conn).unwrap();
+        assert_eq!(p3.path, p.path);
+        assert!(!root.join("references.bib").exists(), "已存在目录只注册，不回补文件");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_project_dir_removes_dir_and_registration() {
+        let dir = temp_dir("deldir");
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        let root = dir.join("demo-proj");
+        write(&config_path(&root), "artifact_dir = \"artifacts\"\n");
+        write(&root.join("notes/x.md"), "x");
+        register_at(&conn, &root, "演示", "2026-08-01T00:00:00Z").unwrap();
+
+        let msg = delete_project_dir_impl(&conn, &root).unwrap();
+        assert_eq!(msg, "已删除目录与注册记录");
+        assert!(!root.exists(), "目录应被删除");
+        assert!(!is_registered_at(&conn, &root), "注册记录应被移除");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_project_dir_rejects_non_project() {
+        let dir = temp_dir("deldir-nonproj");
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        // 普通目录：无 project.toml、未注册、无工作区 → 拒绝且目录原样保留
+        let plain = dir.join("plain");
+        write(&plain.join("a.txt"), "x");
+        let err = delete_project_dir_impl(&conn, &plain).unwrap_err();
+        assert!(err.contains("不是 Ccode 项目"), "{err}");
+        assert!(plain.join("a.txt").exists());
+        // 不存在的路径
+        let err2 = delete_project_dir_impl(&conn, &dir.join("missing")).unwrap_err();
+        assert!(err2.contains("不存在"), "{err2}");
+        // 文件而非目录
+        let f = dir.join("file.txt");
+        write(&f, "x");
+        let err3 = delete_project_dir_impl(&conn, &f).unwrap_err();
+        assert!(err3.contains("不是目录"), "{err3}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_project_dir_rejects_home_and_shallow() {
+        let dir = temp_dir("deldir-guard");
+        // home 与文档目录本身一律拒绝
+        let home = dirs::home_dir().unwrap();
+        let err = guard_project_dir(&home).unwrap_err();
+        assert!(err.contains("主目录"), "{err}");
+        if let Some(docs) = dirs::document_dir() {
+            let err = guard_project_dir(&docs).unwrap_err();
+            assert!(err.contains("文档目录"), "{err}");
+        }
+        // 浅层路径：文件系统根（零有效段）拒绝
+        #[cfg(unix)]
+        {
+            let err = guard_project_dir(Path::new("/")).unwrap_err();
+            assert!(err.contains("层级过浅"), "{err}");
+            // 系统目录
+            assert!(guard_project_dir(Path::new("/usr/bin")).is_err());
+        }
+        // 正常两级以上项目目录放行
+        let ok = dir.join("a").join("b");
+        fs::create_dir_all(&ok).unwrap();
+        assert!(guard_project_dir(&ok.canonicalize().unwrap()).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

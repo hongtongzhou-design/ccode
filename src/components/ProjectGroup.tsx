@@ -34,14 +34,15 @@ const ctaSm =
 const fieldSm =
   "h-7 rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
 /** 步进器虚线块：严格 5×5px 实心正方形，真实元素而非渐变。
- *  已打通（done）列整体 ok 绿；列 hover 微亮一档（表达整列是一个可交互单元）；300ms 颜色过渡 */
+ *  完成列亮灰白（l2）、未完成列暗（hairline）——链条不用绿色，绿色只给完成圆（--color-done）；
+ *  列 hover 微亮一档（表达整列是一个可交互单元）；300ms 颜色过渡 */
 function DashBlock({ k, done }: { k: string; done: boolean }) {
   return (
     <span
       key={k}
       aria-hidden
       className={`block h-[5px] w-[5px] shrink-0 rounded-[1px] transition-colors duration-300 ${
-        done ? "bg-done group-hover:brightness-110" : "bg-hairline group-hover:bg-l3"
+        done ? "bg-l2 group-hover:brightness-110" : "bg-hairline group-hover:bg-l3"
       }`}
     />
   );
@@ -49,8 +50,8 @@ function DashBlock({ k, done }: { k: string; done: boolean }) {
 
 /** 功能小方块（圆前=编辑简报 / 圆后=产物核验）：平时与虚线段等大混在线里（5px），
  *  hover/聚焦时那一块提亮 cta 并略放大（scale-150，容器已 overflow-y-clip 不会触发滚动条晃动）；
- *  28px 透明热区（绝对定位子元素撑开，不占布局）保证好按；已打通（done）列跟随变绿；
- *  功能名只在 title 悬浮 */
+ *  28px 透明热区（绝对定位子元素撑开，不占布局）保证好按；完成列亮色（l2）、未完成列暗（hairline），
+ *  方块不用绿色——绿色只给链条与完成圆；功能名只在 title 悬浮 */
 function SquareButton({
   title,
   label,
@@ -63,7 +64,7 @@ function SquareButton({
   label: string;
   disabled?: boolean;
   expanded?: boolean;
-  /** 已打通列：方块跟随虚线块变绿 */
+  /** 完成列：方块亮色（l2）；未完成列暗（hairline） */
   done?: boolean;
   onClick: () => void;
 }) {
@@ -76,9 +77,7 @@ function SquareButton({
       disabled={disabled}
       onClick={onClick}
       className={`relative block h-[5px] w-[5px] shrink-0 cursor-pointer rounded-[1px] transition-[transform,background-color] duration-300 hover:scale-150 hover:bg-cta focus-visible:scale-150 focus-visible:bg-cta disabled:cursor-not-allowed ${
-        done
-          ? "bg-done group-hover:brightness-110"
-          : "bg-hairline group-hover:bg-l3"
+        done ? "bg-l2 group-hover:brightness-110" : "bg-hairline group-hover:bg-l3"
       }`}
     >
       <span className="absolute left-1/2 top-1/2 size-[28px] -translate-x-1/2 -translate-y-1/2" />

@@ -822,7 +822,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [renameTarget, setRenameTarget] = useState<{
     path: string;
     name: string;
-  } | null>(null);  const [created, setCreated] = useState<WorkspaceDto | null>(null);
+  } | null>(null);
+  // rail 头部 + 菜单（添加项目 / 创建示例课题）
+  const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(
+    null,
+  );  const [created, setCreated] = useState<WorkspaceDto | null>(null);
   // P1b 项目分组：注册项目列表 + 每次刷新自增的令牌（触发各分组重读 project.toml）
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -1361,7 +1365,24 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     setAddProjectPath(selected);
   }
 
-  /** 项目导航行右键菜单项：重命名/复制路径/移除注册（未注册的分组只留复制路径） */
+  const [demoBusy, setDemoBusy] = useState(false);
+  /** 空态次入口：一键创建带演示数据的示例课题（后端幂等，重复点不重复建） */
+  async function onCreateDemo() {
+    setDemoBusy(true);
+    try {
+      const project = await invoke<ProjectDto>("create_demo_project");
+      // 先落项目列表再选中分组：分组表由 projects 派生，反了会被空表 effect 重置
+      setProjects(await invoke<ProjectDto[]>("list_projects"));
+      setSelectedGroupKey(`p:${project.path}`);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDemoBusy(false);
+    }
+  }
+
+  /** 项目导航行右键菜单项：重命名/复制路径/移除注册/删除目录（后两者互斥粒度不同，删除目录对未注册分组也可用） */
   function railMenuItems(group: (typeof groups)[number]) {
     return [
       {
@@ -1386,7 +1407,30 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         title: group.project ? undefined : "未注册项目无法移除",
         onSelect: () => group.project && void removeRegistration(group),
       },
+      {
+        label: "删除项目目录…",
+        danger: true,
+        onSelect: () => void deleteProjectDir(group),
+      },
     ];
+  }
+
+  /** 彻底删除项目：工作区 + 目录 + 注册记录（不可逆；未注册分组同样可用） */
+  async function deleteProjectDir(group: (typeof groups)[number]) {
+    const name = group.project?.name ?? group.repoName;
+    if (
+      !window.confirm(
+        `彻底删除项目「${name}」？\n\n目录：${group.repoPath}\n工作区：${group.list.length} 个\n\n工作区和目录将一并删除、不可恢复；请先关闭该项目内正在运行的终端标签。`,
+      )
+    )
+      return;
+    try {
+      await invoke<string>("delete_project_dir", { path: group.repoPath });
+      // 删掉的是当前选中分组时，selectedGroupKey 回落由分组表 effect 处理
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    }
   }
 
   /** 移除项目注册（只删注册记录，不动磁盘目录与工作区） */
@@ -1445,12 +1489,15 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         <div className="flex h-12 shrink-0 items-center gap-2 px-3">
           <span className="text-sm font-medium text-l1">项目</span>
           <span className="text-xs text-l4">{groups.length}</span>
-          {/* 添加项目收进 rail 头部（页头实心 CTA 不变；原底部整块占位已删） */}
+          {/* 添加项目收进 rail 头部 + 菜单（含示例课题常驻入口）；页头实心 CTA 不变 */}
           <button
             type="button"
-            onClick={() => void onAddProject()}
-            title="添加项目"
-            aria-label="添加项目"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setAddMenu({ x: rect.right - 176, y: rect.bottom + 4 });
+            }}
+            title="添加项目 / 创建示例课题"
+            aria-label="添加项目 / 创建示例课题"
             className="ml-auto flex h-7 w-7 items-center justify-center rounded-md text-sm text-l3 hover:bg-white/5 hover:text-l1"
           >
             +
@@ -1582,13 +1629,23 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           title="还没有研究项目"
           detail="先添加一个项目目录，Ccode 会为它建立流水线和隔离任务。"
           action={
-            <button
-              type="button"
-              onClick={() => void onAddProject()}
-              className={primaryActionClass}
-            >
-              添加项目
-            </button>
+            <div className="flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => void onAddProject()}
+                className={primaryActionClass}
+              >
+                添加项目
+              </button>
+              <button
+                type="button"
+                disabled={demoBusy}
+                onClick={() => void onCreateDemo()}
+                className={secondaryActionClass}
+              >
+                {demoBusy ? "正在创建…" : "✦ 创建示例课题（演示）"}
+              </button>
+            </div>
           }
         />
       ) : selectedGroup ? (
@@ -1801,9 +1858,24 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           }}
         />
       )}
+      {addMenu && (
+        <ContextMenu
+          x={addMenu.x}
+          y={addMenu.y}
+          onClose={() => setAddMenu(null)}
+          items={[
+            { label: "添加项目…", onSelect: () => void onAddProject() },
+            {
+              label: demoBusy ? "正在创建…" : "✦ 创建示例课题（演示）",
+              disabled: demoBusy,
+              title: "在 文档/Ccode 示例课题 生成带演示数据的完整流水线项目",
+              onSelect: () => void onCreateDemo(),
+            },
+          ]}
+        />
+      )}
       {railMenu &&
-        (() => {
-          const group = groups.find((g) => g.key === railMenu.groupKey);
+        (() => {          const group = groups.find((g) => g.key === railMenu.groupKey);
           if (!group) return null;
           return (
             <ContextMenu

@@ -5,6 +5,8 @@ export interface ContextMenuItem {
   onSelect?: () => void;
   /** 禁用项：渲染为不可点，title 说明原因（如互斥脚本运行中） */
   disabled?: boolean;
+  /** 危险项：红色警示文字（删除类不可逆操作） */
+  danger?: boolean;
   title?: string;
 }
 
@@ -100,7 +102,9 @@ export default function ContextMenu({
             className={`block w-full truncate px-3 py-1.5 text-left text-sm ${
               it.disabled
                 ? "cursor-not-allowed text-l4"
-                : "text-l2 hover:bg-white/5"
+                : it.danger
+                  ? "text-err-text hover:bg-white/5"
+                  : "text-l2 hover:bg-white/5"
             }`}
           >
             {it.label}

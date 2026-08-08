@@ -520,7 +520,8 @@ fn create_dir_sync(root: &str, name: &str) -> Result<String, String> {
 }
 
 /// 重要系统/用户路径保护：无论根目录范围如何都拒绝删除
-fn is_protected_path(path: &str) -> bool {
+/// （pub(crate)：projects::delete_project_dir 删项目目录前复用同一黑名单）
+pub(crate) fn is_protected_path(path: &str) -> bool {
     // 词法形式与 canonicalize 后形式双重校验：堵住「项目内符号链接指向受保护目录」的绕过
     let lex = expand_tilde(path);
     let canon = std::path::PathBuf::from(&lex)

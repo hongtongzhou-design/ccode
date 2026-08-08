@@ -85,6 +85,12 @@ fn db_at(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("打开 app.db 失败: {e}"))?;
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|e| format!("设置 app.db 等待时间失败: {e}"))?;
+    ensure_workspaces_table(&conn)?;
+    Ok(conn)
+}
+
+// 幂等建表：delete_workspaces_for_repo 可能拿到只建过 projects 表的连接（同一 app.db）
+fn ensure_workspaces_table(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS workspaces(
           id TEXT PRIMARY KEY, repo_path TEXT, name TEXT, branch TEXT,
@@ -94,7 +100,7 @@ fn db_at(path: &Path) -> Result<Connection, String> {
     .map_err(|e| format!("初始化 workspaces 表失败: {e}"))?;
     // 轻量迁移：老库补 merged_at 列（已存在则忽略错误）
     let _ = conn.execute_batch("ALTER TABLE workspaces ADD COLUMN merged_at TEXT;");
-    Ok(conn)
+    Ok(())
 }
 
 pub(crate) fn db() -> Result<Connection, String> {
@@ -860,6 +866,45 @@ fn delete_impl(conn: &Connection, id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM workspaces WHERE id=?1", params![id])
         .map_err(|e| format!("删除 workspaces 行失败: {e}"))?;
     Ok(())
+}
+
+/// 某仓库的全部工作区（active/archived 不分状态）。
+/// repo_path 落库时可能非 canonical 写法，按 canonical 路径比对。
+pub(crate) fn workspaces_of_repo(
+    conn: &Connection,
+    repo: &Path,
+) -> Result<Vec<WorkspaceDto>, String> {
+    ensure_workspaces_table(conn)?;
+    let key = fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    Ok(query_workspaces(conn)?
+        .into_iter()
+        .filter(|w| {
+            fs::canonicalize(&w.repo_path).unwrap_or_else(|_| PathBuf::from(&w.repo_path)) == key
+        })
+        .collect())
+}
+
+/// 删除某仓库的全部工作区，返回已删工作区名清单。
+/// 供 projects::delete_project_dir 彻底删除项目目录用：属删除语义，允许 force 移除
+/// worktree；任一失败即中止（已删的不回滚），错误信息里说明已删哪些。
+pub(crate) fn delete_workspaces_for_repo(
+    conn: &Connection,
+    repo: &Path,
+) -> Result<Vec<String>, String> {
+    let targets = workspaces_of_repo(conn, repo)?;
+    let mut deleted: Vec<String> = Vec::new();
+    for w in &targets {
+        if let Err(e) = delete_impl(conn, &w.id) {
+            let done = if deleted.is_empty() {
+                "尚无工作区被删除".to_string()
+            } else {
+                format!("已删除的工作区：{}", deleted.join("、"))
+            };
+            return Err(format!("删除工作区「{}」失败: {e}；{done}", w.name));
+        }
+        deleted.push(w.name.clone());
+    }
+    Ok(deleted)
 }
 
 fn port_env(port_base: i64) -> Vec<(String, String)> {

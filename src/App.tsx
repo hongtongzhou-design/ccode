@@ -10,7 +10,7 @@ import CommandPalette from "./components/CommandPalette";
 import { LoadingRows } from "./components/PageFrame";
 import "./App.css";
 import { useAppStore } from "./store";
-import { eventMatchesCombo } from "./hotkeys";
+import { eventMatchesCombo, comboLabel } from "./hotkeys";
 
 // 页面懒加载：首屏只拉当前页 chunk，其余页首次访问时才加载
 const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
@@ -91,6 +91,8 @@ function App() {
   // 全局快捷键（设置页可自定义，存 settings.json）：命令面板（默认 ⌘K）、
   // 隐藏/显示侧栏（默认 ⌘\）、⌘1–⌘7 页切（开关）。空串 = 禁用；⌘F 已被终端搜索占用故不用。
   const settings = useAppStore((s) => s.settings);
+  // 侧栏底部 ⌘K 常驻入口的键位标签：跟随设置页自定义绑定；禁用（空串）时回落默认展示
+  const paletteComboLabel = comboLabel(settings?.hotkeyPalette || "mod+k");
   useEffect(() => {
     const paletteCombo = settings?.hotkeyPalette ?? "mod+k";
     const chromeCombo = settings?.hotkeyHideChrome ?? "mod+\\";
@@ -321,6 +323,22 @@ function App() {
 
           {/* 底部管理区与导航之间只留一根隐约细线（5% 白 + 0.5px），不完全消失 */}
           <div className="shrink-0 border-t border-white/5 px-1.5 py-2">
+            {/* 命令面板常驻发现入口：弱一档（text-l4），标签跟随设置页自定义绑定 */}
+            <button
+              type="button"
+              onClick={() => setPaletteOpen(true)}
+              title="打开命令面板"
+              className={`relative mb-0.5 flex h-7 items-center rounded-md text-sm transition-colors ${
+                collapsed ? "w-11 justify-center" : "w-full px-2.5"
+              } text-l4 hover:bg-white/5 hover:text-l3`}
+            >
+              <span
+                className={`font-mono ${collapsed ? "text-xs" : "mr-2 w-5 text-center text-xs"}`}
+              >
+                {paletteComboLabel}
+              </span>
+              {!collapsed && <span>命令面板</span>}
+            </button>
             {NAV_BOTTOM.map((n) => (
               <button
                 key={n.id}
