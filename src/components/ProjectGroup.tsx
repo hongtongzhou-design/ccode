@@ -33,31 +33,38 @@ const ctaSm =
   "inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
 const fieldSm =
   "h-7 rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
-/** 步进器虚线块：严格 5×5px 实心正方形（跟随 --color-hairline），真实元素而非渐变 */
-function DashBlock({ k }: { k: string }) {
+/** 步进器虚线块：严格 5×5px 实心正方形，真实元素而非渐变。
+ *  已打通（done）列整体 ok 绿；列 hover 微亮一档（表达整列是一个可交互单元）；300ms 颜色过渡 */
+function DashBlock({ k, done }: { k: string; done: boolean }) {
   return (
     <span
       key={k}
       aria-hidden
-      className="block h-[5px] w-[5px] shrink-0 rounded-[1px] bg-hairline"
+      className={`block h-[5px] w-[5px] shrink-0 rounded-[1px] transition-colors duration-300 ${
+        done ? "bg-ok-text group-hover:brightness-110" : "bg-hairline group-hover:bg-l3"
+      }`}
     />
   );
 }
 
-/** 功能小方块（圆前=编辑简报 / 圆后=产物核验）：视觉 = 节律中的普通虚线块（bg-hairline 5px），
- *  混在线里不做状态区分；28px 透明热区（绝对定位子元素撑开，不占布局）；
- *  hover/聚焦提亮 cta 表明可点；功能名只在 title 悬浮 */
+/** 功能小方块（圆前=编辑简报 / 圆后=产物核验）：平时与虚线段等大混在线里（5px），
+ *  hover/聚焦时那一块提亮 cta 并略放大（scale-150，容器已 overflow-y-clip 不会触发滚动条晃动）；
+ *  28px 透明热区（绝对定位子元素撑开，不占布局）保证好按；已打通（done）列跟随变绿；
+ *  功能名只在 title 悬浮 */
 function SquareButton({
   title,
   label,
   disabled,
   expanded,
+  done,
   onClick,
 }: {
   title: string;
   label: string;
   disabled?: boolean;
   expanded?: boolean;
+  /** 已打通列：方块跟随虚线块变绿 */
+  done?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -68,7 +75,11 @@ function SquareButton({
       aria-expanded={expanded}
       disabled={disabled}
       onClick={onClick}
-      className="relative block h-[5px] w-[5px] shrink-0 rounded-[1px] bg-hairline transition-[transform,background-color] hover:bg-cta focus-visible:bg-cta disabled:cursor-not-allowed"
+      className={`relative block h-[5px] w-[5px] shrink-0 cursor-pointer rounded-[1px] transition-[transform,background-color] duration-300 hover:scale-150 hover:bg-cta focus-visible:scale-150 focus-visible:bg-cta disabled:cursor-not-allowed ${
+        done
+          ? "bg-ok-text group-hover:brightness-110"
+          : "bg-hairline group-hover:bg-l3"
+      }`}
     >
       <span className="absolute left-1/2 top-1/2 size-[28px] -translate-x-1/2 -translate-y-1/2" />
     </button>
@@ -131,14 +142,21 @@ function StepperCell({
   }, []);
   const left = Math.ceil(dashCount / 2);
   const right = Math.floor(dashCount / 2);
+  // done 列整条链变绿（已打通）；进行中/checking 的圆加 cta 外环锁定焦点
+  const done = circleClass.includes("bg-ok-text");
+  const active = circleClass.includes("bg-cta ");
   return (
-    <li ref={ref} className="flex min-w-0 items-center justify-center gap-[5px]">
+    <li
+      ref={ref}
+      className="group flex min-w-0 items-center justify-center gap-[5px]"
+    >
       {Array.from({ length: left }, (_, k) => (
-        <DashBlock key={`l${k}`} k={`l${k}`} />
+        <DashBlock key={`l${k}`} k={`l${k}`} done={done} />
       ))}
       <SquareButton
         title={briefTitle}
         label={briefLabel}
+        done={done}
         onClick={onBriefClick}
       />
       <span
@@ -150,9 +168,9 @@ function StepperCell({
           disabled={circleDisabled}
           title={circleTitle}
           aria-label={circleLabel}
-          className={`block h-[24px] w-[24px] shrink-0 rounded-full transition-[filter] hover:brightness-110 disabled:cursor-not-allowed ${circleClass} ${
+          className={`block h-[24px] w-[24px] shrink-0 cursor-pointer rounded-full transition-[filter,color,background-color] duration-300 hover:brightness-110 disabled:cursor-not-allowed ${circleClass} ${
             pulsing ? "animate-pulse" : ""
-          }`}
+          } ${active ? "ring-2 ring-cta/50" : ""}`}
           onClick={onCircleClick}
         />
       </span>
@@ -161,10 +179,11 @@ function StepperCell({
         label={artifactsLabel}
         disabled={artifactsDisabled}
         expanded={artifactsExpanded}
+        done={done}
         onClick={onArtifactsClick}
       />
       {Array.from({ length: right }, (_, k) => (
-        <DashBlock key={`r${k}`} k={`r${k}`} />
+        <DashBlock key={`r${k}`} k={`r${k}`} done={done} />
       ))}
     </li>
   );
@@ -1012,7 +1031,9 @@ export default function ProjectGroup({
         <div className="mb-3 rounded-md bg-strip px-3 py-2.5">
           {/* 等分列网格：列宽下限 9rem 让更多步骤在常规窗口内完整可见；
               窗口过窄放不下全部步骤时保持整体横向滚动（不换行，虚线与各列大圆同轴） */}
-          <div className="overflow-x-auto pb-1">
+          {/* 横向滚动容器必须显式 overflow-y-clip：overflow-x:auto 会把 y 轴也算成 auto，
+              方块的 28px 透明热区/hover 放大溢出纵向就会冒出滚动条，宽度变化又触发链重算（左右晃动） */}
+          <div className="overflow-x-auto overflow-y-clip pb-1">
             <div
               className="min-w-full"
               style={{
