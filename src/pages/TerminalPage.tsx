@@ -25,6 +25,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useAppStore } from "../store";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
+import { confirmDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
 import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
@@ -2091,14 +2092,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     [injectToActiveAgent],
   );
 
-  /** 切换文件树根时关闭旧预览；脏文件先确认，且绝不映射新根下的同名文件。 */
-  const closePreviewForRootChange = useCallback(() => {
+  /** 切换文件树根时关闭旧预览；脏文件先确认（异步内联确认框），且绝不映射新根下的同名文件。 */
+  const closePreviewForRootChange = useCallback(async () => {
     if (!preview) return true;
     if (
       previewDirty &&
-      !window.confirm(
+      !(await confirmDialog(
         "当前预览文件有未保存改动。切换文件树根目录将放弃这些改动，继续？",
-      )
+        { danger: true },
+      ))
     ) {
       return false;
     }
@@ -2501,7 +2503,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         });
         if (
           alive &&
-          !window.confirm("该标签的 Agent 还在运行，确认关闭并终止？")
+          !(await confirmDialog("该标签的 Agent 还在运行，确认关闭并终止？", {
+            danger: true,
+          }))
         )
           return;
       } catch {
@@ -2581,9 +2585,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           }
           if (
             alive > 0 &&
-            !window.confirm(
+            !(await confirmDialog(
               `还有 ${alive} 个标签的 Agent 正在运行，确认退出并终止？`,
-            )
+              { danger: true },
+            ))
           )
             return;
           allowWindowCloseRef.current = true;

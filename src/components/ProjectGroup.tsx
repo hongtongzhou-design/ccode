@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ContextMenu from "./ContextMenu";
+import { confirmDialog } from "./ConfirmDialog";
 import PipelineEditor from "./PipelineEditor";
 import HistoryOverlay from "./HistoryOverlay";
 import TemplatePicker, { type TemplatePickItem } from "./TemplatePicker";
@@ -384,9 +385,9 @@ export default function ProjectGroup({
   async function removeRegistration() {
     if (!project) return;
     if (
-      !window.confirm(
+      !(await confirmDialog(
         `只移除「${project.name}」的项目注册，不删除磁盘目录；项目内工作区保留。继续？`,
-      )
+      ))
     )
       return;
     try {
@@ -516,9 +517,10 @@ export default function ProjectGroup({
     // 已有步骤时视为「更换模板」：提示覆盖，绑定的工作区与资源不受影响
     if (
       cfg.steps.length > 0 &&
-      !window.confirm(
+      !(await confirmDialog(
         `更换模板「${item.name}」？现有 ${cfg.steps.length} 个步骤会被替换，绑定的工作区与资源不受影响。继续？`,
-      )
+        { danger: true },
+      ))
     )
       return;
     setApplyingTemplate(true);
@@ -548,7 +550,9 @@ export default function ProjectGroup({
       ).catch(() => [] as PipelineTemplateDto[]);
       if (
         existing.some((t) => t.name === name) &&
-        !window.confirm(`已存在同名模板「${name}」，保存将覆盖。继续？`)
+        !(await confirmDialog(`已存在同名模板「${name}」，保存将覆盖。继续？`, {
+          danger: true,
+        }))
       )
         return;
       const saved = await invoke<PipelineTemplateDto>(
@@ -591,7 +595,9 @@ export default function ProjectGroup({
     if (!cfg) return;
     const step = cfg.steps[index];
     if (
-      !window.confirm(`删除步骤「${step.name}」？绑定的工作区不受影响。继续？`)
+      !(await confirmDialog(`删除步骤「${step.name}」？绑定的工作区不受影响。继续？`, {
+        danger: true,
+      }))
     )
       return;
     await saveConfig({

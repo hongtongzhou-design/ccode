@@ -2,6 +2,12 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)管理。架构级决策记录见 [docs/architecture.md](docs/architecture.md) §10。
 
+## Unreleased（未发布）
+
+### 修复
+
+- macOS 上确认弹窗一律不弹：`window.confirm` 在 wry 的 WKWebView 里没有 JS 对话框委托，恒返回 `false`——全应用约 30 处确认（删除配置/归档/丢弃改动等）静默走「取消」分支表现为「按钮点了没反应」，最严重的是终端关窗守卫：有 agent 在跑时每次关窗都被当成取消，应用无法退出。改为全局内联确认框 `ConfirmDialog.tsx`（promise 版 `confirmDialog`，宿主挂 App 根部，支持 danger 警示钮与 Esc/Enter/点遮罩），全部调用点已替换；5 处 `window.alert` 提示（同样静默无效）一并替换为同组件的 `alertDialog`
+
 ## v0.1.0（首个发布版本）
 
 **科研流水线**

@@ -7,6 +7,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
+import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import { LoadingRows } from "./components/PageFrame";
 import "./App.css";
 import { useAppStore } from "./store";
@@ -425,6 +426,8 @@ function App() {
           </div>
         </main>
         {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
+        {/* 全局确认框宿主（confirmDialog）：z-[70]，压过一切覆盖层 */}
+        <ConfirmDialogHost />
       </div>
     </ErrorBoundary>
   );

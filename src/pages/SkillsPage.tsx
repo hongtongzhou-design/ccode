@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { AGENTS } from "../types";
 import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
+import { confirmDialog } from "../components/ConfirmDialog";
 import {
   Checkbox,
   EmptyState,
@@ -1000,9 +1001,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
 
   async function onDelete(skill: SkillDto) {
     if (
-      !window.confirm(
+      !(await confirmDialog(
         `将删除技能「${skill.name}」并同步从各 agent 移除（库文件自动备份）。继续？`,
-      )
+        { danger: true },
+      ))
     )
       return;
     try {

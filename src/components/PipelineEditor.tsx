@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Checkbox } from "./PageFrame";
+import { confirmDialog } from "./ConfirmDialog";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import type {
   ProjectConfigDto,
@@ -134,8 +135,13 @@ export default function PipelineEditor({
     patch(index, { resources: [...bound] });
   }
 
-  function tryClose() {
-    if (dirty && !window.confirm("流水线有未保存的改动，确定放弃并关闭？"))
+  async function tryClose() {
+    if (
+      dirty &&
+      !(await confirmDialog("流水线有未保存的改动，确定放弃并关闭？", {
+        danger: true,
+      }))
+    )
       return;
     onClose();
   }

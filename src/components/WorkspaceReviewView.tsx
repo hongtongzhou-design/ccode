@@ -13,6 +13,7 @@ import {
   Search,
 } from "lucide-react";
 import ContextMenu from "./ContextMenu";
+import { confirmDialog } from "./ConfirmDialog";
 import ImagePairView, { isImagePath } from "./ImagePairView";
 import { Checkbox, LoadingRows } from "./PageFrame";
 import { defaultCommitMessage } from "../git-commit-message";
@@ -1391,9 +1392,10 @@ export default function WorkspaceReviewView({
     if (!diff) return;
     if (
       restart &&
-      !window.confirm(
+      !(await confirmDialog(
         `${diff.baseBranch} 已在冲突开始后更新。重新同步会放弃当前尚未提交的选边结果，并用最新 ${diff.baseBranch} 重新生成冲突。继续？`,
-      )
+        { danger: true },
+      ))
     ) {
       return;
     }
@@ -1460,9 +1462,10 @@ export default function WorkspaceReviewView({
     if (!diff || unresolvedFiles.length === 0) return;
     if (
       choice === "theirs" &&
-      !window.confirm(
+      !(await confirmDialog(
         `将全部冲突文件改为 ${diff.baseBranch} 版本，任务分支对应改动会被放弃。继续？`,
-      )
+        { danger: true },
+      ))
     )
       return;
     setConflictBusy(true);
@@ -1546,9 +1549,9 @@ export default function WorkspaceReviewView({
     }
     if (
       mergeAfter &&
-      !window.confirm(
+      !(await confirmDialog(
         `将提交冲突解决结果并合并进本地 ${diff.baseBranch}，工作区保留且不推送。继续？`,
-      )
+      ))
     )
       return;
     setConflictBusy(true);
@@ -1616,7 +1619,9 @@ export default function WorkspaceReviewView({
     if (!diff) return;
     if (
       prBody.trim() &&
-      !window.confirm("将用 AI 起草覆盖当前 PR 描述，继续？")
+      !(await confirmDialog("将用 AI 起草覆盖当前 PR 描述，继续？", {
+        danger: true,
+      }))
     )
       return;
     setPrDrafting(true);
@@ -1675,20 +1680,20 @@ export default function WorkspaceReviewView({
     }
     if (
       shouldMerge &&
-      !window.confirm(
+      !(await confirmDialog(
         `${shouldCommit ? "将提交当前全部改动，然后" : "将"}把 ${diff.branch} 合并进 ${diff.baseBranch}${
           archive ? "并归档工作区" : "（保留工作区）"
         }。继续？`,
-      )
+      ))
     ) {
       return;
     }
     if (
       shouldArchive &&
       !archiveOpen &&
-      !window.confirm(
+      !(await confirmDialog(
         `${shouldCommit ? "将提交当前全部改动，然后" : "将"}归档工作区。worktree 会被移除，分支仍保留以便恢复。继续？`,
-      )
+      ))
     ) {
       return;
     }

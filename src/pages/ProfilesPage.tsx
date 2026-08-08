@@ -10,6 +10,7 @@ import { copyTargets } from "../profile-copy";
 import { interactiveUpdatePrefill } from "../update-routing";
 import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
+import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
 import {
   PageFrame,
   PageHeader,
@@ -982,9 +983,9 @@ export default function ProfilesPage() {
         return;
       }
       if (
-        !window.confirm(
+        !(await confirmDialog(
           `将通过以下命令安装 ${labelOf(agentId)}：\n\n${method}\n\n继续？`,
-        )
+        ))
       )
         return;
     } catch (e) {
@@ -1018,9 +1019,9 @@ export default function ProfilesPage() {
   /** 把 profile 事务化写入该 CLI 的全部目标文件，UI 明示影响范围 */
   async function onApplyGlobal(p: Profile) {
     if (
-      !window.confirm(
+      !(await confirmDialog(
         `将把该配置写入 ${labelOf(p.agent)} 的全局配置文件（影响其他终端里的使用）。全部文件会作为一个批次写入，失败会自动回滚；当前内容会先备份。继续？`,
-      )
+      ))
     )
       return;
     try {
@@ -1032,7 +1033,7 @@ export default function ProfilesPage() {
       );
       await refreshGlobalBackups();
       const cli = applied.validation.cli;
-      window.alert(
+      await alertDialog(
         `已写入全局配置：\n${applied.files.join("\n")}\n\nCLI 配置检查：${
           cli.status === "passed" ? "通过" : "未通过"
         }\n${cli.message}`,
@@ -1067,9 +1068,9 @@ export default function ProfilesPage() {
   /** 恢复该 agent 最近一个完整备份批次；恢复前先备份当前状态。 */
   async function onRestoreBackup(agentId: string) {
     if (
-      !window.confirm(
+      !(await confirmDialog(
         `将恢复 ${labelOf(agentId)} 最近一个完整备份批次。当前状态会先另存为新备份，原恢复点不会被消耗。继续？`,
-      )
+      ))
     )
       return;
     try {
@@ -1077,7 +1078,7 @@ export default function ProfilesPage() {
         agent: agentId,
       });
       await refreshGlobalBackups();
-      window.alert(
+      await alertDialog(
         files.length
           ? `已恢复完整批次：\n${files.join("\n")}`
           : "没有可恢复的完整备份批次",
@@ -1114,14 +1115,18 @@ export default function ProfilesPage() {
       const added = await invoke<number>("import_profiles", { path });
       await loadAll();
       setError(null);
-      window.alert(`已导入 ${added} 个配置（密钥需逐个补填）`);
+      await alertDialog(`已导入 ${added} 个配置（密钥需逐个补填）`);
     } catch (e) {
       setError(String(e));
     }
   }
 
   async function onDelete(p: Profile) {
-    if (!window.confirm(`删除配置「${p.name}」？本地受限存储的密钥会一并删除。`))
+    if (
+      !(await confirmDialog(`删除配置「${p.name}」？本地受限存储的密钥会一并删除。`, {
+        danger: true,
+      }))
+    )
       return;
     try {
       await removeProfile(p.id);

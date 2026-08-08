@@ -9,6 +9,7 @@ import type {
   WorkspaceDiffDto,
 } from "../types";
 import { Checkbox, hoverRevealClass, LoadingRows } from "./PageFrame";
+import { confirmDialog } from "./ConfirmDialog";
 import ImagePairView, { isImagePath } from "./ImagePairView";
 import { useAppStore } from "../store";
 import { defaultCommitMessage } from "../git-commit-message";
@@ -398,7 +399,9 @@ function GitPanel({
     if (!diffPath || hunkBusy) return;
     if (
       mode === "discard" &&
-      !window.confirm("丢弃这块改动？不可恢复（除非已提交）")
+      !(await confirmDialog("丢弃这块改动？不可恢复（除非已提交）", {
+        danger: true,
+      }))
     )
       return;
     const path = diffPath;

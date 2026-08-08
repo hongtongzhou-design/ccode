@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
+import { confirmDialog } from "../components/ConfirmDialog";
 import ProjectGroup from "../components/ProjectGroup";
 import ArtifactChecklist from "../components/ArtifactChecklist";
 import {
@@ -669,9 +670,10 @@ function PortsSection() {
     // 只有 Ccode 之外的进程需要确认；本应用归属（工作区/项目/端口段）直接终止
     if (
       port.ownerKind === "other" &&
-      !window.confirm(
+      !(await confirmDialog(
         `「${port.process || "未知进程"}」不是 Ccode 启动的进程（PID ${port.pid}，端口 ${port.port}）。终止它可能影响其他正在运行的应用。继续？`,
-      )
+        { danger: true },
+      ))
     )
       return;
     setKilling(port.pid);
@@ -1027,9 +1029,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
 
   async function onDelete(ws: WorkspaceDto) {
     if (
-      !window.confirm(
+      !(await confirmDialog(
         `将删除 worktree、分支 ${ws.branch} 和元数据，不可恢复。继续？`,
-      )
+        { danger: true },
+      ))
     )
       return;
     try {
@@ -1068,7 +1071,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
 
   async function onMarkArchived(ws: WorkspaceDto) {
-    if (!window.confirm("仅把 Ccode 记录标记为已归档，不删除分支。继续？"))
+    if (!(await confirmDialog("仅把 Ccode 记录标记为已归档，不删除分支。继续？")))
       return;
     try {
       await invoke("workspace_mark_archived", { id: ws.id });
@@ -1081,9 +1084,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
 
   async function onCleanRecord(ws: WorkspaceDto) {
     if (
-      !window.confirm(
+      !(await confirmDialog(
         `只清理 Ccode 中「${ws.name}」的记录并释放端口，不删除磁盘目录或 Git 分支。继续？`,
-      )
+      ))
     )
       return;
     try {
@@ -1419,9 +1422,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   async function deleteProjectDir(group: (typeof groups)[number]) {
     const name = group.project?.name ?? group.repoName;
     if (
-      !window.confirm(
+      !(await confirmDialog(
         `彻底删除项目「${name}」？\n\n目录：${group.repoPath}\n工作区：${group.list.length} 个\n\n工作区和目录将一并删除、不可恢复；请先关闭该项目内正在运行的终端标签。`,
-      )
+        { danger: true },
+      ))
     )
       return;
     try {
@@ -1437,9 +1441,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   async function removeRegistration(group: (typeof groups)[number]) {
     const name = group.project?.name ?? group.repoName;
     if (
-      !window.confirm(
+      !(await confirmDialog(
         `只移除「${name}」的项目注册，不删除磁盘目录；项目内工作区保留。继续？`,
-      )
+      ))
     )
       return;
     try {

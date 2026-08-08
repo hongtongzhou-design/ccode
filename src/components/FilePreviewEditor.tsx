@@ -5,6 +5,7 @@ import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import { marked } from "marked";
 import SelectionFloatBar, { DistillSkillButton } from "./SelectionFloatBar";
+import { confirmDialog } from "./ConfirmDialog";
 
 // 只用基础 editor worker（不需要语言服务的 intellisense）
 self.MonacoEnvironment = {
@@ -388,9 +389,10 @@ function FilePreviewEditor({
     // 主仓库文件保存前必须确认：改动不属于任何分支，直接写主项目（防误改）
     if (
       ctx?.kind === "main" &&
-      !window.confirm(
+      !(await confirmDialog(
         "这是主仓库（非工作区分支）的文件，保存会直接改动主项目。确认保存？",
-      )
+        { danger: true },
+      ))
     )
       return;
     setSaving(true);

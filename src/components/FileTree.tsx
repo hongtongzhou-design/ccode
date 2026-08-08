@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { File, FolderClosed, FolderOpen } from "lucide-react";
 import ContextMenu from "./ContextMenu";
+import { confirmDialog } from "./ConfirmDialog";
 import { ghostActionClass, LoadingRows } from "./PageFrame";
 import { useAppStore } from "../store";
 import {
@@ -68,7 +69,7 @@ interface TreeNodeCtx {
   highlight: string | null;
   load: (path: string) => Promise<void>;
   toggle: (path: string) => void;
-  nav: (path: string) => boolean;
+  nav: (path: string) => Promise<boolean>;
   onOpenFile: (path: string, name: string, root: string) => void;
   onOpenTerminal: (path: string) => void;
   onMenu: (menu: { x: number; y: number; path: string; isDir: boolean }) => void;
@@ -103,7 +104,7 @@ const FileTreeNode = memo(function FileTreeNode({
           entry.isDir ? toggle(entry.path) : ctx.onOpenFile(entry.path, entry.name, root)
         }
         onDoubleClick={() => {
-          if (entry.isDir) nav(entry.path);
+          if (entry.isDir) void nav(entry.path);
         }}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -209,8 +210,8 @@ function FileTree({
   onFsEvent?: () => void;
   /** 最近项目「真进入」：切树根 + 切换活动标签启动栏 cwd */
   onEnterProject?: (path: string) => void;
-  /** 根目录切换前通知；返回 false 时保留当前根（用于保护未保存预览）。 */
-  onRootChange?: (path: string) => boolean;
+  /** 根目录切换前通知；返回/resolve false 时保留当前根（用于保护未保存预览，确认框为异步）。 */
+  onRootChange?: (path: string) => boolean | Promise<boolean>;
   /** 插在搜索行（含最近项目下拉）与完整树之间的自定义区块（如项目树） */
   belowRecent?: ReactNode;
 }) {
@@ -221,16 +222,16 @@ function FileTree({
   const onRootChangeRef = useRef(onRootChange);
   onRootChangeRef.current = onRootChange;
   /** 所有主动跳转统一走 nav；未保存预览可阻止切换。走 ref 保持稳定身份（树节点 memo 依赖） */
-  const nav = useCallback((path: string): boolean => {
+  const nav = useCallback(async (path: string): Promise<boolean> => {
     if (path === rootRef.current) return true;
-    if (onRootChangeRef.current?.(path) === false) return false;
+    if ((await onRootChangeRef.current?.(path)) === false) return false;
     setRoot(path);
     return true;
   }, []);
   /** 返回上一级目录（不受项目范围限制） */
   function goUp() {
     const p = parentDir(root);
-    if (p) nav(p);
+    if (p) void nav(p);
   }
   const recentRepos = useAppStore((s) => s.recentRepos);
   const recentReposLoading = useAppStore((s) => s.recentReposLoading);
@@ -276,7 +277,9 @@ function FileTree({
 
   /** 主项目 ⇄ 分支互切：重定树根 + 终端真进入（同最近项目语义） */
   function switchTo(path: string) {
-    if (nav(path)) onEnterProject?.(path);
+    void nav(path).then((ok) => {
+      if (ok) onEnterProject?.(path);
+    });
   }
   // ⇄ 下拉：主项目 + 同仓库全部活跃工作区（多工作区时不再只能两点互切）
   const [switchMenu, setSwitchMenu] = useState<{ x: number; y: number } | null>(null);
@@ -284,8 +287,10 @@ function FileTree({
   // 切换活动标签（cwd 变化）时重置回该标签的 cwd
   useEffect(() => {
     if (cwd === rootRef.current) return;
-    if (onRootChangeRef.current?.(cwd) === false) return;
-    setRoot(cwd);
+    void (async () => {
+      if ((await onRootChangeRef.current?.(cwd)) === false) return;
+      setRoot(cwd);
+    })();
   }, [cwd]);
 
   const load = useCallback(
@@ -402,10 +407,10 @@ function FileTree({
   }
 
   /** 搜索结果定位：跳到所在目录并高亮（不打开预览） */
-  function locate(r: SearchResultDto) {
+  async function locate(r: SearchResultDto) {
     const target = r.isDir ? r.path : parentDir(r.path);
     if (target) {
-      if (!nav(target)) return;
+      if (!(await nav(target))) return;
       setResults(null);
       setQuery("");
       setHighlight(r.path);
@@ -498,7 +503,7 @@ function FileTree({
                       try {
                         // 目录可能已归档/移动，先验证再切换，避免树卡进无效根
                         await invoke("list_dir", { path: r.path, showHidden: false });
-                        if (!nav(r.path)) return;
+                        if (!(await nav(r.path))) return;
                         onEnterProject?.(r.path);
                         setResults(null);
                         setQuery("");
@@ -582,7 +587,7 @@ function FileTree({
         )}
         {root !== cwd && (
           <button
-            onClick={() => nav(cwd)}
+            onClick={() => void nav(cwd)}
             title="回到当前项目"
             className="ml-auto shrink-0 text-l4 hover:text-l1"
           >
@@ -670,7 +675,12 @@ function FileTree({
             {
               label: menu.isDir ? "删除目录" : "删除文件",
               onSelect: async () => {
-                if (!window.confirm(`删除「${menu.path}」${menu.isDir ? "（含全部内容）" : ""}？不可恢复。`))
+                if (
+                  !(await confirmDialog(
+                    `删除「${menu.path}」${menu.isDir ? "（含全部内容）" : ""}？不可恢复。`,
+                    { danger: true },
+                  ))
+                )
                   return;
                 try {
                   await invoke("fs_delete_path", { path: menu.path, root });

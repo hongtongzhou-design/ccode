@@ -287,7 +287,7 @@ A：中转模型不支持工具调用（部分中转商的模型只会输出文�
 A：Base URL 的 `/v1` 约定：OpenAI 协议（kimi/codex/qwen/opencode）**必须带** `/v1`；Anthropic 协议（claude/codebuddy）**不要带**。建完先点「测试连接」。
 
 **Q：按钮点了没反应？**
-A：macOS WKWebView 不支持 `window.prompt`——需要输入的地方已全部改为内联输入；如仍遇到，把位置报给开发者。
+A：macOS WKWebView 不支持原生 JS 对话框——需要输入的地方已全部改为内联输入框，确认弹窗也已全部改为应用内对话框；如仍遇到，把位置报给开发者。
 
 **Q：终端输出黑白？**
 A：已内置修复（注入 TERM/COLORTERM、剔除 NO_COLOR）。

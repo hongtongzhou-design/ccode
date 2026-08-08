@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { confirmDialog } from "./ConfirmDialog";
 import { PIPELINE_TEMPLATES } from "../pipeline-presets";
 import type { PipelineTemplateDto, ProjectStepDto } from "../types";
 
@@ -48,7 +49,9 @@ export default function TemplatePicker({
 
   async function removeTemplate(t: PipelineTemplateDto) {
     if (
-      !window.confirm(`删除模板「${t.name}」？已应用的流水线不受影响。继续？`)
+      !(await confirmDialog(`删除模板「${t.name}」？已应用的流水线不受影响。继续？`, {
+        danger: true,
+      }))
     )
       return;
     try {

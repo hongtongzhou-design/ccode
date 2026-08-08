@@ -6,6 +6,7 @@ import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
 import HandoffPicker from "../components/HandoffPicker";
+import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
 import {
   Checkbox,
   EmptyState,
@@ -170,7 +171,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       setCopiedId(sessionRuntimeKey(s.agent, s.sessionId));
       window.setTimeout(() => setCopiedId(null), 1500);
     } catch (e) {
-      window.alert(`复制失败：${e}`);
+      await alertDialog(`复制失败：${e}`);
     }
   }
 
@@ -183,7 +184,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         cwd: s.projectPath,
       });
     } catch (e) {
-      window.alert(`打开外部终端失败：${e}`);
+      await alertDialog(`打开外部终端失败：${e}`);
     }
   }
 
@@ -516,7 +517,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setError(null);
     try {
       if (s.pinned) {
-        if (!window.confirm("取消保留并删除本地快照？")) return;
+        if (!(await confirmDialog("取消保留并删除本地快照？", { danger: true })))
+          return;
         await invoke("unpin_session", {
           agent: s.agent,
           sessionId: s.sessionId,
@@ -564,9 +566,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   async function deleteSession(s: SessionMetaDto) {
     setError(null);
     if (
-      !window.confirm(
+      !(await confirmDialog(
         "删除该对话的本地文件？保留的快照和整理数据会一并删除，不可恢复。",
-      )
+        { danger: true },
+      ))
     )
       return;
     try {
@@ -596,13 +599,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   ) {
     setError(null);
     if (
-      !window.confirm(
+      !(await confirmDialog(
         `将删除 ${agentLabel(agent)} 下 ${basename(path)} 的 ${count} 个对话文件，不可恢复。${
           extra > 0
             ? `该项目另有 ${extra} 个已归档/内部对话不在当前列表中，也会被一并删除。`
             : ""
         }继续？`,
-      )
+        { danger: true },
+      ))
     )
       return;
     try {
