@@ -8,6 +8,7 @@
   <a href="https://github.com/hongtongzhou-design/ccode/actions/workflows/build.yml"><img src="https://github.com/hongtongzhou-design/ccode/actions/workflows/build.yml/badge.svg" alt="Build" /></a>
   <a href="https://github.com/hongtongzhou-design/ccode/releases/latest"><img src="https://img.shields.io/github/v/release/hongtongzhou-design/ccode?label=release" alt="Release" /></a>
   <img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-blue" alt="Platforms" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" /></a>
 </p>
 
 **AI 科研工作台**（桌面应用，Tauri v2 + React/TS + Rust）：底层是八个终端 agent 的统一控制台（启动器 + 配置中心 + 会话监控台），表面是科研流水线（读文献 → 整数据 → 做图 → 写论文）。AI 负责干活，Ccode 负责管活，人负责拍板。
@@ -73,6 +74,10 @@ npm run tauri build      # 打包
 ## 反馈
 
 遇到问题或有想法，欢迎到 [Issues](../../issues) 提出；附上应用内「设置 → 诊断日志」导出的日志能加快定位。
+
+## 开源协议
+
+[MIT](LICENSE)
 
 ## 技术栈
 

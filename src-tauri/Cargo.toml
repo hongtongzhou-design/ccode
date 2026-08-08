@@ -3,6 +3,7 @@ name = "ccode"
 version = "0.1.0"
 description = "Unified launcher, config center and session monitor for AI coding agents"
 authors = ["hongtongzhou-design"]
+license = "MIT"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
