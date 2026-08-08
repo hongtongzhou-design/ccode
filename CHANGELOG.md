@@ -2,7 +2,7 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)管理。架构级决策记录见 [docs/architecture.md](docs/architecture.md) §10。
 
-## Unreleased（未发布）
+## v0.1.0（首个发布版本）
 
 **科研流水线**
 
@@ -106,8 +106,6 @@
 - 侧栏「终端」图标加运行中 agent 数徽标（任意页面可见）；统计页 agent 条右侧加「N 模型」（按使用过的不同模型计）
 - 终端调色板抽出共享表（`src/terminal-palettes.ts`），设置页色卡预览升级为真实 8 个 ANSI 色（与终端生效色同源）
 - 诊断日志加「导出」按钮（txt 落 ~/Downloads/ccode-exports/，配合反馈问题流程）
-
-## v0.1.0（首个发布版本）
 
 **模块**
 
