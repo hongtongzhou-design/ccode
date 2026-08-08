@@ -72,7 +72,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [showArchived, setShowArchived] = useState(false);
   // 分类筛选折叠收进列表栏（默认收起），展开为单列纵向手风琴：点 agent 只展开/收起其项目
-  // 子列表（不动列表筛选、不关回放），「全部项目」/单项目行才落筛选，选中后自动收起。
+  // 子列表（不动列表筛选、不关回放）；「全部项目」/单项目行落筛选且**面板保持展开**（v3.43：
+  // 用户要边筛边浏览，选中不收起），手动点标题行或 × 清除才收。
   const [treeOpen, setTreeOpen] = useState(false);
   // 当前展开项目子列表的 agent：点选记录；失效（该 agent 已无会话）/未点选时回落当前筛选所属
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
@@ -373,6 +374,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   async function openSession(s: SessionMetaDto) {
     // 源文件已删除且无快照，无法回放
     if (!s.alive && !s.pinned) return;
+    // 选中具体会话 = 浏览结束：收起分类筛选面板（筛选过程中的点选不收起，见 v3.43）
+    setTreeOpen(false);
     setSelected(s);
     setReplayTab("chat");
     // 摘要缓存命中：已有 summary 直接展示，不再调用 AI
@@ -877,12 +880,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           </div>
           {treeOpen && (
             // 单列纵向手风琴：点 agent 只展开/收起其项目子列表（不动筛选、不关回放），
-            // 「全部项目」/单项目行才落筛选，选中自动收起；层级靠左侧缩进线，不加竖向分栏线
+            // 「全部项目」/单项目行落筛选后面板保持展开（边筛边浏览）；层级靠左侧缩进线
             <div className="max-h-72 overflow-auto py-1">
               <button
                 onClick={() => {
                   selectFilter({ kind: "all" });
-                  setTreeOpen(false);
                 }}
                 className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 text-left text-xs ${
                   filterActive({ kind: "all" })
@@ -901,7 +903,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 <button
                   onClick={() => {
                     selectFilter({ kind: "internal" });
-                    setTreeOpen(false);
                   }}
                   title="Ccode 自己调用 AI 生成提交信息、摘要等产生的内部对话"
                   className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 text-left text-xs ${
@@ -955,7 +956,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         <button
                           onClick={() => {
                             selectFilter({ kind: "agent", agent: g.agent });
-                            setTreeOpen(false);
                           }}
                           className={`flex h-7 w-full items-center justify-between gap-2 rounded-md px-2 text-left text-xs ${
                             filterActive({ kind: "agent", agent: g.agent })
@@ -985,7 +985,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                                   agent: g.agent,
                                   path: p.path,
                                 });
-                                setTreeOpen(false);
                               }}
                               onContextMenu={(e) => {
                                 e.preventDefault();

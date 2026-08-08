@@ -106,13 +106,9 @@ interface AppState {
   /** 当前页面（nav id），放 store 里让任意页面可跳转 */
   page: string;
   setPage: (p: string) => void;
-  /** 侧栏收缩状态（App 导航与终端专注栏共用；localStorage 持久化的是手动偏好） */
+  /** 侧栏收缩状态（localStorage 持久化，品牌区点击切换） */
   navCollapsed: boolean;
-  /** 手动折叠/展开后本 session 内不再按页面自动收展 */
-  navManual: boolean;
   toggleNavCollapsed: () => void;
-  /** 页面自动收展（多列工作页收起）：只改状态，不写 localStorage、不置 navManual */
-  setNavCollapsedAuto: (collapsed: boolean) => void;
   /** 执行态全隐藏侧栏 chrome（⌘\ 切换，session 级不持久化） */
   chromeHidden: boolean;
   toggleChromeHidden: () => void;
@@ -195,13 +191,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   page: "workspaces",
   setPage: (p) => set({ page: p }),
   navCollapsed: localStorage.getItem("ccode.navCollapsed") === "1",
-  navManual: false,
   toggleNavCollapsed: () =>
     set((s) => {
       localStorage.setItem("ccode.navCollapsed", s.navCollapsed ? "0" : "1");
-      return { navCollapsed: !s.navCollapsed, navManual: true };
+      return { navCollapsed: !s.navCollapsed };
     }),
-  setNavCollapsedAuto: (collapsed) => set({ navCollapsed: collapsed }),
   chromeHidden: false,
   toggleChromeHidden: () => set((s) => ({ chromeHidden: !s.chromeHidden })),
   pendingTerminal: null,

@@ -39,6 +39,9 @@ pub struct SkillDto {
     /// 用户自定义分类（None = 未分类）
     #[serde(default)]
     pub category: Option<String>,
+    /// 用户自定义标签（展示层 pill，最多 4 个；与内部分组字段 category 独立）
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// copy 分发后库已更新、副本还是旧内容的 agent（不入库文件，list 时现算；
     /// 空数组时序列化省略——前端需用 ?? [] 兜底）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -150,6 +153,7 @@ fn new_skill(name: String, description: Option<String>, source: &str, repo: Opti
         apps,
         installed_at: crate::sessions::now_iso(),
         category: None,
+        tags: Vec::new(),
         stale_copies: Vec::new(),
         app_modes: HashMap::new(),
     }
@@ -884,6 +888,47 @@ pub async fn set_skill_category(id: String, category: Option<String>) -> Result<
     .map_err(|e| e.to_string())?
 }
 
+const SKILL_TAG_MAX_COUNT: usize = 4;
+const SKILL_TAG_MAX_LEN: usize = 20;
+
+/// 标签校验：trim 后丢弃空项、保序去重、单个 ≤20 字符、总数 ≤4；空数组 = 清除全部标签
+fn validate_skill_tags(tags: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in tags {
+        let t = raw.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.chars().count() > SKILL_TAG_MAX_LEN {
+            return Err(format!("单个标签最长 {SKILL_TAG_MAX_LEN} 字符"));
+        }
+        if !out.iter().any(|x| x == t) {
+            out.push(t.to_string());
+        }
+    }
+    if out.len() > SKILL_TAG_MAX_COUNT {
+        return Err(format!("最多 {SKILL_TAG_MAX_COUNT} 个标签"));
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn set_skill_tags(id: String, tags: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let tags = validate_skill_tags(&tags)?;
+        let store = SkillStore::default_paths()?;
+        let mut skills = store.read();
+        let s = skills
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| format!("技能不存在: {id}"))?;
+        s.tags = tags;
+        store.write(&skills)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 各启用 agent 的分发形态：带 .ccode-copy 标记 = copy，否则 symlink（apps=true 的都是我们分发的）
 fn app_modes(dirs: &HashMap<String, PathBuf>, skill: &SkillDto) -> HashMap<String, String> {
     let mut out = HashMap::new();
@@ -1068,6 +1113,10 @@ pub async fn import_skills_from_github(
                 skill.repo_ref = branch.clone();
                 skill.repo_subdir = subdir.clone();
                 skill.source_revision = revision.clone();
+                // GitHub 导入自动分类（#15）：无分类时默认填仓库名（owner/repo 的 repo 段），已有分类不覆盖
+                if skill.category.is_none() {
+                    skill.category = github_repo_category(&repo);
+                }
             }
         }
         store
@@ -1095,6 +1144,15 @@ async fn download_limited(mut resp: reqwest::Response) -> Result<Vec<u8>, String
         }
     }
     Ok(buf)
+}
+
+/// GitHub 仓库（owner/name，导入入口已校验恰好两段）取 name 段作为默认分类名
+fn github_repo_category(repo: &str) -> Option<String> {
+    repo.rsplit('/')
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 async fn github_latest_revision(
@@ -1424,6 +1482,40 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn github_repo_category_takes_repo_segment() {
+        assert_eq!(
+            github_repo_category("anthropics/skills"),
+            Some("skills".to_string())
+        );
+        assert_eq!(github_repo_category("owner/"), None);
+    }
+
+    #[test]
+    fn skill_tags_trim_dedupe_and_limit() {
+        // trim + 丢空 + 保序去重
+        let tags = validate_skill_tags(&[
+            " 文献 ".into(),
+            "".into(),
+            "   ".into(),
+            "综述".into(),
+            "文献".into(),
+        ])
+        .unwrap();
+        assert_eq!(tags, vec!["文献".to_string(), "综述".to_string()]);
+        // 空输入 = 清除全部
+        assert_eq!(validate_skill_tags(&[]).unwrap(), Vec::<String>::new());
+        // 超 4 个拒绝
+        let five: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
+        assert!(validate_skill_tags(&five).is_err());
+        // 重复折叠后 ≤4 仍放行
+        let dup: Vec<String> = ["a", "b", "c", "d", "a"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(validate_skill_tags(&dup).unwrap().len(), 4);
+        // 单标签超 20 字符拒绝（按字符数，不按字节）
+        assert!(validate_skill_tags(&["字".repeat(20)]).is_ok());
+        assert!(validate_skill_tags(&["字".repeat(21)]).is_err());
     }
 
     #[test]

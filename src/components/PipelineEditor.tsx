@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Checkbox } from "./PageFrame";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import type {
@@ -74,6 +74,7 @@ export default function PipelineEditor({
   config,
   warnings,
   saving,
+  focusStep,
   onSave,
   onClose,
 }: {
@@ -82,6 +83,8 @@ export default function PipelineEditor({
   /** read_project_config 的 warnings（含资源绑定校验），原样展示 */
   warnings: string[];
   saving: boolean;
+  /** 从步骤 ✎ 进入时定位的步骤序号：滚动到该卡片并聚焦简报输入框 */
+  focusStep?: number | null;
   /** 保存成功与关闭覆盖层由父组件负责 */
   onSave: (steps: ProjectStepDto[]) => void;
   onClose: () => void;
@@ -91,6 +94,15 @@ export default function PipelineEditor({
   );
   const [error, setError] = useState<string | null>(null);
   const resources = config.resources;
+
+  // 挂载时定位一次（仅 ✎ 入口带 focusStep；卡片内第一个 textarea 即简报框）
+  useEffect(() => {
+    if (focusStep == null) return;
+    const card = document.querySelector(`[data-step-card="${focusStep}"]`);
+    card?.scrollIntoView({ block: "center" });
+    card?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 初始快照按写回口径归一化后序列化，作为脏检查基准（与编辑器保存的结果同构）
   const initialJson = useMemo(
@@ -146,6 +158,7 @@ export default function PipelineEditor({
     return (
       <div
         key={i}
+        data-step-card={i}
         className="rounded-md bg-strip p-3"
       >
         <div className="mb-2 flex items-center gap-2">

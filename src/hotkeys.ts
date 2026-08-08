@@ -56,6 +56,23 @@ export function eventMatchesCombo(
   );
 }
 
+/** 快捷键录制态的按键决议（SettingsPage HotkeyCapture 用；与 DOM 解耦可单测）：
+ *  Esc 取消；纯修饰键/无修饰键忽略（继续等待）；与另一绑定冲突则拒绝；其余保存 */
+export function captureDecision(
+  e: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; key: string },
+  conflictWith: string,
+):
+  | { action: "cancel" }
+  | { action: "save"; combo: string }
+  | { action: "conflict"; combo: string }
+  | { action: "ignore" } {
+  if (e.key === "Escape") return { action: "cancel" };
+  const combo = comboFromEvent(e);
+  if (!combo) return { action: "ignore" };
+  if (conflictWith && combo === conflictWith) return { action: "conflict", combo };
+  return { action: "save", combo };
+}
+
 const IS_MAC =
   typeof navigator !== "undefined" && /mac/i.test(navigator.platform || "");
 

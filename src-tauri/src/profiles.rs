@@ -201,6 +201,49 @@ impl ProfileStore {
         Ok(copy)
     }
 
+    /// 复制配置到其他 agent（#14）：密钥在本进程内从 keys.json 直读直写（0600 文件内操作，
+    /// 密钥不出站、不经前端）；名称在目标 agent 内防重名（重名追加 -2/-3…）；
+    /// 目标 agent 必须与源同协议族，多协议目标取与源同族的协议取值
+    pub fn copy_to_agent(&self, id: &str, target_agent: &str) -> Result<Profile, String> {
+        let _g = store_lock();
+        let src = self.get_locked(id)?;
+        if target_agent == src.agent {
+            return Err("目标与来源是同一个 agent，请用「复制配置」".into());
+        }
+        let protocol = pick_copy_protocol(&src, target_agent)?;
+        let profiles = self.read_all()?;
+        let name = copy_name(
+            &profiles
+                .iter()
+                .filter(|p| p.agent == target_agent)
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            &src.name,
+        );
+        let mut copy = Profile {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent: target_agent.to_string(),
+            name,
+            account_type: src.account_type,
+            protocol,
+            base_url: src.base_url,
+            models: src.models,
+            extra_env: src.extra_env,
+            key_hint: src.key_hint,
+            model: None,
+            last_used_at: None,
+            has_key: false,
+        };
+        if let Some(key) = get_key_locked(id)? {
+            set_key(&copy.id, &key)?;
+            copy.has_key = true;
+        }
+        let mut profiles = profiles;
+        profiles.push(copy.clone());
+        self.write_all(&profiles)?;
+        Ok(copy)
+    }
+
     pub fn update(&self, id: &str, input: ProfileInput) -> Result<Profile, String> {
         let _g = store_lock();
         let mut profiles = self.read_all()?;
@@ -246,6 +289,54 @@ impl ProfileStore {
             Ok(())
         })();
     }
+}
+
+/// 目标 agent 内不重名的副本名（copy_to_agent 用）：原名未被占用则沿用，否则追加 -2/-3…
+fn copy_name(existing: &[&str], base: &str) -> String {
+    if !existing.contains(&base) {
+        return base.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !existing.contains(&candidate.as_str()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// 复制到其他 agent 的协议取值（copy_to_agent 用）：目标无协议概念时用固有协议族判定；
+/// 多协议目标优先保留源协议取值，其次取首个与源同族的候选；不同协议族报错拒绝
+fn pick_copy_protocol(src: &Profile, target_agent: &str) -> Result<Option<String>, String> {
+    let spec = crate::agent_specs::agent_spec(target_agent)
+        .ok_or_else(|| format!("未知 agent: {target_agent}"))?;
+    let kind = crate::profile_validation::api_kind_label(&src.agent, src.protocol.as_deref());
+    if spec.protocols.is_empty() {
+        if crate::profile_validation::api_kind_label(target_agent, None) == kind {
+            return Ok(None);
+        }
+    } else {
+        // find 的谓词收到的是条目的引用（&&&str），逐层解引用到 &str
+        let matched = |p: &&&'static str| {
+            crate::profile_validation::api_kind_label(target_agent, Some(**p)) == kind
+        };
+        if let Some(p) = spec
+            .protocols
+            .iter()
+            .find(|p| matched(p) && Some(**p) == src.protocol.as_deref())
+            .or_else(|| spec.protocols.iter().find(matched))
+        {
+            return Ok(Some((*p).to_string()));
+        }
+    }
+    let src_name = crate::agent_specs::agent_spec(&src.agent)
+        .map(|s| s.display_name)
+        .unwrap_or(&src.agent);
+    Err(format!(
+        "协议不兼容：{} 的配置（{kind} 协议）不能复制到 {}",
+        src_name, spec.display_name
+    ))
 }
 
 // ===== 密钥存储：0600 权限的 keys.json =====
@@ -434,6 +525,16 @@ pub fn duplicate_profile(
     store.duplicate(&id)
 }
 
+/// 复制配置到其他 agent（#14）：密钥在后端 0600 文件内直读直写，不经前端
+#[tauri::command]
+pub fn copy_profile_to_agent(
+    store: tauri::State<'_, ProfileStore>,
+    profile_id: String,
+    target_agent: String,
+) -> Result<Profile, String> {
+    store.copy_to_agent(&profile_id, &target_agent)
+}
+
 /// 导出全部 profile 到指定路径；密钥本体与尾号一律不导出
 #[tauri::command]
 pub fn export_profiles(store: tauri::State<'_, ProfileStore>, path: String) -> Result<(), String> {
@@ -560,6 +661,49 @@ mod tests {
     fn key_hint_masks_short_keys() {
         assert_eq!(key_hint_of("sk-1234567"), "···4567");
         assert_eq!(key_hint_of("abc"), "····");
+    }
+
+    #[test]
+    fn copy_name_dedups_within_target_agent() {
+        assert_eq!(copy_name(&[], "中转 A"), "中转 A");
+        assert_eq!(copy_name(&["中转 A"], "中转 A"), "中转 A-2");
+        assert_eq!(copy_name(&["中转 A", "中转 A-2"], "中转 A"), "中转 A-3");
+    }
+
+    #[test]
+    fn pick_copy_protocol_matches_api_kind() {
+        let src = |agent: &str, protocol: Option<&str>| Profile {
+            id: "x".into(),
+            agent: agent.into(),
+            name: "n".into(),
+            account_type: AccountType::Api,
+            protocol: protocol.map(str::to_string),
+            base_url: None,
+            models: vec![],
+            extra_env: Default::default(),
+            key_hint: None,
+            model: None,
+            last_used_at: None,
+            has_key: false,
+        };
+        // 同族可行：anthropic → qwen 取 anthropic；openai 源保留源协议取值
+        assert_eq!(
+            pick_copy_protocol(&src("claude-code", None), "qwen").unwrap(),
+            Some("anthropic".to_string())
+        );
+        assert_eq!(
+            pick_copy_protocol(&src("kimi", Some("openai")), "qwen").unwrap(),
+            Some("openai".to_string())
+        );
+        // 无协议概念的同族目标：协议清为 None
+        assert_eq!(pick_copy_protocol(&src("qwen", Some("anthropic")), "codebuddy").unwrap(), None);
+        // 不同族拒绝：anthropic → codex/gemini；cursor 专有协议与谁都不互通
+        assert!(pick_copy_protocol(&src("claude-code", None), "codex").is_err());
+        assert!(pick_copy_protocol(&src("codex", None), "gemini").is_err());
+        assert!(pick_copy_protocol(&src("codex", None), "cursor").is_err());
+        assert!(pick_copy_protocol(&src("cursor", None), "codex").is_err());
+        // 未知目标报错
+        assert!(pick_copy_protocol(&src("codex", None), "not-an-agent").is_err());
     }
 
     #[test]

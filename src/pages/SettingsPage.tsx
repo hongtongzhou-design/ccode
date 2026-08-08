@@ -13,7 +13,7 @@ import {
   rowActionClass,
   Toggle,
 } from "../components/PageFrame";
-import { comboFromEvent, comboLabel } from "../hotkeys";
+import { captureDecision, comboLabel } from "../hotkeys";
 
 /** 七套深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
 import { XTERM_PALETTES, PALETTE_PREVIEW_KEYS } from "../terminal-palettes";
@@ -155,7 +155,10 @@ function Row({
   );
 }
 
-/** 快捷键录制钮：点击进入监听态，按下新组合即保存；Esc 取消，与另一绑定冲突时拒绝并提示 */
+/** 快捷键录制钮：点击进入监听态，按下新组合即保存；Esc 取消，与另一绑定冲突时拒绝并提示。
+ *  macOS WKWebView 点击 button 默认不给键盘焦点，onKeyDown 挂按钮上永远收不到按键；
+ *  监听态改挂 window 级 capture 监听（capture 先于 App.tsx 的 bubble 全局快捷键触发，
+ *  stopImmediatePropagation 把同节点其余监听一并压过），退出监听态即卸载 */
 function HotkeyCapture({
   value,
   defaultValue,
@@ -171,6 +174,30 @@ function HotkeyCapture({
 }) {
   const [listening, setListening] = useState(false);
   const [conflict, setConflict] = useState(false);
+
+  useEffect(() => {
+    if (!listening) return;
+    const onKey = (e: KeyboardEvent) => {
+      // 录制期间吞掉全部按键：防默认行为（如 ⌘K 的浏览器动作）与全局快捷键触发
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const d = captureDecision(e, conflictWith);
+      if (d.action === "cancel") {
+        setListening(false);
+      } else if (d.action === "conflict") {
+        // 留在监听态，可继续按其他组合
+        setConflict(true);
+      } else if (d.action === "save") {
+        onSave(d.combo);
+        setConflict(false);
+        setListening(false);
+      }
+      // ignore：纯修饰键/无修饰键，继续等待
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [listening, conflictWith, onSave]);
+
   return (
     <span className="flex items-center gap-1.5">
       <button
@@ -179,25 +206,6 @@ function HotkeyCapture({
           setListening(true);
           setConflict(false);
         }}
-        onKeyDown={(e) => {
-          if (!listening) return;
-          // 阻断冒泡：录制期间全局快捷键（App.tsx 的 window 监听）不得触发
-          e.preventDefault();
-          e.stopPropagation();
-          if (e.key === "Escape") {
-            setListening(false);
-            return;
-          }
-          const combo = comboFromEvent(e);
-          if (!combo) return;
-          if (conflictWith && combo === conflictWith) {
-            setConflict(true);
-            return;
-          }
-          onSave(combo);
-          setListening(false);
-        }}
-        onBlur={() => setListening(false)}
         className={`inline-flex h-7 min-w-16 items-center justify-center rounded-md border px-2 font-mono text-xs ${
           listening
             ? "border-cta-bd bg-inset text-cta"
@@ -212,7 +220,10 @@ function HotkeyCapture({
       {value !== defaultValue && (
         <button
           type="button"
-          onClick={() => onSave(defaultValue)}
+          onClick={() => {
+            setListening(false); // 监听中直接改绑定：退出监听态，防后续按键再覆盖
+            onSave(defaultValue);
+          }}
           className={ghostActionClass}
         >
           恢复默认
@@ -221,7 +232,10 @@ function HotkeyCapture({
       {value !== "" && (
         <button
           type="button"
-          onClick={() => onSave("")}
+          onClick={() => {
+            setListening(false);
+            onSave("");
+          }}
           className={ghostActionClass}
         >
           禁用
@@ -494,10 +508,10 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         open={!collapsed.appearance}
         onToggle={() => toggleSection("appearance")}
       >
-        {/* 主题 */}
+        {/* 主题：七套深色一行，对应浅色正下方一列对齐（grid-cols-7） */}
         <div className="border-b border-hairline py-3">
           <div className="mb-2 text-sm text-l2">主题</div>
-          <div className="flex flex-wrap gap-2">
+          <div className="grid grid-cols-7 gap-2 overflow-x-auto">
             {themeSwatches.map((t) => (
               <button
                 key={t.id}

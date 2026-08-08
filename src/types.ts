@@ -333,8 +333,10 @@ export interface SkillDto {
   sourceRevision: string | null;
   apps: Record<string, boolean>;
   installedAt: string;
-  /** 用户自定义分类（null = 未分类） */
+  /** 用户自定义分类（null = 未分类；内部列表分组字段） */
   category: string | null;
+  /** 用户自定义标签（名称后展示的小 pill，最多 4 个；旧数据无此字段时用 ?? [] 兜底） */
+  tags?: string[];
   /** 内容已与库版本不一致的副本（所在 agent id 列表；空 = 无漂移） */
   /** 副本过期的 agent（后端空数组时省略该字段） */
   staleCopies?: string[];

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AGENTS } from "../types";
 import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
@@ -30,7 +31,7 @@ const SOURCE_LABEL: Record<string, string> = {
   discovered: "发现",
 };
 
-/** 列表描述行：空描述或纯符号/标点（无字母数字）视为异常描述，不展示原文 */
+/** 详情面板描述：空描述或纯符号/标点（无字母数字）视为异常描述，不展示原文 */
 function displayDescription(desc: string): string | null {
   const t = desc.trim();
   if (!t) return null;
@@ -41,6 +42,34 @@ const GITHUB_PRESETS = [
   "anthropics/skills",
   "ComposioHQ/awesome-claude-skills",
 ];
+
+/** GitHub 来源的来源链接：仓库根；有子目录拼 /tree/<ref>/<subdir>（ref 缺省用 HEAD） */
+function skillRepoUrl(skill: SkillDto): string | null {
+  if (skill.source !== "github" || !skill.repo) return null;
+  const base = `https://github.com/${skill.repo}`;
+  if (!skill.repoSubdir) return base;
+  return `${base}/tree/${skill.repoRef ?? "HEAD"}/${skill.repoSubdir}`;
+}
+
+/** 来源单元格：GitHub 来源渲染为可点小字链接（系统浏览器打开），其余为纯文本 */
+function SourceCell({ skill }: { skill: SkillDto }) {
+  const url = skillRepoUrl(skill);
+  const label = SOURCE_LABEL[skill.source] ?? skill.source;
+  if (!url) return <span className="truncate text-xs text-l4">{label}</span>;
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        void openUrl(url);
+      }}
+      title={`在浏览器打开 ${url}`}
+      className="truncate text-left text-xs text-l4 underline decoration-white/20 underline-offset-2 hover:text-l2"
+    >
+      {label}
+    </button>
+  );
+}
 
 /** 把用户粘贴的 GitHub 网址/简写统一解析为 { repo, branch, subdir }：
  *  支持 owner/repo、github.com/owner/repo、https://github.com/owner/repo.git、
@@ -836,6 +865,34 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  const [tagEdit, setTagEdit] = useState<{ id: string; value: string } | null>(
+    null,
+  );
+  const tagSubmitting = useRef(false);
+
+  async function submitTags(id: string, value: string) {
+    if (tagSubmitting.current) return;
+    tagSubmitting.current = true;
+    try {
+      // 逗号/空格分隔（含中文逗号），去空去重，超 4 个截断；留空 = 清除全部标签
+      const tags = [
+        ...new Set(
+          value
+            .split(/[,，\s]+/)
+            .map((t) => t.trim())
+            .filter(Boolean),
+        ),
+      ].slice(0, 4);
+      await invoke("set_skill_tags", { id, tags }).catch((e) =>
+        setError(String(e)),
+      );
+      setTagEdit(null);
+      await refresh();
+    } finally {
+      tagSubmitting.current = false;
+    }
+  }
+
   async function onView(skill: SkillDto) {
     try {
       const content = await invoke<string>("read_skill_md", { id: skill.id });
@@ -1058,6 +1115,15 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     <span className="min-w-0 truncate text-sm font-medium text-l1">
                                       {skill.name}
                                     </span>
+                                    {/* 用户自定义标签 pill：名称后 1-4 个，无标签不渲染 */}
+                                    {(skill.tags ?? []).slice(0, 4).map((tag) => (
+                                      <span
+                                        key={tag}
+                                        className="h-4 max-w-24 shrink-0 truncate rounded-full bg-inset px-1.5 text-[10px] leading-4 text-l3"
+                                      >
+                                        {tag}
+                                      </span>
+                                    ))}
                                     {/* 状态聚合：副本过期/GitHub 可更新合并为一个警示点，明细在悬浮 */}
                                     {(stale || update?.updateAvailable) && (
                                       <span
@@ -1075,7 +1141,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                       />
                                     )}
                                   </div>
-                                  {catEdit?.id === skill.id ? (
+                                  {catEdit?.id === skill.id && (
                                     <input
                                       autoFocus
                                       onClick={(event) => event.stopPropagation()}
@@ -1104,31 +1170,37 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                       placeholder="分类名（留空=未分类）"
                                       className="mt-1 w-full rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
                                     />
-                                  ) : (
-                                    (() => {
-                                      const desc = displayDescription(
-                                        skill.description,
-                                      );
-                                      // 单行截断 + title 悬浮全文；异常描述显示占位，不渲染原文
-                                      return desc ? (
-                                        <p
-                                          className="mt-0.5 truncate text-xs text-l3"
-                                          title={desc}
-                                        >
-                                          {desc}
-                                        </p>
-                                      ) : (
-                                        <p className="mt-0.5 text-xs text-l4">
-                                          —
-                                        </p>
-                                      );
-                                    })()
+                                  )}
+                                  {tagEdit?.id === skill.id && (
+                                    <input
+                                      autoFocus
+                                      onClick={(event) => event.stopPropagation()}
+                                      value={tagEdit.value}
+                                      onChange={(event) =>
+                                        setTagEdit({
+                                          id: skill.id,
+                                          value: event.target.value,
+                                        })
+                                      }
+                                      onKeyDown={(event) => {
+                                        if (event.key === "Enter")
+                                          void submitTags(
+                                            skill.id,
+                                            tagEdit.value,
+                                          );
+                                        if (event.key === "Escape")
+                                          setTagEdit(null);
+                                      }}
+                                      onBlur={() =>
+                                        void submitTags(skill.id, tagEdit.value)
+                                      }
+                                      placeholder="标签（逗号/空格分隔，最多 4 个，留空=清除）"
+                                      className="mt-1 w-full rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
+                                    />
                                   )}
                                 </div>
-                                {/* 来源弱化为淡灰，只作识别信息 */}
-                                <span className="truncate text-xs text-l4">
-                                  {SOURCE_LABEL[skill.source] ?? skill.source}
-                                </span>
+                                {/* 来源弱化为淡灰，只作识别信息；GitHub 来源可点跳转 */}
+                                <SourceCell skill={skill} />
                                 <button
                                   type="button"
                                   onClick={(event) => {
@@ -1193,18 +1265,37 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               ×
             </button>
           </div>
+          {/* 描述收进详情面板全文展示，不再截断；空或纯符号的异常值显示占位 */}
+          <div className="shrink-0 border-b border-hairline px-3 py-2.5 text-[13px] leading-5 text-l3">
+            {displayDescription(preview.skill.description) ?? (
+              <span className="text-l4">—</span>
+            )}
+          </div>
           <div className="shrink-0 border-b border-hairline px-3 py-2.5 text-[13px] text-l3">
             <span>
               {SOURCE_LABEL[preview.skill.source] ?? preview.skill.source}
             </span>
-            {preview.skill.repo && (
-              <span
-                className="ml-2 font-mono text-l2"
-                title={preview.skill.repo}
-              >
-                {preview.skill.repo}
-              </span>
-            )}
+            {preview.skill.repo &&
+              (() => {
+                const url = skillRepoUrl(preview.skill);
+                return url ? (
+                  <button
+                    type="button"
+                    onClick={() => void openUrl(url)}
+                    className="ml-2 font-mono text-l2 underline decoration-white/20 underline-offset-2 hover:text-l1"
+                    title={`在浏览器打开 ${url}`}
+                  >
+                    {preview.skill.repo}
+                  </button>
+                ) : (
+                  <span
+                    className="ml-2 font-mono text-l2"
+                    title={preview.skill.repo}
+                  >
+                    {preview.skill.repo}
+                  </span>
+                );
+              })()}
             {(preview.skill.staleCopies ?? []).length > 0 && (
               <span
                 className="ml-2 text-warn-text"
@@ -1376,6 +1467,14 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                 setCatEdit({
                   id: rowMenu.skill.id,
                   value: rowMenu.skill.category ?? "",
+                }),
+            },
+            {
+              label: "设置标签",
+              onSelect: () =>
+                setTagEdit({
+                  id: rowMenu.skill.id,
+                  value: (rowMenu.skill.tags ?? []).join("，"),
                 }),
             },
             ...((rowMenu.skill.staleCopies ?? []).length > 0

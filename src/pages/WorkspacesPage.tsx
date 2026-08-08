@@ -5,6 +5,7 @@ import { useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
 import ProjectGroup from "../components/ProjectGroup";
+import ArtifactChecklist from "../components/ArtifactChecklist";
 import {
   EmptyState,
   fieldClass,
@@ -517,7 +518,7 @@ function WorkspaceDetailsPopover({
         onClick={(event) => event.stopPropagation()}
       >
         <div className="mb-2 flex items-center gap-2">
-          <span className={`h-1.5 w-1.5 rounded-full ${state.dotClass}`} />
+          <span className={`size-2 rounded-full ${state.dotClass}`} />
           <span className={`font-medium ${state.textClass}`}>
             {state.label}
           </span>
@@ -562,7 +563,8 @@ function WorkspaceDetailsPopover({
 }
 
 /** 端口运行时监控：默认折叠，首次展开才拉取，手动刷新，不轮询。
- *  归属点色：工作区/项目=绿（已认归属），段归属=琥珀（占了端口段但进程不在树内），其他=灰 */
+ *  归属点色：工作区/项目=绿（已认归属），段归属=琥珀（占了端口段但进程不在树内），其他=灰；
+ *  列表按归属分「本应用」与「系统/其他」两段：本应用直接 SIGTERM，系统/其他终止前弹确认防误杀 */
 function PortsSection() {
   const [open, setOpen] = useState(false);
   const [ports, setPorts] = useState<PortInfoDto[] | null>(null);
@@ -588,9 +590,11 @@ function PortsSection() {
   }
 
   async function onKill(port: PortInfoDto) {
+    // 只有 Ccode 之外的进程需要确认；本应用归属（工作区/项目/端口段）直接终止
     if (
+      port.ownerKind === "other" &&
       !window.confirm(
-        `将终止 ${port.process}（PID ${port.pid}，端口 ${port.port}）。继续？`,
+        `「${port.process || "未知进程"}」不是 Ccode 启动的进程（PID ${port.pid}，端口 ${port.port}）。终止它可能影响其他正在运行的应用。继续？`,
       )
     )
       return;
@@ -612,6 +616,48 @@ function PortsSection() {
     range: "bg-warn-text",
     other: "bg-l4",
   };
+
+  // 归属分层：本应用（工作区/项目/端口段）与系统/其他分两段展示
+  const internalPorts = (ports ?? []).filter((p) => p.ownerKind !== "other");
+  const externalPorts = (ports ?? []).filter((p) => p.ownerKind === "other");
+
+  function renderPortRow(port: PortInfoDto) {
+    return (
+      <li
+        key={`${port.pid}-${port.port}`}
+        className="flex items-center gap-3 py-2"
+      >
+        <span className="w-14 shrink-0 font-mono text-[13px] text-l1">
+          {port.port}
+        </span>
+        <span
+          className="w-32 shrink-0 truncate text-xs text-l2"
+          title={`PID ${port.pid}`}
+        >
+          {port.process || `PID ${port.pid}`}
+        </span>
+        <span className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-inset px-2 text-xs text-l2">
+          <span className={`size-2 rounded-full ${dotClass[port.ownerKind]}`} />
+          {port.ownerLabel}
+        </span>
+        <span
+          className="min-w-0 flex-1 truncate font-mono text-xs text-l4"
+          title={port.cwd ?? ""}
+        >
+          {port.cwd ?? ""}
+        </span>
+        <button
+          type="button"
+          onClick={() => void onKill(port)}
+          disabled={killing === port.pid}
+          title={`终止进程（PID ${port.pid}）`}
+          className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-err-text disabled:opacity-50"
+        >
+          {killing === port.pid ? "终止中…" : "终止"}
+        </button>
+      </li>
+    );
+  }
 
   return (
     <section className="mt-7">
@@ -653,45 +699,25 @@ function PortsSection() {
             <p className="py-3 text-xs text-l4">当前没有监听中的端口。</p>
           )}
           {ports !== null && ports.length > 0 && (
-            <ul className="mt-1 divide-y divide-hairline">
-              {ports.map((port) => (
-                <li
-                  key={`${port.pid}-${port.port}`}
-                  className="flex items-center gap-3 py-2"
-                >
-                  <span className="w-14 shrink-0 font-mono text-[13px] text-l1">
-                    {port.port}
-                  </span>
-                  <span
-                    className="w-32 shrink-0 truncate text-xs text-l2"
-                    title={`PID ${port.pid}`}
-                  >
-                    {port.process || `PID ${port.pid}`}
-                  </span>
-                  <span className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-inset px-2 text-xs text-l2">
-                    <span
-                      className={`h-1.5 w-1.5 rounded-full ${dotClass[port.ownerKind]}`}
-                    />
-                    {port.ownerLabel}
-                  </span>
-                  <span
-                    className="min-w-0 flex-1 truncate font-mono text-xs text-l4"
-                    title={port.cwd ?? ""}
-                  >
-                    {port.cwd ?? ""}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => void onKill(port)}
-                    disabled={killing === port.pid}
-                    title={`终止进程（PID ${port.pid}）`}
-                    className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-err-text disabled:opacity-50"
-                  >
-                    {killing === port.pid ? "终止中…" : "终止"}
-                  </button>
-                </li>
+            <div className="mt-1 space-y-3">
+              {(
+                [
+                  ["本应用", internalPorts, "本应用当前没有监听中的端口。"],
+                  ["系统/其他", externalPorts, "没有系统或其他进程占用的端口。"],
+                ] as const
+              ).map(([title, list, empty]) => (
+                <div key={title}>
+                  <p className="pt-1 text-[10px] text-l4">{title}</p>
+                  {list.length === 0 ? (
+                    <p className="py-1.5 text-xs text-l4">{empty}</p>
+                  ) : (
+                    <ul className="divide-y divide-hairline">
+                      {list.map(renderPortRow)}
+                    </ul>
+                  )}
+                </div>
               ))}
-            </ul>
+            </div>
           )}
         </div>
       )}
@@ -729,6 +755,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     ws: WorkspaceDto;
   } | null>(null);
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
+  // 任务行产物清单手风琴：按工作区 id 记忆展开态，切项目时清空
+  const [artifactsOpen, setArtifactsOpen] = useState<Set<string>>(new Set());
   // 新建弹窗的仓库候选在页面可见时预热（list_repos 扫描慢，避免弹窗内空等）
   const [repos, setRepos] = useState<RepoDto[]>([]);
   const [reposLoading, setReposLoading] = useState(false);
@@ -1022,6 +1050,20 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       setSelectedGroupKey(groups[0].key);
     }
   }, [groupKeySignature, selectedGroupKey]);
+  // 切项目（含分组表重算后的被动切换）时收起所有产物清单
+  const shownGroupKey = selectedGroup?.key ?? null;
+  useEffect(() => {
+    setArtifactsOpen(new Set());
+  }, [shownGroupKey]);
+
+  function toggleArtifacts(wsId: string) {
+    setArtifactsOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(wsId)) next.delete(wsId);
+      else next.add(wsId);
+      return next;
+    });
+  }
   const actionBtn =
     "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1";
   // hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
@@ -1250,7 +1292,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   className="flex items-center gap-2.5 px-3 py-2 text-xs"
                 >
                   <span
-                    className={`size-1.5 shrink-0 rounded-full ${item.dot}`}
+                    className={`size-2 shrink-0 rounded-full ${item.dot}`}
                   />
                   <span className="min-w-0 flex-1 truncate text-l2">
                     {item.text}
@@ -1297,7 +1339,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                 }`}
               >
                 <span
-                  className={`mt-1 size-1.5 shrink-0 rounded-full ${
+                  className={`mt-1 size-2 shrink-0 rounded-full ${
                     needsAttention > 0
                       ? "bg-warn-text"
                       : groupActive > 0
@@ -1423,7 +1465,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             workspaces={selectedGroup.list}
             health={health}
             drift={drift}
-            driftFailed={driftFailed}
             refreshToken={refreshToken}
             freshGitGuide={
               !!selectedGroup.project &&
@@ -1435,7 +1476,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             onOpenTerminal={(ws, initialPrompt) =>
               void openInTerminal(ws, initialPrompt)
             }
-            onOpenReview={openReview}
             onRegisterProject={setAddProjectPath}
             onError={setError}
           >
@@ -1474,6 +1514,14 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                           <span className="truncate text-sm font-medium text-l1">
                             {workspace.name}
                           </span>
+                          {merged ? (
+                            // 「已合并」是终态提示：行内小字 + ok 色小点，不占按钮位；
+                            // 有新提交（ahead > 0）后恢复状态 pill 与评审入口
+                            <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-l4">
+                              <span className="size-2 rounded-full bg-ok-text" />
+                              已合并
+                            </span>
+                          ) : (
                           <button
                             type="button"
                             onClick={(event) => {
@@ -1493,13 +1541,14 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             }
                           >
                             <span
-                              className={`h-1.5 w-1.5 rounded-full ${state.dotClass}`}
+                              className={`size-2 rounded-full ${state.dotClass}`}
                             />
                             {state.label}
                             {(isDriftFailed || isHealthFailed) && (
                               <span className="text-warn-text">⚠</span>
                             )}
                           </button>
+                          )}
                         </div>
                         {/* 副行：10px 灰字，相对时间主显、悬浮给绝对时间（白话双层） */}
                         <p
@@ -1548,6 +1597,22 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             )}
                           </>
                         )}
+                        {/* 产物核验清单入口：活跃工作区（含已合并）可用，行内手风琴就地展开；展开时保持可见 */}
+                        {workspace.status === "active" && (
+                          <button
+                            type="button"
+                            onClick={() => toggleArtifacts(workspace.id)}
+                            aria-expanded={artifactsOpen.has(workspace.id)}
+                            title="查看该任务已经产出的文件"
+                            className={`${actionBtn} ${
+                              artifactsOpen.has(workspace.id)
+                                ? "text-l1"
+                                : hoverReveal
+                            }`}
+                          >
+                            产物
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={(event) => {
@@ -1567,6 +1632,20 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                         </button>
                       </div>
                     </div>
+                    {/* 产物清单：已合并读项目根（main），其余读工作树 */}
+                    {artifactsOpen.has(workspace.id) &&
+                      workspace.status === "active" && (
+                        <ArtifactChecklist
+                          projectPath={selectedGroup.repoPath}
+                          workspaceName={workspace.name}
+                          root={
+                            merged
+                              ? selectedGroup.repoPath
+                              : workspace.worktreePath
+                          }
+                          rootLabel={merged ? "主文件夹（已合并）" : "工作区"}
+                        />
+                      )}
                   </li>
                 );
               })}

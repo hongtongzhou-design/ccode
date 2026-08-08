@@ -6,6 +6,7 @@ import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS } from "../presets";
 import { upstreamNoteText, upstreamCommand } from "../upstream-note";
+import { copyTargets } from "../profile-copy";
 import { interactiveUpdatePrefill } from "../update-routing";
 import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
@@ -816,12 +817,20 @@ export default function ProfilesPage() {
     y: number;
     profile: Profile;
   } | null>(null);
+  // 「复制到其他 agent…」二级菜单（#14）：点 rowMenu 项后替换弹出，列出同协议族目标
+  const [copyMenu, setCopyMenu] = useState<{
+    x: number;
+    y: number;
+    profile: Profile;
+  } | null>(null);
   const [validationDialog, setValidationDialog] = useState<{
     profile: Profile;
     result: ProfileValidationDto | null;
     running: boolean;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 操作成功提示（复制到其他 agent 等），几秒后自动消失
+  const [notice, setNotice] = useState<string | null>(null);
   // 过滤条：按安装状态过滤 agent 组；按名称/端点/模型过滤配置行
   const [statusFilter, setStatusFilter] = useState<
     "all" | "installed" | "uninstalled"
@@ -1121,6 +1130,22 @@ export default function ProfilesPage() {
     }
   }
 
+  /** 复制到其他 agent（#14）：密钥在后端 0600 文件内直读直写，不经前端；成功后刷新列表并提示 */
+  async function onCopyToAgent(p: Profile, targetAgent: string) {
+    try {
+      const created = await invoke<Profile>("copy_profile_to_agent", {
+        profileId: p.id,
+        targetAgent,
+      });
+      await loadAll();
+      setNotice(`已复制到 ${labelOf(targetAgent)}：「${created.name}」`);
+      setTimeout(() => setNotice(null), 4000);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   const q = search.trim().toLowerCase();
   const matchProfile = (p: Profile) =>
     !q ||
@@ -1207,6 +1232,7 @@ export default function ProfilesPage() {
         </PageToolbar>
 
         {error && <p className="mt-4 text-sm text-err-text">{error}</p>}
+        {notice && <p className="mt-4 text-xs text-ok-text">{notice}</p>}
 
         {/* agent 分组（可折叠） */}
         <div>
@@ -1698,6 +1724,16 @@ export default function ProfilesPage() {
                 })();
               },
             },
+            {
+              label: "复制到其他 agent…",
+              onSelect: () =>
+                // rowMenu 已随本次点击关闭，二级菜单在同一锚点弹出
+                setCopyMenu({
+                  x: rowMenu.x,
+                  y: rowMenu.y,
+                  profile: rowMenu.profile,
+                }),
+            },
             { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
             {
               label: "设为全局",
@@ -1713,6 +1749,22 @@ export default function ProfilesPage() {
               : []),
             { label: "删除", onSelect: () => void onDelete(rowMenu.profile) },
           ]}
+        />
+      )}
+      {copyMenu && (
+        <ContextMenu
+          x={copyMenu.x}
+          y={copyMenu.y}
+          onClose={() => setCopyMenu(null)}
+          items={copyTargets(
+            copyMenu.profile.agent,
+            copyMenu.profile.protocol,
+          ).map((t) => ({
+            label: t.label,
+            disabled: !t.compatible,
+            title: t.reason,
+            onSelect: () => void onCopyToAgent(copyMenu.profile, t.id),
+          }))}
         />
       )}
       {validationDialog && (

@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -98,13 +97,13 @@ interface TabStatus {
   ptyId: string | null;
   /** 会话尾部状态（P3c 注意力标记）；无联动/shell/已退出/未知时为 null */
   attention: "done" | "working" | "confirm" | null;
-  /** shell 模式下存在可恢复的会话（专注栏「⟳ 恢复」可用性） */
+  /** shell 模式下存在可恢复的会话（标签条 ⋯ 菜单「⟳ 恢复会话」可用性） */
   canResume: boolean;
   /** 当前或最近一次关联的会话 id；只用于标签恢复元数据，不含会话文件内容。 */
   sessionId: string | null;
 }
 
-/** TerminalView 暴露给专注栏的动作表（回调经 ref 转发，始终最新） */
+/** TerminalView 暴露给标签条 ⋯ 菜单的动作表（回调经 ref 转发，始终最新） */
 export interface FocusTabActions {
   stop: () => void;
   resume: () => void;
@@ -159,7 +158,8 @@ async function fireAttentionNotification(
   sendNotification({ title, body, actionTypeId: "ccode.attention", extra });
 }
 
-/** 七套深色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板；调色板其余部分共享） */
+/** 七套深色 + 七套浅色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板；调色板其余部分共享）。
+ *  浅色主题下 ANSI 16 色预设仍偏深色向，用户可在设置页调色板里另行选择。 */
 const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
   {
     midnight: { background: "#11131a", foreground: "#aeb6c6" },
@@ -169,6 +169,13 @@ const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
     neutral: { background: "#111111", foreground: "#c9c9c9" },
     dracula: { background: "#282a36", foreground: "#cfcfc9" },
     shadcn: { background: "#111827", foreground: "#b9b9c0" },
+    "midnight-light": { background: "#fdfdfe", foreground: "#3a3f52" },
+    "terracotta-light": { background: "#fefcfa", foreground: "#453f3a" },
+    "ayu-light": { background: "#fffefd", foreground: "#3f4754" },
+    "mocha-light": { background: "#fafbfe", foreground: "#4c4f69" },
+    "neutral-light": { background: "#fdfdfd", foreground: "#3a3a3a" },
+    "dracula-light": { background: "#fefdff", foreground: "#403a4e" },
+    "shadcn-light": { background: "#fefefe", foreground: "#344054" },
   };
 
 /** VS Code Dark+ 风格 16 色调色板（各主题共享，只换底/字色） */
@@ -222,7 +229,7 @@ const TerminalView = memo(function TerminalView({
   primaryFocus?: boolean;
   /** 右侧面板开关影响 xterm 可用宽度，变化时需要重新 fit */
   rightOpen: boolean;
-  /** 布局版本号（工作树收缩/专注模式等宽度变化时递增，触发 xterm 重新 fit） */
+  /** 布局版本号（左栏显隐/专注终端等宽度变化时递增，触发 xterm 重新 fit） */
   layoutKey?: string;
   /** 该标签 cwd 的 git 变更统计（Codex 风：状态行常驻 +N -N） */
   gitTotals?: { add: number; del: number } | null;
@@ -260,9 +267,9 @@ const TerminalView = memo(function TerminalView({
   onSessionUpdate: (id: string, s: SessionLinkState) => void;
   /** 「◈ 接力到…」：把当前关联会话交给父级的接力目标选择器 */
   onHandoff?: (source: HandoffSource) => void;
-  /** 专注模式：隐藏标签内状态条（动作移到侧栏 ⋯ 菜单） */
+  /** 专注终端：隐藏标签内状态条（动作移到标签条 ⋯ 菜单） */
   focusMode?: boolean;
-  /** 向父级注册本标签的动作表（专注栏 ⋯ 菜单调用） */
+  /** 向父级注册本标签的动作表（标签条 ⋯ 菜单调用） */
   onActions?: (id: string, a: FocusTabActions) => void;
   onRestoreComplete?: (id: string) => void;
   /** launch 成功接管会话后通知父级清掉标签级 resumeSessionId（之后「启动」不再接旧会话） */
@@ -1132,7 +1139,7 @@ const TerminalView = memo(function TerminalView({
     setPage("sessions");
   }
 
-  // 专注栏动作表：actionsRef 每次渲染更新为最新闭包；挂载时只注册一次稳定转发对象，
+  // 标签条 ⋯ 菜单动作表：actionsRef 每次渲染更新为最新闭包；挂载时只注册一次稳定转发对象，
   // 父级 ⋯ 菜单调用时穿透 ref，不会拿到首次渲染的陈旧 agent/profile/model/cwd
   const actionsRef = useRef<FocusTabActions>({
     stop: () => {},
@@ -1570,8 +1577,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [sessionByTab, setSessionByTab] = useState<
     Record<string, SessionLinkState>
   >({});
-  // 左栏（工作树）
-  const [railCollapsed, setRailCollapsed] = useState(false);
+  // 左栏（工作树）：只有显示 /（被专注终端或专注内容）隐藏两种状态
   const [showHidden, setShowHidden] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   /** 最近项目「真进入」：待注入活动标签启动栏的目录 */
@@ -1592,9 +1598,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [rightExpanded, setRightExpanded] = useState(false);
   const terminalRootRef = useRef<HTMLDivElement>(null);
   const normalRightWidthRef = useRef(rightWidth);
-  // 专注模式：隐藏左栏与右面板，终端全宽（页级开关，默认关）
+  // 专注终端：隐藏左栏与右面板，中带只剩全宽终端 + 顶部标签条（页级开关，默认关，Esc 退出）
   const [focusMode, setFocusMode] = useState(false);
-  // 专注栏：各标签动作表（TerminalView 挂载时注册，⋯ 菜单调用）与菜单坐标
+  // 标签条 ⋯ 菜单：各标签动作表（TerminalView 挂载时注册）与菜单坐标
   const tabActionsRef = useRef(new Map<string, FocusTabActions>());
   const registerActions = useCallback((id: string, a: FocusTabActions) => {
     tabActionsRef.current.set(id, a);
@@ -1607,7 +1613,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     null,
   );
 
-  /** 专注栏 ⋯ 菜单项：按活动标签状态裁剪（不可用的动作不出现） */
+  /** 标签条 ⋯ 菜单项（专注终端时替代标签内状态条）：按活动标签状态裁剪（不可用的动作不出现） */
   function focusMenuItems() {
     const s = statuses[focusedId];
     const acts = tabActionsRef.current.get(focusedId);
@@ -1649,7 +1655,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             {
               label: "对话面板",
               onSelect: () => {
-                setFocusMode(false); // 右面板在专注模式下隐藏，先退出专注
+                setFocusMode(false); // 右面板在专注终端下隐藏，先退出
                 openSessionPanel();
               },
             },
@@ -1657,7 +1663,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         : []),
       { label: "◎ 查找终端输出", onSelect: () => acts?.search() },
       { label: "修改启动配置", onSelect: () => acts?.modify() },
-      { label: "⤢ 退出专注", onSelect: () => setFocusMode(false) },
+      { label: "⤢ 退出专注终端", onSelect: () => setFocusMode(false) },
     ];
   }
   const [rightTab, setRightTab] = useState<RightTab>("dialogue");
@@ -1758,7 +1764,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   function maxRightWidth(expanded = rightExpanded): number {
     const total = terminalRootRef.current?.clientWidth ?? window.innerWidth;
-    const railWidth = expanded ? 0 : railCollapsed ? 32 : 240;
+    const railWidth = expanded ? 0 : 240;
     return Math.max(
       RIGHT_PANEL_MIN_WIDTH,
       Math.min(RIGHT_PANEL_MAX_WIDTH, total - railWidth - 340),
@@ -1831,7 +1837,21 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [railCollapsed, rightExpanded]);
+  }, [rightExpanded]);
+
+  // Esc 退出专注：仅在专注终端/专注内容激活时才挂监听并拦截，
+  // 平时完全不碰 Esc，避免与终端内的 Esc 输入（如 vim）冲突
+  useEffect(() => {
+    if (!focusMode && !rightExpanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (focusMode) setFocusMode(false);
+      if (rightExpanded) toggleRightExpanded();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusMode, rightExpanded]);
 
   /** TerminalView 上报状态；内容没变就返回原对象，避免无谓重渲染 */
   const reportStatus = useCallback((id: string, s: TabStatus) => {
@@ -2095,7 +2115,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const setWorkspaceReviewRequest = useAppStore(
     (s) => s.setWorkspaceReviewRequest,
   );
-  const navCollapsed = useAppStore((s) => s.navCollapsed);
   const setRunningScript = useAppStore((s) => s.setRunningScript);
   // closeTab 里取最新互斥登记表（避免闭包过期）
   const runningScripts = useAppStore((s) => s.runningScripts);
@@ -2172,7 +2191,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setFocusMode(false);
     setRightOpen(true);
     setRightTab("preview");
-    // PDF 是阅读动作：打开时自动宽屏（隐藏工作树），用户可随时 ⇲ 还原
+    // PDF 是阅读动作：打开时自动进入专注内容（隐藏工作树），用户可随时 ⇲/Esc 还原
     if (previewReq.path.toLowerCase().endsWith(".pdf")) setRightExpanded(true);
     setPreview({
       path: previewReq.path,
@@ -2189,7 +2208,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (!visible || !enterCwdReq) return;
     setEnterCwdReq(null);
-    // 评审覆盖层/专注模式会挡住文件树，先退出（同 previewReq 消费语义）
+    // 评审覆盖层/专注终端会挡住文件树，先退出（同 previewReq 消费语义）
     setReviewPath(null);
     setReviewAction(null);
     setFocusMode(false);
@@ -2613,211 +2632,205 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       ref={terminalRootRef}
       className="terminal-workbench relative flex h-full bg-canvas"
     >
-      {/* 左栏：工作树（专注模式下整体隐藏） */}
-      {!focusMode &&
-        !rightExpanded &&
-        (railCollapsed ? (
-          <div className="flex w-8 shrink-0 flex-col items-center border-r border-hairline bg-rail2 py-1.5">
+      {/* 左栏：工作树（专注终端/专注内容下整体隐藏；无手动收起态） */}
+      {!focusMode && !rightExpanded && (
+        <div className="flex w-60 shrink-0 flex-col border-r border-hairline bg-rail2">
+          <div className="flex h-9 shrink-0 items-center gap-2 px-2">
+            <span className="mr-auto text-xs font-medium text-l3">
+              工作树
+            </span>
             <button
-              onClick={() => setRailCollapsed(false)}
-              title="展开工作树"
+              onClick={() => setShowHidden((v) => !v)}
+              title={showHidden ? "隐藏隐藏文件" : "显示隐藏文件"}
+              className={`flex h-7 w-7 items-center justify-center rounded text-xs hover:bg-white/5 ${
+                showHidden ? "text-l1" : "text-l4 hover:text-l2"
+              }`}
+            >
+              .*
+            </button>
+            <button
+              onClick={() => setRefreshKey((k) => k + 1)}
+              title="刷新"
               className={railBtn}
             >
-              »
+              ⟳
             </button>
           </div>
-        ) : (
-          <div className="flex w-60 shrink-0 flex-col border-r border-hairline bg-rail2">
-            <div className="flex h-9 shrink-0 items-center gap-2 px-2">
-              <span className="mr-auto text-xs font-medium text-l3">
-                工作树
-              </span>
-              <button
-                onClick={() => setShowHidden((v) => !v)}
-                title={showHidden ? "隐藏隐藏文件" : "显示隐藏文件"}
-                className={`flex h-7 w-7 items-center justify-center rounded text-xs hover:bg-white/5 ${
-                  showHidden ? "text-l1" : "text-l4 hover:text-l2"
-                }`}
-              >
-                .*
-              </button>
-              <button
-                onClick={() => setRefreshKey((k) => k + 1)}
-                title="刷新"
-                className={railBtn}
-              >
-                ⟳
-              </button>
-              <button
-                onClick={() => setRailCollapsed(true)}
-                title="收起工作树"
-                className={railBtn}
-              >
-                «
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-auto py-1">
-              <FileTree
-                cwd={activeCwd}
-                showHidden={showHidden}
-                refreshKey={refreshKey}
-                onOpenFile={openPreview}
-                onOpenTerminal={openTerminalAt}
-                onFsEvent={bumpFsChangeTick}
-                onEnterProject={setEnterCwd}
-                onRootChange={closePreviewForRootChange}
-                belowRecent={
-                  /* 项目区：当前标签 cwd 所属项目的主文件夹 + 活跃工作区，点击切根复用 enterCwd 链路 */
-                  <ProjectRail
-                    cwd={activeCwd}
-                    pageVisible={visible}
-                    refreshKey={refreshKey}
-                    agentRunning={statuses[focusedId]?.running ?? false}
-                    tabs={Object.values(statuses).map((s) => ({
-                      cwd: s.cwd,
-                      running: s.running,
-                      attention: s.attention,
-                    }))}
-                    onEnter={setEnterCwd}
-                  />
-                }
-              />
-            </div>
+          <div className="min-h-0 flex-1 overflow-auto py-1">
+            <FileTree
+              cwd={activeCwd}
+              showHidden={showHidden}
+              refreshKey={refreshKey}
+              onOpenFile={openPreview}
+              onOpenTerminal={openTerminalAt}
+              onFsEvent={bumpFsChangeTick}
+              onEnterProject={setEnterCwd}
+              onRootChange={closePreviewForRootChange}
+              belowRecent={
+                /* 项目区：当前标签 cwd 所属项目的主文件夹 + 活跃工作区，点击切根复用 enterCwd 链路 */
+                <ProjectRail
+                  cwd={activeCwd}
+                  pageVisible={visible}
+                  refreshKey={refreshKey}
+                  agentRunning={statuses[focusedId]?.running ?? false}
+                  tabs={Object.values(statuses).map((s) => ({
+                    cwd: s.cwd,
+                    running: s.running,
+                    attention: s.attention,
+                  }))}
+                  onEnter={setEnterCwd}
+                />
+              }
+            />
           </div>
-        ))}
+        </div>
+      )}
 
-      {/* 中带：终端标签区（relative 供宽屏聚焦遮罩定位） */}
+      {/* 中带：终端标签区 */}
       <div className="relative flex min-w-0 flex-1 flex-col">
-        {/* 顶部标签条：专注模式下隐藏（标签移到 App 侧栏专注插槽） */}
-        {!focusMode && (
-          <div className="flex h-9 items-center gap-1 overflow-x-auto border-b border-hairline bg-strip px-2">
-            {tabs.map((t) => {
-              const s = statuses[t.id];
-              const active = t.id === activeId;
-              // 注意力点：仅 工作中/待确认/已完成（未查看）有状态时才渲染，无状态/空闲不渲染（降噪）；
-              // 「已完成」点击跳转过该标签即已读消除（seenDoneRef）。
-              // 与关闭 × 一样只在悬停 / 激活 / 键盘聚焦（focus-within）时显现。
-              const attentionDot =
-                s?.attention === "working"
-                  ? { cls: "text-ok-text animate-pulse", tip: "工作中" }
-                  : s?.attention === "confirm"
-                    ? { cls: "text-warn-text", tip: "待确认" }
-                    : s?.attention === "done" && !seenDoneRef.current.has(t.id)
-                      ? { cls: "text-link", tip: "已完成，等待输入" }
-                      : null;
-              return (
-                <div
-                  key={t.id}
-                  onClick={() => activateTab(t.id)}
-                  className={`group/tab flex h-9 w-[130px] min-w-[100px] shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-2.5 text-xs ${
-                    active
-                      ? "border-cta text-l1"
-                      : "border-transparent text-l3 hover:text-l1"
-                  }`}
-                >
-                  {attentionDot && (
-                    <span
-                      className={`shrink-0 text-[10px] ${attentionDot.cls} ${
-                        active
-                          ? ""
-                          : "invisible group-hover/tab:visible group-focus-within/tab:visible"
-                      }`}
-                      title={attentionDot.tip}
-                    >
-                      ●
-                    </span>
-                  )}
-                  <span className="min-w-0 flex-1 truncate">
-                    {s?.title ?? "终端"}
-                  </span>
-                  {t.restored && (
-                    <span className="shrink-0 rounded bg-inset px-1 text-[10px] text-link">
-                      可恢复
-                    </span>
-                  )}
-                  {splitActive && t.id === splitTabId && (
-                    <span
-                      className="shrink-0 rounded bg-inset px-1 text-[10px] text-l3"
-                      title="分屏右侧对照（点击交换到左侧）"
-                    >
-                      ◧
-                    </span>
-                  )}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void requestCloseTab(t.id);
-                    }}
-                    aria-label="关闭标签"
-                    className={`shrink-0 text-l4 hover:text-err-text focus-visible:visible ${active ? "" : "invisible group-hover/tab:visible"}`}
+        {/* 顶部标签条：常驻中带顶部，专注终端下也保留在原位 */}
+        <div className="flex h-9 items-center gap-1 overflow-x-auto border-b border-hairline bg-strip px-2">
+          {tabs.map((t) => {
+            const s = statuses[t.id];
+            const active = t.id === activeId;
+            // 注意力点：仅 工作中/待确认/已完成（未查看）有状态时才渲染，无状态/空闲不渲染（降噪）；
+            // 「已完成」点击跳转过该标签即已读消除（seenDoneRef）。
+            // 与关闭 × 一样只在悬停 / 激活 / 键盘聚焦（focus-within）时显现。
+            const attentionDot =
+              s?.attention === "working"
+                ? { cls: "text-ok-text animate-pulse", tip: "工作中" }
+                : s?.attention === "confirm"
+                  ? { cls: "text-warn-text", tip: "待确认" }
+                  : s?.attention === "done" && !seenDoneRef.current.has(t.id)
+                    ? { cls: "text-link", tip: "已完成，等待输入" }
+                    : null;
+            return (
+              <div
+                key={t.id}
+                onClick={() => activateTab(t.id)}
+                className={`group/tab flex h-9 w-[130px] min-w-[100px] shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-2.5 text-xs ${
+                  active
+                    ? "border-cta text-l1"
+                    : "border-transparent text-l3 hover:text-l1"
+                }`}
+              >
+                {attentionDot && (
+                  <span
+                    className={`shrink-0 text-[10px] ${attentionDot.cls} ${
+                      active
+                        ? ""
+                        : "invisible group-hover/tab:visible group-focus-within/tab:visible"
+                    }`}
+                    title={attentionDot.tip}
                   >
-                    ×
-                  </button>
-                </div>
-              );
-            })}
-            <button
-              onClick={() => addTab()}
-              title="新建终端标签"
-              className="shrink-0 rounded px-1.5 text-sm text-l4 hover:text-l1"
-            >
-              ＋
-            </button>
-            <span className="ml-auto flex shrink-0 items-center gap-1">
-              {/* 当前项目状态 pill（P1b 参考图 2）：有可合并工作区才显示，纯状态不交互（inset 底 + 语义色小点） */}
-              {mergeReadyWs.length > 0 && (
-                <span
-                  className="flex items-center gap-1 rounded bg-inset px-2 py-0.5 text-xs text-l2"
-                  title={`可合并的工作区：${mergeReadyWs.join("、")}\n从右侧「改动」页签或工作区页进入评审合并`}
-                >
-                  <span className="text-[10px] text-ok-text">●</span>
-                  {mergeReadyWs.length > 1
-                    ? `${mergeReadyWs.length} 个可合并`
-                    : "可合并"}
+                    ●
+                  </span>
+                )}
+                <span className="min-w-0 flex-1 truncate">
+                  {s?.title ?? "终端"}
                 </span>
-              )}
+                {t.restored && (
+                  <span className="shrink-0 rounded bg-inset px-1 text-[10px] text-link">
+                    可恢复
+                  </span>
+                )}
+                {splitActive && t.id === splitTabId && (
+                  <span
+                    className="shrink-0 rounded bg-inset px-1 text-[10px] text-l3"
+                    title="分屏右侧对照（点击交换到左侧）"
+                  >
+                    ◧
+                  </span>
+                )}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void requestCloseTab(t.id);
+                  }}
+                  aria-label="关闭标签"
+                  className={`shrink-0 text-l4 hover:text-err-text focus-visible:visible ${active ? "" : "invisible group-hover/tab:visible"}`}
+                >
+                  ×
+                </button>
+              </div>
+            );
+          })}
+          <button
+            onClick={() => addTab()}
+            title="新建终端标签"
+            className="shrink-0 rounded px-1.5 text-sm text-l4 hover:text-l1"
+          >
+            ＋
+          </button>
+          <span className="ml-auto flex shrink-0 items-center gap-1">
+            {/* 当前项目状态 pill（P1b 参考图 2）：有可合并工作区才显示，纯状态不交互（inset 底 + 语义色小点） */}
+            {mergeReadyWs.length > 0 && (
+              <span
+                className="flex items-center gap-1 rounded bg-inset px-2 py-0.5 text-xs text-l2"
+                title={`可合并的工作区：${mergeReadyWs.join("、")}\n从右侧「改动」页签或工作区页进入评审合并`}
+              >
+                <span className="text-[10px] text-ok-text">●</span>
+                {mergeReadyWs.length > 1
+                  ? `${mergeReadyWs.length} 个可合并`
+                  : "可合并"}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={toggleSplit}
+              disabled={!splitActive && tabs.length < 2}
+              title={
+                splitActive
+                  ? "退出分屏"
+                  : "分屏对比：左侧当前标签，右侧任选对照标签（需要至少两个标签）"
+              }
+              className={`rounded px-2 py-0.5 text-xs disabled:opacity-40 ${
+                splitActive ? "text-l1" : "text-l4 hover:text-l2"
+              }`}
+            >
+              ◧ 分屏
+            </button>
+            <button
+              type="button"
+              onClick={() => setRightOpen(true)}
+              title="打开当前任务工作台（对话 / 文件 / 改动）"
+              aria-label="打开当前任务工作台"
+              className={`rounded px-2 py-0.5 text-xs ${
+                rightOpen ? "text-l1" : "text-l4 hover:text-l2"
+              }`}
+            >
+              ◫ 工作台
+            </button>
+            <button
+              onClick={() => setFocusMode((v) => !v)}
+              title={
+                focusMode
+                  ? "退出专注终端（Esc，恢复左右栏）"
+                  : "专注终端（隐藏左右栏，Esc 退出）"
+              }
+              className={`rounded px-2 py-0.5 text-xs ${
+                focusMode ? "text-l1" : "text-l4 hover:text-l2"
+              }`}
+            >
+              ⤢ 专注终端
+            </button>
+            {/* 专注终端下标签内状态条隐藏，停止/恢复/对话等动作收进此菜单 */}
+            {focusMode && (
               <button
                 type="button"
-                onClick={toggleSplit}
-                disabled={!splitActive && tabs.length < 2}
-                title={
-                  splitActive
-                    ? "退出分屏"
-                    : "分屏对比：左侧当前标签，右侧任选对照标签（需要至少两个标签）"
-                }
-                className={`rounded px-2 py-0.5 text-xs disabled:opacity-40 ${
-                  splitActive ? "text-l1" : "text-l4 hover:text-l2"
-                }`}
+                onClick={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setFocusMenu({ x: r.right, y: r.bottom + 4 });
+                }}
+                title="终端操作（停止/恢复/接力/对话/查找/修改）"
+                aria-label="终端操作"
+                className="rounded px-2 py-0.5 text-xs text-l4 hover:text-l2"
               >
-                ◧ 分屏
+                ⋯
               </button>
-              <button
-                type="button"
-                onClick={() => setRightOpen(true)}
-                title="打开当前任务工作台（对话 / 文件 / 改动）"
-                aria-label="打开当前任务工作台"
-                className={`rounded px-2 py-0.5 text-xs ${
-                  rightOpen ? "text-l1" : "text-l4 hover:text-l2"
-                }`}
-              >
-                ◫ 工作台
-              </button>
-              <button
-                onClick={() => setFocusMode((v) => !v)}
-                title={
-                  focusMode
-                    ? "退出专注模式（恢复侧栏与面板）"
-                    : "专注模式（隐藏侧栏与面板）"
-                }
-                className={`rounded px-2 py-0.5 text-xs ${
-                  focusMode ? "text-l1" : "text-l4 hover:text-l2"
-                }`}
-              >
-                ⤢ 专注
-              </button>
-            </span>
-          </div>
-        )}
+            )}
+          </span>
+        </div>
         <div
           ref={splitAreaRef}
           className={`min-h-0 flex-1${splitActive ? " flex" : ""}`}
@@ -2849,7 +2862,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 visible={tabVisible}
                 primaryFocus={t.id === focusedId}
                 rightOpen={rightOpen}
-                layoutKey={`${railCollapsed}-${focusMode}-${rightOpen}-${Math.round(rightWidth)}-${rightExpanded}-${splitActive ? `split${Math.round(splitPct)}` : "single"}`}
+                layoutKey={`${focusMode}-${rightOpen}-${Math.round(rightWidth)}-${rightExpanded}-${splitActive ? `split${Math.round(splitPct)}` : "single"}`}
                 gitTotals={t.id === focusedId ? gitTotals : null}
                 tabId={t.id}
                 skipSeed={t.skipSeed}
@@ -2966,15 +2979,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             </div>
           )}
         </div>
-        {/* 宽屏聚焦遮罩（waveterm magnify 手法）：宽屏展开时给中带（标签条 + 终端区）
-            加半透明压暗 + 背景模糊，突出右侧宽屏工作台；pointer-events-none 不动交互，
-            终端与标签仍可点击，「⇲」还原即移除 */}
-        {rightExpanded && rightOpen && !focusMode && (
-          <div className="pointer-events-none absolute inset-0 z-10 bg-black/50 backdrop-blur-sm" />
-        )}
+        {/* 专注内容：右栏铺满即表达主次，中带不加压暗遮罩（v3.44 用户否决压黑） */}
       </div>
 
-      {/* 右侧面板：当前对话 / 文件预览 / 改动（专注模式下隐藏） */}
+      {/* 右侧面板：当前对话 / 文件预览 / 改动（专注终端下隐藏） */}
       {rightOpen && !focusMode && (
         <>
           <div
@@ -3019,7 +3027,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     key={k}
                     onClick={() => setRightTab(k)}
                     onDoubleClick={toggleRightExpanded}
-                    title={`${label}；双击${rightExpanded ? "还原" : "宽屏展开"}`}
+                    title={`${label}；双击${rightExpanded ? "退出专注内容" : "进入专注内容"}`}
                     className={`flex h-8 shrink-0 items-center gap-1 rounded px-2.5 text-xs ${
                       rightTab === k
                         ? "bg-seg-sel text-l1"
@@ -3051,7 +3059,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               })}
               {/* 右侧上下文区：按页签透出对应信息（对话 = 状态点 + 标题/agent/会话/状态
                   一行小字 + 完整回放；文件/改动的上下文由各自内容头部承担），
-                  末端固定宽屏与收起按钮；空间不足时小字截断、完整信息在悬浮提示 */}
+                  末端固定专注内容与收起按钮；空间不足时小字截断、完整信息在悬浮提示 */}
               <span className="ml-auto flex min-w-0 items-center gap-1 pl-1">
                 {rightTab === "dialogue" && (
                   <>
@@ -3121,8 +3129,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   onClick={toggleRightExpanded}
                   title={
                     rightExpanded
-                      ? "还原分栏（恢复工作树）"
-                      : "宽屏展开（暂时隐藏工作树，保留终端）"
+                      ? "退出专注内容（Esc，恢复工作树分栏）"
+                      : "专注内容（暂时隐藏工作树，右栏铺满，Esc 退出）"
                   }
                   className="flex size-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
                 >
@@ -3258,94 +3266,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         />
       )}
 
-      {/* 专注栏：portal 到 App 侧栏插槽——纵向标签列表 + ⋯ 集成动作按钮。
-          侧栏收缩到最小时只显示状态点/符号（悬浮 tooltip 显示名称） */}
-      {focusMode &&
-        visible &&
-        createPortal(
-          <div className="flex flex-col gap-0.5 px-1 pb-2">
-            {!navCollapsed && (
-              <div className="px-2 pb-1 pt-1 text-[10px] text-l4">终端</div>
-            )}
-            {tabs.map((t) => {
-              const s = statuses[t.id];
-              const active = t.id === activeId;
-              return (
-                <div
-                  key={t.id}
-                  onClick={() => activateTab(t.id)}
-                  title={s ? `${s.title} · ${s.cwd}` : undefined}
-                  className={`group/ftab flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-xs ${
-                    navCollapsed ? "justify-center" : ""
-                  } ${active ? "bg-rail-sel text-l1" : "text-l3 hover:bg-white/5"}`}
-                >
-                  <span
-                    className={`shrink-0 text-[9px] ${
-                      s?.running
-                        ? `text-ok-text${s.attention === "working" ? " animate-pulse" : ""}`
-                        : s?.shell
-                          ? "text-l3"
-                          : "text-l4"
-                    }`}
-                  >
-                    ●
-                  </span>
-                  {s?.attention === "done" && (
-                    <span className="shrink-0 text-[9px] text-link">●</span>
-                  )}
-                  {s?.attention === "confirm" && (
-                    <span className="shrink-0 text-[9px] text-warn-text">
-                      ●
-                    </span>
-                  )}
-                  {!navCollapsed && (
-                    <span className="min-w-0 flex-1 truncate">
-                      {s?.title ?? "终端"}
-                    </span>
-                  )}
-                  {!navCollapsed && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void requestCloseTab(t.id);
-                      }}
-                      aria-label="关闭标签"
-                      className="invisible shrink-0 text-l4 hover:text-err-text group-hover/ftab:visible"
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-            <button
-              onClick={() => addTab()}
-              title="新建终端标签"
-              className={`rounded-md px-2 py-1.5 text-xs text-l4 hover:bg-white/5 hover:text-l2 ${
-                navCollapsed ? "text-center" : "text-left"
-              }`}
-            >
-              {navCollapsed ? "＋" : "＋ 新终端"}
-            </button>
-            <button
-              onClick={(e) => {
-                const r = e.currentTarget.getBoundingClientRect();
-                setFocusMenu({ x: r.right + 6, y: r.top });
-              }}
-              title="终端操作（停止/恢复/对话/查找/修改）"
-              className={`rounded-md px-2 py-1.5 text-xs text-l4 hover:bg-white/5 hover:text-l2 ${
-                navCollapsed ? "text-center" : "text-left"
-              }`}
-            >
-              {navCollapsed ? "⋯" : "⋯ 操作"}
-            </button>
-          </div>,
-          document.getElementById("app-rail-focus-slot") as HTMLElement,
-        )}
       {focusMenu && (
         <ContextMenu
           x={focusMenu.x}
           y={focusMenu.y}
+          alignRight
           onClose={() => setFocusMenu(null)}
           items={focusMenuItems()}
         />

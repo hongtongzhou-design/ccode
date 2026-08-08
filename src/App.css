@@ -40,11 +40,11 @@
   --color-hairline: #282e42; /* 隐式 1px 细线（走查校准：自 #2d3448 调柔一档，避免“亮线”生硬；仍亮于 inset，与 field 保持层级） */
   --color-field: #3a4258; /* 输入框 / 弹层边线（保持亮于 hairline） */
 
-  /* 文本四级：冷白 → 灰蓝（层级靠颜色不靠字号） */
+  /* 文本四级：冷白 → 灰蓝（层级靠颜色不靠字号；v3.44 起按文档/代码阅读对比度上调一档） */
   --color-l1: #e8f1f2; /* 标题 / 选中 */
-  --color-l2: #b0c0d0; /* 正文 / 次级 */
-  --color-l3: #8f9bb0; /* 元信息 / 非选中页签 */
-  --color-l4: #5a6478; /* 淡 */
+  --color-l2: #b7c5d4; /* 正文 / 次级 */
+  --color-l3: #97a2b6; /* 元信息 / 非选中页签 */
+  --color-l4: #677181; /* 淡 */
 
   /* 主 CTA（粉，P0 拍板）：每个视图只允许一个 */
   --color-cta: #faa8d4;
@@ -57,9 +57,10 @@
   /* 文件树文件夹图标着色（每主题一个 muted 色调；文件图标保持 l4 灰） */
   --color-folder: #7f96b8;
 
-  /* 状态 pill：深底 + 同色相浅字（文字/小点用法不变） */
+  /* 状态 pill：深底 + 同色相浅字（文字/小点用法不变）
+     ok 绿取深色底兼容的哑光绿（v3.43，用户反馈原霓虹绿 #40d080 在深底上发飘） */
   --color-ok: #10331f;
-  --color-ok-text: #40d080;
+  --color-ok-text: #4cc38a;
   --color-err: #381e24;
   --color-err-text: #f07070;
   --color-warn: #37300f;
@@ -102,7 +103,7 @@
   --color-strip: #333331; --color-canvas: #2d2d2b; --color-inset: #383836;
   --color-raised: #3e3e3b; --color-bubble: #4a4a46;
   --color-seg-sel: #434340; --color-hairline: #444441; --color-field: #4a4a47;
-  --color-l1: #f9f9f7; --color-l2: #c9c9c4; --color-l3: #94948f; --color-l4: #6a6a66;
+  --color-l1: #f9f9f7; --color-l2: #d2d2cc; --color-l3: #9d9d97; --color-l4: #747470;
   --color-cta: #cc7d5e; --color-cta-text: #f9f9f7; --color-cta-bd: #8f4f38;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #3d211a;
@@ -115,7 +116,7 @@
   --color-strip: #181c23; --color-canvas: #10141c; --color-inset: #1c212b;
   --color-raised: #222834; --color-bubble: #2b303c;
   --color-seg-sel: #262c37; --color-hairline: #272a33; --color-field: #31353f;
-  --color-l1: #d9d7d2; --color-l2: #bfbdb6; --color-l3: #878580; --color-l4: #5f5e59;
+  --color-l1: #d9d7d2; --color-l2: #c8c6bf; --color-l3: #908e88; --color-l4: #6a6963;
   --color-cta: #e6b450; --color-cta-text: #1d1608; --color-cta-bd: #8a6a26;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #3a2e10;
@@ -128,7 +129,7 @@
   --color-strip: #262738; --color-canvas: #1e1e2e; --color-inset: #2b2c40;
   --color-raised: #313249; --color-bubble: #3a3b56;
   --color-seg-sel: #353650; --color-hairline: #34354a; --color-field: #3d3e54;
-  --color-l1: #cdd6f4; --color-l2: #aeb8dc; --color-l3: #7c86b0; --color-l4: #565e83;
+  --color-l1: #cdd6f4; --color-l2: #b8c1e2; --color-l3: #8790b8; --color-l4: #626a8e;
   --color-cta: #cba6f7; --color-cta-text: #2a1b3d; --color-cta-bd: #6b4d94;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #2e2145;
@@ -141,7 +142,7 @@
   --color-strip: #1c1c1c; --color-canvas: #111111; --color-inset: #212121;
   --color-raised: #272727; --color-bubble: #303030;
   --color-seg-sel: #2b2b2b; --color-hairline: #2c2c2c; --color-field: #383838;
-  --color-l1: #fcfcfc; --color-l2: #c9c9c9; --color-l3: #8f8f8f; --color-l4: #616161;
+  --color-l1: #fcfcfc; --color-l2: #d2d2d2; --color-l3: #989898; --color-l4: #6e6e6e;
   --color-cta: #0169cc; --color-cta-text: #eaf4ff; --color-cta-bd: #014a8f;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #0d2d4d;
@@ -154,7 +155,7 @@
   --color-strip: #33343f; --color-canvas: #282a36; --color-inset: #393a47;
   --color-raised: #3f404f; --color-bubble: #484a5c;
   --color-seg-sel: #434453; --color-hairline: #434455; --color-field: #494a5a;
-  --color-l1: #f8f8f2; --color-l2: #cfcfc9; --color-l3: #94948f; --color-l4: #68686a;
+  --color-l1: #f8f8f2; --color-l2: #d8d8d2; --color-l3: #9d9d97; --color-l4: #747476;
   --color-cta: #ff79c6; --color-cta-text: #38102a; --color-cta-bd: #a64a80;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #401a35;
@@ -167,13 +168,130 @@
   --color-strip: #1a2230; --color-canvas: #111827; --color-inset: #202938;
   --color-raised: #252f41; --color-bubble: #2f3b4e;
   --color-seg-sel: #293447; --color-hairline: #2b323f; --color-field: #363e4e;
-  --color-l1: #e4e4e7; --color-l2: #b9b9c0; --color-l3: #7d7d8a; --color-l4: #55555f;
+  --color-l1: #e4e4e7; --color-l2: #c2c2c9; --color-l3: #878794; --color-l4: #62626c;
   --color-cta: #ff5c5c; --color-cta-text: #3d0f0f; --color-cta-bd: #a83232;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #3d1414;
   --color-cta-pill-text: #ff8080;
   --color-folder: #8291ab;
   --color-editor-bg: #111827; --color-editor-fg: #b9b9c0; --color-editor-line: #55555f;
+}
+
+/* ===== 七套浅色模式（v3.44，与各深色主题同性格、正下方对应） =====
+   明暗方向翻转：rail 比 canvas 略暗（侧栏回收），strip/inset/raised 向白浮起；
+   hairline/field 变为比底色深的灰线；cta 加深保证白底对比度；状态/语义色共享深色值
+   （深底浅字 pill 在浅底上同样成立）；link/tabline 按浅底加深。 */
+
+[data-theme="midnight-light"] {
+  --color-rail: #e8eaf0; --color-rail2: #f8f9fc; --color-rail-sel: #dcdfe8;
+  --color-strip: #fbfcfe; --color-canvas: #f3f4f8; --color-inset: #fdfdfe;
+  --color-raised: #ffffff; --color-bubble: #e4e7ef;
+  --color-seg-sel: #cfd3df; --color-hairline: #d5d8e2; --color-field: #b9bdcf;
+  --color-l1: #171a26; --color-l2: #3a3f52; --color-l3: #6d7386; --color-l4: #9ba1b4;
+  --color-cta: #c2447f; --color-cta-text: #ffffff; --color-cta-bd: #a33368;
+  --color-nav-accent: #5249c4;
+  --color-cta-pill: #f6d7e6; --color-cta-pill-text: #a33368;
+  --color-folder: #66748f;
+  --color-link: #2470d8; --color-tabline: #5a6070;
+  --color-editor-bg: #ffffff; --color-editor-fg: #242839; --color-editor-line: #a3a8ba;
+}
+[data-theme="terracotta-light"] {
+  --color-rail: #ece7e2; --color-rail2: #faf6f3; --color-rail-sel: #e0d9d3;
+  --color-strip: #fcf9f7; --color-canvas: #f5f1ed; --color-inset: #fefcfa;
+  --color-raised: #ffffff; --color-bubble: #e8e1da;
+  --color-seg-sel: #d3cbc3; --color-hairline: #d8d1ca; --color-field: #bcb3a9;
+  --color-l1: #211d1a; --color-l2: #453f3a; --color-l3: #7a726b; --color-l4: #a49b92;
+  --color-cta: #b25a3c; --color-cta-text: #ffffff; --color-cta-bd: #8f4f38;
+  --color-nav-accent: var(--color-cta);
+  --color-cta-pill: #f3ddd2; --color-cta-pill-text: #8f4f38;
+  --color-folder: #96887a;
+  --color-link: #2470d8; --color-tabline: #6b6259;
+  --color-editor-bg: #ffffff; --color-editor-fg: #2a2521; --color-editor-line: #ab9f94;
+}
+[data-theme="ayu-light"] {
+  --color-rail: #efeeea; --color-rail2: #fcfbfa; --color-rail-sel: #e2dfd9;
+  --color-strip: #fdfcfa; --color-canvas: #f8f7f4; --color-inset: #fffefd;
+  --color-raised: #ffffff; --color-bubble: #e7e4de;
+  --color-seg-sel: #d4d0c8; --color-hairline: #d9d5cd; --color-field: #bab4a8;
+  --color-l1: #20242e; --color-l2: #3f4754; --color-l3: #6c7380; --color-l4: #9ea3ac;
+  --color-cta: #e6a417; --color-cta-text: #241a02; --color-cta-bd: #b27d12;
+  --color-nav-accent: var(--color-cta);
+  --color-cta-pill: #f7e8c8; --color-cta-pill-text: #8a6a26;
+  --color-folder: #a2905e;
+  --color-link: #2470d8; --color-tabline: #5f6470;
+  --color-editor-bg: #ffffff; --color-editor-fg: #2a313d; --color-editor-line: #a7adb8;
+}
+[data-theme="mocha-light"] {
+  /* Catppuccin Latte 官方色板 */
+  --color-rail: #e6e9ef; --color-rail2: #f2f4f9; --color-rail-sel: #d5dae4;
+  --color-strip: #f7f8fc; --color-canvas: #eff1f5; --color-inset: #fafbfe;
+  --color-raised: #ffffff; --color-bubble: #dfe3ee;
+  --color-seg-sel: #c6cadb; --color-hairline: #c9cedd; --color-field: #a6adc2;
+  --color-l1: #2a2c3f; --color-l2: #4c4f69; --color-l3: #6c6f85; --color-l4: #9ca0b0;
+  --color-cta: #8839ef; --color-cta-text: #ffffff; --color-cta-bd: #6d2bd0;
+  --color-nav-accent: var(--color-cta);
+  --color-cta-pill: #e6d6fb; --color-cta-pill-text: #6d2bd0;
+  --color-folder: #7c84a8;
+  --color-link: #1e66f5; --color-tabline: #5c5f77;
+  --color-editor-bg: #ffffff; --color-editor-fg: #2a2c3f; --color-editor-line: #9ca0b0;
+}
+[data-theme="neutral-light"] {
+  --color-rail: #e9e9e9; --color-rail2: #f8f8f8; --color-rail-sel: #dedede;
+  --color-strip: #fafafa; --color-canvas: #f3f3f3; --color-inset: #fdfdfd;
+  --color-raised: #ffffff; --color-bubble: #e5e5e5;
+  --color-seg-sel: #d0d0d0; --color-hairline: #d6d6d6; --color-field: #bababa;
+  --color-l1: #161616; --color-l2: #3a3a3a; --color-l3: #6e6e6e; --color-l4: #9d9d9d;
+  --color-cta: #0169cc; --color-cta-text: #ffffff; --color-cta-bd: #014a8f;
+  --color-nav-accent: var(--color-cta);
+  --color-cta-pill: #d3e6f8; --color-cta-pill-text: #014a8f;
+  --color-folder: #8a8a8a;
+  --color-link: #0169cc; --color-tabline: #555555;
+  --color-editor-bg: #ffffff; --color-editor-fg: #1e1e1e; --color-editor-line: #a0a0a0;
+}
+[data-theme="dracula-light"] {
+  --color-rail: #ece9f2; --color-rail2: #f9f7fc; --color-rail-sel: #e0dae9;
+  --color-strip: #fcfbfe; --color-canvas: #f4f2f8; --color-inset: #fefdff;
+  --color-raised: #ffffff; --color-bubble: #e6e0ee;
+  --color-seg-sel: #d0c9de; --color-hairline: #d5cfe0; --color-field: #b7aec6;
+  --color-l1: #241f31; --color-l2: #403a4e; --color-l3: #716a80; --color-l4: #9d97ab;
+  --color-cta: #d6336c; --color-cta-text: #ffffff; --color-cta-bd: #b02855;
+  --color-nav-accent: var(--color-cta);
+  --color-cta-pill: #f6d8e4; --color-cta-pill-text: #a02850;
+  --color-folder: #7f7a9c;
+  --color-link: #2470d8; --color-tabline: #5f5870;
+  --color-editor-bg: #ffffff; --color-editor-fg: #2c2739; --color-editor-line: #a29cb3;
+}
+[data-theme="shadcn-light"] {
+  /* shadcn 官方浅色骨架（background/foreground/muted/border 映射到浮起梯度） */
+  --color-rail: #f0f2f5; --color-rail2: #fafbfd; --color-rail-sel: #e2e6ec;
+  --color-strip: #fcfcfd; --color-canvas: #f7f8fa; --color-inset: #fefefe;
+  --color-raised: #ffffff; --color-bubble: #e6e9ee;
+  --color-seg-sel: #d3d8e0; --color-hairline: #d8dce2; --color-field: #b7bdc7;
+  --color-l1: #101828; --color-l2: #344054; --color-l3: #667085; --color-l4: #98a2b3;
+  --color-cta: #dc2626; --color-cta-text: #ffffff; --color-cta-bd: #a83232;
+  --color-nav-accent: var(--color-cta);
+  --color-cta-pill: #fadcdc; --color-cta-pill-text: #a83232;
+  --color-folder: #75819a;
+  --color-link: #2470d8; --color-tabline: #475467;
+  --color-editor-bg: #ffffff; --color-editor-fg: #182230; --color-editor-line: #9aa4b2;
+}
+
+/* 浅色模式下白色半透明 hover/缩进线不可见：翻转为黑色半透明 */
+[data-theme$="-light"] .ccode-app-shell :where(.hover\:bg-white\/5):hover {
+  background-color: rgb(0 0 0 / 0.05);
+}
+[data-theme$="-light"] .ccode-app-shell :where(.bg-white\/10) {
+  background-color: rgb(0 0 0 / 0.08);
+}
+[data-theme$="-light"] .ccode-app-shell :where(.border-white\/5) {
+  border-color: rgb(0 0 0 / 0.07);
+}
+/* 浅色滚动条：白拇指不可见，换黑色半透明 */
+[data-theme$="-light"] ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.16);
+}
+[data-theme$="-light"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.28);
 }
 
 html,

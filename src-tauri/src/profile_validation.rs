@@ -363,6 +363,19 @@ fn api_kind(profile: &Profile) -> ApiKind {
     }
 }
 
+/// 协议族标签（profiles::copy_to_agent 的兼容性判定用）。与 api_kind 同口径，
+/// 唯一差异是 cursor：api_kind 因 `_` 兜底落入 OpenAi 仅用于跳过云端验证，
+/// 复制判定时 Cursor 是专有协议（见 api_check 注释），自成一族不与任何 agent 互通
+pub(crate) fn api_kind_label(agent: &str, protocol: Option<&str>) -> &'static str {
+    match agent {
+        "claude-code" | "codebuddy" => "anthropic",
+        "gemini" => "gemini",
+        "cursor" => "cursor",
+        "qwen" | "kimi" if protocol == Some("anthropic") => "anthropic",
+        _ => "openai",
+    }
+}
+
 fn default_base(profile: &Profile, kind: ApiKind) -> &'static str {
     match kind {
         // codebuddy 缺省端点：官方国际站（product.json 的 endpoint 字段）

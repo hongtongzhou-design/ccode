@@ -68,7 +68,7 @@ npm run tauri build    # 打包
 docs/                        # 架构方案 + 八 CLI 适配参考（规格）
 src/                         # 前端 React + TS + Tailwind v4（vite 插件接入）
   pages/                     # 七页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ 统计◫ 设置⛭
-  components/                # WorkspaceReviewView、PipelineEditor、ProjectGroup/ProjectRail、FileTree、
+  components/                # WorkspaceReviewView、PipelineEditor、ProjectGroup/ProjectRail、ArtifactChecklist、FileTree、
                              # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker 等
   pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES
   pipeline-start.ts          # 一键开步共享链路（三处 TASK.md 同一出处）
@@ -148,7 +148,9 @@ src-tauri/src/
   - **终端右栏统一称“对话”，有界实时视图**：仅最近 50 条；标题/agent/会话 ID/状态与「完整回放」入口收进右栏页签行右侧
     （页签行与对话头部合并为一行）；在底部附近才自动跟随，向上阅读后禁强制滚动，改显示“有新消息”。
   - **终端左栏两段化（v3.42）**：常驻 = 项目区（ProjectRail）+ 文件树；「打开的标签」折叠区已删除（runInputs 镜像保留）；
-    「最近项目」收进文件树搜索行 ⌄ 浮层（真进入/↗ 新标签语义不变）；区间靠留白分层。
+    「最近项目」收进文件树搜索行 ⌄ 浮层（真进入/↗ 新标签语义不变）；区间靠留白分层。**项目区固定列出所有建有活跃
+    工作区的项目**（每仓一小节：组头 + 主文件夹节点 + 活跃工作区行），cwd 命中的当前项目置顶标注「当前」、无活跃
+    工作区也保留；行内交互（真进入/悬浮/size-2 状态点）不变。
   - **右栏可调分栏，不新增普通内容全屏路由**：左缘拖拽调宽并记忆；宽屏动作暂隐工作树但保留终端，再执行恢复，双击
     对话/预览/改动页签同义；宽度变化必须触发 xterm 重新 fit；任务评审仍用全宽覆盖层。
   - **运行中会话关联排他 + 复合键**：固定 session id 的 CLI 精确锁定；其余 CLI 启动前按 agent+归并后项目登记 claim，同批
@@ -156,8 +158,10 @@ src-tauri/src/
 - **首页「待你处理」收件箱（v3.39；v3.42 起横跨项目导航与详情两栏之上）**：聚合工作区冲突/可合并 + 终端注意力（待确认/
   已完成），排序 冲突 > 待确认 > 可合并 > 已完成，为空整块不渲染；终端运行状态经 `terminalRunInputs` 镜像进 store 跨页
   只读（TerminalPage 唯一写入方，不新增轮询）；跳终端激活标签走一次性 `focusTabReq`（已关闭标签静默忽略）。
-- **产物核验清单（v3.42）**：步骤产物面板 = 已产出 ✓/未产出 — + mtime 相对时间 + 10 分钟内「刚更新」标记 + 手动 ⟳ 刷新
-  （不进轮询）；选段反馈浮动条带「↵ 直接发送」（pty_write 一次拼接 \r，同帧到达防半截输入）。
+- **产物核验清单（v3.42；v3.45 起从胶囊移到任务行；v3.46 起步进器圆后小方块同面板）**：共享组件 `src/components/ArtifactChecklist.tsx`（步骤按 workspaceName 反查
+  project.toml，定位根由调用方给：已合并读项目根/main，其余读工作树）；任务行「产物」按钮（hover 才现，与 ⌨ 终端同档）在行下方
+  就地手风琴展开，展开态按工作区 id 记忆在 WorkspacesPage、切项目清空；步进器圆后小方块在 strip 下方就地展开，展开态记步骤 index（单开）；面板 = 已产出 ✓/未产出 — + mtime 相对时间 + 10 分钟内
+  「刚更新」标记 + 手动 ⟳ 刷新（打开时拉取一次，不进轮询）；选段反馈浮动条带「↵ 直接发送」（pty_write 一次拼接 \r，同帧到达防半截输入）。
 - **沉淀为技能（v3.42）**：md/PDF 选段浮动条「✦ 沉淀为技能」→ `ai_distill_skill`（脱敏 + 8KB 截断 + JSON 容错解析）→
   `skillDraftReq` 一次性请求 → 技能页新建弹窗预填，保存走既有 create_skill（重名拒绝）。
 - **模型 combo-box（v3.42）**：启动栏模型 = 可输可选（profile 预设 + `ccode.modelHistory.<agent>` 历史去重，上限 10 条），
@@ -237,7 +241,7 @@ src-tauri/src/
 - **流水线开步是预设参数的组合调用**（架构 §11）：点「开始」= 建工作区 + 启 Agent + 注入简报 + 落 TASK.md，复用既有
   工作区创建与终端启动；不破坏手动启动栏「Agent → profile → 模型 → 目录 → 启动」主流程。**invoke 链路单一出处
   `src/pipeline-start.ts` 的 `startPipelineStep`**（ensure git → bootstrap 提交 → 建工作区 → 提货单/技能元数据 → TASK.md →
-  run 脚本 → 终端交接），工作区页胶囊与评审「开始下一步」共用，组件态由调用方回调注入。开步在 ensure_git_repo 后先走
+  run 脚本 → 终端交接），工作区页步进器大圆与评审「开始下一步」共用，组件态由调用方回调注入。开步在 ensure_git_repo 后先走
   `commit_project_bootstrap`（best-effort）：只把 `.ccode` 与 `.gitignore` 提交进主仓（literal pathspec，用户暂存文件
   绝不带走），防评审合并被主仓脏拦截；默认 .gitignore 含 `*.pdf`。**TASK.md 不进 git**：落盘时自动追加进
   `.git/info/exclude`（`exclude_task_md`，全 worktree 与主仓生效，best-effort 不阻断）——TASK.md 是开步脚手架而非任务产物。
@@ -263,10 +267,13 @@ src-tauri/src/
 
 ## 主题与设计系统
 
-- 全站**沉浸冷黑主题**，令牌集中在 `src/App.css` 的 `@theme` + `[data-theme]` 变体（**七套深色**：沉浸黑(默认)/陶土/Ayu琥珀/
-  Catppuccin/极简灰蓝/Dracula/灰蓝正红），运行时切 `document.documentElement.dataset.theme`，**改主题只动这一个文件**，
-  组件里禁散落 hex。默认主题 CTA 粉 `#faa8d4`（cta-text 近黑）；`--color-raised`（浮起面板/pill 底）、`--color-bubble`
-  （用户消息气泡）、`--color-nav-accent`（侧栏选中左条+选中图标，默认靛蓝、其余取各自 CTA 色）。
+- 全站主题令牌集中在 `src/App.css` 的 `@theme` + `[data-theme]` 变体（**七套深色 + 七套对应浅色**，v3.44 起：
+  沉浸黑(默认)/陶土/Ayu琥珀/Catppuccin/极简灰蓝/Dracula/灰蓝正红，各配一套同性格浅色；浅色方向翻转——rail 比 canvas
+  略暗、面板向白浮起、hairline/field 为深灰线、cta 加深保白底对比，状态语义色共享深色值；白色半透明 hover/缩进线/
+  滚动条拇指在浅色下由 App.css 统一翻转为黑色半透明），运行时切 `document.documentElement.dataset.theme`，
+  **改主题只动这一个文件**，组件里禁散落 hex。主题清单单一出处 `src/themes.ts`（settings.rs KNOWN_THEMES 与
+  TerminalPage XTERM_BG_FG 需同步）。默认主题 CTA 粉 `#faa8d4`（cta-text 近黑）；`--color-raised`（浮起面板/pill 底）、
+  `--color-bubble`（用户消息气泡）、`--color-nav-accent`（侧栏选中左条+选中图标，默认靛蓝、其余取各自 CTA 色）。
 - 四层「浮起」结构（rail/rail2/canvas/inset 逐级变亮）；文字冷白→灰四档；每主题独立 CTA 强调色（按钮/选中用 `cta`；可操作
   状态如「可合并」用**按钮本身的 cta 高亮**，不另挂 pill；纯状态 pill 用 inset 灰底 + 语义色小圆点）；**状态语义色独立于
   主题**（ok/err/warn 不随主题变）；**结果横幅一律 bg-strip/inset 底 + ✓/✗ 语义色文字**，不用整块 bg-ok/bg-err（bg-err
@@ -278,8 +285,8 @@ src-tauri/src/
   `PageFrame.tsx`**（primary/secondary/rowAction/ghostAction/field/searchField/hoverReveal + SegTabs），禁各页复制本地类，
   一律用通用语义令牌。编辑器面走 `--color-editor-bg/fg/line`，Monaco 经 MutationObserver 随主题换肤。
 - **符号语言统一**：导航与图标用单色几何符号（⚙⛁⌨◔✦◫⛭⇄），◈=AI 功能、⚑=pin/保留；**禁用彩色 emoji**。
-- 用户明确否决过的设计：多栏嵌套的对话页、浅色 + 蓝紫渐变侧边栏、按钮排排坐的 profile 行、暖棕色系整体主题、**浅色模式**、
-  emoji 图标。不要改回去。
+- 用户明确否决过的设计：多栏嵌套的对话页、浅色 + 蓝紫渐变侧边栏、按钮排排坐的 profile 行、暖棕色系整体主题、
+  emoji 图标。不要改回去。（浅色模式曾是否决项，v3.44 用户主动要求并已落地七套浅色，该否决作废。）
 - 配置页结构（用户详版规格）：可折叠 agent 分组 + 五列网格行 + 顶部筛选与搜索 + 无大面积虚线空状态；图标按钮点击区 ≥28px；
   **WKWebView 不支持 window.prompt**——一切输入用内联输入框。
 - 常规管理页统一共享页面框架/标题层级/主操作样式/主题化开关复选框/加载骨架；页面最大宽度必须显式选择，禁叠加冲突的
@@ -287,14 +294,14 @@ src-tauri/src/
   （可点击就不得小于 28px；层级靠填充色/边框/文字色区分，不靠按钮忽大忽小）。**留白节拍固定**：统一标题呼吸区/工具栏
   间距/主体内边距；空状态与低对象数量时允许保留连续画布，不为填满窗口堆料；工作区流水线与任务行可增加垂直间距，但不
   改变步骤顺序和操作语义。
-- **全站导航按工作流分层**：侧栏顺序固定为工作（工作区/终端/对话）→ 能力（配置/技能）→ 管理（统计/设置），首启默认进
+- **全站导航按工作流分层**：侧栏顺序固定为工作（工作区/终端/对话）→ 能力（配置/技能/统计）→ 底部只留设置，首启默认进
   工作区；保留全部路由和 visited 保挂载。常规页必须复用 `PageFrame/PageHeader/PageToolbar` 的“上下文标题栏 + 独立筛选
   工具栏 + 主体”结构，标题栏只保留唯一主动作；工作台页面可维持自身分栏，但分隔、密度和状态语言必须与共享框架一致。
-  借鉴外部工作台只学对象列表/上下文栏/三栏机制，不得把配置中心重新设为首页。**侧栏按页面自动收展（v3.38）**：终端/对话页
-  自动收成图标栏，离开后恢复 localStorage 手动偏好；手动折叠/展开置 `navManual`，本 session 停止自动跟随。
+  借鉴外部工作台只学对象列表/上下文栏/三栏机制，不得把配置中心重新设为首页。**侧栏收展完全手动**（品牌区点击，
+  localStorage 记忆；v3.38 的按页面自动收展被用户否决，v3.43 删除）。
 - **对话页三栏固定（P1a）**：应用导航 ｜ 会话列表栏（375px，rail2 底：标题+「当前 N · 总计 M」副题 + 深色次按钮 + 搜索框 +
   折叠分类筛选——v3.37 定稿单列纵向手风琴：点 agent 只展开/收起项目子列表（左侧缩进线表达层级），「全部项目」/单项目行
-  才落筛选并自动收起，计数保持）｜回放区（canvas 底，常驻，未选中为空态）；列表与回放并列常驻，禁止恢复“列表/回放二选一”
+  落筛选且面板保持展开（v3.43：边筛边浏览，选中不收起），计数保持）｜回放区（canvas 底，常驻，未选中为空态）；列表与回放并列常驻，禁止恢复“列表/回放二选一”
   整列切换。会话行双行（标题行带相对时间 + meta 行），选中行 bg-rail-sel 浅填充。`ConversationView`：用户消息右对齐气泡
   （bg-bubble，max-w 70%）、AI 直接排版、``` 围栏代码块 inset+hairline 带 ⧉ 复制、连续 tool_use/tool_result 折叠为「▸ N 次
   工具调用」行；底部为只读展示态圆角输入条（chip 显示 agent 名）。有界尾窗/向前分页保持滚动位置（scrollRef 必须挂在滚动
@@ -302,8 +309,10 @@ src-tauri/src/
 - **对象数量不得撑坏主布局**：工作区页用“项目导航 rail + 当前项目详情”，禁止恢复全部项目纵向长页；技能主列表禁止按 Agent
   数量永久加列，只展示稳定字段与应用计数，Agent 分发在右侧详情用自动换行网格管理；新增 Agent 只能增加详情项。终端模块 UI
   小字基准 13px，xterm 新用户默认 14px；状态点等微型符号可更小，但文件树、标签、启动栏、对话/改动正文不得退回 11–12px。
-- 终端展开态主流程固定为 Agent → profile → 模型 → 目录 → 启动，辅助动作视觉分组；启动后自动收缩、PTY shell 回落、专注模式
-  和所有终端标签保持挂载的语义不得因布局优化改变。
+- 终端展开态主流程固定为 Agent → profile → 模型 → 目录 → 启动，辅助动作视觉分组；启动后自动收缩、PTY shell 回落、
+  所有终端标签保持挂载的语义不得因布局优化改变。**专注双模式（v3.43）**：中带「⤢ 专注终端」（藏左右栏，标签条
+  留在中带顶部，portal 机制已删）与右栏「⇱ 专注内容」（右栏铺满、中带只压暗不模糊），Esc 退出；左栏不再有 « 收起态。
+  状态点全局统一 `size-2 rounded-full`；端口区分「本应用/系统其他」两段，终止外部进程必须二次确认。
 - **统计内部活动只认后端 provenance**：Ccode 无头 AI 启动前登记精确 agent+项目路径，usage 事件与项目/模型 DTO 显式携带
   `source/internal`；禁止再按 `/tmp`、`ccode-ai-*` 名称、空模型或 `<synthetic>` 猜测。统计页默认归并 `internal=true`，并提供
   “显示内部活动”开关；开关只改变展示分组，不得改写原始用量索引。
@@ -321,12 +330,12 @@ src-tauri/src/
   等）统一 hover 才现——行挂 `group`，按钮 `opacity-0 group-hover:opacity-100 focus-visible:opacity-100`；状态聚合成 ●N 计数
   （明细进悬浮 title），无状态不渲染状态点；次级信息 10px 灰字、时间相对主显（`rel-time`，悬浮 `absTime`）；分组层级靠
   hairline + 左侧缩进线（`border-l border-white/5`），不再套卡片外框。工作区/终端/配置/技能/设置五页同一手法。
-- **工作区项目详情按对象职责分层**：流水线步骤条只表达进度，并仅保留「开始 / 恢复 / 解决冲突」这类推进步骤的动作；终端与
-  普通评审统一由下方工作区任务行执行，产物查看与目录定位进入步骤「⋯」。编辑流水线、模板替换等项目级操作统一进入项目头
-  「⋯」。未创建步骤只显示「开始」；已归档步骤显示「已归档 + 恢复」。已合并且没有新提交的任务行只显示左侧「已合并」状态，
+- **工作区项目详情按对象职责分层**：流水线步进器只表达状态与推进（大圆点击 = 开始/恢复/跳终端，见「流水线大圆步进器」条）；终端与
+  普通评审统一由下方工作区任务行执行，产物核验在任务行行内手风琴与步进器圆后小方块两处同一面板，目录定位进入步骤「⋯」。编辑流水线、模板替换等项目级操作统一进入项目头
+  「⋯」。已合并且没有新提交的任务行只显示左侧「已合并」状态，
   不再重复显示「评审」；新提交后评审入口恢复。
-- **流程进度与步骤固定对齐**：流水线使用等分列，每个步骤的进度线段必须与下方胶囊处于同一列；窄窗口整体横向滚动，禁止胶囊
-  自由换行后继续保留一条无法对应的全宽进度线。
+- **流程进度与步骤固定对齐**：流水线使用等分列（minmax(9rem,1fr)），每个步骤一个大圆一一对应；窄窗口整体横向滚动，禁止
+  自由换行；进度不再画独立进度线段，由大圆状态色直接表达。
 - **终端布局必须有明确高度与滚动边界**：App 容器、页面主区、终端三带均维持 `h-full/min-h-0`，外层裁切溢出；只有文件树、
   对话、diff 等内容区各自滚动。禁止把页面级滚动或无约束 flex 子项带回终端（防窗口缩放/长内容后底部黑屏空白）。
 - **终端工作台信息架构固定为三段**：左侧只负责项目/工作区/文件树上下文，中间只负责 Agent 终端执行，右侧成果工作台固定为
@@ -345,9 +354,19 @@ src-tauri/src/
   `workspaceName === "lit-notes"` 优先、回落流水线第二步；无活跃工作区时复用一键开步链路（ensure_git_repo → create_workspace
   → TASK.md best-effort → 追加 inbox → pendingTerminal + ORGANIZE_NOTES_PROMPT 预填）。
 - **步骤胶囊对照（RX2b）**：跨页「文件树切根」走 store 一次性 `enterCwdReq`（终端页消费后复用 enterCwd/externalCwd「真进入」
-  机制，文件树根随活动标签 cwd）；`previewReq` 可带可选 `root`（文本预览的后端根约束，缺省回落活动标签 cwd）。步骤产物面板
-  只在打开时用 `list_dir` 拉取一次（无根约束，目录列一层文件、父目录匹配区分文件/未产出），不进轮询；已完成步骤读项目根
-  （main），其余读工作树。胶囊悬浮信息（目录/agent/profile）读终端页同一键 `ccode.wsLast.<worktreePath>`。
+  机制，文件树根随活动标签 cwd）；`previewReq` 可带可选 `root`（文本预览的后端根约束，缺省回落活动标签 cwd）。产物核验已移到
+  任务行手风琴与步进器圆后小方块（见「产物核验清单」条）；大圆悬浮信息（目录/agent/profile）读终端页同一键 `ccode.wsLast.<worktreePath>`。
+- **流水线大圆步进器（v3.46，取代 v3.45 胶囊分层与进度段）**：名称带与步进器带两个同列网格；虚线为**真实 flex 块节律**
+  （`StepperCell`：5px 块 + 5px 间隙全是真实元素，块数按列宽 ResizeObserver 现算——任何列宽/步骤数下尺寸与间隔严格一致，
+  永不出现渐变相位残段/双块），与圆心同轴，跨列连续（两条带 grid 均 gap-[5px]）。
+  **大圆（h-6 w-6，24px）= 纯色实心圆（内部无字符）+ 唯一主推进点击**：done=bg-ok-text；进行中/checking=bg-cta（animate-pulse）；
+  待评审=bg-cta-pill；阻塞=bg-warn；pending=bg-l4 实心灰。点击语义按状态：
+  pending 无工作区=startStep、已归档=restoreWs、进行中/待评审/阻塞=onOpenTerminal(ws)、done=setPendingTerminal 开主仓 shell 终端。
+  状态/目录/agent/profile 全部收进圆的悬浮 title（白话双层）。**圆前/圆后小方块 = 节律中的普通虚线块（SquareButton：
+  bg-hairline 5px 与虚段同色等大、无字符、无衬底、无状态区分）+ 28px 透明热区（绝对定位子元素，不占布局）**：
+  视觉混在虚线里，仅 hover/focus 提亮 bg-cta 表明可点，功能名只在 title 悬浮出现；圆前=openEditor(i) 打开流水线编辑器并定位该步骤卡片（PipelineEditor `focusStep` prop 滚动 +
+  聚焦简报框）；圆后=strip 下方就地展开 ArtifactChecklist（单开手风琴记步骤 index；root 口径同任务行：done 读项目根、其余读工作树、
+  无工作区禁用）。步骤 ⋯ 收名称行右侧 hover 才现（hoverRevealClass）；解决冲突/评审/合并统一在下方任务行，步进器不再放第二行动作。
 
 ## 路线图（见 docs/architecture.md §11 演进线）
 
@@ -355,7 +374,7 @@ src-tauri/src/
   ——2026-08 起演进为「AI 科研工作台」。
 - **P1 四条并行线 ✅**：P1a 官方账号（profile 双类型、终端内 CLI 登录、只读检测 auth 文件 + 冲突配置黄色警告、拉起不注入
   API env 且 env_remove 残留密钥变量、统计页「订阅」不计费）；P1b 流水线骨架（`.ccode/project.toml` 档案卡 + 项目注册、
-  工作区页按项目分组 + 流水线胶囊概览（状态从工作区派生、等分进度段表达进度、校验提示收进 ⚠ 浮层）、一键开步（bootstrap
+  工作区页按项目分组 + 流水线步进器概览（v3.46 起大圆步进器：状态从工作区派生、大圆状态色表达进度、校验提示收进 ⚠ 浮层）、一键开步（bootstrap
   自动提交 + TASK.md exclude）、资源面板与自动发现、非 git 目录引导 init；首启引导完整版与工作区类型驱动默认值留 backlog）；
   P1c 供应商预设补齐（各 agent 补 DeepSeek/智谱等端点；加供应商 = `src/presets.ts` 加一行）；P1d 适配器注册表
   （`agent_specs.rs` 中央声明式注册表，一个 CLI 一张规格；解析器与 usage 提取器保持每 CLI 一个文件，注册表只做分发入口）

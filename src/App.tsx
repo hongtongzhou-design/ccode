@@ -43,14 +43,13 @@ const NAV_GROUPS = [
     items: [
       { id: "profiles", label: "配置", icon: "⇄" },
       { id: "skills", label: "技能", icon: "✦" },
+      { id: "stats", label: "统计", icon: "◫" },
     ],
   },
 ] as const;
 
-const NAV_BOTTOM = [
-  { id: "stats", label: "统计", icon: "◫" },
-  { id: "settings", label: "设置", icon: "⛭" },
-] as const;
+// 底部管理区只保留设置（统计归入「能力」组）
+const NAV_BOTTOM = [{ id: "settings", label: "设置", icon: "⛭" }] as const;
 
 /** ⌘1–⌘7 页切顺序（与侧栏工作→能力→管理一致） */
 const PAGE_HOTKEYS = [
@@ -87,17 +86,7 @@ function App() {
     setVisited((v) => (v.has(page) ? v : new Set(v).add(page)));
   }, [page]);
 
-  // 侧栏按页面自动收展：终端/对话是多列工作页，收成图标栏让出横向空间；
-  // 离开后恢复 localStorage 里的手动偏好；用户手动折叠/展开后本 session 停止自动跟随
-  const navManual = useAppStore((s) => s.navManual);
-  const setNavCollapsedAuto = useAppStore((s) => s.setNavCollapsedAuto);
-  useEffect(() => {
-    if (navManual) return;
-    const crowded = page === "terminal" || page === "sessions";
-    setNavCollapsedAuto(
-      crowded ? true : localStorage.getItem("ccode.navCollapsed") === "1",
-    );
-  }, [page, navManual, setNavCollapsedAuto]);
+  // 侧栏收展完全由用户手动控制（品牌区点击）；曾有的按页面自动收展被用户否决（v3.43）
 
   // 全局快捷键（设置页可自定义，存 settings.json）：命令面板（默认 ⌘K）、
   // 隐藏/显示侧栏（默认 ⌘\）、⌘1–⌘7 页切（开关）。空串 = 禁用；⌘F 已被终端搜索占用故不用。
@@ -273,9 +262,9 @@ function App() {
             }`}
           >
             {collapsed ? (
-              <span className="font-semibold">C</span>
+              <span className="text-lg font-semibold">C</span>
             ) : (
-              <span className="block min-w-0 text-base font-semibold tracking-wide">
+              <span className="block min-w-0 text-lg font-semibold tracking-wide">
                 Ccode
               </span>
             )}
@@ -285,7 +274,7 @@ function App() {
             {NAV_GROUPS.map((group, groupIndex) => (
               <div key={group.label} className={groupIndex > 0 ? "mt-3" : ""}>
                 {!collapsed && (
-                  <div className="mb-1 px-2 text-[10px] font-medium uppercase tracking-[0.18em] text-l4">
+                  <div className="mb-1 mt-1 px-2 text-[11px] font-medium tracking-[0.08em] text-l3">
                     {group.label}
                   </div>
                 )}
@@ -314,7 +303,7 @@ function App() {
                       <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
                     )}
                     <span
-                      className={`relative ${collapsed ? "text-base" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
+                      className={`relative ${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
                     >
                       {n.icon}
                       {n.id === "terminal" && runningCount > 0 && (
@@ -328,12 +317,6 @@ function App() {
                 ))}
               </div>
             ))}
-
-            {/* 专注模式插槽：终端页专注时把纵向标签列表 + ⋯ 操作按钮 portal 到这里 */}
-            <div
-              id="app-rail-focus-slot"
-              className="mt-2 flex min-h-0 flex-col overflow-y-auto"
-            />
           </nav>
 
           {/* 底部管理区与导航之间只留一根隐约细线（5% 白 + 0.5px），不完全消失 */}
@@ -357,7 +340,7 @@ function App() {
                   <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
                 )}
                 <span
-                  className={`${collapsed ? "text-base" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
+                  className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
                 >
                   {n.icon}
                 </span>

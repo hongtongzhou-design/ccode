@@ -15,8 +15,10 @@ pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
 pub const DEFAULT_HOTKEY_PALETTE: &str = "mod+k";
 pub const DEFAULT_HOTKEY_HIDE_CHROME: &str = "mod+\\";
 pub const DEFAULT_HOTKEY_PAGE_SWITCH: bool = true;
-const KNOWN_THEMES: [&str; 7] = [
+const KNOWN_THEMES: [&str; 14] = [
     "midnight", "terracotta", "ayu", "mocha", "neutral", "dracula", "shadcn",
+    "midnight-light", "terracotta-light", "ayu-light", "mocha-light",
+    "neutral-light", "dracula-light", "shadcn-light",
 ];
 /// 会话页「⇗ 外部恢复」可选的终端应用；auto = 按平台优先级探测
 const KNOWN_EXTERNAL_TERMINALS: [&str; 9] = [

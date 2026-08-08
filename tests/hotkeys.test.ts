@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  captureDecision,
   comboFromEvent,
   comboLabel,
   eventMatchesCombo,
@@ -45,4 +46,30 @@ test("comboLabel 渲染与禁用态", () => {
   // 非 mac 环境（测试运行在 node）mod 显示 Ctrl+
   const label = comboLabel("mod+k");
   assert.ok(label === "⌘K" || label === "Ctrl+K");
+});
+
+test("captureDecision：Esc 取消 / 纯修饰键忽略", () => {
+  assert.deepEqual(captureDecision(ev({ key: "Escape" }), ""), {
+    action: "cancel",
+  });
+  assert.deepEqual(captureDecision(ev({ metaKey: true, key: "Meta" }), ""), {
+    action: "ignore",
+  });
+  assert.deepEqual(captureDecision(ev({}), ""), { action: "ignore" });
+});
+
+test("captureDecision：冲突拒绝 / 正常保存", () => {
+  assert.deepEqual(captureDecision(ev({ metaKey: true }), "mod+k"), {
+    action: "conflict",
+    combo: "mod+k",
+  });
+  assert.deepEqual(captureDecision(ev({ metaKey: true }), "mod+\\"), {
+    action: "save",
+    combo: "mod+k",
+  });
+  // 冲突方为禁用（空串）时不判冲突
+  assert.deepEqual(captureDecision(ev({ metaKey: true }), ""), {
+    action: "save",
+    combo: "mod+k",
+  });
 });
