@@ -80,6 +80,29 @@ function pathWithin(path: string, base: string): boolean {
   return p === b || p.startsWith(`${b}/`);
 }
 
+/**
+ * WebGL 探针：Windows/WebView2 上 GPU 被拉黑时会退回 SwiftShader 等软件渲染，
+ * 此时 WebGL 版 xterm 每帧重绘都又慢又闪（能正常创建上下文，try/catch 拦不住），
+ * 识别到软件渲染就直接跳过 WebglAddon，退回默认 canvas 渲染；探测失败同样宁可不用。
+ */
+function isSoftwareWebGL(): boolean {
+  try {
+    const canvas = document.createElement("canvas");
+    const gl = (canvas.getContext("webgl2") ??
+      canvas.getContext("webgl")) as WebGLRenderingContext | null;
+    if (!gl) return true;
+    const ext = gl.getExtension("WEBGL_debug_renderer_info");
+    const renderer = String(
+      ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "",
+    );
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    // 查不到渲染器名称时不误伤，保持 WebGL
+    return /swiftshader|software|basic render/i.test(renderer);
+  } catch {
+    return true;
+  }
+}
+
 /** 标签页状态：由 TerminalView 上报，标签条 / 首页收件箱镜像（terminalRunInputs）/ 工作树根目录都用它 */
 interface TabStatus {
   title: string;
@@ -636,13 +659,15 @@ const TerminalView = memo(function TerminalView({
       return true;
     });
 
-    // WebGL 加速失败或上下文丢失时退回 xterm 默认渲染器。
+    // WebGL 加速失败、软件渲染（SwiftShader 等，闪烁）或上下文丢失时退回 xterm 默认渲染器。
     try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        webgl.dispose();
-      });
-      term.loadAddon(webgl);
+      if (!isSoftwareWebGL()) {
+        const webgl = new WebglAddon();
+        webgl.onContextLoss(() => {
+          webgl.dispose();
+        });
+        term.loadAddon(webgl);
+      }
     } catch {
       // GPU/驱动不支持时保持默认渲染器
     }
