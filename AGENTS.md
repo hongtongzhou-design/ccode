@@ -186,7 +186,9 @@ src-tauri/src/
     focusedId），分屏时两个 pane 的 PTY 都推流；分屏状态不进持久化白名单，仅分隔比例本地记忆。
   - **关标签/关窗进程守卫**：仅 `running && ptyId` 的 agent 标签弹确认（shell/已退出一律不弹），存活判定以后端
     `pty_has_running_process` 为准，命令不存在/报错时静默跳过不阻塞关闭；关窗前对全部在跑标签统一确认一次，确认后放行
-    （allowWindowCloseRef 防 onCloseRequested 重入）。
+    （allowWindowCloseRef 防 onCloseRequested 重入）。Tauri 的 `onCloseRequested` 前端封装最终调用 `window.destroy()`，且确认后
+    会调用 `window.close()`；`src-tauri/capabilities/default.json` 必须同时保留 `core:window:allow-destroy` 与
+    `core:window:allow-close`，否则进入终端页挂载监听后窗口无法关闭。
 - **普通仓库与工作区提交语义分开**：普通仓库默认不选文件，`git_commit(paths)` 与 AI 提交信息只处理用户勾选且仍在当前
   status 的安全相对路径（literal pathspec）；工作区任务始终提交全部任务改动，禁止把选择提交扩散到 worktree 流程。
 - **Git 改动列表的单文件 diff 必须安全且可展开**：普通仓库只读当前 status 中经安全校验的相对路径，工作区只读当前累计

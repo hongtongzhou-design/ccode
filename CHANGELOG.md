@@ -2,13 +2,7 @@
 
 本项目按[语义化版本](https://semver.org/lang/zh-CN/)管理。架构级决策记录见 [docs/architecture.md](docs/architecture.md) §10。
 
-## Unreleased（未发布）
-
-### 修复
-
-- macOS 上确认弹窗一律不弹：`window.confirm` 在 wry 的 WKWebView 里没有 JS 对话框委托，恒返回 `false`——全应用约 30 处确认（删除配置/归档/丢弃改动等）静默走「取消」分支表现为「按钮点了没反应」，最严重的是终端关窗守卫：有 agent 在跑时每次关窗都被当成取消，应用无法退出。改为全局内联确认框 `ConfirmDialog.tsx`（promise 版 `confirmDialog`，宿主挂 App 根部，支持 danger 警示钮与 Esc/Enter/点遮罩），全部调用点已替换；5 处 `window.alert` 提示（同样静默无效）一并替换为同组件的 `alertDialog`
-
-## v0.1.0（首个发布版本）
+## v0.1.0（2026-08-08，首个发布版本）
 
 **科研流水线**
 
@@ -83,6 +77,7 @@
 
 **修复**
 
+- macOS 原生 JS 确认/提示框不可用：wry 的 WKWebView 未实现对应委托，`window.confirm` 恒返回 `false`、`window.alert` 静默无效，导致删除、归档、丢弃改动等操作看似无响应。全应用改用 `ConfirmDialog.tsx` 的应用内确认/提示框；同时补齐 Tauri `core:window:allow-close` 与 `core:window:allow-destroy` 权限，修复进入终端页后 Agent 标签可关闭但整个应用无法退出的问题
 - Monaco 预览关闭 unicode 高亮：中文全角标点（）：；，与 −× 等符号不再被黄色方框套住（WKWebView locale 不命中导致防 Trojan Source 特性误伤中文笔记）
 - 空仓库（git init 后无任何提交）创建工作区自动补空初始提交，不再因无基准分支导致 worktree add 失败；未配置 git 身份时使用临时身份、已配置则沿用
 - 统计长会话不再整份跳过：普通 JSONL 与 Codex 压缩会话改逐行流式解析，超过 10MB 的活跃会话也计入；今日/近 7 天/近 30 天按本机时区计算（usage schema 升 v3 自动重建）
