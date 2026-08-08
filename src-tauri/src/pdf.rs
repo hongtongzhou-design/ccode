@@ -214,13 +214,14 @@ mod tests {
         let outside = tmpdir("moutside");
         let f = outside.join("render.pdf");
         fs::write(&f, b"%PDF-1.7 fake body").unwrap();
-        // 清单存的是 canonical 绝对路径（register_artifact 语义）
+        // 清单存的是 canonical 绝对路径（register_artifact 语义）；
+        // 手写 YAML 需与 yaml_escape 同口径转义反斜杠（Windows 路径含 \，否则解析后前缀损坏）
         let canon_f = f.canonicalize().unwrap();
         fs::write(
             root.join("artifacts.yaml"),
             format!(
                 "artifacts:\n  - name: \"render\"\n    path: \"{}\"\n    hash: \"abc\"\n    size: 18\n    produced_by: \"paper-draft\"\n    created_at: \"2026-08-01\"\n",
-                canon_f.display()
+                canon_f.display().to_string().replace('\\', "\\\\")
             ),
         )
         .unwrap();

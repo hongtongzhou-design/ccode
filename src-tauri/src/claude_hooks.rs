@@ -116,7 +116,8 @@ fn strip_marker_entries(arr: &mut Vec<Value>) {
             hooks.retain(|h| {
                 h.get("command")
                     .and_then(|c| c.as_str())
-                    .is_none_or(|c| !c.contains(MARKER))
+                    // Windows 命令内路径是反斜杠分隔，归一化后再匹配 MARKER，否则关开关删不掉条目
+                    .is_none_or(|c| !c.replace('\\', "/").contains(MARKER))
             });
             !hooks.is_empty()
         } else {

@@ -571,12 +571,17 @@ fn windows_resume_command_line(
     if args.is_empty() {
         return Err(format!("{agent_id} 不支持按 ID 恢复"));
     }
-    // 一律双引号包裹（含空格路径与裸名统一处理）；内嵌 " doubling 是 cmd 的转义方式
+    // 路径/值一律双引号包裹（含空格路径与裸名统一处理）；内嵌 " doubling 是 cmd 的转义方式。
+    // flag 参数（-r/--session 等，来自 resume_args 固定表）保持裸名，与 unix 版风格一致
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     let mut cmd = format!("cd /d {} && {}", q(cwd), q(binary));
     for a in &args {
         cmd.push(' ');
-        cmd.push_str(&q(a));
+        if a.starts_with('-') {
+            cmd.push_str(a);
+        } else {
+            cmd.push_str(&q(a));
+        }
     }
     Ok(cmd)
 }
@@ -1548,7 +1553,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
         let cred = dir.join(".kimi-code/credentials");
         std::fs::create_dir_all(cred.join("mcp")).unwrap();
-        std::fs::write(cred.join("managed:kimi-code.json"), "{}").unwrap();
+        // 文件名取 Windows 也合法的形式（kimi 实际命名含冒号，仅 unix 能建）
+        std::fs::write(cred.join("managed-kimi-code.json"), "{}").unwrap();
         std::fs::write(cred.join("notes.txt"), "{}").unwrap();
         std::fs::write(cred.join("mcp/server.json"), "{}").unwrap();
         let oa = crate::agent_specs::OfficialAccountSpec {
@@ -1561,8 +1567,8 @@ mod tests {
         let found = auth_probe_candidates(&dir, &oa);
         // 只命中直接子级 .json：mcp/ 子目录与 .txt 都排除
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].0, ".kimi-code/credentials/managed:kimi-code.json");
-        assert!(found[0].1.ends_with("managed:kimi-code.json"));
+        assert_eq!(found[0].0, ".kimi-code/credentials/managed-kimi-code.json");
+        assert!(found[0].1.ends_with("managed-kimi-code.json"));
         // 目录缺失 → 无候选（按未检出处理，不报错）
         std::fs::remove_dir_all(&cred).ok();
         assert!(auth_probe_candidates(&dir, &oa).is_empty());

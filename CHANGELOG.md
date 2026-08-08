@@ -92,6 +92,7 @@
 - profiles.json / keys.json 读-改-写加序列化锁（并发保存防丢失更新）；pricing.json 写入加数值校验（非负价格、正汇率、逐项报错）
 - 会话页「改动」页签对进行中会话加警告条（agent 可能正在写文件，提交前确认）
 - Windows 终端页持续闪烁：WebGL 加载前加探针，检测到 SwiftShader 等软件渲染（GPU 被 WebView2 拉黑时）直接回退默认 canvas 渲染——此前仅 try/catch 创建失败，软件渲染「创建成功但一直闪」拦不住
+- Windows 修复：关闭 Claude Code 精确注意力开关后 hooks 条目残留（命令内路径反斜杠未归一化导致匹配不上）；Windows 恢复命令行 flag 不再多余加引号；CI Windows 测试口径修正（CRLF 断言归一化、测试文件名避开 Windows 禁用的冒号、手写 YAML 反斜杠转义）
 
 **体验**
 

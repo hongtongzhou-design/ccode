@@ -3516,8 +3516,11 @@ mod tests {
         commit_all_in_worktree(&wt2, "工作区 2 改动");
 
         merge_impl(&fx.conn, &w1.id, false).unwrap();
+        // Windows 上 checkout 落盘为 CRLF，断言归一化
         assert_eq!(
-            fs::read_to_string(fx.repo.join("feature.txt")).unwrap(),
+            fs::read_to_string(fx.repo.join("feature.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "workspace-one\n"
         );
         assert_eq!(health_impl(&fx.conn, &w2.id).unwrap().conflict, Some(true));
@@ -3855,8 +3858,11 @@ mod tests {
         )
         .unwrap()
         .is_empty());
+        // Windows 上 checkout 落盘为 CRLF，断言归一化
         assert_eq!(
-            fs::read_to_string(fx.repo.join("README.md")).unwrap(),
+            fs::read_to_string(fx.repo.join("README.md"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "main\n"
         );
     }
@@ -3931,8 +3937,11 @@ mod tests {
         // 最终 merge --no-ff 进主仓库也绕过 gpgsign
         let out = merge_impl(&fx.conn, &w.id, false).unwrap();
         assert!(out.merged, "{}", out.message);
+        // Windows 上 checkout 落盘为 CRLF，断言归一化
         assert_eq!(
-            fs::read_to_string(fx.repo.join("feature.txt")).unwrap(),
+            fs::read_to_string(fx.repo.join("feature.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "branch\n"
         );
     }
