@@ -281,7 +281,7 @@ WebGL 渲染（创建失败或探测到软件渲染时自动回退，防 Windows
 A：不是真损坏——未签名应用从网络下载会带 quarantine 隔离标记，Gatekeeper 因此拦截。终端执行 `xattr -cr /Applications/Ccode.app` 即可。每次重新下载安装都要执行一次，做了签名公证后此问题消失。
 
 **Q：agent 不真正执行操作（不建文件等）？**
-A：中转模型不支持工具调用（实测 zetatechs 部分模型只会文字糊弄）。换真 Claude 系模型或支持工具调用的中转。
+A：中转模型不支持工具调用（部分中转商的模型只会输出文字、不真正执行工具调用）。换真 Claude 系模型或明确支持工具调用的中转。
 
 **Q：配置保存了但调用报空响应/404？**
 A：Base URL 的 `/v1` 约定：OpenAI 协议（kimi/codex/qwen/opencode）**必须带** `/v1`；Anthropic 协议（claude/codebuddy）**不要带**。建完先点「测试连接」。
