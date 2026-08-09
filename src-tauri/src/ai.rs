@@ -5,7 +5,7 @@ use crate::agents;
 use crate::profiles::{self, Profile, ProfileStore};
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 const AI_TIMEOUT: Duration = Duration::from_secs(120);
@@ -84,7 +84,7 @@ fn tail_chars(text: &str, max: usize) -> String {
     }
 }
 
-fn run_capture(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
+fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -> Result<String, String> {
     // stdin 置空：GUI 环境无控制终端，子进程若读 stdin 会永久挂起
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("启动 agent 失败: {e}"))?;
@@ -167,7 +167,7 @@ fn ai_prompt_impl(
     // 密钥只在调用瞬间读出注入子进程，与终端启动同一约束
     let key = profiles::get_key(&profile.id)?;
     let plan = agents::launch_plan(&profile, key, profile.models.first().map(|s| s.as_str()));
-    let mut cmd = Command::new(&binary_path);
+    let mut cmd = crate::process::background_command(&binary_path);
     for a in &plan.args {
         cmd.arg(a);
     }
@@ -336,7 +336,7 @@ fn git_text(cwd: &str, args: &[&str]) -> Result<String, String> {
 fn git_text_selected(cwd: &str, command: &[&str], paths: &[String]) -> Result<String, String> {
     // 统一走二进制解析（GUI 打包版短 PATH 兜底），解析不到再退回裸名
     let git = agents::resolve_binary("git").unwrap_or_else(|| PathBuf::from("git"));
-    let mut cmd = Command::new(git);
+    let mut cmd = crate::process::background_command(git);
     cmd.arg("-C")
         .arg(cwd)
         .arg("--literal-pathspecs")

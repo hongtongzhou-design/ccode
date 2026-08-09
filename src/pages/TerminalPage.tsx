@@ -36,6 +36,7 @@ import WorkspaceReviewView from "../components/WorkspaceReviewView";
 import { renderTaskMd } from "../pipeline-start";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
 import { XTERM_PALETTES } from "../terminal-palettes";
+import { isSoftwareWebGL } from "../diagnostics";
 import {
   attentionTransition,
   debounceAllows,
@@ -79,29 +80,6 @@ function pathWithin(path: string, base: string): boolean {
   const p = path.replace(/\\/g, "/").replace(/\/+$/, "");
   const b = base.replace(/\\/g, "/").replace(/\/+$/, "");
   return p === b || p.startsWith(`${b}/`);
-}
-
-/**
- * WebGL 探针：Windows/WebView2 上 GPU 被拉黑时会退回 SwiftShader 等软件渲染，
- * 此时 WebGL 版 xterm 每帧重绘都又慢又闪（能正常创建上下文，try/catch 拦不住），
- * 识别到软件渲染就直接跳过 WebglAddon，退回默认 canvas 渲染；探测失败同样宁可不用。
- */
-function isSoftwareWebGL(): boolean {
-  try {
-    const canvas = document.createElement("canvas");
-    const gl = (canvas.getContext("webgl2") ??
-      canvas.getContext("webgl")) as WebGLRenderingContext | null;
-    if (!gl) return true;
-    const ext = gl.getExtension("WEBGL_debug_renderer_info");
-    const renderer = String(
-      ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "",
-    );
-    gl.getExtension("WEBGL_lose_context")?.loseContext();
-    // 查不到渲染器名称时不误伤，保持 WebGL
-    return /swiftshader|software|basic render/i.test(renderer);
-  } catch {
-    return true;
-  }
 }
 
 /** 标签页状态：由 TerminalView 上报，标签条 / 首页收件箱镜像（terminalRunInputs）/ 工作树根目录都用它 */

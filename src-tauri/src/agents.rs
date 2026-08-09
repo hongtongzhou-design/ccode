@@ -67,7 +67,7 @@ fn version_args_with_timeout(
     args: &[&str],
     timeout: std::time::Duration,
 ) -> Option<String> {
-    let mut child = Command::new(path)
+    let mut child = crate::process::background_command(path)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

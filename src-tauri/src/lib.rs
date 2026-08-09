@@ -2,6 +2,7 @@ mod agent_specs;
 mod agents;
 mod ai;
 mod claude_hooks;
+mod diagnostics;
 mod fonts;
 mod fs_tree;
 mod git_info;
@@ -11,6 +12,7 @@ mod logbuf;
 mod models;
 mod pdf;
 mod portwatch;
+mod process;
 mod pricing;
 mod profiles;
 mod profile_validation;
@@ -26,6 +28,7 @@ mod ws_settings;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    diagnostics::start_process_monitor();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -82,6 +85,7 @@ pub fn run() {
             logbuf::clear_app_log,
             logbuf::export_app_log,
             logbuf::log_event,
+            diagnostics::export_diagnostics_bundle,
             fs_tree::list_dir,
             fs_tree::read_file_preview,
             fs_tree::save_file_preview,

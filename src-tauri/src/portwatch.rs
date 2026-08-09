@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 // 端口运行时监控：列出本机 LISTEN 端口（号/协议/pid/进程名/cwd），标注归属
@@ -37,7 +37,7 @@ struct Listener {
 // ===== 子进程执行（同 workspaces.rs run_cmd_full 模式：双流读空防管道死锁 + 超时 kill） =====
 
 /// 返回 (是否退出码 0, stdout, stderr)；超时 kill 后报错
-fn run_capture(mut cmd: Command, timeout: Duration) -> Result<(bool, String, String), String> {
+fn run_capture(mut cmd: crate::process::BackgroundCommand, timeout: Duration) -> Result<(bool, String, String), String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("无法启动进程: {e}"))?;
     let mut stdout = child.stdout.take();
@@ -213,7 +213,7 @@ fn lsof_path() -> Option<PathBuf> {
 #[cfg(unix)]
 fn collect_listeners() -> Result<Vec<Listener>, String> {
     let lsof = lsof_path().ok_or("找不到 lsof（端口列表依赖它）")?;
-    let mut cmd = Command::new(lsof);
+    let mut cmd = crate::process::background_command(lsof);
     // +c 0：进程名不截断；-nP：不做主机/端口名解析（快且输出稳定）
     cmd.args(["+c", "0", "-nP", "-iTCP", "-sTCP:LISTEN"]);
     let (ok, out, err) = run_capture(cmd, Duration::from_secs(15))?;
@@ -231,14 +231,14 @@ fn collect_listeners() -> Result<Vec<Listener>, String> {
 #[cfg(windows)]
 fn collect_listeners() -> Result<Vec<Listener>, String> {
     // netstat/tasklist 是 System32 系统组件（同 workspaces.rs 的 cmd），不经 resolve_binary
-    let mut cmd = Command::new("netstat");
+    let mut cmd = crate::process::background_command("netstat");
     cmd.args(["-ano", "-p", "tcp"]);
     let (ok, out, err) = run_capture(cmd, Duration::from_secs(15))?;
     if !ok {
         return Err(format!("netstat 执行失败: {}", err.trim()));
     }
     let mut listeners = parse_netstat_listeners(&out);
-    let mut cmd = Command::new("tasklist");
+    let mut cmd = crate::process::background_command("tasklist");
     cmd.args(["/fo", "csv", "/nh"]);
     // tasklist 失败时保留空进程名展示，不阻断端口列表
     if let Ok((true, out, _)) = run_capture(cmd, Duration::from_secs(15)) {
@@ -268,7 +268,7 @@ fn cwd_map(listeners: &[Listener]) -> HashMap<u32, PathBuf> {
         .map(|p| p.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    let mut cmd = Command::new(lsof);
+    let mut cmd = crate::process::background_command(lsof);
     cmd.args(["-a", "-p", &joined, "-d", "cwd", "-Fn"]);
     // 部分 pid 退出会导致 lsof 退出码非 0：忽略成败，解析已到手的部分
     let Ok((_, out, _)) = run_capture(cmd, Duration::from_secs(15)) else {
@@ -398,7 +398,7 @@ fn ensure_still_listening(listeners: &[Listener], pid: u32) -> Result<(), String
 #[cfg(unix)]
 fn terminate(pid: u32) -> Result<(), String> {
     // /bin/kill 是系统组件固定路径（同 workspaces.rs 的 cmd），不经 resolve_binary
-    let mut cmd = Command::new("/bin/kill");
+    let mut cmd = crate::process::background_command("/bin/kill");
     cmd.args(["-TERM", &pid.to_string()]);
     let (ok, _, err) = run_capture(cmd, Duration::from_secs(10))?;
     if ok {
@@ -411,7 +411,7 @@ fn terminate(pid: u32) -> Result<(), String> {
 /// 不带 /F：相当于优雅退出请求，与 unix TERM 对齐；进程不退由用户自行处理
 #[cfg(windows)]
 fn terminate(pid: u32) -> Result<(), String> {
-    let mut cmd = Command::new("taskkill");
+    let mut cmd = crate::process::background_command("taskkill");
     cmd.args(["/PID", &pid.to_string()]);
     let (ok, out, err) = run_capture(cmd, Duration::from_secs(10))?;
     if ok {

@@ -6,7 +6,7 @@ use crate::profiles::{self, Profile, ProfileStore};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(20);
@@ -203,7 +203,7 @@ fn tail_chars(text: &str, max: usize) -> String {
     }
 }
 
-fn run_capture(cmd: &mut Command, timeout: Duration) -> Result<String, String> {
+fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -> Result<String, String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("启动 CLI 失败: {e}"))?;
     let mut stdout = child.stdout.take();
@@ -276,7 +276,7 @@ fn cli_check(profile: &Profile, key: Option<&str>, injected: bool) -> Validation
             key.map(ToOwned::to_owned),
             profile.models.first().map(String::as_str),
         );
-        let mut cmd = Command::new(binary);
+        let mut cmd = crate::process::background_command(binary);
         if injected {
             for (name, value) in &plan.env {
                 cmd.env(name, value);

@@ -42,4 +42,4 @@ zip = "2"
 toml_edit = "0.22"
 notify = "6"
 base64 = "0.22"
-
+sysinfo = "0.33"

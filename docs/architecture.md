@@ -347,6 +347,28 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 
 **后续（v2）**：来源更新检测（content_hash 比对）、SKILL.md 在线编辑、自定义命令（commands/prompts）管理。
 
+### 6.14 诊断包与 Windows 后台进程边界
+
+设置页「诊断」提供一键导出 `ccode-diagnostics-<时间>.zip`，固定写入下载目录的 `ccode-exports/`。诊断包由 Rust 层统一组装，包含：
+
+- Windows 版本、WebView2 版本、显卡与驱动；前端补充 WebView user agent、语言、屏幕和 WebGL vendor/renderer；
+- 当前文化、用户语言、默认与活动输入法布局，以及 CTF/TextInputHost 活动；
+- 应用功能开关的脱敏快照（不输出 profile id、密钥或环境变量）；
+- `logbuf` 最近 500 条应用日志；
+- 自 Ccode 启动后的进程生命周期：程序、脱敏参数、PID/父 PID、开始/结束/最后观察时间、CPU/内存、类别、采集方式与时间是否估算。
+
+直接经 `process::background_command` 启动的后台命令在 spawn/wait 边界精确登记程序、参数、PID、父 PID 与退出码；250ms
+进程扫描补齐 WebView2、conhost、命令包装器的子孙进程和 CPU/内存，扫描拿不到创建时间时明确标记为估算。记录采用内存环形缓冲
+（上限 2000），只覆盖 Ccode 子孙进程；系统级例外仅观察
+`ctfmon.exe` / `TextInputHost.exe`，避免采集无关应用命令行。诊断包不读取任何子进程环境变量，命令参数和日志写入 ZIP 前必须经过
+Rust 层密钥脱敏；路径与普通参数仍保留，README 明示发送前可先解压检查。ZIP 只使用 UTF-8 JSON/TXT，目标是 Windows 现场采集后
+带回 macOS 离线分析，不依赖注册表导出、事件查看器格式、Ccode 或 Windows 专用查看器。
+
+Windows release 构建使用 `windows_subsystem = "windows"`，没有可继承的父控制台。后台 console 程序若直接
+`Command::new` 会创建可见 `conhost.exe`，终端右栏 Git 的 8 秒轮询因此表现为周期性闪黑窗。所有非交互后台命令统一走
+`process::background_command` 加 `CREATE_NO_WINDOW` 并登记生命周期；这些包装与进程扫描均由 `cfg(windows)` 隔离，macOS/Linux
+仍直接使用标准 `Command` 且不启动监控线程。用户明确打开的外部终端是唯一可见窗口例外。
+
 ## 7. 技术选型清单
 
 | 层 | 选型 | 理由 |
@@ -474,6 +496,7 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 | v3.48 | **长时工作色彩校准**（用户反馈沉浸黑实为墨蓝、不适合长时间编码/阅读）：默认主题去蓝化——基底从深蓝黑改暖中性炭黑（rail #0a0b0e/canvas #101218），文字从冷白灰蓝改暖纸白（l1 #e9e6e2/l2 #bdbab4），folder/tabline/editor 面同步去蓝；shadcn 深色同步减蓝；midnight-light canvas 调暖（#f4f4f1）；xterm midnight bg/fg 跟随。原则：不纯黑、低蓝光、文字不刺眼 |
 | v3.49 | **macOS 对话框与关窗链路收口**：wry 0.55 的 WKWebView 未实现原生 JS `confirm/alert/prompt` 委托，确认、提示与输入一律使用应用内组件，禁再引入原生 JS 对话框；全局 promise 版 `ConfirmDialog.tsx` 宿主挂 App 根部，覆盖普通页面与全屏评审层。终端 `onCloseRequested` 仍只对存活 Agent 统一确认，但 Tauri 前端封装会调用 `window.destroy()`，确认后还会调用 `window.close()`，因此主窗口 capability 必须同时保留 `core:window:allow-destroy` 与 `core:window:allow-close`，否则进入终端页挂载监听后无法退出 |
 | v3.50 | **Release 触发去重**：SSH:443 的 tag push 是否自动触发 Actions 以 GitHub 实际 run 为准，不再假定 deploy key 一定不触发；推 tag 后先检查对应 SHA/tag 的 push run，存在则复用，30 秒内不存在才手动 workflow_dispatch。两个入口不得并行打包同一 tag，避免 tauri-action 竞争创建或上传同一个 Release |
+| v3.51 | **Windows 闪窗修复 + 一键诊断包**：正式版无父控制台时，终端页 Git 状态轮询会让每个 `git.exe` 创建 `conhost.exe`，开发版因继承控制台而无法复现；所有非交互后台命令统一经 `process.rs` 加 `CREATE_NO_WINDOW`，外部终端保持可见。设置页诊断升级为 ZIP 支持包：系统/WebView2/GPU/WebGL、语言/输入法、功能开关、应用日志和有界进程生命周期；不采集环境变量，参数与日志 Rust 层脱敏，系统级只额外观察 CTF/TextInputHost。后台命令包装与 250ms 扫描由 `cfg(windows)` 隔离，macOS/Linux 继续使用标准 `Command` 且无监控线程。WebGL 探针拿不到明确 renderer 时保守回退 canvas，避免安装版软件渲染漏判。 |
 
 ## 11. 演进线（2026-08 定稿）
 

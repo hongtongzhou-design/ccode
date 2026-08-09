@@ -177,6 +177,10 @@ pub(crate) fn read_current() -> AppSettingsDto {
         .unwrap_or_default()
 }
 
+pub(crate) fn current_with_defaults() -> AppSettingsDto {
+    with_defaults(read_current())
+}
+
 pub(crate) fn brew_mirror_enabled() -> bool {
     read_current().brew_mirror.unwrap_or(DEFAULT_BREW_MIRROR)
 }

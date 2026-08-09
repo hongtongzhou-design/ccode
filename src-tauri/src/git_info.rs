@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Component, Path};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 const FILE_DIFF_CAP: usize = 200_000;
 
@@ -43,7 +43,7 @@ fn expand_tilde(path: &str) -> String {
 
 pub(crate) fn run_git(cwd: &str, args: &[&str]) -> Result<Output, String> {
     let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
-    Command::new(git)
+    crate::process::background_command(git)
         .arg("-C")
         .arg(cwd)
         .args(args)
@@ -334,7 +334,7 @@ pub(crate) fn validate_selected_paths(cwd: &str, paths: &[String]) -> Result<Vec
 
 fn run_git_owned(cwd: &str, args: &[String]) -> Result<Output, String> {
     let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
-    Command::new(git)
+    crate::process::background_command(git)
         .arg("-C")
         .arg(cwd)
         .args(args)
@@ -472,7 +472,7 @@ fn commit_selected_with_index(
     let index_file = tmp.to_string_lossy().into_owned();
     let result = (|| {
         let run = |args: &[&str]| -> Result<Output, String> {
-            Command::new(&git)
+            crate::process::background_command(&git)
                 .arg("-C")
                 .arg(cwd)
                 .env("GIT_INDEX_FILE", &index_file)
@@ -499,7 +499,7 @@ fn commit_selected_with_index(
             let mut args =
                 vec!["--literal-pathspecs".into(), "add".into(), "-A".into(), "--".into()];
             args.extend(fresh.iter().map(|p| (*p).clone()));
-            let add = Command::new(&git)
+            let add = crate::process::background_command(&git)
                 .arg("-C")
                 .arg(cwd)
                 .env("GIT_INDEX_FILE", &index_file)
@@ -512,7 +512,7 @@ fn commit_selected_with_index(
         }
         for p in partial {
             // 真实索引的暂存条目复制进临时索引；无条目 = 暂存的删除，从临时索引移除
-            let entries = Command::new(&git)
+            let entries = crate::process::background_command(&git)
                 .arg("-C")
                 .arg(cwd)
                 .args(["--literal-pathspecs", "ls-files", "-s", "-z", "--", p])
@@ -548,7 +548,7 @@ fn commit_selected_with_index(
                     return Err(output_tail(&rm));
                 }
             } else {
-                let mut child = Command::new(&git)
+                let mut child = crate::process::background_command(&git)
                     .arg("-C")
                     .arg(cwd)
                     .env("GIT_INDEX_FILE", &index_file)
@@ -584,7 +584,7 @@ fn commit_selected_with_index(
                 "--".into(),
             ];
             args.extend(paths.iter().cloned());
-            let sync = Command::new(&git)
+            let sync = crate::process::background_command(&git)
                 .arg("-C")
                 .arg(cwd)
                 .args(&args)
@@ -1006,7 +1006,7 @@ fn apply_hunk_sync(cwd: &str, path: &str, patch: &str, mode: &str) -> Result<Git
     // 补丁本身也要校验：git apply 只认补丁里的路径，必须确保它没指向白名单外的文件
     patch_targets_single_file(patch, path)?;
     let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
-    let mut child = Command::new(git)
+    let mut child = crate::process::background_command(git)
         .arg("-C")
         .arg(&cwd)
         .args(["apply", "--whitespace=nowarn", flag])
@@ -1486,7 +1486,7 @@ mod tests {
     fn git_available() -> bool {
         crate::agents::resolve_binary("git")
             .map(|git| {
-                Command::new(git)
+                crate::process::background_command(git)
                     .arg("--version")
                     .output()
                     .map(|o| o.status.success())
@@ -1502,7 +1502,7 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let out = Command::new(git_bin())
+        let out = crate::process::background_command(git_bin())
             .arg("-C")
             .arg(dir)
             .args(args)
