@@ -804,6 +804,8 @@ fn ensure_git_at(project: &Path) -> Result<EnsureGitDto, String> {
     }
     crate::workspaces::run_git(project, &["init"], Duration::from_secs(30))
         .map_err(|e| format!("git init 失败: {e}"))?;
+    // 改动面板的非仓库负缓存可能刚记过这个目录，init 成功后立即失效
+    crate::git_info::invalidate_repo_probe(&project.to_string_lossy());
     let gitignore = project.join(".gitignore");
     let mut gitignore_written = false;
     if !gitignore.exists() {

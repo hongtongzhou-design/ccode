@@ -1872,6 +1872,7 @@ mod tests {
         assert!(export_impl(&fx.store, &["nonexistent".into()], dest.to_str().unwrap()).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn stale_copy_detected_and_resynced() {
         let fx = Fx::new();

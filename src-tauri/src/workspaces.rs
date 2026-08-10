@@ -2,7 +2,9 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+#[cfg(test)]
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -209,7 +211,7 @@ pub(crate) fn worktree_rows() -> Vec<WorktreeRow> {
 
 pub(crate) fn run_git(repo: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
-    let mut cmd = Command::new(git);
+    let mut cmd = crate::process::background_command(git);
     cmd.arg("-C")
         .arg(repo)
         .args(args)
@@ -228,7 +230,7 @@ struct CmdOutput {
 }
 
 /// 子进程的 stdout/stderr 各放线程读空（管道容量有限，不读会死锁），主线程轮询退出，超时则 kill
-fn run_cmd_full(mut cmd: Command, timeout: Duration) -> Result<CmdOutput, String> {
+fn run_cmd_full(mut cmd: crate::process::BackgroundCommand, timeout: Duration) -> Result<CmdOutput, String> {
     let mut child = cmd.spawn().map_err(|e| format!("无法启动进程: {e}"))?;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -280,7 +282,7 @@ fn run_cmd_full(mut cmd: Command, timeout: Duration) -> Result<CmdOutput, String
 }
 
 /// 成功返回 trim 后 stdout，失败返回 trim 后 stderr
-fn run_cmd(cmd: Command, timeout: Duration) -> Result<String, String> {
+fn run_cmd(cmd: crate::process::BackgroundCommand, timeout: Duration) -> Result<String, String> {
     let out = run_cmd_full(cmd, timeout)?;
     if out.timed_out {
         return Err("操作超时".into());
@@ -935,18 +937,18 @@ fn workspace_env_impl(conn: &Connection, worktree_path: &str) -> Vec<(String, St
 // ===== 项目级脚本钩子（§6.10 阶段 B；脚本来自仓库自己的 .ccode 配置） =====
 
 #[cfg(windows)]
-fn shell_cmd(script: &str) -> Result<Command, String> {
+fn shell_cmd(script: &str) -> Result<crate::process::BackgroundCommand, String> {
     // cmd 是 Windows 系统组件，固定在 System32 且不受用户 PATH 影响，无需 resolve_binary
-    let mut c = Command::new("cmd");
+    let mut c = crate::process::background_command("cmd");
     c.args(["/C", script]);
     Ok(c)
 }
 
 #[cfg(not(windows))]
-fn shell_cmd(script: &str) -> Result<Command, String> {
+fn shell_cmd(script: &str) -> Result<crate::process::BackgroundCommand, String> {
     let bash = crate::agents::resolve_binary("bash")
         .ok_or("找不到 bash 可执行文件，无法运行项目脚本钩子")?;
-    let mut c = Command::new(bash);
+    let mut c = crate::process::background_command(bash);
     c.args(["-c", script]);
     Ok(c)
 }
@@ -1010,7 +1012,7 @@ fn conflict_probe(repo: &Path, base: &str, branch: &str) -> (Option<bool>, Vec<S
     let Some(git) = crate::agents::resolve_binary("git") else {
         return (None, vec![]);
     };
-    let mut cmd = Command::new(git);
+    let mut cmd = crate::process::background_command(git);
     cmd.arg("-C")
         .arg(repo)
         .args(["merge-tree", "--write-tree", "--name-only", base, branch])
@@ -1233,7 +1235,7 @@ fn pr_impl(
 ) -> Result<WorkspacePrResultDto, String> {
     // 复用机器上的 gh CLI 认证，不做应用内 GitHub 登录
     let gh = crate::agents::resolve_binary("gh").ok_or("需要安装 gh CLI")?;
-    let gh_ok = Command::new(&gh)
+    let gh_ok = crate::process::background_command(&gh)
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -1277,7 +1279,7 @@ fn pr_impl(
             }
         }
     };
-    let mut cmd = Command::new(&gh);
+    let mut cmd = crate::process::background_command(&gh);
     cmd.current_dir(&wt)
         .args([
             "pr",
@@ -2021,7 +2023,7 @@ fn cap_conflict_text(mut text: String) -> (String, bool) {
 /// 冲突审阅必须保留文件首尾空白，不能复用会 trim 输出的 run_git。
 fn run_git_raw(repo: &Path, args: &[&str]) -> Result<String, String> {
     let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
-    let mut cmd = Command::new(git);
+    let mut cmd = crate::process::background_command(git);
     cmd.arg("-C")
         .arg(repo)
         .args(args)
@@ -2330,7 +2332,9 @@ pub async fn list_repos() -> Vec<RepoDto> {
                 return hit;
             }
         }
-        let home = dirs::home_dir();
+        // 会话路径统一走了 canonicalize（Windows 上带 \\?\ 前缀），home 必须同口径
+        // 才能比中，否则 home 排除在 Windows 上静默失效（诊断包实测 home 仍被探测）
+        let home = dirs::home_dir().map(|h| std::fs::canonicalize(&h).unwrap_or(h));
         let ws_root = workspaces_root().unwrap_or_default();
         let mut activity = std::collections::HashMap::<PathBuf, Option<String>>::new();
         for session in crate::sessions::cached_scan().sessions {

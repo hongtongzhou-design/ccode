@@ -8,7 +8,6 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -700,7 +699,7 @@ fn semver_newer(a: &str, b: &str) -> bool {
 
 fn npm_latest(pkg: &str) -> Option<String> {
     let npm = agents::resolve_binary("npm")?;
-    let out = Command::new(npm)
+    let out = crate::process::background_command(npm)
         .args(["view", pkg, "version", "--fetch-retries=0", "--fetch-timeout=8000"])
         .output()
         .ok()?;
@@ -713,7 +712,7 @@ fn npm_latest(pkg: &str) -> Option<String> {
 
 fn brew_latest(pkg: &str, cask: bool) -> Option<String> {
     let brew = agents::resolve_binary("brew")?;
-    let mut c = Command::new(brew);
+    let mut c = crate::process::background_command(brew);
     c.args(["info", "--json=v2"]);
     if cask {
         c.arg("--cask");

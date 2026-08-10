@@ -14,6 +14,7 @@ import {
   Toggle,
 } from "../components/PageFrame";
 import { captureDecision, comboLabel } from "../hotkeys";
+import { collectFrontendDiagnostics } from "../diagnostics";
 
 /** 七套深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
 import { XTERM_PALETTES, PALETTE_PREVIEW_KEYS } from "../terminal-palettes";
@@ -284,6 +285,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [savingPricing, setSavingPricing] = useState(false);
   // 诊断日志（进程内环形缓冲，分区展开时拉最近 100 条）
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [diagnosticsExporting, setDiagnosticsExporting] = useState(false);
   // 可安装字体预设的安装状态（id → installed）：进页面查一次缓存，安装成功后刷新
   const [fontStatus, setFontStatus] = useState<Record<string, boolean>>({});
   // 字体安装进行态 / 实时输出 / 最近结果；target 记录本次安装的字体 id（切换选择后隐藏旧输出）
@@ -512,6 +514,24 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setTimeout(() => setNotice(null), 3000);
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function exportDiagnosticsBundle() {
+    if (diagnosticsExporting) return;
+    setDiagnosticsExporting(true);
+    setError(null);
+    try {
+      const path = await invoke<string>("export_diagnostics_bundle", {
+        frontend: collectFrontendDiagnostics(),
+      });
+      setNotice(`诊断包已导出：${path}`);
+      setTimeout(() => setNotice(null), 5000);
+      await loadLogs();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDiagnosticsExporting(false);
     }
   }
 
@@ -997,6 +1017,21 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         open={!collapsed.diag}
         onToggle={() => toggleSection("diag")}
       >
+        <div className="mt-3 flex items-center gap-3 rounded bg-strip p-3">
+          <div className="min-w-0">
+            <p className="text-sm text-l2">Windows 诊断包</p>
+            <p className="mt-0.5 text-xs leading-5 text-l4">
+              汇总系统、WebView2、显卡/WebGL、输入法、功能开关、应用日志与子进程生命周期；不采集环境变量，参数和日志会脱敏
+            </p>
+          </div>
+          <button
+            onClick={exportDiagnosticsBundle}
+            disabled={diagnosticsExporting}
+            className="ml-auto h-8 shrink-0 rounded border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+          >
+            {diagnosticsExporting ? "正在采集…" : "导出诊断包"}
+          </button>
+        </div>
         <div className="py-3">
           <div className="group mb-2 flex items-center gap-2">
             <span className="text-xs text-l4">
