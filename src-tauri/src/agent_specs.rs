@@ -52,6 +52,10 @@ pub struct OfficialAccountSpec {
     pub conflict_probes: &'static [ConflictProbe],
     /// 文件检测的已知漏报场景说明（如凭证存 OS 钥匙串）；文件未检出时随 status 返回给界面
     pub detection_note: Option<&'static str>,
+    /// API Key 模式字段：auth 文件中命中这些字段 = 用户配的是 API Key（官方或第三方端点），
+    /// 不算官方账号登录（codex auth.json 的 OPENAI_API_KEY：codex login --api-key 与
+    /// cc-switch 等第三方中转写出来的是同一形状，文件层面无法区分，不得显示「已连接官方账号」）
+    pub api_key_fields: &'static [&'static str],
 }
 
 /// 一条冲突探测：某个配置文件中存在指定变量即视为会覆盖官方账号登录
@@ -266,6 +270,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
                 note: "settings.json 的 env 块会覆盖官方账号登录，产生 API 计费",
             }],
             detection_note: Some("macOS 上凭证存于系统钥匙串，文件检测可能漏报，以 claude auth status 为准"),
+            api_key_fields: &[],
         }),
     },
     AgentSpec {
@@ -300,6 +305,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             // 无法只靠变量名判定是否覆盖 ChatGPT 登录态，保守留空不探测
             conflict_probes: &[],
             detection_note: Some("凭证也可能存于 OS 钥匙串（cli_auth_credentials_store），以 codex login status 为准"),
+            // auth.json 顶层 OPENAI_API_KEY = API Key 模式（官方 --api-key 或第三方中转同一形状），
+            // 不算官方账号连接
+            api_key_fields: &["OPENAI_API_KEY"],
         }),
     },
     AgentSpec {
@@ -342,6 +350,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
                 note: "该文件中的密钥会覆盖官方账号登录，产生 API 计费",
             }],
             detection_note: Some("新版开启加密存储（GEMINI_FORCE_ENCRYPTED_STORAGE）时凭证不落该文件，可能漏报"),
+            api_key_fields: &[],
         }),
     },
     AgentSpec {
@@ -402,6 +411,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
             }],
             // matrix §4：Qwen OAuth 免费额度已于 2026-04 停；OAuth 本身仍在（/auth 可选）
             detection_note: Some("Qwen OAuth 免费额度 2026-04 已停，登录后按量计费；以 TUI 内 /doctor 的 auth 状态为准"),
+            api_key_fields: &[],
         }),
     },
     AgentSpec {
@@ -488,6 +498,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
             // 冲突探测只支持 .env/.json 格式——无已核实的静默覆盖场景，留空
             conflict_probes: &[],
             detection_note: Some("凭证文件名随 provider 名变化（credentials/<name>.json）；设了 KIMI_CODE_HOME 时数据目录整体搬迁，文件检测可能漏报"),
+            api_key_fields: &[],
         }),
     },
     AgentSpec {
@@ -530,6 +541,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
                 note: "settings.json 的 env 块会覆盖官方账号登录，产生 API 计费",
             }],
             detection_note: Some("登录走浏览器 OAuth（国际站 codebuddy.ai / 中国站 copilot.tencent.com），以 TUI 内 /login 后的状态为准"),
+            api_key_fields: &[],
         }),
     },
     AgentSpec {
@@ -570,6 +582,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
             // ~/.cursor 与 IDE 共享且 CLI 配置形态未核实，保守不探测配置文件冲突
             conflict_probes: &[],
             detection_note: Some("凭证默认存 macOS 钥匙串（仅设 AGENT_CLI_CREDENTIAL_STORE=file 时才落 auth.json），文件检测可能漏报，以 cursor-agent 实际登录态为准"),
+            api_key_fields: &[],
         }),
     },
 ];

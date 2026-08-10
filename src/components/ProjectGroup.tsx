@@ -216,7 +216,7 @@ function StepperCell({
   const right = Math.floor(dashCount / 2);
   // done 列整条链变绿（已打通）；进行中/checking 的圆加 cta 外环锁定焦点
   const done = circleClass.includes("bg-done");
-  const active = circleClass.includes("bg-cta ");
+  const active = circleClass.split(" ").includes("bg-cta");
   return (
     <li
       ref={ref}
@@ -245,7 +245,7 @@ function StepperCell({
           disabled={circleDisabled}
           aria-label={circleLabel}
           className={`block h-[24px] w-[24px] shrink-0 cursor-pointer rounded-full transition-[filter,color,background-color] duration-300 hover:brightness-110 disabled:cursor-not-allowed ${circleClass} ${
-            pulsing ? "animate-pulse" : ""
+            active || pulsing ? "animate-pulse-brief" : ""
           } ${active ? "ring-2 ring-cta/50" : ""}`}
           onClick={() => {
             // 点击即关 tooltip：跳转终端/开覆盖层后不留残留悬浮
@@ -331,13 +331,14 @@ const STEP_STATUS_LABEL: Record<StepStatusKey, string> = {
   checking: "检查中",
 };
 
-/** 大圆步进器的圆填色：纯实心无字符，状态只靠颜色区分；进行中/检查中带呼吸脉冲表达「正在动」 */
+/** 大圆步进器的圆填色：纯实心无字符，状态只靠颜色区分；进行中/检查中的脉冲用
+ *  有界的 animate-pulse-brief（App.css，3 个周期后静止），不用无限 animate-pulse */
 function stepCircleClass(key: StepStatusKey): string {
   // done 用随主题走的低饱和完成绿（--color-done），与状态 ok 绿解耦（用户反馈亮绿突兀）
   if (key === "done") return "bg-done";
   if (key === "blocked") return "bg-warn";
   if (key === "review") return "bg-cta-pill";
-  if (key === "active" || key === "checking") return "bg-cta animate-pulse";
+  if (key === "active" || key === "checking") return "bg-cta";
   // 待开始：实心灰圆
   return "bg-l4";
 }

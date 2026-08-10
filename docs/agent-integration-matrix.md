@@ -34,7 +34,7 @@
 | 会话存储 | `~/.codex/sessions/YYYY/MM/DD/rollout-<时间>-<uuid>.jsonl`；旧文件会被后台 **zstd 压缩为 `.jsonl.zst`**（magic `28 b5 2f fd`），两者都要能读；另有 `history.jsonl`（仅用户 prompt）和 SQLite 镜像库（版本化文件名，勿依赖） |
 | 会话格式 | JSONL `RolloutLine {timestamp, type, payload}`；首行 `session_meta`（含 **cwd** = 项目归属依据）；`response_item`（消息）、`event_msg`（含 token_count）、`turn_context`（每轮 model/cwd）。不按项目分目录，**项目归属靠 session_meta.cwd**。**易漂移** |
 | 关键启动参数 | `-m`、`--profile`、`-c key=value`（最高优先级）、`codex exec`（非交互，`--json` 输出事件流）、`codex resume` |
-| 坑 | **只支持 Responses API**（`wire_api="chat"` 已移除并报错）——中转必须实现 `/v1/responses`；`codex exec` 默认要求 git 仓库（`--skip-git-repo-check`）；凭证可能存 OS keyring 而非 auth.json；TUI `/model` 选择器的模型目录来自 `model_catalog_json` 指定的 JSON 文件（**仅启动时读取**，Ccode 已为每个 profile 生成 catalog） |
+| 坑 | **只支持 Responses API**（`wire_api="chat"` 已移除并报错）——中转必须实现 `/v1/responses`；`codex exec` 默认要求 git 仓库（`--skip-git-repo-check`）；凭证可能存 OS keyring 而非 auth.json；auth.json 顶层只有 `OPENAI_API_KEY` = API Key 模式（官方 `--api-key` 与第三方中转同一形状，**不算官方账号登录**，检测见 v3.55）；TUI `/model` 选择器的模型目录来自 `model_catalog_json` 指定的 JSON 文件（**仅启动时读取**，Ccode 已为每个 profile 生成 catalog） |
 
 ## 3. Gemini CLI
 

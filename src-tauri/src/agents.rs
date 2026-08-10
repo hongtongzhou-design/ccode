@@ -888,38 +888,39 @@ pub struct OfficialAccountStatusDto {
     pub conflicts: Vec<String>,
 }
 
-/// auth 文件里标识「已登录」的凭证字段名（各家结构不同，命中任一即算）：
-/// codex tokens.access_token / OPENAI_API_KEY、claude claudeAiOauth.accessToken、
-/// gemini access_token / refresh_token
+/// auth 文件里标识「官方账号已登录」的凭证字段名（各家结构不同，命中任一即算）：
+/// codex tokens.access_token、claude claudeAiOauth.accessToken、gemini access_token / refresh_token。
+/// 注意 OPENAI_API_KEY 不在此列——那是 API Key 模式（第三方中转同一形状），
+/// 由 OfficialAccountSpec.api_key_fields 单独识别，不能算作官方账号连接
 const CREDENTIAL_FIELD_NAMES: &[&str] = &[
     "access_token",
     "accessToken",
     "refresh_token",
     "refreshToken",
     "id_token",
-    "OPENAI_API_KEY",
 ];
 
-/// 递归（限深）查找凭证字段：值是非空字符串才命中；防御式——结构随版本漂移时不误判
-fn json_has_credential(value: &serde_json::Value, depth: u8) -> bool {
-    if depth == 0 {
+/// 递归（限深）查找指定字段：值是非空字符串才命中；防御式——结构随版本漂移时不误判
+fn json_has_field(value: &serde_json::Value, fields: &[&str], depth: u8) -> bool {
+    if depth == 0 || fields.is_empty() {
         return false;
     }
     match value {
         serde_json::Value::Object(map) => map.iter().any(|(k, v)| {
-            (CREDENTIAL_FIELD_NAMES.contains(&k.as_str())
-                && v.as_str().is_some_and(|s| !s.is_empty()))
-                || json_has_credential(v, depth - 1)
+            (fields.contains(&k.as_str()) && v.as_str().is_some_and(|s| !s.is_empty()))
+                || json_has_field(v, fields, depth - 1)
         }),
         _ => false,
     }
 }
 
-/// 单个 auth 文件的只读探测；文件不存在/不可读 → None（按缺失处理）
-fn probe_auth_file(path: &std::path::Path) -> Option<AuthProbe> {
+/// 单个 auth 文件的只读探测；文件不存在/不可读 → None（按缺失处理）。
+/// api_key_fields 命中（且无官方凭证字段）→ ApiKeyMode：API Key 模式不算官方账号连接
+fn probe_auth_file(path: &std::path::Path, api_key_fields: &[&str]) -> Option<AuthProbe> {
     let text = std::fs::read_to_string(path).ok()?;
     Some(match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) if json_has_credential(&v, 4) => AuthProbe::Connected,
+        Ok(v) if json_has_field(&v, CREDENTIAL_FIELD_NAMES, 4) => AuthProbe::Connected,
+        Ok(v) if json_has_field(&v, api_key_fields, 4) => AuthProbe::ApiKeyMode,
         Ok(_) => AuthProbe::Unrecognized,
         Err(_) => AuthProbe::Corrupt,
     })
@@ -928,6 +929,9 @@ fn probe_auth_file(path: &std::path::Path) -> Option<AuthProbe> {
 #[derive(Debug, PartialEq, Eq)]
 enum AuthProbe {
     Connected,
+    /// API Key 模式（如 codex auth.json 顶层 OPENAI_API_KEY）：可能是官方 --api-key，
+    /// 也可能是第三方中转，不能显示为「已连接官方账号」
+    ApiKeyMode,
     /// 存在但找不到凭证字段（结构可能随版本漂移）
     Unrecognized,
     /// 存在但解析失败（可能损坏或末行截断）
@@ -1061,13 +1065,14 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
         .map(|h| probe_conflicts(h, oa))
         .unwrap_or_default();
     let mut unrecognized: Option<String> = None;
+    let mut api_key_mode: Option<String> = None;
     let mut corrupt: Option<String> = None;
     let candidates = home
         .as_ref()
         .map(|h| auth_probe_candidates(h, oa))
         .unwrap_or_default();
     for (rel, path) in &candidates {
-        match probe_auth_file(path) {
+        match probe_auth_file(path, oa.api_key_fields) {
             Some(AuthProbe::Connected) => {
                 return OfficialAccountStatusDto {
                     supported: true,
@@ -1082,6 +1087,11 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
                     unrecognized = Some(rel.clone());
                 }
             }
+            Some(AuthProbe::ApiKeyMode) => {
+                if api_key_mode.is_none() {
+                    api_key_mode = Some(rel.clone());
+                }
+            }
             Some(AuthProbe::Corrupt) => {
                 if corrupt.is_none() {
                     corrupt = Some(rel.clone());
@@ -1092,6 +1102,10 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
     }
     let detail = if let Some(rel) = corrupt {
         format!("~/{rel} 存在但无法解析（文件可能损坏）")
+    } else if let Some(rel) = api_key_mode {
+        // API Key 模式不是官方账号：官方 --api-key 与第三方中转（如 cc-switch）写出的
+        // 文件形状相同，文件层面无法区分，如实说明而不显示「已连接官方账号」
+        format!("~/{rel} 是 API Key 配置（可能来自官方 --api-key 或第三方中转），不是官方账号登录")
     } else if let Some(rel) = unrecognized {
         format!("~/{rel} 存在但未识别到凭证字段（格式可能随版本变化）")
     } else {
@@ -1491,12 +1505,12 @@ mod tests {
 
     // ===== auth 文件只读探测（防御式）=====
 
-    fn probe_temp(name: &str, content: &str) -> Option<AuthProbe> {
+    fn probe_temp(name: &str, content: &str, api_key_fields: &[&str]) -> Option<AuthProbe> {
         let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, content).unwrap();
-        let probe = probe_auth_file(&path);
+        let probe = probe_auth_file(&path, api_key_fields);
         std::fs::remove_dir_all(&dir).ok();
         probe
     }
@@ -1507,11 +1521,20 @@ mod tests {
         let probe = probe_temp(
             "auth.json",
             r#"{"OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"tok","refresh_token":"r"},"last_refresh":"2026-01-01T00:00:00Z"}"#,
+            &["OPENAI_API_KEY"],
         );
         assert_eq!(probe, Some(AuthProbe::Connected));
-        // API key 登录：顶层 OPENAI_API_KEY
-        let probe = probe_temp("auth.json", r#"{"OPENAI_API_KEY":"sk-x","tokens":null}"#);
-        assert_eq!(probe, Some(AuthProbe::Connected));
+        // API key 模式：顶层 OPENAI_API_KEY（官方 --api-key 与第三方中转同一形状），
+        // 不算官方账号连接
+        let probe = probe_temp(
+            "auth.json",
+            r#"{"OPENAI_API_KEY":"sk-x","tokens":null}"#,
+            &["OPENAI_API_KEY"],
+        );
+        assert_eq!(probe, Some(AuthProbe::ApiKeyMode));
+        // 规格没声明 api_key_fields 时同样形状回落 Unrecognized（不误判已连接）
+        let probe = probe_temp("auth.json", r#"{"OPENAI_API_KEY":"sk-x"}"#, &[]);
+        assert_eq!(probe, Some(AuthProbe::Unrecognized));
     }
 
     #[test]
@@ -1520,12 +1543,14 @@ mod tests {
         let probe = probe_temp(
             ".credentials.json",
             r#"{"claudeAiOauth":{"accessToken":"tok","refreshToken":"r","expiresAt":123}}"#,
+            &[],
         );
         assert_eq!(probe, Some(AuthProbe::Connected));
         // gemini：google-auth-library Credentials 扁平结构
         let probe = probe_temp(
             "oauth_creds.json",
             r#"{"access_token":"tok","refresh_token":"r","scope":"s","token_type":"Bearer","expiry_date":123}"#,
+            &[],
         );
         assert_eq!(probe, Some(AuthProbe::Connected));
     }
@@ -1534,15 +1559,15 @@ mod tests {
     fn auth_probe_is_defensive_on_missing_corrupt_and_unrecognized() {
         // 缺失 → None
         let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
-        assert_eq!(probe_auth_file(&dir.join("nope.json")), None);
+        assert_eq!(probe_auth_file(&dir.join("nope.json"), &[]), None);
         // 损坏（截断的 JSON）→ Corrupt，不误判为已连接
-        let probe = probe_temp("auth.json", r#"{"tokens":{"access_token":"to"#);
+        let probe = probe_temp("auth.json", r#"{"tokens":{"access_token":"to"#, &[]);
         assert_eq!(probe, Some(AuthProbe::Corrupt));
         // 合法 JSON 但无凭证字段 → Unrecognized
-        let probe = probe_temp("auth.json", r#"{"foo":"bar","n":1}"#);
+        let probe = probe_temp("auth.json", r#"{"foo":"bar","n":1}"#, &[]);
         assert_eq!(probe, Some(AuthProbe::Unrecognized));
         // 空字符串凭证不算命中
-        let probe = probe_temp("auth.json", r#"{"access_token":""}"#);
+        let probe = probe_temp("auth.json", r#"{"access_token":""}"#, &[]);
         assert_eq!(probe, Some(AuthProbe::Unrecognized));
     }
 
@@ -1563,6 +1588,7 @@ mod tests {
             env_purge_list: &["KIMI_API_KEY"],
             conflict_probes: &[],
             detection_note: None,
+            api_key_fields: &[],
         };
         let found = auth_probe_candidates(&dir, &oa);
         // 只命中直接子级 .json：mcp/ 子目录与 .txt 都排除

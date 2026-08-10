@@ -1091,6 +1091,20 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  // 存量回填：自动分类（#15）落地前导入的 GitHub 技能没有分类，按仓库名补上；已有分类不动
+  async function onBackfillCategories() {
+    try {
+      const n = await invoke<number>("backfill_skill_categories");
+      setNotice(
+        n ? `已按仓库名补充分类：${n} 个技能` : "没有需要补充分类的 GitHub 技能",
+      );
+      setError(null);
+      if (n) await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   const appliedCount = skills.filter((s) =>
     Object.values(s.apps).some(Boolean),
   ).length;
@@ -1162,8 +1176,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                   <span />
                 </div>
                 {[
+                  // 分组顺序 = 技能数组首现顺序；未分类固定沉底（不挡已归组的内容）
                   ...new Set(skills.map((skill) => skill.category ?? "未分类")),
-                ].map((category) => {
+                ]
+                  .sort((a, b) => (a === "未分类" ? 1 : b === "未分类" ? -1 : 0))
+                  .map((category) => {
                   const categorySkills = skills.filter(
                     (skill) => (skill.category ?? "未分类") === category,
                   );
@@ -1586,6 +1603,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               onSelect: () => {
                 if (!checkingUpdates) void onCheckUpdates();
               },
+            },
+            {
+              label: "无分类 GitHub 技能按仓库归组",
+              onSelect: () => void onBackfillCategories(),
             },
           ]}
         />

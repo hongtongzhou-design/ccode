@@ -626,3 +626,18 @@ select:focus-visible {
 .md-body img {
   max-width: 100%;
 }
+
+/* 有界脉冲：播 3 个周期（约 6s）后静止——状态刚变化时提示，长期无限脉冲是注意力消耗。
+   步进器大圆（进行中/检查中）与项目区工作区状态点共用；状态离开再回来类名重挂会重新播 */
+@keyframes ccode-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.animate-pulse-brief {
+  animation: ccode-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) 3;
+}

@@ -168,6 +168,7 @@ pub fn run() {
             skills::import_skills_from_github,
             skills::check_skill_updates,
             skills::apply_skill_update,
+            skills::backfill_skill_categories,
             skills::discover_unmanaged,
             skills::import_discovered,
             skills::export_skills,

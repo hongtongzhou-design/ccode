@@ -282,7 +282,7 @@ function ProjectRail({
         : tab?.attention === "done"
           ? "bg-link"
           : tab?.attention === "working"
-            ? "bg-ok-text animate-pulse"
+            ? "bg-ok-text animate-pulse-brief"
             : tab?.running
               ? "bg-ok-text"
               : null;

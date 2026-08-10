@@ -894,6 +894,33 @@ pub async fn set_skill_category(id: String, category: Option<String>) -> Result<
     .map_err(|e| e.to_string())?
 }
 
+/// 无分类的 GitHub 技能批量回填仓库名分类（自动分类 #15 落地前的存量导入没有分类）。
+/// 已有分类（含手动设置）一律不动；返回回填条数
+fn backfill_categories_impl(store: &SkillStore) -> Result<usize, String> {
+    let mut skills = store.read();
+    let mut filled = 0usize;
+    for s in &mut skills {
+        if s.source != "github" || s.category.is_some() {
+            continue;
+        }
+        if let Some(cat) = s.repo.as_deref().and_then(github_repo_category) {
+            s.category = Some(cat);
+            filled += 1;
+        }
+    }
+    if filled > 0 {
+        store.write(&skills)?;
+    }
+    Ok(filled)
+}
+
+#[tauri::command]
+pub async fn backfill_skill_categories() -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(|| backfill_categories_impl(&SkillStore::default_paths()?))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 const SKILL_TAG_MAX_COUNT: usize = 4;
 const SKILL_TAG_MAX_LEN: usize = 20;
 
@@ -1570,6 +1597,47 @@ mod tests {
             Some("skills".to_string())
         );
         assert_eq!(github_repo_category("owner/"), None);
+    }
+
+    #[test]
+    fn backfill_fills_only_uncategorized_github_skills() {
+        let fx = Fx::new();
+        let local = fx.add_lib_skill("pdf", "本地");
+        let gh = fx.add_lib_skill("aihot", "x");
+        let gh_named = fx.add_lib_skill("neat", "x");
+        {
+            let mut skills = fx.store.read();
+            for s in &mut skills {
+                if s.id == gh.id {
+                    s.source = "github".into();
+                    s.repo = Some("KKKKhazix/khazix-skills".into());
+                }
+                if s.id == gh_named.id {
+                    s.source = "github".into();
+                    s.repo = Some("o/r".into());
+                    s.category = Some("项目整理".into());
+                }
+            }
+            fx.store.write(&skills).unwrap();
+        }
+        let filled = backfill_categories_impl(&fx.store).unwrap();
+        assert_eq!(filled, 1);
+        let after = fx.store.read();
+        assert_eq!(
+            after.iter().find(|s| s.id == gh.id).unwrap().category.as_deref(),
+            Some("khazix-skills")
+        );
+        assert_eq!(
+            after.iter().find(|s| s.id == gh_named.id).unwrap().category.as_deref(),
+            Some("项目整理"),
+            "已有分类不得被覆盖"
+        );
+        assert!(
+            after.iter().find(|s| s.id == local.id).unwrap().category.is_none(),
+            "非 GitHub 来源不动"
+        );
+        // 幂等：再跑一遍没有可回填的
+        assert_eq!(backfill_categories_impl(&fx.store).unwrap(), 0);
     }
 
     #[test]

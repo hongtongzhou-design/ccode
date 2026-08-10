@@ -284,6 +284,10 @@ src-tauri/src/
   全部资源**；`renderTaskMd` 只在绑定非空时过滤「项目资源」段（单一出处在 `pipeline-start.ts`）。
 - **官方账号 profile 只读检测 + env 净化**：CLI auth 文件只读探测「已连接」，断开引导用户用 CLI 自己的 logout；官方账号
   拉起不注入 API env，且必须 `env_remove` 同协议残留 API 密钥变量（防静默覆盖账号登录）；统计页官方账号显示「订阅」不计费。
+  **API Key 模式不算官方账号**：凭证字段表只认 OAuth token 字段；`OfficialAccountSpec.api_key_fields`（codex =
+  `OPENAI_API_KEY`）命中时显示「API Key 配置」而非「已连接」——官方 `--api-key` 与第三方中转（cc-switch 等）写出的
+  auth.json 形状相同，文件层面无法区分，不得冒充官方账号。
+- **技能分类批量回填**：`backfill_skill_categories` 只给「GitHub 来源 + 无分类」的技能补仓库名分类（自动分类 #15 之前的存量导入），已有分类一律不动、幂等；入口在技能页顶部 ⋯。
 - **「接力」是唯一的跨 Agent 交接表述**：接力 = 结构化简报落成文件 + 新 Agent 带简报启动 + 记录接力链，明示不是记忆转移；
   禁用「无缝继续」。v1 机制（handoff.rs）：简报全文过 `redact_sensitive_text` 脱敏 + 64KB 上限后原子写
   `cwd/.ccode/handoff-<时间>.md`（自定义路径不得出项目根）；接力链先按 agent+cwd 登记 `handoff_links`，新会话被扫描到时
@@ -397,7 +401,8 @@ src-tauri/src/
 - **流水线大圆步进器（v3.46，取代 v3.45 胶囊分层与进度段）**：名称带与步进器带两个同列网格；虚线为**真实 flex 块节律**
   （`StepperCell`：5px 块 + 5px 间隙全是真实元素，块数按列宽 ResizeObserver 现算——任何列宽/步骤数下尺寸与间隔严格一致，
   永不出现渐变相位残段/双块），与圆心同轴，跨列连续（两条带 grid 均 gap-[5px]）。
-  **大圆（h-6 w-6，24px）= 纯色实心圆（内部无字符）+ 唯一主推进点击**：done=bg-ok-text；进行中/checking=bg-cta（animate-pulse）；
+  **大圆（h-6 w-6，24px）= 纯色实心圆（内部无字符）+ 唯一主推进点击**：done=bg-ok-text；进行中/checking=bg-cta（脉冲用有界
+  `animate-pulse-brief`：App.css 自定义 3 周期≈6s 后静止，状态复归重播；无限 animate-pulse 是注意力消耗，项目区工作区状态点同口径）；
   待评审=bg-cta-pill；阻塞=bg-warn；pending=bg-l4 实心灰。点击语义按状态：
   pending 无工作区=startStep、已归档=restoreWs、进行中/待评审/阻塞=onOpenTerminal(ws)、done=setPendingTerminal 开主仓 shell 终端。
   状态/目录/agent/profile + 点击动作提示收进**应用内 tooltip**（`useHoverTip`/`HoverTip`，fixed 定位、横向钳制、滚动/缩放/点击即关）：
