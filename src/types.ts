@@ -562,3 +562,25 @@ export interface BootstrapCommitDto {
   /** 实际提交的文件（相对仓库根，仅 .ccode 与 .gitignore 内） */
   paths: string[];
 }
+
+/** MCP server 清单项（src-tauri/src/mcp.rs；分发规格 = docs/agent-integration-matrix.md §9） */
+export interface McpEnvPair {
+  key: string;
+  /** 字面值，或 $VAR / ${VAR} 引用环境变量（不落明文密钥） */
+  value: string;
+}
+
+export interface McpServerDto {
+  id: string;
+  /** [A-Za-z0-9-]（下划线禁：gemini policy 引擎按下划线切分） */
+  name: string;
+  kind: "stdio" | "remote";
+  command: string;
+  args: string[];
+  cwd: string;
+  env: McpEnvPair[];
+  url: string;
+  headers: McpEnvPair[];
+  /** agent id → 是否分发到其用户级配置 */
+  apps: Record<string, boolean>;
+}

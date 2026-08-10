@@ -122,3 +122,45 @@
 3. **注入模式没有统一三件套**——Claude/Gemini/Qwen(openai 协议）/旧 Kimi/CodeBuddy 有标准 env；Codex 靠 `-c` 参数；OpenCode 靠 `OPENCODE_CONFIG_CONTENT`；新 Kimi 靠 `KIMI_MODEL_*` 合成通道；Cursor 是 env（key/端点）+ flag（模型）混合。`launch_plan { env, args }` 抽象覆盖了全部八种情况。
 4. **前六家都有整体搬迁环境变量**（`CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`GEMINI_CLI_HOME`/`QWEN_HOME`/`KIMI_CODE_HOME`/`KIMI_SHARE_DIR`；CodeBuddy 未核实）——可做「完全隔离 profile」的进阶功能，但会连会话历史一起隔离，MVP 不用。
 5. **都支持非交互模式**——为「绕过终端直接驱动 agent」留了路。
+
+## 9. MCP 配置分发调研（2026-08-10，八家全部经官方文档/源码/本机实测核实）
+
+**目标**：Ccode 维护一份 MCP server 清单，一键分发进各 CLI 自己的配置文件。本节是实现规格的单一出处——写字段/路径前以此为准，不要凭印象。
+
+### 9.1 分发通道总表
+
+| CLI | 用户级配置落点 | 顶层键 | 格式 | 分发主通道 | 备选通道 |
+|---|---|---|---|---|---|
+| claude-code | `~/.claude.json`（**高频共享状态文件，高危**） | `mcpServers` | JSON | 项目级 `<repo>/.mcp.json`（独立单用途文件，最安全；交互会话有审批闸） | `claude mcp add --scope user`（CLI 自己做读改写） |
+| codex | `~/.codex/config.toml`（与 model/notice/trust 同文件） | `[mcp_servers.<name>]`（下划线） | TOML | `codex mcp add/remove`（原子写；add 命中 OAuth server 会弹浏览器登录，注意） | 读-改-原子写 config.toml 只动 `mcp_servers` 段 |
+| gemini | `~/.gemini/settings.json`（混合状态文件） | `mcpServers` | JSONC（容忍注释） | `gemini mcp add/remove -s user`（**scope 默认 project，必须显式 user**） | 读-改-合并写 settings.json 只动 `mcpServers` 键 |
+| qwen | `~/.qwen/settings.json`（Ccode「设为全局」已写同文件） | `mcpServers` | JSONC | **直接写用户级 settings.json**（免审批 + 运行时热加载；JSON 损坏会被 CLI 清空重置，必须原子写+备份） | `qwen mcp add`（scope 默认 user，逐条无批量） |
+| opencode | `~/.config/opencode/opencode.json(c)`（三个文件合并加载：config.json→opencode.json→opencode.jsonc，写已存在者） | `mcp` | JSONC | 直接写文件（纯用户设置文件，最友好；`mcp add` 只能写全局且无 remove） | `opencode mcp add`（非交互，保注释） |
+| kimi | `~/.kimi-code/mcp.json`（`KIMI_CODE_HOME` 可搬迁；**MCP 专用纯声明文件，引擎只读不写**） | `mcpServers` | JSON | **直接写文件**（无可脚本化 CLI 命令，TUI `/mcp-config` 不算） | —（只能写文件；写后新会话生效） |
+| codebuddy | `~/.codebuddy/.mcp.json`（MCP 专用文件，回退链 mcp.json→.codebuddy.json） | `mcpServers` + 并列 `disabledMcpServers` | JSONC | `codebuddy mcp add-json -s user`（默认 scope 是 local，寄生全局状态文件，禁用） | 直写 user 级 .mcp.json（保留 disabledMcpServers 键；有 watch 热生效） |
+| cursor | `~/.cursor/mcp.json`（**CLI 与 IDE 共享**，写入同时改变 IDE 行为） | `mcpServers` | JSON | **直接写文件**（CLI 无 add/remove 子命令；`agent mcp list` 是交互 TUI 不能用于校验） | —（全局 server 免审批，项目级逐工作区批准） |
+
+### 9.2 条目 schema 映射（Ccode 统一模型 → 各家字段）
+
+Ccode 清单模型只收公共子集：stdio（command/args/env/cwd）+ remote（url/headers）+ enabled。映射表：
+
+| Ccode 字段 | claude | codex (TOML) | gemini | qwen | opencode | kimi | codebuddy | cursor |
+|---|---|---|---|---|---|---|---|---|
+| stdio | `command/args/env`（显式 `type:"stdio"`） | `command/args/env/cwd`（有 command 即 stdio） | `command/args/env/cwd` | 同 gemini | `type:"local"`，**command 是数组**（命令+参数合一），env 叫 `environment` | `command/args/env/cwd`（无 transport 自动推断） | `type:"stdio"` + command/args/env | command/args/env（type 可省略） |
+| remote | `type:"http"` + url/headers | `url` + `http_headers`（SSE 不支持） | **`httpUrl`**（url=SSE 已 legacy） | 同 gemini（httpUrl） | `type:"remote"` + url/headers | url/headers（http；SSE 须显式 transport） | `type:"http"` + url/headers | url/headers（自动协商 transport） |
+| cwd | 未核实，**不写** | `cwd` | `cwd` | `cwd` | `cwd` | `cwd` | 未核实，**不写** | 未核实，**不写** |
+
+### 9.3 密钥与插值（防明文落盘口径）
+
+- claude/codebuddy：`${VAR}` / `${VAR:-default}` 插值（codebuddy **只认全大写变量名**）；codex：**无通用插值**，用 `bearer_token_env_var`/`env_http_headers`/`env_vars` 按名引用环境变量（内联 `bearer_token` 会被显式拒绝）；gemini/qwen：`$VAR`/`${VAR}` 全文件插值（gemini 有出站 env 脱敏，密钥必须在 env 块显式声明）；opencode：`{env:VAR}` 语法；kimi：`bearerTokenEnvVar` 间接引用；cursor：`${VAR}` 与 `${env:NAME}`。
+- 结论：Ccode 清单里密钥一律存「环境变量名引用」，各家映射成各自的间接引用字段，不落明文。
+
+### 9.4 共性红线
+
+- **绝不整文件覆盖**：claude/codex/gemini/qwen 的目标文件都是混合状态文件（存登录态/信任记录/model 选择等），只读-改-写一个键/段，写前备份 + 原子写（复用 global_config.rs 的 agent 级事务批次模式）。
+- **企业管理层探测**：claude（managed-mcp.json 三系统路径）/opencode（managed 目录）存在即放弃分发并提示。
+- **项目级都有审批闸**（claude/qwen/cursor/codebuddy 逐工作区批准，gemini/qwen 未信任目录整层忽略）——默认只写用户级。
+- **校验手段**：claude `mcp get`（不要 `mcp list`，会真连 server）、codex `mcp list --json`（脱敏）、cursor 没有非交互校验命令（只能解析文件）。
+- **stdio 命令解析**（Ccode 侧分发义务）：裸命令名必须经 `resolve_binary` 落绝对路径（GUI/打包环境 PATH 短）；node 系 shim（`#!/usr/bin/env node` shebang 的脚本/symlink，如 npx）要再换成 node 绝对路径 + shim 真实路径首参，否则宿主 PATH 无 node 时 spawn ENOENT（实机踩坑：npx symlink → npx-cli.js，shebang 依赖 PATH 里的 node）。
+- **kimi `/mcp-config` 交互编辑器实测坑**：曾把启动参数整体写进 `cwd` 字段（`"cwd": "-y <pkg> <dir>"`），spawn 时目录不存在报 ENOENT——报错文案指向 command 路径，极具迷惑性。遇到 kimi MCP ENOENT 先查 cwd 是否合法目录，再查命令路径。
+- **server 命名**：统一 `[A-Za-z0-9_-]`；gemini 额外要求**不含下划线**（policy 引擎按下划线切分 FQN，含下划线安全策略静默失效）。

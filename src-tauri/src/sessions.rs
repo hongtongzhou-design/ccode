@@ -148,7 +148,8 @@ fn masked_secret(secret: &str) -> String {
     format!("[已隐藏密钥 ···{tail}]")
 }
 
-fn common_secret_token(token: &str) -> Option<String> {
+/// 常见密钥前缀检测（sk-/ghp_/AIza/AKIA 等，≥12 字符才命中）；mcp.rs 明文密钥拦截也用它
+pub(crate) fn common_secret_token(token: &str) -> Option<String> {
     let start = token
         .char_indices()
         .find(|(_, c)| c.is_ascii_alphanumeric())

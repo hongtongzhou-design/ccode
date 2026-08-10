@@ -273,7 +273,12 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [customFont, setCustomFont] = useState("");
   const [scrollback, setScrollback] = useState("");
   const [rate, setRate] = useState("");
-  const [pricing, setPricing] = useState("");
+  // 自定义定价的表格草稿（保存时序列化为 pricing.json 的 {"前缀":[输入,输出]} 格式，后端校验不变）
+  const [pricingRows, setPricingRows] = useState<
+    { prefix: string; input: string; output: string }[]
+  >([]);
+  // 文件里已有的 _rate 原样保留（汇率主入口是上方「汇率」设置项，这里只为了不丢数据）
+  const [pricingRateExtra, setPricingRateExtra] = useState<number | null>(null);
   const [pricingDirty, setPricingDirty] = useState(false);
   // 未提交草稿标记（ref 镜像供 effect 内读取）：settings 变化（如切主题）时不覆盖正在编辑的输入框
   const draftDirty = useRef(new Set<string>());
@@ -325,7 +330,31 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       if (!pricingDirtyRef.current) {
         invoke<string>("read_pricing_file")
           .then((t) => {
-            setPricing(t);
+            if (!t.trim()) {
+              setPricingRows([]);
+              setPricingRateExtra(null);
+            } else {
+              // 解析失败（手改坏的存量文件）：提示并给空表，保存即覆盖
+              try {
+                const v = JSON.parse(t) as Record<string, unknown>;
+                setPricingRateExtra(
+                  typeof v._rate === "number" ? v._rate : null,
+                );
+                setPricingRows(
+                  Object.entries(v)
+                    .filter(([k, val]) => k !== "_rate" && Array.isArray(val))
+                    .map(([prefix, val]) => ({
+                      prefix,
+                      input: String((val as unknown[])[0] ?? ""),
+                      output: String((val as unknown[])[1] ?? ""),
+                    })),
+                );
+              } catch (e) {
+                setPricingRows([]);
+                setPricingRateExtra(null);
+                setError(`pricing.json 解析失败（${e}），编辑后保存将覆盖原文件`);
+              }
+            }
             markPricingDirty(false);
           })
           .catch((e) => setError(String(e)));
@@ -416,7 +445,18 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     setSavingPricing(true);
     setError(null);
     try {
-      await invoke("write_pricing_file", { text: pricing });
+      // 表格序列化回 pricing.json 既有格式：{"前缀": [输入价, 输出价]}；空前缀行丢弃
+      const obj: Record<string, unknown> = {};
+      if (pricingRateExtra != null) obj._rate = pricingRateExtra;
+      for (const row of pricingRows) {
+        const prefix = row.prefix.trim();
+        if (!prefix) continue;
+        obj[prefix] = [Number(row.input) || 0, Number(row.output) || 0];
+      }
+      const text = Object.keys(obj).length
+        ? JSON.stringify(obj, null, 2)
+        : "";
+      await invoke("write_pricing_file", { text });
       markPricingDirty(false);
       setNotice("已保存，下一次统计查询生效");
       setTimeout(() => setNotice(null), 3000);
@@ -808,13 +848,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           />
         </Row>
         <Row
-          label="⌘1–⌘7 页面切换"
-          hint="按侧栏顺序直接切页（一组七个绑定，整组开关）"
+          label="⌘1–⌘8 页面切换"
+          hint="按侧栏顺序直接切页（一组八个绑定，整组开关）"
         >
           <Toggle
             checked={settings?.hotkeyPageSwitch !== false}
             onChange={(v) => void patch({ hotkeyPageSwitch: v })}
-            label="⌘1–⌘7 页面切换"
+            label="⌘1–⌘8 页面切换"
           />
         </Row>
       </Section>
@@ -847,12 +887,12 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           />
         </Row>
 
-        {/* 自定义定价 */}
+        {/* 自定义定价：表格编辑（每行 = 模型前缀 + 输入/输出价），保存时序列化为 pricing.json */}
         <div className="py-3">
           <div className="mb-1 flex items-center gap-3">
             <span className="w-32 shrink-0 text-sm text-l2">自定义定价</span>
             <span className="text-xs text-l4">
-              pricing.json，保存时校验 JSON
+              美元 / 每百万 token，按模型名前缀匹配（覆盖内置价目）
             </span>
             <button
               onClick={savePricing}
@@ -862,15 +902,82 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               {savingPricing ? "保存中…" : "保存"}
             </button>
           </div>
-          <textarea
-            className={`${fieldClass} h-40 font-mono text-xs`}
-            placeholder='{"model-id": {"input": 2.5, "output": 10}}'
-            value={pricing}
-            onChange={(e) => {
-              setPricing(e.target.value);
+          {pricingRows.length > 0 && (
+            <div className="mb-1 grid grid-cols-[minmax(140px,1fr)_7rem_7rem_28px] items-center gap-2 px-1 text-xs text-l4">
+              <span>模型前缀</span>
+              <span>输入价</span>
+              <span>输出价</span>
+              <span />
+            </div>
+          )}
+          <div className="space-y-1">
+            {pricingRows.map((row, i) => (
+              <div
+                key={i}
+                className="grid grid-cols-[minmax(140px,1fr)_7rem_7rem_28px] items-center gap-2"
+              >
+                <input
+                  className={fieldClass}
+                  placeholder="如 kimi-k3"
+                  value={row.prefix}
+                  onChange={(e) => {
+                    const next = [...pricingRows];
+                    next[i] = { ...row, prefix: e.target.value };
+                    setPricingRows(next);
+                    markPricingDirty(true);
+                  }}
+                />
+                <input
+                  className={fieldClass}
+                  placeholder="2.5"
+                  inputMode="decimal"
+                  value={row.input}
+                  onChange={(e) => {
+                    const next = [...pricingRows];
+                    next[i] = { ...row, input: e.target.value };
+                    setPricingRows(next);
+                    markPricingDirty(true);
+                  }}
+                />
+                <input
+                  className={fieldClass}
+                  placeholder="10"
+                  inputMode="decimal"
+                  value={row.output}
+                  onChange={(e) => {
+                    const next = [...pricingRows];
+                    next[i] = { ...row, output: e.target.value };
+                    setPricingRows(next);
+                    markPricingDirty(true);
+                  }}
+                />
+                <button
+                  type="button"
+                  aria-label={`删除 ${row.prefix || "该行"}`}
+                  className="flex h-7 w-7 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-err-text"
+                  onClick={() => {
+                    setPricingRows(pricingRows.filter((_, j) => j !== i));
+                    markPricingDirty(true);
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="mt-2 flex h-7 items-center rounded px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+            onClick={() => {
+              setPricingRows([
+                ...pricingRows,
+                { prefix: "", input: "", output: "" },
+              ]);
               markPricingDirty(true);
             }}
-          />
+          >
+            + 添加模型
+          </button>
         </div>
       </Section>
 

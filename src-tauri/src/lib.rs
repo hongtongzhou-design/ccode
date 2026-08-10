@@ -9,6 +9,7 @@ mod git_info;
 mod global_config;
 mod handoff;
 mod logbuf;
+mod mcp;
 mod models;
 mod pdf;
 mod portwatch;
@@ -86,6 +87,15 @@ pub fn run() {
             logbuf::export_app_log,
             logbuf::log_event,
             diagnostics::export_diagnostics_bundle,
+            mcp::list_mcp_servers,
+            mcp::save_mcp_server,
+            mcp::set_mcp_server_app,
+            mcp::delete_mcp_server,
+            mcp::mcp_agent_status,
+            mcp::discover_mcp_servers,
+            mcp::import_mcp_from_agent,
+            mcp::import_mcp_json,
+            mcp::parse_mcp_json,
             fs_tree::list_dir,
             fs_tree::read_file_preview,
             fs_tree::save_file_preview,

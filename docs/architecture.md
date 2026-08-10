@@ -369,6 +369,19 @@ Windows release 构建使用 `windows_subsystem = "windows"`，没有可继承�
 `process::background_command` 加 `CREATE_NO_WINDOW` 并登记生命周期；这些包装与进程扫描均由 `cfg(windows)` 隔离，macOS/Linux
 仍直接使用标准 `Command` 且不启动监控线程。用户明确打开的外部终端是唯一可见窗口例外。
 
+### 6.15 MCP server 清单与分发
+
+MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-servers.json`，`mcp.rs`），按开关分发到八个 CLI 的**用户级** MCP 配置。规格与调研结论的单一出处是 `docs/agent-integration-matrix.md` §9（分发通道总表 / schema 映射 / 密钥插值 / 共性红线），改映射前先读它。
+
+要点：
+
+- **统一模型**：name（各家交集 `[A-Za-z0-9-]`，下划线禁——gemini policy 引擎按下划线切分）+ kind（stdio/remote）+ command/args/cwd/env + url/headers；env 与 header 的值允许 `$VAR`/`${VAR}` 引用形式。
+- **映射层**：codex 走 TOML `[mcp_servers.<name>]`（toml_edit 保格式；引用转 `env_vars`/`env_http_headers`/`bearer_token_env_var`，内联 bearer 会被 codex 显式拒绝）；opencode 顶层键是 `mcp` 且 command 为数组、env 叫 `environment`、引用语法 `{env:VAR}`；gemini/qwen 的 remote 写 `httpUrl`（url=SSE 已 legacy）；kimi 无插值（header 的 Bearer 引用转 `bearerTokenEnvVar`，env 引用直接拒写报错）；claude/codex/gemini/qwen 的目标文件是混合状态文件，只读-改-写一个键/段。
+- **分发纪律**：只写用户级（项目级在 claude/qwen/cursor/codebuddy 有审批闸）；写前备份 + 原子写 + 读回校验；JSONC 容错读（注释/尾逗号 stripper 自实现）；claude 的 managed-mcp.json 存在即拒写；cursor 配置与 IDE 共享（UI 明示）。
+- **不用 CLI 自带 mcp 命令分发**：各家语义不一（gemini 默认 project scope、codebuddy 默认 local、codex add 命中 OAuth server 会弹浏览器登录、kimi/cursor 没有可脚本化命令），直写文件八家统一且可批量。
+- **编辑重投放**：save 时先重写到所有已开启 agent、全部成功才落库（防「清单说已分发但 agent 侧没写成」的假状态）；删除先逐 agent 移除条目再出清单。
+- **安全闸**：清单文件 0600（对齐 keys.json）；明文密钥拦截——env/header 值命中常见密钥前缀且非 `$VAR` 引用时，保存/粘贴导入报 `PLAINDETECT:` 由前端二次确认；移除/删除前比对 agent 侧条目与当前映射产物，外部改过的报 `EXTMOD:` 确认后才强删；粘贴导入两阶段（预览命令清单 → 确认落库），stdio 命令等于任意执行必须明示。
+
 ## 7. 技术选型清单
 
 | 层 | 选型 | 理由 |
@@ -501,6 +514,7 @@ Windows release 构建使用 `windows_subsystem = "windows"`，没有可继承�
 | v3.53 | **技能一键应用更新**（§6.13 收尾）：`apply_skill_update` 按安装时记录的 repo/ref/subdir 重下 zipball，`import_zip_impl` 新增 `only` 过滤保证只覆盖同名技能（同仓库其他技能不新增不覆盖），复用覆盖+备份路径并刷新 revision 基线；下载循环与版本回写抽为 `download_github_zipball`/`record_github_revision` 供导入与更新共用。上游改名/移动时明确报错引导手动重新导入。前端在详情面板「GitHub 可更新」旁与行 ⋯ 菜单各加一处一键入口，确认走 confirmDialog。 |
 | v3.54 | **步进器信息可达性 + 原生控件主题同步**：① 大圆悬浮信息从原生 title 改应用内 tooltip（`useHoverTip`/`HoverTip`：fixed 定位、横向钳制、滚动/缩放/点击即关，事件挂包裹 span 禁用态可用）——原生 title 在 WKWebView 不渲染或残留串到相邻控件；圆与小方块统一，禁回退原生 title。② 大圆右上角注意力角标（待确认=warn/已完成=done，confirm 优先），只读消费 `terminalRunInputs` 镜像不新增轮询。③ 切主题同步原生窗口外观（`applyTheme` → `setTheme`），修复深色主题下原生 `<select>` 弹出系统浅色列表；capabilities 加 `core:window:allow-set-theme`。 |
 | v3.55 | **官方账号检测不再把 API Key 模式算成「已连接」**：codex `auth.json` 顶层 `OPENAI_API_KEY` 从凭证字段表移除，改由 `OfficialAccountSpec.api_key_fields` 单独识别——官方 `--api-key` 与第三方中转（cc-switch 等）写出的文件形状相同，无法区分，状态行如实显示「API Key 配置，不是官方账号登录」（`AuthProbe::ApiKeyMode`，优先级在损坏之下、未识别之上）。同批：**脉冲动画有界化**——新增 `animate-pulse-brief`（App.css，3 周期≈6s 后静止，状态复归重播），步进器进行中圆与项目区工作区状态点从无限 `animate-pulse` 换用；骨架屏等加载态保持无限脉冲不变。 |
+| v3.56 | **MCP server 统一清单与分发**（matrix §9 调研落地，§6.15）：新增第八页 MCP（⌘6，能力组技能与统计之间）——统一清单 + 按 agent 开关直写八家用户级配置（读-改-写一个键/段 + 备份 + 原子写 + 读回校验）；codex 走 TOML、四家 JSONC 容错读、密钥引用转各家间接引用字段不落明文；不用各家 CLI 的 mcp 命令分发（语义不一且 codex add 有 OAuth 弹窗副作用）；server 名取交集禁下划线。同批：自定义定价改表格编辑（pricing.json 格式与后端校验不变，存量 `_rate` 保留）；技能分类存量批量回填（`backfill_skill_categories`，GitHub 来源无分类补仓库名）；技能页未分类组固定沉底。 |
 
 ## 11. 演进线（2026-08 定稿）
 

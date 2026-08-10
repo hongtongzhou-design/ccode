@@ -15,6 +15,7 @@ import { eventMatchesCombo, comboLabel } from "./hotkeys";
 
 // 页面懒加载：首屏只拉当前页 chunk，其余页首次访问时才加载
 const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
+const McpPage = lazy(() => import("./pages/McpPage"));
 const SessionsPage = lazy(() => import("./pages/SessionsPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const SkillsPage = lazy(() => import("./pages/SkillsPage"));
@@ -44,6 +45,7 @@ const NAV_GROUPS = [
     items: [
       { id: "profiles", label: "配置", icon: "⇄" },
       { id: "skills", label: "技能", icon: "✦" },
+      { id: "mcp", label: "MCP", icon: "⌗" },
       { id: "stats", label: "统计", icon: "◫" },
     ],
   },
@@ -52,13 +54,14 @@ const NAV_GROUPS = [
 // 底部管理区只保留设置（统计归入「能力」组）
 const NAV_BOTTOM = [{ id: "settings", label: "设置", icon: "⛭" }] as const;
 
-/** ⌘1–⌘7 页切顺序（与侧栏工作→能力→管理一致） */
+/** ⌘1–⌘8 页切顺序（与侧栏工作→能力→管理一致） */
 const PAGE_HOTKEYS = [
   "workspaces",
   "terminal",
   "sessions",
   "profiles",
   "skills",
+  "mcp",
   "stats",
   "settings",
 ] as const;
@@ -90,7 +93,7 @@ function App() {
   // 侧栏收展完全由用户手动控制（品牌区点击）；曾有的按页面自动收展被用户否决（v3.43）
 
   // 全局快捷键（设置页可自定义，存 settings.json）：命令面板（默认 ⌘K）、
-  // 隐藏/显示侧栏（默认 ⌘\）、⌘1–⌘7 页切（开关）。空串 = 禁用；⌘F 已被终端搜索占用故不用。
+  // 隐藏/显示侧栏（默认 ⌘\）、⌘1–⌘8 页切（开关）。空串 = 禁用；⌘F 已被终端搜索占用故不用。
   const settings = useAppStore((s) => s.settings);
   // 侧栏底部 ⌘K 常驻入口的键位标签：跟随设置页自定义绑定；禁用（空串）时回落默认展示
   const paletteComboLabel = comboLabel(settings?.hotkeyPalette || "mod+k");
@@ -111,7 +114,7 @@ function App() {
         return;
       }
       if (pageSwitchOn && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-        const idx = ["1", "2", "3", "4", "5", "6", "7"].indexOf(e.key);
+        const idx = ["1", "2", "3", "4", "5", "6", "7", "8"].indexOf(e.key);
         if (idx >= 0) {
           e.preventDefault();
           setPage(PAGE_HOTKEYS[idx]);
@@ -405,6 +408,13 @@ function App() {
             {visited.has("skills") && (
               <Suspense fallback={<PageLoading />}>
                 <SkillsPage visible={page === "skills"} />
+              </Suspense>
+            )}
+          </div>
+          <div className={page === "mcp" ? "h-full overflow-auto" : "hidden"}>
+            {visited.has("mcp") && (
+              <Suspense fallback={<PageLoading />}>
+                <McpPage visible={page === "mcp"} />
               </Suspense>
             )}
           </div>

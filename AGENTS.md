@@ -71,7 +71,7 @@ npm run tauri build    # 打包
 ```
 docs/                        # 架构方案 + 八 CLI 适配参考（规格）
 src/                         # 前端 React + TS + Tailwind v4（vite 插件接入）
-  pages/                     # 七页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ 统计◫ 设置⛭
+  pages/                     # 八页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
   components/                # WorkspaceReviewView、PipelineEditor、ProjectGroup/ProjectRail、ArtifactChecklist、FileTree、
                              # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker 等
   components/CommandPalette.tsx # ⌘K 面板
@@ -102,6 +102,8 @@ src-tauri/src/
                              # 会话删除、注意力分类（session_tail_state）、步骤名映射（RX3a）
   skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor 固定 copy）、四路导入、ZIP 导出、卸载备份、
                              # 漂移检测 resync、create_skill/update_skill_content
+  mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §9）：统一模型→八家映射、读-改-写一个键/段 + 备份 +
+                             # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文）
   usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径
   pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
   settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力
@@ -182,7 +184,7 @@ src-tauri/src/
 - **评审一键开下一步（v3.42）**：开步链路单一出处 `src/pipeline-start.ts`；评审覆盖层合并成功且保留工作区时，成功横幅
   给出「▶ 开始下一步：步骤名」——下一步 = 同名步骤之后第一个无同名工作区（含已归档）的步骤；无下一步/未注册/无流水线
   只显示合并成功横幅；「合并并归档」成功即关覆盖层，不出此入口。
-- **键盘流（v3.40/v3.41）**：⌘K 命令面板（过滤纯逻辑在 `command-palette.ts`）、⌘1–⌘7 页切（顺序同侧栏）、⌘\ 执行态隐藏
+- **键盘流（v3.40/v3.41）**：⌘K 命令面板（过滤纯逻辑在 `command-palette.ts`）、⌘1–⌘8 页切（顺序同侧栏）、⌘\ 执行态隐藏
   侧栏（`chromeHidden`，session 级）；⌘F 已被终端搜索占用。主题清单单一出处 `src/themes.ts`。绑定可自定义（设置页录制，
   `hotkeys.ts` 组合串，空串=禁用，settings.json 三字段）。通知动作 `ccode.attention` → 聚焦窗口 + 回首页收件箱；通知
   extra 带 tabId/cwd/kind，已完成且 cwd 命中工作区直达评审覆盖层，其余聚焦标签；收件箱经 `session_tail_state` 直查外部
@@ -288,6 +290,23 @@ src-tauri/src/
   `OPENAI_API_KEY`）命中时显示「API Key 配置」而非「已连接」——官方 `--api-key` 与第三方中转（cc-switch 等）写出的
   auth.json 形状相同，文件层面无法区分，不得冒充官方账号。
 - **技能分类批量回填**：`backfill_skill_categories` 只给「GitHub 来源 + 无分类」的技能补仓库名分类（自动分类 #15 之前的存量导入），已有分类一律不动、幂等；入口在技能页顶部 ⋯。
+- **MCP 分发（§6.15，规格 = matrix §9）**：Ccode 清单（<config>/ccode/mcp-servers.json）→ 八家用户级配置的映射写入。
+  **只写用户级**（项目级各家都有审批闸）；目标文件多是混合状态文件，一律读-改-写一个键/段 + 写前备份 + 原子写 + 读回校验，
+  绝不整文件覆盖；codex 走 toml_edit 保格式、gemini/qwen/opencode/codebuddy 走 JSONC 容错读；密钥一律用 `$VAR`/`${VAR}`
+  引用形式，映射成各家间接引用字段（codex env_vars/bearer_token_env_var、opencode {env:VAR}、kimi bearerTokenEnvVar），
+  不落明文；server 名取各家交集 [A-Za-z0-9-]（下划线禁：gemini policy 引擎按下划线切分）；claude 的 managed-mcp.json
+  存在即拒写；cursor 的配置与 IDE 共享，分发同时影响 IDE。CLI 自带 mcp 命令不用于分发（各家语义不一：gemini 默认
+  project scope、codebuddy 默认 local、codex add 命中 OAuth 会弹浏览器、kimi/cursor 没有可脚本化命令）。
+  **收编/粘贴导入**：`discover_mcp_servers` 扫八家用户级配置列出清单外 server，`import_mcp_from_agent` 反向映射收编
+  （各家字段→统一模型，引用语法逆向：`{env:VAR}`/`bearer_token_env_var` 等转回 `${VAR}`，收编即标记已分发到来源 agent）；
+  `import_mcp_json` 解析 README 标准片段（剥 mcpServers/mcp/mcp_servers 包裹层，同名跳过）。
+  **安全闸**：清单文件 0600（对齐 keys.json）；env/header 命中常见密钥前缀（sk-/ghp_/AIza/AKIA…，复用
+  `sessions::common_secret_token`）且非 `$VAR` 引用形式时，保存/粘贴导入报 `PLAINDETECT:` 由前端二次确认放行；
+  移除/删除前比对 agent 侧条目与当前映射产物，被外部改过报 `EXTMOD:` 确认后才强删（保护手调版本）；
+  粘贴导入两阶段（`parse_mcp_json` 预览命令清单 → 确认才落库，stdio 命令=任意执行须明示）。
+  **stdio 命令名落盘前深度解析**（`resolve_command_deep`）：裸名经 `resolve_binary` 落绝对路径（GUI 短 PATH）；
+  node 系 shim（shebang `#!/usr/bin/env node` 的脚本/symlink，如 npx）再换成 node 绝对路径 + shim 真实路径首参——
+  否则宿主 PATH 无 node 时照样 spawn ENOENT。kimi 的 MCP 只在会话启动时加载，分发后要新会话生效。
 - **「接力」是唯一的跨 Agent 交接表述**：接力 = 结构化简报落成文件 + 新 Agent 带简报启动 + 记录接力链，明示不是记忆转移；
   禁用「无缝继续」。v1 机制（handoff.rs）：简报全文过 `redact_sensitive_text` 脱敏 + 64KB 上限后原子写
   `cwd/.ccode/handoff-<时间>.md`（自定义路径不得出项目根）；接力链先按 agent+cwd 登记 `handoff_links`，新会话被扫描到时
@@ -336,7 +355,7 @@ src-tauri/src/
   （可点击就不得小于 28px；层级靠填充色/边框/文字色区分，不靠按钮忽大忽小）。**留白节拍固定**：统一标题呼吸区/工具栏
   间距/主体内边距；空状态与低对象数量时允许保留连续画布，不为填满窗口堆料；工作区流水线与任务行可增加垂直间距，但不
   改变步骤顺序和操作语义。
-- **全站导航按工作流分层**：侧栏顺序固定为工作（工作区/终端/对话）→ 能力（配置/技能/统计）→ 底部只留设置，首启默认进
+- **全站导航按工作流分层**：侧栏顺序固定为工作（工作区/终端/对话）→ 能力（配置/技能/MCP/统计）→ 底部只留设置，首启默认进
   工作区；保留全部路由和 visited 保挂载。常规页必须复用 `PageFrame/PageHeader/PageToolbar` 的“上下文标题栏 + 独立筛选
   工具栏 + 主体”结构，标题栏只保留唯一主动作；工作台页面可维持自身分栏，但分隔、密度和状态语言必须与共享框架一致。
   借鉴外部工作台只学对象列表/上下文栏/三栏机制，不得把配置中心重新设为首页。**侧栏收展完全手动**（品牌区点击，
@@ -352,7 +371,9 @@ src-tauri/src/
   数量永久加列，只展示稳定字段与应用计数，Agent 分发在右侧详情用自动换行网格管理；新增 Agent 只能增加详情项。终端模块 UI
   小字基准 13px，xterm 新用户默认 14px；状态点等微型符号可更小，但文件树、标签、启动栏、对话/改动正文不得退回 11–12px。
 - 终端展开态主流程固定为 Agent → profile → 模型 → 目录 → 启动，辅助动作视觉分组；启动后自动收缩、PTY shell 回落、
-  所有终端标签保持挂载的语义不得因布局优化改变。**专注双模式（v3.43）**：中带「⤢ 专注终端」（藏左右栏，标签条
+  所有终端标签保持挂载的语义不得因布局优化改变。**技能/MCP pill 在收缩态同样保留**（展开栏与收缩状态行共用
+  renderSkillMenu/renderMcpMenu，收缩栏在页面顶部菜单向下弹出）；技能=一键使用注入输入框，MCP=一键提及 +
+  「管理分发→」跳 MCP 页。**专注双模式（v3.43）**：中带「⤢ 专注终端」（藏左右栏，标签条
   留在中带顶部，portal 机制已删）与右栏「⇱ 专注内容」（右栏铺满、中带不加遮罩），Esc 退出；左栏不再有 « 收起态。
   状态点全局统一 `size-2 rounded-full`；端口区分「本应用/系统其他」两段，终止外部进程必须二次确认。
 - **统计内部活动只认后端 provenance**：Ccode 无头 AI 启动前登记精确 agent+项目路径，usage 事件与项目/模型 DTO 显式携带
@@ -437,7 +458,7 @@ src-tauri/src/
 - **P5 通用层打磨（部分 ✅）**：逐 hunk 验收 ✅、跨标签聚合视图 ✅、成本按工作区归因 ✅、历史时间线视图 ✅（first-parent
   主线 + 白话翻译：✓ 验收合并/⚙ 自动保存/◔ 保存）、**Claude Code hooks 精确注意力标记 ✅**（设置页显式开关，claude_hooks.rs，
   见架构 v3.32）；批量验收、云端会话双源调研留 backlog
-- **Backlog（记录不动手）**：SSH 远程执行、MCP 配置分发调研、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后
+- **Backlog（记录不动手）**：SSH 远程执行、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后
   评估）、批量验收、云端会话双源调研、首启引导完整版（示例课题最小版已落地：工作区空态「✦ 创建示例课题（演示）」→
   `create_demo_project`，演示 PDF/引文/综述流水线齐备；完整版引导的更丰富演示数据留 backlog）、工作区类型驱动默认值（数据类跳端口）、
   内置技能种子机制（**等用户把现有技能优化完善后再做**：目前六个技能只在本机库，应用无内置/首启导入机制）

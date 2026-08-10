@@ -14,8 +14,9 @@ const PAGE_COMMANDS: {
   { id: "sessions", label: "对话", icon: "◔", hint: "⌘3" },
   { id: "profiles", label: "配置", icon: "⇄", hint: "⌘4" },
   { id: "skills", label: "技能", icon: "✦", hint: "⌘5" },
-  { id: "stats", label: "统计", icon: "◫", hint: "⌘6" },
-  { id: "settings", label: "设置", icon: "⛭", hint: "⌘7" },
+  { id: "mcp", label: "MCP", icon: "⌗", hint: "⌘6" },
+  { id: "stats", label: "统计", icon: "◫", hint: "⌘7" },
+  { id: "settings", label: "设置", icon: "⛭", hint: "⌘8" },
 ];
 
 /**

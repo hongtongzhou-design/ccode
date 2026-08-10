@@ -1,0 +1,778 @@
+import { useCallback, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { AGENTS } from "../types";
+import type { McpEnvPair, McpServerDto } from "../types";
+import { confirmDialog } from "../components/ConfirmDialog";
+import ContextMenu from "../components/ContextMenu";
+import {
+  PageFrame,
+  PageHeader,
+  primaryActionClass,
+  ghostActionClass,
+  fieldClass,
+  Toggle,
+} from "../components/PageFrame";
+
+/** 收编候选（后端 discover_mcp_servers） */
+interface DiscoveredMcp {
+  agent: string;
+  name: string;
+  summary: string;
+}
+
+/** MCP 页（matrix §9 调研落地）：统一清单 + 一键分发到八个 CLI 的用户级配置。
+ *  分发只写用户级（项目级有审批闸），密钥用 $VAR 引用不落明文 */
+
+const EMPTY_FORM = {
+  name: "",
+  kind: "stdio" as "stdio" | "remote",
+  command: "",
+  argsText: "", // 空格分隔
+  cwd: "",
+  env: [] as McpEnvPair[],
+  url: "",
+  headers: [] as McpEnvPair[],
+};
+
+type Form = typeof EMPTY_FORM;
+
+function formFrom(s: McpServerDto): Form {
+  return {
+    name: s.name,
+    kind: s.kind,
+    command: s.command,
+    argsText: s.args.join(" "),
+    cwd: s.cwd,
+    env: s.env.map((p) => ({ ...p })),
+    url: s.url,
+    headers: s.headers.map((p) => ({ ...p })),
+  };
+}
+
+/** 键值对编辑行组（env / headers 共用） */
+function PairEditor({
+  label,
+  pairs,
+  onChange,
+}: {
+  label: string;
+  pairs: McpEnvPair[];
+  onChange: (next: McpEnvPair[]) => void;
+}) {
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs text-l3">{label}</span>
+        <button
+          type="button"
+          className="text-xs text-l4 hover:text-l1"
+          onClick={() => onChange([...pairs, { key: "", value: "" }])}
+        >
+          + 添加
+        </button>
+      </div>
+      <div className="space-y-1">
+        {pairs.map((p, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <input
+              className={`${fieldClass} w-40 shrink-0`}
+              placeholder="KEY"
+              value={p.key}
+              onChange={(e) => {
+                const next = [...pairs];
+                next[i] = { ...p, key: e.target.value };
+                onChange(next);
+              }}
+            />
+            <input
+              className={`${fieldClass} min-w-0 flex-1 font-mono`}
+              placeholder="值，或 $VAR 引用环境变量"
+              value={p.value}
+              onChange={(e) => {
+                const next = [...pairs];
+                next[i] = { ...p, value: e.target.value };
+                onChange(next);
+              }}
+            />
+            <button
+              type="button"
+              aria-label="删除该行"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-err-text"
+              onClick={() => onChange(pairs.filter((_, j) => j !== i))}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export default function McpPage({ visible }: { visible: boolean }) {
+  const [servers, setServers] = useState<McpServerDto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [modal, setModal] = useState<{ id: string | null; form: Form } | null>(
+    null,
+  );
+  const [saving, setSaving] = useState(false);
+  const [applying, setApplying] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<string | null>(null);
+  // 收编现有配置 / 粘贴导入（低频，收进顶部 ⋯ 菜单）
+  const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
+  const [discoverOpen, setDiscoverOpen] = useState(false);
+  const [discovered, setDiscovered] = useState<DiscoveredMcp[]>([]);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  // 粘贴导入两阶段：先解析预览（命令清单可见才允许入库），确认后才写
+  const [pastePreview, setPastePreview] = useState<{
+    servers: McpServerDto[];
+    skipped: string[];
+    suspects: string[];
+  } | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setServers(await invoke<McpServerDto[]>("list_mcp_servers"));
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (visible) void load();
+  }, [visible, load]);
+
+  function toast(text: string) {
+    setNotice(text);
+    setTimeout(() => setNotice(null), 4000);
+  }
+
+  async function save(allowPlaintext = false) {
+    if (!modal) return;
+    setSaving(true);
+    setError(null);
+    const f = modal.form;
+    try {
+      const server: McpServerDto = {
+        id: modal.id ?? "",
+        name: f.name.trim(),
+        kind: f.kind,
+        command: f.command.trim(),
+        args: f.argsText.split(/\s+/).filter(Boolean),
+        cwd: f.cwd.trim(),
+        env: f.env.filter((p) => p.key.trim()),
+        url: f.url.trim(),
+        headers: f.headers.filter((p) => p.key.trim()),
+        apps: {},
+      };
+      setServers(
+        await invoke<McpServerDto[]>("save_mcp_server", {
+          server,
+          allowPlaintext,
+        }),
+      );
+      setModal(null);
+      toast("已保存");
+    } catch (e) {
+      const msg = String(e);
+      // 明文密钥拦截：列出嫌疑键，确认后可重试放行（建议改 $VAR 引用）
+      if (msg.startsWith("PLAINDETECT:") && !allowPlaintext) {
+        const keys = msg.slice("PLAINDETECT:".length);
+        if (
+          await confirmDialog(
+            `检测到疑似明文密钥：${keys}。密钥会以明文写进清单与各 agent 配置文件，建议改用 $VAR 引用环境变量。仍要保存明文吗？`,
+            { danger: true },
+          )
+        ) {
+          setSaving(false);
+          return save(true);
+        }
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggleApp(
+    server: McpServerDto,
+    agent: string,
+    on: boolean,
+    force = false,
+  ) {
+    const key = `${server.id}:${agent}`;
+    if (applying[key]) return;
+    setApplying((prev) => ({ ...prev, [key]: true }));
+    setError(null);
+    try {
+      setServers(
+        await invoke<McpServerDto[]>("set_mcp_server_app", {
+          id: server.id,
+          agent,
+          enabled: on,
+          force,
+        }),
+      );
+      toast(
+        on
+          ? `已分发到 ${AGENTS.find((a) => a.id === agent)?.label}`
+          : `已从 ${AGENTS.find((a) => a.id === agent)?.label} 移除`,
+      );
+    } catch (e) {
+      const msg = String(e);
+      // 该 agent 里的条目被外部改过：确认后才强删（保护手调版本）
+      if (msg.startsWith("EXTMOD:") && !force) {
+        const label = AGENTS.find((a) => a.id === agent)?.label ?? agent;
+        if (
+          await confirmDialog(
+            `「${server.name}」在 ${label} 的配置里已被外部修改，移除会丢掉外部改动的版本。仍要移除吗？`,
+            { danger: true },
+          )
+        ) {
+          setApplying((prev) => ({ ...prev, [key]: false }));
+          return toggleApp(server, agent, on, true);
+        }
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setApplying((prev) => ({ ...prev, [key]: false }));
+    }
+  }
+
+  async function onDelete(server: McpServerDto, force = false) {
+    const n = Object.values(server.apps).filter(Boolean).length;
+    if (
+      !force &&
+      !(await confirmDialog(
+        n
+          ? `将删除 server「${server.name}」并同步从 ${n} 个 agent 的配置中移除。继续？`
+          : `将删除 server「${server.name}」。继续？`,
+        { danger: true },
+      ))
+    )
+      return;
+    try {
+      setServers(
+        await invoke<McpServerDto[]>("delete_mcp_server", {
+          id: server.id,
+          force,
+        }),
+      );
+      toast("已删除");
+    } catch (e) {
+      const msg = String(e);
+      if (msg.startsWith("EXTMOD:") && !force) {
+        const agents = msg.slice("EXTMOD:".length);
+        if (
+          await confirmDialog(
+            `「${server.name}」在这些 agent 的配置里已被外部修改：${agents}。删除会丢掉外部改动的版本。仍要删除吗？`,
+            { danger: true },
+          )
+        ) {
+          return onDelete(server, true);
+        }
+      } else {
+        setError(msg);
+      }
+    }
+  }
+
+  // 收编：扫描八家用户级配置里不在清单中的 server
+  async function onDiscover() {
+    setError(null);
+    try {
+      setDiscovered(await invoke<DiscoveredMcp[]>("discover_mcp_servers"));
+      setDiscoverOpen(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function onAdopt(item: DiscoveredMcp) {
+    setError(null);
+    try {
+      setServers(
+        await invoke<McpServerDto[]>("import_mcp_from_agent", {
+          agent: item.agent,
+          name: item.name,
+        }),
+      );
+      setDiscovered((prev) =>
+        prev.filter((d) => !(d.agent === item.agent && d.name === item.name)),
+      );
+      toast(`已收编「${item.name}」（标记为已分发到来源 agent）`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function onPasteParse() {
+    setSaving(true);
+    setError(null);
+    try {
+      const [servers, skipped, suspects] = await invoke<
+        [McpServerDto[], string[], string[]]
+      >("parse_mcp_json", { text: pasteText });
+      setPastePreview({ servers, skipped, suspects });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function onPasteConfirm() {
+    if (!pastePreview) return;
+    // 有疑似明文密钥时先确认（建议 $VAR 引用）
+    if (pastePreview.suspects.length > 0) {
+      const ok = await confirmDialog(
+        `检测到疑似明文密钥：${pastePreview.suspects.join("、")}。会明文写进清单与各 agent 配置文件，建议改用 $VAR 引用。仍要导入吗？`,
+        { danger: true },
+      );
+      if (!ok) return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const [added, skipped] = await invoke<[string[], string[]]>(
+        "import_mcp_json",
+        { text: pasteText, allowPlaintext: pastePreview.suspects.length > 0 },
+      );
+      setPasteOpen(false);
+      setPasteText("");
+      setPastePreview(null);
+      await load();
+      toast(
+        `已导入 ${added.length} 个${skipped.length ? `，跳过同名 ${skipped.length} 个（${skipped.join("、")}）` : ""}`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const distributed = servers.filter((s) =>
+    Object.values(s.apps).some(Boolean),
+  ).length;
+
+  return (
+    <PageFrame width="standard">
+      <PageHeader
+        title="MCP"
+        meta={`${servers.length} 个 server · 已分发 ${distributed}`}
+        actions={
+          <>
+            <button
+              className={primaryActionClass}
+              onClick={() => setModal({ id: null, form: { ...EMPTY_FORM } })}
+            >
+              + 添加 server
+            </button>
+            <button
+              type="button"
+              title="更多（收编现有配置 / 粘贴导入）"
+              aria-label="更多"
+              className="flex h-8 w-8 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+              onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                setTopMenu({ x: rect.right - 176, y: rect.bottom + 4 });
+              }}
+            >
+              ⋯
+            </button>
+          </>
+        }
+      />
+      <p className="text-xs leading-5 text-l4">
+        统一维护 MCP server 清单，按开关分发到各 CLI 的用户级配置（只读-改-写一个键，写前自动备份）。
+        命令名在分发时自动解析为绝对路径（防 GUI/CLI 环境 PATH 找不到 npx 这类裸名）；
+        env/header 的值可填 <span className="font-mono">$VAR</span> 引用环境变量，密钥不落明文；
+        分发到 Cursor 会同时影响 Cursor IDE（共享同一配置）。
+      </p>
+      {error && <p className="text-sm text-err-text">{error}</p>}
+      {notice && <p className="text-sm text-ok-text">{notice}</p>}
+      {loading ? (
+        <p className="py-8 text-center text-sm text-l4">加载中…</p>
+      ) : servers.length === 0 ? (
+        <p className="py-8 text-center text-sm text-l4">
+          还没有 MCP server，点右上「+ 添加 server」创建
+        </p>
+      ) : (
+        <div className="divide-y divide-hairline">
+          {servers.map((s) => {
+            const onCount = Object.values(s.apps).filter(Boolean).length;
+            const open = expanded === s.id;
+            return (
+              <div key={s.id} className="group py-2">
+                <div className="flex items-center gap-3 px-1">
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    onClick={() => setExpanded(open ? null : s.id)}
+                  >
+                    <span className="w-3 text-l4">{open ? "▾" : "▸"}</span>
+                    <span className="truncate text-sm text-l1">{s.name}</span>
+                    <span className="rounded bg-inset px-1.5 py-0.5 text-[10px] text-l4">
+                      {s.kind}
+                    </span>
+                    <span className="min-w-0 truncate font-mono text-xs text-l4">
+                      {s.kind === "stdio"
+                        ? `${s.command} ${s.args.join(" ")}`
+                        : s.url}
+                    </span>
+                  </button>
+                  <span className="shrink-0 text-xs text-l4">
+                    {onCount > 0 ? `已分发 ${onCount}` : "未分发"}
+                  </span>
+                  <button
+                    type="button"
+                    className={`${ghostActionClass} opacity-0 group-hover:opacity-100 focus-visible:opacity-100`}
+                    onClick={() => setModal({ id: s.id, form: formFrom(s) })}
+                  >
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    className={`${ghostActionClass} opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-err-text`}
+                    onClick={() => void onDelete(s)}
+                  >
+                    删除
+                  </button>
+                </div>
+                {open && (
+                  <div className="mt-2 grid grid-cols-2 gap-1.5 px-1 pb-1 sm:grid-cols-4">
+                    {AGENTS.map((agent) => {
+                      const on = !!s.apps[agent.id];
+                      const key = `${s.id}:${agent.id}`;
+                      return (
+                        <div
+                          key={agent.id}
+                          className="flex items-center justify-between gap-2 rounded bg-inset px-2 py-1.5"
+                        >
+                          <span className="text-xs text-l3">{agent.label}</span>
+                          <Toggle
+                            label={agent.label}
+                            checked={on}
+                            onChange={(v) =>
+                              !applying[key] && void toggleApp(s, agent.id, v)
+                            }
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {modal && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+          onClick={() => setModal(null)}
+        >
+          <div
+            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline bg-raised p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-3 text-base font-semibold text-l1">
+              {modal.id ? "编辑 server" : "添加 server"}
+            </h2>
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <input
+                  className={`${fieldClass} min-w-0 flex-1`}
+                  placeholder="名称（字母/数字/连字符，如 fs-tools）"
+                  value={modal.form.name}
+                  onChange={(e) =>
+                    setModal({
+                      ...modal,
+                      form: { ...modal.form, name: e.target.value },
+                    })
+                  }
+                />
+                <div className="flex shrink-0 rounded border border-field">
+                  {(["stdio", "remote"] as const).map((k) => (
+                    <button
+                      key={k}
+                      type="button"
+                      className={`h-7 px-3 text-xs ${
+                        modal.form.kind === k
+                          ? "bg-cta text-cta-text"
+                          : "text-l3 hover:text-l1"
+                      }`}
+                      onClick={() =>
+                        setModal({
+                          ...modal,
+                          form: { ...modal.form, kind: k },
+                        })
+                      }
+                    >
+                      {k}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {modal.form.kind === "stdio" ? (
+                <>
+                  <div className="flex items-center gap-2">
+                    <input
+                      className={`${fieldClass} w-40 shrink-0`}
+                      placeholder="命令，如 npx"
+                      value={modal.form.command}
+                      onChange={(e) =>
+                        setModal({
+                          ...modal,
+                          form: { ...modal.form, command: e.target.value },
+                        })
+                      }
+                    />
+                    <input
+                      className={`${fieldClass} min-w-0 flex-1 font-mono`}
+                      placeholder="参数（空格分隔）"
+                      value={modal.form.argsText}
+                      onChange={(e) =>
+                        setModal({
+                          ...modal,
+                          form: { ...modal.form, argsText: e.target.value },
+                        })
+                      }
+                    />
+                  </div>
+                  <input
+                    className={fieldClass}
+                    placeholder="工作目录（可空；claude/codebuddy/cursor 不写此字段）"
+                    value={modal.form.cwd}
+                    onChange={(e) =>
+                      setModal({
+                        ...modal,
+                        form: { ...modal.form, cwd: e.target.value },
+                      })
+                    }
+                  />
+                  <PairEditor
+                    label="环境变量"
+                    pairs={modal.form.env}
+                    onChange={(env) =>
+                      setModal({ ...modal, form: { ...modal.form, env } })
+                    }
+                  />
+                </>
+              ) : (
+                <>
+                  <input
+                    className={`${fieldClass} font-mono`}
+                    placeholder="URL，如 https://example.com/mcp"
+                    value={modal.form.url}
+                    onChange={(e) =>
+                      setModal({
+                        ...modal,
+                        form: { ...modal.form, url: e.target.value },
+                      })
+                    }
+                  />
+                  <PairEditor
+                    label="请求头"
+                    pairs={modal.form.headers}
+                    onChange={(headers) =>
+                      setModal({ ...modal, form: { ...modal.form, headers } })
+                    }
+                  />
+                </>
+              )}
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  className={ghostActionClass}
+                  onClick={() => setModal(null)}
+                >
+                  取消
+                </button>
+                <button
+                  className={primaryActionClass}
+                  disabled={saving}
+                  onClick={() => void save()}
+                >
+                  {saving ? "保存中…" : "保存"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 顶部 ⋯ 更多菜单（低频入口）：收编现有配置 / 粘贴导入 */}
+      {topMenu && (
+        <ContextMenu
+          x={topMenu.x}
+          y={topMenu.y}
+          onClose={() => setTopMenu(null)}
+          items={[
+            {
+              label: "收编现有配置",
+              onSelect: () => void onDiscover(),
+            },
+            {
+              label: "粘贴导入",
+              onSelect: () => setPasteOpen(true),
+            },
+          ]}
+        />
+      )}
+      {/* 收编现有配置：八家用户级配置里不在清单的 server */}
+      {discoverOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+          onClick={() => setDiscoverOpen(false)}
+        >
+          <div
+            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline bg-raised p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-1 text-base font-semibold text-l1">
+              收编现有配置
+            </h2>
+            <p className="mb-3 text-xs leading-5 text-l4">
+              各 CLI 用户级配置里已存在、但不在 Ccode 清单中的 server。收编后进入统一清单，并标记为已分发到来源 agent。
+            </p>
+            {discovered.length === 0 ? (
+              <p className="py-4 text-center text-sm text-l4">
+                没有可收编的 server
+              </p>
+            ) : (
+              <ul className="max-h-72 space-y-1 overflow-auto">
+                {discovered.map((d) => (
+                  <li
+                    key={`${d.agent}:${d.name}`}
+                    className="flex items-center gap-2 rounded bg-inset px-2 py-1.5"
+                  >
+                    <span className="shrink-0 rounded bg-strip px-1.5 py-0.5 text-[10px] text-l4">
+                      {AGENTS.find((a) => a.id === d.agent)?.label ?? d.agent}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-l1">
+                      {d.name}
+                      <span className="ml-2 font-mono text-[11px] text-l4">
+                        {d.summary}
+                      </span>
+                    </span>
+                    <button
+                      className={ghostActionClass}
+                      onClick={() => void onAdopt(d)}
+                    >
+                      收编
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="mt-3 flex justify-end">
+              <button
+                className={ghostActionClass}
+                onClick={() => setDiscoverOpen(false)}
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 粘贴导入：README/市场页的标准 mcpServers JSON 片段 */}
+      {pasteOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+          onClick={() => setPasteOpen(false)}
+        >
+          <div
+            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline bg-raised p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-1 text-base font-semibold text-l1">粘贴导入</h2>
+            <p className="mb-3 text-xs leading-5 text-l4">
+              粘贴 MCP server 文档里的标准 JSON 片段（形如{" "}
+              <span className="font-mono">{'{"mcpServers": {"名称": {...}}}'}</span>
+              ），解析后逐条入库；与清单同名自动跳过。
+            </p>
+            <textarea
+              className={`${fieldClass} h-36 font-mono text-xs`}
+              placeholder='{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}}}'
+              value={pasteText}
+              onChange={(e) => {
+                setPasteText(e.target.value);
+                setPastePreview(null);
+              }}
+            />
+            {pastePreview && (
+              <div className="mt-2 rounded bg-inset p-2">
+                <p className="mb-1 text-xs text-l3">
+                  将导入 {pastePreview.servers.length} 个（stdio
+                  命令会被各 agent 直接执行，请确认来源可信）：
+                </p>
+                <ul className="max-h-36 space-y-0.5 overflow-auto">
+                  {pastePreview.servers.map((s) => (
+                    <li key={s.id} className="font-mono text-[11px] text-l2">
+                      {s.name}
+                      <span className="ml-2 text-l4">
+                        {s.kind === "stdio"
+                          ? `${s.command} ${s.args.join(" ")}`
+                          : s.url}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {pastePreview.skipped.length > 0 && (
+                  <p className="mt-1 text-[11px] text-l4">
+                    同名跳过：{pastePreview.skipped.join("、")}
+                  </p>
+                )}
+                {pastePreview.suspects.length > 0 && (
+                  <p className="mt-1 text-[11px] text-warn-text">
+                    疑似明文密钥：{pastePreview.suspects.join("、")}
+                    （建议改用 $VAR 引用）
+                  </p>
+                )}
+              </div>
+            )}
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                className={ghostActionClass}
+                onClick={() => {
+                  setPasteOpen(false);
+                  setPastePreview(null);
+                }}
+              >
+                取消
+              </button>
+              {pastePreview ? (
+                <button
+                  className={primaryActionClass}
+                  disabled={saving || pastePreview.servers.length === 0}
+                  onClick={() => void onPasteConfirm()}
+                >
+                  {saving ? "导入中…" : "确认导入"}
+                </button>
+              ) : (
+                <button
+                  className={primaryActionClass}
+                  disabled={saving || !pasteText.trim()}
+                  onClick={() => void onPasteParse()}
+                >
+                  {saving ? "解析中…" : "解析"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </PageFrame>
+  );
+}

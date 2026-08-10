@@ -53,7 +53,7 @@ pub struct AppSettingsDto {
     /// 快捷键绑定（"mod+shift+k" 格式，mod=⌘/Ctrl；空串 = 禁用该快捷键）
     pub hotkey_palette: Option<String>,
     pub hotkey_hide_chrome: Option<String>,
-    /// ⌘1–⌘7 页切是一组七个绑定，按开关处理不逐个自定义
+    /// ⌘1–⌘8 页切是一组八个绑定，按开关处理不逐个自定义
     pub hotkey_page_switch: Option<bool>,
 }
 

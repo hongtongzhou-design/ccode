@@ -56,6 +56,7 @@ import type {
   ProjectDto,
   SessionMetaDto,
   SkillDto,
+  McpServerDto,
   WorkspaceDto,
   WorkspaceHealthDto,
 } from "../types";
@@ -454,8 +455,11 @@ const TerminalView = memo(function TerminalView({
   // 当前 agent 已启用的技能清单（技能页开关同步）；点击 pill 展开，一键使用
   const [agentSkills, setAgentSkills] = useState<SkillDto[]>([]);
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
+  // 当前 agent 已分发的 MCP server 清单（MCP 页开关同步）；点击 pill 展开，一键提及/管理
+  const [agentMcps, setAgentMcps] = useState<McpServerDto[]>([]);
+  const [mcpMenuOpen, setMcpMenuOpen] = useState(false);
 
-  // 当前 agent 已启用的技能数与清单（技能页开关同步）
+  // 当前 agent 已启用的技能数与清单（技能页开关同步）+ 已分发的 MCP server（MCP 页开关同步）
   useEffect(() => {
     invoke<SkillDto[]>("list_skills")
       .then((all) => {
@@ -467,6 +471,9 @@ const TerminalView = memo(function TerminalView({
         setAgentSkills([]);
         setSkillCount(0);
       });
+    invoke<McpServerDto[]>("list_mcp_servers")
+      .then((all) => setAgentMcps(all.filter((s) => s.apps[agentId])))
+      .catch(() => setAgentMcps([]));
   }, [agentId]);
 
   /** 一键使用技能：运行中注入当前终端输入框（不自动发送）；未启动写进首条指令 */
@@ -479,6 +486,124 @@ const TerminalView = memo(function TerminalView({
       setPromptText((t) => (t ? `${t}\n${text}` : text));
     }
     setSkillMenuOpen(false);
+  }
+
+  /** 一键提及 MCP server：同技能注入机制（提示 agent 调用其工具；分发变更对新会话生效） */
+  function useMcp(name: string) {
+    const text = `使用 ${name} 这个 MCP server 提供的工具：`;
+    if (running && activePtyId) {
+      invoke("pty_write", { id: activePtyId, data: text }).catch(() => {});
+    } else {
+      setShowPrompt(true);
+      setPromptText((t) => (t ? `${t}\n${text}` : text));
+    }
+    setMcpMenuOpen(false);
+  }
+
+  /** 技能清单 pill（展开/收缩启动栏共用；up=true 向上弹出，收缩栏在页面顶部须向下） */
+  function renderSkillMenu(up: boolean) {
+    if (skillCount === 0) return null;
+    return (
+      <span className="relative">
+        <button
+          type="button"
+          onClick={() => setSkillMenuOpen((v) => !v)}
+          title="展开该 agent 已启用的技能清单，点击一键使用"
+          aria-expanded={skillMenuOpen}
+          className="rounded bg-inset px-1.5 py-0.5 text-l3 hover:bg-seg-sel hover:text-l1"
+        >
+          ◈ {skillCount} 技能
+        </button>
+        {skillMenuOpen && (
+          <>
+            {/* 点击浮层外任意处关闭 */}
+            <div
+              className="fixed inset-0 z-40"
+              onClick={() => setSkillMenuOpen(false)}
+            />
+            {/* 技能清单：一键使用（运行中注入终端输入框，未启动写进首条指令） */}
+            <ul
+              className={`absolute ${up ? "bottom-full mb-1" : "top-full mt-1"} z-50 max-h-56 w-64 overflow-auto rounded-md border border-field bg-raised p-1`}
+            >
+              {agentSkills.map((s) => (
+                <li key={s.id}>
+                  <button
+                    type="button"
+                    onClick={() => useSkill(s.name)}
+                    className="flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-white/5"
+                  >
+                    <span className="text-xs text-l1">{s.name}</span>
+                    {s.description && (
+                      <span className="truncate text-[11px] text-l4">
+                        {s.description}
+                      </span>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </span>
+    );
+  }
+
+  /** MCP 清单 pill（同技能入口形态；分发到该 agent 的 server 一键提及，底部入口跳 MCP 页管理） */
+  function renderMcpMenu(up: boolean) {
+    if (agentMcps.length === 0) return null;
+    return (
+      <span className="relative">
+        <button
+          type="button"
+          onClick={() => setMcpMenuOpen((v) => !v)}
+          title="该 agent 已分发的 MCP server 清单（MCP 页管理分发）"
+          aria-expanded={mcpMenuOpen}
+          className="rounded bg-inset px-1.5 py-0.5 text-l3 hover:bg-seg-sel hover:text-l1"
+        >
+          ⌗ {agentMcps.length} MCP
+        </button>
+        {mcpMenuOpen && (
+          <>
+            <div
+              className="fixed inset-0 z-40"
+              onClick={() => setMcpMenuOpen(false)}
+            />
+            <ul
+              className={`absolute ${up ? "bottom-full mb-1" : "top-full mt-1"} z-50 max-h-56 w-64 overflow-auto rounded-md border border-field bg-raised p-1`}
+            >
+              {agentMcps.map((s) => (
+                <li key={s.id}>
+                  <button
+                    type="button"
+                    onClick={() => useMcp(s.name)}
+                    className="flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-white/5"
+                  >
+                    <span className="text-xs text-l1">{s.name}</span>
+                    <span className="truncate font-mono text-[11px] text-l4">
+                      {s.kind === "stdio"
+                        ? `${s.command} ${s.args.join(" ")}`
+                        : s.url}
+                    </span>
+                  </button>
+                </li>
+              ))}
+              <li className="border-t border-hairline">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMcpMenuOpen(false);
+                    setPage("mcp");
+                  }}
+                  className="flex w-full rounded px-2 py-1.5 text-left text-[11px] text-l4 hover:bg-white/5 hover:text-l2"
+                >
+                  管理 MCP 分发 →（变更对新会话生效）
+                </button>
+              </li>
+            </ul>
+          </>
+        )}
+      </span>
+    );
   }
 
   // 向标签条上报标题/运行状态；值没变就不惊动父组件
@@ -1373,47 +1498,8 @@ const TerminalView = memo(function TerminalView({
             </div>
           )}
           <div className="mb-2 flex min-h-7 flex-wrap items-center gap-2 border-t border-hairline pt-1 text-xs">
-            {skillCount > 0 && (
-              <span className="relative">
-                <button
-                  type="button"
-                  onClick={() => setSkillMenuOpen((v) => !v)}
-                  title="展开该 agent 已启用的技能清单，点击一键使用"
-                  aria-expanded={skillMenuOpen}
-                  className="rounded bg-inset px-1.5 py-0.5 text-l3 hover:bg-seg-sel hover:text-l1"
-                >
-                  ◈ {skillCount} 技能
-                </button>
-                {skillMenuOpen && (
-                  <>
-                    {/* 点击浮层外任意处关闭 */}
-                    <div
-                      className="fixed inset-0 z-40"
-                      onClick={() => setSkillMenuOpen(false)}
-                    />
-                    {/* 技能清单：一键使用（运行中注入终端输入框，未启动写进首条指令） */}
-                    <ul className="absolute bottom-full z-50 mb-1 max-h-56 w-64 overflow-auto rounded-md border border-field bg-raised p-1">
-                      {agentSkills.map((s) => (
-                        <li key={s.id}>
-                          <button
-                            type="button"
-                            onClick={() => useSkill(s.name)}
-                            className="flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-white/5"
-                          >
-                            <span className="text-xs text-l1">{s.name}</span>
-                            {s.description && (
-                              <span className="truncate text-[11px] text-l4">
-                                {s.description}
-                              </span>
-                            )}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </span>
-            )}
+            {renderSkillMenu(true)}
+            {renderMcpMenu(true)}
             {initialExtraEnv && Object.keys(initialExtraEnv).length > 0 && (
               <span
                 className="rounded bg-inset px-1.5 py-0.5 text-l3"
@@ -1479,6 +1565,9 @@ const TerminalView = memo(function TerminalView({
           </span>
           {error && <span className="truncate text-err-text">{error}</span>}
           <span className="ml-auto flex shrink-0 items-center gap-1">
+            {/* 技能/MCP 入口在收缩态（运行中）同样可用——展开栏收起后不能丢入口 */}
+            {renderSkillMenu(false)}
+            {renderMcpMenu(false)}
             <button
               type="button"
               onClick={() => setBarExpanded(true)}

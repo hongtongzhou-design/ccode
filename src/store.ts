@@ -53,7 +53,7 @@ export interface AppSettings {
   /** 快捷键绑定（"mod+shift+k" 格式，mod=⌘/Ctrl；空串 = 禁用） */
   hotkeyPalette?: string;
   hotkeyHideChrome?: string;
-  /** ⌘1–⌘7 页切开关（一组七个绑定，不逐个自定义） */
+  /** ⌘1–⌘8 页切开关（一组八个绑定，不逐个自定义） */
   hotkeyPageSwitch?: boolean;
 }
 
