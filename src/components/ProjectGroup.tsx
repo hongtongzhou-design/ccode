@@ -14,6 +14,8 @@ import { Checkbox, hoverRevealClass } from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import { startPipelineStep } from "../pipeline-start";
+import { normSep } from "../path-utils";
+import type { RunOverviewInput } from "../run-overview";
 import type {
   DiscoveredResourceDto,
   EnsureGitDto,
@@ -49,10 +51,58 @@ function DashBlock({ k, done }: { k: string; done: boolean }) {
   );
 }
 
+/** 步进器悬浮提示（应用内 tooltip）：fixed 定位不随滚动容器走，滚动/缩放即关。
+ *  WKWebView 的原生 title 悬浮有平台差异（不渲染或移开后残留数秒），圆与方块统一走这里；
+ *  事件一律挂在包裹 span 上，禁用按钮也能悬浮查看。 */
+function useHoverTip(ref: React.RefObject<HTMLElement | null>) {
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!tip) return;
+    const hide = () => setTip(null);
+    window.addEventListener("scroll", hide, true);
+    window.addEventListener("resize", hide);
+    return () => {
+      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("resize", hide);
+    };
+  }, [tip]);
+  const show = () => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // 横向钳制在窗口内（tooltip max-w-72 半宽 144 + 边距）
+    const x = Math.min(
+      Math.max(r.left + r.width / 2, 150),
+      window.innerWidth - 150,
+    );
+    setTip({ x, y: r.bottom + 8 });
+  };
+  return { tip, show, hide: () => setTip(null) };
+}
+
+function HoverTip({
+  tip,
+  text,
+}: {
+  tip: { x: number; y: number } | null;
+  text: string;
+}) {
+  if (!tip) return null;
+  return (
+    <div
+      role="tooltip"
+      className="pointer-events-none fixed z-50 max-w-72 -translate-x-1/2 whitespace-pre-line rounded-md border border-hairline bg-raised px-2.5 py-1.5 text-left text-xs leading-5 text-l2"
+      style={{ left: tip.x, top: tip.y }}
+    >
+      {text}
+    </div>
+  );
+}
+
 /** 功能小方块（圆前=编辑简报 / 圆后=产物核验）：平时与虚线段等大混在线里（5px），
  *  hover/聚焦时那一块提亮 cta 并略放大（scale-150，容器已 overflow-y-clip 不会触发滚动条晃动）；
  *  28px 透明热区（绝对定位子元素撑开，不占布局）保证好按；完成列亮色（l2）、未完成列暗（hairline），
- *  方块不用绿色——绿色只给链条与完成圆；功能名只在 title 悬浮 */
+ *  方块不用绿色——绿色只给链条与完成圆；功能名走应用内 tooltip（与大圆同一套，见 useHoverTip） */
 function SquareButton({
   title,
   label,
@@ -69,32 +119,50 @@ function SquareButton({
   done?: boolean;
   onClick: () => void;
 }) {
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  const { tip, show, hide } = useHoverTip(wrapRef);
   return (
-    <button
-      type="button"
-      title={title}
-      aria-label={label}
-      aria-expanded={expanded}
-      disabled={disabled}
-      onClick={onClick}
-      className={`relative block h-[5px] w-[5px] shrink-0 cursor-pointer rounded-[1px] transition-[transform,background-color] duration-300 hover:scale-150 hover:bg-cta focus-visible:scale-150 focus-visible:bg-cta disabled:cursor-not-allowed ${
-        done ? "bg-l2 group-hover:brightness-110" : "bg-hairline group-hover:bg-l3"
-      }`}
+    <span
+      ref={wrapRef}
+      className="relative block h-[5px] w-[5px] shrink-0"
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
     >
-      <span className="absolute left-1/2 top-1/2 size-[28px] -translate-x-1/2 -translate-y-1/2" />
-    </button>
+      <button
+        type="button"
+        aria-label={label}
+        aria-expanded={expanded}
+        disabled={disabled}
+        onClick={() => {
+          hide();
+          onClick();
+        }}
+        className={`relative block h-[5px] w-[5px] shrink-0 cursor-pointer rounded-[1px] transition-[transform,background-color] duration-300 hover:scale-150 hover:bg-cta focus-visible:scale-150 focus-visible:bg-cta disabled:cursor-not-allowed ${
+          done ? "bg-l2 group-hover:brightness-110" : "bg-hairline group-hover:bg-l3"
+        }`}
+      >
+        <span className="absolute left-1/2 top-1/2 size-[28px] -translate-x-1/2 -translate-y-1/2" />
+      </button>
+      <HoverTip tip={tip} text={title} />
+    </span>
   );
 }
 
 /** 步进器单元格：真实 flex 块拼出的方块节律线（5px 块 + 5px 间隙）。
  *  虚线块数按列宽用 ResizeObserver 现算（每块含隙占 10px），任何列宽/步骤数下尺寸与间隔严格一致，
- *  圆与方块都是节律中的节点（圆前后各一道 5px 间隙），不存在渐变相位残段。 */
+ *  圆与方块都是节律中的节点（圆前后各一道 5px 间隙），不存在渐变相位残段。
+ *  大圆的悬浮信息走应用内 tooltip（useHoverTip，fixed 定位、滚动即关、点击即关）：
+ *  原生 title 在 WKWebView 上行为不稳定（不渲染或移开后残留数秒串到相邻控件），
+ *  状态/目录/agent/点击动作提示必须可见，且禁用按钮也能触发（事件挂在包裹 span 上）。 */
 function StepperCell({
   circleClass,
   circleTitle,
   circleLabel,
   circleDisabled,
   pulsing,
+  attention,
   onCircleClick,
   briefTitle,
   briefLabel,
@@ -110,6 +178,8 @@ function StepperCell({
   circleLabel: string;
   circleDisabled: boolean;
   pulsing: boolean;
+  /** 终端注意力点：confirm=待确认（warn 点）、done=已完成（done 绿点）；null/缺省不显示 */
+  attention?: "confirm" | "done" | null;
   onCircleClick: () => void;
   briefTitle: string;
   briefLabel: string;
@@ -121,6 +191,8 @@ function StepperCell({
   onArtifactsClick: () => void;
 }) {
   const ref = useRef<HTMLLIElement>(null);
+  const circleRef = useRef<HTMLButtonElement>(null);
+  const { tip, show: showTip, hide: hideTip } = useHoverTip(circleRef);
   const [dashCount, setDashCount] = useState(0);
   const [slack, setSlack] = useState(0);
   useEffect(() => {
@@ -160,19 +232,35 @@ function StepperCell({
         onClick={onBriefClick}
       />
       <span
-        className="shrink-0"
+        className="relative shrink-0"
         style={{ marginInline: slack / 2 }}
+        onMouseEnter={showTip}
+        onMouseLeave={hideTip}
+        onFocus={showTip}
+        onBlur={hideTip}
       >
         <button
+          ref={circleRef}
           type="button"
           disabled={circleDisabled}
-          title={circleTitle}
           aria-label={circleLabel}
           className={`block h-[24px] w-[24px] shrink-0 cursor-pointer rounded-full transition-[filter,color,background-color] duration-300 hover:brightness-110 disabled:cursor-not-allowed ${circleClass} ${
             pulsing ? "animate-pulse" : ""
           } ${active ? "ring-2 ring-cta/50" : ""}`}
-          onClick={onCircleClick}
+          onClick={() => {
+            // 点击即关 tooltip：跳转终端/开覆盖层后不留残留悬浮
+            hideTip();
+            onCircleClick();
+          }}
         />
+        {attention && (
+          <span
+            className={`pointer-events-none absolute right-0 top-0 size-2 rounded-full ${
+              attention === "confirm" ? "bg-warn" : "bg-done"
+            }`}
+          />
+        )}
+        <HoverTip tip={tip} text={circleTitle} />
       </span>
       <SquareButton
         title={artifactsTitle}
@@ -207,6 +295,23 @@ function wsLastConfig(
   }
 }
 
+/** 步骤的终端注意力（步进器大圆角标）：cwd 落在工作区内的运行标签，confirm（待确认）优先于 done（已完成） */
+function stepAttention(
+  ws: WorkspaceDto | undefined,
+  inputs: RunOverviewInput[],
+): "confirm" | "done" | null {
+  if (!ws) return null;
+  const root = normSep(ws.worktreePath).replace(/\/+$/, "");
+  let found: "confirm" | "done" | null = null;
+  for (const input of inputs) {
+    const cwd = normSep(input.cwd).replace(/\/+$/, "");
+    if (cwd !== root && !cwd.startsWith(`${root}/`)) continue;
+    if (input.attention === "confirm") return "confirm";
+    if (input.attention === "done") found = "done";
+  }
+  return found;
+}
+
 /** 步骤状态：从绑定工作区（steps[].workspaceName 匹配工作区名）的 health/drift 派生，纯展示无双状态机 */
 type StepStatusKey =
   | "pending"
@@ -216,7 +321,7 @@ type StepStatusKey =
   | "done"
   | "checking";
 
-/** 状态文字只进悬浮 title（白话双层），胶囊上不再直接显示 */
+/** 状态文字只进悬浮 tooltip（白话双层），圆上不再直接显示 */
 const STEP_STATUS_LABEL: Record<StepStatusKey, string> = {
   pending: "待开始",
   active: "进行中",
@@ -718,6 +823,8 @@ export default function ProjectGroup({
   const setEnterCwdReq = useAppStore((s) => s.setEnterCwdReq);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const profiles = useAppStore((s) => s.profiles);
+  // 步进器大圆的注意力点：终端运行状态镜像（TerminalPage 唯一写入方，只读消费）
+  const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
   function viewPdfResource(r: ProjectResourceDto) {
     setPreviewReq({
       path: absoluteResourcePath(projectPath, r.path),
@@ -1109,6 +1216,8 @@ export default function ProjectGroup({
                       ? profiles.find((p) => p.id === last.profileId)
                       : undefined;
                     // 状态/目录/agent + 点击动作提示并入悬浮全文（白话双层），圆上只留状态色
+                    // 注意力角标：cwd 落在工作区内的终端标签有待确认/已完成时上点（confirm 优先）
+                    const attention = stepAttention(activeWs, terminalRunInputs);
                     const circleTitle = [
                       `${step.name} · ${statusLabel}`,
                       activeWs
@@ -1119,6 +1228,11 @@ export default function ProjectGroup({
                       last.agentId
                         ? `Agent：${last.agentId}${lastProfile ? ` / ${lastProfile.name}` : ""}`
                         : null,
+                      attention === "confirm"
+                        ? "终端：待你确认"
+                        : attention === "done"
+                          ? "终端：任务已完成"
+                          : null,
                       st.key === "pending"
                         ? st.ws
                           ? "点击恢复工作区"
@@ -1148,6 +1262,7 @@ export default function ProjectGroup({
                         circleLabel={`${step.name}：${statusLabel}`}
                         circleDisabled={circleDisabled}
                         pulsing={starting === i}
+                        attention={attention}
                         onCircleClick={() => onCircleClick(i, st)}
                         briefTitle="编辑简报"
                         briefLabel={`编辑简报：${step.name}`}

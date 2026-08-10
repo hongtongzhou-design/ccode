@@ -499,6 +499,7 @@ Windows release 构建使用 `windows_subsystem = "windows"`，没有可继承�
 | v3.51 | **Windows 闪窗修复 + 一键诊断包**：正式版无父控制台时，终端页 Git 状态轮询会让每个 `git.exe` 创建 `conhost.exe`，开发版因继承控制台而无法复现；所有非交互后台命令统一经 `process.rs` 加 `CREATE_NO_WINDOW`，外部终端保持可见。设置页诊断升级为 ZIP 支持包：系统/WebView2/GPU/WebGL、语言/输入法、功能开关、应用日志和有界进程生命周期；不采集环境变量，参数与日志 Rust 层脱敏，系统级只额外观察 CTF/TextInputHost。后台命令包装与 250ms 扫描由 `cfg(windows)` 隔离，macOS/Linux 继续使用标准 `Command` 且无监控线程。 |
 | v3.52 | **诊断包驱动的收尾修复**（Windows 现场包 `ccode-diagnostics-2026-08-09` 离线分析结论）：① git 仓库探测风暴——改动面板 8s×挂载标签轮询使非仓库 cwd 每轮真 spawn git（实测 85 秒 73 次同目录 `rev-parse`），`git_info::probe_is_work_tree` 增加 30s 负缓存（只缓存否定结果，init 后主动失效）；② `list_repos` home 排除被 `canonicalize` 的 `\\?\` 前缀绕过，home 改同口径规范化后再比；③ WebGL 探针「renderer 不明保守回退」收窄为仅 Windows，避免 WKWebView 屏蔽 debug renderer 信息时误伤 macOS WebGL 渲染。spawn-hook/扫描辅助函数全部 `cfg(windows)` 门控，非 Windows 构建零警告。 |
 | v3.53 | **技能一键应用更新**（§6.13 收尾）：`apply_skill_update` 按安装时记录的 repo/ref/subdir 重下 zipball，`import_zip_impl` 新增 `only` 过滤保证只覆盖同名技能（同仓库其他技能不新增不覆盖），复用覆盖+备份路径并刷新 revision 基线；下载循环与版本回写抽为 `download_github_zipball`/`record_github_revision` 供导入与更新共用。上游改名/移动时明确报错引导手动重新导入。前端在详情面板「GitHub 可更新」旁与行 ⋯ 菜单各加一处一键入口，确认走 confirmDialog。 |
+| v3.54 | **步进器信息可达性 + 原生控件主题同步**：① 大圆悬浮信息从原生 title 改应用内 tooltip（`useHoverTip`/`HoverTip`：fixed 定位、横向钳制、滚动/缩放/点击即关，事件挂包裹 span 禁用态可用）——原生 title 在 WKWebView 不渲染或残留串到相邻控件；圆与小方块统一，禁回退原生 title。② 大圆右上角注意力角标（待确认=warn/已完成=done，confirm 优先），只读消费 `terminalRunInputs` 镜像不新增轮询。③ 切主题同步原生窗口外观（`applyTheme` → `setTheme`），修复深色主题下原生 `<select>` 弹出系统浅色列表；capabilities 加 `core:window:allow-set-theme`。 |
 
 ## 11. 演进线（2026-08 定稿）
 

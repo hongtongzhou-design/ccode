@@ -306,7 +306,10 @@ src-tauri/src/
   略暗、面板向白浮起、hairline/field 为深灰线、cta 加深保白底对比，状态语义色共享深色值；白色半透明 hover/缩进线/
   滚动条拇指在浅色下由 App.css 统一翻转为黑色半透明），运行时切 `document.documentElement.dataset.theme`，
   **改主题只动这一个文件**，组件里禁散落 hex。主题清单单一出处 `src/themes.ts`（settings.rs KNOWN_THEMES 与
-  TerminalPage XTERM_BG_FG 需同步）。默认主题 CTA 粉 `#faa8d4`（cta-text 近黑）；`--color-raised`（浮起面板/pill 底）、
+  TerminalPage XTERM_BG_FG 需同步）。**切主题同时同步原生窗口外观**（`applyTheme` 调 `setTheme(light/dark)`，
+  浅色判定走 themes.ts 的 `light` 标记）——原生 `<select>` 下拉、滚动条等按 NSWindow appearance 渲染，
+  只改 CSS 变量时深色主题下弹出系统浅色列表；capabilities 需保留 `core:window:allow-set-theme`。
+  默认主题 CTA 粉 `#faa8d4`（cta-text 近黑）；`--color-raised`（浮起面板/pill 底）、
   `--color-bubble`（用户消息气泡）、`--color-nav-accent`（侧栏选中左条+选中图标，默认靛蓝、其余取各自 CTA 色）。
 - 四层「浮起」结构（rail/rail2/canvas/inset 逐级变亮）；文字冷白→灰四档；每主题独立 CTA 强调色（按钮/选中用 `cta`；可操作
   状态如「可合并」用**按钮本身的 cta 高亮**，不另挂 pill；纯状态 pill 用 inset 灰底 + 语义色小圆点）；**状态语义色独立于
@@ -397,9 +400,12 @@ src-tauri/src/
   **大圆（h-6 w-6，24px）= 纯色实心圆（内部无字符）+ 唯一主推进点击**：done=bg-ok-text；进行中/checking=bg-cta（animate-pulse）；
   待评审=bg-cta-pill；阻塞=bg-warn；pending=bg-l4 实心灰。点击语义按状态：
   pending 无工作区=startStep、已归档=restoreWs、进行中/待评审/阻塞=onOpenTerminal(ws)、done=setPendingTerminal 开主仓 shell 终端。
-  状态/目录/agent/profile 全部收进圆的悬浮 title（白话双层）。**圆前/圆后小方块 = 节律中的普通虚线块（SquareButton：
+  状态/目录/agent/profile + 点击动作提示收进**应用内 tooltip**（`useHoverTip`/`HoverTip`，fixed 定位、横向钳制、滚动/缩放/点击即关）：
+  原生 title 在 WKWebView 上行为不稳定（不渲染或残留数秒串到相邻控件），圆与小方块的悬浮提示**一律走应用内 tooltip，禁再回退原生 title**；
+  事件挂包裹 span，禁用态也可悬浮。**大圆右上角注意力角标**（size-2 圆点）：cwd 落在工作区内的终端标签有待确认=bg-warn /
+  已完成=bg-done（confirm 优先），数据只读消费 `terminalRunInputs` 镜像，不新增轮询。**圆前/圆后小方块 = 节律中的普通虚线块（SquareButton：
   bg-hairline 5px 与虚段同色等大、无字符、无衬底、无状态区分）+ 28px 透明热区（绝对定位子元素，不占布局）**：
-  视觉混在虚线里，仅 hover/focus 提亮 bg-cta 表明可点，功能名只在 title 悬浮出现；圆前=openEditor(i) 打开流水线编辑器并定位该步骤卡片（PipelineEditor `focusStep` prop 滚动 +
+  视觉混在虚线里，仅 hover/focus 提亮 bg-cta 表明可点，功能名在应用内 tooltip 出现；圆前=openEditor(i) 打开流水线编辑器并定位该步骤卡片（PipelineEditor `focusStep` prop 滚动 +
   聚焦简报框）；圆后=strip 下方就地展开 ArtifactChecklist（单开手风琴记步骤 index；root 口径同任务行：done 读项目根、其余读工作树、
   无工作区禁用）。步骤 ⋯ 收名称行右侧 hover 才现（hoverRevealClass）；解决冲突/评审/合并统一在下方任务行，步进器不再放第二行动作。
 

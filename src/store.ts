@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
+import { THEMES } from "./themes";
 import type { RunOverviewInput } from "./run-overview";
 import type {
   DetectResult,
@@ -55,9 +57,16 @@ export interface AppSettings {
   hotkeyPageSwitch?: boolean;
 }
 
-/** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效 */
+/** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效；
+ *  同时同步原生窗口外观——原生 <select> 下拉/滚动条按 NSWindow appearance 渲染，
+ *  只改 CSS 变量时深色主题下弹出的仍是系统浅色列表 */
 export function applyTheme(id: string) {
-  document.documentElement.dataset.theme = id || "midnight";
+  const theme = id || "midnight";
+  document.documentElement.dataset.theme = theme;
+  const light = THEMES.some((t) => t.id === theme && "light" in t && t.light);
+  void getCurrentWindow()
+    .setTheme(light ? "light" : "dark")
+    .catch(() => {});
 }
 
 /** 工作区页 → 终端页的交接：新开一个标签，预填 cwd + 注入 env（如端口段） */
