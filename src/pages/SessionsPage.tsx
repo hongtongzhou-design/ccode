@@ -6,6 +6,7 @@ import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
 import HandoffPicker from "../components/HandoffPicker";
+import DigestPicker from "../components/DigestPicker";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
 import {
   Checkbox,
@@ -723,6 +724,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   );
   // 「◈ 接力到…」目标选择器（回放头部 ⋯ 菜单进入）
   const [handoffFor, setHandoffFor] = useState<SessionMetaDto | null>(null);
+  // 「◈ 提炼接力…」目标选择器（AI 蒸馏简报；回放头部下拉与行内 ⋯ 菜单进入）
+  const [digestFor, setDigestFor] = useState<SessionMetaDto | null>(null);
 
   // 与右键菜单一致：Escape / 任意滚动关闭，避免滚动后浮层错位
   useEffect(() => {
@@ -1562,6 +1565,17 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             </button>
             <button
               className={`${menuItem} disabled:opacity-50`}
+              disabled={!selected.alive && !selected.pinned}
+              title="AI 提炼全会话成紧凑简报，新会话读简报续作（不带旧上下文）"
+              onClick={() => {
+                setResumeMenu(null);
+                setDigestFor(selected);
+              }}
+            >
+              ◈ 提炼接力…
+            </button>
+            <button
+              className={`${menuItem} disabled:opacity-50`}
               disabled={exporting || (!selected.alive && !selected.pinned)}
               onClick={() => {
                 setResumeMenu(null);
@@ -1594,6 +1608,20 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             title: handoffFor.customTitle || handoffFor.title,
           }}
           onClose={() => setHandoffFor(null)}
+        />
+      )}
+
+      {/* 「◈ 提炼接力…」目标选择器（AI 蒸馏简报，三路径续作） */}
+      {digestFor && (
+        <DigestPicker
+          source={{
+            agent: digestFor.agent,
+            sessionId: digestFor.sessionId,
+            filePath: digestFor.filePath,
+            cwd: digestFor.projectPath,
+            title: digestFor.customTitle || digestFor.title,
+          }}
+          onClose={() => setDigestFor(null)}
         />
       )}
 
@@ -1676,6 +1704,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       }}
                     >
                       复制恢复命令
+                    </button>
+                    <button
+                      className={menuItem}
+                      title="AI 提炼全会话成紧凑简报，新会话读简报续作（不带旧上下文）"
+                      onClick={() => {
+                        setMenu(null);
+                        setDigestFor(menu.session);
+                      }}
+                    >
+                      ◈ 提炼接力…
                     </button>
                   </>
                 )}

@@ -30,6 +30,7 @@ import ContextMenu from "../components/ContextMenu";
 import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
 import HandoffPicker, { type HandoffSource } from "../components/HandoffPicker";
+import DigestPicker from "../components/DigestPicker";
 import { LoadingRows } from "../components/PageFrame";
 import ProjectRail from "../components/ProjectRail";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
@@ -222,6 +223,7 @@ const TerminalView = memo(function TerminalView({
   onStatus,
   onSessionUpdate,
   onHandoff,
+  onDigest,
   focusMode,
   onActions,
   onRestoreComplete,
@@ -270,6 +272,8 @@ const TerminalView = memo(function TerminalView({
   onSessionUpdate: (id: string, s: SessionLinkState) => void;
   /** 「◈ 接力到…」：把当前关联会话交给父级的接力目标选择器 */
   onHandoff?: (source: HandoffSource) => void;
+  /** 「◈ 提炼接力…」：把当前关联会话交给父级的提炼接力选择器（AI 蒸馏简报） */
+  onDigest?: (source: HandoffSource) => void;
   /** 专注终端：隐藏标签内状态条（动作移到标签条 ⋯ 菜单） */
   focusMode?: boolean;
   /** 向父级注册本标签的动作表（标签条 ⋯ 菜单调用） */
@@ -1357,6 +1361,17 @@ const TerminalView = memo(function TerminalView({
                 title: linkedSessionTitle,
               }),
           },
+          {
+            label: "◈ 提炼接力…",
+            onSelect: () =>
+              onDigest?.({
+                agent: linkCtxRef.current?.agentId ?? agentId,
+                sessionId: linkedSessionId,
+                filePath: sessionFile,
+                cwd,
+                title: linkedSessionTitle,
+              }),
+          },
         ]
       : []),
     ...(!running && !shellActive
@@ -1760,6 +1775,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [handoffSource, setHandoffSource] = useState<HandoffSource | null>(
     null,
   );
+  // 「◈ 提炼接力…」目标选择器：AI 蒸馏全会话简报，三路径续作
+  const [digestSource, setDigestSource] = useState<HandoffSource | null>(null);
 
   /** 标签条 ⋯ 菜单项（专注终端时替代标签内状态条）：按活动标签状态裁剪（不可用的动作不出现） */
   function focusMenuItems() {
@@ -1781,6 +1798,17 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               label: "◈ 接力到…",
               onSelect: () =>
                 setHandoffSource({
+                  agent: sessAgent,
+                  sessionId: sessId,
+                  filePath: sessFile,
+                  cwd: statuses[focusedId]?.cwd ?? "~",
+                  title: sessionByTab[focusedId]?.title ?? null,
+                }),
+            },
+            {
+              label: "◈ 提炼接力…",
+              onSelect: () =>
+                setDigestSource({
                   agent: sessAgent,
                   sessionId: sessId,
                   filePath: sessFile,
@@ -3035,6 +3063,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 onStatus={reportStatus}
                 onSessionUpdate={reportSession}
                 onHandoff={setHandoffSource}
+                onDigest={setDigestSource}
                 focusMode={focusMode}
                 onActions={registerActions}
                 onRestoreComplete={finishRestore}
@@ -3431,6 +3460,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         <HandoffPicker
           source={handoffSource}
           onClose={() => setHandoffSource(null)}
+        />
+      )}
+      {digestSource && (
+        <DigestPicker
+          source={digestSource}
+          onClose={() => setDigestSource(null)}
         />
       )}
     </div>

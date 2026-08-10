@@ -75,57 +75,17 @@ fn message_text(m: &ChatMessageDto) -> String {
         .join("\n")
 }
 
-/// 组装简报 markdown（纯函数，测试直接构造消息与 git 状态）。
-/// git 为 None 或 is_repo=false 时注明非仓库。
-pub(crate) fn render_handoff_brief(
-    agent: &str,
-    session_id: &str,
-    cwd: &str,
-    title: Option<&str>,
-    messages: &[ChatMessageDto],
-    git: Option<&GitStatusDto>,
-) -> String {
-    let title = title
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| format!("未命名对话 · {}", session_id.chars().take(8).collect::<String>()));
-    let mut out = String::new();
-    out.push_str(&format!("# 接力简报：{title}\n\n"));
-    out.push_str(&format!(
-        "> 本简报由 Ccode 从 {agent} 会话生成（{}），是结构化摘要而非完整记忆。\n\n",
-        sessions::now_iso()
-    ));
+/// 共用段：任务信息（agent/cwd/标题/会话 ID）
+fn render_task_info(out: &mut String, agent: &str, session_id: &str, cwd: &str, title: &str) {
     out.push_str("## 任务信息\n\n");
     out.push_str(&format!("- 来源 Agent：{agent}\n"));
     out.push_str(&format!("- 项目目录：{cwd}\n"));
     out.push_str(&format!("- 会话标题：{title}\n"));
     out.push_str(&format!("- 会话 ID：{session_id}\n\n"));
+}
 
-    out.push_str("## 对话要点（会话尾部窗口）\n\n");
-    let users: Vec<&ChatMessageDto> = messages
-        .iter()
-        .filter(|m| m.role == "user" && !message_text(m).trim().is_empty())
-        .collect();
-    if users.is_empty() {
-        out.push_str("- （尾窗内没有可摘要的用户消息）\n");
-    } else {
-        for m in users.iter().rev().take(RECENT_USER_MESSAGES).collect::<Vec<_>>().into_iter().rev() {
-            out.push_str(&format!("- 用户：{}\n", snip(&message_text(m), USER_SNIP)));
-        }
-    }
-    let last_assistant = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant" && !message_text(m).trim().is_empty());
-    match last_assistant {
-        Some(m) => out.push_str(&format!(
-            "\n助手（最后一条回复）：\n\n{}\n\n",
-            snip(&message_text(m), ASSISTANT_SNIP)
-        )),
-        None => out.push_str("\n（尾窗内没有助手回复）\n\n"),
-    }
-
+/// 共用段：当前 git 状态（非仓库时注明）
+fn render_git_status(out: &mut String, git: Option<&GitStatusDto>) {
     out.push_str("## 当前 git 状态\n\n");
     match git {
         Some(g) if g.is_repo => {
@@ -155,11 +115,95 @@ pub(crate) fn render_handoff_brief(
         }
         _ => out.push_str("- （项目目录不是 git 仓库）\n"),
     }
+}
 
+/// 共用段：接力说明（「非完整记忆」声明，接力家族统一措辞）
+fn render_handoff_note(out: &mut String, agent: &str) {
     out.push_str("\n## 接力说明\n\n");
     out.push_str(&format!("- 本简报由 Ccode 从 {agent} 会话生成，非完整记忆。\n"));
     out.push_str("- 源会话的完整上下文仍保留在原 Agent 中；请结合项目文件与 git 历史补全背景。\n");
     out.push_str("- 不要假设你知道简报之外的对话细节；不确定时先读代码与相关文件。\n");
+}
+
+/// 组装简报 markdown（纯函数，测试直接构造消息与 git 状态）。
+/// git 为 None 或 is_repo=false 时注明非仓库。
+pub(crate) fn render_handoff_brief(
+    agent: &str,
+    session_id: &str,
+    cwd: &str,
+    title: Option<&str>,
+    messages: &[ChatMessageDto],
+    git: Option<&GitStatusDto>,
+) -> String {
+    let title = title
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| format!("未命名对话 · {}", session_id.chars().take(8).collect::<String>()));
+    let mut out = String::new();
+    out.push_str(&format!("# 接力简报：{title}\n\n"));
+    out.push_str(&format!(
+        "> 本简报由 Ccode 从 {agent} 会话生成（{}），是结构化摘要而非完整记忆。\n\n",
+        sessions::now_iso()
+    ));
+    render_task_info(&mut out, agent, session_id, cwd, &title);
+
+    out.push_str("## 对话要点（会话尾部窗口）\n\n");
+    let users: Vec<&ChatMessageDto> = messages
+        .iter()
+        .filter(|m| m.role == "user" && !message_text(m).trim().is_empty())
+        .collect();
+    if users.is_empty() {
+        out.push_str("- （尾窗内没有可摘要的用户消息）\n");
+    } else {
+        for m in users.iter().rev().take(RECENT_USER_MESSAGES).collect::<Vec<_>>().into_iter().rev() {
+            out.push_str(&format!("- 用户：{}\n", snip(&message_text(m), USER_SNIP)));
+        }
+    }
+    let last_assistant = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "assistant" && !message_text(m).trim().is_empty());
+    match last_assistant {
+        Some(m) => out.push_str(&format!(
+            "\n助手（最后一条回复）：\n\n{}\n\n",
+            snip(&message_text(m), ASSISTANT_SNIP)
+        )),
+        None => out.push_str("\n（尾窗内没有助手回复）\n\n"),
+    }
+
+    render_git_status(&mut out, git);
+    render_handoff_note(&mut out, agent);
+    out
+}
+
+/// 「◈ 提炼接力」简报：任务信息 + git 状态沿用规则式简报的共用段，
+/// 对话要点换成 AI 蒸馏全会话后的结构化正文（非完整记忆声明不变）。
+pub(crate) fn render_digest_brief(
+    agent: &str,
+    session_id: &str,
+    cwd: &str,
+    title: Option<&str>,
+    ai_body: &str,
+    git: Option<&GitStatusDto>,
+) -> String {
+    let title = title
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| format!("未命名对话 · {}", session_id.chars().take(8).collect::<String>()));
+    let mut out = String::new();
+    out.push_str(&format!("# 接力简报（AI 提炼）：{title}\n\n"));
+    out.push_str(&format!(
+        "> 本简报由 Ccode 用 AI 从 {agent} 会话全文提炼（{}），是结构化摘要而非完整记忆。\n\n",
+        sessions::now_iso()
+    ));
+    render_task_info(&mut out, agent, session_id, cwd, &title);
+    render_git_status(&mut out, git);
+    out.push_str("\n## 会话要点（AI 提炼）\n\n");
+    out.push_str(ai_body.trim());
+    out.push('\n');
+    render_handoff_note(&mut out, agent);
     out
 }
 
@@ -274,6 +318,72 @@ pub async fn build_handoff_brief(
     })
     .await
     .map_err(|e| format!("生成接力简报失败: {e}"))?
+}
+
+/// 「◈ 提炼接力」送入 AI 的会话文本上限（比会话摘要 8KB 宽：提炼要覆盖全会话脉络）
+const DIGEST_CAP: usize = 24 * 1024;
+
+fn build_session_digest_impl(
+    profiles: Vec<crate::profiles::Profile>,
+    agent: &str,
+    session_id: &str,
+    file_path: &str,
+    cwd: &str,
+    title: Option<&str>,
+    target_path: Option<&str>,
+) -> Result<HandoffBriefDto, String> {
+    // 全会话读取（DTO 层已脱敏）：提炼要覆盖中段的关键决策，规则式简报的尾窗不够
+    let messages = sessions::conversation_impl(agent, file_path);
+    let text = crate::ai::conversation_text(&messages);
+    if text.trim().is_empty() {
+        return Err("会话内容为空，无法提炼".into());
+    }
+    let ai_body = crate::ai::ai_prompt_impl(
+        profiles,
+        None,
+        Some(crate::ai::FN_DIGEST),
+        crate::ai::build_digest_prompt(&crate::ai::cap_text_middle(&text, DIGEST_CAP)),
+    )?;
+    let git = crate::git_info::git_status_sync(cwd).ok();
+    let brief = render_digest_brief(agent, session_id, cwd, title, &ai_body, git.as_ref());
+    // AI 输出再过一次脱敏（与规则式简报同一口径），随后 64KB 上限
+    let text = redact_and_cap(&brief);
+    let path = handoff_target_path(cwd, target_path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
+    }
+    crate::profiles::atomic_write(&path, &text)?;
+    Ok(HandoffBriefDto {
+        file_path: path.to_string_lossy().into_owned(),
+        summary: format!("AI 提炼全会话 {} 条消息（已脱敏）", messages.len()),
+    })
+}
+
+/// 「◈ 提炼接力」：AI 蒸馏全会话成结构化简报并原子写入目标路径（需设置页可用的 AI profile）
+#[tauri::command]
+pub async fn build_session_digest(
+    store: tauri::State<'_, crate::profiles::ProfileStore>,
+    agent: String,
+    session_id: String,
+    file_path: String,
+    cwd: String,
+    title: Option<String>,
+    target_path: Option<String>,
+) -> Result<HandoffBriefDto, String> {
+    let profiles = store.list()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        build_session_digest_impl(
+            profiles,
+            &agent,
+            &session_id,
+            &file_path,
+            &cwd,
+            title.as_deref(),
+            target_path.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("提炼接力简报失败: {e}"))?
 }
 
 // ===== 接力链（app.db 小表）：登记时目标会话还不存在，按 agent+cwd 记录，
@@ -492,6 +602,33 @@ mod tests {
         assert!(brief.contains("（尾窗内没有可摘要的用户消息）"));
         assert!(brief.contains("（尾窗内没有助手回复）"));
         assert!(brief.contains("（项目目录不是 git 仓库）"));
+    }
+
+    /// 提炼简报结构：AI 提炼标题 + 共用任务信息/git 段 + AI 正文 + 接力声明
+    #[test]
+    fn digest_brief_structure_sections() {
+        let ai_body = "## 任务目标\n做提炼接力\n\n## 下一步建议\n先写后端";
+        let brief = render_digest_brief("claude-code", "sess-12345678", "/tmp/proj", Some("提炼接力"), ai_body, Some(&git_dto()));
+        assert!(brief.contains("# 接力简报（AI 提炼）：提炼接力"));
+        assert!(brief.contains("- 来源 Agent：claude-code"));
+        assert!(brief.contains("- 项目目录：/tmp/proj"));
+        assert!(brief.contains("- 分支：main（领先 2 / 落后 0）"));
+        assert!(brief.contains("## 会话要点（AI 提炼）\n\n## 任务目标\n做提炼接力"));
+        assert!(brief.contains("非完整记忆"));
+        // 未命名回落与规则式简报一致
+        let brief = render_digest_brief("kimi", "abc", "/tmp/x", None, "正文", None);
+        assert!(brief.contains("未命名对话 · abc"));
+        assert!(brief.contains("（项目目录不是 git 仓库）"));
+    }
+
+    /// 提炼简报同样过脱敏：AI 正文里的已知前缀密钥不得落盘
+    #[test]
+    fn digest_brief_redacts_ai_output() {
+        let secret = "sk-ant-api03-abcdef123456";
+        let brief = render_digest_brief("codex", "s1", "/tmp/p", None, &format!("密钥是 {secret}"), None);
+        let text = redact_and_cap(&brief);
+        assert!(!text.contains(secret), "AI 输出必须脱敏: {text}");
+        assert!(text.contains("已隐藏密钥"));
     }
 
     /// 脱敏生效：已知前缀密钥（sk- 开头 ≥12 字符）不得原样进简报

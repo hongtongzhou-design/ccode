@@ -19,6 +19,7 @@ pub const FN_SUMMARIZE: &str = "summarize"; // ai_summarize_session（会话摘�
 pub const FN_PR: &str = "pr"; // ai_draft_pr（PR 描述起草）
 pub const FN_DISTILL: &str = "distill"; // ai_distill_skill（✦ 沉淀为技能）
 pub const FN_CONFLICT: &str = "conflict"; // ai_conflict_advice（冲突选侧建议）
+pub const FN_DIGEST: &str = "digest"; // build_session_digest（◈ 提炼接力）
 // 「translate」由 JS 侧（技能页翻译）作为 ai_prompt 的 fnKey 显式传入，Rust 无字面引用
 #[allow(dead_code)]
 pub const FN_TRANSLATE: &str = "translate";
@@ -145,7 +146,7 @@ fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -
     }
 }
 
-fn ai_prompt_impl(
+pub(crate) fn ai_prompt_impl(
     profiles: Vec<Profile>,
     profile_id: Option<String>,
     fn_key: Option<&str>,
@@ -212,7 +213,7 @@ fn cap_text(text: &str, max: usize) -> String {
 }
 
 /// 超长时保留首尾、挖掉中间（会话文本用，头尾信息密度最高）
-fn cap_text_middle(text: &str, max: usize) -> String {
+pub(crate) fn cap_text_middle(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
@@ -242,6 +243,20 @@ fn build_summary_prompt(conversation: &str) -> String {
     format!(
         "用 3-5 行中文概括下面这个编程会话：目标是什么、做了哪些关键改动、结果如何。\
          不要逐条复述工具调用，不要客套话，直接给概括。\n\n{conversation}"
+    )
+}
+
+/// 「◈ 提炼接力」：全会话蒸馏成结构化续作简报正文，供新会话读简报续作（非完整记忆）
+pub(crate) fn build_digest_prompt(conversation: &str) -> String {
+    format!(
+        "下面是一个 AI 编程会话的完整对话记录。请把它提炼成一份「接力简报」，\
+         供另一个全新的 AI 会话阅读后接着把任务做完——目标是保留续作所需的全部关键信息，\
+         同时丢掉寒暄、试错过程与重复内容。\n\
+         只输出中文 markdown 正文（不要解释、不要用代码块包裹全文），按以下小节组织：\n\
+         ## 任务目标\n## 关键决策与结论\n## 已完成的改动（文件 + 要点）\n\
+         ## 当前状态与未完成事项\n## 下一步建议\n## 环境与约束\n\
+         要求：不复述工具调用细节；涉及文件写具体路径；没有内容的小节写「（无）」。\n\n\
+         ## 会话记录\n{conversation}"
     )
 }
 
@@ -378,7 +393,7 @@ fn collect_commit_material(
 }
 
 /// 会话文本：user/assistant 的 text 块按角色拼起来
-fn conversation_text(msgs: &[crate::sessions::ChatMessageDto]) -> String {
+pub(crate) fn conversation_text(msgs: &[crate::sessions::ChatMessageDto]) -> String {
     let mut out = String::new();
     for m in msgs {
         for b in &m.blocks {
@@ -703,6 +718,16 @@ mod tests {
         let list = parse_conflict_advice("我不知道", &files);
         assert_eq!(list.len(), 2);
         assert!(list.iter().all(|a| a.choice == "manual"));
+    }
+
+    #[test]
+    fn digest_prompt_has_sections_and_constraints() {
+        let p = build_digest_prompt("[用户] 做一个提炼接力功能");
+        for section in ["任务目标", "关键决策与结论", "已完成的改动", "当前状态与未完成事项", "下一步建议", "环境与约束"] {
+            assert!(p.contains(section), "缺小节 {section}");
+        }
+        assert!(p.contains("不要逐条复述工具调用") || p.contains("不复述工具调用"));
+        assert!(p.contains("[用户] 做一个提炼接力功能"));
     }
 
     #[test]

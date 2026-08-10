@@ -627,6 +627,87 @@ pub fn resume_external_terminal(
     open_external_terminal(&cmd, &pref)
 }
 
+/// 「◈ 提炼接力」外部续作命令行：cd 到项目目录 + 新会话首条指令（读简报续作，非 resume）。
+/// 注入形态读注册表 prompt_inject：Positional → 位置参数，Flag → `-i '<prompt>'`；
+/// Unsupported（kimi/opencode）报错，由前端改为复制指令文本。
+/// 与 resume 命令同一口径：不带 profile env，外部用的是用户全局配置。
+fn digest_command_line_with(agent_id: &str, cwd: &str, prompt: &str, binary: &str) -> Result<String, String> {
+    let mut cmd = format!(
+        "cd {} && {}",
+        sh_quote_if_needed(cwd),
+        sh_quote_if_needed(binary)
+    );
+    match agent_spec(agent_id).map(|s| s.prompt_inject) {
+        Some(crate::agent_specs::PromptInject::Positional) => {
+            cmd.push(' ');
+            cmd.push_str(&sh_quote_if_needed(prompt));
+        }
+        Some(crate::agent_specs::PromptInject::Flag(flag)) => {
+            cmd.push(' ');
+            cmd.push_str(flag);
+            cmd.push(' ');
+            cmd.push_str(&sh_quote_if_needed(prompt));
+        }
+        Some(crate::agent_specs::PromptInject::Unsupported) => {
+            return Err(format!("{agent_id} 无启动注入参数，简报指令需启动后手动发送"));
+        }
+        None => return Err(format!("未知 agent: {agent_id}")),
+    }
+    Ok(cmd)
+}
+
+/// cmd.exe 方言的提炼接力命令行（镜像 windows_resume_command_line：双引号包裹路径与 prompt）
+#[cfg(target_os = "windows")]
+fn windows_digest_command_line(agent_id: &str, cwd: &str, prompt: &str, binary: &str) -> Result<String, String> {
+    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    let mut cmd = format!("cd /d {} && {}", q(cwd), q(binary));
+    match agent_spec(agent_id).map(|s| s.prompt_inject) {
+        Some(crate::agent_specs::PromptInject::Positional) => {
+            cmd.push(' ');
+            cmd.push_str(&q(prompt));
+        }
+        Some(crate::agent_specs::PromptInject::Flag(flag)) => {
+            cmd.push(' ');
+            cmd.push_str(flag);
+            cmd.push(' ');
+            cmd.push_str(&q(prompt));
+        }
+        Some(crate::agent_specs::PromptInject::Unsupported) => {
+            return Err(format!("{agent_id} 无启动注入参数，简报指令需启动后手动发送"));
+        }
+        None => return Err(format!("未知 agent: {agent_id}")),
+    }
+    Ok(cmd)
+}
+
+/// 复制用：提炼接力的外部续作命令行（裸命令名，同 session_resume_command 口径）
+#[tauri::command]
+pub fn session_digest_command(agent_id: &str, cwd: &str, prompt: &str) -> Result<String, String> {
+    let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
+    #[cfg(target_os = "windows")]
+    return windows_digest_command_line(agent_id, cwd, prompt, binary);
+    #[cfg(not(target_os = "windows"))]
+    digest_command_line_with(agent_id, cwd, prompt, binary)
+}
+
+/// 在外部终端应用中以「读简报续作」开新会话（终端偏好探测同 resume_external_terminal；
+/// 二进制用绝对路径：外部 shell 非交互启动可能不加载 rc）
+#[tauri::command]
+pub fn digest_external_terminal(agent_id: &str, cwd: &str, prompt: &str) -> Result<(), String> {
+    let pref = crate::settings::read_current()
+        .external_terminal
+        .unwrap_or_else(|| "auto".into());
+    let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
+    let binary = resolve_binary(binary)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| binary.into());
+    #[cfg(target_os = "windows")]
+    let cmd = windows_digest_command_line(agent_id, cwd, prompt, &binary)?;
+    #[cfg(not(target_os = "windows"))]
+    let cmd = digest_command_line_with(agent_id, cwd, prompt, &binary)?;
+    open_external_terminal(&cmd, &pref)
+}
+
 #[cfg(target_os = "macos")]
 fn open_external_terminal(cmd: &str, pref: &str) -> Result<(), String> {
     match pref {
@@ -1999,6 +2080,47 @@ mod tests {
         let line = windows_resume_command_line("kimi", "abc", r"C:\it's\proj", "kimi").unwrap();
         assert_eq!(line, r#"cd /d "C:\it's\proj" && "kimi" -S "abc""#);
         assert!(windows_resume_command_line("no-such", "abc", r"C:\x", "x").is_err());
+    }
+
+    #[test]
+    fn digest_command_line_formats_per_agent() {
+        let prompt = "读 .ccode/handoff-x.md 接力简报，继续完成任务";
+        // Positional：prompt 追加为位置参数（含空格/中文 → 单引号包裹）
+        assert_eq!(
+            digest_command_line_with("claude-code", "/tmp/proj", prompt, "claude").unwrap(),
+            format!("cd /tmp/proj && claude '{prompt}'")
+        );
+        assert_eq!(
+            digest_command_line_with("codex", "/tmp/proj", prompt, "codex").unwrap(),
+            format!("cd /tmp/proj && codex '{prompt}'")
+        );
+        // Flag：-i '<prompt>'
+        assert_eq!(
+            digest_command_line_with("gemini", "/tmp/proj", prompt, "gemini").unwrap(),
+            format!("cd /tmp/proj && gemini -i '{prompt}'")
+        );
+        // Unsupported（kimi/opencode）与未知 agent 报错
+        assert!(digest_command_line_with("kimi", "/tmp/proj", prompt, "kimi").is_err());
+        assert!(digest_command_line_with("opencode", "/tmp/proj", prompt, "opencode").is_err());
+        assert!(digest_command_line_with("no-such", "/tmp", prompt, "x").is_err());
+        // cwd 与绝对路径二进制的转义（同 resume 口径）
+        assert_eq!(
+            digest_command_line_with("qwen", "/tmp/我的 项目", prompt, "/Users/x/My Apps/bin/qwen").unwrap(),
+            format!("cd '/tmp/我的 项目' && '/Users/x/My Apps/bin/qwen' -i '{prompt}'")
+        );
+        // prompt 内嵌单引号 → POSIX 转义
+        let quoted = digest_command_line_with("claude-code", "/tmp", "读 it's 简报", "claude").unwrap();
+        assert_eq!(quoted, "cd /tmp && claude '读 it'\\''s 简报'");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_digest_line_uses_cmd_dialect() {
+        let line = windows_digest_command_line("claude-code", r"C:\work\my proj", "读简报", r"C:\tools\claude.cmd").unwrap();
+        assert_eq!(line, r#"cd /d "C:\work\my proj" && "C:\tools\claude.cmd" "读简报""#);
+        let line = windows_digest_command_line("gemini", r"C:\x", "读简报", "gemini").unwrap();
+        assert_eq!(line, r#"cd /d "C:\x" && "gemini" -i "读简报""#);
+        assert!(windows_digest_command_line("kimi", r"C:\x", "读简报", "kimi").is_err());
     }
 
     #[cfg(unix)]
