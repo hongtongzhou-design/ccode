@@ -1016,6 +1016,37 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  // 一键应用 GitHub 更新：按安装时记录的 repo/ref/subdir 下载并覆盖（自动备份），只动该技能
+  const [applyingUpdate, setApplyingUpdate] = useState<string | null>(null);
+  async function onApplyUpdate(skill: SkillDto) {
+    if (applyingUpdate) return;
+    if (
+      !(await confirmDialog(
+        `将下载 ${skill.repo} 最新版本并覆盖技能「${skill.name}」（覆盖前自动备份，同仓库其他技能不受影响）。继续？`,
+      ))
+    )
+      return;
+    setApplyingUpdate(skill.id);
+    try {
+      await invoke("apply_skill_update", { id: skill.id });
+      setNotice(`技能「${skill.name}」已更新到 GitHub 最新版本`);
+      setUpdates((prev) => ({
+        ...prev,
+        [skill.id]: {
+          ...prev[skill.id],
+          updateAvailable: false,
+          message: "已是 GitHub 最新版本",
+        },
+      }));
+      setError(null);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setApplyingUpdate(null);
+    }
+  }
+
   async function onExport(ids: string[], defaultName: string) {
     try {
       const destPath = await save({
@@ -1376,6 +1407,16 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                 GitHub 可更新
               </span>
             )}
+            {updates[preview.skill.id]?.updateAvailable && (
+              <button
+                type="button"
+                onClick={() => void onApplyUpdate(preview.skill)}
+                disabled={applyingUpdate === preview.skill.id}
+                className="ml-2 flex h-7 items-center rounded px-2 text-xs text-cta-text bg-cta hover:opacity-90 disabled:opacity-50"
+              >
+                {applyingUpdate === preview.skill.id ? "正在更新…" : "应用更新"}
+              </button>
+            )}
           </div>
           <div className="border-b border-hairline bg-strip px-3 py-3">
             <div className="mb-2 flex items-center gap-2">
@@ -1593,6 +1634,14 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               onSelect: () =>
                 void onExport([rowMenu.skill.id], `${rowMenu.skill.name}.zip`),
             },
+            ...(updates[rowMenu.skill.id]?.updateAvailable
+              ? [
+                  {
+                    label: "一键应用 GitHub 更新",
+                    onSelect: () => void onApplyUpdate(rowMenu.skill),
+                  },
+                ]
+              : []),
             ...(rowMenu.skill.repo
               ? [
                   {

@@ -607,8 +607,9 @@ fn import_zip_impl(
     source: &str,
     repo: Option<String>,
     resolutions: Option<&HashMap<String, String>>,
+    only: Option<&str>,
 ) -> Result<SkillImportResultDto, String> {
-    import_zip_limited(store, skills, zip_path, subdir, source, repo, resolutions, ZIP_MAX_UNCOMPRESSED)
+    import_zip_limited(store, skills, zip_path, subdir, source, repo, resolutions, only, ZIP_MAX_UNCOMPRESSED)
 }
 
 /// 按实际解压出的字节数累计计费，超过预算即中止（中央目录声明值不可信，防 zip 炸弹）
@@ -632,6 +633,7 @@ fn import_zip_limited(
     source: &str,
     repo: Option<String>,
     resolutions: Option<&HashMap<String, String>>,
+    only: Option<&str>,
     max_uncompressed: u64,
 ) -> Result<SkillImportResultDto, String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("打开 ZIP 失败: {e}"))?;
@@ -666,6 +668,10 @@ fn import_zip_limited(
     roots.dedup();
     let all = roots.clone();
     roots.retain(|r| !all.iter().any(|o| o != r && r.starts_with(o)));
+    // 一键更新只动目标技能：按安装名（= 技能根目录名）过滤，zip 里其他技能一律不碰
+    if let Some(only) = only {
+        roots.retain(|r| r.file_name().map(|n| n == only).unwrap_or(false));
+    }
     let temp = std::env::temp_dir().join(format!("ccode-skill-import-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&temp).map_err(|e| format!("创建技能导入临时目录失败: {e}"))?;
     let imported = (|| {
@@ -1034,7 +1040,75 @@ pub async fn import_skills_from_zip(
         "zip",
         None,
         resolutions.as_ref(),
+        None,
     )
+}
+
+fn github_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .user_agent("ccode-skills")
+        .build()
+        .map_err(|e| format!("创建 GitHub 客户端失败: {e}"))
+}
+
+/// 下载仓库 zipball：指定分支只试该 ref；未指定按 默认分支 → main → master 回退
+async fn download_github_zipball(
+    client: &reqwest::Client,
+    repo: &str,
+    branch: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let refs: Vec<String> = match branch {
+        Some(b) => vec![b.to_string()],
+        None => vec![String::new(), "main".into(), "master".into()],
+    };
+    let mut last_err = String::new();
+    for r in &refs {
+        let url = if r.is_empty() {
+            format!("https://api.github.com/repos/{repo}/zipball")
+        } else {
+            format!("https://api.github.com/repos/{repo}/zipball/{r}")
+        };
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => match download_limited(resp).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => last_err = e,
+            },
+            Ok(resp) => last_err = format!("GitHub 返回 {}", resp.status()),
+            Err(e) => last_err = format!("请求 GitHub 失败: {e}"),
+        }
+    }
+    Err(format!("下载 {repo} 失败: {last_err}"))
+}
+
+/// 导入/更新成功后回写 GitHub 来源元数据（ref/subdir/最新 revision/默认分类）
+async fn record_github_revision(
+    store: &SkillStore,
+    repo: &str,
+    branch: Option<&str>,
+    subdir: Option<&str>,
+    changed: std::collections::HashSet<&str>,
+) -> Result<(), String> {
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let client = github_client(30)?;
+    let revision = github_latest_revision(&client, repo, branch).await.ok();
+    let mut recorded = store.read();
+    for skill in &mut recorded {
+        if changed.contains(skill.name.as_str()) {
+            skill.repo_ref = branch.map(ToOwned::to_owned);
+            skill.repo_subdir = subdir.map(ToOwned::to_owned);
+            skill.source_revision = revision.clone();
+            // GitHub 导入自动分类（#15）：无分类时默认填仓库名（owner/repo 的 repo 段），已有分类不覆盖
+            if skill.category.is_none() {
+                skill.category = github_repo_category(repo);
+            }
+        }
+    }
+    store
+        .write(&recorded)
+        .map_err(|e| format!("技能已导入，但记录 GitHub 版本失败，重试导入即可补全: {e}"))
 }
 
 #[tauri::command]
@@ -1049,39 +1123,8 @@ pub async fn import_skills_from_github(
         return Err("仓库格式应为 owner/name".into());
     }
     let branch = branch.filter(|b| !b.trim().is_empty());
-    let refs: Vec<String> = match branch.clone() {
-        Some(b) => vec![b],
-        // 未指定分支：先默认分支（不带 ref），再 main/master 回退
-        None => vec![String::new(), "main".into(), "master".into()],
-    };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .user_agent("ccode-skills")
-        .build()
-        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
-    let mut last_err = String::new();
-    let mut zip_bytes = None;
-    for r in &refs {
-        let url = if r.is_empty() {
-            format!("https://api.github.com/repos/{repo}/zipball")
-        } else {
-            format!("https://api.github.com/repos/{repo}/zipball/{r}")
-        };
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => match download_limited(resp).await {
-                Ok(bytes) => {
-                    zip_bytes = Some(bytes);
-                    break;
-                }
-                Err(e) => last_err = e,
-            },
-            Ok(resp) => last_err = format!("GitHub 返回 {}", resp.status()),
-            Err(e) => last_err = format!("请求 GitHub 失败: {e}"),
-        }
-    }
-    let Some(bytes) = zip_bytes else {
-        return Err(format!("下载 {repo} 失败: {last_err}"));
-    };
+    let client = github_client(120)?;
+    let bytes = download_github_zipball(&client, &repo, branch.as_deref()).await?;
     let tmp = std::env::temp_dir().join(format!("ccode-gh-{}.zip", uuid::Uuid::new_v4()));
     fs::write(&tmp, &bytes).map_err(|e| format!("写入临时文件失败: {e}"))?;
     let store = SkillStore::default_paths()?;
@@ -1094,35 +1137,71 @@ pub async fn import_skills_from_github(
         "github",
         Some(repo.clone()),
         resolutions.as_ref(),
+        None,
     );
     let _ = fs::remove_file(&tmp);
     let result = result?;
-    if !result.added.is_empty() || !result.updated.is_empty() {
-        let revision = github_latest_revision(&client, &repo, branch.as_deref())
-            .await
-            .ok();
-        let changed: std::collections::HashSet<&str> = result
-            .added
-            .iter()
-            .chain(result.updated.iter())
-            .map(String::as_str)
-            .collect();
-        let mut recorded = store.read();
-        for skill in &mut recorded {
-            if changed.contains(skill.name.as_str()) {
-                skill.repo_ref = branch.clone();
-                skill.repo_subdir = subdir.clone();
-                skill.source_revision = revision.clone();
-                // GitHub 导入自动分类（#15）：无分类时默认填仓库名（owner/repo 的 repo 段），已有分类不覆盖
-                if skill.category.is_none() {
-                    skill.category = github_repo_category(&repo);
-                }
-            }
-        }
-        store
-            .write(&recorded)
-            .map_err(|e| format!("技能已导入，但记录 GitHub 版本失败，重试导入即可补全: {e}"))?;
+    let changed: std::collections::HashSet<&str> = result
+        .added
+        .iter()
+        .chain(result.updated.iter())
+        .map(String::as_str)
+        .collect();
+    record_github_revision(&store, &repo, branch.as_deref(), subdir.as_deref(), changed).await?;
+    Ok(result)
+}
+
+/// 一键应用 GitHub 更新：按安装时记录的 repo/ref/subdir 重新下载，只覆盖该技能本身
+/// （走既有 overwrite-with-backup 路径），成功后刷新 source_revision 基线。
+/// zip 中同仓库的其他技能不新增不覆盖；找不到同名技能时提示改用「重新从 GitHub 导入」。
+#[tauri::command]
+pub async fn apply_skill_update(id: String) -> Result<SkillImportResultDto, String> {
+    let store = SkillStore::default_paths()?;
+    let skill = store
+        .read()
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or("技能不存在，可能已被删除")?;
+    if skill.source != "github" || skill.repo.is_none() {
+        return Err("该技能没有 GitHub 来源，无法一键更新".into());
     }
+    let repo = skill.repo.clone().unwrap_or_default();
+    let branch = skill.repo_ref.clone();
+    let subdir = skill.repo_subdir.clone();
+    let client = github_client(120)?;
+    let bytes = download_github_zipball(&client, &repo, branch.as_deref()).await?;
+    let tmp = std::env::temp_dir().join(format!("ccode-gh-{}.zip", uuid::Uuid::new_v4()));
+    fs::write(&tmp, &bytes).map_err(|e| format!("写入临时文件失败: {e}"))?;
+    let mut skills = store.read();
+    // 既有技能必然同名存在 → overwrite 命中覆盖+备份路径；zip 其余内容被 only 过滤
+    let resolutions: HashMap<String, String> =
+        HashMap::from([(skill.name.clone(), "overwrite".to_string())]);
+    let result = import_zip_impl(
+        &store,
+        &mut skills,
+        &tmp,
+        subdir.as_deref(),
+        "github",
+        Some(repo.clone()),
+        Some(&resolutions),
+        Some(&skill.name),
+    );
+    let _ = fs::remove_file(&tmp);
+    let result = result?;
+    if !result.updated.iter().any(|n| n == &skill.name) {
+        return Err(format!(
+            "仓库 {repo} 最新版本中未找到技能 {}（可能已在上游改名或移动），请改用「重新从 GitHub 导入」",
+            skill.name
+        ));
+    }
+    record_github_revision(
+        &store,
+        &repo,
+        branch.as_deref(),
+        subdir.as_deref(),
+        std::collections::HashSet::from([skill.name.as_str()]),
+    )
+    .await?;
     Ok(result)
 }
 
@@ -1807,7 +1886,7 @@ mod tests {
         );
         let mut skills = Vec::new();
         let result =
-            import_zip_impl(&fx.store, &mut skills, &zip_path, None, "zip", None, None).unwrap();
+            import_zip_impl(&fx.store, &mut skills, &zip_path, None, "zip", None, None, None).unwrap();
         assert_eq!(result.added.len(), 2);
         assert!(fx.store.skill_dir("docx").join("template.bin").exists());
         assert_eq!(skills.iter().find(|s| s.name == "docx").unwrap().description, "word");
@@ -1822,11 +1901,57 @@ mod tests {
             "zip",
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(result.added.len(), 1);
         assert!(fx2.store.skill_dir("pdf").exists());
         assert!(!fx2.store.skill_dir("docx").exists());
+    }
+
+    #[test]
+    fn only_filter_updates_named_skill_and_ignores_rest() {
+        // 一键更新的核心语义：zip 里只覆盖同名技能，其余不新增不覆盖
+        let fx = Fx::new();
+        fx.add_lib_skill("pdf", "旧版");
+        let zip_path = fx.dir.join("upd.zip");
+        build_zip(
+            &zip_path,
+            &[
+                ("repo-sha/skills/pdf/SKILL.md", b"---\ndescription: new\n---\n"),
+                ("repo-sha/skills/docx/SKILL.md", b"---\ndescription: nope\n---\n"),
+            ],
+        );
+        let mut skills = fx.store.read();
+        let resolutions = HashMap::from([("pdf".to_string(), "overwrite".to_string())]);
+        let result = import_zip_impl(
+            &fx.store,
+            &mut skills,
+            &zip_path,
+            Some("skills"),
+            "github",
+            Some("o/r".to_string()),
+            Some(&resolutions),
+            Some("pdf"),
+        )
+        .unwrap();
+        assert_eq!(result.updated, vec!["pdf".to_string()]);
+        assert!(result.added.is_empty());
+        assert!(!fx.store.skill_dir("docx").exists(), "only 过滤下 zip 其余技能不得进入");
+        assert_eq!(fx.store.read()[0].description, "new");
+        // 目标不在 zip 中：空结果由调用方（apply_skill_update）转成「未找到」错误
+        let result = import_zip_impl(
+            &fx.store,
+            &mut fx.store.read(),
+            &zip_path,
+            Some("skills"),
+            "github",
+            Some("o/r".to_string()),
+            None,
+            Some("ghost"),
+        )
+        .unwrap();
+        assert!(result.added.is_empty() && result.updated.is_empty());
     }
 
     #[test]
@@ -1848,6 +1973,7 @@ mod tests {
             "zip",
             None,
             None,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("条目过多"), "{err}");
@@ -1864,7 +1990,7 @@ mod tests {
         // 再按 ZIP 导入流程进另一个库，验证往返一致
         let fx2 = Fx::new();
         let result =
-            import_zip_impl(&fx2.store, &mut Vec::new(), &dest, None, "zip", None, None).unwrap();
+            import_zip_impl(&fx2.store, &mut Vec::new(), &dest, None, "zip", None, None, None).unwrap();
         assert_eq!(result.added.len(), 2);
         assert!(fx2.store.skill_dir("pdf").join("SKILL.md").exists());
         assert!(fx2.store.skill_dir("docx").join("SKILL.md").exists());
@@ -1977,7 +2103,7 @@ mod tests {
             &[("skill-a/SKILL.md", b"---\nname: a\n---\n"), ("skill-a/blob.bin", &[0u8; 200])],
         );
         // 声明总量 ~215 超过注入预算 100：预检拒绝
-        let err = import_zip_limited(&fx.store, &mut Vec::new(), &zip_path, None, "zip", None, None, 100)
+        let err = import_zip_limited(&fx.store, &mut Vec::new(), &zip_path, None, "zip", None, None, None, 100)
             .unwrap_err();
         assert!(err.contains("拒绝解压"), "{err}");
     }

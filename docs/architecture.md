@@ -339,7 +339,7 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 3. **GitHub 仓库**：`owner/repo[/subdir]`，下载 `archive/refs/heads/<branch>.zip`（main→master 回退）后按 ZIP 流程；预设 anthropics/skills 等常用源
 4. **从应用目录发现**：扫描六 CLI 技能目录 + `~/.agents/skills/` 里未纳管的技能，一键收编入库
 
-同名导入返回结构化 `added/updated/skipped/conflicts`；用户可选择跳过、备份后覆盖或另存为。覆盖先备份旧库，ZIP 先完整解压到 staging，元数据保存失败回滚库目录。GitHub 来源额外持久化 repo/ref/subdir/revision，`check_skill_updates` 只负责提示 revision 变化，重新导入仍走同一冲突确认流程。
+同名导入返回结构化 `added/updated/skipped/conflicts`；用户可选择跳过、备份后覆盖或另存为。覆盖先备份旧库，ZIP 先完整解压到 staging，元数据保存失败回滚库目录。GitHub 来源额外持久化 repo/ref/subdir/revision，`check_skill_updates` 提示 revision 变化；`apply_skill_update` 一键应用更新——按记录的 repo/ref/subdir 重下 zipball，`import_zip_impl` 加 `only` 过滤只覆盖同名技能（其余不新增不覆盖，走同一覆盖+备份路径），成功后刷新 revision 基线；上游改名/移动时明确报错并引导手动重新导入（仍走冲突确认）。
 
 **导出**：单个/多个技能打包为 ZIP（系统保存对话框）。
 
@@ -498,6 +498,7 @@ Windows release 构建使用 `windows_subsystem = "windows"`，没有可继承�
 | v3.50 | **Release 触发去重**：SSH:443 的 tag push 是否自动触发 Actions 以 GitHub 实际 run 为准，不再假定 deploy key 一定不触发；推 tag 后先检查对应 SHA/tag 的 push run，存在则复用，30 秒内不存在才手动 workflow_dispatch。两个入口不得并行打包同一 tag，避免 tauri-action 竞争创建或上传同一个 Release |
 | v3.51 | **Windows 闪窗修复 + 一键诊断包**：正式版无父控制台时，终端页 Git 状态轮询会让每个 `git.exe` 创建 `conhost.exe`，开发版因继承控制台而无法复现；所有非交互后台命令统一经 `process.rs` 加 `CREATE_NO_WINDOW`，外部终端保持可见。设置页诊断升级为 ZIP 支持包：系统/WebView2/GPU/WebGL、语言/输入法、功能开关、应用日志和有界进程生命周期；不采集环境变量，参数与日志 Rust 层脱敏，系统级只额外观察 CTF/TextInputHost。后台命令包装与 250ms 扫描由 `cfg(windows)` 隔离，macOS/Linux 继续使用标准 `Command` 且无监控线程。 |
 | v3.52 | **诊断包驱动的收尾修复**（Windows 现场包 `ccode-diagnostics-2026-08-09` 离线分析结论）：① git 仓库探测风暴——改动面板 8s×挂载标签轮询使非仓库 cwd 每轮真 spawn git（实测 85 秒 73 次同目录 `rev-parse`），`git_info::probe_is_work_tree` 增加 30s 负缓存（只缓存否定结果，init 后主动失效）；② `list_repos` home 排除被 `canonicalize` 的 `\\?\` 前缀绕过，home 改同口径规范化后再比；③ WebGL 探针「renderer 不明保守回退」收窄为仅 Windows，避免 WKWebView 屏蔽 debug renderer 信息时误伤 macOS WebGL 渲染。spawn-hook/扫描辅助函数全部 `cfg(windows)` 门控，非 Windows 构建零警告。 |
+| v3.53 | **技能一键应用更新**（§6.13 收尾）：`apply_skill_update` 按安装时记录的 repo/ref/subdir 重下 zipball，`import_zip_impl` 新增 `only` 过滤保证只覆盖同名技能（同仓库其他技能不新增不覆盖），复用覆盖+备份路径并刷新 revision 基线；下载循环与版本回写抽为 `download_github_zipball`/`record_github_revision` 供导入与更新共用。上游改名/移动时明确报错引导手动重新导入。前端在详情面板「GitHub 可更新」旁与行 ⋯ 菜单各加一处一键入口，确认走 confirmDialog。 |
 
 ## 11. 演进线（2026-08 定稿）
 
