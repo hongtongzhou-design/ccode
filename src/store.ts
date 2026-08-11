@@ -6,10 +6,12 @@ import { THEMES } from "./themes";
 import type { RunOverviewInput } from "./run-overview";
 import type {
   DetectResult,
+  HandoffBriefDto,
   Profile,
   ProfileInput,
   RepoDto,
   SessionMetaDto,
+  TaskCardDto,
 } from "./types";
 
 const RECENT_REPOS_CACHE_KEY = "ccode.recentRepos";
@@ -124,7 +126,28 @@ export interface InboxItem {
         intent?: "pr" | "archive" | "resolve-conflict";
       }
     | { type: "tab"; tabId: string }
-    | { type: "session"; agent: string; sessionId: string };
+    | { type: "session"; agent: string; sessionId: string }
+    | { type: "digest" }
+    | { type: "artifacts"; workspaceId: string }
+    | { type: "profiles" };
+}
+
+/** 「◈ 提炼接力」后台任务（v3.60）：AI 蒸馏与 DigestPicker 解耦——picker 可关可开，
+    同一会话复用结果不重复发起；ready 且未消费时进收件箱「待发送」 */
+export interface DigestJob {
+  agent: string;
+  sessionId: string;
+  filePath: string;
+  cwd: string;
+  title: string | null;
+  status: "running" | "ready" | "error";
+  brief?: HandoffBriefDto;
+  error?: string;
+  /** 已选定发送目标/用户丢弃：从收件箱摘除（简报文件仍在磁盘，重开 picker 复用） */
+  consumed: boolean;
+  /** 人工定稿后的落盘简报（save_task_brief 产物）；非空 = 已定稿，picker 重开直达发送页，
+      发送一律用这份定稿（AI 初稿的 handoff-*.md 留在磁盘不再使用） */
+  finalized?: HandoffBriefDto;
 }
 
 /** 收件箱条目动作统一派发（工作区页 strip 与 App 标题栏收件箱共用） */
@@ -140,12 +163,20 @@ export function runInboxAction(item: InboxItem) {
   } else if (item.action.type === "tab") {
     s.setFocusTabReq(item.action.tabId);
     s.setPage("terminal");
-  } else {
+  } else if (item.action.type === "session") {
     s.setOpenSessionReq({
       agent: item.action.agent,
       sessionId: item.action.sessionId,
     });
     s.setPage("sessions");
+  } else if (item.action.type === "digest") {
+    s.setDigestOpenReq(Date.now());
+    s.setPage("sessions");
+  } else if (item.action.type === "artifacts") {
+    s.setArtifactCheckReq(item.action.workspaceId);
+    s.setPage("workspaces");
+  } else {
+    s.setPage("profiles");
   }
 }
 
@@ -212,6 +243,61 @@ interface AppState {
   skillDraftReq: { name: string; description: string; content: string } | null;
   setSkillDraftReq: (
     r: { name: string; description: string; content: string } | null,
+  ) => void;
+  /** 「◈ 提炼接力」后台任务（生成与 picker 解耦；收件箱「待发送」只读） */
+  digestJob: DigestJob | null;
+  /** 发起提炼；同一会话 running/ready 时复用不重复发起，force 用于失败后重试 */
+  startDigestJob: (
+    src: {
+      agent: string;
+      sessionId: string;
+      filePath: string;
+      cwd: string;
+      title: string | null;
+    },
+    force?: boolean,
+  ) => void;
+  /** 已选定发送目标/用户丢弃：从收件箱摘除（简报文件保留，重开 picker 复用） */
+  consumeDigestJob: () => void;
+  /** 定稿落盘成功：记录定稿简报（DigestPicker 重开直达发送页，发送用定稿路径） */
+  setDigestFinalized: (brief: HandoffBriefDto) => void;
+  /** 收件箱「去发送」→ 对话页重开 DigestPicker 的一次性请求（nonce 触发） */
+  digestOpenReq: number | null;
+  setDigestOpenReq: (n: number | null) => void;
+  /** 收件箱「去核验」→ 工作区页展开对应任务行产物清单的一次性请求 */
+  artifactCheckReq: string | null;
+  setArtifactCheckReq: (id: string | null) => void;
+  /** 对话页卡片 chip → 工作区页选中对应项目的一次性请求（项目根路径，工作区页消费并清空） */
+  selectProjectReq: string | null;
+  setSelectProjectReq: (path: string | null) => void;
+  /** 任务卡（按项目根缓存；list_task_cards 对非项目目录返回空表不报错） */
+  taskCards: Record<string, TaskCardDto[]>;
+  /** 拉取并缓存某项目的任务卡；失败抛错由调用方行内报错 */
+  loadTaskCards: (projectRoot: string) => Promise<TaskCardDto[]>;
+  /** 新建卡片（同项目重名后端拒绝）；成功后刷新缓存并返回新卡片 */
+  createCard: (
+    projectRoot: string,
+    name: string,
+    step: string | null,
+  ) => Promise<TaskCardDto>;
+  renameCard: (
+    projectRoot: string,
+    taskId: string,
+    newName: string,
+  ) => Promise<void>;
+  /** 删除卡片（后端顺手清掉所有会话的 task_id 归置） */
+  deleteCard: (projectRoot: string, taskId: string) => Promise<void>;
+  /** 会话归入/移出卡片（taskId null/空白 = 移出）；成功后刷新会话列表让 chip 即时更新 */
+  assignSessionTask: (
+    agent: string,
+    sessionId: string,
+    taskId: string | null,
+  ) => Promise<void>;
+  /** profile 三层验证失败镜像（ProfilesPage 写入：失败登记、通过/编辑后清除），收件箱只读 */
+  profileIssues: Record<string, { name: string; agent: string; reason: string }>;
+  setProfileIssue: (
+    id: string,
+    issue: { name: string; agent: string; reason: string } | null,
   ) => void;
   /** 应用设置（启动时加载；update 合并写回并即时应用主题） */
   settings: AppSettings | null;
@@ -297,6 +383,90 @@ export const useAppStore = create<AppState>((set, get) => ({
   setOpenSessionReq: (r) => set({ openSessionReq: r }),
   skillDraftReq: null,
   setSkillDraftReq: (r) => set({ skillDraftReq: r }),
+  digestJob: null,
+  startDigestJob: (src, force) => {
+    const cur = get().digestJob;
+    const same =
+      cur &&
+      cur.agent === src.agent &&
+      cur.sessionId === src.sessionId &&
+      cur.filePath === src.filePath;
+    // 同一会话已有结果/正在跑：直接复用，不因 picker 重开而重复提炼（费 token 且慢）
+    if (same && !force && cur.status !== "error") return;
+    set({ digestJob: { ...src, status: "running", consumed: false } });
+    invoke<HandoffBriefDto>("build_session_digest", {
+      agent: src.agent,
+      sessionId: src.sessionId,
+      filePath: src.filePath,
+      cwd: src.cwd,
+      title: src.title,
+      targetPath: null,
+    })
+      .then((brief) => {
+        const j = get().digestJob;
+        // 期间用户已发起另一会话的提炼：本次结果作废，不回写
+        if (j && j.agent === src.agent && j.sessionId === src.sessionId)
+          set({ digestJob: { ...j, status: "ready", brief } });
+      })
+      .catch((e) => {
+        const j = get().digestJob;
+        if (j && j.agent === src.agent && j.sessionId === src.sessionId)
+          set({ digestJob: { ...j, status: "error", error: String(e) } });
+      });
+  },
+  consumeDigestJob: () => {
+    const j = get().digestJob;
+    if (j) set({ digestJob: { ...j, consumed: true } });
+  },
+  setDigestFinalized: (brief) => {
+    const j = get().digestJob;
+    if (j) set({ digestJob: { ...j, finalized: brief } });
+  },
+  digestOpenReq: null,
+  setDigestOpenReq: (n) => set({ digestOpenReq: n }),
+  artifactCheckReq: null,
+  setArtifactCheckReq: (id) => set({ artifactCheckReq: id }),
+  selectProjectReq: null,
+  setSelectProjectReq: (path) => set({ selectProjectReq: path }),
+  taskCards: {},
+  loadTaskCards: async (projectRoot) => {
+    const cards = await invoke<TaskCardDto[]>("list_task_cards", {
+      projectRoot,
+    });
+    set((s) => ({ taskCards: { ...s.taskCards, [projectRoot]: cards } }));
+    return cards;
+  },
+  createCard: async (projectRoot, name, step) => {
+    const card = await invoke<TaskCardDto>("create_task_card", {
+      projectRoot,
+      name,
+      step,
+    });
+    await get().loadTaskCards(projectRoot);
+    return card;
+  },
+  renameCard: async (projectRoot, taskId, newName) => {
+    await invoke("rename_task_card", { projectRoot, taskId, newName });
+    await get().loadTaskCards(projectRoot);
+  },
+  deleteCard: async (projectRoot, taskId) => {
+    await invoke("delete_task_card", { projectRoot, taskId });
+    await get().loadTaskCards(projectRoot);
+    // 后端已清掉会话的 task_id：刷新会话列表让对话页 chip/分组即时消失
+    await get().loadSessions();
+  },
+  assignSessionTask: async (agent, sessionId, taskId) => {
+    await invoke("assign_session_task", { agent, sessionId, taskId });
+    await get().loadSessions();
+  },
+  profileIssues: {},
+  setProfileIssue: (id, issue) =>
+    set((s) => {
+      const next = { ...s.profileIssues };
+      if (issue) next[id] = issue;
+      else delete next[id];
+      return { profileIssues: next };
+    }),
   settings: null,
   loadSettings: async () => {
     const s = await invoke<AppSettings>("get_settings");

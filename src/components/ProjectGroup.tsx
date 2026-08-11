@@ -10,6 +10,7 @@ import ArtifactChecklist, {
   absoluteResourcePath,
   formatSize,
 } from "./ArtifactChecklist";
+import TaskCardsSection from "./TaskCardsSection";
 import { Checkbox, hoverRevealClass } from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
@@ -36,23 +37,77 @@ const ctaSm =
   "inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
 const fieldSm =
   "h-7 rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
-/** 步进器虚线块：严格 5×5px 实心正方形，真实元素而非渐变。
- *  完成列亮灰白（l2）、未完成列暗（hairline）——链条不用绿色，绿色只给完成圆（--color-done）；
- *  列 hover 微亮一档（表达整列是一个可交互单元）；300ms 颜色过渡 */
-function DashBlock({ k, done }: { k: string; done: boolean }) {
+/** 步进器带级整条虚线链：真实 6×6px 方块按 12px 等距（6px 块 + 6px 间隙）铺满整个带宽。
+ *  块位以圆心为锚分段计算（圆是列中心，列等宽，段长相等）——每个圆两侧的断口、
+ *  每个步骤之间的块数与间隙严格一致（按全局相位铺排时圆会随机截断方块，用户反馈不规则）。
+ *  段内余数（<12px）：步骤间段落对称均分、首段沉到最左端、尾段沉到最右端（菱形前）。
+ *  完成列区间内的块亮灰白（l2）、其余暗（hairline），300ms 颜色过渡 */
+const NODE_HALF = 17; // 圆遮罩半宽：22px 视觉圆（半径 11）+ 6px 语义空档——与块间间隙精确相等
+function StepperChain({
+  dones,
+  children,
+}: {
+  dones: boolean[];
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => setWidth(el.clientWidth);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const nSteps = dones.length;
+  const blocks: { left: number; done: boolean }[] = [];
+  if (width > 0 && nSteps > 0) {
+    // 与下方 grid 完全相同的列几何：列间隙 6px，列 i 圆心 = i*(列宽+6) + 列宽/2
+    const colW = (width - 6 * (nSteps - 1)) / nSteps;
+    const center = (i: number) => i * (colW + 6) + colW / 2;
+    for (let seg = 0; seg <= nSteps; seg++) {
+      const start = seg === 0 ? 0 : center(seg - 1) + NODE_HALF;
+      const end = seg === nSteps ? width : center(seg) - NODE_HALF;
+      const len = end - start;
+      const m = Math.max(0, Math.floor((len + 6) / 12));
+      if (m === 0) continue;
+      // 段内余数：首尾段贴圆（余数落带缘），中间段对称均分——每段布局完全相同
+      const extra = len - (12 * m - 6);
+      const offset =
+        seg === 0 ? extra : seg === nSteps ? 0 : Math.floor(extra / 2);
+      for (let b = 0; b < m; b++) {
+        const left = start + offset + b * 12;
+        const xCenter = left + 3;
+        const col = Math.min(
+          nSteps - 1,
+          Math.max(0, Math.floor(xCenter / (colW + 6))),
+        );
+        blocks.push({ left, done: dones[col] });
+      }
+    }
+  }
   return (
-    <span
-      key={k}
-      aria-hidden
-      className={`block h-[5px] w-[5px] shrink-0 rounded-[1px] transition-colors duration-300 ${
-        done ? "bg-l2 group-hover:brightness-110" : "bg-hairline group-hover:bg-l3"
-      }`}
-    />
+    <div ref={ref} className="relative min-w-0 flex-1 self-stretch">
+      <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
+        {blocks.map((b, i) => (
+          <span
+            key={i}
+            className={`absolute top-1/2 block h-1.5 w-1.5 -translate-y-1/2 rounded-[1px] transition-colors duration-300 ${
+              b.done ? "bg-l2" : "bg-hairline"
+            }`}
+            style={{ left: b.left }}
+          />
+        ))}
+      </div>
+      {children}
+    </div>
   );
 }
 
 /** 步进器悬浮提示（应用内 tooltip）：fixed 定位不随滚动容器走，滚动/缩放即关。
- *  WKWebView 的原生 title 悬浮有平台差异（不渲染或移开后残留数秒），圆与方块统一走这里；
+ *  WKWebView 的原生 title 悬浮有平台差异（不渲染或移开后残留数秒），圆的悬浮统一走这里；
  *  事件一律挂在包裹 span 上，禁用按钮也能悬浮查看。 */
 function useHoverTip(ref: React.RefObject<HTMLElement | null>) {
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
@@ -99,60 +154,8 @@ function HoverTip({
   );
 }
 
-/** 功能小方块（圆前=编辑简报 / 圆后=产物核验）：平时与虚线段等大混在线里（5px），
- *  hover/聚焦时那一块提亮 cta 并略放大（scale-150，容器已 overflow-y-clip 不会触发滚动条晃动）；
- *  28px 透明热区（绝对定位子元素撑开，不占布局）保证好按；完成列亮色（l2）、未完成列暗（hairline），
- *  方块不用绿色——绿色只给链条与完成圆；功能名走应用内 tooltip（与大圆同一套，见 useHoverTip） */
-function SquareButton({
-  title,
-  label,
-  disabled,
-  expanded,
-  done,
-  onClick,
-}: {
-  title: string;
-  label: string;
-  disabled?: boolean;
-  expanded?: boolean;
-  /** 完成列：方块亮色（l2）；未完成列暗（hairline） */
-  done?: boolean;
-  onClick: () => void;
-}) {
-  const wrapRef = useRef<HTMLSpanElement>(null);
-  const { tip, show, hide } = useHoverTip(wrapRef);
-  return (
-    <span
-      ref={wrapRef}
-      className="relative block h-[5px] w-[5px] shrink-0"
-      onMouseEnter={show}
-      onMouseLeave={hide}
-      onFocus={show}
-      onBlur={hide}
-    >
-      <button
-        type="button"
-        aria-label={label}
-        aria-expanded={expanded}
-        disabled={disabled}
-        onClick={() => {
-          hide();
-          onClick();
-        }}
-        className={`relative block h-[5px] w-[5px] shrink-0 cursor-pointer rounded-[1px] transition-[transform,background-color] duration-300 hover:scale-150 hover:bg-cta focus-visible:scale-150 focus-visible:bg-cta disabled:cursor-not-allowed ${
-          done ? "bg-l2 group-hover:brightness-110" : "bg-hairline group-hover:bg-l3"
-        }`}
-      >
-        <span className="absolute left-1/2 top-1/2 size-[28px] -translate-x-1/2 -translate-y-1/2" />
-      </button>
-      <HoverTip tip={tip} text={title} />
-    </span>
-  );
-}
-
-/** 步进器单元格：真实 flex 块拼出的方块节律线（5px 块 + 5px 间隙）。
- *  虚线块数按列宽用 ResizeObserver 现算（每块含隙占 10px），任何列宽/步骤数下尺寸与间隔严格一致，
- *  圆与方块都是节律中的节点（圆前后各一道 5px 间隙），不存在渐变相位残段。
+/** 步进器单元格：只剩大圆节点（虚线链由 StepperChain 在带级统一铺满）。
+ *  圆的包裹 span 带 strip 底色 + 两侧 6px 内边距形成遮罩，链条在圆处整齐断开。
  *  大圆的悬浮信息走应用内 tooltip（useHoverTip，fixed 定位、滚动即关、点击即关）：
  *  原生 title 在 WKWebView 上行为不稳定（不渲染或移开后残留数秒串到相邻控件），
  *  状态/目录/agent/点击动作提示必须可见，且禁用按钮也能触发（事件挂在包裹 span 上）。 */
@@ -164,76 +167,24 @@ function StepperCell({
   pulsing,
   attention,
   onCircleClick,
-  briefTitle,
-  briefLabel,
-  onBriefClick,
-  artifactsTitle,
-  artifactsLabel,
-  artifactsDisabled,
-  artifactsExpanded,
-  onArtifactsClick,
 }: {
   circleClass: string;
   circleTitle: string;
   circleLabel: string;
   circleDisabled: boolean;
   pulsing: boolean;
-  /** 终端注意力点：confirm=待确认（warn 点）、done=已完成（done 绿点）；null/缺省不显示 */
+  /** 终端注意力点：confirm=待确认（warn 点）；null/缺省不显示 */
   attention?: "confirm" | "done" | null;
   onCircleClick: () => void;
-  briefTitle: string;
-  briefLabel: string;
-  onBriefClick: () => void;
-  artifactsTitle: string;
-  artifactsLabel: string;
-  artifactsDisabled: boolean;
-  artifactsExpanded: boolean;
-  onArtifactsClick: () => void;
 }) {
-  const ref = useRef<HTMLLIElement>(null);
   const circleRef = useRef<HTMLButtonElement>(null);
   const { tip, show: showTip, hide: hideTip } = useHoverTip(circleRef);
-  const [dashCount, setDashCount] = useState(0);
-  const [slack, setSlack] = useState(0);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const update = () => {
-      // 固定件 = 圆 24 + 两方块 10 + 间隙（节点与块数 N 共 N+2 道 5px 间隙）；
-      // 每个虚线块含隙占 10px：链长 = 10N + 44。除不尽的余数 r(<10px) 均分到圆两侧间隙
-      // （参考图里圆周围的空档本来就大于虚线间隙，余数藏在语义空档里，方块永远 5×5 等大）
-      const w = el.clientWidth;
-      const n = Math.max(0, Math.floor((w - 44) / 10));
-      setDashCount(n);
-      setSlack(Math.max(0, w - 44 - 10 * n));
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  const left = Math.ceil(dashCount / 2);
-  const right = Math.floor(dashCount / 2);
-  // done 列整条链变绿（已打通）；进行中/checking 的圆加 cta 外环锁定焦点
-  const done = circleClass.includes("bg-done");
+  // 进行中/checking 的圆加 cta 外环锁定焦点
   const active = circleClass.split(" ").includes("bg-cta");
   return (
-    <li
-      ref={ref}
-      className="group flex min-w-0 items-center justify-center gap-[5px]"
-    >
-      {Array.from({ length: left }, (_, k) => (
-        <DashBlock key={`l${k}`} k={`l${k}`} done={done} />
-      ))}
-      <SquareButton
-        title={briefTitle}
-        label={briefLabel}
-        done={done}
-        onClick={onBriefClick}
-      />
+    <li className="flex min-w-0 items-center justify-center">
       <span
-        className="relative shrink-0"
-        style={{ marginInline: slack / 2 }}
+        className="relative shrink-0 bg-strip px-[3px]"
         onMouseEnter={showTip}
         onMouseLeave={hideTip}
         onFocus={showTip}
@@ -244,15 +195,20 @@ function StepperCell({
           type="button"
           disabled={circleDisabled}
           aria-label={circleLabel}
-          className={`block h-[24px] w-[24px] shrink-0 cursor-pointer rounded-full transition-[filter,color,background-color] duration-300 hover:brightness-110 disabled:cursor-not-allowed ${circleClass} ${
-            active || pulsing ? "animate-pulse-brief" : ""
-          } ${active ? "ring-2 ring-cta/50" : ""}`}
+          className="group/circle flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-full disabled:cursor-not-allowed"
           onClick={() => {
             // 点击即关 tooltip：跳转终端/开覆盖层后不留残留悬浮
             hideTip();
             onCircleClick();
           }}
-        />
+        >
+          {/* 视觉圆 22px，按钮保持 28px 热区 */}
+          <span
+            className={`block h-[22px] w-[22px] rounded-full transition-[filter,color,background-color] duration-300 group-hover/circle:brightness-110 ${circleClass} ${
+              active || pulsing ? "animate-pulse-brief" : ""
+            } ${active ? "ring-2 ring-cta/50" : ""}`}
+          />
+        </button>
         {attention === "confirm" && (
           <span
             className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-warn"
@@ -260,17 +216,6 @@ function StepperCell({
         )}
         <HoverTip tip={tip} text={circleTitle} />
       </span>
-      <SquareButton
-        title={artifactsTitle}
-        label={artifactsLabel}
-        disabled={artifactsDisabled}
-        expanded={artifactsExpanded}
-        done={done}
-        onClick={onArtifactsClick}
-      />
-      {Array.from({ length: right }, (_, k) => (
-        <DashBlock key={`r${k}`} k={`r${k}`} done={done} />
-      ))}
     </li>
   );
 }
@@ -536,9 +481,9 @@ export default function ProjectGroup({
   } | null>(null);
   // 流水线编辑器（RX1）：步骤编辑唯一入口，覆盖旧 ⋯ 内联重命名/编辑简报/+ 步骤表单
   const [editorOpen, setEditorOpen] = useState(false);
-  // 圆前小方块（编辑简报）：打开编辑器并定位到该步骤卡片（null = 从项目菜单进入，不定位）
+  // 步骤 ⋯「编辑步骤」：打开编辑器并定位到该步骤卡片（null = 从项目菜单进入，不定位）
   const [editorFocus, setEditorFocus] = useState<number | null>(null);
-  // 圆后小方块（产物）手风琴：strip 下方就地展开 ArtifactChecklist，记展开的步骤 index（单开）
+  // 步骤 ⋯「产物核验」手风琴：strip 下方就地展开 ArtifactChecklist，记展开的步骤 index（单开）
   const [artifactsStep, setArtifactsStep] = useState<number | null>(null);
   const [pipelineSaving, setPipelineSaving] = useState(false);
   const [applyingTemplate, setApplyingTemplate] = useState(false);
@@ -555,8 +500,9 @@ export default function ProjectGroup({
   const [tplSaving, setTplSaving] = useState(false);
   const [tplSavedMsg, setTplSavedMsg] = useState<string | null>(null);
 
-  /** 一键开步（§11.3 机制三）：invoke 链路在 pipeline-start.ts 与评审「开始下一步」共用，此处只管组件态 */
-  async function startStep(index: number) {
+  /** 一键开步（§11.3 机制三）：invoke 链路在 pipeline-start.ts 与评审「开始下一步」共用，此处只管组件态；
+   *  briefPath = 任务卡「开工」带入的定稿简报（相对项目根），注入 TASK.md */
+  async function startStep(index: number, briefPath?: string) {
     if (!project || !cfg) return;
     const step = cfg.steps[index];
     setStarting(index);
@@ -565,6 +511,7 @@ export default function ProjectGroup({
         projectPath: project.path,
         step,
         cfg,
+        briefPath,
         onError,
         // 刷新先于跳终端：run 脚本写入在工作区行刷新之前，「运行脚本」菜单当次即可见
         onOpenTerminal: async (ws, initialPrompt) => {
@@ -719,6 +666,20 @@ export default function ProjectGroup({
       st.ws && st.ws.status === "active" ? st.ws : undefined;
     return [
       {
+        label: "编辑步骤",
+        title: "打开流水线编辑器并定位到该步骤",
+        onSelect: () => openEditor(index),
+      },
+      {
+        label: artifactsStep === index ? "收起产物核验" : "产物核验",
+        disabled: !st.ws,
+        title: !st.ws
+          ? "工作区尚未创建，暂无产物可核验"
+          : "查看该步骤的预期产物",
+        onSelect: () =>
+          setArtifactsStep((v) => (v === index ? null : index)),
+      },
+      {
         label: "◫ 定位目录",
         disabled: !activeWs,
         title: activeWs
@@ -868,7 +829,7 @@ export default function ProjectGroup({
   // 课题主题直接显示在项目名旁（v3.47：只挂悬浮提示等于不存在——用户反馈看不到）
   const topicText =
     registered && cfg?.topic?.trim() ? cfg.topic.trim() : undefined;
-  // 圆后小方块（产物）手风琴展开项（单开）：无绑定工作区不渲染（方块本身已禁用，此处兜底）
+  // 产物核验手风琴展开项（单开）：无绑定工作区不渲染（菜单项本身已禁用，此处兜底）
   const artStep =
     cfg && artifactsStep !== null ? (cfg.steps[artifactsStep] ?? null) : null;
   const artSt = artStep
@@ -876,6 +837,13 @@ export default function ProjectGroup({
     : null;
   const artWs = artSt?.ws;
   const artMerged = artSt?.key === "done";
+  // 每步完成态（带级虚线链按列区间着色）+ 末端菱形：全部步骤完成才点亮（与完成圆同一 done 绿）
+  const stepDoneFlags =
+    cfg?.steps.map(
+      (s) => deriveStepStatus(s, workspaces, health, drift).key === "done",
+    ) ?? [];
+  const allStepsDone =
+    stepDoneFlags.length > 0 && stepDoneFlags.every(Boolean);
   return (
     // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给流水线等必要块
     <section className="mb-5">
@@ -1141,29 +1109,33 @@ export default function ProjectGroup({
       )}
 
       {/* 流水线 strip（大圆步进器，v3.46）：状态从绑定工作区派生；
-          大圆 = 状态色 + 主推进点击，圆前小方块 = 编辑简报，圆后小方块 = 产物核验。
-          结构 = 名称带 + 步进器带两个同列网格；虚线只有一条（步进器带级单层渐变），
-          列缝无双块、相位一致；圆与方块各自带 strip 色遮断，虚线只在其间穿行 */}
+          大圆 = 状态色 + 主推进点击；编辑步骤/产物核验收进步骤 ⋯ 菜单（原圆前/圆后小方块
+          伪装成虚线块可发现性为零，入口删除、视觉块保留为普通虚线块）；末端菱形 = 流水线终点，
+          全部步骤完成后点亮（与完成圆同一 done 绿）。
+          结构 = 名称带 + 步进器带两个同列网格；虚线链由 StepperChain 在带级一次铺满
+          （块位以圆心为锚分段等距计算，跨列无边界、各圆两侧断口一致），圆以 strip 底色遮罩压在链上 */}
       {registered && cfg && cfg.steps.length > 0 && (
         <div className="mb-3 rounded-md bg-strip px-3 py-2.5">
           {/* 等分列网格：列宽下限 9rem 让更多步骤在常规窗口内完整可见；
               窗口过窄放不下全部步骤时保持整体横向滚动（不换行，虚线与各列大圆同轴） */}
           {/* 横向滚动容器必须显式 overflow-y-clip：overflow-x:auto 会把 y 轴也算成 auto，
-              方块的 28px 透明热区/hover 放大溢出纵向就会冒出滚动条，宽度变化又触发链重算（左右晃动） */}
+              圆的 28px 热区/tooltip 溢出纵向就会冒出滚动条，宽度变化又触发链重算（左右晃动） */}
           <div className="overflow-x-auto overflow-y-clip pb-1">
             <div
               className="min-w-full"
               style={{
-                minWidth: `calc(${cfg.steps.length} * 9rem + ${cfg.steps.length - 1} * 0.5rem)`,
+                minWidth: `calc(${cfg.steps.length} * 9rem + ${cfg.steps.length - 1} * 0.375rem + 20px)`,
               }}
             >
-              {/* 名称带：居中截断（悬浮全称）；⋯ 步骤菜单 hover/聚焦才现 */}
-              <ol
-                className="grid gap-[5px]"
-                style={{
-                  gridTemplateColumns: `repeat(${cfg.steps.length}, minmax(9rem, 1fr))`,
-                }}
-              >
+              {/* 名称带：居中截断（悬浮全称）；⋯ 步骤菜单 hover/聚焦才现。
+                  末尾占位与步进器带的终点菱形同宽（10px），两条带的列严格对齐 */}
+              <div className="flex items-center gap-1.5">
+                <ol
+                  className="grid min-w-0 flex-1 gap-1.5"
+                  style={{
+                    gridTemplateColumns: `repeat(${cfg.steps.length}, minmax(9rem, 1fr))`,
+                  }}
+                >
                 {cfg.steps.map((step, i) => (
                   <li key={`${i}-${step.name}`} className="group relative min-w-0">
                     <div className="relative flex h-7 items-center px-7">
@@ -1192,15 +1164,20 @@ export default function ProjectGroup({
                     </div>
                   </li>
                 ))}
-              </ol>
-              {/* 步进器带：StepperCell 真实块节律线（5px 块 + 5px 间隙，跨列连续）；与名称带同列同隙 */}
-              <div>
-                <ol
-                  className="grid gap-[5px]"
-                  style={{
-                    gridTemplateColumns: `repeat(${cfg.steps.length}, minmax(9rem, 1fr))`,
-                  }}
-                >
+                </ol>
+                <span className="w-3.5 shrink-0" aria-hidden />
+              </div>
+              {/* 步进器带：StepperChain 在带级把虚线链一次铺满（6px 块 + 6px 间隙，跨列连续无边界），
+                  圆用 strip 底色遮罩压在链上；与名称带同列同隙。
+                  末端菱形 = 流水线终点符号（装饰，无点击），全部步骤完成后点亮 */}
+              <div className="flex items-center gap-1.5">
+                <StepperChain dones={stepDoneFlags}>
+                  <ol
+                    className="relative grid gap-1.5"
+                    style={{
+                      gridTemplateColumns: `repeat(${cfg.steps.length}, minmax(9rem, 1fr))`,
+                    }}
+                  >
                   {cfg.steps.map((step, i) => {
                     const st = deriveStepStatus(step, workspaces, health, drift);
                     const statusLabel =
@@ -1244,8 +1221,6 @@ export default function ProjectGroup({
                       st.key === "pending" &&
                       !st.ws &&
                       (starting === i || !step.workspaceName);
-                    // 圆后小方块（产物）：无绑定工作区时禁用；root 口径同任务行——已合并读项目根，其余读工作树
-                    const artifactsDisabled = !st.ws;
                     return (
                       <StepperCell
                         key={`${i}-${step.name}`}
@@ -1260,33 +1235,34 @@ export default function ProjectGroup({
                         pulsing={starting === i}
                         attention={attention}
                         onCircleClick={() => onCircleClick(i, st)}
-                        briefTitle="编辑简报"
-                        briefLabel={`编辑简报：${step.name}`}
-                        onBriefClick={() => openEditor(i)}
-                        artifactsTitle={
-                          artifactsDisabled
-                            ? "工作区尚未创建，暂无产物可核验"
-                            : artifactsStep === i
-                              ? "收起产物核验"
-                              : "查看该步骤的预期产物"
-                        }
-                        artifactsLabel={`产物核验：${step.name}`}
-                        artifactsDisabled={artifactsDisabled}
-                        artifactsExpanded={artifactsStep === i}
-                        onArtifactsClick={() =>
-                          setArtifactsStep((v) => (v === i ? null : i))
-                        }
                       />
                     );
                   })}
-                </ol>
+                  </ol>
+                </StepperChain>
+                <span
+                  className="flex h-7 w-3.5 shrink-0 items-center justify-center"
+                  role="img"
+                  aria-label={
+                    allStepsDone ? "流水线终点：全部步骤已完成" : "流水线终点"
+                  }
+                >
+                  {/* 实心菱形终点（9px 旋转 45°），与虚线块同轴、同 6px 间隙接上链条；
+                      明暗跟随完成态：未完成与未完成链条同暗（hairline），全部完成点亮 done 绿 */}
+                  <span
+                    aria-hidden
+                    className={`block size-[9px] rotate-45 rounded-[1px] transition-colors duration-300 ${
+                      allStepsDone ? "bg-done" : "bg-hairline"
+                    }`}
+                  />
+                </span>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* 圆后小方块（产物）手风琴：strip 下方就地展开（单开）；root 口径同任务行——已合并读项目根，其余读工作树 */}
+      {/* 产物核验手风琴（步骤 ⋯ 菜单触发）：strip 下方就地展开（单开）；root 口径同任务行——已合并读项目根，其余读工作树 */}
       {artStep && artWs && (
         <div className="mb-3">
           <ArtifactChecklist
@@ -1296,6 +1272,17 @@ export default function ProjectGroup({
             rootLabel={artMerged ? "主文件夹（已合并）" : "工作区"}
           />
         </div>
+      )}
+
+      {/* 任务卡区（流水线步进器下方）：对话的文件夹 + 定稿简报收集夹；无独立状态机，不碰工作区/评审流程 */}
+      {registered && cfg && (
+        <TaskCardsSection
+          projectPath={projectPath}
+          steps={cfg.steps}
+          workspaces={workspaces}
+          refreshToken={refreshToken}
+          onStartStep={(index, briefPath) => startStep(index, briefPath)}
+        />
       )}
 
       {/* 模板库选择器：项目菜单与空流水线「选择流水线模板」共用的唯一实例 */}

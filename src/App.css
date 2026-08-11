@@ -26,6 +26,12 @@
 }
 
 @theme {
+  /* 等宽字体单一出处：JetBrains Mono 打包进应用（见上方 @font-face），
+     Windows 回退 Cascadia Mono/Consolas，CJK 兜底雅黑（通用 monospace 在 Windows 会落位图字体） */
+  --font-mono:
+    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, "Cascadia Mono",
+    Consolas, "Microsoft YaHei", monospace;
+
   /* 沉浸工作台（v3.48 长时工作校准）：去蓝化——墨蓝基底改为暖中性炭黑（蓝光少、适合长时间
      编码/读文档），文字冷白灰蓝改暖纸白；侧栏沉入近虚无 → 内容面 → 面板逐级浮起的结构不变 */
   --color-rail: #0a0b0e; /* 应用侧栏（近虚无，最暗） */
@@ -320,13 +326,21 @@ body {
   overscroll-behavior: none;
   background: var(--color-canvas);
   color: var(--color-l2);
+  /* Windows 的 CJK 回退要显式给雅黑：否则中文穿过 Segoe UI/Noto Sans SC（通常未装）
+     落到通用 sans-serif，小字号下 DirectWrite 渲染发虚 */
   font-family:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
-    "PingFang SC", sans-serif;
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI",
+    "Microsoft YaHei", "Noto Sans SC", "PingFang SC", sans-serif;
   /* 深色近黑底上用灰度抗锯齿（auto）而非 antialiased——后者在 macOS 深色界面把笔画削薄，
      用户反馈"字体发白发飘"即源于此；auto 保持次像素渲染，字形更实 */
   font-size: 14px;
   text-rendering: optimizeLegibility;
+}
+
+/* optimizeLegibility 在 Windows Chromium 会走 DirectWrite 的 natural 渲染模式，
+   丢掉字体 hinting，小字号（12–13px）文本明显发糊——Windows 回退 auto */
+[data-platform="windows"] body {
+  text-rendering: auto;
 }
 
 #root {

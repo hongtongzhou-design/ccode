@@ -93,6 +93,11 @@ export function captureDecision(
 export const IS_MAC =
   typeof navigator !== "undefined" && /mac/i.test(navigator.platform || "");
 
+/** Windows 判定（字体光栅化差异需要 CSS 按平台区分，见 App.css） */
+export const IS_WINDOWS =
+  typeof navigator !== "undefined" &&
+  (navigator.platform || "").startsWith("Win");
+
 /** 组合串 → 展示标签（mod+k → ⌘K；非 mac 显示 Ctrl+K） */
 export function comboLabel(combo: string): string {
   if (!combo) return "已禁用";

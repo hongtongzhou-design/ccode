@@ -20,6 +20,7 @@ import { attributeToProject, buildRunOverview } from "../run-overview";
 import { IS_MAC } from "../hotkeys";
 import { AGENTS } from "../types";
 import type {
+  PendingArtifactDto,
   PortInfoDto,
   ProjectConfigReadDto,
   ProjectDto,
@@ -871,6 +872,19 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
   // 收件箱条目数镜像给侧栏「工作区」徽标 + 标题栏收件箱（本页唯一写入方，签名变更才写）
   const setInboxItems = useAppStore((s) => s.setInboxItems);
+  // 「◈ 提炼接力」后台任务（store）：ready 未消费 → 收件箱「待发送」
+  const digestJob = useAppStore((s) => s.digestJob);
+  // profile 三层验证失败镜像（ProfilesPage 写入），收件箱只读；已删除的 profile 惰性剔除
+  const profileIssues = useAppStore((s) => s.profileIssues);
+  const profiles = useAppStore((s) => s.profiles);
+  // 收件箱「去核验」一次性请求：选中该工作区所属项目并展开其任务行的产物清单
+  const artifactCheckReq = useAppStore((s) => s.artifactCheckReq);
+  const setArtifactCheckReq = useAppStore((s) => s.setArtifactCheckReq);
+  // 对话页卡片 chip → 选中对应项目的一次性请求（项目根路径）
+  const selectProjectReq = useAppStore((s) => s.selectProjectReq);
+  const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
+  // 产物待核验（后端只读检查，随 refresh 同频次拉取）：绑定步骤的预期产物全部产出且够新
+  const [artifactReady, setArtifactReady] = useState<PendingArtifactDto[]>([]);
   // 会话清单（启动即加载）：外部 live 会话的收件箱入口
   const sessions = useAppStore((s) => s.sessions);
   // 外部 live 会话（无终端标签可跳）的尾部注意力：后端直查 session_tail_state，
@@ -993,6 +1007,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         return next;
       });
       setHealthFailed(healthFailures);
+      // 产物待核验：与健康度同频次（页可见刷新/事件驱动），失败静默（下轮重试）
+      invoke<PendingArtifactDto[]>("pending_artifact_checks")
+        .then(setArtifactReady)
+        .catch(() => {});
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -1202,8 +1220,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       .map((w) => ({
         key: `conflict:${w.id}`,
         dot: "bg-warn-text",
-        text: `「${w.repoName} / ${w.name}」有合并冲突`,
-        actionLabel: "解决冲突",
+        // 基准已前进：继续按旧两侧选边是在解过期冲突，必须先重新同步
+        text: health[w.id]?.staleBase
+          ? `「${w.repoName} / ${w.name}」有合并冲突，且基准已前进——需重新同步`
+          : `「${w.repoName} / ${w.name}」有合并冲突`,
+        actionLabel: health[w.id]?.staleBase ? "重新同步" : "解决冲突",
         action: {
           type: "review" as const,
           worktreePath: w.worktreePath,
@@ -1247,6 +1268,42 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         actionLabel: "去评审",
         action: { type: "review" as const, worktreePath: w.worktreePath },
       })),
+    // 产物待核验：预期产物已全部产出但尚无提交（可合并/冲突已覆盖的情形不重复报）——
+    // 产物多为 gitignore 的文件（*.pdf 等），git 状态永远看不见，不提醒就是黑洞
+    ...artifactReady
+      .filter((a) => {
+        const h = health[a.workspaceId];
+        return !h?.readyToMerge && !h?.conflict;
+      })
+      .map((a) => ({
+        key: `artifacts:${a.workspaceId}`,
+        dot: "bg-ok-text",
+        text: `「${a.repoName} / ${a.workspaceName}」预期产物已备齐，待你核验`,
+        actionLabel: "去核验",
+        action: { type: "artifacts" as const, workspaceId: a.workspaceId },
+      })),
+    // 接力简报已生成待发送：提炼在后台完成，交接链断在人这里
+    ...(digestJob && digestJob.status === "ready" && !digestJob.consumed
+      ? [
+          {
+            key: "digest",
+            dot: "bg-ok-text",
+            text: `接力简报已生成（${digestJob.title || "未命名对话"}），待发送`,
+            actionLabel: "去发送",
+            action: { type: "digest" as const },
+          },
+        ]
+      : []),
+    // profile 验证失败：agent 起不来 = 停工；只镜像用户触发的验证结果，不新增后台轮询
+    ...Object.entries(profileIssues)
+      .filter(([id]) => profiles.some((p) => p.id === id))
+      .map(([id, issue]) => ({
+        key: `profile:${id}`,
+        dot: "bg-warn-text",
+        text: `配置「${issue.name}」验证失败：${issue.reason}`,
+        actionLabel: "去修复",
+        action: { type: "profiles" as const },
+      })),
   ];
 
   // 项目导航行的「待处理」分布（收件箱同款口径按项目摊开）：终端待确认 +
@@ -1280,6 +1337,29 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inboxSig, setInboxItems]);
 
+  // 收件箱「去核验」一次性请求：选中该工作区所属项目并展开其任务行的产物清单
+  useEffect(() => {
+    if (!artifactCheckReq) return;
+    const g = groups.find((gr) =>
+      gr.list.some((w) => w.id === artifactCheckReq),
+    );
+    if (g) {
+      setSelectedGroupKey(g.key);
+      setArtifactsOpen((prev) => new Set(prev).add(artifactCheckReq));
+    }
+    setArtifactCheckReq(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [artifactCheckReq, groups]);
+
+  // 对话页卡片 chip 的一次性跳转：按项目根选中分组（无对应分组静默忽略，与 focusTabReq 同口径）
+  useEffect(() => {
+    if (!selectProjectReq) return;
+    const g = groups.find((gr) => samePath(gr.repoPath, selectProjectReq));
+    if (g) setSelectedGroupKey(g.key);
+    setSelectProjectReq(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectProjectReq, groups]);
+
   // 收件箱折叠 strip：默认收起只占单行，分类摘要保留第一眼信息（「2 冲突 · 1 待确认」）
   const [inboxOpen, setInboxOpen] = useState(false);
   // 空了就收回展开态；展开时 Esc 关闭
@@ -1301,6 +1381,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       [countBy("conflict:"), "冲突"],
       [countBy("confirm:", "live:"), "待确认"], // 终端标签 + 外部 live 同类合并
       [countBy("ready:"), "可合并"],
+      [countBy("artifacts:"), "待核验"],
+      [countBy("digest"), "待发送"],
+      [countBy("profile:"), "配置失效"],
     ] as [number, string][]
   )
     .filter(([n]) => n > 0)

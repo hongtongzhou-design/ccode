@@ -14,17 +14,19 @@ import type {
   WorkspaceDto,
 } from "./types";
 
-/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 预期产物 + 推荐技能 + 项目资源（步骤有资源绑定时只列绑定项，一键开步落成工作区）。
+/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 任务简报（定稿，可选） + 预期产物 + 推荐技能 + 项目资源（步骤有资源绑定时只列绑定项，一键开步落成工作区）。
  *  一键开步（ProjectGroup / 评审「开始下一步」）与 TerminalPage 的「整理为笔记」开步链路共用，保持各处 TASK.md 一致。
  *  artifacts 为项目根提货单（上一步产物），非空时在「项目资源」后追加提货单段。
  *  skillMeta 为技能库元数据（name → 一句话描述）：步骤 skills 非空时渲染「本步骤推荐技能」段；
- *  缺省（库读取失败）时只列技能名，不误标未安装。 */
+ *  缺省（库读取失败）时只列技能名，不误标未安装。
+ *  finalBrief 为任务卡定稿简报全文（卡片「开工」带入）；缺省时零变化 */
 export function renderTaskMd(
   step: ProjectStepDto,
   cfg: ProjectConfigDto,
   projectPath: string,
   artifacts?: ArtifactEntryDto[],
   skillMeta?: Record<string, string>,
+  finalBrief?: string,
 ): string {
   const lines = [`# ${step.name}`, ""];
   // 课题主题放在简报之前：auto 模式的 Agent 据此明确综述主题
@@ -36,6 +38,10 @@ export function renderTaskMd(
     step.brief.trim() ||
       "（在 .ccode/project.toml 的 steps.brief 中补充本步骤任务简报）",
   );
+  // 任务卡定稿简报（对话→记忆）：全文嵌入，步骤简报之后、预期产物之前
+  if (finalBrief?.trim()) {
+    lines.push("", "## 任务简报（定稿）", finalBrief.trim());
+  }
   if (step.expectedArtifacts.length > 0) {
     lines.push(
       "",
@@ -107,12 +113,15 @@ export async function startPipelineStep({
   projectPath,
   step,
   cfg,
+  briefPath,
   onError,
   onOpenTerminal,
 }: {
   projectPath: string;
   step: ProjectStepDto;
   cfg: ProjectConfigDto;
+  /** 任务卡「开工」带入的定稿简报（相对项目根）；非空时全文读入 TASK.md「任务简报（定稿）」段 */
+  briefPath?: string;
   onError: (msg: string) => void;
   /** 开步完成后的终端交接；实现负责跳终端页并预填首条指令 */
   onOpenTerminal: (
@@ -159,10 +168,25 @@ export async function startPipelineStep({
       /* 技能库不可读时只列技能名 */
     }
   }
+  // 任务卡定稿简报：best-effort 读入全文（简报在项目根内，read_file_preview 根约束放行）；
+  // 读取失败不阻断开步，TASK.md 只少定稿段
+  let finalBrief: string | undefined;
+  if (briefPath) {
+    try {
+      const abs = `${projectPath.replace(/[\\/]+$/, "")}/${briefPath}`;
+      const preview = await invoke<{ text: string; truncated: boolean }>(
+        "read_file_preview",
+        { path: abs, root: projectPath },
+      );
+      finalBrief = preview.text;
+    } catch (reason) {
+      onError(`定稿简报读取失败（不影响开步）：${String(reason)}`);
+    }
+  }
   try {
     await invoke("write_workspace_task_md", {
       worktreePath: ws.worktreePath,
-      content: renderTaskMd(step, cfg, projectPath, artifacts, skillMeta),
+      content: renderTaskMd(step, cfg, projectPath, artifacts, skillMeta, finalBrief),
     });
   } catch (reason) {
     onError(`工作区「${ws.name}」已创建，TASK.md 写入失败：${String(reason)}`);

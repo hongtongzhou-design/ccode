@@ -131,7 +131,8 @@ const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 const RIGHT_PANEL_WIDTH_KEY = "ccode.terminalRightWidth";
 const RIGHT_PANEL_DEFAULT_WIDTH = 460;
 const RIGHT_PANEL_MIN_WIDTH = 360;
-const RIGHT_PANEL_MAX_WIDTH = 820;
+// 右栏最大宽度不写死像素：随窗口自由拉宽，只给中带终端保留最小可用宽度
+const TERMINAL_MIN_RESERVE = 340;
 // 分屏：左 pane 宽度百分比的本地记忆（分屏开关状态本身不持久化）
 const SPLIT_PCT_KEY = "ccode.terminalSplitPct";
 const SPLIT_MIN_PCT = 20;
@@ -293,7 +294,7 @@ const TerminalView = memo(function TerminalView({
     const term = termRef.current;
     if (!term || !settings) return;
     term.options.fontSize = settings.terminalFontSize;
-    term.options.fontFamily = `'${settings.terminalFontFamily ?? "JetBrains Mono"}', 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace`;
+    term.options.fontFamily = `'${settings.terminalFontFamily ?? "JetBrains Mono"}', 'JetBrains Mono', 'SF Mono', Menlo, 'Cascadia Mono', Consolas, 'Microsoft YaHei', monospace`;
     term.options.theme = buildXtermTheme(
       settings.theme,
       settings.terminalPalette,
@@ -721,7 +722,9 @@ const TerminalView = memo(function TerminalView({
   useEffect(() => {
     if (!everVisible) return;
     const term = new Terminal({
-      fontFamily: `'${settingsRef.current?.terminalFontFamily ?? "JetBrains Mono"}', 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace`,
+      // 回退链补 Cascadia Mono（Win10+ 自带）与雅黑（CJK 兜底）——否则 Windows 上
+      // JetBrains Mono 未装时中文落到通用 monospace 位图字体，发糊发虚
+      fontFamily: `'${settingsRef.current?.terminalFontFamily ?? "JetBrains Mono"}', 'JetBrains Mono', 'SF Mono', Menlo, 'Cascadia Mono', Consolas, 'Microsoft YaHei', monospace`,
       fontSize: settingsRef.current?.terminalFontSize ?? 14,
       // 显示质感微调：清瘦锐利（向 Ghostty 靠）、盒绘对齐、粗体增亮、平滑滚动
       fontWeight: 400,
@@ -1751,10 +1754,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     const saved = Number(localStorage.getItem(RIGHT_PANEL_WIDTH_KEY));
     const width =
       Number.isFinite(saved) && saved > 0 ? saved : RIGHT_PANEL_DEFAULT_WIDTH;
-    return Math.min(
-      RIGHT_PANEL_MAX_WIDTH,
-      Math.max(RIGHT_PANEL_MIN_WIDTH, width),
-    );
+    // 上限由挂载时的窗口尺寸动态钳制（见下方 resize 副作用），这里只保下限
+    return Math.max(RIGHT_PANEL_MIN_WIDTH, width);
   });
   const [rightExpanded, setRightExpanded] = useState(false);
   const terminalRootRef = useRef<HTMLDivElement>(null);
@@ -1938,7 +1939,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     const railWidth = expanded ? 0 : 240;
     return Math.max(
       RIGHT_PANEL_MIN_WIDTH,
-      Math.min(RIGHT_PANEL_MAX_WIDTH, total - railWidth - 340),
+      total - railWidth - TERMINAL_MIN_RESERVE,
     );
   }
 

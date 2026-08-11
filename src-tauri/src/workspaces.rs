@@ -6,7 +6,7 @@ use std::process::Stdio;
 #[cfg(test)]
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 // ===== DTO =====
 
@@ -997,6 +997,9 @@ pub struct WsHealthDto {
     pub main_off_base: bool,
     /// 主仓库有未提交改动（本地合并会被拒）
     pub main_dirty: bool,
+    /// 冲突现场已落后基准（MERGE_HEAD ≠ 基准分支 tip）：继续按旧两侧选边是解过期冲突，
+    /// 收件箱据此提示「需重新同步」（评审层 unmerged_with_base 的同口径前置）
+    pub stale_base: bool,
     pub ready_to_merge: bool,
 }
 
@@ -1074,6 +1077,20 @@ fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
     let main_dirty = run_git(&repo, &["status", "--porcelain"], Duration::from_secs(30))
         .map(|s| !s.is_empty())
         .unwrap_or(false);
+    // 冲突现场是否已落后基准：仅 merge 进行中才有 MERGE_HEAD，多一次 rev-parse 只发生在此时
+    let stale_base = run_git(
+        &wt,
+        &["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+        Duration::from_secs(10),
+    )
+    .ok()
+    .filter(|mh| !mh.is_empty())
+    .map(|mh| {
+        run_git(&wt, &["rev-parse", &base], Duration::from_secs(10))
+            .map(|tip| tip != mh)
+            .unwrap_or(false)
+    })
+    .unwrap_or(false);
     Ok(WsHealthDto {
         uncommitted,
         ahead,
@@ -1082,6 +1099,7 @@ fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
         conflict_files,
         main_off_base,
         main_dirty,
+        stale_base,
         ready_to_merge: ahead > 0
             && !uncommitted
             && conflict == Some(false)
@@ -1431,6 +1449,103 @@ pub async fn workspace_health(id: String) -> Result<WsHealthDto, String> {
     tauri::async_runtime::spawn_blocking(move || health_impl(&db()?, &id))
         .await
         .map_err(|e| e.to_string())?
+}
+
+// ===== 产物待核验（收件箱；只读，不进轮询——由前端随健康度同频次拉取） =====
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingArtifactDto {
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub repo_name: String,
+}
+
+/// 单个预期产物「已产出且够新」：目录条目（尾斜杠）要求至少一个直接子文件（与核验清单
+/// 同口径），mtime 取目录与子项最大值；文件条目看自身。mtime 早于工作区创建时间的不算
+/// （files-to-copy/模板带入的旧文件不是本任务产物）。
+fn artifact_produced_since(root: &Path, entry: &str, since: SystemTime) -> bool {
+    let is_dir_entry = entry.ends_with('/') || entry.ends_with('\\');
+    let rel = entry.trim().trim_end_matches(['/', '\\']);
+    // 只接受根的相对路径（核验清单的根约束同口径）；绝对路径/逃逸一律视为未产出
+    if rel.is_empty() || rel.contains("..") || Path::new(rel).is_absolute() {
+        return false;
+    }
+    let path = root.join(rel);
+    let fresh = |m: &fs::Metadata| m.modified().map(|t| t >= since).unwrap_or(false);
+    if is_dir_entry {
+        let mut any_file = false;
+        let mut any_fresh = fs::metadata(&path).map(|m| fresh(&m)).unwrap_or(false);
+        let Ok(rd) = fs::read_dir(&path) else {
+            return false;
+        };
+        for e in rd.flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_file() {
+                any_file = true;
+                if fresh(&m) {
+                    any_fresh = true;
+                }
+            }
+        }
+        any_file && any_fresh
+    } else {
+        fs::metadata(&path)
+            .map(|m| m.is_file() && fresh(&m))
+            .unwrap_or(false)
+    }
+}
+
+pub(crate) fn pending_artifact_checks_impl(conn: &Connection) -> Vec<PendingArtifactDto> {
+    let mut out = Vec::new();
+    let Ok(rows) = query_workspaces(conn) else {
+        return out;
+    };
+    // 每个 repo 只读一次 project.toml
+    let mut configs: std::collections::HashMap<String, crate::projects::ProjectConfigDto> =
+        std::collections::HashMap::new();
+    for w in rows.into_iter().filter(|w| w.status == "active") {
+        let cfg = configs
+            .entry(w.repo_path.clone())
+            .or_insert_with(|| crate::projects::read_config_at(Path::new(&w.repo_path)).config);
+        let Some(step) = cfg
+            .steps
+            .iter()
+            .find(|s| !s.workspace_name.is_empty() && s.workspace_name == w.name)
+        else {
+            continue;
+        };
+        if step.expected_artifacts.is_empty() {
+            continue;
+        }
+        let Ok(created) = chrono::DateTime::parse_from_rfc3339(&w.created_at) else {
+            continue; // 创建时间不可解析时不猜，宁缺勿报
+        };
+        let since: SystemTime = created.into();
+        let root = PathBuf::from(&w.worktree_path);
+        if step
+            .expected_artifacts
+            .iter()
+            .all(|a| artifact_produced_since(&root, a, since))
+        {
+            out.push(PendingArtifactDto {
+                workspace_id: w.id,
+                workspace_name: w.name,
+                repo_name: w.repo_name,
+            });
+        }
+    }
+    out
+}
+
+#[tauri::command]
+pub async fn pending_artifact_checks() -> Vec<PendingArtifactDto> {
+    tauri::async_runtime::spawn_blocking(|| {
+        db().map(|c| pending_artifact_checks_impl(&c))
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// 合并回基准分支（本地 merge，git 写操作）：前置条件不满足直接报错，不动任何东西。
@@ -3435,6 +3550,86 @@ mod tests {
         assert!(!health.uncommitted);
         assert_eq!(health.conflict, Some(false));
         assert!(!health.ready_to_merge, "空工作区不得启用合并");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn health_marks_stale_base_when_base_advanced_during_conflict() {
+        let Some(fx) = Fixture::new() else { return };
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "env"],
+        );
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "stale").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("feature.txt"), "branch\n").unwrap();
+        commit_all_in_worktree(&wt, "分支改动");
+        fs::write(fx.repo.join("feature.txt"), "main v1\n").unwrap();
+        sh(&fx.repo, &["add", "feature.txt"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "主线 v1"],
+        );
+        // 未在 merge 中：stale_base 恒 false
+        assert!(!health_impl(&fx.conn, &w.id).unwrap().stale_base);
+        // 开始并入 → 冲突，MERGE_HEAD = 当前基准 tip
+        assert!(
+            run_git(&wt, &["merge", "main"], Duration::from_secs(60)).is_err(),
+            "应产生冲突"
+        );
+        assert!(
+            !health_impl(&fx.conn, &w.id).unwrap().stale_base,
+            "MERGE_HEAD 与基准 tip 一致不算落后"
+        );
+        // 基准继续前进 → 冲突现场落后
+        fs::write(fx.repo.join("other.txt"), "v2\n").unwrap();
+        sh(&fx.repo, &["add", "other.txt"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "主线 v2"],
+        );
+        let h = health_impl(&fx.conn, &w.id).unwrap();
+        assert!(h.stale_base, "基准已前进：MERGE_HEAD ≠ tip 应标记 stale_base");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_artifact_checks_reports_only_fresh_and_complete() {
+        let Some(fx) = Fixture::new() else { return };
+        // 步骤绑定工作区 art，预期产物 = 一个文件 + 一个目录
+        fs::create_dir_all(fx.repo.join(".ccode")).unwrap();
+        fs::write(
+            fx.repo.join(".ccode/project.toml"),
+            "[[steps]]\nname = \"出图\"\nworkspace_name = \"art\"\nexpected_artifacts = [\"out/result.txt\", \"figs/\"]\n",
+        )
+        .unwrap();
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "art").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        // 未产出 → 不报
+        assert!(pending_artifact_checks_impl(&fx.conn).is_empty());
+        // 只产出一半（目录产物还缺）→ 不报
+        fs::create_dir_all(wt.join("out")).unwrap();
+        fs::write(wt.join("out/result.txt"), "new\n").unwrap();
+        assert!(pending_artifact_checks_impl(&fx.conn).is_empty());
+        // 目录产物补一个文件 → 全部备齐 → 报
+        fs::create_dir_all(wt.join("figs")).unwrap();
+        fs::write(wt.join("figs/a.png"), b"png").unwrap();
+        let hits = pending_artifact_checks_impl(&fx.conn);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].workspace_id, w.id);
+        // 产物 mtime 早于工作区创建 → 不算本任务产出（防 files-to-copy/旧文件误报）
+        let f = fs::File::options()
+            .write(true)
+            .open(wt.join("out/result.txt"))
+            .unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
+        assert!(pending_artifact_checks_impl(&fx.conn).is_empty());
+        // 无绑定步骤的工作区永不报
+        let _plain =
+            create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "plain2").unwrap();
+        assert!(pending_artifact_checks_impl(&fx.conn).is_empty());
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
+import { groupSessionsByTask } from "../task-cards";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
@@ -54,11 +55,6 @@ function sessionTitle(s: SessionMetaDto): string {
   return s.customTitle || s.title || `未命名对话 · ${s.sessionId.slice(0, 8)}`;
 }
 
-/** 步骤展示名：工作区名命中档案卡步骤时显示步骤名，否则回落工作区原名；无工作区为 null */
-function stepLabel(s: SessionMetaDto): string | null {
-  return s.workspace ? (s.stepName ?? s.workspace) : null;
-}
-
 export default function SessionsPage({ visible }: { visible: boolean }) {
   const sessions = useAppStore((s) => s.sessions);
   const loadSessions = useAppStore((s) => s.loadSessions);
@@ -70,6 +66,15 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const focusTab = useAppStore((s) => s.focusTab);
   const sessionsQuery = useAppStore((s) => s.sessionsQuery);
   const setSessionsQuery = useAppStore((s) => s.setSessionsQuery);
+  // 任务卡：移到卡片菜单的候选列表（按项目根缓存）+ 卡片 chip 跳工作区页的一次性请求
+  const taskCards = useAppStore((s) => s.taskCards);
+  const loadTaskCards = useAppStore((s) => s.loadTaskCards);
+  const assignSessionTask = useAppStore((s) => s.assignSessionTask);
+  const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
+  // 「移到卡片…」子面板：依附会话 ⋯ 菜单，仅项目筛选下可进（此时才知道 project_root）
+  const [taskPickerFor, setTaskPickerFor] = useState<SessionMetaDto | null>(
+    null,
+  );
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [showArchived, setShowArchived] = useState(false);
@@ -264,26 +269,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     return src;
   }, [regularVisible, internalVisible, filter]);
 
-  // 项目筛选下按步骤分组（RX3a）：组内保持时间降序，组按各自最近活跃排序，
-  // 无工作区会话不带小标题排在最前；其余筛选保持纯时间序（跨项目分组无意义）。
-  // header 只挂在每组首条上，渲染时据此插步骤名小标题。
+  // 项目筛选下按任务卡分组（对话归入卡片；无卡片的收「未归置」恒在最前，与原「无工作区会话
+  // 排最前」同口径）：组内保持时间降序，组按各自最近活跃排序；其余筛选保持纯时间序（跨项目分组无意义）。
+  // header 只挂在每组首条上，渲染时据此插组名小标题。
   const displayList = useMemo(() => {
     if (filter.kind !== "project")
       return sessionList.map((s) => ({ header: null as string | null, s }));
-    const groups = new Map<string | null, SessionMetaDto[]>();
-    for (const s of sessionList) {
-      const k = stepLabel(s);
-      const g = groups.get(k);
-      if (g) g.push(s);
-      else groups.set(k, [s]);
-    }
-    const ordered = [...groups.entries()].sort((a, b) => {
-      if (a[0] === null) return -1;
-      if (b[0] === null) return 1;
-      return (b[1][0]?.updatedAt ?? "").localeCompare(a[1][0]?.updatedAt ?? "");
-    });
-    return ordered.flatMap(([header, list]) =>
-      list.map((s, i) => ({ header: i === 0 ? header : null, s })),
+    return groupSessionsByTask(sessionList).flatMap((g) =>
+      g.list.map((s, i) => ({ header: i === 0 ? g.name : null, s })),
     );
   }, [sessionList, filter.kind]);
 
@@ -293,6 +286,12 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setFilter(f);
     setSelected(null);
   }
+
+  // 项目筛选激活时预取该项目任务卡（「移到卡片…」菜单候选；非项目目录后端返回空表）
+  const projectFilterPath = filter.kind === "project" ? filter.path : null;
+  useEffect(() => {
+    if (projectFilterPath) void loadTaskCards(projectFilterPath).catch(() => {});
+  }, [projectFilterPath, loadTaskCards]);
 
   const [summary, setSummary] = useState<string | null>(null);
   const [aiSummarizing, setAiSummarizing] = useState(false);
@@ -727,6 +726,21 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   // 「◈ 提炼接力…」目标选择器（AI 蒸馏简报；回放头部下拉与行内 ⋯ 菜单进入）
   const [digestFor, setDigestFor] = useState<SessionMetaDto | null>(null);
 
+  // 收件箱「接力简报待发送 → 去发送」：按后台任务定位会话并重开 DigestPicker（复用已生成简报）
+  const digestOpenReq = useAppStore((s) => s.digestOpenReq);
+  const setDigestOpenReq = useAppStore((s) => s.setDigestOpenReq);
+  const digestJob = useAppStore((s) => s.digestJob);
+  useEffect(() => {
+    if (!digestOpenReq) return;
+    setDigestOpenReq(null);
+    if (!digestJob) return;
+    const hit = sessions.find(
+      (s) => s.agent === digestJob.agent && s.sessionId === digestJob.sessionId,
+    );
+    if (hit) setDigestFor(hit);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [digestOpenReq]);
+
   // 与右键菜单一致：Escape / 任意滚动关闭，避免滚动后浮层错位
   useEffect(() => {
     if (!resumeMenu) return;
@@ -741,6 +755,37 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       window.removeEventListener("scroll", onScroll, true);
     };
   }, [resumeMenu]);
+
+  // 「移到卡片…」子面板：同右键菜单的关闭语义
+  useEffect(() => {
+    if (!taskPickerFor) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setTaskPickerFor(null);
+    };
+    const onScroll = () => setTaskPickerFor(null);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [taskPickerFor]);
+
+  /** 移到卡片 / 移出卡片：assign_session_task 落库后刷新列表（store 动作内完成） */
+  async function assignTask(s: SessionMetaDto, taskId: string | null) {
+    setTaskPickerFor(null);
+    setError(null);
+    try {
+      await assignSessionTask(s.agent, s.sessionId, taskId);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  // 「未归置」组标题行右侧的归类提示：仅项目筛选下且该项目已有卡片时显示
+  // （没有卡片时不教用户做还做不了的事）
+  const projectHasCards =
+    filter.kind === "project" && (taskCards[filter.path] ?? []).length > 0;
 
   const filterActive = (f: Filter) =>
     (filter.kind === "all" && f.kind === "all") ||
@@ -1058,8 +1103,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 return (
                   <Fragment key={skey(s)}>
                     {header && (
-                      <div className="border-b border-hairline bg-strip px-4 pb-1 pt-2 text-xs text-l3">
-                        ⎇ {header}
+                      <div className="flex items-center justify-between gap-2 border-b border-hairline bg-strip px-4 pb-1 pt-2 text-xs text-l3">
+                        <span>{header === "未归置" ? header : `▤ ${header}`}</span>
+                        {header === "未归置" && projectHasCards && (
+                          <span className="text-[10px] text-l4">
+                            ⋯ 可移到卡片归类
+                          </span>
+                        )}
                       </div>
                     )}
                     <div className="space-y-2 border-b border-hairline bg-inset p-4">
@@ -1109,8 +1159,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               return (
                 <Fragment key={skey(s)}>
                   {header && (
-                    <div className="border-b border-hairline bg-strip px-3 pb-1 pt-2 text-xs text-l3">
-                      ⎇ {header}
+                    <div className="flex items-center justify-between gap-2 border-b border-hairline bg-strip px-3 pb-1 pt-2 text-xs text-l3">
+                      <span>{header === "未归置" ? header : `▤ ${header}`}</span>
+                      {header === "未归置" && projectHasCards && (
+                        <span className="text-[10px] text-l4">
+                          ⋯ 可移到卡片归类
+                        </span>
+                      )}
                     </div>
                   )}
                 <div
@@ -1252,6 +1307,20 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       >
                         ⎇ {s.stepName ?? s.workspace}
                       </span>
+                    )}
+                    {s.taskName && (
+                      <button
+                        type="button"
+                        className="max-w-28 shrink-0 truncate rounded bg-inset px-1 text-l3 hover:bg-seg-sel hover:text-l1"
+                        title={`任务卡：${s.taskName}（点击跳到工作区页对应项目）`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSelectProjectReq(s.projectPath);
+                          setPage("workspaces");
+                        }}
+                      >
+                        ▤ {s.taskName}
+                      </button>
                     )}
                     {s.handoffFromAgent && (
                       <span
@@ -1717,6 +1786,19 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     </button>
                   </>
                 )}
+                {/* 移到卡片：仅项目筛选下可用（此时才知道 project_root） */}
+                {filter.kind === "project" && (
+                  <button
+                    className={menuItem}
+                    title="把该对话归入本项目的一张任务卡"
+                    onClick={() => {
+                      setMenu(null);
+                      setTaskPickerFor(menu.session);
+                    }}
+                  >
+                    移到卡片…
+                  </button>
+                )}
                 <button
                   className={`${menuItem} text-err-text`}
                   onClick={() => {
@@ -1741,6 +1823,48 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 }}
               >
                 删除该项目全部对话
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      {/* 「移到卡片…」子面板：列出当前筛选项目的卡片；无卡片给置灰提示 */}
+      {taskPickerFor && filter.kind === "project" && (
+        <div
+          className="fixed inset-0 z-20"
+          onClick={() => setTaskPickerFor(null)}
+        >
+          <div
+            className="absolute left-1/2 top-1/4 w-72 -translate-x-1/2 rounded border border-field bg-strip py-1 text-sm"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="px-3 pb-1 pt-1.5 text-xs text-l4">
+              移到卡片（{basename(filter.path)}）
+            </p>
+            {(taskCards[filter.path] ?? []).length === 0 ? (
+              <p className="px-3 py-1.5 text-sm text-l4">
+                该项目还没有任务卡，可在工作区页新建。
+              </p>
+            ) : (
+              (taskCards[filter.path] ?? []).map((c) => (
+                <button
+                  key={c.id}
+                  className={`${menuItem} flex items-center justify-between gap-2`}
+                  onClick={() => void assignTask(taskPickerFor, c.id)}
+                >
+                  <span className="min-w-0 truncate">▤ {c.name}</span>
+                  {taskPickerFor.taskId === c.id && (
+                    <span className="shrink-0 text-xs text-l4">当前</span>
+                  )}
+                </button>
+              ))
+            )}
+            {taskPickerFor.taskId && (
+              <button
+                className={menuItem}
+                onClick={() => void assignTask(taskPickerFor, null)}
+              >
+                移出卡片
               </button>
             )}
           </div>

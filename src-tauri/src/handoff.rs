@@ -224,10 +224,43 @@ pub(crate) fn redact_and_cap(text: &str) -> String {
     format!("{}{marker}", &redacted[..cut])
 }
 
+/// 接力简报是过程文件而非任务产物（默认 .gitignore 规则的存量仓库补丁）：
+/// 写简报时顺手把 `.ccode/handoff-*.md` 补进仓库 .gitignore。best-effort——
+/// 非 git 仓库/读取失败静默跳过；已有规则不重复追加。
+fn ensure_handoff_ignored(project_root: &Path) {
+    if crate::workspaces::run_git(
+        project_root,
+        &["rev-parse", "--is-inside-work-tree"],
+        std::time::Duration::from_secs(10),
+    )
+    .is_err()
+    {
+        return;
+    }
+    let Some(content) = with_handoff_rule(&fs::read_to_string(project_root.join(".gitignore")).unwrap_or_default())
+    else {
+        return;
+    };
+    let _ = crate::profiles::atomic_write(&project_root.join(".gitignore"), &content);
+}
+
+/// 纯逻辑：缺 `.ccode/handoff-*.md` 规则时返回追加后的全文，已有返回 None
+fn with_handoff_rule(existing: &str) -> Option<String> {
+    const RULE: &str = ".ccode/handoff-*.md";
+    if existing.lines().any(|l| l.trim() == RULE) {
+        return None;
+    }
+    let mut content = existing.to_string();
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str("\n# Ccode 接力简报（过程文件，不进版本库）\n.ccode/handoff-*.md\n");
+    Some(content)
+}
+
 /// 解析简报写入路径：默认 <cwd>/.ccode/handoff-<时间>.md；
 /// 自定义路径（相对则基于 cwd）的父目录必须 canonicalize 后仍在项目根内，防符号链接逃逸。
-fn handoff_target_path(cwd: &str, target_path: Option<&str>) -> Result<PathBuf, String> {
-    let root = fs::canonicalize(sessions::expand_tilde(cwd)).map_err(|e| format!("项目目录无效: {e}"))?;
+fn handoff_target_path(cwd: &str, target_path: Option<&str>) -> Result<PathBuf, String> {    let root = fs::canonicalize(sessions::expand_tilde(cwd)).map_err(|e| format!("项目目录无效: {e}"))?;
     if !root.is_dir() {
         return Err("项目路径不是目录".into());
     }
@@ -282,6 +315,8 @@ fn build_handoff_brief_impl(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
     }
+    // 简报落 .ccode/ 即确保仓库忽略 handoff-*.md（存量仓库的默认规则补齐）
+    ensure_handoff_ignored(Path::new(cwd));
     crate::profiles::atomic_write(&path, &text)?;
     let user_count = page
         .messages
@@ -352,6 +387,8 @@ fn build_session_digest_impl(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
     }
+    // 简报落 .ccode/ 即确保仓库忽略 handoff-*.md（存量仓库的默认规则补齐）
+    ensure_handoff_ignored(Path::new(cwd));
     crate::profiles::atomic_write(&path, &text)?;
     Ok(HandoffBriefDto {
         file_path: path.to_string_lossy().into_owned(),
@@ -384,6 +421,70 @@ pub async fn build_session_digest(
     })
     .await
     .map_err(|e| format!("提炼接力简报失败: {e}"))?
+}
+
+// ===== 定稿简报（任务卡）：AI 初稿 → 人编辑定稿 → 落盘并钉到卡片 =====
+// 与 handoff-*.md 过程文件不同：定稿简报是项目文档（卡片 briefs 以相对路径引用它），
+// 因此固定落 <项目根>/.ccode/brief-<时间>.md，且不进 gitignore（随 git 走）。
+
+/// 定稿简报落盘：脱敏 + 64KB 上限后原子写 .ccode/brief-<时间>.md；
+/// task_id 非空时把相对路径登记进卡片 briefs。返回相对项目根的正斜杠路径。
+/// 不动 build_handoff_brief / build_session_digest 的既有行为。
+#[tauri::command]
+pub async fn save_task_brief(
+    project_root: String,
+    task_id: Option<String>,
+    content: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_task_brief_impl(&project_root, task_id.as_deref(), &content)
+    })
+    .await
+    .map_err(|e| format!("保存定稿简报失败: {e}"))?
+}
+
+fn save_task_brief_impl(
+    project_root: &str,
+    task_id: Option<&str>,
+    content: &str,
+) -> Result<String, String> {
+    let root = crate::projects::ensure_task_project_root(Path::new(&sessions::expand_tilde(project_root)))?;
+    save_task_brief_at(&root, task_id, content)
+}
+
+/// 定稿简报落盘（root 需已过项目门槛校验，测试与示例课题播种直接调这里）
+pub(crate) fn save_task_brief_at(root: &Path, task_id: Option<&str>, content: &str) -> Result<String, String> {
+    if content.trim().is_empty() {
+        return Err("简报内容为空，无法保存".into());
+    }
+    let task_id = task_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    // 先确认卡片存在再落盘，避免写了文件却钉不上卡片留下孤儿文件
+    if let Some(tid) = &task_id {
+        if !crate::projects::task_cards_at(root).iter().any(|t| t.id == *tid) {
+            return Err("卡片不存在（可能已被删除）".into());
+        }
+    }
+    // 文件名时间戳同 handoff 口径（冒号在 Windows 文件名非法，只留字母数字）；
+    // 同一秒连存两份时追加 -2/-3 后缀，互不覆盖
+    let stamp: String = sessions::now_iso()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let mut rel = format!(".ccode/brief-{stamp}.md");
+    let mut n = 1;
+    while root.join(&rel).exists() {
+        n += 1;
+        rel = format!(".ccode/brief-{stamp}-{n}.md");
+    }
+    let path = root.join(&rel);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
+    }
+    crate::profiles::atomic_write(&path, &redact_and_cap(content))?;
+    if let Some(tid) = &task_id {
+        crate::projects::attach_brief_at(root, tid, &rel)?;
+    }
+    Ok(rel)
 }
 
 // ===== 接力链（app.db 小表）：登记时目标会话还不存在，按 agent+cwd 记录，
@@ -457,8 +558,9 @@ fn read_handoff_links(conn: &Connection) -> Vec<HandoffLink> {
 }
 
 /// 会话目录与登记目录的等价判定：先做展开后的字符串相等（零开销），
-/// 不一致再走归一化（canonicalize + 分隔符/前缀归一），避免每次列表全量 canonicalize
-fn cwd_matches(session_path: &str, link_cwd: &str) -> bool {
+/// 不一致再走归一化（canonicalize + 分隔符/前缀归一），避免每次列表全量 canonicalize。
+/// 接力链与卡片认领共用同一口径。
+pub(crate) fn cwd_matches(session_path: &str, link_cwd: &str) -> bool {
     let expanded = sessions::expand_tilde(link_cwd);
     if session_path == expanded {
         return true;
@@ -536,6 +638,8 @@ fn test_session(agent: &str, session_id: &str, project_path: &str, updated_at: &
         internal: false,
         handoff_from_agent: None,
         handoff_from_session: None,
+        task_id: None,
+        task_name: None,
     }
 }
 
@@ -655,10 +759,23 @@ mod tests {
         assert!(!small.contains("尾部已截断"));
     }
 
+    /// .gitignore 规则补齐：缺失才追加、已有不重复、无尾换行先补齐
+    #[test]
+    fn with_handoff_rule_appends_once() {
+        let added = with_handoff_rule("*.pdf\n").unwrap();
+        assert!(added.contains(".ccode/handoff-*.md"));
+        // 已有规则 → None（幂等）
+        assert!(with_handoff_rule(&added).is_none());
+        // 空文件也能写
+        assert!(with_handoff_rule("").unwrap().contains(".ccode/handoff-*.md"));
+        // 无尾换行的存量文件：先换行再追加，不粘连
+        let noeol = with_handoff_rule("*.pdf").unwrap();
+        assert!(noeol.contains("*.pdf\n\n# Ccode 接力简报"), "{noeol}");
+    }
+
     /// 目标路径：默认落 .ccode/ 下；自定义路径逃出项目根必须拒绝
     #[test]
-    fn target_path_default_and_escape_rejected() {
-        let root = std::env::temp_dir().join(format!("ccode-handoff-{}", uuid::Uuid::new_v4()));
+    fn target_path_default_and_escape_rejected() {        let root = std::env::temp_dir().join(format!("ccode-handoff-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let cwd = root.to_string_lossy().into_owned();
         let default = handoff_target_path(&cwd, None).unwrap();
@@ -686,6 +803,61 @@ mod tests {
         .unwrap();
         sessions::migrate_session_meta(&conn);
         conn
+    }
+
+    // ===== 定稿简报（save_task_brief_at） =====
+
+    /// 定稿落盘：.ccode/brief-<时间>.md、脱敏生效、钉进卡片 briefs
+    #[test]
+    fn save_task_brief_writes_redacted_and_attaches() {
+        let root = std::env::temp_dir().join(format!("ccode-brief-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let card = crate::projects::create_task_card_at(&root, "卡片", None).unwrap();
+
+        let secret = "sk-ant-api03-abcdef123456";
+        let rel = save_task_brief_at(&root, Some(&card.id), &format!("# 定稿\n\n密钥 {secret}"))
+            .unwrap();
+        assert!(rel.starts_with(".ccode/brief-") && rel.ends_with(".md"), "{rel}");
+        let text = fs::read_to_string(root.join(&rel)).unwrap();
+        assert!(!text.contains(secret), "落盘必须脱敏: {text}");
+        assert!(text.contains("已隐藏密钥"));
+        // 钉进卡片 briefs（相对路径）
+        let cards = crate::projects::task_cards_at(&root);
+        assert_eq!(cards[0].briefs, vec![rel.clone()]);
+
+        // 同秒连存两份：后缀区分，互不覆盖，卡片按时间序收两份
+        let rel2 = save_task_brief_at(&root, Some(&card.id), "# 第二份").unwrap();
+        assert_ne!(rel, rel2);
+        assert!(root.join(&rel).exists() && root.join(&rel2).exists());
+        let cards = crate::projects::task_cards_at(&root);
+        assert_eq!(cards[0].briefs, vec![rel, rel2]);
+
+        // 不钉卡片：只落盘
+        let rel3 = save_task_brief_at(&root, None, "# 散稿").unwrap();
+        assert!(root.join(&rel3).exists());
+        assert_eq!(crate::projects::task_cards_at(&root)[0].briefs.len(), 2);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 定稿校验：空内容拒绝；卡片不存在先报错、不落孤儿文件
+    #[test]
+    fn save_task_brief_validates_before_write() {
+        let root = std::env::temp_dir().join(format!("ccode-brief-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        assert!(save_task_brief_at(&root, None, "   ").is_err());
+        let err = save_task_brief_at(&root, Some("t-gone"), "# 内容").unwrap_err();
+        assert!(err.contains("卡片不存在"), "{err}");
+        assert!(
+            !root.join(".ccode").exists(),
+            "卡片不存在时不得落盘留孤儿文件"
+        );
+        // 64KB 上限：超长内容截断并带标记
+        let big = "数".repeat(80 * 1024);
+        let rel = save_task_brief_at(&root, None, &big).unwrap();
+        let text = fs::read_to_string(root.join(&rel)).unwrap();
+        assert!(text.len() <= BRIEF_CAP, "超过上限: {}", text.len());
+        assert!(text.contains("尾部已截断"));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// 接力链往返：登记 → 新会话被扫描到后标注并固化；旧会话/异 agent 不误标

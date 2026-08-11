@@ -21,6 +21,7 @@ import {
   buildWorkspaceTerminalRequest,
   startPipelineStep,
 } from "../pipeline-start";
+import { cardForStep } from "../task-cards";
 import { useAppStore } from "../store";
 import type {
   GitCommitResultDto,
@@ -957,6 +958,11 @@ export default function WorkspaceReviewView({
   } | null>(null);
   const [nextBusy, setNextBusy] = useState(false);
   const [nextError, setNextError] = useState<string | null>(null);
+  // 「沉淀到下一步」：评审结论写成定稿简报，钉到下一步步骤的任务卡（无卡则以步骤名新建）
+  const [distillOpen, setDistillOpen] = useState(false);
+  const [distillText, setDistillText] = useState("");
+  const [distillBusy, setDistillBusy] = useState(false);
+  const [distillMsg, setDistillMsg] = useState<string | null>(null);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
   const [message, setMessage] = useState("");
@@ -1160,6 +1166,48 @@ export default function WorkspaceReviewView({
       setNextBusy(false);
     }
   }
+
+  /** 「沉淀到下一步」：评审结论定稿落盘并钉到下一步步骤的第一张卡片（没有则以步骤名新建） */
+  async function submitDistill(e: React.FormEvent) {
+    e.preventDefault();
+    if (!nextStep || distillBusy) return;
+    const content = distillText.trim();
+    if (!content) return;
+    setDistillBusy(true);
+    setNextError(null);
+    try {
+      const st = useAppStore.getState();
+      const cards = await st.loadTaskCards(nextStep.projectPath);
+      const card =
+        cardForStep(cards, nextStep.step.name) ??
+        (await st.createCard(
+          nextStep.projectPath,
+          nextStep.step.name,
+          nextStep.step.name,
+        ));
+      const rel = await invoke<string>("save_task_brief", {
+        projectRoot: nextStep.projectPath,
+        taskId: card.id,
+        content,
+      });
+      // 刷新缓存让工作区页卡片区立即显示新简报
+      await st.loadTaskCards(nextStep.projectPath);
+      setDistillOpen(false);
+      setDistillText("");
+      setDistillMsg(`已沉淀到「${card.name}」：${rel}`);
+    } catch (reason) {
+      setNextError(String(reason));
+    } finally {
+      setDistillBusy(false);
+    }
+  }
+
+  // 沉淀成功提示是瞬态反馈：10s 自动消退（同工作区创建横幅口径）
+  useEffect(() => {
+    if (!distillMsg) return;
+    const t = setTimeout(() => setDistillMsg(null), 10_000);
+    return () => clearTimeout(t);
+  }, [distillMsg]);
 
   // 工作区列表的“在评审中创建 PR / 归档”只负责定位到此处；真正执行仍要求在覆盖层内确认。
   useEffect(() => {
@@ -2111,6 +2159,52 @@ export default function WorkspaceReviewView({
               {nextBusy ? "开步中…" : `▶ 开始下一步：${nextStep.step.name}`}
             </button>
           )}
+          {mergeDone && nextStep && (
+            <button
+              type="button"
+              onClick={() => setDistillOpen((v) => !v)}
+              title={`把本次评审结论写成定稿简报，钉到「${nextStep.step.name}」的任务卡`}
+              className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+            >
+              沉淀到下一步
+            </button>
+          )}
+        </div>
+      )}
+      {distillOpen && mergeDone && nextStep && (
+        <form
+          onSubmit={(e) => void submitDistill(e)}
+          className="shrink-0 border-b border-hairline bg-inset px-3 py-2"
+        >
+          <textarea
+            className="w-full rounded-md border border-field bg-canvas px-2 py-1.5 text-[13px] leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
+            rows={4}
+            placeholder={`写下评审结论：这步验收了什么、下一步该怎么想（定稿后钉到「${nextStep.step.name}」的任务卡）`}
+            value={distillText}
+            onChange={(e) => setDistillText(e.target.value)}
+            autoFocus
+          />
+          <div className="mt-1.5 flex items-center gap-2">
+            <button
+              type="submit"
+              disabled={distillBusy || !distillText.trim()}
+              className="inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+            >
+              {distillBusy ? "沉淀中…" : "定稿并钉到下一步卡片"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDistillOpen(false)}
+              className="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+            >
+              取消
+            </button>
+          </div>
+        </form>
+      )}
+      {distillMsg && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-ok-text">
+          <span className="min-w-0 truncate">✓ {distillMsg}</span>
         </div>
       )}
       {nextError && (

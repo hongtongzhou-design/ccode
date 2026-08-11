@@ -72,13 +72,14 @@ npm run tauri build    # 打包
 docs/                        # 架构方案 + 八 CLI 适配参考（规格）
 src/                         # 前端 React + TS + Tailwind v4（vite 插件接入）
   pages/                     # 八页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
-  components/                # WorkspaceReviewView、PipelineEditor、ProjectGroup/ProjectRail、ArtifactChecklist、FileTree、
+  components/                # WorkspaceReviewView、PipelineEditor、ProjectGroup/ProjectRail、ArtifactChecklist、TaskCardsSection、FileTree、
                              # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker/DigestPicker 等
   components/CommandPalette.tsx # ⌘K 面板
   pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES
   pipeline-start.ts          # 一键开步共享链路（三处 TASK.md 同一出处）
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
+  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/最新简报/会话按卡分组（tests/task-cards.test.ts）
   notify.ts                  # 长任务 OS 通知（仅「待确认」跃迁 + 未聚焦 + 30s 去抖；「已回复」不通知）
   git-status-groups.ts       # 改动列表状态分组/白话双层纯逻辑
   git-commit-message.ts      # 空提交信息的本地默认信息生成
@@ -165,18 +166,26 @@ src-tauri/src/
     「最近项目」收进文件树搜索行 ⌄ 浮层（真进入/↗ 新标签语义不变）；区间靠留白分层。**项目区固定列出所有建有活跃
     工作区的项目**（每仓一小节：组头 + 主文件夹节点 + 活跃工作区行），cwd 命中的当前项目置顶标注「当前」、无活跃
     工作区也保留；行内交互（真进入/悬浮/size-2 状态点）不变。
-  - **右栏可调分栏，不新增普通内容全屏路由**：左缘拖拽调宽并记忆；宽屏动作暂隐工作树但保留终端，再执行恢复，双击
+  - **右栏可调分栏，不新增普通内容全屏路由**：左缘拖拽调宽并记忆；**宽度上限不写死像素**（v3.60 前曾限 820px），
+    随窗口自由拉宽、只给中带终端保留 340px 最小宽度（`TERMINAL_MIN_RESERVE`），下限 360px；宽屏动作暂隐工作树但保留终端，再执行恢复，双击
     对话/预览/改动页签同义；宽度变化必须触发 xterm 重新 fit；任务评审仍用全宽覆盖层。
   - **WebGL 渲染器加载前必须过 `isSoftwareWebGL` 探针**（TerminalPage.tsx）：Windows/WebView2 GPU 被拉黑时退回
     SwiftShader 软件渲染，上下文能建但终端持续闪烁，try/catch 拦不住；探测失败同样不用 WebGL，勿删此兜底。
   - **运行中会话关联排他 + 复合键**：固定 session id 的 CLI 精确锁定；其余 CLI 启动前按 agent+归并后项目登记 claim，同批
     并发统一排序分配，已分配会话进程内不得转给另一标签；前端 live/open 一律以 agent+sessionId 为键，完整回放跳转前先刷新索引。
-- **首页「待你处理」收件箱（v3.39；v3.42 起横跨项目导航与详情两栏之上；v3.59 起文档流单行 strip + macOS 收进自绘标题栏）**：聚合工作区冲突/可合并
-  + 终端注意力（仅待确认），排序 冲突 > 待确认 > 可合并，为空整块不渲染；条目为可序列化 `InboxItem`（action 描述非闭包），
-  由 WorkspacesPage 签名去抖镜像进 store（唯一写入方），点击统一走 `runInboxAction` 派发（review/tab/session 三类都走 store 一次性请求）。
+- **首页「待你处理」收件箱（v3.39；v3.42 起横跨项目导航与详情两栏之上；v3.59 起文档流单行 strip + macOS 收进自绘标题栏；v3.60 扩四类新来源）**：聚合工作区冲突/可合并
+  + 终端注意力（仅待确认），排序 冲突 > 待确认 > 可合并 > 待核验 > 待发送 > 配置失效，为空整块不渲染；条目为可序列化 `InboxItem`（action 描述非闭包），
+  由 WorkspacesPage 签名去抖镜像进 store（唯一写入方），点击统一走 `runInboxAction` 派发（review/tab/session/digest/artifacts/profiles 都走 store 一次性请求）。
+  **v3.60 新来源（全部过「是否阻塞人的决策」闸）**：**产物待核验**（后端 `pending_artifact_checks`：活跃工作区绑定步骤的
+  expectedArtifacts 全部产出且 mtime ≥ 工作区创建时间，可合并/冲突已覆盖的不重复报——产物多为 gitignore 的 *.pdf，git 状态看不见，
+  不提醒就是黑洞；action `artifacts` → 选中项目 + 展开任务行产物清单）；**接力待发送**（digestJob ready 未消费）；**配置失效**
+  （`profileIssues`：只镜像用户触发的三层验证/设为全局复检失败，验证通过或 profile 删除即摘除，**不新增后台网络轮询**）；
+  **冲突升级文案**：`WsHealthDto.stale_base`（MERGE_HEAD ≠ 基准 tip，health_impl 内仅 merge 进行中多一次 rev-parse）命中时
+  冲突条目改「基准已前进——需重新同步」，动作仍走 resolve-conflict（评审层自动以当前基准 tip 重备两侧）。
   **macOS：标题栏自绘（tauri.conf `titleBarStyle: Overlay` + `hiddenTitle`，capabilities 加 `core:window:allow-title` 与
   `core:window:allow-start-dragging`——缺后者 `data-tauri-drag-region` 拖拽静默失效），收件箱 =
-  标题后的 Ghostty 式胶囊 + 下拉明细，页内 strip 不渲染**；Windows/Linux 保留原生标题栏 + 页内 strip（32px 一行，展开明细为悬浮下拉，
+  标题后的 Ghostty 式胶囊 + 下拉明细，页内 strip 不渲染；**chromeHidden 执行态下标题栏体仍必须保留**（Overlay 模式红绿灯始终悬浮
+  左上角，靠栏的 `pl-[78px]` 让位，整条隐藏会被按钮压内容且胶囊丢失），只省略窗口标题与底部分隔线**；Windows/Linux 保留原生标题栏 + 页内 strip（32px 一行，展开明细为悬浮下拉，
   遮罩/Esc 收起——整体悬浮 pill 遮挡内容被用户否决）。终端运行状态经 `terminalRunInputs` 镜像进 store 跨页
   只读（TerminalPage 唯一写入方，不新增轮询）；跳终端激活标签走一次性 `focusTabReq`（已关闭标签静默忽略）。
   **注意力信噪比总规则（v3.60，用户拍板全链路清理）**：「已回复」（done = 回合结束）**在全链路无任何视觉标记**——不进收件箱、标签/项目区
@@ -190,7 +199,7 @@ src-tauri/src/
   镜像进 store（`inboxCount`，WorkspacesPage 唯一写入方）。**侧栏不挂任何徽标**（终端运行数、工作区待处理全部取消，
   三平台统一——数字胶囊突兀、size-2 圆点与项目行状态点撞语义、9px 裸数字用户仍嫌吵，三轮均被否决；计数只在悬浮
   title 与 macOS 标题栏胶囊/页内 strip 出现）——收件箱仍为空不渲染，发现性由标题栏胶囊（mac）与页内 strip（Win/Linux）承担。
-- **产物核验清单（v3.42；v3.45 起从胶囊移到任务行；v3.46 起步进器圆后小方块同面板）**：共享组件 `src/components/ArtifactChecklist.tsx`（步骤按 workspaceName 反查
+- **产物核验清单（v3.42；v3.45 起从胶囊移到任务行；v3.61 起第二入口为步骤 ⋯ 菜单）**：共享组件 `src/components/ArtifactChecklist.tsx`（步骤按 workspaceName 反查
   project.toml，定位根由调用方给：已合并读项目根/main，其余读工作树）；任务行「产物」按钮（hover 才现，与 ⌨ 终端同档）在行下方
   就地手风琴展开，展开态按工作区 id 记忆在 WorkspacesPage、切项目清空；步进器圆后小方块在 strip 下方就地展开，展开态记步骤 index（单开）；面板 = 已产出 ✓/未产出 — + mtime 相对时间
   + 手动 ⟳ 刷新（打开时拉取一次，不进轮询；v3.60 起无「刚更新」标记——文件新旧不是待办）；选段反馈浮动条带「↵ 直接发送」（pty_write 一次拼接 \r，同帧到达防半截输入）。
@@ -293,7 +302,7 @@ src-tauri/src/
   `src/pipeline-start.ts` 的 `startPipelineStep`**（ensure git → bootstrap 提交 → 建工作区 → 提货单/技能元数据 → TASK.md →
   run 脚本 → 终端交接），工作区页步进器大圆与评审「开始下一步」共用，组件态由调用方回调注入。开步在 ensure_git_repo 后先走
   `commit_project_bootstrap`（best-effort）：只把 `.ccode` 与 `.gitignore` 提交进主仓（literal pathspec，用户暂存文件
-  绝不带走），防评审合并被主仓脏拦截；默认 .gitignore 含 `*.pdf`。**TASK.md 不进 git**：落盘时自动追加进
+  绝不带走），防评审合并被主仓脏拦截；默认 .gitignore 含 `*.pdf` 与 `.ccode/handoff-*.md`。**TASK.md 不进 git**：落盘时自动追加进
   `.git/info/exclude`（`exclude_task_md`，全 worktree 与主仓生效，best-effort 不阻断）——TASK.md 是开步脚手架而非任务产物。
 - **流水线模板库**：内置模板集中在 `src/pipeline-presets.ts` 的 `PIPELINE_TEMPLATES`（综述/科研论文/数据处理/毕业论文/投稿与返修），
   新增场景 = 数组加一项，简报必须遵守输入写死/决策写死/交付写死约定（auto 模式无歧义）；用户模板走后端
@@ -327,7 +336,9 @@ src-tauri/src/
   否则宿主 PATH 无 node 时照样 spawn ENOENT。kimi 的 MCP 只在会话启动时加载，分发后要新会话生效。
 - **「接力」是唯一的跨 Agent 交接表述**：接力 = 结构化简报落成文件 + 新 Agent 带简报启动 + 记录接力链，明示不是记忆转移；
   禁用「无缝继续」。v1 机制（handoff.rs）：简报全文过 `redact_sensitive_text` 脱敏 + 64KB 上限后原子写
-  `cwd/.ccode/handoff-<时间>.md`（自定义路径不得出项目根）；接力链先按 agent+cwd 登记 `handoff_links`，新会话被扫描到时
+  `cwd/.ccode/handoff-<时间>.md`（自定义路径不得出项目根）；简报是过程文件不进版本库：新项目默认 .gitignore 模板含
+  `.ccode/handoff-*.md`，存量仓库在每次写简报时 best-effort 补齐该规则（`with_handoff_rule` 幂等追加，非仓库静默跳过）；
+  接力链先按 agent+cwd 登记 `handoff_links`，新会话被扫描到时
   固化进 `session_meta.handoff_from_*` 并消费登记（防同目录后续会话误标）；kimi/opencode 无启动注入参数，走复制简报路径 +
   手动发送，不得伪造注入成功。
 - **「◈ 提炼接力」是长会话续作的 AI 简报变体**（handoff.rs `build_session_digest`，AI 功能键 `digest`）：全会话文本（DTO 层
@@ -335,7 +346,26 @@ src-tauri/src/
   再过 `redact_and_cap` 才落盘；目标列表来源 agent 置顶（同 Agent 新会话，不走 resume 防上下文污染），跨 agent 与接力链登记
   复用既有链路；外部续作走 `digest_command_line`（按注册表 prompt_inject 拼「新会话 + 读简报首条指令」，**非 resume**；
   Unsupported 的 kimi/opencode 复制指令文本手动发送）；无 AI profile 或调用失败行内报错可重试，不免 AI 静默降级（免 AI 场景
-  用原「◈ 接力到…」快速简报）。
+  用原「◈ 接力到…」快速简报）。**v3.60 起生成是 store 后台任务（`digestJob` + `startDigestJob`）**：DigestPicker 可关可开，
+  同一会话（agent+sessionId+filePath）复用结果不重复发起（费 token 且慢），失败重试走 force；ready 未消费进收件箱「待发送」
+  （`{type:"digest"}` → `digestOpenReq` 由对话页消费重开 picker），选定目标或「暂不发送」即 `consumeDigestJob` 摘除。
+  **任务卡起 picker 变两段（定稿页 → 发送页）**：AI 初稿读进可编辑文本框，「定稿并继续」走 `save_task_brief`
+  落盘 `.ccode/brief-<时间>.md`（定稿简报是项目文档，不走 handoff 的 gitignore 规则）并钉入会话所属卡片（会话 taskId 查
+  store.sessions；未归置只落盘）；发送一律用定稿路径（`digestJob.finalized`，AI 初稿 handoff-*.md 留盘不再用），
+  已定稿重开直达发送页；「暂不发送」= 仅定稿落盘钉卡。
+- **任务卡（对话的文件夹 + 定稿简报的收集夹；无独立状态机，不碰工作区/评审流程）**：卡片挂在项目
+  `.ccode/project.toml` 旁（projects.rs task_cards，写操作过 `ensure_task_project_root` 门槛，list 非项目返回空表）；
+  会话归置存 `session_meta.task_id`（`assign_session_task`，删卡自动清归置），SessionMetaDto 回填 taskName。
+  前端：`store.taskCards` 按项目根缓存 + 变更后重取（deleteCard/assignSessionTask 顺带刷新会话列表）；纯逻辑集中
+  `src/task-cards.ts`（按步骤分桶——失效步骤并入「未挂步骤」桶恒在末尾、latestBrief、cardForStep、groupSessionsByTask——
+  「未归置」恒最前同原「无工作区会话排最前」口径）。工作区页卡片区 = `TaskCardsSection`（ProjectGroup 内、步进器下方，
+  展开手风琴按卡片 id 记忆、切项目随 key 重挂载清空）：「开工」= startPipelineStep 加可选 `briefPath`（最新定稿简报全文进
+  TASK.md「任务简报（定稿）」段，读取走 `read_file_preview` 根约束、best-effort 不阻断）；「继续」= pendingTerminal
+  initialPrompt「阅读 <简报> 简报并继续任务」（cwd = 卡片绑定工作区工作树否则项目根，工作树内引用用绝对路径；
+  kimi/opencode 无注入由启动栏 promptDropped 既有处理兜底）。对话页项目筛选下按卡片分组 + meta 行「▤ 卡片名」chip
+  （点击经一次性 `selectProjectReq` 跳工作区页选中项目，WorkspacesPage 消费）+ ⋯「移到卡片…」（仅项目筛选下显示）。
+  评审合并成功横幅「▶ 开始下一步」旁「沉淀到下一步」：评审结论 → 下一步步骤的首张卡片（无则以步骤名 create_task_card）
+  → save_task_brief 钉入，成功提示 10s 自收。
 - **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不在逻辑里写死「文献/数据/
   论文」概念。
 - **示例课题（首启引导最小版）**：`projects::create_demo_project` 在「文档/Ccode 示例课题」幂等生成演示项目（英文综述五步
@@ -362,6 +392,13 @@ src-tauri/src/
   状态如「可合并」用**按钮本身的 cta 高亮**，不另挂 pill；纯状态 pill 用 inset 灰底 + 语义色小圆点）；**状态语义色独立于
   主题**（ok/err/warn 不随主题变）；**结果横幅一律 bg-strip/inset 底 + ✓/✗ 语义色文字**，不用整块 bg-ok/bg-err（bg-err
   仅留给需警惕的小 pill）；零阴影、隐式 hairline。
+- **字体渲染按平台分口径（v3.60 后 Windows 糊字修复）**：入口（main.tsx）在 `<html>` 上落 `data-platform`
+  （mac/windows/linux，判定在 hotkeys.ts `IS_MAC`/`IS_WINDOWS`）。Windows Chromium 下 `text-rendering:
+  optimizeLegibility` 会走 DirectWrite natural 模式丢 hinting，小字号发糊——`[data-platform="windows"]` 覆写回 `auto`，
+  macOS 保持 optimizeLegibility 不动。CJK 回退链必须显式带雅黑：body 栈含 `"Microsoft YaHei UI", "Microsoft YaHei"`
+  （否则中文穿过未安装的 Noto Sans SC 落通用 sans-serif 发虚）；等宽单一出处是 `@theme` 的 `--font-mono`
+  （打包的 JetBrains Mono 在前，Windows 回退 Cascadia Mono/Consolas，CJK 兜底雅黑）；xterm 的 fontFamily 回退链同口径
+  （TerminalPage 两处，勿落通用 monospace——Windows 会解析成位图字体）。新增等宽/正文场景一律用这两条链，别自造栈。
 - **线条语言（去格子化，v3.35/v3.37 定稿）**：内联内容容器一律**不加 1px 描边**，靠底色差 + 圆角 + hairline 分层；边框只给
   浮层与控件。strip/inset/raised 三级梯度七套主题必须可分辨；hairline/field 与底色对比度七主题同档。**区间分隔优先留白**
   （折叠区标题、rail 底部、PageHeader 均不画横线）。搜索框无描边（inset 底 + 聚焦加深），输入框保留 field 边。**全站线宽
@@ -443,21 +480,25 @@ src-tauri/src/
 - **步骤对照（RX2b）**：跨页「文件树切根」走 store 一次性 `enterCwdReq`（终端页消费后复用 enterCwd/externalCwd「真进入」
   机制，文件树根随活动标签 cwd）；`previewReq` 可带可选 `root`（文本预览的后端根约束，缺省回落活动标签 cwd）。产物核验已移到
   任务行手风琴与步进器圆后小方块（见「产物核验清单」条）；大圆悬浮信息（目录/agent/profile）读终端页同一键 `ccode.wsLast.<worktreePath>`。
-- **流水线大圆步进器（v3.46，取代 v3.45 胶囊分层与进度段）**：名称带与步进器带两个同列网格；虚线为**真实 flex 块节律**
-  （`StepperCell`：5px 块 + 5px 间隙全是真实元素，块数按列宽 ResizeObserver 现算——任何列宽/步骤数下尺寸与间隔严格一致，
-  永不出现渐变相位残段/双块），与圆心同轴，跨列连续（两条带 grid 均 gap-[5px]）。
-  **大圆（h-6 w-6，24px）= 纯色实心圆（内部无字符）+ 唯一主推进点击**：done=bg-ok-text；进行中/checking=bg-cta（脉冲用有界
+- **流水线大圆步进器（v3.46，取代 v3.45 胶囊分层与进度段；v3.61 虚线链改为带级一次铺满）**：名称带与步进器带两个同列网格；
+  虚线为**带级真实块链**（`StepperChain`：6px 块 + 6px 间隙全是真实元素，块位以圆心为锚按列几何分段现算——
+  跨列无边界、每段块数与间隙严格一致、各圆两侧断口等大且间隙 = 块间 6px（`NODE_HALF` = 22px 视觉圆半径 11 + 6；
+  按列各自现算会在列缝出大间隙，按全局相位铺排会被圆随机截断，两种都已被用户否决），完成列区间内的块亮灰白（l2）、其余暗（hairline）。
+  **大圆 = 纯色实心圆（内部无字符）+ 唯一主推进点击**：done=bg-ok-text；进行中/checking=bg-cta（脉冲用有界
   `animate-pulse-brief`：App.css 自定义 3 周期≈6s 后静止，状态复归重播；无限 animate-pulse 是注意力消耗，项目区工作区状态点同口径）；
   待评审=bg-cta-pill；阻塞=bg-warn；pending=bg-l4 实心灰。点击语义按状态：
   pending 无工作区=startStep、已归档=restoreWs、进行中/待评审/阻塞=onOpenTerminal(ws)、done=setPendingTerminal 开主仓 shell 终端。
   状态/目录/agent/profile + 点击动作提示收进**应用内 tooltip**（`useHoverTip`/`HoverTip`，fixed 定位、横向钳制、滚动/缩放/点击即关）：
-  原生 title 在 WKWebView 上行为不稳定（不渲染或残留数秒串到相邻控件），圆与小方块的悬浮提示**一律走应用内 tooltip，禁再回退原生 title**；
+  原生 title 在 WKWebView 上行为不稳定（不渲染或残留数秒串到相邻控件），圆的悬浮提示**一律走应用内 tooltip，禁再回退原生 title**；
   事件挂包裹 span，禁用态也可悬浮。**大圆右上角注意力角标**（size-2 圆点）：cwd 落在工作区内的终端标签有待确认=bg-warn；
-  v3.59 起「已回复」绿点移除（每回合结束都会亮，噪音大于信号，用户否决），只留待确认；数据只读消费 `terminalRunInputs` 镜像，不新增轮询。**圆前/圆后小方块 = 节律中的普通虚线块（SquareButton：
-  bg-hairline 5px 与虚段同色等大、无字符、无衬底、无状态区分）+ 28px 透明热区（绝对定位子元素，不占布局）**：
-  视觉混在虚线里，仅 hover/focus 提亮 bg-cta 表明可点，功能名在应用内 tooltip 出现；圆前=openEditor(i) 打开流水线编辑器并定位该步骤卡片（PipelineEditor `focusStep` prop 滚动 +
-  聚焦简报框）；圆后=strip 下方就地展开 ArtifactChecklist（单开手风琴记步骤 index；root 口径同任务行：done 读项目根、其余读工作树、
-  无工作区禁用）。步骤 ⋯ 收名称行右侧 hover 才现（hoverRevealClass）；解决冲突/评审/合并统一在下方任务行，步进器不再放第二行动作。
+  v3.59 起「已回复」绿点移除（每回合结束都会亮，噪音大于信号，用户否决），只留待确认；数据只读消费 `terminalRunInputs` 镜像，不新增轮询。
+  **v3.61 步进器精简（用户拍板）**：**圆视觉 22px（按钮保持 28px 热区）**；**圆前/圆后小方块的按钮职责删除**
+  （伪装成虚线块可发现性为零、与步骤 ⋯ 重复、误触打开全宽覆盖层代价高），小方块视觉保留为普通虚线块（DashBlock），
+  SquareButton 组件移除；「编辑步骤」（openEditor(i) 定位卡片，PipelineEditor `focusStep` prop 滚动 + 聚焦简报框）与
+  「产物核验」（strip 下方就地展开 ArtifactChecklist，单开手风琴记步骤 index；root 口径同任务行：done 读项目根、其余读工作树、
+  无工作区禁用）**全部收进步骤名称行右侧 hover 才现的 ⋯ 菜单**（hoverRevealClass）。
+  **末端菱形终点**：步进器带末尾 9px 旋转 45° **实心**菱形（装饰无点击，与链条同轴、经 6px 间隙接在末块之后；
+  名称带末尾有同宽占位保列对齐），全部步骤 done 时点亮相同 done 绿（bg-done，平时 bg-hairline 与未完成链条同暗）。解决冲突/评审/合并统一在下方任务行，步进器不再放第二行动作。
 
 ## 路线图（见 docs/architecture.md §11 演进线）
 

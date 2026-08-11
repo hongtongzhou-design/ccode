@@ -1016,6 +1016,22 @@ export default function ProfilesPage() {
     refreshGlobalBackups().catch(() => {});
   }, [profiles]);
 
+  /** 三层验证结果镜像进 store（收件箱「配置失效」条目）；通过则摘除。原因取第一个未通过层 */
+  function mirrorValidation(p: Profile, result: ProfileValidationDto) {
+    const layers: [string, ValidationCheckDto][] = [
+      ["本地解析", result.local],
+      ["CLI 预检", result.cli],
+      ["API 连通", result.api],
+    ];
+    const failed = layers.find(([, c]) => c.status === "failed");
+    useAppStore.getState().setProfileIssue(
+      p.id,
+      failed
+        ? { name: p.name, agent: p.agent, reason: `${failed[0]}：${failed[1].message}` }
+        : null,
+    );
+  }
+
   /** 把 profile 事务化写入该 CLI 的全部目标文件，UI 明示影响范围 */
   async function onApplyGlobal(p: Profile) {
     if (
@@ -1032,6 +1048,7 @@ export default function ProfilesPage() {
         },
       );
       await refreshGlobalBackups();
+      mirrorValidation(p, applied.validation);
       const cli = applied.validation.cli;
       await alertDialog(
         `已写入全局配置：\n${applied.files.join("\n")}\n\nCLI 配置检查：${
@@ -1057,6 +1074,7 @@ export default function ProfilesPage() {
       const result = await invoke<ProfileValidationDto>("validate_profile", {
         profileId: p.id,
       });
+      mirrorValidation(p, result);
       setValidationDialog({ profile: p, result, running: false });
       setError(null);
     } catch (e) {

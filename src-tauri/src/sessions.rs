@@ -62,6 +62,12 @@ pub struct SessionMetaDto {
     pub handoff_from_agent: Option<String>,
     #[serde(default)]
     pub handoff_from_session: Option<String>,
+    /// 会话归卡（任务卡）：session_meta.task_id 列；未归卡为 None
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// task_id 命中所属项目档案卡 [[tasks]] 时由后端回填的卡片名；卡片已删容忍为 None
+    #[serde(default)]
+    pub task_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -573,6 +579,8 @@ fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         internal: false,
         handoff_from_agent: None,
         handoff_from_session: None,
+        task_id: None,
+        task_name: None,
     })
 }
 
@@ -810,6 +818,8 @@ fn codex_file_meta(
             internal: false,
             handoff_from_agent: None,
             handoff_from_session: None,
+            task_id: None,
+            task_name: None,
         },
         forked_from_id,
     ))
@@ -1081,6 +1091,8 @@ fn gemini_file_meta(
         internal: false,
         handoff_from_agent: None,
         handoff_from_session: None,
+        task_id: None,
+        task_name: None,
     })
 }
 
@@ -1295,6 +1307,8 @@ fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMet
         internal: false,
         handoff_from_agent: None,
         handoff_from_session: None,
+        task_id: None,
+        task_name: None,
     })
 }
 
@@ -1515,6 +1529,8 @@ fn kimi_wire_file_meta(
         internal: false,
         handoff_from_agent: None,
         handoff_from_session: None,
+        task_id: None,
+        task_name: None,
     })
 }
 
@@ -1774,6 +1790,8 @@ fn kimi_legacy_file_meta(
         internal: false,
         handoff_from_agent: None,
         handoff_from_session: None,
+        task_id: None,
+        task_name: None,
     })
 }
 
@@ -1970,6 +1988,8 @@ fn codebuddy_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         internal: false,
         handoff_from_agent: None,
         handoff_from_session: None,
+        task_id: None,
+        task_name: None,
     })
 }
 
@@ -2137,6 +2157,8 @@ fn cursor_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         internal: false,
         handoff_from_agent: None,
         handoff_from_session: None,
+        task_id: None,
+        task_name: None,
     })
 }
 
@@ -2335,6 +2357,8 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             internal: false,
             handoff_from_agent: None,
             handoff_from_session: None,
+            task_id: None,
+            task_name: None,
         });
     }
     // OpenCode 新会话常暂存为 "New Session"：只对占位标题的会话惰性补标题——
@@ -2705,6 +2729,8 @@ fn opencode_scan_legacy(storage: &Path) -> Vec<SessionMetaDto> {
             internal: false,
             handoff_from_agent: None,
             handoff_from_session: None,
+            task_id: None,
+            task_name: None,
         });
     }
     out
@@ -3103,6 +3129,8 @@ fn opencode_snapshot_meta(path: &Path, session_id: &str) -> Option<SessionMetaDt
         internal: false,
         handoff_from_agent: None,
         handoff_from_session: None,
+        task_id: None,
+        task_name: None,
     })
 }
 
@@ -3185,13 +3213,14 @@ pub(crate) fn open_db() -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// 老库补列（AI 摘要、接力来源）：已存在则报错忽略，幂等
+/// 老库补列（AI 摘要、接力来源、会话归卡）：已存在则报错忽略，幂等
 pub(crate) fn migrate_session_meta(conn: &Connection) {
     for col in [
         "summary TEXT",
         "summary_at TEXT",
         "handoff_from_agent TEXT",
         "handoff_from_session TEXT",
+        "task_id TEXT",
     ] {
         let _ = conn.execute_batch(&format!("ALTER TABLE session_meta ADD COLUMN {col}"));
     }
@@ -3205,12 +3234,14 @@ struct MetaRow {
     summary: Option<String>,
     /// 固化后的接力来源（agent, session_id）
     handoff_from: Option<(String, String)>,
+    /// 会话归卡（任务卡 id）
+    task_id: Option<String>,
 }
 
 fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
     let mut map = HashMap::new();
     let Ok(mut stmt) = conn
-        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session FROM session_meta")
+        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session, task_id FROM session_meta")
     else {
         return map;
     };
@@ -3225,10 +3256,11 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
             r.get::<_, Option<String>>(6)?,
             r.get::<_, Option<String>>(7)?,
             r.get::<_, Option<String>>(8)?,
+            r.get::<_, Option<String>>(9)?,
         ))
     });
     if let Ok(rows) = rows {
-        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session) in rows.flatten() {
+        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session, task_id) in rows.flatten() {
             map.insert(
                 (agent, sid),
                 MetaRow {
@@ -3238,6 +3270,7 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
                     tags: serde_json::from_str(&tags).unwrap_or_default(),
                     summary,
                     handoff_from: hf_agent.zip(hf_session),
+                    task_id,
                 },
             );
         }
@@ -3609,7 +3642,23 @@ fn apply_meta(
                 s.handoff_from_agent = Some(hf_agent.clone());
                 s.handoff_from_session = Some(hf_session.clone());
             }
+            s.task_id = row.task_id.clone();
         }
+    }
+}
+
+/// 会话归卡回填：task_id 命中所属项目档案卡 [[tasks]] 时附带卡片名；卡片已删容忍为 None。
+/// 与步骤名同一口径：每个项目根每轮列表只读一次 project.toml（列表结果另有 10s 扫描缓存）。
+fn apply_task_names(sessions: &mut [SessionMetaDto]) {
+    let mut cache: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for s in sessions.iter_mut() {
+        let Some(task_id) = s.task_id.clone() else {
+            continue;
+        };
+        let names = cache
+            .entry(s.project_path.clone())
+            .or_insert_with(|| crate::projects::task_names_at(Path::new(&s.project_path)));
+        s.task_name = names.get(&task_id).cloned();
     }
 }
 
@@ -3662,7 +3711,11 @@ pub async fn list_sessions() -> Vec<SessionMetaDto> {
         apply_provenance(&conn, &mut sessions, &scan.provenance_paths);
         // 接力链：新会话被扫描到后标注并固化「接自 <agent>」
         crate::handoff::apply_handoff(&conn, &mut sessions);
+        // 卡片认领：从卡片发起聊天后的新会话归进该卡片
+        apply_card_claims(&conn, &mut sessions);
     }
+    // 归卡回填在 db 块外：task_id 来自 meta，卡片名只读项目档案卡
+    apply_task_names(&mut sessions);
     // 最近活跃在前；ISO 字符串可直接字典序比较
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     redact_session_meta(&mut sessions);
@@ -4212,6 +4265,142 @@ pub fn set_session_meta(
     .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
     invalidate_scan_cache();
     Ok(())
+}
+
+/// 会话归卡（任务卡）：写 session_meta.task_id；None 或空白 = 移出卡片。
+/// 只存 id，卡片名在列表时按项目档案卡回填（卡片改名/删除不需要回写这里）。
+#[tauri::command]
+pub fn assign_session_task(
+    agent: String,
+    session_id: String,
+    task_id: Option<String>,
+) -> Result<(), String> {
+    let conn = open_db()?;
+    assign_session_task_at(&conn, &agent, &session_id, task_id.as_deref())
+}
+
+pub(crate) fn assign_session_task_at(
+    conn: &Connection,
+    agent: &str,
+    session_id: &str,
+    task_id: Option<&str>,
+) -> Result<(), String> {
+    let task_id = task_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    conn.execute(
+        "INSERT INTO session_meta(agent, session_id, task_id) VALUES(?1, ?2, ?3)
+         ON CONFLICT(agent, session_id) DO UPDATE SET task_id=?3",
+        params![agent, session_id, task_id],
+    )
+    .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
+    Ok(())
+}
+
+/// 删除任务卡时顺带清空该卡片的会话归卡标记（卡片没了，会话不应再挂着失效 id）
+pub(crate) fn clear_task_assignment(conn: &Connection, task_id: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE session_meta SET task_id=NULL WHERE task_id=?1",
+        params![task_id],
+    )
+    .map_err(|e| format!("清理会话归卡标记失败: {e}"))?;
+    Ok(())
+}
+
+// ===== 卡片认领（仿 handoff_links 两阶段登记）：从卡片发起聊天时登记
+// 「该 agent 在该 cwd 的下一个新会话属于此卡」，列表扫描到后固化进 session_meta.task_id 并消费，
+// 登记只生效一次（消费即失效），同目录之后更新的会话不再被误归 =====
+
+pub(crate) fn ensure_card_claim_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS card_claims(
+          agent TEXT NOT NULL, cwd TEXT NOT NULL, task_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(agent, cwd));",
+    )
+    .map_err(|e| format!("初始化 card_claims 表失败: {e}"))
+}
+
+/// 卡片发起聊天前登记认领（聊想法/开工/继续共用）；同 agent+cwd 重复登记覆盖（以最后一次发起为准）。
+/// 登记不设过期：很久之后才产生的新会话也能命中（靠 created_at 时间口径排除登记前的旧会话）。
+#[tauri::command]
+pub fn claim_next_session_for_card(
+    agent: String,
+    cwd: String,
+    task_id: String,
+) -> Result<(), String> {
+    let task_id = task_id.trim();
+    if task_id.is_empty() {
+        return Err("卡片 id 不能为空".into());
+    }
+    let conn = open_db()?;
+    ensure_card_claim_table(&conn)?;
+    conn.execute(
+        "INSERT INTO card_claims(agent, cwd, task_id, created_at) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(agent, cwd) DO UPDATE SET task_id=?3, created_at=?4",
+        params![agent, cwd, task_id, now_iso()],
+    )
+    .map_err(|e| format!("登记卡片认领失败: {e}"))?;
+    Ok(())
+}
+
+struct CardClaim {
+    agent: String,
+    cwd: String,
+    task_id: String,
+    created_at: String,
+}
+
+fn read_card_claims(conn: &Connection) -> Vec<CardClaim> {
+    let Ok(mut stmt) =
+        conn.prepare("SELECT agent, cwd, task_id, created_at FROM card_claims")
+    else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok(CardClaim {
+            agent: r.get(0)?,
+            cwd: r.get(1)?,
+            task_id: r.get(2)?,
+            created_at: r.get(3)?,
+        })
+    });
+    rows.map(|rs| rs.flatten().collect()).unwrap_or_default()
+}
+
+/// 把卡片认领并入列表结果（list_sessions 在 apply_handoff 之后调用）：
+/// 对每条登记，找该 agent+cwd 下登记时间之后有活动、且尚未归卡的最新会话，
+/// 写入 session_meta.task_id 并消费登记。已手动归卡（task_id 非空）的会话不被抢占。
+pub(crate) fn apply_card_claims(conn: &Connection, sessions: &mut [SessionMetaDto]) {
+    if ensure_card_claim_table(conn).is_err() {
+        return;
+    }
+    for claim in read_card_claims(conn) {
+        let mut best: Option<usize> = None;
+        for (i, s) in sessions.iter().enumerate() {
+            if s.agent != claim.agent || s.task_id.is_some() {
+                continue;
+            }
+            // 只认登记之后有活动的会话，避免把登记前就存在的旧会话归进卡片
+            if s.updated_at.as_deref().unwrap_or("") < claim.created_at.as_str() {
+                continue;
+            }
+            if !crate::handoff::cwd_matches(&s.project_path, &claim.cwd) {
+                continue;
+            }
+            if best.is_none_or(|b| sessions[b].updated_at < s.updated_at) {
+                best = Some(i);
+            }
+        }
+        let Some(i) = best else { continue };
+        let agent = sessions[i].agent.clone();
+        let session_id = sessions[i].session_id.clone();
+        sessions[i].task_id = Some(claim.task_id.clone());
+        // 固化完成即消费登记：归卡以 session_meta 为持久记录
+        let _ = assign_session_task_at(conn, &agent, &session_id, Some(&claim.task_id));
+        let _ = conn.execute(
+            "DELETE FROM card_claims WHERE agent=?1 AND cwd=?2",
+            params![claim.agent, claim.cwd],
+        );
+    }
 }
 
 // ===== 删除（用户显式发起，是只读原则的唯一例外） =====
@@ -5038,6 +5227,8 @@ mod tests {
                 internal: false,
             handoff_from_agent: None,
             handoff_from_session: None,
+            task_id: None,
+            task_name: None,
             },
             fork.map(String::from),
         )
@@ -5097,6 +5288,7 @@ mod tests {
                 tags: vec!["重要".into()],
                 summary: None,
                 handoff_from: None,
+                task_id: None,
             },
         );
         apply_meta(&mut merged, &members, &meta);
@@ -5748,6 +5940,193 @@ mod tests {
         apply_meta(&mut merged, &HashMap::new(), &meta);
         assert_eq!(merged[0].summary.as_deref(), Some("AI 摘要内容"));
         drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn session_meta_task_id_migration_assign_and_clear() {
+        // 模拟旧库：没有 task_id 列，迁移幂等补上
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_meta(
+              agent TEXT NOT NULL, session_id TEXT NOT NULL,
+              pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+              custom_title TEXT, tags TEXT NOT NULL DEFAULT '[]',
+              note TEXT, pinned_at TEXT,
+              PRIMARY KEY(agent, session_id));",
+        )
+        .unwrap();
+        migrate_session_meta(&conn);
+        migrate_session_meta(&conn); // 第二次不报错（幂等）
+
+        // 归卡 → 移出（None 与空白串等价）→ 再归卡
+        assign_session_task_at(&conn, "codex", "s1", Some("t-a1")).unwrap();
+        let meta = read_all_meta(&conn);
+        assert_eq!(
+            meta.get(&("codex".to_string(), "s1".to_string())).unwrap().task_id.as_deref(),
+            Some("t-a1")
+        );
+        assign_session_task_at(&conn, "codex", "s1", None).unwrap();
+        assign_session_task_at(&conn, "codex", "s1", Some("   ")).unwrap();
+        let meta = read_all_meta(&conn);
+        assert_eq!(meta.get(&("codex".to_string(), "s1".to_string())).unwrap().task_id, None);
+
+        // 归卡不影响其他整理字段（upsert 只动 task_id）
+        assign_session_task_at(&conn, "codex", "s1", Some("t-a1")).unwrap();
+        assign_session_task_at(&conn, "claude-code", "s2", Some("t-a1")).unwrap();
+        // 删卡清理：该卡所有会话摘掉失效 id，其他卡不动
+        assign_session_task_at(&conn, "codex", "s3", Some("t-b2")).unwrap();
+        clear_task_assignment(&conn, "t-a1").unwrap();
+        let meta = read_all_meta(&conn);
+        assert_eq!(meta.get(&("codex".to_string(), "s1".to_string())).unwrap().task_id, None);
+        assert_eq!(meta.get(&("claude-code".to_string(), "s2".to_string())).unwrap().task_id, None);
+        assert_eq!(
+            meta.get(&("codex".to_string(), "s3".to_string())).unwrap().task_id.as_deref(),
+            Some("t-b2"),
+            "其他卡片的归卡不受影响"
+        );
+
+        // apply_meta 把 task_id 合并进 DTO
+        let (mut merged, _) = merge_codex_chains(vec![codex_meta("s3", "2026-07-03T00:00:00Z", None)]);
+        apply_meta(&mut merged, &HashMap::new(), &meta);
+        assert_eq!(merged[0].task_id.as_deref(), Some("t-b2"));
+    }
+
+    /// 卡片认领：登记 → 扫描命中新会话并固化 task_id → 消费登记；
+    /// 登记前旧会话/异 agent/已归卡会话不误命中，消费后同目录新会话不再误归
+    #[test]
+    fn card_claim_applies_once_and_consumes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_meta(
+              agent TEXT NOT NULL, session_id TEXT NOT NULL,
+              pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+              custom_title TEXT, tags TEXT NOT NULL DEFAULT '[]',
+              note TEXT, pinned_at TEXT,
+              PRIMARY KEY(agent, session_id));",
+        )
+        .unwrap();
+        migrate_session_meta(&conn);
+        claim_test_register(&conn, "codex", "/tmp/proj", "t-card1");
+
+        // 登记前的旧会话 / 登记后的新会话 / 异 agent / 已手动归卡
+        let old = claim_test_session("codex", "old", "/tmp/proj", "2000-01-01T00:00:00Z");
+        let new = claim_test_session("codex", "new", "/tmp/proj", "2999-01-01T00:00:00Z");
+        let other = claim_test_session("gemini", "g1", "/tmp/proj", "2999-01-01T00:00:00Z");
+        let mut taken = claim_test_session("codex", "taken", "/tmp/proj", "2999-02-01T00:00:00Z");
+        taken.task_id = Some("t-other".into());
+        let mut sessions = vec![old, new, other, taken];
+        apply_card_claims(&conn, &mut sessions);
+
+        assert_eq!(sessions[0].task_id, None, "登记前的旧会话不得归卡");
+        assert_eq!(sessions[1].task_id.as_deref(), Some("t-card1"));
+        assert_eq!(sessions[2].task_id, None, "agent 不匹配不得归卡");
+        assert_eq!(sessions[3].task_id.as_deref(), Some("t-other"), "已归卡会话不被抢占");
+        // 固化进 session_meta（下次列表经 apply_meta 读到）
+        let meta = read_all_meta(&conn);
+        assert_eq!(
+            meta.get(&("codex".to_string(), "new".to_string())).unwrap().task_id.as_deref(),
+            Some("t-card1")
+        );
+        // 登记已消费：同目录之后更新的会话不再误归
+        assert!(read_card_claims(&conn).is_empty());
+        let newer = claim_test_session("codex", "newer", "/tmp/proj", "2999-06-01T00:00:00Z");
+        let mut sessions = vec![newer];
+        apply_card_claims(&conn, &mut sessions);
+        assert_eq!(sessions[0].task_id, None, "消费后登记失效");
+
+        // 无登记的目录不受影响
+        let stray = claim_test_session("codex", "stray", "/tmp/other", "2999-01-01T00:00:00Z");
+        let mut sessions = vec![stray];
+        apply_card_claims(&conn, &mut sessions);
+        assert_eq!(sessions[0].task_id, None);
+    }
+
+    /// 同 agent+cwd 重复登记：后一次覆盖前一次（以最后一次发起为准）
+    #[test]
+    fn card_claim_overwrites_same_target() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_meta(
+              agent TEXT NOT NULL, session_id TEXT NOT NULL,
+              pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+              custom_title TEXT, tags TEXT NOT NULL DEFAULT '[]',
+              note TEXT, pinned_at TEXT,
+              PRIMARY KEY(agent, session_id));",
+        )
+        .unwrap();
+        migrate_session_meta(&conn);
+        claim_test_register(&conn, "kimi", "/tmp/p", "t-a");
+        claim_test_register(&conn, "kimi", "/tmp/p", "t-b");
+        let claims = read_card_claims(&conn);
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].task_id, "t-b");
+    }
+
+    /// 测试内登记认领（command 本体走全局库，这里直写内存库）
+    fn claim_test_register(conn: &Connection, agent: &str, cwd: &str, task_id: &str) {
+        ensure_card_claim_table(conn).unwrap();
+        conn.execute(
+            "INSERT INTO card_claims(agent, cwd, task_id, created_at) VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(agent, cwd) DO UPDATE SET task_id=?3, created_at=?4",
+            params![agent, cwd, task_id, now_iso()],
+        )
+        .unwrap();
+    }
+
+    fn claim_test_session(agent: &str, id: &str, path: &str, updated: &str) -> SessionMetaDto {
+        SessionMetaDto {
+            agent: agent.into(),
+            session_id: id.into(),
+            project_path: path.into(),
+            title: None,
+            created_at: None,
+            updated_at: Some(updated.into()),
+            file_path: format!("/{id}.jsonl"),
+            token_usage: None,
+            cli_version: None,
+            pinned: false,
+            archived: false,
+            custom_title: None,
+            tags: Vec::new(),
+            alive: true,
+            chain_count: 1,
+            workspace: None,
+            step_name: None,
+            summary: None,
+            live: false,
+            source: default_session_source(),
+            internal: false,
+            handoff_from_agent: None,
+            handoff_from_session: None,
+            task_id: None,
+            task_name: None,
+        }
+    }
+
+    #[test]
+    fn apply_task_names_fills_and_tolerates_deleted_card() {
+        // 卡片名按项目档案卡回填；卡片已删时 task_name=None 且 task_id 保留
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let project = dir.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let card = crate::projects::create_task_card_at(&project, "文献筛选", None).unwrap();
+
+        let mut hit = codex_meta("s1", "2026-07-03T00:00:00Z", None).0;
+        hit.project_path = project.to_string_lossy().into_owned();
+        hit.task_id = Some(card.id.clone());
+        let mut gone = codex_meta("s2", "2026-07-03T00:00:00Z", None).0;
+        gone.project_path = project.to_string_lossy().into_owned();
+        gone.task_id = Some("t-deleted".into());
+        let mut none = codex_meta("s3", "2026-07-03T00:00:00Z", None).0;
+        none.project_path = project.to_string_lossy().into_owned();
+
+        let mut sessions = vec![hit, gone, none];
+        apply_task_names(&mut sessions);
+        assert_eq!(sessions[0].task_name.as_deref(), Some("文献筛选"));
+        assert_eq!(sessions[1].task_name, None, "卡片已删容忍为 None");
+        assert_eq!(sessions[1].task_id.as_deref(), Some("t-deleted"));
+        assert_eq!(sessions[2].task_name, None);
         std::fs::remove_dir_all(&dir).ok();
     }
 

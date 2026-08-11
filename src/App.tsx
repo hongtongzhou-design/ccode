@@ -251,18 +251,25 @@ function App() {
       <div className="ccode-app-shell flex h-full flex-col overflow-hidden bg-rail text-l2">
         {/* macOS 自绘标题栏（titleBarStyle: Overlay + hiddenTitle）：拖拽区 + 窗口标题 +
             Ghostty 式标题栏收件箱（胶囊在标题后，点按向下展开明细，遮罩/Esc 关闭）。
-            Windows/Linux 用原生标题栏，收件箱保留在工作区页内 strip */}
-        {IS_MAC && !chromeHidden && (
+            Windows/Linux 用原生标题栏，收件箱保留在工作区页内 strip。
+            执行态（chromeHidden）下也必须保留这条栏：Overlay 模式下红绿灯按钮始终悬浮在
+            左上角，栏的 pl-[78px] 负责让位；整条隐藏会导致按钮压住页面内容、胶囊消失。
+            执行态只省略窗口标题与底部分隔线，栏体保留以承接红绿灯与收件箱胶囊。 */}
+        {IS_MAC && (
           <header
             data-tauri-drag-region
-            className="flex h-10 shrink-0 items-center gap-2.5 border-b border-hairline bg-rail pl-[78px] pr-3"
+            className={`flex h-10 shrink-0 items-center gap-2.5 bg-rail pl-[78px] pr-3 ${
+              chromeHidden ? "" : "border-b border-hairline"
+            }`}
           >
-            <span
-              data-tauri-drag-region
-              className="pointer-events-none select-none text-xs font-medium text-l3"
-            >
-              {winTitle}
-            </span>
+            {!chromeHidden && (
+              <span
+                data-tauri-drag-region
+                className="pointer-events-none select-none text-xs font-medium text-l3"
+              >
+                {winTitle}
+              </span>
+            )}
             {inboxCount > 0 && (
               <div className="relative">
                 <button

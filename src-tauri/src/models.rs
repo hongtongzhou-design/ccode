@@ -1,5 +1,36 @@
 use crate::profiles;
 
+/// 任务卡（项目档案卡 project.toml 的 [[tasks]] 段）：对话的文件夹 + 定稿简报的收集夹。
+/// 卡片本身无状态机，不碰工作区/评审流程。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TaskCardDto {
+    /// "t-<短随机>"，项目内唯一
+    pub id: String,
+    /// 卡片名（同项目内唯一，大小写敏感）
+    pub name: String,
+    /// 挂到的流水线步骤名（步骤 name）；未挂为 None
+    pub step: Option<String>,
+    /// 开工后绑定的工作区名（先留字段，前端后续填）
+    pub workspace: Option<String>,
+    pub created_at: String,
+    /// 定稿简报路径（相对项目根，统一正斜杠），时间序
+    pub briefs: Vec<String>,
+}
+
+impl Default for TaskCardDto {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            step: None,
+            workspace: None,
+            created_at: String::new(),
+            briefs: Vec::new(),
+        }
+    }
+}
+
 /// 从 profile 的端点拉取可用模型列表。
 /// 密钥优先用表单里新输入的，否则取钥匙串中已存的；只用于本次请求，不持久化。
 #[tauri::command]

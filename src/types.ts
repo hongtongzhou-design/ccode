@@ -108,6 +108,9 @@ export interface SessionMetaDto {
   /** 接力来源（P3 机制四）：该会话接自哪个 agent 的哪个会话；非接力会话为 null */
   handoffFromAgent: string | null;
   handoffFromSession: string | null;
+  /** 归入的任务卡（卡片 = 对话的文件夹）；后端按项目回填卡片名，卡片删除后两者回落 null */
+  taskId: string | null;
+  taskName: string | null;
 }
 
 /** 接力目标（handoff_targets）：各 CLI 的安装与启动注入支持情况 */
@@ -267,7 +270,16 @@ export interface WorkspaceHealthDto {
   mainOffBase: boolean;
   /** 主仓库有未提交改动 */
   mainDirty: boolean;
+  /** 冲突现场已落后基准（MERGE_HEAD ≠ 基准 tip），需重新同步后再选边 */
+  staleBase: boolean;
   readyToMerge: boolean;
+}
+
+/** 产物待核验（收件箱）：活跃工作区绑定步骤的预期产物已全部产出且够新 */
+export interface PendingArtifactDto {
+  workspaceId: string;
+  workspaceName: string;
+  repoName: string;
 }
 
 export interface WorkspaceDriftIssueDto {
@@ -521,6 +533,21 @@ export interface ProjectConfigDto {
   artifactDir: string;
   resources: ProjectResourceDto[];
   steps: ProjectStepDto[];
+}
+
+/** 任务卡（list_task_cards 等）：挂在项目下的「对话文件夹 + 定稿简报收集夹」，无独立状态机 */
+export interface TaskCardDto {
+  /** "t-<短随机>"，项目内唯一 */
+  id: string;
+  /** 卡片名（同项目内唯一，大小写敏感） */
+  name: string;
+  /** 挂到的流水线步骤名（steps[].name）；未挂为 null */
+  step: string | null;
+  /** 开工后绑定的工作区名（预留字段，后端暂无写入入口） */
+  workspace: string | null;
+  createdAt: string;
+  /** 定稿简报相对项目根路径（统一正斜杠），时间序 */
+  briefs: string[];
 }
 
 /** read_project_config 返回：坏字段不阻断，逐条进 warnings */
