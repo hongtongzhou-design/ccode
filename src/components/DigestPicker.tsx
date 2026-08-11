@@ -38,21 +38,24 @@ export default function DigestPicker({
     prompt: string;
   } | null>(null);
 
+  // 依赖原始字段而非 source 对象：调用方在 JSX 里内联构造 source，
+  // 父级任何重渲染都会换新对象身份，若按对象依赖会反复重新提炼
+  const { agent, sessionId, filePath, cwd, title } = source;
   const generate = useCallback(() => {
     setGenerating(true);
     setError(null);
     invoke<HandoffBriefDto>("build_session_digest", {
-      agent: source.agent,
-      sessionId: source.sessionId,
-      filePath: source.filePath,
-      cwd: source.cwd,
-      title: source.title,
+      agent,
+      sessionId,
+      filePath,
+      cwd,
+      title,
       targetPath: null,
     })
       .then(setBrief)
       .catch((e) => setError(String(e)))
       .finally(() => setGenerating(false));
-  }, [source]);
+  }, [agent, sessionId, filePath, cwd, title]);
 
   useEffect(() => {
     generate();
