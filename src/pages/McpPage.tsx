@@ -365,7 +365,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
   ).length;
 
   return (
-    <PageFrame width="standard">
+    <PageFrame width="wide">
       <PageHeader
         title="MCP"
         meta={`${servers.length} 个 server · 已分发 ${distributed}`}

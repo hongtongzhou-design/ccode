@@ -276,16 +276,15 @@ function ProjectRail({
   function renderWsRow(sec: RailSection, w: WorkspaceDto) {
     const wsActive = pathWithin(cwd, w.worktreePath);
     const tab = tabs.find((t) => pathWithin(t.cwd, w.worktreePath));
+    // 「已回复」不打点（回合结束每轮都发生，不是待办）；只留 待确认 > 工作中 > 运行中
     const dot =
       tab?.attention === "confirm"
         ? "bg-warn-text"
-        : tab?.attention === "done"
-          ? "bg-link"
-          : tab?.attention === "working"
-            ? "bg-ok-text animate-pulse-brief"
-            : tab?.running
-              ? "bg-ok-text"
-              : null;
+        : tab?.attention === "working"
+          ? "bg-ok-text animate-pulse-brief"
+          : tab?.running
+            ? "bg-ok-text"
+            : null;
     const stepName = stepNames[sec.repo]?.[w.name];
     return (
       <div key={w.id}>
@@ -315,13 +314,7 @@ function ProjectRail({
           {dot && (
             <span
               className={`size-2 shrink-0 rounded-full ${dot}`}
-              title={
-                tab?.attention === "confirm"
-                  ? "待确认"
-                  : tab?.attention === "done"
-                    ? "已完成"
-                    : "工作中"
-              }
+              title={tab?.attention === "confirm" ? "待确认" : "工作中"}
             />
           )}
         </div>

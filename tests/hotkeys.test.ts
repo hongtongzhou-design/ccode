@@ -5,6 +5,7 @@ import {
   comboFromEvent,
   comboLabel,
   eventMatchesCombo,
+  PAGE_HOTKEY_DEFS,
 } from "../src/hotkeys.ts";
 
 const ev = (over: Partial<Parameters<typeof comboFromEvent>[0]>) => ({
@@ -49,27 +50,43 @@ test("comboLabel 渲染与禁用态", () => {
 });
 
 test("captureDecision：Esc 取消 / 纯修饰键忽略", () => {
-  assert.deepEqual(captureDecision(ev({ key: "Escape" }), ""), {
+  assert.deepEqual(captureDecision(ev({ key: "Escape" }), []), {
     action: "cancel",
   });
-  assert.deepEqual(captureDecision(ev({ metaKey: true, key: "Meta" }), ""), {
+  assert.deepEqual(captureDecision(ev({ metaKey: true, key: "Meta" }), []), {
     action: "ignore",
   });
-  assert.deepEqual(captureDecision(ev({}), ""), { action: "ignore" });
+  assert.deepEqual(captureDecision(ev({}), []), { action: "ignore" });
 });
 
-test("captureDecision：冲突拒绝 / 正常保存", () => {
-  assert.deepEqual(captureDecision(ev({ metaKey: true }), "mod+k"), {
+test("captureDecision：冲突拒绝（多冲突方任一命中即拒）/ 正常保存", () => {
+  assert.deepEqual(captureDecision(ev({ metaKey: true }), ["mod+k"]), {
     action: "conflict",
     combo: "mod+k",
   });
-  assert.deepEqual(captureDecision(ev({ metaKey: true }), "mod+\\"), {
+  // 多个冲突方：命中任意一个都拒绝
+  assert.deepEqual(
+    captureDecision(ev({ metaKey: true, key: "2" }), ["mod+k", "mod+2"]),
+    { action: "conflict", combo: "mod+2" },
+  );
+  assert.deepEqual(captureDecision(ev({ metaKey: true }), ["mod+\\"]), {
     action: "save",
     combo: "mod+k",
   });
   // 冲突方为禁用（空串）时不判冲突
-  assert.deepEqual(captureDecision(ev({ metaKey: true }), ""), {
+  assert.deepEqual(captureDecision(ev({ metaKey: true }), [""]), {
     action: "save",
     combo: "mod+k",
   });
+});
+
+test("PAGE_HOTKEY_DEFS：八页、顺序与默认绑定唯一", () => {
+  assert.equal(PAGE_HOTKEY_DEFS.length, 8);
+  assert.deepEqual(
+    PAGE_HOTKEY_DEFS.map((p) => p.id),
+    ["workspaces", "terminal", "sessions", "profiles", "skills", "mcp", "stats", "settings"],
+  );
+  const combos = PAGE_HOTKEY_DEFS.map((p) => p.combo);
+  assert.equal(new Set(combos).size, 8, "默认绑定不得互相冲突");
+  assert.deepEqual(combos, [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `mod+${n}`));
 });

@@ -79,7 +79,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   pipeline-start.ts          # 一键开步共享链路（三处 TASK.md 同一出处）
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
-  notify.ts                  # 长任务 OS 通知（跃迁 + 未聚焦 + 30s 去抖）
+  notify.ts                  # 长任务 OS 通知（仅「待确认」跃迁 + 未聚焦 + 30s 去抖；「已回复」不通知）
   git-status-groups.ts       # 改动列表状态分组/白话双层纯逻辑
   git-commit-message.ts      # 空提交信息的本地默认信息生成
   terminal-tab-persistence.ts # 终端标签重启恢复白名单（不含 PTY/密钥/env）
@@ -171,13 +171,29 @@ src-tauri/src/
     SwiftShader 软件渲染，上下文能建但终端持续闪烁，try/catch 拦不住；探测失败同样不用 WebGL，勿删此兜底。
   - **运行中会话关联排他 + 复合键**：固定 session id 的 CLI 精确锁定；其余 CLI 启动前按 agent+归并后项目登记 claim，同批
     并发统一排序分配，已分配会话进程内不得转给另一标签；前端 live/open 一律以 agent+sessionId 为键，完整回放跳转前先刷新索引。
-- **首页「待你处理」收件箱（v3.39；v3.42 起横跨项目导航与详情两栏之上）**：聚合工作区冲突/可合并 + 终端注意力（待确认/
-  已完成），排序 冲突 > 待确认 > 可合并 > 已完成，为空整块不渲染；终端运行状态经 `terminalRunInputs` 镜像进 store 跨页
+- **首页「待你处理」收件箱（v3.39；v3.42 起横跨项目导航与详情两栏之上；v3.59 起文档流单行 strip + macOS 收进自绘标题栏）**：聚合工作区冲突/可合并
+  + 终端注意力（仅待确认），排序 冲突 > 待确认 > 可合并，为空整块不渲染；条目为可序列化 `InboxItem`（action 描述非闭包），
+  由 WorkspacesPage 签名去抖镜像进 store（唯一写入方），点击统一走 `runInboxAction` 派发（review/tab/session 三类都走 store 一次性请求）。
+  **macOS：标题栏自绘（tauri.conf `titleBarStyle: Overlay` + `hiddenTitle`，capabilities 加 `core:window:allow-title` 与
+  `core:window:allow-start-dragging`——缺后者 `data-tauri-drag-region` 拖拽静默失效），收件箱 =
+  标题后的 Ghostty 式胶囊 + 下拉明细，页内 strip 不渲染**；Windows/Linux 保留原生标题栏 + 页内 strip（32px 一行，展开明细为悬浮下拉，
+  遮罩/Esc 收起——整体悬浮 pill 遮挡内容被用户否决）。终端运行状态经 `terminalRunInputs` 镜像进 store 跨页
   只读（TerminalPage 唯一写入方，不新增轮询）；跳终端激活标签走一次性 `focusTabReq`（已关闭标签静默忽略）。
+  **注意力信噪比总规则（v3.60，用户拍板全链路清理）**：「已回复」（done = 回合结束）**在全链路无任何视觉标记**——不进收件箱、标签/项目区
+  工作区行不打点、OS 通知不发、`run-overview` 不占排序档，done 态仅剩会话尾部推断的内部状态；理由 = 每回合结束都会亮，噪音 > 信号
+  （同 v3.59 步进器绿点否决）。同批口径：**纯状态不用语义色**（分组头「进行中/待评审」计数降灰点，仅「阻塞」用 err 色；项目导航行副行只留
+  「M 个待处理」，活跃任务数删除）；**瞬态反馈自动消退**（「✓ 工作区已创建」横幅 10s 自收，setup 失败除外）；**常驻 pill 降裸字**
+  （标签「可恢复」、启动栏「端口段已注入/上次任务」去底色去 link 蓝）；**无限脉冲禁留**（标签「工作中」与项目区同用有界
+  `animate-pulse-brief`）；端口「N 个监听中」只在展开后显示；产物清单「刚更新」标记删除。新状态指示进界面前先过「是否阻塞人的决策」闸。
+  **v3.59 起导航行「待处理」与收件箱同口径按项目摊开**：终端待确认与外部 live 待确认按 cwd 最长前缀归属项目根/
+  工作树（`run-overview.ts attributeToProject` 纯逻辑，段边界防误中），收件箱给总数、导航行给分布。同批：收件箱条目数
+  镜像进 store（`inboxCount`，WorkspacesPage 唯一写入方）。**侧栏不挂任何徽标**（终端运行数、工作区待处理全部取消，
+  三平台统一——数字胶囊突兀、size-2 圆点与项目行状态点撞语义、9px 裸数字用户仍嫌吵，三轮均被否决；计数只在悬浮
+  title 与 macOS 标题栏胶囊/页内 strip 出现）——收件箱仍为空不渲染，发现性由标题栏胶囊（mac）与页内 strip（Win/Linux）承担。
 - **产物核验清单（v3.42；v3.45 起从胶囊移到任务行；v3.46 起步进器圆后小方块同面板）**：共享组件 `src/components/ArtifactChecklist.tsx`（步骤按 workspaceName 反查
   project.toml，定位根由调用方给：已合并读项目根/main，其余读工作树）；任务行「产物」按钮（hover 才现，与 ⌨ 终端同档）在行下方
-  就地手风琴展开，展开态按工作区 id 记忆在 WorkspacesPage、切项目清空；步进器圆后小方块在 strip 下方就地展开，展开态记步骤 index（单开）；面板 = 已产出 ✓/未产出 — + mtime 相对时间 + 10 分钟内
-  「刚更新」标记 + 手动 ⟳ 刷新（打开时拉取一次，不进轮询）；选段反馈浮动条带「↵ 直接发送」（pty_write 一次拼接 \r，同帧到达防半截输入）。
+  就地手风琴展开，展开态按工作区 id 记忆在 WorkspacesPage、切项目清空；步进器圆后小方块在 strip 下方就地展开，展开态记步骤 index（单开）；面板 = 已产出 ✓/未产出 — + mtime 相对时间
+  + 手动 ⟳ 刷新（打开时拉取一次，不进轮询；v3.60 起无「刚更新」标记——文件新旧不是待办）；选段反馈浮动条带「↵ 直接发送」（pty_write 一次拼接 \r，同帧到达防半截输入）。
 - **沉淀为技能（v3.42）**：md/PDF 选段浮动条「✦ 沉淀为技能」→ `ai_distill_skill`（脱敏 + 8KB 截断 + JSON 容错解析）→
   `skillDraftReq` 一次性请求 → 技能页新建弹窗预填，保存走既有 create_skill（重名拒绝）。
 - **模型 combo-box（v3.42）**：启动栏模型 = 可输可选（profile 预设 + `ccode.modelHistory.<agent>` 历史去重，上限 10 条），
@@ -185,11 +201,12 @@ src-tauri/src/
 - **评审一键开下一步（v3.42）**：开步链路单一出处 `src/pipeline-start.ts`；评审覆盖层合并成功且保留工作区时，成功横幅
   给出「▶ 开始下一步：步骤名」——下一步 = 同名步骤之后第一个无同名工作区（含已归档）的步骤；无下一步/未注册/无流水线
   只显示合并成功横幅；「合并并归档」成功即关覆盖层，不出此入口。
-- **键盘流（v3.40/v3.41）**：⌘K 命令面板（过滤纯逻辑在 `command-palette.ts`）、⌘1–⌘8 页切（顺序同侧栏）、⌘\ 执行态隐藏
-  侧栏（`chromeHidden`，session 级）；⌘F 已被终端搜索占用。主题清单单一出处 `src/themes.ts`。绑定可自定义（设置页录制，
-  `hotkeys.ts` 组合串，空串=禁用，settings.json 三字段）。通知动作 `ccode.attention` → 聚焦窗口 + 回首页收件箱；通知
-  extra 带 tabId/cwd/kind，已完成且 cwd 命中工作区直达评审覆盖层，其余聚焦标签；收件箱经 `session_tail_state` 直查外部
-  live 会话（≤10 条）。
+- **键盘流（v3.40/v3.41；v3.58 起页切逐页可自定义）**：⌘K 命令面板（过滤纯逻辑在 `command-palette.ts`）、页切（顺序同侧栏；
+  清单单一出处 `hotkeys.ts` PAGE_HOTKEY_DEFS，默认 mod+1..8，`hotkeyPages` map 按页覆盖、整组总开关 `hotkeyPageSwitch` 保留）、
+  ⌘\ 执行态隐藏侧栏（`chromeHidden`，session 级）；⌘F 已被终端搜索占用。主题清单单一出处 `src/themes.ts`。绑定可自定义（设置页录制，
+  `hotkeys.ts` 组合串，空串=禁用，settings.json 四字段；录制冲突判定对全部在用绑定互判）。通知动作 `ccode.attention` → 聚焦窗口 + 聚焦对应终端标签，
+  无 extra 回首页收件箱；通知 extra 带 tabId/cwd（v3.60 起通知只有「待确认」一种，原「已回复直达评审覆盖层」链路随 done 通知一并移除）；
+  收件箱经 `session_tail_state` 直查外部 live 会话（≤10 条）。
   - **终端分屏（SplitView）只是显隐与排序变化**：全部标签仍在同一容器保持挂载，靠 flex order 把活跃标签（左）与对照标签
     （右）排到分隔条两侧，禁止把标签移进第二棵子树（会重挂载杀 PTY）；右栏/文件树/改动跟随「活跃 pane」（点击切换，
     focusedId），分屏时两个 pane 的 PTY 都推流；分屏状态不进持久化白名单，仅分隔比例本地记忆。
@@ -435,8 +452,8 @@ src-tauri/src/
   pending 无工作区=startStep、已归档=restoreWs、进行中/待评审/阻塞=onOpenTerminal(ws)、done=setPendingTerminal 开主仓 shell 终端。
   状态/目录/agent/profile + 点击动作提示收进**应用内 tooltip**（`useHoverTip`/`HoverTip`，fixed 定位、横向钳制、滚动/缩放/点击即关）：
   原生 title 在 WKWebView 上行为不稳定（不渲染或残留数秒串到相邻控件），圆与小方块的悬浮提示**一律走应用内 tooltip，禁再回退原生 title**；
-  事件挂包裹 span，禁用态也可悬浮。**大圆右上角注意力角标**（size-2 圆点）：cwd 落在工作区内的终端标签有待确认=bg-warn /
-  已完成=bg-done（confirm 优先），数据只读消费 `terminalRunInputs` 镜像，不新增轮询。**圆前/圆后小方块 = 节律中的普通虚线块（SquareButton：
+  事件挂包裹 span，禁用态也可悬浮。**大圆右上角注意力角标**（size-2 圆点）：cwd 落在工作区内的终端标签有待确认=bg-warn；
+  v3.59 起「已回复」绿点移除（每回合结束都会亮，噪音大于信号，用户否决），只留待确认；数据只读消费 `terminalRunInputs` 镜像，不新增轮询。**圆前/圆后小方块 = 节律中的普通虚线块（SquareButton：
   bg-hairline 5px 与虚段同色等大、无字符、无衬底、无状态区分）+ 28px 透明热区（绝对定位子元素，不占布局）**：
   视觉混在虚线里，仅 hover/focus 提亮 bg-cta 表明可点，功能名在应用内 tooltip 出现；圆前=openEditor(i) 打开流水线编辑器并定位该步骤卡片（PipelineEditor `focusStep` prop 滚动 +
   聚焦简报框）；圆后=strip 下方就地展开 ArtifactChecklist（单开手风琴记步骤 index；root 口径同任务行：done 读项目根、其余读工作树、

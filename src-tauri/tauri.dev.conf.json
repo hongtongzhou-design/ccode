@@ -7,7 +7,9 @@
       {
         "title": "Ccode Dev - 热更新",
         "width": 1100,
-        "height": 720
+        "height": 720,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ]
   }

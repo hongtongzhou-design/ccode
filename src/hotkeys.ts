@@ -6,6 +6,19 @@
 
 export const HOTKEY_DISABLED = "";
 
+/** 页切绑定清单单一出处（App.tsx 全局监听与设置页录制 UI 同源）：
+ *  顺序与侧栏「工作→能力→管理」一致；combo 为该页默认绑定（settings.hotkeyPages 可按页覆盖） */
+export const PAGE_HOTKEY_DEFS = [
+  { id: "workspaces", label: "工作区", combo: "mod+1" },
+  { id: "terminal", label: "终端", combo: "mod+2" },
+  { id: "sessions", label: "对话", combo: "mod+3" },
+  { id: "profiles", label: "配置", combo: "mod+4" },
+  { id: "skills", label: "技能", combo: "mod+5" },
+  { id: "mcp", label: "MCP", combo: "mod+6" },
+  { id: "stats", label: "统计", combo: "mod+7" },
+  { id: "settings", label: "设置", combo: "mod+8" },
+] as const;
+
 export interface Combo {
   mod: boolean;
   shift: boolean;
@@ -57,10 +70,10 @@ export function eventMatchesCombo(
 }
 
 /** 快捷键录制态的按键决议（SettingsPage HotkeyCapture 用；与 DOM 解耦可单测）：
- *  Esc 取消；纯修饰键/无修饰键忽略（继续等待）；与另一绑定冲突则拒绝；其余保存 */
+ *  Esc 取消；纯修饰键/无修饰键忽略（继续等待）；与任一在用的其他绑定冲突则拒绝；其余保存 */
 export function captureDecision(
   e: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; key: string },
-  conflictWith: string,
+  conflictsWith: readonly string[],
 ):
   | { action: "cancel" }
   | { action: "save"; combo: string }
@@ -69,11 +82,15 @@ export function captureDecision(
   if (e.key === "Escape") return { action: "cancel" };
   const combo = comboFromEvent(e);
   if (!combo) return { action: "ignore" };
-  if (conflictWith && combo === conflictWith) return { action: "conflict", combo };
+  // 冲突方为禁用（空串）时不判冲突
+  if (conflictsWith.some((c) => c && c === combo)) {
+    return { action: "conflict", combo };
+  }
   return { action: "save", combo };
 }
 
-const IS_MAC =
+/** 平台判定（App 标题栏收件箱等 mac 专属 chrome 用） */
+export const IS_MAC =
   typeof navigator !== "undefined" && /mac/i.test(navigator.platform || "");
 
 /** 组合串 → 展示标签（mod+k → ⌘K；非 mac 显示 Ctrl+K） */

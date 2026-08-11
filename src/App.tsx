@@ -8,10 +8,15 @@ import {
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
 import { ConfirmDialogHost } from "./components/ConfirmDialog";
-import { LoadingRows } from "./components/PageFrame";
+import { LoadingRows, rowActionClass } from "./components/PageFrame";
 import "./App.css";
-import { useAppStore } from "./store";
-import { eventMatchesCombo, comboLabel } from "./hotkeys";
+import { useAppStore, runInboxAction } from "./store";
+import {
+  eventMatchesCombo,
+  comboLabel,
+  PAGE_HOTKEY_DEFS,
+  IS_MAC,
+} from "./hotkeys";
 
 // 页面懒加载：首屏只拉当前页 chunk，其余页首次访问时才加载
 const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
@@ -54,17 +59,7 @@ const NAV_GROUPS = [
 // 底部管理区只保留设置（统计归入「能力」组）
 const NAV_BOTTOM = [{ id: "settings", label: "设置", icon: "⛭" }] as const;
 
-/** ⌘1–⌘8 页切顺序（与侧栏工作→能力→管理一致） */
-const PAGE_HOTKEYS = [
-  "workspaces",
-  "terminal",
-  "sessions",
-  "profiles",
-  "skills",
-  "mcp",
-  "stats",
-  "settings",
-] as const;
+/** 页切顺序/逐页绑定/默认值的单一出处在 hotkeys.ts PAGE_HOTKEY_DEFS（与侧栏工作→能力→管理一致） */
 
 function App() {
   const page = useAppStore((s) => s.page);
@@ -76,6 +71,28 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 终端里运行中的 agent 数（任意页面可见，徽标挂在「终端」图标上）
   const runningCount = useAppStore((s) => Object.keys(s.liveSessions).length);
+  // 「待你处理」收件箱条目镜像（WorkspacesPage 写入）：侧栏圆点计数 + macOS 标题栏收件箱共用
+  const inboxItems = useAppStore((s) => s.inboxItems);
+  const inboxCount = inboxItems.length;
+  // macOS 自绘标题栏的窗口标题（hiddenTitle 后原生标题不显示，由我们渲染）
+  const [winTitle, setWinTitle] = useState("");
+  // 标题栏收件箱的展开态（Ghostty 式下拉；遮罩/Esc 关闭）
+  const [titleInboxOpen, setTitleInboxOpen] = useState(false);
+  useEffect(() => {
+    if (!IS_MAC) return;
+    getCurrentWindow()
+      .title()
+      .then(setWinTitle)
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!titleInboxOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setTitleInboxOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [titleInboxOpen]);
   const loadAll = useAppStore((s) => s.loadAll);
   const loadSessions = useAppStore((s) => s.loadSessions);
   const loadRecentRepos = useAppStore((s) => s.loadRecentRepos);
@@ -93,7 +110,8 @@ function App() {
   // 侧栏收展完全由用户手动控制（品牌区点击）；曾有的按页面自动收展被用户否决（v3.43）
 
   // 全局快捷键（设置页可自定义，存 settings.json）：命令面板（默认 ⌘K）、
-  // 隐藏/显示侧栏（默认 ⌘\）、⌘1–⌘8 页切（开关）。空串 = 禁用；⌘F 已被终端搜索占用故不用。
+  // 隐藏/显示侧栏（默认 ⌘\）、页切逐页绑定（默认 ⌘1–⌘8，hotkeyPages 按页覆盖 + 整组总开关）。
+  // 空串 = 禁用；⌘F 已被终端搜索占用故不用。
   const settings = useAppStore((s) => s.settings);
   // 侧栏底部 ⌘K 常驻入口的键位标签：跟随设置页自定义绑定；禁用（空串）时回落默认展示
   const paletteComboLabel = comboLabel(settings?.hotkeyPalette || "mod+k");
@@ -113,11 +131,14 @@ function App() {
         toggleChromeHidden();
         return;
       }
-      if (pageSwitchOn && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-        const idx = ["1", "2", "3", "4", "5", "6", "7", "8"].indexOf(e.key);
-        if (idx >= 0) {
+      // 页切：逐页绑定（缺省回落默认 mod+1..8），冲突由设置页录制时拒绝兜底
+      if (pageSwitchOn) {
+        const hit = PAGE_HOTKEY_DEFS.find((p) =>
+          eventMatchesCombo(e, settings?.hotkeyPages?.[p.id] ?? p.combo),
+        );
+        if (hit) {
           e.preventDefault();
-          setPage(PAGE_HOTKEYS[idx]);
+          setPage(hit.id);
         }
       }
     };
@@ -125,12 +146,8 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [paletteOpen, setPage, toggleChromeHidden, settings]);
 
-  // 通知动作：注册「去处理」按钮类型；点击后的路由按 extra 分级——
-  // 已完成且 cwd 是任务工作区 → 直达评审覆盖层；待确认/其余 → 聚焦对应终端标签；
+  // 通知动作：注册「去处理」按钮类型；点击后聚焦对应终端标签（通知只有「待确认」一种），
   // 无 extra（旧通知）→ 回首页收件箱。横幅样式不显按钮（系统设置决定），正文点击走系统默认激活。
-  const setWorkspaceReviewRequest = useAppStore(
-    (s) => s.setWorkspaceReviewRequest,
-  );
   const setFocusTabReq = useAppStore((s) => s.setFocusTabReq);
   useEffect(() => {
     let unregister: (() => void) | undefined;
@@ -147,27 +164,8 @@ function App() {
       const extra = (notification.extra ?? {}) as {
         tabId?: string;
         cwd?: string;
-        kind?: string;
       };
       void (async () => {
-        if (extra.kind === "done" && extra.cwd) {
-          try {
-            const list = await invoke<{ worktreePath: string }[]>(
-              "list_workspaces",
-            );
-            const hit = list.find((w) => w.worktreePath === extra.cwd);
-            if (hit) {
-              setPage("terminal");
-              setWorkspaceReviewRequest({
-                worktreePath: hit.worktreePath,
-                requestId: crypto.randomUUID(),
-              });
-              return;
-            }
-          } catch {
-            /* 工作区查询失败：回落标签聚焦 */
-          }
-        }
         if (extra.tabId) {
           setPage("terminal");
           setFocusTabReq(extra.tabId);
@@ -181,7 +179,7 @@ function App() {
       })
       .catch(() => {});
     return () => unregister?.();
-  }, [setPage, setWorkspaceReviewRequest, setFocusTabReq]);
+  }, [setPage, setFocusTabReq]);
 
   useEffect(() => {
     loadAll().catch((e) => console.error(e));
@@ -250,7 +248,71 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <div className="ccode-app-shell flex h-full overflow-hidden bg-rail text-l2">
+      <div className="ccode-app-shell flex h-full flex-col overflow-hidden bg-rail text-l2">
+        {/* macOS 自绘标题栏（titleBarStyle: Overlay + hiddenTitle）：拖拽区 + 窗口标题 +
+            Ghostty 式标题栏收件箱（胶囊在标题后，点按向下展开明细，遮罩/Esc 关闭）。
+            Windows/Linux 用原生标题栏，收件箱保留在工作区页内 strip */}
+        {IS_MAC && !chromeHidden && (
+          <header
+            data-tauri-drag-region
+            className="flex h-10 shrink-0 items-center gap-2.5 border-b border-hairline bg-rail pl-[78px] pr-3"
+          >
+            <span
+              data-tauri-drag-region
+              className="pointer-events-none select-none text-xs font-medium text-l3"
+            >
+              {winTitle}
+            </span>
+            {inboxCount > 0 && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setTitleInboxOpen((v) => !v)}
+                  aria-expanded={titleInboxOpen}
+                  className="flex h-6 items-center gap-1.5 rounded-full border border-field bg-strip px-2.5 text-[11px] text-l2 hover:bg-white/5"
+                >
+                  <span className="size-1.5 shrink-0 rounded-full bg-warn-text" />
+                  待你处理 {inboxCount}
+                  <span className="text-l4">{titleInboxOpen ? "▴" : "▾"}</span>
+                </button>
+                {titleInboxOpen && (
+                  <ul className="absolute left-0 top-full z-40 mt-1.5 max-h-80 w-[420px] max-w-[80vw] divide-y divide-hairline overflow-auto rounded-md border border-field bg-strip">
+                    {inboxItems.map((item) => (
+                      <li
+                        key={item.key}
+                        className="flex items-center gap-2.5 px-3 py-2 text-xs"
+                      >
+                        <span
+                          className={`size-2 shrink-0 rounded-full ${item.dot}`}
+                        />
+                        <span className="min-w-0 flex-1 truncate text-l2">
+                          {item.text}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTitleInboxOpen(false);
+                            runInboxAction(item);
+                          }}
+                          className={rowActionClass}
+                        >
+                          {item.actionLabel}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </header>
+        )}
+        {titleInboxOpen && (
+          <div
+            className="fixed inset-0 z-20"
+            onClick={() => setTitleInboxOpen(false)}
+          />
+        )}
+        <div className="flex min-h-0 flex-1">
         {/* 执行态（⌘\）：侧栏整体隐藏，页面 chrome 让位给终端/评审 */}
         {!chromeHidden && (
         <aside
@@ -276,7 +338,7 @@ function App() {
             )}
           </button>
 
-          <nav className="ccode-app-nav min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
+          <nav className="ccode-app-nav min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5 py-2">
             {NAV_GROUPS.map((group, groupIndex) => (
               <div key={group.label} className={groupIndex > 0 ? "mt-3" : ""}>
                 {!collapsed && (
@@ -293,12 +355,12 @@ function App() {
                     title={
                       n.id === "terminal" && runningCount > 0
                         ? `${n.label}（${runningCount} 个 agent 运行中）`
-                        : n.label
+                        : n.id === "workspaces" && inboxCount > 0
+                          ? `${n.label}（${inboxCount} 件待处理）`
+                          : n.label
                     }
-                    className={`relative mb-0.5 flex h-7 items-center rounded-md text-sm transition-colors ${
-                      collapsed
-                        ? "w-11 justify-center"
-                        : "w-full px-2.5"
+                    className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm transition-colors ${
+                      collapsed ? "justify-center" : "px-2.5"
                     } ${
                       page === n.id
                         ? "bg-rail-sel text-l1"
@@ -309,14 +371,9 @@ function App() {
                       <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
                     )}
                     <span
-                      className={`relative ${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
+                      className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
                     >
                       {n.icon}
-                      {n.id === "terminal" && runningCount > 0 && (
-                        <span className="absolute -right-2 -top-1 flex min-w-3.5 items-center justify-center rounded-full bg-inset px-1 text-[9px] leading-3 text-ok-text">
-                          {runningCount}
-                        </span>
-                      )}
                     </span>
                     {!collapsed && <span className="truncate">{n.label}</span>}
                   </button>
@@ -435,6 +492,7 @@ function App() {
             )}
           </div>
         </main>
+        </div>
         {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
         {/* 全局确认框宿主（confirmDialog）：z-[70]，压过一切覆盖层 */}
         <ConfirmDialogHost />

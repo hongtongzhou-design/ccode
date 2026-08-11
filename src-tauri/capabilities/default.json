@@ -8,6 +8,8 @@
     "core:window:allow-close",
     "core:window:allow-destroy",
     "core:window:allow-set-theme",
+    "core:window:allow-title",
+    "core:window:allow-start-dragging",
     "opener:default",
     "dialog:default",
     "updater:default",

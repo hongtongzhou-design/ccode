@@ -41,7 +41,7 @@ import { isSoftwareWebGL } from "../diagnostics";
 import {
   attentionTransition,
   debounceAllows,
-  notifyBody,
+  NOTIFY_BODY,
   notifyTitle,
 } from "../notify";
 import {
@@ -149,12 +149,12 @@ type RightTab = (typeof RIGHT_TABS)[number]["key"];
 const shQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
 /** 发系统通知：macOS 首次发送前必须显式申请权限（系统级弹窗，仅首次）；被拒则静默跳过。
- *  带「去处理」动作按钮（ccode.attention，App.tsx 注册）；extra 携带 tabId/cwd/kind，
- *  onAction 路由：已完成且 cwd 是任务工作区 → 直达评审覆盖层；待确认/其余 → 聚焦对应标签。 */
+ *  带「去处理」动作按钮（ccode.attention，App.tsx 注册）；extra 携带 tabId/cwd，
+ *  onAction 路由：聚焦对应标签（只有待确认一种通知）。 */
 async function fireAttentionNotification(
   title: string,
   body: string,
-  extra: { tabId: string; cwd: string; kind: "confirm" | "done" },
+  extra: { tabId: string; cwd: string },
 ) {
   let granted = await isPermissionGranted();
   if (!granted) granted = (await requestPermission()) === "granted";
@@ -1517,7 +1517,7 @@ const TerminalView = memo(function TerminalView({
             {renderMcpMenu(true)}
             {initialExtraEnv && Object.keys(initialExtraEnv).length > 0 && (
               <span
-                className="rounded bg-inset px-1.5 py-0.5 text-l3"
+                className="text-l4"
                 title={`启动时注入：\n${Object.entries(initialExtraEnv)
                   .map(([k, v]) => `${k}=${v}`)
                   .join("\n")}`}
@@ -1532,7 +1532,7 @@ const TerminalView = memo(function TerminalView({
               <span className="text-l3">进程已退出</span>
             )}
             {restored && !running && !shellActive && (
-              <span className="text-link">上次任务，可恢复</span>
+              <span className="text-l3">上次任务，可恢复</span>
             )}
             {error && <span className="truncate text-err-text">{error}</span>}
             <span className="ml-auto flex shrink-0 items-center gap-1">
@@ -1745,8 +1745,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [refreshKey, setRefreshKey] = useState(0);
   /** 最近项目「真进入」：待注入活动标签启动栏的目录 */
   const [enterCwd, setEnterCwd] = useState<string | null>(null);
-  // 「已完成」已读集合（P5 聚合视图）：点击跳过的标签不再计入「要你管」，仅本次会话内有效
-  const seenDoneRef = useRef(new Set<string>());
   // 右侧成果工作台默认可见；对话、文件、改动在同一处切换，避免入口散落在终端标签内。
   const [rightOpen, setRightOpen] = useState(true);
   const [rightWidth, setRightWidth] = useState(() => {
@@ -1879,11 +1877,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     splitActive && activePane === "right" && splitTabId ? splitTabId : activeId;
   const activeCwd = statuses[focusedId]?.cwd ?? "~";
 
-  /** 标签激活：分屏时点到右 pane 的标签则左右互换（活跃标签始终固定在左 pane）；
-      「已完成」点击跳过即视为已读（seenDoneRef，标签条注意力点同源） */
+  /** 标签激活：分屏时点到右 pane 的标签则左右互换（活跃标签始终固定在左 pane） */
   function activateTab(id: string) {
     if (splitActive && id === splitTabId) setSplitTabId(activeId);
-    if (statuses[id]?.attention === "done") seenDoneRef.current.add(id);
     setActiveId(id);
     setActivePane("left");
   }
@@ -1908,7 +1904,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setSplitTabId(null);
     setActivePane("left");
     if (keepId) {
-      if (statuses[keepId]?.attention === "done") seenDoneRef.current.add(keepId);
       setActiveId(keepId);
     }
   }
@@ -2512,16 +2507,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     }
   }, [visible, focusTabId, tabs, focusTab]);
 
-  // 「已完成」已读集合剪枝：attention 离开 done（重新工作/退出/标签关闭）时复位，
-  // 下次再 done 重新计入「要你管」
-  useEffect(() => {
-    for (const id of [...seenDoneRef.current]) {
-      if (statuses[id]?.attention !== "done") seenDoneRef.current.delete(id);
-    }
-  }, [statuses]);
-
-  // 长任务 OS 通知（P3）：attention 跃迁（非→待确认/已完成）且窗口未聚焦时发系统通知。
-  // 只 watch 终端标签 statuses；对话页/工作区页的状态变化 v1 不通知。
+  // 长任务 OS 通知（P3）：attention 跃迁（非→待确认）且窗口未聚焦时发系统通知。
+  // 「已回复」不通知——回合结束每轮都发生、不阻塞决策。只 watch 终端标签 statuses；
+  // 对话页/工作区页的状态变化 v1 不通知。
   const notificationsEnabled = useAppStore(
     (s) => s.settings?.notificationsEnabled ?? true,
   );
@@ -2555,8 +2543,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     for (const [tabId, s] of Object.entries(statuses)) {
       const prev = attentionPrevRef.current.get(tabId);
       attentionPrevRef.current.set(tabId, s.attention);
-      const kind = attentionTransition(prev, s.attention);
-      if (!kind) continue;
+      if (!attentionTransition(prev, s.attention)) continue;
       // 设置开关关闭时完全不请求权限、不发通知
       if (!notificationsEnabled) continue;
       if (!document.hidden && windowFocusedRef.current) continue;
@@ -2565,8 +2552,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       notifySentAtRef.current.set(tabId, now);
       void fireAttentionNotification(
         notifyTitle(s.title, agentLabel(s.agentId)),
-        notifyBody(kind),
-        { tabId, cwd: s.cwd, kind },
+        NOTIFY_BODY,
+        { tabId, cwd: s.cwd },
       );
     }
   }, [statuses, notificationsEnabled]);
@@ -2873,17 +2860,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           {tabs.map((t) => {
             const s = statuses[t.id];
             const active = t.id === activeId;
-            // 注意力点：仅 工作中/待确认/已完成（未查看）有状态时才渲染，无状态/空闲不渲染（降噪）；
-            // 「已完成」点击跳转过该标签即已读消除（seenDoneRef）。
+            // 注意力点：仅 工作中/待确认 有状态时才渲染，无状态/空闲不渲染（降噪）；
+            // 「已回复」不打点——回合结束每轮都发生，不是待办。
             // 与关闭 × 一样只在悬停 / 激活 / 键盘聚焦（focus-within）时显现。
             const attentionDot =
               s?.attention === "working"
-                ? { cls: "text-ok-text animate-pulse", tip: "工作中" }
+                ? { cls: "text-ok-text animate-pulse-brief", tip: "工作中" }
                 : s?.attention === "confirm"
                   ? { cls: "text-warn-text", tip: "待确认" }
-                  : s?.attention === "done" && !seenDoneRef.current.has(t.id)
-                    ? { cls: "text-link", tip: "已完成，等待输入" }
-                    : null;
+                  : null;
             return (
               <div
                 key={t.id}
@@ -2910,7 +2895,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   {s?.title ?? "终端"}
                 </span>
                 {t.restored && (
-                  <span className="shrink-0 rounded bg-inset px-1 text-[10px] text-link">
+                  <span
+                    className="shrink-0 text-[10px] text-l4"
+                    title="应用重启前未结束的任务，点「恢复任务」重建"
+                  >
                     可恢复
                   </span>
                 )}

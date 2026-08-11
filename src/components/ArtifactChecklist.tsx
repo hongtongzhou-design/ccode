@@ -28,15 +28,6 @@ interface ArtifactRow {
   files: DirEntryDto[];
 }
 
-/** 「刚更新」阈值：10 分钟内修改的产物在核验清单上标 ok 色小点 */
-const ARTIFACT_FRESH_MS = 10 * 60_000;
-
-function isFreshMtime(iso: string | null): boolean {
-  if (!iso) return false;
-  const t = Date.parse(iso);
-  return !Number.isNaN(t) && Date.now() - t < ARTIFACT_FRESH_MS;
-}
-
 /** 预期产物条目逐个在 root 下定位——文件单列自身；
  *  目录列一层文件（只列文件不递归）；找不到返回空 files（UI 显示「尚未产出」）。
  *  list_dir 无根目录约束（只读列举），直接传绝对路径；仅在面板打开/手动刷新时调用，不进轮询 */
@@ -187,12 +178,6 @@ export default function ArtifactChecklist({
             };
             const fileMeta = (f: DirEntryDto) => (
               <>
-                {isFreshMtime(f.modified) && (
-                  <span className="flex shrink-0 items-center gap-1 text-[10px] text-ok-text">
-                    <span className="size-2 rounded-full bg-ok-text" />
-                    刚更新
-                  </span>
-                )}
                 <span
                   className="shrink-0 text-[10px] text-l4"
                   title={absTime(f.modified)}

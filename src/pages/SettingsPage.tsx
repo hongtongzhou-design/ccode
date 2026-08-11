@@ -13,7 +13,7 @@ import {
   rowActionClass,
   Toggle,
 } from "../components/PageFrame";
-import { captureDecision, comboLabel } from "../hotkeys";
+import { captureDecision, comboLabel, PAGE_HOTKEY_DEFS } from "../hotkeys";
 import { collectFrontendDiagnostics } from "../diagnostics";
 
 /** 七套深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
@@ -174,14 +174,14 @@ function Row({
 function HotkeyCapture({
   value,
   defaultValue,
-  conflictWith,
+  conflictsWith,
   onSave,
 }: {
   /** 当前绑定（"" = 已禁用） */
   value: string;
   defaultValue: string;
-  /** 另一个可编辑绑定的当前值，用于防冲突 */
-  conflictWith: string;
+  /** 其余在用的绑定值，用于防冲突（空串不计） */
+  conflictsWith: string[];
   onSave: (combo: string) => void;
 }) {
   const [listening, setListening] = useState(false);
@@ -193,7 +193,7 @@ function HotkeyCapture({
       // 录制期间吞掉全部按键：防默认行为（如 ⌘K 的浏览器动作）与全局快捷键触发
       e.preventDefault();
       e.stopImmediatePropagation();
-      const d = captureDecision(e, conflictWith);
+      const d = captureDecision(e, conflictsWith);
       if (d.action === "cancel") {
         setListening(false);
       } else if (d.action === "conflict") {
@@ -208,7 +208,7 @@ function HotkeyCapture({
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [listening, conflictWith, onSave]);
+  }, [listening, conflictsWith, onSave]);
 
   return (
     <span className="flex items-center gap-1.5">
@@ -228,7 +228,7 @@ function HotkeyCapture({
       >
         {listening ? "按下新快捷键…" : comboLabel(value)}
       </button>
-      {conflict && <span className="text-xs text-err-text">与另一个快捷键冲突</span>}
+      {conflict && <span className="text-xs text-err-text">与其他快捷键冲突</span>}
       {value !== defaultValue && (
         <button
           type="button"
@@ -816,7 +816,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="长任务 OS 通知"
-          hint="agent 从工作中转为待确认/已完成且窗口未聚焦时发系统通知（同一标签 30 秒内最多一条）；首次发送需允许系统通知权限"
+          hint="agent 转为待确认且窗口未聚焦时发系统通知（同一标签 30 秒内最多一条）；首次发送需允许系统通知权限"
         >
           <Toggle
             label="长任务 OS 通知"
@@ -832,32 +832,79 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         open={!collapsed.hotkeys}
         onToggle={() => toggleSection("hotkeys")}
       >
-        <Row label="命令面板" hint="呼出页面跳转 / 主题切换 / 侧栏显隐">
-          <HotkeyCapture
-            value={settings?.hotkeyPalette ?? "mod+k"}
-            defaultValue="mod+k"
-            conflictWith={settings?.hotkeyHideChrome ?? "mod+\\"}
-            onSave={(combo) => void patch({ hotkeyPalette: combo })}
-          />
-        </Row>
-        <Row label="隐藏 / 显示侧栏" hint="执行态：界面只剩工作内容">
-          <HotkeyCapture
-            value={settings?.hotkeyHideChrome ?? "mod+\\"}
-            defaultValue="mod+\\"
-            conflictWith={settings?.hotkeyPalette ?? "mod+k"}
-            onSave={(combo) => void patch({ hotkeyHideChrome: combo })}
-          />
-        </Row>
-        <Row
-          label="⌘1–⌘8 页面切换"
-          hint="按侧栏顺序直接切页（一组八个绑定，整组开关）"
-        >
-          <Toggle
-            checked={settings?.hotkeyPageSwitch !== false}
-            onChange={(v) => void patch({ hotkeyPageSwitch: v })}
-            label="⌘1–⌘8 页面切换"
-          />
-        </Row>
+        {/* 全部在用的绑定（命令面板/侧栏/八页切），供各行录制时互判冲突 */}
+        {(() => {
+          const palette = settings?.hotkeyPalette ?? "mod+k";
+          const chrome = settings?.hotkeyHideChrome ?? "mod+\\";
+          const pageCombo = (id: string) =>
+            settings?.hotkeyPages?.[id] ??
+            PAGE_HOTKEY_DEFS.find((p) => p.id === id)?.combo ??
+            "";
+          const pageCombos = PAGE_HOTKEY_DEFS.map((p) => pageCombo(p.id));
+          return (
+            <>
+              <Row label="命令面板" hint="呼出页面跳转 / 主题切换 / 侧栏显隐">
+                <HotkeyCapture
+                  value={palette}
+                  defaultValue="mod+k"
+                  conflictsWith={[chrome, ...pageCombos]}
+                  onSave={(combo) => void patch({ hotkeyPalette: combo })}
+                />
+              </Row>
+              <Row label="隐藏 / 显示侧栏" hint="执行态：界面只剩工作内容">
+                <HotkeyCapture
+                  value={chrome}
+                  defaultValue="mod+\\"
+                  conflictsWith={[palette, ...pageCombos]}
+                  onSave={(combo) => void patch({ hotkeyHideChrome: combo })}
+                />
+              </Row>
+              <Row
+                label="页面切换"
+                hint="整组总开关；关闭后下面八个绑定全部不生效"
+              >
+                <Toggle
+                  checked={settings?.hotkeyPageSwitch !== false}
+                  onChange={(v) => void patch({ hotkeyPageSwitch: v })}
+                  label="页面切换"
+                />
+              </Row>
+              <Row
+                label="逐页绑定"
+                hint="按侧栏顺序直接切页；点击绑定钮录制新组合（默认 ⌘1–⌘8）"
+              >
+                <div className="grid max-w-xl grid-cols-2 gap-x-4 gap-y-1.5">
+                  {PAGE_HOTKEY_DEFS.map((p) => (
+                    <span key={p.id} className="flex items-center gap-2">
+                      <span className="w-9 shrink-0 text-xs text-l3">
+                        {p.label}
+                      </span>
+                      <HotkeyCapture
+                        value={pageCombo(p.id)}
+                        defaultValue={p.combo}
+                        conflictsWith={[
+                          palette,
+                          chrome,
+                          ...PAGE_HOTKEY_DEFS.filter((x) => x.id !== p.id).map(
+                            (x) => pageCombo(x.id),
+                          ),
+                        ]}
+                        onSave={(combo) =>
+                          void patch({
+                            hotkeyPages: {
+                              ...(settings?.hotkeyPages ?? {}),
+                              [p.id]: combo,
+                            },
+                          })
+                        }
+                      />
+                    </span>
+                  ))}
+                </div>
+              </Row>
+            </>
+          );
+        })()}
       </Section>
 
       <Section

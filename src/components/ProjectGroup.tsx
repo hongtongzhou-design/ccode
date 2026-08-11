@@ -253,11 +253,9 @@ function StepperCell({
             onCircleClick();
           }}
         />
-        {attention && (
+        {attention === "confirm" && (
           <span
-            className={`pointer-events-none absolute right-0 top-0 size-2 rounded-full ${
-              attention === "confirm" ? "bg-warn" : "bg-done"
-            }`}
+            className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-warn"
           />
         )}
         <HoverTip tip={tip} text={circleTitle} />
@@ -926,15 +924,16 @@ export default function ProjectGroup({
         )}
         {groupCountsTotal > 0 && (
           <span className="flex shrink-0 items-center gap-2 text-xs text-l3">
+            {/* 进行中/待评审是纯状态（不阻塞决策），用灰点；只有「阻塞」够格用语义色 */}
             {groupCounts.active > 0 && (
               <span className="flex items-center gap-1">
-                <span className="size-2 rounded-full bg-ok-text" />
+                <span className="size-2 rounded-full bg-l4" />
                 {groupCounts.active} 进行中
               </span>
             )}
             {groupCounts.review > 0 && (
               <span className="flex items-center gap-1">
-                <span className="size-2 rounded-full bg-cta" />
+                <span className="size-2 rounded-full bg-l4" />
                 {groupCounts.review} 待评审
               </span>
             )}
@@ -1229,11 +1228,7 @@ export default function ProjectGroup({
                       last.agentId
                         ? `Agent：${last.agentId}${lastProfile ? ` / ${lastProfile.name}` : ""}`
                         : null,
-                      attention === "confirm"
-                        ? "终端：待你确认"
-                        : attention === "done"
-                          ? "终端：任务已完成"
-                          : null,
+                      attention === "confirm" ? "终端：待你确认" : null,
                       st.key === "pending"
                         ? st.ws
                           ? "点击恢复工作区"

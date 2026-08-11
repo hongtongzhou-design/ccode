@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useAppStore } from "../store";
+import { useAppStore, runInboxAction, type InboxItem } from "../store";
 import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
 import { confirmDialog } from "../components/ConfirmDialog";
@@ -16,7 +16,8 @@ import {
   rowActionClass,
   secondaryActionClass,
 } from "../components/PageFrame";
-import { buildRunOverview } from "../run-overview";
+import { attributeToProject, buildRunOverview } from "../run-overview";
+import { IS_MAC } from "../hotkeys";
 import { AGENTS } from "../types";
 import type {
   PortInfoDto,
@@ -750,7 +751,8 @@ function PortsSection() {
         >
           <span className="w-3 text-xs text-l4">{open ? "▾" : "▸"}</span>
           端口
-          {ports !== null && (
+          {/* 计数只在展开后显示——「有几个端口在监听」是信息不是警报，折叠态不占注意力 */}
+          {open && ports !== null && (
             <span className="text-xs font-normal text-l4">
               {ports.length} 个监听中
             </span>
@@ -829,6 +831,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(
     null,
   );  const [created, setCreated] = useState<WorkspaceDto | null>(null);
+  // 创建成功横幅是瞬态反馈：10s 自动消退（setup 失败除外——失败详情要人看，不自动收）
+  useEffect(() => {
+    if (!created || (created.setupResult && !created.setupResult.ok)) return;
+    const t = setTimeout(() => setCreated(null), 10_000);
+    return () => clearTimeout(t);
+  }, [created]);
   // P1b 项目分组：注册项目列表 + 每次刷新自增的令牌（触发各分组重读 project.toml）
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -859,12 +867,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const setPage = useAppStore((s) => s.setPage);
   const setSessionsQuery = useAppStore((s) => s.setSessionsQuery);
   const runningScripts = useAppStore((s) => s.runningScripts);
-  // 终端标签运行状态镜像（TerminalPage 写入）+ 跳终端激活标签请求（首页「待你处理」用）
+  // 终端标签运行状态镜像（TerminalPage 写入，首页「待你处理」用）；跳转派发统一走 runInboxAction
   const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
-  const setFocusTabReq = useAppStore((s) => s.setFocusTabReq);
-  // 会话清单（启动即加载）+ 对话页打开指定会话请求（外部 live 会话的收件箱入口）
+  // 收件箱条目数镜像给侧栏「工作区」徽标 + 标题栏收件箱（本页唯一写入方，签名变更才写）
+  const setInboxItems = useAppStore((s) => s.setInboxItems);
+  // 会话清单（启动即加载）：外部 live 会话的收件箱入口
   const sessions = useAppStore((s) => s.sessions);
-  const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   // 外部 live 会话（无终端标签可跳）的尾部注意力：后端直查 session_tail_state，
   // 补齐收件箱在终端页未挂载时的盲区；只查 live 且非内部的少量会话（上限 10 条）
   const [liveTail, setLiveTail] = useState<Record<string, string>>({});
@@ -1180,16 +1188,15 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
 
   // 「待你处理」首页聚合（v3.39）：打开应用第一眼看到要拍板的事——
-  // 工作区冲突/可合并（health 随页加载）+ 终端标签待确认/已完成（store 镜像，跨页可读）。
-  // 排序：冲突 > 待确认 > 可合并 > 已完成；为空时整个区块不渲染（零噪音）。
-  const runItems = buildRunOverview(terminalRunInputs, new Set<string>()).items;
-  const jumpToTab = (tabId: string) => {
-    setFocusTabReq(tabId);
-    setPage("terminal");
-  };
+  // 工作区冲突/可合并（health 随页加载）+ 终端标签待确认（store 镜像，跨页可读）。
+  // 排序：冲突 > 待确认 > 可合并；为空时整个区块不渲染（零噪音）。
+  // 「已回复」不进收件箱——回合结束每轮都发生、不阻塞决策（同口径：标签/项目区/通知均不打点）。
+  const runItems = buildRunOverview(terminalRunInputs).items;
   const tabLabel = (agentId: string, title: string, cwdLabel: string) =>
     `${agentId ? `${AGENTS.find((a) => a.id === agentId)?.label ?? agentId} · ` : ""}${title}（${cwdLabel}）`;
-  const inboxItems = [
+  // 收件箱条目为可序列化数据（action 描述而非闭包）：镜像进 store 供 App 标题栏收件箱共用，
+  // 点击统一走 store.ts 的 runInboxAction 派发
+  const inboxItems: InboxItem[] = [
     ...active
       .filter((w) => health[w.id]?.conflict)
       .map((w) => ({
@@ -1197,7 +1204,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         dot: "bg-warn-text",
         text: `「${w.repoName} / ${w.name}」有合并冲突`,
         actionLabel: "解决冲突",
-        onClick: () => openReview(w, "resolve-conflict"),
+        action: {
+          type: "review" as const,
+          worktreePath: w.worktreePath,
+          intent: "resolve-conflict" as const,
+        },
       })),
     ...runItems
       .filter((it) => it.attention === "confirm")
@@ -1206,7 +1217,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         dot: "bg-warn-text",
         text: `${tabLabel(it.agentId, it.title, it.cwdLabel)} 待你确认`,
         actionLabel: "去处理",
-        onClick: () => jumpToTab(it.tabId),
+        action: { type: "tab" as const, tabId: it.tabId },
       })),
     // 外部运行（无终端标签）的会话：后端直查尾部状态，待确认时进收件箱
     ...sessions
@@ -1221,9 +1232,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         dot: "bg-warn-text",
         text: `${AGENTS.find((a) => a.id === s.agent)?.label ?? s.agent} · ${s.customTitle ?? s.title ?? "未命名对话"}（${pathBaseName(s.projectPath)}）外部运行中，待你确认`,
         actionLabel: "去查看",
-        onClick: () => {
-          setOpenSessionReq({ agent: s.agent, sessionId: s.sessionId });
-          setPage("sessions");
+        action: {
+          type: "session" as const,
+          agent: s.agent,
+          sessionId: s.sessionId,
         },
       })),
     ...active
@@ -1233,18 +1245,67 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         dot: "bg-ok-text",
         text: `「${w.repoName} / ${w.name}」可以合并`,
         actionLabel: "去评审",
-        onClick: () => openReview(w),
-      })),
-    ...runItems
-      .filter((it) => it.attention === "done" && !it.seenDone)
-      .map((it) => ({
-        key: `done:${it.tabId}`,
-        dot: "bg-link",
-        text: `${tabLabel(it.agentId, it.title, it.cwdLabel)} 已完成，等你审阅`,
-        actionLabel: "去查看",
-        onClick: () => jumpToTab(it.tabId),
+        action: { type: "review" as const, worktreePath: w.worktreePath },
       })),
   ];
+
+  // 项目导航行的「待处理」分布（收件箱同款口径按项目摊开）：终端待确认 +
+  // 外部 live 待确认，cwd 经最长前缀归属项目根/工作树（attributeToProject 纯逻辑）
+  const projectRoots = groups.map((g) => ({
+    key: g.key,
+    roots: [g.repoPath, ...g.list.map((w) => w.worktreePath)],
+  }));
+  const navAttention = new Map<string, number>();
+  const bumpAttention = (path: string) => {
+    const key = attributeToProject(path, projectRoots);
+    if (key) navAttention.set(key, (navAttention.get(key) ?? 0) + 1);
+  };
+  for (const it of runItems) {
+    if (it.attention === "confirm") bumpAttention(it.cwd);
+  }
+  for (const s of sessions) {
+    if (
+      s.live &&
+      !s.internal &&
+      liveTail[`${s.agent}:${s.sessionId}`] === "confirm"
+    )
+      bumpAttention(s.projectPath);
+  }
+
+  // 收件箱条目镜像进 store（本页常驻挂载，签名变更才写，防每 render 抖动订阅方）
+  const inboxLen = inboxItems.length;
+  const inboxSig = inboxItems.map((it) => `${it.key}=${it.text}`).join("|");
+  useEffect(() => {
+    setInboxItems(inboxItems);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inboxSig, setInboxItems]);
+
+  // 收件箱折叠 strip：默认收起只占单行，分类摘要保留第一眼信息（「2 冲突 · 1 待确认」）
+  const [inboxOpen, setInboxOpen] = useState(false);
+  // 空了就收回展开态；展开时 Esc 关闭
+  useEffect(() => {
+    if (inboxLen === 0) setInboxOpen(false);
+  }, [inboxLen]);
+  useEffect(() => {
+    if (!inboxOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setInboxOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [inboxOpen]);
+  const countBy = (...prefixes: string[]) =>
+    inboxItems.filter((it) => prefixes.some((p) => it.key.startsWith(p))).length;
+  const inboxBreakdown = (
+    [
+      [countBy("conflict:"), "冲突"],
+      [countBy("confirm:", "live:"), "待确认"], // 终端标签 + 外部 live 同类合并
+      [countBy("ready:"), "可合并"],
+    ] as [number, string][]
+  )
+    .filter(([n]) => n > 0)
+    .map(([n, label]) => `${n} ${label}`)
+    .join(" · ");
 
   function workspaceMenuItems(workspace: WorkspaceDto) {
     const workspaceHealth = health[workspace.id];
@@ -1455,36 +1516,58 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
 
   return (
-    <div className="flex h-full flex-col bg-canvas">
-      {/* 待你处理（全局收件箱）：横跨两栏之上，与当前选中项目无关；全空则不渲染 */}
-      {inboxItems.length > 0 && (
-        <section className="shrink-0 px-6 pt-3">
-          <div className="mx-auto w-full max-w-[1440px]">
-            <p className="mb-1.5 text-[11px] text-l4">
-              待你处理 {inboxItems.length}
-            </p>
-            <ul className="divide-y divide-hairline rounded-md bg-strip">
-              {inboxItems.map((item) => (
-                <li
-                  key={item.key}
-                  className="flex items-center gap-2.5 px-3 py-2 text-xs"
-                >
-                  <span
-                    className={`size-2 shrink-0 rounded-full ${item.dot}`}
-                  />
-                  <span className="min-w-0 flex-1 truncate text-l2">
-                    {item.text}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={item.onClick}
-                    className={rowActionClass}
+    <div className="relative flex h-full flex-col bg-canvas">
+      {/* 待你处理（全局收件箱）：文档流单行 strip（只占 32px，不顶开工作台）；
+          全空不渲染。明细是 strip 下方的悬浮下拉（遮罩/Esc 关闭），不推布局也不遮挡。
+          macOS 上收件箱收进自绘标题栏（Ghostty 式），页内 strip 不渲染（Windows/Linux 保留本 strip） */}
+      {!IS_MAC && inboxOpen && (
+        <div
+          className="fixed inset-0 z-10"
+          onClick={() => setInboxOpen(false)}
+        />
+      )}
+      {!IS_MAC && inboxItems.length > 0 && (
+        <section className="relative z-20 shrink-0 px-6 pt-2">
+          <div className="relative mx-auto w-full max-w-[1440px]">
+            <button
+              type="button"
+              onClick={() => setInboxOpen((v) => !v)}
+              aria-expanded={inboxOpen}
+              className="flex h-8 w-full items-center gap-2 rounded-md bg-strip px-3 text-xs text-l2 hover:bg-white/5"
+            >
+              <span className="size-2 shrink-0 rounded-full bg-warn-text" />
+              <span className="font-medium text-l1">
+                待你处理 {inboxItems.length}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-left text-l4">
+                {inboxBreakdown}
+              </span>
+              <span className="shrink-0 text-l4">{inboxOpen ? "▴" : "▾"}</span>
+            </button>
+            {inboxOpen && (
+              <ul className="absolute inset-x-0 top-full z-20 mt-1 max-h-80 divide-y divide-hairline overflow-auto rounded-md border border-field bg-strip">
+                {inboxItems.map((item) => (
+                  <li
+                    key={item.key}
+                    className="flex items-center gap-2.5 px-3 py-2 text-xs"
                   >
-                    {item.actionLabel}
-                  </button>
-                </li>
-              ))}
-            </ul>
+                    <span
+                      className={`size-2 shrink-0 rounded-full ${item.dot}`}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-l2">
+                      {item.text}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => runInboxAction(item)}
+                      className={rowActionClass}
+                    >
+                      {item.actionLabel}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </section>
       )}
@@ -1512,10 +1595,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             const groupActive = group.list.filter(
               (workspace) => workspace.status === "active",
             ).length;
-            const needsAttention = group.list.filter((workspace) => {
-              const state = health[workspace.id];
-              return state?.conflict || state?.readyToMerge;
-            }).length;
+            // 待处理 = 工作区冲突/可合并 + 归属本项目的终端待确认/已完成/外部 live 待确认
+            const needsAttention =
+              group.list.filter((workspace) => {
+                const state = health[workspace.id];
+                return state?.conflict || state?.readyToMerge;
+              }).length + (navAttention.get(group.key) ?? 0);
             const selected = selectedGroup?.key === group.key;
             return (
               <button
@@ -1546,10 +1631,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   <span className="block truncate text-[13px] font-medium">
                     {group.project?.name ?? group.repoName}
                   </span>
-                  <span className="mt-0.5 block truncate text-xs text-l4">
-                    {groupActive > 0 ? `${groupActive} 个活跃任务` : "暂无活跃任务"}
-                    {needsAttention > 0 ? ` · ${needsAttention} 个待处理` : ""}
-                  </span>
+                  {/* 副行只留「待处理」（与收件箱同口径）；活跃任务数是纯状态，不占注意力 */}
+                  {needsAttention > 0 && (
+                    <span className="mt-0.5 block truncate text-xs text-l4">
+                      {needsAttention} 个待处理
+                    </span>
+                  )}
                 </span>
               </button>
             );

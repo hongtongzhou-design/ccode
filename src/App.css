@@ -361,7 +361,8 @@ body {
   transition: background-color 150ms var(--ccode-motion-ease);
 }
 
-.ccode-app-nav,
+/* 侧栏 nav 不可用 scrollbar-gutter：经典滚动条（系统"始终显示"）下 stable 会在 56px
+   收缩态里再占 ~14px，固定宽按钮的 hover/选中衬底被 overflow-x-hidden 裁掉一截 */
 .ccode-app-main {
   scrollbar-gutter: stable;
 }

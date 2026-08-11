@@ -53,8 +53,11 @@ export interface AppSettings {
   /** 快捷键绑定（"mod+shift+k" 格式，mod=⌘/Ctrl；空串 = 禁用） */
   hotkeyPalette?: string;
   hotkeyHideChrome?: string;
-  /** ⌘1–⌘8 页切开关（一组八个绑定，不逐个自定义） */
+  /** ⌘1–⌘8 页切整组总开关（关 = 全部页切绑定不生效） */
   hotkeyPageSwitch?: boolean;
+  /** 页切逐页绑定：键 = 页面 id（hotkeys.ts PAGE_HOTKEY_DEFS），值 = 组合串；
+      键缺失 = 该页用默认绑定（mod+1..mod+8） */
+  hotkeyPages?: Record<string, string>;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效；
@@ -106,6 +109,46 @@ export function sessionRuntimeKey(agent: string, sessionId: string): string {
   return `${agent}\n${sessionId}`;
 }
 
+/** 「待你处理」收件箱条目（可序列化，闭包不进 store）；
+    action 由消费方统一派发（全部走 store 一次性请求 + 页面跳转） */
+export interface InboxItem {
+  key: string;
+  /** 状态点语义色 class（bg-warn-text / bg-ok-text） */
+  dot: string;
+  text: string;
+  actionLabel: string;
+  action:
+    | {
+        type: "review";
+        worktreePath: string;
+        intent?: "pr" | "archive" | "resolve-conflict";
+      }
+    | { type: "tab"; tabId: string }
+    | { type: "session"; agent: string; sessionId: string };
+}
+
+/** 收件箱条目动作统一派发（工作区页 strip 与 App 标题栏收件箱共用） */
+export function runInboxAction(item: InboxItem) {
+  const s = useAppStore.getState();
+  if (item.action.type === "review") {
+    s.setWorkspaceReviewRequest({
+      worktreePath: item.action.worktreePath,
+      action: item.action.intent,
+      requestId: crypto.randomUUID(),
+    });
+    s.setPage("terminal");
+  } else if (item.action.type === "tab") {
+    s.setFocusTabReq(item.action.tabId);
+    s.setPage("terminal");
+  } else {
+    s.setOpenSessionReq({
+      agent: item.action.agent,
+      sessionId: item.action.sessionId,
+    });
+    s.setPage("sessions");
+  }
+}
+
 interface AppState {
   profiles: Profile[];
   agents: DetectResult[];
@@ -132,6 +175,10 @@ interface AppState {
   /** 终端标签运行状态镜像（TerminalPage 写入；工作区首页「待你处理」跨页只读） */
   terminalRunInputs: RunOverviewInput[];
   setTerminalRunInputs: (inputs: RunOverviewInput[]) => void;
+  /** 「待你处理」收件箱条目镜像（WorkspacesPage 唯一写入方，签名变更才写）；
+      App 标题栏收件箱与工作区页 strip 共同消费；action 为可序列化跳转描述 */
+  inboxItems: InboxItem[];
+  setInboxItems: (items: InboxItem[]) => void;
   /** 一次性「跳终端页并激活标签」请求（首页待办点击发起），终端页可见时消费并清空 */
   focusTabReq: string | null;
   setFocusTabReq: (tabId: string | null) => void;
@@ -217,6 +264,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ workspaceReviewRequest: request }),
   terminalRunInputs: [],
   setTerminalRunInputs: (inputs) => set({ terminalRunInputs: inputs }),
+  inboxItems: [],
+  setInboxItems: (items) => set({ inboxItems: items }),
   focusTabReq: null,
   setFocusTabReq: (tabId) => set({ focusTabReq: tabId }),
   previewReq: null,

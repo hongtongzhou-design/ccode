@@ -53,8 +53,11 @@ pub struct AppSettingsDto {
     /// 快捷键绑定（"mod+shift+k" 格式，mod=⌘/Ctrl；空串 = 禁用该快捷键）
     pub hotkey_palette: Option<String>,
     pub hotkey_hide_chrome: Option<String>,
-    /// ⌘1–⌘8 页切是一组八个绑定，按开关处理不逐个自定义
+    /// ⌘1–⌘8 页切整组总开关（关 = 全部页切绑定不生效）
     pub hotkey_page_switch: Option<bool>,
+    /// 页切逐页绑定：键 = 页面 id（前端 hotkeys.ts PAGE_HOTKEY_DEFS），值 = 组合串；
+    /// 键缺失 = 该页用默认绑定（mod+1..mod+8），整图覆盖（同 ai_profiles 口径）
+    pub hotkey_pages: Option<BTreeMap<String, String>>,
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -114,6 +117,8 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
             .hotkey_hide_chrome
             .or_else(|| Some(DEFAULT_HOTKEY_HIDE_CHROME.to_string())),
         hotkey_page_switch: s.hotkey_page_switch.or(Some(DEFAULT_HOTKEY_PAGE_SWITCH)),
+        // 逐页绑定不做默认值填充：键缺失即「跟随默认」（同 ai_profiles 口径）
+        hotkey_pages: s.hotkey_pages,
     }
 }
 
@@ -166,6 +171,10 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.hotkey_page_switch.is_some() {
         cur.hotkey_page_switch = patch.hotkey_page_switch;
+    }
+    // 逐页绑定整图覆盖（前端每次提交完整 map）
+    if patch.hotkey_pages.is_some() {
+        cur.hotkey_pages = patch.hotkey_pages;
     }
 }
 
