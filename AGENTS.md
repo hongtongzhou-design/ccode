@@ -1,6 +1,8 @@
 # AGENTS.md
 
-> **规则沉淀（用户指令）**：每次重大改变，把由此确立的**规则/约定/决策**记录到本文件（关键约定、主题与设计系统、本机环境档案）和 `docs/architecture.md` §10 决策记录。**不记操作流水账**——代码和 git 历史本身就是操作记录，这里只留"以后必须遵守什么"。
+> **规则沉淀（用户指令）**：每次重大改变，把由此确立的**规则/约定/决策**记录到本文件（硬约束、本机环境档案）或对应
+> `docs/conventions/*.md` 主题文件，以及 `docs/architecture.md` §10 决策记录。**不记操作流水账**——代码和 git 历史本身就是
+> 操作记录，这里只留"以后必须遵守什么"。
 >
 > **文档同步（用户指令）**：功能增改时必须同步更新 `docs/user-guide.md`（用户操作手册）；发版本时同步更新 `CHANGELOG.md`（版本更新日志）。
 
@@ -70,6 +72,7 @@ npm run tauri build    # 打包
 
 ```
 docs/                        # 架构方案 + 八 CLI 适配参考（规格）
+  conventions/               # 主题化约定细则（改动对应领域前必读，见「关键约定」索引）
 src/                         # 前端 React + TS + Tailwind v4（vite 插件接入）
   pages/                     # 八页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
   components/                # WorkspaceReviewView、PipelineEditor、ProjectGroup/ProjectRail、ArtifactChecklist、TaskCardsSection、FileTree、
@@ -130,380 +133,29 @@ src-tauri/src/
 
 ## 关键约定
 
+以下硬约束**任何会话都必须遵守**；各领域的细则（评审覆盖层交互、流水线开步参数、步进器视觉规格、MCP 字段映射等）
+已按主题迁入 `docs/conventions/`，改动对应领域前必读对应文件，日常会话不必加载。
+
 - **密钥绝不回显/进 shell**：存 0600 `keys.json`，只在拉起瞬间注入子进程 env；`profiles.json` 只存尾号 key_hint；
   `NO_COLOR` 必须 `env_remove`；`TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Ccode` 必须显式设置。
-  **外部恢复/复制恢复命令不携带 profile env**（`agents::resume_command_line`，⇗/⧉ 共用）；⇗ 拉起：CLI 用绝对路径
-  （`resolve_binary`，⧉ 复制命令才用裸名）、shell 必须 `-l -i` 交互登录（非交互不加载 `.zshrc` 的安装器 PATH）。
-  **Ghostty** 走 AppleScript（`open -n` 堆实例、不带 `-n` 不投递 `--args`）：激活 → ⌘N → 剪贴板粘贴命令 + 回车
-  （用后还原；首次需用户授权自动化）。
 - **会话文本出站前必须在 Rust 层脱敏**：标题/摘要、结构化回放、AI 摘要、Markdown 导出均不得把已保存密钥或常见密钥前缀
   送到 React；只作用于 DTO/导出副本，不得回写会话源文件；前端遮盖不是安全边界。
-- **Profile 的 extra_env 排在 adapter 内置 env 之后注入**，供用户覆盖内置值（CommandBuilder 后者生效）。
-- **终端行为**（用户明确要求；配色 = VS Code Dark+ 调色板，集中在 `TerminalPage.tsx` 的 `theme` 一处）：
-  - 「停止」或 agent 退出后必须**自动回落用户登录 shell**（`$SHELL -l`，同 cwd），不死在最终画面；手动 `exit` 不自动
-    重开；回落 shell 不带 profile env；agent/shell 共用 `pty.rs` 的 `spawn_tracked`，退出事件按 PTY 类型区分。
-  - **重启只恢复标签元数据，不恢复 PTY**：白名单限 label/cwd/agent/profile/model/sessionId，禁存 PTY id/scrollback/密钥/
-    env/run 脚本；重开后为「上次任务，可恢复」占位，点击才建新 PTY；目录/profile 失效留在可编辑启动栏提示，禁自动换目标。
-  - **预览编辑器不映射同名文件**：切项目/工作区/标签 cwd/树根时清空旧预览，由用户在新根重选，禁自动打开新根同相对路径
-    文件；有未保存改动先确认，取消则不切根；主仓库文件保存按钮警示色 + 二次确认。
-  - **任务审阅 = 终端全宽覆盖层**：工作区行「评审」与终端「改动 → 审阅」同一视图，连续浏览累计 diff，可「提交并合并 /
-    仅提交 / 合并并归档」；底下终端标签与 PTY 保持挂载。默认合并只落本地主分支并保留工作区，不自动推送；原「提交 /
-    提交并推送」与工作区行合并/PR/归档/会话操作保留。`merged_at && ahead == 0` 时合并按钮禁用显示「已合并」，`ahead > 0` 恢复。
-  - **冲突审阅与普通审阅共用同一覆盖层**：冲突模式读 Git index stage 2/3，任务/基准分支按文件连续双栏，右侧冲突清单可
-    定位，逐文件/全部选边与 ◈ AI 建议同屏；禁第二套冲突解决器；入口用「开始解决冲突」任务语言。全部选边默认串联「提交
-    解决结果 → 健康检查 → 合并（保留工作区）」，另保留「仅保存解决结果」；提交成功而合并失败必须提示部分成功，不自动
-    重做 merge commit。「解决冲突」后干净工作区必须自动以**当前基准 tip** 准备两侧（完成前禁以 merge-base diff 冒充）；
-    处理中基准前进立即停止展示和选边，经用户确认 `merge --abort` 后重新同步。评审入口以 intent 区分
-    （`WorkspaceReviewRequest.action`：pr/archive/resolve-conflict）：仅 `resolve-conflict` 允许自动同步基准、准备冲突两侧。
-  - **评审覆盖层以代码为中心**：顶部固定任务/分支/增删统计与唯一主动作，提交信息和批量冲突操作在第二工具行；右侧只做
-    文件搜索/树形定位/简短进度；diff 连续浏览、标题吸顶、长段未修改折叠，右侧选中随主区滚动同步；冲突选边用文件标题下
-    紧凑双侧控件，AI 理由单行展示、用户显式执行。
-  - **改动面板空信息走本地快速提交**：非空原样提交；为空按文件状态/数量即时生成中性默认信息直接执行 `git_commit`，不
-    为此启动 AI；失败保留默认信息供重试；◈ 按钮与手动输入保留，仅主动点 ◈ 才调 AI。
-  - **终端右栏统一称“对话”，有界实时视图**：仅最近 50 条；标题/agent/会话 ID/状态与「完整回放」入口收进右栏页签行右侧
-    （页签行与对话头部合并为一行）；在底部附近才自动跟随，向上阅读后禁强制滚动，改显示“有新消息”。
-  - **终端左栏两段化（v3.42）**：常驻 = 项目区（ProjectRail）+ 文件树；「打开的标签」折叠区已删除（runInputs 镜像保留）；
-    「最近项目」收进文件树搜索行 ⌄ 浮层（真进入/↗ 新标签语义不变）；区间靠留白分层。**项目区固定列出所有建有活跃
-    工作区的项目**（每仓一小节：组头 + 主文件夹节点 + 活跃工作区行），cwd 命中的当前项目置顶标注「当前」、无活跃
-    工作区也保留；行内交互（真进入/悬浮/size-2 状态点）不变。
-  - **右栏可调分栏，不新增普通内容全屏路由**：左缘拖拽调宽并记忆；**宽度上限不写死像素**（v3.60 前曾限 820px），
-    随窗口自由拉宽、只给中带终端保留 340px 最小宽度（`TERMINAL_MIN_RESERVE`），下限 360px；宽屏动作暂隐工作树但保留终端，再执行恢复，双击
-    对话/预览/改动页签同义；宽度变化必须触发 xterm 重新 fit；任务评审仍用全宽覆盖层。
-  - **WebGL 渲染器加载前必须过 `isSoftwareWebGL` 探针**（TerminalPage.tsx）：Windows/WebView2 GPU 被拉黑时退回
-    SwiftShader 软件渲染，上下文能建但终端持续闪烁，try/catch 拦不住；探测失败同样不用 WebGL，勿删此兜底。
-  - **运行中会话关联排他 + 复合键**：固定 session id 的 CLI 精确锁定；其余 CLI 启动前按 agent+归并后项目登记 claim，同批
-    并发统一排序分配，已分配会话进程内不得转给另一标签；前端 live/open 一律以 agent+sessionId 为键，完整回放跳转前先刷新索引。
-- **首页「待你处理」收件箱（v3.39；v3.42 起横跨项目导航与详情两栏之上；v3.59 起文档流单行 strip + macOS 收进自绘标题栏；v3.60 扩四类新来源）**：聚合工作区冲突/可合并
-  + 终端注意力（仅待确认），排序 冲突 > 待确认 > 可合并 > 待核验 > 待发送 > 配置失效，为空整块不渲染；条目为可序列化 `InboxItem`（action 描述非闭包），
-  由 WorkspacesPage 签名去抖镜像进 store（唯一写入方），点击统一走 `runInboxAction` 派发（review/tab/session/digest/artifacts/profiles 都走 store 一次性请求）。
-  **v3.60 新来源（全部过「是否阻塞人的决策」闸）**：**产物待核验**（后端 `pending_artifact_checks`：活跃工作区绑定步骤的
-  expectedArtifacts 全部产出且 mtime ≥ 工作区创建时间，可合并/冲突已覆盖的不重复报——产物多为 gitignore 的 *.pdf，git 状态看不见，
-  不提醒就是黑洞；action `artifacts` → 选中项目 + 展开任务行产物清单）；**接力待发送**（digestJob ready 未消费）；**配置失效**
-  （`profileIssues`：只镜像用户触发的三层验证/设为全局复检失败，验证通过或 profile 删除即摘除，**不新增后台网络轮询**）；
-  **冲突升级文案**：`WsHealthDto.stale_base`（MERGE_HEAD ≠ 基准 tip，health_impl 内仅 merge 进行中多一次 rev-parse）命中时
-  冲突条目改「基准已前进——需重新同步」，动作仍走 resolve-conflict（评审层自动以当前基准 tip 重备两侧）。
-  **macOS：标题栏自绘（tauri.conf `titleBarStyle: Overlay` + `hiddenTitle`，capabilities 加 `core:window:allow-title` 与
-  `core:window:allow-start-dragging`——缺后者 `data-tauri-drag-region` 拖拽静默失效），收件箱 =
-  标题后的 Ghostty 式胶囊 + 下拉明细，页内 strip 不渲染；**chromeHidden 执行态下标题栏体仍必须保留**（Overlay 模式红绿灯始终悬浮
-  左上角，靠栏的 `pl-[78px]` 让位，整条隐藏会被按钮压内容且胶囊丢失），只省略窗口标题与底部分隔线**；Windows/Linux 保留原生标题栏 + 页内 strip（32px 一行，展开明细为悬浮下拉，
-  遮罩/Esc 收起——整体悬浮 pill 遮挡内容被用户否决）。终端运行状态经 `terminalRunInputs` 镜像进 store 跨页
-  只读（TerminalPage 唯一写入方，不新增轮询）；跳终端激活标签走一次性 `focusTabReq`（已关闭标签静默忽略）。
-  **注意力信噪比总规则（v3.60，用户拍板全链路清理）**：「已回复」（done = 回合结束）**在全链路无任何视觉标记**——不进收件箱、标签/项目区
-  工作区行不打点、OS 通知不发、`run-overview` 不占排序档，done 态仅剩会话尾部推断的内部状态；理由 = 每回合结束都会亮，噪音 > 信号
-  （同 v3.59 步进器绿点否决）。同批口径：**纯状态不用语义色**（分组头「进行中/待评审」计数降灰点，仅「阻塞」用 err 色；项目导航行副行只留
-  「M 个待处理」，活跃任务数删除）；**瞬态反馈自动消退**（「✓ 工作区已创建」横幅 10s 自收，setup 失败除外）；**常驻 pill 降裸字**
-  （标签「可恢复」、启动栏「端口段已注入/上次任务」去底色去 link 蓝）；**无限脉冲禁留**（标签「工作中」与项目区同用有界
-  `animate-pulse-brief`）；端口「N 个监听中」只在展开后显示；产物清单「刚更新」标记删除。新状态指示进界面前先过「是否阻塞人的决策」闸。
-  **v3.59 起导航行「待处理」与收件箱同口径按项目摊开**：终端待确认与外部 live 待确认按 cwd 最长前缀归属项目根/
-  工作树（`run-overview.ts attributeToProject` 纯逻辑，段边界防误中），收件箱给总数、导航行给分布。同批：收件箱条目数
-  镜像进 store（`inboxCount`，WorkspacesPage 唯一写入方）。**侧栏不挂任何徽标**（终端运行数、工作区待处理全部取消，
-  三平台统一——数字胶囊突兀、size-2 圆点与项目行状态点撞语义、9px 裸数字用户仍嫌吵，三轮均被否决；计数只在悬浮
-  title 与 macOS 标题栏胶囊/页内 strip 出现）——收件箱仍为空不渲染，发现性由标题栏胶囊（mac）与页内 strip（Win/Linux）承担。
-- **产物核验清单（v3.42；v3.45 起从胶囊移到任务行；v3.61 起第二入口为步骤 ⋯ 菜单）**：共享组件 `src/components/ArtifactChecklist.tsx`（步骤按 workspaceName 反查
-  project.toml，定位根由调用方给：已合并读项目根/main，其余读工作树）；任务行「产物」按钮（hover 才现，与 ⌨ 终端同档）在行下方
-  就地手风琴展开，展开态按工作区 id 记忆在 WorkspacesPage、切项目清空；步进器圆后小方块在 strip 下方就地展开，展开态记步骤 index（单开）；面板 = 已产出 ✓/未产出 — + mtime 相对时间
-  + 手动 ⟳ 刷新（打开时拉取一次，不进轮询；v3.60 起无「刚更新」标记——文件新旧不是待办）；选段反馈浮动条带「↵ 直接发送」（pty_write 一次拼接 \r，同帧到达防半截输入）。
-- **沉淀为技能（v3.42）**：md/PDF 选段浮动条「✦ 沉淀为技能」→ `ai_distill_skill`（脱敏 + 8KB 截断 + JSON 容错解析）→
-  `skillDraftReq` 一次性请求 → 技能页新建弹窗预填，保存走既有 create_skill（重名拒绝）。
-- **模型 combo-box（v3.42）**：启动栏模型 = 可输可选（profile 预设 + `ccode.modelHistory.<agent>` 历史去重，上限 10 条），
-  启动成功即记历史；「新增模型」不再是配置概念。
-- **评审一键开下一步（v3.42）**：开步链路单一出处 `src/pipeline-start.ts`；评审覆盖层合并成功且保留工作区时，成功横幅
-  给出「▶ 开始下一步：步骤名」——下一步 = 同名步骤之后第一个无同名工作区（含已归档）的步骤；无下一步/未注册/无流水线
-  只显示合并成功横幅；「合并并归档」成功即关覆盖层，不出此入口。
-- **键盘流（v3.40/v3.41；v3.58 起页切逐页可自定义）**：⌘K 命令面板（过滤纯逻辑在 `command-palette.ts`）、页切（顺序同侧栏；
-  清单单一出处 `hotkeys.ts` PAGE_HOTKEY_DEFS，默认 mod+1..8，`hotkeyPages` map 按页覆盖、整组总开关 `hotkeyPageSwitch` 保留）、
-  ⌘\ 执行态隐藏侧栏（`chromeHidden`，session 级）；⌘F 已被终端搜索占用。主题清单单一出处 `src/themes.ts`。绑定可自定义（设置页录制，
-  `hotkeys.ts` 组合串，空串=禁用，settings.json 四字段；录制冲突判定对全部在用绑定互判）。通知动作 `ccode.attention` → 聚焦窗口 + 聚焦对应终端标签，
-  无 extra 回首页收件箱；通知 extra 带 tabId/cwd（v3.60 起通知只有「待确认」一种，原「已回复直达评审覆盖层」链路随 done 通知一并移除）；
-  收件箱经 `session_tail_state` 直查外部 live 会话（≤10 条）。
-  - **终端分屏（SplitView）只是显隐与排序变化**：全部标签仍在同一容器保持挂载，靠 flex order 把活跃标签（左）与对照标签
-    （右）排到分隔条两侧，禁止把标签移进第二棵子树（会重挂载杀 PTY）；右栏/文件树/改动跟随「活跃 pane」（点击切换，
-    focusedId），分屏时两个 pane 的 PTY 都推流；分屏状态不进持久化白名单，仅分隔比例本地记忆。
-  - **关标签/关窗进程守卫**：仅 `running && ptyId` 的 agent 标签弹确认（shell/已退出一律不弹），存活判定以后端
-    `pty_has_running_process` 为准，命令不存在/报错时静默跳过不阻塞关闭；关窗前对全部在跑标签统一确认一次，确认后放行
-    （allowWindowCloseRef 防 onCloseRequested 重入）。Tauri 的 `onCloseRequested` 前端封装最终调用 `window.destroy()`，且确认后
-    会调用 `window.close()`；`src-tauri/capabilities/default.json` 必须同时保留 `core:window:allow-destroy` 与
-    `core:window:allow-close`，否则进入终端页挂载监听后窗口无法关闭。
-- **普通仓库与工作区提交语义分开**：普通仓库默认不选文件，`git_commit(paths)` 与 AI 提交信息只处理用户勾选且仍在当前
-  status 的安全相对路径（literal pathspec）；工作区任务始终提交全部任务改动，禁止把选择提交扩散到 worktree 流程。
-- **Git 改动列表的单文件 diff 必须安全且可展开**：普通仓库只读当前 status 中经安全校验的相对路径，工作区只读当前累计
-  任务 diff 中的路径；未跟踪文件按全新增展示，二进制只提示，单次读取/展示设上限并明确截断。对话页只读展示“当前项目
-  改动”，必须声明它不是历史快照，禁止提交或推送。紧凑 diff 增删行**整行铺语义深底**（bg-ok/bg-err，v3.36 定稿），hunk
-  标题 inset 底。**改动面板主从分栏（v3.36）**：点文件行 = 左栏 diff 主区 + 右栏紧凑文件列（右栏保持勾选框与状态徽标）；
-  WKWebView 不显示 title 悬浮，操作入口用可见提示（hover 才现小字）。
-- **逐 hunk 验收只覆盖未提交改动，hunks 一律取未暂存 diff（工作树 vs 暂存区）**：丢弃 = `git apply -R` 回工作树、暂存 =
-  `git apply --cached` 上暂存区（`git_file_hunks`/`apply_hunk`，白名单同单文件 diff；补丁必须再经
-  `patch_targets_single_file` 校验只指向该文件）；已提交的累计 diff（评审 merge-base diff）禁止逐 hunk。新文件整个算一个
-  块（暂存 = 跟踪，丢弃 = 删文件）。**勾选提交遇部分暂存文件必须走临时索引提交**（`commit_selected_with_index`：
-  `commit -- paths` 是工作树语义会把未暂存块一起带走；提交成功后按路径 `git reset -q HEAD --` 同步真实索引消幻影 MM），
-  未暂存块保持未暂存，未勾选文件的暂存内容不得被波及。
-- **工作区创建是补偿事务**：先以 SQLite `BEGIN IMMEDIATE` 原子预留端口并写 `creating`，再创建 worktree/复制文件/激活；
-  任一步失败必须移除 worktree、prune、删分支、删 creating 行并释放端口。复制错误不得忽略；setup 失败维持非阻断。
-  `ready_to_merge` 必须要求 `ahead > 0`，空工作区禁止合并。
-- **工作区漂移修复必须显式且非破坏**：仓库/分支/worktree 缺失、注册不一致、归档记录与磁盘冲突、merge 进行中都由
-  `workspace_drift` 先诊断并暂停普通危险动作；重新挂载/重新定位可修复实体，标记归档/清理记录只改元数据，不得删目录或分支。
-- **工作区归档是无损操作，删除才允许强制**：归档前必须重新检查 merge 状态、未提交改动和该工作区内仍运行的 agent/run
-  脚本；任一存在即拒绝。脏工作区只允许走「提交并归档」，提交成功而归档失败后只能重试归档，禁止重复提交。归档移除
-  worktree 禁用 `--force`；`git worktree remove --force` 只允许用于用户明确确认的「删除工作区」。最终合并失败必须自动
-  `git merge --abort`，不得把主仓库留在冲突状态。
-- **项目目录彻底删除（delete_project_dir）防护口径**：必须是 Ccode 项目（`.ccode/project.toml`、注册记录、工作区记录
-  三者有其一）才允许删；拒绝 home/document_dir 本身、少于两级的浅层路径与 fs_tree 重要路径黑名单；该 repo 全部工作区
-  逐个走删除实现（允许 force 移除 worktree），任一失败即中止且已删不回滚（错误说明已删哪些），再删目录与注册记录。
-- **多阶段 Git 操作必须返回结构化阶段结果**：commit/push、merge/archive、push/PR 任一后阶段失败时，前阶段成功事实必须
-  保留并明示；UI 只重试失败阶段，禁止把部分成功显示成整体失败或诱导重复提交、重复合并。
-- **全局配置写入/恢复按 agent 整批事务处理**：先生成并验证全部目标内容，再为同批目标建清单备份、写完并同步全部临时文件，
-  最后替换；中途失败自动回滚整批。恢复必须选最近一个完整批次，恢复前先备份当前状态，且不得移动/消耗原恢复点。
-- **Profile“保存成功”不等于“可用”**：验证固定三层——本地字段/活配置解析、CLI doctor/启动预检、最小 API 请求；密钥仅在
-  Rust 层参与验证，结果统一脱敏。「设为全局」成功后必须自动执行本地与 CLI 配置复检。
-- **技能同名导入不得静默跳过**：导入返回 added/updated/skipped/conflicts；覆盖前备份、另存为校验单段安全名称，ZIP 先
-  staging，元数据保存失败回滚。GitHub 来源保存 repo/ref/subdir/revision；**一键应用更新**（`apply_skill_update`）按记录的
-  repo/ref/subdir 重下并只覆盖同名技能（`import_zip_impl` 的 `only` 过滤，同仓库其他技能不新增不覆盖，走同一覆盖+备份
-  路径），上游改名/移动时明确报错并引导手动重新导入；手动重新导入仍走冲突确认。新建/编辑
-  走 `create_skill`/`update_skill_content`：重名拒绝并引导改用「编辑内容」；编辑经临时目录走既有覆盖路径（覆盖前备份、
-  辅助文件保留、source/repo 不改写）；◈ 优化开终端让 Agent 直改库文件，备份兜底仍靠保存/覆盖路径。
-- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：
-  1. 「设为全局默认」（写前必须备份）；
-  2. **精确注意力标记开关**（claude_hooks.rs 写 ~/.claude/settings.json hooks 段：写前备份 + 原子写、只动 hooks 键、已有
-     hooks 追加不覆盖、关闭只删含 `hooks-state/claude-hooks.jsonl` 的条目并回收空壳键、配置损坏拒绝写；开关走
-     `set_claude_hooks_attention` 单命令落应用设置，失败回滚，禁前端单独 patch `claudeHooksAttention`）；
-  3. 会话删除（delete_session/delete_project_sessions：canonicalize 根校验 + **已知会话数据子目录 + 会话后缀白名单**，
-     同根 auth.json/settings.json 等一律拒绝；**Cursor 不走目录级白名单**（~/.cursor 与 IDE 共享），由 `cursor_deletable`
-     限定 `projects/*/agent-transcripts/**/*.jsonl`；OpenCode 事务删库行且 db 必须等于已知 opencode.db；Codex resume 链删除
-     连带成员文件）；
-  4. 工作树文件删除（限定树当前根 + 重要路径黑名单：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单 canonicalize
-     双校验堵 symlink 绕过）。
-- **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录），AI 无头调用 `-s read-only`；用户可用
-  extra_env/参数覆盖。
-- **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底（macOS 用户目录
-  `~/.npm-global/bin`/`~/.local/bin`/`~/bin`/`~/.kimi-code/bin` **先于** `/opt/homebrew/bin`；Linux `~/.local/bin`，
-  Windows `%LOCALAPPDATA%\Programs`/`%APPDATA%\npm`）；新增 CLI/工具调用点一律用它，禁直接 `which::which` 或裸名 spawn。
-- **诊断包是脱敏的有界快照**：设置页一键导出到 `~/Downloads/ccode-exports/`，包含 Windows/WebView2/GPU/WebGL、
-  语言与输入法、当前功能开关、应用日志及自应用启动后的子进程生命周期；进程记录为内存环形缓冲，不读取环境变量，命令参数
-  与日志在导出前必须经 Rust 层脱敏。ZIP 内只放 UTF-8 JSON/TXT，保证从 Windows 带回 macOS 后无需 Ccode 或 Windows 工具
-  即可离线分析。系统级活动只额外观察 CTF/TextInputHost，禁止借诊断之名采集无关应用的命令行。
-- **「是否 git 仓库」探测带 30s 负缓存**（`git_info::probe_is_work_tree`）：轮询入口（git_status/git_status_map）对非仓库
-  cwd 不得每轮真 spawn git（诊断包实测 Windows 安装版 85 秒 73 次同目录探测）；只缓存否定结果，应用内 `git init` 成功后
-  必须调 `invalidate_repo_probe` 主动失效。**跨路径比较先统一 canonicalize 口径**：Windows 上 `canonicalize` 带 `\\?\`
-  前缀，与 `dirs::home_dir()` 等未规范化路径直接比较会静默失效（recent_repos 的 home 排除曾因此被绕过）。
-- **WebGL 探针的「renderer 不明」保守回退仅限 Windows**：`diagnostics.ts webglUsable`——WKWebView 等平台可能屏蔽
-  debug renderer 信息但 GPU 正常，不得全局按软件渲染处理。
-- **npm 更新用与目标二进制同目录的 npm（`updater::npm_for`）**（用错 npm 会把包装进另一个 prefix）；brew 安装的 CLI 一律
-  走 `brew upgrade`。
-- **交互式 TUI 自更新不走 run_streaming_pty**：kimi/opencode 的 `upgrade` 是方向键选择界面，行输入无法应答——规格标
-  `PackagingSpec.interactive_tui`，`check_agent_updates` 按与 update_agent 同一套渠道判定（`updater::interactive_self_update`）
-  带出预填命令；配置页「新版/更新」命中时改走 `setPendingTerminal`（shellOnly + prefillCommand，同官方账号登录机制）开
-  完整终端让用户方向键操作，普通渠道零变化。
-- 解析各 CLI 内部格式时**防御式**：跳过未知类型、容忍缺字段、容忍末行截断（格式随版本漂移）。
+- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作（设为全局默认、Claude hooks 注意力开关、会话删除、工作树文件删除，
+  四类均有备份/白名单防护口径，见 `docs/conventions/safety.md`）。
+- **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底；新增 CLI/工具调用点一律
+  用它，禁直接 `which::which` 或裸名 spawn（候选目录清单见 `docs/conventions/safety.md` 对应实现 `agents.rs`）。
 - 三平台兼容：禁写平台特定路径，用 `dirs`/`keyring`/`portable-pty` 的抽象。
 - UI 文案用中文；代码注释用中文、只在非显而易见处写（参照现有文件风格）。
 - 前端不直接碰文件系统，一切经 Tauri command；流式输出走 `pty-output-<id>` 等事件。
-- **流水线开步是预设参数的组合调用**（架构 §11）：点「开始」= 建工作区 + 启 Agent + 注入简报 + 落 TASK.md，复用既有
-  工作区创建与终端启动；不破坏手动启动栏「Agent → profile → 模型 → 目录 → 启动」主流程。**invoke 链路单一出处
-  `src/pipeline-start.ts` 的 `startPipelineStep`**（ensure git → bootstrap 提交 → 建工作区 → 提货单/技能元数据 → TASK.md →
-  run 脚本 → 终端交接），工作区页步进器大圆与评审「开始下一步」共用，组件态由调用方回调注入。开步在 ensure_git_repo 后先走
-  `commit_project_bootstrap`（best-effort）：只把 `.ccode` 与 `.gitignore` 提交进主仓（literal pathspec，用户暂存文件
-  绝不带走），防评审合并被主仓脏拦截；默认 .gitignore 含 `*.pdf` 与 `.ccode/handoff-*.md`。**TASK.md 不进 git**：落盘时自动追加进
-  `.git/info/exclude`（`exclude_task_md`，全 worktree 与主仓生效，best-effort 不阻断）——TASK.md 是开步脚手架而非任务产物。
-- **流水线模板库**：内置模板集中在 `src/pipeline-presets.ts` 的 `PIPELINE_TEMPLATES`（综述/科研论文/数据处理/毕业论文/投稿与返修），
-  新增场景 = 数组加一项，简报必须遵守输入写死/决策写死/交付写死约定（auto 模式无歧义）；用户模板走后端
-  `list/save/delete_pipeline_template`，选择器（TemplatePicker）合并展示，后端命令未就绪时优雅降级为仅内置模板。
-- **流水线编辑器（RX1）是步骤编辑唯一入口**：`src/components/PipelineEditor.tsx` 全宽覆盖层（fixed inset-0 z-30，与评审
-  覆盖层同级），每步一张卡片（名称/工作区名/简报/预期产物/run 脚本/资源绑定），整体写回 steps；新增步骤相关编辑一律进
-  编辑器，不再开第二套入口。`ProjectStepDto.resources?: string[]` = 资源绑定（`[[resources]]` 条目的 path），**空/缺省 =
-  全部资源**；`renderTaskMd` 只在绑定非空时过滤「项目资源」段（单一出处在 `pipeline-start.ts`）。
-- **官方账号 profile 只读检测 + env 净化**：CLI auth 文件只读探测「已连接」，断开引导用户用 CLI 自己的 logout；官方账号
-  拉起不注入 API env，且必须 `env_remove` 同协议残留 API 密钥变量（防静默覆盖账号登录）；统计页官方账号显示「订阅」不计费。
-  **API Key 模式不算官方账号**：凭证字段表只认 OAuth token 字段；`OfficialAccountSpec.api_key_fields`（codex =
-  `OPENAI_API_KEY`）命中时显示「API Key 配置」而非「已连接」——官方 `--api-key` 与第三方中转（cc-switch 等）写出的
-  auth.json 形状相同，文件层面无法区分，不得冒充官方账号。
-- **技能分类批量回填**：`backfill_skill_categories` 只给「GitHub 来源 + 无分类」的技能补仓库名分类（自动分类 #15 之前的存量导入），已有分类一律不动、幂等；入口在技能页顶部 ⋯。
-- **MCP 分发（§6.15，规格 = matrix §9）**：Ccode 清单（<config>/ccode/mcp-servers.json）→ 八家用户级配置的映射写入。
-  **只写用户级**（项目级各家都有审批闸）；目标文件多是混合状态文件，一律读-改-写一个键/段 + 写前备份 + 原子写 + 读回校验，
-  绝不整文件覆盖；codex 走 toml_edit 保格式、gemini/qwen/opencode/codebuddy 走 JSONC 容错读；密钥一律用 `$VAR`/`${VAR}`
-  引用形式，映射成各家间接引用字段（codex env_vars/bearer_token_env_var、opencode {env:VAR}、kimi bearerTokenEnvVar），
-  不落明文；server 名取各家交集 [A-Za-z0-9-]（下划线禁：gemini policy 引擎按下划线切分）；claude 的 managed-mcp.json
-  存在即拒写；cursor 的配置与 IDE 共享，分发同时影响 IDE。CLI 自带 mcp 命令不用于分发（各家语义不一：gemini 默认
-  project scope、codebuddy 默认 local、codex add 命中 OAuth 会弹浏览器、kimi/cursor 没有可脚本化命令）。
-  **收编/粘贴导入**：`discover_mcp_servers` 扫八家用户级配置列出清单外 server，`import_mcp_from_agent` 反向映射收编
-  （各家字段→统一模型，引用语法逆向：`{env:VAR}`/`bearer_token_env_var` 等转回 `${VAR}`，收编即标记已分发到来源 agent）；
-  `import_mcp_json` 解析 README 标准片段（剥 mcpServers/mcp/mcp_servers 包裹层，同名跳过）。
-  **安全闸**：清单文件 0600（对齐 keys.json）；env/header 命中常见密钥前缀（sk-/ghp_/AIza/AKIA…，复用
-  `sessions::common_secret_token`）且非 `$VAR` 引用形式时，保存/粘贴导入报 `PLAINDETECT:` 由前端二次确认放行；
-  移除/删除前比对 agent 侧条目与当前映射产物，被外部改过报 `EXTMOD:` 确认后才强删（保护手调版本）；
-  粘贴导入两阶段（`parse_mcp_json` 预览命令清单 → 确认才落库，stdio 命令=任意执行须明示）。
-  **stdio 命令名落盘前深度解析**（`resolve_command_deep`）：裸名经 `resolve_binary` 落绝对路径（GUI 短 PATH）；
-  node 系 shim（shebang `#!/usr/bin/env node` 的脚本/symlink，如 npx）再换成 node 绝对路径 + shim 真实路径首参——
-  否则宿主 PATH 无 node 时照样 spawn ENOENT。kimi 的 MCP 只在会话启动时加载，分发后要新会话生效。
-- **「接力」是唯一的跨 Agent 交接表述**：接力 = 结构化简报落成文件 + 新 Agent 带简报启动 + 记录接力链，明示不是记忆转移；
-  禁用「无缝继续」。v1 机制（handoff.rs）：简报全文过 `redact_sensitive_text` 脱敏 + 64KB 上限后原子写
-  `cwd/.ccode/handoff-<时间>.md`（自定义路径不得出项目根）；简报是过程文件不进版本库：新项目默认 .gitignore 模板含
-  `.ccode/handoff-*.md`，存量仓库在每次写简报时 best-effort 补齐该规则（`with_handoff_rule` 幂等追加，非仓库静默跳过）；
-  接力链先按 agent+cwd 登记 `handoff_links`，新会话被扫描到时
-  固化进 `session_meta.handoff_from_*` 并消费登记（防同目录后续会话误标）；kimi/opencode 无启动注入参数，走复制简报路径 +
-  手动发送，不得伪造注入成功。
-- **「◈ 提炼接力」是长会话续作的 AI 简报变体**（handoff.rs `build_session_digest`，AI 功能键 `digest`）：全会话文本（DTO 层
-  已脱敏，`cap_text_middle` 24KB）经无头 AI 蒸馏成结构化简报（任务目标/关键决策/已完改动/状态待办/下一步/环境约束），AI 输出
-  再过 `redact_and_cap` 才落盘；目标列表来源 agent 置顶（同 Agent 新会话，不走 resume 防上下文污染），跨 agent 与接力链登记
-  复用既有链路；外部续作走 `digest_command_line`（按注册表 prompt_inject 拼「新会话 + 读简报首条指令」，**非 resume**；
-  Unsupported 的 kimi/opencode 复制指令文本手动发送）；无 AI profile 或调用失败行内报错可重试，不免 AI 静默降级（免 AI 场景
-  用原「◈ 接力到…」快速简报）。**v3.60 起生成是 store 后台任务（`digestJob` + `startDigestJob`）**：DigestPicker 可关可开，
-  同一会话（agent+sessionId+filePath）复用结果不重复发起（费 token 且慢），失败重试走 force；ready 未消费进收件箱「待发送」
-  （`{type:"digest"}` → `digestOpenReq` 由对话页消费重开 picker），选定目标或「暂不发送」即 `consumeDigestJob` 摘除。
-  **任务卡起 picker 变两段（定稿页 → 发送页）**：AI 初稿读进可编辑文本框，「定稿并继续」走 `save_task_brief`
-  落盘 `.ccode/brief-<时间>.md`（定稿简报是项目文档，不走 handoff 的 gitignore 规则）并钉入会话所属卡片（会话 taskId 查
-  store.sessions；未归置只落盘）；发送一律用定稿路径（`digestJob.finalized`，AI 初稿 handoff-*.md 留盘不再用），
-  已定稿重开直达发送页；「暂不发送」= 仅定稿落盘钉卡。
-- **任务卡（对话的文件夹 + 定稿简报的收集夹；无独立状态机，不碰工作区/评审流程）**：卡片挂在项目
-  `.ccode/project.toml` 旁（projects.rs task_cards，写操作过 `ensure_task_project_root` 门槛，list 非项目返回空表）；
-  会话归置存 `session_meta.task_id`（`assign_session_task`，删卡自动清归置），SessionMetaDto 回填 taskName。
-  前端：`store.taskCards` 按项目根缓存 + 变更后重取（deleteCard/assignSessionTask 顺带刷新会话列表）；纯逻辑集中
-  `src/task-cards.ts`（按步骤分桶——失效步骤并入「未挂步骤」桶恒在末尾、latestBrief、cardForStep、groupSessionsByTask——
-  「未归置」恒最前同原「无工作区会话排最前」口径）。工作区页卡片区 = `TaskCardsSection`（ProjectGroup 内、步进器下方，
-  展开手风琴按卡片 id 记忆、切项目随 key 重挂载清空）：「开工」= startPipelineStep 加可选 `briefPath`（最新定稿简报全文进
-  TASK.md「任务简报（定稿）」段，读取走 `read_file_preview` 根约束、best-effort 不阻断）；「继续」= pendingTerminal
-  initialPrompt「阅读 <简报> 简报并继续任务」（cwd = 卡片绑定工作区工作树否则项目根，工作树内引用用绝对路径；
-  kimi/opencode 无注入由启动栏 promptDropped 既有处理兜底）。对话页项目筛选下按卡片分组 + meta 行「▤ 卡片名」chip
-  （点击经一次性 `selectProjectReq` 跳工作区页选中项目，WorkspacesPage 消费）+ ⋯「移到卡片…」（仅项目筛选下显示）。
-  评审合并成功横幅「▶ 开始下一步」旁「沉淀到下一步」：评审结论 → 下一步步骤的首张卡片（无则以步骤名 create_task_card）
-  → save_task_brief 钉入，成功提示 10s 自收。**认领机制（聊想法/开工/继续发起前）**：`card_claims` 表 +
-  `claim_next_session_for_card` command——按 agent+cwd 登记（同键覆盖，created_at 时间口径排除登记前旧会话），
-  会话扫描时（`apply_card_claims`，list_sessions 内 apply_handoff 之后）固化进 `session_meta.task_id` 并消费登记，
-  口径与 handoff_links 一致；认领 cwd 恒为项目根（工作区会话 project_path 已改写为真实仓库）；登记失败静默降级，
-  对话页手动归卡兜底。卡片行「聊想法」= 项目根开终端预填「我想跟你探讨：<卡片名>」（不建工作区，想法期不动手）；
-  新卡片（无简报）常驻主按钮 = 聊想法，已有简报 = 开工/继续常驻、聊想法收 ⋯。
-- **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不在逻辑里写死「文献/数据/
-  论文」概念。
-- **示例课题（首启引导最小版）**：`projects::create_demo_project` 在「文档/Ccode 示例课题」幂等生成演示项目（英文综述五步
-  档案卡 + `build_demo_pdf` 手工拼 xref 的单页示例 PDF + references.bib + README）；已注册直接返回现有 project，目录已存在
-  但未注册时**只注册、不补建不覆盖**；git 初始化失败报错、bootstrap 提交 best-effort。前端入口 = 工作区空态「添加项目」旁
-  次级按钮；侧栏底部「设置」上方另有常驻「⌘K 命令面板」发现入口（键位标签随自定义绑定）。
-- **界面白话双层呈现（双语义）**：UI 主文案一律白话（保存到历史 / 相对主分支 / 多出 N 个保存点 / 改动说明），git 技术信息
-  不删除、降为二级呈现（小字 mono、悬浮 title、详情 popover、⋯ 菜单），**不加任何模式开关**；状态分组等纯逻辑集中放
-  `src/git-status-groups.ts`，新增 git 相关 UI 必须遵守同一双层规则。
 
-## 主题与设计系统
+### 主题约定索引（改动前必读对应文件）
 
-- 全站主题令牌集中在 `src/App.css` 的 `@theme` + `[data-theme]` 变体（**七套深色 + 七套对应浅色**，v3.44 起：
-  沉浸黑(默认)/陶土/Ayu琥珀/Catppuccin/极简灰蓝/Dracula/灰蓝正红，各配一套同性格浅色；浅色方向翻转——rail 比 canvas
-  略暗、面板向白浮起、hairline/field 为深灰线、cta 加深保白底对比，状态语义色共享深色值；白色半透明 hover/缩进线/
-  滚动条拇指在浅色下由 App.css 统一翻转为黑色半透明），运行时切 `document.documentElement.dataset.theme`，
-  **改主题只动这一个文件**，组件里禁散落 hex。主题清单单一出处 `src/themes.ts`（settings.rs KNOWN_THEMES 与
-  TerminalPage XTERM_BG_FG 需同步）。**切主题同时同步原生窗口外观**（`applyTheme` 调 `setTheme(light/dark)`，
-  浅色判定走 themes.ts 的 `light` 标记）——原生 `<select>` 下拉、滚动条等按 NSWindow appearance 渲染，
-  只改 CSS 变量时深色主题下弹出系统浅色列表；capabilities 需保留 `core:window:allow-set-theme`。
-  默认主题 CTA 粉 `#faa8d4`（cta-text 近黑）；`--color-raised`（浮起面板/pill 底）、
-  `--color-bubble`（用户消息气泡）、`--color-nav-accent`（侧栏选中左条+选中图标，默认靛蓝、其余取各自 CTA 色）。
-- 四层「浮起」结构（rail/rail2/canvas/inset 逐级变亮）；文字冷白→灰四档；每主题独立 CTA 强调色（按钮/选中用 `cta`；可操作
-  状态如「可合并」用**按钮本身的 cta 高亮**，不另挂 pill；纯状态 pill 用 inset 灰底 + 语义色小圆点）；**状态语义色独立于
-  主题**（ok/err/warn 不随主题变）；**结果横幅一律 bg-strip/inset 底 + ✓/✗ 语义色文字**，不用整块 bg-ok/bg-err（bg-err
-  仅留给需警惕的小 pill）；零阴影、隐式 hairline。
-- **字体渲染按平台分口径（v3.60 后 Windows 糊字修复）**：入口（main.tsx）在 `<html>` 上落 `data-platform`
-  （mac/windows/linux，判定在 hotkeys.ts `IS_MAC`/`IS_WINDOWS`）。Windows Chromium 下 `text-rendering:
-  optimizeLegibility` 会走 DirectWrite natural 模式丢 hinting，小字号发糊——`[data-platform="windows"]` 覆写回 `auto`，
-  macOS 保持 optimizeLegibility 不动。CJK 回退链必须显式带雅黑：body 栈含 `"Microsoft YaHei UI", "Microsoft YaHei"`
-  （否则中文穿过未安装的 Noto Sans SC 落通用 sans-serif 发虚）；等宽单一出处是 `@theme` 的 `--font-mono`
-  （打包的 JetBrains Mono 在前，Windows 回退 Cascadia Mono/Consolas，CJK 兜底雅黑）；xterm 的 fontFamily 回退链同口径
-  （TerminalPage 两处，勿落通用 monospace——Windows 会解析成位图字体）。新增等宽/正文场景一律用这两条链，别自造栈。
-- **线条语言（去格子化，v3.35/v3.37 定稿）**：内联内容容器一律**不加 1px 描边**，靠底色差 + 圆角 + hairline 分层；边框只给
-  浮层与控件。strip/inset/raised 三级梯度七套主题必须可分辨；hairline/field 与底色对比度七主题同档。**区间分隔优先留白**
-  （折叠区标题、rail 底部、PageHeader 均不画横线）。搜索框无描边（inset 底 + 聚焦加深），输入框保留 field 边。**全站线宽
-  0.5px**（App.css 覆写 border/divide；focus outline 不动）。**侧栏只保留全高竖分界 + 底部管理区一根横线**。**共享控件集中
-  `PageFrame.tsx`**（primary/secondary/rowAction/ghostAction/field/searchField/hoverReveal + SegTabs），禁各页复制本地类，
-  一律用通用语义令牌。编辑器面走 `--color-editor-bg/fg/line`，Monaco 经 MutationObserver 随主题换肤。
-- **符号语言统一**：导航与图标用单色几何符号（⚙⛁⌨◔✦◫⛭⇄），◈=AI 功能、⚑=pin/保留；**禁用彩色 emoji**。
-- 用户明确否决过的设计：多栏嵌套的对话页、浅色 + 蓝紫渐变侧边栏、按钮排排坐的 profile 行、暖棕色系整体主题、
-  emoji 图标。不要改回去。（浅色模式曾是否决项，v3.44 用户主动要求并已落地七套浅色，该否决作废。）
-- 配置页结构（用户详版规格）：可折叠 agent 分组 + 五列网格行 + 顶部筛选与搜索 + 无大面积虚线空状态；图标按钮点击区 ≥28px；
-  **WKWebView 不支持 window.prompt/confirm/alert 等原生 JS 对话框**（macOS wry 未实现对话框委托，confirm 恒返回 false、prompt/alert 静默无效）——
-  一切输入用内联输入框，确认走 `src/components/ConfirmDialog.tsx` 的 `confirmDialog`、提示走 `alertDialog`（promise 版，宿主已挂 App 根部），禁再引入原生 JS 对话框。
-- 常规管理页统一共享页面框架/标题层级/主操作样式/主题化开关复选框/加载骨架；页面最大宽度必须显式选择，禁叠加冲突的
-  `max-w-*`。**控件尺寸固定两级**：标题栏主/次操作与终端启动栏 32px；任务行、步进器圆/小方块热区、对话列表/回放头部及图标按钮 28px
-  （可点击就不得小于 28px；层级靠填充色/边框/文字色区分，不靠按钮忽大忽小）。**留白节拍固定**：统一标题呼吸区/工具栏
-  间距/主体内边距；空状态与低对象数量时允许保留连续画布，不为填满窗口堆料；工作区流水线与任务行可增加垂直间距，但不
-  改变步骤顺序和操作语义。
-- **全站导航按工作流分层**：侧栏顺序固定为工作（工作区/终端/对话）→ 能力（配置/技能/MCP/统计）→ 底部只留设置，首启默认进
-  工作区；保留全部路由和 visited 保挂载。常规页必须复用 `PageFrame/PageHeader/PageToolbar` 的“上下文标题栏 + 独立筛选
-  工具栏 + 主体”结构，标题栏只保留唯一主动作；工作台页面可维持自身分栏，但分隔、密度和状态语言必须与共享框架一致。
-  借鉴外部工作台只学对象列表/上下文栏/三栏机制，不得把配置中心重新设为首页。**侧栏收展完全手动**（品牌区点击，
-  localStorage 记忆；v3.38 的按页面自动收展被用户否决，v3.43 删除）。
-- **对话页三栏固定（P1a）**：应用导航 ｜ 会话列表栏（375px，rail2 底：标题+「当前 N · 总计 M」副题 + 深色次按钮 + 搜索框 +
-  折叠分类筛选——v3.37 定稿单列纵向手风琴：点 agent 只展开/收起项目子列表（左侧缩进线表达层级），「全部项目」/单项目行
-  落筛选且面板保持展开（v3.43：边筛边浏览，选中不收起），计数保持）｜回放区（canvas 底，常驻，未选中为空态）；列表与回放并列常驻，禁止恢复“列表/回放二选一”
-  整列切换。会话行双行（标题行带相对时间 + meta 行），选中行 bg-rail-sel 浅填充。`ConversationView`：用户消息右对齐气泡
-  （bg-bubble，max-w 70%）、AI 直接排版、``` 围栏代码块 inset+hairline 带 ⧉ 复制、连续 tool_use/tool_result 折叠为「▸ N 次
-  工具调用」行；底部为只读展示态圆角输入条（chip 显示 agent 名）。有界尾窗/向前分页保持滚动位置（scrollRef 必须挂在滚动
-  容器上）。
-- **对象数量不得撑坏主布局**：工作区页用“项目导航 rail + 当前项目详情”，禁止恢复全部项目纵向长页；技能主列表禁止按 Agent
-  数量永久加列，只展示稳定字段与应用计数，Agent 分发在右侧详情用自动换行网格管理；新增 Agent 只能增加详情项。终端模块 UI
-  小字基准 13px，xterm 新用户默认 14px；状态点等微型符号可更小，但文件树、标签、启动栏、对话/改动正文不得退回 11–12px。
-- 终端展开态主流程固定为 Agent → profile → 模型 → 目录 → 启动，辅助动作视觉分组；启动后自动收缩、PTY shell 回落、
-  所有终端标签保持挂载的语义不得因布局优化改变。**技能/MCP pill 在收缩态同样保留**（展开栏与收缩状态行共用
-  renderSkillMenu/renderMcpMenu，收缩栏在页面顶部菜单向下弹出）；技能=一键使用注入输入框，MCP=一键提及 +
-  「管理分发→」跳 MCP 页。**专注双模式（v3.43）**：中带「⤢ 专注终端」（藏左右栏，标签条
-  留在中带顶部，portal 机制已删）与右栏「⇱ 专注内容」（右栏铺满、中带不加遮罩），Esc 退出；左栏不再有 « 收起态。
-  状态点全局统一 `size-2 rounded-full`；端口区分「本应用/系统其他」两段，终止外部进程必须二次确认。
-- **统计内部活动只认后端 provenance**：Ccode 无头 AI 启动前登记精确 agent+项目路径，usage 事件与项目/模型 DTO 显式携带
-  `source/internal`；禁止再按 `/tmp`、`ccode-ai-*` 名称、空模型或 `<synthetic>` 猜测。统计页默认归并 `internal=true`，并提供
-  “显示内部活动”开关；开关只改变展示分组，不得改写原始用量索引。
-- **会话整理与长回放口径统一**：对话页默认从普通项目树排除 `internal=true`，归并为单一“Ccode 内部 AI”入口；“显示已归档”
-  必须同时作用于全部/agent/项目/内部入口计数。标题先折叠空白并拒绝通用占位值，再回落首条真实用户消息，最终使用“未命名
-  对话 · 短 ID”。长会话首次只读有界尾窗，向前分页保持滚动位置；终端不得用全量回放接口做轮询。
-- **usage 长会话必须流式解析并按本机日期聚合**：普通 JSONL 与 Codex zstd 会话逐行消费，禁止因整个文件超过固定大小而跳过；
-  “今日/近 7 天/近 30 天”及事件日桶都使用系统本地时区。改变解析或日桶语义时必须升级 usage schema 并自动重建旧索引。
-- **最近项目采用 stale-while-revalidate**：后端按仓库聚合各 Agent 会话的最大 updated_at、canonical 去重并降序返回；前端启动
-  即预取、本地缓存上次成功结果，首次无缓存时用固定骨架占位。终端最多展示 4 个且排除当前项目，缓存路径在进入前仍必须重新验证。
-- **管理列表只展示状态与主路径**：配置、工作区、技能和对话列表的行内只保留识别信息、状态与一到两个高频动作；导入/导出、
-  删除、诊断、恢复等低频项进入「⋯」。工作区的 PR 与归档必须在统一全宽评审内确认和执行；唯一例外是正在进行的 merge 冲突，
-  必须在工作区行保留直接的「解决冲突」入口，且仍进入同一评审覆盖层。
-- **列表行内操作分两级显隐**：每行最多一个常驻主按钮（编辑 / 应用开关 / 评审 / 组头「新版」），其余低频按钮（行内 ⋯、⧉ 复制
-  等）统一 hover 才现——行挂 `group`，按钮 `opacity-0 group-hover:opacity-100 focus-visible:opacity-100`；状态聚合成 ●N 计数
-  （明细进悬浮 title），无状态不渲染状态点；次级信息 10px 灰字、时间相对主显（`rel-time`，悬浮 `absTime`）；分组层级靠
-  hairline + 左侧缩进线（`border-l border-white/5`），不再套卡片外框。工作区/终端/配置/技能/设置五页同一手法。
-- **工作区项目详情按对象职责分层**：流水线步进器只表达状态与推进（大圆点击 = 开始/恢复/跳终端，见「流水线大圆步进器」条）；终端与
-  普通评审统一由下方工作区任务行执行，产物核验在任务行行内手风琴与步进器圆后小方块两处同一面板，目录定位进入步骤「⋯」。编辑流水线、模板替换等项目级操作统一进入项目头
-  「⋯」。已合并且没有新提交的任务行只显示左侧「已合并」状态，
-  不再重复显示「评审」；新提交后评审入口恢复。
-- **流程进度与步骤固定对齐**：流水线使用等分列（minmax(9rem,1fr)），每个步骤一个大圆一一对应；窄窗口整体横向滚动，禁止
-  自由换行；进度不再画独立进度线段，由大圆状态色直接表达。
-- **终端布局必须有明确高度与滚动边界**：App 容器、页面主区、终端三带均维持 `h-full/min-h-0`，外层裁切溢出；只有文件树、
-  对话、diff 等内容区各自滚动。禁止把页面级滚动或无约束 flex 子项带回终端（防窗口缩放/长内容后底部黑屏空白）。
-- **终端工作台信息架构固定为三段**：左侧只负责项目/工作区/文件树上下文，中间只负责 Agent 终端执行，右侧成果工作台固定为
-  「对话 / 文件 / 改动」三模式并默认可见。终端启动栏不再放重复的「对话」入口；实时对话、预览编辑、Git 改动统一从右侧工作台
-  切换，任务审阅仍从改动进入既有全宽覆盖层。右侧可拖拽记忆宽度，宽屏只隐藏工作树，不得杀终端或改变 PTY/会话挂载语义。
-- **PDF 预览（P2a）**：pdf.js 渲染器必须随 PdfPreview 组件动态 import 拆独立 chunk（禁进主包）；`read_pdf_bytes` 只放行四类
-  白名单（注册项目登记资源/注册项目根/工作区·仓库根/终端标签 cwd hint），canonicalize 后判定，传输用 base64 字符串（macOS
-  Raw 响应会退化为逐字节 JSON 数组，禁改 raw bytes）；选段问 AI 只 pty_write 注入活跃标签输入框，不自动回车。
-- **md 阅读模式（RX2a）**：md 文件预览默认「阅读版式」（marked 渲染，pin 版本、随 FilePreviewEditor 懒加载 chunk，禁进主包；
-  本地可信内容不引 sanitize 重库），排版样式集中在 App.css `.md-body`（全主题令牌）；「阅读/编辑」切换时 Monaco 保持挂载仅
-  隐藏（未保存改动/undo 不丢）；「⛶ 沉浸阅读」为 `fixed inset-0 z-30` 全宽覆盖层（Esc 退出，终端/PTY 保持挂载）；外部写盘
-  自动刷新沿用现有 watcher 链路，编辑中（dirty）不覆盖。
-- **「整理为笔记」（P2b）**：归属判定只在后端 `pdf_owner_project`（登记资源 canonical 精确命中 → 项目根最长前缀命中，都未
-  命中由前端提示去登记，前端不做路径归属猜测）；写入只走 `append_workspace_inbox`——目标固定为工作区根内 `notes/inbox.md`
-  （不接受外部子路径），单次 ≤ 64KB、读-改-原子写、已存在文件 canonicalize 双校验防 symlink 逃逸；笔记步骤定位 =
-  `workspaceName === "lit-notes"` 优先、回落流水线第二步；无活跃工作区时复用一键开步链路（ensure_git_repo → create_workspace
-  → TASK.md best-effort → 追加 inbox → pendingTerminal + ORGANIZE_NOTES_PROMPT 预填）。
-- **步骤对照（RX2b）**：跨页「文件树切根」走 store 一次性 `enterCwdReq`（终端页消费后复用 enterCwd/externalCwd「真进入」
-  机制，文件树根随活动标签 cwd）；`previewReq` 可带可选 `root`（文本预览的后端根约束，缺省回落活动标签 cwd）。产物核验已移到
-  任务行手风琴与步进器圆后小方块（见「产物核验清单」条）；大圆悬浮信息（目录/agent/profile）读终端页同一键 `ccode.wsLast.<worktreePath>`。
-- **流水线大圆步进器（v3.46，取代 v3.45 胶囊分层与进度段；v3.61 虚线链改为带级一次铺满）**：名称带与步进器带两个同列网格；
-  虚线为**带级真实块链**（`StepperChain`：6px 块 + 6px 间隙全是真实元素，块位以圆心为锚按列几何分段现算——
-  跨列无边界、每段块数与间隙严格一致、各圆两侧断口等大且间隙 = 块间 6px（`NODE_HALF` = 22px 视觉圆半径 11 + 6；
-  按列各自现算会在列缝出大间隙，按全局相位铺排会被圆随机截断，两种都已被用户否决），完成列区间内的块亮灰白（l2）、其余暗（hairline）。
-  **大圆 = 纯色实心圆（内部无字符）+ 唯一主推进点击**：done=bg-ok-text；进行中/checking=bg-cta（脉冲用有界
-  `animate-pulse-brief`：App.css 自定义 3 周期≈6s 后静止，状态复归重播；无限 animate-pulse 是注意力消耗，项目区工作区状态点同口径）；
-  待评审=bg-cta-pill；阻塞=bg-warn；pending=bg-l4 实心灰。点击语义按状态：
-  pending 无工作区=startStep、已归档=restoreWs、进行中/待评审/阻塞=onOpenTerminal(ws)、done=setPendingTerminal 开主仓 shell 终端。
-  状态/目录/agent/profile + 点击动作提示收进**应用内 tooltip**（`useHoverTip`/`HoverTip`，fixed 定位、横向钳制、滚动/缩放/点击即关）：
-  原生 title 在 WKWebView 上行为不稳定（不渲染或残留数秒串到相邻控件），圆的悬浮提示**一律走应用内 tooltip，禁再回退原生 title**；
-  事件挂包裹 span，禁用态也可悬浮。**大圆右上角注意力角标**（size-2 圆点）：cwd 落在工作区内的终端标签有待确认=bg-warn；
-  v3.59 起「已回复」绿点移除（每回合结束都会亮，噪音大于信号，用户否决），只留待确认；数据只读消费 `terminalRunInputs` 镜像，不新增轮询。
-  **v3.61 步进器精简（用户拍板）**：**圆视觉 22px（按钮保持 28px 热区）**；**圆前/圆后小方块的按钮职责删除**
-  （伪装成虚线块可发现性为零、与步骤 ⋯ 重复、误触打开全宽覆盖层代价高），小方块视觉保留为普通虚线块（DashBlock），
-  SquareButton 组件移除；「编辑步骤」（openEditor(i) 定位卡片，PipelineEditor `focusStep` prop 滚动 + 聚焦简报框）与
-  「产物核验」（strip 下方就地展开 ArtifactChecklist，单开手风琴记步骤 index；root 口径同任务行：done 读项目根、其余读工作树、
-  无工作区禁用）**全部收进步骤名称行右侧 hover 才现的 ⋯ 菜单**（hoverRevealClass）。
-  **末端菱形终点**：步进器带末尾 9px 旋转 45° **实心**菱形（装饰无点击，与链条同轴、经 6px 间隙接在末块之后；
-  名称带末尾有同宽占位保列对齐），全部步骤 done 时点亮相同 done 绿（bg-done，平时 bg-hairline 与未完成链条同暗）。解决冲突/评审/合并统一在下方任务行，步进器不再放第二行动作。
+| 领域 | 文件 | 覆盖内容 |
+|---|---|---|
+| 安全与数据防护 | `docs/conventions/safety.md` | 密钥/脱敏细节、git 提交与逐 hunk 验收、多阶段 Git、profile 三层验证、会话/配置写操作口径、诊断包、MCP 分发与技能导入导出、CLI 更新、PDF/笔记白名单 |
+| 终端与工作台 | `docs/conventions/terminal.md` | PTY 回落 shell、标签持久化白名单、评审/冲突覆盖层、改动面板、收件箱与注意力规则、键盘流、分屏、关窗守卫、WebGL 探针 |
+| 流水线与项目域 | `docs/conventions/pipeline.md` | 工作区创建/漂移/归档/删除、流水线开步/模板/编辑器、接力与提炼接力、任务卡、示例课题、白话双层 |
+| 主题与设计系统 | `docs/conventions/design-system.md` | 主题令牌、字体栈、线条语言、控件密度、页面框架、对话页三栏、步进器规格、已否决设计 |
 
 ## 路线图（见 docs/architecture.md §11 演进线）
 

@@ -1,0 +1,90 @@
+# 约定：流水线与项目域
+
+> 适用范围：工作区（worktree）生命周期、流水线开步/模板/编辑器、任务卡、接力/提炼接力、示例课题。从 AGENTS.md 迁入（原文照录，未做语义改动）。
+
+## 工作区生命周期（无损口径）
+
+- **工作区创建是补偿事务**：先以 SQLite `BEGIN IMMEDIATE` 原子预留端口并写 `creating`，再创建 worktree/复制文件/激活；
+  任一步失败必须移除 worktree、prune、删分支、删 creating 行并释放端口。复制错误不得忽略；setup 失败维持非阻断。
+  `ready_to_merge` 必须要求 `ahead > 0`，空工作区禁止合并。
+- **工作区漂移修复必须显式且非破坏**：仓库/分支/worktree 缺失、注册不一致、归档记录与磁盘冲突、merge 进行中都由
+  `workspace_drift` 先诊断并暂停普通危险动作；重新挂载/重新定位可修复实体，标记归档/清理记录只改元数据，不得删目录或分支。
+- **工作区归档是无损操作，删除才允许强制**：归档前必须重新检查 merge 状态、未提交改动和该工作区内仍运行的 agent/run
+  脚本；任一存在即拒绝。脏工作区只允许走「提交并归档」，提交成功而归档失败后只能重试归档，禁止重复提交。归档移除
+  worktree 禁用 `--force`；`git worktree remove --force` 只允许用于用户明确确认的「删除工作区」。最终合并失败必须自动
+  `git merge --abort`，不得把主仓库留在冲突状态。
+- **项目目录彻底删除（delete_project_dir）防护口径**：必须是 Ccode 项目（`.ccode/project.toml`、注册记录、工作区记录
+  三者有其一）才允许删；拒绝 home/document_dir 本身、少于两级的浅层路径与 fs_tree 重要路径黑名单；该 repo 全部工作区
+  逐个走删除实现（允许 force 移除 worktree），任一失败即中止且已删不回滚（错误说明已删哪些），再删目录与注册记录。
+
+## 流水线开步与模板
+
+- **流水线开步是预设参数的组合调用**（架构 §11）：点「开始」= 建工作区 + 启 Agent + 注入简报 + 落 TASK.md，复用既有
+  工作区创建与终端启动；不破坏手动启动栏「Agent → profile → 模型 → 目录 → 启动」主流程。**invoke 链路单一出处
+  `src/pipeline-start.ts` 的 `startPipelineStep`**（ensure git → bootstrap 提交 → 建工作区 → 提货单/技能元数据 → TASK.md →
+  run 脚本 → 终端交接），工作区页步进器大圆与评审「开始下一步」共用，组件态由调用方回调注入。开步在 ensure_git_repo 后先走
+  `commit_project_bootstrap`（best-effort）：只把 `.ccode` 与 `.gitignore` 提交进主仓（literal pathspec，用户暂存文件
+  绝不带走），防评审合并被主仓脏拦截；默认 .gitignore 含 `*.pdf` 与 `.ccode/handoff-*.md`。**TASK.md 不进 git**：落盘时自动追加进
+  `.git/info/exclude`（`exclude_task_md`，全 worktree 与主仓生效，best-effort 不阻断）——TASK.md 是开步脚手架而非任务产物。
+- **流水线模板库**：内置模板集中在 `src/pipeline-presets.ts` 的 `PIPELINE_TEMPLATES`（综述/科研论文/数据处理/毕业论文/投稿与返修），
+  新增场景 = 数组加一项，简报必须遵守输入写死/决策写死/交付写死约定（auto 模式无歧义）；用户模板走后端
+  `list/save/delete_pipeline_template`，选择器（TemplatePicker）合并展示，后端命令未就绪时优雅降级为仅内置模板。
+- **流水线编辑器（RX1）是步骤编辑唯一入口**：`src/components/PipelineEditor.tsx` 全宽覆盖层（fixed inset-0 z-30，与评审
+  覆盖层同级），每步一张卡片（名称/工作区名/简报/预期产物/run 脚本/资源绑定），整体写回 steps；新增步骤相关编辑一律进
+  编辑器，不再开第二套入口。`ProjectStepDto.resources?: string[]` = 资源绑定（`[[resources]]` 条目的 path），**空/缺省 =
+  全部资源**；`renderTaskMd` 只在绑定非空时过滤「项目资源」段（单一出处在 `pipeline-start.ts`）。
+
+## 接力与提炼接力
+
+- **「接力」是唯一的跨 Agent 交接表述**：接力 = 结构化简报落成文件 + 新 Agent 带简报启动 + 记录接力链，明示不是记忆转移；
+  禁用「无缝继续」。v1 机制（handoff.rs）：简报全文过 `redact_sensitive_text` 脱敏 + 64KB 上限后原子写
+  `cwd/.ccode/handoff-<时间>.md`（自定义路径不得出项目根）；简报是过程文件不进版本库：新项目默认 .gitignore 模板含
+  `.ccode/handoff-*.md`，存量仓库在每次写简报时 best-effort 补齐该规则（`with_handoff_rule` 幂等追加，非仓库静默跳过）；
+  接力链先按 agent+cwd 登记 `handoff_links`，新会话被扫描到时
+  固化进 `session_meta.handoff_from_*` 并消费登记（防同目录后续会话误标）；kimi/opencode 无启动注入参数，走复制简报路径 +
+  手动发送，不得伪造注入成功。
+- **「◈ 提炼接力」是长会话续作的 AI 简报变体**（handoff.rs `build_session_digest`，AI 功能键 `digest`）：全会话文本（DTO 层
+  已脱敏，`cap_text_middle` 24KB）经无头 AI 蒸馏成结构化简报（任务目标/关键决策/已完改动/状态待办/下一步/环境约束），AI 输出
+  再过 `redact_and_cap` 才落盘；目标列表来源 agent 置顶（同 Agent 新会话，不走 resume 防上下文污染），跨 agent 与接力链登记
+  复用既有链路；外部续作走 `digest_command_line`（按注册表 prompt_inject 拼「新会话 + 读简报首条指令」，**非 resume**；
+  Unsupported 的 kimi/opencode 复制指令文本手动发送）；无 AI profile 或调用失败行内报错可重试，不免 AI 静默降级（免 AI 场景
+  用原「◈ 接力到…」快速简报）。**v3.60 起生成是 store 后台任务（`digestJob` + `startDigestJob`）**：DigestPicker 可关可开，
+  同一会话（agent+sessionId+filePath）复用结果不重复发起（费 token 且慢），失败重试走 force；ready 未消费进收件箱「待发送」
+  （`{type:"digest"}` → `digestOpenReq` 由对话页消费重开 picker），选定目标或「暂不发送」即 `consumeDigestJob` 摘除。
+  **任务卡起 picker 变两段（定稿页 → 发送页）**：AI 初稿读进可编辑文本框，「定稿并继续」走 `save_task_brief`
+  落盘 `.ccode/brief-<时间>.md`（定稿简报是项目文档，不走 handoff 的 gitignore 规则）并钉入会话所属卡片（会话 taskId 查
+  store.sessions；未归置只落盘）；发送一律用定稿路径（`digestJob.finalized`，AI 初稿 handoff-*.md 留盘不再用），
+  已定稿重开直达发送页；「暂不发送」= 仅定稿落盘钉卡。
+
+## 任务卡
+
+- **任务卡（对话的文件夹 + 定稿简报的收集夹；无独立状态机，不碰工作区/评审流程）**：卡片挂在项目
+  `.ccode/project.toml` 旁（projects.rs task_cards，写操作过 `ensure_task_project_root` 门槛，list 非项目返回空表）；
+  会话归置存 `session_meta.task_id`（`assign_session_task`，删卡自动清归置），SessionMetaDto 回填 taskName。
+  前端：`store.taskCards` 按项目根缓存 + 变更后重取（deleteCard/assignSessionTask 顺带刷新会话列表）；纯逻辑集中
+  `src/task-cards.ts`（按步骤分桶——失效步骤并入「未挂步骤」桶恒在末尾、latestBrief、cardForStep、groupSessionsByTask——
+  「未归置」恒最前同原「无工作区会话排最前」口径）。工作区页卡片区 = `TaskCardsSection`（ProjectGroup 内、步进器下方，
+  展开手风琴按卡片 id 记忆、切项目随 key 重挂载清空）：「开工」= startPipelineStep 加可选 `briefPath`（最新定稿简报全文进
+  TASK.md「任务简报（定稿）」段，读取走 `read_file_preview` 根约束、best-effort 不阻断）；「继续」= pendingTerminal
+  initialPrompt「阅读 <简报> 简报并继续任务」（cwd = 卡片绑定工作区工作树否则项目根，工作树内引用用绝对路径；
+  kimi/opencode 无注入由启动栏 promptDropped 既有处理兜底）。对话页项目筛选下按卡片分组 + meta 行「▤ 卡片名」chip
+  （点击经一次性 `selectProjectReq` 跳工作区页选中项目，WorkspacesPage 消费）+ ⋯「移到卡片…」（仅项目筛选下显示）。
+  评审合并成功横幅「▶ 开始下一步」旁「沉淀到下一步」：评审结论 → 下一步步骤的首张卡片（无则以步骤名 create_task_card）
+  → save_task_brief 钉入，成功提示 10s 自收。**认领机制（聊想法/开工/继续发起前）**：`card_claims` 表 +
+  `claim_next_session_for_card` command——按 agent+cwd 登记（同键覆盖，created_at 时间口径排除登记前旧会话），
+  会话扫描时（`apply_card_claims`，list_sessions 内 apply_handoff 之后）固化进 `session_meta.task_id` 并消费登记，
+  口径与 handoff_links 一致；认领 cwd 恒为项目根（工作区会话 project_path 已改写为真实仓库）；登记失败静默降级，
+  对话页手动归卡兜底。卡片行「聊想法」= 项目根开终端预填「我想跟你探讨：<卡片名>」（不建工作区，想法期不动手）；
+  新卡片（无简报）常驻主按钮 = 聊想法，已有简报 = 开工/继续常驻、聊想法收 ⋯。
+
+## 其他
+
+- **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不在逻辑里写死「文献/数据/
+  论文」概念。
+- **示例课题（首启引导最小版）**：`projects::create_demo_project` 在「文档/Ccode 示例课题」幂等生成演示项目（英文综述五步
+  档案卡 + `build_demo_pdf` 手工拼 xref 的单页示例 PDF + references.bib + README）；已注册直接返回现有 project，目录已存在
+  但未注册时**只注册、不补建不覆盖**；git 初始化失败报错、bootstrap 提交 best-effort。前端入口 = 工作区空态「添加项目」旁
+  次级按钮；侧栏底部「设置」上方另有常驻「⌘K 命令面板」发现入口（键位标签随自定义绑定）。
+- **界面白话双层呈现（双语义）**：UI 主文案一律白话（保存到历史 / 相对主分支 / 多出 N 个保存点 / 改动说明），git 技术信息
+  不删除、降为二级呈现（小字 mono、悬浮 title、详情 popover、⋯ 菜单），**不加任何模式开关**；状态分组等纯逻辑集中放
+  `src/git-status-groups.ts`，新增 git 相关 UI 必须遵守同一双层规则。
