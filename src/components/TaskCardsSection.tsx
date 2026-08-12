@@ -212,7 +212,6 @@ export default function TaskCardsSection({
   }
 
   function renderCard(card: TaskCardDto) {
-    const brief = latestBrief(card);
     const canStart = card.step !== null && steps.some((s) => s.name === card.step);
     // 新卡片（无简报）= 想法期：常驻主按钮是「聊想法」；已有简报则「开工/继续」上位，聊想法收进 ⋯
     const fresh = card.briefs.length === 0;

@@ -365,7 +365,12 @@ src-tauri/src/
   kimi/opencode 无注入由启动栏 promptDropped 既有处理兜底）。对话页项目筛选下按卡片分组 + meta 行「▤ 卡片名」chip
   （点击经一次性 `selectProjectReq` 跳工作区页选中项目，WorkspacesPage 消费）+ ⋯「移到卡片…」（仅项目筛选下显示）。
   评审合并成功横幅「▶ 开始下一步」旁「沉淀到下一步」：评审结论 → 下一步步骤的首张卡片（无则以步骤名 create_task_card）
-  → save_task_brief 钉入，成功提示 10s 自收。
+  → save_task_brief 钉入，成功提示 10s 自收。**认领机制（聊想法/开工/继续发起前）**：`card_claims` 表 +
+  `claim_next_session_for_card` command——按 agent+cwd 登记（同键覆盖，created_at 时间口径排除登记前旧会话），
+  会话扫描时（`apply_card_claims`，list_sessions 内 apply_handoff 之后）固化进 `session_meta.task_id` 并消费登记，
+  口径与 handoff_links 一致；认领 cwd 恒为项目根（工作区会话 project_path 已改写为真实仓库）；登记失败静默降级，
+  对话页手动归卡兜底。卡片行「聊想法」= 项目根开终端预填「我想跟你探讨：<卡片名>」（不建工作区，想法期不动手）；
+  新卡片（无简报）常驻主按钮 = 聊想法，已有简报 = 开工/继续常驻、聊想法收 ⋯。
 - **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不在逻辑里写死「文献/数据/
   论文」概念。
 - **示例课题（首启引导最小版）**：`projects::create_demo_project` 在「文档/Ccode 示例课题」幂等生成演示项目（英文综述五步
