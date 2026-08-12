@@ -16,13 +16,26 @@
 - **项目目录彻底删除（delete_project_dir）防护口径**：必须是 Ccode 项目（`.ccode/project.toml`、注册记录、工作区记录
   三者有其一）才允许删；拒绝 home/document_dir 本身、少于两级的浅层路径与 fs_tree 重要路径黑名单；该 repo 全部工作区
   逐个走删除实现（允许 force 移除 worktree），任一失败即中止且已删不回滚（错误说明已删哪些），再删目录与注册记录。
+- **清除 Ccode 痕迹（purge_project_traces，v3.65 中间档）**：保留项目文件夹与用户全部文件——全部工作区
+  （worktree + 分支 + 记录，彻底删，同删除项目目录口径）→ `.ccode/` 走系统回收站（可反悔）→ 摘注册记录（未注册容忍）；
+  防护复用 `guard_project_dir`；三者皆无时报「没有 Ccode 痕迹」。**不自动 git rm/提交**：.ccode 若被跟踪过，删除显在
+  改动面板由用户自行提交（摘要与前端确认框均提示）。
 
 ## 流水线开步与模板
 
 - **流水线开步是预设参数的组合调用**（架构 §11）：点「开始」= 建工作区 + 启 Agent + 注入简报 + 落 TASK.md，复用既有
   工作区创建与终端启动；不破坏手动启动栏「Agent → profile → 模型 → 目录 → 启动」主流程。**invoke 链路单一出处
   `src/pipeline-start.ts` 的 `startPipelineStep`**（ensure git → bootstrap 提交 → 建工作区 → 提货单/技能元数据 → TASK.md →
-  run 脚本 → 终端交接），工作区页步进器大圆与评审「开始下一步」共用，组件态由调用方回调注入。开步在 ensure_git_repo 后先走
+  run 脚本 → 终端交接），工作区页步进器大圆与评审「开始下一步」共用，组件态由调用方回调注入。**v3.64 起「开工」为两步**：
+  步进器大圆与卡片「开工」先开 `KickoffConfirmDialog`（TASK.md 全文预览 + 简报来源勾选 + 主仓提醒），确认才走
+  startPipelineStep；评审「开始下一步」保留直开（连续流，简报已沉淀到下一步卡），「继续」不经弹层。**TASK.md 拼装单一出处
+  `renderTaskMd`**：弹层预览与实际落盘共用 `gatherTaskMdExtras`（提货单/技能元数据）+ `readTaskBriefs`（简报全文）+
+  `renderTaskMd`（briefs: 单份直排、多份按卡片名分小节），禁复制第二份拼装逻辑。**v3.66 起弹层预览区升级为可编辑
+  TASK.md 编辑区**：默认拼装结果进编辑区（状态机 `taskMdEditorReduce`——dirty 后重拼不覆盖人编辑/融合稿），「确认开工」
+  落盘 = 编辑区最终内容（`startPipelineStep` 的 `taskMdOverride`，写盘仍走 write_workspace_task_md 单一路径）；
+  「◈ 融合为连贯 TASK.md」（勾选简报非空可用）走 `ai_fuse_task_md`（模板简报为主干、卡片思想融入对应段落、去重复与
+  过程性描述、已否决方向保留为约束、提货单段原样，功能键复用 digest，脱敏不落盘）填进编辑区。步骤级只读预览入口
+  （任务卡桶头部「预览 TASK.md」）走 `buildTaskMdPreview`，同一出处。开步在 ensure_git_repo 后先走
   `commit_project_bootstrap`（best-effort）：只把 `.ccode` 与 `.gitignore` 提交进主仓（literal pathspec，用户暂存文件
   绝不带走），防评审合并被主仓脏拦截；默认 .gitignore 含 `*.pdf` 与 `.ccode/handoff-*.md`。**TASK.md 不进 git**：落盘时自动追加进
   `.git/info/exclude`（`exclude_task_md`，全 worktree 与主仓生效，best-effort 不阻断）——TASK.md 是开步脚手架而非任务产物。
@@ -64,20 +77,44 @@
   前端：`store.taskCards` 按项目根缓存 + 变更后重取（deleteCard/assignSessionTask 顺带刷新会话列表）；纯逻辑集中
   `src/task-cards.ts`（按步骤分桶——失效步骤并入「未挂步骤」桶恒在末尾、latestBrief、cardForStep、groupSessionsByTask——
   「未归置」恒最前同原「无工作区会话排最前」口径）。工作区页卡片区 = `TaskCardsSection`（ProjectGroup 内、步进器下方，
-  展开手风琴按卡片 id 记忆、切项目随 key 重挂载清空）：「开工」= startPipelineStep 加可选 `briefPath`（最新定稿简报全文进
-  TASK.md「任务简报（定稿）」段，读取走 `read_file_preview` 根约束、best-effort 不阻断）；「继续」= pendingTerminal
+  展开手风琴按卡片 id 记忆、切项目随 key 重挂载清空）：「开工」= 打开开工确认弹层（v3.64：TASK.md 预览 + 本步骤
+  含简报卡片勾选 + ◈ 融合所选简报），确认才走 startPipelineStep（briefs 为多份简报引用，读取走 `read_file_preview`
+  根约束、best-effort 不阻断）；「继续」= pendingTerminal
   initialPrompt「阅读 <简报> 简报并继续任务」（cwd = 卡片绑定工作区工作树否则项目根，工作树内引用用绝对路径；
-  kimi/opencode 无注入由启动栏 promptDropped 既有处理兜底）。对话页项目筛选下按卡片分组 + meta 行「▤ 卡片名」chip
+  kimi/opencode 无注入由启动栏 promptDropped 既有处理兜底）。**多卡简报融合**（v3.64）：勾选 ≥2 张出现
+  「◈ 融合所选简报」→ `ai_fuse_briefs`（逐份 canonicalize 根校验 + 每份 8KB/总量 24KB cap，功能键复用 digest）
+  → 弹层内定稿态（措辞同 DigestPicker/评审沉淀）→ save_task_brief 钉目标卡（默认出处卡，可换卡或以步骤名新建）
+  → TASK.md 改用融合简报；失败行内报错可重试。**主仓改动协同**（v3.64）：聊想法在主仓进行，agent 改动留主仓合法——
+  弹层顶部与卡片区标题行各一条警告色提醒（复用 `git_status`，进项目详情读一次 + 弹层打开刷新，不轮询，非 git 不渲染），
+  卡片区点击经 `PendingTerminal.rightTab: "git"` 直达终端页改动面板；只提醒不阻断。对话页项目筛选下按卡片分组 + meta 行「▤ 卡片名」chip
   （点击经一次性 `selectProjectReq` 跳工作区页选中项目，WorkspacesPage 消费）+ ⋯「移到卡片…」（仅项目筛选下显示）。
   评审合并成功横幅「▶ 开始下一步」旁「沉淀到下一步」：评审结论 → 下一步步骤的首张卡片（无则以步骤名 create_task_card）
   → save_task_brief 钉入，成功提示 10s 自收。**认领机制（聊想法/开工/继续发起前）**：`card_claims` 表 +
   `claim_next_session_for_card` command——按 agent+cwd 登记（同键覆盖，created_at 时间口径排除登记前旧会话），
   会话扫描时（`apply_card_claims`，list_sessions 内 apply_handoff 之后）固化进 `session_meta.task_id` 并消费登记，
   口径与 handoff_links 一致；认领 cwd 恒为项目根（工作区会话 project_path 已改写为真实仓库）；登记失败静默降级，
-  对话页手动归卡兜底。卡片行「聊想法」= 项目根开终端预填「我想跟你探讨：<卡片名>」（不建工作区，想法期不动手）；
+  对话页手动归卡兜底。卡片行「聊想法」= 项目根开终端预填「我想跟你探讨：<卡片名>」（不建工作区，想法期不动手）。
+  **想法期只读保护**（v3.66，settings.json `discussReadonly`，卡片区标题行就地开关、默认开，设置页不加行）：
+  开 = 预填指令带「只讨论不动文件」约束 + `PendingTerminal.readonly` → pty_spawn 注入注册表
+  `readonly_args`（`agents::readonly_launch_args`；claude/codebuddy `--permission-mode plan`、codex `-s read-only`
+  替换默认 workspace-write、gemini `--approval-mode plan`、kimi/cursor `--plan`；qwen/opencode 无据只有软约束，
+  支持矩阵见 matrix 跨 agent 共性结论 §6）；卡片 ⋯「聊想法（允许改文件）」= 不动开关的单次豁免（开关关时不渲染）。
   新卡片（无简报）常驻主按钮 = 聊想法，已有简报 = 开工/继续常驻、聊想法收 ⋯。
 
 ## 其他
+
+- **上游漂移提醒（v3.63，启发式非硬状态）**：`stale_upstream_for`（workspaces.rs）——步骤 k 的任一上游步骤
+  （序号更小，steps[].workspace_name 绑定工作区）晚于本步「最后推进时间」（已合并取 merged_at、未合并取
+  created_at；now_iso 定宽串字典序即时间序）发生合并 → `WorkspaceDto.staleUpstream` 回填最晚合并的上游步骤名
+  （仅 list_workspaces 计算）；本步再次合并自然恢复新鲜，不加状态位。前端三处同文案警告色提醒（步进器悬浮卡 /
+  任务行状态详情 / 评审覆盖层顶部），只提醒不阻断。
+- **评审「沉淀到下一步」与 DigestPicker 定稿页同一形态**（v3.63）：AI 起草 → 人定稿 → 落盘钉卡；「◈ AI 起草」
+  走 `ai_distill_review`（上下文 = 本步提交清单 + diff numstat + TASK.md），**功能键复用 `digest` 不新增设置项**，
+  说明行措辞统一「AI 初稿，改完定稿后才会落盘」；失败行内报错可重试，不静默降级。
+- **评审「可信度」行**（v3.63）：`check_citation_health`（citation.rs，纯 Rust 无 AI）扫 .md 引用键
+  （`[@key]`/`[@k1; @k2]`/`[-@key]`；保守口径——项必须以 `[-]@key` 起头，带前缀的 `[cf. @k]` 不收）对照
+  references.bib（根目录优先、其次 manuscript/）+ 产物 X/Y 摘要（复用 ArtifactChecklist 定位机制）；
+  无 bib/全文无引用/无预期产物时不渲染，进评审一次性读取不轮询。
 
 - **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不在逻辑里写死「文献/数据/
   论文」概念。

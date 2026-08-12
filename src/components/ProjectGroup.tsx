@@ -11,10 +11,11 @@ import ArtifactChecklist, {
   formatSize,
 } from "./ArtifactChecklist";
 import TaskCardsSection from "./TaskCardsSection";
+import KickoffConfirmDialog from "./KickoffConfirmDialog";
 import { Checkbox, hoverRevealClass } from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
-import { startPipelineStep } from "../pipeline-start";
+import { startPipelineStep, type TaskBriefRef } from "../pipeline-start";
 import { normSep } from "../path-utils";
 import type { RunOverviewInput } from "../run-overview";
 import type {
@@ -40,7 +41,8 @@ const fieldSm =
 /** 步进器带级整条虚线链：真实 6×6px 方块按 12px 等距（6px 块 + 6px 间隙）铺满整个带宽。
  *  块位以圆心为锚分段计算（圆是列中心，列等宽，段长相等）——每个圆两侧的断口、
  *  每个步骤之间的块数与间隙严格一致（按全局相位铺排时圆会随机截断方块，用户反馈不规则）。
- *  段内余数（<12px）：步骤间段落对称均分、首段沉到最左端、尾段沉到最右端（菱形前）。
+ *  段内余数（<12px）：步骤间段落对称均分、首段沉到最左端、尾段沉到末圆旁——
+ *  末端方块贴齐链尾，菱形前保持 6px 标准间隙（余数若沉菱形前，该间隙最大 17px，用户反馈过远）。
  *  完成列区间内的块亮灰白（l2）、其余暗（hairline），300ms 颜色过渡 */
 const NODE_HALF = 17; // 圆遮罩半宽：22px 视觉圆（半径 11）+ 6px 语义空档——与块间间隙精确相等
 function StepperChain({
@@ -73,10 +75,11 @@ function StepperChain({
       const len = end - start;
       const m = Math.max(0, Math.floor((len + 6) / 12));
       if (m === 0) continue;
-      // 段内余数：首尾段贴圆（余数落带缘），中间段对称均分——每段布局完全相同
+      // 段内余数：首段贴圆（余数落左带缘）、尾段贴菱形（余数落末圆旁，末端方块贴齐链尾），
+      // 中间段对称均分——中间段布局完全相同
       const extra = len - (12 * m - 6);
       const offset =
-        seg === 0 ? extra : seg === nSteps ? 0 : Math.floor(extra / 2);
+        seg === 0 || seg === nSteps ? extra : Math.floor(extra / 2);
       for (let b = 0; b < m; b++) {
         const left = start + offset + b * 12;
         const xCenter = left + 3;
@@ -138,9 +141,12 @@ function useHoverTip(ref: React.RefObject<HTMLElement | null>) {
 function HoverTip({
   tip,
   text,
+  warn,
 }: {
   tip: { x: number; y: number } | null;
   text: string;
+  /** 警告色小字行（如上游漂移提醒），附加在正文之后 */
+  warn?: string | null;
 }) {
   if (!tip) return null;
   return (
@@ -150,6 +156,7 @@ function HoverTip({
       style={{ left: tip.x, top: tip.y }}
     >
       {text}
+      {warn && <div className="text-warn-text">{warn}</div>}
     </div>
   );
 }
@@ -162,6 +169,7 @@ function HoverTip({
 function StepperCell({
   circleClass,
   circleTitle,
+  circleWarn,
   circleLabel,
   circleDisabled,
   pulsing,
@@ -170,6 +178,8 @@ function StepperCell({
 }: {
   circleClass: string;
   circleTitle: string;
+  /** 悬浮卡内的警告色小字行（上游漂移提醒等），null/缺省不显示 */
+  circleWarn?: string | null;
   circleLabel: string;
   circleDisabled: boolean;
   pulsing: boolean;
@@ -214,7 +224,7 @@ function StepperCell({
             className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-warn"
           />
         )}
-        <HoverTip tip={tip} text={circleTitle} />
+        <HoverTip tip={tip} text={circleTitle} warn={circleWarn} />
       </span>
     </li>
   );
@@ -376,8 +386,26 @@ export default function ProjectGroup({
     };
   }, [project, refreshToken]);
 
-  /** 全量写回 resources/steps（后端保留未知键）；失败只报错不回滚本地状态 */
-  async function saveConfig(next: ProjectConfigDto): Promise<boolean> {
+  // 主仓脏检查：进项目详情读一次 + 页面刷新时重读，不轮询（开工弹层打开时会再刷新一次）
+  useEffect(() => {
+    if (!project) {
+      setMainDirty(null);
+      return;
+    }
+    let stale = false;
+    invoke<{ isRepo: boolean; files: unknown[] }>("git_status", {
+      cwd: project.path,
+    })
+      .then((status) => {
+        if (!stale) setMainDirty(status.isRepo ? status.files.length : null);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [project, refreshToken]);
+
+  /** 全量写回 resources/steps（后端保留未知键）；失败只报错不回滚本地状态 */  async function saveConfig(next: ProjectConfigDto): Promise<boolean> {
     if (!project) return false;
     try {
       await invoke("write_project_config", { path: project.path, config: next });
@@ -474,6 +502,13 @@ export default function ProjectGroup({
 
   // ===== 流水线 strip =====
   const [starting, setStarting] = useState<number | null>(null);
+  // 开工确认弹层（v3.64）：步进器大圆与卡片「开工」的唯一开工入口
+  const [kickoff, setKickoff] = useState<{
+    index: number;
+    originCardId: string | null;
+  } | null>(null);
+  // 主仓未提交改动数（null = 非 git 仓库/读取失败）：卡片区提醒行用，进项目详情读一次不轮询
+  const [mainDirty, setMainDirty] = useState<number | null>(null);
   const [stepMenu, setStepMenu] = useState<{
     x: number;
     y: number;
@@ -500,9 +535,14 @@ export default function ProjectGroup({
   const [tplSaving, setTplSaving] = useState(false);
   const [tplSavedMsg, setTplSavedMsg] = useState<string | null>(null);
 
-  /** 一键开步（§11.3 机制三）：invoke 链路在 pipeline-start.ts 与评审「开始下一步」共用，此处只管组件态；
-   *  briefPath = 任务卡「开工」带入的定稿简报（相对项目根），注入 TASK.md */
-  async function startStep(index: number, briefPath?: string) {
+  /** 一键开步（§11.3 机制三）：invoke 链路在 pipeline-start.ts 与评审「开始下一步」共用，此处只管组件态。
+   *  v3.64 起「开工」为两步：先开 KickoffConfirmDialog（TASK.md 预览 + 简报来源勾选 + 融合），
+   *  确认后本函数才执行建工作区链路；briefs = 弹层确认（或融合定稿）的简报引用 */
+  async function runStartStep(
+    index: number,
+    briefs?: TaskBriefRef[],
+    taskMdOverride?: string,
+  ) {
     if (!project || !cfg) return;
     const step = cfg.steps[index];
     setStarting(index);
@@ -511,7 +551,8 @@ export default function ProjectGroup({
         projectPath: project.path,
         step,
         cfg,
-        briefPath,
+        briefs,
+        taskMdOverride,
         onError,
         // 刷新先于跳终端：run 脚本写入在工作区行刷新之前，「运行脚本」菜单当次即可见
         onOpenTerminal: async (ws, initialPrompt) => {
@@ -524,6 +565,12 @@ export default function ProjectGroup({
     } finally {
       setStarting(null);
     }
+  }
+
+  /** 「开工」第一步：打开确认弹层（originCardId = 卡片开工的出处卡；步进器大圆为 null） */
+  function startStep(index: number, originCardId: string | null = null) {
+    if (!project || !cfg) return;
+    setKickoff({ index, originCardId });
   }
 
   async function restoreWs(ws: WorkspaceDto) {
@@ -1230,6 +1277,11 @@ export default function ProjectGroup({
                             ? "该步骤未配置工作区名，请在「编辑流水线」中补充"
                             : circleTitle
                         }
+                        circleWarn={
+                          st.ws?.staleUpstream
+                            ? `上游「${st.ws.staleUpstream}」有更新，产物可能过期`
+                            : null
+                        }
                         circleLabel={`${step.name}：${statusLabel}`}
                         circleDisabled={circleDisabled}
                         pulsing={starting === i}
@@ -1279,9 +1331,11 @@ export default function ProjectGroup({
         <TaskCardsSection
           projectPath={projectPath}
           steps={cfg.steps}
+          cfg={cfg}
           workspaces={workspaces}
           refreshToken={refreshToken}
-          onStartStep={(index, briefPath) => startStep(index, briefPath)}
+          mainDirty={mainDirty}
+          onStartStep={(index, originCardId) => startStep(index, originCardId)}
         />
       )}
 
@@ -1589,6 +1643,22 @@ export default function ProjectGroup({
           repoPath={project.path}
           wsSteps={wsStepMap}
           onClose={() => setHistoryOpen(false)}
+        />
+      )}
+      {/* 开工确认弹层：确认后才走建工作区链路（runStartStep） */}
+      {kickoff && project && cfg && cfg.steps[kickoff.index] && (
+        <KickoffConfirmDialog
+          projectPath={project.path}
+          step={cfg.steps[kickoff.index]}
+          cfg={cfg}
+          originCardId={kickoff.originCardId}
+          busy={starting !== null}
+          onCancel={() => setKickoff(null)}
+          onConfirm={(briefs, taskMd) => {
+            const index = kickoff.index;
+            setKickoff(null);
+            void runStartStep(index, briefs, taskMd);
+          }}
         />
       )}
     </section>

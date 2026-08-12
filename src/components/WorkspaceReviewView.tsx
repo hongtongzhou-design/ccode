@@ -15,6 +15,7 @@ import {
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
 import ImagePairView, { isImagePath } from "./ImagePairView";
+import { loadArtifactRows } from "./ArtifactChecklist";
 import { Checkbox, LoadingRows } from "./PageFrame";
 import { defaultCommitMessage } from "../git-commit-message";
 import {
@@ -24,6 +25,7 @@ import {
 import { cardForStep } from "../task-cards";
 import { useAppStore } from "../store";
 import type {
+  CitationHealthDto,
   GitCommitResultDto,
   GitFileDto,
   ProjectConfigDto,
@@ -963,6 +965,19 @@ export default function WorkspaceReviewView({
   const [distillText, setDistillText] = useState("");
   const [distillBusy, setDistillBusy] = useState(false);
   const [distillMsg, setDistillMsg] = useState<string | null>(null);
+  // 「◈ AI 起草」：ai_distill_review（功能键复用 digest）填初稿，人定稿后才落盘
+  const [distillDrafting, setDistillDrafting] = useState(false);
+  const [distillDraftError, setDistillDraftError] = useState<string | null>(null);
+  // 可信度证据（进评审一次性读取，不轮询；失败静默降级为不显示）：
+  // 引用健康（.md 引用键 vs references.bib）+ 产物核验摘要（复用 ArtifactChecklist 的定位机制）
+  const [citations, setCitations] = useState<CitationHealthDto | null>(null);
+  const [citeExpanded, setCiteExpanded] = useState(false);
+  const [artifacts, setArtifacts] = useState<{
+    produced: number;
+    total: number;
+  } | null>(null);
+  // 上游漂移提醒：上游步骤晚于本步最后推进时间合并 → 产物可能过期（list_workspaces 顺带取回）
+  const [staleUpstream, setStaleUpstream] = useState<string | null>(null);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
   const [message, setMessage] = useState("");
@@ -1071,6 +1086,11 @@ export default function WorkspaceReviewView({
     setMergeDone(false);
     setNextStep(null);
     setNextError(null);
+    setCitations(null);
+    setCiteExpanded(false);
+    setArtifacts(null);
+    setStaleUpstream(null);
+    setDistillDraftError(null);
     setUnmerged(null);
     setConflictFiles([]);
     setConflictContents({});
@@ -1085,7 +1105,7 @@ export default function WorkspaceReviewView({
   }, [worktreePath]);
 
   // merged_at 不在 diff/health DTO 上，按工作区单独取一次，用于「已合并」按钮态；
-  // 顺带取所属主仓库路径，供主仓脏拦截的内联快速提交使用
+  // 顺带取所属主仓库路径（主仓脏拦截的内联快速提交）与上游漂移提醒（staleUpstream）
   useEffect(() => {
     const workspaceId = diff?.workspaceId;
     if (!workspaceId) return;
@@ -1094,9 +1114,49 @@ export default function WorkspaceReviewView({
         const workspace = list.find((entry) => entry.id === workspaceId);
         setMergedAt(workspace?.mergedAt ?? null);
         setRepoPath(workspace?.repoPath ?? null);
+        setStaleUpstream(workspace?.staleUpstream ?? null);
       })
       .catch(() => {});
   }, [diff?.workspaceId]);
+
+  // 可信度证据：进评审一次性读取（不轮询）。引用健康扫工作树；产物按绑定步骤的
+  // 预期清单在工作树定位（同 ArtifactChecklist 机制）。任一路失败静默降级（行不显示）。
+  useEffect(() => {
+    const workspaceId = diff?.workspaceId;
+    if (!workspaceId) return;
+    let stale = false;
+    invoke<CitationHealthDto>("check_citation_health", { path: worktreePath })
+      .then((value) => {
+        if (!stale) setCitations(value);
+      })
+      .catch(() => {});
+    void (async () => {
+      try {
+        const list = await invoke<WorkspaceDto[]>("list_workspaces");
+        const workspace = list.find((entry) => entry.id === workspaceId);
+        if (!workspace) return;
+        const read = await invoke<ProjectConfigReadDto>("read_project_config", {
+          path: workspace.repoPath,
+        });
+        const step = read.config.steps.find(
+          (s) => s.workspaceName === workspace.name,
+        );
+        if (!step || step.expectedArtifacts.length === 0) return;
+        const rows = await loadArtifactRows(step.expectedArtifacts, worktreePath);
+        if (!stale) {
+          setArtifacts({
+            produced: rows.filter((row) => row.files.length > 0).length,
+            total: rows.length,
+          });
+        }
+      } catch {
+        /* 静默降级 */
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+  }, [diff?.workspaceId, worktreePath]);
 
   // 合并成功后定位流水线下一步：当前步 = 与本工作区同名的步骤；
   // 下一步 = 其后第一个尚未开步的步骤（同仓库存在同名工作区 = 已开过，含已归档）。
@@ -1164,6 +1224,25 @@ export default function WorkspaceReviewView({
       setNextError(String(reason));
     } finally {
       setNextBusy(false);
+    }
+  }
+
+  /** 「◈ AI 起草」：本步提交清单 + diff 统计 + TASK.md → 初稿填入编辑框；
+   *  失败行内报错可重试，不静默降级（功能键复用设置页 digest 专用 profile） */
+  async function draftDistill() {
+    if (!diff || !nextStep || distillDrafting) return;
+    setDistillDrafting(true);
+    setDistillDraftError(null);
+    try {
+      const draft = await invoke<string>("ai_distill_review", {
+        id: diff.workspaceId,
+        stepName: nextStep.step.name,
+      });
+      setDistillText(draft.trim());
+    } catch (reason) {
+      setDistillDraftError(`${reason}（检查设置页「AI 专用配置」是否可用）`);
+    } finally {
+      setDistillDrafting(false);
     }
   }
 
@@ -2068,7 +2147,65 @@ export default function WorkspaceReviewView({
             )}
           </div>
         )}
+
+        {/* 可信度行：引用解析（bib 对照）+ 产物核验摘要。无 bib/全文无引用/无预期产物时不渲染，
+            不给非写作类项目添噪声；数据进评审时一次性读取，失败静默降级 */}
+        {diff &&
+          ((citations && citations.bibFound && citations.totalRefs > 0) ||
+            (artifacts && artifacts.total > 0)) && (
+            <div className="border-t border-hairline px-3 py-1.5 text-xs">
+              <div className="flex min-h-6 items-center gap-3">
+                <span className="shrink-0 text-l4">可信度</span>
+                {citations && citations.bibFound && citations.totalRefs > 0 && (
+                  <button
+                    type="button"
+                    disabled={citations.missing.length === 0}
+                    onClick={() => setCiteExpanded((v) => !v)}
+                    title={
+                      citations.missing.length > 0
+                        ? "点击查看缺失的引用键"
+                        : "文中引用键均能在 references.bib 中找到"
+                    }
+                    className={`shrink-0 rounded px-1 ${
+                      citations.missing.length > 0
+                        ? "text-warn-text hover:bg-white/5"
+                        : "text-l3"
+                    } disabled:cursor-default`}
+                  >
+                    引用 {citations.resolved}/{citations.totalRefs} 可解析
+                    {citations.missing.length > 0 &&
+                      `（缺 ${citations.missing.length}）`}
+                  </button>
+                )}
+                {artifacts && artifacts.total > 0 && (
+                  <span
+                    className={`shrink-0 ${
+                      artifacts.produced < artifacts.total
+                        ? "text-warn-text"
+                        : "text-l3"
+                    }`}
+                  >
+                    产物 {artifacts.produced}/{artifacts.total} 已产出
+                  </span>
+                )}
+              </div>
+              {citeExpanded && citations && citations.missing.length > 0 && (
+                <p className="mt-1 break-all font-mono text-[11px] text-warn-text">
+                  缺失引用键：{citations.missing.join("、")}
+                </p>
+              )}
+            </div>
+          )}
       </header>
+
+      {/* 上游漂移提醒（启发式，只提醒不阻断）：上游步骤晚于本步最后推进时间合并，
+          本步合并后（merged_at 推进）自然恢复新鲜 */}
+      {staleUpstream && !mergeDone && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn-text" />
+          <span>上游「{staleUpstream}」有更新，产物可能过期</span>
+        </div>
+      )}
 
       {diff && !conflictMode && blockers.length > 0 && (
         <div className="shrink-0 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
@@ -2176,6 +2313,34 @@ export default function WorkspaceReviewView({
           onSubmit={(e) => void submitDistill(e)}
           className="shrink-0 border-b border-hairline bg-inset px-3 py-2"
         >
+          {/* 与 DigestPicker 定稿页同一措辞：AI 初稿，改完定稿后才落盘 */}
+          <div className="mb-1.5 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void draftDistill()}
+              disabled={distillDrafting || distillBusy}
+              title="按本步提交与 TASK.md 起草沉淀初稿（可再改）"
+              className="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+            >
+              {distillDrafting ? "◈ 起草中…" : "◈ AI 起草"}
+            </button>
+            <span className="min-w-0 flex-1 truncate text-[11px] text-l4">
+              AI 初稿，改完定稿后才会落盘（钉到「{nextStep.step.name}
+              」的任务卡）
+            </span>
+          </div>
+          {distillDraftError && (
+            <p className="mb-1.5 text-xs text-err-text">
+              ✗ {distillDraftError}
+              <button
+                type="button"
+                onClick={() => void draftDistill()}
+                className="ml-2 rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1"
+              >
+                重试
+              </button>
+            </p>
+          )}
           <textarea
             className="w-full rounded-md border border-field bg-canvas px-2 py-1.5 text-[13px] leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
             rows={4}

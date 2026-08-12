@@ -166,8 +166,18 @@ export interface WorkspaceDto {
   archivedAt: string | null;
   /** 「合并（保留工作区）」后置位：已合并进基准分支的时间；继续提交后按 ahead>0 隐藏 */
   mergedAt: string | null;
+  /** 上游漂移提醒（启发式）：上游步骤晚于本步最后推进时间合并时，回填该上游步骤名 */
+  staleUpstream: string | null;
   /** 仅创建时返回：setup 脚本执行结果（失败不阻断创建） */
   setupResult: SetupResultDto | null;
+}
+
+/** 引用健康检查（check_citation_health）：.md 引用键对照 references.bib 的可解析统计 */
+export interface CitationHealthDto {
+  totalRefs: number;
+  resolved: number;
+  missing: string[];
+  bibFound: boolean;
 }
 
 /** 端口运行时监控（portwatch.rs）：一条 LISTEN 端口及其归属 */

@@ -122,6 +122,11 @@
 3. **注入模式没有统一三件套**——Claude/Gemini/Qwen(openai 协议）/旧 Kimi/CodeBuddy 有标准 env；Codex 靠 `-c` 参数；OpenCode 靠 `OPENCODE_CONFIG_CONTENT`；新 Kimi 靠 `KIMI_MODEL_*` 合成通道；Cursor 是 env（key/端点）+ flag（模型）混合。`launch_plan { env, args }` 抽象覆盖了全部八种情况。
 4. **前六家都有整体搬迁环境变量**（`CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`GEMINI_CLI_HOME`/`QWEN_HOME`/`KIMI_CODE_HOME`/`KIMI_SHARE_DIR`；CodeBuddy 未核实）——可做「完全隔离 profile」的进阶功能，但会连会话历史一起隔离，MVP 不用。
 5. **都支持非交互模式**——为「绕过终端直接驱动 agent」留了路。
+6. **只读/计划模式参数（2026-08-12 本机 `--help` 实测，「聊想法」想法期只读保护用）**：claude `--permission-mode plan`、
+   codex `-s read-only`（替换 Ccode 默认注入的 `-s workspace-write`，重复 -s 生效顺序未文档化故先剔除）、
+   gemini `--approval-mode plan`、kimi（新版）`--plan`、cursor `--plan`（= `--mode plan`）、codebuddy `--permission-mode plan`；
+   **qwen 0.21.1 无 approval/plan 类参数**（`--safe-mode` 只是禁用自定义配置，非只读）、opencode 未装无据——这两家只有 prompt 软约束。
+   注册表落点：`agent_specs.rs` 的 `AgentSpec.readonly_args`，应用逻辑 `agents::readonly_launch_args`。
 
 ## 9. MCP 配置分发调研（2026-08-10，八家全部经官方文档/源码/本机实测核实）
 

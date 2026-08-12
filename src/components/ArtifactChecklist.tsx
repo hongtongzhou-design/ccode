@@ -30,8 +30,9 @@ interface ArtifactRow {
 
 /** 预期产物条目逐个在 root 下定位——文件单列自身；
  *  目录列一层文件（只列文件不递归）；找不到返回空 files（UI 显示「尚未产出」）。
- *  list_dir 无根目录约束（只读列举），直接传绝对路径；仅在面板打开/手动刷新时调用，不进轮询 */
-async function loadArtifactRows(
+ *  list_dir 无根目录约束（只读列举），直接传绝对路径；仅在面板打开/手动刷新时调用，不进轮询。
+ *  评审覆盖层的「产物 X/Y 已产出」摘要也复用本函数（同一数据机制，不另造请求）。 */
+export async function loadArtifactRows(
   entries: string[],
   root: string,
 ): Promise<ArtifactRow[]> {

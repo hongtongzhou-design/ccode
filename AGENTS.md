@@ -76,13 +76,14 @@ docs/                        # 架构方案 + 八 CLI 适配参考（规格）
 src/                         # 前端 React + TS + Tailwind v4（vite 插件接入）
   pages/                     # 八页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
   components/                # WorkspaceReviewView、PipelineEditor、ProjectGroup/ProjectRail、ArtifactChecklist、TaskCardsSection、FileTree、
-                             # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker/DigestPicker 等
+                             # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker/DigestPicker、
+                             # KickoffConfirmDialog（开工确认弹层：TASK.md 预览 + 简报勾选/融合 + 主仓提醒） 等
   components/CommandPalette.tsx # ⌘K 面板
   pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES
-  pipeline-start.ts          # 一键开步共享链路（三处 TASK.md 同一出处）
+  pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras/readTaskBriefs 单一出处，弹层预览与落盘共用）
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
-  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/最新简报/会话按卡分组（tests/task-cards.test.ts）
+  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/最新简报/会话按卡分组/开工简报来源勾选（tests/task-cards.test.ts）
   notify.ts                  # 长任务 OS 通知（仅「待确认」跃迁 + 未聚焦 + 30s 去抖；「已回复」不通知）
   git-status-groups.ts       # 改动列表状态分组/白话双层纯逻辑
   git-commit-message.ts      # 空提交信息的本地默认信息生成
@@ -95,25 +96,28 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   profile-copy.ts            # profile 跨 agent 复制纯逻辑
   store.ts                   # zustand 状态
 src-tauri/src/
-  agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login）
-  agents.rs                  # 适配器分发入口 + resolve_binary 二进制解析（GUI 短 PATH 兜底）
+  agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数）
+  agents.rs                  # 适配器分发入口 + resolve_binary 二进制解析（GUI 短 PATH 兜底）+ readonly_launch_args（聊想法只读注入）
   profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
   global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）
-  projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox
+  projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
+                             # 项目移除三档（移除注册 / purge_project_traces 清除 Ccode 痕迹保留文件夹 / delete_project_dir）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用
   sessions.rs                # 会话浏览：八 agent 会话扫描/解析（Codex .zst、OpenCode SQLite/JSON）、session_meta、pin 快照、
                              # 会话删除、注意力分类（session_tail_state）、步骤名映射（RX3a）
   skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor 固定 copy）、四路导入、ZIP 导出、卸载备份、
-                             # 漂移检测 resync、create_skill/update_skill_content
+                             # 漂移检测 resync、create_skill/update_skill_content；内置技能种子（seed_builtin_skills：
+                             # include_str! 内嵌 src-tauri/resources/skills/ 14 个技能，启动幂等播种，不覆盖/不复活用户改动）
   mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §9）：统一模型→八家映射、读-改-写一个键/段 + 备份 +
                              # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文）
   usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径
   pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
-  settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力
+  settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力/想法期只读保护
   claude_hooks.rs            # 精确注意力标记：写/移除 ~/.claude/settings.json hooks 段；事件日志按 session_id 取最新
   fonts.rs                   # 终端字体打包与 brew 一键安装（Maple/Sarasa/Iosevka）
-  ai.rs                      # 无头 AI 调用层：一次性 prompt + 提交信息/摘要/PR 描述/冲突建议/提炼接力简报生成
+  ai.rs                      # 无头 AI 调用层：一次性 prompt + 提交信息/摘要/PR 描述/冲突建议/提炼接力简报/评审沉淀起草生成
+  citation.rs                # 引用健康检查：.md 引用键（[@key]/多键/[-@key]）对照 references.bib（白名单同 pdf.rs 口径）
   handoff.rs                 # 接力（§11.3 机制四）：简报生成（脱敏+64KB）、提炼接力（build_session_digest，AI 蒸馏全会话）、
                              # handoff_links 接力链登记/固化
   workspaces.rs              # 任务工作区（§6.10）：worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT、
@@ -121,7 +125,7 @@ src-tauri/src/
   portwatch.rs               # 端口监控：LISTEN 列表、归属标注（cwd 最长前缀，回落 CCODE_PORT 段）、校验后 SIGTERM
   ws_settings.rs             # .ccode/settings.toml 三层合并（用户→仓库→local）；开步自动写 quarto 渲染脚本
   git_info.rs                # git 状态/累计 diff/逐 hunk/勾选提交临时索引
-  fs_tree.rs                 # 文件树与文件操作（重要路径删除保护，canonicalize 双校验）
+  fs_tree.rs                 # 文件树与文件操作（删除走系统回收站 trash；重要路径删除保护，canonicalize 双校验）
   pdf.rs                     # PDF/docx 字节读取：read_pdf_bytes 白名单 + canonicalize + 上限，base64 传输
   updater.rs                 # CLI 安装/更新（brew TUNA、npm_for 同目录 npm）+ 应用自身 Tauri updater
   logbuf.rs                  # 诊断日志环形缓冲
@@ -140,8 +144,8 @@ src-tauri/src/
   `NO_COLOR` 必须 `env_remove`；`TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Ccode` 必须显式设置。
 - **会话文本出站前必须在 Rust 层脱敏**：标题/摘要、结构化回放、AI 摘要、Markdown 导出均不得把已保存密钥或常见密钥前缀
   送到 React；只作用于 DTO/导出副本，不得回写会话源文件；前端遮盖不是安全边界。
-- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作（设为全局默认、Claude hooks 注意力开关、会话删除、工作树文件删除，
-  四类均有备份/白名单防护口径，见 `docs/conventions/safety.md`）。
+- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作（设为全局默认、Claude hooks 注意力开关、会话删除、工作树文件删除——
+  工作树文件删除走系统回收站（trash crate）可反悔，四类均有备份/白名单防护口径，见 `docs/conventions/safety.md`）。
 - **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底；新增 CLI/工具调用点一律
   用它，禁直接 `which::which` 或裸名 spawn（候选目录清单见 `docs/conventions/safety.md` 对应实现 `agents.rs`）。
 - 三平台兼容：禁写平台特定路径，用 `dirs`/`keyring`/`portable-pty` 的抽象。
@@ -179,11 +183,11 @@ src-tauri/src/
   批改（选段「◈ 讨论/改写此段」）；界面白话双层 + 工作区页/列表精简
 - **P5 通用层打磨（部分 ✅）**：逐 hunk 验收 ✅、跨标签聚合视图 ✅、成本按工作区归因 ✅、历史时间线视图 ✅（first-parent
   主线 + 白话翻译：✓ 验收合并/⚙ 自动保存/◔ 保存）、**Claude Code hooks 精确注意力标记 ✅**（设置页显式开关，claude_hooks.rs，
-  见架构 v3.32）；批量验收、云端会话双源调研留 backlog
+  见架构 v3.32）、**内置技能种子 ✅**（v3.64：14 个内置技能 = 9 个原有补强 + 5 个外部仓库内化，include_str! 播种、不覆盖不复活，
+  五套流水线模板按步骤挂载）；批量验收、云端会话双源调研留 backlog
 - **Backlog（记录不动手）**：SSH 远程执行、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后
   评估）、批量验收、云端会话双源调研、首启引导完整版（示例课题最小版已落地：工作区空态「✦ 创建示例课题（演示）」→
-  `create_demo_project`，演示 PDF/引文/综述流水线齐备；完整版引导的更丰富演示数据留 backlog）、工作区类型驱动默认值（数据类跳端口）、
-  内置技能种子机制（**等用户把现有技能优化完善后再做**：目前六个技能只在本机库，应用无内置/首启导入机制）
+  `create_demo_project`，演示 PDF/引文/综述流水线齐备；完整版引导的更丰富演示数据留 backlog）、工作区类型驱动默认值（数据类跳端口）
 
 **当前待办**：
 

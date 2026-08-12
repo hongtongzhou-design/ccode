@@ -33,6 +33,9 @@ pub struct WorkspaceDto {
     pub archived_at: Option<String>,
     /// 已合并进基准分支的时间（仅「合并（保留工作区）」后置位；继续提交后前端按 ahead>0 隐藏）
     pub merged_at: Option<String>,
+    /// 上游漂移提醒（启发式，非硬状态）：序号更小的上游步骤晚于本步「最后推进时间」
+    /// 发生合并时，回填该上游步骤名（见 stale_upstream_for）；仅 list_workspaces 计算
+    pub stale_upstream: Option<String>,
     /// 仅创建时填充：setup 脚本的执行结果（W2）；查询路径一律 None
     pub setup_result: Option<SetupResultDto>,
 }
@@ -139,8 +142,41 @@ fn row_to_dto(
         created_at,
         archived_at,
         merged_at,
+        stale_upstream: None,
         setup_result: None,
     }
+}
+
+/// 上游漂移（纯逻辑，启发式提醒非硬状态）：步骤 k 的任一上游步骤（序号更小）晚于本步
+/// 「最后推进时间」发生合并 → 返回最晚合并的上游步骤名，否则 None。
+/// 最后推进时间口径：本步工作区已合并取 merged_at，未合并取 created_at。
+/// 时间戳均为 now_iso 定宽 UTC 串，字典序即时间序。
+/// workspaces 需先按同仓库过滤；步骤-工作区绑定 = steps[].workspace_name 匹配工作区名。
+pub(crate) fn stale_upstream_for(
+    steps: &[crate::projects::StepDto],
+    workspaces: &[WorkspaceDto],
+    step_index: usize,
+) -> Option<String> {
+    let step = steps.get(step_index)?;
+    let target_ws = workspaces.iter().find(|w| w.name == step.workspace_name)?;
+    let last_progress = target_ws
+        .merged_at
+        .as_deref()
+        .unwrap_or(&target_ws.created_at);
+    let mut best: Option<(&str, &str)> = None; // (merged_at, 步骤名)
+    for step in &steps[..step_index] {
+        let Some(upstream_ws) = workspaces.iter().find(|w| w.name == step.workspace_name)
+        else {
+            continue;
+        };
+        let Some(merged_at) = upstream_ws.merged_at.as_deref() else {
+            continue;
+        };
+        if merged_at > last_progress && best.map_or(true, |(b, _)| merged_at > b) {
+            best = Some((merged_at, step.name.as_str()));
+        }
+    }
+    best.map(|(_, name)| name.to_string())
 }
 
 fn query_workspaces(conn: &Connection) -> Result<Vec<WorkspaceDto>, String> {
@@ -1365,6 +1401,32 @@ pub async fn list_workspaces() -> Result<Vec<WorkspaceDto>, String> {
                 .cmp(&(a.status != "active"))
                 .then(b.created_at.cmp(&a.created_at))
         });
+        // 上游漂移提醒：按仓库分组读一次 project.toml，逐步骤比对合并时间（启发式，读失败静默跳过）
+        let mut repos: Vec<String> = rows.iter().map(|w| w.repo_path.clone()).collect();
+        repos.sort_unstable();
+        repos.dedup();
+        for repo in repos {
+            let steps = crate::projects::read_config_at(Path::new(&repo)).config.steps;
+            if steps.is_empty() {
+                continue;
+            }
+            let repo_ws: Vec<WorkspaceDto> = rows
+                .iter()
+                .filter(|w| w.repo_path == repo)
+                .cloned()
+                .collect();
+            for index in 0..steps.len() {
+                let Some(stale) = stale_upstream_for(&steps, &repo_ws, index) else {
+                    continue;
+                };
+                if let Some(w) = rows
+                    .iter_mut()
+                    .find(|w| w.repo_path == repo && w.name == steps[index].workspace_name)
+                {
+                    w.stale_upstream = Some(stale);
+                }
+            }
+        }
         Ok(rows)
     })
     .await
@@ -2710,7 +2772,8 @@ fn register_artifact_impl(
 }
 
 /// 读项目根（或工作区根）的清单；缺失返回空，解析全程防御式容错
-fn read_artifacts_manifest_impl(root: &Path) -> Vec<ArtifactEntryDto> {
+/// （pub(crate)：ai.rs 的 ai_fuse_task_md 要把提货单清单喂给融合 prompt）
+pub(crate) fn read_artifacts_manifest_impl(root: &Path) -> Vec<ArtifactEntryDto> {
     let Ok(text) = fs::read_to_string(root.join(ARTIFACTS_FILE)) else {
         return Vec::new();
     };
@@ -2866,6 +2929,69 @@ mod tests {
             sanitize_name("我的").is_err(),
             "全非允许字符清洗后为空要拒绝"
         );
+    }
+
+    // ===== 上游漂移提醒（stale_upstream_for 纯逻辑） =====
+
+    fn ws_named(name: &str, created_at: &str, merged_at: Option<&str>) -> WorkspaceDto {
+        WorkspaceDto {
+            id: name.into(),
+            repo_path: "/r".into(),
+            repo_name: "r".into(),
+            name: name.into(),
+            branch: format!("ccode/{name}"),
+            worktree_path: format!("/wt/{name}"),
+            base_branch: "main".into(),
+            port_base: 0,
+            status: "active".into(),
+            created_at: created_at.into(),
+            archived_at: None,
+            merged_at: merged_at.map(String::from),
+            stale_upstream: None,
+            setup_result: None,
+        }
+    }
+
+    fn step(name: &str, workspace_name: &str) -> crate::projects::StepDto {
+        crate::projects::StepDto {
+            name: name.into(),
+            workspace_name: workspace_name.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stale_upstream_rules() {
+        let steps = vec![step("查文献", "lit"), step("做分析", "ana"), step("写论文", "write")];
+        // 无上游：第一步永不标
+        let ws = vec![
+            ws_named("lit", "2026-08-01T00:00:00Z", Some("2026-08-02T00:00:00Z")),
+            ws_named("ana", "2026-08-03T00:00:00Z", None),
+        ];
+        assert_eq!(stale_upstream_for(&steps, &ws, 0), None);
+        // 上游合并早于本步推进（本步未合并，推进时间=创建时间）：新鲜
+        assert_eq!(stale_upstream_for(&steps, &ws, 1), None);
+        // 上游晚于本步创建发生合并 → 标出上游步骤名
+        let ws = vec![
+            ws_named("lit", "2026-08-01T00:00:00Z", Some("2026-08-05T00:00:00Z")),
+            ws_named("ana", "2026-08-03T00:00:00Z", None),
+        ];
+        assert_eq!(stale_upstream_for(&steps, &ws, 1).as_deref(), Some("查文献"));
+        // 本步之后重新合并（merged_at 晚于上游合并）→ 恢复新鲜
+        let ws = vec![
+            ws_named("lit", "2026-08-01T00:00:00Z", Some("2026-08-05T00:00:00Z")),
+            ws_named("ana", "2026-08-03T00:00:00Z", Some("2026-08-06T00:00:00Z")),
+        ];
+        assert_eq!(stale_upstream_for(&steps, &ws, 1), None);
+        // 多个上游时标最晚合并的那个；未合并/未建工作区的上游不参与
+        let ws = vec![
+            ws_named("lit", "2026-08-01T00:00:00Z", Some("2026-08-04T00:00:00Z")),
+            ws_named("ana", "2026-08-01T00:00:00Z", Some("2026-08-05T00:00:00Z")),
+            ws_named("write", "2026-08-03T00:00:00Z", None),
+        ];
+        assert_eq!(stale_upstream_for(&steps, &ws, 2).as_deref(), Some("做分析"));
+        // 本步尚未创建工作区 / 步骤未绑定工作区名 → 不标
+        assert_eq!(stale_upstream_for(&steps, &ws[..2], 2), None);
     }
 
     #[test]

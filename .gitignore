@@ -29,3 +29,6 @@ src-tauri/gen
 
 # 参考实现镜像（不提交）
 .reference/
+
+# Ccode 接力简报（过程文件，不进版本库）
+.ccode/handoff-*.md

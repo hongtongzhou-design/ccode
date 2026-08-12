@@ -19,7 +19,7 @@ pub const FN_SUMMARIZE: &str = "summarize"; // ai_summarize_session（会话摘�
 pub const FN_PR: &str = "pr"; // ai_draft_pr（PR 描述起草）
 pub const FN_DISTILL: &str = "distill"; // ai_distill_skill（✦ 沉淀为技能）
 pub const FN_CONFLICT: &str = "conflict"; // ai_conflict_advice（冲突选侧建议）
-pub const FN_DIGEST: &str = "digest"; // build_session_digest（◈ 提炼接力）
+pub const FN_DIGEST: &str = "digest"; // build_session_digest（◈ 提炼接力）+ ai_distill_review（评审沉淀起草）
 // 「translate」由 JS 侧（技能页翻译）作为 ai_prompt 的 fnKey 显式传入，Rust 无字面引用
 #[allow(dead_code)]
 pub const FN_TRANSLATE: &str = "translate";
@@ -274,6 +274,85 @@ fn build_pr_prompt(log: &str, numstat: &str) -> String {
     )
 }
 
+/// 评审「沉淀到下一步」的 AI 起草 prompt（功能键复用 FN_DIGEST）：
+/// 本步的提交清单 + diff 统计 + TASK.md 简报 → 给下一步的定稿简报初稿（人改完才落盘钉卡）。
+fn build_review_distill_prompt(step_name: &str, task_brief: &str, log: &str, numstat: &str) -> String {
+    let brief_section = if task_brief.trim().is_empty() {
+        "（本步 TASK.md 未读到，按提交材料起草）".to_string()
+    } else {
+        cap_text(task_brief, DIFF_CAP)
+    };
+    format!(
+        "你在科研流水线的评审现场：步骤刚验收合并，要把评审结论沉淀成给下一步「{step_name}」的简报初稿，\
+         由人改完定稿后才落盘钉到任务卡。\n\
+         只输出中文 markdown 正文（不要解释、不要用代码块包裹全文），按以下小节组织：\n\
+         ## 本步验收结论\n## 关键决策与理由\n## 给下一步的要点\n## 风险与待办\n\
+         要求：只基于给出的材料，不要编造未出现的文件或结论；没有内容的小节写「（无）」。\n\n\
+         ## 本步 TASK.md 简报\n{brief_section}\n\n## git log --oneline\n{log}\n\n## diff --numstat\n{numstat}"
+    )
+}
+
+/// 「◈ 融合所选简报」prompt（功能键复用 FN_DIGEST）：多张任务卡的定稿简报融合成一份开工简报初稿。
+/// 核心取舍：各来源的关键决策/思路理由/已否决方向必须保留（这是简报的记忆价值），
+/// 来源间冲突不得擅自取舍、要显式列出由人拍板；末尾注明融合来源，便于回溯。
+fn build_fuse_briefs_prompt(briefs: &[(String, String)]) -> String {
+    let mut body = String::new();
+    for (label, text) in briefs {
+        body.push_str(&format!("## 简报《{label}》\n{}\n\n", cap_text(text, DIFF_CAP)));
+    }
+    format!(
+        "下面是同一科研步骤下多张任务卡的定稿简报（每张卡 = 一条想法线的沉淀）。\
+         请把它们融合成一份开工简报，供 Agent 据此自主执行该步骤。\n\
+         要求：各来源的关键决策、思路理由、已否决方向必须保留，不得只留结论丢掉为什么；\
+         来源之间有取舍冲突时不得擅自裁决，显式列出冲突点与各方理由，交给读者拍板；\
+         重复内容合并去重；正文之后另起「## 融合来源」小节，逐行列出融合了哪几份简报（用《》内的名字）。\n\
+         只输出中文 markdown 正文（不要解释、不要用代码块包裹全文）。\n\n{body}"
+    )
+}
+
+/// 「◈ 融合为连贯 TASK.md」prompt（功能键复用 FN_DIGEST）：模板简报是合同主干，
+/// 卡片简报的思想融入对应段落——不是段与段并列拼接（用户反馈拼接带去污染）。
+/// 提货单段已在 Rust 侧按 renderTaskMd 同款格式渲染好，要求 AI 原样保留在结尾。
+fn build_fuse_task_md_prompt(
+    step_name: &str,
+    step_brief: &str,
+    briefs: &[(String, String)],
+    manifest: &[crate::workspaces::ArtifactEntryDto],
+) -> String {
+    let mut cards = String::new();
+    for (label, text) in briefs {
+        cards.push_str(&format!("## 简报《{label}》\n{}\n\n", cap_text(text, DIFF_CAP)));
+    }
+    // 与前端 renderTaskMd「上一步产物（提货单）」段同格式：AI 只需原样照抄到结尾
+    let manifest_section = if manifest.is_empty() {
+        "（本步骤没有上一步产物提货单，最终文档不要提货单段）".to_string()
+    } else {
+        let mut s = String::from("## 上一步产物（提货单）\n");
+        for a in manifest {
+            s.push_str(&format!(
+                "- {}：{}（md5 {}，来自「{}」）\n",
+                a.name,
+                a.path,
+                a.hash.chars().take(8).collect::<String>(),
+                a.produced_by
+            ));
+        }
+        s.push_str("产物文件按路径直接读取，勿复制；新产物请通过改动面板登记进提货单。");
+        s
+    };
+    format!(
+        "你在为科研流水线的步骤「{step_name}」写最终的 TASK.md（新工作区里 Agent 自主执行的任务书）。\n\
+         输入是步骤模板简报（合同：做什么、交付什么）和若干张任务卡的定稿简报（想法期的决策与思路）。\n\
+         请输出一份**连贯的** TASK.md：以模板简报的交付要求为主干组织全文，把卡片简报里的关键决策、\
+         思路理由融入对应段落；去掉重复内容与过程性描述（寒暄、试错过程）；卡片简报中的「已否决方向」\
+         必须保留，写成约束（不得做 X，因为…）；来源间冲突不得擅自裁决，显式列出由读者拍板。\n\
+         格式：第一行 `# {step_name}`；只输出中文 markdown 正文（不要解释、不要用代码块包裹全文）；\
+         结尾原样保留给出的提货单段（逐字照抄，不要改写）。\n\n\
+         ## 步骤模板简报\n{}\n\n{cards}\n## 提货单段（结尾原样保留）\n{manifest_section}",
+        cap_text(step_brief, DIFF_CAP)
+    )
+}
+
 fn build_distill_skill_prompt(excerpt: &str) -> String {
     format!(
         "下面这段文字是用户与 AI 助手的一段交互摘录（用户纠正/指导了助手的做法）。\
@@ -519,6 +598,144 @@ pub async fn ai_draft_pr(store: tauri::State<'_, ProfileStore>, id: String) -> R
     .map_err(|e| e.to_string())?
 }
 
+/// 评审「沉淀到下一步」的 AI 起草：本步提交清单 + diff 统计 + TASK.md（读不到则省略）→ 初稿文本。
+/// 功能键复用 FN_DIGEST（同属「蒸馏简报」场景，不新增设置项）；输出脱敏后返回，
+/// 落盘仍由 save_task_brief 的 redact_and_cap 兜底。
+#[tauri::command]
+pub async fn ai_distill_review(
+    store: tauri::State<'_, ProfileStore>,
+    id: String,
+    step_name: String,
+) -> Result<String, String> {
+    let profiles = store.list()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = crate::workspaces::db()?;
+        let w = crate::workspaces::get_workspace(&conn, &id)?;
+        let wt = PathBuf::from(&w.worktree_path);
+        let base = crate::workspaces::base_ref(&wt, &w.base_branch);
+        let log = crate::workspaces::run_git(
+            &wt,
+            &["log", "--oneline", &format!("{base}..HEAD"), "-50"],
+            Duration::from_secs(30),
+        )?;
+        if log.trim().is_empty() {
+            return Err("分支上还没有提交，无法起草沉淀".into());
+        }
+        let mb = crate::workspaces::run_git(&wt, &["merge-base", &base, "HEAD"], Duration::from_secs(30))?;
+        let numstat = crate::workspaces::run_git(
+            &wt,
+            &["diff", "--numstat", &format!("{mb}..HEAD")],
+            Duration::from_secs(30),
+        )
+        .unwrap_or_default();
+        // TASK.md 是开步脚手架（不进 git），读不到不阻断起草
+        let task_brief = fs::read_to_string(wt.join("TASK.md")).unwrap_or_default();
+        let raw = ai_prompt_impl(
+            profiles,
+            None,
+            Some(FN_DIGEST),
+            build_review_distill_prompt(&step_name, &task_brief, &log, &numstat),
+        )?;
+        Ok(crate::sessions::redact_sensitive_text(&raw))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 读多份定稿简报全文（相对项目根）：逐份 canonicalize 根校验防越界；
+/// 总量控制——每份最多 8KB（build 层 cap_text 再收一道），总量 24KB（同提炼接力口径）
+fn read_briefs_capped(root: &std::path::Path, brief_paths: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut briefs: Vec<(String, String)> = Vec::new();
+    let mut budget = 24 * 1024;
+    for rel in brief_paths {
+        // 简报固定落在项目根 .ccode/ 下：逐份 canonicalize 校验防越界（防符号链接逃逸）
+        let path = root
+            .join(rel)
+            .canonicalize()
+            .map_err(|e| format!("简报不存在或不可读: {rel}: {e}"))?;
+        if !path.starts_with(root) {
+            return Err(format!("简报路径超出项目目录，拒绝读取: {rel}"));
+        }
+        let text = fs::read_to_string(&path)
+            .map_err(|e| format!("读取简报失败: {rel}: {e}"))?;
+        let label = PathBuf::from(rel)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| rel.clone());
+        let take = budget.min(text.len());
+        briefs.push((label, text[..take].to_string()));
+        budget = budget.saturating_sub(take);
+        if budget == 0 {
+            break;
+        }
+    }
+    Ok(briefs)
+}
+
+/// 「◈ 融合所选简报」（开工确认弹层）：读多份定稿简报全文 → AI 融合成一份开工简报初稿。
+/// 只返回草稿文本（脱敏），不落盘——定稿由前端走 save_task_brief 钉卡。
+/// 功能键复用 FN_DIGEST（同属蒸馏简报场景，不新增设置项）。
+#[tauri::command]
+pub async fn ai_fuse_briefs(
+    store: tauri::State<'_, ProfileStore>,
+    project_root: String,
+    brief_paths: Vec<String>,
+) -> Result<String, String> {
+    let profiles = store.list()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = crate::projects::ensure_task_project_root(PathBuf::from(
+            crate::sessions::expand_tilde(&project_root),
+        ).as_path())?;
+        if brief_paths.len() < 2 {
+            return Err("至少选择两份简报才能融合".into());
+        }
+        let briefs = read_briefs_capped(&root, &brief_paths)?;
+        let raw = ai_prompt_impl(profiles, None, Some(FN_DIGEST), build_fuse_briefs_prompt(&briefs))?;
+        Ok(crate::sessions::redact_sensitive_text(&raw))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 「◈ 融合为连贯 TASK.md」（开工确认弹层）：模板简报为主干 + 所选卡片简报融入 +
+/// 提货单清单 → 一份连贯的最终 TASK.md 草稿。脱敏返回不落盘——落盘由开工链路按
+/// 弹层编辑区最终内容写入（人拍板）。功能键复用 FN_DIGEST。
+#[tauri::command]
+pub async fn ai_fuse_task_md(
+    store: tauri::State<'_, ProfileStore>,
+    project_root: String,
+    step_name: String,
+    brief_paths: Vec<String>,
+) -> Result<String, String> {
+    let profiles = store.list()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = crate::projects::ensure_task_project_root(PathBuf::from(
+            crate::sessions::expand_tilde(&project_root),
+        ).as_path())?;
+        let cfg = crate::projects::read_config_at(&root).config;
+        let step = cfg
+            .steps
+            .iter()
+            .find(|s| s.name == step_name)
+            .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
+        let briefs = read_briefs_capped(&root, &brief_paths)?;
+        if briefs.is_empty() {
+            return Err("至少选择一份简报才能融合".into());
+        }
+        // 提货单段按 renderTaskMd 同款格式渲染，prompt 要求 AI 原样保留在结尾
+        let manifest = crate::workspaces::read_artifacts_manifest_impl(&root);
+        let raw = ai_prompt_impl(
+            profiles,
+            None,
+            Some(FN_DIGEST),
+            build_fuse_task_md_prompt(&step.name, &step.brief, &briefs, &manifest),
+        )?;
+        Ok(crate::sessions::redact_sensitive_text(&raw))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 选段「✦ 沉淀为技能」：把交互摘录提炼成技能草稿（前端预填新建技能 modal，保存仍走 create_skill）
 #[tauri::command]
 pub async fn ai_distill_skill(
@@ -747,8 +964,72 @@ mod tests {
     }
 
     #[test]
-    fn prompt_builders_contain_material_and_caps() {
-        let diff = "line\n".repeat(3000); // ~15KB > 8KB 上限
+    fn review_distill_prompt_carries_step_and_materials() {
+        let p = build_review_distill_prompt(
+            "写论文",
+            "# 任务\n做数据分析",
+            "abc123 feat: 分析",
+            "5\t1\tdata/out.csv",
+        );
+        for section in ["本步验收结论", "关键决策与理由", "给下一步的要点", "风险与待办"] {
+            assert!(p.contains(section), "缺小节 {section}");
+        }
+        assert!(p.contains("下一步「写论文」"));
+        assert!(p.contains("做数据分析"));
+        assert!(p.contains("abc123"));
+        assert!(p.contains("不要编造"));
+        // TASK.md 缺省时给明确占位，不留空段误导模型
+        let p = build_review_distill_prompt("写论文", "", "abc123 x", "");
+        assert!(p.contains("未读到"));
+    }
+
+    #[test]
+    fn fuse_briefs_prompt_preserves_reasoning_and_marks_sources() {
+        let p = build_fuse_briefs_prompt(&[
+            ("brief-a.md".into(), "# 甲\n用方案 A，因为快".into()),
+            ("brief-b.md".into(), "# 乙\n否决方案 A，太慢".into()),
+        ]);
+        assert!(p.contains("brief-a.md") && p.contains("brief-b.md"));
+        assert!(p.contains("用方案 A，因为快"));
+        // 关键决策/思路理由/已否决方向必须保留；冲突显式呈现不擅自裁决
+        assert!(p.contains("已否决方向"));
+        assert!(p.contains("冲突"));
+        assert!(p.contains("融合来源"));
+    }
+
+    #[test]
+    fn fuse_task_md_prompt_is_coherent_doc_with_verbatim_manifest() {
+        let manifest = vec![crate::workspaces::ArtifactEntryDto {
+            name: "图".into(),
+            path: "/p/fig1.pdf".into(),
+            hash: "abcdef012345".into(),
+            size: 10,
+            produced_by: "做分析".into(),
+            created_at: String::new(),
+        }];
+        let p = build_fuse_task_md_prompt(
+            "写论文",
+            "交付： manuscript 初稿",
+            &[("brief-a.md".into(), "否决了 X，因为太慢".into())],
+            &manifest,
+        );
+        assert!(p.contains("# 写论文"));
+        assert!(p.contains("交付： manuscript 初稿"));
+        assert!(p.contains("否决了 X，因为太慢"));
+        // 主干/融入/去过程化/已否决方向留约束/冲突不裁决/提货单原样
+        for kw in ["主干", "已否决方向", "冲突", "原样保留", "逐字照抄"] {
+            assert!(p.contains(kw), "缺要求 {kw}");
+        }
+        // 提货单段按 renderTaskMd 格式渲染（md5 截 8 位）
+        assert!(p.contains("## 上一步产物（提货单）"));
+        assert!(p.contains("图：/p/fig1.pdf（md5 abcdef01，来自「做分析」）"));
+        // 空提货单：明确不要该段
+        let p2 = build_fuse_task_md_prompt("写论文", "b", &[("a".into(), "t".into())], &[]);
+        assert!(p2.contains("没有上一步产物提货单"));
+    }
+
+    #[test]
+    fn prompt_builders_contain_material_and_caps() {        let diff = "line\n".repeat(3000); // ~15KB > 8KB 上限
         let p = build_commit_prompt(" M a.rs", "1\t0\ta.rs", &diff);
         assert!(p.contains("conventional commits"));
         assert!(p.contains(" M a.rs"));

@@ -94,3 +94,89 @@ export function groupSessionsByTask<
       list,
     }));
 }
+
+// ===== 开工确认弹层：简报来源勾选（纯逻辑，供 KickoffConfirmDialog 使用） =====
+
+/** 一个可勾选的简报来源：本步骤下含定稿简报的卡片 + 其最新简报（相对路径与落盘时间） */
+export interface BriefSource {
+  card: TaskCardDto;
+  /** 最新定稿简报（相对项目根） */
+  brief: string;
+  /** 简报落盘时间（ISO）；解析失败为 null，调用方省略时间展示 */
+  time: string | null;
+}
+
+/** 开工确认弹层的可选简报来源：本步骤卡片 + 未挂步骤卡片（含步骤改名后失效的卡——
+ *  它们多数就是在这个项目里聊的，理应可选）；只收含定稿简报的卡，按 sortCards 序 */
+export function briefSourcesForStep(
+  cards: TaskCardDto[],
+  stepName: string,
+  stepNames: string[],
+): BriefSource[] {
+  return sortCards(cards)
+    .filter(
+      (c) =>
+        c.briefs.length > 0 &&
+        (c.step === stepName || c.step === null || !stepNames.includes(c.step)),
+    )
+    .map((card) => ({
+      card,
+      brief: latestBrief(card)!,
+      time: briefTimeFromPath(latestBrief(card)!),
+    }));
+}
+
+/** 默认勾选：点开工的那张卡（含简报时）；否则唯一有简报的卡；多张且无出处卡时不勾（保持原步进器开工无简报口径） */
+export function defaultCheckedSources(
+  sources: BriefSource[],
+  originCardId: string | null,
+): Set<string> {
+  if (originCardId && sources.some((s) => s.card.id === originCardId)) {
+    return new Set([originCardId]);
+  }
+  if (sources.length === 1) return new Set([sources[0].card.id]);
+  return new Set();
+}
+
+/** 勾选集合 → 进 TASK.md 的简报引用列表（按卡片排序序，与弹层列表顺序一致） */
+export function checkedBriefRefs(
+  sources: BriefSource[],
+  checked: ReadonlySet<string>,
+): { path: string; cardName: string }[] {
+  return sources
+    .filter((s) => checked.has(s.card.id))
+    .map((s) => ({ path: s.brief, cardName: s.card.name }));
+}
+
+// ===== 开工弹层 TASK.md 编辑区（可编辑预览 + AI 融合）的纯状态机 =====
+
+/** text = 编辑区当前内容；dirty = 人编辑过或已填入 AI 融合结果（勾选变化的重拼不再覆盖） */
+export interface TaskMdEditorState {
+  text: string;
+  dirty: boolean;
+}
+
+export type TaskMdEditorEvent =
+  /** 默认拼装结果（初次加载/勾选变化）：仅 dirty=false 时生效 */
+  | { type: "assemble"; text: string }
+  /** 人工编辑 */
+  | { type: "edit"; text: string }
+  /** 「◈ 融合为连贯 TASK.md」结果填入 */
+  | { type: "fused"; text: string }
+  /** 恢复默认拼装 */
+  | { type: "reset"; text: string };
+
+export function taskMdEditorReduce(
+  state: TaskMdEditorState,
+  event: TaskMdEditorEvent,
+): TaskMdEditorState {
+  switch (event.type) {
+    case "assemble":
+      return state.dirty ? state : { text: event.text, dirty: false };
+    case "edit":
+    case "fused":
+      return { text: event.text, dirty: true };
+    case "reset":
+      return { text: event.text, dirty: false };
+  }
+}

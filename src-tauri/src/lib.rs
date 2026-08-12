@@ -1,6 +1,7 @@
 mod agent_specs;
 mod agents;
 mod ai;
+mod citation;
 mod claude_hooks;
 mod diagnostics;
 mod fonts;
@@ -40,6 +41,13 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(profiles::ProfileStore::new().expect("初始化 ProfileStore 失败"))
         .manage(pty::PtyManager::default())
+        // 内置技能种子：启动时把库里没有的内置技能补进去（幂等，不覆盖用户已有同名技能）
+        .setup(|_app| {
+            if let Err(e) = skills::seed_builtin_skills() {
+                logbuf::record("warn", "skills", &format!("内置技能播种失败: {e}"));
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             profiles::list_profiles,
             profiles::create_profile,
@@ -112,6 +120,7 @@ pub fn run() {
             fs_tree::fs_delete_path,
             pdf::read_pdf_bytes,
             pdf::read_docx_bytes,
+            citation::check_citation_health,
             git_info::git_status,
             git_info::git_file_diff,
             git_info::git_file_hunks,
@@ -162,6 +171,7 @@ pub fn run() {
             projects::register_project,
             projects::remove_project,
             projects::delete_project_dir,
+            projects::purge_project_traces,
             projects::read_project_config,
             projects::write_project_config,
             projects::discover_resources,
@@ -211,6 +221,9 @@ pub fn run() {
             ai::ai_draft_pr,
             ai::ai_conflict_advice,
             ai::ai_distill_skill,
+            ai::ai_distill_review,
+            ai::ai_fuse_briefs,
+            ai::ai_fuse_task_md,
             pricing::read_pricing_file,
             pricing::write_pricing_file,
         ])

@@ -25,7 +25,7 @@ pub struct SkillDto {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub source: String, // local | zip | github | discovered
+    pub source: String, // builtin | local | zip | github | discovered
     pub repo: Option<String>,
     #[serde(default)]
     pub repo_ref: Option<String>,
@@ -157,6 +157,79 @@ fn new_skill(name: String, description: Option<String>, source: &str, repo: Opti
         stale_copies: Vec::new(),
         app_modes: HashMap::new(),
     }
+}
+
+// ===== 内置技能种子 =====
+
+/// 种子版本：内置技能集合有新增/修订时 +1；启动时 marker 低于此版本才补播缺失项。
+/// marker 是库目录下的 . 开头文件（发现逻辑跳过），记录已播种到的版本；
+/// 用户删掉某个内置技能后不会被复活——只有版本升级才补播「库里没有」的项。
+const BUILTIN_SEED_VERSION: u32 = 1;
+const BUILTIN_SEED_MARKER: &str = ".builtin-seed-version";
+
+/// 内置技能表：(技能名, SKILL.md 全文)。内容单一出处在 resources/skills/<name>/SKILL.md，
+/// 经 include_str! 编进二进制，dev 与打包行为一致，无需配置 bundle resources。
+static BUILTIN_SKILLS: &[(&str, &str)] = &[
+    ("lit-search", include_str!("../resources/skills/lit-search/SKILL.md")),
+    ("lit-notes", include_str!("../resources/skills/lit-notes/SKILL.md")),
+    ("lit-watch", include_str!("../resources/skills/lit-watch/SKILL.md")),
+    ("review-framework", include_str!("../resources/skills/review-framework/SKILL.md")),
+    ("review-writing", include_str!("../resources/skills/review-writing/SKILL.md")),
+    ("data-clean", include_str!("../resources/skills/data-clean/SKILL.md")),
+    ("data-eda", include_str!("../resources/skills/data-eda/SKILL.md")),
+    ("quarto-render", include_str!("../resources/skills/quarto-render/SKILL.md")),
+    ("bib-check", include_str!("../resources/skills/bib-check/SKILL.md")),
+    ("rebuttal-crafter", include_str!("../resources/skills/rebuttal-crafter/SKILL.md")),
+    ("stats-check", include_str!("../resources/skills/stats-check/SKILL.md")),
+    ("figure-forge", include_str!("../resources/skills/figure-forge/SKILL.md")),
+    ("slides-deck", include_str!("../resources/skills/slides-deck/SKILL.md")),
+    ("proposal-writer", include_str!("../resources/skills/proposal-writer/SKILL.md")),
+];
+
+/// 启动时播种内置技能（幂等）：只补库里没有的，同名技能（含用户自建/改过的）一律跳过，
+/// 永不覆盖。返回本次新播种的技能名清单（无新增时为空）。
+pub fn seed_builtin_skills() -> Result<Vec<String>, String> {
+    let store = SkillStore::default_paths()?;
+    seed_builtin_skills_impl(&store)
+}
+
+fn seed_builtin_skills_impl(store: &SkillStore) -> Result<Vec<String>, String> {
+    let marker = store.lib.join(BUILTIN_SEED_MARKER);
+    let seeded = fs::read_to_string(&marker)
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if seeded >= BUILTIN_SEED_VERSION {
+        return Ok(Vec::new());
+    }
+    let mut skills = store.read();
+    let mut added = Vec::new();
+    for (name, content) in BUILTIN_SKILLS {
+        if skills.iter().any(|s| s.name == *name) || store.skill_dir(name).exists() {
+            continue; // 已有同名（含用户自建/改过的）：不覆盖
+        }
+        let dir = store.skill_dir(name);
+        fs::create_dir_all(&dir).map_err(|e| format!("创建内置技能目录失败: {e}"))?;
+        fs::write(dir.join("SKILL.md"), content)
+            .map_err(|e| format!("写入内置技能 {name} 失败: {e}"))?;
+        let (_, description) = parse_skill_md(&dir.join("SKILL.md"));
+        skills.push(new_skill(name.to_string(), description, "builtin", None));
+        added.push(name.to_string());
+    }
+    if !added.is_empty() {
+        store.write(&skills)?;
+    }
+    fs::create_dir_all(&store.lib).map_err(|e| format!("创建技能库目录失败: {e}"))?;
+    fs::write(&marker, BUILTIN_SEED_VERSION.to_string())
+        .map_err(|e| format!("写入种子版本标记失败: {e}"))?;
+    if !added.is_empty() {
+        crate::logbuf::record(
+            "info",
+            "skills",
+            &format!("内置技能播种：新增 {} 个（{}）", added.len(), added.join("、")),
+        );
+    }
+    Ok(added)
 }
 
 // ===== SKILL.md 防御式解析（开放标准：frontmatter 只取 name/description，扩展字段忽略） =====
@@ -1597,6 +1670,68 @@ mod tests {
             Some("skills".to_string())
         );
         assert_eq!(github_repo_category("owner/"), None);
+    }
+
+    #[test]
+    fn builtin_skill_files_are_well_formed() {
+        // 内置 SKILL.md 必须能被解析口径读出 name/description，且 name 与目录名一致
+        for (name, content) in BUILTIN_SKILLS {
+            assert!(
+                content.starts_with(&format!("---\nname: {name}\n")),
+                "{name} 的 frontmatter name 与目录名不一致"
+            );
+            let mut lines = content.lines();
+            lines.next(); // 首行 ---
+            let has_desc = lines
+                .by_ref()
+                .take_while(|l| l.trim_end() != "---")
+                .any(|l| l.starts_with("description: ") && l.len() > 14);
+            assert!(has_desc, "{name} 缺少 description");
+        }
+    }
+
+    #[test]
+    fn seed_adds_all_builtin_skills_once() {
+        let fx = Fx::new();
+        let added = seed_builtin_skills_impl(&fx.store).unwrap();
+        assert_eq!(added.len(), BUILTIN_SKILLS.len());
+        let skills = fx.store.read();
+        for (name, _) in BUILTIN_SKILLS {
+            assert!(fx.store.skill_dir(name).join("SKILL.md").is_file());
+            let s = skills.iter().find(|s| s.name == *name).unwrap();
+            assert_eq!(s.source, "builtin");
+            assert!(!s.description.is_empty());
+        }
+        // 幂等：第二次不再新增
+        assert!(seed_builtin_skills_impl(&fx.store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn seed_never_overwrites_existing_user_skill() {
+        let fx = Fx::new();
+        let first = BUILTIN_SKILLS[0].0;
+        fx.add_lib_skill(first, "用户自己的描述");
+        let md = fx.store.skill_dir(first).join("SKILL.md");
+        let before = fs::read_to_string(&md).unwrap();
+        let added = seed_builtin_skills_impl(&fx.store).unwrap();
+        assert!(!added.contains(&first.to_string()));
+        assert_eq!(fs::read_to_string(&md).unwrap(), before);
+        let skills = fx.store.read();
+        assert_eq!(skills.iter().find(|s| s.name == first).unwrap().source, "local");
+    }
+
+    #[test]
+    fn seed_marker_prevents_resurrecting_deleted_builtin() {
+        let fx = Fx::new();
+        seed_builtin_skills_impl(&fx.store).unwrap();
+        // 用户删掉一个内置技能：marker 已是最新版本，不应复活
+        let first = BUILTIN_SKILLS[0].0;
+        fs::remove_dir_all(fx.store.skill_dir(first)).unwrap();
+        let mut skills = fx.store.read();
+        skills.retain(|s| s.name != first);
+        fx.store.write(&skills).unwrap();
+        assert!(seed_builtin_skills_impl(&fx.store).unwrap().is_empty());
+        assert!(!fx.store.skill_dir(first).exists());
     }
 
     #[test]

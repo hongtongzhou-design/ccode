@@ -218,6 +218,7 @@ const TerminalView = memo(function TerminalView({
   prefillCommand,
   shellOnly,
   initialPrompt: presetPrompt,
+  readonly,
   restored,
   externalCwd,
   onConsumeExternalCwd,
@@ -263,6 +264,8 @@ const TerminalView = memo(function TerminalView({
   shellOnly?: boolean;
   /** 一键开步预填的首条指令：启动时注入 CLI，成功后清除（一次性）；留空 = 不注入 */
   initialPrompt?: string;
+  /** 「聊想法」只读模式：pty_spawn 透传（支持的 CLI 注入只读/计划模式参数） */
+  readonly?: boolean;
   /** 应用重启后恢复出的占位标签；用户明确操作前不启动 PTY。 */
   restored?: boolean;
   /** 最近项目「真进入」：把目标目录注入活动标签的启动栏（TerminalView 消费后清空） */
@@ -1171,6 +1174,8 @@ const TerminalView = memo(function TerminalView({
         // 一键开步的首条指令（恢复会话由后端忽略注入）
         initialPrompt: promptText.trim() || null,
         linkClaimId: tabId,
+        // 「聊想法」只读模式：后端按注册表注入只读/计划模式参数（不支持的 CLI 只有 prompt 软约束）
+        readonly: readonly ?? null,
       });
       localStorage.setItem(
         "ccode.lastLaunch",
@@ -1694,6 +1699,8 @@ interface Tab {
   shellOnly?: boolean;
   /** 一键开步预填的首条指令（启动时注入，一次性；不进重启持久化白名单） */
   initialPrompt?: string;
+  /** 「聊想法」只读模式标签：pty_spawn 注入只读/计划模式参数（不进持久化白名单） */
+  readonly?: boolean;
   /** 应用重启后恢复出的元数据占位标签。 */
   restored?: boolean;
 }
@@ -2251,6 +2258,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       prefillCommand?: string;
       shellOnly?: boolean;
       initialPrompt?: string;
+      /** 「聊想法」只读模式：pty_spawn 透传，支持的 CLI 注入只读/计划模式参数 */
+      readonly?: boolean;
     }): string => {
       const t: Tab = {
         id: crypto.randomUUID(),
@@ -2265,6 +2274,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         prefillCommand: init?.prefillCommand,
         shellOnly: init?.shellOnly,
         initialPrompt: init?.initialPrompt,
+        readonly: init?.readonly,
       };
       setTabs((prev) => [...prev, t]);
       setActiveId(t.id);
@@ -2324,9 +2334,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         prefillCommand: pt.prefillCommand,
         shellOnly: pt.shellOnly,
         initialPrompt: pt.initialPrompt,
+        readonly: pt.readonly,
       });
       // run 脚本标签：登记 nonconcurrent 互斥追踪
       if (pt.wsId) setRunningScript(pt.wsId, tabId);
+      // 指定右栏页签（如「主仓改动」提醒 → 改动面板）
+      if (pt.rightTab === "git") {
+        setRightOpen(true);
+        setRightTab("git");
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, pendingTerminal, setPendingTerminal, setRunningScript]);
@@ -3046,6 +3062,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 prefillCommand={t.prefillCommand}
                 shellOnly={t.shellOnly}
                 initialPrompt={t.initialPrompt}
+                readonly={t.readonly}
                 restored={t.restored}
                 externalCwd={t.id === focusedId ? enterCwd : null}
                 onConsumeExternalCwd={consumeExternalCwd}

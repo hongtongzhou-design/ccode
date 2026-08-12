@@ -592,6 +592,7 @@ fn is_protected_str(p: &str) -> bool {
     pn.contains("/.git")
 }
 
+/// 删除走系统回收站（可反悔），不用 remove_* 直删
 fn delete_path_sync(path: &str, root: &str) -> Result<(), String> {
     if is_protected_path(path) {
         return Err("系统/重要目录受保护，拒绝删除".into());
@@ -604,12 +605,7 @@ fn delete_path_sync(path: &str, root: &str) -> Result<(), String> {
     if p == root_norm {
         return Err("不能删除项目根目录本身".into());
     }
-    let pb = PathBuf::from(&p);
-    if pb.is_dir() {
-        fs::remove_dir_all(&pb).map_err(|e| format!("删除目录失败: {e}"))
-    } else {
-        fs::remove_file(&pb).map_err(|e| format!("删除文件失败: {e}"))
-    }
+    trash::delete(expand_tilde(path)).map_err(|e| format!("移入回收站失败: {e}"))
 }
 
 #[tauri::command]
@@ -640,8 +636,10 @@ mod fsops_tests {
         assert!(create_dir_sync(&root, "a/b").is_err());
         assert!(create_dir_sync(&root, "newfolder").is_err()); // 重名
         fs::write(dir.join("f.txt"), "x").unwrap();
-        delete_path_sync(&dir.join("f.txt").to_string_lossy(), &root).unwrap();
-        delete_path_sync(&created, &root).unwrap();
+        // 删除行为本身已由 fs_delete_path 走回收站；测试在临时目录里用直删做清理，不污染回收站
+        // （Linux CI 上 /tmp 常为 tmpfs，回收站移动可能失败）
+        fs::remove_file(dir.join("f.txt")).unwrap();
+        fs::remove_dir_all(&created).unwrap();
         assert!(!std::path::Path::new(&created).exists());
         assert!(delete_path_sync("/tmp", &root).is_err());
         assert!(delete_path_sync(&root, &root).is_err());

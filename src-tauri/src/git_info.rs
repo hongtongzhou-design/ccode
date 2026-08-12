@@ -165,13 +165,19 @@ fn parse_porcelain(text: &str) -> (String, u32, u32, Vec<(String, String)>) {
                 .to_string()
         };
         let mut path = line[3..].to_string();
-        // 重命名条目形如 "old -> new"，取新名
+        // 重命名条目形如 "old -> new"，取新名；整体被引号包住时先解外层再切
+        if path.starts_with('"') && !path.contains(" -> \"") {
+            if let Some(unq) = unquote_diff_path(&path) {
+                path = unq;
+            }
+        }
         if let Some((_, new)) = path.split_once(" -> ") {
             path = new.to_string();
         }
-        // 含空格/特殊字符的路径 git 会加引号
-        if path.len() >= 2 && path.starts_with('"') && path.ends_with('"') {
-            path = path[1..path.len() - 1].to_string();
+        // 含非 ASCII/特殊字符的路径 git 会 C 风格加引号并把字节转八进制（core.quotepath 默认开），
+        // 只剥引号会留下 \ooo 字面量导致按错路径读文件，必须完整反转义
+        if let Some(unq) = unquote_diff_path(&path) {
+            path = unq;
         }
         files.push((status, path));
     }
@@ -1792,6 +1798,16 @@ mod tests {
 
         let (_, _, _, files3) = parse_porcelain("R  old.rs -> new.rs\n");
         assert_eq!(files3[0], ("R".to_string(), "new.rs".to_string()));
+
+        // 非 ASCII 文件名：git 默认 core.quotepath 把字节转八进制并整体加引号，必须反转义还原
+        // 「文献分类索引.md」的 porcelain 输出形态
+        let (_, _, _, files4) =
+            parse_porcelain("?? \"\\346\\226\\207\\347\\214\\256\\345\\210\\206\\347\\261\\273\\347\\264\\242\\345\\274\\225.md\"\n");
+        assert_eq!(files4[0], ("??".to_string(), "文献分类索引.md".to_string()));
+        // 重命名 + 非 ASCII：两侧各自加引号
+        let (_, _, _, files5) =
+            parse_porcelain("R  old.rs -> \"\\346\\226\\207\\346\\221\\230.md\"\n");
+        assert_eq!(files5[0], ("R".to_string(), "文摘.md".to_string()));
     }
 
     #[test]

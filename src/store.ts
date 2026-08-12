@@ -60,6 +60,9 @@ export interface AppSettings {
   /** 页切逐页绑定：键 = 页面 id（hotkeys.ts PAGE_HOTKEY_DEFS），值 = 组合串；
       键缺失 = 该页用默认绑定（mod+1..mod+8） */
   hotkeyPages?: Record<string, string>;
+  /** 想法期只读保护（卡片区「聊想法」，默认开）：开 = 支持的 CLI 注入只读/计划模式参数 +
+      预填指令带不动文件约束；关 = 纯聊天 */
+  discussReadonly?: boolean;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效；
@@ -95,6 +98,10 @@ export interface PendingTerminal {
   model?: string;
   /** 一键开步预填的首条指令：启动时注入 CLI，启动成功后清除（一次性） */
   initialPrompt?: string;
+  /** 打开后右栏直接落到指定页签（如卡片区「主仓改动」提醒跳到改动面板） */
+  rightTab?: "git";
+  /** 「聊想法」只读模式：pty_spawn 注入只读/计划模式参数（硬保护，支持的 CLI 才生效） */
+  readonly?: boolean;
 }
 
 /** 工作区页 / 改动面板 → 终端全宽审阅视图的一次性交接。 */

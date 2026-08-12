@@ -24,6 +24,11 @@ pub struct AgentSpec {
     pub launch: LaunchSpec,
     /// 交互模式初始 prompt 注入方式（一键开步的首条指令）
     pub prompt_inject: PromptInject,
+    /// 「聊想法」只读模式的启动参数（2026-08-12 本机 --help 实测；空 = 不支持，只有 prompt 软约束）：
+    /// claude/codebuddy --permission-mode plan、codex -s read-only（替换默认 workspace-write，
+    /// 见 agents::readonly_launch_args）、gemini --approval-mode plan、kimi/cursor --plan；
+    /// qwen 0.21.1 无 approval/plan 参数、opencode 无据，保持空
+    pub readonly_args: &'static [&'static str],
     /// 支持 --session-id 固定新会话文件名（pty 启动即锁定会话关联，matrix：claude-code、qwen、codebuddy）
     pub fixed_session_id: bool,
     /// 按 ID 恢复会话的参数格式
@@ -245,6 +250,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         protocols: &[],
         launch: LaunchSpec::Special(SpecialLaunch::ClaudeModelSlots(CLAUDE_ENV)),
         prompt_inject: PromptInject::Positional,
+        readonly_args: &["--permission-mode", "plan"],
         fixed_session_id: true,
         resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
         skills_dir: &[".claude", "skills"],
@@ -284,6 +290,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
             sandbox_args: &["-s", "workspace-write"],
         }),
         prompt_inject: PromptInject::Positional,
+        readonly_args: &["-s", "read-only"],
         fixed_session_id: false,
         resume: ResumeSpec { prepend: true, args: &["resume", "{session}"] },
         skills_dir: &[".codex", "skills"],
@@ -324,6 +331,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
             fixed_args: &[],
         }),
         prompt_inject: PromptInject::Flag("-i"),
+        readonly_args: &["--approval-mode", "plan"],
         fixed_session_id: false,
         resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
         skills_dir: &[".gemini", "skills"],
@@ -368,6 +376,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
             },
         ]),
         prompt_inject: PromptInject::Flag("-i"),
+        readonly_args: &[],
         fixed_session_id: true,
         resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
         skills_dir: &[".qwen", "skills"],
@@ -425,6 +434,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
             no_autoupdate_env: "OPENCODE_DISABLE_AUTOUPDATE",
         }),
         prompt_inject: PromptInject::Unsupported,
+        readonly_args: &[],
         fixed_session_id: false,
         resume: ResumeSpec { prepend: false, args: &["--session", "{session}"] },
         skills_dir: &[".config", "opencode", "skills"],
@@ -454,6 +464,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         protocols: &["kimi", "openai", "anthropic"],
         launch: LaunchSpec::Special(SpecialLaunch::KimiDualChannel),
         prompt_inject: PromptInject::Unsupported,
+        readonly_args: &["--plan"],
         fixed_session_id: false,
         resume: ResumeSpec { prepend: false, args: &["-S", "{session}"] },
         skills_dir: &[".kimi-code", "skills"],
@@ -516,6 +527,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
             fixed_args: &[],
         }),
         prompt_inject: PromptInject::Positional,
+        readonly_args: &["--permission-mode", "plan"],
         // --session-id <uuid> 实测支持固定会话文件名
         fixed_session_id: true,
         // -r|--resume [sessionId] 可带 id；-c 是续最近（不带 id 的场景前端不用）
@@ -560,6 +572,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         }),
         // 初始 prompt 是 argv 末尾位置参数；非交互模式为 -p/--print + --output-format
         prompt_inject: PromptInject::Positional,
+        readonly_args: &["--plan"],
         fixed_session_id: false,
         // --resume <uuid> 必须带 id（无参会卡 Ink TUI）；--continue 续最近（前端不用）
         resume: ResumeSpec { prepend: false, args: &["--resume", "{session}"] },

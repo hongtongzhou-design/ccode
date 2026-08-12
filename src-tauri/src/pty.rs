@@ -401,6 +401,8 @@ pub fn pty_spawn(
     initial_prompt: Option<String>,
     // 无固定 session id 的 agent 用终端标签 id 预登记关联声明，避免并发标签抢同一会话
     link_claim_id: Option<String>,
+    // 「聊想法」只读模式：对支持的 CLI 注入注册表 readonly_args（仅全新会话生效）
+    readonly: Option<bool>,
 ) -> Result<SpawnResult, String> {
     let profile = store.get(&profile_id)?;
     if profile.agent != agent_id {
@@ -427,6 +429,12 @@ pub fn pty_spawn(
     };
     // 每-agent 启动前文件准备（codex：写模型 catalog，让 /model 选择器列出全部模型）
     let extra_args = agents::prepare_launch(&profile)?;
+    // 聊想法只读模式（仅全新会话）：支持的 CLI 替换/追加只读参数；不支持的原样（软约束兜底）
+    let plan_args = if readonly.unwrap_or(false) && resume_session_id.is_none() {
+        agents::readonly_launch_args(&agent_id, &plan.args).unwrap_or_else(|| plan.args.clone())
+    } else {
+        plan.args.clone()
+    };
 
     let mut cmd = CommandBuilder::new(&binary_path);
     if let Some(sid) = &resume_session_id {
@@ -436,7 +444,7 @@ pub fn pty_spawn(
                 cmd.arg(arg);
             }
         }
-        for arg in &plan.args {
+        for arg in &plan_args {
             cmd.arg(arg);
         }
         for arg in &extra_args {
@@ -448,7 +456,7 @@ pub fn pty_spawn(
             }
         }
     } else {
-        for arg in &plan.args {
+        for arg in &plan_args {
             cmd.arg(arg);
         }
         for arg in &extra_args {

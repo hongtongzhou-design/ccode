@@ -677,7 +677,7 @@ function FileTree({
               onSelect: async () => {
                 if (
                   !(await confirmDialog(
-                    `删除「${menu.path}」${menu.isDir ? "（含全部内容）" : ""}？不可恢复。`,
+                    `删除「${menu.path}」${menu.isDir ? "（含全部内容）" : ""}？将移入系统回收站。`,
                     { danger: true },
                   ))
                 )

@@ -26,6 +26,7 @@ import type {
 } from "../types";
 
 const SOURCE_LABEL: Record<string, string> = {
+  builtin: "内置",
   local: "本地",
   zip: "ZIP",
   github: "GitHub",

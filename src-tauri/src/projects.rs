@@ -263,9 +263,10 @@ fn is_registered_at(conn: &Connection, path: &Path) -> bool {
     .unwrap_or(false)
 }
 
-// ===== 项目目录彻底删除（工作区页右键「删除项目目录…」） =====
-// 与「移除注册」相反：删全部工作区 + 目录本身 + 注册记录。不可逆操作，
-// 防护宁严勿宽：必须是 Ccode 项目、拒绝主目录/文档目录/浅层路径/系统目录。
+// ===== 项目目录删除（工作区页右键「删除项目目录…」） =====
+// 与「移除注册」相反：删全部工作区 + 目录本身 + 注册记录。主目录走系统回收站（可反悔），
+// 工作区 worktree/分支是 git 元数据只能彻底删。防护宁严勿宽：必须是 Ccode 项目、
+// 拒绝主目录/文档目录/浅层路径/系统目录。
 
 /// 目录删除防护：拒绝 home/document_dir 本身、少于两级的浅层路径（防误传 ~/Documents
 /// 这类）、系统与关键用户目录（复用 fs_tree 的重要路径黑名单，含 canonicalize 双校验）。
@@ -290,7 +291,7 @@ fn guard_project_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 彻底删除项目目录：全部工作区（含已归档）→ 目录本身 → 注册记录。
+/// 删除项目目录：全部工作区（含已归档，彻底删）→ 主目录移入系统回收站（可反悔）→ 注册记录。
 /// 工作区任一删除失败即中止，已删的不回滚（错误信息由 workspaces 层说明已删哪些）。
 fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, String> {
     let dir = fs::canonicalize(path).map_err(|e| format!("目录不存在或不可访问: {e}"))?;
@@ -308,13 +309,53 @@ fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, Str
     }
     guard_project_dir(&dir)?;
     let deleted = crate::workspaces::delete_workspaces_for_repo(conn, &dir)?;
-    fs::remove_dir_all(&dir).map_err(|e| format!("删除目录失败: {e}"))?;
+    // 主目录走系统回收站可反悔；工作区 worktree/分支属 git 元数据，回收站管不了，仍为彻底删除
+    trash::delete(&dir).map_err(|e| format!("移入回收站失败: {e}"))?;
     remove_project_at(conn, &dir)?;
     if deleted.is_empty() {
-        Ok("已删除目录与注册记录".to_string())
+        Ok("目录已移入回收站，注册记录已删除".to_string())
     } else {
-        Ok(format!("已删除目录与 {} 个工作区", deleted.len()))
+        Ok(format!(
+            "目录已移入回收站，已删除 {} 个工作区",
+            deleted.len()
+        ))
     }
+}
+
+/// 清除 Ccode 痕迹（中间档：保留项目文件夹与用户的全部文件，其余 Ccode 痕迹清掉）：
+/// 全部工作区（worktree + 分支 + 记录，彻底删——同删除项目目录口径）→ `.ccode/` 移入系统
+/// 回收站（可反悔）→ 摘注册记录。**不自动 git rm/提交**：.ccode 若被 git 跟踪过，删除会显在
+/// 改动面板，由用户自行提交（自动提交用户仓库违反既有纪律；摘要文案里提示）。
+fn purge_project_traces_impl(conn: &Connection, path: &Path) -> Result<String, String> {
+    let dir = fs::canonicalize(path).map_err(|e| format!("目录不存在或不可访问: {e}"))?;
+    if !dir.is_dir() {
+        return Err("目标不是目录，拒绝操作".to_string());
+    }
+    guard_project_dir(&dir)?;
+    let has_ccode = dir.join(".ccode").is_dir();
+    let registered = is_registered_at(conn, &dir);
+    let has_workspaces = !crate::workspaces::workspaces_of_repo(conn, &dir)?.is_empty();
+    if !has_ccode && !registered && !has_workspaces {
+        return Err("该目录没有 Ccode 痕迹（无 .ccode、注册或工作区记录）".to_string());
+    }
+    // 工作区任一删除失败即中止（已删的不回滚），错误信息由 workspaces 层说明已删哪些
+    let deleted = crate::workspaces::delete_workspaces_for_repo(conn, &dir)?;
+    if has_ccode {
+        trash::delete(dir.join(".ccode"))
+            .map_err(|e| format!("工作区已清理，但 .ccode 移入回收站失败: {e}"))?;
+    }
+    remove_project_at(conn, &dir)?;
+    let mut parts: Vec<String> = Vec::new();
+    if !deleted.is_empty() {
+        parts.push(format!("{} 个工作区", deleted.len()));
+    }
+    if has_ccode {
+        parts.push("档案卡与简报（回收站）".to_string());
+    }
+    if registered {
+        parts.push("注册记录".to_string());
+    }
+    Ok(format!("已清除：{}", parts.join("、")))
 }
 
 // ===== 档案卡 .ccode/project.toml =====
@@ -475,8 +516,11 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
         warnings.push("steps 不是表数组，已忽略".to_string());
     }
     // 语义级校验（绑定资源存在性、简报产物引用）并入 warnings，read_project_config 自动产出
+    // prior_artifacts 按步骤顺序累计：简报引用上游产物 = 合法输入，不报（见 validate_step ②）
+    let mut prior_artifacts: Vec<String> = Vec::new();
     for step in &config.steps {
-        warnings.extend(validate_step(step, &config.resources));
+        warnings.extend(validate_step(step, &config.resources, &prior_artifacts));
+        prior_artifacts.extend(step.expected_artifacts.iter().cloned());
     }
     (config, warnings)
 }
@@ -489,8 +533,13 @@ const BRIEF_ARTIFACT_REFS: [&str; 5] =
 
 /// 校验单个步骤，返回中文提示文案（不做翻译层）：
 /// ① 绑定值必须在 [[resources]] 的 path 里精确存在；空数组 = 不绑定，不触发；
-/// ② brief 引用了约定产物路径，但 expectedArtifacts 无对应项（同值或以该目录开头）时提示。
-pub(crate) fn validate_step(step: &StepDto, resources: &[ResourceDto]) -> Vec<String> {
+/// ② brief 引用了约定产物路径，但三处都查无对应项时提示——本步 expectedArtifacts（产物）、
+///    上游步骤产物（引用上游产物 = 合法输入）、[[resources]]（登记资源 = 输入物料）。
+pub(crate) fn validate_step(
+    step: &StepDto,
+    resources: &[ResourceDto],
+    prior_artifacts: &[String],
+) -> Vec<String> {
     let mut warnings = Vec::new();
     for bound in &step.resources {
         if !resources.iter().any(|r| r.path == *bound) {
@@ -501,12 +550,14 @@ pub(crate) fn validate_step(step: &StepDto, resources: &[ResourceDto]) -> Vec<St
         }
     }
     for token in BRIEF_ARTIFACT_REFS {
-        if step.brief.contains(token)
-            && !step
-                .expected_artifacts
-                .iter()
-                .any(|e| e == token || e.starts_with(token))
-        {
+        if !step.brief.contains(token) {
+            continue;
+        }
+        let covered = |e: &String| e == token || e.starts_with(token);
+        let own = step.expected_artifacts.iter().any(covered);
+        let upstream = prior_artifacts.iter().any(covered);
+        let resourced = resources.iter().any(|r| covered(&r.path));
+        if !(own || upstream || resourced) {
             warnings.push(format!(
                 "步骤「{}」的简报引用了「{token}」，但 expectedArtifacts 未包含对应产物",
                 step.name
@@ -1193,6 +1244,19 @@ pub async fn delete_project_dir(path: String) -> Result<String, String> {
     })
     .await
     .map_err(|e| format!("删除项目目录失败: {e}"))?
+}
+
+/// 清除 Ccode 痕迹（保留文件夹）：全部工作区 + `.ccode/`（回收站）+ 注册记录。
+/// 返回中文成功摘要（如「已清除：2 个工作区、档案卡与简报（回收站）、注册记录」）。
+#[tauri::command]
+pub async fn purge_project_traces(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project = PathBuf::from(crate::sessions::expand_tilde(&path));
+        let conn = db()?;
+        purge_project_traces_impl(&conn, &project)
+    })
+    .await
+    .map_err(|e| format!("清除 Ccode 痕迹失败: {e}"))?
 }
 
 #[tauri::command]
@@ -2204,45 +2268,60 @@ resources = [1, "papers/a.pdf", "", 42]
             resources: vec!["papers/a.pdf".into(), "/shared/x.csv".into(), "missing.pdf".into()],
             ..StepDto::default()
         };
-        let warnings = validate_step(&step, &resources);
+        let warnings = validate_step(&step, &resources, &[]);
         assert_eq!(warnings.len(), 1, "只有不存在的绑定要提示: {warnings:?}");
         assert!(warnings[0].contains("绑定的资源不存在：missing.pdf"), "{}", warnings[0]);
         let ok = StepDto {
             resources: vec!["papers/a.pdf".into()],
             ..StepDto::default()
         };
-        assert!(validate_step(&ok, &resources).is_empty(), "精确命中不提示");
+        assert!(validate_step(&ok, &resources, &[]).is_empty(), "精确命中不提示");
         let unbound = StepDto::default();
         assert!(
-            validate_step(&unbound, &resources).is_empty(),
+            validate_step(&unbound, &resources, &[]).is_empty(),
             "空数组 = 不绑定 = 全部资源，不校验"
         );
 
-        // 规则②：brief 引用约定产物路径但 expectedArtifacts 无对应项 → 提示；有对应项或无引用不提示
+        // 规则②：brief 引用约定路径，本步产物/上游产物/登记资源三处都查无 → 提示
+        // papers/ 已登记为资源（papers/a.pdf 前缀命中）= 输入物料，不报；references.bib 三处皆无 → 报
         let miss = StepDto {
             name: "整理".into(),
             brief: "通读 papers/ 后把笔记写进 notes/，更新 references.bib".into(),
             expected_artifacts: vec!["notes/".into()],
             ..StepDto::default()
         };
-        let warnings = validate_step(&miss, &resources);
-        assert_eq!(warnings.len(), 2, "papers/ 与 references.bib 各提示一次: {warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("「papers/」")), "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("「references.bib」")), "{warnings:?}");
+        let warnings = validate_step(&miss, &resources, &[]);
+        assert_eq!(warnings.len(), 1, "只有 references.bib 提示: {warnings:?}");
+        assert!(warnings[0].contains("「references.bib」"), "{warnings:?}");
+        // 上游产物豁免：references.bib 与 papers/ 均由更早步骤产出 → 引用它们是合法输入，不报
+        let prior = vec!["references.bib".to_string(), "papers/".to_string()];
+        assert!(
+            validate_step(&miss, &[], &prior).is_empty(),
+            "上游产物被引用 = 合法输入，不提示"
+        );
+        // 只豁免一个时另一个仍报
+        let warnings = validate_step(&miss, &[], &["papers/".to_string()]);
+        assert_eq!(warnings.len(), 1, "references.bib 仍提示: {warnings:?}");
+        // 本步产物/上游产物/资源三处皆无才提示（miss 去掉资源后 papers/ 也要报）
+        assert_eq!(
+            validate_step(&miss, &[], &[]).len(),
+            2,
+            "papers/ 与 references.bib 各提示一次"
+        );
         let hit = StepDto {
             brief: "把综述草稿写进 manuscript/ 并同步 outline.md".into(),
             expected_artifacts: vec!["manuscript/draft.md".into(), "outline.md".into()],
             ..StepDto::default()
         };
         assert!(
-            validate_step(&hit, &resources).is_empty(),
+            validate_step(&hit, &resources, &[]).is_empty(),
             "目录前缀命中与文件精确命中都不提示"
         );
         let no_ref = StepDto {
             brief: "读文献写笔记".into(),
             ..StepDto::default()
         };
-        assert!(validate_step(&no_ref, &resources).is_empty(), "无引用不提示");
+        assert!(validate_step(&no_ref, &resources, &[]).is_empty(), "无引用不提示");
     }
 
     #[test]
@@ -2874,8 +2953,8 @@ resources = ["ghost.pdf"]
         register_at(&conn, &root, "演示", "2026-08-01T00:00:00Z").unwrap();
 
         let msg = delete_project_dir_impl(&conn, &root).unwrap();
-        assert_eq!(msg, "已删除目录与注册记录");
-        assert!(!root.exists(), "目录应被删除");
+        assert_eq!(msg, "目录已移入回收站，注册记录已删除");
+        assert!(!root.exists(), "目录应已移入回收站（原位不再存在）");
         assert!(!is_registered_at(&conn, &root), "注册记录应被移除");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2901,9 +2980,79 @@ resources = ["ghost.pdf"]
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ===== 清除 Ccode 痕迹（purge_project_traces，中间档：保留文件夹与用户文件） =====
+
     #[test]
-    fn delete_project_dir_rejects_home_and_shallow() {
-        let dir = temp_dir("deldir-guard");
+    fn purge_traces_removes_ccode_registration_and_workspace_but_keeps_user_files() {
+        let dir = temp_dir("purge");
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        let root = dir.join("demo-proj");
+        write(&config_path(&root), "artifact_dir = \"artifacts\"\n");
+        write(&root.join(".ccode/brief-20260801T100000Z.md"), "# 简报");
+        write(&root.join("notes/x.md"), "用户文件");
+        register_at(&conn, &root, "演示", "2026-08-01T00:00:00Z").unwrap();
+        // 一条工作区记录（worktree 不存在、目录非 git 仓库也能走删除实现：两者都按缺失容忍）
+        crate::workspaces::workspaces_of_repo(&conn, &root).unwrap(); // 顺带建表
+        conn.execute(
+            "INSERT INTO workspaces(id, repo_path, name, branch, worktree_path, base_branch, port_base, status, created_at)
+             VALUES('w1', ?1, 'lit', 'ccode/lit', ?2, 'main', 4000, 'active', '2026-08-01T00:00:00Z')",
+            params![
+                root.canonicalize().unwrap().to_string_lossy().into_owned(),
+                dir.join("wt-missing").to_string_lossy().into_owned()
+            ],
+        )
+        .unwrap();
+
+        let msg = purge_project_traces_impl(&conn, &root).unwrap();
+        assert_eq!(msg, "已清除：1 个工作区、档案卡与简报（回收站）、注册记录");
+        assert!(root.is_dir(), "项目文件夹必须保留");
+        assert_eq!(
+            fs::read_to_string(root.join("notes/x.md")).unwrap(),
+            "用户文件",
+            "用户文件原样保留"
+        );
+        assert!(!root.join(".ccode").exists(), ".ccode 应已移入回收站");
+        assert!(!is_registered_at(&conn, &root), "注册记录应被移除");
+        assert!(
+            crate::workspaces::workspaces_of_repo(&conn, &root)
+                .unwrap()
+                .is_empty(),
+            "工作区记录应被清空"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn purge_traces_rejects_dir_without_traces() {
+        let dir = temp_dir("purge-empty");
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        // 无 .ccode、无注册、无工作区 → 报错且目录原样保留
+        let plain = dir.join("plain");
+        write(&plain.join("a.txt"), "x");
+        let err = purge_project_traces_impl(&conn, &plain).unwrap_err();
+        assert!(err.contains("没有 Ccode 痕迹"), "{err}");
+        assert!(plain.join("a.txt").exists());
+        // 防护：home 本身拒绝（复用 guard_project_dir 口径）
+        let home = dirs::home_dir().unwrap();
+        assert!(purge_project_traces_impl(&conn, &home).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn purge_traces_tolerates_unregistered() {
+        let dir = temp_dir("purge-unreg");
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        let root = dir.join("proj");
+        // 只有 .ccode、未注册：照样清，摘注册容忍未注册
+        write(&config_path(&root), "artifact_dir = \"artifacts\"\n");
+        let msg = purge_project_traces_impl(&conn, &root).unwrap();
+        assert_eq!(msg, "已清除：档案卡与简报（回收站）");
+        assert!(!root.join(".ccode").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_project_dir_rejects_home_and_shallow() {        let dir = temp_dir("deldir-guard");
         // home 与文档目录本身一律拒绝
         let home = dirs::home_dir().unwrap();
         let err = guard_project_dir(&home).unwrap_err();

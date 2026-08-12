@@ -602,6 +602,12 @@ function WorkspaceDetailsPopover({
             {state.label}
           </span>
         </div>
+        {/* 上游漂移提醒（启发式，只提醒不阻断）：上游步骤晚于本步最后推进时间合并 */}
+        {workspace.staleUpstream && (
+          <p className="mb-2 text-warn-text">
+            上游「{workspace.staleUpstream}」有更新，产物可能过期
+          </p>
+        )}
         <dl className="space-y-1.5 border-t border-hairline pt-2 text-l3">
           {rows.map(([label, value, hint]) => (
             <div
@@ -817,6 +823,13 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     {},
   );
   const [error, setError] = useState<string | null>(null);
+  // 一般操作成功提示（清除 Ccode 痕迹等）：10s 自动消退
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 10_000);
+    return () => clearTimeout(t);
+  }, [notice]);
   const [modal, setModal] = useState(false);
   // 项目导航行右键菜单（重命名/复制路径/移除注册）与改名弹窗
   const [railMenu, setRailMenu] = useState<{
@@ -1555,6 +1568,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         onSelect: () => group.project && void removeRegistration(group),
       },
       {
+        label: "清除 Ccode 痕迹（保留文件夹）…",
+        danger: true,
+        title: "保留文件夹与你的全部文件；清掉工作区、.ccode 与注册记录",
+        onSelect: () => void purgeTraces(group),
+      },
+      {
         label: "删除项目目录…",
         danger: true,
         onSelect: () => void deleteProjectDir(group),
@@ -1562,12 +1581,37 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     ];
   }
 
-  /** 彻底删除项目：工作区 + 目录 + 注册记录（不可逆；未注册分组同样可用） */
+  /** 清除 Ccode 痕迹（中间档）：文件夹与用户文件保留；工作区/分支彻底删，.ccode 入回收站，注册摘除 */
+  async function purgeTraces(group: (typeof groups)[number]) {
+    const name = group.project?.name ?? group.repoName;
+    if (
+      !(await confirmDialog(
+        `清除「${name}」的 Ccode 痕迹？\n\n` +
+          `文件夹与你的文件：保留\n` +
+          `.ccode/（档案卡、任务卡、简报）：移入回收站（可找回）\n` +
+          `工作区 worktree 与分支、注册记录：彻底删除\n\n` +
+          `注意：如果 .ccode 曾被 git 跟踪，改动面板会显示对应删除，需要你自行提交。请先关闭该项目内正在运行的终端标签。`,
+        { danger: true },
+      ))
+    )
+      return;
+    try {
+      const msg = await invoke<string>("purge_project_traces", {
+        path: group.repoPath,
+      });
+      setNotice(msg);
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  /** 删除项目：工作区（彻底删）+ 主目录（移入回收站）+ 注册记录（未注册分组同样可用） */
   async function deleteProjectDir(group: (typeof groups)[number]) {
     const name = group.project?.name ?? group.repoName;
     if (
       !(await confirmDialog(
-        `彻底删除项目「${name}」？\n\n目录：${group.repoPath}\n工作区：${group.list.length} 个\n\n工作区和目录将一并删除、不可恢复；请先关闭该项目内正在运行的终端标签。`,
+        `删除项目「${name}」？\n\n目录：${group.repoPath}\n工作区：${group.list.length} 个\n\n目录将移入系统回收站（可找回）；工作区的 worktree 与分支将彻底删除、不可恢复。请先关闭该项目内正在运行的终端标签。`,
         { danger: true },
       ))
     )
@@ -1760,6 +1804,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         }
       />
       {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
+      {notice && (
+        <p className="mb-4 text-sm text-ok-text">
+          <span className="mr-1">✓</span>
+          {notice}
+        </p>
+      )}
       {created && (
         <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md bg-strip px-3 py-2.5 text-xs text-l2">
           <span>

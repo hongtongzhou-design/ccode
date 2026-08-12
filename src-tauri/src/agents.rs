@@ -282,6 +282,40 @@ pub fn launch_plan_with_prompt(
     plan
 }
 
+/// 「聊想法」只读模式（硬保护，想法期防 agent 擅自改主仓文件）：在启动计划 args 上应用
+/// 注册表 readonly_args。codex 特殊：只读要替换默认的 `-s workspace-write`
+///（重复 -s 哪个生效未文档化，不赌后者生效——先剔除原沙箱参数对再追加）。
+/// 返回 None = 该 CLI 无只读参数（只有 prompt 软约束），调用方原样使用 plan.args。
+pub fn readonly_launch_args(agent_id: &str, base_args: &[String]) -> Option<Vec<String>> {
+    let spec = agent_spec(agent_id)?;
+    if spec.readonly_args.is_empty() {
+        return None;
+    }
+    let mut args: Vec<String> = if agent_id == "codex" {
+        // 剔除 `-s/--sandbox <值>` 参数对（值是分离的下一个参数）
+        let mut filtered = Vec::with_capacity(base_args.len());
+        let mut skip_next = false;
+        for a in base_args {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if a == "-s" || a == "--sandbox" {
+                skip_next = true;
+                continue;
+            }
+            filtered.push(a.clone());
+        }
+        filtered
+    } else {
+        base_args.to_vec()
+    };
+    for a in spec.readonly_args {
+        args.push((*a).into());
+    }
+    Some(args)
+}
+
 /// 官方账号模式的注入：purge 残留密钥 env（规格 env_purge_list），模型非空才注入模型 env/参数。
 /// 凭证与 base URL 一律不注入——认证完全交给 CLI 自己的账号登录
 fn apply_official_inject(
@@ -1355,6 +1389,35 @@ mod tests {
         let bare = launch_plan(&p, None, None);
         assert!(bare.args.is_empty());
         assert!(bare.env.is_empty());
+    }
+
+    #[test]
+    fn readonly_launch_args_per_agent() {
+        // 硬保护矩阵（注册表 readonly_args）：六家有只读/计划模式参数
+        assert_eq!(
+            readonly_launch_args("claude-code", &[]).unwrap(),
+            vec!["--permission-mode", "plan"]
+        );
+        assert_eq!(
+            readonly_launch_args("gemini", &[]).unwrap(),
+            vec!["--approval-mode", "plan"]
+        );
+        assert_eq!(readonly_launch_args("kimi", &[]).unwrap(), vec!["--plan"]);
+        assert_eq!(readonly_launch_args("cursor", &[]).unwrap(), vec!["--plan"]);
+        assert_eq!(
+            readonly_launch_args("codebuddy", &[]).unwrap(),
+            vec!["--permission-mode", "plan"]
+        );
+        // codex：只读替换默认的 -s workspace-write（先剔除原沙箱参数对再追加）
+        let base: Vec<String> = vec!["-c".into(), "x=1".into(), "-s".into(), "workspace-write".into()];
+        assert_eq!(
+            readonly_launch_args("codex", &base).unwrap(),
+            vec!["-c", "x=1", "-s", "read-only"]
+        );
+        // 无只读参数（qwen/opencode）与未知 agent：None = 只有软约束，调用方原样用 plan.args
+        assert!(readonly_launch_args("qwen", &[]).is_none());
+        assert!(readonly_launch_args("opencode", &[]).is_none());
+        assert!(readonly_launch_args("nope", &[]).is_none());
     }
 
     #[test]
