@@ -1,8 +1,21 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { useAppStore, runInboxAction, type InboxItem } from "../store";
 import { absTime, relTime } from "../rel-time";
+import {
+  groupInbox,
+  helpNotifyKeys,
+  helpPreview,
+  helpSignature,
+  isHelpDismissed,
+  type InboxCategory,
+} from "../inbox";
 import ContextMenu from "../components/ContextMenu";
 import { confirmDialog } from "../components/ConfirmDialog";
 import ProjectGroup from "../components/ProjectGroup";
@@ -20,6 +33,7 @@ import { attributeToProject, buildRunOverview } from "../run-overview";
 import { IS_MAC } from "../hotkeys";
 import { AGENTS } from "../types";
 import type {
+  HelpRequestDto,
   PendingArtifactDto,
   PortInfoDto,
   ProjectConfigReadDto,
@@ -53,6 +67,18 @@ function samePath(a: string, b: string): boolean {
 function pathBaseName(path: string): string {
   const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || path;
+}
+
+/** 人工请求新来源的系统通知：macOS 首次发送前必须显式申请权限（系统级弹窗，仅首次）；
+    被拒则静默跳过。复用「长任务 OS 通知」设置开关，不新增设置项。 */
+async function fireHelpNotification(sourceCount: number) {
+  let granted = await isPermissionGranted();
+  if (!granted) granted = (await requestPermission()) === "granted";
+  if (!granted) return;
+  sendNotification({
+    title: "人工请求",
+    body: `${sourceCount} 个来源有人工请求`,
+  });
 }
 
 /** 添加项目（§11.4 P1b）：目录已在弹窗外经系统对话框选定，这里只内联命名（WKWebView 无 window.prompt） */
@@ -135,7 +161,9 @@ function AddProjectModal({
           />
         </label>
         <label className="mb-4 block text-sm">
-          <span className="mb-1 block text-xs text-l3">课题主题（可选）</span>
+          <span className="mb-1 block text-xs text-l3">
+            课题主题（可选，给 Agent 看——开工时写进 TASK.md）
+          </span>
           <input
             className={fieldClass}
             value={topic}
@@ -898,6 +926,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
   // 产物待核验（后端只读检查，随 refresh 同频次拉取）：绑定步骤的预期产物全部产出且够新
   const [artifactReady, setArtifactReady] = useState<PendingArtifactDto[]>([]);
+  // agent 人工请求（.ccode/help-wanted.md，随 refresh 同频次拉取；失败静默下轮重试）
+  const [helpRequests, setHelpRequests] = useState<HelpRequestDto[]>([]);
+  // help: 条目屏蔽表（store 镜像 localStorage）：签名一致不生成条目，内容变了自动复现
+  const helpDismissed = useAppStore((s) => s.helpDismissed);
+  const dismissHelpRequest = useAppStore((s) => s.dismissHelpRequest);
   // 会话清单（启动即加载）：外部 live 会话的收件箱入口
   const sessions = useAppStore((s) => s.sessions);
   // 外部 live 会话（无终端标签可跳）的尾部注意力：后端直查 session_tail_state，
@@ -1023,6 +1056,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       // 产物待核验：与健康度同频次（页可见刷新/事件驱动），失败静默（下轮重试）
       invoke<PendingArtifactDto[]>("pending_artifact_checks")
         .then(setArtifactReady)
+        .catch(() => {});
+      // agent 人工请求（.ccode/help-wanted.md）：同频次拉取，失败静默（下轮重试）
+      invoke<HelpRequestDto[]>("list_help_requests")
+        .then(setHelpRequests)
         .catch(() => {});
       setError(null);
     } catch (e) {
@@ -1295,6 +1332,21 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         actionLabel: "去核验",
         action: { type: "artifacts" as const, workspaceId: a.workspaceId },
       })),
+    // agent 人工请求（.ccode/help-wanted.md）：插在可合并/待核验之后；
+    // dismiss 后签名一致不生成，文件内容变了（签名不同）自动复现
+    ...helpRequests
+      .filter((h) => h.items.length > 0)
+      .filter(
+        (h) => !isHelpDismissed(helpDismissed, h.root, helpSignature(h.items)),
+      )
+      .map((h) => ({
+        key: `help:${h.root}`,
+        dot: "bg-warn-text",
+        text: `「${h.repoName} / ${h.workspaceName ?? "主仓"}」有 ${h.items.length} 条人工请求：${helpPreview(h.items[0])}`,
+        actionLabel: "去查看",
+        dismissSignature: helpSignature(h.items),
+        action: { type: "project" as const, projectRoot: h.root },
+      })),
     // 接力简报已生成待发送：提炼在后台完成，交接链断在人这里
     ...(digestJob && digestJob.status === "ready" && !digestJob.consumed
       ? [
@@ -1364,44 +1416,72 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [artifactCheckReq, groups]);
 
-  // 对话页卡片 chip 的一次性跳转：按项目根选中分组（无对应分组静默忽略，与 focusTabReq 同口径）
+  // 对话页卡片 chip / 收件箱「去查看」的一次性跳转：按项目根或工作树根选中分组
+  //（无对应分组静默忽略，与 focusTabReq 同口径）
   useEffect(() => {
     if (!selectProjectReq) return;
-    const g = groups.find((gr) => samePath(gr.repoPath, selectProjectReq));
+    const g = groups.find(
+      (gr) =>
+        samePath(gr.repoPath, selectProjectReq) ||
+        gr.list.some((w) => samePath(w.worktreePath, selectProjectReq)),
+    );
     if (g) setSelectedGroupKey(g.key);
     setSelectProjectReq(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectProjectReq, groups]);
 
-  // 收件箱折叠 strip：默认收起只占单行，分类摘要保留第一眼信息（「2 冲突 · 1 待确认」）
-  const [inboxOpen, setInboxOpen] = useState(false);
-  // 空了就收回展开态；展开时 Esc 关闭
+  // 收件箱折叠 strip：默认收起只占单行，类别胶囊保留第一眼信息（点胶囊展开该类明细）
+  const [inboxCat, setInboxCat] = useState<InboxCategory | null>(null);
+  const inboxGroups = groupInbox(inboxItems);
+  // 空了就收回展开态；展开中的类别被清空（如最后一条 help 被忽略）同样收起
   useEffect(() => {
-    if (inboxLen === 0) setInboxOpen(false);
-  }, [inboxLen]);
+    if (
+      inboxCat !== null &&
+      !inboxGroups.some((g) => g.category === inboxCat)
+    )
+      setInboxCat(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inboxLen, inboxCat]);
+  // 展开时 Esc 关闭
   useEffect(() => {
-    if (!inboxOpen) return;
+    if (inboxCat === null) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setInboxOpen(false);
+      if (e.key === "Escape") setInboxCat(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [inboxOpen]);
-  const countBy = (...prefixes: string[]) =>
-    inboxItems.filter((it) => prefixes.some((p) => it.key.startsWith(p))).length;
-  const inboxBreakdown = (
-    [
-      [countBy("conflict:"), "冲突"],
-      [countBy("confirm:", "live:"), "待确认"], // 终端标签 + 外部 live 同类合并
-      [countBy("ready:"), "可合并"],
-      [countBy("artifacts:"), "待核验"],
-      [countBy("digest"), "待发送"],
-      [countBy("profile:"), "配置失效"],
-    ] as [number, string][]
-  )
-    .filter(([n]) => n > 0)
-    .map(([n, label]) => `${n} ${label}`)
-    .join(" · ");
+  }, [inboxCat]);
+  const openInboxGroup =
+    inboxGroups.find((g) => g.category === inboxCat) ?? null;
+
+  // 人工请求 OS 通知（复用「长任务 OS 通知」开关，不新增设置项）：help 条目集合出现新
+  // 来源（edge-trigger，对比上一轮 key 集合）且窗口隐藏时发一条系统通知；同一来源 30s
+  // 去抖。判定纯逻辑在 inbox.ts（helpNotifyKeys），首轮刷新只建基线不通知。
+  const notificationsEnabled = useAppStore(
+    (s) => s.settings?.notificationsEnabled ?? true,
+  );
+  const helpPrevKeysRef = useRef<Set<string> | null>(null);
+  const helpNotifySentRef = useRef(new Map<string, number>());
+  const helpKeys = inboxItems
+    .filter((it) => it.key.startsWith("help:"))
+    .map((it) => it.key);
+  const helpKeysSig = helpKeys.join("\n");
+  useEffect(() => {
+    // 已消失来源的清掉去抖记录，防 root 复用时沿用旧时间
+    for (const key of [...helpNotifySentRef.current.keys()]) {
+      if (!helpKeys.includes(key)) helpNotifySentRef.current.delete(key);
+    }
+    const prev = helpPrevKeysRef.current;
+    helpPrevKeysRef.current = new Set(helpKeys);
+    if (!notificationsEnabled) return;
+    if (!document.hidden) return;
+    const now = Date.now();
+    const fresh = helpNotifyKeys(prev, helpKeys, helpNotifySentRef.current, now);
+    if (fresh.length === 0) return;
+    for (const key of fresh) helpNotifySentRef.current.set(key, now);
+    void fireHelpNotification(fresh.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [helpKeysSig, notificationsEnabled]);
 
   function workspaceMenuItems(workspace: WorkspaceDto) {
     const workspaceHealth = health[workspace.id];
@@ -1645,35 +1725,48 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   return (
     <div className="relative flex h-full flex-col bg-canvas">
       {/* 待你处理（全局收件箱）：文档流单行 strip（只占 32px，不顶开工作台）；
-          全空不渲染。明细是 strip 下方的悬浮下拉（遮罩/Esc 关闭），不推布局也不遮挡。
+          全空不渲染。按类别拆胶囊，点胶囊展开该类明细（悬浮下拉，遮罩/Esc 关闭）。
           macOS 上收件箱收进自绘标题栏（Ghostty 式），页内 strip 不渲染（Windows/Linux 保留本 strip） */}
-      {!IS_MAC && inboxOpen && (
+      {!IS_MAC && inboxCat !== null && (
         <div
           className="fixed inset-0 z-10"
-          onClick={() => setInboxOpen(false)}
+          onClick={() => setInboxCat(null)}
         />
       )}
       {!IS_MAC && inboxItems.length > 0 && (
         <section className="relative z-20 shrink-0 px-6 pt-2">
           <div className="relative mx-auto w-full max-w-[1440px]">
-            <button
-              type="button"
-              onClick={() => setInboxOpen((v) => !v)}
-              aria-expanded={inboxOpen}
-              className="flex h-8 w-full items-center gap-2 rounded-md bg-strip px-3 text-xs text-l2 hover:bg-white/5"
-            >
-              <span className="size-2 shrink-0 rounded-full bg-warn-text" />
-              <span className="font-medium text-l1">
+            <div className="flex h-8 items-center gap-2 rounded-md bg-strip px-3 text-xs text-l2">
+              <span className="shrink-0 font-medium text-l1">
                 待你处理 {inboxItems.length}
               </span>
-              <span className="min-w-0 flex-1 truncate text-left text-l4">
-                {inboxBreakdown}
-              </span>
-              <span className="shrink-0 text-l4">{inboxOpen ? "▴" : "▾"}</span>
-            </button>
-            {inboxOpen && (
+              <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
+                {inboxGroups.map((group) => (
+                  <button
+                    key={group.category}
+                    type="button"
+                    onClick={() =>
+                      setInboxCat((v) =>
+                        v === group.category ? null : group.category,
+                      )
+                    }
+                    aria-expanded={inboxCat === group.category}
+                    className="flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-field px-2.5 text-[11px] text-l2 hover:bg-white/5"
+                  >
+                    <span
+                      className={`size-1.5 shrink-0 rounded-full ${group.items[0].dot}`}
+                    />
+                    {group.label} {group.items.length}
+                    <span className="text-l4">
+                      {inboxCat === group.category ? "▴" : "▾"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            {openInboxGroup && (
               <ul className="absolute inset-x-0 top-full z-20 mt-1 max-h-80 divide-y divide-hairline overflow-auto rounded-md border border-field bg-strip">
-                {inboxItems.map((item) => (
+                {openInboxGroup.items.map((item) => (
                   <li
                     key={item.key}
                     className="flex items-center gap-2.5 px-3 py-2 text-xs"
@@ -1684,6 +1777,21 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                     <span className="min-w-0 flex-1 truncate text-l2">
                       {item.text}
                     </span>
+                    {item.key.startsWith("help:") && (
+                      <button
+                        type="button"
+                        title="忽略此来源（内容变化后重新出现）"
+                        onClick={() =>
+                          dismissHelpRequest(
+                            item.key.slice("help:".length),
+                            item.dismissSignature ?? "",
+                          )
+                        }
+                        className="shrink-0 text-l4 hover:text-l1"
+                      >
+                        ✕
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => runInboxAction(item)}
@@ -1851,7 +1959,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       {groups.length === 0 ? (
         <EmptyState
           title="还没有研究项目"
-          detail="先添加一个项目目录，Ccode 会为它建立流水线和隔离任务。"
+          detail="先添加一个项目目录，Ccode 会为它建立研究流程和隔离任务。"
           action={
             <div className="flex items-center justify-center gap-2">
               <button
@@ -1897,7 +2005,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           >
             {selectedGroup.list.length === 0 ? (
               <p className="py-2 text-xs text-l4">
-                该项目还没有工作区，从上方流水线步骤「开始」一键开步。
+                该项目还没有工作区，从上方研究步骤「开始」一键开步。
               </p>
             ) : (
             <ul className="divide-y divide-hairline">
@@ -2092,7 +2200,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             {
               label: demoBusy ? "正在创建…" : "✦ 创建示例课题（演示）",
               disabled: demoBusy,
-              title: "在 文档/Ccode 示例课题 生成带演示数据的完整流水线项目",
+              title: "在 文档/Ccode 示例课题 生成带演示数据的完整研究流程项目",
               onSelect: () => void onCreateDemo(),
             },
           ]}

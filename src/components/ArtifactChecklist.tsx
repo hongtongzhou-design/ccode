@@ -161,11 +161,11 @@ export default function ArtifactChecklist({
         <p className="text-xs text-l4">读取中…</p>
       ) : !stepFound ? (
         <p className="text-xs text-l4">
-          未找到绑定该任务的流水线步骤，暂无预期产物可核验。
+          未找到绑定该任务的研究步骤，暂无预期产物可核验。
         </p>
       ) : rows.length === 0 ? (
         <p className="text-xs text-l4">
-          该步骤未登记预期产物，可在「编辑流水线」中补充。
+          该步骤未登记预期产物，可在「编辑研究流程」中补充。
         </p>
       ) : (
         <ul className="space-y-0.5">

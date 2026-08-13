@@ -1610,6 +1610,453 @@ pub async fn pending_artifact_checks() -> Vec<PendingArtifactDto> {
     .unwrap_or_default()
 }
 
+// ===== 人工事项（步骤的人机分工清单）：声明在 project.toml steps[].human_tasks，
+// 状态不进档案卡——手动勾选存 app.db human_task_checks 表（行在 = 人勾了），
+// 落点检测按文件系统现算；done = 手动 || 检测，手动优先（勾了系统不再追问） =====
+
+/// 单个人工事项的派生状态（list_human_task_states 返回，按步骤顺序平铺）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanTaskStateDto {
+    pub step: String,
+    pub title: String,
+    pub guidance: String,
+    pub target: String,
+    pub timing: String,
+    /// 落点位置检测到文件（空 target 恒 false——纯脑力事项只能手勾）
+    pub detected: bool,
+    /// 人手动勾过（优先于检测；取消勾选即回到纯检测口径）
+    pub manual: bool,
+    /// done = manual || detected（前端不再重算）
+    pub done: bool,
+}
+
+fn ensure_human_task_checks_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS human_task_checks(
+          project_path TEXT NOT NULL, step TEXT NOT NULL, title TEXT NOT NULL,
+          updated_at TEXT, PRIMARY KEY(project_path, step, title));",
+    )
+    .map_err(|e| format!("初始化 human_task_checks 表失败: {e}"))
+}
+
+fn manual_checks_at(conn: &Connection, project_path: &str) -> std::collections::HashSet<(String, String)> {
+    let mut out = std::collections::HashSet::new();
+    if ensure_human_task_checks_table(conn).is_err() {
+        return out;
+    }
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT step, title FROM human_task_checks WHERE project_path = ?1")
+    {
+        if let Ok(rows) = stmt.query_map(params![project_path], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        }) {
+            out.extend(rows.flatten());
+        }
+    }
+    out
+}
+
+/// 极简通配匹配：仅支持 `*`（任意字符序列），大小写敏感（两指针 + 星号回退点）
+fn wildcard_match(pattern: &str, name: &str) -> bool {
+    let pc: Vec<char> = pattern.chars().collect();
+    let nc: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0usize, 0usize);
+    let (mut star_p, mut star_n) = (None, None);
+    while ni < nc.len() {
+        if pi < pc.len() && pc[pi] == nc[ni] {
+            pi += 1;
+            ni += 1;
+        } else if pi < pc.len() && pc[pi] == '*' {
+            star_p = Some(pi);
+            star_n = Some(ni);
+            pi += 1;
+        } else if let (Some(sp), Some(sn)) = (star_p, star_n) {
+            pi = sp + 1;
+            ni = sn + 1;
+            star_n = Some(ni);
+        } else {
+            return false;
+        }
+    }
+    while pi < pc.len() && pc[pi] == '*' {
+        pi += 1;
+    }
+    pi == pc.len()
+}
+
+/// 落点检测：root 下是否已有交付物。
+/// 三种形态：目录（结尾 /）= 内有任意非隐藏文件；目录/通配 = 目录内有匹配文件（不递归）；
+/// 精确文件 = 存在。只接受根的相对路径，绝对路径/.. 逃逸一律视为未交付（同产物核验口径）。
+pub(crate) fn human_target_hit(root: &Path, target: &str) -> bool {
+    let rel = target.trim();
+    if rel.is_empty() {
+        return false;
+    }
+    let is_dir_entry = rel.ends_with('/') || rel.ends_with('\\');
+    let rel = rel.trim_end_matches(['/', '\\']);
+    if rel.is_empty() || rel.contains("..") || Path::new(rel).is_absolute() {
+        return false;
+    }
+    let visible_file = |e: &fs::DirEntry| {
+        !e.file_name().to_string_lossy().starts_with('.')
+            && e.metadata().map(|m| m.is_file()).unwrap_or(false)
+    };
+    if is_dir_entry {
+        // 目录形态：内有任意非隐藏文件即算交付；递归（用户可能放进子目录），限量防暴走
+        let mut stack = vec![root.join(rel)];
+        let mut visited = 0usize;
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = fs::read_dir(dir) else { continue };
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                visited += 1;
+                if visited > 2000 || stack.len() > 64 {
+                    return false; // 异常巨大的目录不按交付计
+                }
+                let Ok(m) = e.metadata() else { continue };
+                if m.is_file() {
+                    return true;
+                }
+                if m.is_dir() {
+                    stack.push(e.path());
+                }
+            }
+        }
+        return false;
+    }
+    if rel.contains('*') {
+        // 只允许通配在最后一段；目录部分仍须是纯相对路径
+        let (dir, pattern) = match rel.rsplit_once('/') {
+            Some((d, p)) => (d, p),
+            None => ("", rel),
+        };
+        if pattern.is_empty() || dir.contains('*') {
+            return false;
+        }
+        let dir_path = if dir.is_empty() { root.to_path_buf() } else { root.join(dir) };
+        let Ok(rd) = fs::read_dir(dir_path) else {
+            return false;
+        };
+        return rd.flatten().any(|e| {
+            visible_file(&e) && wildcard_match(pattern, &e.file_name().to_string_lossy())
+        });
+    }
+    fs::metadata(root.join(rel))
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+}
+
+/// 步骤人工事项的检测根列表：项目根恒在；步骤绑定了活跃工作区时工作树根也算
+/// （交付落在哪一侧都算数——开工前的事项多在主仓，执行中的事项多在工作树）
+fn human_detection_roots(
+    conn: Option<&Connection>,
+    project_root: &Path,
+    workspace_name: &str,
+) -> Vec<PathBuf> {
+    let mut roots = vec![project_root.to_path_buf()];
+    if workspace_name.is_empty() {
+        return roots;
+    }
+    if let Some(conn) = conn {
+        let key = project_root.to_string_lossy().into_owned();
+        if let Ok(rows) = query_workspaces(conn) {
+            for w in rows {
+                if w.status == "active"
+                    && w.name == workspace_name
+                    && crate::projects::canonical_key(Path::new(&w.repo_path)) == key
+                {
+                    roots.push(PathBuf::from(w.worktree_path));
+                }
+            }
+        }
+    }
+    roots
+}
+
+pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
+    let cfg = crate::projects::read_config_at(root).config;
+    if cfg.steps.iter().all(|s| s.human_tasks.is_empty()) {
+        return Vec::new();
+    }
+    let conn = db().ok();
+    if let Some(c) = &conn {
+        let _ = ensure_human_task_checks_table(c);
+    }
+    let key = root.to_string_lossy().into_owned();
+    let manual = conn
+        .as_ref()
+        .map(|c| manual_checks_at(c, &key))
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for step in &cfg.steps {
+        for h in &step.human_tasks {
+            let detected = human_detection_roots(conn.as_ref(), root, &step.workspace_name)
+                .iter()
+                .any(|r| human_target_hit(r, &h.target));
+            let manual_hit = manual.contains(&(step.name.clone(), h.title.clone()));
+            out.push(HumanTaskStateDto {
+                step: step.name.clone(),
+                title: h.title.clone(),
+                guidance: h.guidance.clone(),
+                target: h.target.clone(),
+                timing: h.timing.clone(),
+                detected,
+                manual: manual_hit,
+                done: manual_hit || detected,
+            });
+        }
+    }
+    out
+}
+
+#[tauri::command]
+pub async fn list_human_task_states(project_root: String) -> Result<Vec<HumanTaskStateDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = PathBuf::from(crate::sessions::expand_tilde(&project_root));
+        let root = fs::canonicalize(&root).map_err(|e| format!("项目目录无效: {e}"))?;
+        // list 口径同 list_task_cards：非项目（无档案卡）返回空表，不设门槛
+        Ok(list_human_task_states_at(&root))
+    })
+    .await
+    .map_err(|e| format!("读取人工事项状态失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn set_human_task_check(
+    project_root: String,
+    step: String,
+    title: String,
+    checked: bool,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root =
+            crate::projects::ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
+                &project_root,
+            )))?;
+        let conn = db()?;
+        ensure_human_task_checks_table(&conn)?;
+        let key = root.to_string_lossy().into_owned();
+        if checked {
+            conn.execute(
+                "INSERT OR REPLACE INTO human_task_checks(project_path, step, title, updated_at)
+                 VALUES(?1, ?2, ?3, ?4)",
+                params![key, step, title, crate::sessions::now_iso()],
+            )
+            .map_err(|e| format!("勾选人工事项失败: {e}"))?;
+        } else {
+            // 取消勾选 = 删行回到纯检测口径（检测命中仍算完成）
+            conn.execute(
+                "DELETE FROM human_task_checks WHERE project_path = ?1 AND step = ?2 AND title = ?3",
+                params![key, step, title],
+            )
+            .map_err(|e| format!("取消勾选失败: {e}"))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("更新人工事项勾选失败: {e}"))?
+}
+
+// ===== 人工交付导入：选中的外部文件复制进落点目录 + 登记提货单 =====
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportDeliverableDto {
+    /// 复制后的绝对路径
+    pub dest_path: String,
+    /// 相对落点根（项目根或工作树根），正斜杠
+    pub dest_rel: String,
+    /// 落点根（工作树根优先，无活跃工作区 = 项目根）
+    pub dest_root: String,
+    /// 提货单登记是否成功（文件已复制；失败原因在 register_error）
+    pub registered: bool,
+    pub register_error: Option<String>,
+}
+
+/// target → 目标目录与文件名策略：目录/通配 = 目录取静态前缀、文件名用源文件 basename；
+/// 精确文件 = 按 target 原样落（允许改名交付）
+fn dest_for_target(root: &Path, target: &str, source: &Path) -> Result<PathBuf, String> {
+    let rel = target.trim();
+    if rel.is_empty() {
+        return Err("该事项没有落点路径，无法登记交付".into());
+    }
+    let is_dir_entry = rel.ends_with('/') || rel.ends_with('\\');
+    let rel = rel.trim_end_matches(['/', '\\']);
+    if rel.is_empty() || rel.contains("..") || Path::new(rel).is_absolute() {
+        return Err(format!("落点路径不安全: {target}"));
+    }
+    let base = source
+        .file_name()
+        .ok_or("源文件没有文件名")?;
+    if is_dir_entry {
+        return Ok(root.join(rel).join(base));
+    }
+    if rel.contains('*') {
+        let (dir, _) = rel.rsplit_once('/').unwrap_or(("", rel));
+        if dir.contains('*') {
+            return Err(format!("落点通配只允许出现在最后一段: {target}"));
+        }
+        return Ok(if dir.is_empty() {
+            root.join(base)
+        } else {
+            root.join(dir).join(base)
+        });
+    }
+    Ok(root.join(rel))
+}
+
+#[tauri::command]
+pub async fn import_human_deliverable(
+    project_root: String,
+    step: String,
+    title: String,
+    source_path: String,
+) -> Result<ImportDeliverableDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root =
+            crate::projects::ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
+                &project_root,
+            )))?;
+        let cfg = crate::projects::read_config_at(&root).config;
+        let step_cfg = cfg
+            .steps
+            .iter()
+            .find(|s| s.name == step)
+            .ok_or_else(|| format!("步骤不存在: {step}"))?;
+        let task = step_cfg
+            .human_tasks
+            .iter()
+            .find(|h| h.title == title)
+            .ok_or_else(|| format!("人工事项不存在: {title}"))?;
+        let source = PathBuf::from(crate::sessions::expand_tilde(&source_path));
+        let source =
+            fs::canonicalize(&source).map_err(|e| format!("源文件不存在或不可读: {e}"))?;
+        if !source.is_file() {
+            return Err("源路径不是文件".into());
+        }
+        // 落点根：步骤绑定的活跃工作区优先（agent 在工作树里干活），否则项目根
+        let conn = db().ok();
+        let dest_root = human_detection_roots(conn.as_ref(), &root, &step_cfg.workspace_name)
+            .into_iter()
+            .last()
+            .unwrap_or_else(|| root.clone());
+        let dest = dest_for_target(&dest_root, &task.target, &source)?;
+        if dest.exists() {
+            return Err(format!("落点已存在同名文件: {}", dest.display()));
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建落点目录失败: {e}"))?;
+        }
+        fs::copy(&source, &dest).map_err(|e| format!("复制文件失败: {e}"))?;
+        // 登记提货单（best-effort：文件已落位，检测口径已算完成；登记失败只回告不否决）
+        let (registered, register_error) =
+            match register_artifact_impl(&dest_root, &title, &dest, "人工交付") {
+                Ok(_) => (true, None),
+                Err(e) => (false, Some(e)),
+            };
+        let dest_rel = dest
+            .strip_prefix(&dest_root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        Ok(ImportDeliverableDto {
+            dest_path: dest.to_string_lossy().into_owned(),
+            dest_rel,
+            dest_root: dest_root.to_string_lossy().into_owned(),
+            registered,
+            register_error,
+        })
+    })
+    .await
+    .map_err(|e| format!("导入人工交付失败: {e}"))?
+}
+
+// ===== agent 人工请求（HELP-WANTED.md 约定文件） =====
+// agent 只会写文件，Ccode 负责看见：工作树/主仓 .ccode/help-wanted.md 里每行
+// 「- 」开头是一条请求，约定每条自带兜底句「若未回复则按 … 继续」（非阻断）。
+// 扫描范围：活跃工作区的工作树 + 其主仓根（聊想法在主仓进行）；无工作区的项目不扫。
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelpRequestDto {
+    /// 来源根（工作树根或主仓根）
+    pub root: String,
+    pub workspace_id: Option<String>,
+    pub workspace_name: Option<String>,
+    pub repo_name: String,
+    /// 请求条目（已去「- 」前缀，上限 20 条 × 300 字符）
+    pub items: Vec<String>,
+}
+
+pub(crate) const HELP_WANTED_FILE: &str = ".ccode/help-wanted.md";
+
+fn parse_help_wanted(text: &str) -> Vec<String> {
+    text.chars()
+        .take(32 * 1024)
+        .collect::<String>()
+        .lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            let item = t
+                .strip_prefix("- ")
+                .or_else(|| t.strip_prefix("* "))
+                .unwrap_or(t);
+            let item = item.trim();
+            // 跳过标题/空行/分隔线，只收实质条目
+            if item.is_empty() || item.starts_with('#') || item.starts_with("---") {
+                return None;
+            }
+            Some(item.chars().take(300).collect())
+        })
+        .take(20)
+        .collect()
+}
+
+#[tauri::command]
+pub async fn list_help_requests() -> Vec<HelpRequestDto> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut out = Vec::new();
+        let Ok(conn) = db() else {
+            return out;
+        };
+        let Ok(rows) = query_workspaces(&conn) else {
+            return out;
+        };
+        let mut seen_roots = std::collections::HashSet::new();
+        for w in rows.into_iter().filter(|w| w.status == "active") {
+            // 工作树 + 主仓根各算一个来源（主仓可能覆盖多个工作区，去重）
+            for (root, ws_id, ws_name) in [
+                (w.worktree_path.clone(), Some(w.id.clone()), Some(w.name.clone())),
+                (w.repo_path.clone(), None, None),
+            ] {
+                if !seen_roots.insert(root.clone()) {
+                    continue;
+                }
+                let file = Path::new(&root).join(HELP_WANTED_FILE);
+                let Ok(text) = fs::read_to_string(&file) else {
+                    continue;
+                };
+                let items = parse_help_wanted(&text);
+                if items.is_empty() {
+                    continue;
+                }
+                out.push(HelpRequestDto {
+                    root,
+                    workspace_id: ws_id,
+                    workspace_name: ws_name,
+                    repo_name: w.repo_name.clone(),
+                    items,
+                });
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// 合并回基准分支（本地 merge，git 写操作）：前置条件不满足直接报错，不动任何东西。
 /// archive=false 只合并（工作区保留，终端可继续用）；archive=true 合并并归档
 #[tauri::command]
@@ -4402,5 +4849,106 @@ mod tests {
         let entries = read_artifacts_manifest_impl(&fx.repo);
         assert_eq!(entries.len(), 2, "{entries:?}");
         assert!(entries.iter().any(|e| e.name == "数据集"));
+    }
+
+    // ===== 人工事项：落点检测 / 勾选存取 / 交付导入 / HELP-WANTED 解析 =====
+
+    #[test]
+    fn wildcard_match_basics() {
+        assert!(wildcard_match("*.bib", "a.bib"));
+        assert!(wildcard_match("*.bib", ".bib"));
+        assert!(!wildcard_match("*.bib", "a.bib.bak"));
+        assert!(wildcard_match("a*", "a"));
+        assert!(wildcard_match("*", "任意.txt"));
+        assert!(!wildcard_match("a*", "ba"));
+        assert!(wildcard_match("s*.pdf", "smith-2024.pdf"));
+    }
+
+    #[test]
+    fn human_target_hit_three_forms() {
+        let dir = std::env::temp_dir().join(format!("ccode-ht-{}", uuid::Uuid::new_v4()));
+        let root = dir.join("proj");
+        fs::create_dir_all(root.join("papers/search")).unwrap();
+        // 空目录/缺文件 → 未交付
+        assert!(!human_target_hit(&root, "papers/"));
+        assert!(!human_target_hit(&root, "papers/*.bib"));
+        assert!(!human_target_hit(&root, "papers/screening.md"));
+        // 目录形态：隐藏文件不算交付
+        fs::write(root.join("papers/.keep"), "x").unwrap();
+        assert!(!human_target_hit(&root, "papers/"));
+        fs::write(root.join("papers/search/wos.bib"), "@article{}").unwrap();
+        assert!(human_target_hit(&root, "papers/"));
+        assert!(human_target_hit(&root, "papers/search/"));
+        // 通配只认最后一段
+        assert!(human_target_hit(&root, "papers/search/*.bib"));
+        assert!(!human_target_hit(&root, "papers/search/*.pdf"));
+        assert!(!human_target_hit(&root, "papers/*/x.bib"), "跨段通配不支持");
+        // 精确文件
+        fs::write(root.join("papers/screening.md"), "s").unwrap();
+        assert!(human_target_hit(&root, "papers/screening.md"));
+        // 逃逸/绝对路径一律未交付
+        assert!(!human_target_hit(&root, "../outside/"));
+        assert!(!human_target_hit(&root, "/etc/hosts"));
+        assert!(!human_target_hit(&root, ""));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_help_wanted_bullets_only() {
+        let text = "# 需要人工协助\n\n- 请补充检索词 GLP-1 心血管（若未回复则按现有检索词继续）\n\n- 下载 smith 2024 全文\n---\n* 星号条目也算\n\n";
+        let items = parse_help_wanted(text);
+        assert_eq!(items.len(), 3, "{items:?}");
+        assert!(items[0].starts_with("请补充检索词"));
+        assert_eq!(items[2], "星号条目也算");
+        assert_eq!(parse_help_wanted("# 只有标题\n\n"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn dest_for_target_forms() {
+        let root = Path::new("/proj");
+        let src = Path::new("/downloads/smith-2024.pdf");
+        assert_eq!(
+            dest_for_target(root, "papers/", src).unwrap(),
+            PathBuf::from("/proj/papers/smith-2024.pdf")
+        );
+        assert_eq!(
+            dest_for_target(root, "papers/*.pdf", src).unwrap(),
+            PathBuf::from("/proj/papers/smith-2024.pdf")
+        );
+        // 精确文件 = 允许改名交付
+        assert_eq!(
+            dest_for_target(root, "papers/list.md", src).unwrap(),
+            PathBuf::from("/proj/papers/list.md")
+        );
+        assert!(dest_for_target(root, "../x/", src).is_err());
+        assert!(dest_for_target(root, "", src).is_err());
+    }
+
+    /// 勾选存取（行在 = 人勾了）：upsert/delete 往返 + 项目间隔离
+    #[test]
+    fn human_task_checks_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("ccode-htc-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        ensure_human_task_checks_table(&conn).unwrap();
+        let proj = dir.join("p1").to_string_lossy().into_owned();
+        conn.execute(
+            "INSERT OR REPLACE INTO human_task_checks(project_path, step, title, updated_at) VALUES(?1,?2,?3,?4)",
+            params![proj, "检索", "下载全文", "2026-08-12T00:00:00Z"],
+        )
+        .unwrap();
+        let set = manual_checks_at(&conn, &proj);
+        assert!(set.contains(&("检索".into(), "下载全文".into())));
+        // 其他项目隔离
+        let other = dir.join("p2").to_string_lossy().into_owned();
+        assert!(manual_checks_at(&conn, &other).is_empty());
+        // 取消勾选 = 删行
+        conn.execute(
+            "DELETE FROM human_task_checks WHERE project_path = ?1 AND step = ?2 AND title = ?3",
+            params![proj, "检索", "下载全文"],
+        )
+        .unwrap();
+        assert!(manual_checks_at(&conn, &proj).is_empty());
+        fs::remove_dir_all(&dir).ok();
     }
 }

@@ -2430,13 +2430,13 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       });
       const cfg = read.config;
       // 笔记步骤定位规则（简单可靠）：优先 workspaceName === "lit-notes"（默认模板第二步）；
-      // 用户改过工作区名时回落流水线第二步（文献精读通常排在检索之后）
+      // 用户改过工作区名时回落研究流程第二步（文献精读通常排在检索之后）
       const step =
         cfg.steps.find((s) => s.workspaceName === "lit-notes") ?? cfg.steps[1];
       if (!step?.workspaceName) {
         return {
           ok: false,
-          msg: "该项目流水线中没有笔记步骤：请把工作区名设为 lit-notes 的步骤，或保留流水线前两步",
+          msg: "该项目研究流程中没有笔记步骤：请把工作区名设为 lit-notes 的步骤，或保留研究流程前两步",
         };
       }
       // 已有活跃工作区直接追加；没有则走一键开步链路（同 ProjectGroup.startStep）

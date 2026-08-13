@@ -254,6 +254,53 @@ export interface WorkspaceDiffDto {
   totalDel: number;
 }
 
+/** 人工事项（步骤的人机分工清单，声明在 project.toml steps[].human_tasks）：
+ *  引擎不识语义（科研语义只进模板），只做文本/路径透传 */
+export interface HumanTaskDto {
+  /** 一句话说明（checklist 条目文本） */
+  title: string;
+  /** 引导说明（渠道选项等，只告知不推荐）；空串 = 无 */
+  guidance: string;
+  /** 交付落点（相对项目根/工作树）：目录（结尾 /）、精确文件、或「目录/通配」；
+      空串 = 纯脑力事项，只能手动勾选 */
+  target: string;
+  /** 时机：before（开工前）| during（并行）| after（收尾） */
+  timing: string;
+}
+
+/** 人工事项派生状态（list_human_task_states）：done = manual || detected，手动优先 */
+export interface HumanTaskStateDto {
+  step: string;
+  title: string;
+  guidance: string;
+  target: string;
+  timing: string;
+  /** 落点位置检测到文件 */
+  detected: boolean;
+  /** 人手动勾过（勾了系统不再追问；取消勾选回到纯检测口径） */
+  manual: boolean;
+  done: boolean;
+}
+
+/** import_human_deliverable 返回：复制落位 + 提货单登记结果（登记失败不否决复制） */
+export interface ImportDeliverableDto {
+  destPath: string;
+  destRel: string;
+  destRoot: string;
+  registered: boolean;
+  registerError: string | null;
+}
+
+/** agent 人工请求（.ccode/help-wanted.md 约定文件，list_help_requests 返回） */
+export interface HelpRequestDto {
+  /** 来源根（工作树根或主仓根） */
+  root: string;
+  workspaceId: string | null;
+  workspaceName: string | null;
+  repoName: string;
+  items: string[];
+}
+
 /** 提货单 artifacts.yaml 条目（§11.3 机制五）：产物本体不进 git，清单随分支提交传递 */
 export interface ArtifactEntryDto {
   name: string;
@@ -525,7 +572,7 @@ export interface ProjectStepRunDto {
   default: boolean;
 }
 
-/** 档案卡流水线步骤：工作区名/简报/技能/预期产物均为可编辑预设 */
+/** 档案卡流水线步骤：工作区名/简报/技能/预期产物/人工事项均为可编辑预设 */
 export interface ProjectStepDto {
   name: string;
   workspaceName: string;
@@ -535,6 +582,10 @@ export interface ProjectStepDto {
   run: ProjectStepRunDto[];
   /** 资源绑定：[[resources]] 条目的 path；空/缺省 = 绑定全部资源（向后兼容旧后端与旧配置） */
   resources?: string[];
+  /** 人工事项（人机分工清单）；缺省 = 无（向后兼容旧后端与旧配置） */
+  humanTasks?: HumanTaskDto[];
+  /** 讨论种子（模板预置的「开工前建议想清楚的问题」）：卡片区按步骤列出，点击即聊；不进 TASK.md */
+  discussionSeeds?: string[];
 }
 
 export interface ProjectConfigDto {

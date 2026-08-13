@@ -11,6 +11,7 @@ import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import { LoadingRows, rowActionClass } from "./components/PageFrame";
 import "./App.css";
 import { useAppStore, runInboxAction } from "./store";
+import { groupInbox, type InboxCategory } from "./inbox";
 import {
   eventMatchesCombo,
   comboLabel,
@@ -74,10 +75,13 @@ function App() {
   // 「待你处理」收件箱条目镜像（WorkspacesPage 写入）：侧栏圆点计数 + macOS 标题栏收件箱共用
   const inboxItems = useAppStore((s) => s.inboxItems);
   const inboxCount = inboxItems.length;
+  const dismissHelpRequest = useAppStore((s) => s.dismissHelpRequest);
+  // 类别胶囊：按 key 前缀分组（固定顺序，空类不渲染）
+  const inboxGroups = groupInbox(inboxItems);
   // macOS 自绘标题栏的窗口标题（hiddenTitle 后原生标题不显示，由我们渲染）
   const [winTitle, setWinTitle] = useState("");
-  // 标题栏收件箱的展开态（Ghostty 式下拉；遮罩/Esc 关闭）
-  const [titleInboxOpen, setTitleInboxOpen] = useState(false);
+  // 标题栏收件箱的展开态：当前展开的类别（Ghostty 式下拉；遮罩/Esc/再点关闭）
+  const [titleInboxCat, setTitleInboxCat] = useState<InboxCategory | null>(null);
   useEffect(() => {
     if (!IS_MAC) return;
     getCurrentWindow()
@@ -85,14 +89,23 @@ function App() {
       .then(setWinTitle)
       .catch(() => {});
   }, []);
+  // 展开中的类别被清空（如最后一条 help 被忽略）时收起下拉
   useEffect(() => {
-    if (!titleInboxOpen) return;
+    if (
+      titleInboxCat !== null &&
+      !inboxGroups.some((g) => g.category === titleInboxCat)
+    )
+      setTitleInboxCat(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [titleInboxCat, inboxItems]);
+  useEffect(() => {
+    if (titleInboxCat === null) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setTitleInboxOpen(false);
+      if (e.key === "Escape") setTitleInboxCat(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [titleInboxOpen]);
+  }, [titleInboxCat]);
   const loadAll = useAppStore((s) => s.loadAll);
   const loadSessions = useAppStore((s) => s.loadSessions);
   const loadRecentRepos = useAppStore((s) => s.loadRecentRepos);
@@ -250,7 +263,7 @@ function App() {
     <ErrorBoundary>
       <div className="ccode-app-shell flex h-full flex-col overflow-hidden bg-rail text-l2">
         {/* macOS 自绘标题栏（titleBarStyle: Overlay + hiddenTitle）：拖拽区 + 窗口标题 +
-            Ghostty 式标题栏收件箱（胶囊在标题后，点按向下展开明细，遮罩/Esc 关闭）。
+            Ghostty 式标题栏收件箱（按类别拆胶囊，点胶囊向下展开该类明细，遮罩/Esc/再点关闭）。
             Windows/Linux 用原生标题栏，收件箱保留在工作区页内 strip。
             执行态（chromeHidden）下也必须保留这条栏：Overlay 模式下红绿灯按钮始终悬浮在
             左上角，栏的 pl-[78px] 负责让位；整条隐藏会导致按钮压住页面内容、胶囊消失。
@@ -270,53 +283,80 @@ function App() {
                 {winTitle}
               </span>
             )}
-            {inboxCount > 0 && (
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setTitleInboxOpen((v) => !v)}
-                  aria-expanded={titleInboxOpen}
-                  className="flex h-6 items-center gap-1.5 rounded-full border border-field bg-strip px-2.5 text-[11px] text-l2 hover:bg-white/5"
-                >
-                  <span className="size-1.5 shrink-0 rounded-full bg-warn-text" />
-                  待你处理 {inboxCount}
-                  <span className="text-l4">{titleInboxOpen ? "▴" : "▾"}</span>
-                </button>
-                {titleInboxOpen && (
-                  <ul className="absolute left-0 top-full z-40 mt-1.5 max-h-80 w-[420px] max-w-[80vw] divide-y divide-hairline overflow-auto rounded-md border border-field bg-strip">
-                    {inboxItems.map((item) => (
-                      <li
-                        key={item.key}
-                        className="flex items-center gap-2.5 px-3 py-2 text-xs"
-                      >
-                        <span
-                          className={`size-2 shrink-0 rounded-full ${item.dot}`}
-                        />
-                        <span className="min-w-0 flex-1 truncate text-l2">
-                          {item.text}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setTitleInboxOpen(false);
-                            runInboxAction(item);
-                          }}
-                          className={rowActionClass}
-                        >
-                          {item.actionLabel}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+            {inboxGroups.length > 0 && (
+              <div className="relative flex items-center gap-1.5">
+                {inboxGroups.map((group) => (
+                  <div key={group.category} className="relative">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setTitleInboxCat((v) =>
+                          v === group.category ? null : group.category,
+                        )
+                      }
+                      aria-expanded={titleInboxCat === group.category}
+                      className="flex h-6 items-center gap-1.5 rounded-full border border-field bg-strip px-2.5 text-[11px] text-l2 hover:bg-white/5"
+                    >
+                      <span
+                        className={`size-1.5 shrink-0 rounded-full ${group.items[0].dot}`}
+                      />
+                      {group.label} {group.items.length}
+                      <span className="text-l4">
+                        {titleInboxCat === group.category ? "▴" : "▾"}
+                      </span>
+                    </button>
+                    {titleInboxCat === group.category && (
+                      <ul className="absolute left-0 top-full z-40 mt-1.5 max-h-80 w-[420px] max-w-[80vw] divide-y divide-hairline overflow-auto rounded-md border border-field bg-strip">
+                        {group.items.map((item) => (
+                          <li
+                            key={item.key}
+                            className="flex items-center gap-2.5 px-3 py-2 text-xs"
+                          >
+                            <span
+                              className={`size-2 shrink-0 rounded-full ${item.dot}`}
+                            />
+                            <span className="min-w-0 flex-1 truncate text-l2">
+                              {item.text}
+                            </span>
+                            {item.key.startsWith("help:") && (
+                              <button
+                                type="button"
+                                title="忽略此来源（内容变化后重新出现）"
+                                onClick={() =>
+                                  dismissHelpRequest(
+                                    item.key.slice("help:".length),
+                                    item.dismissSignature ?? "",
+                                  )
+                                }
+                                className="shrink-0 text-l4 hover:text-l1"
+                              >
+                                ✕
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setTitleInboxCat(null);
+                                runInboxAction(item);
+                              }}
+                              className={rowActionClass}
+                            >
+                              {item.actionLabel}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </header>
         )}
-        {titleInboxOpen && (
+        {titleInboxCat !== null && (
           <div
             className="fixed inset-0 z-20"
-            onClick={() => setTitleInboxOpen(false)}
+            onClick={() => setTitleInboxCat(null)}
           />
         )}
         <div className="flex min-h-0 flex-1">

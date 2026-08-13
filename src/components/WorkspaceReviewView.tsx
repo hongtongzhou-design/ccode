@@ -22,12 +22,12 @@ import {
   buildWorkspaceTerminalRequest,
   startPipelineStep,
 } from "../pipeline-start";
-import { cardForStep } from "../task-cards";
 import { useAppStore } from "../store";
 import type {
   CitationHealthDto,
   GitCommitResultDto,
   GitFileDto,
+  HumanTaskStateDto,
   ProjectConfigDto,
   ProjectConfigReadDto,
   ProjectStepDto,
@@ -976,6 +976,8 @@ export default function WorkspaceReviewView({
     produced: number;
     total: number;
   } | null>(null);
+  // 人工事项收尾提醒（同一次性读取口径）：本步骤 timing=after 且未完成的事项标题
+  const [humanClosing, setHumanClosing] = useState<string[] | null>(null);
   // 上游漂移提醒：上游步骤晚于本步最后推进时间合并 → 产物可能过期（list_workspaces 顺带取回）
   const [staleUpstream, setStaleUpstream] = useState<string | null>(null);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
@@ -1141,6 +1143,24 @@ export default function WorkspaceReviewView({
         const step = read.config.steps.find(
           (s) => s.workspaceName === workspace.name,
         );
+        // 人工事项收尾提醒：步骤声明了人工事项才查（after 档未完成才提醒，同只提醒不阻断口径）
+        if (step && (step.humanTasks?.length ?? 0) > 0) {
+          invoke<HumanTaskStateDto[]>("list_human_task_states", {
+            projectRoot: workspace.repoPath,
+          })
+            .then((states) => {
+              if (stale) return;
+              setHumanClosing(
+                states
+                  .filter(
+                    (s) =>
+                      s.step === step.name && s.timing === "after" && !s.done,
+                  )
+                  .map((s) => s.title),
+              );
+            })
+            .catch(() => {});
+        }
         if (!step || step.expectedArtifacts.length === 0) return;
         const rows = await loadArtifactRows(step.expectedArtifacts, worktreePath);
         if (!stale) {
@@ -1246,7 +1266,9 @@ export default function WorkspaceReviewView({
     }
   }
 
-  /** 「沉淀到下一步」：评审结论定稿落盘并钉到下一步步骤的第一张卡片（没有则以步骤名新建） */
+  /** 「沉淀到下一步」（v3.72 起改落任务书草稿）：评审结论定稿追加进下一步步骤的
+   *  任务书草稿（.ccode/drafts/<步骤>.md，不存在则新建）——下一步开工弹层直接读到它，
+   *  不再经「简报钉卡 → 开工拼装」中间层 */
   async function submitDistill(e: React.FormEvent) {
     e.preventDefault();
     if (!nextStep || distillBusy) return;
@@ -1255,25 +1277,15 @@ export default function WorkspaceReviewView({
     setDistillBusy(true);
     setNextError(null);
     try {
-      const st = useAppStore.getState();
-      const cards = await st.loadTaskCards(nextStep.projectPath);
-      const card =
-        cardForStep(cards, nextStep.step.name) ??
-        (await st.createCard(
-          nextStep.projectPath,
-          nextStep.step.name,
-          nextStep.step.name,
-        ));
-      const rel = await invoke<string>("save_task_brief", {
+      const rel = await invoke<string>("append_step_draft", {
         projectRoot: nextStep.projectPath,
-        taskId: card.id,
+        stepName: nextStep.step.name,
+        heading: `上一步（${diff?.workspaceName ?? "未知步骤"}）评审沉淀`,
         content,
       });
-      // 刷新缓存让工作区页卡片区立即显示新简报
-      await st.loadTaskCards(nextStep.projectPath);
       setDistillOpen(false);
       setDistillText("");
-      setDistillMsg(`已沉淀到「${card.name}」：${rel}`);
+      setDistillMsg(`已沉淀进下一步任务书草稿：${rel}`);
     } catch (reason) {
       setNextError(String(reason));
     } finally {
@@ -2148,11 +2160,13 @@ export default function WorkspaceReviewView({
           </div>
         )}
 
-        {/* 可信度行：引用解析（bib 对照）+ 产物核验摘要。无 bib/全文无引用/无预期产物时不渲染，
-            不给非写作类项目添噪声；数据进评审时一次性读取，失败静默降级 */}
+        {/* 可信度行：引用解析（bib 对照）+ 产物核验摘要 + 人工事项收尾提醒。
+            无 bib/全文无引用/无预期产物/无收尾事项时不渲染，不给非写作类项目添噪声；
+            数据进评审时一次性读取，失败静默降级；收尾事项只提醒不阻断合并 */}
         {diff &&
           ((citations && citations.bibFound && citations.totalRefs > 0) ||
-            (artifacts && artifacts.total > 0)) && (
+            (artifacts && artifacts.total > 0) ||
+            (humanClosing && humanClosing.length > 0)) && (
             <div className="border-t border-hairline px-3 py-1.5 text-xs">
               <div className="flex min-h-6 items-center gap-3">
                 <span className="shrink-0 text-l4">可信度</span>
@@ -2186,6 +2200,14 @@ export default function WorkspaceReviewView({
                     }`}
                   >
                     产物 {artifacts.produced}/{artifacts.total} 已产出
+                  </span>
+                )}
+                {humanClosing && humanClosing.length > 0 && (
+                  <span
+                    className="shrink-0 text-warn-text"
+                    title={`收尾人工事项未完成：${humanClosing.join("、")}`}
+                  >
+                    收尾事项 {humanClosing.length} 件待做
                   </span>
                 )}
               </div>

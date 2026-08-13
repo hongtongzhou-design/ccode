@@ -16,7 +16,7 @@ export interface TemplatePickItem {
 }
 
 /**
- * 流水线模板选择器（内联面板）：内置模板（pipeline-presets）+ 用户模板（list_pipeline_templates）。
+ * 研究流程模板选择器（内联面板）：内置模板（pipeline-presets）+ 用户模板（list_pipeline_templates）。
  * 后端命令未注册（旧版本）时优雅降级为仅内置模板，不报错也不影响其他功能；
  * 选中只抛出 steps，写回 project.toml（含覆盖确认/保留 topic 与 resources）由父组件负责。
  */
@@ -49,7 +49,7 @@ export default function TemplatePicker({
 
   async function removeTemplate(t: PipelineTemplateDto) {
     if (
-      !(await confirmDialog(`删除模板「${t.name}」？已应用的流水线不受影响。继续？`, {
+      !(await confirmDialog(`删除模板「${t.name}」？已应用的研究流程不受影响。继续？`, {
         danger: true,
       }))
     )

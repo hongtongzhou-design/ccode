@@ -35,6 +35,27 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["papers/"],
     skills: ["lit-search"],
     run: [],
+    humanTasks: [
+      {
+        title: "补充你已知的关键文献",
+        guidance:
+          "你自己读过、认为必须纳入的文献——检索引擎未必覆盖；导出 .bib 或直接放 PDF 均可",
+        target: "papers/",
+        timing: "before",
+      },
+      {
+        title: "下载付费墙文献全文",
+        guidance:
+          "渠道自选：机构图书馆/作者邮件索取 preprint 等；缺权限清单见 papers/to-fetch.md（agent 筛完会列出）",
+        target: "papers/*.pdf",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "综述角度怎么收：领域全景铺开，还是聚焦某个子问题/结局？",
+      "纳入排除标准定多严：只要高质量研究，还是观察性/预印本也要？",
+      "检索哪几个数据库：结合你自己的机构权限和课题领域",
+    ],
   },
   {
     name: "文献精读与笔记",
@@ -50,6 +71,9 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["notes/", "references.bib"],
     skills: ["lit-notes"],
     run: [],
+    discussionSeeds: [
+      "精读力度怎么分：全部全文精读，还是核心文献精读、其余按摘要记？",
+    ],
   },
   {
     name: "综述大纲",
@@ -64,6 +88,10 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["outline.md"],
     skills: ["review-framework"],
     run: [],
+    discussionSeeds: [
+      "分类框架按什么组织：主题聚类、方法路线还是时间线？",
+      "这篇综述的卖点是什么：想让读者读完记住哪一句话？",
+    ],
   },
   {
     name: "综述初稿",
@@ -78,6 +106,9 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["manuscript/"],
     skills: ["review-writing"],
     run: [],
+    discussionSeeds: [
+      "目标篇幅和读者怎么定：写多长、文风偏入门科普还是偏同行专家？",
+    ],
   },
   {
     name: "润色与定稿",
@@ -110,6 +141,26 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["survey/", "references.bib"],
     skills: ["lit-search"],
     run: [],
+    humanTasks: [
+      {
+        title: "补充你已知的关键文献",
+        guidance:
+          "你自己读过、认为必须纳入的文献——检索引擎未必覆盖；放进项目目录或导出 .bib 均可",
+        target: "",
+        timing: "before",
+      },
+      {
+        title: "确认研究问题",
+        guidance:
+          "agent 会从候选中选定一个并把取舍理由写进 survey/gap-analysis.md；方向性决策建议过目后再进入实验设计",
+        target: "",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "研究问题怎么选：追热点求稳妥，还是押高风险高回报的 gap？",
+      "数据从哪来：公开数据集够用吗，还是要自己采/申请？",
+    ],
   },
   {
     name: "实验设计",
@@ -125,6 +176,19 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["design.md"],
     skills: ["stats-check"],
     run: [],
+    humanTasks: [
+      {
+        title: "审阅实验设计",
+        guidance:
+          "design.md 的实验矩阵与计算开销估算直接决定下一步的执行成本；确认或修改后再开「实验执行」",
+        target: "",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "实验规模怎么定：算力/时间预算内，矩阵砍到哪些组合必须跑？",
+      "主指标押哪个：论文卖点挂在哪个指标上，辅指标留哪些？",
+    ],
   },
   {
     name: "实验执行",
@@ -139,6 +203,18 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["experiments/", "results/summary.md"],
     skills: [],
     run: [],
+    humanTasks: [
+      {
+        title: "准备数据集与算力访问",
+        guidance:
+          "design.md 所列数据集/模型若需申请或登录（公开数据集协议、机构集群账号等），开工前完成授权",
+        target: "",
+        timing: "before",
+      },
+    ],
+    discussionSeeds: [
+      "算力怎么排：本机跑还是上集群/云，排队和花费接受多少？",
+    ],
   },
   {
     name: "结果分析",
@@ -154,6 +230,9 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["analysis/", "figures/"],
     skills: ["stats-check", "figure-forge"],
     run: [],
+    discussionSeeds: [
+      "结果不如预期怎么办：阴性结果如实写进论文，还是换方向补实验？",
+    ],
   },
   {
     name: "论文初稿",
@@ -167,6 +246,9 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "完成标准：manuscript/draft.md 覆盖 IMRaD 四节，引用键全部可在 references.bib 解析，数字与 analysis/ 一致。",
     expectedArtifacts: ["manuscript/"],
     skills: [],
+    discussionSeeds: [
+      "卖点怎么讲：贡献的三句话电梯陈述怎么定，Introduction 往哪个方向带？",
+    ],
     // P4 quarto 渲染：产物为 manuscript/draft.md，渲染输出 draft.pdf 落在同目录（工作区内，PDF 预览白名单覆盖）；
     // RX4a 追加 export-docx：同一份 md 导出 draft.docx，与 render-draft 并存互不冲突
     run: [
@@ -194,6 +276,18 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "完成标准：paper-final.md 引用闭环、changelog.md 与 submission/checklist.md 已提交；[待补实验] 全部清除，确无法完成的列入 checklist 投稿前必办项。",
     expectedArtifacts: ["manuscript/paper-final.md", "submission/"],
     skills: ["bib-check"],
+    humanTasks: [
+      {
+        title: "填写作者信息并初定投稿目标",
+        guidance:
+          "submission/checklist.md 中的作者信息/利益声明「待填」占位逐条补齐；目标期刊候选 2-3 个已附理由，可改选",
+        target: "submission/checklist.md",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "投哪里：冲高一档还是求稳，毕业/评职时间线上来得及吗？",
+    ],
     // P4 quarto 渲染：定稿 paper-final.md → paper-final.pdf；RX4a 追加 export-docx → paper-final.docx
     run: [
       {
@@ -225,6 +319,26 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["data-dictionary.md"],
     skills: [],
     run: [],
+    humanTasks: [
+      {
+        title: "采集/导出原始数据",
+        guidance:
+          "渠道自选：业务系统导出/问卷平台下载/公开数据集；放入项目目录即可，agent 会扫描并逐数据集登记",
+        target: "",
+        timing: "before",
+      },
+      {
+        title: "解答「待确认」字段的业务含义",
+        guidance:
+          "data-dictionary.md 中标注「待确认」的字段逐条回复含义与口径；可直接改文件，或在对话中说明",
+        target: "data-dictionary.md",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "数据口径以哪份为准：多来源数据冲突时听谁的？",
+      "这份数据最终要回答什么问题：决定了哪些字段是重点？",
+    ],
   },
   {
     name: "清洗与整理",
@@ -239,6 +353,9 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["cleaning/"],
     skills: ["data-clean"],
     run: [],
+    discussionSeeds: [
+      "清洗尺度怎么定：缺失值删还是填，丢掉多少数据能接受？",
+    ],
   },
   {
     name: "探索性分析",
@@ -253,6 +370,9 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["figures/", "eda-report.md"],
     skills: ["data-eda"],
     run: [],
+    discussionSeeds: [
+      "EDA 要支撑什么决策：这份分析最后要帮谁拍什么板？",
+    ],
   },
   {
     name: "分析报告",
@@ -267,6 +387,9 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["analysis-report.md"],
     skills: [],
     run: [],
+    discussionSeeds: [
+      "报告给谁看：决策层要结论先行，还是技术读者要细节可复核？",
+    ],
   },
 ];
 
@@ -285,6 +408,25 @@ const THESIS_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["proposal/", "chapters/literature-review.md", "references.bib"],
     skills: ["lit-search", "lit-notes", "proposal-writer"],
     run: [],
+    humanTasks: [
+      {
+        title: "补充你已知的关键文献",
+        guidance:
+          "你自己读过、认为必须纳入的文献——检索引擎未必覆盖；放进项目目录或导出 .bib 均可",
+        target: "",
+        timing: "before",
+      },
+      {
+        title: "开题报告送导师评阅",
+        guidance:
+          "proposal/proposal.md 可直接发导师；导师意见自行记录，可追加到该文件末尾供后续步骤参考",
+        target: "proposal/",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "研究问题聚焦到哪：导师给的大方向里，切哪一块是你真能做完的？",
+    ],
   },
   {
     name: "研究方法",
@@ -299,6 +441,18 @@ const THESIS_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["chapters/methodology.md", "design.md"],
     skills: ["stats-check"],
     run: [],
+    humanTasks: [
+      {
+        title: "与导师确认方法与技术路线",
+        guidance:
+          "methodology.md 与开题报告不一致的改动见文末「变更说明」，建议逐条与导师过一遍",
+        target: "",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "技术路线押哪条：成熟方案保毕业，还是新方法冲创新点？",
+    ],
   },
   {
     name: "实验与结果",
@@ -313,6 +467,18 @@ const THESIS_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["experiments/", "results/summary.md", "chapters/results.md"],
     skills: ["figure-forge"],
     run: [],
+    humanTasks: [
+      {
+        title: "准备数据集与算力访问",
+        guidance:
+          "design.md 所列数据集/模型若需申请或登录（公开数据集协议、机构集群账号等），开工前完成授权",
+        target: "",
+        timing: "before",
+      },
+    ],
+    discussionSeeds: [
+      "实验做到什么程度收手：矩阵全跑完，还是核心结果出来就转写作？",
+    ],
   },
   {
     name: "论文初稿",
@@ -327,6 +493,9 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "完成标准：thesis-draft.md 章节齐全、引用闭环、revision-notes.md 已提交。",
     expectedArtifacts: ["manuscript/"],
     skills: [],
+    discussionSeeds: [
+      "章节权重怎么分：哪几章是答辩老师最看重、要重点打磨的？",
+    ],
     // P4 quarto 渲染：产物为 manuscript/thesis-draft.md → thesis-draft.pdf；RX4a 追加 export-docx → thesis-draft.docx
     run: [
       {
@@ -354,6 +523,25 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "完成标准：format-check.md 问题逐条有处理结论，thesis-final.md 引用闭环，changelog.md 已提交。",
     expectedArtifacts: ["manuscript/thesis-final.md"],
     skills: ["bib-check"],
+    humanTasks: [
+      {
+        title: "放入学校格式规范与论文模板",
+        guidance:
+          "学校官网/研究生院下载的格式规范与模板文件，放到项目目录即可；没有时 agent 按通用学位论文规范执行并注明依据",
+        target: "",
+        timing: "before",
+      },
+      {
+        title: "定稿送导师审阅并按学校要求查重",
+        guidance:
+          "thesis-final.md 渲染后送导师；查重渠道以学校要求为准，高重复风险段落见 manuscript/plagiarism-advice.md",
+        target: "",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "查重红线留多少余量：学校要求多少以下，定稿前自己先压到多少？",
+    ],
     // P4 quarto 渲染：定稿 thesis-final.md → thesis-final.pdf；RX4a 追加 export-docx → thesis-final.docx
     run: [
       {
@@ -386,6 +574,25 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["submission/"],
     skills: ["bib-check"],
     run: [],
+    humanTasks: [
+      {
+        title: "写下已定目标期刊（如已确定）",
+        guidance:
+          "已确定期刊时在 submission/target-journal.md 写明刊名与理由；没有则 agent 会给 2-3 个候选并标注「待用户确认」",
+        target: "submission/target-journal.md",
+        timing: "before",
+      },
+      {
+        title: "拍板目标期刊并补齐「待填」信息",
+        guidance:
+          "期刊候选见 submission/target-journal.md；作者单位/基金号/通讯邮箱等占位在 formatted.md 与 format-notes.md 中汇总",
+        target: "submission/",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "投哪里：候选期刊里冲一档还是保一档，时间成本怎么权衡？",
+    ],
   },
   {
     name: "投稿材料",
@@ -400,6 +607,18 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["submission/cover-letter.md", "submission/checklist.md"],
     skills: ["pre-submission-reviewer"],
     run: [],
+    humanTasks: [
+      {
+        title: "补齐投稿清单「待填」项并选定推荐审稿人",
+        guidance:
+          "checklist.md 中投稿系统入口、作者信息与利益声明逐条补齐；推荐审稿人只给了研究领域与选择理由，具体姓名由你定",
+        target: "submission/checklist.md",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "推荐审稿人怎么圈：避开利益冲突又要懂行，从哪些组里挑？",
+    ],
   },
   {
     name: "审稿意见回复",
@@ -414,6 +633,25 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["rebuttal/", "manuscript/revised.md"],
     skills: ["rebuttal-crafter"],
     run: [],
+    humanTasks: [
+      {
+        title: "保存审稿意见全文",
+        guidance:
+          "把编辑来信/审稿意见粘贴保存为 reviews/round-1.md（多位审稿人合在一个文件即可，agent 会分节编号）；缺该文件 agent 会停止",
+        target: "reviews/round-1.md",
+        timing: "before",
+      },
+      {
+        title: "确认 [待确认] 回应口径",
+        guidance:
+          "response-letter.md 中标注 [待确认] 的条目是 agent 拿不准的回应，逐条拍板；[待补实验] 需你安排补做",
+        target: "",
+        timing: "after",
+      },
+    ],
+    discussionSeeds: [
+      "回复策略怎么定：意见尽量接受修改，还是该反驳的坚决反驳？",
+    ],
   },
 ];
 

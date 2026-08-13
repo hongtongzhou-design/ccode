@@ -77,13 +77,18 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   pages/                     # 八页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
   components/                # WorkspaceReviewView、PipelineEditor、ProjectGroup/ProjectRail、ArtifactChecklist、TaskCardsSection、FileTree、
                              # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker/DigestPicker、
-                             # KickoffConfirmDialog（开工确认弹层：TASK.md 预览 + 简报勾选/融合 + 主仓提醒） 等
+                             # KickoffConfirmDialog（开工确认弹层：TASK.md 预览/编辑 + 简报勾选/融合 + 技能区 + 人工事项区 + 主仓提醒）、
+                             # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态）、
+                             # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑）、StepFlow（步骤内协同流程线） 等
   components/CommandPalette.tsx # ⌘K 面板
   pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES
   pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras/readTaskBriefs 单一出处，弹层预览与落盘共用）
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
-  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/最新简报/会话按卡分组/开工简报来源勾选（tests/task-cards.test.ts）
+  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/最新简报/会话按卡分组/开工简报来源勾选/人工事项过滤与
+                             # 待拍板小节提取（tests/task-cards.test.ts）
+  step-flow.ts               # 步骤内协同流程线纯逻辑：种子→before→agent→during→after→评审节点链（tests/step-flow.test.ts）
+  inbox.ts                   # 收件箱分类胶囊纯逻辑：key 前缀→类别、分组、help dismiss 签名、人工请求通知 edge-trigger（tests/inbox.test.ts）
   notify.ts                  # 长任务 OS 通知（仅「待确认」跃迁 + 未聚焦 + 30s 去抖；「已回复」不通知）
   git-status-groups.ts       # 改动列表状态分组/白话双层纯逻辑
   git-commit-message.ts      # 空提交信息的本地默认信息生成
@@ -102,6 +107,8 @@ src-tauri/src/
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
   global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）
   projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
+                             # update_step_skills（步骤推荐技能读-改-原子写）、任务书草稿（read_task_draft/append_step_draft，
+                             # .ccode/drafts/）、
                              # 项目移除三档（移除注册 / purge_project_traces 清除 Ccode 痕迹保留文件夹 / delete_project_dir）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用
   sessions.rs                # 会话浏览：八 agent 会话扫描/解析（Codex .zst、OpenCode SQLite/JSON）、session_meta、pin 快照、
@@ -121,7 +128,9 @@ src-tauri/src/
   handoff.rs                 # 接力（§11.3 机制四）：简报生成（脱敏+64KB）、提炼接力（build_session_digest，AI 蒸馏全会话）、
                              # handoff_links 接力链登记/固化
   workspaces.rs              # 任务工作区（§6.10）：worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT、
-                             # setup/archive 钩子、评审合并（health/merge/PR）、artifacts.yaml
+                             # setup/archive 钩子、评审合并（health/merge/PR）、artifacts.yaml、
+                             # 人工事项状态（human_task_checks 勾选 + human_target_hit 落点检测）、import_human_deliverable
+                             # 交付导入（复制落点 + 登记提货单）、list_help_requests（.ccode/help-wanted.md 人工请求扫描）
   portwatch.rs               # 端口监控：LISTEN 列表、归属标注（cwd 最长前缀，回落 CCODE_PORT 段）、校验后 SIGTERM
   ws_settings.rs             # .ccode/settings.toml 三层合并（用户→仓库→local）；开步自动写 quarto 渲染脚本
   git_info.rs                # git 状态/累计 diff/逐 hunk/勾选提交临时索引
@@ -158,7 +167,7 @@ src-tauri/src/
 |---|---|---|
 | 安全与数据防护 | `docs/conventions/safety.md` | 密钥/脱敏细节、git 提交与逐 hunk 验收、多阶段 Git、profile 三层验证、会话/配置写操作口径、诊断包、MCP 分发与技能导入导出、CLI 更新、PDF/笔记白名单 |
 | 终端与工作台 | `docs/conventions/terminal.md` | PTY 回落 shell、标签持久化白名单、评审/冲突覆盖层、改动面板、收件箱与注意力规则、键盘流、分屏、关窗守卫、WebGL 探针 |
-| 流水线与项目域 | `docs/conventions/pipeline.md` | 工作区创建/漂移/归档/删除、流水线开步/模板/编辑器、接力与提炼接力、任务卡、示例课题、白话双层 |
+| 流水线与项目域 | `docs/conventions/pipeline.md` | 工作区创建/漂移/归档/删除、流水线开步/模板/编辑器、接力与提炼接力、任务卡、人工事项与讨论种子、agent 人工请求（help-wanted）、收件箱分类胶囊、示例课题、白话双层 |
 | 主题与设计系统 | `docs/conventions/design-system.md` | 主题令牌、字体栈、线条语言、控件密度、页面框架、对话页三栏、步进器规格、已否决设计 |
 
 ## 路线图（见 docs/architecture.md §11 演进线）

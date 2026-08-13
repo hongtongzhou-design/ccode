@@ -26,7 +26,7 @@ export interface TaskBriefRef {
   cardName: string;
 }
 
-/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 任务简报（定稿，可选） + 预期产物 + 推荐技能 + 项目资源（步骤有资源绑定时只列绑定项，一键开步落成工作区）。
+/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 任务简报（定稿，可选） + 预期产物 + 人工事项（可选） + 推荐技能 + 项目资源（步骤有资源绑定时只列绑定项，一键开步落成工作区）。
  *  一键开步（开工确认弹层 / 评审「开始下一步」）与 TerminalPage 的「整理为笔记」开步链路共用，保持各处 TASK.md 一致。
  *  artifacts 为项目根提货单（上一步产物），非空时在「项目资源」后追加提货单段。
  *  skillMeta 为技能库元数据（name → 一句话描述）：步骤 skills 非空时渲染「本步骤推荐技能」段；
@@ -66,6 +66,28 @@ export function renderTaskMd(
       "",
       "## 预期产物",
       ...step.expectedArtifacts.map((a) => `- ${a}`),
+    );
+  }
+  // 人工事项（人机分工清单）：告知 agent 这些事归人做、交付物会出现在落点路径，
+  // 不要代做也不要干等；执行中另需人协助时写 .ccode/help-wanted.md（非阻断，自带兜底句）
+  const humanTasks = step.humanTasks ?? [];
+  if (humanTasks.length > 0) {
+    lines.push("", "## 人工事项（由人完成，不要代做）");
+    for (const h of humanTasks) {
+      const when =
+        h.timing === "before"
+          ? "开始前"
+          : h.timing === "after"
+            ? "收尾"
+            : "进行中";
+      lines.push(
+        `- [${when}] ${h.title}${h.target ? ` → 交付落点 \`${h.target}\`` : ""}`,
+      );
+    }
+    lines.push(
+      "上述事项由人完成，交付物会出现在对应落点路径；落点为空前请按既有内容推进可推进的部分。",
+      "执行中若另需人协助（如补检索词、缺权限全文），把请求逐条写进 .ccode/help-wanted.md" +
+        "（每条一行「- 」开头，附「若未回复则按 ×× 继续」的兜底方案），写完按兜底继续，不要停工等待。",
     );
   }
   // 步骤挂载技能（RX3b）：只列名称 + 一句话描述，技能本体不进 TASK.md（保持简报轻量）

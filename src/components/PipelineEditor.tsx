@@ -3,6 +3,7 @@ import { Checkbox } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import type {
+  HumanTaskDto,
   ProjectConfigDto,
   ProjectStepDto,
   ProjectStepRunDto,
@@ -20,6 +21,13 @@ function sanitizeWsName(name: string): string {
   return name.replace(/[^A-Za-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
 }
 
+/** 人工事项时机选项（值与后端 before/during/after 对应） */
+const TIMING_OPTIONS: { value: string; label: string }[] = [
+  { value: "before", label: "开始前" },
+  { value: "during", label: "进行中" },
+  { value: "after", label: "收尾" },
+];
+
 /** 编辑器内的步骤草稿：预期产物用逗号分隔文本编辑，保存时再归一化为数组 */
 type StepDraft = {
   name: string;
@@ -30,6 +38,10 @@ type StepDraft = {
   run: ProjectStepRunDto[];
   /** 勾选中的资源绑定（path）；空 = 不绑定 = 使用项目全部资源 */
   resources: string[];
+  /** 人工事项编辑态（人机分工清单） */
+  humanTasks: HumanTaskDto[];
+  /** 讨论种子编辑态：每行一条 */
+  discussionSeeds: string[];
 };
 
 function toDraft(s: ProjectStepDto): StepDraft {
@@ -41,10 +53,13 @@ function toDraft(s: ProjectStepDto): StepDraft {
     skills: [...s.skills],
     run: s.run.map((r) => ({ ...r })),
     resources: [...(s.resources ?? [])],
+    humanTasks: (s.humanTasks ?? []).map((t) => ({ ...t })),
+    discussionSeeds: [...(s.discussionSeeds ?? [])],
   };
 }
 
-/** 草稿 → 写回的步骤：名称去空白、工作区名留空时按步骤名派生、产物按中英文逗号切分、run 丢弃缺名称/命令的行 */
+/** 草稿 → 写回的步骤：名称去空白、工作区名留空时按步骤名派生、产物按中英文逗号切分、run 丢弃缺名称/命令的行、
+ *  人工事项丢弃标题空白的行并 trim 各字段 */
 function toStep(d: StepDraft, index: number): ProjectStepDto {
   const name = d.name.trim();
   return {
@@ -61,11 +76,20 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
       .filter((r) => r.name.trim() && r.command.trim())
       .map((r) => ({ ...r, name: r.name.trim(), command: r.command.trim() })),
     resources: [...d.resources],
+    humanTasks: d.humanTasks
+      .filter((t) => t.title.trim())
+      .map((t) => ({
+        title: t.title.trim(),
+        guidance: t.guidance.trim(),
+        target: t.target.trim(),
+        timing: t.timing,
+      })),
+    discussionSeeds: d.discussionSeeds.map((x) => x.trim()).filter(Boolean),
   };
 }
 
 /**
- * 流水线编辑器（全宽覆盖层）：项目流水线的唯一编辑入口。
+ * 研究流程编辑器（全宽覆盖层）：项目研究流程的唯一编辑入口。
  * 每个步骤一张卡片（名称/工作区名/简报/预期产物/run 脚本/资源绑定），卡片可排序与增删；
  * 「保存」把全部步骤整体写回 project.toml（write_project_config 由父组件执行），「取消」放弃草稿，
  * 有未保存改动时关闭需确认。
@@ -135,10 +159,22 @@ export default function PipelineEditor({
     patch(index, { resources: [...bound] });
   }
 
+  function patchHumanTask(
+    index: number,
+    ti: number,
+    part: Partial<HumanTaskDto>,
+  ) {
+    patch(index, {
+      humanTasks: drafts[index].humanTasks.map((t, x) =>
+        x === ti ? { ...t, ...part } : t,
+      ),
+    });
+  }
+
   async function tryClose() {
     if (
       dirty &&
-      !(await confirmDialog("流水线有未保存的改动，确定放弃并关闭？", {
+      !(await confirmDialog("研究流程有未保存的改动，确定放弃并关闭？", {
         danger: true,
       }))
     )
@@ -240,6 +276,133 @@ export default function PipelineEditor({
             placeholder="notes/, references.bib"
           />
         </label>
+
+        <div className="mb-2">
+          <span className="mb-1 block text-xs text-l3">
+            人工事项（人必须参与的事项清单；标题空白行保存时丢弃）
+          </span>
+          {d.humanTasks.map((t, ti) => (
+            <div key={ti} className="mb-1 rounded bg-inset p-1.5">
+              <div className="mb-1 flex items-center gap-1">
+                <input
+                  className={`${field} min-w-0 flex-1`}
+                  value={t.title}
+                  onChange={(e) =>
+                    patchHumanTask(i, ti, { title: e.target.value })
+                  }
+                  placeholder="一句话说明，如 下载付费墙文献全文"
+                />
+                <input
+                  className={`${field} w-44 shrink-0 font-mono text-xs`}
+                  value={t.target}
+                  onChange={(e) =>
+                    patchHumanTask(i, ti, { target: e.target.value })
+                  }
+                  placeholder="落点，如 papers/ 或 papers/*.pdf"
+                  title="交付落点：目录（结尾 /）、精确文件或「目录/通配」；留空 = 纯脑力事项"
+                />
+                <select
+                  className={`${field} w-24 shrink-0`}
+                  value={t.timing}
+                  onChange={(e) =>
+                    patchHumanTask(i, ti, { timing: e.target.value })
+                  }
+                  title="时机：开始前 / 进行中 / 收尾"
+                >
+                  {/* 旧配置里出现未知 timing 值时保留原值可选，不静默改写 */}
+                  {!TIMING_OPTIONS.some((o) => o.value === t.timing) && (
+                    <option value={t.timing}>{t.timing}</option>
+                  )}
+                  {TIMING_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className={`${actionBtn} shrink-0`}
+                  aria-label={`删除人工事项：${t.title || ti + 1}`}
+                  onClick={() =>
+                    patch(i, {
+                      humanTasks: d.humanTasks.filter((_, x) => x !== ti),
+                    })
+                  }
+                >
+                  删除
+                </button>
+              </div>
+              <textarea
+                className={`${field} w-full text-xs`}
+                rows={1}
+                value={t.guidance}
+                onChange={(e) =>
+                  patchHumanTask(i, ti, { guidance: e.target.value })
+                }
+                placeholder="引导说明（可选）：渠道选项等，只告知不推荐"
+              />
+            </div>
+          ))}
+          <button
+            type="button"
+            className={actionBtn}
+            onClick={() =>
+              patch(i, {
+                humanTasks: [
+                  ...d.humanTasks,
+                  { title: "", guidance: "", target: "", timing: "before" },
+                ],
+              })
+            }
+          >
+            + 添加人工事项
+          </button>
+        </div>
+
+        <div className="mb-2">
+          <span className="mb-1 block text-xs text-l3">
+            讨论种子（开工前建议先和 Agent 聊清楚的问题，会在任务卡区列出、点击即聊）
+          </span>
+          {d.discussionSeeds.map((s, si) => (
+            <div key={si} className="mb-1 flex items-center gap-1">
+              <input
+                className={`${field} min-w-0 flex-1`}
+                value={s}
+                onChange={(e) =>
+                  patch(i, {
+                    discussionSeeds: d.discussionSeeds.map((x, xi) =>
+                      xi === si ? e.target.value : x,
+                    ),
+                  })
+                }
+                placeholder="如 纳入排除标准定多严：只要 RCT 还是观察性研究也要？"
+              />
+              <button
+                type="button"
+                className={`${actionBtn} shrink-0`}
+                aria-label={`删除讨论种子：${s || si + 1}`}
+                onClick={() =>
+                  patch(i, {
+                    discussionSeeds: d.discussionSeeds.filter(
+                      (_, x) => x !== si,
+                    ),
+                  })
+                }
+              >
+                删除
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            className={actionBtn}
+            onClick={() =>
+              patch(i, { discussionSeeds: [...d.discussionSeeds, ""] })
+            }
+          >
+            + 添加讨论种子
+          </button>
+        </div>
 
         <div className="mb-2">
           <span className="mb-1 block text-xs text-l3">
@@ -368,7 +531,7 @@ export default function PipelineEditor({
       {/* 覆盖层头部统一（P3）：strip 底 + hairline 下缘，标题 + 副题 + 唯一主动作（保存） */}
       <div className="flex shrink-0 items-center gap-3 border-b border-hairline bg-strip px-8 py-3">
         <h2 className="shrink-0 text-base font-semibold text-l1">
-          编辑流水线
+          编辑研究流程
         </h2>
         <span className="min-w-0 truncate text-xs text-l3">
           {projectName} · {drafts.length} 个步骤
@@ -409,7 +572,7 @@ export default function PipelineEditor({
           )}
           {drafts.length === 0 && (
             <p className="rounded-md bg-strip p-3 text-xs text-l3">
-              还没有流水线步骤。点击下方「+ 添加步骤」逐张卡片填写（名称、简报、
+              还没有研究步骤。点击下方「+ 添加步骤」逐张卡片填写（名称、简报、
               预期产物与资源绑定），保存后写入 .ccode/project.toml。
             </p>
           )}
@@ -428,6 +591,8 @@ export default function PipelineEditor({
                   skills: [],
                   run: [],
                   resources: [],
+                  humanTasks: [],
+                  discussionSeeds: [],
                 },
               ])
             }

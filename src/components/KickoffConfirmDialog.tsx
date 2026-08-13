@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Checkbox, LoadingRows } from "./PageFrame";
+import StepSkillsChips from "./StepSkillsChips";
+import HumanTasksList from "./HumanTasksList";
 import { useAppStore } from "../store";
 import { relTime } from "../rel-time";
 import {
+  blockingHumanTasks,
   briefSourcesForStep,
   checkedBriefRefs,
   defaultCheckedSources,
@@ -18,8 +21,10 @@ import {
 } from "../pipeline-start";
 import type {
   ArtifactEntryDto,
+  HumanTaskStateDto,
   ProjectConfigDto,
   ProjectStepDto,
+  SkillDto,
 } from "../types";
 
 /** git_status 返回（本组件只看是否仓库与未提交改动数） */
@@ -47,6 +52,7 @@ export default function KickoffConfirmDialog({
   busy,
   onCancel,
   onConfirm,
+  onCfgChange,
 }: {
   projectPath: string;
   step: ProjectStepDto;
@@ -58,10 +64,28 @@ export default function KickoffConfirmDialog({
   onCancel: () => void;
   /** 确认开工：briefs = 勾选（或融合定稿）的简报引用；taskMd = 编辑区最终内容（覆盖默认拼装落盘） */
   onConfirm: (briefs: TaskBriefRef[], taskMd: string) => void;
+  /** 技能区增删写回 project.toml 后同步父级 cfg（保持步进器/下次打开一致） */
+  onCfgChange?: (cfg: ProjectConfigDto) => void;
 }) {
   const cards = useAppStore((s) => s.taskCards[projectPath]);
   const loadTaskCards = useAppStore((s) => s.loadTaskCards);
   const createCard = useAppStore((s) => s.createCard);
+
+  // 档案卡本地副本：技能区增删写回 project.toml 后重读替换（步骤其余字段以后端回读为准）
+  const [cfgLocal, setCfgLocal] = useState(cfg);
+  // 技能库（名称 + 一句话描述）：技能区展示与「＋ 添加技能」候选的数据源，打开时读一次
+  const [skillLib, setSkillLib] = useState<SkillDto[] | null>(null);
+  const [skillError, setSkillError] = useState<string | null>(null);
+  // 当前步骤（技能区写回后 cfgLocal 里的最新版本，prop 可能是旧的）
+  const stepNow =
+    cfgLocal.steps.find((s) => s.name === step.name) ?? step;
+  const skillMeta = useMemo(
+    () =>
+      skillLib
+        ? Object.fromEntries(skillLib.map((s) => [s.name, s.description]))
+        : undefined,
+    [skillLib],
+  );
 
   // 简报来源与勾选：本步骤 + 未挂步骤（含步骤改名失效）的含简报卡片
   const stepNames = useMemo(() => cfg.steps.map((s) => s.name), [cfg.steps]);
@@ -93,6 +117,17 @@ export default function KickoffConfirmDialog({
   // 连贯 TASK.md 融合（④）：结果直接填进编辑区
   const [fusingTaskMd, setFusingTaskMd] = useState(false);
   const [fuseTaskMdError, setFuseTaskMdError] = useState<string | null>(null);
+  // 人工事项状态（HumanTasksList 回传）：开工前（before）未完成的提醒用
+  const [humanStates, setHumanStates] = useState<HumanTaskStateDto[] | null>(
+    null,
+  );
+
+  // 任务书草稿（v3.72）：草稿存在时编辑区初始内容 = 草稿全文（优先于模板拼装）；
+  // undefined = 尚未加载（等草稿到达再初始化编辑区，避免先显示拼装再被草稿闪换）
+  const [draftText, setDraftText] = useState<string | null | undefined>(
+    undefined,
+  );
+  const [draftRel, setDraftRel] = useState<string | null>(null);
 
   // TASK.md 编辑区：默认拼装内容 + 人编辑/AI 融合覆盖（状态机在 task-cards.ts，纯逻辑可测）
   const [editor, dispatchEditor] = useReducer(
@@ -113,6 +148,23 @@ export default function KickoffConfirmDialog({
         if (!stale) setMainDirty(status.isRepo ? status.files.length : null);
       })
       .catch(() => {});
+    invoke<SkillDto[]>("list_skills")
+      .then((lib) => {
+        if (!stale) setSkillLib(lib);
+      })
+      .catch(() => {});
+    invoke<{ relPath: string; text: string | null }>("read_task_draft", {
+      projectRoot: projectPath,
+      stepName: step.name,
+    })
+      .then((d) => {
+        if (stale) return;
+        setDraftRel(d.relPath);
+        setDraftText(d.text);
+      })
+      .catch(() => {
+        if (!stale) setDraftText(null);
+      });
     return () => {
       stale = true;
     };
@@ -176,7 +228,7 @@ export default function KickoffConfirmDialog({
     if (savedFuse) {
       // 融合简报文本本地已有（定稿时写的就是它），直接用避免再读盘
       const text = briefTexts["__fused__"] ?? "";
-      return renderTaskMd(step, cfg, projectPath, extras.artifacts, extras.skillMeta, [
+      return renderTaskMd(stepNow, cfgLocal, projectPath, extras.artifacts, skillMeta ?? extras.skillMeta, [
         { cardName: savedFuse.cardName, text },
       ]);
     }
@@ -186,14 +238,17 @@ export default function KickoffConfirmDialog({
         cardName: s.card.name,
         text: briefTexts[s.card.id] ?? "（简报读取中…）",
       }));
-    return renderTaskMd(step, cfg, projectPath, extras.artifacts, extras.skillMeta, briefInputs);
-  }, [extras, savedFuse, sources, checked, briefTexts, step, cfg, projectPath]);
+    return renderTaskMd(stepNow, cfgLocal, projectPath, extras.artifacts, skillMeta ?? extras.skillMeta, briefInputs);
+  }, [extras, savedFuse, sources, checked, briefTexts, stepNow, cfgLocal, skillMeta, projectPath]);
 
+  // 编辑区初始化：草稿存在（非空）时草稿优先于模板拼装——草稿是讨论的直接产物，
+  // 所见即所得；「恢复默认拼装」仍可回到模板拼装。等草稿加载完再初始化，避免闪换
   useEffect(() => {
-    if (assembled === null) return;
-    dispatchEditor({ type: "assemble", text: assembled });
+    if (assembled === null || draftText === undefined) return;
+    const draft = draftText?.trim() ? draftText.trim() : null;
+    dispatchEditor({ type: "assemble", text: draft ?? assembled });
     setEditorReady(true);
-  }, [assembled]);
+  }, [assembled, draftText]);
 
   /** 「◈ 融合所选简报」：多份简报 AI 融合成一份初稿 → 弹层内定稿钉卡；失败行内报错可重试 */
   async function fuseSelected() {
@@ -246,6 +301,27 @@ export default function KickoffConfirmDialog({
     }
   }
 
+  /** 技能区增删（v3.67）：写回 project.toml steps[].skills（持久配置，影响以后所有开工），
+   *  成功后重读档案卡同步本地与父级，预览经 renderTaskMd 即时联动 */
+  async function onSkillsChange(next: string[]) {
+    setSkillError(null);
+    try {
+      await invoke("update_step_skills", {
+        projectRoot: projectPath,
+        stepName: step.name,
+        skills: next,
+      });
+      const read = await invoke<{ config: ProjectConfigDto }>(
+        "read_project_config",
+        { path: projectPath },
+      );
+      setCfgLocal(read.config);
+      onCfgChange?.(read.config);
+    } catch (reason) {
+      setSkillError(String(reason));
+    }
+  }
+
   /** 「◈ 融合为连贯 TASK.md」（④）：模板简报为主干 + 所选简报融入，结果填进编辑区（可再改） */
   async function fuseTaskMd() {
     const refs = checkedBriefRefs(sources, checked);
@@ -280,7 +356,7 @@ export default function KickoffConfirmDialog({
         onClick={(event) => event.stopPropagation()}
       >
         <h2 className="mb-1 shrink-0 text-base font-semibold text-l1">
-          开工确认：{step.name}
+          开始：{step.name}
         </h2>
         <p className="mb-3 shrink-0 font-mono text-xs text-l4">
           工作区 {step.workspaceName}
@@ -290,7 +366,7 @@ export default function KickoffConfirmDialog({
         {mainDirty !== null && mainDirty > 0 && (
           <p className="mb-3 shrink-0 rounded bg-inset px-2.5 py-1.5 text-xs text-warn-text">
             主仓有 {mainDirty} 个未提交改动，不会带入新工作区——可先在主仓提交，
-            或开工后用 files-to-copy 机制携带。
+            或开始后用 files-to-copy 机制携带。
           </p>
         )}
 
@@ -331,7 +407,7 @@ export default function KickoffConfirmDialog({
                     钉到「{s.card.name}」
                   </option>
                 ))}
-                <option value="__new__">新建卡片（以步骤名）</option>
+                <option value="__new__">添加想法（以步骤名）</option>
               </select>
               <button
                 type="button"
@@ -360,7 +436,7 @@ export default function KickoffConfirmDialog({
                   type="button"
                   disabled={fusing}
                   onClick={() => void fuseSelected()}
-                  title="AI 把所选简报融合成一份开工简报初稿，定稿后钉卡并用于 TASK.md"
+                  title="AI 把所选简报融合成一份简报初稿，定稿后钉卡并用于 TASK.md"
                   className="rounded px-1.5 py-0.5 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
                 >
                   {fusing ? "◈ 融合中…" : "◈ 融合所选简报"}
@@ -417,12 +493,49 @@ export default function KickoffConfirmDialog({
           </p>
         )}
 
+        {/* 人工事项区（步骤声明了才有）：开工前事项未完成给提醒，只提醒不阻断；
+            勾选/提交交付直接可在这里做，与卡片区同一个 HumanTasksList */}
+        {(stepNow.humanTasks?.length ?? 0) > 0 && (
+          <div className="mb-3 max-h-44 shrink-0 overflow-auto rounded-md bg-inset px-2.5 py-2">
+            {(() => {
+              const blocking = humanStates
+                ? blockingHumanTasks(humanStates, step.name)
+                : [];
+              return blocking.length > 0 ? (
+                <p className="mb-1.5 text-xs text-warn-text">
+                  开始前还有 {blocking.length}{" "}
+                  件事没完成（{blocking.map((t) => t.title).join("、")}
+                  ）——做完再开始更顺；现在开始也可以，系统只提醒不拦你
+                </p>
+              ) : null;
+            })()}
+            <HumanTasksList
+              projectPath={projectPath}
+              stepName={step.name}
+              onStates={setHumanStates}
+            />
+          </div>
+        )}
+
+        {/* 推荐技能区（可编辑）：增删写回步骤定义（project.toml），预览即时联动 */}
+        <StepSkillsChips
+          skills={stepNow.skills}
+          skillMeta={skillMeta}
+          available={skillLib?.map((s) => s.name)}
+          onChange={(next) => void onSkillsChange(next)}
+        />
+        {skillError && (
+          <p className="mb-2 shrink-0 text-xs text-err-text">✗ {skillError}</p>
+        )}
+
         {/* TASK.md 编辑区：默认拼装（同一 renderTaskMd），可人改 / AI 融合为连贯文档；
             确认开工落盘 = 编辑区最终内容 */}
         <div className="mb-1 flex shrink-0 items-center gap-2">
           <span className="text-xs text-l3">TASK.md（可编辑）</span>
           <span className="text-[10px] text-l4">
-            默认由模板与勾选简报拼装，确认后按编辑区内容落盘
+            {draftText?.trim()
+              ? `内容来自任务书草稿 ${draftRel ?? ""}（改这里只影响本次落盘，不回写草稿）`
+              : "默认由模板与勾选简报拼装，确认后按编辑区内容落盘"}
           </span>
           {canFuseTaskMd && (
             <button
@@ -496,7 +609,7 @@ export default function KickoffConfirmDialog({
             onClick={() => onConfirm(activeBriefRefs, editor.text)}
             className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
-            {busy ? "开工中…" : "确认开工"}
+            {busy ? "开始中…" : "确认开始"}
           </button>
         </div>
       </div>

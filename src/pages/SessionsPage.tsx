@@ -1301,7 +1301,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         className="max-w-28 truncate rounded bg-inset px-1 text-l3"
                         title={
                           s.stepName
-                            ? `流水线步骤：${s.stepName}（工作区：${s.workspace}）`
+                            ? `研究步骤：${s.stepName}（工作区：${s.workspace}）`
                             : `任务工作区：${s.workspace}`
                         }
                       >
@@ -1419,7 +1419,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-xs text-l2"
                   title={
                     selected.stepName
-                      ? `流水线步骤：${selected.stepName}（工作区：${selected.workspace}）`
+                      ? `研究步骤：${selected.stepName}（工作区：${selected.workspace}）`
                       : `任务工作区：${selected.workspace}`
                   }
                 >

@@ -45,6 +45,23 @@ pub struct StepRunDto {
     pub is_default: bool,
 }
 
+/// 人工事项（步骤的一等属性，人机分工清单）：人要做的事 + 引导说明 + 交付落点 + 时机。
+/// 引擎不识语义（科研语义只进模板），只做文本/路径透传；状态由落点检测 + 手动勾选派生，
+/// 不在步骤定义里存任何状态。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HumanTaskDto {
+    /// 一句话说明（checklist 条目文本）
+    pub title: String,
+    /// 引导说明（渠道选项等，只告知不推荐）；可空
+    pub guidance: String,
+    /// 交付落点（相对项目根/工作树）：目录（结尾 /）、精确文件、或「目录/通配」（如
+    /// papers/search/*.bib）；空 = 纯脑力事项，只能靠手动勾选
+    pub target: String,
+    /// 时机：before（开工前）| during（并行）| after（收尾）；非法值解析期归一为 during
+    pub timing: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StepDto {
@@ -57,6 +74,10 @@ pub struct StepDto {
     // 空数组 = 不绑定 = 全部资源（向后兼容旧档案卡）
     pub resources: Vec<String>,
     pub run: Vec<StepRunDto>,
+    pub human_tasks: Vec<HumanTaskDto>,
+    /// 讨论种子（模板预置的「开工前建议想清楚的问题」）：卡片区按步骤列出，点击即聊；
+    /// 引擎只做透传，不进 TASK.md（种子是给人的入口，不是给 agent 的合同）
+    pub discussion_seeds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -143,7 +164,8 @@ fn db() -> Result<Connection, String> {
 }
 
 /// 注册用主键：能 canonicalize 就用 canonical 路径，不同写法指向同一目录时去重
-fn canonical_key(path: &Path) -> String {
+/// （pub(crate)：workspaces.rs 人工事项检测根归属同一口径）
+pub(crate) fn canonical_key(path: &Path) -> String {
     fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
@@ -391,6 +413,17 @@ struct TomlStepRun {
 }
 
 #[derive(Debug, Deserialize)]
+struct TomlHumanTask {
+    title: String,
+    #[serde(default)]
+    guidance: String,
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    timing: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TomlStep {
     name: String,
     #[serde(default)]
@@ -403,6 +436,18 @@ struct TomlStep {
     skills: Vec<String>,
     #[serde(default)]
     run: BTreeMap<String, TomlStepRun>,
+    #[serde(default)]
+    human_tasks: Vec<TomlHumanTask>,
+    #[serde(default)]
+    discussion_seeds: Vec<String>,
+}
+
+/// 人工事项时机归一：before/during/after 之外一律按 during（并行），不阻断
+fn normalize_human_timing(timing: &str) -> String {
+    match timing.trim() {
+        "before" | "after" | "during" => timing.trim().to_string(),
+        _ => "during".into(),
+    }
 }
 
 fn normalize_resource_type(kind: &str) -> String {
@@ -491,6 +536,30 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                         Some(_) => warnings
                             .push(format!("steps[{i}] 的 resources 不是数组，已忽略")),
                     }
+                    // 人工事项：title 空白整条跳过；timing 非法值归一 warning（不拖垮步骤）
+                    let mut human_tasks = Vec::new();
+                    for (j, h) in s.human_tasks.into_iter().enumerate() {
+                        let title = h.title.trim().to_string();
+                        if title.is_empty() {
+                            warnings.push(format!(
+                                "steps[{i}] 的 human_tasks[{j}] 标题为空，已跳过"
+                            ));
+                            continue;
+                        }
+                        let timing = normalize_human_timing(&h.timing);
+                        if !h.timing.trim().is_empty() && timing != h.timing.trim() {
+                            warnings.push(format!(
+                                "steps[{i}] 的人工事项「{title}」时机「{}」无法识别，已按 during 处理",
+                                h.timing.trim()
+                            ));
+                        }
+                        human_tasks.push(HumanTaskDto {
+                            title,
+                            guidance: h.guidance.trim().to_string(),
+                            target: h.target.trim().to_string(),
+                            timing,
+                        });
+                    }
                     config.steps.push(StepDto {
                         name: s.name,
                         workspace_name: s.workspace_name,
@@ -506,6 +575,13 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                                 command: r.command,
                                 is_default: r.default,
                             })
+                            .collect(),
+                        human_tasks,
+                        discussion_seeds: s
+                            .discussion_seeds
+                            .into_iter()
+                            .map(|d| d.trim().to_string())
+                            .filter(|d| !d.is_empty())
                             .collect(),
                     });
                 }
@@ -689,6 +765,33 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                 }
                 t["run"] = Item::Table(run);
             }
+            // 人工事项：空数组省略不写；timing 为默认 during 时省略该键，档案卡更简洁
+            if !s.human_tasks.is_empty() {
+                let mut hts = ArrayOfTables::new();
+                for h in &s.human_tasks {
+                    let mut ht = Table::new();
+                    ht["title"] = value(&h.title);
+                    if !h.guidance.is_empty() {
+                        ht["guidance"] = value(&h.guidance);
+                    }
+                    if !h.target.is_empty() {
+                        ht["target"] = value(&h.target);
+                    }
+                    if h.timing != "during" {
+                        ht["timing"] = value(&h.timing);
+                    }
+                    hts.push(ht);
+                }
+                t["human_tasks"] = Item::ArrayOfTables(hts);
+            }
+            // 讨论种子：空数组省略不写（同 skills 口径）
+            if !s.discussion_seeds.is_empty() {
+                let mut seeds = toml_edit::Array::new();
+                for d in &s.discussion_seeds {
+                    seeds.push(d.as_str());
+                }
+                t["discussion_seeds"] = value(seeds);
+            }
             arr.push(t);
         }
         doc["steps"] = Item::ArrayOfTables(arr);
@@ -711,6 +814,111 @@ fn write_config_at(project: &Path, config: &ProjectConfigDto) -> Result<(), Stri
         fs::create_dir_all(parent).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
     }
     crate::profiles::atomic_write(&path, &text)
+}
+
+// ===== 任务书草稿（v3.72：讨论直接服务于 TASK.md，砍掉「提炼→定稿→钉卡→拼装」中间层） =====
+// 每个步骤一份草稿 .ccode/drafts/<workspace_name>.md（项目根，随 .ccode 进 git——草稿是源、
+// 工作区 TASK.md 是开工那一刻的产物）；聊想法 = agent 只允许改这一个文件；开工弹层预览
+// 草稿优先于模板拼装；评审沉淀从「钉卡」改为追加进下一步草稿。
+
+/// 草稿相对路径（单一出处）：文件名取 workspace_name（已 sanitize），空则步骤名替换不安全字符
+pub(crate) fn draft_rel_path(step_name: &str, workspace_name: &str) -> String {
+    let base = if !workspace_name.trim().is_empty() {
+        workspace_name.trim().to_string()
+    } else {
+        step_name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .collect::<String>()
+    };
+    format!(".ccode/drafts/{base}.md")
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDraftDto {
+    /// 相对项目根路径（正斜杠）
+    pub rel_path: String,
+    /// 草稿全文；不存在为 null
+    pub text: Option<String>,
+}
+
+/// 读步骤任务书草稿（list 口径无门槛：非项目/无草稿返回 text=null）
+#[tauri::command]
+pub async fn read_task_draft(
+    project_root: String,
+    step_name: String,
+) -> Result<TaskDraftDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = fs::canonicalize(crate::sessions::expand_tilde(&project_root))
+            .map_err(|e| format!("项目目录无效: {e}"))?;
+        let cfg = read_config_at(&root).config;
+        let step = cfg
+            .steps
+            .iter()
+            .find(|s| s.name == step_name)
+            .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
+        let rel = draft_rel_path(&step.name, &step.workspace_name);
+        let text = fs::read_to_string(root.join(&rel)).ok();
+        Ok(TaskDraftDto {
+            rel_path: rel,
+            text,
+        })
+    })
+    .await
+    .map_err(|e| format!("读取任务书草稿失败: {e}"))?
+}
+
+/// 评审沉淀追加进下一步草稿（读-改-原子写；不存在则以标题头新建）
+#[tauri::command]
+pub async fn append_step_draft(
+    project_root: String,
+    step_name: String,
+    heading: String,
+    content: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
+            &project_root,
+        )))?;
+        append_step_draft_at(&root, &step_name, &heading, &content)
+    })
+    .await
+    .map_err(|e| format!("写入任务书草稿失败: {e}"))?
+}
+
+/// 追加实现（root 需已过项目门槛校验；测试直接调这里）。返回草稿相对路径
+pub(crate) fn append_step_draft_at(
+    root: &Path,
+    step_name: &str,
+    heading: &str,
+    content: &str,
+) -> Result<String, String> {
+    let cfg = read_config_at(root).config;
+    let step = cfg
+        .steps
+        .iter()
+        .find(|s| s.name == step_name)
+        .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
+    let rel = draft_rel_path(&step.name, &step.workspace_name);
+    let path = root.join(&rel);
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let body = if existing.trim().is_empty() {
+        format!("# 任务书草稿：{}\n", step.name)
+    } else {
+        existing.trim_end().to_string()
+    };
+    let next = format!(
+        "{body}\n\n## {}（{}）\n{}\n",
+        heading.trim(),
+        crate::sessions::now_iso(),
+        content.trim()
+    );
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建草稿目录失败: {e}"))?;
+    }
+    crate::profiles::atomic_write(&path, &next)?;
+    Ok(rel)
 }
 
 // ===== 任务卡（project.toml 的 [[tasks]] 段） =====
@@ -1285,6 +1493,53 @@ pub async fn write_project_config(
     .map_err(|e| format!("写入项目配置失败: {e}"))?
 }
 
+/// 步骤推荐技能的读-改-原子写（开工确认弹层技能区增删写回 steps[].skills，v3.67）：
+/// 不走整份 write_project_config 往返——read_config_at 读出现有配置，只改目标步骤的 skills，
+/// 其余字段（含未知键）由 render_config 原样保留。
+#[tauri::command]
+pub async fn update_step_skills(
+    project_root: String,
+    step_name: String,
+    skills: Vec<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update_step_skills_impl(&project_root, &step_name, skills)
+    })
+    .await
+    .map_err(|e| format!("更新步骤技能失败: {e}"))?
+}
+
+fn update_step_skills_impl(
+    project_root: &str,
+    step_name: &str,
+    skills: Vec<String>,
+) -> Result<(), String> {
+    let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(project_root)))?;
+    update_step_skills_at(&root, step_name, skills)
+}
+
+/// 读-改-原子写 steps[].skills（root 需已过项目门槛校验；测试直接调这里）
+pub(crate) fn update_step_skills_at(
+    root: &Path,
+    step_name: &str,
+    skills: Vec<String>,
+) -> Result<(), String> {
+    let mut cfg = read_config_at(root).config;
+    let step = cfg
+        .steps
+        .iter_mut()
+        .find(|s| s.name == step_name)
+        .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
+    // 归一：去空白、去空项、保序去重
+    let mut seen = std::collections::HashSet::new();
+    step.skills = skills
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+        .collect();
+    write_config_at(root, &cfg)
+}
+
 #[tauri::command]
 pub async fn discover_resources(path: String) -> Result<Vec<DiscoveredResourceDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -1421,13 +1676,13 @@ const DEMO_BIB: &str = r#"@article{marso2016liraglutide,
 
 const DEMO_README: &str = r#"# 示例课题（演示）
 
-这是 Ccode 自动创建的演示课题，用来体验「项目 → 流水线 → 工作区」的完整流程：
+这是 Ccode 自动创建的演示课题，用来体验「项目 → 研究流程 → 工作区」的完整流程：
 
-- `.ccode/project.toml`：课题档案卡，内置英文综述五步流水线（检索筛选 → 精读笔记 → 大纲 → 初稿 → 润色定稿）；
+- `.ccode/project.toml`：课题档案卡，内置英文综述五步研究流程（检索筛选 → 精读笔记 → 大纲 → 初稿 → 润色定稿）；
 - `papers/sample-glp1-review.pdf`：一页示例文献摘要（程序生成的演示文件，不是真实论文）；
 - `references.bib`：两条真实示例引文（LEADER / SUSTAIN-6 试验）。
 
-可以在这个项目上随意试验：开步、编辑流水线、建工作区。整个目录可随时删除，
+可以在这个项目上随意试验：开步、编辑研究流程、建工作区。整个目录可随时删除，
 删除前在工作区页右键项目导航行「移除注册」即可。
 "#;
 
@@ -1499,27 +1754,10 @@ fn demo_project_config() -> ProjectConfigDto {
         skills: Vec::new(),
         resources: Vec::new(),
         run: Vec::new(),
+        human_tasks: Vec::new(),
+        discussion_seeds: Vec::new(),
     };
-    ProjectConfigDto {
-        topic: Some("GLP-1 受体激动剂的心血管结局（演示课题）".into()),
-        artifact_dir: DEFAULT_ARTIFACT_DIR.into(),
-        resources: vec![
-            ResourceDto {
-                name: "示例文献（演示 PDF）".into(),
-                path: "papers/sample-glp1-review.pdf".into(),
-                kind: "paper".into(),
-                readonly: true,
-                note: "程序生成的演示文件，可替换为真实文献".into(),
-            },
-            ResourceDto {
-                name: "引文库".into(),
-                path: "references.bib".into(),
-                kind: "reference".into(),
-                readonly: false,
-                note: String::new(),
-            },
-        ],
-        steps: vec![
+    let mut steps = vec![
             step(
                 "文献检索与筛选",
                 "lit-search",
@@ -1582,7 +1820,50 @@ fn demo_project_config() -> ProjectConfigDto {
                     .into(),
                 &["manuscript/review-final.md"],
             ),
+        ];
+    // 人工事项演示：付费全文下载正是「人做机器做不了」的典型（落点检测 papers/ 下的 PDF）
+    steps[0].human_tasks = vec![
+        HumanTaskDto {
+            title: "下载付费墙文献全文".into(),
+            guidance: "渠道自选：机构图书馆 / Sci-Hub 以外的合法途径 / 作者邮件索取 preprint；\
+                       缺权限清单见 papers/to-fetch.md（agent 筛完会列出）".into(),
+            target: "papers/*.pdf".into(),
+            timing: "after".into(),
+        },
+        HumanTaskDto {
+            title: "补充你已知的关键文献".into(),
+            guidance: "你自己读过、认为必须纳入的文献——检索引擎未必覆盖；导出 .bib 或直接放 PDF 均可"
+                .into(),
+            target: "papers/".into(),
+            timing: "before".into(),
+        },
+    ];
+    // 讨论种子演示：开工前建议想清楚的问题，点击即聊（卡片以问题为名自动建立）
+    steps[0].discussion_seeds = vec![
+        "综述角度怎么收：全适应症还是聚焦心血管结局？".into(),
+        "纳入排除标准定多严：只要 RCT 还是观察性研究也要？".into(),
+        "检索哪几个数据库：结合你自己的机构权限".into(),
+    ];
+    ProjectConfigDto {
+        topic: Some("GLP-1 受体激动剂的心血管结局（演示课题）".into()),
+        artifact_dir: DEFAULT_ARTIFACT_DIR.into(),
+        resources: vec![
+            ResourceDto {
+                name: "示例文献（演示 PDF）".into(),
+                path: "papers/sample-glp1-review.pdf".into(),
+                kind: "paper".into(),
+                readonly: true,
+                note: "程序生成的演示文件，可替换为真实文献".into(),
+            },
+            ResourceDto {
+                name: "引文库".into(),
+                path: "references.bib".into(),
+                kind: "reference".into(),
+                readonly: false,
+                note: String::new(),
+            },
         ],
+        steps,
     }
 }
 
@@ -1936,7 +2217,7 @@ fn delete_template_at(path: &Path, id: &str) -> Result<(), String> {
 pub async fn list_pipeline_templates() -> Result<Vec<PipelineTemplateDto>, String> {
     tauri::async_runtime::spawn_blocking(|| read_templates_at(&templates_path()?))
         .await
-        .map_err(|e| format!("读取流水线模板失败: {e}"))?
+        .map_err(|e| format!("读取研究流程模板失败: {e}"))?
 }
 
 #[tauri::command]
@@ -1951,7 +2232,7 @@ pub async fn save_pipeline_template(
         save_template_at(&templates_path()?, &name, &description, steps)
     })
     .await
-    .map_err(|e| format!("保存流水线模板失败: {e}"))?
+    .map_err(|e| format!("保存研究流程模板失败: {e}"))?
 }
 
 #[tauri::command]
@@ -1961,7 +2242,7 @@ pub async fn delete_pipeline_template(id: String) -> Result<(), String> {
         delete_template_at(&templates_path()?, &id)
     })
     .await
-    .map_err(|e| format!("删除流水线模板失败: {e}"))?
+    .map_err(|e| format!("删除研究流程模板失败: {e}"))?
 }
 
 #[cfg(test)]
@@ -2004,6 +2285,8 @@ mod tests {
                 expected_artifacts: vec!["notes/".into()],
                 skills: vec!["paper-notes".into()],
                 resources: Vec::new(),
+                human_tasks: Vec::new(),
+                discussion_seeds: Vec::new(),
                 run: vec![
                     StepRunDto {
                         name: "dev".into(),
@@ -2756,6 +3039,8 @@ resources = ["ghost.pdf"]
                 expected_artifacts: vec!["notes/".into()],
                 skills: vec!["paper-notes".into()],
                 resources: Vec::new(),
+                human_tasks: Vec::new(),
+                discussion_seeds: Vec::new(),
                 run: vec![StepRunDto {
                     name: "dev".into(),
                     command: "echo hi".into(),
@@ -2925,6 +3210,10 @@ resources = ["ghost.pdf"]
         for marker in ["## 目标", "## 思路与理由", "## 已否决方向", "## 下一步"] {
             assert!(brief_text.contains(marker), "示范简报缺段: {marker}");
         }
+        // 演示人工事项：第一步声明了「下载付费墙文献全文」（落点通配 papers/*.pdf）
+        assert_eq!(config.steps[0].human_tasks.len(), 2);
+        assert_eq!(config.steps[0].human_tasks[0].timing, "after");
+        assert_eq!(config.steps[0].human_tasks[1].timing, "before");
 
         // 幂等：二次调用返回同一项目，且不覆盖用户改过的内容
         write(&root.join("README.md"), "user edit");
@@ -3048,6 +3337,129 @@ resources = ["ghost.pdf"]
         let msg = purge_project_traces_impl(&conn, &root).unwrap();
         assert_eq!(msg, "已清除：档案卡与简报（回收站）");
         assert!(!root.join(".ccode").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== 步骤推荐技能写回（update_step_skills，v3.67） =====
+
+    #[test]
+    fn update_step_skills_writes_only_skills_and_preserves_rest() {
+        let dir = temp_dir("stepskills");
+        let root = dir.join("proj");
+        let text = "artifact_dir = \"outputs\"\nfuture_top_key = 42\n\n\
+                    [[steps]]\nname = \"文献整理\"\nworkspace_name = \"lit\"\nbrief = \"读文献写笔记\"\nskills = [\"paper-notes\"]\n\n\
+                    [[steps]]\nname = \"写作\"\nworkspace_name = \"write\"\n";
+        write(&config_path(&root), text);
+        // 归一：去空白、保序去重
+        update_step_skills_at(
+            &root,
+            "文献整理",
+            vec![" lit-search ".into(), "paper-notes".into(), "lit-search".into()],
+        )
+        .unwrap();
+        let cfg = read_config_at(&root).config;
+        assert_eq!(cfg.steps[0].skills, vec!["lit-search", "paper-notes"]);
+        // 其余字段与步骤原样；未知顶层键保留（render_config 口径）
+        assert_eq!(cfg.steps[0].brief, "读文献写笔记");
+        assert_eq!(cfg.steps[1].name, "写作");
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(raw.contains("future_top_key = 42"), "未知键丢失: {raw}");
+        // 步骤不存在 → 报错，文件不动
+        let before = fs::read_to_string(config_path(&root)).unwrap();
+        let err = update_step_skills_at(&root, "没有这步", vec![]).unwrap_err();
+        assert!(err.contains("步骤不存在"), "{err}");
+        assert_eq!(fs::read_to_string(config_path(&root)).unwrap(), before);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== 人工事项（steps[].human_tasks）解析/写回 =====
+
+    #[test]
+    fn human_tasks_parse_render_roundtrip() {
+        let dir = temp_dir("humantasks");
+        let root = dir.join("proj");
+        let text = "[[steps]]\nname = \"检索筛选\"\nworkspace_name = \"lit\"\n\
+                    discussion_seeds = [\"角度怎么收？\", \"  \", \"检索哪几个库？\"]\n\n\
+                    [[steps.human_tasks]]\ntitle = \"下载付费文献\"\nguidance = \"渠道自选\"\n\
+                    target = \"papers/*.pdf\"\ntiming = \"after\"\n\n\
+                    [[steps.human_tasks]]\ntitle = \"补充已知文献\"\ntarget = \"papers/\"\n\n\
+                    [[steps]]\nname = \"写作\"\n";
+        write(&config_path(&root), text);
+        let (cfg, warnings) = parse_config(text);
+        assert_eq!(cfg.steps[0].human_tasks.len(), 2, "{:?}", cfg.steps[0].human_tasks);
+        // 讨论种子：去空白、空项剔除
+        assert_eq!(
+            cfg.steps[0].discussion_seeds,
+            vec!["角度怎么收？", "检索哪几个库？"]
+        );
+        let h0 = &cfg.steps[0].human_tasks[0];
+        assert_eq!(h0.title, "下载付费文献");
+        assert_eq!(h0.target, "papers/*.pdf");
+        assert_eq!(h0.timing, "after");
+        // 缺省 timing = during
+        assert_eq!(cfg.steps[0].human_tasks[1].timing, "during");
+        // 写回再读：内容不变；during 与空字段省略不写
+        write_config_at(&root, &cfg).unwrap();
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        let (cfg2, _) = parse_config(&raw);
+        assert_eq!(cfg2.steps[0].human_tasks, cfg.steps[0].human_tasks);
+        assert_eq!(cfg2.steps[0].discussion_seeds, cfg.steps[0].discussion_seeds);
+        assert!(raw.contains("[[steps.human_tasks]]"), "{raw}");
+        assert!(raw.contains("discussion_seeds"), "{raw}");
+        assert!(!raw.contains("during"), "默认时机省略不写: {raw}");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn human_tasks_bad_entries_tolerated() {        // 空标题跳过、非法时机归一 during 并告警、无 human_tasks 段的步骤不受影响
+        let text = "[[steps]]\nname = \"检索\"\n\n\
+                    [[steps.human_tasks]]\ntitle = \"  \"\n\n\
+                    [[steps.human_tasks]]\ntitle = \"下载全文\"\ntiming = \"whenever\"\n";
+        let (cfg, warnings) = parse_config(text);
+        assert_eq!(cfg.steps[0].human_tasks.len(), 1);
+        assert_eq!(cfg.steps[0].human_tasks[0].timing, "during");
+        assert!(warnings.iter().any(|w| w.contains("标题为空")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("whenever")), "{warnings:?}");
+    }
+
+    // ===== 任务书草稿（v3.72） =====
+
+    #[test]
+    fn draft_rel_path_prefers_workspace_name() {
+        assert_eq!(
+            draft_rel_path("文献检索与筛选", "lit-search"),
+            ".ccode/drafts/lit-search.md"
+        );
+        // 无工作区名回落步骤名，不安全字符替换为 -
+        assert_eq!(
+            draft_rel_path("综述 大纲/初稿", ""),
+            ".ccode/drafts/综述-大纲-初稿.md"
+        );
+    }
+
+    #[test]
+    fn append_step_draft_creates_then_appends() {
+        let dir = temp_dir("draft");
+        let root = dir.join("proj");
+        write(
+            &config_path(&root),
+            "[[steps]]\nname = \"检索筛选\"\nworkspace_name = \"lit\"\n",
+        );
+        // 草稿不存在 → 以标题头新建
+        let rel = append_step_draft_at(&root, "检索筛选", "上一步评审沉淀", "结论 A 保留").unwrap();
+        assert_eq!(rel, ".ccode/drafts/lit.md");
+        let text = fs::read_to_string(root.join(&rel)).unwrap();
+        assert!(text.starts_with("# 任务书草稿：检索筛选"), "{text}");
+        assert!(text.contains("## 上一步评审沉淀"), "{text}");
+        assert!(text.contains("结论 A 保留"), "{text}");
+        // 再次追加：原有内容保留，新小节在后
+        append_step_draft_at(&root, "检索筛选", "二次沉淀", "结论 B");
+        let text = fs::read_to_string(root.join(&rel)).unwrap();
+        assert!(text.contains("结论 A 保留") && text.contains("结论 B"), "{text}");
+        assert!(text.find("结论 A 保留") < text.find("结论 B"), "追加保序");
+        // 步骤不存在报错
+        assert!(append_step_draft_at(&root, "没有这步", "x", "y").is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

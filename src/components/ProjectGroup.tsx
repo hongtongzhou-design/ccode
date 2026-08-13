@@ -16,11 +16,13 @@ import { Checkbox, hoverRevealClass } from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import { startPipelineStep, type TaskBriefRef } from "../pipeline-start";
+import { actionableHumanTasks, pendingHumanTasks } from "../task-cards";
 import { normSep } from "../path-utils";
 import type { RunOverviewInput } from "../run-overview";
 import type {
   DiscoveredResourceDto,
   EnsureGitDto,
+  HumanTaskStateDto,
   PipelineTemplateDto,
   ProjectConfigDto,
   ProjectConfigReadDto,
@@ -174,6 +176,7 @@ function StepperCell({
   circleDisabled,
   pulsing,
   attention,
+  selected,
   onCircleClick,
 }: {
   circleClass: string;
@@ -185,6 +188,8 @@ function StepperCell({
   pulsing: boolean;
   /** 终端注意力点：confirm=待确认（warn 点）；null/缺省不显示 */
   attention?: "confirm" | "done" | null;
+  /** 聚焦选中（v3.70：点圆 = 下方只看这一步）：中性高亮环 */
+  selected?: boolean;
   onCircleClick: () => void;
 }) {
   const circleRef = useRef<HTMLButtonElement>(null);
@@ -207,7 +212,7 @@ function StepperCell({
           aria-label={circleLabel}
           className="group/circle flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-full disabled:cursor-not-allowed"
           onClick={() => {
-            // 点击即关 tooltip：跳转终端/开覆盖层后不留残留悬浮
+            // 点击即关 tooltip：聚焦后不留残留悬浮
             hideTip();
             onCircleClick();
           }}
@@ -216,7 +221,7 @@ function StepperCell({
           <span
             className={`block h-[22px] w-[22px] rounded-full transition-[filter,color,background-color] duration-300 group-hover/circle:brightness-110 ${circleClass} ${
               active || pulsing ? "animate-pulse-brief" : ""
-            } ${active ? "ring-2 ring-cta/50" : ""}`}
+            } ${active ? "ring-2 ring-cta/50" : ""} ${selected ? "ring-2 ring-l1/70" : ""}`}
           />
         </button>
         {attention === "confirm" && (
@@ -321,7 +326,7 @@ function deriveStepStatus(
 }
 
 /**
- * 工作区页的项目分组（§11.4 P1b）：分组头 + 流水线 strip + 资源面板。
+ * 工作区页的项目分组（§11.4 P1b）：分组头 + 研究流程 strip + 资源面板。
  * 工作区行列表由 WorkspacesPage 作为 children 传入，本组件只管项目层 chrome。
  */
 export default function ProjectGroup({
@@ -403,6 +408,24 @@ export default function ProjectGroup({
     return () => {
       stale = true;
     };
+  }, [project, refreshToken]);
+
+  // 人工事项派生状态：进项目详情读一次 + 页面刷新重读；清单内操作（勾选/提交）后经回调重取
+  const loadHumanStates = () => {
+    if (!project) return;
+    invoke<HumanTaskStateDto[]>("list_human_task_states", {
+      projectRoot: project.path,
+    })
+      .then(setHumanStates)
+      .catch(() => {});
+  };
+  useEffect(() => {
+    if (!project) {
+      setHumanStates(null);
+      return;
+    }
+    loadHumanStates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, refreshToken]);
 
   /** 全量写回 resources/steps（后端保留未知键）；失败只报错不回滚本地状态 */  async function saveConfig(next: ProjectConfigDto): Promise<boolean> {
@@ -500,7 +523,7 @@ export default function ProjectGroup({
     }
   }
 
-  // ===== 流水线 strip =====
+  // ===== 研究流程 strip =====
   const [starting, setStarting] = useState<number | null>(null);
   // 开工确认弹层（v3.64）：步进器大圆与卡片「开工」的唯一开工入口
   const [kickoff, setKickoff] = useState<{
@@ -514,16 +537,31 @@ export default function ProjectGroup({
     y: number;
     index: number;
   } | null>(null);
-  // 流水线编辑器（RX1）：步骤编辑唯一入口，覆盖旧 ⋯ 内联重命名/编辑简报/+ 步骤表单
+  // 研究流程编辑器（RX1）：步骤编辑唯一入口，覆盖旧 ⋯ 内联重命名/编辑简报/+ 步骤表单
   const [editorOpen, setEditorOpen] = useState(false);
   // 步骤 ⋯「编辑步骤」：打开编辑器并定位到该步骤卡片（null = 从项目菜单进入，不定位）
   const [editorFocus, setEditorFocus] = useState<number | null>(null);
   // 步骤 ⋯「产物核验」手风琴：strip 下方就地展开 ArtifactChecklist，记展开的步骤 index（单开）
   const [artifactsStep, setArtifactsStep] = useState<number | null>(null);
+  // 步骤聚焦（v3.70）：null = 跟随当前步骤（第一个未完成）；-1 = 显示全部；其余 = 指定步骤。
+  // 大圆点击设置，卡片区只渲染聚焦步骤的种子/卡片/人工事项
+  const [focusStep, setFocusStep] = useState<number | null>(null);
+  // 人工事项派生状态（当前步骤条与 ⋯ 菜单计数用；清单本体自取自刷，操作后经回调重取这里）
+  const [humanStates, setHumanStates] = useState<HumanTaskStateDto[] | null>(
+    null,
+  );
   const [pipelineSaving, setPipelineSaving] = useState(false);
   const [applyingTemplate, setApplyingTemplate] = useState(false);
-  // 「使用科研流水线模板」旁的可选课题主题输入，随模板一并落进 project.toml
+  // 「使用研究流程模板」旁的可选课题主题输入，随模板一并落进 project.toml；
+  // 与「添加项目」弹窗的课题主题是同一字段：回显既有值（templateTopic 为空才回填，不盖用户输入）
   const [templateTopic, setTemplateTopic] = useState("");
+  // 应用模板成功的一次性引导条（组件态，切项目自然消失；不持久化——应用模板不是高频动作）
+  const [tplApplied, setTplApplied] = useState(false);
+  useEffect(() => {
+    if (cfg?.topic?.trim()) {
+      setTemplateTopic((cur) => (cur.trim() ? cur : cfg.topic!.trim()));
+    }
+  }, [cfg]);
   // 模板选择器：首启引导与「更换模板」共用，列出内置 + 用户模板
   const [pickerOpen, setPickerOpen] = useState(false);
   // 校验提示浮层：⚠ 徽标点击展开逐条全文（WKWebView 不显示 title 悬浮）
@@ -587,27 +625,10 @@ export default function ProjectGroup({
     setEditorOpen(true);
   }
 
-  /** 大圆点击 = 主推进动作（按状态唯一语义）：待开始开步/已归档恢复/进行中跳工作区终端/已合并开主仓终端 */
-  function onCircleClick(
-    index: number,
-    st: { key: StepStatusKey; ws?: WorkspaceDto },
-  ) {
-    if (st.key === "pending") {
-      if (st.ws) void restoreWs(st.ws);
-      else void startStep(index);
-      return;
-    }
-    if (st.key === "done") {
-      setPendingTerminal({
-        cwd: projectPath,
-        extraEnv: {},
-        title: displayName,
-        shellOnly: true,
-      });
-      setPage("terminal");
-      return;
-    }
-    if (st.ws) onOpenTerminal(st.ws);
+  /** 大圆点击 = 步骤聚焦（v3.70，用户拍板：圆的终端入口语义删除——跳终端/开步/恢复分别由
+   *  当前步骤条、卡片行、任务行承担）：点圆 = 下方卡片区只看这一步（种子/卡片/人工事项） */
+  function onCircleClick(index: number) {
+    setFocusStep(index);
   }
 
   async function applyTemplate(item: TemplatePickItem) {
@@ -631,7 +652,11 @@ export default function ProjectGroup({
       steps: item.steps.map((s) => ({ ...s })),
     });
     setApplyingTemplate(false);
-    if (ok) setPickerOpen(false);
+    if (ok) {
+      setPickerOpen(false);
+      // 顺序引导（一次性提示条，可关）：把视线引到第 1 步与种子
+      setTplApplied(true);
+    }
   }
 
   /** 另存为模板：当前 steps 存入用户模板库（后端同名覆盖，先查重 confirm） */
@@ -714,9 +739,24 @@ export default function ProjectGroup({
     return [
       {
         label: "编辑步骤",
-        title: "打开流水线编辑器并定位到该步骤",
+        title: "打开研究流程编辑器并定位到该步骤",
         onSelect: () => openEditor(index),
       },
+      // 人工事项（步骤声明了才出现）：点击 = 聚焦该步骤，清单在卡片区顶部直接可见
+      ...((step.humanTasks?.length ?? 0) > 0
+        ? [
+            {
+              label: (() => {
+                const n = humanStates
+                  ? pendingHumanTasks(humanStates, step.name).length
+                  : 0;
+                return n > 0 ? `人工事项（${n} 件待做）` : "人工事项";
+              })(),
+              title: "在下方只看这一步：归你做的事、讨论种子与卡片",
+              onSelect: () => setFocusStep(index),
+            },
+          ]
+        : []),
       {
         label: artifactsStep === index ? "收起产物核验" : "产物核验",
         disabled: !st.ws,
@@ -828,10 +868,14 @@ export default function ProjectGroup({
   const setPage = useAppStore((s) => s.setPage);
   // RX2b：步骤胶囊的「◫」切根交接与产物面板的 agent/profile 显示
   const setEnterCwdReq = useAppStore((s) => s.setEnterCwdReq);
-  const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const setWorkspaceReviewRequest = useAppStore(
+    (s) => s.setWorkspaceReviewRequest,
+  );
   const profiles = useAppStore((s) => s.profiles);
   // 步进器大圆的注意力点：终端运行状态镜像（TerminalPage 唯一写入方，只读消费）
   const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
+  // 任务卡（当前步骤条「待开始」文案按是否有定稿简报分情境；TaskCardsSection 负责加载，这里只读）
+  const taskCards = useAppStore((s) => s.taskCards[projectPath]);
   function viewPdfResource(r: ProjectResourceDto) {
     setPreviewReq({
       path: absoluteResourcePath(projectPath, r.path),
@@ -891,8 +935,105 @@ export default function ProjectGroup({
     ) ?? [];
   const allStepsDone =
     stepDoneFlags.length > 0 && stepDoneFlags.every(Boolean);
+  // 当前步骤 = 第一个未完成步骤（全部完成 → null，当前步骤条不渲染）。
+  // 主按钮与大圆同语义（唯一主推进动作）；待评审/阻塞时直达评审覆盖层（比跳终端少一步）
+  const currentStep = (() => {
+    if (!cfg) return null;
+    for (let i = 0; i < cfg.steps.length; i++) {
+      const step = cfg.steps[i];
+      const st = deriveStepStatus(step, workspaces, health, drift);
+      if (st.key === "done") continue;
+      // 「等你做」只数现在轮到人的：after（收尾）档在 agent 完成前还轮不到人，不计入
+      const pendingHuman = humanStates
+        ? actionableHumanTasks(
+            humanStates,
+            step.name,
+            st.key === "review" || st.key === "blocked",
+          ).length
+        : 0;
+      const goReview = (intent?: "resolve-conflict") => () => {
+        if (!st.ws) return;
+        setWorkspaceReviewRequest({
+          worktreePath: st.ws.worktreePath,
+          action: intent,
+          requestId: crypto.randomUUID(),
+        });
+        setPage("terminal");
+      };
+      const base = { index: i, step, pendingHuman };
+      switch (st.key) {
+        case "pending":
+          return st.ws
+            ? {
+                ...base,
+                statusText: "工作区已归档",
+                actionLabel: "恢复工作区",
+                action: () => void restoreWs(st.ws!),
+              }
+            : {
+                ...base,
+                // 情境化引导（顺序引导 A）：本步骤有定稿简报 = 想法聊透了；
+                // 没有则建议先点种子——不阻断，「开始」按钮始终可用
+                statusText: (taskCards ?? []).some(
+                  (c) => c.step === step.name && c.briefs.length > 0,
+                )
+                  ? "想法已就位，可以开始"
+                  : "待开始 · 建议先点下方种子聊聊",
+                actionLabel: "开始",
+                action: () => void startStep(i),
+              };
+        case "review":
+          return {
+            ...base,
+            statusText: "agent 做完了，待你评审",
+            actionLabel: "去评审",
+            action: goReview(),
+          };
+        case "blocked":
+          return {
+            ...base,
+            statusText: "有合并冲突待处理",
+            actionLabel: "去处理冲突",
+            action: goReview("resolve-conflict"),
+          };
+        case "checking":
+          return {
+            ...base,
+            statusText: "状态检查中",
+            actionLabel: "去终端",
+            action: () => st.ws && onOpenTerminal(st.ws),
+          };
+        default:
+          return {
+            ...base,
+            statusText: "agent 进行中",
+            actionLabel: "去终端",
+            action: () => st.ws && onOpenTerminal(st.ws),
+          };
+      }
+    }
+    return null;
+  })();
+  // 步骤聚焦 → 卡片区过滤的步骤名：显式选择 > 跟随当前步骤；-1 或全部完成 = 显示全部
+  const focusStepName = (() => {
+    if (!cfg) return null;
+    if (focusStep === -1) return null;
+    if (focusStep !== null) return (cfg.steps[focusStep]?.name ?? null) as string | null;
+    return currentStep?.step.name ?? null;
+  })();
+  // 聚焦步骤的执行状态（流程线 agent/评审节点用）：deriveStepStatus 六态映射到流程线四态
+  const focusRunStatus = (() => {
+    if (!cfg || !focusStepName) return undefined;
+    const step = cfg.steps.find((s) => s.name === focusStepName);
+    if (!step) return undefined;
+    const st = deriveStepStatus(step, workspaces, health, drift);
+    if (st.key === "done") return "done" as const;
+    if (st.key === "review" || st.key === "blocked") return "review" as const;
+    if (st.key === "active" || st.key === "checking") return "active" as const;
+    return "pending" as const;
+  })();
   return (
-    // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给流水线等必要块
+    // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给研究流程等必要块
     <section className="mb-5">
       <div className="flex min-h-12 min-w-0 items-center gap-2 border-b border-hairline px-4 py-2.5">
         {renamingProject ? (
@@ -960,7 +1101,7 @@ export default function ProjectGroup({
             )}
           </span>
         )}
-        {/* 校验提示（项目配置级，属于项目头而非流水线条）：⚠ 徽标点开展开逐条全文浮层 */}
+        {/* 校验提示（项目配置级，属于项目头而非研究流程条）：⚠ 徽标点开展开逐条全文浮层 */}
         {cfgWarnings.length > 0 && (
           <span className="relative shrink-0">
             <button
@@ -1000,7 +1141,7 @@ export default function ProjectGroup({
             <button
               type="button"
               className={actionBtn}
-              title="注册该项目目录，获得流水线骨架与资源面板"
+              title="注册该项目目录，获得研究流程骨架与资源面板"
               onClick={() => onRegisterProject(repoPath)}
             >
               注册项目
@@ -1122,18 +1263,18 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {/* 首启引导（轻量版）：注册项目且 steps 为空 → 从模板库选择写入流水线 */}
+      {/* 首启引导（轻量版）：注册项目且 steps 为空 → 从模板库选择写入研究流程 */}
       {registered && cfg && cfg.steps.length === 0 && (
         <div className="mb-2 rounded-md bg-strip p-3">
           <p className="mb-2 text-xs text-l3">
-            该项目还没有流水线步骤。从模板库选择（英文综述 / 科研论文 / 数据处理 /
+            该项目还没有研究步骤。从模板库选择（英文综述 / 科研论文 / 数据处理 /
             毕业论文，以及已另存的自定义模板）写入 .ccode/project.toml，之后可逐步编辑。
           </p>
           <input
             className={`${fieldSm} mb-2 w-full`}
             value={templateTopic}
             onChange={(e) => setTemplateTopic(e.target.value)}
-            placeholder="课题主题（可选）：随模板写进 project.toml，开步时进入 TASK.md"
+            placeholder="课题主题（给 Agent 看，随 TASK.md 走）：添加项目时填过会显示在这里，可改可留空"
           />
           <div className="flex items-center gap-2">
             <button
@@ -1141,23 +1282,23 @@ export default function ProjectGroup({
               className={ctaSm}
               onClick={() => setPickerOpen((v) => !v)}
             >
-              {pickerOpen ? "收起模板库" : "选择流水线模板"}
+              {pickerOpen ? "收起模板库" : "选择研究流程模板"}
             </button>
             <button
               type="button"
               className={actionBtn}
-              title="打开流水线编辑器，从头手动添加步骤"
+              title="打开研究流程编辑器，从头手动添加步骤"
               onClick={() => openEditor()}
             >
-              编辑流水线
+              编辑研究流程
             </button>
           </div>
         </div>
       )}
 
-      {/* 流水线 strip（大圆步进器，v3.46）：状态从绑定工作区派生；
+      {/* 研究流程 strip（大圆步进器，v3.46）：状态从绑定工作区派生；
           大圆 = 状态色 + 主推进点击；编辑步骤/产物核验收进步骤 ⋯ 菜单（原圆前/圆后小方块
-          伪装成虚线块可发现性为零，入口删除、视觉块保留为普通虚线块）；末端菱形 = 流水线终点，
+          伪装成虚线块可发现性为零，入口删除、视觉块保留为普通虚线块）；末端菱形 = 流程终点，
           全部步骤完成后点亮（与完成圆同一 done 绿）。
           结构 = 名称带 + 步进器带两个同列网格；虚线链由 StepperChain 在带级一次铺满
           （块位以圆心为锚分段等距计算，跨列无边界、各圆两侧断口一致），圆以 strip 底色遮罩压在链上 */}
@@ -1216,7 +1357,7 @@ export default function ProjectGroup({
               </div>
               {/* 步进器带：StepperChain 在带级把虚线链一次铺满（6px 块 + 6px 间隙，跨列连续无边界），
                   圆用 strip 底色遮罩压在链上；与名称带同列同隙。
-                  末端菱形 = 流水线终点符号（装饰，无点击），全部步骤完成后点亮 */}
+                  末端菱形 = 流程终点符号（装饰，无点击），全部步骤完成后点亮 */}
               <div className="flex items-center gap-1.5">
                 <StepperChain dones={stepDoneFlags}>
                   <ol
@@ -1242,6 +1383,7 @@ export default function ProjectGroup({
                     // 状态/目录/agent + 点击动作提示并入悬浮全文（白话双层），圆上只留状态色
                     // 注意力角标：cwd 落在工作区内的终端标签有待确认/已完成时上点（confirm 优先）
                     const attention = stepAttention(activeWs, terminalRunInputs);
+                    // 点击 = 聚焦该步骤（下方卡片区只看这一步）；推进动作归当前步骤条/卡片行/任务行
                     const circleTitle = [
                       `${step.name} · ${statusLabel}`,
                       activeWs
@@ -1253,40 +1395,31 @@ export default function ProjectGroup({
                         ? `Agent：${last.agentId}${lastProfile ? ` / ${lastProfile.name}` : ""}`
                         : null,
                       attention === "confirm" ? "终端：待你确认" : null,
-                      st.key === "pending"
-                        ? st.ws
-                          ? "点击恢复工作区"
-                          : "点击开始该步骤"
-                        : st.key === "done"
-                          ? "点击打开主文件夹终端"
-                          : "点击打开该工作区终端",
+                      "点击在下方只看这一步",
                     ]
                       .filter(Boolean)
                       .join("\n");
-                    // 待开始且缺工作区名时禁止开步（原「开始」按钮的 disabled 口径）
-                    const circleDisabled =
-                      st.key === "pending" &&
-                      !st.ws &&
-                      (starting === i || !step.workspaceName);
+                    // 聚焦选中态：显式选择优先；未选过时当前步骤（第一个未完成）亮环
+                    const selected =
+                      focusStep !== null && focusStep !== -1
+                        ? focusStep === i
+                        : currentStep?.index === i;
                     return (
                       <StepperCell
                         key={`${i}-${step.name}`}
                         circleClass={stepCircleClass(st.key)}
-                        circleTitle={
-                          circleDisabled && !step.workspaceName
-                            ? "该步骤未配置工作区名，请在「编辑流水线」中补充"
-                            : circleTitle
-                        }
+                        circleTitle={circleTitle}
                         circleWarn={
                           st.ws?.staleUpstream
                             ? `上游「${st.ws.staleUpstream}」有更新，产物可能过期`
                             : null
                         }
                         circleLabel={`${step.name}：${statusLabel}`}
-                        circleDisabled={circleDisabled}
+                        circleDisabled={false}
                         pulsing={starting === i}
                         attention={attention}
-                        onCircleClick={() => onCircleClick(i, st)}
+                        selected={selected}
+                        onCircleClick={() => onCircleClick(i)}
                       />
                     );
                   })}
@@ -1296,7 +1429,7 @@ export default function ProjectGroup({
                   className="flex h-7 w-3.5 shrink-0 items-center justify-center"
                   role="img"
                   aria-label={
-                    allStepsDone ? "流水线终点：全部步骤已完成" : "流水线终点"
+                    allStepsDone ? "流程终点：全部步骤已完成" : "流程终点"
                   }
                 >
                   {/* 实心菱形终点（9px 旋转 45°），与虚线块同轴、同 6px 间隙接上链条；
@@ -1314,6 +1447,56 @@ export default function ProjectGroup({
         </div>
       )}
 
+      {/* 应用模板成功的一次性引导条（顺序引导的入口提示）：把视线引到第 1 步与种子，可关 */}
+      {tplApplied && (
+        <div className="mb-3 flex items-center gap-2 rounded-md bg-inset px-3 py-1.5 text-xs text-l3">
+          <span className="min-w-0 flex-1">
+            研究流程已就位——建议先点卡片区「开工前聊聊」的种子问题，跟 Agent
+            把方向聊透（◈ 提炼定稿会自动带进 TASK.md），想清楚了再从第 1 步开始
+          </span>
+          <button
+            type="button"
+            onClick={() => setTplApplied(false)}
+            className={`${actionBtn} shrink-0 text-l4 hover:text-l1`}
+          >
+            知道了
+          </button>
+        </div>
+      )}
+
+      {/* 当前步骤条（「现在该干嘛」的单一答案）：第一个未完成步骤 = 状态白话 + 你的待办 + 一个主按钮；
+          全部完成或不适用（未注册/无研究流程）时不渲染，保持安静 */}
+      {registered && cfg && cfg.steps.length > 0 && currentStep && (
+        <div className="mb-3 flex h-8 items-center gap-2 rounded-md bg-strip px-3 text-xs">
+          <span className="shrink-0 text-l4">
+            第 {currentStep.index + 1}/{cfg.steps.length} 步
+          </span>
+          <span className="min-w-0 truncate font-medium text-l1">
+            {currentStep.step.name}
+          </span>
+          <span className="shrink-0 text-l3">{currentStep.statusText}</span>
+          {currentStep.pendingHuman > 0 && (
+            <button
+              type="button"
+              onClick={() => setFocusStep(currentStep.index)}
+              title="聚焦这一步：归你做的事在下方流程线里，当前节点已高亮"
+              className="shrink-0 rounded-full border border-warn/40 bg-warn/10 px-2 py-0.5 text-[11px] font-medium text-warn-text hover:bg-warn/20"
+            >
+              等你做 {currentStep.pendingHuman} 件
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={currentStep.action}
+            className={`ml-auto shrink-0 ${actionBtn} border border-field`}
+          >
+            {currentStep.actionLabel}
+          </button>
+        </div>
+      )}
+
+      {/* 人工事项清单已并入聚焦视图（TaskCardsSection 聚焦步骤时顶部渲染）；原 ⋯ 手风琴面板删除 */}
+
       {/* 产物核验手风琴（步骤 ⋯ 菜单触发）：strip 下方就地展开（单开）；root 口径同任务行——已合并读项目根，其余读工作树 */}
       {artStep && artWs && (
         <div className="mb-3">
@@ -1326,7 +1509,8 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {/* 任务卡区（流水线步进器下方）：对话的文件夹 + 定稿简报收集夹；无独立状态机，不碰工作区/评审流程 */}
+      {/* 任务卡区（研究流程步进器下方）：对话的文件夹 + 定稿简报收集夹；无独立状态机，不碰工作区/评审流程。
+          v3.70 起按 focusStep 聚焦：默认只看当前步骤，点大圆切步骤，「显示全部」还原 */}
       {registered && cfg && (
         <TaskCardsSection
           projectPath={projectPath}
@@ -1335,11 +1519,15 @@ export default function ProjectGroup({
           workspaces={workspaces}
           refreshToken={refreshToken}
           mainDirty={mainDirty}
+          focusStep={focusStepName}
+          focusRunStatus={focusRunStatus}
+          onClearFocus={() => setFocusStep(-1)}
+          onHumanChanged={loadHumanStates}
           onStartStep={(index, originCardId) => startStep(index, originCardId)}
         />
       )}
 
-      {/* 模板库选择器：项目菜单与空流水线「选择流水线模板」共用的唯一实例 */}
+      {/* 模板库选择器：项目菜单与空研究流程「选择研究流程模板」共用的唯一实例 */}
       {registered && cfg && pickerOpen && (
         <div className="mb-2 rounded-md bg-strip p-2">
           <TemplatePicker
@@ -1549,7 +1737,7 @@ export default function ProjectGroup({
           onClose={() => setProjectMenu(null)}
           items={[
             {
-              label: "编辑流水线",
+              label: "编辑研究流程",
               disabled: !cfg,
               title: cfg
                 ? "编辑步骤名称、简报、预期产物和脚本"
@@ -1591,7 +1779,7 @@ export default function ProjectGroup({
               title:
                 cfg && cfg.steps.length > 0
                   ? undefined
-                  : "没有可保存的流水线步骤",
+                  : "没有可保存的研究步骤",
               onSelect: () => {
                 setTplSavedMsg(null);
                 setSavingTemplate(true);
@@ -1659,6 +1847,7 @@ export default function ProjectGroup({
             setKickoff(null);
             void runStartStep(index, briefs, taskMd);
           }}
+          onCfgChange={(next) => setCfg(next)}
         />
       )}
     </section>

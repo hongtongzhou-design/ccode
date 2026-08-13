@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { THEMES } from "./themes";
+import { dismissHelp, loadHelpDismissed } from "./inbox";
 import type { RunOverviewInput } from "./run-overview";
 import type {
   DetectResult,
@@ -126,6 +127,8 @@ export interface InboxItem {
   dot: string;
   text: string;
   actionLabel: string;
+  /** 仅 help: 条目携带：请求条目签名（dismiss 时连同 root 写入屏蔽表） */
+  dismissSignature?: string;
   action:
     | {
         type: "review";
@@ -136,6 +139,7 @@ export interface InboxItem {
     | { type: "session"; agent: string; sessionId: string }
     | { type: "digest" }
     | { type: "artifacts"; workspaceId: string }
+    | { type: "project"; projectRoot: string }
     | { type: "profiles" };
 }
 
@@ -182,6 +186,9 @@ export function runInboxAction(item: InboxItem) {
   } else if (item.action.type === "artifacts") {
     s.setArtifactCheckReq(item.action.workspaceId);
     s.setPage("workspaces");
+  } else if (item.action.type === "project") {
+    s.setSelectProjectReq(item.action.projectRoot);
+    s.setPage("workspaces");
   } else {
     s.setPage("profiles");
   }
@@ -217,6 +224,10 @@ interface AppState {
       App 标题栏收件箱与工作区页 strip 共同消费；action 为可序列化跳转描述 */
   inboxItems: InboxItem[];
   setInboxItems: (items: InboxItem[]) => void;
+  /** help: 条目屏蔽表（{ root: 条目签名 }，localStorage ccode.helpDismissed 持久化；
+      签名随文件内容变化，内容一变自动复现）。签名一致时 WorkspacesPage 不生成该条目 */
+  helpDismissed: Record<string, string>;
+  dismissHelpRequest: (root: string, signature: string) => void;
   /** 一次性「跳终端页并激活标签」请求（首页待办点击发起），终端页可见时消费并清空 */
   focusTabReq: string | null;
   setFocusTabReq: (tabId: string | null) => void;
@@ -359,6 +370,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   setTerminalRunInputs: (inputs) => set({ terminalRunInputs: inputs }),
   inboxItems: [],
   setInboxItems: (items) => set({ inboxItems: items }),
+  helpDismissed: loadHelpDismissed(),
+  dismissHelpRequest: (root, signature) =>
+    set({ helpDismissed: dismissHelp(root, signature) }),
   focusTabReq: null,
   setFocusTabReq: (tabId) => set({ focusTabReq: tabId }),
   previewReq: null,
