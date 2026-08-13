@@ -83,13 +83,13 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-center bg-black/50"
+      className="fixed inset-0 z-50 flex justify-center bg-black/40"
       onClick={onClose}
     >
       <div
         role="dialog"
         aria-label="命令面板"
-        className="mt-[16vh] h-fit w-[30rem] overflow-hidden rounded-md border border-field bg-strip"
+        className="mt-[16vh] h-fit w-[30rem] overflow-hidden rounded-md border border-field ccode-float-surface"
         onClick={(e) => e.stopPropagation()}
       >
         <input

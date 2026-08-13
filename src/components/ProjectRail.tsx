@@ -198,7 +198,7 @@ function ProjectRail({
     if (!entries) {
       return (
         <div className="py-1" style={{ paddingLeft: 6 + (depth + 1) * 12 }}>
-          <span className="block h-1.5 w-16 animate-pulse rounded bg-inset" />
+          <span className="block h-1.5 w-16 animate-pulse rounded-sm bg-inset" />
         </div>
       );
     }
@@ -218,7 +218,7 @@ function ProjectRail({
         onClick={e.isDir ? () => enter(e.path) : undefined}
         title={e.path}
         className={`flex items-center gap-1 py-0.5 pr-2 text-xs ${
-          e.isDir ? "cursor-pointer hover:bg-white/5" : ""
+          e.isDir ? "cursor-pointer hover:bg-hover" : ""
         }`}
         style={{ paddingLeft: 6 + (depth + 1) * 12 }}
       >

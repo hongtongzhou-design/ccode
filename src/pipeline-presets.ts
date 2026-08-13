@@ -39,7 +39,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       {
         title: "补充你已知的关键文献",
         guidance:
-          "你自己读过、认为必须纳入的文献——检索引擎未必覆盖；导出 .bib 或直接放 PDF 均可",
+          "分工：agent 负责系统检索（OpenAlex / Semantic Scholar 等可程序化库）与 DOI 去重合并；你负责语义发现补漏——在 Undermind / Google Scholar / Elicit 网页端检索（哪篇重要你判断更快），导出 RIS / BibTeX / CSV 后点本行「导入检索结果」（落 papers/imports/），开工时 agent 自动解析、去重并合并进 papers/screening.md；你自己读过、认为必须纳入的 PDF 也可直接放进 papers/",
         target: "papers/",
         timing: "before",
       },
@@ -145,8 +145,8 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       {
         title: "补充你已知的关键文献",
         guidance:
-          "你自己读过、认为必须纳入的文献——检索引擎未必覆盖；放进项目目录或导出 .bib 均可",
-        target: "",
+          "分工：agent 负责系统检索（OpenAlex / Semantic Scholar 等可程序化库）与 DOI 去重合并；你负责语义发现补漏——在 Undermind / Google Scholar / Elicit 网页端检索（哪篇重要你判断更快），导出 RIS / BibTeX / CSV 后点本行「导入检索结果」（落 papers/imports/），agent 解析去重后并入文献库；你自己读过的 PDF 也可直接放进 papers/",
+        target: "papers/",
         timing: "before",
       },
       {
@@ -412,8 +412,8 @@ const THESIS_STEPS: ProjectStepDto[] = [
       {
         title: "补充你已知的关键文献",
         guidance:
-          "你自己读过、认为必须纳入的文献——检索引擎未必覆盖；放进项目目录或导出 .bib 均可",
-        target: "",
+          "分工：agent 负责系统检索（OpenAlex / Semantic Scholar 等可程序化库）与 DOI 去重合并；你负责语义发现补漏——在 Undermind / Google Scholar / Elicit 网页端检索（哪篇重要你判断更快），导出 RIS / BibTeX / CSV 后点本行「导入检索结果」（落 papers/imports/），agent 解析去重后并入文献库；你自己读过的 PDF 也可直接放进 papers/",
+        target: "papers/",
         timing: "before",
       },
       {

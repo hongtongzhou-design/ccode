@@ -315,7 +315,7 @@ function PdfPreview({
   }
 
   const zoomBtn =
-    "flex h-6 min-w-6 items-center justify-center rounded px-1 text-xs text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-40";
+    "flex h-6 min-w-6 items-center justify-center rounded-sm px-1 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-40";
 
   // 只挂载当前页 ±1（相邻页预渲染在隐藏状态，翻页即时可见），不整本渲染
   const pages = doc
@@ -328,7 +328,7 @@ function PdfPreview({
         <span className="truncate text-l3" title={path}>
           {fileName}
         </span>
-        <span className="shrink-0 rounded bg-inset px-1 text-l4">PDF</span>
+        <span className="shrink-0 rounded-sm bg-inset px-1 text-l4">PDF</span>
         {doc && (
           <span className="ml-auto flex shrink-0 items-center gap-1">
             <button
@@ -346,7 +346,7 @@ function PdfPreview({
                 if (e.key === "Enter" && pageInput) goPage(Number(pageInput));
               }}
               onBlur={() => setPageInput(String(pageNum))}
-              className="w-9 rounded border border-field bg-canvas px-1 py-0.5 text-center text-xs text-l2 outline-none focus:border-l4"
+              className="w-9 rounded-sm border border-field bg-canvas px-1 py-0.5 text-center text-xs text-l2 outline-none focus:border-l4"
             />
             <span className="text-l4">/ {pageCount}</span>
             <button
@@ -394,7 +394,7 @@ function PdfPreview({
           {hint.action && (
             <button
               type="button"
-              className="shrink-0 rounded border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110"
+              className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110"
               onClick={() => {
                 hint.action!.run();
                 setHint(null);
@@ -441,7 +441,7 @@ function PdfPreview({
                     // preventDefault 保住选区，click 时才读文字
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => askAi()}
-                    className="rounded border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
+                    className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
                   >
                     ◈ 问 AI
                   </button>
@@ -449,7 +449,7 @@ function PdfPreview({
                     type="button"
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => askAi(true)}
-                    className="rounded border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
+                    className="rounded-sm border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
                   >
                     ↵ 直接发送
                   </button>
@@ -461,7 +461,7 @@ function PdfPreview({
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => void organize()}
                   disabled={organizing}
-                  className="rounded border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-60"
+                  className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-60"
                 >
                   {organizing ? "整理中…" : "整理为笔记"}
                 </button>

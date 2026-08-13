@@ -24,12 +24,12 @@ export default class ErrorBoundary extends Component<Props, State> {
       return (
         <div className="flex h-full flex-col items-center justify-center gap-3 bg-canvas p-8 text-center">
           <p className="text-base font-medium text-err-text">界面渲染出错</p>
-          <pre className="max-w-2xl overflow-auto whitespace-pre-wrap rounded bg-inset p-4 text-left text-xs text-l3">
+          <pre className="max-w-2xl overflow-auto whitespace-pre-wrap rounded-sm bg-inset p-4 text-left text-xs text-l3">
             {String(this.state.error.stack ?? this.state.error)}
           </pre>
           <button
             onClick={() => this.setState({ error: null })}
-            className="rounded border border-field px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm border border-field px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           >
             尝试恢复
           </button>

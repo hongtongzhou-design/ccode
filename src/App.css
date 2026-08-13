@@ -46,6 +46,10 @@
   --color-hairline: #2c3039; /* 隐式 0.5px 细线 */
   --color-field: #40454f; /* 输入框 / 弹层边线（保持亮于 hairline） */
 
+  /* 行 hover 表面：透明度叠加而非新颜色（Linear 式），深色=5% 白，
+     浅色主题统一覆写为 5% 黑（见 [data-theme$="-light"] 段），任何底色自动融合 */
+  --color-hover: rgb(255 255 255 / 0.05);
+
   /* 文本四级：暖纸白 → 暖灰（层级靠颜色不靠字号；长时阅读不刺眼） */
   --color-l1: #e9e6e2; /* 标题 / 选中 */
   --color-l2: #bdbab4; /* 正文 / 次级 */
@@ -299,9 +303,10 @@
   --color-done: #2c7d5c;
 }
 
-/* 浅色模式下白色半透明 hover/缩进线不可见：翻转为黑色半透明 */
-[data-theme$="-light"] .ccode-app-shell :where(.hover\:bg-white\/5):hover {
-  background-color: rgb(0 0 0 / 0.05);
+/* 浅色模式：hover 表面令牌翻转为 5% 黑（bg-hover 随主题变量自动适配，替代原 white/5 类名补丁）；
+   其余白色半透明（选中行 bg-white/10、缩进线 border-white/5）仍按类名翻转 */
+[data-theme$="-light"] {
+  --color-hover: rgb(0 0 0 / 0.05);
 }
 [data-theme$="-light"] .ccode-app-shell :where(.bg-white\/10) {
   background-color: rgb(0 0 0 / 0.08);
@@ -422,6 +427,14 @@ body {
 .ccode-action-secondary {
   transition-duration: 150ms;
   transition-timing-function: var(--ccode-motion-ease);
+}
+
+/* 浮层表面统一口径（弹窗/下拉/右键菜单/命令面板）：raised 一档浮起 + 顶部 1px 内高光
+   （Linear edge highlight 手法）——零阴影原则不变，浮起感靠边缘高光而非投影表达；
+   浅色主题下高光落在白板上近不可见，无害 */
+.ccode-float-surface {
+  background-color: var(--color-raised);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06);
 }
 
 button,

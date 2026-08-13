@@ -397,13 +397,13 @@ export default function KickoffConfirmDialog({
   const canFuseTaskMd = checked.size >= 1 && !savedFuse;
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
       onClick={() => {
         if (!busy) onCancel();
       }}
     >
       <div
-        className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-md border border-field bg-strip p-5"
+        className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-md border border-field ccode-float-surface p-5"
         onClick={(event) => event.stopPropagation()}
       >
         <h2 className="mb-1 shrink-0 text-base font-semibold text-l1">
@@ -415,7 +415,7 @@ export default function KickoffConfirmDialog({
 
         {/* 主仓改动协同（只提醒不阻断）：想法期实验性改动留在主仓是合法的 */}
         {mainDirty !== null && mainDirty > 0 && (
-          <p className="mb-3 shrink-0 rounded bg-inset px-2.5 py-1.5 text-xs text-warn-text">
+          <p className="mb-3 shrink-0 rounded-sm bg-inset px-2.5 py-1.5 text-xs text-warn-text">
             主仓有 {mainDirty} 个未提交改动，不会带入新工作区——可先在主仓提交，
             或开始后用 files-to-copy 机制携带。
           </p>
@@ -430,7 +430,7 @@ export default function KickoffConfirmDialog({
             <button
               type="button"
               onClick={() => setSavedFuse(null)}
-              className="rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1"
+              className="rounded-sm px-1.5 py-0.5 text-l3 hover:bg-hover hover:text-l1"
             >
               撤销，改回多份全文
             </button>
@@ -472,7 +472,7 @@ export default function KickoffConfirmDialog({
                 type="button"
                 disabled={savingFuse}
                 onClick={() => setDraft(null)}
-                className="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                className="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
               >
                 放弃融合
               </button>
@@ -488,7 +488,7 @@ export default function KickoffConfirmDialog({
                   disabled={fusing}
                   onClick={() => void fuseSelected()}
                   title="AI 把所选简报融合成一份简报初稿，定稿后钉卡并用于 TASK.md"
-                  className="rounded px-1.5 py-0.5 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                  className="rounded-sm px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
                 >
                   {fusing ? "◈ 融合中…" : "◈ 融合所选简报"}
                 </button>
@@ -536,7 +536,7 @@ export default function KickoffConfirmDialog({
               <button
                 type="button"
                 onClick={() => void fuseSelected()}
-                className="ml-2 rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1"
+                className="ml-2 rounded-sm px-1.5 py-0.5 text-l3 hover:bg-hover hover:text-l1"
               >
                 重试
               </button>
@@ -565,7 +565,7 @@ export default function KickoffConfirmDialog({
                     }}
                     label={
                       <span className="flex min-w-0 items-center gap-2 text-xs">
-                        <span className="shrink-0 rounded bg-strip px-1 py-0.5 text-l3">
+                        <span className="shrink-0 rounded-sm bg-strip px-1 py-0.5 text-l3">
                           {RESOURCE_TYPE_LABELS[d.type] ?? "其他"}
                         </span>
                         <span
@@ -585,7 +585,7 @@ export default function KickoffConfirmDialog({
                 type="button"
                 disabled={resChecked.size === 0 || resSaving}
                 onClick={() => void registerResources()}
-                className="rounded border border-field px-1.5 py-0.5 text-[11px] text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                className="rounded-sm border border-field px-1.5 py-0.5 text-[11px] text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
               >
                 {resSaving ? "登记中…" : `登记选中（${resChecked.size}）`}
               </button>
@@ -649,7 +649,7 @@ export default function KickoffConfirmDialog({
               disabled={fusingTaskMd || !editorReady}
               onClick={() => void fuseTaskMd()}
               title="AI 把模板简报与所选简报融合成一份连贯的 TASK.md（提货单段原样保留），填入后可再改"
-              className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+              className="ml-auto shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
             >
               {fusingTaskMd ? "◈ 融合中…" : "◈ 融合为连贯 TASK.md"}
             </button>
@@ -665,7 +665,7 @@ export default function KickoffConfirmDialog({
                 dispatchEditor({ type: "reset", text: assembled })
               }
               title="放弃修改，回到模板与勾选简报的默认拼装"
-              className={`shrink-0 rounded px-1.5 py-0.5 text-xs text-l4 hover:bg-white/5 hover:text-l2 ${canFuseTaskMd ? "" : "ml-auto"}`}
+              className={`shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-l4 hover:bg-hover hover:text-l2 ${canFuseTaskMd ? "" : "ml-auto"}`}
             >
               恢复默认拼装
             </button>
@@ -677,7 +677,7 @@ export default function KickoffConfirmDialog({
             <button
               type="button"
               onClick={() => void fuseTaskMd()}
-              className="ml-2 rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1"
+              className="ml-2 rounded-sm px-1.5 py-0.5 text-l3 hover:bg-hover hover:text-l1"
             >
               重试
             </button>
@@ -705,7 +705,7 @@ export default function KickoffConfirmDialog({
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5 disabled:opacity-50"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover disabled:opacity-50"
           >
             取消
           </button>
@@ -713,7 +713,7 @@ export default function KickoffConfirmDialog({
             type="button"
             disabled={busy || !editorReady}
             onClick={() => onConfirm(activeBriefRefs, editor.text)}
-            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             {busy ? "开始中…" : "确认开始"}
           </button>

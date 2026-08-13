@@ -48,7 +48,7 @@ export default function StepSkillsChips({
             </>
           );
           const chipClass =
-            "flex items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-[11px] text-l2";
+            "flex items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-[11px] text-l2";
           return (
             <span key={name} className="flex flex-col">
               {editable ? (
@@ -59,7 +59,7 @@ export default function StepSkillsChips({
                     aria-label={`移除技能 ${name}`}
                     title="从步骤定义移除"
                     onClick={() => onChange(skills.filter((s) => s !== name))}
-                    className="rounded px-0.5 text-l4 hover:text-l1"
+                    className="rounded-sm px-0.5 text-l4 hover:text-l1"
                   >
                     ×
                   </button>
@@ -69,7 +69,7 @@ export default function StepSkillsChips({
                   type="button"
                   onClick={() => setExpanded(open ? null : name)}
                   title={open ? "收起说明" : (desc ?? "查看说明")}
-                  className={`${chipClass} hover:bg-white/5`}
+                  className={`${chipClass} hover:bg-hover`}
                 >
                   {label}
                 </button>

@@ -519,7 +519,7 @@ function ChangeTree({
                 }
               }}
               title={node.path}
-              className={`flex h-7 w-full items-center gap-1.5 border-l-2 pr-2 text-left text-xs hover:bg-white/5 ${
+              className={`flex h-7 w-full items-center gap-1.5 border-l-2 pr-2 text-left text-xs hover:bg-hover ${
                 !isDir && activePath === node.path
                   ? "border-cta bg-rail-sel text-l1"
                   : "border-transparent text-l2"
@@ -634,7 +634,7 @@ function ConflictFileSection({
             {path}
           </span>
           {choice && (
-            <span className="rounded bg-inset px-2 py-0.5 text-l2">
+            <span className="rounded-sm bg-inset px-2 py-0.5 text-l2">
               已选 {choice === "ours" ? "任务版" : baseBranch}
             </span>
           )}
@@ -654,7 +654,7 @@ function ConflictFileSection({
               type="button"
               onClick={() => onChoose(path, "ours")}
               disabled={!content || !unresolved || busy}
-              className={`rounded border px-2 py-0.5 disabled:opacity-50 ${
+              className={`rounded-sm border px-2 py-0.5 disabled:opacity-50 ${
                 choice === "ours"
                   ? "border-cta-bd bg-cta text-cta-text"
                   : "border-field bg-inset text-l2 hover:bg-seg-sel hover:text-l1"
@@ -677,7 +677,7 @@ function ConflictFileSection({
               type="button"
               onClick={() => onChoose(path, "theirs")}
               disabled={!content || !unresolved || busy}
-              className={`rounded border px-2 py-0.5 disabled:opacity-50 ${
+              className={`rounded-sm border px-2 py-0.5 disabled:opacity-50 ${
                 choice === "theirs"
                   ? "border-cta-bd bg-cta text-cta-text"
                   : "border-field bg-inset text-l2 hover:bg-seg-sel hover:text-l1"
@@ -711,7 +711,7 @@ function ConflictFileSection({
                     onChoose(path, advice.choice as ConflictChoice)
                   }
                   disabled={busy}
-                  className="shrink-0 rounded px-2 py-0.5 text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                  className="shrink-0 rounded-sm px-2 py-0.5 text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
                 >
                   按建议
                 </button>
@@ -726,7 +726,7 @@ function ConflictFileSection({
           <button
             type="button"
             onClick={() => onRetry(path)}
-            className="mt-2 rounded bg-btn px-2 py-1 text-l1 hover:bg-white/10"
+            className="mt-2 rounded-sm bg-btn px-2 py-1 text-l1 hover:bg-white/10"
           >
             重试加载
           </button>
@@ -896,13 +896,13 @@ function MainRepoCommitPanel({
               }}
               disabled={committing}
               placeholder="提交信息（可选，留空快速提交）"
-              className="min-w-0 flex-1 rounded border border-field bg-strip px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
+              className="min-w-0 flex-1 rounded-sm border border-field bg-strip px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
             />
             <button
               type="button"
               onClick={() => void commit()}
               disabled={committing || selectedFiles.length === 0}
-              className="shrink-0 rounded border border-cta-bd bg-cta px-3 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+              className="shrink-0 rounded-sm border border-cta-bd bg-cta px-3 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
             >
               {committing ? "提交中…" : message.trim() ? "提交" : "快速提交"}
             </button>
@@ -910,7 +910,7 @@ function MainRepoCommitPanel({
               type="button"
               onClick={onCancel}
               disabled={committing}
-              className="shrink-0 rounded px-2 py-1 text-xs text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+              className="shrink-0 rounded-sm px-2 py-1 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
             >
               取消
             </button>
@@ -1909,7 +1909,7 @@ export default function WorkspaceReviewView({
             type="button"
             onClick={onClose}
             title="返回终端"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-l3 hover:bg-white/5 hover:text-l1"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1"
           >
             <ArrowLeft aria-hidden="true" className="h-4 w-4" />
           </button>
@@ -1929,7 +1929,7 @@ export default function WorkspaceReviewView({
               onClick={() => void refresh()}
               disabled={refreshing || busy || conflictBusy}
               title="刷新审阅数据"
-              className="flex h-8 w-8 items-center justify-center rounded text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+              className="flex h-8 w-8 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
             >
               <RefreshCw
                 aria-hidden="true"
@@ -1951,7 +1951,7 @@ export default function WorkspaceReviewView({
                   conflictBusy || busy || (hasUncommitted && !message.trim())
                 }
                 title="两边改了同一个地方，需要你逐个文件选一边"
-                className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
               >
                 {busy || conflictBusy
                   ? "处理中…"
@@ -1965,7 +1965,7 @@ export default function WorkspaceReviewView({
                   type="button"
                   onClick={() => void startConflictResolution(true)}
                   disabled={conflictBusy}
-                  className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
                   {conflictBusy
                     ? "重新同步中…"
@@ -2073,7 +2073,7 @@ export default function WorkspaceReviewView({
                     unresolvedFiles.length === 0 ||
                     !allConflictContentsLoaded
                   }
-                  className="rounded border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
+                  className="rounded-sm border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
                 >
                   全部任务版
                 </button>
@@ -2086,7 +2086,7 @@ export default function WorkspaceReviewView({
                     unresolvedFiles.length === 0 ||
                     !allConflictContentsLoaded
                   }
-                  className="rounded border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
+                  className="rounded-sm border border-field bg-inset px-2 py-1 text-l2 hover:bg-seg-sel hover:text-l1 disabled:opacity-50"
                 >
                   全部 {diff.baseBranch}
                 </button>
@@ -2100,7 +2100,7 @@ export default function WorkspaceReviewView({
                     conflictBusy ||
                     unresolvedFiles.length === 0
                   }
-                  className="rounded border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
                   {adviceBusy ? "◈ 分析中…" : "◈ AI 建议"}
                 </button>
@@ -2111,7 +2111,7 @@ export default function WorkspaceReviewView({
                     disabled={
                       staleBase || conflictBusy || !allConflictContentsLoaded
                     }
-                    className="rounded border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
+                    className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
                   >
                     按建议选择
                   </button>
@@ -2133,14 +2133,14 @@ export default function WorkspaceReviewView({
                     }}
                     disabled={busy}
                     placeholder="提交信息"
-                    className="min-w-0 flex-1 rounded border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
+                    className="min-w-0 flex-1 rounded-sm border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
                   />
                   <button
                     type="button"
                     onClick={() => void generateMessage()}
                     disabled={aiBusy || busy}
                     title="AI 生成提交信息"
-                    className="flex h-7 min-w-7 items-center justify-center rounded px-1.5 text-l2 hover:bg-white/5 disabled:opacity-50"
+                    className="flex h-7 min-w-7 items-center justify-center rounded-sm px-1.5 text-l2 hover:bg-hover disabled:opacity-50"
                   >
                     {aiBusy ? "◈…" : "◈"}
                   </button>
@@ -2152,7 +2152,7 @@ export default function WorkspaceReviewView({
             ) : (
               <span
                 title={`默认只合并到本地 ${diff.baseBranch} 并保留工作区；不会自动推送远程`}
-                className="ml-auto flex h-7 w-7 items-center justify-center rounded text-l4"
+                className="ml-auto flex h-7 w-7 items-center justify-center rounded-sm text-l4"
               >
                 ⓘ
               </span>
@@ -2180,9 +2180,9 @@ export default function WorkspaceReviewView({
                         ? "点击查看缺失的引用键"
                         : "文中引用键均能在 references.bib 中找到"
                     }
-                    className={`shrink-0 rounded px-1 ${
+                    className={`shrink-0 rounded-sm px-1 ${
                       citations.missing.length > 0
-                        ? "text-warn-text hover:bg-white/5"
+                        ? "text-warn-text hover:bg-hover"
                         : "text-l3"
                     } disabled:cursor-default`}
                   >
@@ -2239,7 +2239,7 @@ export default function WorkspaceReviewView({
             <button
               type="button"
               onClick={() => setShowBlockers((value) => !value)}
-              className="rounded px-2 py-0.5 text-warn-text hover:bg-white/5"
+              className="rounded-sm px-2 py-0.5 text-warn-text hover:bg-hover"
             >
               {showBlockers ? "收起" : "查看"}
             </button>
@@ -2255,7 +2255,7 @@ export default function WorkspaceReviewView({
                         <button
                           type="button"
                           onClick={() => setMainCommitOpen((value) => !value)}
-                          className="rounded px-2 py-0.5 text-warn-text hover:bg-white/5"
+                          className="rounded-sm px-2 py-0.5 text-warn-text hover:bg-hover"
                         >
                           {mainCommitOpen ? "收起提交面板" : "提交主文件夹的改动…"}
                         </button>
@@ -2323,7 +2323,7 @@ export default function WorkspaceReviewView({
               type="button"
               onClick={() => setDistillOpen((v) => !v)}
               title={`把本次评审结论写成定稿简报，钉到「${nextStep.step.name}」的任务卡`}
-              className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+              className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
             >
               沉淀到下一步
             </button>
@@ -2342,7 +2342,7 @@ export default function WorkspaceReviewView({
               onClick={() => void draftDistill()}
               disabled={distillDrafting || distillBusy}
               title="按本步提交与 TASK.md 起草沉淀初稿（可再改）"
-              className="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+              className="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
             >
               {distillDrafting ? "◈ 起草中…" : "◈ AI 起草"}
             </button>
@@ -2357,7 +2357,7 @@ export default function WorkspaceReviewView({
               <button
                 type="button"
                 onClick={() => void draftDistill()}
-                className="ml-2 rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1"
+                className="ml-2 rounded-sm px-1.5 py-0.5 text-l3 hover:bg-hover hover:text-l1"
               >
                 重试
               </button>
@@ -2382,7 +2382,7 @@ export default function WorkspaceReviewView({
             <button
               type="button"
               onClick={() => setDistillOpen(false)}
-              className="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+              className="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
             >
               取消
             </button>
@@ -2434,7 +2434,7 @@ export default function WorkspaceReviewView({
                     type="button"
                     onClick={() => void startConflictResolution(true)}
                     disabled={conflictBusy}
-                    className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                    className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                   >
                     {conflictBusy
                       ? "重新同步中…"
@@ -2509,7 +2509,7 @@ export default function WorkspaceReviewView({
 
           <aside className="flex w-[292px] shrink-0 flex-col border-l border-hairline bg-rail2">
             <div className="shrink-0 border-b border-hairline p-3">
-              <div className="flex h-8 items-center gap-2 rounded border border-field bg-canvas px-2">
+              <div className="flex h-8 items-center gap-2 rounded-sm border border-field bg-canvas px-2">
                 <Search
                   aria-hidden="true"
                   className="h-3.5 w-3.5 shrink-0 text-l4"
@@ -2557,7 +2557,7 @@ export default function WorkspaceReviewView({
                         onClick={() => selectFile(path)}
                         title={path}
                         className={[
-                          "flex min-h-8 w-full items-center gap-2 border-l-2 px-3 py-1.5 text-left text-xs hover:bg-white/5",
+                          "flex min-h-8 w-full items-center gap-2 border-l-2 px-3 py-1.5 text-left text-xs hover:bg-hover",
                           activePath === path
                             ? "border-cta bg-rail-sel"
                             : "border-transparent",
@@ -2687,7 +2687,7 @@ export default function WorkspaceReviewView({
 
       {prOpen && diff && (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
           onClick={() => {
             // 请求在途时不响应遮罩关闭，避免关框重开导致重复建 PR
             if (!prBusy) closePrDialog();
@@ -2699,7 +2699,7 @@ export default function WorkspaceReviewView({
               event.preventDefault();
               void submitPr();
             }}
-            className="w-full max-w-[26rem] rounded-md border border-field bg-strip p-5"
+            className="w-full max-w-[26rem] rounded-md border border-field ccode-float-surface p-5"
           >
             <h2 className="mb-1 text-base font-semibold text-l1">创建 PR</h2>
             <p
@@ -2728,7 +2728,7 @@ export default function WorkspaceReviewView({
                         window.setTimeout(() => setPrCopied(false), 1500);
                       });
                     }}
-                    className="shrink-0 rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+                    className="shrink-0 rounded-sm px-2 py-0.5 text-xs text-l2 hover:bg-hover"
                   >
                     {prCopied ? "已复制" : "复制"}
                   </button>
@@ -2743,7 +2743,7 @@ export default function WorkspaceReviewView({
                     required
                     value={prTitle}
                     onChange={(event) => setPrTitle(event.target.value)}
-                    className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+                    className="w-full rounded-sm border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
                   />
                 </label>
                 <label className="mb-4 block text-sm">
@@ -2754,7 +2754,7 @@ export default function WorkspaceReviewView({
                       onClick={() => void draftPr()}
                       disabled={prDrafting}
                       title="AI 起草 PR 描述"
-                      className="rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+                      className="rounded-sm px-2 py-0.5 text-xs text-l2 hover:bg-hover disabled:opacity-50"
                     >
                       {prDrafting ? "◈ 起草中…" : "◈ AI 起草"}
                     </button>
@@ -2763,7 +2763,7 @@ export default function WorkspaceReviewView({
                     value={prBody}
                     onChange={(event) => setPrBody(event.target.value)}
                     placeholder="留空自动生成提交摘要"
-                    className="h-24 w-full resize-y rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+                    className="h-24 w-full resize-y rounded-sm border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
                   />
                 </label>
                 {error && <p className="mb-3 text-xs text-err-text">{error}</p>}
@@ -2773,7 +2773,7 @@ export default function WorkspaceReviewView({
               <button
                 type="button"
                 onClick={closePrDialog}
-                className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+                className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
               >
                 {prUrl ? "关闭" : "取消"}
               </button>
@@ -2781,7 +2781,7 @@ export default function WorkspaceReviewView({
                 <button
                   type="submit"
                   disabled={prBusy || !prTitle.trim()}
-                  className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
                   {prBusy ? "创建中…" : prPushed ? "重试创建 PR" : "创建 PR"}
                 </button>
@@ -2793,7 +2793,7 @@ export default function WorkspaceReviewView({
 
       {archiveOpen && diff && (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
           onClick={() => {
             // 请求在途时不响应遮罩关闭，避免关框重开导致重复提交/归档
             if (!busy) setArchiveOpen(false);
@@ -2805,7 +2805,7 @@ export default function WorkspaceReviewView({
               event.preventDefault();
               void finish("archive");
             }}
-            className="w-full max-w-[26rem] rounded-md border border-field bg-strip p-5"
+            className="w-full max-w-[26rem] rounded-md border border-field ccode-float-surface p-5"
           >
             <h2 className="mb-2 text-base font-semibold text-l1">
               {hasUncommitted ? "提交并归档" : "归档工作区"}
@@ -2825,7 +2825,7 @@ export default function WorkspaceReviewView({
                   onChange={(event) => setMessage(event.target.value)}
                   disabled={busy}
                   placeholder={`chore: 保存 ${diff.workspaceName}`}
-                  className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+                  className="w-full rounded-sm border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
                 />
               </label>
             )}
@@ -2835,14 +2835,14 @@ export default function WorkspaceReviewView({
                 type="button"
                 onClick={() => setArchiveOpen(false)}
                 disabled={busy}
-                className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5 disabled:opacity-50"
+                className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover disabled:opacity-50"
               >
                 取消
               </button>
               <button
                 type="submit"
                 disabled={busy || (hasUncommitted && !message.trim())}
-                className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
               >
                 {busy
                   ? "处理中…"

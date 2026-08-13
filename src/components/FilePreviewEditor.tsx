@@ -148,7 +148,7 @@ function MarkdownView({
               // preventDefault 保住选区，click 时才读文字
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => discuss()}
-              className="rounded border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
+              className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
             >
               ◈ 讨论/改写此段
             </button>
@@ -156,7 +156,7 @@ function MarkdownView({
               type="button"
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => discuss(true)}
-              className="rounded border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
+              className="rounded-sm border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
             >
               ↵ 直接发送
             </button>
@@ -432,18 +432,18 @@ function FilePreviewEditor({
           </span>
         )}
         {truncated && (
-          <span className="shrink-0 rounded bg-warn px-1 text-warn-text">
+          <span className="shrink-0 rounded-sm bg-warn px-1 text-warn-text">
             已截断（只读）
           </span>
         )}
         {dirty && <span className="shrink-0 text-l3" title="有未保存的修改">●</span>}
         {isMd && (
-          <div className="flex shrink-0 items-center rounded bg-inset p-0.5 text-[11px]">
+          <div className="flex shrink-0 items-center rounded-sm bg-inset p-0.5 text-[11px]">
             {(["read", "edit"] as const).map((m) => (
               <button
                 key={m}
                 onClick={() => setMode(m)}
-                className={`rounded px-2 py-0.5 ${
+                className={`rounded-sm px-2 py-0.5 ${
                   mode === m ? "bg-seg-sel text-l1" : "text-l3 hover:text-l2"
                 }`}
               >
@@ -457,7 +457,7 @@ function FilePreviewEditor({
             <button
               onClick={() => setImmersive(true)}
               title={`全宽沉浸${mode === "read" ? "阅读" : "编辑"}（Esc 退出）`}
-              className="shrink-0 rounded px-2 py-0.5 text-l2 hover:bg-white/5"
+              className="shrink-0 rounded-sm px-2 py-0.5 text-l2 hover:bg-hover"
             >
               ⛶ {mode === "read" ? "沉浸阅读" : "沉浸编辑"}
             </button>
@@ -471,7 +471,7 @@ function FilePreviewEditor({
                   ? "直接修改主项目（不属于任何分支），保存前会再确认"
                   : undefined
               }
-              className={`shrink-0 rounded px-2 py-0.5 hover:bg-white/5 disabled:opacity-50 ${
+              className={`shrink-0 rounded-sm px-2 py-0.5 hover:bg-hover disabled:opacity-50 ${
                 ctx?.kind === "main" ? "text-warn-text" : "text-l2"
               }`}
             >
@@ -510,7 +510,7 @@ function FilePreviewEditor({
                     ? "直接修改主项目（不属于任何分支），保存前会再确认"
                     : undefined
                 }
-                className={`ml-auto shrink-0 rounded px-2 py-1 hover:bg-white/5 disabled:opacity-50 ${
+                className={`ml-auto shrink-0 rounded-sm px-2 py-1 hover:bg-hover disabled:opacity-50 ${
                   ctx?.kind === "main" ? "text-warn-text" : "text-l2"
                 }`}
               >
@@ -520,7 +520,7 @@ function FilePreviewEditor({
             <button
               onClick={() => setImmersive(false)}
               title={`退出沉浸${mode === "read" ? "阅读" : "编辑"}（Esc）`}
-              className={`${mode === "edit" && !truncated ? "" : "ml-auto "}shrink-0 rounded px-2 py-1 text-l3 hover:bg-white/5 hover:text-l1`}
+              className={`${mode === "edit" && !truncated ? "" : "ml-auto "}shrink-0 rounded-sm px-2 py-1 text-l3 hover:bg-hover hover:text-l1`}
             >
               ✕ 退出
             </button>

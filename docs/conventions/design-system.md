@@ -6,8 +6,9 @@
 
 - 全站主题令牌集中在 `src/App.css` 的 `@theme` + `[data-theme]` 变体（**七套深色 + 七套对应浅色**，v3.44 起：
   沉浸黑(默认)/陶土/Ayu琥珀/Catppuccin/极简灰蓝/Dracula/灰蓝正红，各配一套同性格浅色；浅色方向翻转——rail 比 canvas
-  略暗、面板向白浮起、hairline/field 为深灰线、cta 加深保白底对比，状态语义色共享深色值；白色半透明 hover/缩进线/
-  滚动条拇指在浅色下由 App.css 统一翻转为黑色半透明），运行时切 `document.documentElement.dataset.theme`，
+  略暗、面板向白浮起、hairline/field 为深灰线、cta 加深保白底对比，状态语义色共享深色值；行 hover 统一走
+  `--color-hover` 令牌（深色 5% 白 / 浅色 5% 黑，`hover:bg-hover`，禁再写死 `hover:bg-white/*`），选中行 bg-white/10
+  与缩进线 border-white/5 仍在浅色下由 App.css 按类名翻转），运行时切 `document.documentElement.dataset.theme`，
   **改主题只动这一个文件**，组件里禁散落 hex。主题清单单一出处 `src/themes.ts`（settings.rs KNOWN_THEMES 与
   TerminalPage XTERM_BG_FG 需同步）。**切主题同时同步原生窗口外观**（`applyTheme` 调 `setTheme(light/dark)`，
   浅色判定走 themes.ts 的 `light` 标记）——原生 `<select>` 下拉、滚动条等按 NSWindow appearance 渲染，
@@ -17,7 +18,9 @@
 - 四层「浮起」结构（rail/rail2/canvas/inset 逐级变亮）；文字冷白→灰四档；每主题独立 CTA 强调色（按钮/选中用 `cta`；可操作
   状态如「可合并」用**按钮本身的 cta 高亮**，不另挂 pill；纯状态 pill 用 inset 灰底 + 语义色小圆点）；**状态语义色独立于
   主题**（ok/err/warn 不随主题变）；**结果横幅一律 bg-strip/inset 底 + ✓/✗ 语义色文字**，不用整块 bg-ok/bg-err（bg-err
-  仅留给需警惕的小 pill）；零阴影、隐式 hairline。
+  仅留给需警惕的小 pill）；零阴影、隐式 hairline。**浮层统一口径**：弹窗/下拉/右键菜单/命令面板表面一律
+  `.ccode-float-surface`（= raised 底 + 顶部 1px 内高光，Linear edge highlight 手法——零阴影原则不变，浮起感靠
+  边缘高光而非投影），禁再随手用 bg-strip/bg-raised 做弹层；全屏遮罩统一 `bg-black/40`（25/50/60 三档已并一）。
 - **字体渲染按平台分口径（v3.60 后 Windows 糊字修复）**：入口（main.tsx）在 `<html>` 上落 `data-platform`
   （mac/windows/linux，判定在 hotkeys.ts `IS_MAC`/`IS_WINDOWS`）。Windows Chromium 下 `text-rendering:
   optimizeLegibility` 会走 DirectWrite natural 模式丢 hinting，小字号发糊——`[data-platform="windows"]` 覆写回 `auto`，

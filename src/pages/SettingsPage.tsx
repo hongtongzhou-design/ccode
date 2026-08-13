@@ -602,7 +602,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                     : "border-field text-l3 hover:text-l1"
                 }`}
               >
-                <span className="mb-1 flex h-8 overflow-hidden rounded">
+                <span className="mb-1 flex h-8 overflow-hidden rounded-sm">
                   <span
                     className="h-full w-1/2"
                     style={{ background: t.rail }}
@@ -667,13 +667,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                     ref={(el) => {
                       if (el) el.scrollTop = el.scrollHeight;
                     }}
-                    className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-inset p-2 font-mono text-xs text-l3"
+                    className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-sm bg-inset p-2 font-mono text-xs text-l3"
                   >
                     {fontInstallOutput || "安装中，等待输出…"}
                   </pre>
                 )}
                 {!fontInstalling && fontInstallResult && (
-                  <div className="rounded bg-strip p-2 text-xs text-l2">
+                  <div className="rounded-sm bg-strip p-2 text-xs text-l2">
                     <span
                       className={
                         fontInstallResult.ok ? "text-ok-text" : "text-err-text"
@@ -747,7 +747,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                   onClick={() => installFont(INSTALLABLE_FONTS[fontFamily])}
                   disabled={fontInstalling}
                   title="通过 Homebrew 安装该字体"
-                  className="h-7 shrink-0 rounded border border-cta-bd bg-cta px-2.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className="h-7 shrink-0 rounded-sm border border-cta-bd bg-cta px-2.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
                   {fontInstalling &&
                   fontInstallTarget === INSTALLABLE_FONTS[fontFamily]
@@ -1002,7 +1002,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 <button
                   type="button"
                   aria-label={`删除 ${row.prefix || "该行"}`}
-                  className="flex h-7 w-7 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-err-text"
+                  className="flex h-7 w-7 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-err-text"
                   onClick={() => {
                     setPricingRows(pricingRows.filter((_, j) => j !== i));
                     markPricingDirty(true);
@@ -1015,7 +1015,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           </div>
           <button
             type="button"
-            className="mt-2 flex h-7 items-center rounded px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+            className="mt-2 flex h-7 items-center rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
             onClick={() => {
               setPricingRows([
                 ...pricingRows,
@@ -1119,7 +1119,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         badge={
           // 有新版本时强制展开并在标题加标记，避免静默检查结果无人感知
           appUpdate ? (
-            <span className="ml-1 inline-flex items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs font-normal text-l3">
+            <span className="ml-1 inline-flex items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-xs font-normal text-l3">
               <span className="size-1.5 rounded-full bg-ok-text" />
               v{appUpdate.version} 可更新
             </span>
@@ -1140,13 +1140,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 <button
                   onClick={installUpdate}
                   disabled={installing}
-                  className="ml-auto h-8 rounded border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className="ml-auto h-8 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
                   {installing ? "下载安装中…" : "下载并安装"}
                 </button>
               </div>
               {appUpdate.body && (
-                <div className="max-h-48 overflow-auto whitespace-pre-line rounded bg-inset p-2 text-xs leading-5 text-l3">
+                <div className="max-h-48 overflow-auto whitespace-pre-line rounded-sm bg-inset p-2 text-xs leading-5 text-l3">
                   {appUpdate.body}
                 </div>
               )}
@@ -1172,7 +1172,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         open={!collapsed.diag}
         onToggle={() => toggleSection("diag")}
       >
-        <div className="mt-3 flex items-center gap-3 rounded bg-strip p-3">
+        <div className="mt-3 flex items-center gap-3 rounded-sm bg-strip p-3">
           <div className="min-w-0">
             <p className="text-sm text-l2">Windows 诊断包</p>
             <p className="mt-0.5 text-xs leading-5 text-l4">
@@ -1182,7 +1182,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           <button
             onClick={exportDiagnosticsBundle}
             disabled={diagnosticsExporting}
-            className="ml-auto h-8 shrink-0 rounded border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className="ml-auto h-8 shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             {diagnosticsExporting ? "正在采集…" : "导出诊断包"}
           </button>
@@ -1195,14 +1195,14 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             {/* 诊断是低频区：行内按钮 hover 才现，Tab 聚焦同样显示 */}
             <button
               onClick={loadLogs}
-              className={`ml-auto rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 ${hoverRevealClass}`}
+              className={`ml-auto rounded-sm px-2 py-0.5 text-xs text-l2 hover:bg-hover ${hoverRevealClass}`}
             >
               刷新
             </button>
             <button
               onClick={copyLogs}
               disabled={logs.length === 0}
-              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverRevealClass}`}
+              className={`rounded-sm px-2 py-0.5 text-xs text-l2 hover:bg-hover disabled:opacity-50 ${hoverRevealClass}`}
             >
               复制全部
             </button>
@@ -1219,14 +1219,14 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               }}
               disabled={logs.length === 0}
               title="导出为 txt 到 ~/Downloads/ccode-exports/，反馈问题时发给开发者"
-              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverRevealClass}`}
+              className={`rounded-sm px-2 py-0.5 text-xs text-l2 hover:bg-hover disabled:opacity-50 ${hoverRevealClass}`}
             >
               导出
             </button>
             <button
               onClick={clearLogs}
               disabled={logs.length === 0}
-              className={`rounded px-2 py-0.5 text-xs text-l2 hover:bg-white/5 disabled:opacity-50 ${hoverRevealClass}`}
+              className={`rounded-sm px-2 py-0.5 text-xs text-l2 hover:bg-hover disabled:opacity-50 ${hoverRevealClass}`}
             >
               清空
             </button>
@@ -1234,7 +1234,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           {logs.length === 0 ? (
             <p className="text-xs text-l4">暂无日志</p>
           ) : (
-            <div className="max-h-64 overflow-auto rounded bg-inset p-2 font-mono text-xs leading-5">
+            <div className="max-h-64 overflow-auto rounded-sm bg-inset p-2 font-mono text-xs leading-5">
               {logs.map((l, i) => (
                 <div key={i} className="break-all">
                   <span className="text-l4">

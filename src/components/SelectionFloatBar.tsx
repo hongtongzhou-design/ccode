@@ -46,7 +46,7 @@ export function DistillSkillButton({
       onMouseDown={(e) => e.preventDefault()}
       onClick={() => void distill()}
       disabled={distilling}
-      className="rounded border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-60"
+      className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-60"
     >
       {distilling ? "提炼中…" : "✦ 沉淀为技能"}
     </button>

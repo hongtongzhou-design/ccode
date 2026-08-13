@@ -335,7 +335,7 @@ export default function HumanTasksList({
             <li
               key={task.title}
               data-human-task={task.target ? task.title : undefined}
-              className={`rounded px-1.5 py-1 ${
+              className={`rounded-sm px-1.5 py-1 ${
                 dropHover === task.title
                   ? "bg-cta/10 outline outline-1 outline-cta-bd"
                   : "bg-inset"
@@ -374,7 +374,7 @@ export default function HumanTasksList({
                     disabled={busyTitle !== null}
                     onClick={() => void pickFile(task.title)}
                     title={`选文件提交到落点 ${task.target}（复制 + 登记提货单）；也可直接把文件拖到这一行`}
-                    className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                    className="shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
                   >
                     {busyTitle === task.title ? "提交中…" : "提交产物"}
                   </button>
@@ -411,7 +411,7 @@ export default function HumanTasksList({
           <button
             type="button"
             onClick={() => void registerOffered()}
-            className="rounded border border-field px-1.5 py-0.5 text-l2 hover:bg-white/5 hover:text-l1"
+            className="rounded-sm border border-field px-1.5 py-0.5 text-l2 hover:bg-hover hover:text-l1"
           >
             登记
           </button>
@@ -419,7 +419,7 @@ export default function HumanTasksList({
             type="button"
             onClick={dismissRegisterOffer}
             title="不登记，文件已在落点目录里"
-            className="rounded px-1 py-0.5 text-l4 hover:bg-white/5 hover:text-l1"
+            className="rounded-sm px-1 py-0.5 text-l4 hover:bg-hover hover:text-l1"
           >
             不了
           </button>

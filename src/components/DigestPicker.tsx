@@ -246,7 +246,7 @@ export default function DigestPicker({
   return (
     <div className="fixed inset-0 z-50" onClick={onClose}>
       <div
-        className={`absolute top-[12%] left-1/2 -translate-x-1/2 rounded border border-field bg-strip py-2 text-sm ${
+        className={`absolute top-[12%] left-1/2 -translate-x-1/2 rounded-sm border border-field ccode-float-surface py-2 text-sm ${
           brief && !finalized ? "w-[36rem]" : "w-96"
         }`}
         onClick={(e) => e.stopPropagation()}
@@ -273,7 +273,7 @@ export default function DigestPicker({
             <p className="text-xs text-err-text">{error}</p>
             {!generating && !brief && (
               <button
-                className="mt-1 rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                className="mt-1 rounded-sm px-2 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
                 onClick={() =>
                   startDigestJob({ agent, sessionId, filePath, cwd, title }, true)
                 }
@@ -305,7 +305,7 @@ export default function DigestPicker({
                 disabled={saving || draft === null || !draft.trim()}
                 onClick={() => void finalize(true)}
                 title="定稿落盘（钉入任务卡）后选择目标 Agent 发送"
-                className="rounded border border-cta-bd bg-cta px-2.5 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+                className="rounded-sm border border-cta-bd bg-cta px-2.5 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
               >
                 {saving ? "定稿中…" : "定稿并继续"}
               </button>
@@ -314,7 +314,7 @@ export default function DigestPicker({
                 disabled={saving || draft === null || !draft.trim()}
                 onClick={() => void finalize(false)}
                 title="仅定稿落盘钉卡，不发送；收件箱「待发送」摘除"
-                className="rounded px-2.5 py-1 text-xs text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                className="rounded-sm px-2.5 py-1 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
               >
                 暂不发送
               </button>
@@ -325,7 +325,7 @@ export default function DigestPicker({
         {finalized && !ready && (
           <div className="px-3 pb-1">
             <button
-              className="rounded px-2 py-0.5 text-xs text-l4 hover:bg-white/5 hover:text-l2"
+              className="rounded-sm px-2 py-0.5 text-xs text-l4 hover:bg-hover hover:text-l2"
               title="暂不发送：简报文件保留在磁盘，收件箱条目摘除"
               onClick={() => {
                 consumeDigestJob();
@@ -345,13 +345,13 @@ export default function DigestPicker({
             </p>
             <div className="mt-2 flex gap-2">
               <button
-                className="rounded border border-cta-bd bg-cta px-2.5 py-1 text-xs text-cta-text hover:brightness-110"
+                className="rounded-sm border border-cta-bd bg-cta px-2.5 py-1 text-xs text-cta-text hover:brightness-110"
                 onClick={() => goTerminal(ready.target, ready.prompt)}
               >
                 前往终端启动
               </button>
               <button
-                className="rounded px-2.5 py-1 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                className="rounded-sm px-2.5 py-1 text-xs text-l3 hover:bg-hover hover:text-l1"
                 onClick={onClose}
               >
                 取消
@@ -376,7 +376,7 @@ export default function DigestPicker({
                   if (e.key === "Enter" && t.installed && busy === null)
                     void pick(t);
                 }}
-                className="group flex w-full items-center gap-2 px-3 py-1.5 text-left text-l2 hover:bg-white/5 aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+                className="group flex w-full items-center gap-2 px-3 py-1.5 text-left text-l2 hover:bg-hover aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
               >
                 <span className="min-w-0 flex-1 truncate">
                   {busy === t.id ? "登记接力…" : agentLabel(t.id)}
@@ -395,7 +395,7 @@ export default function DigestPicker({
                 {t.installed && (
                   <span className="flex shrink-0 items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
                     <button
-                      className="rounded px-1 py-0.5 text-xs text-l4 hover:bg-white/10 hover:text-l1"
+                      className="rounded-sm px-1 py-0.5 text-xs text-l4 hover:bg-white/10 hover:text-l1"
                       title={
                         t.promptSupported
                           ? "复制外部终端续作命令（新会话读简报，非恢复旧会话）"
@@ -410,7 +410,7 @@ export default function DigestPicker({
                     </button>
                     {t.promptSupported && (
                       <button
-                        className="rounded px-1 py-0.5 text-xs text-l4 hover:bg-white/10 hover:text-l1"
+                        className="rounded-sm px-1 py-0.5 text-xs text-l4 hover:bg-white/10 hover:text-l1"
                         title="在外部终端以「读简报续作」开新会话"
                         onClick={(e) => {
                           e.stopPropagation();

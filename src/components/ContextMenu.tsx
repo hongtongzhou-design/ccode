@@ -85,7 +85,7 @@ export default function ContextMenu({
     >
       <div
         ref={panelRef}
-        className="absolute min-w-40 max-w-80 rounded border border-field bg-strip py-1"
+        className="absolute min-w-40 max-w-80 rounded-sm border border-field ccode-float-surface py-1"
         style={style}
         onClick={(e) => e.stopPropagation()}
       >
@@ -103,8 +103,8 @@ export default function ContextMenu({
               it.disabled
                 ? "cursor-not-allowed text-l4"
                 : it.danger
-                  ? "text-err-text hover:bg-white/5"
-                  : "text-l2 hover:bg-white/5"
+                  ? "text-err-text hover:bg-hover"
+                  : "text-l2 hover:bg-hover"
             }`}
           >
             {it.label}

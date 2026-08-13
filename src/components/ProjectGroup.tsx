@@ -37,7 +37,7 @@ import type {
 } from "../types";
 
 const actionBtn =
-  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1";
+  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1";
 const ctaSm =
   "inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
 const fieldSm =
@@ -156,7 +156,7 @@ function HoverTip({
   return (
     <div
       role="tooltip"
-      className="pointer-events-none fixed z-50 max-w-72 -translate-x-1/2 whitespace-pre-line rounded-md border border-hairline bg-raised px-2.5 py-1.5 text-left text-xs leading-5 text-l2"
+      className="pointer-events-none fixed z-50 max-w-72 -translate-x-1/2 whitespace-pre-line rounded-md border border-hairline ccode-float-surface px-2.5 py-1.5 text-left text-xs leading-5 text-l2"
       style={{ left: tip.x, top: tip.y }}
     >
       {text}
@@ -1158,7 +1158,7 @@ export default function ProjectGroup({
           </span>
         )}
         {!registered && (
-          <span className="inline-flex shrink-0 items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l3">
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l3">
             <span className="size-2 rounded-full bg-l4" />
             未注册
           </span>
@@ -1193,7 +1193,7 @@ export default function ProjectGroup({
               type="button"
               aria-expanded={warnOpen}
               title="查看全部校验提示"
-              className="rounded px-1 text-xs text-warn-text hover:bg-white/5"
+              className="rounded-sm px-1 text-xs text-warn-text hover:bg-hover"
               onClick={() => setWarnOpen((v) => !v)}
             >
               ⚠ {cfgWarnings.length}
@@ -1204,7 +1204,7 @@ export default function ProjectGroup({
                   className="fixed inset-0 z-40"
                   onClick={() => setWarnOpen(false)}
                 />
-                <ul className="absolute left-0 z-50 mt-1 w-72 space-y-1.5 rounded-md border border-hairline bg-raised p-2">
+                <ul className="absolute left-0 z-50 mt-1 w-72 space-y-1.5 rounded-md border border-hairline ccode-float-surface p-2">
                   {cfgWarnings.map((w, i) => (
                     <li key={i} className="break-words text-xs text-l2">
                       {w}
@@ -1241,7 +1241,7 @@ export default function ProjectGroup({
               }}
               title="项目操作"
               aria-label={`项目操作：${displayName}`}
-              className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+              className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
             >
               ⋯
             </button>
@@ -1306,7 +1306,7 @@ export default function ProjectGroup({
       )}
 
       {tplSavedMsg && (
-        <div className="mb-2 flex items-center gap-2 rounded bg-strip p-2 text-xs text-l2">
+        <div className="mb-2 flex items-center gap-2 rounded-sm bg-strip p-2 text-xs text-l2">
           <span className="min-w-0 flex-1">
             <span className="mr-1 text-ok-text">✓</span>
             {tplSavedMsg}
@@ -1322,7 +1322,7 @@ export default function ProjectGroup({
       )}
 
       {registered && freshGitGuide && (
-        <div className="mb-2 flex flex-wrap items-center gap-2 rounded bg-strip p-2 text-xs text-l2">
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-sm bg-strip p-2 text-xs text-l2">
           <span>新项目：若目录还不是 git 仓库，初始化后才能创建工作区。</span>
           {gitMsg && (
             <span>
@@ -1430,7 +1430,7 @@ export default function ProjectGroup({
                         }}
                         title="步骤操作"
                         aria-label={`步骤操作：${step.name}`}
-                        className={`absolute right-0 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded text-xs text-l3 hover:bg-white/5 hover:text-l1 ${hoverRevealClass}`}
+                        className={`absolute right-0 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
                       >
                         ⋯
                       </button>
@@ -1625,7 +1625,7 @@ export default function ProjectGroup({
               <button
                 type="button"
                 className={actionBtn}
-                title="从 Undermind / Consensus / Elicit 等导出 RIS/BibTeX/CSV 后导入（可多选），落主仓 papers/imports/，开工时 agent 自动解析合并；建议文件名带 来源-日期（如 consensus-2026-08-13.ris）"
+                title="分工：你在 Undermind / Scholar / Elicit 网页端做语义发现，agent 负责解析、DOI 去重、合并进筛选清单。导出 RIS/BibTeX/CSV 后点这里导入（可多选），落主仓 papers/imports/；建议文件名带 来源-日期（如 consensus-2026-08-13.ris）"
                 onClick={() => void importSearchResults()}
               >
                 导入检索结果
@@ -1647,7 +1647,7 @@ export default function ProjectGroup({
                       key={`${i}-${r.path}`}
                       className="flex min-w-0 items-center gap-2 py-1.5"
                     >
-                      <span className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-xs text-l3">
+                      <span className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l3">
                         {RESOURCE_TYPE_LABELS[r.type] ?? "其他"}
                       </span>
                       <span
@@ -1670,7 +1670,7 @@ export default function ProjectGroup({
                           type="button"
                           onClick={() => viewPdfResource(r)}
                           title="在终端页内嵌预览（可选中文字问 AI）"
-                          className="shrink-0 rounded px-1.5 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                          className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
                         >
                           查看
                         </button>
@@ -1688,7 +1688,7 @@ export default function ProjectGroup({
                         }}
                         title="资源操作"
                         aria-label={`资源操作：${r.name}`}
-                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1"
                       >
                         ⋯
                       </button>
@@ -1735,7 +1735,7 @@ export default function ProjectGroup({
                                 }}
                                 label={
                                   <span className="flex min-w-0 items-center gap-2 text-xs">
-                                    <span className="shrink-0 rounded bg-inset px-1 py-0.5 text-l3">
+                                    <span className="shrink-0 rounded-sm bg-inset px-1 py-0.5 text-l3">
                                       {RESOURCE_TYPE_LABELS[d.type] ??
                                         "其他"}
                                     </span>
@@ -1777,7 +1777,7 @@ export default function ProjectGroup({
                 </div>
               )}
               {importMsg && (
-                <div className="mt-2 flex items-center gap-2 rounded bg-inset p-2 text-xs text-l2">
+                <div className="mt-2 flex items-center gap-2 rounded-sm bg-inset p-2 text-xs text-l2">
                   <span className="min-w-0 flex-1">
                     <span className="mr-1 text-ok-text">✓</span>
                     {importMsg}
@@ -1792,7 +1792,7 @@ export default function ProjectGroup({
                 </div>
               )}
               {gitignoreHint && (
-                <div className="mt-2 flex items-center gap-2 rounded bg-inset p-2 text-xs text-l2">
+                <div className="mt-2 flex items-center gap-2 rounded-sm bg-inset p-2 text-xs text-l2">
                   <span className="min-w-0 flex-1">
                     提示：数据/产物类大文件建议加入 .gitignore，避免进入 git
                     历史（git init 生成的 .gitignore 已含常见目录注释）。

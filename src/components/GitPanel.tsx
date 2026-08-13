@@ -476,14 +476,14 @@ function GitPanel({
             type="button"
             onClick={() => void toggleDiff(f)}
             title={`${expanded ? "收起" : "查看"} ${f.path} 的 diff`}
-            className="group flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-1 text-left hover:bg-white/5"
+            className="group flex min-w-0 flex-1 items-center gap-1.5 rounded-sm px-1 py-1 text-left hover:bg-hover"
           >
             <span className="w-3 shrink-0 text-center text-l3">
               {expanded ? "▾" : "▸"}
             </span>
             <span
               title={statusBadgeTitle(f.status)}
-              className={`shrink-0 rounded px-1 font-mono text-[10px] leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
+              className={`shrink-0 rounded-sm px-1 font-mono text-[10px] leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
             >
               {f.status}
             </span>
@@ -502,7 +502,7 @@ function GitPanel({
             )}
             {/* WKWebView 不显示 title 悬浮：diff 入口用可见的 hover 提示代替 */}
             <span
-              className={`${hoverRevealClass} shrink-0 rounded px-1 text-[10px] text-l4`}
+              className={`${hoverRevealClass} shrink-0 rounded-sm px-1 text-[10px] text-l4`}
             >
               {expanded ? "收起" : "diff"}
             </span>
@@ -528,13 +528,13 @@ function GitPanel({
           type="button"
           onClick={() => void toggleDiff(f)}
           title={f.path}
-          className={`flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left ${
-            active ? "bg-inset text-l1" : "hover:bg-white/5"
+          className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-sm px-1.5 py-1 text-left ${
+            active ? "bg-inset text-l1" : "hover:bg-hover"
           }`}
         >
           <span
             title={statusBadgeTitle(f.status)}
-            className={`shrink-0 rounded px-1 font-mono text-[10px] leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
+            className={`shrink-0 rounded-sm px-1 font-mono text-[10px] leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
           >
             {f.status}
           </span>
@@ -561,7 +561,7 @@ function GitPanel({
             type="button"
             onClick={() => void toggleDiff(f)}
             title="收起 diff，回到全宽文件列表"
-            className="shrink-0 rounded px-1 text-l3 hover:bg-white/5 hover:text-l1"
+            className="shrink-0 rounded-sm px-1 text-l3 hover:bg-hover hover:text-l1"
           >
             ×
           </button>
@@ -606,7 +606,7 @@ function GitPanel({
                           disabled={hunkBusy}
                           onClick={() => void applyHunk(h, "discard")}
                           title="丢弃这块改动，恢复到暂存区状态（不可恢复，除非已提交）"
-                          className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-warn-text hover:bg-white/5 disabled:opacity-50"
+                          className="shrink-0 rounded-sm px-1.5 py-0.5 text-[11px] text-warn-text hover:bg-hover disabled:opacity-50"
                         >
                           丢弃
                         </button>
@@ -615,7 +615,7 @@ function GitPanel({
                           disabled={hunkBusy}
                           onClick={() => void applyHunk(h, "stage")}
                           title="把这块改动放进暂存区；勾选此文件「保存到历史」时只提交已暂存的块"
-                          className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                          className="shrink-0 rounded-sm px-1.5 py-0.5 text-[11px] text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
                         >
                           暂存
                         </button>
@@ -715,7 +715,7 @@ function GitPanel({
                   type="button"
                   onClick={() => onOpenReview(cwd)}
                   title="展开任务审阅"
-                  className={`${wsDiff!.totalAdd > 0 || wsDiff!.totalDel > 0 ? "" : "ml-auto"} flex h-7 items-center gap-1 rounded px-1.5 text-l2 hover:bg-white/5 hover:text-l1`}
+                  className={`${wsDiff!.totalAdd > 0 || wsDiff!.totalDel > 0 ? "" : "ml-auto"} flex h-7 items-center gap-1 rounded-sm px-1.5 text-l2 hover:bg-hover hover:text-l1`}
                 >
                   <Maximize2 aria-hidden="true" className="h-3.5 w-3.5" />
                   审阅
@@ -801,7 +801,7 @@ function GitPanel({
                 type="button"
                 onClick={() => void registerArtifact()}
                 disabled={registering}
-                className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                className="shrink-0 rounded-sm px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
               >
                 {registering ? "登记中…" : "登记产物"}
               </button>
@@ -829,7 +829,7 @@ function GitPanel({
                           setPage("terminal");
                         }}
                         title="在终端页内嵌预览该 PDF"
-                        className="shrink-0 rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1"
+                        className="shrink-0 rounded-sm px-1.5 py-0.5 text-l3 hover:bg-hover hover:text-l1"
                       >
                         查看
                       </button>
@@ -882,13 +882,13 @@ function GitPanel({
               }}
               placeholder="改动说明（可选，留空自动生成）"
               disabled={running !== null || aiBusy}
-              className="w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
+              className="w-full rounded-sm border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
             />
             <button
               onClick={genMessage}
               disabled={!canCommit || aiBusy || running !== null}
               title="AI 生成更完整的改动说明（可选，速度取决于模型）"
-              className={`shrink-0 rounded px-2 py-1.5 text-sm text-l2 hover:bg-white/5 disabled:opacity-50 ${
+              className={`shrink-0 rounded-sm px-2 py-1.5 text-sm text-l2 hover:bg-hover disabled:opacity-50 ${
                 aiBusy ? "animate-pulse" : ""
               }`}
             >
@@ -900,7 +900,7 @@ function GitPanel({
               onClick={() => void doCommit(false)}
               disabled={!canCommit}
               title="git commit：把勾选的改动保存到项目历史"
-              className="flex-1 rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+              className="flex-1 rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
             >
               {running === "commit"
                 ? "保存中…"
@@ -912,7 +912,7 @@ function GitPanel({
               onClick={() => void doCommit(true)}
               disabled={!canCommit}
               title="git commit + push：保存到历史并推送到远程"
-              className="flex-1 rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="flex-1 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               {running === "push"
                 ? "推送中…"
@@ -922,7 +922,7 @@ function GitPanel({
             </button>
           </div>
           {output && (
-            <div className="mt-2 rounded bg-inset p-2 text-xs">
+            <div className="mt-2 rounded-sm bg-inset p-2 text-xs">
               <pre
                 className={`max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono ${
                   output.phase === "push" ? "text-warn-text" : "text-err-text"
@@ -935,7 +935,7 @@ function GitPanel({
                   type="button"
                   onClick={() => void retryPush()}
                   disabled={running !== null}
-                  className="mt-2 rounded border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className="mt-2 rounded-sm border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
                   {running === "push" ? "推送中…" : "重试推送"}
                 </button>

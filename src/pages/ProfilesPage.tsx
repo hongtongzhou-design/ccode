@@ -162,13 +162,13 @@ function ProfileModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
       onClick={onClose}
     >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="max-h-[90vh] w-[36rem] overflow-y-auto rounded-md border border-field bg-strip p-5"
+        className="max-h-[90vh] w-[36rem] overflow-y-auto rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">
           {initial ? "编辑配置" : "新建配置"}
@@ -282,7 +282,7 @@ function ProfileModal({
               title={
                 form.baseUrl.trim() ? "验证端点与密钥连通性" : "先填写 Base URL"
               }
-              className="w-20 shrink-0 rounded bg-btn px-2 py-1 text-xs text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="w-20 shrink-0 rounded-sm bg-btn px-2 py-1 text-xs text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               {testing ? "测试中…" : "测试"}
             </button>
@@ -342,7 +342,7 @@ function ProfileModal({
                   ? "从 Base URL 拉取可用模型"
                   : "先填写 Base URL"
               }
-              className="shrink-0 rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="shrink-0 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               {fetching ? "获取中…" : "获取模型"}
             </button>
@@ -381,7 +381,7 @@ function ProfileModal({
               {form.models.map((m, i) => (
                 <span
                   key={m}
-                  className="flex items-center gap-1 rounded bg-inset px-2 py-0.5 text-xs text-l2"
+                  className="flex items-center gap-1 rounded-sm bg-inset px-2 py-0.5 text-xs text-l2"
                 >
                   {m}
                   {i === 0 && <span className="text-l1">默认</span>}
@@ -419,7 +419,7 @@ function ProfileModal({
               type="button"
               onClick={addModel}
               disabled={!modelInput.trim()}
-              className="shrink-0 rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="shrink-0 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               添加
             </button>
@@ -470,14 +470,14 @@ function ProfileModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={saving}
-            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             保存
           </button>
@@ -637,11 +637,11 @@ function ValidationDialog({
   ];
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
       onClick={onClose}
     >
       <section
-        className="w-full max-w-xl rounded-lg border border-field bg-strip"
+        className="w-full max-w-xl rounded-lg border border-field ccode-float-surface"
         onClick={(event) => event.stopPropagation()}
       >
         <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
@@ -656,7 +656,7 @@ function ValidationDialog({
           <button
             type="button"
             onClick={onClose}
-            className="ml-auto h-8 rounded px-2 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+            className="ml-auto h-8 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
           >
             关闭
           </button>
@@ -1206,7 +1206,7 @@ export default function ProfilesPage() {
                 }}
                 title="更多配置操作"
                 aria-label="更多配置操作"
-                className="flex h-8 w-8 items-center justify-center rounded text-sm text-l2 hover:bg-white/5 hover:text-l1"
+                className="flex h-8 w-8 items-center justify-center rounded-sm text-sm text-l2 hover:bg-hover hover:text-l1"
               >
                 ⋯
               </button>
@@ -1240,7 +1240,7 @@ export default function ProfilesPage() {
                   return next;
                 })
               }
-              className="ml-2 flex h-7 items-center rounded px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+              className="ml-2 flex h-7 items-center rounded-sm px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
             >
               {anyExpanded ? "全部折叠" : "全部展开"}
             </button>
@@ -1282,7 +1282,7 @@ export default function ProfilesPage() {
                       });
                     }}
                     aria-label={isCollapsed ? "展开" : "收起"}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-sm text-l2 hover:bg-white/5 hover:text-l1"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-sm text-l2 hover:bg-hover hover:text-l1"
                   >
                     {isCollapsed ? "▸" : "▾"}
                   </button>
@@ -1325,7 +1325,7 @@ export default function ProfilesPage() {
                                 onClick={() =>
                                   void navigator.clipboard.writeText(cmd)
                                 }
-                                className={`flex size-6 items-center justify-center rounded text-l4 hover:bg-white/5 hover:text-l1 ${hoverRevealClass}`}
+                                className={`flex size-6 items-center justify-center rounded-sm text-l4 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
                               >
                                 ⧉
                               </button>
@@ -1342,7 +1342,7 @@ export default function ProfilesPage() {
                                 ? `有新版本 ${info.latest ?? ""}；交互式更新（${tuiPrefill}），将在终端中打开，需方向键选择`
                                 : `有新版本 ${info.latest ?? ""}，点击更新`
                             }
-                            className="ml-auto flex h-8 items-center rounded px-2 text-xs text-cta hover:bg-white/5 hover:brightness-125"
+                            className="ml-auto flex h-8 items-center rounded-sm px-2 text-xs text-cta hover:bg-hover hover:brightness-125"
                           >
                             新版
                           </button>
@@ -1355,7 +1355,7 @@ export default function ProfilesPage() {
                               ? `交互式更新（${tuiPrefill}），将在终端中打开，需方向键选择`
                               : undefined
                           }
-                          className="ml-auto flex h-8 items-center rounded px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                          className="ml-auto flex h-8 items-center rounded-sm px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
                         >
                           更新
                         </button>
@@ -1425,7 +1425,7 @@ export default function ProfilesPage() {
                               <button
                                 onClick={() => void refreshOfficial(agent.id)}
                                 title="重新检测连接状态"
-                                className="h-7 rounded px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                                className="h-7 rounded-sm px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
                               >
                                 刷新
                               </button>
@@ -1482,7 +1482,7 @@ export default function ProfilesPage() {
                       </div>
                     )}
                     {updateResults[agent.id] && (
-                      <div className="mt-2 rounded bg-strip p-2 text-xs text-l2">
+                      <div className="mt-2 rounded-sm bg-strip p-2 text-xs text-l2">
                         <span
                           className={
                             updateResults[agent.id].ok
@@ -1620,7 +1620,7 @@ export default function ProfilesPage() {
                               <button
                                 type="button"
                                 onClick={() => setModal({ initial: profile })}
-                                className="h-8 rounded px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                                className="h-8 rounded-sm px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
                               >
                                 编辑
                               </button>
@@ -1636,7 +1636,7 @@ export default function ProfilesPage() {
                                   });
                                 }}
                                 aria-label={`更多操作：${profile.name}`}
-                                className={`flex h-8 w-8 items-center justify-center rounded text-sm text-l4 hover:bg-white/5 hover:text-l1 ${hoverRevealClass}`}
+                                className={`flex h-8 w-8 items-center justify-center rounded-sm text-sm text-l4 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
                               >
                                 ⋯
                               </button>
@@ -1656,7 +1656,7 @@ export default function ProfilesPage() {
         <div className="fixed inset-0 z-20" onClick={() => setUsagePop(null)}>
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute w-56 rounded-md border border-field bg-strip p-3 text-xs"
+            className="absolute w-56 rounded-md border border-field ccode-float-surface p-3 text-xs"
             // 防出屏：往左/往上收（卡片 w-56 约 224px、高约 170px）
             style={{
               left: Math.max(8, Math.min(usagePop.x, window.innerWidth - 240)),

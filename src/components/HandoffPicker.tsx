@@ -129,7 +129,7 @@ export default function HandoffPicker({
   return (
     <div className="fixed inset-0 z-50" onClick={onClose}>
       <div
-        className="absolute top-1/4 left-1/2 w-80 -translate-x-1/2 rounded border border-field bg-strip py-2 text-sm"
+        className="absolute top-1/4 left-1/2 w-80 -translate-x-1/2 rounded-sm border border-field ccode-float-surface py-2 text-sm"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-3 pb-2">
@@ -151,13 +151,13 @@ export default function HandoffPicker({
             </p>
             <div className="mt-2 flex gap-2">
               <button
-                className="rounded border border-cta-bd bg-cta px-2.5 py-1 text-xs text-cta-text hover:brightness-110"
+                className="rounded-sm border border-cta-bd bg-cta px-2.5 py-1 text-xs text-cta-text hover:brightness-110"
                 onClick={() => goTerminal(ready.target, ready.prompt)}
               >
                 前往终端启动
               </button>
               <button
-                className="rounded px-2.5 py-1 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                className="rounded-sm px-2.5 py-1 text-xs text-l3 hover:bg-hover hover:text-l1"
                 onClick={onClose}
               >
                 取消
@@ -181,7 +181,7 @@ export default function HandoffPicker({
                       : "该 CLI 无启动注入参数，简报路径需手动发送"
                 }
                 onClick={() => void pick(t)}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-l2 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-l2 hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <span className="min-w-0 flex-1 truncate">
                   {busy === t.id ? "生成简报…" : agentLabel(t.id)}

@@ -111,7 +111,7 @@ const FileTreeNode = memo(function FileTreeNode({
           ctx.onMenu({ x: e.clientX, y: e.clientY, path: entry.path, isDir: entry.isDir });
         }}
         title={entry.isDir ? `${entry.path}\n双击进入，右键在此打开终端` : entry.path}
-        className={`group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-white/5 ${
+        className={`group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-hover ${
           highlight === entry.path ? "bg-white/10" : ""
         }`}
         style={{ paddingLeft: 6 + depth * 12 }}
@@ -162,7 +162,7 @@ const FileTreeNode = memo(function FileTreeNode({
           className="py-1"
           style={{ paddingLeft: 6 + (depth + 1) * 12 }}
         >
-          <span className="block h-1.5 w-16 animate-pulse rounded bg-inset" />
+          <span className="block h-1.5 w-16 animate-pulse rounded-sm bg-inset" />
         </div>
       )}
       {entry.isDir &&
@@ -488,11 +488,11 @@ function FileTree({
               className="fixed inset-0 z-40"
               onClick={() => setRecentMenuOpen(false)}
             />
-            <div className="absolute inset-x-2 top-full z-50 mt-0.5 max-h-56 overflow-auto rounded-md border border-field bg-raised py-1">
+            <div className="absolute inset-x-2 top-full z-50 mt-0.5 max-h-56 overflow-auto rounded-md border border-field ccode-float-surface py-1">
               {!recentReposLoaded && recent.length === 0 ? (
                 <div className="space-y-1 px-2 py-0.5" aria-label="正在加载最近项目">
                   {[0, 1, 2, 3].map((index) => (
-                    <div key={index} className="h-4 animate-pulse rounded bg-inset" />
+                    <div key={index} className="h-4 animate-pulse rounded-sm bg-inset" />
                   ))}
                 </div>
               ) : (
@@ -514,7 +514,7 @@ function FileTree({
                       }
                     }}
                     title={`${r.path}${r.lastActive ? `\n最近活动：${new Date(r.lastActive).toLocaleString("zh-CN")}` : ""}\n点击进入；↗ 打开新终端`}
-                    className="group cursor-pointer px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                    className="group cursor-pointer px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1"
                   >
                     <span className="flex items-center gap-1">
                       <span className="shrink-0 text-l4">◔</span>
@@ -608,7 +608,7 @@ function FileTree({
             }}
             onBlur={() => void submitNewFolder()}
             placeholder="文件夹名称"
-            className="min-w-0 flex-1 rounded border border-field bg-inset px-1.5 py-0.5 text-xs text-l2 outline-none"
+            className="min-w-0 flex-1 rounded-sm border border-field bg-inset px-1.5 py-0.5 text-xs text-l2 outline-none"
           />
         </div>
       )}
@@ -624,7 +624,7 @@ function FileTree({
                 key={r.path}
                 onClick={() => locate(r)}
                 title={r.path}
-                className="cursor-pointer truncate px-2 py-0.5 text-xs text-l2 hover:bg-white/5"
+                className="cursor-pointer truncate px-2 py-0.5 text-xs text-l2 hover:bg-hover"
               >
                 {r.isDir ? (
                   <FolderClosed

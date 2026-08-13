@@ -59,7 +59,7 @@ export default function HistoryOverlay({
         </span>
         <button
           type="button"
-          className="ml-auto shrink-0 rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+          className="ml-auto shrink-0 rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           onClick={onClose}
         >
           关闭
@@ -69,7 +69,7 @@ export default function HistoryOverlay({
       <div className="min-h-0 flex-1 overflow-auto">
         <div className="mx-auto w-full max-w-3xl px-8 py-4">
           {error ? (
-            <p className="rounded bg-strip p-3 text-xs">
+            <p className="rounded-sm bg-strip p-3 text-xs">
               <span className="mr-1 text-err-text">✗</span>
               <span className="text-l2">{error}</span>
             </p>

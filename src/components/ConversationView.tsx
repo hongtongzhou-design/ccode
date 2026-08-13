@@ -156,7 +156,7 @@ export default function ConversationView({
             {isOpen ? "▾" : "▸"} 思考过程
           </button>
           {isOpen && (
-            <div className="mt-1 whitespace-pre-wrap rounded bg-inset p-2 text-xs italic text-l3">
+            <div className="mt-1 whitespace-pre-wrap rounded-sm bg-inset p-2 text-xs italic text-l3">
               {b.text}
             </div>
           )}
@@ -169,9 +169,9 @@ export default function ConversationView({
       return (
         <div
           key={key}
-          className="my-1 inline-block max-w-full rounded bg-inset px-2 py-1 font-mono text-xs text-l3"
+          className="my-1 inline-block max-w-full rounded-sm bg-inset px-2 py-1 font-mono text-xs text-l3"
         >
-          <span className="mr-1 rounded bg-seg-sel px-1 text-l2">{b.toolName ?? "tool"}</span>
+          <span className="mr-1 rounded-sm bg-seg-sel px-1 text-l2">{b.toolName ?? "tool"}</span>
           <span className="whitespace-pre-wrap break-all">
             {isOpen || !long ? b.text : `${b.text.slice(0, 120)}…`}
           </span>
@@ -192,7 +192,7 @@ export default function ConversationView({
       return (
         <div
           key={key}
-          className="my-1 whitespace-pre-wrap break-all rounded border border-hairline bg-inset p-2 font-mono text-xs text-l3"
+          className="my-1 whitespace-pre-wrap break-all rounded-sm border border-hairline bg-inset p-2 font-mono text-xs text-l3"
         >
           {isOpen || !long ? b.text : `${b.text.slice(0, 200)}…`}
           {long && (

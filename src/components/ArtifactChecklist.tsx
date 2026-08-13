@@ -193,7 +193,7 @@ export default function ArtifactChecklist({
             return (
               <li key={row.entry}>
                 {!produced ? (
-                  <div className="flex h-7 items-center gap-2 rounded px-1 text-xs">
+                  <div className="flex h-7 items-center gap-2 rounded-sm px-1 text-xs">
                     <span className="shrink-0 text-l4">—</span>
                     <span className="min-w-0 flex-1 truncate font-mono text-l4">
                       {row.entry}
@@ -203,7 +203,7 @@ export default function ArtifactChecklist({
                 ) : single ? (
                   <button
                     type="button"
-                    className="flex h-7 w-full items-center gap-2 rounded px-1 text-left text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                    className="flex h-7 w-full items-center gap-2 rounded-sm px-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
                     title={`在终端页预览 ${single.path}`}
                     onClick={() => openFile(single)}
                   >
@@ -215,7 +215,7 @@ export default function ArtifactChecklist({
                   </button>
                 ) : (
                   <>
-                    <div className="flex h-7 items-center gap-2 rounded px-1 text-xs">
+                    <div className="flex h-7 items-center gap-2 rounded-sm px-1 text-xs">
                       <span className="shrink-0 text-ok-text">✓</span>
                       <span className="min-w-0 flex-1 truncate font-mono text-l2">
                         {row.entry}
@@ -229,7 +229,7 @@ export default function ArtifactChecklist({
                         <li key={f.path}>
                           <button
                             type="button"
-                            className="flex h-7 w-full items-center gap-2 rounded px-1 text-left text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                            className="flex h-7 w-full items-center gap-2 rounded-sm px-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
                             title={`在终端页预览 ${f.path}`}
                             onClick={() => openFile(f)}
                           >

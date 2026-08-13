@@ -714,9 +714,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   }
 
   const input =
-    "w-full rounded border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
+    "w-full rounded-sm border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
   const menuItem =
-    "block w-full px-3 py-1.5 text-left text-l2 hover:bg-white/5";
+    "block w-full px-3 py-1.5 text-left text-l2 hover:bg-hover";
   // 回放头部「恢复 ▾」下拉（外部恢复/复制命令），坐标定位 + 全屏遮罩点击关闭
   const [resumeMenu, setResumeMenu] = useState<{ x: number; y: number } | null>(
     null,
@@ -834,7 +834,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   className={
                     confirmBatch
                       ? "inline-flex h-7 items-center justify-center rounded-md bg-err px-2 text-xs text-err-text hover:brightness-110 disabled:opacity-50"
-                      : "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-err-text hover:bg-white/5 disabled:opacity-50"
+                      : "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-err-text hover:bg-hover disabled:opacity-50"
                   }
                 >
                   {batchDeleting
@@ -893,7 +893,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               <button
                 type="button"
                 onClick={() => setQuery("")}
-                className="max-w-48 truncate rounded bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
+                className="max-w-48 truncate rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
                 title="清除搜索"
               >
                 搜索：{query.trim()} ×
@@ -909,7 +909,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               type="button"
               onClick={() => setTreeOpen(!treeOpen)}
               aria-expanded={treeOpen}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-xs text-l3 hover:bg-hover hover:text-l1"
             >
               <span className="w-3 shrink-0 text-[10px] text-l4">
                 {treeOpen ? "▾" : "▸"}
@@ -941,7 +941,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 text-left text-xs ${
                   filterActive({ kind: "all" })
                     ? "bg-rail-sel text-l1"
-                    : "text-l3 hover:bg-white/5"
+                    : "text-l3 hover:bg-hover"
                 }`}
               >
                 <span className="truncate">全部对话</span>
@@ -960,7 +960,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 text-left text-xs ${
                     filterActive({ kind: "internal" })
                       ? "bg-rail-sel text-l1"
-                      : "text-l3 hover:bg-white/5"
+                      : "text-l3 hover:bg-hover"
                   }`}
                 >
                   <span className="truncate">Ccode 内部 AI</span>
@@ -988,7 +988,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center gap-1.5 rounded-md px-2 text-left text-xs ${
                         active
                           ? "bg-rail-sel text-l1"
-                          : "text-l3 hover:bg-white/5"
+                          : "text-l3 hover:bg-hover"
                       }`}
                     >
                       <span className="w-3 shrink-0 text-[10px] text-l4">
@@ -1012,7 +1012,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                           className={`flex h-7 w-full items-center justify-between gap-2 rounded-md px-2 text-left text-xs ${
                             filterActive({ kind: "agent", agent: g.agent })
                               ? "bg-rail-sel text-l1"
-                              : "text-l3 hover:bg-white/5"
+                              : "text-l3 hover:bg-hover"
                           }`}
                         >
                           <span className="truncate">全部项目</span>
@@ -1066,7 +1066,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                               className={`flex h-7 w-full items-center justify-between gap-2 rounded-md px-2 text-left text-xs ${
                                 pActive
                                   ? "bg-rail-sel text-l1"
-                                  : "text-l3 hover:bg-white/5"
+                                  : "text-l3 hover:bg-hover"
                               }`}
                             >
                               <span className="truncate">
@@ -1185,7 +1185,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   }}
                   className={`group border-b border-hairline px-3 py-1.5 text-sm ${
                     selecting || clickable
-                      ? "cursor-pointer hover:bg-white/5"
+                      ? "cursor-pointer hover:bg-hover"
                       : "opacity-60"
                   } ${isSelected ? "bg-rail-sel" : ""}`}
                 >
@@ -1221,7 +1221,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                             ? "正在终端中进行，点击跳转"
                             : "CLI 仍在外部终端中运行"
                         }
-                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded disabled:cursor-default"
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-sm disabled:cursor-default"
                       >
                         <span className="size-2 rounded-full bg-ok-text" />
                       </button>
@@ -1236,7 +1236,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     </span>
                     {s.chainCount > 1 && (
                       <span
-                        className="shrink-0 rounded bg-inset px-1 text-xs text-l3"
+                        className="shrink-0 rounded-sm bg-inset px-1 text-xs text-l3"
                         title="Codex resume 链合并为一条"
                       >
                         {s.chainCount} 次继续
@@ -1244,7 +1244,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     )}
                     {!s.alive && (
                       <span
-                        className="shrink-0 rounded bg-warn px-1 text-xs text-warn-text"
+                        className="shrink-0 rounded-sm bg-warn px-1 text-xs text-warn-text"
                         title="源文件已失效"
                       >
                         失效
@@ -1279,7 +1279,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                           }}
                           title="更多操作"
                           aria-label={`更多操作：${sessionTitle(s)}`}
-                          className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+                          className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
                         >
                           ⋯
                         </button>
@@ -1298,7 +1298,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     <span className="shrink-0">{agentLabel(s.agent)}</span>
                     {s.workspace && (
                       <span
-                        className="max-w-28 truncate rounded bg-inset px-1 text-l3"
+                        className="max-w-28 truncate rounded-sm bg-inset px-1 text-l3"
                         title={
                           s.stepName
                             ? `研究步骤：${s.stepName}（工作区：${s.workspace}）`
@@ -1311,7 +1311,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     {s.taskName && (
                       <button
                         type="button"
-                        className="max-w-28 shrink-0 truncate rounded bg-inset px-1 text-l3 hover:bg-seg-sel hover:text-l1"
+                        className="max-w-28 shrink-0 truncate rounded-sm bg-inset px-1 text-l3 hover:bg-seg-sel hover:text-l1"
                         title={`任务卡：${s.taskName}（点击跳到工作区页对应项目）`}
                         onClick={(event) => {
                           event.stopPropagation();
@@ -1324,7 +1324,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     )}
                     {s.handoffFromAgent && (
                       <span
-                        className="max-w-36 shrink-0 truncate rounded bg-inset px-1 text-l3"
+                        className="max-w-36 shrink-0 truncate rounded-sm bg-inset px-1 text-l3"
                         title={`接自 ${agentLabel(s.handoffFromAgent)} 的对话（简报接力，非记忆转移）`}
                       >
                         ⇄ 接自 {agentLabel(s.handoffFromAgent)}
@@ -1338,7 +1338,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     {s.tags.slice(0, 2).map((tag) => (
                       <span
                         key={tag}
-                        className="max-w-28 truncate rounded bg-inset px-1 text-l3"
+                        className="max-w-28 truncate rounded-sm bg-inset px-1 text-l3"
                       >
                         {tag}
                       </span>
@@ -1372,7 +1372,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         setQuery("");
                         setFilter({ kind: "all" });
                       }}
-                      className="ml-2 rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1"
+                      className="ml-2 rounded-sm px-1.5 py-0.5 text-l3 hover:bg-hover hover:text-l1"
                     >
                       清除筛选
                     </button>
@@ -1398,7 +1398,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   setExportPath(null);
                   setReplayTab("chat");
                 }}
-                className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5"
+                className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover"
               >
                 ← 返回
               </button>
@@ -1407,7 +1407,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               </span>
               {selected.live && (
                 <span
-                  className="flex shrink-0 items-center gap-1 rounded bg-inset px-1.5 py-0.5 text-xs text-l2"
+                  className="flex shrink-0 items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l2"
                   title="该对话的 CLI 进程仍在运行（外部探测）"
                 >
                   <span className="size-2 rounded-full bg-ok-text" />
@@ -1416,7 +1416,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               )}
               {selected.workspace && (
                 <span
-                  className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-xs text-l2"
+                  className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l2"
                   title={
                     selected.stepName
                       ? `研究步骤：${selected.stepName}（工作区：${selected.workspace}）`
@@ -1428,7 +1428,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               )}
               {selected.handoffFromAgent && (
                 <span
-                  className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-xs text-l2"
+                  className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l2"
                   title={`该对话由 ${agentLabel(selected.handoffFromAgent)} 会话接力生成（简报接力，非记忆转移）`}
                 >
                   ⇄ 接自 {agentLabel(selected.handoffFromAgent)}
@@ -1447,7 +1447,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 <button
                   onClick={() => resumeInTerminal(selected)}
                   disabled={!selected.alive && !selected.pinned}
-                  className="inline-flex h-7 items-center justify-center rounded-l-md px-2 text-xs text-l2 hover:bg-white/5 disabled:opacity-50"
+                  className="inline-flex h-7 items-center justify-center rounded-l-md px-2 text-xs text-l2 hover:bg-hover disabled:opacity-50"
                 >
                   恢复
                 </button>
@@ -1457,7 +1457,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     setResumeMenu({ x: r.right - 176, y: r.bottom + 4 });
                   }}
                   title="更多对话操作"
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-r-md text-xs text-l4 hover:bg-white/5 hover:text-l1"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-r-md text-xs text-l4 hover:bg-hover hover:text-l1"
                 >
                   ⋯
                 </button>
@@ -1506,7 +1506,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       });
                       setPage("terminal");
                     }}
-                    className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-l2 hover:bg-white/5 hover:text-l1"
+                    className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-l2 hover:bg-hover hover:text-l1"
                   >
                     前往终端处理
                   </button>
@@ -1522,7 +1522,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               <>
                 {summary && (
                   <div className="px-4">
-                    <div className="mx-auto mt-2 max-w-3xl rounded bg-inset p-3 text-sm text-l2">
+                    <div className="mx-auto mt-2 max-w-3xl rounded-sm bg-inset p-3 text-sm text-l2">
                       <span className="mr-1">◈</span>
                       <span className="whitespace-pre-wrap">{summary}</span>
                     </div>
@@ -1585,7 +1585,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       {resumeMenu && selected && (
         <div className="fixed inset-0 z-20" onClick={() => setResumeMenu(null)}>
           <div
-            className="absolute w-44 rounded border border-field bg-strip py-1 text-sm"
+            className="absolute w-44 rounded-sm border border-field ccode-float-surface py-1 text-sm"
             style={{ left: resumeMenu.x, top: resumeMenu.y }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -1705,7 +1705,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           }}
         >
           <div
-            className="absolute min-w-36 rounded border border-field bg-strip py-1 text-sm"
+            className="absolute min-w-36 rounded-sm border border-field ccode-float-surface py-1 text-sm"
             style={{ left: menu.x, top: menu.y }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -1835,7 +1835,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           onClick={() => setTaskPickerFor(null)}
         >
           <div
-            className="absolute left-1/2 top-1/4 w-72 -translate-x-1/2 rounded border border-field bg-strip py-1 text-sm"
+            className="absolute left-1/2 top-1/4 w-72 -translate-x-1/2 rounded-sm border border-field ccode-float-surface py-1 text-sm"
             onClick={(e) => e.stopPropagation()}
           >
             <p className="px-3 pb-1 pt-1.5 text-xs text-l4">

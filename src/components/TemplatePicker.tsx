@@ -5,9 +5,9 @@ import { PIPELINE_TEMPLATES } from "../pipeline-presets";
 import type { PipelineTemplateDto, ProjectStepDto } from "../types";
 
 const actionBtn =
-  "rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1";
+  "rounded-sm px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1";
 const ctaSm =
-  "rounded border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
+  "rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
 
 /** 选择器向外抛出的模板：内置与用户模板同构，父组件只关心 steps */
 export interface TemplatePickItem {
@@ -69,14 +69,14 @@ export default function TemplatePicker({
   ) {
     const stepPreview = t.steps.map((s) => s.name).join(" → ");
     return (
-      <li key={key} className="rounded bg-inset p-2">
+      <li key={key} className="rounded-sm bg-inset p-2">
         <div className="flex items-center gap-2">
           <span className="shrink-0 text-xs font-medium text-l1">{t.name}</span>
-          <span className="shrink-0 rounded bg-strip px-1.5 py-0.5 text-xs text-l3">
+          <span className="shrink-0 rounded-sm bg-strip px-1.5 py-0.5 text-xs text-l3">
             {t.steps.length} 步
           </span>
           {onDelete && (
-            <span className="shrink-0 rounded bg-strip px-1.5 py-0.5 text-xs text-l3">
+            <span className="shrink-0 rounded-sm bg-strip px-1.5 py-0.5 text-xs text-l3">
               我的
             </span>
           )}

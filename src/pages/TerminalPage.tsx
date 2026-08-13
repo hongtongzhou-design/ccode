@@ -518,7 +518,7 @@ const TerminalView = memo(function TerminalView({
           onClick={() => setSkillMenuOpen((v) => !v)}
           title="展开该 agent 已启用的技能清单，点击一键使用"
           aria-expanded={skillMenuOpen}
-          className="rounded bg-inset px-1.5 py-0.5 text-l3 hover:bg-seg-sel hover:text-l1"
+          className="rounded-sm bg-inset px-1.5 py-0.5 text-l3 hover:bg-seg-sel hover:text-l1"
         >
           ◈ {skillCount} 技能
         </button>
@@ -531,14 +531,14 @@ const TerminalView = memo(function TerminalView({
             />
             {/* 技能清单：一键使用（运行中注入终端输入框，未启动写进首条指令） */}
             <ul
-              className={`absolute ${up ? "bottom-full mb-1" : "top-full mt-1"} z-50 max-h-56 w-64 overflow-auto rounded-md border border-field bg-raised p-1`}
+              className={`absolute ${up ? "bottom-full mb-1" : "top-full mt-1"} z-50 max-h-56 w-64 overflow-auto rounded-md border border-field ccode-float-surface p-1`}
             >
               {agentSkills.map((s) => (
                 <li key={s.id}>
                   <button
                     type="button"
                     onClick={() => useSkill(s.name)}
-                    className="flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-white/5"
+                    className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-1.5 text-left hover:bg-hover"
                   >
                     <span className="text-xs text-l1">{s.name}</span>
                     {s.description && (
@@ -566,7 +566,7 @@ const TerminalView = memo(function TerminalView({
           onClick={() => setMcpMenuOpen((v) => !v)}
           title="该 agent 已分发的 MCP server 清单（MCP 页管理分发）"
           aria-expanded={mcpMenuOpen}
-          className="rounded bg-inset px-1.5 py-0.5 text-l3 hover:bg-seg-sel hover:text-l1"
+          className="rounded-sm bg-inset px-1.5 py-0.5 text-l3 hover:bg-seg-sel hover:text-l1"
         >
           ⌗ {agentMcps.length} MCP
         </button>
@@ -577,14 +577,14 @@ const TerminalView = memo(function TerminalView({
               onClick={() => setMcpMenuOpen(false)}
             />
             <ul
-              className={`absolute ${up ? "bottom-full mb-1" : "top-full mt-1"} z-50 max-h-56 w-64 overflow-auto rounded-md border border-field bg-raised p-1`}
+              className={`absolute ${up ? "bottom-full mb-1" : "top-full mt-1"} z-50 max-h-56 w-64 overflow-auto rounded-md border border-field ccode-float-surface p-1`}
             >
               {agentMcps.map((s) => (
                 <li key={s.id}>
                   <button
                     type="button"
                     onClick={() => useMcp(s.name)}
-                    className="flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-white/5"
+                    className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-1.5 text-left hover:bg-hover"
                   >
                     <span className="text-xs text-l1">{s.name}</span>
                     <span className="truncate font-mono text-[11px] text-l4">
@@ -602,7 +602,7 @@ const TerminalView = memo(function TerminalView({
                     setMcpMenuOpen(false);
                     setPage("mcp");
                   }}
-                  className="flex w-full rounded px-2 py-1.5 text-left text-[11px] text-l4 hover:bg-white/5 hover:text-l2"
+                  className="flex w-full rounded-sm px-2 py-1.5 text-left text-[11px] text-l4 hover:bg-hover hover:text-l2"
                 >
                   管理 MCP 分发 →（变更对新会话生效）
                 </button>
@@ -1454,7 +1454,7 @@ const TerminalView = memo(function TerminalView({
                   title="选择或输入本次启动使用的模型"
                 />
                 {modelOpen && modelOptions.length > 0 && (
-                  <ul className="absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-auto rounded-md border border-field bg-raised py-1">
+                  <ul className="absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-auto rounded-md border border-field ccode-float-surface py-1">
                     {modelOptions
                       .filter((m) =>
                         m.toLowerCase().includes(model.trim().toLowerCase()),
@@ -1469,7 +1469,7 @@ const TerminalView = memo(function TerminalView({
                               setModel(m);
                               setModelOpen(false);
                             }}
-                            className="flex w-full truncate px-2 py-1 text-left text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                            className="flex w-full truncate px-2 py-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
                           >
                             {m}
                           </button>
@@ -1493,7 +1493,7 @@ const TerminalView = memo(function TerminalView({
               (running ? (
                 <button
                   onClick={stop}
-                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-field bg-inset px-3 text-sm text-err-text hover:bg-white/5"
+                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-field bg-inset px-3 text-sm text-err-text hover:bg-hover"
                 >
                   停止
                 </button>
@@ -1549,7 +1549,7 @@ const TerminalView = memo(function TerminalView({
                 onClick={openTerminalActionMenu}
                 title="更多终端操作"
                 aria-label="更多终端操作"
-                className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+                className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
               >
                 ⋯
               </button>
@@ -1595,7 +1595,7 @@ const TerminalView = memo(function TerminalView({
               type="button"
               onClick={() => setBarExpanded(true)}
               title="修改启动配置"
-              className="rounded px-2 py-1 text-l3 hover:bg-white/5 hover:text-l1"
+              className="rounded-sm px-2 py-1 text-l3 hover:bg-hover hover:text-l1"
             >
               修改
             </button>
@@ -1604,7 +1604,7 @@ const TerminalView = memo(function TerminalView({
               onClick={openTerminalActionMenu}
               title="更多终端操作"
               aria-label="更多终端操作"
-              className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+              className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
             >
               ⋯
             </button>
@@ -1632,26 +1632,26 @@ const TerminalView = memo(function TerminalView({
               }
             }}
             placeholder="查找终端输出"
-            className="w-56 rounded border border-field bg-inset px-2 py-1 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+            className="w-56 rounded-sm border border-field bg-inset px-2 py-1 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
           />
           <button
             onClick={findPrev}
             title="上一个（Shift+Enter）"
-            className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+            className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
           >
             ↑
           </button>
           <button
             onClick={() => findNext()}
             title="下一个（Enter）"
-            className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+            className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
           >
             ↓
           </button>
           <button
             onClick={closeSearch}
             title="关闭（Esc）"
-            className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+            className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
           >
             ×
           </button>
@@ -2707,7 +2707,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   }, []);
 
   const railBtn =
-    "flex h-7 w-7 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l2";
+    "flex h-7 w-7 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-l2";
 
   // 运行中输入汇总（P5）：状态全部来自现有 statuses 上报，不新增轮询；
   // inputs 镜像进 store（terminalRunInputs），供工作区首页「待你处理」跨页聚合只读
@@ -2826,7 +2826,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             <button
               onClick={() => setShowHidden((v) => !v)}
               title={showHidden ? "隐藏隐藏文件" : "显示隐藏文件"}
-              className={`flex h-7 w-7 items-center justify-center rounded text-xs hover:bg-white/5 ${
+              className={`flex h-7 w-7 items-center justify-center rounded-sm text-xs hover:bg-hover ${
                 showHidden ? "text-l1" : "text-l4 hover:text-l2"
               }`}
             >
@@ -2921,7 +2921,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 )}
                 {splitActive && t.id === splitTabId && (
                   <span
-                    className="shrink-0 rounded bg-inset px-1 text-[10px] text-l3"
+                    className="shrink-0 rounded-sm bg-inset px-1 text-[10px] text-l3"
                     title="分屏右侧对照（点击交换到左侧）"
                   >
                     ◧
@@ -2943,7 +2943,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           <button
             onClick={() => addTab()}
             title="新建终端标签"
-            className="shrink-0 rounded px-1.5 text-sm text-l4 hover:text-l1"
+            className="shrink-0 rounded-sm px-1.5 text-sm text-l4 hover:text-l1"
           >
             ＋
           </button>
@@ -2951,7 +2951,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             {/* 当前项目状态 pill（P1b 参考图 2）：有可合并工作区才显示，纯状态不交互（inset 底 + 语义色小点） */}
             {mergeReadyWs.length > 0 && (
               <span
-                className="flex items-center gap-1 rounded bg-inset px-2 py-0.5 text-xs text-l2"
+                className="flex items-center gap-1 rounded-sm bg-inset px-2 py-0.5 text-xs text-l2"
                 title={`可合并的工作区：${mergeReadyWs.join("、")}\n从右侧「改动」页签或工作区页进入评审合并`}
               >
                 <span className="text-[10px] text-ok-text">●</span>
@@ -2969,7 +2969,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   ? "退出分屏"
                   : "分屏对比：左侧当前标签，右侧任选对照标签（需要至少两个标签）"
               }
-              className={`rounded px-2 py-0.5 text-xs disabled:opacity-40 ${
+              className={`rounded-sm px-2 py-0.5 text-xs disabled:opacity-40 ${
                 splitActive ? "text-l1" : "text-l4 hover:text-l2"
               }`}
             >
@@ -2980,7 +2980,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               onClick={() => setRightOpen(true)}
               title="打开当前任务工作台（对话 / 文件 / 改动）"
               aria-label="打开当前任务工作台"
-              className={`rounded px-2 py-0.5 text-xs ${
+              className={`rounded-sm px-2 py-0.5 text-xs ${
                 rightOpen ? "text-l1" : "text-l4 hover:text-l2"
               }`}
             >
@@ -2993,7 +2993,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   ? "退出专注终端（Esc，恢复左右栏）"
                   : "专注终端（隐藏左右栏，Esc 退出）"
               }
-              className={`rounded px-2 py-0.5 text-xs ${
+              className={`rounded-sm px-2 py-0.5 text-xs ${
                 focusMode ? "text-l1" : "text-l4 hover:text-l2"
               }`}
             >
@@ -3009,7 +3009,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 }}
                 title="终端操作（停止/恢复/接力/对话/查找/修改）"
                 aria-label="终端操作"
-                className="rounded px-2 py-0.5 text-xs text-l4 hover:text-l2"
+                className="rounded-sm px-2 py-0.5 text-xs text-l4 hover:text-l2"
               >
                 ⋯
               </button>
@@ -3104,7 +3104,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                         <select
                           value={splitTabId ?? ""}
                           onChange={(e) => setSplitTabId(e.target.value)}
-                          className="h-6 min-w-0 flex-1 rounded border border-field bg-inset px-1.5 text-xs text-l2 outline-none focus:border-l4"
+                          className="h-6 min-w-0 flex-1 rounded-sm border border-field bg-inset px-1.5 text-xs text-l2 outline-none focus:border-l4"
                           title="选择右侧对照显示的标签"
                         >
                           {tabs
@@ -3135,7 +3135,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                           : "关闭此 pane（退出分屏，切换到对照标签）"
                       }
                       aria-label="关闭此 pane"
-                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-l1"
                     >
                       ×
                     </button>
@@ -3215,7 +3215,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     onClick={() => setRightTab(k)}
                     onDoubleClick={toggleRightExpanded}
                     title={`${label}；双击${rightExpanded ? "退出专注内容" : "进入专注内容"}`}
-                    className={`flex h-8 shrink-0 items-center gap-1 rounded px-2.5 text-xs ${
+                    className={`flex h-8 shrink-0 items-center gap-1 rounded-sm px-2.5 text-xs ${
                       rightTab === k
                         ? "bg-seg-sel text-l1"
                         : "text-l3 hover:text-l1"
@@ -3225,7 +3225,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     {label}
                     {k === "dialogue" && dialogueCount > 0 && (
                       <span
-                        className="ml-1 rounded bg-inset px-1 text-[11px] text-l3"
+                        className="ml-1 rounded-sm bg-inset px-1 text-[11px] text-l3"
                         title="实时视图最多保留最近 50 条"
                       >
                         {dialogueCount >= 50 ? "50+" : dialogueCount}
@@ -3237,7 +3237,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       </span>
                     )}
                     {gitBadge && (
-                      <span className="ml-1 rounded bg-ok px-1 text-ok-text">
+                      <span className="ml-1 rounded-sm bg-ok px-1 text-ok-text">
                         +{gitBadge}
                       </span>
                     )}
@@ -3305,7 +3305,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                         });
                         setPage("sessions");
                       }}
-                      className="shrink-0 rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-40"
+                      className="shrink-0 rounded-sm px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-40"
                     >
                       完整回放
                     </button>
@@ -3319,14 +3319,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       ? "退出专注内容（Esc，恢复工作树分栏）"
                       : "专注内容（暂时隐藏工作树，右栏铺满，Esc 退出）"
                   }
-                  className="flex size-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
+                  className="flex size-7 shrink-0 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-l1"
                 >
                   {rightExpanded ? "⇲" : "⇱"}
                 </button>
                 <button
                   onClick={closeRightPanel}
                   title="收起工作台"
-                  className="flex size-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
+                  className="flex size-7 shrink-0 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-l1"
                 >
                   ×
                 </button>
@@ -3366,7 +3366,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   <button
                     type="button"
                     onClick={scrollDialogueToBottom}
-                    className="absolute bottom-3 right-3 rounded border border-field bg-strip px-2.5 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
+                    className="absolute bottom-3 right-3 rounded-sm border border-field bg-strip px-2.5 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
                   >
                     有新消息 ↓
                   </button>

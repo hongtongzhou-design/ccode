@@ -220,7 +220,7 @@ function ImportModal({
     <button
       key={k}
       onClick={() => setTab(k)}
-      className={`rounded px-2.5 py-1 text-xs ${
+      className={`rounded-sm px-2.5 py-1 text-xs ${
         tab === k ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
       }`}
     >
@@ -230,12 +230,12 @@ function ImportModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[26rem] rounded-md border border-field bg-strip p-5"
+        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-3 text-base font-semibold text-l1">导入技能</h2>
         <div className="mb-4 flex gap-1">
@@ -251,7 +251,7 @@ function ImportModal({
             <button
               onClick={pickDir}
               disabled={busy}
-              className="rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               选择目录…
             </button>
@@ -263,7 +263,7 @@ function ImportModal({
             <button
               onClick={pickZip}
               disabled={busy}
-              className="rounded bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
             >
               选择 ZIP…
             </button>
@@ -276,7 +276,7 @@ function ImportModal({
                 <button
                   key={p}
                   onClick={() => setRepo(p)}
-                  className="rounded bg-inset px-1.5 py-0.5 text-xs text-l3 hover:text-l1"
+                  className="rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l3 hover:text-l1"
                 >
                   {p}
                 </button>
@@ -324,7 +324,7 @@ function ImportModal({
                   });
                 }}
                 disabled={busy || !repo.trim()}
-                className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
               >
                 {busy ? "下载中…" : "导入"}
               </button>
@@ -335,7 +335,7 @@ function ImportModal({
           <p className="mb-2 text-xs text-l3">导入中…</p>
         )}
         {result && (
-          <div className="mb-3 rounded border border-field bg-inset p-3 text-xs">
+          <div className="mb-3 rounded-sm border border-field bg-inset p-3 text-xs">
             <p className="text-l2">{summary(result)}</p>
             {result.added.length > 0 && (
               <p className="mt-1 break-words text-ok-text">
@@ -377,7 +377,7 @@ function ImportModal({
                         }))
                       }
                       aria-label={`${conflict.name} 另存为名称`}
-                      className="rounded border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none focus:border-l4"
+                      className="rounded-sm border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none focus:border-l4"
                     />
                   </div>
                 ))}
@@ -389,7 +389,7 @@ function ImportModal({
                     type="button"
                     onClick={() => void resolveConflicts("skip")}
                     disabled={busy}
-                    className="rounded px-2 py-1 text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                    className="rounded-sm px-2 py-1 text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
                   >
                     跳过冲突
                   </button>
@@ -402,7 +402,7 @@ function ImportModal({
                         (item) => !renameTargets[item.name]?.trim(),
                       )
                     }
-                    className="rounded bg-btn px-2 py-1 text-l1 hover:bg-white/10 disabled:opacity-50"
+                    className="rounded-sm bg-btn px-2 py-1 text-l1 hover:bg-white/10 disabled:opacity-50"
                   >
                     全部另存为
                   </button>
@@ -410,7 +410,7 @@ function ImportModal({
                     type="button"
                     onClick={() => void resolveConflicts("overwrite")}
                     disabled={busy}
-                    className="rounded border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
+                    className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-cta-text hover:brightness-110 disabled:opacity-50"
                   >
                     备份并覆盖
                   </button>
@@ -423,7 +423,7 @@ function ImportModal({
         <div className="flex justify-end">
           <button
             onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           >
             关闭
           </button>
@@ -469,12 +469,12 @@ function DiscoverModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[28rem] rounded-md border border-field bg-strip p-5"
+        className="w-[28rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-3 text-base font-semibold text-l1">发现未纳管技能</h2>
         {items.length === 0 ? (
@@ -500,7 +500,7 @@ function DiscoverModal({
                 label={
                   <span className="min-w-0">
                     <span className="mr-2 text-l1">{it.name}</span>
-                    <span className="rounded bg-inset px-1 text-xs text-l3">
+                    <span className="rounded-sm bg-inset px-1 text-xs text-l3">
                       {it.fromAgent}
                     </span>
                     <span
@@ -519,7 +519,7 @@ function DiscoverModal({
         <div className="flex justify-end gap-2">
           <button
             onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           >
             取消
           </button>
@@ -527,7 +527,7 @@ function DiscoverModal({
             <button
               onClick={importSelected}
               disabled={busy || checked.size === 0}
-              className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+              className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
             >
               {busy ? "导入中…" : `导入选中（${checked.size}）`}
             </button>
@@ -600,12 +600,12 @@ function SkillEditorModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[85vh] w-[36rem] flex-col rounded-md border border-field bg-strip p-5"
+        className="flex max-h-[85vh] w-[36rem] flex-col rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-3 text-base font-semibold text-l1">
           {mode === "create" ? "新建技能" : `编辑技能：${skill?.name}`}
@@ -653,14 +653,14 @@ function SkillEditorModal({
         <div className="flex justify-end gap-2">
           <button
             onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           >
             取消
           </button>
           <button
             onClick={() => void submit()}
             disabled={busy || !name.trim() || !content.trim()}
-            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             {busy ? "保存中…" : mode === "create" ? "创建" : "保存"}
           </button>
@@ -699,12 +699,12 @@ function OptimizeModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[30rem] rounded-md border border-field bg-strip p-5"
+        className="w-[30rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-1 text-base font-semibold text-l1">
           ◈ 优化技能：{skill.name}
@@ -724,14 +724,14 @@ function OptimizeModal({
         <div className="flex justify-end gap-2">
           <button
             onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           >
             取消
           </button>
           <button
             onClick={() => void submit()}
             disabled={busy || !opinion.trim()}
-            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             {busy ? "打开中…" : "开终端优化"}
           </button>
@@ -1141,7 +1141,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                   }}
                   title="更多技能操作"
                   aria-label="更多技能操作"
-                  className="flex h-8 w-8 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+                  className="flex h-8 w-8 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
                 >
                   ⋯
                 </button>
@@ -1193,7 +1193,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         aria-label={
                           catCollapsed.has(category) ? "展开" : "收起"
                         }
-                        className="flex h-9 w-full items-center gap-1.5 border-b border-hairline px-3 text-sm hover:bg-white/5"
+                        className="flex h-9 w-full items-center gap-1.5 border-b border-hairline px-3 text-sm hover:bg-hover"
                       >
                         <span className="w-3 text-l4">
                           {catCollapsed.has(category) ? "▸" : "▾"}
@@ -1213,7 +1213,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                               <li
                                 key={skill.id}
                                 onClick={() => void onView(skill)}
-                                className={`group grid min-h-12 cursor-pointer grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_36px] items-center gap-3 px-3 transition-colors hover:bg-white/5 ${
+                                className={`group grid min-h-12 cursor-pointer grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_36px] items-center gap-3 px-3 transition-colors hover:bg-hover ${
                                   preview?.skill.id === skill.id
                                     ? "bg-inset"
                                     : ""
@@ -1277,7 +1277,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                         )
                                       }
                                       placeholder="分类名（留空=未分类）"
-                                      className="mt-1 w-full rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
+                                      className="mt-1 w-full rounded-sm border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
                                     />
                                   )}
                                   {tagEdit?.id === skill.id && (
@@ -1304,7 +1304,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                         void submitTags(skill.id, tagEdit.value)
                                       }
                                       placeholder="标签（逗号/空格分隔，最多 4 个，留空=清除）"
-                                      className="mt-1 w-full rounded border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
+                                      className="mt-1 w-full rounded-sm border border-field bg-canvas px-1.5 py-0.5 text-xs text-l2 outline-none"
                                     />
                                   )}
                                 </div>
@@ -1339,7 +1339,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                       });
                                     }}
                                     aria-label={`${skill.name} 更多操作`}
-                                    className={`flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1 ${hoverRevealClass}`}
+                                    className={`flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
                                   >
                                     ⋯
                                   </button>
@@ -1369,7 +1369,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               onClick={() => setPreview(null)}
               title="关闭预览"
               aria-label="关闭预览"
-              className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-l1"
+              className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-l1"
             >
               ×
             </button>
@@ -1430,7 +1430,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                 type="button"
                 onClick={() => void onApplyUpdate(preview.skill)}
                 disabled={applyingUpdate === preview.skill.id}
-                className="ml-2 flex h-7 items-center rounded px-2 text-xs text-cta-text bg-cta hover:opacity-90 disabled:opacity-50"
+                className="ml-2 flex h-7 items-center rounded-sm px-2 text-xs text-cta-text bg-cta hover:opacity-90 disabled:opacity-50"
               >
                 {applyingUpdate === preview.skill.id ? "正在更新…" : "应用更新"}
               </button>
@@ -1453,7 +1453,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                     onClick={() => void applyAllAgents(preview.skill)}
                     disabled={applying[allKey]}
                     title={`分发到剩余 ${remaining} 个未启用的 Agent`}
-                    className="flex h-7 items-center rounded px-2 text-xs text-cta-text bg-cta hover:opacity-90 disabled:opacity-50"
+                    className="flex h-7 items-center rounded-sm px-2 text-xs text-cta-text bg-cta hover:opacity-90 disabled:opacity-50"
                   >
                     {applying[allKey] ? "应用中…" : "一键应用"}
                   </button>
@@ -1513,7 +1513,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                 type="button"
                 disabled={translating}
                 onClick={() => void toggleTranslation()}
-                className="ml-auto rounded px-1.5 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+                className="ml-auto rounded-sm px-1.5 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
               >
                 {translating
                   ? "翻译中…"

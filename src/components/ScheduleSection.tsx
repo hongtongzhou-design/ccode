@@ -19,7 +19,7 @@ import type {
 } from "../types";
 
 const actionBtn =
-  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50";
+  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50";
 
 /** 历史条目最多展开显示条数（DTO 保留最近 20 条，行内只看最近几条） */
 const HISTORY_PREVIEW = 5;
@@ -74,13 +74,13 @@ function CreateScheduleModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
       onClick={onClose}
     >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-[24rem] rounded-md border border-field bg-strip p-5"
+        className="w-[24rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">定时巡检</h2>
         <p className="mb-3 text-xs text-l3">
@@ -159,14 +159,14 @@ function CreateScheduleModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={busy || !time}
-            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             {busy ? "创建中…" : "创建"}
           </button>
@@ -403,7 +403,7 @@ export default function ScheduleSection({
                       }}
                       title="任务操作"
                       aria-label={`任务操作：${s.name}`}
-                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-xs text-l3 hover:bg-white/5 hover:text-l1"
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1"
                     >
                       ⋯
                     </button>

@@ -333,7 +333,7 @@ function App() {
                         )
                       }
                       aria-expanded={titleInboxCat === group.category}
-                      className="flex h-6 items-center gap-1.5 rounded-full border border-field bg-strip px-2.5 text-[11px] text-l2 hover:bg-white/5"
+                      className="flex h-6 items-center gap-1.5 rounded-full border border-field bg-strip px-2.5 text-[11px] text-l2 hover:bg-hover"
                     >
                       <span
                         className={`size-1.5 shrink-0 rounded-full ${group.items[0].dot}`}
@@ -344,7 +344,7 @@ function App() {
                       </span>
                     </button>
                     {titleInboxCat === group.category && (
-                      <ul className="absolute left-0 top-full z-40 mt-1.5 max-h-80 w-[420px] max-w-[80vw] divide-y divide-hairline overflow-auto rounded-md border border-field bg-strip">
+                      <ul className="absolute left-0 top-full z-40 mt-1.5 max-h-80 w-[420px] max-w-[80vw] divide-y divide-hairline overflow-auto rounded-md border border-field ccode-float-surface">
                         {group.items.map((item) => (
                           <li
                             key={item.key}
@@ -449,7 +449,7 @@ function App() {
                     } ${
                       page === n.id
                         ? "bg-rail-sel text-l1"
-                        : "text-l3 hover:bg-white/5 hover:text-l2"
+                        : "text-l3 hover:bg-hover hover:text-l2"
                     }`}
                   >
                     {page === n.id && (
@@ -476,7 +476,7 @@ function App() {
               title="打开命令面板"
               className={`relative mb-0.5 flex h-7 items-center rounded-md text-sm transition-colors ${
                 collapsed ? "w-11 justify-center" : "w-full px-2.5"
-              } text-l4 hover:bg-white/5 hover:text-l3`}
+              } text-l4 hover:bg-hover hover:text-l3`}
             >
               <span
                 className={`font-mono ${collapsed ? "text-xs" : "mr-2 w-5 text-center text-xs"}`}
@@ -497,7 +497,7 @@ function App() {
                 } ${
                   page === n.id
                     ? "bg-rail-sel text-l1"
-                    : "text-l3 hover:bg-white/5 hover:text-l2"
+                    : "text-l3 hover:bg-hover hover:text-l2"
                 }`}
               >
                 {page === n.id && (

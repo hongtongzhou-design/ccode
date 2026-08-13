@@ -58,7 +58,7 @@ export const rowActionClass =
 
 /** 行内 28px 无框低调按钮：辅助/低频动作 */
 export const ghostActionClass =
-  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 transition-colors hover:bg-white/5 hover:text-l1 disabled:opacity-50";
+  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 transition-colors hover:bg-hover hover:text-l1 disabled:opacity-50";
 
 /** 表单输入框：模态与内联表单统一（canvas 底 + field 边） */
 export const fieldClass =
@@ -216,7 +216,7 @@ export function LoadingRows({ compact = false }: { compact?: boolean }) {
       className={`animate-pulse space-y-3 ${compact ? "py-2" : "py-6"}`}
     >
       {["w-3/5", "w-full", "w-4/5"].map((width, index) => (
-        <div key={index} className={`h-3 rounded bg-inset ${width}`} />
+        <div key={index} className={`h-3 rounded-sm bg-inset ${width}`} />
       ))}
     </div>
   );

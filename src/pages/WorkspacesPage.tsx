@@ -135,13 +135,13 @@ function AddProjectModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
       onClick={onClose}
     >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-[26rem] rounded-md border border-field bg-strip p-5"
+        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">添加项目</h2>
         <p
@@ -176,14 +176,14 @@ function AddProjectModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={busy || !name.trim()}
-            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             {busy ? "注册中…" : "注册"}
           </button>
@@ -225,13 +225,13 @@ function RenameProjectModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
       onClick={onClose}
     >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-[24rem] rounded-md border border-field bg-strip p-5"
+        className="w-[24rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">重命名项目</h2>
         <p className="mb-3 truncate font-mono text-xs text-l3" title={path}>
@@ -252,14 +252,14 @@ function RenameProjectModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={busy || !name.trim()}
-            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             {busy ? "保存中…" : "保存"}
           </button>
@@ -346,13 +346,13 @@ function NewWorkspaceModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
       onClick={onClose}
     >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-[26rem] rounded-md border border-field bg-strip p-5"
+        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">新建工作区</h2>
         <label className="mb-3 block text-sm">
@@ -404,14 +404,14 @@ function NewWorkspaceModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={creating || !name.trim() || !repoPath}
-            className="rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             {creating ? "创建中…" : "创建"}
           </button>
@@ -620,7 +620,7 @@ function WorkspaceDetailsPopover({
     <div className="fixed inset-0 z-50" onClick={onClose}>
       <section
         ref={panelRef}
-        className="absolute w-80 rounded border border-field bg-strip p-3 text-xs"
+        className="absolute w-80 rounded-sm border border-field ccode-float-surface p-3 text-xs"
         style={pos}
         onClick={(event) => event.stopPropagation()}
       >
@@ -664,7 +664,7 @@ function WorkspaceDetailsPopover({
                 onClose();
                 onRetry();
               }}
-              className="inline-flex h-7 items-center rounded-md px-2 text-xs text-warn-text hover:bg-white/5"
+              className="inline-flex h-7 items-center rounded-md px-2 text-xs text-warn-text hover:bg-hover"
             >
               诊断失败 · 重新检查
             </button>
@@ -765,7 +765,7 @@ function PortsSection() {
           onClick={() => void onKill(port)}
           disabled={killing === port.pid}
           title={`终止进程（PID ${port.pid}）`}
-          className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-err-text disabled:opacity-50"
+          className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-err-text disabled:opacity-50"
         >
           {killing === port.pid ? "终止中…" : "终止"}
         </button>
@@ -798,7 +798,7 @@ function PortsSection() {
             type="button"
             onClick={() => void load()}
             disabled={loading}
-            className="mr-2 inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+            className="mr-2 inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
           >
             {loading ? "刷新中…" : "刷新"}
           </button>
@@ -1233,7 +1233,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     });
   }
   const actionBtn =
-    "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1";
+    "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1";
   // hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
   const hoverReveal =
     "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
@@ -1751,7 +1751,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                       )
                     }
                     aria-expanded={inboxCat === group.category}
-                    className="flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-field px-2.5 text-[11px] text-l2 hover:bg-white/5"
+                    className="flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-field px-2.5 text-[11px] text-l2 hover:bg-hover"
                   >
                     <span
                       className={`size-1.5 shrink-0 rounded-full ${group.items[0].dot}`}
@@ -1765,7 +1765,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
               </div>
             </div>
             {openInboxGroup && (
-              <ul className="absolute inset-x-0 top-full z-20 mt-1 max-h-80 divide-y divide-hairline overflow-auto rounded-md border border-field bg-strip">
+              <ul className="absolute inset-x-0 top-full z-20 mt-1 max-h-80 divide-y divide-hairline overflow-auto rounded-md border border-field ccode-float-surface">
                 {openInboxGroup.items.map((item) => (
                   <li
                     key={item.key}
@@ -1820,7 +1820,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             }}
             title="添加项目 / 创建示例课题"
             aria-label="添加项目 / 创建示例课题"
-            className="ml-auto flex h-7 w-7 items-center justify-center rounded-md text-sm text-l3 hover:bg-white/5 hover:text-l1"
+            className="ml-auto flex h-7 w-7 items-center justify-center rounded-md text-sm text-l3 hover:bg-hover hover:text-l1"
           >
             +
           </button>
@@ -1850,7 +1850,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                 className={`mx-1.5 mb-1 flex w-[calc(100%-12px)] items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors ${
                   selected
                     ? "bg-rail-sel text-l1"
-                    : "text-l3 hover:bg-white/5 hover:text-l2"
+                    : "text-l3 hover:bg-hover hover:text-l2"
                 }`}
               >
                 <span
@@ -1950,7 +1950,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             type="button"
             onClick={() => setCreated(null)}
             aria-label="关闭"
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-l3 hover:bg-white/5 hover:text-l1"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1"
           >
             ×
           </button>
@@ -2026,7 +2026,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   <button
                     type="button"
                     onClick={wsView.onToggleShowAll}
-                    className="ml-auto rounded px-1.5 py-0.5 text-[10px] text-l4 hover:bg-white/5 hover:text-l1"
+                    className="ml-auto rounded-sm px-1.5 py-0.5 text-[10px] text-l4 hover:bg-hover hover:text-l1"
                   >
                     {wsView.showAll ? "按步骤" : "全部"}
                   </button>
@@ -2182,7 +2182,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                           }}
                           title="更多操作"
                           aria-label={`更多操作：${workspace.name}`}
-                          className={`flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1 ${hoverReveal}`}
+                          className={`flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1 ${hoverReveal}`}
                         >
                           ⋯
                         </button>

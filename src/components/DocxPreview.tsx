@@ -78,7 +78,7 @@ function DocxPreview({
         <span className="truncate text-l3" title={path}>
           {basename(path)}
         </span>
-        <span className="shrink-0 rounded bg-inset px-1 text-l4">docx</span>
+        <span className="shrink-0 rounded-sm bg-inset px-1 text-l4">docx</span>
         {warnings > 0 && (
           <span
             className="shrink-0 text-l4"

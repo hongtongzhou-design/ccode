@@ -26,7 +26,7 @@ import type {
 } from "../types";
 
 const actionBtn =
-  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50";
+  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50";
 const fieldSm =
   "h-7 rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
@@ -78,7 +78,7 @@ function OpenQuestions({
               type="button"
               onClick={() => onPick(q)}
               title="开终端讨论这个问题（想法期只读保护同样生效）"
-              className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs text-l2 hover:bg-white/5 hover:text-l1"
+              className="flex w-full items-center gap-1.5 rounded-sm px-1.5 py-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
             >
               <span className="shrink-0 text-[10px] text-warn-text">?</span>
               <span className="min-w-0 truncate">{q}</span>
@@ -447,7 +447,7 @@ export default function TaskCardsSection({
       : `简报 ${card.briefs.length}${latestTime ? ` · 最新 ${relTime(latestTime)}` : ""}`;
     return (
       <li key={card.id} className="group">
-        <div className="flex h-7 min-w-0 items-center gap-2 rounded px-1 hover:bg-white/5">
+        <div className="flex h-7 min-w-0 items-center gap-2 rounded-sm px-1 hover:bg-hover">
           <button
             type="button"
             onClick={() => toggleOpen(card.id)}
@@ -529,7 +529,7 @@ export default function TaskCardsSection({
               }}
               title="卡片操作"
               aria-label={`卡片操作：${card.name}`}
-              className="flex h-7 w-7 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+              className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
             >
               ⋯
             </button>
@@ -594,7 +594,7 @@ export default function TaskCardsSection({
                             setPage("terminal");
                           }}
                           title={`在终端页预览 ${rel}`}
-                          className="flex h-7 w-full items-center gap-2 rounded px-1 text-left text-xs text-l2 hover:bg-white/5 hover:text-l1"
+                          className="flex h-7 w-full items-center gap-2 rounded-sm px-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
                         >
                           <span className="min-w-0 flex-1 truncate font-mono">
                             {rel}
@@ -631,7 +631,7 @@ export default function TaskCardsSection({
             type="button"
             onClick={openMainChanges}
             title="想法期的实验性改动留在主仓，不会带入新工作区；点击查看改动"
-            className="ml-auto shrink-0 rounded bg-inset px-1.5 py-0.5 text-[10px] text-warn-text hover:bg-white/5"
+            className="ml-auto shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-[10px] text-warn-text hover:bg-hover"
           >
             主仓 {mainDirty} 个未提交改动
           </button>
@@ -675,7 +675,7 @@ export default function TaskCardsSection({
             <button
               type="button"
               onClick={onClearFocus}
-              className="ml-auto rounded px-1.5 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
+              className="ml-auto rounded-sm px-1.5 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
             >
               总览全部步骤
             </button>
@@ -739,30 +739,43 @@ export default function TaskCardsSection({
               ? (steps.find((s) => s.name === bucket.step)?.discussionSeeds ??
                 [])
               : [];
-          // 空桶收成单行只在聚焦态用（聚焦空桶只剩 ＋ 行）；总览态强制展开，
-          // 没卡也没种子的桶给一行占位——「总览全部步骤」要有明确的视觉变化
-          const compact = focusStep ? bucket.cards.length === 0 : false;
+          // 总览态桶强制展开，没卡也没种子的桶给一行占位——「总览全部步骤」要有明确的视觉变化
           return (
             <div key={key || "__unattached__"} className="group">
+              {/* 聚焦态不渲染桶头：步骤名已在聚焦头部与流程线，讨论入口（种子＋自定义话题）
+                  已并入流程线「任务书」节点，此处不再重复。总览态才需要桶头（步骤名＋＋添加想法） */}
+              {!focusStep && (
               <div className="flex h-7 items-center gap-2">
-                {/* 聚焦态桶头去重：步骤名已在聚焦头部与流程线 agent 节点，桶头只留「＋ 添加想法」 */}
-                {!focusStep && (
-                  <span
-                    className={`text-[13px] ${compact ? "text-l3" : "text-l2"}`}
-                  >
-                    {bucket.step ?? "未挂步骤"}
-                  </span>
-                )}
+                <span className="text-[13px] text-l2">
+                  {bucket.step ?? "未挂步骤"}
+                </span>
                 {creatingIn === key ? (
                   <form
-                    onSubmit={(e) => void submitCreate(bucket.step, e)}
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const name = draftName.trim();
+                      if (!name) return;
+                      // 挂步骤的话题 = 服务于该步骤 TASK.md：与种子/自定义话题同口径，
+                      // 建卡归档 + 直接开聊写草稿；未挂步骤的卡无步骤语境，只建卡归档
+                      if (bucket.step) {
+                        setCreatingIn(null);
+                        setDraftName("");
+                        void onSeed(bucket.step, name);
+                      } else {
+                        void submitCreate(bucket.step, e);
+                      }
+                    }}
                     className="flex min-w-0 flex-1 items-center gap-1"
                   >
                     <input
                       className={`${fieldSm} min-w-0 flex-1`}
                       value={draftName}
                       onChange={(e) => setDraftName(e.target.value)}
-                      placeholder="卡片名，如 方法对比整理"
+                      placeholder={
+                        bucket.step
+                          ? "话题名，回车开聊（结论直接进任务书草稿）"
+                          : "卡片名，如 方法对比整理"
+                      }
                       autoFocus
                       required
                     />
@@ -778,11 +791,8 @@ export default function TaskCardsSection({
                     </button>
                   </form>
                 ) : (
-                  /* 桶头按钮降噪用悬停才现；但聚焦视图（点大圆只看一步）只有一个桶，
-                     没有拥挤问题，入口常驻可见 */
-                  <span
-                    className={`flex items-center gap-1 ${focusStep ? "" : hoverRevealClass}`}
-                  >
+                  /* 桶头按钮降噪用悬停才现 */
+                  <span className={`flex items-center gap-1 ${hoverRevealClass}`}>
                     {/* 步骤级 TASK.md 预览全页唯一入口 = 流程线 agent 节点，桶头不再重复 */}
                     <button
                       type="button"
@@ -790,14 +800,19 @@ export default function TaskCardsSection({
                         setDraftName("");
                         setCreatingIn(key);
                       }}
-                      title="添加想法"
+                      title={
+                        bucket.step
+                          ? "起一个种子没覆盖到的话题开聊：自动建卡归档，结论直接写进本步骤任务书草稿（开工时就是 TASK.md）"
+                          : "手动开一张讨论卡：起个名建卡，之后点卡片「聊想法」去跟 Agent 聊，对话与简报自动归到这张卡"
+                      }
                       className={`${actionBtn} text-l4 hover:text-l1`}
                     >
-                      {compact ? "＋" : "＋ 添加想法"}
+                      ＋ 添加想法
                     </button>
                   </span>
                 )}
               </div>
+              )}
               {/* 讨论种子（模板预置的「开工前建议想清楚的问题」）：点击即聊——
                   自动以问题建卡（已有同名卡直接续聊），卡片不再靠用户凭空想话题。
                   聚焦时种子已进流程线的 discuss 节点，桶内不重复渲染 */}
@@ -816,7 +831,7 @@ export default function TaskCardsSection({
                             ? "已有同名卡片，点击继续聊"
                             : "点击就这个问题开聊（自动建卡，只读保护生效）"
                         }
-                        className="rounded-full bg-inset px-2 py-0.5 text-[11px] text-l3 hover:bg-white/5 hover:text-l1"
+                        className="rounded-full bg-inset px-2 py-0.5 text-[11px] text-l3 hover:bg-hover hover:text-l1"
                       >
                         {seed}
                       </button>
@@ -842,11 +857,11 @@ export default function TaskCardsSection({
       {/* 步骤级 TASK.md 只读预览弹层（拼装与开工落盘同一出处） */}
       {taskMdPreview && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
           onClick={() => setTaskMdPreview(null)}
         >
           <div
-            className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-md border border-field bg-strip p-5"
+            className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-md border border-field ccode-float-surface p-5"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="mb-3 shrink-0 text-base font-semibold text-l1">
@@ -881,7 +896,7 @@ export default function TaskCardsSection({
               <button
                 type="button"
                 onClick={() => setTaskMdPreview(null)}
-                className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+                className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
               >
                 关闭
               </button>

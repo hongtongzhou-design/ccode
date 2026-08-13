@@ -10,11 +10,11 @@ import type {
 } from "../types";
 
 const actionBtn =
-  "rounded px-2 py-1 text-xs text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-40";
+  "rounded-sm px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-40";
 const ctaSm =
-  "rounded border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50";
+  "rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50";
 const field =
-  "rounded border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
+  "rounded-sm border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
 /** 与后端 sanitize 一致：非 [A-Za-z0-9-] → -，去掉首尾 - */
 function sanitizeWsName(name: string): string {
@@ -282,7 +282,7 @@ export default function PipelineEditor({
             人工事项（人必须参与的事项清单；标题空白行保存时丢弃）
           </span>
           {d.humanTasks.map((t, ti) => (
-            <div key={ti} className="mb-1 rounded bg-inset p-1.5">
+            <div key={ti} className="mb-1 rounded-sm bg-inset p-1.5">
               <div className="mb-1 flex items-center gap-1">
                 <input
                   className={`${field} min-w-0 flex-1`}
@@ -481,7 +481,7 @@ export default function PipelineEditor({
                     onChange={(checked) => toggleResource(i, r.path, checked)}
                     label={
                       <span className="flex min-w-0 items-center gap-2 text-xs">
-                        <span className="shrink-0 rounded bg-inset px-1 py-0.5 text-l3">
+                        <span className="shrink-0 rounded-sm bg-inset px-1 py-0.5 text-l3">
                           {RESOURCE_TYPE_LABELS[r.type] ?? "其他"}
                         </span>
                         <span className="min-w-0 truncate text-l2" title={r.name}>
@@ -505,7 +505,7 @@ export default function PipelineEditor({
                     onChange={(checked) => toggleResource(i, p, checked)}
                     label={
                       <span className="flex min-w-0 items-center gap-2 text-xs">
-                        <span className="shrink-0 rounded bg-inset px-1 py-0.5 text-warn-text">
+                        <span className="shrink-0 rounded-sm bg-inset px-1 py-0.5 text-warn-text">
                           失效
                         </span>
                         <span
@@ -540,7 +540,7 @@ export default function PipelineEditor({
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <button
             type="button"
-            className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
             onClick={tryClose}
           >
             取消
@@ -559,7 +559,7 @@ export default function PipelineEditor({
       <div className="min-h-0 flex-1 overflow-auto">
         <div className="mx-auto w-full max-w-3xl space-y-3 px-8 py-4">
           {warnings.length > 0 && (
-            <div className="rounded bg-strip p-2 text-xs">
+            <div className="rounded-sm bg-strip p-2 text-xs">
               <p className="mb-1 text-warn-text">
                 ⚠ project.toml 有 {warnings.length} 条提示
               </p>
@@ -602,7 +602,7 @@ export default function PipelineEditor({
           <div className="flex justify-end gap-2 pb-4">
             <button
               type="button"
-              className="rounded px-3 py-1.5 text-sm text-l2 hover:bg-white/5"
+              className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
               onClick={tryClose}
             >
               取消

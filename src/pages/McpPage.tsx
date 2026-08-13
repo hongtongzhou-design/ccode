@@ -8,6 +8,7 @@ import {
   PageFrame,
   PageHeader,
   primaryActionClass,
+  secondaryActionClass,
   ghostActionClass,
   fieldClass,
   Toggle,
@@ -87,7 +88,7 @@ function PairEditor({
         {pairs.map((p, i) => (
           <div key={i} className="flex items-center gap-2">
             <input
-              className={`${fieldClass} w-40 shrink-0`}
+              className={`${fieldClass} basis-40 shrink-0 grow-0`}
               placeholder="KEY"
               value={p.key}
               onChange={(e) => {
@@ -109,7 +110,7 @@ function PairEditor({
             <button
               type="button"
               aria-label="删除该行"
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-xs text-l4 hover:bg-white/5 hover:text-err-text"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-err-text"
               onClick={() => onChange(pairs.filter((_, j) => j !== i))}
             >
               ✕
@@ -137,6 +138,10 @@ export default function McpPage({ visible }: { visible: boolean }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   // 收编现有配置 / 粘贴导入 / 内置预设（低频，收进顶部 ⋯ 菜单）
   const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
+  // 页头「预设 ▾」下拉：内置预置一键预填（mcp-presets.ts，加预设 = 加一条）
+  const [presetMenu, setPresetMenu] = useState<{ x: number; y: number } | null>(
+    null,
+  );
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [discovered, setDiscovered] = useState<DiscoveredMcp[]>([]);
   const [pasteOpen, setPasteOpen] = useState(false);
@@ -394,12 +399,23 @@ export default function McpPage({ visible }: { visible: boolean }) {
             </button>
             <button
               type="button"
-              title="更多（收编现有配置 / 粘贴导入 / 预设）"
-              aria-label="更多"
-              className="flex h-8 w-8 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
+              title="从内置预置一键添加（如 Consensus 学术搜索）"
+              className={secondaryActionClass}
               onClick={(event) => {
                 const rect = event.currentTarget.getBoundingClientRect();
-                setTopMenu({ x: rect.right - 176, y: rect.bottom + 4 });
+                setPresetMenu({ x: rect.right, y: rect.bottom + 4 });
+              }}
+            >
+              预设 ▾
+            </button>
+            <button
+              type="button"
+              title="更多（收编现有配置 / 粘贴导入）"
+              aria-label="更多"
+              className="flex h-8 w-8 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
+              onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                setTopMenu({ x: rect.right, y: rect.bottom + 4 });
               }}
             >
               ⋯
@@ -436,7 +452,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                   >
                     <span className="w-3 text-l4">{open ? "▾" : "▸"}</span>
                     <span className="truncate text-sm text-l1">{s.name}</span>
-                    <span className="rounded bg-inset px-1.5 py-0.5 text-[10px] text-l4">
+                    <span className="rounded-sm bg-inset px-1.5 py-0.5 text-[10px] text-l4">
                       {s.kind}
                     </span>
                     <span className="min-w-0 truncate font-mono text-xs text-l4">
@@ -471,7 +487,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                       return (
                         <div
                           key={agent.id}
-                          className="flex items-center justify-between gap-2 rounded bg-inset px-2 py-1.5"
+                          className="flex items-center justify-between gap-2 rounded-sm bg-inset px-2 py-1.5"
                         >
                           <span className="text-xs text-l3">{agent.label}</span>
                           <Toggle
@@ -494,11 +510,11 @@ export default function McpPage({ visible }: { visible: boolean }) {
 
       {modal && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
           onClick={() => setModal(null)}
         >
           <div
-            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline bg-raised p-4"
+            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline ccode-float-surface p-4"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="mb-3 text-base font-semibold text-l1">
@@ -522,12 +538,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     })
                   }
                 />
-                <div className="flex shrink-0 rounded border border-field">
+                <div className="flex shrink-0 gap-0.5 rounded-sm border border-field p-0.5">
                   {(["stdio", "remote"] as const).map((k) => (
                     <button
                       key={k}
                       type="button"
-                      className={`h-7 px-3 text-xs ${
+                      className={`h-7 rounded-sm px-3 text-xs ${
                         modal.form.kind === k
                           ? "bg-cta text-cta-text"
                           : "text-l3 hover:text-l1"
@@ -548,7 +564,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                 <>
                   <div className="flex items-center gap-2">
                     <input
-                      className={`${fieldClass} w-40 shrink-0`}
+                      className={`${fieldClass} basis-40 shrink-0 grow-0`}
                       placeholder="命令，如 npx"
                       value={modal.form.command}
                       onChange={(e) =>
@@ -635,6 +651,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
         <ContextMenu
           x={topMenu.x}
           y={topMenu.y}
+          alignRight
           onClose={() => setTopMenu(null)}
           items={[
             {
@@ -645,23 +662,31 @@ export default function McpPage({ visible }: { visible: boolean }) {
               label: "粘贴导入",
               onSelect: () => setPasteOpen(true),
             },
-            ...MCP_PRESETS.map((p) => ({
-              label: `预设：${p.label}`,
-              title: p.note,
-              onSelect: () =>
-                setModal({ id: null, form: formFromPreset(p), note: p.note }),
-            })),
           ]}
+        />
+      )}
+      {presetMenu && (
+        <ContextMenu
+          x={presetMenu.x}
+          y={presetMenu.y}
+          alignRight
+          onClose={() => setPresetMenu(null)}
+          items={MCP_PRESETS.map((p) => ({
+            label: p.label,
+            title: p.note,
+            onSelect: () =>
+              setModal({ id: null, form: formFromPreset(p), note: p.note }),
+          }))}
         />
       )}
       {/* 收编现有配置：八家用户级配置里不在清单的 server */}
       {discoverOpen && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
           onClick={() => setDiscoverOpen(false)}
         >
           <div
-            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline bg-raised p-4"
+            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline ccode-float-surface p-4"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="mb-1 text-base font-semibold text-l1">
@@ -679,9 +704,9 @@ export default function McpPage({ visible }: { visible: boolean }) {
                 {discovered.map((d) => (
                   <li
                     key={`${d.agent}:${d.name}`}
-                    className="flex items-center gap-2 rounded bg-inset px-2 py-1.5"
+                    className="flex items-center gap-2 rounded-sm bg-inset px-2 py-1.5"
                   >
-                    <span className="shrink-0 rounded bg-strip px-1.5 py-0.5 text-[10px] text-l4">
+                    <span className="shrink-0 rounded-sm bg-strip px-1.5 py-0.5 text-[10px] text-l4">
                       {AGENTS.find((a) => a.id === d.agent)?.label ?? d.agent}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-xs text-l1">
@@ -715,11 +740,11 @@ export default function McpPage({ visible }: { visible: boolean }) {
       {/* 粘贴导入：README/市场页的标准 mcpServers JSON 片段 */}
       {pasteOpen && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
           onClick={() => setPasteOpen(false)}
         >
           <div
-            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline bg-raised p-4"
+            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline ccode-float-surface p-4"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="mb-1 text-base font-semibold text-l1">粘贴导入</h2>
@@ -738,7 +763,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
               }}
             />
             {pastePreview && (
-              <div className="mt-2 rounded bg-inset p-2">
+              <div className="mt-2 rounded-sm bg-inset p-2">
                 <p className="mb-1 text-xs text-l3">
                   将导入 {pastePreview.servers.length} 个（stdio
                   命令会被各 agent 直接执行，请确认来源可信）：

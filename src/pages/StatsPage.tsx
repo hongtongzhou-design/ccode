@@ -221,13 +221,13 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               );
             }}
             label="显示内部活动"
-            className="rounded px-2 py-0.5 text-xs text-l3 hover:bg-white/5"
+            className="rounded-sm px-2 py-0.5 text-xs text-l3 hover:bg-hover"
           />
           <button
             type="button"
             onClick={toggleCurrency}
             title="切换货币（$ 美元 / ¥ 人民币）"
-            className="w-7 rounded px-1 py-1 text-xs text-l3 hover:text-l1"
+            className="w-7 rounded-sm px-1 py-1 text-xs text-l3 hover:text-l1"
           >
             {currency}
           </button>
@@ -334,9 +334,9 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                           {a.modelCount} 个模型
                         </span>
                       </span>
-                      <span className="h-2 min-w-0 flex-1 rounded bg-hairline">
+                      <span className="h-2 min-w-0 flex-1 rounded-sm bg-hairline">
                         <span
-                          className="block h-2 rounded"
+                          className="block h-2 rounded-sm"
                           style={{
                             width: `${Math.max(1.5, share * 100)}%`,
                             backgroundColor: agentColor(a.agent),
