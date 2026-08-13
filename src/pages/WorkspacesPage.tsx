@@ -2003,13 +2003,45 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             onRegisterProject={setAddProjectPath}
             onError={setError}
           >
-            {selectedGroup.list.length === 0 ? (
+            {(wsView) => {
+            // 工作区↔步骤归属：复用 steps[].workspaceName === 工作区名 口径（与步进器状态派生同一映射）
+            const focusWsName = wsView.focusStepName;
+            const wsList = focusWsName
+              ? selectedGroup.list.filter(
+                  (w) =>
+                    wsView.steps.find((s) => s.name === focusWsName)
+                      ?.workspaceName === w.name,
+                )
+              : selectedGroup.list;
+            return (
+            <>
+            {wsView.steps.length > 0 && (
+              <div className="flex items-center gap-2 pt-1">
+                <span className="text-xs text-l3">
+                  {focusWsName
+                    ? `${focusWsName} · 工作区（${wsList.length}）`
+                    : `工作区（${wsList.length}）`}
+                </span>
+                {(focusWsName !== null || wsView.showAll) && (
+                  <button
+                    type="button"
+                    onClick={wsView.onToggleShowAll}
+                    className="ml-auto rounded px-1.5 py-0.5 text-[10px] text-l4 hover:bg-white/5 hover:text-l1"
+                  >
+                    {wsView.showAll ? "按步骤" : "全部"}
+                  </button>
+                )}
+              </div>
+            )}
+            {wsList.length === 0 ? (
               <p className="py-2 text-xs text-l4">
-                该项目还没有工作区，从上方研究步骤「开始」一键开步。
+                {selectedGroup.list.length === 0
+                  ? "该项目还没有工作区，从上方研究步骤「开始」一键开步。"
+                  : "该步骤还没有工作区，点流程线里的「开始」一键开步。"}
               </p>
             ) : (
             <ul className="divide-y divide-hairline">
-              {selectedGroup.list.map((workspace) => {
+              {wsList.map((workspace) => {
                 const workspaceHealth = health[workspace.id];
                 const workspaceDrift = drift[workspace.id];
                 const isDriftFailed = !!driftFailed[workspace.id];
@@ -2175,6 +2207,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
               })}
             </ul>
             )}
+            </>
+            );
+            }}
           </ProjectGroup>
       ) : null}
       <PortsSection />

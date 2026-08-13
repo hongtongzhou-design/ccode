@@ -12,6 +12,7 @@ import {
   fieldClass,
   Toggle,
 } from "../components/PageFrame";
+import { MCP_PRESETS, type McpPreset } from "../mcp-presets";
 
 /** 收编候选（后端 discover_mcp_servers） */
 interface DiscoveredMcp {
@@ -46,6 +47,17 @@ function formFrom(s: McpServerDto): Form {
     env: s.env.map((p) => ({ ...p })),
     url: s.url,
     headers: s.headers.map((p) => ({ ...p })),
+  };
+}
+
+/** 预设 → 添加表单（键值对克隆，避免编辑时改到预设常量） */
+function formFromPreset(p: McpPreset): Form {
+  return {
+    ...EMPTY_FORM,
+    name: p.name,
+    kind: p.kind,
+    url: p.url ?? "",
+    headers: (p.headers ?? []).map((x) => ({ ...x })),
   };
 }
 
@@ -114,13 +126,16 @@ export default function McpPage({ visible }: { visible: boolean }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [modal, setModal] = useState<{ id: string | null; form: Form } | null>(
-    null,
-  );
+  const [modal, setModal] = useState<{
+    id: string | null;
+    form: Form;
+    /** 从预设打开时的顶部提示（密钥要求等） */
+    note?: string;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
-  // 收编现有配置 / 粘贴导入（低频，收进顶部 ⋯ 菜单）
+  // 收编现有配置 / 粘贴导入 / 内置预设（低频，收进顶部 ⋯ 菜单）
   const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [discovered, setDiscovered] = useState<DiscoveredMcp[]>([]);
@@ -379,7 +394,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
             </button>
             <button
               type="button"
-              title="更多（收编现有配置 / 粘贴导入）"
+              title="更多（收编现有配置 / 粘贴导入 / 预设）"
               aria-label="更多"
               className="flex h-8 w-8 items-center justify-center rounded text-sm text-l3 hover:bg-white/5 hover:text-l1"
               onClick={(event) => {
@@ -489,6 +504,11 @@ export default function McpPage({ visible }: { visible: boolean }) {
             <h2 className="mb-3 text-base font-semibold text-l1">
               {modal.id ? "编辑 server" : "添加 server"}
             </h2>
+            {modal.note && (
+              <p className="-mt-2 mb-3 text-xs leading-5 text-l4">
+                {modal.note}
+              </p>
+            )}
             <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <input
@@ -625,6 +645,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
               label: "粘贴导入",
               onSelect: () => setPasteOpen(true),
             },
+            ...MCP_PRESETS.map((p) => ({
+              label: `预设：${p.label}`,
+              title: p.note,
+              onSelect: () =>
+                setModal({ id: null, form: formFromPreset(p), note: p.note }),
+            })),
           ]}
         />
       )}

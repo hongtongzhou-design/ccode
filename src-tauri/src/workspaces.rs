@@ -1911,9 +1911,11 @@ fn dest_for_target(root: &Path, target: &str, source: &Path) -> Result<PathBuf, 
 #[tauri::command]
 pub async fn import_human_deliverable(
     project_root: String,
-    step: String,
-    title: String,
+    step: Option<String>,
+    title: Option<String>,
     source_path: String,
+    // 落点覆盖（papers/imports/ 检索结果导入专用）：给定时不再取人工事项声明的落点
+    target_override: Option<String>,
 ) -> Result<ImportDeliverableDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root =
@@ -1921,29 +1923,45 @@ pub async fn import_human_deliverable(
                 &project_root,
             )))?;
         let cfg = crate::projects::read_config_at(&root).config;
-        let step_cfg = cfg
-            .steps
-            .iter()
-            .find(|s| s.name == step)
-            .ok_or_else(|| format!("步骤不存在: {step}"))?;
-        let task = step_cfg
-            .human_tasks
-            .iter()
-            .find(|h| h.title == title)
-            .ok_or_else(|| format!("人工事项不存在: {title}"))?;
+        let step_cfg = match &step {
+            Some(name) => Some(
+                cfg.steps
+                    .iter()
+                    .find(|s| &s.name == name)
+                    .ok_or_else(|| format!("步骤不存在: {name}"))?,
+            ),
+            None => None,
+        };
+        let target = match &target_override {
+            Some(t) => t.clone(),
+            None => {
+                let sc = step_cfg.ok_or("缺少步骤参数")?;
+                let t = title.as_deref().ok_or("缺少人工事项参数")?;
+                sc.human_tasks
+                    .iter()
+                    .find(|h| h.title == t)
+                    .ok_or_else(|| format!("人工事项不存在: {t}"))?
+                    .target
+                    .clone()
+            }
+        };
         let source = PathBuf::from(crate::sessions::expand_tilde(&source_path));
         let source =
             fs::canonicalize(&source).map_err(|e| format!("源文件不存在或不可读: {e}"))?;
         if !source.is_file() {
             return Err("源路径不是文件".into());
         }
-        // 落点根：步骤绑定的活跃工作区优先（agent 在工作树里干活），否则项目根
+        // 落点根：人工事项语境（带步骤）= 步骤绑定的活跃工作区优先（agent 在工作树里干活），
+        // 否则项目根；纯导入（无步骤，资源面板入口）一律落项目根
         let conn = db().ok();
-        let dest_root = human_detection_roots(conn.as_ref(), &root, &step_cfg.workspace_name)
-            .into_iter()
-            .last()
-            .unwrap_or_else(|| root.clone());
-        let dest = dest_for_target(&dest_root, &task.target, &source)?;
+        let dest_root = match step_cfg {
+            Some(sc) => human_detection_roots(conn.as_ref(), &root, &sc.workspace_name)
+                .into_iter()
+                .last()
+                .unwrap_or_else(|| root.clone()),
+            None => root.clone(),
+        };
+        let dest = dest_for_target(&dest_root, &target, &source)?;
         if dest.exists() {
             return Err(format!("落点已存在同名文件: {}", dest.display()));
         }
@@ -1951,12 +1969,15 @@ pub async fn import_human_deliverable(
             fs::create_dir_all(parent).map_err(|e| format!("创建落点目录失败: {e}"))?;
         }
         fs::copy(&source, &dest).map_err(|e| format!("复制文件失败: {e}"))?;
-        // 登记提货单（best-effort：文件已落位，检测口径已算完成；登记失败只回告不否决）
-        let (registered, register_error) =
-            match register_artifact_impl(&dest_root, &title, &dest, "人工交付") {
+        // 登记提货单（best-effort：文件已落位，检测口径已算完成；登记失败只回告不否决）；
+        // 纯导入（无人工事项语境）不登记提货单
+        let (registered, register_error) = match &title {
+            Some(t) => match register_artifact_impl(&dest_root, t, &dest, "人工交付") {
                 Ok(_) => (true, None),
                 Err(e) => (false, Some(e)),
-            };
+            },
+            None => (false, None),
+        };
         let dest_rel = dest
             .strip_prefix(&dest_root)
             .map(|p| p.to_string_lossy().replace('\\', "/"))

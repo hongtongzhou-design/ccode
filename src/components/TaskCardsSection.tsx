@@ -117,7 +117,11 @@ export default function TaskCardsSection({
   refreshToken,
   mainDirty,
   focusStep,
+  focusStatusText,
   focusRunStatus,
+  focusHumanPending,
+  reviewConflict,
+  onRestoreWorkspace,
   onClearFocus,
   onHumanChanged,
   onStartStep,
@@ -133,11 +137,19 @@ export default function TaskCardsSection({
   mainDirty: number | null;
   /** 步骤聚焦（v3.70）：非 null 时只显示该步骤的种子/卡片/人工事项；null = 全部 */
   focusStep?: string | null;
+  /** 聚焦步骤的状态白话短语（聚焦头部用；由父级 describeStep 口径派生） */
+  focusStatusText?: string | null;
   /** 聚焦步骤的执行状态（v3.71 流程线用；由父级从工作区派生——健康/漂移数据在本组件外） */
   focusRunStatus?: "pending" | "active" | "review" | "done";
-  /** 「显示全部」回调（清除聚焦） */
+  /** 聚焦步骤轮到人做的待办事项标题（父级「等你做」口径）：流程线 human 节点橙点 */
+  focusHumanPending?: string[];
+  /** 聚焦步骤处于合并冲突阻塞：流程线评审节点入口改为「去处理冲突」 */
+  reviewConflict?: boolean;
+  /** 聚焦步骤的工作区已归档：流程线 agent 节点主入口改为「恢复工作区」 */
+  onRestoreWorkspace?: () => void;
+  /** 「总览全部步骤」回调（清除聚焦） */
   onClearFocus?: () => void;
-  /** 人工事项勾选/交付后通知父级（当前步骤条与 ⋯ 菜单计数重取） */
+  /** 人工事项勾选/交付后通知父级（流程线橙点与 ⋯ 菜单计数重取） */
   onHumanChanged?: () => void;
   /** 卡片「开工」：打开开工确认弹层（originCardId = 出处卡，弹层内可选多卡简报/融合）；
       返回 Promise 供行内 busy 态跟随 */
@@ -560,9 +572,7 @@ export default function TaskCardsSection({
               />
             )}
             {card.briefs.length === 0 ? (
-              <p className="text-xs text-l4">
-                还没有简报——讨论建议从流程线的「任务书」节点开始（结论直接进草稿）；本卡负责归置相关对话。
-              </p>
+              <p className="text-xs text-l4">还没有简报</p>
             ) : (
               <ul className="space-y-0.5">
                 {/* briefs 时间序，展示最新在前 */}
@@ -615,7 +625,6 @@ export default function TaskCardsSection({
         <span className="text-xs text-l3">
           任务卡{cards && cards.length > 0 ? `（${cards.length}）` : ""}
         </span>
-        <span className="text-[10px] text-l4">按任务归置对话与简报</span>
         {/* 主仓改动协同提醒（与开工弹层同款口径，只提醒不阻断）：小 chip 降噪，点击跳改动面板 */}
         {mainDirty !== null && mainDirty > 0 && (
           <button
@@ -654,19 +663,21 @@ export default function TaskCardsSection({
         </p>
       )}
       {error && <p className="mt-1 text-xs text-err-text">{error}</p>}
-      {/* 步骤聚焦视图（v3.70）：提示条 + 该步骤的人工事项清单（归你做的事直接可见可勾） */}
+      {/* 聚焦头部：步骤名 + 状态短语（父级 describeStep 口径）+ 总览切换。
+          聚焦态下步骤名只出现在这里与流程线 agent 节点，桶头不再重复 */}
       {focusStep && (
-        <div className="mt-1 flex items-center gap-2 text-[10px] text-l4">
-          <span>
-            只看「{focusStep}」——点上方其他圆切换步骤
-          </span>
+        <div className="mt-1 flex items-center gap-2">
+          <span className="text-sm font-medium text-l1">{focusStep}</span>
+          {focusStatusText && (
+            <span className="text-xs text-l3">{focusStatusText}</span>
+          )}
           {onClearFocus && (
             <button
               type="button"
               onClick={onClearFocus}
-              className="rounded px-1.5 py-0.5 text-l3 hover:bg-white/5 hover:text-l1"
+              className="ml-auto rounded px-1.5 py-0.5 text-xs text-l3 hover:bg-white/5 hover:text-l1"
             >
-              显示全部步骤
+              总览全部步骤
             </button>
           )}
         </div>
@@ -705,6 +716,9 @@ export default function TaskCardsSection({
               (w) =>
                 w.name === focusStepDto.workspaceName && w.status === "active",
             )}
+            humanPending={focusHumanPending}
+            reviewConflict={reviewConflict}
+            onRestore={onRestoreWorkspace}
             onSeed={(seed) => void onSeed(focusStepDto.name, seed)}
             onStart={() =>
               void onStartStep(
@@ -720,16 +734,25 @@ export default function TaskCardsSection({
           const key = bucket.step ?? "";
           // 「未挂步骤」桶空时整桶不渲染（它出现时必带卡）
           if (bucket.step === null && bucket.cards.length === 0) return null;
-          // 空步骤桶收成单行：按钮 hover/focus 才现；有卡的桶保持展开，桶头按钮同样 hover 才现
-          const compact = bucket.cards.length === 0;
+          const bucketSeeds =
+            bucket.step !== null
+              ? (steps.find((s) => s.name === bucket.step)?.discussionSeeds ??
+                [])
+              : [];
+          // 空桶收成单行只在聚焦态用（聚焦空桶只剩 ＋ 行）；总览态强制展开，
+          // 没卡也没种子的桶给一行占位——「总览全部步骤」要有明确的视觉变化
+          const compact = focusStep ? bucket.cards.length === 0 : false;
           return (
             <div key={key || "__unattached__"} className="group">
               <div className="flex h-7 items-center gap-2">
-                <span
-                  className={`text-[13px] ${compact ? "text-l3" : "text-l2"}`}
-                >
-                  {bucket.step ?? "未挂步骤"}
-                </span>
+                {/* 聚焦态桶头去重：步骤名已在聚焦头部与流程线 agent 节点，桶头只留「＋ 添加想法」 */}
+                {!focusStep && (
+                  <span
+                    className={`text-[13px] ${compact ? "text-l3" : "text-l2"}`}
+                  >
+                    {bucket.step ?? "未挂步骤"}
+                  </span>
+                )}
                 {creatingIn === key ? (
                   <form
                     onSubmit={(e) => void submitCreate(bucket.step, e)}
@@ -759,17 +782,8 @@ export default function TaskCardsSection({
                      没有拥挤问题，入口常驻可见 */
                   <span
                     className={`flex items-center gap-1 ${focusStep ? "" : hoverRevealClass}`}
-                  >                    {/* 步骤级 TASK.md 预览（v3.66）：不用点进卡片/开工也能看当前拼装结果 */}
-                    {bucket.step !== null && (
-                      <button
-                        type="button"
-                        onClick={() => onPreviewTaskMd(bucket.step!)}
-                        title="预览该步骤当前 TASK.md 拼装结果（模板简报 + 默认来源简报 + 提货单）"
-                        className={`${actionBtn} text-l4 hover:text-l1`}
-                      >
-                        预览 TASK.md
-                      </button>
-                    )}
+                  >
+                    {/* 步骤级 TASK.md 预览全页唯一入口 = 流程线 agent 节点，桶头不再重复 */}
                     <button
                       type="button"
                       onClick={() => {
@@ -787,38 +801,35 @@ export default function TaskCardsSection({
               {/* 讨论种子（模板预置的「开工前建议想清楚的问题」）：点击即聊——
                   自动以问题建卡（已有同名卡直接续聊），卡片不再靠用户凭空想话题。
                   聚焦时种子已进流程线的 discuss 节点，桶内不重复渲染 */}
+              {!focusStep && bucket.step !== null && bucketSeeds.length > 0 && (
+                <div className="mb-1 flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] text-l4">开工前聊聊：</span>
+                  {bucketSeeds.map((seed) => {
+                    const exists = (cards ?? []).some((c) => c.name === seed);
+                    return (
+                      <button
+                        key={seed}
+                        type="button"
+                        onClick={() => void onSeed(bucket.step!, seed)}
+                        title={
+                          exists
+                            ? "已有同名卡片，点击继续聊"
+                            : "点击就这个问题开聊（自动建卡，只读保护生效）"
+                        }
+                        className="rounded-full bg-inset px-2 py-0.5 text-[11px] text-l3 hover:bg-white/5 hover:text-l1"
+                      >
+                        {seed}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
               {!focusStep &&
                 bucket.step !== null &&
-                (() => {
-                  const step = steps.find((s) => s.name === bucket.step);
-                  const seeds = step?.discussionSeeds ?? [];
-                  if (seeds.length === 0) return null;
-                  return (
-                    <div className="mb-1 flex flex-wrap items-center gap-1">
-                      <span className="text-[10px] text-l4">开工前聊聊：</span>
-                      {seeds.map((seed) => {
-                        const exists = (cards ?? []).some(
-                          (c) => c.name === seed,
-                        );
-                        return (
-                          <button
-                            key={seed}
-                            type="button"
-                            onClick={() => void onSeed(bucket.step!, seed)}
-                            title={
-                              exists
-                                ? "已有同名卡片，点击继续聊"
-                                : "点击就这个问题开聊（自动建卡，只读保护生效）"
-                            }
-                            className="rounded-full bg-inset px-2 py-0.5 text-[11px] text-l3 hover:bg-white/5 hover:text-l1"
-                          >
-                            {seed}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  );
-                })()}
+                bucket.cards.length === 0 &&
+                bucketSeeds.length === 0 && (
+                  <p className="mb-1 text-xs text-l4">该步骤还没开始</p>
+                )}
               {bucket.cards.length > 0 && (
                 <ul className="divide-y divide-hairline">
                   {bucket.cards.map(renderCard)}
@@ -838,13 +849,9 @@ export default function TaskCardsSection({
             className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-md border border-field bg-strip p-5"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 className="mb-1 shrink-0 text-base font-semibold text-l1">
+            <h2 className="mb-3 shrink-0 text-base font-semibold text-l1">
               TASK.md 预览：{taskMdPreview.stepName}
             </h2>
-            <p className="mb-3 shrink-0 text-xs text-l4">
-              当前拼装结果（模板简报 + 默认来源简报 +
-              提货单）；开工确认弹层里可编辑与融合
-            </p>
             {/* 推荐技能区（只读；开工确认弹层里可增删） */}
             <StepSkillsChips
               skills={

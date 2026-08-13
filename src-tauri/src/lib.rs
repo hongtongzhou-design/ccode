@@ -20,6 +20,7 @@ mod profiles;
 mod profile_validation;
 mod projects;
 mod pty;
+mod scheduler;
 mod sessions;
 mod settings;
 mod skills;
@@ -42,10 +43,12 @@ pub fn run() {
         .manage(profiles::ProfileStore::new().expect("初始化 ProfileStore 失败"))
         .manage(pty::PtyManager::default())
         // 内置技能种子：启动时把库里没有的内置技能补进去（幂等，不覆盖用户已有同名技能）
-        .setup(|_app| {
+        .setup(|app| {
             if let Err(e) = skills::seed_builtin_skills() {
                 logbuf::record("warn", "skills", &format!("内置技能播种失败: {e}"));
             }
+            // 定时雷达：60s tick 调度，启动首 tick 自动补跑关闭期间漏掉的任务
+            scheduler::start_scheduler(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -233,6 +236,11 @@ pub fn run() {
             ai::ai_fuse_task_md,
             pricing::read_pricing_file,
             pricing::write_pricing_file,
+            scheduler::list_schedules,
+            scheduler::create_schedule,
+            scheduler::update_schedule,
+            scheduler::delete_schedule,
+            scheduler::run_schedule_now,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

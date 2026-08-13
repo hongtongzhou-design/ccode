@@ -19,8 +19,10 @@ import {
   renderTaskMd,
   type TaskBriefRef,
 } from "../pipeline-start";
+import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import type {
   ArtifactEntryDto,
+  DiscoveredResourceDto,
   HumanTaskStateDto,
   ProjectConfigDto,
   ProjectStepDto,
@@ -121,6 +123,13 @@ export default function KickoffConfirmDialog({
   const [humanStates, setHumanStates] = useState<HumanTaskStateDto[] | null>(
     null,
   );
+  // 未登记资源提醒（打开时只读扫描一次）：有候选才渲染，默认不勾选不打扰，登记后小节消失
+  const [resCandidates, setResCandidates] = useState<
+    DiscoveredResourceDto[] | null
+  >(null);
+  const [resChecked, setResChecked] = useState<Set<string>>(new Set());
+  const [resSaving, setResSaving] = useState(false);
+  const [resError, setResError] = useState<string | null>(null);
 
   // 任务书草稿（v3.72）：草稿存在时编辑区初始内容 = 草稿全文（优先于模板拼装）；
   // undefined = 尚未加载（等草稿到达再初始化编辑区，避免先显示拼装再被草稿闪换）
@@ -151,6 +160,11 @@ export default function KickoffConfirmDialog({
     invoke<SkillDto[]>("list_skills")
       .then((lib) => {
         if (!stale) setSkillLib(lib);
+      })
+      .catch(() => {});
+    invoke<DiscoveredResourceDto[]>("discover_resources", { path: projectPath })
+      .then((items) => {
+        if (!stale) setResCandidates(items.filter((d) => !d.exists));
       })
       .catch(() => {});
     invoke<{ relPath: string; text: string | null }>("read_task_draft", {
@@ -319,6 +333,43 @@ export default function KickoffConfirmDialog({
       onCfgChange?.(read.config);
     } catch (reason) {
       setSkillError(String(reason));
+    }
+  }
+
+  /** 「登记选中」未登记资源：resources 数组整体写回 project.toml（与资源面板同一口径），
+   *  成功后重读档案卡同步本地与父级，小节消失 */
+  async function registerResources() {
+    if (!resCandidates || resChecked.size === 0 || resSaving) return;
+    setResSaving(true);
+    setResError(null);
+    try {
+      const additions = resCandidates
+        .filter((d) => resChecked.has(d.path))
+        .map((d) => ({
+          name: d.path.split("/").pop() ?? d.path,
+          path: d.path,
+          type: d.type,
+          readonly: false,
+          note: "",
+        }));
+      await invoke("write_project_config", {
+        path: projectPath,
+        config: {
+          ...cfgLocal,
+          resources: [...cfgLocal.resources, ...additions],
+        },
+      });
+      const read = await invoke<{ config: ProjectConfigDto }>(
+        "read_project_config",
+        { path: projectPath },
+      );
+      setCfgLocal(read.config);
+      onCfgChange?.(read.config);
+      setResCandidates(null);
+    } catch (reason) {
+      setResError(String(reason));
+    } finally {
+      setResSaving(false);
     }
   }
 
@@ -491,6 +542,61 @@ export default function KickoffConfirmDialog({
               </button>
             )}
           </p>
+        )}
+
+        {/* 未登记资源提醒（只提醒不阻断，默认不勾选）：登记后进 TASK.md 的「项目资源」段 */}
+        {resCandidates && resCandidates.length > 0 && (
+          <div className="mb-3 shrink-0 rounded-md bg-inset px-2.5 py-2">
+            <div className="mb-1 text-xs text-l3">
+              发现 {resCandidates.length} 个未登记文件
+            </div>
+            <ul className="max-h-28 space-y-0.5 overflow-auto">
+              {resCandidates.map((d) => (
+                <li key={d.path}>
+                  <Checkbox
+                    checked={resChecked.has(d.path)}
+                    onChange={(checked) => {
+                      setResChecked((cur) => {
+                        const next = new Set(cur);
+                        if (checked) next.add(d.path);
+                        else next.delete(d.path);
+                        return next;
+                      });
+                    }}
+                    label={
+                      <span className="flex min-w-0 items-center gap-2 text-xs">
+                        <span className="shrink-0 rounded bg-strip px-1 py-0.5 text-l3">
+                          {RESOURCE_TYPE_LABELS[d.type] ?? "其他"}
+                        </span>
+                        <span
+                          className="min-w-0 truncate font-mono text-l2"
+                          title={d.path}
+                        >
+                          {d.path}
+                        </span>
+                      </span>
+                    }
+                  />
+                </li>
+              ))}
+            </ul>
+            <div className="mt-1.5 flex items-center gap-2">
+              <button
+                type="button"
+                disabled={resChecked.size === 0 || resSaving}
+                onClick={() => void registerResources()}
+                className="rounded border border-field px-1.5 py-0.5 text-[11px] text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+              >
+                {resSaving ? "登记中…" : `登记选中（${resChecked.size}）`}
+              </button>
+              <span className="text-[10px] text-l4">
+                不登记也能开工，登记后 TASK.md 才会列出它们
+              </span>
+            </div>
+            {resError && (
+              <p className="mt-1 text-xs text-err-text">✗ {resError}</p>
+            )}
+          </div>
         )}
 
         {/* 人工事项区（步骤声明了才有）：开工前事项未完成给提醒，只提醒不阻断；

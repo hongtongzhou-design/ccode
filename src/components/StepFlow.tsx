@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { useAppStore } from "../store";
 import { buildStepFlow, type StepFlowNode } from "../step-flow";
 import { useHumanTasks } from "./HumanTasksList";
@@ -19,6 +19,9 @@ export default function StepFlow({
   onChanged,
   draft,
   agentContent,
+  humanPending,
+  onRestore,
+  reviewConflict,
 }: {
   projectPath: string;
   step: ProjectStepDto;
@@ -31,22 +34,41 @@ export default function StepFlow({
   onSeed: (seed: string) => void;
   /** agent 节点「开始」= 打开开工确认弹层 */
   onStart: () => void;
-  /** 人工事项勾选/交付后通知父级（当前步骤条等外部计数重取） */
+  /** 人工事项勾选/交付后通知父级（流程线橙点等外部计数重取） */
   onChanged?: () => void;
   /** 任务书草稿（v3.72）：relPath 恒有（后端单一出处），exists = 草稿已起草 */
   draft?: { relPath: string; exists: boolean };
   /** agent 节点内嵌内容（如「预览 TASK.md」——TASK.md 是 agent 的合同，属于这个节点） */
   agentContent?: React.ReactNode;
+  /** 轮到人做的待办事项标题（ProjectGroup「等你做」口径，节点粒度）：命中的 human 节点旁上橙点 */
+  humanPending?: string[];
+  /** 步骤工作区已归档时 agent 节点的主入口（替代「开始」）：恢复工作区 */
+  onRestore?: () => void;
+  /** 合并冲突阻塞：评审节点入口改为「去处理冲突」（直达冲突解决意图） */
+  reviewConflict?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { states, error, note, busyTitle, dropHover, toggle, pickFile } =
-    useHumanTasks({ projectPath, stepName: step.name, containerRef, onChanged });
+  const {
+    states,
+    error,
+    note,
+    busyTitle,
+    dropHover,
+    toggle,
+    pickFile,
+    pickSearchResults,
+    registerOffer,
+    registerOffered,
+    dismissRegisterOffer,
+  } = useHumanTasks({ projectPath, stepName: step.name, containerRef, onChanged });
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setWorkspaceReviewRequest = useAppStore(
     (s) => s.setWorkspaceReviewRequest,
   );
   const setPage = useAppStore((s) => s.setPage);
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);
+  // 橙点点击后的短暂高亮（定位反馈）：节点 key，1.5s 后消
+  const [flash, setFlash] = useState<string | null>(null);
 
   /** 聊任务书（v3.72）：讨论直接服务于草稿——非只读启动（agent 要写草稿），
    *  指令约束只许新建/修改草稿这一个文件；不用卡片的只读保护（那是不动文件口径） */
@@ -99,9 +121,22 @@ export default function StepFlow({
     if (!ws) return;
     setWorkspaceReviewRequest({
       worktreePath: ws.worktreePath,
+      action: reviewConflict ? "resolve-conflict" : undefined,
       requestId: crypto.randomUUID(),
     });
     setPage("terminal");
+  }
+
+  /** 橙点点击：滚动定位到该 human 节点行并短暂高亮（1.5s），作为「等你做」的落点反馈 */
+  function locateHuman(key: string) {
+    containerRef.current
+      ?.querySelector(`[data-node-key="${CSS.escape(key)}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setFlash(key);
+    window.setTimeout(
+      () => setFlash((cur) => (cur === key ? null : cur)),
+      1500,
+    );
   }
 
   function icon(node: StepFlowNode): { text: string; cls: string } {
@@ -113,7 +148,12 @@ export default function StepFlow({
   function nodeActions(node: StepFlowNode) {
     const isCurrent = node.key === flow.currentKey;
     switch (node.kind) {
-      case "human":
+      case "human": {
+        // 落点在 papers/ 的事项（如「补充你已知的关键文献」）多出「导入检索结果」入口：
+        // 从 Undermind/Consensus/Elicit 导出的 RIS/BibTeX/CSV 固定落 papers/imports/
+        const papersTarget = (node.human!.target ?? "")
+          .replace(/\\/g, "/")
+          .startsWith("papers/");
         return (
           <>
             {node.human!.target && !node.done && (
@@ -127,10 +167,34 @@ export default function StepFlow({
                 {busyTitle === node.human!.title ? "提交中…" : "提交产物"}
               </button>
             )}
+            {papersTarget && (
+              <button
+                type="button"
+                disabled={busyTitle !== null}
+                onClick={() => void pickSearchResults(node.human!.title)}
+                title="从 Undermind / Consensus / Elicit 等导出 RIS/BibTeX/CSV 后导入（可多选），落 papers/imports/，开工时 agent 自动解析合并；建议文件名带 来源-日期（如 consensus-2026-08-13.ris）"
+                className="shrink-0 rounded border border-field px-1.5 py-0.5 text-[10px] text-l2 hover:bg-white/5 hover:text-l1 disabled:opacity-50"
+              >
+                导入检索结果
+              </button>
+            )}
           </>
         );
+      }
       case "agent":
         if (!isCurrent) return null;
+        // 工作区已归档：主入口换成「恢复工作区」（归档工作区不能再开工）
+        if (runStatus === "pending" && onRestore) {
+          return (
+            <button
+              type="button"
+              onClick={onRestore}
+              className="shrink-0 rounded border border-cta-bd bg-cta px-2 py-0.5 text-[10px] text-cta-text hover:brightness-110"
+            >
+              恢复工作区
+            </button>
+          );
+        }
         return runStatus === "pending" ? (
           <button
             type="button"
@@ -156,7 +220,7 @@ export default function StepFlow({
             onClick={goReview}
             className="shrink-0 rounded border border-cta-bd bg-cta px-2 py-0.5 text-[10px] text-cta-text hover:brightness-110"
           >
-            去评审
+            {reviewConflict ? "去处理冲突" : "去评审"}
           </button>
         );
       default:
@@ -170,25 +234,43 @@ export default function StepFlow({
         {flow.nodes.map((node) => {
           const isCurrent = node.key === flow.currentKey;
           const ic = icon(node);
+          // 「等你做」橙点：该 human 节点有待办（父级 actionableHumanTasks 口径，节点粒度）
+          const pendingDot =
+            node.kind === "human" &&
+            (humanPending?.includes(node.human!.title) ?? false);
           return (
             <li
               key={node.key}
+              data-node-key={node.key}
               data-human-task={
                 node.kind === "human" && node.human?.target
                   ? node.human.title
                   : undefined
               }
-              className={`rounded px-1.5 py-1 ${
+              className={`rounded px-1.5 py-1 transition-colors duration-300 ${
                 node.kind === "human" && dropHover === node.human?.title
                   ? "bg-cta/10 outline outline-1 outline-cta-bd"
-                  : isCurrent
-                    ? "bg-white/5"
-                    : ""
+                  : flash === node.key
+                    ? "bg-warn/10"
+                    : isCurrent
+                      ? "bg-white/5"
+                      : ""
               }`}
             >
               <div className="flex items-center gap-2">
-                <span className={`w-4 shrink-0 text-center text-xs ${ic.cls}`}>
+                <span
+                  className={`relative w-4 shrink-0 text-center text-xs ${ic.cls}`}
+                >
                   {ic.text}
+                  {pendingDot && (
+                    <button
+                      type="button"
+                      onClick={() => locateHuman(node.key)}
+                      title="这件事还等着你——点击定位到这一行"
+                      aria-label={`待办：${node.human!.title}`}
+                      className="absolute -right-1 -top-1 size-2 rounded-full bg-warn"
+                    />
+                  )}
                 </span>
                 {node.kind === "human" ? (
                   <input
@@ -302,6 +384,26 @@ export default function StepFlow({
         })}
       </ol>
       {note && <p className="mt-1 pl-1 text-[11px] text-ok-text">{note}</p>}
+      {registerOffer && (
+        <p className="mt-1 flex items-center gap-1.5 pl-1 text-[11px] text-l3">
+          要登记为项目资源吗（{registerOffer.destRel}）
+          <button
+            type="button"
+            onClick={() => void registerOffered()}
+            className="rounded border border-field px-1.5 py-0.5 text-l2 hover:bg-white/5 hover:text-l1"
+          >
+            登记
+          </button>
+          <button
+            type="button"
+            onClick={dismissRegisterOffer}
+            title="不登记，文件已在落点目录里"
+            className="rounded px-1 py-0.5 text-l4 hover:bg-white/5 hover:text-l1"
+          >
+            不了
+          </button>
+        </p>
+      )}
       {error && <p className="mt-1 pl-1 text-[11px] text-err-text">{error}</p>}
     </div>
   );

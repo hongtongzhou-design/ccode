@@ -203,7 +203,7 @@ export function pendingHumanTasks(
   return states.filter((s) => s.step === stepName && !s.done);
 }
 
-/** 「等你做 N 件」口径（当前步骤条）：只数现在轮到人的——before/during 未完成恒算；
+/** 「等你做 N 件」口径（流程线 human 节点橙点）：只数现在轮到人的——before/during 未完成恒算；
  *  after（收尾）档在 agent 未完成前还轮不到人，不算（agentDone = 待评审/已合并后才计入） */
 export function actionableHumanTasks(
   states: HumanTaskStateDto[],

@@ -672,3 +672,65 @@ export interface McpServerDto {
   /** agent id → 是否分发到其用户级配置 */
   apps: Record<string, boolean>;
 }
+
+// ===== 定时雷达（src-tauri/src/scheduler.rs） =====
+
+/** 单次运行记录（status: "ok" | "error"；at 为 ISO 时间） */
+export interface RunRecordDto {
+  at: string;
+  status: string;
+  /** 脱敏后截断的简报/错误信息 */
+  summary: string;
+}
+
+/** 定时任务（serde camelCase）；skill 目前固定 "lit-watch" */
+export interface ScheduleDto {
+  id: string;
+  name: string;
+  /** 项目根绝对路径（任务 cwd） */
+  projectRoot: string;
+  skill: string;
+  /** null = 每次运行现解析（设置页 AI 专用 profile → 最近使用） */
+  profileId: string | null;
+  /** "daily" | "weekly" */
+  frequency: string;
+  /** weekly 时 1-7（周一=1）；daily 忽略 */
+  weekday: number | null;
+  hour: number;
+  minute: number;
+  enabled: boolean;
+  lastRunAt: string | null;
+  lastStatus: string | null;
+  /** 最近 20 条，新的在前 */
+  history: RunRecordDto[];
+}
+
+export interface CreateScheduleInput {
+  name?: string;
+  projectRoot: string;
+  skill?: string;
+  profileId?: string | null;
+  frequency: string;
+  weekday?: number | null;
+  hour: number;
+  minute: number;
+}
+
+/** 更新补丁：字段全可选（不传 = 不改）；profileId 显式传 null = 清掉指定 profile 回到现解析 */
+export interface UpdateSchedulePatch {
+  name?: string;
+  profileId?: string | null;
+  frequency?: string;
+  weekday?: number | null;
+  hour?: number;
+  minute?: number;
+  enabled?: boolean;
+}
+
+/** scheduler-run-done 事件载荷（summary 已脱敏） */
+export interface SchedulerRunDonePayload {
+  scheduleId: string;
+  projectRoot: string;
+  status: string;
+  summary: string;
+}

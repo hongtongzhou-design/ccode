@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
 import PipelineEditor from "./PipelineEditor";
@@ -11,6 +12,7 @@ import ArtifactChecklist, {
   formatSize,
 } from "./ArtifactChecklist";
 import TaskCardsSection from "./TaskCardsSection";
+import ScheduleSection from "./ScheduleSection";
 import KickoffConfirmDialog from "./KickoffConfirmDialog";
 import { Checkbox, hoverRevealClass } from "./PageFrame";
 import { useAppStore } from "../store";
@@ -327,7 +329,8 @@ function deriveStepStatus(
 
 /**
  * 工作区页的项目分组（§11.4 P1b）：分组头 + 研究流程 strip + 资源面板。
- * 工作区行列表由 WorkspacesPage 作为 children 传入，本组件只管项目层 chrome。
+ * 工作区行列表由 WorkspacesPage 作为 children（render prop）传入：本组件把聚焦步骤名
+ * 与步骤表回传给父级，工作区列表按聚焦步骤过滤（归属口径 = steps[].workspaceName === 工作区名）。
  */
 export default function ProjectGroup({
   project,
@@ -363,7 +366,17 @@ export default function ProjectGroup({
   /** 未注册分组的「注册项目」：打开与页头「+ 添加项目」相同的注册弹窗（预选该 repo 路径） */
   onRegisterProject: (repoPath: string) => void;
   onError: (msg: string) => void;
-  children: ReactNode;
+  /** 工作区列表渲染（render prop）：回传聚焦视图上下文，父级按步骤过滤列表 */
+  children: (wsView: {
+    /** 聚焦步骤名（null = 总览：显示项目全量工作区） */
+    focusStepName: string | null;
+    /** 项目步骤表（归属判定用；未注册/未加载 = 空表） */
+    steps: ProjectStepDto[];
+    /** 用户点了「全部」（focusStep === -1）：忽略聚焦显示全量 */
+    showAll: boolean;
+    /** 「全部」⇄「按步骤」切换 */
+    onToggleShowAll: () => void;
+  }) => ReactNode;
 }) {
   const registered = project !== null;
   const projectPath = project?.path ?? repoPath;
@@ -546,7 +559,7 @@ export default function ProjectGroup({
   // 步骤聚焦（v3.70）：null = 跟随当前步骤（第一个未完成）；-1 = 显示全部；其余 = 指定步骤。
   // 大圆点击设置，卡片区只渲染聚焦步骤的种子/卡片/人工事项
   const [focusStep, setFocusStep] = useState<number | null>(null);
-  // 人工事项派生状态（当前步骤条与 ⋯ 菜单计数用；清单本体自取自刷，操作后经回调重取这里）
+  // 人工事项派生状态（流程线橙点与 ⋯ 菜单计数用；清单本体自取自刷，操作后经回调重取这里）
   const [humanStates, setHumanStates] = useState<HumanTaskStateDto[] | null>(
     null,
   );
@@ -626,7 +639,7 @@ export default function ProjectGroup({
   }
 
   /** 大圆点击 = 步骤聚焦（v3.70，用户拍板：圆的终端入口语义删除——跳终端/开步/恢复分别由
-   *  当前步骤条、卡片行、任务行承担）：点圆 = 下方卡片区只看这一步（种子/卡片/人工事项） */
+   *  流程线节点、卡片行、任务行承担）：点圆 = 下方卡片区只看这一步（种子/卡片/人工事项） */
   function onCircleClick(index: number) {
     setFocusStep(index);
   }
@@ -801,6 +814,50 @@ export default function ProjectGroup({
     index: number;
   } | null>(null);
   const [gitignoreHint, setGitignoreHint] = useState(false);
+  // 检索结果导入（papers/imports/ 人肉中转入口）的行内提示：换掉或手动关掉即消
+  const [importMsg, setImportMsg] = useState<string | null>(null);
+
+  /** 导入检索结果：多选 RIS/BibTeX/CSV/TXT 复制进项目根的 papers/imports/
+   *  （import_human_deliverable 无步骤语境 = 纯导入落主仓，不登记提货单） */
+  async function importSearchResults() {
+    const selected = await open({
+      multiple: true,
+      directory: false,
+      title: "选择导出的检索结果文件",
+      filters: [
+        {
+          name: "检索结果（RIS / BibTeX / CSV / TXT）",
+          extensions: ["ris", "bib", "csv", "txt"],
+        },
+      ],
+    });
+    const paths = Array.isArray(selected)
+      ? selected
+      : typeof selected === "string"
+        ? [selected]
+        : [];
+    if (paths.length === 0) return;
+    let ok = 0;
+    for (const p of paths) {
+      try {
+        await invoke("import_human_deliverable", {
+          projectRoot: projectPath,
+          step: null,
+          title: null,
+          sourcePath: p,
+          targetOverride: "papers/imports/",
+        });
+        ok++;
+      } catch (reason) {
+        onError(String(reason));
+      }
+    }
+    if (ok > 0) {
+      setImportMsg(
+        `已放入 papers/imports/（${ok} 个文件），agent 开工时会自动解析、去重并合并进筛选清单`,
+      );
+    }
+  }
 
   async function discoverResources() {
     if (!project) return;
@@ -874,7 +931,7 @@ export default function ProjectGroup({
   const profiles = useAppStore((s) => s.profiles);
   // 步进器大圆的注意力点：终端运行状态镜像（TerminalPage 唯一写入方，只读消费）
   const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
-  // 任务卡（当前步骤条「待开始」文案按是否有定稿简报分情境；TaskCardsSection 负责加载，这里只读）
+  // 任务卡（聚焦头部「待开始」文案按是否有定稿简报分情境；TaskCardsSection 负责加载，这里只读）
   const taskCards = useAppStore((s) => s.taskCards[projectPath]);
   function viewPdfResource(r: ProjectResourceDto) {
     setPreviewReq({
@@ -935,82 +992,91 @@ export default function ProjectGroup({
     ) ?? [];
   const allStepsDone =
     stepDoneFlags.length > 0 && stepDoneFlags.every(Boolean);
-  // 当前步骤 = 第一个未完成步骤（全部完成 → null，当前步骤条不渲染）。
-  // 主按钮与大圆同语义（唯一主推进动作）；待评审/阻塞时直达评审覆盖层（比跳终端少一步）
+  /** 步骤状态快照：白话状态短语 + 主推进动作（聚焦头部与流程线节点入口共用口径；
+   *  待评审/阻塞时直达评审覆盖层，比跳终端少一步）。done 步骤无动作 */
+  const describeStep = (i: number) => {
+    if (!cfg) return null;
+    const step = cfg.steps[i];
+    const st = deriveStepStatus(step, workspaces, health, drift);
+    const goReview = (intent?: "resolve-conflict") => () => {
+      if (!st.ws) return;
+      setWorkspaceReviewRequest({
+        worktreePath: st.ws.worktreePath,
+        action: intent,
+        requestId: crypto.randomUUID(),
+      });
+      setPage("terminal");
+    };
+    const base = { index: i, step, st };
+    switch (st.key) {
+      case "pending":
+        return st.ws
+          ? {
+              ...base,
+              statusText: "工作区已归档",
+              actionLabel: "恢复工作区",
+              action: (() => void restoreWs(st.ws!)),
+            }
+          : {
+              ...base,
+              // 情境化引导（顺序引导 A）：本步骤有定稿简报 = 想法聊透了；
+              // 没有则建议先点种子——不阻断，「开始」始终可用
+              statusText: (taskCards ?? []).some(
+                (c) => c.step === step.name && c.briefs.length > 0,
+              )
+                ? "想法已就位，可以开始"
+                : "待开始 · 建议先点下方种子聊聊",
+              actionLabel: "开始",
+              action: (() => void startStep(i)),
+            };
+      case "review":
+        return {
+          ...base,
+          statusText: "agent 做完了，待你评审",
+          actionLabel: "去评审",
+          action: goReview(),
+        };
+      case "blocked":
+        return {
+          ...base,
+          statusText: "有合并冲突待处理",
+          actionLabel: "去处理冲突",
+          action: goReview("resolve-conflict"),
+        };
+      case "checking":
+        return {
+          ...base,
+          statusText: "状态检查中",
+          actionLabel: "去终端",
+          action: (() => {
+            if (st.ws) onOpenTerminal(st.ws);
+          }),
+        };
+      case "done":
+        return {
+          ...base,
+          statusText: "已完成",
+          actionLabel: null,
+          action: null,
+        };
+      default:
+        return {
+          ...base,
+          statusText: "agent 进行中",
+          actionLabel: "去终端",
+          action: (() => {
+            if (st.ws) onOpenTerminal(st.ws);
+          }),
+        };
+    }
+  };
+  // 当前步骤 = 第一个未完成步骤（步进器亮环回落与默认聚焦用；全部完成 → null）
   const currentStep = (() => {
     if (!cfg) return null;
     for (let i = 0; i < cfg.steps.length; i++) {
-      const step = cfg.steps[i];
-      const st = deriveStepStatus(step, workspaces, health, drift);
-      if (st.key === "done") continue;
-      // 「等你做」只数现在轮到人的：after（收尾）档在 agent 完成前还轮不到人，不计入
-      const pendingHuman = humanStates
-        ? actionableHumanTasks(
-            humanStates,
-            step.name,
-            st.key === "review" || st.key === "blocked",
-          ).length
-        : 0;
-      const goReview = (intent?: "resolve-conflict") => () => {
-        if (!st.ws) return;
-        setWorkspaceReviewRequest({
-          worktreePath: st.ws.worktreePath,
-          action: intent,
-          requestId: crypto.randomUUID(),
-        });
-        setPage("terminal");
-      };
-      const base = { index: i, step, pendingHuman };
-      switch (st.key) {
-        case "pending":
-          return st.ws
-            ? {
-                ...base,
-                statusText: "工作区已归档",
-                actionLabel: "恢复工作区",
-                action: () => void restoreWs(st.ws!),
-              }
-            : {
-                ...base,
-                // 情境化引导（顺序引导 A）：本步骤有定稿简报 = 想法聊透了；
-                // 没有则建议先点种子——不阻断，「开始」按钮始终可用
-                statusText: (taskCards ?? []).some(
-                  (c) => c.step === step.name && c.briefs.length > 0,
-                )
-                  ? "想法已就位，可以开始"
-                  : "待开始 · 建议先点下方种子聊聊",
-                actionLabel: "开始",
-                action: () => void startStep(i),
-              };
-        case "review":
-          return {
-            ...base,
-            statusText: "agent 做完了，待你评审",
-            actionLabel: "去评审",
-            action: goReview(),
-          };
-        case "blocked":
-          return {
-            ...base,
-            statusText: "有合并冲突待处理",
-            actionLabel: "去处理冲突",
-            action: goReview("resolve-conflict"),
-          };
-        case "checking":
-          return {
-            ...base,
-            statusText: "状态检查中",
-            actionLabel: "去终端",
-            action: () => st.ws && onOpenTerminal(st.ws),
-          };
-        default:
-          return {
-            ...base,
-            statusText: "agent 进行中",
-            actionLabel: "去终端",
-            action: () => st.ws && onOpenTerminal(st.ws),
-          };
-      }
+      const d = describeStep(i)!;
+      if (d.st.key === "done") continue;
+      return d;
     }
     return null;
   })();
@@ -1018,7 +1084,7 @@ export default function ProjectGroup({
   const focusStepName = (() => {
     if (!cfg) return null;
     if (focusStep === -1) return null;
-    if (focusStep !== null) return (cfg.steps[focusStep]?.name ?? null) as string | null;
+    if (focusStep !== null) return (cfg.steps[focusStep]?.name ?? null);
     return currentStep?.step.name ?? null;
   })();
   // 聚焦步骤的执行状态（流程线 agent/评审节点用）：deriveStepStatus 六态映射到流程线四态
@@ -1031,6 +1097,25 @@ export default function ProjectGroup({
     if (st.key === "review" || st.key === "blocked") return "review" as const;
     if (st.key === "active" || st.key === "checking") return "active" as const;
     return "pending" as const;
+  })();
+  // 聚焦步骤的完整快照：聚焦头部状态短语 + 流程线动作入口（恢复工作区/冲突意图）共用
+  const focusDesc = (() => {
+    if (!cfg || !focusStepName) return null;
+    const i = cfg.steps.findIndex((s) => s.name === focusStepName);
+    return i >= 0 ? describeStep(i) : null;
+  })();
+  // 聚焦步骤的已归档工作区（pending + ws）：流程线 agent 节点此时主入口是「恢复工作区」而非「开始」
+  const focusArchivedWs =
+    focusDesc && focusDesc.st.key === "pending" ? (focusDesc.st.ws ?? null) : null;
+  // 「等你做」口径按节点粒度传给流程线：有待办的 human 节点旁上橙点。
+  // 只数现在轮到人的——after（收尾）档在 agent 完成前还轮不到人，不计入
+  const focusHumanPending = (() => {
+    if (!focusStepName || !humanStates || !focusDesc) return [];
+    return actionableHumanTasks(
+      humanStates,
+      focusStepName,
+      focusDesc.st.key === "review" || focusDesc.st.key === "blocked",
+    ).map((s) => s.title);
   })();
   return (
     // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给研究流程等必要块
@@ -1383,7 +1468,7 @@ export default function ProjectGroup({
                     // 状态/目录/agent + 点击动作提示并入悬浮全文（白话双层），圆上只留状态色
                     // 注意力角标：cwd 落在工作区内的终端标签有待确认/已完成时上点（confirm 优先）
                     const attention = stepAttention(activeWs, terminalRunInputs);
-                    // 点击 = 聚焦该步骤（下方卡片区只看这一步）；推进动作归当前步骤条/卡片行/任务行
+                    // 点击 = 聚焦该步骤（下方卡片区只看这一步）；推进动作归流程线节点/卡片行/任务行
                     const circleTitle = [
                       `${step.name} · ${statusLabel}`,
                       activeWs
@@ -1452,7 +1537,7 @@ export default function ProjectGroup({
         <div className="mb-3 flex items-center gap-2 rounded-md bg-inset px-3 py-1.5 text-xs text-l3">
           <span className="min-w-0 flex-1">
             研究流程已就位——建议先点卡片区「开工前聊聊」的种子问题，跟 Agent
-            把方向聊透（◈ 提炼定稿会自动带进 TASK.md），想清楚了再从第 1 步开始
+            把方向聊透（结论直接写进任务书草稿，开工时草稿就是 TASK.md），想清楚了再从第 1 步开始
           </span>
           <button
             type="button"
@@ -1460,37 +1545,6 @@ export default function ProjectGroup({
             className={`${actionBtn} shrink-0 text-l4 hover:text-l1`}
           >
             知道了
-          </button>
-        </div>
-      )}
-
-      {/* 当前步骤条（「现在该干嘛」的单一答案）：第一个未完成步骤 = 状态白话 + 你的待办 + 一个主按钮；
-          全部完成或不适用（未注册/无研究流程）时不渲染，保持安静 */}
-      {registered && cfg && cfg.steps.length > 0 && currentStep && (
-        <div className="mb-3 flex h-8 items-center gap-2 rounded-md bg-strip px-3 text-xs">
-          <span className="shrink-0 text-l4">
-            第 {currentStep.index + 1}/{cfg.steps.length} 步
-          </span>
-          <span className="min-w-0 truncate font-medium text-l1">
-            {currentStep.step.name}
-          </span>
-          <span className="shrink-0 text-l3">{currentStep.statusText}</span>
-          {currentStep.pendingHuman > 0 && (
-            <button
-              type="button"
-              onClick={() => setFocusStep(currentStep.index)}
-              title="聚焦这一步：归你做的事在下方流程线里，当前节点已高亮"
-              className="shrink-0 rounded-full border border-warn/40 bg-warn/10 px-2 py-0.5 text-[11px] font-medium text-warn-text hover:bg-warn/20"
-            >
-              等你做 {currentStep.pendingHuman} 件
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={currentStep.action}
-            className={`ml-auto shrink-0 ${actionBtn} border border-field`}
-          >
-            {currentStep.actionLabel}
           </button>
         </div>
       )}
@@ -1510,7 +1564,7 @@ export default function ProjectGroup({
       )}
 
       {/* 任务卡区（研究流程步进器下方）：对话的文件夹 + 定稿简报收集夹；无独立状态机，不碰工作区/评审流程。
-          v3.70 起按 focusStep 聚焦：默认只看当前步骤，点大圆切步骤，「显示全部」还原 */}
+          v3.70 起按 focusStep 聚焦：默认只看当前步骤，点大圆切步骤，「总览全部步骤」还原 */}
       {registered && cfg && (
         <TaskCardsSection
           projectPath={projectPath}
@@ -1520,7 +1574,13 @@ export default function ProjectGroup({
           refreshToken={refreshToken}
           mainDirty={mainDirty}
           focusStep={focusStepName}
+          focusStatusText={focusDesc?.statusText ?? null}
           focusRunStatus={focusRunStatus}
+          focusHumanPending={focusHumanPending}
+          reviewConflict={focusDesc?.st.key === "blocked"}
+          onRestoreWorkspace={
+            focusArchivedWs ? () => void restoreWs(focusArchivedWs) : undefined
+          }
           onClearFocus={() => setFocusStep(-1)}
           onHumanChanged={loadHumanStates}
           onStartStep={(index, originCardId) => startStep(index, originCardId)}
@@ -1559,6 +1619,16 @@ export default function ProjectGroup({
                 onClick={() => void discoverResources()}
               >
                 {discoverLoading ? "扫描中…" : "发现资源"}
+              </button>
+            )}
+            {resOpen && (
+              <button
+                type="button"
+                className={actionBtn}
+                title="从 Undermind / Consensus / Elicit 等导出 RIS/BibTeX/CSV 后导入（可多选），落主仓 papers/imports/，开工时 agent 自动解析合并；建议文件名带 来源-日期（如 consensus-2026-08-13.ris）"
+                onClick={() => void importSearchResults()}
+              >
+                导入检索结果
               </button>
             )}
           </div>
@@ -1706,6 +1776,21 @@ export default function ProjectGroup({
                   )}
                 </div>
               )}
+              {importMsg && (
+                <div className="mt-2 flex items-center gap-2 rounded bg-inset p-2 text-xs text-l2">
+                  <span className="min-w-0 flex-1">
+                    <span className="mr-1 text-ok-text">✓</span>
+                    {importMsg}
+                  </span>
+                  <button
+                    type="button"
+                    className={`${actionBtn} shrink-0`}
+                    onClick={() => setImportMsg(null)}
+                  >
+                    知道了
+                  </button>
+                </div>
+              )}
               {gitignoreHint && (
                 <div className="mt-2 flex items-center gap-2 rounded bg-inset p-2 text-xs text-l2">
                   <span className="min-w-0 flex-1">
@@ -1726,7 +1811,15 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {children}
+      {/* 定时任务区块（scheduler.rs）：只显示 projectRoot 命中本项目的任务，运行完成走 scheduler-run-done 事件刷新 */}
+      {registered && <ScheduleSection projectRoot={projectPath} />}
+
+      {children({
+        focusStepName,
+        steps: cfg?.steps ?? [],
+        showAll: focusStep === -1,
+        onToggleShowAll: () => setFocusStep((v) => (v === -1 ? null : -1)),
+      })}
       </div>
 
       {projectMenu && project && (

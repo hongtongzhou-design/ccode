@@ -1,9 +1,13 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  isPermissionGranted,
   onAction,
   registerActionTypes,
+  requestPermission,
+  sendNotification,
 } from "@tauri-apps/plugin-notification";
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
@@ -12,6 +16,8 @@ import { LoadingRows, rowActionClass } from "./components/PageFrame";
 import "./App.css";
 import { useAppStore, runInboxAction } from "./store";
 import { groupInbox, type InboxCategory } from "./inbox";
+import { runDoneNotifyBody, runDoneNotifyTitle } from "./schedule-tasks";
+import type { SchedulerRunDonePayload } from "./types";
 import {
   eventMatchesCombo,
   comboLabel,
@@ -59,6 +65,21 @@ const NAV_GROUPS = [
 
 // 底部管理区只保留设置（统计归入「能力」组）
 const NAV_BOTTOM = [{ id: "settings", label: "设置", icon: "⛭" }] as const;
+
+/** 路径末段作项目名（通知标题用；与 WorkspacesPage pathBaseName 同口径） */
+function baseName(path: string): string {
+  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
+/** 定时雷达运行完成的系统通知：复用通知权限申请模式（首次系统级弹窗，被拒静默跳过）。
+ *  遵守「长任务 OS 通知」设置开关（notificationsEnabled），不新增设置项。 */
+async function fireScheduleNotification(title: string, body: string) {
+  let granted = await isPermissionGranted();
+  if (!granted) granted = (await requestPermission()) === "granted";
+  if (!granted) return;
+  sendNotification({ title, body });
+}
 
 /** 页切顺序/逐页绑定/默认值的单一出处在 hotkeys.ts PAGE_HOTKEY_DEFS（与侧栏工作→能力→管理一致） */
 
@@ -193,6 +214,23 @@ function App() {
       .catch(() => {});
     return () => unregister?.();
   }, [setPage, setFocusTabReq]);
+
+  // 定时雷达运行完成 → OS 通知（scheduler.rs 的 scheduler-run-done；summary 后端已脱敏）。
+  // 只负责通知：工作区页 ScheduleSection 自行监听同一事件刷新列表。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<SchedulerRunDonePayload>("scheduler-run-done", (e) => {
+      const enabled = useAppStore.getState().settings?.notificationsEnabled ?? true;
+      if (!enabled) return;
+      void fireScheduleNotification(
+        runDoneNotifyTitle(baseName(e.payload.projectRoot), e.payload.status),
+        runDoneNotifyBody(e.payload.summary),
+      );
+    })
+      .then((u) => (unlisten = u))
+      .catch(() => {});
+    return () => unlisten?.();
+  }, []);
 
   useEffect(() => {
     loadAll().catch((e) => console.error(e));

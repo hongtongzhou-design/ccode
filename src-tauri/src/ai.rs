@@ -27,7 +27,7 @@ pub const FN_TRANSLATE: &str = "translate";
 /// 显式 id 优先；其次该功能的专属 profile（ai_profiles[fn_key]）；再次设置页 AI 专用 profile；
 /// 最后最近使用（last_used_at 最新）；一个都没有才报错。
 /// 功能专属 id 已失效（被删）视为不存在继续回落；显式/全局专用 id 失效仍明确报错
-fn resolve_profile_from(
+pub(crate) fn resolve_profile_from(
     profiles: Vec<Profile>,
     profile_id: Option<String>,
     fn_profile_id: Option<String>,
@@ -74,6 +74,16 @@ fn headless_args(agent: &str, prompt: &str) -> Vec<String> {
     }
 }
 
+/// 定时任务（scheduler）的无头参数：与 headless_args 同形，唯一区别是 codex 用
+/// workspace-write 沙箱——定时任务要在项目里写文件（如 lit-watch 的 notes/inbox.md、
+/// papers/watch-seen.md），read-only 跑不了
+pub(crate) fn headless_task_args(agent: &str, prompt: &str) -> Vec<String> {
+    match agent {
+        "codex" => vec!["exec".into(), "--skip-git-repo-check".into(), "-s".into(), "workspace-write".into(), prompt.into()],
+        other => headless_args(other, prompt),
+    }
+}
+
 // ===== 进程执行（不走 PTY；stdout/stderr 各开线程读，超时 kill 并返回部分输出） =====
 
 fn tail_chars(text: &str, max: usize) -> String {
@@ -85,7 +95,7 @@ fn tail_chars(text: &str, max: usize) -> String {
     }
 }
 
-fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -> Result<String, String> {
+pub(crate) fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -> Result<String, String> {
     // stdin 置空：GUI 环境无控制终端，子进程若读 stdin 会永久挂起
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("启动 agent 失败: {e}"))?;
@@ -128,7 +138,8 @@ fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -
                     let out = String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
                     let err = String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
                     return Err(format!(
-                        "AI 调用超时（120s）。部分输出:\n{}",
+                        "AI 调用超时（{}s）。部分输出:\n{}",
+                        timeout.as_secs(),
                         tail_chars(format!("{out}\n{err}").trim(), 4000)
                     ));
                 }
@@ -194,6 +205,38 @@ pub(crate) fn ai_prompt_impl(
     let result = run_capture(&mut cmd, AI_TIMEOUT);
     let _ = fs::remove_dir_all(&cwd);
     result
+}
+
+/// 定时任务执行段（scheduler 用）：与 ai_prompt_impl 同一注入链路，但 cwd 是传入的
+/// 项目目录——不建/删临时目录，也不登记 usage 内部运行：任务跑在用户项目里，
+/// token 本来就该按该项目的正常活动归因。密钥同样只在拉起瞬间读出注入。
+pub(crate) fn run_agent_task(
+    profile: &Profile,
+    prompt: &str,
+    cwd: &std::path::Path,
+    timeout: Duration,
+) -> Result<String, String> {
+    let binary = agents::binary_for(&profile.agent)
+        .ok_or_else(|| format!("profile 所属 agent 不支持无头调用: {}", profile.agent))?;
+    let binary_path = agents::resolve_binary(binary)
+        .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
+    let key = profiles::get_key(&profile.id)?;
+    let plan = agents::launch_plan(profile, key, profile.models.first().map(|s| s.as_str()));
+    let mut cmd = crate::process::background_command(&binary_path);
+    for a in &plan.args {
+        cmd.arg(a);
+    }
+    for a in headless_task_args(&profile.agent, prompt) {
+        cmd.arg(a);
+    }
+    for (k, v) in &plan.env {
+        cmd.env(k, v);
+    }
+    for k in &plan.env_remove {
+        cmd.env_remove(k);
+    }
+    cmd.current_dir(cwd);
+    run_capture(&mut cmd, timeout)
 }
 
 // ===== prompt 构造（纯函数，可测） =====
@@ -892,6 +935,19 @@ mod tests {
         assert_eq!(headless_args("opencode", "你好"), vec!["run", "你好"]);
         assert_eq!(headless_args("codebuddy", "你好"), vec!["-p", "你好"]);
         assert_eq!(headless_args("cursor", "你好"), vec!["-p", "你好", "--output-format", "text"]);
+    }
+
+    #[test]
+    fn headless_task_args_codex_workspace_write_others_same() {
+        // 定时任务要写项目文件（notes/inbox.md 等），codex 必须 workspace-write
+        assert_eq!(
+            headless_task_args("codex", "你好"),
+            vec!["exec", "--skip-git-repo-check", "-s", "workspace-write", "你好"]
+        );
+        // 其余 agent 与 headless_args 同形
+        assert_eq!(headless_task_args("claude-code", "你好"), headless_args("claude-code", "你好"));
+        assert_eq!(headless_task_args("kimi", "你好"), headless_args("kimi", "你好"));
+        assert_eq!(headless_task_args("opencode", "你好"), headless_args("opencode", "你好"));
     }
 
     #[test]
