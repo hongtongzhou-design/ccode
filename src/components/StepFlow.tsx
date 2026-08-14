@@ -20,7 +20,6 @@ export default function StepFlow({
   onChanged,
   draft,
   agentContent,
-  humanPending,
   onRestore,
   reviewConflict,
 }: {
@@ -43,8 +42,6 @@ export default function StepFlow({
   draft?: { relPath: string; exists: boolean };
   /** agent 节点内嵌内容（如「预览 TASK.md」——TASK.md 是 agent 的合同，属于这个节点） */
   agentContent?: React.ReactNode;
-  /** 轮到人做的待办事项标题（ProjectGroup「等你做」口径，节点粒度）：命中的 human 节点行内出「等你做」标签 */
-  humanPending?: string[];
   /** 步骤工作区已归档时 agent 节点的主入口（替代「开始」）：恢复工作区 */
   onRestore?: () => void;
   /** 合并冲突阻塞：评审节点入口改为「去处理冲突」（直达冲突解决意图） */
@@ -232,10 +229,6 @@ export default function StepFlow({
         {flow.nodes.map((node) => {
           const isCurrent = node.key === flow.currentKey;
           const ic = icon(node);
-          // 「等你做」标记：该 human 节点有待办（父级 actionableHumanTasks 口径，节点粒度）
-          const pendingDot =
-            node.kind === "human" &&
-            (humanPending?.includes(node.human!.title) ?? false);
           return (
             <li
               key={node.key}
@@ -286,14 +279,6 @@ export default function StepFlow({
                 >
                   {node.label}
                 </span>
-                {pendingDot && (
-                  <span
-                    className="shrink-0 rounded-sm bg-warn px-1 py-px text-micro text-warn-text"
-                    title="这件事还等着你完成"
-                  >
-                    等你做
-                  </span>
-                )}
                 {isCurrent && !node.done && (
                   <span className="shrink-0 text-micro text-cta">← 当前</span>
                 )}
@@ -328,22 +313,15 @@ export default function StepFlow({
                         预览/编辑草稿
                       </button>
                     )}
-                    {draft && (
+                    {draft?.exists && (
                       <span className="text-xs text-l4">
-                        {draft.exists
-                          ? `已起草 · ${draft.relPath}`
-                          : "还没起草——开聊后 Agent 会创建"}
+                        已起草 · {draft.relPath}
                       </span>
                     )}
                   </div>
                   {/* 讨论入口单一化：种子 + 自定义话题同口径（建卡归档 + 结论直接写草稿进 TASK.md）。
                       桶头不再另设「添加想法」——讨论的事全归这个节点 */}
                   <div className="flex flex-wrap items-center gap-1">
-                    {seeds.length > 0 && (
-                      <span className="text-micro text-l4">
-                        不知道从哪聊起：
-                      </span>
-                    )}
                     {seeds.map((seed) => (
                       <button
                         key={seed}

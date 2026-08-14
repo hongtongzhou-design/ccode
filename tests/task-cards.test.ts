@@ -104,13 +104,11 @@ test("taskMdEditorReduce：脏态防覆盖，重置恢复跟随拼装", () => {
 });
 
 
-// ===== 人工事项与待拍板问题 =====
+// ===== 人工事项 =====
 
 import {
-  actionableHumanTasks,
   blockingHumanTasks,
   closingHumanTasks,
-  extractOpenQuestions,
   humanTimingLabel,
   pendingHumanTasks,
 } from "../src/task-cards.ts";
@@ -158,52 +156,6 @@ test("pending/blocking/closing：按步骤过滤未完成，blocking 只收开�
     ["c"],
   );
 });
-
-test("actionableHumanTasks：after 档在 agent 完成前不算「等你做」", () => {
-  const states = [
-    ht({ title: "补文献", timing: "before" }),
-    ht({ title: "补检索词", timing: "during" }),
-    ht({ title: "下载付费", timing: "after" }),
-  ];
-  assert.deepEqual(
-    actionableHumanTasks(states, "检索", false).map((s) => s.title),
-    ["补文献", "补检索词"],
-    "agent 未完成时 after 档不计入",
-  );
-  assert.deepEqual(
-    actionableHumanTasks(states, "检索", true).map((s) => s.title),
-    ["补文献", "补检索词", "下载付费"],
-    "agent 完成后 after 档计入",
-  );
-});
-
-test("extractOpenQuestions：待拍板小节条目，遇下一标题即止", () => {
-  const md = [
-    "# 简报",
-    "## 目标",
-    "写综述",
-    "## 待拍板",
-    "- 题目用心血管结局还是全适应症？",
-    "- 插图组合三选一",
-    "  缩进行也算条目",
-    "## 下一步",
-    "- 开工",
-  ].join("\n");
-  assert.deepEqual(extractOpenQuestions(md), [
-    "题目用心血管结局还是全适应症？",
-    "插图组合三选一",
-    "缩进行也算条目",
-  ]);
-});
-
-test("extractOpenQuestions：无小节/空小节/### 级别标题", () => {
-  assert.deepEqual(extractOpenQuestions("## 目标\n写综述"), []);
-  assert.deepEqual(extractOpenQuestions("## 待拍板\n\n## 其他\n- x"), []);
-  assert.deepEqual(extractOpenQuestions("### 待拍板问题\n- 选 A 还是 B"), [
-    "选 A 还是 B",
-  ]);
-});
-
 
 test("kind：想法区只收聚焦步骤的 idea 卡，讨论卡区只收 draft 卡", () => {
   const cards = [

@@ -1970,7 +1970,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             return (
             <>
             {/* 列表头部行始终渲染：「新建工作区」入口对无步骤项目与未注册分组同样可用；
-                「全部/按步骤」切换只在有研究步骤时有意义 */}
+                有研究步骤时列表恒跟随聚焦步骤（v3.81 起无「全部」切换） */}
             <div className="flex items-center gap-2 pt-1">
               <span className="text-xs text-l3">
                 {focusStepName
@@ -1978,16 +1978,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   : `工作区（${wsList.length}）`}
               </span>
               <div className="ml-auto flex items-center gap-1">
-                {wsView.steps.length > 0 &&
-                  (focusStepName !== null || wsView.showAll) && (
-                    <button
-                      type="button"
-                      onClick={wsView.onToggleShowAll}
-                      className="rounded-sm px-1.5 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l1"
-                    >
-                      {wsView.showAll ? "按步骤" : "全部"}
-                    </button>
-                  )}
                 <button
                   type="button"
                   onClick={() => setNewWsRepoPath(selectedGroup.repoPath)}

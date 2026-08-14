@@ -90,8 +90,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
   mcp-presets.ts             # MCP 内置预设表（加预设 = 加一条；密钥一律 ${VAR} 引用）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
-  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/会话按卡分组/卡片 kind（idea 想法卡 / draft 讨论卡）过滤与
-                             # 待拍板小节提取（数据源为步骤草稿）（tests/task-cards.test.ts）
+  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/会话按卡分组/卡片 kind（idea 想法卡 / draft 讨论卡）过滤
+                             # （tests/task-cards.test.ts）
   step-flow.ts               # 步骤内协同流程线纯逻辑：种子→before→agent→during→after→评审节点链（tests/step-flow.test.ts）
   schedule-tasks.ts          # 定时任务纯逻辑：周期白话/相对时间/按 projectRoot 过滤（tests/schedule-tasks.test.ts）
   schedule-skill.ts          # 定时巡检「技能」下拉与默认任务名跟随纯逻辑（lit-watch 恒最前/默认「文献雷达」、

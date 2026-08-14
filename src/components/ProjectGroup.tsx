@@ -18,7 +18,7 @@ import { Checkbox, hoverRevealClass } from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import { startPipelineStep } from "../pipeline-start";
-import { actionableHumanTasks, pendingHumanTasks } from "../task-cards";
+import { pendingHumanTasks } from "../task-cards";
 import { normSep } from "../path-utils";
 import type { RunOverviewInput } from "../run-overview";
 import type {
@@ -368,14 +368,10 @@ export default function ProjectGroup({
   onError: (msg: string) => void;
   /** 工作区列表渲染（render prop）：回传聚焦视图上下文，父级按步骤过滤列表 */
   children: (wsView: {
-    /** 聚焦步骤名（null = 总览：显示项目全量工作区） */
+    /** 聚焦步骤名（null = 项目无研究步骤：显示项目全量工作区） */
     focusStepName: string | null;
     /** 项目步骤表（归属判定用；未注册/未加载 = 空表） */
     steps: ProjectStepDto[];
-    /** 用户点了「全部」（focusStep === -1）：忽略聚焦显示全量 */
-    showAll: boolean;
-    /** 「全部」⇄「按步骤」切换 */
-    onToggleShowAll: () => void;
   }) => ReactNode;
 }) {
   const registered = project !== null;
@@ -556,8 +552,8 @@ export default function ProjectGroup({
   const [editorFocus, setEditorFocus] = useState<number | null>(null);
   // 步骤 ⋯「产物核验」手风琴：strip 下方就地展开 ArtifactChecklist，记展开的步骤 index（单开）
   const [artifactsStep, setArtifactsStep] = useState<number | null>(null);
-  // 步骤聚焦（v3.70）：null = 跟随当前步骤（第一个未完成）；-1 = 显示全部；其余 = 指定步骤。
-  // 大圆点击设置，卡片区只渲染聚焦步骤的种子/卡片/人工事项
+  // 步骤聚焦（v3.70）：null = 跟随当前步骤（第一个未完成，全部完成则落最后一步）；其余 = 指定步骤。
+  // 大圆点击与卡片区头部 ‹ › 箭头设置；卡片区恒为单步骤聚焦视图（v3.81 起无总览态）
   const [focusStep, setFocusStep] = useState<number | null>(null);
   // 人工事项派生状态（流程线橙点与 ⋯ 菜单计数用；清单本体自取自刷，操作后经回调重取这里）
   const [humanStates, setHumanStates] = useState<HumanTaskStateDto[] | null>(
@@ -644,7 +640,8 @@ export default function ProjectGroup({
   }
 
   /** 大圆点击 = 步骤聚焦（v3.70，用户拍板：圆的终端入口语义删除——跳终端/开步/恢复分别由
-   *  流程线节点、卡片行、任务行承担）：点圆 = 下方卡片区只看这一步（种子/卡片/人工事项） */
+   *  流程线节点、卡片行、任务行承担）：点圆 = 下方卡片区只看这一步（种子/卡片/人工事项）；
+   *  与卡片区头部 ‹ › 箭头同一切换口径 */
   function onCircleClick(index: number) {
     setFocusStep(index);
   }
@@ -1111,12 +1108,15 @@ export default function ProjectGroup({
     }
     return null;
   })();
-  // 步骤聚焦 → 卡片区过滤的步骤名：显式选择 > 跟随当前步骤；-1 或全部完成 = 显示全部
+  // 步骤聚焦：显式选择 > 跟随当前步骤 > 全部完成时落最后一步；无步骤 = null（卡片区只留「未挂步骤」桶）
+  const focusIndex = (() => {
+    if (!cfg || cfg.steps.length === 0) return null;
+    if (focusStep !== null && cfg.steps[focusStep]) return focusStep;
+    return currentStep?.index ?? cfg.steps.length - 1;
+  })();
   const focusStepName = (() => {
-    if (!cfg) return null;
-    if (focusStep === -1) return null;
-    if (focusStep !== null) return (cfg.steps[focusStep]?.name ?? null);
-    return currentStep?.step.name ?? null;
+    if (!cfg || focusIndex === null) return null;
+    return cfg.steps[focusIndex]?.name ?? null;
   })();
   // 聚焦步骤草稿加载（state 声明在上方 describeStep 之前）：进项目详情/切聚焦/页面刷新时重读，不轮询；
   // 「◈ 融合进任务书」落盘后经 onDraftChanged 回调即刻重读（不等页面刷新）
@@ -1156,16 +1156,6 @@ export default function ProjectGroup({
   // 聚焦步骤的已归档工作区（pending + ws）：流程线 agent 节点此时主入口是「恢复工作区」而非「开始」
   const focusArchivedWs =
     focusDesc && focusDesc.st.key === "pending" ? (focusDesc.st.ws ?? null) : null;
-  // 「等你做」口径按节点粒度传给流程线：有待办的 human 节点旁上橙点。
-  // 只数现在轮到人的——after（收尾）档在 agent 完成前还轮不到人，不计入
-  const focusHumanPending = (() => {
-    if (!focusStepName || !humanStates || !focusDesc) return [];
-    return actionableHumanTasks(
-      humanStates,
-      focusStepName,
-      focusDesc.st.key === "review" || focusDesc.st.key === "blocked",
-    ).map((s) => s.title);
-  })();
   return (
     // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给研究流程等必要块
     <section className="mb-5">
@@ -1535,10 +1525,7 @@ export default function ProjectGroup({
                       .filter(Boolean)
                       .join("\n");
                     // 聚焦选中态：显式选择优先；未选过时当前步骤（第一个未完成）亮环
-                    const selected =
-                      focusStep !== null && focusStep !== -1
-                        ? focusStep === i
-                        : currentStep?.index === i;
+                    const selected = focusIndex === i;
                     return (
                       <StepperCell
                         key={`${i}-${step.name}`}
@@ -1614,7 +1601,7 @@ export default function ProjectGroup({
       )}
 
       {/* 任务卡区（研究流程步进器下方）：对话的归档文件夹（任务书沉淀统一走草稿）；无独立状态机，不碰工作区/评审流程。
-          v3.70 起按 focusStep 聚焦：默认只看当前步骤，点大圆切步骤，「总览全部步骤」还原 */}
+          v3.70 起按 focusStep 聚焦：恒为单步骤视图，点大圆或卡片区头部 ‹ › 箭头切步骤（v3.81 起无总览态） */}
       {registered && cfg && (
         <TaskCardsSection
           projectPath={projectPath}
@@ -1626,7 +1613,6 @@ export default function ProjectGroup({
           focusStep={focusStepName}
           focusStatusText={focusDesc?.statusText ?? null}
           focusRunStatus={focusRunStatus}
-          focusHumanPending={focusHumanPending}
           focusDraft={
             focusDraft && focusDraft.stepName === focusStepName
               ? focusDraft
@@ -1637,7 +1623,7 @@ export default function ProjectGroup({
           onRestoreWorkspace={
             focusArchivedWs ? () => void restoreWs(focusArchivedWs) : undefined
           }
-          onClearFocus={() => setFocusStep(-1)}
+          onFocusIndex={(i) => setFocusStep(i)}
           onHumanChanged={loadHumanStates}
           onStartStep={(index, originCardId) => startStep(index, originCardId)}
         />
@@ -1874,8 +1860,6 @@ export default function ProjectGroup({
       {children({
         focusStepName,
         steps: cfg?.steps ?? [],
-        showAll: focusStep === -1,
-        onToggleShowAll: () => setFocusStep((v) => (v === -1 ? null : -1)),
       })}
       </div>
 

@@ -49,7 +49,6 @@ export function buildStepFlow(args: {
       key: "discuss",
       kind: "discuss",
       label: "任务书：和 Agent 聊出本步任务书",
-      hint: "讨论出的结论直接写进草稿，开工时草稿就是 TASK.md",
       done: hasDraft,
     });
   }

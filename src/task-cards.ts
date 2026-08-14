@@ -135,7 +135,7 @@ export function customTopicsForStep(
     .map((c) => c.name);
 }
 
-// ===== 人工事项（人机分工 checklist）与待拍板问题的纯逻辑 =====
+// ===== 人工事项（人机分工 checklist）的纯逻辑 =====
 
 /** 时机 → 白话标签（before/during/after 之外的一律按并行处理，与后端归一口径一致） */
 export function humanTimingLabel(timing: string): string {
@@ -157,18 +157,6 @@ export function pendingHumanTasks(
   return states.filter((s) => s.step === stepName && !s.done);
 }
 
-/** 「等你做 N 件」口径（流程线 human 节点橙点）：只数现在轮到人的——before/during 未完成恒算；
- *  after（收尾）档在 agent 未完成前还轮不到人，不算（agentDone = 待评审/已合并后才计入） */
-export function actionableHumanTasks(
-  states: HumanTaskStateDto[],
-  stepName: string,
-  agentDone: boolean,
-): HumanTaskStateDto[] {
-  return pendingHumanTasks(states, stepName).filter(
-    (s) => s.timing !== "after" || agentDone,
-  );
-}
-
 /** 开工弹层提醒口径：开工前（before）事项未完成才提示——进行中/收尾的不挡开工 */
 export function blockingHumanTasks(
   states: HumanTaskStateDto[],
@@ -183,25 +171,4 @@ export function closingHumanTasks(
   stepName: string,
 ): HumanTaskStateDto[] {
   return pendingHumanTasks(states, stepName).filter((s) => s.timing === "after");
-}
-
-/** 从任务书草稿 Markdown 提取「## 待拍板」小节的条目（每行一条，去「- 」前缀，遇下一标题即止）。
- *  这是视图而非新存储：条目由 agent/人在草稿里维护，卡片只负责看见 */
-export function extractOpenQuestions(md: string): string[] {
-  const lines = md.split("\n");
-  const out: string[] = [];
-  let inSection = false;
-  for (const line of lines) {
-    const t = line.trim();
-    if (/^#{1,6}\s/.test(t)) {
-      if (inSection) break; // 下一标题 = 小节结束
-      // 「## 待拍板」「### 待拍板问题」都算
-      inSection = /^#{1,6}\s*待拍板/.test(t);
-      continue;
-    }
-    if (!inSection) continue;
-    const item = t.replace(/^[-*]\s+/, "").trim();
-    if (item && !item.startsWith("---")) out.push(item);
-  }
-  return out;
 }
