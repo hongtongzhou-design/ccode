@@ -131,12 +131,12 @@ export function EmptyState({
 }) {
   return (
     <div className="flex min-h-48 flex-col items-center justify-center px-6 py-10 text-center">
-      <div className="mb-3 flex size-9 items-center justify-center text-lg text-l4">
-        ○
-      </div>
-      <p className="text-sm font-medium text-l2">{title}</p>
-      {detail && <div className="mt-1 max-w-md text-xs leading-5 text-l4">{detail}</div>}
-      {action && <div className="mt-4">{action}</div>}
+      {/* 原来这里有个空心圆图标：它不表达任何东西，纯占位。去掉后标题自然成为视觉起点 */}
+      <p className="text-base font-medium text-l1">{title}</p>
+      {detail && (
+        <div className="mt-2 max-w-lg text-xs leading-6 text-l3">{detail}</div>
+      )}
+      {action && <div className="mt-5">{action}</div>}
     </div>
   );
 }
@@ -218,6 +218,46 @@ export function LoadingRows({ compact = false }: { compact?: boolean }) {
       {["w-3/5", "w-full", "w-4/5"].map((width, index) => (
         <div key={index} className={`h-3 rounded-sm bg-inset ${width}`} />
       ))}
+    </div>
+  );
+}
+
+/** 一次性提示条（注册结果、模板已应用、git 引导等）：全站同一副长相。
+ *  原先各页各写一份裸文字或自制 div——ProjectGroup 一个文件里就有 5 份「知道了」条，
+ *  文案长了就散架（顶部 notice 是一行绿字，塞进两句话后既挤又刺眼）。
+ *  版式取自工作区创建成功条：inset 卡片 + 语义色仅用在图标上，正文保持正常前景色。 */
+export function NoticeBar({
+  tone = "ok",
+  children,
+  onDismiss,
+  className = "",
+}: {
+  /** ok = 完成（绿勾）；info = 中性说明（无图标）；warn = 需留意 */
+  tone?: "ok" | "info" | "warn";
+  children: React.ReactNode;
+  /** 给了才显示「知道了」——不给就是随时间自动消失的那种 */
+  onDismiss?: () => void;
+  className?: string;
+}) {
+  const icon =
+    tone === "ok" ? "✓" : tone === "warn" ? "⚠" : null;
+  const iconCls =
+    tone === "ok" ? "text-ok-text" : tone === "warn" ? "text-warn-text" : "";
+  return (
+    <div
+      className={`flex items-start gap-2 rounded-md bg-strip px-3 py-2.5 text-xs leading-5 text-l2 ${className}`}
+    >
+      {icon && <span className={`shrink-0 ${iconCls}`}>{icon}</span>}
+      <span className="min-w-0 flex-1">{children}</span>
+      {onDismiss && (
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="shrink-0 rounded-sm px-1.5 py-0.5 text-l4 hover:bg-hover hover:text-l1"
+        >
+          知道了
+        </button>
+      )}
     </div>
   );
 }

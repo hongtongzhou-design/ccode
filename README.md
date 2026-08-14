@@ -11,20 +11,20 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" /></a>
 </p>
 
-**AI 科研工作台**（桌面应用，Tauri v2 + React/TS + Rust）：底层是八个终端 agent 的统一控制台（启动器 + 配置中心 + 会话监控台），表面是科研流程（读文献 → 整数据 → 做图 → 写论文）。AI 负责干活，Ccode 负责管活，人负责拍板。
+**AI 科研工作台**（桌面应用，Tauri v2 + React/TS + Rust）：底层是九个终端 agent 的统一控制台（启动器 + 配置中心 + 会话监控台），表面是科研流程（读文献 → 整数据 → 做图 → 写论文）。AI 负责干活，Ccode 负责管活，人负责拍板。
 
-为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI 八个终端 agent 管理多套 API 配置（端点/密钥/模型）与官方账号登录，内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览；在此之上提供项目研究流程（模板 + 一键开步）、任务工作区评审、PDF/笔记阅读写作与用量成本统计。
+为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI、Grok Build 九个终端 agent 管理多套 API 配置（端点/密钥/模型）与官方账号登录，内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览；在此之上提供项目研究流程（模板 + 一键开步）、任务工作区评审、PDF/笔记阅读写作与用量成本统计。
 
 ## 功能
 
 - **配置中心（⇄）**：agent × profile 多配置管理（API 配置 + 官方账号双轨），多模型切换，密钥 0600 本地存储绝不回显；默认启动注入环境变量（零污染），可选「设为全局默认」（写前备份）；CLI 安装/更新一键完成
 - **工作区（⛁）**：任务级 git worktree 隔离（`ccode/<任务名>` 分支），多任务并行互不污染；`.ccode/settings.toml` 项目自动化（files-to-copy、setup/archive 脚本、端口段注入）；评审流：任务 diff、逐 hunk 验收、健康状态、本地合并、gh PR；项目注册后按研究流程分组（`.ccode/project.toml` 档案卡 + 模板库 + 一键开步 + 资源面板 + 提货单 artifacts.yaml）
 - **终端（⌨）**：内嵌 xterm.js 多标签终端（支持分屏对照与专注模式），agent 退出自动回落登录 shell、会话可一键恢复；Monaco 文件预览/编辑 + Markdown 阅读版式与沉浸阅读 + PDF/docx 内嵌预览（选段「◈ 问 AI」「整理为笔记」）+ git 改动面板 + ⌘F 输出搜索；◈ AI 生成提交信息、「◈ 接力到…」跨 Agent 交接
-- **会话（◔）**：解析八个 CLI 的本地会话文件做结构化回放（含外部终端里运行的会话）；按研究步骤分组、pin 快照保留、标签/归档/搜索、批量删除、◈ AI 摘要、Markdown 导出
-- **技能（✦）**：Skills 统一库 + 八 CLI 分发（symlink/copy），目录/ZIP/GitHub 四路导入，ZIP 导出；新建/编辑与「◈ 优化」让 Agent 迭代技能
+- **会话（◔）**：解析九个 CLI 的本地会话文件做结构化回放（含外部终端里运行的会话）；按研究步骤分组、pin 快照保留、标签/归档/搜索、批量删除、◈ AI 摘要、Markdown 导出
+- **技能（✦）**：Skills 统一库 + 九 CLI 分发（symlink/copy），目录/ZIP/GitHub 四路导入，ZIP 导出；新建/编辑与「◈ 优化」让 Agent 迭代技能
 - **统计（◫）**：token 用量与费用统计（官方价口径，官方账号显示「订阅」，$/¥ 切换），agent 占比进度条、项目/模型分布、任务成本按工作区归因
-- **设置（⛭）**：七套深色 + 七套浅色主题、终端字体/调色板、AI 专用配置、长任务 OS 通知、应用内自动更新、诊断日志
-- **工作台体验**：「待你处理」首页收件箱聚合冲突/待确认/可合并/已完成待拍板事项；⌘K 命令面板 + ⌘1–⌘7 页切；研究流程大圆步进器直观表达步骤状态与点按推进；首启可一键创建示例课题（演示研究流程 + 示例 PDF + 引文）
+- **设置（⛭）**：七套深色 + 七套浅色共十四套主题、终端字体/调色板、AI 专用配置、长任务 OS 通知、应用内自动更新、诊断日志
+- **工作台体验**：「待你处理」首页收件箱聚合冲突/待确认/可合并/已完成待拍板事项；⌘K 命令面板 + ⌘1–⌘8 页切；研究流程大圆步进器直观表达步骤状态与点按推进；首启可一键创建示例课题（演示研究流程 + 示例 PDF + 引文）
 
 ## 安装
 
@@ -54,7 +54,7 @@
 - [docs/user-guide.md](docs/user-guide.md) — 使用手册（完整操作流程）
 - [CHANGELOG.md](CHANGELOG.md) — 版本更新日志
 - [docs/architecture.md](docs/architecture.md) — 架构设计与决策记录
-- [docs/agent-integration-matrix.md](docs/agent-integration-matrix.md) — 八个 CLI 的 env/配置/会话格式调研
+- [docs/agent-integration-matrix.md](docs/agent-integration-matrix.md) — 九个 CLI 的 env/配置/会话格式调研
 - [AGENTS.md](AGENTS.md) — 开发约定与踩坑记录
 
 ## 开发

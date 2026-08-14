@@ -3414,6 +3414,10 @@ pub(crate) fn open_db() -> Result<Connection, String> {
         .join("ccode");
     fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
     let conn = Connection::open(dir.join("app.db")).map_err(|e| format!("打开 app.db 失败: {e}"))?;
+    // 与 projects::db_at / workspaces::db_at 同一口径（同一个 app.db）：不设等待窗口时
+    // 本连接是并发写下最先吃 SQLITE_BUSY 的那个（session_meta / card_claims 的写入走这里）
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("设置 app.db 等待时间失败: {e}"))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_meta(
           agent TEXT NOT NULL, session_id TEXT NOT NULL,

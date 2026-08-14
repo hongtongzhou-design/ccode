@@ -36,7 +36,7 @@ outputs: [papers/]
 Elicit / Undermind / X-MOL / Google Scholar 等闭源站点无法程序化检索时，由用户在网页端检索并导出 RIS / BibTeX / CSV：
 
 1. 导出文件放入项目 `papers/imports/`，命名「来源-日期」，如 `elicit-20260812.ris`；
-2. Agent 负责解析题录、去重、合并进 `papers/screening.md` 候选池与 `references.bib`；
+2. Agent 负责解析题录、去重、合并进 `papers/screening.md` 候选池与 `references.bib`；**导出文件有两个落点，都要看**：工作区内的 `papers/imports/` 目录，以及 TASK.md「项目资源」段里类型为「引文」的条目、「上一步产物（提货单）」段里来自「人工交付」的条目——后两类给的是绝对路径，按路径直读、不要复制进工作区（开工前导入的题录通常在这里，工作区不含主仓未提交的文件）；
 3. 去重口径：DOI 精确匹配优先，标题模糊匹配（忽略大小写与标点）兜底；
 4. 每条记录保留来源标注（如「来源：Elicit 导出」），便于回溯检索渠道。
 

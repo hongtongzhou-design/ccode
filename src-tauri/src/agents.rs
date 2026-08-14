@@ -9,6 +9,10 @@ pub struct DetectResult {
     pub id: String,
     pub binary_path: Option<String>,
     pub version: Option<String>,
+    /// 该 CLI 有进程级只读参数（注册表 readonly_args 非空）。
+    /// false = 「聊想法只读保护」对它只剩 prompt 里的软约束，agent 可以无视——
+    /// UI 据此如实标注，不让开关沉默降级（用户在头脑风暴时最依赖「它不会动我文件」这个假设）
+    pub readonly_supported: bool,
 }
 
 /// 启动计划：env 差异由 adapter 吸收（Codex 没有 base-url 环境变量，只能走 -c 参数）
@@ -960,6 +964,7 @@ fn detect_one(spec: &'static AgentSpec) -> DetectResult {
         id: spec.id.to_string(),
         binary_path,
         version,
+        readonly_supported: !spec.readonly_args.is_empty(),
     }
 }
 

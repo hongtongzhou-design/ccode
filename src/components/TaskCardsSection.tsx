@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { marked } from "marked";
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
 import { hoverRevealClass, LoadingRows, Toggle } from "./PageFrame";
@@ -9,10 +10,11 @@ import FuseDraftModal from "./FuseDraftModal";
 import { useAppStore } from "../store";
 import {
   bucketCardsByStep,
-  customTopicsForStep,
-  ideaCardsForStep,
+  topicCardsForStep,
+  unstartedSeeds,
 } from "../task-cards";
 import { buildTaskMdPreview } from "../pipeline-start";
+import { AGENTS } from "../types";
 import type {
   ProjectConfigDto,
   ProjectStepDto,
@@ -62,6 +64,7 @@ export default function TaskCardsSection({
   onStartStep,
   focusDraft,
   onDraftChanged,
+  onOpenResources,
 }: {
   projectPath: string;
   steps: ProjectStepDto[];
@@ -70,7 +73,8 @@ export default function TaskCardsSection({
   workspaces: WorkspaceDto[];
   /** 页面刷新令牌：评审沉淀等页外写入后随刷新重读 */
   refreshToken: number;
-  /** 主仓未提交改动数（null = 非 git 仓库/未知）：非零时标题行右侧显示协同提醒 */
+  /** 项目文件夹里未存入历史的改动数（null = 非 git 仓库/未知）：非零时标题行右侧提醒。
+   *  「主仓/未提交」是 git 术语，用户看不懂——文案按 user-guide 术语表走白话（提交 = 存入历史） */
   mainDirty: number | null;
   /** 步骤聚焦（v3.70）：聚焦步骤名；null = 项目无研究步骤（只显示「未挂步骤」桶） */
   focusStep?: string | null;
@@ -90,8 +94,10 @@ export default function TaskCardsSection({
   onStartStep: (index: number, originCardId?: string) => Promise<void> | void;
   /** 聚焦步骤的任务书草稿（v3.72；ProjectGroup 单一加载点下发）：discuss 节点状态与「聊任务书」指令用 */
   focusDraft?: { relPath: string; text: string | null } | null;
-  /** 「◈ 融合进任务书」落盘后回调：ProjectGroup 即刻重读 focusDraft（不等页面刷新） */
+  /** 「◈ 沉淀进任务书」落盘后回调：ProjectGroup 即刻重读 focusDraft（不等页面刷新） */
   onDraftChanged?: () => void;
+  /** 展开「文献与数据」面板：流程线里的文献类交付统一引到那里 */
+  onOpenResources?: () => void;
 }) {
   const cards = useAppStore((s) => s.taskCards[projectPath]);
   const loadTaskCards = useAppStore((s) => s.loadTaskCards);
@@ -103,6 +109,16 @@ export default function TaskCardsSection({
   const updateSettings = useAppStore((s) => s.updateSettings);
   // 想法期只读保护开关（settings.json，默认开）
   const discussGuard = useAppStore((s) => s.settings?.discussReadonly !== false);
+  // 只读保护对当前启动栏 agent 是否真的是硬保护（进程级参数）：
+  // qwen/opencode 的注册表 readonly_args 为空，开了也只剩 prompt 软约束，UI 要如实标注。
+  // 能力位来自后端 detect_agents（与 agent_specs 注册表同一出处，不在前端另抄一份名单）
+  const detected = useAppStore((s) => s.agents);
+  const guardAgentId = launchBarAgent();
+  const guardAgentLabel =
+    AGENTS.find((a) => a.id === guardAgentId)?.label ?? guardAgentId;
+  // 探测结果还没回来时按「有硬保护」显示：不在加载中途闪一条吓人的警告
+  const guardHard =
+    detected?.find((a) => a.id === guardAgentId)?.readonlySupported ?? true;
   const [error, setError] = useState<string | null>(null);
   // 新建内联表单（「未挂步骤」桶的「＋ 添加想法」）
   const [creatingIn, setCreatingIn] = useState<string | null>(null);
@@ -116,7 +132,7 @@ export default function TaskCardsSection({
     card: TaskCardDto;
   } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  // 想法区（聚焦态专属）：新建内联表单 + 融合弹层目标卡
+  // 想法区（聚焦态专属）：新建内联表单 + 沉淀弹层目标卡
   const [ideaFormOpen, setIdeaFormOpen] = useState(false);
   const [ideaName, setIdeaName] = useState("");
   const [fusing, setFusing] = useState<TaskCardDto | null>(null);
@@ -126,6 +142,20 @@ export default function TaskCardsSection({
     text: string | null;
   } | null>(null);
   const [skillLib, setSkillLib] = useState<SkillDto[] | null>(null);
+  // TASK.md 预览的呈现方式：默认渲染（要读的是内容），源码一键可见（它是 agent 的合同，
+  // 排查「这句到底怎么写进去的」时要看原文）
+  const [taskMdRaw, setTaskMdRaw] = useState(false);
+  const taskMdHtml = useMemo(
+    () =>
+      taskMdPreview?.text
+        ? marked.parse(taskMdPreview.text, {
+            gfm: true,
+            breaks: false,
+            async: false,
+          })
+        : "",
+    [taskMdPreview?.text],
+  );
 
   useEffect(() => {
     let stale = false;
@@ -143,8 +173,8 @@ export default function TaskCardsSection({
     steps.map((s) => s.name),
   );
   const unattached = buckets.find((b) => b.step === null);
-  /** 聚焦步骤的想法卡（kind=idea，想法区用） */
-  const ideaCards = focusStep ? ideaCardsForStep(cards ?? [], focusStep) : [];
+  /** 聚焦步骤的话题卡（讨论的唯一清单：种子开聊的、决策项开聊的、手动加的都在这儿） */
+  const ideaCards = focusStep ? topicCardsForStep(cards ?? [], focusStep) : [];
   /** 聚焦步骤的声明（人工事项清单/种子用）与序号（头部 ‹ › 箭头用）；聚焦名失效（步骤被删/改名）时 null/-1 */
   const focusStepDto = focusStep
     ? (steps.find((s) => s.name === focusStep) ?? null)
@@ -152,9 +182,9 @@ export default function TaskCardsSection({
   const focusIdx = focusStepDto
     ? steps.findIndex((s) => s.name === focusStepDto.name)
     : -1;
-  /** 聚焦步骤的自定义话题 chips（任务书节点，种子之后）：已建卡的非种子名 draft 卡 */
-  const customTopics = focusStepDto
-    ? customTopicsForStep(
+  /** 还没开聊过的预置话题（讨论种子）：开过的已经在话题清单里，不再出 chip */
+  const openSeeds = focusStepDto
+    ? unstartedSeeds(
         cards ?? [],
         focusStepDto.name,
         focusStepDto.discussionSeeds ?? [],
@@ -176,7 +206,7 @@ export default function TaskCardsSection({
     }
   }
 
-  /** 想法区「＋ 新建想法」：kind=idea、挂当前聚焦步骤；不开聊，只建卡 */
+  /** 想法区「＋ 聊个话题」：kind=idea、挂当前聚焦步骤；不开聊，只建卡 */
   async function submitCreateIdea(e: React.FormEvent) {
     e.preventDefault();
     if (!focusStep) return;
@@ -266,38 +296,17 @@ export default function TaskCardsSection({
       .finally(() => setBusyId(null));
   }
 
-  /** 讨论种子/挂步骤卡「聊想法」点击即聊（v3.72 任务书口径）：以种子问题为名建卡归档
-      （已有同名卡则直接续聊——挂步骤卡的「聊想法」也走这里，topic 可另带讨论问题），
-      非只读启动——讨论出的结论 agent 直接写进任务书草稿（指令约束只许动这一个文件）。
-      开聊同时带开草稿预览（previewPath/previewRoot 交接给终端页右栏） */
+  /** 开聊一个话题（种子 chip / 决策项「开聊」/ 手动加的话题共用；已有同名卡则续聊）。
+   *  与「聊想法」同一口径：**只读开聊**（受想法期只读保护约束），结论不由 agent 直接落盘，
+   *  聊完走「◈ 沉淀进任务书」提炼后追加——讨论入口只此一条，
+   *  「让 agent 直接改草稿」由 discuss 节点的「跟 Agent 聊任务书」单独承担，两者不再重叠 */
   async function onSeed(stepName: string, seed: string, topic?: string) {
     setError(null);
     try {
-      // 草稿路径单一出处在后端（不存在也返回 relPath）
-      const d = await invoke<{ relPath: string }>("read_task_draft", {
-        projectRoot: projectPath,
-        stepName,
-      }).catch(() => null);
       const existing = (cards ?? []).find((c) => c.name === seed);
-      const card = existing ?? (await createCard(projectPath, seed, stepName));
-      claimForCard(card);
-      setPendingTerminal({
-        cwd: projectPath,
-        extraEnv: {},
-        title: card.name,
-        initialPrompt:
-          `我们在完善「${stepName}」这一步的任务书草稿（${d?.relPath ?? ".ccode/drafts/ 下对应步骤的文件"}）。` +
-          `先聊这个问题：${topic ?? seed}。讨论出的结论直接整理进这个草稿文件——只允许新建/修改这一个文件，其他文件一律不要动。` +
-          `讨论中没定下来的问题，记到草稿的「## 待拍板」小节。`,
-        // 开聊时自动带开草稿预览（草稿不存在时预览随后刷新即可见）
-        ...(d?.relPath
-          ? {
-              previewPath: `${projectPath.replace(/[\\/]+$/, "")}/${d.relPath}`,
-              previewRoot: projectPath,
-            }
-          : {}),
-      });
-      setPage("terminal");
+      const card =
+        existing ?? (await createCard(projectPath, seed, stepName, "idea"));
+      onDiscuss(card, false, topic);
     } catch (reason) {
       setError(String(reason));
     }
@@ -359,8 +368,8 @@ export default function TaskCardsSection({
       );
   }
 
-  /** 想法卡行（想法区）：主按钮 = 只读纯聊「聊想法」；「◈ 融合进任务书」只在开工前渲染
-   *  （步骤已有活跃工作区 = runStatus 非 pending 时藏融合，卡仍可续聊） */
+  /** 想法卡行（想法区）：主按钮 = 只读纯聊「聊想法」；「◈ 沉淀进任务书」只在开工前渲染
+   *  （步骤已有活跃工作区 = runStatus 非 pending 时藏沉淀入口，卡仍可续聊） */
   function renderIdeaCard(card: TaskCardDto) {
     const canFuse = (focusRunStatus ?? "pending") === "pending";
     return (
@@ -384,7 +393,7 @@ export default function TaskCardsSection({
               title="AI 把这张卡的讨论结论织进当前步骤的任务书草稿；先出稿给你改，确认后才写入"
               className={`${actionBtn} shrink-0`}
             >
-              ◈ 融合进任务书
+              ◈ 沉淀进任务书
             </button>
           )}
           <button
@@ -431,7 +440,7 @@ export default function TaskCardsSection({
   }
 
   function renderCard(card: TaskCardDto) {
-    // 「开工」是任务书讨论卡（draft）的路径；想法卡（idea）的路径是「◈ 融合进任务书」，不给开工入口
+    // 「开工」是任务书讨论卡（draft）的路径；想法卡（idea）的路径是「◈ 沉淀进任务书」，不给开工入口
     const canStart =
       card.kind === "draft" &&
       card.step !== null &&
@@ -537,17 +546,19 @@ export default function TaskCardsSection({
     <div className="mb-2">
       <div className="flex items-center gap-2">
         <span className="text-xs text-l3">
-          任务卡{cards && cards.length > 0 ? `（${cards.length}）` : ""}
+          {focusStep ? "这一步怎么走" : "任务卡"}
+          {!focusStep && cards && cards.length > 0 ? `（${cards.length}）` : ""}
         </span>
         {/* 主仓改动协同提醒（与开工弹层同款口径，只提醒不阻断）：小 chip 降噪，点击跳改动面板 */}
         {mainDirty !== null && mainDirty > 0 && (
           <button
             type="button"
             onClick={openMainChanges}
-            title="想法期的实验性改动留在主仓，不会带入新工作区；点击查看改动"
-            className="ml-auto shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-micro text-warn-text hover:bg-hover"
+            title={`你在项目文件夹里改了 ${mainDirty} 个文件，还没存入历史（文件本身不会丢）。每一步的 agent 在一份独立副本里干活，只看得到最近一次存入历史的内容——想让它看到这些改动，点这里先存一下`}
+            className="ml-auto flex shrink-0 items-center gap-1 rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2"
           >
-            主仓 {mainDirty} 个未提交改动
+            <span className="inline-block size-1.5 rounded-full bg-warn" />
+            {mainDirty} 处改动未存入历史
           </button>
         )}
         {/* 「想法期只读保护」开关已迁入聚焦态想法区标题行（它只管想法卡的只读纯聊一路） */}
@@ -592,81 +603,90 @@ export default function TaskCardsSection({
         </div>
       )}
       {focusStepDto && (
-        <div className="mt-1 rounded-md bg-strip px-3 py-2.5">
-          {/* 想法区（v3.80，聚焦态专属，独立 strip 区域）：自由想法卡（kind=idea）——只读纯聊 + ◈ 融合进任务书；
-              「想法期只读保护」开关从卡片区总标题行迁来（它只管只读纯聊一路，设置页不加行） */}
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-medium text-l2">
-              想法区{ideaCards.length > 0 ? `（${ideaCards.length}）` : ""}
-            </span>
-            {ideaFormOpen ? (
-              <form
-                onSubmit={(e) => void submitCreateIdea(e)}
-                className="flex min-w-0 flex-1 items-center gap-1"
-              >
-                <input
-                  className={`${fieldSm} min-w-0 flex-1`}
-                  value={ideaName}
-                  onChange={(e) => setIdeaName(e.target.value)}
-                  placeholder="想法名，如 要不要加对照实验"
-                  autoFocus
-                  required
-                />
-                <button type="submit" className={actionBtn}>
-                  确定
-                </button>
-                <button
-                  type="button"
-                  className={actionBtn}
-                  onClick={() => setIdeaFormOpen(false)}
-                >
-                  取消
-                </button>
-              </form>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  setIdeaName("");
-                  setIdeaFormOpen(true);
-                }}
-                title="开一张自由想法卡：只读纯聊，聊完可一键把结论融合进任务书草稿"
-                className={`${actionBtn} text-l4 hover:text-l1`}
-              >
-                ＋ 新建想法
-              </button>
-            )}
-            <span
-              className="ml-auto flex shrink-0 items-center gap-1.5"
-              title="开启后，想法卡的「聊想法」会以只读/计划模式启动 Agent（支持该参数的 CLI），并嘱咐它只讨论不动文件"
-            >
-              <span className="text-micro text-l4">想法期只读保护</span>
-              <Toggle
-                checked={discussGuard}
-                onChange={(checked) =>
-                  void updateSettings({ discussReadonly: checked }).catch((e) =>
-                    setError(String(e)),
-                  )
-                }
-                label="想法期只读保护"
-              />
-            </span>
-          </div>
-          {ideaCards.length > 0 ? (
-            <ul className="mt-1 divide-y divide-hairline">
-              {ideaCards.map(renderIdeaCard)}
-            </ul>
-          ) : (
-            <p className="mt-1 text-micro text-l4">
-              还没有想法。「＋ 新建想法」开一张卡：只读纯聊，聊完可一键把结论融合进任务书草稿。
-            </p>
-          )}
-        </div>
-      )}
-      {focusStepDto && (
         <div className="mt-1">
-          {/* 步骤内协同流程线（v3.71）：人/agent 动作按先后排成节点链，当前节点就地操作 */}
+          {/* 步骤内协同流程线（v3.71）：人/agent 动作按先后排成节点链，当前节点就地操作。
+              想法区经 discussContent 收进 discuss 节点内（原先是流程线上方的并列 strip，
+              两块并排会把「一步 = 一条线」的时序感冲掉） */}
           <StepFlow
+            discussContent={
+              <div className="mt-1">
+                {/* 想法区（v3.80）：自由想法卡（kind=idea）——只读纯聊 + ◈ 沉淀进任务书；
+                    「想法期只读保护」开关只管只读纯聊这一路，设置页不加行 */}
+                <div className="flex items-center gap-2">
+                  <span className="text-micro text-l4">
+                    话题{ideaCards.length > 0 ? `（${ideaCards.length}）` : ""}
+                  </span>
+                  {ideaFormOpen ? (
+                    <form
+                      onSubmit={(e) => void submitCreateIdea(e)}
+                      className="flex min-w-0 flex-1 items-center gap-1"
+                    >
+                      <input
+                        className={`${fieldSm} min-w-0 flex-1`}
+                        value={ideaName}
+                        onChange={(e) => setIdeaName(e.target.value)}
+                        placeholder="话题名，如 要不要加对照实验（回车开聊）"
+                        autoFocus
+                        required
+                      />
+                      <button type="submit" className={actionBtn}>
+                        确定
+                      </button>
+                      <button
+                        type="button"
+                        className={actionBtn}
+                        onClick={() => setIdeaFormOpen(false)}
+                      >
+                        取消
+                      </button>
+                    </form>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIdeaName("");
+                        setIdeaFormOpen(true);
+                      }}
+                      title="起个话题开聊：只读讨论不动文件，聊完可「◈ 沉淀进任务书」把结论追加进草稿"
+                      className={`${actionBtn} text-l4 hover:text-l1`}
+                    >
+                      ＋ 聊个话题
+                    </button>
+                  )}
+                  <span
+                    className="ml-auto flex shrink-0 items-center gap-1"
+                    title={
+                      guardHard
+                        ? `开启后以只读/计划模式启动 ${guardAgentLabel}——进程级参数，agent 改不了文件（硬保护）`
+                        : `${guardAgentLabel} 没有只读启动参数：开启后只能在指令里嘱咐它别动文件，agent 可以无视（软约束）。要硬保护请换 Claude Code / Codex / Gemini / Kimi / CodeBuddy / Cursor / Grok`
+                    }
+                  >
+                    <span className="text-micro text-l4">只读保护</span>
+                    {/* 如实标注当前 agent 有没有硬保护：不标的话开关会沉默降级，
+                        而头脑风暴恰恰最依赖「它不会动我文件」这个假设 */}
+                    {discussGuard && !guardHard && (
+                      <span className="text-micro text-warn-text">
+                        {guardAgentLabel} 仅提示约束
+                      </span>
+                    )}
+                    <Toggle
+                      checked={discussGuard}
+                      onChange={(checked) =>
+                        void updateSettings({
+                          discussReadonly: checked,
+                        }).catch((e) => setError(String(e)))
+                      }
+                      label="想法期只读保护"
+                    />
+                  </span>
+                </div>
+                {ideaCards.length > 0 && (
+                  <ul className="mt-1 divide-y divide-hairline">
+                    {ideaCards.map(renderIdeaCard)}
+                  </ul>
+                )}
+              </div>
+            }
             projectPath={projectPath}
             step={focusStepDto}
             runStatus={focusRunStatus ?? "pending"}
@@ -676,9 +696,13 @@ export default function TaskCardsSection({
                 ? {
                     relPath: focusDraft.relPath,
                     exists: !!focusDraft.text?.trim(),
+                    text: focusDraft.text,
                   }
                 : undefined
             }
+            onDraftChanged={onDraftChanged}
+            litSource={cfg.litSource}
+            onOpenResources={onOpenResources}
             agentContent={
               <button
                 type="button"
@@ -696,7 +720,7 @@ export default function TaskCardsSection({
             reviewConflict={reviewConflict}
             onRestore={onRestoreWorkspace}
             onSeed={(seed) => void onSeed(focusStepDto.name, seed)}
-            customTopics={customTopics}
+            openSeeds={openSeeds}
             onStart={() =>
               void onStartStep(
                 steps.findIndex((s) => s.name === focusStepDto.name),
@@ -767,9 +791,23 @@ export default function TaskCardsSection({
             className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-md border border-field ccode-float-surface p-5"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 className="mb-3 shrink-0 text-base font-semibold text-l1">
-              TASK.md 预览：{taskMdPreview.stepName}
-            </h2>
+            <div className="mb-3 flex shrink-0 items-center gap-2">
+              <h2 className="min-w-0 truncate text-base font-semibold text-l1">
+                TASK.md 预览：{taskMdPreview.stepName}
+              </h2>
+              <button
+                type="button"
+                onClick={() => setTaskMdRaw((v) => !v)}
+                title={
+                  taskMdRaw
+                    ? "看渲染后的排版"
+                    : "看原始 markdown（agent 拿到的就是这份原文）"
+                }
+                className="ml-auto shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
+              >
+                {taskMdRaw ? "渲染" : "源码"}
+              </button>
+            </div>
             {/* 推荐技能区（只读；开工确认弹层里可增删） */}
             <StepSkillsChips
               skills={
@@ -790,10 +828,15 @@ export default function TaskCardsSection({
                 <div className="p-3">
                   <LoadingRows compact />
                 </div>
-              ) : (
+              ) : taskMdRaw ? (
                 <pre className="whitespace-pre-wrap break-words p-3 font-mono text-micro leading-5 text-l2">
                   {taskMdPreview.text}
                 </pre>
+              ) : (
+                <div
+                  className="md-body px-4 py-3"
+                  dangerouslySetInnerHTML={{ __html: taskMdHtml }}
+                />
               )}
             </div>
             <div className="mt-4 flex shrink-0 justify-end">

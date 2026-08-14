@@ -9,6 +9,7 @@ import {
   type TaskMdEditorState,
 } from "../task-cards";
 import { gatherTaskMdExtras, renderTaskMd } from "../pipeline-start";
+import { isDecisionsOnly } from "../step-decisions";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import type {
   ArtifactEntryDto,
@@ -32,7 +33,7 @@ interface GitStatusBrief {
  *    任务书草稿非空时初始内容 = 草稿全文；确认开工落盘 = 编辑区最终内容）；
  * 2. 旧版简报兜底：.ccode/brief-*.md 存在且草稿为空时给一行提示，可「并入草稿」
  *    （新口径不再自动带入 TASK.md）；
- * 3. 主仓改动协同：主仓有未提交改动时顶部提醒（不阻断）。
+ * 3. 未存入历史的改动：项目文件夹有改动时顶部提醒（不阻断，文案走白话术语表）。
  * 「继续」动作不经本弹层；评审「开始下一步」保留直开（连续流，评审沉淀已落下一步草稿）。
  */
 export default function KickoffConfirmDialog({
@@ -77,6 +78,8 @@ export default function KickoffConfirmDialog({
   const [extras, setExtras] = useState<{
     artifacts: ArtifactEntryDto[];
     skillMeta: Record<string, string> | undefined;
+    /** 已定方向（决策项答案，读自任务书草稿）：渲染进 TASK.md 的「已定方向」段 */
+    decisions: { q: string; answer: string }[];
   } | null>(null);
   // 主仓未提交改动数（null = 非 git 仓库/读取失败，不渲染提醒行）
   const [mainDirty, setMainDirty] = useState<number | null>(null);
@@ -111,6 +114,9 @@ export default function KickoffConfirmDialog({
     { text: "", dirty: false } satisfies TaskMdEditorState,
   );
   const [editorReady, setEditorReady] = useState(false);
+  // TASK.md 编辑区默认折叠：它是自动拼装的合同，绝大多数开工不需要看，
+  // 更不该摆在正中暗示「你得先改这个」。想看/想改一点即展开
+  const [taskMdOpen, setTaskMdOpen] = useState(false);
 
   // 打开时一次性加载：提货单/技能元数据 + 主仓状态 + 技能库 + 未登记资源 + 任务书草稿 + 旧版简报；不轮询
   useEffect(() => {
@@ -168,14 +174,19 @@ export default function KickoffConfirmDialog({
       projectPath,
       extras.artifacts,
       skillMeta ?? extras.skillMeta,
+      extras.decisions,
     );
   }, [extras, stepNow, cfgLocal, skillMeta, projectPath]);
 
-  // 编辑区初始化：草稿存在（非空）时草稿优先于模板拼装——草稿是讨论的直接产物，
-  // 所见即所得；「恢复默认拼装」仍可回到模板拼装。等草稿加载完再初始化，避免闪换
+  // 编辑区初始化：草稿有正文时草稿优先于模板拼装——草稿是讨论的直接产物，所见即所得；
+  // 但「只点了几个选项」生成的草稿（只有「已定方向」段、没有正文）不算数：
+  // 那种草稿顶掉拼装会把简报/产物/人工事项全丢掉，agent 会拿到一份没有任务的任务书。
+  // 这种情况走模板拼装——拼装里已经带上了「已定方向」段，拍板结果一样不丢。
+  // 「恢复默认拼装」仍可回到模板拼装。等草稿加载完再初始化，避免闪换
   useEffect(() => {
     if (assembled === null || draftText === undefined) return;
-    const draft = draftText?.trim() ? draftText.trim() : null;
+    const raw = draftText?.trim() ?? "";
+    const draft = raw && !isDecisionsOnly(raw) ? raw : null;
     dispatchEditor({ type: "assemble", text: draft ?? assembled });
     setEditorReady(true);
   }, [assembled, draftText]);
@@ -304,9 +315,11 @@ export default function KickoffConfirmDialog({
 
         {/* 主仓改动协同（只提醒不阻断）：想法期实验性改动留在主仓是合法的 */}
         {mainDirty !== null && mainDirty > 0 && (
-          <p className="mb-3 shrink-0 rounded-sm bg-inset px-2.5 py-1.5 text-xs text-warn-text">
-            主仓有 {mainDirty} 个未提交改动，不会带入新工作区——可先在主仓提交，
-            或开始后用 files-to-copy 机制携带。
+          <p className="mb-3 shrink-0 rounded-md bg-inset px-3 py-2 text-xs leading-5 text-l2">
+            <span className="mr-1 text-warn-text">⚠</span>
+            项目文件夹里有 {mainDirty} 处改动还没存入历史。这一步的 agent 会在一份
+            独立副本里干活，只看得到最近一次存入历史的内容——如果刚放进去的文件要给它用，
+            先到「改动」面板存一下再开始。
           </p>
         )}
 
@@ -429,16 +442,31 @@ export default function KickoffConfirmDialog({
           <p className="mb-2 shrink-0 text-xs text-err-text">✗ {skillError}</p>
         )}
 
-        {/* TASK.md 编辑区：默认拼装（同一 renderTaskMd），草稿优先、可人改；
-            确认开工落盘 = 编辑区最终内容 */}
+        {/* TASK.md 编辑区：默认折叠——它由模板+已定方向+资源自动拼装，绝大多数情况不用改；
+            摆在正中会暗示「你得编辑这个」，反而让人不敢开工。人改过（dirty）时保持展开，
+            避免改完一折叠就看不见自己写了什么 */}
         <div className="mb-1 flex shrink-0 items-center gap-2">
-          <span className="text-xs text-l3">TASK.md（可编辑）</span>
-          <span className="text-micro text-l4">
-            {draftText?.trim()
-              ? `内容来自任务书草稿 ${draftRel ?? ""}（改这里只影响本次落盘，不回写草稿）`
-              : "默认由模板拼装，确认后按编辑区内容落盘"}
-          </span>
-          {editor.dirty && (
+          <button
+            type="button"
+            onClick={() => setTaskMdOpen((v) => !v)}
+            title={
+              taskMdOpen ? "收起 TASK.md" : "展开查看/编辑本步交给 agent 的合同"
+            }
+            className="rounded-sm px-1 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
+          >
+            <span className="inline-block w-3 text-l4">
+              {taskMdOpen ? "▾" : "▸"}
+            </span>
+            本步合同 TASK.md
+            <span className="ml-1 text-micro text-l4">
+              {editor.dirty
+                ? "（已手改）"
+                : draftText?.trim() && !isDecisionsOnly(draftText.trim())
+                  ? "（来自任务书草稿）"
+                  : "（自动生成，一般不用改）"}
+            </span>
+          </button>
+          {taskMdOpen && editor.dirty && (
             <button
               type="button"
               onClick={() =>
@@ -452,22 +480,31 @@ export default function KickoffConfirmDialog({
             </button>
           )}
         </div>
-        <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-field bg-canvas">
-          {!editorReady ? (
-            <div className="p-3">
-              <LoadingRows compact />
+        {taskMdOpen && (
+          <>
+            {draftText?.trim() && !isDecisionsOnly(draftText.trim()) && (
+              <p className="mb-1 shrink-0 text-micro text-l4">
+                内容来自任务书草稿 {draftRel ?? ""}（改这里只影响本次落盘，不回写草稿）
+              </p>
+            )}
+            <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-field bg-canvas">
+              {!editorReady ? (
+                <div className="p-3">
+                  <LoadingRows compact />
+                </div>
+              ) : (
+                <textarea
+                  className="h-full max-h-[38vh] min-h-40 w-full resize-none overflow-auto bg-canvas p-3 font-mono text-micro leading-5 text-l2 outline-none placeholder:text-l4"
+                  value={editor.text}
+                  onChange={(e) =>
+                    dispatchEditor({ type: "edit", text: e.target.value })
+                  }
+                  spellCheck={false}
+                />
+              )}
             </div>
-          ) : (
-            <textarea
-              className="h-full max-h-[38vh] min-h-40 w-full resize-none overflow-auto bg-canvas p-3 font-mono text-micro leading-5 text-l2 outline-none placeholder:text-l4"
-              value={editor.text}
-              onChange={(e) =>
-                dispatchEditor({ type: "edit", text: e.target.value })
-              }
-              spellCheck={false}
-            />
-          )}
-        </div>
+          </>
+        )}
 
         <div className="mt-4 flex shrink-0 justify-end gap-2">
           <button

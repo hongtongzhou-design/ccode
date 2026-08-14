@@ -60,6 +60,24 @@ pub struct HumanTaskDto {
     pub target: String,
     /// 时机：before（开工前）| during（并行）| after（收尾）；非法值解析期归一为 during
     pub timing: String,
+    /// 可选事项：不做也不影响这一步跑完（如「补充你已知的关键文献」——agent 照样会检索）。
+    /// 流程线标「可选」并从「N 件待做」里排除，免得摆出一个永远做不完的必办项。
+    /// 缺省 false = 必办（旧档案卡与旧模板照原样按必办处理）
+    pub optional: bool,
+}
+
+/// 步骤决策项（模板预置的「开工前要拍板的选择题」）。
+/// 与 discussion_seeds 的分工：答案可枚举的走 decisions（点一下就答完，不开会话），
+/// 真正开放、需要来回讨论的留在 discussion_seeds（点了去聊）。
+/// 同样只做透传、不进 TASK.md——答案由人选定后落进任务书草稿，草稿才是开工合同。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DecisionDto {
+    /// 问题（短句；不带问号更好渲染成一行）
+    pub q: String,
+    /// 可选答案，首项即推荐值（「全部用推荐值」按首项一键应用）；
+    /// 空 options 的条目在解析期丢弃——没有选项的题应该写成 discussion_seeds
+    pub options: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -78,6 +96,8 @@ pub struct StepDto {
     /// 讨论种子（模板预置的「开工前建议想清楚的问题」）：卡片区按步骤列出，点击即聊；
     /// 引擎只做透传，不进 TASK.md（种子是给人的入口，不是给 agent 的合同）
     pub discussion_seeds: Vec<String>,
+    /// 决策项（可枚举的拍板点，点选即答）：见 DecisionDto
+    pub decisions: Vec<DecisionDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,7 +111,14 @@ pub struct ProjectConfigDto {
     /// 「不使用研究流程」显式标记：true = 用户明确不要流水线（隐藏模板引导横幅与定时任务区块），
     /// 与「稍后再选」（不写标记、保留引导）区分；追加模板步骤时自动清回 false
     pub pipeline_opt_out: bool,
+    /// 文献来源：search = 让 agent 系统检索（默认，缺省即此）；
+    /// zotero / folder = 用户已有文献库，检索这一步降级为「盘点已有 + 查漏补缺」。
+    /// 纯透传标记——引擎不认科研语义，怎么变形由模板简报自述（§11.1 纪律一）
+    pub lit_source: String,
 }
+
+/// 文献来源合法值；非法值解析期归一为 search
+pub const LIT_SOURCES: [&str; 3] = ["search", "zotero", "folder"];
 
 impl Default for ProjectConfigDto {
     fn default() -> Self {
@@ -101,6 +128,7 @@ impl Default for ProjectConfigDto {
             resources: Vec::new(),
             steps: Vec::new(),
             pipeline_opt_out: false,
+            lit_source: "search".into(),
         }
     }
 }
@@ -317,6 +345,57 @@ fn guard_project_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 清掉项目在 app.db 里留下的行（删项目 / 清痕迹共用）。
+///
+/// 这三张表都以「项目路径」或「卡片 id」为键，删项目时不清就永久变孤儿：
+/// `human_task_checks` 会让同路径的新项目继承上一个项目的勾选状态；
+/// `session_meta.task_id` / `card_claims` 会让会话永远挂着已不存在的卡片 id。
+/// （`delete_task_card` 早就记得清 session_meta，只是项目级删除漏了这一步。）
+///
+/// best-effort：主删除流程已经成功，清理失败不该把整个操作判失败——
+/// 但逐条记进 warnings 由调用方拼进摘要，不静默吞掉。
+///
+/// 返回 (清掉的行数, warnings)。行数为 0 时调用方不提这件事：
+/// 三张表都是懒建的（用户没勾过人工事项就没有 human_task_checks），
+/// 表不存在 = 本来就没有痕迹，不是错误。
+fn cleanup_project_db_traces(
+    conn: &Connection,
+    dir: &Path,
+    task_ids: &[String],
+) -> (usize, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut cleaned = 0usize;
+    let key = canonical_key(dir);
+    /// 懒建表未创建时的错误一律当「没有痕迹」处理，不回报给用户
+    fn missing_table(e: &rusqlite::Error) -> bool {
+        e.to_string().contains("no such table")
+    }
+    let mut run = |sql: &str, p: &[&dyn rusqlite::ToSql], what: &str| {
+        match conn.execute(sql, p) {
+            Ok(n) => cleaned += n,
+            Err(e) if missing_table(&e) => {}
+            Err(e) => warnings.push(format!("{what}清理失败: {e}")),
+        }
+    };
+    run(
+        "DELETE FROM human_task_checks WHERE project_path = ?1",
+        &[&key],
+        "人工事项勾选记录",
+    );
+    run("DELETE FROM card_claims WHERE cwd = ?1", &[&key], "卡片认领登记");
+    for id in task_ids {
+        match conn.execute(
+            "UPDATE session_meta SET task_id=NULL WHERE task_id=?1",
+            rusqlite::params![id],
+        ) {
+            Ok(n) => cleaned += n,
+            Err(e) if missing_table(&e) => {}
+            Err(e) => warnings.push(format!("会话归卡标记清理失败（{id}）: {e}")),
+        }
+    }
+    (cleaned, warnings)
+}
+
 /// 删除项目目录：全部工作区（含已归档，彻底删）→ 主目录移入系统回收站（可反悔）→ 注册记录。
 /// 工作区任一删除失败即中止，已删的不回滚（错误信息由 workspaces 层说明已删哪些）。
 fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, String> {
@@ -334,15 +413,22 @@ fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, Str
         );
     }
     guard_project_dir(&dir)?;
+    // 卡片 id 必须在目录还在时读出来：删完 .ccode/project.toml 就没地方查了
+    let task_ids: Vec<String> = task_cards_at(&dir).into_iter().map(|c| c.id).collect();
     let deleted = crate::workspaces::delete_workspaces_for_repo(conn, &dir)?;
     // 主目录走系统回收站可反悔；工作区 worktree/分支属 git 元数据，回收站管不了，仍为彻底删除
     trash::delete(&dir).map_err(|e| format!("移入回收站失败: {e}"))?;
     remove_project_at(conn, &dir)?;
+    let (_, warn) = cleanup_project_db_traces(conn, &dir, &task_ids);
+    let tail = warn
+        .first()
+        .map(|w| format!("；{w}"))
+        .unwrap_or_default();
     if deleted.is_empty() {
-        Ok("目录已移入回收站，注册记录已删除".to_string())
+        Ok(format!("目录已移入回收站，注册记录已删除{tail}"))
     } else {
         Ok(format!(
-            "目录已移入回收站，已删除 {} 个工作区",
+            "目录已移入回收站，已删除 {} 个工作区{tail}",
             deleted.len()
         ))
     }
@@ -366,11 +452,14 @@ fn purge_project_traces_impl(conn: &Connection, path: &Path) -> Result<String, S
     }
     // 工作区任一删除失败即中止（已删的不回滚），错误信息由 workspaces 层说明已删哪些
     let deleted = crate::workspaces::delete_workspaces_for_repo(conn, &dir)?;
+    // 卡片 id 在 .ccode 还在时读出来（下面就要把它移进回收站了）
+    let task_ids: Vec<String> = task_cards_at(&dir).into_iter().map(|c| c.id).collect();
     if has_ccode {
         trash::delete(dir.join(".ccode"))
             .map_err(|e| format!("工作区已清理，但 .ccode 移入回收站失败: {e}"))?;
     }
     remove_project_at(conn, &dir)?;
+    let (cleaned, warn) = cleanup_project_db_traces(conn, &dir, &task_ids);
     let mut parts: Vec<String> = Vec::new();
     if !deleted.is_empty() {
         parts.push(format!("{} 个工作区", deleted.len()));
@@ -381,7 +470,15 @@ fn purge_project_traces_impl(conn: &Connection, path: &Path) -> Result<String, S
     if registered {
         parts.push("注册记录".to_string());
     }
-    Ok(format!("已清除：{}", parts.join("、")))
+    // 只在真清掉行时才提：没勾过任何事项的项目提这句纯属噪音
+    if cleaned > 0 {
+        parts.push("勾选与归卡记录".to_string());
+    }
+    Ok(format!(
+        "已清除：{}{}",
+        parts.join("、"),
+        warn.first().map(|w| format!("；{w}")).unwrap_or_default()
+    ))
 }
 
 // ===== 档案卡 .ccode/project.toml =====
@@ -425,6 +522,8 @@ struct TomlHumanTask {
     target: String,
     #[serde(default)]
     timing: String,
+    #[serde(default)]
+    optional: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -444,6 +543,16 @@ struct TomlStep {
     human_tasks: Vec<TomlHumanTask>,
     #[serde(default)]
     discussion_seeds: Vec<String>,
+    #[serde(default)]
+    decisions: Vec<TomlDecision>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TomlDecision {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    options: Vec<String>,
 }
 
 /// 人工事项时机归一：before/during/after 之外一律按 during（并行），不阻断
@@ -498,6 +607,17 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
         None => {}
         Some(toml::Value::Boolean(b)) => config.pipeline_opt_out = *b,
         Some(_) => warnings.push("pipeline_opt_out 不是布尔值，已忽略".to_string()),
+    }
+    // 文献来源：非法值归一为 search（同 resource type 口径，坏字段不阻断整份解析）
+    match value.get("lit_source") {
+        None => {}
+        Some(toml::Value::String(s)) if LIT_SOURCES.contains(&s.trim()) => {
+            config.lit_source = s.trim().to_string()
+        }
+        Some(toml::Value::String(s)) => {
+            warnings.push(format!("lit_source 取值无效（{s}），已按 search 处理"))
+        }
+        Some(_) => warnings.push("lit_source 不是字符串，已忽略".to_string()),
     }
     if let Some(resources) = value.get("resources").and_then(|v| v.as_array()) {
         for (i, item) in resources.iter().enumerate() {
@@ -568,6 +688,7 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                             guidance: h.guidance.trim().to_string(),
                             target: h.target.trim().to_string(),
                             timing,
+                            optional: h.optional,
                         });
                     }
                     config.steps.push(StepDto {
@@ -592,6 +713,22 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                             .into_iter()
                             .map(|d| d.trim().to_string())
                             .filter(|d| !d.is_empty())
+                            .collect(),
+                        // 决策项：q 与 options 都要非空——没有选项的题该写成 discussion_seeds，
+                        // 留个空壳在这儿只会渲染出一行点不动的问句
+                        decisions: s
+                            .decisions
+                            .into_iter()
+                            .map(|d| DecisionDto {
+                                q: d.q.trim().to_string(),
+                                options: d
+                                    .options
+                                    .into_iter()
+                                    .map(|o| o.trim().to_string())
+                                    .filter(|o| !o.is_empty())
+                                    .collect(),
+                            })
+                            .filter(|d| !d.q.is_empty() && !d.options.is_empty())
                             .collect(),
                     });
                 }
@@ -715,6 +852,11 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
     } else {
         doc.remove("pipeline_opt_out");
     }
+    if config.lit_source != "search" {
+        doc["lit_source"] = value(config.lit_source.as_str());
+    } else {
+        doc.remove("lit_source");
+    }
     if config.resources.is_empty() {
         doc.remove("resources");
     } else {
@@ -796,6 +938,10 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                     if h.timing != "during" {
                         ht["timing"] = value(&h.timing);
                     }
+                    // 默认值（必办）省略不写，同 timing 口径
+                    if h.optional {
+                        ht["optional"] = value(true);
+                    }
                     hts.push(ht);
                 }
                 t["human_tasks"] = Item::ArrayOfTables(hts);
@@ -808,6 +954,21 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                 }
                 t["discussion_seeds"] = value(seeds);
             }
+            // 决策项：空数组省略不写（同上）；options 恒非空（解析期已丢弃空条目）
+            if !s.decisions.is_empty() {
+                let mut ds = ArrayOfTables::new();
+                for d in &s.decisions {
+                    let mut dt = Table::new();
+                    dt["q"] = value(&d.q);
+                    let mut opts = toml_edit::Array::new();
+                    for o in &d.options {
+                        opts.push(o.as_str());
+                    }
+                    dt["options"] = value(opts);
+                    ds.push(dt);
+                }
+                t["decisions"] = Item::ArrayOfTables(ds);
+            }
             arr.push(t);
         }
         doc["steps"] = Item::ArrayOfTables(arr);
@@ -815,7 +976,7 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
     Ok(doc.to_string())
 }
 
-fn write_config_at(project: &Path, config: &ProjectConfigDto) -> Result<(), String> {
+pub(crate) fn write_config_at(project: &Path, config: &ProjectConfigDto) -> Result<(), String> {
     let path = config_path(project);
     let existing = if path.exists() {
         Some(
@@ -1649,14 +1810,16 @@ pub(crate) fn build_fuse_prompt(
     let task = match draft {
         Some(d) if !d.trim().is_empty() => format!(
             "【当前任务书草稿】\n{}\n\n\
-             请把讨论记录中与「{step_name}」相关的结论织进草稿的既有结构：保持原有小节组织与措辞风格，\
-             只增改与讨论结论直接相关的内容；讨论中没定下来的问题保留或补进「## 待拍板」小节。\
-             输出完整的新草稿全文（Markdown），不要输出任何解释、前后缀或代码围栏。",
+             请从讨论记录里提炼与「{step_name}」相关的结论，输出一段可直接追加到草稿末尾的 Markdown 片段：\n\
+             - 一条结论一个要点（`- ` 开头），只写讨论中真的定下来的事，没定的收进末尾「### 待拍板」小项；\n\
+             - 草稿里已经写过的结论不要重复；\n\
+             - 不要复述讨论过程，不要输出标题行（调用方会自动加），不要解释、前后缀或代码围栏；\n\
+             - 提炼不出任何新结论时输出一行「（本轮讨论未产生新结论）」。",
             d.trim()
         ),
-        _ => "当前还没有任务书草稿。请直接以讨论结论起草一份任务书草稿（Markdown，\
-              以「# 任务书草稿」开头，没定下来的问题收进「## 待拍板」小节）。\
-              输出草稿全文，不要输出任何解释、前后缀或代码围栏。"
+        _ => "当前还没有任务书草稿。请从讨论记录里提炼与本步骤相关的结论，\
+              输出一段 Markdown 片段：一条结论一个要点（`- ` 开头），没定下来的收进末尾「### 待拍板」小项。\
+              不要复述讨论过程，不要输出标题行（调用方会自动加），不要解释、前后缀或代码围栏。"
             .to_string(),
     };
     format!("{base}{task}")
@@ -1716,7 +1879,10 @@ fn fuse_card_into_draft_impl(
     })
 }
 
-/// 「◈ 融合进任务书」第一阶段：生成融合稿（不写盘，人在前端预览/编辑后才经 write_task_draft 落盘）
+/// 「◈ 沉淀进任务书」第一阶段：从想法卡的讨论里提炼结论片段（不写盘）。
+/// 人在前端预览/编辑后经 append_step_draft 追加到草稿末尾——**不是整份覆盖**：
+/// 头脑风暴是发散的半成品，拿它重写一份已定好的合同方向就反了，
+/// 且整份覆盖时唯一的防线只有那个 textarea（无 diff、无备份）。追加则不可能删掉已有内容。
 #[tauri::command]
 pub async fn fuse_card_into_draft(
     store: tauri::State<'_, crate::profiles::ProfileStore>,
@@ -1875,6 +2041,7 @@ fn demo_project_config() -> ProjectConfigDto {
         run: Vec::new(),
         human_tasks: Vec::new(),
         discussion_seeds: Vec::new(),
+        decisions: Vec::new(),
     };
     let mut steps = vec![
             step(
@@ -1948,6 +2115,7 @@ fn demo_project_config() -> ProjectConfigDto {
                        缺权限清单见 papers/to-fetch.md（agent 筛完会列出）".into(),
             target: "papers/*.pdf".into(),
             timing: "after".into(),
+            optional: false,
         },
         HumanTaskDto {
             title: "补充你已知的关键文献".into(),
@@ -1955,6 +2123,7 @@ fn demo_project_config() -> ProjectConfigDto {
                 .into(),
             target: "papers/".into(),
             timing: "before".into(),
+            optional: false,
         },
     ];
     // 讨论种子演示：开工前建议想清楚的问题，点击即聊（卡片以问题为名自动建立）
@@ -1984,6 +2153,7 @@ fn demo_project_config() -> ProjectConfigDto {
         ],
         steps,
         pipeline_opt_out: false,
+        lit_source: "search".into(),
     }
 }
 
@@ -2502,6 +2672,7 @@ mod tests {
                 resources: Vec::new(),
                 human_tasks: Vec::new(),
                 discussion_seeds: Vec::new(),
+                decisions: Vec::new(),
                 run: vec![
                     StepRunDto {
                         name: "dev".into(),
@@ -2516,6 +2687,7 @@ mod tests {
                 ],
             }],
             pipeline_opt_out: false,
+        lit_source: "search".into(),
         }
     }
 
@@ -2631,6 +2803,7 @@ type = "paper"
             }],
             steps: Vec::new(),
             pipeline_opt_out: false,
+        lit_source: "search".into(),
         };
         let rendered = render_config(Some(existing), &config).unwrap();
         assert!(rendered.contains("# 用户手写注释"), "注释必须保留: {rendered}");
@@ -3258,6 +3431,7 @@ resources = ["ghost.pdf"]
                 resources: Vec::new(),
                 human_tasks: Vec::new(),
                 discussion_seeds: Vec::new(),
+                decisions: Vec::new(),
                 run: vec![StepRunDto {
                     name: "dev".into(),
                     command: "echo hi".into(),
@@ -3734,6 +3908,176 @@ resources = ["ghost.pdf"]
     // ===== 人工事项（steps[].human_tasks）解析/写回 =====
 
     #[test]
+    fn cleanup_project_db_traces_removes_orphans() {
+        // 这个 bug 的特征是「删完当场看不出问题」——下次在同路径建项目才发作
+        // （继承上个项目的勾选状态），所以必须有测试盯着
+        let dir = temp_dir("orphans");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE human_task_checks(project_path TEXT NOT NULL, step TEXT NOT NULL, \
+               title TEXT NOT NULL, updated_at TEXT, PRIMARY KEY(project_path, step, title));\
+             CREATE TABLE card_claims(agent TEXT NOT NULL, cwd TEXT NOT NULL, \
+               task_id TEXT NOT NULL, created_at TEXT, PRIMARY KEY(agent, cwd));\
+             CREATE TABLE session_meta(agent TEXT NOT NULL, session_id TEXT NOT NULL, \
+               task_id TEXT, PRIMARY KEY(agent, session_id));",
+        )
+        .unwrap();
+        let key = canonical_key(&root);
+        conn.execute(
+            "INSERT INTO human_task_checks VALUES (?1,'检索筛选','补文献','t')",
+            rusqlite::params![key],
+        )
+        .unwrap();
+        // 别的项目的行必须原样留着
+        conn.execute(
+            "INSERT INTO human_task_checks VALUES ('/other/proj','检索筛选','补文献','t')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO card_claims VALUES ('claude-code',?1,'t-abc','t')",
+            rusqlite::params![key],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_meta VALUES ('claude-code','s1','t-abc')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_meta VALUES ('claude-code','s2','t-other')",
+            [],
+        )
+        .unwrap();
+
+        let (cleaned, warn) = cleanup_project_db_traces(&conn, &root, &["t-abc".to_string()]);
+        assert!(warn.is_empty(), "{warn:?}");
+        assert_eq!(cleaned, 3, "勾选 1 + 认领 1 + 归卡 1");
+
+        let mine: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM human_task_checks WHERE project_path=?1",
+                rusqlite::params![key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mine, 0, "本项目的勾选记录应清空");
+        let others: i64 = conn
+            .query_row("SELECT COUNT(*) FROM human_task_checks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(others, 1, "别的项目的勾选记录不该被误删");
+        let claims: i64 = conn
+            .query_row("SELECT COUNT(*) FROM card_claims", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(claims, 0);
+        let cleared: Option<String> = conn
+            .query_row(
+                "SELECT task_id FROM session_meta WHERE session_id='s1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cleared, None, "本项目卡片的归卡标记应清掉");
+        let kept: Option<String> = conn
+            .query_row(
+                "SELECT task_id FROM session_meta WHERE session_id='s2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("t-other"), "别的卡片不该被动");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cleanup_tolerates_lazily_created_tables() {
+        // 三张表都是懒建的：用户从没勾过人工事项时表根本不存在。
+        // 这时 DELETE 会报 no such table——当成「没有痕迹」而不是错误，
+        // 否则新用户第一次删项目就会看到一条莫名其妙的「清理失败」
+        let dir = temp_dir("lazytables");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let (cleaned, warn) =
+            cleanup_project_db_traces(&conn, &root, &["t-abc".to_string()]);
+        assert_eq!(cleaned, 0);
+        assert!(warn.is_empty(), "表不存在不该报错: {warn:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lit_source_parse_render_roundtrip() {
+        let dir = temp_dir("litsource");
+        let root = dir.join("proj");
+        // 合法值原样保留
+        let (cfg, w) = parse_config("lit_source = \"zotero\"\n");
+        assert_eq!(cfg.lit_source, "zotero");
+        assert!(w.is_empty(), "{w:?}");
+        write(&config_path(&root), "x = 1\n");
+        write_config_at(&root, &cfg).unwrap();
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(raw.contains("lit_source"), "{raw}");
+        assert_eq!(parse_config(&raw).0.lit_source, "zotero");
+
+        // 缺省 = search，且默认值不写进文件（同 pipeline_opt_out 口径）
+        let (d, _) = parse_config("");
+        assert_eq!(d.lit_source, "search");
+        write_config_at(&root, &d).unwrap();
+        let raw2 = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(!raw2.contains("lit_source"), "默认值不该落盘: {raw2}");
+
+        // 非法值归一为 search 并留 warning，不阻断整份解析
+        let (bad, wb) = parse_config("lit_source = \"endnote\"\nartifact_dir = \"out\"\n");
+        assert_eq!(bad.lit_source, "search");
+        assert_eq!(bad.artifact_dir, "out", "坏字段不该带垮其余解析");
+        assert!(wb.iter().any(|x| x.contains("lit_source")), "{wb:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn decisions_parse_render_roundtrip() {
+        let dir = temp_dir("decisions");
+        let root = dir.join("proj");
+        // 同一步骤里 decisions（表数组）与 discussion_seeds（内联数组）并存：
+        // 渲染顺序必须仍是合法 toml，否则 seeds 会被吸进最后一个 decisions 表
+        let text = "[[steps]]\nname = \"检索筛选\"\nworkspace_name = \"lit\"\n\
+                    discussion_seeds = [\"范式锚点：借哪篇的结构？\"]\n\n\
+                    [[steps.decisions]]\nq = \"综述角度怎么收\"\n\
+                    options = [\"领域全景铺开\", \" 聚焦某个子问题 \", \"  \"]\n\n\
+                    [[steps.decisions]]\nq = \"  \"\noptions = [\"甲\"]\n\n\
+                    [[steps.decisions]]\nq = \"没有选项的题\"\noptions = []\n";
+        write(&config_path(&root), text);
+        let (cfg, warnings) = parse_config(text);
+        // 只留 q 与 options 都非空的条目；选项两端空白剔除、空项丢弃
+        assert_eq!(cfg.steps[0].decisions.len(), 1, "{:?}", cfg.steps[0].decisions);
+        assert_eq!(cfg.steps[0].decisions[0].q, "综述角度怎么收");
+        assert_eq!(
+            cfg.steps[0].decisions[0].options,
+            vec!["领域全景铺开", "聚焦某个子问题"]
+        );
+        // 开放题仍走 discussion_seeds，两者互不影响
+        assert_eq!(
+            cfg.steps[0].discussion_seeds,
+            vec!["范式锚点：借哪篇的结构？"]
+        );
+        // 写回再读：两个字段都原样回来（证明并存时的 toml 结构合法）
+        write_config_at(&root, &cfg).unwrap();
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        let (cfg2, w2) = parse_config(&raw);
+        assert_eq!(cfg2.steps[0].decisions, cfg.steps[0].decisions, "{raw}");
+        assert_eq!(
+            cfg2.steps[0].discussion_seeds, cfg.steps[0].discussion_seeds,
+            "{raw}"
+        );
+        assert!(raw.contains("[[steps.decisions]]"), "{raw}");
+        assert!(w2.is_empty(), "{w2:?}");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn human_tasks_parse_render_roundtrip() {
         let dir = temp_dir("humantasks");
         let root = dir.join("proj");
@@ -3881,18 +4225,25 @@ resources = ["ghost.pdf"]
 
     #[test]
     fn fuse_prompt_branches_on_draft_presence() {
-        // 草稿非空：织进既有结构
+        // 草稿非空：带上现有草稿做去重参照，但只要结论片段
         let p = build_fuse_prompt("选角度", "文献检索", Some("# 任务书草稿\n\n## 待拍板\n"), "[用户] 聊角度");
         assert!(p.contains("文献检索") && p.contains("选角度"));
         assert!(p.contains("当前任务书草稿"));
-        assert!(p.contains("织进草稿的既有结构"));
+        assert!(p.contains("已经写过的结论不要重复"));
         assert!(p.contains("[用户] 聊角度"));
-        // 草稿为空/缺失：直接起草
+        // 草稿为空/缺失：同样只要片段，不要整份草稿
         for empty in [None, Some(""), Some("   ")] {
             let p = build_fuse_prompt("选角度", "文献检索", empty, "讨论内容");
             assert!(p.contains("还没有任务书草稿"), "{p}");
-            assert!(p.contains("起草"), "{p}");
-            assert!(!p.contains("织进草稿的既有结构"), "{p}");
+            assert!(p.contains("提炼"), "{p}");
+            assert!(!p.contains("已经写过的结论不要重复"), "{p}");
+        }
+        // 两个分支都不得索要整份草稿：落盘走 append_step_draft 追加，
+        // 让 AI 输出全文会诱导它复述已有内容，追加后草稿越滚越重复
+        for d in [Some("# 任务书草稿\n"), None] {
+            let p = build_fuse_prompt("选角度", "文献检索", d, "讨论内容");
+            assert!(!p.contains("全文"), "不该索要整份草稿: {p}");
+            assert!(p.contains("不要输出标题行"), "标题由 append 侧生成: {p}");
         }
     }
 

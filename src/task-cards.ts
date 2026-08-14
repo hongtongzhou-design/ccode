@@ -100,39 +100,32 @@ export function taskMdEditorReduce(
 }
 
 
-// ===== 卡片种类（kind：idea 想法卡 / draft 任务书讨论卡） =====
+// ===== 话题卡（讨论的唯一载体） =====
 
-/** 聚焦步骤的想法区卡片：kind = idea 且挂在该步骤（后端已对旧卡按 step 推断回填 kind） */
-export function ideaCardsForStep(
+/** 聚焦步骤下的全部话题卡：种子开聊建的、决策项「开聊」建的、手动加的，一律进这一个清单。
+ *
+ *  刻意不按 kind 过滤：kind（idea/draft）原本区分「只读纯聊」和「agent 直接改草稿」，
+ *  但那是启动参数的差别，不该逼用户在开聊前先选一种——讨论入口已合并为「只读开聊 + 事后沉淀」，
+ *  可写那条路由 discuss 节点的「跟 Agent 聊任务书」单独承担。
+ *  两种 kind 都收还有个现实理由：老项目里已经建好的 draft 卡不能凭空消失。 */
+export function topicCardsForStep(
   cards: TaskCardDto[],
   stepName: string,
 ): TaskCardDto[] {
-  return sortCards(
-    cards.filter((c) => c.kind === "idea" && c.step === stepName),
-  );
+  return sortCards(cards.filter((c) => c.step === stepName));
 }
 
-/** 讨论卡区（流程线下方）在聚焦态只放 draft 卡：idea 卡已上移到想法区，不重复出现 */
-export function discussionCardsForStep(
-  cards: TaskCardDto[],
-  stepName: string,
-): TaskCardDto[] {
-  return sortCards(
-    cards.filter((c) => c.kind === "draft" && c.step === stepName),
-  );
-}
-
-/** 自定义话题 chips（流程线任务书节点）：该步骤的 draft 卡中名字不在模板种子里的——
- *  种子卡由种子 chip 本身代表（点击即续聊），自定义话题以同款 chip 补在其后 */
-export function customTopicsForStep(
+/** 还没开聊过的预置话题（讨论种子 + 决策项问题）：已经建了卡的不再出 chip，
+ *  它已经以话题行的形式躺在清单里了——两处都显示会让人以为是两个东西 */
+export function unstartedSeeds(
   cards: TaskCardDto[],
   stepName: string,
   seeds: string[],
 ): string[] {
-  const seedSet = new Set(seeds);
-  return discussionCardsForStep(cards, stepName)
-    .filter((c) => !seedSet.has(c.name))
-    .map((c) => c.name);
+  const started = new Set(
+    topicCardsForStep(cards, stepName).map((c) => c.name.trim()),
+  );
+  return seeds.filter((s) => s.trim() && !started.has(s.trim()));
 }
 
 // ===== 人工事项（人机分工 checklist）的纯逻辑 =====
@@ -149,12 +142,14 @@ export function humanTimingLabel(timing: string): string {
   }
 }
 
-/** 某步骤未完成的人工事项（卡片 badge / 开工弹层提醒 / 评审收尾提醒共用） */
+/** 某步骤未完成的人工事项（卡片 badge / 开工弹层提醒 / 评审收尾提醒共用）。
+ *  排除可选事项：它们不做也不影响这一步跑完，计进「N 件待做」会变成一个
+ *  永远清不掉的红点，久了整套提醒就没人看了 */
 export function pendingHumanTasks(
   states: HumanTaskStateDto[],
   stepName: string,
 ): HumanTaskStateDto[] {
-  return states.filter((s) => s.step === stepName && !s.done);
+  return states.filter((s) => s.step === stepName && !s.done && !s.optional);
 }
 
 /** 开工弹层提醒口径：开工前（before）事项未完成才提示——进行中/收尾的不挡开工 */

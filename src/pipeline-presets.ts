@@ -27,7 +27,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     brief:
       "输入：课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源推断一个最可能的主题，写进 papers/screening.md 开头「检索主题假设」一节，并按该假设执行到底，不留「待定」）。全程按 lit-search 技能执行：\n" +
       "1. 制定纳入/排除标准（年份、语言、来源级别、相关性口径），写进 papers/screening.md；\n" +
-      "2. 先解析 papers/imports/ 中的人工导出题录（RIS/BibTeX/CSV；目录不存在则跳过），按 lit-search 技能口径去重合并进候选池，每条保留来源标注；\n" +
+      "2. 先解析人工导入的题录（RIS/BibTeX/CSV），两处都要看：① 工作区内 papers/imports/ 目录；② 本文件「项目资源」段中类型为「引文」的条目、以及「上一步产物（提货单）」段中来自「人工交付」的条目——这两类给的是绝对路径，按路径直读、勿复制进工作区（开工前导入的题录多半在这里，工作区不含主仓未提交的文件）。两处都没有才跳过。解析后按 lit-search 技能口径去重合并进候选池，每条保留来源标注；\n" +
       "3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；\n" +
       "4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律纳入并标注「待确认」，不允许自行裁掉；\n" +
       "5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；\n" +
@@ -44,29 +44,36 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       {
         title: "补充你已知的关键文献",
         guidance:
-          "分工：agent 负责系统检索（OpenAlex / Semantic Scholar 等可程序化库）与 DOI 去重合并；你负责语义发现补漏——在 Undermind / Google Scholar / Elicit 网页端检索（哪篇重要你判断更快），导出 RIS / BibTeX / CSV 后点本行「导入检索结果」（落 papers/imports/），开工时 agent 自动解析、去重并合并进 papers/screening.md；你自己读过、认为必须纳入的 PDF 也可直接放进 papers/",
+          "agent 会系统检索 OpenAlex / Semantic Scholar 等可程序化库并按 DOI 去重；你补的是它搜不到的那部分——Undermind / Google Scholar / Elicit 等网页端的语义发现结果，或你读过、认定必须纳入的文献。到「文献与数据」导入即可（支持 Zotero 库、RIS/BibTeX 题录）。不补也能跑。",
         target: "papers/",
         timing: "before",
-      },
-      {
-        title: "（可选）给 agent 配学术检索 MCP",
-        guidance:
-          "到 MCP 页「预设 ▾」一键添加：Consensus（需先在系统环境变量设好 CONSENSUS_API_KEY 再分发，密钥按引用转写、不落明文）、Undermind（OAuth 无 key，保存分发后在对应 CLI 里登录一次授权，免费档即可用）。不配也能跑——OpenAlex/Semantic Scholar 官方 API 免 key，agent 直连即可；检索站反爬/需登录导出时才另挂 Playwright MCP，平时不必挂",
-        target: "",
-        timing: "before",
+        optional: true,
       },
       {
         title: "下载付费墙文献全文",
         guidance:
-          "渠道自选：机构图书馆/作者邮件索取 preprint 等；缺权限清单见 papers/to-fetch.md（agent 筛完会列出）",
+          "agent 筛完会把拿不到全文的列进 papers/to-fetch.md。渠道自选：机构图书馆、作者邮件索取 preprint 等。拿到后加进你的文献库或项目目录再导入；不补的话 agent 按摘要写笔记并标注「仅摘要」。",
         target: "papers/*.pdf",
         timing: "after",
+        optional: true,
       },
     ],
-    discussionSeeds: [
-      "综述角度怎么收：领域全景铺开，还是聚焦某个子问题/结局？",
-      "纳入排除标准定多严：只要高质量期刊/顶会，还是观察性研究、预印本也要？",
-      "检索范围铺多广：免 key 的 OpenAlex/S2/arXiv 够用，还是要动用机构订阅库（WoS 等，需你提供 key）？",
+    decisions: [
+      {
+        q: "综述角度怎么收",
+        options: ["领域全景铺开", "聚焦某个子问题/结局"],
+      },
+      {
+        q: "纳入标准定多严",
+        options: ["只要高质量期刊/顶会", "含观察性研究与预印本"],
+      },
+      {
+        q: "检索范围铺多广",
+        options: [
+          "免 key 的 OpenAlex/S2/arXiv 够用",
+          "另加机构订阅库（需你提供 key）",
+        ],
+      },
     ],
   },
   {
@@ -87,13 +94,17 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       {
         title: "继续补投付费全文",
         guidance:
-          "上一步 papers/to-fetch.md 列出的付费文献，拿到后直接放进 papers/（文件名按「作者年份-短标题.pdf」）；agent 收尾前会重读全文、更新对应「仅摘要」笔记",
+          "上一步 papers/to-fetch.md 列出的付费文献，拿到后到「文献与数据」导入；agent 收尾前会重读全文、更新对应「仅摘要」笔记。",
         target: "papers/*.pdf",
         timing: "during",
+        optional: true,
       },
     ],
-    discussionSeeds: [
-      "精读力度怎么分：全部全文精读，还是核心文献精读、其余按摘要记？",
+    decisions: [
+      {
+        q: "精读力度怎么分",
+        options: ["核心文献精读、其余按摘要记", "全部全文精读"],
+      },
     ],
   },
   {
@@ -117,6 +128,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
           "重点看末尾「框架推演」段的取舍理由与空白-章节对应；框架不合意时回任务书草稿改，比初稿写完再返工便宜",
         target: "",
         timing: "after",
+        optional: true,
       },
     ],
     discussionSeeds: [
@@ -137,9 +149,13 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["manuscript/draft.md"],
     skills: ["review-writing"],
     run: [],
-    discussionSeeds: [
-      "目标篇幅和读者怎么定：写多长、文风偏入门科普还是偏同行专家？",
-      "这篇综述的去向是什么：课程作业/毕业论文一章/投某期刊？去向决定格式与篇幅口径",
+    decisions: [
+      { q: "目标篇幅", options: ["6000-8000 词", "4000 词以内", "1 万词以上"] },
+      { q: "读者与文风", options: ["偏同行专家", "偏入门科普"] },
+      {
+        q: "这篇综述的去向",
+        options: ["投期刊", "毕业论文的一章", "课程作业"],
+      },
     ],
   },
   {
@@ -180,7 +196,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     brief:
       "输入：英文综述模板的 notes/ 与 references.bib、数据处理模板的 analysis/ 分析报告与清洗后数据（接自上游模板时随仓库合并自带；独立启动本项目时，先把上游产物放入对应目录，或在资源面板绑定上游项目目录；没有上游产物时按下面流程自行检索补齐）。\n" +
       "围绕课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源自行判断，并把假设写进 papers/screening.md 开头）执行：\n" +
-      "1. 检索与筛选按 lit-search 技能：先定纳入/排除标准（年份、语言、来源级别、相关性），检索候选并逐条判定，产出 papers/screening.md（标准 + 各库检索式与命中数 + 每篇判定理由；拿不准相关性的一律纳入并标注「待确认」）与 papers/included.md（纳入清单，一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；papers/imports/ 中用户导入的检索结果先解析去重、并入 screening.md 候选池再筛选；\n" +
+      "1. 检索与筛选按 lit-search 技能：先定纳入/排除标准（年份、语言、来源级别、相关性），检索候选并逐条判定，产出 papers/screening.md（标准 + 各库检索式与命中数 + 每篇判定理由；拿不准相关性的一律纳入并标注「待确认」）与 papers/included.md（纳入清单，一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；用户导入的检索结果先解析去重、并入 screening.md 候选池再筛选——两处都要看：工作区内 papers/imports/ 目录，以及本文件「项目资源」段的「引文」条目与「上一步产物（提货单）」段中「人工交付」条目给出的绝对路径（按路径直读，勿复制进工作区）；\n" +
       "2. 全文获取：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的直接下载到 papers/（文件名：作者年份-短标题.pdf）；付费墙的不得尝试绕过，汇总写入 papers/to-fetch.md（标题 — DOI），等用户提供；\n" +
       "3. 精读按 lit-notes 技能：对 included.md 每篇产出 notes/<序号-短标题>.md（研究问题/方法/主要结果/局限/可引用点五段）；全文缺失（to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，开头标注「仅摘要」；每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」）；\n" +
       "4. 按主题归纳研究现状写入 survey/literature.md（主要线索、方法与结论的异同）；提炼 2-3 个候选研究问题，逐一分析现有工作的 gap（未解决的问题、方法的不足、数据的空白），写入 survey/gap-analysis.md；\n" +
@@ -193,16 +209,10 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       {
         title: "补充你已知的关键文献",
         guidance:
-          "分工：agent 负责系统检索（OpenAlex / Semantic Scholar 等可程序化库）与 DOI 去重合并；你负责语义发现补漏——在 Undermind / Google Scholar / Elicit 网页端检索（哪篇重要你判断更快），导出 RIS / BibTeX / CSV 后点本行「导入检索结果」（落 papers/imports/），开工时 agent 自动解析、去重并合并进 papers/screening.md；你自己读过、认为必须纳入的 PDF 也可直接放进 papers/",
+          "agent 会系统检索 OpenAlex / Semantic Scholar 等可程序化库并按 DOI 去重；你补的是它搜不到的那部分——Undermind / Google Scholar / Elicit 等网页端的语义发现结果，或你读过、认定必须纳入的文献。到「文献与数据」导入即可（支持 Zotero 库、RIS/BibTeX 题录）。不补也能跑。",
         target: "papers/",
         timing: "before",
-      },
-      {
-        title: "（可选）配置学术检索 MCP 与 API key",
-        guidance:
-          "到 MCP 页「预设 ▾」一键预填「Consensus（学术搜索）」或「Undermind（文献语义搜索）」（Undermind 无 key，首次在 CLI 里 OAuth 浏览器授权即可）；Consensus / Web of Science / SerpAPI 的 key 先设为环境变量（CONSENSUS_API_KEY / WOS_API_KEY / SERPAPI_KEY）再按引用分发，不落明文；检索站反爬兜底可在 MCP 页粘贴导入 playwright。不配也能跑——agent 默认用 OpenAlex / Semantic Scholar 免费 API",
-        target: "",
-        timing: "before",
+        optional: true,
       },
       {
         title: "确认研究问题",
@@ -210,6 +220,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
           "agent 会从候选中选定一个并把取舍理由写进 survey/gap-analysis.md；方向性决策建议过目后再进入实验设计",
         target: "",
         timing: "after",
+        optional: true,
       },
       {
         title: "下载付费墙文献全文",
@@ -217,12 +228,19 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
           "渠道自选：机构图书馆/作者邮件索取 preprint 等；缺权限清单见 papers/to-fetch.md（agent 筛完会列出）；补齐后让 agent 重读全文、更新对应「仅摘要」笔记",
         target: "papers/*.pdf",
         timing: "after",
+        optional: true,
       },
     ],
-    discussionSeeds: [
-      "课题边界收多宽：调研铺满整个方向，还是只盯准备做的那条线？",
-      "研究问题怎么选：追热点求稳妥，还是押高风险高回报的 gap？",
-      "数据从哪来：公开数据集够用吗，还是要自己采/申请？",
+    decisions: [
+      {
+        q: "课题边界收多宽",
+        options: ["只盯准备做的那条线", "铺满整个方向"],
+      },
+      {
+        q: "研究问题怎么选",
+        options: ["追热点求稳妥", "押高风险高回报的 gap"],
+      },
+      { q: "数据从哪来", options: ["公开数据集够用", "自己采集/申请"] },
     ],
   },
   {
@@ -246,10 +264,16 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
           "design.md 的实验矩阵与计算开销估算直接决定下一步的执行成本；确认或修改后再开「实验执行」",
         target: "",
         timing: "after",
+        optional: true,
+      },
+    ],
+    decisions: [
+      {
+        q: "实验规模怎么定",
+        options: ["先跑最小可行集", "只跑核心组合", "矩阵全跑"],
       },
     ],
     discussionSeeds: [
-      "实验规模怎么定：算力/时间预算内，矩阵砍到哪些组合必须跑？",
       "主指标押哪个：论文卖点挂在哪个指标上，辅指标留哪些？",
     ],
   },
@@ -275,8 +299,8 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
         timing: "before",
       },
     ],
-    discussionSeeds: [
-      "算力怎么排：本机跑还是上集群/云，排队和花费接受多少？",
+    decisions: [
+      { q: "算力怎么排", options: ["本机跑", "上集群/云"] },
     ],
   },
   {
@@ -293,8 +317,11 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["analysis/", "figures/"],
     skills: ["stats-check", "figure-forge"],
     run: [],
-    discussionSeeds: [
-      "结果不如预期怎么办：阴性结果如实写进论文，还是换方向补实验？",
+    decisions: [
+      {
+        q: "结果不如预期怎么办",
+        options: ["阴性结果如实写进论文", "换方向补实验"],
+      },
     ],
   },
   {
@@ -353,8 +380,8 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
         timing: "after",
       },
     ],
-    discussionSeeds: [
-      "投哪里：冲高一档还是求稳，毕业/评职时间线上来得及吗？",
+    decisions: [
+      { q: "目标期刊怎么定", options: ["冲高一档", "求稳妥投"] },
     ],
     // P4 quarto 渲染：定稿 paper-final.md → paper-final.pdf；RX4a 追加 export-docx → paper-final.docx
     run: [
@@ -404,10 +431,15 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
         timing: "after",
       },
     ],
+    decisions: [
+      {
+        q: "敏感字段怎么处理",
+        options: ["先脱敏再分析", "无敏感字段，照常处理", "敏感字段整列排除"],
+      },
+    ],
     discussionSeeds: [
       "数据口径以哪份为准：多来源数据冲突时听谁的？",
       "这份数据最终要回答什么问题：决定了哪些字段是重点？",
-      "敏感字段怎么处理：数据里有没有个人标识/隐私信息，哪些字段不能进 git 或要先脱敏？",
     ],
   },
   {
@@ -433,9 +465,10 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
         timing: "after",
       },
     ],
-    discussionSeeds: [
-      "清洗尺度怎么定：缺失值删还是填，丢掉多少数据能接受？",
-      "分析粒度定在哪：一行代表什么（一个人/一次事件/一天），多表要不要先合并成一张？",
+    decisions: [
+      { q: "缺失值怎么处理", options: ["能填就填", "直接删除缺失行"] },
+      { q: "分析粒度", options: ["保持原始粒度不聚合", "按人聚合", "按天聚合"] },
+      { q: "多表要不要先合并", options: ["不合并，保持多表", "合并成一张宽表"] },
     ],
   },
   {
@@ -469,8 +502,11 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["analysis-report.md"],
     skills: [],
     run: [],
-    discussionSeeds: [
-      "报告给谁看：决策层要结论先行，还是技术读者要细节可复核？",
+    decisions: [
+      {
+        q: "报告给谁看",
+        options: ["决策层：结论先行", "技术读者：细节可复核"],
+      },
     ],
   },
 ];
@@ -483,7 +519,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
     brief:
       "输入：综述线产出的 notes/ 文献笔记与 references.bib（接自上游英文综述/科研论文模板时随仓库合并自带；独立启动本项目时，先把上游产物放入对应目录，或在资源面板绑定上游项目目录；没有上游产物时按下面第 1-3 条自行检索补齐）。\n" +
       "围绕课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源推断，并把推断写进 papers/screening.md 与开题报告）执行：\n" +
-      "1. 检索与筛选按 lit-search 技能执行：先定纳入/排除标准（年份、语言、来源级别、相关性）写入 papers/screening.md，逐条判定后纳入清单写入 papers/included.md；拿不准相关性的一律纳入并标注「待确认」，不自行剔除；\n" +
+      "1. 检索与筛选按 lit-search 技能执行：先定纳入/排除标准（年份、语言、来源级别、相关性）写入 papers/screening.md，逐条判定后纳入清单写入 papers/included.md；拿不准相关性的一律纳入并标注「待确认」，不自行剔除；用户人工导入的题录先解析去重并进候选池——两处都要看：工作区内 papers/imports/ 目录，以及本文件「项目资源」段的「引文」条目与「上一步产物（提货单）」段中「人工交付」条目给出的绝对路径（按路径直读，勿复制进工作区）；\n" +
       "2. 全文获取：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的直接下载到 papers/（文件名：作者年份-短标题.pdf）；付费墙的不绕过，在 included.md 该行标注「需自行获取」并汇总到 papers/to-fetch.md（等人工补全文）；\n" +
       "3. 精读与笔记按 lit-notes 技能执行：included.md 逐篇产出 notes/<序号-短标题>.md（研究问题 / 方法 / 主要结果 / 局限 / 可引用点），每篇在 references.bib 追加 BibTeX（缺字段标「待补」）；全文未得的按摘要+可见元数据写笔记并在开头标注「仅摘要·待全文」，人工补齐全文后重读更新；\n" +
       "4. 产出 proposal/proposal.md 开题报告（按 proposal-writer 技能）：选题依据、研究内容、研究目标与创新点、技术路线、可行性与进度安排，引用只用 references.bib 已有键；\n" +
@@ -502,9 +538,10 @@ const THESIS_STEPS: ProjectStepDto[] = [
       {
         title: "补充你已知的关键文献",
         guidance:
-          "分工：agent 负责系统检索（OpenAlex / Semantic Scholar 等可程序化库）与 DOI 去重合并；你负责语义发现补漏——在 Undermind / Google Scholar / Elicit 网页端检索（哪篇重要你判断更快），导出 RIS / BibTeX / CSV 后点本行「导入检索结果」（落 papers/imports/），agent 解析去重后并入筛选清单；你自己读过、必须纳入的 PDF 也可直接放进 papers/。可选加速：到 MCP 页「预设 ▾」导入 Consensus（学术搜索，需先设环境变量 CONSENSUS_API_KEY）或 Undermind（OAuth，分发后在 CLI 里登录一次），agent 即可直接调用检索；检索站反爬/需登录时的浏览器兜底是 Playwright MCP，平时不必挂",
+          "agent 会系统检索 OpenAlex / Semantic Scholar 等可程序化库并按 DOI 去重；你补的是它搜不到的那部分——Undermind / Google Scholar / Elicit 等网页端的语义发现结果，或你读过、认定必须纳入的文献。到「文献与数据」导入即可（支持 Zotero 库、RIS/BibTeX 题录）。不补也能跑。",
         target: "papers/",
         timing: "before",
+        optional: true,
       },
       {
         title: "下载付费墙文献全文",
@@ -512,6 +549,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
           "渠道自选：机构图书馆/作者邮件索取 preprint 等；缺权限清单见 papers/to-fetch.md（agent 检索后会列出）；补进 papers/ 后告诉 agent 重读全文、更新对应「仅摘要」笔记",
         target: "papers/*.pdf",
         timing: "during",
+        optional: true,
       },
       {
         title: "开题报告送导师评阅",
@@ -519,11 +557,16 @@ const THESIS_STEPS: ProjectStepDto[] = [
           "proposal/proposal.md 可直接发导师；导师意见自行记录，可追加到该文件末尾供后续步骤参考",
         target: "proposal/",
         timing: "after",
+        optional: true,
       },
+    ],
+    decisions: [
+      { q: "检索年限", options: ["近五年", "近十年", "不限年限"] },
+      { q: "文献语言", options: ["中英文都要", "只要英文"] },
+      { q: "预印本要不要纳入", options: ["纳入并标注", "不纳入"] },
     ],
     discussionSeeds: [
       "研究问题聚焦到哪：导师给的大方向里，切哪一块是你真能做完的？",
-      "文献范围收多宽：检索年限、语言（中文文献知网需手动导出）、预印本要不要纳入？",
     ],
   },
   {
@@ -546,10 +589,13 @@ const THESIS_STEPS: ProjectStepDto[] = [
           "methodology.md 与开题报告不一致的改动见文末「变更说明」，建议逐条与导师过一遍",
         target: "",
         timing: "after",
+        optional: true,
       },
     ],
+    decisions: [
+      { q: "技术路线押哪条", options: ["成熟方案保毕业", "新方法冲创新点"] },
+    ],
     discussionSeeds: [
-      "技术路线押哪条：成熟方案保毕业，还是新方法冲创新点？",
       "基线与评价指标怎么定：跟谁比、比到什么程度算达到预期？",
     ],
   },
@@ -580,9 +626,15 @@ const THESIS_STEPS: ProjectStepDto[] = [
         timing: "before",
       },
     ],
-    discussionSeeds: [
-      "实验做到什么程度收手：矩阵全跑完，还是核心结果出来就转写作？",
-      "结果不如预期怎么办：阴性结果如实写进论文，还是换方向补实验？",
+    decisions: [
+      {
+        q: "实验做到什么程度收手",
+        options: ["核心结果出来就转写作", "矩阵全跑完"],
+      },
+      {
+        q: "结果不如预期怎么办",
+        options: ["阴性结果如实写进论文", "换方向补实验"],
+      },
     ],
   },
   {
@@ -599,9 +651,10 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "完成标准：thesis-draft.md 章节齐全、引用闭环、revision-notes.md 已提交、run 脚本渲染通过。",
     expectedArtifacts: ["manuscript/"],
     skills: ["quarto-render"],
+    decisions: [{ q: "论文语种", options: ["中文", "英文"] }],
     discussionSeeds: [
       "章节权重怎么分：哪几章是答辩老师最看重、要重点打磨的？",
-      "语种与篇幅：中文还是英文写、学校字数与章节要求是多少？",
+      "学校的字数与章节要求是什么：有没有硬性模板要对齐？",
     ],
     // P4 quarto 渲染：产物为 manuscript/thesis-draft.md → thesis-draft.pdf；RX4a 追加 export-docx → thesis-draft.docx
     run: [
@@ -652,8 +705,11 @@ const THESIS_STEPS: ProjectStepDto[] = [
         timing: "after",
       },
     ],
-    discussionSeeds: [
-      "查重红线留多少余量：学校要求多少以下，定稿前自己先压到多少？",
+    decisions: [
+      {
+        q: "查重目标",
+        options: ["按学校红线即可", "压到 15% 以下", "压到 10% 以下"],
+      },
     ],
     // P4 quarto 渲染：定稿 thesis-final.md → thesis-final.pdf；RX4a 追加 export-docx → thesis-final.docx
     run: [
@@ -702,6 +758,7 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
           "已确定期刊时在 submission/target-journal.md 写明刊名与理由；没有则 agent 会给 2-3 个候选并标注「待用户确认」",
         target: "submission/target-journal.md",
         timing: "before",
+        optional: true,
       },
       {
         title: "拍板目标期刊、字数裁剪方案并补齐「待填」信息",
@@ -711,9 +768,12 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
         timing: "after",
       },
     ],
-    discussionSeeds: [
-      "投哪里：候选期刊里冲一档还是保一档，时间成本怎么权衡？",
-      "字数超标怎么办：超限时先砍哪部分（方法细节/讨论/文献量），还是换允许更长篇幅的刊？",
+    decisions: [
+      { q: "目标期刊怎么选", options: ["冲高一档", "求稳保一档"] },
+      {
+        q: "字数超标先砍哪部分",
+        options: ["砍讨论", "砍方法细节", "砍文献量", "换更长篇幅的刊"],
+      },
     ],
   },
   {
@@ -792,8 +852,13 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
         timing: "after",
       },
     ],
+    decisions: [
+      {
+        q: "回复策略怎么定",
+        options: ["意见尽量接受修改", "该反驳的坚决反驳"],
+      },
+    ],
     discussionSeeds: [
-      "回复策略怎么定：意见尽量接受修改，还是该反驳的坚决反驳？",
       "补实验的底线在哪：审稿人要的新实验哪些做哪些拒，时间与资源预算卡在哪？",
     ],
   },

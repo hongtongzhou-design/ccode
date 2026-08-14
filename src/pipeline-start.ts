@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { orderedAnswers, parseDecisions } from "./step-decisions";
 import {
   DEFAULT_KICKOFF_PROMPT,
   RESOURCE_TYPE_LABELS,
@@ -25,12 +26,41 @@ export function renderTaskMd(
   projectPath: string,
   artifacts?: ArtifactEntryDto[],
   skillMeta?: Record<string, string>,
+  decisions?: { q: string; answer: string }[],
 ): string {
   const lines = [`# ${step.name}`, ""];
   // 课题主题放在简报之前：auto 模式的 Agent 据此明确综述主题
   const topic = cfg.topic?.trim();
   if (topic) {
     lines.push("## 课题主题", topic, "");
+  }
+  // 文献来源：用户已有文献库时，检索这一步的性质变了——不是「去检索」而是「盘点 + 查漏」。
+  // 放在简报之前，让 agent 先知道前提再读步骤简报（模板简报本身不必为此写两套）
+  const litSource = cfg.litSource?.trim();
+  if (litSource === "zotero" || litSource === "folder") {
+    lines.push(
+      "## 文献来源",
+      litSource === "zotero"
+        ? "本项目的文献来自用户已有的 Zotero 库（已导出 references.bib，PDF 见「项目资源」段的绝对路径）。"
+        : "本项目的文献来自用户已有的本地文件夹（见「项目资源」段）。",
+      "因此涉及文献检索的步骤按「盘点 + 查漏补缺」执行，而不是从零系统检索：",
+      "1. 先通读已有条目，按本步骤的纳入/排除标准逐条判定，产出筛选记录；",
+      "2. 只针对明显缺口做补充检索（近一年新工作、标准里要求但库中没有的方向），不重复已有条目；",
+      "3. 已有条目的元数据以 references.bib 为准，不要重新编造；缺字段标「待补」。",
+      "",
+    );
+  }
+  // 已定方向紧跟主题、排在简报之前：这是人对本步骤的显式约束，
+  // agent 应当在读简报之前先知道哪些口径已经被拍死
+  if (decisions && decisions.length > 0) {
+    lines.push(
+      "## 已定方向",
+      ...decisions.map((d) => `- ${d.q}：${d.answer}`),
+      // 空行不能省：紧贴列表的段落会被 markdown 当成最后一个列表项的续行
+      "",
+      "以上为人已拍板的口径，按此执行；与简报冲突时以本节为准。",
+      "",
+    );
   }
   lines.push(
     step.brief.trim() ||
@@ -129,6 +159,7 @@ export async function gatherTaskMdExtras(
 ): Promise<{
   artifacts: ArtifactEntryDto[];
   skillMeta: Record<string, string> | undefined;
+  decisions: { q: string; answer: string }[];
 }> {
   // 提货单：项目根已有上一步产物清单时带进 TASK.md（读取失败不阻断）
   let artifacts: ArtifactEntryDto[] = [];
@@ -152,7 +183,21 @@ export async function gatherTaskMdExtras(
       /* 技能库不可读时只列技能名 */
     }
   }
-  return { artifacts, skillMeta };
+  // 已定方向：答案存在任务书草稿里，拼装时读出来渲染成一段（读失败只是不带这段，不阻断开步）
+  let decisions: { q: string; answer: string }[] = [];
+  try {
+    const d = await invoke<{ relPath: string; text: string | null }>(
+      "read_task_draft",
+      { projectRoot: projectPath, stepName: step.name },
+    );
+    decisions = orderedAnswers(
+      step.decisions ?? [],
+      parseDecisions(d?.text ?? ""),
+    );
+  } catch {
+    /* 草稿不可读时跳过「已定方向」段 */
+  }
+  return { artifacts, skillMeta, decisions };
 }
 
 /** 只读预览用的一步到位拼装（步骤级「预览 TASK.md」入口）：与开工落盘同一出处
@@ -162,8 +207,11 @@ export async function buildTaskMdPreview(
   step: ProjectStepDto,
   cfg: ProjectConfigDto,
 ): Promise<string> {
-  const { artifacts, skillMeta } = await gatherTaskMdExtras(projectPath, step);
-  return renderTaskMd(step, cfg, projectPath, artifacts, skillMeta);
+  const { artifacts, skillMeta, decisions } = await gatherTaskMdExtras(
+    projectPath,
+    step,
+  );
+  return renderTaskMd(step, cfg, projectPath, artifacts, skillMeta, decisions);
 }
 
 /** 一键开步共享链路（§11.3 机制三）：ensure git → bootstrap 提交 → 建工作区 → 简报落成 TASK.md →
@@ -212,8 +260,18 @@ export async function startPipelineStep({
   if (taskMdOverride?.trim()) {
     content = taskMdOverride;
   } else {
-    const { artifacts, skillMeta } = await gatherTaskMdExtras(projectPath, step);
-    content = renderTaskMd(step, cfg, projectPath, artifacts, skillMeta);
+    const { artifacts, skillMeta, decisions } = await gatherTaskMdExtras(
+      projectPath,
+      step,
+    );
+    content = renderTaskMd(
+      step,
+      cfg,
+      projectPath,
+      artifacts,
+      skillMeta,
+      decisions,
+    );
   }
   try {
     await invoke("write_workspace_task_md", {

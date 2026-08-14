@@ -46,6 +46,8 @@ type StepDraft = {
   humanTasks: HumanTaskDto[];
   /** 讨论种子编辑态：每行一条 */
   discussionSeeds: string[];
+  /** 决策项编辑态：options 用逗号分隔的文本（同 artifactsText 口径） */
+  decisions: { q: string; optionsText: string }[];
 };
 
 function toDraft(s: ProjectStepDto): StepDraft {
@@ -59,6 +61,10 @@ function toDraft(s: ProjectStepDto): StepDraft {
     resources: [...(s.resources ?? [])],
     humanTasks: (s.humanTasks ?? []).map((t) => ({ ...t })),
     discussionSeeds: [...(s.discussionSeeds ?? [])],
+    decisions: (s.decisions ?? []).map((d) => ({
+      q: d.q,
+      optionsText: d.options.join(", "),
+    })),
   };
 }
 
@@ -89,6 +95,16 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
         timing: t.timing,
       })),
     discussionSeeds: d.discussionSeeds.map((x) => x.trim()).filter(Boolean),
+    // 与后端解析同一口径：问题与选项都非空才留（没有选项的题该写成讨论种子）
+    decisions: d.decisions
+      .map((x) => ({
+        q: x.q.trim(),
+        options: x.optionsText
+          .split(/[,，]/)
+          .map((o) => o.trim())
+          .filter(Boolean),
+      }))
+      .filter((x) => x.q && x.options.length > 0),
   };
 }
 
@@ -428,7 +444,64 @@ export default function PipelineEditor({
 
         <div className="mb-2">
           <span className="mb-1 block text-xs text-l3">
-            讨论种子（开工前建议先和 Agent 聊清楚的问题，会在任务卡区列出、点击即聊）
+            决策项（答案可枚举的拍板点，在流程线上点选即答、不用开会话；第一个选项即推荐值）
+          </span>
+          {d.decisions.map((dec, di) => (
+            <div key={di} className="mb-1 flex items-center gap-1">
+              <input
+                className={`${field} min-w-0 flex-1`}
+                value={dec.q}
+                onChange={(e) =>
+                  patch(i, {
+                    decisions: d.decisions.map((x, xi) =>
+                      xi === di ? { ...x, q: e.target.value } : x,
+                    ),
+                  })
+                }
+                placeholder="问题，如 纳入标准定多严"
+              />
+              <input
+                className={`${field} min-w-0 flex-[2]`}
+                value={dec.optionsText}
+                onChange={(e) =>
+                  patch(i, {
+                    decisions: d.decisions.map((x, xi) =>
+                      xi === di ? { ...x, optionsText: e.target.value } : x,
+                    ),
+                  })
+                }
+                placeholder="选项，逗号分隔，如 只要高质量期刊/顶会, 含观察性研究与预印本"
+              />
+              <button
+                type="button"
+                className={`${actionBtn} shrink-0`}
+                aria-label={`删除决策项：${dec.q || di + 1}`}
+                onClick={() =>
+                  patch(i, {
+                    decisions: d.decisions.filter((_, x) => x !== di),
+                  })
+                }
+              >
+                删除
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            className={actionBtn}
+            onClick={() =>
+              patch(i, {
+                decisions: [...d.decisions, { q: "", optionsText: "" }],
+              })
+            }
+          >
+            + 添加决策项
+          </button>
+        </div>
+
+        <div className="mb-2">
+          <span className="mb-1 block text-xs text-l3">
+            讨论种子（答案不可枚举、需要来回聊的开放问题；点击即开会话）
           </span>
           {d.discussionSeeds.map((s, si) => (
             <div key={si} className="mb-1 flex items-center gap-1">
@@ -661,6 +734,7 @@ export default function PipelineEditor({
                     resources: [],
                     humanTasks: [],
                     discussionSeeds: [],
+                    decisions: [],
                   },
                 ])
               }

@@ -17,6 +17,10 @@ export type StepRunStatus =
 export interface StepFlowNode {
   key: string;
   kind: "discuss" | "human" | "agent" | "review";
+  /** 版式分区：main = 主干（必须发生的先后链）；optional = 可选补充（沉到分隔线下）。
+   *  可选项不进主干还有个要紧的副作用——它们不再抢「当前节点」：
+   *  一个永远不打勾的可选项会把当前指示卡死在那儿，后面的节点永远轮不到 */
+  section: "main" | "optional";
   label: string;
   /** 引导小字（落点说明/时机说明） */
   hint?: string;
@@ -38,25 +42,42 @@ export function buildStepFlow(args: {
   /** 本步骤任务书草稿已起草（.ccode/drafts/<步骤>.md，讨论种子节点的完成口径） */
   hasDraft: boolean;
   runStatus: StepRunStatus;
+  /** 还没拍板的决策项数量（草稿「已定方向」小节回填后算出）：
+   *  只要还有没答的，本节点就不算完事——只写了一条答案草稿就存在了，
+   *  拿 hasDraft 当完成口径会在还剩几题没答时就打勾 */
+  pendingDecisions?: number;
 }): StepFlow {
   const { step, states, hasDraft, runStatus } = args;
+  const pendingDecisions = args.pendingDecisions ?? 0;
   const nodes: StepFlowNode[] = [];
   const humans = (timing: string) => states.filter((s) => s.timing === timing);
 
-  // 1. 讨论种子（有种子才有此节点）：聊透 = 任务书草稿已起草
-  if ((step.discussionSeeds ?? []).length > 0) {
-    nodes.push({
-      key: "discuss",
-      kind: "discuss",
-      label: "任务书：和 Agent 聊出本步任务书",
-      done: hasDraft,
-    });
-  }
+  // 1. 定方向：恒存在。它同时是想法区的落点（discussContent），
+  //    没有决策项也没有种子的步骤照样要能记想法、聊任务书——按「有种子才生成」会让那些步骤
+  //    的想法区整个消失。无可拍板项时直接算完成，不挡后面的节点。
+  const decisions = step.decisions ?? [];
+  const seeds = step.discussionSeeds ?? [];
+  const nothingToSettle = decisions.length === 0 && seeds.length === 0;
+  nodes.push({
+    key: "discuss",
+    kind: "discuss",
+    section: "main",
+    label:
+      pendingDecisions > 0
+        ? `定方向：还有 ${pendingDecisions} 件要拍板`
+        : "定方向：本步任务书",
+    hint:
+      pendingDecisions > 0
+        ? "选项点一下就答完，不用开会话；拿不准的点「其他…」自己写或开聊"
+        : undefined,
+    done: nothingToSettle || (hasDraft && pendingDecisions === 0),
+  });
   // 2. before 人工事项
   for (const h of humans("before")) {
     nodes.push({
       key: `human:${h.title}`,
       kind: "human",
+      section: h.optional ? "optional" : "main",
       label: h.title,
       hint: h.target ? `交付落点 ${h.target}` : "完成后手动勾选",
       done: h.done,
@@ -67,6 +88,7 @@ export function buildStepFlow(args: {
   nodes.push({
     key: "agent",
     kind: "agent",
+    section: "main",
     label: `agent 执行：${step.name}`,
     hint:
       runStatus === "pending"
@@ -83,6 +105,7 @@ export function buildStepFlow(args: {
     nodes.push({
       key: `human:${h.title}`,
       kind: "human",
+      section: h.optional ? "optional" : "main",
       label: h.title,
       hint: `agent 干活期间随时可做${h.target ? `；交付落点 ${h.target}` : ""}`,
       done: h.done,
@@ -94,6 +117,7 @@ export function buildStepFlow(args: {
     nodes.push({
       key: `human:${h.title}`,
       kind: "human",
+      section: h.optional ? "optional" : "main",
       label: h.title,
       hint: `agent 干完后轮到你${h.target ? `；交付落点 ${h.target}` : ""}`,
       done: h.done,
@@ -104,11 +128,13 @@ export function buildStepFlow(args: {
   nodes.push({
     key: "review",
     kind: "review",
+    section: "main",
     label: "评审合并进主文件夹",
     hint: runStatus === "review" ? "点「去评审」验收产物" : undefined,
     done: runStatus === "done",
   });
 
-  const current = nodes.find((n) => !n.done);
+  // 当前节点只在主干里找：可选项不做也能往下走，让它当「当前」会把指示卡死
+  const current = nodes.find((n) => n.section === "main" && !n.done);
   return { nodes, currentKey: current?.key ?? null };
 }

@@ -25,6 +25,7 @@ import { filterWorkspacesByFocus } from "../workspace-visibility";
 import {
   EmptyState,
   fieldClass,
+  NoticeBar,
   PageFrame,
   PageHeader,
   primaryActionClass,
@@ -38,6 +39,7 @@ import type {
   HelpRequestDto,
   PendingArtifactDto,
   PortInfoDto,
+  DiscoveredResourceDto,
   ProjectConfigReadDto,
   ProjectDto,
   RunScriptDto,
@@ -90,7 +92,8 @@ function AddProjectModal({
 }: {
   path: string;
   onClose: () => void;
-  onRegistered: (project: ProjectDto) => void;
+  /** autoAdded = 注册时自动扫描并登记的资源条数（0 = 目录里没有 PDF/数据/引文） */
+  onRegistered: (project: ProjectDto, autoAdded: number) => void;
 }) {
   const [name, setName] = useState(pathBaseName(path));
   const [topic, setTopic] = useState("");
@@ -107,26 +110,48 @@ function AddProjectModal({
         name: name.trim(),
       });
       const topicText = topic.trim();
-      if (topicText) {
-        // 课题主题落进档案卡：先读后写，保留目录里已有的 resources/steps
-        try {
-          const read = await invoke<ProjectConfigReadDto>(
-            "read_project_config",
-            { path },
-          );
-          await invoke("write_project_config", {
-            path,
-            config: { ...read.config, topic: topicText },
-          });
-        } catch (reason) {
-          // 注册已成功：留在弹窗内报错，重试/取消由用户决定（重注册是幂等 upsert）
-          setError(
-            `项目已注册，但课题主题写入 project.toml 失败：${String(reason)}`,
-          );
-          return;
+      // 注册即扫一次资源并登记：discover_at 是深度 3 的只读 stat（只认 pdf/csv/bib 等），
+      // 很便宜。原先要用户自己想起来去点「发现资源」——新用户根本不知道有这一步，
+      // 结果 TASK.md 的「项目资源」段空着，agent 看不到手边已有的文献。
+      // 只记路径不复制（机制一），条目可在资源面板随时删。
+      let autoAdded = 0;
+      try {
+        const read = await invoke<ProjectConfigReadDto>("read_project_config", {
+          path,
+        });
+        const found = await invoke<DiscoveredResourceDto[]>(
+          "discover_resources",
+          { path },
+        );
+        const fresh = found.filter((d) => !d.exists);
+        // 上限兜底：目录里堆着几百个 csv 时不把资源面板灌满，超了留给用户手动挑
+        const AUTO_MAX = 60;
+        const next = {
+          ...read.config,
+          ...(topicText ? { topic: topicText } : {}),
+          resources: [
+            ...read.config.resources,
+            ...fresh.slice(0, AUTO_MAX).map((d) => ({
+              name: d.path.split(/[\\/]/).pop() ?? d.path,
+              path: d.path,
+              type: d.type,
+              readonly: false,
+              note: "",
+            })),
+          ],
+        };
+        autoAdded = Math.min(fresh.length, AUTO_MAX);
+        if (autoAdded > 0 || topicText) {
+          await invoke("write_project_config", { path, config: next });
         }
+      } catch (reason) {
+        // 注册已成功：扫描/写入失败不回滚，留在弹窗内报错由用户决定重试
+        setError(
+          `项目已注册，但写入 project.toml 失败：${String(reason)}`,
+        );
+        return;
       }
-      onRegistered(project);
+      onRegistered(project, autoAdded);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -858,6 +883,21 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [addProjectPath, setAddProjectPath] = useState<string | null>(null);
   // 刚注册的项目路径：对应分组显示一次性 git 初始化引导
   const [freshProjectPath, setFreshProjectPath] = useState<string | null>(null);
+  /** 注册时自动扫到的资源条数：注册后立刻弹模板选择层会盖住页面顶部的 notice，
+   *  所以先存着，等模板层关掉（选了/跳过/不用流程都算）再连同结果一起报 */
+  const [justScanned, setJustScanned] = useState<number | null>(null);
+
+  /** 注册时的扫描结果拼成一句话，接在模板层关闭后的提示里（消费一次即清）。
+   *  0 条也要说——用户得知道「扫过了、确实没有」，而不是以为系统什么都没做 */
+  function scanSuffix(): string {
+    const n = justScanned;
+    if (n === null) return "";
+    setJustScanned(null);
+    return n > 0
+      ? `；已自动扫描并登记 ${n} 个文献/数据文件（开工时进 TASK.md，可在「文献与数据」增删）`
+      : "；项目目录里没扫到 PDF / 数据 / 引文，可在「文献与数据」从 Zotero 或检索结果导入";
+  }
+
   const [workspaceMenu, setWorkspaceMenu] = useState<{
     x: number;
     y: number;
@@ -1853,25 +1893,30 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         meta={
           selectedGroup
             ? `${selectedGroup.project?.name ?? selectedGroup.repoName} · ${selectedGroup.list.length} 个任务`
-            : `${active.length} 个活跃 · ${projects.length} 个项目 · ${repoCount} 个仓库`
+            : groups.length === 0
+              ? // 空状态：三个 0 没有信息量，只留一句说明这页是干嘛的
+                "把项目文件夹交给 AI 干活，你只管拍板"
+              : `${active.length} 个活跃 · ${projects.length} 个项目 · ${repoCount} 个仓库`
         }
         actions={
-          // 页头唯一主动作 = 添加项目；新建工作区收进各项目分组的工作区列表头部（仓库固定为当前分组）
-          <button
-            type="button"
-            onClick={() => void onAddProject()}
-            className={primaryActionClass}
-          >
-            + 添加项目
-          </button>
+          // 页头唯一主动作 = 添加项目；新建工作区收进各项目分组的工作区列表头部（仓库固定为当前分组）。
+          // 空状态下收起：空态卡片里已经有同一个主按钮，一屏两个实心 CTA 指同一件事是噪音
+          groups.length === 0 ? null : (
+            <button
+              type="button"
+              onClick={() => void onAddProject()}
+              className={primaryActionClass}
+            >
+              + 添加项目
+            </button>
+          )
         }
       />
       {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
       {notice && (
-        <p className="mb-4 text-sm text-ok-text">
-          <span className="mr-1">✓</span>
+        <NoticeBar className="mb-4" onDismiss={() => setNotice(null)}>
           {notice}
-        </p>
+        </NoticeBar>
       )}
       {created && (
         <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md bg-strip px-3 py-2.5 text-xs text-l2">
@@ -1913,8 +1958,17 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       )}
       {groups.length === 0 ? (
         <EmptyState
-          title="还没有研究项目"
-          detail="先添加一个项目目录，Ccode 会为它建立研究流程和隔离任务。"
+          title="从一个项目文件夹开始"
+          detail={
+            <>
+              选一个放着你文献、数据的文件夹，Ccode 会按研究流程排出步骤（读文献 →
+              整数据 → 做图 → 写论文），每一步交给 AI 去跑，跑完你验收了才算数。
+              <br />
+              <span className="text-l4">
+                不确定它怎么用？先创建一个示例课题，带演示数据和完整流程，随时可删。
+              </span>
+            </>
+          }
           action={
             <div className="flex items-center justify-center gap-2">
               <button
@@ -2168,14 +2222,17 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             }}
           </ProjectGroup>
       ) : null}
-      <PortsSection />
+      {/* 端口监控：一个项目都没有时不出现——它是技术面板，
+          在首屏只会给新用户添一个看不懂的词 */}
+      {groups.length > 0 && <PortsSection />}
       {addProjectPath && (
         <AddProjectModal
           path={addProjectPath}
           onClose={() => setAddProjectPath(null)}
-          onRegistered={(project) => {
+          onRegistered={(project, autoAdded) => {
             setAddProjectPath(null);
             setFreshProjectPath(project.path);
+            setJustScanned(autoAdded);
             setSelectedGroupKey(`p:${project.path}`);
             // 注册成功后接研究流程模板选择层（选模板 = append_pipeline_steps 追加步骤）
             setTemplatePick({ path: project.path, name: project.name });
@@ -2187,19 +2244,24 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         <TemplatePickModal
           projectPath={templatePick.path}
           projectName={templatePick.name}
-          onClose={() => setTemplatePick(null)}
+          onClose={() => {
+            setTemplatePick(null);
+            const tail = scanSuffix();
+            if (tail) setNotice(`项目已注册${tail}`);
+          }}
           onOptOut={() => {
             // 「不使用研究流程」标记已落盘：刷新让分组重读 project.toml（隐藏模板引导）
             setTemplatePick(null);
+            setNotice(`已记住「不使用研究流程」${scanSuffix()}`);
             void refresh();
           }}
           onApplied={(result, templateName) => {
             setTemplatePick(null);
-            setNotice(
+            const base =
               result.skipped.length > 0
                 ? `已按模板「${templateName}」追加 ${result.appended} 个研究步骤；跳过 ${result.skipped.length} 步（同名）：${result.skipped.join("、")}`
-                : `已按模板「${templateName}」追加 ${result.appended} 个研究步骤`,
-            );
+                : `已按模板「${templateName}」追加 ${result.appended} 个研究步骤`;
+            setNotice(`${base}${scanSuffix()}`);
             void refresh();
           }}
         />

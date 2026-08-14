@@ -28,6 +28,7 @@ mod updater;
 mod usage;
 mod workspaces;
 mod ws_settings;
+mod zotero;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -190,6 +191,9 @@ pub fn run() {
             projects::commit_project_bootstrap,
             projects::create_demo_project,
             projects::write_workspace_task_md,
+            zotero::zotero_inspect,
+            zotero::zotero_items,
+            zotero::zotero_import,
             projects::pdf_owner_project,
             projects::append_workspace_inbox,
             projects::list_pipeline_templates,

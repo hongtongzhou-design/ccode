@@ -66,6 +66,9 @@ export interface DetectResult {
   id: string;
   binaryPath: string | null;
   version: string | null;
+  /** 该 CLI 有进程级只读参数（--permission-mode plan / -s read-only 之类）。
+   *  false（qwen / opencode）= 「只读保护」对它只剩 prompt 软约束，agent 可以无视 */
+  readonlySupported: boolean;
 }
 
 export interface TokenUsageDto {
@@ -266,6 +269,8 @@ export interface HumanTaskDto {
   target: string;
   /** 时机：before（开工前）| during（并行）| after（收尾） */
   timing: string;
+  /** 可选事项：不做也不影响这一步跑完；缺省 false = 必办 */
+  optional?: boolean;
 }
 
 /** 人工事项派生状态（list_human_task_states）：done = manual || detected，手动优先 */
@@ -275,6 +280,8 @@ export interface HumanTaskStateDto {
   guidance: string;
   target: string;
   timing: string;
+  /** 可选事项：流程线标「可选」，且不计入「N 件待做」 */
+  optional?: boolean;
   /** 落点位置检测到文件 */
   detected: boolean;
   /** 人手动勾过（勾了系统不再追问；取消勾选回到纯检测口径） */
@@ -527,6 +534,22 @@ export interface UsageStatsDto {
   rateUsdCny: number;
 }
 
+/** Zotero 进料口（只读适配器，不做文献库）：探测结果 */
+export interface ZoteroCollectionDto {
+  id: number;
+  name: string;
+  /** 该分类下的条目数（不含附件与笔记） */
+  count: number;
+}
+
+export interface ZoteroLibraryDto {
+  dbPath: string;
+  storageDir: string;
+  collections: ZoteroCollectionDto[];
+  /** 全库条目数（含未分类） */
+  total: number;
+}
+
 export const AGENTS = [
   { id: "claude-code", label: "Claude Code", binary: "claude" },
   { id: "codex", label: "Codex", binary: "codex" },
@@ -577,6 +600,16 @@ export interface ProjectStepRunDto {
   default: boolean;
 }
 
+/** 步骤决策项（模板预置的「开工前要拍板的选择题」）：答案可枚举的走这里——点一下就答完，
+ *  不开会话；真正开放、需要来回讨论的留在 discussionSeeds。同样不进 TASK.md：
+ *  答案选定后写进任务书草稿，草稿才是开工合同 */
+export interface StepDecisionDto {
+  /** 问题（短句，不带问号） */
+  q: string;
+  /** 可选答案，首项即推荐值（「全部用推荐值」按首项一键应用）；后端保证非空 */
+  options: string[];
+}
+
 /** 档案卡流水线步骤：工作区名/简报/技能/预期产物/人工事项均为可编辑预设 */
 export interface ProjectStepDto {
   name: string;
@@ -591,6 +624,8 @@ export interface ProjectStepDto {
   humanTasks?: HumanTaskDto[];
   /** 讨论种子（模板预置的「开工前建议想清楚的问题」）：卡片区按步骤列出，点击即聊；不进 TASK.md */
   discussionSeeds?: string[];
+  /** 决策项（可枚举的拍板点，点选即答）；缺省 = 无（向后兼容旧后端与旧配置） */
+  decisions?: StepDecisionDto[];
 }
 
 export interface ProjectConfigDto {
@@ -601,6 +636,10 @@ export interface ProjectConfigDto {
   steps: ProjectStepDto[];
   /** 「不使用研究流程」显式标记：true = 隐藏模板引导横幅与定时任务区块；选模板后后端自动清回 false */
   pipelineOptOut?: boolean;
+  /** 文献来源：search（默认，让 agent 系统检索）| zotero | folder。
+   *  后两者 = 用户已有文献库，TASK.md 会加「文献来源」段把检索步骤降级为「盘点 + 查漏补缺」。
+   *  缺省 = search（向后兼容旧后端与旧配置） */
+  litSource?: string;
 }
 
 /** 任务卡（list_task_cards 等）：挂在项目下的「对话文件夹」，无独立状态机 */
@@ -613,7 +652,7 @@ export interface TaskCardDto {
   step: string | null;
   /** 开工后绑定的工作区名（预留字段，后端暂无写入入口） */
   workspace: string | null;
-  /** 卡片种类：draft = 服务于任务书草稿的讨论卡；idea = 自由想法卡（只读纯聊、可融合进任务书）。
+  /** 卡片种类：draft = 服务于任务书草稿的讨论卡；idea = 自由想法卡（只读纯聊、结论可追加进任务书）。
    *  旧卡缺 kind 时后端按 step 推断回填（step 非空 → draft，否则 idea） */
   kind: "idea" | "draft";
   createdAt: string;

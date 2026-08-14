@@ -45,10 +45,11 @@ export function useHumanTasks({
   const [busyTitle, setBusyTitle] = useState<string | null>(null);
   // 拖拽悬停命中的事项标题（高亮行）
   const [dropHover, setDropHover] = useState<string | null>(null);
-  // 导入成功后的「登记为项目资源」追问（7b）：仅交付落在项目根时出现，关掉不纠缠
-  const [registerOffer, setRegisterOffer] = useState<{ destRel: string } | null>(
-    null,
-  );
+  // 导入成功后的「登记为项目资源」追问（7b）：仅交付落在项目根时出现，关掉不纠缠。
+  // 检索结果多选导入时一次攒齐再问一次，不逐个弹（destRels 保序去重）
+  const [registerOffer, setRegisterOffer] = useState<{
+    destRels: string[];
+  } | null>(null);
 
   async function reload() {
     try {
@@ -133,13 +134,21 @@ export function useHumanTasks({
     }
   }
 
+  /** 落点是否就是项目根（工作区是临时的，登记其中路径没意义） */
+  function landedInProjectRoot(out: ImportDeliverableDto): boolean {
+    const norm = (p: string) => p.replace(/[\\/]+$/, "");
+    return norm(out.destRoot) === norm(projectPath);
+  }
+
   /** 提交产物（按钮选文件 / 拖拽共用）：复制进落点 + 登记提货单（登记失败只提示不否决）。
-   *  targetOverride = 落点覆盖（papers/imports/ 检索结果导入专用，提示文案不同） */
+   *  targetOverride = 落点覆盖（papers/imports/ 检索结果导入专用）：提示文案不同，
+   *  且「登记为项目资源」由调用方在多选全部导完后统一追问，本函数不逐个弹。
+   *  返回后端结果供调用方聚合；失败返回 null */
   async function importFile(
     title: string,
     sourcePath: string,
     targetOverride?: string,
-  ) {
+  ): Promise<ImportDeliverableDto | null> {
     setBusyTitle(title);
     setError(null);
     setNote(null);
@@ -162,16 +171,14 @@ export function useHumanTasks({
             ? `已提交「${title}」→ ${out.destRel}（已登记提货单）`
             : `已提交「${title}」→ ${out.destRel}（提货单登记未成功：${out.registerError ?? "未知原因"}）`,
         );
-        // 「登记为项目资源」追问：只限交付落在项目根（工作区是临时的，登记其中路径没意义）
-        const norm = (p: string) => p.replace(/[\\/]+$/, "");
-        if (norm(out.destRoot) === norm(projectPath)) {
-          setRegisterOffer({ destRel: out.destRel });
-        }
+        if (landedInProjectRoot(out)) setRegisterOffer({ destRels: [out.destRel] });
       }
       await reload();
       onChanged?.();
+      return out;
     } catch (reason) {
       setError(String(reason));
+      return null;
     } finally {
       setBusyTitle(null);
     }
@@ -205,37 +212,71 @@ export function useHumanTasks({
       : typeof selected === "string"
         ? [selected]
         : [];
-    // 逐个导入：单个失败（如同名已存在）只报错，不阻断其余
-    for (const p of paths) await importFile(title, p, SEARCH_IMPORTS_DIR);
+    if (paths.length === 0) return;
+    // 逐个导入：单个失败（如同名已存在）不阻断其余，失败数最后统一回报
+    const landed: string[] = [];
+    let failed = 0;
+    for (const p of paths) {
+      const out = await importFile(title, p, SEARCH_IMPORTS_DIR);
+      if (!out) {
+        failed += 1;
+        continue;
+      }
+      if (landedInProjectRoot(out) && !landed.includes(out.destRel))
+        landed.push(out.destRel);
+    }
+    const dir = SEARCH_IMPORTS_DIR.replace(/[\\/]+$/, "");
+    const ok = paths.length - failed;
+    setError(
+      failed > 0 ? `${failed} 个文件没导进来（多为落点已存在同名文件）` : null,
+    );
+    setNote(
+      ok > 0
+        ? `已放入 ${dir}/（${ok} 份），agent 开工时会自动解析、去重并合并进筛选清单`
+        : null,
+    );
+    // 落在项目根的题录登记为项目资源后，TASK.md 的「项目资源」段会按绝对路径列出，
+    // agent 在工作树里也读得到——工作区不含主仓未提交的文件
+    if (landed.length > 0) setRegisterOffer({ destRels: landed });
   }
 
-  /** 登记导入的交付文件为项目资源（读-改-写回 project.toml，与资源面板同一口径） */
+  /** 登记导入的交付文件为项目资源（读-改-写回 project.toml，与资源面板同一口径）：
+   *  同路径已登记的跳过，不产生重复行 */
   async function registerOffered() {
     if (!registerOffer) return;
-    const rel = registerOffer.destRel;
     setError(null);
     try {
       const read = await invoke<{ config: ProjectConfigDto }>(
         "read_project_config",
         { path: projectPath },
       );
-      await invoke("write_project_config", {
-        path: projectPath,
-        config: {
-          ...read.config,
-          resources: [
-            ...read.config.resources,
-            {
-              name: rel.split("/").pop() ?? rel,
-              path: rel,
-              type: resourceTypeOf(rel),
-              readonly: false,
-              note: "",
-            },
-          ],
-        },
-      });
-      setNote(`已登记为项目资源：${rel}`);
+      const norm = (p: string) => p.replace(/\\/g, "/").replace(/^\.\//, "");
+      const known = new Set(read.config.resources.map((r) => norm(r.path)));
+      const added = registerOffer.destRels
+        .filter((rel) => !known.has(norm(rel)))
+        .map((rel) => ({
+          name: rel.split("/").pop() ?? rel,
+          path: rel,
+          type: resourceTypeOf(rel),
+          readonly: false,
+          note: "",
+        }));
+      if (added.length > 0) {
+        await invoke("write_project_config", {
+          path: projectPath,
+          config: {
+            ...read.config,
+            resources: [...read.config.resources, ...added],
+          },
+        });
+      }
+      setNote(
+        added.length === 0
+          ? "这些文件已经登记过了"
+          : added.length === 1
+            ? `已登记为项目资源：${added[0].path}`
+            : `已登记 ${added.length} 个文件为项目资源`,
+      );
       setRegisterOffer(null);
       onChanged?.();
     } catch (reason) {
@@ -258,6 +299,47 @@ export function useHumanTasks({
   };
 }
 
+/** 「登记为项目资源」追问页脚（平铺清单与流程线共用，避免两份文案各自漂移）：
+ *  长路径截断不挤走按钮；多文件只报数量，全量路径进 tooltip */
+export function RegisterOfferRow({
+  destRels,
+  onRegister,
+  onDismiss,
+  className = "",
+}: {
+  destRels: string[];
+  onRegister: () => void;
+  onDismiss: () => void;
+  className?: string;
+}) {
+  return (
+    <p
+      className={`mt-1 flex items-center gap-1.5 text-micro text-l3 ${className}`}
+    >
+      <span className="min-w-0 truncate" title={destRels.join("\n")}>
+        要登记为项目资源吗（
+        {destRels.length === 1 ? destRels[0] : `${destRels.length} 个文件`}）
+      </span>
+      <button
+        type="button"
+        onClick={onRegister}
+        title="登记后 TASK.md 的「项目资源」段会按绝对路径列出，agent 在工作区里也读得到"
+        className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-l2 hover:bg-hover hover:text-l1"
+      >
+        登记
+      </button>
+      <button
+        type="button"
+        onClick={onDismiss}
+        title="不登记，文件已在落点目录里"
+        className="shrink-0 rounded-sm px-1 py-0.5 text-l4 hover:bg-hover hover:text-l1"
+      >
+        不了
+      </button>
+    </p>
+  );
+}
+
 /** 人工事项平铺 checklist（开工确认弹层用；聚焦视图用 StepFlow 流程线）：
  *  状态与动作逻辑在 useHumanTasks，本组件只是分组渲染 */
 export default function HumanTasksList({
@@ -273,7 +355,9 @@ export default function HumanTasksList({
   /** 每次状态（重）载后回传本步骤的状态切片（开工弹层的开工前提醒等需要读状态） */
   onStates?: (states: HumanTaskStateDto[]) => void;
 }) {
-  const listRef = useRef<HTMLUListElement>(null);
+  // 拖拽落点容器：必须包住全部三个时机分组的行——挂在分组内的 <ul> 上会被后一组覆盖，
+  // 只剩最后一组能命中（useHumanTasks 的 containerRef.contains 判定）
+  const listRef = useRef<HTMLDivElement>(null);
   const {
     states,
     error,
@@ -310,7 +394,7 @@ export default function HumanTasksList({
       ) : (
         // 按时机分组（开始前 → 进行中 → 收尾）：组名即"什么时候轮到你了"，
         // 避免不同档的事项并排摆着被误读成"现在全都要做"
-        <div className="space-y-2">
+        <div ref={listRef} className="space-y-2">
           {(["before", "during", "after"] as const)
             .map((timing) => ({
               timing,
@@ -330,7 +414,7 @@ export default function HumanTasksList({
                       ? "收尾（agent 干完后轮到你）"
                       : "进行中（随时可做）"}
                 </div>
-                <ul ref={listRef} className="space-y-1">
+                <ul className="space-y-1">
                   {g.items.map((task) => (
             <li
               key={task.title}
@@ -364,8 +448,8 @@ export default function HumanTasksList({
                   {task.title}
                 </span>
                 {task.done && (
-                  <span className="shrink-0 text-micro text-ok-text">
-                    {task.manual ? "✓ 已确认" : "✓ 已见到文件"}
+                  <span className="shrink-0 text-micro text-done">
+                    {task.manual ? "已确认" : "已见到文件"}
                   </span>
                 )}
                 {task.target && !task.done && (
@@ -406,24 +490,11 @@ export default function HumanTasksList({
       )}
       {note && <p className="mt-1 text-micro text-ok-text">{note}</p>}
       {registerOffer && (
-        <p className="mt-1 flex items-center gap-1.5 text-micro text-l3">
-          要登记为项目资源吗（{registerOffer.destRel}）
-          <button
-            type="button"
-            onClick={() => void registerOffered()}
-            className="rounded-sm border border-field px-1.5 py-0.5 text-l2 hover:bg-hover hover:text-l1"
-          >
-            登记
-          </button>
-          <button
-            type="button"
-            onClick={dismissRegisterOffer}
-            title="不登记，文件已在落点目录里"
-            className="rounded-sm px-1 py-0.5 text-l4 hover:bg-hover hover:text-l1"
-          >
-            不了
-          </button>
-        </p>
+        <RegisterOfferRow
+          destRels={registerOffer.destRels}
+          onRegister={() => void registerOffered()}
+          onDismiss={dismissRegisterOffer}
+        />
       )}
       {error && <p className="mt-1 text-micro text-err-text">{error}</p>}
     </div>

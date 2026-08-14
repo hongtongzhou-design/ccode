@@ -228,6 +228,11 @@ src-tauri/src/
 **当前待办**：
 
 - P0 收尾当前批次：全量文档同步 → 走查 → [skip ci] 提交 → 可选发版
+- **定时任务与研究流程结合（细目见架构 §11.4 Backlog 细目）**：边界已定——不给每步配定时任务，
+  结合点是「产出回流」（进收件箱 / 关联步骤 / 复用 staleUpstream 口径）而非「配置下沉」。
+  同时记了三条已确认风险：写权限九家不齐（仅 codex 有沙箱、grok 用 --yolo、qwen 未验证）、
+  产出绕过验收层（cwd 是项目根不是 worktree）、10 分钟超时与真失败不可分。
+  先做能力标注 + 落点收敛，跑进工作区属定位决策待拍板
 - macOS 签名公证（暂缓，需 Apple Developer 会员 + CI 配 6 个 APPLE_* secrets，见架构 v1.3）
 - Intel macOS 安装包（暂缓：CI macos-latest 只出 aarch64；加 `x86_64-apple-darwin` target 构建时间翻倍，真有 Intel 用户再加，
   见架构 v1.3 / README 安装节）

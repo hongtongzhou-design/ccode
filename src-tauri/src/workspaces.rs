@@ -1628,6 +1628,8 @@ pub struct HumanTaskStateDto {
     pub guidance: String,
     pub target: String,
     pub timing: String,
+    /// 可选事项：不做也不影响这一步跑完；UI 标「可选」且不计入待做数
+    pub optional: bool,
     /// 落点位置检测到文件（空 target 恒 false——纯脑力事项只能手勾）
     pub detected: bool,
     /// 人手动勾过（优先于检测；取消勾选即回到纯检测口径）
@@ -1808,6 +1810,7 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
                 guidance: h.guidance.clone(),
                 target: h.target.clone(),
                 timing: h.timing.clone(),
+                optional: h.optional,
                 detected,
                 manual: manual_hit,
                 done: manual_hit || detected,

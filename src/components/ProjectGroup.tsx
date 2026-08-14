@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -14,7 +14,7 @@ import ArtifactChecklist, {
 import TaskCardsSection from "./TaskCardsSection";
 import ScheduleSection from "./ScheduleSection";
 import KickoffConfirmDialog from "./KickoffConfirmDialog";
-import { Checkbox, hoverRevealClass } from "./PageFrame";
+import { Checkbox, hoverRevealClass, NoticeBar } from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import { startPipelineStep } from "../pipeline-start";
@@ -23,6 +23,7 @@ import { normSep } from "../path-utils";
 import type { RunOverviewInput } from "../run-overview";
 import type {
   DiscoveredResourceDto,
+  ZoteroLibraryDto,
   EnsureGitDto,
   HumanTaskStateDto,
   PipelineTemplateDto,
@@ -381,13 +382,29 @@ export default function ProjectGroup({
   // ===== 档案卡（仅注册项目） =====
   const [cfg, setCfg] = useState<ProjectConfigDto | null>(null);
   const [cfgWarnings, setCfgWarnings] = useState<string[]>([]);
+  /** 从磁盘重读档案卡并同步本地状态：档案卡的唯一读入口。
+   *  原先四处各写一遍「read → setCfg + setCfgWarnings」，漏掉 warnings 的那处会让
+   *  ⚠ 徽标停在上一次的结果；收成一个函数后本地与磁盘只有这一条同步路径。
+   *  后端保证不 reject（坏配置回落空配置 + warnings），失败时保留现有本地配置。 */
+  async function reloadCfg(path: string): Promise<ProjectConfigDto | null> {
+    try {
+      const read = await invoke<ProjectConfigReadDto>("read_project_config", {
+        path,
+      });
+      setCfg(read.config);
+      setCfgWarnings(read.warnings);
+      return read.config;
+    } catch {
+      return null;
+    }
+  }
+
   useEffect(() => {
     if (!project) {
       setCfg(null);
       return;
     }
     let stale = false;
-    // 后端保证不 reject（坏配置回落空配置 + warnings），catch 兜底防抖
     invoke<ProjectConfigReadDto>("read_project_config", { path: project.path })
       .then((read) => {
         if (stale) return;
@@ -554,7 +571,9 @@ export default function ProjectGroup({
   const [artifactsStep, setArtifactsStep] = useState<number | null>(null);
   // 步骤聚焦（v3.70）：null = 跟随当前步骤（第一个未完成，全部完成则落最后一步）；其余 = 指定步骤。
   // 大圆点击与卡片区头部 ‹ › 箭头设置；卡片区恒为单步骤聚焦视图（v3.81 起无总览态）
-  const [focusStep, setFocusStep] = useState<number | null>(null);
+  /** 聚焦步骤名（存名字而非索引）：索引在流水线编辑器里重排/改名后会指向另一个步骤，
+   *  而下游全部按名字找回。名字对不上时 focusIndex 回落到当前步骤，不静默跳错 */
+  const [focusStepKey, setFocusStepKey] = useState<string | null>(null);
   // 人工事项派生状态（流程线橙点与 ⋯ 菜单计数用；清单本体自取自刷，操作后经回调重取这里）
   const [humanStates, setHumanStates] = useState<HumanTaskStateDto[] | null>(
     null,
@@ -639,11 +658,17 @@ export default function ProjectGroup({
     setEditorOpen(true);
   }
 
+  /** 按索引聚焦（大圆 / 步骤 ⋯ 菜单 / 卡片区 ‹ › 箭头共用）：落库存的是步骤名 */
+  function focusByIndex(index: number) {
+    const name = cfg?.steps[index]?.name;
+    if (name) setFocusStepKey(name);
+  }
+
   /** 大圆点击 = 步骤聚焦（v3.70，用户拍板：圆的终端入口语义删除——跳终端/开步/恢复分别由
    *  流程线节点、卡片行、任务行承担）：点圆 = 下方卡片区只看这一步（种子/卡片/人工事项）；
    *  与卡片区头部 ‹ › 箭头同一切换口径 */
   function onCircleClick(index: number) {
-    setFocusStep(index);
+    focusByIndex(index);
   }
 
   async function applyTemplate(item: TemplatePickItem) {
@@ -657,15 +682,11 @@ export default function ProjectGroup({
           steps: item.steps,
         });
         // 与编辑器「＋ 从模板追加」同一口径：重读配置刷新本地状态（含清掉的 opt-out 标记）
-        const read = await invoke<ProjectConfigReadDto>("read_project_config", {
-          path: projectPath,
-        });
-        setCfg(read.config);
-        setCfgWarnings(read.warnings);
+        const fresh = await reloadCfg(projectPath);
         // 首启横幅里的可选课题主题：append 不碰 topic，变了才单独写回
         const topic = templateTopic.trim();
-        if (topic && topic !== (read.config.topic ?? "")) {
-          await saveConfig({ ...read.config, topic });
+        if (fresh && topic && topic !== (fresh.topic ?? "")) {
+          await saveConfig({ ...fresh, topic });
         }
         setPickerOpen(false);
         // 顺序引导（一次性提示条，可关）：把视线引到第 1 步与种子
@@ -743,12 +764,7 @@ export default function ProjectGroup({
     const ok = await saveConfig({ ...cfg, steps });
     if (ok) {
       try {
-        const read = await invoke<ProjectConfigReadDto>(
-          "read_project_config",
-          { path: project.path },
-        );
-        setCfg(read.config);
-        setCfgWarnings(read.warnings);
+        await reloadCfg(project.path);
       } catch {
         /* 重读失败保留刚写入的本地配置 */
       }
@@ -776,7 +792,7 @@ export default function ProjectGroup({
     if (!cfg) return [];
     const step = cfg.steps[index];
     // 「◫ 定位目录」与胶囊原 ◫ 按钮同一语义：仅活跃工作区可定位
-    const st = deriveStepStatus(step, workspaces, health, drift);
+    const st = statusAt(index)!;
     const activeWs =
       st.ws && st.ws.status === "active" ? st.ws : undefined;
     return [
@@ -796,7 +812,7 @@ export default function ProjectGroup({
                 return n > 0 ? `人工事项（${n} 件待做）` : "人工事项";
               })(),
               title: "在下方只看这一步：归你做的事、讨论种子与卡片",
-              onSelect: () => setFocusStep(index),
+              onSelect: () => focusByIndex(index),
             },
           ]
         : []),
@@ -832,8 +848,97 @@ export default function ProjectGroup({
   }
 
   // ===== 资源面板 =====
-  const [resOpen, setResOpen] = useState(false);
+  // 资源面板展开态：新注册的项目默认展开——注册时自动扫过一遍，
+  // 不展开的话用户既不知道扫到了什么，也看不到还能从哪儿补
+  const [resOpen, setResOpen] = useState(freshGitGuide);
+  /** 「文献与数据」面板锚点：流程线里的「到「文献与数据」导入」展开后滚到这里 */
+  const resPanelRef = useRef<HTMLDivElement>(null);
   const [discoverLoading, setDiscoverLoading] = useState(false);
+  // Zotero 进料口（只读适配器；不做文献库，见 zotero.rs 头注）：探测 → 选分类 → 导入
+  const [zoteroBusy, setZoteroBusy] = useState(false);
+  const [zoteroLib, setZoteroLib] = useState<ZoteroLibraryDto | null>(null);
+  /** 手动指定过的 Zotero 数据目录（自定义目录的用户不必每次重选） */
+  const [zoteroDir, setZoteroDir] = useState<string | null>(null);
+  const [zoteroMsg, setZoteroMsg] = useState<string | null>(null);
+  const [litBusy, setLitBusy] = useState(false);
+
+  /** 切换文献来源：只改 project.toml 的 lit_source，不动任何文件。
+   *  已经是 zotero 时点「我已有文献库」不降级为 folder——那会丢掉 Zotero 语境 */
+  async function setLitSource(next: "search" | "folder") {
+    if (!cfg || litBusy) return;
+    const cur = cfg.litSource?.trim() || "search";
+    const target =
+      next === "folder" && cur === "zotero" ? "zotero" : next;
+    if (target === cur) return;
+    setLitBusy(true);
+    try {
+      await saveConfig({ ...cfg, litSource: target });
+    } finally {
+      setLitBusy(false);
+    }
+  }
+
+  /** 打开 Zotero 分类选择：探测失败（没装/自定义数据目录）时把后端原因显示出来，
+   *  并给一个手动选目录的入口——报错文案说了「可手动指定」，就得真有这个入口 */
+  async function openZotero(dataDir?: string) {
+    setZoteroBusy(true);
+    setZoteroMsg(null);
+    try {
+      const lib = await invoke<ZoteroLibraryDto>("zotero_inspect", {
+        dataDir: dataDir ?? zoteroDir ?? null,
+      });
+      if (dataDir) setZoteroDir(dataDir);
+      setZoteroLib(lib);
+    } catch (reason) {
+      setZoteroMsg(String(reason));
+    } finally {
+      setZoteroBusy(false);
+    }
+  }
+
+  /** 手动指定 Zotero 数据目录（Zotero 里可改数据目录，默认 ~/Zotero 找不到时走这条） */
+  async function pickZoteroDir() {
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      title: "选择 Zotero 数据目录（含 zotero.sqlite）",
+    });
+    if (typeof picked === "string") await openZotero(picked);
+  }
+
+  /** 导入选定分类：生成 references.bib + 登记 PDF 为资源；顺带把 lit_source 置为 zotero，
+   *  TASK.md 据此把检索步骤降级为「盘点 + 查漏补缺」（renderTaskMd 的「文献来源」段） */
+  async function importZotero(collectionId: number | null) {
+    if (!project) return;
+    setZoteroBusy(true);
+    setZoteroMsg(null);
+    try {
+      const out = await invoke<{
+        bibRel: string;
+        itemCount: number;
+        pdfCount: number;
+        missingPdf: number;
+      }>("zotero_import", {
+        projectRoot: project.path,
+        dataDir: zoteroDir ?? null,
+        collectionId,
+      });
+      if (cfg && cfg.litSource !== "zotero") {
+        await saveConfig({ ...cfg, litSource: "zotero" });
+      }
+      setZoteroLib(null);
+      setZoteroMsg(
+        `已导入 ${out.itemCount} 条 → ${out.bibRel}` +
+          (out.pdfCount > 0 ? `，${out.pdfCount} 篇 PDF 已登记为项目资源` : "") +
+          (out.missingPdf > 0 ? `；${out.missingPdf} 条无本地 PDF（agent 会列进待获取）` : ""),
+      );
+      await onRefresh();
+    } catch (reason) {
+      setZoteroMsg(String(reason));
+    } finally {
+      setZoteroBusy(false);
+    }
+  }
   const [discoverState, setDiscoverState] = useState<{
     items: DiscoveredResourceDto[];
     selected: Set<string>;
@@ -1002,22 +1107,44 @@ export default function ProjectGroup({
   }
   const groupCountsTotal =
     groupCounts.active + groupCounts.review + groupCounts.blocked;
+  // 步骤状态表：每步算一次，下面各处派生共用同一份快照。
+  // 原先 7 处各调一次 deriveStepStatus，每次都遍历 workspaces——N 步项目每渲染要跑 2N+ 次
+  // find（describeStep 与 currentStep 还会互相嵌套调用）。纯派生无副作用，
+  // 依赖变了整表重算，行为与逐处现算完全一致。
+  const stepStatuses = useMemo(
+    () =>
+      (cfg?.steps ?? []).map((s) =>
+        deriveStepStatus(s, workspaces, health, drift),
+      ),
+    [cfg, workspaces, health, drift],
+  );
+  /** 按索引取状态；越界回落现算（artifactsStep 等可能指向已删步骤） */
+  const statusAt = (i: number) =>
+    stepStatuses[i] ??
+    (cfg?.steps[i]
+      ? deriveStepStatus(cfg.steps[i], workspaces, health, drift)
+      : null);
+  /** 资源构成一句话（折叠态也让人知道里面有什么）：按类型计数，零资源时明说扫过了 */
+  const resourceSummary = (() => {
+    const rs = cfg?.resources ?? [];
+    if (rs.length === 0) return "还没有登记文献/数据";
+    const by = new Map<string, number>();
+    for (const r of rs) by.set(r.type, (by.get(r.type) ?? 0) + 1);
+    return [...by.entries()]
+      .map(([t, n]) => `${n} 个${RESOURCE_TYPE_LABELS[t] ?? t}`)
+      .join(" · ");
+  })();
   // 课题主题直接显示在项目名旁（v3.47：只挂悬浮提示等于不存在——用户反馈看不到）
   const topicText =
     registered && cfg?.topic?.trim() ? cfg.topic.trim() : undefined;
   // 产物核验手风琴展开项（单开）：无绑定工作区不渲染（菜单项本身已禁用，此处兜底）
   const artStep =
     cfg && artifactsStep !== null ? (cfg.steps[artifactsStep] ?? null) : null;
-  const artSt = artStep
-    ? deriveStepStatus(artStep, workspaces, health, drift)
-    : null;
+  const artSt = artifactsStep !== null ? statusAt(artifactsStep) : null;
   const artWs = artSt?.ws;
   const artMerged = artSt?.key === "done";
   // 每步完成态（带级虚线链按列区间着色）+ 末端菱形：全部步骤完成才点亮（与完成圆同一 done 绿）
-  const stepDoneFlags =
-    cfg?.steps.map(
-      (s) => deriveStepStatus(s, workspaces, health, drift).key === "done",
-    ) ?? [];
+  const stepDoneFlags = stepStatuses.map((st) => st.key === "done");
   const allStepsDone =
     stepDoneFlags.length > 0 && stepDoneFlags.every(Boolean);
   /** 步骤状态快照：白话状态短语 + 主推进动作（聚焦头部与流程线节点入口共用口径；
@@ -1025,7 +1152,7 @@ export default function ProjectGroup({
   const describeStep = (i: number) => {
     if (!cfg) return null;
     const step = cfg.steps[i];
-    const st = deriveStepStatus(step, workspaces, health, drift);
+    const st = statusAt(i)!;
     const goReview = (intent?: "resolve-conflict") => () => {
       if (!st.ws) return;
       setWorkspaceReviewRequest({
@@ -1108,10 +1235,14 @@ export default function ProjectGroup({
     }
     return null;
   })();
-  // 步骤聚焦：显式选择 > 跟随当前步骤 > 全部完成时落最后一步；无步骤 = null（卡片区只留「未挂步骤」桶）
+  // 步骤聚焦：显式选择（按名字核对身份）> 跟随当前步骤 > 全部完成时落最后一步；
+  // 名字在流程里找不到（被改名/删除）时不认这次聚焦，回落当前步骤——避免静默指向另一个步骤
   const focusIndex = (() => {
     if (!cfg || cfg.steps.length === 0) return null;
-    if (focusStep !== null && cfg.steps[focusStep]) return focusStep;
+    if (focusStepKey !== null) {
+      const i = cfg.steps.findIndex((s) => s.name === focusStepKey);
+      if (i >= 0) return i;
+    }
     return currentStep?.index ?? cfg.steps.length - 1;
   })();
   const focusStepName = (() => {
@@ -1119,7 +1250,7 @@ export default function ProjectGroup({
     return cfg.steps[focusIndex]?.name ?? null;
   })();
   // 聚焦步骤草稿加载（state 声明在上方 describeStep 之前）：进项目详情/切聚焦/页面刷新时重读，不轮询；
-  // 「◈ 融合进任务书」落盘后经 onDraftChanged 回调即刻重读（不等页面刷新）
+  // 「◈ 沉淀进任务书」落盘后经 onDraftChanged 回调即刻重读（不等页面刷新）
   function loadFocusDraft() {
     if (!project || !focusStepName) {
       setFocusDraft(null);
@@ -1139,9 +1270,9 @@ export default function ProjectGroup({
   // 聚焦步骤的执行状态（流程线 agent/评审节点用）：deriveStepStatus 六态映射到流程线四态
   const focusRunStatus = (() => {
     if (!cfg || !focusStepName) return undefined;
-    const step = cfg.steps.find((s) => s.name === focusStepName);
-    if (!step) return undefined;
-    const st = deriveStepStatus(step, workspaces, health, drift);
+    const i = cfg.steps.findIndex((s) => s.name === focusStepName);
+    const st = i >= 0 ? stepStatuses[i] : undefined;
+    if (!st) return undefined;
     if (st.key === "done") return "done" as const;
     if (st.key === "review" || st.key === "blocked") return "review" as const;
     if (st.key === "active" || st.key === "checking") return "active" as const;
@@ -1345,19 +1476,9 @@ export default function ProjectGroup({
       )}
 
       {tplSavedMsg && (
-        <div className="mb-2 flex items-center gap-2 rounded-sm bg-strip p-2 text-xs text-l2">
-          <span className="min-w-0 flex-1">
-            <span className="mr-1 text-ok-text">✓</span>
-            {tplSavedMsg}
-          </span>
-          <button
-            type="button"
-            className={`${actionBtn} shrink-0`}
-            onClick={() => setTplSavedMsg(null)}
-          >
-            知道了
-          </button>
-        </div>
+        <NoticeBar className="mb-2" onDismiss={() => setTplSavedMsg(null)}>
+          {tplSavedMsg}
+        </NoticeBar>
       )}
 
       {registered && freshGitGuide && (
@@ -1492,7 +1613,7 @@ export default function ProjectGroup({
                     }}
                   >
                   {cfg.steps.map((step, i) => {
-                    const st = deriveStepStatus(step, workspaces, health, drift);
+                    const st = statusAt(i)!;
                     const statusLabel =
                       st.key === "pending" && st.ws
                         ? "已归档"
@@ -1571,19 +1692,14 @@ export default function ProjectGroup({
 
       {/* 应用模板成功的一次性引导条（顺序引导的入口提示）：把视线引到第 1 步与种子，可关 */}
       {tplApplied && (
-        <div className="mb-3 flex items-center gap-2 rounded-md bg-inset px-3 py-1.5 text-xs text-l3">
-          <span className="min-w-0 flex-1">
-            研究流程已就位——建议先点卡片区「开工前聊聊」的种子问题，跟 Agent
-            把方向聊透（结论直接写进任务书草稿，开工时草稿就是 TASK.md），想清楚了再从第 1 步开始
-          </span>
-          <button
-            type="button"
-            onClick={() => setTplApplied(false)}
-            className={`${actionBtn} shrink-0 text-l4 hover:text-l1`}
-          >
-            知道了
-          </button>
-        </div>
+        <NoticeBar
+          tone="info"
+          className="mb-3"
+          onDismiss={() => setTplApplied(false)}
+        >
+          研究流程已就位——第 1 步的「定方向」里有几道选择题，点一下就答完（也可「全部用推荐值」跳过）；
+          拿不准的问题点「其他…」自己写或开聊。定完再点「开始」。
+        </NoticeBar>
       )}
 
       {/* 人工事项清单已并入聚焦视图（TaskCardsSection 聚焦步骤时顶部渲染）；原 ⋯ 手风琴面板删除 */}
@@ -1619,11 +1735,21 @@ export default function ProjectGroup({
               : null
           }
           onDraftChanged={loadFocusDraft}
+          onOpenResources={() => {
+            setResOpen(true);
+            // 面板在流程线下方：展开后滚过去，否则用户点了没反应
+            requestAnimationFrame(() =>
+              resPanelRef.current?.scrollIntoView({
+                behavior: "smooth",
+                block: "center",
+              }),
+            );
+          }}
           reviewConflict={focusDesc?.st.key === "blocked"}
           onRestoreWorkspace={
             focusArchivedWs ? () => void restoreWs(focusArchivedWs) : undefined
           }
-          onFocusIndex={(i) => setFocusStep(i)}
+          onFocusIndex={focusByIndex}
           onHumanChanged={loadHumanStates}
           onStartStep={(index, originCardId) => startStep(index, originCardId)}
         />
@@ -1640,9 +1766,11 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {/* 资源面板：默认折叠，管理列表只展示状态与主路径 */}
+      {/* 文献与数据（原「资源面板」）：三个进料口收在一处——注册时已自动扫过一遍，
+          这里回答「扫到了什么」+「还能从哪儿补」。新注册的项目自动展开：
+          原先提示挂在页面底部、又被模板选择层挡住，用户根本看不到扫描发生过 */}
       {registered && cfg && (
-        <div className="mb-2">
+        <div className="mb-2" ref={resPanelRef}>
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -1651,35 +1779,104 @@ export default function ProjectGroup({
               aria-expanded={resOpen}
             >
               <span>{resOpen ? "▾" : "▸"}</span>
-              资源（{cfg.resources.length}）
+              文献与数据（{cfg.resources.length}）
             </button>
-            {resOpen && (
-              <button
-                type="button"
-                className={actionBtn}
-                disabled={discoverLoading}
-                onClick={() => void discoverResources()}
-              >
-                {discoverLoading ? "扫描中…" : "发现资源"}
-              </button>
-            )}
-            {resOpen && (
-              <button
-                type="button"
-                className={actionBtn}
-                title="分工：你在 Undermind / Scholar / Elicit 网页端做语义发现，agent 负责解析、DOI 去重、合并进筛选清单。导出 RIS/BibTeX/CSV 后点这里导入（可多选），落主仓 papers/imports/；建议文件名带 来源-日期（如 consensus-2026-08-13.ris）"
-                onClick={() => void importSearchResults()}
-              >
-                导入检索结果
-              </button>
+            {/* 折叠态也要说清「有什么」和「还能补」：只在新注册或零资源时才提示，
+                等于对老项目和已有资源的项目永远沉默——那正是用户看不到扫描发生过的原因 */}
+            {!resOpen && (
+              <span className="min-w-0 truncate text-micro text-l4">
+                {resourceSummary}
+                <span className="text-l4"> · 展开可从 Zotero / 检索结果补充</span>
+              </span>
             )}
           </div>
           {resOpen && (
             <div className="mt-1 rounded-md bg-strip p-2">
+              {/* 文献来源：决定检索类步骤的性质。已有完整文献库的人不需要「从零系统检索」，
+                  但**不能直接删掉那一步**——筛选记录（纳入/排除标准与逐条判定）是综述的
+                  可复现性要求，且再全的库也缺最近半年的新工作。所以是让那一步变形为
+                  「盘点 + 查漏补缺」，由 renderTaskMd 的「文献来源」段告诉 agent。
+                  「从 Zotero 导入」会自动置为 zotero；本行是给「文献在本地文件夹」的人用的 */}
+              <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-micro text-l4">文献来源</span>
+                {(
+                  [
+                    ["search", "agent 帮我检索"],
+                    ["folder", "我已有文献库（只做筛选与查漏）"],
+                  ] as const
+                ).map(([value, label]) => {
+                  const cur = cfg.litSource?.trim() || "search";
+                  // zotero 也归到「已有文献库」这一侧：它就是已有库的一种，不单列第三个选项
+                  const on =
+                    value === "search" ? cur === "search" : cur !== "search";
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      disabled={litBusy}
+                      onClick={() => void setLitSource(value)}
+                      title={
+                        value === "search"
+                          ? "让 agent 按纳入/排除标准从 OpenAlex / Semantic Scholar 等系统检索"
+                          : "已有文献库：检索步骤改为「盘点已有 + 只补缺口」，不从零检索、不重复已有条目"
+                      }
+                      className={`rounded-full px-2 py-0.5 text-micro disabled:opacity-50 ${
+                        on
+                          ? "border border-cta-bd bg-cta text-cta-text"
+                          : "bg-strip text-l3 hover:bg-hover hover:text-l1"
+                      }`}
+                    >
+                      {on && cur === "zotero" && value !== "search"
+                        ? "我已有文献库（Zotero）"
+                        : label}
+                    </button>
+                  );
+                })}
+              </div>
+              {(cfg.litSource?.trim() || "search") !== "search" && (
+                <p className="mb-2 text-micro leading-5 text-l4">
+                  检索类步骤已改为「盘点 + 查漏补缺」：agent 先按纳入/排除标准逐条判定你库里的条目、
+                  产出筛选记录，只对明显缺口（如近一年新工作）做补充检索，不重复已有条目。
+                  <span className="text-l4">
+                    　筛选这一步不会跳过——纳入理由是综述可复现性的一部分。
+                  </span>
+                </p>
+              )}
+              {/* 进料口三选一：agent 自己扫 / 你已有的库 / 你手动检索的结果。
+                  一行摆齐，用户不必在界面里找第二处入口 */}
+              <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-micro text-l4">从哪儿补</span>
+                <button
+                  type="button"
+                  className={actionBtn}
+                  disabled={zoteroBusy}
+                  title="从本机 Zotero 库导入：生成 references.bib，已下载的 PDF 按绝对路径登记为资源（只读引用，不复制）。你的 Zotero 库只读不改"
+                  onClick={() => void openZotero()}
+                >
+                  {zoteroBusy ? "读取中…" : "从 Zotero 导入"}
+                </button>
+                <button
+                  type="button"
+                  className={actionBtn}
+                  title="你在 Undermind / Google Scholar / Elicit 等网页端检索后，把结果导出成 RIS / BibTeX / CSV 文件，点这里导入（可多选）。开工时 agent 会自动解析、按 DOI 去重、并进筛选清单——省掉你手抄一遍"
+                  onClick={() => void importSearchResults()}
+                >
+                  导入 RIS / BibTeX
+                </button>
+                <button
+                  type="button"
+                  className={actionBtn}
+                  disabled={discoverLoading}
+                  title="重新扫描项目目录（PDF / CSV / parquet / bib 等，深度 3）；注册时已自动扫过一次，往目录里放了新文件再点"
+                  onClick={() => void discoverResources()}
+                >
+                  {discoverLoading ? "扫描中…" : "重新扫描目录"}
+                </button>
+              </div>
               {cfg.resources.length === 0 && !discoverState && (
                 <p className="text-xs text-l4">
-                  还没有登记资源。点「发现资源」扫描项目目录（PDF / CSV /
-                  parquet / bib 等），勾选后一键登记。
+                  注册时扫过项目目录，没找到 PDF / CSV / bib 等文件。
+                  上面三个入口都可以补：有 Zotero 库直接导入，或先把文件放进项目目录再「重新扫描目录」。
                 </p>
               )}
               {cfg.resources.length > 0 && (
@@ -1819,34 +2016,40 @@ export default function ProjectGroup({
                 </div>
               )}
               {importMsg && (
-                <div className="mt-2 flex items-center gap-2 rounded-sm bg-inset p-2 text-xs text-l2">
-                  <span className="min-w-0 flex-1">
-                    <span className="mr-1 text-ok-text">✓</span>
-                    {importMsg}
-                  </span>
+                <NoticeBar className="mt-2" onDismiss={() => setImportMsg(null)}>
+                  {importMsg}
+                </NoticeBar>
+              )}
+              {zoteroMsg && (
+                <div className="mt-2 flex items-start gap-2 rounded-md bg-strip px-3 py-2.5 text-xs leading-5 text-l2">
+                  <span className="min-w-0 flex-1">{zoteroMsg}</span>
+                  {zoteroMsg.includes("没找到") && (
+                    <button
+                      type="button"
+                      onClick={() => void pickZoteroDir()}
+                      className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-l2 hover:bg-hover hover:text-l1"
+                    >
+                      选择目录
+                    </button>
+                  )}
                   <button
                     type="button"
-                    className={`${actionBtn} shrink-0`}
-                    onClick={() => setImportMsg(null)}
+                    onClick={() => setZoteroMsg(null)}
+                    className="shrink-0 rounded-sm px-1 py-0.5 text-l4 hover:bg-hover hover:text-l1"
                   >
                     知道了
                   </button>
                 </div>
               )}
               {gitignoreHint && (
-                <div className="mt-2 flex items-center gap-2 rounded-sm bg-inset p-2 text-xs text-l2">
-                  <span className="min-w-0 flex-1">
-                    提示：数据/产物类大文件建议加入 .gitignore，避免进入 git
-                    历史（git init 生成的 .gitignore 已含常见目录注释）。
-                  </span>
-                  <button
-                    type="button"
-                    className={`${actionBtn} shrink-0`}
-                    onClick={() => setGitignoreHint(false)}
-                  >
-                    知道了
-                  </button>
-                </div>
+                <NoticeBar
+                  tone="info"
+                  className="mt-2"
+                  onDismiss={() => setGitignoreHint(false)}
+                >
+                  数据/产物类大文件建议加入 .gitignore，避免进入 git
+                  历史（git init 生成的 .gitignore 已含常见目录注释）。
+                </NoticeBar>
               )}
             </div>
           )}
@@ -1978,6 +2181,69 @@ export default function ProjectGroup({
           wsSteps={wsStepMap}
           onClose={() => setHistoryOpen(false)}
         />
+      )}
+      {/* Zotero 分类选择：只读适配器的唯一交互点——选一个分类（或整库）导入 */}
+      {zoteroLib && (
+        <div
+          className="ccode-fade fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setZoteroLib(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="ccode-float-surface flex max-h-[70vh] w-[30rem] flex-col rounded-md border border-field p-5"
+          >
+            <h2 className="shrink-0 text-base font-semibold text-l1">
+              从 Zotero 导入
+            </h2>
+            <p className="mt-1 shrink-0 text-xs text-l3">
+              生成 references.bib；已下载的 PDF 按绝对路径登记为项目资源（只读引用，不复制）。
+              <span className="text-l4">你的 Zotero 库只读不改。</span>
+            </p>
+            <div className="mt-3 min-h-0 flex-1 space-y-1 overflow-auto">
+              {zoteroLib.collections.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  disabled={zoteroBusy || c.count === 0}
+                  onClick={() => void importZotero(c.id)}
+                  className="flex w-full items-center gap-2 rounded-md bg-inset px-2.5 py-2 text-left hover:bg-hover disabled:opacity-40"
+                >
+                  <span className="min-w-0 flex-1 truncate text-sm text-l1">
+                    {c.name}
+                  </span>
+                  <span className="shrink-0 text-micro text-l4">
+                    {c.count} 条
+                  </span>
+                </button>
+              ))}
+              <button
+                type="button"
+                disabled={zoteroBusy}
+                onClick={() => void importZotero(null)}
+                className="flex w-full items-center gap-2 rounded-md border border-dashed border-field px-2.5 py-2 text-left hover:bg-hover disabled:opacity-40"
+              >
+                <span className="min-w-0 flex-1 truncate text-sm text-l2">
+                  整个库（含未分类）
+                </span>
+                <span className="shrink-0 text-micro text-l4">
+                  {zoteroLib.total} 条
+                </span>
+              </button>
+            </div>
+            <div className="mt-3 flex shrink-0 items-center gap-2">
+              <span className="min-w-0 flex-1 truncate font-mono text-micro text-l4">
+                {zoteroLib.dbPath}
+              </span>
+              <button
+                type="button"
+                onClick={() => setZoteroLib(null)}
+                className="shrink-0 rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {/* 开工确认弹层：确认后才走建工作区链路（runStartStep） */}
       {kickoff && project && cfg && cfg.steps[kickoff.index] && (

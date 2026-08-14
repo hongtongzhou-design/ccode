@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   bucketCardsByStep,
-  customTopicsForStep,
-  discussionCardsForStep,
+  topicCardsForStep,
+  unstartedSeeds,
   groupSessionsByTask,
-  ideaCardsForStep,
   taskMdEditorReduce,
   sortCards,
 } from "../src/task-cards.ts";
@@ -157,43 +156,40 @@ test("pending/blocking/closing：按步骤过滤未完成，blocking 只收开�
   );
 });
 
-test("kind：想法区只收聚焦步骤的 idea 卡，讨论卡区只收 draft 卡", () => {
+test("话题清单：收聚焦步骤下的全部卡，不按 kind 过滤", () => {
   const cards = [
     card({ id: "t-i1", name: "想法一", kind: "idea", step: "读文献" }),
+    // 老项目留下的 draft 卡：讨论入口合并后仍必须看得见，不能凭空消失
     card({ id: "t-d1", name: "讨论一", kind: "draft", step: "读文献" }),
     card({ id: "t-i2", name: "别步想法", kind: "idea", step: "写综述" }),
     card({ id: "t-i3", name: "散想法", kind: "idea" }),
-    card({ id: "t-d2", name: "散讨论", kind: "draft" }),
   ];
   assert.deepEqual(
-    ideaCardsForStep(cards, "读文献").map((c) => c.id),
-    ["t-i1"],
+    topicCardsForStep(cards, "读文献").map((c) => c.id),
+    ["t-i1", "t-d1"],
   );
+  // 别的步骤/未挂步骤的卡不进聚焦清单
   assert.deepEqual(
-    discussionCardsForStep(cards, "读文献").map((c) => c.id),
-    ["t-d1"],
+    topicCardsForStep(cards, "写综述").map((c) => c.id),
+    ["t-i2"],
   );
-  // 未挂步骤/其他步骤的卡不进聚焦区
-  assert.deepEqual(ideaCardsForStep(cards, "读文献").length, 1);
-  assert.deepEqual(discussionCardsForStep(cards, "写综述"), []);
+  assert.deepEqual(topicCardsForStep(cards, "不存在的步骤"), []);
 });
 
-test("自定义话题 chips：只收该步骤 draft 卡中不在种子里的名字", () => {
+test("预置话题 chips：开聊过的不再出 chip（已在话题清单里）", () => {
   const cards = [
-    card({ id: "t-d1", name: "综述角度怎么收？", kind: "draft", step: "读文献" }),
-    card({ id: "t-d2", name: "要不要限近五年", kind: "draft", step: "读文献" }),
-    card({ id: "t-i1", name: "随便想想", kind: "idea", step: "读文献" }),
-    card({ id: "t-d3", name: "别步话题", kind: "draft", step: "写综述" }),
-    card({ id: "t-d4", name: "散讨论", kind: "draft" }),
+    card({ id: "t-1", name: "综述角度怎么收", kind: "idea", step: "读文献" }),
+    card({ id: "t-2", name: "别步的同名", kind: "idea", step: "写综述" }),
   ];
-  const seeds = ["综述角度怎么收？"];
-  // 种子同名卡由种子 chip 代表；idea 卡/别步骤/未挂步骤都不进自定义话题
-  assert.deepEqual(customTopicsForStep(cards, "读文献", seeds), [
-    "要不要限近五年",
-  ]);
-  // 无种子时全部 draft 卡都是自定义话题
-  assert.deepEqual(
-    customTopicsForStep(cards, "写综述", []),
-    ["别步话题"],
-  );
+  const seeds = ["综述角度怎么收", "纳入标准定多严"];
+  assert.deepEqual(unstartedSeeds(cards, "读文献", seeds), ["纳入标准定多严"]);
+  // 别的步骤开过的不算数
+  assert.deepEqual(unstartedSeeds(cards, "写综述", seeds), seeds);
+  // 无卡时全部未开聊
+  assert.deepEqual(unstartedSeeds([], "读文献", seeds), seeds);
+});
+
+test("预置话题比对忽略首尾空白；空种子剔除", () => {
+  const cards = [card({ id: "t-1", name: " 算力怎么排 ", kind: "idea", step: "跑实验" })];
+  assert.deepEqual(unstartedSeeds(cards, "跑实验", ["算力怎么排", "  "]), []);
 });
