@@ -90,13 +90,13 @@ export function ConfirmDialogHost() {
   if (!req) return null;
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-6"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-6 ccode-fade"
       onClick={() => settle(false)}
     >
       <section
         role="alertdialog"
         aria-modal="true"
-        className="w-full max-w-sm rounded-lg border border-hairline ccode-float-surface p-4"
+        className="w-full max-w-[26rem] rounded-lg border border-hairline ccode-float-surface p-4"
         onClick={(e) => e.stopPropagation()}
       >
         <p className="whitespace-pre-wrap text-sm leading-6 text-l1">

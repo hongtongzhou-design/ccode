@@ -29,7 +29,7 @@ export default function StepSkillsChips({
     <div className="mb-3 shrink-0">
       <div className="mb-1 flex items-center gap-2">
         <span className="text-xs text-l3">推荐技能</span>
-        <span className="text-[10px] text-l4">
+        <span className="text-micro text-l4">
           {editable
             ? "增删写回步骤定义（project.toml），影响以后所有开工"
             : "点击技能名看一句话说明"}
@@ -43,12 +43,12 @@ export default function StepSkillsChips({
             <>
               {name}
               {!(name in (skillMeta ?? {})) && (
-                <span className="text-[10px] text-l4">（未安装）</span>
+                <span className="text-micro text-l4">（未安装）</span>
               )}
             </>
           );
           const chipClass =
-            "flex items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-[11px] text-l2";
+            "flex items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-micro text-l2";
           return (
             <span key={name} className="flex flex-col">
               {editable ? (
@@ -75,7 +75,7 @@ export default function StepSkillsChips({
                 </button>
               )}
               {open && desc && (
-                <span className="max-w-72 px-1.5 py-0.5 text-[10px] text-l4">
+                <span className="max-w-72 px-1.5 py-0.5 text-micro text-l4">
                   {desc}
                 </span>
               )}
@@ -90,7 +90,7 @@ export default function StepSkillsChips({
               if (name) onChange([...skills, name]);
             }}
             title="添加技能到步骤定义"
-            className="h-6 rounded-md border border-field bg-canvas px-1 text-[11px] text-l4 outline-none focus:border-l4"
+            className="h-6 rounded-md border border-field bg-canvas px-1 text-micro text-l4 outline-none focus:border-l4"
           >
             <option value="">＋ 添加技能</option>
             {candidates.map((name) => (

@@ -4,6 +4,7 @@ import { AGENTS } from "../types";
 import type { UsageStatsDto } from "../types";
 import {
   Checkbox,
+  EmptyState,
   LoadingRows,
   PageFrame,
   PageHeader,
@@ -145,7 +146,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
   );
   const rate = stats?.rateUsdCny ?? 7.2;
   // 分布区表头：caps 式小字加字距（同 SkillsPage 表头规格），弱化只作列定位
-  const th = "px-2 py-1.5 text-left text-[11px] font-normal tracking-wider text-l4";
+  const th = "px-2 py-1.5 text-left text-micro font-normal tracking-wider text-l4";
 
   const projectRows = useMemo(() => {
     if (!stats || showInternal) return stats?.byProject ?? [];
@@ -254,15 +255,16 @@ export default function StatsPage({ visible }: { visible: boolean }) {
       {!stats ? (
         <LoadingRows />
       ) : empty ? (
-        <p className="py-8 text-sm text-l4">
-          暂无用量数据——用 agent 跑几个任务后再来
-        </p>
+        <EmptyState
+          title="还没有用量记录"
+          detail="跑几个 agent 会话后，这里会按天汇总 token 和费用。"
+        />
       ) : (
         <>
           {/* 概览：大数字 + 小号灰标签两档（CAO 手法），不堆卡片边框 */}
           <div className="mb-8 grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-5">
             <div>
-              <div className="text-[10px] tracking-wider text-l4">
+              <div className="text-micro tracking-wider text-l4">
                 输入 tokens
               </div>
               <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
@@ -270,7 +272,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               </div>
             </div>
             <div>
-              <div className="text-[10px] tracking-wider text-l4">
+              <div className="text-micro tracking-wider text-l4">
                 输出 tokens
               </div>
               <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
@@ -278,24 +280,24 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               </div>
             </div>
             <div>
-              <div className="text-[10px] tracking-wider text-l4">
+              <div className="text-micro tracking-wider text-l4">
                 缓存读 tokens
               </div>
               <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
                 {compact(stats.cards.cacheRead)}
               </div>
-              <div className="mt-0.5 text-[10px] text-l4">
+              <div className="mt-0.5 text-micro text-l4">
                 缓存写 {compact(stats.cards.cacheWrite)}
               </div>
             </div>
             <div>
-              <div className="text-[10px] tracking-wider text-l4">对话数</div>
+              <div className="text-micro tracking-wider text-l4">对话数</div>
               <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
                 {compact(stats.cards.sessions)}
               </div>
             </div>
             <div>
-              <div className="text-[10px] tracking-wider text-l4">费用</div>
+              <div className="text-micro tracking-wider text-l4">费用</div>
               <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
                 {fmtCost(
                   stats.cards.costUsd,
@@ -328,7 +330,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                           {agentLabel(a.agent)}
                         </span>
                         <span
-                          className="block text-[10px] text-l4"
+                          className="block text-micro text-l4"
                           title={`统计范围内使用了 ${a.modelCount} 个不同模型`}
                         >
                           {a.modelCount} 个模型

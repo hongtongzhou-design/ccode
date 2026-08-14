@@ -135,7 +135,7 @@ function AddProjectModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <form
@@ -225,13 +225,13 @@ function RenameProjectModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-[24rem] rounded-md border border-field ccode-float-surface p-5"
+        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">重命名项目</h2>
         <p className="mb-3 truncate font-mono text-xs text-l3" title={path}>
@@ -346,7 +346,7 @@ function NewWorkspaceModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <form
@@ -741,7 +741,7 @@ function PortsSection() {
         key={`${port.pid}-${port.port}`}
         className="flex items-center gap-3 py-2"
       >
-        <span className="w-14 shrink-0 font-mono text-[13px] text-l1">
+        <span className="w-14 shrink-0 font-mono text-sm text-l1">
           {port.port}
         </span>
         <span
@@ -822,7 +822,7 @@ function PortsSection() {
                 ] as const
               ).map(([title, list, empty]) => (
                 <div key={title}>
-                  <p className="pt-1 text-[10px] text-l4">{title}</p>
+                  <p className="pt-1 text-micro text-l4">{title}</p>
                   {list.length === 0 ? (
                     <p className="py-1.5 text-xs text-l4">{empty}</p>
                   ) : (
@@ -1751,7 +1751,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                       )
                     }
                     aria-expanded={inboxCat === group.category}
-                    className="flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-field px-2.5 text-[11px] text-l2 hover:bg-hover"
+                    className="flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-field px-2.5 text-micro text-l2 hover:bg-hover"
                   >
                     <span
                       className={`size-1.5 shrink-0 rounded-full ${group.items[0].dot}`}
@@ -1863,7 +1863,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   }`}
                 />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] font-medium">
+                  <span className="block truncate text-sm font-medium">
                     {group.project?.name ?? group.repoName}
                   </span>
                   {/* 副行只留「待处理」（与收件箱同口径）；活跃任务数是纯状态，不占注意力 */}
@@ -2026,7 +2026,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   <button
                     type="button"
                     onClick={wsView.onToggleShowAll}
-                    className="ml-auto rounded-sm px-1.5 py-0.5 text-[10px] text-l4 hover:bg-hover hover:text-l1"
+                    className="ml-auto rounded-sm px-1.5 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l1"
                   >
                     {wsView.showAll ? "按步骤" : "全部"}
                   </button>
@@ -2106,9 +2106,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                           </button>
                           )}
                         </div>
-                        {/* 副行：10px 灰字，相对时间主显、悬浮给绝对时间（白话双层） */}
+                        {/* 副行：micro 档灰字，相对时间主显、悬浮给绝对时间（白话双层） */}
                         <p
-                          className="mt-0.5 truncate font-mono text-[10px] text-l4"
+                          className="mt-0.5 truncate font-mono text-micro text-l4"
                           title={`${workspace.worktreePath}\n创建于 ${absTime(workspace.createdAt)}`}
                         >
                           {workspace.branch} · {relTime(workspace.createdAt)}

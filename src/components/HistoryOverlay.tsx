@@ -6,6 +6,7 @@ import {
   translateHistoryEntry,
   type WsStepMap,
 } from "../history-view";
+import { EmptyState } from "./PageFrame";
 import type { HistoryEntryDto } from "../types";
 
 /**
@@ -76,10 +77,10 @@ export default function HistoryOverlay({
           ) : entries === null ? (
             <p className="text-xs text-l4">读取中…</p>
           ) : entries.length === 0 ? (
-            <p className="rounded-md bg-strip p-3 text-xs text-l3">
-              还没有保存记录。到终端页右侧「改动」页签点「保存到历史」，
-              或合并一个工作区任务，这里就会出现第一条时间线记录。
-            </p>
+            <EmptyState
+              title="还没有保存记录"
+              detail="到终端页右侧「改动」页签点「保存到历史」，或合并一个工作区任务，这里就会出现第一条时间线记录。"
+            />
           ) : (
             groups.map((group) => (
               <section key={group.label} className="mb-4">
@@ -115,7 +116,7 @@ export default function HistoryOverlay({
                           )}
                         </span>
                         <span
-                          className="shrink-0 font-mono text-[11px] text-l4"
+                          className="shrink-0 font-mono text-micro text-l4"
                           title={`提交 ${entry.hash} · ${entry.author}`}
                         >
                           {entry.hash}

@@ -151,7 +151,7 @@ export default function StepFlow({
                 disabled={busyTitle !== null}
                 onClick={() => void pickFile(node.human!.title)}
                 title={`选文件提交到落点 ${node.human!.target}（复制 + 登记提货单）；也可直接把文件拖到这一行`}
-                className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-[10px] text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
               >
                 {busyTitle === node.human!.title ? "提交中…" : "提交产物"}
               </button>
@@ -162,7 +162,7 @@ export default function StepFlow({
                 disabled={busyTitle !== null}
                 onClick={() => void pickSearchResults(node.human!.title)}
                 title="分工：你在 Undermind / Scholar / Elicit 网页端做语义发现，agent 负责解析、DOI 去重、合并进筛选清单。导出 RIS/BibTeX/CSV 后点这里导入（可多选），落 papers/imports/；建议文件名带 来源-日期（如 consensus-2026-08-13.ris）"
-                className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-[10px] text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
               >
                 导入检索结果
               </button>
@@ -178,7 +178,7 @@ export default function StepFlow({
             <button
               type="button"
               onClick={onRestore}
-              className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-[10px] text-cta-text hover:brightness-110"
+              className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110"
             >
               恢复工作区
             </button>
@@ -188,7 +188,7 @@ export default function StepFlow({
           <button
             type="button"
             onClick={onStart}
-            className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-[10px] text-cta-text hover:brightness-110"
+            className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110"
           >
             开始
           </button>
@@ -196,7 +196,7 @@ export default function StepFlow({
           <button
             type="button"
             onClick={goTerminal}
-            className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-[10px] text-l2 hover:bg-hover"
+            className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover"
           >
             去终端看看
           </button>
@@ -207,7 +207,7 @@ export default function StepFlow({
           <button
             type="button"
             onClick={goReview}
-            className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-[10px] text-cta-text hover:brightness-110"
+            className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110"
           >
             {reviewConflict ? "去处理冲突" : "去评审"}
           </button>
@@ -279,20 +279,20 @@ export default function StepFlow({
                 </span>
                 {pendingDot && (
                   <span
-                    className="shrink-0 rounded-sm bg-warn/15 px-1 py-px text-[10px] text-warn-text"
+                    className="shrink-0 rounded-sm bg-warn/15 px-1 py-px text-micro text-warn-text"
                     title="这件事还等着你完成"
                   >
                     等你做
                   </span>
                 )}
                 {isCurrent && !node.done && (
-                  <span className="shrink-0 text-[10px] text-cta">← 当前</span>
+                  <span className="shrink-0 text-micro text-cta">← 当前</span>
                 )}
                 {nodeActions(node)}
               </div>
               {/* 当前节点的引导与展开操作：种子 chips / 落点说明 */}
               {isCurrent && node.hint && (
-                <p className="mt-0.5 pl-9 text-[11px] text-l4">{node.hint}</p>
+                <p className="mt-0.5 pl-9 text-micro text-l4">{node.hint}</p>
               )}
               {node.kind === "agent" && agentContent && (
                 <div className="mt-0.5 pl-9">{agentContent}</div>
@@ -305,7 +305,7 @@ export default function StepFlow({
                       disabled={!draft}
                       onClick={chatDraft}
                       title="开终端和 Agent 一起改任务书草稿（只许它动这一个文件）"
-                      className="rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-[10px] text-cta-text hover:brightness-110 disabled:opacity-50"
+                      className="rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110 disabled:opacity-50"
                     >
                       跟 Agent 聊任务书
                     </button>
@@ -314,13 +314,13 @@ export default function StepFlow({
                         type="button"
                         onClick={openDraft}
                         title="在终端页预览/直接编辑草稿"
-                        className="rounded-sm border border-field px-1.5 py-0.5 text-[10px] text-l2 hover:bg-hover"
+                        className="rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover"
                       >
                         预览/编辑草稿
                       </button>
                     )}
                     {draft && (
-                      <span className="text-[10px] text-l4">
+                      <span className="text-micro text-l4">
                         {draft.exists
                           ? `已起草 · ${draft.relPath}`
                           : "还没起草——开聊后 Agent 会创建"}
@@ -331,7 +331,7 @@ export default function StepFlow({
                       桶头不再另设「添加想法」——讨论的事全归这个节点 */}
                   <div className="flex flex-wrap items-center gap-1">
                     {seeds.length > 0 && (
-                      <span className="text-[10px] text-l4">
+                      <span className="text-micro text-l4">
                         不知道从哪聊起：
                       </span>
                     )}
@@ -341,7 +341,7 @@ export default function StepFlow({
                         type="button"
                         onClick={() => onSeed(seed)}
                         title="点击就这个问题开聊（自动建卡）"
-                        className="rounded-full bg-strip px-2 py-0.5 text-[11px] text-l3 hover:bg-hover hover:text-l1"
+                        className="rounded-full bg-strip px-2 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
                       >
                         {seed}
                       </button>
@@ -372,7 +372,7 @@ export default function StepFlow({
                             if (!customTopic.trim()) setCustomOpen(false);
                           }}
                           placeholder="话题名，回车开聊"
-                          className="w-44 rounded border border-field bg-inset px-1.5 py-0.5 text-[11px] text-l1 outline-none placeholder:text-l4 focus:border-cta-bd"
+                          className="w-44 rounded border border-field bg-inset px-1.5 py-0.5 text-micro text-l1 outline-none placeholder:text-l4 focus:border-cta-bd"
                         />
                       </form>
                     ) : (
@@ -380,7 +380,7 @@ export default function StepFlow({
                         type="button"
                         onClick={() => setCustomOpen(true)}
                         title="种子没覆盖到的话题：起名开聊，与种子同一口径——自动建卡归档，结论直接写进任务书草稿"
-                        className="rounded-full border border-dashed border-field px-2 py-0.5 text-[11px] text-l4 hover:bg-hover hover:text-l1"
+                        className="rounded-full border border-dashed border-field px-2 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l1"
                       >
                         ＋ 自定义话题
                       </button>
@@ -391,10 +391,10 @@ export default function StepFlow({
               {node.kind === "human" &&
                 (node.human!.guidance || node.human!.target) && (
                   <details className="mt-0.5 pl-9">
-                    <summary className="cursor-pointer select-none text-[10px] text-l4 hover:text-l2">
+                    <summary className="cursor-pointer select-none text-micro text-l4 hover:text-l2">
                       怎么做 / 落点
                     </summary>
-                    <div className="mt-0.5 space-y-0.5 text-[11px] leading-4 text-l3">
+                    <div className="mt-0.5 space-y-0.5 text-micro leading-4 text-l3">
                       {node.human!.guidance && (
                         <p className="whitespace-pre-wrap">
                           {node.human!.guidance}
@@ -412,9 +412,9 @@ export default function StepFlow({
           );
         })}
       </ol>
-      {note && <p className="mt-1 pl-1 text-[11px] text-ok-text">{note}</p>}
+      {note && <p className="mt-1 pl-1 text-micro text-ok-text">{note}</p>}
       {registerOffer && (
-        <p className="mt-1 flex items-center gap-1.5 pl-1 text-[11px] text-l3">
+        <p className="mt-1 flex items-center gap-1.5 pl-1 text-micro text-l3">
           要登记为项目资源吗（{registerOffer.destRel}）
           <button
             type="button"
@@ -433,7 +433,7 @@ export default function StepFlow({
           </button>
         </p>
       )}
-      {error && <p className="mt-1 pl-1 text-[11px] text-err-text">{error}</p>}
+      {error && <p className="mt-1 pl-1 text-micro text-err-text">{error}</p>}
     </div>
   );
 }

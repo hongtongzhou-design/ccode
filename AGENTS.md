@@ -118,7 +118,9 @@ src-tauri/src/
                              # 会话删除、注意力分类（session_tail_state）、步骤名映射（RX3a）
   skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor 固定 copy）、四路导入、ZIP 导出、卸载备份、
                              # 漂移检测 resync、create_skill/update_skill_content；内置技能种子（seed_builtin_skills：
-                             # include_str! 内嵌 src-tauri/resources/skills/ 14 个技能，启动幂等播种，不覆盖/不复活用户改动）
+                             # include_str! 内嵌 src-tauri/resources/skills/ 14 个技能，启动幂等播种，不覆盖/不复活用户改动）、
+                             # 内置技能更新（check_builtin_skill_updates 种子逐字节比对 + apply_builtin_skill_update
+                             # 覆盖前备份 SKILL.md.bak-<yyyymmdd> 后原子写入）
   mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §9）：统一模型→八家映射、读-改-写一个键/段 + 备份 +
                              # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文）
   usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径

@@ -333,7 +333,7 @@ function App() {
                         )
                       }
                       aria-expanded={titleInboxCat === group.category}
-                      className="flex h-6 items-center gap-1.5 rounded-full border border-field bg-strip px-2.5 text-[11px] text-l2 hover:bg-hover"
+                      className="flex h-6 items-center gap-1.5 rounded-full border border-field bg-strip px-2.5 text-micro text-l2 hover:bg-hover"
                     >
                       <span
                         className={`size-1.5 shrink-0 rounded-full ${group.items[0].dot}`}
@@ -427,7 +427,7 @@ function App() {
             {NAV_GROUPS.map((group, groupIndex) => (
               <div key={group.label} className={groupIndex > 0 ? "mt-3" : ""}>
                 {!collapsed && (
-                  <div className="mb-1 mt-1 px-2 text-[11px] font-medium tracking-[0.08em] text-l3">
+                  <div className="mb-1 mt-1 px-2 text-micro font-medium tracking-[0.08em] text-l3">
                     {group.label}
                   </div>
                 )}

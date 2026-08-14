@@ -38,7 +38,7 @@ function CodeBlock({ lang, text }: { lang: string; text: string }) {
   return (
     <div className="group/code my-1.5 overflow-hidden rounded-md border border-hairline bg-inset">
       <div className="flex h-6 items-center justify-between border-b border-hairline px-2.5">
-        <span className="text-[10px] text-l4">{lang || "code"}</span>
+        <span className="text-micro text-l4">{lang || "code"}</span>
         <button
           type="button"
           onClick={() => {
@@ -50,7 +50,7 @@ function CodeBlock({ lang, text }: { lang: string; text: string }) {
               })
               .catch(() => {});
           }}
-          className="text-[10px] text-l3 opacity-0 transition-opacity hover:text-l1 focus-visible:opacity-100 group-hover/code:opacity-100"
+          className="text-micro text-l3 opacity-0 transition-opacity hover:text-l1 focus-visible:opacity-100 group-hover/code:opacity-100"
         >
           {copied ? "已复制" : "⧉ 复制"}
         </button>
@@ -259,7 +259,7 @@ export default function ConversationView({
           aria-expanded={isOpen}
           className="flex h-7 w-full items-center gap-1.5 rounded-md bg-inset px-2 text-left text-xs text-l3 hover:bg-raised hover:text-l1"
         >
-          <span className="shrink-0 text-[10px] text-l4">
+          <span className="shrink-0 text-micro text-l4">
             {isOpen ? "▾" : "▸"}
           </span>
           <span className="shrink-0">{run.blocks.length} 次工具调用</span>

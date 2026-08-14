@@ -68,7 +68,7 @@ function OpenQuestions({
   if (!questions || questions.length === 0) return null;
   return (
     <div>
-      <div className="mb-1 text-[10px] text-l4">
+      <div className="mb-1 text-micro text-l4">
         待拍板（{questions.length}）——来自最新简报，点了去聊
       </div>
       <ul className="space-y-0.5">
@@ -80,7 +80,7 @@ function OpenQuestions({
               title="开终端讨论这个问题（想法期只读保护同样生效）"
               className="flex w-full items-center gap-1.5 rounded-sm px-1.5 py-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
             >
-              <span className="shrink-0 text-[10px] text-warn-text">?</span>
+              <span className="shrink-0 text-micro text-warn-text">?</span>
               <span className="min-w-0 truncate">{q}</span>
             </button>
           </li>
@@ -455,7 +455,7 @@ export default function TaskCardsSection({
             className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
             title={expanded ? "收起" : "展开（待拍板 / 简报）"}
           >
-            <span className="w-3 shrink-0 text-[10px] text-l4">
+            <span className="w-3 shrink-0 text-micro text-l4">
               {expanded ? "▾" : "▸"}
             </span>
             <span className="min-w-0 truncate text-xs text-l1">
@@ -463,7 +463,7 @@ export default function TaskCardsSection({
             </span>
             {meta && (
               <span
-                className="shrink-0 text-[10px] text-l4"
+                className="shrink-0 text-micro text-l4"
                 title={latestTime ? absTime(latestTime) : undefined}
               >
                 {meta}
@@ -601,7 +601,7 @@ export default function TaskCardsSection({
                           </span>
                           {time && (
                             <span
-                              className="shrink-0 text-[10px] text-l4"
+                              className="shrink-0 text-micro text-l4"
                               title={absTime(time)}
                             >
                               {relTime(time)}
@@ -631,7 +631,7 @@ export default function TaskCardsSection({
             type="button"
             onClick={openMainChanges}
             title="想法期的实验性改动留在主仓，不会带入新工作区；点击查看改动"
-            className="ml-auto shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-[10px] text-warn-text hover:bg-hover"
+            className="ml-auto shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-micro text-warn-text hover:bg-hover"
           >
             主仓 {mainDirty} 个未提交改动
           </button>
@@ -642,7 +642,7 @@ export default function TaskCardsSection({
           className={`flex shrink-0 items-center gap-1.5 ${mainDirty ? "" : "ml-auto"}`}
           title="开启后，「聊想法」会以只读/计划模式启动 Agent（支持该参数的 CLI），并嘱咐它只讨论不动文件"
         >
-          <span className="text-[10px] text-l4">想法期只读保护</span>
+          <span className="text-micro text-l4">想法期只读保护</span>
           <Toggle
             checked={discussGuard}
             onChange={(checked) =>
@@ -657,7 +657,7 @@ export default function TaskCardsSection({
       {/* 空态即教学：还没有卡片时用一行白话讲清工作流（不做教程页）。
           聚焦时不显示（聚焦本身已是引导） */}
       {!focusStep && cards && cards.length === 0 && (
-        <p className="mt-1 rounded-md bg-inset px-2.5 py-2 text-[13px] text-l4">
+        <p className="mt-1 rounded-md bg-inset px-2.5 py-2 text-sm text-l4">
           点步骤下的种子问题开聊 → 结论直接写进任务书草稿 →
           开工时草稿就是 TASK.md。卡片只负责归档这些讨论。
         </p>
@@ -667,7 +667,7 @@ export default function TaskCardsSection({
           聚焦态下步骤名只出现在这里与流程线 agent 节点，桶头不再重复 */}
       {focusStep && (
         <div className="mt-1 flex items-center gap-2">
-          <span className="text-sm font-medium text-l1">{focusStep}</span>
+          <span className="text-sm font-semibold text-l1">{focusStep}</span>
           {focusStatusText && (
             <span className="text-xs text-l3">{focusStatusText}</span>
           )}
@@ -746,7 +746,7 @@ export default function TaskCardsSection({
                   已并入流程线「任务书」节点，此处不再重复。总览态才需要桶头（步骤名＋＋添加想法） */}
               {!focusStep && (
               <div className="flex h-7 items-center gap-2">
-                <span className="text-[13px] text-l2">
+                <span className="text-sm text-l2">
                   {bucket.step ?? "未挂步骤"}
                 </span>
                 {creatingIn === key ? (
@@ -818,7 +818,7 @@ export default function TaskCardsSection({
                   聚焦时种子已进流程线的 discuss 节点，桶内不重复渲染 */}
               {!focusStep && bucket.step !== null && bucketSeeds.length > 0 && (
                 <div className="mb-1 flex flex-wrap items-center gap-1">
-                  <span className="text-[10px] text-l4">开工前聊聊：</span>
+                  <span className="text-micro text-l4">开工前聊聊：</span>
                   {bucketSeeds.map((seed) => {
                     const exists = (cards ?? []).some((c) => c.name === seed);
                     return (
@@ -831,7 +831,7 @@ export default function TaskCardsSection({
                             ? "已有同名卡片，点击继续聊"
                             : "点击就这个问题开聊（自动建卡，只读保护生效）"
                         }
-                        className="rounded-full bg-inset px-2 py-0.5 text-[11px] text-l3 hover:bg-hover hover:text-l1"
+                        className="rounded-full bg-inset px-2 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
                       >
                         {seed}
                       </button>
@@ -857,7 +857,7 @@ export default function TaskCardsSection({
       {/* 步骤级 TASK.md 只读预览弹层（拼装与开工落盘同一出处） */}
       {taskMdPreview && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 ccode-fade"
           onClick={() => setTaskMdPreview(null)}
         >
           <div
@@ -887,7 +887,7 @@ export default function TaskCardsSection({
                   <LoadingRows compact />
                 </div>
               ) : (
-                <pre className="whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5 text-l2">
+                <pre className="whitespace-pre-wrap break-words p-3 font-mono text-micro leading-5 text-l2">
                   {taskMdPreview.text}
                 </pre>
               )}

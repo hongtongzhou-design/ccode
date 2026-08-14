@@ -293,7 +293,7 @@ export default function DigestPicker({
                 : ""}
             </p>
             <textarea
-              className="h-72 w-full resize-none rounded-md border border-field bg-inset px-2 py-1.5 text-[13px] leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
+              className="h-72 w-full resize-none rounded-md border border-field bg-inset px-2 py-1.5 text-sm leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
               value={draft ?? ""}
               disabled={draft === null || saving}
               placeholder={draft === null ? "读取初稿中…" : ""}

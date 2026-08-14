@@ -232,6 +232,78 @@ fn seed_builtin_skills_impl(store: &SkillStore) -> Result<Vec<String>, String> {
     Ok(added)
 }
 
+// ===== 内置技能更新（种子增强后老用户库内旧副本的追平通道，播种器永不覆盖的配套出口） =====
+
+/// 内置技能更新检测：库内 SKILL.md 与内嵌种子逐字节不一致 → 返回技能名。
+/// 只提示 skills.json 里 source == "builtin" 的项（同名用户自建技能不算）；
+/// 库目录缺失/文件读失败 = 跳过（缺失归播种器管）。用户在内置技能上的自改同样算差异，
+/// 照样提示，由用户决定是否更新（更新前自动备份）。
+fn check_builtin_skill_updates_impl(store: &SkillStore) -> Vec<String> {
+    let skills = store.read();
+    let mut outdated = Vec::new();
+    for (name, seed) in BUILTIN_SKILLS {
+        if !skills.iter().any(|s| s.name == *name && s.source == "builtin") {
+            continue;
+        }
+        let Ok(current) = fs::read(store.skill_dir(name).join("SKILL.md")) else {
+            continue;
+        };
+        if current != seed.as_bytes() {
+            outdated.push(name.to_string());
+        }
+    }
+    outdated
+}
+
+/// 今天日期 yyyymmdd：内置技能更新备份（SKILL.md.bak-<date>）命名用
+fn today_yyyymmdd() -> String {
+    compact_iso(&crate::sessions::now_iso())
+        .chars()
+        .take(8)
+        .collect()
+}
+
+/// 应用内置技能更新：现有 SKILL.md 先备份为同目录 SKILL.md.bak-<yyyymmdd>
+/// （同日重复更新追加 -2/-3 防覆盖），再原子写入种子内容，skills.json 描述按新文件重解析。
+fn apply_builtin_skill_update_impl(store: &SkillStore, name: &str) -> Result<(), String> {
+    let Some((_, seed)) = BUILTIN_SKILLS.iter().find(|(n, _)| *n == name) else {
+        return Err(format!("「{name}」不是内置技能，无法一键更新"));
+    };
+    let dir = store.skill_dir(name);
+    let md = dir.join("SKILL.md");
+    if !md.is_file() {
+        return Err(format!("库内缺少 {}（重启应用播种后再试）", md.display()));
+    }
+    let date = today_yyyymmdd();
+    let mut backup = dir.join(format!("SKILL.md.bak-{date}"));
+    let mut seq = 2;
+    while backup.exists() {
+        backup = dir.join(format!("SKILL.md.bak-{date}-{seq}"));
+        seq += 1;
+    }
+    fs::copy(&md, &backup).map_err(|e| format!("备份原文件失败: {e}"))?;
+    if let Err(e) = crate::profiles::atomic_write(&md, seed) {
+        // 写入失败盘面回到更新前，不留孤儿备份
+        let _ = fs::remove_file(&backup);
+        return Err(format!("写入新版 SKILL.md 失败: {e}"));
+    }
+    let mut skills = store.read();
+    if let Some(pos) = skills.iter().position(|s| s.name == name) {
+        let (_, description) = parse_skill_md(&md);
+        skills[pos].description = description.unwrap_or_default();
+        store.write(&skills)?;
+    }
+    crate::logbuf::record(
+        "info",
+        "skills",
+        &format!(
+            "内置技能 {name} 已更新到最新版，原文件备份为 {}",
+            backup.file_name().unwrap_or_default().to_string_lossy()
+        ),
+    );
+    Ok(())
+}
+
 // ===== SKILL.md 防御式解析（开放标准：frontmatter 只取 name/description，扩展字段忽略） =====
 
 fn parse_skill_md(path: &Path) -> (Option<String>, Option<String>) {
@@ -1305,6 +1377,22 @@ pub async fn apply_skill_update(id: String) -> Result<SkillImportResultDto, Stri
     Ok(result)
 }
 
+/// 内置技能新版检测（best-effort，失败静默）：库副本与内嵌种子不一致的内置技能名列表
+#[tauri::command]
+pub async fn check_builtin_skill_updates() -> Vec<String> {
+    let Ok(store) = SkillStore::default_paths() else {
+        return Vec::new();
+    };
+    check_builtin_skill_updates_impl(&store)
+}
+
+/// 一键更新内置技能为内嵌种子版（覆盖前原文件自动备份为同目录 SKILL.md.bak-<yyyymmdd>）
+#[tauri::command]
+pub async fn apply_builtin_skill_update(name: String) -> Result<(), String> {
+    let store = SkillStore::default_paths()?;
+    apply_builtin_skill_update_impl(&store, name.trim())
+}
+
 /// 边下边计数：content_length 预检 + 实际字节超限即中止（防 zipball 内存炸弹）
 async fn download_limited(mut resp: reqwest::Response) -> Result<Vec<u8>, String> {
     if let Some(len) = resp.content_length() {
@@ -1732,6 +1820,81 @@ mod tests {
         fx.store.write(&skills).unwrap();
         assert!(seed_builtin_skills_impl(&fx.store).unwrap().is_empty());
         assert!(!fx.store.skill_dir(first).exists());
+    }
+
+    #[test]
+    fn builtin_update_check_and_apply() {
+        let fx = Fx::new();
+        seed_builtin_skills_impl(&fx.store).unwrap();
+        // 库里副本与种子一致 → 无提示
+        assert!(check_builtin_skill_updates_impl(&fx.store).is_empty());
+        // 库内是旧内容（含用户自改）→ 检出该技能
+        let first = BUILTIN_SKILLS[0].0;
+        let md = fx.store.skill_dir(first).join("SKILL.md");
+        fs::write(&md, "---\nname: old\ndescription: 旧描述\n---\n旧内容\n").unwrap();
+        // skills.json 描述也拨旧，验证更新后同步回种子描述
+        let mut skills = fx.store.read();
+        let pos = skills.iter().position(|s| s.name == first).unwrap();
+        skills[pos].description = "旧描述".into();
+        fx.store.write(&skills).unwrap();
+        assert_eq!(
+            check_builtin_skill_updates_impl(&fx.store),
+            vec![first.to_string()]
+        );
+        // 库里缺目录的内置技能不提示（缺失归播种器管）
+        let second = BUILTIN_SKILLS[1].0;
+        fs::remove_dir_all(fx.store.skill_dir(second)).unwrap();
+        assert!(!check_builtin_skill_updates_impl(&fx.store).contains(&second.to_string()));
+        // 应用更新：内容 = 种子、备份存在且为旧内容、skills.json 描述同步
+        apply_builtin_skill_update_impl(&fx.store, first).unwrap();
+        let seed = BUILTIN_SKILLS.iter().find(|(n, _)| *n == first).unwrap().1;
+        assert_eq!(fs::read_to_string(&md).unwrap(), seed);
+        let backups_of = |fx: &Fx| -> Vec<String> {
+            let mut v: Vec<String> = fs::read_dir(fx.store.skill_dir(first))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("SKILL.md.bak-"))
+                .collect();
+            v.sort();
+            v
+        };
+        let backups = backups_of(&fx);
+        assert_eq!(backups.len(), 1, "应恰好一份备份: {backups:?}");
+        assert!(
+            fs::read_to_string(fx.store.skill_dir(first).join(&backups[0]))
+                .unwrap()
+                .contains("旧内容"),
+            "备份必须保留更新前内容"
+        );
+        let saved = fx.store.read();
+        let s = saved.iter().find(|s| s.name == first).unwrap();
+        let (_, seed_desc) = parse_skill_md(&md);
+        assert_eq!(s.description, seed_desc.unwrap_or_default(), "描述同步为新版");
+        assert_ne!(s.description, "旧描述");
+        // 追平后检测归零
+        assert!(check_builtin_skill_updates_impl(&fx.store).is_empty());
+        // 同日再次更新：备份追加 -2 后缀防覆盖
+        fs::write(&md, "---\nname: old\ndescription: 旧描述\n---\n旧内容 v2\n").unwrap();
+        apply_builtin_skill_update_impl(&fx.store, first).unwrap();
+        let backups = backups_of(&fx);
+        assert_eq!(backups.len(), 2, "同日重复更新应追加序号: {backups:?}");
+        assert!(backups[1].ends_with("-2"), "{backups:?}");
+        // 非内置技能名报错
+        let err = apply_builtin_skill_update_impl(&fx.store, "not-builtin").unwrap_err();
+        assert!(err.contains("不是内置技能"), "{err}");
+    }
+
+    #[test]
+    fn builtin_update_check_ignores_user_owned_same_name() {
+        let fx = Fx::new();
+        // 用户自建与内置同名的技能（source=local）：内容与种子不同，但不得提示
+        let first = BUILTIN_SKILLS[0].0;
+        fx.add_lib_skill(first, "用户自己的版本");
+        assert!(
+            check_builtin_skill_updates_impl(&fx.store).is_empty(),
+            "source 非 builtin 的同名技能不提示"
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Checkbox } from "./PageFrame";
+import { Checkbox, EmptyState } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import type {
@@ -571,10 +571,10 @@ export default function PipelineEditor({
             </div>
           )}
           {drafts.length === 0 && (
-            <p className="rounded-md bg-strip p-3 text-xs text-l3">
-              还没有研究步骤。点击下方「+ 添加步骤」逐张卡片填写（名称、简报、
-              预期产物与资源绑定），保存后写入 .ccode/project.toml。
-            </p>
+            <EmptyState
+              title="还没有研究步骤"
+              detail="点击下方「+ 添加步骤」逐张卡片填写（名称、简报、预期产物与资源绑定），保存后写入 .ccode/project.toml。"
+            />
           )}
           {drafts.map(renderCard)}
           <button

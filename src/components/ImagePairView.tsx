@@ -52,7 +52,7 @@ function ImageSide({
 }) {
   return (
     <div className="flex min-w-0 flex-col">
-      <div className="border-b border-hairline px-2 py-1 text-[11px] text-l3">
+      <div className="border-b border-hairline px-2 py-1 text-micro text-l3">
         {label}
       </div>
       <div

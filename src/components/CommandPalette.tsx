@@ -83,7 +83,7 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-center bg-black/40"
+      className="fixed inset-0 z-50 flex justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <div

@@ -333,7 +333,7 @@ function DiffTable({
   }, [rows]);
 
   return (
-    <div className="overflow-x-auto bg-canvas font-mono text-[11px] leading-5">
+    <div className="overflow-x-auto bg-canvas font-mono text-micro leading-5">
       {displayRows.map((row, index) => {
         if (row.kind === "fold") {
           return (
@@ -726,7 +726,7 @@ function ConflictFileSection({
           <button
             type="button"
             onClick={() => onRetry(path)}
-            className="mt-2 rounded-sm bg-btn px-2 py-1 text-l1 hover:bg-white/10"
+            className="mt-2 rounded-sm bg-btn px-2 py-1 text-l1 hover:brightness-125"
           >
             重试加载
           </button>
@@ -736,7 +736,7 @@ function ConflictFileSection({
           <LoadingRows compact />
         </div>
       ) : rows.length === 0 ? (
-        <div className="grid min-h-36 grid-cols-2 divide-x divide-hairline font-mono text-[11px] leading-5">
+        <div className="grid min-h-36 grid-cols-2 divide-x divide-hairline font-mono text-micro leading-5">
           <pre className="overflow-auto whitespace-pre p-3 text-l2">
             {content.ours ?? "（此侧已删除）"}
           </pre>
@@ -822,7 +822,7 @@ function MainRepoCommitPanel({
 
   return (
     <div className="mt-1.5 rounded-md bg-inset p-2 text-l2">
-      <p className="mb-2 text-[11px] text-l4">
+      <p className="mb-2 text-micro text-l4">
         提交 = 把改动保存到项目历史。文件本身不会丢，保存后才能把成果合并回来。
       </p>
       {loadError ? (
@@ -833,7 +833,7 @@ function MainRepoCommitPanel({
         <p className="text-xs text-l4">主文件夹当前没有未保存的改动</p>
       ) : (
         <>
-          <div className="mb-1 flex items-center justify-between text-[11px] text-l4">
+          <div className="mb-1 flex items-center justify-between text-micro text-l4">
             <span>
               将提交 {selectedFiles.length} / {files.length} 个文件
             </span>
@@ -2117,7 +2117,7 @@ export default function WorkspaceReviewView({
                   </button>
                 )}
                 </div>
-                <span className="text-[11px] text-l4">
+                <span className="text-micro text-l4">
                   不确定选哪边时可让 AI 按上下文建议；仍可逐文件手动改选
                 </span>
               </div>
@@ -2145,7 +2145,7 @@ export default function WorkspaceReviewView({
                     {aiBusy ? "◈…" : "◈"}
                   </button>
                 </div>
-                <span className="text-[11px] text-l4">
+                <span className="text-micro text-l4">
                   提交 = 保存到历史；合并 = 把成果放回主文件夹
                 </span>
               </div>
@@ -2212,7 +2212,7 @@ export default function WorkspaceReviewView({
                 )}
               </div>
               {citeExpanded && citations && citations.missing.length > 0 && (
-                <p className="mt-1 break-all font-mono text-[11px] text-warn-text">
+                <p className="mt-1 break-all font-mono text-micro text-warn-text">
                   缺失引用键：{citations.missing.join("、")}
                 </p>
               )}
@@ -2262,7 +2262,7 @@ export default function WorkspaceReviewView({
                       )}
                     </div>
                     {blocker.key === "main-dirty" && (
-                      <p className="pl-3 text-[11px] text-l4">
+                      <p className="pl-3 text-micro text-l4">
                         提交 =
                         把改动保存到项目历史。文件本身不会丢，保存后才能把成果合并回来。
                       </p>
@@ -2346,7 +2346,7 @@ export default function WorkspaceReviewView({
             >
               {distillDrafting ? "◈ 起草中…" : "◈ AI 起草"}
             </button>
-            <span className="min-w-0 flex-1 truncate text-[11px] text-l4">
+            <span className="min-w-0 flex-1 truncate text-micro text-l4">
               AI 初稿，改完定稿后才会落盘（钉到「{nextStep.step.name}
               」的任务卡）
             </span>
@@ -2364,7 +2364,7 @@ export default function WorkspaceReviewView({
             </p>
           )}
           <textarea
-            className="w-full rounded-md border border-field bg-canvas px-2 py-1.5 text-[13px] leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
+            className="w-full rounded-md border border-field bg-canvas px-2 py-1.5 text-sm leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
             rows={4}
             placeholder={`写下评审结论：这步验收了什么、下一步该怎么想（定稿后钉到「${nextStep.step.name}」的任务卡）`}
             value={distillText}
@@ -2531,7 +2531,7 @@ export default function WorkspaceReviewView({
                   </button>
                 )}
               </div>
-              <div className="mt-2 flex items-center text-[11px] text-l4">
+              <div className="mt-2 flex items-center text-micro text-l4">
                 <span>{conflictMode ? "冲突文件" : "改动文件"}</span>
                 <span className="ml-auto">
                   {conflictMode
@@ -2594,7 +2594,7 @@ export default function WorkspaceReviewView({
               )}
             </div>
 
-            <div className="shrink-0 border-t border-hairline bg-strip px-3 py-2 text-[11px] text-l4">
+            <div className="shrink-0 border-t border-hairline bg-strip px-3 py-2 text-micro text-l4">
               {conflictMode ? (
                 <div className="flex items-center gap-2">
                   <span
@@ -2687,7 +2687,7 @@ export default function WorkspaceReviewView({
 
       {prOpen && diff && (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4 ccode-fade"
           onClick={() => {
             // 请求在途时不响应遮罩关闭，避免关框重开导致重复建 PR
             if (!prBusy) closePrDialog();
@@ -2793,7 +2793,7 @@ export default function WorkspaceReviewView({
 
       {archiveOpen && diff && (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4 ccode-fade"
           onClick={() => {
             // 请求在途时不响应遮罩关闭，避免关框重开导致重复提交/归档
             if (!busy) setArchiveOpen(false);

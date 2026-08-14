@@ -8,7 +8,7 @@ import type {
   GitFileDto,
   WorkspaceDiffDto,
 } from "../types";
-import { Checkbox, hoverRevealClass, LoadingRows } from "./PageFrame";
+import { Checkbox, EmptyState, hoverRevealClass, LoadingRows } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
 import ImagePairView, { isImagePath } from "./ImagePairView";
 import { useAppStore } from "../store";
@@ -483,7 +483,7 @@ function GitPanel({
             </span>
             <span
               title={statusBadgeTitle(f.status)}
-              className={`shrink-0 rounded-sm px-1 font-mono text-[10px] leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
+              className={`shrink-0 rounded-sm px-1 font-mono text-micro leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
             >
               {f.status}
             </span>
@@ -502,7 +502,7 @@ function GitPanel({
             )}
             {/* WKWebView 不显示 title 悬浮：diff 入口用可见的 hover 提示代替 */}
             <span
-              className={`${hoverRevealClass} shrink-0 rounded-sm px-1 text-[10px] text-l4`}
+              className={`${hoverRevealClass} shrink-0 rounded-sm px-1 text-micro text-l4`}
             >
               {expanded ? "收起" : "diff"}
             </span>
@@ -534,7 +534,7 @@ function GitPanel({
         >
           <span
             title={statusBadgeTitle(f.status)}
-            className={`shrink-0 rounded-sm px-1 font-mono text-[10px] leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
+            className={`shrink-0 rounded-sm px-1 font-mono text-micro leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
           >
             {f.status}
           </span>
@@ -551,7 +551,7 @@ function GitPanel({
     const diffLines = diffDetail ? diffDetail.text.split("\n") : null;
     return (
       <div className="overflow-hidden rounded-md bg-strip">
-        <div className="flex items-center gap-2 border-b border-hairline px-2 py-1 text-[11px] text-l4">
+        <div className="flex items-center gap-2 border-b border-hairline px-2 py-1 text-micro text-l4">
           <span className="min-w-0 flex-1 truncate font-mono">{f.path}</span>
           {diffDetail?.binary && <span>二进制</span>}
           {diffDetail?.truncated && (
@@ -576,12 +576,12 @@ function GitPanel({
           // 逐 hunk 验收：未暂存改动按块展示，块头右侧「丢弃 / 暂存」
           <div>
             {diffError && (
-              <p className="border-b border-hairline px-2 py-1 text-[11px] text-err-text">
+              <p className="border-b border-hairline px-2 py-1 text-micro text-err-text">
                 {diffError}
               </p>
             )}
             {hunksStaged && (
-              <p className="border-b border-hairline px-2 py-1 text-[11px] text-warn-text">
+              <p className="border-b border-hairline px-2 py-1 text-micro text-warn-text">
                 该文件已有部分内容暂存；勾选它「保存到历史」时只提交已暂存的块，下方的块留在工作区
               </p>
             )}
@@ -594,7 +594,7 @@ function GitPanel({
                 >
                   <div className="flex items-center gap-1 border-b border-hairline/60 bg-inset px-2 py-0.5">
                     <span
-                      className="min-w-0 flex-1 truncate font-mono text-[11px] text-link"
+                      className="min-w-0 flex-1 truncate font-mono text-micro text-link"
                       title={h.header}
                     >
                       {h.header}
@@ -606,7 +606,7 @@ function GitPanel({
                           disabled={hunkBusy}
                           onClick={() => void applyHunk(h, "discard")}
                           title="丢弃这块改动，恢复到暂存区状态（不可恢复，除非已提交）"
-                          className="shrink-0 rounded-sm px-1.5 py-0.5 text-[11px] text-warn-text hover:bg-hover disabled:opacity-50"
+                          className="shrink-0 rounded-sm px-1.5 py-0.5 text-micro text-warn-text hover:bg-hover disabled:opacity-50"
                         >
                           丢弃
                         </button>
@@ -615,7 +615,7 @@ function GitPanel({
                           disabled={hunkBusy}
                           onClick={() => void applyHunk(h, "stage")}
                           title="把这块改动放进暂存区；勾选此文件「保存到历史」时只提交已暂存的块"
-                          className="shrink-0 rounded-sm px-1.5 py-0.5 text-[11px] text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                          className="shrink-0 rounded-sm px-1.5 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
                         >
                           暂存
                         </button>
@@ -633,7 +633,7 @@ function GitPanel({
                     ))}
                   </pre>
                   {body.length > DIFF_LINE_CAP && (
-                    <p className="border-t border-hairline px-2 py-1 text-[11px] text-l4">
+                    <p className="border-t border-hairline px-2 py-1 text-micro text-l4">
                       仅渲染前 {DIFF_LINE_CAP} 行（共 {body.length}{" "}
                       行），完整内容见审阅视图
                     </p>
@@ -647,7 +647,7 @@ function GitPanel({
         ) : diffLines ? (
           <>
             {hunksStaged && (
-              <p className="border-b border-hairline px-2 py-1 text-[11px] text-l3">
+              <p className="border-b border-hairline px-2 py-1 text-micro text-l3">
                 改动已全部暂存；勾选后「保存到历史」将提交这些内容
               </p>
             )}
@@ -662,7 +662,7 @@ function GitPanel({
               ))}
             </pre>
             {diffLines.length > DIFF_LINE_CAP && (
-              <p className="border-t border-hairline px-2 py-1 text-[11px] text-l4">
+              <p className="border-t border-hairline px-2 py-1 text-micro text-l4">
                 仅渲染前 {DIFF_LINE_CAP} 行（共 {diffLines.length}{" "}
                 行），完整内容见审阅视图
               </p>
@@ -758,9 +758,16 @@ function GitPanel({
             </span>
           </p>
         ) : files.length === 0 ? (
-          <p className="p-3 text-sm text-l4">
-            {inWs ? "任务无改动 ✓" : "工作区干净 ✓"}
-          </p>
+          <div className="p-3">
+            <EmptyState
+              title="没有未提交的改动"
+              detail={
+                inWs
+                  ? "这个任务的改动都已提交，可以继续下一步。"
+                  : "所有改动都已提交，工作区很干净。"
+              }
+            />
+          </div>
         ) : (
           // 白话分组：组名给中文，状态字母保留为文件名前的小号 mono 徽标（悬浮 title 双语义）
           <div className="flex h-full">
@@ -778,7 +785,7 @@ function GitPanel({
             >
               {groupFilesByStatus(files).map((group) => (
                 <div key={group.key}>
-                  <p className="px-1 pb-0.5 pt-1.5 text-[11px] text-l4">
+                  <p className="px-1 pb-0.5 pt-1.5 text-micro text-l4">
                     {group.label} {group.files.length}
                   </p>
                   {group.files.map((f) =>
@@ -840,7 +847,7 @@ function GitPanel({
                     <span className="shrink-0 text-l4">{formatSize(a.size)}</span>
                     <span className="shrink-0 text-l4">← {a.producedBy}</span>
                   </div>
-                  <div className="truncate font-mono text-[11px] text-l4">{a.path}</div>
+                  <div className="truncate font-mono text-micro text-l4">{a.path}</div>
                 </li>
               ))}
             </ul>
@@ -912,7 +919,7 @@ function GitPanel({
               onClick={() => void doCommit(true)}
               disabled={!canCommit}
               title="git commit + push：保存到历史并推送到远程"
-              className="flex-1 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="flex-1 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:brightness-125 disabled:opacity-50"
             >
               {running === "push"
                 ? "推送中…"

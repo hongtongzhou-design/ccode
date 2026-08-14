@@ -132,7 +132,7 @@ const FileTreeNode = memo(function FileTreeNode({
         <span className="ml-auto flex shrink-0 items-center gap-1">
           {gitStatus && (
             <span
-              className={`font-mono text-[10px] opacity-75 ${STATUS_COLOR[gitStatus] ?? "text-l3"}`}
+              className={`font-mono text-micro opacity-75 ${STATUS_COLOR[gitStatus] ?? "text-l3"}`}
               title={STATUS_WORD[gitStatus] ?? gitStatus}
             >
               {gitStatus === "??" ? "?" : gitStatus}

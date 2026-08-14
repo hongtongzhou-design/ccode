@@ -39,7 +39,7 @@ export function PageHeader({
         <h1 className="shrink-0 text-base font-semibold tracking-tight text-l1">
           {title}
         </h1>
-        {meta && <span className="truncate text-[11px] text-l4">{meta}</span>}
+        {meta && <span className="truncate text-micro text-l4">{meta}</span>}
       </div>
       {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
     </header>
@@ -195,7 +195,7 @@ export function Checkbox({
       />
       <span
         aria-hidden="true"
-        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] ${align === "start" ? "mt-0.5" : ""} ${
+        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border text-micro ${align === "start" ? "mt-0.5" : ""} ${
           checked
             ? "border-cta-bd bg-cta text-cta-text"
             : "border-field bg-canvas text-transparent"

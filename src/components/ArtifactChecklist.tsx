@@ -143,7 +143,7 @@ export default function ArtifactChecklist({
           「{stepName ?? workspaceName}」产物核验
         </span>
         <span
-          className="min-w-0 truncate font-mono text-[11px] text-l4"
+          className="min-w-0 truncate font-mono text-micro text-l4"
           title={root}
         >
           {rootLabel}
@@ -180,12 +180,12 @@ export default function ArtifactChecklist({
             const fileMeta = (f: DirEntryDto) => (
               <>
                 <span
-                  className="shrink-0 text-[10px] text-l4"
+                  className="shrink-0 text-micro text-l4"
                   title={absTime(f.modified)}
                 >
                   {relTime(f.modified)}
                 </span>
-                <span className="shrink-0 text-[10px] text-l4">
+                <span className="shrink-0 text-micro text-l4">
                   {formatSize(f.size)}
                 </span>
               </>
@@ -220,7 +220,7 @@ export default function ArtifactChecklist({
                       <span className="min-w-0 flex-1 truncate font-mono text-l2">
                         {row.entry}
                       </span>
-                      <span className="shrink-0 text-[10px] text-l4">
+                      <span className="shrink-0 text-micro text-l4">
                         {row.files.length} 个文件
                       </span>
                     </div>

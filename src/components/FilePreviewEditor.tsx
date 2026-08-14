@@ -438,7 +438,7 @@ function FilePreviewEditor({
         )}
         {dirty && <span className="shrink-0 text-l3" title="有未保存的修改">●</span>}
         {isMd && (
-          <div className="flex shrink-0 items-center rounded-sm bg-inset p-0.5 text-[11px]">
+          <div className="flex shrink-0 items-center rounded-sm bg-inset p-0.5 text-micro">
             {(["read", "edit"] as const).map((m) => (
               <button
                 key={m}

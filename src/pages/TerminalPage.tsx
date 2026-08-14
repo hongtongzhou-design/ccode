@@ -31,7 +31,7 @@ import FileTree from "../components/FileTree";
 import GitPanel from "../components/GitPanel";
 import HandoffPicker, { type HandoffSource } from "../components/HandoffPicker";
 import DigestPicker from "../components/DigestPicker";
-import { LoadingRows } from "../components/PageFrame";
+import { EmptyState, LoadingRows } from "../components/PageFrame";
 import ProjectRail from "../components/ProjectRail";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
 import { renderTaskMd } from "../pipeline-start";
@@ -542,7 +542,7 @@ const TerminalView = memo(function TerminalView({
                   >
                     <span className="text-xs text-l1">{s.name}</span>
                     {s.description && (
-                      <span className="truncate text-[11px] text-l4">
+                      <span className="truncate text-micro text-l4">
                         {s.description}
                       </span>
                     )}
@@ -587,7 +587,7 @@ const TerminalView = memo(function TerminalView({
                     className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-1.5 text-left hover:bg-hover"
                   >
                     <span className="text-xs text-l1">{s.name}</span>
-                    <span className="truncate font-mono text-[11px] text-l4">
+                    <span className="truncate font-mono text-micro text-l4">
                       {s.kind === "stdio"
                         ? `${s.command} ${s.args.join(" ")}`
                         : s.url}
@@ -602,7 +602,7 @@ const TerminalView = memo(function TerminalView({
                     setMcpMenuOpen(false);
                     setPage("mcp");
                   }}
-                  className="flex w-full rounded-sm px-2 py-1.5 text-left text-[11px] text-l4 hover:bg-hover hover:text-l2"
+                  className="flex w-full rounded-sm px-2 py-1.5 text-left text-micro text-l4 hover:bg-hover hover:text-l2"
                 >
                   管理 MCP 分发 →（变更对新会话生效）
                 </button>
@@ -1556,9 +1556,10 @@ const TerminalView = memo(function TerminalView({
             </span>
           </div>
           {agentProfiles.length === 0 && (
-            <p className="mb-2 text-sm text-l3">
-              该 agent 暂无配置，请先在「配置」页创建。
-            </p>
+            <EmptyState
+              title="该 agent 还没有配置"
+              detail="到「配置」页创建一个，再回来启动。"
+            />
           )}
           {autoStart &&
             profileId &&
@@ -2898,7 +2899,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               >
                 {attentionDot && (
                   <span
-                    className={`shrink-0 text-[10px] ${attentionDot.cls} ${
+                    className={`shrink-0 text-micro ${attentionDot.cls} ${
                       active
                         ? ""
                         : "invisible group-hover/tab:visible group-focus-within/tab:visible"
@@ -2913,7 +2914,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 </span>
                 {t.restored && (
                   <span
-                    className="shrink-0 text-[10px] text-l4"
+                    className="shrink-0 text-micro text-l4"
                     title="应用重启前未结束的任务，点「恢复任务」重建"
                   >
                     可恢复
@@ -2921,7 +2922,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 )}
                 {splitActive && t.id === splitTabId && (
                   <span
-                    className="shrink-0 rounded-sm bg-inset px-1 text-[10px] text-l3"
+                    className="shrink-0 rounded-sm bg-inset px-1 text-micro text-l3"
                     title="分屏右侧对照（点击交换到左侧）"
                   >
                     ◧
@@ -2954,7 +2955,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 className="flex items-center gap-1 rounded-sm bg-inset px-2 py-0.5 text-xs text-l2"
                 title={`可合并的工作区：${mergeReadyWs.join("、")}\n从右侧「改动」页签或工作区页进入评审合并`}
               >
-                <span className="text-[10px] text-ok-text">●</span>
+                <span className="text-micro text-ok-text">●</span>
                 {mergeReadyWs.length > 1
                   ? `${mergeReadyWs.length} 个可合并`
                   : "可合并"}
@@ -3098,7 +3099,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   >
                     {isRightPane ? (
                       <>
-                        <span className="shrink-0 text-[11px] text-l4">
+                        <span className="shrink-0 text-micro text-l4">
                           对照
                         </span>
                         <select
@@ -3118,7 +3119,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       </>
                     ) : (
                       <>
-                        <span className="shrink-0 text-[11px] text-l4">
+                        <span className="shrink-0 text-micro text-l4">
                           当前
                         </span>
                         <span className="min-w-0 flex-1 truncate text-xs text-l2">
@@ -3221,11 +3222,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                         : "text-l3 hover:text-l1"
                     }`}
                   >
-                    <span className="text-[11px] text-l4">{symbol}</span>
+                    <span className="text-micro text-l4">{symbol}</span>
                     {label}
                     {k === "dialogue" && dialogueCount > 0 && (
                       <span
-                        className="ml-1 rounded-sm bg-inset px-1 text-[11px] text-l3"
+                        className="ml-1 rounded-sm bg-inset px-1 text-micro text-l3"
                         title="实时视图最多保留最近 50 条"
                       >
                         {dialogueCount >= 50 ? "50+" : dialogueCount}
@@ -3260,7 +3261,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       }`}
                     />
                     <span
-                      className="min-w-0 truncate text-[11px] text-l4"
+                      className="min-w-0 truncate text-micro text-l4"
                       title={
                         activeSession?.sessionId
                           ? `会话 ${activeSession.sessionId}`

@@ -159,7 +159,7 @@ function Row({
     <div className="grid grid-cols-[minmax(180px,1fr)_auto] items-center gap-x-5 border-b border-hairline py-3 last:border-b-0">
       <div className="min-w-0">
         <div className="text-sm text-l2">{label}</div>
-        {hint && <p className="mt-0.5 max-w-lg text-[11px] leading-4 text-l4">{hint}</p>}
+        {hint && <p className="mt-0.5 max-w-lg text-micro leading-4 text-l4">{hint}</p>}
       </div>
       <div className="flex min-w-0 items-center justify-end gap-2">{children}</div>
       {extra && <div className="col-span-2 mt-2">{extra}</div>}

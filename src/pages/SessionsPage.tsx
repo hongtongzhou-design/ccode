@@ -856,7 +856,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               <div className="flex min-w-0 items-baseline gap-2">
                 <h1 className="shrink-0 text-base font-semibold text-l1">对话</h1>
                 {/* 计数副题：与既有口径一致，搜索时透出命中数 */}
-                <span className="truncate text-[10px] text-l4">
+                <span className="truncate text-micro text-l4">
                   当前 {sessionList.length}
                   {q ? ` · 搜索命中 ${searched.length}` : ""} · 总计{" "}
                   {sessions.length}
@@ -911,7 +911,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               aria-expanded={treeOpen}
               className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-xs text-l3 hover:bg-hover hover:text-l1"
             >
-              <span className="w-3 shrink-0 text-[10px] text-l4">
+              <span className="w-3 shrink-0 text-micro text-l4">
                 {treeOpen ? "▾" : "▸"}
               </span>
               分类筛选
@@ -991,7 +991,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                           : "text-l3 hover:bg-hover"
                       }`}
                     >
-                      <span className="w-3 shrink-0 text-[10px] text-l4">
+                      <span className="w-3 shrink-0 text-micro text-l4">
                         {open ? "▾" : "▸"}
                       </span>
                       <span className="min-w-0 flex-1 truncate">
@@ -1086,7 +1086,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 );
               })}
               {tree.length === 0 && (
-                <p className="p-3 text-xs text-l4">暂无对话</p>
+                <EmptyState
+                  title="还没有对话"
+                  detail="跑过 agent 会话后，这里按项目列出来。"
+                />
               )}
             </div>
           )}
@@ -1106,7 +1109,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       <div className="flex items-center justify-between gap-2 border-b border-hairline bg-strip px-4 pb-1 pt-2 text-xs text-l3">
                         <span>{header === "未归置" ? header : `▤ ${header}`}</span>
                         {header === "未归置" && projectHasCards && (
-                          <span className="text-[10px] text-l4">
+                          <span className="text-micro text-l4">
                             ⋯ 可移到卡片归类
                           </span>
                         )}
@@ -1162,7 +1165,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     <div className="flex items-center justify-between gap-2 border-b border-hairline bg-strip px-3 pb-1 pt-2 text-xs text-l3">
                       <span>{header === "未归置" ? header : `▤ ${header}`}</span>
                       {header === "未归置" && projectHasCards && (
-                        <span className="text-[10px] text-l4">
+                        <span className="text-micro text-l4">
                           ⋯ 可移到卡片归类
                         </span>
                       )}
@@ -1231,7 +1234,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         ⚑
                       </span>
                     )}
-                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-7 text-l1">
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium leading-7 text-l1">
                       {sessionTitle(s)}
                     </span>
                     {s.chainCount > 1 && (
@@ -1287,14 +1290,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     )}
                     {/* 右侧相对时间：主显相对、悬浮绝对（白话双层） */}
                     <span
-                      className="shrink-0 font-mono text-[10px] text-l4"
+                      className="shrink-0 font-mono text-micro text-l4"
                       title={absTime(s.updatedAt)}
                     >
                       {relTime(s.updatedAt)}
                     </span>
                   </div>
                   {/* meta 行：agent · token mono 小字 + 步骤/接力/标签 chip，AI 摘要截断尾随 */}
-                  <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] leading-[15px] text-l4">
+                  <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-micro text-l4">
                     <span className="shrink-0">{agentLabel(s.agent)}</span>
                     {s.workspace && (
                       <span
@@ -1362,23 +1365,34 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               );
             })}
             {sessionList.length === 0 && (
-              <p className="p-4 text-sm text-l4">
-                {showArchived ? "暂无对话" : "暂无对话（已归档的被隐藏）"}
-                {(q || filter.kind !== "all") && (
-                  <>
-                    —— 当前筛选/搜索无结果
+              <EmptyState
+                title={
+                  q || filter.kind !== "all"
+                    ? "筛选没有命中对话"
+                    : showArchived
+                      ? "还没有对话"
+                      : "还没有对话（已归档的被隐藏）"
+                }
+                detail={
+                  q || filter.kind !== "all"
+                    ? "换个关键词，或清除筛选看全部。"
+                    : "去终端页跑几个 agent 会话，回来就能在这里翻记录。"
+                }
+                action={
+                  q || filter.kind !== "all" ? (
                     <button
+                      type="button"
                       onClick={() => {
                         setQuery("");
                         setFilter({ kind: "all" });
                       }}
-                      className="ml-2 rounded-sm px-1.5 py-0.5 text-l3 hover:bg-hover hover:text-l1"
+                      className={rowActionClass}
                     >
                       清除筛选
                     </button>
-                  </>
-                )}
-              </p>
+                  ) : undefined
+                }
+              />
             )}
         </div>
       </div>
@@ -1534,7 +1548,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     {loadingConv ? (
                       <LoadingRows compact />
                     ) : messages.length === 0 ? (
-                      <p className="text-sm text-l4">没有可回放的对话内容</p>
+                      <EmptyState
+                        title="这条会话没有可回放的内容"
+                        detail="本地会话文件里没有解析出消息记录。"
+                      />
                     ) : (
                       <>
                         {conversationCursor !== null && (
@@ -1560,11 +1577,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     <span className="min-w-0 flex-1 truncate text-xs text-l4">
                       历史回放只读 · 点右上角「恢复」在终端继续该对话
                     </span>
-                    <span className="shrink-0 rounded-full bg-raised px-2.5 py-0.5 text-[10px] text-l3">
+                    <span className="shrink-0 rounded-full bg-raised px-2.5 py-0.5 text-micro text-l3">
                       {agentLabel(selected.agent)}
                     </span>
                   </div>
-                  <p className="mt-1.5 text-center text-[10px] text-l4">
+                  <p className="mt-1.5 text-center text-micro text-l4">
                     内容由 AI 生成，请核对后使用
                   </p>
                 </div>

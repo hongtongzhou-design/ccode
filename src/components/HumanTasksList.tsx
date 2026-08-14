@@ -298,9 +298,9 @@ export default function HumanTasksList({
   return (
     <div>
       <div className="mb-1 flex items-center gap-2">
-        <span className="text-[10px] text-l4">人工事项</span>
+        <span className="text-micro text-l4">人工事项</span>
         {states && states.some((s) => !s.done) && (
-          <span className="text-[10px] text-warn-text">
+          <span className="text-micro text-warn-text">
             {states.filter((s) => !s.done).length} 件待做
           </span>
         )}
@@ -323,7 +323,7 @@ export default function HumanTasksList({
             .filter((g) => g.items.length > 0)
             .map((g) => (
               <div key={g.timing}>
-                <div className="mb-0.5 text-[10px] text-l4">
+                <div className="mb-0.5 text-micro text-l4">
                   {g.timing === "before"
                     ? "开始前（建议先做，不做也能开工）"
                     : g.timing === "after"
@@ -364,7 +364,7 @@ export default function HumanTasksList({
                   {task.title}
                 </span>
                 {task.done && (
-                  <span className="shrink-0 text-[10px] text-ok-text">
+                  <span className="shrink-0 text-micro text-ok-text">
                     {task.manual ? "✓ 已确认" : "✓ 已见到文件"}
                   </span>
                 )}
@@ -374,7 +374,7 @@ export default function HumanTasksList({
                     disabled={busyTitle !== null}
                     onClick={() => void pickFile(task.title)}
                     title={`选文件提交到落点 ${task.target}（复制 + 登记提货单）；也可直接把文件拖到这一行`}
-                    className="shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                    className="shrink-0 rounded-sm px-1.5 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
                   >
                     {busyTitle === task.title ? "提交中…" : "提交产物"}
                   </button>
@@ -382,10 +382,10 @@ export default function HumanTasksList({
               </div>
               {(task.guidance || task.target) && (
                 <details className="mt-0.5 pl-6">
-                  <summary className="cursor-pointer select-none text-[10px] text-l4 hover:text-l2">
+                  <summary className="cursor-pointer select-none text-micro text-l4 hover:text-l2">
                     怎么做 / 落点
                   </summary>
-                  <div className="mt-0.5 space-y-0.5 text-[11px] leading-4 text-l3">
+                  <div className="mt-0.5 space-y-0.5 text-micro leading-4 text-l3">
                     {task.guidance && (
                       <p className="whitespace-pre-wrap">{task.guidance}</p>
                     )}
@@ -404,9 +404,9 @@ export default function HumanTasksList({
             ))}
         </div>
       )}
-      {note && <p className="mt-1 text-[11px] text-ok-text">{note}</p>}
+      {note && <p className="mt-1 text-micro text-ok-text">{note}</p>}
       {registerOffer && (
-        <p className="mt-1 flex items-center gap-1.5 text-[11px] text-l3">
+        <p className="mt-1 flex items-center gap-1.5 text-micro text-l3">
           要登记为项目资源吗（{registerOffer.destRel}）
           <button
             type="button"
@@ -425,7 +425,7 @@ export default function HumanTasksList({
           </button>
         </p>
       )}
-      {error && <p className="mt-1 text-[11px] text-err-text">{error}</p>}
+      {error && <p className="mt-1 text-micro text-err-text">{error}</p>}
     </div>
   );
 }

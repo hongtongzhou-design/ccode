@@ -74,13 +74,13 @@ function CreateScheduleModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-[24rem] rounded-md border border-field ccode-float-surface p-5"
+        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">定时巡检</h2>
         <p className="mb-3 text-xs text-l3">

@@ -61,7 +61,7 @@ function SourceCell({ skill }: { skill: SkillDto }) {
     ? skill.repo + (skill.repoSubdir ? `/${skill.repoSubdir}` : "")
     : (SOURCE_LABEL[skill.source] ?? skill.source);
   if (!url)
-    return <span className="truncate text-[13px] text-l4">{label}</span>;
+    return <span className="truncate text-sm text-l4">{label}</span>;
   return (
     <button
       type="button"
@@ -70,7 +70,7 @@ function SourceCell({ skill }: { skill: SkillDto }) {
         void openUrl(url);
       }}
       title={`在浏览器打开 ${url}`}
-      className="truncate text-left font-mono text-[13px] text-l4 underline decoration-white/20 underline-offset-2 hover:text-l2"
+      className="truncate text-left font-mono text-sm text-l4 underline decoration-white/20 underline-offset-2 hover:text-l2"
     >
       {label}
     </button>
@@ -230,7 +230,7 @@ function ImportModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <div
@@ -251,7 +251,7 @@ function ImportModal({
             <button
               onClick={pickDir}
               disabled={busy}
-              className="rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:brightness-125 disabled:opacity-50"
             >
               选择目录…
             </button>
@@ -263,7 +263,7 @@ function ImportModal({
             <button
               onClick={pickZip}
               disabled={busy}
-              className="rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:brightness-125 disabled:opacity-50"
             >
               选择 ZIP…
             </button>
@@ -402,7 +402,7 @@ function ImportModal({
                         (item) => !renameTargets[item.name]?.trim(),
                       )
                     }
-                    className="rounded-sm bg-btn px-2 py-1 text-l1 hover:bg-white/10 disabled:opacity-50"
+                    className="rounded-sm bg-btn px-2 py-1 text-l1 hover:brightness-125 disabled:opacity-50"
                   >
                     全部另存为
                   </button>
@@ -469,12 +469,12 @@ function DiscoverModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[28rem] rounded-md border border-field ccode-float-surface p-5"
+        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-3 text-base font-semibold text-l1">发现未纳管技能</h2>
         {items.length === 0 ? (
@@ -600,7 +600,7 @@ function SkillEditorModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <div
@@ -699,12 +699,12 @@ function OptimizeModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[30rem] rounded-md border border-field ccode-float-surface p-5"
+        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-1 text-base font-semibold text-l1">
           ◈ 优化技能：{skill.name}
@@ -777,6 +777,12 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
   const [updates, setUpdates] = useState<Record<string, SkillUpdateDto>>({});
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  // 内置技能新版提示：加载时 best-effort 检测；更新失败行内报错（按技能名记录）
+  const [builtinUpdates, setBuiltinUpdates] = useState<string[]>([]);
+  const [builtinApplying, setBuiltinApplying] = useState<string | null>(null);
+  const [builtinErrors, setBuiltinErrors] = useState<Record<string, string>>(
+    {},
+  );
   // ◈ 技能翻译（英文技能友好）：ai_prompt 一次性调用，译文随会话缓存（skill.id → 译文），
   // 只读展示不写库文件；切换技能各自缓存
   const [translations, setTranslations] = useState<Record<string, string>>({});
@@ -844,6 +850,32 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (visible) void refresh();
   }, [visible]);
+
+  // 内置技能新版检测：best-effort，失败静默
+  useEffect(() => {
+    if (!visible) return;
+    invoke<string[]>("check_builtin_skill_updates")
+      .then(setBuiltinUpdates)
+      .catch(() => {});
+  }, [visible]);
+
+  /** 一键更新内置技能为官方最新版（覆盖前自动备份）；成功移出提示条并刷新列表 */
+  async function onApplyBuiltinUpdate(name: string) {
+    if (builtinApplying) return;
+    setBuiltinApplying(name);
+    setBuiltinErrors((prev) => ({ ...prev, [name]: "" }));
+    try {
+      await invoke("apply_builtin_skill_update", { name });
+      setBuiltinUpdates((prev) => prev.filter((n) => n !== name));
+      setNotice(`内置技能「${name}」已更新到最新版（原文件已备份）`);
+      setError(null);
+      await refresh();
+    } catch (e) {
+      setBuiltinErrors((prev) => ({ ...prev, [name]: String(e) }));
+    } finally {
+      setBuiltinApplying(null);
+    }
+  }
 
   // 选段「✦ 沉淀为技能」交来的 AI 草稿：打开新建 modal 预填（同 focusTabReq 一次性消费模式）
   const skillDraftReq = useAppStore((s) => s.skillDraftReq);
@@ -1148,6 +1180,36 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               </>
             }
           />
+          {builtinUpdates.length > 0 && (
+            <div className="mb-3 rounded-md bg-inset px-3 py-2 text-xs text-l3">
+              <p>
+                内置技能有新版：{builtinUpdates.join("、")}（共{" "}
+                {builtinUpdates.length}{" "}
+                个）——更新会用官方最新版覆盖库内副本，原文件自动备份为
+                SKILL.md.bak
+              </p>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                {builtinUpdates.map((name) => (
+                  <span key={name} className="inline-flex items-center gap-1.5">
+                    <span className="text-l2">{name}</span>
+                    <button
+                      type="button"
+                      disabled={builtinApplying !== null}
+                      onClick={() => void onApplyBuiltinUpdate(name)}
+                      className="rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110 disabled:opacity-50"
+                    >
+                      {builtinApplying === name ? "更新中…" : "更新"}
+                    </button>
+                    {builtinErrors[name] ? (
+                      <span className="text-err-text">
+                        {builtinErrors[name]}
+                      </span>
+                    ) : null}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
           {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
           {loading ? (
@@ -1316,7 +1378,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     event.stopPropagation();
                                     void onView(skill);
                                   }}
-                                  className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-[13px] text-l3 hover:bg-seg-sel hover:text-l1"
+                                  className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-sm text-l3 hover:bg-seg-sel hover:text-l1"
                                   title="在右侧管理该技能应用到哪些 Agent"
                                 >
                                   {/* 无状态不渲染状态点：未应用时不画灰点，计数文字已表达 */}
@@ -1362,7 +1424,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
       {preview && (
         <div className="flex w-[clamp(360px,34vw,460px)] shrink-0 flex-col border-l border-hairline bg-canvas">
           <div className="flex h-11 shrink-0 items-center gap-2 border-b border-hairline bg-strip px-3">
-            <span className="truncate text-[15px] font-medium text-l1">
+            <span className="truncate text-sm font-semibold text-l1">
               {preview.skill.name}
             </span>
             <button
@@ -1377,12 +1439,12 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           {/* 描述/来源/应用网格与 SKILL.md 同在一个滚动区（v3.47：顶部固定区曾挡掉内容上半部分）；
               描述全文展示，不再截断；空或纯符号的异常值显示占位 */}
           <div className="min-h-0 flex-1 overflow-auto">
-          <div className="border-b border-hairline px-3 py-2.5 text-[13px] leading-5 text-l3">
+          <div className="border-b border-hairline px-3 py-2.5 text-sm leading-5 text-l3">
             {displayDescription(preview.skill.description) ?? (
               <span className="text-l4">—</span>
             )}
           </div>
-          <div className="border-b border-hairline px-3 py-2.5 text-[13px] text-l3">
+          <div className="border-b border-hairline px-3 py-2.5 text-sm text-l3">
             <span>
               {SOURCE_LABEL[preview.skill.source] ?? preview.skill.source}
             </span>
@@ -1438,7 +1500,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           </div>
           <div className="border-b border-hairline bg-strip px-3 py-3">
             <div className="mb-2 flex items-center gap-2">
-              <span className="text-[13px] font-medium text-l2">
+              <span className="text-sm font-medium text-l2">
                 应用到 Agent
               </span>
               {(() => {
@@ -1485,7 +1547,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         ? `${mode === "copy" ? "copy（有漂移检测）" : "symlink"}；点击取消应用`
                         : `应用到 ${agent.label}`
                     }
-                    className={`flex h-9 items-center gap-2 rounded-md border px-2 text-[13px] transition-colors disabled:opacity-50 ${
+                    className={`flex h-9 items-center gap-2 rounded-md border px-2 text-sm transition-colors disabled:opacity-50 ${
                       enabled
                         ? "border-cta-bd bg-inset text-l1"
                         : "border-hairline bg-canvas text-l3 hover:bg-inset hover:text-l1"
@@ -1524,7 +1586,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                     : "◈ 翻译为中文"}
               </button>
             </div>
-            <pre className="whitespace-pre-wrap break-all font-mono text-[13px] leading-6 text-l2">
+            <pre className="whitespace-pre-wrap break-all font-mono text-sm leading-6 text-l2">
               {translation && !showOriginal
                 ? translation
                 : preview.content}

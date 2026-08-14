@@ -397,7 +397,7 @@ export default function KickoffConfirmDialog({
   const canFuseTaskMd = checked.size >= 1 && !savedFuse;
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4 ccode-fade"
       onClick={() => {
         if (!busy) onCancel();
       }}
@@ -442,7 +442,7 @@ export default function KickoffConfirmDialog({
               AI 初稿，改完定稿后才会落盘（钉入任务卡）
             </p>
             <textarea
-              className="h-36 w-full resize-none rounded-md border border-field bg-inset px-2 py-1.5 text-[13px] leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
+              className="h-36 w-full resize-none rounded-md border border-field bg-inset px-2 py-1.5 text-sm leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
             />
@@ -495,7 +495,7 @@ export default function KickoffConfirmDialog({
               )}
             </div>
             {sources.length === 0 ? (
-              <p className="text-[11px] text-l4">
+              <p className="text-micro text-l4">
                 还没有定稿简报——对话页 ◈ 提炼接力定稿后会自动钉到卡片，再回来勾选。
               </p>
             ) : (
@@ -510,13 +510,13 @@ export default function KickoffConfirmDialog({
                           <span className="min-w-0 truncate text-l2">
                             {s.card.name}
                             {s.card.step === null && (
-                              <span className="ml-1 text-[10px] text-l4">
+                              <span className="ml-1 text-micro text-l4">
                                 （未挂步骤）
                               </span>
                             )}
                           </span>
                           {s.time && (
-                            <span className="shrink-0 text-[10px] text-l4">
+                            <span className="shrink-0 text-micro text-l4">
                               最新简报 {relTime(s.time)}
                             </span>
                           )}
@@ -585,11 +585,11 @@ export default function KickoffConfirmDialog({
                 type="button"
                 disabled={resChecked.size === 0 || resSaving}
                 onClick={() => void registerResources()}
-                className="rounded-sm border border-field px-1.5 py-0.5 text-[11px] text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                className="rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
               >
                 {resSaving ? "登记中…" : `登记选中（${resChecked.size}）`}
               </button>
-              <span className="text-[10px] text-l4">
+              <span className="text-micro text-l4">
                 不登记也能开工，登记后 TASK.md 才会列出它们
               </span>
             </div>
@@ -638,7 +638,7 @@ export default function KickoffConfirmDialog({
             确认开工落盘 = 编辑区最终内容 */}
         <div className="mb-1 flex shrink-0 items-center gap-2">
           <span className="text-xs text-l3">TASK.md（可编辑）</span>
-          <span className="text-[10px] text-l4">
+          <span className="text-micro text-l4">
             {draftText?.trim()
               ? `内容来自任务书草稿 ${draftRel ?? ""}（改这里只影响本次落盘，不回写草稿）`
               : "默认由模板与勾选简报拼装，确认后按编辑区内容落盘"}
@@ -690,7 +690,7 @@ export default function KickoffConfirmDialog({
             </div>
           ) : (
             <textarea
-              className="h-full max-h-[38vh] min-h-40 w-full resize-none overflow-auto bg-canvas p-3 font-mono text-[11px] leading-5 text-l2 outline-none placeholder:text-l4"
+              className="h-full max-h-[38vh] min-h-40 w-full resize-none overflow-auto bg-canvas p-3 font-mono text-micro leading-5 text-l2 outline-none placeholder:text-l4"
               value={editor.text}
               onChange={(e) =>
                 dispatchEditor({ type: "edit", text: e.target.value })

@@ -205,7 +205,7 @@ function ProjectRail({
     if (entries.length === 0) {
       return (
         <p
-          className="py-0.5 text-[11px] text-l4"
+          className="py-0.5 text-micro text-l4"
           style={{ paddingLeft: 6 + (depth + 1) * 12 }}
         >
           空目录
@@ -265,7 +265,7 @@ function ProjectRail({
           >
             {sec.name}
           </span>
-          <span className="shrink-0 text-[10px] text-l4">主</span>
+          <span className="shrink-0 text-micro text-l4">主</span>
         </div>
         {renderDirRows(sec.repo, 0)}
       </div>
@@ -327,7 +327,7 @@ function ProjectRail({
     <div className="shrink-0">
       <button
         onClick={() => setCollapsed((v) => !v)}
-        className="flex w-full items-center gap-1 px-2 py-2 text-left text-[10px] text-l4 hover:text-l2"
+        className="flex w-full items-center gap-1 px-2 py-2 text-left text-micro text-l4 hover:text-l2"
       >
         <span>{collapsed ? "▸" : "▾"}</span>
         <span>项目</span>
@@ -339,7 +339,7 @@ function ProjectRail({
               {/* 多小节时组头标仓库名；当前项目标注「当前」（单小节保持原样，不加噪音） */}
               {sections.length > 1 && (
                 <p
-                  className={`truncate px-2 pb-0.5 pt-1.5 text-[10px] ${sec.current ? "text-l2" : "text-l4"}`}
+                  className={`truncate px-2 pb-0.5 pt-1.5 text-micro ${sec.current ? "text-l2" : "text-l4"}`}
                   title={sec.repo}
                 >
                   {sec.name}
@@ -349,13 +349,13 @@ function ProjectRail({
               {renderMainRow(sec)}
               {sec.ws.map((w) => renderWsRow(sec, w))}
               {sec.current && sec.ws.length === 0 && (
-                <p className="py-0.5 text-[11px] text-l4" style={{ paddingLeft: 18 }}>
+                <p className="py-0.5 text-micro text-l4" style={{ paddingLeft: 18 }}>
                   暂无活跃工作区
                 </p>
               )}
             </div>
           ))}
-          {hint && <p className="px-2 py-0.5 text-[11px] text-warn-text">{hint}</p>}
+          {hint && <p className="px-2 py-0.5 text-micro text-warn-text">{hint}</p>}
         </div>
       )}
     </div>

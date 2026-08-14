@@ -162,7 +162,7 @@ function ProfileModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <form
@@ -282,7 +282,7 @@ function ProfileModal({
               title={
                 form.baseUrl.trim() ? "验证端点与密钥连通性" : "先填写 Base URL"
               }
-              className="w-20 shrink-0 rounded-sm bg-btn px-2 py-1 text-xs text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="w-20 shrink-0 rounded-sm bg-btn px-2 py-1 text-xs text-l1 hover:brightness-125 disabled:opacity-50"
             >
               {testing ? "测试中…" : "测试"}
             </button>
@@ -342,7 +342,7 @@ function ProfileModal({
                   ? "从 Base URL 拉取可用模型"
                   : "先填写 Base URL"
               }
-              className="shrink-0 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="shrink-0 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:brightness-125 disabled:opacity-50"
             >
               {fetching ? "获取中…" : "获取模型"}
             </button>
@@ -419,7 +419,7 @@ function ProfileModal({
               type="button"
               onClick={addModel}
               disabled={!modelInput.trim()}
-              className="shrink-0 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:bg-white/10 disabled:opacity-50"
+              className="shrink-0 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:brightness-125 disabled:opacity-50"
             >
               添加
             </button>
@@ -637,7 +637,7 @@ function ValidationDialog({
   ];
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 ccode-fade"
       onClick={onClose}
     >
       <section
@@ -1550,10 +1550,10 @@ export default function ProfilesPage() {
                               >
                                 {profile.name}
                               </span>
-                              {/* 次级行：10px 灰字，相对时间主显、悬浮给绝对时间（白话双层）；从未使用不渲染 */}
+                              {/* 次级行：micro 档灰字，相对时间主显、悬浮给绝对时间（白话双层）；从未使用不渲染 */}
                               {profile.lastUsedAt && (
                                 <span
-                                  className="mt-0.5 block truncate font-mono text-[10px] text-l4"
+                                  className="mt-0.5 block truncate font-mono text-micro text-l4"
                                   title={`上次使用 ${absTime(profile.lastUsedAt)}`}
                                 >
                                   上次使用 {relTime(profile.lastUsedAt)}

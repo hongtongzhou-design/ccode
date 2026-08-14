@@ -35,6 +35,18 @@
   `PageFrame.tsx`**（primary/secondary/rowAction/ghostAction/field/searchField/hoverReveal + SegTabs），禁各页复制本地类，
   一律用通用语义令牌。编辑器面走 `--color-editor-bg/fg/line`，Monaco 经 MutationObserver 随主题换肤。
 - **符号语言统一**：导航与图标用单色几何符号（⚙⛁⌨◔✦◫⛭⇄），◈=AI 功能、⚑=pin/保留；**禁用彩色 emoji**。
+- **字号阶梯令牌化**：正文阶梯 `text-micro`(11/15) → `text-xs`(12) → `text-sm`(14) → `text-base`(16)，**禁 `text-[Npx]` 任意值**；
+  语义分工：micro = badge/时间戳/副注释（11px 是可读下限，不再用 10px），xs = 次级说明，sm = 正文/列表行，base = 页面标题。
+  终端工作台整体提高一档（`.terminal-workbench` 覆写 micro→12、xs→13）。同类信息必须用同一档，禁止同页相邻出现两档灰字。
+- **动效口径**：弹层入场 `ccode-pop`（150ms opacity+scale .98→1，已绑在 `.ccode-float-surface` 上，弹层零额外接入）；
+  遮罩入场 `ccode-fade`（120ms 透明度）；统一 `--ccode-motion-ease`，UI 反馈都在 200ms 内；`prefers-reduced-motion` 全局关闭。
+  focus 环 `outline: 1px solid var(--color-l3)`（field 色太弱，l3 提亮不换色相）。
+- **弹层规格台账**：宽度两档——简单对话/短表单 `w-[26rem]`、富表单 `w-[36rem]`（命令面板 `w-[30rem]` 为独立规格）；
+  遮罩统一 `bg-black/40` + `ccode-fade`；z 轴台账：页面模态 z-10 / 悬浮层 z-20 / 页面内弹层 z-40 / 右键菜单·命令面板·下拉 z-50 /
+  评审内弹层 z-60 / 确认框 z-[70]（ConfirmDialog 压一切）。新弹层按档入座，禁造新档。
+- **按钮分工**：页头/工具栏次按钮 = `secondaryActionClass`（描边 bg-strip）；表单内实心确认 = `bg-btn` + `hover:brightness-125`
+  （实心按钮 hover 用提亮，禁 `hover:bg-white/10`——浅色下不可见）；分段控件选中态 = `bg-seg-sel`（SegTabs 口径），
+  不用 CTA 填充（每视图只允许一个主 CTA）。
 - 用户明确否决过的设计：多栏嵌套的对话页、浅色 + 蓝紫渐变侧边栏、按钮排排坐的 profile 行、暖棕色系整体主题、
   emoji 图标。不要改回去。（浅色模式曾是否决项，v3.44 用户主动要求并已落地七套浅色，该否决作废。）
 

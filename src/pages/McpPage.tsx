@@ -5,6 +5,7 @@ import type { McpEnvPair, McpServerDto } from "../types";
 import { confirmDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
 import {
+  EmptyState,
   PageFrame,
   PageHeader,
   primaryActionClass,
@@ -434,9 +435,10 @@ export default function McpPage({ visible }: { visible: boolean }) {
       {loading ? (
         <p className="py-8 text-center text-sm text-l4">加载中…</p>
       ) : servers.length === 0 ? (
-        <p className="py-8 text-center text-sm text-l4">
-          还没有 MCP server，点右上「+ 添加 server」创建
-        </p>
+        <EmptyState
+          title="还没有 MCP server"
+          detail="点右上「+ 添加 server」创建。"
+        />
       ) : (
         <div className="divide-y divide-hairline">
           {servers.map((s) => {
@@ -452,7 +454,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                   >
                     <span className="w-3 text-l4">{open ? "▾" : "▸"}</span>
                     <span className="truncate text-sm text-l1">{s.name}</span>
-                    <span className="rounded-sm bg-inset px-1.5 py-0.5 text-[10px] text-l4">
+                    <span className="rounded-sm bg-inset px-1.5 py-0.5 text-micro text-l4">
                       {s.kind}
                     </span>
                     <span className="min-w-0 truncate font-mono text-xs text-l4">
@@ -510,7 +512,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
 
       {modal && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
           onClick={() => setModal(null)}
         >
           <div
@@ -545,7 +547,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                       type="button"
                       className={`h-7 rounded-sm px-3 text-xs ${
                         modal.form.kind === k
-                          ? "bg-cta text-cta-text"
+                          ? "bg-seg-sel text-l1"
                           : "text-l3 hover:text-l1"
                       }`}
                       onClick={() =>
@@ -682,7 +684,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
       {/* 收编现有配置：八家用户级配置里不在清单的 server */}
       {discoverOpen && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
           onClick={() => setDiscoverOpen(false)}
         >
           <div
@@ -706,12 +708,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     key={`${d.agent}:${d.name}`}
                     className="flex items-center gap-2 rounded-sm bg-inset px-2 py-1.5"
                   >
-                    <span className="shrink-0 rounded-sm bg-strip px-1.5 py-0.5 text-[10px] text-l4">
+                    <span className="shrink-0 rounded-sm bg-strip px-1.5 py-0.5 text-micro text-l4">
                       {AGENTS.find((a) => a.id === d.agent)?.label ?? d.agent}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-xs text-l1">
                       {d.name}
-                      <span className="ml-2 font-mono text-[11px] text-l4">
+                      <span className="ml-2 font-mono text-micro text-l4">
                         {d.summary}
                       </span>
                     </span>
@@ -740,7 +742,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
       {/* 粘贴导入：README/市场页的标准 mcpServers JSON 片段 */}
       {pasteOpen && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
           onClick={() => setPasteOpen(false)}
         >
           <div
@@ -770,7 +772,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                 </p>
                 <ul className="max-h-36 space-y-0.5 overflow-auto">
                   {pastePreview.servers.map((s) => (
-                    <li key={s.id} className="font-mono text-[11px] text-l2">
+                    <li key={s.id} className="font-mono text-micro text-l2">
                       {s.name}
                       <span className="ml-2 text-l4">
                         {s.kind === "stdio"
@@ -781,12 +783,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
                   ))}
                 </ul>
                 {pastePreview.skipped.length > 0 && (
-                  <p className="mt-1 text-[11px] text-l4">
+                  <p className="mt-1 text-micro text-l4">
                     同名跳过：{pastePreview.skipped.join("、")}
                   </p>
                 )}
                 {pastePreview.suspects.length > 0 && (
-                  <p className="mt-1 text-[11px] text-warn-text">
+                  <p className="mt-1 text-micro text-warn-text">
                     疑似明文密钥：{pastePreview.suspects.join("、")}
                     （建议改用 $VAR 引用）
                   </p>
