@@ -960,7 +960,7 @@ export default function WorkspaceReviewView({
   } | null>(null);
   const [nextBusy, setNextBusy] = useState(false);
   const [nextError, setNextError] = useState<string | null>(null);
-  // 「沉淀到下一步」：评审结论写成定稿简报，钉到下一步步骤的任务卡（无卡则以步骤名新建）
+  // 「沉淀到下一步」：评审结论写进下一步步骤的任务书草稿（不存在则新建）
   const [distillOpen, setDistillOpen] = useState(false);
   const [distillText, setDistillText] = useState("");
   const [distillBusy, setDistillBusy] = useState(false);
@@ -2322,7 +2322,7 @@ export default function WorkspaceReviewView({
             <button
               type="button"
               onClick={() => setDistillOpen((v) => !v)}
-              title={`把本次评审结论写成定稿简报，钉到「${nextStep.step.name}」的任务卡`}
+              title={`把本次评审结论写进「${nextStep.step.name}」的任务书草稿`}
               className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
             >
               沉淀到下一步
@@ -2335,7 +2335,7 @@ export default function WorkspaceReviewView({
           onSubmit={(e) => void submitDistill(e)}
           className="shrink-0 border-b border-hairline bg-inset px-3 py-2"
         >
-          {/* 与 DigestPicker 定稿页同一措辞：AI 初稿，改完定稿后才落盘 */}
+          {/* AI 初稿供人改，提交才写进任务书草稿（与 DigestPicker「写回简报文件」同一口径） */}
           <div className="mb-1.5 flex items-center gap-2">
             <button
               type="button"
@@ -2347,8 +2347,8 @@ export default function WorkspaceReviewView({
               {distillDrafting ? "◈ 起草中…" : "◈ AI 起草"}
             </button>
             <span className="min-w-0 flex-1 truncate text-micro text-l4">
-              AI 初稿，改完定稿后才会落盘（钉到「{nextStep.step.name}
-              」的任务卡）
+              AI 初稿，改完沉淀后写进「{nextStep.step.name}
+              」的任务书草稿
             </span>
           </div>
           {distillDraftError && (
@@ -2366,7 +2366,7 @@ export default function WorkspaceReviewView({
           <textarea
             className="w-full rounded-md border border-field bg-canvas px-2 py-1.5 text-sm leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
             rows={4}
-            placeholder={`写下评审结论：这步验收了什么、下一步该怎么想（定稿后钉到「${nextStep.step.name}」的任务卡）`}
+            placeholder={`写下评审结论：这步验收了什么、下一步该怎么想（沉淀后写进「${nextStep.step.name}」的任务书草稿）`}
             value={distillText}
             onChange={(e) => setDistillText(e.target.value)}
             autoFocus
@@ -2377,7 +2377,7 @@ export default function WorkspaceReviewView({
               disabled={distillBusy || !distillText.trim()}
               className="inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
             >
-              {distillBusy ? "沉淀中…" : "定稿并钉到下一步卡片"}
+              {distillBusy ? "沉淀中…" : "写进下一步任务书草稿"}
             </button>
             <button
               type="button"

@@ -1,6 +1,6 @@
 use crate::profiles;
 
-/// 任务卡（项目档案卡 project.toml 的 [[tasks]] 段）：对话的文件夹 + 定稿简报的收集夹。
+/// 任务卡（项目档案卡 project.toml 的 [[tasks]] 段）：对话/会话的归档夹。
 /// 卡片本身无状态机，不碰工作区/评审流程。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -14,8 +14,6 @@ pub struct TaskCardDto {
     /// 开工后绑定的工作区名（先留字段，前端后续填）
     pub workspace: Option<String>,
     pub created_at: String,
-    /// 定稿简报路径（相对项目根，统一正斜杠），时间序
-    pub briefs: Vec<String>,
 }
 
 impl Default for TaskCardDto {
@@ -26,7 +24,6 @@ impl Default for TaskCardDto {
             step: None,
             workspace: None,
             created_at: String::new(),
-            briefs: Vec::new(),
         }
     }
 }

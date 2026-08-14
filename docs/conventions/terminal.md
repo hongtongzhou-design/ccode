@@ -50,9 +50,10 @@
   **冲突升级文案**：`WsHealthDto.stale_base`（MERGE_HEAD ≠ 基准 tip，health_impl 内仅 merge 进行中多一次 rev-parse）命中时
   冲突条目改「基准已前进——需重新同步」，动作仍走 resolve-conflict（评审层自动以当前基准 tip 重备两侧）。
   **macOS：标题栏自绘（tauri.conf `titleBarStyle: Overlay` + `hiddenTitle`，capabilities 加 `core:window:allow-title` 与
-  `core:window:allow-start-dragging`——缺后者 `data-tauri-drag-region` 拖拽静默失效），收件箱 =
-  标题后的 Ghostty 式胶囊 + 下拉明细，页内 strip 不渲染；**chromeHidden 执行态下标题栏体仍必须保留**（Overlay 模式红绿灯始终悬浮
-  左上角，靠栏的 `pl-[78px]` 让位，整条隐藏会被按钮压内容且胶囊丢失），只省略窗口标题与底部分隔线**；Windows/Linux 保留原生标题栏 + 页内 strip（32px 一行，展开明细为悬浮下拉，
+  `core:window:allow-start-dragging`——缺后者 `data-tauri-drag-region` 拖拽静默失效），窗口标题不在界面渲染
+  （用户拍板：纯拖拽区即可，标题字符串保留在配置里供自动化定位窗口），收件箱 =
+  栏上的 Ghostty 式胶囊 + 下拉明细，页内 strip 不渲染；**chromeHidden 执行态下标题栏体仍必须保留**（Overlay 模式红绿灯始终悬浮
+  左上角，靠栏的 `pl-[78px]` 让位，整条隐藏会被按钮压内容且胶囊丢失），只省略底部分隔线**；Windows/Linux 保留原生标题栏 + 页内 strip（32px 一行，展开明细为悬浮下拉，
   遮罩/Esc 收起——整体悬浮 pill 遮挡内容被用户否决）。终端运行状态经 `terminalRunInputs` 镜像进 store 跨页
   只读（TerminalPage 唯一写入方，不新增轮询）；跳终端激活标签走一次性 `focusTabReq`（已关闭标签静默忽略）。
   **注意力信噪比总规则（v3.60，用户拍板全链路清理）**：「已回复」（done = 回合结束）**在全链路无任何视觉标记**——不进收件箱、标签/项目区

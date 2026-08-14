@@ -97,4 +97,5 @@
   走 `create_skill`/`update_skill_content`：重名拒绝并引导改用「编辑内容」；编辑经临时目录走既有覆盖路径（覆盖前备份、
   辅助文件保留、source/repo 不改写）；◈ 优化开终端让 Agent 直改库文件，备份兜底仍靠保存/覆盖路径。**内置技能更新**
   （`apply_builtin_skill_update`）= 覆盖前原文件自动备份为同目录 `SKILL.md.bak-<yyyymmdd>`（同日重名追加 -2/-3），种子内容原子写入。
+- **技能产物冲突检测（outputs 声明）**：内置技能 SKILL.md frontmatter 声明 `outputs` 字段（YAML 列表，行内 `[a, b]` 与多行 `- a` 两种写法解析都容忍，缺字段 = 空数组；目录带尾斜杠、文件写全路径，只声明会写的主要产物），`parse_skill_md` 解析进 `SkillDto.outputs`（list 时现算，不入库文件；`compose_skill_md` 不写该字段——用户自建技能不参与检测）。分发随目录走不受影响，CLI 端对未知 frontmatter 字段一律忽略。检测为纯逻辑（`src/skill-conflicts.ts` 的 `skillOutputConflicts`）：同一步骤挂载技能的 outputs 两两比对，路径相同或互为目录前缀（如 `papers/` 与 `papers/inbox.md`）即报一对冲突，StepSkillsChips 警告行提示分工——只提醒不拦截。
 - **技能分类批量回填**：`backfill_skill_categories` 只给「GitHub 来源 + 无分类」的技能补仓库名分类（自动分类 #15 之前的存量导入），已有分类一律不动、幂等；入口在技能页顶部 ⋯。

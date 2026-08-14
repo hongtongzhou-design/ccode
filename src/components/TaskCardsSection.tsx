@@ -6,16 +6,7 @@ import { hoverRevealClass, LoadingRows, Toggle } from "./PageFrame";
 import StepSkillsChips from "./StepSkillsChips";
 import StepFlow from "./StepFlow";
 import { useAppStore } from "../store";
-import { absTime, relTime } from "../rel-time";
-import {
-  briefSourcesForStep,
-  briefTimeFromPath,
-  bucketCardsByStep,
-  checkedBriefRefs,
-  defaultCheckedSources,
-  extractOpenQuestions,
-  latestBrief,
-} from "../task-cards";
+import { bucketCardsByStep, extractOpenQuestions } from "../task-cards";
 import { buildTaskMdPreview } from "../pipeline-start";
 import type {
   ProjectConfigDto,
@@ -30,33 +21,27 @@ const actionBtn =
 const fieldSm =
   "h-7 rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
-function baseName(path: string): string {
-  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
-  return parts[parts.length - 1] || path;
-}
-
-/** 待拍板问题：最新定稿简报「## 待拍板」小节的只读视图（extractOpenQuestions 纯逻辑）。
- *  挂载读一次简报全文（read_file_preview 根约束），无小节或无条目不渲染；
- *  点条目 = 带着这个问题去「聊想法」（沿用想法期只读保护口径） */
+/** 待拍板问题：卡片所属步骤的任务书草稿「## 待拍板」小节的只读视图（extractOpenQuestions 纯逻辑）。
+ *  挂载读一次草稿（read_task_draft），无小节或无条目不渲染；无步骤语境（未挂步骤卡）不挂载本块。
+ *  点条目 = 带着这个问题去聊（onSeed 草稿口径：结论直接写进草稿） */
 function OpenQuestions({
   projectPath,
-  briefRel,
+  stepName,
   onPick,
 }: {
   projectPath: string;
-  briefRel: string;
+  stepName: string;
   onPick: (question: string) => void;
 }) {
   const [questions, setQuestions] = useState<string[] | null>(null);
   useEffect(() => {
     let stale = false;
-    const abs = `${projectPath.replace(/[\\/]+$/, "")}/${briefRel}`;
-    invoke<{ text: string }>("read_file_preview", {
-      path: abs,
-      root: projectPath,
+    invoke<{ relPath: string; text: string | null }>("read_task_draft", {
+      projectRoot: projectPath,
+      stepName,
     })
-      .then((p) => {
-        if (!stale) setQuestions(extractOpenQuestions(p.text));
+      .then((d) => {
+        if (!stale) setQuestions(extractOpenQuestions(d.text ?? ""));
       })
       .catch(() => {
         if (!stale) setQuestions([]);
@@ -64,12 +49,12 @@ function OpenQuestions({
     return () => {
       stale = true;
     };
-  }, [projectPath, briefRel]);
+  }, [projectPath, stepName]);
   if (!questions || questions.length === 0) return null;
   return (
     <div>
       <div className="mb-1 text-micro text-l4">
-        待拍板（{questions.length}）——来自最新简报，点了去聊
+        待拍板（{questions.length}）——来自任务书草稿，点了去聊
       </div>
       <ul className="space-y-0.5">
         {questions.map((q) => (
@@ -77,7 +62,7 @@ function OpenQuestions({
             <button
               type="button"
               onClick={() => onPick(q)}
-              title="开终端讨论这个问题（想法期只读保护同样生效）"
+              title="开终端讨论这个问题（结论直接写进任务书草稿）"
               className="flex w-full items-center gap-1.5 rounded-sm px-1.5 py-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
             >
               <span className="shrink-0 text-micro text-warn-text">?</span>
@@ -104,9 +89,9 @@ function launchBarAgent(): string {
 }
 
 /**
- * 任务卡区（项目详情，流水线步进器下方）：卡片 = 对话的文件夹 + 定稿简报的收集夹。
- * 按步骤分桶（失效步骤的卡并入「未挂步骤」桶）；行主动作 = 开工（挂步骤的卡，走一键开步链路，
- * 最新定稿简报注入 TASK.md）/ 继续（有定稿简报，开终端预填「阅读简报并继续」首条指令）。
+ * 任务卡区（项目详情，流水线步进器下方）：卡片 = 对话的归档文件夹（任务书沉淀统一走草稿）。
+ * 按步骤分桶（失效步骤的卡并入「未挂步骤」桶）；行主动作 = 聊想法（未绑工作区）/ 开工
+ * （挂步骤的卡，走一键开步链路）/ 继续（已绑工作区，开终端预填「阅读 TASK.md 并继续任务」）。
  * 展开手风琴按卡片 id 记忆在本组件内——ProjectGroup 以项目 key 挂载，切项目自然清空。
  */
 export default function TaskCardsSection({
@@ -125,6 +110,7 @@ export default function TaskCardsSection({
   onClearFocus,
   onHumanChanged,
   onStartStep,
+  focusDraft,
 }: {
   projectPath: string;
   steps: ProjectStepDto[];
@@ -151,9 +137,10 @@ export default function TaskCardsSection({
   onClearFocus?: () => void;
   /** 人工事项勾选/交付后通知父级（流程线橙点与 ⋯ 菜单计数重取） */
   onHumanChanged?: () => void;
-  /** 卡片「开工」：打开开工确认弹层（originCardId = 出处卡，弹层内可选多卡简报/融合）；
-      返回 Promise 供行内 busy 态跟随 */
+  /** 卡片「开工」：打开开工确认弹层（originCardId = 出处卡）；返回 Promise 供行内 busy 态跟随 */
   onStartStep: (index: number, originCardId?: string) => Promise<void> | void;
+  /** 聚焦步骤的任务书草稿（v3.72；ProjectGroup 单一加载点下发）：discuss 节点状态与「聊任务书」指令用 */
+  focusDraft?: { relPath: string; text: string | null } | null;
 }) {
   const cards = useAppStore((s) => s.taskCards[projectPath]);
   const loadTaskCards = useAppStore((s) => s.loadTaskCards);
@@ -161,7 +148,6 @@ export default function TaskCardsSection({
   const renameCard = useAppStore((s) => s.renameCard);
   const deleteCard = useAppStore((s) => s.deleteCard);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
-  const setPreviewReq = useAppStore((s) => s.setPreviewReq);
   const setPage = useAppStore((s) => s.setPage);
   const updateSettings = useAppStore((s) => s.updateSettings);
   // 想法期只读保护开关（settings.json，默认开）
@@ -211,31 +197,6 @@ export default function TaskCardsSection({
   const focusStepDto = focusStep
     ? (steps.find((s) => s.name === focusStep) ?? null)
     : null;
-  // 聚焦步骤的任务书草稿（v3.72）：discuss 节点状态与「聊任务书」指令用
-  const [focusDraft, setFocusDraft] = useState<{
-    relPath: string;
-    text: string | null;
-  } | null>(null);
-  useEffect(() => {
-    if (!focusStep) {
-      setFocusDraft(null);
-      return;
-    }
-    let stale = false;
-    invoke<{ relPath: string; text: string | null }>("read_task_draft", {
-      projectRoot: projectPath,
-      stepName: focusStep,
-    })
-      .then((d) => {
-        if (!stale) setFocusDraft(d);
-      })
-      .catch(() => {
-        if (!stale) setFocusDraft(null);
-      });
-    return () => {
-      stale = true;
-    };
-  }, [projectPath, focusStep, refreshToken]);
 
   async function submitCreate(step: string | null, e: React.FormEvent) {
     e.preventDefault();
@@ -266,7 +227,7 @@ export default function TaskCardsSection({
   async function onDelete(card: TaskCardDto) {
     if (
       !(await confirmDialog(
-        `删除卡片「${card.name}」？卡片内的对话会移出卡片（对话本身不删除），钉住的简报文件保留在磁盘。继续？`,
+        `删除卡片「${card.name}」？卡片内的对话会移出卡片（对话本身不删除），任务书草稿不受影响。继续？`,
         { danger: true },
       ))
     )
@@ -290,7 +251,7 @@ export default function TaskCardsSection({
     }).catch(() => {});
   }
 
-  /** 聊想法：项目根开终端（不建工作区——想法期不动手）。
+  /** 聊想法（仅未挂步骤卡使用——挂步骤卡的讨论并入 onSeed 草稿口径）：项目根开终端（不建工作区——想法期不动手）。
    *  想法期只读保护（卡片区标题行开关，默认开；allowEdit = ⋯ 菜单的单次豁免）：
    *  开 = 预填指令带不动文件约束 + readonly 标记（后端对支持的 CLI 注入只读/计划模式参数——硬保护）；
    *  关/豁免 = 纯聊天，不动参数。
@@ -314,7 +275,7 @@ export default function TaskCardsSection({
     setPage("terminal");
   }
 
-  /** 开工：挂步骤的卡打开开工确认弹层（TASK.md 预览 + 简报来源勾选/融合），确认后才建工作区 */
+  /** 开工：挂步骤的卡打开开工确认弹层（TASK.md 预览编辑，草稿优先），确认后才建工作区 */
   function onStart(card: TaskCardDto) {
     const index = steps.findIndex((s) => s.name === card.step);
     if (index < 0 || busyId) return;
@@ -325,9 +286,11 @@ export default function TaskCardsSection({
       .finally(() => setBusyId(null));
   }
 
-  /** 讨论种子点击即聊（v3.72 任务书口径）：以种子问题为名建卡归档（已有同名卡则直接续聊），
-      非只读启动——讨论出的结论 agent 直接写进任务书草稿（指令约束只许动这一个文件） */
-  async function onSeed(stepName: string, seed: string) {
+  /** 讨论种子/挂步骤卡「聊想法」点击即聊（v3.72 任务书口径）：以种子问题为名建卡归档
+      （已有同名卡则直接续聊——挂步骤卡的「聊想法」也走这里，topic 可另带讨论问题），
+      非只读启动——讨论出的结论 agent 直接写进任务书草稿（指令约束只许动这一个文件）。
+      开聊同时带开草稿预览（previewPath/previewRoot 交接给终端页右栏） */
+  async function onSeed(stepName: string, seed: string, topic?: string) {
     setError(null);
     try {
       // 草稿路径单一出处在后端（不存在也返回 relPath）
@@ -344,7 +307,15 @@ export default function TaskCardsSection({
         title: card.name,
         initialPrompt:
           `我们在完善「${stepName}」这一步的任务书草稿（${d?.relPath ?? ".ccode/drafts/ 下对应步骤的文件"}）。` +
-          `先聊这个问题：${seed}。讨论出的结论直接整理进这个草稿文件——只允许新建/修改这一个文件，其他文件一律不要动。`,
+          `先聊这个问题：${topic ?? seed}。讨论出的结论直接整理进这个草稿文件——只允许新建/修改这一个文件，其他文件一律不要动。` +
+          `讨论中没定下来的问题，记到草稿的「## 待拍板」小节。`,
+        // 开聊时自动带开草稿预览（草稿不存在时预览随后刷新即可见）
+        ...(d?.relPath
+          ? {
+              previewPath: `${projectPath.replace(/[\\/]+$/, "")}/${d.relPath}`,
+              previewRoot: projectPath,
+            }
+          : {}),
       });
       setPage("terminal");
     } catch (reason) {
@@ -364,32 +335,26 @@ export default function TaskCardsSection({
     setPage("terminal");
   }
 
-  /** 继续：开终端新会话，预填「阅读最新简报并继续」；目录 = 绑定工作区工作树（若有）否则项目根。
+  /** 继续（已绑定工作区的卡）：开终端新会话，cwd = 工作树，预填「阅读 TASK.md 并继续任务」。
    *  kimi/opencode 无启动注入参数：启动栏保留指令文本由用户手动发送（pty_spawn promptDropped 既有处理） */
   function onContinue(card: TaskCardDto) {
-    const brief = latestBrief(card);
-    if (!brief) return;
-    claimForCard(card);
     const ws = card.workspace
       ? workspaces.find(
           (w) => w.name === card.workspace && w.status === "active",
         )
       : undefined;
-    const cwd = ws?.worktreePath ?? projectPath;
-    // 简报存在项目根 .ccode/ 下：cwd 是工作树时相对路径够不到，用绝对路径
-    const ref = ws
-      ? `${projectPath.replace(/[\\/]+$/, "")}/${brief}`
-      : brief;
+    if (!ws) return; // 绑定工作区不存在/已归档：renderCard 不渲染「继续」，此处兜底
+    claimForCard(card);
     setPendingTerminal({
-      cwd,
+      cwd: ws.worktreePath,
       extraEnv: {},
       title: card.name,
-      initialPrompt: `阅读 ${ref} 简报并继续任务`,
+      initialPrompt: "阅读 TASK.md 并继续任务",
     });
     setPage("terminal");
   }
 
-  /** 步骤级「预览 TASK.md」：默认来源（无出处卡口径）拼装当前 TASK.md，只读展示；
+  /** 步骤级「预览 TASK.md」：模板拼装当前 TASK.md，只读展示；
    *  无卡无工作区也可预览（模板 + 提货单）。与开工落盘同一 renderTaskMd 出处 */
   function onPreviewTaskMd(stepName: string) {
     const step = steps.find((s) => s.name === stepName);
@@ -401,13 +366,7 @@ export default function TaskCardsSection({
         .then(setSkillLib)
         .catch(() => {});
     }
-    const sources = briefSourcesForStep(
-      cards ?? [],
-      stepName,
-      steps.map((s) => s.name),
-    );
-    const refs = checkedBriefRefs(sources, defaultCheckedSources(sources, null));
-    buildTaskMdPreview(projectPath, step, cfg, refs)
+    buildTaskMdPreview(projectPath, step, cfg)
       .then((text) =>
         setTaskMdPreview((cur) => (cur?.stepName === stepName ? { stepName, text } : cur)),
       )
@@ -429,22 +388,16 @@ export default function TaskCardsSection({
     });
   }
 
-  function briefAbsPath(rel: string): string {
-    return `${projectPath.replace(/[\\/]+$/, "")}/${rel}`;
-  }
-
   function renderCard(card: TaskCardDto) {
     const canStart = card.step !== null && steps.some((s) => s.name === card.step);
-    // 新卡片（无简报）= 想法期：常驻主按钮是「聊想法」；已有简报则「开工/继续」上位，聊想法收进 ⋯
-    const fresh = card.briefs.length === 0;
+    // 已绑定工作区（活跃）= 已开工：主按钮「继续」；未绑定的挂步骤卡 = 想法期：「聊想法」+「开工」；
+    // 未挂步骤卡只有「聊想法」（onDiscuss 只读纯聊）
+    const boundWs = card.workspace
+      ? workspaces.find(
+          (w) => w.name === card.workspace && w.status === "active",
+        )
+      : undefined;
     const expanded = open.has(card.id);
-    // 行内 meta 小字：简报数 + 最新简报相对时间（不加新请求，会话数不显示）
-    const latestTime = latestBrief(card)
-      ? briefTimeFromPath(latestBrief(card)!)
-      : null;
-    const meta = fresh
-      ? null
-      : `简报 ${card.briefs.length}${latestTime ? ` · 最新 ${relTime(latestTime)}` : ""}`;
     return (
       <li key={card.id} className="group">
         <div className="flex h-7 min-w-0 items-center gap-2 rounded-sm px-1 hover:bg-hover">
@@ -453,7 +406,7 @@ export default function TaskCardsSection({
             onClick={() => toggleOpen(card.id)}
             aria-expanded={expanded}
             className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-            title={expanded ? "收起" : "展开（待拍板 / 简报）"}
+            title={expanded ? "收起" : "展开（待拍板）"}
           >
             <span className="w-3 shrink-0 text-micro text-l4">
               {expanded ? "▾" : "▸"}
@@ -461,64 +414,45 @@ export default function TaskCardsSection({
             <span className="min-w-0 truncate text-xs text-l1">
               {card.name}
             </span>
-            {meta && (
-              <span
-                className="shrink-0 text-micro text-l4"
-                title={latestTime ? absTime(latestTime) : undefined}
-              >
-                {meta}
-              </span>
-            )}
           </button>
-          {fresh ? (
-            <button
-              type="button"
-              onClick={() => onDiscuss(card)}
-              title="在项目根开终端聊聊这张卡（不建工作区），新会话自动归入本卡"
-              className={`${actionBtn} shrink-0`}
-            >
-              聊想法
-            </button>
-          ) : canStart ? (
-            <button
-              type="button"
-              disabled={busyId === card.id}
-              onClick={() => onStart(card)}
-              title="一键开步：建工作区并把最新定稿简报写进 TASK.md；会话自动归入本卡"
-              className={`${actionBtn} shrink-0`}
-            >
-              开始
-            </button>
-          ) : (
+          {boundWs ? (
             <button
               type="button"
               onClick={() => onContinue(card)}
-              title="开终端新会话，预填「阅读最新简报并继续任务」；会话自动归入本卡"
+              title="开终端新会话，预填「阅读 TASK.md 并继续任务」；会话自动归入本卡"
               className={`${actionBtn} shrink-0`}
             >
               继续
             </button>
+          ) : canStart ? (
+            <button
+              type="button"
+              onClick={() => void onSeed(card.step!, card.name)}
+              title="就这张卡开聊，结论直接写进任务书草稿；新会话自动归入本卡"
+              className={`${actionBtn} shrink-0`}
+            >
+              聊想法
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onDiscuss(card)}
+              title="在项目根开终端聊聊这张卡（不建工作区，只读纯聊），新会话自动归入本卡"
+              className={`${actionBtn} shrink-0`}
+            >
+              聊想法
+            </button>
           )}
           <span className={`flex shrink-0 items-center gap-1 ${hoverRevealClass}`}>
-            {fresh && canStart && (
+            {!boundWs && canStart && (
               <button
                 type="button"
                 disabled={busyId === card.id}
                 onClick={() => onStart(card)}
-                title="跳过讨论直接开步：建工作区并预填步骤简报"
+                title="一键开步：建工作区，任务书草稿即 TASK.md；会话自动归入本卡"
                 className={actionBtn}
               >
-                开始
-              </button>
-            )}
-            {!fresh && canStart && (
-              <button
-                type="button"
-                onClick={() => onContinue(card)}
-                title="开终端新会话，预填「阅读最新简报并继续任务」；会话自动归入本卡"
-                className={actionBtn}
-              >
-                继续
+                开工
               </button>
             )}
             <button
@@ -563,55 +497,16 @@ export default function TaskCardsSection({
         )}
         {expanded && (
           <div className="mb-1 ml-6 space-y-2 rounded-md bg-strip p-2">
-            {/* 待拍板问题（最新定稿简报「## 待拍板」小节的视图，无新存储）：点了带问题去聊想法 */}
-            {latestBrief(card) && (
+            {/* 待拍板问题（卡片所属步骤的任务书草稿「## 待拍板」小节的视图，无新存储）：
+                点了带问题去聊（onSeed 草稿口径）；未挂步骤卡无步骤语境，不渲染该块 */}
+            {card.step !== null ? (
               <OpenQuestions
                 projectPath={projectPath}
-                briefRel={latestBrief(card)!}
-                onPick={(q) => onDiscuss(card, false, q)}
+                stepName={card.step}
+                onPick={(q) => void onSeed(card.step!, card.name, q)}
               />
-            )}
-            {card.briefs.length === 0 ? (
-              <p className="text-xs text-l4">还没有简报</p>
             ) : (
-              <ul className="space-y-0.5">
-                {/* briefs 时间序，展示最新在前 */}
-                {card.briefs
-                  .slice()
-                  .reverse()
-                  .map((rel) => {
-                    const time = briefTimeFromPath(rel);
-                    return (
-                      <li key={rel}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setPreviewReq({
-                              path: briefAbsPath(rel),
-                              name: baseName(rel),
-                              root: projectPath,
-                            });
-                            setPage("terminal");
-                          }}
-                          title={`在终端页预览 ${rel}`}
-                          className="flex h-7 w-full items-center gap-2 rounded-sm px-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
-                        >
-                          <span className="min-w-0 flex-1 truncate font-mono">
-                            {rel}
-                          </span>
-                          {time && (
-                            <span
-                              className="shrink-0 text-micro text-l4"
-                              title={absTime(time)}
-                            >
-                              {relTime(time)}
-                            </span>
-                          )}
-                        </button>
-                      </li>
-                    );
-                  })}
-              </ul>
+              <p className="text-xs text-l4">未挂步骤的卡片没有任务书草稿</p>
             )}
           </div>
         )}
@@ -636,11 +531,12 @@ export default function TaskCardsSection({
             主仓 {mainDirty} 个未提交改动
           </button>
         )}
-        {/* 想法期只读保护（默认开，存 settings.json）：开 = 聊想法注入只读/计划模式参数（支持的 CLI）
-            + 预填不动文件约束；关 = 纯聊天。设置页不加行，就地开关 */}
+        {/* 想法期只读保护（默认开，存 settings.json）：只作用于未挂步骤卡的「聊想法」——
+            开 = 注入只读/计划模式参数（支持的 CLI）+ 预填不动文件约束；关 = 纯聊天。
+            挂步骤卡的讨论走任务书草稿口径（要写草稿，不适用只读）。设置页不加行，就地开关 */}
         <span
           className={`flex shrink-0 items-center gap-1.5 ${mainDirty ? "" : "ml-auto"}`}
-          title="开启后，「聊想法」会以只读/计划模式启动 Agent（支持该参数的 CLI），并嘱咐它只讨论不动文件"
+          title="开启后，未挂步骤卡片的「聊想法」会以只读/计划模式启动 Agent（支持该参数的 CLI），并嘱咐它只讨论不动文件"
         >
           <span className="text-micro text-l4">想法期只读保护</span>
           <Toggle
@@ -689,11 +585,7 @@ export default function TaskCardsSection({
             projectPath={projectPath}
             step={focusStepDto}
             runStatus={focusRunStatus ?? "pending"}
-            hasBrief={
-              (cards ?? []).some(
-                (c) => c.step === focusStepDto.name && c.briefs.length > 0,
-              ) || !!focusDraft?.text?.trim()
-            }
+            hasDraft={!!focusDraft?.text?.trim()}
             draft={
               focusDraft
                 ? {
@@ -706,7 +598,7 @@ export default function TaskCardsSection({
               <button
                 type="button"
                 onClick={() => onPreviewTaskMd(focusStepDto.name)}
-                title="预览该步骤当前 TASK.md 拼装结果（模板简报 + 默认来源简报 + 提货单）"
+                title="预览该步骤当前 TASK.md 拼装结果（模板简报 + 提货单）"
                 className={`${actionBtn} text-l4 hover:text-l1`}
               >
                 预览 TASK.md
@@ -829,7 +721,7 @@ export default function TaskCardsSection({
                         title={
                           exists
                             ? "已有同名卡片，点击继续聊"
-                            : "点击就这个问题开聊（自动建卡，只读保护生效）"
+                            : "点击就这个问题开聊（自动建卡，结论直接写进任务书草稿）"
                         }
                         className="rounded-full bg-inset px-2 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
                       >
@@ -880,6 +772,7 @@ export default function TaskCardsSection({
                     )
                   : undefined
               }
+              skillLib={skillLib}
             />
             <div className="min-h-0 flex-1 overflow-auto rounded-md border border-field bg-canvas">
               {taskMdPreview.text === null ? (
@@ -911,19 +804,19 @@ export default function TaskCardsSection({
           alignRight
           onClose={() => setMenu(null)}
           items={[
-            // 已有简报的卡片：聊想法降为低频入口（新卡片它已是行内主按钮）
-            ...(menu.card.briefs.length > 0
+            // 只读纯聊（onDiscuss）只保留给未挂步骤卡：挂步骤卡的讨论已并入 onSeed 草稿口径（行内主按钮）
+            ...(!steps.some((s) => s.name === menu.card.step)
               ? [
                   {
                     label: "聊想法",
                     title:
-                      "在项目根开终端聊聊这张卡（不建工作区），新会话自动归入本卡",
+                      "在项目根开终端聊聊这张卡（不建工作区，只读纯聊），新会话自动归入本卡",
                     onSelect: () => onDiscuss(menu.card),
                   },
                 ]
               : []),
             // 单次豁免：不动「想法期只读保护」开关，本次允许 Agent 改文件（开关关时无意义不渲染）
-            ...(discussGuard
+            ...(discussGuard && !steps.some((s) => s.name === menu.card.step)
               ? [
                   {
                     label: "聊想法（允许改文件）",

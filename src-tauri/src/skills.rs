@@ -49,6 +49,13 @@ pub struct SkillDto {
     /// 各 agent 的分发形态（"symlink" | "copy"，list 时现算，仅启用的 agent 有键）
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub app_modes: HashMap<String, String>,
+    /// SKILL.md 是否提到 MCP（含「推荐 MCP」段）：list 时现算，不入库文件
+    #[serde(default)]
+    pub mentions_mcp: bool,
+    /// SKILL.md frontmatter 声明的产物路径（目录带尾斜杠、文件写全路径）：
+    /// list 时现算，不入库文件；空数组 = 未声明（自建/外部技能不参与产物冲突检测）
+    #[serde(default)]
+    pub outputs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +163,8 @@ fn new_skill(name: String, description: Option<String>, source: &str, repo: Opti
         tags: Vec::new(),
         stale_copies: Vec::new(),
         app_modes: HashMap::new(),
+        mentions_mcp: false,
+        outputs: Vec::new(),
     }
 }
 
@@ -212,7 +221,7 @@ fn seed_builtin_skills_impl(store: &SkillStore) -> Result<Vec<String>, String> {
         fs::create_dir_all(&dir).map_err(|e| format!("创建内置技能目录失败: {e}"))?;
         fs::write(dir.join("SKILL.md"), content)
             .map_err(|e| format!("写入内置技能 {name} 失败: {e}"))?;
-        let (_, description) = parse_skill_md(&dir.join("SKILL.md"));
+        let (_, description, _) = parse_skill_md(&dir.join("SKILL.md"));
         skills.push(new_skill(name.to_string(), description, "builtin", None));
         added.push(name.to_string());
     }
@@ -289,7 +298,7 @@ fn apply_builtin_skill_update_impl(store: &SkillStore, name: &str) -> Result<(),
     }
     let mut skills = store.read();
     if let Some(pos) = skills.iter().position(|s| s.name == name) {
-        let (_, description) = parse_skill_md(&md);
+        let (_, description, _) = parse_skill_md(&md);
         skills[pos].description = description.unwrap_or_default();
         store.write(&skills)?;
     }
@@ -304,39 +313,67 @@ fn apply_builtin_skill_update_impl(store: &SkillStore, name: &str) -> Result<(),
     Ok(())
 }
 
-// ===== SKILL.md 防御式解析（开放标准：frontmatter 只取 name/description，扩展字段忽略） =====
+// ===== SKILL.md 防御式解析（开放标准：frontmatter 取 name/description/outputs，扩展字段忽略） =====
 
-fn parse_skill_md(path: &Path) -> (Option<String>, Option<String>) {
+fn parse_skill_md(path: &Path) -> (Option<String>, Option<String>, Vec<String>) {
     let Ok(raw) = fs::read(path) else {
-        return (None, None);
+        return (None, None, Vec::new());
     };
     let text = String::from_utf8_lossy(&raw);
     // BOM 与 CRLF 都容忍
     let text = text.trim_start_matches('\u{feff}');
     let mut lines = text.lines();
     if lines.next().map(|l| l.trim_end()) != Some("---") {
-        return (None, None);
+        return (None, None, Vec::new());
     }
     let (mut name, mut description) = (None, None);
+    let mut outputs: Vec<String> = Vec::new();
+    // outputs 多行列表收集态：`outputs:` 空值行之后连续的 `- item` 行都算条目
+    let mut in_outputs_list = false;
     for line in lines {
         let line = line.trim_end();
         if line == "---" {
             break;
         }
+        if in_outputs_list {
+            if let Some(item) = line.trim_start().strip_prefix('-') {
+                let item = item.trim().trim_matches('"').trim_matches('\'');
+                if !item.is_empty() {
+                    outputs.push(item.to_string());
+                }
+                continue;
+            }
+            in_outputs_list = false;
+        }
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
-        if value.is_empty() {
-            continue;
-        }
+        let value = value.trim().trim_matches('"').trim_matches('\'');
         match key.trim() {
-            "name" => name = Some(value),
-            "description" => description = Some(value),
+            "name" if !value.is_empty() => name = Some(value.to_string()),
+            "description" if !value.is_empty() => description = Some(value.to_string()),
+            "outputs" => {
+                if value.is_empty() {
+                    in_outputs_list = true;
+                } else {
+                    // 行内写法：`[a, b]` 或裸标量 `a`
+                    let inner = value
+                        .strip_prefix('[')
+                        .and_then(|s| s.strip_suffix(']'))
+                        .unwrap_or(value);
+                    outputs.extend(
+                        inner
+                            .split(',')
+                            .map(|s| s.trim().trim_matches('"').trim_matches('\''))
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string),
+                    );
+                }
+            }
             _ => {}
         }
     }
-    (name, description)
+    (name, description, outputs)
 }
 
 /// 由名称/描述/正文组成 SKILL.md 全文（frontmatter 只写 name/description，与解析口径一致）。
@@ -487,7 +524,7 @@ fn add_skill_from_dir(
 ) -> Result<(), String> {
     let dst = store.skill_dir(install_name);
     copy_dir_recursive(src_dir, &dst)?;
-    let (_, description) = parse_skill_md(&dst.join("SKILL.md"));
+    let (_, description, _) = parse_skill_md(&dst.join("SKILL.md"));
     skills.push(new_skill(install_name.to_string(), description, source, repo));
     if let Err(e) = store.write(skills) {
         skills.pop();
@@ -516,7 +553,7 @@ fn overwrite_skill_from_dir(
         }
         return Err(e);
     }
-    let (_, description) = parse_skill_md(&dst.join("SKILL.md"));
+    let (_, description, _) = parse_skill_md(&dst.join("SKILL.md"));
     match existing_pos {
         Some(pos) => {
             skills[pos].description = description.unwrap_or_default();
@@ -1129,16 +1166,29 @@ fn app_modes(dirs: &HashMap<String, PathBuf>, skill: &SkillDto) -> HashMap<Strin
     out
 }
 
+/// SKILL.md 是否提到 MCP（「推荐 MCP」段也靠这个子串命中；读不到视为未提及）
+fn mentions_mcp(md_path: &Path) -> bool {
+    fs::read_to_string(md_path)
+        .map(|t| t.contains("MCP"))
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 pub async fn list_skills() -> Vec<SkillDto> {
     let Ok(store) = SkillStore::default_paths() else {
         return Vec::new();
     };
-    let dirs = agent_dirs();
+    list_skills_impl(&store, &agent_dirs())
+}
+
+fn list_skills_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>) -> Vec<SkillDto> {
     let mut skills = store.read();
     for s in &mut skills {
-        s.stale_copies = stale_agents(&store, &dirs, s);
-        s.app_modes = app_modes(&dirs, s);
+        s.stale_copies = stale_agents(store, dirs, s);
+        s.app_modes = app_modes(dirs, s);
+        s.mentions_mcp = mentions_mcp(&store.skill_dir(&s.name).join("SKILL.md"));
+        let (_, _, outputs) = parse_skill_md(&store.skill_dir(&s.name).join("SKILL.md"));
+        s.outputs = outputs;
     }
     skills
 }
@@ -1531,7 +1581,7 @@ pub async fn discover_unmanaged() -> Vec<DiscoveredDto> {
             if name.is_empty() || known.contains(&name.as_str()) {
                 continue; // 已在库里的不重复收编
             }
-            let (_, description) = parse_skill_md(&dir.join("SKILL.md"));
+            let (_, description, _) = parse_skill_md(&dir.join("SKILL.md"));
             out.push(DiscoveredDto {
                 name,
                 description: description.unwrap_or_default(),
@@ -1613,7 +1663,7 @@ fn create_impl(
         let _ = fs::remove_dir_all(&dst);
         return Err(format!("写入 SKILL.md 失败: {e}"));
     }
-    let (_, parsed_desc) = parse_skill_md(&dst.join("SKILL.md"));
+    let (_, parsed_desc, _) = parse_skill_md(&dst.join("SKILL.md"));
     skills.push(new_skill(name.to_string(), parsed_desc, "local", None));
     if let Err(e) = store.write(skills) {
         skills.pop();
@@ -1761,20 +1811,44 @@ mod tests {
     }
 
     #[test]
+    fn mentions_mcp_detects_keyword_and_tolerates_missing_file() {
+        let fx = Fx::new();
+        fx.add_lib_skill("plain", "普通技能");
+        assert!(!mentions_mcp(&fx.store.skill_dir("plain").join("SKILL.md")));
+        // 「推荐 MCP」段命中
+        fx.add_lib_skill("with-mcp", "带 MCP 推荐");
+        fs::write(
+            fx.store.skill_dir("with-mcp").join("SKILL.md"),
+            "---\nname: with-mcp\n---\n## 推荐 MCP\n配一个 arxiv 检索 server。\n",
+        )
+        .unwrap();
+        assert!(mentions_mcp(&fx.store.skill_dir("with-mcp").join("SKILL.md")));
+        // 正文任意处出现 MCP 子串也命中；SKILL.md 缺失/不可读 → false 不报错
+        assert!(!mentions_mcp(&fx.dir.join("missing").join("SKILL.md")));
+    }
+
+    #[test]
     fn builtin_skill_files_are_well_formed() {
-        // 内置 SKILL.md 必须能被解析口径读出 name/description，且 name 与目录名一致
+        // 内置 SKILL.md 必须能被解析口径读出 name/description，且 name 与目录名一致；
+        // outputs 声明（行内列表）是产物冲突检测的数据源，内置技能必须带
         for (name, content) in BUILTIN_SKILLS {
             assert!(
                 content.starts_with(&format!("---\nname: {name}\n")),
                 "{name} 的 frontmatter name 与目录名不一致"
             );
-            let mut lines = content.lines();
-            lines.next(); // 首行 ---
-            let has_desc = lines
-                .by_ref()
+            let fm: Vec<&str> = content
+                .lines()
+                .skip(1) // 首行 ---
                 .take_while(|l| l.trim_end() != "---")
+                .collect();
+            let has_desc = fm
+                .iter()
                 .any(|l| l.starts_with("description: ") && l.len() > 14);
             assert!(has_desc, "{name} 缺少 description");
+            let has_outputs = fm
+                .iter()
+                .any(|l| l.starts_with("outputs: [") && l.len() > 11);
+            assert!(has_outputs, "{name} 未声明 outputs");
         }
     }
 
@@ -1869,7 +1943,7 @@ mod tests {
         );
         let saved = fx.store.read();
         let s = saved.iter().find(|s| s.name == first).unwrap();
-        let (_, seed_desc) = parse_skill_md(&md);
+        let (_, seed_desc, _) = parse_skill_md(&md);
         assert_eq!(s.description, seed_desc.unwrap_or_default(), "描述同步为新版");
         assert_ne!(s.description, "旧描述");
         // 追平后检测归零
@@ -1969,13 +2043,67 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let f = dir.join("SKILL.md");
         fs::write(&f, "\u{feff}---\r\nname: pdf\r\ndescription: 处理 PDF 文件\r\nextra: ignored\r\n---\r\n# body\r\n").unwrap();
-        let (name, desc) = parse_skill_md(&f);
+        let (name, desc, _) = parse_skill_md(&f);
         assert_eq!(name.as_deref(), Some("pdf"));
         assert_eq!(desc.as_deref(), Some("处理 PDF 文件"));
         fs::write(&f, "---\nname: only-name\n---\n").unwrap();
-        assert_eq!(parse_skill_md(&f), (Some("only-name".into()), None));
+        assert_eq!(parse_skill_md(&f), (Some("only-name".into()), None, Vec::new()));
         fs::write(&f, "# 没有 frontmatter\n").unwrap();
-        assert_eq!(parse_skill_md(&f), (None, None));
+        assert_eq!(parse_skill_md(&f), (None, None, Vec::new()));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn list_skills_carries_outputs_from_frontmatter() {
+        let fx = Fx::new();
+        fx.add_lib_skill("with-outputs", "带产物声明");
+        fs::write(
+            fx.store.skill_dir("with-outputs").join("SKILL.md"),
+            "---\nname: with-outputs\noutputs: [papers/, notes/inbox.md]\n---\nbody\n",
+        )
+        .unwrap();
+        fx.add_lib_skill("no-outputs", "无产物声明");
+        let skills = list_skills_impl(&fx.store, &HashMap::new());
+        let s = skills.iter().find(|s| s.name == "with-outputs").unwrap();
+        assert_eq!(
+            s.outputs,
+            vec!["papers/".to_string(), "notes/inbox.md".to_string()]
+        );
+        let s = skills.iter().find(|s| s.name == "no-outputs").unwrap();
+        assert!(s.outputs.is_empty(), "未声明 outputs 的技能为空数组");
+    }
+
+    #[test]
+    fn frontmatter_outputs_inline_and_block_and_missing() {
+        let dir = std::env::temp_dir().join(format!("ccode-skills-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("SKILL.md");
+        // 行内列表写法
+        fs::write(
+            &f,
+            "---\nname: s\noutputs: [papers/, references.bib]\n---\n# body\n",
+        )
+        .unwrap();
+        let (_, _, outputs) = parse_skill_md(&f);
+        assert_eq!(outputs, vec!["papers/".to_string(), "references.bib".to_string()]);
+        // 多行列表写法（允许缩进与引号）
+        fs::write(
+            &f,
+            "---\nname: s\noutputs:\n  - notes/\n  - \"notes/inbox.md\"\ndescription: d\n---\n",
+        )
+        .unwrap();
+        let (_, desc, outputs) = parse_skill_md(&f);
+        assert_eq!(outputs, vec!["notes/".to_string(), "notes/inbox.md".to_string()]);
+        assert_eq!(desc.as_deref(), Some("d"), "列表结束后其他字段照常解析");
+        // 裸标量写法容忍为单条
+        fs::write(&f, "---\nname: s\noutputs: outline.md\n---\n").unwrap();
+        assert_eq!(parse_skill_md(&f).2, vec!["outline.md".to_string()]);
+        // 缺字段 = 空数组
+        fs::write(&f, "---\nname: s\ndescription: d\n---\n").unwrap();
+        assert!(parse_skill_md(&f).2.is_empty());
+        // 空行内列表 = 空数组
+        fs::write(&f, "---\nname: s\noutputs: []\n---\n").unwrap();
+        assert!(parse_skill_md(&f).2.is_empty());
         fs::remove_dir_all(&dir).ok();
     }
 

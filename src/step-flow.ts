@@ -33,22 +33,22 @@ export function buildStepFlow(args: {
   step: ProjectStepDto;
   /** 本步骤的人工事项派生状态（已按步骤过滤） */
   states: HumanTaskStateDto[];
-  /** 本步骤已有定稿简报（讨论种子节点的完成口径） */
-  hasBrief: boolean;
+  /** 本步骤任务书草稿已起草（.ccode/drafts/<步骤>.md，讨论种子节点的完成口径） */
+  hasDraft: boolean;
   runStatus: StepRunStatus;
 }): StepFlow {
-  const { step, states, hasBrief, runStatus } = args;
+  const { step, states, hasDraft, runStatus } = args;
   const nodes: StepFlowNode[] = [];
   const humans = (timing: string) => states.filter((s) => s.timing === timing);
 
-  // 1. 讨论种子（有种子才有此节点）：聊透 = 任务书草稿已起草或本步骤已有定稿简报
+  // 1. 讨论种子（有种子才有此节点）：聊透 = 任务书草稿已起草
   if ((step.discussionSeeds ?? []).length > 0) {
     nodes.push({
       key: "discuss",
       kind: "discuss",
       label: "任务书：和 Agent 聊出本步任务书",
       hint: "讨论出的结论直接写进草稿，开工时草稿就是 TASK.md",
-      done: hasBrief,
+      done: hasDraft,
     });
   }
   // 2. before 人工事项

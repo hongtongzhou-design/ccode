@@ -11,13 +11,15 @@ function agentLabel(id: string): string {
 
 /**
  * 「◈ 提炼接力…」目标选择器：AI 把全会话蒸馏成紧凑的结构化简报，
- * 新会话只读简报续作（不带旧上下文，非完整记忆）。两段流程：
- * 定稿页（AI 初稿可编辑，「定稿并继续」落盘 .ccode/brief-*.md 并钉入会话所属任务卡）
- * → 发送页（目标 Agent 列表，一律发送定稿路径；AI 初稿的 handoff-*.md 留在磁盘不再使用）。
+ * 新会话只读简报续作（不带旧上下文，非完整记忆）。单页流程：
+ * brief ready 后同页显示「AI 初稿编辑框（可改）+ 发送目标列表」——
+ * 点目标发送/暂不发送前比对编辑框与初稿原文，有改动先 finalize_digest_brief
+ * 写回 handoff-*.md 再继续，零改动直接用；任务书沉淀统一走草稿（append_step_draft），
+ * 本弹窗不再落 brief-*.md 钉卡。
  * 三路径消费：内部同 Agent 新会话 / 内部其他 Agent / 外部（⧉ 复制命令、⇗ 外部终端）。
  * 骨架与 HandoffPicker 一致；kimi/opencode 无启动注入参数，走手动发送停留态。
  * 生成走 store.digestJob 后台任务（v3.60）：关闭本弹窗不中断、重开复用结果不重复提炼；
- * ready 未消费时收件箱挂「待发送」条目；已定稿（digestJob.finalized）重开直达发送页。
+ * ready 未消费时收件箱挂「待发送」条目。
  */
 export default function DigestPicker({
   source,
@@ -29,18 +31,18 @@ export default function DigestPicker({
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
   const profiles = useAppStore((s) => s.profiles);
-  const sessions = useAppStore((s) => s.sessions);
   const digestJob = useAppStore((s) => s.digestJob);
   const startDigestJob = useAppStore((s) => s.startDigestJob);
   const consumeDigestJob = useAppStore((s) => s.consumeDigestJob);
-  const setDigestFinalized = useAppStore((s) => s.setDigestFinalized);
-  const loadTaskCards = useAppStore((s) => s.loadTaskCards);
   const [targets, setTargets] = useState<HandoffTargetDto[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
-  // 定稿页：AI 初稿全文（可编辑）与落盘状态
+  // AI 初稿全文（可编辑）；draft 原文用于比对是否有改动，写回后同步推进
   const [draft, setDraft] = useState<string | null>(null);
+  const [draftOrigin, setDraftOrigin] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // 确实写回过 handoff 文件后显示「✓ 已写回 →」状态行
+  const [writtenBack, setWrittenBack] = useState(false);
   // 外部命令/指令的已复制反馈（按目标 agent 区分）
   const [copiedId, setCopiedId] = useState<string | null>(null);
   // kimi/opencode 无启动注入：简报就绪后停留展示手动发送提示
@@ -62,9 +64,6 @@ export default function DigestPicker({
       : null;
   const generating = job?.status !== "ready" && job?.status !== "error";
   const brief = job?.status === "ready" ? (job.brief ?? null) : null;
-  // 定稿后发送一律用定稿产物（save_task_brief 落盘的 brief-*.md），AI 初稿仅作编辑底本
-  const finalized = job?.finalized ?? null;
-  const effectiveBrief = finalized ?? brief;
   const error = localError ?? (job?.status === "error" ? (job.error ?? null) : null);
 
   useEffect(() => {
@@ -74,8 +73,8 @@ export default function DigestPicker({
       .catch((e) => setLocalError(String(e)));
   }, [agent, sessionId, filePath, cwd, title, startDigestJob]);
 
-  // 定稿页底本：读 AI 初稿全文进编辑框（已定稿则跳过，直达发送页）
-  const draftPath = brief && !finalized ? brief.filePath : null;
+  // 编辑框底本：读 AI 初稿全文进编辑框（原文另存 draftOrigin，供发送前比对改动）
+  const draftPath = brief ? brief.filePath : null;
   useEffect(() => {
     if (!draftPath) return;
     let stale = false;
@@ -84,7 +83,10 @@ export default function DigestPicker({
       root: cwd,
     })
       .then((p) => {
-        if (!stale) setDraft(p.text);
+        if (!stale) {
+          setDraft(p.text);
+          setDraftOrigin(p.text);
+        }
       })
       .catch((e) => {
         if (!stale) setLocalError(String(e));
@@ -94,40 +96,17 @@ export default function DigestPicker({
     };
   }, [draftPath, cwd]);
 
-  /** 会话所属任务卡（归置过才钉卡；名称用于定稿页提示） */
-  const sourceTask = sessions.find(
-    (s) => s.agent === agent && s.sessionId === sessionId,
-  );
-
-  /** 定稿落盘：save_task_brief 写入项目 .ccode/brief-*.md（已脱敏+上限），
-   *  会话已归置卡片时钉进卡片；continueSend = 定稿后进发送页，否则仅落盘钉卡并关闭 */
-  async function finalize(continueSend: boolean) {
-    if (!job || draft === null || saving) return;
-    setSaving(true);
-    setLocalError(null);
-    try {
-      const taskId = sourceTask?.taskId ?? null;
-      const rel = await invoke<string>("save_task_brief", {
-        projectRoot: cwd,
-        taskId,
-        content: draft,
-      });
-      const abs = `${cwd.replace(/[\\/]+$/, "")}/${rel}`;
-      setDigestFinalized({
-        filePath: abs,
-        summary: brief?.summary ?? "已定稿",
-      });
-      // 钉卡后刷新卡片缓存（工作区页卡片区/对话页分组同源）
-      if (taskId) void loadTaskCards(cwd).catch(() => {});
-      if (!continueSend) {
-        consumeDigestJob();
-        onClose();
-      }
-    } catch (e) {
-      setLocalError(String(e));
-    } finally {
-      setSaving(false);
-    }
+  /** 编辑框内容相对 AI 初稿原文有改动：finalize_digest_brief 写回 handoff-*.md
+   *  （.ccode 内 + handoff- 前缀校验、脱敏截断、原子覆盖都在后端），零改动直接跳过 */
+  async function writeBackIfChanged(): Promise<void> {
+    if (!brief || draft === null || draft === draftOrigin) return;
+    await invoke("finalize_digest_brief", {
+      path: brief.filePath,
+      content: draft,
+    });
+    // 写回成功后原文基线推进到当前内容，避免同一会话内重复写
+    setDraftOrigin(draft);
+    setWrittenBack(true);
   }
 
   // Escape 关闭（同 HandoffPicker 语义）
@@ -168,19 +147,20 @@ export default function DigestPicker({
     onClose();
   }
 
-  /** 内部启动：登记接力链（⇄ 接自 badge 沿用）后按注入能力分流 */
+  /** 内部启动：有改动先把编辑框内容写回简报文件，登记接力链（⇄ 接自 badge 沿用）后按注入能力分流 */
   async function pick(t: HandoffTargetDto) {
-    if (!effectiveBrief) return;
+    if (!brief) return;
     setBusy(t.id);
     setLocalError(null);
     try {
+      await writeBackIfChanged();
       await invoke("mark_handoff", {
         targetAgent: t.id,
         targetCwd: source.cwd,
         fromAgent: source.agent,
         fromSessionId: source.sessionId,
       });
-      const prompt = promptFor(effectiveBrief);
+      const prompt = promptFor(brief);
       // 已选定发送目标：简报任务标记已消费，收件箱「待发送」摘除
       consumeDigestJob();
       if (t.promptSupported) {
@@ -197,11 +177,13 @@ export default function DigestPicker({
     }
   }
 
-  /** ⧉ 复制外部续作命令；Unsupported 目标复制指令文本（启动后手动粘贴） */
+  /** ⧉ 复制外部续作命令；Unsupported 目标复制指令文本（启动后手动粘贴）。
+      外部读的也是简报文件，发送前同样先写回改动 */
   async function copyExternal(t: HandoffTargetDto) {
-    if (!effectiveBrief) return;
+    if (!brief) return;
     try {
-      const prompt = promptFor(effectiveBrief);
+      await writeBackIfChanged();
+      const prompt = promptFor(brief);
       const text = t.promptSupported
         ? await invoke<string>("session_digest_command", {
             agentId: t.id,
@@ -219,15 +201,32 @@ export default function DigestPicker({
 
   /** ⇗ 在外部终端以「读简报续作」开新会话（仅支持注入的目标） */
   async function openExternal(t: HandoffTargetDto) {
-    if (!effectiveBrief) return;
+    if (!brief) return;
     try {
+      await writeBackIfChanged();
       await invoke("digest_external_terminal", {
         agentId: t.id,
         cwd: source.cwd,
-        prompt: promptFor(effectiveBrief),
+        prompt: promptFor(brief),
       });
     } catch (e) {
       setLocalError(String(e));
+    }
+  }
+
+  /** 暂不发送：有改动先写回简报文件再关；零改动直接摘除收件箱条目并关闭 */
+  async function dismiss() {
+    if (saving) return;
+    setSaving(true);
+    setLocalError(null);
+    try {
+      await writeBackIfChanged();
+      consumeDigestJob();
+      onClose();
+    } catch (e) {
+      setLocalError(String(e));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -247,7 +246,7 @@ export default function DigestPicker({
     <div className="fixed inset-0 z-50" onClick={onClose}>
       <div
         className={`absolute top-[12%] left-1/2 -translate-x-1/2 rounded-sm border border-field ccode-float-surface py-2 text-sm ${
-          brief && !finalized ? "w-[36rem]" : "w-96"
+          brief ? "w-[36rem]" : "w-96"
         }`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -261,9 +260,9 @@ export default function DigestPicker({
               <span className="text-l4">
                 ⏳ 正在后台提炼会话…可关闭本窗口，完成后在「待你处理」出现
               </span>
-            ) : finalized ? (
+            ) : writtenBack && brief ? (
               <span className="text-ok-text">
-                ✓ 已定稿 → {relPath(finalized.filePath)}
+                ✓ 已写回 → {relPath(brief.filePath)}
               </span>
             ) : null}
           </p>
@@ -283,60 +282,36 @@ export default function DigestPicker({
             )}
           </div>
         )}
-        {/* 定稿页：AI 初稿进编辑框，定稿才落盘（钉入会话所属任务卡）；「暂不发送」= 仅定稿落盘 */}
-        {brief && !finalized && (
+        {/* 单页：AI 初稿进编辑框可直接改；发送或「暂不发送」前有改动才写回简报文件 */}
+        {brief && (
           <div className="px-3 pb-2">
             <p className="pb-1.5 text-xs text-l4">
-              AI 初稿，改完定稿后才会落盘
-              {sourceTask?.taskName
-                ? `；将钉入任务卡「${sourceTask.taskName}」`
-                : ""}
+              AI 初稿，可直接改；有改动会在发送/关闭前写回简报文件
             </p>
             <textarea
               className="h-72 w-full resize-none rounded-md border border-field bg-inset px-2 py-1.5 text-sm leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
               value={draft ?? ""}
-              disabled={draft === null || saving}
+              disabled={draft === null || saving || busy !== null}
               placeholder={draft === null ? "读取初稿中…" : ""}
               onChange={(e) => setDraft(e.target.value)}
             />
-            <div className="mt-2 flex items-center gap-2">
-              <button
-                type="button"
-                disabled={saving || draft === null || !draft.trim()}
-                onClick={() => void finalize(true)}
-                title="定稿落盘（钉入任务卡）后选择目标 Agent 发送"
-                className="rounded-sm border border-cta-bd bg-cta px-2.5 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
-              >
-                {saving ? "定稿中…" : "定稿并继续"}
-              </button>
-              <button
-                type="button"
-                disabled={saving || draft === null || !draft.trim()}
-                onClick={() => void finalize(false)}
-                title="仅定稿落盘钉卡，不发送；收件箱「待发送」摘除"
-                className="rounded-sm px-2.5 py-1 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
-              >
-                暂不发送
-              </button>
-            </div>
+            {!ready && (
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={saving || busy !== null}
+                  onClick={() => void dismiss()}
+                  title="不发送；有改动会先写回简报文件，收件箱「待发送」摘除"
+                  className="rounded-sm px-2.5 py-1 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                >
+                  {saving ? "写回中…" : "暂不发送"}
+                </button>
+              </div>
+            )}
           </div>
         )}
-        {/* 发送页（已定稿）：目标列表与外部路径一律用定稿简报 */}
-        {finalized && !ready && (
-          <div className="px-3 pb-1">
-            <button
-              className="rounded-sm px-2 py-0.5 text-xs text-l4 hover:bg-hover hover:text-l2"
-              title="暂不发送：简报文件保留在磁盘，收件箱条目摘除"
-              onClick={() => {
-                consumeDigestJob();
-                onClose();
-              }}
-            >
-              暂不发送
-            </button>
-          </div>
-        )}
-        {finalized &&
+        {/* 发送目标：brief ready 即显示，一律发送简报文件本身（有改动发送前已写回） */}
+        {brief &&
           (ready ? (
           <div className="px-3 pb-1">
             <p className="text-xs text-warn-text">

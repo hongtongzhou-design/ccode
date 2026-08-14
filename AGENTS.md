@@ -75,20 +75,20 @@ docs/                        # 架构方案 + 八 CLI 适配参考（规格）
   conventions/               # 主题化约定细则（改动对应领域前必读，见「关键约定」索引）
 src/                         # 前端 React + TS + Tailwind v4（vite 插件接入）
   pages/                     # 八页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
-  components/                # WorkspaceReviewView、PipelineEditor、ProjectGroup/ProjectRail、ArtifactChecklist、TaskCardsSection、FileTree、
+  components/                # WorkspaceReviewView、PipelineEditor（含「＋ 从模板追加」）、ProjectGroup/ProjectRail、ArtifactChecklist、TaskCardsSection、FileTree、
                              # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker/DigestPicker、
-                             # KickoffConfirmDialog（开工确认弹层：TASK.md 预览/编辑 + 简报勾选/融合 + 技能区 + 人工事项区 + 主仓提醒）、
+                             # KickoffConfirmDialog（开工确认弹层：TASK.md 预览/编辑（草稿优先）+ 旧简报并入兜底 + 技能区（含 MCP 归处标记）+ 人工事项区 + 主仓提醒）、
                              # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态）、
                              # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑）、StepFlow（步骤内协同流程线）、
                              # ScheduleSection（项目分组「◔ 定时任务」区块） 等
   components/CommandPalette.tsx # ⌘K 面板
   pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES
-  pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras/readTaskBriefs 单一出处，弹层预览与落盘共用）
+  pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras 单一出处，弹层预览与落盘共用）
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
   mcp-presets.ts             # MCP 内置预设表（加预设 = 加一条；密钥一律 ${VAR} 引用）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
-  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/最新简报/会话按卡分组/开工简报来源勾选/人工事项过滤与
-                             # 待拍板小节提取（tests/task-cards.test.ts）
+  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/会话按卡分组/人工事项过滤与
+                             # 待拍板小节提取（数据源为步骤草稿）（tests/task-cards.test.ts）
   step-flow.ts               # 步骤内协同流程线纯逻辑：种子→before→agent→during→after→评审节点链（tests/step-flow.test.ts）
   schedule-tasks.ts          # 定时任务纯逻辑：周期白话/相对时间/按 projectRoot 过滤（tests/schedule-tasks.test.ts）
   inbox.ts                   # 收件箱分类胶囊纯逻辑：key 前缀→类别、分组、help dismiss 签名、人工请求通知 edge-trigger（tests/inbox.test.ts）
@@ -110,8 +110,9 @@ src-tauri/src/
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
   global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）
   projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
-                             # update_step_skills（步骤推荐技能读-改-原子写）、任务书草稿（read_task_draft/append_step_draft，
-                             # .ccode/drafts/）、
+                             # update_step_skills（步骤推荐技能读-改-原子写）、append_pipeline_steps（从模板追加：重名跳过、全跳过不落盘）、
+                             # 任务书草稿（read_task_draft/append_step_draft，
+                             # .ccode/drafts/）、旧简报一次性并入草稿（list_legacy_briefs）、
                              # 项目移除三档（移除注册 / purge_project_traces 清除 Ccode 痕迹保留文件夹 / delete_project_dir）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用
   sessions.rs                # 会话浏览：八 agent 会话扫描/解析（Codex .zst、OpenCode SQLite/JSON）、session_meta、pin 快照、
@@ -120,7 +121,8 @@ src-tauri/src/
                              # 漂移检测 resync、create_skill/update_skill_content；内置技能种子（seed_builtin_skills：
                              # include_str! 内嵌 src-tauri/resources/skills/ 14 个技能，启动幂等播种，不覆盖/不复活用户改动）、
                              # 内置技能更新（check_builtin_skill_updates 种子逐字节比对 + apply_builtin_skill_update
-                             # 覆盖前备份 SKILL.md.bak-<yyyymmdd> 后原子写入）
+                             # 覆盖前备份 SKILL.md.bak-<yyyymmdd> 后原子写入）、产物冲突检测（frontmatter outputs
+                             # 解析进 SkillDto，list 时现算；前端 skill-conflicts.ts 判定 + StepSkillsChips 警告行）
   mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §9）：统一模型→八家映射、读-改-写一个键/段 + 备份 +
                              # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文）
   usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径
@@ -134,8 +136,8 @@ src-tauri/src/
                              # （漏跑 coalesce 只补一次）、无头拉起 agent 在项目根跑技能（默认 lit-watch，10 分钟超时）、
                              # 历史留 20 条、跑完发 scheduler-run-done 事件（App.tsx 全局监听弹 OS 通知，复用长任务通知开关）
   citation.rs                # 引用健康检查：.md 引用键（[@key]/多键/[-@key]）对照 references.bib（白名单同 pdf.rs 口径）
-  handoff.rs                 # 接力（§11.3 机制四）：简报生成（脱敏+64KB）、提炼接力（build_session_digest，AI 蒸馏全会话）、
-                             # handoff_links 接力链登记/固化
+  handoff.rs                 # 接力（§11.3 机制四）：简报生成（脱敏+64KB）、提炼接力（build_session_digest AI 蒸馏全会话 +
+                             # finalize_digest_brief 初稿写回）、handoff_links 接力链登记/固化
   workspaces.rs              # 任务工作区（§6.10）：worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT、
                              # setup/archive 钩子、评审合并（health/merge/PR）、artifacts.yaml、
                              # 人工事项状态（human_task_checks 勾选 + human_target_hit 落点检测）、import_human_deliverable
@@ -204,7 +206,8 @@ src-tauri/src/
   主线 + 白话翻译：✓ 验收合并/⚙ 自动保存/◔ 保存）、**Claude Code hooks 精确注意力标记 ✅**（设置页显式开关，claude_hooks.rs，
   见架构 v3.32）、**内置技能种子 ✅**（v3.64：14 个内置技能 = 9 个原有补强 + 5 个外部仓库内化，include_str! 播种、不覆盖不复活，
   五套流水线模板按步骤挂载）、**定时雷达 ✅**（v3.75：scheduler.rs 每日/每周无头巡检 + lit-watch 多源精选升级，
-  约定见 conventions/pipeline.md「定时雷达」）；批量验收、云端会话双源调研留 backlog
+  约定见 conventions/pipeline.md「定时雷达」）、**模板重设计与接壤 ✅**（v3.78：五套模板内容重设计（种子对准拍板点/技能挂载核对/
+  学术 MCP 人工事项）+ 产物路径接壤（投稿与返修接综述/科研论文成稿）+ 编辑器「＋ 从模板追加」）；批量验收、云端会话双源调研留 backlog
 - **Backlog（记录不动手）**：SSH 远程执行、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后
   评估）、批量验收、云端会话双源调研、首启引导完整版（示例课题最小版已落地：工作区空态「✦ 创建示例课题（演示）」→
   `create_demo_project`，演示 PDF/引文/综述流水线齐备；完整版引导的更丰富演示数据留 backlog）、工作区类型驱动默认值（数据类跳端口）

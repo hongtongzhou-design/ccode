@@ -1,6 +1,7 @@
 ---
 name: proposal-writer
 description: 开题报告与研究方案写作规范。当用户要求写开题报告、研究计划书、基金/课题申请的本子框架时使用。按「选题依据→研究内容→技术路线→可行性→进度安排」组织，产出结构化草稿；引用只用 references.bib 已有键，预期成果不夸大，草稿供人修改定夺。
+outputs: [proposal/]
 ---
 
 # 开题报告与研究方案（proposal-writer）

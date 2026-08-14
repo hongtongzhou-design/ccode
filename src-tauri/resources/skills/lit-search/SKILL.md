@@ -1,6 +1,7 @@
 ---
 name: lit-search
 description: 文献检索与筛选规范。当用户要求围绕某个课题检索学术文献、做系统综述检索、制定纳入/排除标准、或把候选文献筛选成最终清单时使用。产出 papers/screening.md 与 papers/included.md 两份固定格式文件。
+outputs: [papers/]
 ---
 
 # 文献检索与筛选

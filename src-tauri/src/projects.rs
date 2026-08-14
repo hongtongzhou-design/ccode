@@ -922,8 +922,8 @@ pub(crate) fn append_step_draft_at(
 }
 
 // ===== 任务卡（project.toml 的 [[tasks]] 段） =====
-// 卡片 = 对话的文件夹 + 定稿简报的收集夹：只增删改名与登记简报路径，
-// 无独立状态机，不碰工作区/评审流程。tasks 段与 resources/steps 相互独立：
+// 卡片 = 对话/会话的归档夹：只增删改名，无独立状态机，不碰工作区/评审流程。
+// tasks 段与 resources/steps 相互独立：
 // write_project_config 的 toml_edit 补丁不触碰 tasks（未知段原样保留），
 // 任务卡写回同样只替换 tasks 段，档案卡其余内容原样保留。
 
@@ -939,8 +939,7 @@ struct TomlTask {
     workspace: Option<String>,
     #[serde(default)]
     created_at: String,
-    #[serde(default)]
-    briefs: Vec<String>,
+    // 旧版残留的 briefs = [...] 由 serde 默认忽略，下次写回自然丢弃
 }
 
 /// 防御式解析：整份坏掉或单条坏字段都不阻断，坏条目跳过（风格同 parse_config）
@@ -966,12 +965,6 @@ fn parse_task_cards(text: &str) -> Vec<TaskCardDto> {
                 step: clean(t.step),
                 workspace: clean(t.workspace),
                 created_at: t.created_at,
-                briefs: t
-                    .briefs
-                    .into_iter()
-                    .map(|b| b.trim().to_string())
-                    .filter(|b| !b.is_empty())
-                    .collect(),
             });
         }
     }
@@ -1017,13 +1010,6 @@ fn render_tasks(existing: Option<&str>, tasks: &[TaskCardDto]) -> Result<String,
                 tab["workspace"] = value(ws);
             }
             tab["created_at"] = value(&t.created_at);
-            if !t.briefs.is_empty() {
-                let mut briefs = toml_edit::Array::new();
-                for b in &t.briefs {
-                    briefs.push(b.as_str());
-                }
-                tab["briefs"] = value(briefs);
-            }
             arr.push(tab);
         }
         doc["tasks"] = Item::ArrayOfTables(arr);
@@ -1083,7 +1069,6 @@ pub(crate) fn create_task_card_at(root: &Path, name: &str, step: Option<&str>) -
         step: step.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         workspace: None,
         created_at: crate::sessions::now_iso(),
-        briefs: Vec::new(),
     };
     tasks.push(card.clone());
     write_tasks_at(root, &tasks)?;
@@ -1114,35 +1099,6 @@ fn delete_task_card_at(root: &Path, task_id: &str) -> Result<(), String> {
         return Err("卡片不存在（可能已被删除）".into());
     }
     write_tasks_at(root, &tasks)
-}
-
-/// 把简报路径登记进卡片 briefs（去重，保持追加时间序）。
-/// 校验：文件必须存在且 canonicalize 后不逃出项目根（防符号链接逃逸，同 handoff 口径）；
-/// 存储为相对项目根的正斜杠路径。返回归一化后的相对路径。
-pub(crate) fn attach_brief_at(root: &Path, task_id: &str, brief_path: &str) -> Result<String, String> {
-    let root = fs::canonicalize(root).map_err(|e| format!("项目目录无效: {e}"))?;
-    let candidate = {
-        let c = PathBuf::from(crate::sessions::expand_tilde(brief_path));
-        if c.is_absolute() { c } else { root.join(c) }
-    };
-    let canon = fs::canonicalize(&candidate).map_err(|e| format!("简报文件不存在或不可读: {e}"))?;
-    if !canon.starts_with(&root) {
-        return Err("简报路径必须位于项目目录内".into());
-    }
-    let rel = canon
-        .strip_prefix(&root)
-        .map_err(|e| format!("计算简报相对路径失败: {e}"))?
-        .to_string_lossy()
-        .replace('\\', "/");
-    let mut tasks = task_cards_at(&root);
-    let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) else {
-        return Err("卡片不存在（可能已被删除）".into());
-    };
-    if !task.briefs.iter().any(|b| *b == rel) {
-        task.briefs.push(rel.clone());
-    }
-    write_tasks_at(&root, &tasks)?;
-    Ok(rel)
 }
 
 // ===== 资源自动发现（只读 stat，不读文件内容） =====
@@ -1627,22 +1583,6 @@ pub async fn delete_task_card(project_root: String, task_id: String) -> Result<(
     .map_err(|e| format!("删除任务卡失败: {e}"))?
 }
 
-/// 把已落盘的简报登记进卡片 briefs（去重）；路径校验见 attach_brief_at
-#[tauri::command]
-pub async fn attach_brief_to_card(
-    project_root: String,
-    task_id: String,
-    brief_rel_path: String,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
-        attach_brief_at(&root, &task_id, &brief_rel_path)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("登记简报到任务卡失败: {e}"))?
-}
-
 // ===== 示例课题（首启引导最小版落地，§11.4 backlog） =====
 // 在「文档/Ccode 示例课题」生成带演示数据的完整项目：目录骨架、程序生成的一页示例 PDF、
 // references.bib、README、英文综述五步流水线档案卡，然后 git 初始化并注册。
@@ -1867,20 +1807,19 @@ fn demo_project_config() -> ProjectConfigDto {
     }
 }
 
-/// 示例课题预置的示范定稿简报：演示「目标/思路与理由/已否决方向/下一步」长什么样，
-/// 让新用户点开卡片就理解定稿简报的用途（对话是日志、简报是记忆）。
-const DEMO_TASK_BRIEF: &str = "# 确定综述角度（示范定稿简报）\n\n\
-## 目标\n从「GLP-1 受体激动剂」大题里收敛出一个可写的综述角度，作为文献检索的输入。\n\n\
-## 思路与理由\n与 Agent 讨论后聚焦「心血管结局」：该方向有多项大型 RCT 佐证、证据链完整，适合作综述主线。\n\n\
-## 已否决方向\n- 减肥适应症全综述：范围太大，文献量不可控；\n- 药物化学机制：偏离本课题的临床结局导向。\n\n\
-## 下一步\n带着本简报开工「文献检索与筛选」：点卡片行的「开工」，这份简报会写进 TASK.md，Agent 据此制定纳入/排除标准。\n\n\
-—— 这是 Ccode 预置的示范简报。你自己的简报由「对话页 → ◈ 提炼接力 → 人工定稿」产生，钉在卡片上随时注入下一步。\n";
+/// 示例课题预置的示范任务书草稿：演示「讨论结论沉淀进 .ccode/drafts/ 草稿」长什么样，
+/// 让新用户点开第一步就理解草稿的用途（对话是过程，草稿是下一步任务书的积累区）。
+const DEMO_STEP_DRAFT: &str = "结论：综述聚焦「心血管结局」方向。\n\n\
+- 理由：该方向有多项大型 RCT 佐证、证据链完整，适合作综述主线；\n\
+- 已否决：减肥适应症全综述（范围太大，文献量不可控）、药物化学机制（偏离临床结局导向）；\n\
+- 下一步：开工「文献检索与筛选」时，Agent 会参考本草稿制定纳入/排除标准。\n\n\
+—— 这是 Ccode 预置的示范草稿。你自己的草稿由「评审沉淀 / ◈ 提炼接力」追加到这里（.ccode/drafts/）。";
 
-/// 预置演示任务卡 + 示范定稿简报（best-effort：播种失败不阻断示例课题创建；
+/// 预置演示任务卡 + 第一步示范任务书草稿（best-effort：播种失败不阻断示例课题创建；
 /// 幂等由 create_demo_at 顶部的早退保证——已注册直接返回、已存在目录只注册不补建）。
 fn seed_demo_task_card(root: &Path) -> Result<(), String> {
-    let card = create_task_card_at(root, "示例：确定综述角度", Some("文献检索与筛选"))?;
-    crate::handoff::save_task_brief_at(root, Some(&card.id), DEMO_TASK_BRIEF)?;
+    create_task_card_at(root, "示例：确定综述角度", Some("文献检索与筛选"))?;
+    append_step_draft_at(root, "文献检索与筛选", "想法期讨论沉淀（示范）", DEMO_STEP_DRAFT)?;
     Ok(())
 }
 
@@ -2243,6 +2182,75 @@ pub async fn delete_pipeline_template(id: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("删除研究流程模板失败: {e}"))?
+}
+
+// ===== 从模板追加步骤（模板接壤拼接：相邻段模板追加进同一项目续走） =====
+// 与「使用模板 = 整体替换 steps」不同：把模板步骤追加到 [[steps]] 末尾，
+// 步骤链/提货单/资源机制对新步骤天然生效。重名（name 或非空 workspace_name）
+// 的步骤跳过不追加，避免覆盖已有工作区绑定。
+
+/// 追加结果：实际追加步数 + 因重名跳过的步骤名（前端据此行内提示）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendStepsResultDto {
+    pub appended: usize,
+    pub skipped: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn append_pipeline_steps(
+    project_root: String,
+    steps: Vec<ProjectStepDto>,
+) -> Result<AppendStepsResultDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
+            &project_root,
+        )))?;
+        append_pipeline_steps_at(&root, steps)
+    })
+    .await
+    .map_err(|e| format!("追加模板步骤失败: {e}"))?
+}
+
+/// 追加实现（root 需已过项目门槛校验；测试直接调这里）。
+/// 读-改-原子写：冲突判定对着随追加增长的步骤表做，模板内部重复也会跳过；
+/// 全部被跳过时不落盘（文件保持原样）。
+pub(crate) fn append_pipeline_steps_at(
+    root: &Path,
+    steps: Vec<ProjectStepDto>,
+) -> Result<AppendStepsResultDto, String> {
+    if steps.is_empty() {
+        return Err("没有可追加的步骤（模板为空）".into());
+    }
+    let mut cfg = read_config_at(root).config;
+    let mut appended = 0usize;
+    let mut skipped: Vec<String> = Vec::new();
+    for step in steps {
+        let name = step.name.trim().to_string();
+        if name.is_empty() {
+            skipped.push("（未命名步骤）".to_string());
+            continue;
+        }
+        let workspace_name = step.workspace_name.trim().to_string();
+        let conflict = cfg.steps.iter().any(|s| {
+            s.name == name
+                || (!workspace_name.is_empty() && s.workspace_name == workspace_name)
+        });
+        if conflict {
+            skipped.push(name);
+            continue;
+        }
+        cfg.steps.push(StepDto {
+            name,
+            workspace_name,
+            ..step
+        });
+        appended += 1;
+    }
+    if appended > 0 {
+        write_config_at(root, &cfg)?;
+    }
+    Ok(AppendStepsResultDto { appended, skipped })
 }
 
 #[cfg(test)]
@@ -3135,6 +3143,106 @@ resources = ["ghost.pdf"]
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ===== 从模板追加步骤（append_pipeline_steps_at） =====
+
+    #[test]
+    fn append_steps_appends_in_order_and_preserves_unknown_keys() {
+        let dir = temp_dir("append-ok");
+        let root = dir.join("proj");
+        let text = "artifact_dir = \"outputs\"\nfuture_top_key = 42\n\n\
+                    [[steps]]\nname = \"初稿\"\nworkspace_name = \"draft\"\n";
+        write(&config_path(&root), text);
+        let res = append_pipeline_steps_at(&root, sample_steps()).unwrap();
+        assert_eq!(res.appended, 2);
+        assert!(res.skipped.is_empty());
+        let cfg = read_config_at(&root).config;
+        let names: Vec<&str> = cfg.steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["初稿", "读文献", "写论文"], "追加在末尾且保序");
+        // 追加步骤的字段完整落盘（run/简报随步骤走）
+        assert_eq!(cfg.steps[1].workspace_name, "lit-notes");
+        assert_eq!(cfg.steps[1].run.len(), 1);
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(raw.contains("future_top_key = 42"), "未知顶层键丢失: {raw}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_steps_skips_name_and_workspace_conflicts() {
+        let dir = temp_dir("append-skip");
+        let root = dir.join("proj");
+        let text = "[[steps]]\nname = \"读文献\"\nworkspace_name = \"lit-notes\"\n\n\
+                    [[steps]]\nname = \"占位\"\nworkspace_name = \"write\"\n";
+        write(&config_path(&root), text);
+        let mut batch = sample_steps(); // 「读文献」(lit-notes) + 「写论文」(无 workspace_name)
+        batch.push(StepDto {
+            name: "换个名字".into(),
+            workspace_name: "write".into(), // 与既有步骤 workspace_name 撞车
+            ..StepDto::default()
+        });
+        batch.push(StepDto {
+            name: "写论文".into(), // 模板内部重复：撞上刚追加进来的同名步骤
+            ..StepDto::default()
+        });
+        let res = append_pipeline_steps_at(&root, batch).unwrap();
+        assert_eq!(res.appended, 1, "只有「写论文」真正追加");
+        assert_eq!(
+            res.skipped,
+            vec!["读文献", "换个名字", "写论文"],
+            "name 撞车、workspace_name 撞车、批次内重复各跳过一条"
+        );
+        let cfg = read_config_at(&root).config;
+        assert_eq!(cfg.steps.len(), 3);
+        assert_eq!(cfg.steps[2].name, "写论文");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_steps_all_skipped_leaves_file_untouched() {
+        let dir = temp_dir("append-allskip");
+        let root = dir.join("proj");
+        let text = "[[steps]]\nname = \"文献整理\"\nworkspace_name = \"lit\"\n";
+        write(&config_path(&root), text);
+        let before = fs::read_to_string(config_path(&root)).unwrap();
+        let res = append_pipeline_steps_at(
+            &root,
+            vec![StepDto {
+                name: "文献整理".into(),
+                ..StepDto::default()
+            }],
+        )
+        .unwrap();
+        assert_eq!(res.appended, 0);
+        assert_eq!(res.skipped, vec!["文献整理"]);
+        assert_eq!(
+            fs::read_to_string(config_path(&root)).unwrap(),
+            before,
+            "全部跳过时不落盘"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_steps_rejects_empty_batch() {
+        let dir = temp_dir("append-empty");
+        let root = dir.join("proj");
+        write(&config_path(&root), "[[steps]]\nname = \"一步\"\n");
+        let err = append_pipeline_steps_at(&root, Vec::new()).unwrap_err();
+        assert!(err.contains("没有可追加的步骤"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_steps_rejects_unregistered_project() {
+        let dir = temp_dir("append-unreg");
+        let plain = dir.join("plain");
+        write(&plain.join("a.txt"), "x");
+        // 无 .ccode/project.toml 且未注册 → 写门槛拒绝（查询真实注册表，随机路径必未注册）
+        let err = ensure_task_project_root(&plain).unwrap_err();
+        assert!(err.contains("不是 Ccode 项目"), "{err}");
+        assert!(!config_path(&plain).exists(), "拒绝后不得留下档案卡");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // ===== 示例课题（create_demo_at / build_demo_pdf） =====
 
     #[test]
@@ -3199,16 +3307,16 @@ resources = ["ghost.pdf"]
         assert_eq!(config.steps[4].workspace_name, "polish");
         assert_eq!(config.resources.len(), 2);
         assert!(git_has_head(&root), "bootstrap 应已产生初始提交");
-        // 预置演示卡片：挂「文献检索与筛选」步骤，钉一份示范定稿简报（含八段新要素）
+        // 预置演示卡片：挂「文献检索与筛选」步骤；第一步播一份示范任务书草稿
         let cards = task_cards_at(&root);
         assert_eq!(cards.len(), 1, "示例课题应预置一张演示卡片");
         let demo_card = &cards[0];
         assert_eq!(demo_card.name, "示例：确定综述角度");
         assert_eq!(demo_card.step.as_deref(), Some("文献检索与筛选"));
-        assert_eq!(demo_card.briefs.len(), 1, "演示卡片应钉一份示范简报");
-        let brief_text = fs::read_to_string(root.join(&demo_card.briefs[0])).unwrap();
-        for marker in ["## 目标", "## 思路与理由", "## 已否决方向", "## 下一步"] {
-            assert!(brief_text.contains(marker), "示范简报缺段: {marker}");
+        let draft_text = fs::read_to_string(root.join(".ccode/drafts/lit-search.md")).unwrap();
+        assert!(draft_text.starts_with("# 任务书草稿：文献检索与筛选"), "{draft_text}");
+        for marker in ["想法期讨论沉淀（示范）", "心血管结局", "已否决", "下一步"] {
+            assert!(draft_text.contains(marker), "示范草稿缺内容: {marker}");
         }
         // 演示人工事项：第一步声明了「下载付费墙文献全文」（落点通配 papers/*.pdf）
         assert_eq!(config.steps[0].human_tasks.len(), 2);
@@ -3504,7 +3612,6 @@ resources = ["ghost.pdf"]
         assert!(!card.created_at.is_empty());
         assert_eq!(card.step.as_deref(), Some("文献检索与筛选"));
         assert_eq!(card.workspace, None);
-        assert!(card.briefs.is_empty());
         // 空白 step 视为未挂
         let card2 = create_task_card_at(&project, "数据分析", Some("  ")).unwrap();
         assert_eq!(card2.step, None);
@@ -3550,7 +3657,8 @@ resources = ["ghost.pdf"]
 
     #[test]
     fn task_card_parse_tolerates_broken_and_render_keeps_unknown() {
-        // 防御式解析：坏条目跳过、缺字段容忍、空白 step 归 None
+        // 防御式解析：坏条目跳过、缺字段容忍、空白 step 归 None；
+        // 旧版残留的 briefs 字段解析时忽略（类型对错都不阻断），写回自然丢弃
         let text = r#"artifact_dir = "outputs"
 
 [[tasks]]
@@ -3570,76 +3678,26 @@ name = "没有 id"
 
 [[tasks]]
 id = "t-c3"
-name = "坏 briefs"
+name = "坏 briefs 残留也忽略"
 briefs = "not-an-array"
 "#;
         let cards = parse_task_cards(text);
-        assert_eq!(cards.len(), 2, "缺 id / briefs 类型错的整条跳过: {cards:?}");
-        assert_eq!(cards[0].briefs, vec![".ccode/brief-1.md".to_string()]);
+        assert_eq!(cards.len(), 3, "缺 id 的整条跳过；残留 briefs 字段一律忽略: {cards:?}");
         assert_eq!(cards[1].step, None, "空白 step 归 None");
         assert_eq!(cards[1].created_at, "");
         // 整份坏掉 → 空表
         assert!(parse_task_cards("not [valid toml").is_empty());
 
-        // 写回只替换 tasks 段，未知键与注释保留
+        // 写回只替换 tasks 段，未知键与注释保留；残留 briefs 写回后自然丢弃
         let existing = "# 用户注释\nfuture_top_key = 42\n\n[[tasks]]\nid = \"t-old\"\nname = \"旧卡\"\n";
         let rendered = render_tasks(Some(existing), &cards[..1]).unwrap();
         assert!(rendered.contains("# 用户注释"), "{rendered}");
         assert!(rendered.contains("future_top_key = 42"), "{rendered}");
         assert!(!rendered.contains("旧卡"), "{rendered}");
+        assert!(!rendered.contains("brief-1.md"), "残留 briefs 写回应丢弃: {rendered}");
         let back = parse_task_cards(&rendered);
         assert_eq!(back, cards[..1].to_vec(), "tasks 往返一致");
         // 现有文件是坏 TOML 时停止写入，不覆盖未知内容
         assert!(render_tasks(Some("not [valid"), &cards).is_err());
-    }
-
-    #[test]
-    fn attach_brief_dedups_and_rejects_escape() {
-        let dir = temp_dir("task-attach");
-        let project = dir.join("proj");
-        fs::create_dir_all(&project).unwrap();
-        let card = create_task_card_at(&project, "卡片", None).unwrap();
-        let brief = project.join(".ccode").join("brief-x.md");
-        write(&brief, "# 简报");
-
-        // 相对路径登记为归一化正斜杠路径；重复登记去重
-        let rel = attach_brief_at(&project, &card.id, ".ccode/brief-x.md").unwrap();
-        assert_eq!(rel, ".ccode/brief-x.md");
-        attach_brief_at(&project, &card.id, &rel).unwrap();
-        let cards = task_cards_at(&project);
-        assert_eq!(cards[0].briefs, vec![".ccode/brief-x.md".to_string()], "重复登记要去重");
-
-        // 顺序保持追加时间序
-        write(&project.join(".ccode/brief-y.md"), "# 二");
-        attach_brief_at(&project, &card.id, ".ccode/brief-y.md").unwrap();
-        let cards = task_cards_at(&project);
-        assert_eq!(
-            cards[0].briefs,
-            vec![".ccode/brief-x.md".to_string(), ".ccode/brief-y.md".to_string()]
-        );
-
-        // 根外路径与不存在文件拒绝；卡片不存在报错
-        write(&dir.join("outside.md"), "外部");
-        assert!(attach_brief_at(&project, &card.id, "../outside.md").is_err());
-        assert!(attach_brief_at(&project, &card.id, ".ccode/missing.md").is_err());
-        assert!(attach_brief_at(&project, "t-gone", &rel).is_err());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    #[cfg(unix)] // 符号链接语义仅 unix；Windows 无权限创建
-    fn attach_brief_rejects_symlink_escape() {
-        let dir = temp_dir("task-attach-sym");
-        let project = dir.join("proj");
-        fs::create_dir_all(&project).unwrap();
-        let card = create_task_card_at(&project, "卡片", None).unwrap();
-        let outside = dir.join("outside");
-        fs::create_dir_all(&outside).unwrap();
-        fs::write(outside.join("brief.md"), "外部内容").unwrap();
-        fs::create_dir_all(project.join(".ccode")).unwrap();
-        std::os::unix::fs::symlink(outside.join("brief.md"), project.join(".ccode/brief-link.md")).unwrap();
-        let err = attach_brief_at(&project, &card.id, ".ccode/brief-link.md").unwrap_err();
-        assert!(err.contains("项目目录内"), "{err}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

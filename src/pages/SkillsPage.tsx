@@ -230,7 +230,7 @@ function ImportModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <div
@@ -469,7 +469,7 @@ function DiscoverModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <div
@@ -600,7 +600,7 @@ function SkillEditorModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <div
@@ -699,7 +699,7 @@ function OptimizeModal({
 
   return (
     <div
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40 ccode-fade"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
     >
       <div

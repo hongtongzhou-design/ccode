@@ -37,7 +37,7 @@ test("节点顺序：种子 → before → agent → during → after → 评审
       ht({ title: "补检索词", timing: "during" }),
       ht({ title: "下载付费", timing: "after" }),
     ],
-    hasBrief: false,
+    hasDraft: false,
     runStatus: "pending",
   });
   assert.deepEqual(
@@ -60,7 +60,7 @@ test("无种子步骤没有 discuss 节点；当前节点随完成推进", () =>
   const flow = buildStepFlow({
     step: step({}),
     states,
-    hasBrief: false,
+    hasDraft: false,
     runStatus: "active",
   });
   assert.deepEqual(
@@ -74,7 +74,7 @@ test("runStatus 映射：review/done 都算 agent 节点完成；评审节点只
   const review = buildStepFlow({
     step: step({}),
     states: [],
-    hasBrief: true,
+    hasDraft: true,
     runStatus: "review",
   });
   assert.equal(review.nodes.find((n) => n.kind === "agent")?.done, true);
@@ -83,7 +83,7 @@ test("runStatus 映射：review/done 都算 agent 节点完成；评审节点只
   const done = buildStepFlow({
     step: step({}),
     states: [],
-    hasBrief: true,
+    hasDraft: true,
     runStatus: "done",
   });
   assert.equal(done.currentKey, null, "全部完成时无当前节点");
@@ -93,7 +93,7 @@ test("after 事项未完成时卡在 after 节点（评审之前）", () => {
   const flow = buildStepFlow({
     step: step({}),
     states: [ht({ title: "下载付费", timing: "after" })],
-    hasBrief: true,
+    hasDraft: true,
     runStatus: "review",
   });
   assert.equal(flow.currentKey, "human:下载付费");

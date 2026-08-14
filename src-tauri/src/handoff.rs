@@ -423,68 +423,71 @@ pub async fn build_session_digest(
     .map_err(|e| format!("提炼接力简报失败: {e}"))?
 }
 
-// ===== 定稿简报（任务卡）：AI 初稿 → 人编辑定稿 → 落盘并钉到卡片 =====
-// 与 handoff-*.md 过程文件不同：定稿简报是项目文档（卡片 briefs 以相对路径引用它），
-// 因此固定落 <项目根>/.ccode/brief-<时间>.md，且不进 gitignore（随 git 走）。
+// ===== 提炼简报人工定稿：DigestPicker 编辑后的写回 =====
+// 任务书结论统一走 .ccode/drafts/ 草稿（append_step_draft），不再有「钉卡」中间层；
+// 这里只负责把人改完的提炼简报写回它自己的过程文件（.ccode/handoff-*.md，不进版本库）。
 
-/// 定稿简报落盘：脱敏 + 64KB 上限后原子写 .ccode/brief-<时间>.md；
-/// task_id 非空时把相对路径登记进卡片 briefs。返回相对项目根的正斜杠路径。
-/// 不动 build_handoff_brief / build_session_digest 的既有行为。
+/// 提炼简报写回：path 必须已存在（它是 build_session_digest 的产物），
+/// canonicalize 后必须位于 .ccode/ 目录内且文件名以 handoff- 开头（防逃逸/防误覆盖其他文件）；
+/// 内容过 redact_and_cap 脱敏截断后原子覆盖写。
 #[tauri::command]
-pub async fn save_task_brief(
-    project_root: String,
-    task_id: Option<String>,
-    content: String,
-) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        save_task_brief_impl(&project_root, task_id.as_deref(), &content)
-    })
-    .await
-    .map_err(|e| format!("保存定稿简报失败: {e}"))?
+pub async fn finalize_digest_brief(path: String, content: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || finalize_digest_brief_at(&path, &content))
+        .await
+        .map_err(|e| format!("写回提炼简报失败: {e}"))?
 }
 
-fn save_task_brief_impl(
-    project_root: &str,
-    task_id: Option<&str>,
-    content: &str,
-) -> Result<String, String> {
-    let root = crate::projects::ensure_task_project_root(Path::new(&sessions::expand_tilde(project_root)))?;
-    save_task_brief_at(&root, task_id, content)
-}
-
-/// 定稿简报落盘（root 需已过项目门槛校验，测试与示例课题播种直接调这里）
-pub(crate) fn save_task_brief_at(root: &Path, task_id: Option<&str>, content: &str) -> Result<String, String> {
+fn finalize_digest_brief_at(path: &str, content: &str) -> Result<(), String> {
     if content.trim().is_empty() {
         return Err("简报内容为空，无法保存".into());
     }
-    let task_id = task_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-    // 先确认卡片存在再落盘，避免写了文件却钉不上卡片留下孤儿文件
-    if let Some(tid) = &task_id {
-        if !crate::projects::task_cards_at(root).iter().any(|t| t.id == *tid) {
-            return Err("卡片不存在（可能已被删除）".into());
+    let p = PathBuf::from(sessions::expand_tilde(path));
+    // canonicalize 要求文件已存在，顺带解开符号链接（逃逸链接解析后落在 .ccode 之外即拒）
+    let canon = fs::canonicalize(&p).map_err(|e| format!("简报文件不存在或不可读: {e}"))?;
+    if !canon.is_file() {
+        return Err("目标不是文件，拒绝覆盖".into());
+    }
+    let in_ccode = canon
+        .parent()
+        .and_then(|d| d.file_name())
+        .is_some_and(|n| n == ".ccode");
+    let is_handoff = canon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("handoff-"));
+    if !in_ccode || !is_handoff {
+        return Err("只能写回 .ccode/ 下的 handoff-*.md 提炼简报".into());
+    }
+    crate::profiles::atomic_write(&canon, &redact_and_cap(content))
+}
+
+/// 旧版「定稿简报」残留扫描（迁移提示用）：列项目根 .ccode/ 下 brief-*.md，
+/// 返回相对项目根的正斜杠路径列表（文件名带时间戳，字典序即时间序）。
+/// list 口径无写门槛（同 read_task_draft）：仅要求 project_root 是有效目录。
+#[tauri::command]
+pub async fn list_legacy_briefs(project_root: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        list_legacy_briefs_at(&sessions::expand_tilde(&project_root))
+    })
+    .await
+    .map_err(|e| format!("扫描遗留简报失败: {e}"))?
+}
+
+fn list_legacy_briefs_at(project_root: &str) -> Result<Vec<String>, String> {
+    let root = fs::canonicalize(project_root).map_err(|e| format!("项目目录无效: {e}"))?;
+    let mut out: Vec<String> = Vec::new();
+    // 无 .ccode 目录 → 空表（不报错）
+    if let Ok(entries) = fs::read_dir(root.join(".ccode")) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with("brief-") && name.ends_with(".md") {
+                out.push(format!(".ccode/{name}"));
+            }
         }
     }
-    // 文件名时间戳同 handoff 口径（冒号在 Windows 文件名非法，只留字母数字）；
-    // 同一秒连存两份时追加 -2/-3 后缀，互不覆盖
-    let stamp: String = sessions::now_iso()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect();
-    let mut rel = format!(".ccode/brief-{stamp}.md");
-    let mut n = 1;
-    while root.join(&rel).exists() {
-        n += 1;
-        rel = format!(".ccode/brief-{stamp}-{n}.md");
-    }
-    let path = root.join(&rel);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
-    }
-    crate::profiles::atomic_write(&path, &redact_and_cap(content))?;
-    if let Some(tid) = &task_id {
-        crate::projects::attach_brief_at(root, tid, &rel)?;
-    }
-    Ok(rel)
+    out.sort();
+    Ok(out)
 }
 
 // ===== 接力链（app.db 小表）：登记时目标会话还不存在，按 agent+cwd 记录，
@@ -805,59 +808,80 @@ mod tests {
         conn
     }
 
-    // ===== 定稿简报（save_task_brief_at） =====
+    // ===== 提炼简报写回（finalize_digest_brief）与遗留简报扫描（list_legacy_briefs） =====
 
-    /// 定稿落盘：.ccode/brief-<时间>.md、脱敏生效、钉进卡片 briefs
+    /// 写回：内容覆盖原 handoff-*.md 且脱敏；非 handoff- 前缀、.ccode 之外、不存在路径一律拒绝
     #[test]
-    fn save_task_brief_writes_redacted_and_attaches() {
-        let root = std::env::temp_dir().join(format!("ccode-brief-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let card = crate::projects::create_task_card_at(&root, "卡片", None).unwrap();
+    fn finalize_digest_brief_overwrites_redacted_and_rejects_foreign_paths() {
+        let root = std::env::temp_dir().join(format!("ccode-finalize-{}", uuid::Uuid::new_v4()));
+        let ccode = root.join(".ccode");
+        fs::create_dir_all(&ccode).unwrap();
+        let target = ccode.join("handoff-20260814T000000Z.md");
+        fs::write(&target, "# 旧内容").unwrap();
 
+        // 正常覆盖写 + 脱敏
         let secret = "sk-ant-api03-abcdef123456";
-        let rel = save_task_brief_at(&root, Some(&card.id), &format!("# 定稿\n\n密钥 {secret}"))
-            .unwrap();
-        assert!(rel.starts_with(".ccode/brief-") && rel.ends_with(".md"), "{rel}");
-        let text = fs::read_to_string(root.join(&rel)).unwrap();
+        finalize_digest_brief_at(
+            target.to_str().unwrap(),
+            &format!("# 定稿\n\n密钥 {secret}"),
+        )
+        .unwrap();
+        let text = fs::read_to_string(&target).unwrap();
+        assert!(!text.contains("旧内容"), "应整份覆盖: {text}");
         assert!(!text.contains(secret), "落盘必须脱敏: {text}");
         assert!(text.contains("已隐藏密钥"));
-        // 钉进卡片 briefs（相对路径）
-        let cards = crate::projects::task_cards_at(&root);
-        assert_eq!(cards[0].briefs, vec![rel.clone()]);
 
-        // 同秒连存两份：后缀区分，互不覆盖，卡片按时间序收两份
-        let rel2 = save_task_brief_at(&root, Some(&card.id), "# 第二份").unwrap();
-        assert_ne!(rel, rel2);
-        assert!(root.join(&rel).exists() && root.join(&rel2).exists());
-        let cards = crate::projects::task_cards_at(&root);
-        assert_eq!(cards[0].briefs, vec![rel, rel2]);
+        // 空内容拒绝且不破坏原文件
+        assert!(finalize_digest_brief_at(target.to_str().unwrap(), "   ").is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), text);
 
-        // 不钉卡片：只落盘
-        let rel3 = save_task_brief_at(&root, None, "# 散稿").unwrap();
-        assert!(root.join(&rel3).exists());
-        assert_eq!(crate::projects::task_cards_at(&root)[0].briefs.len(), 2);
+        // 同目录但非 handoff- 前缀：拒绝（防误覆盖草稿/档案卡等）
+        let other = ccode.join("project.toml");
+        fs::write(&other, "x").unwrap();
+        let err = finalize_digest_brief_at(other.to_str().unwrap(), "# x").unwrap_err();
+        assert!(err.contains("handoff-"), "{err}");
+
+        // .ccode 之外的路径：拒绝（防逃逸）
+        let outside = root.join("handoff-outside.md");
+        fs::write(&outside, "x").unwrap();
+        assert!(finalize_digest_brief_at(outside.to_str().unwrap(), "# x").is_err());
+
+        // 不存在的路径：拒绝（写回载体必须是已生成的 handoff 文件）
+        let missing = ccode.join("handoff-missing.md");
+        assert!(finalize_digest_brief_at(missing.to_str().unwrap(), "# x").is_err());
+        assert!(!missing.exists(), "拒绝时不得顺手新建文件");
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// 定稿校验：空内容拒绝；卡片不存在先报错、不落孤儿文件
+    /// 遗留简报扫描：只收 .ccode/brief-*.md，按时间（文件名）排序；无 .ccode 目录返回空
     #[test]
-    fn save_task_brief_validates_before_write() {
-        let root = std::env::temp_dir().join(format!("ccode-brief-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        assert!(save_task_brief_at(&root, None, "   ").is_err());
-        let err = save_task_brief_at(&root, Some("t-gone"), "# 内容").unwrap_err();
-        assert!(err.contains("卡片不存在"), "{err}");
-        assert!(
-            !root.join(".ccode").exists(),
-            "卡片不存在时不得落盘留孤儿文件"
+    fn list_legacy_briefs_filters_and_sorts() {
+        let root = std::env::temp_dir().join(format!("ccode-legacy-{}", uuid::Uuid::new_v4()));
+        let ccode = root.join(".ccode");
+        fs::create_dir_all(&ccode).unwrap();
+        fs::write(ccode.join("brief-20260802T100000Z.md"), "# 二").unwrap();
+        fs::write(ccode.join("brief-20260801T100000Z.md"), "# 一").unwrap();
+        fs::write(ccode.join("handoff-20260803T100000Z.md"), "# 过程文件不收").unwrap();
+        fs::write(ccode.join("brief-notes.txt"), "非 md 不收").unwrap();
+        fs::write(root.join("brief-root.md"), "根目录不收").unwrap();
+
+        let list = list_legacy_briefs_at(root.to_str().unwrap()).unwrap();
+        assert_eq!(
+            list,
+            vec![
+                ".ccode/brief-20260801T100000Z.md".to_string(),
+                ".ccode/brief-20260802T100000Z.md".to_string(),
+            ]
         );
-        // 64KB 上限：超长内容截断并带标记
-        let big = "数".repeat(80 * 1024);
-        let rel = save_task_brief_at(&root, None, &big).unwrap();
-        let text = fs::read_to_string(root.join(&rel)).unwrap();
-        assert!(text.len() <= BRIEF_CAP, "超过上限: {}", text.len());
-        assert!(text.contains("尾部已截断"));
+
+        // 无 .ccode 目录 → 空表
+        let bare = std::env::temp_dir().join(format!("ccode-legacy-bare-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&bare).unwrap();
+        assert!(list_legacy_briefs_at(bare.to_str().unwrap()).unwrap().is_empty());
+        // 不存在的项目根 → 报错
+        assert!(list_legacy_briefs_at(bare.join("missing").to_str().unwrap()).is_err());
         std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&bare).ok();
     }
 
     /// 接力链往返：登记 → 新会话被扫描到后标注并固化；旧会话/异 agent 不误标

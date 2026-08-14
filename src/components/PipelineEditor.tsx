@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Checkbox, EmptyState } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
-import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
+import { PIPELINE_TEMPLATES, RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import type {
+  AppendStepsResultDto,
   HumanTaskDto,
+  PipelineTemplateDto,
   ProjectConfigDto,
+  ProjectConfigReadDto,
   ProjectStepDto,
   ProjectStepRunDto,
 } from "../types";
@@ -96,14 +100,18 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
  */
 export default function PipelineEditor({
   projectName,
+  projectPath,
   config,
   warnings,
   saving,
   focusStep,
   onSave,
   onClose,
+  onConfigReload,
 }: {
   projectName: string;
+  /** 项目根路径：「从模板追加」直接写 project.toml 用 */
+  projectPath: string;
   config: ProjectConfigDto;
   /** read_project_config 的 warnings（含资源绑定校验），原样展示 */
   warnings: string[];
@@ -113,12 +121,37 @@ export default function PipelineEditor({
   /** 保存成功与关闭覆盖层由父组件负责 */
   onSave: (steps: ProjectStepDto[]) => void;
   onClose: () => void;
+  /** 从模板追加成功后回推重读的配置（父组件同步 cfg/warnings，保持脏检查基准一致） */
+  onConfigReload: (read: ProjectConfigReadDto) => void;
 }) {
   const [drafts, setDrafts] = useState<StepDraft[]>(() =>
     config.steps.map(toDraft),
   );
   const [error, setError] = useState<string | null>(null);
+  // 「从模板追加」：内联模板列表 + 追加结果行内提示
+  const [appendOpen, setAppendOpen] = useState(false);
+  const [appending, setAppending] = useState(false);
+  const [appendResult, setAppendResult] = useState<AppendStepsResultDto | null>(
+    null,
+  );
+  const [userTemplates, setUserTemplates] = useState<PipelineTemplateDto[]>([]);
   const resources = config.resources;
+
+  // 展开模板列表时拉一次用户另存模板；后端未就绪（旧版本）降级为仅内置模板
+  useEffect(() => {
+    if (!appendOpen) return;
+    let stale = false;
+    invoke<PipelineTemplateDto[]>("list_pipeline_templates")
+      .then((list) => {
+        if (!stale) setUserTemplates(list);
+      })
+      .catch(() => {
+        if (!stale) setUserTemplates([]);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [appendOpen]);
 
   // 挂载时定位一次（仅 ✎ 入口带 focusStep；卡片内第一个 textarea 即简报框）
   useEffect(() => {
@@ -190,6 +223,40 @@ export default function PipelineEditor({
     }
     setError(null);
     onSave(drafts.map(toStep));
+  }
+
+  /** 从模板追加：步骤直接写入 project.toml（后端跳过重名步骤），成功后重读配置刷新卡片 */
+  async function appendTemplate(tpl: { name: string; steps: ProjectStepDto[] }) {
+    if (appending) return;
+    if (
+      dirty &&
+      !(await confirmDialog(
+        "当前有未保存的改动，追加模板后会按最新 project.toml 刷新步骤列表，未保存改动将丢失。继续？",
+        { danger: true },
+      ))
+    )
+      return;
+    setAppending(true);
+    setAppendResult(null);
+    setError(null);
+    try {
+      const res = await invoke<AppendStepsResultDto>("append_pipeline_steps", {
+        projectRoot: projectPath,
+        steps: tpl.steps,
+      });
+      // 刷新编辑器步骤列表：与保存后同一口径重读配置，本地草稿与父组件状态一起更新
+      const read = await invoke<ProjectConfigReadDto>("read_project_config", {
+        path: projectPath,
+      });
+      setDrafts(read.config.steps.map(toDraft));
+      onConfigReload(read);
+      setAppendResult(res);
+      setAppendOpen(false);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setAppending(false);
+    }
   }
 
   function renderCard(d: StepDraft, i: number) {
@@ -577,28 +644,109 @@ export default function PipelineEditor({
             />
           )}
           {drafts.map(renderCard)}
-          <button
-            type="button"
-            className="w-full rounded-md bg-strip p-3 text-sm text-l3 hover:bg-inset hover:text-l1"
-            onClick={() =>
-              setDrafts((list) => [
-                ...list,
-                {
-                  name: "",
-                  workspaceName: "",
-                  brief: "",
-                  artifactsText: "",
-                  skills: [],
-                  run: [],
-                  resources: [],
-                  humanTasks: [],
-                  discussionSeeds: [],
-                },
-              ])
-            }
-          >
-            + 添加步骤
-          </button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="flex-1 rounded-md bg-strip p-3 text-sm text-l3 hover:bg-inset hover:text-l1"
+              onClick={() =>
+                setDrafts((list) => [
+                  ...list,
+                  {
+                    name: "",
+                    workspaceName: "",
+                    brief: "",
+                    artifactsText: "",
+                    skills: [],
+                    run: [],
+                    resources: [],
+                    humanTasks: [],
+                    discussionSeeds: [],
+                  },
+                ])
+              }
+            >
+              + 添加步骤
+            </button>
+            <button
+              type="button"
+              className="flex-1 rounded-md bg-strip p-3 text-sm text-l3 hover:bg-inset hover:text-l1 disabled:opacity-40"
+              disabled={appending}
+              title="把模板的步骤追加到当前流程末尾；同名/同工作区名的步骤自动跳过"
+              onClick={() => setAppendOpen((v) => !v)}
+            >
+              ＋ 从模板追加
+            </button>
+          </div>
+          {appendResult && (
+            <p className="text-xs">
+              <span className="text-ok-text">
+                已追加 {appendResult.appended} 步
+              </span>
+              {appendResult.skipped.length > 0 && (
+                <span className="text-warn-text">
+                  {"；跳过 "}
+                  {appendResult.skipped.length}
+                  {" 步（同名）："}
+                  {appendResult.skipped.join("、")}
+                </span>
+              )}
+            </p>
+          )}
+          {appendOpen && (
+            <div className="rounded-md bg-strip p-3">
+              <p className="mb-2 text-xs text-l3">
+                选择模板，把它的步骤追加到当前流程末尾（与现有步骤同名/同工作区名的自动跳过）：
+              </p>
+              <ul className="space-y-1.5">
+                {PIPELINE_TEMPLATES.map((t) => (
+                  <li key={t.id}>
+                    <button
+                      type="button"
+                      className="w-full rounded-sm bg-inset p-2 text-left hover:bg-hover disabled:opacity-40"
+                      disabled={appending}
+                      onClick={() => void appendTemplate(t)}
+                    >
+                      <span className="text-xs font-medium text-l1">
+                        {t.name}
+                      </span>
+                      <span className="ml-2 rounded-sm bg-strip px-1.5 py-0.5 text-xs text-l3">
+                        {t.steps.length} 步
+                      </span>
+                      <span className="mt-1 block truncate text-xs text-l4">
+                        {t.steps.map((s) => s.name).join(" → ")}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+                {userTemplates.length > 0 && (
+                  <li className="pt-1 text-xs text-l3">我的模板</li>
+                )}
+                {userTemplates.map((t) => (
+                  <li key={t.id}>
+                    <button
+                      type="button"
+                      className="w-full rounded-sm bg-inset p-2 text-left hover:bg-hover disabled:opacity-40"
+                      disabled={appending}
+                      onClick={() => void appendTemplate(t)}
+                    >
+                      <span className="text-xs font-medium text-l1">
+                        {t.name}
+                      </span>
+                      <span className="ml-2 rounded-sm bg-strip px-1.5 py-0.5 text-xs text-l3">
+                        {t.steps.length} 步
+                      </span>
+                      <span className="mt-1 block truncate text-xs text-l4">
+                        {t.steps.map((s) => s.name).join(" → ")}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {appending && (
+                <p className="mt-2 text-xs text-l3">追加中…</p>
+              )}
+            </div>
+          )}
           <div className="flex justify-end gap-2 pb-4">
             <button
               type="button"

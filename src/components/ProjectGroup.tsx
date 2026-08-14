@@ -17,7 +17,7 @@ import KickoffConfirmDialog from "./KickoffConfirmDialog";
 import { Checkbox, hoverRevealClass } from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
-import { startPipelineStep, type TaskBriefRef } from "../pipeline-start";
+import { startPipelineStep } from "../pipeline-start";
 import { actionableHumanTasks, pendingHumanTasks } from "../task-cards";
 import { normSep } from "../path-utils";
 import type { RunOverviewInput } from "../run-overview";
@@ -563,6 +563,13 @@ export default function ProjectGroup({
   const [humanStates, setHumanStates] = useState<HumanTaskStateDto[] | null>(
     null,
   );
+  // 聚焦步骤的任务书草稿（v3.72）：聚焦头部「待开始」情境文案（describeStep）与卡片区流程线
+  // 共用这一份加载（TaskCardsSection 经 focusDraft prop 接收，不重复请求）；effect 在 focusStepName 之后
+  const [focusDraft, setFocusDraft] = useState<{
+    stepName: string;
+    relPath: string;
+    text: string | null;
+  } | null>(null);
   const [pipelineSaving, setPipelineSaving] = useState(false);
   const [applyingTemplate, setApplyingTemplate] = useState(false);
   // 「使用研究流程模板」旁的可选课题主题输入，随模板一并落进 project.toml；
@@ -587,11 +594,10 @@ export default function ProjectGroup({
   const [tplSavedMsg, setTplSavedMsg] = useState<string | null>(null);
 
   /** 一键开步（§11.3 机制三）：invoke 链路在 pipeline-start.ts 与评审「开始下一步」共用，此处只管组件态。
-   *  v3.64 起「开工」为两步：先开 KickoffConfirmDialog（TASK.md 预览 + 简报来源勾选 + 融合），
-   *  确认后本函数才执行建工作区链路；briefs = 弹层确认（或融合定稿）的简报引用 */
+   *  v3.64 起「开工」为两步：先开 KickoffConfirmDialog（TASK.md 预览编辑，任务书草稿优先），
+   *  确认后本函数才执行建工作区链路；taskMdOverride = 弹层编辑区的最终内容 */
   async function runStartStep(
     index: number,
-    briefs?: TaskBriefRef[],
     taskMdOverride?: string,
   ) {
     if (!project || !cfg) return;
@@ -602,7 +608,6 @@ export default function ProjectGroup({
         projectPath: project.path,
         step,
         cfg,
-        briefs,
         taskMdOverride,
         onError,
         // 刷新先于跳终端：run 脚本写入在工作区行刷新之前，「运行脚本」菜单当次即可见
@@ -931,8 +936,6 @@ export default function ProjectGroup({
   const profiles = useAppStore((s) => s.profiles);
   // 步进器大圆的注意力点：终端运行状态镜像（TerminalPage 唯一写入方，只读消费）
   const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
-  // 任务卡（聚焦头部「待开始」文案按是否有定稿简报分情境；TaskCardsSection 负责加载，这里只读）
-  const taskCards = useAppStore((s) => s.taskCards[projectPath]);
   function viewPdfResource(r: ProjectResourceDto) {
     setPreviewReq({
       path: absoluteResourcePath(projectPath, r.path),
@@ -1019,13 +1022,13 @@ export default function ProjectGroup({
             }
           : {
               ...base,
-              // 情境化引导（顺序引导 A）：本步骤有定稿简报 = 想法聊透了；
-              // 没有则建议先点种子——不阻断，「开始」始终可用
-              statusText: (taskCards ?? []).some(
-                (c) => c.step === step.name && c.briefs.length > 0,
-              )
-                ? "想法已就位，可以开始"
-                : "待开始 · 建议先点下方种子聊聊",
+              // 情境化引导（顺序引导 A）：任务书草稿已起草 = 想法聊透了；
+              // 没有则建议先点种子——不阻断，「开始」始终可用。
+              // （草稿只加载聚焦步骤那一份；statusText 仅经 focusDesc 展示，即聚焦步骤）
+              statusText:
+                focusDraft?.stepName === step.name && focusDraft.text?.trim()
+                  ? "任务书草稿已就位，可以开始"
+                  : "待开始 · 建议先点下方种子聊聊",
               actionLabel: "开始",
               action: (() => void startStep(i)),
             };
@@ -1087,6 +1090,27 @@ export default function ProjectGroup({
     if (focusStep !== null) return (cfg.steps[focusStep]?.name ?? null);
     return currentStep?.step.name ?? null;
   })();
+  // 聚焦步骤草稿加载（state 声明在上方 describeStep 之前）：进项目详情/切聚焦/页面刷新时重读，不轮询
+  useEffect(() => {
+    if (!project || !focusStepName) {
+      setFocusDraft(null);
+      return;
+    }
+    let stale = false;
+    invoke<{ relPath: string; text: string | null }>("read_task_draft", {
+      projectRoot: project.path,
+      stepName: focusStepName,
+    })
+      .then((d) => {
+        if (!stale) setFocusDraft({ stepName: focusStepName, ...d });
+      })
+      .catch(() => {
+        if (!stale) setFocusDraft(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [project, focusStepName, refreshToken]);
   // 聚焦步骤的执行状态（流程线 agent/评审节点用）：deriveStepStatus 六态映射到流程线四态
   const focusRunStatus = (() => {
     if (!cfg || !focusStepName) return undefined;
@@ -1563,7 +1587,7 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {/* 任务卡区（研究流程步进器下方）：对话的文件夹 + 定稿简报收集夹；无独立状态机，不碰工作区/评审流程。
+      {/* 任务卡区（研究流程步进器下方）：对话的归档文件夹（任务书沉淀统一走草稿）；无独立状态机，不碰工作区/评审流程。
           v3.70 起按 focusStep 聚焦：默认只看当前步骤，点大圆切步骤，「总览全部步骤」还原 */}
       {registered && cfg && (
         <TaskCardsSection
@@ -1577,6 +1601,11 @@ export default function ProjectGroup({
           focusStatusText={focusDesc?.statusText ?? null}
           focusRunStatus={focusRunStatus}
           focusHumanPending={focusHumanPending}
+          focusDraft={
+            focusDraft && focusDraft.stepName === focusStepName
+              ? focusDraft
+              : null
+          }
           reviewConflict={focusDesc?.st.key === "blocked"}
           onRestoreWorkspace={
             focusArchivedWs ? () => void restoreWs(focusArchivedWs) : undefined
@@ -1910,12 +1939,17 @@ export default function ProjectGroup({
       {editorOpen && project && cfg && (
         <PipelineEditor
           projectName={displayName}
+          projectPath={project.path}
           config={cfg}
           warnings={cfgWarnings}
           saving={pipelineSaving}
           focusStep={editorFocus}
           onSave={(steps) => void savePipeline(steps)}
           onClose={() => setEditorOpen(false)}
+          onConfigReload={(read) => {
+            setCfg(read.config);
+            setCfgWarnings(read.warnings);
+          }}
         />
       )}
       {historyOpen && project && (
@@ -1935,10 +1969,10 @@ export default function ProjectGroup({
           originCardId={kickoff.originCardId}
           busy={starting !== null}
           onCancel={() => setKickoff(null)}
-          onConfirm={(briefs, taskMd) => {
+          onConfirm={(taskMd) => {
             const index = kickoff.index;
             setKickoff(null);
-            void runStartStep(index, briefs, taskMd);
+            void runStartStep(index, taskMd);
           }}
           onCfgChange={(next) => setCfg(next)}
         />

@@ -14,31 +14,17 @@ import type {
   WorkspaceDto,
 } from "./types";
 
-/** 进 TASK.md「任务简报（定稿）」段的一份简报：卡片名 + 全文（已读好的文本） */
-export interface TaskBriefInput {
-  cardName: string;
-  text: string;
-}
-
-/** 开工确认弹层/实际开工共用的简报引用：相对项目根路径 + 卡片名 */
-export interface TaskBriefRef {
-  path: string;
-  cardName: string;
-}
-
-/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 任务简报（定稿，可选） + 预期产物 + 人工事项（可选） + 推荐技能 + 项目资源（步骤有资源绑定时只列绑定项，一键开步落成工作区）。
+/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 预期产物 + 人工事项（可选） + 推荐技能 + 项目资源（步骤有资源绑定时只列绑定项，一键开步落成工作区）。
  *  一键开步（开工确认弹层 / 评审「开始下一步」）与 TerminalPage 的「整理为笔记」开步链路共用，保持各处 TASK.md 一致。
  *  artifacts 为项目根提货单（上一步产物），非空时在「项目资源」后追加提货单段。
  *  skillMeta 为技能库元数据（name → 一句话描述）：步骤 skills 非空时渲染「本步骤推荐技能」段；
- *  缺省（库读取失败）时只列技能名，不误标未安装。
- *  briefs 为任务卡定稿简报全文（卡片「开工」带入）：单份直排，多份按卡片名分小节；缺省时零变化 */
+ *  缺省（库读取失败）时只列技能名，不误标未安装 */
 export function renderTaskMd(
   step: ProjectStepDto,
   cfg: ProjectConfigDto,
   projectPath: string,
   artifacts?: ArtifactEntryDto[],
   skillMeta?: Record<string, string>,
-  briefs?: TaskBriefInput[],
 ): string {
   const lines = [`# ${step.name}`, ""];
   // 课题主题放在简报之前：auto 模式的 Agent 据此明确综述主题
@@ -50,17 +36,6 @@ export function renderTaskMd(
     step.brief.trim() ||
       "（在 .ccode/project.toml 的 steps.brief 中补充本步骤任务简报）",
   );
-  // 任务卡定稿简报（对话→记忆）：全文嵌入，步骤简报之后、预期产物之前；
-  // 多份（多卡想法汇总）按卡片名分小节
-  const validBriefs = (briefs ?? []).filter((b) => b.text.trim());
-  if (validBriefs.length === 1) {
-    lines.push("", "## 任务简报（定稿）", validBriefs[0].text.trim());
-  } else if (validBriefs.length > 1) {
-    lines.push("", "## 任务简报（定稿）");
-    for (const b of validBriefs) {
-      lines.push("", `### 来自卡片「${b.cardName}」`, b.text.trim());
-    }
-  }
   if (step.expectedArtifacts.length > 0) {
     lines.push(
       "",
@@ -180,40 +155,15 @@ export async function gatherTaskMdExtras(
   return { artifacts, skillMeta };
 }
 
-/** 读简报全文（相对项目根，read_file_preview 根约束放行）：逐份 best-effort，失败经 onError 提示并跳过。
- *  开工确认弹层预览与实际开工共用，保持所见即所得 */
-export async function readTaskBriefs(
-  projectPath: string,
-  briefs: TaskBriefRef[],
-  onError?: (msg: string) => void,
-): Promise<TaskBriefInput[]> {
-  const out: TaskBriefInput[] = [];
-  for (const brief of briefs) {
-    try {
-      const abs = `${projectPath.replace(/[\\/]+$/, "")}/${brief.path}`;
-      const preview = await invoke<{ text: string; truncated: boolean }>(
-        "read_file_preview",
-        { path: abs, root: projectPath },
-      );
-      out.push({ cardName: brief.cardName, text: preview.text });
-    } catch (reason) {
-      onError?.(`简报「${brief.cardName}」读取失败（不影响开步）：${String(reason)}`);
-    }
-  }
-  return out;
-}
-
 /** 只读预览用的一步到位拼装（步骤级「预览 TASK.md」入口）：与开工落盘同一出处
- *  （gatherTaskMdExtras + readTaskBriefs + renderTaskMd），禁复制第二份拼装逻辑 */
+ *  （gatherTaskMdExtras + renderTaskMd），禁复制第二份拼装逻辑 */
 export async function buildTaskMdPreview(
   projectPath: string,
   step: ProjectStepDto,
   cfg: ProjectConfigDto,
-  briefs: TaskBriefRef[],
 ): Promise<string> {
   const { artifacts, skillMeta } = await gatherTaskMdExtras(projectPath, step);
-  const briefInputs = await readTaskBriefs(projectPath, briefs);
-  return renderTaskMd(step, cfg, projectPath, artifacts, skillMeta, briefInputs);
+  return renderTaskMd(step, cfg, projectPath, artifacts, skillMeta);
 }
 
 /** 一键开步共享链路（§11.3 机制三）：ensure git → bootstrap 提交 → 建工作区 → 简报落成 TASK.md →
@@ -223,7 +173,6 @@ export async function startPipelineStep({
   projectPath,
   step,
   cfg,
-  briefs,
   taskMdOverride,
   onError,
   onOpenTerminal,
@@ -231,9 +180,7 @@ export async function startPipelineStep({
   projectPath: string;
   step: ProjectStepDto;
   cfg: ProjectConfigDto;
-  /** 任务卡「开工」带入的定稿简报（相对项目根 + 卡片名）；多份按卡片名分小节进 TASK.md「任务简报（定稿）」段 */
-  briefs?: TaskBriefRef[];
-  /** 开工确认弹层编辑区的最终内容（人编辑/AI 融合后的定稿）：非空时覆盖默认拼装，
+  /** 开工确认弹层编辑区的最终内容（人编辑后的定稿）：非空时覆盖默认拼装，
       写盘仍是 write_workspace_task_md 单一路径 */
   taskMdOverride?: string;
   onError: (msg: string) => void;
@@ -260,17 +207,13 @@ export async function startPipelineStep({
   });
   // TASK.md 为 best-effort：write_workspace_task_md 是 P1b 的最小后端补充，
   // 命令就绪前失败不阻断开步，简报仍可在 project.toml 与步骤「编辑简报」中查看。
-  // taskMdOverride（开工确认弹层编辑区定稿）非空时覆盖默认拼装；否则按简报引用现拼
+  // taskMdOverride（开工确认弹层编辑区定稿）非空时覆盖默认拼装；否则按模板现拼
   let content: string;
   if (taskMdOverride?.trim()) {
     content = taskMdOverride;
   } else {
     const { artifacts, skillMeta } = await gatherTaskMdExtras(projectPath, step);
-    // 任务卡定稿简报：best-effort 读入全文；读取失败不阻断开步，TASK.md 只少对应简报
-    const briefInputs = briefs?.length
-      ? await readTaskBriefs(projectPath, briefs, onError)
-      : [];
-    content = renderTaskMd(step, cfg, projectPath, artifacts, skillMeta, briefInputs);
+    content = renderTaskMd(step, cfg, projectPath, artifacts, skillMeta);
   }
   try {
     await invoke("write_workspace_task_md", {

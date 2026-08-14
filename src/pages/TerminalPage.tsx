@@ -2344,6 +2344,18 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         setRightOpen(true);
         setRightTab("git");
       }
+      // 开聊自动带开文件预览（一次性交接，不落盘）：右栏落到预览页签，
+      // 评审覆盖层已在上面统一关掉（同 previewReq 消费语义）
+      if (pt.previewPath) {
+        setRightOpen(true);
+        setRightTab("preview");
+        setPreview({
+          path: pt.previewPath,
+          name: basename(pt.previewPath),
+          root: pt.previewRoot ?? null,
+        });
+        setPreviewDirty(false);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, pendingTerminal, setPendingTerminal, setRunningScript]);

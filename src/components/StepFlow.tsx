@@ -12,7 +12,7 @@ export default function StepFlow({
   projectPath,
   step,
   runStatus,
-  hasBrief,
+  hasDraft,
   ws,
   onSeed,
   onStart,
@@ -26,8 +26,8 @@ export default function StepFlow({
   projectPath: string;
   step: ProjectStepDto;
   runStatus: StepRunStatus;
-  /** 本步骤已有定稿简报（discuss 节点完成口径） */
-  hasBrief: boolean;
+  /** 本步骤任务书草稿已起草（discuss 节点完成口径） */
+  hasDraft: boolean;
   /** 本步骤绑定的活跃工作区（无 = 未开始） */
   ws: WorkspaceDto | undefined;
   /** 讨论种子点击（由卡片区已有逻辑承载：建卡 + 聊想法） */
@@ -72,7 +72,8 @@ export default function StepFlow({
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);
 
   /** 聊任务书（v3.72）：讨论直接服务于草稿——非只读启动（agent 要写草稿），
-   *  指令约束只许新建/修改草稿这一个文件；不用卡片的只读保护（那是不动文件口径） */
+   *  指令约束只许新建/修改草稿这一个文件；不用卡片的只读保护（那是不动文件口径）。
+   *  开聊同时带开草稿预览（previewPath/previewRoot 交接给终端页右栏） */
   function chatDraft() {
     if (!draft) return;
     setPendingTerminal({
@@ -83,7 +84,11 @@ export default function StepFlow({
         `我们一起完善「${step.name}」这一步的任务书草稿（${draft.relPath}）。` +
         `先读它的现有内容（不存在就新建，开头写「# 任务书草稿：${step.name}」）。` +
         `我们讨论出的结论你直接整理进这个草稿文件——只允许新建/修改这一个文件，其他文件一律不要动。` +
+        `讨论中没定下来的问题，记到草稿的「## 待拍板」小节。` +
         (seeds.length > 0 ? `可以先从这几个问题聊起：${seeds.join("；")}` : ""),
+      // 草稿绝对路径：不存在也会在讨论中被 agent 创建，预览随后刷新即可见
+      previewPath: `${projectPath.replace(/[\\/]+$/, "")}/${draft.relPath}`,
+      previewRoot: projectPath,
     });
     setPage("terminal");
   }
@@ -103,7 +108,7 @@ export default function StepFlow({
   const flow = buildStepFlow({
     step,
     states,
-    hasBrief,
+    hasDraft,
     runStatus,
   });
   const seeds = step.discussionSeeds ?? [];

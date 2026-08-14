@@ -411,6 +411,10 @@ export interface SkillDto {
   staleCopies?: string[];
   /** 各 agent 的分发形态（"symlink" | "copy"；仅启用的 agent 有键） */
   appModes?: Record<string, string>;
+  /** SKILL.md 正文提及 MCP 工具/服务器（后端内容扫描，serde camelCase） */
+  mentionsMcp: boolean;
+  /** SKILL.md frontmatter 声明的产物路径（目录带尾斜杠，list 时现算）；空/缺 = 未声明，不参与产物冲突检测 */
+  outputs?: string[];
 }
 
 /** skill_md_path 返回：SKILL.md 绝对路径 + 技能库目录（◈ 优化开终端的 cwd） */
@@ -596,7 +600,7 @@ export interface ProjectConfigDto {
   steps: ProjectStepDto[];
 }
 
-/** 任务卡（list_task_cards 等）：挂在项目下的「对话文件夹 + 定稿简报收集夹」，无独立状态机 */
+/** 任务卡（list_task_cards 等）：挂在项目下的「对话文件夹」，无独立状态机 */
 export interface TaskCardDto {
   /** "t-<短随机>"，项目内唯一 */
   id: string;
@@ -607,8 +611,6 @@ export interface TaskCardDto {
   /** 开工后绑定的工作区名（预留字段，后端暂无写入入口） */
   workspace: string | null;
   createdAt: string;
-  /** 定稿简报相对项目根路径（统一正斜杠），时间序 */
-  briefs: string[];
 }
 
 /** read_project_config 返回：坏字段不阻断，逐条进 warnings */
@@ -624,6 +626,12 @@ export interface PipelineTemplateDto {
   description: string;
   steps: ProjectStepDto[];
   createdAt: string;
+}
+
+/** append_pipeline_steps 返回：实际追加步数 + 因重名（name/workspaceName）跳过的步骤名 */
+export interface AppendStepsResultDto {
+  appended: number;
+  skipped: string[];
 }
 
 export interface DiscoveredResourceDto {

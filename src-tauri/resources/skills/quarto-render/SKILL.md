@@ -1,6 +1,7 @@
 ---
 name: quarto-render
 description: Quarto 稿件渲染规范。当用户要求把 manuscript/*.qmd 渲染为 PDF/docx/html，或论文流水线中「渲染成稿」一步时使用。先 quarto check 确认环境，渲染产物写入产物目录（不进 git），缺依赖按序引导安装，报错先装依赖不绕路，渲染成功后在 Ccode 改动面板「登记产物」记入提货单。
+outputs: [output/]
 ---
 
 # Quarto 稿件渲染

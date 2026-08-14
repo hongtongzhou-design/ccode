@@ -101,6 +101,10 @@ export interface PendingTerminal {
   initialPrompt?: string;
   /** 打开后右栏直接落到指定页签（如卡片区「主仓改动」提醒跳到改动面板） */
   rightTab?: "git";
+  /** 开聊自动带开文件预览（路径 + 预览根）：一次性交接不落盘
+      （terminal-tab-persistence 白名单本就不含它） */
+  previewPath?: string;
+  previewRoot?: string;
   /** 「聊想法」只读模式：pty_spawn 注入只读/计划模式参数（硬保护，支持的 CLI 才生效） */
   readonly?: boolean;
 }
@@ -156,9 +160,6 @@ export interface DigestJob {
   error?: string;
   /** 已选定发送目标/用户丢弃：从收件箱摘除（简报文件仍在磁盘，重开 picker 复用） */
   consumed: boolean;
-  /** 人工定稿后的落盘简报（save_task_brief 产物）；非空 = 已定稿，picker 重开直达发送页，
-      发送一律用这份定稿（AI 初稿的 handoff-*.md 留在磁盘不再使用） */
-  finalized?: HandoffBriefDto;
 }
 
 /** 收件箱条目动作统一派发（工作区页 strip 与 App 标题栏收件箱共用） */
@@ -277,8 +278,6 @@ interface AppState {
   ) => void;
   /** 已选定发送目标/用户丢弃：从收件箱摘除（简报文件保留，重开 picker 复用） */
   consumeDigestJob: () => void;
-  /** 定稿落盘成功：记录定稿简报（DigestPicker 重开直达发送页，发送用定稿路径） */
-  setDigestFinalized: (brief: HandoffBriefDto) => void;
   /** 收件箱「去发送」→ 对话页重开 DigestPicker 的一次性请求（nonce 触发） */
   digestOpenReq: number | null;
   setDigestOpenReq: (n: number | null) => void;
@@ -438,10 +437,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   consumeDigestJob: () => {
     const j = get().digestJob;
     if (j) set({ digestJob: { ...j, consumed: true } });
-  },
-  setDigestFinalized: (brief) => {
-    const j = get().digestJob;
-    if (j) set({ digestJob: { ...j, finalized: brief } });
   },
   digestOpenReq: null,
   setDigestOpenReq: (n) => set({ digestOpenReq: n }),

@@ -42,8 +42,8 @@
   遮罩入场 `ccode-fade`（120ms 透明度）；统一 `--ccode-motion-ease`，UI 反馈都在 200ms 内；`prefers-reduced-motion` 全局关闭。
   focus 环 `outline: 1px solid var(--color-l3)`（field 色太弱，l3 提亮不换色相）。
 - **弹层规格台账**：宽度两档——简单对话/短表单 `w-[26rem]`、富表单 `w-[36rem]`（命令面板 `w-[30rem]` 为独立规格）；
-  遮罩统一 `bg-black/40` + `ccode-fade`；z 轴台账：页面模态 z-10 / 悬浮层 z-20 / 页面内弹层 z-40 / 右键菜单·命令面板·下拉 z-50 /
-  评审内弹层 z-60 / 确认框 z-[70]（ConfirmDialog 压一切）。新弹层按档入座，禁造新档。
+  遮罩统一 `bg-black/40` + `ccode-fade`；z 轴台账：sticky 页头 z-20（基准）/ 页面模态 z-40（必须压过页头，用 z-10 会被
+  页头白底戳穿遮罩）/ 右键菜单·命令面板·下拉 z-50 / 评审内弹层 z-60 / 确认框 z-[70]（ConfirmDialog 压一切）。新弹层按档入座，禁造新档。
 - **按钮分工**：页头/工具栏次按钮 = `secondaryActionClass`（描边 bg-strip）；表单内实心确认 = `bg-btn` + `hover:brightness-125`
   （实心按钮 hover 用提亮，禁 `hover:bg-white/10`——浅色下不可见）；分段控件选中态 = `bg-seg-sel`（SegTabs 口径），
   不用 CTA 填充（每视图只允许一个主 CTA）。

@@ -1,6 +1,7 @@
 ---
 name: figure-forge
 description: 投稿级图表生产规范。当用户要求把分析结果画成论文/投稿用图、按期刊规格调整图（尺寸/分辨率/字体）、或把探索性草稿图升级为投稿质量时使用。负责「怎么画到位」；图的内容设计与选型见 figure-designer 技能。全部图由可复现脚本生成，禁止手工改图。
+outputs: [figures/]
 ---
 
 # 投稿级图表生产（figure-forge）

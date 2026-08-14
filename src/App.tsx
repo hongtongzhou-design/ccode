@@ -99,17 +99,8 @@ function App() {
   const dismissHelpRequest = useAppStore((s) => s.dismissHelpRequest);
   // 类别胶囊：按 key 前缀分组（固定顺序，空类不渲染）
   const inboxGroups = groupInbox(inboxItems);
-  // macOS 自绘标题栏的窗口标题（hiddenTitle 后原生标题不显示，由我们渲染）
-  const [winTitle, setWinTitle] = useState("");
   // 标题栏收件箱的展开态：当前展开的类别（Ghostty 式下拉；遮罩/Esc/再点关闭）
   const [titleInboxCat, setTitleInboxCat] = useState<InboxCategory | null>(null);
-  useEffect(() => {
-    if (!IS_MAC) return;
-    getCurrentWindow()
-      .title()
-      .then(setWinTitle)
-      .catch(() => {});
-  }, []);
   // 展开中的类别被清空（如最后一条 help 被忽略）时收起下拉
   useEffect(() => {
     if (
@@ -300,12 +291,13 @@ function App() {
   return (
     <ErrorBoundary>
       <div className="ccode-app-shell flex h-full flex-col overflow-hidden bg-rail text-l2">
-        {/* macOS 自绘标题栏（titleBarStyle: Overlay + hiddenTitle）：拖拽区 + 窗口标题 +
+        {/* macOS 自绘标题栏（titleBarStyle: Overlay + hiddenTitle）：纯拖拽区 +
             Ghostty 式标题栏收件箱（按类别拆胶囊，点胶囊向下展开该类明细，遮罩/Esc/再点关闭）。
+            窗口标题不在界面渲染（用户拍板删除，标题字符串仍保留在 tauri 配置里供自动化定位窗口）。
             Windows/Linux 用原生标题栏，收件箱保留在工作区页内 strip。
             执行态（chromeHidden）下也必须保留这条栏：Overlay 模式下红绿灯按钮始终悬浮在
             左上角，栏的 pl-[78px] 负责让位；整条隐藏会导致按钮压住页面内容、胶囊消失。
-            执行态只省略窗口标题与底部分隔线，栏体保留以承接红绿灯与收件箱胶囊。 */}
+            执行态只省略底部分隔线，栏体保留以承接红绿灯与收件箱胶囊。 */}
         {IS_MAC && (
           <header
             data-tauri-drag-region
@@ -313,14 +305,6 @@ function App() {
               chromeHidden ? "" : "border-b border-hairline"
             }`}
           >
-            {!chromeHidden && (
-              <span
-                data-tauri-drag-region
-                className="pointer-events-none select-none text-xs font-medium text-l3"
-              >
-                {winTitle}
-              </span>
-            )}
             {inboxGroups.length > 0 && (
               <div className="relative flex items-center gap-1.5">
                 {inboxGroups.map((group) => (

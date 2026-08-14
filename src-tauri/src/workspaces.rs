@@ -3240,7 +3240,7 @@ fn register_artifact_impl(
 }
 
 /// 读项目根（或工作区根）的清单；缺失返回空，解析全程防御式容错
-/// （pub(crate)：ai.rs 的 ai_fuse_task_md 要把提货单清单喂给融合 prompt）
+/// （pub(crate)：PDF 白名单 artifact_paths_at 与清单命令共用这份解析）
 pub(crate) fn read_artifacts_manifest_impl(root: &Path) -> Vec<ArtifactEntryDto> {
     let Ok(text) = fs::read_to_string(root.join(ARTIFACTS_FILE)) else {
         return Vec::new();
