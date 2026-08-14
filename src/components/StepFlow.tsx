@@ -246,14 +246,14 @@ export default function StepFlow({
             >
               <div className="flex items-center gap-2">
                 <span
-                  className={`w-4 shrink-0 text-center text-xs ${ic.cls}`}
+                  className={`w-4 shrink-0 text-center text-sm ${ic.cls}`}
                 >
                   {ic.text}
                 </span>
                 {node.kind === "human" ? (
                   <input
                     type="checkbox"
-                    className="size-3.5 shrink-0 accent-[var(--color-cta)]"
+                    className="size-4 shrink-0 accent-[var(--color-cta)]"
                     checked={node.done}
                     disabled={busyTitle === node.human!.title}
                     onChange={(e) =>
@@ -267,7 +267,7 @@ export default function StepFlow({
                   />
                 ) : null}
                 <span
-                  className={`min-w-0 flex-1 truncate text-xs ${
+                  className={`min-w-0 flex-1 truncate text-sm ${
                     node.done
                       ? "text-l3 line-through"
                       : isCurrent
@@ -279,7 +279,7 @@ export default function StepFlow({
                 </span>
                 {pendingDot && (
                   <span
-                    className="shrink-0 rounded-sm bg-warn/15 px-1 py-px text-micro text-warn-text"
+                    className="shrink-0 rounded-sm bg-warn px-1 py-px text-micro text-warn-text"
                     title="这件事还等着你完成"
                   >
                     等你做
@@ -292,7 +292,7 @@ export default function StepFlow({
               </div>
               {/* 当前节点的引导与展开操作：种子 chips / 落点说明 */}
               {isCurrent && node.hint && (
-                <p className="mt-0.5 pl-9 text-micro text-l4">{node.hint}</p>
+                <p className="mt-0.5 pl-9 text-xs text-l4">{node.hint}</p>
               )}
               {node.kind === "agent" && agentContent && (
                 <div className="mt-0.5 pl-9">{agentContent}</div>
@@ -320,7 +320,7 @@ export default function StepFlow({
                       </button>
                     )}
                     {draft && (
-                      <span className="text-micro text-l4">
+                      <span className="text-xs text-l4">
                         {draft.exists
                           ? `已起草 · ${draft.relPath}`
                           : "还没起草——开聊后 Agent 会创建"}
@@ -391,10 +391,10 @@ export default function StepFlow({
               {node.kind === "human" &&
                 (node.human!.guidance || node.human!.target) && (
                   <details className="mt-0.5 pl-9">
-                    <summary className="cursor-pointer select-none text-micro text-l4 hover:text-l2">
+                    <summary className="cursor-pointer select-none text-xs text-l4 hover:text-l2">
                       怎么做 / 落点
                     </summary>
-                    <div className="mt-0.5 space-y-0.5 text-micro leading-4 text-l3">
+                    <div className="mt-0.5 space-y-0.5 text-xs leading-5 text-l3">
                       {node.human!.guidance && (
                         <p className="whitespace-pre-wrap">
                           {node.human!.guidance}
