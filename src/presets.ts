@@ -92,4 +92,6 @@ export const PRESETS: Preset[] = [
   },
   // Cursor 不设预设：端点是 Cursor 专有协议（CURSOR_API_ENDPOINT），非 OpenAI/Anthropic 兼容，
   // 第三方供应商端点接上也不通，列出来只会误导
+  // Grok Build 是 OpenAI 兼容协议（XAI_API_KEY 鉴权），官方端点公开
+  { name: "xAI 官方", agent: "grok", baseUrl: "https://api.x.ai/v1" },
 ];

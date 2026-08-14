@@ -518,7 +518,9 @@ fn plan_writes(
                 push(tag, path, content);
             }
         }
-        other => return Err(format!("未知 agent: {other}")),
+        other => return Err(format!(
+            "「设为全局默认」暂不支持 {other}（grok 的全局配置是 TOML [model.<name>] 段结构，首版仅支持启动注入；其余 agent 未适配）"
+        )),
     }
     Ok(plans)
 }

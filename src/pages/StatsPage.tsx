@@ -68,6 +68,7 @@ const AGENT_COLORS: Record<string, string> = {
   qwen: "var(--color-err-text)",
   opencode: "var(--color-add)",
   kimi: "var(--color-tabline)",
+  grok: "var(--color-cta-pill-text)",
 };
 /** 未知 agent 兜底：按 id 哈希取 HSL 色，确定性且不再复用上方令牌池
     （原按列表序循环同一组令牌，未知 agent 会与已知 agent 固定色撞色） */

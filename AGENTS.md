@@ -8,13 +8,13 @@
 
 ## 项目简介
 
-Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）——底层是八个 Agent CLI 的统一控制台（启动器 + 配置中心 +
+Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）——底层是九个 Agent CLI 的统一控制台（启动器 + 配置中心 +
 会话监控台），表面是科研流水线（读文献→整数据→做图→写论文）：AI 负责干活，Ccode 负责管活，人负责拍板。
-为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI 管理多套 API 配置
+为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI、Grok Build 管理多套 API 配置
 （端点/密钥/模型），内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览。
 
 **设计文档即规格**：改架构/适配逻辑前先读 `docs/architecture.md`（总体设计）和 `docs/agent-integration-matrix.md`
-（八个 CLI 的 env/配置/会话格式，源码级调研结论，勿凭印象写 env 变量名）。
+（九个 CLI 的 env/配置/会话格式，源码级调研结论，勿凭印象写 env 变量名）。
 
 **参考实现（长期有效）**：`.reference/` 下三个开源项目浅克隆，实现新功能前先查有没有成熟方案可借鉴：
 
@@ -26,7 +26,7 @@ Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）—�
 
 **已确认的产品决策**（用户拍板，勿擅自更改）：
 
-- 应用名 **Ccode**；八个 agent 全部支持（CodeBuddy Code、Cursor CLI 见 matrix §7/§8）
+- 应用名 **Ccode**；九个 agent 全部支持（CodeBuddy Code、Cursor CLI、Grok Build 见 matrix §7/§8/§9；grok 首版：「设为全局默认」不支持、MCP 只读不分发、技能强制 copy）
 - 配置切换**双模式**：默认启动注入环境变量（零污染），另提供「设为全局默认」（写配置文件，先备份）
 - 终端为内嵌形态，且**与结构化会话视图联动**（同一会话双栏观看）
 - 项目列表**从各 agent 历史会话自动聚合并分类**，辅以手动添加
@@ -71,7 +71,7 @@ npm run tauri build    # 打包
 ## 代码结构
 
 ```
-docs/                        # 架构方案 + 八 CLI 适配参考（规格）
+docs/                        # 架构方案 + 九 CLI 适配参考（规格）
   conventions/               # 主题化约定细则（改动对应领域前必读，见「关键约定」索引）
 src/                         # 前端 React + TS + Tailwind v4（vite 插件接入）
   pages/                     # 八页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
@@ -80,20 +80,28 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # KickoffConfirmDialog（开工确认弹层：TASK.md 预览/编辑（草稿优先）+ 旧简报并入兜底 + 技能区（含 MCP 归处标记）+ 人工事项区 + 主仓提醒）、
                              # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态）、
                              # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑）、StepFlow（步骤内协同流程线）、
-                             # ScheduleSection（项目分组「◔ 定时任务」区块） 等
+                             # ScheduleSection（项目分组「◔ 定时任务」区块）、
+                             # TemplatePickModal（注册成功后的研究流程模板选择层：五套内置模板 +
+                             # 「不使用研究流程」（写 pipeline_opt_out 标记）/「稍后再选」（不留痕）两出口）、
+                             # FuseDraftModal（「◈ 融合进任务书」预览编辑弹层：AI 融合稿可改后确认才写草稿） 等
   components/CommandPalette.tsx # ⌘K 面板
   pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES
   pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras 单一出处，弹层预览与落盘共用）
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
   mcp-presets.ts             # MCP 内置预设表（加预设 = 加一条；密钥一律 ${VAR} 引用）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
-  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/会话按卡分组/人工事项过滤与
+  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/会话按卡分组/卡片 kind（idea 想法卡 / draft 讨论卡）过滤与
                              # 待拍板小节提取（数据源为步骤草稿）（tests/task-cards.test.ts）
   step-flow.ts               # 步骤内协同流程线纯逻辑：种子→before→agent→during→after→评审节点链（tests/step-flow.test.ts）
   schedule-tasks.ts          # 定时任务纯逻辑：周期白话/相对时间/按 projectRoot 过滤（tests/schedule-tasks.test.ts）
+  schedule-skill.ts          # 定时巡检「技能」下拉与默认任务名跟随纯逻辑（lit-watch 恒最前/默认「文献雷达」、
+                             # 手改不覆盖、空库兜底，tests/schedule-skill.test.ts）
   inbox.ts                   # 收件箱分类胶囊纯逻辑：key 前缀→类别、分组、help dismiss 签名、人工请求通知 edge-trigger（tests/inbox.test.ts）
   notify.ts                  # 长任务 OS 通知（仅「待确认」跃迁 + 未聚焦 + 30s 去抖；「已回复」不通知）
   git-status-groups.ts       # 改动列表状态分组/白话双层纯逻辑
+  file-icons.ts              # 文件类型小徽标纯逻辑：扩展名 → 短标签 + 固定识别色（tests/file-icons.test.ts）
+  workspace-visibility.ts    # 聚焦步骤工作区可见性过滤纯逻辑（不匹配任何步骤的手动工作区始终可见，
+                             # tests/workspace-visibility.test.ts）
   git-commit-message.ts      # 空提交信息的本地默认信息生成
   terminal-tab-persistence.ts # 终端标签重启恢复白名单（不含 PTY/密钥/env）
   terminal-palettes.ts       # 终端调色板共享表（设置页与终端同源）
@@ -110,20 +118,24 @@ src-tauri/src/
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
   global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）
   projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
-                             # update_step_skills（步骤推荐技能读-改-原子写）、append_pipeline_steps（从模板追加：重名跳过、全跳过不落盘）、
+                             # update_step_skills（步骤推荐技能读-改-原子写）、append_pipeline_steps（从模板追加：重名跳过、全跳过不落盘、
+                             # 追加成功自动清 pipeline_opt_out）、set_pipeline_opt_out（「不使用研究流程」显式标记读-改-原子写）、
                              # 任务书草稿（read_task_draft/append_step_draft，
                              # .ccode/drafts/）、旧简报一次性并入草稿（list_legacy_briefs）、
+                             # 任务卡 kind（idea/draft，旧卡按 step 推断）、fuse_card_into_draft（想法卡会话 ×
+                             # 当前步骤草稿 → AI 融合稿，出站 redact_and_cap 不写盘）+ write_task_draft（确认后整份落盘）、
                              # 项目移除三档（移除注册 / purge_project_traces 清除 Ccode 痕迹保留文件夹 / delete_project_dir）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用
-  sessions.rs                # 会话浏览：八 agent 会话扫描/解析（Codex .zst、OpenCode SQLite/JSON）、session_meta、pin 快照、
-                             # 会话删除、注意力分类（session_tail_state）、步骤名映射（RX3a）
-  skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor 固定 copy）、四路导入、ZIP 导出、卸载备份、
+  sessions.rs                # 会话浏览：九 agent 会话扫描/解析（Codex .zst、OpenCode SQLite/JSON）、session_meta、pin 快照、
+                             # 会话删除、注意力分类（session_tail_state）、步骤名映射（RX3a）、
+                             # sessions_for_card（融合进任务书的按卡取会话：与列表同一归属口径）
+  skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor/grok 固定 copy）、四路导入、ZIP 导出、卸载备份、
                              # 漂移检测 resync、create_skill/update_skill_content；内置技能种子（seed_builtin_skills：
                              # include_str! 内嵌 src-tauri/resources/skills/ 14 个技能，启动幂等播种，不覆盖/不复活用户改动）、
                              # 内置技能更新（check_builtin_skill_updates 种子逐字节比对 + apply_builtin_skill_update
                              # 覆盖前备份 SKILL.md.bak-<yyyymmdd> 后原子写入）、产物冲突检测（frontmatter outputs
                              # 解析进 SkillDto，list 时现算；前端 skill-conflicts.ts 判定 + StepSkillsChips 警告行）
-  mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §9）：统一模型→八家映射、读-改-写一个键/段 + 备份 +
+  mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §10）：统一模型→八家映射（grok 只读）、读-改-写一个键/段 + 备份 +
                              # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文）
   usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径
   pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
@@ -132,8 +144,9 @@ src-tauri/src/
   fonts.rs                   # 终端字体打包与 brew 一键安装（Maple/Sarasa/Iosevka）
   ai.rs                      # 无头 AI 调用层：一次性 prompt + 提交信息/摘要/PR 描述/冲突建议/提炼接力简报/评审沉淀起草生成；
                              # headless_task_args/run_agent_task 供 scheduler 复用（定时任务要写项目文件，codex 用 -s workspace-write）
-  scheduler.rs               # 定时雷达（v3.75）：schedules.json（每日/每周+时分，本地时区）、60s tick + 启动补跑
-                             # （漏跑 coalesce 只补一次）、无头拉起 agent 在项目根跑技能（默认 lit-watch，10 分钟超时）、
+  scheduler.rs               # 定时雷达（v3.75；v3.79 起技能可选）：schedules.json（每日/每周+时分，本地时区）、60s tick + 启动补跑
+                             # （漏跑 coalesce 只补一次）、无头拉起 agent 在项目根跑技能（默认 lit-watch，prompt 按技能分派：
+                             # lit-watch 专用文案不动、其他技能通用模板，10 分钟超时）、
                              # 历史留 20 条、跑完发 scheduler-run-done 事件（App.tsx 全局监听弹 OS 通知，复用长任务通知开关）
   citation.rs                # 引用健康检查：.md 引用键（[@key]/多键/[-@key]）对照 references.bib（白名单同 pdf.rs 口径）
   handoff.rs                 # 接力（§11.3 机制四）：简报生成（脱敏+64KB）、提炼接力（build_session_digest AI 蒸馏全会话 +

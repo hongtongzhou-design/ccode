@@ -5,8 +5,14 @@ import { confirmDialog } from "./ConfirmDialog";
 import { hoverRevealClass, LoadingRows, Toggle } from "./PageFrame";
 import StepSkillsChips from "./StepSkillsChips";
 import StepFlow from "./StepFlow";
+import FuseDraftModal from "./FuseDraftModal";
 import { useAppStore } from "../store";
-import { bucketCardsByStep, extractOpenQuestions } from "../task-cards";
+import {
+  bucketCardsByStep,
+  discussionCardsForStep,
+  extractOpenQuestions,
+  ideaCardsForStep,
+} from "../task-cards";
 import { buildTaskMdPreview } from "../pipeline-start";
 import type {
   ProjectConfigDto,
@@ -111,6 +117,7 @@ export default function TaskCardsSection({
   onHumanChanged,
   onStartStep,
   focusDraft,
+  onDraftChanged,
 }: {
   projectPath: string;
   steps: ProjectStepDto[];
@@ -141,6 +148,8 @@ export default function TaskCardsSection({
   onStartStep: (index: number, originCardId?: string) => Promise<void> | void;
   /** 聚焦步骤的任务书草稿（v3.72；ProjectGroup 单一加载点下发）：discuss 节点状态与「聊任务书」指令用 */
   focusDraft?: { relPath: string; text: string | null } | null;
+  /** 「◈ 融合进任务书」落盘后回调：ProjectGroup 即刻重读 focusDraft（不等页面刷新） */
+  onDraftChanged?: () => void;
 }) {
   const cards = useAppStore((s) => s.taskCards[projectPath]);
   const loadTaskCards = useAppStore((s) => s.loadTaskCards);
@@ -167,6 +176,10 @@ export default function TaskCardsSection({
     card: TaskCardDto;
   } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // 想法区（聚焦态专属）：新建内联表单 + 融合弹层目标卡
+  const [ideaFormOpen, setIdeaFormOpen] = useState(false);
+  const [ideaName, setIdeaName] = useState("");
+  const [fusing, setFusing] = useState<TaskCardDto | null>(null);
   // 步骤级 TASK.md 预览（只读弹层）：步骤名 + 拼装结果 + 技能库元数据（推荐技能区的描述来源）
   const [taskMdPreview, setTaskMdPreview] = useState<{
     stepName: string;
@@ -189,10 +202,15 @@ export default function TaskCardsSection({
       cards ?? [],
       steps.map((s) => s.name),
     );
-    // 步骤聚焦：只保留聚焦步骤的桶（「未挂步骤」桶在聚焦时隐藏——它不属于任何步骤）
+    // 步骤聚焦：只保留聚焦步骤的桶（「未挂步骤」桶在聚焦时隐藏——它不属于任何步骤）；
+    // 桶内只留 draft 讨论卡——idea 想法卡已上移到流程线上方的想法区，不重复出现
     if (!focusStep) return all;
-    return all.filter((b) => b.step === focusStep);
+    return all
+      .filter((b) => b.step === focusStep)
+      .map((b) => ({ ...b, cards: discussionCardsForStep(b.cards, focusStep) }));
   })();
+  /** 聚焦步骤的想法卡（kind=idea，想法区用） */
+  const ideaCards = focusStep ? ideaCardsForStep(cards ?? [], focusStep) : [];
   /** 聚焦步骤的声明（人工事项清单/种子用）；聚焦名失效（步骤被删/改名）时 null → 聚焦桶为空 */
   const focusStepDto = focusStep
     ? (steps.find((s) => s.name === focusStep) ?? null)
@@ -207,6 +225,22 @@ export default function TaskCardsSection({
       await createCard(projectPath, name, step);
       setCreatingIn(null);
       setDraftName("");
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  /** 想法区「＋ 新建想法」：kind=idea、挂当前聚焦步骤；不开聊，只建卡 */
+  async function submitCreateIdea(e: React.FormEvent) {
+    e.preventDefault();
+    if (!focusStep) return;
+    const name = ideaName.trim();
+    if (!name) return;
+    setError(null);
+    try {
+      await createCard(projectPath, name, focusStep, "idea");
+      setIdeaFormOpen(false);
+      setIdeaName("");
     } catch (reason) {
       setError(String(reason));
     }
@@ -251,7 +285,7 @@ export default function TaskCardsSection({
     }).catch(() => {});
   }
 
-  /** 聊想法（仅未挂步骤卡使用——挂步骤卡的讨论并入 onSeed 草稿口径）：项目根开终端（不建工作区——想法期不动手）。
+  /** 聊想法（idea 卡专用——想法区行内主按钮与 ⋯ 菜单；draft 卡的讨论并入 onSeed 草稿口径）：项目根开终端（不建工作区——想法期不动手）。
    *  想法期只读保护（卡片区标题行开关，默认开；allowEdit = ⋯ 菜单的单次豁免）：
    *  开 = 预填指令带不动文件约束 + readonly 标记（后端对支持的 CLI 注入只读/计划模式参数——硬保护）；
    *  关/豁免 = 纯聊天，不动参数。
@@ -388,8 +422,83 @@ export default function TaskCardsSection({
     });
   }
 
+  /** 想法卡行（想法区）：主按钮 = 只读纯聊「聊想法」；「◈ 融合进任务书」只在开工前渲染
+   *  （步骤已有活跃工作区 = runStatus 非 pending 时藏融合，卡仍可续聊） */
+  function renderIdeaCard(card: TaskCardDto) {
+    const canFuse = (focusRunStatus ?? "pending") === "pending";
+    return (
+      <li key={card.id} className="group">
+        <div className="flex h-7 min-w-0 items-center gap-2 rounded-sm px-1 hover:bg-hover">
+          <span className="min-w-0 flex-1 truncate text-xs text-l1">
+            {card.name}
+          </span>
+          <button
+            type="button"
+            onClick={() => onDiscuss(card)}
+            title="在项目根开终端聊聊这个想法（不建工作区，只读纯聊），新会话自动归入本卡"
+            className={`${actionBtn} shrink-0`}
+          >
+            聊想法
+          </button>
+          {canFuse && (
+            <button
+              type="button"
+              onClick={() => setFusing(card)}
+              title="AI 把这张卡的讨论结论织进当前步骤的任务书草稿；先出稿给你改，确认后才写入"
+              className={`${actionBtn} shrink-0`}
+            >
+              ◈ 融合进任务书
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setMenu({ x: rect.right, y: rect.bottom + 4, card });
+            }}
+            title="卡片操作"
+            aria-label={`卡片操作：${card.name}`}
+            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
+          >
+            ⋯
+          </button>
+        </div>
+        {renaming?.id === card.id && (
+          <form
+            onSubmit={submitRename}
+            className="flex items-center gap-1 py-1"
+          >
+            <input
+              className={`${fieldSm} min-w-0 flex-1`}
+              value={renaming.name}
+              onChange={(e) =>
+                setRenaming({ id: card.id, name: e.target.value })
+              }
+              autoFocus
+              required
+            />
+            <button type="submit" className={actionBtn}>
+              确定
+            </button>
+            <button
+              type="button"
+              className={actionBtn}
+              onClick={() => setRenaming(null)}
+            >
+              取消
+            </button>
+          </form>
+        )}
+      </li>
+    );
+  }
+
   function renderCard(card: TaskCardDto) {
-    const canStart = card.step !== null && steps.some((s) => s.name === card.step);
+    // 「开工」是任务书讨论卡（draft）的路径；想法卡（idea）的路径是「◈ 融合进任务书」，不给开工入口
+    const canStart =
+      card.kind === "draft" &&
+      card.step !== null &&
+      steps.some((s) => s.name === card.step);
     // 已绑定工作区（活跃）= 已开工：主按钮「继续」；未绑定的挂步骤卡 = 想法期：「聊想法」+「开工」；
     // 未挂步骤卡只有「聊想法」（onDiscuss 只读纯聊）
     const boundWs = card.workspace
@@ -428,10 +537,10 @@ export default function TaskCardsSection({
             <button
               type="button"
               onClick={() => void onSeed(card.step!, card.name)}
-              title="就这张卡开聊，结论直接写进任务书草稿；新会话自动归入本卡"
+              title="继续这张卡的讨论，结论直接写进任务书草稿；新会话自动归入本卡"
               className={`${actionBtn} shrink-0`}
             >
-              聊想法
+              接着聊
             </button>
           ) : (
             <button
@@ -531,24 +640,7 @@ export default function TaskCardsSection({
             主仓 {mainDirty} 个未提交改动
           </button>
         )}
-        {/* 想法期只读保护（默认开，存 settings.json）：只作用于未挂步骤卡的「聊想法」——
-            开 = 注入只读/计划模式参数（支持的 CLI）+ 预填不动文件约束；关 = 纯聊天。
-            挂步骤卡的讨论走任务书草稿口径（要写草稿，不适用只读）。设置页不加行，就地开关 */}
-        <span
-          className={`flex shrink-0 items-center gap-1.5 ${mainDirty ? "" : "ml-auto"}`}
-          title="开启后，未挂步骤卡片的「聊想法」会以只读/计划模式启动 Agent（支持该参数的 CLI），并嘱咐它只讨论不动文件"
-        >
-          <span className="text-micro text-l4">想法期只读保护</span>
-          <Toggle
-            checked={discussGuard}
-            onChange={(checked) =>
-              void updateSettings({ discussReadonly: checked }).catch((e) =>
-                setError(String(e)),
-              )
-            }
-            label="想法期只读保护"
-          />
-        </span>
+        {/* 「想法期只读保护」开关已迁入聚焦态想法区标题行（它只管想法卡的只读纯聊一路） */}
       </div>
       {/* 空态即教学：还没有卡片时用一行白话讲清工作流（不做教程页）。
           聚焦时不显示（聚焦本身已是引导） */}
@@ -575,6 +667,78 @@ export default function TaskCardsSection({
             >
               总览全部步骤
             </button>
+          )}
+        </div>
+      )}
+      {focusStepDto && (
+        <div className="mt-1 rounded-md bg-strip px-3 py-2.5">
+          {/* 想法区（v3.80，聚焦态专属，独立 strip 区域）：自由想法卡（kind=idea）——只读纯聊 + ◈ 融合进任务书；
+              「想法期只读保护」开关从卡片区总标题行迁来（它只管只读纯聊一路，设置页不加行） */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium text-l2">
+              想法区{ideaCards.length > 0 ? `（${ideaCards.length}）` : ""}
+            </span>
+            {ideaFormOpen ? (
+              <form
+                onSubmit={(e) => void submitCreateIdea(e)}
+                className="flex min-w-0 flex-1 items-center gap-1"
+              >
+                <input
+                  className={`${fieldSm} min-w-0 flex-1`}
+                  value={ideaName}
+                  onChange={(e) => setIdeaName(e.target.value)}
+                  placeholder="想法名，如 要不要加对照实验"
+                  autoFocus
+                  required
+                />
+                <button type="submit" className={actionBtn}>
+                  确定
+                </button>
+                <button
+                  type="button"
+                  className={actionBtn}
+                  onClick={() => setIdeaFormOpen(false)}
+                >
+                  取消
+                </button>
+              </form>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setIdeaName("");
+                  setIdeaFormOpen(true);
+                }}
+                title="开一张自由想法卡：只读纯聊，聊完可一键把结论融合进任务书草稿"
+                className={`${actionBtn} text-l4 hover:text-l1`}
+              >
+                ＋ 新建想法
+              </button>
+            )}
+            <span
+              className="ml-auto flex shrink-0 items-center gap-1.5"
+              title="开启后，想法卡的「聊想法」会以只读/计划模式启动 Agent（支持该参数的 CLI），并嘱咐它只讨论不动文件"
+            >
+              <span className="text-micro text-l4">想法期只读保护</span>
+              <Toggle
+                checked={discussGuard}
+                onChange={(checked) =>
+                  void updateSettings({ discussReadonly: checked }).catch((e) =>
+                    setError(String(e)),
+                  )
+                }
+                label="想法期只读保护"
+              />
+            </span>
+          </div>
+          {ideaCards.length > 0 ? (
+            <ul className="mt-1 divide-y divide-hairline">
+              {ideaCards.map(renderIdeaCard)}
+            </ul>
+          ) : (
+            <p className="mt-1 text-micro text-l4">
+              还没有想法。「＋ 新建想法」开一张卡：只读纯聊，聊完可一键把结论融合进任务书草稿。
+            </p>
           )}
         </div>
       )}
@@ -797,6 +961,18 @@ export default function TaskCardsSection({
           </div>
         </div>
       )}
+      {fusing && focusStepDto && (
+        <FuseDraftModal
+          projectPath={projectPath}
+          card={fusing}
+          stepName={focusStepDto.name}
+          onClose={() => setFusing(null)}
+          onWritten={() => {
+            setFusing(null);
+            onDraftChanged?.();
+          }}
+        />
+      )}
       {menu && (
         <ContextMenu
           x={menu.x}
@@ -804,8 +980,9 @@ export default function TaskCardsSection({
           alignRight
           onClose={() => setMenu(null)}
           items={[
-            // 只读纯聊（onDiscuss）只保留给未挂步骤卡：挂步骤卡的讨论已并入 onSeed 草稿口径（行内主按钮）
-            ...(!steps.some((s) => s.name === menu.card.step)
+            // 只读纯聊（onDiscuss）给想法卡（kind=idea，含未挂步骤卡——旧卡按 step 推断后两者等价）：
+            // draft 讨论卡的讨论已并入 onSeed 草稿口径（行内主按钮「接着聊」）
+            ...(menu.card.kind === "idea"
               ? [
                   {
                     label: "聊想法",
@@ -816,7 +993,7 @@ export default function TaskCardsSection({
                 ]
               : []),
             // 单次豁免：不动「想法期只读保护」开关，本次允许 Agent 改文件（开关关时无意义不渲染）
-            ...(discussGuard && !steps.some((s) => s.name === menu.card.step)
+            ...(discussGuard && menu.card.kind === "idea"
               ? [
                   {
                     label: "聊想法（允许改文件）",

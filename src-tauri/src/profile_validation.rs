@@ -157,6 +157,11 @@ fn local_check_at(home: &Path, profile: &Profile) -> ValidationCheckDto {
                 &home.join(".codebuddy/settings.json"),
                 "~/.codebuddy/settings.json",
             ))?,
+            // grok 主配置是 TOML（[model.<name>] 段的 base_url/env_key 线索在 profile 字段已验）
+            "grok" => add(parse_toml_file(
+                &home.join(".grok/config.toml"),
+                "~/.grok/config.toml",
+            ))?,
             // cursor 仅 AGENT_CLI_CREDENTIAL_STORE=file 时落 auth.json（默认在钥匙串）
             "cursor" => add(parse_json_file(
                 &home.join(".cursor/auth.json"),
@@ -318,6 +323,10 @@ fn cli_check(profile: &Profile, key: Option<&str>, injected: bool) -> Validation
                 cmd.arg("--version");
                 "CodeBuddy 启动预检（CLI 暂无 doctor）"
             }
+            "grok" => {
+                cmd.arg("--version");
+                "Grok 启动预检（CLI 暂无 doctor）"
+            }
             "cursor" => {
                 cmd.arg("--version");
                 "Cursor 启动预检（CLI 暂无 doctor）"
@@ -383,6 +392,7 @@ fn default_base(profile: &Profile, kind: ApiKind) -> &'static str {
         ApiKind::Anthropic => "https://api.anthropic.com/v1",
         ApiKind::Gemini => "https://generativelanguage.googleapis.com/v1beta",
         ApiKind::OpenAi if profile.agent == "kimi" => "https://api.moonshot.cn/v1",
+        ApiKind::OpenAi if profile.agent == "grok" => "https://api.x.ai/v1",
         ApiKind::OpenAi => "https://api.openai.com/v1",
     }
 }

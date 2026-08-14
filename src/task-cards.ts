@@ -100,6 +100,41 @@ export function taskMdEditorReduce(
 }
 
 
+// ===== 卡片种类（kind：idea 想法卡 / draft 任务书讨论卡） =====
+
+/** 聚焦步骤的想法区卡片：kind = idea 且挂在该步骤（后端已对旧卡按 step 推断回填 kind） */
+export function ideaCardsForStep(
+  cards: TaskCardDto[],
+  stepName: string,
+): TaskCardDto[] {
+  return sortCards(
+    cards.filter((c) => c.kind === "idea" && c.step === stepName),
+  );
+}
+
+/** 讨论卡区（流程线下方）在聚焦态只放 draft 卡：idea 卡已上移到想法区，不重复出现 */
+export function discussionCardsForStep(
+  cards: TaskCardDto[],
+  stepName: string,
+): TaskCardDto[] {
+  return sortCards(
+    cards.filter((c) => c.kind === "draft" && c.step === stepName),
+  );
+}
+
+/** 自定义话题 chips（流程线任务书节点）：该步骤的 draft 卡中名字不在模板种子里的——
+ *  种子卡由种子 chip 本身代表（点击即续聊），自定义话题以同款 chip 补在其后 */
+export function customTopicsForStep(
+  cards: TaskCardDto[],
+  stepName: string,
+  seeds: string[],
+): string[] {
+  const seedSet = new Set(seeds);
+  return discussionCardsForStep(cards, stepName)
+    .filter((c) => !seedSet.has(c.name))
+    .map((c) => c.name);
+}
+
 // ===== 人工事项（人机分工 checklist）与待拍板问题的纯逻辑 =====
 
 /** 时机 → 白话标签（before/during/after 之外的一律按并行处理，与后端归一口径一致） */

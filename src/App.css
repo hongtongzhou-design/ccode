@@ -85,6 +85,13 @@
   --color-add: #8fd3a8;
   --color-del: #d98a93;
 
+  /* diff 增删行整行铺底（深色主题口径：深底浅字）；浅色主题在下方 [data-theme$="-light"]
+     统一覆写为浅底深字——深底只在小 pill 上成立，整行铺在浅底上会显黑 */
+  --color-diff-add-bg: #10331f;
+  --color-diff-add-fg: #4cc38a;
+  --color-diff-del-bg: #381e24;
+  --color-diff-del-fg: #f07070;
+
   /* 流水线步进器"已完成"色（v3.47）：随主题走的低饱和绿，比 ok 状态绿更安静；
      只用于步进器链与完成圆，状态 pill 仍用语义 ok 色 */
   --color-done: #47967a;
@@ -312,6 +319,9 @@
    其余白色半透明（选中行 bg-white/10、缩进线 border-white/5）仍按类名翻转 */
 [data-theme$="-light"] {
   --color-hover: rgb(0 0 0 / 0.05);
+  /* diff 增删行：GitHub 式浅底深字（七套浅色共享，截图口径） */
+  --color-diff-add-bg: #d9f2e2; --color-diff-add-fg: #177245;
+  --color-diff-del-bg: #fbe3e6; --color-diff-del-fg: #b02a42;
 }
 [data-theme$="-light"] .ccode-app-shell :where(.bg-white\/10) {
   background-color: rgb(0 0 0 / 0.08);

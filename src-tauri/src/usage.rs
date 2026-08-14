@@ -1,4 +1,4 @@
-//! 用量与费用统计（§6.11）：八个 agent 的会话 usage 按天聚合进 app.db，
+//! 用量与费用统计（§6.11）：各 agent 的会话 usage 按天聚合进 app.db，
 //! 内置定价表（可被 <config>/ccode/pricing.json 覆盖）估算 USD 费用；价格不明的只显示 token。
 
 use chrono::{DateTime, Days, Local, NaiveDate, TimeZone};
@@ -333,6 +333,64 @@ where
     out
 }
 
+/// Grok Build：token usage 在 updates.jsonl 中 turn 结束时的 ACP 通知 `_meta.usage`（PromptUsage）：
+/// input_tokens/output_tokens/total_tokens/cached_read_tokens + modelUsage{<model>:{...}}。
+/// _meta 位置未完全实证（params._meta 或 params.update._meta 两种都探）；
+/// 无 usage 字段的行不产生事件（不报错）。模型取 modelUsage 的第一个键（多模型取其一）。
+fn grok_events<I, S>(lines: I) -> Vec<UsageEvent>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = Vec::new();
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line.as_ref()) else {
+            continue;
+        };
+        let Some(params) = v.get("params") else {
+            continue;
+        };
+        // _meta 两层兼容：params._meta 或 params.update._meta
+        let usage = params
+            .get("_meta")
+            .and_then(|m| m.get("usage"))
+            .or_else(|| {
+                params
+                    .get("update")
+                    .and_then(|u| u.get("_meta"))
+                    .and_then(|m| m.get("usage"))
+            });
+        let Some(u) = usage else {
+            continue;
+        };
+        let num = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        // 时间戳是 unix 秒数字（容错 ISO 字符串）
+        let day = match v.get("timestamp") {
+            Some(Value::Number(n)) => n.as_i64().map(|s| day_of_ms(s * 1000)).unwrap_or_default(),
+            Some(Value::String(s)) => day_of_iso(s),
+            _ => String::new(),
+        };
+        // modelUsage 是 <model> → {...} 的 map；模型名取第一个键
+        let model = u
+            .get("modelUsage")
+            .and_then(|m| m.as_object())
+            .and_then(|o| o.keys().next().cloned())
+            .unwrap_or_default();
+        out.push(UsageEvent {
+            day,
+            model,
+            input: num("input_tokens"),
+            output: num("output_tokens"),
+            cache_read: num("cached_read_tokens"),
+            cache_write: 0,
+            source: SOURCE_CLI.into(),
+            internal: false,
+            official: false,
+        });
+    }
+    out
+}
+
 fn opencode_events(db_path: &Path, session_id: &str) -> Vec<UsageEvent> {
     let Some(conn) = crate::sessions::open_opencode_db(db_path) else {
         return Vec::new();
@@ -424,6 +482,7 @@ fn extract_file_events(agent: &str, path: &Path) -> Vec<UsageEvent> {
         "kimi" => kimi_events(lines),
         "codebuddy" => codebuddy_events(lines),
         "cursor" => cursor_events(lines),
+        "grok" => grok_events(lines),
         _ => claude_events(lines),
     }
 }
@@ -1953,6 +2012,30 @@ mod tests {
         assert_eq!(evs[0].day, day_of_ms(1786005443775));
         assert_eq!(evs[0].model, "claude-opus-4-8");
         assert_eq!((evs[0].input, evs[0].output), (20, 7), "camelCase 候选字段名也要能取到");
+        // grok：_meta.usage 在 turn 结束通知里（params._meta 与 params.update._meta 两层都探）；
+        // 无 usage 的行必须零事件不报错
+        let lines = vec![
+            r#"{"timestamp":1786005441,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"}}}}"#.to_string(),
+            r#"{"timestamp":1786005442,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"你好"}}}}"#.to_string(),
+        ];
+        assert!(grok_events(&lines).is_empty(), "无 _meta.usage 的行必须零事件不报错");
+        // params.update._meta 位置
+        let lines = vec![
+            r#"{"timestamp":1786005445,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"完成"},"_meta":{"usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150,"cached_read_tokens":40,"modelUsage":{"grok-code-fast-1":{"input_tokens":120,"output_tokens":30}},"numTurns":1,"usageIsIncomplete":false}}}}}"#.to_string(),
+        ];
+        let evs = grok_events(&lines);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].day, day_of_ms(1786005445 * 1000), "unix 秒转日期");
+        assert_eq!(evs[0].model, "grok-code-fast-1", "modelUsage 第一个键作模型名");
+        assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read, evs[0].cache_write), (120, 30, 40, 0));
+        // params._meta 位置（兼容另一层）
+        let lines = vec![
+            r#"{"timestamp":1786005500,"method":"session/update","params":{"_meta":{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"cached_read_tokens":2,"modelUsage":{"grok-4":{}},"numTurns":1}},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x"}}}}"#.to_string(),
+        ];
+        let evs = grok_events(&lines);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].model, "grok-4");
+        assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read), (10, 5, 2));
     }
 
     #[test]

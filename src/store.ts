@@ -291,11 +291,13 @@ interface AppState {
   taskCards: Record<string, TaskCardDto[]>;
   /** 拉取并缓存某项目的任务卡；失败抛错由调用方行内报错 */
   loadTaskCards: (projectRoot: string) => Promise<TaskCardDto[]>;
-  /** 新建卡片（同项目重名后端拒绝）；成功后刷新缓存并返回新卡片 */
+  /** 新建卡片（同项目重名后端拒绝）；成功后刷新缓存并返回新卡片。
+   *  kind 缺省由后端推断（step 非空 → draft，否则 idea）；想法区建卡传 "idea" */
   createCard: (
     projectRoot: string,
     name: string,
     step: string | null,
+    kind?: "idea" | "draft",
   ) => Promise<TaskCardDto>;
   renameCard: (
     projectRoot: string,
@@ -325,7 +327,7 @@ interface AppState {
   /** 启动时静默检查应用更新；失败（无网络/dev 模式）吞掉不打扰 */
   checkAppUpdate: () => Promise<void>;
   loadAll: () => Promise<void>;
-  /** 拉取全部六个 agent 的会话元数据，返回最新列表供轮询比对 */
+  /** 拉取全部 agent 的会话元数据，返回最新列表供轮询比对 */
   loadSessions: () => Promise<SessionMetaDto[]>;
   saveProfile: (id: string | null, input: ProfileInput) => Promise<void>;
   removeProfile: (id: string) => Promise<void>;
@@ -452,11 +454,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ taskCards: { ...s.taskCards, [projectRoot]: cards } }));
     return cards;
   },
-  createCard: async (projectRoot, name, step) => {
+  createCard: async (projectRoot, name, step, kind) => {
     const card = await invoke<TaskCardDto>("create_task_card", {
       projectRoot,
       name,
       step,
+      kind: kind ?? null,
     });
     await get().loadTaskCards(projectRoot);
     return card;

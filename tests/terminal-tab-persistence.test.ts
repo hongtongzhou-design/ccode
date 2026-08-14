@@ -38,6 +38,25 @@ test("recoverable terminal metadata round-trips without runtime fields", () => {
   });
 });
 
+test("grok 终端标签在重启恢复白名单内", () => {
+  const raw = serializeRecoverableTerminalState({
+    tabs: [
+      {
+        label: "Grok Build",
+        cwd: "/repo",
+        agentId: "grok",
+        profileId: "p1",
+        model: "",
+        sessionId: null,
+      },
+    ],
+    activeIndex: 0,
+  });
+  const parsed = parseRecoverableTerminalState(raw);
+  assert.equal(parsed.tabs.length, 1);
+  assert.equal(parsed.tabs[0].agentId, "grok");
+});
+
 test("damaged, future and incomplete states fall back safely", () => {
   assert.deepEqual(parseRecoverableTerminalState("not-json"), { tabs: [], activeIndex: 0 });
   assert.deepEqual(parseRecoverableTerminalState('{"version":2,"tabs":[]}'), {

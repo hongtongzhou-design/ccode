@@ -1,8 +1,8 @@
 # Ccode 架构方案 v0.2
 
-> 一个「AI 科研工作台」：底层是八个 Agent CLI 的统一控制台（启动器 + 配置中心 + 会话监控台），
+> 一个「AI 科研工作台」：底层是九个 Agent CLI 的统一控制台（启动器 + 配置中心 + 会话监控台），
 > 表面是科研流水线（读文献 → 整数据 → 做图 → 写论文）——AI 负责干活，Ccode 负责管活，人负责拍板（2026-08 定稿，§11）。
-> 本文档是项目的总体逻辑架构，配合 `docs/agent-integration-matrix.md`（八个 CLI 的适配细节）使用。
+> 本文档是项目的总体逻辑架构，配合 `docs/agent-integration-matrix.md`（九个 CLI 的适配细节）使用。
 > 所有关于各 CLI 的事实均来自 2026-07-30 对官方文档/源码的调研，标注「易漂移」的字段需防御式处理。
 > v0.2：固化五项产品决策（命名 Ccode、项目自动聚合、终端↔对话联动、token 统计留在 P3、三平台同步）。
 > v3.4：定位演进为 AI 科研工作台（§11 演进线）；通用控制台架构（§1–§10）作为其底层继续成立。
@@ -34,7 +34,7 @@
 | 切换机制 | 双模式：默认**启动时注入环境变量**（零污染），另提供「设为全局默认」写入 CLI 配置文件 |
 | 终端形态 | 内嵌终端（xterm.js + Rust PTY），**与会话视图联动** |
 | 项目来源 | **从各 agent 历史会话自动聚合「常用项目」并分类**，辅以手动添加 |
-| Agent 范围 | 六个全部进 MVP，通过适配器接口隔离差异（v3.23/v3.24 起八家） |
+| Agent 范围 | 六个全部进 MVP，通过适配器接口隔离差异（v3.23/v3.24 起八家，v3.80 起九家） |
 | 分发 | **三平台（macOS / Windows / Linux）同步**，代码从第一天起保持跨平台 |
 | token/费用统计 | P3 顺带做（usage 字段已确认可解析） |
 | 实现方式 | 主要由 AI 编码，架构保持简单直接 |
@@ -55,7 +55,7 @@
 ├────────────────── Tauri IPC（commands + events）────────┤
 │ Rust 核心                                               │
 │  ├─ ProfileStore    profile 持久化（JSON + 系统钥匙串） │
-│  ├─ AgentAdapter    trait，八个实现（见 §4）            │
+│  ├─ AgentAdapter    trait，九个实现（见 §4）            │
 │  ├─ PtyManager      portable-pty 拉起/管理 CLI 进程     │
 │  ├─ SessionIndexer  扫描各 agent 会话目录 → 统一索引    │
 │  ├─ SessionParser   每种格式一个 parser（防御式）       │
@@ -91,7 +91,7 @@ trait AgentAdapter {
 }
 ```
 
-八个 agent 的关键适配结论（细节见 matrix 文档，此处只列**影响架构的事实**）：
+九个 agent 的关键适配结论（细节见 matrix 文档，此处只列**影响架构的事实**）：
 
 | Agent | 注入模式可行？ | 注意点 |
 |---|---|---|
@@ -373,7 +373,7 @@ Windows release 构建使用 `windows_subsystem = "windows"`，没有可继承�
 
 ### 6.15 MCP server 清单与分发
 
-MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-servers.json`，`mcp.rs`），按开关分发到八个 CLI 的**用户级** MCP 配置。规格与调研结论的单一出处是 `docs/agent-integration-matrix.md` §9（分发通道总表 / schema 映射 / 密钥插值 / 共性红线），改映射前先读它。
+MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-servers.json`，`mcp.rs`），按开关分发到各 CLI 的**用户级** MCP 配置（grok 首版只读清单、不分发，见 matrix §10.1）。规格与调研结论的单一出处是 `docs/agent-integration-matrix.md` §10（分发通道总表 / schema 映射 / 密钥插值 / 共性红线），改映射前先读它。
 
 要点：
 
@@ -516,7 +516,7 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 | v3.53 | **技能一键应用更新**（§6.13 收尾）：`apply_skill_update` 按安装时记录的 repo/ref/subdir 重下 zipball，`import_zip_impl` 新增 `only` 过滤保证只覆盖同名技能（同仓库其他技能不新增不覆盖），复用覆盖+备份路径并刷新 revision 基线；下载循环与版本回写抽为 `download_github_zipball`/`record_github_revision` 供导入与更新共用。上游改名/移动时明确报错引导手动重新导入。前端在详情面板「GitHub 可更新」旁与行 ⋯ 菜单各加一处一键入口，确认走 confirmDialog。 |
 | v3.54 | **步进器信息可达性 + 原生控件主题同步**：① 大圆悬浮信息从原生 title 改应用内 tooltip（`useHoverTip`/`HoverTip`：fixed 定位、横向钳制、滚动/缩放/点击即关，事件挂包裹 span 禁用态可用）——原生 title 在 WKWebView 不渲染或残留串到相邻控件；圆与小方块统一，禁回退原生 title。② 大圆右上角注意力角标（待确认=warn/已完成=done，confirm 优先），只读消费 `terminalRunInputs` 镜像不新增轮询。③ 切主题同步原生窗口外观（`applyTheme` → `setTheme`），修复深色主题下原生 `<select>` 弹出系统浅色列表；capabilities 加 `core:window:allow-set-theme`。 |
 | v3.55 | **官方账号检测不再把 API Key 模式算成「已连接」**：codex `auth.json` 顶层 `OPENAI_API_KEY` 从凭证字段表移除，改由 `OfficialAccountSpec.api_key_fields` 单独识别——官方 `--api-key` 与第三方中转（cc-switch 等）写出的文件形状相同，无法区分，状态行如实显示「API Key 配置，不是官方账号登录」（`AuthProbe::ApiKeyMode`，优先级在损坏之下、未识别之上）。同批：**脉冲动画有界化**——新增 `animate-pulse-brief`（App.css，3 周期≈6s 后静止，状态复归重播），步进器进行中圆与项目区工作区状态点从无限 `animate-pulse` 换用；骨架屏等加载态保持无限脉冲不变。 |
-| v3.56 | **MCP server 统一清单与分发**（matrix §9 调研落地，§6.15）：新增第八页 MCP（⌘6，能力组技能与统计之间）——统一清单 + 按 agent 开关直写八家用户级配置（读-改-写一个键/段 + 备份 + 原子写 + 读回校验）；codex 走 TOML、四家 JSONC 容错读、密钥引用转各家间接引用字段不落明文；不用各家 CLI 的 mcp 命令分发（语义不一且 codex add 有 OAuth 弹窗副作用）；server 名取交集禁下划线。同批：自定义定价改表格编辑（pricing.json 格式与后端校验不变，存量 `_rate` 保留）；技能分类存量批量回填（`backfill_skill_categories`，GitHub 来源无分类补仓库名）；技能页未分类组固定沉底。 |
+| v3.56 | **MCP server 统一清单与分发**（matrix §10 调研落地，§6.15）：新增第八页 MCP（⌘6，能力组技能与统计之间）——统一清单 + 按 agent 开关直写八家用户级配置（读-改-写一个键/段 + 备份 + 原子写 + 读回校验）；codex 走 TOML、四家 JSONC 容错读、密钥引用转各家间接引用字段不落明文；不用各家 CLI 的 mcp 命令分发（语义不一且 codex add 有 OAuth 弹窗副作用）；server 名取交集禁下划线。同批：自定义定价改表格编辑（pricing.json 格式与后端校验不变，存量 `_rate` 保留）；技能分类存量批量回填（`backfill_skill_categories`，GitHub 来源无分类补仓库名）；技能页未分类组固定沉底。 |
 | v3.57 | **提炼接力（◈ AI 蒸馏简报续作）**：补 resume（全量上下文带回，长会话污染）与 v3.15 快速简报（仅尾窗摘录）之间的空档——`build_session_digest` 读全会话文本（DTO 层已脱敏，`cap_text_middle` 24KB）经无头 AI（新功能键 `digest`，进设置页按功能 AI 配置）蒸馏成结构化简报（任务目标/关键决策/已完改动/状态待办/下一步/环境约束），AI 输出再过 `redact_and_cap` 落盘 `.ccode/handoff-<时间>.md`；失败行内报错可重试，不免 AI 静默降级。消费三路径：内部同 Agent 新会话（DigestPicker 目标列表来源 agent 置顶，不走 resume）/ 内部跨 Agent（复用接力链登记）/ 外部（`digest_command_line` 按注册表 prompt_inject 拼「新会话 + 读简报首条指令」——**非 resume**，⧉ 复制命令 / ⇗ 外部终端；kimi/opencode 无注入参数复制指令文本手动发送）。入口：对话页回放头部「恢复 ▾」与行内 ⋯、终端标签 ⋯ 与状态条 ⋯。 |
 | v3.58 | **页切快捷键逐页可自定义**（取代 v3.41 的整组开关单控）：页切清单抽 `hotkeys.ts` `PAGE_HOTKEY_DEFS` 单一出处（id/名称/默认 mod+1..8，App.tsx 全局监听与设置页录制 UI 同源）；settings.json 新增 `hotkeyPages` map（键 = 页面 id，缺省回落默认，整图覆盖同 ai_profiles 口径），整组总开关 `hotkeyPageSwitch` 保留。`captureDecision` 冲突判定从单一冲突方改为多冲突方数组（八页切 + 面板 + 侧栏互判）。 |
 | v3.59 | **收件箱顶部悬浮化 + 按项目摊开 + 侧栏徽标 + done 态文案纠偏**（用户三连反馈："N 条事项把工作区页顶下去"、"没看到收件箱在哪"、"只是回合结束就提示已完成"）：① 收件箱改**顶部悬浮 pill**（absolute 覆盖不占布局，pill 带总数 + 分类摘要「2 冲突 · 1 待确认」，点按向下展开明细浮层，遮罩/Esc 收起，为空不渲染）；② 导航行「待处理」扩到收件箱全口径（`run-overview.ts attributeToProject` 纯逻辑：分隔符归一 + 段边界防 /repo/a2 误中 /repo/a，嵌套根取最长）；③ 条目数镜像进 store（`inboxCount`，WorkspacesPage 唯一写入方），侧栏「工作区」图标挂 warn 色计数徽标（复用终端运行数徽标模式，任意页面可见、有事才出现）；④ **注意力 done 态用户面文案从「已完成」改「已回复」**（收件箱/标签悬浮/通知正文/步进器角标/设置页）——尾部推断只能看到「回合结束等你输入」，看不到任务完成，文案必须如实。三层分工：徽标报数 → 悬浮收件箱列事 → 导航行给分布。走查续批（用户五连反馈）：⑤ 步进器大圆「已回复」绿点角标移除（每回合结束都亮，噪音大于信号），只留待确认黄点；⑥ 侧栏徽标三轮后**全删**（数字胶囊突兀 → 圆点与项目行状态点撞语义 → 裸数字仍嫌吵；用户拍板三平台一个不留，计数只留悬浮 title 与标题栏胶囊/页内 strip），nav 保留 overflow-x-hidden 兜底；⑦ MCP 页 PageFrame standard→wide 对齐技能页；⑧ 收件箱悬浮 pill 遮挡内容被否决 → **文档流单行 strip（32px）+ 展开明细悬浮下拉**（不推布局不遮挡）；⑨ **macOS 收件箱收进自绘标题栏**（用户要 Ghostty 式：`titleBarStyle: Overlay` + `hiddenTitle`，App.tsx 渲染 40px 拖拽区 + 窗口标题 + 标题后收件箱胶囊/下拉；条目改可序列化 `InboxItem` 镜像进 store，`runInboxAction` 统一派发；capabilities 加 `core:window:allow-title`；⌘\ 执行态随 chrome 一起隐藏）。Windows/Linux 保留原生标题栏 + 页内 strip（Overlay 仅 macOS 生效，功能不裁剪、仅 chrome 集成随平台能力）。 |
@@ -552,16 +552,19 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 
 | v3.78 | **五套内置流水线模板内容重设计 + 模板接壤 + 「从模板追加」**：① **模板内容重设计**（src/pipeline-presets.ts）：准绳 =「讨论种子 → 草稿 → TASK.md → 执行」全链相辅相成——种子逐条对准 TASK.md/执行中的真实拍板点（删空洞种子、补缺口种子；纯执行步骤不给种子，沿用 v3.69 口径）；简报坚持输入/决策/交付写死，expectedArtifacts 精确化；技能挂载按 14 个内置技能核对（research-paper 首步 +lit-notes、结果分析/毕业论文实验步 +stats-check、毕业论文初稿/定稿 +quarto-render、data-eda 步 +stats-check；submission-rebuttal 摘除不存在的假技能 pre-submission-reviewer，投稿前自查口径内联进简报）；MCP 归处——lit-search 链路步骤新增 before 人工事项「（可选）配置学术检索 MCP」（MCP 页预设导入 Consensus/Undermind，key 走环境变量引用；不配也能跑：OpenAlex/Semantic Scholar 免 key 兜底），付费墙文献全程有人工事项接应（落点 `papers/*.pdf`）。② **模板接壤**：五套 = 同一条科研流水线的相邻段，产物路径固定对齐——综述末步产 `manuscript/review-final.md`、科研论文末步产 `manuscript/paper-final.md`，投稿与返修首步输入精确指向两者 + `references.bib`；综述的 `notes/`+`references.bib` 可被科研论文/毕业论文首步复用，数据处理的 `analysis/` 可接科研论文实验段；每套模板首步简报带双口径输入说明（接自上游随仓库合并自带 / 独立启动先放入对应目录或资源面板绑定上游项目目录），投稿与返修首步另有 before 人工事项「放入成稿与 references.bib」（落点 `manuscript/`）。③ **「＋ 从模板追加」**（PipelineEditor 工具区「+ 添加步骤」旁）：区别于「使用模板 = 整体替换 steps」，把选定模板（内置五套 + 用户另存）的步骤追加到当前项目 steps 末尾——步骤链/提货单/资源机制对新步骤天然生效；后端新 command `append_pipeline_steps`（projects.rs：`ensure_task_project_root` 写门槛；读-改-原子写；name 或非空 workspace_name 重名跳过——撞已有步骤或撞本批次刚追加的都跳过，避免覆盖已有工作区绑定；全跳过不落盘、空批次拒绝；返回 `{appended, skipped}` 供行内提示「已追加 N 步；跳过 N 步（同名）」）；追加直接写盘不经编辑器未保存草稿（dirty 先弹确认），成功后前端重读 `read_project_config` 刷新步骤卡与脏检查基准（`onConfigReload` 回推父组件）。典型用法：科研论文写完 → 追加「投稿与返修」三步 → 同一项目续走。 |
 | v3.79 | **技能挂载产物冲突检测**：技能内容是 markdown 指导文件，内容级「职责重叠」无法自动判定，但产物路径相撞可检测——14 个内置技能 SKILL.md frontmatter 新增 `outputs` 声明（YAML 行内/多行列表均容忍，目录带尾斜杠、文件写全路径，只声明会写的主要产物；老用户库内旧副本经既有 check_builtin_skill_updates 逐字节比对检出、走一键更新）；`parse_skill_md` 扩展解析 outputs 进 `SkillDto.outputs`（list 时现算不入库，compose_skill_md 不写——自建技能不参与）；前端纯逻辑 `src/skill-conflicts.ts`（skillOutputConflicts：两两比对，路径相同或互为目录前缀即相交，同一对技能多处相交只报一次）；StepSkillsChips 加可选 `skillLib` prop，有冲突时 chips 下方逐行 ⚠ 提示「确认步骤简报里写明了分工」——只提醒不拦截，只读/可编辑两态都显示（KickoffConfirmDialog/TaskCardsSection 两处调用方传入）。 |
+| v3.80 | **接入第九个 agent Grok Build**（xAI 官方终端编码 agent，xai-org/grok-build 源码调研 2026-08，标注「待实机验证」处未经实机核对，matrix §9）：纯 env 注入三件套（`XAI_API_KEY` / `GROK_CLI_CHAT_PROXY_BASE_URL`（CLI chat 代理端点覆盖，作第三方端点注入通道**待实机验证**）/ `GROK_DEFAULT_MODEL`），归 OpenAI 兼容族（官方端点 https://api.x.ai/v1，presets 设官方预设行；`[model.*]` 的 `api_backend` 另支持 responses/messages）。官方账号 `grok login`（OAuth，凭证 `~/.grok/auth.json`，拉起 env_remove 两个 XAI key 变量；TOML 配置无冲突探测，detection_note 写明）。会话 `~/.grok/sessions/<url编码cwd>/<uuidv7>/`：`updates.jsonl` 为权威日志（ACP session/update 通知流，防御式解析跳过未知类型），`summary.json` 供 meta（info.cwd 比解码目录名可靠）；`session_search.sqlite` 只是 FTS 索引，扫描只收文件名恰为 `updates.jsonl` 的。usage 从 updates 内 `_meta.usage`（`params._meta` 与 `params.update._meta` 两层兼容探测）。聊想法只读 = `--permission-mode dontAsk --sandbox read-only`（`--permission-mode plan` 门控链路未确认不用）。headless `-p`（不读 stdin，prompt 走参数），scheduler 任务追加 `--yolo`（headless 默认权限行为未确认，防请求被 Cancelled 静默失败，照 codex `-s workspace-write` 先例）。**两个首版不做**：「设为全局默认」显式不支持（config.toml 是 `[model.<name>]` 段结构且默认模型指针机制未确认，学 cursor 落到显式报错）；MCP 只读清单不分发（`[mcp_servers.*]` TOML 段与 model/hooks 同文件属高危混合状态文件，且 grok 自带 `grok mcp add` 做读改写，不硬造 TOML 原子写管线；前端 `MCP_DISTRIBUTE_UNSUPPORTED` 显示「只读」）。技能 `~/.grok/skills` 强制 copy（未实机验证，仿 cursor，`allow_symlink_for` 改集合判断）。安装走官方脚本（`~/.grok/bin` 进 resolve_binary 三平台候选）/ npm `@xai-official/grok`，更新自更新 `grok update` 优先。matrix 重编号：MCP 调研节 §9→§10（Grok 占 §9），代码与文档全部引用同步 |
+| v3.81 | **浅色主题 diff 铺底修复 + 改动面板文件类型徽标**：① diff 增删行从复用 `bg-ok/bg-err`（深底浅字 pill 口径）拆出专用令牌 `--color-diff-add-bg/fg`、`--color-diff-del-bg/fg`（App.css @theme；深色主题值不变），`[data-theme$="-light"]` 统一覆写为 GitHub 式浅底深字（add #d9f2e2/#177245、del #fbe3e6/#b02a42）——ok/err 深底整行铺在浅底上会显黑（用户反馈）。改动面板 `diffLineClass` 与审阅视图 `DiffSide` 同换新令牌（审阅行 fg 从 text-add/del 并入，深色下略有加深，口径统一）；状态字母 pill 等小块用法不动。② 改动面板文件名前加**文件类型小徽标**（`src/file-icons.ts` 纯逻辑：扩展名 → 短标签 + 固定识别色不随主题，未收录类型留空槽位对齐；GitPanel 全宽行与紧凑行均接入，tests/file-icons.test.ts） |
+| v3.82 | **改动面板改跟左栏文件树的根**（用户拍板：原「跟随聚焦终端标签 cwd」口径下，工作区页点了项目但终端标签停在别处（典型：停在已归档工作区的死路径）时面板错位显示「不是 git 仓库」，心智负担大）：FileTree 新增 `onRootNavigated` 回调（nav 与 cwd 同步两个 setRoot 出口都上报，与 onRootChange 守卫配对只在真切换后触发）；TerminalPage 记 `treeRoot`，GitPanel 改吃 `treeRoot ?? activeCwd`；activeCwd 变化时 TerminalPage 主动清空 treeRoot 兜底（专注终端等树未挂载场景无人上报）。对话页签与文件预览口径不动。配套：git_status_sync 对不存在的目录先报「目录不存在（可能已被归档或删除）」（与误判「不是仓库」区分，含 Rust 测试） |
 
 ## 11. 演进线（2026-08 定稿）
 
-定位从「通用 Agent 控制台」演进为 **AI 科研工作台**：底层仍是八个 Agent CLI（Claude Code / Codex / Gemini / Qwen / OpenCode / Kimi / CodeBuddy / Cursor）的统一控制台，表面是科研流水线（读文献 → 整数据 → 做图 → 写论文）。一句话：**AI 负责干活，Ccode 负责管活，人负责拍板。**
+定位从「通用 Agent 控制台」演进为 **AI 科研工作台**：底层仍是九个 Agent CLI（Claude Code / Codex / Gemini / Qwen / OpenCode / Kimi / CodeBuddy / Cursor / Grok Build）的统一控制台，表面是科研流水线（读文献 → 整数据 → 做图 → 写论文）。一句话：**AI 负责干活，Ccode 负责管活，人负责拍板。**
 
 ### 11.1 三条纪律
 
 1. **科研语义进模板和数据，不进逻辑**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不认识「文献」「论文」这些概念。
 2. **验收层是护城河**：每一步成果必须人工评审才合并进入下一步（沿用 §6.10 评审流与全宽评审覆盖层）。
-3. **跨厂商中立是生存线**：八个 CLI 平等支持；API 与官方账号双轨并行（§11.4 P1a）。
+3. **跨厂商中立是生存线**：九个 CLI 平等支持；API 与官方账号双轨并行（§11.4 P1a）。
 
 ### 11.2 量化目标
 

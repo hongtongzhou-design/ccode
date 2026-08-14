@@ -550,6 +550,10 @@ const MODEL_SWITCH: Record<string, { max: number | null; hint: string }> = {
   },
   opencode: { max: null, hint: "全部已配置模型都会注册，可在 TUI 自由切换" },
   kimi: { max: 1, hint: "多模型需「⋯ → 设为全局」写入配置后才能在模型页切换" },
+  grok: {
+    max: 1,
+    hint: "多模型注入方式未实机验证；如需切换，在 TUI 内用 Grok Build 自带的模型切换命令",
+  },
 };
 
 /** 各 CLI 断开官方账号的方式（Ccode 不删 auth 文件，引导用 CLI 自己的 logout；
@@ -560,6 +564,7 @@ const OFFICIAL_LOGOUT_HINT: Record<string, string> = {
   gemini: "TUI 内 /auth signout",
   codebuddy: "TUI 内 /logout",
   cursor: "cursor-agent logout",
+  grok: "grok logout",
   kimi: "TUI 内 /logout",
   qwen: "TUI 内 /auth",
 };

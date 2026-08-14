@@ -934,6 +934,26 @@ mod tests {
     }
 
     #[test]
+    fn grok_update_channels_self_then_npm() {
+        // grok 有 npm 官方包（@xai-official/grok）+ 非交互自更新（grok update）；
+        // 自装/未知渠道时回落链是 self → npm
+        let cmds = update_commands("grok", "self", "/Users/x/.grok/bin/grok");
+        assert_eq!(cmds.len(), 2, "grok 自装渠道应给 self + npm 两个候选");
+        assert_eq!(cmds[0].method, "self");
+        assert_eq!(cmds[0].args, vec!["update"]);
+        assert_eq!(cmds[1].method, "npm");
+        // npm 安装命中时直接走 npm 更新
+        let cmds = update_commands("grok", "npm", "/Users/x/.npm-global/bin/grok");
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].method, "npm");
+        // 非交互自更新不得路由到完整终端（interactive_tui=false）
+        assert_eq!(
+            interactive_self_update("grok", "self", "/Users/x/.grok/bin/grok"),
+            None
+        );
+    }
+
+    #[test]
     fn interactive_self_update_routes_tui_self_update_only() {
         // kimi 自装（~/.kimi-code/bin）：唯一更新渠道是交互 TUI 自更新，给出终端预填命令
         assert_eq!(

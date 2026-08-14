@@ -2199,7 +2199,207 @@ fn parse_cursor(lines: &[String]) -> Vec<ChatMessageDto> {
     msgs
 }
 
-// ===== OpenCode（v1.2+ 单一 SQLite；旧版 storage/ 扁平 JSON；agent id "opencode"） =====
+// ===== Grok Build（~/.grok/sessions/<encoded-cwd>/<session-id>/，xai-org/grok-build 源码调研 2026-08） =====
+//
+// 目录式会话：每会话一个 <session-id-uuidv7>/ 目录，内含
+//   summary.json   —— info{id,cwd}、generated_title、created_at/updated_at、num_messages、current_model_id
+//   updates.jsonl  —— 权威对话日志（append-only），本解析器的消费对象
+//   chat_history.jsonl 等（原始请求消息，不解析）
+// updates.jsonl 每行：{"timestamp": <unix秒>, "method": "session/update", "params": <ACP SessionNotification>}；
+// 消费方式 = params.update.sessionUpdate：user_message_chunk / agent_message_chunk
+//（content 为 ACP ContentBlock，text 在 content.text）/ tool_call / tool_call_update / plan 等，
+// 另有 _x.ai/ 前缀扩展通知。~/.grok/sessions/session_search.sqlite 只是 FTS 索引，不是会话本体。
+// 防御式：未知 sessionUpdate 类型/缺字段/末行截断一律跳过。
+
+/// ACP ContentBlock 提取文本（text 在 content.text；容错 content 为字符串直取）
+fn grok_content_text(update: &Value) -> Option<String> {
+    let content = update.get("content")?;
+    let text = match content {
+        Value::String(s) => s.clone(),
+        Value::Object(_) => get_str(content, "text")?.to_string(),
+        _ => return None,
+    };
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// 行时间戳：unix 秒数字转 ISO（容错字符串原样透传）
+fn grok_time(v: &Value) -> Option<String> {
+    match v.get("timestamp") {
+        Some(Value::Number(n)) => n.as_u64().map(iso_from_unix),
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// 会话目录路径：.../sessions/<encoded-cwd>/<session-id>/<file>
+/// 回退两级取 encoded-cwd 目录名（有损不解码）；summary.json 的 info.cwd 优先
+fn grok_session_dir(path: &Path) -> Option<&Path> {
+    path.parent()
+}
+
+/// 从同目录 summary.json 读元信息（缺文件/缺字段容错回落）
+fn grok_summary(path: &Path) -> Option<Value> {
+    let dir = grok_session_dir(path)?;
+    read_json_file(&dir.join("summary.json"))
+}
+
+fn grok_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
+    // 会话文件本体是 updates.jsonl；meta 优先 summary.json，回落 updates.jsonl 行内提取
+    let summary = grok_summary(path);
+    let info = summary.as_ref().and_then(|s| s.get("info"));
+    let (mut created, mut updated, mut title) = (None, None, None);
+    let cwd = info.and_then(|i| get_str(i, "cwd")).map(String::from);
+    let session_id = info.and_then(|i| get_str(i, "id")).map(String::from);
+    if let Some(s) = &summary {
+        created = grok_time(s);
+        updated = grok_time_field(s, "updated_at");
+        title = get_str(s, "generated_title").and_then(usable_title);
+    }
+    // summary.json 读不到时从 updates.jsonl 行内补（head 提首条用户消息做标题，尾行时间戳做 updated）
+    if created.is_none() || title.is_none() || cwd.is_none() {
+        let (head, tail) = read_head_tail(path, 64 * 1024)?;
+        for line in head.iter().chain(&tail) {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if created.is_none() {
+                created = grok_time(&v);
+            }
+            if updated.is_none() {
+                updated = grok_time(&v);
+            }
+            if title.is_none() {
+                if let Some(update) = v.get("params").and_then(|p| p.get("update")) {
+                    if get_str(update, "sessionUpdate") == Some("user_message_chunk") {
+                        title = grok_content_text(update).and_then(|t| usable_title(&t));
+                    }
+                }
+            }
+        }
+    }
+    let project_path = cwd.unwrap_or_else(|| {
+        // 目录名是 URL 编码的 cwd（超长则 slug+hash），不解码；读不到 info.cwd 时原样兜底（同 Claude 规则）
+        grok_session_dir(path)
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    let session_id = session_id
+        .or_else(|| {
+            grok_session_dir(path)
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    Some(SessionMetaDto {
+        agent: "grok".into(),
+        session_id,
+        project_path,
+        title,
+        created_at: created,
+        updated_at: updated.or_else(|| mtime_iso(path)),
+        file_path: path.to_string_lossy().into_owned(),
+        token_usage: None,
+        cli_version: None,
+        pinned: false,
+        archived: false,
+        custom_title: None,
+        tags: Vec::new(),
+        alive,
+        chain_count: 1,
+        workspace: None,
+        step_name: None,
+        summary: None,
+        live: alive && mtime_fresh(path, 60),
+        source: default_session_source(),
+        internal: false,
+        handoff_from_agent: None,
+        handoff_from_session: None,
+        task_id: None,
+        task_name: None,
+    })
+}
+
+/// summary.json 的 updated_at 字段（created_at 走 grok_time 复用 timestamp 键——summary 顶层
+/// 是 created_at/updated_at 不是 timestamp，分开取）
+fn grok_time_field(v: &Value, key: &str) -> Option<String> {
+    match v.get(key) {
+        Some(Value::Number(n)) => n.as_u64().map(iso_from_unix),
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn parse_grok(lines: &[String]) -> Vec<ChatMessageDto> {
+    let mut msgs = Vec::new();
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue; // 末行截断等坏行直接跳过
+        };
+        let Some(update) = v.get("params").and_then(|p| p.get("update")) else {
+            continue;
+        };
+        let ts = grok_time(&v);
+        match get_str(update, "sessionUpdate") {
+            Some("user_message_chunk") => {
+                let Some(text) = grok_content_text(update) else {
+                    continue;
+                };
+                msgs.push(ChatMessageDto {
+                    role: "user".into(),
+                    blocks: vec![text_block(text)],
+                    timestamp: ts,
+                    usage: None,
+                });
+            }
+            Some("agent_message_chunk") => {
+                let Some(text) = grok_content_text(update) else {
+                    continue;
+                };
+                msgs.push(ChatMessageDto {
+                    role: "assistant".into(),
+                    blocks: vec![text_block(text)],
+                    timestamp: ts,
+                    usage: None,
+                });
+            }
+            // tool_call/tool_call_update/plan 及未知 sessionUpdate 类型（含 _x.ai/ 扩展）跳过
+            _ => {}
+        }
+    }
+    msgs
+}
+
+/// grok 尾部状态：从后往前找最近的已知事件。
+/// user_message_chunk = 用户刚发消息（回合进行中）→ working；
+/// agent_message_chunk = 助手输出 → 文本问句收尾判 confirm，否则 done；
+/// tool_call/tool_call_update = 工具回合进行中 → working。
+fn grok_tail_state(lines: &[String]) -> &'static str {
+    for line in lines.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(update) = v.get("params").and_then(|p| p.get("update")) else {
+            continue;
+        };
+        match get_str(update, "sessionUpdate") {
+            Some("user_message_chunk") => return "working",
+            Some("agent_message_chunk") => {
+                let text = grok_content_text(update).unwrap_or_default();
+                return if ends_with_question(&text) { "confirm" } else { "done" };
+            }
+            Some("tool_call") | Some("tool_call_update") => return "working",
+            _ => continue,
+        }
+    }
+    "unknown"
+}
+
 
 /// OPENCODE_DB 环境变量优先，其次 ~/.local/share/opencode/opencode.db
 fn opencode_db_path() -> Option<PathBuf> {
@@ -2923,6 +3123,19 @@ pub fn scan_sessions() -> ScanResult {
                 out.push(m);
             }
         }
+        // Grok Build：sessions/<encoded-cwd>/<session-id>/updates.jsonl（深度 3 到文件）；
+        // 只收文件名恰为 updates.jsonl 的（session_search.sqlite 是 FTS 索引不是会话本体，
+        // chat_history.jsonl 是原始请求消息——均自然排除）
+        let mut grok_files = Vec::new();
+        collect_files(&home.join(".grok").join("sessions"), 3, &mut grok_files);
+        for f in grok_files {
+            if f.file_name().map(|n| n.to_string_lossy().into_owned()).as_deref() != Some("updates.jsonl") {
+                continue;
+            }
+            if let Some(m) = grok_file_meta(&f, true) {
+                out.push(m);
+            }
+        }
     }
     // pin 即保留：源文件已消失的会话从快照补齐（§6.5）
     let seen: HashSet<(String, String)> = out
@@ -2930,7 +3143,7 @@ pub fn scan_sessions() -> ScanResult {
         .map(|m| (m.agent.clone(), m.session_id.clone()))
         .collect();
     if let Some(dir) = snapshots_root() {
-        for agent in ["claude-code", "codex", "gemini", "qwen", "kimi", "opencode", "codebuddy", "cursor"] {
+        for agent in ["claude-code", "codex", "gemini", "qwen", "kimi", "opencode", "codebuddy", "cursor", "grok"] {
             for f in snapshot_files(&dir, agent) {
                 let stem = snapshot_stem(&f);
                 if seen.contains(&(agent.to_string(), stem.clone())) {
@@ -2943,6 +3156,7 @@ pub fn scan_sessions() -> ScanResult {
                     "opencode" => opencode_snapshot_meta(&f, &stem),
                     "codebuddy" => codebuddy_file_meta(&f, false),
                     "cursor" => cursor_file_meta(&f, false),
+                    "grok" => grok_file_meta(&f, false),
                     "kimi" => {
                         // 快照脱离了原目录结构（无 state.json / bucket），项目归属不可知
                         let bytes = read_session_bytes(&f);
@@ -3570,6 +3784,7 @@ fn tail_state_impl(agent: &str, file_path: &str) -> String {
         "kimi" => kimi_tail_state(&lines),
         "codebuddy" => codebuddy_tail_state(&lines),
         "cursor" => cursor_tail_state(&lines),
+        "grok" => grok_tail_state(&lines),
         _ => claude_tail_state(&lines),
     }
     .into()
@@ -3615,6 +3830,32 @@ pub(crate) fn invalidate_scan_cache() {
             *g = None;
         }
     }
+}
+
+/// 「◈ 融合进任务书」的会话范围过滤（纯逻辑，可测）：只取 task_id 命中的会话，按时间升序
+pub(crate) fn sessions_belonging_to(
+    sessions: Vec<SessionMetaDto>,
+    task_id: &str,
+) -> Vec<SessionMetaDto> {
+    let mut out: Vec<SessionMetaDto> = sessions
+        .into_iter()
+        .filter(|s| s.task_id.as_deref() == Some(task_id))
+        .collect();
+    out.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+    out
+}
+
+/// 某张任务卡名下的全部会话（融合进任务书的取材范围）：全量扫描 + meta/认领合并后按 task_id 过滤。
+/// 与 list_sessions 同一归属口径（含 card_claims 固化）；不带分页，归卡会话量少
+pub(crate) fn sessions_for_card(task_id: &str) -> Vec<SessionMetaDto> {
+    let scan = cached_scan();
+    let mut sessions = scan.sessions;
+    if let Ok(conn) = open_db() {
+        let meta = read_all_meta(&conn);
+        apply_meta(&mut sessions, &scan.chain_members, &meta);
+        apply_card_claims(&conn, &mut sessions);
+    }
+    sessions_belonging_to(sessions, task_id)
 }
 
 /// 把 session_meta 表的整理数据合并进扫描结果；codex 链代表自身没有行时按任一成员 id 找
@@ -3878,6 +4119,7 @@ fn parse_session_lines(agent: &str, lines: &[String]) -> Vec<ChatMessageDto> {
         }
         "codebuddy" => parse_codebuddy(lines),
         "cursor" => parse_cursor(lines),
+        "grok" => parse_grok(lines),
         _ => parse_claude(lines),
     }
 }
@@ -4427,6 +4669,9 @@ fn session_data_dirs() -> Vec<(PathBuf, bool)> {
         dirs.push((home.join(".local").join("share").join("opencode").join("storage"), true));
         // codebuddy: projects/<slug>/<uuid>.jsonl（同根的 .credentials.json 等不许删 → 限定 projects 子目录）
         dirs.push((home.join(".codebuddy").join("projects"), false));
+        // grok: sessions/<encoded-cwd>/<session-id>/updates.jsonl（同根的 auth.json/config.toml
+        // 与 sessions 根的 session_search.sqlite 不许删 → 限定 sessions 子目录）
+        dirs.push((home.join(".grok").join("sessions"), false));
         // cursor 不进目录级白名单：~/.cursor 与 IDE 共享，projects 下也有非会话 jsonl，
         // 目录粒度太粗——由 deletable_session_file 里的 cursor_deletable 精确判定
     }
@@ -5027,6 +5272,113 @@ mod tests {
         assert!(
             !cursor_deletable(&dir.join("auth.json"), &root),
             "projects 之外（同根 auth.json）必须拒绝"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== Grok Build 解析（updates.jsonl 的 ACP session/update 行） =====
+
+    #[test]
+    fn grok_parse_messages_skips_unknown_update_types_and_truncation() {
+        let lines = s(&[
+            r#"{"timestamp":1786005441,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"写一个 hello world"}}}}"#,
+            r#"{"timestamp":1786005442,"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"t1","title":"read_file"}}}"#,
+            r#"{"timestamp":1786005443,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"好的，已写好"}}}}"#,
+            r#"{"timestamp":1786005444,"method":"session/update","params":{"update":{"sessionUpdate":"plan","entries":[]}}}"#,
+            r#"{"timestamp":1786005445,"method":"_x.ai/custom","params":{"foo":1}}"#,
+            r#"{"timestamp":1786005446,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"#, // 截断末行
+        ]);
+        let msgs = parse_grok(&lines);
+        assert_eq!(msgs.len(), 2, "tool_call/plan/扩展通知/截断行都要跳过");
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].blocks[0].text, "写一个 hello world");
+        assert_eq!(msgs[0].timestamp.as_deref(), Some("2026-08-06T08:37:21Z"), "unix 秒应转 ISO");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].blocks[0].text, "好的，已写好");
+    }
+
+    #[test]
+    fn grok_meta_reads_summary_json_and_falls_back_to_dir_name() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let sess = dir.join("sessions").join("%2FUsers%2Fx%2Fproj").join("018f7c2a-0000-7000-8000-000000000000");
+        std::fs::create_dir_all(&sess).unwrap();
+        let file = sess.join("updates.jsonl");
+        std::fs::write(
+            &file,
+            r#"{"timestamp":1786005441,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"帮我看这份数据"}}}}"#,
+        )
+        .unwrap();
+        // summary.json 提供 info.cwd/generated_title/current_model_id（比解码目录名可靠）
+        std::fs::write(
+            sess.join("summary.json"),
+            r#"{"info":{"id":"018f7c2a-0000-7000-8000-000000000000","cwd":"/Users/x/proj"},"generated_title":"看数据","created_at":1786005441,"updated_at":1786005500,"num_messages":2,"current_model_id":"grok-code-fast-1"}"#,
+        )
+        .unwrap();
+        let m = grok_file_meta(&file, true).unwrap();
+        assert_eq!(m.agent, "grok");
+        assert_eq!(m.project_path, "/Users/x/proj", "info.cwd 优先于目录名");
+        assert_eq!(m.session_id, "018f7c2a-0000-7000-8000-000000000000");
+        assert_eq!(m.title.as_deref(), Some("看数据"));
+        assert_eq!(m.created_at.as_deref(), Some("2026-08-06T08:37:21Z"));
+        assert_eq!(m.updated_at.as_deref(), Some("2026-08-06T08:38:20Z"));
+        // summary.json 缺失时：项目归属回落 encoded-cwd 目录名（不解码），标题从 updates.jsonl 首条用户消息提取
+        std::fs::remove_file(sess.join("summary.json")).unwrap();
+        let m = grok_file_meta(&file, true).unwrap();
+        assert_eq!(m.project_path, "%2FUsers%2Fx%2Fproj");
+        assert_eq!(m.title.as_deref(), Some("帮我看这份数据"));
+        assert!(m.created_at.is_some(), "行内 timestamp 兜底 created_at");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tail_state_grok() {
+        // 用户消息发出后还没等到助手输出 → working
+        let working = s(&[
+            r#"{"timestamp":1,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"已完成"}}}}"#,
+            r#"{"timestamp":2,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"继续"}}}}"#,
+        ]);
+        assert_eq!(grok_tail_state(&working), "working");
+        // 工具调用进行中 → working
+        let tool = s(&[r#"{"timestamp":1,"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"t1"}}}"#]);
+        assert_eq!(grok_tail_state(&tool), "working");
+        // 助手输出收尾：问句判 confirm，陈述判 done；未知类型跳过不算最新状态
+        let confirm = s(&[
+            r#"{"timestamp":1,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"}}}}"#,
+            r#"{"timestamp":2,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"要我继续吗？"}}}}"#,
+        ]);
+        assert_eq!(grok_tail_state(&confirm), "confirm");
+        let done = s(&[
+            r#"{"timestamp":1,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"已完成。"}}}}"#,
+            r#"{"timestamp":2,"method":"session/update","params":{"update":{"sessionUpdate":"plan","entries":[]}}}"#,
+        ]);
+        assert_eq!(grok_tail_state(&done), "done", "plan 等事件行跳过，不算最新状态");
+        assert_eq!(grok_tail_state(&[]), "unknown");
+    }
+
+    #[test]
+    fn grok_deletable_whitelist_limits_to_sessions_subdir() {
+        // 白名单目录 = ~/.grok/sessions；同根的 auth.json/config.toml 与
+        // sessions 根的 session_search.sqlite 均不在放行范围（目录闸 + .jsonl 后缀闸）
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        let sessions = dir.join("sessions");
+        let ok = sessions.join("%2Ftmp%2Fx").join("u1").join("updates.jsonl");
+        assert!(ok.ends_with("updates.jsonl") && ok.starts_with(&sessions), "会话文件在 sessions 子目录内");
+        // deletable_session_file 需要 canonicalize 存在，建真文件验证
+        std::fs::create_dir_all(ok.parent().unwrap()).unwrap();
+        std::fs::write(&ok, "{}\n").unwrap();
+        let dirs = vec![(sessions.clone(), false)];
+        assert!(deletable_session_file(&ok, &dirs), "sessions/*/*/updates.jsonl 放行");
+        let summary = ok.parent().unwrap().join("summary.json");
+        std::fs::write(&summary, "{}").unwrap();
+        assert!(
+            !deletable_session_file(&summary, &dirs),
+            "同目录 summary.json（.json 不放行）必须拒绝"
+        );
+        let auth = dir.join("auth.json");
+        std::fs::write(&auth, "{}").unwrap();
+        assert!(
+            !deletable_session_file(&auth, &dirs),
+            "sessions 之外的 auth.json 必须拒绝"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6105,12 +6457,28 @@ mod tests {
     }
 
     #[test]
+    fn sessions_belonging_to_filters_by_card_and_sorts_asc() {
+        // 「◈ 融合进任务书」取材范围 = 该卡名下会话（task_id 口径），不碰其他会话
+        let mut a = claim_test_session("codex", "s-a", "/p", "2026-07-01T00:00:00Z");
+        a.task_id = Some("t-card".into());
+        let mut b = claim_test_session("claude-code", "s-b", "/p", "2026-07-03T00:00:00Z");
+        b.task_id = Some("t-card".into());
+        let mut other = claim_test_session("codex", "s-c", "/p", "2026-07-02T00:00:00Z");
+        other.task_id = Some("t-other".into());
+        let unassigned = claim_test_session("codex", "s-d", "/p", "2026-07-04T00:00:00Z");
+        let out = sessions_belonging_to(vec![b.clone(), other, unassigned, a.clone()], "t-card");
+        let ids: Vec<&str> = out.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["s-a", "s-b"], "只取当前卡，按活跃时间升序");
+        assert!(sessions_belonging_to(vec![a, b], "t-nobody").is_empty());
+    }
+
+    #[test]
     fn apply_task_names_fills_and_tolerates_deleted_card() {
         // 卡片名按项目档案卡回填；卡片已删时 task_name=None 且 task_id 保留
         let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
         let project = dir.join("proj");
         std::fs::create_dir_all(&project).unwrap();
-        let card = crate::projects::create_task_card_at(&project, "文献筛选", None).unwrap();
+        let card = crate::projects::create_task_card_at(&project, "文献筛选", None, None).unwrap();
 
         let mut hit = codex_meta("s1", "2026-07-03T00:00:00Z", None).0;
         hit.project_path = project.to_string_lossy().into_owned();

@@ -1201,9 +1201,10 @@ pub async fn resync_skill_copies(id: String) -> Result<Vec<String>, String> {
 
 /// 各 agent 是否允许 symlink 分发（False = 强制 copy）。
 /// cursor 的 ~/.cursor/skills-cursor 未验证 CLI 是否真读、且 ~/.cursor 与 IDE 共享，
-/// 保守走 copy（漂移检测/resync 沿用既有 copy 机制），不建 symlink
+/// 保守走 copy（漂移检测/resync 沿用既有 copy 机制），不建 symlink；
+/// grok 的 ~/.grok/skills 是独占目录且文档确认读 SKILL.md，但首版未经实机验证，同样先强制 copy
 fn allow_symlink_for(agent: &str) -> bool {
-    agent != "cursor"
+    !matches!(agent, "cursor" | "grok")
 }
 
 #[tauri::command]
@@ -2290,8 +2291,11 @@ mod tests {
 
     #[test]
     fn cursor_distribution_forces_copy_mode() {
-        // cursor 的 skills 目录未验证 CLI 是否真读，强制 copy 不建 symlink
-        assert!(!allow_symlink_for("cursor"));
+        // cursor 的 skills 目录未验证 CLI 是否真读，强制 copy 不建 symlink；
+        // grok 首版未经实机验证同样强制 copy
+        for a in ["cursor", "grok"] {
+            assert!(!allow_symlink_for(a), "{a} 应强制 copy");
+        }
         for a in ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi", "codebuddy"] {
             assert!(allow_symlink_for(a), "{a} 应保持 symlink 优先");
         }

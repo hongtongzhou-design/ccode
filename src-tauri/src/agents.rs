@@ -1352,6 +1352,34 @@ mod tests {
     }
 
     #[test]
+    fn grok_plan_injects_xai_env() {
+        let p = profile("grok", Some("https://relay.example.com/v1"));
+        let plan = launch_plan(&p, Some("xai-secret".into()), Some("grok-code-fast-1"));
+        assert!(plan
+            .env
+            .contains(&("GROK_CLI_CHAT_PROXY_BASE_URL".into(), "https://relay.example.com/v1".into())));
+        assert!(plan
+            .env
+            .contains(&("XAI_API_KEY".into(), "xai-secret".into())));
+        assert!(plan
+            .env
+            .contains(&("GROK_DEFAULT_MODEL".into(), "grok-code-fast-1".into())));
+        // 初始 prompt 是位置参数（一键开步注入）
+        let plan = launch_plan_with_prompt(&p, Some("xai-secret".into()), None, Some("干活"));
+        assert_eq!(plan.prompt_args, vec!["干活"]);
+    }
+
+    #[test]
+    fn grok_official_plan_purges_api_env() {
+        // 官方账号拉起：不注入 API env，且必须 env_remove 残留密钥变量（凭证优先级 api_key > env_key > 登录 token）
+        let p = official_profile("grok");
+        let plan = launch_plan(&p, None, None);
+        assert!(!plan.env.iter().any(|(k, _)| k.starts_with("XAI_") || k.starts_with("GROK_")));
+        assert!(plan.env_remove.contains(&"XAI_API_KEY".to_string()));
+        assert!(plan.env_remove.contains(&"GROK_CODE_XAI_API_KEY".to_string()));
+    }
+
+    #[test]
     fn cursor_plan_injects_key_endpoint_env_and_model_flag() {
         let p = profile("cursor", Some("https://cursor.example.com"));
         let plan = launch_plan(&p, Some("key-secret".into()), Some("claude-opus-4-8[context=1m,effort=high]"));
@@ -1407,6 +1435,11 @@ mod tests {
         assert_eq!(
             readonly_launch_args("codebuddy", &[]).unwrap(),
             vec!["--permission-mode", "plan"]
+        );
+        // grok：dontAsk（CI 严格白名单）+ sandbox read-only（OS 级只读）
+        assert_eq!(
+            readonly_launch_args("grok", &[]).unwrap(),
+            vec!["--permission-mode", "dontAsk", "--sandbox", "read-only"]
         );
         // codex：只读替换默认的 -s workspace-write（先剔除原沙箱参数对再追加）
         let base: Vec<String> = vec!["-c".into(), "x=1".into(), "-s".into(), "workspace-write".into()];
@@ -2111,6 +2144,10 @@ mod tests {
         assert_eq!(
             resume_command_line("cursor", "abc", "/tmp/proj").unwrap(),
             "cd /tmp/proj && cursor-agent --resume abc"
+        );
+        assert_eq!(
+            resume_command_line("grok", "abc", "/tmp/proj").unwrap(),
+            "cd /tmp/proj && grok -r abc"
         );
         // 路径含空格/中文 → 单引号包裹
         assert_eq!(

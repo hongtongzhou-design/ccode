@@ -612,6 +612,11 @@ where
 {
     let name = sanitize_name(name)?;
     let repo = PathBuf::from(crate::sessions::expand_tilde(repo_path));
+    // 落库/分支检测/worktree 路径派生统一用 canonical 路径（与 register_project 的
+    // canonical_key 同口径）：前端按 repoPath 字符串把工作组归进项目分组，symlink
+    // 拼写不一致（macOS /var→/private/var 等）会让工作区掉出分组。canonicalize 失败
+    // （目录不存在）保留原路径——后续 rev-parse 仍报「不是 git 仓库」，错误体验不变。
+    let repo = PathBuf::from(crate::projects::canonical_key(&repo));
     run_git(&repo, &["rev-parse", "--git-dir"], Duration::from_secs(10))
         .map_err(|e| format!("不是 git 仓库: {repo_path} ({e})"))?;
     let branch = format!("ccode/{name}");
@@ -3796,6 +3801,23 @@ mod tests {
             "ORIGINAL\n"
         );
         assert!(query_workspaces(&fx.conn).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_via_symlinked_repo_path_stores_canonical_repo_path() {
+        let Some(fx) = Fixture::new() else { return };
+        // 经符号链接路径创建工作区：落库的 repo_path 必须解析为 canonical 形式
+        // （与 register_project 的 canonical_key 同口径），否则前端按路径字符串
+        // 归组时工作区会掉出项目分组（macOS /var→/private/var 同理）
+        let link = fx.dir.join("repo-link");
+        std::os::unix::fs::symlink(&fx.repo, &link).unwrap();
+        let w = create_impl(&fx.conn, &fx.ws_root, link.to_str().unwrap(), "canon").unwrap();
+        let canonical = fs::canonicalize(&fx.repo).unwrap();
+        assert_eq!(w.repo_path, canonical.to_string_lossy().as_ref());
+        assert_ne!(w.repo_path, link.to_string_lossy().as_ref());
+        // worktree 目录按 canonical 路径末段派生
+        assert_eq!(w.repo_name, "myrepo");
     }
 
     #[test]

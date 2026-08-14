@@ -13,6 +13,9 @@ pub struct TaskCardDto {
     pub step: Option<String>,
     /// 开工后绑定的工作区名（先留字段，前端后续填）
     pub workspace: Option<String>,
+    /// 卡片种类："draft"（服务于任务书草稿的讨论卡）| "idea"（自由想法卡，只读纯聊、可融合进任务书）；
+    /// 缺省推断 = step 非空 → draft，否则 idea（正好等于引入 kind 前的两种行为）
+    pub kind: String,
     pub created_at: String,
 }
 
@@ -23,6 +26,7 @@ impl Default for TaskCardDto {
             name: String::new(),
             step: None,
             workspace: None,
+            kind: "idea".into(),
             created_at: String::new(),
         }
     }

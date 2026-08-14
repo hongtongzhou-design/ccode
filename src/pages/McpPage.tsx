@@ -23,8 +23,11 @@ interface DiscoveredMcp {
   summary: string;
 }
 
-/** MCP 页（matrix §9 调研落地）：统一清单 + 一键分发到八个 CLI 的用户级配置。
+/** MCP 页（matrix §10 调研落地）：统一清单 + 一键分发到各 CLI 的用户级配置。
  *  分发只写用户级（项目级有审批闸），密钥用 $VAR 引用不落明文 */
+
+/** 首版只读、暂不支持 MCP 分发的 agent（后端决策）：展开区显示「只读」而非开关 */
+const MCP_DISTRIBUTE_UNSUPPORTED = new Set(["grok"]);
 
 const EMPTY_FORM = {
   name: "",
@@ -492,13 +495,22 @@ export default function McpPage({ visible }: { visible: boolean }) {
                           className="flex items-center justify-between gap-2 rounded-sm bg-inset px-2 py-1.5"
                         >
                           <span className="text-xs text-l3">{agent.label}</span>
-                          <Toggle
-                            label={agent.label}
-                            checked={on}
-                            onChange={(v) =>
-                              !applying[key] && void toggleApp(s, agent.id, v)
-                            }
-                          />
+                          {MCP_DISTRIBUTE_UNSUPPORTED.has(agent.id) ? (
+                            <span
+                              className="text-xs text-l4"
+                              title="该 CLI 的 MCP 配置首版只读，暂不支持分发"
+                            >
+                              只读
+                            </span>
+                          ) : (
+                            <Toggle
+                              label={agent.label}
+                              checked={on}
+                              onChange={(v) =>
+                                !applying[key] && void toggleApp(s, agent.id, v)
+                              }
+                            />
+                          )}
                         </div>
                       );
                     })}

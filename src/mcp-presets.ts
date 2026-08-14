@@ -15,7 +15,7 @@ export interface McpPreset {
 
 export const MCP_PRESETS: McpPreset[] = [
   // Consensus 官方 hosted MCP（lit-search 技能推荐）；需 Consensus API key。
-  // Bearer 后用 ${VAR} 带括号写法：claude/codebuddy/cursor 只插值 ${VAR} 形式（matrix §9.3）
+  // Bearer 后用 ${VAR} 带括号写法：claude/codebuddy/cursor 只插值 ${VAR} 形式（matrix §10.3）
   {
     label: "Consensus（学术搜索）",
     note: "Consensus 官方 hosted MCP。需 Consensus API key：先设好环境变量 CONSENSUS_API_KEY 再分发，密钥按引用转写、不落明文。",

@@ -1885,6 +1885,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const focusedId =
     splitActive && activePane === "right" && splitTabId ? splitTabId : activeId;
   const activeCwd = statuses[focusedId]?.cwd ?? "~";
+  /** 左栏文件树当前根（钻取/切根后与 activeCwd 分叉）：改动面板跟随它而不是终端标签 cwd，
+      未分叉时为 null 回落 activeCwd（v3.82 口径：「我在看哪个目录，改动就显示哪个」） */
+  const [treeRoot, setTreeRoot] = useState<string | null>(null);
+  const gitPanelCwd = treeRoot ?? activeCwd;
+  // 切标签/分屏焦点变化时回到新标签 cwd：树若未挂载（专注终端）就没人发 onRootNavigated，
+  // 必须在这里清掉分叉，否则改动面板会停在旧标签的目录上
+  useEffect(() => {
+    setTreeRoot(null);
+  }, [activeCwd]);
 
   /** 标签激活：分屏时点到右 pane 的标签则左右互换（活跃标签始终固定在左 pane） */
   function activateTab(id: string) {
@@ -2863,6 +2872,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               onFsEvent={bumpFsChangeTick}
               onEnterProject={setEnterCwd}
               onRootChange={closePreviewForRootChange}
+              onRootNavigated={setTreeRoot}
               belowRecent={
                 /* 项目区：当前标签 cwd 所属项目的主文件夹 + 活跃工作区，点击切根复用 enterCwd 链路 */
                 <ProjectRail
@@ -3439,7 +3449,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               }
             >
               <GitPanel
-                cwd={activeCwd}
+                cwd={gitPanelCwd}
                 visible={visible && rightOpen}
                 refreshKey={fsChangeTick}
                 onTotals={reportGitTotals}

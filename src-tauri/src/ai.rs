@@ -68,6 +68,8 @@ fn headless_args(agent: &str, prompt: &str) -> Vec<String> {
         "codebuddy" => vec!["-p".into(), prompt.into()],
         // cursor 无头：-p/--print + --output-format text（与 claude 同形）
         "cursor" => vec!["-p".into(), prompt.into(), "--output-format".into(), "text".into()],
+        // grok 无头：-p/--print + --output-format json（**不读 stdin**，prompt 必须走参数）
+        "grok" => vec!["-p".into(), prompt.into(), "--output-format".into(), "json".into()],
         "opencode" => vec!["run".into(), prompt.into()],
         // qwen 与未知 agent 按位置参数兜底
         _ => vec![prompt.into()],
@@ -75,11 +77,14 @@ fn headless_args(agent: &str, prompt: &str) -> Vec<String> {
 }
 
 /// 定时任务（scheduler）的无头参数：与 headless_args 同形，唯一区别是 codex 用
-/// workspace-write 沙箱——定时任务要在项目里写文件（如 lit-watch 的 notes/inbox.md、
-/// papers/watch-seen.md），read-only 跑不了
+/// workspace-write 沙箱、grok 加 --yolo——定时任务要在项目里写文件（如 lit-watch 的
+/// notes/inbox.md、papers/watch-seen.md），read-only 跑不了；grok headless 默认权限模式
+/// 未确认（若默认交互式问权限，headless 下非白名单请求会被 Cancelled 导致任务失败），
+/// 照 codex `-s workspace-write` 的先例给 grok 加 --yolo（自动批准全部工具，含写文件）
 pub(crate) fn headless_task_args(agent: &str, prompt: &str) -> Vec<String> {
     match agent {
         "codex" => vec!["exec".into(), "--skip-git-repo-check".into(), "-s".into(), "workspace-write".into(), prompt.into()],
+        "grok" => vec!["-p".into(), prompt.into(), "--output-format".into(), "json".into(), "--yolo".into()],
         other => headless_args(other, prompt),
     }
 }

@@ -651,9 +651,37 @@ export default function ProjectGroup({
 
   async function applyTemplate(item: TemplatePickItem) {
     if (!cfg) return;
+    // 空流程（含「不使用研究流程」后从 ⋯ 菜单回流）：走追加——后端顺带清 pipeline_opt_out
+    if (cfg.steps.length === 0) {
+      setApplyingTemplate(true);
+      try {
+        await invoke("append_pipeline_steps", {
+          projectRoot: projectPath,
+          steps: item.steps,
+        });
+        // 与编辑器「＋ 从模板追加」同一口径：重读配置刷新本地状态（含清掉的 opt-out 标记）
+        const read = await invoke<ProjectConfigReadDto>("read_project_config", {
+          path: projectPath,
+        });
+        setCfg(read.config);
+        setCfgWarnings(read.warnings);
+        // 首启横幅里的可选课题主题：append 不碰 topic，变了才单独写回
+        const topic = templateTopic.trim();
+        if (topic && topic !== (read.config.topic ?? "")) {
+          await saveConfig({ ...read.config, topic });
+        }
+        setPickerOpen(false);
+        // 顺序引导（一次性提示条，可关）：把视线引到第 1 步与种子
+        setTplApplied(true);
+      } catch (reason) {
+        onError(String(reason));
+      } finally {
+        setApplyingTemplate(false);
+      }
+      return;
+    }
     // 已有步骤时视为「更换模板」：提示覆盖，绑定的工作区与资源不受影响
     if (
-      cfg.steps.length > 0 &&
       !(await confirmDialog(
         `更换模板「${item.name}」？现有 ${cfg.steps.length} 个步骤会被替换，绑定的工作区与资源不受影响。继续？`,
         { danger: true },
@@ -1090,26 +1118,23 @@ export default function ProjectGroup({
     if (focusStep !== null) return (cfg.steps[focusStep]?.name ?? null);
     return currentStep?.step.name ?? null;
   })();
-  // 聚焦步骤草稿加载（state 声明在上方 describeStep 之前）：进项目详情/切聚焦/页面刷新时重读，不轮询
-  useEffect(() => {
+  // 聚焦步骤草稿加载（state 声明在上方 describeStep 之前）：进项目详情/切聚焦/页面刷新时重读，不轮询；
+  // 「◈ 融合进任务书」落盘后经 onDraftChanged 回调即刻重读（不等页面刷新）
+  function loadFocusDraft() {
     if (!project || !focusStepName) {
       setFocusDraft(null);
       return;
     }
-    let stale = false;
     invoke<{ relPath: string; text: string | null }>("read_task_draft", {
       projectRoot: project.path,
       stepName: focusStepName,
     })
-      .then((d) => {
-        if (!stale) setFocusDraft({ stepName: focusStepName, ...d });
-      })
-      .catch(() => {
-        if (!stale) setFocusDraft(null);
-      });
-    return () => {
-      stale = true;
-    };
+      .then((d) => setFocusDraft({ stepName: focusStepName, ...d }))
+      .catch(() => setFocusDraft(null));
+  }
+  useEffect(() => {
+    loadFocusDraft();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, focusStepName, refreshToken]);
   // 聚焦步骤的执行状态（流程线 agent/评审节点用）：deriveStepStatus 六态映射到流程线四态
   const focusRunStatus = (() => {
@@ -1372,8 +1397,9 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {/* 首启引导（轻量版）：注册项目且 steps 为空 → 从模板库选择写入研究流程 */}
-      {registered && cfg && cfg.steps.length === 0 && (
+      {/* 首启引导（轻量版）：注册项目且 steps 为空 → 从模板库选择写入研究流程；
+          「不使用研究流程」（pipelineOptOut）显式隐藏本横幅，回流入口在 ⋯ 菜单 */}
+      {registered && cfg && cfg.steps.length === 0 && !cfg.pipelineOptOut && (
         <div className="mb-2 rounded-md bg-strip p-3">
           <p className="mb-2 text-xs text-l3">
             该项目还没有研究步骤。从模板库选择（英文综述 / 科研论文 / 数据处理 /
@@ -1606,6 +1632,7 @@ export default function ProjectGroup({
               ? focusDraft
               : null
           }
+          onDraftChanged={loadFocusDraft}
           reviewConflict={focusDesc?.st.key === "blocked"}
           onRestoreWorkspace={
             focusArchivedWs ? () => void restoreWs(focusArchivedWs) : undefined
@@ -1840,7 +1867,8 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {/* 定时任务区块（scheduler.rs）：只显示 projectRoot 命中本项目的任务，运行完成走 scheduler-run-done 事件刷新 */}
+      {/* 定时任务区块（scheduler.rs）：只显示 projectRoot 命中本项目的任务，运行完成走 scheduler-run-done 事件刷新；
+          技能可选后不再科研专属，「不使用研究流程」的项目也照常显示 */}
       {registered && <ScheduleSection projectRoot={projectPath} />}
 
       {children({
@@ -1867,11 +1895,18 @@ export default function ProjectGroup({
               onSelect: () => openEditor(),
             },
             {
-              label: pickerOpen ? "收起模板库" : "更换模板",
+              // 空步骤项目（含「不使用研究流程」后隐藏横幅的）从这里回流模板库
+              label: pickerOpen
+                ? "收起模板库"
+                : cfg && cfg.steps.length === 0
+                  ? "选择研究流程模板"
+                  : "更换模板",
               disabled: !cfg,
-              title: cfg
-                ? "打开模板库另选一个模板；写入时现有步骤被替换，绑定的工作区与资源不受影响"
-                : "project.toml 尚未加载完成",
+              title: !cfg
+                ? "project.toml 尚未加载完成"
+                : cfg.steps.length === 0
+                  ? "打开模板库选一套研究流程写入项目"
+                  : "打开模板库另选一个模板；写入时现有步骤被替换，绑定的工作区与资源不受影响",
               onSelect: () => setPickerOpen((v) => !v),
             },
             {

@@ -18,7 +18,9 @@
 - 四层「浮起」结构（rail/rail2/canvas/inset 逐级变亮）；文字冷白→灰四档；每主题独立 CTA 强调色（按钮/选中用 `cta`；可操作
   状态如「可合并」用**按钮本身的 cta 高亮**，不另挂 pill；纯状态 pill 用 inset 灰底 + 语义色小圆点）；**状态语义色独立于
   主题**（ok/err/warn 不随主题变）；**结果横幅一律 bg-strip/inset 底 + ✓/✗ 语义色文字**，不用整块 bg-ok/bg-err（bg-err
-  仅留给需警惕的小 pill）；零阴影、隐式 hairline。**浮层统一口径**：弹窗/下拉/右键菜单/命令面板表面一律
+  仅留给需警惕的小 pill）；**diff 增删行铺底走专用令牌 `--color-diff-add-bg/fg`、`--color-diff-del-bg/fg`**（v3.81：
+  深色主题沿用深底浅字，浅色主题在 `[data-theme$="-light"]` 统一覆写为 GitHub 式浅底深字——ok/err 深底整行铺在浅底上
+  会显黑，故不再直接复用 bg-ok/bg-err 铺整行）；零阴影、隐式 hairline。**浮层统一口径**：弹窗/下拉/右键菜单/命令面板表面一律
   `.ccode-float-surface`（= raised 底 + 顶部 1px 内高光，Linear edge highlight 手法——零阴影原则不变，浮起感靠
   边缘高光而非投影），禁再随手用 bg-strip/bg-raised 做弹层；全屏遮罩统一 `bg-black/40`（25/50/60 三档已并一）。
 - **字体渲染按平台分口径（v3.60 后 Windows 糊字修复）**：入口（main.tsx）在 `<html>` 上落 `data-platform`

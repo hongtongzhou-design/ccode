@@ -3,7 +3,9 @@ import type { HumanTaskStateDto, ProjectStepDto } from "./types";
 /** 步骤内协同流程线（v3.71）的纯逻辑：把「这一步里人和 agent 的动作」按先后排成有序节点链，
  *  全部状态派生（无状态机）。节点顺序 = 讨论种子 → before 人工事项 → agent 执行
  *  → during 人工事项（并行段） → after 人工事项 → 评审合并。
- *  「当前节点」= 第一个未完成节点（currentNodeKey），组件高亮并就地展开其操作区。 */
+ *  「当前节点」= 第一个未完成节点（currentNodeKey），组件高亮并就地展开其操作区。
+ *  例外：agent 节点的「开始/恢复工作区/去终端看看」不受当前节点门控——开始始终可用，
+ *  讨论种子与开始前事项只提醒不拦（同 KickoffConfirmDialog 口径）。 */
 
 /** 步骤执行状态的外部输入（由调用方从工作区派生：ProjectGroup 的 deriveStepStatus 口径） */
 export type StepRunStatus =

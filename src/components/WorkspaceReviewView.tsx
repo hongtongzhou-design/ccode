@@ -258,9 +258,9 @@ function DiffSide({
 }) {
   const tone =
     kind === "add"
-      ? "bg-ok text-add"
+      ? "bg-diff-add-bg text-diff-add-fg"
       : kind === "delete"
-        ? "bg-err text-del"
+        ? "bg-diff-del-bg text-diff-del-fg"
         : kind === "blank"
           ? "bg-inset/40 text-l4"
           : "text-l2";

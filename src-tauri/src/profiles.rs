@@ -697,6 +697,9 @@ mod tests {
         );
         // 无协议概念的同族目标：协议清为 None
         assert_eq!(pick_copy_protocol(&src("qwen", Some("anthropic")), "codebuddy").unwrap(), None);
+        // grok 归 openai 族（xAI 官方 API 是 OpenAI chat_completions 兼容），无协议概念目标协议清 None
+        assert_eq!(pick_copy_protocol(&src("codex", None), "grok").unwrap(), None);
+        assert!(pick_copy_protocol(&src("claude-code", None), "grok").is_err(), "anthropic → grok 不同族应拒绝");
         // 不同族拒绝：anthropic → codex/gemini；cursor 专有协议与谁都不互通
         assert!(pick_copy_protocol(&src("claude-code", None), "codex").is_err());
         assert!(pick_copy_protocol(&src("codex", None), "gemini").is_err());

@@ -598,6 +598,57 @@ static AGENT_SPECS: &[AgentSpec] = &[
             api_key_fields: &[],
         }),
     },
+    AgentSpec {
+        id: "grok",
+        display_name: "Grok Build",
+        binary: "grok",
+        version_args: &["--version"],
+        protocols: &[],
+        // xai-org/grok-build 源码调研（matrix §9）：key/model env 已核实；
+        // GROK_CLI_CHAT_PROXY_BASE_URL 是 CLI chat API 代理端点覆盖（对应 --cli-chat-proxy-base-url），
+        // 作为第三方端点注入通道待实机验证
+        launch: LaunchSpec::Env(EnvInject {
+            base_url: Some("GROK_CLI_CHAT_PROXY_BASE_URL"),
+            key: Some("XAI_API_KEY"),
+            model: Some("GROK_DEFAULT_MODEL"),
+            fixed_env: &[],
+            fixed_args: &[],
+        }),
+        // 交互初始 prompt 是位置参数；headless 为 -p/--print（不读 stdin）
+        prompt_inject: PromptInject::Positional,
+        // 「聊想法」只读注入：headless 已验证语义最硬的组合——dontAsk 是 CI 严格白名单
+        //（非白名单工具请求直接 Cancelled）+ read-only 是 OS 级只读（只能写 ~/.grok 和临时目录）；
+        // --permission-mode plan 的值被接受但主会话门控链路未确认，不用
+        readonly_args: &["--permission-mode", "dontAsk", "--sandbox", "read-only"],
+        // -s/--session-id <UUID> 仅新建会话可用（matrix §9）
+        fixed_session_id: true,
+        // -r/--resume [ID_OR_TITLE] 按 ID 恢复；-c/--continue 续最近（前端不用）
+        resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
+        // 与 Ccode SSOT 同构（目录 + SKILL.md）；首版未经实机验证，分发强制 copy（skills.rs）
+        skills_dir: &[".grok", "skills"],
+        packaging: PackagingSpec {
+            npm_install: Some("@xai-official/grok"),
+            npm_update: Some("@xai-official/grok"),
+            // grok update 是非交互自更新（grok update --check --json 机器可读）
+            self_update: Some(&["update"]),
+            install_script: Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
+            update_fallback: &[UpdateChannel::SelfUpdate, UpdateChannel::Npm],
+            ..NO_PACKAGING
+        },
+        // grok login 走浏览器 OAuth（auth.x.ai），凭证落 ~/.grok/auth.json（0600，grok 自己原子重写，
+        // 我们只读）；XAI_API_KEY 残留会压登录态（凭证优先级 api_key > env_key > session token），
+        // 官方账号拉起必须 env_remove
+        official_account: Some(OfficialAccountSpec {
+            login_cmd: &["login"],
+            auth_file_paths: &[".grok/auth.json"],
+            env_purge_list: &["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"],
+            // config.toml 顶层 api_key 是凭证优先级最高档，会静默覆盖官方账号登录；
+            // 但冲突探测只支持 .env/.json 格式（TOML 不支持），无法探测文件级冲突
+            conflict_probes: &[],
+            detection_note: Some("凭证在 ~/.grok/auth.json（scope→GrokAuth 顶层 map，grok 自己原子重写）；config.toml 顶层 api_key 优先级最高会覆盖登录态，TOML 冲突探测暂不支持"),
+            api_key_fields: &[],
+        }),
+    },
 ];
 
 /// 按 id 查规格
@@ -636,6 +687,7 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
             out.push(h.join(".local/bin"));
             out.push(h.join("bin"));
             out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
+            out.push(h.join(".grok/bin")); // Grok Build 官方安装器（x.ai/cli/install.sh）
         }
         out.push("/opt/homebrew/bin".into()); // Apple Silicon brew
         out.push("/usr/local/bin".into()); // Intel brew / 手动安装
@@ -645,6 +697,7 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
         if let Some(h) = dirs::home_dir() {
             out.push(h.join(".local/bin"));
             out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
+            out.push(h.join(".grok/bin")); // Grok Build 官方安装器
         }
         out.push("/usr/local/bin".into());
     }
@@ -659,6 +712,7 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
         }
         if let Some(h) = dirs::home_dir() {
             out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
+            out.push(h.join(".grok/bin")); // Grok Build 官方安装器（%USERPROFILE%\.grok\bin\grok.exe）
         }
     }
     out
@@ -668,7 +722,7 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
 mod tests {
     use super::*;
 
-    const KNOWN_IDS: [&str; 8] = [
+    const KNOWN_IDS: [&str; 9] = [
         "claude-code",
         "codex",
         "gemini",
@@ -677,9 +731,10 @@ mod tests {
         "kimi",
         "codebuddy",
         "cursor",
+        "grok",
     ];
 
-    /// 注册表完整性：八个既有 agent 全部有规格，必填字段非空
+    /// 注册表完整性：全部已知 agent 都有规格，必填字段非空
     #[test]
     fn registry_covers_all_known_agents_with_required_fields() {
         assert_eq!(all_agent_specs().len(), KNOWN_IDS.len());
@@ -785,6 +840,30 @@ mod tests {
         assert!(agent_spec("opencode").unwrap().official_account.is_none());
     }
 
+    /// grok 规格与 xai-org/grok-build 源码调研一致（matrix §9）
+    #[test]
+    fn grok_spec_matches_source_research() {
+        let spec = agent_spec("grok").unwrap();
+        assert_eq!(spec.binary, "grok");
+        let LaunchSpec::Env(env) = &spec.launch else {
+            panic!("grok 应为 Env 注入形态");
+        };
+        assert_eq!(env.key, Some("XAI_API_KEY"));
+        assert_eq!(env.model, Some("GROK_DEFAULT_MODEL"));
+        assert_eq!(env.base_url, Some("GROK_CLI_CHAT_PROXY_BASE_URL"));
+        assert_eq!(
+            spec.readonly_args,
+            &["--permission-mode", "dontAsk", "--sandbox", "read-only"]
+        );
+        let oa = spec.official_account.as_ref().unwrap();
+        assert_eq!(oa.login_cmd, &["login"]);
+        assert_eq!(oa.auth_file_paths, &[".grok/auth.json"]);
+        assert!(oa.env_purge_list.contains(&"XAI_API_KEY"));
+        assert!(oa.env_purge_list.contains(&"GROK_CODE_XAI_API_KEY"));
+        assert_eq!(spec.packaging.npm_install, Some("@xai-official/grok"));
+        assert_eq!(spec.packaging.self_update, Some(&["update"][..]));
+    }
+
     /// 交互式 TUI 自更新标记：kimi/opencode 的 upgrade 是方向键选择界面（行输入无法应答，
     /// 配置页更新按钮据此改路由到完整终端）；标记必须挂在有 self_update 的规格上
     #[test]
@@ -800,8 +879,8 @@ mod tests {
         }
         assert!(agent_spec("kimi").unwrap().packaging.interactive_tui);
         assert!(agent_spec("opencode").unwrap().packaging.interactive_tui);
-        // claude/codebuddy/cursor 的自更新是普通非交互命令，其余 agent 无自更新渠道，均不得误标
-        for id in ["claude-code", "codex", "gemini", "qwen", "codebuddy", "cursor"] {
+        // claude/codebuddy/cursor/grok 的自更新是普通非交互命令，其余 agent 无自更新渠道，均不得误标
+        for id in ["claude-code", "codex", "gemini", "qwen", "codebuddy", "cursor", "grok"] {
             assert!(
                 !agent_spec(id).unwrap().packaging.interactive_tui,
                 "{id} 不应标 interactive_tui"

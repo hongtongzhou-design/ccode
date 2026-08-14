@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   bucketCardsByStep,
+  discussionCardsForStep,
   groupSessionsByTask,
+  ideaCardsForStep,
   taskMdEditorReduce,
   sortCards,
 } from "../src/task-cards.ts";
@@ -14,13 +16,13 @@ function card(partial: Partial<TaskCardDto>): TaskCardDto {
     name: "卡片",
     step: null,
     workspace: null,
+    kind: "draft",
     createdAt: "2026-08-01T10:00:00Z",
     ...partial,
   };
 }
 
-test("sortCards：创建时间升序，同刻按名称兜底", () => {
-  const sorted = sortCards([
+test("sortCards：创建时间升序，同刻按名称兜底", () => {  const sorted = sortCards([
     card({ id: "t-b", name: "乙", createdAt: "2026-08-02T00:00:00Z" }),
     card({ id: "t-a2", name: "甲二", createdAt: "2026-08-01T00:00:00Z" }),
     card({ id: "t-a1", name: "甲一", createdAt: "2026-08-01T00:00:00Z" }),
@@ -199,4 +201,26 @@ test("extractOpenQuestions：无小节/空小节/### 级别标题", () => {
   assert.deepEqual(extractOpenQuestions("### 待拍板问题\n- 选 A 还是 B"), [
     "选 A 还是 B",
   ]);
+});
+
+
+test("kind：想法区只收聚焦步骤的 idea 卡，讨论卡区只收 draft 卡", () => {
+  const cards = [
+    card({ id: "t-i1", name: "想法一", kind: "idea", step: "读文献" }),
+    card({ id: "t-d1", name: "讨论一", kind: "draft", step: "读文献" }),
+    card({ id: "t-i2", name: "别步想法", kind: "idea", step: "写综述" }),
+    card({ id: "t-i3", name: "散想法", kind: "idea" }),
+    card({ id: "t-d2", name: "散讨论", kind: "draft" }),
+  ];
+  assert.deepEqual(
+    ideaCardsForStep(cards, "读文献").map((c) => c.id),
+    ["t-i1"],
+  );
+  assert.deepEqual(
+    discussionCardsForStep(cards, "读文献").map((c) => c.id),
+    ["t-d1"],
+  );
+  // 未挂步骤/其他步骤的卡不进聚焦区
+  assert.deepEqual(ideaCardsForStep(cards, "读文献").length, 1);
+  assert.deepEqual(discussionCardsForStep(cards, "写综述"), []);
 });

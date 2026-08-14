@@ -20,6 +20,8 @@ import ContextMenu from "../components/ContextMenu";
 import { confirmDialog } from "../components/ConfirmDialog";
 import ProjectGroup from "../components/ProjectGroup";
 import ArtifactChecklist from "../components/ArtifactChecklist";
+import TemplatePickModal from "../components/TemplatePickModal";
+import { filterWorkspacesByFocus } from "../workspace-visibility";
 import {
   EmptyState,
   fieldClass,
@@ -38,7 +40,6 @@ import type {
   PortInfoDto,
   ProjectConfigReadDto,
   ProjectDto,
-  RepoDto,
   RunScriptDto,
   WorkspaceDto,
   WorkspaceDriftDto,
@@ -300,31 +301,22 @@ function useOpenInTerminal() {
   };
 }
 
+/** 新建工作区（入口收进项目分组的工作区列表头部）：仓库固定为发起分组的路径，
+ *  弹窗只剩任务名 + 分支预览，不再提供仓库下拉/自定义路径（避免建错项目） */
 function NewWorkspaceModal({
-  repos,
-  reposLoading,
+  repoPath,
   onClose,
   onCreated,
 }: {
-  /** 页面级预热的候选仓库（后端聚合的会话目录，已过滤为真实存在的 git 仓库） */
-  repos: RepoDto[];
-  reposLoading: boolean;
+  /** 发起分组的仓库路径（项目注册路径或未注册分组的 repo 路径），弹窗内不可改 */
+  repoPath: string;
   onClose: () => void;
   onCreated: (ws: WorkspaceDto) => void;
 }) {
-  const [repoChoice, setRepoChoice] = useState("");
-  const [customPath, setCustomPath] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
-  // 仓库列表由页面预热传入；就绪后默认选中第一个，为空/加载失败兜底手动输入
-  useEffect(() => {
-    if (reposLoading) return;
-    setRepoChoice((c) => c || repos[0]?.path || "__custom__");
-  }, [repos, reposLoading]);
-
-  const repoPath = repoChoice === "__custom__" ? customPath.trim() : repoChoice;
   const branch = `ccode/${sanitizeBranch(name)}`;
 
   async function submit(e: React.FormEvent) {
@@ -355,40 +347,15 @@ function NewWorkspaceModal({
         className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">新建工作区</h2>
-        <label className="mb-3 block text-sm">
-          <span className="mb-1 block text-xs text-l3">仓库</span>
-          <select
-            className={fieldClass}
-            value={repoChoice}
-            disabled={reposLoading}
-            onChange={(e) => setRepoChoice(e.target.value)}
-          >
-            {reposLoading && <option value="">加载仓库列表…</option>}
-            {repos.map((r) => (
-              <option key={r.path} value={r.path} title={r.path}>
-                {r.name}（{r.path}）
-              </option>
-            ))}
-            <option value="__custom__">其他目录…</option>
-          </select>
-        </label>
-        {repoChoice === "__custom__" && (
-          <label className="mb-3 block text-sm">
-            <span className="mb-1 block text-xs text-l3">仓库路径</span>
-            <input
-              className={fieldClass}
-              required
-              placeholder="~/work/myproject"
-              value={customPath}
-              onChange={(e) => setCustomPath(e.target.value)}
-            />
-          </label>
-        )}
+        <p className="mb-3 truncate font-mono text-xs text-l3" title={repoPath}>
+          {repoPath}
+        </p>
         <label className="mb-4 block text-sm">
           <span className="mb-1 block text-xs text-l3">任务名</span>
           <input
             className={fieldClass}
             required
+            autoFocus
             placeholder="如 fix-login"
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -410,7 +377,7 @@ function NewWorkspaceModal({
           </button>
           <button
             type="submit"
-            disabled={creating || !name.trim() || !repoPath}
+            disabled={creating || !name.trim()}
             className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             {creating ? "创建中…" : "创建"}
@@ -858,7 +825,13 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     const t = setTimeout(() => setNotice(null), 10_000);
     return () => clearTimeout(t);
   }, [notice]);
-  const [modal, setModal] = useState(false);
+  // 新建工作区弹窗：携带发起分组的仓库路径（入口在各分组的工作区列表头部）
+  const [newWsRepoPath, setNewWsRepoPath] = useState<string | null>(null);
+  // 注册成功后的研究流程模板选择层（不使用/稍后再选 = 直接关闭不追加）
+  const [templatePick, setTemplatePick] = useState<{
+    path: string;
+    name: string;
+  } | null>(null);
   // 项目导航行右键菜单（重命名/复制路径/移除注册）与改名弹窗
   const [railMenu, setRailMenu] = useState<{
     x: number;
@@ -898,9 +871,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
   // 任务行产物清单手风琴：按工作区 id 记忆展开态，切项目时清空
   const [artifactsOpen, setArtifactsOpen] = useState<Set<string>>(new Set());
-  // 新建弹窗的仓库候选在页面可见时预热（list_repos 扫描慢，避免弹窗内空等）
-  const [repos, setRepos] = useState<RepoDto[]>([]);
-  const [reposLoading, setReposLoading] = useState(false);
   const openInTerminal = useOpenInTerminal();
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setWorkspaceReviewRequest = useAppStore(
@@ -1086,12 +1056,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (!visible) return;
     void refresh();
-    // 预热新建弹窗的仓库候选；失败保持空列表，弹窗兜底 __custom__ 手动输入
-    setReposLoading(true);
-    invoke<RepoDto[]>("list_repos")
-      .then(setRepos)
-      .catch(() => {})
-      .finally(() => setReposLoading(false));
   }, [visible]);
 
   async function onRestore(ws: WorkspaceDto) {
@@ -1892,23 +1856,14 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             : `${active.length} 个活跃 · ${projects.length} 个项目 · ${repoCount} 个仓库`
         }
         actions={
-          <>
-            {/* 页头唯一实心 CTA = 添加项目；新建工作区降次级描边（统一页头规格 P3） */}
-            <button
-              type="button"
-              onClick={() => void onAddProject()}
-              className={primaryActionClass}
-            >
-              + 添加项目
-            </button>
-            <button
-              type="button"
-              onClick={() => setModal(true)}
-              className={secondaryActionClass}
-            >
-              新建工作区
-            </button>
-          </>
+          // 页头唯一主动作 = 添加项目；新建工作区收进各项目分组的工作区列表头部（仓库固定为当前分组）
+          <button
+            type="button"
+            onClick={() => void onAddProject()}
+            className={primaryActionClass}
+          >
+            + 添加项目
+          </button>
         }
       />
       {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
@@ -2004,40 +1959,51 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             onError={setError}
           >
             {(wsView) => {
-            // 工作区↔步骤归属：复用 steps[].workspaceName === 工作区名 口径（与步进器状态派生同一映射）
-            const focusWsName = wsView.focusStepName;
-            const wsList = focusWsName
-              ? selectedGroup.list.filter(
-                  (w) =>
-                    wsView.steps.find((s) => s.name === focusWsName)
-                      ?.workspaceName === w.name,
-                )
-              : selectedGroup.list;
+            // 聚焦步骤可见性（纯逻辑 src/workspace-visibility.ts）：聚焦 = 绑定该步骤的工作区
+            // + 不匹配任何步骤的手动工作区（手动建的任何东西都不能被默认视图藏掉）
+            const focusStepName = wsView.focusStepName;
+            const wsList = filterWorkspacesByFocus(
+              selectedGroup.list,
+              wsView.steps,
+              focusStepName,
+            );
             return (
             <>
-            {wsView.steps.length > 0 && (
-              <div className="flex items-center gap-2 pt-1">
-                <span className="text-xs text-l3">
-                  {focusWsName
-                    ? `${focusWsName} · 工作区（${wsList.length}）`
-                    : `工作区（${wsList.length}）`}
-                </span>
-                {(focusWsName !== null || wsView.showAll) && (
-                  <button
-                    type="button"
-                    onClick={wsView.onToggleShowAll}
-                    className="ml-auto rounded-sm px-1.5 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l1"
-                  >
-                    {wsView.showAll ? "按步骤" : "全部"}
-                  </button>
-                )}
+            {/* 列表头部行始终渲染：「新建工作区」入口对无步骤项目与未注册分组同样可用；
+                「全部/按步骤」切换只在有研究步骤时有意义 */}
+            <div className="flex items-center gap-2 pt-1">
+              <span className="text-xs text-l3">
+                {focusStepName
+                  ? `${focusStepName} · 工作区（${wsList.length}）`
+                  : `工作区（${wsList.length}）`}
+              </span>
+              <div className="ml-auto flex items-center gap-1">
+                {wsView.steps.length > 0 &&
+                  (focusStepName !== null || wsView.showAll) && (
+                    <button
+                      type="button"
+                      onClick={wsView.onToggleShowAll}
+                      className="rounded-sm px-1.5 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l1"
+                    >
+                      {wsView.showAll ? "按步骤" : "全部"}
+                    </button>
+                  )}
+                <button
+                  type="button"
+                  onClick={() => setNewWsRepoPath(selectedGroup.repoPath)}
+                  className={`${actionBtn} shrink-0`}
+                >
+                  新建工作区
+                </button>
               </div>
-            )}
+            </div>
             {wsList.length === 0 ? (
               <p className="py-2 text-xs text-l4">
                 {selectedGroup.list.length === 0
-                  ? "该项目还没有工作区，从上方研究步骤「开始」一键开步。"
-                  : "该步骤还没有工作区，点流程线里的「开始」一键开步。"}
+                  ? wsView.steps.length > 0
+                    ? "该项目还没有工作区，从上方研究步骤「开始」一键开步，或点右侧「新建工作区」。"
+                    : "该项目还没有工作区，点右侧「新建工作区」建一个。"
+                  : "该步骤还没有工作区，点流程线里的「开始」一键开步，或点右侧「新建工作区」。"}
               </p>
             ) : (
             <ul className="divide-y divide-hairline">
@@ -2221,6 +2187,29 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             setAddProjectPath(null);
             setFreshProjectPath(project.path);
             setSelectedGroupKey(`p:${project.path}`);
+            // 注册成功后接研究流程模板选择层（选模板 = append_pipeline_steps 追加步骤）
+            setTemplatePick({ path: project.path, name: project.name });
+            void refresh();
+          }}
+        />
+      )}
+      {templatePick && (
+        <TemplatePickModal
+          projectPath={templatePick.path}
+          projectName={templatePick.name}
+          onClose={() => setTemplatePick(null)}
+          onOptOut={() => {
+            // 「不使用研究流程」标记已落盘：刷新让分组重读 project.toml（隐藏模板引导）
+            setTemplatePick(null);
+            void refresh();
+          }}
+          onApplied={(result, templateName) => {
+            setTemplatePick(null);
+            setNotice(
+              result.skipped.length > 0
+                ? `已按模板「${templateName}」追加 ${result.appended} 个研究步骤；跳过 ${result.skipped.length} 步（同名）：${result.skipped.join("、")}`
+                : `已按模板「${templateName}」追加 ${result.appended} 个研究步骤`,
+            );
             void refresh();
           }}
         />
@@ -2264,13 +2253,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           }}
         />
       )}
-      {modal && (
+      {newWsRepoPath && (
         <NewWorkspaceModal
-          repos={repos}
-          reposLoading={reposLoading}
-          onClose={() => setModal(false)}
+          repoPath={newWsRepoPath}
+          onClose={() => setNewWsRepoPath(null)}
           onCreated={(workspace) => {
-            setModal(false);
+            setNewWsRepoPath(null);
             setCreated(workspace);
             void refresh();
           }}

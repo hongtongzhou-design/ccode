@@ -10,6 +10,14 @@
 - **工作区创建是补偿事务**：先以 SQLite `BEGIN IMMEDIATE` 原子预留端口并写 `creating`，再创建 worktree/复制文件/激活；
   任一步失败必须移除 worktree、prune、删分支、删 creating 行并释放端口。复制错误不得忽略；setup 失败维持非阻断。
   `ready_to_merge` 必须要求 `ahead > 0`，空工作区禁止合并。
+- **create_workspace 落库 repo_path 统一 canonical 口径**：`create_impl_with_copy` 在 expand_tilde 后过
+  `projects::canonical_key`（与 register_project 同口径），落库/分支检测/worktree 路径派生全用 canonical 路径——
+  前端按 repoPath 字符串归组（samePath 仅去尾斜杠），symlink 拼写不一致（macOS /var→/private/var 等）会让工作区
+  掉出项目分组；canonicalize 失败（目录不存在）保留原路径，后续 rev-parse 仍报「不是 git 仓库」，错误体验不变。
+- **「新建工作区」入口收进项目分组**（页头不再放全局按钮）：入口在工作区列表头部行（该行始终渲染，无步骤项目与
+  未注册分组同样可建），弹窗仓库固定为发起分组的 repoPath——不再有仓库下拉与自定义路径（原页头弹窗默认选
+  repos[0] 导致建错仓库）；弹窗只剩任务名 + 分支预览。页面级 list_repos 预热随之删除（store.ts 的
+  recentRepos 预取是终端页「最近项目」用途，保留）。
 - **工作区漂移修复必须显式且非破坏**：仓库/分支/worktree 缺失、注册不一致、归档记录与磁盘冲突、merge 进行中都由
   `workspace_drift` 先诊断并暂停普通危险动作；重新挂载/重新定位可修复实体，标记归档/清理记录只改元数据，不得删目录或分支。
 - **工作区归档是无损操作，删除才允许强制**：归档前必须重新检查 merge 状态、未提交改动和该工作区内仍运行的 agent/run
@@ -48,6 +56,17 @@
 - **流水线模板库**：内置模板集中在 `src/pipeline-presets.ts` 的 `PIPELINE_TEMPLATES`（综述/科研论文/数据处理/毕业论文/投稿与返修），
   新增场景 = 数组加一项，简报必须遵守输入写死/决策写死/交付写死约定（auto 模式无歧义）；用户模板走后端
   `list/save/delete_pipeline_template`，选择器（TemplatePicker）合并展示，后端命令未就绪时优雅降级为仅内置模板。
+  **注册后模板选择层（TemplatePickModal）**：`register_project` 成功后弹出，选项 = 五套内置模板
+  （名称 + 一句话说明 + 步骤数，数据直接用 PIPELINE_TEMPLATES，不另造表），选中即 `append_pipeline_steps`
+  追加进 project.toml 后关闭并刷新。**两个出口语义不同**：「不使用研究流程」调 `set_pipeline_opt_out`
+  把 `pipeline_opt_out = true` 显式写进 project.toml（记住选择）；「稍后再选」只关闭不留痕。
+  **`pipeline_opt_out` 口径**：serde/toml 缺省 false；render_config 里 false 移除该行（同 topic 清除口径，
+  档案卡简洁）；`append_pipeline_steps_at` 追加成功自动清回 false（选模板 = 启用流程，编辑器「＋ 从模板追加」
+  同路径同语义）。**渲染规则（ProjectGroup）**：模板引导横幅只在 `steps 为空 && !pipelineOptOut` 时显示；
+  ScheduleSection 不再受 opt-out 影响（定时任务技能可选后为通用能力，非科研项目照常显示）；
+  资源面板不受影响。空步骤项目的 ⋯ 菜单项文案为「选择研究流程模板」（非空 = 「更换模板」），从这里应用模板
+  走 `append_pipeline_steps`（后端清标记）+ 前端重读 `read_project_config`；横幅里的可选课题主题 append
+  不碰，值变了才单独 write_project_config 写回。
   **v3.78 起五套模板内容重设计并互相对齐（接壤）**：准绳 =「讨论种子 → 草稿 → TASK.md → 执行」全链相辅相成——
   种子逐条对准 TASK.md/执行中的真实拍板点（删空洞种子、补缺口种子；纯执行步骤不给种子，沿用 v3.69 口径）；
   expectedArtifacts 精确化；技能挂载按 14 个内置技能核对（research-paper 首步 +lit-notes、结果分析/毕业论文
@@ -119,14 +138,33 @@
   口径与 handoff_links 一致；认领 cwd 恒为项目根（工作区会话 project_path 已改写为真实仓库）；登记失败静默降级，
   对话页手动归卡兜底。卡片行「聊想法」= 项目根开终端预填「我想跟你探讨：<卡片名>」（不建工作区，想法期不动手）；
   挂步骤的卡走任务书草稿口径（非只读、结论直写草稿，开聊自动带开草稿预览），未挂步骤的卡维持只读纯聊归档。
-  **想法期只读保护**（v3.66，settings.json `discussReadonly`，卡片区标题行就地开关、默认开，设置页不加行；
-  v3.77 起只服务未挂步骤卡片的纯聊一路）：
+  **卡片种类 kind（v3.80）**：`[[tasks]]` 加 `kind = "idea" | "draft"`——draft = 服务于任务书草稿的讨论卡
+  （接着聊 + 开工），idea = 自由想法卡（只读纯聊 + ◈ 融合进任务书）；**旧卡缺 kind 解析时现算**
+  （step 非空 → draft，否则 idea，正好等于引入前的两种行为），不写迁移脚本、写回时固化推断值；
+  `create_task_card` 加可选 kind 参数，缺省按同一规则推断。前端纯逻辑在 `src/task-cards.ts`
+  （`ideaCardsForStep`/`discussionCardsForStep`，tests/task-cards.test.ts）。
+  **想法区（聚焦态专属，流程线上方，独立 strip 容器 `rounded-md bg-strip`）**：标题行 =「想法区（N）」+「＋ 新建想法」（内联命名，kind=idea、
+  step=当前聚焦步骤）+「想法期只读保护」开关（从卡片区总标题行迁入此处，settings.discussReadonly 存储不动）；
+  空态一行引导（「还没有想法…」）。
+  想法卡行 = 名称 +「聊想法」（只读纯聊 onDiscuss）+「◈ 融合进任务书」+ ⋯（重命名/删除/单次豁免沿用）；
+  **聚焦步骤已有活跃工作区（runStatus 非 pending）时藏融合按钮**，卡仍可续聊。聚焦态讨论卡区只留 draft 卡；
+  draft 卡的「聊想法」主按钮改名「**接着聊**」（与 idea 卡只读纯聊区分）；未挂步骤桶与总览态行为不变。
+  **「◈ 融合进任务书」两阶段（人拍板后落盘）**：① `fuse_card_into_draft`（projects.rs）——取该卡名下会话
+  （`sessions::sessions_for_card`：cached_scan + apply_meta + apply_card_claims 后按 task_id 过滤，
+  与列表同一归属口径；范围只取当前卡不碰其他会话）逐会话读全文（DTO 层已脱敏）+ 当前步骤草稿 →
+  `build_fuse_prompt`（草稿非空 = 织进既有结构保持小节组织与措辞、空 = 直接起草）→ `ai_prompt_impl`
+  （profile 走设置页 digest 功能键）→ AI 输出过 `redact_and_cap` 才返回前端，**不写盘**；
+  ② 前端 FuseDraftModal 预览/可编辑（编辑区形态同开工弹层）→ 确认才 `write_task_draft` 整份覆盖落盘
+  （ensure_task_project_root 门槛 + draft_rel_path 单一出处 + atomic_write）→ `onDraftChanged` 回调让
+  ProjectGroup 即刻重读 focusDraft。AI 未配/失败行内中文报错可重试。
+  **想法期只读保护**（v3.66，settings.json `discussReadonly`，就地开关、默认开，设置页不加行；
+  v3.77 起只服务未挂步骤卡片的纯聊一路；v3.80 起开关随想法区走——聚焦态想法区标题行）：
   开 = 预填指令带「只讨论不动文件」约束 + `PendingTerminal.readonly` → pty_spawn 注入注册表
   `readonly_args`（`agents::readonly_launch_args`；claude/codebuddy `--permission-mode plan`、codex `-s read-only`
   替换默认 workspace-write、gemini `--approval-mode plan`、kimi/cursor `--plan`；qwen/opencode 无据只有软约束，
   支持矩阵见 matrix 跨 agent 共性结论 §6）；卡片 ⋯「聊想法（允许改文件）」= 不动开关的单次豁免（开关关时不渲染）。
-  主按钮口径（v3.77）：有绑定工作区 = 继续（工作树读 TASK.md）；未开工挂步骤 = 聊想法（草稿口径）+ 开工；
-  未挂步骤 = 只读纯聊。
+  主按钮口径（v3.77；v3.80 起「聊想法」改名「接着聊」）：有绑定工作区 = 继续（工作树读 TASK.md）；
+  未开工挂步骤 = 接着聊（草稿口径）+ 开工；未挂步骤 = 只读纯聊。
 
 ## 任务书草稿（v3.72：讨论直接服务于 TASK.md，中间层拆除）
 
@@ -190,12 +228,18 @@
   占位「该步骤还没开始」；聚焦态桶头去重——步骤名与「预览 TASK.md」不再重复渲染，预览全页唯一入口 =
   流程线 agent 节点）；步骤 ⋯「人工事项（N 件待做）」= 同效聚焦入口。**工作区列表跟随聚焦过滤**（v3.73：
   归属判定 = `steps[].workspaceName` === 工作区名，与 deriveStepStatus 同一映射；ProjectGroup children 改
-  render prop 回传 focusStepName/steps/showAll/onToggleShowAll，列表过滤逻辑留在 WorkspacesPage），
-  标题「{步骤名} · 工作区（N）」+ 右侧「全部/按步骤」切换，空态区分「该步骤还没有」与「项目还没有」。
+  render prop 回传 focusStepName/steps/showAll/onToggleShowAll）。**可见性规则（纯逻辑
+  `src/workspace-visibility.ts` 的 `filterWorkspacesByFocus`，tests/workspace-visibility.test.ts）**：
+  聚焦某步骤 = 绑定该步骤的工作区 + **不匹配任何步骤 workspaceName 的工作区始终可见**（手动建的任何东西
+  都不能被默认视图藏掉）；focusStepName 为 null 显示全量。列表头部行始终渲染并带「新建工作区」入口
+  （见「工作区生命周期」节），「全部/按步骤」切换只在有步骤时渲染；标题「{步骤名} · 工作区（N）」，
+  空态区分「该步骤还没有」与「项目还没有」。
   **v3.71 起聚焦视图顶部为「步骤内协同流程线」（StepFlow）**：这一步里人和 agent 的动作按先后排成节点链
   （讨论种子 → before 人工事项 → agent 执行 → during 人工事项（并行段）→ after 人工事项 → 评审合并），
-  当前节点 = 第一个未完成（高亮 + 就地展开操作区：种子 chips/提交产物/开始/去终端/去评审）——
-  回答「这一步谁先谁后、现在轮到谁、轮到我时在哪操作」。纯逻辑 `src/step-flow.ts`（buildStepFlow，
+  当前节点 = 第一个未完成（高亮 + 就地展开操作区：种子 chips/提交产物/去评审）——
+  回答「这一步谁先谁后、现在轮到谁、轮到我时在哪操作」。**例外（开始始终可用口径）**：agent 节点的
+  「开始/恢复工作区/去终端看看」不受当前节点门控，pending 态即使讨论种子/开始前事项未完也渲染——
+  只提醒不拦，与 KickoffConfirmDialog 同一口径。纯逻辑 `src/step-flow.ts`（buildStepFlow，
   runStatus 四态由 ProjectGroup 从 deriveStepStatus 六态映射，blocked 并入 review——阻塞也走评审入口）；
   人工事项的状态/勾选/交付/拖拽逻辑抽成 `useHumanTasks`（HumanTasksList.tsx 导出），
   平铺清单（开工弹层）与流程线共用一份。
@@ -225,10 +269,15 @@
   「＋ 自定义话题」起名即聊；总览态桶头「＋ 添加想法」挂步骤时同样走 onSeed 草稿口径，未挂步骤的卡无步骤
   语境、只建卡归档。纯执行步骤不给种子（没有要商量的就不出现入口）。
 
-## 定时雷达（scheduler.rs，v3.75）
+## 定时雷达（scheduler.rs，v3.75；v3.79 起技能可选）
 
-- **职责切分**：调度器只管「什么时候跑」，检索策略/关键词/来源永远以项目内 `papers/watchlist.md` 为唯一口径
-  （改流程 = 改文件，不在任务定义里复制关键词）；技能固定 `lit-watch`，skill 字段只做预留，不为假想技能抽象。
+- **职责切分**：调度器只管「什么时候跑」；任务内容永远以技能自身规范与项目内文件为准（lit-watch 的检索策略/关键词/来源
+  以 `papers/watchlist.md` 为唯一口径，改流程 = 改文件，不在任务定义里复制关键词）。
+- **技能可选**：创建弹层有「技能」下拉（list_skills 供给，lit-watch 固定最前、库里没有也兜底；默认任务名跟随技能——
+  lit-watch =「文献雷达」、其他 = 技能名，用户手改过的名称不被覆盖；纯逻辑 `src/schedule-tasks.ts` 旁的
+  `src/schedule-skill.ts`，tests/schedule-skill.test.ts）。**prompt 模板按技能分派**（`build_task_prompt`）：
+  lit-watch 用文献巡检专用文案（一字不动）；其他技能用通用模板（「请使用 {skill} 技能…按该技能的既定规范产出结果…
+  三行以内简报…定时雷达自动触发」），调度器不替其他技能发明任务内容。
 - **存储**：app 级 `schedules.json`（config_dir/ccode/，原子写 + 进程内锁，同 profiles/skills 口径）；历史留最近
   20 条（简报脱敏 + 截 2000 字符）；周期只支持「每日/每周 + 时分」（本地时区），**不引入 cron 表达式**。
 - **due 判定即补跑**：「最近应跑时刻 > last_run_at」即 due——应用没开错过的时间点在启动后首个 tick 自动补跑，

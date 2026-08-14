@@ -9,6 +9,7 @@ test("apiKindOf 协议族归类与后端同口径", () => {
   assert.equal(apiKindOf("cursor", null), "cursor");
   assert.equal(apiKindOf("codex", null), "openai");
   assert.equal(apiKindOf("opencode", null), "openai");
+  assert.equal(apiKindOf("grok", null), "openai");
   assert.equal(apiKindOf("qwen", "anthropic"), "anthropic");
   assert.equal(apiKindOf("qwen", "openai"), "openai");
   assert.equal(apiKindOf("kimi", "kimi"), "openai");
@@ -23,7 +24,7 @@ test("copyTargets 排除自身并禁用不同协议族", () => {
   assert.equal(byId["kimi"].compatible, true);
   assert.equal(byId["codebuddy"].compatible, true);
   // openai/gemini/cursor 族禁用并带原因
-  for (const id of ["codex", "opencode", "gemini", "cursor"]) {
+  for (const id of ["codex", "opencode", "gemini", "cursor", "grok"]) {
     assert.equal(byId[id].compatible, false, id);
     assert.ok(byId[id].reason?.includes("协议不兼容"), id);
   }
@@ -31,6 +32,7 @@ test("copyTargets 排除自身并禁用不同协议族", () => {
   const fromCodex = copyTargets("codex", null);
   const byId2 = Object.fromEntries(fromCodex.map((t) => [t.id, t]));
   assert.equal(byId2["opencode"].compatible, true);
+  assert.equal(byId2["grok"].compatible, true);
   assert.equal(byId2["qwen"].compatible, true);
   assert.equal(byId2["claude-code"].compatible, false);
   assert.equal(byId2["cursor"].compatible, false);

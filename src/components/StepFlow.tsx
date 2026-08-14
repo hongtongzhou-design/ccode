@@ -15,6 +15,7 @@ export default function StepFlow({
   hasDraft,
   ws,
   onSeed,
+  customTopics,
   onStart,
   onChanged,
   draft,
@@ -32,6 +33,8 @@ export default function StepFlow({
   ws: WorkspaceDto | undefined;
   /** 讨论种子点击（由卡片区已有逻辑承载：建卡 + 聊想法） */
   onSeed: (seed: string) => void;
+  /** 自定义话题 chips（任务书节点，种子之后）：该步骤已建卡的自定义话题，点击 = 续聊（同种子口径） */
+  customTopics?: string[];
   /** agent 节点「开始」= 打开开工确认弹层 */
   onStart: () => void;
   /** 人工事项勾选/交付后通知父级（流程线橙点等外部计数重取） */
@@ -176,7 +179,8 @@ export default function StepFlow({
         );
       }
       case "agent":
-        if (!isCurrent) return null;
+        // 「开始」不受当前节点门控（口径：开始始终可用，讨论种子/开始前事项只提醒不拦，
+        // 与 KickoffConfirmDialog 一致）；active 时「去终端看看」同理常显
         // 工作区已归档：主入口换成「恢复工作区」（归档工作区不能再开工）
         if (runStatus === "pending" && onRestore) {
           return (
@@ -349,6 +353,18 @@ export default function StepFlow({
                         className="rounded-full bg-strip px-2 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
                       >
                         {seed}
+                      </button>
+                    ))}
+                    {/* 自定义话题 = 种子同款 chip：已建卡，点击直接续聊（结论继续写进任务书草稿） */}
+                    {(customTopics ?? []).map((topic) => (
+                      <button
+                        key={topic}
+                        type="button"
+                        onClick={() => onSeed(topic)}
+                        title="你加过的自定义话题：点击继续聊（结论写进任务书草稿）"
+                        className="rounded-full bg-inset px-2 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
+                      >
+                        {topic}
                       </button>
                     ))}
                     {customOpen ? (

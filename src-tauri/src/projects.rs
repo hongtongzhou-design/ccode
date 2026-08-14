@@ -88,6 +88,9 @@ pub struct ProjectConfigDto {
     pub artifact_dir: String,
     pub resources: Vec<ResourceDto>,
     pub steps: Vec<StepDto>,
+    /// 「不使用研究流程」显式标记：true = 用户明确不要流水线（隐藏模板引导横幅与定时任务区块），
+    /// 与「稍后再选」（不写标记、保留引导）区分；追加模板步骤时自动清回 false
+    pub pipeline_opt_out: bool,
 }
 
 impl Default for ProjectConfigDto {
@@ -97,6 +100,7 @@ impl Default for ProjectConfigDto {
             artifact_dir: DEFAULT_ARTIFACT_DIR.into(),
             resources: Vec::new(),
             steps: Vec::new(),
+            pipeline_opt_out: false,
         }
     }
 }
@@ -489,6 +493,12 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
             "artifact_dir 不是有效字符串，已使用默认值 {DEFAULT_ARTIFACT_DIR}"
         )),
     }
+    // 「不使用研究流程」显式标记：非布尔容错忽略，缺省 false
+    match value.get("pipeline_opt_out") {
+        None => {}
+        Some(toml::Value::Boolean(b)) => config.pipeline_opt_out = *b,
+        Some(_) => warnings.push("pipeline_opt_out 不是布尔值，已忽略".to_string()),
+    }
     if let Some(resources) = value.get("resources").and_then(|v| v.as_array()) {
         for (i, item) in resources.iter().enumerate() {
             match item.clone().try_into::<TomlResource>() {
@@ -699,6 +709,12 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
         config.artifact_dir.trim()
     };
     doc["artifact_dir"] = value(artifact_dir);
+    // false 是缺省：清回 false 时移除该行，保持档案卡简洁（同 topic 清除口径）
+    if config.pipeline_opt_out {
+        doc["pipeline_opt_out"] = value(true);
+    } else {
+        doc.remove("pipeline_opt_out");
+    }
     if config.resources.is_empty() {
         doc.remove("resources");
     } else {
@@ -938,8 +954,23 @@ struct TomlTask {
     #[serde(default)]
     workspace: Option<String>,
     #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
     created_at: String,
     // 旧版残留的 briefs = [...] 由 serde 默认忽略，下次写回自然丢弃
+}
+
+/// 卡片种类推断：只认显式 "idea"/"draft"；缺省/未知值按 step 推断
+/// （step 非空 → draft，否则 idea——正好等于引入 kind 前的两种行为，免迁移脚本）
+fn infer_task_kind(kind: Option<String>, step: &Option<String>) -> String {
+    match kind.as_deref().map(str::trim) {
+        Some("idea") => "idea",
+        Some("draft") => "draft",
+        _ => {
+            if step.is_some() { "draft" } else { "idea" }
+        }
+    }
+    .to_string()
 }
 
 /// 防御式解析：整份坏掉或单条坏字段都不阻断，坏条目跳过（风格同 parse_config）
@@ -959,11 +990,14 @@ fn parse_task_cards(text: &str) -> Vec<TaskCardDto> {
                 continue;
             }
             let clean = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let step = clean(t.step);
+            let kind = infer_task_kind(t.kind, &step);
             out.push(TaskCardDto {
                 id,
                 name,
-                step: clean(t.step),
+                step,
                 workspace: clean(t.workspace),
+                kind,
                 created_at: t.created_at,
             });
         }
@@ -1009,6 +1043,8 @@ fn render_tasks(existing: Option<&str>, tasks: &[TaskCardDto]) -> Result<String,
             if let Some(ws) = &t.workspace {
                 tab["workspace"] = value(ws);
             }
+            // kind 恒写回（含旧卡推断值——读时现算，写回固化，免迁移脚本）
+            tab["kind"] = value(&t.kind);
             tab["created_at"] = value(&t.created_at);
             arr.push(tab);
         }
@@ -1054,7 +1090,7 @@ fn new_task_id() -> String {
     format!("t-{}", hex.chars().take(8).collect::<String>())
 }
 
-pub(crate) fn create_task_card_at(root: &Path, name: &str, step: Option<&str>) -> Result<TaskCardDto, String> {
+pub(crate) fn create_task_card_at(root: &Path, name: &str, step: Option<&str>, kind: Option<&str>) -> Result<TaskCardDto, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("卡片名不能为空".into());
@@ -1063,10 +1099,13 @@ pub(crate) fn create_task_card_at(root: &Path, name: &str, step: Option<&str>) -
     if tasks.iter().any(|t| t.name == name) {
         return Err(format!("已存在同名卡片「{name}」"));
     }
+    let step = step.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let card = TaskCardDto {
         id: new_task_id(),
         name: name.to_string(),
-        step: step.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        // kind 缺省 = 推断规则（step 非空 → draft，否则 idea），与旧卡解析口径一致
+        kind: infer_task_kind(kind.map(str::to_string), &step),
+        step,
         workspace: None,
         created_at: crate::sessions::now_iso(),
     };
@@ -1545,10 +1584,11 @@ pub async fn create_task_card(
     project_root: String,
     name: String,
     step: Option<String>,
+    kind: Option<String>,
 ) -> Result<TaskCardDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
-        create_task_card_at(&root, &name, step.as_deref())
+        create_task_card_at(&root, &name, step.as_deref(), kind.as_deref())
     })
     .await
     .map_err(|e| format!("创建任务卡失败: {e}"))?
@@ -1581,6 +1621,145 @@ pub async fn delete_task_card(project_root: String, task_id: String) -> Result<(
     })
     .await
     .map_err(|e| format!("删除任务卡失败: {e}"))?
+}
+
+// ===== 「◈ 融合进任务书」（想法卡 → 任务书草稿，两阶段：AI 出稿 → 人确认落盘） =====
+
+/// 融合稿 command 返回：新草稿全文（AI 输出已过 redact_and_cap 脱敏截断）+ 草稿相对路径
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FuseDraftDto {
+    pub rel_path: String,
+    pub text: String,
+    /// 纳入融合的会话数（该卡名下；0 时前端不应走到这里）
+    pub session_count: usize,
+}
+
+/// 融合 prompt（纯函数，可测）：草稿非空 = 织进既有结构；草稿为空 = 以讨论结论直接起草
+pub(crate) fn build_fuse_prompt(
+    card_name: &str,
+    step_name: &str,
+    draft: Option<&str>,
+    discussion: &str,
+) -> String {
+    let base = format!(
+        "项目里有一张某步骤「{step_name}」的想法卡「{card_name}」，下面是归到这张卡里的自由讨论记录。\n\n\
+         【讨论记录】\n{discussion}\n\n"
+    );
+    let task = match draft {
+        Some(d) if !d.trim().is_empty() => format!(
+            "【当前任务书草稿】\n{}\n\n\
+             请把讨论记录中与「{step_name}」相关的结论织进草稿的既有结构：保持原有小节组织与措辞风格，\
+             只增改与讨论结论直接相关的内容；讨论中没定下来的问题保留或补进「## 待拍板」小节。\
+             输出完整的新草稿全文（Markdown），不要输出任何解释、前后缀或代码围栏。",
+            d.trim()
+        ),
+        _ => "当前还没有任务书草稿。请直接以讨论结论起草一份任务书草稿（Markdown，\
+              以「# 任务书草稿」开头，没定下来的问题收进「## 待拍板」小节）。\
+              输出草稿全文，不要输出任何解释、前后缀或代码围栏。"
+            .to_string(),
+    };
+    format!("{base}{task}")
+}
+
+fn fuse_card_into_draft_impl(
+    profiles: Vec<crate::profiles::Profile>,
+    project_root: &str,
+    task_id: &str,
+    step_name: &str,
+) -> Result<FuseDraftDto, String> {
+    let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(project_root)))?;
+    let card = task_cards_at(&root)
+        .into_iter()
+        .find(|c| c.id == task_id)
+        .ok_or_else(|| "卡片不存在（可能已被删除）".to_string())?;
+    let cfg = read_config_at(&root).config;
+    let step = cfg
+        .steps
+        .iter()
+        .find(|s| s.name == step_name)
+        .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
+    let rel = draft_rel_path(&step.name, &step.workspace_name);
+    let draft_text = fs::read_to_string(root.join(&rel)).ok();
+    // 范围 = 该卡名下的会话（session_meta.task_id 口径），逐个读全文（DTO 层已脱敏）
+    let sessions = crate::sessions::sessions_for_card(task_id);
+    if sessions.is_empty() {
+        return Err("这张卡片还没有归入任何对话，先去「聊想法」聊一轮再融合".into());
+    }
+    let mut discussion = String::new();
+    for s in &sessions {
+        let text = crate::ai::conversation_text(&crate::sessions::conversation_impl(&s.agent, &s.file_path));
+        if text.trim().is_empty() {
+            continue;
+        }
+        discussion.push_str(&format!("--- 会话：{} ---\n{}\n\n", s.session_id, text));
+    }
+    if discussion.trim().is_empty() {
+        return Err("卡片内的对话内容为空，无法融合".into());
+    }
+    // 与「◈ 提炼接力」同口径：中段挖空截 24KB，profile 走设置页 digest 功能键
+    let prompt = build_fuse_prompt(
+        &card.name,
+        step_name,
+        draft_text.as_deref(),
+        &crate::ai::cap_text_middle(&discussion, 24 * 1024),
+    );
+    let ai_out = crate::ai::ai_prompt_impl(profiles, None, Some(crate::ai::FN_DIGEST), prompt)?;
+    let text = crate::handoff::redact_and_cap(&ai_out).trim().to_string();
+    if text.is_empty() {
+        return Err("AI 没有产出融合稿，请重试".into());
+    }
+    Ok(FuseDraftDto {
+        rel_path: rel,
+        text,
+        session_count: sessions.len(),
+    })
+}
+
+/// 「◈ 融合进任务书」第一阶段：生成融合稿（不写盘，人在前端预览/编辑后才经 write_task_draft 落盘）
+#[tauri::command]
+pub async fn fuse_card_into_draft(
+    store: tauri::State<'_, crate::profiles::ProfileStore>,
+    project_root: String,
+    task_id: String,
+    step_name: String,
+) -> Result<FuseDraftDto, String> {
+    let profiles = store.list()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        fuse_card_into_draft_impl(profiles, &project_root, &task_id, &step_name)
+    })
+    .await
+    .map_err(|e| format!("融合进任务书失败: {e}"))?
+}
+
+/// 整份覆盖写任务书草稿（融合稿确认落盘用；读-改-原子写同 drafts 口径：路径单一出处
+/// draft_rel_path，atomic_write，父目录缺失自动建）
+#[tauri::command]
+pub async fn write_task_draft(
+    project_root: String,
+    step_name: String,
+    content: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
+            &project_root,
+        )))?;
+        let cfg = read_config_at(&root).config;
+        let step = cfg
+            .steps
+            .iter()
+            .find(|s| s.name == step_name)
+            .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
+        let rel = draft_rel_path(&step.name, &step.workspace_name);
+        let path = root.join(&rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建草稿目录失败: {e}"))?;
+        }
+        crate::profiles::atomic_write(&path, &content)?;
+        Ok(rel)
+    })
+    .await
+    .map_err(|e| format!("写入任务书草稿失败: {e}"))?
 }
 
 // ===== 示例课题（首启引导最小版落地，§11.4 backlog） =====
@@ -1804,6 +1983,7 @@ fn demo_project_config() -> ProjectConfigDto {
             },
         ],
         steps,
+        pipeline_opt_out: false,
     }
 }
 
@@ -1818,7 +1998,7 @@ const DEMO_STEP_DRAFT: &str = "结论：综述聚焦「心血管结局」方向�
 /// 预置演示任务卡 + 第一步示范任务书草稿（best-effort：播种失败不阻断示例课题创建；
 /// 幂等由 create_demo_at 顶部的早退保证——已注册直接返回、已存在目录只注册不补建）。
 fn seed_demo_task_card(root: &Path) -> Result<(), String> {
-    create_task_card_at(root, "示例：确定综述角度", Some("文献检索与筛选"))?;
+    create_task_card_at(root, "示例：确定综述角度", Some("文献检索与筛选"), None)?;
     append_step_draft_at(root, "文献检索与筛选", "想法期讨论沉淀（示范）", DEMO_STEP_DRAFT)?;
     Ok(())
 }
@@ -2248,9 +2428,36 @@ pub(crate) fn append_pipeline_steps_at(
         appended += 1;
     }
     if appended > 0 {
+        // 选了模板 = 启用流程：顺带清掉「不使用研究流程」标记（含编辑器「＋ 从模板追加」路径）
+        cfg.pipeline_opt_out = false;
         write_config_at(root, &cfg)?;
     }
     Ok(AppendStepsResultDto { appended, skipped })
+}
+
+// ===== 「不使用研究流程」显式标记（pipeline_opt_out） =====
+// 与「稍后再选」（不写标记、保留模板引导）区分：true = 隐藏模板引导横幅与定时任务区块。
+
+/// 读-改-原子写实现（root 需已过项目门槛校验；测试直接调这里）
+pub(crate) fn set_pipeline_opt_out_at(root: &Path, opt_out: bool) -> Result<(), String> {
+    let mut cfg = read_config_at(root).config;
+    cfg.pipeline_opt_out = opt_out;
+    write_config_at(root, &cfg)
+}
+
+#[tauri::command]
+pub async fn set_pipeline_opt_out(
+    project_root: String,
+    opt_out: bool,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
+            &project_root,
+        )))?;
+        set_pipeline_opt_out_at(&root, opt_out)
+    })
+    .await
+    .map_err(|e| format!("更新研究流程标记失败: {e}"))?
 }
 
 #[cfg(test)]
@@ -2308,6 +2515,7 @@ mod tests {
                     },
                 ],
             }],
+            pipeline_opt_out: false,
         }
     }
 
@@ -2422,6 +2630,7 @@ type = "paper"
                 note: String::new(),
             }],
             steps: Vec::new(),
+            pipeline_opt_out: false,
         };
         let rendered = render_config(Some(existing), &config).unwrap();
         assert!(rendered.contains("# 用户手写注释"), "注释必须保留: {rendered}");
@@ -3166,6 +3375,48 @@ resources = ["ghost.pdf"]
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ===== pipeline_opt_out（「不使用研究流程」显式标记） =====
+
+    #[test]
+    fn pipeline_opt_out_roundtrip_and_append_clears_it() {
+        let dir = temp_dir("opt-out");
+        let root = dir.join("proj");
+        // 无 project.toml 起步（已注册项目也允许：write_config_at 会新建）
+        set_pipeline_opt_out_at(&root, true).unwrap();
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(raw.contains("pipeline_opt_out = true"), "{raw}");
+        assert!(read_config_at(&root).config.pipeline_opt_out);
+        // 清回 false：行移除（false 是缺省，不落盘），未知键保留
+        set_pipeline_opt_out_at(&root, false).unwrap();
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(!raw.contains("pipeline_opt_out"), "{raw}");
+        assert!(!read_config_at(&root).config.pipeline_opt_out);
+        // 再次置 true 后追加模板步骤：追加成功自动清标记
+        set_pipeline_opt_out_at(&root, true).unwrap();
+        let res = append_pipeline_steps_at(&root, sample_steps()).unwrap();
+        assert_eq!(res.appended, 2);
+        assert!(
+            !read_config_at(&root).config.pipeline_opt_out,
+            "选了模板 = 启用流程，标记必须清掉"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pipeline_opt_out_preserves_unknown_keys() {
+        let dir = temp_dir("opt-out-unknown");
+        let root = dir.join("proj");
+        write(
+            &config_path(&root),
+            "artifact_dir = \"outputs\"\nfuture_top_key = 42\n",
+        );
+        set_pipeline_opt_out_at(&root, true).unwrap();
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(raw.contains("future_top_key = 42"), "未知顶层键丢失: {raw}");
+        assert!(raw.contains("pipeline_opt_out = true"), "{raw}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn append_steps_skips_name_and_workspace_conflicts() {
         let dir = temp_dir("append-skip");
@@ -3596,6 +3847,72 @@ resources = ["ghost.pdf"]
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn task_card_kind_inferred_for_legacy_and_written_back() {
+        let dir = temp_dir("task-kind");
+        let project = dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        // 旧卡（无 kind 字段）：step 非空 → draft，step 空 → idea
+        write(
+            &config_path(&project),
+            "[[tasks]]\nid = \"t-a\"\nname = \"挂步骤旧卡\"\nstep = \"检索筛选\"\ncreated_at = \"2026-01-01\"\n\n\
+             [[tasks]]\nid = \"t-b\"\nname = \"未挂旧卡\"\ncreated_at = \"2026-01-01\"\n\n\
+             [[tasks]]\nid = \"t-c\"\nname = \"显式想法卡\"\nstep = \"检索筛选\"\nkind = \"idea\"\ncreated_at = \"2026-01-01\"\n\n\
+             [[tasks]]\nid = \"t-d\"\nname = \"未知 kind\"\nkind = \"weird\"\ncreated_at = \"2026-01-01\"\n",
+        );
+        let cards = task_cards_at(&project);
+        assert_eq!(cards.len(), 4);
+        assert_eq!(cards[0].kind, "draft", "缺 kind + 有 step → draft");
+        assert_eq!(cards[1].kind, "idea", "缺 kind + 无 step → idea");
+        assert_eq!(cards[2].kind, "idea", "显式 kind 保留（哪怕与 step 推断相反）");
+        assert_eq!(cards[3].kind, "idea", "未知 kind 按缺省规则推断");
+        // 写回固化推断值（免迁移脚本）
+        write_tasks_at(&project, &cards).unwrap();
+        let raw = fs::read_to_string(config_path(&project)).unwrap();
+        assert!(raw.contains("kind = \"draft\""), "{raw}");
+        assert!(raw.contains("kind = \"idea\""), "{raw}");
+        // 新建：显式 kind 生效；缺省按 step 推断
+        let idea = create_task_card_at(&project, "新想法", Some("检索筛选"), Some("idea")).unwrap();
+        assert_eq!(idea.kind, "idea");
+        let draft = create_task_card_at(&project, "新讨论", Some("检索筛选"), None).unwrap();
+        assert_eq!(draft.kind, "draft");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fuse_prompt_branches_on_draft_presence() {
+        // 草稿非空：织进既有结构
+        let p = build_fuse_prompt("选角度", "文献检索", Some("# 任务书草稿\n\n## 待拍板\n"), "[用户] 聊角度");
+        assert!(p.contains("文献检索") && p.contains("选角度"));
+        assert!(p.contains("当前任务书草稿"));
+        assert!(p.contains("织进草稿的既有结构"));
+        assert!(p.contains("[用户] 聊角度"));
+        // 草稿为空/缺失：直接起草
+        for empty in [None, Some(""), Some("   ")] {
+            let p = build_fuse_prompt("选角度", "文献检索", empty, "讨论内容");
+            assert!(p.contains("还没有任务书草稿"), "{p}");
+            assert!(p.contains("起草"), "{p}");
+            assert!(!p.contains("织进草稿的既有结构"), "{p}");
+        }
+    }
+
+    #[test]
+    fn write_task_draft_at_writes_atomically() {
+        let dir = temp_dir("writedraft");
+        let root = dir.join("proj");
+        write(
+            &config_path(&root),
+            "[[steps]]\nname = \"检索筛选\"\nworkspace_name = \"lit\"\n",
+        );
+        // 融合确认落盘走 command 内的同一段逻辑：这里直接测草稿路径 + 原子写结果
+        let rel = draft_rel_path("检索筛选", "lit");
+        let path = root.join(&rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::profiles::atomic_write(&path, "# 任务书草稿：检索筛选\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# 任务书草稿：检索筛选\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // ===== 任务卡（[[tasks]]） =====
 
     #[test]
@@ -3607,13 +3924,13 @@ resources = ["ghost.pdf"]
         assert!(task_cards_at(&project).is_empty());
 
         // 创建：id 带 t- 前缀、created_at 非空、step 可选
-        let card = create_task_card_at(&project, "文献筛选", Some("文献检索与筛选")).unwrap();
+        let card = create_task_card_at(&project, "文献筛选", Some("文献检索与筛选"), None).unwrap();
         assert!(card.id.starts_with("t-"), "id 前缀: {}", card.id);
         assert!(!card.created_at.is_empty());
         assert_eq!(card.step.as_deref(), Some("文献检索与筛选"));
         assert_eq!(card.workspace, None);
         // 空白 step 视为未挂
-        let card2 = create_task_card_at(&project, "数据分析", Some("  ")).unwrap();
+        let card2 = create_task_card_at(&project, "数据分析", Some("  "), None).unwrap();
         assert_eq!(card2.step, None);
 
         // 读回一致；档案卡其余段不受影响（先写一份 resources/steps 再读）
@@ -3625,11 +3942,11 @@ resources = ["ghost.pdf"]
         assert_eq!(read.config, sample_config(), "tasks 写回不得动 resources/steps");
 
         // 重名拒绝（大小写敏感：不同大小写允许）
-        let err = create_task_card_at(&project, "文献筛选", None).unwrap_err();
+        let err = create_task_card_at(&project, "文献筛选", None, None).unwrap_err();
         assert!(err.contains("同名卡片"), "{err}");
-        assert!(create_task_card_at(&project, "文献筛选 ", None).is_err(), "尾随空白去重后仍同名应拒绝");
+        assert!(create_task_card_at(&project, "文献筛选 ", None, None).is_err(), "尾随空白去重后仍同名应拒绝");
         // 空名拒绝
-        assert!(create_task_card_at(&project, "   ", None).is_err());
+        assert!(create_task_card_at(&project, "   ", None, None).is_err());
 
         // 重命名：改其他卡撞名拒绝；改自己同名放行；不存在的 id 报错
         let err = rename_task_card_at(&project, &card2.id, "文献筛选").unwrap_err();
@@ -3638,7 +3955,7 @@ resources = ["ghost.pdf"]
         assert!(rename_task_card_at(&project, "t-gone", "x").is_err());
 
         // 删除：少一张；删不存在的 id 报错
-        let card3 = create_task_card_at(&project, "润色", None).unwrap();
+        let card3 = create_task_card_at(&project, "润色", None, None).unwrap();
         delete_task_card_at(&project, &card2.id).unwrap();
         let cards = task_cards_at(&project);
         assert_eq!(cards.len(), 2, "删一张后剩两张: {cards:?}");

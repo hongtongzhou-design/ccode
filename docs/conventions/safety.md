@@ -73,7 +73,7 @@
   （不接受外部子路径），单次 ≤ 64KB、读-改-原子写、已存在文件 canonicalize 双校验防 symlink 逃逸；笔记步骤定位 =
   `workspaceName === "lit-notes"` 优先、回落流水线第二步；无活跃工作区时复用一键开步链路（ensure_git_repo → create_workspace
   → TASK.md best-effort → 追加 inbox → pendingTerminal + ORGANIZE_NOTES_PROMPT 预填）。
-- **MCP 分发（§6.15，规格 = matrix §9）**：Ccode 清单（<config>/ccode/mcp-servers.json）→ 八家用户级配置的映射写入。
+- **MCP 分发（§6.15，规格 = matrix §10）**：Ccode 清单（<config>/ccode/mcp-servers.json）→ 八家用户级配置的映射写入（grok 首版只读不分发）。
   **只写用户级**（项目级各家都有审批闸）；目标文件多是混合状态文件，一律读-改-写一个键/段 + 写前备份 + 原子写 + 读回校验，
   绝不整文件覆盖；codex 走 toml_edit 保格式、gemini/qwen/opencode/codebuddy 走 JSONC 容错读；密钥一律用 `$VAR`/`${VAR}`
   引用形式，映射成各家间接引用字段（codex env_vars/bearer_token_env_var、opencode {env:VAR}、kimi bearerTokenEnvVar），

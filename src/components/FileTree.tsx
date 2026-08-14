@@ -199,6 +199,7 @@ function FileTree({
   onFsEvent,
   onEnterProject,
   onRootChange,
+  onRootNavigated,
   belowRecent,
 }: {
   cwd: string;
@@ -212,6 +213,8 @@ function FileTree({
   onEnterProject?: (path: string) => void;
   /** 根目录切换前通知；返回/resolve false 时保留当前根（用于保护未保存预览，确认框为异步）。 */
   onRootChange?: (path: string) => boolean | Promise<boolean>;
+  /** 根目录切换成功后通知（供改动面板等跟随树根；与 onRootChange 守卫配对，只在真切换后触发） */
+  onRootNavigated?: (path: string) => void;
   /** 插在搜索行（含最近项目下拉）与完整树之间的自定义区块（如项目树） */
   belowRecent?: ReactNode;
 }) {
@@ -221,11 +224,14 @@ function FileTree({
   rootRef.current = root;
   const onRootChangeRef = useRef(onRootChange);
   onRootChangeRef.current = onRootChange;
+  const onRootNavigatedRef = useRef(onRootNavigated);
+  onRootNavigatedRef.current = onRootNavigated;
   /** 所有主动跳转统一走 nav；未保存预览可阻止切换。走 ref 保持稳定身份（树节点 memo 依赖） */
   const nav = useCallback(async (path: string): Promise<boolean> => {
     if (path === rootRef.current) return true;
     if ((await onRootChangeRef.current?.(path)) === false) return false;
     setRoot(path);
+    onRootNavigatedRef.current?.(path);
     return true;
   }, []);
   /** 返回上一级目录（不受项目范围限制） */
@@ -290,6 +296,7 @@ function FileTree({
     void (async () => {
       if ((await onRootChangeRef.current?.(cwd)) === false) return;
       setRoot(cwd);
+      onRootNavigatedRef.current?.(cwd);
     })();
   }, [cwd]);
 

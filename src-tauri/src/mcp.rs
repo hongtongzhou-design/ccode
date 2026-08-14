@@ -1,7 +1,7 @@
-//! MCP server 清单与一键分发（规格单一出处 = docs/agent-integration-matrix.md §9，勿凭印象改字段）。
+//! MCP server 清单与一键分发（规格单一出处 = docs/agent-integration-matrix.md §10，勿凭印象改字段）。
 //!
 //! 统一模型（Ccode 自有清单 <config>/ccode/mcp-servers.json）→ 各家配置文件的映射层。
-//! 分发纪律（红线，见 §9.4）：
+//! 分发纪律（红线，见 §10.4）：
 //! - 只写用户级配置（项目级在 claude/qwen/cursor/codebuddy 有审批闸，gemini/qwen 未信任目录忽略）；
 //! - 目标文件多是混合状态文件，一律读-改-写一个键/段 + 写前备份 + 原子写，绝不整文件覆盖；
 //! - 密钥不落明文：清单里 env/header 值允许 `$VAR`/`${VAR}` 引用形式，映射时转各家的间接引用字段；
@@ -33,7 +33,7 @@ pub struct McpServerDto {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// 可空串；claude/codebuddy/cursor 不写 cwd（未核实支持，matrix §9.2）
+    /// 可空串；claude/codebuddy/cursor 不写 cwd（未核实支持，matrix §10.2）
     #[serde(default)]
     pub cwd: String,
     #[serde(default)]
@@ -347,7 +347,7 @@ fn entry_json(server: &McpServerDto, agent: &str) -> Result<serde_json::Value, S
                 m.insert("env".into(), Value::Object(env));
             }
         }
-        // cwd 只写给核实支持的家（claude/codebuddy/cursor 不写，matrix §9.2）
+        // cwd 只写给核实支持的家（claude/codebuddy/cursor 不写，matrix §10.2）
         if !server.cwd.trim().is_empty() && matches!(agent, "gemini" | "qwen" | "opencode" | "kimi") {
             m.insert("cwd".into(), json!(server.cwd.trim()));
         }
@@ -491,7 +491,7 @@ fn env_home(var: &str) -> Option<PathBuf> {
 fn agent_paths(agent: &str) -> Result<(PathBuf, Vec<PathBuf>), String> {
     let home = home()?;
     Ok(match agent {
-        // ~/.claude.json 是高频共享状态文件（user scope）；managed-mcp.json 存在即拒写（§9.4）
+        // ~/.claude.json 是高频共享状态文件（user scope）；managed-mcp.json 存在即拒写（§10.4）
         "claude-code" => {
             let base = env_home("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.clone());
             let p = base.join(".claude.json");
@@ -550,6 +550,14 @@ fn agent_paths(agent: &str) -> Result<(PathBuf, Vec<PathBuf>), String> {
         // CLI 与 IDE 共享（写入同时改变 IDE 行为，UI 需提示）
         "cursor" => {
             let p = home.join(".cursor").join("mcp.json");
+            (p.clone(), vec![p])
+        }
+        // grok：~/.grok/config.toml 的 [mcp_servers.<name>] 段（TOML，不是 JSON）；
+        // GROK_HOME 可整体搬迁。首版只做只读清单（agent_entries 解析 TOML），分发/写入
+        // 在 apply_to_agent 明确拒绝（grok 自带 `grok mcp add` CLI，不硬造 TOML 原子写管线）
+        "grok" => {
+            let base = env_home("GROK_HOME").unwrap_or_else(|| home.join(".grok"));
+            let p = base.join("config.toml");
             (p.clone(), vec![p])
         }
         _ => return Err(format!("未知 agent: {agent}")),
@@ -676,6 +684,11 @@ fn write_codex_entry(name: &str, entry: Option<toml_edit::Table>) -> Result<(), 
 
 /// 写/删一个 agent 侧条目（entry=None 即删除）
 fn apply_to_agent(agent: &str, server: &McpServerDto, install: bool) -> Result<(), String> {
+    if agent == "grok" {
+        // grok 的 [mcp_servers.<name>] 在 config.toml 里与 model/hooks 同文件，且自带
+        // `grok mcp add` CLI 做读改写；首版不硬造 TOML 原子写管线，明确拒绝分发/写入
+        return Err("Grok 的 MCP 分发暂不支持（TOML [mcp_servers] 段与 model 同文件）；请用 `grok mcp add` 或编辑 ~/.grok/config.toml".into());
+    }
     if agent == "codex" {
         let entry = if install {
             Some(entry_toml(server)?)
@@ -721,10 +734,19 @@ fn toml_to_json(item: &toml_edit::Item) -> serde_json::Value {
     }
 }
 
+/// 各家 TOML 配置的段名（codex/grok 都是 mcp_servers，不共用函数体以防 grok 后续分岔）
+fn toml_servers_key(agent: &str) -> &'static str {
+    match agent {
+        _ => "mcp_servers",
+    }
+}
+
 /// 读某 agent 用户级配置里的完整 server 条目（名称 → 原始 JSON 值）
 fn agent_entries(agent: &str) -> Result<Vec<(String, serde_json::Value)>, String> {
     let (_, candidates) = agent_paths(agent)?;
-    if agent == "codex" {
+    if agent == "codex" || agent == "grok" {
+        // codex：config.toml 的 [mcp_servers.<name>]（分发可写，见 write_codex_entry）
+        // grok：同段名同构（TOML），首版只读清单不写——解析成本低且 toml_edit 已在依赖里
         let Some(path) = candidates.iter().find(|p| p.exists()) else {
             return Ok(Vec::new());
         };
@@ -733,7 +755,7 @@ fn agent_entries(agent: &str) -> Result<Vec<(String, serde_json::Value)>, String
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| format!("{} 解析失败: {e}", path.display()))?;
         return Ok(doc
-            .get("mcp_servers")
+            .get(toml_servers_key(agent))
             .and_then(|t| t.as_table())
             .map(|t| {
                 t.iter()
@@ -852,6 +874,27 @@ fn reverse_entry(agent: &str, name: &str, v: &serde_json::Value) -> McpServerDto
                         value: format!("${{{name}}}"),
                     });
                 }
+            }
+        }
+        // grok：与 codex 同构的 [mcp_servers.<name>] TOML 段，但远程另有 `type`("http"/"sse")
+        // 且 headers 直收 + bearer_token_env_var 是 env 引用（语义同 codex，无 env_http_headers 中间层）
+        "grok" => {
+            if v.get("url").is_some() {
+                server.kind = "remote".into();
+                server.url = s("url");
+                server.headers = pairs("headers");
+                let bearer = s("bearer_token_env_var");
+                if !bearer.is_empty() {
+                    server.headers.push(McpEnvPair {
+                        key: "Authorization".into(),
+                        value: format!("Bearer ${{{bearer}}}"),
+                    });
+                }
+            } else {
+                server.command = s("command");
+                server.args = arr("args");
+                server.cwd = s("cwd");
+                server.env = pairs("env");
             }
         }
         "kimi" => {
@@ -1082,7 +1125,7 @@ pub struct DiscoveredMcpDto {
     pub summary: String,
 }
 
-/// 扫描八家用户级配置，列出不在 Ccode 清单里的 server（「发现未纳管」同套路）
+/// 扫描各家用户级配置，列出不在 Ccode 清单里的 server（「发现未纳管」同套路）
 #[tauri::command]
 pub async fn discover_mcp_servers() -> Result<Vec<DiscoveredMcpDto>, String> {
     tauri::async_runtime::spawn_blocking(|| {

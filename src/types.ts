@@ -536,6 +536,7 @@ export const AGENTS = [
   { id: "kimi", label: "Kimi Code", binary: "kimi" },
   { id: "codebuddy", label: "CodeBuddy", binary: "codebuddy" },
   { id: "cursor", label: "Cursor", binary: "cursor-agent" },
+  { id: "grok", label: "Grok Build", binary: "grok" },
 ] as const;
 
 /** 多协议 agent 的协议选项与默认值（其余 agent 返回 null，profile 不存协议） */
@@ -598,6 +599,8 @@ export interface ProjectConfigDto {
   artifactDir: string;
   resources: ProjectResourceDto[];
   steps: ProjectStepDto[];
+  /** 「不使用研究流程」显式标记：true = 隐藏模板引导横幅与定时任务区块；选模板后后端自动清回 false */
+  pipelineOptOut?: boolean;
 }
 
 /** 任务卡（list_task_cards 等）：挂在项目下的「对话文件夹」，无独立状态机 */
@@ -610,6 +613,9 @@ export interface TaskCardDto {
   step: string | null;
   /** 开工后绑定的工作区名（预留字段，后端暂无写入入口） */
   workspace: string | null;
+  /** 卡片种类：draft = 服务于任务书草稿的讨论卡；idea = 自由想法卡（只读纯聊、可融合进任务书）。
+   *  旧卡缺 kind 时后端按 step 推断回填（step 非空 → draft，否则 idea） */
+  kind: "idea" | "draft";
   createdAt: string;
 }
 
@@ -659,7 +665,7 @@ export interface BootstrapCommitDto {
   paths: string[];
 }
 
-/** MCP server 清单项（src-tauri/src/mcp.rs；分发规格 = docs/agent-integration-matrix.md §9） */
+/** MCP server 清单项（src-tauri/src/mcp.rs；分发规格 = docs/agent-integration-matrix.md §10） */
 export interface McpEnvPair {
   key: string;
   /** 字面值，或 $VAR / ${VAR} 引用环境变量（不落明文密钥） */

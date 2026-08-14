@@ -1,8 +1,9 @@
-# 八个 CLI Agent 适配参考（调研蒸馏版）
+# 九个 CLI Agent 适配参考（调研蒸馏版）
 
 > 供实现 AgentAdapter 时查阅。来源：2026-07-30 对官方文档与源码的调研（多数核到源码行号）。
 > 2026-08-05 补充核实各供应商 Anthropic/OpenAI 兼容端点（见 §1 附注），来源均为官方文档页面。
 > 2026-08-06 新增 §7 CodeBuddy Code（v2.132.0 实机验证，含真实会话样本与 product.json 核实）。
+> 2026-08 新增 §9 Grok Build（xai-org/grok-build 源码调研；标注「待实机验证」处未经实机核对）。
 > 标记「易漂移」的均为各 CLI 内部格式，解析必须防御式（跳过未知类型、容忍缺字段、容忍末行截断）。
 
 ## 1. Claude Code
@@ -115,24 +116,44 @@
 | 技能 | `~/.cursor/skills-cursor/`（**未验证 CLI 是否真读，分发走 copy 模式**）；`~/.cursor` 与 IDE 共享——**会话删除白名单必须限定 `projects/*/agent-transcripts/**/*.jsonl`** |
 | 安装 / 更新 | 官方安装脚本（`curl -fsSL https://cursor.com/install | bash`）；自更新 `cursor-agent update`（非交互）；无 brew/npm 官方包。**Windows 安装/数据路径未验证** |
 
+## 9. Grok Build（xai-org/grok-build 源码调研，2026-08；标注「待实机验证」处未经实机核对）
+
+| 项 | 值 |
+|---|---|
+| 二进制 / 检测 | **`grok`**（xAI 官方终端编码 agent，二进制也叫 grok）；`grok --version` 单行输出 `grok 0.2.180 (abc1234)`（非 stable 频道追加 ` [alpha]`）；`grok version --json` 给 `{"currentVersion":"X.Y.Z (commit)","channel":"stable"}`。官方安装落 `~/.grok/bin/grok`（另尝试 `~/.local/bin`、`/usr/local/bin` symlink；resolve_binary 已把 `~/.grok/bin` 收进三平台候选目录） |
+| 注入 env | **`XAI_API_KEY`**（别名 `GROK_CODE_XAI_API_KEY`）、模型 **`GROK_DEFAULT_MODEL`**、base url 覆盖 **`GROK_CLI_CHAT_PROXY_BASE_URL`**（对应 flag `--cli-chat-proxy-base-url`，是 CLI chat API 代理端点覆盖——作为第三方端点注入通道**待实机验证**）。凭证优先级：config.toml `api_key` > `env_key` > 登录 session token > `XAI_API_KEY` |
+| 官方端点 | xAI 官方 API 是 OpenAI chat_completions 兼容：`https://api.x.ai/v1`；config.toml `[model.<name>]` 的 `api_backend` 支持 chat_completions/responses/messages 三种 |
+| 全局配置 | `$GROK_HOME`（缺省 `~/.grok`，三平台同）下 `config.toml`（主配置 TOML：`[model.<name>]` 段 + `[mcp_servers.<name>]` 段）；项目级 `<cwd>/.grok/config.toml` 只贡献 `[mcp_servers]` 等少数段。**「设为全局默认」首版不支持**（TOML `[model.<name>]` 段结构 + 设为默认的字段未核实，风险高于收益；仅启动注入） |
+| 官方账号 | `grok login`（浏览器 OAuth，auth.x.ai）/ `grok login --device-auth` / `grok logout`；凭证落 `~/.grok/auth.json`（0600，顶层 map：scope → GrokAuth{key, auth_mode, refresh_token, expires_at}，grok 自己原子重写——我们只读）。官方账号拉起必须 `env_remove XAI_API_KEY`/`GROK_CODE_XAI_API_KEY` |
+| 会话存储 | `~/.grok/sessions/<encoded-cwd>/<session-id-uuidv7>/` 目录式会话（目录 0700）：`summary.json`（info{id,cwd}、generated_title、created_at/updated_at、num_messages、current_model_id）+ **`updates.jsonl`（权威对话日志，append-only）** + `chat_history.jsonl` 等；`<encoded-cwd>` 是 cwd 的 URL 编码（超长则 slug+hash 且目录内有 `.cwd` 元数据文件）。**`~/.grok/sessions/session_search.sqlite` 只是 FTS 索引不是会话本体**，扫描须排除。项目归属以 `summary.json` 的 `info.cwd` 为准（比解码目录名可靠） |
+| 会话格式 | `updates.jsonl` 每行 `{"timestamp": <unix秒>, "method": "session/update", "params": <ACP SessionNotification>}`；消费方式 = `params.update.sessionUpdate`：`user_message_chunk`/`agent_message_chunk`（content 为 ACP ContentBlock，text 在 `content.text`）/`tool_call`/`tool_call_update`/`plan` 等，另有 `_x.ai/` 前缀扩展通知；未识别类型跳过（防御式）。token usage 在 turn 结束的 ACP 通知 `_meta.usage`（PromptUsage）：`input_tokens`/`output_tokens`/`total_tokens`/`cached_read_tokens` + `modelUsage{<model>:{...}}`（可能在 `params._meta` 或 `params.update._meta`，两层都探） |
+| 关键启动参数 | `-p/--print`（headless，**不读 stdin**，prompt 必须走参数）+ `--output-format plain\|json\|streaming-json`；`-m/--model`、`--cwd`、`-r/--resume [ID_OR_TITLE]`、`-c/--continue`、`-s/--session-id <UUID>`（仅新建会话，固定会话关联）、`--max-turns`、`--yolo`、`--tools/--disallowed-tools`、`--permission-mode <default\|acceptEdits\|auto\|dontAsk\|bypassPermissions\|plan>`、`--sandbox <off\|workspace\|read-only\|strict>` |
+| 只读模式 | headless 已验证语义最硬的组合：**`--permission-mode dontAsk`（CI 严格白名单，非白名单工具请求直接 Cancelled）+ `--sandbox read-only`（OS 级只读，只能写 ~/.grok 和临时目录）**。`--permission-mode plan` 的值被接受但主会话门控链路**未确认**，不要用 |
+| 技能 | `~/.grok/skills/<name>/SKILL.md`（目录+SKILL.md，与 Ccode SSOT 同构；另兼容读 `~/.claude/skills`、`~/.cursor/skills`）。首版未经实机验证，分发**强制 copy**（同 cursor 口径） |
+| MCP | `~/.grok/config.toml` 的 **`[mcp_servers.<name>]` 段（TOML，不是 JSON）**——stdio = `command`+`args[]`+`env{}`+`cwd`；远程 = `url`+`type`("http"/"sse"，省略时 url 以 /sse 结尾即 sse)+`headers{}`+`bearer_token_env_var`（env 读 token 注入 Authorization: Bearer，密钥不落盘）；通用 `enabled`/`startup_timeout_sec`/`tool_timeout_sec`；headers/env 值支持 `${VAR}` 引用。grok 另兼容读 `~/.claude.json`/`.mcp.json`/`~/.cursor/mcp.json`（可在 config 关）。**Ccode 首版：MCP 页只读清单（解析 TOML 段）+ 分发/写入不支持**（grok 自带 `grok mcp add` CLI；不为首版硬造 TOML 原子写管线） |
+| 安装 / 更新 | 官方脚本 `curl -fsSL https://x.ai/cli/install.sh \| bash`（mac/Linux/Git Bash）→ `~/.grok/bin/grok`；Windows `irm https://x.ai/cli/install.ps1 \| iex` → `%USERPROFILE%\.grok\bin\grok.exe`；**npm 官方包 `@xai-official/grok`**（postinstall 解压到 `~/.grok/bin/`）。自更新 `grok update`（非交互；`grok update --check --json` 机器可读）。Windows 支持官方称 best-effort |
+| 坑 | `auth.json` grok 自己原子重写（0600），我们只读；`session_search.sqlite` 不是会话本体；headless 不读 stdin；`--permission-mode plan` 门控链路未确认别用；base url 注入通道（GROK_CLI_CHAT_PROXY_BASE_URL）待实机验证 |
+
 ## 跨 agent 共性结论
 
 1. **会话格式全是内部格式**——解析层统一防御式策略，并准备「原始 JSON 视图」作为降级。
 2. **项目归属推导各家各样**——在各自 adapter 的 `list_sessions` 里解决，对上层统一暴露 `project_path`。
-3. **注入模式没有统一三件套**——Claude/Gemini/Qwen(openai 协议）/旧 Kimi/CodeBuddy 有标准 env；Codex 靠 `-c` 参数；OpenCode 靠 `OPENCODE_CONFIG_CONTENT`；新 Kimi 靠 `KIMI_MODEL_*` 合成通道；Cursor 是 env（key/端点）+ flag（模型）混合。`launch_plan { env, args }` 抽象覆盖了全部八种情况。
-4. **前六家都有整体搬迁环境变量**（`CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`GEMINI_CLI_HOME`/`QWEN_HOME`/`KIMI_CODE_HOME`/`KIMI_SHARE_DIR`；CodeBuddy 未核实）——可做「完全隔离 profile」的进阶功能，但会连会话历史一起隔离，MVP 不用。
+3. **注入模式没有统一三件套**——Claude/Gemini/Qwen(openai 协议）/旧 Kimi/CodeBuddy 有标准 env；Codex 靠 `-c` 参数；OpenCode 靠 `OPENCODE_CONFIG_CONTENT`；新 Kimi 靠 `KIMI_MODEL_*` 合成通道；Cursor 是 env（key/端点）+ flag（模型）混合；Grok 是 `XAI_API_KEY`+`GROK_*` env 三件套（base url 注入待实机验证）。`launch_plan { env, args }` 抽象覆盖了全部九种情况。
+4. **前六家都有整体搬迁环境变量**（`CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`GEMINI_CLI_HOME`/`QWEN_HOME`/`KIMI_CODE_HOME`/`KIMI_SHARE_DIR`；CodeBuddy 未核实；Grok 有 `GROK_HOME`）——可做「完全隔离 profile」的进阶功能，但会连会话历史一起隔离，MVP 不用。
 5. **都支持非交互模式**——为「绕过终端直接驱动 agent」留了路。
 6. **只读/计划模式参数（2026-08-12 本机 `--help` 实测，「聊想法」想法期只读保护用）**：claude `--permission-mode plan`、
    codex `-s read-only`（替换 Ccode 默认注入的 `-s workspace-write`，重复 -s 生效顺序未文档化故先剔除）、
    gemini `--approval-mode plan`、kimi（新版）`--plan`、cursor `--plan`（= `--mode plan`）、codebuddy `--permission-mode plan`；
    **qwen 0.21.1 无 approval/plan 类参数**（`--safe-mode` 只是禁用自定义配置，非只读）、opencode 未装无据——这两家只有 prompt 软约束。
+   grok（源码调研，待实机验证）：`--permission-mode dontAsk --sandbox read-only`（CI 严格白名单 + OS 级只读；
+   `--permission-mode plan` 门控链路未确认，不用）。
    注册表落点：`agent_specs.rs` 的 `AgentSpec.readonly_args`，应用逻辑 `agents::readonly_launch_args`。
 
-## 9. MCP 配置分发调研（2026-08-10，八家全部经官方文档/源码/本机实测核实）
+## 10. MCP 配置分发调研（2026-08-10，八家经官方文档/源码/本机实测核实；grok 为 2026-08 源码调研，首版只读不分发）
 
 **目标**：Ccode 维护一份 MCP server 清单，一键分发进各 CLI 自己的配置文件。本节是实现规格的单一出处——写字段/路径前以此为准，不要凭印象。
 
-### 9.1 分发通道总表
+### 10.1 分发通道总表
 
 | CLI | 用户级配置落点 | 顶层键 | 格式 | 分发主通道 | 备选通道 |
 |---|---|---|---|---|---|
@@ -144,23 +165,24 @@
 | kimi | `~/.kimi-code/mcp.json`（`KIMI_CODE_HOME` 可搬迁；**MCP 专用纯声明文件，引擎只读不写**） | `mcpServers` | JSON | **直接写文件**（无可脚本化 CLI 命令，TUI `/mcp-config` 不算） | —（只能写文件；写后新会话生效） |
 | codebuddy | `~/.codebuddy/.mcp.json`（MCP 专用文件，回退链 mcp.json→.codebuddy.json） | `mcpServers` + 并列 `disabledMcpServers` | JSONC | `codebuddy mcp add-json -s user`（默认 scope 是 local，寄生全局状态文件，禁用） | 直写 user 级 .mcp.json（保留 disabledMcpServers 键；有 watch 热生效） |
 | cursor | `~/.cursor/mcp.json`（**CLI 与 IDE 共享**，写入同时改变 IDE 行为） | `mcpServers` | JSON | **直接写文件**（CLI 无 add/remove 子命令；`agent mcp list` 是交互 TUI 不能用于校验） | —（全局 server 免审批，项目级逐工作区批准） |
+| grok | `$GROK_HOME/config.toml`（缺省 `~/.grok/config.toml`，与 model/hooks 同文件） | `[mcp_servers.<name>]`（**TOML 段**，非 JSON） | TOML | `grok mcp add`（CLI 自己做读改写；**Ccode 首版只读清单、不分发**——TOML 段结构独立，不硬造原子写管线） | 手工编辑 config.toml（grok 兼容读 `~/.claude.json`/`.mcp.json`/`~/.cursor/mcp.json`，可在 config 关） |
 
-### 9.2 条目 schema 映射（Ccode 统一模型 → 各家字段）
+### 10.2 条目 schema 映射（Ccode 统一模型 → 各家字段）
 
 Ccode 清单模型只收公共子集：stdio（command/args/env/cwd）+ remote（url/headers）+ enabled。映射表：
 
-| Ccode 字段 | claude | codex (TOML) | gemini | qwen | opencode | kimi | codebuddy | cursor |
-|---|---|---|---|---|---|---|---|---|
-| stdio | `command/args/env`（显式 `type:"stdio"`） | `command/args/env/cwd`（有 command 即 stdio） | `command/args/env/cwd` | 同 gemini | `type:"local"`，**command 是数组**（命令+参数合一），env 叫 `environment` | `command/args/env/cwd`（无 transport 自动推断） | `type:"stdio"` + command/args/env | command/args/env（type 可省略） |
-| remote | `type:"http"` + url/headers | `url` + `http_headers`（SSE 不支持） | **`httpUrl`**（url=SSE 已 legacy） | 同 gemini（httpUrl） | `type:"remote"` + url/headers | url/headers（http；SSE 须显式 transport） | `type:"http"` + url/headers | url/headers（自动协商 transport） |
-| cwd | 未核实，**不写** | `cwd` | `cwd` | `cwd` | `cwd` | `cwd` | 未核实，**不写** | 未核实，**不写** |
+| Ccode 字段 | claude | codex (TOML) | gemini | qwen | opencode | kimi | codebuddy | cursor | grok (TOML，首版只读) |
+|---|---|---|---|---|---|---|---|---|---|
+| stdio | `command/args/env`（显式 `type:"stdio"`） | `command/args/env/cwd`（有 command 即 stdio） | `command/args/env/cwd` | 同 gemini | `type:"local"`，**command 是数组**（命令+参数合一），env 叫 `environment` | `command/args/env/cwd`（无 transport 自动推断） | `type:"stdio"` + command/args/env | command/args/env（type 可省略） | `command/args/env/cwd`（有 command 即 stdio；通用 `enabled`/`startup_timeout_sec`/`tool_timeout_sec`） |
+| remote | `type:"http"` + url/headers | `url` + `http_headers`（SSE 不支持） | **`httpUrl`**（url=SSE 已 legacy） | 同 gemini（httpUrl） | `type:"remote"` + url/headers | url/headers（http；SSE 须显式 transport） | `type:"http"` + url/headers | url/headers（自动协商 transport） | `url` + `type`("http"/"sse"，省略时 /sse 结尾即 sse) + `headers`/`bearer_token_env_var` |
+| cwd | 未核实，**不写** | `cwd` | `cwd` | `cwd` | `cwd` | `cwd` | 未核实，**不写** | 未核实，**不写** | `cwd` |
 
-### 9.3 密钥与插值（防明文落盘口径）
+### 10.3 密钥与插值（防明文落盘口径）
 
-- claude/codebuddy：`${VAR}` / `${VAR:-default}` 插值（codebuddy **只认全大写变量名**）；codex：**无通用插值**，用 `bearer_token_env_var`/`env_http_headers`/`env_vars` 按名引用环境变量（内联 `bearer_token` 会被显式拒绝）；gemini/qwen：`$VAR`/`${VAR}` 全文件插值（gemini 有出站 env 脱敏，密钥必须在 env 块显式声明）；opencode：`{env:VAR}` 语法；kimi：`bearerTokenEnvVar` 间接引用；cursor：`${VAR}` 与 `${env:NAME}`。
+- claude/codebuddy：`${VAR}` / `${VAR:-default}` 插值（codebuddy **只认全大写变量名**）；codex：**无通用插值**，用 `bearer_token_env_var`/`env_http_headers`/`env_vars` 按名引用环境变量（内联 `bearer_token` 会被显式拒绝）；gemini/qwen：`$VAR`/`${VAR}` 全文件插值（gemini 有出站 env 脱敏，密钥必须在 env 块显式声明）；opencode：`{env:VAR}` 语法；kimi：`bearerTokenEnvVar` 间接引用；cursor：`${VAR}` 与 `${env:NAME}`；grok：headers/env 值支持 `${VAR}` 引用 + `bearer_token_env_var`（env 读 token 注入 `Authorization: Bearer`，密钥不落盘）。
 - 结论：Ccode 清单里密钥一律存「环境变量名引用」，各家映射成各自的间接引用字段，不落明文。
 
-### 9.4 共性红线
+### 10.4 共性红线
 
 - **绝不整文件覆盖**：claude/codex/gemini/qwen 的目标文件都是混合状态文件（存登录态/信任记录/model 选择等），只读-改-写一个键/段，写前备份 + 原子写（复用 global_config.rs 的 agent 级事务批次模式）。
 - **企业管理层探测**：claude（managed-mcp.json 三系统路径）/opencode（managed 目录）存在即放弃分发并提示。

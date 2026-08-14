@@ -246,6 +246,11 @@ fn count_lines(cwd: &str, rel: &str) -> Option<u64> {
 
 pub(crate) fn git_status_sync(cwd: &str) -> Result<GitStatusDto, String> {
     let cwd = expand_tilde(cwd);
+    // cwd 已不存在（工作区被归档/删除后标签页仍指着旧路径）要与「目录在但不是仓库」区分开，
+    // 否则 git rev-parse 的 128 会被误显示为「该目录不是 git 仓库」
+    if !Path::new(&cwd).is_dir() {
+        return Err(format!("目录不存在（可能已被归档或删除）：{cwd}"));
+    }
     if !probe_is_work_tree(&cwd)? {
         return Ok(GitStatusDto::default()); // is_repo = false，其余默认
     }
@@ -1750,6 +1755,15 @@ mod tests {
         assert!(s.files.is_empty());
         assert_eq!(s.total_add, 0);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_dir_returns_distinct_error() {
+        // 工作区归档/删除后标签页仍指旧路径：必须报「目录不存在」而非误判为「不是 git 仓库」
+        let dir = tmpdir("gone");
+        fs::remove_dir_all(&dir).ok();
+        let err = git_status_sync(dir.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("目录不存在"), "err = {err}");
     }
 
     #[test]

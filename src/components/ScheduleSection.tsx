@@ -11,11 +11,16 @@ import {
   schedulesForProject,
   summaryPreview,
 } from "../schedule-tasks";
+import {
+  followSkillName,
+  scheduleSkillOptions,
+} from "../schedule-skill";
 import { AGENTS } from "../types";
 import type {
   RunRecordDto,
   ScheduleDto,
   SchedulerRunDonePayload,
+  SkillDto,
 } from "../types";
 
 const actionBtn =
@@ -24,7 +29,7 @@ const actionBtn =
 /** 历史条目最多展开显示条数（DTO 保留最近 20 条，行内只看最近几条） */
 const HISTORY_PREVIEW = 5;
 
-/** 「＋ 定时巡检」弹层：skill 固定 lit-watch（v1 唯一用例），UI 不暴露 */
+/** 「＋ 定时巡检」弹层：技能可选（默认 lit-watch 文献监控），任务名默认值跟随技能（手改过不覆盖） */
 function CreateScheduleModal({
   projectRoot,
   onClose,
@@ -36,12 +41,32 @@ function CreateScheduleModal({
 }) {
   const profiles = useAppStore((s) => s.profiles);
   const [name, setName] = useState("文献雷达");
+  const [skill, setSkill] = useState("lit-watch");
+  const [skills, setSkills] = useState<SkillDto[]>([]);
   const [frequency, setFrequency] = useState<"daily" | "weekly">("daily");
   const [weekday, setWeekday] = useState(1);
   const [time, setTime] = useState("09:00");
   const [profileId, setProfileId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // 技能库供「技能」下拉（读取失败保持空表，scheduleSkillOptions 兜底 lit-watch）
+  useEffect(() => {
+    let stale = false;
+    invoke<SkillDto[]>("list_skills")
+      .then((list) => {
+        if (!stale) setSkills(list);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, []);
+
+  function onSkillChange(next: string) {
+    setName((cur) => followSkillName(cur, skill, next, skills));
+    setSkill(next);
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -57,6 +82,7 @@ function CreateScheduleModal({
         input: {
           name: name.trim() || undefined,
           projectRoot,
+          skill,
           frequency,
           weekday: frequency === "weekly" ? weekday : null,
           hour,
@@ -84,9 +110,23 @@ function CreateScheduleModal({
       >
         <h2 className="mb-4 text-base font-semibold text-l1">定时巡检</h2>
         <p className="mb-3 text-xs text-l3">
-          按周期在项目目录里无头跑一次文献监控（lit-watch），新文献追加到
+          按周期在项目目录里无头跑一次所选技能；默认文献监控（lit-watch），新文献追加到
           notes/inbox.md。
         </p>
+        <label className="mb-3 block text-sm">
+          <span className="mb-1 block text-xs text-l3">技能</span>
+          <select
+            className={fieldClass}
+            value={skill}
+            onChange={(e) => onSkillChange(e.target.value)}
+          >
+            {scheduleSkillOptions(skills).map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">任务名</span>
           <input
@@ -94,7 +134,6 @@ function CreateScheduleModal({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="文献雷达"
-            autoFocus
           />
         </label>
         <div className="mb-3 flex gap-2">
@@ -320,7 +359,7 @@ export default function ScheduleSection({
         <button
           type="button"
           className={actionBtn}
-          title="新建定时巡检（文献监控）"
+          title="新建定时巡检（默认文献监控，可选其他技能）"
           onClick={() => setCreateOpen(true)}
         >
           ＋ 定时巡检
@@ -354,6 +393,8 @@ export default function ScheduleSection({
                     <span className="shrink-0 text-xs text-l3">
                       {frequencyLabel(s.frequency, s.weekday, s.hour, s.minute)}
                     </span>
+                    {/* 技能名白话直显：「文献雷达 · 每天 09:00 · lit-watch」 */}
+                    <span className="shrink-0 text-xs text-l4">{s.skill}</span>
                     <span className="min-w-0 flex-1" />
                     {s.lastRunAt && (
                       <span

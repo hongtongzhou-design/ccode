@@ -1,5 +1,5 @@
 //! 定时雷达：按「每日/每周 + 时分」周期，无头拉起 agent CLI 在项目目录里跑一次技能
-//! （首个用例是文献监控 lit-watch），跑完记录历史并发 `scheduler-run-done` 事件给前端。
+//! （默认文献监控 lit-watch，可选技能库里的其他技能），跑完记录历史并发 `scheduler-run-done` 事件给前端。
 //!
 //! 存储：应用配置目录 ccode/schedules.json（snake_case）；给前端的 DTO 用 camelCase。
 //! due 判定按本地时间算「最近一次应跑时刻」，last_run_at 早于它即 due——应用关闭错过
@@ -22,8 +22,10 @@ const HISTORY_CAP: usize = 20;
 /// 简报脱敏后截 2000 字符
 const SUMMARY_CAP: usize = 2000;
 
-/// 任务 prompt 模板：技能名按 task.skill 替换（v1 只有 lit-watch）
-const TASK_PROMPT_TEMPLATE: &str = "请使用 {skill} 技能执行一次文献巡检：按 papers/watchlist.md 的订阅清单检索新文献，去重、精选后把命中追加到 notes/inbox.md，结束时输出三行以内的简报（检索了几条关键词/来源、新命中几篇、其中推荐几篇、哪些来源未达）。本任务由 Ccode 定时雷达自动触发。";
+/// 任务 prompt 模板按技能分派：lit-watch 用文献巡检专用文案（一字不动），
+/// 其他技能用通用模板（技能自有规范为准，调度器不复制关键词/路径口径）
+const TASK_PROMPT_LIT_WATCH: &str = "请使用 {skill} 技能执行一次文献巡检：按 papers/watchlist.md 的订阅清单检索新文献，去重、精选后把命中追加到 notes/inbox.md，结束时输出三行以内的简报（检索了几条关键词/来源、新命中几篇、其中推荐几篇、哪些来源未达）。本任务由 Ccode 定时雷达自动触发。";
+const TASK_PROMPT_GENERIC: &str = "请使用 {skill} 技能在项目内执行一次定时巡检，按该技能的既定规范产出结果，结束时输出三行以内简报。本任务由 Ccode 定时雷达自动触发。";
 
 // ===== 数据模型 =====
 
@@ -276,7 +278,12 @@ fn validate_fields(
 }
 
 fn build_task_prompt(skill: &str) -> String {
-    TASK_PROMPT_TEMPLATE.replace("{skill}", skill)
+    let template = if skill == "lit-watch" {
+        TASK_PROMPT_LIT_WATCH
+    } else {
+        TASK_PROMPT_GENERIC
+    };
+    template.replace("{skill}", skill)
 }
 
 fn cap_summary(text: &str) -> String {
@@ -733,6 +740,22 @@ mod tests {
         assert!(p.contains("定时雷达自动触发"));
         let p = build_task_prompt("other-skill");
         assert!(p.contains("other-skill"));
+        assert!(!p.contains("{skill}"));
+    }
+
+    #[test]
+    fn prompt_template_dispatches_by_skill() {
+        // lit-watch 专用文案一字不动（回归钉死）
+        assert_eq!(
+            build_task_prompt("lit-watch"),
+            "请使用 lit-watch 技能执行一次文献巡检：按 papers/watchlist.md 的订阅清单检索新文献，去重、精选后把命中追加到 notes/inbox.md，结束时输出三行以内的简报（检索了几条关键词/来源、新命中几篇、其中推荐几篇、哪些来源未达）。本任务由 Ccode 定时雷达自动触发。"
+        );
+        // 其他技能走通用模板：替换技能名、不带文献巡检的路径口径
+        let p = build_task_prompt("data-clean");
+        assert!(p.contains("data-clean"));
+        assert!(p.contains("定时巡检"));
+        assert!(p.contains("定时雷达自动触发"));
+        assert!(!p.contains("watchlist.md"));
         assert!(!p.contains("{skill}"));
     }
 }

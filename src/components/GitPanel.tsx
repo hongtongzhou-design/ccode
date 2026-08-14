@@ -13,6 +13,7 @@ import { confirmDialog } from "./ConfirmDialog";
 import ImagePairView, { isImagePath } from "./ImagePairView";
 import { useAppStore } from "../store";
 import { defaultCommitMessage } from "../git-commit-message";
+import { fileTypeIcon } from "../file-icons";
 import { groupFilesByStatus, statusBadgeTitle } from "../git-status-groups";
 
 interface GitStatusDto {
@@ -69,6 +70,24 @@ function formatSize(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+/** 文件类型小徽标（固定识别色，不随主题）；未收录类型留空槽位保持行对齐 */
+function FileTypeBadge({ path }: { path: string }) {
+  const icon = fileTypeIcon(path);
+  return (
+    <span
+      aria-hidden="true"
+      className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm px-0.5 font-mono text-micro leading-4"
+      style={
+        icon
+          ? { color: icon.color, backgroundColor: `${icon.color}26` }
+          : undefined
+      }
+    >
+      {icon?.label ?? ""}
+    </span>
+  );
 }
 
 /**
@@ -487,6 +506,7 @@ function GitPanel({
             >
               {f.status}
             </span>
+            <FileTypeBadge path={f.path} />
             <span className="min-w-0 flex-1 truncate font-mono text-l2">
               {f.path}
             </span>
@@ -538,6 +558,7 @@ function GitPanel({
           >
             {f.status}
           </span>
+          <FileTypeBadge path={f.path} />
           <span className="min-w-0 flex-1 truncate font-mono text-xs text-l2">
             {f.path.split(/[\\/]/).pop()}
           </span>
@@ -673,13 +694,14 @@ function GitPanel({
     );
   }
 
-  // 增删整行铺语义深底（bg-ok/bg-err，七主题共享）：用户拍板「可以铺」，比细边更清晰
+  // 增删整行铺语义底色（diff-add/del 令牌）：用户拍板「可以铺」，比细边更清晰；
+  // 深色主题深底浅字，浅色主题由 App.css 覆写为浅底深字（GitHub 式）
   function diffLineClass(line: string): string {
     if (line.startsWith("@@")) return "bg-inset text-link";
     if (line.startsWith("+") && !line.startsWith("+++"))
-      return "bg-ok text-ok-text";
+      return "bg-diff-add-bg text-diff-add-fg";
     if (line.startsWith("-") && !line.startsWith("---"))
-      return "bg-err text-err-text";
+      return "bg-diff-del-bg text-diff-del-fg";
     if (
       line.startsWith("diff --git") ||
       line.startsWith("index ") ||

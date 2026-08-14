@@ -940,11 +940,11 @@ mod tests {
         assert_eq!(links[0].from_session_id, "s2");
     }
 
-    /// 接力目标清单覆盖八 CLI，kimi/opencode 标注需手动注入
+    /// 接力目标清单覆盖九 CLI，kimi/opencode 标注需手动注入
     #[test]
     fn handoff_targets_cover_registry() {
         let targets = handoff_targets();
-        assert_eq!(targets.len(), 8);
+        assert_eq!(targets.len(), 9);
         let manual: Vec<&str> = targets
             .iter()
             .filter(|t| !t.prompt_supported)
