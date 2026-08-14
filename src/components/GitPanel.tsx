@@ -90,6 +90,17 @@ function FileTypeBadge({ path }: { path: string }) {
   );
 }
 
+/** 改动面板上报给终端页的状态摘要：标签条变更芯片（改动数 + 分支 + 快速保存）与页签徽标共用 */
+export interface GitSummary {
+  add: number;
+  del: number;
+  isRepo: boolean;
+  branch: string;
+  /** 任务工作区视图（提交时 paths 传 null 全量提交，与面板「保存到历史」同口径） */
+  inWorkspace: boolean;
+  files: GitFileDto[];
+}
+
 /**
  * 改动面板：活动标签 cwd 的 git 状态（8s 轮询）+ 提交/推送。
  * 输入提交信息时直接使用；留空点击则用本地规则生成默认信息。显式点击即视为用户同意，不再二次确认。
@@ -107,7 +118,7 @@ function GitPanel({
   visible: boolean;
   /** 外部刷新信号（如 fs-changed 文件监听事件），变化时立即刷新 */
   refreshKey?: number;
-  onTotals: (t: { add: number; del: number }) => void;
+  onTotals: (t: GitSummary) => void;
   /** 工作区任务进入全宽审阅；普通仓库不显示入口。 */
   onOpenReview?: (cwd: string) => void;
   /** 会话页只展示当前项目状态，不允许从历史上下文提交或推送。 */
@@ -214,11 +225,14 @@ function GitPanel({
         new Set([...selected].filter((path) => current.has(path))),
       );
     }
-    onTotals(
-      d
-        ? { add: d.totalAdd, del: d.totalDel }
-        : { add: s?.totalAdd ?? 0, del: s?.totalDel ?? 0 },
-    );
+    onTotals({
+      add: d ? d.totalAdd : (s?.totalAdd ?? 0),
+      del: d ? d.totalDel : (s?.totalDel ?? 0),
+      isRepo: s?.isRepo ?? false,
+      branch: s?.branch ?? "",
+      inWorkspace: d !== null,
+      files: d ? d.files : (s?.files ?? []),
+    });
   }, [cwd, onTotals]);
 
   // cwd / 可见性变化：重置勾选与展开的 diff 并立即刷新；可见时每 8s 轮询

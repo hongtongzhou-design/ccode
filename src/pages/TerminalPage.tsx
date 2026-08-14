@@ -28,13 +28,14 @@ import ConversationView from "../components/ConversationView";
 import { confirmDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
 import FileTree from "../components/FileTree";
-import GitPanel from "../components/GitPanel";
+import GitPanel, { type GitSummary } from "../components/GitPanel";
 import HandoffPicker, { type HandoffSource } from "../components/HandoffPicker";
 import DigestPicker from "../components/DigestPicker";
 import { EmptyState, LoadingRows } from "../components/PageFrame";
 import ProjectRail from "../components/ProjectRail";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
 import { renderTaskMd } from "../pipeline-start";
+import { defaultCommitMessage } from "../git-commit-message";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
 import { XTERM_PALETTES } from "../terminal-palettes";
 import { isSoftwareWebGL } from "../diagnostics";
@@ -1850,10 +1851,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     ];
   }
   const [rightTab, setRightTab] = useState<RightTab>("dialogue");
-  const [gitTotals, setGitTotals] = useState<{
-    add: number;
-    del: number;
-  } | null>(null);
+  const [gitTotals, setGitTotals] = useState<GitSummary | null>(null);
+  /** 变更芯片「✓ 保存」的行内反馈（保存中/已保存/失败，2.5s 自动复位） */
+  const [gitSave, setGitSave] = useState<"saving" | "saved" | "failed" | null>(
+    null,
+  );
+  const gitSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 中带「可合并」状态 pill（P1b 参考图 2）：当前项目可合并工作区名列表，空 = 不显示
   const [mergeReadyWs, setMergeReadyWs] = useState<string[]>([]);
   // pill 刷新信号：工作区归档事件（合并保留工作区的场景走 reviewPath 关闭触发刷新）
@@ -2135,12 +2138,34 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     );
   }, [activeId, statuses, tabs]);
 
-  /** GitPanel 上报改动总量（改动页签的 +N 徽标）；没变就不更新 */
-  const reportGitTotals = useCallback((t: { add: number; del: number }) => {
-    setGitTotals((prev) =>
-      prev && prev.add === t.add && prev.del === t.del ? prev : t,
-    );
+  /** GitPanel 上报改动摘要（页签 +N 徽标与标签条变更芯片共用）；内容没变就不更新（按签名比较，免 8s 轮询空转重渲染） */
+  const reportGitTotals = useCallback((t: GitSummary) => {
+    const sig = (s: GitSummary) =>
+      `${s.add}|${s.del}|${s.isRepo}|${s.branch}|${s.inWorkspace}|${s.files.map((f) => f.status + f.path).join(",")}`;
+    setGitTotals((prev) => (prev && sig(prev) === sig(t) ? prev : t));
   }, []);
+
+  /** 变更芯片「✓ 保存」：提交全部未提交改动，说明本地自动生成——与改动面板「快速保存到历史」同口径 */
+  async function quickCommitAll() {
+    const s = gitTotals;
+    if (!s?.isRepo || s.files.length === 0 || gitSave === "saving") return;
+    setGitSave("saving");
+    try {
+      await invoke("git_commit", {
+        cwd: gitPanelCwd,
+        message: defaultCommitMessage(s.files),
+        push: false,
+        paths: s.inWorkspace ? null : s.files.map((f) => f.path),
+      });
+      setGitSave("saved");
+      bumpFsChangeTick();
+    } catch {
+      setGitSave("failed");
+    } finally {
+      if (gitSaveTimerRef.current) clearTimeout(gitSaveTimerRef.current);
+      gitSaveTimerRef.current = setTimeout(() => setGitSave(null), 2500);
+    }
+  }
 
   /** FileTree 的 fs-changed 事件 → GitPanel 一并刷新（稳定回调） */
   const bumpFsChangeTick = useCallback(() => setFsChangeTick((t) => t + 1), []);
@@ -2971,6 +2996,44 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             ＋
           </button>
           <span className="ml-auto flex shrink-0 items-center gap-1">
+            {/* 变更芯片（Codex 式，v3.83）：改动面板摘要的常驻镜像——点数字打开改动页签，
+                「✓ 保存」直接全量快速提交（说明自动生成），不用点开面板 */}
+            {gitTotals?.isRepo && gitTotals.files.length > 0 && (
+              <span
+                className="flex items-center rounded-sm bg-inset text-xs"
+                title={`${gitPanelCwd} 的未提交改动（跟随左栏文件树的根）`}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRightOpen(true);
+                    setRightTab("git");
+                  }}
+                  title={`${gitPanelCwd} 的未提交改动，点击查看改动面板`}
+                  className="flex min-w-0 items-center gap-1 rounded-l-sm py-0.5 pl-2 pr-1 text-l2 hover:bg-hover"
+                >
+                  <span className="text-l3">⑂</span>
+                  <span className="max-w-28 truncate">{gitTotals.branch || "HEAD"}</span>
+                  <span className="font-mono text-add">+{gitTotals.add}</span>
+                  <span className="font-mono text-del">-{gitTotals.del}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void quickCommitAll()}
+                  disabled={gitSave === "saving"}
+                  title="快速保存到历史：提交全部改动，说明自动生成（同改动面板留空点「快速保存到历史」）"
+                  className="shrink-0 rounded-r-sm py-0.5 pl-1 pr-2 text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                >
+                  {gitSave === "saving"
+                    ? "保存中…"
+                    : gitSave === "saved"
+                      ? "✓ 已保存"
+                      : gitSave === "failed"
+                        ? "保存失败"
+                        : "✓ 保存"}
+                </button>
+              </span>
+            )}
             {/* 当前项目状态 pill（P1b 参考图 2）：有可合并工作区才显示，纯状态不交互（inset 底 + 语义色小点） */}
             {mergeReadyWs.length > 0 && (
               <span
@@ -3191,6 +3254,19 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         </div>
         {/* 专注内容：右栏铺满即表达主次，中带不加压暗遮罩（v3.44 用户否决压黑） */}
       </div>
+
+      {/* 右栏关闭（或专注终端）时改动面板随右栏卸载、轮询停止，标签条变更芯片与页签徽标需要数据：
+          挂一个 display:none 的实例在同一 cwd 上持续轮询（与右栏内的面板实例互斥，永不同存） */}
+      {(!rightOpen || focusMode) && (
+        <div className="hidden">
+          <GitPanel
+            cwd={gitPanelCwd}
+            visible={visible}
+            refreshKey={fsChangeTick}
+            onTotals={reportGitTotals}
+          />
+        </div>
+      )}
 
       {/* 右侧面板：当前对话 / 文件预览 / 改动（专注终端下隐藏） */}
       {rightOpen && !focusMode && (

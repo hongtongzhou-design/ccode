@@ -9,6 +9,7 @@ import FuseDraftModal from "./FuseDraftModal";
 import { useAppStore } from "../store";
 import {
   bucketCardsByStep,
+  customTopicsForStep,
   discussionCardsForStep,
   extractOpenQuestions,
   ideaCardsForStep,
@@ -215,6 +216,14 @@ export default function TaskCardsSection({
   const focusStepDto = focusStep
     ? (steps.find((s) => s.name === focusStep) ?? null)
     : null;
+  /** 聚焦步骤的自定义话题 chips（任务书节点，种子之后）：已建卡的非种子名 draft 卡 */
+  const customTopics = focusStepDto
+    ? customTopicsForStep(
+        cards ?? [],
+        focusStepDto.name,
+        focusStepDto.discussionSeeds ?? [],
+      )
+    : [];
 
   async function submitCreate(step: string | null, e: React.FormEvent) {
     e.preventDefault();
@@ -776,6 +785,7 @@ export default function TaskCardsSection({
             reviewConflict={reviewConflict}
             onRestore={onRestoreWorkspace}
             onSeed={(seed) => void onSeed(focusStepDto.name, seed)}
+            customTopics={customTopics}
             onStart={() =>
               void onStartStep(
                 steps.findIndex((s) => s.name === focusStepDto.name),
@@ -901,7 +911,10 @@ export default function TaskCardsSection({
                 bucketSeeds.length === 0 && (
                   <p className="mb-1 text-xs text-l4">该步骤还没开始</p>
                 )}
-              {bucket.cards.length > 0 && (
+              {/* 聚焦态不渲染卡行：该步骤的 draft 卡已全部以 chip 形式上收进流程线任务书节点
+                  （种子卡 = 种子 chip，自定义话题 = 同款 chip，点击即续聊）；卡的管理（重命名/删除/
+                  待拍板展开）在「总览全部步骤」里进行 */}
+              {!focusStep && bucket.cards.length > 0 && (
                 <ul className="divide-y divide-hairline">
                   {bucket.cards.map(renderCard)}
                 </ul>

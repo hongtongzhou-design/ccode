@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   bucketCardsByStep,
+  customTopicsForStep,
   discussionCardsForStep,
   groupSessionsByTask,
   ideaCardsForStep,
@@ -223,4 +224,24 @@ test("kind：想法区只收聚焦步骤的 idea 卡，讨论卡区只收 draft 
   // 未挂步骤/其他步骤的卡不进聚焦区
   assert.deepEqual(ideaCardsForStep(cards, "读文献").length, 1);
   assert.deepEqual(discussionCardsForStep(cards, "写综述"), []);
+});
+
+test("自定义话题 chips：只收该步骤 draft 卡中不在种子里的名字", () => {
+  const cards = [
+    card({ id: "t-d1", name: "综述角度怎么收？", kind: "draft", step: "读文献" }),
+    card({ id: "t-d2", name: "要不要限近五年", kind: "draft", step: "读文献" }),
+    card({ id: "t-i1", name: "随便想想", kind: "idea", step: "读文献" }),
+    card({ id: "t-d3", name: "别步话题", kind: "draft", step: "写综述" }),
+    card({ id: "t-d4", name: "散讨论", kind: "draft" }),
+  ];
+  const seeds = ["综述角度怎么收？"];
+  // 种子同名卡由种子 chip 代表；idea 卡/别步骤/未挂步骤都不进自定义话题
+  assert.deepEqual(customTopicsForStep(cards, "读文献", seeds), [
+    "要不要限近五年",
+  ]);
+  // 无种子时全部 draft 卡都是自定义话题
+  assert.deepEqual(
+    customTopicsForStep(cards, "写综述", []),
+    ["别步话题"],
+  );
 });
