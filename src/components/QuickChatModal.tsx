@@ -5,6 +5,8 @@ import { useAppStore } from "../store";
 import { AGENTS } from "../types";
 
 const LAST_KEY = "ccode.quickChat";
+/** 「下次直接开聊」开关：勾选后侧栏「快速开聊」跳过弹层直接落终端（⌘K 入口永远开弹层，留作调整口） */
+const SKIP_KEY = "ccode.quickChatSkip";
 
 type Remembered = { agentId?: string; profileId?: string; cwd?: string };
 
@@ -17,6 +19,46 @@ function loadRemembered(): Remembered {
   } catch {
     return {};
   }
+}
+
+export function quickChatSkipEnabled(): boolean {
+  try {
+    return localStorage.getItem(SKIP_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** 跳过弹层的直接开聊：按上次选择落终端。返回 false = 没有可用的记住选择，调用方退回弹层 */
+export async function launchQuickChatDirect(): Promise<boolean> {
+  const r = loadRemembered();
+  if (!r.agentId) return false;
+  const { profiles, setPendingTerminal, setPage } = useAppStore.getState();
+  const agentProfiles = profiles.filter((p) => p.agent === r.agentId);
+  // 记住的配置可能已删除：落到该 agent 的第一个可用配置，没有就只预填不启动
+  const profileId = agentProfiles.some((p) => p.id === r.profileId)
+    ? r.profileId!
+    : (agentProfiles[0]?.id ?? "");
+  let cwd = r.cwd?.trim() ?? "";
+  if (!cwd) {
+    try {
+      cwd = await invoke<string>("ensure_scratch_dir");
+    } catch {
+      return false;
+    }
+  }
+  const agentLabel = AGENTS.find((a) => a.id === r.agentId)?.label ?? r.agentId;
+  setPendingTerminal({
+    cwd,
+    extraEnv: {},
+    title: `随手聊 · ${agentLabel}`,
+    agentId: r.agentId,
+    profileId: profileId || undefined,
+    autoStart: !!profileId,
+    clean: true,
+  });
+  setPage("terminal");
+  return true;
 }
 
 /**
@@ -54,6 +96,7 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   const [profileId, setProfileId] = useState(() => remembered.profileId ?? "");
   const [cwd, setCwd] = useState(remembered.cwd ?? "");
   const [error, setError] = useState<string | null>(null);
+  const [skipNext, setSkipNext] = useState(quickChatSkipEnabled);
 
   // 换 agent 时把配置落到该 agent 的可用项（记住的那个可能属于别的 agent）
   useEffect(() => {
@@ -92,6 +135,7 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
         LAST_KEY,
         JSON.stringify({ agentId, profileId, cwd }),
       );
+      localStorage.setItem(SKIP_KEY, skipNext ? "1" : "0");
     } catch {
       /* 隐私模式写不进就只用本次 */
     }
@@ -171,6 +215,18 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
         </label>
 
         {error && <p className="mb-2 text-xs text-err-text">{error}</p>}
+
+        {/* 跳过弹层：勾选后下次点侧栏「快速开聊」按这套选择直接落终端；
+            ⌘K 里的「快速开聊」永远打开本弹层，留作调整口 */}
+        <label className="mb-3 flex items-center gap-2 text-xs text-l3">
+          <input
+            type="checkbox"
+            className="size-3.5 accent-[var(--color-cta)]"
+            checked={skipNext}
+            onChange={(e) => setSkipNext(e.target.checked)}
+          />
+          下次直接开聊，不再询问（要调整就从 ⌘K 命令面板进）
+        </label>
 
         <div className="flex items-center justify-end gap-2">
           <button type="button" className={secondaryActionClass} onClick={onClose}>

@@ -1971,7 +1971,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [gitSave, setGitSave] = useState<"saving" | "saved" | "failed" | null>(
     null,
   );
+  /** 「⇧ 推送」的行内反馈（与保存反馈同口径、独立计时） */
+  const [gitPush, setGitPush] = useState<"pushing" | "pushed" | "failed" | null>(
+    null,
+  );
   const gitSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const gitPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 中带「可合并」状态 pill（P1b 参考图 2）：当前项目可合并工作区名列表，空 = 不显示
   const [mergeReadyWs, setMergeReadyWs] = useState<string[]>([]);
   // pill 刷新信号：工作区归档事件（合并保留工作区的场景走 reviewPath 关闭触发刷新）
@@ -2256,7 +2261,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   /** GitPanel 上报改动摘要（页签 +N 徽标与标签条变更芯片共用）；内容没变就不更新（按签名比较，免 8s 轮询空转重渲染） */
   const reportGitTotals = useCallback((t: GitSummary) => {
     const sig = (s: GitSummary) =>
-      `${s.add}|${s.del}|${s.isRepo}|${s.branch}|${s.inWorkspace}|${s.files.map((f) => f.status + f.path).join(",")}`;
+      `${s.add}|${s.del}|${s.isRepo}|${s.branch}|${s.ahead}|${s.behind}|${s.inWorkspace}|${s.files.map((f) => f.status + f.path).join(",")}`;
     setGitTotals((prev) => (prev && sig(prev) === sig(t) ? prev : t));
   }, []);
 
@@ -2279,6 +2284,24 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     } finally {
       if (gitSaveTimerRef.current) clearTimeout(gitSaveTimerRef.current);
       gitSaveTimerRef.current = setTimeout(() => setGitSave(null), 2500);
+    }
+  }
+
+  /** 状态条「⇧ 推送」（v3.90）：底部芯片原先只有保存没有推送——保存完想推还得打开改动面板。
+      与改动面板同一个 `git_push` 命令（含无上游时自动 push -u origin <branch>），
+      推送成功后 8s 轮询自然清掉 ↑N */
+  async function quickPush() {
+    const s = gitTotals;
+    if (!s?.isRepo || gitPush === "pushing") return;
+    setGitPush("pushing");
+    try {
+      await invoke<string>("git_push", { cwd: gitPanelCwd });
+      setGitPush("pushed");
+    } catch {
+      setGitPush("failed");
+    } finally {
+      if (gitPushTimerRef.current) clearTimeout(gitPushTimerRef.current);
+      gitPushTimerRef.current = setTimeout(() => setGitPush(null), 2500);
     }
   }
 
@@ -2526,6 +2549,23 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setFocusMode(false);
     setWorkspaceReviewRequest(null);
   }, [visible, workspaceReviewRequest, setWorkspaceReviewRequest]);
+
+  // 从其他页面进入终端页：右栏默认收起，只剩终端——「默认可见」会在每次
+  // 切回来时摊开一个此刻没用途的面板。只有明确交接才开：预览请求（资源面板
+  // 「查看」）、pendingTerminal 指定右栏页签/预览（「主仓改动」提醒、开聊带开草稿）。
+  // 用 getState 现查而非依赖顺序：交接与切页是同一批 store 更新。
+  const prevVisibleRef = useRef(visible);
+  useEffect(() => {
+    const was = prevVisibleRef.current;
+    prevVisibleRef.current = visible;
+    if (!visible || was) return;
+    const st = useAppStore.getState();
+    const handoff =
+      st.previewReq !== null ||
+      st.pendingTerminal?.rightTab != null ||
+      st.pendingTerminal?.previewPath != null;
+    if (!handoff) setRightOpen(false);
+  }, [visible]);
 
   // 首页「待你处理」交来的标签激活请求：跳到终端页并激活该标签（已关闭的标签静默忽略）
   const focusTabReq = useAppStore((s) => s.focusTabReq);
@@ -3342,10 +3382,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             那正是最需要「手边有个保存」的场景 */}
         {(gitTotals?.isRepo || mergeReadyWs.length > 0) && (
           <div className="flex h-7 shrink-0 items-center gap-2 px-2 text-xs">
-            {gitTotals?.isRepo && gitTotals.files.length > 0 && (
+            {gitTotals?.isRepo &&
+              (gitTotals.files.length > 0 || gitTotals.ahead > 0) && (
               <span
                 className="flex items-center rounded-sm bg-inset"
-                title={`${gitPanelCwd} 的未提交改动（跟随左栏文件树的根）`}
+                title={`${gitPanelCwd} 的 git 状态（跟随左栏文件树的根）`}
               >
                 <button
                   type="button"
@@ -3353,31 +3394,84 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     setRightOpen(true);
                     setRightTab("git");
                   }}
-                  title={`${gitPanelCwd} 的未提交改动，点击查看改动面板`}
+                  title={`${gitPanelCwd} 的 git 状态，点击查看改动面板`}
                   className="flex min-w-0 items-center gap-1 rounded-l-sm py-0.5 pl-2 pr-1 text-l2 hover:bg-hover"
                 >
                   <span className="text-l3">⑂</span>
                   <span className="max-w-28 truncate">
                     {gitTotals.branch || "HEAD"}
                   </span>
-                  <span className="font-mono text-add">+{gitTotals.add}</span>
-                  <span className="font-mono text-del">-{gitTotals.del}</span>
+                  {(gitTotals.files.length > 0 ||
+                    gitTotals.ahead > 0 ||
+                    gitTotals.behind > 0) && (
+                    <>
+                      {gitTotals.files.length > 0 && (
+                        <>
+                          <span className="font-mono text-add">
+                            +{gitTotals.add}
+                          </span>
+                          <span className="font-mono text-del">
+                            -{gitTotals.del}
+                          </span>
+                        </>
+                      )}
+                      {/* 领先/落后远程：悬浮白话解释（与改动面板同口径） */}
+                      {gitTotals.ahead > 0 && (
+                        <span
+                          className="font-mono text-l3"
+                          title={`比远程多出 ${gitTotals.ahead} 个提交，点右侧「⇧ 推送」发到远程`}
+                        >
+                          ↑{gitTotals.ahead}
+                        </span>
+                      )}
+                      {gitTotals.behind > 0 && (
+                        <span
+                          className="font-mono text-l3"
+                          title={`远程新增 ${gitTotals.behind} 个提交，建议在终端里 pull 同步`}
+                        >
+                          ↓{gitTotals.behind}
+                        </span>
+                      )}
+                    </>
+                  )}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void quickCommitAll()}
-                  disabled={gitSave === "saving"}
-                  title="快速保存到历史：提交全部改动，说明自动生成（同改动面板留空点「快速保存到历史」）"
-                  className="shrink-0 rounded-r-sm py-0.5 pl-1 pr-2 text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
-                >
-                  {gitSave === "saving"
-                    ? "保存中…"
-                    : gitSave === "saved"
-                      ? "✓ 已保存"
-                      : gitSave === "failed"
-                        ? "保存失败"
-                        : "✓ 保存"}
-                </button>
+                {gitTotals.files.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void quickCommitAll()}
+                    disabled={gitSave === "saving"}
+                    title="快速保存到历史：提交全部改动，说明自动生成（同改动面板留空点「快速保存到历史」）"
+                    className={`shrink-0 py-0.5 pl-1 text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50 ${
+                      gitTotals.ahead > 0 ? "" : "rounded-r-sm pr-2"
+                    }`}
+                  >
+                    {gitSave === "saving"
+                      ? "保存中…"
+                      : gitSave === "saved"
+                        ? "✓ 已保存"
+                        : gitSave === "failed"
+                          ? "保存失败"
+                          : "✓ 保存"}
+                  </button>
+                )}
+                {/* 「⇧ 推送」只在有未推送提交时出现（无提交可推时摆着只会误点） */}
+                {gitTotals.ahead > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void quickPush()}
+                    disabled={gitPush === "pushing"}
+                    title="推送到远程（无上游分支时自动建立跟踪，同改动面板「保存并推送」的推送半段）"
+                    className="shrink-0 rounded-r-sm py-0.5 pl-1 pr-2 text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                  >
+                    {gitPush === "pushing"
+                      ? "推送中…"
+                      : gitPush === "pushed"
+                        ? "✓ 已推送"
+                        : gitPush === "failed"
+                          ? "推送失败"
+                          : "⇧ 推送"}
+                  </button>
+                )}
               </span>
             )}
             {mergeReadyWs.length > 0 && (

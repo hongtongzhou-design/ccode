@@ -11,7 +11,10 @@ import {
 } from "@tauri-apps/plugin-notification";
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
-import QuickChatModal from "./components/QuickChatModal";
+import QuickChatModal, {
+  launchQuickChatDirect,
+  quickChatSkipEnabled,
+} from "./components/QuickChatModal";
 import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import { LoadingRows, rowActionClass } from "./components/PageFrame";
 import "./App.css";
@@ -477,11 +480,21 @@ function App() {
                   </div>
                 )}
                 {/* 「快速开聊」是动作不是页面：放在「工作」组首位，回答「我就想随便聊聊」——
-                    其余入口全是项目/流程优先，进来先要建项目太重 */}
+                    其余入口全是项目/流程优先，进来先要建项目太重。
+                    弹层里勾过「下次直接开聊」就跳过弹层直接落终端（记住上次选择），
+                    ⌘K 入口永远开弹层，留作调整口 */}
                 {group.label === "工作" && (
                   <button
                     type="button"
-                    onClick={() => setQuickChatOpen(true)}
+                    onClick={() => {
+                      if (quickChatSkipEnabled()) {
+                        void launchQuickChatDirect().then((ok) => {
+                          if (!ok) setQuickChatOpen(true);
+                        });
+                      } else {
+                        setQuickChatOpen(true);
+                      }
+                    }}
                     title="快速开聊：不建项目直接开一个终端标签"
                     className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm text-l3 transition-colors hover:bg-hover hover:text-l2 ${
                       collapsed ? "justify-center" : "px-2.5"

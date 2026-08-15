@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
-import type { UsageStatsDto } from "../types";
+import type { UsageDayDto, UsageStatsDto } from "../types";
+import { axisLabels } from "../stats-trend";
 import {
   Checkbox,
   EmptyState,
@@ -78,6 +79,132 @@ function fallbackColor(id: string): string {
   return `hsl(${h % 360} 45% 65%)`;
 }
 const agentColor = (id: string) => AGENT_COLORS[id] ?? fallbackColor(id);
+
+/**
+ * 每日用量折线（手绘 SVG，不引图表库）：
+ * - 直折线段 + 淡色面积（用户拍板：不要平滑曲线，保留折线形式）
+ * - 底部日期轴与数值 tooltip 默认不显示，悬停图表才淡入；
+ *   跨度 ≤45 天按「MM-DD」标注，更久自动降为按月（跨年带年份）
+ * - 悬停时显示竖向指示线 + 命中点 + 当日明细（合计 tokens / 费用）
+ */
+function DailyTrend({
+  pts,
+  currency,
+  rate,
+}: {
+  pts: UsageDayDto[];
+  currency: "$" | "¥";
+  rate: number;
+}) {
+  const [hover, setHover] = useState<number | null>(null);
+  const peak = Math.max(1, ...pts.map((d) => d.input + d.output));
+  const W = 720;
+  const H = 96;
+  // 上下留白，峰值点与零值点不贴边
+  const PAD = 6;
+  const stepX = W / Math.max(1, pts.length - 1);
+  const coords = pts.map((d, i) => {
+    const v = d.input + d.output;
+    return [i * stepX, H - PAD - (v / peak) * (H - PAD * 2)] as const;
+  });
+  const line = coords
+    .map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`)
+    .join(" ");
+  const area = `${line} L${W} ${H} L0 ${H} Z`;
+  const labels = axisLabels(pts.map((d) => d.day));
+  const last = Math.max(1, pts.length - 1);
+
+  function onMove(e: React.MouseEvent<HTMLDivElement>) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    setHover(Math.round(frac * last));
+  }
+
+  const hd = hover !== null ? pts[hover] : null;
+  const hx = hover !== null ? (coords[hover][0] / W) * 100 : 0;
+  const hy = hover !== null ? (coords[hover][1] / H) * 100 : 0;
+
+  return (
+    <div className="rounded-lg bg-strip p-3">
+      <div
+        className="relative"
+        onMouseMove={onMove}
+        onMouseLeave={() => setHover(null)}
+      >
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          preserveAspectRatio="none"
+          className="block h-24 w-full"
+          role="img"
+          aria-label={`每日 token 折线，峰值 ${peak.toLocaleString()}`}
+        >
+          <path d={area} className="fill-cta/10" />
+          <path
+            d={line}
+            className="stroke-cta"
+            strokeWidth={1.5}
+            fill="none"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+        {hd && (
+          <>
+            {/* 指示线与命中点走 HTML 覆盖层：preserveAspectRatio="none" 会把 SVG 圆拉成椭圆 */}
+            <div
+              className="pointer-events-none absolute bottom-0 top-0 w-px bg-cta/40"
+              style={{ left: `${hx}%` }}
+            />
+            <div
+              className="pointer-events-none absolute size-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-cta ring-2 ring-strip"
+              style={{ left: `${hx}%`, top: `${hy}%` }}
+            />
+            <div
+              className="pointer-events-none absolute top-0 z-10 whitespace-nowrap rounded-md border border-field px-2 py-1 text-micro text-l2 ccode-float-surface"
+              // 边缘钳制，tooltip 不出图区
+              style={{
+                left: `${Math.min(85, Math.max(15, hx))}%`,
+                transform: "translateX(-50%)",
+              }}
+            >
+              {hd.day} · 合计 {compact(hd.input + hd.output)} tokens（入{" "}
+              {compact(hd.input)} / 出 {compact(hd.output)}） ·{" "}
+              {fmtCost(hd.costUsd, currency, rate, hd.costPartial)}
+            </div>
+          </>
+        )}
+      </div>
+      {/* 日期轴：默认不显示，悬停才淡入；占位行保留高度避免布局跳动 */}
+      <div
+        className={`relative mt-1 h-4 text-micro text-l4 transition-opacity duration-150 ${
+          hover === null ? "opacity-0" : "opacity-100"
+        }`}
+      >
+        {labels.map((l) => (
+          <span
+            key={l.index}
+            // nowrap：「08-15」的连字符是 CSS 断行机会，右端标签会在那里换行被截断
+            className="absolute whitespace-nowrap"
+            style={{
+              left: `${(l.index / last) * 100}%`,
+              transform:
+                l.index === 0
+                  ? "none"
+                  : l.index === last
+                    ? "translateX(-100%)"
+                    : "translateX(-50%)",
+            }}
+          >
+            {l.label}
+          </span>
+        ))}
+      </div>
+      <div className="mt-1 flex justify-between text-micro text-l4">
+        <span>峰值 {peak.toLocaleString()} tokens/天</span>
+        <span>{pts.length} 天有用量</span>
+      </div>
+    </div>
+  );
+}
 
 export default function StatsPage({ visible }: { visible: boolean }) {
   const [range, setRange] = useState<Range>("week");
@@ -311,8 +438,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           </div>
 
           {/* 趋势（v3.88）：区间总数看不出「这周比上周多花多少」——这是统计页最核心的缺口。
-              手绘 SVG 折线，与现有手绘进度条同一手法，不引图表库（package.json 保持零图表依赖）。
-              数据本就按天存，后端聚合一层即得（UsageStatsDto.daily）。 */}
+              手绘 SVG 平滑折线，不引图表库（package.json 保持零图表依赖）；纯逻辑（平滑路径/
+              自适应日期轴）在 stats-trend.ts。日期轴与数值默认不显示，悬停图表才淡入。 */}
           {stats.daily.length > 1 && (
             <section className="mb-6">
               <h2 className="mb-2 text-xs font-medium text-l3">
@@ -321,49 +448,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                   {stats.daily[0].day} → {stats.daily[stats.daily.length - 1].day}
                 </span>
               </h2>
-              {(() => {
-                const pts = stats.daily;
-                const peak = Math.max(
-                  1,
-                  ...pts.map((d) => d.input + d.output),
-                );
-                const W = 720;
-                const H = 96;
-                // 单点时 x 除零：夹到 1
-                const stepX = W / Math.max(1, pts.length - 1);
-                const coords = pts.map((d, i) => {
-                  const v = d.input + d.output;
-                  return [i * stepX, H - (v / peak) * (H - 8)] as const;
-                });
-                const line = coords
-                  .map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`)
-                  .join(" ");
-                const area = `${line} L${W} ${H} L0 ${H} Z`;
-                return (
-                  <div className="rounded-lg bg-strip p-3">
-                    <svg
-                      viewBox={`0 0 ${W} ${H}`}
-                      preserveAspectRatio="none"
-                      className="h-24 w-full"
-                      role="img"
-                      aria-label={`每日 token 折线，峰值 ${peak.toLocaleString()}`}
-                    >
-                      <path d={area} className="fill-cta/10" />
-                      <path
-                        d={line}
-                        className="stroke-cta"
-                        strokeWidth={1.5}
-                        fill="none"
-                        vectorEffect="non-scaling-stroke"
-                      />
-                    </svg>
-                    <div className="mt-1 flex justify-between text-micro text-l4">
-                      <span>峰值 {peak.toLocaleString()} tokens/天</span>
-                      <span>{pts.length} 天有用量</span>
-                    </div>
-                  </div>
-                );
-              })()}
+              <DailyTrend pts={stats.daily} currency={currency} rate={rate} />
             </section>
           )}
 

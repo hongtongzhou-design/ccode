@@ -96,6 +96,9 @@ export interface GitSummary {
   del: number;
   isRepo: boolean;
   branch: string;
+  /** 领先/落后远程的提交数（状态条「⇧ 推送」按 ahead 决定是否出现） */
+  ahead: number;
+  behind: number;
   /** 任务工作区视图（提交时 paths 传 null 全量提交，与面板「保存到历史」同口径） */
   inWorkspace: boolean;
   files: GitFileDto[];
@@ -230,6 +233,8 @@ function GitPanel({
       del: d ? d.totalDel : (s?.totalDel ?? 0),
       isRepo: s?.isRepo ?? false,
       branch: s?.branch ?? "",
+      ahead: s?.ahead ?? 0,
+      behind: s?.behind ?? 0,
       inWorkspace: d !== null,
       files: d ? d.files : (s?.files ?? []),
     });
