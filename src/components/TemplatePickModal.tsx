@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { PIPELINE_TEMPLATES } from "../pipeline-presets";
-import type { AppendStepsResultDto } from "../types";
+import type { AppendStepsResultDto, ProjectConfigReadDto } from "../types";
 
 /**
  * 添加项目注册成功后的研究流程模板选择层（v3.79）：
@@ -40,6 +40,23 @@ export default function TemplatePickModal({
         projectRoot: projectPath,
         steps: tpl.steps,
       });
+      // 全局设定（v3.89）：贯穿全程的决定预填进项目层（空答案，用户在项目设置里补）。
+      // 已有设定则不覆盖——用户自己填过的优先
+      if (tpl.projectSettings?.length) {
+        try {
+          const read = await invoke<ProjectConfigReadDto>(
+            "read_project_config",
+            { path: projectPath },
+          );
+          if ((read.config.settings ?? []).length === 0)
+            await invoke("write_project_config", {
+              path: projectPath,
+              config: { ...read.config, settings: tpl.projectSettings },
+            });
+        } catch {
+          /* 预填失败不影响模板应用本身 */
+        }
+      }
       onApplied(res, tpl.name);
     } catch (reason) {
       setError(String(reason));
@@ -77,7 +94,7 @@ export default function TemplatePickModal({
           选择研究流程模板
         </h2>
         <p className="mb-4 text-xs text-l3">
-          「{projectName}」已注册。挑一套研究流程直接开始，也可以先空着。
+          「{projectName}」已添加。挑一套研究流程，也可以先空着。
         </p>
         <ul className="space-y-1.5">
           {PIPELINE_TEMPLATES.map((t) => (
@@ -113,7 +130,7 @@ export default function TemplatePickModal({
             title="项目保持空白，只作为目录与任务的分组管理（记住这个选择，不再显示模板引导）"
             className="rounded-sm px-3 py-1.5 text-sm text-l3 hover:bg-hover hover:text-l2 disabled:opacity-50"
           >
-            {busy === "__optout__" ? "保存中…" : "不使用研究流程"}
+            {busy === "__optout__" ? "保存中…" : "不用，别再提示"}
           </button>
           <button
             type="button"

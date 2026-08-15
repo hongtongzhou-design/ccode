@@ -4,15 +4,17 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
-import { PRESETS } from "../presets";
+import { PRESETS, NO_PRESET_REASON } from "../presets";
 import { upstreamNoteText, upstreamCommand } from "../upstream-note";
 import { copyTargets } from "../profile-copy";
+import { MODEL_SWITCH } from "../model-switch";
 import { interactiveUpdatePrefill } from "../update-routing";
 import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
 import {
   PageFrame,
+  NoticeBar,
   PageHeader,
   PageToolbar,
   SegTabs,
@@ -38,6 +40,7 @@ function ProfileModal({
   presetAgent,
   officialSupported,
   onClose,
+  onSaved,
 }: {
   initial: Profile | null;
   /** 从某个 agent 组的「+ 添加配置」打开时预选该 agent */
@@ -45,6 +48,8 @@ function ProfileModal({
   /** 各 agent 是否支持官方账号（来自 official_account_status） */
   officialSupported: Record<string, boolean>;
   onClose: () => void;
+  /** 保存成功回调：页面据此判断要不要提示「该 agent 有标签在跑，需重开才生效」 */
+  onSaved?: (agent: string, name: string) => void;
 }) {
   const saveProfile = useAppStore((s) => s.saveProfile);
   const [form, setForm] = useState({
@@ -152,6 +157,7 @@ function ProfileModal({
     };
     try {
       await saveProfile(initial?.id ?? null, input);
+      onSaved?.(input.agent, input.name);
       onClose();
     } catch (err) {
       setError(String(err));
@@ -174,6 +180,13 @@ function ProfileModal({
           {initial ? "编辑配置" : "新建配置"}
         </h2>
         <div className="mb-4 grid grid-cols-2 items-end gap-3">
+          {/* 没有预设的 agent（gemini/cursor）不给空下拉——空选择器看起来像功能坏了，
+              而这两家「本来就不该有预设」（原因见 presets.ts NO_PRESET_REASON） */}
+          {PRESETS.every((p) => p.agent !== form.agent) ? (
+            <p className="self-center text-micro leading-4 text-l4">
+              {NO_PRESET_REASON[form.agent] ?? "这个 agent 暂无内置端点预设，请手动填写 Base URL。"}
+            </p>
+          ) : (
           <select
             className={fieldClass}
             value=""
@@ -201,6 +214,7 @@ function ProfileModal({
               </option>
             ))}
           </select>
+          )}
           <label className="block text-sm">
             <span className="mb-1 block text-xs text-l3">Agent</span>
             <select
@@ -259,10 +273,7 @@ function ProfileModal({
           </label>
         )}
         {form.accountType === "official" && (
-          <p className="-mt-1 mb-3 text-xs text-l3">
-            官方账号配置启动时不注入端点与密钥，使用 CLI 自身的账号登录；模型可留空（用
-            CLI 默认模型）。请先在组内「官方账号」行完成连接。
-          </p>
+          <p className="-mt-1 mb-3 text-xs text-l3">用 CLI 自己的账号登录，不注入端点与密钥。请先在组内完成连接。</p>
         )}
         {form.accountType === "api" && (
           <>
@@ -375,6 +386,14 @@ function ProfileModal({
             <p className="mb-2 text-xs text-err-text">{fetchError}</p>
           )}
             </>
+          )}
+          {/* 空模型是个静默陷阱（pty.rs）：models 为空时**完全不注入**模型环境变量，
+              CLI 用自己的默认值——用户看到的现象就是「切了没反应」。API 类配置才提示，
+              官方账号本就由 CLI 自己决定模型 */}
+          {form.models.length === 0 && form.accountType !== "official" && (
+            <p className="mb-2 text-micro text-warn-text">
+              没填模型，会用 CLI 自己的默认值。
+            </p>
           )}
           {form.models.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
@@ -531,30 +550,6 @@ interface AgentUpdateInfo {
 
 /** 各 agent 在 TUI 模型切换页可用的模型数上限（注入模式；matrix 调研结论）。
  *  max = null 表示不限（选择器列出全部已配置模型） */
-const MODEL_SWITCH: Record<string, { max: number | null; hint: string }> = {
-  "claude-code": {
-    max: 5,
-    hint: "前 4 个占 SONNET/OPUS/HAIKU/FABLE 别名槽，第 5 个占自定义槽；超出的只能 /model <id> 手输",
-  },
-  codex: {
-    max: null,
-    hint: "启动时生成模型 catalog，/model 选择器列出全部已配置模型",
-  },
-  gemini: {
-    max: 1,
-    hint: "CLI 无多模型注入机制，多模型只能在 TUI 里 /model set 手动切换",
-  },
-  qwen: {
-    max: 1,
-    hint: "多模型需「⋯ → 设为全局」写入配置后才能在 /model 里切换",
-  },
-  opencode: { max: null, hint: "全部已配置模型都会注册，可在 TUI 自由切换" },
-  kimi: { max: 1, hint: "多模型需「⋯ → 设为全局」写入配置后才能在模型页切换" },
-  grok: {
-    max: 1,
-    hint: "多模型注入方式未实机验证；如需切换，在 TUI 内用 Grok Build 自带的模型切换命令",
-  },
-};
 
 /** 各 CLI 断开官方账号的方式（Ccode 不删 auth 文件，引导用 CLI 自己的 logout；
  *  命令按官方文档/CLI help 核实，见 agent_specs.rs 的 official_account 注释） */
@@ -1186,10 +1181,64 @@ export default function ProfilesPage() {
   });
   // 可见分组中存在展开项 → 按钮显示「全部折叠」，否则「全部展开」
   const anyExpanded = visibleAgents.some((a) => !collapsedGroups.has(a.id));
+  // 保存后的「要重启标签才生效」提示（仅当该 agent 确有标签在跑）
+  const [savedNote, setSavedNote] = useState<string | null>(null);
+  const settings = useAppStore((s) => s.settings);
+  const updateSettings = useAppStore((s) => s.updateSettings);
+
+  /** 「在终端使用」：新开标签并直接启动（与快速开聊共用 pendingTerminal 链路）。
+   *  目录取上次启动过的，没有就交给启动栏留空由用户填 */
+  function useTerminalWith(profile: Profile) {
+    let cwd = "";
+    try {
+      cwd =
+        (JSON.parse(localStorage.getItem("ccode.lastLaunch") ?? "{}") as {
+          cwd?: string;
+        }).cwd ?? "";
+    } catch {
+      /* 读不到就留空 */
+    }
+    setPendingTerminal({
+      cwd,
+      extraEnv: {},
+      agentId: profile.agent,
+      profileId: profile.id,
+      autoStart: !!cwd,
+    });
+    setPage("terminal");
+  }
+
+  /** 隐藏/取消隐藏（settings.hiddenProfiles 整表覆盖）：只影响启动栏下拉分组 */
+  async function toggleHiddenProfile(profile: Profile) {
+    const cur = new Set(settings?.hiddenProfiles ?? []);
+    if (cur.has(profile.id)) cur.delete(profile.id);
+    else cur.add(profile.id);
+    await updateSettings({ hiddenProfiles: [...cur] });
+  }
+
+  /** 设为该 agent 的默认配置（settings.defaultProfiles 整图覆盖；再点一次取消） */
+  async function toggleDefaultProfile(profile: Profile) {
+    const cur = { ...(settings?.defaultProfiles ?? {}) };
+    if (cur[profile.agent] === profile.id) delete cur[profile.agent];
+    else cur[profile.agent] = profile.id;
+    await updateSettings({ defaultProfiles: cur });
+  }
+  const liveSessions = useAppStore((s) => s.liveSessions);
+  const runningAgents = new Set(
+    Object.keys(liveSessions).map((k) => k.split("\n")[0]),
+  );
 
   return (
     <div className="min-h-full bg-canvas">
       <PageFrame>
+        {/* 注入模式的核心规则：配置只在**启动那一刻**注入子进程，改了对已在跑的标签无效。
+            这条以前只写在用户手册里，用户改完配置回终端发现没变化，界面上没有任何解释
+            （「有时候配置了无法切换模型」的第二个来源）。保存后有标签在跑才提示，平时不啰嗦。 */}
+        {savedNote && (
+          <NoticeBar tone="warn" onDismiss={() => setSavedNote(null)}>
+            {savedNote}
+          </NoticeBar>
+        )}
         {/* 命令栏：标题 + 元信息，右侧动作 */}
         <PageHeader
           title="配置中心"
@@ -1554,6 +1603,25 @@ export default function ProfilesPage() {
                                 title={profile.name}
                               >
                                 {profile.name}
+                                {(settings?.hiddenProfiles ?? []).includes(
+                                  profile.id,
+                                ) && (
+                                  <span
+                                    className="ml-1.5 rounded-sm bg-inset px-1 py-0.5 text-micro font-normal text-l4"
+                                    title="已隐藏：仍可用，只是在启动栏下拉里沉到「更多」"
+                                  >
+                                    已隐藏
+                                  </span>
+                                )}
+                                {settings?.defaultProfiles?.[profile.agent] ===
+                                  profile.id && (
+                                  <span
+                                    className="ml-1.5 rounded-sm bg-inset px-1 py-0.5 text-micro font-normal text-l3"
+                                    title="终端启动栏选这个 agent 时默认用它"
+                                  >
+                                    默认
+                                  </span>
+                                )}
                               </span>
                               {/* 次级行：micro 档灰字，相对时间主显、悬浮给绝对时间（白话双层）；从未使用不渲染 */}
                               {profile.lastUsedAt && (
@@ -1622,6 +1690,16 @@ export default function ProfilesPage() {
                             </span>
                             )}
                             <span className="flex items-center justify-end gap-1 whitespace-nowrap">
+                              {/* 「在终端使用」（v3.88）：配置页原本没有任何通往终端的路——
+                                  建完配置只能自己去终端页再选一遍。hover 才现（常驻位给「编辑」） */}
+                              <button
+                                type="button"
+                                onClick={() => useTerminalWith(profile)}
+                                title="用这个配置新开一个终端标签"
+                                className={`h-8 rounded-sm px-2 text-xs text-l2 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
+                              >
+                                ⌨ 在终端使用
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => setModal({ initial: profile })}
@@ -1708,6 +1786,13 @@ export default function ProfilesPage() {
             Object.entries(officialStatus).map(([k, v]) => [k, v.supported]),
           )}
           onClose={() => setModal(null)}
+          onSaved={(agent, name) => {
+            // 注入模式：改动只对**新启动**的标签生效，已在跑的要重开
+            if (runningAgents.has(agent))
+              setSavedNote(
+                `已保存「${name}」。这个 agent 有终端标签正在运行——配置是在启动那一刻注入的，改动要**重开标签**才生效。`,
+              );
+          }}
         />
       )}
       {topMenu && (
@@ -1727,6 +1812,28 @@ export default function ProfilesPage() {
           y={rowMenu.y}
           onClose={() => setRowMenu(null)}
           items={[
+            {
+              // 「停用」的准确形态：不动数据、不动行为，只让它别在启动栏下拉里挡路。
+              // 真正的「禁用」在注入模式下无意义——配置只在启动那一刻生效，
+              // 没被选中的配置本来就不产生任何作用
+              label: (settings?.hiddenProfiles ?? []).includes(rowMenu.profile.id)
+                ? "取消隐藏"
+                : "隐藏此配置",
+              title:
+                "仍可正常使用，只是在启动栏下拉里沉到「更多」",
+              onSelect: () => void toggleHiddenProfile(rowMenu.profile),
+            },
+            {
+              // 用户要的「启用」其实是这个：注入模式没有全局激活态，
+              // 能表达的是「这个 agent 默认用哪套」（启动栏据此预选）
+              label:
+                settings?.defaultProfiles?.[rowMenu.profile.agent] ===
+                rowMenu.profile.id
+                  ? "取消默认"
+                  : "设为该 agent 默认",
+              title: "终端启动栏选完这个 agent 后自动预选该配置",
+              onSelect: () => void toggleDefaultProfile(rowMenu.profile),
+            },
             ...(hasUsage(usageMap[rowMenu.profile.id])
               ? [
                   {

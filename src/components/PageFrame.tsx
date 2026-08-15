@@ -158,11 +158,13 @@ export function Toggle({
       aria-label={label}
       onClick={() => onChange(!checked)}
       className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors ${
-        checked ? "border-cta-bd bg-cta" : "border-field bg-inset"
+        checked ? "border-cta-bd bg-cta" : "border-field bg-switch-off"
       }`}
     >
+      {/* 滑块用专用令牌而非 bg-l1：l1 是「文字最亮档」，在浅色主题是近黑 #171a26，
+          直接当滑块会渲染成白底上的黑疙瘩（v3.85 修）。滑块永远是浅色，状态由轨道表达 */}
       <span
-        className={`absolute top-0.5 h-3.5 w-3.5 rounded-full bg-l1 transition-[left] ${
+        className={`absolute top-0.5 h-3.5 w-3.5 rounded-full bg-switch-knob transition-[left] ${
           checked ? "left-[18px]" : "left-0.5"
         }`}
       />
@@ -259,5 +261,31 @@ export function NoticeBar({
         </button>
       )}
     </div>
+  );
+}
+
+/** 步骤角色标记（v3.89）：ai = AI 干活你验收 / you = 要你出场 / both = 协作。
+ *  步骤名保留学术术语（文献检索与筛选…），角色单独标出来——
+ *  用户真正要知道的是「哪几步轮到我」，而不是这一步产出什么文件。 */
+export function RoleBadge({ role }: { role?: string }) {
+  const r = role === "you" || role === "both" ? role : "ai";
+  const meta = {
+    ai: { text: "AI 做", cls: "text-l4" },
+    you: { text: "你来", cls: "text-cta" },
+    both: { text: "一起", cls: "text-l3" },
+  }[r];
+  return (
+    <span
+      className={`shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-micro ${meta.cls}`}
+      title={
+        r === "you"
+          ? "这一步主要靠你，AI 打下手"
+          : r === "both"
+            ? "这一步你和 AI 一起定"
+            : "这一步 AI 干活，做完你验收"
+      }
+    >
+      {meta.text}
+    </span>
   );
 }

@@ -23,7 +23,14 @@ const PAGE_COMMANDS: {
  * ⌘K 命令面板（浮层，边框按浮层规则保留）：页面跳转 / 主题切换 / 侧栏显隐。
  * ↑↓ 移动、Enter 执行、Esc 或点遮罩关闭；执行后一律关闭。
  */
-export default function CommandPalette({ onClose }: { onClose: () => void }) {
+export default function CommandPalette({
+  onClose,
+  onQuickChat,
+}: {
+  onClose: () => void;
+  /** 「快速开聊」弹层由 App 承载（侧栏入口共用同一个宿主） */
+  onQuickChat: () => void;
+}) {
   const setPage = useAppStore((s) => s.setPage);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const chromeHidden = useAppStore((s) => s.chromeHidden);
@@ -35,6 +42,14 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
 
   const commands = useMemo<{ cmd: PaletteCommand; run: () => void }[]>(
     () => [
+      {
+        cmd: {
+          id: "quick-chat",
+          title: "＋ 快速开聊",
+          keywords: ["chat", "聊", "开聊", "随便聊", "quick", "新会话", "kuaisu"],
+        },
+        run: onQuickChat,
+      },
       ...PAGE_COMMANDS.map((p) => ({
         cmd: {
           id: `page:${p.id}`,
@@ -62,7 +77,7 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
         run: toggleChromeHidden,
       },
     ],
-    [setPage, updateSettings, chromeHidden, toggleChromeHidden],
+    [setPage, updateSettings, chromeHidden, toggleChromeHidden, onQuickChat],
   );
 
   const filtered = useMemo(

@@ -14,6 +14,7 @@ import {
   helpPreview,
   helpSignature,
   isHelpDismissed,
+  filterDismissed,
   type InboxCategory,
 } from "../inbox";
 import ContextMenu from "../components/ContextMenu";
@@ -93,7 +94,10 @@ function AddProjectModal({
   path: string;
   onClose: () => void;
   /** autoAdded = 注册时自动扫描并登记的资源条数（0 = 目录里没有 PDF/数据/引文） */
-  onRegistered: (project: ProjectDto, autoAdded: number) => void;
+  onRegistered: (
+    project: ProjectDto,
+    scan: { added: number; total: number },
+  ) => void;
 }) {
   const [name, setName] = useState(pathBaseName(path));
   const [topic, setTopic] = useState("");
@@ -115,6 +119,7 @@ function AddProjectModal({
       // 结果 TASK.md 的「项目资源」段空着，agent 看不到手边已有的文献。
       // 只记路径不复制（机制一），条目可在资源面板随时删。
       let autoAdded = 0;
+      let totalResources = 0;
       try {
         const read = await invoke<ProjectConfigReadDto>("read_project_config", {
           path,
@@ -141,6 +146,7 @@ function AddProjectModal({
           ],
         };
         autoAdded = Math.min(fresh.length, AUTO_MAX);
+        totalResources = next.resources.length;
         if (autoAdded > 0 || topicText) {
           await invoke("write_project_config", { path, config: next });
         }
@@ -151,7 +157,7 @@ function AddProjectModal({
         );
         return;
       }
-      onRegistered(project, autoAdded);
+      onRegistered(project, { added: autoAdded, total: totalResources });
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -187,8 +193,11 @@ function AddProjectModal({
           />
         </label>
         <label className="mb-4 block text-sm">
-          <span className="mb-1 block text-xs text-l3">
-            课题主题（可选，给 Agent 看——开工时写进 TASK.md）
+          <span
+            className="mb-1 block text-xs text-l3"
+            title="每次开工时写进 TASK.md，给 Agent 交代研究背景"
+          >
+            课题主题（可选）
           </span>
           <input
             className={fieldClass}
@@ -211,7 +220,7 @@ function AddProjectModal({
             disabled={busy || !name.trim()}
             className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
-            {busy ? "注册中…" : "注册"}
+            {busy ? "添加中…" : "添加"}
           </button>
         </div>
       </form>
@@ -767,9 +776,8 @@ function PortsSection() {
 
   return (
     <section className="mt-7">
-      <div
-        className={`flex h-8 items-center ${open ? "border-b border-hairline" : ""}`}
-      >
+      {/* 折叠区标题不画横线（区间分隔优先留白，去线条化 v3.85） */}
+      <div className="flex h-8 items-center">
         <button
           type="button"
           onClick={toggle}
@@ -885,17 +893,25 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [freshProjectPath, setFreshProjectPath] = useState<string | null>(null);
   /** 注册时自动扫到的资源条数：注册后立刻弹模板选择层会盖住页面顶部的 notice，
    *  所以先存着，等模板层关掉（选了/跳过/不用流程都算）再连同结果一起报 */
-  const [justScanned, setJustScanned] = useState<number | null>(null);
+  const [justScanned, setJustScanned] = useState<{
+    added: number;
+    total: number;
+  } | null>(null);
 
   /** 注册时的扫描结果拼成一句话，接在模板层关闭后的提示里（消费一次即清）。
    *  0 条也要说——用户得知道「扫过了、确实没有」，而不是以为系统什么都没做 */
   function scanSuffix(): string {
-    const n = justScanned;
-    if (n === null) return "";
+    const v = justScanned;
+    if (v === null) return "";
     setJustScanned(null);
-    return n > 0
-      ? `；已自动扫描并登记 ${n} 个文献/数据文件（开工时进 TASK.md，可在「文献与数据」增删）`
-      : "；项目目录里没扫到 PDF / 数据 / 引文，可在「文献与数据」从 Zotero 或检索结果导入";
+    // total = 该项目当前登记的资源总数，added = 本次新登记的。
+    // 只看 added 会在「重复添加已有项目」时报「没扫到」，而资源面板明明有一堆——
+    // 与项目内的「已自动扫描：N」自相矛盾（v3.88 修）
+    if (v.total > 0)
+      return v.added > 0
+        ? `；扫到并登记了 ${v.added} 个文献/数据文件`
+        : `；已有 ${v.total} 个文献/数据文件`;
+    return "；没扫到 PDF / 数据 / 引文，可在「文献与数据」导入";
   }
 
   const [workspaceMenu, setWorkspaceMenu] = useState<{
@@ -1212,6 +1228,14 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   ];
   const selectedGroup =
     groups.find((group) => group.key === selectedGroupKey) ?? groups[0] ?? null;
+  // 顶栏上下文镜像（v3.88）：本页是唯一写入方，顶栏跨页只读消费，不新增任何请求
+  const setContextLabel = useAppStore((s) => s.setContextLabel);
+  const contextProject = selectedGroup
+    ? (selectedGroup.project?.name ?? pathBaseName(selectedGroup.repoPath))
+    : null;
+  useEffect(() => {
+    setContextLabel(contextProject ? { project: contextProject, step: null } : null);
+  }, [contextProject, setContextLabel]);
   const groupKeySignature = groups.map((group) => group.key).join("\n");
   useEffect(() => {
     if (groups.length === 0) {
@@ -1402,7 +1426,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const inboxLen = inboxItems.length;
   const inboxSig = inboxItems.map((it) => `${it.key}=${it.text}`).join("|");
   useEffect(() => {
-    setInboxItems(inboxItems);
+    setInboxItems(filterDismissed(inboxItems, useAppStore.getState().inboxDismissed));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inboxSig, setInboxItems]);
 
@@ -1632,7 +1656,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       {
         label: "重命名项目",
         disabled: !group.project,
-        title: group.project ? undefined : "未注册项目无法重命名",
+        title: group.project ? undefined : "这个文件夹还没添加到 Ccode",
         onSelect: () =>
           group.project &&
           setRenameTarget({ path: group.repoPath, name: group.project.name }),
@@ -1646,9 +1670,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         },
       },
       {
-        label: "移除项目注册",
+        label: "从 Ccode 移除",
         disabled: !group.project,
-        title: group.project ? undefined : "未注册项目无法移除",
+        title: group.project ? undefined : "这个文件夹还没添加到 Ccode",
         onSelect: () => group.project && void removeRegistration(group),
       },
       {
@@ -1894,8 +1918,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           selectedGroup
             ? `${selectedGroup.project?.name ?? selectedGroup.repoName} · ${selectedGroup.list.length} 个任务`
             : groups.length === 0
-              ? // 空状态：三个 0 没有信息量，只留一句说明这页是干嘛的
-                "把项目文件夹交给 AI 干活，你只管拍板"
+              ? // 空态：下方空状态区已经把「这页干嘛的」说清楚了，页头再说一遍是重复
+                ""
               : `${active.length} 个活跃 · ${projects.length} 个项目 · ${repoCount} 个仓库`
         }
         actions={
@@ -1959,16 +1983,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       {groups.length === 0 ? (
         <EmptyState
           title="从一个项目文件夹开始"
-          detail={
-            <>
-              选一个放着你文献、数据的文件夹，Ccode 会按研究流程排出步骤（读文献 →
-              整数据 → 做图 → 写论文），每一步交给 AI 去跑，跑完你验收了才算数。
-              <br />
-              <span className="text-l4">
-                不确定它怎么用？先创建一个示例课题，带演示数据和完整流程，随时可删。
-              </span>
-            </>
-          }
+          detail="选一个放着文献、数据的文件夹，Ccode 排出步骤交给 AI 跑，你验收。"
           action={
             <div className="flex items-center justify-center gap-2">
               <button
@@ -1982,9 +1997,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                 type="button"
                 disabled={demoBusy}
                 onClick={() => void onCreateDemo()}
+                title="带演示数据和完整研究流程，随时可以删"
                 className={secondaryActionClass}
               >
-                {demoBusy ? "正在创建…" : "✦ 创建示例课题（演示）"}
+                {demoBusy ? "正在创建…" : "✦ 创建示例课题"}
               </button>
             </div>
           }
@@ -2050,7 +2066,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   : "该步骤还没有工作区，点流程线里的「开始」一键开步，或点右侧「新建工作区」。"}
               </p>
             ) : (
-            <ul className="divide-y divide-hairline">
+            /* 工作区列表改卡片（去线条化，v3.85）：原 divide-y 细行叠成一串横线，
+               是「界面很线条化」的主要来源之一。改为 strip 底色的独立卡 + 卡间留白，
+               靠底色差成块、不靠分隔线；对象少时保留连续画布不铺满 */
+            <ul className="mt-2 flex flex-col gap-2">
               {wsList.map((workspace) => {
                 const workspaceHealth = health[workspace.id];
                 const workspaceDrift = drift[workspace.id];
@@ -2073,7 +2092,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                     canResolveConflict ||
                     isDriftFailed);
                 return (
-                  <li key={workspace.id} className="group py-3">
+                  <li key={workspace.id} className="group rounded-lg bg-strip p-3">
                     <div className="flex min-w-0 items-center gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">
@@ -2099,7 +2118,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                                 ws: workspace,
                               });
                             }}
-                            className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-md bg-inset px-2 text-xs ${state.textClass} hover:bg-seg-sel`}
+                            className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-md bg-raised px-2 text-xs ${state.textClass} hover:bg-seg-sel`}
                             title={
                               isDriftFailed || isHealthFailed
                                 ? "状态诊断失败，点开查看详情并重试"
@@ -2229,10 +2248,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         <AddProjectModal
           path={addProjectPath}
           onClose={() => setAddProjectPath(null)}
-          onRegistered={(project, autoAdded) => {
+          onRegistered={(project, scan) => {
             setAddProjectPath(null);
             setFreshProjectPath(project.path);
-            setJustScanned(autoAdded);
+            setJustScanned(scan);
             setSelectedGroupKey(`p:${project.path}`);
             // 注册成功后接研究流程模板选择层（选模板 = append_pipeline_steps 追加步骤）
             setTemplatePick({ path: project.path, name: project.name });
@@ -2257,10 +2276,14 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           }}
           onApplied={(result, templateName) => {
             setTemplatePick(null);
+            // 全部同名跳过 = 项目本来就有这套流程（多为重复添加已有项目），
+            // 报「追加 0 个步骤；跳过 5 步（同名）」既像出错又没信息量
             const base =
-              result.skipped.length > 0
-                ? `已按模板「${templateName}」追加 ${result.appended} 个研究步骤；跳过 ${result.skipped.length} 步（同名）：${result.skipped.join("、")}`
-                : `已按模板「${templateName}」追加 ${result.appended} 个研究步骤`;
+              result.appended === 0
+                ? `项目已有「${templateName}」的全部步骤，没有重复添加`
+                : result.skipped.length > 0
+                  ? `已添加 ${result.appended} 个步骤；${result.skipped.length} 个同名的跳过了`
+                  : `已按「${templateName}」添加 ${result.appended} 个研究步骤`;
             setNotice(`${base}${scanSuffix()}`);
             void refresh();
           }}

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Checkbox, EmptyState } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
+import StepSkillsChips from "./StepSkillsChips";
 import { PIPELINE_TEMPLATES, RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import type {
   AppendStepsResultDto,
@@ -11,6 +12,7 @@ import type {
   ProjectConfigReadDto,
   ProjectStepDto,
   ProjectStepRunDto,
+  SkillDto,
 } from "../types";
 
 const actionBtn =
@@ -48,6 +50,8 @@ type StepDraft = {
   discussionSeeds: string[];
   /** 决策项编辑态：options 用逗号分隔的文本（同 artifactsText 口径） */
   decisions: { q: string; optionsText: string }[];
+  /** 这一步要先拍板文献从哪来（流程线「定方向」出现输入准备块） */
+  asksLitSource: boolean;
 };
 
 function toDraft(s: ProjectStepDto): StepDraft {
@@ -65,6 +69,7 @@ function toDraft(s: ProjectStepDto): StepDraft {
       q: d.q,
       optionsText: d.options.join(", "),
     })),
+    asksLitSource: s.asksLitSource ?? false,
   };
 }
 
@@ -93,6 +98,9 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
         guidance: t.guidance.trim(),
         target: t.target.trim(),
         timing: t.timing,
+        // optional 必须透传：内置模板用它标「不做也能跑」的事项，漏掉会让编辑器一保存
+        // 就把这些事项静默升级为必办（v3.85 修）
+        optional: t.optional ?? false,
       })),
     discussionSeeds: d.discussionSeeds.map((x) => x.trim()).filter(Boolean),
     // 与后端解析同一口径：问题与选项都非空才留（没有选项的题该写成讨论种子）
@@ -105,6 +113,7 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
           .filter(Boolean),
       }))
       .filter((x) => x.q && x.options.length > 0),
+    asksLitSource: d.asksLitSource,
   };
 }
 
@@ -152,6 +161,30 @@ export default function PipelineEditor({
   );
   const [userTemplates, setUserTemplates] = useState<PipelineTemplateDto[]>([]);
   const resources = config.resources;
+  // 技能库（推荐技能 chip 的展示元数据与「＋ 添加技能」候选）：挂载时读一次，失败降级为不可编辑 chip
+  const [skillLib, setSkillLib] = useState<SkillDto[] | null>(null);
+  const skillMeta = useMemo(
+    () =>
+      skillLib
+        ? Object.fromEntries(skillLib.map((s) => [s.name, s.description]))
+        : undefined,
+    [skillLib],
+  );
+  // 折叠区展开态：键为 `${卡片序号}:${区块}`，一律默认收起，这里只记用户的显式覆盖。
+  // 序号在排序/删除后会错位，但折叠态是纯瞬时视图状态，不影响数据。
+  const [folds, setFolds] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    let stale = false;
+    invoke<SkillDto[]>("list_skills")
+      .then((lib) => {
+        if (!stale) setSkillLib(lib);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, []);
 
   // 展开模板列表时拉一次用户另存模板；后端未就绪（旧版本）降级为仅内置模板
   useEffect(() => {
@@ -275,6 +308,56 @@ export default function PipelineEditor({
     }
   }
 
+  /**
+   * 步骤卡的折叠区（v3.85 字段分档）：常驻只留「步骤名 / 简报 / 预期产物 / 推荐技能」——
+   * 这四项决定 TASK.md 的全部内容，是步骤的合同本体；其余按「人机分工」与「高级」两档收起。
+   * 字段一个没删（模板要用、向后兼容），只是默认不占视线：一屏从放不下一张卡变成放得下三张。
+   *
+   * **一律默认收起**：曾按「已填就展开」处理，结果模板步骤个个都填了 workspace_name 与
+   * human_tasks，两档在每张卡上全是展开的，等于没折叠。workspace_name 是保存时自动派生的
+   * 机械字段、human_tasks 是模板带的内容，都不算「用户自己配过的东西」；
+   * 标题上的明细计数已经足够告诉人里面有什么，不需要靠默认展开来保证可发现性。
+   */
+  function fold(
+    index: number,
+    id: string,
+    title: string,
+    parts: { label: string; n: number }[],
+    note: string,
+    body: ReactNode,
+  ) {
+    const key = `${index}:${id}`;
+    const filled = parts.filter((p) => p.n > 0);
+    const open = folds[key] ?? false;
+    return (
+      <div className="mb-2">
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setFolds((m) => ({ ...m, [key]: !open }))}
+          className="flex w-full items-center gap-1.5 rounded-sm py-1 text-left text-xs text-l3 hover:text-l1"
+        >
+          <span className="w-3 text-l4">{open ? "▾" : "▸"}</span>
+          {title}
+          <span className="min-w-0 truncate text-micro text-l4">
+            {filled.length
+              ? filled
+                  .map((p) => (p.n > 1 ? `${p.label} ${p.n}` : p.label))
+                  .join(" · ")
+              : "未设置"}
+          </span>
+        </button>
+        {open && (
+          <div className="pl-4">
+            {/* 「这些改了会不会显示在流程里」是编辑时最常问的一句，直接写在区首 */}
+            <p className="mb-1.5 text-micro leading-4 text-l4">{note}</p>
+            {body}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   function renderCard(d: StepDraft, i: number) {
     // 绑定里引用了已移除资源的失效条目：保留展示并可勾选移除，不静默丢弃
     const stale = d.resources.filter(
@@ -294,13 +377,16 @@ export default function PipelineEditor({
             onChange={(e) => patch(i, { name: e.target.value })}
             placeholder="步骤名，如 文献综述"
           />
-          <input
-            className={`${field} w-44 shrink-0 font-mono text-xs`}
-            value={d.workspaceName}
-            onChange={(e) => patch(i, { workspaceName: e.target.value })}
-            placeholder={sanitizeWsName(d.name) || `step-${i + 1}`}
-            title="绑定工作区名（英文）；留空保存时按步骤名自动派生"
-          />
+          {/* 工作区名移进「高级」：99% 的步骤用派生值，不该常年占一格。
+              这里只回显最终会用的名字，不展开也能确认 */}
+          <span
+            className="shrink-0 truncate font-mono text-micro text-l4"
+            title="绑定的工作区名（在「高级」里可改）"
+          >
+            {d.workspaceName.trim() ||
+              sanitizeWsName(d.name) ||
+              `step-${i + 1}`}
+          </span>
           <div className="flex shrink-0 items-center">
             <button
               type="button"
@@ -360,6 +446,32 @@ export default function PipelineEditor({
           />
         </label>
 
+        {/* 推荐技能：常驻第 4 项。与另外三项一起构成 TASK.md 的全部内容，是「合同」本体。
+            这里改的是草稿，随整份 steps 一起保存（不走 update_step_skills 的单步写回）。 */}
+        <div className="mb-2">
+          <StepSkillsChips
+            skills={d.skills}
+            skillMeta={skillMeta}
+            available={skillLib?.map((s) => s.name)}
+            mcpRecommended={skillLib
+              ?.filter((s) => s.mentionsMcp)
+              .map((s) => s.name)}
+            skillLib={skillLib}
+            onChange={(next) => patch(i, { skills: next })}
+          />
+        </div>
+
+        {fold(
+          i,
+          "human",
+          "人机分工",
+          [
+            { label: "人工事项", n: d.humanTasks.length },
+            { label: "决策项", n: d.decisions.length },
+            { label: "讨论种子", n: d.discussionSeeds.length },
+          ],
+          "这三项都会显示在流程线上。",
+          <>
         <div className="mb-2">
           <span className="mb-1 block text-xs text-l3">
             人工事项（人必须参与的事项清单；标题空白行保存时丢弃）
@@ -415,15 +527,34 @@ export default function PipelineEditor({
                   删除
                 </button>
               </div>
-              <textarea
-                className={`${field} w-full text-xs`}
-                rows={1}
-                value={t.guidance}
-                onChange={(e) =>
-                  patchHumanTask(i, ti, { guidance: e.target.value })
-                }
-                placeholder="引导说明（可选）：渠道选项等，只告知不推荐"
-              />
+              <div className="flex items-center gap-2">
+                <textarea
+                  className={`${field} min-w-0 flex-1 text-xs`}
+                  rows={1}
+                  value={t.guidance}
+                  onChange={(e) =>
+                    patchHumanTask(i, ti, { guidance: e.target.value })
+                  }
+                  placeholder="引导说明（可选）：渠道选项等，只告知不推荐"
+                />
+                {/* 「可选」以前只能由模板写、界面上没有开关，编辑器一保存还会把它抹掉（v3.85 补） */}
+                <span className="shrink-0">
+                  <Checkbox
+                    checked={t.optional ?? false}
+                    onChange={(checked) =>
+                      patchHumanTask(i, ti, { optional: checked })
+                    }
+                    label={
+                      <span
+                        className="text-micro text-l3"
+                        title="可选事项：不做也不影响这一步跑完，流程线上标「可选」且不计入待办数"
+                      >
+                        可选
+                      </span>
+                    }
+                  />
+                </span>
+              </div>
             </div>
           ))}
           <button
@@ -433,7 +564,13 @@ export default function PipelineEditor({
               patch(i, {
                 humanTasks: [
                   ...d.humanTasks,
-                  { title: "", guidance: "", target: "", timing: "before" },
+                  {
+                    title: "",
+                    guidance: "",
+                    target: "",
+                    timing: "before",
+                    optional: false,
+                  },
                 ],
               })
             }
@@ -543,6 +680,57 @@ export default function PipelineEditor({
             + 添加讨论种子
           </button>
         </div>
+          </>,
+        )}
+
+        {fold(
+          i,
+          "adv",
+          "高级",
+          [
+            // 只把「和派生值不同」算作自定义——模板步骤的 workspace_name 恒等于派生值，
+            // 一律算已填会让这一档在每张卡上都显示有内容
+            {
+              label: "自定义工作区名",
+              n:
+                d.workspaceName.trim() &&
+                d.workspaceName.trim() !== sanitizeWsName(d.name)
+                  ? 1
+                  : 0,
+            },
+            { label: "run 脚本", n: d.run.length },
+            { label: "资源绑定", n: d.resources.length },
+            { label: "先问文献来源", n: d.asksLitSource ? 1 : 0 },
+          ],
+          "这些不显示在流程线上，幕后生效。",
+          <>
+        <div className="mb-2">
+          <Checkbox
+            checked={d.asksLitSource}
+            onChange={(checked) => patch(i, { asksLitSource: checked })}
+            label={
+              <span
+                className="text-xs text-l2"
+                title="流程线「定方向」里会出现文献来源选择与导入入口；答案写进项目配置，与只写草稿的决策项不是一类"
+              >
+                这一步先问「文献从哪来」
+              </span>
+            }
+          />
+        </div>
+
+        <label className="mb-2 block">
+          <span className="mb-1 block text-xs text-l3">
+            工作区名（英文；留空按步骤名自动派生）
+          </span>
+          <input
+            className={`${field} w-full font-mono text-xs`}
+            value={d.workspaceName}
+            onChange={(e) => patch(i, { workspaceName: e.target.value })}
+            placeholder={sanitizeWsName(d.name) || `step-${i + 1}`}
+            title="绑定工作区名（英文）；留空保存时按步骤名自动派生"
+          />
+        </label>
 
         <div className="mb-2">
           <span className="mb-1 block text-xs text-l3">
@@ -662,6 +850,8 @@ export default function PipelineEditor({
             </ul>
           )}
         </div>
+          </>,
+        )}
       </div>
     );
   }
@@ -713,7 +903,7 @@ export default function PipelineEditor({
           {drafts.length === 0 && (
             <EmptyState
               title="还没有研究步骤"
-              detail="点击下方「+ 添加步骤」逐张卡片填写（名称、简报、预期产物与资源绑定），保存后写入 .ccode/project.toml。"
+              detail="点下方「+ 添加步骤」逐张填写，保存即写入项目。"
             />
           )}
           {drafts.map(renderCard)}
@@ -735,6 +925,7 @@ export default function PipelineEditor({
                     humanTasks: [],
                     discussionSeeds: [],
                     decisions: [],
+                    asksLitSource: false,
                   },
                 ])
               }

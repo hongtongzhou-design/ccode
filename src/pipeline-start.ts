@@ -34,6 +34,11 @@ export function renderTaskMd(
   if (topic) {
     lines.push("## 课题主题", topic, "");
   }
+  // 全局设定：贯穿全程的决定，每一步的 TASK.md 都要带上（这正是它挂项目层的意义）
+  const globals = (cfg.settings ?? []).map((x) => x.trim()).filter(Boolean);
+  if (globals.length > 0) {
+    lines.push("## 全局设定", ...globals.map((x) => `- ${x}`), "");
+  }
   // 文献来源：用户已有文献库时，检索这一步的性质变了——不是「去检索」而是「盘点 + 查漏」。
   // 放在简报之前，让 agent 先知道前提再读步骤简报（模板简报本身不必为此写两套）
   const litSource = cfg.litSource?.trim();

@@ -109,10 +109,7 @@ function CreateScheduleModal({
         className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">定时巡检</h2>
-        <p className="mb-3 text-xs text-l3">
-          按周期在项目目录里无头跑一次所选技能；默认文献监控（lit-watch），新文献追加到
-          notes/inbox.md。
-        </p>
+        <p className="mb-3 text-xs text-l3">按周期自动跑一次所选技能，结果追加到 notes/inbox.md。</p>
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">技能</span>
           <select
@@ -369,15 +366,12 @@ export default function ScheduleSection({
         <div className="mt-1 rounded-md bg-strip p-2">
           {error && <p className="py-1 text-xs text-err-text">{error}</p>}
           {schedules !== null && schedules.length === 0 && (
-            <p className="text-xs text-l4">
-              无定时任务。点「＋ 定时巡检」让 Agent
-              按周期自动巡检文献，命中追加到 notes/inbox.md。
-            </p>
+            <p className="text-xs text-l4">还没有定时任务。点「＋ 定时巡检」建一个。</p>
           )}
           {schedules !== null && schedules.length > 0 && (
-            <ul className="divide-y divide-hairline">
+            <ul className="space-y-0.5">
               {schedules.map((s) => (
-                <li key={s.id} className="group py-1.5">
+                <li key={s.id} className="group rounded-sm py-1.5">
                   <div className="flex min-w-0 items-center gap-2">
                     <Toggle
                       checked={s.enabled}

@@ -60,7 +60,7 @@ pub struct HumanTaskDto {
     pub target: String,
     /// 时机：before（开工前）| during（并行）| after（收尾）；非法值解析期归一为 during
     pub timing: String,
-    /// 可选事项：不做也不影响这一步跑完（如「补充你已知的关键文献」——agent 照样会检索）。
+    /// 可选事项：不做也不影响这一步跑完（如「下载付费墙文献全文」——拿不到全文时 agent 按摘要写）。
     /// 流程线标「可选」并从「N 件待做」里排除，免得摆出一个永远做不完的必办项。
     /// 缺省 false = 必办（旧档案卡与旧模板照原样按必办处理）
     pub optional: bool,
@@ -98,6 +98,15 @@ pub struct StepDto {
     pub discussion_seeds: Vec<String>,
     /// 决策项（可枚举的拍板点，点选即答）：见 DecisionDto
     pub decisions: Vec<DecisionDto>,
+    /// 这一步主要由谁出场：ai（AI 干活，你验收）| you（要你出场）| both（协作）。
+    /// 缺省 ai。只影响界面上的角色标记与「轮到谁」提示，不参与任何流程判定
+    /// （科研语义进模板不进引擎：引擎不认识「检索」「写作」，只认识这个中性字段）。
+    pub role: String,
+    /// 「这一步要先拍板文献从哪来」（模板声明，引擎只做透传）。
+    /// true = 该步骤的「定方向」节点里出现文献来源选择器 + 就地导入入口，答案写 config.lit_source。
+    /// 语义进模板不进引擎：哪一步该问由模板说了算，引擎不去猜（曾评估过按 skills 含 lit-search
+    /// 推断，属隐式魔法，用户删个技能就没了，否决）。
+    pub asks_lit_source: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -105,6 +114,10 @@ pub struct StepDto {
 pub struct ProjectConfigDto {
     // 课题主题：一键开步写进 TASK.md「课题主题」段；可省
     pub topic: Option<String>,
+    /// 全局设定（v3.89）：贯穿全程的决定——如综述角度、目标篇幅、读者与文风、投稿去向。
+    /// 它们决定后面每一步，摆在某个步骤的决策项里属层级错配（用户实测反馈）。
+    /// 每条一行「问题：答案」，随 TASK.md 下发给每一步。引擎不认识内容，只做透传。
+    pub settings: Vec<String>,
     pub artifact_dir: String,
     pub resources: Vec<ResourceDto>,
     pub steps: Vec<StepDto>,
@@ -124,6 +137,7 @@ impl Default for ProjectConfigDto {
     fn default() -> Self {
         Self {
             topic: None,
+            settings: Vec::new(),
             artifact_dir: DEFAULT_ARTIFACT_DIR.into(),
             resources: Vec::new(),
             steps: Vec::new(),
@@ -545,6 +559,10 @@ struct TomlStep {
     discussion_seeds: Vec<String>,
     #[serde(default)]
     decisions: Vec<TomlDecision>,
+    #[serde(default)]
+    asks_lit_source: bool,
+    #[serde(default)]
+    role: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -594,6 +612,19 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
             }
         }
         Some(_) => warnings.push("topic 不是有效字符串，已忽略".to_string()),
+    }
+    // 全局设定：字符串数组，逐项去空白丢空（防御式，同 discussion_seeds 口径）
+    match value.get("settings") {
+        None => {}
+        Some(toml::Value::Array(arr)) => {
+            config.settings = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect();
+        }
+        Some(_) => warnings.push("settings 不是字符串数组，已忽略".to_string()),
     }
     match value.get("artifact_dir") {
         None => {}
@@ -730,6 +761,12 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                             })
                             .filter(|d| !d.q.is_empty() && !d.options.is_empty())
                             .collect(),
+                        asks_lit_source: s.asks_lit_source,
+                        role: match s.role.trim() {
+                            "you" => "you".to_string(),
+                            "both" => "both".to_string(),
+                            _ => "ai".to_string(),
+                        },
                     });
                 }
                 Err(e) => warnings.push(format!("steps[{i}] 字段无效，已跳过: {e}")),
@@ -839,6 +876,22 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
         _ => {
             doc.remove("topic");
         }
+    }
+    // 全局设定：同 topic 口径，空则清除
+    let settings: Vec<&str> = config
+        .settings
+        .iter()
+        .map(|x| x.trim())
+        .filter(|x| !x.is_empty())
+        .collect();
+    if settings.is_empty() {
+        doc.remove("settings");
+    } else {
+        let mut arr = toml_edit::Array::new();
+        for x in &settings {
+            arr.push(*x);
+        }
+        doc["settings"] = value(arr);
     }
     let artifact_dir = if config.artifact_dir.trim().is_empty() {
         DEFAULT_ARTIFACT_DIR
@@ -968,6 +1021,13 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                     ds.push(dt);
                 }
                 t["decisions"] = Item::ArrayOfTables(ds);
+            }
+            // 缺省 false 时不写这一行（同 pipeline_opt_out 的清除口径，档案卡保持简洁）
+            if s.asks_lit_source {
+                t["asks_lit_source"] = value(true);
+            }
+            if s.role != "ai" && !s.role.is_empty() {
+                t["role"] = value(s.role.as_str());
             }
             arr.push(t);
         }
@@ -2042,6 +2102,8 @@ fn demo_project_config() -> ProjectConfigDto {
         human_tasks: Vec::new(),
         discussion_seeds: Vec::new(),
         decisions: Vec::new(),
+        asks_lit_source: false,
+        role: "ai".into(),
     };
     let mut steps = vec![
             step(
@@ -2117,14 +2179,6 @@ fn demo_project_config() -> ProjectConfigDto {
             timing: "after".into(),
             optional: false,
         },
-        HumanTaskDto {
-            title: "补充你已知的关键文献".into(),
-            guidance: "你自己读过、认为必须纳入的文献——检索引擎未必覆盖；导出 .bib 或直接放 PDF 均可"
-                .into(),
-            target: "papers/".into(),
-            timing: "before".into(),
-            optional: false,
-        },
     ];
     // 讨论种子演示：开工前建议想清楚的问题，点击即聊（卡片以问题为名自动建立）
     steps[0].discussion_seeds = vec![
@@ -2132,8 +2186,11 @@ fn demo_project_config() -> ProjectConfigDto {
         "纳入排除标准定多严：只要 RCT 还是观察性研究也要？".into(),
         "检索哪几个数据库：结合你自己的机构权限".into(),
     ];
+    // 第一步的输入是文献，开工前先拍板从哪来（流程线「定方向」出现输入准备块）
+    steps[0].asks_lit_source = true;
     ProjectConfigDto {
         topic: Some("GLP-1 受体激动剂的心血管结局（演示课题）".into()),
+        settings: Vec::new(),
         artifact_dir: DEFAULT_ARTIFACT_DIR.into(),
         resources: vec![
             ResourceDto {
@@ -2534,6 +2591,26 @@ pub async fn delete_pipeline_template(id: String) -> Result<(), String> {
     .map_err(|e| format!("删除研究流程模板失败: {e}"))?
 }
 
+/// 「快速开聊」的落脚目录 `~/ccode/scratch`（不存在则创建）。
+///
+/// 刻意**不**做的事：不 git init、不写 `.ccode`、不登记项目——快速开聊就是「先聊聊」，
+/// 不该在磁盘上留下项目结构。改动面板对这个目录如实显示「不是 git 仓库」即为预期。
+/// 想转正时由用户显式走 `register_project`（终端标签 ⋯「转为项目…」）。
+#[tauri::command]
+pub async fn ensure_scratch_dir() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = dirs::home_dir()
+            .ok_or("无法确定用户主目录")?
+            .join("ccode")
+            .join("scratch");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("创建 {} 失败: {e}", dir.display()))?;
+        Ok(dir.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("准备快速开聊目录失败: {e}"))?
+}
+
 // ===== 从模板追加步骤（模板接壤拼接：相邻段模板追加进同一项目续走） =====
 // 与「使用模板 = 整体替换 steps」不同：把模板步骤追加到 [[steps]] 末尾，
 // 步骤链/提货单/资源机制对新步骤天然生效。重名（name 或非空 workspace_name）
@@ -2646,6 +2723,7 @@ mod tests {
     fn sample_config() -> ProjectConfigDto {
         ProjectConfigDto {
             topic: None,
+            settings: Vec::new(),
             artifact_dir: "outputs".into(),
             resources: vec![
                 ResourceDto {
@@ -2673,6 +2751,8 @@ mod tests {
                 human_tasks: Vec::new(),
                 discussion_seeds: Vec::new(),
                 decisions: Vec::new(),
+                asks_lit_source: false,
+            role: "ai".into(),
                 run: vec![
                     StepRunDto {
                         name: "dev".into(),
@@ -2793,6 +2873,7 @@ type = "paper"
 "#;
         let config = ProjectConfigDto {
             topic: None,
+            settings: Vec::new(),
             artifact_dir: "new-out".into(),
             resources: vec![ResourceDto {
                 name: "新资源".into(),
@@ -3432,6 +3513,8 @@ resources = ["ghost.pdf"]
                 human_tasks: Vec::new(),
                 discussion_seeds: Vec::new(),
                 decisions: Vec::new(),
+                asks_lit_source: false,
+            role: "ai".into(),
                 run: vec![StepRunDto {
                     name: "dev".into(),
                     command: "echo hi".into(),
@@ -3744,9 +3827,11 @@ resources = ["ghost.pdf"]
             assert!(draft_text.contains(marker), "示范草稿缺内容: {marker}");
         }
         // 演示人工事项：第一步声明了「下载付费墙文献全文」（落点通配 papers/*.pdf）
-        assert_eq!(config.steps[0].human_tasks.len(), 2);
+        // v3.87：「补充你已知的关键文献」删除（与流程线「输入准备」重合，且 papers/ 落点
+        // 对 Zotero 路径永不成立）——示例课题只剩「下载付费墙文献全文」这一条真人工事项
+        assert_eq!(config.steps[0].human_tasks.len(), 1);
         assert_eq!(config.steps[0].human_tasks[0].timing, "after");
-        assert_eq!(config.steps[0].human_tasks[1].timing, "before");
+        assert_eq!(config.steps[0].human_tasks[0].title, "下载付费墙文献全文");
 
         // 幂等：二次调用返回同一项目，且不覆盖用户改过的内容
         write(&root.join("README.md"), "user edit");
@@ -4074,6 +4159,36 @@ resources = ["ghost.pdf"]
         assert!(raw.contains("[[steps.decisions]]"), "{raw}");
         assert!(w2.is_empty(), "{w2:?}");
         assert!(warnings.is_empty(), "{warnings:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn asks_lit_source_round_trips_and_defaults_false() {
+        let dir = temp_dir("asks-lit");
+        let root = dir.join("proj");
+        // 缺省不写这一行 → 解析为 false，渲染后也不该冒出来（档案卡保持简洁）
+        let plain = "[[steps]]\nname = \"检索\"\nworkspace_name = \"lit\"\n";
+        let (cfg0, w0) = parse_config(plain);
+        assert!(!cfg0.steps[0].asks_lit_source);
+        assert!(w0.is_empty(), "{w0:?}");
+        write(&config_path(&root), plain);
+        write_config_at(&root, &cfg0).unwrap();
+        let raw0 = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(!raw0.contains("asks_lit_source"), "{raw0}");
+
+        // 声明为 true → 解析出来，写回后仍在（漏了透传会让编辑器一保存就把声明抹掉，
+        // 与 human_tasks.optional 同一类静默丢失）
+        let text = "[[steps]]\nname = \"检索\"\nworkspace_name = \"lit\"\n\
+                    asks_lit_source = true\n";
+        write(&config_path(&root), text);
+        let (cfg, warnings) = parse_config(text);
+        assert!(cfg.steps[0].asks_lit_source);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        write_config_at(&root, &cfg).unwrap();
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        let (cfg2, w2) = parse_config(&raw);
+        assert!(cfg2.steps[0].asks_lit_source, "{raw}");
+        assert!(w2.is_empty(), "{w2:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -2,8 +2,13 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { THEMES } from "./themes";
-import { dismissHelp, loadHelpDismissed } from "./inbox";
+import { isLightTheme } from "./themes";
+import {
+  dismissHelp,
+  dismissInboxItem,
+  loadHelpDismissed,
+  loadInboxDismissed,
+} from "./inbox";
 import type { RunOverviewInput } from "./run-overview";
 import type {
   DetectResult,
@@ -37,7 +42,7 @@ function cachedRecentRepos(): RepoDto[] {
 export interface AppSettings {
   terminalFontSize: number;
   terminalFontFamily?: string;
-  terminalPalette?: string; // dark-plus | solarized | one-dark | catppuccin
+  terminalPalette?: string; // 四套深色 + 四套配对浅色，见 terminal-palettes.ts PALETTE_LIST
   scrollback: number;
   rateUsdCny: number;
   brewMirror: boolean;
@@ -49,6 +54,13 @@ export interface AppSettings {
   /** ◈ AI 功能按功能独立配置：键 = 功能 key（commit/summarize/pr/distill/conflict/translate，
       见 ai.rs FN_* 常量），值 = profile id；键缺失 = 跟随默认（aiProfileId） */
   aiProfiles?: Record<string, string>;
+  /** 每个 agent 的默认 profile（agent id → profile id）：启动栏选完 agent 后预选它。
+   *  解析顺序 显式默认 > 上次使用 > 首个配置 */
+  defaultProfiles?: Record<string, string>;
+  /** 启动时进入哪一页（页面 id）；缺省 = workspaces */
+  startPage?: string;
+  /** 「隐藏」的 profile id：只影响启动栏下拉分组（沉到「更多」），不删数据、不改启动行为 */
+  hiddenProfiles?: string[];
   /** 对话页「⇗ 外部恢复」的终端应用；auto/undefined = 按优先级探测 */
   externalTerminal?: string;
   /** 精确注意力标记（Claude Code hooks，写 ~/.claude/settings.json，默认关） */
@@ -72,7 +84,7 @@ export interface AppSettings {
 export function applyTheme(id: string) {
   const theme = id || "midnight";
   document.documentElement.dataset.theme = theme;
-  const light = THEMES.some((t) => t.id === theme && "light" in t && t.light);
+  const light = isLightTheme(theme);
   void getCurrentWindow()
     .setTheme(light ? "light" : "dark")
     .catch(() => {});
@@ -97,10 +109,17 @@ export interface PendingTerminal {
   agentId?: string;
   profileId?: string;
   model?: string;
+  /** 建好标签就直接启动（不用再点一次「启动」）。会话恢复隐含为 true；
+   *  「快速开聊」显式置 true——弹层里已经确认过 agent/配置/目录，再点一次纯属多余。
+   *  找不到对应 profile 时自动降级为「只预填、不启动」（见 TerminalView 的 autoStart 守卫）。 */
+  autoStart?: boolean;
   /** 一键开步预填的首条指令：启动时注入 CLI，启动成功后清除（一次性） */
   initialPrompt?: string;
   /** 打开后右栏直接落到指定页签（如卡片区「主仓改动」提醒跳到改动面板） */
   rightTab?: "git";
+  /** 「最干净的终端」：落地即收起工作树与右栏（走既有专注终端语义，Esc 可退）。
+   *  给「快速开聊」用——没有项目上下文时三个面板都没东西可给，摆着只是噪音 */
+  clean?: boolean;
   /** 开聊自动带开文件预览（路径 + 预览根）：一次性交接不落盘
       （terminal-tab-persistence 白名单本就不含它） */
   previewPath?: string;
@@ -229,6 +248,9 @@ interface AppState {
       签名随文件内容变化，内容一变自动复现）。签名一致时 WorkspacesPage 不生成该条目 */
   helpDismissed: Record<string, string>;
   dismissHelpRequest: (root: string, signature: string) => void;
+  /** 通用条目屏蔽表（v3.88）：任意收件箱条目可忽略，状态变化后自动复现 */
+  inboxDismissed: Record<string, string>;
+  dismissInbox: (item: InboxItem) => void;
   /** 一次性「跳终端页并激活标签」请求（首页待办点击发起），终端页可见时消费并清空 */
   focusTabReq: string | null;
   setFocusTabReq: (tabId: string | null) => void;
@@ -285,7 +307,16 @@ interface AppState {
   artifactCheckReq: string | null;
   setArtifactCheckReq: (id: string | null) => void;
   /** 对话页卡片 chip → 工作区页选中对应项目的一次性请求（项目根路径，工作区页消费并清空） */
+  /** 当前项目·步骤上下文镜像（WorkspacesPage 唯一写入方）：顶栏跨页展示「我在哪」。
+   *  只读消费，不新增轮询——数据本就在工作区页手里 */
+  contextLabel: { project: string; step: string | null } | null;
+  setContextLabel: (v: { project: string; step: string | null } | null) => void;
   selectProjectReq: string | null;
+  /** 对话页作用域筛选的一次性请求（工作区页「本步骤的对话」→ 落成 step chip） */
+  sessionScopeReq: { kind: "project" | "step" | "task" | "agent"; value: string; label: string } | null;
+  setSessionScopeReq: (
+    r: { kind: "project" | "step" | "task" | "agent"; value: string; label: string } | null,
+  ) => void;
   setSelectProjectReq: (path: string | null) => void;
   /** 任务卡（按项目根缓存；list_task_cards 对非项目目录返回空表不报错） */
   taskCards: Record<string, TaskCardDto[]>;
@@ -371,6 +402,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   setTerminalRunInputs: (inputs) => set({ terminalRunInputs: inputs }),
   inboxItems: [],
   setInboxItems: (items) => set({ inboxItems: items }),
+  inboxDismissed: loadInboxDismissed(),
+  dismissInbox: (item) =>
+    set((st) => ({ inboxDismissed: dismissInboxItem(item, st.inboxDismissed) })),
   helpDismissed: loadHelpDismissed(),
   dismissHelpRequest: (root, signature) =>
     set({ helpDismissed: dismissHelp(root, signature) }),
@@ -444,8 +478,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   setDigestOpenReq: (n) => set({ digestOpenReq: n }),
   artifactCheckReq: null,
   setArtifactCheckReq: (id) => set({ artifactCheckReq: id }),
+  contextLabel: null,
+  setContextLabel: (v) => set({ contextLabel: v }),
   selectProjectReq: null,
   setSelectProjectReq: (path) => set({ selectProjectReq: path }),
+  sessionScopeReq: null,
+  setSessionScopeReq: (r) => set({ sessionScopeReq: r }),
   taskCards: {},
   loadTaskCards: async (projectRoot) => {
     const cards = await invoke<TaskCardDto[]>("list_task_cards", {

@@ -140,6 +140,23 @@ export default function McpPage({ visible }: { visible: boolean }) {
   const [saving, setSaving] = useState(false);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
+  // 分发三态缓存（server id → agent id → off|ok|modified）：展开时读一次，不轮询。
+  // 探测要读各 CLI 的配置文件，不适合常驻刷新
+  const [distStatus, setDistStatus] = useState<
+    Record<string, Record<string, string>>
+  >({});
+  useEffect(() => {
+    if (!expanded || distStatus[expanded]) return;
+    let stale = false;
+    invoke<Record<string, string>>("mcp_distribution_status", { id: expanded })
+      .then((m) => {
+        if (!stale) setDistStatus((prev) => ({ ...prev, [expanded]: m }));
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [expanded, distStatus]);
   // 收编现有配置 / 粘贴导入 / 内置预设（低频，收进顶部 ⋯ 菜单）
   const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
   // 页头「预设 ▾」下拉：内置预置一键预填（mcp-presets.ts，加预设 = 加一条）
@@ -244,6 +261,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
           force,
         }),
       );
+      // 分发状态缓存失效：刚写过，三态点必须按新结果重算
+      setDistStatus((prev) => {
+        const next = { ...prev };
+        delete next[server.id];
+        return next;
+      });
       toast(
         on
           ? `已分发到 ${AGENTS.find((a) => a.id === agent)?.label}`
@@ -428,10 +451,8 @@ export default function McpPage({ visible }: { visible: boolean }) {
         }
       />
       <p className="text-xs leading-5 text-l4">
-        统一维护 MCP server 清单，按开关分发到各 CLI 的用户级配置（只读-改-写一个键，写前自动备份）。
-        命令名在分发时自动解析为绝对路径（防 GUI/CLI 环境 PATH 找不到 npx 这类裸名）；
-        env/header 的值可填 <span className="font-mono">$VAR</span> 引用环境变量，密钥不落明文；
-        分发到 Cursor 会同时影响 Cursor IDE（共享同一配置）。
+        统一维护 MCP server 清单，按开关分发到各 CLI。密钥用{" "}
+        <span className="font-mono">$VAR</span> 引用，不落明文。
       </p>
       {error && <p className="text-sm text-err-text">{error}</p>}
       {notice && <p className="text-sm text-ok-text">{notice}</p>}
@@ -494,7 +515,26 @@ export default function McpPage({ visible }: { visible: boolean }) {
                           key={agent.id}
                           className="flex items-center justify-between gap-2 rounded-sm bg-inset px-2 py-1.5"
                         >
-                          <span className="text-xs text-l3">{agent.label}</span>
+                          <span className="flex min-w-0 items-center gap-1 text-xs text-l3">
+                            {/* 分发三态（v3.88）：后端 entry_modified_externally 早有能力，
+                                此前只在删除/改投时用来拦「假状态」，界面上看不到——
+                                用户不知道自己在 agent 侧手改过的东西下次保存会被覆盖 */}
+                            {on && (
+                              <span
+                                className={`size-1.5 shrink-0 rounded-full ${
+                                  distStatus[s.id]?.[agent.id] === "modified"
+                                    ? "bg-warn-text"
+                                    : "bg-ok-text"
+                                }`}
+                                title={
+                                  distStatus[s.id]?.[agent.id] === "modified"
+                                    ? "已写入，但该 agent 侧的条目被外部改过——下次保存会按本清单覆盖"
+                                    : "已写入该 agent 的用户级配置"
+                                }
+                              />
+                            )}
+                            <span className="truncate">{agent.label}</span>
+                          </span>
                           {MCP_DISTRIBUTE_UNSUPPORTED.has(agent.id) ? (
                             <span
                               className="text-xs text-l4"
@@ -707,7 +747,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
               收编现有配置
             </h2>
             <p className="mb-3 text-xs leading-5 text-l4">
-              各 CLI 用户级配置里已存在、但不在 Ccode 清单中的 server。收编后进入统一清单，并标记为已分发到来源 agent。
+              这些 server 在 CLI 里已有、但不在 Ccode 清单中。收编后统一管理。
             </p>
             {discovered.length === 0 ? (
               <p className="py-4 text-center text-sm text-l4">

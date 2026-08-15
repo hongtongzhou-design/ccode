@@ -16,7 +16,7 @@ export type StepRunStatus =
 
 export interface StepFlowNode {
   key: string;
-  kind: "discuss" | "human" | "agent" | "review";
+  kind: "discuss" | "input" | "human" | "agent" | "review";
   /** 版式分区：main = 主干（必须发生的先后链）；optional = 可选补充（沉到分隔线下）。
    *  可选项不进主干还有个要紧的副作用——它们不再抢「当前节点」：
    *  一个永远不打勾的可选项会把当前指示卡死在那儿，后面的节点永远轮不到 */
@@ -41,6 +41,8 @@ export function buildStepFlow(args: {
   states: HumanTaskStateDto[];
   /** 本步骤任务书草稿已起草（.ccode/drafts/<步骤>.md，讨论种子节点的完成口径） */
   hasDraft: boolean;
+  /** 项目当前的文献来源（input 节点完成口径）：非空且非 search = 已交代清楚 */
+  litSource?: string;
   runStatus: StepRunStatus;
   /** 还没拍板的决策项数量（草稿「已定方向」小节回填后算出）：
    *  只要还有没答的，本节点就不算完事——只写了一条答案草稿就存在了，
@@ -52,26 +54,47 @@ export function buildStepFlow(args: {
   const nodes: StepFlowNode[] = [];
   const humans = (timing: string) => states.filter((s) => s.timing === timing);
 
-  // 1. 定方向：恒存在。它同时是想法区的落点（discussContent），
-  //    没有决策项也没有种子的步骤照样要能记想法、聊任务书——按「有种子才生成」会让那些步骤
-  //    的想法区整个消失。无可拍板项时直接算完成，不挡后面的节点。
+  // 0.5 输入准备：文献从哪来（模板声明 asksLitSource 的步骤才有）。
+  //     独立成节点、排在 agent 之前——它是**开工的前提**（决定 AI 要不要去检索），
+  //     挂在 agent 节点内容区会让「开始」按钮出现在它上方，变成「先出发再问路」（用户实测）。
+  if (step.asksLitSource) {
+    nodes.push({
+      key: "input",
+      kind: "input",
+      section: "main",
+      label: "确定文献来源",
+      hint: undefined,
+      // 已声明来源（非默认 search）或已有登记资源 = 这一步交代清楚了
+      done: (args.litSource ?? "").trim() !== "" && args.litSource !== "search",
+    });
+  }
+  // 1. 「先定几件事」：**有东西要定才出现**（v3.89 修，用户反馈「有点空」）。
+  //    v3.89 把整篇级决策移到项目层、把要看数据才能定的改为按需问之后，
+  //    检索这类步骤的开工前决策项归零——节点只剩一个「跟 AI 商量」按钮，
+  //    白占流程线一格还让人以为漏了什么。
+  //    判定用**声明**（decisions/seeds 是否配置）而非「是否答完」：答完就消失会让
+  //    流程线在你眼前少一格，比空着更让人不安。
+  //    想法区（discussContent）随之改挂 agent 节点——它本来就是「开工前想清楚要干嘛」，
+  //    贴着 agent 节点比单独占一格更贴切。
   const decisions = step.decisions ?? [];
   const seeds = step.discussionSeeds ?? [];
-  const nothingToSettle = decisions.length === 0 && seeds.length === 0;
-  nodes.push({
-    key: "discuss",
-    kind: "discuss",
-    section: "main",
-    label:
-      pendingDecisions > 0
-        ? `定方向：还有 ${pendingDecisions} 件要拍板`
-        : "定方向：本步任务书",
-    hint:
-      pendingDecisions > 0
-        ? "选项点一下就答完，不用开会话；拿不准的点「其他…」自己写或开聊"
-        : undefined,
-    done: nothingToSettle || (hasDraft && pendingDecisions === 0),
-  });
+  const hasSomethingToSettle = decisions.length > 0 || seeds.length > 0;
+  if (hasSomethingToSettle) {
+    nodes.push({
+      key: "discuss",
+      kind: "discuss",
+      section: "main",
+      label:
+        pendingDecisions > 0
+          ? `先定几件事（还有 ${pendingDecisions} 件）`
+          : "先定几件事",
+      hint:
+        pendingDecisions > 0
+          ? "点一下就答完；拿不准就点「其他…」"
+          : undefined,
+      done: hasDraft && pendingDecisions === 0,
+    });
+  }
   // 2. before 人工事项
   for (const h of humans("before")) {
     nodes.push({
@@ -89,14 +112,14 @@ export function buildStepFlow(args: {
     key: "agent",
     kind: "agent",
     section: "main",
-    label: `agent 执行：${step.name}`,
+    label: `AI 干活：${step.name}`,
     hint:
       runStatus === "pending"
-        ? "点「开始」建工作区并开工"
+        ? undefined
         : runStatus === "active"
-          ? "agent 正在工作区里干活"
+          ? "AI 正在干活"
           : runStatus === "review"
-            ? "agent 做完了，产物待你评审"
+            ? "AI 做完了，等你验收"
             : "已合并",
     done: runStatus === "review" || runStatus === "done",
   });
@@ -129,7 +152,7 @@ export function buildStepFlow(args: {
     key: "review",
     kind: "review",
     section: "main",
-    label: "评审合并进主文件夹",
+    label: "你验收，合并进主文件夹",
     hint: runStatus === "review" ? "点「去评审」验收产物" : undefined,
     done: runStatus === "done",
   });

@@ -127,3 +127,23 @@ test("helpNotifyKeys：同一 root 30 秒去抖，窗口外放行", () => {
     ["help:/b"],
   );
 });
+
+// ── 通用忽略（v3.88）：原先只有 help: 能忽略 ──
+import {
+  filterDismissed,
+  inboxSignature,
+} from "../src/inbox.ts";
+
+test("忽略后条目消失，内容变化即复现", () => {
+  const item = { key: "ready:w1", text: "任务 A 可合并", actionLabel: "去评审" };
+  const dismissed = { [item.key]: inboxSignature(item) };
+  assert.deepEqual(filterDismissed([item], dismissed), []);
+  // 同一 key 但状态变了（文案变）→ 签名不同 → 重新出现
+  const changed = { ...item, text: "任务 A 有冲突" };
+  assert.deepEqual(filterDismissed([changed], dismissed), [changed]);
+});
+
+test("未忽略的条目原样保留", () => {
+  const a = { key: "conflict:x", text: "冲突", actionLabel: "解决" };
+  assert.deepEqual(filterDismissed([a], {}), [a]);
+});

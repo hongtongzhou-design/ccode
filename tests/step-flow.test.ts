@@ -43,19 +43,19 @@ test("节点顺序：种子 → before → agent → during → after → 评审
   assert.deepEqual(
     flow.nodes.map((n) => `${n.kind}:${n.label}`),
     [
-      "discuss:定方向：本步任务书",
+      "discuss:先定几件事",
       "human:补文献",
-      "agent:agent 执行：检索筛选",
+      "agent:AI 干活：检索筛选",
       "human:补检索词",
       "human:下载付费",
-      "review:评审合并进主文件夹",
+      "review:你验收，合并进主文件夹",
     ],
   );
   // 当前节点 = 第一个未完成（种子未聊）
   assert.equal(flow.currentKey, "discuss");
 });
 
-test("无种子步骤：discuss 节点恒在但直接完成；当前节点随完成推进", () => {
+test("无决策项/种子的步骤：不生成 discuss 节点（v3.89）", () => {
   const states = [ht({ title: "补文献", timing: "before", done: true })];
   const flow = buildStepFlow({
     step: step({}),
@@ -63,14 +63,11 @@ test("无种子步骤：discuss 节点恒在但直接完成；当前节点随完
     hasDraft: false,
     runStatus: "active",
   });
+  // 没东西要定就不占流程线一格——只剩一个「跟 AI 商量」按钮的空节点
+  // 白占位置还让人以为漏了什么（用户实测反馈「有点空」）
   assert.deepEqual(
     flow.nodes.map((n) => n.kind),
-    ["discuss", "human", "agent", "review"],
-  );
-  assert.equal(
-    flow.nodes.find((n) => n.kind === "discuss")?.done,
-    true,
-    "没有决策项/种子 = 没有要拍板的，不该卡住",
+    ["human", "agent", "review"],
   );
   assert.equal(flow.currentKey, "agent", "before 事项已完成、agent 进行中 → 当前是 agent 节点");
 });
@@ -122,7 +119,7 @@ test("决策项未拍板完：discuss 节点不算完成，即使草稿已存在
   });
   const d1 = partial.nodes.find((n) => n.key === "discuss")!;
   assert.equal(d1.done, false, "还有没答的题就不该打勾");
-  assert.match(d1.label, /还有 1 件要拍板/);
+  assert.match(d1.label, /还有 1 件/);
   assert.equal(partial.currentKey, "discuss", "当前节点应停在定方向");
 
   // 全部拍板完
@@ -151,15 +148,30 @@ test("只有决策项、没有讨论种子：discuss 节点照常出现", () => 
   assert.ok(flow.nodes.some((n) => n.key === "discuss"));
 });
 
-test("既无决策项也无种子：discuss 节点仍在（想法区的落点），且直接算完成不挡后面", () => {
+test("既无决策项也无种子：不生成 discuss 节点，当前直接落 agent（v3.89）", () => {
   const flow = buildStepFlow({
     step: step({ discussionSeeds: [], decisions: [] }),
     states: [],
     hasDraft: false,
     runStatus: "pending",
   });
-  const d = flow.nodes.find((n) => n.key === "discuss");
-  assert.ok(d, "想法区挂在这个节点上，没有它那些步骤就记不了想法");
-  assert.equal(d.done, true, "没有可拍板项就不该卡住流程");
+  assert.equal(
+    flow.nodes.find((n) => n.key === "discuss"),
+    undefined,
+    "没东西要定就不生成该节点（想法区改挂 agent 节点，见 StepFlow.tsx hasDiscussNode）",
+  );
   assert.equal(flow.currentKey, "agent");
+});
+
+test("有种子但无决策项：discuss 节点仍在（种子就是要聊的东西）", () => {
+  const flow = buildStepFlow({
+    step: step({ discussionSeeds: ["范式锚点：借哪篇的结构？"], decisions: [] }),
+    states: [],
+    hasDraft: false,
+    runStatus: "pending",
+  });
+  assert.ok(
+    flow.nodes.find((n) => n.key === "discuss"),
+    "配了种子 = 模板认为这一步有东西要商量",
+  );
 });

@@ -18,14 +18,12 @@ import { Checkbox, hoverRevealClass, NoticeBar } from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import { startPipelineStep } from "../pipeline-start";
-import { pendingHumanTasks } from "../task-cards";
 import { normSep } from "../path-utils";
 import type { RunOverviewInput } from "../run-overview";
 import type {
   DiscoveredResourceDto,
   ZoteroLibraryDto,
   EnsureGitDto,
-  HumanTaskStateDto,
   PipelineTemplateDto,
   ProjectConfigDto,
   ProjectConfigReadDto,
@@ -229,7 +227,7 @@ function StepperCell({
         </button>
         {attention === "confirm" && (
           <span
-            className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-warn"
+            className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-warn-text"
           />
         )}
         <HoverTip tip={tip} text={circleTitle} warn={circleWarn} />
@@ -297,7 +295,9 @@ const STEP_STATUS_LABEL: Record<StepStatusKey, string> = {
 function stepCircleClass(key: StepStatusKey): string {
   // done 用随主题走的低饱和完成绿（--color-done），与状态 ok 绿解耦（用户反馈亮绿突兀）
   if (key === "done") return "bg-done";
-  if (key === "blocked") return "bg-warn";
+  // 阻塞用 warn 的「文字/圆点」档而非底色档：底色档在浅色主题是浅黄（#fdf1cd），
+  // 铺成 22px 实心圆会在近白 canvas 上消失；且同为实心圆的 done 本就用 -text 档口径
+  if (key === "blocked") return "bg-warn-text";
   if (key === "review") return "bg-cta-pill";
   if (key === "active" || key === "checking") return "bg-cta";
   // 待开始：实心灰圆
@@ -436,24 +436,6 @@ export default function ProjectGroup({
     };
   }, [project, refreshToken]);
 
-  // 人工事项派生状态：进项目详情读一次 + 页面刷新重读；清单内操作（勾选/提交）后经回调重取
-  const loadHumanStates = () => {
-    if (!project) return;
-    invoke<HumanTaskStateDto[]>("list_human_task_states", {
-      projectRoot: project.path,
-    })
-      .then(setHumanStates)
-      .catch(() => {});
-  };
-  useEffect(() => {
-    if (!project) {
-      setHumanStates(null);
-      return;
-    }
-    loadHumanStates();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, refreshToken]);
-
   /** 全量写回 resources/steps（后端保留未知键）；失败只报错不回滚本地状态 */  async function saveConfig(next: ProjectConfigDto): Promise<boolean> {
     if (!project) return false;
     try {
@@ -574,10 +556,8 @@ export default function ProjectGroup({
   /** 聚焦步骤名（存名字而非索引）：索引在流水线编辑器里重排/改名后会指向另一个步骤，
    *  而下游全部按名字找回。名字对不上时 focusIndex 回落到当前步骤，不静默跳错 */
   const [focusStepKey, setFocusStepKey] = useState<string | null>(null);
-  // 人工事项派生状态（流程线橙点与 ⋯ 菜单计数用；清单本体自取自刷，操作后经回调重取这里）
-  const [humanStates, setHumanStates] = useState<HumanTaskStateDto[] | null>(
-    null,
-  );
+  // 人工事项派生状态原本只喂步骤 ⋯ 菜单的「N 件待做」计数，该菜单项已随 v3.86 精简删除
+  // （清单本体在 useHumanTasks 里自取自刷），这里连同 list_human_task_states 一次调用一并去掉
   // 聚焦步骤的任务书草稿（v3.72）：聚焦头部「待开始」情境文案（describeStep）与卡片区流程线
   // 共用这一份加载（TaskCardsSection 经 focusDraft prop 接收，不重复请求）；effect 在 focusStepName 之后
   const [focusDraft, setFocusDraft] = useState<{
@@ -689,6 +669,8 @@ export default function ProjectGroup({
           await saveConfig({ ...fresh, topic });
         }
         setPickerOpen(false);
+        // 模板选完就该看到步进器，别把抽屉留在前面挡着
+        setSettingsOpen(false);
         // 顺序引导（一次性提示条，可关）：把视线引到第 1 步与种子
         setTplApplied(true);
       } catch (reason) {
@@ -718,6 +700,7 @@ export default function ProjectGroup({
     setApplyingTemplate(false);
     if (ok) {
       setPickerOpen(false);
+      setSettingsOpen(false);
       // 顺序引导（一次性提示条，可关）：把视线引到第 1 步与种子
       setTplApplied(true);
     }
@@ -773,24 +756,20 @@ export default function ProjectGroup({
     setPipelineSaving(false);
   }
 
-  async function removeStep(index: number) {
-    if (!cfg) return;
-    const step = cfg.steps[index];
-    if (
-      !(await confirmDialog(`删除步骤「${step.name}」？绑定的工作区不受影响。继续？`, {
-        danger: true,
-      }))
-    )
-      return;
-    await saveConfig({
-      ...cfg,
-      steps: cfg.steps.filter((_, i) => i !== index),
-    });
-  }
-
+  /**
+   * 步骤 ⋯ 菜单（v3.86 精简 6 → 1~3）。删掉的三项与理由：
+   * - **人工事项**：`onSelect` 就是 `focusByIndex`，与「点大圆 = 只看这一步」完全同效；
+   *   清单本身在聚焦后的当前步骤卡流程线里直接可见。标签上的「N 件待做」是 v3.84
+   *   已删的「等你做」计数的最后残留，同一噪音不再从菜单里冒出来。
+   * - **复制工作区名**：近乎零频次；工作区名在「编辑步骤 → 高级」里可见，
+   *   任务行 ⋯ 另有更有用的「复制工作树路径」。
+   * - **删除步骤**：结构性编辑，按约定归编辑器（每张步骤卡自带删除），
+   *   且不该把破坏性动作放在悬停即出的菜单里紧挨着步进器大圆。
+   * 余下两项**不再渲染禁用态**：没有工作区时「产物核验 / 定位目录」本就无事可做，
+   * 灰着占位只是噪音（原菜单 6 项里有 2 项常年是灰的）。
+   */
   function stepMenuItems(index: number) {
     if (!cfg) return [];
-    const step = cfg.steps[index];
     // 「◫ 定位目录」与胶囊原 ◫ 按钮同一语义：仅活跃工作区可定位
     const st = statusAt(index)!;
     const activeWs =
@@ -801,49 +780,28 @@ export default function ProjectGroup({
         title: "打开研究流程编辑器并定位到该步骤",
         onSelect: () => openEditor(index),
       },
-      // 人工事项（步骤声明了才出现）：点击 = 聚焦该步骤，清单在卡片区顶部直接可见
-      ...((step.humanTasks?.length ?? 0) > 0
+      ...(st.ws
         ? [
             {
-              label: (() => {
-                const n = humanStates
-                  ? pendingHumanTasks(humanStates, step.name).length
-                  : 0;
-                return n > 0 ? `人工事项（${n} 件待做）` : "人工事项";
-              })(),
-              title: "在下方只看这一步：归你做的事、讨论种子与卡片",
-              onSelect: () => focusByIndex(index),
+              label: artifactsStep === index ? "收起产物核验" : "产物核验",
+              title: "查看该步骤的预期产物",
+              onSelect: () =>
+                setArtifactsStep((v) => (v === index ? null : index)),
             },
           ]
         : []),
-      {
-        label: artifactsStep === index ? "收起产物核验" : "产物核验",
-        disabled: !st.ws,
-        title: !st.ws
-          ? "工作区尚未创建，暂无产物可核验"
-          : "查看该步骤的预期产物",
-        onSelect: () =>
-          setArtifactsStep((v) => (v === index ? null : index)),
-      },
-      {
-        label: "◫ 定位目录",
-        disabled: !activeWs,
-        title: activeWs
-          ? "跳到终端页，文件树定位到该工作区目录"
-          : st.ws
-            ? "工作区已归档，无法定位目录"
-            : "工作区尚未创建",
-        onSelect: () => {
-          setEnterCwdReq(activeWs!.worktreePath);
-          setPage("terminal");
-        },
-      },
-      {
-        label: "复制工作区名",
-        onSelect: () =>
-          copyText(step.workspaceName, "复制工作区名失败"),
-      },
-      { label: "删除步骤", onSelect: () => void removeStep(index) },
+      ...(activeWs
+        ? [
+            {
+              label: "◫ 定位目录",
+              title: "跳到终端页，文件树定位到该工作区目录",
+              onSelect: () => {
+                setEnterCwdReq(activeWs.worktreePath);
+                setPage("terminal");
+              },
+            },
+          ]
+        : []),
     ];
   }
 
@@ -851,6 +809,33 @@ export default function ProjectGroup({
   // 资源面板展开态：新注册的项目默认展开——注册时自动扫过一遍，
   // 不展开的话用户既不知道扫到了什么，也看不到还能从哪儿补
   const [resOpen, setResOpen] = useState(freshGitGuide);
+  // 「项目设置」抽屉（v3.85）：项目级低频配置的单一落点。原先资源面板与定时任务
+  // 各占详情页一条常驻带，配置项还散在 ⋯ 菜单八项里；收进抽屉后详情页少两条带、
+  // ⋯ 菜单收到四项，项目级配置也终于有了一个能一眼看全的地方。
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // 全局设定编辑（抽屉内）：textarea 一行一条，失焦即存
+  const [globalsDraft, setGlobalsDraft] = useState("");
+  useEffect(() => {
+    setGlobalsDraft((cfg?.settings ?? []).join("\n"));
+  }, [cfg?.settings]);
+  /** 失焦即存：静默保存等于「我改了但不知道存没存」（用户实测反馈），
+   *  故给一次性「已保存」反馈（2s 自动消退）；失败走 onError 横幅 */
+  const [globalsSaved, setGlobalsSaved] = useState(false);
+  async function saveGlobals() {
+    if (!cfg) return;
+    const next = globalsDraft
+      .split("\n")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (next.join("\n") === (cfg.settings ?? []).join("\n")) return;
+    if (await saveConfig({ ...cfg, settings: next })) {
+      setGlobalsSaved(true);
+      window.setTimeout(() => setGlobalsSaved(false), 2000);
+    }
+  }
+  // 「文献与数据」落点聚焦：从流程线按所选来源跳过来时高亮对应进料入口，2.5s 后自动消退。
+  // 落点统一是这一处面板（导入只此一处），高亮解决「到了之后点哪个」
+  const [resFocus, setResFocus] = useState<"zotero" | "files" | null>(null);
   /** 「文献与数据」面板锚点：流程线里的「到「文献与数据」导入」展开后滚到这里 */
   const resPanelRef = useRef<HTMLDivElement>(null);
   const [discoverLoading, setDiscoverLoading] = useState(false);
@@ -863,13 +848,15 @@ export default function ProjectGroup({
   const [litBusy, setLitBusy] = useState(false);
 
   /** 切换文献来源：只改 project.toml 的 lit_source，不动任何文件。
-   *  已经是 zotero 时点「我已有文献库」不降级为 folder——那会丢掉 Zotero 语境 */
-  async function setLitSource(next: "search" | "folder") {
+   *  v3.86 起改为**显式三值**（search / zotero / folder）——原先是两档开关，
+   *  「我已有文献库」无法表达 zotero 与 folder 的区别，才需要「已是 zotero 就不降级」的特判；
+   *  流程线「输入准备」三个选项一一对应后，特判不再需要，选什么就是什么。 */
+  async function setLitSource(next: string) {
     if (!cfg || litBusy) return;
-    const cur = cfg.litSource?.trim() || "search";
-    const target =
-      next === "folder" && cur === "zotero" ? "zotero" : next;
-    if (target === cur) return;
+    const target = ["search", "zotero", "folder"].includes(next)
+      ? next
+      : "search";
+    if (target === (cfg.litSource?.trim() || "search")) return;
     setLitBusy(true);
     try {
       await saveConfig({ ...cfg, litSource: target });
@@ -1125,6 +1112,14 @@ export default function ProjectGroup({
       ? deriveStepStatus(cfg.steps[i], workspaces, health, drift)
       : null);
   /** 资源构成一句话（折叠态也让人知道里面有什么）：按类型计数，零资源时明说扫过了 */
+  /** 已真正填写的全局设定：模板预填的是「综述角度：（领域全景 / 聚焦某个子问题）」这种
+   *  带括号占位的空答案——原样显示会让项目头挂一串没意义的问号，用户还以为是已定的结论。
+   *  判定：冒号后去掉括号内容还剩字才算填过 */
+  const filledSettings = (cfg?.settings ?? []).filter((line) => {
+    const ans = line.split(/[：:]/).slice(1).join(":");
+    return ans.replace(/[（(].*?[）)]/g, "").trim().length > 0;
+  });
+
   const resourceSummary = (() => {
     const rs = cfg?.resources ?? [];
     if (rs.length === 0) return "还没有登记文献/数据";
@@ -1180,7 +1175,7 @@ export default function ProjectGroup({
               statusText:
                 focusDraft?.stepName === step.name && focusDraft.text?.trim()
                   ? "任务书草稿已就位，可以开始"
-                  : "待开始 · 建议先点下方种子聊聊",
+                  : "待开始",
               actionLabel: "开始",
               action: (() => void startStep(i)),
             };
@@ -1290,7 +1285,8 @@ export default function ProjectGroup({
   return (
     // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给研究流程等必要块
     <section className="mb-5">
-      <div className="flex min-h-12 min-w-0 items-center gap-2 border-b border-hairline px-4 py-2.5">
+      {/* 项目身份行：区间分隔一律用留白，不画横线（去线条化，v3.85；同 PageHeader 口径） */}
+      <div className="flex min-h-12 min-w-0 items-center gap-2 px-4 pb-3 pt-2.5">
         {renamingProject ? (
           <form
             onSubmit={submitRenameProject}
@@ -1315,22 +1311,52 @@ export default function ProjectGroup({
             </button>
           </form>
         ) : (
-          <h2 className="shrink-0 text-sm font-medium text-l1">
+          <h2 className="shrink-0 text-base font-semibold text-l1">
             {displayName}
           </h2>
         )}
-        {topicText && (
+        {topicText ? (
           <span
             className="min-w-0 max-w-72 truncate text-xs text-l3"
             title={topicText}
           >
             {topicText}
           </span>
+        ) : (
+          // 课题主题是给 Agent 看的（随 TASK.md 走），空着时给个能点的占位，
+          // 别让它只存在于 ⋯ 菜单深处
+          registered &&
+          cfg && (
+            <button
+              type="button"
+              onClick={() => {
+                setTopicDraft("");
+                setEditingTopic(true);
+              }}
+              className="shrink-0 text-xs text-l4 hover:text-l2"
+              title="课题主题会写进每次开工的 TASK.md，给 Agent 交代研究背景"
+            >
+              ＋ 写一句课题主题
+            </button>
+          )
+        )}
+        {/* 全局设定（v3.89）：贯穿全程的决定摆在项目头，与课题主题并排——
+            它们决定后面每一步，躲在第 1 步的折叠区里属层级错配（用户实测反馈）。
+            点击进项目设置抽屉编辑 */}
+        {registered && filledSettings.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            title={filledSettings.join("\n")}
+            className="min-w-0 shrink truncate rounded-sm px-1 text-xs text-l4 hover:bg-hover hover:text-l2"
+          >
+            {filledSettings.join(" · ")}
+          </button>
         )}
         {!registered && (
           <span className="inline-flex shrink-0 items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l3">
             <span className="size-2 rounded-full bg-l4" />
-            未注册
+            未添加
           </span>
         )}
         {groupCountsTotal > 0 && (
@@ -1396,10 +1422,10 @@ export default function ProjectGroup({
             <button
               type="button"
               className={actionBtn}
-              title="注册该项目目录，获得研究流程骨架与资源面板"
+              title="添加到 Ccode，获得研究流程与资源面板"
               onClick={() => onRegisterProject(repoPath)}
             >
-              注册项目
+              添加到 Ccode
             </button>
           )}
           {registered && (
@@ -1483,7 +1509,31 @@ export default function ProjectGroup({
 
       {registered && freshGitGuide && (
         <div className="mb-2 flex flex-wrap items-center gap-2 rounded-sm bg-strip p-2 text-xs text-l2">
-          <span>新项目：若目录还不是 git 仓库，初始化后才能创建工作区。</span>
+          <span>还不是 git 仓库的话，初始化后才能建工作区。</span>
+          {/* 注册时已自动扫过一遍资源，结果要在**详情页**说出来（v3.87 修）：
+              原先只在「文献与数据」面板的折叠头里显示，而那个面板 v3.85 搬进了设置抽屉，
+              新项目自动展开变成「在关着的抽屉里展开」——用户根本看不到扫描发生过 */}
+          {cfg && (
+            <span className="text-l3">
+              已扫到 {resourceSummary}
+              <button
+                type="button"
+                onClick={() => {
+                  setSettingsOpen(true);
+                  setResOpen(true);
+                  requestAnimationFrame(() =>
+                    resPanelRef.current?.scrollIntoView({
+                      behavior: "smooth",
+                      block: "center",
+                    }),
+                  );
+                }}
+                className="ml-1 underline decoration-dotted underline-offset-2 hover:text-l1"
+              >
+                查看 / 补充
+              </button>
+            </span>
+          )}
           {gitMsg && (
             <span>
               <span className="mr-1 text-ok-text">✓</span>
@@ -1512,10 +1562,7 @@ export default function ProjectGroup({
           「不使用研究流程」（pipelineOptOut）显式隐藏本横幅，回流入口在 ⋯ 菜单 */}
       {registered && cfg && cfg.steps.length === 0 && !cfg.pipelineOptOut && (
         <div className="mb-2 rounded-md bg-strip p-3">
-          <p className="mb-2 text-xs text-l3">
-            该项目还没有研究步骤。从模板库选择（英文综述 / 科研论文 / 数据处理 /
-            毕业论文，以及已另存的自定义模板）写入 .ccode/project.toml，之后可逐步编辑。
-          </p>
+          <p className="mb-2 text-xs text-l3">还没有研究步骤。从模板库选一套，之后可以逐步改。</p>
           <input
             className={`${fieldSm} mb-2 w-full`}
             value={templateTopic}
@@ -1526,9 +1573,14 @@ export default function ProjectGroup({
             <button
               type="button"
               className={ctaSm}
-              onClick={() => setPickerOpen((v) => !v)}
+              onClick={() => {
+                // 模板库实例住在项目设置抽屉里（v3.85），这里必须连抽屉一起开，
+                // 否则只翻了 pickerOpen、界面上什么都不会发生
+                setPickerOpen(true);
+                setSettingsOpen(true);
+              }}
             >
-              {pickerOpen ? "收起模板库" : "选择研究流程模板"}
+              选择研究流程模板
             </button>
             <button
               type="button"
@@ -1574,10 +1626,25 @@ export default function ProjectGroup({
                   <li key={`${i}-${step.name}`} className="group relative min-w-0">
                     <div className="relative flex h-7 items-center px-7">
                       <span
-                        className="min-w-0 flex-1 truncate text-center text-xs text-l2"
-                        title={step.name}
+                        className="flex min-w-0 flex-1 items-center justify-center gap-1 truncate text-center text-xs text-l2"
+                        title={
+                          step.role === "you"
+                            ? `${step.name}（这一步主要靠你）`
+                            : step.role === "both"
+                              ? `${step.name}（你和 AI 一起定）`
+                              : step.name
+                        }
                       >
-                        {step.name}
+                        <span className="min-w-0 truncate">{step.name}</span>
+                        {/* 「轮到我」的一眼扫描（v3.89）：名称带列宽只有 9rem，
+                            塞文字徽标会挤掉步骤名，故只用一个点；完整说明在 title 与流程线里 */}
+                        {(step.role === "you" || step.role === "both") && (
+                          <span
+                            className={`size-1.5 shrink-0 rounded-full ${
+                              step.role === "you" ? "bg-cta" : "bg-l4"
+                            }`}
+                          />
+                        )}
                       </span>
                       <button
                         type="button"
@@ -1696,17 +1763,14 @@ export default function ProjectGroup({
           tone="info"
           className="mb-3"
           onDismiss={() => setTplApplied(false)}
-        >
-          研究流程已就位——第 1 步的「定方向」里有几道选择题，点一下就答完（也可「全部用推荐值」跳过）；
-          拿不准的问题点「其他…」自己写或开聊。定完再点「开始」。
-        </NoticeBar>
+        >研究流程已就位。先到第 1 步「定方向」答几道选择题，再点「开始」。</NoticeBar>
       )}
 
       {/* 人工事项清单已并入聚焦视图（TaskCardsSection 聚焦步骤时顶部渲染）；原 ⋯ 手风琴面板删除 */}
 
       {/* 产物核验手风琴（步骤 ⋯ 菜单触发）：strip 下方就地展开（单开）；root 口径同任务行——已合并读项目根，其余读工作树 */}
       {artStep && artWs && (
-        <div className="mb-3">
+        <div className="mb-4">
           <ArtifactChecklist
             projectPath={projectPath}
             workspaceName={artStep.workspaceName}
@@ -1735,9 +1799,13 @@ export default function ProjectGroup({
               : null
           }
           onDraftChanged={loadFocusDraft}
-          onOpenResources={() => {
+          onOpenResources={(focus) => {
+            // 资源面板已搬进项目设置抽屉（v3.85）：开抽屉 + 展开该区，
+            // 再滚到它（抽屉里内容多时它不一定在首屏）；focus 高亮对应进料入口
+            setSettingsOpen(true);
             setResOpen(true);
-            // 面板在流程线下方：展开后滚过去，否则用户点了没反应
+            setResFocus(focus ?? null);
+            if (focus) window.setTimeout(() => setResFocus(null), 2500);
             requestAnimationFrame(() =>
               resPanelRef.current?.scrollIntoView({
                 behavior: "smooth",
@@ -1745,19 +1813,185 @@ export default function ProjectGroup({
               }),
             );
           }}
+          // 输入准备（v3.86）：文献来源与两个导入入口直接放到流程线「定方向」里，
+          // 不必再进抽屉找。Zotero 选择器本就是根级弹层，任何地方都能拉起
+          onSetLitSource={setLitSource}
+          litBusy={litBusy}
           reviewConflict={focusDesc?.st.key === "blocked"}
           onRestoreWorkspace={
             focusArchivedWs ? () => void restoreWs(focusArchivedWs) : undefined
           }
           onFocusIndex={focusByIndex}
-          onHumanChanged={loadHumanStates}
           onStartStep={(index, originCardId) => startStep(index, originCardId)}
         />
       )}
 
+      {/* ───── 项目设置抽屉（右侧滑出，不是页面、不进侧栏、不占路由） ─────
+          容纳全部项目级低频配置：基本 / 研究流程模板 / 文献与数据 / 定时巡检。
+          内部各块沿用原有的 state 与 handler，只是从详情页的常驻带搬进抽屉。 */}
+      {settingsOpen && (
+        <div
+          className="fixed inset-0 z-40 flex justify-end bg-black/40 ccode-fade"
+          onClick={() => setSettingsOpen(false)}
+        >
+          <aside
+            className="flex h-full w-[34rem] max-w-[92vw] flex-col bg-canvas"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="flex h-12 shrink-0 items-center gap-2 px-5">
+              <h2 className="min-w-0 flex-1 truncate text-base font-semibold text-l1">
+                项目设置
+              </h2>
+              <button
+                type="button"
+                className={actionBtn}
+                onClick={() => setSettingsOpen(false)}
+                aria-label="关闭项目设置"
+              >
+                ✕
+              </button>
+            </header>
+            <div className="min-h-0 flex-1 space-y-5 overflow-auto px-5 pb-6">
+              {project && (
+                <section>
+                  <h3 className="mb-2 text-xs font-medium text-l3">基本</h3>
+                  <div className="rounded-lg bg-strip p-3">
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="w-20 shrink-0 text-xs text-l3">
+                        项目名
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-sm text-l1">
+                        {displayName}
+                      </span>
+                      <button
+                        type="button"
+                        className={actionBtn}
+                        onClick={() => {
+                          setProjectName(project.name);
+                          setRenamingProject(true);
+                          setSettingsOpen(false);
+                        }}
+                      >
+                        重命名
+                      </button>
+                    </div>
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="w-20 shrink-0 text-xs text-l3">
+                        课题主题
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-sm text-l2">
+                        {cfg?.topic?.trim() || (
+                          <span className="text-l4">未填写</span>
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className={actionBtn}
+                        disabled={!cfg}
+                        onClick={() => {
+                          setTopicDraft(cfg?.topic ?? "");
+                          setEditingTopic(true);
+                          setSettingsOpen(false);
+                        }}
+                      >
+                        编辑
+                      </button>
+                    </div>
+                    {/* 全局设定编辑（v3.89）：一行一条「问题：答案」，随 TASK.md 下发每一步 */}
+                    <div className="mb-2 flex items-start gap-2">
+                      <span className="w-20 shrink-0 pt-1 text-xs text-l3">
+                        全局设定
+                      </span>
+                      <span className="flex min-w-0 flex-1 flex-col gap-1">
+                        {/* fieldSm 自带 h-7（单行高），会把 rows={3} 压成一行——
+                            多行输入必须去掉那个固定高度（v3.89 修：4 条设定只看得见 1 条） */}
+                        <textarea
+                          className={`${fieldSm.replace("h-7 ", "")} min-w-0 flex-1 resize-y py-1 leading-5`}
+                          rows={4}
+                          value={globalsDraft}
+                          onChange={(e) => setGlobalsDraft(e.target.value)}
+                          onBlur={() => void saveGlobals()}
+                          placeholder={"综述角度：聚焦储能应用\n目标篇幅：8000 词"}
+                        />
+                        <span className="flex items-center gap-2 text-micro text-l4">
+                          一行一条，写成「问题：答案」；每一步开工时都会带给 AI
+                          {globalsSaved && (
+                            <span className="text-ok-text">✓ 已保存</span>
+                          )}
+                        </span>
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-20 shrink-0 text-xs text-l3">
+                        项目路径
+                      </span>
+                      <span
+                        className="min-w-0 flex-1 truncate font-mono text-micro text-l4"
+                        title={project.path}
+                      >
+                        {project.path}
+                      </span>
+                      <button
+                        type="button"
+                        className={actionBtn}
+                        onClick={() =>
+                          copyText(project.path, "复制项目路径失败")
+                        }
+                      >
+                        复制
+                      </button>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {registered && cfg && (
+                <section>
+                  <h3 className="mb-2 text-xs font-medium text-l3">研究流程</h3>
+                  <div className="rounded-lg bg-strip p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="min-w-0 flex-1 text-xs text-l4">
+                        当前 {cfg.steps.length} 个步骤
+                      </span>
+                      <button
+                        type="button"
+                        className={actionBtn}
+                        onClick={() => setPickerOpen((v) => !v)}
+                        title={
+                          cfg.steps.length === 0
+                            ? "打开模板库选一套研究流程写入项目"
+                            : "另选一个模板；写入时现有步骤被替换，绑定的工作区与资源不受影响"
+                        }
+                      >
+                        {pickerOpen
+                          ? "收起模板库"
+                          : cfg.steps.length === 0
+                            ? "选择模板"
+                            : "更换模板"}
+                      </button>
+                      <button
+                        type="button"
+                        className={actionBtn}
+                        disabled={cfg.steps.length === 0}
+                        title={
+                          cfg.steps.length > 0 ? undefined : "没有可保存的研究步骤"
+                        }
+                        onClick={() => {
+                          setTplSavedMsg(null);
+                          setSavingTemplate(true);
+                          setSettingsOpen(false);
+                        }}
+                      >
+                        另存为模板
+                      </button>
+                    </div>
+                  </div>
+                </section>
+              )}
+
       {/* 模板库选择器：项目菜单与空研究流程「选择研究流程模板」共用的唯一实例 */}
       {registered && cfg && pickerOpen && (
-        <div className="mb-2 rounded-md bg-strip p-2">
+        <div className="mb-4 rounded-md bg-strip p-2">
           <TemplatePicker
             applying={applyingTemplate}
             onApply={(item) => void applyTemplate(item)}
@@ -1770,7 +2004,7 @@ export default function ProjectGroup({
           这里回答「扫到了什么」+「还能从哪儿补」。新注册的项目自动展开：
           原先提示挂在页面底部、又被模板选择层挡住，用户根本看不到扫描发生过 */}
       {registered && cfg && (
-        <div className="mb-2" ref={resPanelRef}>
+        <div className="mb-4" ref={resPanelRef}>
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -1792,54 +2026,26 @@ export default function ProjectGroup({
           </div>
           {resOpen && (
             <div className="mt-1 rounded-md bg-strip p-2">
-              {/* 文献来源：决定检索类步骤的性质。已有完整文献库的人不需要「从零系统检索」，
-                  但**不能直接删掉那一步**——筛选记录（纳入/排除标准与逐条判定）是综述的
-                  可复现性要求，且再全的库也缺最近半年的新工作。所以是让那一步变形为
-                  「盘点 + 查漏补缺」，由 renderTaskMd 的「文献来源」段告诉 agent。
-                  「从 Zotero 导入」会自动置为 zotero；本行是给「文献在本地文件夹」的人用的 */}
+              {/* 「文献来源」选择器已移到流程线「定方向」的输入准备块（v3.86）——
+                  它是开工前必须拍板的事，藏在抽屉三层下面本身就是错的位置，
+                  而且当时与决策项、人工事项一起把同一个问题问了四遍。
+                  这里只留当前值的只读回显 + 跳转，导入动作两处都保留（这里是二级入口）。 */}
               <div className="mb-2 flex flex-wrap items-center gap-1.5">
                 <span className="text-micro text-l4">文献来源</span>
-                {(
-                  [
-                    ["search", "agent 帮我检索"],
-                    ["folder", "我已有文献库（只做筛选与查漏）"],
-                  ] as const
-                ).map(([value, label]) => {
-                  const cur = cfg.litSource?.trim() || "search";
-                  // zotero 也归到「已有文献库」这一侧：它就是已有库的一种，不单列第三个选项
-                  const on =
-                    value === "search" ? cur === "search" : cur !== "search";
-                  return (
-                    <button
-                      key={value}
-                      type="button"
-                      disabled={litBusy}
-                      onClick={() => void setLitSource(value)}
-                      title={
-                        value === "search"
-                          ? "让 agent 按纳入/排除标准从 OpenAlex / Semantic Scholar 等系统检索"
-                          : "已有文献库：检索步骤改为「盘点已有 + 只补缺口」，不从零检索、不重复已有条目"
-                      }
-                      className={`rounded-full px-2 py-0.5 text-micro disabled:opacity-50 ${
-                        on
-                          ? "border border-cta-bd bg-cta text-cta-text"
-                          : "bg-strip text-l3 hover:bg-hover hover:text-l1"
-                      }`}
-                    >
-                      {on && cur === "zotero" && value !== "search"
-                        ? "我已有文献库（Zotero）"
-                        : label}
-                    </button>
-                  );
-                })}
+                <span className="rounded-full bg-inset px-2 py-0.5 text-micro text-l2">
+                  {{
+                    search: "让 agent 检索",
+                    zotero: "我有 Zotero 库",
+                    folder: "我有一堆 PDF / 题录",
+                  }[cfg.litSource?.trim() || "search"] ?? "让 agent 检索"}
+                </span>
+                <span className="text-micro text-l4" title="在流程线的「定方向 → 输入」里更改">
+                  在流程线里改
+                </span>
               </div>
               {(cfg.litSource?.trim() || "search") !== "search" && (
                 <p className="mb-2 text-micro leading-5 text-l4">
-                  检索类步骤已改为「盘点 + 查漏补缺」：agent 先按纳入/排除标准逐条判定你库里的条目、
-                  产出筛选记录，只对明显缺口（如近一年新工作）做补充检索，不重复已有条目。
-                  <span className="text-l4">
-                    　筛选这一步不会跳过——纳入理由是综述可复现性的一部分。
-                  </span>
+                  检索步骤已改为「盘点已有 + 查漏补缺」，筛选这一步不会跳过。
                 </p>
               )}
               {/* 进料口三选一：agent 自己扫 / 你已有的库 / 你手动检索的结果。
@@ -1848,7 +2054,7 @@ export default function ProjectGroup({
                 <span className="text-micro text-l4">从哪儿补</span>
                 <button
                   type="button"
-                  className={actionBtn}
+                  className={`${actionBtn} ${resFocus === "zotero" ? "ring-2 ring-cta" : ""}`}
                   disabled={zoteroBusy}
                   title="从本机 Zotero 库导入：生成 references.bib，已下载的 PDF 按绝对路径登记为资源（只读引用，不复制）。你的 Zotero 库只读不改"
                   onClick={() => void openZotero()}
@@ -1857,7 +2063,7 @@ export default function ProjectGroup({
                 </button>
                 <button
                   type="button"
-                  className={actionBtn}
+                  className={`${actionBtn} ${resFocus === "files" ? "ring-2 ring-cta" : ""}`}
                   title="你在 Undermind / Google Scholar / Elicit 等网页端检索后，把结果导出成 RIS / BibTeX / CSV 文件，点这里导入（可多选）。开工时 agent 会自动解析、按 DOI 去重、并进筛选清单——省掉你手抄一遍"
                   onClick={() => void importSearchResults()}
                 >
@@ -1874,10 +2080,7 @@ export default function ProjectGroup({
                 </button>
               </div>
               {cfg.resources.length === 0 && !discoverState && (
-                <p className="text-xs text-l4">
-                  注册时扫过项目目录，没找到 PDF / CSV / bib 等文件。
-                  上面三个入口都可以补：有 Zotero 库直接导入，或先把文件放进项目目录再「重新扫描目录」。
-                </p>
+                <p className="text-xs text-l4">没扫到 PDF / CSV / bib。用上面的入口导入，或放进项目目录后重新扫描。</p>
               )}
               {cfg.resources.length > 0 && (
                 <ul className="divide-y divide-hairline">
@@ -1936,7 +2139,7 @@ export default function ProjectGroup({
                 </ul>
               )}
               {discoverState && (
-                <div className="mt-2 border-t border-hairline pt-2">
+                <div className="mt-3">
                   {discoverState.items.length === 0 ? (
                     <p className="text-xs text-l4">
                       未扫描到 PDF / CSV / parquet / bib 等资源文件。
@@ -2046,10 +2249,7 @@ export default function ProjectGroup({
                   tone="info"
                   className="mt-2"
                   onDismiss={() => setGitignoreHint(false)}
-                >
-                  数据/产物类大文件建议加入 .gitignore，避免进入 git
-                  历史（git init 生成的 .gitignore 已含常见目录注释）。
-                </NoticeBar>
+                >数据与产物类大文件建议加进 .gitignore。</NoticeBar>
               )}
             </div>
           )}
@@ -2059,6 +2259,11 @@ export default function ProjectGroup({
       {/* 定时任务区块（scheduler.rs）：只显示 projectRoot 命中本项目的任务，运行完成走 scheduler-run-done 事件刷新；
           技能可选后不再科研专属，「不使用研究流程」的项目也照常显示 */}
       {registered && <ScheduleSection projectRoot={projectPath} />}
+            </div>
+          </aside>
+        </div>
+      )}
+      {/* ───── 项目设置抽屉结束 ───── */}
 
       {children({
         focusStepName,
@@ -2082,35 +2287,12 @@ export default function ProjectGroup({
               onSelect: () => openEditor(),
             },
             {
-              // 空步骤项目（含「不使用研究流程」后隐藏横幅的）从这里回流模板库
-              label: pickerOpen
-                ? "收起模板库"
-                : cfg && cfg.steps.length === 0
-                  ? "选择研究流程模板"
-                  : "更换模板",
-              disabled: !cfg,
-              title: !cfg
-                ? "project.toml 尚未加载完成"
-                : cfg.steps.length === 0
-                  ? "打开模板库选一套研究流程写入项目"
-                  : "打开模板库另选一个模板；写入时现有步骤被替换，绑定的工作区与资源不受影响",
-              onSelect: () => setPickerOpen((v) => !v),
-            },
-            {
-              label: "重命名项目",
-              onSelect: () => {
-                setProjectName(project.name);
-                setRenamingProject(true);
-              },
-            },
-            {
-              label: "编辑课题主题",
-              disabled: !cfg,
-              title: cfg ? undefined : "project.toml 尚未加载完成",
-              onSelect: () => {
-                setTopicDraft(cfg?.topic ?? "");
-                setEditingTopic(true);
-              },
+              // 项目级低频配置的单一入口（v3.85）：原先「重命名 / 课题主题 / 更换模板 /
+              // 另存为模板 / 复制路径」五项平铺在这里，加上详情页两条常驻带，
+              // 项目配置散在四处；现在统一进抽屉
+              label: "项目设置…",
+              title: "项目名 / 课题主题 / 研究流程模板 / 文献与数据 / 定时巡检",
+              onSelect: () => setSettingsOpen(true),
             },
             {
               label: "历史",
@@ -2118,23 +2300,9 @@ export default function ProjectGroup({
               onSelect: () => setHistoryOpen(true),
             },
             {
-              label: "另存为模板",
-              disabled: !cfg || cfg.steps.length === 0,
+              label: "从 Ccode 移除",
               title:
-                cfg && cfg.steps.length > 0
-                  ? undefined
-                  : "没有可保存的研究步骤",
-              onSelect: () => {
-                setTplSavedMsg(null);
-                setSavingTemplate(true);
-              },
-            },
-            {
-              label: "复制项目路径",
-              onSelect: () => copyText(project.path, "复制项目路径失败"),
-            },
-            {
-              label: "移除项目注册",
+                "只把项目从 Ccode 列表里摘掉，不动磁盘文件；清除痕迹与删除目录在左侧项目栏右键菜单里",
               onSelect: () => void removeRegistration(),
             },
           ]}
@@ -2195,9 +2363,7 @@ export default function ProjectGroup({
             <h2 className="shrink-0 text-base font-semibold text-l1">
               从 Zotero 导入
             </h2>
-            <p className="mt-1 shrink-0 text-xs text-l3">
-              生成 references.bib；已下载的 PDF 按绝对路径登记为项目资源（只读引用，不复制）。
-              <span className="text-l4">你的 Zotero 库只读不改。</span>
+            <p className="mt-1 shrink-0 text-xs text-l3">生成 references.bib；PDF 只登记位置，不复制。<span className="text-l4">你的 Zotero 库只读不改。</span>
             </p>
             <div className="mt-3 min-h-0 flex-1 space-y-1 overflow-auto">
               {zoteroLib.collections.map((c) => (

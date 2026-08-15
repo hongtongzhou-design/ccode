@@ -109,6 +109,12 @@
   /* 次级实心按钮 */
   --color-btn: #464543;
 
+  /* 开关（Toggle）：滑块恒为浅色、状态由轨道表达。深色沿用原值（外观不变），
+     浅色在 [data-theme$="-light"] 覆写为「白滑块 + 可见灰轨道」——
+     原实现滑块用 bg-l1、轨道用 bg-inset，在浅色主题分别是近黑与近白，成了白底上的黑疙瘩 */
+  --color-switch-off: #1e222c;
+  --color-switch-knob: #e9e6e2;
+
   /* 编辑器面（Monaco 经 getComputedStyle 读这三个变量，比 canvas 更暗半档，代码块感） */
   --color-editor-bg: #0e1015;
   --color-editor-fg: #b3b0aa;
@@ -215,8 +221,8 @@
    （深底浅字 pill 在浅底上同样成立）；link/tabline 按浅底加深。 */
 
 [data-theme="midnight-light"] {
-  --color-rail: #e8eaf0; --color-rail2: #f8f9fc; --color-rail-sel: #dcdfe8;
-  --color-strip: #fbfcfe; --color-canvas: #f4f4f1; --color-inset: #fdfdfe;
+  --color-rail: #e5e5dd; --color-rail2: #f2f2ee; --color-rail-sel: #dcdfe8;
+  --color-strip: #f6f6f4; --color-canvas: #edede9; --color-inset: #fbfbf9;
   --color-raised: #ffffff; --color-bubble: #e4e7ef;
   --color-seg-sel: #cfd3df; --color-hairline: #d5d8e2; --color-field: #b9bdcf;
   --color-l1: #171a26; --color-l2: #3a3f52; --color-l3: #6d7386; --color-l4: #9ba1b4;
@@ -229,8 +235,8 @@
   --color-done: #2e7d5f;
 }
 [data-theme="terracotta-light"] {
-  --color-rail: #ece7e2; --color-rail2: #faf6f3; --color-rail-sel: #e0d9d3;
-  --color-strip: #fcf9f7; --color-canvas: #f5f1ed; --color-inset: #fefcfa;
+  --color-rail: #ebe3db; --color-rail2: #f5f1ed; --color-rail-sel: #e0d9d3;
+  --color-strip: #f8f6f3; --color-canvas: #f2ece7; --color-inset: #fcfaf9;
   --color-raised: #ffffff; --color-bubble: #e8e1da;
   --color-seg-sel: #d3cbc3; --color-hairline: #d8d1ca; --color-field: #bcb3a9;
   --color-l1: #211d1a; --color-l2: #453f3a; --color-l3: #7a726b; --color-l4: #a49b92;
@@ -243,8 +249,8 @@
   --color-done: #4a7d4f;
 }
 [data-theme="ayu-light"] {
-  --color-rail: #efeeea; --color-rail2: #fcfbfa; --color-rail-sel: #e2dfd9;
-  --color-strip: #fdfcfa; --color-canvas: #f8f7f4; --color-inset: #fffefd;
+  --color-rail: #e7e4da; --color-rail2: #f3f2ec; --color-rail-sel: #e2dfd9;
+  --color-strip: #f7f6f3; --color-canvas: #efede6; --color-inset: #fbfbf9;
   --color-raised: #ffffff; --color-bubble: #e7e4de;
   --color-seg-sel: #d4d0c8; --color-hairline: #d9d5cd; --color-field: #bab4a8;
   --color-l1: #20242e; --color-l2: #3f4754; --color-l3: #6c7380; --color-l4: #9ea3ac;
@@ -257,9 +263,10 @@
   --color-done: #567d3d;
 }
 [data-theme="mocha-light"] {
-  /* Catppuccin Latte 官方色板 */
-  --color-rail: #e6e9ef; --color-rail2: #f2f4f9; --color-rail-sel: #d5dae4;
-  --color-strip: #f7f8fc; --color-canvas: #eff1f5; --color-inset: #fafbfe;
+  /* 基于 Catppuccin Latte 色相，按浮起阶梯重排（官方 base/mantle/crust 是「越深越低」，
+     与本应用「越亮越浮起」的方向相反，直接照搬会让 strip/inset/raised 挤在一起） */
+  --color-rail: #e0e4ec; --color-rail2: #f0f2f5; --color-rail-sel: #d5dae4;
+  --color-strip: #f5f6f9; --color-canvas: #ebedf2; --color-inset: #fafbfc;
   --color-raised: #ffffff; --color-bubble: #dfe3ee;
   --color-seg-sel: #c6cadb; --color-hairline: #c9cedd; --color-field: #a6adc2;
   --color-l1: #2a2c3f; --color-l2: #4c4f69; --color-l3: #6c6f85; --color-l4: #9ca0b0;
@@ -272,8 +279,8 @@
   --color-done: #3f7d6a;
 }
 [data-theme="neutral-light"] {
-  --color-rail: #e9e9e9; --color-rail2: #f8f8f8; --color-rail-sel: #dedede;
-  --color-strip: #fafafa; --color-canvas: #f3f3f3; --color-inset: #fdfdfd;
+  --color-rail: #e4e4e4; --color-rail2: #f1f1f1; --color-rail-sel: #dedede;
+  --color-strip: #f6f6f6; --color-canvas: #ededed; --color-inset: #fafafa;
   --color-raised: #ffffff; --color-bubble: #e5e5e5;
   --color-seg-sel: #d0d0d0; --color-hairline: #d6d6d6; --color-field: #bababa;
   --color-l1: #161616; --color-l2: #3a3a3a; --color-l3: #6e6e6e; --color-l4: #9d9d9d;
@@ -286,8 +293,8 @@
   --color-done: #3a7d60;
 }
 [data-theme="dracula-light"] {
-  --color-rail: #ece9f2; --color-rail2: #f9f7fc; --color-rail-sel: #e0dae9;
-  --color-strip: #fcfbfe; --color-canvas: #f4f2f8; --color-inset: #fefdff;
+  --color-rail: #e7e2ef; --color-rail2: #f3f1f7; --color-rail-sel: #e0dae9;
+  --color-strip: #f7f5fa; --color-canvas: #efecf5; --color-inset: #fbfafc;
   --color-raised: #ffffff; --color-bubble: #e6e0ee;
   --color-seg-sel: #d0c9de; --color-hairline: #d5cfe0; --color-field: #b7aec6;
   --color-l1: #241f31; --color-l2: #403a4e; --color-l3: #716a80; --color-l4: #9d97ab;
@@ -301,10 +308,10 @@
 }
 [data-theme="shadcn-light"] {
   /* shadcn 官方浅色骨架（background/foreground/muted/border 映射到浮起梯度） */
-  --color-rail: #f0f2f5; --color-rail2: #fafbfd; --color-rail-sel: #e2e6ec;
-  --color-strip: #fcfcfd; --color-canvas: #f7f8fa; --color-inset: #fefefe;
+  --color-rail: #e0e4ec; --color-rail2: #f0f2f5; --color-rail-sel: #d2d7e3;
+  --color-strip: #f5f6f9; --color-canvas: #ebedf2; --color-inset: #fafbfc;
   --color-raised: #ffffff; --color-bubble: #e6e9ee;
-  --color-seg-sel: #d3d8e0; --color-hairline: #d8dce2; --color-field: #b7bdc7;
+  --color-seg-sel: #c2cad9; --color-hairline: #d8dce2; --color-field: #b7bdc7;
   --color-l1: #101828; --color-l2: #344054; --color-l3: #667085; --color-l4: #98a2b3;
   --color-cta: #dc2626; --color-cta-text: #ffffff; --color-cta-bd: #a83232;
   --color-nav-accent: var(--color-cta);
@@ -322,6 +329,34 @@
   /* diff 增删行：GitHub 式浅底深字（七套浅色共享，截图口径） */
   --color-diff-add-bg: #d9f2e2; --color-diff-add-fg: #177245;
   --color-diff-del-bg: #fbe3e6; --color-diff-del-fg: #b02a42;
+
+  /* 状态语义色浅色口径（v3.85）：深底浅字只在深色主题成立——
+     `--color-ok/err/warn` 原值是 #10331f/#381e24/#37300f 这样的深底，
+     浅色主题不覆写会让全站 bg-ok/bg-err/bg-warn 变成白页上的深色块
+     （与上面 diff 行早已做过的浅底深字修正自相矛盾）。
+     这里按同一手法翻转：底色取浅，文字/圆点取同色相深值——
+     `*-text` 同时供 pill 文字与 size-2 状态圆点使用，故必须保证在浅底上可读。 */
+  --color-ok: #d9f2e2; --color-ok-text: #177245;
+  --color-err: #fbe3e6; --color-err-text: #b02a42;
+  --color-warn: #fdf1cd; --color-warn-text: #8a6100;
+
+  /* diff 增删「行数」文字（text-add/text-del，画在 canvas 上不是画在 pill 上）：
+     深色值 #8fd3a8/#d98a93 在浅底上约 1.8:1，读不了，与 diff 行 fg 取同值 */
+  --color-add: #177245;
+  --color-del: #b02a42;
+
+  /* 开关：白滑块 + 可见灰轨道（深色的 near-black 轨道 / near-white 滑块在浅色下都反了） */
+  --color-switch-off: #ccd1da;
+  --color-switch-knob: #ffffff;
+}
+
+/* 浅色浮层边界：raised 在浅色下是纯白、canvas 是米白，两者几乎同色，
+   而深色用的白色内高光在白底上完全不可见 → 浮层与页面糊在一起。
+   改为极淡内暗边 + 一圈 0.5px 外描线；零偏移零模糊，不违反「零阴影」 */
+[data-theme$="-light"] .ccode-float-surface {
+  box-shadow:
+    inset 0 1px 0 rgb(0 0 0 / 0.04),
+    0 0 0 0.5px var(--color-hairline);
 }
 [data-theme$="-light"] .ccode-app-shell :where(.bg-white\/10) {
   background-color: rgb(0 0 0 / 0.08);

@@ -16,9 +16,12 @@ import {
   PageHeader,
   primaryActionClass,
   secondaryActionClass,
+  searchFieldClass,
 } from "../components/PageFrame";
 import type {
   DiscoveredSkillDto,
+  ProjectConfigReadDto,
+  ProjectDto,
   SkillDto,
   SkillImportResultDto,
   SkillPathDto,
@@ -709,10 +712,7 @@ function OptimizeModal({
         <h2 className="mb-1 text-base font-semibold text-l1">
           ◈ 优化技能：{skill.name}
         </h2>
-        <p className="mb-3 text-xs text-l3">
-          开终端让 Agent 阅读并按你的意见直接改写该技能的
-          SKILL.md；改写结果请审查后再用，技能页的保存/覆盖都会自动备份旧版本。
-        </p>
+        <p className="mb-3 text-xs text-l3">开终端让 Agent 按你的意见改写这个技能；改完记得审查。</p>
         <textarea
           autoFocus
           className={`${fieldClass} mb-3 h-24 resize-y`}
@@ -1141,6 +1141,59 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   const appliedCount = skills.filter((s) =>
     Object.values(s.apps).some(Boolean),
   ).length;
+  // 技能一多（内置 14 + 自建 + GitHub 导入）就只能靠肉眼在分组里找（v3.88 补搜索）。
+  // 范围 = 名称 + 描述 + 分类 + 来源，正文搜索留二期（要后端支持）
+  const [query, setQuery] = useState("");
+  // 「哪些步骤在用」反查（v3.88）：打开预览时扫一次已注册项目的 project.toml，
+  // null = 查询中。纯读，不轮询；单个项目读失败静默跳过（未注册/档案卡缺失是常态）
+  const [skillUsage, setSkillUsage] = useState<
+    { projectPath: string; projectName: string; step: string }[] | null
+  >(null);
+  const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
+
+  useEffect(() => {
+    if (!preview) {
+      setSkillUsage(null);
+      return;
+    }
+    let stale = false;
+    const name = preview.skill.name;
+    setSkillUsage(null);
+    void (async () => {
+      const hits: { projectPath: string; projectName: string; step: string }[] = [];
+      try {
+        const projects = await invoke<ProjectDto[]>("list_projects");
+        for (const p of projects) {
+          try {
+            const read = await invoke<ProjectConfigReadDto>(
+              "read_project_config",
+              { path: p.path },
+            );
+            for (const st of read.config.steps)
+              if (st.skills.includes(name))
+                hits.push({ projectPath: p.path, projectName: p.name, step: st.name });
+          } catch {
+            /* 未注册/档案卡缺失是常态，跳过 */
+          }
+        }
+      } catch {
+        /* 列不出项目就当没有 */
+      }
+      if (!stale) setSkillUsage(hits);
+    })();
+    return () => {
+      stale = true;
+    };
+  }, [preview]);
+  const q = query.trim().toLowerCase();
+  const matched = q
+    ? skills.filter((sk) =>
+        [sk.name, sk.description, sk.category ?? "", sk.source ?? ""]
+          .join("\n")
+          .toLowerCase()
+          .includes(q),
+      )
+    : skills;
 
   return (
     <div className="flex h-full">
@@ -1230,6 +1283,25 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             />
           ) : (
             <div className="mt-4">
+              <div className="mb-2 flex items-center gap-2">
+                <input
+                  className={searchFieldClass}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="搜索技能（名称 / 描述 / 分类 / 来源）"
+                  aria-label="搜索技能"
+                />
+                {q && (
+                  <span className="shrink-0 text-micro text-l4">
+                    {matched.length} / {skills.length}
+                  </span>
+                )}
+              </div>
+              {q && matched.length === 0 && (
+                <p className="py-6 text-center text-xs text-l4">
+                  没有匹配「{query}」的技能
+                </p>
+              )}
               {/* caps 式小字灰表头：弱化只作列定位，hairline 分隔无卡片外框；sticky 用页面底色遮挡滚动内容 */}
               <div>
                 <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_36px] items-center gap-3 border-b border-hairline bg-canvas px-3 py-2 text-xs tracking-wider text-l4">
@@ -1240,11 +1312,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                 </div>
                 {[
                   // 分组顺序 = 技能数组首现顺序；未分类固定沉底（不挡已归组的内容）
-                  ...new Set(skills.map((skill) => skill.category ?? "未分类")),
+                  ...new Set(matched.map((skill) => skill.category ?? "未分类")),
                 ]
                   .sort((a, b) => (a === "未分类" ? 1 : b === "未分类" ? -1 : 0))
                   .map((category) => {
-                  const categorySkills = skills.filter(
+                  const categorySkills = matched.filter(
                     (skill) => (skill.category ?? "未分类") === category,
                   );
                   return (
@@ -1442,6 +1514,37 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           <div className="border-b border-hairline px-3 py-2.5 text-sm leading-5 text-l3">
             {displayDescription(preview.skill.description) ?? (
               <span className="text-l4">—</span>
+            )}
+          </div>
+          {/* 哪些步骤在用（v3.88）：删技能前得知道会影响谁——这条以前完全没有。
+              纯前端反查已注册项目的 steps[].skills，打开预览时读一次，不轮询 */}
+          <div className="border-b border-hairline px-3 py-2.5 text-sm">
+            <div className="mb-1 text-xs text-l4">哪些步骤在用</div>
+            {skillUsage === null ? (
+              <span className="text-xs text-l4">查询中…</span>
+            ) : skillUsage.length === 0 ? (
+              <span className="text-xs text-l4" title="删除它不会影响现有研究流程">
+                没有步骤在用
+              </span>
+            ) : (
+              <ul className="space-y-0.5">
+                {skillUsage.map((u) => (
+                  <li key={`${u.projectPath}/${u.step}`}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectProjectReq(u.projectPath);
+                        setPage("workspaces");
+                      }}
+                      title={`到工作区页查看 ${u.projectName}`}
+                      className="flex w-full min-w-0 items-baseline gap-1.5 rounded-sm px-1 py-0.5 text-left text-xs hover:bg-hover"
+                    >
+                      <span className="shrink-0 text-l4">{u.projectName}</span>
+                      <span className="min-w-0 truncate text-l2">{u.step}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
           <div className="border-b border-hairline px-3 py-2.5 text-sm text-l3">

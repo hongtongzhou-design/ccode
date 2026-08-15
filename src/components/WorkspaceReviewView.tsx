@@ -2481,10 +2481,7 @@ export default function WorkspaceReviewView({
                         ? "同步失败，请从右上角重试"
                         : `与 ${diff.baseBranch} 存在冲突，可从右上角开始解决`}
                 </p>
-                <p className="max-w-xl text-xs text-l4">
-                  两边改了同一个地方，需要你逐个文件选一边。冲突模式只展示本次同步后
-                  真实的任务版和主分支版，不再用普通 merge-base diff 代替当前主分支内容。
-                </p>
+                <p className="max-w-xl text-xs text-l4">两边改了同一个地方，需要你逐个文件选一边。</p>
               </div>
             ) : !hasTaskChanges ? (
               <div className="flex h-full items-center justify-center text-sm text-l4">

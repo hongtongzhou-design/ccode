@@ -1,0 +1,79 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  MODEL_SWITCH,
+  launchModelNote,
+  looksLikeModelId,
+  modelOnProfileSwitch,
+} from "../src/model-switch.ts";
+import { AGENTS } from "../src/types.ts";
+
+test("能力表只收录真实 agent id", () => {
+  const ids = new Set(AGENTS.map((a) => a.id));
+  for (const id of Object.keys(MODEL_SWITCH))
+    assert.ok(ids.has(id), `${id} 不是已知 agent`);
+});
+
+test("单模型 CLI 一律给「只认一个模型」提示", () => {
+  for (const id of ["gemini", "qwen", "kimi", "grok"])
+    assert.match(launchModelNote(id, 1) ?? "", /只认一个模型/, id);
+});
+
+test("codex 与 cursor 给各自的重启/参数提示", () => {
+  assert.match(launchModelNote("codex", 3) ?? "", /重开标签/);
+  assert.match(launchModelNote("cursor", 3) ?? "", /启动参数|不能在会话/);
+});
+
+test("claude-code 超过选择器上限才提示", () => {
+  assert.equal(launchModelNote("claude-code", 5), null);
+  assert.match(launchModelNote("claude-code", 6) ?? "", /第 6 个起/);
+});
+
+test("未知 agent 与不限量 CLI 不啰嗦", () => {
+  assert.equal(launchModelNote("不存在的-agent", 3), null);
+  assert.equal(launchModelNote("opencode", 9), null);
+});
+
+test("模型名软校验放得松（中转模型名千奇百怪，宁可漏报）", () => {
+  for (const ok of [
+    "gpt-4o",
+    "claude-opus-4-8",
+    "deepseek/deepseek-chat",
+    "glm-4.6",
+    "o3",
+    "qwen:7b",
+  ])
+    assert.ok(looksLikeModelId(ok), ok);
+  // 只有纯字母且无分隔符才判为「不像」
+  assert.ok(!looksLikeModelId("随便写的"));
+  assert.ok(!looksLikeModelId("模型"));
+  assert.ok(!looksLikeModelId(""));
+});
+
+test("换 profile 不再静默清掉手填的模型", () => {
+  // 手填值不在两边表里 → 保留 + 打 kept 标记（界面据此给一行说明）
+  assert.deepEqual(
+    modelOnProfileSwitch("my-custom-model-1", ["a-1"], ["b-1", "b-2"]),
+    { model: "my-custom-model-1", kept: true },
+  );
+  // 值本来就是旧 profile 的预设 → 跟着换到新 profile 的默认
+  assert.deepEqual(modelOnProfileSwitch("a-1", ["a-1"], ["b-1", "b-2"]), {
+    model: "b-1",
+    kept: false,
+  });
+  // 新表里已有同名 → 原样留着
+  assert.deepEqual(modelOnProfileSwitch("b-2", ["a-1"], ["b-1", "b-2"]), {
+    model: "b-2",
+    kept: false,
+  });
+  // 空值 → 落新 profile 首个
+  assert.deepEqual(modelOnProfileSwitch("", ["a-1"], ["b-1"]), {
+    model: "b-1",
+    kept: false,
+  });
+  // 新 profile 没配模型：空着（后端会回落 profile.models.first()，即不注入）
+  assert.deepEqual(modelOnProfileSwitch("a-1", ["a-1"], []), {
+    model: "",
+    kept: false,
+  });
+});

@@ -35,12 +35,17 @@ flowchart TB
 
 ## 二、单个步骤的执行闭环（所有步骤通用）
 
-每一步都是「开工确认 → agent 干活 → 人拍板 → 评审合并」的闭环：
+每一步都是「（可选）交代输入与拍板 → agent 干活 → 人验收合并」的闭环。
+界面上的节点链由 `buildStepFlow` 生成（v3.89）：**input → discuss → human(before) → agent →
+human(during/after) → review**，其中 input 与 discuss **有声明才出现**（见
+`docs/conventions/step-panel.md` R1/R2）：
 
 ```mermaid
 flowchart LR
-    K[＋ 一键开步<br/>KickoffConfirmDialog<br/>预览/编辑 TASK.md] --> T[终端拉起 agent<br/>注入简报 + 挂载技能<br/>工作区 worktree 隔离]
-    H1([人工事项 before<br/>如：补文献/配 MCP/备数据]) -.-> T
+    I[① 确定输入<br/>如文献从哪来<br/>asks_lit_source 声明才有] --> D[② 先定几件事<br/>decisions/seeds<br/>默认折叠·可跳过]
+    D --> K[＋ 一键开步<br/>KickoffConfirmDialog<br/>预览/编辑 TASK.md]
+    K --> T[终端拉起 agent<br/>注入简报 + 挂载技能<br/>工作区 worktree 隔离]
+    H1([人工事项 before<br/>如：补文献/备数据]) -.-> T
     T --> X{agent 执行}
     H2([人工事项 during<br/>如：补投付费全文]) -.-> X
     X -->|产出 expectedArtifacts| R[评审合并<br/>改动面板逐 hunk 验收]
@@ -51,6 +56,11 @@ flowchart LR
 
 关键规则：
 
+- **主路径不设门控**：input / discuss / 人工事项一律「只提醒不拦」，「开始」始终可用——
+  直接开工那条路必须敞开，缺的信息由 agent 在对话里问（step-panel.md R6）
+- **要看到数据才定得了的问题不进开工前**：简报写「先报数 → 给建议 → 给兜底不停工」，
+  经 `.ccode/help-wanted.md` 按需问（step-panel.md 第二节）
+- **贯穿全程的决定挂项目层**（`project.toml` 的 `settings`），每步 TASK.md 自动带上
 - 简报三写死：输入路径写死、决策规则写死（拿不准一律纳入标「待确认」）、交付标准写死
 - 拿不准的不裁掉：标 `[待确认]` / `[待核实]` / `[待补实验]`，留人拍板
 - 原始数据与原始结果全程只读 / 进产物目录，不进 git

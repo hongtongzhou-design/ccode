@@ -1644,19 +1644,33 @@ fn ensure_human_task_checks_table(conn: &Connection) -> Result<(), String> {
           project_path TEXT NOT NULL, step TEXT NOT NULL, title TEXT NOT NULL,
           updated_at TEXT, PRIMARY KEY(project_path, step, title));",
     )
-    .map_err(|e| format!("初始化 human_task_checks 表失败: {e}"))
+    .map_err(|e| format!("初始化 human_task_checks 表失败: {e}"))?;
+    // checked 列（v3.89）：0 = 用户**显式取消**。原表只能记「勾了」，
+    // 取消就是删行、回落检测口径——落点里有文件时会立刻自动勾回来，表现为「取消不了」。
+    // 已存在时报错，忽略即可（SQLite 无 IF NOT EXISTS COLUMN）
+    let _ = conn.execute(
+        "ALTER TABLE human_task_checks ADD COLUMN checked INTEGER NOT NULL DEFAULT 1",
+        [],
+    );
+    Ok(())
 }
 
-fn manual_checks_at(conn: &Connection, project_path: &str) -> std::collections::HashSet<(String, String)> {
-    let mut out = std::collections::HashSet::new();
+fn manual_checks_at(
+    conn: &Connection,
+    project_path: &str,
+) -> std::collections::HashMap<(String, String), bool> {
+    let mut out = std::collections::HashMap::new();
     if ensure_human_task_checks_table(conn).is_err() {
         return out;
     }
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT step, title FROM human_task_checks WHERE project_path = ?1")
+    if let Ok(mut stmt) = conn
+        .prepare("SELECT step, title, checked FROM human_task_checks WHERE project_path = ?1")
     {
         if let Ok(rows) = stmt.query_map(params![project_path], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                r.get::<_, i64>(2)? != 0,
+            ))
         }) {
             out.extend(rows.flatten());
         }
@@ -1783,6 +1797,7 @@ fn human_detection_roots(
     roots
 }
 
+
 pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
     let cfg = crate::projects::read_config_at(root).config;
     if cfg.steps.iter().all(|s| s.human_tasks.is_empty()) {
@@ -1803,7 +1818,9 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
             let detected = human_detection_roots(conn.as_ref(), root, &step.workspace_name)
                 .iter()
                 .any(|r| human_target_hit(r, &h.target));
-            let manual_hit = manual.contains(&(step.name.clone(), h.title.clone()));
+            // 手动优先（v3.89）：显式取消（checked=0）时**检测命中也不算完成**——
+            // 否则落点里有文件就会自动勾回来，用户取消不掉（实测 bug）
+            let manual_state = manual.get(&(step.name.clone(), h.title.clone())).copied();
             out.push(HumanTaskStateDto {
                 step: step.name.clone(),
                 title: h.title.clone(),
@@ -1812,8 +1829,11 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
                 timing: h.timing.clone(),
                 optional: h.optional,
                 detected,
-                manual: manual_hit,
-                done: manual_hit || detected,
+                manual: manual_state == Some(true),
+                done: match manual_state {
+                    Some(v) => v,
+                    None => detected,
+                },
             });
         }
     }
@@ -1849,16 +1869,18 @@ pub async fn set_human_task_check(
         let key = root.to_string_lossy().into_owned();
         if checked {
             conn.execute(
-                "INSERT OR REPLACE INTO human_task_checks(project_path, step, title, updated_at)
-                 VALUES(?1, ?2, ?3, ?4)",
+                "INSERT OR REPLACE INTO human_task_checks(project_path, step, title, updated_at, checked)
+                 VALUES(?1, ?2, ?3, ?4, 1)",
                 params![key, step, title, crate::sessions::now_iso()],
             )
             .map_err(|e| format!("勾选人工事项失败: {e}"))?;
         } else {
-            // 取消勾选 = 删行回到纯检测口径（检测命中仍算完成）
+            // 取消勾选 = 落 checked=0（显式取消），不再删行——删行会回落检测口径，
+            // 落点里有文件时立刻自动勾回来，用户取消不掉（v3.89 修）
             conn.execute(
-                "DELETE FROM human_task_checks WHERE project_path = ?1 AND step = ?2 AND title = ?3",
-                params![key, step, title],
+                "INSERT OR REPLACE INTO human_task_checks(project_path, step, title, updated_at, checked)
+                 VALUES(?1, ?2, ?3, ?4, 0)",
+                params![key, step, title, crate::sessions::now_iso()],
             )
             .map_err(|e| format!("取消勾选失败: {e}"))?;
         }
@@ -3299,6 +3321,7 @@ pub async fn read_artifacts_manifest(repo_path: String) -> Result<Vec<ArtifactEn
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     /// 测试也统一走 resolve_binary（与生产代码同一解析路径）
@@ -4970,6 +4993,47 @@ mod tests {
         assert!(dest_for_target(root, "", src).is_err());
     }
 
+    /// 显式取消后，即便落点检测命中也不得自动勾回（v3.89 实测 bug：用户「取消不了」）
+    #[test]
+    fn explicit_uncheck_beats_detection() {
+        let dir = std::env::temp_dir().join(format!("ccode-unchk-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        ensure_human_task_checks_table(&conn).unwrap();
+        let proj = dir.join("p").to_string_lossy().into_owned();
+        let key = ("检索".to_string(), "下载付费墙文献全文".to_string());
+
+        // 勾上
+        conn.execute(
+            "INSERT OR REPLACE INTO human_task_checks(project_path, step, title, updated_at, checked)
+             VALUES(?1,?2,?3,?4,1)",
+            params![proj, key.0, key.1, "2026-08-16T00:00:00Z"],
+        )
+        .unwrap();
+        assert_eq!(manual_checks_at(&conn, &proj).get(&key), Some(&true));
+
+        // 取消：留痕为 false，而不是消失
+        conn.execute(
+            "INSERT OR REPLACE INTO human_task_checks(project_path, step, title, updated_at, checked)
+             VALUES(?1,?2,?3,?4,0)",
+            params![proj, key.0, key.1, "2026-08-16T00:01:00Z"],
+        )
+        .unwrap();
+        let m = manual_checks_at(&conn, &proj);
+        assert_eq!(
+            m.get(&key),
+            Some(&false),
+            "取消必须留痕；删行会让检测命中把它自动勾回来",
+        );
+        // done 判定：Some(false) 一律不完成，不看 detected
+        let done = match m.get(&key).copied() {
+            Some(v) => v,
+            None => true, // 假设检测命中
+        };
+        assert!(!done, "显式取消后，检测命中也不算完成");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// 勾选存取（行在 = 人勾了）：upsert/delete 往返 + 项目间隔离
     #[test]
     fn human_task_checks_roundtrip() {
@@ -4984,17 +5048,24 @@ mod tests {
         )
         .unwrap();
         let set = manual_checks_at(&conn, &proj);
-        assert!(set.contains(&("检索".into(), "下载全文".into())));
+        // 旧行（无 checked 列时写入）默认视为已勾选，向后兼容
+        assert_eq!(set.get(&("检索".into(), "下载全文".into())), Some(&true));
         // 其他项目隔离
         let other = dir.join("p2").to_string_lossy().into_owned();
         assert!(manual_checks_at(&conn, &other).is_empty());
-        // 取消勾选 = 删行
+        // 取消勾选 = 落 checked=0（**不删行**）：删行会回落检测口径，
+        // 落点里有文件时立刻自动勾回来，用户取消不掉（v3.89 修）
         conn.execute(
-            "DELETE FROM human_task_checks WHERE project_path = ?1 AND step = ?2 AND title = ?3",
-            params![proj, "检索", "下载全文"],
+            "INSERT OR REPLACE INTO human_task_checks(project_path, step, title, updated_at, checked)
+             VALUES(?1,?2,?3,?4,0)",
+            params![proj, "检索", "下载全文", "2026-08-12T00:00:00Z"],
         )
         .unwrap();
-        assert!(manual_checks_at(&conn, &proj).is_empty());
+        assert_eq!(
+            manual_checks_at(&conn, &proj).get(&("检索".into(), "下载全文".into())),
+            Some(&false),
+            "显式取消要留痕，不能删行",
+        );
         fs::remove_dir_all(&dir).ok();
     }
 }

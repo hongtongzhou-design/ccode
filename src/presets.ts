@@ -94,4 +94,23 @@ export const PRESETS: Preset[] = [
   // 第三方供应商端点接上也不通，列出来只会误导
   // Grok Build 是 OpenAI 兼容协议（XAI_API_KEY 鉴权），官方端点公开
   { name: "xAI 官方", agent: "grok", baseUrl: "https://api.x.ai/v1" },
+  // grok 归 OpenAI 兼容族，第三方兼容端点同样可用
+  { name: "OpenRouter", agent: "grok", baseUrl: "https://openrouter.ai/api/v1", note: "聚合多家" },
+  { name: "DeepSeek", agent: "grok", baseUrl: "https://api.deepseek.com/v1" },
+  {
+    name: "智谱 GLM",
+    agent: "grok",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+  },
 ];
+
+/**
+ * 没有预设的 agent 及其原因（v3.88）。
+ * 空下拉看起来像功能坏了——两家「本来就不该有预设」必须说清楚，而不是给个空选择器。
+ */
+export const NO_PRESET_REASON: Record<string, string> = {
+  gemini:
+    "用 Google 官方账号/API 时 Base URL 留空即可，不需要填端点。",
+  cursor:
+    "Cursor 的端点是它自家协议（非 OpenAI/Anthropic 兼容），第三方供应商端点接上也不通，所以不设预设。",
+};

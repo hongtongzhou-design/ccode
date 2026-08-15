@@ -1515,3 +1515,36 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+/// 分发三态（v3.88 设置页/MCP 页用）：已开启的 agent 里，哪些的实际落盘条目
+/// 与当前清单产物不一致（= 被外部改过）。
+///
+/// 只读探测，不写任何文件。此前 `entry_modified_externally` 只在删除/改投时用来
+/// 拦「假状态」，界面上看不到——用户不知道自己在 agent 侧手改过的东西会被覆盖。
+#[tauri::command]
+pub async fn mcp_distribution_status(
+    id: String,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let server = read_store()?
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or("找不到该 MCP server")?;
+        let mut out = std::collections::BTreeMap::new();
+        for (agent, on) in &server.apps {
+            if !*on {
+                out.insert(agent.clone(), "off".to_string());
+                continue;
+            }
+            // 探测失败按「已写入」处理：不确定不该报警（假警报比漏报更烦人）
+            let state = match entry_modified_externally(agent, &server) {
+                Ok(true) => "modified",
+                _ => "ok",
+            };
+            out.insert(agent.clone(), state.to_string());
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("查询 MCP 分发状态失败: {e}"))?
+}

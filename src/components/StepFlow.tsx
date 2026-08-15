@@ -17,6 +17,40 @@ import type { StepRunStatus } from "../step-flow";
 /** 步骤内协同流程线（v3.71，聚焦视图顶部）：把这一步里人和 agent 的动作按先后排成有序节点链
  * （种子 → before 事项 → agent 执行 → during 事项 → after 事项 → 评审合并），当前节点高亮。
  *  回答三个问题：这一步谁先谁后（节点顺序）、现在轮到谁（当前节点）、轮到我时在哪操作（节点行就地）。 */
+/** 文献来源选项（值与后端 lit_source 对应）：zotero 与 folder 都属「我已有文献库」，
+ *  区别只在进料方式，故并列三项而不是嵌套两层 */
+const LIT_SOURCES: {
+  id: string;
+  label: string;
+  hint: string;
+  /** 选完之后要做的事（链接文案）；null = 不需要准备什么 */
+  action: string | null;
+  /** 落点聚焦：到「文献与数据」后高亮哪个入口 */
+  focus?: "zotero" | "files";
+}[] = [
+  {
+    id: "search",
+    label: "让 agent 检索",
+    hint: "不用准备，开工即检索。",
+    action: "去补几篇 →",
+    focus: "files",
+  },
+  {
+    id: "zotero",
+    label: "我有 Zotero 库",
+    hint: "读你的 Zotero 库；文献留在原处不搬走。",
+    action: "去导入 Zotero 库 →",
+    focus: "zotero",
+  },
+  {
+    id: "folder",
+    label: "我有一堆 PDF / 题录",
+    hint: "把题录或 PDF 放进项目，开工时自动解析。",
+    action: "去放入题录 / PDF →",
+    focus: "files",
+  },
+];
+
 export default function StepFlow({
   projectPath,
   step,
@@ -35,6 +69,9 @@ export default function StepFlow({
   discussContent,
   litSource,
   onOpenResources,
+  onSetLitSource,
+  litBusy = false,
+  bare = false,
 }: {
   projectPath: string;
   step: ProjectStepDto;
@@ -61,8 +98,15 @@ export default function StepFlow({
   /** 项目的文献来源（project.toml lit_source）：zotero/folder 时，落点在 papers/ 的人工事项
    *  不该再劝人往 papers/ 里塞 PDF——那会造出第二个文献存放处，与已有库各自漂移 */
   litSource?: string;
-  /** 展开项目的「文献与数据」面板：文献类交付统一引到那里，不在每个事项行复制入口 */
-  onOpenResources?: () => void;
+  /** 展开项目的「文献与数据」面板：文献类交付统一引到那里，不在每个事项行复制入口。
+   *  focus = 落地后高亮哪个进料入口（按所选文献来源给） */
+  onOpenResources?: (focus?: "zotero" | "files") => void;
+  /** 输入准备（v3.86，仅 step.asksLitSource 为真的步骤渲染）：文献来源选择 + 就地导入。
+   *  与决策项分属两类——决策项写草稿、纯记录；这里写 config.lit_source 且带动作 */
+  onSetLitSource?: (value: string) => void | Promise<void>;
+  litBusy?: boolean;
+  /** 嵌在「当前步骤卡」里时去掉自带的底色与内边距，由外层卡片统一承载（v3.85 三段式） */
+  bare?: boolean;
   /** agent 节点内嵌内容（如「预览 TASK.md」——TASK.md 是 agent 的合同，属于这个节点） */
   agentContent?: React.ReactNode;
   /** 步骤工作区已归档时 agent 节点的主入口（替代「开始」）：恢复工作区 */
@@ -109,6 +153,8 @@ export default function StepFlow({
   const [decisionError, setDecisionError] = useState<string | null>(null);
   // 「自己写」行内输入：选项不合适时多半只是想填一句自己的答案，
   // 为这个开终端太贵——真要展开讨论才走「开聊」
+  // 决策项折叠态（v3.89）：默认收起——它们不拦开工，摊开像必办清单
+  const [decisionsOpen, setDecisionsOpen] = useState(false);
   const [writeOwn, setWriteOwn] = useState<{ q: string; text: string } | null>(
     null,
   );
@@ -268,6 +314,7 @@ export default function StepFlow({
     states,
     hasDraft,
     runStatus,
+    litSource,
     pendingDecisions: pendingDecisions.length,
   });
   const seeds = step.discussionSeeds ?? [];
@@ -296,10 +343,20 @@ export default function StepFlow({
    *  原来完成态用绿 ✓——勾号在一列圆点里是异类，而且 ok-text 的亮绿在暗色主题下发飘。
    *  改用实心圆 + done 色（与上方大圆步进器的 bg-done 同一枚绿），全站一套语言；
    *  「已完成」的语义还有标题的删除线与降级色兜着，不靠图标独扛 */
+  /** 主干节点的序号（可选区不编号——它们不在时间线上）：
+   *  流程感来自「① → ② → ③」的顺序本身，光靠 ○/● 看不出先后（用户反馈） */
+  const mainOrder = new Map(
+    flow.nodes
+      .filter((n) => n.section === "main")
+      .map((n, i) => [n.key, i + 1] as const),
+  );
+
   function icon(node: StepFlowNode): { text: string; cls: string } {
-    if (node.done) return { text: "●", cls: "text-done" };
-    if (node.key === flow.currentKey) return { text: "●", cls: "text-cta" };
-    return { text: "○", cls: "text-l4" };
+    const n = mainOrder.get(node.key);
+    const num = n ? "①②③④⑤⑥⑦⑧⑨"[n - 1] ?? String(n) : "○";
+    if (node.done) return { text: "✓", cls: "text-done" };
+    if (node.key === flow.currentKey) return { text: num, cls: "text-cta" };
+    return { text: num, cls: "text-l4" };
   }
 
   function nodeActions(node: StepFlowNode) {
@@ -319,13 +376,13 @@ export default function StepFlow({
           return node.done ? null : (
             <button
               type="button"
-              onClick={onOpenResources}
+              onClick={() => onOpenResources?.()}
               title={
                 hasLibrary
                   ? "新文献加进你的文献库后，到「文献与数据」重新导入即可——不必往项目里另放一份"
                   : "到「文献与数据」导入：可从 Zotero 导入、导入 RIS/BibTeX 题录，或把文件放进项目目录后重新扫描"
               }
-              className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1"
+              className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1"
             >
               到「文献与数据」导入
             </button>
@@ -338,7 +395,7 @@ export default function StepFlow({
             disabled={busyTitle !== null}
             onClick={() => void pickFile(node.human!.title)}
             title={`选文件提交到落点 ${node.human!.target}；也可直接把文件拖到这一行`}
-            className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+            className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
           >
             {busyTitle === node.human!.title ? "提交中…" : "提交产物"}
           </button>
@@ -353,17 +410,20 @@ export default function StepFlow({
             <button
               type="button"
               onClick={onRestore}
-              className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110"
+              className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110"
             >
               恢复工作区
             </button>
           );
         }
         return runStatus === "pending" ? (
+          // 唯一主路径（v3.89）：上面那些题都不拦着开工，所以「开始」必须比它们显眼一档。
+          // 新用户直接点它就完事——AI 自己会在对话里问缺的信息
           <button
             type="button"
             onClick={onStart}
-            className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110"
+            title="直接开工也行，AI 会在对话里问你缺的信息"
+            className="shrink-0 rounded-sm border border-cta-bd bg-cta px-3 py-1 text-sm text-cta-text hover:brightness-110"
           >
             开始
           </button>
@@ -371,7 +431,7 @@ export default function StepFlow({
           <button
             type="button"
             onClick={goTerminal}
-            className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover"
+            className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover"
           >
             去终端看看
           </button>
@@ -382,7 +442,7 @@ export default function StepFlow({
           <button
             type="button"
             onClick={goReview}
-            className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110"
+            className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110"
           >
             {reviewConflict ? "去处理冲突" : "去评审"}
           </button>
@@ -393,6 +453,8 @@ export default function StepFlow({
   }
 
   /** 单个节点行（主干与可选区共用）：dense = 可选区的紧凑版（更小字号、不显示 hint） */
+  const hasDiscussNode = flow.nodes.some((n) => n.kind === "discuss");
+
   function renderNode(node: StepFlowNode, dense = false) {
     const isCurrent = node.key === flow.currentKey;
     const ic = icon(node);
@@ -415,9 +477,11 @@ export default function StepFlow({
             ? "bg-cta/10 outline outline-1 outline-cta-bd pl-1.5"
             : isCurrent
               ? // 当前节点只在左侧立一道竖线，不给整块刷底色：
-                // 「定方向」内容高，整块 bg-hover 会变成一大片色板，把主动作「开始」压下去
-                "border-l-2 border-cta pl-1"
-              : "pl-1.5 border-l-2 border-transparent"
+                // 「定方向」内容高，整块 bg-hover 会变成一大片色板，把主动作「开始」压下去。
+                // 竖线走绝对定位压在**序号那一列**（left-[7px]，与 StepperChain 的连接线同轴），
+                // 用 border-l 会画在行最左，与序号差 7px 对不上（用户实测「框线没对上」）
+                "relative pl-1.5 before:absolute before:bottom-1 before:left-[7px] before:top-3 before:w-0.5 before:bg-cta before:content-['']"
+              : "pl-1.5"
         } ${
           // 还轮不到（after 档且 agent 未产出）：整行压暗，不写「等 agent」那种话
           node.kind === "human" &&
@@ -429,10 +493,14 @@ export default function StepFlow({
         }`}
       >
         <div className="flex items-center gap-2">
+          {/* 人工事项行：复选框本身就是状态 + 控件，再画一个 ✓ 是同一件事说两遍
+              （用户实测：一行两个勾）。这里只占位保持与主干节点同列对齐 */}
           <span
-            className={`w-4 shrink-0 text-center text-sm ${ic.cls}`}
+            className={`relative z-10 w-4 shrink-0 bg-inset text-center text-sm ${
+              node.kind === "human" ? "" : ic.cls
+            }`}
           >
-            {ic.text}
+            {node.kind === "human" ? "" : ic.text}
           </span>
           {node.kind === "human" ? (
             <input
@@ -467,16 +535,16 @@ export default function StepFlow({
           </span>
           {/* 可选事项标记：不做也不影响这一步跑完。没有这个标记的话，
               一个永远不打勾的条目看起来就像没做完的必办项 */}
-          {!dense && node.kind === "human" && node.human!.optional && !node.done && (
+          {node.section === "main" &&
+            node.kind === "human" &&
+            node.human!.optional &&
+            !node.done && (
             <span
-              className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-micro text-l4"
+              className="shrink-0 rounded-sm bg-raised px-1.5 py-0.5 text-micro text-l4"
               title="可选：不做也能跑完这一步"
             >
               可选
             </span>
-          )}
-          {isCurrent && !node.done && (
-            <span className="shrink-0 text-micro text-cta">← 当前</span>
           )}
           {nodeActions(node)}
         </div>
@@ -484,21 +552,82 @@ export default function StepFlow({
         {!dense && isCurrent && node.hint && (
           <p className="mt-0.5 pl-9 text-micro text-l4">{node.hint}</p>
         )}
-        {node.kind === "agent" && agentContent && (
-          <div className="mt-0.5 pl-9">{agentContent}</div>
+        {node.kind === "input" && onSetLitSource && (
+          // pl-9 与其余内容区（hint/agentContent）对齐到步骤名左缘，不顶到序号
+          <div className="ml-9 rounded-md bg-strip px-2 py-1.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              {LIT_SOURCES.map((o) => {
+                const on = (litSource || "search") === o.id;
+                return (
+                  <button
+                    key={o.id}
+                    type="button"
+                    disabled={litBusy}
+                    onClick={() => void onSetLitSource(o.id)}
+                    title={o.hint}
+                    className={`rounded-full px-2 py-0.5 text-xs disabled:opacity-50 ${
+                      on
+                        ? "border border-cta-bd bg-cta text-cta-text"
+                        : "bg-inset text-l3 hover:bg-hover hover:text-l1"
+                    }`}
+                  >
+                    {o.label}
+                  </button>
+                );
+              })}
+              {/* 动作链接并进同一行（v3.89）：原先独占一行，还配一句与选项 title 重复的小字。
+                  动作跟着所选来源走；落点统一是「文献与数据」（导入只此一处），
+                  链接常驻——选了让 agent 检索也可能想补几篇 */}
+              {(() => {
+                const cur =
+                  LIT_SOURCES.find((o) => o.id === (litSource || "search")) ??
+                  LIT_SOURCES[0];
+                return onOpenResources && cur.action ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenResources(cur.focus)}
+                    title={cur.hint}
+                    className="ml-auto shrink-0 rounded-sm px-1 py-0.5 text-xs text-l2 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1"
+                  >
+                    {cur.action}
+                  </button>
+                ) : null;
+              })()}
+            </div>
+          </div>
         )}
-        {node.kind === "discuss" && (
+        {/* 想法区与「跟 AI 商量」：discuss 节点存在时挂它，否则挂 agent 节点（v3.89）——
+            内容一字未动，只是换了落点，避免节点被隐藏时这些入口一起消失 */}
+        {(node.kind === "discuss" ||
+          (node.kind === "agent" && !hasDiscussNode)) && (
           <div className="mt-1 space-y-1.5 pl-9">
+            {/* ── 输入准备（v3.86；v3.89 升格为独立 input 节点，排在 AI 干活之前）──
+                · 决策项：答案写进任务书草稿，纯记录，给 agent 看的合同内容
+                · 文献来源：答案写进项目配置 lit_source，要动手（导入），还会改变这一步的性质
+                  （系统检索 → 盘点已有 + 查漏补缺）
+                所以它是「这一步的输入从哪来」，不是「这一步怎么做」，单独成块 + 自带动作按钮。
+                答完且没有待办动作时收成一行，不长期占地方。 */}
             {/* 决策项：可枚举的拍板点一行一题，点选即答——不开终端、不建卡、不切页。
                 真正开放的问题才留给下面的种子 chips 去聊 */}
             {decisions.length > 0 && (
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
-                  <span className="text-micro text-l4">
+                  {/* 默认折叠（v3.89）：这些题**不拦着开工**（不答也能点「开始」），
+                      但摊开成一列待答清单看着像必办任务——每步 0~3 件还没规律，
+                      用户无从预期。降为「想省事就点两下」的快捷方式 */}
+                  <button
+                    type="button"
+                    onClick={() => setDecisionsOpen((v) => !v)}
+                    aria-expanded={decisionsOpen}
+                    className="flex min-w-0 items-center gap-1 text-xs text-l3 hover:text-l1"
+                  >
+                    <span className="w-3 text-l4">
+                      {decisionsOpen ? "▾" : "▸"}
+                    </span>
                     {pendingDecisions.length > 0
-                      ? `要拍板的 ${pendingDecisions.length} 件事`
-                      : `${decisions.length} 件都已拍板`}
-                  </span>
+                      ? `${pendingDecisions.length} 个常见问题，点一下就答完`
+                      : `${decisions.length} 个问题都定好了`}
+                  </button>
                   {pendingDecisions.length > 0 && (
                     <button
                       type="button"
@@ -515,7 +644,8 @@ export default function StepFlow({
                     </button>
                   )}
                 </div>
-                {decisions.map((d) => {
+                {decisionsOpen &&
+                  decisions.map((d) => {
                   const picked = answered.get(d.q.trim());
                   return (
                     <div
@@ -544,7 +674,7 @@ export default function StepFlow({
                                 ? "已选：写在草稿「已定方向」里，点别的选项可改"
                                 : `选它：直接写进草稿「已定方向」，不开会话`
                             }
-                            className={`rounded-full px-2 py-0.5 text-micro disabled:opacity-50 ${
+                            className={`rounded-full px-2 py-0.5 text-xs disabled:opacity-50 ${
                               on
                                 ? "border border-cta-bd bg-cta text-cta-text"
                                 : "bg-strip text-l3 hover:bg-hover hover:text-l1"
@@ -563,7 +693,7 @@ export default function StepFlow({
                             setWriteOwn({ q: d.q, text: picked })
                           }
                           title="你自己写的答案，点击可改"
-                          className="rounded-full border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110"
+                          className="rounded-full border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110"
                         >
                           {picked}
                         </button>
@@ -611,12 +741,12 @@ export default function StepFlow({
                         if (e.key === "Escape") setWriteOwn(null);
                       }}
                       placeholder="自己写一句，回车写进草稿"
-                      className="min-w-0 flex-1 rounded-sm border border-field bg-canvas px-1.5 py-0.5 text-micro text-l1 outline-none focus:border-cta-bd"
+                      className="min-w-0 flex-1 rounded-sm border border-field bg-canvas px-1.5 py-0.5 text-xs text-l1 outline-none focus:border-cta-bd"
                     />
                     <button
                       type="submit"
                       disabled={decisionBusy || !writeOwn.text.trim()}
-                      className="shrink-0 rounded-sm border border-cta-bd bg-cta px-1.5 py-0.5 text-micro text-cta-text hover:brightness-110 disabled:opacity-50"
+                      className="shrink-0 rounded-sm border border-cta-bd bg-cta px-1.5 py-0.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
                     >
                       记下
                     </button>
@@ -642,21 +772,32 @@ export default function StepFlow({
               </div>
             )}
             <div className="flex flex-wrap items-center gap-2">
+              {/* 聊天入口合一（v3.89，用户拍板）：原先「跟 Agent 聊任务书」（写草稿）
+                  与「聊个话题」（只建卡纯聊）并列，但**这个区别对新用户没有意义**——
+                  两个都是「去聊」。合成一个，默认写草稿：聊完有产出，
+                  总好过聊完还要想「刚才那些话去哪了」 */}
               <button
                 type="button"
                 disabled={!draft}
                 onClick={chatDraft}
-                title="开终端和 Agent 一起改任务书草稿（只许它动这一个文件）"
-                className="rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                title="开终端跟 AI 一起把这一步要干什么讲清楚，结论自动写进任务书草稿"
+                className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
               >
-                跟 Agent 聊任务书
+                跟 AI 商量一下
               </button>
+              {/* 明确标成可选（v3.89，用户：「新用户会以为要干嘛」）——
+                  它和「开始」是并列的两条路，不是开工前必经的一步 */}
+              {!draft?.exists && (
+                <span className="text-xs text-l4">
+                  可选 · 拿不准要做什么就先聊聊，结论写成任务书
+                </span>
+              )}
               {draft?.exists && (
                 <button
                   type="button"
                   onClick={() => void openDraftInline()}
                   title="就地查看/编辑草稿，不跳页"
-                  className="rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover"
+                  className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover"
                 >
                   预览/编辑草稿
                 </button>
@@ -670,15 +811,18 @@ export default function StepFlow({
             {/* 预置话题 chips：只列还没开聊过的——开过的已经以话题行躺在下面的清单里，
                 两处都显示会让人以为是两个东西。点击 = 只读开聊（同话题清单口径），
                 「让 agent 直接改草稿」是上面那颗「跟 Agent 聊任务书」的活，两者不重叠 */}
+            {/* 预置话题：不再是独立一区，而是「跟 AI 商量」的现成话头。
+                前缀「聊聊：」让它一眼看出是同一件事的快捷入口，不是第三个功能 */}
             {(openSeeds ?? []).length > 0 && (
               <div className="flex flex-wrap items-center gap-1">
+                <span className="text-xs text-l4">或直接聊：</span>
                 {(openSeeds ?? []).map((seed) => (
                   <button
                     key={seed}
                     type="button"
                     onClick={() => onSeed(seed)}
-                    title="就这个问题开聊：只读讨论不动文件，聊完可「◈ 沉淀进任务书」"
-                    className="rounded-full bg-strip px-2 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
+                    title="就这个问题开聊，结论可以沉淀进任务书"
+                    className="rounded-full bg-strip px-2 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
                   >
                     {seed}
                   </button>
@@ -690,6 +834,9 @@ export default function StepFlow({
                 收进本节点是为了让「一步 = 一条线」，不在流程线旁边另立并列区块 */}
             {discussContent}
           </div>
+        )}
+        {node.kind === "agent" && agentContent && (
+          <div className="mt-0.5 pl-9">{agentContent}</div>
         )}
         {/* 说明常显、不再折叠：按钮收走之后行里本来就空，把唯一有信息量的
             一句话藏进「怎么做 / 落点」等于既占地方又没人看。
@@ -707,8 +854,13 @@ export default function StepFlow({
   }
 
   return (
-    <div ref={containerRef} className="rounded-md bg-inset px-2.5 py-2">
-      <ol className="space-y-1">
+    <div
+      ref={containerRef}
+      className={bare ? "" : "rounded-md bg-inset px-2.5 py-2"}
+    >
+      {/* 主干节点用左侧竖线串起来（连接线落在序号列正下方，1.5px 极淡）：
+          没有连线时三个节点像三条独立的行，读不出「这是一条流程」 */}
+      <ol className="relative space-y-1 before:absolute before:bottom-4 before:left-[7px] before:top-4 before:w-px before:bg-hairline before:content-['']">
         {flow.nodes
           .filter((n) => n.section === "main")
           .map((node) => renderNode(node, false))}
@@ -761,7 +913,7 @@ export default function StepFlow({
                 title={
                   draftPreview ? "回到编辑" : "看渲染后的排版（长草稿好读）"
                 }
-                className="shrink-0 self-center rounded-sm border border-field px-1.5 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
+                className="shrink-0 self-center rounded-sm border border-field px-1.5 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
               >
                 {draftPreview ? "编辑" : "预览"}
               </button>
@@ -780,12 +932,10 @@ export default function StepFlow({
                   setDraftEdit((s) => (s ? { ...s, text: e.target.value } : s))
                 }
                 spellCheck={false}
-                className="min-h-0 flex-1 resize-none rounded-md border border-field bg-canvas p-3 font-mono text-micro leading-5 text-l2 outline-none focus:border-cta-bd"
+                className="min-h-0 flex-1 resize-none rounded-md border border-field bg-canvas p-3 font-mono text-xs leading-5 text-l2 outline-none focus:border-cta-bd"
               />
             )}
-            <p className="mt-2 shrink-0 text-micro text-l4">
-              草稿就是开工时的 TASK.md 来源；「已定方向」小节由上方选项自动维护，手改也生效
-            </p>
+            <p className="mt-2 shrink-0 text-micro text-l4">草稿就是开工时的 TASK.md 来源。</p>
             <div className="mt-3 flex shrink-0 items-center gap-2">
               <button
                 type="button"

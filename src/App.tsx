@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -11,6 +11,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
+import QuickChatModal from "./components/QuickChatModal";
 import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import { LoadingRows, rowActionClass } from "./components/PageFrame";
 import "./App.css";
@@ -91,12 +92,16 @@ function App() {
   const chromeHidden = useAppStore((s) => s.chromeHidden);
   const toggleChromeHidden = useAppStore((s) => s.toggleChromeHidden);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // 「快速开聊」弹层：侧栏常驻入口与 ⌘K 命令共用同一个宿主
+  const [quickChatOpen, setQuickChatOpen] = useState(false);
   // 终端里运行中的 agent 数（任意页面可见，徽标挂在「终端」图标上）
   const runningCount = useAppStore((s) => Object.keys(s.liveSessions).length);
   // 「待你处理」收件箱条目镜像（WorkspacesPage 写入）：侧栏圆点计数 + macOS 标题栏收件箱共用
   const inboxItems = useAppStore((s) => s.inboxItems);
   const inboxCount = inboxItems.length;
+  const contextLabel = useAppStore((s) => s.contextLabel);
   const dismissHelpRequest = useAppStore((s) => s.dismissHelpRequest);
+  const dismissInbox = useAppStore((s) => s.dismissInbox);
   // 类别胶囊：按 key 前缀分组（固定顺序，空类不渲染）
   const inboxGroups = groupInbox(inboxItems);
   // 标题栏收件箱的展开态：当前展开的类别（Ghostty 式下拉；遮罩/Esc/再点关闭）
@@ -223,6 +228,16 @@ function App() {
     return () => unlisten?.();
   }, []);
 
+  // 启动页（设置页可选）：设置载入后只应用一次，之后用户翻页不受影响
+  const startPageAppliedRef = useRef(false);
+  useEffect(() => {
+    if (startPageAppliedRef.current || !settings) return;
+    startPageAppliedRef.current = true;
+    const target = settings.startPage;
+    if (target && target !== page) setPage(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings]);
+
   useEffect(() => {
     loadAll().catch((e) => console.error(e));
     loadSessions().catch((e) => console.error(e));
@@ -305,6 +320,50 @@ function App() {
               chromeHidden ? "" : "border-b border-hairline"
             }`}
           >
+            {/* 全局上下文栏（v3.88）：这条栏在 macOS 上因 Overlay 模式恒占 40px 且不可省
+                （红绿灯要靠 pl-[78px] 让位），此前只在有收件箱条目时才有内容、其余时间纯浪费。
+                左=我在哪、右=在跑什么 + 等我处理什么。
+                （中间曾放过 ⌘K 假输入框，用户否决：顶栏摆输入框不好看；命令面板入口
+                仍在侧栏底部 + ⌘K 快捷键，不另设第二处。）
+                与 v3.38「否决全局顶栏」不冲突：那条否决的是新增垂直占用，这里是利用既有空间。
+                执行态（⌘\）下左中两段隐藏，只留红绿灯让位与收件箱胶囊。 */}
+            {!chromeHidden && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setPage("workspaces")}
+                  title={
+                    contextLabel
+                      ? `当前项目：${contextLabel.project}（点击回工作区页）`
+                      : "还没有选中项目"
+                  }
+                  className="flex h-6 min-w-0 shrink items-center gap-1.5 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
+                >
+                  <span className="shrink-0 text-l4">⛁</span>
+                  <span className="min-w-0 truncate">
+                    {contextLabel?.project ?? "Ccode"}
+                  </span>
+                  {contextLabel?.step && (
+                    <>
+                      <span className="shrink-0 text-l4">·</span>
+                      <span className="min-w-0 truncate">{contextLabel.step}</span>
+                    </>
+                  )}
+                </button>
+                {runningCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setPage("terminal")}
+                    title={`${runningCount} 个 agent 正在运行（点击去终端）`}
+                    className="flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
+                  >
+                    <span className="text-l4">⑂</span>
+                    {runningCount} 运行中
+                  </button>
+                )}
+                <span className="ml-auto" />
+              </>
+            )}
             {inboxGroups.length > 0 && (
               <div className="relative flex items-center gap-1.5">
                 {inboxGroups.map((group) => (
@@ -340,21 +399,23 @@ function App() {
                             <span className="min-w-0 flex-1 truncate text-l2">
                               {item.text}
                             </span>
-                            {item.key.startsWith("help:") && (
-                              <button
-                                type="button"
-                                title="忽略此来源（内容变化后重新出现）"
-                                onClick={() =>
-                                  dismissHelpRequest(
-                                    item.key.slice("help:".length),
-                                    item.dismissSignature ?? "",
-                                  )
-                                }
-                                className="shrink-0 text-l4 hover:text-l1"
-                              >
-                                ✕
-                              </button>
-                            )}
+                            {/* 忽略：help: 走原有的按来源屏蔽，其余六类走通用条目屏蔽
+                                （v3.88；两者都以「状态变化即复现」为口径，忽略 ≠ 漏掉） */}
+                            <button
+                              type="button"
+                              title="忽略（状态变化后会重新出现）"
+                              onClick={() =>
+                                item.key.startsWith("help:")
+                                  ? dismissHelpRequest(
+                                      item.key.slice("help:".length),
+                                      item.dismissSignature ?? "",
+                                    )
+                                  : dismissInbox(item)
+                              }
+                              className="shrink-0 text-l4 hover:text-l1"
+                            >
+                              ✕
+                            </button>
                             <button
                               type="button"
                               onClick={() => {
@@ -414,6 +475,25 @@ function App() {
                   <div className="mb-1 mt-1 px-2 text-micro font-medium tracking-[0.08em] text-l3">
                     {group.label}
                   </div>
+                )}
+                {/* 「快速开聊」是动作不是页面：放在「工作」组首位，回答「我就想随便聊聊」——
+                    其余入口全是项目/流程优先，进来先要建项目太重 */}
+                {group.label === "工作" && (
+                  <button
+                    type="button"
+                    onClick={() => setQuickChatOpen(true)}
+                    title="快速开聊：不建项目直接开一个终端标签"
+                    className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm text-l3 transition-colors hover:bg-hover hover:text-l2 ${
+                      collapsed ? "justify-center" : "px-2.5"
+                    }`}
+                  >
+                    <span
+                      className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"}`}
+                    >
+                      ＋
+                    </span>
+                    {!collapsed && <span className="truncate">快速开聊</span>}
+                  </button>
                 )}
                 {group.items.map((n) => (
                   <button
@@ -562,7 +642,15 @@ function App() {
           </div>
         </main>
         </div>
-        {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
+        {paletteOpen && (
+          <CommandPalette
+            onClose={() => setPaletteOpen(false)}
+            onQuickChat={() => setQuickChatOpen(true)}
+          />
+        )}
+        {quickChatOpen && (
+          <QuickChatModal onClose={() => setQuickChatOpen(false)} />
+        )}
         {/* 全局确认框宿主（confirmDialog）：z-[70]，压过一切覆盖层 */}
         <ConfirmDialogHost />
       </div>

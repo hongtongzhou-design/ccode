@@ -104,11 +104,13 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # tests/workspace-visibility.test.ts）
   git-commit-message.ts      # 空提交信息的本地默认信息生成
   terminal-tab-persistence.ts # 终端标签重启恢复白名单（不含 PTY/密钥/env）
-  terminal-palettes.ts       # 终端调色板共享表（设置页与终端同源）
+  terminal-palettes.ts       # 终端调色板共享表（设置页与终端同源）：四套深色 + 四套配对浅色 twin，
+                             # ANSI 16 色 + 光标 + 选区全在表内；resolvePaletteId 按主题亮暗自动换 twin
+                             # （新增调色板须同步 settings.rs KNOWN_PALETTES，否则被静默丢弃，tests/terminal-palettes.test.ts）
   upstream-note.ts           # brew 最新但上游 npm 更高版本的提示
   command-palette.ts         # 命令面板过滤纯逻辑
   hotkeys.ts                 # 快捷键组合串纯逻辑
-  themes.ts                  # 主题清单单一出处
+  themes.ts                  # 主题清单单一出处 + isLightTheme() 亮暗判定单一出处（禁另造判定）
   profile-copy.ts            # profile 跨 agent 复制纯逻辑
   store.ts                   # zustand 状态
 src-tauri/src/
@@ -193,6 +195,7 @@ src-tauri/src/
 | 安全与数据防护 | `docs/conventions/safety.md` | 密钥/脱敏细节、git 提交与逐 hunk 验收、多阶段 Git、profile 三层验证、会话/配置写操作口径、诊断包、MCP 分发与技能导入导出、CLI 更新、PDF/笔记白名单 |
 | 终端与工作台 | `docs/conventions/terminal.md` | PTY 回落 shell、标签持久化白名单、评审/冲突覆盖层、改动面板、收件箱与注意力规则、键盘流、分屏、关窗守卫、WebGL 探针 |
 | 流水线与项目域 | `docs/conventions/pipeline.md` | 工作区创建/漂移/归档/删除、流水线开步/模板/编辑器、接力与提炼接力、任务卡、人工事项与讨论种子、agent 人工请求（help-wanted）、收件箱分类胶囊、示例课题、白话双层 |
+| 步骤工作面板 | `docs/conventions/step-panel.md` | **新增步骤/模板前必读**：七条硬规则（顺序即语义、空节点不出现、同一事实只说一次、孤立按钮、主路径唯一不设门控、角色标注）、问题该在什么时刻与层级出现（项目层/决策项/按需问/种子/人工事项五选一）、文案与术语、新增模板检查清单 |
 | 主题与设计系统 | `docs/conventions/design-system.md` | 主题令牌、字体栈、线条语言、控件密度、页面框架、对话页三栏、步进器规格、已否决设计 |
 
 ## 路线图（见 docs/architecture.md §11 演进线）

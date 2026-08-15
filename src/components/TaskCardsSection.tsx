@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { marked } from "marked";
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
-import { hoverRevealClass, LoadingRows, Toggle } from "./PageFrame";
+import { hoverRevealClass, LoadingRows, RoleBadge, Toggle } from "./PageFrame";
 import StepSkillsChips from "./StepSkillsChips";
 import StepFlow from "./StepFlow";
 import FuseDraftModal from "./FuseDraftModal";
@@ -65,6 +65,8 @@ export default function TaskCardsSection({
   focusDraft,
   onDraftChanged,
   onOpenResources,
+  onSetLitSource,
+  litBusy,
 }: {
   projectPath: string;
   steps: ProjectStepDto[];
@@ -96,8 +98,11 @@ export default function TaskCardsSection({
   focusDraft?: { relPath: string; text: string | null } | null;
   /** 「◈ 沉淀进任务书」落盘后回调：ProjectGroup 即刻重读 focusDraft（不等页面刷新） */
   onDraftChanged?: () => void;
-  /** 展开「文献与数据」面板：流程线里的文献类交付统一引到那里 */
-  onOpenResources?: () => void;
+  /** 展开「文献与数据」面板：流程线里的文献类交付统一引到那里（focus 高亮对应进料入口） */
+  onOpenResources?: (focus?: "zotero" | "files") => void;
+  /** 输入准备（v3.86）：透传给流程线「定方向」节点的文献来源选择与就地导入 */
+  onSetLitSource?: (value: string) => void | Promise<void>;
+  litBusy?: boolean;
 }) {
   const cards = useAppStore((s) => s.taskCards[projectPath]);
   const loadTaskCards = useAppStore((s) => s.loadTaskCards);
@@ -106,6 +111,7 @@ export default function TaskCardsSection({
   const deleteCard = useAppStore((s) => s.deleteCard);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
+  const setSessionScopeReq = useAppStore((s) => s.setSessionScopeReq);
   const updateSettings = useAppStore((s) => s.updateSettings);
   // 想法期只读保护开关（settings.json，默认开）
   const discussGuard = useAppStore((s) => s.settings?.discussReadonly !== false);
@@ -546,7 +552,7 @@ export default function TaskCardsSection({
     <div className="mb-2">
       <div className="flex items-center gap-2">
         <span className="text-xs text-l3">
-          {focusStep ? "这一步怎么走" : "任务卡"}
+          {focusStep ? "这一步的流程" : "任务卡"}
           {!focusStep && cards && cards.length > 0 ? `（${cards.length}）` : ""}
         </span>
         {/* 主仓改动协同提醒（与开工弹层同款口径，只提醒不阻断）：小 chip 降噪，点击跳改动面板 */}
@@ -557,17 +563,22 @@ export default function TaskCardsSection({
             title={`你在项目文件夹里改了 ${mainDirty} 个文件，还没存入历史（文件本身不会丢）。每一步的 agent 在一份独立副本里干活，只看得到最近一次存入历史的内容——想让它看到这些改动，点这里先存一下`}
             className="ml-auto flex shrink-0 items-center gap-1 rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2"
           >
-            <span className="inline-block size-1.5 rounded-full bg-warn" />
+            {/* 状态圆点用 warn 的文字档：底色档在浅色主题是浅黄，1.5px 圆点会看不见 */}
+            <span className="inline-block size-1.5 rounded-full bg-warn-text" />
             {mainDirty} 处改动未存入历史
           </button>
         )}
         {/* 「想法期只读保护」开关已迁入聚焦态想法区标题行（它只管想法卡的只读纯聊一路） */}
       </div>
       {error && <p className="mt-1 text-xs text-err-text">{error}</p>}
-      {/* 聚焦头部：‹ › 箭头切步骤（与步进器大圆同口径）+ 步骤名 + 状态短语（父级 describeStep 口径）。
-          聚焦态下步骤名只出现在这里与流程线 agent 节点，桶头不再重复 */}
-      {focusStep && focusStepDto && (
-        <div className="mt-1 flex items-center gap-2">
+      {/* ───── 当前步骤卡（v3.85 三段式的第②段）─────
+          「现在该干嘛」以前摊在三处：步进器给状态色、聚焦头给白话短语、流程线给动作，
+          三者是三条独立细带（这也是「详情页不够清楚 / 线条化」的直接来源）。
+          这里把聚焦头与流程线并进同一张卡：卡头 = 步骤名 + 白话状态，卡身 = 流程线（含唯一主动作）。
+          StepFlow 传 bare 去掉自带底色，由这张卡统一承载。 */}
+      {focusStep && focusStepDto ? (
+        <div className="mt-2 rounded-lg bg-inset p-3">
+          <div className="mb-2 flex items-center gap-2">
           {onFocusIndex && (
             <button
               type="button"
@@ -581,6 +592,9 @@ export default function TaskCardsSection({
             </button>
           )}
           <span className="text-sm font-semibold text-l1">{focusStep}</span>
+          {/* 角色标记（v3.89）：步骤名保留学术术语，另标「这一步轮到谁」——
+              用户扫一眼就知道哪几步要自己出场，流程感来自角色交替而非序号 */}
+          {focusStepDto && <RoleBadge role={focusStepDto.role} />}
           {onFocusIndex && (
             <button
               type="button"
@@ -601,22 +615,28 @@ export default function TaskCardsSection({
             <span className="text-xs text-l3">{focusStatusText}</span>
           )}
         </div>
-      )}
-      {focusStepDto && (
-        <div className="mt-1">
           {/* 步骤内协同流程线（v3.71）：人/agent 动作按先后排成节点链，当前节点就地操作。
               想法区经 discussContent 收进 discuss 节点内（原先是流程线上方的并列 strip，
               两块并排会把「一步 = 一条线」的时序感冲掉） */}
           <StepFlow
+            bare
             discussContent={
               <div className="mt-1">
                 {/* 想法区（v3.80）：自由想法卡（kind=idea）——只读纯聊 + ◈ 沉淀进任务书；
                     「想法期只读保护」开关只管只读纯聊这一路，设置页不加行 */}
-                <div className="flex items-center gap-2">
-                  <span className="text-micro text-l4">
-                    话题{ideaCards.length > 0 ? `（${ideaCards.length}）` : ""}
-                  </span>
-                  {ideaFormOpen ? (
+                {/* 「话题」区（v3.89）：主聊天入口已合并到流程线的「跟 AI 商量一下」，
+                    这里只作**已聊过话题的归档清单**——没聊过时整个标签不渲染，
+                    否则「话题 / ＋ 聊个话题 / 跟 AI 商量」三个入口并排，新用户分不清 */}
+                <div className="group flex items-center gap-2">
+                  {ideaCards.length > 0 && (
+                    <span className="text-xs text-l4">
+                      聊过的（{ideaCards.length}）
+                    </span>
+                  )}
+                  {/* 「＋ 话题」只在已聊过话题时出现（v3.89）：主聊天入口是流程线的
+                      「跟 AI 商量一下」，这里是给已有讨论再起一个分支用的。
+                      零话题时它是个没有上下文的孤立按钮，用户只会问「这是干嘛的」 */}
+                  {ideaCards.length === 0 && !ideaFormOpen ? null : ideaFormOpen ? (
                     <form
                       onSubmit={(e) => void submitCreateIdea(e)}
                       className="flex min-w-0 flex-1 items-center gap-1"
@@ -647,12 +667,15 @@ export default function TaskCardsSection({
                         setIdeaName("");
                         setIdeaFormOpen(true);
                       }}
-                      title="起个话题开聊：只读讨论不动文件，聊完可「◈ 沉淀进任务书」把结论追加进草稿"
-                      className={`${actionBtn} text-l4 hover:text-l1`}
+                      title="自己起个话题开聊，结论可以沉淀进任务书"
+                      className={`${actionBtn} text-l4 hover:text-l1 ${hoverRevealClass}`}
                     >
-                      ＋ 聊个话题
+                      ＋ 话题
                     </button>
                   )}
+                  {/* 跟随想法区同步出现（v3.89，用户要求）：没聊过话题时它没有约束对象，
+                      孤零零挂在右下角只会让人问「这管的是什么」 */}
+                  {ideaCards.length > 0 && (
                   <span
                     className="ml-auto flex shrink-0 items-center gap-1"
                     title={
@@ -661,7 +684,7 @@ export default function TaskCardsSection({
                         : `${guardAgentLabel} 没有只读启动参数：开启后只能在指令里嘱咐它别动文件，agent 可以无视（软约束）。要硬保护请换 Claude Code / Codex / Gemini / Kimi / CodeBuddy / Cursor / Grok`
                     }
                   >
-                    <span className="text-micro text-l4">只读保护</span>
+                    <span className="text-xs text-l4">聊天时不让 AI 改文件</span>
                     {/* 如实标注当前 agent 有没有硬保护：不标的话开关会沉默降级，
                         而头脑风暴恰恰最依赖「它不会动我文件」这个假设 */}
                     {discussGuard && !guardHard && (
@@ -676,12 +699,13 @@ export default function TaskCardsSection({
                           discussReadonly: checked,
                         }).catch((e) => setError(String(e)))
                       }
-                      label="想法期只读保护"
+                      label="聊的时候不让 AI 改文件"
                     />
                   </span>
+                  )}
                 </div>
                 {ideaCards.length > 0 && (
-                  <ul className="mt-1 divide-y divide-hairline">
+                  <ul className="mt-1 space-y-0.5">
                     {ideaCards.map(renderIdeaCard)}
                   </ul>
                 )}
@@ -703,15 +727,36 @@ export default function TaskCardsSection({
             onDraftChanged={onDraftChanged}
             litSource={cfg.litSource}
             onOpenResources={onOpenResources}
+            onSetLitSource={onSetLitSource}
+            litBusy={litBusy}
             agentContent={
-              <button
-                type="button"
-                onClick={() => onPreviewTaskMd(focusStepDto.name)}
-                title="预览该步骤当前 TASK.md 拼装结果（模板简报 + 提货单）"
-                className={`${actionBtn} text-l4 hover:text-l1`}
-              >
-                预览 TASK.md
-              </button>
+              <span className="flex flex-wrap items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => onPreviewTaskMd(focusStepDto.name)}
+                  title="预览该步骤当前 TASK.md 拼装结果（模板简报 + 提货单）"
+                  className={`${actionBtn} text-l4 hover:text-l1`}
+                >
+                  预览 TASK.md
+                </button>
+                {/* 反向链接（v3.88）：会话早就带 stepName，但只在对话页单向展示、没有入口。
+                    这里落成结构化 scope chip，不是往搜索框塞字符串 */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSessionScopeReq({
+                      kind: "step",
+                      value: focusStepDto.name,
+                      label: focusStepDto.name,
+                    });
+                    setPage("sessions");
+                  }}
+                  title="到对话页只看这一步的会话"
+                  className={`${actionBtn} text-l4 hover:text-l1`}
+                >
+                  本步骤的对话
+                </button>
+              </span>
             }
             ws={workspaces.find(
               (w) =>
@@ -729,7 +774,7 @@ export default function TaskCardsSection({
             onChanged={onHumanChanged}
           />
         </div>
-      )}
+      ) : null}
       {/* 「未挂步骤」桶：空时整桶不渲染（它出现时必带卡）；无研究步骤的项目只有这一桶 */}
       {unattached && unattached.cards.length > 0 && (
         <div className="group mt-1">
@@ -776,7 +821,8 @@ export default function TaskCardsSection({
               </span>
             )}
           </div>
-          <ul className="divide-y divide-hairline">
+          {/* 行间不画分隔线：行本身有 hover 高亮做分隔感（去线条化，v3.85） */}
+          <ul className="space-y-0.5">
             {unattached.cards.map(renderCard)}
           </ul>
         </div>

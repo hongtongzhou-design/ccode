@@ -17,16 +17,24 @@ export interface PipelineTemplateDef {
   name: string;
   description: string;
   steps: ProjectStepDto[];
+  /** 全局设定的建议项（v3.89）：贯穿全程的决定——应用模板时预填进项目层，
+   *  而不是塞进某一步的决策项（那属层级错配：它们决定后面每一步）。
+   *  形如「综述角度：」的空答案，用户在项目设置里补全 */
+  projectSettings?: string[];
 }
 
 /** 英文综述（review）：文献检索 → 精读笔记 → 大纲 → 初稿 → 润色定稿 */
 const REVIEW_STEPS: ProjectStepDto[] = [
   {
     name: "文献检索与筛选",
+    role: "both",
     workspaceName: "lit-search",
     brief:
       "输入：课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源推断一个最可能的主题，写进 papers/screening.md 开头「检索主题假设」一节，并按该假设执行到底，不留「待定」）。全程按 lit-search 技能执行：\n" +
-      "1. 制定纳入/排除标准（年份、语言、来源级别、相关性口径），写进 papers/screening.md；\n" +
+      "1. 制定纳入/排除标准（年份、语言、来源级别、相关性口径），写进 papers/screening.md。" +
+      "**先粗检一轮报数再定标准**：用主题词在 OpenAlex 粗查命中量，把「命中约 N 篇」与你建议的标准写进 " +
+      ".ccode/help-wanted.md 问用户一句（附兜底：若未回复则按你建议的标准继续），写完不要停工、按兜底往下做。" +
+      "——标准松紧取决于命中量，开工前问用户等于让他在没有数字的时候猜；\n" +
       "2. 先解析人工导入的题录（RIS/BibTeX/CSV），两处都要看：① 工作区内 papers/imports/ 目录；② 本文件「项目资源」段中类型为「引文」的条目、以及「上一步产物（提货单）」段中来自「人工交付」的条目——这两类给的是绝对路径，按路径直读、勿复制进工作区（开工前导入的题录多半在这里，工作区不含主仓未提交的文件）。两处都没有才跳过。解析后按 lit-search 技能口径去重合并进候选池，每条保留来源标注；\n" +
       "3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；\n" +
       "4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律纳入并标注「待确认」，不允许自行裁掉；\n" +
@@ -39,16 +47,11 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "papers/to-fetch.md",
     ],
     skills: ["lit-search"],
+    // 这一步的输入是文献，开工前必须先拍板「从哪来」：流程线「定方向」里出现
+    // 文献来源选择器 + 就地导入入口（答案写 config.litSource，与只写草稿的 decisions 分属两类）
+    asksLitSource: true,
     run: [],
     humanTasks: [
-      {
-        title: "补充你已知的关键文献",
-        guidance:
-          "agent 会系统检索 OpenAlex / Semantic Scholar 等可程序化库并按 DOI 去重；你补的是它搜不到的那部分——Undermind / Google Scholar / Elicit 等网页端的语义发现结果，或你读过、认定必须纳入的文献。到「文献与数据」导入即可（支持 Zotero 库、RIS/BibTeX 题录）。不补也能跑。",
-        target: "papers/",
-        timing: "before",
-        optional: true,
-      },
       {
         title: "下载付费墙文献全文",
         guidance:
@@ -58,23 +61,10 @@ const REVIEW_STEPS: ProjectStepDto[] = [
         optional: true,
       },
     ],
-    decisions: [
-      {
-        q: "综述角度怎么收",
-        options: ["领域全景铺开", "聚焦某个子问题/结局"],
-      },
-      {
-        q: "纳入标准定多严",
-        options: ["只要高质量期刊/顶会", "含观察性研究与预印本"],
-      },
-      {
-        q: "检索范围铺多广",
-        options: [
-          "免 key 的 OpenAlex/S2/arXiv 够用",
-          "另加机构订阅库（需你提供 key）",
-        ],
-      },
-    ],
+    // 「纳入标准定多严」「检索范围铺多广」已移除（v3.89）：这两件事**要看到命中量才定得了**，
+    // 开工前问等于要用户在信息最少时做最需要信息的决定。改为 agent 粗检报数后经
+    // help-wanted.md 按需问（见上方简报第 1 条），问题出现在它真正该出现的时刻。
+    decisions: [],
   },
   {
     name: "文献精读与笔记",
@@ -94,7 +84,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       {
         title: "继续补投付费全文",
         guidance:
-          "上一步 papers/to-fetch.md 列出的付费文献，拿到后到「文献与数据」导入；agent 收尾前会重读全文、更新对应「仅摘要」笔记。",
+          "上一步 papers/to-fetch.md 列出的付费文献，拿到后放进 papers/ 或加进你的文献库再到「文献与数据」导入，两种都算完成；agent 收尾前会重读全文、更新对应「仅摘要」笔记。",
         target: "papers/*.pdf",
         timing: "during",
         optional: true,
@@ -109,6 +99,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
   },
   {
     name: "综述大纲",
+    role: "you",
     workspaceName: "outline",
     brief:
       "输入：notes/ 全部笔记、papers/included.md 与 references.bib（已随 main 合并在本工作区内）。框架构造全程按 review-framework 技能执行（空白清单 → 范式卡片 → 融合）：\n" +
@@ -149,17 +140,10 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     expectedArtifacts: ["manuscript/draft.md"],
     skills: ["review-writing"],
     run: [],
-    decisions: [
-      { q: "目标篇幅", options: ["6000-8000 词", "4000 词以内", "1 万词以上"] },
-      { q: "读者与文风", options: ["偏同行专家", "偏入门科普"] },
-      {
-        q: "这篇综述的去向",
-        options: ["投期刊", "毕业论文的一章", "课程作业"],
-      },
-    ],
   },
   {
     name: "润色与定稿",
+    role: "you",
     workspaceName: "polish",
     brief:
       "输入：manuscript/draft.md 与 references.bib（已随 main 合并在本工作区内）。\n" +
@@ -192,6 +176,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
 const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
   {
     name: "选题与文献调研",
+    role: "both",
     workspaceName: "lit-survey",
     brief:
       "输入：英文综述模板的 notes/ 与 references.bib、数据处理模板的 analysis/ 分析报告与清洗后数据（接自上游模板时随仓库合并自带；独立启动本项目时，先把上游产物放入对应目录，或在资源面板绑定上游项目目录；没有上游产物时按下面流程自行检索补齐）。\n" +
@@ -204,16 +189,11 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md（无付费文献则注明为空）、notes/、survey/literature.md、survey/gap-analysis.md 均存在，研究问题明确唯一，references.bib 条目无空缺字段。",
     expectedArtifacts: ["papers/", "notes/", "survey/", "references.bib"],
     skills: ["lit-search", "lit-notes"],
+    // 这一步的输入是文献，开工前必须先拍板「从哪来」：流程线「定方向」里出现
+    // 文献来源选择器 + 就地导入入口（答案写 config.litSource，与只写草稿的 decisions 分属两类）
+    asksLitSource: true,
     run: [],
     humanTasks: [
-      {
-        title: "补充你已知的关键文献",
-        guidance:
-          "agent 会系统检索 OpenAlex / Semantic Scholar 等可程序化库并按 DOI 去重；你补的是它搜不到的那部分——Undermind / Google Scholar / Elicit 等网页端的语义发现结果，或你读过、认定必须纳入的文献。到「文献与数据」导入即可（支持 Zotero 库、RIS/BibTeX 题录）。不补也能跑。",
-        target: "papers/",
-        timing: "before",
-        optional: true,
-      },
       {
         title: "确认研究问题",
         guidance:
@@ -232,19 +212,12 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       },
     ],
     decisions: [
-      {
-        q: "课题边界收多宽",
-        options: ["只盯准备做的那条线", "铺满整个方向"],
-      },
-      {
-        q: "研究问题怎么选",
-        options: ["追热点求稳妥", "押高风险高回报的 gap"],
-      },
       { q: "数据从哪来", options: ["公开数据集够用", "自己采集/申请"] },
     ],
   },
   {
     name: "实验设计",
+    role: "both",
     workspaceName: "exp-design",
     brief:
       "输入：survey/gap-analysis.md 确定的研究问题、notes/ 文献笔记与 references.bib（已随 main 合并在本工作区内）。\n" +
@@ -282,7 +255,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     workspaceName: "exp-run",
     brief:
       "输入：design.md 的实验矩阵（已随 main 合并在本工作区内）。\n" +
-      "1. 按 design.md 实现实验代码，放入 experiments/（脚本可重复执行，参数集中在文件头或配置文件）；\n" +
+      "1. 按 design.md 实现实验代码，放入 experiments/（脚本可重复执行，参数集中在文件头或配置文件）。先试跑一组估算单次耗时与显存/内存占用，若整个矩阵在本机跑不完（估算 >8 小时或内存不足），把估算值与建议写进 .ccode/help-wanted.md 问用户要不要上集群（附兜底：先按可跑的子集跑，不停工）；\n" +
       "2. 逐项跑实验矩阵；标「裁剪」的组合跳过并在结果记录中说明；\n" +
       "3. 原始结果与日志写入项目产物目录（见下方「产物目录」段；未配置时用项目根 artifacts/），不要提交进 git；工作区内只提交代码与 results/summary.md（每行一项实验：配置、主指标数值、产物目录中的结果路径）；\n" +
       "4. 失败的实验不删除日志：在 results/summary.md 标注「失败」与原因，按 design.md 风险清单的备选方案重跑一次，仍失败则记录后继续下一项。\n" +
@@ -300,11 +273,12 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       },
     ],
     decisions: [
-      { q: "算力怎么排", options: ["本机跑", "上集群/云"] },
+
     ],
   },
   {
     name: "结果分析",
+    role: "both",
     workspaceName: "exp-analysis",
     brief:
       "输入：results/summary.md 与产物目录中的原始结果（路径见 summary.md 逐行记录）。\n" +
@@ -356,6 +330,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
   },
   {
     name: "润色与投稿准备",
+    role: "you",
     workspaceName: "polish",
     brief:
       "输入：manuscript/draft.md、analysis/results-table.md、references.bib（已随 main 合并在本工作区内）。\n" +
@@ -381,7 +356,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       },
     ],
     decisions: [
-      { q: "目标期刊怎么定", options: ["冲高一档", "求稳妥投"] },
+      
     ],
     // P4 quarto 渲染：定稿 paper-final.md → paper-final.pdf；RX4a 追加 export-docx → paper-final.docx
     run: [
@@ -403,6 +378,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
 const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
   {
     name: "数据登记与检查",
+    role: "both",
     workspaceName: "data-inspect",
     brief:
       "输入：项目已登记的数据资源（见下方「项目资源」段；无登记资源时扫描项目目录中的 CSV/parquet/JSON 等数据文件，并把扫描依据写进报告）。全程只读：原始数据一个字节都不改。\n" +
@@ -447,8 +423,8 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
     workspaceName: "data-clean",
     brief:
       "输入：data-dictionary.md（已随 main 合并在本工作区内；其中「待确认」字段若已由人补全口径，以补全值为准）。全程按 data-clean 技能执行：规则先行、原始数据只读。\n" +
-      "1. 清洗规则逐项写死再动手：缺失值处理（删除/填充及填充值）、去重键、异常值边界、类型转换，写入 cleaning/rules.md，每条规则注明依据，不允许「视情况而定」项；\n" +
-      "2. 粒度/合并拿不准时按确定规则办：保持原始粒度不聚合、多表不合并，在 rules.md 标 [待确认] 后继续其余规则，不停工等待；\n" +
+      "1. **先报数再定规则**：统计各字段缺失率、重复行数、表间关系与行数量级，把「缺失率 Top5 字段 / 建议的处理方式 / 建议的分析粒度 / 要不要合表」写进 .ccode/help-wanted.md 问用户一句（附兜底：若未回复则按你建议的规则继续），写完不要停工、按兜底往下做。——这几件事要看到数据长什么样才定得了，开工前问等于让用户猜；\n" +
+      "2. 清洗规则逐项写死再动手：缺失值处理（删除/填充及填充值）、去重键、异常值边界、类型转换，写入 cleaning/rules.md，每条规则注明依据，不允许「视情况而定」项；\n" +
       "3. 清洗脚本放入 cleaning/（可重复执行；输入只读原始数据，不原地修改）；\n" +
       "4. 处理后的数据写入项目产物目录（见下方「产物目录」段；未配置时用项目根 artifacts/），不进 git；\n" +
       "5. 清洗报告 cleaning/cleaning-report.md：每条规则影响的行数、丢弃数据的清单与原因、清洗前后规模对比，[待确认] 规则单列一节。\n" +
@@ -466,13 +442,12 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
       },
     ],
     decisions: [
-      { q: "缺失值怎么处理", options: ["能填就填", "直接删除缺失行"] },
-      { q: "分析粒度", options: ["保持原始粒度不聚合", "按人聚合", "按天聚合"] },
-      { q: "多表要不要先合并", options: ["不合并，保持多表", "合并成一张宽表"] },
+
     ],
   },
   {
     name: "探索性分析",
+    role: "both",
     workspaceName: "data-eda",
     brief:
       "输入：产物目录中清洗后的数据与 cleaning/rules.md（已随 main 合并在本工作区内）。全程按 data-eda 技能执行：分布/相关/异常全覆盖不挑选、图表可复现、发现可回溯。\n" +
@@ -515,6 +490,7 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
 const THESIS_STEPS: ProjectStepDto[] = [
   {
     name: "开题与文献综述",
+    role: "both",
     workspaceName: "proposal",
     brief:
       "输入：综述线产出的 notes/ 文献笔记与 references.bib（接自上游英文综述/科研论文模板时随仓库合并自带；独立启动本项目时，先把上游产物放入对应目录，或在资源面板绑定上游项目目录；没有上游产物时按下面第 1-3 条自行检索补齐）。\n" +
@@ -533,16 +509,11 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "chapters/literature-review.md",
     ],
     skills: ["lit-search", "lit-notes", "proposal-writer"],
+    // 这一步的输入是文献，开工前必须先拍板「从哪来」：流程线「定方向」里出现
+    // 文献来源选择器 + 就地导入入口（答案写 config.litSource，与只写草稿的 decisions 分属两类）
+    asksLitSource: true,
     run: [],
     humanTasks: [
-      {
-        title: "补充你已知的关键文献",
-        guidance:
-          "agent 会系统检索 OpenAlex / Semantic Scholar 等可程序化库并按 DOI 去重；你补的是它搜不到的那部分——Undermind / Google Scholar / Elicit 等网页端的语义发现结果，或你读过、认定必须纳入的文献。到「文献与数据」导入即可（支持 Zotero 库、RIS/BibTeX 题录）。不补也能跑。",
-        target: "papers/",
-        timing: "before",
-        optional: true,
-      },
       {
         title: "下载付费墙文献全文",
         guidance:
@@ -571,6 +542,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
   },
   {
     name: "研究方法",
+    role: "both",
     workspaceName: "methodology",
     brief:
       "输入：proposal/proposal.md 的研究内容与技术路线、chapters/literature-review.md（已随 main 合并在本工作区内）。\n" +
@@ -651,7 +623,6 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "完成标准：thesis-draft.md 章节齐全、引用闭环、revision-notes.md 已提交、run 脚本渲染通过。",
     expectedArtifacts: ["manuscript/"],
     skills: ["quarto-render"],
-    decisions: [{ q: "论文语种", options: ["中文", "英文"] }],
     discussionSeeds: [
       "章节权重怎么分：哪几章是答辩老师最看重、要重点打磨的？",
       "学校的字数与章节要求是什么：有没有硬性模板要对齐？",
@@ -672,6 +643,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
   },
   {
     name: "格式与定稿",
+    role: "you",
     workspaceName: "thesis-final",
     brief:
       "输入：manuscript/thesis-draft.md、references.bib（已随 main 合并在本工作区内）。\n" +
@@ -768,16 +740,14 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
         timing: "after",
       },
     ],
+    // 「目标期刊怎么选」提到项目层（它是这条流程的前提，不是第 1 步的战术问题）；
+    // 「字数超标先砍哪部分」改按需问——得先知道超了多少（见简报）
     decisions: [
-      { q: "目标期刊怎么选", options: ["冲高一档", "求稳保一档"] },
-      {
-        q: "字数超标先砍哪部分",
-        options: ["砍讨论", "砍方法细节", "砍文献量", "换更长篇幅的刊"],
-      },
     ],
   },
   {
     name: "投稿材料",
+    role: "you",
     workspaceName: "submission-materials",
     brief:
       "输入：submission/formatted.md、submission/target-journal.md（已随 main 合并在本工作区内）。\n" +
@@ -809,6 +779,7 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
   },
   {
     name: "审稿意见回复",
+    role: "you",
     workspaceName: "rebuttal",
     brief:
       "输入：reviews/round-1.md 审稿意见全文（用户把编辑来信粘贴保存为该文件；文件缺失时提示用户提供并停止，不得编造审稿意见）；submission/formatted.md（已随 main 合并在本工作区内）。\n" +
@@ -870,8 +841,14 @@ export const PIPELINE_TEMPLATES: PipelineTemplateDef[] = [
     id: "review",
     name: "英文综述",
     description:
-      "文献检索与筛选 → 精读笔记 → 大纲 → 初稿 → 润色定稿，规范英文学术综述的常规路径",
+      "文献检索与筛选 → 精读笔记 → 大纲 → 初稿 → 润色定稿",
     steps: REVIEW_STEPS,
+    projectSettings: [
+      "综述角度：（领域全景 / 聚焦某个子问题）",
+      "目标篇幅：（如 6000-8000 词）",
+      "读者与文风：（偏同行专家 / 偏入门科普）",
+      "去向：（投期刊 / 毕业论文一章 / 课程作业）",
+    ],
   },
   {
     id: "research-paper",
@@ -879,27 +856,47 @@ export const PIPELINE_TEMPLATES: PipelineTemplateDef[] = [
     description:
       "选题与 gap 分析 → 实验设计/执行/分析 → IMRaD 初稿 → 润色与投稿材料清单",
     steps: RESEARCH_PAPER_STEPS,
+    projectSettings: [
+      "课题边界：（只盯一条线 / 铺满一个方向）",
+      "研究问题：（追热点求稳 / 押高风险高回报的 gap）",
+      "目标期刊：（冲高一档 / 求稳妥投；决定字数与格式）",
+      "语种：（中文 / 英文）",
+    ],
   },
   {
     id: "data-processing",
     name: "数据处理",
     description:
-      "数据登记与质量检查 → 清洗整理 → 探索性分析 → 结论与建议报告，原始数据与结果全程入产物目录",
+      "数据登记与质量检查 → 清洗整理 → 探索性分析 → 结论与建议报告",
     steps: DATA_PROCESSING_STEPS,
+    projectSettings: [
+      "报告给谁看：（业务方 / 同行 / 自己留档）",
+      "数据敏感级别：（含个人信息 / 已脱敏 / 公开数据）",
+    ],
   },
   {
     id: "thesis",
     name: "毕业论文",
     description:
-      "开题与综述 → 研究方法 → 实验与结果 → 全文初稿 → 格式与定稿，按学位论文结构逐章产出",
+      "开题与综述 → 研究方法 → 实验与结果 → 全文初稿 → 格式与定稿",
     steps: THESIS_STEPS,
+    projectSettings: [
+      "论文语种：（中文 / 英文）",
+      "学位类型与学校模板：（如 硕士 / 校内 LaTeX 模板）",
+      "查重目标：（如 ≤10%）",
+      "答辩时间：（倒推各章节的截止）",
+    ],
   },
   {
     id: "submission-rebuttal",
     name: "投稿与返修",
     description:
-      "期刊格式适配 → cover letter 与投稿清单 → 审稿意见逐条回复与修订稿，覆盖定稿之后的投稿全流程",
+      "期刊格式适配 → cover letter 与投稿清单 → 审稿意见逐条回复与修订稿",
     steps: SUBMISSION_REBUTTAL_STEPS,
+    projectSettings: [
+      "目标期刊：（决定格式、字数与文风，是这条流程的前提）",
+      "投稿轮次：（首投 / 返修第 N 轮）",
+    ],
   },
 ];
 

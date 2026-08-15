@@ -67,6 +67,49 @@ export function groupInbox<T extends { key: string }>(
 /** help: 条目屏蔽表的 localStorage 键：{ [root]: 条目签名 } */
 export const HELP_DISMISSED_KEY = "ccode.helpDismissed";
 
+/** 通用条目屏蔽表（v3.88）：{ [item.key]: 签名 }。
+ *  原先只有 help: 能忽略，其余六类只能干等它自己消失。
+ *  签名口径同 help——状态一变签名就变、条目自动复现，所以「忽略」不会真的漏掉事情。 */
+export const INBOX_DISMISSED_KEY = "ccode.inboxDismissed";
+
+/** 条目的状态签名：同 key 的内容变化即视为新事件，旧的忽略自动失效 */
+export function inboxSignature(item: {
+  key: string;
+  text: string;
+  actionLabel: string;
+}): string {
+  return `${item.text}|${item.actionLabel}`;
+}
+
+/** 过滤掉「已忽略且签名未变」的条目 */
+export function filterDismissed<
+  T extends { key: string; text: string; actionLabel: string },
+>(items: readonly T[], dismissed: Record<string, string>): T[] {
+  return items.filter((it) => dismissed[it.key] !== inboxSignature(it));
+}
+
+/** 记录忽略并返回新表；写入失败静默（隐私模式） */
+export function dismissInboxItem(
+  item: { key: string; text: string; actionLabel: string },
+  cur: Record<string, string>,
+): Record<string, string> {
+  const next = { ...cur, [item.key]: inboxSignature(item) };
+  try {
+    localStorage.setItem(INBOX_DISMISSED_KEY, JSON.stringify(next));
+  } catch {
+    /* 写不进就只靠本次内存态 */
+  }
+  return next;
+}
+
+export function loadInboxDismissed(): Record<string, string> {
+  try {
+    return parseHelpDismissed(localStorage.getItem(INBOX_DISMISSED_KEY));
+  } catch {
+    return {};
+  }
+}
+
 /** 请求条目签名：文件内容变化（签名不同）时旧屏蔽自动失效、条目复现 */
 export function helpSignature(items: readonly string[]): string {
   return items.join("|");

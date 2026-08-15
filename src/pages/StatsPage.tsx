@@ -310,6 +310,63 @@ export default function StatsPage({ visible }: { visible: boolean }) {
             </div>
           </div>
 
+          {/* 趋势（v3.88）：区间总数看不出「这周比上周多花多少」——这是统计页最核心的缺口。
+              手绘 SVG 折线，与现有手绘进度条同一手法，不引图表库（package.json 保持零图表依赖）。
+              数据本就按天存，后端聚合一层即得（UsageStatsDto.daily）。 */}
+          {stats.daily.length > 1 && (
+            <section className="mb-6">
+              <h2 className="mb-2 text-xs font-medium text-l3">
+                每日用量
+                <span className="ml-2 font-normal text-l4">
+                  {stats.daily[0].day} → {stats.daily[stats.daily.length - 1].day}
+                </span>
+              </h2>
+              {(() => {
+                const pts = stats.daily;
+                const peak = Math.max(
+                  1,
+                  ...pts.map((d) => d.input + d.output),
+                );
+                const W = 720;
+                const H = 96;
+                // 单点时 x 除零：夹到 1
+                const stepX = W / Math.max(1, pts.length - 1);
+                const coords = pts.map((d, i) => {
+                  const v = d.input + d.output;
+                  return [i * stepX, H - (v / peak) * (H - 8)] as const;
+                });
+                const line = coords
+                  .map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`)
+                  .join(" ");
+                const area = `${line} L${W} ${H} L0 ${H} Z`;
+                return (
+                  <div className="rounded-lg bg-strip p-3">
+                    <svg
+                      viewBox={`0 0 ${W} ${H}`}
+                      preserveAspectRatio="none"
+                      className="h-24 w-full"
+                      role="img"
+                      aria-label={`每日 token 折线，峰值 ${peak.toLocaleString()}`}
+                    >
+                      <path d={area} className="fill-cta/10" />
+                      <path
+                        d={line}
+                        className="stroke-cta"
+                        strokeWidth={1.5}
+                        fill="none"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    </svg>
+                    <div className="mt-1 flex justify-between text-micro text-l4">
+                      <span>峰值 {peak.toLocaleString()} tokens/天</span>
+                      <span>{pts.length} 天有用量</span>
+                    </div>
+                  </div>
+                );
+              })()}
+            </section>
+          )}
+
           {/* 按 agent：用量占比进度条（占比 = 该 agent tokens / 全部合计） */}
           {stats.byAgent.length > 0 && (
             <section className="mb-6">

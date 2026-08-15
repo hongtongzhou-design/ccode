@@ -523,8 +523,19 @@ export interface WorkspaceUsageDto {
   official: boolean;
 }
 
+/** 按天的 token 与费用（升序）：统计页趋势线用 */
+export interface UsageDayDto {
+  /** 本机日期 YYYY-MM-DD */
+  day: string;
+  input: number;
+  output: number;
+  costUsd: number | null;
+  costPartial: boolean;
+}
+
 export interface UsageStatsDto {
   cards: UsageCardsDto;
+  daily: UsageDayDto[];
   byAgent: AgentUsageDto[];
   byProject: ProjectUsageDto[];
   byModel: ModelUsageDto[];
@@ -626,11 +637,21 @@ export interface ProjectStepDto {
   discussionSeeds?: string[];
   /** 决策项（可枚举的拍板点，点选即答）；缺省 = 无（向后兼容旧后端与旧配置） */
   decisions?: StepDecisionDto[];
+  /** 这一步主要由谁出场：ai（AI 干活，你验收）| you（要你出场）| both（协作）；缺省 ai。
+   *  只影响界面角色标记，不参与流程判定 */
+  role?: string;
+  /** 「这一步要先拍板文献从哪来」（模板声明）：流程线「定方向」节点里出现
+   *  文献来源选择器 + 就地导入入口，答案写 config.litSource。
+   *  与 decisions 分属两类——decisions 写草稿只做记录，这条写项目配置且带动作 */
+  asksLitSource?: boolean;
 }
 
 export interface ProjectConfigDto {
   /** 课题主题：一键开步写进 TASK.md「课题主题」段；可空 */
   topic?: string | null;
+  /** 全局设定（v3.89）：贯穿全程的决定（综述角度/篇幅/读者/去向），每条一行「问题：答案」。
+   *  它们决定后面每一步，故挂项目层而非某个步骤；随 TASK.md 下发给每一步 */
+  settings?: string[];
   artifactDir: string;
   resources: ProjectResourceDto[];
   steps: ProjectStepDto[];
@@ -786,4 +807,14 @@ export interface SchedulerRunDonePayload {
   projectRoot: string;
   status: string;
   summary: string;
+}
+
+/** 应用数据占用（设置页「数据与存储」） */
+export interface StorageEntryDto {
+  label: string;
+  path: string;
+  bytes: number;
+  exists: boolean;
+  /** 可清理（快照/备份/缓存）；配置与索引一律 false */
+  clearable: boolean;
 }

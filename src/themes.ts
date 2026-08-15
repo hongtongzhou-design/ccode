@@ -18,3 +18,8 @@ export const THEMES = [
 ] as const;
 
 export type ThemeId = (typeof THEMES)[number]["id"];
+
+/** 主题亮暗判定单一出处：原生窗口外观、终端调色板 twin、浅色分支都走它，禁另造判定 */
+export function isLightTheme(id: string | undefined): boolean {
+  return THEMES.some((t) => t.id === id && "light" in t && t.light);
+}

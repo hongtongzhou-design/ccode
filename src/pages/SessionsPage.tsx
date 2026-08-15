@@ -3,6 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
 import { groupSessionsByTask } from "../task-cards";
+import {
+  QUICK_FILTERS,
+  SCOPE_KIND_LABEL,
+  applySessionFilters,
+  buildScopeSuggestions,
+  type QuickFilterId,
+  type ScopeChip,
+} from "../session-filter";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
@@ -65,6 +73,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const liveSessions = useAppStore((s) => s.liveSessions);
   const focusTab = useAppStore((s) => s.focusTab);
   const sessionsQuery = useAppStore((s) => s.sessionsQuery);
+  const sessionScopeReq = useAppStore((s) => s.sessionScopeReq);
+  const setSessionScopeReq = useAppStore((s) => s.setSessionScopeReq);
   const setSessionsQuery = useAppStore((s) => s.setSessionsQuery);
   // 任务卡：移到卡片菜单的候选列表（按项目根缓存）+ 卡片 chip 跳工作区页的一次性请求
   const taskCards = useAppStore((s) => s.taskCards);
@@ -78,6 +88,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [showArchived, setShowArchived] = useState(false);
+  // 一行 chip 快筛 + 搜索建议落成的作用域 chip（v3.88，纯逻辑在 session-filter.ts）
+  const [quick, setQuick] = useState<Set<QuickFilterId>>(() => new Set());
+  const [scopes, setScopes] = useState<ScopeChip[]>([]);
   // 分类筛选折叠收进列表栏（默认收起），展开为单列纵向手风琴：点 agent 只展开/收起其项目
   // 子列表（不动列表筛选、不关回放）；「全部项目」/单项目行落筛选且**面板保持展开**（v3.43：
   // 用户要边筛边浏览，选中不收起），手动点标题行或 × 清除才收。
@@ -136,6 +149,18 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       setSessionsQuery(null);
     }
   }, [sessionsQuery, setSessionsQuery]);
+
+  // 工作区页「本步骤的对话」：落成作用域 chip（结构化筛选，不是往搜索框塞字符串）
+  useEffect(() => {
+    if (!sessionScopeReq) return;
+    const req = sessionScopeReq;
+    setScopes((prev) =>
+      prev.some((x) => x.kind === req.kind && x.value === req.value)
+        ? prev
+        : [...prev, req],
+    );
+    setSessionScopeReq(null);
+  }, [sessionScopeReq, setSessionScopeReq]);
   const searched = useMemo(() => {
     if (!q) return sessions;
     return sessions.filter((s) =>
@@ -153,6 +178,12 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         .includes(q),
     );
   }, [sessions, q]);
+
+  // 搜索建议从「已按文本命中」的集合里提，输入越具体建议越准
+  const suggestions = useMemo(
+    () => buildScopeSuggestions(searched, query),
+    [searched, query],
+  );
 
   /** A. 会话恢复：把会话交给终端页以 resume 语义自动重启 */
   function resumeInTerminal(s: SessionMetaDto) {
@@ -202,9 +233,21 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     focusTab(tabId);
   }
 
+  // 快筛 + 作用域 chip（v3.88）先过一道；archived/internal 口径由 applySessionFilters 统一裁决，
+  // 下游 archiveVisible 保留原表达式做兜底（showArchived 与 archived chip 已同步）
+  const quickFiltered = useMemo(
+    () =>
+      applySessionFilters(
+        searched,
+        quick,
+        scopes,
+        new Set(Object.keys(liveSessions)),
+      ),
+    [searched, quick, scopes, liveSessions],
+  );
   const archiveVisible = useMemo(
-    () => searched.filter((s) => showArchived || !s.archived),
-    [searched, showArchived],
+    () => quickFiltered.filter((s) => showArchived || !s.archived),
+    [quickFiltered, showArchived],
   );
   const regularVisible = useMemo(
     () => archiveVisible.filter((s) => !s.internal),
@@ -717,6 +760,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     "w-full rounded-sm border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
   const menuItem =
     "block w-full px-3 py-1.5 text-left text-l2 hover:bg-hover";
+  // 菜单分组小标题（v3.88）：11 项平铺改三组，caps 式弱化小字，只作分段不可点
+  const menuGroupLabel =
+    "px-3 pb-0.5 pt-1.5 text-micro tracking-wider text-l4 first:pt-0.5";
   // 回放头部「恢复 ▾」下拉（外部恢复/复制命令），坐标定位 + 全屏遮罩点击关闭
   const [resumeMenu, setResumeMenu] = useState<{ x: number; y: number } | null>(
     null,
@@ -866,7 +912,17 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 <button
                   type="button"
                   aria-pressed={showArchived}
-                  onClick={() => setShowArchived(!showArchived)}
+                  onClick={() => {
+                    const next = !showArchived;
+                    setShowArchived(next);
+                    // 与快筛的「已归档」chip 是同一件事，保持一致（不做两套归档口径）
+                    setQuick((prev) => {
+                      const s2 = new Set(prev);
+                      if (next) s2.add("archived");
+                      else s2.delete("archived");
+                      return s2;
+                    });
+                  }}
                   className={`${rowActionClass} ${showArchived ? "border-seg-sel bg-seg-sel text-l1" : ""}`}
                 >
                   显示已归档
@@ -888,6 +944,33 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
+          {/* 搜索建议（v3.88）：输入即给出结构化维度，点一下落成可叠加 chip——
+              取代「展开手风琴 → 找 agent → 展开 → 找项目」的三次点击钻取 */}
+          {!selecting && q && suggestions.length > 0 && (
+            <div className="mt-1 flex flex-wrap items-center gap-1">
+              {suggestions.map((c) => (
+                <button
+                  key={`${c.kind}:${c.value}`}
+                  type="button"
+                  onClick={() => {
+                    setScopes((prev) =>
+                      prev.some(
+                        (x) => x.kind === c.kind && x.value === c.value,
+                      )
+                        ? prev
+                        : [...prev, c],
+                    );
+                    setQuery("");
+                  }}
+                  title={`${SCOPE_KIND_LABEL[c.kind]}：${c.value}`}
+                  className="max-w-56 truncate rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel hover:text-l1"
+                >
+                  <span className="text-l4">{SCOPE_KIND_LABEL[c.kind]} </span>
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          )}
           {!selecting && q && (
             <div className="mt-2 flex flex-wrap items-center gap-1">
               <button
@@ -898,6 +981,61 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               >
                 搜索：{query.trim()} ×
               </button>
+            </div>
+          )}
+          {/* 已落作用域 chip（可叠加、可逐个 ×） */}
+          {!selecting && scopes.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-1">
+              {scopes.map((c) => (
+                <button
+                  key={`${c.kind}:${c.value}`}
+                  type="button"
+                  onClick={() =>
+                    setScopes((prev) =>
+                      prev.filter(
+                        (x) => !(x.kind === c.kind && x.value === c.value),
+                      ),
+                    )
+                  }
+                  title={`移除筛选：${SCOPE_KIND_LABEL[c.kind]} ${c.value}`}
+                  className="max-w-56 truncate rounded-sm border border-cta-bd bg-cta px-1.5 py-0.5 text-xs text-cta-text"
+                >
+                  <span className="opacity-70">{SCOPE_KIND_LABEL[c.kind]} </span>
+                  {c.label} ×
+                </button>
+              ))}
+            </div>
+          )}
+          {/* 一行 chip 快筛（v3.88）：状态与时间维度以前完全没进筛选 UI，
+              而这些数据早就在 SessionMetaDto 里 */}
+          {!selecting && (
+            <div className="mt-2 flex flex-wrap items-center gap-1">
+              {QUICK_FILTERS.map((f) => {
+                const on = quick.has(f.id);
+                return (
+                  <button
+                    key={f.id}
+                    type="button"
+                    aria-pressed={on}
+                    title={f.title}
+                    onClick={() =>
+                      setQuick((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(f.id)) next.delete(f.id);
+                        else next.add(f.id);
+                        return next;
+                      })
+                    }
+                    className={`rounded-full px-2 py-0.5 text-micro ${
+                      on
+                        ? "border border-cta-bd bg-cta text-cta-text"
+                        : "bg-inset text-l3 hover:bg-hover hover:text-l1"
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
@@ -1230,9 +1368,18 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       </button>
                     )}
                     {s.pinned && (
-                      <span className="shrink-0 text-l2" title="已保留">
+                      // 常驻状态标记本身可点（取消保留）——不再在 hover 区重复一个 ⚑
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void togglePin(s);
+                        }}
+                        title="已保留（点击取消）"
+                        className="shrink-0 rounded-sm px-0.5 text-l2 hover:text-cta"
+                      >
                         ⚑
-                      </span>
+                      </button>
                     )}
                     <span className="min-w-0 flex-1 truncate text-sm font-medium leading-7 text-l1">
                       {sessionTitle(s)}
@@ -1269,6 +1416,21 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                             恢复
                           </button>
                         )}
+                        {/* ⚑ 保留提为行内 hover（v3.88）：与「恢复」并列为两个高频项，
+                            其余低频统一进 ⋯ 的三组菜单 */}
+                        {!s.pinned && (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void togglePin(s);
+                            }}
+                            title="保留（并生成快照，防 CLI 自动清理）"
+                            className={`${ghostActionClass} text-l3`}
+                          >
+                            ⚑
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={(event) => {
@@ -1300,16 +1462,24 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-micro text-l4">
                     <span className="shrink-0">{agentLabel(s.agent)}</span>
                     {s.workspace && (
-                      <span
-                        className="max-w-28 truncate rounded-sm bg-inset px-1 text-l3"
+                      // 反向跳转（v3.88）：这个 badge 以前只能看不能点——会话与项目/步骤的
+                      // 四条关联全是单向的。点它回工作区页并选中该项目
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectProjectReq(s.projectPath);
+                          setPage("workspaces");
+                        }}
+                        className="max-w-28 truncate rounded-sm bg-inset px-1 text-l3 hover:bg-seg-sel hover:text-l1"
                         title={
-                          s.stepName
+                          (s.stepName
                             ? `研究步骤：${s.stepName}（工作区：${s.workspace}）`
-                            : `任务工作区：${s.workspace}`
+                            : `任务工作区：${s.workspace}`) + "\n点击回工作区页查看该项目"
                         }
                       >
                         ⎇ {s.stepName ?? s.workspace}
-                      </span>
+                      </button>
                     )}
                     {s.taskName && (
                       <button
@@ -1728,6 +1898,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           >
             {menu.kind === "session" ? (
               <>
+                {/* 11 项平铺 → 三组（v3.88，用户点名「一堆可选操作」）：
+                    整理（改这条对话的元数据）/ 继续（把它接着往下做）/ 危险。
+                    「保留」「在终端恢复」两个高频项已提到行内 hover，菜单里保留同项以便右键直达 */}
+                <div className={menuGroupLabel}>整理</div>
                 <button
                   className={menuItem}
                   onClick={() => {
@@ -1762,8 +1936,22 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 >
                   编辑
                 </button>
+                {/* 移到卡片：仅项目筛选下可用（此时才知道 project_root）——属「整理」 */}
+                {filter.kind === "project" && (
+                  <button
+                    className={menuItem}
+                    title="把该对话归入本项目的一张任务卡"
+                    onClick={() => {
+                      setMenu(null);
+                      setTaskPickerFor(menu.session);
+                    }}
+                  >
+                    移到卡片…
+                  </button>
+                )}
                 {(menu.session.alive || menu.session.pinned) && (
                   <>
+                    <div className={menuGroupLabel}>继续</div>
                     <button
                       className={menuItem}
                       onClick={() => {
@@ -1775,12 +1963,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     </button>
                     <button
                       className={menuItem}
+                      title="在外部终端应用里恢复（同一件事的另一个出口，下面是复制命令自己粘）"
                       onClick={() => {
                         setMenu(null);
                         void resumeExternal(menu.session);
                       }}
                     >
-                      在外部终端恢复
+                      在外部继续 · 打开终端
                     </button>
                     <button
                       className={menuItem}
@@ -1789,7 +1978,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         void copyResumeCommand(menu.session);
                       }}
                     >
-                      复制恢复命令
+                      在外部继续 · 复制命令
                     </button>
                     <button
                       className={menuItem}
@@ -1803,19 +1992,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     </button>
                   </>
                 )}
-                {/* 移到卡片：仅项目筛选下可用（此时才知道 project_root） */}
-                {filter.kind === "project" && (
-                  <button
-                    className={menuItem}
-                    title="把该对话归入本项目的一张任务卡"
-                    onClick={() => {
-                      setMenu(null);
-                      setTaskPickerFor(menu.session);
-                    }}
-                  >
-                    移到卡片…
-                  </button>
-                )}
+                <div className={menuGroupLabel}>危险</div>
                 <button
                   className={`${menuItem} text-err-text`}
                   onClick={() => {

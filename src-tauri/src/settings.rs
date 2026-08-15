@@ -21,6 +21,18 @@ const KNOWN_THEMES: [&str; 14] = [
     "midnight-light", "terracotta-light", "ayu-light", "mocha-light",
     "neutral-light", "dracula-light", "shadcn-light",
 ];
+/// 终端 ANSI 调色板：四套深色 + 四套配对浅色。
+/// 单一出处在前端 `src/terminal-palettes.ts` 的 PALETTE_LIST，此处是持久化白名单，两边须同步
+/// （不在名单里的值会被静默丢弃，表现为「设置页选了调色板但没生效」）。
+/// 启动页白名单（与前端 hotkeys.ts PAGE_HOTKEY_DEFS 同步）
+const KNOWN_PAGES: [&str; 8] = [
+    "workspaces", "terminal", "sessions", "profiles",
+    "skills", "mcp", "stats", "settings",
+];
+const KNOWN_PALETTES: [&str; 8] = [
+    "dark-plus", "solarized", "one-dark", "catppuccin",
+    "light-plus", "solarized-light", "one-light", "latte",
+];
 /// 会话页「⇗ 外部恢复」可选的终端应用；auto = 按平台优先级探测
 const KNOWN_EXTERNAL_TERMINALS: [&str; 9] = [
     "auto", "ghostty", "iterm", "terminal", "cmd",
@@ -45,6 +57,18 @@ pub struct AppSettingsDto {
     /// ◈ AI 功能按功能独立配置：键 = 功能 key（见 ai.rs FN_* 常量），值 = profile id；
     /// 某功能缺省时回落 ai_profile_id，None = 全部走默认
     pub ai_profiles: Option<BTreeMap<String, String>>,
+    /// 每个 agent 的默认 profile（agent id → profile id）：终端启动栏选完 agent 后预选它。
+    /// 解析顺序 显式默认 > ccode.lastProfile（上次使用）> 该 agent 首个配置。
+    /// 键缺失 = 没设默认，整图覆盖（同 ai_profiles 口径）。
+    /// 刻意不在 profiles.json 加 `enabled` 布尔：配置是**启动那一刻**注入的，
+    /// 没有「全局激活态」，加 enabled 会与注入语义打架、也会和「设为全局」形成两套激活概念。
+    pub default_profiles: Option<BTreeMap<String, String>>,
+    /// 启动时进入哪一页（页面 id，同 hotkeys.ts PAGE_HOTKEY_DEFS）；缺省 = workspaces
+    pub start_page: Option<String>,
+    /// 「隐藏」的 profile id 列表：只影响终端启动栏下拉的分组（沉到「更多」），
+    /// **不删数据、不改任何启动行为**——已选中它的标签照常工作，配置页照常列出。
+    /// 与 default_profiles 一样存在设置里而不是 profiles.json：这是展示偏好，不是配置属性。
+    pub hidden_profiles: Option<Vec<String>>,
     /// 会话页「⇗ 外部恢复」使用的终端应用（KNOWN_EXTERNAL_TERMINALS）；None/auto = 自动探测
     pub external_terminal: Option<String>,
     /// 精确注意力标记（Claude Code hooks）：开启/关闭由 claude_hooks::set_claude_hooks_attention
@@ -90,9 +114,9 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         terminal_font_family: s
             .terminal_font_family
             .or_else(|| Some(DEFAULT_TERMINAL_FONT_FAMILY.to_string())),
-        terminal_palette: s.terminal_palette.filter(|p| {
-            ["dark-plus", "solarized", "one-dark", "catppuccin"].contains(&p.as_str())
-        }),
+        terminal_palette: s
+            .terminal_palette
+            .filter(|p| KNOWN_PALETTES.contains(&p.as_str())),
         scrollback: s.scrollback.or(Some(DEFAULT_SCROLLBACK)),
         rate_usd_cny: s.rate_usd_cny.or(Some(DEFAULT_RATE_USD_CNY)),
         brew_mirror: s.brew_mirror.or(Some(DEFAULT_BREW_MIRROR)),
@@ -107,6 +131,11 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         ai_profile_id: s.ai_profile_id.filter(|v| !v.trim().is_empty()),
         // 按功能配置不做默认值填充：键缺失即「跟随默认」
         ai_profiles: s.ai_profiles,
+        default_profiles: s.default_profiles,
+        start_page: s
+            .start_page
+            .filter(|p| KNOWN_PAGES.contains(&p.as_str())),
+        hidden_profiles: s.hidden_profiles,
         external_terminal: Some(
             s.external_terminal
                 .filter(|v| KNOWN_EXTERNAL_TERMINALS.contains(&v.as_str()))
@@ -157,6 +186,15 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
         cur.ai_profile_id = patch.ai_profile_id.filter(|v| !v.trim().is_empty());
     }
     // 按功能配置整图覆盖（前端每次提交完整 map；空 map = 全部跟随默认）
+    if patch.start_page.is_some() {
+        cur.start_page = patch.start_page;
+    }
+    if patch.hidden_profiles.is_some() {
+        cur.hidden_profiles = patch.hidden_profiles;
+    }
+    if patch.default_profiles.is_some() {
+        cur.default_profiles = patch.default_profiles;
+    }
     if patch.ai_profiles.is_some() {
         cur.ai_profiles = patch.ai_profiles;
     }
@@ -402,4 +440,82 @@ mod tests {
         assert_eq!(cur2.discuss_readonly, Some(false));
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
+}
+
+/// 应用数据占用（设置页「数据与存储」）：用户此前完全不知道 Ccode 在硬盘上占了多少、存在哪。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageEntryDto {
+    /// 展示名（app.db / 技能库 / 会话快照 …）
+    pub label: String,
+    /// 绝对路径（前端只展示与「打开目录」，不参与任何写操作）
+    pub path: String,
+    pub bytes: u64,
+    pub exists: bool,
+    /// 可清理（快照与备份是可再生/可丢的；profiles/keys/app.db 一律 false）
+    pub clearable: bool,
+}
+
+/// 递归求目录大小；单个条目读失败按 0 计（宁可少算也不报错——这只是个信息展示）。
+/// 有界：最多下钻 2000 个条目，异常巨大的目录返回已累计值，不卡住设置页。
+fn dir_size(path: &std::path::Path, budget: &mut u32) -> u64 {
+    if *budget == 0 {
+        return 0;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if meta.is_file() {
+        *budget = budget.saturating_sub(1);
+        return meta.len();
+    }
+    // 符号链接不跟随（技能分发可能是 symlink，跟随会重复计入甚至成环）
+    if meta.is_symlink() || !meta.is_dir() {
+        return 0;
+    }
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for e in rd.flatten() {
+        if *budget == 0 {
+            break;
+        }
+        total = total.saturating_add(dir_size(&e.path(), budget));
+    }
+    total
+}
+
+#[tauri::command]
+pub async fn app_storage_usage() -> Result<Vec<StorageEntryDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = dirs::config_dir()
+            .ok_or("无法确定平台配置目录")?
+            .join("ccode");
+        // (展示名, 相对名, 可清理)
+        let items: [(&str, &str, bool); 6] = [
+            ("会话索引与用量（app.db）", "app.db", false),
+            ("配置（profiles.json）", "profiles.json", false),
+            ("技能库", "skills", false),
+            ("会话快照（pin 保留的）", "snapshots", true),
+            ("配置改写备份", "backups", true),
+            ("模型目录缓存", "catalogs", true),
+        ];
+        let mut out = Vec::new();
+        for (label, rel, clearable) in items {
+            let p = root.join(rel);
+            let exists = p.exists();
+            let mut budget = 20_000u32;
+            out.push(StorageEntryDto {
+                label: label.to_string(),
+                path: p.to_string_lossy().to_string(),
+                bytes: if exists { dir_size(&p, &mut budget) } else { 0 },
+                exists,
+                clearable,
+            });
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("统计应用数据占用失败: {e}"))?
 }

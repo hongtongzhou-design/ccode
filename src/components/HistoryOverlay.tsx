@@ -79,7 +79,7 @@ export default function HistoryOverlay({
           ) : entries.length === 0 ? (
             <EmptyState
               title="还没有保存记录"
-              detail="到终端页右侧「改动」页签点「保存到历史」，或合并一个工作区任务，这里就会出现第一条时间线记录。"
+              detail="保存一次改动、或合并一个任务，这里就会有记录。"
             />
           ) : (
             groups.map((group) => (

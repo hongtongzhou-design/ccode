@@ -12,20 +12,24 @@ import {
   PageHeader,
   rowActionClass,
   Toggle,
+  secondaryActionClass,
 } from "../components/PageFrame";
 import { captureDecision, comboLabel, PAGE_HOTKEY_DEFS } from "../hotkeys";
+import { openUrl, openPath } from "@tauri-apps/plugin-opener";
+import type { StorageEntryDto } from "../types";
+import { getVersion } from "@tauri-apps/api/app";
 import { collectFrontendDiagnostics } from "../diagnostics";
 
 /** 七套深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
-import { XTERM_PALETTES, PALETTE_PREVIEW_KEYS } from "../terminal-palettes";
-import { THEMES } from "../themes";
+import {
+  XTERM_PALETTES,
+  PALETTE_PREVIEW_KEYS,
+  PALETTE_LIST,
+  resolvePaletteId,
+} from "../terminal-palettes";
+import { THEMES, isLightTheme } from "../themes";
 
-const PALETTES = [
-  { id: "dark-plus", name: "Dark+" },
-  { id: "solarized", name: "Solarized" },
-  { id: "one-dark", name: "One Dark" },
-  { id: "catppuccin", name: "Catppuccin" },
-] as const;
+// 调色板清单单一出处在 ../terminal-palettes（PALETTE_LIST，含亮暗标记）
 
 /** 色卡预览：取共享调色板表的前 8 个 ANSI 标准色（与终端实际生效色一致） */
 function paletteDots(id: string): string[] {
@@ -105,7 +109,23 @@ type FontInstallResult = { ok: boolean; output: string };
 
 /** 分区折叠状态在 localStorage 的键。首次仅展开高频外观，长说明按需展开。 */
 const SECTIONS_KEY = "ccode.settings.sections";
+/** 字节数白话：设置页「数据与存储」用（1 位小数，KB 起跳） */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
+}
+
 const DEFAULT_COLLAPSED: Record<string, boolean> = {
+  startup: true,
+  storage: true,
+  about: true,
   stats: true,
   integration: true,
   update: true,
@@ -303,6 +323,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     null,
   );
   // 分区折叠状态：首次仅展开高频外观，切换后持久化。
+  // 应用版本（「关于」分区）：Tauri 从 tauri.conf.json 取，与打包产物一致
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  useEffect(() => {
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => {});
+  }, []);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
     try {
       const raw = localStorage.getItem(SECTIONS_KEY);
@@ -320,6 +347,16 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       return next;
     });
   }
+
+  // 应用数据占用：展开「数据与存储」时读一次（递归求目录大小，不适合常驻轮询）
+  const [storage, setStorage] = useState<StorageEntryDto[] | null>(null);
+  useEffect(() => {
+    if (visible && !collapsed.storage && storage === null)
+      invoke<StorageEntryDto[]>("app_storage_usage")
+        .then(setStorage)
+        .catch(() => setStorage([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, collapsed.storage]);
 
   useEffect(() => {
     if (visible) {
@@ -655,7 +692,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="终端字体"
-          hint="立即生效；Maple/Sarasa/Iosevka 未安装时可在行内一键安装（走 Homebrew）；选「自定义」可输入系统已装字体名"
+          hint="立即生效；未安装的字体可一键装"
           extra={
             fontInstallTarget &&
             fontInstallTarget === INSTALLABLE_FONTS[fontFamily] &&
@@ -759,31 +796,49 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         </Row>
 
         <Row label="终端调色板" hint="立即生效">
-          <div className="flex gap-2">
-            {PALETTES.map((pl) => (
-              <button
-                key={pl.id}
-                onClick={() => patch({ terminalPalette: pl.id })}
-                title={pl.name}
-                className={`rounded-md border p-1.5 text-xs ${
-                  (settings?.terminalPalette ?? "dark-plus") === pl.id
-                    ? "border-cta-bd text-l1"
-                    : "border-field text-l3 hover:text-l1"
-                }`}
-              >
-                {/* 8 色无缝色条：分段 flex-1 自适应固定宽度，色数变化也不撑破布局 */}
-                <span className="flex h-3 w-16 overflow-hidden rounded-sm">
-                  {paletteDots(pl.id).map((d) => (
-                    <span
-                      key={d}
-                      className="flex-1"
-                      style={{ background: d }}
-                    />
+          {/* 只列出与当前主题亮暗匹配的四套：浅色主题配深色向 ANSI 会让 white/brightWhite
+              在近白底上隐形，不给用户配出不可读组合的机会。存的值不符时按 twin 现算生效值。 */}
+          {(() => {
+            const themeIsLight = isLightTheme(settings?.theme);
+            const stored = settings?.terminalPalette;
+            const effective = resolvePaletteId(stored, themeIsLight);
+            const options = PALETTE_LIST.filter((p) => p.light === themeIsLight);
+            return (
+              <div className="flex flex-col gap-1.5">
+                <div className="flex gap-2">
+                  {options.map((pl) => (
+                    <button
+                      key={pl.id}
+                      onClick={() => patch({ terminalPalette: pl.id })}
+                      title={pl.name}
+                      className={`rounded-md border p-1.5 text-xs ${
+                        effective === pl.id
+                          ? "border-cta-bd text-l1"
+                          : "border-field text-l3 hover:text-l1"
+                      }`}
+                    >
+                      {/* 8 色无缝色条：分段 flex-1 自适应固定宽度，色数变化也不撑破布局 */}
+                      <span className="flex h-3 w-16 overflow-hidden rounded-sm">
+                        {paletteDots(pl.id).map((d) => (
+                          <span
+                            key={d}
+                            className="flex-1"
+                            style={{ background: d }}
+                          />
+                        ))}
+                      </span>
+                    </button>
                   ))}
-                </span>
-              </button>
-            ))}
-          </div>
+                </div>
+                {stored && stored !== effective && (
+                  <div className="text-micro text-l4">
+                    当前主题是{themeIsLight ? "浅色" : "深色"}，已自动切换到配对的
+                    {themeIsLight ? "浅色" : "深色"}调色板
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </Row>
 
         <Row label="滚动缓冲行数" hint="新开标签生效（1000–20000）">
@@ -827,6 +882,38 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       </Section>
 
       {/* 快捷键：点击绑定钮进入录制态，按下新组合即保存；空串 = 禁用 */}
+      <Section
+        title="启动行为"
+        open={!collapsed.startup}
+        onToggle={() => toggleSection("startup")}
+      >
+        <Row
+          label="想法期只读保护"
+          hint="聊想法时不让 agent 改文件（支持的 CLI 走进程级保护）"
+        >
+          {/* v3.66 当时定「设置页不加行」，前提是只有一个开关点；
+              现在它影响多条讨论路径，用户在卡片区之外找不到它（v3.88 补） */}
+          <Toggle
+            checked={settings?.discussReadonly ?? true}
+            onChange={(v) => patch({ discussReadonly: v })}
+            label="想法期只读保护"
+          />
+        </Row>
+        <Row label="启动时进入" hint="下次启动生效">
+          <select
+            className={fieldFixed + " w-32"}
+            value={settings?.startPage ?? "workspaces"}
+            onChange={(e) => patch({ startPage: e.target.value })}
+          >
+            {PAGE_HOTKEY_DEFS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </Row>
+      </Section>
+
       <Section
         title="快捷键"
         open={!collapsed.hotkeys}
@@ -1102,7 +1189,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="精确注意力标记（Claude Code）"
-          hint="开启后会向 ~/.claude/settings.json 写入 hooks 配置（写入前自动备份，仅合并 hooks 段、不动其他配置），注意力点由 Claude 事件实时驱动，比默认的会话尾部推断更准；关闭即移除 hooks 并回退推断模式"
+          hint="比默认推断更准；会写入 Claude 的 hooks 配置（自动备份）"
         >
           <Toggle
             label="精确注意力标记（Claude Code）"
@@ -1176,7 +1263,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           <div className="min-w-0">
             <p className="text-sm text-l2">Windows 诊断包</p>
             <p className="mt-0.5 text-xs leading-5 text-l4">
-              汇总系统、WebView2、显卡/WebGL、输入法、功能开关、应用日志与子进程生命周期；不采集环境变量，参数和日志会脱敏
+              打包系统与运行信息供排查；已脱敏，不含环境变量
             </p>
           </div>
           <button
@@ -1258,6 +1345,70 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             </div>
           )}
         </div>
+      </Section>
+
+      <Section
+        title="数据与存储"
+        open={!collapsed.storage}
+        onToggle={() => toggleSection("storage")}
+      >
+        {/* 用户此前完全不知道 Ccode 在硬盘上占了多少、存在哪（v3.88 补） */}
+        {storage === null ? (
+          <p className="py-2 text-xs text-l4">统计中…</p>
+        ) : (
+          <ul className="divide-y divide-hairline">
+            {storage.map((e) => (
+              <li key={e.path} className="flex items-center gap-2 py-2">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm text-l2">
+                    {e.label}
+                  </span>
+                  <span
+                    className="block truncate font-mono text-micro text-l4"
+                    title={e.path}
+                  >
+                    {e.path}
+                  </span>
+                </span>
+                <span className="shrink-0 font-mono text-xs text-l3">
+                  {e.exists ? formatBytes(e.bytes) : "—"}
+                </span>
+                <button
+                  type="button"
+                  disabled={!e.exists}
+                  onClick={() => void openPath(e.path)}
+                  className={`${secondaryActionClass} shrink-0 disabled:opacity-40`}
+                >
+                  打开
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="pt-2 text-micro text-l4">
+          快照 / 备份 / 缓存可以直接删，配置与索引别手动删。
+        </p>
+      </Section>
+
+      <Section
+        title="关于"
+        open={!collapsed.about}
+        onToggle={() => toggleSection("about")}
+      >
+        <Row label="版本" hint="">
+          <span className="font-mono text-xs text-l2">{appVersion ?? "…"}</span>
+        </Row>
+        <Row label="项目主页" hint="MIT 许可">
+          <button
+            type="button"
+            className={secondaryActionClass}
+            onClick={() =>
+              void openUrl("https://github.com/hongtongzhou-design/ccode")
+            }
+          >
+            在浏览器打开
+          </button>
+        </Row>
       </Section>
     </PageFrame>
   );

@@ -25,19 +25,25 @@ import "@xterm/xterm/css/xterm.css";
 import { useAppStore } from "../store";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
-import { confirmDialog } from "../components/ConfirmDialog";
+import { confirmDialog, alertDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
 import FileTree from "../components/FileTree";
 import GitPanel, { type GitSummary } from "../components/GitPanel";
 import HandoffPicker, { type HandoffSource } from "../components/HandoffPicker";
 import DigestPicker from "../components/DigestPicker";
-import { EmptyState, LoadingRows } from "../components/PageFrame";
+import { EmptyState, LoadingRows, hoverRevealClass } from "../components/PageFrame";
 import ProjectRail from "../components/ProjectRail";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
 import { renderTaskMd } from "../pipeline-start";
 import { defaultCommitMessage } from "../git-commit-message";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
-import { XTERM_PALETTES } from "../terminal-palettes";
+import { XTERM_PALETTES, resolvePaletteId } from "../terminal-palettes";
+import { isLightTheme } from "../themes";
+import {
+  launchModelNote,
+  looksLikeModelId,
+  modelOnProfileSwitch,
+} from "../model-switch";
 import { isSoftwareWebGL } from "../diagnostics";
 import {
   attentionTransition,
@@ -164,8 +170,9 @@ async function fireAttentionNotification(
   sendNotification({ title, body, actionTypeId: "ccode.attention", extra });
 }
 
-/** 七套深色 + 七套浅色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板；调色板其余部分共享）。
- *  浅色主题下 ANSI 16 色预设仍偏深色向，用户可在设置页调色板里另行选择。 */
+/** 七套深色 + 七套浅色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板）。
+ *  ANSI 16 色 + 光标 + 选区由调色板预设提供，并按主题亮暗自动取深/浅套
+ *  （见 terminal-palettes.ts 的 resolvePaletteId）。 */
 const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
   {
     midnight: { background: "#0e1015", foreground: "#b3b0aa" },
@@ -184,16 +191,16 @@ const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
     "shadcn-light": { background: "#fefefe", foreground: "#344054" },
   };
 
-/** VS Code Dark+ 风格 16 色调色板（各主题共享，只换底/字色） */
 /** 终端 16 色调色板预设已抽至 src/terminal-palettes.ts（设置页预览共享） */
 
+/** 底/字色取自主题表，ANSI 16 色 + cursor + selectionBackground 全部由调色板提供。
+ *  调色板先经 resolvePaletteId 按主题亮暗解析：浅色主题拿到深色向预设时自动换 twin，
+ *  避免近白底上出现 white/brightWhite 隐形、深藏蓝选区压死选中文字。 */
 function buildXtermTheme(themeId: string, paletteId?: string) {
   const palette =
-    XTERM_PALETTES[paletteId ?? "dark-plus"] ?? XTERM_PALETTES["dark-plus"];
+    XTERM_PALETTES[resolvePaletteId(paletteId, isLightTheme(themeId))];
   return {
     ...(XTERM_BG_FG[themeId] ?? XTERM_BG_FG.midnight),
-    cursor: "#aeafad",
-    selectionBackground: "#264f78",
     ...palette,
   };
 }
@@ -327,12 +334,38 @@ const TerminalView = memo(function TerminalView({
   const [profileId, setProfileId] = useState(
     initialProfileId ?? saved.profileId ?? "",
   );
+  // 换 agent 后按「显式默认 > 上次使用 > 该 agent 首个配置」预选（v3.88）。
+  // 这才是用户心里的「启用某个配置」——不加 enabled 布尔（与注入语义打架，见 settings.rs）
+  useEffect(() => {
+    if (running || profileId) return;
+    const pick =
+      settings?.defaultProfiles?.[agentId] ||
+      localStorage.getItem(`ccode.lastProfile.${agentId}`) ||
+      "";
+    const ok = profiles.find(
+      (p) => p.id === pick && p.agent === agentId,
+    )?.id;
+    // 兜底挑首个时跳过隐藏项（隐藏的本意就是「别默认落到我头上」）；
+    // 全被隐藏时仍从隐藏项里取，好过留空
+    const visible = profiles.filter(
+      (p) => p.agent === agentId && !hiddenProfiles.includes(p.id),
+    );
+    setProfileId(
+      ok ??
+        visible[0]?.id ??
+        profiles.find((p) => p.agent === agentId)?.id ??
+        "",
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId, profiles, settings?.defaultProfiles, settings?.hiddenProfiles]);
   const [model, setModel] = useState(initialModel ?? saved.model ?? "");
   const selectedProfile = profiles.find(
     (p) => p.id === profileId && p.agent === agentId,
   );
   // 模型 combo：下拉开合状态 + 选项来源（profile 预设 + 本 agent 历史，去重）
   const [modelOpen, setModelOpen] = useState(false);
+  // 换 profile 时保留了手填模型：说明行据此提示「仍按原样注入」（选中预设即消）
+  const [modelKept, setModelKept] = useState(false);
   const modelOptions = useMemo(() => {
     let history: string[] = [];
     try {
@@ -460,6 +493,8 @@ const TerminalView = memo(function TerminalView({
   const setPage = useAppStore((s) => s.setPage);
 
   const agentProfiles = profiles.filter((p) => p.agent === agentId);
+  // 「隐藏」的配置：只在启动栏下拉里沉到「更多」分组，不影响可用性
+  const hiddenProfiles = settings?.hiddenProfiles ?? [];
   const [skillCount, setSkillCount] = useState(0);
   // 当前 agent 已启用的技能清单（技能页开关同步）；点击 pill 展开，一键使用
   const [agentSkills, setAgentSkills] = useState<SkillDto[]>([]);
@@ -1386,6 +1421,33 @@ const TerminalView = memo(function TerminalView({
     ...(!running && !shellActive
       ? [{ label: "打开 Shell", onSelect: () => void openShell() }]
       : []),
+    // 「快速开聊」的转正出口：把当前目录登记成项目，会话历史天然跟 cwd 走、
+    // 自动归到新项目下（ProjectAggregator 既有归并口径，不需要迁移任何东西）。
+    // 只登记，不建工作区、不选模板——模板从项目页的引导横幅或 ⋯ 里选。
+    {
+      label: "转为项目…",
+      onSelect: () => {
+        void (async () => {
+          const dir = cwd.trim().replace(/[\\/]+$/, "");
+          const name = dir.split(/[\\/]/).pop() || dir;
+          if (!dir) return;
+          if (
+            !(await confirmDialog(
+              `把「${dir}」登记为 Ccode 项目？\n只登记这个目录，不会建工作区、不改动任何文件；登记后可在项目页选研究流程模板。`,
+              { confirmText: "登记" },
+            ))
+          )
+            return;
+          try {
+            await invoke("register_project", { path: dir, name });
+            useAppStore.getState().setSelectProjectReq(dir);
+            useAppStore.getState().setPage("workspaces");
+          } catch (e) {
+            void alertDialog(`转为项目失败：${String(e)}`);
+          }
+        })();
+      },
+    },
     { label: "◎ 查找终端输出", onSelect: () => setSearchOpen(true) },
   ];
 
@@ -1401,6 +1463,7 @@ const TerminalView = memo(function TerminalView({
                 setAgentId(e.target.value);
                 setProfileId("");
                 setModel("");
+                setModelKept(false);
               }}
               disabled={running}
             >
@@ -1415,9 +1478,19 @@ const TerminalView = memo(function TerminalView({
               className={`${select} w-40 shrink-0`}
               value={profileId}
               onChange={(e) => {
-                setProfileId(e.target.value);
+                const prevModels =
+                  profiles.find((p) => p.id === profileId)?.models ?? [];
                 const prof = profiles.find((p) => p.id === e.target.value);
-                setModel(prof?.models[0] ?? "");
+                setProfileId(e.target.value);
+                // 手填的模型不再被静默清掉（v3.88）：不在新配置模型表里就保留，
+                // 并由下方说明行告知「仍会按原样注入」
+                const next = modelOnProfileSwitch(
+                  model,
+                  prevModels,
+                  prof?.models ?? [],
+                );
+                setModel(next.model);
+                setModelKept(next.kept);
               }}
               disabled={running}
             >
@@ -1427,11 +1500,26 @@ const TerminalView = memo(function TerminalView({
               {profileId && !selectedProfile && (
                 <option value={profileId}>上次配置已不存在</option>
               )}
-              {agentProfiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
+              {/* 「隐藏此配置」的落点（v3.88）：隐藏项沉到「更多」optgroup，不从列表里消失
+                  ——真删掉会让已选中它的标签无从显示。配置本身与启动行为一字未改 */}
+              {agentProfiles
+                .filter((p) => !hiddenProfiles.includes(p.id))
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              {agentProfiles.some((p) => hiddenProfiles.includes(p.id)) && (
+                <optgroup label="更多（已隐藏）">
+                  {agentProfiles
+                    .filter((p) => hiddenProfiles.includes(p.id))
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                </optgroup>
+              )}
             </select>
             {selectedProfile && (
               // 模型 combo-box：可输可选（profile 预设 + 本 agent 历史），输入即筛选，
@@ -1442,6 +1530,7 @@ const TerminalView = memo(function TerminalView({
                   value={model}
                   onChange={(e) => {
                     setModel(e.target.value);
+                    setModelKept(false);
                     setModelOpen(true);
                   }}
                   onFocus={() => setModelOpen(true)}
@@ -1468,6 +1557,7 @@ const TerminalView = memo(function TerminalView({
                             onMouseDown={(e) => {
                               e.preventDefault();
                               setModel(m);
+                              setModelKept(false);
                               setModelOpen(false);
                             }}
                             className="flex w-full truncate px-2 py-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
@@ -1480,6 +1570,31 @@ const TerminalView = memo(function TerminalView({
                 )}
               </span>
             )}
+            {/* 模型相关的「为什么没生效」就近说清（v3.88）：
+                以前这些只写在配置页表单与用户手册里，用户在启动栏换模型没反应时看不到任何解释 */}
+            {(() => {
+              const prof = profiles.find((p) => p.id === profileId);
+              const cap = launchModelNote(agentId, prof?.models.length ?? 0);
+              const emptyModels =
+                !!prof && prof.models.length === 0 && !model.trim();
+              const odd = model.trim() !== "" && !looksLikeModelId(model);
+              const line = modelKept
+                ? "不在这个配置的模型列表里，仍按原样用。"
+                : emptyModels
+                  ? "这个配置没填模型，会用 CLI 自己的默认值。"
+                  : odd
+                    ? "这串不太像模型名，确认一下。"
+                    : cap;
+              return line ? (
+                <span
+                  className={`w-full text-micro leading-4 ${
+                    modelKept || emptyModels || odd ? "text-warn-text" : "text-l4"
+                  }`}
+                >
+                  {line}
+                </span>
+              ) : null;
+            })()}
             <input
               ref={cwdInputRef}
               className={`${select} min-w-40 flex-1`}
@@ -2365,7 +2480,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         profileId,
         model,
         resumeSessionId: pt.resume?.sessionId,
-        autoStart: !!pt.resume,
+        autoStart: !!pt.resume || !!pt.autoStart,
         prefillCommand: pt.prefillCommand,
         shellOnly: pt.shellOnly,
         initialPrompt: pt.initialPrompt,
@@ -2373,6 +2488,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       });
       // run 脚本标签：登记 nonconcurrent 互斥追踪
       if (pt.wsId) setRunningScript(pt.wsId, tabId);
+      // 「快速开聊」：落到最干净的终端——收起工作树与右栏，只剩标签条 + 终端。
+      // 复用既有的「专注终端」语义（Esc 或 ⤢ 退出），不另造一套显隐状态。
+      // 理由：随手聊没有项目上下文——文件树是空目录、改动面板是「不是 git 仓库」、
+      // 对话面板要等会话关联，三个面板都没东西可给，摆着只是噪音
+      if (pt.clean) {
+        setFocusMode(true);
+        setRightOpen(false);
+      }
       // 指定右栏页签（如「主仓改动」提醒 → 改动面板）
       if (pt.rightTab === "git") {
         setRightOpen(true);
@@ -2996,110 +3119,69 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             ＋
           </button>
           <span className="ml-auto flex shrink-0 items-center gap-1">
-            {/* 变更芯片（Codex 式，v3.83）：改动面板摘要的常驻镜像——点数字打开改动页签，
-                「✓ 保存」直接全量快速提交（说明自动生成），不用点开面板 */}
-            {gitTotals?.isRepo && gitTotals.files.length > 0 && (
-              <span
-                className="flex items-center rounded-sm bg-inset text-xs"
-                title={`${gitPanelCwd} 的未提交改动（跟随左栏文件树的根）`}
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRightOpen(true);
-                    setRightTab("git");
-                  }}
-                  title={`${gitPanelCwd} 的未提交改动，点击查看改动面板`}
-                  className="flex min-w-0 items-center gap-1 rounded-l-sm py-0.5 pl-2 pr-1 text-l2 hover:bg-hover"
-                >
-                  <span className="text-l3">⑂</span>
-                  <span className="max-w-28 truncate">{gitTotals.branch || "HEAD"}</span>
-                  <span className="font-mono text-add">+{gitTotals.add}</span>
-                  <span className="font-mono text-del">-{gitTotals.del}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void quickCommitAll()}
-                  disabled={gitSave === "saving"}
-                  title="快速保存到历史：提交全部改动，说明自动生成（同改动面板留空点「快速保存到历史」）"
-                  className="shrink-0 rounded-r-sm py-0.5 pl-1 pr-2 text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
-                >
-                  {gitSave === "saving"
-                    ? "保存中…"
-                    : gitSave === "saved"
-                      ? "✓ 已保存"
-                      : gitSave === "failed"
-                        ? "保存失败"
-                        : "✓ 保存"}
-                </button>
-              </span>
-            )}
-            {/* 当前项目状态 pill（P1b 参考图 2）：有可合并工作区才显示，纯状态不交互（inset 底 + 语义色小点） */}
-            {mergeReadyWs.length > 0 && (
-              <span
-                className="flex items-center gap-1 rounded-sm bg-inset px-2 py-0.5 text-xs text-l2"
-                title={`可合并的工作区：${mergeReadyWs.join("、")}\n从右侧「改动」页签或工作区页进入评审合并`}
-              >
-                <span className="text-micro text-ok-text">●</span>
-                {mergeReadyWs.length > 1
-                  ? `${mergeReadyWs.length} 个可合并`
-                  : "可合并"}
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={toggleSplit}
-              disabled={!splitActive && tabs.length < 2}
-              title={
-                splitActive
-                  ? "退出分屏"
-                  : "分屏对比：左侧当前标签，右侧任选对照标签（需要至少两个标签）"
-              }
-              className={`rounded-sm px-2 py-0.5 text-xs disabled:opacity-40 ${
-                splitActive ? "text-l1" : "text-l4 hover:text-l2"
-              }`}
-            >
-              ◧ 分屏
-            </button>
-            <button
-              type="button"
-              onClick={() => setRightOpen(true)}
-              title="打开当前任务工作台（对话 / 文件 / 改动）"
-              aria-label="打开当前任务工作台"
-              className={`rounded-sm px-2 py-0.5 text-xs ${
-                rightOpen ? "text-l1" : "text-l4 hover:text-l2"
-              }`}
-            >
-              ◫ 工作台
-            </button>
-            <button
-              onClick={() => setFocusMode((v) => !v)}
-              title={
-                focusMode
-                  ? "退出专注终端（Esc，恢复左右栏）"
-                  : "专注终端（隐藏左右栏，Esc 退出）"
-              }
-              className={`rounded-sm px-2 py-0.5 text-xs ${
-                focusMode ? "text-l1" : "text-l4 hover:text-l2"
-              }`}
-            >
-              ⤢ 专注终端
-            </button>
-            {/* 专注终端下标签内状态条隐藏，停止/恢复/对话等动作收进此菜单 */}
-            {focusMode && (
+            {/* 布局三开关合成一个分段控件（v3.88）：分屏 / 工作台 / 专注终端本질上是同一维度
+                ——「这块屏怎么排」。三个独立按钮各占一格、视觉同权重，是标签条最挤的一段。
+                互斥高亮后语义更清楚，也省两个按钮宽度。git 芯片与可合并 pill 是**结果不是入口**，
+                已下移到中带底部状态条（见下方 statusBar），不与标签抢注意力 */}
+            <span className="flex items-center rounded-sm bg-inset p-0.5">
               <button
                 type="button"
-                onClick={(e) => {
-                  const r = e.currentTarget.getBoundingClientRect();
-                  setFocusMenu({ x: r.right, y: r.bottom + 4 });
-                }}
-                title="终端操作（停止/恢复/接力/对话/查找/修改）"
-                aria-label="终端操作"
-                className="rounded-sm px-2 py-0.5 text-xs text-l4 hover:text-l2"
+                onClick={toggleSplit}
+                disabled={!splitActive && tabs.length < 2}
+                title={
+                  splitActive
+                    ? "退出分屏"
+                    : "分屏对比：左侧当前标签，右侧任选对照标签（需要至少两个标签）"
+                }
+                aria-pressed={splitActive}
+                className={`rounded-sm px-1.5 py-0.5 text-xs disabled:opacity-40 ${
+                  splitActive ? "bg-seg-sel text-l1" : "text-l4 hover:text-l2"
+                }`}
               >
-                ⋯
+                ◧
               </button>
-            )}
+              <button
+                type="button"
+                onClick={() => setRightOpen((v) => !v)}
+                title="成果工作台（对话 / 文件 / 改动）"
+                aria-label="成果工作台"
+                aria-pressed={rightOpen}
+                className={`rounded-sm px-1.5 py-0.5 text-xs ${
+                  rightOpen ? "bg-seg-sel text-l1" : "text-l4 hover:text-l2"
+                }`}
+              >
+                ◫
+              </button>
+              <button
+                type="button"
+                onClick={() => setFocusMode((v) => !v)}
+                title={
+                  focusMode
+                    ? "退出专注终端（Esc，恢复左右栏）"
+                    : "专注终端（隐藏左右栏，Esc 退出）"
+                }
+                aria-pressed={focusMode}
+                className={`rounded-sm px-1.5 py-0.5 text-xs ${
+                  focusMode ? "bg-seg-sel text-l1" : "text-l4 hover:text-l2"
+                }`}
+              >
+                ⤢
+              </button>
+            </span>
+            {/* ⋯ 改为常驻（v3.88）：原先只在专注模式渲染，非专注时同一批动作散在标签内
+                启动栏的 ⋯ 里，两套菜单内容高度重叠。现在合为一处、位置固定 */}
+            <button
+              type="button"
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setFocusMenu({ x: r.right, y: r.bottom + 4 });
+              }}
+              title="终端操作（停止/恢复/接力/对话/查找/修改）"
+              aria-label="终端操作"
+              className="rounded-sm px-2 py-0.5 text-xs text-l4 hover:text-l2"
+            >
+              ⋯
+            </button>
           </span>
         </div>
         <div
@@ -3252,6 +3334,65 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             </div>
           )}
         </div>
+        {/* 中带底部状态条（v3.88）：git 芯片 / ✓保存 / 可合并 pill 从标签条下移到这里。
+            理由——它们是**结果不是入口**，放顶部与标签抢注意力；状态栏是 VS Code / Codex 的
+            通行心智，「✓ 保存」在底部误触概率也更低。v3.83 的芯片行为语义一字未改
+            （点数字开改动页签、✓保存走 defaultCommitMessage 全量快速提交、
+            隐藏 GitPanel 实例继续轮询喂数据），只是换了位置。专注终端下同样保留：
+            那正是最需要「手边有个保存」的场景 */}
+        {(gitTotals?.isRepo || mergeReadyWs.length > 0) && (
+          <div className="flex h-7 shrink-0 items-center gap-2 px-2 text-xs">
+            {gitTotals?.isRepo && gitTotals.files.length > 0 && (
+              <span
+                className="flex items-center rounded-sm bg-inset"
+                title={`${gitPanelCwd} 的未提交改动（跟随左栏文件树的根）`}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRightOpen(true);
+                    setRightTab("git");
+                  }}
+                  title={`${gitPanelCwd} 的未提交改动，点击查看改动面板`}
+                  className="flex min-w-0 items-center gap-1 rounded-l-sm py-0.5 pl-2 pr-1 text-l2 hover:bg-hover"
+                >
+                  <span className="text-l3">⑂</span>
+                  <span className="max-w-28 truncate">
+                    {gitTotals.branch || "HEAD"}
+                  </span>
+                  <span className="font-mono text-add">+{gitTotals.add}</span>
+                  <span className="font-mono text-del">-{gitTotals.del}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void quickCommitAll()}
+                  disabled={gitSave === "saving"}
+                  title="快速保存到历史：提交全部改动，说明自动生成（同改动面板留空点「快速保存到历史」）"
+                  className="shrink-0 rounded-r-sm py-0.5 pl-1 pr-2 text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                >
+                  {gitSave === "saving"
+                    ? "保存中…"
+                    : gitSave === "saved"
+                      ? "✓ 已保存"
+                      : gitSave === "failed"
+                        ? "保存失败"
+                        : "✓ 保存"}
+                </button>
+              </span>
+            )}
+            {mergeReadyWs.length > 0 && (
+              <span
+                className="flex items-center gap-1 rounded-sm bg-inset px-2 py-0.5 text-l2"
+                title={`可合并的工作区：${mergeReadyWs.join("、")}\n从右侧「改动」页签或工作区页进入评审合并`}
+              >
+                <span className="text-micro text-ok-text">●</span>
+                {mergeReadyWs.length > 1
+                  ? `${mergeReadyWs.length} 个可合并`
+                  : "可合并"}
+              </span>
+            )}
+          </div>
+        )}
         {/* 专注内容：右栏铺满即表达主次，中带不加压暗遮罩（v3.44 用户否决压黑） */}
       </div>
 
@@ -3299,7 +3440,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             {/* 页签与面板头部合并为一行（走查去重）：左侧页签，右侧按页签透出上下文
                 （对话 = 会话状态小字 + 完整回放入口）与面板动作；不再单设「工作台」标题行，
                 对话区也不再重复一行标题/agent/状态头部（信息仍在，收进本行右侧） */}
-            <div className="flex h-9 shrink-0 items-center gap-1 border-b border-hairline bg-raised px-2">
+            <div className="group flex h-9 shrink-0 items-center gap-1 border-b border-hairline bg-raised px-2">
               {RIGHT_TABS.map(({ key: k, label, symbol }) => {
                 const gitBadge =
                   k === "git" && gitTotals && gitTotals.add + gitTotals.del > 0
@@ -3404,7 +3545,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                         });
                         setPage("sessions");
                       }}
-                      className="shrink-0 rounded-sm px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-40"
+                      className={`shrink-0 rounded-sm px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-40 ${hoverRevealClass}`}
                     >
                       完整回放
                     </button>
@@ -3418,14 +3559,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       ? "退出专注内容（Esc，恢复工作树分栏）"
                       : "专注内容（暂时隐藏工作树，右栏铺满，Esc 退出）"
                   }
-                  className="flex size-7 shrink-0 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-l1"
+                  className={`flex size-7 shrink-0 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
                 >
                   {rightExpanded ? "⇲" : "⇱"}
                 </button>
                 <button
                   onClick={closeRightPanel}
                   title="收起工作台"
-                  className="flex size-7 shrink-0 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-l1"
+                  className={`flex size-7 shrink-0 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
                 >
                   ×
                 </button>

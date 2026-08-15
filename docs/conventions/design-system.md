@@ -16,13 +16,42 @@
   默认主题 CTA 粉 `#faa8d4`（cta-text 近黑）；`--color-raised`（浮起面板/pill 底）、
   `--color-bubble`（用户消息气泡）、`--color-nav-accent`（侧栏选中左条+选中图标，默认靛蓝、其余取各自 CTA 色）。
 - 四层「浮起」结构（rail/rail2/canvas/inset 逐级变亮）；文字冷白→灰四档；每主题独立 CTA 强调色（按钮/选中用 `cta`；可操作
-  状态如「可合并」用**按钮本身的 cta 高亮**，不另挂 pill；纯状态 pill 用 inset 灰底 + 语义色小圆点）；**状态语义色独立于
-  主题**（ok/err/warn 不随主题变）；**结果横幅一律 bg-strip/inset 底 + ✓/✗ 语义色文字**，不用整块 bg-ok/bg-err（bg-err
+  状态如「可合并」用**按钮本身的 cta 高亮**，不另挂 pill；纯状态 pill 用 inset 灰底 + 语义色小圆点）；
+  **浅色浮起阶梯必须真的拉得开（v3.85）**：`canvas→strip→inset→raised` 每档亮度差 ≥4，且
+  `rail < canvas < rail2 < strip < inset < raised` 次序不得破坏，`rail-sel/seg-sel/hairline/field/bubble`
+  必须比各自所在底色深。浅色的「浮起 = 更亮」在 raised = 白处到顶，阶梯只能靠**把 canvas 压深**换空间——
+  七套浅色原先挤在 1–4 的差里（整页发平、卡片与页面底糊在一起，用户截图即此症），v3.85 统一按
+  「从白往下每档降约 4.5 亮度」重排（保各主题色相；midnight 家族随 v3.48 去蓝一并转暖；
+  mocha-light 不再直接照搬 Latte 官方 base/mantle/crust——那套是「越深越低」，与本应用方向相反）。
+  **开关（Toggle）走专用令牌 `--color-switch-off`（轨道）/`--color-switch-knob`（滑块）**：
+  滑块恒为浅色、状态由轨道表达；禁用 `bg-l1` 当滑块（l1 是文字最亮档，浅色主题是近黑，会渲染成白底黑疙瘩）。
+  **以上几条已写成可执行断言 `tests/theme-contrast.test.ts`（直接解析 App.css），改主题令牌必须跑它**；
+  对比度断言要用 WCAG 相对亮度（先线性化 sRGB），直接拿 0–255 加权会高估暗色、把合格色误判成不合格。
+  **状态语义色分深浅两套**（v3.85 修正原「ok/err/warn 不随主题变」口径）——深色沿用深底浅字，
+  浅色主题在 `[data-theme$="-light"]` 覆写为浅底深字（与 diff 行同手法，实测五对均 ≈5:1 过 AA）：不覆写会让全站 69 处
+  `bg-ok/bg-err/bg-warn` 变成白页上的深色块。**`--color-*` 与 `--color-*-text` 分工是硬规则**：
+  `--color-ok/err/warn` 只作 **pill 底色**（必须配 `text-*-text`），`--color-*-text` 同时供 pill 文字与
+  **一切实心状态圆点/圆形**使用。**禁止用底色档铺实心形状**——浅色下 `--color-warn` 是浅黄 `#fdf1cd`，
+  铺成圆点/22px 步进器大圆会在近白 canvas 上消失（v3.85 已修 `stepCircleClass` 的 blocked、
+  步进器注意力角标、任务卡主仓改动点三处；同为实心圆的 done 本就用 `-text` 档，原先是自相矛盾）；
+  **结果横幅一律 bg-strip/inset 底 + ✓/✗ 语义色文字**，不用整块 bg-ok/bg-err（bg-err
   仅留给需警惕的小 pill）；**diff 增删行铺底走专用令牌 `--color-diff-add-bg/fg`、`--color-diff-del-bg/fg`**（v3.81：
   深色主题沿用深底浅字，浅色主题在 `[data-theme$="-light"]` 统一覆写为 GitHub 式浅底深字——ok/err 深底整行铺在浅底上
-  会显黑，故不再直接复用 bg-ok/bg-err 铺整行）；零阴影、隐式 hairline。**浮层统一口径**：弹窗/下拉/右键菜单/命令面板表面一律
+  会显黑，故不再直接复用 bg-ok/bg-err 铺整行）；**diff 行数文字 `--color-add/--color-del` 同样分深浅两套**
+  （画在 canvas 上不是画在 pill 上，深色值在浅底约 1.8:1）；零阴影、隐式 hairline。**浮层统一口径**：弹窗/下拉/右键菜单/命令面板表面一律
   `.ccode-float-surface`（= raised 底 + 顶部 1px 内高光，Linear edge highlight 手法——零阴影原则不变，浮起感靠
-  边缘高光而非投影），禁再随手用 bg-strip/bg-raised 做弹层；全屏遮罩统一 `bg-black/40`（25/50/60 三档已并一）。
+  边缘高光而非投影），禁再随手用 bg-strip/bg-raised 做弹层；**浅色下白色内高光在白底上不可见**，
+  `[data-theme$="-light"] .ccode-float-surface` 改为极淡内暗边 + 一圈 `0 0 0 0.5px` 外描线
+  （零偏移零模糊，仍不违反零阴影）；全屏遮罩统一 `bg-black/40`（25/50/60 三档已并一）。
+- **终端 ANSI 调色板深浅成对（v3.85）**：`src/terminal-palettes.ts` 的 `PALETTE_LIST` 是 id/名称/亮暗的单一出处，
+  四套深色（dark-plus / solarized / one-dark / catppuccin）各配一套 twin 浅色（light-plus / solarized-light /
+  one-light / latte），`PALETTE_TWIN` 双向映射。**ANSI 16 色 + `cursor` + `selectionBackground` 全部进调色板表**，
+  禁再在 `buildXtermTheme` 里写死——原先写死的 `cursor #aeafad` / `selectionBackground #264f78` 在浅色底上
+  分别是「几乎看不见」和「深底压深字、选中即不可读」。`buildXtermTheme` 必须经 `resolvePaletteId(paletteId, isLightTheme(themeId))`
+  按主题亮暗解析，亮暗不符自动换 twin；设置页只列出与当前主题亮暗匹配的四套。
+  **三处同步点**：`terminal-palettes.ts PALETTE_LIST` ↔ `settings.rs KNOWN_PALETTES`（持久化白名单，
+  漏加会让新调色板被静默丢弃、表现为「选了没生效」）↔ `TerminalPage XTERM_BG_FG`（每主题底/字色）。
+  **主题亮暗判定单一出处是 `themes.ts` 的 `isLightTheme()`**，禁另造判定。
 - **字体渲染按平台分口径（v3.60 后 Windows 糊字修复）**：入口（main.tsx）在 `<html>` 上落 `data-platform`
   （mac/windows/linux，判定在 hotkeys.ts `IS_MAC`/`IS_WINDOWS`）。Windows Chromium 下 `text-rendering:
   optimizeLegibility` 会走 DirectWrite natural 模式丢 hinting，小字号发糊——`[data-platform="windows"]` 覆写回 `auto`，
@@ -30,12 +59,59 @@
   （否则中文穿过未安装的 Noto Sans SC 落通用 sans-serif 发虚）；等宽单一出处是 `@theme` 的 `--font-mono`
   （打包的 JetBrains Mono 在前，Windows 回退 Cascadia Mono/Consolas，CJK 兜底雅黑）；xterm 的 fontFamily 回退链同口径
   （TerminalPage 两处，勿落通用 monospace——Windows 会解析成位图字体）。新增等宽/正文场景一律用这两条链，别自造栈。
-- **线条语言（去格子化，v3.35/v3.37 定稿）**：内联内容容器一律**不加 1px 描边**，靠底色差 + 圆角 + hairline 分层；边框只给
+- **线条语言（去格子化，v3.35/v3.37 定稿；v3.85 补「去线条化」）**：内联内容容器一律**不加 1px 描边**，靠底色差 + 圆角 + hairline 分层；边框只给
   浮层与控件。strip/inset/raised 三级梯度七套主题必须可分辨；hairline/field 与底色对比度七主题同档。**区间分隔优先留白**
   （折叠区标题、rail 底部、PageHeader 均不画横线）。搜索框无描边（inset 底 + 聚焦加深），输入框保留 field 边。**全站线宽
   0.5px**（App.css 覆写 border/divide；focus outline 不动）。**侧栏只保留全高竖分界 + 底部管理区一根横线**。**共享控件集中
   `PageFrame.tsx`**（primary/secondary/rowAction/ghostAction/field/searchField/hoverReveal + SegTabs），禁各页复制本地类，
   一律用通用语义令牌。编辑器面走 `--color-editor-bg/fg/line`，Monaco 经 MutationObserver 随主题换肤。
+- **去线条化（v3.85，用户反馈「工作区界面有点线条化」）**：v3.35/v3.37 拆掉了描边与横线，但没解决**「带太多」这个结构问题**——
+  拆完变成一堆等高细条，反而更像线。补三条硬规则：
+  - **同屏最多 2 条横向「带」**。工作区页只有大圆步进器带保留（它是流程骨架，规格另有硬约束）；其余一律改**块区**——
+    有内边距、靠 `bg-strip`/`bg-inset` 底色成块，不靠横线切分。
+  - **列表分两类**：页面级对象列表（工作区、项目）用**卡片 + 卡间留白**（`flex flex-col gap-2` + `rounded-lg bg-strip p-3`），
+    禁 `divide-y`；块内的密集行列表（任务卡、定时任务）用 `space-y-0.5` + 行 hover 高亮做分隔感，同样不画分隔线。
+    仅浮层内部（popover/下拉）与带左缩进线的层级子列表保留 `divide-y`。
+  - **块与块之间用留白（≥16px / `mb-4`）分隔，禁画分隔横线**。
+  卡片底色选 `bg-strip` 而非 `bg-inset`：卡内还有状态 pill 要再浮一层（pill 走 `bg-raised`），
+  用 inset 做卡会让 pill 无处可去（浅色主题 inset/raised 已接近纯白，梯度顶端压缩）。
+- **界面文案克制（v3.88，用户拍板「界面处越简单越好」）**：
+  - **一个操作最多配一句话**，一句话 ≤ 20 字左右；说不完的**进 `title=` 悬浮提示**，不占版面。
+  - **禁止在界面上写「为什么这么设计」**——那属于代码注释与决策记录（architecture.md §10 / 本文件），
+    不是给用户看的。界面只回答「这是什么、我该怎么做、出了什么问题」。
+  - 弹层/分区的开场白最多一行；**能靠控件自明的就不写说明**（「打开」按钮不必解释它会打开文件管理器）。
+  - 警示类文案（会丢数据、会被覆盖、不会生效）优先保留，但同样压到一句；纯功能介绍一律砍到一句或删。
+  - 反例（v3.88 自查砍掉的）：折叠区整段「这三项会出现在流程线上：人工事项按…、决策项…、种子…」
+    压成「这三项都会显示在流程线上。」；选项 hint 里写完整机制，压成一句、细节进 `title`。
+- **界面术语用白话，内部术语不外露（v3.88）**：`register_project` 的用户面表述是**添加 ↔ 移除**，
+  不是「注册 / 移除注册」——弹层叫「添加项目」，按钮就得叫「添加」，状态叫「未添加」，
+  移除项叫「从 Ccode 移除」（天然与「删除项目目录」区分）。代码标识符与开发文档继续用 register/注册，
+  两者同一物（同 pipeline/研究流程 的映射口径）。
+- **跨页视觉三原则（v3.85，每批 UI 改动自查）**：
+  1. **美观 = 减少同权重元素**——同一视觉层里超过 5 个等权重控件必须分级（主 / 次 / hover 才现）。
+  2. **沉浸 = 减少边界**——一屏内的容器边界（描边 + 横线 + 底色跳变）总数 ≤ 4。
+  3. **简洁 = 每个视图一个答案**——每屏必须能一句话说出「现在该干嘛」，且该答案只出现在一处。
+- **项目详情页固定三段（v3.85）**：①**身份段**（项目名 16px semibold + 课题主题；主题为空时给可点的
+  「＋ 写一句课题主题」占位，不让它只活在菜单深处）→ ②**流程段**（大圆步进器带**规格不动** +
+  其下一张「当前步骤卡」）→ ③**工作段**（任务卡 + 工作区卡）。段间只用留白。
+  **「当前步骤卡」是「现在该干嘛」的唯一答案**：卡头 = 步骤名 + 白话状态（`describeStep` 口径），
+  卡身 = `StepFlow` 流程线（含唯一主动作）。v3.73 把这个答案拆到聚焦头/步进器/流程线三条独立细带上，
+  正是「详情页不够清楚」的来源；现在聚焦头与流程线并进同一张 `bg-inset` 卡，`StepFlow` 传 `bare`
+  去掉自带底色由外层卡承载。**卡内再浮一层用 `bg-raised`**（如「可选」徽标——原用 bg-inset，
+  并进卡后与卡同色即消失）。
+- **项目级低频配置收进「项目设置」抽屉（v3.85）**：右侧滑出，**不是页面、不进侧栏、不占路由**。
+  分组 = 基本（项目名 / 课题主题 / 项目路径）· 研究流程（更换模板 / 另存为模板 + TemplatePicker 实例）·
+  文献与数据（litSource + 资源清单 + 发现资源）· 定时巡检（ScheduleSection）。
+  项目 `⋯` 随之收敛为四项：编辑研究流程 · 项目设置… · 历史 · 移除项目注册
+  （清除痕迹与删除目录仍只在左侧项目栏右键菜单，不在两处各留一套删除入口）。
+  **模板库实例住在抽屉里**——任何打开模板库的入口（空流程引导横幅、设置里的按钮）都必须
+  同时开抽屉，只翻 `pickerOpen` 界面上不会有任何反应；模板应用成功后连抽屉一起关（要让用户看到步进器）。
+- **「快速开聊」是动作不是页面（v3.85）**：侧栏「工作」组首位 + ⌘K 命令，弹层只问 agent / 配置 / 目录，
+  确认即开标签并自动启动（`PendingTerminal.autoStart`；无可用配置时降级为只预填）。
+  **明确不做**：不建项目、不建工作区、不写 `.ccode`、不注册、不选模板、不落 TASK.md；
+  默认落脚 `~/ccode/scratch`（后端 `ensure_scratch_dir` 只 create_dir_all，**不 git init**——
+  改动面板显示「不是 git 仓库」是预期）。转正走终端标签 ⋯「转为项目…」= 仅 `register_project`，
+  会话历史跟 cwd 走、自动归到新项目下，不需要迁移。
 - **符号语言统一**：导航与图标用单色几何符号（⚙⛁⌨◔✦◫⛭⇄），◈=AI 功能、⚑=pin/保留；**禁用彩色 emoji**。
 - **字号阶梯令牌化**：正文阶梯 `text-micro`(11/15) → `text-xs`(12) → `text-sm`(14) → `text-base`(16)，**禁 `text-[Npx]` 任意值**；
   语义分工：micro = badge/时间戳/副注释（11px 是可读下限，不再用 10px），xs = 次级说明，sm = 正文/列表行，base = 页面标题。
@@ -127,11 +203,12 @@
   按列各自现算会在列缝出大间隙，按全局相位铺排会被圆随机截断，两种都已被用户否决），完成列区间内的块亮灰白（l2）、其余暗（hairline）。
   **大圆 = 纯色实心圆（内部无字符）+ 唯一主推进点击**：done=bg-ok-text；进行中/checking=bg-cta（脉冲用有界
   `animate-pulse-brief`：App.css 自定义 3 周期≈6s 后静止，状态复归重播；无限 animate-pulse 是注意力消耗，项目区工作区状态点同口径）；
-  待评审=bg-cta-pill；阻塞=bg-warn；pending=bg-l4 实心灰。点击语义按状态：
+  待评审=bg-cta-pill；阻塞=bg-warn-text（v3.85 由 bg-warn 改：底色档在浅色主题是浅黄，铺 22px 实心圆会消失；
+  且同为实心圆的 done 本就用 `-text` 档）；pending=bg-l4 实心灰。点击语义按状态：
   pending 无工作区=startStep、已归档=restoreWs、进行中/待评审/阻塞=onOpenTerminal(ws)、done=setPendingTerminal 开主仓 shell 终端。
   状态/目录/agent/profile + 点击动作提示收进**应用内 tooltip**（`useHoverTip`/`HoverTip`，fixed 定位、横向钳制、滚动/缩放/点击即关）：
   原生 title 在 WKWebView 上行为不稳定（不渲染或残留数秒串到相邻控件），圆的悬浮提示**一律走应用内 tooltip，禁再回退原生 title**；
-  事件挂包裹 span，禁用态也可悬浮。**大圆右上角注意力角标**（size-2 圆点）：cwd 落在工作区内的终端标签有待确认=bg-warn；
+  事件挂包裹 span，禁用态也可悬浮。**大圆右上角注意力角标**（size-2 圆点）：cwd 落在工作区内的终端标签有待确认=bg-warn-text（同上，v3.85 由 bg-warn 改）；
   v3.59 起「已回复」绿点移除（每回合结束都会亮，噪音大于信号，用户否决），只留待确认；数据只读消费 `terminalRunInputs` 镜像，不新增轮询。
   **v3.61 步进器精简（用户拍板）**：**圆视觉 22px（按钮保持 28px 热区）**；**圆前/圆后小方块的按钮职责删除**
   （伪装成虚线块可发现性为零、与步骤 ⋯ 重复、误触打开全宽覆盖层代价高），小方块视觉保留为普通虚线块（DashBlock），

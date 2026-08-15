@@ -1143,6 +1143,9 @@ fn build_stats(
     let mut by_model: HashMap<(String, String, bool), Bucket> = HashMap::new();
     // (工作区名, 所属仓库路径, internal, official)：同名工作区在不同仓库下各自成行
     let mut by_workspace: HashMap<(String, String, bool, bool), Bucket> = HashMap::new();
+    // 按天成桶（v3.88 趋势线）：区间总数看不出「这周比上周多花多少」，
+    // 而数据本来就是按天存的，聚合一层即可，不引图表库
+    let mut by_day: std::collections::BTreeMap<String, Bucket> = Default::default();
     for (_day, agent, model, project, sid, i, o, cr, cw, source, internal, workspace, official) in rows {
         let acc = TokenAcc {
             input: i as u64,
@@ -1151,6 +1154,9 @@ fn build_stats(
             cache_write: cw as u64,
         };
         cards.add(&model, &sid, acc);
+        if !_day.is_empty() {
+            by_day.entry(_day).or_default().add(&model, &sid, acc);
+        }
         by_agent
             .entry((agent, official))
             .or_default()
@@ -1246,8 +1252,23 @@ fn build_stats(
         (b.tokens_in + b.tokens_out).cmp(&(a.tokens_in + a.tokens_out))
     });
     workspace_rows.truncate(LIST_CAP);
+    // 趋势序列：按日期升序，日期字符串定宽（YYYY-MM-DD）故 BTreeMap 顺序即时间序
+    let daily: Vec<UsageDayRowDto> = by_day
+        .into_iter()
+        .map(|(day, b)| {
+            let (cost_usd, cost_partial) = b.cost(table);
+            UsageDayRowDto {
+                day,
+                input: b.tokens.input,
+                output: b.tokens.output,
+                cost_usd,
+                cost_partial,
+            }
+        })
+        .collect();
     let (cards_cost, cards_partial) = cards.cost(table);
     UsageStatsDto {
+        daily,
         cards: UsageCardsDto {
             input: cards.tokens.input,
             output: cards.tokens.output,
@@ -1312,6 +1333,17 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
 pub struct UsageBuildResult {
     pub sessions_indexed: usize,
     pub rows: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageDayRowDto {
+    /// 本机日期 YYYY-MM-DD（定宽，字典序即时间序）
+    pub day: String,
+    pub input: u64,
+    pub output: u64,
+    pub cost_usd: Option<f64>,
+    pub cost_partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1390,6 +1422,8 @@ pub struct UsageWorkspaceRowDto {
 #[serde(rename_all = "camelCase")]
 pub struct UsageStatsDto {
     pub cards: UsageCardsDto,
+    /// 按天的 token 与费用（升序）：统计页趋势线用；区间总数看不出周比周的变化
+    pub daily: Vec<UsageDayRowDto>,
     pub by_agent: Vec<UsageAgentRowDto>,
     pub by_project: Vec<UsageProjectRowDto>,
     pub by_model: Vec<UsageModelRowDto>,
