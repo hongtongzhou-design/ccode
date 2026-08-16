@@ -91,8 +91,8 @@ export default function FuseDraftModal({
           ◈ 沉淀进任务书
         </h2>
         <p className="mb-3 shrink-0 text-xs text-l3">
-          把「{card.name}」的讨论结论追加到「{stepName}」的任务书草稿
-          {draft ? `（${draft.relPath}）` : ""}末尾；可改后再写入，草稿已有内容不会被动。
+          把「{card.name}」的讨论结论追加到「{stepName}」的 TASK.md
+          {draft ? `（${draft.relPath}）` : ""}末尾；可改后再写入，已有内容不会被动。
         </p>
         <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-field bg-canvas">
           {draft === null && !error ? (
@@ -135,7 +135,7 @@ export default function FuseDraftModal({
             onClick={() => void confirm()}
             className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
-            {writing ? "写入中…" : "追加到草稿"}
+            {writing ? "写入中…" : "追加到 TASK.md"}
           </button>
         </div>
       </div>

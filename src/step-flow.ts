@@ -90,7 +90,7 @@ export function buildStepFlow(args: {
           : "先定几件事",
       hint:
         pendingDecisions > 0
-          ? "点一下就答完；拿不准就点「其他…」"
+          ? "点卡片或跟 AI 聊，都进 TASK.md"
           : undefined,
       done: hasDraft && pendingDecisions === 0,
     });

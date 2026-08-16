@@ -6,6 +6,7 @@ import { confirmDialog } from "./ConfirmDialog";
 import { buildStepFlow, type StepFlowNode } from "../step-flow";
 import {
   parseDecisions,
+  isDecisionsOnly,
   recommendedAnswers,
   unansweredDecisions,
   upsertDecisions,
@@ -66,6 +67,8 @@ export default function StepFlow({
   onRestore,
   reviewConflict,
   onDraftChanged,
+  onSeedDraft,
+  onLoadTaskMd,
   discussContent,
   litSource,
   onOpenResources,
@@ -93,6 +96,11 @@ export default function StepFlow({
   draft?: { relPath: string; exists: boolean; text?: string | null };
   /** 决策项落盘后通知父级重读草稿（与「◈ 沉淀进任务书」同一回调） */
   onDraftChanged?: () => void;
+  /** 「跟 AI 商量一下」开聊前的播种（v3.90）：空内容先灌模板拼装，由卡片区实现（它有 cfg 与拼装出处） */
+  onSeedDraft?: () => Promise<void>;
+  /** 「预览/编辑 TASK.md」的统一加载（v3.90）：返回展示内容——已有编辑内容读文件全文，
+   *  否则给模板拼装（只读展示不落盘，保存才落地）。由卡片区实现（它有 cfg 与拼装出处） */
+  onLoadTaskMd?: () => Promise<string>;
   /** discuss 节点内嵌内容（想法区）：讨论的事全归这个节点，不在流程线外另立并列区块 */
   discussContent?: React.ReactNode;
   /** 项目的文献来源（project.toml lit_source）：zotero/folder 时，落点在 papers/ 的人工事项
@@ -148,6 +156,10 @@ export default function StepFlow({
   // 答案存在草稿的「已定方向」小节里（草稿是开工合同，不另立一份状态），选中态由它回填
   const decisions = step.decisions ?? [];
   const answered = parseDecisions(draft?.text ?? "");
+  /** 已有编辑内容（v3.90：UI 不再暴露「草稿」概念）= 文件有正文；
+      仅含「已定方向」答案的不算——那只是点选记录，不是编辑过的 TASK.md */
+  const draftHasBody =
+    !!draft?.text?.trim() && !isDecisionsOnly(draft.text ?? "");
   const pendingDecisions = unansweredDecisions(decisions, answered);
   const [decisionBusy, setDecisionBusy] = useState(false);
   const [decisionError, setDecisionError] = useState<string | null>(null);
@@ -155,6 +167,8 @@ export default function StepFlow({
   // 为这个开终端太贵——真要展开讨论才走「开聊」
   // 决策项折叠态（v3.89）：默认收起——它们不拦开工，摊开像必办清单
   const [decisionsOpen, setDecisionsOpen] = useState(false);
+  // 方式二折叠态（v3.90）：与方式一同款——默认收起一行，展开才露「跟 AI 商量一下」
+  const [chatOpen, setChatOpen] = useState(false);
   const [writeOwn, setWriteOwn] = useState<{ q: string; text: string } | null>(
     null,
   );
@@ -186,35 +200,53 @@ export default function StepFlow({
     }
   }
 
-  /** 聊任务书（v3.72）：讨论直接服务于草稿——非只读启动（agent 要写草稿），
-   *  指令约束只许新建/修改草稿这一个文件；不用卡片的只读保护（那是不动文件口径）。
-   *  开聊同时带开草稿预览（previewPath/previewRoot 交接给终端页右栏） */
-  function chatDraft() {
-    if (!draft) return;
+  /** 聊任务书（v3.72）：讨论直接服务于 TASK.md 内容文件——非只读启动（agent 要写文件），
+   *  指令约束只许新建/修改这一个文件；不用卡片的只读保护（那是不动文件口径）。
+   *  开聊同时带开文件预览（previewPath/previewRoot 交接给终端页右栏）。
+   *  v3.90 起先播种（onSeedDraft）：空文件/仅决策答案的文件先灌入模板拼装——
+   *  商量改的就是最终落盘的 TASK.md，从零起草会把简报/预期产物/提货单全丢掉 */
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  async function chatDraft() {
+    if (!draft || chatBusy) return;
+    setChatBusy(true);
+    setChatError(null);
+    try {
+      await onSeedDraft?.();
+    } catch (reason) {
+      setChatBusy(false);
+      setChatError(`TASK.md 准备失败：${String(reason)}`);
+      return;
+    }
+    setChatBusy(false);
     setPendingTerminal({
       cwd: projectPath,
       extraEnv: {},
       title: `${step.name} · 任务书`,
       initialPrompt:
-        `我们一起完善「${step.name}」这一步的任务书草稿（${draft.relPath}）。` +
-        `先读它的现有内容（不存在就新建，开头写「# 任务书草稿：${step.name}」）。` +
-        `我们讨论出的结论你直接整理进这个草稿文件——只允许新建/修改这一个文件，其他文件一律不要动。` +
-        `讨论中没定下来的问题，记到草稿的「## 待拍板」小节。` +
+        `我们一起敲定「${step.name}」这一步的任务书（${draft.relPath}）。` +
+        `它现在的内容就是 TASK.md 的默认拼装（步骤简报、预期产物等都在里面），定稿后会原样落成工作区的 TASK.md。` +
+        `先通读一遍，把拿不准的点（范围、口径、标准等）逐个问我，按我的回答直接修改这份文件。` +
+        `只允许新建/修改这一个文件，其他文件一律不要动。` +
+        `讨论中没定下来的问题，记到这份任务书的「## 待拍板」小节。` +
         (seeds.length > 0 ? `可以先从这几个问题聊起：${seeds.join("；")}` : ""),
-      // 草稿绝对路径：不存在也会在讨论中被 agent 创建，预览随后刷新即可见
+      // 文件绝对路径：播种后已存在；播种失败已在上面拦截，不会走到这里
       previewPath: `${projectPath.replace(/[\\/]+$/, "")}/${draft.relPath}`,
       previewRoot: projectPath,
     });
     setPage("terminal");
   }
 
-  /** 预览/编辑草稿（终端页文件预览编辑器，md 可直接改） */
-  /** 草稿就地编辑（本页弹层）：草稿是开工合同，改它是高频动作，
-   *  为此跳到终端页再切回来太贵。仍保留「在终端里打开」作为逃生口（要看 diff/用编辑器时） */
+  /** TASK.md 就地预览/编辑（本页弹层，v3.90 起与「预览 TASK.md」入口合一——不再有「草稿」概念）：
+   *  内容经 onLoadTaskMd 加载：已有编辑内容读文件，否则给模板拼装（只读展示不落盘，纯看不留痕，
+   *  discuss 节点完成口径不受影响）；保存才经 write_task_draft 落地。
+   *  仍保留「在终端里打开」作为逃生口（要看 diff/用编辑器时） */
   const [draftEdit, setDraftEdit] = useState<{
-    /** 打开时从磁盘读到的原文，用来判断是否有未保存改动 */
+    /** 打开时读到的原文，用来判断是否有未保存改动 */
     origin: string;
     text: string;
+    /** true = 还没有编辑内容，显示的是模板拼装（保存才创建文件）；「在终端里打开」此时无文件可开 */
+    fromTemplate: boolean;
     saving: boolean;
     error: string | null;
   } | null>(null);
@@ -232,19 +264,31 @@ export default function StepFlow({
   );
 
   async function openDraftInline() {
-    setDraftEdit({ origin: "", text: "", saving: false, error: null });
+    setDraftEdit({ origin: "", text: "", fromTemplate: false, saving: false, error: null });
     try {
-      // 以磁盘最新为准：agent 可能刚改过草稿
+      if (onLoadTaskMd) {
+        const text = await onLoadTaskMd();
+        setDraftEdit({
+          origin: text,
+          text,
+          fromTemplate: !draftHasBody,
+          saving: false,
+          error: null,
+        });
+        return;
+      }
+      // 无加载回调的兜底（StepFlow 目前仅卡片区使用，正常不会走到）
       const cur = await invoke<{ relPath: string; text: string | null }>(
         "read_task_draft",
         { projectRoot: projectPath, stepName: step.name },
       );
       const text = cur?.text ?? "";
-      setDraftEdit({ origin: text, text, saving: false, error: null });
+      setDraftEdit({ origin: text, text, fromTemplate: !text.trim(), saving: false, error: null });
     } catch (reason) {
       setDraftEdit({
         origin: "",
         text: "",
+        fromTemplate: false,
         saving: false,
         error: String(reason),
       });
@@ -274,7 +318,7 @@ export default function StepFlow({
     if (!draftEdit) return;
     if (
       draftEdit.text !== draftEdit.origin &&
-      !(await confirmDialog("草稿有未保存的改动，确定放弃？", {
+      !(await confirmDialog("TASK.md 有未保存的改动，确定放弃？", {
         danger: true,
         confirmText: "放弃改动",
       }))
@@ -607,8 +651,8 @@ export default function StepFlow({
                   （系统检索 → 盘点已有 + 查漏补缺）
                 所以它是「这一步的输入从哪来」，不是「这一步怎么做」，单独成块 + 自带动作按钮。
                 答完且没有待办动作时收成一行，不长期占地方。 */}
-            {/* 决策项：可枚举的拍板点一行一题，点选即答——不开终端、不建卡、不切页。
-                真正开放的问题才留给下面的种子 chips 去聊 */}
+            {/* 决策项 = 方式一（点卡片直接定）：可枚举的拍板点一行一题，点选即答——不开终端、不建卡、不切页。
+                与「跟 AI 商量一下」（方式二 · 聊着定）是确定 TASK.md 的两条并列路径，终点相同（v3.90 用户拍板挑明） */}
             {decisions.length > 0 && (
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
@@ -625,8 +669,8 @@ export default function StepFlow({
                       {decisionsOpen ? "▾" : "▸"}
                     </span>
                     {pendingDecisions.length > 0
-                      ? `${pendingDecisions.length} 个常见问题，点一下就答完`
-                      : `${decisions.length} 个问题都定好了`}
+                      ? `方式一 · 点卡片直接定（还有 ${pendingDecisions.length} 题）`
+                      : `方式一 · 点卡片直接定（都定好了）`}
                   </button>
                   {pendingDecisions.length > 0 && (
                     <button
@@ -771,43 +815,93 @@ export default function StepFlow({
                 )}
               </div>
             )}
-            <div className="flex flex-wrap items-center gap-2">
-              {/* 聊天入口合一（v3.89，用户拍板）：原先「跟 Agent 聊任务书」（写草稿）
-                  与「聊个话题」（只建卡纯聊）并列，但**这个区别对新用户没有意义**——
-                  两个都是「去聊」。合成一个，默认写草稿：聊完有产出，
-                  总好过聊完还要想「刚才那些话去哪了」 */}
-              <button
-                type="button"
-                disabled={!draft}
-                onClick={chatDraft}
-                title="开终端跟 AI 一起把这一步要干什么讲清楚，结论自动写进任务书草稿"
-                className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
-              >
-                跟 AI 商量一下
-              </button>
-              {/* 明确标成可选（v3.89，用户：「新用户会以为要干嘛」）——
-                  它和「开始」是并列的两条路，不是开工前必经的一步 */}
-              {!draft?.exists && (
-                <span className="text-xs text-l4">
-                  可选 · 拿不准要做什么就先聊聊，结论写成任务书
-                </span>
-              )}
-              {draft?.exists && (
+            {/* 方式一/方式二同形（v3.90 走查，用户拍板）：两条路都是「可折叠的一行」——
+                ▸ 折叠只露一行标签，▾ 展开才露动作（方式一展开是卡片、方式二展开是聊天按钮）。
+                「预览/编辑 TASK.md」是看结果不是第三条路——固定在行尾（与方式一行的
+                「全部用推荐值」同位），不参战 */}
+            {decisions.length > 0 ? (
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setChatOpen((v) => !v)}
+                    aria-expanded={chatOpen}
+                    className="flex min-w-0 items-center gap-1 text-xs text-l3 hover:text-l1"
+                  >
+                    <span className="w-3 text-l4">{chatOpen ? "▾" : "▸"}</span>
+                    方式二 · 聊着定（可选）
+                  </button>
+                  <span className="ml-auto flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={!draft}
+                      onClick={() => void openDraftInline()}
+                      title="查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
+                      className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                    >
+                      预览/编辑 TASK.md
+                    </button>
+                    {draftHasBody && (
+                      <span className="text-xs text-l4">
+                        已编辑 · 开工以这份为准
+                      </span>
+                    )}
+                  </span>
+                </div>
+                {chatOpen && (
+                  <div className="flex flex-wrap items-center gap-2 pl-4">
+                    <button
+                      type="button"
+                      disabled={!draft || chatBusy}
+                      onClick={() => void chatDraft()}
+                      className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                    >
+                      {chatBusy ? "准备 TASK.md…" : "跟 AI 商量一下"}
+                    </button>
+                    <span className="text-xs text-l4">
+                      它先读 TASK.md，拿不准的点逐个问你，按你的回答直接改稿
+                    </span>
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* 无决策项的步骤：方式一不存在，不标「方式二」（会让人找方式一）——维持单按钮形态 */
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => void openDraftInline()}
-                  title="就地查看/编辑草稿，不跳页"
-                  className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover"
+                  disabled={!draft || chatBusy}
+                  onClick={() => void chatDraft()}
+                  title="开终端跟 AI 一起过一遍任务书：它读稿提问、你拍板、它直接改稿——改的就是最终落盘的 TASK.md"
+                  className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
                 >
-                  预览/编辑草稿
+                  {chatBusy ? "准备 TASK.md…" : "跟 AI 商量一下"}
                 </button>
-              )}
-              {draft?.exists && (
-                <span className="text-xs text-l4">
-                  已起草 · {draft.relPath}
+                {!draftHasBody && (
+                  <span className="text-xs text-l4">
+                    可选 · 边聊边改 TASK.md
+                  </span>
+                )}
+                <span className="ml-auto flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={!draft}
+                    onClick={() => void openDraftInline()}
+                    title="查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
+                    className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                  >
+                    预览/编辑 TASK.md
+                  </button>
+                  {draftHasBody && (
+                    <span className="text-xs text-l4">
+                      已编辑 · 开工以这份为准
+                    </span>
+                  )}
                 </span>
-              )}
-            </div>
+              </div>
+            )}
+            {chatError && (
+              <p className="text-micro text-err-text">{chatError}</p>
+            )}
             {/* 预置话题 chips：只列还没开聊过的——开过的已经以话题行躺在下面的清单里，
                 两处都显示会让人以为是两个东西。点击 = 只读开聊（同话题清单口径），
                 「让 agent 直接改草稿」是上面那颗「跟 Agent 聊任务书」的活，两者不重叠 */}
@@ -890,7 +984,7 @@ export default function StepFlow({
         />
       )}
       {error && <p className="mt-1 pl-1 text-micro text-err-text">{error}</p>}
-      {/* 草稿就地编辑弹层：不跳终端页。背景点击在有未保存改动时会先确认 */}
+      {/* TASK.md 就地编辑弹层：不跳终端页。背景点击在有未保存改动时会先确认 */}
       {draftEdit && (
         <div
           className="ccode-fade fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -902,18 +996,15 @@ export default function StepFlow({
           >
             <div className="mb-3 flex shrink-0 items-baseline gap-2">
               <h2 className="shrink-0 text-base font-semibold text-l1">
-                任务书草稿：{step.name}
+                TASK.md：{step.name}
               </h2>
-              <span className="min-w-0 flex-1 truncate font-mono text-micro text-l4">
-                {draft?.relPath}
-              </span>
               <button
                 type="button"
                 onClick={() => setDraftPreview((v) => !v)}
                 title={
-                  draftPreview ? "回到编辑" : "看渲染后的排版（长草稿好读）"
+                  draftPreview ? "回到编辑" : "看渲染后的排版（长文档好读）"
                 }
-                className="shrink-0 self-center rounded-sm border border-field px-1.5 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
+                className="ml-auto shrink-0 self-center rounded-sm border border-field px-1.5 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
               >
                 {draftPreview ? "编辑" : "预览"}
               </button>
@@ -935,19 +1026,25 @@ export default function StepFlow({
                 className="min-h-0 flex-1 resize-none rounded-md border border-field bg-canvas p-3 font-mono text-xs leading-5 text-l2 outline-none focus:border-cta-bd"
               />
             )}
-            <p className="mt-2 shrink-0 text-micro text-l4">草稿就是开工时的 TASK.md 来源。</p>
+            <p className="mt-2 shrink-0 text-micro text-l4">
+              {draftEdit.fromTemplate
+                ? "当前是模板默认拼装，还没改过；保存后开工就以这份为准。"
+                : "开工时这份内容将原样落成工作区的 TASK.md。"}
+            </p>
             <div className="mt-3 flex shrink-0 items-center gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setDraftEdit(null);
-                  openDraft();
-                }}
-                title="改用终端页打开（要看改动对比或用编辑器时）"
-                className="rounded-sm px-2 py-1.5 text-micro text-l4 hover:bg-hover hover:text-l2"
-              >
-                在终端里打开
-              </button>
+              {!draftEdit.fromTemplate && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraftEdit(null);
+                    openDraft();
+                  }}
+                  title="改用终端页打开（要看改动对比或用编辑器时）"
+                  className="rounded-sm px-2 py-1.5 text-micro text-l4 hover:bg-hover hover:text-l2"
+                >
+                  在终端里打开
+                </button>
+              )}
               {draftEdit.error && (
                 <span className="min-w-0 flex-1 truncate text-micro text-err-text">
                   {draftEdit.error}
@@ -970,7 +1067,7 @@ export default function StepFlow({
                   title={
                     draftEdit.text === draftEdit.origin
                       ? "没有改动"
-                      : "写回草稿文件"
+                      : "保存为开工用的 TASK.md 内容"
                   }
                   className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                 >

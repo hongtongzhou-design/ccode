@@ -116,6 +116,10 @@
 - **字号阶梯令牌化**：正文阶梯 `text-micro`(11/15) → `text-xs`(12) → `text-sm`(14) → `text-base`(16)，**禁 `text-[Npx]` 任意值**；
   语义分工：micro = badge/时间戳/副注释（11px 是可读下限，不再用 10px），xs = 次级说明，sm = 正文/列表行，base = 页面标题。
   终端工作台整体提高一档（`.terminal-workbench` 覆写 micro→12、xs→13）。同类信息必须用同一档，禁止同页相邻出现两档灰字。
+  **已定现状，勿动（v3.90 否决）**：`App.css` 的全局 `button/input { font: inherit }` 未包 cascade layer，
+  优先级高于 Tailwind v4 工具类——按钮上的 `text-*` 类实际不生效，**全站按钮按继承字号渲染**。
+  曾尝试包进 `@layer base` 修复，全站按钮整体变小一档，用户实测「还不如之前」否决，已回退。
+  局部块要统一字号的做法：给容器定字号、让按钮继承（不要再给按钮单独标 `text-*`）。
 - **动效口径**：弹层入场 `ccode-pop`（150ms opacity+scale .98→1，已绑在 `.ccode-float-surface` 上，弹层零额外接入）；
   遮罩入场 `ccode-fade`（120ms 透明度）；统一 `--ccode-motion-ease`，UI 反馈都在 200ms 内；`prefers-reduced-motion` 全局关闭。
   focus 环 `outline: 1px solid var(--color-l3)`（field 色太弱，l3 提亮不换色相）。

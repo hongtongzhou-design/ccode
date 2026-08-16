@@ -1261,8 +1261,9 @@ const TerminalView = memo(function TerminalView({
       setRunning(true);
       if (res.promptDropped) {
         // 该 CLI 无交互注入参数（kimi/opencode）：保留启动栏展开与指令文本，
-        // 用户可复制后在终端里手动发送
-        setError("该 CLI 不支持启动注入，请手动发送首条指令");
+        // 并自动复制到剪贴板（运行中输入框 disabled 不可选中），用户在终端里粘贴发送
+        void navigator.clipboard.writeText(promptText).catch(() => {});
+        setError("该 CLI 不支持启动注入：指令已复制，请在终端里粘贴发送");
       } else {
         // 一次性：注入成功（或未携带指令）即清除，之后「启动」不再重复发送
         setPromptText("");
@@ -1623,7 +1624,8 @@ const TerminalView = memo(function TerminalView({
                 </button>
               ))}
           </div>
-          {/* 一键开步的首条指令：可编辑，留空 = 不注入；注入成功即清除 */}
+          {/* 一键开步的首条指令：可编辑，留空 = 不注入；注入成功即清除。
+              无注入参数的 CLI（kimi/opencode）运行中输入框 disabled 不可选中，给一键复制兜底 */}
           {showPrompt && !shellOnly && (
             <div className="mb-2 flex items-center gap-2">
               <span className="shrink-0 text-xs text-l3">启动后自动发送：</span>
@@ -1634,6 +1636,18 @@ const TerminalView = memo(function TerminalView({
                 placeholder="留空则不注入首条指令"
                 disabled={running}
               />
+              {running && promptText.trim() && (
+                <button
+                  type="button"
+                  title="复制指令到剪贴板"
+                  onClick={() =>
+                    void navigator.clipboard.writeText(promptText).catch(() => {})
+                  }
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
+                >
+                  ⧉
+                </button>
+              )}
             </div>
           )}
           <div className="mb-2 flex min-h-7 flex-wrap items-center gap-2 border-t border-hairline pt-1 text-xs">

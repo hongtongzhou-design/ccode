@@ -1696,7 +1696,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       !(await confirmDialog(
         `清除「${name}」的 Ccode 痕迹？\n\n` +
           `文件夹与你的文件：保留\n` +
-          `.ccode/（档案卡、任务卡、任务书草稿）：移入回收站（可找回）\n` +
+          `.ccode/（档案卡、任务卡、各步骤 TASK.md 内容）：移入回收站（可找回）\n` +
           `工作区 worktree 与分支、注册记录：彻底删除\n\n` +
           `注意：如果 .ccode 曾被 git 跟踪，改动面板会显示对应删除，需要你自行提交。请先关闭该项目内正在运行的终端标签。`,
         { danger: true },

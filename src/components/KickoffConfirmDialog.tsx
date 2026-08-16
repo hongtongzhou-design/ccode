@@ -335,10 +335,10 @@ export default function KickoffConfirmDialog({
                 type="button"
                 disabled={legacyMerging}
                 onClick={() => void mergeLegacyBriefs()}
-                title="把旧版简报全文逐份追加进本步骤任务书草稿（「旧简报并入」小节），之后可在编辑区再改"
+                title="把旧版简报全文逐份追加进本步骤的 TASK.md 内容文件（「旧简报并入」小节），之后可在编辑区再改"
                 className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
               >
-                {legacyMerging ? "并入中…" : "并入草稿"}
+                {legacyMerging ? "并入中…" : "并入 TASK.md"}
               </button>
             </div>
             {legacyError && (
@@ -462,7 +462,7 @@ export default function KickoffConfirmDialog({
               {editor.dirty
                 ? "（已手改）"
                 : draftText?.trim() && !isDecisionsOnly(draftText.trim())
-                  ? "（来自任务书草稿）"
+                  ? "（来自你已编辑的 TASK.md）"
                   : "（自动生成，一般不用改）"}
             </span>
           </button>
@@ -484,7 +484,7 @@ export default function KickoffConfirmDialog({
           <>
             {draftText?.trim() && !isDecisionsOnly(draftText.trim()) && (
               <p className="mb-1 shrink-0 text-micro text-l4">
-                内容来自任务书草稿 {draftRel ?? ""}（改这里只影响本次落盘，不回写草稿）
+                内容来自你编辑过的 TASK.md（{draftRel ?? ""}；改这里只影响本次落盘，不回写该文件）
               </p>
             )}
             <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-field bg-canvas">

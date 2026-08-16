@@ -18,6 +18,8 @@ import { Checkbox, hoverRevealClass, NoticeBar } from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import { startPipelineStep } from "../pipeline-start";
+import { upsertLitSourceSection } from "../task-md-sections";
+import { isDecisionsOnly } from "../step-decisions";
 import { normSep } from "../path-utils";
 import type { RunOverviewInput } from "../run-overview";
 import type {
@@ -847,10 +849,13 @@ export default function ProjectGroup({
   const [zoteroMsg, setZoteroMsg] = useState<string | null>(null);
   const [litBusy, setLitBusy] = useState(false);
 
-  /** 切换文献来源：只改 project.toml 的 lit_source，不动任何文件。
+  /** 切换文献来源：改 project.toml 的 lit_source + 就地同步各步骤已编辑的 TASK.md 内容文件。
    *  v3.86 起改为**显式三值**（search / zotero / folder）——原先是两档开关，
    *  「我已有文献库」无法表达 zotero 与 folder 的区别，才需要「已是 zotero 就不降级」的特判；
-   *  流程线「输入准备」三个选项一一对应后，特判不再需要，选什么就是什么。 */
+   *  流程线「输入准备」三个选项一一对应后，特判不再需要，选什么就是什么。
+   *  v3.90 起内容文件是快照（编辑/播种后不再随模板拼装变化），但「文献来源」段是改变检索
+   *  步骤性质的硬前提，必须就地 upsert 进已有正文的文件；无正文/不存在的文件不管
+   *  （它们展示与落盘走模板拼装，本来就是最新） */
   async function setLitSource(next: string) {
     if (!cfg || litBusy) return;
     const target = ["search", "zotero", "folder"].includes(next)
@@ -860,9 +865,37 @@ export default function ProjectGroup({
     setLitBusy(true);
     try {
       await saveConfig({ ...cfg, litSource: target });
+      await syncLitSourceToTaskMds(target);
     } finally {
       setLitBusy(false);
     }
+  }
+
+  /** 把「文献来源」段就地同步进各步骤已有正文的 TASK.md 内容文件（快照的例外，见 setLitSource）。
+   *  单步失败不阻断（best-effort）；完成后重读聚焦步骤内容，让「预览/编辑 TASK.md」即刻反映 */
+  async function syncLitSourceToTaskMds(target: string) {
+    if (!project || !cfg) return;
+    for (const s of cfg.steps) {
+      try {
+        const cur = await invoke<{ relPath: string; text: string | null }>(
+          "read_task_draft",
+          { projectRoot: project.path, stepName: s.name },
+        );
+        const raw = cur?.text?.trim() ?? "";
+        if (!raw || isDecisionsOnly(raw)) continue;
+        const nextText = upsertLitSourceSection(cur?.text ?? "", target);
+        if (nextText !== cur?.text) {
+          await invoke("write_task_draft", {
+            projectRoot: project.path,
+            stepName: s.name,
+            content: nextText,
+          });
+        }
+      } catch {
+        /* 单步读写失败跳过，不阻断其余步骤 */
+      }
+    }
+    loadFocusDraft();
   }
 
   /** 打开 Zotero 分类选择：探测失败（没装/自定义数据目录）时把后端原因显示出来，
@@ -912,6 +945,8 @@ export default function ProjectGroup({
       });
       if (cfg && cfg.litSource !== "zotero") {
         await saveConfig({ ...cfg, litSource: "zotero" });
+        // 与 setLitSource 同口径：「文献来源」段就地同步进已编辑的 TASK.md 内容文件
+        await syncLitSourceToTaskMds("zotero");
       }
       setZoteroLib(null);
       setZoteroMsg(
@@ -1174,7 +1209,7 @@ export default function ProjectGroup({
               // （草稿只加载聚焦步骤那一份；statusText 仅经 focusDesc 展示，即聚焦步骤）
               statusText:
                 focusDraft?.stepName === step.name && focusDraft.text?.trim()
-                  ? "任务书草稿已就位，可以开始"
+                  ? "TASK.md 已就位，可以开始"
                   : "待开始",
               actionLabel: "开始",
               action: (() => void startStep(i)),

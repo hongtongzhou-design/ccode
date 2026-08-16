@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { orderedAnswers, parseDecisions } from "./step-decisions";
+import { litSourceSectionLines } from "./task-md-sections";
 import {
   DEFAULT_KICKOFF_PROMPT,
   RESOURCE_TYPE_LABELS,
@@ -39,21 +40,10 @@ export function renderTaskMd(
   if (globals.length > 0) {
     lines.push("## 全局设定", ...globals.map((x) => `- ${x}`), "");
   }
-  // 文献来源：用户已有文献库时，检索这一步的性质变了——不是「去检索」而是「盘点 + 查漏」。
-  // 放在简报之前，让 agent 先知道前提再读步骤简报（模板简报本身不必为此写两套）
-  const litSource = cfg.litSource?.trim();
-  if (litSource === "zotero" || litSource === "folder") {
-    lines.push(
-      "## 文献来源",
-      litSource === "zotero"
-        ? "本项目的文献来自用户已有的 Zotero 库（已导出 references.bib，PDF 见「项目资源」段的绝对路径）。"
-        : "本项目的文献来自用户已有的本地文件夹（见「项目资源」段）。",
-      "因此涉及文献检索的步骤按「盘点 + 查漏补缺」执行，而不是从零系统检索：",
-      "1. 先通读已有条目，按本步骤的纳入/排除标准逐条判定，产出筛选记录；",
-      "2. 只针对明显缺口做补充检索（近一年新工作、标准里要求但库中没有的方向），不重复已有条目；",
-      "3. 已有条目的元数据以 references.bib 为准，不要重新编造；缺字段标「待补」。",
-      "",
-    );
+  // 文献来源：用户已有文献库时，检索这一步的性质变了——不是「去检索」而是「盘点 + 查漏」
+  const litLines = litSourceSectionLines(cfg.litSource);
+  if (litLines) {
+    lines.push(...litLines, "");
   }
   // 已定方向紧跟主题、排在简报之前：这是人对本步骤的显式约束，
   // agent 应当在读简报之前先知道哪些口径已经被拍死

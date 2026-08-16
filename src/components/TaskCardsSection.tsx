@@ -1,10 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { marked } from "marked";
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
-import { hoverRevealClass, LoadingRows, RoleBadge, Toggle } from "./PageFrame";
-import StepSkillsChips from "./StepSkillsChips";
+import { hoverRevealClass, RoleBadge, Toggle } from "./PageFrame";
 import StepFlow from "./StepFlow";
 import FuseDraftModal from "./FuseDraftModal";
 import { useAppStore } from "../store";
@@ -14,11 +12,11 @@ import {
   unstartedSeeds,
 } from "../task-cards";
 import { buildTaskMdPreview } from "../pipeline-start";
+import { isDecisionsOnly } from "../step-decisions";
 import { AGENTS } from "../types";
 import type {
   ProjectConfigDto,
   ProjectStepDto,
-  SkillDto,
   TaskCardDto,
   WorkspaceDto,
 } from "../types";
@@ -142,26 +140,6 @@ export default function TaskCardsSection({
   const [ideaFormOpen, setIdeaFormOpen] = useState(false);
   const [ideaName, setIdeaName] = useState("");
   const [fusing, setFusing] = useState<TaskCardDto | null>(null);
-  // 步骤级 TASK.md 预览（只读弹层）：步骤名 + 拼装结果 + 技能库元数据（推荐技能区的描述来源）
-  const [taskMdPreview, setTaskMdPreview] = useState<{
-    stepName: string;
-    text: string | null;
-  } | null>(null);
-  const [skillLib, setSkillLib] = useState<SkillDto[] | null>(null);
-  // TASK.md 预览的呈现方式：默认渲染（要读的是内容），源码一键可见（它是 agent 的合同，
-  // 排查「这句到底怎么写进去的」时要看原文）
-  const [taskMdRaw, setTaskMdRaw] = useState(false);
-  const taskMdHtml = useMemo(
-    () =>
-      taskMdPreview?.text
-        ? marked.parse(taskMdPreview.text, {
-            gfm: true,
-            breaks: false,
-            async: false,
-          })
-        : "",
-    [taskMdPreview?.text],
-  );
 
   useEffect(() => {
     let stale = false;
@@ -243,7 +221,7 @@ export default function TaskCardsSection({
   async function onDelete(card: TaskCardDto) {
     if (
       !(await confirmDialog(
-        `删除卡片「${card.name}」？卡片内的对话会移出卡片（对话本身不删除），任务书草稿不受影响。继续？`,
+        `删除卡片「${card.name}」？卡片内的对话会移出卡片（对话本身不删除），TASK.md 不受影响。继续？`,
         { danger: true },
       ))
     )
@@ -349,29 +327,41 @@ export default function TaskCardsSection({
     setPage("terminal");
   }
 
-  /** 步骤级「预览 TASK.md」：模板拼装当前 TASK.md，只读展示；
-   *  无卡无工作区也可预览（模板 + 提货单）。与开工落盘同一 renderTaskMd 出处 */
-  function onPreviewTaskMd(stepName: string) {
-    const step = steps.find((s) => s.name === stepName);
+  /** 「跟 AI 商量一下」开聊前的草稿播种（v3.90）：空草稿/仅决策答案的草稿先灌入当前模板拼装——
+   *  商量的产出就是最终落盘的 TASK.md，从零起草会把简报/预期产物/提货单丢掉。
+   *  决策答案不丢：buildTaskMdPreview 的「已定方向」段本就解析自草稿（gatherTaskMdExtras）。
+   *  已有正文草稿时不覆盖，agent 接着它改 */
+  async function seedDraftForChat() {
+    const step = focusStepDto;
     if (!step) return;
-    setTaskMdPreview({ stepName, text: null });
-    // 技能库描述（推荐技能区用）：与预览并行加载，失败则只列技能名
-    if (!skillLib) {
-      invoke<SkillDto[]>("list_skills")
-        .then(setSkillLib)
-        .catch(() => {});
-    }
-    buildTaskMdPreview(projectPath, step, cfg)
-      .then((text) =>
-        setTaskMdPreview((cur) => (cur?.stepName === stepName ? { stepName, text } : cur)),
-      )
-      .catch((e) =>
-        setTaskMdPreview((cur) =>
-          cur?.stepName === stepName
-            ? { stepName, text: `预览生成失败：${String(e)}` }
-            : cur,
-        ),
-      );
+    const cur = await invoke<{ relPath: string; text: string | null }>(
+      "read_task_draft",
+      { projectRoot: projectPath, stepName: step.name },
+    );
+    const raw = cur?.text?.trim() ?? "";
+    if (raw && !isDecisionsOnly(raw)) return;
+    const assembled = await buildTaskMdPreview(projectPath, step, cfg);
+    await invoke("write_task_draft", {
+      projectRoot: projectPath,
+      stepName: step.name,
+      content: assembled,
+    });
+    onDraftChanged?.();
+  }
+
+  /** 「预览/编辑 TASK.md」的统一加载（v3.90：入口合一，不再有「草稿」概念）：
+   *  有正文内容读文件全文；否则给模板拼装（只读展示不落盘——纯看不留痕，
+   *  保存才经 write_task_draft 落地；与 seedDraftForChat 同一拼装出处） */
+  async function loadTaskMdForStep(): Promise<string> {
+    const step = focusStepDto;
+    if (!step) return "";
+    const cur = await invoke<{ relPath: string; text: string | null }>(
+      "read_task_draft",
+      { projectRoot: projectPath, stepName: step.name },
+    );
+    const raw = cur?.text?.trim() ?? "";
+    if (raw && !isDecisionsOnly(raw)) return cur?.text ?? "";
+    return buildTaskMdPreview(projectPath, step, cfg);
   }
 
   /** 想法卡行（想法区）：主按钮 = 只读纯聊「聊想法」；「◈ 沉淀进任务书」只在开工前渲染
@@ -396,7 +386,7 @@ export default function TaskCardsSection({
             <button
               type="button"
               onClick={() => setFusing(card)}
-              title="AI 把这张卡的讨论结论织进当前步骤的任务书草稿；先出稿给你改，确认后才写入"
+              title="AI 把这张卡的讨论结论织进当前步骤的 TASK.md；先出稿给你改，确认后才写入"
               className={`${actionBtn} shrink-0`}
             >
               ◈ 沉淀进任务书
@@ -477,7 +467,7 @@ export default function TaskCardsSection({
             <button
               type="button"
               onClick={() => void onSeed(card.step!, card.name)}
-              title="继续这张卡的讨论，结论直接写进任务书草稿；新会话自动归入本卡"
+              title="继续这张卡的讨论，结论直接写进 TASK.md；新会话自动归入本卡"
               className={`${actionBtn} shrink-0`}
             >
               接着聊
@@ -498,7 +488,7 @@ export default function TaskCardsSection({
                 type="button"
                 disabled={busyId === card.id}
                 onClick={() => onStart(card)}
-                title="一键开步：建工作区，任务书草稿即 TASK.md；会话自动归入本卡"
+                title="一键开步：建工作区，TASK.md 随之落盘；会话自动归入本卡"
                 className={actionBtn}
               >
                 开工
@@ -725,20 +715,14 @@ export default function TaskCardsSection({
                 : undefined
             }
             onDraftChanged={onDraftChanged}
+            onSeedDraft={seedDraftForChat}
+            onLoadTaskMd={loadTaskMdForStep}
             litSource={cfg.litSource}
             onOpenResources={onOpenResources}
             onSetLitSource={onSetLitSource}
             litBusy={litBusy}
             agentContent={
               <span className="flex flex-wrap items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => onPreviewTaskMd(focusStepDto.name)}
-                  title="预览该步骤当前 TASK.md 拼装结果（模板简报 + 提货单）"
-                  className={`${actionBtn} text-l4 hover:text-l1`}
-                >
-                  预览 TASK.md
-                </button>
                 {/* 反向链接（v3.88）：会话早就带 stepName，但只在对话页单向展示、没有入口。
                     这里落成结构化 scope chip，不是往搜索框塞字符串 */}
                 <button
@@ -827,76 +811,7 @@ export default function TaskCardsSection({
           </ul>
         </div>
       )}
-      {/* 步骤级 TASK.md 只读预览弹层（拼装与开工落盘同一出处） */}
-      {taskMdPreview && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 ccode-fade"
-          onClick={() => setTaskMdPreview(null)}
-        >
-          <div
-            className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-md border border-field ccode-float-surface p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="mb-3 flex shrink-0 items-center gap-2">
-              <h2 className="min-w-0 truncate text-base font-semibold text-l1">
-                TASK.md 预览：{taskMdPreview.stepName}
-              </h2>
-              <button
-                type="button"
-                onClick={() => setTaskMdRaw((v) => !v)}
-                title={
-                  taskMdRaw
-                    ? "看渲染后的排版"
-                    : "看原始 markdown（agent 拿到的就是这份原文）"
-                }
-                className="ml-auto shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
-              >
-                {taskMdRaw ? "渲染" : "源码"}
-              </button>
-            </div>
-            {/* 推荐技能区（只读；开工确认弹层里可增删） */}
-            <StepSkillsChips
-              skills={
-                steps.find((s) => s.name === taskMdPreview.stepName)?.skills ??
-                []
-              }
-              skillMeta={
-                skillLib
-                  ? Object.fromEntries(
-                      skillLib.map((s) => [s.name, s.description]),
-                    )
-                  : undefined
-              }
-              skillLib={skillLib}
-            />
-            <div className="min-h-0 flex-1 overflow-auto rounded-md border border-field bg-canvas">
-              {taskMdPreview.text === null ? (
-                <div className="p-3">
-                  <LoadingRows compact />
-                </div>
-              ) : taskMdRaw ? (
-                <pre className="whitespace-pre-wrap break-words p-3 font-mono text-micro leading-5 text-l2">
-                  {taskMdPreview.text}
-                </pre>
-              ) : (
-                <div
-                  className="md-body px-4 py-3"
-                  dangerouslySetInnerHTML={{ __html: taskMdHtml }}
-                />
-              )}
-            </div>
-            <div className="mt-4 flex shrink-0 justify-end">
-              <button
-                type="button"
-                onClick={() => setTaskMdPreview(null)}
-                className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
-              >
-                关闭
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* 步骤级 TASK.md 查看/编辑已并入流程线的「预览/编辑 TASK.md」（StepFlow 内弹层，v3.90） */}
       {fusing && focusStepDto && (
         <FuseDraftModal
           projectPath={projectPath}

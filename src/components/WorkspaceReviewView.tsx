@@ -1285,7 +1285,7 @@ export default function WorkspaceReviewView({
       });
       setDistillOpen(false);
       setDistillText("");
-      setDistillMsg(`已沉淀进下一步任务书草稿：${rel}`);
+      setDistillMsg(`已沉淀进下一步 TASK.md：${rel}`);
     } catch (reason) {
       setNextError(String(reason));
     } finally {
@@ -2322,7 +2322,7 @@ export default function WorkspaceReviewView({
             <button
               type="button"
               onClick={() => setDistillOpen((v) => !v)}
-              title={`把本次评审结论写进「${nextStep.step.name}」的任务书草稿`}
+              title={`把本次评审结论写进「${nextStep.step.name}」的 TASK.md`}
               className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
             >
               沉淀到下一步
@@ -2348,7 +2348,7 @@ export default function WorkspaceReviewView({
             </button>
             <span className="min-w-0 flex-1 truncate text-micro text-l4">
               AI 初稿，改完沉淀后写进「{nextStep.step.name}
-              」的任务书草稿
+              」的 TASK.md
             </span>
           </div>
           {distillDraftError && (
@@ -2366,7 +2366,7 @@ export default function WorkspaceReviewView({
           <textarea
             className="w-full rounded-md border border-field bg-canvas px-2 py-1.5 text-sm leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
             rows={4}
-            placeholder={`写下评审结论：这步验收了什么、下一步该怎么想（沉淀后写进「${nextStep.step.name}」的任务书草稿）`}
+            placeholder={`写下评审结论：这步验收了什么、下一步该怎么想（沉淀后写进「${nextStep.step.name}」的 TASK.md）`}
             value={distillText}
             onChange={(e) => setDistillText(e.target.value)}
             autoFocus
@@ -2377,7 +2377,7 @@ export default function WorkspaceReviewView({
               disabled={distillBusy || !distillText.trim()}
               className="inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
             >
-              {distillBusy ? "沉淀中…" : "写进下一步任务书草稿"}
+              {distillBusy ? "沉淀中…" : "写进下一步 TASK.md"}
             </button>
             <button
               type="button"
