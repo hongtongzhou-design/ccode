@@ -83,7 +83,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # ScheduleSection（项目分组「◔ 定时任务」区块）、
                              # TemplatePickModal（注册成功后的研究流程模板选择层：五套内置模板 +
                              # 「不使用研究流程」（写 pipeline_opt_out 标记）/「稍后再选」（不留痕）两出口）、
-                             # FuseDraftModal（「◈ 融合进任务书」预览编辑弹层：AI 融合稿可改后确认才写草稿） 等
+                             # FuseDraftModal（「◈ 融合进任务书」预览编辑弹层：AI 融合稿可改后确认才写草稿）、
+                             # TerminalStatusBar（终端底部常驻状态栏：模型/思考档可点切 + 📂 胶囊浮层改目录（仅未启动）+
+                             #   git 芯片/保存/推送 + 状态点/时长/本会话 token，吸收旧中带底条） 等
   components/CommandPalette.tsx # ⌘K 面板
   pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES
   pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras 单一出处，弹层预览与落盘共用）
@@ -114,11 +116,20 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   profile-copy.ts            # profile 跨 agent 复制纯逻辑
   store.ts                   # zustand 状态
 src-tauri/src/
-  agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数）
-  agents.rs                  # 适配器分发入口 + resolve_binary 二进制解析（GUI 短 PATH 兜底）+ readonly_launch_args（聊想法只读注入）
+  agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/
+                             #   model_switch 运行中切模型（claude/gemini 直切、codex/kimi/opencode 唤选择器）与
+                             #   effort_levels 思考档槽位（本期仅 claude /effort 实证，kimi/codex 待实机））
+  agents.rs                  # 适配器分发入口 + resolve_binary 二进制解析（GUI 短 PATH 兜底）+ readonly_launch_args（聊想法只读注入）；
+                             # 选择器显示名统一「配置名 · 模型」（claude _NAME 槽 / codex catalog display_name /
+                             #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）
+  model_registry.rs          # 模型能力注册表（同 pricing.rs 口径）：内置前缀表 + model-capabilities.json 覆盖 +
+                             # 关键词推断兜底；kimi capabilities/max_context_size、codex context_window、
+                             #   opencode reasoning/limit 共用；内置表宁缺毋滥（收错比漏报有害）
   profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
-  global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）
+  global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）；
+                             # kimi 的 [models.*] 随写 display_name（配置名·模型，选择器 label 优先它）
+                             # 与 capabilities（仅推断为思考模型时写，仅新版变体）
   projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
                              # update_step_skills（步骤推荐技能读-改-原子写）、append_pipeline_steps（从模板追加：重名跳过、全跳过不落盘、
                              # 追加成功自动清 pipeline_opt_out）、set_pipeline_opt_out（「不使用研究流程」显式标记读-改-原子写）、
@@ -132,14 +143,17 @@ src-tauri/src/
                              # 会话删除、注意力分类（session_tail_state）、步骤名映射（RX3a）、
                              # sessions_for_card（融合进任务书的按卡取会话：与列表同一归属口径）
   skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor/grok 固定 copy）、四路导入、ZIP 导出、卸载备份、
-                             # 漂移检测 resync、create_skill/update_skill_content；内置技能种子（seed_builtin_skills：
+                             # 漂移检测 resync、create_skill/update_skill_content；apps 表是创建时快照，
+                             #   list 时现算补齐注册表新 agent 的缺键（否则一键应用永远漏新 agent，不写盘）；内置技能种子（seed_builtin_skills：
                              # include_str! 内嵌 src-tauri/resources/skills/ 14 个技能，启动幂等播种，不覆盖/不复活用户改动）、
                              # 内置技能更新（check_builtin_skill_updates 种子逐字节比对 + apply_builtin_skill_update
                              # 覆盖前备份 SKILL.md.bak-<yyyymmdd> 后原子写入）、产物冲突检测（frontmatter outputs
                              # 解析进 SkillDto，list 时现算；前端 skill-conflicts.ts 判定 + StepSkillsChips 警告行）
   mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §10）：统一模型→八家映射（grok 只读）、读-改-写一个键/段 + 备份 +
-                             # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文）
-  usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径
+                             # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文）、stdio 裸命令名 resolve_binary
+                             #   绝对化 + node shim 深化、相对路径命令拒写（跨 agent 必挂，报错引导改绝对路径）
+  usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径、
+                             # session_usage 单会话聚合（终端状态栏 token 段，先增量索引再按 session_id 汇总）
   pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
   settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力/想法期只读保护
   claude_hooks.rs            # 精确注意力标记：写/移除 ~/.claude/settings.json hooks 段；事件日志按 session_id 取最新
@@ -161,7 +175,8 @@ src-tauri/src/
   portwatch.rs               # 端口监控：LISTEN 列表、归属标注（cwd 最长前缀，回落 CCODE_PORT 段）、校验后 SIGTERM
   ws_settings.rs             # .ccode/settings.toml 三层合并（用户→仓库→local）；开步自动写 quarto 渲染脚本
   git_info.rs                # git 状态/累计 diff/逐 hunk/勾选提交临时索引
-  fs_tree.rs                 # 文件树与文件操作（删除走系统回收站 trash；重要路径删除保护，canonicalize 双校验）
+  fs_tree.rs                 # 文件树与文件操作（删除走系统回收站 trash；重要路径删除保护，canonicalize 双校验；
+                             #   家目录直下系统目录标 isSystem 供前端置灰）
   pdf.rs                     # PDF/docx 字节读取：read_pdf_bytes 白名单 + canonicalize + 上限，base64 传输
   updater.rs                 # CLI 安装/更新（brew TUNA、npm_for 同目录 npm）+ 应用自身 Tauri updater
   logbuf.rs                  # 诊断日志环形缓冲

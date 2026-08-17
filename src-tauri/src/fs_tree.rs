@@ -18,6 +18,8 @@ pub struct DirEntryDto {
     pub is_dir: bool,
     pub size: u64,
     pub modified: Option<String>, // ISO 时间
+    /// 家目录直下的系统目录（macOS 的 Library 等）：前端置灰降噪，交互不受影响
+    pub is_system: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +36,23 @@ fn expand_tilde(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+/// 家目录直下的系统目录清单（按平台）：只用于置灰降噪，宁缺毋滥。
+/// Linux 的系统配置目录多为 `.` 开头，已被隐藏过滤，无需清单。
+#[cfg(target_os = "macos")]
+const HOME_SYSTEM_DIRS: &[&str] = &["Library", "Applications"];
+#[cfg(target_os = "windows")]
+const HOME_SYSTEM_DIRS: &[&str] = &["AppData", "Application Data", "Local Settings"];
+#[cfg(all(unix, not(target_os = "macos")))]
+const HOME_SYSTEM_DIRS: &[&str] = &[];
+
+/// 条目是否「家目录直下的系统目录」（纯函数，便于单测；parent 需已展开 ~）
+fn is_home_system_dir(parent: &std::path::Path, is_dir: bool, name: &str) -> bool {
+    if !is_dir || HOME_SYSTEM_DIRS.is_empty() {
+        return false;
+    }
+    dirs::home_dir().is_some_and(|h| h == parent) && HOME_SYSTEM_DIRS.contains(&name)
 }
 
 /// unix 秒 → ISO UTC（civil from days，与 sessions.rs 同款算法）
@@ -73,6 +92,7 @@ fn list_dir_sync(path: &str, show_hidden: bool) -> Result<Vec<DirEntryDto>, Stri
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| iso_from_unix(d.as_secs()));
         entries.push(DirEntryDto {
+            is_system: is_home_system_dir(std::path::Path::new(&dir), md.is_dir(), &name),
             name,
             path: e.path().to_string_lossy().into_owned(),
             is_dir: md.is_dir(),
@@ -661,5 +681,33 @@ mod fsops_tests {
             let _ = fs::remove_file(&link);
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod system_dir_tests {
+    use super::*;
+
+    #[test]
+    fn home_system_dir_predicate() {
+        let home = dirs::home_dir().unwrap();
+        // macOS 清单内目录命中；普通目录/文件/非 home 父目录不命中
+        #[cfg(target_os = "macos")]
+        {
+            assert!(is_home_system_dir(&home, true, "Library"));
+            assert!(is_home_system_dir(&home, true, "Applications"));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert!(is_home_system_dir(&home, true, "AppData"));
+        }
+        assert!(!is_home_system_dir(&home, true, "Documents"));
+        assert!(!is_home_system_dir(&home, true, "nltk_data"));
+        assert!(!is_home_system_dir(&home, false, "Library")); // 文件不命中
+        assert!(!is_home_system_dir(
+            &home.join("Documents"),
+            true,
+            "Library"
+        )); // 父目录不是 home
     }
 }

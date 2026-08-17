@@ -291,22 +291,10 @@ fn kimi_model_alias(model: &str) -> String {
         .collect()
 }
 
-/// [models.*] 的 max_context_size（kimi 0.31+ 必填）：已知模型按官方上下文映射，
-/// 第三方/未知给 128K 保守默认（特殊模型用户可手改 config.toml）
-fn kimi_context_size(model: &str) -> i64 {
-    let m = model.to_lowercase();
-    if m.starts_with("kimi-k3") {
-        1_048_576 // k3 官方 1M 上下文
-    } else if m.starts_with("kimi-k2.6") || m.starts_with("kimi-k2.7") {
-        262_144 // k2.6/k2.7 官方 256K
-    } else {
-        131_072 // k2 128K；未知按保守默认
-    }
-}
-
 fn patch_kimi_config(
     existing: Option<&str>,
     provider_type: &str,
+    profile_name: &str,
     base_url: Option<&str>,
     key: Option<&str>,
     models: &[String],
@@ -339,9 +327,22 @@ fn patch_kimi_config(
             let t = sub_table(models_tbl, &kimi_model_alias(m))?;
             t["provider"] = value("ccode");
             t["model"] = value(m.as_str());
-            // 新版 0.31+ 必填 max_context_size；旧版 kimi-cli 不写（未知字段可能报错）
+            // 新版 0.31+ 必填 max_context_size；旧版 kimi-cli 不写（未知字段可能报错），
+            // display_name/capabilities 同理只写新版（alias.display_name 与 capabilities
+            // 数组均为新版字段，2026-08-17 二进制实证）
             if require_context_size {
-                t["max_context_size"] = value(kimi_context_size(m));
+                t["max_context_size"] = value(crate::model_registry::model_context_size(m));
+                // 选择器 label 优先 display_name：用 profile 名避免显示成 provider id "ccode"
+                t["display_name"] = value(format!("{profile_name} · {m}"));
+                // 只在注册表判定为思考模型时显式声明；否则留空走 CLI registry 默认兜底，
+                // 避免把 CLI 自己认得的模型能力降级
+                if crate::model_registry::model_thinking(m) {
+                    t["capabilities"] = toml_edit::value(
+                        vec!["tool_use", "thinking"]
+                            .into_iter()
+                            .collect::<toml_edit::Array>(),
+                    );
+                }
             }
         }
         doc["default_model"] = value(kimi_model_alias(&models[0]));
@@ -423,9 +424,11 @@ fn plan_writes(
                 None
             } else {
                 let path = agents::codex_catalog_path(&profile.id).ok_or("无法确定平台配置目录")?;
-                let mut content =
-                    serde_json::to_string_pretty(&agents::codex_catalog_json(&profile.models))
-                        .map_err(|e| e.to_string())?;
+                let mut content = serde_json::to_string_pretty(&agents::codex_catalog_json(
+                    &profile.name,
+                    &profile.models,
+                ))
+                .map_err(|e| e.to_string())?;
                 content.push('\n');
                 push("model-catalog.json", path.clone(), content);
                 Some(path)
@@ -510,6 +513,7 @@ fn plan_writes(
                 let content = patch_kimi_config(
                     read_existing(&path).as_deref(),
                     provider_type,
+                    &profile.name,
                     base_url,
                     key,
                     &profile.models,
@@ -1266,9 +1270,10 @@ mod tests {
         let out = patch_kimi_config(
             Some(existing),
             "kimi",
+            "Zetatechs",
             Some("https://api.moonshot.cn/v1"),
             Some("sk-secret"),
-            &["kimi-k3".into(), "kimi.k2.5 turbo".into()],
+            &["kimi-k3".into(), "kimi.k2.5 turbo".into(), "deepseek-chat".into()],
             true,
         )
         .unwrap();
@@ -1297,13 +1302,30 @@ mod tests {
             doc["models"]["kimi_k2_5_turbo"]["model"].as_str(),
             Some("kimi.k2.5 turbo")
         );
+        // display_name 用 profile 名 + 模型名（选择器 label 优先 display_name）
+        assert_eq!(
+            doc["models"]["kimi-k3"]["display_name"].as_str(),
+            Some("Zetatechs · kimi-k3")
+        );
+        // 推断为思考模型的写 capabilities；普通模型不写（走 CLI registry 默认）
+        let caps = &doc["models"]["kimi-k3"]["capabilities"];
+        assert_eq!(
+            caps.as_array().map(|a| a.len()),
+            Some(2),
+            "kimi-k3 应声明 tool_use + thinking"
+        );
+        assert_eq!(
+            doc["models"]["kimi-k3"]["capabilities"][1].as_str(),
+            Some("thinking")
+        );
+        assert!(doc["models"]["deepseek-chat"].get("capabilities").is_none());
         // default_model = 首个模型的别名
         assert_eq!(doc["default_model"].as_str(), Some("kimi-k3"));
     }
 
     #[test]
     fn kimi_patch_without_models_keeps_single_ccode_alias() {
-        let out = patch_kimi_config(None, "openai", None, None, &[], true).unwrap();
+        let out = patch_kimi_config(None, "openai", "P", None, None, &[], true).unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
         assert_eq!(doc["providers"]["ccode"]["type"].as_str(), Some("openai"));
         assert_eq!(doc["models"]["ccode"]["provider"].as_str(), Some("ccode"));
@@ -1316,10 +1338,14 @@ mod tests {
 
     #[test]
     fn kimi_patch_legacy_variant_omits_context_size() {
-        // 旧版 kimi-cli（~/.kimi）：不写 max_context_size，防止老版本解析未知字段报错
-        let out = patch_kimi_config(None, "kimi", None, None, &["kimi-k3".into()], false).unwrap();
+        // 旧版 kimi-cli（~/.kimi）：不写 max_context_size/display_name/capabilities，
+        // 防止老版本解析未知字段报错
+        let out =
+            patch_kimi_config(None, "kimi", "P", None, None, &["kimi-k3".into()], false).unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
         assert!(doc["models"]["kimi-k3"].get("max_context_size").is_none());
+        assert!(doc["models"]["kimi-k3"].get("display_name").is_none());
+        assert!(doc["models"]["kimi-k3"].get("capabilities").is_none());
     }
 
     #[test]

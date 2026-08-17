@@ -16,7 +16,7 @@
 | 会话存储 | `~/.claude/projects/<sanitize(cwd)>/<session-uuid>.jsonl`；目录名 = 路径中所有非字母数字字符替换为 `-` |
 | 会话格式 | JSONL。envelope：`uuid/parentUuid/timestamp/sessionId/cwd/gitBranch/version/isSidechain/type`；`type=user/assistant`，assistant 的 `message` 是原始 API 响应（content blocks + usage）；另有 `ai-title`（会话标题）、`summary`、`file-history-snapshot` 等类型，未知 type 必须跳过。**易漂移** |
 | 关键启动参数 | `--model`、`-p`（非交互）、`-c/-r`（续会话）、`--session-id`（固定会话 ID=文件名）、`--settings` |
-| 坑 | 非官方 base URL 会禁用 Remote Control 与部分 MCP 行为；CLI 自己会给配置文件做时间戳备份（我们不是唯一写者）；`CLAUDE_CONFIG_DIR` 可整体搬迁配置目录（完全隔离方案，但会话也随之隔离）；`/model` 选择器默认只显示内置别名，Ccode 用 `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL`(+`_NAME`) 注册前 4 个模型、第 5 个走 `ANTHROPIC_CUSTOM_MODEL_OPTION`，更多模型需 `/model <id>` 手输 |
+| 坑 | 非官方 base URL 会禁用 Remote Control 与部分 MCP 行为；CLI 自己会给配置文件做时间戳备份（我们不是唯一写者）；`CLAUDE_CONFIG_DIR` 可整体搬迁配置目录（完全隔离方案，但会话也随之隔离）；`/model` 选择器默认只显示内置别名，Ccode 用 `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL`(+`_NAME`) 注册前 4 个模型、第 5 个走 `ANTHROPIC_CUSTOM_MODEL_OPTION`，更多模型需 `/model <id>` 手输；`_NAME` 是选择器显示名（Ccode 填「配置名 · 模型」）。运行中切换（2026-08-17 v2.1.212 strings 实证，终端状态栏用）：`/model <name>` 带参直切（session 级）、`/effort <low\|medium\|high\|xhigh\|max>` 带参直切 |
 
 **Anthropic 兼容端点（2026-08-05 核实，来源均为官方文档）**：
 
@@ -35,7 +35,7 @@
 | 会话存储 | `~/.codex/sessions/YYYY/MM/DD/rollout-<时间>-<uuid>.jsonl`；旧文件会被后台 **zstd 压缩为 `.jsonl.zst`**（magic `28 b5 2f fd`），两者都要能读；另有 `history.jsonl`（仅用户 prompt）和 SQLite 镜像库（版本化文件名，勿依赖） |
 | 会话格式 | JSONL `RolloutLine {timestamp, type, payload}`；首行 `session_meta`（含 **cwd** = 项目归属依据）；`response_item`（消息）、`event_msg`（含 token_count）、`turn_context`（每轮 model/cwd）。不按项目分目录，**项目归属靠 session_meta.cwd**。**易漂移** |
 | 关键启动参数 | `-m`、`--profile`、`-c key=value`（最高优先级）、`codex exec`（非交互，`--json` 输出事件流）、`codex resume` |
-| 坑 | **只支持 Responses API**（`wire_api="chat"` 已移除并报错）——中转必须实现 `/v1/responses`；`codex exec` 默认要求 git 仓库（`--skip-git-repo-check`）；凭证可能存 OS keyring 而非 auth.json；auth.json 顶层只有 `OPENAI_API_KEY` = API Key 模式（官方 `--api-key` 与第三方中转同一形状，**不算官方账号登录**，检测见 v3.55）；TUI `/model` 选择器的模型目录来自 `model_catalog_json` 指定的 JSON 文件（**仅启动时读取**，Ccode 已为每个 profile 生成 catalog） |
+| 坑 | **只支持 Responses API**（`wire_api="chat"` 已移除并报错）——中转必须实现 `/v1/responses`；`codex exec` 默认要求 git 仓库（`--skip-git-repo-check`）；凭证可能存 OS keyring 而非 auth.json；auth.json 顶层只有 `OPENAI_API_KEY` = API Key 模式（官方 `--api-key` 与第三方中转同一形状，**不算官方账号登录**，检测见 v3.55）；TUI `/model` 选择器的模型目录来自 `model_catalog_json` 指定的 JSON 文件（**仅启动时读取**，Ccode 已为每个 profile 生成 catalog：display_name = 「配置名 · 模型」，context_window/max_context_window 取自 model_registry；reasoning levels 全量模板 [low/medium/high]，与 cc-switch 同口径——模型不支持时端点忽略 effort） |
 
 ## 3. Gemini CLI
 
@@ -68,7 +68,7 @@
 | 项 | 值 |
 |---|---|
 | 二进制 / 检测 | `opencode`（npm `opencode-ai`；仓库已更名 anomalyco/opencode）；`opencode --version` |
-| 注入方式 | **无通用 key/baseURL env**。用 `OPENCODE_CONFIG_CONTENT`（内联配置 JSON，优先级几乎最高）+ `OPENCODE_AUTH_CONTENT`（内联凭证 JSON，未文档化但源码确认）做启动注入。provider 配置：`provider.<id>.options.{apiKey, baseURL}` + `npm: "@ai-sdk/openai-compatible"` 接任意中转 |
+| 注入方式 | **无通用 key/baseURL env**。用 `OPENCODE_CONFIG_CONTENT`（内联配置 JSON，优先级几乎最高）+ `OPENCODE_AUTH_CONTENT`（内联凭证 JSON，未文档化但源码确认）做启动注入。provider 配置：`provider.<id>.options.{apiKey, baseURL}` + `npm: "@ai-sdk/openai-compatible"` 接任意中转；provider 级 `name` 与 models 条目 `name`/`reasoning`/`limit.context` 是 models.dev 覆盖语义（官方文档 2026-08-17 核实），Ccode 填显示名（配置名 · 模型）+ 思考模型 `reasoning: true` + 上下文 limit（model_registry） |
 | 全局配置 | `~/.config/opencode/opencode.json(c)`（支持 `{env:VAR}` 插值）。**优先级坑：config > auth.json > env**，注入必须走 config 层才确定 |
 | 会话存储 | **v1.2.0+：单一 SQLite** `~/.local/share/opencode/opencode.db`（WAL 模式；表：`session/message/part/project`，`message.data`/`part.data` 为 JSON 列）。更早版本是 `storage/` 目录的扁平 JSON 文件（需双解析） |
 | 会话格式 | `session` 表直接有 `title/cost/tokens_*/time_*`；项目 = git 首个 commit hash，`project.worktree` 列给路径；message.data：`{role, time, model, tokens, cost, ...}`；part.data：`type: text/reasoning/tool/...` 判别联合。**drizzle 迁移频繁，易漂移** |
@@ -80,11 +80,11 @@
 | 项 | 新版 kimi-code（TS，0.x，现役） | 旧版 kimi-cli（Python，1.x，收缩中） |
 |---|---|---|
 | 检测 | `~/.kimi-code/` 存在；`kimi doctor` 可用 | `~/.kimi/` 存在；`kimi --version` 为 1.x |
-| 注入 env | **故意忽略 shell env 的 API key**。唯一注入通道：合成模型 `KIMI_MODEL_NAME` + `KIMI_MODEL_API_KEY` + `KIMI_MODEL_BASE_URL` + `KIMI_MODEL_PROVIDER_TYPE`（kimi/anthropic/openai） | `KIMI_API_KEY`/`KIMI_BASE_URL`/`KIMI_MODEL_NAME`（最高优先级）；或 `--config-file` / `--config '<json>'` |
+| 注入 env | **故意忽略 shell env 的 API key**。唯一注入通道：合成模型 `KIMI_MODEL_NAME` + `KIMI_MODEL_API_KEY` + `KIMI_MODEL_BASE_URL` + `KIMI_MODEL_PROVIDER_TYPE`（kimi/anthropic/openai）。合成通道另有元数据字段（2026-08-17 二进制 strings 实证）：`KIMI_MODEL_CAPABILITIES`（逗号分隔小写，如 `tool_use,thinking`；缺省时 kimi 协议默认 `["image_in","thinking"]`、openai/anthropic 兼容通道默认 `["tool_use"]`——不含 thinking 时 TUI 显示「不支持思考」）、`KIMI_MODEL_DISPLAY_NAME`（选择器 label 优先它）、`KIMI_MODEL_MAX_CONTEXT_SIZE`、`KIMI_MODEL_THINKING_EFFORT`/`ADAPTIVE_THINKING`/`REASONING_KEY` 等；Ccode 注入 display_name=配置名·模型、max_context_size 与 capabilities 判定统一走 model_registry（内置表 + model-capabilities.json 覆盖 + 关键词推断兜底，思考模型才声明） | `KIMI_API_KEY`/`KIMI_BASE_URL`/`KIMI_MODEL_NAME`（最高优先级）；或 `--config-file` / `--config '<json>'` |
 | 全局配置 | `~/.kimi-code/config.toml`：`[providers.x]`（type/base_url/api_key/custom_headers）+ `[models.x]` + `default_model`；也可脚本化 `kimi provider add/remove`；`KIMI_CODE_HOME` 整体搬迁 | `~/.kimi/config.toml`，同构字段；`KIMI_SHARE_DIR` 整体搬迁 |
 | 会话存储 | `~/.kimi-code/session_index.jsonl`（枚举入口：sessionId/sessionDir/**workDir**）+ `sessions/<wd_*>/<id>/agents/main/wire.jsonl` | `~/.kimi/sessions/<md5(workDir)>/<uuid>/context.jsonl`（无时间戳；时间戳在 `wire.jsonl`，标题在 `state.json`）；项目映射读 `~/.kimi/kimi.json` 的 `work_dirs[]` |
 | 会话格式 | wire.jsonl：版本化 record（`metadata` / `turn.prompt`（用户输入）/ `context.append_message`（assistant/tool）/ `usage.record`（token）），协议 v1.0→v1.4 有迁移 | context.jsonl：`{role, content, tool_calls, tool_call_id}`；`_` 开头的 role 是内部记录（跳过）；content 可能是字符串或 parts 数组；tool_calls.arguments 是 JSON 字符串 |
-| 坑 | 密钥在 config.toml 里是明文；旧版 1.47+ 会催用户升级新版；模型选择器按 `[models.*]` 别名列出（注入模式的 KIMI_MODEL_* 合成通道是单模型设计，多模型需走全局写入） | 正在被新版替代，安装新版会迁移其数据（不改旧数据） |
+| 坑 | 密钥在 config.toml 里是明文；旧版 1.47+ 会催用户升级新版；模型选择器按 `[models.*]` 别名列出（注入模式的 KIMI_MODEL_* 合成通道是单模型设计，多模型需走全局写入）。运行中切换（0.36.1 pty 探针实证）：`/model <别名>` 与 `/effort <档>` 带参直切（/model 吃的是别名不是模型 id；档位随模型，K3 等布尔模型只有 on/off）；**kitty 键盘协议坑**：TUI 启动 push flags（`\x1b[>7u`）后只认 CSI-u 的 Enter（`\x1b[13u`），普通 `\r` 不提交——xterm.js 不支持该协议，Ccode 在 xterm 键盘层与写入链路两处改写（注册表 `submit_csi_u`） | 正在被新版替代，安装新版会迁移其数据（不改旧数据） |
 
 **兼容端点（2026-08-05 核实）**：`KIMI_MODEL_PROVIDER_TYPE=openai` 可接任意 OpenAI 兼容端点（如智谱 `https://open.bigmodel.cn/api/paas/v4`、DeepSeek `https://api.deepseek.com/v1`）；`=anthropic` 理论上可接 §1 附注的 Anthropic 兼容端点，未实测。
 
@@ -148,6 +148,10 @@
    grok（源码调研，待实机验证）：`--permission-mode dontAsk --sandbox read-only`（CI 严格白名单 + OS 级只读；
    `--permission-mode plan` 门控链路未确认，不用）。
    注册表落点：`agent_specs.rs` 的 `AgentSpec.readonly_args`，应用逻辑 `agents::readonly_launch_args`。
+7. **模型能力元数据统一走 `model_registry.rs`**（2026-08-17）：内置前缀表 + `<config>/ccode/model-capabilities.json`
+   覆盖 + 关键词推断兜底（同 pricing.rs 口径，最长前缀匹配、剥 provider/ 前缀）。kimi 的 capabilities/max_context_size、
+   codex catalog 的 context_window、opencode 的 reasoning/limit 全从这张表出；内置表宁缺毋滥（收错比漏报有害）。
+   有能力声明通道的只有 kimi/codex/opencode/claude（claude 仅显示名槽）；gemini/qwen/codebuddy/cursor/grok 无此机制。
 
 ## 10. MCP 配置分发调研（2026-08-10，八家经官方文档/源码/本机实测核实；grok 为 2026-08 源码调研，首版只读不分发）
 
@@ -188,6 +192,6 @@ Ccode 清单模型只收公共子集：stdio（command/args/env/cwd）+ remote�
 - **企业管理层探测**：claude（managed-mcp.json 三系统路径）/opencode（managed 目录）存在即放弃分发并提示。
 - **项目级都有审批闸**（claude/qwen/cursor/codebuddy 逐工作区批准，gemini/qwen 未信任目录整层忽略）——默认只写用户级。
 - **校验手段**：claude `mcp get`（不要 `mcp list`，会真连 server）、codex `mcp list --json`（脱敏）、cursor 没有非交互校验命令（只能解析文件）。
-- **stdio 命令解析**（Ccode 侧分发义务）：裸命令名必须经 `resolve_binary` 落绝对路径（GUI/打包环境 PATH 短）；node 系 shim（`#!/usr/bin/env node` shebang 的脚本/symlink，如 npx）要再换成 node 绝对路径 + shim 真实路径首参，否则宿主 PATH 无 node 时 spawn ENOENT（实机踩坑：npx symlink → npx-cli.js，shebang 依赖 PATH 里的 node）。
+- **stdio 命令解析**（Ccode 侧分发义务）：裸命令名必须经 `resolve_binary` 落绝对路径（GUI/打包环境 PATH 短）；node 系 shim（`#!/usr/bin/env node` shebang 的脚本/symlink，如 npx）要再换成 node 绝对路径 + shim 真实路径首参，否则宿主 PATH 无 node 时 spawn ENOENT（实机踩坑：npx symlink → npx-cli.js，shebang 依赖 PATH 里的 node）。**相对路径命令（`./` `../` 开头）直接拒写报错**——基准是来源 CLI 的运行语境（如 codex 插件目录），分发到别家必 ENOENT，引导改绝对路径（2026-08-17 实机案例：codex 插件的 computer-use 以 `./…` 收编后分发 kimi 连不上）。
 - **kimi `/mcp-config` 交互编辑器实测坑**：曾把启动参数整体写进 `cwd` 字段（`"cwd": "-y <pkg> <dir>"`），spawn 时目录不存在报 ENOENT——报错文案指向 command 路径，极具迷惑性。遇到 kimi MCP ENOENT 先查 cwd 是否合法目录，再查命令路径。
 - **server 命名**：统一 `[A-Za-z0-9_-]`；gemini 额外要求**不含下划线**（policy 引擎按下划线切分 FQN，含下划线安全策略静默失效）。

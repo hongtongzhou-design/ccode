@@ -362,6 +362,8 @@ pub struct GitCommitResultDto {
     pub failed_phase: Option<String>,
     pub message: String,
     pub output: String,
+    /// 提交短哈希（rev-parse --short HEAD；取不到为 None）
+    pub hash: Option<String>,
 }
 
 pub(crate) fn validate_selected_paths(cwd: &str, paths: &[String]) -> Result<Vec<String>, String> {
@@ -454,6 +456,12 @@ fn git_commit_sync(
     if !commit.status.success() {
         return Err(tail_lines(&log, 20));
     }
+    // 提交哈希（状态栏「✓ Pushed [a1b2c3d]」用；取不到不阻塞主流程）
+    let hash = run_git(&cwd, &["rev-parse", "--short", "HEAD"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|h| !h.is_empty());
     if push {
         match do_push(&cwd) {
             Ok(t) => {
@@ -472,6 +480,7 @@ fn git_commit_sync(
                     failed_phase: Some("push".into()),
                     message: "提交已完成，但推送失败；可直接重试推送，无需再次提交".into(),
                     output,
+                    hash,
                 });
             }
         }
@@ -488,6 +497,7 @@ fn git_commit_sync(
         }
         .into(),
         output,
+        hash,
     })
 }
 

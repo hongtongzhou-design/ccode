@@ -69,6 +69,21 @@ export interface DetectResult {
   /** 该 CLI 有进程级只读参数（--permission-mode plan / -s read-only 之类）。
    *  false（qwen / opencode）= 「只读保护」对它只剩 prompt 软约束，agent 可以无视 */
   readonlySupported: boolean;
+  /** 运行中模型切换命令（终端状态栏模型菜单；null = 无机制不显示） */
+  modelSwitch: { kind: "direct" | "picker"; command: string } | null;
+  /** 运行中思考档调节（档位表 + 命令模板；null = 不显示「◈ 思考」控件） */
+  effort: { levels: string[]; command: string } | null;
+  /** TUI 的 Enter 需要 CSI-u 形式（kitty 键盘协议；kimi）——xterm 层与状态栏写入改写 */
+  submitCsiU: boolean;
+}
+
+/** 单会话累计用量（终端状态栏 token 段） */
+export interface SessionUsageDto {
+  input: number;
+  output: number;
+  costUsd: number;
+  /** 至少一个模型命中定价表（false = 费用无意义，只显示 token） */
+  priced: boolean;
 }
 
 export interface TokenUsageDto {
@@ -376,6 +391,8 @@ export interface GitCommitResultDto {
   failedPhase: "push" | null;
   message: string;
   output: string;
+  /** 提交短哈希（rev-parse --short HEAD；取不到为 null） */
+  hash: string | null;
 }
 
 /** 本地合并/归档的分阶段结果；归档失败时 merged 仍为 true。 */

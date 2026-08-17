@@ -40,6 +40,20 @@ pub struct AgentSpec {
     /// 官方账号（P1a）：终端内登录、只读检测 auth 文件、拉起时净化残留 API env；
     /// 数据按 matrix / 官方文档 / 实机 CLI 逐家核实（opencode 无官方账号语义，保持 None 见注释）
     pub official_account: Option<OfficialAccountSpec>,
+    /// 运行中模型切换（终端状态栏模型菜单用）：往 PTY 写 TUI 命令的形态。
+    /// Direct 带参直切（claude `/model <name>`、gemini `/model set <id>` 实证）；
+    /// Picker 唤出 TUI 选择器由用户完成（codex `/model`、kimi `/models`、opencode `/models`）；
+    /// None = 未核实/无机制（qwen/codebuddy/cursor/grok），状态栏不显示模型菜单
+    pub model_switch: ModelSwitch,
+    /// 运行中思考档调节（终端状态栏「◈ 思考」用）：(档位表, 命令模板 "/effort {level}")；
+    /// 档位表为空 = picker 形态（命令唤出 TUI 选择器）。None = 无机制不显示控件。
+    /// claude /effort 带参直切实证；kimi /effort on|off 直切实证（档位随模型，布尔模型
+    /// 只有 on/off）；codex 的 effort 在其 /model 选择器内（快捷键默认键位未核实，不单列）
+    pub effort_levels: Option<(&'static [&'static str], &'static str)>,
+    /// TUI 的 Enter 需要 CSI-u 形式（kitty 键盘协议：应用 push flags 后只认 \x1b[13u，
+    /// 普通 \r 不提交）。kimi = true（0.36.1 实证）；xterm.js 不支持该协议，
+    /// Ccode 在 xterm 键盘层与状态栏写入两处改写
+    pub submit_csi_u: bool,
 }
 
 /// 官方账号规格（P1a）：终端内登录、只读检测 auth 文件、拉起时净化残留 API env
@@ -81,6 +95,17 @@ pub enum LaunchSpec {
     ByProtocol(&'static [ProtocolEnv]),
     /// 无法纯数据化的特殊注入（env 名等数据仍在这里，分支逻辑留在 agents::launch_plan）
     Special(SpecialLaunch),
+}
+
+/// 运行中模型切换的 TUI 命令形态（终端状态栏模型菜单用）
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ModelSwitch {
+    /// 带参直切：命令模板含 {model} 占位（claude `/model {model}`）
+    Direct(&'static str),
+    /// 唤出 TUI 选择器，由用户在终端里完成选择（kimi `/models`、codex `/model`）
+    Picker(&'static str),
+    /// 未核实/无机制：状态栏不显示模型菜单
+    None,
 }
 
 /// 交互模式初始 prompt 的注入形态（一键开步首条指令）。
@@ -278,6 +303,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             detection_note: Some("macOS 上凭证存于系统钥匙串，文件检测可能漏报，以 claude auth status 为准"),
             api_key_fields: &[],
         }),
+        model_switch: ModelSwitch::Direct("/model {model}"),
+        effort_levels: Some((&["low", "medium", "high", "xhigh", "max"], "/effort {level}")),
+        submit_csi_u: false,
     },
     AgentSpec {
         id: "codex",
@@ -316,6 +344,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             // 不算官方账号连接
             api_key_fields: &["OPENAI_API_KEY"],
         }),
+        model_switch: ModelSwitch::Picker("/model"),
+        effort_levels: None,
+        submit_csi_u: false,
     },
     AgentSpec {
         id: "gemini",
@@ -360,6 +391,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             detection_note: Some("新版开启加密存储（GEMINI_FORCE_ENCRYPTED_STORAGE）时凭证不落该文件，可能漏报"),
             api_key_fields: &[],
         }),
+        model_switch: ModelSwitch::Direct("/model set {model}"),
+        effort_levels: None,
+        submit_csi_u: false,
     },
     AgentSpec {
         id: "qwen",
@@ -422,6 +456,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             detection_note: Some("Qwen OAuth 免费额度 2026-04 已停，登录后按量计费；以 TUI 内 /doctor 的 auth 状态为准"),
             api_key_fields: &[],
         }),
+        model_switch: ModelSwitch::None,
+        effort_levels: None,
+        submit_csi_u: false,
     },
     AgentSpec {
         id: "opencode",
@@ -455,6 +492,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
         // 各家 key/OAuth 的通用入口；且 Ccode 的 OpenCodeInlineConfig（OPENCODE_CONFIG_CONTENT）
         // 优先级高于 auth.json，官方账号模式无从对应——保持 None 不硬加
         official_account: None,
+        model_switch: ModelSwitch::Picker("/models"),
+        effort_levels: None,
+        submit_csi_u: false,
     },
     AgentSpec {
         id: "kimi",
@@ -501,6 +541,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
                 "KIMI_MODEL_PROVIDER_TYPE",
                 "KIMI_MODEL_API_KEY",
                 "KIMI_MODEL_BASE_URL",
+                "KIMI_MODEL_DISPLAY_NAME",
+                "KIMI_MODEL_CAPABILITIES",
+                "KIMI_MODEL_MAX_CONTEXT_SIZE",
                 "KIMI_API_KEY",
                 "KIMI_BASE_URL",
             ],
@@ -511,6 +554,17 @@ static AGENT_SPECS: &[AgentSpec] = &[
             detection_note: Some("凭证文件名随 provider 名变化（credentials/<name>.json）；设了 KIMI_CODE_HOME 时数据目录整体搬迁，文件检测可能漏报"),
             api_key_fields: &[],
         }),
+        // /model <别名> 带参直切（0.36.1 实证）：参数是 config.toml [models.*] 的别名
+        //（非法字符清洗为 _），注入模式下模型没入表会报 Unknown model alias（TUI 可见）
+        model_switch: ModelSwitch::Direct("/model {model}"),
+        // /effort <level> 带参直切（0.36.1 实证；档位随模型，K3 等布尔模型只有 on/off，
+        // 不支持的档会回报 Available 列表——kimi 没有 acceptsInput 的 /thinking 选择器是它的
+        // TUI 内交互形态，/effort 才是命令行式入口）
+        effort_levels: Some((&["on", "off"], "/effort {level}")),
+        // kitty 键盘协议：kimi TUI 启动即 push flags（\x1b[>7u），之后只认 CSI-u 形式的
+        // Enter（\x1b[13u），普通 \r 不提交（2026-08-17 pty 探针实证）——xterm.js 不支持
+        // kitty 协议，Ccode 侧须把 Enter 改写成 CSI-u
+        submit_csi_u: true,
     },
     AgentSpec {
         id: "codebuddy",
@@ -555,6 +609,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             detection_note: Some("登录走浏览器 OAuth（国际站 codebuddy.ai / 中国站 copilot.tencent.com），以 TUI 内 /login 后的状态为准"),
             api_key_fields: &[],
         }),
+        model_switch: ModelSwitch::None,
+        effort_levels: None,
+        submit_csi_u: false,
     },
     AgentSpec {
         id: "cursor",
@@ -597,6 +654,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             detection_note: Some("凭证默认存 macOS 钥匙串（仅设 AGENT_CLI_CREDENTIAL_STORE=file 时才落 auth.json），文件检测可能漏报，以 cursor-agent 实际登录态为准"),
             api_key_fields: &[],
         }),
+        model_switch: ModelSwitch::None,
+        effort_levels: None,
+        submit_csi_u: false,
     },
     AgentSpec {
         id: "grok",
@@ -648,6 +708,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             detection_note: Some("凭证在 ~/.grok/auth.json（scope→GrokAuth 顶层 map，grok 自己原子重写）；config.toml 顶层 api_key 优先级最高会覆盖登录态，TOML 冲突探测暂不支持"),
             api_key_fields: &[],
         }),
+        model_switch: ModelSwitch::None,
+        effort_levels: None,
+        submit_csi_u: false,
     },
 ];
 

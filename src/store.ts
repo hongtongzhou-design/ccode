@@ -126,6 +126,9 @@ export interface PendingTerminal {
   previewRoot?: string;
   /** 「聊想法」只读模式：pty_spawn 注入只读/计划模式参数（硬保护，支持的 CLI 才生效） */
   readonly?: boolean;
+  /** 复用键：已有同 key 标签时切换到它而不是新开（「快速开聊」「跟 AI 商量一下」等
+      重复入口防标签堆积）。仅内存匹配，不进重启持久化白名单（恢复占位不参与复用） */
+  reuseKey?: string;
 }
 
 /** 工作区页 / 改动面板 → 终端全宽审阅视图的一次性交接。 */

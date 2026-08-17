@@ -4,6 +4,23 @@ use serde::Serialize;
 use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "command")]
+pub enum ModelSwitchDto {
+    /// 带参直切（命令模板含 {model} 占位）
+    Direct(String),
+    /// 唤出 TUI 选择器由用户完成
+    Picker(String),
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffortSpecDto {
+    pub levels: Vec<String>,
+    /// 命令模板（含 {level} 占位），pty_write 写入
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectResult {
     pub id: String,
@@ -13,6 +30,12 @@ pub struct DetectResult {
     /// false = 「聊想法只读保护」对它只剩 prompt 里的软约束，agent 可以无视——
     /// UI 据此如实标注，不让开关沉默降级（用户在头脑风暴时最依赖「它不会动我文件」这个假设）
     pub readonly_supported: bool,
+    /// 运行中模型切换命令形态（终端状态栏模型菜单；None = 无机制不显示）
+    pub model_switch: Option<ModelSwitchDto>,
+    /// 运行中思考档调节（档位表 + 命令模板；None = 不显示「◈ 思考」控件）
+    pub effort: Option<EffortSpecDto>,
+    /// TUI 的 Enter 需要 CSI-u 形式（kitty 键盘协议；kimi）——xterm 键盘层与状态栏写入改写
+    pub submit_csi_u: bool,
 }
 
 /// 启动计划：env 差异由 adapter 吸收（Codex 没有 base-url 环境变量，只能走 -c 参数）
@@ -152,16 +175,23 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                 SpecialLaunch::ClaudeModelSlots(env) => {
                     apply_env_inject(&mut plan, env, profile, key.as_deref(), model);
                     // 把模型列表注册进 /model 选择器（否则选择器里只有内置别名可用）：
-                    // 前 4 个占用 opus/sonnet/haiku/fable 别名槽，_NAME 让选择器显示真实模型名；
+                    // 前 4 个占用 opus/sonnet/haiku/fable 别名槽，_NAME 让选择器显示友好名
+                    // （profile 名 · 模型，与 kimi/codex/opencode 同口径）；
                     // 第 5 个走唯一的 CUSTOM_MODEL_OPTION；更多模型只能靠 /model <id> 手输
                     const SLOTS: [&str; 4] = ["SONNET", "OPUS", "HAIKU", "FABLE"];
                     for (m, slot) in profile.models.iter().take(4).zip(SLOTS) {
                         plan.env.push((format!("ANTHROPIC_DEFAULT_{slot}_MODEL"), m.clone()));
-                        plan.env.push((format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"), m.clone()));
+                        plan.env.push((
+                            format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"),
+                            format!("{} · {m}", profile.name),
+                        ));
                     }
                     if let Some(fifth) = profile.models.get(4) {
                         plan.env.push(("ANTHROPIC_CUSTOM_MODEL_OPTION".into(), fifth.clone()));
-                        plan.env.push(("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(), fifth.clone()));
+                        plan.env.push((
+                            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(),
+                            format!("{} · {fifth}", profile.name),
+                        ));
                     }
                 }
                 SpecialLaunch::CodexInlineProvider { key_env, sandbox_args } => {
@@ -212,18 +242,35 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     // env 名留在代码里：双通道的条件结构无法纯数据化
                     if let Some(model) = model {
                         plan.env.push(("KIMI_MODEL_NAME".into(), model.into()));
-                        plan.env.push((
-                            "KIMI_MODEL_PROVIDER_TYPE".into(),
-                            profile
-                                .protocol
-                                .clone()
-                                .unwrap_or_else(|| spec.protocols.first().copied().unwrap_or("kimi").into()),
-                        ));
+                        let provider_type = profile
+                            .protocol
+                            .clone()
+                            .unwrap_or_else(|| spec.protocols.first().copied().unwrap_or("kimi").into());
+                        plan.env.push(("KIMI_MODEL_PROVIDER_TYPE".into(), provider_type.clone()));
                         if let Some(key) = &key {
                             plan.env.push(("KIMI_MODEL_API_KEY".into(), key.clone()));
                         }
                         if let Some(url) = &profile.base_url {
                             plan.env.push(("KIMI_MODEL_BASE_URL".into(), url.clone()));
+                        }
+                        // 合成模型的元数据（2026-08-17 二进制实证）：
+                        // 选择器 label 优先 displayName——用 profile 名避免显示成内部名；
+                        // 兼容协议通道（openai/anthropic）capabilities 缺省只有 ["tool_use"]，
+                        // 注册表判定为思考模型时显式声明（kimi 官方协议默认 ["image_in","thinking"]
+                        // 已合理，不注入以免覆盖丢 image_in）
+                        plan.env.push((
+                            "KIMI_MODEL_DISPLAY_NAME".into(),
+                            format!("{} · {model}", profile.name),
+                        ));
+                        plan.env.push((
+                            "KIMI_MODEL_MAX_CONTEXT_SIZE".into(),
+                            crate::model_registry::model_context_size(model).to_string(),
+                        ));
+                        if provider_type != "kimi" && crate::model_registry::model_thinking(model) {
+                            plan.env.push((
+                                "KIMI_MODEL_CAPABILITIES".into(),
+                                "tool_use,thinking".into(),
+                            ));
                         }
                     }
                     if let Some(key) = &key {
@@ -418,7 +465,12 @@ fn apply_env_inject(
     }
 }
 
-/// OpenCode 的 provider 条目（npm + options + models），启动注入与全局写入共用
+// ===== kimi 模型元数据：能力与上下文统一走 model_registry（内置表 + 覆盖文件 + 推断兜底） =====
+
+/// OpenCode 的 provider 条目（npm + options + models），启动注入与全局写入共用。
+/// provider 级 name = 选择器里的供应商显示名（用 profile 名，不再是内部 id "ccode"）；
+/// models 条目 name = 模型显示名（models.dev 覆盖语义，官方文档核实）；
+/// 思考能力与上下文取自 model_registry（内置表 + 覆盖文件 + 推断兜底）
 pub(crate) fn opencode_provider_json(
     profile: &Profile,
     key: Option<&str>,
@@ -432,16 +484,28 @@ pub(crate) fn opencode_provider_json(
         options.insert("apiKey".into(), serde_json::json!(k));
     }
     let mut models_map = serde_json::Map::new();
-    for m in &profile.models {
-        models_map.insert(m.clone(), serde_json::json!({}));
-    }
+    let mut all: Vec<&str> = profile.models.iter().map(|m| m.as_str()).collect();
     if let Some(m) = model {
-        models_map
-            .entry(m.to_string())
-            .or_insert_with(|| serde_json::json!({}));
+        if !all.contains(&m) {
+            all.push(m);
+        }
+    }
+    for m in all {
+        let mut entry = serde_json::json!({
+            "name": format!("{} · {m}", profile.name),
+            // 上下文写入 limit（官方文档字段），供 opencode 计算剩余上下文
+            "limit": { "context": crate::model_registry::model_context_size(m) },
+        });
+        // 思考模型补 reasoning: true（models.dev 覆盖语义）；否则 models.dev
+        // 查不到条目时 opencode 按无思考能力处理
+        if crate::model_registry::model_thinking(m) {
+            entry["reasoning"] = serde_json::json!(true);
+        }
+        models_map.insert(m.into(), entry);
     }
     serde_json::json!({
         "npm": "@ai-sdk/openai-compatible",
+        "name": profile.name,
         "options": options,
         "models": models_map,
     })
@@ -460,12 +524,18 @@ pub fn codex_catalog_path(profile_id: &str) -> Option<std::path::PathBuf> {
 }
 
 /// 单个 catalog 条目：字段拼写与标量值照抄 codex-rs/models-manager/models.json 的打包条目
-/// （slug/display_name 换成模型 id；reasoning levels 取其 low/medium/high 子集）
-fn codex_catalog_entry(model: &str) -> serde_json::Value {
+/// （reasoning levels 取其 low/medium/high 子集全量给——cc-switch 的 catalog 同样全量模板
+/// （自家资源 codex_native_responses_template.json），模型不支持时端点忽略 effort，口径稳妥；
+/// display_name 带 profile 名，选择器里不再是裸模型 id）
+fn codex_catalog_entry(profile_name: &str, model: &str) -> serde_json::Value {
+    let ctx = crate::model_registry::model_context_size(model);
     serde_json::json!({
         "slug": model,
-        "display_name": model,
+        "display_name": format!("{profile_name} · {model}"),
         "description": null,
+        // 上下文窗口按能力注册表（cc-switch 的 catalog 条目同样带这两个字段）
+        "context_window": ctx,
+        "max_context_window": ctx,
         "supported_reasoning_levels": [
             { "effort": "low", "description": "Fast responses with lighter reasoning" },
             { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
@@ -489,18 +559,22 @@ fn codex_catalog_entry(model: &str) -> serde_json::Value {
 }
 
 /// ModelsResponse { models: [ModelInfo] }：每个 profile 模型一条目
-pub fn codex_catalog_json(models: &[String]) -> serde_json::Value {
+pub fn codex_catalog_json(profile_name: &str, models: &[String]) -> serde_json::Value {
     serde_json::json!({
-        "models": models.iter().map(|m| codex_catalog_entry(m)).collect::<Vec<_>>(),
+        "models": models.iter().map(|m| codex_catalog_entry(profile_name, m)).collect::<Vec<_>>(),
     })
 }
 
-fn write_codex_catalog_to(path: &std::path::Path, models: &[String]) -> Result<(), String> {
+fn write_codex_catalog_to(
+    path: &std::path::Path,
+    profile_name: &str,
+    models: &[String],
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建 catalog 目录失败: {e}"))?;
     }
-    let text =
-        serde_json::to_string_pretty(&codex_catalog_json(models)).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(&codex_catalog_json(profile_name, models))
+        .map_err(|e| e.to_string())?;
     crate::profiles::atomic_write(path, &text)
 }
 
@@ -510,7 +584,7 @@ pub fn write_codex_catalog(profile: &Profile) -> Result<Option<std::path::PathBu
         return Ok(None);
     }
     let path = codex_catalog_path(&profile.id).ok_or("无法确定平台配置目录")?;
-    write_codex_catalog_to(&path, &profile.models)?;
+    write_codex_catalog_to(&path, &profile.name, &profile.models)?;
     Ok(Some(path))
 }
 
@@ -965,6 +1039,20 @@ fn detect_one(spec: &'static AgentSpec) -> DetectResult {
         binary_path,
         version,
         readonly_supported: !spec.readonly_args.is_empty(),
+        model_switch: match spec.model_switch {
+            crate::agent_specs::ModelSwitch::Direct(t) => {
+                Some(ModelSwitchDto::Direct(t.to_string()))
+            }
+            crate::agent_specs::ModelSwitch::Picker(c) => {
+                Some(ModelSwitchDto::Picker(c.to_string()))
+            }
+            crate::agent_specs::ModelSwitch::None => None,
+        },
+        effort: spec.effort_levels.map(|(levels, cmd)| EffortSpecDto {
+            levels: levels.iter().map(|s| s.to_string()).collect(),
+            command: cmd.to_string(),
+        }),
+        submit_csi_u: spec.submit_csi_u,
     }
 }
 
@@ -1272,9 +1360,11 @@ mod tests {
         assert!(plan
             .env
             .contains(&("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), "m1".into())));
-        assert!(plan
-            .env
-            .contains(&("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME".into(), "m2".into())));
+        // _NAME 槽是选择器显示名：带 profile 名（配置名 · 模型）
+        assert!(plan.env.contains(&(
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME".into(),
+            "测试 · m2".into()
+        )));
         assert!(plan
             .env
             .contains(&("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), "m3".into())));
@@ -1284,6 +1374,10 @@ mod tests {
         assert!(plan
             .env
             .contains(&("ANTHROPIC_CUSTOM_MODEL_OPTION".into(), "m5".into())));
+        assert!(plan.env.contains(&(
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(),
+            "测试 · m5".into()
+        )));
     }
 
     #[test]
@@ -1537,6 +1631,9 @@ mod tests {
             "KIMI_MODEL_PROVIDER_TYPE",
             "KIMI_MODEL_API_KEY",
             "KIMI_MODEL_BASE_URL",
+            "KIMI_MODEL_DISPLAY_NAME",
+            "KIMI_MODEL_CAPABILITIES",
+            "KIMI_MODEL_MAX_CONTEXT_SIZE",
             "KIMI_API_KEY",
             "KIMI_BASE_URL",
         ] {
@@ -1983,7 +2080,52 @@ mod tests {
         assert!(plan
             .env
             .contains(&("KIMI_BASE_URL".into(), "https://api.moonshot.cn/v1".into())));
+        // 合成模型元数据：显示名 = profile 名 · 模型；上下文按模型映射（k2 = 128K）
+        assert!(plan.env.contains(&(
+            "KIMI_MODEL_DISPLAY_NAME".into(),
+            "测试 · kimi-k2".into()
+        )));
+        assert!(plan.env.contains(&(
+            "KIMI_MODEL_MAX_CONTEXT_SIZE".into(),
+            "131072".into()
+        )));
+        // kimi 官方协议不注入 CAPABILITIES（CLI 默认 ["image_in","thinking"] 已合理）
+        assert!(!plan.env.iter().any(|(k, _)| k == "KIMI_MODEL_CAPABILITIES"));
         assert!(plan.args.is_empty());
+    }
+
+    #[test]
+    fn kimi_plan_thinking_model_declares_capabilities_on_compat_protocol() {
+        let mut p = profile("kimi", Some("https://relay.example.com/v1"));
+        p.protocol = Some("openai".into());
+        let plan = launch_plan(&p, None, Some("kimi-k2-thinking"));
+        // 兼容协议通道 capabilities 缺省只有 ["tool_use"]：思考模型要显式声明
+        assert!(plan.env.contains(&(
+            "KIMI_MODEL_CAPABILITIES".into(),
+            "tool_use,thinking".into()
+        )));
+        assert!(plan.env.contains(&(
+            "KIMI_MODEL_DISPLAY_NAME".into(),
+            "测试 · kimi-k2-thinking".into()
+        )));
+    }
+
+    #[test]
+    fn kimi_plan_plain_model_omits_capabilities() {
+        // 非思考模型不声明 capabilities：留空走 CLI registry 默认，避免降级
+        let mut p = profile("kimi", Some("https://relay.example.com/v1"));
+        p.protocol = Some("openai".into());
+        let plan = launch_plan(&p, None, Some("deepseek-chat"));
+        assert!(!plan.env.iter().any(|(k, _)| k == "KIMI_MODEL_CAPABILITIES"));
+        // 显示名与上下文照常注入
+        assert!(plan.env.contains(&(
+            "KIMI_MODEL_DISPLAY_NAME".into(),
+            "测试 · deepseek-chat".into()
+        )));
+        assert!(plan.env.contains(&(
+            "KIMI_MODEL_MAX_CONTEXT_SIZE".into(),
+            "131072".into()
+        )));
     }
 
     #[test]
@@ -2024,17 +2166,43 @@ mod tests {
         let models = config["provider"]["ccode"]["models"].as_object().unwrap();
         for m in ["m1", "m2", "m3"] {
             assert!(models.contains_key(m), "provider.ccode.models 缺 {m}");
+            // 每个条目带显示名（配置名 · 模型）与 limit.context（注册表保守默认 128K）
+            assert_eq!(models[m]["name"].as_str(), Some(format!("测试 · {m}").as_str()));
+            assert_eq!(models[m]["limit"]["context"].as_i64(), Some(131_072));
         }
+        // provider 级 name = profile 名（选择器不再显示内部 id "ccode"）
+        assert_eq!(config["provider"]["ccode"]["name"].as_str(), Some("测试"));
+        // 表外未知模型不声明 reasoning
+        assert!(models["m1"].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn opencode_inject_marks_thinking_model_reasoning() {
+        // 注册表命中思考模型 → models 条目带 reasoning: true
+        let mut p = profile("opencode", Some("https://openrouter.ai/api/v1"));
+        p.models = vec!["deepseek-reasoner".into()];
+        let plan = launch_plan(&p, None, None);
+        let (_, v) = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(v).unwrap();
+        assert_eq!(
+            config["provider"]["ccode"]["models"]["deepseek-reasoner"]["reasoning"],
+            true
+        );
     }
 
     #[test]
     fn codex_catalog_contains_every_model_with_template_shape() {
-        let v = codex_catalog_json(&["gpt-5-codex".into(), "gpt-5.1".into()]);
+        let v = codex_catalog_json("测试", &["gpt-5-codex".into(), "gpt-5.1".into()]);
         let models = v["models"].as_array().unwrap();
         assert_eq!(models.len(), 2);
         let e = &models[0];
         assert_eq!(e["slug"], "gpt-5-codex");
-        assert_eq!(e["display_name"], "gpt-5-codex");
+        // display_name 带 profile 名（选择器不再是裸模型 id）
+        assert_eq!(e["display_name"], "测试 · gpt-5-codex");
         assert_eq!(models[1]["slug"], "gpt-5.1");
         // 关键枚举拼写与打包条目一致（codex-rs models-manager/models.json）
         assert_eq!(e["shell_type"], "shell_command");
@@ -2056,10 +2224,11 @@ mod tests {
     fn codex_catalog_written_atomically() {
         let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
         let path = dir.join("catalogs").join("codex-p1.json");
-        write_codex_catalog_to(&path, &["m1".into()]).unwrap();
+        write_codex_catalog_to(&path, "测试", &["m1".into()]).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["models"][0]["slug"], "m1");
+        assert_eq!(v["models"][0]["display_name"], "测试 · m1");
         std::fs::remove_dir_all(&dir).ok();
     }
 

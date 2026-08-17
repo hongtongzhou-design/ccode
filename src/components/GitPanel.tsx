@@ -53,13 +53,30 @@ function hunkBodyLines(patch: string): string[] {
   return body;
 }
 
-const STATUS_STYLE: Record<string, string> = {
-  M: "bg-warn text-warn-text",
-  A: "bg-ok text-ok-text",
-  "??": "bg-ok text-ok-text",
-  D: "bg-err text-err-text",
-  R: "bg-inset text-l3",
+/** 状态 → 文件名单色（v3.92 起替代独立 M/?? 徽标块：状态色直接上到文件名，
+    前缀只剩勾选框 + 类型图标，更清爽；黄=修改 绿=新增 红=删除） */
+const STATUS_TEXT: Record<string, string> = {
+  M: "text-warn-text",
+  A: "text-ok-text",
+  "??": "text-ok-text",
+  D: "text-err-text",
+  R: "text-l3",
 };
+
+/** 路径分级：目录段弱化、文件名加粗（扫视找文件名不费力） */
+function PathLabel({ path, status }: { path: string; status: string }) {
+  const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const dir = idx >= 0 ? path.slice(0, idx + 1) : "";
+  const base = idx >= 0 ? path.slice(idx + 1) : path;
+  return (
+    <span className="min-w-0 flex-1 truncate font-mono">
+      <span className="text-l4">{dir}</span>
+      <span className={`font-medium ${STATUS_TEXT[status] ?? "text-l1"}`}>
+        {base}
+      </span>
+    </span>
+  );
+}
 
 /** 内联 diff 渲染行数上限：超出只渲染前 N 行并提示，防超大 diff 的全量 span 拖垮面板 */
 const DIFF_LINE_CAP = 2000;
@@ -519,16 +536,10 @@ function GitPanel({
             <span className="w-3 shrink-0 text-center text-l3">
               {expanded ? "▾" : "▸"}
             </span>
-            <span
-              title={statusBadgeTitle(f.status)}
-              className={`shrink-0 rounded-sm px-1 font-mono text-micro leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
-            >
-              {f.status}
+            <span title={statusBadgeTitle(f.status)} className="contents">
+              <FileTypeBadge path={f.path} />
             </span>
-            <FileTypeBadge path={f.path} />
-            <span className="min-w-0 flex-1 truncate font-mono text-l2">
-              {f.path}
-            </span>
+            <PathLabel path={f.path} status={f.status} />
             {(f.additions !== null || f.deletions !== null) && (
               <span className="shrink-0 font-mono">
                 {f.additions !== null && (
@@ -571,14 +582,12 @@ function GitPanel({
             active ? "bg-inset text-l1" : "hover:bg-hover"
           }`}
         >
-          <span
-            title={statusBadgeTitle(f.status)}
-            className={`shrink-0 rounded-sm px-1 font-mono text-micro leading-4 ${STATUS_STYLE[f.status] ?? "bg-inset text-l3"}`}
-          >
-            {f.status}
+          <span title={statusBadgeTitle(f.status)} className="contents">
+            <FileTypeBadge path={f.path} />
           </span>
-          <FileTypeBadge path={f.path} />
-          <span className="min-w-0 flex-1 truncate font-mono text-xs text-l2">
+          <span
+            className={`min-w-0 flex-1 truncate font-mono text-xs font-medium ${STATUS_TEXT[f.status] ?? "text-l2"}`}
+          >
             {f.path.split(/[\\/]/).pop()}
           </span>
         </button>
@@ -903,8 +912,8 @@ function GitPanel({
             <div className="mb-2 flex items-center justify-between text-xs text-l3">
               <span>
                 {inWs
-                  ? `将保存全部 ${selectedFiles.length} 个未提交文件`
-                  : `将保存 ${selectedFiles.length} / ${files.length} 个文件`}
+                  ? `已选择全部 ${selectedFiles.length} 个未提交文件`
+                  : `已选择 ${selectedFiles.length} / ${files.length} 个文件`}
               </span>
               {!inWs && (
                 <span className="flex items-center gap-2">
@@ -926,6 +935,7 @@ function GitPanel({
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               onKeyDown={(e) => {
+                // Enter / ⌘Enter 都是「快速提交」（按钮上标注 ⌘Enter 是熟手提示）
                 if (e.key === "Enter" && canCommit) void doCommit(false);
               }}
               placeholder="改动说明（可选，留空自动生成）"
@@ -935,7 +945,7 @@ function GitPanel({
             <button
               onClick={genMessage}
               disabled={!canCommit || aiBusy || running !== null}
-              title="AI 生成更完整的改动说明（可选，速度取决于模型）"
+              title="生成 Commit Message（AI 分析 diff 后填入输入框，可再改；速度取决于模型）"
               className={`shrink-0 rounded-sm px-2 py-1.5 text-sm text-l2 hover:bg-hover disabled:opacity-50 ${
                 aiBusy ? "animate-pulse" : ""
               }`}
@@ -947,26 +957,30 @@ function GitPanel({
             <button
               onClick={() => void doCommit(false)}
               disabled={!canCommit}
-              title="git commit：把勾选的改动保存到项目历史"
-              className="flex-1 rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+              title="git commit：把勾选的改动提交到项目历史（⌘Enter）"
+              className={`flex-1 rounded-sm border px-3 py-1.5 text-sm disabled:opacity-50 ${
+                canCommit
+                  ? "border-cta-bd bg-cta text-cta-text hover:brightness-110"
+                  : "border-field bg-inset text-l4"
+              }`}
             >
               {running === "commit"
-                ? "保存中…"
+                ? "提交中…"
                 : message.trim()
-                  ? "保存到历史"
-                  : "快速保存到历史"}
+                  ? "提交（⌘Enter）"
+                  : "快速提交（⌘Enter）"}
             </button>
             <button
               onClick={() => void doCommit(true)}
               disabled={!canCommit}
-              title="git commit + push：保存到历史并推送到远程"
-              className="flex-1 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:brightness-125 disabled:opacity-50"
+              title="git commit + push：提交到历史并推送到远程"
+              className={`flex-1 rounded-sm px-3 py-1.5 text-sm disabled:opacity-50 ${
+                canCommit
+                  ? "bg-[linear-gradient(90deg,var(--color-ok,#22c55e),#10b981)] text-[var(--color-bg)] hover:brightness-110"
+                  : "bg-inset text-l4"
+              }`}
             >
-              {running === "push"
-                ? "推送中…"
-                : message.trim()
-                  ? "保存并推送"
-                  : "快速保存并推送"}
+              {running === "push" ? "推送中…" : "提交并推送"}
             </button>
           </div>
           {output && (

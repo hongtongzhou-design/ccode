@@ -56,6 +56,8 @@ export async function launchQuickChatDirect(): Promise<boolean> {
     profileId: profileId || undefined,
     autoStart: !!profileId,
     clean: true,
+    // 同一套选择的重复开聊切回已有标签，不堆新标签
+    reuseKey: `quickchat:${r.agentId}:${profileId}:${cwd}`,
   });
   setPage("terminal");
   return true;
@@ -150,6 +152,8 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
       autoStart: !!profileId,
       // 随手聊没有项目上下文：收起工作树与右栏，落地就是一个干净终端
       clean: true,
+      // 同一套选择的重复开聊切回已有标签，不堆新标签
+      reuseKey: `quickchat:${agentId}:${profileId}:${cwd.trim()}`,
     });
     setPage("terminal");
     onClose();

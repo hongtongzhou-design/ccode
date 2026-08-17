@@ -1184,6 +1184,12 @@ pub async fn list_skills() -> Vec<SkillDto> {
 fn list_skills_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>) -> Vec<SkillDto> {
     let mut skills = store.read();
     for s in &mut skills {
+        // 老技能的 apps 表是创建时的注册表快照：后来接入的 agent（codebuddy/cursor/grok）
+        // 缺键，前端「一键应用」按 apps 键过滤会永远跳过它们——list 时现算补齐
+        // （不写盘；将来再接入新 agent 也免疫，无需迁移）
+        for spec in crate::agent_specs::all_agent_specs() {
+            s.apps.entry(spec.id.to_string()).or_insert(false);
+        }
         s.stale_copies = stale_agents(store, dirs, s);
         s.app_modes = app_modes(dirs, s);
         s.mentions_mcp = mentions_mcp(&store.skill_dir(&s.name).join("SKILL.md"));
@@ -1809,6 +1815,31 @@ mod tests {
             Some("skills".to_string())
         );
         assert_eq!(github_repo_category("owner/"), None);
+    }
+
+    #[test]
+    fn list_backfills_missing_agent_keys_for_legacy_skills() {
+        // 老技能的 apps 表是创建时的注册表快照（后来接入的 agent 缺键）：
+        // list 时现算补齐为 false，否则前端「一键应用」按 apps 键过滤会永远跳过新 agent
+        let fx = Fx::new();
+        let mut skill = fx.add_lib_skill("legacy", "老技能");
+        skill.apps = HashMap::from([
+            ("claude-code".to_string(), true),
+            ("kimi".to_string(), false),
+        ]);
+        fx.store.write(&[skill]).unwrap();
+        let listed = list_skills_impl(&fx.store, &fx.agents);
+        assert_eq!(listed.len(), 1);
+        let apps = &listed[0].apps;
+        for spec in crate::agent_specs::all_agent_specs() {
+            assert!(apps.contains_key(spec.id), "list 后 apps 缺 {}", spec.id);
+        }
+        // 既有键的值不被覆盖（true 保留、显式 false 保留）
+        assert_eq!(apps["claude-code"], true);
+        assert_eq!(apps["kimi"], false);
+        // 现算不写盘：盘上仍是旧快照
+        let on_disk = fx.store.read();
+        assert_eq!(on_disk[0].apps.len(), 2);
     }
 
     #[test]

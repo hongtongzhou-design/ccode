@@ -1440,6 +1440,74 @@ pub async fn rebuild_usage_index() -> Result<UsageBuildResult, String> {
         .map_err(|e| e.to_string())?
 }
 
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsageDto {
+    pub input: u64,
+    pub output: u64,
+    pub cost_usd: f64,
+    /// 至少一个模型命中定价表（费用才有意义；全未命中时前端只显示 token）
+    pub priced: bool,
+}
+
+/// 按 session 聚合用量（查询本体，测试可注入内存库）；费用按模型分组各自计价再合计
+fn session_usage_from(
+    conn: &Connection,
+    agent: &str,
+    session_id: &str,
+) -> Result<SessionUsageDto, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT model, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write)
+             FROM usage_daily WHERE agent = ?1 AND session_id = ?2 GROUP BY model",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![agent, session_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let pricing = load_pricing(None);
+    let mut out = SessionUsageDto::default();
+    for row in rows {
+        let (model, i, o, cr, cw) = row.map_err(|e| e.to_string())?;
+        out.input += i as u64;
+        out.output += o as u64;
+        if let Some(price) = price_of(&model, &pricing) {
+            out.priced = true;
+            out.cost_usd += cost_of(
+                &TokenAcc {
+                    input: i as u64,
+                    output: o as u64,
+                    cache_read: cr as u64,
+                    cache_write: cw as u64,
+                },
+                price,
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// 单个会话的累计用量（终端状态栏）：先增量索引（marker 未变的会话直接跳过，运行中
+/// 会话随前端轮询节奏追新）再按 session_id 聚合 usage_daily
+#[tauri::command]
+pub async fn session_usage(agent: String, session_id: String) -> Result<SessionUsageDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        rebuild_impl()?;
+        let conn = usage_db()?;
+        session_usage_from(&conn, &agent, &session_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn get_usage_stats(range: String) -> Result<UsageStatsDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -1714,6 +1782,35 @@ mod tests {
         let official_ws = stats.by_workspace.iter().find(|w| w.official).unwrap();
         assert_eq!(official_ws.workspace_name, "task-x");
         assert_eq!(official_ws.tokens_in + official_ws.tokens_out, 22);
+    }
+
+    #[test]
+    fn session_usage_aggregates_per_session_with_pricing() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        let mut ins = |session: &str, model: &str, i: i64, o: i64, cr: i64, cw: i64| {
+            conn.execute(
+                "INSERT INTO usage_daily(day, agent, model, project_path, session_id,
+                 input, output, cache_read, cache_write) VALUES ('2026-08-17','claude-code',?1,'/p',?2,?3,?4,?5,?6)",
+                rusqlite::params![model, session, i, o, cr, cw],
+            )
+            .unwrap();
+        };
+        ins("s1", "claude-sonnet-4", 1_000_000, 100_000, 0, 0);
+        ins("s1", "gpt-5", 500_000, 50_000, 100_000, 0); // 同会话多模型分组计价
+        ins("s1", "unknown-model-x", 10_000, 5_000, 0, 0); // 未命中定价表不计费
+        ins("s2", "claude-sonnet-4", 9_999, 1, 0, 0); // 别的会话不混入
+        let dto = session_usage_from(&conn, "claude-code", "s1").unwrap();
+        assert_eq!(dto.input, 1_510_000);
+        assert_eq!(dto.output, 155_000);
+        assert!(dto.priced);
+        // sonnet: 1M×3 + 0.1M×15 = 4.5；gpt-5: 0.5M×1.25 + 0.05M×10 + 0.1M×1.25×0.1 = 1.1375
+        let expect = 4.5 + 1.1375;
+        assert!((dto.cost_usd - expect).abs() < 1e-9, "{}", dto.cost_usd);
+        // 未命中定价表时 priced=false（前端只显示 token）
+        let dto2 = session_usage_from(&conn, "claude-code", "s-none").unwrap();
+        assert_eq!(dto2.input, 0);
+        assert!(!dto2.priced);
     }
 
     #[test]

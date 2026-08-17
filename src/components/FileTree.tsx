@@ -28,6 +28,8 @@ export interface DirEntryDto {
   isDir: boolean;
   size: number;
   modified: string | null;
+  /** 家目录直下的系统目录（macOS Library 等）：置灰降噪，交互不受影响 */
+  isSystem?: boolean;
 }
 
 /** git 状态字母配色（M 改 / A·?? 增 / D 删 / R 改名） */
@@ -110,10 +112,10 @@ const FileTreeNode = memo(function FileTreeNode({
           e.preventDefault();
           ctx.onMenu({ x: e.clientX, y: e.clientY, path: entry.path, isDir: entry.isDir });
         }}
-        title={entry.isDir ? `${entry.path}\n双击进入，右键在此打开终端` : entry.path}
+        title={`${entry.isDir ? `${entry.path}\n双击进入，右键在此打开终端` : entry.path}${entry.isSystem ? "\n系统目录" : ""}`}
         className={`group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-hover ${
           highlight === entry.path ? "bg-white/10" : ""
-        }`}
+        } ${entry.isSystem ? "opacity-50" : ""}`}
         style={{ paddingLeft: 6 + depth * 12 }}
       >
         <span className="w-3 shrink-0 text-l4">

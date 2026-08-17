@@ -11,6 +11,7 @@ mod global_config;
 mod handoff;
 mod logbuf;
 mod mcp;
+mod model_registry;
 mod models;
 mod pdf;
 mod portwatch;
@@ -232,6 +233,7 @@ pub fn run() {
             skills::resync_skill_copies,
             usage::rebuild_usage_index,
             usage::get_usage_stats,
+            usage::session_usage,
             usage::profile_usage,
             settings::get_settings,
             settings::app_storage_usage,

@@ -233,6 +233,8 @@ export default function StepFlow({
       // 文件绝对路径：播种后已存在；播种失败已在上面拦截，不会走到这里
       previewPath: `${projectPath.replace(/[\\/]+$/, "")}/${draft.relPath}`,
       previewRoot: projectPath,
+      // 同一步骤的任务书讨论是同一个对话：再点「跟 AI 商量一下」切回已有标签
+      reuseKey: `discuss:${projectPath}:${draft.relPath}`,
     });
     setPage("terminal");
   }

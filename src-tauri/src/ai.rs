@@ -277,11 +277,17 @@ pub(crate) fn cap_text_middle(text: &str, max: usize) -> String {
     format!("{}\n...（中间省略）...\n{}", &text[..head_end], &text[tail_start..])
 }
 
-fn build_commit_prompt(status: &str, numstat: &str, diff: &str) -> String {
+fn build_commit_prompt(status: &str, numstat: &str, diff: &str, style: Option<&str>) -> String {
+    // 状态栏「⚡ Commit & Push」分割菜单的风格偏好（空 = 默认 conventional commits 风格）
+    let style_line = style
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("风格偏好（覆盖默认风格要求）：{}\n", s.trim()))
+        .unwrap_or_default();
     format!(
         "请根据以下 git 变更生成提交信息。\n\
          要求：第一行是 conventional commits 风格主题（feat/fix/refactor/docs/chore 等开头，≤50 字符）；\
-         空一行；再写 1-3 行中文要点。只输出提交信息本身，不要解释、不要包裹引号、不要代码块。\n\n\
+         空一行；再写 1-3 行中文要点。只输出提交信息本身，不要解释、不要包裹引号、不要代码块。\n\
+         {style_line}\n\
          ## git status\n{status}\n\n## git diff --numstat\n{numstat}\n\n## git diff\n{}",
         cap_text(diff, DIFF_CAP)
     )
@@ -512,17 +518,24 @@ pub async fn ai_prompt(
     .map_err(|e| e.to_string())?
 }
 
+/// 「◈ 提交信息」生成；style = 状态栏分割菜单的风格偏好（None = 默认 conventional commits）
 #[tauri::command]
 pub async fn ai_commit_message(
     store: tauri::State<'_, ProfileStore>,
     cwd: String,
     paths: Option<Vec<String>>,
+    style: Option<String>,
 ) -> Result<String, String> {
     let profiles = store.list()?;
     tauri::async_runtime::spawn_blocking(move || {
         let cwd = crate::sessions::expand_tilde(&cwd);
         let (status, numstat, diff) = collect_commit_material(&cwd, paths.as_deref())?;
-        ai_prompt_impl(profiles, None, Some(FN_COMMIT), build_commit_prompt(&status, &numstat, &diff))
+        ai_prompt_impl(
+            profiles,
+            None,
+            Some(FN_COMMIT),
+            build_commit_prompt(&status, &numstat, &diff, style.as_deref()),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -893,11 +906,15 @@ mod tests {
 
     #[test]
     fn prompt_builders_contain_material_and_caps() {        let diff = "line\n".repeat(3000); // ~15KB > 8KB 上限
-        let p = build_commit_prompt(" M a.rs", "1\t0\ta.rs", &diff);
+        let p = build_commit_prompt(" M a.rs", "1\t0\ta.rs", &diff, None);
         assert!(p.contains("conventional commits"));
         assert!(p.contains(" M a.rs"));
         assert!(p.contains("...（内容过长已截断）"));
         assert!(p.len() < 12000, "prompt 必须被截断: {}", p.len());
+        // 风格偏好附加进 prompt（状态栏分割菜单的 Customize Prompt）
+        let p2 = build_commit_prompt(" M a.rs", "1\t0\ta.rs", "x", Some("全英文，带 emoji"));
+        assert!(p2.contains("全英文，带 emoji"));
+        assert!(!p.contains("风格偏好"));
         let s = build_summary_prompt("[用户] 修 bug");
         assert!(s.contains("3-5 行"));
         let pr = build_pr_prompt("abc123 feat: x", "5\t1\tsrc/a.rs");

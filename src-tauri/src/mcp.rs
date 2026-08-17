@@ -291,6 +291,19 @@ fn is_node_shim(path: &Path) -> bool {
         .is_some_and(|l| l.starts_with("#!") && l.contains("env node"))
 }
 
+/// stdio 命令若是相对路径（./ ../ 及 Windows 反斜杠变体），分发出去必挂：
+/// 相对路径的基准是来源 agent 自己的运行语境（如 codex 插件目录），其他 CLI 从任意目录
+/// 启动都找不到——拒写并报错引导改绝对路径，比静默写一个必然 ENOENT 的配置诚实
+fn reject_relative_command(command: &str) -> Result<(), String> {
+    let c = command.trim();
+    if c.starts_with("./") || c.starts_with("../") || c.starts_with(".\\") || c.starts_with("..\\") {
+        return Err(format!(
+            "该 server 的命令是相对路径（{c}），换个 agent 的工作目录就找不到；请把命令改为绝对路径后再分发"
+        ));
+    }
+    Ok(())
+}
+
 fn entry_json(server: &McpServerDto, agent: &str) -> Result<serde_json::Value, String> {
     use serde_json::{json, Map, Value};
     let env: Map<String, Value> = pairs_to_map(&server.env)
@@ -318,6 +331,7 @@ fn entry_json(server: &McpServerDto, agent: &str) -> Result<serde_json::Value, S
         if server.command.trim().is_empty() {
             return Err("stdio 类型必须填命令".into());
         }
+        reject_relative_command(&server.command)?;
         let (command, args) = resolve_command_deep(&server.command, &server.args);
         if agent == "opencode" {
             // opencode：command 是命令+参数合成的一个数组
@@ -406,6 +420,7 @@ fn entry_toml(server: &McpServerDto) -> Result<toml_edit::Table, String> {
         if server.command.trim().is_empty() {
             return Err("stdio 类型必须填命令".into());
         }
+        reject_relative_command(&server.command)?;
         let (command, args) = resolve_command_deep(&server.command, &server.args);
         t["command"] = toml_edit::value(command.as_str());
         if !args.is_empty() {
@@ -1323,6 +1338,26 @@ mod tests {
         assert_eq!(env_ref("${FOO}"), Some("FOO"));
         assert_eq!(env_ref("Bearer $FOO"), None); // 内嵌不算整值引用
         assert_eq!(env_ref("plain"), None);
+    }
+
+    #[test]
+    fn relative_stdio_command_rejected_on_distribute() {
+        // 相对路径的基准是来源 agent 的运行语境（如 codex 插件目录），分发到别家必 ENOENT：
+        // 拒写并引导改绝对路径，比静默写必挂配置诚实
+        let mut s = stdio_server();
+        s.command = "./plugins/foo/bin/serve".into();
+        let err = entry_json(&s, "kimi").unwrap_err();
+        assert!(err.contains("相对路径"), "{err}");
+        assert!(err.contains("绝对路径"), "{err}");
+        let err = entry_toml(&s).unwrap_err();
+        assert!(err.contains("相对路径"), "{err}");
+        s.command = "../up/serve".into();
+        assert!(entry_json(&s, "claude-code").is_err());
+        // 绝对路径与裸名不受影响（用 claude-code 做正例：kimi 会拒写 stdio_server 里的 env 引用）
+        s.command = "/abs/path/serve".into();
+        assert!(entry_json(&s, "claude-code").is_ok());
+        s.command = "ccode-test-nonexistent-bin".into();
+        assert!(entry_json(&s, "claude-code").is_ok());
     }
 
     #[test]

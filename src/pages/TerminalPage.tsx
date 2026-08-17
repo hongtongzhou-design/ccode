@@ -23,12 +23,14 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { useAppStore } from "../store";
+import { IS_MAC } from "../hotkeys";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import { confirmDialog, alertDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
 import FileTree from "../components/FileTree";
 import GitPanel, { type GitSummary } from "../components/GitPanel";
+import TerminalStatusBar, { fmtTokens } from "../components/TerminalStatusBar";
 import HandoffPicker, { type HandoffSource } from "../components/HandoffPicker";
 import DigestPicker from "../components/DigestPicker";
 import { EmptyState, LoadingRows, hoverRevealClass } from "../components/PageFrame";
@@ -60,11 +62,13 @@ import type { RunOverviewInput } from "../run-overview";
 import type {
   ChatMessageDto,
   ConversationPageDto,
+  GitCommitResultDto,
   ProjectConfigReadDto,
   ProjectDto,
   SessionMetaDto,
   SkillDto,
   McpServerDto,
+  SessionUsageDto,
   WorkspaceDto,
   WorkspaceHealthDto,
 } from "../types";
@@ -92,7 +96,7 @@ function pathWithin(path: string, base: string): boolean {
 }
 
 /** 标签页状态：由 TerminalView 上报，标签条 / 首页收件箱镜像（terminalRunInputs）/ 工作树根目录都用它 */
-interface TabStatus {
+export interface TabStatus {
   title: string;
   /** 有存活 PTY（agent 或 shell） */
   alive: boolean;
@@ -112,6 +116,8 @@ interface TabStatus {
   canResume: boolean;
   /** 当前或最近一次关联的会话 id；只用于标签恢复元数据，不含会话文件内容。 */
   sessionId: string | null;
+  /** agent 启动成功时刻（ms epoch；终端状态栏运行时长用；shell/未启动为 null） */
+  startedAt: number | null;
 }
 
 /** TerminalView 暴露给标签条 ⋯ 菜单的动作表（回调经 ref 转发，始终最新） */
@@ -121,6 +127,11 @@ export interface FocusTabActions {
   openConversationPage: () => void;
   search: () => void;
   modify: () => void;
+  /** 往 xterm 画面写一行浅灰日志（状态栏 Commit & Push 的回显；走终端缓冲区不经 PTY，
+      运行中的 TUI 会在下一帧覆盖它——只是即时反馈，不是持久日志） */
+  logLine: (text: string) => void;
+  /** 状态栏 📂 浮层改工作目录（仅未启动时开放；cwd state 单一出处在 TerminalView） */
+  setCwd: (cwd: string) => void;
 }
 
 /** TerminalView 上报的当前对话联动数据（右侧「对话」页签渲染用） */
@@ -196,7 +207,10 @@ const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
 /** 底/字色取自主题表，ANSI 16 色 + cursor + selectionBackground 全部由调色板提供。
  *  调色板先经 resolvePaletteId 按主题亮暗解析：浅色主题拿到深色向预设时自动换 twin，
  *  避免近白底上出现 white/brightWhite 隐形、深藏蓝选区压死选中文字。 */
-function buildXtermTheme(themeId: string, paletteId?: string) {
+function buildXtermTheme(
+  themeId: string,
+  paletteId?: string,
+): { background: string; foreground: string } & Record<string, string> {
   const palette =
     XTERM_PALETTES[resolvePaletteId(paletteId, isLightTheme(themeId))];
   return {
@@ -387,6 +401,8 @@ const TerminalView = memo(function TerminalView({
   const [running, setRunning] = useState(false); // agent 正在运行
   const [shellActive, setShellActive] = useState(false); // 当前接的是 shell
   const [exited, setExited] = useState(false);
+  /** agent 启动成功时刻（状态栏运行时长；shell/未启动为 null） */
+  const [startedAt, setStartedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 启动栏收缩：空闲时完整展示，启动成功后自动收成一行状态条（「修改」可重新展开）
   const [barExpanded, setBarExpanded] = useState(true);
@@ -502,6 +518,20 @@ const TerminalView = memo(function TerminalView({
   // 当前 agent 已分发的 MCP server 清单（MCP 页开关同步）；点击 pill 展开，一键提及/管理
   const [agentMcps, setAgentMcps] = useState<McpServerDto[]>([]);
   const [mcpMenuOpen, setMcpMenuOpen] = useState(false);
+  // 向上弹出菜单的锚点与动态限高：固定 224px 在锚点上方空间不足时会顶出屏幕
+  const skillAnchor = useRef<HTMLSpanElement>(null);
+  const mcpAnchor = useRef<HTMLSpanElement>(null);
+  const [skillMenuMaxH, setSkillMenuMaxH] = useState(224);
+  const [mcpMenuMaxH, setMcpMenuMaxH] = useState(224);
+
+  /** 向上弹出菜单的限高：锚点上方可用空间 - 8px 边距，夹在 [96, 224] */
+  function upMaxH(anchor: HTMLElement | null) {
+    if (!anchor) return 224;
+    return Math.max(
+      96,
+      Math.min(224, Math.floor(anchor.getBoundingClientRect().top) - 8),
+    );
+  }
 
   // 当前 agent 已启用的技能数与清单（技能页开关同步）+ 已分发的 MCP server（MCP 页开关同步）
   useEffect(() => {
@@ -544,14 +574,19 @@ const TerminalView = memo(function TerminalView({
     setMcpMenuOpen(false);
   }
 
-  /** 技能清单 pill（展开/收缩启动栏共用；up=true 向上弹出，收缩栏在页面顶部须向下） */
-  function renderSkillMenu(up: boolean) {
+  /** 技能清单 pill（展开/收缩启动栏共用；up=true 向上弹出，收缩栏在页面顶部须向下；
+      alignRight=true 右对齐——收缩态 pill 在 ml-auto 右侧，默认左对齐会溢出屏幕右缘） */
+  function renderSkillMenu(up: boolean, alignRight = false) {
     if (skillCount === 0) return null;
     return (
-      <span className="relative">
+      <span className="relative" ref={skillAnchor}>
         <button
           type="button"
-          onClick={() => setSkillMenuOpen((v) => !v)}
+          onClick={() => {
+            // 打开（向上弹）时按锚点上方空间重新限高
+            if (up && !skillMenuOpen) setSkillMenuMaxH(upMaxH(skillAnchor.current));
+            setSkillMenuOpen((v) => !v);
+          }}
           title="展开该 agent 已启用的技能清单，点击一键使用"
           aria-expanded={skillMenuOpen}
           className="rounded-sm bg-inset px-1.5 py-0.5 text-l3 hover:bg-seg-sel hover:text-l1"
@@ -565,9 +600,11 @@ const TerminalView = memo(function TerminalView({
               className="fixed inset-0 z-40"
               onClick={() => setSkillMenuOpen(false)}
             />
-            {/* 技能清单：一键使用（运行中注入终端输入框，未启动写进首条指令） */}
+            {/* 技能清单：一键使用（运行中注入终端输入框，未启动写进首条指令）；
+                高度随锚点上方空间收缩，防顶出屏幕 */}
             <ul
-              className={`absolute ${up ? "bottom-full mb-1" : "top-full mt-1"} z-50 max-h-56 w-64 overflow-auto rounded-md border border-field ccode-float-surface p-1`}
+              style={{ maxHeight: up ? skillMenuMaxH : 224 }}
+              className={`absolute ${up ? "bottom-full mb-1" : "top-full mt-1"} ${alignRight ? "right-0" : "left-0"} z-50 w-64 overflow-auto rounded-md border border-field ccode-float-surface p-1`}
             >
               {agentSkills.map((s) => (
                 <li key={s.id}>
@@ -593,13 +630,16 @@ const TerminalView = memo(function TerminalView({
   }
 
   /** MCP 清单 pill（同技能入口形态；分发到该 agent 的 server 一键提及，底部入口跳 MCP 页管理） */
-  function renderMcpMenu(up: boolean) {
+  function renderMcpMenu(up: boolean, alignRight = false) {
     if (agentMcps.length === 0) return null;
     return (
-      <span className="relative">
+      <span className="relative" ref={mcpAnchor}>
         <button
           type="button"
-          onClick={() => setMcpMenuOpen((v) => !v)}
+          onClick={() => {
+            if (up && !mcpMenuOpen) setMcpMenuMaxH(upMaxH(mcpAnchor.current));
+            setMcpMenuOpen((v) => !v);
+          }}
           title="该 agent 已分发的 MCP server 清单（MCP 页管理分发）"
           aria-expanded={mcpMenuOpen}
           className="rounded-sm bg-inset px-1.5 py-0.5 text-l3 hover:bg-seg-sel hover:text-l1"
@@ -613,7 +653,8 @@ const TerminalView = memo(function TerminalView({
               onClick={() => setMcpMenuOpen(false)}
             />
             <ul
-              className={`absolute ${up ? "bottom-full mb-1" : "top-full mt-1"} z-50 max-h-56 w-64 overflow-auto rounded-md border border-field ccode-float-surface p-1`}
+              style={{ maxHeight: up ? mcpMenuMaxH : 224 }}
+              className={`absolute ${up ? "bottom-full mb-1" : "top-full mt-1"} ${alignRight ? "right-0" : "left-0"} z-50 w-64 overflow-auto rounded-md border border-field ccode-float-surface p-1`}
             >
               {agentMcps.map((s) => (
                 <li key={s.id}>
@@ -655,8 +696,7 @@ const TerminalView = memo(function TerminalView({
   const [activePtyId, setActivePtyId] = useState<string | null>(null);
   // 真实 cwd 跟随：进程存活期间每 4s 问一次后端 PTY 进程的真实 cwd——shell 内 cd 后
   // 文件树/git 面板也能跟上（此前只认启动栏路径，切标签「不跟随」的根源之一）。
-  // 启动栏输入框聚焦时不覆盖，避免打断用户编辑
-  const cwdInputRef = useRef<HTMLInputElement>(null);
+  // 未启动时的目录编辑入口在底部状态栏 📂 浮层（启动前生效，与轮询不冲突）
   useEffect(() => {
     if (!visible || !activePtyId || (!running && !shellActive)) return;
     let cancelled = false;
@@ -665,11 +705,7 @@ const TerminalView = memo(function TerminalView({
         const real = await invoke<string | null>("pty_get_cwd", {
           ptyId: activePtyId,
         });
-        if (
-          !cancelled &&
-          real &&
-          document.activeElement !== cwdInputRef.current
-        ) {
+        if (!cancelled && real) {
           setCwd((cur) => (cur === real ? cur : real));
         }
       } catch {
@@ -683,6 +719,41 @@ const TerminalView = memo(function TerminalView({
       clearInterval(timer);
     };
   }, [visible, activePtyId, running, shellActive]);
+
+  // 空态引导卡可见性（画布中央卡片 + 启动栏主按钮降级 + ⌘↵ 快捷键共用同一条件）
+  const welcomeVisible = !shellOnly && !running && !shellActive;
+  // ⌘↵ 直启动作经 ref 转发（xterm 键盘层 handler 是挂载期闭包，只能经 ref 拿最新状态）
+  const launchNowRef = useRef<() => void>(() => {});
+  launchNowRef.current = () => {
+    if (!profileId) return;
+    if (restored) void restoreTask();
+    else void launch();
+  };
+  const welcomeVisibleRef = useRef(welcomeVisible);
+  welcomeVisibleRef.current = welcomeVisible;
+  // ⌘/Ctrl+Enter 直接启动（打字中不抢；终端聚焦时按键被 xterm 吞掉、走不到 window，
+  // 那条路径由 attachCustomKeyEventHandler 里的同款分支兜底——与 ⌘F 同一处理模式）
+  useEffect(() => {
+    if (!visible || !primaryFocus || !welcomeVisible) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Enter" || !(e.metaKey || e.ctrlKey)) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el) {
+        const tag = el.tagName;
+        const typing =
+          (tag === "TEXTAREA" &&
+            !el.classList.contains("xterm-helper-textarea")) ||
+          tag === "INPUT" ||
+          tag === "SELECT" ||
+          el.isContentEditable;
+        if (typing) return;
+      }
+      e.preventDefault();
+      launchNowRef.current();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [visible, primaryFocus, welcomeVisible]);
   const [attention, setAttention] = useState<TabStatus["attention"]>(null);
   const lastReportRef = useRef("");
   useEffect(() => {
@@ -699,6 +770,7 @@ const TerminalView = memo(function TerminalView({
       // 注意力标记只在 agent 运行中且已联动会话时有意义
       attention: running && !shellActive && sessionFile ? attention : null,
       canResume: shellActive && lastResumeRef.current != null,
+      startedAt,
       sessionId:
         linkCtxRef.current?.sessionId ??
         linkCtxRef.current?.hint ??
@@ -723,6 +795,7 @@ const TerminalView = memo(function TerminalView({
     attention,
     sessionFile,
     resumeSessionId,
+    startedAt,
     onStatus,
   ]);
 
@@ -798,12 +871,39 @@ const TerminalView = memo(function TerminalView({
 
     // Cmd/Ctrl+F 在终端聚焦时也呼出搜索条（拦在 xterm 之前，避免 Ctrl+F 字符进 PTY）
     term.attachCustomKeyEventHandler((e) => {
+      // kimi 的 TUI 开了 kitty 键盘协议（\x1b[>7u）后只认 CSI-u 形式的 Enter，
+      // xterm.js 不支持该协议（手动回车发 \r，kimi 不提交）——在键盘层改写。
+      // 仅拦无修饰的 Enter；Shift/Ctrl/Alt 组合键保持原样穿透
+      if (
+        agentId === "kimi" &&
+        e.type === "keydown" &&
+        e.key === "Enter" &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.shiftKey
+      ) {
+        const id = ptyIdRef.current;
+        if (id)
+          invoke("pty_write", { ptyId: id, data: "\x1b[13u" }).catch(() => {});
+        return false;
+      }
       if (
         e.type === "keydown" &&
         (e.metaKey || e.ctrlKey) &&
         e.key.toLowerCase() === "f"
       ) {
         setSearchOpen(true);
+        return false;
+      }
+      // ⌘/Ctrl+Enter 空态直启：终端聚焦时按键到不了 window 监听，必须在 xterm 键盘层拦
+      if (
+        e.type === "keydown" &&
+        (e.metaKey || e.ctrlKey) &&
+        e.key === "Enter" &&
+        welcomeVisibleRef.current
+      ) {
+        launchNowRef.current();
         return false;
       }
       return true;
@@ -829,6 +929,17 @@ const TerminalView = memo(function TerminalView({
     };
     window.addEventListener("resize", onWinResize);
 
+    // 容器尺寸变化的通用兜底：状态栏进出、启动栏塌缩、分屏拖拽、侧栏开合……
+    // 凡改变 xterm 容器高度的都自动 fit，不再逐个点名触发（留空/遮行问题的根治）
+    const resizeObs = new ResizeObserver(() => {
+      try {
+        fit.fit();
+      } catch {
+        // display:none 时尺寸为 0，fit 会抛；可见性 effect 里会补
+      }
+    });
+    if (containerRef.current) resizeObs.observe(containerRef.current);
+
     const subs = [
       term.onData((data) => {
         const id = ptyIdRef.current;
@@ -843,6 +954,7 @@ const TerminalView = memo(function TerminalView({
     // 只在组件卸载（标签被关闭 / 应用退出）时清理 PTY；隐藏不触发
     return () => {
       window.removeEventListener("resize", onWinResize);
+      resizeObs.disconnect();
       subs.forEach((s) => s.dispose());
       stopLinkTimer();
       // 释放 liveSessions 登记（「进行中」标记随标签消失）
@@ -861,14 +973,15 @@ const TerminalView = memo(function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [everVisible]);
 
-  // 标签从隐藏切回可见 / 右侧面板开关改变可用宽度时重新 fit（display:none 下尺寸为 0）
+  // 标签从隐藏切回可见 / 右侧面板开关改变可用宽度时重新 fit（display:none 下尺寸为 0）；
+  // barExpanded 切换（启动时启动栏塌缩为收缩态）同样改变终端区高度，不补 fit 会下方留空
   useEffect(() => {
     requestAnimationFrame(() => {
       try {
         fitRef.current?.fit();
       } catch {}
     });
-  }, [visible, rightOpen, layoutKey]);
+  }, [visible, rightOpen, layoutKey, barExpanded]);
 
   // 最近项目/⇄「真进入」：外部注入的 cwd 落地到启动栏；shell 存活时写 cd 让终端真正跟上
   //（否则树走了 shell 还在原地，真实 cwd 轮询会把路径拉回旧目录）
@@ -1259,6 +1372,7 @@ const TerminalView = memo(function TerminalView({
       setExited(false);
       setShellActive(false);
       setRunning(true);
+      setStartedAt(Date.now());
       if (res.promptDropped) {
         // 该 CLI 无交互注入参数（kimi/opencode）：保留启动栏展开与指令文本，
         // 并自动复制到剪贴板（运行中输入框 disabled 不可选中），用户在终端里粘贴发送
@@ -1347,6 +1461,8 @@ const TerminalView = memo(function TerminalView({
     openConversationPage: () => {},
     search: () => {},
     modify: () => {},
+    logLine: () => {},
+    setCwd: () => {},
   });
   actionsRef.current = {
     stop: () => void stop(),
@@ -1357,6 +1473,9 @@ const TerminalView = memo(function TerminalView({
     openConversationPage,
     search: () => setSearchOpen(true),
     modify: () => setBarExpanded(true),
+    // 暗淡色（SGR 2）写一行，不进 PTY 输入流
+    logLine: (text) => termRef.current?.writeln(`\x1b[2m${text}\x1b[0m`),
+    setCwd: (c) => setCwd(c),
   };
   useEffect(() => {
     onActions?.(tabId, {
@@ -1366,6 +1485,8 @@ const TerminalView = memo(function TerminalView({
         actionsRef.current.openConversationPage(),
       search: () => actionsRef.current.search(),
       modify: () => actionsRef.current.modify(),
+      logLine: (t) => actionsRef.current.logLine(t),
+      setCwd: (c) => actionsRef.current.setCwd(c),
     });
   }, [onActions, tabId]);
 
@@ -1596,14 +1717,12 @@ const TerminalView = memo(function TerminalView({
                 </span>
               ) : null;
             })()}
-            <input
-              ref={cwdInputRef}
-              className={`${select} min-w-40 flex-1`}
-              value={cwd}
-              onChange={(e) => setCwd(e.target.value)}
-              placeholder="工作目录，如 ~/work/myproject"
-              disabled={running}
-            />
+            {/* 目录输入框已移除（v3.91 走查）：目录改由底部状态栏 📂 胶囊浮层编辑（仅未启动），
+                空间让给模型框；技能/MCP 胶囊右对齐收进本行末端（启动主流程：Agent→配置→模型→启动） */}
+            <span className="ml-auto flex shrink-0 items-center gap-2">
+              {renderSkillMenu(false, true)}
+              {renderMcpMenu(false, true)}
+            </span>
             {/* run 脚本（shellOnly）标签不走 agent 启动流程：隐藏启动/停止按钮，
                 避免误点「启动」无确认杀掉正在跑的脚本 shell */}
             {!shellOnly &&
@@ -1615,10 +1734,15 @@ const TerminalView = memo(function TerminalView({
                   停止
                 </button>
               ) : (
+                /* 空态卡片在场时降级为线框——同一视野内只留卡片里一个高亮主按钮（v3.91） */
                 <button
                   onClick={() => (restored ? void restoreTask() : void launch())}
                   disabled={!profileId}
-                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className={`inline-flex h-8 shrink-0 items-center justify-center rounded-md border px-3 text-sm disabled:opacity-50 ${
+                    welcomeVisible
+                      ? "border-field bg-inset text-l2 hover:bg-hover"
+                      : "border-cta-bd bg-cta text-cta-text hover:brightness-110"
+                  }`}
                 >
                   {restored ? "恢复任务" : "启动"}
                 </button>
@@ -1651,8 +1775,6 @@ const TerminalView = memo(function TerminalView({
             </div>
           )}
           <div className="mb-2 flex min-h-7 flex-wrap items-center gap-2 border-t border-hairline pt-1 text-xs">
-            {renderSkillMenu(true)}
-            {renderMcpMenu(true)}
             {initialExtraEnv && Object.keys(initialExtraEnv).length > 0 && (
               <span
                 className="text-l4"
@@ -1719,9 +1841,10 @@ const TerminalView = memo(function TerminalView({
           </span>
           {error && <span className="truncate text-err-text">{error}</span>}
           <span className="ml-auto flex shrink-0 items-center gap-1">
-            {/* 技能/MCP 入口在收缩态（运行中）同样可用——展开栏收起后不能丢入口 */}
-            {renderSkillMenu(false)}
-            {renderMcpMenu(false)}
+            {/* 技能/MCP 入口在收缩态（运行中）同样可用——展开栏收起后不能丢入口；
+                pill 在 ml-auto 右侧，菜单须右对齐防溢出屏幕右缘 */}
+            {renderSkillMenu(false, true)}
+            {renderMcpMenu(false, true)}
             <button
               type="button"
               onClick={() => setBarExpanded(true)}
@@ -1788,11 +1911,61 @@ const TerminalView = memo(function TerminalView({
           </button>
         </div>
       )}
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         <div
           ref={containerRef}
           className="min-w-0 flex-1 overflow-hidden px-3 py-2.5"
         />
+        {/* 未启动空态引导（v3.91）：画布中央一张极简卡片，说清「现在该干嘛」。
+            xterm 保持挂载在底层（移树会杀 PTY 语义）；浮层壳 pointer-events-none 不挡画布 */}
+        {welcomeVisible && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+            <div className="pointer-events-auto flex w-88 flex-col items-center gap-3 rounded-lg border border-field bg-raised px-6 py-6 text-center shadow-lg">
+              {/* 视觉锚点：品牌色图标盒（cta-pill 与主按钮同色系呼应）+ agent 主标题 + 配置胶囊 */}
+              <div
+                aria-hidden="true"
+                className="flex size-9 items-center justify-center rounded-md bg-cta-pill font-mono text-sm text-cta-pill-text"
+              >
+                &gt;_
+              </div>
+              <div className="flex items-center gap-1.5 text-sm text-l1">
+                {agentLabel(agentId)}
+                {selectedProfile && (
+                  <span className="rounded-sm bg-inset px-1.5 py-0.5 text-micro text-l3">
+                    {selectedProfile.name}
+                  </span>
+                )}
+              </div>
+              <div className="text-micro text-l4">
+                {restored
+                  ? "上次任务还在，可接着跑"
+                  : "启动后这里就是 AI 的终端画面"}
+              </div>
+              <button
+                type="button"
+                onClick={() => (restored ? void restoreTask() : void launch())}
+                disabled={!profileId}
+                className="inline-flex h-9 w-2/3 cursor-pointer items-center justify-center rounded-md border border-cta-bd bg-cta text-sm text-cta-text hover:brightness-110 disabled:cursor-default disabled:opacity-50"
+              >
+                {restored ? "恢复任务" : "启动"}
+              </button>
+              {/* 快捷键说明独立一行（不进按钮，保持按钮视觉干净） */}
+              <div className="-mt-1.5 text-micro text-l4">
+                （{IS_MAC ? "⌘" : "Ctrl"} + Enter）
+              </div>
+              <button
+                type="button"
+                onClick={() => void openShell()}
+                className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-field bg-inset px-3 py-1.5 text-xs text-l3 transition-colors hover:border-l4 hover:bg-hover hover:text-l1 active:brightness-95"
+              >
+                <span aria-hidden="true" className="font-mono">
+                  &gt;_
+                </span>
+                打开普通 Shell 终端
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       {terminalActionMenu && (
         <ContextMenu
@@ -1834,6 +2007,9 @@ interface Tab {
   readonly?: boolean;
   /** 应用重启后恢复出的元数据占位标签。 */
   restored?: boolean;
+  /** 复用键（pendingTerminal.reuseKey 透传）：同 key 的重复开聊请求切换到本标签。
+      仅内存标记，不进重启持久化白名单（恢复出的占位标签不参与复用——会话已断，新开更诚实） */
+  reuseKey?: string;
 }
 
 export default function TerminalPage({ visible }: { visible: boolean }) {
@@ -1981,16 +2157,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   }
   const [rightTab, setRightTab] = useState<RightTab>("dialogue");
   const [gitTotals, setGitTotals] = useState<GitSummary | null>(null);
-  /** 变更芯片「✓ 保存」的行内反馈（保存中/已保存/失败，2.5s 自动复位） */
-  const [gitSave, setGitSave] = useState<"saving" | "saved" | "failed" | null>(
-    null,
-  );
-  /** 「⇧ 推送」的行内反馈（与保存反馈同口径、独立计时） */
-  const [gitPush, setGitPush] = useState<"pushing" | "pushed" | "failed" | null>(
-    null,
-  );
-  const gitSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const gitPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 中带「可合并」状态 pill（P1b 参考图 2）：当前项目可合并工作区名列表，空 = 不显示
   const [mergeReadyWs, setMergeReadyWs] = useState<string[]>([]);
   // pill 刷新信号：工作区归档事件（合并保留工作区的场景走 reviewPath 关闭触发刷新）
@@ -2279,48 +2445,37 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setGitTotals((prev) => (prev && sig(prev) === sig(t) ? prev : t));
   }, []);
 
-  /** 变更芯片「✓ 保存」：提交全部未提交改动，说明本地自动生成——与改动面板「快速保存到历史」同口径 */
-  async function quickCommitAll() {
-    const s = gitTotals;
-    if (!s?.isRepo || s.files.length === 0 || gitSave === "saving") return;
-    setGitSave("saving");
-    try {
-      await invoke("git_commit", {
-        cwd: gitPanelCwd,
-        message: defaultCommitMessage(s.files),
-        push: false,
-        paths: s.inWorkspace ? null : s.files.map((f) => f.path),
-      });
-      setGitSave("saved");
-      bumpFsChangeTick();
-    } catch {
-      setGitSave("failed");
-    } finally {
-      if (gitSaveTimerRef.current) clearTimeout(gitSaveTimerRef.current);
-      gitSaveTimerRef.current = setTimeout(() => setGitSave(null), 2500);
-    }
-  }
-
-  /** 状态条「⇧ 推送」（v3.90）：底部芯片原先只有保存没有推送——保存完想推还得打开改动面板。
-      与改动面板同一个 `git_push` 命令（含无上游时自动 push -u origin <branch>），
-      推送成功后 8s 轮询自然清掉 ↑N */
-  async function quickPush() {
-    const s = gitTotals;
-    if (!s?.isRepo || gitPush === "pushing") return;
-    setGitPush("pushing");
-    try {
-      await invoke<string>("git_push", { cwd: gitPanelCwd });
-      setGitPush("pushed");
-    } catch {
-      setGitPush("failed");
-    } finally {
-      if (gitPushTimerRef.current) clearTimeout(gitPushTimerRef.current);
-      gitPushTimerRef.current = setTimeout(() => setGitPush(null), 2500);
-    }
-  }
-
   /** FileTree 的 fs-changed 事件 → GitPanel 一并刷新（稳定回调） */
   const bumpFsChangeTick = useCallback(() => setFsChangeTick((t) => t + 1), []);
+
+  /** 状态栏「⚡ Commit & Push」第一步：AI 生成提交信息（失败回落本地默认规则）。
+      style = 分割菜单的风格偏好（空串 = 默认） */
+  async function generateCommitMsg(style: string): Promise<string> {
+    const s = gitTotals;
+    if (!s?.isRepo || s.files.length === 0) throw new Error("没有可提交的改动");
+    const paths = s.inWorkspace ? null : s.files.map((f) => f.path);
+    return invoke<string>("ai_commit_message", {
+      cwd: gitPanelCwd,
+      paths,
+      style: style || null,
+    }).catch(() => defaultCommitMessage(s.files));
+  }
+
+  /** 状态栏「⚡ Commit & Push」第二步：以确认的信息全量提交并推送，
+      返回结果（hash 给「✓ Pushed [a1b2c3d]」用）。与改动面板同一个 git_commit 命令 */
+  async function commitPushMsg(message: string): Promise<GitCommitResultDto> {
+    const s = gitTotals;
+    if (!s?.isRepo) throw new Error("不是 git 仓库");
+    const paths = s.inWorkspace ? null : s.files.map((f) => f.path);
+    const res = await invoke<GitCommitResultDto>("git_commit", {
+      cwd: gitPanelCwd,
+      message,
+      push: true,
+      paths,
+    });
+    bumpFsChangeTick();
+    return res;
+  }
 
   /** 工作树单击文件 → 右侧「预览」页签（编辑器自行加载内容；路径限制在后端校验） */
   const openPreview = useCallback(
@@ -2418,6 +2573,33 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   }
 
   const activeSession = sessionByTab[focusedId];
+  // 会话底条 token 用量：与状态栏同一个 session_usage 命令、60s 轮询；无关联会话不查
+  const [footerUsage, setFooterUsage] = useState<SessionUsageDto | null>(null);
+  const footerSessionId = activeSession?.sessionId ?? null;
+  const footerAgent = activeSession?.agentId ?? null;
+  useEffect(() => {
+    if (!footerSessionId || !footerAgent || rightTab !== "dialogue") {
+      setFooterUsage(null);
+      return;
+    }
+    let stale = false;
+    const pull = () => {
+      invoke<SessionUsageDto>("session_usage", {
+        agent: footerAgent,
+        sessionId: footerSessionId,
+      })
+        .then((u) => {
+          if (!stale) setFooterUsage(u);
+        })
+        .catch(() => {});
+    };
+    pull();
+    const t = setInterval(pull, 60_000);
+    return () => {
+      stale = true;
+      clearInterval(t);
+    };
+  }, [footerSessionId, footerAgent, rightTab]);
   useEffect(() => {
     if (!rightOpen || rightTab !== "dialogue") return;
     dialogueFollowRef.current = true;
@@ -2447,6 +2629,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       initialPrompt?: string;
       /** 「聊想法」只读模式：pty_spawn 透传，支持的 CLI 注入只读/计划模式参数 */
       readonly?: boolean;
+      /** 复用键（pendingTerminal.reuseKey 透传）：重复入口切标签而不是新开 */
+      reuseKey?: string;
     }): string => {
       const t: Tab = {
         id: crypto.randomUUID(),
@@ -2462,6 +2646,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         shellOnly: init?.shellOnly,
         initialPrompt: init?.initialPrompt,
         readonly: init?.readonly,
+        reuseKey: init?.reuseKey,
       };
       setTabs((prev) => [...prev, t]);
       setActiveId(t.id);
@@ -2491,6 +2676,24 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const runningScriptsRef = useRef(runningScripts);
   runningScriptsRef.current = runningScripts;
   const profiles = useAppStore((s) => s.profiles);
+  // 状态栏的模型/思考档槽位来自检测缓存（agents.rs DetectResult 随规格下发）
+  const agents = useAppStore((s) => s.agents);
+  // 状态栏配色与终端画面同底同色（buildXtermTheme 与 xterm 实例同一出处）
+  const appSettings = useAppStore((s) => s.settings);
+  const statusBarColors = (() => {
+    const t = buildXtermTheme(
+      appSettings?.theme ?? "midnight",
+      appSettings?.terminalPalette,
+    );
+    return {
+      background: t.background,
+      foreground: t.foreground,
+      green: t.green,
+      red: t.red,
+      yellow: t.yellow,
+      blue: t.blue,
+    };
+  })();
   useEffect(() => {
     if (visible && pendingTerminal) {
       setPendingTerminal(null);
@@ -2509,7 +2712,18 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           "";
         model = profiles.find((p) => p.id === profileId)?.models[0] ?? "";
       }
-      const tabId = addTab({
+      // 复用键：已有同 key 标签就切过去，不再新开（「快速开聊」「跟 AI 商量一下」等
+      // 重复入口防标签堆积；恢复出的占位标签不带 reuseKey，不参与复用——会话已断，新开才诚实）。
+      // 复用时不跳过右侧收尾：previewPath/rightTab 等交接对复用标签同样生效（重进即回到该有的布局）
+      let tabId: string | null = null;
+      if (pt.reuseKey) {
+        const existing = tabs.find((t) => t.reuseKey === pt.reuseKey);
+        if (existing) {
+          tabId = existing.id;
+          setActiveId(existing.id);
+        }
+      }
+      tabId ??= addTab({
         cwd: pt.cwd,
         extraEnv: pt.extraEnv,
         title: pt.title,
@@ -2522,9 +2736,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         shellOnly: pt.shellOnly,
         initialPrompt: pt.initialPrompt,
         readonly: pt.readonly,
+        reuseKey: pt.reuseKey,
       });
       // run 脚本标签：登记 nonconcurrent 互斥追踪
-      if (pt.wsId) setRunningScript(pt.wsId, tabId);
+      if (pt.wsId && tabId) setRunningScript(pt.wsId, tabId);
       // 「快速开聊」：落到最干净的终端——收起工作树与右栏，只剩标签条 + 终端。
       // 复用既有的「专注终端」语义（Esc 或 ⤢ 退出），不另造一套显隐状态。
       // 理由：随手聊没有项目上下文——文件树是空目录、改动面板是「不是 git 仓库」、
@@ -3363,8 +3578,49 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     </button>
                   </div>
                 )}
-                <div key="pane-body" className="min-h-0 flex-1">
-                  {view}
+                <div key="pane-body" className="flex min-h-0 flex-1 flex-col">
+                  <div className="min-h-0 flex-1">{view}</div>
+                  {/* 终端底部状态栏：在 pane 内部、贴 xterm 画面下缘，与终端同底同色
+                      （视觉上是终端自己画的状态行）。常驻渲染——未启动也有 cwd/未启动态，
+                      高度恒定不跳动；ResizeObserver 兜底尺寸变化后的 fit。
+                      分屏时各 pane 显示各标签；git 段只跟随活跃 pane（数据是 focusedId 的） */}
+                  {(() => {
+                    const st = statuses[t.id] ?? null;
+                    const prof = st
+                      ? profiles.find((p) => p.id === st.profileId)
+                      : null;
+                    const det = st
+                      ? agents.find((a) => a.id === st.agentId)
+                      : null;
+                    const focused = t.id === focusedId;
+                    return (
+                      <TerminalStatusBar
+                        status={st}
+                        fallbackCwd={t.initialCwd ?? ""}
+                        profileName={prof?.name ?? null}
+                        profileModels={prof?.models ?? []}
+                        modelSwitch={det?.modelSwitch ?? null}
+                        effort={det?.effort ?? null}
+                        git={focused ? gitTotals : null}
+                        mergeReady={focused ? mergeReadyWs : []}
+                        gitCwd={gitPanelCwd}
+                        submitCsiU={det?.submitCsiU ?? false}
+                        onOpenGit={() => {
+                          setRightOpen(true);
+                          setRightTab("git");
+                        }}
+                        onGenerateMsg={generateCommitMsg}
+                        onCommitPush={commitPushMsg}
+                        onCwdChange={(c) =>
+                          tabActionsRef.current.get(t.id)?.setCwd(c)
+                        }
+                        onTermLog={(line) =>
+                          tabActionsRef.current.get(t.id)?.logLine(line)
+                        }
+                        colors={statusBarColors}
+                      />
+                    );
+                  })()}
                 </div>
               </div>
             );
@@ -3388,119 +3644,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             </div>
           )}
         </div>
-        {/* 中带底部状态条（v3.88）：git 芯片 / ✓保存 / 可合并 pill 从标签条下移到这里。
-            理由——它们是**结果不是入口**，放顶部与标签抢注意力；状态栏是 VS Code / Codex 的
-            通行心智，「✓ 保存」在底部误触概率也更低。v3.83 的芯片行为语义一字未改
-            （点数字开改动页签、✓保存走 defaultCommitMessage 全量快速提交、
-            隐藏 GitPanel 实例继续轮询喂数据），只是换了位置。专注终端下同样保留：
-            那正是最需要「手边有个保存」的场景 */}
-        {(gitTotals?.isRepo || mergeReadyWs.length > 0) && (
-          <div className="flex h-7 shrink-0 items-center gap-2 px-2 text-xs">
-            {gitTotals?.isRepo &&
-              (gitTotals.files.length > 0 || gitTotals.ahead > 0) && (
-              <span
-                className="flex items-center rounded-sm bg-inset"
-                title={`${gitPanelCwd} 的 git 状态（跟随左栏文件树的根）`}
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRightOpen(true);
-                    setRightTab("git");
-                  }}
-                  title={`${gitPanelCwd} 的 git 状态，点击查看改动面板`}
-                  className="flex min-w-0 items-center gap-1 rounded-l-sm py-0.5 pl-2 pr-1 text-l2 hover:bg-hover"
-                >
-                  <span className="text-l3">⑂</span>
-                  <span className="max-w-28 truncate">
-                    {gitTotals.branch || "HEAD"}
-                  </span>
-                  {(gitTotals.files.length > 0 ||
-                    gitTotals.ahead > 0 ||
-                    gitTotals.behind > 0) && (
-                    <>
-                      {gitTotals.files.length > 0 && (
-                        <>
-                          <span className="font-mono text-add">
-                            +{gitTotals.add}
-                          </span>
-                          <span className="font-mono text-del">
-                            -{gitTotals.del}
-                          </span>
-                        </>
-                      )}
-                      {/* 领先/落后远程：悬浮白话解释（与改动面板同口径） */}
-                      {gitTotals.ahead > 0 && (
-                        <span
-                          className="font-mono text-l3"
-                          title={`比远程多出 ${gitTotals.ahead} 个提交，点右侧「⇧ 推送」发到远程`}
-                        >
-                          ↑{gitTotals.ahead}
-                        </span>
-                      )}
-                      {gitTotals.behind > 0 && (
-                        <span
-                          className="font-mono text-l3"
-                          title={`远程新增 ${gitTotals.behind} 个提交，建议在终端里 pull 同步`}
-                        >
-                          ↓{gitTotals.behind}
-                        </span>
-                      )}
-                    </>
-                  )}
-                </button>
-                {gitTotals.files.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => void quickCommitAll()}
-                    disabled={gitSave === "saving"}
-                    title="快速保存到历史：提交全部改动，说明自动生成（同改动面板留空点「快速保存到历史」）"
-                    className={`shrink-0 py-0.5 pl-1 text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50 ${
-                      gitTotals.ahead > 0 ? "" : "rounded-r-sm pr-2"
-                    }`}
-                  >
-                    {gitSave === "saving"
-                      ? "保存中…"
-                      : gitSave === "saved"
-                        ? "✓ 已保存"
-                        : gitSave === "failed"
-                          ? "保存失败"
-                          : "✓ 保存"}
-                  </button>
-                )}
-                {/* 「⇧ 推送」只在有未推送提交时出现（无提交可推时摆着只会误点） */}
-                {gitTotals.ahead > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => void quickPush()}
-                    disabled={gitPush === "pushing"}
-                    title="推送到远程（无上游分支时自动建立跟踪，同改动面板「保存并推送」的推送半段）"
-                    className="shrink-0 rounded-r-sm py-0.5 pl-1 pr-2 text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
-                  >
-                    {gitPush === "pushing"
-                      ? "推送中…"
-                      : gitPush === "pushed"
-                        ? "✓ 已推送"
-                        : gitPush === "failed"
-                          ? "推送失败"
-                          : "⇧ 推送"}
-                  </button>
-                )}
-              </span>
-            )}
-            {mergeReadyWs.length > 0 && (
-              <span
-                className="flex items-center gap-1 rounded-sm bg-inset px-2 py-0.5 text-l2"
-                title={`可合并的工作区：${mergeReadyWs.join("、")}\n从右侧「改动」页签或工作区页进入评审合并`}
-              >
-                <span className="text-micro text-ok-text">●</span>
-                {mergeReadyWs.length > 1
-                  ? `${mergeReadyWs.length} 个可合并`
-                  : "可合并"}
-              </span>
-            )}
-          </div>
-        )}
         {/* 专注内容：右栏铺满即表达主次，中带不加压暗遮罩（v3.44 用户否决压黑） */}
       </div>
 
@@ -3545,9 +3688,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             style={{ width: rightWidth }}
             className="flex shrink-0 flex-col border-l border-hairline bg-raised"
           >
-            {/* 页签与面板头部合并为一行（走查去重）：左侧页签，右侧按页签透出上下文
-                （对话 = 会话状态小字 + 完整回放入口）与面板动作；不再单设「工作台」标题行，
-                对话区也不再重复一行标题/agent/状态头部（信息仍在，收进本行右侧） */}
+            {/* 页签与面板头部合并为一行（走查去重）：左侧三页签，右侧面板动作
+                （↺ 完整回放 / ⇱ 专注内容 / × 收起，低频 hover 才现）；不再单设「工作台」标题行，
+                会话上下文在「对话」页签底部细条（v3.91 迁出，页签行不再截断） */}
             <div className="group flex h-9 shrink-0 items-center gap-1 border-b border-hairline bg-raised px-2">
               {RIGHT_TABS.map(({ key: k, label, symbol }) => {
                 const gitBadge =
@@ -3592,72 +3735,30 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   </button>
                 );
               })}
-              {/* 右侧上下文区：按页签透出对应信息（对话 = 状态点 + 标题/agent/会话/状态
-                  一行小字 + 完整回放；文件/改动的上下文由各自内容头部承担），
-                  末端固定专注内容与收起按钮；空间不足时小字截断、完整信息在悬浮提示 */}
+              {/* 右侧动作区：完整回放（↺ 图标，hover 才现）+ 专注内容 + 收起。
+                  会话上下文（状态点 + 标题/agent/会话/状态）已迁到「对话」页签底部细条（v3.91），
+                  页签行只留三页签，不再截断 */}
               <span className="ml-auto flex min-w-0 items-center gap-1 pl-1">
                 {rightTab === "dialogue" && (
-                  <>
-                    <span
-                      className={`size-1.5 shrink-0 rounded-full ${
-                        statuses[focusedId]?.running
-                          ? "bg-ok-text"
-                          : activeSession?.state === "timeout"
-                            ? "bg-warn-text"
-                            : "bg-l4"
-                      }`}
-                    />
-                    <span
-                      className="min-w-0 truncate text-micro text-l4"
-                      title={
-                        activeSession?.sessionId
-                          ? `会话 ${activeSession.sessionId}`
-                          : undefined
-                      }
-                    >
-                      <span className="text-l2">
-                        {activeSession?.title ||
-                          statuses[focusedId]?.title ||
-                          "当前对话"}
-                      </span>
-                      {" · "}
-                      {activeSession?.agentId
-                        ? agentLabel(activeSession.agentId)
-                        : statuses[focusedId]?.agentId
-                          ? agentLabel(statuses[focusedId].agentId)
-                          : "尚未启动"}
-                      {activeSession?.sessionId
-                        ? ` · ${activeSession.sessionId.slice(0, 8)}`
-                        : ""}
-                      {activeSession?.state === "detecting"
-                        ? " · 识别中"
-                        : activeSession?.state === "timeout"
-                          ? " · 等待关联"
-                          : activeSession?.file
-                            ? statuses[focusedId]?.running
-                              ? " · 同步中"
-                              : " · 已结束"
-                            : ""}
-                    </span>
-                    <button
-                      type="button"
-                      disabled={
-                        !activeSession?.sessionId || !activeSession.agentId
-                      }
-                      onClick={() => {
-                        if (!activeSession?.sessionId || !activeSession.agentId)
-                          return;
-                        setOpenSessionReq({
-                          agent: activeSession.agentId,
-                          sessionId: activeSession.sessionId,
-                        });
-                        setPage("sessions");
-                      }}
-                      className={`shrink-0 rounded-sm px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-40 ${hoverRevealClass}`}
-                    >
-                      完整回放
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    disabled={
+                      !activeSession?.sessionId || !activeSession.agentId
+                    }
+                    onClick={() => {
+                      if (!activeSession?.sessionId || !activeSession.agentId)
+                        return;
+                      setOpenSessionReq({
+                        agent: activeSession.agentId,
+                        sessionId: activeSession.sessionId,
+                      });
+                      setPage("sessions");
+                    }}
+                    title="完整回放"
+                    className={`flex size-7 shrink-0 items-center justify-center rounded-sm text-xs text-l4 hover:bg-hover hover:text-l1 disabled:opacity-40 ${hoverRevealClass}`}
+                  >
+                    ↺
+                  </button>
                 )}
                 <button
                   type="button"
@@ -3720,6 +3821,73 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   </button>
                 )}
               </div>
+              {/* 会话底条（v3.91）：状态点 + 标题/agent/会话/状态，整条可点进完整回放。
+                  从页签行迁来——页签行只留三页签，标题不再被截断；点按全局 size-2 对齐 */}
+              <button
+                type="button"
+                disabled={!activeSession?.sessionId || !activeSession.agentId}
+                onClick={() => {
+                  if (!activeSession?.sessionId || !activeSession.agentId)
+                    return;
+                  setOpenSessionReq({
+                    agent: activeSession.agentId,
+                    sessionId: activeSession.sessionId,
+                  });
+                  setPage("sessions");
+                }}
+                title={
+                  activeSession?.sessionId
+                    ? `会话 ${activeSession.sessionId}（点击完整回放）`
+                    : "启动 Agent 后这里显示当前会话"
+                }
+                className="flex h-7 shrink-0 items-center gap-2 border-t border-hairline px-3 text-left text-micro text-l4 enabled:hover:bg-hover disabled:cursor-default"
+              >
+                <span
+                  className={`size-2 shrink-0 rounded-full ${
+                    statuses[focusedId]?.running
+                      ? "bg-ok-text"
+                      : activeSession?.state === "timeout"
+                        ? "bg-warn-text"
+                        : "bg-l4"
+                  }`}
+                />
+                {/* 与底部终端状态栏差异化（v3.92）：这里只讲「对话」自己的事——
+                    未关联时报关联状态，关联后报会话标题/状态/token，不重复 agent · 配置 */}
+                <span className="min-w-0 truncate">
+                  {activeSession?.sessionId ? (
+                    <>
+                      <span className="text-l2">
+                        {activeSession.title ||
+                          statuses[focusedId]?.title ||
+                          "当前对话"}
+                      </span>
+                      {` · ${activeSession.sessionId.slice(0, 8)}`}
+                      {activeSession.state === "detecting"
+                        ? " · 识别中"
+                        : activeSession.state === "timeout"
+                          ? " · 等待关联"
+                          : activeSession.file
+                            ? statuses[focusedId]?.running
+                              ? " · 同步中"
+                              : " · 已结束"
+                            : ""}
+                    </>
+                  ) : statuses[focusedId]?.running ? (
+                    "Agent 运行中 · 等待会话关联"
+                  ) : (
+                    "未关联会话 · 启动后自动同步"
+                  )}
+                </span>
+                {footerUsage &&
+                  (footerUsage.input > 0 || footerUsage.output > 0) && (
+                    <span
+                      className="ml-auto shrink-0 font-mono"
+                      title="本会话累计 token（随索引节奏更新，约 1 分钟粒度）"
+                    >
+                      {fmtTokens(footerUsage.input)}↑ {fmtTokens(footerUsage.output)}↓
+                    </span>
+                  )}
+              </button>
             </div>
             <div
               className={
