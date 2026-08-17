@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import type { MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AGENTS } from "../types";
 import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
+import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { confirmDialog } from "../components/ConfirmDialog";
 import {
   Checkbox,
@@ -54,6 +56,82 @@ function skillRepoUrl(skill: SkillDto): string | null {
   const base = `https://github.com/${skill.repo}`;
   if (!skill.repoSubdir) return base;
   return `${base}/tree/${skill.repoRef ?? "HEAD"}/${skill.repoSubdir}`;
+}
+
+/** 应用列单元格（v3.93）：未应用 = 浅灰「0 个 Agent」无状态点；已应用 = 绿点 +「N 个 Agent」，各 agent
+ *  名称收进悬浮 tooltip（共享 HoverTip——原生 title 在 WKWebView 不稳定）；点击进右侧详情管理分发 */
+function AppliedCell({
+  skill,
+  onOpen,
+}: {
+  skill: SkillDto;
+  onOpen: () => void;
+}) {
+  const appliedNames = Object.entries(skill.apps)
+    .filter(([, on]) => on)
+    .map(([id]) => AGENTS.find((a) => a.id === id)?.label ?? id);
+  const anchorRef = useRef<HTMLButtonElement>(null);
+  const { tip, show, hide } = useHoverTip(anchorRef);
+  const has = appliedNames.length > 0;
+  return (
+    <button
+      ref={anchorRef}
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpen();
+      }}
+      onMouseEnter={has ? show : undefined}
+      onMouseLeave={hide}
+      className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-seg-sel"
+    >
+      {/* 无状态不渲染状态点：未应用时不画灰点，计数文字已表达 */}
+      {has && <span className="size-2 shrink-0 rounded-full bg-ok-text" />}
+      <span className={has ? "text-l3 hover:text-l1" : "text-l4"}>
+        {appliedNames.length} 个 Agent
+      </span>
+      {has && (
+        <HoverTip
+          tip={tip}
+          text={`已应用到：\n${appliedNames.join("、")}\n点击在右侧管理分发`}
+        />
+      )}
+    </button>
+  );
+}
+
+/** 行内悬浮操作钮（v3.93）：自带「锚点上方」应用内 tooltip——原生 title 渲染在光标下方，
+ *  与胶囊动作栏视觉脱节；点击先收 tooltip 再透传事件（⋯ 要取按钮锚点定位菜单） */
+function RowAction({
+  icon,
+  tip,
+  label,
+  onClick,
+}: {
+  icon: string;
+  tip: string;
+  label: string;
+  onClick: (e: MouseEvent<HTMLButtonElement>) => void;
+}) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const { tip: pos, show, hide } = useHoverTip(ref, true);
+  return (
+    <button
+      ref={ref}
+      type="button"
+      aria-label={label}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onClick={(e) => {
+        hide();
+        onClick(e);
+      }}
+      className="flex h-7 w-7 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1"
+    >
+      {icon}
+      <HoverTip tip={pos} text={tip} up />
+    </button>
+  );
 }
 
 /** 来源单元格：GitHub 来源渲染为可点小字链接（系统浏览器打开），其余为纯文本 */
@@ -1304,7 +1382,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               )}
               {/* caps 式小字灰表头：弱化只作列定位，hairline 分隔无卡片外框；sticky 用页面底色遮挡滚动内容 */}
               <div>
-                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_36px] items-center gap-3 border-b border-hairline bg-canvas px-3 py-2 text-xs tracking-wider text-l4">
+                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_92px] items-center gap-3 border-b border-hairline bg-canvas px-3 py-2 text-xs tracking-wider text-l4">
                   <span>技能</span>
                   <span>来源</span>
                   <span>应用</span>
@@ -1332,22 +1410,28 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         <span className="w-3 text-l4">
                           {catCollapsed.has(category) ? "▸" : "▾"}
                         </span>
-                        <span className="font-medium text-l3">{category}</span>
-                        <span className="text-l4">{categorySkills.length}</span>
+                        {/* 分组标题加深到 l1（原 l3 太淡层级不清）；计数改微型胶囊 */}
+                        <span className="font-medium text-l1">{category}</span>
+                        <span className="rounded-full bg-inset px-1.5 py-0.5 text-micro text-l4">
+                          {categorySkills.length} 个技能
+                        </span>
+                        {/* 未分类组挂归类引导（实际入口是行内 ⋯ → 设置分类，无拖拽归类） */}
+                        {category === "未分类" && (
+                          <span className="ml-1 text-micro text-l4">
+                            — 行内 ⋯ →「设置分类」即可归档
+                          </span>
+                        )}
                       </button>
                       {!catCollapsed.has(category) && (
                         <ul className="divide-y divide-hairline">
                           {categorySkills.map((skill) => {
                             const stale = (skill.staleCopies ?? []).length > 0;
                             const update = updates[skill.id];
-                            const applied = Object.values(skill.apps).filter(
-                              Boolean,
-                            ).length;
                             return (
                               <li
                                 key={skill.id}
                                 onClick={() => void onView(skill)}
-                                className={`group grid min-h-12 cursor-pointer grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_36px] items-center gap-3 px-3 transition-colors hover:bg-hover ${
+                                className={`group grid min-h-14 cursor-pointer grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_92px] items-center gap-3 px-3 py-1.5 transition-colors hover:bg-hover ${
                                   preview?.skill.id === skill.id
                                     ? "bg-inset"
                                     : ""
@@ -1358,6 +1442,16 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     <span className="min-w-0 truncate text-sm font-medium text-l1">
                                       {skill.name}
                                     </span>
+                                    {/* 类型标签（v3.93）：有后端数据支撑的只有 MCP 提及
+                                        （skills.rs 内容扫描）；Prompt/Tool 分类无来源，不编造 */}
+                                    {skill.mentionsMcp && (
+                                      <span
+                                        className="shrink-0 rounded-sm bg-inset px-1 py-0.5 font-mono text-micro text-l4"
+                                        title="SKILL.md 正文提及 MCP 工具/服务器"
+                                      >
+                                        ⌗ MCP
+                                      </span>
+                                    )}
                                     {/* 用户自定义标签 pill：名称后 1-4 个，无标签不渲染 */}
                                     {(skill.tags ?? []).slice(0, 4).map((tag) => (
                                       <span
@@ -1384,6 +1478,18 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                       />
                                     )}
                                   </div>
+                                  {/* 描述次行（v3.93）：名称下挂一行简介提升扫视效率；
+                                      空/纯符号描述不渲染（displayDescription 同预览面板口径） */}
+                                  {(() => {
+                                    const desc = displayDescription(
+                                      skill.description,
+                                    );
+                                    return desc ? (
+                                      <div className="mt-0.5 max-w-md truncate text-micro text-l4">
+                                        {desc}
+                                      </div>
+                                    ) : null;
+                                  })()}
                                   {catEdit?.id === skill.id && (
                                     <input
                                       autoFocus
@@ -1444,39 +1550,50 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                 </div>
                                 {/* 来源弱化为淡灰，只作识别信息；GitHub 来源可点跳转 */}
                                 <SourceCell skill={skill} />
-                                <button
-                                  type="button"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    void onView(skill);
-                                  }}
-                                  className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-sm text-l3 hover:bg-seg-sel hover:text-l1"
-                                  title="在右侧管理该技能应用到哪些 Agent"
-                                >
-                                  {/* 无状态不渲染状态点：未应用时不画灰点，计数文字已表达 */}
-                                  {applied > 0 && (
-                                    <span className="size-2 shrink-0 rounded-full bg-ok-text" />
-                                  )}
-                                  {applied}/{AGENTS.length} 个 Agent
-                                </button>
+                                <AppliedCell
+                                  skill={skill}
+                                  onOpen={() => void onView(skill)}
+                                />
+                                {/* 行内高频操作收进悬浮胶囊栏（v3.93）：raised 底 + 细边 + 投影浮起，
+                                    hover 行才现；tooltip 挂按钮上方（RowAction）不再与图标脱节 */}
                                 <div className="flex items-center justify-end">
-                                  <button
-                                    type="button"
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      const rect =
-                                        event.currentTarget.getBoundingClientRect();
-                                      setRowMenu({
-                                        x: rect.right - 176,
-                                        y: rect.bottom + 4,
-                                        skill,
-                                      });
-                                    }}
-                                    aria-label={`${skill.name} 更多操作`}
-                                    className={`flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
+                                  <div
+                                    className={`flex items-center rounded-lg border border-hairline bg-raised px-1 py-0.5 shadow-lg ${hoverRevealClass}`}
                                   >
-                                    ⋯
-                                  </button>
+                                    <RowAction
+                                      icon="✎"
+                                      tip="编辑内容"
+                                      label={`编辑 ${skill.name}`}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void onEdit(skill);
+                                      }}
+                                    />
+                                    <RowAction
+                                      icon="◈"
+                                      tip="◈ 优化：开终端让 Agent 按你的意见改写"
+                                      label={`优化 ${skill.name}`}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOptimize(skill);
+                                      }}
+                                    />
+                                    <RowAction
+                                      icon="⋯"
+                                      tip="更多操作"
+                                      label={`${skill.name} 更多操作`}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const rect =
+                                          e.currentTarget.getBoundingClientRect();
+                                        setRowMenu({
+                                          x: rect.right - 176,
+                                          y: rect.bottom + 4,
+                                          skill,
+                                        });
+                                      }}
+                                    />
+                                  </div>
                                 </div>
                               </li>
                             );
@@ -1536,7 +1653,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         setSelectProjectReq(u.projectPath);
                         setPage("workspaces");
                       }}
-                      title={`到工作区页查看 ${u.projectName}`}
+                      title={`到项目页查看 ${u.projectName}`}
                       className="flex w-full min-w-0 items-baseline gap-1.5 rounded-sm px-1 py-0.5 text-left text-xs hover:bg-hover"
                     >
                       <span className="shrink-0 text-l4">{u.projectName}</span>

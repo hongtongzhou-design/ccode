@@ -11,6 +11,7 @@ import { MODEL_SWITCH } from "../model-switch";
 import { interactiveUpdatePrefill } from "../update-routing";
 import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
+import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
 import {
   PageFrame,
@@ -581,6 +582,73 @@ function displayHost(baseUrl: string): string {
   }
 }
 
+/** 官方账号状态行：收纳为「● 官方账号 · 已连接/未连接」微型标签，
+ *  排查指引（检测路径/登录命令/断开方式）收进悬浮 tooltip，右侧只留连接胶囊 + 刷新图标钮。
+ *  hook 约束：状态行挂在 per-agent 组件上，useHoverTip 才能逐行实例化。 */
+function OfficialStatusRow({
+  agentId,
+  st,
+  onConnect,
+  onRefresh,
+}: {
+  agentId: string;
+  st: OfficialAccountStatusDto;
+  onConnect: () => void;
+  onRefresh: () => void;
+}) {
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const { tip, show, hide } = useHoverTip(anchorRef);
+  // 悬浮正文：检测说明（含凭证路径）+ 下一步操作引导
+  const lines: string[] = [];
+  if (st.detail) lines.push(st.detail);
+  if (st.connected) {
+    const hint = OFFICIAL_LOGOUT_HINT[agentId];
+    if (hint) lines.push(`断开方式：${hint}`);
+  } else if (st.loginCommand) {
+    lines.push(`点「连接」将在终端执行：${st.loginCommand}`);
+  }
+  return (
+    <div className="flex items-center gap-2 border-b border-hairline px-3 py-1.5 text-xs">
+      <span
+        ref={anchorRef}
+        onMouseEnter={show}
+        onMouseLeave={hide}
+        onFocus={show}
+        onBlur={hide}
+        tabIndex={0}
+        className="flex cursor-default items-center gap-1.5"
+      >
+        <span
+          className={`h-1.5 w-1.5 shrink-0 rounded-full ${st.connected ? "bg-ok-text" : "bg-l4"}`}
+        />
+        <span className={st.connected ? "text-ok-text" : "text-l3"}>
+          官方账号 · {st.connected ? "已连接" : "未连接"}
+        </span>
+      </span>
+      {lines.length > 0 && <HoverTip tip={tip} text={lines.join("\n")} />}
+      <span className="ml-auto flex shrink-0 items-center gap-1">
+        {!st.connected && (
+          <button
+            onClick={onConnect}
+            title={`在终端执行 ${st.loginCommand ?? ""}`}
+            className={rowActionClass}
+          >
+            连接
+          </button>
+        )}
+        <button
+          onClick={onRefresh}
+          title="重新检测连接状态"
+          aria-label="重新检测连接状态"
+          className="flex h-7 w-7 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1"
+        >
+          ⟳
+        </button>
+      </span>
+    </div>
+  );
+}
+
 /** 失败诊断：按输出/方式文本给一条下一步建议，无匹配则不提示（纯函数，可单测） */
 function diagnose(output: string, method: string): string | null {
   const lower = output.toLowerCase();
@@ -720,6 +788,12 @@ export default function ProfilesPage() {
     y: number;
     id: string;
   } | null>(null);
+  // 组头「⚠ N 项配置冲突」胶囊的点击弹层（锚定 agent 分组头）
+  const [conflictPop, setConflictPop] = useState<{
+    x: number;
+    y: number;
+    agentId: string;
+  } | null>(null);
 
   // 各 profile 用量（按模型近似归属；模型跨 profile 共享时会重复计入）
   useEffect(() => {
@@ -752,21 +826,24 @@ export default function ProfilesPage() {
     };
   }, [profiles]);
 
-  // 用量悬浮卡：Escape / 任意滚动即关闭（同 ContextMenu；滚动关闭也避免与锚点脱离）
+  // 悬浮卡（用量 / 配置冲突）：Escape / 任意滚动即关闭（同 ContextMenu；滚动关闭也避免与锚点脱离）
   useEffect(() => {
-    if (!usagePop) return;
+    if (!usagePop && !conflictPop) return;
+    const closeAll = () => {
+      setUsagePop(null);
+      setConflictPop(null);
+    };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setUsagePop(null);
+      if (e.key === "Escape") closeAll();
     };
     // capture 阶段的滚动监听能捕获任意容器的滚动
-    const onScroll = () => setUsagePop(null);
     window.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("scroll", closeAll, true);
     return () => {
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("scroll", closeAll, true);
     };
-  }, [usagePop]);
+  }, [usagePop, conflictPop]);
   const agents = useAppStore((s) => s.agents);
   const removeProfile = useAppStore((s) => s.removeProfile);
   const duplicateProfile = useAppStore((s) => s.duplicateProfile);
@@ -1320,10 +1397,20 @@ export default function ProfilesPage() {
             );
             if (q && list.length === 0) return null;
             const isCollapsed = collapsedGroups.has(agent.id);
-            // 分组收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层（同工作区项目组手法）
+            // 分组卡片化（v3.93 用户拍板）：field 细边 + strip 底色卡片给每个 agent 明确边界，
+            // 替代原 hairline + 左侧缩进线手法；未安装的卡片去底色降权（无配置可管，权重最低）。
+            // 不用 opacity 降权：opacity<1 会改变 fixed 后代的包含块，悬浮层定位会错乱。
+            const installed = !!det?.binaryPath;
             return (
-              <section key={agent.id} className="mb-5">
-                <div className="group flex h-10 items-center gap-2 border-b border-hairline px-3">
+              <section
+                key={agent.id}
+                className={`mb-4 overflow-hidden rounded-md border ${
+                  installed
+                    ? "border-field bg-strip"
+                    : "border-hairline"
+                }`}
+              >
+                <div className="group flex h-10 items-center gap-2 px-3">
                   <button
                     onClick={() => {
                       // 更新/安装进行中禁止折叠，避免交互输入行（如 brew [y/n]）被隐藏
@@ -1343,6 +1430,26 @@ export default function ProfilesPage() {
                   <h2 className="text-sm font-medium text-l1">
                     {agent.label}
                   </h2>
+                  {/* 配置冲突提升为组头琥珀胶囊（v3.93）：CLI 自读文件里的残留密钥会覆盖官方账号
+                      登录并产生计费——藏在大段灰字里会被忽略；点击弹层列出具体文件/变量 */}
+                  {(officialStatus[agent.id]?.conflicts.length ?? 0) > 0 && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        const rect =
+                          event.currentTarget.getBoundingClientRect();
+                        setConflictPop({
+                          x: rect.left,
+                          y: rect.bottom + 4,
+                          agentId: agent.id,
+                        });
+                      }}
+                      title="配置文件中的残留密钥会覆盖官方账号登录，点击查看明细"
+                      className="flex h-5 shrink-0 items-center gap-1 rounded-full bg-warn px-2 text-micro text-warn-text transition-[filter] hover:brightness-125"
+                    >
+                      ⚠ {officialStatus[agent.id].conflicts.length} 项配置冲突
+                    </button>
+                  )}
                   {/* 已安装显示包名+版本号（mono）；右侧状态：更新中… / 新版（可点更新）/ 更新（查不到最新版时的回退）；已是最新则不显示 */}
                   {det?.binaryPath ? (
                     <span className="font-mono text-xs text-l4">
@@ -1427,69 +1534,19 @@ export default function ProfilesPage() {
                 </div>
 
                 {!isCollapsed && (
-                  <div className="border-l border-white/5">
+                  <div className="border-t border-hairline">
                     {/* 官方账号状态行（P1a）：支持官方账号的 agent 固定展示；断开走 CLI 自己的 logout，Ccode 不删 auth 文件 */}
-                    {officialStatus[agent.id]?.supported &&
-                      (() => {
-                        const st = officialStatus[agent.id];
-                        return (
-                          <div className="flex items-center gap-2 border-b border-hairline px-3 py-1.5 text-xs">
-                            <span
-                              className={`h-1.5 w-1.5 shrink-0 rounded-full ${st.connected ? "bg-ok-text" : "bg-l4"}`}
-                            />
-                            <span className="shrink-0 text-l2">官方账号</span>
-                            <span
-                              className={`shrink-0 ${st.connected ? "text-ok-text" : "text-l4"}`}
-                            >
-                              {st.connected ? "已连接" : "未连接"}
-                            </span>
-                            {st.detail && (
-                              <span
-                                className="min-w-0 truncate text-l4"
-                                title={st.detail}
-                              >
-                                {st.detail}
-                              </span>
-                            )}
-                            {st.connected && OFFICIAL_LOGOUT_HINT[agent.id] && (
-                              <span className="shrink-0 text-l4">
-                                断开：{OFFICIAL_LOGOUT_HINT[agent.id]}
-                              </span>
-                            )}
-                            {/* 配置文件冲突警告（P1a）：CLI 自读文件里的残留密钥会覆盖官方账号登录，悬停列出各项 */}
-                            {st.conflicts.length > 0 && (
-                              <span
-                                className="flex shrink-0 items-center gap-1 text-warn-text"
-                                title={`${st.conflicts.join("\n")}\n该文件中的密钥会覆盖官方账号登录，产生 API 计费`}
-                              >
-                                <span className="h-1.5 w-1.5 rounded-full bg-warn-text" />
-                                {st.conflicts.length} 项配置冲突
-                              </span>
-                            )}
-                            <span className="ml-auto flex shrink-0 items-center gap-1">
-                              {!st.connected && (
-                                <button
-                                  onClick={() => connectOfficial(agent.id)}
-                                  title={`在终端执行 ${st.loginCommand ?? ""}`}
-                                  className={rowActionClass}
-                                >
-                                  连接
-                                </button>
-                              )}
-                              <button
-                                onClick={() => void refreshOfficial(agent.id)}
-                                title="重新检测连接状态"
-                                className="h-7 rounded-sm px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
-                              >
-                                刷新
-                              </button>
-                            </span>
-                          </div>
-                        );
-                      })()}
+                    {officialStatus[agent.id]?.supported && (
+                      <OfficialStatusRow
+                        agentId={agent.id}
+                        st={officialStatus[agent.id]}
+                        onConnect={() => connectOfficial(agent.id)}
+                        onRefresh={() => void refreshOfficial(agent.id)}
+                      />
+                    )}
                     {/* 安装/更新实时输出（全宽，行为不变） */}
                     {updating[agent.id] && (
-                      <div className="mt-2">
+                      <div className="mx-3 mt-2">
                         <pre
                           // callback ref：每次渲染都把滚动条钉在底部，实现跟随输出自动滚动
                           ref={(el) => {
@@ -1536,7 +1593,7 @@ export default function ProfilesPage() {
                       </div>
                     )}
                     {updateResults[agent.id] && (
-                      <div className="mt-2 rounded-sm bg-strip p-2 text-xs text-l2">
+                      <div className="mx-3 mt-2 rounded-sm bg-inset p-2 text-xs text-l2">
                         <span
                           className={
                             updateResults[agent.id].ok
@@ -1579,13 +1636,15 @@ export default function ProfilesPage() {
                     )}
 
                     {list.length === 0 ? (
-                      <div className="flex h-12 items-center justify-between px-3">
-                        <span className="text-sm text-l4">暂无配置</span>
+                      // 空状态虚线引导框（v3.93）：整框即「+ 添加配置」按钮，强化可点击创建的暗示；
+                      // 分组内小区块虚线，不属于被否决的大面积页面级虚线空状态
+                      <div className="px-3 py-3">
                         <button
+                          type="button"
                           onClick={() =>
                             setModal({ initial: null, presetAgent: agent.id })
                           }
-                          className="text-xs text-l2 hover:text-l1"
+                          className="flex h-12 w-full items-center justify-center rounded-md border border-dashed border-field text-xs text-l3 transition-colors hover:border-l4 hover:bg-inset hover:text-l1"
                         >
                           + 添加配置
                         </button>
@@ -1649,18 +1708,37 @@ export default function ProfilesPage() {
                                   ? displayHost(profile.baseUrl)
                                   : "默认端点"}
                             </span>
+                            {/* 模型列 Code Tag 化（v3.93）：前 3 个平铺，其余折叠为 +N；
+                                列宽装不下时 overflow 裁切，悬浮 title 始终给全文 */}
                             <span
-                              className={`min-w-0 truncate font-mono text-xs ${
+                              className="flex min-w-0 items-center gap-1 overflow-hidden"
+                              title={
                                 profile.models.length > 0
-                                  ? "text-l2"
-                                  : "text-l4"
-                              }`}
-                              title={profile.models.join(" · ")}
+                                  ? profile.models.join(" · ")
+                                  : undefined
+                              }
                             >
-                              {/* 全量展示该 profile 配置的所有模型（极端超长才截断，悬浮给全文） */}
-                              {profile.models.length > 0
-                                ? profile.models.join(" · ")
-                                : "未指定模型"}
+                              {profile.models.length > 0 ? (
+                                <>
+                                  {profile.models.slice(0, 3).map((m) => (
+                                    <span
+                                      key={m}
+                                      className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 font-mono text-micro text-l2"
+                                    >
+                                      {m}
+                                    </span>
+                                  ))}
+                                  {profile.models.length > 3 && (
+                                    <span className="shrink-0 rounded-sm bg-inset px-1 py-0.5 font-mono text-micro text-l4">
+                                      +{profile.models.length - 3}
+                                    </span>
+                                  )}
+                                </>
+                              ) : (
+                                <span className="text-xs text-l4">
+                                  未指定模型
+                                </span>
+                              )}
                             </span>
                             {profile.accountType === "official" ? (
                               <span
@@ -1778,6 +1856,53 @@ export default function ProfilesPage() {
           </div>
         </div>
       )}
+      {/* 配置冲突弹层：组头琥珀胶囊点出，列出具体文件/变量；只含文件名与变量名，密钥值不出后端 */}
+      {conflictPop &&
+        (() => {
+          const st = officialStatus[conflictPop.agentId];
+          if (!st || st.conflicts.length === 0) return null;
+          return (
+            <div
+              className="fixed inset-0 z-20"
+              onClick={() => setConflictPop(null)}
+            >
+              <div
+                onClick={(e) => e.stopPropagation()}
+                className="absolute w-80 rounded-md border border-field ccode-float-surface p-3 text-xs"
+                // 防出屏：往左/往上收（卡片 w-80 约 320px、高约 180px）
+                style={{
+                  left: Math.max(
+                    8,
+                    Math.min(conflictPop.x, window.innerWidth - 336),
+                  ),
+                  top: Math.max(
+                    8,
+                    Math.min(conflictPop.y, window.innerHeight - 190),
+                  ),
+                }}
+              >
+                <div className="mb-1.5 font-medium text-warn-text">
+                  ⚠ {st.conflicts.length} 项配置冲突 ·{" "}
+                  {labelOf(conflictPop.agentId)}
+                </div>
+                <ul className="space-y-1">
+                  {st.conflicts.map((c) => (
+                    <li
+                      key={c}
+                      className="rounded-sm bg-inset px-1.5 py-1 font-mono text-l2"
+                    >
+                      {c}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-2 leading-5 text-l3">
+                  这些文件里残留的密钥会覆盖官方账号登录并产生 API
+                  计费；请编辑对应文件删除后，点状态行的 ⟳ 重新检测。
+                </p>
+              </div>
+            </div>
+          );
+        })()}
       {modal && (
         <ProfileModal
           initial={modal.initial}

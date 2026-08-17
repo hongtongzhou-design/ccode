@@ -74,7 +74,7 @@ npm run tauri build    # 打包
 docs/                        # 架构方案 + 九 CLI 适配参考（规格）
   conventions/               # 主题化约定细则（改动对应领域前必读，见「关键约定」索引）
 src/                         # 前端 React + TS + Tailwind v4（vite 插件接入）
-  pages/                     # 八页：配置⇄ 工作区⛁ 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
+  pages/                     # 八页：配置⇄ 项目⛁（workspaces，v3.92 起 UI 页名「项目」） 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
   components/                # WorkspaceReviewView、PipelineEditor（含「＋ 从模板追加」）、ProjectGroup/ProjectRail、ArtifactChecklist、TaskCardsSection、FileTree、
                              # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker/DigestPicker、
                              # KickoffConfirmDialog（开工确认弹层：TASK.md 预览/编辑（草稿优先）+ 旧简报并入兜底 + 技能区（含 MCP 归处标记）+ 人工事项区 + 主仓提醒）、

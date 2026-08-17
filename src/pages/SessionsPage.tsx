@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
+import { agentBrandBadgeStyle } from "../agent-colors";
 import { groupSessionsByTask } from "../task-cards";
 import {
   QUICK_FILTERS,
@@ -35,6 +36,9 @@ import type {
 
 /** GitPanel 的 onTotals 占位（会话页不消费改动总量；稳定引用避免击穿 memo） */
 const NOOP_TOTALS = () => {};
+
+/** 常驻行内的快筛（其余收进「更多 ▾」，激活的会提到行内常显） */
+const PRIMARY_QUICK: ReadonlySet<string> = new Set(["pinned", "live", "today"]);
 
 type Filter =
   | { kind: "all" }
@@ -71,6 +75,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const openSessionReq = useAppStore((s) => s.openSessionReq);
   const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   const liveSessions = useAppStore((s) => s.liveSessions);
+  const currentPage = useAppStore((s) => s.page);
   const focusTab = useAppStore((s) => s.focusTab);
   const sessionsQuery = useAppStore((s) => s.sessionsQuery);
   const sessionScopeReq = useAppStore((s) => s.sessionScopeReq);
@@ -90,8 +95,19 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [showArchived, setShowArchived] = useState(false);
   // 一行 chip 快筛 + 搜索建议落成的作用域 chip（v3.88，纯逻辑在 session-filter.ts）
   const [quick, setQuick] = useState<Set<QuickFilterId>>(() => new Set());
-  const [scopes, setScopes] = useState<ScopeChip[]>([]);
-  // 分类筛选折叠收进列表栏（默认收起），展开为单列纵向手风琴：点 agent 只展开/收起其项目
+  // 「更多 ▾」收纳的次常用快筛（v3.92 控制区瘦身）：近 7 天 / 内部 AI / 已归档
+  const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
+  /** 快筛开关统一入口：archived chip 与 showArchived 是同一件事，必须同步两边
+      （此前只有页头按钮同步，单独点 chip 会被 archiveVisible 兜底过滤掉——等于无效） */
+  function toggleQuick(id: QuickFilterId) {
+    const next = new Set(quick);
+    const on = !next.has(id);
+    if (on) next.add(id);
+    else next.delete(id);
+    setQuick(next);
+    if (id === "archived") setShowArchived(on);
+  }
+  const [scopes, setScopes] = useState<ScopeChip[]>([]);  // 分类筛选折叠收进列表栏（默认收起），展开为单列纵向手风琴：点 agent 只展开/收起其项目
   // 子列表（不动列表筛选、不关回放）；「全部项目」/单项目行落筛选且**面板保持展开**（v3.43：
   // 用户要边筛边浏览，选中不收起），手动点标题行或 × 清除才收。
   const [treeOpen, setTreeOpen] = useState(false);
@@ -451,6 +467,57 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       if (request === conversationRequestRef.current) setLoadingConv(false);
     }
   }
+
+  // ↑/↓ 在列表中切换对话（v3.92）：仅本页可见、无右键菜单/批量管理、非打字焦点时生效；
+  // 顺序 = 当前渲染的 displayList（与鼠标点选同一口径），失效且无快照的不可回放行跳过
+  useEffect(() => {
+    if (currentPage !== "sessions") return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      if (menu || selecting) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el) {
+        const tag = el.tagName;
+        if (
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          tag === "SELECT" ||
+          el.isContentEditable
+        )
+          return;
+      }
+      const rows = displayList
+        .map((d) => d.s)
+        .filter((s) => s.alive || s.pinned);
+      if (rows.length === 0) return;
+      e.preventDefault();
+      const idx = rows.findIndex(
+        (s) =>
+          selected?.agent === s.agent && selected?.sessionId === s.sessionId,
+      );
+      const delta = e.key === "ArrowDown" ? 1 : -1;
+      const next =
+        idx === -1
+          ? delta > 0
+            ? rows[0]
+            : rows[rows.length - 1]
+          : rows[Math.min(rows.length - 1, Math.max(0, idx + delta))];
+      if (next && (selected?.agent !== next.agent || selected?.sessionId !== next.sessionId))
+        void openSession(next);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPage, displayList, selected, menu, selecting]);
+
+  // 键盘切换/外部跳转后把选中行滚进可视区（block:nearest，在视野内则不动）
+  useEffect(() => {
+    if (!selected) return;
+    const el = document.querySelector(
+      `[data-session-key="${CSS.escape(`${selected.agent}:${selected.sessionId}`)}"]`,
+    );
+    el?.scrollIntoView({ block: "nearest" });
+  }, [selected]);
 
   async function loadOlderMessages() {
     if (!selected || conversationCursor === null || loadingOlder) return;
@@ -909,24 +976,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 </span>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <button
-                  type="button"
-                  aria-pressed={showArchived}
-                  onClick={() => {
-                    const next = !showArchived;
-                    setShowArchived(next);
-                    // 与快筛的「已归档」chip 是同一件事，保持一致（不做两套归档口径）
-                    setQuick((prev) => {
-                      const s2 = new Set(prev);
-                      if (next) s2.add("archived");
-                      else s2.delete("archived");
-                      return s2;
-                    });
-                  }}
-                  className={`${rowActionClass} ${showArchived ? "border-seg-sel bg-seg-sel text-l1" : ""}`}
-                >
-                  显示已归档
-                </button>
+                {/* 「显示已归档」已并入快筛 chip（toggleQuick 单控点，v3.92），页头不再重复 */}
                 <button
                   type="button"
                   onClick={() => setSelecting(true)}
@@ -1006,54 +1056,92 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               ))}
             </div>
           )}
-          {/* 一行 chip 快筛（v3.88）：状态与时间维度以前完全没进筛选 UI，
-              而这些数据早就在 SessionMetaDto 里 */}
-          {!selecting && (
-            <div className="mt-2 flex flex-wrap items-center gap-1">
-              {QUICK_FILTERS.map((f) => {
-                const on = quick.has(f.id);
-                return (
+          {/* 一行 chip 快筛（v3.88）+ 分类筛选入口并入本行（v3.92 控制区瘦身，省一行常驻高度）：
+              常用 3 个常驻；近 7 天/内部 AI/已归档收进「更多 ▾」，激活的提到行内常显、不漏状态 */}
+          <div className="mt-2 flex flex-wrap items-center gap-1">
+            {!selecting && (
+              <>
+                {QUICK_FILTERS.filter(
+                  (f) => PRIMARY_QUICK.has(f.id) || quick.has(f.id),
+                ).map((f) => {
+                  const on = quick.has(f.id);
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      aria-pressed={on}
+                      title={f.title}
+                      onClick={() => toggleQuick(f.id)}
+                      className={`rounded-full px-2 py-0.5 text-micro ${
+                        on
+                          ? "border border-cta-bd bg-cta text-cta-text"
+                          : "bg-inset text-l3 hover:bg-hover hover:text-l1"
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  );
+                })}
+                <span className="relative">
                   <button
-                    key={f.id}
                     type="button"
-                    aria-pressed={on}
-                    title={f.title}
-                    onClick={() =>
-                      setQuick((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(f.id)) next.delete(f.id);
-                        else next.add(f.id);
-                        return next;
-                      })
-                    }
-                    className={`rounded-full px-2 py-0.5 text-micro ${
-                      on
-                        ? "border border-cta-bd bg-cta text-cta-text"
-                        : "bg-inset text-l3 hover:bg-hover hover:text-l1"
-                    }`}
+                    onClick={() => setMoreFiltersOpen((v) => !v)}
+                    aria-expanded={moreFiltersOpen}
+                    title="更多快筛（近 7 天 / 内部 AI / 已归档）"
+                    className="rounded-full bg-inset px-2 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
                   >
-                    {f.label}
+                    更多 ▾
                   </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-        {/* 分类筛选：默认收起，展开为单列纵向手风琴（点 agent 展开项目子列表，项目行落筛选）。
-            行尾直接承载当前筛选口径与 × 清除（不再单设 chip 行） */}
-        <div className="shrink-0 border-b border-hairline">
-          <div className="flex h-8 items-center">
+                  {moreFiltersOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-40"
+                        onClick={() => setMoreFiltersOpen(false)}
+                      />
+                      <div className="ccode-float-surface absolute left-0 top-full z-50 mt-1 w-36 rounded-md border border-field p-1">
+                        {QUICK_FILTERS.filter(
+                          (f) => !PRIMARY_QUICK.has(f.id),
+                        ).map((f) => {
+                          const on = quick.has(f.id);
+                          return (
+                            <button
+                              key={f.id}
+                              type="button"
+                              aria-pressed={on}
+                              title={f.title}
+                              onClick={() => {
+                                toggleQuick(f.id);
+                                setMoreFiltersOpen(false);
+                              }}
+                              className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left text-xs hover:bg-hover"
+                            >
+                              <span
+                                className={`w-3 shrink-0 text-cta ${on ? "" : "opacity-0"}`}
+                              >
+                                ✓
+                              </span>
+                              <span className={on ? "text-l1" : "text-l3"}>
+                                {f.label}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </span>
+              </>
+            )}
+            {/* 分类筛选手风琴入口（原独立标题行并入本行） */}
             <button
               type="button"
               onClick={() => setTreeOpen(!treeOpen)}
               aria-expanded={treeOpen}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-xs text-l3 hover:bg-hover hover:text-l1"
+              className="ml-auto flex h-6 min-w-0 items-center gap-1 rounded-sm px-1.5 text-micro text-l3 hover:bg-hover hover:text-l1"
             >
-              <span className="w-3 shrink-0 text-micro text-l4">
-                {treeOpen ? "▾" : "▸"}
-              </span>
+              <span className="shrink-0 text-l4">{treeOpen ? "▾" : "▸"}</span>
               分类筛选
-              <span className="min-w-0 flex-1 truncate text-left text-l4">
+              <span className="max-w-28 truncate text-l4">
                 {filterChipLabel ?? "全部对话"}
               </span>
             </button>
@@ -1062,12 +1150,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 type="button"
                 onClick={() => selectFilter({ kind: "all" })}
                 title="清除分类筛选"
-                className="flex h-full shrink-0 items-center px-2.5 text-xs text-l4 hover:text-l1"
+                className="flex h-6 shrink-0 items-center rounded-sm px-1 text-xs text-l4 hover:text-l1"
               >
                 ×
               </button>
             )}
           </div>
+        </div>
+        {/* 分类筛选：标题行已并入上方快筛行（v3.92）；展开为单列纵向手风琴
+            （点 agent 展开项目子列表，项目行落筛选），面板保持展开、边筛边浏览 */}
+        <div className="shrink-0 border-b border-hairline">
           {treeOpen && (
             // 单列纵向手风琴：点 agent 只展开/收起其项目子列表（不动筛选、不关回放），
             // 「全部项目」/单项目行落筛选后面板保持展开（边筛边浏览）；层级靠左侧缩进线
@@ -1310,6 +1402,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     </div>
                   )}
                 <div
+                  data-session-key={`${s.agent}:${s.sessionId}`}
                   onClick={() => {
                     if (selecting) toggleChecked(s);
                     else if (clickable) void openSession(s);
@@ -1450,17 +1543,23 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         </button>
                       </div>
                     )}
-                    {/* 右侧相对时间：主显相对、悬浮绝对（白话双层） */}
+                    {/* 右侧相对时间：主显相对、悬浮绝对（白话双层）；
+                        hover/聚焦行时渐隐，把右端让给浮现的操作组（v3.92） */}
                     <span
-                      className="shrink-0 font-mono text-micro text-l4"
+                      className="shrink-0 font-mono text-micro text-l4 transition-opacity group-hover:opacity-0"
                       title={absTime(s.updatedAt)}
                     >
                       {relTime(s.updatedAt)}
                     </span>
                   </div>
-                  {/* meta 行：agent · token mono 小字 + 步骤/接力/标签 chip，AI 摘要截断尾随 */}
+                  {/* meta 行：agent 品牌色胶囊（扫一眼分家）· token mono 小字 + 步骤/接力/标签 chip，AI 摘要截断尾随 */}
                   <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-micro text-l4">
-                    <span className="shrink-0">{agentLabel(s.agent)}</span>
+                    <span
+                      className="shrink-0 rounded-full px-1.5 py-px font-medium"
+                      style={agentBrandBadgeStyle(s.agent)}
+                    >
+                      {agentLabel(s.agent)}
+                    </span>
                     {s.workspace && (
                       // 反向跳转（v3.88）：这个 badge 以前只能看不能点——会话与项目/步骤的
                       // 四条关联全是单向的。点它回工作区页并选中该项目
@@ -1475,7 +1574,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         title={
                           (s.stepName
                             ? `研究步骤：${s.stepName}（工作区：${s.workspace}）`
-                            : `任务工作区：${s.workspace}`) + "\n点击回工作区页查看该项目"
+                            : `任务工作区：${s.workspace}`) + "\n点击回项目页查看该项目"
                         }
                       >
                         ⎇ {s.stepName ?? s.workspace}
@@ -1485,7 +1584,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       <button
                         type="button"
                         className="max-w-28 shrink-0 truncate rounded-sm bg-inset px-1 text-l3 hover:bg-seg-sel hover:text-l1"
-                        title={`任务卡：${s.taskName}（点击跳到工作区页对应项目）`}
+                        title={`任务卡：${s.taskName}（点击跳到项目页对应项目）`}
                         onClick={(event) => {
                           event.stopPropagation();
                           setSelectProjectReq(s.projectPath);
@@ -1747,7 +1846,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     <span className="min-w-0 flex-1 truncate text-xs text-l4">
                       历史回放只读 · 点右上角「恢复」在终端继续该对话
                     </span>
-                    <span className="shrink-0 rounded-full bg-raised px-2.5 py-0.5 text-micro text-l3">
+                    <span
+                      className="shrink-0 rounded-full px-2.5 py-0.5 text-micro font-medium"
+                      style={agentBrandBadgeStyle(selected.agent)}
+                    >
                       {agentLabel(selected.agent)}
                     </span>
                   </div>
@@ -1762,7 +1864,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           <div className="flex min-h-0 flex-1 items-center justify-center">
             <EmptyState
               title="从左侧选择一条对话"
-              detail="回放为只读历史记录；选中后可在回放头部恢复、保留、归档或导出。"
+              detail="回放为只读历史记录；选中后可在回放头部恢复、保留、归档或导出。按 ↑ / ↓ 可在列表中快速切换对话。"
             />
           </div>
         )}
@@ -2037,7 +2139,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             </p>
             {(taskCards[filter.path] ?? []).length === 0 ? (
               <p className="px-3 py-1.5 text-sm text-l4">
-                该项目还没有任务卡，可在工作区页新建。
+                该项目还没有任务卡，可在项目页新建。
               </p>
             ) : (
               (taskCards[filter.path] ?? []).map((c) => (

@@ -635,6 +635,14 @@ pub async fn fs_create_dir(root: String, name: String) -> Result<String, String>
         .map_err(|e| e.to_string())?
 }
 
+/// 家目录绝对路径（前端项目路径缩略为 ~ 显示用）
+#[tauri::command]
+pub fn home_dir() -> String {
+    dirs::home_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 pub async fn fs_delete_path(path: String, root: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || delete_path_sync(&path, &root))

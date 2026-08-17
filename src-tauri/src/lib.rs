@@ -124,6 +124,7 @@ pub fn run() {
             fs_tree::search_files,
             fs_tree::fs_create_dir,
             fs_tree::fs_delete_path,
+            fs_tree::home_dir,
             pdf::read_pdf_bytes,
             pdf::read_docx_bytes,
             citation::check_citation_health,

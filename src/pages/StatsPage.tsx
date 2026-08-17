@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
 import type { UsageDayDto, UsageStatsDto } from "../types";
 import { axisLabels } from "../stats-trend";
+import { agentColor } from "../agent-colors";
 import {
   Checkbox,
   EmptyState,
@@ -58,27 +59,7 @@ function SubscriptionCost() {
 
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
-/**
- * 每个 agent 的进度条色相：从现有设计令牌取色（低饱和、状态色系的浅字档）。
- * 随主题切换联动的令牌用 CSS 变量引用。
- */
-const AGENT_COLORS: Record<string, string> = {
-  "claude-code": "var(--color-ok-text)",
-  codex: "var(--color-link)",
-  gemini: "var(--color-warn-text)",
-  qwen: "var(--color-err-text)",
-  opencode: "var(--color-add)",
-  kimi: "var(--color-tabline)",
-  grok: "var(--color-cta-pill-text)",
-};
-/** 未知 agent 兜底：按 id 哈希取 HSL 色，确定性且不再复用上方令牌池
-    （原按列表序循环同一组令牌，未知 agent 会与已知 agent 固定色撞色） */
-function fallbackColor(id: string): string {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return `hsl(${h % 360} 45% 65%)`;
-}
-const agentColor = (id: string) => AGENT_COLORS[id] ?? fallbackColor(id);
+/** agent 进度条色相：共享自 src/agent-colors.ts（与对话页列表行 meta 同一出处） */
 
 /**
  * 每日用量折线（手绘 SVG，不引图表库）：

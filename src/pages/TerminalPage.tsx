@@ -33,7 +33,7 @@ import GitPanel, { type GitSummary } from "../components/GitPanel";
 import TerminalStatusBar, { fmtTokens } from "../components/TerminalStatusBar";
 import HandoffPicker, { type HandoffSource } from "../components/HandoffPicker";
 import DigestPicker from "../components/DigestPicker";
-import { EmptyState, LoadingRows, hoverRevealClass } from "../components/PageFrame";
+import { LoadingRows, hoverRevealClass } from "../components/PageFrame";
 import ProjectRail from "../components/ProjectRail";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
 import { renderTaskMd } from "../pipeline-start";
@@ -722,6 +722,13 @@ const TerminalView = memo(function TerminalView({
 
   // 空态引导卡可见性（画布中央卡片 + 启动栏主按钮降级 + ⌘↵ 快捷键共用同一条件）
   const welcomeVisible = !shellOnly && !running && !shellActive;
+  // 启动栏第二行（状态提示行）有内容才渲染——只有 ⋯ 时整行像悬空碎片（v3.92 修）
+  const showBarMeta = !!(
+    error ||
+    (initialExtraEnv && Object.keys(initialExtraEnv).length > 0) ||
+    (!running &&
+      (shellActive || exited || restored))
+  );
   // ⌘↵ 直启动作经 ref 转发（xterm 键盘层 handler 是挂载期闭包，只能经 ref 拿最新状态）
   const launchNowRef = useRef<() => void>(() => {});
   launchNowRef.current = () => {
@@ -972,6 +979,12 @@ const TerminalView = memo(function TerminalView({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [everVisible]);
+
+  // 空态隐藏 xterm 的静态块光标（左上角那个）：DECTCEM 转义对 WebGL/DOM 渲染都生效，
+  // 不写进回滚缓冲；启动后进程输出会自行把光标恢复
+  useEffect(() => {
+    termRef.current?.write(welcomeVisible ? "\x1b[?25l" : "\x1b[?25h");
+  }, [welcomeVisible, everVisible]);
 
   // 标签从隐藏切回可见 / 右侧面板开关改变可用宽度时重新 fit（display:none 下尺寸为 0）；
   // barExpanded 切换（启动时启动栏塌缩为收缩态）同样改变终端区高度，不补 fit 会下方留空
@@ -1493,6 +1506,10 @@ const TerminalView = memo(function TerminalView({
   // P1b：启动栏输入框统一 inset 底（浮起层级），聚焦边线不变
   const select =
     "h-8 rounded-md border border-field bg-inset px-2 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
+  // 分段容器内的无边框控件（v3.92：Agent/配置/模型三组收进同一条分段工具条，
+  // 段与段之间留真空隙（gap）各自成小胶囊、不靠分隔线粘连，hover 单段高亮）
+  const seg =
+    "h-7 rounded-sm bg-transparent px-2 text-sm text-l2 outline-none placeholder:text-l4 hover:bg-hover focus:bg-hover disabled:hover:bg-transparent";
 
   function openTerminalActionMenu(event: React.MouseEvent<HTMLButtonElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1578,8 +1595,11 @@ const TerminalView = memo(function TerminalView({
       {barExpanded ? (
         <>
           <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
+            {/* Agent/配置/模型收进同一条分段工具条（v3.92）：去掉三个独立框线；
+                段间留空隙（容器 gap + 内边距）各自成小胶囊，不粘在一起 */}
+            <div className="flex min-w-0 items-center gap-1 rounded-md border border-field bg-inset p-0.5">
             <select
-              className={`${select} w-36 shrink-0`}
+              className={`${seg} w-36 shrink-0`}
               value={agentId}
               onChange={(e) => {
                 setAgentId(e.target.value);
@@ -1597,7 +1617,7 @@ const TerminalView = memo(function TerminalView({
             </select>
             <select
               ref={profileSelectRef}
-              className={`${select} w-40 shrink-0`}
+              className={`${seg} w-40 shrink-0`}
               value={profileId}
               onChange={(e) => {
                 const prevModels =
@@ -1646,9 +1666,9 @@ const TerminalView = memo(function TerminalView({
             {selectedProfile && (
               // 模型 combo-box：可输可选（profile 预设 + 本 agent 历史），输入即筛选，
               // 自由输入的模型启动成功后记入历史（ccode.modelHistory.<agent>），下次直接可选
-              <span className="relative w-44 shrink-0">
+              <span className="relative w-56 shrink-0">
                 <input
-                  className={`${select} w-full`}
+                  className={`${seg} w-full`}
                   value={model}
                   onChange={(e) => {
                     setModel(e.target.value);
@@ -1692,33 +1712,10 @@ const TerminalView = memo(function TerminalView({
                 )}
               </span>
             )}
-            {/* 模型相关的「为什么没生效」就近说清（v3.88）：
-                以前这些只写在配置页表单与用户手册里，用户在启动栏换模型没反应时看不到任何解释 */}
-            {(() => {
-              const prof = profiles.find((p) => p.id === profileId);
-              const cap = launchModelNote(agentId, prof?.models.length ?? 0);
-              const emptyModels =
-                !!prof && prof.models.length === 0 && !model.trim();
-              const odd = model.trim() !== "" && !looksLikeModelId(model);
-              const line = modelKept
-                ? "不在这个配置的模型列表里，仍按原样用。"
-                : emptyModels
-                  ? "这个配置没填模型，会用 CLI 自己的默认值。"
-                  : odd
-                    ? "这串不太像模型名，确认一下。"
-                    : cap;
-              return line ? (
-                <span
-                  className={`w-full text-micro leading-4 ${
-                    modelKept || emptyModels || odd ? "text-warn-text" : "text-l4"
-                  }`}
-                >
-                  {line}
-                </span>
-              ) : null;
-            })()}
+            </div>
             {/* 目录输入框已移除（v3.91 走查）：目录改由底部状态栏 📂 胶囊浮层编辑（仅未启动），
-                空间让给模型框；技能/MCP 胶囊右对齐收进本行末端（启动主流程：Agent→配置→模型→启动） */}
+                空间让给模型框；技能/MCP 胶囊右对齐收进本行末端（启动主流程：Agent→配置→模型→启动）。
+                注意必须在模型提示行之前——提示行是 w-full，排它后面会被挤到下一行（v3.92 修） */}
             <span className="ml-auto flex shrink-0 items-center gap-2">
               {renderSkillMenu(false, true)}
               {renderMcpMenu(false, true)}
@@ -1747,6 +1744,40 @@ const TerminalView = memo(function TerminalView({
                   {restored ? "恢复任务" : "启动"}
                 </button>
               ))}
+            <button
+              type="button"
+              onClick={openTerminalActionMenu}
+              title="更多终端操作"
+              aria-label="更多终端操作"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-sm text-l3 hover:bg-hover hover:text-l1"
+            >
+              ⋯
+            </button>
+            {/* 模型相关的「为什么没生效」就近说清（v3.88）：
+                以前这些只写在配置页表单与用户手册里，用户在启动栏换模型没反应时看不到任何解释 */}
+            {(() => {
+              const prof = profiles.find((p) => p.id === profileId);
+              const cap = launchModelNote(agentId, prof?.models.length ?? 0);
+              const emptyModels =
+                !!prof && prof.models.length === 0 && !model.trim();
+              const odd = model.trim() !== "" && !looksLikeModelId(model);
+              const line = modelKept
+                ? "不在这个配置的模型列表里，仍按原样用。"
+                : emptyModels
+                  ? "这个配置没填模型，会用 CLI 自己的默认值。"
+                  : odd
+                    ? "这串不太像模型名，确认一下。"
+                    : cap;
+              return line ? (
+                <span
+                  className={`w-full text-micro leading-4 ${
+                    modelKept || emptyModels || odd ? "text-warn-text" : "text-l4"
+                  }`}
+                >
+                  {line}
+                </span>
+              ) : null;
+            })()}
           </div>
           {/* 一键开步的首条指令：可编辑，留空 = 不注入；注入成功即清除。
               无注入参数的 CLI（kimi/opencode）运行中输入框 disabled 不可选中，给一键复制兜底 */}
@@ -1774,6 +1805,8 @@ const TerminalView = memo(function TerminalView({
               )}
             </div>
           )}
+          {/* 第二行（状态提示行）有内容才渲染；⋯ 已挪到第一行末尾（v3.92） */}
+          {showBarMeta && (
           <div className="mb-2 flex min-h-7 flex-wrap items-center gap-2 border-t border-hairline pt-1 text-xs">
             {initialExtraEnv && Object.keys(initialExtraEnv).length > 0 && (
               <span
@@ -1795,24 +1828,10 @@ const TerminalView = memo(function TerminalView({
               <span className="text-l3">上次任务，可恢复</span>
             )}
             {error && <span className="truncate text-err-text">{error}</span>}
-            <span className="ml-auto flex shrink-0 items-center gap-1">
-              <button
-                type="button"
-                onClick={openTerminalActionMenu}
-                title="更多终端操作"
-                aria-label="更多终端操作"
-                className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
-              >
-                ⋯
-              </button>
-            </span>
           </div>
-          {agentProfiles.length === 0 && (
-            <EmptyState
-              title="该 agent 还没有配置"
-              detail="到「配置」页创建一个，再回来启动。"
-            />
           )}
+          {/* 无配置的引导统一收进空态卡片（v3.92：卡片给「去配置页创建」动作；
+              不再在启动栏里渲染整段 EmptyState——那条 min-h-48 灰带与卡片重复且视觉断裂） */}
           {autoStart &&
             profileId &&
             !profiles.some((p) => p.id === profileId) && (
@@ -1920,7 +1939,27 @@ const TerminalView = memo(function TerminalView({
             xterm 保持挂载在底层（移树会杀 PTY 语义）；浮层壳 pointer-events-none 不挡画布 */}
         {welcomeVisible && (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-            <div className="pointer-events-auto flex w-88 flex-col items-center gap-3 rounded-lg border border-field bg-raised px-6 py-6 text-center shadow-lg">
+            {/* 点阵网格垫底（v3.92）：破除纯色画布的平感又不像光晕那么抢眼，
+                颜色取 l1 令牌的 7% 混合，深浅主题/换主题色都跟随（不写死色值） */}
+            <div
+              aria-hidden="true"
+              className="absolute inset-0"
+              style={{
+                backgroundImage:
+                  "radial-gradient(circle, color-mix(in srgb, var(--color-l1) 7%, transparent) 1px, transparent 1px)",
+                backgroundSize: "18px 18px",
+              }}
+            />
+            {/* 玻璃拟态卡：raised 85% + backdrop-blur（画布内容隐约透出）。
+                勾边（v3.93 微调）：l1 的 12% 混合——field 档在浅色主题偏蓝显脏，
+                hairline 档又会糊进 7% 的点阵，取两者之间的极浅中性边 */}
+            <div
+              className="pointer-events-auto relative flex w-88 flex-col items-center gap-3 rounded-lg border bg-raised/85 px-6 py-6 text-center shadow-lg backdrop-blur-xl"
+              style={{
+                borderColor:
+                  "color-mix(in srgb, var(--color-l1) 12%, transparent)",
+              }}
+            >
               {/* 视觉锚点：品牌色图标盒（cta-pill 与主按钮同色系呼应）+ agent 主标题 + 配置胶囊 */}
               <div
                 aria-hidden="true"
@@ -1937,22 +1976,40 @@ const TerminalView = memo(function TerminalView({
                 )}
               </div>
               <div className="text-micro text-l4">
-                {restored
-                  ? "上次任务还在，可接着跑"
-                  : "启动后这里就是 AI 的终端画面"}
+                {agentProfiles.length === 0
+                  ? "该 agent 还没有配置"
+                  : restored
+                    ? "上次任务还在，可接着跑"
+                    : "启动后这里就是 AI 的终端画面"}
               </div>
-              <button
-                type="button"
-                onClick={() => (restored ? void restoreTask() : void launch())}
-                disabled={!profileId}
-                className="inline-flex h-9 w-2/3 cursor-pointer items-center justify-center rounded-md border border-cta-bd bg-cta text-sm text-cta-text hover:brightness-110 disabled:cursor-default disabled:opacity-50"
-              >
-                {restored ? "恢复任务" : "启动"}
-              </button>
-              {/* 快捷键说明独立一行（不进按钮，保持按钮视觉干净） */}
-              <div className="-mt-1.5 text-micro text-l4">
-                （{IS_MAC ? "⌘" : "Ctrl"} + Enter）
-              </div>
+              {agentProfiles.length === 0 ? (
+                /* 无配置时主按钮换成有效引导（禁用的「启动」是死按钮，v3.92 修） */
+                <button
+                  type="button"
+                  onClick={() => setPage("profiles")}
+                  className="inline-flex h-9 w-2/3 cursor-pointer items-center justify-center rounded-md border border-cta-bd bg-cta text-sm text-cta-text hover:brightness-110"
+                >
+                  去配置页创建
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      restored ? void restoreTask() : void launch()
+                    }
+                    disabled={!profileId}
+                    className="inline-flex h-9 w-2/3 cursor-pointer items-center justify-center gap-2 rounded-md border border-cta-bd bg-cta text-sm text-cta-text hover:brightness-110 disabled:cursor-default disabled:opacity-50"
+                  >
+                    {restored ? "恢复任务" : "启动"}
+                    {/* 快捷键说明：括号小字随按钮文字整体居中，不加胶囊底色
+                        （18% 混合底在纯色按钮上是块显眼补丁，用户否为「色差」）；勿绝对定位钉右缘 */}
+                    <span className="text-micro opacity-80">
+                      （{IS_MAC ? "⌘ + Enter" : "Ctrl + Enter"}）
+                    </span>
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 onClick={() => void openShell()}
@@ -2861,7 +2918,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         return {
           ok: false,
           msg: "该 PDF 未登记为任何项目资源",
-          action: { label: "去工作区页登记", run: () => setPage("workspaces") },
+          action: { label: "去项目页登记", run: () => setPage("workspaces") },
         };
       }
       const read = await invoke<ProjectConfigReadDto>("read_project_config", {

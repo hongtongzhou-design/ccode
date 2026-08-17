@@ -14,6 +14,7 @@ import ArtifactChecklist, {
 import TaskCardsSection from "./TaskCardsSection";
 import ScheduleSection from "./ScheduleSection";
 import KickoffConfirmDialog from "./KickoffConfirmDialog";
+import { HoverTip, useHoverTip } from "./HoverTip";
 import { Checkbox, hoverRevealClass, NoticeBar } from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
@@ -21,8 +22,7 @@ import { startPipelineStep } from "../pipeline-start";
 import { upsertLitSourceSection } from "../task-md-sections";
 import { isDecisionsOnly } from "../step-decisions";
 import { normSep } from "../path-utils";
-import type { RunOverviewInput } from "../run-overview";
-import type {
+import type { RunOverviewInput } from "../run-overview";import type {
   DiscoveredResourceDto,
   ZoteroLibraryDto,
   EnsureGitDto,
@@ -43,6 +43,22 @@ const ctaSm =
   "inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
 const fieldSm =
   "h-7 rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
+
+// 家目录（项目路径缩略 ~ 显示用）：模块级缓存，全部项目组共用一次查询
+let homeDirPromise: Promise<string> | null = null;
+function getHomeDir(): Promise<string> {
+  homeDirPromise ??= invoke<string>("home_dir").catch(() => "");
+  return homeDirPromise;
+}
+/** 绝对路径缩略：家目录前缀 → ~（完整路径仍在外层 title 悬浮里） */
+export function abbrevHome(path: string, home: string): string {
+  if (!home) return path;
+  const h = home.replace(/[\\/]+$/, "");
+  if (path === h) return "~";
+  return path.startsWith(h + "/") || path.startsWith(h + "\\")
+    ? `~${path.slice(h.length)}`
+    : path;
+}
 /** 步进器带级整条虚线链：真实 6×6px 方块按 12px 等距（6px 块 + 6px 间隙）铺满整个带宽。
  *  块位以圆心为锚分段计算（圆是列中心，列等宽，段长相等）——每个圆两侧的断口、
  *  每个步骤之间的块数与间隙严格一致（按全局相位铺排时圆会随机截断方块，用户反馈不规则）。
@@ -114,61 +130,9 @@ function StepperChain({
   );
 }
 
-/** 步进器悬浮提示（应用内 tooltip）：fixed 定位不随滚动容器走，滚动/缩放即关。
- *  WKWebView 的原生 title 悬浮有平台差异（不渲染或移开后残留数秒），圆的悬浮统一走这里；
- *  事件一律挂在包裹 span 上，禁用按钮也能悬浮查看。 */
-function useHoverTip(ref: React.RefObject<HTMLElement | null>) {
-  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
-  useEffect(() => {
-    if (!tip) return;
-    const hide = () => setTip(null);
-    window.addEventListener("scroll", hide, true);
-    window.addEventListener("resize", hide);
-    return () => {
-      window.removeEventListener("scroll", hide, true);
-      window.removeEventListener("resize", hide);
-    };
-  }, [tip]);
-  const show = () => {
-    const el = ref.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    // 横向钳制在窗口内（tooltip max-w-72 半宽 144 + 边距）
-    const x = Math.min(
-      Math.max(r.left + r.width / 2, 150),
-      window.innerWidth - 150,
-    );
-    setTip({ x, y: r.bottom + 8 });
-  };
-  return { tip, show, hide: () => setTip(null) };
-}
-
-function HoverTip({
-  tip,
-  text,
-  warn,
-}: {
-  tip: { x: number; y: number } | null;
-  text: string;
-  /** 警告色小字行（如上游漂移提醒），附加在正文之后 */
-  warn?: string | null;
-}) {
-  if (!tip) return null;
-  return (
-    <div
-      role="tooltip"
-      className="pointer-events-none fixed z-50 max-w-72 -translate-x-1/2 whitespace-pre-line rounded-md border border-hairline ccode-float-surface px-2.5 py-1.5 text-left text-xs leading-5 text-l2"
-      style={{ left: tip.x, top: tip.y }}
-    >
-      {text}
-      {warn && <div className="text-warn-text">{warn}</div>}
-    </div>
-  );
-}
-
 /** 步进器单元格：只剩大圆节点（虚线链由 StepperChain 在带级统一铺满）。
  *  圆的包裹 span 带 strip 底色 + 两侧 6px 内边距形成遮罩，链条在圆处整齐断开。
- *  大圆的悬浮信息走应用内 tooltip（useHoverTip，fixed 定位、滚动即关、点击即关）：
+ *  大圆的悬浮信息走应用内 tooltip（useHoverTip，fixed 定位、滚动即关、点击即关，见 ./HoverTip）：
  *  原生 title 在 WKWebView 上行为不稳定（不渲染或移开后残留数秒串到相邻控件），
  *  状态/目录/agent/点击动作提示必须可见，且禁用按钮也能触发（事件挂在包裹 span 上）。 */
 function StepperCell({
@@ -380,6 +344,11 @@ export default function ProjectGroup({
   const registered = project !== null;
   const projectPath = project?.path ?? repoPath;
   const displayName = project?.name ?? repoName;
+  // 项目路径缩略显示（/Users/x/… → ~/…）：家目录模块级缓存，全组共用一次查询
+  const [homeDir, setHomeDir] = useState("");
+  useEffect(() => {
+    void getHomeDir().then(setHomeDir);
+  }, []);
 
   // ===== 档案卡（仅注册项目） =====
   const [cfg, setCfg] = useState<ProjectConfigDto | null>(null);
@@ -1447,10 +1416,10 @@ export default function ProjectGroup({
           </span>
         )}
         <span
-          className="min-w-0 truncate font-mono text-xs text-l4 opacity-70"
+          className="min-w-0 truncate font-mono text-xs text-l3"
           title={projectPath}
         >
-          {projectPath}
+          {abbrevHome(projectPath, homeDir)}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {!registered && (

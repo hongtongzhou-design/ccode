@@ -843,11 +843,6 @@ export default function StepFlow({
                     >
                       预览/编辑 TASK.md
                     </button>
-                    {draftHasBody && (
-                      <span className="text-xs text-l4">
-                        已编辑 · 开工以这份为准
-                      </span>
-                    )}
                   </span>
                 </div>
                 {chatOpen && (
@@ -893,11 +888,6 @@ export default function StepFlow({
                   >
                     预览/编辑 TASK.md
                   </button>
-                  {draftHasBody && (
-                    <span className="text-xs text-l4">
-                      已编辑 · 开工以这份为准
-                    </span>
-                  )}
                 </span>
               </div>
             )}

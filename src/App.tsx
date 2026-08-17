@@ -51,7 +51,7 @@ const NAV_GROUPS = [
   {
     label: "工作",
     items: [
-      { id: "workspaces", label: "工作区", icon: "⛁" },
+      { id: "workspaces", label: "项目", icon: "⛁" },
       { id: "terminal", label: "终端", icon: "⌨" },
       { id: "sessions", label: "对话", icon: "◔" },
     ],
@@ -337,7 +337,7 @@ function App() {
                   onClick={() => setPage("workspaces")}
                   title={
                     contextLabel
-                      ? `当前项目：${contextLabel.project}（点击回工作区页）`
+                      ? `当前项目：${contextLabel.project}（点击回项目页）`
                       : "还没有选中项目"
                   }
                   className="flex h-6 min-w-0 shrink items-center gap-1.5 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"

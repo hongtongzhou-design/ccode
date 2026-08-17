@@ -530,6 +530,10 @@ pub async fn ai_commit_message(
     tauri::async_runtime::spawn_blocking(move || {
         let cwd = crate::sessions::expand_tilde(&cwd);
         let (status, numstat, diff) = collect_commit_material(&cwd, paths.as_deref())?;
+        // 出站前脱敏（与会话摘要同一约束）：diff 可能含误提交的 .env / 粘进代码的密钥
+        let status = crate::sessions::redact_sensitive_text(&status);
+        let numstat = crate::sessions::redact_sensitive_text(&numstat);
+        let diff = crate::sessions::redact_sensitive_text(&diff);
         ai_prompt_impl(
             profiles,
             None,

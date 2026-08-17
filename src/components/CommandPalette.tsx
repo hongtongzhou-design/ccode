@@ -9,7 +9,7 @@ const PAGE_COMMANDS: {
   icon: string;
   hint: string;
 }[] = [
-  { id: "workspaces", label: "工作区", icon: "⛁", hint: "⌘1" },
+  { id: "workspaces", label: "项目", icon: "⛁", hint: "⌘1" },
   { id: "terminal", label: "终端", icon: "⌨", hint: "⌘2" },
   { id: "sessions", label: "对话", icon: "◔", hint: "⌘3" },
   { id: "profiles", label: "配置", icon: "⇄", hint: "⌘4" },

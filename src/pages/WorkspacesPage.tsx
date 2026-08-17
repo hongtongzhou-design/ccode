@@ -1913,7 +1913,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       <div className="min-w-0 flex-1 overflow-auto">
         <PageFrame width="wide">
       <PageHeader
-        title="工作区"
+        title="项目"
         meta={
           selectedGroup
             ? `${selectedGroup.project?.name ?? selectedGroup.repoName} · ${selectedGroup.list.length} 个任务`
@@ -2039,7 +2039,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             );
             return (
             <>
-            {/* 列表头部行始终渲染：「新建工作区」入口对无步骤项目与未注册分组同样可用；
+            {/* 列表头部行始终渲染（标题）；「新建工作区」按钮只在已有工作区时出现在行尾——
+                空列表时由下方虚线引导卡承载同一入口，同一视野不摆两个相同按钮（v3.92）；
+                无步骤项目与未注册分组同样适用（空态卡按钮对它们照常可用）。
                 有研究步骤时列表恒跟随聚焦步骤（v3.81 起无「全部」切换） */}
             <div className="flex items-center gap-2 pt-1">
               <span className="text-xs text-l3">
@@ -2048,23 +2050,36 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   : `工作区（${wsList.length}）`}
               </span>
               <div className="ml-auto flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => setNewWsRepoPath(selectedGroup.repoPath)}
-                  className={`${actionBtn} shrink-0`}
-                >
-                  新建工作区
-                </button>
+                {wsList.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setNewWsRepoPath(selectedGroup.repoPath)}
+                    className={`${actionBtn} shrink-0`}
+                  >
+                    新建工作区
+                  </button>
+                )}
               </div>
             </div>
             {wsList.length === 0 ? (
-              <p className="py-2 text-xs text-l4">
-                {selectedGroup.list.length === 0
-                  ? wsView.steps.length > 0
-                    ? "该项目还没有工作区，从上方研究步骤「开始」一键开步，或点右侧「新建工作区」。"
-                    : "该项目还没有工作区，点右侧「新建工作区」建一个。"
-                  : "该步骤还没有工作区，点流程线里的「开始」一键开步，或点右侧「新建工作区」。"}
-              </p>
+              /* 空状态改虚线引导卡（v3.92 走查）：纯文字行看起来像「没加载完」，
+                 虚线框 + 内嵌动作既填补视觉空白又直接给出下一步 */
+              <div className="mt-2 flex flex-col items-center gap-2 rounded-lg border border-dashed border-field px-4 py-6 text-center">
+                <p className="text-xs text-l3">
+                  {selectedGroup.list.length === 0
+                    ? wsView.steps.length > 0
+                      ? "该项目还没有工作区。从上方研究步骤点「开始」一键开步，或直接新建一个："
+                      : "该项目还没有工作区。"
+                    : "该步骤还没有工作区。点流程线里的「开始」一键开步，或直接新建一个："}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setNewWsRepoPath(selectedGroup.repoPath)}
+                  className={`${actionBtn} border border-field`}
+                >
+                  ＋ 新建工作区
+                </button>
+              </div>
             ) : (
             /* 工作区列表改卡片（去线条化，v3.85）：原 divide-y 细行叠成一串横线，
                是「界面很线条化」的主要来源之一。改为 strip 底色的独立卡 + 卡间留白，

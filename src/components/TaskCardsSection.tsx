@@ -567,7 +567,8 @@ export default function TaskCardsSection({
           这里把聚焦头与流程线并进同一张卡：卡头 = 步骤名 + 白话状态，卡身 = 流程线（含唯一主动作）。
           StepFlow 传 bare 去掉自带底色，由这张卡统一承载。 */}
       {focusStep && focusStepDto ? (
-        <div className="mt-2 rounded-lg bg-inset p-3">
+        /* shadow-sm：当前步骤卡是本屏唯一「现在该干嘛」答案，微弱投影把它从画布上抬起来（v3.92 走查） */
+        <div className="mt-2 rounded-lg bg-inset p-3 shadow-sm">
           <div className="mb-2 flex items-center gap-2">
           {onFocusIndex && (
             <button
