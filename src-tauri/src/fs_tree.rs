@@ -79,7 +79,9 @@ fn list_dir_sync(path: &str, show_hidden: bool) -> Result<Vec<DirEntryDto>, Stri
     let mut entries = Vec::new();
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if !show_hidden && name.starts_with('.') {
+        // .ccode 目录豁免：任务书草稿（drafts/）等是用户要找的内容，默认隐藏会让人找不到
+        // （预览关掉后只能从这里重新打开）；其余点开头条目照旧隐藏
+        if !show_hidden && name.starts_with('.') && name != ".ccode" {
             continue;
         }
         // 读不到元数据的条目（坏链接、权限不足）静默跳过
@@ -206,6 +208,11 @@ fn fs_noise_skip(path: &std::path::Path) -> bool {
     if s.contains("/.git/") || s.contains("/node_modules/") || s.contains("/target/") || s.contains("/dist/") {
         return true;
     }
+    // .ccode 豁免：drafts（任务书草稿）/help-wanted 等是应用自己展示的内容，
+    // AI 改稿必须能触发预览实时重载（「跟 AI 商量一下」的草稿就在 .ccode/drafts/ 下）
+    if s.contains("/.ccode/") {
+        return false;
+    }
     let mut idx = 0;
     while let Some(pos) = s[idx..].find("/.") {
         let abs = idx + pos;
@@ -287,13 +294,15 @@ mod tests {
         fs::write(dir.join("beta.txt"), "x").unwrap();
         fs::write(dir.join("Gamma.txt"), "x").unwrap();
         fs::write(dir.join(".hidden"), "x").unwrap();
+        fs::create_dir_all(dir.join(".ccode/drafts")).unwrap();
         let entries = list_dir_sync(dir.to_str().unwrap(), false).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, ["Alpha", "zeta", "beta.txt", "Gamma.txt"]);
+        assert_eq!(names, [".ccode", "Alpha", "zeta", "beta.txt", "Gamma.txt"]);
         assert!(entries[0].is_dir && entries[1].is_dir);
-        assert!(!entries[2].is_dir);
-        assert!(entries[2].modified.is_some());
+        assert!(!entries[3].is_dir);
+        assert!(entries[3].modified.is_some());
         assert!(!names.contains(&".hidden"), "默认不显示隐藏文件");
+        assert!(names.contains(&".ccode"), ".ccode 目录豁免默认隐藏");
         let with_hidden = list_dir_sync(dir.to_str().unwrap(), true).unwrap();
         assert!(with_hidden.iter().any(|e| e.name == ".hidden"));
         fs::remove_dir_all(&dir).ok();
@@ -407,6 +416,10 @@ mod fix_tests {
         assert!(fs_noise_skip(Path::new("/home/u/proj/target/debug/build/x")));
         assert!(fs_noise_skip(Path::new("/home/u/proj/dist/assets/index.js")));
         assert!(!fs_noise_skip(Path::new("/home/u/proj/.env")));
+        // .ccode 豁免：任务书草稿 AI 改稿要触发预览实时重载
+        assert!(!fs_noise_skip(Path::new("/home/u/proj/.ccode/drafts/lit-search.md")));
+        // 其他隐藏目录照旧过滤
+        assert!(fs_noise_skip(Path::new("/home/u/proj/.idea/workspace.xml")));
     }
 }
 

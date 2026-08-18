@@ -129,6 +129,10 @@ export interface PendingTerminal {
   /** 复用键：已有同 key 标签时切换到它而不是新开（「快速开聊」「跟 AI 商量一下」等
       重复入口防标签堆积）。仅内存匹配，不进重启持久化白名单（恢复占位不参与复用） */
   reuseKey?: string;
+  /** 步骤认领（「跟 AI 商量一下」）：启动 spawn 时以最终 agent/cwd 登记
+      claim_next_session_for_step，让会话归到该步骤（「本步骤的对话」按 stepName 过滤）。
+      不在发起时提前登记——启动栏还可改 agent/目录，spawn 时的实时值才作数 */
+  stepName?: string;
 }
 
 /** 工作区页 / 改动面板 → 终端全宽审阅视图的一次性交接。 */

@@ -1,4 +1,6 @@
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
+import { useRef } from "react";
+import { HoverTip, useHoverTip } from "./HoverTip";
 
 const WIDTHS = {
   narrow: "max-w-2xl",
@@ -71,6 +73,41 @@ export const searchFieldClass =
 /** hover 才现的低频操作：行挂 group，按钮用此类；键盘 Tab 聚焦（focus-visible）同样显示 */
 export const hoverRevealClass =
   "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
+
+/** 行内悬浮操作钮（v3.93）：自带「锚点上方」应用内 tooltip——原生 title 渲染在光标下方，
+ *  与胶囊动作栏视觉脱节；点击先收 tooltip 再透传事件（⋯ 要取按钮锚点定位菜单）。
+ *  点击区保持 h-7 w-7（≥28px 硬约束）。 */
+export function RowAction({
+  icon,
+  tip,
+  label,
+  onClick,
+}: {
+  icon: string;
+  tip: string;
+  label: string;
+  onClick: (e: MouseEvent<HTMLButtonElement>) => void;
+}) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const { tip: pos, show, hide } = useHoverTip(ref, true);
+  return (
+    <button
+      ref={ref}
+      type="button"
+      aria-label={label}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onClick={(e) => {
+        hide();
+        onClick(e);
+      }}
+      className="flex h-7 w-7 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1"
+    >
+      {icon}
+      <HoverTip tip={pos} text={tip} up />
+    </button>
+  );
+}
 
 /** 分段切换（状态筛选/时间范围）：胶囊行，选中 bg-seg-sel，未选中灰字 */
 export function SegTabs<T extends string>({

@@ -1,22 +1,13 @@
 /**
- * 每个 agent 的识别色：从现有设计令牌取色（低饱和、状态色系的浅字档），随主题联动。
- * 统计页进度条与对话页列表行 meta 共用（单一出处；新增 agent 在这里加一行）。
+ * agent 识别色模块：品牌色（AGENT_BRAND）为唯一在用的色相表——对话页列表行胶囊与
+ * 统计页进度条/圆点共用（单一出处；新增 agent 在这里加一行）。
+ * （v3.94 前另有一张随主题联动的令牌色表 AGENT_COLORS 供统计页进度条用，
+ *  用户拍板进度条改绑品牌色后已删。）
  */
-export const AGENT_COLORS: Record<string, string> = {
-  "claude-code": "var(--color-ok-text)",
-  codex: "var(--color-link)",
-  gemini: "var(--color-warn-text)",
-  qwen: "var(--color-err-text)",
-  opencode: "var(--color-add)",
-  kimi: "var(--color-tabline)",
-  grok: "var(--color-cta-pill-text)",
-  codebuddy: "var(--color-done)",
-  cursor: "var(--color-cta-bd)",
-};
 
 /**
  * 品牌色（固定 hex，不随主题变——同 file-icons.ts 的「固定识别色」先例）：
- * 对话列表的 agent 胶囊用这种色做文字 + 低透明底，扫一眼即可分家。
+ * 对话列表的 agent 胶囊（色字 + 10% 淡底）与统计页进度条/圆点共用，扫一眼即可分家。
  * 选色口径（v3.92 调）：低饱和中明度的「雾面色」（高饱和 500 档在浅色主题下发飘显廉价），
  * 尽量贴各家真实品牌色相（Claude 赤陶、Codex 紫、Kimi 青玉…），九家 hue 两两拉开；
  * 胶囊是「色字 + 10% 淡底」，深浅主题都要可读，禁走极端明暗。新 agent 加一行，别撞色。
@@ -39,9 +30,6 @@ export function fallbackAgentColor(id: string): string {
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
   return `hsl(${h % 360} 45% 65%)`;
 }
-
-export const agentColor = (id: string) =>
-  AGENT_COLORS[id] ?? fallbackAgentColor(id);
 
 export const agentBrand = (id: string) =>
   AGENT_BRAND[id] ?? fallbackAgentColor(id);

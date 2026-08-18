@@ -45,6 +45,14 @@ pub struct McpServerDto {
     /// 分发开关（agent id → 是否分发）
     #[serde(default)]
     pub apps: HashMap<String, bool>,
+    /// 全局启用开关（v3.93，matrix §10.2 预留字段落地）：false = 从所有 agent 移除条目
+    /// 但保留 apps 映射，重新启用时按原样重投；旧清单无此字段，serde 默认 true
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 // ===== 清单存储 =====
@@ -843,6 +851,7 @@ fn reverse_entry(agent: &str, name: &str, v: &serde_json::Value) -> McpServerDto
         url: String::new(),
         headers: vec![],
         apps: HashMap::new(),
+        enabled: true,
     };
     match agent {
         "opencode" => {
@@ -1034,6 +1043,7 @@ pub async fn save_mcp_server(
                 return Err(format!("已存在同名 server: {}", server.name));
             }
             server.apps = list[pos].apps.clone(); // 分发开关以开关命令为准，编辑不夹带
+            server.enabled = list[pos].enabled; // 全局启用开关同理（set_mcp_server_enabled 管辖）
             list[pos] = server.clone();
         }
         // 先重投放到已开启的 agent（内容跟随最新清单），全成功才落库——
@@ -1071,6 +1081,52 @@ pub async fn set_mcp_server_app(
         }
         apply_to_agent(&agent, &server, enabled)?;
         list[pos].apps.insert(agent, enabled);
+        write_store(&list)?;
+        Ok(list)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 全局启用开关（v3.93）：禁用 = 从所有已分发 agent 移除条目但保留 apps 映射
+///（下次启用按原样重投）；禁用的 EXTMOD 预检与 delete 同口径，启用（写入方向）
+/// 与 set_app 同口径不查外部修改
+#[tauri::command]
+pub async fn set_mcp_server_enabled(
+    id: String,
+    enabled: bool,
+    force: bool,
+) -> Result<Vec<McpServerDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut list = read_store()?;
+        let Some(pos) = list.iter().position(|s| s.id == id) else {
+            return Err("该 server 不存在（可能已删除）".into());
+        };
+        let server = list[pos].clone();
+        let targets: Vec<String> = server
+            .apps
+            .iter()
+            .filter(|(_, on)| **on)
+            .map(|(a, _)| a.clone())
+            .collect();
+        if !enabled && !force {
+            let modified: Vec<String> = targets
+                .iter()
+                .filter_map(|a| {
+                    entry_modified_externally(a, &server)
+                        .ok()
+                        .filter(|m| *m)
+                        .map(|_| a.clone())
+                })
+                .collect();
+            if !modified.is_empty() {
+                return Err(format!("EXTMOD:{}", modified.join("、")));
+            }
+        }
+        for agent in &targets {
+            apply_to_agent(agent, &server, enabled)?;
+        }
+        list[pos].enabled = enabled;
         write_store(&list)?;
         Ok(list)
     })
@@ -1298,6 +1354,7 @@ mod tests {
             url: String::new(),
             headers: vec![],
             apps: HashMap::new(),
+            enabled: true,
         }
     }
 
@@ -1316,6 +1373,7 @@ mod tests {
                 value: "Bearer ${MCP_TOKEN}".into(),
             }],
             apps: HashMap::new(),
+            enabled: true,
         }
     }
 
@@ -1582,4 +1640,295 @@ pub async fn mcp_distribution_status(
     })
     .await
     .map_err(|e| format!("查询 MCP 分发状态失败: {e}"))?
+}
+
+// ===== 连通性健康检测（v3.93） =====
+
+/// check_mcp_server 的返回：ok + 耗时 + 失败原因 + 附加说明（serverInfo / HTTP 状态）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpHealthDto {
+    pub ok: bool,
+    /// 握手/请求耗时（毫秒）
+    pub latency_ms: u64,
+    /// 失败原因（路径无效 / 超时 / 连接拒绝…）；成功为 null
+    pub error: Option<String>,
+    /// 成功时的附加信息：stdio = serverInfo.name@version；remote = HTTP 状态行
+    pub detail: Option<String>,
+}
+
+fn health_ok(started: std::time::Instant, detail: Option<String>) -> McpHealthDto {
+    McpHealthDto {
+        ok: true,
+        latency_ms: started.elapsed().as_millis() as u64,
+        error: None,
+        detail,
+    }
+}
+
+fn health_fail(started: std::time::Instant, error: String) -> McpHealthDto {
+    McpHealthDto {
+        ok: false,
+        latency_ms: started.elapsed().as_millis() as u64,
+        error: Some(error),
+        detail: None,
+    }
+}
+
+/// env/header 值注入前的宿主展开：整值引用（$VAR/${VAR}，env_ref 同口径）查宿主环境，
+/// 字面值原样；引用未设置的变量返回 Err(变量名)（检测照常跑，失败时附加提示）
+fn inject_pair(
+    envs: &mut Vec<(String, String)>,
+    missing: &mut Vec<String>,
+    key: &str,
+    value: &str,
+) {
+    match env_ref(value) {
+        Some(var) => match std::env::var(var) {
+            Ok(v) => envs.push((key.to_string(), v)),
+            Err(_) => missing.push(var.to_string()),
+        },
+        None => envs.push((key.to_string(), value.to_string())),
+    }
+}
+
+fn append_missing_hint(error: String, missing: &[String]) -> String {
+    if missing.is_empty() {
+        error
+    } else {
+        format!("{error}（另：环境变量 {} 未设置）", missing.join("、"))
+    }
+}
+
+/// MCP initialize 请求体（stdio 与 remote 共用）
+fn initialize_body() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": { "name": "ccode-healthcheck", "version": "0.1.0" }
+        }
+    })
+}
+
+/// stdio 检测：按分发同一口径解析命令（resolve_command_deep 含 node shim 深化）→
+/// 拉起进程 → stdin 写 initialize 帧 → 8s 内等首帧响应。覆盖最常见断连：
+/// 路径失效/node 缺失（spawn ENOENT）、进程秒退、协议不应答（超时）。
+fn check_stdio(server: &McpServerDto) -> McpHealthDto {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::Stdio;
+    let started = std::time::Instant::now();
+    let (cmd, args) = resolve_command_deep(&server.command, &server.args);
+    let mut command = crate::process::background_command(&cmd);
+    command
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // 与终端拉起同一环境纪律：NO_COLOR 移除、TERM/COLORTERM 显式设置
+        .env_remove("NO_COLOR")
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .env("TERM_PROGRAM", "Ccode");
+    if !server.cwd.trim().is_empty() {
+        command.current_dir(server.cwd.trim());
+    }
+    let mut missing: Vec<String> = Vec::new();
+    let mut envs: Vec<(String, String)> = Vec::new();
+    for pair in &server.env {
+        inject_pair(&mut envs, &mut missing, &pair.key, &pair.value);
+    }
+    command.envs(envs);
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return health_fail(
+                started,
+                append_missing_hint(format!("命令不存在或路径失效：{cmd}"), &missing),
+            );
+        }
+        Err(e) => {
+            return health_fail(
+                started,
+                append_missing_hint(format!("命令启动失败（{cmd}）：{e}"), &missing),
+            );
+        }
+    };
+    let body = initialize_body().to_string();
+    let mut stdin = child.stdin.take().expect("stdin 已 pipe");
+    if let Err(e) = stdin
+        .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+        .and_then(|_| stdin.write_all(body.as_bytes()))
+        .and_then(|_| stdin.flush())
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return health_fail(
+            started,
+            append_missing_hint(format!("写入 initialize 失败（进程可能已退出）：{e}"), &missing),
+        );
+    }
+    // 响应读取搬进线程，主线程 recv_timeout 实现 8s 上限（CI 不挂死兜底）
+    let mut stdout = child.stdout.take().expect("stdout 已 pipe");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let r = (|| -> Result<String, String> {
+            let mut reader = BufReader::new(&mut stdout);
+            let mut content_len: Option<usize> = None;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    return Err("进程未响应就退出了".into());
+                }
+                let t = line.trim();
+                if t.is_empty() {
+                    if content_len.is_some() {
+                        break;
+                    }
+                    continue;
+                }
+                if let Some(rest) = t.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_len = rest.trim().parse().ok();
+                }
+            }
+            let len = content_len.ok_or("响应缺少 Content-Length 头")?;
+            let mut buf = vec![0u8; len.min(1024 * 1024)];
+            reader.read_exact(&mut buf).map_err(|e| e.to_string())?;
+            String::from_utf8(buf).map_err(|e| e.to_string())
+        })();
+        let _ = tx.send(r);
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(8));
+    let _ = child.kill();
+    let mut err_text = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut err_text);
+    }
+    let _ = child.wait();
+    match outcome {
+        Ok(Ok(frame)) => match serde_json::from_str::<serde_json::Value>(&frame) {
+            Ok(v) => {
+                if let Some(err) = v.get("error") {
+                    return health_fail(
+                        started,
+                        append_missing_hint(format!("server 拒绝 initialize：{err}"), &missing),
+                    );
+                }
+                let info = v.pointer("/result/serverInfo");
+                let detail = info.map(|i| {
+                    format!(
+                        "{}{}",
+                        i.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                        i.get("version")
+                            .and_then(|n| n.as_str())
+                            .map(|v| format!("@{v}"))
+                            .unwrap_or_default()
+                    )
+                });
+                health_ok(started, detail.filter(|d| !d.is_empty()))
+            }
+            Err(e) => health_fail(
+                started,
+                append_missing_hint(format!("响应不是合法 JSON-RPC 帧：{e}"), &missing),
+            ),
+        },
+        Ok(Err(e)) => health_fail(
+            started,
+            append_missing_hint(
+                if err_text.trim().is_empty() {
+                    e
+                } else {
+                    let tail: String = err_text
+                        .trim()
+                        .chars()
+                        .rev()
+                        .take(200)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    format!("{e}；stderr 末尾：{tail}")
+                },
+                &missing,
+            ),
+        ),
+        Err(_) => health_fail(
+            started,
+            append_missing_hint("8 秒未响应 initialize（超时）".to_string(), &missing),
+        ),
+    }
+}
+
+/// remote 检测：POST initialize（MCP streamable HTTP 口径，Accept 双类型）。
+/// 2xx/3xx/4xx 都算「服务在线」（4xx 多为鉴权/协商问题，传输层本身是通的），
+/// 5xx 与网络错误才算异常。
+async fn check_remote(server: &McpServerDto) -> McpHealthDto {
+    let started = std::time::Instant::now();
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return health_fail(started, format!("HTTP 客户端初始化失败：{e}")),
+    };
+    let mut req = client
+        .post(server.url.trim())
+        .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+        .json(&initialize_body());
+    let mut missing: Vec<String> = Vec::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for pair in &server.headers {
+        inject_pair(&mut pairs, &mut missing, &pair.key, &pair.value);
+    }
+    for (k, v) in pairs {
+        req = req.header(k, v);
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let detail = format!("HTTP {status}");
+            if status.is_server_error() {
+                health_fail(started, append_missing_hint(detail, &missing))
+            } else {
+                health_ok(started, Some(detail))
+            }
+        }
+        Err(e) => {
+            let why = if e.is_timeout() {
+                "8 秒超时".to_string()
+            } else if e.is_connect() {
+                format!("连接失败（服务未启动或地址错误）：{e}")
+            } else {
+                format!("请求失败：{e}")
+            };
+            health_fail(started, append_missing_hint(why, &missing))
+        }
+    }
+}
+
+/// 现场连通性检测（行内 ⚡ / 状态点点按触发）：不进页面时自动跑——
+/// 拉起 N 个 stdio 进程的代价不该由打开页面承担，检测过才显示状态点
+#[tauri::command]
+pub async fn check_mcp_server(id: String) -> Result<McpHealthDto, String> {
+    let server = tauri::async_runtime::spawn_blocking(move || {
+        read_store()?
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| "该 server 不存在（可能已删除）".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if server.kind == "remote" {
+        Ok(check_remote(&server).await)
+    } else {
+        let s = server.clone();
+        tauri::async_runtime::spawn_blocking(move || check_stdio(&s))
+            .await
+            .map_err(|e| e.to_string())
+    }
 }

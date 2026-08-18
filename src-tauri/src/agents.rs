@@ -154,7 +154,23 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
     if let Some(spec) = agent_spec(&profile.agent) {
         match &spec.launch {
             LaunchSpec::Env(env) => {
-                apply_env_inject(&mut plan, env, profile, key.as_deref(), model)
+                apply_env_inject(&mut plan, env, profile, key.as_deref(), model);
+                // grok：把模型列表收敛进选择器——GROK_CONFIG 是 JSON overlay（深合并进 config.toml，
+                // 白名单含 models 表），allowed_models 支持精确名/通配；不注则 GROK_MODELS_BASE_URL
+                // 网关的全量目录（动辄几百个）全进选择器。空列表不注（allowed_models 空 = fail-closed
+                // 一个都不匹配）；选中模型兜底并入，防选择器与默认模型脱节
+                if profile.agent == "grok" && !profile.models.is_empty() {
+                    let mut allowed = profile.models.clone();
+                    if let Some(m) = model {
+                        if !allowed.iter().any(|x| x == m) {
+                            allowed.push(m.into());
+                        }
+                    }
+                    plan.env.push((
+                        "GROK_CONFIG".into(),
+                        serde_json::json!({ "models": { "allowed_models": allowed } }).to_string(),
+                    ));
+                }
             }
             LaunchSpec::ByProtocol(entries) => {
                 // 缺省 = 协议表第一个；未支持的取值（gemini/vertex-ai 暂不支持）也按第一个注入
@@ -1452,20 +1468,37 @@ mod tests {
 
     #[test]
     fn grok_plan_injects_xai_env() {
-        let p = profile("grok", Some("https://relay.example.com/v1"));
+        let mut p = profile("grok", Some("https://relay.example.com/v1"));
+        p.models = vec!["grok-code-fast-1".into(), "grok-4.5".into()];
         let plan = launch_plan(&p, Some("xai-secret".into()), Some("grok-code-fast-1"));
         assert!(plan
             .env
-            .contains(&("GROK_CLI_CHAT_PROXY_BASE_URL".into(), "https://relay.example.com/v1".into())));
+            .contains(&("GROK_MODELS_BASE_URL".into(), "https://relay.example.com/v1".into())));
         assert!(plan
             .env
             .contains(&("XAI_API_KEY".into(), "xai-secret".into())));
         assert!(plan
             .env
             .contains(&("GROK_DEFAULT_MODEL".into(), "grok-code-fast-1".into())));
+        // 模型列表经 GROK_CONFIG overlay 收敛进选择器（allowed_models）
+        let grok_config = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == "GROK_CONFIG")
+            .map(|(_, v)| v.clone())
+            .expect("grok 有模型列表时必须注入 GROK_CONFIG");
+        let v: serde_json::Value = serde_json::from_str(&grok_config).unwrap();
+        assert_eq!(
+            v["models"]["allowed_models"],
+            serde_json::json!(["grok-code-fast-1", "grok-4.5"])
+        );
         // 初始 prompt 是位置参数（一键开步注入）
         let plan = launch_plan_with_prompt(&p, Some("xai-secret".into()), None, Some("干活"));
         assert_eq!(plan.prompt_args, vec!["干活"]);
+        // 空模型列表不注入 GROK_CONFIG（allowed_models 空 = fail-closed 全不匹配）
+        let empty = profile("grok", Some("https://relay.example.com/v1"));
+        let plan = launch_plan(&empty, Some("xai-secret".into()), None);
+        assert!(!plan.env.iter().any(|(k, _)| k == "GROK_CONFIG"));
     }
 
     #[test]

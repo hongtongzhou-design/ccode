@@ -3,6 +3,7 @@ mod agents;
 mod ai;
 mod citation;
 mod claude_hooks;
+mod clipboard;
 mod diagnostics;
 mod fonts;
 mod fs_tree;
@@ -78,6 +79,7 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            clipboard::save_clipboard_image,
             pty::pty_set_visible,
             pty::pty_get_cwd,
             pty::pty_has_running_process,
@@ -92,6 +94,7 @@ pub fn run() {
             sessions::set_session_meta,
             sessions::assign_session_task,
             sessions::claim_next_session_for_card,
+            sessions::claim_next_session_for_step,
             sessions::delete_session,
             sessions::delete_project_sessions,
             sessions::session_tail_state,
@@ -110,7 +113,9 @@ pub fn run() {
             mcp::list_mcp_servers,
             mcp::save_mcp_server,
             mcp::set_mcp_server_app,
+            mcp::set_mcp_server_enabled,
             mcp::delete_mcp_server,
+            mcp::check_mcp_server,
             mcp::mcp_agent_status,
             mcp::discover_mcp_servers,
             mcp::import_mcp_from_agent,

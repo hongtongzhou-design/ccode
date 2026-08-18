@@ -11,6 +11,8 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { exit } from "@tauri-apps/plugin-process";
 import {
   isPermissionGranted,
@@ -21,9 +23,17 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { useAppStore } from "../store";
 import { IS_MAC } from "../hotkeys";
+import {
+  escapeShellPath,
+  firstImageItem,
+  imageExtFromMime,
+  joinDroppedPaths,
+  pasteImageFeedback,
+} from "../terminal-input";
 import { AGENTS } from "../types";
 import ConversationView from "../components/ConversationView";
 import { confirmDialog, alertDialog } from "../components/ConfirmDialog";
@@ -242,6 +252,7 @@ const TerminalView = memo(function TerminalView({
   initialPrompt: presetPrompt,
   readonly,
   restored,
+  stepClaimName,
   externalCwd,
   onConsumeExternalCwd,
   onStatus,
@@ -290,6 +301,8 @@ const TerminalView = memo(function TerminalView({
   readonly?: boolean;
   /** 应用重启后恢复出的占位标签；用户明确操作前不启动 PTY。 */
   restored?: boolean;
+  /** 步骤认领（「跟 AI 商量一下」）：launch 时以最终 agent/cwd 登记会话归该步骤 */
+  stepClaimName?: string;
   /** 最近项目「真进入」：把目标目录注入活动标签的启动栏（TerminalView 消费后清空） */
   externalCwd?: string | null;
   onConsumeExternalCwd?: () => void;
@@ -423,6 +436,70 @@ const TerminalView = memo(function TerminalView({
     x: number;
     y: number;
   } | null>(null);
+  // 终端画布右键菜单（复制/粘贴/全选/清屏/查找）
+  const [termCtxMenu, setTermCtxMenu] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  // 粘贴图片/拖入文件后的瞬态轻反馈（3s 自动消，重贴重置计时）
+  const [inputNote, setInputNote] = useState<string | null>(null);
+  const inputNoteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** 输入侧动作的瞬态轻反馈（参考配置页 notice 模式，只是更轻） */
+  function flashInputNote(text: string) {
+    setInputNote(text);
+    if (inputNoteTimer.current) clearTimeout(inputNoteTimer.current);
+    inputNoteTimer.current = setTimeout(() => setInputNote(null), 3000);
+  }
+
+  /** 剪贴板图片 → 落盘（save_clipboard_image）→ 绝对路径转义写进 PTY
+      （「路径文本」是九家 CLI 通吃的图片输入方式，各家升级行为见 matrix §11） */
+  async function pasteImageFile(file: File) {
+    const id = ptyIdRef.current;
+    if (!id) {
+      flashInputNote("终端未启动，无法粘贴");
+      return;
+    }
+    try {
+      const buf = await file.arrayBuffer();
+      const path = await invoke<string>("save_clipboard_image", {
+        bytes: Array.from(new Uint8Array(buf)),
+        ext: imageExtFromMime(file.type),
+      });
+      await invoke("pty_write", { ptyId: id, data: escapeShellPath(path) }).catch(
+        () => {},
+      );
+      flashInputNote(pasteImageFeedback(path));
+    } catch (reason) {
+      flashInputNote(`粘贴图片失败：${String(reason)}`);
+    }
+  }
+
+  /** 右键「粘贴」：先试 navigator.clipboard.read() 找图片条目（Chromium 支持）；
+      不支持/无图回落 readText 纯文本写 PTY（多行由 Rust 端自动 bracketed paste 包裹） */
+  async function pasteFromClipboard() {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const imgType = item.types.find((t) => t.startsWith("image/"));
+        if (imgType) {
+          const blob = await item.getType(imgType);
+          await pasteImageFile(new File([blob], "clipboard", { type: imgType }));
+          return;
+        }
+      }
+    } catch {
+      /* 当前 webview 不支持 read() 或权限被拒：回落文本 */
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return;
+      const id = ptyIdRef.current;
+      if (id)
+        await invoke("pty_write", { ptyId: id, data: text }).catch(() => {});
+    } catch {
+      flashInputNote("无法读取剪贴板");
+    }
+  }
 
   /** xterm 画布内的匹配高亮色（与主题无关，参照 VS Code Dark+ 查找高亮） */
   const SEARCH_OPTS = {
@@ -460,6 +537,7 @@ const TerminalView = memo(function TerminalView({
     if (!visible) {
       setSearchOpen(false);
       setTerminalActionMenu(null);
+      setTermCtxMenu(null);
     }
   }, [visible]);
 
@@ -554,7 +632,7 @@ const TerminalView = memo(function TerminalView({
   function useSkill(name: string) {
     const text = `使用 ${name} 技能：`;
     if (running && activePtyId) {
-      invoke("pty_write", { id: activePtyId, data: text }).catch(() => {});
+      invoke("pty_write", { ptyId: activePtyId, data: text }).catch(() => {});
     } else {
       setShowPrompt(true);
       setPromptText((t) => (t ? `${t}\n${text}` : text));
@@ -566,7 +644,7 @@ const TerminalView = memo(function TerminalView({
   function useMcp(name: string) {
     const text = `使用 ${name} 这个 MCP server 提供的工具：`;
     if (running && activePtyId) {
-      invoke("pty_write", { id: activePtyId, data: text }).catch(() => {});
+      invoke("pty_write", { ptyId: activePtyId, data: text }).catch(() => {});
     } else {
       setShowPrompt(true);
       setPromptText((t) => (t ? `${t}\n${text}` : text));
@@ -850,6 +928,9 @@ const TerminalView = memo(function TerminalView({
       fontWeightBold: 600,
       rescaleOverlappingGlyphs: true,
       drawBoldTextInBrightColors: true,
+      // 暗色 TUI 弱字（brightBlack 灰、dim 修饰）在深底上对比度过低发暗——
+      // 按 VS Code 终端同款默认 4.5 兜底提亮（只抬对比度不足的颜色，不改调色板定义）
+      minimumContrastRatio: 4.5,
       // Ink 类 TUI（Gemini CLI）整片高频重绘时，平滑滚动动画会叠加成闪烁——关闭
       smoothScrollDuration: 0,
       lineHeight: 1.2,
@@ -903,6 +984,29 @@ const TerminalView = memo(function TerminalView({
         setSearchOpen(true);
         return false;
       }
+      // macOS 贴图键透传：七家 CLI（claude/codex/gemini/qwen/opencode/kimi/codebuddy）
+      // 的剪贴板图片粘贴键是 Ctrl+V——CLI 收到按键后自己去读系统剪贴板；但网页侧
+      // Ctrl+V 在 WKWebView 里不产生 paste 事件也不进 PTY，须在键盘层改写为 \x16。
+      // 只拦 macOS：Windows 各家贴图用 Alt+V（本就透传为 ESC+v），
+      // Windows/Linux 的 Ctrl+V 保留文本粘贴语义（走下方 paste 事件路径）。
+      if (
+        IS_MAC &&
+        e.type === "keydown" &&
+        e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === "v"
+      ) {
+        const id = ptyIdRef.current;
+        if (id) {
+          // kimi 开了 kitty 键盘协议后只认 CSI-u（v=118 + ctrl 修饰位 5），
+          // 与同函数上方 Enter → \x1b[13u 同一改写模式——待实机验证
+          const data = agentId === "kimi" ? "\x1b[118;5u" : "\x16";
+          invoke("pty_write", { ptyId: id, data }).catch(() => {});
+        }
+        return false;
+      }
       // ⌘/Ctrl+Enter 空态直启：终端聚焦时按键到不了 window 监听，必须在 xterm 键盘层拦
       if (
         e.type === "keydown" &&
@@ -916,9 +1020,11 @@ const TerminalView = memo(function TerminalView({
       return true;
     });
 
-    // WebGL 加速失败、软件渲染（SwiftShader 等，闪烁）或上下文丢失时退回 xterm 默认渲染器。
+    // 渲染器选择：macOS 不用 WebGL——xterm 的字形图集→GPU 纹理采样在 WKWebView 里
+    // 整体偏软发糊（A/B 实测 DOM 渲染明显更锐利，Safari 同引擎复现一致）；
+    // Windows 保留 WebGL 加速，但软件渲染（SwiftShader 等，闪烁）或上下文丢失时退回默认渲染器。
     try {
-      if (!isSoftwareWebGL()) {
+      if (!IS_MAC && !isSoftwareWebGL()) {
         const webgl = new WebglAddon();
         webgl.onContextLoss(() => {
           webgl.dispose();
@@ -928,6 +1034,56 @@ const TerminalView = memo(function TerminalView({
     } catch {
       // GPU/驱动不支持时保持默认渲染器
     }
+
+    // 链接可点击：点击经 opener 插件打开系统浏览器（不泄进 PTY，与技能页同源）
+    term.loadAddon(
+      new WebLinksAddon((_event, uri) => {
+        void openUrl(uri);
+      }),
+    );
+
+    // 剪贴板图片粘贴：capture 阶段拦在 xterm 默认文本粘贴之前——
+    // 有 image/* 条目就落盘并把绝对路径写进 PTY；无图片则不干预（走默认文本粘贴）
+    const container = containerRef.current!;
+    const onPasteCapture = (e: ClipboardEvent) => {
+      const items = Array.from(e.clipboardData?.items ?? []);
+      const idx = firstImageItem(items);
+      if (idx < 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const file = items[idx].getAsFile();
+      if (file) void pasteImageFile(file);
+    };
+    container.addEventListener("paste", onPasteCapture, true);
+
+    // 文件拖入转路径：只响应落在本终端 rect 内的 drop（人工事项导入等其它
+    // 拖放监听按各自坐标域区分，互不拦截）；多路径 shell 转义后空格拼接，
+    // 不换行——只进输入框，避免误执行
+    const unlistenDrop = getCurrentWebviewWindow().onDragDropEvent((event) => {
+      if (event.payload.type !== "drop") return;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect || rect.width === 0) return; // display:none 的隐藏标签 rect 全 0
+      const scale = window.devicePixelRatio || 1;
+      const { x, y } = event.payload.position;
+      // Tauri 报物理像素 → CSS 像素换算；个别平台口径不一，两种都试（HumanTasksList 同款防御）
+      const hit = [
+        [x, y],
+        [x / scale, y / scale],
+      ].some(
+        ([px, py]) =>
+          px >= rect.left && px <= rect.right && py >= rect.top && py <= rect.bottom,
+      );
+      if (!hit) return;
+      const paths = event.payload.paths;
+      const text = joinDroppedPaths(paths);
+      if (!text) return;
+      const id = ptyIdRef.current;
+      if (id) {
+        invoke("pty_write", { ptyId: id, data: text })
+          .then(() => flashInputNote(`已写入 ${paths.length} 个路径`))
+          .catch(() => {});
+      }
+    });
 
     const onWinResize = () => {
       try {
@@ -962,6 +1118,8 @@ const TerminalView = memo(function TerminalView({
     return () => {
       window.removeEventListener("resize", onWinResize);
       resizeObs.disconnect();
+      container.removeEventListener("paste", onPasteCapture, true);
+      void unlistenDrop.then((f) => f());
       subs.forEach((s) => s.dispose());
       stopLinkTimer();
       // 释放 liveSessions 登记（「进行中」标记随标签消失）
@@ -1319,6 +1477,18 @@ const TerminalView = memo(function TerminalView({
     await cleanupPty();
     setLinkState("detecting");
     linkStartedAtRef.current = Date.now();
+    // 步骤认领（「跟 AI 商量一下」）：spawn 前以最终 agent/cwd 登记——此刻的值才是用户
+    // 在启动栏确认后的真实选择；会话归属由列表扫描命中后固化进 session_meta.step_name。
+    // 同标签重复启动（重启 agent 接着聊任务书）重新登记，新会话仍归该步骤
+    if (stepClaimName && !resumeId && !resumeSessionId) {
+      invoke("claim_next_session_for_step", {
+        agent: agentId,
+        cwd,
+        stepName: stepClaimName,
+      }).catch(() => {
+        // 登记失败静默降级：会话不归步骤，仍可在对话页全部列表里看到
+      });
+    }
     try {
       const res = await invoke<{
         ptyId: string;
@@ -1588,6 +1758,22 @@ const TerminalView = memo(function TerminalView({
       },
     },
     { label: "◎ 查找终端输出", onSelect: () => setSearchOpen(true) },
+  ];
+
+  // 终端画布右键菜单：复制按打开菜单那一刻的选区裁剪（setTermCtxMenu 触发重渲染即取到最新值）
+  const ctxSelection = termRef.current?.getSelection() ?? "";
+  const termCtxMenuItems = [
+    {
+      label: "复制",
+      disabled: !ctxSelection,
+      title: ctxSelection ? undefined : "先在终端里选中一段输出",
+      onSelect: () =>
+        void navigator.clipboard.writeText(ctxSelection).catch(() => {}),
+    },
+    { label: "粘贴", onSelect: () => void pasteFromClipboard() },
+    { label: "全选", onSelect: () => termRef.current?.selectAll() },
+    { label: "清屏", onSelect: () => termRef.current?.clear() },
+    { label: "查找输出", onSelect: () => setSearchOpen(true) },
   ];
 
   return (
@@ -1934,25 +2120,24 @@ const TerminalView = memo(function TerminalView({
         <div
           ref={containerRef}
           className="min-w-0 flex-1 overflow-hidden px-3 py-2.5"
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setTermCtxMenu({ x: e.clientX, y: e.clientY });
+          }}
         />
+        {/* 粘贴图片/拖入文件的瞬态轻反馈（不挡画布，3s 自消） */}
+        {inputNote && (
+          <div className="pointer-events-none absolute bottom-3 right-4 z-20 max-w-[80%] truncate rounded-sm border border-field ccode-float-surface px-2 py-1 text-xs text-l2">
+            {inputNote}
+          </div>
+        )}
         {/* 未启动空态引导（v3.91）：画布中央一张极简卡片，说清「现在该干嘛」。
             xterm 保持挂载在底层（移树会杀 PTY 语义）；浮层壳 pointer-events-none 不挡画布 */}
         {welcomeVisible && (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-            {/* 点阵网格垫底（v3.92）：破除纯色画布的平感又不像光晕那么抢眼，
-                颜色取 l1 令牌的 7% 混合，深浅主题/换主题色都跟随（不写死色值） */}
-            <div
-              aria-hidden="true"
-              className="absolute inset-0"
-              style={{
-                backgroundImage:
-                  "radial-gradient(circle, color-mix(in srgb, var(--color-l1) 7%, transparent) 1px, transparent 1px)",
-                backgroundSize: "18px 18px",
-              }}
-            />
             {/* 玻璃拟态卡：raised 85% + backdrop-blur（画布内容隐约透出）。
                 勾边（v3.93 微调）：l1 的 12% 混合——field 档在浅色主题偏蓝显脏，
-                hairline 档又会糊进 7% 的点阵，取两者之间的极浅中性边 */}
+                hairline 档又太弱，取两者之间的极浅中性边 */}
             <div
               className="pointer-events-auto relative flex w-88 flex-col items-center gap-3 rounded-lg border bg-raised/85 px-6 py-6 text-center shadow-lg backdrop-blur-xl"
               style={{
@@ -2032,6 +2217,14 @@ const TerminalView = memo(function TerminalView({
           items={terminalMenuItems}
         />
       )}
+      {termCtxMenu && (
+        <ContextMenu
+          x={termCtxMenu.x}
+          y={termCtxMenu.y}
+          onClose={() => setTermCtxMenu(null)}
+          items={termCtxMenuItems}
+        />
+      )}
     </div>
   );
 });
@@ -2067,6 +2260,9 @@ interface Tab {
   /** 复用键（pendingTerminal.reuseKey 透传）：同 key 的重复开聊请求切换到本标签。
       仅内存标记，不进重启持久化白名单（恢复出的占位标签不参与复用——会话已断，新开更诚实） */
   reuseKey?: string;
+  /** 步骤认领（pendingTerminal.stepName 透传）：launch 时以最终 agent/cwd 登记，
+      让该标签产出的会话归到该步骤。仅内存标记，不进重启持久化白名单 */
+  stepName?: string;
 }
 
 export default function TerminalPage({ visible }: { visible: boolean }) {
@@ -2688,6 +2884,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       readonly?: boolean;
       /** 复用键（pendingTerminal.reuseKey 透传）：重复入口切标签而不是新开 */
       reuseKey?: string;
+      /** 步骤认领（pendingTerminal.stepName 透传）：launch 时登记会话归步骤 */
+      stepName?: string;
     }): string => {
       const t: Tab = {
         id: crypto.randomUUID(),
@@ -2704,6 +2902,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         initialPrompt: init?.initialPrompt,
         readonly: init?.readonly,
         reuseKey: init?.reuseKey,
+        stepName: init?.stepName,
       };
       setTabs((prev) => [...prev, t]);
       setActiveId(t.id);
@@ -2719,6 +2918,25 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     },
     [addTab],
   );
+
+  // 从其他页面进入终端页：右栏默认收起，只剩终端——「默认可见」会在每次
+  // 切回来时摊开一个此刻没用途的面板。只有明确交接才开：预览请求（资源面板
+  // 「查看」）、pendingTerminal 指定右栏页签/预览（「主仓改动」提醒、开聊带开草稿）。
+  // 必须声明在下方交接消费 effect 之前：交接与切页是同一批 store 更新，
+  // 消费 effect 会立刻把 pendingTerminal/previewReq 置空——本 effect 用 getState 现查，
+  // 顺序反了会把刚按交接打开的预览面板又收掉（「跟 AI 商量一下」带开 TASK.md 曾被这样关掉）。
+  const prevVisibleRef = useRef(visible);
+  useEffect(() => {
+    const was = prevVisibleRef.current;
+    prevVisibleRef.current = visible;
+    if (!visible || was) return;
+    const st = useAppStore.getState();
+    const handoff =
+      st.previewReq !== null ||
+      st.pendingTerminal?.rightTab != null ||
+      st.pendingTerminal?.previewPath != null;
+    if (!handoff) setRightOpen(false);
+  }, [visible]);
 
   // 消费工作区页/会话页交来的终端启动请求（可见时才消费，保证标签能立刻聚焦启动栏）
   const pendingTerminal = useAppStore((s) => s.pendingTerminal);
@@ -2794,6 +3012,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         initialPrompt: pt.initialPrompt,
         readonly: pt.readonly,
         reuseKey: pt.reuseKey,
+        stepName: pt.stepName,
       });
       // run 脚本标签：登记 nonconcurrent 互斥追踪
       if (pt.wsId && tabId) setRunningScript(pt.wsId, tabId);
@@ -2835,23 +3054,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setFocusMode(false);
     setWorkspaceReviewRequest(null);
   }, [visible, workspaceReviewRequest, setWorkspaceReviewRequest]);
-
-  // 从其他页面进入终端页：右栏默认收起，只剩终端——「默认可见」会在每次
-  // 切回来时摊开一个此刻没用途的面板。只有明确交接才开：预览请求（资源面板
-  // 「查看」）、pendingTerminal 指定右栏页签/预览（「主仓改动」提醒、开聊带开草稿）。
-  // 用 getState 现查而非依赖顺序：交接与切页是同一批 store 更新。
-  const prevVisibleRef = useRef(visible);
-  useEffect(() => {
-    const was = prevVisibleRef.current;
-    prevVisibleRef.current = visible;
-    if (!visible || was) return;
-    const st = useAppStore.getState();
-    const handoff =
-      st.previewReq !== null ||
-      st.pendingTerminal?.rightTab != null ||
-      st.pendingTerminal?.previewPath != null;
-    if (!handoff) setRightOpen(false);
-  }, [visible]);
 
   // 首页「待你处理」交来的标签激活请求：跳到终端页并激活该标签（已关闭的标签静默忽略）
   const focusTabReq = useAppStore((s) => s.focusTabReq);
@@ -3558,6 +3760,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 initialPrompt={t.initialPrompt}
                 readonly={t.readonly}
                 restored={t.restored}
+                stepClaimName={t.stepName}
                 externalCwd={t.id === focusedId ? enterCwd : null}
                 onConsumeExternalCwd={consumeExternalCwd}
                 onStatus={reportStatus}

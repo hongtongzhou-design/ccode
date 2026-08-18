@@ -390,7 +390,9 @@ function App() {
                       </span>
                     </button>
                     {titleInboxCat === group.category && (
-                      <ul className="absolute left-0 top-full z-40 mt-1.5 max-h-80 w-[420px] max-w-[80vw] divide-y divide-hairline overflow-auto rounded-md border border-field ccode-float-surface">
+                      // 右缘锚定（right-0）：胶囊在标题栏右侧（ml-auto 后），left-0 向右展开
+                      // 420px 会超出视口右缘被窗口裁掉（v3.94 截图反馈）；向左展开永不越界
+                      <ul className="absolute right-0 top-full z-40 mt-1.5 max-h-80 w-[420px] max-w-[80vw] divide-y divide-hairline overflow-auto rounded-md border border-field ccode-float-surface">
                         {group.items.map((item) => (
                           <li
                             key={item.key}

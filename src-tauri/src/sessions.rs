@@ -3431,7 +3431,7 @@ pub(crate) fn open_db() -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// 老库补列（AI 摘要、接力来源、会话归卡）：已存在则报错忽略，幂等
+/// 老库补列（AI 摘要、接力来源、会话归卡、步骤归属）：已存在则报错忽略，幂等
 pub(crate) fn migrate_session_meta(conn: &Connection) {
     for col in [
         "summary TEXT",
@@ -3439,6 +3439,7 @@ pub(crate) fn migrate_session_meta(conn: &Connection) {
         "handoff_from_agent TEXT",
         "handoff_from_session TEXT",
         "task_id TEXT",
+        "step_name TEXT",
     ] {
         let _ = conn.execute_batch(&format!("ALTER TABLE session_meta ADD COLUMN {col}"));
     }
@@ -3454,12 +3455,14 @@ struct MetaRow {
     handoff_from: Option<(String, String)>,
     /// 会话归卡（任务卡 id）
     task_id: Option<String>,
+    /// 步骤认领固化后的步骤归属（「跟 AI 商量一下」等跑在项目根、落不到 worktree 的会话）
+    step_name: Option<String>,
 }
 
 fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
     let mut map = HashMap::new();
     let Ok(mut stmt) = conn
-        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session, task_id FROM session_meta")
+        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session, task_id, step_name FROM session_meta")
     else {
         return map;
     };
@@ -3475,10 +3478,11 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
             r.get::<_, Option<String>>(7)?,
             r.get::<_, Option<String>>(8)?,
             r.get::<_, Option<String>>(9)?,
+            r.get::<_, Option<String>>(10)?,
         ))
     });
     if let Ok(rows) = rows {
-        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session, task_id) in rows.flatten() {
+        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session, task_id, step_name) in rows.flatten() {
             map.insert(
                 (agent, sid),
                 MetaRow {
@@ -3489,6 +3493,7 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
                     summary,
                     handoff_from: hf_agent.zip(hf_session),
                     task_id,
+                    step_name,
                 },
             );
         }
@@ -3888,6 +3893,10 @@ fn apply_meta(
                 s.handoff_from_session = Some(hf_session.clone());
             }
             s.task_id = row.task_id.clone();
+            // 步骤归属兜底：worktree 命中（RX3a，扫描侧已填）优先，持久列只补项目根会话的空
+            if s.step_name.is_none() {
+                s.step_name = row.step_name.clone();
+            }
         }
     }
 }
@@ -3958,6 +3967,8 @@ pub async fn list_sessions() -> Vec<SessionMetaDto> {
         crate::handoff::apply_handoff(&conn, &mut sessions);
         // 卡片认领：从卡片发起聊天后的新会话归进该卡片
         apply_card_claims(&conn, &mut sessions);
+        // 步骤认领：「跟 AI 商量一下」等按步骤上下文发起的会话归进该步骤（没落 worktree 也能命中）
+        apply_step_claims(&conn, &mut sessions);
     }
     // 归卡回填在 db 块外：task_id 来自 meta，卡片名只读项目档案卡
     apply_task_names(&mut sessions);
@@ -4647,6 +4658,123 @@ pub(crate) fn apply_card_claims(conn: &Connection, sessions: &mut [SessionMetaDt
             params![claim.agent, claim.cwd],
         );
     }
+}
+
+// ===== 步骤认领（与卡片认领同构，v3.93）：从「跟 AI 商量一下」（方式二·聊着定）等按步骤上下文
+// 发起的会话，让该 agent 在该 cwd 的目标会话归到该步骤。与卡片同口径：命中后回填当次结果并固化进
+// session_meta.step_name（步骤名直接存字符串，步骤改名后旧归属自然滞留、不影响其他过滤），
+// 之后每轮列表由 apply_meta 持久列回填——否则对话页 8s 轮询的下一轮就丢掉归属。
+// 目的是让这类跑在项目根（不落步骤工作区 worktree）的商量会话也能被「本步骤的对话」捞到。 =====
+
+pub(crate) fn ensure_step_claim_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS step_claims(
+          agent TEXT NOT NULL, cwd TEXT NOT NULL, step_name TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(agent, cwd));",
+    )
+    .map_err(|e| format!("初始化 step_claims 表失败: {e}"))
+}
+
+/// 按步骤上下文发起会话前登记认领（「跟 AI 商量一下」共用）；同 agent+cwd 重复登记覆盖（以最后一次为准）。
+/// 登记不设过期：很久之后才产生的新会话也能命中（靠 created_at 时间口径排除登记前的旧会话）。
+#[tauri::command]
+pub fn claim_next_session_for_step(
+    agent: String,
+    cwd: String,
+    step_name: String,
+) -> Result<(), String> {
+    let step_name = step_name.trim();
+    if step_name.is_empty() {
+        return Err("步骤名不能为空".into());
+    }
+    let conn = open_db()?;
+    ensure_step_claim_table(&conn)?;
+    conn.execute(
+        "INSERT INTO step_claims(agent, cwd, step_name, created_at) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(agent, cwd) DO UPDATE SET step_name=?3, created_at=?4",
+        params![agent, cwd, step_name, now_iso()],
+    )
+    .map_err(|e| format!("登记步骤认领失败: {e}"))?;
+    Ok(())
+}
+
+struct StepClaim {
+    agent: String,
+    cwd: String,
+    step_name: String,
+    created_at: String,
+}
+
+fn read_step_claims(conn: &Connection) -> Vec<StepClaim> {
+    let Ok(mut stmt) =
+        conn.prepare("SELECT agent, cwd, step_name, created_at FROM step_claims")
+    else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok(StepClaim {
+            agent: r.get(0)?,
+            cwd: r.get(1)?,
+            step_name: r.get(2)?,
+            created_at: r.get(3)?,
+        })
+    });
+    rows.map(|rs| rs.flatten().collect()).unwrap_or_default()
+}
+
+/// 把步骤认领并入列表结果：对每条登记，找该 agent+cwd 下登记时间之后有活动、且尚未有步骤归属的
+/// 最新会话，回填 step_name、固化进 session_meta 并消费登记。已有步骤归属（worktree 命中或
+/// 此前固化）的会话不被抢占。
+pub(crate) fn apply_step_claims(conn: &Connection, sessions: &mut [SessionMetaDto]) {
+    if ensure_step_claim_table(conn).is_err() {
+        return;
+    }
+    for claim in read_step_claims(conn) {
+        let mut best: Option<usize> = None;
+        for (i, s) in sessions.iter().enumerate() {
+            // agent 不符或会话已有步骤归属（如 worktree 步骤命中的）不抢占
+            if s.agent != claim.agent || s.step_name.is_some() {
+                continue;
+            }
+            // 只认登记之后有活动的会话，避免把登记前就存在的旧会话误归进该步骤
+            if s.updated_at.as_deref().unwrap_or("") < claim.created_at.as_str() {
+                continue;
+            }
+            if !crate::handoff::cwd_matches(&s.project_path, &claim.cwd) {
+                continue;
+            }
+            if best.is_none_or(|b| sessions[b].updated_at < s.updated_at) {
+                best = Some(i);
+            }
+        }
+        let Some(i) = best else { continue };
+        let agent = sessions[i].agent.clone();
+        let session_id = sessions[i].session_id.clone();
+        sessions[i].step_name = Some(claim.step_name.clone());
+        // 固化完成即消费登记：步骤归属以 session_meta 为持久记录（与归卡同口径）
+        let _ = assign_session_step_at(conn, &agent, &session_id, &claim.step_name);
+        let _ = conn.execute(
+            "DELETE FROM step_claims WHERE agent=?1 AND cwd=?2",
+            params![claim.agent, claim.cwd],
+        );
+    }
+}
+
+/// 步骤认领固化：写 session_meta.step_name（内部函数，仅 apply_step_claims 消费时调用）。
+pub(crate) fn assign_session_step_at(
+    conn: &Connection,
+    agent: &str,
+    session_id: &str,
+    step_name: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO session_meta(agent, session_id, step_name) VALUES(?1, ?2, ?3)
+         ON CONFLICT(agent, session_id) DO UPDATE SET step_name=?3",
+        params![agent, session_id, step_name],
+    )
+    .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
+    Ok(())
 }
 
 // ===== 删除（用户显式发起，是只读原则的唯一例外） =====
@@ -5645,6 +5773,7 @@ mod tests {
                 summary: None,
                 handoff_from: None,
                 task_id: None,
+                step_name: None,
             },
         );
         apply_meta(&mut merged, &members, &meta);
@@ -6500,6 +6629,82 @@ mod tests {
         assert_eq!(sessions[1].task_id.as_deref(), Some("t-deleted"));
         assert_eq!(sessions[2].task_name, None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn apply_step_claims_fills_consumes_and_does_not_preempt() {
+        // 「跟 AI 商量一下」等按步骤上下文发起的会话：落在项目根也能归到该步骤，同时不抢占
+        // 既有 worktree 步骤归属、不把登记前的旧会话误归、不跨项目归。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_meta(
+              agent TEXT NOT NULL, session_id TEXT NOT NULL,
+              pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+              custom_title TEXT, tags TEXT NOT NULL DEFAULT '[]',
+              note TEXT, pinned_at TEXT,
+              PRIMARY KEY(agent, session_id));",
+        )
+        .unwrap();
+        migrate_session_meta(&conn);
+        ensure_step_claim_table(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO step_claims(agent, cwd, step_name, created_at)
+             VALUES('codex', '/proj', '文献检索与筛选', '2026-07-02T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // 命中：agent+cwd 匹配、登记之后有活动、无既有步骤归属
+        let mut hit = codex_meta("s-hit", "2026-07-03T00:00:00Z", None).0;
+        hit.project_path = "/proj".into();
+        // 登记前的旧会话：updated_at < created_at，不命中
+        let mut old = codex_meta("s-old", "2026-07-01T00:00:00Z", None).0;
+        old.project_path = "/proj".into();
+        // 已有 worktree 步骤归属：不抢占
+        let mut owned = codex_meta("s-owned", "2026-07-05T00:00:00Z", None).0;
+        owned.project_path = "/proj".into();
+        owned.step_name = Some("文献精读与笔记".into());
+        // 其它项目：cwd 不匹配
+        let mut elsewhere = codex_meta("s-else", "2026-07-05T00:00:00Z", None).0;
+        elsewhere.project_path = "/other".into();
+
+        let mut sessions = vec![elsewhere, owned, old, hit];
+        apply_step_claims(&conn, &mut sessions);
+        assert_eq!(sessions[3].step_name.as_deref(), Some("文献检索与筛选"));
+        assert_eq!(sessions[2].step_name, None, "登记前的旧会话不归该步骤");
+        assert_eq!(
+            sessions[1].step_name.as_deref(),
+            Some("文献精读与笔记"),
+            "既有 worktree 步骤归属不被抢占"
+        );
+        assert_eq!(sessions[0].step_name, None, "别项目会话不归");
+        // 消费：登记行已删，再次 apply 不重复生效
+        apply_step_claims(&conn, &mut sessions);
+        assert!(read_step_claims(&conn).is_empty(), "认领消费后登记清空");
+
+        // 持久化：归属已固化进 session_meta——下一轮列表（全新扫描、step_name 全空）
+        // 由 apply_meta 从持久列回填，对话页 8s 轮询不会丢归属
+        let mut next_round = vec![{
+            let mut s = codex_meta("s-hit", "2026-07-03T00:00:00Z", None).0;
+            s.project_path = "/proj".into();
+            s
+        }];
+        assert_eq!(next_round[0].step_name, None);
+        let meta = read_all_meta(&conn);
+        apply_meta(&mut next_round, &HashMap::new(), &meta);
+        assert_eq!(
+            next_round[0].step_name.as_deref(),
+            Some("文献检索与筛选"),
+            "步骤归属持久化进 session_meta，后续轮次由 apply_meta 回填"
+        );
+        // worktree 命中（扫描侧已填）优先于持久列，不被旧归属覆盖
+        next_round[0].step_name = Some("数据清洗".into());
+        apply_meta(&mut next_round, &HashMap::new(), &meta);
+        assert_eq!(
+            next_round[0].step_name.as_deref(),
+            Some("数据清洗"),
+            "worktree 步骤归属优先于持久列"
+        );
     }
 
     // ===== OpenCode =====

@@ -762,6 +762,19 @@ export interface McpServerDto {
   headers: McpEnvPair[];
   /** agent id → 是否分发到其用户级配置 */
   apps: Record<string, boolean>;
+  /** 全局启用开关（v3.93）：false = 已从所有 agent 移除条目但保留分发映射，重开按原样重投 */
+  enabled: boolean;
+}
+
+/** check_mcp_server 返回：连通性健康检测（v3.93） */
+export interface McpHealthDto {
+  ok: boolean;
+  /** 握手/请求耗时（毫秒） */
+  latencyMs: number;
+  /** 失败原因；成功为 null */
+  error: string | null;
+  /** stdio = serverInfo.name@version；remote = HTTP 状态行 */
+  detail: string | null;
 }
 
 // ===== 定时雷达（src-tauri/src/scheduler.rs） =====

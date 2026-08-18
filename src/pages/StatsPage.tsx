@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
 import type { UsageDayDto, UsageStatsDto } from "../types";
 import { axisLabels } from "../stats-trend";
-import { agentColor } from "../agent-colors";
+import { agentBrand } from "../agent-colors";
 import {
   Checkbox,
   EmptyState,
@@ -59,12 +59,13 @@ function SubscriptionCost() {
 
 const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
-/** agent 进度条色相：共享自 src/agent-colors.ts（与对话页列表行 meta 同一出处） */
+/** agent 进度条色相：v3.94 起走品牌色 AGENT_BRAND（与对话页胶囊同一出处，
+    共享自 src/agent-colors.ts；原令牌色 AGENT_COLORS 仅剩其它用途时保留） */
 
 /**
  * 每日用量折线（手绘 SVG，不引图表库）：
- * - 直折线段 + 淡色面积（用户拍板：不要平滑曲线，保留折线形式）
- * - 底部日期轴与数值 tooltip 默认不显示，悬停图表才淡入；
+ * - 直折线段 + 渐变面积（用户拍板：不要平滑曲线，保留折线形式；v3.94 面积改垂直渐变）
+ * - 底部日期轴常驻（v3.94 起：原「悬停才显」被用户否为不悬浮时无法定位时间节点）；
  *   跨度 ≤45 天按「MM-DD」标注，更久自动降为按月（跨年带年份）
  * - 悬停时显示竖向指示线 + 命中点 + 当日明细（合计 tokens / 费用）
  */
@@ -119,7 +120,15 @@ function DailyTrend({
           role="img"
           aria-label={`每日 token 折线，峰值 ${peak.toLocaleString()}`}
         >
-          <path d={area} className="fill-cta/10" />
+          {/* 面积填充走垂直渐变（折线处 15% → X 轴处 0%，Stripe/Vercel 式），
+              stop 引用 cta 令牌、随主题换色 */}
+          <defs>
+            <linearGradient id="dailyTrendFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stopColor="var(--color-cta)" stopOpacity="0.15" />
+              <stop offset="1" stopColor="var(--color-cta)" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <path d={area} fill="url(#dailyTrendFill)" />
           <path
             d={line}
             className="stroke-cta"
@@ -154,12 +163,8 @@ function DailyTrend({
           </>
         )}
       </div>
-      {/* 日期轴：默认不显示，悬停才淡入；占位行保留高度避免布局跳动 */}
-      <div
-        className={`relative mt-1 h-4 text-micro text-l4 transition-opacity duration-150 ${
-          hover === null ? "opacity-0" : "opacity-100"
-        }`}
-      >
+      {/* 日期轴常驻；nowrap：「08-15」的连字符是 CSS 断行机会，右端标签会在那里换行被截断 */}
+      <div className="relative mt-1 h-4 text-micro text-l4">
         {labels.map((l) => (
           <span
             key={l.index}
@@ -370,57 +375,67 @@ export default function StatsPage({ visible }: { visible: boolean }) {
         />
       ) : (
         <>
-          {/* 概览：大数字 + 小号灰标签两档（CAO 手法），不堆卡片边框 */}
-          <div className="mb-8 grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-5">
-            <div>
-              <div className="text-micro tracking-wider text-l4">
-                输入 tokens
+          {/* 概览 KPI 卡（v3.94，用户拍板卡片化取代纯文本平铺）：strip 底 + l1 12% 极浅勾边
+              （启动栏卡片同款精致边线，field 档浅色偏蓝、hairline 档糊进点阵）；
+              标签 text-xs font-medium + 最淡 l4，与 24px semibold 数字拉开层级；
+              费用卡的高亮两次迭代（cta-pill 蓝底、warn 琥珀底均被否为难看）后定为：
+              去底色、边框略粗一档（1px + l1 25% 勾边，介于全站 0.5px 与 2px 之间）——
+              走内联 style 不带 border 类，否则 App.css 全站 0.5px 覆写会把它压回去；
+              数字一律 tabular-nums */}
+          {(() => {
+            const cardCls =
+              "rounded-lg border bg-strip p-4 text-xs font-medium tracking-wider text-l4";
+            const numCls =
+              "mt-1 text-2xl font-semibold tracking-tight tabular-nums text-l1";
+            const cardEdge = {
+              borderColor: "color-mix(in srgb, var(--color-l1) 12%, transparent)",
+            };
+            return (
+              <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-5">
+                <div className={cardCls} style={cardEdge}>
+                  输入 tokens
+                  <div className={numCls}>{compact(stats.cards.input)}</div>
+                </div>
+                <div className={cardCls} style={cardEdge}>
+                  输出 tokens
+                  <div className={numCls}>{compact(stats.cards.output)}</div>
+                </div>
+                <div className={cardCls} style={cardEdge}>
+                  缓存读 tokens
+                  <div className={numCls}>{compact(stats.cards.cacheRead)}</div>
+                  <div className="mt-0.5 text-micro text-l4">
+                    缓存写 {compact(stats.cards.cacheWrite)}
+                  </div>
+                </div>
+                <div className={cardCls} style={cardEdge}>
+                  对话数
+                  <div className={numCls}>{compact(stats.cards.sessions)}</div>
+                </div>
+                <div
+                  className="rounded-lg bg-strip p-4 text-xs font-medium tracking-wider text-l4"
+                  style={{
+                    border:
+                      "1px solid color-mix(in srgb, var(--color-l1) 25%, transparent)",
+                  }}
+                >
+                  费用
+                  <div className={numCls}>
+                    {fmtCost(
+                      stats.cards.costUsd,
+                      currency,
+                      rate,
+                      stats.cards.costPartial,
+                    )}
+                  </div>
+                </div>
               </div>
-              <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
-                {compact(stats.cards.input)}
-              </div>
-            </div>
-            <div>
-              <div className="text-micro tracking-wider text-l4">
-                输出 tokens
-              </div>
-              <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
-                {compact(stats.cards.output)}
-              </div>
-            </div>
-            <div>
-              <div className="text-micro tracking-wider text-l4">
-                缓存读 tokens
-              </div>
-              <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
-                {compact(stats.cards.cacheRead)}
-              </div>
-              <div className="mt-0.5 text-micro text-l4">
-                缓存写 {compact(stats.cards.cacheWrite)}
-              </div>
-            </div>
-            <div>
-              <div className="text-micro tracking-wider text-l4">对话数</div>
-              <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
-                {compact(stats.cards.sessions)}
-              </div>
-            </div>
-            <div>
-              <div className="text-micro tracking-wider text-l4">费用</div>
-              <div className="mt-1 text-2xl font-semibold tracking-tight text-l1">
-                {fmtCost(
-                  stats.cards.costUsd,
-                  currency,
-                  rate,
-                  stats.cards.costPartial,
-                )}
-              </div>
-            </div>
-          </div>
+            );
+          })()}
 
           {/* 趋势（v3.88）：区间总数看不出「这周比上周多花多少」——这是统计页最核心的缺口。
               手绘 SVG 平滑折线，不引图表库（package.json 保持零图表依赖）；纯逻辑（平滑路径/
-              自适应日期轴）在 stats-trend.ts。日期轴与数值默认不显示，悬停图表才淡入。 */}
+              自适应日期轴）在 stats-trend.ts。日期轴常驻（v3.94 起，原悬停才显被否为定位不便），
+              数值 tooltip 仍悬停才淡入。 */}
           {stats.daily.length > 1 && (
             <section className="mb-6">
               <h2 className="mb-2 text-xs font-medium text-l3">
@@ -447,7 +462,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                     >
                       <span
                         className="size-2 shrink-0 rounded-full"
-                        style={{ backgroundColor: agentColor(a.agent) }}
+                        style={{ backgroundColor: agentBrand(a.agent) }}
                       />
                       <span className="w-24 shrink-0">
                         <span className="block text-l2">
@@ -460,22 +475,24 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                           {a.modelCount} 个模型
                         </span>
                       </span>
-                      <span className="h-2 min-w-0 flex-1 rounded-sm bg-hairline">
+                      {/* 轨道：inset 底（浅色≈近白浅槽/深色=微亮槽）全圆角；
+                          前景与圆点同绑品牌色（v3.94 起，与对话页胶囊同 AGENT_BRAND 口径） */}
+                      <span className="h-2 min-w-0 flex-1 rounded-full bg-inset">
                         <span
-                          className="block h-2 rounded-sm"
+                          className="block h-2 rounded-full"
                           style={{
                             width: `${Math.max(1.5, share * 100)}%`,
-                            backgroundColor: agentColor(a.agent),
+                            backgroundColor: agentBrand(a.agent),
                           }}
                         />
                       </span>
-                      <span className="w-16 shrink-0 text-right font-mono text-xs text-l2">
+                      <span className="w-16 shrink-0 text-right font-mono text-xs tabular-nums text-l2">
                         {compact(a.tokens)}
                       </span>
-                      <span className="w-12 shrink-0 text-right font-mono text-xs text-l4">
+                      <span className="w-12 shrink-0 text-right font-mono text-xs tabular-nums text-l4">
                         {(share * 100).toFixed(1)}%
                       </span>
-                      <span className="w-14 shrink-0 text-right text-xs text-l3">
+                      <span className="w-14 shrink-0 text-right font-mono text-xs tabular-nums text-l3">
                         {a.official ? (
                           <SubscriptionCost />
                         ) : (
@@ -516,13 +533,13 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                       >
                         {basename(p.projectPath)}
                       </td>
-                      <td className="px-2 py-2 text-right text-xs text-l3">
+                      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
                         {p.sessions}
                       </td>
-                      <td className="px-2 py-2 text-right font-mono text-xs text-l2">
+                      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l2">
                         {compact(p.tokens)}
                       </td>
-                      <td className="px-2 py-2 text-right text-xs text-l3">
+                      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
                         {p.official ? (
                           <SubscriptionCost />
                         ) : (
@@ -561,14 +578,14 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                         </span>
                       </td>
                       <td
-                        className="px-2 py-2 text-right font-mono text-xs text-l2"
+                        className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l2"
                         title={`输入 ${compact(w.tokensIn)} / 输出 ${compact(
                           w.tokensOut,
                         )}，${w.models} 个模型`}
                       >
                         {compact(w.tokensIn + w.tokensOut)}
                       </td>
-                      <td className="px-2 py-2 text-right text-xs text-l3">
+                      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
                         {w.official ? (
                           <SubscriptionCost />
                         ) : (
@@ -607,13 +624,13 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                       >
                         {m.model || "（未知）"}
                       </td>
-                      <td className="px-2 py-2 text-right font-mono text-xs text-l3">
+                      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
                         {compact(m.input)}
                       </td>
-                      <td className="px-2 py-2 text-right font-mono text-xs text-l3">
+                      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
                         {compact(m.output)}
                       </td>
-                      <td className="px-2 py-2 text-right text-xs text-l3">
+                      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
                         {fmtCost(m.costUsd, currency, rate, m.costPartial)}
                       </td>
                     </tr>

@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
-import type { McpEnvPair, McpServerDto } from "../types";
+import type { McpEnvPair, McpHealthDto, McpServerDto } from "../types";
 import { confirmDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
+import { HoverTip, useHoverTip } from "../components/HoverTip";
+import { mcpKindBadgeStyle, shortenCommand } from "../mcp-display";
 import {
   EmptyState,
   PageFrame,
@@ -12,9 +14,56 @@ import {
   secondaryActionClass,
   ghostActionClass,
   fieldClass,
+  RowAction,
   Toggle,
 } from "../components/PageFrame";
 import { MCP_PRESETS, type McpPreset } from "../mcp-presets";
+
+/** 行首健康状态点（v3.93）：未检测不渲染（无状态不渲染状态点）；检测过 = 绿/红点 + 延迟，
+ *  悬浮看 detail/error 全文，点击重新检测。⚡ 行内测试与这里是同一触发 */
+function HealthDot({
+  health,
+  onCheck,
+}: {
+  health: McpHealthDto | "checking" | undefined;
+  onCheck: () => void;
+}) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const { tip, show, hide } = useHoverTip(ref);
+  if (!health) return null;
+  const checking = health === "checking";
+  const ok = !checking && health.ok;
+  const text = checking
+    ? "正在检测连通性…"
+    : ok
+      ? `连通正常${health.detail ? ` · ${health.detail}` : ""} · ${health.latencyMs}ms\n点击重新检测`
+      : `${health.error ?? "检测失败"}\n点击重新检测`;
+  return (
+    <button
+      ref={ref}
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        onCheck();
+      }}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      aria-label={checking ? "正在检测" : ok ? "连通正常" : "未连通"}
+      className="flex h-7 w-4 shrink-0 items-center justify-center"
+    >
+      <span
+        className={`size-2 rounded-full ${
+          checking
+            ? "animate-pulse bg-l4"
+            : ok
+              ? "bg-ok-text"
+              : "bg-err-text"
+        }`}
+      />
+      <HoverTip tip={tip} text={text} />
+    </button>
+  );
+}
 
 /** 收编候选（后端 discover_mcp_servers） */
 interface DiscoveredMcp {
@@ -211,6 +260,8 @@ export default function McpPage({ visible }: { visible: boolean }) {
         url: f.url.trim(),
         headers: f.headers.filter((p) => p.key.trim()),
         apps: {},
+        // 新建默认启用；编辑时后端会以开关命令为准覆盖此值（编辑不夹带）
+        enabled: true,
       };
       setServers(
         await invoke<McpServerDto[]>("save_mcp_server", {
@@ -239,6 +290,65 @@ export default function McpPage({ visible }: { visible: boolean }) {
       }
     } finally {
       setSaving(false);
+    }
+  }
+
+  // 连通性检测结果缓存（server id → 结果 | 检测中）：仅手动触发（行内 ⚡ / 状态点点按），
+  // 不进页面自动全量跑——拉起 N 个 stdio 进程的代价不该由打开页面承担
+  const [health, setHealth] = useState<Record<string, McpHealthDto | "checking">>(
+    {},
+  );
+
+  /** 现场连通性检测：stdio = 拉起进程握手 initialize；remote = POST 探活（8s 上限） */
+  async function checkHealth(s: McpServerDto) {
+    setHealth((prev) => ({ ...prev, [s.id]: "checking" }));
+    try {
+      const h = await invoke<McpHealthDto>("check_mcp_server", { id: s.id });
+      setHealth((prev) => ({ ...prev, [s.id]: h }));
+    } catch (e) {
+      setHealth((prev) => ({
+        ...prev,
+        [s.id]: { ok: false, latencyMs: 0, error: String(e), detail: null },
+      }));
+    }
+  }
+
+  /** 全局启用/停用：停用从各 agent 移除条目但保留分发映射（重开按原样重投） */
+  async function setEnabled(s: McpServerDto, enabled: boolean, force = false) {
+    setError(null);
+    try {
+      setServers(
+        await invoke<McpServerDto[]>("set_mcp_server_enabled", {
+          id: s.id,
+          enabled,
+          force,
+        }),
+      );
+      setDistStatus((prev) => {
+        const next = { ...prev };
+        delete next[s.id];
+        return next;
+      });
+      toast(
+        enabled
+          ? `已启用「${s.name}」并按映射重新分发`
+          : `已停用「${s.name}」（分发映射保留，重新启用时恢复）`,
+      );
+    } catch (e) {
+      const msg = String(e);
+      if (msg.startsWith("EXTMOD:") && !force) {
+        const agents = msg.slice("EXTMOD:".length);
+        if (
+          await confirmDialog(
+            `「${s.name}」在这些 agent 的配置里已被外部修改：${agents}。停用会移除这些条目。仍要停用吗？`,
+            { danger: true },
+          )
+        ) {
+          return setEnabled(s, enabled, true);
+        }
+      } else {
+        setError(msg);
+      }
     }
   }
 
@@ -477,33 +587,94 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     onClick={() => setExpanded(open ? null : s.id)}
                   >
                     <span className="w-3 text-l4">{open ? "▾" : "▸"}</span>
-                    <span className="truncate text-sm text-l1">{s.name}</span>
-                    <span className="rounded-sm bg-inset px-1.5 py-0.5 text-micro text-l4">
+                    <HealthDot
+                      health={health[s.id]}
+                      onCheck={() => void checkHealth(s)}
+                    />
+                    <span
+                      className={`truncate text-sm ${s.enabled ? "text-l1" : "text-l4"}`}
+                    >
+                      {s.name}
+                    </span>
+                    {/* 协议徽章固定识别色（stdio 紫 / remote 蓝，mcp-display.ts） */}
+                    <span
+                      className="shrink-0 rounded-sm px-1.5 py-0.5 font-mono text-micro"
+                      style={mcpKindBadgeStyle(s.kind)}
+                    >
                       {s.kind}
                     </span>
-                    <span className="min-w-0 truncate font-mono text-xs text-l4">
+                    {/* 命令智能缩略（~/…/尾段），完整命令悬浮给全文 */}
+                    <span
+                      className="min-w-0 truncate font-mono text-xs text-l4"
+                      title={
+                        s.kind === "stdio"
+                          ? `${s.command} ${s.args.join(" ")}`.trim()
+                          : s.url
+                      }
+                    >
                       {s.kind === "stdio"
-                        ? `${s.command} ${s.args.join(" ")}`
+                        ? shortenCommand(s.command, s.args)
                         : s.url}
                     </span>
+                    {!s.enabled && (
+                      <span className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-micro text-l4">
+                        已停用
+                      </span>
+                    )}
                   </button>
-                  <span className="shrink-0 text-xs text-l4">
+                  {/* 已分发列可点（v3.93）：点击展开/收起分发网格（勾选在展开区） */}
+                  <button
+                    type="button"
+                    onClick={() => setExpanded(open ? null : s.id)}
+                    title="展开分发管理"
+                    className={`flex shrink-0 items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-xs hover:bg-hover ${
+                      onCount > 0 ? "text-l3" : "text-l4"
+                    }`}
+                  >
+                    {onCount > 0 && (
+                      <span className="size-1.5 rounded-full bg-ok-text" />
+                    )}
                     {onCount > 0 ? `已分发 ${onCount}` : "未分发"}
+                  </button>
+                  {/* 行内悬浮操作（v3.93）：⚡ 测试连通 / ✎ 编辑 / ✕ 删除。
+                      裸图标钮 hover 淡入，不套胶囊容器——本页是素列表行，
+                      raised 底 + 边框 + 投影的实体栏会与原层级脱节（技能页网格行才用胶囊栏） */}
+                  <div
+                    className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+                  >
+                    <RowAction
+                      icon="⚡"
+                      tip="测试连通性（stdio 拉起握手 / remote 探活）"
+                      label={`测试 ${s.name} 连通性`}
+                      onClick={() => void checkHealth(s)}
+                    />
+                    <RowAction
+                      icon="✎"
+                      tip="编辑"
+                      label={`编辑 ${s.name}`}
+                      onClick={() => setModal({ id: s.id, form: formFrom(s) })}
+                    />
+                    <RowAction
+                      icon="✕"
+                      tip="删除（同步从各 agent 配置移除）"
+                      label={`删除 ${s.name}`}
+                      onClick={() => void onDelete(s)}
+                    />
+                  </div>
+                  {/* 全局启用开关：停用不删配置，分发映射保留 */}
+                  <span
+                    title={
+                      s.enabled
+                        ? "停用：从各 agent 移除条目，分发映射保留"
+                        : "启用：按分发映射重新写入各 agent"
+                    }
+                  >
+                    <Toggle
+                      label={`${s.name} 启用开关`}
+                      checked={s.enabled}
+                      onChange={(v) => void setEnabled(s, v)}
+                    />
                   </span>
-                  <button
-                    type="button"
-                    className={`${ghostActionClass} opacity-0 group-hover:opacity-100 focus-visible:opacity-100`}
-                    onClick={() => setModal({ id: s.id, form: formFrom(s) })}
-                  >
-                    编辑
-                  </button>
-                  <button
-                    type="button"
-                    className={`${ghostActionClass} opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-err-text`}
-                    onClick={() => void onDelete(s)}
-                  >
-                    删除
-                  </button>
                 </div>
                 {open && (
                   <div className="mt-2 grid grid-cols-2 gap-1.5 px-1 pb-1 sm:grid-cols-4">

@@ -664,11 +664,13 @@ static AGENT_SPECS: &[AgentSpec] = &[
         binary: "grok",
         version_args: &["--version"],
         protocols: &[],
-        // xai-org/grok-build 源码调研（matrix §9）：key/model env 已核实；
-        // GROK_CLI_CHAT_PROXY_BASE_URL 是 CLI chat API 代理端点覆盖（对应 --cli-chat-proxy-base-url），
-        // 作为第三方端点注入通道待实机验证
+        // xai-org/grok-build 源码调研（matrix §9）+ 1.0.5 实机核实（自带 user-guide 11-custom-models.md）：
+        // base url 走 GROK_MODELS_BASE_URL——模型目录从 {base_url}/models 拉取、推理同走该 base，
+        // XAI_API_KEY 作 Bearer；GROK_DEFAULT_MODEL 只是「偏好」，会跟目录比对，不在目录里静默回退
+        // 默认模型——所以第三方模型必须配 GROK_MODELS_BASE_URL 让目录来自网关自身才能匹配上。
+        // （GROK_CLI_CHAT_PROXY_BASE_URL 是 xAI 内部 CLI chat API 代理覆盖口，不是推理端点，勿用）
         launch: LaunchSpec::Env(EnvInject {
-            base_url: Some("GROK_CLI_CHAT_PROXY_BASE_URL"),
+            base_url: Some("GROK_MODELS_BASE_URL"),
             key: Some("XAI_API_KEY"),
             model: Some("GROK_DEFAULT_MODEL"),
             fixed_env: &[],
@@ -913,7 +915,7 @@ mod tests {
         };
         assert_eq!(env.key, Some("XAI_API_KEY"));
         assert_eq!(env.model, Some("GROK_DEFAULT_MODEL"));
-        assert_eq!(env.base_url, Some("GROK_CLI_CHAT_PROXY_BASE_URL"));
+        assert_eq!(env.base_url, Some("GROK_MODELS_BASE_URL"));
         assert_eq!(
             spec.readonly_args,
             &["--permission-mode", "dontAsk", "--sandbox", "read-only"]

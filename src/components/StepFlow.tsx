@@ -219,10 +219,15 @@ export default function StepFlow({
       return;
     }
     setChatBusy(false);
+    // 步骤认领不在此登记：启动栏还可能改 agent/目录，改由终端页 spawn 时以最终值登记
+    // （pendingTerminal.stepName → TerminalView launch 时 invoke claim_next_session_for_step）。
+    // 它跑在项目根（只改 TASK.md，不落步骤工作区），不登记的话 stepName 为空，
+    // 「本步骤的对话」捞不到它。
     setPendingTerminal({
       cwd: projectPath,
       extraEnv: {},
       title: `${step.name} · 任务书`,
+      stepName: step.name,
       initialPrompt:
         `我们一起敲定「${step.name}」这一步的任务书（${draft.relPath}）。` +
         `它现在的内容就是 TASK.md 的默认拼装（步骤简报、预期产物等都在里面），定稿后会原样落成工作区的 TASK.md。` +

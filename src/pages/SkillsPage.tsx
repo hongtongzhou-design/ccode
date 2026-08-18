@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import type { MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -17,6 +16,7 @@ import {
   PageFrame,
   PageHeader,
   primaryActionClass,
+  RowAction,
   secondaryActionClass,
   searchFieldClass,
 } from "../components/PageFrame";
@@ -96,40 +96,6 @@ function AppliedCell({
           text={`已应用到：\n${appliedNames.join("、")}\n点击在右侧管理分发`}
         />
       )}
-    </button>
-  );
-}
-
-/** 行内悬浮操作钮（v3.93）：自带「锚点上方」应用内 tooltip——原生 title 渲染在光标下方，
- *  与胶囊动作栏视觉脱节；点击先收 tooltip 再透传事件（⋯ 要取按钮锚点定位菜单） */
-function RowAction({
-  icon,
-  tip,
-  label,
-  onClick,
-}: {
-  icon: string;
-  tip: string;
-  label: string;
-  onClick: (e: MouseEvent<HTMLButtonElement>) => void;
-}) {
-  const ref = useRef<HTMLButtonElement>(null);
-  const { tip: pos, show, hide } = useHoverTip(ref, true);
-  return (
-    <button
-      ref={ref}
-      type="button"
-      aria-label={label}
-      onMouseEnter={show}
-      onMouseLeave={hide}
-      onClick={(e) => {
-        hide();
-        onClick(e);
-      }}
-      className="flex h-7 w-7 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1"
-    >
-      {icon}
-      <HoverTip tip={pos} text={tip} up />
     </button>
   );
 }

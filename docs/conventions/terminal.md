@@ -10,6 +10,9 @@
   env/run 脚本；重开后为「上次任务，可恢复」占位，点击才建新 PTY；目录/profile 失效留在可编辑启动栏提示，禁自动换目标。
 - **预览编辑器不映射同名文件**：切项目/工作区/标签 cwd/树根时清空旧预览，由用户在新根重选，禁自动打开新根同相对路径
   文件；有未保存改动先确认，取消则不切根；主仓库文件保存按钮警示色 + 二次确认。
+- **`.ccode` 目录对「默认隐藏」豁免**：文件树 `list_dir` 在 `showHidden=false` 时仍显示 `.ccode`（任务书草稿
+  drafts/、help-wanted 等是用户要找的内容，预览关掉后只能从这里找回）；同一理由 `fs_noise_skip` 也豁免
+  `/.ccode/`——AI 改草稿必须能触发预览实时重载。其余点开头条目/隐藏目录照旧隐藏、照旧过滤。
 - **任务审阅 = 终端全宽覆盖层**：工作区行「评审」与终端「改动 → 审阅」同一视图，连续浏览累计 diff，可「提交并合并 /
   仅提交 / 合并并归档」；底下终端标签与 PTY 保持挂载。默认合并只落本地主分支并保留工作区，不自动推送；原「提交 /
   提交并推送」与工作区行合并/PR/归档/会话操作保留。`merged_at && ahead == 0` 时合并按钮禁用显示「已合并」，`ahead > 0` 恢复。
@@ -74,8 +77,13 @@
 - **右栏可调分栏，不新增普通内容全屏路由**：左缘拖拽调宽并记忆；**宽度上限不写死像素**（v3.60 前曾限 820px），
   随窗口自由拉宽、只给中带终端保留 340px 最小宽度（`TERMINAL_MIN_RESERVE`），下限 360px；宽屏动作暂隐工作树但保留终端，再执行恢复，双击
   对话/预览/改动页签同义；宽度变化必须触发 xterm 重新 fit；任务评审仍用全宽覆盖层。
-- **WebGL 渲染器加载前必须过 `isSoftwareWebGL` 探针**（TerminalPage.tsx）：Windows/WebView2 GPU 被拉黑时退回
-  SwiftShader 软件渲染，上下文能建但终端持续闪烁，try/catch 拦不住；探测失败同样不用 WebGL，勿删此兜底。
+- **渲染器按平台分流（实测定论，勿回退）**：macOS 不走 WebGL——xterm 的字形图集→GPU 纹理采样在
+  WKWebView 里整体偏软发糊（A/B 截屏实测 DOM 渲染明显更锐利，Safari 同引擎复现一致），故 macOS 直接用
+  xterm 默认 DOM 渲染器；Windows 保留 WebGL 加速，但加载前必须过 `isSoftwareWebGL` 探针（TerminalPage.tsx）：
+  Windows/WebView2 GPU 被拉黑时退回 SwiftShader 软件渲染，上下文能建但终端持续闪烁，try/catch 拦不住；
+  探测失败同样不用 WebGL，勿删此兜底。
+- **弱字亮度兜底 `minimumContrastRatio: 4.5`**（VS Code 终端同款默认值）：暗色主题下 brightBlack 灰字、
+  dim 修饰文本对比度不足发暗，xterm 自动提亮不达标的颜色；只作用于显示，不改调色板定义。
 - **运行中会话关联排他 + 复合键**：固定 session id 的 CLI 精确锁定；其余 CLI 启动前按 agent+归并后项目登记 claim，同批
   并发统一排序分配，已分配会话进程内不得转给另一标签；前端 live/open 一律以 agent+sessionId 为键，完整回放跳转前先刷新索引。
 
@@ -133,6 +141,29 @@
   （allowWindowCloseRef 防 onCloseRequested 重入）。Tauri 的 `onCloseRequested` 前端封装最终调用 `window.destroy()`，且确认后
   会调用 `window.close()`；`src-tauri/capabilities/default.json` 必须同时保留 `core:window:allow-destroy` 与
   `core:window:allow-close`，否则进入终端页挂载监听后窗口无法关闭。
+
+## 输入侧：图片粘贴 / 文件拖入 / 右键菜单 / 链接点击（2026-08-17）
+
+- **九家 CLI 图片输入的通吃口径 = 绝对路径文本写进 PTY**（各家升级行为分两派，明细见 matrix §11）；
+  macOS 直读剪贴板键是 Ctrl+V。机制明细：前端纯逻辑在 `src/terminal-input.ts`（`escapeShellPath`/`joinDroppedPaths`/
+  `firstImageItem`/`imageExtFromMime`/反馈文案，tests/terminal-input.test.ts），落盘在 `src-tauri/src/clipboard.rs`。
+- **paste 事件拦图片**：capture 阶段挂在 xterm 容器上，`clipboardData.items` 含 `image/*` 才
+  preventDefault + stopPropagation（拦掉 xterm 默认文本粘贴），落盘后把**转义绝对路径**写 PTY（不补换行、
+  不自动发送）；无图片一律不干预。终端未启动时提示「终端未启动，无法粘贴」，不落盘。
+- **macOS Ctrl+V 透传**：`attachCustomKeyEventHandler` 里拦 `keydown + 仅 ctrl + v` → `pty_write("\x16")`，
+  return false（网页侧 Ctrl+V 在 WKWebView 不产生 paste 事件也到不了 PTY；CLI 收到 \x16 自读系统剪贴板）。
+  **kimi 特判发 CSI-u `\x1b[118;5u`**（kitty 协议，v=118 + ctrl 修饰位 5，与同函数 Enter→`\x1b[13u` 同模式，
+  **待实机验证**）。非 mac 不拦：Windows 各家贴图用 Alt+V（本就透传为 ESC+v），Ctrl+V 保留文本粘贴语义。
+- **文件拖入转路径**：`getCurrentWebviewWindow().onDragDropEvent`（HumanTasksList 同款），只处理 `drop` 且
+  坐标命中本终端容器 rect（devicePixelRatio 两口径都试）；隐藏标签 rect 全 0 天然不响应；**只在自己 rect 内响应，
+  不 return 掉人工事项导入等其它监听**（按坐标域区分共存）。多路径 shell 转义后空格拼接，不换行防误执行。
+- **右键菜单**：容器 `onContextMenu` → 复用 `ContextMenu` 组件（复制按打开时选区裁剪 / 粘贴先试
+  `navigator.clipboard.read()` 找图片、回落 readText / 全选 / 清屏 / 查找输出）。**链接点击** =
+  `@xterm/addon-web-links`（0.12.0 配 xterm 6），点击 handler 走 `@tauri-apps/plugin-opener` 的 `openUrl`
+  （capabilities 已有 `opener:default`，与技能页同源，不另引入机制）。
+- **临时图片生命周期**：`save_clipboard_image(bytes, ext)` 落 `<config>/ccode/tmp/paste-<时间戳>-<随机>.<ext>`
+  （ext 白名单 png/jpg/jpeg/gif/webp，非法归 png；上限 50MB），每次调用顺带清理 7 天前 `paste-*`；**不加
+  arboard 依赖**（读剪贴板在前端 paste 事件完成，Rust 只收字节）。
 
 ## 其余终端工作台条目
 

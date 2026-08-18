@@ -47,7 +47,7 @@
 | 会话存储 | `~/.gemini/tmp/<slug>/chats/session-<时间>-<id8>.jsonl`；**slug 映射读 `~/.gemini/projects.json` 和目录内 `.project_root` 标记，不要自己推导**（旧版是 sha256 目录，有迁移） |
 | 会话格式 | JSONL。首行 metadata；消息 `{id, timestamp, content, type: user/info/error/warning/gemini}`，gemini 类型带 `toolCalls` 和 `tokens{input,output,cached,thoughts,tool,total}`；**控制记录 `$rewindTo`（截断后续消息）和 `$set`（patch 元数据）必须处理**，不能简单拼接。旧版单 JSON 文件仍需兼容。**易漂移** |
 | 关键启动参数 | `-m`、`-p`（进入 headless）、`--output-format stream-json`、`-r/--resume`、`--list-sessions` |
-| 坑 | **默认 30 天自动删除会话**（`general.sessionRetention`）；新目录首次运行有信任确认（`--skip-trust` 绕过）；管道 stdio 会静默进入 headless；会话文件边写边追加，末行可能残缺；**多模型切换无配置注入机制**（已核实），只能在 TUI 里 `/model set <id>` 手动切换 |
+| 坑 | **默认 30 天自动删除会话**（`general.sessionRetention`）；新目录首次运行有信任确认（`--skip-trust` 绕过）；管道 stdio 会静默进入 headless；会话文件边写边追加，末行可能残缺；**多模型切换无配置注入机制**（已核实），只能在 TUI 里 `/model set <id>` 手动切换。**0.46 实机核实补充**：`/model` 的「Select Model」选择器列表**硬编码**（main 视图 Auto/Manual 两项 + Manual 子视图官方模型），`GEMINI_MODEL` env 的值不进列表（优先级 `--model` > `GEMINI_MODEL` > settings `model.name`）；`/model set <id>` 零校验任意 id 当场生效。自定义模型进选择器的官方机制：`experimental.dynamicModelConfiguration: true` + `modelConfigs.modelDefinitions`（与内置表 merge，`tier:"custom"` + `isVisible:true` 进 Manual 子视图；实验开关，requiresRestart）。**闪烁**：inline 模式 UI 高度超终端行数即整区重绘（内置 useFlickerDetector 检测；上游已知问题簇，官方 Epic google-gemini/gemini-cli#10673，与终端种类无关，维护者背书 alternate buffer 可根治），缓解 = settings `ui.useAlternateBuffer: true`（默认 false；开了之后 `ui.incrementalRendering`（默认 true）才生效），可叠加 `ui.showSpinner: false` / `ui.loadingPhrases: "off"` |
 
 ## 4. Qwen Code
 
@@ -121,7 +121,7 @@
 | 项 | 值 |
 |---|---|
 | 二进制 / 检测 | **`grok`**（xAI 官方终端编码 agent，二进制也叫 grok）；`grok --version` 单行输出 `grok 0.2.180 (abc1234)`（非 stable 频道追加 ` [alpha]`）；`grok version --json` 给 `{"currentVersion":"X.Y.Z (commit)","channel":"stable"}`。官方安装落 `~/.grok/bin/grok`（另尝试 `~/.local/bin`、`/usr/local/bin` symlink；resolve_binary 已把 `~/.grok/bin` 收进三平台候选目录） |
-| 注入 env | **`XAI_API_KEY`**（别名 `GROK_CODE_XAI_API_KEY`）、模型 **`GROK_DEFAULT_MODEL`**、base url 覆盖 **`GROK_CLI_CHAT_PROXY_BASE_URL`**（对应 flag `--cli-chat-proxy-base-url`，是 CLI chat API 代理端点覆盖——作为第三方端点注入通道**待实机验证**）。凭证优先级：config.toml `api_key` > `env_key` > 登录 session token > `XAI_API_KEY` |
+| 注入 env | **`XAI_API_KEY`**（别名 `GROK_CODE_XAI_API_KEY`）、模型 **`GROK_DEFAULT_MODEL`**、base url 覆盖 **`GROK_MODELS_BASE_URL`**（1.0.5 实机核实，自带 user-guide 11-custom-models.md：模型目录从 `{base_url}/models` 拉取、推理同走该 base，`XAI_API_KEY` 作 Bearer；另可用 `GROK_MODELS_LIST_URL` 单独覆盖列表地址）。**`GROK_DEFAULT_MODEL` 只是「偏好」**：与可用模型目录比对，不在目录里走 `preferred model not in available models, falling back` 静默回退默认——第三方模型必须配 `GROK_MODELS_BASE_URL` 让目录来自网关自身。勿用 `GROK_CLI_CHAT_PROXY_BASE_URL`（xAI 内部 CLI chat API 代理覆盖口，非推理端点，第三方端点注进去模型流量不走它）。**模型列表收敛（1.0.5 实机核实）**：`GROK_CONFIG` env 是 JSON overlay 深合并进 config.toml（白名单含 `models` 表），注入 `{"models":{"allowed_models":[...]}}` 可把选择器/`-m` 可选范围收敛到 profile 模型列表（不注则网关全量目录进选择器；空列表勿注——fail-closed 全不匹配），选中模型兜底并入。凭证优先级：config.toml `api_key` > `env_key` > 登录 session token > `XAI_API_KEY` |
 | 官方端点 | xAI 官方 API 是 OpenAI chat_completions 兼容：`https://api.x.ai/v1`；config.toml `[model.<name>]` 的 `api_backend` 支持 chat_completions/responses/messages 三种 |
 | 全局配置 | `$GROK_HOME`（缺省 `~/.grok`，三平台同）下 `config.toml`（主配置 TOML：`[model.<name>]` 段 + `[mcp_servers.<name>]` 段）；项目级 `<cwd>/.grok/config.toml` 只贡献 `[mcp_servers]` 等少数段。**「设为全局默认」首版不支持**（TOML `[model.<name>]` 段结构 + 设为默认的字段未核实，风险高于收益；仅启动注入） |
 | 官方账号 | `grok login`（浏览器 OAuth，auth.x.ai）/ `grok login --device-auth` / `grok logout`；凭证落 `~/.grok/auth.json`（0600，顶层 map：scope → GrokAuth{key, auth_mode, refresh_token, expires_at}，grok 自己原子重写——我们只读）。官方账号拉起必须 `env_remove XAI_API_KEY`/`GROK_CODE_XAI_API_KEY` |
@@ -132,7 +132,7 @@
 | 技能 | `~/.grok/skills/<name>/SKILL.md`（目录+SKILL.md，与 Ccode SSOT 同构；另兼容读 `~/.claude/skills`、`~/.cursor/skills`）。首版未经实机验证，分发**强制 copy**（同 cursor 口径） |
 | MCP | `~/.grok/config.toml` 的 **`[mcp_servers.<name>]` 段（TOML，不是 JSON）**——stdio = `command`+`args[]`+`env{}`+`cwd`；远程 = `url`+`type`("http"/"sse"，省略时 url 以 /sse 结尾即 sse)+`headers{}`+`bearer_token_env_var`（env 读 token 注入 Authorization: Bearer，密钥不落盘）；通用 `enabled`/`startup_timeout_sec`/`tool_timeout_sec`；headers/env 值支持 `${VAR}` 引用。grok 另兼容读 `~/.claude.json`/`.mcp.json`/`~/.cursor/mcp.json`（可在 config 关）。**Ccode 首版：MCP 页只读清单（解析 TOML 段）+ 分发/写入不支持**（grok 自带 `grok mcp add` CLI；不为首版硬造 TOML 原子写管线） |
 | 安装 / 更新 | 官方脚本 `curl -fsSL https://x.ai/cli/install.sh \| bash`（mac/Linux/Git Bash）→ `~/.grok/bin/grok`；Windows `irm https://x.ai/cli/install.ps1 \| iex` → `%USERPROFILE%\.grok\bin\grok.exe`；**npm 官方包 `@xai-official/grok`**（postinstall 解压到 `~/.grok/bin/`）。自更新 `grok update`（非交互；`grok update --check --json` 机器可读）。Windows 支持官方称 best-effort |
-| 坑 | `auth.json` grok 自己原子重写（0600），我们只读；`session_search.sqlite` 不是会话本体；headless 不读 stdin；`--permission-mode plan` 门控链路未确认别用；base url 注入通道（GROK_CLI_CHAT_PROXY_BASE_URL）待实机验证 |
+| 坑 | `auth.json` grok 自己原子重写（0600），我们只读；`session_search.sqlite` 不是会话本体；headless 不读 stdin；`--permission-mode plan` 门控链路未确认别用；base url 注入必须走 `GROK_MODELS_BASE_URL`（见「注入 env」行），`GROK_CLI_CHAT_PROXY_BASE_URL` 是 xAI 内部代理口勿用；`GROK_DEFAULT_MODEL` 不在目录即静默回退 |
 
 ## 跨 agent 共性结论
 
@@ -173,7 +173,9 @@
 
 ### 10.2 条目 schema 映射（Ccode 统一模型 → 各家字段）
 
-Ccode 清单模型只收公共子集：stdio（command/args/env/cwd）+ remote（url/headers）+ enabled。映射表：
+Ccode 清单模型只收公共子集：stdio（command/args/env/cwd）+ remote（url/headers）+ enabled（v3.93 已落地：
+清单级全局开关，停用 = 从各 agent 移除条目但保留 apps 映射，重开按原样重投——各家条目 schema 无原生禁用字段，
+故不停用各家配置表达，codebuddy 的 `disabledMcpServers` / grok 的 `enabled` 暂不接入）。映射表：
 
 | Ccode 字段 | claude | codex (TOML) | gemini | qwen | opencode | kimi | codebuddy | cursor | grok (TOML，首版只读) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -195,3 +197,30 @@ Ccode 清单模型只收公共子集：stdio（command/args/env/cwd）+ remote�
 - **stdio 命令解析**（Ccode 侧分发义务）：裸命令名必须经 `resolve_binary` 落绝对路径（GUI/打包环境 PATH 短）；node 系 shim（`#!/usr/bin/env node` shebang 的脚本/symlink，如 npx）要再换成 node 绝对路径 + shim 真实路径首参，否则宿主 PATH 无 node 时 spawn ENOENT（实机踩坑：npx symlink → npx-cli.js，shebang 依赖 PATH 里的 node）。**相对路径命令（`./` `../` 开头）直接拒写报错**——基准是来源 CLI 的运行语境（如 codex 插件目录），分发到别家必 ENOENT，引导改绝对路径（2026-08-17 实机案例：codex 插件的 computer-use 以 `./…` 收编后分发 kimi 连不上）。
 - **kimi `/mcp-config` 交互编辑器实测坑**：曾把启动参数整体写进 `cwd` 字段（`"cwd": "-y <pkg> <dir>"`），spawn 时目录不存在报 ENOENT——报错文案指向 command 路径，极具迷惑性。遇到 kimi MCP ENOENT 先查 cwd 是否合法目录，再查命令路径。
 - **server 命名**：统一 `[A-Za-z0-9_-]`；gemini 额外要求**不含下划线**（policy 引擎按下划线切分 FQN，含下划线安全策略静默失效）。
+
+## 11. 图片输入实测表（2026-08-17 调研）
+
+九家 CLI **全部内建图片输入**，且「把图片/文件的绝对路径文本写进输入框」九家通吃——这是 Ccode 终端
+图片/文件输入的实现基础（paste 事件拦图片 → 落盘 → 路径写 PTY；macOS Ctrl+V 透传 `\x16` 由 CLI 自读剪贴板）。
+
+| CLI | 粘贴剪贴板图片（键位 + 机制） | 拖入图片 | @路径引用图片 | 模型能力门控 | 来源 |
+|---|---|---|---|---|---|
+| claude | macOS **Ctrl+V**（CLI 收到按键后自读系统剪贴板；Cmd+V 只在新版终端部分支持） | 拖入 = 路径文本，发送时升级为真附件 | 支持，自动升级为真附件 | 多模态模型才消费（当前默认模型均可） | [docs](https://docs.anthropic.com/en/docs/claude-code/interactive-mode) |
+| codex | macOS Ctrl+V（TUI 自读剪贴板）；Windows/Linux Alt+V | 路径文本 → 真附件 | 支持 | 取决于所配模型是否多模态 | [repo](https://github.com/openai/codex) |
+| gemini | macOS Ctrl+V；Windows Alt+V | 路径文本 | 路径原文进上下文，模型经工具读图 | 同左 | [repo](https://github.com/google-gemini/gemini-cli) |
+| qwen | 同 gemini（fork 同源键位） | 路径文本 | 路径原文 + 工具读图 | 同左 | [repo](https://github.com/QwenLM/qwen-code) |
+| opencode | macOS Ctrl+V；Windows Alt+V | 路径文本 → 真附件 | 支持 | 同左 | [docs](https://opencode.ai/docs/tui/) |
+| kimi | macOS Ctrl+V；Windows Alt+V | 路径文本 | 路径原文 + 工具读图 | 同左 | [repo](https://github.com/MoonshotAI/kimi-cli) |
+| codebuddy | macOS **Ctrl+V 与 Cmd+V 都认**；Windows Alt+V | 路径文本 | 路径原文 + 工具读图 | 同左 | [官网](https://www.codebuddy.ai) |
+| cursor | 剪贴板图片键位同上口径；路径引用为主 | 路径文本 | 路径原文 + 工具读图 | 同左 | [docs](https://cursor.com/docs/cli) |
+| grok | Ctrl+V（**另认 Cmd+V**，九家中仅 codebuddy/grok 两家） | 路径文本 → 真附件 | 支持 | 同左 | [repo](https://github.com/xai-org/grok-build) |
+
+要点：
+
+- **macOS 的网页侧坑**：Ctrl+V 在 WKWebView 里不产生 paste 事件也不进 PTY，Ccode 在键盘层改写为
+  `\x16` 透传（kimi 因 kitty 键盘协议改写为 CSI-u `\x1b[118;5u`，待实机验证）；Cmd+V / Chromium 的 Ctrl+V
+  走 paste 事件，有图片时拦下落盘转路径。Windows 各家贴图用 **Alt+V**（本就透传为 ESC+v，无需处理）。
+- **路径文本的升级行为分两派**：claude/codex/qwen/grok/opencode 会把输入框里的图片路径升级为真附件
+  （多模态直读）；gemini/kimi/codebuddy/cursor 是路径原文进上下文、模型经工具读图。两派用户体验等价，
+  Ccode 只需保证写进去的是**转义后的绝对路径**。
+- 临时落盘文件在 `<config>/ccode/tmp/paste-*`，保存时顺带清理 7 天前残留（clipboard.rs）。
