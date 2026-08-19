@@ -5,17 +5,20 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 // textLayer 的官方样式（选区/定位规则）；随本组件进懒加载 chunk
 import "pdfjs-dist/web/pdf_viewer.css";
 import SelectionFloatBar, { DistillSkillButton } from "./SelectionFloatBar";
+import { HoverTip, useHoverTip } from "./HoverTip";
+import { findGlossaryMatches, type GlossaryEntry } from "../reader";
 
 // vite 惯例：worker 走 ?url 资源，不进主包（本组件整体被动态 import）
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
-interface PdfBytesDto {
+export interface PdfBytesDto {
   data: string; // base64（macOS WKWebView 的 raw bytes 响应会退化成数字数组，故走字符串）
   size: number;
 }
 
-/** base64 → Uint8Array（atob 分块，避免大文件一次性函数调用栈/参数上限） */
-function base64ToBytes(b64: string): Uint8Array {
+/** base64 → Uint8Array（atob 分块，避免大文件一次性函数调用栈/参数上限）。
+ *  export：阅读区的连续滚动视图（PdfContinuousView）同链路复用 */
+export function base64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
   const CHUNK = 0x8000;
@@ -31,13 +34,15 @@ function basename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
-/** 单页视图：canvas 渲染 + textLayer 选区层；display:none 时保持已渲染内容不销毁 */
-function PdfPageView({
+/** 单页视图：canvas 渲染 + textLayer 选区层；display:none 时保持已渲染内容不销毁。
+ *  export：阅读区的连续滚动视图（PdfContinuousView）按页复用（active 恒 true） */
+export function PdfPageView({
   doc,
   pageNum,
   scale,
   active,
   renderKey,
+  glossTerms,
 }: {
   doc: pdfjs.PDFDocumentProxy;
   pageNum: number;
@@ -45,11 +50,15 @@ function PdfPageView({
   active: boolean;
   /** scale 之外的强制重渲染信号（适配宽度随容器尺寸变化） */
   renderKey: number;
+  /** 生词高亮术语表（阅读区 B3；空/缺省不高亮） */
+  glossTerms?: readonly GlossaryEntry[];
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
+  /** textLayer 渲染完成信号（计数器）：术语高亮等它落地后再跑 */
+  const [textRendered, setTextRendered] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +85,9 @@ function PdfPageView({
           viewport,
           transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
         });
+        // pdf.js 的 TextLayer 只往容器 append 不清空：重渲染前先清，
+        // 否则缩放/重排后选段与高亮都会叠出重复文本片
+        textRef.current!.replaceChildren();
         const text = new pdfjs.TextLayer({
           textContentSource: page.streamTextContent(),
           container: textRef.current!,
@@ -83,6 +95,7 @@ function PdfPageView({
         });
         textLayer = text;
         await Promise.all([renderTask.promise, text.render()]);
+        if (!cancelled) setTextRendered((c) => c + 1);
       } catch (e) {
         // 取消渲染不算错误（翻页/缩放打断上一帧）
         if (!cancelled && !(e instanceof pdfjs.RenderingCancelledException)) {
@@ -96,6 +109,49 @@ function PdfPageView({
       textLayer?.cancel();
     };
   }, [doc, pageNum, scale, renderKey]);
+
+  // 术语高亮：textLayer 落地后（或术语表增删后）对文本节点跑整词匹配，命中处包
+  // <span class="ccode-gloss">（点状下划线，悬停释义由 PdfContinuousView 事件代理出 HoverTip）；
+  // cleanup 先还原旧高亮再重包，幂等可重入
+  useEffect(() => {
+    const container = textRef.current;
+    if (!container || textRendered === 0 || !glossTerms || glossTerms.length === 0) {
+      return;
+    }
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    const nodes: Text[] = [];
+    while (walker.nextNode()) {
+      const n = walker.currentNode as Text;
+      if (!n.data.trim()) continue;
+      if (n.parentElement?.closest(".ccode-gloss")) continue;
+      nodes.push(n);
+    }
+    for (const node of nodes) {
+      const matches = findGlossaryMatches(node.data, glossTerms);
+      if (matches.length === 0) continue;
+      const frag = document.createDocumentFragment();
+      let pos = 0;
+      for (const m of matches) {
+        if (m.start > pos) {
+          frag.append(document.createTextNode(node.data.slice(pos, m.start)));
+        }
+        const span = document.createElement("span");
+        span.className = "ccode-gloss";
+        span.dataset.meaning = m.meaning;
+        span.textContent = node.data.slice(m.start, m.end);
+        frag.append(span);
+        pos = m.end;
+      }
+      frag.append(document.createTextNode(node.data.slice(pos)));
+      node.parentNode?.replaceChild(frag, node);
+    }
+    return () => {
+      container.querySelectorAll(".ccode-gloss").forEach((el) => {
+        el.replaceWith(...Array.from(el.childNodes));
+      });
+      container.normalize();
+    };
+  }, [textRendered, glossTerms]);
 
   return (
     <div
@@ -139,6 +195,7 @@ function PdfPreview({
   cwdHint,
   onAskAi,
   onOrganize,
+  onOpenReader,
 }: {
   path: string;
   /** 终端标签 cwd / 文件树根：后端白名单的第四类来源 */
@@ -156,6 +213,8 @@ function PdfPreview({
     page: number,
     fileName: string,
   ) => Promise<PdfActionResult>;
+  /** 「⛶ 沉浸阅读」入口（批次 B1 阅读区）：归属项目解析与失败提示由调用方负责 */
+  onOpenReader?: () => void;
 }) {
   const [doc, setDoc] = useState<pdfjs.PDFDocumentProxy | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -170,6 +229,9 @@ function PdfPreview({
   const [organizing, setOrganizing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 「⛶ 沉浸阅读」钮的应用内 tooltip（原生 title 在 WKWebView 上行为不稳定）
+  const readerBtnRef = useRef<HTMLButtonElement>(null);
+  const readerTip = useHoverTip(readerBtnRef);
   const scale = fixedScale ?? fitScale;
 
   const fileName = basename(path);
@@ -329,6 +391,21 @@ function PdfPreview({
           {fileName}
         </span>
         <span className="shrink-0 rounded-sm bg-inset px-1 text-l4">PDF</span>
+        {onOpenReader && (
+          <>
+            <button
+              ref={readerBtnRef}
+              type="button"
+              onMouseEnter={readerTip.show}
+              onMouseLeave={readerTip.hide}
+              onClick={onOpenReader}
+              className="flex h-6 shrink-0 items-center rounded-sm px-1.5 text-xs text-l3 hover:bg-hover hover:text-l1"
+            >
+              ⛶ 沉浸阅读
+            </button>
+            <HoverTip tip={readerTip.tip} text="笔记 · PDF · 对话 三栏并排" />
+          </>
+        )}
         {doc && (
           <span className="ml-auto flex shrink-0 items-center gap-1">
             <button

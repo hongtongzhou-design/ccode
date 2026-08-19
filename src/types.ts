@@ -785,6 +785,8 @@ export interface RunRecordDto {
   status: string;
   /** 脱敏后截断的简报/错误信息 */
   summary: string;
+  /** 本次巡检的新命中数（仅 lit-watch 类任务成功时有值；老记录缺省） */
+  newEntries?: number | null;
 }
 
 /** 定时任务（serde camelCase）；skill 目前固定 "lit-watch" */
@@ -805,6 +807,8 @@ export interface ScheduleDto {
   enabled: boolean;
   lastRunAt: string | null;
   lastStatus: string | null;
+  /** 关联步骤名（null/缺省 = 不关联）：雷达新命中晚于该步骤推进时给漂移提醒 */
+  linkedStep?: string | null;
   /** 最近 20 条，新的在前 */
   history: RunRecordDto[];
 }
@@ -818,9 +822,11 @@ export interface CreateScheduleInput {
   weekday?: number | null;
   hour: number;
   minute: number;
+  /** 关联步骤名（null/缺省 = 不关联） */
+  linkedStep?: string | null;
 }
 
-/** 更新补丁：字段全可选（不传 = 不改）；profileId 显式传 null = 清掉指定 profile 回到现解析 */
+/** 更新补丁：字段全可选（不传 = 不改）；profileId/linkedStep 显式传 null = 清掉回到未指定 */
 export interface UpdateSchedulePatch {
   name?: string;
   profileId?: string | null;
@@ -829,6 +835,7 @@ export interface UpdateSchedulePatch {
   hour?: number;
   minute?: number;
   enabled?: boolean;
+  linkedStep?: string | null;
 }
 
 /** scheduler-run-done 事件载荷（summary 已脱敏） */

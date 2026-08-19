@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   isPermissionGranted,
@@ -23,6 +24,7 @@ import ProjectGroup from "../components/ProjectGroup";
 import ArtifactChecklist from "../components/ArtifactChecklist";
 import TemplatePickModal from "../components/TemplatePickModal";
 import { filterWorkspacesByFocus } from "../workspace-visibility";
+import { buildWorkspaceTerminalRequest } from "../pipeline-start";
 import {
   EmptyState,
   fieldClass,
@@ -34,6 +36,7 @@ import {
   secondaryActionClass,
 } from "../components/PageFrame";
 import { attributeToProject, buildRunOverview } from "../run-overview";
+import { litInboxCandidates, type LitInboxCandidate } from "../lit-watch";
 import { IS_MAC } from "../hotkeys";
 import { AGENTS } from "../types";
 import type {
@@ -44,6 +47,8 @@ import type {
   ProjectConfigReadDto,
   ProjectDto,
   RunScriptDto,
+  ScheduleDto,
+  SchedulerRunDonePayload,
   WorkspaceDto,
   WorkspaceDriftDto,
   WorkspaceHealthDto,
@@ -309,28 +314,9 @@ function RenameProjectModal({
 function useOpenInTerminal() {
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
+  // 交接构造单一出处在 pipeline-start.ts（reuseKey 找回同工作区标签 + 无 prompt 时 resume 最近会话）
   return async (ws: WorkspaceDto, initialPrompt?: string) => {
-    const pairs = await invoke<[string, string][]>("workspace_env_for", {
-      worktreePath: ws.worktreePath,
-    });
-    const last = (() => {
-      try {
-        return JSON.parse(
-          localStorage.getItem(`ccode.wsLast.${ws.worktreePath}`) ?? "{}",
-        ) as Partial<{ agentId: string; profileId: string; model: string }>;
-      } catch {
-        return {};
-      }
-    })();
-    setPendingTerminal({
-      cwd: ws.worktreePath,
-      extraEnv: Object.fromEntries(pairs),
-      title: ws.name,
-      agentId: last.agentId,
-      profileId: last.profileId,
-      model: last.model,
-      initialPrompt,
-    });
+    setPendingTerminal(await buildWorkspaceTerminalRequest(ws, initialPrompt));
     setPage("terminal");
   };
 }
@@ -954,6 +940,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [artifactReady, setArtifactReady] = useState<PendingArtifactDto[]>([]);
   // agent 人工请求（.ccode/help-wanted.md，随 refresh 同频次拉取；失败静默下轮重试）
   const [helpRequests, setHelpRequests] = useState<HelpRequestDto[]>([]);
+  // 文献雷达新命中（收件箱「文献」胶囊）：随 refresh 同频次拉 schedules，判定纯逻辑在 lit-watch.ts
+  const [litCandidates, setLitCandidates] = useState<LitInboxCandidate[]>([]);
   // help: 条目屏蔽表（store 镜像 localStorage）：签名一致不生成条目，内容变了自动复现
   const helpDismissed = useAppStore((s) => s.helpDismissed);
   const dismissHelpRequest = useAppStore((s) => s.dismissHelpRequest);
@@ -1087,6 +1075,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       invoke<HelpRequestDto[]>("list_help_requests")
         .then(setHelpRequests)
         .catch(() => {});
+      // 文献雷达新命中（收件箱「文献」胶囊）：同频次拉取，失败静默（下轮重试）
+      invoke<ScheduleDto[]>("list_schedules")
+        .then((list) => setLitCandidates(litInboxCandidates(list)))
+        .catch(() => {});
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -1113,6 +1105,22 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     if (!visible) return;
     void refresh();
   }, [visible]);
+
+  // 定时巡检跑完：重拉 schedules 刷新收件箱「文献」胶囊（ScheduleSection 同款监听模式；
+  // 全局 OS 通知在 App.tsx 另行监听，这里只管收件箱条目）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<SchedulerRunDonePayload>("scheduler-run-done", () => {
+      invoke<ScheduleDto[]>("list_schedules")
+        .then((list) => setLitCandidates(litInboxCandidates(list)))
+        .catch(() => {});
+    })
+      .then((u) => (unlisten = u))
+      .catch(() => {});
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   async function onRestore(ws: WorkspaceDto) {
     try {
@@ -1337,6 +1345,15 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           sessionId: s.sessionId,
         },
       })),
+    // 文献雷达新命中（lit:<scheduleId>:<lastRunAt>；24h 窗口与 newEntries 判定在
+    // lit-watch.ts 的 litInboxCandidates）：点击经 selectProjectReq 跳该项目详情
+    ...litCandidates.map((c) => ({
+      key: `lit:${c.scheduleId}:${c.at}`,
+      dot: "bg-ok-text",
+      text: `文献雷达 · ${projects.find((p) => samePath(p.path, c.projectRoot))?.name ?? pathBaseName(c.projectRoot)}：${c.count} 条新命中`,
+      actionLabel: "去看看",
+      action: { type: "project" as const, projectRoot: c.projectRoot },
+    })),
     ...active
       .filter((w) => health[w.id]?.readyToMerge && !health[w.id]?.conflict)
       .map((w) => ({

@@ -13,6 +13,7 @@ import ArtifactChecklist, {
 } from "./ArtifactChecklist";
 import TaskCardsSection from "./TaskCardsSection";
 import ScheduleSection from "./ScheduleSection";
+import LitWatchCard from "./LitWatchCard";
 import KickoffConfirmDialog from "./KickoffConfirmDialog";
 import { HoverTip, useHoverTip } from "./HoverTip";
 import { Checkbox, hoverRevealClass, NoticeBar } from "./PageFrame";
@@ -809,6 +810,8 @@ export default function ProjectGroup({
   const [resFocus, setResFocus] = useState<"zotero" | "files" | null>(null);
   /** 「文献与数据」面板锚点：流程线里的「到「文献与数据」导入」展开后滚到这里 */
   const resPanelRef = useRef<HTMLDivElement>(null);
+  /** 「◔ 定时任务」面板锚点：文献雷达卡片「◔ 定时」开抽屉后滚到这里 */
+  const schedulePanelRef = useRef<HTMLDivElement>(null);
   const [discoverLoading, setDiscoverLoading] = useState(false);
   // Zotero 进料口（只读适配器；不做文献库，见 zotero.rs 头注）：探测 → 选分类 → 导入
   const [zoteroBusy, setZoteroBusy] = useState(false);
@@ -1830,6 +1833,26 @@ export default function ProjectGroup({
         />
       )}
 
+      {/* ◔ 文献雷达卡片（工作段，任务卡与工作区卡之间）：新命中 + 精读清单双页签；
+          「◔ 定时」开项目设置抽屉滚到定时区块（定时任务本体仍在抽屉里，单一入口不复制） */}
+      {registered && cfg && (
+        <LitWatchCard
+          projectRoot={projectPath}
+          cfg={cfg}
+          workspaces={workspaces}
+          onOpenSchedules={() => {
+            setSettingsOpen(true);
+            requestAnimationFrame(() =>
+              schedulePanelRef.current?.scrollIntoView({
+                behavior: "smooth",
+                block: "center",
+              }),
+            );
+          }}
+          onConfigChanged={() => void reloadCfg(projectPath)}
+        />
+      )}
+
       {/* ───── 项目设置抽屉（右侧滑出，不是页面、不进侧栏、不占路由） ─────
           容纳全部项目级低频配置：基本 / 研究流程模板 / 文献与数据 / 定时巡检。
           内部各块沿用原有的 state 与 handler，只是从详情页的常驻带搬进抽屉。 */}
@@ -2261,8 +2284,13 @@ export default function ProjectGroup({
       )}
 
       {/* 定时任务区块（scheduler.rs）：只显示 projectRoot 命中本项目的任务，运行完成走 scheduler-run-done 事件刷新；
-          技能可选后不再科研专属，「不使用研究流程」的项目也照常显示 */}
-      {registered && <ScheduleSection projectRoot={projectPath} />}
+          技能可选后不再科研专属，「不使用研究流程」的项目也照常显示；
+          ref 锚点供文献雷达卡片「◔ 定时」滚动定位；steps 供新建弹层「关联步骤」下拉 */}
+      {registered && (
+        <div ref={schedulePanelRef}>
+          <ScheduleSection projectRoot={projectPath} steps={cfg?.steps ?? []} />
+        </div>
+      )}
             </div>
           </aside>
         </div>

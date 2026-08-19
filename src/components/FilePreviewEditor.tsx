@@ -1,11 +1,20 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import { marked } from "marked";
 import SelectionFloatBar, { DistillSkillButton } from "./SelectionFloatBar";
 import { confirmDialog } from "./ConfirmDialog";
+import { useAppStore } from "../store";
+import {
+  bytesToBase64,
+  classifyMdHref,
+  relMdLinkPath,
+  resolveMdPath,
+} from "../reader";
+import { escapeShellPath, imageExtFromMime } from "../terminal-input";
 
 // 只用基础 editor worker（不需要语言服务的 intellisense）
 self.MonacoEnvironment = {
@@ -64,18 +73,29 @@ function isMarkdownPath(path: string): boolean {
  * 选中文字出现浮动按钮「◈ 讨论/改写此段」（与 PDF 问 AI 共用 SelectionFloatBar），
  * 点击把选段 + 出处交给调用方写入活跃终端输入（「↵ 直接发送」立即回车发送）；沉浸阅读覆盖层同款生效。
  * 另有「✦ 沉淀为技能」（DistillSkillButton）：AI 把选段提炼成技能草稿，跳技能页新建表单预填。
+ * 批次 B2 后处理：相对/绝对路径图片经 read_image_bytes 换 data URL（http(s) 图片不加载，
+ * 只显示链接文本——笔记渲染不发网络请求）；相对链接点击在阅读区笔记栏/预览页签内打开。
  */
 function MarkdownView({
   text,
   large,
   fileName,
+  filePath,
+  root,
   onDiscuss,
+  onOpenFile,
 }: {
   text: string;
   large?: boolean;
   fileName: string;
+  /** 当前 md 文件绝对路径：相对图片/链接的解析基准 */
+  filePath: string;
+  /** 预览根约束（read_image_bytes 的 cwdHint 来源之一） */
+  root: string;
   /** 返回 null 表示已写入；返回字符串为要给用户看的提示（如无运行中 agent）。send=true 直接发送 */
   onDiscuss?: (text: string, fileName: string, send?: boolean) => string | null;
+  /** 相对链接的打开去向（阅读区笔记栏原地打开）；缺省走 store previewReq 终端页预览 */
+  onOpenFile?: (absPath: string) => void;
 }) {
   const html = useMemo(
     // ⚠️（U+26A0+U+FE0F）在 WKWebView 里渲染成黄色 Apple Color Emoji，
@@ -91,6 +111,8 @@ function MarkdownView({
     [text],
   );
   const scrollRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const setPreviewReq = useAppStore((s) => s.setPreviewReq);
   const [hint, setHint] = useState<string | null>(null);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -120,6 +142,71 @@ function MarkdownView({
     if (!err) window.getSelection()?.removeAllRanges();
   }
 
+  // 图片后处理（批次 B2）：相对/绝对路径经 read_image_bytes 换 data URL（白名单口径）；
+  // http(s) 图片不加载（笔记渲染不发网络请求），只显示链接文本
+  useEffect(() => {
+    const host = bodyRef.current;
+    if (!host) return;
+    let cancelled = false;
+    for (const img of Array.from(host.querySelectorAll("img"))) {
+      const src = img.getAttribute("src") ?? "";
+      if (!src || src.startsWith("data:")) continue;
+      const alt = img.getAttribute("alt") ?? "";
+      if (classifyMdHref(src) === "external") {
+        const span = document.createElement("span");
+        span.className = "md-img-remote";
+        span.textContent = `[外部图片未加载] ${src}`;
+        img.replaceWith(span);
+        continue;
+      }
+      const abs = resolveMdPath(filePath, src);
+      const ph = document.createElement("span");
+      ph.className = "md-img-pending";
+      ph.textContent = "图片加载中…";
+      img.replaceWith(ph);
+      void invoke<{ mime: string; data: string }>("read_image_bytes", {
+        path: abs,
+        cwdHint: root,
+      })
+        .then((dto) => {
+          if (cancelled || !ph.isConnected) return;
+          const el = document.createElement("img");
+          el.src = `data:${dto.mime};base64,${dto.data}`;
+          el.alt = alt;
+          ph.replaceWith(el);
+        })
+        .catch(() => {
+          if (cancelled || !ph.isConnected) return;
+          const span = document.createElement("span");
+          span.className = "md-img-failed";
+          span.textContent = `[图片不可读] ${src}`;
+          ph.replaceWith(span);
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [html, filePath, root]);
+
+  /** 链接点击（批次 B2）：锚点默认滚动；外链走系统浏览器（openUrl，webview 内跳转会破坏应用）；
+      相对/绝对路径原地打开——阅读区笔记栏由 onOpenFile 接管，否则 previewReq 跳终端页预览 */
+  function onBodyClick(e: React.MouseEvent<HTMLDivElement>) {
+    const a = (e.target as HTMLElement).closest("a");
+    if (!a) return;
+    const href = a.getAttribute("href") ?? "";
+    if (!href) return;
+    const kind = classifyMdHref(href);
+    if (kind === "anchor") return;
+    e.preventDefault();
+    if (kind === "external" || kind === "other") {
+      void openUrl(href).catch(() => showHint("无法打开外部链接"));
+      return;
+    }
+    const abs = resolveMdPath(filePath, href);
+    if (onOpenFile) onOpenFile(abs);
+    else setPreviewReq({ path: abs, name: abs.split(/[\\/]/).pop() ?? abs, root });
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {hint && (
@@ -132,6 +219,8 @@ function MarkdownView({
       )}
       <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-y-auto">
         <div
+          ref={bodyRef}
+          onClick={onBodyClick}
           className={`md-body${large ? " md-body-lg" : ""} ${
             large ? "mx-auto max-w-3xl px-8 py-10" : "px-5 py-4"
           }`}
@@ -178,12 +267,18 @@ function FilePreviewEditor({
   root,
   onDirtyChange,
   onDiscuss,
+  hideImmersive,
+  onOpenFile,
 }: {
   path: string;
   root: string;
   onDirtyChange?: (dirty: boolean) => void;
   /** md 阅读视图选段「◈ 讨论/改写此段」：写入活跃终端输入（send=true 直接发送）；返回 null 已写入，否则为提示 */
   onDiscuss?: (text: string, fileName: string, send?: boolean) => string | null;
+  /** 嵌入阅读区笔记栏时置 true：自带的 ⛶ 沉浸层是 z-30，压在阅读区 z-40 下面会失灵 */
+  hideImmersive?: boolean;
+  /** md 阅读视图相对链接的打开去向（阅读区笔记栏原地打开）；缺省走 previewReq 终端页预览 */
+  onOpenFile?: (absPath: string) => void;
 }) {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   // 编辑器宿主节点独立于 React 渲染树：沉浸编辑切换只移动 DOM 节点，
@@ -200,6 +295,20 @@ function FilePreviewEditor({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [ctx, setCtx] = useState<PathContext | null>(null);
+  // 粘贴图片等输入侧动作的瞬态轻反馈（3s 自动消，同终端页 inputNote 模式）
+  const [pasteNote, setPasteNote] = useState<string | null>(null);
+  const pasteNoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function flashPasteNote(text: string) {
+    setPasteNote(text);
+    if (pasteNoteTimerRef.current) clearTimeout(pasteNoteTimerRef.current);
+    pasteNoteTimerRef.current = setTimeout(() => setPasteNote(null), 3000);
+  }
+  useEffect(
+    () => () => {
+      if (pasteNoteTimerRef.current) clearTimeout(pasteNoteTimerRef.current);
+    },
+    [],
+  );
   // 阅读/编辑模式与沉浸覆盖层（仅 md 有阅读态；其他文本固定编辑态）
   const isMd = isMarkdownPath(path);
   const [mode, setMode] = useState<"read" | "edit">(isMd ? "read" : "edit");
@@ -357,6 +466,62 @@ function FilePreviewEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, truncated]);
 
+  // 编辑态粘贴图片（批次 B2）：剪贴板含 image/* 时接管粘贴——
+  // 项目内 md 落 notes/assets/ 并在光标处插 ![](相对路径)；非项目文件回落临时图路径文本（终端粘贴同口径）
+  useEffect(() => {
+    const ed = editorRef.current;
+    const dom = ed?.getDomNode();
+    if (!ed || !dom || !isMd || truncated) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const item = Array.from(items).find((it) => it.type.startsWith("image/"));
+      if (!item) return; // 纯文本粘贴走 Monaco 默认
+      e.preventDefault();
+      e.stopPropagation();
+      const file = item.getAsFile();
+      if (file) void pasteImageIntoMd(ed, file);
+    };
+    dom.addEventListener("paste", onPaste, true);
+    return () => dom.removeEventListener("paste", onPaste, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, truncated, isMd, path, root]);
+
+  /** 粘贴图片落盘并在光标处插入（executeEdits 会触发 dirty，沿用既有保存链路） */
+  async function pasteImageIntoMd(
+    ed: monaco.editor.IStandaloneCodeEditor,
+    file: File,
+  ) {
+    flashPasteNote("正在保存图片…");
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let insert: string;
+      try {
+        const cap = await invoke<{ relPath: string; absPath: string }>(
+          "save_reader_capture",
+          { projectRoot: root, imageBase64: bytesToBase64(bytes) },
+        );
+        insert = `![](${relMdLinkPath(path, cap.absPath)})`;
+      } catch (reason) {
+        // 不在已注册项目内：回落 <config>/ccode/tmp 临时图 + 路径文本；其它失败如实上报
+        if (!String(reason).includes("不是 Ccode 项目")) throw reason;
+        const p = await invoke<string>("save_clipboard_image", {
+          bytes: Array.from(bytes),
+          ext: imageExtFromMime(file.type),
+        });
+        insert = escapeShellPath(p);
+      }
+      const sel = ed.getSelection();
+      if (!sel) return;
+      ed.executeEdits("paste-image", [{ range: sel, text: insert }]);
+      ed.pushUndoStop();
+      ed.focus();
+      flashPasteNote("已插入图片");
+    } catch (e) {
+      flashPasteNote(`粘贴图片失败：${String(e)}`);
+    }
+  }
+
   // 主题切换跟随：data-theme 变化时按最新 CSS 变量重定义并应用（setTheme 全局生效，
   // 同时覆盖其他已挂载的编辑器实例；设置页色卡预览的瞬时翻转也只是多余一次重定义）
   useEffect(() => {
@@ -453,7 +618,7 @@ function FilePreviewEditor({
           </div>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-1">
-          {ready && (mode === "edit" || isMd) && (
+          {ready && !hideImmersive && (mode === "edit" || isMd) && (
             <button
               onClick={() => setImmersive(true)}
               title={`全宽沉浸${mode === "read" ? "阅读" : "编辑"}（Esc 退出）`}
@@ -481,11 +646,15 @@ function FilePreviewEditor({
         </div>
       </div>
       {error && <p className="px-3 py-1 text-xs text-err-text">{error}</p>}
+      {pasteNote && <p className="px-3 py-1 text-xs text-l3">{pasteNote}</p>}
       {mode === "read" && ready && (
         <MarkdownView
           text={text!}
           fileName={path.split(/[\\/]/).pop() ?? path}
+          filePath={path}
+          root={root}
           onDiscuss={onDiscuss}
+          onOpenFile={onOpenFile}
         />
       )}
       {/* Monaco 宿主槽位（display:contents 不改变布局）：编辑器 DOM 节点由 effect 挂入，
@@ -530,7 +699,10 @@ function FilePreviewEditor({
               text={text ?? ""}
               large
               fileName={path.split(/[\\/]/).pop() ?? path}
+              filePath={path}
+              root={root}
               onDiscuss={onDiscuss}
+              onOpenFile={onOpenFile}
             />
           ) : (
             <div ref={immersiveSlotRef} className="contents" />

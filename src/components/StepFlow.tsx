@@ -12,6 +12,7 @@ import {
   upsertDecisions,
 } from "../step-decisions";
 import { useHumanTasks, RegisterOfferRow } from "./HumanTasksList";
+import { buildWorkspaceTerminalRequest } from "../pipeline-start";
 import type { ProjectStepDto, WorkspaceDto } from "../types";
 import type { StepRunStatus } from "../step-flow";
 
@@ -372,12 +373,12 @@ export default function StepFlow({
 
   function goTerminal() {
     if (!ws) return;
-    setPendingTerminal({
-      cwd: ws.worktreePath,
-      extraEnv: {},
-      title: ws.name,
+    // 共享交接（pipeline-start.ts）：reuseKey 切回该工作区已有标签；没有活标签时
+    // resume 最近会话——「去终端看看」是回到那个对话，不是每次新开
+    void buildWorkspaceTerminalRequest(ws).then((req) => {
+      setPendingTerminal(req);
+      setPage("terminal");
     });
-    setPage("terminal");
   }
 
   function goReview() {

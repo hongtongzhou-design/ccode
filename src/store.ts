@@ -265,6 +265,9 @@ interface AppState {
       root 可选：文本预览的后端根约束（不给则回落活动标签 cwd） */
   previewReq: { path: string; name: string; root?: string } | null;
   setPreviewReq: (r: { path: string; name: string; root?: string } | null) => void;
+  /** 沉浸式阅读区的一次性打开请求（终端页消费并清空）：PDF 绝对路径 + 所属项目根 */
+  readerReq: { pdfPath: string; projectRoot: string } | null;
+  setReaderReq: (r: { pdfPath: string; projectRoot: string } | null) => void;
   /** 步骤胶囊「📁」→ 终端页文件树切根的一次性交接（终端页消费并清空） */
   enterCwdReq: string | null;
   setEnterCwdReq: (p: string | null) => void;
@@ -419,6 +422,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setFocusTabReq: (tabId) => set({ focusTabReq: tabId }),
   previewReq: null,
   setPreviewReq: (r) => set({ previewReq: r }),
+  readerReq: null,
+  setReaderReq: (r) => set({ readerReq: r }),
   enterCwdReq: null,
   setEnterCwdReq: (p) => set({ enterCwdReq: p }),
   runningScripts: {},

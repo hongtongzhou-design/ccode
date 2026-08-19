@@ -46,7 +46,9 @@ import DigestPicker from "../components/DigestPicker";
 import { LoadingRows, hoverRevealClass } from "../components/PageFrame";
 import ProjectRail from "../components/ProjectRail";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
+import ReaderOverlay from "../components/ReaderOverlay";
 import { renderTaskMd } from "../pipeline-start";
+import { formatPdfExcerptPrompt, readerReuseKey } from "../reader";
 import { defaultCommitMessage } from "../git-commit-message";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
 import { XTERM_PALETTES, resolvePaletteId } from "../terminal-palettes";
@@ -68,6 +70,7 @@ import {
   serializeRecoverableTerminalState,
   TERMINAL_TABS_STORAGE_KEY,
 } from "../terminal-tab-persistence";
+import { clampTabDragDx, tabDragTarget } from "../tab-drag";
 import type { RunOverviewInput } from "../run-overview";
 import type {
   ChatMessageDto,
@@ -144,8 +147,8 @@ export interface FocusTabActions {
   setCwd: (cwd: string) => void;
 }
 
-/** TerminalView 上报的当前对话联动数据（右侧「对话」页签渲染用） */
-interface SessionLinkState {
+/** TerminalView 上报的当前对话联动数据（右侧「对话」页签与阅读区 Agent 栏渲染用） */
+export interface SessionLinkState {
   file: string | null;
   sessionId: string | null;
   title: string | null;
@@ -1782,7 +1785,8 @@ const TerminalView = memo(function TerminalView({
         <>
           <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
             {/* Agent/配置/模型收进同一条分段工具条（v3.92）：去掉三个独立框线；
-                段间留空隙（容器 gap + 内边距）各自成小胶囊，不粘在一起 */}
+                段间留空隙（容器 gap + 内边距）各自成小胶囊，不粘在一起。
+                v3.93：段间加 h-4 短竖线（不贯穿整行，居中一小段）强化三段的分组边界 */}
             <div className="flex min-w-0 items-center gap-1 rounded-md border border-field bg-inset p-0.5">
             <select
               className={`${seg} w-36 shrink-0`}
@@ -1801,6 +1805,7 @@ const TerminalView = memo(function TerminalView({
                 </option>
               ))}
             </select>
+            <span aria-hidden="true" className="h-4 w-px shrink-0 bg-field" />
             <select
               ref={profileSelectRef}
               className={`${seg} w-40 shrink-0`}
@@ -1852,6 +1857,8 @@ const TerminalView = memo(function TerminalView({
             {selectedProfile && (
               // 模型 combo-box：可输可选（profile 预设 + 本 agent 历史），输入即筛选，
               // 自由输入的模型启动成功后记入历史（ccode.modelHistory.<agent>），下次直接可选
+              <>
+              <span aria-hidden="true" className="h-4 w-px shrink-0 bg-field" />
               <span className="relative w-56 shrink-0">
                 <input
                   className={`${seg} w-full`}
@@ -1897,6 +1904,7 @@ const TerminalView = memo(function TerminalView({
                   </ul>
                 )}
               </span>
+              </>
             )}
             </div>
             {/* 目录输入框已移除（v3.91 走查）：目录改由底部状态栏 📂 胶囊浮层编辑（仅未启动），
@@ -2137,42 +2145,33 @@ const TerminalView = memo(function TerminalView({
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
             {/* 玻璃拟态卡：raised 85% + backdrop-blur（画布内容隐约透出）。
                 勾边（v3.93 微调）：l1 的 12% 混合——field 档在浅色主题偏蓝显脏，
-                hairline 档又太弱，取两者之间的极浅中性边 */}
+                hairline 档又太弱，取两者之间的极浅中性边。
+                元素收敛（v3.93 用户拍板）：不要顶部图标盒、不要说明小字（「上次任务还在」
+                这类——按钮文案「恢复任务/启动/去配置页创建」本身已说清现在该干嘛），
+                卡片 w-80（v3.93 二调：w-72 太挤，主按钮被按比例压缩到快溢出——
+                按钮宽改 min-w-40 自适应内容，不再随卡片宽比例缩放）；
+                agent 名与配置胶囊是这张卡的主体信息，字号放大 */}
             <div
-              className="pointer-events-auto relative flex w-88 flex-col items-center gap-3 rounded-lg border bg-raised/85 px-6 py-6 text-center shadow-lg backdrop-blur-xl"
+              className="pointer-events-auto relative flex w-80 flex-col items-center gap-3 rounded-lg border bg-raised/85 px-5 py-5 text-center shadow-lg backdrop-blur-xl"
               style={{
                 borderColor:
                   "color-mix(in srgb, var(--color-l1) 12%, transparent)",
               }}
             >
-              {/* 视觉锚点：品牌色图标盒（cta-pill 与主按钮同色系呼应）+ agent 主标题 + 配置胶囊 */}
-              <div
-                aria-hidden="true"
-                className="flex size-9 items-center justify-center rounded-md bg-cta-pill font-mono text-sm text-cta-pill-text"
-              >
-                &gt;_
-              </div>
-              <div className="flex items-center gap-1.5 text-sm text-l1">
+              <div className="flex items-center gap-2 text-base font-medium text-l1">
                 {agentLabel(agentId)}
                 {selectedProfile && (
-                  <span className="rounded-sm bg-inset px-1.5 py-0.5 text-micro text-l3">
+                  <span className="rounded-sm bg-inset px-1.5 py-0.5 text-xs font-normal text-l2">
                     {selectedProfile.name}
                   </span>
                 )}
-              </div>
-              <div className="text-micro text-l4">
-                {agentProfiles.length === 0
-                  ? "该 agent 还没有配置"
-                  : restored
-                    ? "上次任务还在，可接着跑"
-                    : "启动后这里就是 AI 的终端画面"}
               </div>
               {agentProfiles.length === 0 ? (
                 /* 无配置时主按钮换成有效引导（禁用的「启动」是死按钮，v3.92 修） */
                 <button
                   type="button"
                   onClick={() => setPage("profiles")}
-                  className="inline-flex h-9 w-2/3 cursor-pointer items-center justify-center rounded-md border border-cta-bd bg-cta text-sm text-cta-text hover:brightness-110"
+                  className="inline-flex h-9 min-w-40 cursor-pointer items-center justify-center rounded-md border border-cta-bd bg-cta px-5 text-sm text-cta-text hover:brightness-110"
                 >
                   去配置页创建
                 </button>
@@ -2184,7 +2183,7 @@ const TerminalView = memo(function TerminalView({
                       restored ? void restoreTask() : void launch()
                     }
                     disabled={!profileId}
-                    className="inline-flex h-9 w-2/3 cursor-pointer items-center justify-center gap-2 rounded-md border border-cta-bd bg-cta text-sm text-cta-text hover:brightness-110 disabled:cursor-default disabled:opacity-50"
+                    className="inline-flex h-9 min-w-40 cursor-pointer items-center justify-center gap-2 rounded-md border border-cta-bd bg-cta px-5 text-sm text-cta-text hover:brightness-110 disabled:cursor-default disabled:opacity-50"
                   >
                     {restored ? "恢复任务" : "启动"}
                     {/* 快捷键说明：括号小字随按钮文字整体居中，不加胶囊底色
@@ -2293,6 +2292,109 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   });
   const [tabs, setTabs] = useState<Tab[]>(initialState.tabs);
   const [activeId, setActiveId] = useState(initialState.activeId);
+  // 标签条拖拽排序（Ghostty 式跟手拖动）：源标签随指针平移、其余标签滑动让位（150ms
+  // transition）、松手先吸附到目标槽位再真正重排——全程无 HTML5 DnD（Tauri 原生文件拖放
+  // dragDropEnabled 默认开，会拦截 WKWebView 拖拽手势，dragstart 根本不触发）。
+  // 拖拽期间 tabs 顺序不变（布局稳定，槽位测量值才有效），落定时才 moveTab 重排；
+  // 顺序即 tabs 数组顺序，重启持久化按数组存，重排自动带过去
+  const [tabDrag, setTabDrag] = useState<{
+    id: string;
+    /** 源标签原索引（= 当前渲染索引，拖拽期间顺序不变） */
+    from: number;
+    /** 指针当前落在的槽位索引（让位动画与落定位置都按它） */
+    target: number;
+    /** 源标签当前位移 px（钳制在标签条内容范围内） */
+    dx: number;
+    /** 拖拽开始时各槽位测量值（viewport 坐标；顺序 = tabs 顺序） */
+    rects: { left: number; width: number }[];
+    /** true = 松手吸附动画中：源标签 transition 到落点，结束才重排清态 */
+    settling: boolean;
+  } | null>(null);
+  // 拖拽落定后的那次 click 要吞掉（否则拖完还会触发激活切换）
+  const suppressTabClickRef = useRef(false);
+  const moveTab = useCallback((from: number, to: number) => {
+    setTabs((prev) => {
+      if (from < 0 || to < 0 || from >= prev.length || to >= prev.length || from === to)
+        return prev;
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+  }, []);
+  /** 标签按下即挂 window 级 move/up 监听：横向位移超 6px 才进入拖拽，否则当普通点击放过 */
+  function onTabPointerDown(e: React.PointerEvent, tabId: string) {
+    if (e.button !== 0) return;
+    const tabEl = e.currentTarget as HTMLElement;
+    const startX = e.clientX;
+    let active = false;
+    let rects: { left: number; width: number }[] = [];
+    let from = 0;
+    // finish 里要用最新 target（setState 闭包拿不到），ref 镜像
+    let lastTarget = 0;
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.style.userSelect = "";
+    };
+    const finish = () => {
+      cleanup();
+      if (!active) return;
+      suppressTabClickRef.current = true;
+      const target = lastTarget;
+      if (target === from) {
+        setTabDrag(null);
+        return;
+      }
+      // 先吸附：源标签 transition 滑到目标槽位，动画结束才重排（与 transition 时长对齐）
+      setTabDrag((cur) =>
+        cur
+          ? {
+              ...cur,
+              dx: cur.rects[target].left - cur.rects[from].left,
+              settling: true,
+            }
+          : null,
+      );
+      window.setTimeout(() => {
+        moveTab(from, target);
+        setTabDrag(null);
+      }, 170);
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (!active) {
+        if (Math.abs(ev.clientX - startX) <= 6) return;
+        active = true;
+        // 进入拖拽态才测量槽位（此刻布局未变）；querySelectorAll 顺序 = tabs 顺序
+        const els = Array.from(
+          (tabEl.parentElement ?? tabEl).querySelectorAll<HTMLElement>(
+            "[data-tab-id]",
+          ),
+        );
+        rects = els.map((el) => {
+          const r = el.getBoundingClientRect();
+          return { left: r.left, width: r.width };
+        });
+        from = Math.max(
+          0,
+          els.findIndex((el) => el.getAttribute("data-tab-id") === tabId),
+        );
+        lastTarget = from;
+        // 拖动经过的标签标题会被划选，拖拽期间全局禁选
+        document.body.style.userSelect = "none";
+      }
+      // 钳制：源标签不出标签条内容范围；目标槽位：源中心越过谁的中线就占谁的位
+      // （纯逻辑在 tab-drag.ts——>= 判定守「拖到最右」边界，曾翻车：严格 > 永远够不到末槽）
+      const dx = clampTabDragDx(rects, from, ev.clientX - startX);
+      const target = tabDragTarget(rects, from, dx);
+      lastTarget = target;
+      setTabDrag({ id: tabId, from, target, dx, rects, settling: false });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  }
   const [statuses, setStatuses] = useState<Record<string, TabStatus>>({});
   // 关闭守卫（关标签/关窗）在异步链路里取最新状态，避免闭包过期
   const statusesRef = useRef(statuses);
@@ -2429,6 +2531,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     "pr" | "archive" | "resolve-conflict" | null
   >(null);
   const [reviewRequestId, setReviewRequestId] = useState<string | null>(null);
+  /** 沉浸式阅读区（批次 B1）：非空即全屏覆盖（z-40 页面模态档），底下终端/右栏保持挂载 */
+  const [reader, setReader] = useState<{
+    pdfPath: string;
+    projectRoot: string;
+  } | null>(null);
   const sessionScrollRef = useRef<HTMLDivElement>(null);
   const dialogueFollowRef = useRef(true);
   const [dialogueHasNew, setDialogueHasNew] = useState(false);
@@ -2590,13 +2697,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     if (!focusMode && !rightExpanded) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // 沉浸阅读区在更外层：打开期间 Esc 先退阅读区（它自己的监听处理）
+      if (reader) return;
       if (focusMode) setFocusMode(false);
       if (rightExpanded) toggleRightExpanded();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusMode, rightExpanded]);
+  }, [focusMode, rightExpanded, reader]);
 
   /** TerminalView 上报状态；内容没变就返回原对象，避免无谓重渲染 */
   const reportStatus = useCallback((id: string, s: TabStatus) => {
@@ -2741,11 +2850,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     [],
   );
 
-  /** 写入当前活跃终端标签 agent 输入的公共链路（pty_write；send=true 时末尾补 \r 直接发送，
-      缺省不自动回车、用户检查后发送）。PDF 问 AI 与 md 讨论/改写共用；返回 null 表示已写入，返回字符串为预览区要展示的提示。 */
-  const injectToActiveAgent = useCallback(
-    (data: string, send?: boolean): string | null => {
-      const s = statuses[focusedId];
+  /** 写入指定终端标签 agent 输入的核心链路（pty_write；send=true 时末尾补 \r 直接发送，
+      缺省不自动回车、用户检查后发送）。右栏选段（活跃标签）与阅读区（阅读会话标签）共用；
+      返回 null 表示已写入，返回字符串为要展示给用户的提示。 */
+  const injectToTab = useCallback(
+    (tabId: string, data: string, send?: boolean): string | null => {
+      const s = statuses[tabId];
       if (!s?.running || !s.ptyId) {
         return "当前标签没有运行中的 Agent，请先启动再试";
       }
@@ -2755,17 +2865,20 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       }).catch(() => {});
       return null;
     },
-    [statuses, focusedId],
+    [statuses],
   );
 
-  /** PDF 选段「◈ 问 AI」：选段 + 出处格式化后注入活跃终端 */
+  /** 写入当前活跃终端标签 agent 输入（PDF 问 AI 与 md 讨论/改写共用） */
+  const injectToActiveAgent = useCallback(
+    (data: string, send?: boolean): string | null =>
+      injectToTab(focusedId, data, send),
+    [injectToTab, focusedId],
+  );
+
+  /** PDF 选段「◈ 问 AI」：选段 + 出处格式化后注入活跃终端（格式单一出处在 reader.ts，阅读区共用） */
   const askAiFromPdf = useCallback(
     (text: string, page: number, fileName: string, send?: boolean): string | null => {
-      // 注入上限保护：选段过长时截断正文，避免把整页灌进输入框
-      const body = text.length > 6000 ? `${text.slice(0, 6000)}…` : text;
-      const brief = text.replace(/\s+/g, " ").slice(0, 60);
-      const data = `> 「${brief}${text.length > 60 ? "…" : ""}」（${fileName}，第 ${page} 页）\n\n${body}`;
-      return injectToActiveAgent(data, send);
+      return injectToActiveAgent(formatPdfExcerptPrompt(text, page, fileName), send);
     },
     [injectToActiveAgent],
   );
@@ -2998,6 +3111,21 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           setActiveId(existing.id);
         }
       }
+      // resume 兜底：reuseKey 没命中（restored/手动开的标签不带 key）时，若某活标签的 cwd
+      // 就是目标目录，聚焦它而不是新开 resume——那个会话正被它的 CLI 进程持有，
+      // 再 resume 会被拒（codex: thread already has an active writer）
+      if (!tabId && pt.resume) {
+        const norm = (p: string) => p.replace(/[\\/]+$/, "");
+        const holder = tabs.find(
+          (t) =>
+            statuses[t.id]?.alive &&
+            norm(statuses[t.id]?.cwd ?? t.initialCwd ?? "") === norm(pt.cwd),
+        );
+        if (holder) {
+          tabId = holder.id;
+          setActiveId(holder.id);
+        }
+      }
       tabId ??= addTab({
         cwd: pt.cwd,
         extraEnv: pt.extraEnv,
@@ -3087,6 +3215,139 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     });
     setPreviewDirty(false);
   }, [visible, previewReq, setPreviewReq]);
+
+  // ===== 沉浸式阅读区（批次 B1）=====
+  // store 一次性请求消费（雷达卡「开读」等跨页入口）；终端页内部入口（预览工具条/文件树右键）直接 setReader
+  const readerReq = useAppStore((s) => s.readerReq);
+  const setReaderReq = useAppStore((s) => s.setReaderReq);
+  useEffect(() => {
+    if (!visible || !readerReq) return;
+    setReaderReq(null);
+    // 评审覆盖层会挡住阅读区，先关掉（同 previewReq 消费语义）；
+    // 右栏若正在预览同一 PDF 保持原样不动它
+    setReviewPath(null);
+    setReviewAction(null);
+    setReader({ pdfPath: readerReq.pdfPath, projectRoot: readerReq.projectRoot });
+  }, [visible, readerReq, setReaderReq]);
+
+  const readerKey = reader ? readerReuseKey(reader.projectRoot) : null;
+  /** 阅读会话标签（reuseKey 找回：退出再进接着聊；恢复出的占位标签不带 reuseKey 不参与复用） */
+  const readerTabId = readerKey
+    ? (tabs.find((t) => t.reuseKey === readerKey)?.id ?? null)
+    : null;
+  const [readerNeedsProfile, setReaderNeedsProfile] = useState(false);
+  /** 自动起会话的一次性标记：用户手动关掉阅读会话标签后不连环重建（栏内给「重新启动」入口） */
+  const readerTriedRef = useRef<string | null>(null);
+  const [readerAgentTick, setReaderAgentTick] = useState(0);
+  useEffect(() => {
+    if (!reader) readerTriedRef.current = null;
+  }, [reader]);
+
+  /** 阅读会话的启动配置：agent 跟随启动栏上次选择；profile 按既有解析顺序
+      （显式默认 settings.defaultProfiles > 上次使用 > 首个可见 > 首个，与启动栏一致） */
+  function resolveReaderLaunch(): { agentId: string; profileId: string } {
+    const st = useAppStore.getState();
+    let agentId = "claude-code";
+    try {
+      const saved = JSON.parse(
+        localStorage.getItem("ccode.lastLaunch") ?? "{}",
+      ) as Partial<{ agentId: string }>;
+      if (saved.agentId && AGENTS.some((a) => a.id === saved.agentId))
+        agentId = saved.agentId;
+    } catch {
+      /* 损坏按默认 */
+    }
+    const pick =
+      st.settings?.defaultProfiles?.[agentId] ||
+      localStorage.getItem(`ccode.lastProfile.${agentId}`) ||
+      "";
+    const ok = st.profiles.find((p) => p.id === pick && p.agent === agentId)?.id;
+    // 兜底挑首个时跳过隐藏项（同启动栏口径）；全被隐藏时仍从隐藏项里取，好过留空
+    const hidden = st.settings?.hiddenProfiles ?? [];
+    const visibleProfiles = st.profiles.filter(
+      (p) => p.agent === agentId && !hidden.includes(p.id),
+    );
+    return {
+      agentId,
+      profileId:
+        ok ??
+        visibleProfiles[0]?.id ??
+        st.profiles.find((p) => p.agent === agentId)?.id ??
+        "",
+    };
+  }
+
+  /** 派一个阅读会话标签（项目根 + 默认配置 + autoStart + reuseKey，快速开聊同款机制）；
+      返回 false = 无可用配置（Agent 栏显示引导卡） */
+  function dispatchReaderSession(r: {
+    pdfPath: string;
+    projectRoot: string;
+  }): boolean {
+    const launch = resolveReaderLaunch();
+    if (!launch.profileId) return false;
+    setPendingTerminal({
+      cwd: r.projectRoot,
+      extraEnv: {},
+      title: `阅读 · ${basename(r.pdfPath).replace(/\.pdf$/i, "")}`,
+      agentId: launch.agentId,
+      profileId: launch.profileId,
+      autoStart: true,
+      reuseKey: readerReuseKey(r.projectRoot),
+    });
+    return true;
+  }
+
+  // 进入阅读区：还没有绑定本项目的阅读会话标签就自动起一个
+  useEffect(() => {
+    if (!visible || !reader || !readerKey) return;
+    if (readerTabId) {
+      setReaderNeedsProfile(false);
+      return;
+    }
+    if (readerTriedRef.current === readerKey) return;
+    const ok = dispatchReaderSession(reader);
+    // 无配置不记一次性标记：配置页加好配置后 profiles 变化会自然重试
+    readerTriedRef.current = ok ? readerKey : null;
+    setReaderNeedsProfile(!ok);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, reader, readerKey, readerTabId, profiles, readerAgentTick]);
+
+  /** 阅读区注入（选段「↵ 直接发送」/ 输入框回车）：走与右栏选段同一条 injectToTab 链路，目标换成阅读会话标签 */
+  const injectToReader = useCallback(
+    (data: string, send?: boolean): string | null =>
+      readerTabId
+        ? injectToTab(readerTabId, data, send)
+        : "阅读会话还没建好，稍等片刻再试",
+    [injectToTab, readerTabId],
+  );
+
+  /** 阅读会话标签被手动关掉后的「重新启动」：清一次性标记再派一次 */
+  const restartReaderAgent = useCallback(() => {
+    readerTriedRef.current = null;
+    setReaderAgentTick((t) => t + 1);
+  }, []);
+
+  const closeReader = useCallback(() => setReader(null), []);
+
+  /** 「⛶ 沉浸阅读」入口（PDF 预览工具条 / 文件树右键共用）：反查归属项目后开覆盖层 */
+  async function openReaderForPdf(pdfPath: string) {
+    try {
+      const owner = await invoke<ProjectDto | null>("pdf_owner_project", {
+        pdfPath,
+      });
+      if (!owner) {
+        void alertDialog(
+          "该 PDF 不在任何项目里，先在项目资源里登记再沉浸阅读",
+        );
+        return;
+      }
+      setReviewPath(null);
+      setReviewAction(null);
+      setReader({ pdfPath, projectRoot: owner.path });
+    } catch (e) {
+      void alertDialog(String(e));
+    }
+  }
 
   // 步骤胶囊「📁」交来的文件树切根请求：复用 enterCwd/externalCwd「真进入」机制，
   // 落地到活动标签启动栏（shell 存活时写 cd），文件树根随活动标签 cwd 切换
@@ -3549,6 +3810,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               onEnterProject={setEnterCwd}
               onRootChange={closePreviewForRootChange}
               onRootNavigated={setTreeRoot}
+              onOpenReader={(path) => void openReaderForPdf(path)}
               belowRecent={
                 /* 项目区：当前标签 cwd 所属项目的主文件夹 + 活跃工作区，点击切根复用 enterCwd 链路 */
                 <ProjectRail
@@ -3573,7 +3835,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       <div className="relative flex min-w-0 flex-1 flex-col">
         {/* 顶部标签条：常驻中带顶部，专注终端下也保留在原位 */}
         <div className="flex h-9 items-center gap-1 overflow-x-auto border-b border-hairline bg-strip px-2">
-          {tabs.map((t) => {
+          {tabs.map((t, tabIndex) => {
             const s = statuses[t.id];
             const active = t.id === activeId;
             // 注意力点：仅 工作中/待确认 有状态时才渲染，无状态/空闲不渲染（降噪）；
@@ -3585,15 +3847,52 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 : s?.attention === "confirm"
                   ? { cls: "text-warn-text", tip: "待确认" }
                   : null;
+            // 拖拽（Ghostty 式）：源标签跟手平移；位于「原位置→目标位置」之间的标签
+            // 各退/进一个槽位（滑动让位）；松手时源标签 transition 吸附到目标槽位后重排
+            const isDragSource = tabDrag?.id === t.id;
+            let shift = 0;
+            if (tabDrag && !isDragSource) {
+              const { from, target, rects } = tabDrag;
+              if (from < target && tabIndex > from && tabIndex <= target) {
+                shift = rects[tabIndex - 1].left - rects[tabIndex].left;
+              } else if (from > target && tabIndex < from && tabIndex >= target) {
+                shift = rects[tabIndex + 1].left - rects[tabIndex].left;
+              }
+            }
             return (
               <div
                 key={t.id}
-                onClick={() => activateTab(t.id)}
+                data-tab-id={t.id}
+                onClick={() => {
+                  // 拖拽落定后的那次 click 吞掉（拖排序不该顺手切换标签）
+                  if (suppressTabClickRef.current) {
+                    suppressTabClickRef.current = false;
+                    return;
+                  }
+                  activateTab(t.id);
+                }}
+                onPointerDown={(e) => onTabPointerDown(e, t.id)}
+                style={{
+                  transform:
+                    isDragSource && tabDrag
+                      ? `translateX(${tabDrag.dx}px)`
+                      : shift !== 0
+                        ? `translateX(${shift}px)`
+                        : undefined,
+                  // 让位标签始终滑动；源标签跟手不动画、吸附时才有
+                  transition:
+                    tabDrag && (!isDragSource || tabDrag.settling)
+                      ? "transform 150ms ease"
+                      : undefined,
+                  // 源标签浮在让位标签之上（零阴影体系下用层级表达浮起）
+                  position: isDragSource ? "relative" : undefined,
+                  zIndex: isDragSource ? 10 : undefined,
+                }}
                 className={`group/tab flex h-9 w-[130px] min-w-[100px] shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-2.5 text-xs ${
                   active
                     ? "border-cta text-l1"
                     : "border-transparent text-l3 hover:text-l1"
-                }`}
+                } ${isDragSource ? "bg-raised" : ""}`}
               >
                 {attentionDot && (
                   <span
@@ -4170,6 +4469,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       cwdHint={preview.root ?? activeCwd}
                       onAskAi={askAiFromPdf}
                       onOrganize={organizePdfExcerpt}
+                      onOpenReader={() => void openReaderForPdf(preview.path)}
                     />
                   ) : /\.docx$/i.test(preview.path) ? (
                     <DocxPreview
@@ -4226,6 +4526,24 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             setReviewAction(null);
             setReviewRequestId(null);
           }}
+        />
+      )}
+
+      {/* 沉浸式阅读区（z-40 页面模态档）：底下终端/PTY/右栏全程保持挂载，只是被盖住 */}
+      {reader && (
+        <ReaderOverlay
+          pdfPath={reader.pdfPath}
+          projectRoot={reader.projectRoot}
+          hasAgentTab={readerTabId !== null}
+          agentStatus={readerTabId ? (statuses[readerTabId] ?? null) : null}
+          agentSession={
+            readerTabId ? (sessionByTab[readerTabId] ?? null) : null
+          }
+          needsProfile={readerNeedsProfile}
+          onInject={injectToReader}
+          onRestartAgent={restartReaderAgent}
+          onGoProfiles={() => setPage("profiles")}
+          onClose={closeReader}
         />
       )}
 

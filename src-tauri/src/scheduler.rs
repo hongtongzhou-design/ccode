@@ -29,7 +29,8 @@ const TASK_PROMPT_GENERIC: &str = "请使用 {skill} 技能在项目内执行一
 
 // ===== 数据模型 =====
 
-/// 单次运行记录（at/status/summary 均为单词，snake_case 与 camelCase 一致，存储/前端共用）
+/// 单次运行记录（at/status/summary 均为单词，snake_case 与 camelCase 一致，存储/前端共用；
+/// new_entries 是两词字段，按前端 DTO 约定序列化为 newEntries，老记录缺省 None）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunRecord {
     pub at: String,
@@ -37,6 +38,9 @@ pub struct RunRecord {
     pub status: String,
     /// 脱敏后截 2000 字符的简报/错误信息
     pub summary: String,
+    /// 本次运行新增的收件箱条目数（仅 lit-watch 类任务、仅成功时记；超时/失败为 None）
+    #[serde(default, rename = "newEntries")]
+    pub new_entries: Option<u32>,
 }
 
 /// 存储形态（schedules.json，snake_case）
@@ -50,6 +54,9 @@ pub struct Schedule {
     pub skill: String,
     /// None = 每次运行现解析（设置页 AI 专用 profile → 最近使用）
     pub profile_id: Option<String>,
+    /// 关联的流水线步骤名（步骤 name；未关联为 None）。serde default 兼容老 schedules.json
+    #[serde(default)]
+    pub linked_step: Option<String>,
     /// "daily" | "weekly"
     pub frequency: String,
     /// weekly 时 1-7（周一=1）；daily 忽略
@@ -71,6 +78,7 @@ pub struct ScheduleDto {
     pub project_root: String,
     pub skill: String,
     pub profile_id: Option<String>,
+    pub linked_step: Option<String>,
     pub frequency: String,
     pub weekday: Option<u8>,
     pub hour: u8,
@@ -89,6 +97,7 @@ impl From<Schedule> for ScheduleDto {
             project_root: s.project_root,
             skill: s.skill,
             profile_id: s.profile_id,
+            linked_step: s.linked_step,
             frequency: s.frequency,
             weekday: s.weekday,
             hour: s.hour,
@@ -108,20 +117,26 @@ pub struct CreateScheduleInput {
     pub project_root: String,
     pub skill: Option<String>,
     pub profile_id: Option<String>,
+    /// 关联的流水线步骤名（可选；老前端不传为 None）
+    pub linked_step: Option<String>,
     pub frequency: String,
     pub weekday: Option<u8>,
     pub hour: u8,
     pub minute: u8,
 }
 
-/// 更新补丁：字段全 Option（None = 不改）；profile_id 用 Option<Option<String>>，
-/// 显式传 null 表示清掉指定 profile、回到每次运行现解析
+/// 更新补丁：字段全 Option（None = 不改）；profile_id/linked_step 用 Option<Option<String>>，
+/// 传空字符串（空白归一为 None）表示清掉指定值、回到每次运行现解析/未关联
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSchedulePatch {
     pub name: Option<String>,
     #[serde(default)]
     pub profile_id: Option<Option<String>>,
+    // 关联步骤补丁。注意 serde 对 Option<Option<T>> 不区分「缺失」与显式 null（都按 None = 不改），
+    // 清除关联走 Some("")：空白在下方归一为 None（与 profile_id 的空串过滤口径一致）
+    #[serde(default)]
+    pub linked_step: Option<Option<String>>,
     pub frequency: Option<String>,
     pub weekday: Option<u8>,
     pub hour: Option<u8>,
@@ -315,6 +330,10 @@ fn create_schedule_at(path: &Path, input: CreateScheduleInput) -> Result<Schedul
         project_root: root,
         skill,
         profile_id: input.profile_id.filter(|v| !v.trim().is_empty()),
+        linked_step: input
+            .linked_step
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         frequency: input.frequency,
         weekday: input.weekday,
         hour: input.hour,
@@ -347,6 +366,11 @@ fn update_schedule_at(path: &Path, id: &str, patch: UpdateSchedulePatch) -> Resu
     if let Some(profile_id) = patch.profile_id {
         task.profile_id = profile_id.filter(|v| !v.trim().is_empty());
     }
+    if let Some(linked_step) = patch.linked_step {
+        task.linked_step = linked_step
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
     if let Some(frequency) = patch.frequency {
         task.frequency = frequency;
     }
@@ -376,8 +400,9 @@ fn update_schedule_at(path: &Path, id: &str, patch: UpdateSchedulePatch) -> Resu
     Ok(task)
 }
 
-/// 跑一次后回填 last_run_at/last_status/history（新的在前，只留 20 条）并原子写
-fn record_run(id: &str, status: &str, summary: &str) -> Result<(), String> {
+/// 跑一次后回填 last_run_at/last_status/history（新的在前，只留 20 条）并原子写。
+/// new_entries 仅 lit-watch 类任务成功时才有值（超时/失败由调用方传 None）
+fn record_run(id: &str, status: &str, summary: &str, new_entries: Option<u32>) -> Result<(), String> {
     let _g = sched_lock();
     let path = schedules_path()?;
     let mut list = read_schedules_at(&path)?;
@@ -394,6 +419,7 @@ fn record_run(id: &str, status: &str, summary: &str) -> Result<(), String> {
             at,
             status: status.to_string(),
             summary: summary.to_string(),
+            new_entries,
         },
     );
     task.history.truncate(HISTORY_CAP);
@@ -435,6 +461,13 @@ fn execute_one(id: &str) -> RunDonePayload {
             summary: format!("定时任务不存在: {id}"),
         };
     };
+    // 新增条目计数仅对 lit-watch 类任务有意义（只有它往 notes/inbox.md 追加条目）
+    let is_lit_watch = task.skill == "lit-watch";
+    let before_entries = if is_lit_watch {
+        Some(crate::lit_watch::count_inbox_entries(Path::new(&task.project_root)))
+    } else {
+        None
+    };
     let result: Result<String, String> = (|| {
         let root = Path::new(&task.project_root);
         if !root.is_dir() {
@@ -446,12 +479,20 @@ fn execute_one(id: &str) -> RunDonePayload {
         let profile = crate::ai::resolve_profile_from(profiles, task.profile_id.clone(), None, dedicated)?;
         crate::ai::run_agent_task(&profile, &build_task_prompt(&task.skill), root, RUN_TIMEOUT)
     })();
+    // 超时/失败不记新增数：只有成功跑完才数第二次取差值（saturating_sub 防文件被外部截断）
+    let new_entries = match (&result, before_entries) {
+        (Ok(_), Some(before)) => Some(
+            crate::lit_watch::count_inbox_entries(Path::new(&task.project_root))
+                .saturating_sub(before),
+        ),
+        _ => None,
+    };
     let (status, summary) = match result {
         // 简报/错误文本落存储与发事件前必须脱敏
         Ok(out) => ("ok", cap_summary(&crate::sessions::redact_sensitive_text(&out))),
         Err(e) => ("error", cap_summary(&crate::sessions::redact_sensitive_text(&e))),
     };
-    if let Err(e) = record_run(id, status, &summary) {
+    if let Err(e) = record_run(id, status, &summary, new_entries) {
         crate::logbuf::record("error", "scheduler", &format!("回填运行历史失败: {e}"));
     }
     RunDonePayload {
@@ -663,6 +704,7 @@ mod tests {
             project_root: "/tmp/p".into(),
             skill: "lit-watch".into(),
             profile_id: None,
+            linked_step: Some("文献监控".into()),
             frequency: "daily".into(),
             weekday: None,
             hour: 8,
@@ -674,6 +716,7 @@ mod tests {
                 at: "2026-08-13T01:00:00Z".into(),
                 status: "ok".into(),
                 summary: "新命中 2 篇".into(),
+                new_entries: Some(2),
             }],
         };
         write_schedules_at(&path, &[task.clone()]).unwrap();
@@ -682,12 +725,42 @@ mod tests {
         let back = read_schedules_at(&path).unwrap();
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].id, "t1");
+        assert_eq!(back[0].linked_step.as_deref(), Some("文献监控"));
         assert_eq!(back[0].history.len(), 1);
         assert_eq!(back[0].history[0].summary, "新命中 2 篇");
+        assert_eq!(back[0].history[0].new_entries, Some(2));
         // 缺文件 → 空列表
         let missing = tmp_schedules_path("missing");
         assert!(read_schedules_at(&missing).unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_json_without_linked_step_and_new_entries_deserializes() {
+        // 老版本 schedules.json：无 linked_step、history 无 newEntries —— 两个字段都要 default 兼容
+        let text = r#"[{
+            "id": "t1", "name": "文献雷达", "project_root": "/tmp/p", "skill": "lit-watch",
+            "profile_id": null, "frequency": "daily", "weekday": null, "hour": 8, "minute": 30,
+            "enabled": true, "last_run_at": null, "last_status": null,
+            "history": [{"at": "2026-08-13T01:00:00Z", "status": "ok", "summary": "新命中 2 篇"}]
+        }]"#;
+        let list: Vec<Schedule> = serde_json::from_str(text).unwrap();
+        assert_eq!(list[0].linked_step, None);
+        assert_eq!(list[0].history[0].new_entries, None);
+        // 老前端发来的 create/update 报文（无 linkedStep）也要能解析
+        let create: CreateScheduleInput = serde_json::from_str(
+            r#"{"projectRoot": "/tmp/p", "frequency": "daily", "hour": 8, "minute": 0}"#,
+        )
+        .unwrap();
+        assert_eq!(create.linked_step, None);
+        let patch: UpdateSchedulePatch = serde_json::from_str(r#"{"hour": 9}"#).unwrap();
+        assert_eq!(patch.linked_step, None);
+        // 显式 null 与缺失等价：serde 对 Option<Option<T>> 不区分二者（既有 profile_id 同款口径），
+        // 清除关联由 update 时空白字符串归一为 None 承担
+        let patch: UpdateSchedulePatch = serde_json::from_str(r#"{"linkedStep": null}"#).unwrap();
+        assert_eq!(patch.linked_step, None);
+        let patch: UpdateSchedulePatch = serde_json::from_str(r#"{"linkedStep": " 检索筛选 "}"#).unwrap();
+        assert_eq!(patch.linked_step, Some(Some(" 检索筛选 ".into())));
     }
 
     #[test]
@@ -700,6 +773,7 @@ mod tests {
             project_root: root.to_string(),
             skill: None,
             profile_id: None,
+            linked_step: None,
             frequency: frequency.into(),
             weekday,
             hour,

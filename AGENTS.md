@@ -81,22 +81,39 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态）、
                              # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑）、StepFlow（步骤内协同流程线）、
                              # ScheduleSection（项目分组「◔ 定时任务」区块）、
+                             # LitWatchCard（「◔ 文献雷达」卡片：新命中/精读清单双页签 + 近 8 周趋势 + →精读/◈解读/↓全文，
+                             #   挂项目详情工作段 TaskCardsSection 之后）、
+                             # ReaderOverlay（沉浸阅读区全屏覆盖层，v3.96：三栏「笔记｜PDF｜Agent 对话」，fixed inset-0 z-40，
+                             #   Esc 退出级联最优先，底下终端/PTY 保持挂载；会话数据/注入由 TerminalPage 供给）+
+                             #   PdfContinuousView（连续滚动 PDF 栏：±2 页虚拟化懒渲染、选段浮动条四钮、▦ 圈选截图、
+                             #   ⌘+点击段落对照、进度记忆/护眼反色/术语淡高亮）+ ReaderToolsPanel（✦ 工具页签：译/生词本/大纲三段折叠）、
                              # TemplatePickModal（注册成功后的研究流程模板选择层：五套内置模板 +
                              # 「不使用研究流程」（写 pipeline_opt_out 标记）/「稍后再选」（不留痕）两出口）、
                              # FuseDraftModal（「◈ 融合进任务书」预览编辑弹层：AI 融合稿可改后确认才写草稿）、
                              # TerminalStatusBar（终端底部常驻状态栏：模型/思考档可点切 + 📂 胶囊浮层改目录（仅未启动）+
                              #   git 芯片/保存/推送 + 状态点/时长/本会话 token，吸收旧中带底条） 等
   components/CommandPalette.tsx # ⌘K 面板
+  components/QuickChatHistoryMenu.tsx # 侧栏「快速开聊」右键的随手聊历史浮层（命令面板式行：色点+标题+时间；
+                             # 勾了「下次直接开聊」的用户左键直达终端看不到弹层历史，右键是回看口）
+                             # 行样式与弹层「随手聊历史」一致：品牌胶囊 + 标题 + 归属 · 时间
   components/HoverTip.tsx      # 应用内 tooltip 共享件（v3.93 提取自 ProjectGroup）：useHoverTip + HoverTip，
                              # portal 到 body（免疫祖先 opacity/transform 的 fixed 包含块问题）、滚动/缩放即关、
                              # up 参数支持锚点上方弹出（行内动作栏 tooltip 专用）；PageFrame 的 RowAction 内置上方 tooltip
   pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES
-  pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras 单一出处，弹层预览与落盘共用）
+  pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras 单一出处，弹层预览与落盘共用）；
+                             # 工作区→终端交接单一出处 buildWorkspaceTerminalRequest（reuseKey 找回同工作区标签 +
+                             # 无 prompt 时 resume 最近会话）
+  workspace-resume.ts        # 「去终端」resume 挑选纯逻辑（workspace 名 + 仓库路径匹配，排除归档/内部/live，
+                             # tests/workspace-resume.test.ts）
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
   mcp-presets.ts             # MCP 内置预设表（加预设 = 加一条；密钥一律 ${VAR} 引用）
   mcp-display.ts             # MCP 页展示纯逻辑：协议徽章固定识别色（stdio 紫/remote 蓝）+ 命令路径智能缩略
                              # （家目录折 ~、段数>3 且 >28 字符才砍中段留首尾，tests/mcp-display.test.ts）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
+  lit-watch.ts               # 文献雷达纯逻辑：分组/趋势/直链转换/已读判定/漂移提醒（tests/lit-watch.test.ts）
+  reader.ts                  # 沉浸阅读区纯逻辑：分栏钳制与像素换算/圈选命中与 canvas 映射/截图注入格式/
+                             # glossary 表格契约（与 reader.rs 双端镜像，改动需同步）/段落边界提取/术语匹配/
+                             # 进度与护眼存储键（tests/reader.test.ts）
   task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/会话按卡分组/卡片 kind（idea 想法卡 / draft 讨论卡）过滤
                              # （tests/task-cards.test.ts）
   step-flow.ts               # 步骤内协同流程线纯逻辑：种子→before→agent→during→after→评审节点链（tests/step-flow.test.ts）
@@ -113,10 +130,14 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   terminal-input.ts          # 终端输入侧纯逻辑：shell 路径转义 escapeShellPath、拖入多路径拼接 joinDroppedPaths、
                              # 剪贴板图片条目判定/MIME→扩展名/粘贴反馈文案（tests/terminal-input.test.ts）
   terminal-tab-persistence.ts # 终端标签重启恢复白名单（不含 PTY/密钥/env）
+  tab-drag.ts                # 标签条拖拽排序纯逻辑：位移钳制 + 目标槽位判定（>= 中线守末槽边界，
+                             # tests/tab-drag.test.ts）
   terminal-palettes.ts       # 终端调色板共享表（设置页与终端同源）：四套深色 + 四套配对浅色 twin，
                              # ANSI 16 色 + 光标 + 选区全在表内；resolvePaletteId 按主题亮暗自动换 twin
                              # （新增调色板须同步 settings.rs KNOWN_PALETTES，否则被静默丢弃，tests/terminal-palettes.test.ts）
   upstream-note.ts           # brew 最新但上游 npm 更高版本的提示
+  quick-chat.ts              # 快速开聊弹层「随手聊历史」纯逻辑：pickQuickChatSessions（不落工作区/注册项目，
+                             # 且排除归档/内部/live/源文件已删——列了也恢复不了的）+ 标题展示（tests/quick-chat.test.ts）
   command-palette.ts         # 命令面板过滤纯逻辑
   hotkeys.ts                 # 快捷键组合串纯逻辑
   themes.ts                  # 主题清单单一出处 + isLightTheme() 亮暗判定单一出处（禁另造判定）
@@ -175,7 +196,18 @@ src-tauri/src/
   scheduler.rs               # 定时雷达（v3.75；v3.79 起技能可选）：schedules.json（每日/每周+时分，本地时区）、60s tick + 启动补跑
                              # （漏跑 coalesce 只补一次）、无头拉起 agent 在项目根跑技能（默认 lit-watch，prompt 按技能分派：
                              # lit-watch 专用文案不动、其他技能通用模板，10 分钟超时）、
-                             # 历史留 20 条、跑完发 scheduler-run-done 事件（App.tsx 全局监听弹 OS 通知，复用长任务通知开关）
+                             # 历史留 20 条、跑完发 scheduler-run-done 事件（App.tsx 全局监听弹 OS 通知，复用长任务通知开关）；
+                             # v3.95 起 Schedule.linkedStep 关联步骤（可空，update 空串归 None）+ RunRecord.newEntries 新命中计数
+                             # （跑 lit-watch 前后数 inbox.md `## ` 标题数取差，超时/失败不记）
+  lit_watch.rs               # 文献雷达应用层（v3.95）：巡检产物解析 DTO（notes/inbox.md 条目含 watch-run 批次标记日期、上限 500 条；
+                             # papers/watch-followup.md 付费墙待办、watchlist.md 订阅读写整表写回保留注释行、included.md 精读清单
+                             # 增删去重）+ download_paper_pdf 白名单下载（仅 http/https、60MB 流式上限、%PDF- 魔数校验、
+                             # 落 papers/ 自动登记 project.toml 资源）；门槛 = 注册项目根 + canonicalize + 读-改-原子写
+  reader.rs                  # 沉浸阅读区后端（v3.96）：ensure_paper_note 建档 notes/<slug>.md（七固定小节、已存在不覆盖）+
+                             # read_image_bytes 图片通道（png/jpg/jpeg/gif/webp/svg、20MB，白名单判定复用 pdf.rs 内核）+
+                             # save_reader_capture 圈选截图落 notes/assets/（PNG 魔数 + 同秒重名 -2/-3）/ append_note_image
+                             # （追加进「我的想法」小节）+ 生词本 notes/glossary.md（list/append 术语小写去重/remove）+
+                             # append_note_translation（「译段」小节）；门槛 = gated_root 注册项目根 + canonicalize + 原子写
   citation.rs                # 引用健康检查：.md 引用键（[@key]/多键/[-@key]）对照 references.bib（白名单同 pdf.rs 口径）
   handoff.rs                 # 接力（§11.3 机制四）：简报生成（脱敏+64KB）、提炼接力（build_session_digest AI 蒸馏全会话 +
                              # finalize_digest_brief 初稿写回）、handoff_links 接力链登记/固化
@@ -220,7 +252,7 @@ src-tauri/src/
 | 领域 | 文件 | 覆盖内容 |
 |---|---|---|
 | 安全与数据防护 | `docs/conventions/safety.md` | 密钥/脱敏细节、git 提交与逐 hunk 验收、多阶段 Git、profile 三层验证、会话/配置写操作口径、诊断包、MCP 分发与技能导入导出、CLI 更新、PDF/笔记白名单 |
-| 终端与工作台 | `docs/conventions/terminal.md` | PTY 回落 shell、标签持久化白名单、评审/冲突覆盖层、改动面板、收件箱与注意力规则、键盘流、分屏、关窗守卫、WebGL 探针、输入侧（图片粘贴/文件拖入/右键菜单/链接点击） |
+| 终端与工作台 | `docs/conventions/terminal.md` | PTY 回落 shell、标签持久化白名单、评审/冲突覆盖层、改动面板、收件箱与注意力规则、键盘流、分屏、关窗守卫、WebGL 探针、输入侧（图片粘贴/文件拖入/右键菜单/链接点击）、沉浸阅读区 |
 | 流水线与项目域 | `docs/conventions/pipeline.md` | 工作区创建/漂移/归档/删除、流水线开步/模板/编辑器、接力与提炼接力、任务卡、人工事项与讨论种子、agent 人工请求（help-wanted）、收件箱分类胶囊、示例课题、白话双层 |
 | 步骤工作面板 | `docs/conventions/step-panel.md` | **新增步骤/模板前必读**：七条硬规则（顺序即语义、空节点不出现、同一事实只说一次、孤立按钮、主路径唯一不设门控、角色标注）、问题该在什么时刻与层级出现（项目层/决策项/按需问/种子/人工事项五选一）、文案与术语、新增模板检查清单 |
 | 主题与设计系统 | `docs/conventions/design-system.md` | 主题令牌、字体栈、线条语言、控件密度、页面框架、对话页三栏、步进器规格、已否决设计 |
@@ -251,18 +283,21 @@ src-tauri/src/
   五套流水线模板按步骤挂载）、**定时雷达 ✅**（v3.75：scheduler.rs 每日/每周无头巡检 + lit-watch 多源精选升级，
   约定见 conventions/pipeline.md「定时雷达」）、**模板重设计与接壤 ✅**（v3.78：五套模板内容重设计（种子对准拍板点/技能挂载核对/
   学术 MCP 人工事项）+ 产物路径接壤（投稿与返修接综述/科研论文成稿）+ 编辑器「＋ 从模板追加」）；批量验收、云端会话双源调研留 backlog
-- **Backlog（记录不动手）**：SSH 远程执行、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（P2 验证后
-  评估）、批量验收、云端会话双源调研、首启引导完整版（示例课题最小版已落地：工作区空态「✦ 创建示例课题（演示）」→
+- **Backlog（记录不动手）**：SSH 远程执行、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（✅ 已落地为
+  沉浸阅读区，v3.96）、批量验收、云端会话双源调研、首启引导完整版（示例课题最小版已落地：工作区空态「✦ 创建示例课题（演示）」→
   `create_demo_project`，演示 PDF/引文/综述流水线齐备；完整版引导的更丰富演示数据留 backlog）、工作区类型驱动默认值（数据类跳端口）
 
 **当前待办**：
 
-- P0 收尾当前批次：全量文档同步 → 走查 → [skip ci] 提交 → 可选发版
-- **定时任务与研究流程结合（细目见架构 §11.4 Backlog 细目）**：边界已定——不给每步配定时任务，
-  结合点是「产出回流」（进收件箱 / 关联步骤 / 复用 staleUpstream 口径）而非「配置下沉」。
-  同时记了三条已确认风险：写权限九家不齐（仅 codex 有沙箱、grok 用 --yolo、qwen 未验证）、
+- P0 收尾当前批次：批次 A（文献雷达应用层，v3.95）与批次 B（沉浸阅读区，v3.96）均已落地待走查；
+  全量文档同步 → 走查 → [skip ci] 提交 → 可选发版；后续批次 C/D/E 待本批走查完成后按既定计划推进
+- **定时任务与研究流程结合（部分落地 v3.95，细目见架构 §11.4 Backlog 细目）**：边界已定——不给每步配定时任务，
+  结合点是「产出回流」而非「配置下沉」。产出回流三件套已上线（v3.95：lit_watch.rs 解析巡检产物 + LitWatchCard
+  雷达卡片 + 收件箱 lit: 文献胶囊 / Schedule.linkedStep 关联步骤 + RunRecord.newEntries / staleLitHint 复用
+  staleUpstream 口径只提醒不阻断）。
+  三条已确认风险不变：写权限九家不齐（仅 codex 有沙箱、grok 用 --yolo、qwen 未验证）、
   产出绕过验收层（cwd 是项目根不是 worktree）、10 分钟超时与真失败不可分。
-  先做能力标注 + 落点收敛，跑进工作区属定位决策待拍板
+  落点收敛 + 能力标注仍未做，跑进工作区属定位决策待拍板
 - macOS 签名公证（暂缓，需 Apple Developer 会员 + CI 配 6 个 APPLE_* secrets，见架构 v1.3）
 - Intel macOS 安装包（暂缓：CI macos-latest 只出 aarch64；加 `x86_64-apple-darwin` target 构建时间翻倍，真有 Intel 用户再加，
   见架构 v1.3 / README 安装节）

@@ -10,6 +10,7 @@ mod fs_tree;
 mod git_info;
 mod global_config;
 mod handoff;
+mod lit_watch;
 mod logbuf;
 mod mcp;
 mod model_registry;
@@ -22,6 +23,7 @@ mod profiles;
 mod profile_validation;
 mod projects;
 mod pty;
+mod reader;
 mod scheduler;
 mod sessions;
 mod settings;
@@ -260,6 +262,21 @@ pub fn run() {
             scheduler::update_schedule,
             scheduler::delete_schedule,
             scheduler::run_schedule_now,
+            lit_watch::list_watch_entries,
+            lit_watch::list_watch_subscriptions,
+            lit_watch::save_watch_subscriptions,
+            lit_watch::list_included_entries,
+            lit_watch::add_included_entry,
+            lit_watch::remove_included_entry,
+            lit_watch::download_paper_pdf,
+            reader::ensure_paper_note,
+            reader::read_image_bytes,
+            reader::save_reader_capture,
+            reader::append_note_image,
+            reader::list_glossary,
+            reader::append_glossary,
+            reader::remove_glossary_entry,
+            reader::append_note_translation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

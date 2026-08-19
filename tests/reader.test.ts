@@ -1,0 +1,404 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  CAPTURE_MIN_PX,
+  READER_PDF_MIN_PX,
+  READER_SIDE_MIN_PX,
+  bytesToBase64,
+  buildFigureTourPrompt,
+  buildNotePolishPrompt,
+  buildPageSummaryPrompt,
+  buildReaderTranslatePrompt,
+  captureRectToCanvasPixels,
+  captureRectUsable,
+  clampReaderPct,
+  classifyMdHref,
+  escapeGlossaryCell,
+  findGlossaryMatches,
+  formatPdfExcerptPrompt,
+  formatReaderCapturePrompt,
+  groupTextLines,
+  hitTestCapture,
+  isParagraphBreak,
+  joinParagraphLines,
+  nearestLineIndex,
+  normCaptureRect,
+  paragraphBounds,
+  parseGlossaryTable,
+  readerColumnWidths,
+  readerDarkKey,
+  readerProgressKey,
+  readerReuseKey,
+  relMdLinkPath,
+  relToProjectRoot,
+  renderGlossaryTable,
+  resolveMdPath,
+  splitGlossaryRow,
+  stripMdHrefSuffix,
+} from "../src/reader.ts";
+
+test("clampReaderPct 坏值/非正数回落缺省", () => {
+  assert.equal(clampReaderPct(Number.NaN, 22), 22);
+  assert.equal(clampReaderPct(0, 28), 28);
+  assert.equal(clampReaderPct(-5, 28), 28);
+  assert.equal(clampReaderPct(Infinity, 22), 22);
+});
+
+test("clampReaderPct 夹到 12–40", () => {
+  assert.equal(clampReaderPct(5, 22), 12);
+  assert.equal(clampReaderPct(60, 22), 40);
+  assert.equal(clampReaderPct(25, 22), 25);
+});
+
+test("readerColumnWidths 侧栏按百分比取整且保底 240px", () => {
+  const { left, right } = readerColumnWidths(1600, 22, 28);
+  assert.equal(left, 352);
+  assert.equal(right, 448);
+  // 窄窗下 12% 不足 240px 时保底线生效
+  const narrow = readerColumnWidths(1200, 12, 12);
+  assert.equal(narrow.left, READER_SIDE_MIN_PX);
+  assert.equal(narrow.right, READER_SIDE_MIN_PX);
+});
+
+test("readerColumnWidths 两侧超预算时按比例压缩，PDF 保底不被压穿", () => {
+  const total = 900;
+  const { left, right } = readerColumnWidths(total, 40, 40);
+  // 预算 = 900 - 280 = 620，两侧各 360 → 等比压缩
+  assert.equal(left + right, total - READER_PDF_MIN_PX);
+  assert.equal(left, right);
+  assert.ok(left < 360);
+});
+
+test("readerColumnWidths 极端窄窗侧栏归零让位", () => {
+  assert.deepEqual(readerColumnWidths(READER_PDF_MIN_PX, 22, 28), {
+    left: 0,
+    right: 0,
+  });
+  assert.deepEqual(readerColumnWidths(0, 22, 28), { left: 0, right: 0 });
+});
+
+test("readerReuseKey 稳定格式（退出再进找回同一标签）", () => {
+  assert.equal(readerReuseKey("/Users/u/proj"), "reader:/Users/u/proj");
+});
+
+test("formatPdfExcerptPrompt 短文本原样 + 出处格式", () => {
+  assert.equal(
+    formatPdfExcerptPrompt("固态电解质界面稳定性的方法", 3, "a.pdf"),
+    "> 「固态电解质界面稳定性的方法」（a.pdf，第 3 页）\n\n固态电解质界面稳定性的方法",
+  );
+  // 摘要折行：换行/连续空白压成单个空格
+  assert.equal(
+    formatPdfExcerptPrompt("a\nb  c", 1, "x.pdf"),
+    "> 「a b c」（x.pdf，第 1 页）\n\na\nb  c",
+  );
+});
+
+test("formatPdfExcerptPrompt 超长摘要 60 字截断加省略号", () => {
+  const text = "字".repeat(70);
+  const out = formatPdfExcerptPrompt(text, 2, "长文.pdf");
+  const [head, body] = out.split("\n\n");
+  assert.equal(head, `> 「${"字".repeat(60)}…」（长文.pdf，第 2 页）`);
+  assert.equal(body, text);
+});
+
+test("formatPdfExcerptPrompt 正文超过 6000 字截断", () => {
+  const text = "正".repeat(6001);
+  const out = formatPdfExcerptPrompt(text, 1, "a.pdf");
+  const body = out.split("\n\n")[1];
+  assert.equal(body.length, 6001); // 6000 + 省略号
+  assert.ok(body.endsWith("…"));
+});
+
+// ===== 批次 B2：圈选截图与 md 图片/链接 =====
+
+test("normCaptureRect 任意方向拖拽归一化", () => {
+  assert.deepEqual(normCaptureRect(10, 20, 30, 50), { x: 10, y: 20, w: 20, h: 30 });
+  assert.deepEqual(normCaptureRect(30, 50, 10, 20), { x: 10, y: 20, w: 20, h: 30 });
+});
+
+test("captureRectUsable 小于 8×8 视为误触", () => {
+  const ok = { x: 0, y: 0, w: CAPTURE_MIN_PX, h: CAPTURE_MIN_PX };
+  assert.ok(captureRectUsable(ok));
+  assert.ok(!captureRectUsable({ x: 0, y: 0, w: CAPTURE_MIN_PX - 1, h: 20 }));
+  assert.ok(!captureRectUsable({ x: 0, y: 0, w: 20, h: 2 }));
+});
+
+test("hitTestCapture 单页命中/跨页拒绝/空白忽略", () => {
+  const slots = [
+    { page: 1, x: 0, y: 0, w: 500, h: 700 },
+    { page: 2, x: 0, y: 720, w: 500, h: 700 }, // 页间 20px 分隔带归页 2 槽
+  ];
+  assert.deepEqual(hitTestCapture({ x: 50, y: 50, w: 100, h: 100 }, slots), {
+    kind: "ok",
+    page: 1,
+  });
+  // 纵跨页缝 → cross
+  assert.deepEqual(hitTestCapture({ x: 50, y: 690, w: 100, h: 100 }, slots).kind, "cross");
+  // 落在页槽之外（两侧留白）→ none
+  assert.deepEqual(hitTestCapture({ x: 600, y: 50, w: 50, h: 50 }, slots).kind, "none");
+});
+
+test("captureRectToCanvasPixels 按 DPR/缩放换算并钳到 canvas 内", () => {
+  // canvas CSS 600×800，像素 1200×1600（dpr=2）
+  const css = { x: 100, y: 200, w: 600, h: 800 };
+  const r = captureRectToCanvasPixels(
+    { x: 250, y: 400, w: 150, h: 200 },
+    css,
+    1200,
+    1600,
+  );
+  assert.deepEqual(r, { sx: 300, sy: 400, sw: 300, sh: 400 });
+  // 出圈部分裁掉：左/上越界 → 从 0 起算，宽高压小
+  const clamped = captureRectToCanvasPixels(
+    { x: 50, y: 150, w: 200, h: 200 },
+    css,
+    1200,
+    1600,
+  );
+  assert.deepEqual(clamped, { sx: 0, sy: 0, sw: 300, sh: 300 });
+  // 完全落在 canvas 外 → null
+  assert.equal(
+    captureRectToCanvasPixels({ x: 0, y: 0, w: 50, h: 50 }, css, 1200, 1600),
+    null,
+  );
+});
+
+test("formatReaderCapturePrompt 路径转义 + 预填 prompt + 出处", () => {
+  assert.equal(
+    formatReaderCapturePrompt("/tmp/ccode/paste-a.png", 3, "paper.pdf"),
+    "/tmp/ccode/paste-a.png\n这张图/这段讲了什么？请结合论文解释。（paper.pdf，第 3 页圈选）",
+  );
+  // 含空格路径整体单引号包裹（终端粘贴图片同一口径）
+  const out = formatReaderCapturePrompt("/tmp/my dir/p.png", 1, "a.pdf");
+  assert.ok(out.startsWith("'/tmp/my dir/p.png'\n"), out);
+});
+
+test("bytesToBase64 与 atob 互逆（分块编码）", () => {
+  const bytes = new Uint8Array(70000).map((_, i) => i % 256);
+  const b64 = bytesToBase64(bytes);
+  const bin = atob(b64);
+  assert.equal(bin.length, bytes.length);
+  assert.equal(bin.charCodeAt(65536), bytes[65536]);
+});
+
+test("classifyMdHref 锚点/外链/其它协议/本地路径", () => {
+  assert.equal(classifyMdHref("#小节"), "anchor");
+  assert.equal(classifyMdHref("https://a.b/c"), "external");
+  assert.equal(classifyMdHref("//a.b/c.png"), "external");
+  assert.equal(classifyMdHref("mailto:x@y.z"), "other");
+  assert.equal(classifyMdHref("assets/x.png"), "local");
+  assert.equal(classifyMdHref("../papers/a.md"), "local");
+  assert.equal(classifyMdHref("/abs/path/x.png"), "local");
+});
+
+test("stripMdHrefSuffix 去 query/fragment 并 URI 解码", () => {
+  assert.equal(stripMdHrefSuffix("a%20b.png#frag"), "a b.png");
+  assert.equal(stripMdHrefSuffix("x.md?y=1"), "x.md");
+  // 非法编码保留原样
+  assert.equal(stripMdHrefSuffix("100%.png"), "100%.png");
+});
+
+test("resolveMdPath 相对当前 md 目录解析", () => {
+  assert.equal(
+    resolveMdPath("/p/notes/a.md", "assets/x.png"),
+    "/p/notes/assets/x.png",
+  );
+  assert.equal(resolveMdPath("/p/notes/sub/a.md", "../x.png"), "/p/notes/x.png");
+  assert.equal(resolveMdPath("/p/notes/a.md", "./y.md"), "/p/notes/y.md");
+  // 绝对路径原样归一（折叠 ..）
+  assert.equal(resolveMdPath("/p/notes/a.md", "/q/./z/../w.png"), "/q/w.png");
+  // Windows 盘符（分隔符归一）
+  assert.equal(
+    resolveMdPath("C:\\proj\\notes\\a.md", "assets\\x.png"),
+    "C:/proj/notes/assets/x.png",
+  );
+});
+
+test("relMdLinkPath 目标相对当前 md 目录（../ 回退）", () => {
+  assert.equal(
+    relMdLinkPath("/p/notes/a.md", "/p/notes/assets/x.png"),
+    "assets/x.png",
+  );
+  assert.equal(relMdLinkPath("/p/notes/sub/a.md", "/p/notes/x.png"), "../x.png");
+  // 同目录就是文件名
+  assert.equal(relMdLinkPath("/p/notes/a.md", "/p/notes/b.png"), "b.png");
+});
+
+// ===== 批次 B3：翻译 prompt / 相对路径 / 生词本格式 / 段落提取 / 术语匹配 =====
+
+test("buildReaderTranslatePrompt 学术直译约束 + 原文附上", () => {
+  const p = buildReaderTranslatePrompt("interfacial resistance");
+  assert.ok(p.includes("学术语境直译"));
+  assert.ok(p.endsWith("\n\ninterfacial resistance"));
+});
+
+test("chips 三条 prompt 口径固定", () => {
+  assert.equal(
+    buildFigureTourPrompt("papers/a.pdf"),
+    "请通读 papers/a.pdf，逐个说明每张 Figure/表讲了什么、哪些值得细看（图导游）。",
+  );
+  assert.equal(
+    buildPageSummaryPrompt("papers/a.pdf", 7),
+    "请总结 papers/a.pdf 第 7 页（我当前读到的位置）的内容，中文三行以内。",
+  );
+  assert.equal(
+    buildNotePolishPrompt("notes/a.md"),
+    "请阅读 notes/a.md，结合我们刚才的讨论，把笔记的五段内容补全改好。",
+  );
+});
+
+test("relToProjectRoot 根内转相对、根外原样", () => {
+  assert.equal(relToProjectRoot("/p/proj", "/p/proj/papers/a.pdf"), "papers/a.pdf");
+  assert.equal(relToProjectRoot("/p/proj/", "/p/proj/notes/x.md"), "notes/x.md");
+  // Windows 分隔符归一
+  assert.equal(
+    relToProjectRoot("C:\\proj", "C:\\proj\\papers\\a.pdf"),
+    "papers/a.pdf",
+  );
+  assert.equal(relToProjectRoot("/p/proj", "/q/other.pdf"), "/q/other.pdf");
+});
+
+test("进度记忆与护眼的 localStorage 键格式", () => {
+  assert.equal(readerProgressKey("/p/a.pdf"), "ccode.readerProgress./p/a.pdf");
+  assert.equal(readerDarkKey("/p/a.pdf"), "ccode.readerDark./p/a.pdf");
+});
+
+test("splitGlossaryRow 转义还原与尾单元处理", () => {
+  assert.deepEqual(splitGlossaryRow("| a | b | c |"), ["a", "b", "c"]);
+  assert.deepEqual(splitGlossaryRow("| C\\|D | x | y |"), ["C|D", "x", "y"]);
+  // 缺尾竖线也能切
+  assert.deepEqual(splitGlossaryRow("| a | b"), ["a", "b"]);
+  // 非 | 起头不是表行
+  assert.deepEqual(splitGlossaryRow("普通一行"), []);
+  assert.deepEqual(splitGlossaryRow("|术语|释义|出处|"), ["术语", "释义", "出处"]);
+});
+
+test("escapeGlossaryCell 管道转义 + 换行折空格", () => {
+  assert.equal(escapeGlossaryCell("a|b\nc"), "a\\|b c");
+});
+
+test("parseGlossaryTable 容错：非表行/表头/分隔/短行/空术语全跳过", () => {
+  const text = [
+    "# 生词本",
+    "",
+    "随手记",
+    "| 术语 | 释义 | 出处 |",
+    "| --- | --- | --- |",
+    "| Alpha | 甲 | p1 |",
+    "| 两列 | x |",
+    "| | 空术语 | x |",
+    "尾部备注",
+  ].join("\n");
+  assert.deepEqual(parseGlossaryTable(text), [
+    { term: "Alpha", meaning: "甲", source: "p1" },
+  ]);
+});
+
+test("glossary 渲染→解析往返稳定（格式契约锚点）", () => {
+  const entries = [
+    { term: "C|D 键", meaning: "某释义", source: "《p》第 1 页" },
+    { term: "界面阻抗", meaning: "interfacial resistance", source: "《p》第 2 页" },
+  ];
+  const text = renderGlossaryTable(entries);
+  assert.ok(text.startsWith("| 术语 | 释义 | 出处 |\n| --- | --- | --- |\n"));
+  assert.deepEqual(parseGlossaryTable(text), entries);
+});
+
+test("groupTextLines 同视觉行拼接、跨行分行", () => {
+  const spans = [
+    { top: 100.2, left: 60, height: 12, text: "world" },
+    { top: 100, left: 10, height: 12, text: "hello " },
+    { top: 120, left: 10, height: 12, text: "next line" },
+  ];
+  const lines = groupTextLines(spans);
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].text, "hello world"); // 组内按 left 排序拼接
+  assert.equal(lines[0].top, 100);
+  assert.equal(lines[1].text, "next line");
+});
+
+test("isParagraphBreak 间隙 > 1.4 倍行高才算段界", () => {
+  const a = { top: 0, height: 10, text: "a" };
+  // 间隙 13 ≤ 14 → 同段
+  assert.ok(!isParagraphBreak(a, { top: 23, height: 10, text: "b" }));
+  // 间隙 15 > 14 → 段界
+  assert.ok(isParagraphBreak(a, { top: 25, height: 10, text: "b" }));
+  // 负间隙（行重叠）不算段界
+  assert.ok(!isParagraphBreak(a, { top: 5, height: 10, text: "b" }));
+});
+
+test("paragraphBounds 从点击行向上下扩展", () => {
+  // 行高 10：行内间隙 4，段界间隙 20
+  const lines = [
+    { top: 0, height: 10, text: "p1a" },
+    { top: 14, height: 10, text: "p1b" },
+    { top: 44, height: 10, text: "p2a" },
+    { top: 58, height: 10, text: "p2b" },
+    { top: 72, height: 10, text: "p2c" },
+    { top: 102, height: 10, text: "p3a" },
+  ];
+  assert.deepEqual(paragraphBounds(lines, 0), { start: 0, end: 1 });
+  assert.deepEqual(paragraphBounds(lines, 3), { start: 2, end: 4 });
+  assert.deepEqual(paragraphBounds(lines, 5), { start: 5, end: 5 });
+  // 越界下标钳制
+  assert.deepEqual(paragraphBounds(lines, 99), { start: 5, end: 5 });
+  assert.deepEqual(paragraphBounds([], 0), { start: 0, end: -1 });
+});
+
+test("nearestLineIndex 行内含中、行间取最近", () => {
+  const lines = [
+    { top: 0, height: 10, text: "a" },
+    { top: 30, height: 10, text: "b" },
+  ];
+  assert.equal(nearestLineIndex(lines, 5), 0);
+  assert.equal(nearestLineIndex(lines, 18), 0); // 距 a 底 8 < 距 b 顶 12
+  assert.equal(nearestLineIndex(lines, 25), 1);
+  assert.equal(nearestLineIndex(lines, 500), 1);
+});
+
+test("joinParagraphLines 行间换行、收尾空白", () => {
+  assert.equal(
+    joinParagraphLines([
+      { top: 0, height: 10, text: " 第一段  " },
+      { top: 14, height: 10, text: "第二行  " },
+    ]),
+    "第一段\n第二行",
+  );
+});
+
+test("findGlossaryMatches 大小写不敏感 + 整词边界 + 长词优先", () => {
+  const terms = [
+    { term: "solid electrolyte", meaning: "固态电解质" },
+    { term: "Li", meaning: "锂" },
+    { term: "界面", meaning: "interface" },
+  ];
+  // 大小写不敏感 + 长词优先（solid electrolyte 整体命中，不再单拆 Li）
+  const m1 = findGlossaryMatches("A Solid Electrolyte interface", terms);
+  assert.deepEqual(m1, [
+    { start: 2, end: 19, meaning: "固态电解质" },
+  ]);
+  // 整词边界：LiI 里的 Li 不命中；句尾 Li. 命中
+  assert.deepEqual(findGlossaryMatches("LiI and LiF", terms), []);
+  assert.deepEqual(findGlossaryMatches("metal Li.", terms), [
+    { start: 6, end: 8, meaning: "锂" },
+  ]);
+  // CJK 术语按子串命中（无单词边界概念）
+  assert.deepEqual(findGlossaryMatches("固液界面稳定性", terms), [
+    { start: 2, end: 4, meaning: "interface" },
+  ]);
+  // 多次命中
+  const m4 = findGlossaryMatches("Li anode, Li metal", terms);
+  assert.equal(m4.length, 2);
+  // 空术语表/空文本
+  assert.deepEqual(findGlossaryMatches("text", []), []);
+  assert.deepEqual(findGlossaryMatches("", terms), []);
+});
+
+test("findGlossaryMatches 术语含正则字符不炸", () => {
+  const terms = [{ term: "C++", meaning: "语言" }];
+  assert.deepEqual(findGlossaryMatches("written in C++.", terms), [
+    { start: 11, end: 14, meaning: "语言" },
+  ]);
+  // 「C++11」：+ 非单词字符，尾边界放行——按术语原样命中（已知取舍）
+  assert.deepEqual(findGlossaryMatches("in C++11", terms).length, 1);
+});

@@ -40,7 +40,9 @@
   run 脚本 → 终端交接），工作区页步进器大圆与评审「开始下一步」共用，组件态由调用方回调注入。**v3.64 起「开工」为两步**：
   步进器大圆与卡片「开工」先开 `KickoffConfirmDialog`（TASK.md 预览/编辑（草稿优先）+ 推荐技能区 + 人工事项区 +
   主仓提醒），确认才走 startPipelineStep；评审「开始下一步」保留直开（连续流，结论已沉淀到下一步草稿），「继续」
-  不经弹层。**TASK.md 拼装单一出处 `renderTaskMd`**：弹层预览与实际落盘共用 `gatherTaskMdExtras`（提货单/技能元数据）
+  不经弹层。**弹层人工事项区只显示 before/during，收尾（after）事项整组不出现**（agent 干完才轮到人做的活，
+  开工时摆出来只会让人误以为现在就要做；收尾语境由 StepFlow 流程线节点与评审「收尾事项」行承担），
+  步骤只剩 after 事项时整区不渲染、「N 件待做」计数同口径。**TASK.md 拼装单一出处 `renderTaskMd`**：弹层预览与实际落盘共用 `gatherTaskMdExtras`（提货单/技能元数据）
   + `renderTaskMd`（模板简报拼装；草稿非空时编辑区直接取草稿全文，见「任务书草稿」节），禁复制第二份拼装逻辑。
   **v3.66 起弹层预览区升级为可编辑 TASK.md 编辑区**：默认拼装结果进编辑区（状态机 `taskMdEditorReduce`——dirty 后
   重拼不覆盖人编辑稿），「确认开工」落盘 = 编辑区最终内容（`startPipelineStep` 的 `taskMdOverride`，写盘仍走
@@ -377,7 +379,17 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   流程线区域布局：聚焦头部显示步骤名 + describeStep 白话状态（待开始按草稿是否已起草分
   「建议先点下方种子聊聊」/「想法已就位」），主推进入口并入流程线节点——待开始=开始（agent 节点）/
   工作区已归档=恢复工作区（agent 节点，替代开始）/待评审=去评审/阻塞=去处理冲突（评审节点，带
-  resolve-conflict 意图直达评审覆盖层不绕终端）/进行中=去终端看看。
+  resolve-conflict 意图直达评审覆盖层不绕终端）/进行中=去终端看看。**「去终端」类入口（流程线
+  「去终端看看」、工作区行「去终端」）是「回到那个对话」而非新开**（v3.93，用户拍板）：交接构造
+  单一出处 `pipeline-start.ts buildWorkspaceTerminalRequest`——始终带 reuseKey `ws:<worktreePath>`
+  （开工起的标签之后能找回，同一工作区永远回到同一个终端标签），无 initialPrompt 时自动 resume
+  该工作区最近会话（`latestWorkspaceSession`：按 workspace 名 + 仓库路径匹配列表，排除归档/内部
+  无头/live 中的会话）；有 prompt（开工/整理笔记）是明确新任务，不 resume。StepFlow `goTerminal`
+  与 WorkspacesPage `useOpenInTerminal` 都走它，禁再各自手搓 pendingTerminal。
+  **resume 前还有一道 cwd 活标签兜底**（TerminalPage 消费处）：reuseKey 没命中（restored/手动开的
+  标签不带 key）时若某活标签的 cwd 就是目标目录，聚焦它而不是新开 resume——`live` 只标外部进程，
+  本应用标签里活着的会话不在其列，直接去 resume 会被 CLI 拒（codex：thread already has an
+  active writer）。
   **人工事项是步骤级，不进卡片**（v3.69 修正：卡片是想法容器，一步多卡时步骤级清单在每张卡重复渲染 = 噪声）；
   **v3.70 起大圆点击语义从「终端入口」改为「步骤聚焦」**（用户拍板：圆上不再跳终端/开步——推进动作归流程
   线节点、卡片行、任务行）：点圆 = 卡片区只看该步骤（种子 + 卡片 + 人工事项清单一屏内），选中圆中性高亮环，
@@ -454,6 +466,24 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   notificationsEnabled 开关，不新增设置项）；命中正文仍由技能本身写 `notes/inbox.md`，调度器不二次搬运。
 - **已知风险**：各家 CLI 无头模式的工具放行/写权限行为 matrix 无记录、未经全量实测（qwen 无头为位置参数兜底），
   首批用户验证后按实测校准并回写 matrix。
+- **应用层消费（v3.95，lit_watch.rs + LitWatchCard）**：雷达卡片与收件箱负责「消费」巡检产物，调度器职责切分不变。
+  - **条目格式与批次标记**：inbox.md 条目新增「期刊」「中文一句话」两行（中文一句话每条必写）；精选排序 =
+    相关度 × 期刊档次双因子（内置主流高刊名单，名单外不降级只作加分；期刊档次只影响排序不影响收录）；
+    每批命中的日期以 `<!-- watch-run: YYYY-MM-DD -->` 注释批次标记为唯一来源。
+  - **解析口径**：lit_watch.rs 把 `notes/inbox.md`（上限 500 条）、`papers/watch-followup.md`（付费墙待办）、
+    `papers/watchlist.md`（订阅读写：整表写回、保留注释行）、`papers/included.md`（精读清单增删、规范化标题去重）
+    解析为 DTO；格式不规整的条目容错跳过。所有操作门槛 = 已注册项目根 + canonicalize 防逃逸 + 读-改-原子写。
+  - **收件箱 lit 类别**：key 前缀 `lit:`，胶囊排在「待确认」之后；最近一次成功 run 有 newEntries>0 且 24h 内 →
+    条目「文献雷达 · <项目名>：N 条新命中」，点击跳项目详情；dismiss 走既有签名机制。
+  - **关联步骤 + 漂移提醒**：`Schedule.linkedStep`（可空，update 空串归 None 清除）+ `RunRecord.newEntries`
+    （跑前后数 inbox.md `## ` 标题数取差，超时/失败不记）；staleLitHint = linkedStep 非空 && newEntries>0 &&
+    巡检时间晚于该步骤工作区 mergedAt/createdAt → 雷达卡片警告色小字「雷达有新命中，『X』步的产物可能过期」，
+    复用 staleUpstream 口径，只提醒不阻断。
+  - **精读清单与已读判定**：included.md 是「先攒后读」主路径；已读 = notes/ 有匹配笔记文件（规范化标题互相包含
+    判定），纯派生不建状态机；「开读」有已下载 PDF 走 previewReq 预览，没有则主按钮变「↓ 全文」先下载。
+  - **下载白名单与资源登记**：download_paper_pdf 仅 http/https、60MB 上限流式中止、%PDF- 魔数校验、文件名
+    sanitize、落 papers/ 重名 -2/-3、自动登记 project.toml `[[resources]]` type="paper"；非直链（出版商页）前端
+    禁用并提示手动下载，付费墙文献仍走 watch-followup.md「待人工下载」。
 
 ## 其他
 

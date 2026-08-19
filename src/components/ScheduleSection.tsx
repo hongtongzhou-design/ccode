@@ -29,13 +29,17 @@ const actionBtn =
 /** 历史条目最多展开显示条数（DTO 保留最近 20 条，行内只看最近几条） */
 const HISTORY_PREVIEW = 5;
 
-/** 「＋ 定时巡检」弹层：技能可选（默认 lit-watch 文献监控），任务名默认值跟随技能（手改过不覆盖） */
+/** 「＋ 定时巡检」弹层：技能可选（默认 lit-watch 文献监控），任务名默认值跟随技能（手改过不覆盖）；
+ *  「关联步骤」可选：雷达新命中晚于该步骤推进时，文献雷达卡片给漂移提醒 */
 function CreateScheduleModal({
   projectRoot,
+  steps,
   onClose,
   onCreated,
 }: {
   projectRoot: string;
+  /** 项目步骤表（关联步骤下拉选项；空表 = 无研究流程，不渲染该下拉） */
+  steps: { name: string }[];
   onClose: () => void;
   onCreated: () => void;
 }) {
@@ -47,6 +51,7 @@ function CreateScheduleModal({
   const [weekday, setWeekday] = useState(1);
   const [time, setTime] = useState("09:00");
   const [profileId, setProfileId] = useState("");
+  const [linkedStep, setLinkedStep] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -88,6 +93,7 @@ function CreateScheduleModal({
           hour,
           minute,
           profileId: profileId || null,
+          linkedStep: linkedStep || null,
         },
       });
       onCreated();
@@ -190,6 +196,23 @@ function CreateScheduleModal({
             ))}
           </select>
         </label>
+        {steps.length > 0 && (
+          <label className="mb-4 block text-sm">
+            <span className="mb-1 block text-xs text-l3">关联步骤（可选）</span>
+            <select
+              className={fieldClass}
+              value={linkedStep}
+              onChange={(e) => setLinkedStep(e.target.value)}
+            >
+              <option value="">不关联</option>
+              {steps.map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
         <div className="flex justify-end gap-2">
           <button
@@ -242,8 +265,11 @@ function RunHistoryItem({ record }: { record: RunRecordDto }) {
  */
 export default function ScheduleSection({
   projectRoot,
+  steps = [],
 }: {
   projectRoot: string;
+  /** 项目步骤表：新建弹层「关联步骤」下拉的选项（空表 = 不渲染该下拉） */
+  steps?: { name: string }[];
 }) {
   const [open, setOpen] = useState(false);
   const [schedules, setSchedules] = useState<ScheduleDto[] | null>(null);
@@ -389,6 +415,11 @@ export default function ScheduleSection({
                     </span>
                     {/* 技能名白话直显：「文献雷达 · 每天 09:00 · lit-watch」 */}
                     <span className="shrink-0 text-xs text-l4">{s.skill}</span>
+                    {s.linkedStep && (
+                      <span className="shrink-0 text-xs text-l4">
+                        → {s.linkedStep}
+                      </span>
+                    )}
                     <span className="min-w-0 flex-1" />
                     {s.lastRunAt && (
                       <span
@@ -477,6 +508,7 @@ export default function ScheduleSection({
       {createOpen && (
         <CreateScheduleModal
           projectRoot={projectRoot}
+          steps={steps}
           onClose={() => setCreateOpen(false)}
           onCreated={() => {
             setCreateOpen(false);

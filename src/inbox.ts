@@ -9,6 +9,7 @@ import { NOTIFY_DEBOUNCE_MS } from "./notify.ts";
 export type InboxCategory =
   | "conflict"
   | "confirm"
+  | "lit"
   | "ready"
   | "artifacts"
   | "digest"
@@ -20,10 +21,12 @@ export interface InboxCategoryMeta {
   label: string;
 }
 
-/** 固定展示顺序（与原 strip 摘要口径一致，confirm: 与 live: 合并为「待确认」；help 追加在末尾） */
+/** 固定展示顺序（与原 strip 摘要口径一致，confirm: 与 live: 合并为「待确认」；
+ *  lit: 文献雷达新命中紧随「待确认」；help 追加在末尾） */
 export const INBOX_CATEGORIES: readonly InboxCategoryMeta[] = [
   { id: "conflict", label: "冲突" },
   { id: "confirm", label: "待确认" },
+  { id: "lit", label: "文献" },
   { id: "ready", label: "可合并" },
   { id: "artifacts", label: "待核验" },
   { id: "digest", label: "待发送" },
@@ -35,6 +38,7 @@ export const INBOX_CATEGORIES: readonly InboxCategoryMeta[] = [
 export function inboxCategoryOf(key: string): InboxCategory {
   if (key.startsWith("conflict:")) return "conflict";
   if (key.startsWith("confirm:") || key.startsWith("live:")) return "confirm";
+  if (key.startsWith("lit:")) return "lit";
   if (key.startsWith("ready:")) return "ready";
   if (key.startsWith("artifacts:")) return "artifacts";
   if (key.startsWith("digest")) return "digest";

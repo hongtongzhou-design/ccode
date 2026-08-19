@@ -1,0 +1,118 @@
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { SessionMetaDto } from "../types";
+import { AGENTS } from "../types";
+import { agentBrandBadgeStyle } from "../agent-colors";
+import { relTime } from "../rel-time";
+import { sessionDisplayTitle, sessionHomeLabel } from "../quick-chat";
+
+/**
+ * 侧栏「快速开聊」右键 = 随手聊历史浮层（v3.93 用户拍板：勾了「下次直接开聊」的用户
+ * 左键直达终端、永远看不到弹层里的历史区，右键是她们的回看口）。
+ * 行样式与弹层「随手聊历史」完全一致（用户拍板）：品牌胶囊 + 标题 + 归属 · 时间。
+ * 定位/关闭语义与 ContextMenu 一致：点外/Esc/滚动即关，实测后钳制在视口内。
+ */
+export default function QuickChatHistoryMenu({
+  x,
+  y,
+  sessions,
+  onPick,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  /** null = 还在读取 */
+  sessions: SessionMetaDto[] | null;
+  onPick: (s: SessionMetaDto) => void;
+  onClose: () => void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [measured, setMeasured] = useState<{ left: number; top: number } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    const onScroll = () => onClose();
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [onClose]);
+
+  // 实测面板宽高后钳制在视口内（useLayoutEffect 绘制前完成修正，不闪动）
+  useLayoutEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const { offsetWidth: w, offsetHeight: h } = el;
+    setMeasured({
+      left: Math.max(4, Math.min(x, window.innerWidth - w - 4)),
+      top: Math.max(4, Math.min(y, window.innerHeight - h - 4)),
+    });
+  }, [x, y, sessions]);
+
+  const style = measured ?? { left: x, top: y };
+
+  return (
+    <div
+      className="fixed inset-0 z-50"
+      onClick={onClose}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onClose();
+      }}
+    >
+      <div
+        ref={panelRef}
+        role="menu"
+        aria-label="随手聊历史"
+        className="absolute w-80 overflow-hidden rounded-md border border-field ccode-float-surface"
+        style={style}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="border-b border-hairline px-3.5 py-2 text-xs text-l3">
+          随手聊历史
+        </div>
+        <ul className="max-h-80 space-y-0.5 overflow-auto py-1">
+          {sessions === null ? (
+            <li className="px-3.5 py-3 text-xs text-l4">读取中…</li>
+          ) : sessions.length === 0 ? (
+            <li className="px-3.5 py-3 text-xs text-l4">
+              还没有随手聊的会话
+            </li>
+          ) : (
+            sessions.map((s) => (
+              <li key={`${s.agent}:${s.sessionId}`}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onPick(s);
+                  }}
+                  title={`${sessionDisplayTitle(s)}\n${AGENTS.find((a) => a.id === s.agent)?.label ?? s.agent} · ${s.projectPath}`}
+                  className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-hover"
+                >
+                  <span
+                    className="shrink-0 rounded-sm px-1 py-0.5 text-micro"
+                    style={agentBrandBadgeStyle(s.agent)}
+                  >
+                    {AGENTS.find((a) => a.id === s.agent)?.label ?? s.agent}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-l1">
+                    {sessionDisplayTitle(s)}
+                  </span>
+                  <span className="shrink-0 text-micro text-l4">
+                    {sessionHomeLabel(s)} · {relTime(s.updatedAt)}
+                  </span>
+                </button>
+              </li>
+            ))
+          )}
+        </ul>
+      </div>
+    </div>
+  );
+}

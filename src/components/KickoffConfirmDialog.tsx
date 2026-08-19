@@ -403,8 +403,9 @@ export default function KickoffConfirmDialog({
         )}
 
         {/* 人工事项区（步骤声明了才有）：开工前事项未完成给提醒，只提醒不阻断；
-            勾选/提交交付直接可在这里做，与卡片区同一个 HumanTasksList */}
-        {(stepNow.humanTasks?.length ?? 0) > 0 && (
+            勾选/提交交付直接可在这里做，与卡片区同一个 HumanTasksList。
+            收尾（after）事项不出现（agent 干完才轮到人做），步骤只剩 after 事项时整区不渲染 */}
+        {(stepNow.humanTasks?.some((t) => t.timing !== "after") ?? false) && (
           <div className="mb-3 max-h-44 shrink-0 overflow-auto rounded-md bg-inset px-2.5 py-2">
             {(() => {
               const blocking = humanStates

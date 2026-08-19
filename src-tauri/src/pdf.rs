@@ -35,9 +35,9 @@ fn path_allowed(target: &Path, roots: &[PathBuf], resources: &[PathBuf]) -> bool
     roots.iter().any(|r| target.starts_with(r)) || resources.iter().any(|r| target == r)
 }
 
-/// 白名单 + 上限 + 完整读取的公共内核（PDF 与 docx 共用；格式魔数校验与 base64 编码由调用方做）。
-/// cap_exceeded 为超限时的报错文案（按类型定制提示）。
-fn read_whitelisted_sync(
+/// 白名单 + 上限 + 完整读取的公共内核（PDF / docx / 阅读区图片通道共用；
+/// 格式魔数校验与 base64 编码由调用方做）。cap_exceeded 为超限时的报错文案（按类型定制提示）。
+pub(crate) fn read_whitelisted_sync(
     path: &str,
     cwd_hint: Option<&str>,
     cap: u64,

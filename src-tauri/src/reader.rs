@@ -1,0 +1,976 @@
+//! 沉浸式阅读区（批次 B1/B2/B3）：为项目内 PDF 建 notes/<slug>.md 精读笔记档案（B1），
+//! 图片通道（B2）：白名单读图片字节（read_image_bytes）、圈选截图落 notes/assets/
+//! （save_reader_capture）、截图链接追加进笔记「## 我的想法」小节（append_note_image）；
+//! 生词本与译段（B3）：notes/glossary.md 表格的 list/append/remove（机管文件，表外内容保留），
+//! 译段追加进笔记「## 译段」小节（append_note_translation）。
+//! 门槛同 lit_watch（gated_root 口径：已注册项目或含 .ccode/project.toml，返回 canonical 根）；
+//! pdf_path canonicalize 后必须在项目根内；已存在的笔记**永不覆盖**（created:false 原样返回）；
+//! 新建/写回走 profiles::atomic_write（tmp+rename），symlink 会被整体替换而非穿透。
+
+use base64::Engine;
+use serde::Serialize;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// ensure_paper_note 返回：笔记绝对路径 + 本次是否新建（false = 已存在，内容原样保留）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PaperNoteDto {
+    pub path: String,
+    pub created: bool,
+}
+
+/// 笔记文件名安全化：去路径分隔与控制字符、连续空白折成单个 -（首尾/连续不出 -）、
+/// 限长 80 字符；结果为空回落 "paper"。slug 只作文件名，笔记标题仍用原始 stem。
+fn slugify_note_stem(stem: &str) -> String {
+    let mut out = String::new();
+    let mut len = 0usize;
+    // 空白先记账，后面真来了有效字符才落 -（避免首尾/连续横线）
+    let mut pending_dash = false;
+    for c in stem.chars() {
+        if c.is_whitespace() {
+            pending_dash = !out.is_empty();
+            continue;
+        }
+        if c.is_control() || c == '/' || c == '\\' {
+            continue;
+        }
+        if len >= 80 {
+            break;
+        }
+        if pending_dash {
+            out.push('-');
+            len += 1;
+            pending_dash = false;
+        }
+        out.push(c);
+        len += 1;
+    }
+    if out.is_empty() { "paper".into() } else { out }
+}
+
+/// 新笔记模板：标题 + 来源行 + 固定小节（结构对齐 lit-notes 技能的精读笔记口径）
+fn note_template(title: &str, rel_pdf: &str, date: &str) -> String {
+    format!(
+        "# {title}\n\n> 来源：{rel_pdf} · 开始阅读 {date}\n\n## 研究问题\n\n## 方法\n\n## 主要结果\n\n## 局限\n\n## 可引用点\n\n## 译段\n\n## 我的想法\n"
+    )
+}
+
+fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNoteDto, String> {
+    let root = gated_root(project_root)?;
+    let pdf = fs::canonicalize(Path::new(&crate::sessions::expand_tilde(pdf_path)))
+        .map_err(|e| format!("PDF 不存在或不可读: {e}"))?;
+    if !pdf.starts_with(&root) {
+        return Err("PDF 不在项目目录内，拒绝建立笔记".into());
+    }
+    let file_name = pdf
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or("PDF 文件名无效")?;
+    let stem = Path::new(&file_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file_name.clone());
+    let notes = root.join("notes");
+    fs::create_dir_all(&notes).map_err(|e| format!("创建 notes 目录失败: {e}"))?;
+    // notes 若是指向根外的 symlink 要拦下（同 lit_watch 落盘的双校验口径）
+    let canon_notes = fs::canonicalize(&notes).map_err(|e| format!("notes 目录无效: {e}"))?;
+    if !canon_notes.starts_with(&root) {
+        return Err("notes 指向项目目录之外，拒绝写入".into());
+    }
+    // slug 已去路径分隔符，join 不会逃逸 canon_notes
+    let target = canon_notes.join(format!("{}.md", slugify_note_stem(&stem)));
+    if target.exists() {
+        return Ok(PaperNoteDto {
+            path: target.to_string_lossy().into_owned(),
+            created: false,
+        });
+    }
+    // 来源行写相对项目根的路径（统一正斜杠，同 discover_resources 口径）
+    let rel_pdf = pdf
+        .strip_prefix(&root)
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_else(|_| file_name.clone());
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    crate::profiles::atomic_write(&target, &note_template(&stem, &rel_pdf, &date))?;
+    Ok(PaperNoteDto {
+        path: target.to_string_lossy().into_owned(),
+        created: true,
+    })
+}
+
+/// 打开阅读区时建档：已存在原样返回（永不覆盖），不存在按模板原子写
+#[tauri::command]
+pub async fn ensure_paper_note(
+    project_root: String,
+    pdf_path: String,
+) -> Result<PaperNoteDto, String> {
+    tauri::async_runtime::spawn_blocking(move || ensure_paper_note_sync(&project_root, &pdf_path))
+        .await
+        .map_err(|e| format!("建立文献笔记失败: {e}"))?
+}
+
+/// 门槛 + canonical 项目根（同 lit_watch.rs 的口径，不复制实现）
+fn gated_root(project_root: &str) -> Result<PathBuf, String> {
+    crate::projects::ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
+        project_root,
+    )))
+}
+
+// ===== 批次 B2：图片通道 =====
+
+/// 图片单文件上限 20MB（笔记内嵌图远超此值基本是误操作）
+const IMAGE_CAP: u64 = 20 * 1024 * 1024;
+
+/// read_image_bytes 返回：mime 按扩展名映射 + base64 完整字节（前端拼 data URL）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBytesDto {
+    pub mime: String,
+    pub data: String,
+}
+
+/// 扩展名白名单 → mime；不在名单内返回 None（读取前就拒绝）
+fn image_mime_for(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()?
+        .to_string_lossy()
+        .to_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+fn read_image_sync(path: &str, cwd_hint: Option<&str>) -> Result<ImageBytesDto, String> {
+    let expanded = crate::sessions::expand_tilde(path);
+    let mime = image_mime_for(Path::new(&expanded))
+        .ok_or("只支持 png/jpg/jpeg/gif/webp/svg 图片")?;
+    // 白名单口径完全复用 pdf.rs 的四类来源判定（canonicalize 防逃逸在内核里做）
+    let (bytes, _size) = crate::pdf::read_whitelisted_sync(path, cwd_hint, IMAGE_CAP, |mb| {
+        format!("图片超过 20 MB（{mb:.1} MB），暂不支持内嵌显示")
+    })?;
+    // svg 是文本格式，直接按字节编码即可（与其它位图同一通道）
+    Ok(ImageBytesDto {
+        mime: mime.into(),
+        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
+}
+
+/// 笔记阅读版式的图片渲染：白名单内图片字节 → data URL 素材
+#[tauri::command]
+pub async fn read_image_bytes(
+    path: String,
+    cwd_hint: Option<String>,
+) -> Result<ImageBytesDto, String> {
+    tauri::async_runtime::spawn_blocking(move || read_image_sync(&path, cwd_hint.as_deref()))
+        .await
+        .map_err(|e| format!("读取图片失败: {e}"))?
+}
+
+/// save_reader_capture 返回：项目根相对路径（notes/assets/…）与绝对路径
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderCaptureDto {
+    pub rel_path: String,
+    pub abs_path: String,
+}
+
+/// 同秒连截的重名避让：capture-<stamp>.png 已存在则 -2/-3 递增
+fn next_capture_name(dir: &Path, stamp: &str) -> String {
+    let mut name = format!("capture-{stamp}.png");
+    let mut n = 2;
+    while dir.join(&name).exists() {
+        name = format!("capture-{stamp}-{n}.png");
+        n += 1;
+    }
+    name
+}
+
+fn save_reader_capture_sync(
+    project_root: &str,
+    image_base64: &str,
+) -> Result<ReaderCaptureDto, String> {
+    let root = gated_root(project_root)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image_base64)
+        .map_err(|e| format!("图片数据不是有效的 base64: {e}"))?;
+    if bytes.is_empty() {
+        return Err("图片数据为空".into());
+    }
+    if bytes.len() as u64 > IMAGE_CAP {
+        return Err(format!(
+            "截图超过 20 MB（{:.1} MB）",
+            bytes.len() as f64 / 1024.0 / 1024.0
+        ));
+    }
+    // 圈选产物来自 canvas.toBlob('image/png')，魔数不符即非预期来源
+    if !bytes.starts_with(b"\x89PNG") {
+        return Err("只接受 PNG 截图".into());
+    }
+    let assets = root.join("notes").join("assets");
+    fs::create_dir_all(&assets).map_err(|e| format!("创建 notes/assets 目录失败: {e}"))?;
+    // notes/assets 若是指向根外的 symlink 要拦下（同 ensure_paper_note 的双校验口径）
+    let canon_assets = fs::canonicalize(&assets).map_err(|e| format!("notes/assets 目录无效: {e}"))?;
+    if !canon_assets.starts_with(&root) {
+        return Err("notes/assets 指向项目目录之外，拒绝写入".into());
+    }
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let name = next_capture_name(&canon_assets, &stamp);
+    let target = canon_assets.join(&name);
+    fs::write(&target, &bytes).map_err(|e| format!("保存截图失败: {e}"))?;
+    Ok(ReaderCaptureDto {
+        rel_path: format!("notes/assets/{name}"),
+        abs_path: target.to_string_lossy().into_owned(),
+    })
+}
+
+/// 圈选截图落盘：项目根门槛 + PNG 魔数 + 20MB 上限，返回相对/绝对路径
+#[tauri::command]
+pub async fn save_reader_capture(
+    project_root: String,
+    image_base64: String,
+) -> Result<ReaderCaptureDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_reader_capture_sync(&project_root, &image_base64)
+    })
+    .await
+    .map_err(|e| format!("保存截图失败: {e}"))?
+}
+
+/// 计算 target 相对 from_dir 的 md 链接路径（统一正斜杠；同目录时就是文件名）
+fn rel_md_path(from_dir: &Path, target: &Path) -> Option<String> {
+    let f: Vec<_> = from_dir.components().collect();
+    let t: Vec<_> = target.components().collect();
+    let mut i = 0;
+    while i < f.len() && i < t.len() && f[i] == t[i] {
+        i += 1;
+    }
+    let mut parts: Vec<String> = (0..f.len() - i).map(|_| "..".to_string()).collect();
+    for c in &t[i..] {
+        parts.push(c.as_os_str().to_string_lossy().into_owned());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+/// 在指定二级小节末尾插入内容块（前后各一空行）；小节不存在则文件末尾补小节再插。
+/// 纯函数（测试友好）：split('\n') 保留尾部空串，join 回原样不丢末尾换行。
+fn append_block_to_section(text: &str, section: &str, block: &str) -> String {
+    let header = format!("## {section}");
+    let lines: Vec<&str> = text.split('\n').collect();
+    if let Some(h) = lines.iter().position(|l| l.trim() == header) {
+        // 小节结束 = 下一个二级标题或文件尾
+        let mut end = lines.len();
+        for (i, l) in lines.iter().enumerate().skip(h + 1) {
+            if l.starts_with("## ") {
+                end = i;
+                break;
+            }
+        }
+        // 小节内尾部空行先归一，再统一补「空行 + 内容块 + 空行」
+        let mut tail = end;
+        while tail > h + 1 && lines[tail - 1].trim().is_empty() {
+            tail -= 1;
+        }
+        let mut out: Vec<&str> = lines[..tail].to_vec();
+        out.push("");
+        out.extend(block.split('\n'));
+        out.push("");
+        out.extend_from_slice(&lines[end..]);
+        out.join("\n")
+    } else {
+        format!("{}\n\n## {section}\n\n{block}\n", text.trim_end())
+    }
+}
+
+/// 在「## 我的想法」小节末尾插入图片行（append_block_to_section 的图片入口）
+fn append_image_to_section(text: &str, image_md: &str) -> String {
+    append_block_to_section(text, "我的想法", image_md)
+}
+
+fn append_note_image_sync(
+    project_root: &str,
+    note_path: &str,
+    rel_image_path: &str,
+) -> Result<(), String> {
+    let root = gated_root(project_root)?;
+    let note = fs::canonicalize(Path::new(&crate::sessions::expand_tilde(note_path)))
+        .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
+    let canon_notes =
+        fs::canonicalize(root.join("notes")).map_err(|e| format!("notes 目录无效: {e}"))?;
+    if !note.starts_with(&canon_notes) {
+        return Err("笔记必须在项目 notes/ 目录内，拒绝写入".into());
+    }
+    // 图片按项目根相对路径解析，canonical 后同样必须在 notes/ 内（防 ../ 逃逸与绝对路径）
+    let rel_img = rel_image_path.replace('\\', "/");
+    let img = fs::canonicalize(root.join(&rel_img)).map_err(|e| format!("图片不存在: {e}"))?;
+    if !img.starts_with(&canon_notes) {
+        return Err("图片必须在项目 notes/ 目录内".into());
+    }
+    let note_dir = note.parent().ok_or("笔记路径无效")?;
+    let rel = rel_md_path(note_dir, &img).ok_or("无法计算图片的相对路径")?;
+    let text = fs::read_to_string(&note).map_err(|e| format!("读取笔记失败: {e}"))?;
+    let new_text = append_image_to_section(&text, &format!("![截图]({rel})"));
+    crate::profiles::atomic_write(&note, &new_text)
+}
+
+/// 把已落盘的截图链接追加进笔记「## 我的想法」小节（读-改-原子写）
+#[tauri::command]
+pub async fn append_note_image(
+    project_root: String,
+    note_path: String,
+    rel_image_path: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        append_note_image_sync(&project_root, &note_path, &rel_image_path)
+    })
+    .await
+    .map_err(|e| format!("写入笔记失败: {e}"))?
+}
+
+// ===== 批次 B3：生词本（notes/glossary.md）与译段保存 =====
+
+/// 生词本条目 DTO（解析时已反转义，前端表格直接渲染）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GlossaryEntryDto {
+    pub term: String,
+    pub meaning: String,
+    pub source: String,
+}
+
+/// 表头/分隔行（无文件或无表时按此建表；格式契约与 src/reader.ts 双端镜像，改动需同步）
+const GLOSSARY_HEADER: &str = "| 术语 | 释义 | 出处 |";
+const GLOSSARY_SEP: &str = "| --- | --- | --- |";
+
+/// 单元格转义：| → \|、换行折成空格（表格单行约束）
+fn escape_glossary_cell(s: &str) -> String {
+    s.replace('|', "\\|").replace(['\r', '\n'], " ")
+}
+
+/// 按未转义的 | 切分行（\| 还原为 |），单元格 trim；非 | 起头的行返回空 Vec
+fn split_glossary_row(line: &str) -> Vec<String> {
+    let t = line.trim();
+    if !t.starts_with('|') {
+        return Vec::new();
+    }
+    let mut cells = Vec::new();
+    let mut cur = String::new();
+    let mut chars = t.chars().peekable();
+    chars.next(); // 行首 | 只是起始符
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&'|') {
+            cur.push('|');
+            chars.next();
+        } else if c == '|' {
+            cells.push(cur.trim().to_string());
+            cur.clear();
+        } else {
+            cur.push(c);
+        }
+    }
+    cells.push(cur.trim().to_string());
+    // 行尾 | 会多收一个空尾单元，去掉
+    if cells.last().is_some_and(|c| c.is_empty()) {
+        cells.pop();
+    }
+    cells
+}
+
+/// 分隔行判定：所有单元格只由 - : 空格组成且至少含一个 -
+fn is_glossary_sep_row(cells: &[String]) -> bool {
+    !cells.is_empty()
+        && cells
+            .iter()
+            .all(|c| !c.is_empty() && c.contains('-') && c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')))
+}
+
+/// 解析 glossary.md 的表格行（容错：非表行/表头/分隔行/不足 3 列/空术语一律跳过）
+fn parse_glossary(text: &str) -> Vec<GlossaryEntryDto> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let cells = split_glossary_row(line);
+        if cells.len() < 3 || cells[0].is_empty() {
+            continue;
+        }
+        if cells[0] == "术语" || is_glossary_sep_row(&cells[..3]) {
+            continue;
+        }
+        out.push(GlossaryEntryDto {
+            term: cells[0].clone(),
+            meaning: cells[1].clone(),
+            source: cells[2].clone(),
+        });
+    }
+    out
+}
+
+/// 整表渲染（表头 + 分隔 + 数据行，末尾换行收尾）
+fn render_glossary(entries: &[GlossaryEntryDto]) -> String {
+    let mut out = format!("{GLOSSARY_HEADER}\n{GLOSSARY_SEP}");
+    for e in entries {
+        out.push_str(&format!(
+            "\n| {} | {} | {} |",
+            escape_glossary_cell(&e.term),
+            escape_glossary_cell(&e.meaning),
+            escape_glossary_cell(&e.source)
+        ));
+    }
+    out.push('\n');
+    out
+}
+
+/// 写回口径：表外内容（标题/备注行）原样保留在前，表格整体重排在其后
+/// （机管文件，与 lit_watch 的 watchlist 保留注释行同一思路）
+fn splice_glossary(text: &str, entries: &[GlossaryEntryDto]) -> String {
+    let kept: Vec<&str> = text
+        .split('\n')
+        .filter(|l| !l.trim().starts_with('|'))
+        .collect();
+    let head = kept.join("\n");
+    let head = head.trim();
+    if head.is_empty() {
+        render_glossary(entries)
+    } else {
+        format!("{head}\n\n{}", render_glossary(entries))
+    }
+}
+
+/// glossary.md 路径：notes/ 目录 canonical 双校验（symlink 指根外即拒）
+fn glossary_path(root: &Path) -> Result<PathBuf, String> {
+    let notes = root.join("notes");
+    fs::create_dir_all(&notes).map_err(|e| format!("创建 notes 目录失败: {e}"))?;
+    let canon_notes = fs::canonicalize(&notes).map_err(|e| format!("notes 目录无效: {e}"))?;
+    if !canon_notes.starts_with(root) {
+        return Err("notes 指向项目目录之外，拒绝写入".into());
+    }
+    Ok(canon_notes.join("glossary.md"))
+}
+
+fn list_glossary_sync(project_root: &str) -> Result<Vec<GlossaryEntryDto>, String> {
+    let root = gated_root(project_root)?;
+    let path = glossary_path(&root)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取生词本失败: {e}"))?;
+    Ok(parse_glossary(&text))
+}
+
+/// 生词本整表（无文件返回空表）
+#[tauri::command]
+pub async fn list_glossary(project_root: String) -> Result<Vec<GlossaryEntryDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_glossary_sync(&project_root))
+        .await
+        .map_err(|e| format!("读取生词本失败: {e}"))?
+}
+
+fn append_glossary_sync(
+    project_root: &str,
+    term: &str,
+    meaning: &str,
+    source: &str,
+) -> Result<Vec<GlossaryEntryDto>, String> {
+    let root = gated_root(project_root)?;
+    let term = term.trim();
+    if term.is_empty() {
+        return Err("术语为空，未写入生词本".into());
+    }
+    let path = glossary_path(&root)?;
+    let text = if path.exists() {
+        fs::read_to_string(&path).map_err(|e| format!("读取生词本失败: {e}"))?
+    } else {
+        String::new()
+    };
+    let mut entries = parse_glossary(&text);
+    // 按术语小写去重：重复 = 原位更新释义/出处（术语原写法与位置不动）
+    let key = term.to_lowercase();
+    if let Some(ex) = entries.iter_mut().find(|e| e.term.to_lowercase() == key) {
+        ex.meaning = meaning.trim().to_string();
+        ex.source = source.trim().to_string();
+    } else {
+        entries.push(GlossaryEntryDto {
+            term: term.to_string(),
+            meaning: meaning.trim().to_string(),
+            source: source.trim().to_string(),
+        });
+    }
+    crate::profiles::atomic_write(&path, &splice_glossary(&text, &entries))?;
+    Ok(entries)
+}
+
+/// 加入/更新生词（按术语小写去重，重复 = 更新释义与出处），返回更新后整表
+#[tauri::command]
+pub async fn append_glossary(
+    project_root: String,
+    term: String,
+    meaning: String,
+    source: String,
+) -> Result<Vec<GlossaryEntryDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        append_glossary_sync(&project_root, &term, &meaning, &source)
+    })
+    .await
+    .map_err(|e| format!("写入生词本失败: {e}"))?
+}
+
+fn remove_glossary_entry_sync(
+    project_root: &str,
+    term: &str,
+) -> Result<Vec<GlossaryEntryDto>, String> {
+    let root = gated_root(project_root)?;
+    let path = glossary_path(&root)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取生词本失败: {e}"))?;
+    let target = term.trim();
+    let entries: Vec<GlossaryEntryDto> = parse_glossary(&text)
+        .into_iter()
+        .filter(|e| e.term != target) // 精确匹配删行（大小写敏感，与前端 DTO 回传一致）
+        .collect();
+    crate::profiles::atomic_write(&path, &splice_glossary(&text, &entries))?;
+    Ok(entries)
+}
+
+/// 删除生词（术语精确匹配），返回更新后整表
+#[tauri::command]
+pub async fn remove_glossary_entry(
+    project_root: String,
+    term: String,
+) -> Result<Vec<GlossaryEntryDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || remove_glossary_entry_sync(&project_root, &term))
+        .await
+        .map_err(|e| format!("删除生词失败: {e}"))?
+}
+
+/// 译段块：`> 原文`（多行逐行引用，「（第 N 页）」挂末行）+ 空行 + 译文
+fn translation_block(original: &str, translated: &str, page: u32) -> String {
+    let quoted = original
+        .lines()
+        .map(|l| format!("> {l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{quoted}（第 {page} 页）\n\n{translated}")
+}
+
+fn append_note_translation_sync(
+    project_root: &str,
+    note_path: &str,
+    original: &str,
+    translated: &str,
+    page: u32,
+) -> Result<(), String> {
+    let root = gated_root(project_root)?;
+    let note = fs::canonicalize(Path::new(&crate::sessions::expand_tilde(note_path)))
+        .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
+    let canon_notes =
+        fs::canonicalize(root.join("notes")).map_err(|e| format!("notes 目录无效: {e}"))?;
+    if !note.starts_with(&canon_notes) {
+        return Err("笔记必须在项目 notes/ 目录内，拒绝写入".into());
+    }
+    let original = original.trim();
+    let translated = translated.trim();
+    if original.is_empty() || translated.is_empty() {
+        return Err("译段内容为空，未写入笔记".into());
+    }
+    let text = fs::read_to_string(&note).map_err(|e| format!("读取笔记失败: {e}"))?;
+    let new_text =
+        append_block_to_section(&text, "译段", &translation_block(original, translated, page));
+    crate::profiles::atomic_write(&note, &new_text)
+}
+
+/// 保存译段到笔记「## 译段」小节末尾（无则补小节；读-改-原子写，笔记栏 watcher 自动刷新）
+#[tauri::command]
+pub async fn append_note_translation(
+    project_root: String,
+    note_path: String,
+    original: String,
+    translated: String,
+    page: u32,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        append_note_translation_sync(&project_root, &note_path, &original, &translated, page)
+    })
+    .await
+    .map_err(|e| format!("写入笔记失败: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ccode-reader-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        // 生产路径下 root 恒为 canonical（ensure_task_project_root），测试同口径：
+        // macOS 的 temp_dir 在 /var（软链到 /private/var），不 canonicalize 会让 starts_with 双校验误杀
+        dir.canonicalize().unwrap()
+    }
+
+    /// 造一个「含 .ccode/project.toml + papers/一篇.pdf」的临时项目，返回 (canonical 根, pdf 路径)
+    fn project_with_pdf(name: &str, pdf_name: &str) -> (PathBuf, PathBuf) {
+        let root = tmpdir(name);
+        let ccode = root.join(".ccode");
+        fs::create_dir_all(&ccode).unwrap();
+        fs::write(ccode.join("project.toml"), "name = \"t\"\n").unwrap();
+        let papers = root.join("papers");
+        fs::create_dir_all(&papers).unwrap();
+        let pdf = papers.join(pdf_name);
+        fs::write(&pdf, b"%PDF-fake").unwrap();
+        (root, pdf)
+    }
+
+    #[test]
+    fn creates_note_from_template() {
+        let (root, pdf) = project_with_pdf("create", "My Paper 2026.pdf");
+        let dto = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        assert!(dto.created);
+        assert!(Path::new(&dto.path).ends_with("notes/My-Paper-2026.md"));
+        let text = fs::read_to_string(&dto.path).unwrap();
+        assert!(text.starts_with("# My Paper 2026\n"));
+        assert!(text.contains("> 来源：papers/My Paper 2026.pdf · 开始阅读 "));
+        for h in [
+            "## 研究问题",
+            "## 方法",
+            "## 主要结果",
+            "## 局限",
+            "## 可引用点",
+            "## 译段",
+            "## 我的想法",
+        ] {
+            assert!(text.contains(h), "缺少小节 {h}");
+        }
+    }
+
+    #[test]
+    fn second_call_never_overwrites() {
+        let (root, pdf) = project_with_pdf("keep", "a.pdf");
+        let first = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        fs::write(&first.path, "人手改过的内容").unwrap();
+        let second =
+            ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        assert!(!second.created);
+        assert_eq!(second.path, first.path);
+        assert_eq!(fs::read_to_string(&second.path).unwrap(), "人手改过的内容");
+    }
+
+    #[test]
+    fn slug_sanitizes_separators_controls_and_blanks() {
+        assert_eq!(slugify_note_stem("a/b\\c"), "abc");
+        assert_eq!(slugify_note_stem("hello  world\twide"), "hello-world-wide");
+        assert_eq!(slugify_note_stem("  前后空白  "), "前后空白");
+        assert_eq!(slugify_note_stem("a\u{0007}b"), "ab");
+        assert_eq!(slugify_note_stem(" \t "), "paper");
+        assert_eq!(slugify_note_stem(&"长".repeat(100)).chars().count(), 80);
+    }
+
+    #[test]
+    fn rejects_pdf_outside_root() {
+        let (root, _pdf) = project_with_pdf("outside", "a.pdf");
+        let outside_root = tmpdir("outside-pdf");
+        let outside = outside_root.join("x.pdf");
+        fs::write(&outside, b"%PDF-fake").unwrap();
+        let err = ensure_paper_note_sync(&root.to_string_lossy(), &outside.to_string_lossy())
+            .unwrap_err();
+        assert!(err.contains("项目目录"), "意外报错：{err}");
+    }
+
+    #[test]
+    fn rejects_unregistered_root() {
+        let (root, _pdf) = project_with_pdf("unregistered", "a.pdf");
+        // 删掉档案卡后即不命中门槛（未注册且无 .ccode/project.toml）
+        fs::remove_file(root.join(".ccode/project.toml")).unwrap();
+        let pdf = root.join("papers/a.pdf");
+        assert!(ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).is_err());
+    }
+
+    // ===== 批次 B2：图片通道 =====
+
+    /// 最小合法 PNG（8 字节魔数+长度即可，本模块只校验前 4 字节魔数）
+    const FAKE_PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+    fn project_with_note(name: &str) -> (PathBuf, PathBuf) {
+        let (root, _pdf) = project_with_pdf(name, "a.pdf");
+        let dto = ensure_paper_note_sync(&root.to_string_lossy(), &root.join("papers/a.pdf").to_string_lossy()).unwrap();
+        (root, PathBuf::from(dto.path))
+    }
+
+    #[test]
+    fn read_image_ok_and_mime_by_ext() {
+        let dir = tmpdir("img-ok");
+        let f = dir.join("fig.png");
+        fs::write(&f, FAKE_PNG).unwrap();
+        let dto = read_image_sync(f.to_str().unwrap(), Some(dir.to_str().unwrap())).unwrap();
+        assert_eq!(dto.mime, "image/png");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&dto.data)
+            .unwrap();
+        assert_eq!(decoded, FAKE_PNG);
+        // svg 走同一通道，mime 按扩展名
+        let svg = dir.join("icon.svg");
+        fs::write(&svg, "<svg/>").unwrap();
+        let dto2 = read_image_sync(svg.to_str().unwrap(), Some(dir.to_str().unwrap())).unwrap();
+        assert_eq!(dto2.mime, "image/svg+xml");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_image_rejects_ext_and_escape() {
+        let root = tmpdir("img-root");
+        let outside = tmpdir("img-outside");
+        let txt = root.join("notes.txt");
+        fs::write(&txt, "plain").unwrap();
+        let err = read_image_sync(txt.to_str().unwrap(), Some(root.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("只支持"), "{err}");
+        // hint 根外（且不在任何注册来源内）：白名单拒绝
+        let f = outside.join("fig.png");
+        fs::write(&f, FAKE_PNG).unwrap();
+        let err2 = read_image_sync(f.to_str().unwrap(), Some(root.to_str().unwrap())).unwrap_err();
+        assert!(err2.contains("拒绝读取"), "{err2}");
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn read_image_rejects_oversize() {
+        let dir = tmpdir("img-cap");
+        let f = dir.join("huge.png");
+        let file = fs::File::create(&f).unwrap();
+        file.set_len(IMAGE_CAP + 1).unwrap(); // 稀疏文件置长度，不真写 20MB
+        drop(file);
+        let err = read_image_sync(f.to_str().unwrap(), Some(dir.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("20 MB"), "{err}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_capture_checks_magic_and_writes() {
+        let (root, _note) = project_with_note("capture");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(FAKE_PNG);
+        let dto = save_reader_capture_sync(&root.to_string_lossy(), &b64).unwrap();
+        assert!(dto.rel_path.starts_with("notes/assets/capture-"), "{}", dto.rel_path);
+        assert!(dto.rel_path.ends_with(".png"));
+        assert_eq!(fs::read(&dto.abs_path).unwrap(), FAKE_PNG);
+        // 非 PNG 内容（魔数不符）拒绝
+        let bad = base64::engine::general_purpose::STANDARD.encode(b"GIF89a fake");
+        let err = save_reader_capture_sync(&root.to_string_lossy(), &bad).unwrap_err();
+        assert!(err.contains("PNG"), "{err}");
+        // 非法 base64 拒绝
+        assert!(save_reader_capture_sync(&root.to_string_lossy(), "!!!not-b64!!!").is_err());
+    }
+
+    #[test]
+    fn capture_name_collision_gets_suffix() {
+        let dir = tmpdir("cap-name");
+        fs::write(dir.join("capture-t.png"), b"x").unwrap();
+        fs::write(dir.join("capture-t-2.png"), b"x").unwrap();
+        assert_eq!(next_capture_name(&dir, "t"), "capture-t-3.png");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_image_to_existing_section_end() {
+        let (root, note) = project_with_note("append");
+        // 笔记模板自带「## 我的想法」收尾小节；在其后再挂一节，验证插在小节末尾而非文件尾
+        let mut text = fs::read_to_string(&note).unwrap();
+        text.push_str("\n已有一条想法\n\n## 后续小节\n\n别的内容\n");
+        fs::write(&note, &text).unwrap();
+        fs::create_dir_all(root.join("notes/assets")).unwrap();
+        fs::write(root.join("notes/assets/capture-x.png"), FAKE_PNG).unwrap();
+        append_note_image_sync(&root.to_string_lossy(), &note.to_string_lossy(), "notes/assets/capture-x.png").unwrap();
+        let out = fs::read_to_string(&note).unwrap();
+        let expected = "已有一条想法\n\n![截图](assets/capture-x.png)\n\n## 后续小节";
+        assert!(out.contains(expected), "实际内容：\n{out}");
+    }
+
+    #[test]
+    fn append_image_creates_section_when_missing() {
+        let (root, note) = project_with_note("append-new");
+        fs::write(&note, "# 标题\n\n只有正文\n").unwrap();
+        fs::create_dir_all(root.join("notes/assets")).unwrap();
+        fs::write(root.join("notes/assets/c.png"), FAKE_PNG).unwrap();
+        append_note_image_sync(&root.to_string_lossy(), &note.to_string_lossy(), "notes/assets/c.png").unwrap();
+        let out = fs::read_to_string(&note).unwrap();
+        assert_eq!(out, "# 标题\n\n只有正文\n\n## 我的想法\n\n![截图](assets/c.png)\n");
+    }
+
+    #[test]
+    fn append_image_rejects_outside_paths() {
+        let (root, note) = project_with_note("append-out");
+        // 根外笔记拒绝
+        let outside = tmpdir("note-outside");
+        let foreign = outside.join("x.md");
+        fs::write(&foreign, "# x\n").unwrap();
+        let err = append_note_image_sync(&root.to_string_lossy(), &foreign.to_string_lossy(), "notes/assets/c.png").unwrap_err();
+        assert!(err.contains("notes"), "{err}");
+        // 图片不在 notes/ 内（项目根下的兄弟文件）拒绝
+        fs::write(root.join("c.png"), FAKE_PNG).unwrap();
+        let err2 = append_note_image_sync(&root.to_string_lossy(), &note.to_string_lossy(), "c.png").unwrap_err();
+        assert!(err2.contains("notes"), "{err2}");
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn rel_md_path_computes_dotdot() {
+        assert_eq!(
+            rel_md_path(Path::new("/p/notes"), Path::new("/p/notes/assets/x.png")).as_deref(),
+            Some("assets/x.png")
+        );
+        assert_eq!(
+            rel_md_path(Path::new("/p/notes/sub"), Path::new("/p/notes/x.png")).as_deref(),
+            Some("../x.png")
+        );
+        assert_eq!(
+            rel_md_path(Path::new("/p/a"), Path::new("/p/b/x.png")).as_deref(),
+            Some("../b/x.png")
+        );
+    }
+
+    // ===== 批次 B3：生词本与译段 =====
+
+    #[test]
+    fn glossary_append_creates_table_and_dedups_by_lower() {
+        let (root, _pdf) = project_with_pdf("gloss", "a.pdf");
+        let root_s = root.to_string_lossy().into_owned();
+        let list = append_glossary_sync(&root_s, "Solid Electrolyte", "固态电解质", "《a》第 1 页").unwrap();
+        assert_eq!(list.len(), 1);
+        let text = fs::read_to_string(root.join("notes/glossary.md")).unwrap();
+        assert!(text.starts_with("| 术语 | 释义 | 出处 |\n| --- | --- | --- |\n"), "{text}");
+        assert!(text.contains("| Solid Electrolyte | 固态电解质 | 《a》第 1 页 |"));
+        // 大小写不同视为同一术语：原位更新释义/出处，不新增行
+        let list2 = append_glossary_sync(&root_s, "solid electrolyte", "固态电解质（更新）", "《a》第 2 页").unwrap();
+        assert_eq!(list2.len(), 1);
+        assert_eq!(list2[0].term, "Solid Electrolyte"); // 原写法与位置保留
+        assert_eq!(list2[0].meaning, "固态电解质（更新）");
+        assert_eq!(list2[0].source, "《a》第 2 页");
+        // 再追加一条不同术语
+        let list3 = append_glossary_sync(&root_s, "界面阻抗", "interfacial resistance", "《a》第 3 页").unwrap();
+        assert_eq!(list3.len(), 2);
+        assert_eq!(list_glossary_sync(&root_s).unwrap(), list3);
+    }
+
+    #[test]
+    fn glossary_parse_fault_tolerance_and_escape_roundtrip() {
+        // 非表行/表头/分隔行/不足 3 列/空术语全部跳过；\| 还原
+        let text = "# 生词本\n\n随手记一行\n\n| 术语 | 释义 | 出处 |\n| --- | --- | --- |\n\
+                    | C\\|D 键 | 某个释义 | 《p》第 1 页 |\n| 只有两列 | x |\n| | 空术语 | x |\n\n尾部备注\n";
+        let list = parse_glossary(text);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].term, "C|D 键");
+        // 渲染 → 再解析往返稳定（转义互逆）
+        let rendered = render_glossary(&list);
+        assert!(rendered.contains("| C\\|D 键 | 某个释义 | 《p》第 1 页 |"), "{rendered}");
+        assert_eq!(parse_glossary(&rendered), list);
+        // 单元格里的换行折成空格
+        assert_eq!(escape_glossary_cell("a\nb|c"), "a b\\|c");
+        // 缺尾竖线/紧凑表头也能解析
+        let loose = parse_glossary("|术语|释义|出处|\n|---|---|---|\n|固态|solid|第 1 页");
+        assert_eq!(loose.len(), 1);
+        assert_eq!(loose[0].term, "固态");
+    }
+
+    #[test]
+    fn glossary_remove_exact_match_and_keeps_preamble() {
+        let (root, _pdf) = project_with_pdf("gloss-rm", "a.pdf");
+        let root_s = root.to_string_lossy().into_owned();
+        // 预置带标题的机管文件
+        fs::create_dir_all(root.join("notes")).unwrap();
+        fs::write(
+            root.join("notes/glossary.md"),
+            "# 我的生词本\n\n| 术语 | 释义 | 出处 |\n| --- | --- | --- |\n| Alpha | 甲 | p1 |\n| Beta | 乙 | p2 |\n",
+        )
+        .unwrap();
+        let list = remove_glossary_entry_sync(&root_s, "Alpha").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].term, "Beta");
+        let text = fs::read_to_string(root.join("notes/glossary.md")).unwrap();
+        assert!(text.starts_with("# 我的生词本\n\n"), "表外内容要保留：\n{text}");
+        assert!(!text.contains("Alpha"));
+        // 大小写不同不算精确匹配，不删
+        let list2 = remove_glossary_entry_sync(&root_s, "beta").unwrap();
+        assert_eq!(list2.len(), 1);
+        // 删除不存在的术语是 no-op
+        let list3 = remove_glossary_entry_sync(&root_s, "Gamma").unwrap();
+        assert_eq!(list3.len(), 1);
+        // 文件不存在时删除返回空表（不报错）
+        let (root2, _p2) = project_with_pdf("gloss-rm-empty", "a.pdf");
+        assert!(remove_glossary_entry_sync(&root2.to_string_lossy(), "X").unwrap().is_empty());
+    }
+
+    #[test]
+    fn glossary_rejects_unregistered_root() {
+        let (root, _pdf) = project_with_pdf("gloss-out", "a.pdf");
+        fs::remove_file(root.join(".ccode/project.toml")).unwrap();
+        let root_s = root.to_string_lossy().into_owned();
+        assert!(list_glossary_sync(&root_s).is_err());
+        assert!(append_glossary_sync(&root_s, "t", "m", "s").is_err());
+        assert!(remove_glossary_entry_sync(&root_s, "t").is_err());
+    }
+
+    #[test]
+    fn translation_appends_to_existing_section_before_next_header() {
+        let (root, note) = project_with_note("trans");
+        append_note_translation_sync(
+            &root.to_string_lossy(),
+            &note.to_string_lossy(),
+            "The solid electrolyte interface",
+            "固态电解质界面",
+            2,
+        )
+        .unwrap();
+        let out = fs::read_to_string(&note).unwrap();
+        let expected = "## 译段\n\n> The solid electrolyte interface（第 2 页）\n\n固态电解质界面\n\n## 我的想法";
+        assert!(out.contains(expected), "实际内容：\n{out}");
+        // 再追加一条落在同小节末尾（仍在上一条之后、## 我的想法之前）
+        append_note_translation_sync(&root.to_string_lossy(), &note.to_string_lossy(), "second", "第二段", 5).unwrap();
+        let out2 = fs::read_to_string(&note).unwrap();
+        let expected2 = "固态电解质界面\n\n> second（第 5 页）\n\n第二段\n\n## 我的想法";
+        assert!(out2.contains(expected2), "实际内容：\n{out2}");
+    }
+
+    #[test]
+    fn translation_multiline_original_quoted_line_by_line() {
+        let block = translation_block("line one\nline two", "译文", 3);
+        assert_eq!(block, "> line one\n> line two（第 3 页）\n\n译文");
+    }
+
+    #[test]
+    fn translation_creates_section_when_missing() {
+        let (root, note) = project_with_note("trans-new");
+        fs::write(&note, "# 标题\n\n只有正文\n").unwrap();
+        append_note_translation_sync(&root.to_string_lossy(), &note.to_string_lossy(), "orig", "译文", 1).unwrap();
+        let out = fs::read_to_string(&note).unwrap();
+        assert_eq!(out, "# 标题\n\n只有正文\n\n## 译段\n\n> orig（第 1 页）\n\n译文\n");
+    }
+
+    #[test]
+    fn translation_rejects_outside_note_and_empty_content() {
+        let (root, note) = project_with_note("trans-out");
+        // 根外笔记拒绝
+        let outside = tmpdir("trans-note-outside");
+        let foreign = outside.join("x.md");
+        fs::write(&foreign, "# x\n").unwrap();
+        let err = append_note_translation_sync(&root.to_string_lossy(), &foreign.to_string_lossy(), "o", "t", 1).unwrap_err();
+        assert!(err.contains("notes"), "{err}");
+        // 空内容拒绝
+        assert!(append_note_translation_sync(&root.to_string_lossy(), &note.to_string_lossy(), "  ", "t", 1).is_err());
+        assert!(append_note_translation_sync(&root.to_string_lossy(), &note.to_string_lossy(), "o", "", 1).is_err());
+        fs::remove_dir_all(&outside).ok();
+    }
+}

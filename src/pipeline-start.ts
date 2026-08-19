@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { orderedAnswers, parseDecisions } from "./step-decisions";
 import { litSourceSectionLines } from "./task-md-sections";
+import { pickWorkspaceResume } from "./workspace-resume";
 import {
   DEFAULT_KICKOFF_PROMPT,
   RESOURCE_TYPE_LABELS,
@@ -12,6 +13,7 @@ import type {
   EnsureGitDto,
   ProjectConfigDto,
   ProjectStepDto,
+  SessionMetaDto,
   SkillDto,
   WorkspaceDto,
 } from "./types";
@@ -295,7 +297,10 @@ export async function startPipelineStep({
 }
 
 /** 工作区 → 终端的交接 payload：取端口段 env + 预填该目录上次使用的配置
- *  （与工作区页 useOpenInTerminal 同一语义；`ccode.wsLast.<worktreePath>` 为共享键） */
+ *  （与工作区页 useOpenInTerminal 同一语义；`ccode.wsLast.<worktreePath>` 为共享键）。
+ *  始终带 reuseKey：同一工作区永远回到同一个终端标签（开工起的标签之后「去终端」能找回）。
+ *  无 initialPrompt（「去终端看看」等纯查看入口）时自动 resume 该工作区最近会话——
+ *  保持一个对话，而不是每次新开；有 prompt（开工/整理笔记）时是明确的新任务，不 resume */
 export async function buildWorkspaceTerminalRequest(
   ws: WorkspaceDto,
   initialPrompt?: string,
@@ -312,13 +317,36 @@ export async function buildWorkspaceTerminalRequest(
       return {};
     }
   })();
+  const resume = initialPrompt ? null : await latestWorkspaceSession(ws);
   return {
     cwd: ws.worktreePath,
     extraEnv: Object.fromEntries(pairs),
     title: ws.name,
-    agentId: last.agentId,
-    profileId: last.profileId,
-    model: last.model,
+    // resume 命中时以会话的 agent 为准（TerminalPage 的 resume 分支会自选 profile/model）；
+    // 未命中按该目录上次使用的配置预填
+    agentId: resume?.agentId ?? last.agentId,
+    profileId: resume ? undefined : last.profileId,
+    model: resume ? undefined : last.model,
+    resume: resume ?? undefined,
     initialPrompt,
+    reuseKey: workspaceReuseKey(ws),
   };
+}
+
+/** 工作区终端的复用键：开工/去终端/评审「开始下一步」共用同一口径 */
+export function workspaceReuseKey(ws: WorkspaceDto): string {
+  return `ws:${ws.worktreePath}`;
+}
+
+/** 该工作区最近一次的会话（resume 用）：纯筛选逻辑在 workspace-resume.ts（可测）。
+ *  列表失败降级为不 resume（仍新开标签），不阻断「去终端」 */
+async function latestWorkspaceSession(
+  ws: WorkspaceDto,
+): Promise<{ agentId: string; sessionId: string } | null> {
+  try {
+    const sessions = await invoke<SessionMetaDto[]>("list_sessions");
+    return pickWorkspaceResume(sessions, ws.name, ws.repoPath);
+  } catch {
+    return null;
+  }
 }

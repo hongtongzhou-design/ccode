@@ -125,6 +125,23 @@ fn truncate_title(text: &str) -> String {
     }
 }
 
+/// 纯问候语判定（整条消息就是打招呼、没有实质内容）：列表标题拒识——
+/// 各解析器「title 为空才取」的守卫会顺势跳到下一条 user 消息（第二句实质 prompt）。
+/// 只精确匹配整条文本（折叠大小写、去尾部标点/语气符），「你好，帮我看看 ××」这类
+/// 问候+正事同条的不误伤。
+fn is_generic_greeting(text: &str) -> bool {
+    let t = text
+        .trim()
+        .trim_end_matches(['!', '！', '~', '～', '。', '.', '?', '？', '…', '，', ','])
+        .trim()
+        .to_lowercase();
+    matches!(
+        t.as_str(),
+        "hi" | "hello" | "hey" | "hiya" | "howdy" | "hi there" | "hello there" | "hey there"
+            | "你好" | "您好" | "嗨" | "哈喽" | "在吗" | "在么" | "喂"
+    )
+}
+
 fn usable_title(text: &str) -> Option<String> {
     let title = truncate_title(text);
     let lower = title.trim().to_ascii_lowercase();
@@ -133,7 +150,7 @@ fn usable_title(text: &str) -> Option<String> {
         "new session" | "untitled" | "untitled session" | "session" | "new chat"
             | "新会话" | "新对话" | "未命名" | "未命名会话" | "未命名对话"
     );
-    if title.is_empty() || generic || title.starts_with('<')
+    if title.is_empty() || generic || is_generic_greeting(&title) || title.starts_with('<')
         || title.starts_with("# AGENTS.md") || title.starts_with("The following is the ")
     {
         None
@@ -5237,6 +5254,42 @@ mod tests {
         assert_eq!(usable_title("New Session"), None);
         assert_eq!(usable_title("未命名对话"), None);
         assert_eq!(usable_title("  修复统计页\n\n今日用量  ").as_deref(), Some("修复统计页 今日用量"));
+    }
+
+    #[test]
+    fn title_quality_rejects_bare_greetings_but_keeps_greeting_with_content() {
+        // 纯问候语拒识（解析器守卫会顺势跳到下一条 user 消息）
+        for g in ["你好", "您好", "嗨", "在吗", "hi", "HI", "Hello!", "hey~", "你好。", "喂？"] {
+            assert_eq!(usable_title(g), None, "{g} 不该成为列表标题");
+        }
+        // 问候 + 正事同一条消息的不误伤
+        assert_eq!(
+            usable_title("你好，帮我看看这个 bug").as_deref(),
+            Some("你好，帮我看看这个 bug")
+        );
+    }
+
+    #[test]
+    fn claude_meta_skips_greeting_and_takes_next_substantive_prompt() {
+        // 首句是「你好」时标题取第二条实质 prompt（用户拍板：列表里一排「你好」没法区分）
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("s-greet.jsonl");
+        std::fs::write(
+            &f,
+            concat!(
+                r#"{"type":"user","cwd":"/tmp/proj","sessionId":"sid-g","timestamp":"2026-07-01T00:00:00Z","message":{"content":"你好"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"你好！有什么可以帮你？"}]}}"#,
+                "\n",
+                r#"{"type":"user","message":{"content":"把文献综述的第二章压缩到 800 字"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let m = claude_file_meta(&f, true).unwrap();
+        assert_eq!(m.title.as_deref(), Some("把文献综述的第二章压缩到 800 字"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ===== CodeBuddy 解析（v2.132.0 实测样本行） =====

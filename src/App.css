@@ -736,6 +736,24 @@ select:focus-visible {
 .md-body img {
   max-width: 100%;
 }
+/* 批次 B2 图片后处理的三种呈现：加载占位灰块 / 失败小字 / 外部图片不加载只显文本 */
+.md-body .md-img-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 4rem;
+  margin: 0.7em 0;
+  border-radius: 6px;
+  background: var(--color-inset);
+  color: var(--color-l4);
+  font-size: 12px;
+}
+.md-body .md-img-failed,
+.md-body .md-img-remote {
+  color: var(--color-l4);
+  font-size: 12px;
+  overflow-wrap: break-word;
+}
 
 /* 有界脉冲：播 3 个周期（约 6s）后静止——状态刚变化时提示，长期无限脉冲是注意力消耗。
    步进器大圆（进行中/检查中）与项目区工作区状态点共用；状态离开再回来类名重挂会重新播 */
@@ -750,4 +768,27 @@ select:focus-visible {
 }
 .animate-pulse-brief {
   animation: ccode-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) 3;
+}
+
+/* ===== 沉浸式阅读区（批次 B3） ===== */
+
+/* 生词高亮：点状下划线（l2 档），不上背景色块。
+   两条对抗 pdf_viewer.css：① textLayer 文字本身 color:transparent，text-decoration 默认跟
+   currentColor 会隐形，装饰色必须显式指定令牌色；② .textLayer :is(span) 会给 span 挂
+   position:absolute（ specificity 0-1-1 ），本类用 .textLayer span.ccode-gloss（0-1-2）压回 static——
+   否则命中词脱离文档流，所在文本片 shrink-to-fit 宽度塌掉、选区几何被破坏 */
+.textLayer span.ccode-gloss {
+  position: static;
+  text-decoration: underline dotted;
+  text-decoration-color: var(--color-l2);
+  text-underline-offset: 2px;
+}
+
+/* 护眼反色：CSS filter 只反 canvas 位图层（文字层保持主题色、仍可选中），
+   页宿主的白底同步压暗到反色后的近黑（invert(0.92) 的白 ≈ #141414），不整套切 canvas 数据 */
+.ccode-reader-dark canvas {
+  filter: invert(0.92) hue-rotate(180deg);
+}
+.ccode-reader-dark [data-page-num] {
+  background-color: #141414;
 }

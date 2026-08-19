@@ -341,7 +341,9 @@ export function RegisterOfferRow({
 }
 
 /** 人工事项平铺 checklist（开工确认弹层用；聚焦视图用 StepFlow 流程线）：
- *  状态与动作逻辑在 useHumanTasks，本组件只是分组渲染 */
+ *  状态与动作逻辑在 useHumanTasks，本组件只是分组渲染。
+ *  收尾（after）事项不在这里出现——那是 agent 干完才轮到人做的活，开工时摆出来只会让人
+ *  误以为现在就要做；收尾语境由 StepFlow 流程线节点与评审「收尾事项」行承担 */
 export default function HumanTasksList({
   projectPath,
   stepName,
@@ -379,26 +381,30 @@ export default function HumanTasksList({
 
   if (states !== null && states.length === 0) return null;
 
+  // 收尾（after）事项整组不显示（见组件头注释）；「N 件待做」与空态判断同口径
+  const visible = states?.filter((s) => s.timing !== "after") ?? null;
+  if (visible !== null && visible.length === 0) return null;
+
   return (
     <div>
       <div className="mb-1 flex items-center gap-2">
         <span className="text-micro text-l4">人工事项</span>
-        {states && states.some((s) => !s.done) && (
+        {visible && visible.some((s) => !s.done) && (
           <span className="text-micro text-warn-text">
-            {states.filter((s) => !s.done).length} 件待做
+            {visible.filter((s) => !s.done).length} 件待做
           </span>
         )}
       </div>
-      {states === null ? (
+      {visible === null ? (
         <p className="text-xs text-l4">读取中…</p>
       ) : (
-        // 按时机分组（开始前 → 进行中 → 收尾）：组名即"什么时候轮到你了"，
+        // 按时机分组（开始前 → 进行中）：组名即"什么时候轮到你了"，
         // 避免不同档的事项并排摆着被误读成"现在全都要做"
         <div ref={listRef} className="space-y-2">
-          {(["before", "during", "after"] as const)
+          {(["before", "during"] as const)
             .map((timing) => ({
               timing,
-              items: states.filter((s) =>
+              items: visible.filter((s) =>
                 timing === "during"
                   ? s.timing !== "before" && s.timing !== "after"
                   : s.timing === timing,
@@ -410,9 +416,7 @@ export default function HumanTasksList({
                 <div className="mb-0.5 text-micro text-l4">
                   {g.timing === "before"
                     ? "开始前（建议先做，不做也能开工）"
-                    : g.timing === "after"
-                      ? "收尾（agent 干完后轮到你）"
-                      : "进行中（随时可做）"}
+                    : "进行中（随时可做）"}
                 </div>
                 <ul className="space-y-1">
                   {g.items.map((task) => (

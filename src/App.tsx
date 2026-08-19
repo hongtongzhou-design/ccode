@@ -14,14 +14,17 @@ import CommandPalette from "./components/CommandPalette";
 import QuickChatModal, {
   launchQuickChatDirect,
   quickChatSkipEnabled,
+  resumeSessionInTerminal,
 } from "./components/QuickChatModal";
+import QuickChatHistoryMenu from "./components/QuickChatHistoryMenu";
+import { pickQuickChatSessions } from "./quick-chat";
 import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import { LoadingRows, rowActionClass } from "./components/PageFrame";
 import "./App.css";
 import { useAppStore, runInboxAction } from "./store";
 import { groupInbox, type InboxCategory } from "./inbox";
 import { runDoneNotifyBody, runDoneNotifyTitle } from "./schedule-tasks";
-import type { SchedulerRunDonePayload } from "./types";
+import type { SchedulerRunDonePayload, SessionMetaDto } from "./types";
 import {
   eventMatchesCombo,
   comboLabel,
@@ -97,6 +100,35 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 「快速开聊」弹层：侧栏常驻入口与 ⌘K 命令共用同一个宿主
   const [quickChatOpen, setQuickChatOpen] = useState(false);
+  // 侧栏「快速开聊」右键 = 随手聊历史浮层（v3.93 用户拍板）：勾了「下次直接开聊」的用户
+  // 左键直达终端、永远看不到弹层里的历史区，右键浮层是她们的回看口；
+  // 只列随手聊会话（不落工作区/已注册项目），与弹层「随手聊历史」同一口径
+  const [quickChatMenu, setQuickChatMenu] = useState<{
+    x: number;
+    y: number;
+    sessions: SessionMetaDto[] | null;
+  } | null>(null);
+  /** 右键先弹读取中浮层，数据到达即替换（list_sessions 有 10s 缓存、list_projects 本地读） */
+  function openQuickChatMenu(e: React.MouseEvent) {
+    e.preventDefault();
+    const { clientX: x, clientY: y } = e;
+    setQuickChatMenu({ x, y, sessions: null });
+    void (async () => {
+      try {
+        const [all, projects] = await Promise.all([
+          invoke<SessionMetaDto[]>("list_sessions"),
+          invoke<{ path: string }[]>("list_projects"),
+        ]);
+        const sessions = pickQuickChatSessions(
+          all,
+          projects.map((p) => p.path),
+        );
+        setQuickChatMenu((cur) => (cur ? { ...cur, sessions } : cur));
+      } catch {
+        setQuickChatMenu((cur) => (cur ? { ...cur, sessions: [] } : cur));
+      }
+    })();
+  }
   // 终端里运行中的 agent 数（任意页面可见，徽标挂在「终端」图标上）
   const runningCount = useAppStore((s) => Object.keys(s.liveSessions).length);
   // 「待你处理」收件箱条目镜像（WorkspacesPage 写入）：侧栏圆点计数 + macOS 标题栏收件箱共用
@@ -484,7 +516,8 @@ function App() {
                 {/* 「快速开聊」是动作不是页面：放在「工作」组首位，回答「我就想随便聊聊」——
                     其余入口全是项目/流程优先，进来先要建项目太重。
                     弹层里勾过「下次直接开聊」就跳过弹层直接落终端（记住上次选择），
-                    ⌘K 入口永远开弹层，留作调整口 */}
+                    ⌘K 入口永远开弹层，留作调整口；右键 = 随手聊历史浮层（跳过弹层的用户
+                    左键看不到历史，右键是她们的回看口） */}
                 {group.label === "工作" && (
                   <button
                     type="button"
@@ -497,7 +530,8 @@ function App() {
                         setQuickChatOpen(true);
                       }
                     }}
-                    title="快速开聊：不建项目直接开一个终端标签"
+                    onContextMenu={(e) => void openQuickChatMenu(e)}
+                    title="快速开聊：不建项目直接开一个终端标签（右键看随手聊历史）"
                     className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm text-l3 transition-colors hover:bg-hover hover:text-l2 ${
                       collapsed ? "justify-center" : "px-2.5"
                     }`}
@@ -665,6 +699,15 @@ function App() {
         )}
         {quickChatOpen && (
           <QuickChatModal onClose={() => setQuickChatOpen(false)} />
+        )}
+        {quickChatMenu && (
+          <QuickChatHistoryMenu
+            x={quickChatMenu.x}
+            y={quickChatMenu.y}
+            sessions={quickChatMenu.sessions}
+            onPick={resumeSessionInTerminal}
+            onClose={() => setQuickChatMenu(null)}
+          />
         )}
         {/* 全局确认框宿主（confirmDialog）：z-[70]，压过一切覆盖层 */}
         <ConfirmDialogHost />

@@ -2,7 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { primaryActionClass, secondaryActionClass, fieldClass } from "./PageFrame";
 import { useAppStore } from "../store";
-import { AGENTS } from "../types";
+import { AGENTS, type SessionMetaDto } from "../types";
+import { agentBrandBadgeStyle } from "../agent-colors";
+import { relTime } from "../rel-time";
+import {
+  pickQuickChatSessions,
+  sessionHomeLabel,
+  sessionDisplayTitle,
+} from "../quick-chat";
 
 const LAST_KEY = "ccode.quickChat";
 /** 「下次直接开聊」开关：勾选后侧栏「快速开聊」跳过弹层直接落终端（⌘K 入口永远开弹层，留作调整口） */
@@ -63,6 +70,22 @@ export async function launchQuickChatDirect(): Promise<boolean> {
   return true;
 }
 
+/** 恢复一条历史会话进终端（弹层「最近对话」行与侧栏右键菜单共用）：不开新会话。
+    cwd 用会话原目录——worktree 会话的 projectPath 已归并回真实仓库（展示层另有工作区标注）。
+    reuseKey 按会话 id：同一对话重复点切回同一标签；终端页消费处另有 cwd 活标签兜底
+    （进程活着时不重复 resume，防 active writer 冲突） */
+export function resumeSessionInTerminal(s: SessionMetaDto): void {
+  const { setPendingTerminal, setPage } = useAppStore.getState();
+  setPendingTerminal({
+    cwd: s.projectPath,
+    extraEnv: {},
+    title: sessionDisplayTitle(s),
+    resume: { agentId: s.agent, sessionId: s.sessionId },
+    reuseKey: `resume:${s.agent}:${s.sessionId}`,
+  });
+  setPage("terminal");
+}
+
 /**
  * 「快速开聊」弹层：不绑项目地开一个终端标签。
  *
@@ -70,6 +93,9 @@ export async function launchQuickChatDirect(): Promise<boolean> {
  * 不注册、不选模板、不落 TASK.md。默认落脚 `~/ccode/scratch`（后端 ensure_scratch_dir 创建，
  * 不 git init）——改动面板对它显示「不是 git 仓库」是预期行为。
  * 聊出东西了再从终端标签 ⋯「转为项目…」转正，会话历史跟着 cwd 走、自动归到新项目下。
+ *
+ * v3.93 起弹层下半带「最近对话」区（用户拍板：想继续之前聊的还要去对话页翻，太远）——
+ * 点一条直接 resume 进终端（不开新会话）。勾了「下次直接开聊」的用户从 ⌘K 进弹层仍可见。
  */
 export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   const profiles = useAppStore((s) => s.profiles);
@@ -78,6 +104,32 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   const setPage = useAppStore((s) => s.setPage);
 
   const remembered = useMemo(loadRemembered, []);
+  // 最近对话（随手聊口径：不落工作区/已注册项目）：弹层每次打开拉一轮
+  // （list_sessions 有 10s 扫描缓存，list_projects 是本地 db 读，都不重）
+  const [recent, setRecent] = useState<SessionMetaDto[] | null>(null);
+  useEffect(() => {
+    let stale = false;
+    void (async () => {
+      try {
+        const [all, projects] = await Promise.all([
+          invoke<SessionMetaDto[]>("list_sessions"),
+          invoke<{ path: string }[]>("list_projects"),
+        ]);
+        if (stale) return;
+        setRecent(
+          pickQuickChatSessions(
+            all,
+            projects.map((p) => p.path),
+          ),
+        );
+      } catch {
+        if (!stale) setRecent([]);
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+  }, []);
   // 已检测到的 agent 排在前面：没装的排后面并标注，不直接隐藏（用户可能刚装完还没重新检测）
   const installed = useMemo(
     () => new Set(agents.filter((a) => a.binaryPath).map((a) => a.id)),
@@ -156,6 +208,12 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
       reuseKey: `quickchat:${agentId}:${profileId}:${cwd.trim()}`,
     });
     setPage("terminal");
+    onClose();
+  }
+
+  /** 点「最近对话」行：resume 进终端（模块级 resumeSessionInTerminal 与侧栏右键菜单共用） */
+  function resumeSession(s: SessionMetaDto) {
+    resumeSessionInTerminal(s);
     onClose();
   }
 
@@ -245,6 +303,52 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
             开聊
           </button>
         </div>
+
+        {/* 随手聊历史（v3.93）：回到之前的散聊不用去对话页翻。只列随手聊会话
+            （不落工作区/已注册项目）且可恢复的（排除归档/内部/源文件已删/进程活着的）；
+            与侧栏「快速开聊」右键浮层同一口径；空列表时整区不渲染 */}
+        {recent && recent.length > 0 && (
+          <div className="mt-4">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-xs text-l3">随手聊历史</span>
+              <button
+                type="button"
+                className="text-micro text-l4 hover:text-l2"
+                onClick={() => {
+                  setPage("sessions");
+                  onClose();
+                }}
+              >
+                查看全部 →
+              </button>
+            </div>
+            <ul className="max-h-52 space-y-0.5 overflow-auto">
+              {recent.map((s) => (
+                <li key={`${s.agent}:${s.sessionId}`}>
+                  <button
+                    type="button"
+                    onClick={() => resumeSession(s)}
+                    title={`${sessionDisplayTitle(s)}\n${AGENTS.find((a) => a.id === s.agent)?.label ?? s.agent} · ${s.projectPath}\n点按恢复该对话`}
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-hover"
+                  >
+                    <span
+                      className="shrink-0 rounded-sm px-1 py-0.5 text-micro"
+                      style={agentBrandBadgeStyle(s.agent)}
+                    >
+                      {AGENTS.find((a) => a.id === s.agent)?.label ?? s.agent}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-l1">
+                      {sessionDisplayTitle(s)}
+                    </span>
+                    <span className="shrink-0 text-micro text-l4">
+                      {sessionHomeLabel(s)} · {relTime(s.updatedAt)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     </div>
   );

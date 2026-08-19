@@ -198,6 +198,7 @@ function FileTree({
   refreshKey,
   onOpenFile,
   onOpenTerminal,
+  onOpenReader,
   onFsEvent,
   onEnterProject,
   onRootChange,
@@ -209,6 +210,8 @@ function FileTree({
   refreshKey: number;
   onOpenFile: (path: string, name: string, root: string) => void;
   onOpenTerminal: (path: string) => void;
+  /** PDF 右键「⛶ 沉浸阅读」（批次 B1 阅读区入口）；不给则不显示该菜单项 */
+  onOpenReader?: (path: string, name: string, root: string) => void;
   /** 文件系统变化回调（fs-changed 防抖后触发，供 GitPanel 等联动刷新） */
   onFsEvent?: () => void;
   /** 最近项目「真进入」：切树根 + 切换活动标签启动栏 cwd */
@@ -678,6 +681,15 @@ function FileTree({
                     onSelect: async () => {
                       setNewFolderFor(menu.path);
                     },
+                  },
+                ]
+              : []),
+            ...(!menu.isDir && /\.pdf$/i.test(menu.path) && onOpenReader
+              ? [
+                  {
+                    label: "⛶ 沉浸阅读",
+                    onSelect: () =>
+                      onOpenReader(menu.path, basenameOf(menu.path), root),
                   },
                 ]
               : []),

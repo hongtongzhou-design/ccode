@@ -35,6 +35,18 @@
   （◧ 分屏 / ◫ 工作台 / ⤢ 专注终端本质是同一维度「这块屏怎么排」，互斥高亮，`bg-seg-sel` 选中）；
   ③ **状态镜像下移**到中带底部状态条（见下条）。**`⋯` 改为常驻**——原先只在专注模式渲染，
   非专注时同一批动作散在标签内启动栏的 `⋯` 里，两套菜单内容高度重叠。
+  **标签支持拖拽排序（v3.93，用户提出；Ghostty 式跟手拖动）**：pointer 事件自实现（按下超 6px
+  横移进拖拽态，window 级 move/up/cancel 监听）——**不能用 HTML5 DnD**（`draggable`/`onDragStart`）：
+  Tauri 原生文件拖放（`dragDropEnabled` 默认开）会拦截 WKWebView 的拖拽手势，dragstart 根本不触发；
+  全站拖文件走的都是 `onDragDropEvent` 原生事件而非 HTML5 DnD。拖拽手感：进拖拽态时测量各槽位
+  `getBoundingClientRect`（拖拽期间 `tabs` 顺序不变，测量值才有效）；源标签 `translateX` 跟手
+  （钳制在标签条内容范围内、relative + z-10 浮起 + `bg-raised`），原位置与目标槽位之间的标签各
+  退/进一个槽位（150ms transform transition 滑动让位，位移用相邻槽位测量差而非假设等宽）；
+  松手先让源标签 transition 吸附到目标槽位、动画结束才 `moveTab` 重排清态（避免瞬移跳变），
+  落定后吞掉紧随的 click 防误切换。钳制与目标槽位判定抽在 `src/tab-drag.ts`
+  （tests/tab-drag.test.ts）——**目标判定必须 `>=` 中线**：钳制上限恰好让源中心到达末槽中线
+  （等宽槽位等号成立），严格 `>` 会让「拖到最右」永远差一个无穷小、末槽永远不让位（两标签时
+  左拖右 100% 复现）。顺序即 `tabs` 数组顺序，重启持久化本就按数组存，顺序自动带过去。
 - **中带底部状态条（v3.88）**：git 芯片 `⑂ 分支 +N -M`、`✓ 保存`、`● N 个可合并` 从标签条下移至此。
   理由：它们是**结果不是入口**，放顶部与标签抢注意力；状态栏是 VS Code / Codex 的通行心智，
   `✓ 保存` 在底部误触概率也更低。**v3.83 的行为语义一字未改**（点数字开改动页签、
@@ -68,6 +80,10 @@
 - **启动栏与状态栏分工（v3.91）**：启动栏主流程 Agent → 配置 → 模型 → 启动，技能/MCP 胶囊右对齐在启动行末端；
   工作目录不再占启动栏，改由底部状态栏 📂 胶囊浮层编辑（仅未启动可改；运行/shell 中 cwd 由 pty_get_cwd
   4s 回写跟随，shell 里 cd 即可）。未启动时画布中央渲染空态引导卡（启动/恢复 + 打开 Shell）。
+  **空态卡元素收敛（v3.93 用户拍板）**：无顶部图标盒、无说明小字（「上次任务还在，可接着跑」
+  这类全删——按钮文案本身已说清现在该干嘛），卡片 `w-80`，agent 名（text-base）与配置胶囊
+  （text-xs）放大为视觉主体；主按钮宽 `min-w-40 px-5` 自适应内容——勿按比例（w-2/3）随卡片宽
+  缩放，卡片一窄按钮文字就溢出。
 - **文件树系统目录置灰（v3.91）**：`list_dir` 对家目录直下命中平台清单的目录（macOS：Library/Applications；
   Windows：AppData 等）标 `isSystem`，前端行 opacity-50 + title 注「系统目录」；普通用户目录不置灰，交互不变。
 - **终端左栏两段化（v3.42）**：常驻 = 项目区（ProjectRail）+ 文件树；「打开的标签」折叠区已删除（runInputs 镜像保留）；
@@ -164,6 +180,42 @@
 - **临时图片生命周期**：`save_clipboard_image(bytes, ext)` 落 `<config>/ccode/tmp/paste-<时间戳>-<随机>.<ext>`
   （ext 白名单 png/jpg/jpeg/gif/webp，非法归 png；上限 50MB），每次调用顺带清理 7 天前 `paste-*`；**不加
   arboard 依赖**（读剪贴板在前端 paste 事件完成，Rust 只收字节）。
+
+## 沉浸阅读区（v3.96；批次 B1/B2/B3）
+
+- **覆盖层形态**：`ReaderOverlay` 挂在终端页内（`fixed inset-0 z-40` 页面模态档，与评审覆盖层同思路），
+  三栏「笔记｜PDF｜Agent 对话」，**不要底部终端**（用户拍板）；底下终端/PTY/右栏全程保持挂载，退出即回原样。
+  分隔条拖拽记宽度（localStorage `ccode.readerSplitL/R`，钳制与像素换算在 `src/reader.ts`），左右栏可收起；
+  v1 单窗全屏，结构上预留 v2 独立弹窗能力（未做）。入口三处统一走 store 一次性请求
+  `readerReq: { pdfPath, projectRoot }`：PDF 预览工具条「⛶ 沉浸阅读」、文献雷达精读清单「开读」、文件树 PDF 右键。
+- **Esc 级联阅读区最优先**：阅读区自己的 keydown 监听带 `isComposing` 守卫（中文输入法组词中按 Esc 是取消候选）；
+  TerminalPage 的专注/右栏全宽 Esc 在阅读区打开期间直接放行不拦（`if (reader) return`）；圈选模式内的 Esc 用
+  capture 相 + stopPropagation 抢在关阅读区之前（先退圈选，再退阅读区）。
+- **注入单一内核 `injectToTab(tabId, data, send)`**：原 `injectToActiveAgent` 抽成按 tabId 的共用内核，
+  右栏选段（活跃标签）与阅读区注入（阅读会话标签）走同一条链路，行为口径不变（缺省不自动回车、`send=true`
+  一次拼接 `\r`）；选段「◈ 问 AI」/「↵ 直接发送」/圈选「发给 agent」/chips 全部经此。
+- **阅读会话 reuseKey 口径**：进入阅读区自动起一个阅读会话标签（项目根 + 默认配置 + autoStart，快速开聊同款
+  机制），`reuseKey = reader:<projectRoot>`（`src/reader.ts readerReuseKey` 单一出处）——退出再进找回同一标签
+  接着聊；恢复出的占位标签不带 reuseKey 不参与复用；用户手动关掉标签后不连环重建（一次性标记，栏内给
+  「重新启动」入口）；无可用配置时 Agent 栏给引导卡跳配置页，不自动起会话。
+- **圈选截图两个去向**（裁好的 PNG 由 PdfContinuousView 交来）：「◈ 发给 agent」= 走 `save_clipboard_image`
+  落**临时图**（终端粘贴图片同一命令/口径），路径 + 预填 prompt 写进阅读区输入框**不自动发送**（图是临时产物，
+  不进项目目录）；「＋ 插入笔记」= 走 `save_reader_capture` 落 `notes/assets/`（PNG 魔数校验 + 同秒重名 -2/-3）
+  并 `append_note_image` 追加进笔记「## 我的想法」小节（笔记栏经 watcher 自动刷新可见）。
+- **md 阅读版式图片与相对链接后处理**（批次 B2，FilePreviewEditor）：相对/绝对路径图片经 `read_image_bytes`
+  （白名单判定复用 pdf.rs `read_whitelisted_sync` 内核，png/jpg/jpeg/gif/webp/svg，20MB）转 data URL 内嵌；
+  **http(s) 图片不加载**（隐私，用户拍板——笔记渲染不发网络请求），只显示链接文本；相对链接在阅读区笔记栏
+  **原地打开** + 顶栏「← 回笔记」退回（previewReq 会开在阅读区底下看不见，故不走它）。
+- **笔记编辑态粘贴图片**：项目内 md（有 projectRoot 语境）落 `notes/assets/` 并在光标处插 `![](相对路径)`；
+  非项目内文件回落临时图路径文本（终端粘贴同口径），不混用两条通道。
+- **术语淡高亮实现约束**：textLayer 落地后对**文本节点**跑整词匹配（`findGlossaryMatches`，大小写不敏感），
+  命中处包 `<span class="ccode-gloss">`（点状下划线；悬停释义由 PdfContinuousView 事件代理命中 `.ccode-gloss`
+  出 HoverTip，禁原生 title）；cleanup 先还原旧高亮再重包（`replaceWith(childNodes)` + `normalize()`），
+  幂等可重入——**不得破坏 textLayer 文档流**（选区/复制行为不能变）。护眼反色只反 canvas 层
+  （CSS filter，不动 canvas 数据），进度/护眼均按文件记忆（localStorage `ccode.readerProgress.`/`ccode.readerDark.`）。
+- **生词本/译段落盘契约**：`notes/glossary.md` 表格（`| 术语 | 释义 | 出处 |`）是机管文件，表外内容保留；
+  格式契约与 `src/reader.ts` 双端镜像（前端不直接写文件，那组函数是格式的单一可读规格 + 测试锚点，
+  改动需同步）；译段追加进笔记「## 译段」小节，会话内译段对照卡是组件态不落库，「保存译段到笔记」才写盘。
 
 ## 其余终端工作台条目
 
