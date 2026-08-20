@@ -1206,11 +1206,16 @@ pub async fn resync_skill_copies(id: String) -> Result<Vec<String>, String> {
 }
 
 /// 各 agent 是否允许 symlink 分发（False = 强制 copy）。
-/// cursor 的 ~/.cursor/skills-cursor 未验证 CLI 是否真读、且 ~/.cursor 与 IDE 共享，
-/// 保守走 copy（漂移检测/resync 沿用既有 copy 机制），不建 symlink；
-/// grok 的 ~/.grok/skills 是独占目录且文档确认读 SKILL.md，但首版未经实机验证，同样先强制 copy
+/// 判定单一出处 = agent_specs 的 skill_dist 字段：cursor 的 ~/.cursor/skills-cursor
+/// 未验证 CLI 是否真读、且 ~/.cursor 与 IDE 共享，保守走 copy（漂移检测/resync 沿用既有
+/// copy 机制），不建 symlink；grok 的 ~/.grok/skills 是独占目录且文档确认读 SKILL.md，
+/// 但首版未经实机验证，同样先强制 copy
 fn allow_symlink_for(agent: &str) -> bool {
-    !matches!(agent, "cursor" | "grok")
+    match crate::agent_specs::agent_spec(agent).map(|s| s.skill_dist) {
+        Some(crate::agent_specs::SkillDist::CopyOnly(_)) => false,
+        // SymlinkOrCopy 与未知 agent（行为与收敛前一致）都 symlink 优先
+        _ => true,
+    }
 }
 
 #[tauri::command]
@@ -2323,11 +2328,21 @@ mod tests {
     #[test]
     fn cursor_distribution_forces_copy_mode() {
         // cursor 的 skills 目录未验证 CLI 是否真读，强制 copy 不建 symlink；
-        // grok 首版未经实机验证同样强制 copy
+        // grok 首版未经实机验证同样强制 copy。取值单一出处 = agent_specs.skill_dist
+        use crate::agent_specs::{agent_spec, SkillDist};
         for a in ["cursor", "grok"] {
+            assert!(
+                matches!(agent_spec(a).unwrap().skill_dist, SkillDist::CopyOnly(r) if !r.is_empty()),
+                "{a} 能力表应标 CopyOnly 且带原因"
+            );
             assert!(!allow_symlink_for(a), "{a} 应强制 copy");
         }
         for a in ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi", "codebuddy"] {
+            assert_eq!(
+                agent_spec(a).unwrap().skill_dist,
+                SkillDist::SymlinkOrCopy,
+                "{a} 能力表应保持 symlink 优先"
+            );
             assert!(allow_symlink_for(a), "{a} 应保持 symlink 优先");
         }
     }

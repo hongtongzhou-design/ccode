@@ -97,6 +97,15 @@ impl ProfileStore {
         })
     }
 
+    /// 只读场景的构造（config_dump 自省快照）：配置目录不存在返回 None，
+    /// 不像 new() 那样建目录——只读路径不得有写副作用
+    pub(crate) fn existing() -> Option<Self> {
+        let dir = dirs::config_dir()?.join("ccode");
+        dir.is_dir().then(|| Self {
+            path: dir.join("profiles.json"),
+        })
+    }
+
     fn read_all(&self) -> Result<Vec<Profile>, String> {
         match fs::read_to_string(&self.path) {
             Ok(text) => serde_json::from_str(&text).map_err(|e| format!("解析 profiles.json 失败: {e}")),
@@ -274,6 +283,9 @@ impl ProfileStore {
         profiles.retain(|p| p.id != id);
         self.write_all(&profiles)?;
         delete_key(id);
+        // 同步清掉设置里的引用（AI 专用/按功能绑定指到已删 id 会让解析链硬报错）；
+        // 持锁内联调用，失败只记日志不否决删除
+        crate::settings::clear_profile_refs(id);
         Ok(())
     }
 
@@ -404,11 +416,20 @@ fn write_keys_at(
     fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
 }
 
-/// 原子写入：先写临时文件再 rename，避免中途崩溃留下半截 JSON（借鉴 CC Switch）
+/// 原子写入：先写临时文件再 rename，避免中途崩溃留下半截 JSON（借鉴 CC Switch）。
+/// iCloud 等同步目录里新落盘的 tmp 偶发被同步代理瞬时介入，rename 吃 ENOENT——
+/// 短暂退避后重试一次（父目录真不存在时第二次照样失败，语义不变）
 pub(crate) fn atomic_write(path: &std::path::Path, text: &str) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, text).map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
-    fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
+        }
+        Err(e) => Err(format!("替换 {} 失败: {e}", path.display())),
+    }
 }
 
 /// profiles.json / keys.json 的读-改-写序列化锁：多标签页并发保存时防互相覆盖

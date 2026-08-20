@@ -111,3 +111,7 @@ export function comboLabel(combo: string): string {
     key === "\\" ? "\\" : key.length === 1 ? key.toUpperCase() : key;
   return mods.join("") + keyLabel;
 }
+
+/** 阅读区笔记栏「阅读/编辑」切换（ReaderOverlay 监听 → FilePreviewEditor modeTick 翻转）。
+ *  mod = macOS ⌘ / Win·Linux Ctrl；焦点在右栏终端时不拦（Ctrl+E 是 readline 行尾） */
+export const READER_MODE_HOTKEY = "mod+e";

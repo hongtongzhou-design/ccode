@@ -17,6 +17,7 @@ import {
 import { captureDecision, comboLabel, PAGE_HOTKEY_DEFS } from "../hotkeys";
 import { openUrl, openPath } from "@tauri-apps/plugin-opener";
 import type { StorageEntryDto } from "../types";
+import { AGENTS } from "../types";
 import { getVersion } from "@tauri-apps/api/app";
 import { collectFrontendDiagnostics } from "../diagnostics";
 
@@ -95,6 +96,14 @@ const AI_FN_ROWS: { key: string; label: string }[] = [
 
 /** 诊断日志条目（与后端 logbuf::LogEntryDto 对应） */
 type LogEntry = { ts: string; level: string; source: string; message: string };
+
+/** 精确注意力标记支持清单条目（与后端 hooks::HookSupportDto 对应） */
+type HookSupport = {
+  agent: string;
+  supported: boolean;
+  note?: string | null;
+  configPath?: string | null;
+};
 
 /** 可一键安装的字体预设：下拉字体名 → 后端字体 id（内置/系统/自定义不在安装范围） */
 const INSTALLABLE_FONTS: Record<string, string> = {
@@ -312,6 +321,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   // 诊断日志（进程内环形缓冲，分区展开时拉最近 100 条）
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [diagnosticsExporting, setDiagnosticsExporting] = useState(false);
+  // 生效配置快照导出进行态（排查九家 agent 配置漂移用）
+  const [configDumpExporting, setConfigDumpExporting] = useState(false);
   // 可安装字体预设的安装状态（id → installed）：进页面查一次缓存，安装成功后刷新
   const [fontStatus, setFontStatus] = useState<Record<string, boolean>>({});
   // 字体安装进行态 / 实时输出 / 最近结果；target 记录本次安装的字体 id（切换选择后隐藏旧输出）
@@ -328,6 +339,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     getVersion()
       .then(setAppVersion)
+      .catch(() => {});
+  }, []);
+  // 精确注意力标记支持清单（九家全列出，支持与否与备注以后端注册表为准）
+  const [hookSupport, setHookSupport] = useState<HookSupport[]>([]);
+  useEffect(() => {
+    invoke<HookSupport[]>("hooks_attention_support")
+      .then(setHookSupport)
       .catch(() => {});
   }, []);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
@@ -443,28 +461,30 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     void patch({ aiProfiles: next });
   }
 
-  /** 精确注意力标记开关：走专用命令（写/移除 ~/.claude/settings.json hooks 段 + 记设置），
+  /** 精确注意力标记开关：走专用命令（写/移除该 agent 的 hooks 配置 + 记设置），
       不走普通 patch——失败时设置不落库，避免开关显示与实际安装不一致 */
-  const [hooksBusy, setHooksBusy] = useState(false);
-  async function toggleClaudeHooks(enabled: boolean) {
+  const [hooksBusy, setHooksBusy] = useState<string | null>(null);
+  async function toggleHooks(agent: string, label: string, enabled: boolean) {
     if (hooksBusy) return;
     setError(null);
-    setHooksBusy(true);
+    setHooksBusy(agent);
     try {
-      const s = await invoke<AppSettings>("set_claude_hooks_attention", {
+      const s = await invoke<AppSettings>("set_hooks_attention", {
+        agent,
         enabled,
       });
       useAppStore.setState({ settings: s });
+      const target = hookSupport.find((h) => h.agent === agent)?.configPath;
       setNotice(
         enabled
-          ? "已开启：Claude Code hooks 已写入 ~/.claude/settings.json"
-          : "已关闭：Claude Code hooks 已移除",
+          ? `已开启：${label} hooks 已写入 ${target ?? "其配置文件"}`
+          : `已关闭：${label} hooks 已移除`,
       );
       setTimeout(() => setNotice(null), 3000);
     } catch (e) {
       setError(String(e));
     } finally {
-      setHooksBusy(false);
+      setHooksBusy(null);
     }
   }
 
@@ -610,6 +630,25 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setError(String(e));
     } finally {
       setDiagnosticsExporting(false);
+    }
+  }
+
+  // 生效配置快照：一键落盘 ~/Downloads/ccode-exports/（口径同诊断包导出）；
+  // 设置页无项目语境，projectRoot 传 null（workspaceSettings 段不产出）
+  async function exportEffectiveConfig() {
+    if (configDumpExporting) return;
+    setConfigDumpExporting(true);
+    setError(null);
+    try {
+      const path = await invoke<string>("export_effective_config", {
+        projectRoot: null,
+      });
+      setNotice(`配置快照已导出：${path}`);
+      setTimeout(() => setNotice(null), 5000);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setConfigDumpExporting(false);
     }
   }
 
@@ -1187,16 +1226,35 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           </select>
         </Row>
 
-        <Row
-          label="精确注意力标记（Claude Code）"
-          hint="比默认推断更准；会写入 Claude 的 hooks 配置（自动备份）"
-        >
-          <Toggle
-            label="精确注意力标记（Claude Code）"
-            checked={settings?.claudeHooksAttention ?? false}
-            onChange={(checked) => void toggleClaudeHooks(checked)}
-          />
-        </Row>
+        {hookSupport.map((h) => {
+          const label = AGENTS.find((a) => a.id === h.agent)?.label ?? h.agent;
+          const baseHint = h.supported
+            ? `比默认推断更准；会写入 ${h.configPath ?? `${label} 配置`}（自动备份，不影响已有配置）`
+            : "暂不支持";
+          return (
+            <Row
+              key={h.agent}
+              label={`精确注意力标记（${label}）`}
+              hint={h.note ? `${baseHint}；${h.note}` : baseHint}
+            >
+              {h.supported ? (
+                <Toggle
+                  label={`精确注意力标记（${label}）`}
+                  checked={settings?.hooksAttention?.[h.agent] ?? false}
+                  onChange={(checked) => void toggleHooks(h.agent, label, checked)}
+                />
+              ) : (
+                <span className="pointer-events-none opacity-40">
+                  <Toggle
+                    label={`精确注意力标记（${label}）`}
+                    checked={false}
+                    onChange={() => {}}
+                  />
+                </span>
+              )}
+            </Row>
+          );
+        })}
       </Section>
 
       <Section
@@ -1272,6 +1330,21 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             className="ml-auto h-8 shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
             {diagnosticsExporting ? "正在采集…" : "导出诊断包"}
+          </button>
+        </div>
+        <div className="mt-3 flex items-center gap-3 rounded-sm bg-strip p-3">
+          <div className="min-w-0">
+            <p className="text-sm text-l2">生效配置快照</p>
+            <p className="mt-0.5 text-xs leading-5 text-l4">
+              应用设置、九家配置清单与能力表的当前生效值，排查配置漂移用；已脱敏，不含密钥
+            </p>
+          </div>
+          <button
+            onClick={exportEffectiveConfig}
+            disabled={configDumpExporting}
+            className="ml-auto h-8 shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+          >
+            {configDumpExporting ? "正在生成…" : "导出生效配置快照"}
           </button>
         </div>
         <div className="py-3">

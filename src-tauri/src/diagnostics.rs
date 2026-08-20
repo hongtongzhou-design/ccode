@@ -433,7 +433,7 @@ fn feature_flags() -> Value {
         "scrollback": settings.scrollback,
         "brewMirror": settings.brew_mirror,
         "notificationsEnabled": settings.notifications_enabled,
-        "claudeHooksAttention": settings.claude_hooks_attention,
+        "hooksAttention": settings.hooks_attention,
         "externalTerminal": settings.external_terminal,
         "hotkeyPaletteEnabled": settings.hotkey_palette.as_deref().is_some_and(|v| !v.is_empty()),
         "hotkeyHideChromeEnabled": settings.hotkey_hide_chrome.as_deref().is_some_and(|v| !v.is_empty()),

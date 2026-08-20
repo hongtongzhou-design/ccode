@@ -5,6 +5,7 @@ import StepSkillsChips from "./StepSkillsChips";
 import HumanTasksList from "./HumanTasksList";
 import {
   blockingHumanTasks,
+  closingHumanTasks,
   taskMdEditorReduce,
   type TaskMdEditorState,
 } from "../task-cards";
@@ -33,8 +34,11 @@ interface GitStatusBrief {
  *    任务书草稿非空时初始内容 = 草稿全文；确认开工落盘 = 编辑区最终内容）；
  * 2. 旧版简报兜底：.ccode/brief-*.md 存在且草稿为空时给一行提示，可「并入草稿」
  *    （新口径不再自动带入 TASK.md）；
- * 3. 未存入历史的改动：项目文件夹有改动时顶部提醒（不阻断，文案走白话术语表）。
- * 「继续」动作不经本弹层；评审「开始下一步」保留直开（连续流，评审沉淀已落下一步草稿）。
+ * 3. 未存入历史的改动：项目文件夹有改动时顶部提醒（不阻断，文案走白话术语表）；
+ * 4. 上一步收尾软门：紧邻上一步的非可选 after 事项未勾时，「确认开始」需按两次
+ *    （首击知情、按钮变「仍要开工」再击才开——只确认不阻断）。
+ * 「继续」动作不经本弹层；评审合并成功的「→ 去下一步」v3.97 起也不直开——跳项目页聚焦下一步，
+ * 用户点「开始」仍经本弹层（上一步收尾软门因此不会被绕过）。
  */
 export default function KickoffConfirmDialog({
   projectPath,
@@ -87,6 +91,13 @@ export default function KickoffConfirmDialog({
   const [humanStates, setHumanStates] = useState<HumanTaskStateDto[] | null>(
     null,
   );
+  // 上一步收尾软门（用户拍板）：上一步非可选 after 事项未勾 → 「确认开始」要按两次
+  // （只确认不阻断——不违反「主路径唯一不设门控」，但跳过审阅必须明确表态）。
+  // 大纲没审就开初稿这类返工最贵的跳步，就靠它拦住手滑
+  const [allHumanStates, setAllHumanStates] = useState<HumanTaskStateDto[] | null>(
+    null,
+  );
+  const [closingAcked, setClosingAcked] = useState(false);
   // 未登记资源提醒（打开时只读扫描一次）：有候选才渲染，默认不勾选不打扰，登记后小节消失
   const [resCandidates, setResCandidates] = useState<
     DiscoveredResourceDto[] | null
@@ -158,6 +169,14 @@ export default function KickoffConfirmDialog({
       .catch(() => {
         if (!stale) setLegacyBriefs([]);
       });
+    // 全量人工事项状态（上一步收尾软门用；本步骤的状态由 HumanTasksList 回传，互不相同）
+    invoke<HumanTaskStateDto[]>("list_human_task_states", {
+      projectRoot: projectPath,
+    })
+      .then((all) => {
+        if (!stale) setAllHumanStates(all);
+      })
+      .catch(() => {});
     return () => {
       stale = true;
     };
@@ -295,6 +314,15 @@ export default function KickoffConfirmDialog({
     draftText !== undefined &&
     !draftText?.trim() &&
     (legacyBriefs?.length ?? 0) > 0;
+  // 上一步收尾软门：按流水线顺序取紧邻上一步，其非可选 after 事项未勾则需要二次确认
+  const prevStep = (() => {
+    const idx = cfgLocal.steps.findIndex((s) => s.name === step.name);
+    return idx > 0 ? cfgLocal.steps[idx - 1] : null;
+  })();
+  const prevClosing =
+    prevStep && allHumanStates
+      ? closingHumanTasks(allHumanStates, prevStep.name)
+      : [];
   return (
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4 ccode-fade"
@@ -507,6 +535,20 @@ export default function KickoffConfirmDialog({
           </>
         )}
 
+        {/* 上一步收尾软门（只确认不阻断）：未勾的非可选收尾事项逐条列出，
+            第一次点「确认开始」只是表态知情，按钮变成「仍要开工」再点才真开 */}
+        {prevClosing.length > 0 && prevStep && (
+          <p className="mb-3 shrink-0 rounded-md bg-inset px-3 py-2 text-xs leading-5 text-l2">
+            <span className="mr-1 text-warn-text">⚠</span>
+            上一步「{prevStep.name}」还有 {prevClosing.length}{" "}
+            件收尾事项没完成（{prevClosing.map((t) => t.title).join("、")}
+            ）——跳过审阅直接开工，上一步要返工时这一步也得跟着作废。
+            {closingAcked
+              ? "再点一次「仍要开工」即继续。"
+              : "建议先回去过完再来；确认跳过就点「确认开始」，按钮会再问你一次。"}
+          </p>
+        )}
+
         <div className="mt-4 flex shrink-0 justify-end gap-2">
           <button
             type="button"
@@ -519,10 +561,20 @@ export default function KickoffConfirmDialog({
           <button
             type="button"
             disabled={busy || !editorReady}
-            onClick={() => onConfirm(editor.text)}
+            onClick={() => {
+              if (prevClosing.length > 0 && !closingAcked) {
+                setClosingAcked(true);
+                return;
+              }
+              onConfirm(editor.text);
+            }}
             className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
-            {busy ? "开始中…" : "确认开始"}
+            {busy
+              ? "开始中…"
+              : prevClosing.length > 0 && closingAcked
+                ? "仍要开工"
+                : "确认开始"}
           </button>
         </div>
       </div>

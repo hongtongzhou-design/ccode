@@ -236,8 +236,10 @@ function CreateScheduleModal({
 }
 
 function RunHistoryItem({ record }: { record: RunRecordDto }) {
+  // 行内单行截断只给预览（hover title 有全文但不易发现）；点击切换全文展开
+  const [open, setOpen] = useState(false);
   return (
-    <li className="flex min-w-0 items-center gap-2 py-1">
+    <li className="flex min-w-0 items-start gap-2 py-1">
       <span
         className={`shrink-0 ${record.status === "ok" ? "text-ok-text" : "text-err-text"}`}
       >
@@ -249,12 +251,16 @@ function RunHistoryItem({ record }: { record: RunRecordDto }) {
       >
         {relTime(record.at)}
       </span>
-      <span
-        className="min-w-0 flex-1 truncate text-xs text-l3"
-        title={record.summary}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`min-w-0 flex-1 cursor-pointer text-left text-xs text-l3 ${
+          open ? "break-words whitespace-pre-wrap" : "truncate"
+        }`}
+        title={open ? "收起" : "展开全文"}
       >
-        {summaryPreview(record) || "（无简报）"}
-      </span>
+        {open ? record.summary : summaryPreview(record) || "（无简报）"}
+      </button>
     </li>
   );
 }
@@ -274,6 +280,8 @@ export default function ScheduleSection({
   const [open, setOpen] = useState(false);
   const [schedules, setSchedules] = useState<ScheduleDto[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** 运行配置下拉（行内可改）：profile 列表从 store 取 */
+  const profiles = useAppStore((s) => s.profiles);
   /** 手动「立即跑」中的任务 id：靠 scheduler-run-done 事件清除并触发重拉 */
   const [running, setRunning] = useState<Set<string>>(new Set());
   const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(
@@ -326,6 +334,19 @@ export default function ScheduleSection({
       await invoke("update_schedule", {
         id: s.id,
         patch: { enabled: !s.enabled },
+      });
+      await load();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  /** 行内改运行配置：空串 = 清掉绑定回到「自动」（后端归一为 None，每次运行现解析） */
+  async function changeProfile(s: ScheduleDto, profileId: string) {
+    try {
+      await invoke("update_schedule", {
+        id: s.id,
+        patch: { profileId },
       });
       await load();
     } catch (reason) {
@@ -410,16 +431,6 @@ export default function ScheduleSection({
                     >
                       {s.name}
                     </span>
-                    <span className="shrink-0 text-xs text-l3">
-                      {frequencyLabel(s.frequency, s.weekday, s.hour, s.minute)}
-                    </span>
-                    {/* 技能名白话直显：「文献雷达 · 每天 09:00 · lit-watch」 */}
-                    <span className="shrink-0 text-xs text-l4">{s.skill}</span>
-                    {s.linkedStep && (
-                      <span className="shrink-0 text-xs text-l4">
-                        → {s.linkedStep}
-                      </span>
-                    )}
                     <span className="min-w-0 flex-1" />
                     {s.lastRunAt && (
                       <span
@@ -473,6 +484,43 @@ export default function ScheduleSection({
                     >
                       ⋯
                     </button>
+                  </div>
+                  {/* meta 行（窄栏不挤主行）：周期 · 技能 · 关联步骤 · 运行配置；
+                      配置行内可改，hover 才显边框降存在感，绑定被删给出可见标记 */}
+                  <div className="ml-9 mt-0.5 flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 text-micro text-l3">
+                      {frequencyLabel(s.frequency, s.weekday, s.hour, s.minute)}
+                    </span>
+                    <span className="shrink-0 text-micro text-l4">
+                      {s.skill}
+                    </span>
+                    {s.linkedStep && (
+                      <span
+                        className="min-w-0 truncate text-micro text-l4"
+                        title={s.linkedStep}
+                      >
+                        → {s.linkedStep}
+                      </span>
+                    )}
+                    <select
+                      value={s.profileId ?? ""}
+                      onChange={(e) => void changeProfile(s, e.target.value)}
+                      title="运行配置：「自动」= 跟随默认解析（设置页 AI 专用配置 → 最近使用）；绑定配置被删会自动回落并在此标出"
+                      className="min-w-0 max-w-36 shrink cursor-pointer truncate rounded-sm border border-transparent bg-transparent px-1 py-0.5 text-micro text-l4 outline-none hover:border-field hover:text-l2"
+                    >
+                      <option value="">自动</option>
+                      {s.profileId &&
+                        !profiles.some((p) => p.id === s.profileId) && (
+                          <option value={s.profileId}>
+                            原配置已删除（自动回落中）
+                          </option>
+                        )}
+                      {profiles.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                   {historyOpen === s.id && (
                     <ul className="ml-9 mt-1 divide-y divide-hairline border-l border-white/5 pl-2">

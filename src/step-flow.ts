@@ -2,8 +2,10 @@ import type { HumanTaskStateDto, ProjectStepDto } from "./types";
 
 /** 步骤内协同流程线（v3.71）的纯逻辑：把「这一步里人和 agent 的动作」按先后排成有序节点链，
  *  全部状态派生（无状态机）。节点顺序 = 讨论种子 → before 人工事项 → agent 执行
- *  → during 人工事项（并行段） → after 人工事项 → 评审合并。
- *  「当前节点」= 第一个未完成节点（currentNodeKey），组件高亮并就地展开其操作区。
+ *  → during 人工事项（并行段） → after 人工事项（v3.97 起一律进主干——收尾项是流程的一步，
+ *  沉到可选分隔线下会让用户以为它不存在） → 评审合并。
+ *  「当前节点」= 第一个未完成节点（currentNodeKey），组件高亮并就地展开其操作区；
+ *  **可选人工事项不参与当前节点判定**——不做也能跑完，让它当「当前」会把指示卡死。
  *  例外：agent 节点的「开始/恢复工作区/去终端看看」不受当前节点门控——开始始终可用，
  *  讨论种子与开始前事项只提醒不拦（同 KickoffConfirmDialog 口径）。 */
 
@@ -135,14 +137,19 @@ export function buildStepFlow(args: {
       human: h,
     });
   }
-  // 5. after 人工事项（agent 干完才轮到人）
+  // 5. after 人工事项（agent 干完才轮到人）。
+  //    v3.97 起**一律进主干**（用户拍板：「补充付费墙文献」这类收尾项就是流程的第三步，
+  //    沉到可选分隔线下会让人觉得它不存在）；optional 的仍带「可选」徽标且不参与
+  //    「当前节点」判定（见下方 currentKey），不会卡住流程指示
   for (const h of humans("after")) {
     nodes.push({
       key: `human:${h.title}`,
       kind: "human",
-      section: h.optional ? "optional" : "main",
+      section: "main",
       label: h.title,
-      hint: `agent 干完后轮到你${h.target ? `；交付落点 ${h.target}` : ""}`,
+      hint: h.target
+        ? `agent 干完后轮到你；把文件拖到这一行，或点右侧入口导入（落点 ${h.target}）`
+        : "agent 干完后轮到你，完成后手动勾选",
       done: h.done,
       human: h,
     });
@@ -153,11 +160,22 @@ export function buildStepFlow(args: {
     kind: "review",
     section: "main",
     label: "你验收，合并进主文件夹",
-    hint: runStatus === "review" ? "点「去评审」验收产物" : undefined,
+    hint:
+      runStatus === "review"
+        ? "点「去评审」：逐文件核对改动、对照预期产物清单，没问题点「提交并合并」；不满意回终端让 AI 继续改"
+        : runStatus === "active"
+          ? "AI 提交产出后在这里验收：核对改动与产物后合并进主文件夹"
+          : undefined,
     done: runStatus === "done",
   });
 
-  // 当前节点只在主干里找：可选项不做也能往下走，让它当「当前」会把指示卡死
-  const current = nodes.find((n) => n.section === "main" && !n.done);
+  // 当前节点只在主干里找，且跳过可选项：可选人工事项不做也能跑完这一步，
+  // 让它当「当前」会把指示卡死在那儿，后面的节点永远轮不到
+  const current = nodes.find(
+    (n) =>
+      n.section === "main" &&
+      !n.done &&
+      !(n.kind === "human" && n.human?.optional),
+  );
   return { nodes, currentKey: current?.key ?? null };
 }

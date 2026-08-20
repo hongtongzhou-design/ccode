@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import ContextMenu from "./ContextMenu";
 
 // monaco 体积大，与终端页同款懒加载，避免拖慢工作区页首屏
@@ -134,6 +135,7 @@ function WatchEntryRow({
   onExplain,
   onCloseExplain,
   onDownload,
+  onAttach,
   onDismiss,
 }: {
   entry: WatchEntryDto;
@@ -143,6 +145,7 @@ function WatchEntryRow({
   onExplain: () => void;
   onCloseExplain: () => void;
   onDownload: () => void;
+  onAttach: () => void;
   onDismiss: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -272,6 +275,11 @@ function WatchEntryRow({
               title: entry.url.trim() ? entry.url : "这条命中没有链接",
               onSelect: () => void openUrl(entry.url),
             },
+            {
+              label: "关联本地 PDF…",
+              title: "已手动下载全文？选中文件，自动复制进 papers/ 并登记",
+              onSelect: onAttach,
+            },
             { label: "忽略这条", onSelect: onDismiss },
             {
               label: "复制标题",
@@ -285,6 +293,83 @@ function WatchEntryRow({
   );
 }
 
+/** 精读清单：未读全列（超 10 条先收起）、已读默认折叠——清单随精读步骤能攒到上百条，
+ *  平铺会把雷达卡片撑爆 */
+function IncludedList({
+  included,
+  resources,
+  projectRoot,
+  noteNames,
+  downloading,
+  onOpenPdf,
+  onDownload,
+  onAttach,
+  onRemove,
+}: {
+  included: IncludedEntryDto[];
+  resources: ProjectResourceDto[];
+  projectRoot: string;
+  noteNames: string[];
+  downloading: Set<string>;
+  onOpenPdf: (relPath: string) => void;
+  onDownload: (key: string, link: string, title: string) => void;
+  onAttach: (title: string) => void;
+  onRemove: (entry: IncludedEntryDto) => void;
+}) {
+  const UNREAD_CAP = 10;
+  const [showAllUnread, setShowAllUnread] = useState(false);
+  const [readOpen, setReadOpen] = useState(false);
+  const unread = included.filter((e) => !isRead(e, noteNames));
+  const readOnes = included.filter((e) => isRead(e, noteNames));
+  const visibleUnread = showAllUnread ? unread : unread.slice(0, UNREAD_CAP);
+  const renderRow = (entry: IncludedEntryDto, read: boolean) => {
+    const pdf = paperResourceFor(entry, resources);
+    return (
+      <IncludedRow
+        key={entry.lineId}
+        entry={entry}
+        read={read}
+        pdfPath={pdf ? absResourcePath(projectRoot, pdf) : null}
+        downloading={downloading.has(entry.lineId)}
+        onOpen={() => pdf && onOpenPdf(pdf)}
+        onDownload={() => onDownload(entry.lineId, entry.link, entry.title)}
+        onAttach={() => onAttach(entry.title)}
+        onRemove={() => onRemove(entry)}
+      />
+    );
+  };
+  return (
+    <ul className="mt-1 space-y-0.5">
+      {visibleUnread.map((e) => renderRow(e, false))}
+      {unread.length > UNREAD_CAP && (
+        <li className="px-2 py-1">
+          <button
+            type="button"
+            onClick={() => setShowAllUnread((v) => !v)}
+            className="text-xs text-l4 hover:text-l2"
+          >
+            {showAllUnread
+              ? "▾ 收起"
+              : `▸ 展开其余 ${unread.length - UNREAD_CAP} 条未读`}
+          </button>
+        </li>
+      )}
+      {readOnes.length > 0 && (
+        <li className="px-2 py-1">
+          <button
+            type="button"
+            onClick={() => setReadOpen((v) => !v)}
+            className="text-xs text-l4 hover:text-l2"
+          >
+            {readOpen ? "▾" : "▸"} 已读 {readOnes.length} 条
+          </button>
+        </li>
+      )}
+      {readOpen && readOnes.map((e) => renderRow(e, true))}
+    </ul>
+  );
+}
+
 /** 精读清单行：状态点（已读绿/未读灰）+ 标题 + 作者年份 + 主按钮（开读 / ↓ 全文）+ ⋯ */
 function IncludedRow({
   entry,
@@ -293,6 +378,7 @@ function IncludedRow({
   downloading,
   onOpen,
   onDownload,
+  onAttach,
   onRemove,
 }: {
   entry: IncludedEntryDto;
@@ -302,6 +388,7 @@ function IncludedRow({
   downloading: boolean;
   onOpen: () => void;
   onDownload: () => void;
+  onAttach: () => void;
   onRemove: () => void;
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -377,6 +464,11 @@ function IncludedRow({
                     disabled: !canDownload,
                     title: canDownload ? pdfUrl! : "出版商页面，请手动下载",
                     onSelect: onDownload,
+                  },
+                  {
+                    label: "关联本地 PDF…",
+                    title: "已手动下载全文？选中文件，自动复制进 papers/ 并登记",
+                    onSelect: onAttach,
                   },
                 ]
               : []),
@@ -842,6 +934,27 @@ ${topicLine}
     }
   }
 
+  /** 关联本地 PDF（命中条目 / 精读条目共用 ⋯ 菜单）：文件对话框选 PDF，
+   *  后端复制进 papers/ 并按标题登记 project.toml，父级重读后精读行主按钮变「开读」 */
+  async function attachPdf(title: string) {
+    const selected = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (typeof selected !== "string") return; // 取消或异常形态
+    try {
+      const res = await invoke<DownloadedPaperDto>("attach_paper_pdf", {
+        projectRoot,
+        sourcePath: selected,
+        title,
+      });
+      showToast(`已关联：${res.name}`);
+      onConfigChanged();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function removeIncluded(entry: IncludedEntryDto) {
     try {
       await invoke("remove_included_entry", {
@@ -991,6 +1104,7 @@ ${topicLine}
                           onDownload={() =>
                             void download(entry.id, entry.url, entry.title)
                           }
+                          onAttach={() => void attachPdf(entry.title)}
                           onDismiss={() =>
                             setDismissed((cur) => dismissLitEntry(cur, entry.id))
                           }
@@ -1050,25 +1164,17 @@ ${topicLine}
                 还没有精读条目。在「新命中」里点「→ 精读」加进来。
               </p>
             ) : (
-              <ul className="mt-1 space-y-0.5">
-                {included.map((entry) => {
-                  const pdf = paperResourceFor(entry, resources);
-                  return (
-                    <IncludedRow
-                      key={entry.lineId}
-                      entry={entry}
-                      read={isRead(entry, noteNames)}
-                      pdfPath={pdf ? absResourcePath(projectRoot, pdf) : null}
-                      downloading={downloading.has(entry.lineId)}
-                      onOpen={() => pdf && openPdf(pdf)}
-                      onDownload={() =>
-                        void download(entry.lineId, entry.link, entry.title)
-                      }
-                      onRemove={() => void removeIncluded(entry)}
-                    />
-                  );
-                })}
-              </ul>
+              <IncludedList
+                included={included}
+                resources={resources}
+                projectRoot={projectRoot}
+                noteNames={noteNames}
+                downloading={downloading}
+                onOpenPdf={openPdf}
+                onDownload={(key, link, title) => void download(key, link, title)}
+                onAttach={(title) => void attachPdf(title)}
+                onRemove={(entry) => void removeIncluded(entry)}
+              />
             ))}
         </>
       )}

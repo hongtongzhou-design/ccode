@@ -5,9 +5,6 @@ import {
   READER_PDF_MIN_PX,
   READER_SIDE_MIN_PX,
   bytesToBase64,
-  buildFigureTourPrompt,
-  buildNotePolishPrompt,
-  buildPageSummaryPrompt,
   buildReaderTranslatePrompt,
   captureRectToCanvasPixels,
   captureRectUsable,
@@ -30,11 +27,11 @@ import {
   readerProgressKey,
   readerReuseKey,
   relMdLinkPath,
-  relToProjectRoot,
   renderGlossaryTable,
   resolveMdPath,
   splitGlossaryRow,
   stripMdHrefSuffix,
+  translationSavedToast,
 } from "../src/reader.ts";
 
 test("clampReaderPct 坏值/非正数回落缺省", () => {
@@ -232,32 +229,6 @@ test("buildReaderTranslatePrompt 学术直译约束 + 原文附上", () => {
   assert.ok(p.endsWith("\n\ninterfacial resistance"));
 });
 
-test("chips 三条 prompt 口径固定", () => {
-  assert.equal(
-    buildFigureTourPrompt("papers/a.pdf"),
-    "请通读 papers/a.pdf，逐个说明每张 Figure/表讲了什么、哪些值得细看（图导游）。",
-  );
-  assert.equal(
-    buildPageSummaryPrompt("papers/a.pdf", 7),
-    "请总结 papers/a.pdf 第 7 页（我当前读到的位置）的内容，中文三行以内。",
-  );
-  assert.equal(
-    buildNotePolishPrompt("notes/a.md"),
-    "请阅读 notes/a.md，结合我们刚才的讨论，把笔记的五段内容补全改好。",
-  );
-});
-
-test("relToProjectRoot 根内转相对、根外原样", () => {
-  assert.equal(relToProjectRoot("/p/proj", "/p/proj/papers/a.pdf"), "papers/a.pdf");
-  assert.equal(relToProjectRoot("/p/proj/", "/p/proj/notes/x.md"), "notes/x.md");
-  // Windows 分隔符归一
-  assert.equal(
-    relToProjectRoot("C:\\proj", "C:\\proj\\papers\\a.pdf"),
-    "papers/a.pdf",
-  );
-  assert.equal(relToProjectRoot("/p/proj", "/q/other.pdf"), "/q/other.pdf");
-});
-
 test("进度记忆与护眼的 localStorage 键格式", () => {
   assert.equal(readerProgressKey("/p/a.pdf"), "ccode.readerProgress./p/a.pdf");
   assert.equal(readerDarkKey("/p/a.pdf"), "ccode.readerDark./p/a.pdf");
@@ -401,4 +372,12 @@ test("findGlossaryMatches 术语含正则字符不炸", () => {
   ]);
   // 「C++11」：+ 非单词字符，尾边界放行——按术语原样命中（已知取舍）
   assert.deepEqual(findGlossaryMatches("in C++11", terms).length, 1);
+});
+
+
+test("translationSavedToast：笔记栏脏时明示不回显，干净时简洁口径", () => {
+  assert.equal(translationSavedToast(false), "已存到笔记「译段」");
+  const dirty = translationSavedToast(true);
+  assert.ok(dirty.startsWith("已存到笔记「译段」"));
+  assert.ok(dirty.includes("未保存改动"));
 });

@@ -23,8 +23,6 @@ import {
   type GlossaryEntry,
   type PageBox,
   type RawTextSpan,
-  type ReaderOutlineItem,
-  type ReaderTranslateKind,
   type ReaderTranslateResult,
 } from "../reader";
 
@@ -36,37 +34,6 @@ function basename(p: string): string {
 /** 生词出处里的文献名（《stem》第 N 页） */
 function fileStem(name: string): string {
   return name.replace(/\.pdf$/i, "");
-}
-
-/** pdf.js 大纲节点（getOutline 的返回类型在 d.ts 里是匿名结构，这里收窄出用到的三个字段） */
-interface OutlineNodeLike {
-  title?: string;
-  dest?: string | unknown[] | null;
-  items?: OutlineNodeLike[];
-}
-
-/** pdf.js 页引用（RefProxy 未从包根导出，按 display/api.d.ts 的定义收窄） */
-type PdfRefProxy = { num: number; gen: number };
-
-/** 大纲 dest → 页码：具名 dest 先 getDestination 拿显式数组，再 getPageIndex 解析页引用；
- *  无 dest/外链/解析失败一律 null（该条目不可跳转） */
-async function resolveOutlinePage(
-  doc: pdfjs.PDFDocumentProxy,
-  dest: string | unknown[] | null | undefined,
-): Promise<number | null> {
-  try {
-    if (!dest) return null;
-    const d = typeof dest === "string" ? await doc.getDestination(dest) : dest;
-    const ref = d?.[0] as { num?: number } | number | null | undefined;
-    if (ref == null) return null;
-    if (typeof ref === "number") return ref + 1; // 旧式直接页索引
-    if (typeof ref === "object" && typeof ref.num === "number") {
-      return (await doc.getPageIndex(ref as PdfRefProxy)) + 1;
-    }
-    return null;
-  } catch {
-    return null;
-  }
 }
 
 /** 选区长度门槛（≤ max 字符才放行「＋ 生词」）：挂在 SelectionFloatBar 里自己订阅
@@ -142,9 +109,6 @@ function PdfContinuousView({
   onCaptureNote,
   glossTerms,
   dark,
-  onPageChange,
-  onOutlineLoad,
-  jumpToPage,
   onRequestTranslate,
   onSaveTranslation,
   onAddGlossary,
@@ -173,21 +137,14 @@ function PdfContinuousView({
     page: number,
     fileName: string,
   ) => Promise<string | null>;
-  /** 生词高亮术语表（批次 B3：阅读区打开时加载一次，增删后刷新） */
+  /** 生词高亮术语表（阅读区打开时加载一次，增删后刷新） */
   glossTerms?: readonly GlossaryEntry[];
   /** 护眼反色开关（只反 canvas 层，CSS filter，不动 canvas 数据） */
   dark?: boolean;
-  /** 当前页变化汇报（进度记忆 /「总结这页」chip 用） */
-  onPageChange?: (page: number) => void;
-  /** 大纲加载完成（无大纲回 []；doc 就绪后跑一次） */
-  onOutlineLoad?: (items: ReaderOutlineItem[]) => void;
-  /** 大纲点击跳页请求（nonce 变化即触发滚动） */
-  jumpToPage?: { page: number; nonce: number } | null;
-  /** 翻译请求（译浮卡 / ＋生词预填 / ⌘+点击段落对照）；kind=word 不进译段历史 */
+  /** 翻译请求（译浮卡 / ＋生词预填 / ⌘+点击段落对照）；结果由本组件的浮卡就地呈现 */
   onRequestTranslate?: (
     text: string,
     page: number,
-    kind: ReaderTranslateKind,
   ) => Promise<ReaderTranslateResult>;
   /** 保存译段到笔记「## 译段」（笔记路径在 ReaderOverlay），返回 null 成功 */
   onSaveTranslation?: (t: {
@@ -265,53 +222,12 @@ function PdfContinuousView({
   /** 进度恢复只跑一次（换文档重置）；恢复前的初始页不落盘 */
   const restoredRef = useRef(false);
 
-  // 换文档时连同 B3 会话态一起重置（浮卡/术语悬停/进度恢复标记）
+  // 换文档时连同会话态一起重置（浮卡/术语悬停/进度恢复标记）
   useEffect(() => {
     restoredRef.current = false;
     setFloatCard(null);
     setGlossTip(null);
   }, [path]);
-
-  // 大纲：doc 就绪后解析目录树（dest → getDestination/getPageIndex → 页码；无大纲回 []）
-  useEffect(() => {
-    if (!doc || !onOutlineLoad) return;
-    let cancelled = false;
-    void (async () => {
-      const items: ReaderOutlineItem[] = [];
-      try {
-        const outline = await doc.getOutline();
-        const walk = async (
-          nodes: readonly OutlineNodeLike[],
-          depth: number,
-        ): Promise<void> => {
-          for (const n of nodes) {
-            if (items.length >= 300) return; // 病态 PDF 兜底
-            items.push({
-              title: (n.title ?? "").replace(/\s+/g, " ").trim() || "（无标题）",
-              page: await resolveOutlinePage(doc, n.dest),
-              depth,
-            });
-            if (n.items && n.items.length > 0) await walk(n.items, depth + 1);
-          }
-        };
-        if (outline) await walk(outline as OutlineNodeLike[], 0);
-      } catch {
-        /* 目录读取失败按无目录处理 */
-      }
-      if (!cancelled) onOutlineLoad(items);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [doc, onOutlineLoad]);
-
-  // 大纲点击跳页：页槽恒渲染，直接 scrollIntoView（IO 随后把该页拉进渲染窗口）
-  useEffect(() => {
-    if (!jumpToPage || !doc) return;
-    scrollRef.current
-      ?.querySelector(`[data-page-slot="${jumpToPage.page}"]`)
-      ?.scrollIntoView({ block: "start" });
-  }, [jumpToPage, doc]);
 
   /** 选区锚点 → 滚动容器坐标（同 SelectionFloatBar 的换算口径，右缘预留浮卡宽 288px） */
   function anchorFromSelection(): { x: number; y: number } | null {
@@ -319,17 +235,24 @@ function PdfContinuousView({
     const sel = window.getSelection();
     if (!scroll || !sel || sel.isCollapsed) return null;
     const r = sel.getRangeAt(0).getBoundingClientRect();
+    return anchorFromPoint(r.left, r.bottom);
+  }
+
+  /** 任意 client 点 → 滚动容器坐标（⌘+点击段落对照的浮卡锚点；同一换算口径） */
+  function anchorFromPoint(clientX: number, clientY: number): { x: number; y: number } | null {
+    const scroll = scrollRef.current;
+    if (!scroll) return null;
     const sr = scroll.getBoundingClientRect();
     return {
       x: Math.max(
         8,
-        Math.min(r.left - sr.left + scroll.scrollLeft, sr.width - 296),
+        Math.min(clientX - sr.left + scroll.scrollLeft, sr.width - 296),
       ),
-      y: r.bottom - sr.top + scroll.scrollTop + 6,
+      y: clientY - sr.top + scroll.scrollTop + 6,
     };
   }
 
-  /** 「译」：选区旁浮出对照小卡 + 送翻译（历史进工具页签由 ReaderOverlay 负责） */
+  /** 「译」：选区旁浮出对照小卡 + 送翻译 */
   function openTranslateCard() {
     const excerpt = selectedExcerpt();
     if (!excerpt || !onRequestTranslate) return;
@@ -348,7 +271,7 @@ function PdfContinuousView({
     const my = ++translateReqRef.current;
     setCardTranslating(true);
     setCardError(null);
-    const r = await onRequestTranslate(text, page, "selection");
+    const r = await onRequestTranslate(text, page);
     if (my !== translateReqRef.current) return;
     setCardTranslating(false);
     if (r.ok) setCardTranslated(r.text);
@@ -365,11 +288,11 @@ function PdfContinuousView({
     setFloatCard({ anchor, kind: "glossary", text: excerpt.text.slice(0, 60), page: excerpt.page });
     setGlossMeaning("");
     setGlossBusy(false);
-    // 自动调 translate 预填释义（word 通道：不进译段历史、不切工具页签）
+    // 自动调 translate 预填释义（结果只进这张卡，不做别的记录）
     if (onRequestTranslate) {
       const my = ++translateReqRef.current;
       setGlossPrefilling(true);
-      void onRequestTranslate(excerpt.text, excerpt.page, "word").then((r) => {
+      void onRequestTranslate(excerpt.text, excerpt.page).then((r) => {
         if (my !== translateReqRef.current) return;
         setGlossPrefilling(false);
         if (r.ok) setGlossMeaning((prev) => (prev.trim() ? prev : r.text));
@@ -404,8 +327,8 @@ function PdfContinuousView({
     else setCardSaved(true);
   }
 
-  /** ⌘/Ctrl + 点击正文段落：从点击行按 y 连续性向上下扩展提取整段 → 送段落对照翻译。
-   *  与圈选模式互斥（圈选交互层盖住内容层，这里再守一道） */
+  /** ⌘/Ctrl + 点击正文段落：从点击行按 y 连续性向上下扩展提取整段 → 段落对照翻译，
+   *  结果进点击位置旁的同款对照浮卡（可保存译段）。与圈选模式互斥（圈选交互层盖住内容层，这里再守一道） */
   function onContentClick(e: React.MouseEvent<HTMLDivElement>) {
     if (!onRequestTranslate || captureOn) return;
     if (!e.metaKey && !e.ctrlKey) return;
@@ -430,9 +353,13 @@ function PdfContinuousView({
     const text = joinParagraphLines(lines.slice(start, end + 1));
     if (!text) return;
     e.preventDefault();
-    void onRequestTranslate(text, page, "paragraph").then((r) => {
-      showHint(r.ok ? "段落对照已进「✦ 工具」页签" : `段落翻译失败：${r.error}`);
-    });
+    const anchor = anchorFromPoint(e.clientX, e.clientY);
+    if (!anchor) return;
+    setFloatCard({ anchor, kind: "translate", text, page });
+    setCardTranslated(null);
+    setCardError(null);
+    setCardSaved(false);
+    void runCardTranslate(text, page);
   }
 
   /** 术语悬停释义：事件代理命中 .ccode-gloss（HoverTip 横向钳制同 useHoverTip 口径） */
@@ -619,17 +546,12 @@ function PdfContinuousView({
     return () => io.disconnect();
   }, [doc, pageCount]);
 
-  /** 当前页指示：可视带内最靠上的一页 */
+  /** 当前页指示：可视带内最靠上的一页（缩放浮控的页码与进度记忆同源） */
   const currentPage = (() => {
     let min = Infinity;
     for (const n of seenPages) min = Math.min(min, n);
     return min === Infinity ? 1 : min;
   })();
-
-  // 当前页变化上报（chips「总结这页」/ 进度记忆同源）
-  useEffect(() => {
-    onPageChange?.(currentPage);
-  }, [currentPage, onPageChange]);
 
   // 进度记忆：当前页稳定 2s 才落盘（滚动中不写；恢复完成前的初始页不写）
   useEffect(() => {
@@ -695,7 +617,7 @@ function PdfContinuousView({
       onAskAi?.(excerpt.text, excerpt.page, fileName, send) ??
       "当前页面不支持问 AI";
     showHint(
-      err ?? (send ? "已发送给阅读会话" : "已写入右侧输入框，检查后自行发送"),
+      err ?? (send ? "已发送给阅读会话" : "已写入终端输入行，检查后回车发送"),
     );
     if (!err) clearSelection();
   }
@@ -804,7 +726,7 @@ function PdfContinuousView({
         Promise.resolve("当前环境不支持截图"));
       showHint(
         err ??
-          (target === "agent" ? "已写入右侧输入框，检查后自行发送" : "已贴进笔记"),
+          (target === "agent" ? "已写入终端输入行，检查后回车发送" : "已贴进笔记"),
       );
       if (!err) setFrozen(null);
     } finally {
@@ -812,8 +734,9 @@ function PdfContinuousView({
     }
   }
 
+  /** 图标钮规格同阅读区顶栏 topBtn：28px 热区（设计系统下限），层级靠文字色 */
   const zoomBtn =
-    "flex h-6 min-w-6 items-center justify-center rounded-sm px-1 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-40";
+    "flex h-7 min-w-7 items-center justify-center rounded-sm px-0.5 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-40";
   const firstSize = pageSizes[1] ?? FALLBACK_PAGE;
 
   return (
@@ -839,56 +762,59 @@ function PdfContinuousView({
           <p className="text-sm text-l4">正在加载 PDF…</p>
         </div>
       ) : (
-        <div
-          ref={scrollRef}
-          onScroll={() => setGlossTip(null)}
-          onMouseOver={onContentMouseOver}
-          className="relative min-h-0 flex-1 overflow-auto"
-        >
-          {/* 浮动缩放控件（默认适配宽度；固定倍率下才可能出现横向滚动）。
-              h-0 + sticky：滚动时钉在栏顶又不占布局高度、不挡内容点击；
-              z-30 压过圈选覆盖层（z-20），圈选模式下仍可缩放/退出 */}
-          <div className="sticky top-2 z-30 flex h-0 justify-end pr-3">
-            <div className="flex items-center gap-1 rounded-md ccode-float-surface px-1.5 py-1">
-            <button
-              type="button"
-              className={zoomBtn}
-              onClick={() =>
-                setFixedScale((s) => Math.max(0.25, (s ?? fitScale) / 1.2))
-              }
-            >
-              −
-            </button>
-            <button
-              type="button"
-              className={`${zoomBtn} px-1.5 tabular-nums`}
-              onClick={() => setFixedScale(null)}
-            >
-              {fixedScale === null ? "适配宽度" : `${Math.round(scale * 100)}%`}
-            </button>
-            <button
-              type="button"
-              className={zoomBtn}
-              onClick={() =>
-                setFixedScale((s) => Math.min(4, (s ?? fitScale) * 1.2))
-              }
-            >
-              +
-            </button>
-            <span className="px-1 text-micro text-l4 tabular-nums">
-              {currentPage} / {pageCount}
-            </span>
-            {captureSupported && (
+        <>
+          {/* 常驻细工具条（Zotero 式收敛：图标化按钮、页码居中、圈选右置）：
+              原是滚动层内的 sticky 浮块，会挡住右上角的正文与圈选画面；
+              与左右栏顶条同高（h-8）同底部分隔线，三栏严丝合缝 */}
+          <div className="grid h-8 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-hairline bg-strip px-2">
+            <div className="flex items-center gap-0.5">
               <button
                 type="button"
-                className={`${zoomBtn} px-1.5 ${captureOn ? "bg-seg-sel text-l1" : ""}`}
-                onClick={() => (captureOn ? exitCapture() : setCaptureOn(true))}
+                className={zoomBtn}
+                onClick={() =>
+                  setFixedScale((s) => Math.max(0.25, (s ?? fitScale) / 1.2))
+                }
               >
-                ▦ 圈选
+                −
               </button>
-            )}
+              <button
+                type="button"
+                className={zoomBtn}
+                onClick={() =>
+                  setFixedScale((s) => Math.min(4, (s ?? fitScale) * 1.2))
+                }
+              >
+                ＋
+              </button>
+              <button
+                type="button"
+                className={`${zoomBtn} px-1.5 text-micro tabular-nums`}
+                onClick={() => setFixedScale(null)}
+              >
+                {fixedScale === null ? "适配宽度" : `${Math.round(scale * 100)}%`}
+              </button>
+            </div>
+            <span className="text-center text-micro text-l4 tabular-nums">
+              {currentPage} / {pageCount}
+            </span>
+            <div className="flex items-center justify-end">
+              {captureSupported && (
+                <button
+                  type="button"
+                  className={`${zoomBtn} px-1.5 text-micro ${captureOn ? "bg-seg-sel text-l1" : ""}`}
+                  onClick={() => (captureOn ? exitCapture() : setCaptureOn(true))}
+                >
+                  ▦ 圈选
+                </button>
+              )}
             </div>
           </div>
+          <div
+            ref={scrollRef}
+            onScroll={() => setGlossTip(null)}
+            onMouseOver={onContentMouseOver}
+            className="relative min-h-0 flex-1 overflow-auto"
+          >
           <div
             ref={contentRef}
             onClick={onContentClick}
@@ -1153,7 +1079,8 @@ function PdfContinuousView({
           )}
           {/* 术语悬停释义（HoverTip 应用内 tooltip，禁原生 title） */}
           <HoverTip tip={glossTip} text={glossTip?.text ?? ""} />
-        </div>
+          </div>
+        </>
       )}
     </div>
   );

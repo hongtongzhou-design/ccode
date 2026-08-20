@@ -38,17 +38,26 @@
   auth.json 形状相同，文件层面无法区分，不得冒充官方账号。
 - **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作：
   1. 「设为全局默认」（写前必须备份）；
-  2. **精确注意力标记开关**（claude_hooks.rs 写 ~/.claude/settings.json hooks 段：写前备份 + 原子写、只动 hooks 键、已有
-     hooks 追加不覆盖、关闭只删含 `hooks-state/claude-hooks.jsonl` 的条目并回收空壳键、配置损坏拒绝写；开关走
-     `set_claude_hooks_attention` 单命令落应用设置，失败回滚，禁前端单独 patch `claudeHooksAttention`）；
+  2. **精确注意力标记开关**（hooks.rs 按 agent 写七家 hooks 配置——claude `~/.claude/settings.json`、
+     qwen `~/.qwen/settings.json`、codebuddy `~/.codebuddy/settings.json`、gemini `~/.gemini/settings.json`
+     （qwen/gemini 走 JSONC 容错读）、kimi `~/.kimi-code/config.toml`（`[[hooks]]` 表，toml_edit 保格式）、
+     grok `~/.grok/hooks/ccode.json`、codex `~/.codex/hooks.json`；统一防护口径：写前备份（同前缀留 10 份）+
+     原子写、只动 hooks 键/段、已有 hooks 追加不覆盖、关闭只删含 `hooks-state/<tag>-hooks.jsonl` marker 的条目
+     并回收空壳键、配置损坏拒绝写；**grok 为整文件形态特例**——该文件整份归 Ccode（开启=写文件、关闭=删文件），
+     不含 marker 的外来文件拒绝覆盖；开关走 `set_hooks_attention(agent, enabled)` 单命令（先改各家配置，
+     成功后才落应用设置 hooks_attention map 逐键），失败回滚，禁前端单独 patch `hooksAttention`）；
   3. 会话删除（delete_session/delete_project_sessions：canonicalize 根校验 + **已知会话数据子目录 + 会话后缀白名单**，
      同根 auth.json/settings.json 等一律拒绝；**Cursor 不走目录级白名单**（~/.cursor 与 IDE 共享），由 `cursor_deletable`
      限定 `projects/*/agent-transcripts/**/*.jsonl`；OpenCode 事务删库行且 db 必须等于已知 opencode.db；Codex resume 链删除
      连带成员文件）；
   4. 工作树文件删除（限定树当前根 + 重要路径黑名单：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单 canonicalize
      双校验堵 symlink 绕过）。
-- **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录），AI 无头调用 `-s read-only`；用户可用
-  extra_env/参数覆盖。
+- **「设为全局」/MCP 写入/技能分发的各家支持面统一查 AgentSpec 能力表**（agent_specs.rs 的 set_global/mcp_write/
+  skill_dist 三字段，fail-loud：不支持必须带用户可见原因，后端报错与前端置灰同源），不再散写硬编码名单
+  （mcp.rs 的 grok 只读、skills.rs 的 allow_symlink_for 等旧硬编码均已改查表）。
+- **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录）+ `-c sandbox_workspace_write.network_access=true`
+  （沙箱内放开联网——默认拦网会导致文献检索/查资料每次都弹提权确认；定时任务 headless 无人可批，不开网必失败），
+  AI 无头调用 `-s read-only`；用户可用 extra_env/参数覆盖。
 - **诊断包是脱敏的有界快照**：设置页一键导出到 `~/Downloads/ccode-exports/`，包含 Windows/WebView2/GPU/WebGL、
   语言与输入法、当前功能开关、应用日志及自应用启动后的子进程生命周期；进程记录为内存环形缓冲，不读取环境变量，命令参数
   与日志在导出前必须经 Rust 层脱敏。ZIP 内只放 UTF-8 JSON/TXT，保证从 Windows 带回 macOS 后无需 Ccode 或 Windows 工具

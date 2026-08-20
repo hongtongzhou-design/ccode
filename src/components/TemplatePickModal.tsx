@@ -7,7 +7,7 @@ import { fieldClass, primaryActionClass, secondaryActionClass } from "./PageFram
 
 /**
  * 添加项目注册成功后的研究流程模板选择层（v3.79）：
- * 选项 = 内置五套模板（名称 + 一句话说明 + 步骤数），选中即把模板步骤追加进
+ * 选项 = 内置六套模板（名称 + 一句话说明 + 步骤数），选中即把模板步骤追加进
  * project.toml（append_pipeline_steps：重名跳过、全跳过不落盘、顺带清 pipeline_opt_out）；
  * 「不使用研究流程」= 显式写 pipeline_opt_out = true（记住选择，不再显示模板引导），
  * 「稍后再选」= 只关闭不留痕；两条路事后都可从项目组 ⋯ 或编辑器「＋ 从模板追加」补。

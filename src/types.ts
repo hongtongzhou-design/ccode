@@ -299,6 +299,10 @@ export interface HumanTaskStateDto {
   optional?: boolean;
   /** 落点位置检测到文件 */
   detected: boolean;
+  /** 落点命中的文件数（v3.97，目录/通配现算、两侧根取 max；未命中/空 target 无此字段） */
+  hitCount?: number;
+  /** 待获取清单总篇数（v3.97，仅 papers/*.pdf 落点且存在 to-fetch.md 时有） */
+  expectedCount?: number;
   /** 人手动勾过（勾了系统不再追问；取消勾选回到纯检测口径） */
   manual: boolean;
   done: boolean;
@@ -775,6 +779,22 @@ export interface McpHealthDto {
   error: string | null;
   /** stdio = serverInfo.name@version；remote = HTTP 状态行 */
   detail: string | null;
+}
+
+// ===== 能力表（src-tauri/src/agent_specs.rs agent_capabilities） =====
+
+export interface CapabilityFlagDto {
+  supported: boolean;
+  /** 不支持时的用户可见原因（fail-loud） */
+  reason?: string;
+}
+
+/** 九家三项能力一览：前端置灰/提示与后端报错同源，不另维护硬编码 */
+export interface AgentCapabilitiesDto {
+  agent: string;
+  setGlobal: CapabilityFlagDto;
+  mcpWrite: CapabilityFlagDto;
+  skillDist: { mode: "symlinkOrCopy" | "copyOnly"; reason?: string };
 }
 
 // ===== 定时雷达（src-tauri/src/scheduler.rs） =====

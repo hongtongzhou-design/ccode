@@ -71,8 +71,12 @@ pub struct AppSettingsDto {
     pub hidden_profiles: Option<Vec<String>>,
     /// 会话页「⇗ 外部恢复」使用的终端应用（KNOWN_EXTERNAL_TERMINALS）；None/auto = 自动探测
     pub external_terminal: Option<String>,
-    /// 精确注意力标记（Claude Code hooks）：开启/关闭由 claude_hooks::set_claude_hooks_attention
-    /// 统一完成（写 ~/.claude/settings.json hooks 段 + 记本字段），勿单独 patch 本字段
+    /// 精确注意力标记（agent hooks 桥接）：agent id → 开关。键缺失 = 关。
+    /// 开/关由 hooks::set_hooks_attention 统一完成（写各家 hooks 配置 + 逐键记本字段），勿单独 patch
+    pub hooks_attention: Option<BTreeMap<String, bool>>,
+    /// 旧字段（Claude 单开关时代）：仅保留反序列化兼容，读取侧迁移进 hooks_attention（见
+    /// with_defaults / set_hooks_attention_entry），不再写出
+    #[serde(skip_serializing)]
     pub claude_hooks_attention: Option<bool>,
     /// 快捷键绑定（"mod+shift+k" 格式，mod=⌘/Ctrl；空串 = 禁用该快捷键）
     pub hotkey_palette: Option<String>,
@@ -141,7 +145,16 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
                 .filter(|v| KNOWN_EXTERNAL_TERMINALS.contains(&v.as_str()))
                 .unwrap_or_else(|| "auto".to_string()),
         ),
-        claude_hooks_attention: s.claude_hooks_attention.or(Some(false)),
+        // 旧字段迁移：claude_hooks_attention=true 且新 map 无 claude-code 键 → 视为开
+        hooks_attention: Some({
+            let mut map = s.hooks_attention.unwrap_or_default();
+            if s.claude_hooks_attention == Some(true) && !map.contains_key("claude-code") {
+                map.insert("claude-code".to_string(), true);
+            }
+            map
+        }),
+        // 旧字段原样随行（不再写出，仅内存保留供迁移判断）
+        claude_hooks_attention: s.claude_hooks_attention,
         hotkey_palette: s
             .hotkey_palette
             .or_else(|| Some(DEFAULT_HOTKEY_PALETTE.to_string())),
@@ -201,9 +214,12 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     if patch.external_terminal.is_some() {
         cur.external_terminal = patch.external_terminal;
     }
-    if patch.claude_hooks_attention.is_some() {
-        cur.claude_hooks_attention = patch.claude_hooks_attention;
+    // 整图覆盖（同 ai_profiles 口径）；开/关走 hooks::set_hooks_attention 专用命令
+    // （那边用 set_hooks_attention_entry 逐键读-改-写），勿单独 patch 本字段
+    if patch.hooks_attention.is_some() {
+        cur.hooks_attention = patch.hooks_attention;
     }
+    // 旧字段 claude_hooks_attention 不再接受 patch（只读迁移用）
     // 快捷键：Some 即覆盖（含空串=禁用）；读侧 with_defaults 只填 None
     if patch.hotkey_palette.is_some() {
         cur.hotkey_palette = patch.hotkey_palette;
@@ -225,6 +241,38 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
 
 // ===== 供其他模块读取的小入口（每次都从文件读，改动即时生效） =====
 
+/// 删除 profile 时同步清掉设置里的引用（AI 专用 / 按功能绑定指到已删 id 会让
+/// resolve_profile_from 的硬报错槽炸出来）。调用方须已持 profiles::store_lock
+/// （profiles.delete 路径持锁内联调用，本函数不再加锁）；失败只记日志不否决删除
+pub(crate) fn clear_profile_refs(id: &str) {
+    let Ok(path) = settings_path() else { return };
+    let mut cur = read_from(&path);
+    let mut touched = false;
+    if cur.ai_profile_id.as_deref() == Some(id) {
+        cur.ai_profile_id = None;
+        touched = true;
+    }
+    if let Some(map) = &mut cur.ai_profiles {
+        let before = map.len();
+        map.retain(|_, v| v != id);
+        if map.len() != before {
+            touched = true;
+        }
+        if map.is_empty() {
+            cur.ai_profiles = None;
+        }
+    }
+    if touched {
+        if let Err(e) = write_to(&path, &cur) {
+            crate::logbuf::record(
+                "error",
+                "settings",
+                &format!("清理已删 profile 的设置引用失败: {e}"),
+            );
+        }
+    }
+}
+
 pub(crate) fn read_current() -> AppSettingsDto {
     settings_path()
         .map(|p| read_from(&p))
@@ -241,6 +289,39 @@ pub(crate) fn brew_mirror_enabled() -> bool {
 
 pub(crate) fn rate_setting() -> Option<f64> {
     read_current().rate_usd_cny.filter(|r| *r > 0.0)
+}
+
+/// 精确注意力标记读取口径（含旧字段迁移）：新 map 有键以它为准；
+/// 旧字段 claude_hooks_attention=true 且新 map 无 claude-code 键 → 视为开
+pub(crate) fn hooks_attention_enabled(s: &AppSettingsDto, agent: &str) -> bool {
+    if let Some(v) = s.hooks_attention.as_ref().and_then(|m| m.get(agent)) {
+        return *v;
+    }
+    agent == "claude-code" && s.claude_hooks_attention == Some(true)
+}
+
+/// hooks::set_hooks_attention 专用：逐键读-改-写（持 profiles 锁防并发 patch 互相覆盖，
+/// 与 update_settings 同一把锁），顺带把旧字段迁移进新 map
+pub(crate) fn set_hooks_attention_entry(agent: &str, enabled: bool) -> Result<AppSettingsDto, String> {
+    let _g = crate::profiles::store_lock();
+    set_hooks_attention_entry_at(&settings_path()?, agent, enabled)
+}
+
+fn set_hooks_attention_entry_at(
+    path: &Path,
+    agent: &str,
+    enabled: bool,
+) -> Result<AppSettingsDto, String> {
+    let mut cur = read_from(path);
+    let mut map = cur.hooks_attention.unwrap_or_default();
+    if cur.claude_hooks_attention == Some(true) && !map.contains_key("claude-code") {
+        map.insert("claude-code".to_string(), true);
+    }
+    map.insert(agent.to_string(), enabled);
+    cur.hooks_attention = Some(map);
+    cur.claude_hooks_attention = None; // 已迁移，内存里也清掉（写出时本就不序列化）
+    write_to(path, &cur)?;
+    Ok(with_defaults(cur))
 }
 
 // ===== Tauri commands =====
@@ -404,21 +485,55 @@ mod tests {
     }
 
     #[test]
-    fn claude_hooks_attention_roundtrip() {
+    fn hooks_attention_roundtrip_and_legacy_migration() {
         let p = tmp();
-        // 缺省 → false
-        assert_eq!(with_defaults(read_from(&p)).claude_hooks_attention, Some(false));
-        let mut cur = read_from(&p);
-        merge(
-            &mut cur,
-            AppSettingsDto {
-                claude_hooks_attention: Some(true),
-                ..Default::default()
-            },
+        // 缺省 → 空 map
+        assert_eq!(
+            with_defaults(read_from(&p)).hooks_attention,
+            Some(BTreeMap::new())
         );
+        // 整图 patch 写读往返
+        let mut cur = read_from(&p);
+        let mut m = BTreeMap::new();
+        m.insert("claude-code".to_string(), true);
+        m.insert("kimi".to_string(), false);
+        merge(&mut cur, AppSettingsDto { hooks_attention: Some(m), ..Default::default() });
         write_to(&p, &cur).unwrap();
         let full = with_defaults(read_from(&p));
-        assert_eq!(full.claude_hooks_attention, Some(true), "写读往返");
+        let map = full.hooks_attention.unwrap();
+        assert_eq!(map.get("claude-code"), Some(&true), "写读往返");
+        assert_eq!(map.get("kimi"), Some(&false));
+        // 写出不含旧字段
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("claudeHooksAttention"), "旧字段不再写出");
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn legacy_claude_hooks_attention_migrates_into_map() {
+        let p = tmp();
+        // 磁盘上只有旧字段 true → with_defaults 迁移为 map 里 claude-code=true
+        std::fs::write(&p, r#"{"claudeHooksAttention": true}"#).unwrap();
+        let full = with_defaults(read_from(&p));
+        assert_eq!(
+            full.hooks_attention.as_ref().unwrap().get("claude-code"),
+            Some(&true),
+            "旧字段 true 迁移进新 map"
+        );
+        // 读取口径：未迁移的原始 DTO 也认旧字段
+        assert!(hooks_attention_enabled(&read_from(&p), "claude-code"));
+        assert!(!hooks_attention_enabled(&read_from(&p), "kimi"));
+        // 新 map 已有 claude-code 键时以新 map 为准（旧 true 不覆盖显式 false）
+        std::fs::write(&p, r#"{"claudeHooksAttention": true, "hooksAttention": {"claude-code": false}}"#).unwrap();
+        assert!(!hooks_attention_enabled(&read_from(&p), "claude-code"));
+        // 专用写入：逐键读写 + 顺带迁移旧字段，写出后旧字段消失
+        let full = set_hooks_attention_entry_at(&p, "qwen", true).unwrap();
+        assert_eq!(full.hooks_attention.as_ref().unwrap().get("qwen"), Some(&true));
+        let disk = std::fs::read_to_string(&p).unwrap();
+        assert!(!disk.contains("claudeHooksAttention"), "旧字段随迁移从磁盘消失");
+        let v: serde_json::Value = serde_json::from_str(&disk).unwrap();
+        assert_eq!(v["hooksAttention"]["claude-code"], false, "迁移以新 map 为准");
+        assert_eq!(v["hooksAttention"]["qwen"], true);
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 

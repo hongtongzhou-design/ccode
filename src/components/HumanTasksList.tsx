@@ -453,7 +453,20 @@ export default function HumanTasksList({
                 </span>
                 {task.done && (
                   <span className="shrink-0 text-micro text-done">
-                    {task.manual ? "已确认" : "已见到文件"}
+                    {task.manual
+                      ? "已确认"
+                      : task.hitCount != null
+                        ? `已见到 ${task.hitCount} 个文件${task.expectedCount != null ? `（清单共 ${task.expectedCount} 篇）` : ""}`
+                        : "已见到文件"}
+                  </span>
+                )}
+                {/* 显式取消后检测仍命中的计数也亮出来：进度感不该跟着勾态消失 */}
+                {!task.done && !task.manual && task.hitCount != null && (
+                  <span className="shrink-0 text-micro text-l4">
+                    落点已有 {task.hitCount} 个文件
+                    {task.expectedCount != null
+                      ? `（清单共 ${task.expectedCount} 篇）`
+                      : ""}
                   </span>
                 )}
                 {task.target && !task.done && (

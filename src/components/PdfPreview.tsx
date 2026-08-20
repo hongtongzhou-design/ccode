@@ -60,10 +60,29 @@ export function PdfPageView({
   /** textLayer 渲染完成信号（计数器）：术语高亮等它落地后再跑 */
   const [textRendered, setTextRendered] = useState(0);
 
+  // 拖选时给 textLayer 挂 selecting 类（官方 viewer 的 TextLayerBuilder 同款）：
+  // pdf_viewer.css 里 .selecting 的 endOfContent 会撑满整层接住指针，
+  // 拖过末行之下选区仍能扩到页尾
+  useEffect(() => {
+    const layer = textRef.current;
+    if (!layer) return;
+    const on = () => layer.classList.add("selecting");
+    const off = () => layer.classList.remove("selecting");
+    layer.addEventListener("mousedown", on);
+    document.addEventListener("pointerup", off);
+    window.addEventListener("blur", off);
+    return () => {
+      layer.removeEventListener("mousedown", on);
+      document.removeEventListener("pointerup", off);
+      window.removeEventListener("blur", off);
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     let renderTask: pdfjs.RenderTask | null = null;
     let textLayer: pdfjs.TextLayer | null = null;
+    let drawLayer: pdfjs.DrawLayer | null = null;
     void (async () => {
       try {
         const page = await doc.getPage(pageNum);
@@ -78,8 +97,12 @@ export function PdfPageView({
         const host = hostRef.current!;
         host.style.width = `${Math.floor(viewport.width)}px`;
         host.style.height = `${Math.floor(viewport.height)}px`;
-        // textLayer 字号按 --total-scale-factor 换算（pdf_viewer.css 的变量约定）
-        host.style.setProperty("--total-scale-factor", String(scale));
+        // textLayer 字号按 --total-scale-factor 换算（pdf_viewer.css 变量约定 =
+        // 名义倍率 × userUnit，即 viewport.scale × viewport.userUnit）
+        host.style.setProperty(
+          "--total-scale-factor",
+          String(viewport.scale * viewport.userUnit),
+        );
         renderTask = page.render({
           canvas,
           viewport,
@@ -94,8 +117,23 @@ export function PdfPageView({
           viewport,
         });
         textLayer = text;
+        // 选区高亮交给 pdf.js v6 的 DrawLayer 自绘（整页 div + SVG clip 贴字形）：
+        // 原生 ::selection 在 scaleX 变换的文本片上溢出/错位，官方 viewer 因此默认
+        // enableSelectionRendering 自绘并关掉原生高亮（.selectionRendering，pdf_viewer.css）
+        drawLayer = new pdfjs.DrawLayer({
+          pageIndex: pageNum - 1,
+          textLayer: textRef.current!,
+        });
+        drawLayer.setParent(host);
         await Promise.all([renderTask.promise, text.render()]);
-        if (!cancelled) setTextRendered((c) => c + 1);
+        if (!cancelled) {
+          // 页尾捕手（官方 viewer 的 endOfContent，配合上面 selecting 类生效）；
+          // DrawLayer 的 MutationObserver 也靠它感知重渲染后重算选区高亮
+          const end = document.createElement("div");
+          end.className = "endOfContent";
+          textRef.current!.append(end);
+          setTextRendered((c) => c + 1);
+        }
       } catch (e) {
         // 取消渲染不算错误（翻页/缩放打断上一帧）
         if (!cancelled && !(e instanceof pdfjs.RenderingCancelledException)) {
@@ -107,6 +145,7 @@ export function PdfPageView({
       cancelled = true;
       renderTask?.cancel();
       textLayer?.cancel();
+      drawLayer?.destroy();
     };
   }, [doc, pageNum, scale, renderKey]);
 
@@ -160,7 +199,8 @@ export function PdfPageView({
       className={`relative bg-white ${active ? "" : "hidden"}`}
     >
       <canvas ref={canvasRef} className="block" />
-      <div ref={textRef} className="textLayer" />
+      {/* selectionRendering：关掉原生 ::selection（透明化），高亮由 DrawLayer 自绘 */}
+      <div ref={textRef} className="textLayer selectionRendering" />
       {error && (
         <p className="absolute inset-x-0 top-0 bg-strip px-3 py-1 text-xs text-err-text">
           第 {pageNum} 页渲染失败：{error}

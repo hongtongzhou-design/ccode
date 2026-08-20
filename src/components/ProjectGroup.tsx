@@ -315,6 +315,8 @@ export default function ProjectGroup({
   onRegisterProject,
   onError,
   children,
+  focusStepReq,
+  pageVisible,
 }: {
   /** null = 未注册分组（仅按工作区 repo 归组） */
   project: ProjectDto | null;
@@ -341,6 +343,14 @@ export default function ProjectGroup({
     /** 项目步骤表（归属判定用；未注册/未加载 = 空表） */
     steps: ProjectStepDto[];
   }) => ReactNode;
+  /** 外部一次性聚焦请求（收件箱「去核验」：目标工作区被聚焦过滤藏掉时，先切到它的步骤）；
+   *  传工作区名，步骤名按 steps[].workspaceName 在本组件内解析（父级没有 cfg）；
+   *  token 变化才消费，同目标重复点不重复切 */
+  focusStepReq?: { wsName: string; token: number } | null;
+  /** 页面可见性（v3.97）：项目页常驻挂载，手动聚焦会跨页留存——从终端页等回来时，
+   *  若聚焦的步骤已完成（ merged ），放掉手动聚焦、回落到当前步骤（第一个未完成），
+   *  否则用户看到的永远是上次点过的那一步（实测：已完成的「文献检索」一直占着聚焦） */
+  pageVisible?: boolean;
 }) {
   const registered = project !== null;
   const projectPath = project?.path ?? repoPath;
@@ -528,6 +538,15 @@ export default function ProjectGroup({
   /** 聚焦步骤名（存名字而非索引）：索引在流水线编辑器里重排/改名后会指向另一个步骤，
    *  而下游全部按名字找回。名字对不上时 focusIndex 回落到当前步骤，不静默跳错 */
   const [focusStepKey, setFocusStepKey] = useState<string | null>(null);
+  // 外部一次性聚焦请求（收件箱「去核验」）：目标工作区被聚焦过滤藏掉时，父级请先切到它的步骤。
+  // 传的是工作区名，步骤名在这里按 steps[].workspaceName 解析；解析不到（未绑定步骤的手动工作区
+  // 恒可见，不需要切）就不动
+  useEffect(() => {
+    if (!focusStepReq || !cfg) return;
+    const step = cfg.steps.find((s) => s.workspaceName === focusStepReq.wsName);
+    if (step) setFocusStepKey(step.name);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusStepReq, cfg]);
   // 人工事项派生状态原本只喂步骤 ⋯ 菜单的「N 件待做」计数，该菜单项已随 v3.86 精简删除
   // （清单本体在 useHumanTasks 里自取自刷），这里连同 list_human_task_states 一次调用一并去掉
   // 聚焦步骤的任务书草稿（v3.72）：聚焦头部「待开始」情境文案（describeStep）与卡片区流程线
@@ -1251,6 +1270,18 @@ export default function ProjectGroup({
     if (!cfg || focusIndex === null) return null;
     return cfg.steps[focusIndex]?.name ?? null;
   })();
+  // 回页释放已完成聚焦（v3.97）：页面常驻挂载，手动聚焦（focusStepKey）跨页留存——
+  // 从终端页等回来时，若聚焦的步骤已完成，放掉手动聚焦、回落到当前步骤（第一个未完成）。
+  // 只认「完成」这个明确信号：聚焦的步骤仍在进行/待评审时不抢用户的选择
+  const prevPageVisibleRef = useRef(pageVisible);
+  useEffect(() => {
+    const becameVisible = pageVisible === true && prevPageVisibleRef.current !== true;
+    prevPageVisibleRef.current = pageVisible;
+    if (!becameVisible || focusStepKey === null) return;
+    const i = cfg?.steps.findIndex((s) => s.name === focusStepKey) ?? -1;
+    if (i >= 0 && stepStatuses[i]?.key === "done") setFocusStepKey(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageVisible]);
   // 聚焦步骤草稿加载（state 声明在上方 describeStep 之前）：进项目详情/切聚焦/页面刷新时重读，不轮询；
   // 「◈ 沉淀进任务书」落盘后经 onDraftChanged 回调即刻重读（不等页面刷新）
   function loadFocusDraft() {
@@ -1286,6 +1317,13 @@ export default function ProjectGroup({
     const i = cfg.steps.findIndex((s) => s.name === focusStepName);
     return i >= 0 ? describeStep(i) : null;
   })();
+  // 聚焦步骤的终端注意力（流程线 agent 节点「已跑完」提示用；大圆角标同一 stepAttention 口径）
+  const focusAttention = stepAttention(
+    focusDesc?.st.ws && focusDesc.st.ws.status === "active"
+      ? focusDesc.st.ws
+      : undefined,
+    terminalRunInputs,
+  );
   // 聚焦步骤的已归档工作区（pending + ws）：流程线 agent 节点此时主入口是「恢复工作区」而非「开始」
   const focusArchivedWs =
     focusDesc && focusDesc.st.key === "pending" ? (focusDesc.st.ws ?? null) : null;
@@ -1715,6 +1753,7 @@ export default function ProjectGroup({
                         ? `Agent：${last.agentId}${lastProfile ? ` / ${lastProfile.name}` : ""}`
                         : null,
                       attention === "confirm" ? "终端：待你确认" : null,
+                      attention === "done" ? "终端：agent 已跑完" : null,
                       "点击在下方只看这一步",
                     ]
                       .filter(Boolean)
@@ -1800,6 +1839,7 @@ export default function ProjectGroup({
           focusStep={focusStepName}
           focusStatusText={focusDesc?.statusText ?? null}
           focusRunStatus={focusRunStatus}
+          focusAgentAttention={focusAttention}
           focusDraft={
             focusDraft && focusDraft.stepName === focusStepName
               ? focusDraft

@@ -179,7 +179,7 @@ pub(crate) fn stale_upstream_for(
     best.map(|(_, name)| name.to_string())
 }
 
-fn query_workspaces(conn: &Connection) -> Result<Vec<WorkspaceDto>, String> {
+pub(crate) fn query_workspaces(conn: &Connection) -> Result<Vec<WorkspaceDto>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, repo_path, name, branch, worktree_path, base_branch,
@@ -1632,6 +1632,12 @@ pub struct HumanTaskStateDto {
     pub optional: bool,
     /// 落点位置检测到文件（空 target 恒 false——纯脑力事项只能手勾）
     pub detected: bool,
+    /// 落点命中的文件数（目录/通配形态现算，两侧检测根取 max 防合并后重复计数；
+    /// 精确文件命中=1；空 target/未命中=None）——「已见到 N 个文件」的进度感
+    pub hit_count: Option<usize>,
+    /// 待获取清单总篇数（仅 papers/*.pdf 落点且同侧根存在 papers/to-fetch.md 时现算，
+    /// 数条目行：非空、非 # 开头、非「为空」注明行；否则 None）
+    pub expected_count: Option<usize>,
     /// 人手动勾过（优先于检测；取消勾选即回到纯检测口径）
     pub manual: bool,
     /// done = manual || detected（前端不再重算）
@@ -1710,23 +1716,30 @@ fn wildcard_match(pattern: &str, name: &str) -> bool {
 /// 三种形态：目录（结尾 /）= 内有任意非隐藏文件；目录/通配 = 目录内有匹配文件（不递归）；
 /// 精确文件 = 存在。只接受根的相对路径，绝对路径/.. 逃逸一律视为未交付（同产物核验口径）。
 pub(crate) fn human_target_hit(root: &Path, target: &str) -> bool {
+    human_target_count(root, target).is_some_and(|n| n > 0)
+}
+
+/// 落点命中计数（v3.97）：与 human_target_hit 同口径，但返回命中文件数而非布尔——
+/// 供「已见到 N 个文件」的进度展示。None = 未命中/异常（异常巨大目录同原口径不按交付计）。
+pub(crate) fn human_target_count(root: &Path, target: &str) -> Option<usize> {
     let rel = target.trim();
     if rel.is_empty() {
-        return false;
+        return None;
     }
     let is_dir_entry = rel.ends_with('/') || rel.ends_with('\\');
     let rel = rel.trim_end_matches(['/', '\\']);
     if rel.is_empty() || rel.contains("..") || Path::new(rel).is_absolute() {
-        return false;
+        return None;
     }
     let visible_file = |e: &fs::DirEntry| {
         !e.file_name().to_string_lossy().starts_with('.')
             && e.metadata().map(|m| m.is_file()).unwrap_or(false)
     };
     if is_dir_entry {
-        // 目录形态：内有任意非隐藏文件即算交付；递归（用户可能放进子目录），限量防暴走
+        // 目录形态：递归数非隐藏文件（用户可能放进子目录），限量防暴走
         let mut stack = vec![root.join(rel)];
         let mut visited = 0usize;
+        let mut count = 0usize;
         while let Some(dir) = stack.pop() {
             let Ok(rd) = fs::read_dir(dir) else { continue };
             for e in rd.flatten() {
@@ -1735,18 +1748,17 @@ pub(crate) fn human_target_hit(root: &Path, target: &str) -> bool {
                 }
                 visited += 1;
                 if visited > 2000 || stack.len() > 64 {
-                    return false; // 异常巨大的目录不按交付计
+                    return None; // 异常巨大的目录不按交付计
                 }
                 let Ok(m) = e.metadata() else { continue };
                 if m.is_file() {
-                    return true;
-                }
-                if m.is_dir() {
+                    count += 1;
+                } else if m.is_dir() {
                     stack.push(e.path());
                 }
             }
         }
-        return false;
+        return (count > 0).then_some(count);
     }
     if rel.contains('*') {
         // 只允许通配在最后一段；目录部分仍须是纯相对路径
@@ -1755,19 +1767,41 @@ pub(crate) fn human_target_hit(root: &Path, target: &str) -> bool {
             None => ("", rel),
         };
         if pattern.is_empty() || dir.contains('*') {
-            return false;
+            return None;
         }
         let dir_path = if dir.is_empty() { root.to_path_buf() } else { root.join(dir) };
         let Ok(rd) = fs::read_dir(dir_path) else {
-            return false;
+            return None;
         };
-        return rd.flatten().any(|e| {
-            visible_file(&e) && wildcard_match(pattern, &e.file_name().to_string_lossy())
-        });
+        let count = rd
+            .flatten()
+            .filter(|e| {
+                visible_file(e) && wildcard_match(pattern, &e.file_name().to_string_lossy())
+            })
+            .count();
+        return (count > 0).then_some(count);
     }
-    fs::metadata(root.join(rel))
-        .map(|m| m.is_file())
-        .unwrap_or(false)
+    match fs::metadata(root.join(rel)) {
+        Ok(m) if m.is_file() => Some(1),
+        _ => None,
+    }
+}
+
+/// 待获取清单总篇数（v3.97）：仅 papers/*.pdf 落点且根下存在 papers/to-fetch.md 时现算。
+/// 条目行 = 非空、非 # 标题、非「为空」注明行；列表标记（- / *）剥掉后判定。
+fn to_fetch_entry_count(root: &Path, target: &str) -> Option<usize> {
+    if target.trim().replace('\\', "/") != "papers/*.pdf" {
+        return None;
+    }
+    let text = fs::read_to_string(root.join("papers").join("to-fetch.md")).ok()?;
+    let count = text
+        .lines()
+        .map(|l| l.trim().trim_start_matches(['-', '*']).trim())
+        .filter(|l| {
+            !l.is_empty() && !l.starts_with('#') && !l.contains("为空") && !l.starts_with("（无")
+        })
+        .count();
+    Some(count)
 }
 
 /// 步骤人工事项的检测根列表：项目根恒在；步骤绑定了活跃工作区时工作树根也算
@@ -1815,9 +1849,17 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
     let mut out = Vec::new();
     for step in &cfg.steps {
         for h in &step.human_tasks {
-            let detected = human_detection_roots(conn.as_ref(), root, &step.workspace_name)
+            let roots = human_detection_roots(conn.as_ref(), root, &step.workspace_name);
+            // 计数取两侧根的 max：合并后同一文件在项目根与工作树各有一份，相加会重复计数
+            let hit_count = roots
                 .iter()
-                .any(|r| human_target_hit(r, &h.target));
+                .filter_map(|r| human_target_count(r, &h.target))
+                .max();
+            let expected_count = roots
+                .iter()
+                .filter_map(|r| to_fetch_entry_count(r, &h.target))
+                .max();
+            let detected = hit_count.is_some();
             // 手动优先（v3.89）：显式取消（checked=0）时**检测命中也不算完成**——
             // 否则落点里有文件就会自动勾回来，用户取消不掉（实测 bug）
             let manual_state = manual.get(&(step.name.clone(), h.title.clone())).copied();
@@ -1829,6 +1871,8 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
                 timing: h.timing.clone(),
                 optional: h.optional,
                 detected,
+                hit_count,
+                expected_count,
                 manual: manual_state == Some(true),
                 done: match manual_state {
                     Some(v) => v,
@@ -2696,7 +2740,7 @@ fn cap_conflict_text(mut text: String) -> (String, bool) {
 }
 
 /// 冲突审阅必须保留文件首尾空白，不能复用会 trim 输出的 run_git。
-fn run_git_raw(repo: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_git_raw(repo: &Path, args: &[&str]) -> Result<String, String> {
     let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
     let mut cmd = crate::process::background_command(git);
     cmd.arg("-C")
@@ -4959,6 +5003,49 @@ mod tests {
         assert!(!human_target_hit(&root, "../outside/"));
         assert!(!human_target_hit(&root, "/etc/hosts"));
         assert!(!human_target_hit(&root, ""));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn human_target_count_matches_files() {
+        let dir = std::env::temp_dir().join(format!("ccode-htc-{}", uuid::Uuid::new_v4()));
+        let root = dir.join("proj");
+        fs::create_dir_all(root.join("papers")).unwrap();
+        // 未命中 → None（不是 Some(0)）
+        assert_eq!(human_target_count(&root, "papers/*.pdf"), None);
+        assert_eq!(human_target_count(&root, "papers/"), None);
+        fs::write(root.join("papers/a-2024-x.pdf"), "%PDF").unwrap();
+        fs::write(root.join("papers/b-2023-y.pdf"), "%PDF").unwrap();
+        fs::write(root.join("papers/screening.md"), "s").unwrap();
+        assert_eq!(human_target_count(&root, "papers/*.pdf"), Some(2));
+        // 目录形态递归计数，含子目录里的
+        fs::create_dir_all(root.join("papers/sub")).unwrap();
+        fs::write(root.join("papers/sub/c-2022-z.pdf"), "%PDF").unwrap();
+        assert_eq!(human_target_count(&root, "papers/"), Some(4));
+        // 精确文件命中 = 1
+        assert_eq!(human_target_count(&root, "papers/screening.md"), Some(1));
+        // 逃逸/空 target → None
+        assert_eq!(human_target_count(&root, "../outside/"), None);
+        assert_eq!(human_target_count(&root, ""), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn to_fetch_entry_count_rules() {
+        let dir = std::env::temp_dir().join(format!("ccode-tf-{}", uuid::Uuid::new_v4()));
+        let root = dir.join("proj");
+        fs::create_dir_all(root.join("papers")).unwrap();
+        // 非 papers/*.pdf 落点不算
+        assert_eq!(to_fetch_entry_count(&root, "papers/"), None);
+        // 文件不存在 → None
+        assert_eq!(to_fetch_entry_count(&root, "papers/*.pdf"), None);
+        // 标题/空行/「为空」注明行不算条目；列表标记剥掉
+        fs::write(
+            root.join("papers/to-fetch.md"),
+            "# 待获取全文\n\n- Smith 2024 — 10.1/abc\n\n* 张三 2023 — 10.1/def\n（无付费文献则本清单为空）\nWang 2022 — 10.1/ghi\n",
+        )
+        .unwrap();
+        assert_eq!(to_fetch_entry_count(&root, "papers/*.pdf"), Some(3));
         fs::remove_dir_all(&dir).ok();
     }
 

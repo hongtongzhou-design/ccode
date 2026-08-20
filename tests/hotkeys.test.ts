@@ -6,6 +6,7 @@ import {
   comboLabel,
   eventMatchesCombo,
   PAGE_HOTKEY_DEFS,
+  READER_MODE_HOTKEY,
 } from "../src/hotkeys.ts";
 
 const ev = (over: Partial<Parameters<typeof comboFromEvent>[0]>) => ({
@@ -89,4 +90,16 @@ test("PAGE_HOTKEY_DEFS：八页、顺序与默认绑定唯一", () => {
   const combos = PAGE_HOTKEY_DEFS.map((p) => p.combo);
   assert.equal(new Set(combos).size, 8, "默认绑定不得互相冲突");
   assert.deepEqual(combos, [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `mod+${n}`));
+});
+
+
+test("READER_MODE_HOTKEY：⌘E/Ctrl+E 命中，裸 E 与带 Shift 不命中", () => {
+  assert.ok(eventMatchesCombo(ev({ metaKey: true, key: "e" }), READER_MODE_HOTKEY));
+  assert.ok(eventMatchesCombo(ev({ ctrlKey: true, key: "E" }), READER_MODE_HOTKEY));
+  assert.ok(!eventMatchesCombo(ev({ key: "e" }), READER_MODE_HOTKEY));
+  assert.ok(
+    !eventMatchesCombo(ev({ metaKey: true, shiftKey: true, key: "e" }), READER_MODE_HOTKEY),
+  );
+  // 不与八页页切绑定（mod+1..8）冲突
+  assert.ok(!PAGE_HOTKEY_DEFS.some((p) => p.combo === READER_MODE_HOTKEY));
 });

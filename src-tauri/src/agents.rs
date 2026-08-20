@@ -237,6 +237,10 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     for arg in *sandbox_args {
                         plan.args.push((*arg).into());
                     }
+                    // workspace-write 默认拦网：文献检索/查资料一联网就弹提权确认，
+                    // 这里放开沙箱内联网（只影响 workspace-write 档，read-only 下该键被忽略）
+                    plan.args.push("-c".into());
+                    plan.args.push("sandbox_workspace_write.network_access=true".into());
                 }
                 SpecialLaunch::OpenCodeInlineConfig { config_env, no_autoupdate_env } => {
                     // OpenCode 没有通用 key/baseURL 环境变量：用 OPENCODE_CONFIG_CONTENT 内联配置注入，
@@ -429,10 +433,12 @@ fn apply_official_inject(
                     plan.args.push("-m".into());
                     plan.args.push(m.into());
                 }
-                // 默认沙箱与认证方式无关，官方账号同样生效
+                // 默认沙箱与认证方式无关，官方账号同样生效；沙箱内联网同步放开
                 for arg in *sandbox_args {
                     plan.args.push((*arg).into());
                 }
+                plan.args.push("-c".into());
+                plan.args.push("sandbox_workspace_write.network_access=true".into());
             }
             // cursor 官方账号：不注入密钥/端点，模型 flag 与认证方式无关照常可用
             SpecialLaunch::CursorFlags { model_flag, .. } => {
@@ -1603,8 +1609,16 @@ mod tests {
     fn codex_plan_without_base_url_has_no_provider_args() {
         let p = profile("codex", None);
         let plan = launch_plan(&p, None, None);
-        // 无 provider 参数，只有默认沙箱参数
-        assert_eq!(plan.args, vec!["-s", "workspace-write"]);
+        // 无 provider 参数，只有默认沙箱参数 + 沙箱内联网放开
+        assert_eq!(
+            plan.args,
+            vec![
+                "-s",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=true"
+            ]
+        );
         assert!(plan.env.is_empty());
     }
 
@@ -1711,13 +1725,22 @@ mod tests {
         assert!(!joined.contains("model_providers"));
         assert!(!joined.contains("model_provider="));
         assert!(joined.contains("-m gpt-5-codex"));
-        // 默认沙箱与认证方式无关，官方账号同样生效
+        // 默认沙箱与认证方式无关，官方账号同样生效；沙箱内联网同步放开
         assert!(joined.contains("-s workspace-write"));
+        assert!(joined.contains("sandbox_workspace_write.network_access=true"));
         assert!(plan.env_remove.contains(&"CODEX_API_KEY".into()));
         assert!(plan.env_remove.contains(&"OPENAI_API_KEY".into()));
         // 模型为空：只剩沙箱参数
         let bare = launch_plan(&p, None, None);
-        assert_eq!(bare.args, vec!["-s", "workspace-write"]);
+        assert_eq!(
+            bare.args,
+            vec![
+                "-s",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=true"
+            ]
+        );
     }
 
     #[test]
@@ -2486,5 +2509,7 @@ mod tests {
         let dirs = crate::agent_specs::binary_candidate_dirs();
         assert!(dirs.iter().any(|d| d == std::path::Path::new("/opt/homebrew/bin")));
         assert!(dirs.iter().any(|d| d == std::path::Path::new("/usr/local/bin")));
+        // MacTeX/TeXLive（latexmk）：GUI 短 PATH 兜底，批次 E LaTeX 编译链
+        assert!(dirs.iter().any(|d| d == std::path::Path::new("/Library/TeX/texbin")));
     }
 }

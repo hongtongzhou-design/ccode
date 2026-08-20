@@ -1,5 +1,6 @@
-/** 沉浸式阅读区（批次 B1/B2）的纯逻辑：分栏百分比钳制/像素换算、阅读会话复用键、
- *  PDF 选段注入格式（B1）；圈选矩形映射/命中判定、md 图片与相对链接判定、截图注入格式（B2）。
+/** 沉浸式阅读区的纯逻辑：分栏百分比钳制/像素换算、阅读会话复用键、
+ *  PDF 选段注入格式（B1）；圈选矩形映射/命中判定、md 图片与相对链接判定、截图注入格式（B2）；
+ *  划词翻译 prompt、生词本表格契约、段落边界提取、术语匹配、进度/护眼存储键（B3）。
  *  布局常量与换算全部集中这里，组件（ReaderOverlay/PdfContinuousView/FilePreviewEditor）只做绑定。 */
 
 import { escapeShellPath } from "./terminal-input.ts";
@@ -258,41 +259,13 @@ export function buildReaderTranslatePrompt(text: string): string {
   return `把以下学术文献内容翻译为中文。要求：学术语境直译，专业术语保留原词（必要时括注原文），不增减内容，只输出译文，不要任何解释：\n\n${text}`;
 }
 
-/** Agent 栏快捷 chips 的三条预填 prompt（<pdf> 用项目根相对路径，agent 直接可读文件） */
-export function buildFigureTourPrompt(relPdf: string): string {
-  return `请通读 ${relPdf}，逐个说明每张 Figure/表讲了什么、哪些值得细看（图导游）。`;
+/** 保存译段成功的 toast 口径：笔记栏停在编辑态且有未保存改动时 watcher 停订、
+ *  界面不会回显刚写入的译段——文案里明说，否则看起来像「没反应」 */
+export function translationSavedToast(noteDirty: boolean): string {
+  return noteDirty
+    ? "已存到笔记「译段」（笔记栏有未保存改动，保存后可见）"
+    : "已存到笔记「译段」";
 }
-
-export function buildPageSummaryPrompt(relPdf: string, page: number): string {
-  return `请总结 ${relPdf} 第 ${page} 页（我当前读到的位置）的内容，中文三行以内。`;
-}
-
-export function buildNotePolishPrompt(relNote: string): string {
-  return `请阅读 ${relNote}，结合我们刚才的讨论，把笔记的五段内容补全改好。`;
-}
-
-/** 项目根相对路径（chips/注入用；不在根内原样返回绝对路径，统一正斜杠） */
-export function relToProjectRoot(root: string, absPath: string): string {
-  const r = root.replace(/[\\/]+$/, "");
-  if (absPath.startsWith(`${r}/`) || absPath.startsWith(`${r}\\`)) {
-    return absPath.slice(r.length + 1).replace(/\\/g, "/");
-  }
-  return absPath;
-}
-
-/** 一条会话内译段（工具页签「译」段对照卡/历史列表；组件态，不落库） */
-export interface ReaderTranslation {
-  id: number;
-  kind: "selection" | "paragraph";
-  page: number;
-  original: string;
-  translated: string;
-  /** 已保存进笔记「## 译段」（保存按钮转 ✓ 防重） */
-  saved?: boolean;
-}
-
-/** 翻译通道：word = 生词卡释义预填（不进译段历史、不切页签） */
-export type ReaderTranslateKind = "selection" | "paragraph" | "word";
 
 export type ReaderTranslateResult =
   | { ok: true; text: string }
@@ -303,13 +276,6 @@ export interface GlossaryEntry {
   term: string;
   meaning: string;
   source: string;
-}
-
-/** PDF 大纲平铺项（depth 用于缩进渲染；page=null 的条目不可跳转） */
-export interface ReaderOutlineItem {
-  title: string;
-  page: number | null;
-  depth: number;
 }
 
 // ----- 进度记忆与护眼（localStorage，按文件记忆） -----

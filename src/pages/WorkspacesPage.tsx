@@ -945,6 +945,17 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   // help: 条目屏蔽表（store 镜像 localStorage）：签名一致不生成条目，内容变了自动复现
   const helpDismissed = useAppStore((s) => s.helpDismissed);
   const dismissHelpRequest = useAppStore((s) => s.dismissHelpRequest);
+  // 人工请求「去查看」的完整内容层（v3.97）：strip 行只有 40 字截断预览，
+  // 「选中项目」单独作为动作反馈太弱（已选中时像没反应）——弹出该来源的全部请求全文
+  const helpViewReq = useAppStore((s) => s.helpViewReq);
+  const setHelpViewReq = useAppStore((s) => s.setHelpViewReq);
+  const [helpView, setHelpView] = useState<HelpRequestDto | null>(null);
+  useEffect(() => {
+    if (!helpViewReq) return;
+    setHelpView(helpRequests.find((h) => h.root === helpViewReq) ?? null);
+    setHelpViewReq(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [helpViewReq, helpRequests]);
   // 会话清单（启动即加载）：外部 live 会话的收件箱入口
   const sessions = useAppStore((s) => s.sessions);
   // 外部 live 会话（无终端标签可跳）的尾部注意力：后端直查 session_tail_state，
@@ -1105,6 +1116,23 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     if (!visible) return;
     void refresh();
   }, [visible]);
+
+  // 「agent 已跑完」跃迁触发一次 refresh（v3.97）：步骤状态只从 git 派生，agent 干完若已提交，
+  // 不重拉 health 就永远停在「进行中」。terminalRunInputs 是 TerminalPage 镜像进 store 的既有信号，
+  // 这里只认「上次非 done → 本次 done」的跃迁（按 cwd 记已触发，回落后再 done 可再触发），不轮询。
+  const doneSeenRef = useRef<Record<string, boolean>>({});
+  useEffect(() => {
+    if (!visible) return;
+    let hit = false;
+    for (const input of terminalRunInputs) {
+      const cwd = input.cwd;
+      const isDone = input.attention === "done";
+      if (isDone && !doneSeenRef.current[cwd]) hit = true;
+      doneSeenRef.current[cwd] = isDone;
+    }
+    if (hit) void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, terminalRunInputs]);
 
   // 定时巡检跑完：重拉 schedules 刷新收件箱「文献」胶囊（ScheduleSection 同款监听模式；
   // 全局 OS 通知在 App.tsx 另行监听，这里只管收件箱条目）
@@ -1390,7 +1418,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         text: `「${h.repoName} / ${h.workspaceName ?? "主仓"}」有 ${h.items.length} 条人工请求：${helpPreview(h.items[0])}`,
         actionLabel: "去查看",
         dismissSignature: helpSignature(h.items),
-        action: { type: "project" as const, projectRoot: h.root },
+        action: { type: "help" as const, projectRoot: h.root },
       })),
     // 接力简报已生成待发送：提炼在后台完成，交接链断在人这里
     ...(digestJob && digestJob.status === "ready" && !digestJob.consumed
@@ -1447,19 +1475,42 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inboxSig, setInboxItems]);
 
-  // 收件箱「去核验」一次性请求：选中该工作区所属项目并展开其任务行的产物清单
+  // 收件箱「去核验」一次性请求：选中该工作区所属项目并展开其任务行的产物清单；
+  // v3.97 补强——原实现只改选中态，已选中/已展开时毫无视觉反馈（用户实测「点了没反应」）：
+  // ① 聚焦切到该工作区所属步骤（否则聚焦过滤会把目标行藏掉）② 行滚动进视野 + 短暂高亮
+  const [focusStepReq, setFocusStepReq] = useState<{
+    wsName: string;
+    token: number;
+  } | null>(null);
+  const [flashWsId, setFlashWsId] = useState<string | null>(null);
   useEffect(() => {
     if (!artifactCheckReq) return;
     const g = groups.find((gr) =>
       gr.list.some((w) => w.id === artifactCheckReq),
     );
     if (g) {
+      const ws = g.list.find((w) => w.id === artifactCheckReq)!;
       setSelectedGroupKey(g.key);
       setArtifactsOpen((prev) => new Set(prev).add(artifactCheckReq));
+      setFocusStepReq({ wsName: ws.name, token: Date.now() });
+      setFlashWsId(ws.id);
     }
     setArtifactCheckReq(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [artifactCheckReq, groups]);
+
+  // 高亮闪烁 2.5s 自动消退（与「文献与数据」进料口 ring 口径一致）；渲染后滚动进视野
+  useEffect(() => {
+    if (!flashWsId) return;
+    const t = window.setTimeout(() => setFlashWsId(null), 2500);
+    // 等聚焦切换+手风琴展开渲染完再滚
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-ws-row="${CSS.escape(flashWsId)}"]`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    return () => window.clearTimeout(t);
+  }, [flashWsId]);
 
   // 对话页卡片 chip / 收件箱「去查看」的一次性跳转：按项目根或工作树根选中分组
   //（无对应分组静默忽略，与 focusTabReq 同口径）
@@ -2032,6 +2083,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             health={health}
             drift={drift}
             refreshToken={refreshToken}
+            focusStepReq={focusStepReq}
+            pageVisible={visible}
             freshGitGuide={
               !!selectedGroup.project &&
               !!freshProjectPath &&
@@ -2124,7 +2177,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                     canResolveConflict ||
                     isDriftFailed);
                 return (
-                  <li key={workspace.id} className="group rounded-lg bg-strip p-3">
+                  <li
+                    key={workspace.id}
+                    data-ws-row={workspace.id}
+                    className={`group rounded-lg bg-strip p-3 ${flashWsId === workspace.id ? "ring-2 ring-cta" : ""}`}
+                  >
                     <div className="flex min-w-0 items-center gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">
@@ -2399,6 +2456,58 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           onRetry={() => void refresh()}
           onClose={() => setDetailsPopover(null)}
         />
+      )}
+      {/* 人工请求完整内容层（v3.97）：收件箱行只放 40 字预览，全文在这里看。
+          回复方式 = 到该工作区终端直接告诉 agent（或在源文件 .ccode/help-wanted.md 里写）——
+          每条请求都自带兜底方案，不回也不停工 */}
+      {helpView && (
+        <div
+          className="ccode-fade fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setHelpView(null)}
+        >
+          <div
+            className="ccode-float-surface flex max-h-[70vh] w-full max-w-lg flex-col rounded-md border border-field p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-1 shrink-0 text-base font-semibold text-l1">
+              人工请求 · {helpView.repoName}
+              {helpView.workspaceName ? ` / ${helpView.workspaceName}` : ""}
+            </h2>
+            <p className="mb-3 shrink-0 text-xs text-l4">
+              Agent 干到一半需要你拍板的事。回到对应终端直接回答它即可；不回复它会按每条自带的兜底方案继续，不停工。
+            </p>
+            <ol className="min-h-0 flex-1 list-decimal space-y-2 overflow-auto pl-5">
+              {helpView.items.map((item, i) => (
+                <li
+                  key={i}
+                  className="whitespace-pre-wrap text-sm leading-6 text-l1"
+                >
+                  {item}
+                </li>
+              ))}
+            </ol>
+            <div className="mt-4 flex shrink-0 items-center justify-end gap-2">
+              <button
+                type="button"
+                title="忽略此来源（请求内容变化后会重新出现）"
+                onClick={() => {
+                  dismissHelpRequest(helpView.root, helpSignature(helpView.items));
+                  setHelpView(null);
+                }}
+                className="rounded-sm px-3 py-1.5 text-sm text-l4 hover:bg-hover hover:text-l2"
+              >
+                忽略此来源
+              </button>
+              <button
+                type="button"
+                onClick={() => setHelpView(null)}
+                className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110"
+              >
+                知道了
+              </button>
+            </div>
+          </div>
+        </div>
       )}
         </PageFrame>
       </div>

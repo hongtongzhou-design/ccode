@@ -2,14 +2,14 @@ mod agent_specs;
 mod agents;
 mod ai;
 mod citation;
-mod claude_hooks;
 mod clipboard;
+mod config_dump;
 mod diagnostics;
-mod fonts;
-mod fs_tree;
+mod fonts;mod fs_tree;
 mod git_info;
 mod global_config;
 mod handoff;
+mod hooks;
 mod lit_watch;
 mod logbuf;
 mod mcp;
@@ -45,6 +45,9 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         // 长任务 OS 通知（注意力跃迁：工作中→待确认/已完成，窗口未聚焦时）
         .plugin(tauri_plugin_notification::init())
+        // 产物文件 OS 级拖出（v3.97：把 to-fetch.ris / PDF 从产物核验清单直接拖进 Zotero 等外部应用；
+        // WebView 的 HTML5 拖拽出不了窗口，必须走系统拖拽会话）
+        .plugin(tauri_plugin_drag::init())
         .manage(profiles::ProfileStore::new().expect("初始化 ProfileStore 失败"))
         .manage(pty::PtyManager::default())
         // 内置技能种子：启动时把库里没有的内置技能补进去（幂等，不覆盖用户已有同名技能）
@@ -112,6 +115,9 @@ pub fn run() {
             logbuf::export_app_log,
             logbuf::log_event,
             diagnostics::export_diagnostics_bundle,
+            config_dump::dump_effective_config,
+            config_dump::export_effective_config,
+            agent_specs::agent_capabilities,
             mcp::list_mcp_servers,
             mcp::save_mcp_server,
             mcp::set_mcp_server_app,
@@ -247,7 +253,8 @@ pub fn run() {
             settings::app_storage_usage,
             mcp::mcp_distribution_status,
             settings::update_settings,
-            claude_hooks::set_claude_hooks_attention,
+            hooks::set_hooks_attention,
+            hooks::hooks_attention_support,
             ai::ai_prompt,
             ai::ai_commit_message,
             ai::ai_summarize_session,
@@ -269,7 +276,10 @@ pub fn run() {
             lit_watch::add_included_entry,
             lit_watch::remove_included_entry,
             lit_watch::download_paper_pdf,
+            lit_watch::attach_paper_pdf,
             reader::ensure_paper_note,
+            reader::pdf_for_note,
+            reader::reader_for_note,
             reader::read_image_bytes,
             reader::save_reader_capture,
             reader::append_note_image,

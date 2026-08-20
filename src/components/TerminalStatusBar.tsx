@@ -8,7 +8,7 @@ import type { TabStatus } from "../pages/TerminalPage";
 /**
  * 终端底部状态栏（胶囊化）：36px 固置于终端 pane 内部下缘，与终端同底同色。
  * 左区 = 状态圆点 + agent · 配置 · 模型（可点切）+ 思考强度 step 滑块；
- * 中区 = git 连体胶囊（分支/变更 + ⚡ Commit & Push：AI 生成提交信息→提交并推送→Toast 预览）；
+ * 中区 = git 连体胶囊（分支/变更 + Commit & Push（云上传图标）：AI 生成提交信息→提交并推送→Toast 预览）；
  * 右区 = 运行时长 · 本会话 token（等宽小字）。
  * 切换类控件只写 TUI 命令、不回读 CLI 内部状态——模型名按用户切的选择显示（内存态）。
  */
@@ -72,13 +72,13 @@ export default function TerminalStatusBar({
   gitCwd: string;
   submitCsiU: boolean;
   onOpenGit: () => void;
-  /** ⚡ 流程第一步：AI 生成提交信息（style = 分割菜单的风格偏好，空串 = 默认） */
+  /** Commit & Push 流程第一步：AI 生成提交信息（style = 分割菜单的风格偏好，空串 = 默认） */
   onGenerateMsg: (style: string) => Promise<string>;
-  /** ⚡ 流程第二步：以确认的信息提交 + 推送，返回结果（hash 用于成功态显示） */
+  /** Commit & Push 流程第二步：以确认的信息提交 + 推送，返回结果（hash 用于成功态显示） */
   onCommitPush: (msg: string) => Promise<GitCommitResultDto>;
   /** 📂 浮层改工作目录（仅未启动时可用；运行/shell 中由 pty_get_cwd 回写跟随） */
   onCwdChange?: (cwd: string) => void;
-  /** 往终端画面写一行浅灰日志（防黑盒：⚡ 流程的每步都回显） */
+  /** 往终端画面写一行浅灰日志（防黑盒：Commit & Push 流程的每步都回显） */
   onTermLog: (line: string) => void;
   colors: StatusBarColors;
 }) {
@@ -179,7 +179,7 @@ export default function TerminalStatusBar({
     }
   }
 
-  // ===== ⚡ Commit & Push 状态机：idle → generating → review(倒计时) → pushing → success =====
+  // ===== Commit & Push 状态机：idle → generating → review(倒计时) → pushing → success =====
   type CpPhase = "idle" | "generating" | "review" | "pushing" | "success";
   const [phase, setPhase] = useState<CpPhase>("idle");
   const [msg, setMsg] = useState(""); // 生成的提交信息（review 里可改）
@@ -579,8 +579,8 @@ export default function TerminalStatusBar({
       </span>
       {hasGit && (
         /* 外包一层 relative 给浮层做锚（菜单右对齐 ▾、气泡左对齐胶囊左缘）；
-           内层胶囊保持 overflow-hidden 裁圆角 */
-        <span className="relative">
+           内层胶囊保持 overflow-hidden 裁圆角；min-w-0 允许窄窗时收缩防溢出右栏 */
+        <span className="relative min-w-0">
         <span
           className="flex items-stretch overflow-hidden rounded-full font-mono"
           style={{ border: `1px solid ${fg}22` }}
@@ -589,7 +589,7 @@ export default function TerminalStatusBar({
             type="button"
             onClick={onOpenGit}
             title="git 状态，点击查看改动面板"
-            className="flex cursor-pointer items-center gap-1 border-0 px-2.5 py-1 font-mono"
+            className="flex min-w-0 cursor-pointer items-center gap-1 border-0 px-2.5 py-1 font-mono"
             style={{ background: `${fg}12`, color: fg }}
           >
             <svg
@@ -606,7 +606,7 @@ export default function TerminalStatusBar({
               <circle cx="11" cy="6.5" r="2" />
               <path d="M5 5.5v5M11 8.5c0 2-2 2.5-4 2.7" />
             </svg>
-            {git!.branch || "HEAD"}
+            <span className="min-w-0 truncate">{git!.branch || "HEAD"}</span>
             {git!.files.length > 0 && (
               <>
                 {" "}
@@ -647,7 +647,7 @@ export default function TerminalStatusBar({
                         ? "点击停止自动提交（信息留在预览里）"
                         : undefined
                 }
-                className="flex cursor-pointer items-center gap-1 border-0 px-2.5 py-1 font-mono font-medium disabled:cursor-wait"
+                className="flex min-w-0 cursor-pointer items-center gap-1 border-0 px-2.5 py-1 font-mono font-medium disabled:cursor-wait"
                 style={{
                   background:
                     phase === "idle"
@@ -680,7 +680,26 @@ export default function TerminalStatusBar({
                 ) : phase === "success" ? (
                   `✓ Pushed${successHash ? ` [${successHash}]` : ""}`
                 ) : (
-                  `⚡ Commit & Push${git!.files.length > 0 ? ` (+${git!.files.length})` : ""}`
+                  <>
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.1"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M9 16.5 L5.5 16.5 A2.5 2.5 0 1 1 6.03 11.55 A6 6 0 1 1 17.97 11.55 A2.5 2.5 0 1 1 18.5 16.5 L15 16.5" />
+                      <polyline points="9.5 13.5 12 11 14.5 13.5" />
+                      <line x1="12" y1="11" x2="12" y2="19.5" />
+                    </svg>
+                    <span className="min-w-0 truncate">
+                      {`Commit & Push${git!.files.length > 0 ? ` (+${git!.files.length})` : ""}`}
+                    </span>
+                  </>
                 )}
               </button>
               {/* 分割下拉：模式与风格偏好 */}
@@ -892,7 +911,7 @@ export default function TerminalStatusBar({
 
       {/* 右区：时长 · token（等宽小字） */}
       <span
-        className="ml-auto flex shrink-0 items-center gap-3 font-mono"
+        className="ml-auto flex min-w-0 items-center gap-3 overflow-hidden font-mono"
         style={{ color: faint }}
       >
         {startedAt != null && (

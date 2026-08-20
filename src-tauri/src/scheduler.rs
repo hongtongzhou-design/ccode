@@ -468,15 +468,29 @@ fn execute_one(id: &str) -> RunDonePayload {
     } else {
         None
     };
+    // 绑定 profile 被删导致回落时，在运行历史里留一句说明（成功/失败都带）
+    let mut fallback_note: Option<String> = None;
     let result: Result<String, String> = (|| {
         let root = Path::new(&task.project_root);
         if !root.is_dir() {
             return Err(format!("项目目录不存在: {}", task.project_root));
         }
         let profiles = crate::profiles::ProfileStore::new()?.list()?;
-        // profile 解析与 ai.rs 同一回落链：显式 id → 设置页 AI 专用 → 最近使用
+        // 任务绑定的 profile 走「功能专属 id」槽：被删时按失效回落（AI 专用 → 最近使用）而非硬报错——
+        // 定时任务是长期住户，配置被删不该让任务永久哑跑；AI 专用配置也可能指着已删 id
+        // （删除时清引用是后加的，存量 settings 可能还带旧指针），硬报错时去掉专用槽再回落最近使用。
+        // 显式槽的硬报错口径只留给交互场景
         let dedicated = crate::settings::read_current().ai_profile_id;
-        let profile = crate::ai::resolve_profile_from(profiles, task.profile_id.clone(), None, dedicated)?;
+        let pinned = task.profile_id.clone().filter(|v| !v.trim().is_empty());
+        let profile =
+            crate::ai::resolve_profile_from(profiles.clone(), None, pinned.clone(), dedicated)
+                .or_else(|_| crate::ai::resolve_profile_from(profiles, None, pinned.clone(), None))?;
+        // 回落发生时在运行历史里留一句话，用户看得到「为什么换了配置」
+        if let Some(p) = pinned {
+            if p != profile.id {
+                fallback_note = Some(format!("原绑定配置已删除，本次回落用「{}」", profile.name));
+            }
+        }
         crate::ai::run_agent_task(&profile, &build_task_prompt(&task.skill), root, RUN_TIMEOUT)
     })();
     // 超时/失败不记新增数：只有成功跑完才数第二次取差值（saturating_sub 防文件被外部截断）
@@ -491,6 +505,10 @@ fn execute_one(id: &str) -> RunDonePayload {
         // 简报/错误文本落存储与发事件前必须脱敏
         Ok(out) => ("ok", cap_summary(&crate::sessions::redact_sensitive_text(&out))),
         Err(e) => ("error", cap_summary(&crate::sessions::redact_sensitive_text(&e))),
+    };
+    let summary = match fallback_note {
+        Some(note) => format!("{note}；{summary}"),
+        None => summary,
     };
     if let Err(e) = record_run(id, status, &summary, new_entries) {
         crate::logbuf::record("error", "scheduler", &format!("回填运行历史失败: {e}"));

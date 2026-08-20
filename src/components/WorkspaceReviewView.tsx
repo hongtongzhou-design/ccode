@@ -18,10 +18,6 @@ import ImagePairView, { isImagePath } from "./ImagePairView";
 import { loadArtifactRows } from "./ArtifactChecklist";
 import { Checkbox, LoadingRows } from "./PageFrame";
 import { defaultCommitMessage } from "../git-commit-message";
-import {
-  buildWorkspaceTerminalRequest,
-  startPipelineStep,
-} from "../pipeline-start";
 import { useAppStore } from "../store";
 import type {
   CitationHealthDto,
@@ -958,8 +954,6 @@ export default function WorkspaceReviewView({
     cfg: ProjectConfigDto;
     projectPath: string;
   } | null>(null);
-  const [nextBusy, setNextBusy] = useState(false);
-  const [nextError, setNextError] = useState<string | null>(null);
   // 「沉淀到下一步」：评审结论写进下一步步骤的任务书草稿（不存在则新建）
   const [distillOpen, setDistillOpen] = useState(false);
   const [distillText, setDistillText] = useState("");
@@ -980,8 +974,8 @@ export default function WorkspaceReviewView({
   const [humanClosing, setHumanClosing] = useState<string[] | null>(null);
   // 上游漂移提醒：上游步骤晚于本步最后推进时间合并 → 产物可能过期（list_workspaces 顺带取回）
   const [staleUpstream, setStaleUpstream] = useState<string | null>(null);
-  const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
+  const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1087,7 +1081,6 @@ export default function WorkspaceReviewView({
     setMergedAt(null);
     setMergeDone(false);
     setNextStep(null);
-    setNextError(null);
     setCitations(null);
     setCiteExpanded(false);
     setArtifacts(null);
@@ -1221,30 +1214,15 @@ export default function WorkspaceReviewView({
     };
   }, [mergeDone, diff]);
 
-  /** 「▶ 开始下一步」：与流水线胶囊同一套开步链路，成功即收起入口防重复开同名工作区 */
-  async function startNextStep() {
-    if (!nextStep || nextBusy) return;
-    setNextBusy(true);
-    setNextError(null);
-    try {
-      await startPipelineStep({
-        projectPath: nextStep.projectPath,
-        step: nextStep.step,
-        cfg: nextStep.cfg,
-        onError: (msg) => setNextError(msg),
-        onOpenTerminal: async (ws, initialPrompt) => {
-          setPendingTerminal(
-            await buildWorkspaceTerminalRequest(ws, initialPrompt),
-          );
-          setPage("terminal");
-        },
-      });
-      setNextStep(null);
-    } catch (reason) {
-      setNextError(String(reason));
-    } finally {
-      setNextBusy(false);
-    }
+  /** 「→ 去下一步」（v3.97 改向）：合并成功后**不直接开步**，而是把用户带到项目页——
+   *  聚焦自动落在第一个未完成步骤（即刚解锁的下一步），先看流程线/TASK.md/人工事项，
+   *  准备好了自己点「开始」。直接开步跳终端会把非编程用户扔进黑窗（用户拍板） */
+  function goNextStep() {
+    if (!nextStep) return;
+    setSelectProjectReq(nextStep.projectPath);
+    setPage("workspaces");
+    // 收起入口防重复点击；项目页聚焦逻辑自己会落到下一步
+    setNextStep(null);
   }
 
   /** 「◈ AI 起草」：本步提交清单 + diff 统计 + TASK.md → 初稿填入编辑框；
@@ -1275,7 +1253,7 @@ export default function WorkspaceReviewView({
     const content = distillText.trim();
     if (!content) return;
     setDistillBusy(true);
-    setNextError(null);
+    setDistillDraftError(null);
     try {
       const rel = await invoke<string>("append_step_draft", {
         projectRoot: nextStep.projectPath,
@@ -1287,7 +1265,7 @@ export default function WorkspaceReviewView({
       setDistillText("");
       setDistillMsg(`已沉淀进下一步 TASK.md：${rel}`);
     } catch (reason) {
-      setNextError(String(reason));
+      setDistillDraftError(String(reason));
     } finally {
       setDistillBusy(false);
     }
@@ -1430,7 +1408,8 @@ export default function WorkspaceReviewView({
   const canPrimary =
     !busy &&
     !hardBlocked &&
-    (hasUncommitted ? message.trim().length > 0 : hasCommitted);
+    // 提交信息可留空（v3.97）：finish 里留空走本地默认信息，按钮不再因空信息变灰
+    (hasUncommitted || hasCommitted);
   const normalizedQuery = fileQuery.trim().toLocaleLowerCase();
   const filteredFiles = useMemo(
     () =>
@@ -1813,10 +1792,10 @@ export default function WorkspaceReviewView({
     const shouldMerge = mode === "merge" || mode === "merge-archive";
     const shouldArchive = mode === "archive";
     const archive = mode === "merge-archive";
-    if (shouldCommit && !message.trim()) {
-      setError("请先填写提交信息");
-      return;
-    }
+    // 提交信息可留空（v3.97，面向不懂编程的用户）：留空走本地规则默认信息
+    // （chore: 更新 N 个文件），与主仓快速提交面板同口径；想写更好的点输入框旁 ◈ 让 AI 起草
+    const commitMessage =
+      message.trim() || defaultCommitMessage(status.files);
     if (
       shouldMerge &&
       !(await confirmDialog(
@@ -1845,7 +1824,7 @@ export default function WorkspaceReviewView({
       if (shouldCommit) {
         const commitResult = await invoke<GitCommitResultDto>("git_commit", {
           cwd: worktreePath,
-          message: message.trim(),
+          message: commitMessage,
           push: false,
         });
         if (!commitResult.committed) throw new Error(commitResult.message);
@@ -2132,21 +2111,21 @@ export default function WorkspaceReviewView({
                         void finish("merge");
                     }}
                     disabled={busy}
-                    placeholder="提交信息"
+                    placeholder="这次改了什么（可留空，自动写一句）"
                     className="min-w-0 flex-1 rounded-sm border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
                   />
                   <button
                     type="button"
                     onClick={() => void generateMessage()}
                     disabled={aiBusy || busy}
-                    title="AI 生成提交信息"
+                    title="让 AI 看改动内容写一句；不写也行——留空会自动写「更新 N 个文件」"
                     className="flex h-7 min-w-7 items-center justify-center rounded-sm px-1.5 text-l2 hover:bg-hover disabled:opacity-50"
                   >
                     {aiBusy ? "◈…" : "◈"}
                   </button>
                 </div>
                 <span className="text-micro text-l4">
-                  提交 = 保存到历史；合并 = 把成果放回主文件夹
+                  直接点「提交并合并」就行——这栏是可选的
                 </span>
               </div>
             ) : (
@@ -2310,12 +2289,11 @@ export default function WorkspaceReviewView({
           {mergeDone && nextStep && (
             <button
               type="button"
-              disabled={nextBusy}
-              onClick={() => void startNextStep()}
-              title={`建工作区并预填「${nextStep.step.name}」简报，跳到终端确认启动`}
+              onClick={goNextStep}
+              title={`到项目页看「${nextStep.step.name}」这一步：流程线、TASK.md、要补的东西都在那里，准备好了点「开始」`}
               className="inline-flex h-7 shrink-0 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
             >
-              {nextBusy ? "开步中…" : `▶ 开始下一步：${nextStep.step.name}`}
+              → 去下一步：{nextStep.step.name}
             </button>
           )}
           {mergeDone && nextStep && (
@@ -2392,11 +2370,6 @@ export default function WorkspaceReviewView({
       {distillMsg && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-ok-text">
           <span className="min-w-0 truncate">✓ {distillMsg}</span>
-        </div>
-      )}
-      {nextError && (
-        <div className="shrink-0 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-err-text">
-          ✗ {nextError}
         </div>
       )}
       {error && (
@@ -2814,10 +2787,11 @@ export default function WorkspaceReviewView({
             </p>
             {hasUncommitted && (
               <label className="mb-4 block">
-                <span className="mb-1 block text-xs text-l3">提交信息</span>
+                <span className="mb-1 block text-xs text-l3">
+                  这次改了什么（可留空，自动写一句）
+                </span>
                 <input
                   autoFocus
-                  required
                   value={message}
                   onChange={(event) => setMessage(event.target.value)}
                   disabled={busy}
@@ -2838,7 +2812,7 @@ export default function WorkspaceReviewView({
               </button>
               <button
                 type="submit"
-                disabled={busy || (hasUncommitted && !message.trim())}
+                disabled={busy}
                 className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
               >
                 {busy

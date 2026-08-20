@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { marked } from "marked";
+import { renderMathInto } from "../md-math";
 import { useAppStore } from "../store";
 import { confirmDialog } from "./ConfirmDialog";
 import { buildStepFlow, type StepFlowNode } from "../step-flow";
@@ -76,6 +77,7 @@ export default function StepFlow({
   onSetLitSource,
   litBusy = false,
   bare = false,
+  agentAttention = null,
 }: {
   projectPath: string;
   step: ProjectStepDto;
@@ -122,6 +124,9 @@ export default function StepFlow({
   onRestore?: () => void;
   /** 合并冲突阻塞：评审节点入口改为「去处理冲突」（直达冲突解决意图） */
   reviewConflict?: boolean;
+  /** 本步骤工作区内终端的注意力（ProjectGroup stepAttention 同一口径）：
+   *  done = agent 跑完在等你——active 态的「去终端看看」旁给出完成提示 */
+  agentAttention?: "confirm" | "done" | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const {
@@ -150,8 +155,13 @@ export default function StepFlow({
   /** 落点在 papers/ 的事项 = 文献类交付，统一引到「文献与数据」 */
   const isPapersTarget = (target: string | undefined) =>
     (target ?? "").replace(/\\/g, "/").startsWith("papers/");
-  /** agent 已经产出了东西（待评审或已合并）：after 档事项到这时才有的做 */
+  /** agent 已经产出了东西（待评审或已合并）：after 档事项到这时才有的做。
+   *  v3.97 放宽（用户实测：agent 跑完但没提交时步骤停在「进行中」，入口永远不出现）——
+   *  单个 after 事项的就绪口径见 afterReady()：会话尾部判定 done（agent 跑完在等你）、
+   *  或该事项的待获取清单已现算到（to-fetch.md 存在 = agent 已列出要补什么） */
   const agentProduced = runStatus === "review" || runStatus === "done";
+  const afterReady = (h: { expectedCount?: number }) =>
+    agentProduced || agentAttention === "done" || h.expectedCount != null;
 
   // ===== 决策项（可枚举的拍板点）：点一下就答完，不开会话 =====
   // 答案存在草稿的「已定方向」小节里（草稿是开工合同，不另立一份状态），选中态由它回填
@@ -270,6 +280,11 @@ export default function StepFlow({
         : "",
     [draftEdit?.text],
   );
+  // TASK.md 预览的公式升级（与文件预览阅读版式同一口径；无公式不加载 katex）
+  const draftHtmlRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (draftHtmlRef.current) void renderMathInto(draftHtmlRef.current);
+  }, [draftHtml]);
 
   async function openDraftInline() {
     setDraftEdit({ origin: "", text: "", fromTemplate: false, saving: false, error: null });
@@ -395,11 +410,13 @@ export default function StepFlow({
    *  原来完成态用绿 ✓——勾号在一列圆点里是异类，而且 ok-text 的亮绿在暗色主题下发飘。
    *  改用实心圆 + done 色（与上方大圆步进器的 bg-done 同一枚绿），全站一套语言；
    *  「已完成」的语义还有标题的删除线与降级色兜着，不靠图标独扛 */
-  /** 主干节点的序号（可选区不编号——它们不在时间线上）：
+  /** 主干节点的序号（可选区不编号——它们不在时间线上；人工事项行也不参与编号——
+   *  人工序用复选框表达状态、从不显示序号，把它们算进去会让可见序号断档：
+   *  ① ② [复选框行] ④，用户实测「可选项占用了一个计数但没显示」）：
    *  流程感来自「① → ② → ③」的顺序本身，光靠 ○/● 看不出先后（用户反馈） */
   const mainOrder = new Map(
     flow.nodes
-      .filter((n) => n.section === "main")
+      .filter((n) => n.section === "main" && n.kind !== "human")
       .map((n, i) => [n.key, i + 1] as const),
   );
 
@@ -417,18 +434,28 @@ export default function StepFlow({
       case "human": {
         const papersTarget = isPapersTarget(node.human!.target);
         // after 档事项依赖 agent 的产出才知道要做什么（付费墙清单是 agent 筛完才列出来的）。
-        // agent 没跑完就摆出操作入口 = 提前噪音；节点仍然显示，让人知道后面有这一步
-        // after 档且 agent 还没产出：不给操作入口，也不写一句「等 agent」——
-        // 节点排在 agent 之后，先后顺序看位置就知道了，多一句话是噪音。
+        // 就绪口径放宽到「agent 跑完/清单已产出」（afterReady），不再死等 git 待评审——
+        // 否则 agent 没提交时入口永远不出现（用户实测「没看见补充入口」）。
+        // 未就绪时不给操作入口，也不写一句「等 agent」——节点排在 agent 之后，先后顺序看位置就知道。
         // 「还轮不到」由整行降透明度表达（见下方 li 的 dimmed）
-        if (node.human!.timing === "after" && !agentProduced) return null;
+        if (node.human!.timing === "after" && !afterReady(node.human!)) return null;
         // 文献类交付统一去「文献与数据」：那里三个进料口齐全（Zotero / 题录 / 扫目录），
         // 在每个事项行再复制一套入口，等于把同一件事摆三个地方
         if (papersTarget) {
           return node.done ? null : (
             <button
               type="button"
-              onClick={() => onOpenResources?.()}
+              // 按文献来源高亮对应进料口（与「确定文献来源」节点的落地口径一致），
+              // 免得跳过去之后不知道点哪个（用户实测「和确定文献来源一样，没说清怎么导入」）
+              onClick={() =>
+                onOpenResources?.(
+                  litSource === "zotero"
+                    ? "zotero"
+                    : litSource === "folder"
+                      ? "files"
+                      : undefined,
+                )
+              }
               title={
                 hasLibrary
                   ? "新文献加进你的文献库后，到「文献与数据」重新导入即可——不必往项目里另放一份"
@@ -480,13 +507,20 @@ export default function StepFlow({
             开始
           </button>
         ) : runStatus === "active" ? (
-          <button
-            type="button"
-            onClick={goTerminal}
-            className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover"
-          >
-            去终端看看
-          </button>
+          // agent 已跑完（会话尾部判定 done，大圆角标同一口径）：按钮旁给完成提示，
+          // 行为不变——点进去看产出/提交情况；状态翻转仍走 git 派生（提交→待评审）
+          <span className="flex shrink-0 items-center gap-1.5">
+            {agentAttention === "done" && (
+              <span className="text-xs text-done">✓ agent 已跑完</span>
+            )}
+            <button
+              type="button"
+              onClick={goTerminal}
+              className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover"
+            >
+              去终端看看
+            </button>
+          </span>
         ) : null;
       case "review":
         if (!isCurrent || !ws) return null;
@@ -535,10 +569,10 @@ export default function StepFlow({
                 "relative pl-1.5 before:absolute before:bottom-1 before:left-[7px] before:top-3 before:w-0.5 before:bg-cta before:content-['']"
               : "pl-1.5"
         } ${
-          // 还轮不到（after 档且 agent 未产出）：整行压暗，不写「等 agent」那种话
+          // 还轮不到（after 档且 agent 未产出/未跑完）：整行压暗，不写「等 agent」那种话
           node.kind === "human" &&
           node.human!.timing === "after" &&
-          !agentProduced &&
+          !afterReady(node.human!) &&
           !node.done
             ? "opacity-45"
             : ""
@@ -598,10 +632,25 @@ export default function StepFlow({
               可选
             </span>
           )}
+          {/* 落点命中计数（v3.97）：存在性检测的进度感——见到几个文件、清单共几篇。
+              显式取消后检测命中也照显示：进度感不随勾态消失（与 HumanTasksList 同文案） */}
+          {node.kind === "human" && node.human!.hitCount != null && (
+            <span
+              className={`shrink-0 text-micro ${node.done ? "text-done" : "text-l4"}`}
+            >
+              已见到 {node.human!.hitCount} 个文件
+              {node.human!.expectedCount != null
+                ? ` / 清单共 ${node.human!.expectedCount} 篇`
+                : ""}
+            </span>
+          )}
           {nodeActions(node)}
         </div>
-        {/* 当前节点的引导与展开操作：种子 chips / 落点说明 */}
-        {!dense && isCurrent && node.hint && (
+        {/* 当前节点的引导与展开操作：种子 chips / 落点说明。
+            例外：评审节点的验收引导不看「当前」身份（v3.97）——hint 已按 runStatus 门控
+            （待开始无文案、进行中预告、待评审给步骤）；agent 跑完没提交时当前节点一直停在
+            agent 上，若死守 isCurrent，验收引导永远显示不出来（用户实测） */}
+        {!dense && (isCurrent || node.kind === "review") && node.hint && (
           <p className="mt-0.5 pl-9 text-micro text-l4">{node.hint}</p>
         )}
         {node.kind === "input" && onSetLitSource && (
@@ -935,12 +984,21 @@ export default function StepFlow({
             只显示 guidance（真正的人机分工说明）；落点路径是实现细节，
             拖拽/导入都不需要用户知道它，不再单列一行 */}
         {/* 说明只在当前节点显示：一屏同时摊开五段说明是这一页最大的噪音源。
-            非当前节点的说明挂在行的 title 上（悬停可见），信息不丢 */}
-        {!dense && isCurrent && node.kind === "human" && node.human!.guidance && (
-          <p className="mt-0.5 whitespace-pre-wrap pl-9 text-micro leading-5 text-l4">
-            {node.human!.guidance}
-          </p>
-        )}
+            非当前节点的说明挂在行的 title 上（悬停可见），信息不丢。
+            例外（v3.97）：可选的 after 档事项被设计成不抢「当前节点」，若死守 isCurrent，
+            「下载付费墙文献全文」的导入说明就只剩悬停可见（用户实测「没说清怎么导入」）——
+            就绪（afterReady）且未完成时就地展开它的 guidance */}
+        {!dense &&
+          node.kind === "human" &&
+          node.human!.guidance &&
+          (isCurrent ||
+            (!node.done &&
+              node.human!.timing === "after" &&
+              afterReady(node.human!))) && (
+            <p className="mt-0.5 whitespace-pre-wrap pl-9 text-micro leading-5 text-l4">
+              {node.human!.guidance}
+            </p>
+          )}
       </li>
     );
   }
@@ -1010,6 +1068,7 @@ export default function StepFlow({
             {draftPreview ? (
               <div className="min-h-0 flex-1 overflow-auto rounded-md border border-field bg-canvas">
                 <div
+                  ref={draftHtmlRef}
                   className="md-body px-4 py-3"
                   dangerouslySetInnerHTML={{ __html: draftHtml }}
                 />

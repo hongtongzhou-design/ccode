@@ -4,6 +4,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -2127,6 +2128,8 @@ const TerminalView = memo(function TerminalView({
       <div className="relative flex min-h-0 flex-1">
         <div
           ref={containerRef}
+          // 阅读区打开期间由 TerminalPage 按此标记把本节点搬进覆盖层右栏（DOM 搬移不重建）
+          data-terminal-host={tabId}
           className="min-w-0 flex-1 overflow-hidden px-3 py-2.5"
           onContextMenu={(e) => {
             e.preventDefault();
@@ -2531,10 +2534,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     "pr" | "archive" | "resolve-conflict" | null
   >(null);
   const [reviewRequestId, setReviewRequestId] = useState<string | null>(null);
-  /** 沉浸式阅读区（批次 B1）：非空即全屏覆盖（z-40 页面模态档），底下终端/右栏保持挂载 */
+  /** 沉浸式阅读区（批次 B1）：非空即全屏覆盖（z-40 页面模态档），底下终端/右栏保持挂载；
+      notePath 指定后笔记栏直接编辑该 md（精读笔记产物入口），不按 PDF slug 另建档 */
   const [reader, setReader] = useState<{
     pdfPath: string;
     projectRoot: string;
+    notePath?: string;
   } | null>(null);
   const sessionScrollRef = useRef<HTMLDivElement>(null);
   const dialogueFollowRef = useRef(true);
@@ -2810,7 +2815,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   /** FileTree 的 fs-changed 事件 → GitPanel 一并刷新（稳定回调） */
   const bumpFsChangeTick = useCallback(() => setFsChangeTick((t) => t + 1), []);
 
-  /** 状态栏「⚡ Commit & Push」第一步：AI 生成提交信息（失败回落本地默认规则）。
+  /** 状态栏「Commit & Push」第一步：AI 生成提交信息（失败回落本地默认规则）。
       style = 分割菜单的风格偏好（空串 = 默认） */
   async function generateCommitMsg(style: string): Promise<string> {
     const s = gitTotals;
@@ -2823,7 +2828,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     }).catch(() => defaultCommitMessage(s.files));
   }
 
-  /** 状态栏「⚡ Commit & Push」第二步：以确认的信息全量提交并推送，
+  /** 状态栏「Commit & Push」第二步：以确认的信息全量提交并推送，
       返回结果（hash 给「✓ Pushed [a1b2c3d]」用）。与改动面板同一个 git_commit 命令 */
   async function commitPushMsg(message: string): Promise<GitCommitResultDto> {
     const s = gitTotals;
@@ -3227,7 +3232,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     // 右栏若正在预览同一 PDF 保持原样不动它
     setReviewPath(null);
     setReviewAction(null);
-    setReader({ pdfPath: readerReq.pdfPath, projectRoot: readerReq.projectRoot });
+    setReader({
+      pdfPath: readerReq.pdfPath,
+      projectRoot: readerReq.projectRoot,
+      notePath: readerReq.notePath,
+    });
   }, [visible, readerReq, setReaderReq]);
 
   const readerKey = reader ? readerReuseKey(reader.projectRoot) : null;
@@ -3329,6 +3338,68 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   const closeReader = useCallback(() => setReader(null), []);
 
+  // 阅读区打开时把阅读会话标签提到活跃（右栏 xterm 就是那个标签的画面；退出阅读区正好落在它上面）
+  useEffect(() => {
+    if (!reader || !readerTabId || activeId === readerTabId) return;
+    activateTab(readerTabId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reader, readerTabId, activeId]);
+
+  // 阅读区打开期间：阅读会话标签的 xterm 宿主节点移进覆盖层右栏槽位，关闭时移回原标签槽位
+  // （Monaco 宿主移动同款先例：DOM 搬移不重建，PTY/xterm/scrollback 全程不丢；
+  // 容器上的 ResizeObserver 在尺寸变化时自动 fit，无需额外触发）。
+  // 槽位用回调 ref + state：右栏收起/展开导致槽位卸载重建时 effect 随之复位/再搬。
+  const [readerTermSlot, setReaderTermSlot] = useState<HTMLDivElement | null>(
+    null,
+  );
+  const bindReaderTermSlot = useCallback(
+    (el: HTMLDivElement | null) => setReaderTermSlot(el),
+    [],
+  );
+  const [readerStatusSlot, setReaderStatusSlot] =
+    useState<HTMLDivElement | null>(null);
+  const bindReaderStatusSlot = useCallback(
+    (el: HTMLDivElement | null) => setReaderStatusSlot(el),
+    [],
+  );
+  useLayoutEffect(() => {
+    if (!reader || !readerTabId) return;
+    const root = terminalRootRef.current;
+    // host 与状态栏独立判定、分别搬运：两个槽位的挂载时机可能不同步
+    // （右栏收起/展开会重建槽位），早退会漏搬后到的那一个
+    const host = root?.querySelector<HTMLElement>(
+      `[data-terminal-host="${readerTabId}"]`,
+    );
+    let hostHome: HTMLElement | null = null;
+    if (host && readerTermSlot) {
+      const home = host.parentElement;
+      if (home && home !== readerTermSlot) {
+        readerTermSlot.appendChild(host);
+        hostHome = home;
+      }
+    }
+    // 状态栏随宿主一起搬（同 DOM 搬移口径）：右栏底部槽位存在才搬，槽位缺席（引导卡等）留在原 pane
+    const bar = root?.querySelector<HTMLElement>(
+      `[data-statusbar-host="${readerTabId}"]`,
+    );
+    let barHome: HTMLElement | null = null;
+    if (bar && readerStatusSlot) {
+      const home = bar.parentElement;
+      if (home && home !== readerStatusSlot) {
+        readerStatusSlot.appendChild(bar);
+        barHome = home;
+      }
+    }
+    return () => {
+      // 移回原槽位：host 原是容器第一个孩子；状态栏原是 pane-body 最后一个孩子。
+      // 标签被关时 TerminalView 卸载、home 已不在文档里（React 只卸其自身子树，
+      // 搬走的节点不在其中），isConnected 跳过硬挂
+      if (host && hostHome?.isConnected)
+        hostHome.insertBefore(host, hostHome.firstChild);
+      if (bar && barHome?.isConnected) barHome.appendChild(bar);
+    };
+  }, [reader, readerTabId, readerTermSlot, readerStatusSlot]);
+
   /** 「⛶ 沉浸阅读」入口（PDF 预览工具条 / 文件树右键共用）：反查归属项目后开覆盖层 */
   async function openReaderForPdf(pdfPath: string) {
     try {
@@ -3344,6 +3415,27 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       setReviewPath(null);
       setReviewAction(null);
       setReader({ pdfPath, projectRoot: owner.path });
+    } catch (e) {
+      void alertDialog(String(e));
+    }
+  }
+
+  /** md 笔记「⛶ 沉浸阅读」入口（文件树右键 / 预览工具条）：reader_for_note 一次给齐
+      归属项目根 + 配对 PDF + 实际笔记路径（工作区笔记映射回主仓副本；失败原因直接弹给用户） */
+  async function openReaderForNote(notePath: string) {
+    try {
+      const r = await invoke<{
+        projectRoot: string;
+        pdfPath: string;
+        notePath: string;
+      }>("reader_for_note", { notePath });
+      setReviewPath(null);
+      setReviewAction(null);
+      setReader({
+        pdfPath: r.pdfPath,
+        projectRoot: r.projectRoot,
+        notePath: r.notePath,
+      });
     } catch (e) {
       void alertDialog(String(e));
     }
@@ -3810,7 +3902,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               onEnterProject={setEnterCwd}
               onRootChange={closePreviewForRootChange}
               onRootNavigated={setTreeRoot}
-              onOpenReader={(path) => void openReaderForPdf(path)}
+              onOpenReader={(path) =>
+                void (/\.pdf$/i.test(path)
+                  ? openReaderForPdf(path)
+                  : openReaderForNote(path))
+              }
               belowRecent={
                 /* 项目区：当前标签 cwd 所属项目的主文件夹 + 活跃工作区，点击切根复用 enterCwd 链路 */
                 <ProjectRail
@@ -4142,7 +4238,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   {/* 终端底部状态栏：在 pane 内部、贴 xterm 画面下缘，与终端同底同色
                       （视觉上是终端自己画的状态行）。常驻渲染——未启动也有 cwd/未启动态，
                       高度恒定不跳动；ResizeObserver 兜底尺寸变化后的 fit。
-                      分屏时各 pane 显示各标签；git 段只跟随活跃 pane（数据是 focusedId 的） */}
+                      分屏时各 pane 显示各标签；git 段只跟随活跃 pane（数据是 focusedId 的）。
+                      data-statusbar-host：阅读区打开时随 xterm 宿主一并搬进覆盖层右栏槽位 */}
+                  <div data-statusbar-host={t.id} className="shrink-0">
                   {(() => {
                     const st = statuses[t.id] ?? null;
                     const prof = st
@@ -4180,6 +4278,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       />
                     );
                   })()}
+                  </div>
                 </div>
               </div>
             );
@@ -4482,6 +4581,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       root={preview.root ?? activeCwd}
                       onDirtyChange={setPreviewDirty}
                       onDiscuss={discussMdExcerpt}
+                      onOpenReader={
+                        /\.md$/i.test(preview.path)
+                          ? () => void openReaderForNote(preview.path)
+                          : undefined
+                      }
                     />
                   )}
                 </Suspense>
@@ -4529,11 +4633,13 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         />
       )}
 
-      {/* 沉浸式阅读区（z-40 页面模态档）：底下终端/PTY/右栏全程保持挂载，只是被盖住 */}
+      {/* 沉浸式阅读区（z-40 页面模态档）：底下终端/PTY/右栏全程保持挂载，只是被盖住；
+          右栏 xterm 由上面的 useLayoutEffect 把阅读会话标签的宿主节点搬进 termSlot */}
       {reader && (
         <ReaderOverlay
           pdfPath={reader.pdfPath}
           projectRoot={reader.projectRoot}
+          notePath={reader.notePath ?? null}
           hasAgentTab={readerTabId !== null}
           agentStatus={readerTabId ? (statuses[readerTabId] ?? null) : null}
           agentSession={
@@ -4544,6 +4650,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           onRestartAgent={restartReaderAgent}
           onGoProfiles={() => setPage("profiles")}
           onClose={closeReader}
+          termSlot={bindReaderTermSlot}
+          statusBarSlot={bindReaderStatusSlot}
         />
       )}
 

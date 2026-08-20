@@ -325,6 +325,7 @@
 /* 浅色模式：hover 表面令牌翻转为 5% 黑（bg-hover 随主题变量自动适配，替代原 white/5 类名补丁）；
    其余白色半透明（选中行 bg-white/10、缩进线 border-white/5）仍按类名翻转 */
 [data-theme$="-light"] {
+  color-scheme: light;
   --color-hover: rgb(0 0 0 / 0.05);
   /* diff 增删行：GitHub 式浅底深字（七套浅色共享，截图口径） */
   --color-diff-add-bg: #d9f2e2; --color-diff-add-fg: #177245;
@@ -412,6 +413,9 @@ body {
   --ccode-radius-control: 7px;
   --ccode-radius-panel: 9px;
   --ccode-motion-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* 原生表单控件配色模式：不声明时 WebView 一律按浅色 UA 样式画控件，
+     深色主题下 input/select 等原生件发白（浅色主题在下方 [data-theme$="-light"] 覆写） */
+  color-scheme: dark;
 }
 
 .ccode-app-shell {
@@ -754,6 +758,22 @@ select:focus-visible {
   font-size: 12px;
   overflow-wrap: break-word;
 }
+/* KaTeX 公式（批次 E）：块级可水平滚动（长公式不撑破版心）；
+   占位未升级/渲染失败时显示原始 $..$ 源码，失败加一层淡底提示 */
+.md-body .md-math-display {
+  margin: 0.9em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2em 0;
+}
+.md-body .md-math-failed {
+  background: var(--color-inset);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.92em;
+  color: var(--color-l3);
+}
 
 /* 有界脉冲：播 3 个周期（约 6s）后静止——状态刚变化时提示，长期无限脉冲是注意力消耗。
    步进器大圆（进行中/检查中）与项目区工作区状态点共用；状态离开再回来类名重挂会重新播 */
@@ -782,6 +802,29 @@ select:focus-visible {
   text-decoration: underline dotted;
   text-decoration-color: var(--color-l2);
   text-underline-offset: 2px;
+}
+
+/* PDF 选区高亮层：pdf.js v6 DrawLayer 把选区画成整页 div + SVG clip-path 贴合字形
+   （原生 ::selection 在 scaleX 变换的文本片上溢出/错位，官方 viewer 因此默认自绘）。
+   pdf_viewer.css 里该规则 scoped 在 .pdfViewer .canvasWrapper 下，我们的页宿主没有
+   这两个类，照抄一份到页宿主直子级（样式口径与官方一致，含 pointer-events:none） */
+[data-page-num] > .selection {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  background: rgb(0 90 255 / 0.22);
+}
+
+/* WebKit 的 range.getClientRects() 对同一文本行会同时返回两个盒：span 边框盒
+   （高度由 line-height 决定）与字形 ascent+descent 内容盒，DrawLayer 取并集后
+   高亮比字形胖一截、压住相邻行（Chrome 只返回一个盒，官方 viewer 无此问题）。
+   line-height: normal 让边框盒按字体自身 A+D 计算，与内容盒重合，并集收敛成
+   单个贴字形盒（WKWebView 实测验证）；span 均绝对定位且文字透明，只影响选区几何 */
+.textLayer span {
+  line-height: normal;
 }
 
 /* 护眼反色：CSS filter 只反 canvas 位图层（文字层保持主题色、仍可选中），

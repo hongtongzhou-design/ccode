@@ -101,6 +101,24 @@ test("after 事项未完成时卡在 after 节点（评审之前）", () => {
   assert.equal(flow.currentKey, "human:下载付费");
 });
 
+test("可选 after 事项进主干但不抢「当前节点」（v3.97）", () => {
+  const flow = buildStepFlow({
+    step: step({}),
+    states: [ht({ title: "下载付费", timing: "after", optional: true })],
+    hasDraft: true,
+    runStatus: "review",
+  });
+  // 进主干：出现在评审之前（用户拍板：可选项不该沉到分隔线下像不存在）
+  const kinds = flow.nodes.map((n) => `${n.kind}:${n.section}`);
+  assert.deepEqual(kinds, [
+    "agent:main",
+    "human:main",
+    "review:main",
+  ]);
+  // 但它不做也能跑完——当前节点跳过它直奔评审
+  assert.equal(flow.currentKey, "review");
+});
+
 test("决策项未拍板完：discuss 节点不算完成，即使草稿已存在", () => {
   const s = step({
     discussionSeeds: [],

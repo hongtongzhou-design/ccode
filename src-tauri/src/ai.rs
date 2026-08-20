@@ -83,7 +83,8 @@ fn headless_args(agent: &str, prompt: &str) -> Vec<String> {
 /// 照 codex `-s workspace-write` 的先例给 grok 加 --yolo（自动批准全部工具，含写文件）
 pub(crate) fn headless_task_args(agent: &str, prompt: &str) -> Vec<String> {
     match agent {
-        "codex" => vec!["exec".into(), "--skip-git-repo-check".into(), "-s".into(), "workspace-write".into(), prompt.into()],
+        // workspace-write 默认拦网，lit-watch 巡检必须联网；headless 无人可批，不开网必失败
+        "codex" => vec!["exec".into(), "--skip-git-repo-check".into(), "-s".into(), "workspace-write".into(), "-c".into(), "sandbox_workspace_write.network_access=true".into(), prompt.into()],
         "grok" => vec!["-p".into(), prompt.into(), "--output-format".into(), "json".into(), "--yolo".into()],
         other => headless_args(other, prompt),
     }
@@ -185,10 +186,7 @@ pub(crate) fn ai_prompt_impl(
     let key = profiles::get_key(&profile.id)?;
     let plan = agents::launch_plan(&profile, key, profile.models.first().map(|s| s.as_str()));
     let mut cmd = crate::process::background_command(&binary_path);
-    for a in &plan.args {
-        cmd.arg(a);
-    }
-    for a in headless_args(&profile.agent, &prompt) {
+    for a in compose_headless_args(&profile.agent, &plan.args, &headless_args(&profile.agent, &prompt)) {
         cmd.arg(a);
     }
     for (k, v) in &plan.env {
@@ -215,6 +213,46 @@ pub(crate) fn ai_prompt_impl(
 /// 定时任务执行段（scheduler 用）：与 ai_prompt_impl 同一注入链路，但 cwd 是传入的
 /// 项目目录——不建/删临时目录，也不登记 usage 内部运行：任务跑在用户项目里，
 /// token 本来就该按该项目的正常活动归因。密钥同样只在拉起瞬间读出注入。
+/// 去掉 plan 参数里的沙箱档位（-s/--sandbox 键值对）：无头场景沙箱档位由各调用点的
+/// headless 参数定夺（一次性 prompt = read-only、定时任务 = workspace-write），
+/// 与 plan 的默认 workspace-write 并存会让 codex 报「-s 不能重复」直接退出
+fn strip_sandbox_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == "-s" || a == "--sandbox" {
+            skip_next = true;
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
+}
+
+/// 无头调用的最终参数拼装（plan 注入参数 + 无头形态参数）。
+/// codex 的 exec 是子命令：plan 的 -c/-m 必须跟在子命令头之后——实测 codex v0.148 把
+/// `-c` 放在 exec 前会被顶层解析静默吞掉（provider 回落到 ~/.codex/config.toml 的默认
+/// provider，自定义端点配置整个失效，报错的 401 极具迷惑性）；plan 的默认沙箱档剥离，
+/// 由 headless 尾部的档位决定（-s 单值参数，重复即报错）。其余 agent 无子命令，顺序照旧
+pub(crate) fn compose_headless_args(agent: &str, plan_args: &[String], headless: &[String]) -> Vec<String> {
+    // headless_task_args/headless_args 的 codex 形状固定为 ["exec", "--skip-git-repo-check", …]（有测试钉住）
+    const CODEX_HEAD: usize = 2;
+    if agent == "codex" && headless.len() >= CODEX_HEAD {
+        let mut out = headless[..CODEX_HEAD].to_vec();
+        out.extend(strip_sandbox_args(plan_args));
+        out.extend(headless[CODEX_HEAD..].iter().cloned());
+        out
+    } else {
+        let mut out = plan_args.to_vec();
+        out.extend(headless.iter().cloned());
+        out
+    }
+}
+
 pub(crate) fn run_agent_task(
     profile: &Profile,
     prompt: &str,
@@ -228,10 +266,7 @@ pub(crate) fn run_agent_task(
     let key = profiles::get_key(&profile.id)?;
     let plan = agents::launch_plan(profile, key, profile.models.first().map(|s| s.as_str()));
     let mut cmd = crate::process::background_command(&binary_path);
-    for a in &plan.args {
-        cmd.arg(a);
-    }
-    for a in headless_task_args(&profile.agent, prompt) {
+    for a in compose_headless_args(&profile.agent, &plan.args, &headless_task_args(&profile.agent, prompt)) {
         cmd.arg(a);
     }
     for (k, v) in &plan.env {
@@ -697,7 +732,37 @@ pub async fn ai_conflict_advice(
         }
         let mut contents = Vec::new();
         for f in &files {
-            let text = fs::read_to_string(wt.join(f)).map_err(|e| format!("读取 {f} 失败: {e}"))?;
+            // 删/改冲突（一侧已删除）时工作区里文件不存在，直读会 os error 2：
+            // 回落到索引两侧（:2 工作区分支 / :3 基准分支）拼内容供 AI 判读
+            let text = match fs::read_to_string(wt.join(f)) {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let ours =
+                        crate::workspaces::run_git_raw(&wt, &["show", &format!(":2:{f}")]).ok();
+                    let theirs =
+                        crate::workspaces::run_git_raw(&wt, &["show", &format!(":3:{f}")]).ok();
+                    match (ours, theirs) {
+                        (Some(o), Some(t)) => format!(
+                            "<<<<<<< {}（工作区侧）\n{o}\n=======\n{t}\n>>>>>>> {}（基准侧）\n",
+                            w.branch, w.base_branch
+                        ),
+                        (Some(o), None) => format!(
+                            "（本文件在基准侧「{}」已删除；以下为工作区侧「{}」内容）\n{o}",
+                            w.base_branch, w.branch
+                        ),
+                        (None, Some(t)) => format!(
+                            "（本文件在工作区侧「{}」已删除；以下为基准侧「{}」内容）\n{t}",
+                            w.branch, w.base_branch
+                        ),
+                        (None, None) => {
+                            return Err(format!(
+                                "读取 {f} 失败: 工作区与索引两侧均无内容（os error 2）"
+                            ))
+                        }
+                    }
+                }
+                Err(e) => return Err(format!("读取 {f} 失败: {e}")),
+            };
             contents.push((f.clone(), text));
         }
         let raw = ai_prompt_impl(profiles, None, Some(FN_CONFLICT), build_conflict_prompt(&w.branch, &w.base_branch, &contents))?;
@@ -806,15 +871,52 @@ mod tests {
 
     #[test]
     fn headless_task_args_codex_workspace_write_others_same() {
-        // 定时任务要写项目文件（notes/inbox.md 等），codex 必须 workspace-write
+        // 定时任务要写项目文件（notes/inbox.md 等），codex 必须 workspace-write + 开网（巡检要联网）
         assert_eq!(
             headless_task_args("codex", "你好"),
-            vec!["exec", "--skip-git-repo-check", "-s", "workspace-write", "你好"]
+            vec!["exec", "--skip-git-repo-check", "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "你好"]
         );
         // 其余 agent 与 headless_args 同形
         assert_eq!(headless_task_args("claude-code", "你好"), headless_args("claude-code", "你好"));
         assert_eq!(headless_task_args("kimi", "你好"), headless_args("kimi", "你好"));
         assert_eq!(headless_task_args("opencode", "你好"), headless_args("opencode", "你好"));
+    }
+
+    #[test]
+    fn compose_headless_args_codex_puts_plan_args_after_exec() {
+        // 回归锚点（实测 codex v0.148）：-c/-m 在 exec 前被顶层解析静默吞掉，
+        // provider 回落桌面版 config.toml —— plan 参数必须跟在 exec 子命令头之后；
+        // plan 默认带的 -s workspace-write 要剥离，由 headless 尾部的档位定夺（重复即报错）
+        let plan = vec![
+            "-c".to_string(),
+            r#"model_provider="ccode""#.to_string(),
+            "-m".to_string(),
+            "m1".to_string(),
+            "-s".to_string(),
+            "workspace-write".to_string(),
+        ];
+        let out = compose_headless_args("codex", &plan, &headless_task_args("codex", "你好"));
+        assert_eq!(
+            out,
+            vec![
+                "exec", "--skip-git-repo-check",
+                "-c", r#"model_provider="ccode""#, "-m", "m1",
+                "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "你好"
+            ]
+        );
+        // 一次性 prompt 路径：沙箱档 = read-only（plan 的 workspace-write 不重复出现）
+        let out_ro = compose_headless_args("codex", &plan, &headless_args("codex", "你好"));
+        assert_eq!(
+            out_ro,
+            vec![
+                "exec", "--skip-git-repo-check",
+                "-c", r#"model_provider="ccode""#, "-m", "m1",
+                "-s", "read-only", "你好"
+            ]
+        );
+        // 其余 agent：plan 在前、无头参数在后（无子命令，旧顺序不变）
+        let out2 = compose_headless_args("kimi", &plan, &headless_task_args("kimi", "你好"));
+        assert_eq!(out2, vec!["-c", r#"model_provider="ccode""#, "-m", "m1", "-s", "workspace-write", "-p", "你好"]);
     }
 
     #[test]

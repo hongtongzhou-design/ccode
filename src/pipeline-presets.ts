@@ -3,7 +3,7 @@ import type { ProjectStepDto } from "./types";
 /**
  * 内置流水线模板库（§11.3 机制二、§11.4 P1b 首启引导轻量版）：
  * 步骤是写在 project.toml 里的可编辑预设，引擎不识别「文献/论文」语义。
- * 五套内置模板覆盖综述/科研论文/数据处理/毕业论文/投稿与返修，新增场景 = PIPELINE_TEMPLATES 加一项；
+ * 六套内置模板覆盖综述/科研论文/数据处理/毕业论文/投稿与返修/LaTeX 论文，新增场景 = PIPELINE_TEMPLATES 加一项；
  * 用户另存的模板由后端 list/save/delete_pipeline_template 管理，选择器中与本库合并展示。
  *
  * 简报写作约定（auto 权限模式可无人值守执行）：
@@ -39,12 +39,13 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；\n" +
       "4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律纳入并标注「待确认」，不允许自行裁掉；\n" +
       "5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；\n" +
-      "6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到 papers/（文件名规范化：作者年份-短标题.pdf）；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI），等用户提供全文。\n" +
-      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md 均存在（无付费文献则 to-fetch.md 注明为空），每条记录无空缺字段（未知则标「待补」），筛选记录能让第三人按标准复现每条判定。",
+      "6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到 papers/（文件名规范化：作者年份-短标题.pdf）；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR + TI/DO/UR 尽力而为，缺字段留空不编造），供用户一键导入 Zotero 建成待获取列表。\n" +
+      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris 均存在（无付费文献则 to-fetch 两个文件注明为空），每条记录无空缺字段（未知则标「待补」），筛选记录能让第三人按标准复现每条判定。",
     expectedArtifacts: [
       "papers/screening.md",
       "papers/included.md",
       "papers/to-fetch.md",
+      "papers/to-fetch.ris",
     ],
     skills: ["lit-search"],
     // 这一步的输入是文献，开工前必须先拍板「从哪来」：流程线「定方向」里出现
@@ -55,7 +56,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       {
         title: "下载付费墙文献全文",
         guidance:
-          "agent 筛完会把拿不到全文的列进 papers/to-fetch.md。渠道自选：机构图书馆、作者邮件索取 preprint 等。拿到后加进你的文献库或项目目录再导入；不补的话 agent 按摘要写笔记并标注「仅摘要」。",
+          "agent 筛完会把拿不到全文的列进 papers/to-fetch.md，并附 papers/to-fetch.ris——拖进 Zotero 会自动建成一个待获取列表。渠道自选：机构图书馆、作者邮件索取 preprint 等。拿到后三选一：直接把 PDF 拖到这一行；拷进项目 papers/ 目录；或放进你的文献库后到「文献与数据」重新导入（进库的导完回来手动勾一下）。文件名随意，下一步 agent 会统一改成 作者年份-短标题.pdf；不补的话 agent 按摘要写笔记并标注「仅摘要」。",
         target: "papers/*.pdf",
         timing: "after",
         optional: true,
@@ -71,31 +72,30 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     workspaceName: "lit-notes",
     brief:
       "输入：上一步产物 papers/included.md 与 papers/to-fetch.md（已随 main 合并在本工作区内）。全程按 lit-notes 技能执行。\n" +
-      "1. 按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题或自行补清单）；\n" +
-      "2. 全文来源优先级（写死）：papers/ 已有 PDF（含人工补投）→ 开放获取补下（arXiv/PMC/作者主页 preprint）→ 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」，不得装作读过全文；\n" +
-      "3. 每篇产出 notes/<序号-短标题>.md，固定结构：研究问题 / 方法 / 主要结果 / 局限 / 可引用点（原文关键句+页码或段落位置）；\n" +
-      "4. 每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」，不得编造）；\n" +
-      "5. 收尾前复查：notes/ 中「仅摘要」笔记对应的全文若已出现在 papers/（人工补投），重读全文并更新该笔记、去掉标记；仍未补的保持标注并在报告末尾计数说明。\n" +
+      "1. 先整理人工补投：papers/ 中命名不符「作者年份-短标题.pdf」的 PDF，对照 included.md/to-fetch.md 判定归属后重命名规范，并在 to-fetch.md 勾掉已补行（拿不准归属的不改名、标注「待确认」）；再按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题或自行补清单）；\n" +
+      "2. 精读力度按需问（v3.97）：力度取决于清单规模与全文到位率，开工前问等于让人盲猜。**先粗读 included.md 全部条目的标题与摘要，把「共 N 篇、全文到位 M 篇、我建议核心精读 K 篇（列篇目）其余按摘要记」写进 .ccode/help-wanted.md 问用户一句**（附兜底：若未回复则按你建议的分配继续），写完不要停工、按兜底往下做；\n" +
+      "3. 全文来源优先级（写死）：papers/ 已有 PDF（含人工补投）→ 开放获取补下（arXiv/PMC/作者主页 preprint）→ 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」，不得装作读过全文；\n" +
+      "4. 每篇产出 notes/<序号-短标题>.md，开头先记来源锚点行「> 来源 PDF：<项目内相对路径>.pdf」（沉浸阅读区靠它认回笔记不另建重复），固定结构按 lit-notes 技能八段：一句话总结（≤50字）/ 研究问题 / 方法（附可复现细节）/ 主要结果（区分实验证明与作者推测，注页码+表/图编号）/ 局限（作者自述与本笔记识别分开列）/ 可引用点（原文关键句+页码或段落位置）/ 与本课题的关系 / 疑问与待跟进（待跟进引用同时追加 papers/to-fetch.md）；\n" +
+      "5. 每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」、未经权威源核对标「待核」，不得编造）；\n" +
+      "6. 收尾前复查：notes/ 中「仅摘要」笔记对应的全文若已出现在 papers/（人工补投），重读全文并更新该笔记、去掉标记；仍未补的保持标注并在报告末尾计数说明。\n" +
       "完成标准：included.md 每篇都有对应笔记与 bib 条目；notes/ 与 references.bib 均已提交。",
     expectedArtifacts: ["notes/", "references.bib"],
     skills: ["lit-notes"],
     run: [],
     humanTasks: [
       {
-        title: "继续补投付费全文",
+        title: "继续精读笔记（沉浸阅读区）",
         guidance:
-          "上一步 papers/to-fetch.md 列出的付费文献，拿到后放进 papers/ 或加进你的文献库再到「文献与数据」导入，两种都算完成；agent 收尾前会重读全文、更新对应「仅摘要」笔记。",
-        target: "papers/*.pdf",
-        timing: "during",
+          "验收后想补读或修正哪篇笔记：项目详情的产物清单、或终端页文件树里点开 notes/ 中那份 md →「⛶ 沉浸阅读」进三栏阅读区（笔记｜PDF｜Agent 并排，笔记可直接改，右栏 agent 也能改同一份）。改的是主仓里的笔记本身——改完到「改动」面板提交一下，后面的大纲/初稿步骤读到的就是你的修改版（主仓未提交的改动不进下一步工作区，开工弹层也会提醒）。",
+        target: "",
+        timing: "after",
         optional: true,
       },
     ],
-    decisions: [
-      {
-        q: "精读力度怎么分",
-        options: ["核心文献精读、其余按摘要记", "全部全文精读"],
-      },
-    ],
+    // 「精读力度怎么分」卡片已移除（v3.97，用户拍板）：力度要看到清单规模和全文到位率才定得了，
+    // 开工前点卡片等于让人盲猜——与 v3.89 移除「纳入标准定多严」同一道理。
+    // 改为 agent 粗读清单后带着数字经 help-wanted.md 按需问（见上方简报第 2 条）。
+    decisions: [],
   },
   {
     name: "综述大纲",
@@ -105,9 +105,10 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "输入：notes/ 全部笔记、papers/included.md 与 references.bib（已随 main 合并在本工作区内）。框架构造全程按 review-framework 技能执行（空白清单 → 范式卡片 → 融合）：\n" +
       "1. 提炼研究空白清单：通读 notes/ 各笔记的「局限」与「可引用点」，最新一批精读文献回到原文前言核对作者自述的 gap（优先级最高）；每条空白标注来源笔记/bib 键，多条指向同一空白时合并；仅凭单篇文献主观抱怨的标「孤证」；\n" +
       "2. 拆解范式卡片：从 papers/included.md 选 2-3 篇权威综述类文献（期刊级别/被引优先；清单里没有综述类文献时如实说明并跳过本步，不虚构范式），每篇拆「结构逻辑 / 详略配比 / 论证顺序」三项；\n" +
-      "3. 融合构造框架：以覆盖空白最多的范式做骨架，每条空白落到具体章节；范式冲突时选覆盖空白更多的，落选范式的局部优点吸收为节内参考；不新造与空白无关的章节；空白无处安放时允许新增章节并在该节标注「空白驱动新增」；\n" +
-      "4. 产出 outline.md：章节结构（引言 / 背景 / 主题各节 / 讨论 / 结论），每节给要点（3-6 条）、拟引用 bib 键、回应空白编号；末尾固定附「## 框架推演」段（空白清单 / 范式卡片 / 融合理由三块）；\n" +
-      "5. 只引用 references.bib 中存在的键，不为大纲新造引用。\n" +
+      "3. **先报候选再融合**：把拆出的范式卡片连同「我建议以哪篇为骨架（按覆盖空白数给理由）+ 建议的综述卖点（想让读者读完记住的一句话）」写进 .ccode/help-wanted.md 问用户一句（附兜底：若未回复则按建议执行），写完不要停工、按兜底往下做。——骨架与卖点是全篇最贵的返工点，但开工前问等于让用户在没看到候选时盲选；\n" +
+      "4. 融合构造框架：以覆盖空白最多的范式做骨架（用户已拍板时从用户选择），每条空白落到具体章节；范式冲突时选覆盖空白更多的，落选范式的局部优点吸收为节内参考；不新造与空白无关的章节；空白无处安放时允许新增章节并在该节标注「空白驱动新增」；\n" +
+      "5. 产出 outline.md：章节结构（引言 / 背景 / 主题各节 / 讨论 / 结论），每节给要点（3-6 条）、拟引用 bib 键、回应空白编号；末尾固定附「## 框架推演」段（空白清单 / 范式卡片 / 融合理由三块）；\n" +
+      "6. 只引用 references.bib 中存在的键，不为大纲新造引用。\n" +
       "完成标准：outline.md 结构完整，每节要点/引用键/回应空白齐全，「框架推演」段三块内容齐备。",
     expectedArtifacts: ["outline.md"],
     skills: ["review-framework"],
@@ -119,13 +120,14 @@ const REVIEW_STEPS: ProjectStepDto[] = [
           "重点看末尾「框架推演」段的取舍理由与空白-章节对应；框架不合意时回任务书草稿改，比初稿写完再返工便宜",
         target: "",
         timing: "after",
-        optional: true,
+        // 非可选（用户拍板）：大纲是全流水线返工最贵的点，不合意时初稿整篇白写——
+        // 进主干流程线 + 评审收尾提醒 + 下一步开工弹层二次确认，三处一起提醒
       },
     ],
-    discussionSeeds: [
-      "范式锚点：你读过、欣赏的综述里，哪一篇的结构值得借来做骨架？",
-      "这篇综述的卖点是什么：想让读者读完记住哪一句话？",
-    ],
+    // 讨论种子已移除（用户拍板，与 v3.89 检索步移除决策项同一道理）：范式锚点/卖点
+    // 要看到候选范式卡片才定得了，开工前点卡片等于盲猜；且只读想法卡聊完要手动
+    // 「◈ 沉淀」、只追加草稿末尾，对「定任务书参数」类问题是绕路。改为简报第 3 条
+    // 带候选经 help-wanted 按需问；「跟 AI 商量一下」开场本就逐条问拿不准的点。
   },
   {
     name: "综述初稿",
@@ -182,11 +184,11 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "输入：英文综述模板的 notes/ 与 references.bib、数据处理模板的 analysis/ 分析报告与清洗后数据（接自上游模板时随仓库合并自带；独立启动本项目时，先把上游产物放入对应目录，或在资源面板绑定上游项目目录；没有上游产物时按下面流程自行检索补齐）。\n" +
       "围绕课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源自行判断，并把假设写进 papers/screening.md 开头）执行：\n" +
       "1. 检索与筛选按 lit-search 技能：先定纳入/排除标准（年份、语言、来源级别、相关性），检索候选并逐条判定，产出 papers/screening.md（标准 + 各库检索式与命中数 + 每篇判定理由；拿不准相关性的一律纳入并标注「待确认」）与 papers/included.md（纳入清单，一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；用户导入的检索结果先解析去重、并入 screening.md 候选池再筛选——两处都要看：工作区内 papers/imports/ 目录，以及本文件「项目资源」段的「引文」条目与「上一步产物（提货单）」段中「人工交付」条目给出的绝对路径（按路径直读，勿复制进工作区）；\n" +
-      "2. 全文获取：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的直接下载到 papers/（文件名：作者年份-短标题.pdf）；付费墙的不得尝试绕过，汇总写入 papers/to-fetch.md（标题 — DOI），等用户提供；\n" +
-      "3. 精读按 lit-notes 技能：对 included.md 每篇产出 notes/<序号-短标题>.md（研究问题/方法/主要结果/局限/可引用点五段）；全文缺失（to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，开头标注「仅摘要」；每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」）；\n" +
+      "2. 全文获取：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的直接下载到 papers/（文件名：作者年份-短标题.pdf）；付费墙的不得尝试绕过，汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供，并同步转成 papers/to-fetch.ris（RIS 2004，字段缺则留空不编造）供用户导入 Zotero 建待获取列表；\n" +
+      "3. 精读按 lit-notes 技能：先整理人工补投（papers/ 中命名不符「作者年份-短标题.pdf」的对照清单判定归属后重命名，to-fetch.md 勾掉已补行；拿不准的不改名、标「待确认」）；再对 included.md 每篇产出 notes/<序号-短标题>.md（八段结构按 lit-notes 技能：一句话总结/研究问题/方法/主要结果/局限/可引用点/与本课题的关系/疑问与待跟进）；全文缺失（to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，开头标注「仅摘要」；每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」、未经权威源核对标「待核」）；\n" +
       "4. 按主题归纳研究现状写入 survey/literature.md（主要线索、方法与结论的异同）；提炼 2-3 个候选研究问题，逐一分析现有工作的 gap（未解决的问题、方法的不足、数据的空白），写入 survey/gap-analysis.md；\n" +
       "5. 从候选中选定一个研究问题：优先选 gap 明确且数据/方法可支撑的；拿不准时选文献支撑最多的，并在 gap-analysis.md 记录取舍理由。\n" +
-      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md（无付费文献则注明为空）、notes/、survey/literature.md、survey/gap-analysis.md 均存在，研究问题明确唯一，references.bib 条目无空缺字段。",
+      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris（无付费文献则两个 to-fetch 文件注明为空）、notes/、survey/literature.md、survey/gap-analysis.md 均存在，研究问题明确唯一，references.bib 条目无空缺字段。",
     expectedArtifacts: ["papers/", "notes/", "survey/", "references.bib"],
     skills: ["lit-search", "lit-notes"],
     // 这一步的输入是文献，开工前必须先拍板「从哪来」：流程线「定方向」里出现
@@ -205,7 +207,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       {
         title: "下载付费墙文献全文",
         guidance:
-          "渠道自选：机构图书馆/作者邮件索取 preprint 等；缺权限清单见 papers/to-fetch.md（agent 筛完会列出）；补齐后让 agent 重读全文、更新对应「仅摘要」笔记",
+          "渠道自选：机构图书馆/作者邮件索取 preprint 等；缺权限清单见 papers/to-fetch.md（agent 筛完会列出，附 to-fetch.ris 可拖进 Zotero 建成待获取列表）。拿到后拖到这一行或放进 papers/（文件名随意，agent 会统一改名）；放进自己文献库的到「文献与数据」重新导入后回来手动勾一下。补齐后 agent 会重读全文、更新对应「仅摘要」笔记",
         target: "papers/*.pdf",
         timing: "after",
         optional: true,
@@ -496,11 +498,11 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "输入：综述线产出的 notes/ 文献笔记与 references.bib（接自上游英文综述/科研论文模板时随仓库合并自带；独立启动本项目时，先把上游产物放入对应目录，或在资源面板绑定上游项目目录；没有上游产物时按下面第 1-3 条自行检索补齐）。\n" +
       "围绕课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源推断，并把推断写进 papers/screening.md 与开题报告）执行：\n" +
       "1. 检索与筛选按 lit-search 技能执行：先定纳入/排除标准（年份、语言、来源级别、相关性）写入 papers/screening.md，逐条判定后纳入清单写入 papers/included.md；拿不准相关性的一律纳入并标注「待确认」，不自行剔除；用户人工导入的题录先解析去重并进候选池——两处都要看：工作区内 papers/imports/ 目录，以及本文件「项目资源」段的「引文」条目与「上一步产物（提货单）」段中「人工交付」条目给出的绝对路径（按路径直读，勿复制进工作区）；\n" +
-      "2. 全文获取：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的直接下载到 papers/（文件名：作者年份-短标题.pdf）；付费墙的不绕过，在 included.md 该行标注「需自行获取」并汇总到 papers/to-fetch.md（等人工补全文）；\n" +
-      "3. 精读与笔记按 lit-notes 技能执行：included.md 逐篇产出 notes/<序号-短标题>.md（研究问题 / 方法 / 主要结果 / 局限 / 可引用点），每篇在 references.bib 追加 BibTeX（缺字段标「待补」）；全文未得的按摘要+可见元数据写笔记并在开头标注「仅摘要·待全文」，人工补齐全文后重读更新；\n" +
+      "2. 全文获取：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的直接下载到 papers/（文件名：作者年份-短标题.pdf）；付费墙的不绕过，在 included.md 该行标注「需自行获取」并汇总到 papers/to-fetch.md（等人工补全文），同步转成 papers/to-fetch.ris（RIS 2004，字段缺则留空不编造）供用户导入 Zotero 建待获取列表；\n" +
+      "3. 精读与笔记按 lit-notes 技能执行：先整理人工补投（papers/ 中命名不符「作者年份-短标题.pdf」的对照清单判定归属后重命名，to-fetch.md 勾掉已补行；拿不准的不改名、标「待确认」）；included.md 逐篇产出 notes/<序号-短标题>.md（按 lit-notes 技能八段：一句话总结 / 研究问题 / 方法 / 主要结果 / 局限 / 可引用点 / 与本课题的关系 / 疑问与待跟进），每篇在 references.bib 追加 BibTeX（缺字段标「待补」、未经权威源核对标「待核」）；全文未得的按摘要+可见元数据写笔记并在开头标注「仅摘要·待全文」，人工补齐全文后重读更新；\n" +
       "4. 产出 proposal/proposal.md 开题报告（按 proposal-writer 技能）：选题依据、研究内容、研究目标与创新点、技术路线、可行性与进度安排，引用只用 references.bib 已有键；\n" +
       "5. 产出 chapters/literature-review.md 综述章节草稿：按主题聚类组织，只引用 references.bib 中存在的键，不为综述新造引用。\n" +
-      "完成标准：papers/screening.md 与 included.md 每条记录无空缺字段（未知标「待补」）；proposal.md 五节齐全；literature-review.md 引用键全部可解析；notes/ 与 references.bib 已提交。",
+      "完成标准：papers/screening.md、included.md 与 to-fetch.ris 每条记录无空缺字段（未知标「待补」，无付费文献则 to-fetch 两个文件注明为空）；proposal.md 五节齐全；literature-review.md 引用键全部可解析；notes/ 与 references.bib 已提交。",
     expectedArtifacts: [
       "papers/",
       "notes/",
@@ -517,7 +519,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
       {
         title: "下载付费墙文献全文",
         guidance:
-          "渠道自选：机构图书馆/作者邮件索取 preprint 等；缺权限清单见 papers/to-fetch.md（agent 检索后会列出）；补进 papers/ 后告诉 agent 重读全文、更新对应「仅摘要」笔记",
+          "渠道自选：机构图书馆/作者邮件索取 preprint 等；缺权限清单见 papers/to-fetch.md（agent 检索后会列出，附 to-fetch.ris 可拖进 Zotero 建成待获取列表）。拿到后拖到这一行或放进 papers/（文件名随意，agent 会统一改名）；放进自己文献库的到「文献与数据」重新导入后回来手动勾一下。补齐后 agent 会重读全文、更新对应「仅摘要」笔记",
         target: "papers/*.pdf",
         timing: "during",
         optional: true,
@@ -835,6 +837,126 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
   },
 ];
 
+/** LaTeX 论文（latex-paper）：搭建骨架 → 章节写作 → 编译与排错 → 定稿导出（批次 E）。
+ *  编译脚本 render-pdf 四步共用：优先 tectonic（轻量、自动下载宏包），缺则 latexmk，
+ *  都没有则非零退出并打印安装引导——应用内不做安装器，检测引导就放在脚本里 */
+const LATEX_RENDER_PDF_CMD =
+  'cd manuscript && if command -v tectonic >/dev/null 2>&1; then tectonic main.tex; ' +
+  'elif command -v latexmk >/dev/null 2>&1; then latexmk -pdf -interaction=nonstopmode main.tex; ' +
+  'else echo "未检测到 LaTeX 编译环境：brew install tectonic（轻量，编译时自动下载宏包），' +
+  '或安装 MacTeX/TeXLive 获得 latexmk"; exit 1; fi';
+
+const LATEX_PAPER_STEPS: ProjectStepDto[] = [
+  {
+    name: "搭建骨架",
+    role: "both",
+    workspaceName: "latex-skeleton",
+    brief:
+      "输入：课题主题（见上方「课题主题」段）；上游模板产出的 notes/ 文献笔记与 references.bib（接自英文综述/科研论文模板时随仓库合并自带；没有则从空库起步，并在 manuscript/README.md 注明）。\n" +
+      "1. 文档类按开工前定下的选择（见任务书草稿决策段；未选则按项目层「目标期刊或学校」推断：中文正文用 ctexart，Elsevier 系用 elsarticle，IEEE 用 IEEEtran，ACS 系用 achemso，学位论文用通用学位架；都套不上就用 article 并在 manuscript/README.md 说明依据）。elsarticle/IEEEtran/achemso/ctexart 这些类 TeXLive 自带，tectonic 也会按需自动下载，不要自己去找 .cls 文件；\n" +
+      "2. 若 manuscript/template/ 目录存在（人工事项放入的期刊官方模板），先读其中的 README/说明与示例 .tex，以模板文件为底做适配（documentclass、宏包、章节命令都按模板口径），不要从零另起一套；\n" +
+      "3. 产出 manuscript/main.tex（文档类 + 宏包 + \\input 各章）与 manuscript/chapters/ 下每章一个 .tex（introduction/methods/results/discussion 等，按论文类型定），每章先放节标题骨架与一句话要点；\n" +
+      "4. 参考文献沿用 references.bib：natbib 或 biblatex 二选一（开工前决策；未选定则按文档类惯常搭配——elsarticle/IEEEtran 配 natbib 系，其余配 biblatex），在 main.tex 接好；\n" +
+      "5. 冒烟编译：骨架必须能编译出 PDF（用本步骤 run 脚本 render-pdf；本机没装编译环境时把脚本打印的安装提示写进 .ccode/help-wanted.md 提醒用户，装好前不卡在等待）。\n" +
+      "完成标准：manuscript/main.tex 与 chapters/ 各章文件存在且能编译出 PDF；references.bib 已接入；manuscript/README.md 记录文档类与宏包的选择依据。",
+    expectedArtifacts: ["manuscript/main.tex", "manuscript/chapters/"],
+    skills: [],
+    run: [{ name: "render-pdf", command: LATEX_RENDER_PDF_CMD, default: true }],
+    humanTasks: [
+      {
+        title: "（可选）把期刊官方模板解压到 manuscript/template/",
+        guidance:
+          "目标期刊官网下载的 LaTeX 模板 zip，解压到项目 manuscript/template/ 目录；agent 开工时会先读模板说明再搭骨架。没有指定模板就跳过，agent 按开工前选的文档类从零搭",
+        target: "manuscript/template/",
+        timing: "before",
+        optional: true,
+      },
+    ],
+    decisions: [
+      {
+        q: "文档类选哪个",
+        options: ["elsarticle", "IEEEtran", "achemso", "ctexart", "学位论文通用架"],
+      },
+      { q: "参考文献宏包", options: ["natbib", "biblatex"] },
+    ],
+    discussionSeeds: [
+      "目标期刊/学校有没有官方模板：有就先拿到手再搭骨架（见人工事项），别搭完再返工？",
+    ],
+  },
+  {
+    name: "章节写作",
+    workspaceName: "latex-writing",
+    brief:
+      "输入：manuscript/main.tex 骨架与 chapters/ 各章文件、notes/ 文献笔记与 references.bib（已随 main 合并在本工作区内）。引用纪律全程按 review-writing 技能执行（[@bib键] 换成 \\cite{bib键}，口径不变）。\n" +
+      "1. 按骨架逐章充实内容：每节成文，学术语气，目标篇幅按项目层设定（未设定时每章 800-1500 词）；\n" +
+      "2. 引用一律 \\cite{bib键}，键必须存在于 references.bib——严禁编造文献、严禁新造键；确需引用而库里没有的文献，先在 references.bib 补条目（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」）再引用；\n" +
+      "3. 图表用占位：figure/table 环境只放 \\caption 与「（待绘制）」说明，不虚构数据；\n" +
+      "4. 没有文献支撑的论断不得下；必须保留的判断在该行行尾加 % TODO 待核实 注释；\n" +
+      "5. 每写完一章跑一次本步骤 run 脚本 render-pdf 确认可编译，报错立即读 manuscript/main.log 定位修掉，不攒到最后。\n" +
+      "完成标准：chapters/ 各章内容成文，全文编译通过，\\cite 键全部可在 references.bib 解析。",
+    expectedArtifacts: ["manuscript/chapters/"],
+    skills: ["review-writing"],
+    run: [{ name: "render-pdf", command: LATEX_RENDER_PDF_CMD, default: true }],
+    discussionSeeds: [
+      "卖点怎么讲：贡献的三句话电梯陈述怎么定，Introduction 往哪个方向带？",
+    ],
+  },
+  {
+    name: "编译与排错",
+    workspaceName: "latex-compile",
+    brief:
+      "输入：manuscript/ 全文（已随 main 合并在本工作区内）。\n" +
+      "1. 用本步骤 run 脚本 render-pdf 编译：脚本优先 tectonic（缺则 latexmk），两个都没有会打印安装提示并以非零退出；本机缺环境时把提示原样写进 .ccode/help-wanted.md 转给用户，不要自己下载安装编译器；\n" +
+      "2. 编译报错先读 manuscript/main.log 定位（缺宏包/未闭合环境/引用未解析），对症改源码，禁止绕路——不删报错的命令、不换文档类、不把整段注释掉；\n" +
+      "3. 缺宏包：tectonic 会自动下载；latexmk 依赖本机 TeXLive 完整安装，遇到缺失包错误优先换用 TeXLive 自带的等价宏包，换不了的在 compile-notes.md 说明；\n" +
+      "4. 警告分级处理：Citation/Reference undefined（PDF 里的 ??）必须清零；明显超版的 Overfull \\hbox 逐处调整；其余警告记录进 manuscript/compile-notes.md，不逐个纠缠；\n" +
+      "5. 产出 manuscript/main.pdf 与 manuscript/compile-notes.md（编译口径、清零项、遗留警告清单）。\n" +
+      "完成标准：render-pdf 退出码为 0，main.pdf 页数与结构符合骨架；Citation/Reference undefined 为零。",
+    expectedArtifacts: ["manuscript/main.pdf", "manuscript/compile-notes.md"],
+    skills: [],
+    run: [{ name: "render-pdf", command: LATEX_RENDER_PDF_CMD, default: true }],
+    humanTasks: [
+      {
+        title: "（可选）安装 LaTeX 编译环境",
+        guidance:
+          "本机任选一个：brew install tectonic（轻量，编译时自动下载宏包）；或安装 MacTeX/TeXLive（完整，自带 latexmk）。已装过就跳过，run 脚本会自动识别",
+        target: "",
+        timing: "before",
+        optional: true,
+      },
+    ],
+  },
+  {
+    name: "定稿导出",
+    role: "you",
+    workspaceName: "latex-final",
+    brief:
+      "输入：manuscript/ 全文与 main.pdf（已随 main 合并在本工作区内）。\n" +
+      "1. 通读定稿：语法、用词与段落衔接，只改表达不改学术观点与数据；发现内容性错误在该行行尾加 % TODO 待核实 注释，不自行改写事实；\n" +
+      "2. 引用闭环核对：全文 \\cite 键逐条对照 references.bib，未解析键与未被引用条目清单写入 manuscript/final-check.md（未使用条目只列出、不删）；\n" +
+      "3. 版面终检：图表编号连续、交叉引用无 ??、无残留「（待绘制）」占位；问题一并写入 final-check.md 并逐项处理；\n" +
+      "4. 终编译：跑本步骤 run 脚本 render-pdf 产出定稿 manuscript/main.pdf；\n" +
+      "5. 产出 manuscript/changelog.md，逐条记录定稿阶段的修改点。\n" +
+      "完成标准：final-check.md 逐项有处理结论，main.pdf 终编译通过，changelog.md 已提交。",
+    expectedArtifacts: [
+      "manuscript/main.pdf",
+      "manuscript/final-check.md",
+      "manuscript/changelog.md",
+    ],
+    skills: [],
+    run: [{ name: "render-pdf", command: LATEX_RENDER_PDF_CMD, default: true }],
+    humanTasks: [
+      {
+        title: "核对 % TODO 待核实 处并拍板定稿",
+        guidance:
+          "定稿里的 % TODO 待核实 只有你能对照原始文献确认；逐条处理后再算定稿，导出投稿用最终 PDF",
+        target: "",
+        timing: "after",
+      },
+    ],
+  },
+];
+
 /** 内置模板清单：选择器按此顺序展示，用户模板列在其后 */
 export const PIPELINE_TEMPLATES: PipelineTemplateDef[] = [
   {
@@ -896,6 +1018,17 @@ export const PIPELINE_TEMPLATES: PipelineTemplateDef[] = [
     projectSettings: [
       "目标期刊：（决定格式、字数与文风，是这条流程的前提）",
       "投稿轮次：（首投 / 返修第 N 轮）",
+    ],
+  },
+  {
+    id: "latex-paper",
+    name: "LaTeX 论文",
+    description:
+      "搭 LaTeX 骨架（可套期刊官方模板）→ 章节写作 → 编译排错 → 定稿导出 PDF",
+    steps: LATEX_PAPER_STEPS,
+    projectSettings: [
+      "目标期刊或学校：（决定文档类与排版格式，是骨架的前提）",
+      "篇幅与语种：（如 英文双栏 10 页 / 中文学位论文）",
     ],
   },
 ];

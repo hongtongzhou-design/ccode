@@ -1,10 +1,63 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { marked } from "marked";
+import { renderMathInto } from "../md-math";
 import { rowActionClass } from "./PageFrame";
+import { confirmDialog } from "./ConfirmDialog";
 import type { DirEntryDto } from "./FileTree";
 import { absTime, relTime } from "../rel-time";
 import { useAppStore } from "../store";
 import type { ProjectConfigReadDto } from "../types";
+
+/** 可就地预览的文本类扩展名（阅读态渲染 md，其余按纯文本预格式化展示）；
+ *  pdf/docx 预览组件接线重（onAskAi 等在终端页），维持跳终端页 */
+const INLINE_PREVIEW_EXTS = ["md", "markdown", "txt", "ris", "bib"];
+
+/** 拖出会话的悬浮图标（48×48 文档形 PNG，生成脚本见 git 历史；只是拖拽时的视觉反馈，不要求精美） */
+const DRAG_ICON_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAAi0lEQVR4nO3WPQqAMBBE4Rw7pcdL43GCpWIhiPizxGJ24C28fr5uS+GSXq3TmqVhQO+LvNZmX8A+3hZwjLcEnMfbAa7jrQB3420AT+MtAG/j0wO+xqcGRManBUTHpwVEs/+FAKgDoA6AOgDqAKgDoA6AOgDqAKgDoA6AOgDqAKgDoO4XIEtDAI6L3QY0A9vXVQwJnAAAAABJRU5ErkJggg==";
+
+/** 产物文件 OS 级拖出（v3.97）：WebView 的 HTML5 拖拽出不了窗口，必须经 tauri-plugin-drag
+ *  开系统拖拽会话——才能把 to-fetch.ris / PDF 直接拖进 Zotero 等外部应用。
+ *  必须在 mousedown 里同步发起（macOS 要求拖拽会话挂在鼠标按下事件上），
+ *  所以拖出手柄独占一个小图标，不与「点击预览」抢手势。失败静默：拖拽没起来就当没拖 */
+function startOsFileDrag(path: string) {
+  const onEvent = new Channel<unknown>();
+  void invoke("plugin:drag|start_drag", {
+    item: [path],
+    image: DRAG_ICON_DATA_URL,
+    onEvent,
+  }).catch(() => {});
+}
+
+/** 行内拖出手柄：mousedown 即起系统拖拽；阻止冒泡避免触发行点击预览 */
+function DragOutHandle({ path }: { path: string }) {
+  return (
+    <span
+      role="button"
+      aria-label="拖出到其他应用"
+      title="按住拖进其他应用（如 Zotero、Finder）"
+      className="shrink-0 cursor-grab select-none px-0.5 text-micro text-l4 hover:text-l2"
+      onMouseDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        startOsFileDrag(path);
+      }}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+    >
+      ⠿
+    </span>
+  );
+}
+
+function extOf(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
+}
 
 export function formatSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -89,6 +142,7 @@ export default function ArtifactChecklist({
   rootLabel: string;
 }) {
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);
+  const setReaderReq = useAppStore((s) => s.setReaderReq);
   const setPage = useAppStore((s) => s.setPage);
   const [rows, setRows] = useState<ArtifactRow[] | null>(null);
   const [stepName, setStepName] = useState<string | null>(null);
@@ -96,6 +150,142 @@ export default function ArtifactChecklist({
   const [stepFound, setStepFound] = useState(true);
   const [loading, setLoading] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
+  // 文本类产物就地预览（v3.97）：不再跳终端页。弹层形式与 TASK.md 预览/编辑同款——
+  // 标题栏 + 预览/编辑切换 + 底部「在终端页打开 / 取消 / 保存」；读盘走 read_file_preview
+  // （根白名单 + 256KB 上限，截断则只读），保存走 save_file_preview 原子写
+  const [inlinePreview, setInlinePreview] = useState<{
+    path: string;
+    name: string;
+    /** 打开时读到的原文，判断未保存改动用 */
+    origin: string;
+    text: string;
+    edit: boolean;
+    truncated: boolean;
+    saving: boolean;
+    error: string | null;
+  } | null>(null);
+
+  async function openInlinePreview(f: DirEntryDto) {
+    setInlinePreview({
+      path: f.path,
+      name: f.name,
+      origin: "",
+      text: "",
+      edit: false,
+      truncated: false,
+      saving: false,
+      error: null,
+    });
+    try {
+      const r = await invoke<{ text: string; truncated: boolean }>(
+        "read_file_preview",
+        { path: f.path, root },
+      );
+      setInlinePreview((s) =>
+        s && s.path === f.path
+          ? { ...s, origin: r.text, text: r.text, truncated: r.truncated }
+          : s,
+      );
+    } catch (reason) {
+      setInlinePreview((s) =>
+        s && s.path === f.path ? { ...s, error: String(reason) } : s,
+      );
+    }
+  }
+
+  async function saveInlinePreview() {
+    if (!inlinePreview || inlinePreview.saving) return;
+    setInlinePreview({ ...inlinePreview, saving: true, error: null });
+    try {
+      await invoke("save_file_preview", {
+        path: inlinePreview.path,
+        root,
+        text: inlinePreview.text,
+      });
+      setInlinePreview(null);
+      setRefreshTick((v) => v + 1);
+    } catch (reason) {
+      setInlinePreview((s) =>
+        s ? { ...s, saving: false, error: String(reason) } : s,
+      );
+    }
+  }
+
+  /** 关闭前守一道：有未保存改动时确认（与 TASK.md 弹层同口径） */
+  async function closeInlinePreview() {
+    if (!inlinePreview) return;
+    if (
+      inlinePreview.text !== inlinePreview.origin &&
+      !(await confirmDialog("有未保存的改动，确定放弃？", {
+        danger: true,
+        confirmText: "放弃",
+      }))
+    ) {
+      return;
+    }
+    setInlinePreview(null);
+  }
+
+  /** md 笔记「⛶ 沉浸阅读」：reader_for_note 一次给齐归属项目根 + 配对 PDF + 实际笔记路径
+      （工作区里的笔记自动映射回主仓副本；未合并/无配对/未登记等失败原因就地在弹层报错） */
+  const [immersiveBusy, setImmersiveBusy] = useState(false);
+  async function openImmersive() {
+    if (!inlinePreview || immersiveBusy) return;
+    setImmersiveBusy(true);
+    try {
+      const r = await invoke<{
+        projectRoot: string;
+        pdfPath: string;
+        notePath: string;
+      }>("reader_for_note", { notePath: inlinePreview.path });
+      setReaderReq({
+        pdfPath: r.pdfPath,
+        projectRoot: r.projectRoot,
+        notePath: r.notePath,
+      });
+      setPage("terminal");
+      setInlinePreview(null);
+    } catch (reason) {
+      setInlinePreview((s) => (s ? { ...s, error: String(reason) } : s));
+    } finally {
+      setImmersiveBusy(false);
+    }
+  }
+
+  // Esc 关闭预览弹层（有改动时同样先确认）
+  useEffect(() => {
+    if (!inlinePreview) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        void closeInlinePreview();
+      }
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inlinePreview?.text, inlinePreview?.origin]);
+
+  const isMd = inlinePreview
+    ? ["md", "markdown"].includes(extOf(inlinePreview.name))
+    : false;
+  const previewHtml = useMemo(
+    () =>
+      inlinePreview && isMd
+        ? marked.parse(inlinePreview.text, {
+            gfm: true,
+            breaks: false,
+            async: false,
+          })
+        : "",
+    [inlinePreview, isMd],
+  );
+  // 产物内联预览的公式升级（与文件预览阅读版式同一口径；无公式不加载 katex）
+  const previewHtmlRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (previewHtmlRef.current) void renderMathInto(previewHtmlRef.current);
+  }, [previewHtml]);
 
   useEffect(() => {
     let stale = false;
@@ -173,7 +363,12 @@ export default function ArtifactChecklist({
             const produced = row.files.length > 0;
             // 单文件产物：行本身可点击预览；目录产物：行只表状态，文件逐个列在下方
             const single = row.files.length === 1 ? row.files[0] : null;
+            // 文本类就地预览（TASK.md 同款弹层）；pdf/docx 等跳终端页（右栏 preview 页签）
             const openFile = (f: DirEntryDto) => {
+              if (INLINE_PREVIEW_EXTS.includes(extOf(f.name))) {
+                void openInlinePreview(f);
+                return;
+              }
               setPreviewReq({ path: f.path, name: f.name, root });
               setPage("terminal");
             };
@@ -190,6 +385,10 @@ export default function ArtifactChecklist({
                 </span>
               </>
             );
+            const fileTitle = (f: DirEntryDto) =>
+              INLINE_PREVIEW_EXTS.includes(extOf(f.name))
+                ? `预览 ${f.path}`
+                : `在终端页预览 ${f.path}`;
             return (
               <li key={row.entry}>
                 {!produced ? (
@@ -204,13 +403,14 @@ export default function ArtifactChecklist({
                   <button
                     type="button"
                     className="flex h-7 w-full items-center gap-2 rounded-sm px-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
-                    title={`在终端页预览 ${single.path}`}
+                    title={fileTitle(single)}
                     onClick={() => openFile(single)}
                   >
                     <span className="shrink-0 text-ok-text">✓</span>
                     <span className="min-w-0 flex-1 truncate font-mono">
                       {single.name}
                     </span>
+                    <DragOutHandle path={single.path} />
                     {fileMeta(single)}
                   </button>
                 ) : (
@@ -230,12 +430,13 @@ export default function ArtifactChecklist({
                           <button
                             type="button"
                             className="flex h-7 w-full items-center gap-2 rounded-sm px-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
-                            title={`在终端页预览 ${f.path}`}
+                            title={fileTitle(f)}
                             onClick={() => openFile(f)}
                           >
                             <span className="min-w-0 flex-1 truncate font-mono">
                               {f.name}
                             </span>
+                            <DragOutHandle path={f.path} />
                             {fileMeta(f)}
                           </button>
                         </li>
@@ -247,6 +448,133 @@ export default function ArtifactChecklist({
             );
           })}
         </ul>
+      )}
+      {/* 文本类产物就地预览弹层（v3.97）：与 TASK.md 预览/编辑同款——标题栏 +
+          预览/编辑切换 + 底部「在终端页打开 / 取消 / 保存」。背景点击/Esc 关闭，
+          有未保存改动先确认。截断文件（>256KB）只读，不给编辑 */}
+      {inlinePreview && (
+        <div
+          className="ccode-fade fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => void closeInlinePreview()}
+        >
+          <div
+            className="ccode-float-surface flex h-[70vh] w-full max-w-2xl flex-col rounded-md border border-field p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex shrink-0 items-baseline gap-2">
+              <h2 className="min-w-0 truncate text-base font-semibold text-l1">
+                {inlinePreview.name}
+              </h2>
+              <span
+                className="min-w-0 truncate font-mono text-micro text-l4"
+                title={inlinePreview.path}
+              >
+                {inlinePreview.path}
+              </span>
+              {!inlinePreview.truncated && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setInlinePreview((s) => (s ? { ...s, edit: !s.edit } : s))
+                  }
+                  title={inlinePreview.edit ? "看渲染后的排版" : "编辑原文"}
+                  className="ml-auto shrink-0 self-center rounded-sm border border-field px-1.5 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
+                >
+                  {inlinePreview.edit ? "预览" : "编辑"}
+                </button>
+              )}
+            </div>
+            {inlinePreview.edit ? (
+              <textarea
+                value={inlinePreview.text}
+                onChange={(e) =>
+                  setInlinePreview((s) =>
+                    s ? { ...s, text: e.target.value } : s,
+                  )
+                }
+                spellCheck={false}
+                className="min-h-0 flex-1 resize-none rounded-md border border-field bg-canvas p-3 font-mono text-xs leading-5 text-l2 outline-none focus:border-cta-bd"
+              />
+            ) : isMd ? (
+              <div className="min-h-0 flex-1 overflow-auto rounded-md border border-field bg-canvas">
+                <div
+                  ref={previewHtmlRef}
+                  className="md-body px-4 py-3"
+                  dangerouslySetInnerHTML={{ __html: previewHtml }}
+                />
+              </div>
+            ) : (
+              <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-md border border-field bg-canvas p-3 font-mono text-xs leading-5 text-l2">
+                {inlinePreview.text}
+              </pre>
+            )}
+            <p className="mt-2 shrink-0 text-micro text-l4">
+              {inlinePreview.truncated
+                ? "文件较大，只显示了开头部分（只读）；要完整编辑请「在终端页打开」。"
+                : "改动保存后直接写回该文件。"}
+            </p>
+            <div className="mt-3 flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setPreviewReq({
+                    path: inlinePreview.path,
+                    name: inlinePreview.name,
+                    root,
+                  });
+                  setPage("terminal");
+                }}
+                title="改用终端页打开（要看改动对比或用编辑器时）"
+                className="rounded-sm px-2 py-1.5 text-micro text-l4 hover:bg-hover hover:text-l2"
+              >
+                在终端页打开
+              </button>
+              {isMd && (
+                <button
+                  type="button"
+                  onClick={() => void openImmersive()}
+                  disabled={immersiveBusy}
+                  title="找到这篇笔记对应的 PDF，进沉浸阅读区（笔记｜PDF｜Agent 三栏，笔记可直接编辑）"
+                  className="rounded-sm px-2 py-1.5 text-micro text-l4 hover:bg-hover hover:text-l2 disabled:opacity-50"
+                >
+                  {immersiveBusy ? "查找 PDF…" : "⛶ 沉浸阅读"}
+                </button>
+              )}
+              {inlinePreview.error && (
+                <span className="min-w-0 flex-1 truncate text-micro text-err-text">
+                  {inlinePreview.error}
+                </span>
+              )}
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void closeInlinePreview()}
+                  className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
+                >
+                  取消
+                </button>
+                {!inlinePreview.truncated && (
+                  <button
+                    type="button"
+                    disabled={
+                      inlinePreview.saving ||
+                      inlinePreview.text === inlinePreview.origin
+                    }
+                    onClick={() => void saveInlinePreview()}
+                    title={
+                      inlinePreview.text === inlinePreview.origin
+                        ? "没有改动"
+                        : "保存改动"
+                    }
+                    className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                  >
+                    {inlinePreview.saving ? "保存中…" : "保存"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

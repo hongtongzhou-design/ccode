@@ -407,6 +407,19 @@ fn plan_writes(
     let base_url = profile.base_url.as_deref();
     // 全局模式没有运行时模型选择，默认取模型列表首个（与启动注入的兜底一致）
     let model = models.first().map(|s| s.as_str());
+    // 能力表先行：不支持的 agent 带原因 fail-loud，不进写计划分发
+    match crate::agent_specs::agent_spec(&profile.agent).map(|s| s.set_global) {
+        Some(crate::agent_specs::SetGlobalCap::Supported) => {}
+        Some(crate::agent_specs::SetGlobalCap::Unsupported(reason)) => {
+            return Err(format!("「设为全局默认」暂不支持 {}：{reason}", profile.agent))
+        }
+        None => {
+            return Err(format!(
+                "「设为全局默认」暂不支持 {}（未适配）",
+                profile.agent
+            ))
+        }
+    }
     let mut plans = Vec::new();
     let mut push = |tag: &'static str, path: PathBuf, content: String| {
         plans.push(PlannedWrite { tag, path, content });
@@ -522,8 +535,9 @@ fn plan_writes(
                 push(tag, path, content);
             }
         }
+        // 防御兜底：能力表标 Supported 但这里漏了 arm（两表漂移），属内部错误
         other => return Err(format!(
-            "「设为全局默认」暂不支持 {other}（grok 的全局配置是 TOML [model.<name>] 段结构，首版仅支持启动注入；其余 agent 未适配）"
+            "内部错误：{other} 的能力表标为支持「设为全局默认」但写计划缺失"
         )),
     }
     Ok(plans)

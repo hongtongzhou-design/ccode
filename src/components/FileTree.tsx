@@ -210,7 +210,8 @@ function FileTree({
   refreshKey: number;
   onOpenFile: (path: string, name: string, root: string) => void;
   onOpenTerminal: (path: string) => void;
-  /** PDF 右键「⛶ 沉浸阅读」（批次 B1 阅读区入口）；不给则不显示该菜单项 */
+  /** PDF/md 右键「⛶ 沉浸阅读」（批次 B1 阅读区入口；v3.98 起 md 笔记走 reader_for_note 配对 PDF）；
+      不给则不显示该菜单项 */
   onOpenReader?: (path: string, name: string, root: string) => void;
   /** 文件系统变化回调（fs-changed 防抖后触发，供 GitPanel 等联动刷新） */
   onFsEvent?: () => void;
@@ -684,7 +685,7 @@ function FileTree({
                   },
                 ]
               : []),
-            ...(!menu.isDir && /\.pdf$/i.test(menu.path) && onOpenReader
+            ...(!menu.isDir && /\.(pdf|md)$/i.test(menu.path) && onOpenReader
               ? [
                   {
                     label: "⛶ 沉浸阅读",

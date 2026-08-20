@@ -75,18 +75,21 @@ docs/                        # 架构方案 + 九 CLI 适配参考（规格）
   conventions/               # 主题化约定细则（改动对应领域前必读，见「关键约定」索引）
 src/                         # 前端 React + TS + Tailwind v4（vite 插件接入）
   pages/                     # 八页：配置⇄ 项目⛁（workspaces，v3.92 起 UI 页名「项目」） 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
-  components/                # WorkspaceReviewView、PipelineEditor（含「＋ 从模板追加」）、ProjectGroup/ProjectRail、ArtifactChecklist、TaskCardsSection、FileTree、
+  components/                # WorkspaceReviewView、PipelineEditor（含「＋ 从模板追加」）、ProjectGroup/ProjectRail、ArtifactChecklist（文本类产物就地预览层 +
+                             # md 笔记「⛶ 沉浸阅读」入口（v3.98：pdf_for_note 配对后发 readerReq 带 notePath 进阅读区）+
+                             # ⠿ 拖出手柄经 tauri-plugin-drag 做 OS 级文件拖出——WebView HTML5 拖拽出不了窗口）、TaskCardsSection、FileTree、
                              # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker/DigestPicker、
-                             # KickoffConfirmDialog（开工确认弹层：TASK.md 预览/编辑（草稿优先）+ 旧简报并入兜底 + 技能区（含 MCP 归处标记）+ 人工事项区 + 主仓提醒）、
+                             # KickoffConfirmDialog（开工确认弹层：TASK.md 预览/编辑（草稿优先）+ 旧简报并入兜底 + 技能区（含 MCP 归处标记）+ 人工事项区 + 主仓提醒 +
+                             # 上一步收尾软门：紧邻上一步非可选 after 事项未勾 → 「确认开始」二击变「仍要开工」才开，只确认不阻断）、
                              # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态）、
                              # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑）、StepFlow（步骤内协同流程线）、
                              # ScheduleSection（项目分组「◔ 定时任务」区块）、
                              # LitWatchCard（「◔ 文献雷达」卡片：新命中/精读清单双页签 + 近 8 周趋势 + →精读/◈解读/↓全文，
                              #   挂项目详情工作段 TaskCardsSection 之后）、
-                             # ReaderOverlay（沉浸阅读区全屏覆盖层，v3.96：三栏「笔记｜PDF｜Agent 对话」，fixed inset-0 z-40，
-                             #   Esc 退出级联最优先，底下终端/PTY 保持挂载；会话数据/注入由 TerminalPage 供给）+
-                             #   PdfContinuousView（连续滚动 PDF 栏：±2 页虚拟化懒渲染、选段浮动条四钮、▦ 圈选截图、
-                             #   ⌘+点击段落对照、进度记忆/护眼反色/术语淡高亮）+ ReaderToolsPanel（✦ 工具页签：译/生词本/大纲三段折叠）、
+                             # ReaderOverlay（沉浸阅读区全屏覆盖层，v3.96：三栏「笔记｜PDF｜Agent 终端」，fixed inset-0 z-40，
+                             #   Esc 退出级联最优先，底下终端/PTY 保持挂载；右栏 = 阅读会话标签 xterm 宿主搬移，注入由 TerminalPage 供给）+
+                             #   PdfContinuousView（连续滚动 PDF 栏：±2 页虚拟化懒渲染、选段浮动条（译/◈问 AI/＋生词/⋯）、▦ 圈选截图、
+                             #   ⌘+点击段落对照（结果进同款浮卡）、进度记忆/护眼反色/术语淡高亮）、
                              # TemplatePickModal（注册成功后的研究流程模板选择层：五套内置模板 +
                              # 「不使用研究流程」（写 pipeline_opt_out 标记）/「稍后再选」（不留痕）两出口）、
                              # FuseDraftModal（「◈ 融合进任务书」预览编辑弹层：AI 融合稿可改后确认才写草稿）、
@@ -99,7 +102,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   components/HoverTip.tsx      # 应用内 tooltip 共享件（v3.93 提取自 ProjectGroup）：useHoverTip + HoverTip，
                              # portal 到 body（免疫祖先 opacity/transform 的 fixed 包含块问题）、滚动/缩放即关、
                              # up 参数支持锚点上方弹出（行内动作栏 tooltip 专用）；PageFrame 的 RowAction 内置上方 tooltip
-  pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES
+  pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES（六套，含 v3.97「LaTeX 论文」）
   pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras 单一出处，弹层预览与落盘共用）；
                              # 工作区→终端交接单一出处 buildWorkspaceTerminalRequest（reuseKey 找回同工作区标签 +
                              # 无 prompt 时 resume 最近会话）
@@ -114,9 +117,13 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   reader.ts                  # 沉浸阅读区纯逻辑：分栏钳制与像素换算/圈选命中与 canvas 映射/截图注入格式/
                              # glossary 表格契约（与 reader.rs 双端镜像，改动需同步）/段落边界提取/术语匹配/
                              # 进度与护眼存储键（tests/reader.test.ts）
+  md-math.ts                 # md 阅读版式公式渲染（批次 E）：marked 扩展按 Pandoc 口径切分 $/$$
+                             # （边界规则/转义/代码块不渲染/货币不误判）+ renderMathInto 懒加载
+                             # katex+CSS（独立 chunk 不进主包，失败回落原文，tests/md-math.test.ts 25 例）
   task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/会话按卡分组/卡片 kind（idea 想法卡 / draft 讨论卡）过滤
                              # （tests/task-cards.test.ts）
-  step-flow.ts               # 步骤内协同流程线纯逻辑：种子→before→agent→during→after→评审节点链（tests/step-flow.test.ts）
+  step-flow.ts               # 步骤内协同流程线纯逻辑：种子→before→agent→during→after→评审节点链
+                             # （v3.97 起 after 档一律进主干，可选项带徽标但不抢当前节点；tests/step-flow.test.ts）
   schedule-tasks.ts          # 定时任务纯逻辑：周期白话/相对时间/按 projectRoot 过滤（tests/schedule-tasks.test.ts）
   schedule-skill.ts          # 定时巡检「技能」下拉与默认任务名跟随纯逻辑（lit-watch 恒最前/默认「文献雷达」、
                              # 手改不覆盖、空库兜底，tests/schedule-skill.test.ts）
@@ -124,6 +131,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   notify.ts                  # 长任务 OS 通知（仅「待确认」跃迁 + 未聚焦 + 30s 去抖；「已回复」不通知）
   git-status-groups.ts       # 改动列表状态分组/白话双层纯逻辑
   file-icons.ts              # 文件类型小徽标纯逻辑：扩展名 → 短标签 + 固定识别色（tests/file-icons.test.ts）
+  editor-languages.ts        # monaco 语言注册（批次 E）：monaco-editor 0.56 ESM 不带 latex，
+                             # 自带紧凑 Monarch 定义覆盖 .tex/.sty/.cls/.bib（tests/editor-languages.test.ts）
   workspace-visibility.ts    # 聚焦步骤工作区可见性过滤纯逻辑（不匹配任何步骤的手动工作区始终可见，
                              # tests/workspace-visibility.test.ts）
   git-commit-message.ts      # 空提交信息的本地默认信息生成
@@ -146,14 +155,19 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
 src-tauri/src/
   agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/
                              #   model_switch 运行中切模型（claude/gemini 直切、codex/kimi/opencode 唤选择器）与
-                             #   effort_levels 思考档槽位（本期仅 claude /effort 实证，kimi/codex 待实机））
+                             #   effort_levels 思考档槽位（本期仅 claude /effort 实证，kimi/codex 待实机）；
+                             #   能力表三字段 fail-loud（原因即用户可见文案，后端报错与前端置灰同源）：
+                             #   set_global（cursor/grok 不支持）/ mcp_write（grok 只读，请用 grok mcp add）/
+                             #   skill_dist（cursor/grok 强制 copy）——global_config/mcp.rs/skills.rs 全部改查表，
+                             #   前端经 agent_capabilities command 读表置灰）；
+                             #   resolve_binary 兜底候选目录 binary_candidate_dirs 同在本模块（macOS 含 /Library/TeX/texbin）
   agents.rs                  # 适配器分发入口 + resolve_binary 二进制解析（GUI 短 PATH 兜底）+ readonly_launch_args（聊想法只读注入）；
                              # 选择器显示名统一「配置名 · 模型」（claude _NAME 槽 / codex catalog display_name /
                              #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）
   model_registry.rs          # 模型能力注册表（同 pricing.rs 口径）：内置前缀表 + model-capabilities.json 覆盖 +
                              # 关键词推断兜底；kimi capabilities/max_context_size、codex context_window、
                              #   opencode reasoning/limit 共用；内置表宁缺毋滥（收错比漏报有害）
-  profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥
+  profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥；删除时同步清设置引用（settings::clear_profile_refs）
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
   global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）；
                              # kimi 的 [models.*] 随写 display_name（配置名·模型，选择器 label 优先它）
@@ -178,7 +192,9 @@ src-tauri/src/
                              # include_str! 内嵌 src-tauri/resources/skills/ 14 个技能，启动幂等播种，不覆盖/不复活用户改动）、
                              # 内置技能更新（check_builtin_skill_updates 种子逐字节比对 + apply_builtin_skill_update
                              # 覆盖前备份 SKILL.md.bak-<yyyymmdd> 后原子写入）、产物冲突检测（frontmatter outputs
-                             # 解析进 SkillDto，list 时现算；前端 skill-conflicts.ts 判定 + StepSkillsChips 警告行）
+                             # 解析进 SkillDto，list 时现算；前端 skill-conflicts.ts 判定 + StepSkillsChips 警告行）；
+                             # 技能内容红线（2026-08-20 社区对标批量升级后确立）：单文件轻量规范（~100 行内，禁脚本/JSON 中间件/lint 体系）、
+                             #   产出文件名与流水线接口（TASK.md 内联口径）不动、升级后同步 cp 进技能库（种子改完库不追平，见种子更新机制）
   mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §10）：统一模型→八家映射（grok 只读）、读-改-写一个键/段 + 备份 +
                              # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文）、stdio 裸命令名 resolve_binary
                              #   绝对化 + node shim 深化、相对路径命令拒写（跨 agent 必挂，报错引导改绝对路径）；
@@ -188,8 +204,16 @@ src-tauri/src/
   usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径、
                              # session_usage 单会话聚合（终端状态栏 token 段，先增量索引再按 session_id 汇总）
   pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
-  settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力/想法期只读保护
-  claude_hooks.rs            # 精确注意力标记：写/移除 ~/.claude/settings.json hooks 段；事件日志按 session_id 取最新
+  settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力
+                             # （hooks_attention 按 agent map，旧 claude_hooks_attention 仅反序列化兼容迁移）/想法期只读保护
+  hooks.rs                   # 精确注意力标记（七家 hooks 桥接）：BRIDGE_SPECS 每 agent 一张桥接规格（claude/qwen/
+                             # codebuddy/gemini/kimi/grok/codex；cursor 无「等待确认」等价事件、opencode 无 shell hooks
+                             #   形态，两家未接入），写各家 hooks 配置（备份留 10 份 + 原子写 + marker 合并/移除 +
+                             #   损坏拒写；grok 整文件归 Ccode、外来文件拒覆盖），机制调研录 matrix §12；
+                             # 事件日志解析双信封（snake_case/camelCase）+ 事件名去下划线小写归一 + grok Stop 只认
+                             #   reason=end_turn + 会话归属双键匹配（session_id==文件主名 或 transcript_path==完整路径），
+                             #   10 分钟 TTL 回落尾部推断不变；settings 字段 hooks_attention: map<agent,bool>
+                             #   （旧 claude_hooks_attention 仅保留反序列化兼容迁移）
   fonts.rs                   # 终端字体打包与 brew 一键安装（Maple/Sarasa/Iosevka）
   ai.rs                      # 无头 AI 调用层：一次性 prompt + 提交信息/摘要/PR 描述/冲突建议/提炼接力简报/评审沉淀起草生成；
                              # headless_task_args/run_agent_task 供 scheduler 复用（定时任务要写项目文件，codex 用 -s workspace-write）
@@ -202,8 +226,13 @@ src-tauri/src/
   lit_watch.rs               # 文献雷达应用层（v3.95）：巡检产物解析 DTO（notes/inbox.md 条目含 watch-run 批次标记日期、上限 500 条；
                              # papers/watch-followup.md 付费墙待办、watchlist.md 订阅读写整表写回保留注释行、included.md 精读清单
                              # 增删去重）+ download_paper_pdf 白名单下载（仅 http/https、60MB 流式上限、%PDF- 魔数校验、
-                             # 落 papers/ 自动登记 project.toml 资源）；门槛 = 注册项目根 + canonicalize + 读-改-原子写
-  reader.rs                  # 沉浸阅读区后端（v3.96）：ensure_paper_note 建档 notes/<slug>.md（七固定小节、已存在不覆盖）+
+                             # 落 papers/ 自动登记 project.toml 资源）+ attach_paper_pdf 关联本地 PDF（付费墙手动下载后
+                             # 一步复制进 papers/ 并登记，源文件同口径校验、复制非移动）；门槛 = 注册项目根 + canonicalize + 读-改-原子写
+  reader.rs                  # 沉浸阅读区后端（v3.96）：ensure_paper_note 建档 notes/<slug>.md（精读八小节对齐 lit-notes 技能口径 + 机管「译段」「我的想法」两节，已存在不覆盖；
+                             # 建档前先扫 notes/ 头部「来源行」配对已有精读笔记，命中即复用不另建，空模板 slug 笔记顺带清回收站；
+                             # pdf_for_note 笔记→配对 PDF（来源行锚点优先；无锚点回落笔记 stem × type=paper 资源 stem
+                             # 做 normalize_title 互相包含，多命中取最长，无命中返回 None；lit_watch.rs normalize_title 提 pub(crate) 复用）+
+                             # reader_for_note 归属反查版（注册项目根直含 / 工作区 worktree 映射主仓副本，未合并明确报错）+
                              # read_image_bytes 图片通道（png/jpg/jpeg/gif/webp/svg、20MB，白名单判定复用 pdf.rs 内核）+
                              # save_reader_capture 圈选截图落 notes/assets/（PNG 魔数 + 同秒重名 -2/-3）/ append_note_image
                              # （追加进「我的想法」小节）+ 生词本 notes/glossary.md（list/append 术语小写去重/remove）+
@@ -213,7 +242,7 @@ src-tauri/src/
                              # finalize_digest_brief 初稿写回）、handoff_links 接力链登记/固化
   workspaces.rs              # 任务工作区（§6.10）：worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT、
                              # setup/archive 钩子、评审合并（health/merge/PR）、artifacts.yaml、
-                             # 人工事项状态（human_task_checks 勾选 + human_target_hit 落点检测）、import_human_deliverable
+                             # 人工事项状态（human_task_checks 勾选 + human_target_hit 落点检测 + human_target_count 命中计数/to-fetch 清单计数）、import_human_deliverable
                              # 交付导入（复制落点 + 登记提货单；v3.74 起 step/title 可选 + target_override 固定落点，
                              # 无步骤语境 = papers/imports/ 检索结果导入落主仓）、list_help_requests（.ccode/help-wanted.md 人工请求扫描）
   portwatch.rs               # 端口监控：LISTEN 列表、归属标注（cwd 最长前缀，回落 CCODE_PORT 段）、校验后 SIGTERM
@@ -225,6 +254,12 @@ src-tauri/src/
   updater.rs                 # CLI 安装/更新（brew TUNA、npm_for 同目录 npm）+ 应用自身 Tauri updater
   logbuf.rs                  # 诊断日志环形缓冲
   diagnostics.rs             # 诊断包：系统/WebView/GPU/输入法、功能开关、日志、进程生命周期采集与 ZIP 导出
+  config_dump.rs             # 生效配置自省（只读，不建/不改任何用户配置文件）：dump_effective_config /
+                             # export_effective_config（落 ~/Downloads/ccode-exports/ccode-effective-config-<时间戳>.json）——
+                             # 快照含 generatedAt/appVersion/appSettings（with_defaults 完整 DTO）/profiles（仅 keyHint 尾号、
+                             # 剔除 extra_env，绝无密钥）/hooksAttention/capabilities（复用 agent_capabilities）/
+                             # workspaceSettings（传 root 时 ws_settings 三层合并终值 + 每键来源层标注）；
+                             # 整份出站前过 sessions::redact_sensitive_text；设置页「诊断」区「生效配置快照」卡片消费
   process.rs                 # 后台子进程统一创建（Windows CREATE_NO_WINDOW 防 conhost 闪窗）
   models.rs                  # 共享 DTO
   lib.rs                     # 模块与 Tauri command 注册
@@ -239,7 +274,7 @@ src-tauri/src/
   `NO_COLOR` 必须 `env_remove`；`TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Ccode` 必须显式设置。
 - **会话文本出站前必须在 Rust 层脱敏**：标题/摘要、结构化回放、AI 摘要、Markdown 导出均不得把已保存密钥或常见密钥前缀
   送到 React；只作用于 DTO/导出副本，不得回写会话源文件；前端遮盖不是安全边界。
-- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作（设为全局默认、Claude hooks 注意力开关、会话删除、工作树文件删除——
+- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作（设为全局默认、hooks 精确注意力开关（七家，见 hooks.rs）、会话删除、工作树文件删除——
   工作树文件删除走系统回收站（trash crate）可反悔，四类均有备份/白名单防护口径，见 `docs/conventions/safety.md`）。
 - **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底；新增 CLI/工具调用点一律
   用它，禁直接 `which::which` 或裸名 spawn（候选目录清单见 `docs/conventions/safety.md` 对应实现 `agents.rs`）。
@@ -278,8 +313,8 @@ src-tauri/src/
   对话步骤化（步骤名 badge/分组/搜索）、RX3b 技能新建/编辑/◈ 优化 + 步骤挂载技能；RX4a docx 预览 + export-docx；笔记对话式
   批改（选段「◈ 讨论/改写此段」）；界面白话双层 + 工作区页/列表精简
 - **P5 通用层打磨（部分 ✅）**：逐 hunk 验收 ✅、跨标签聚合视图 ✅、成本按工作区归因 ✅、历史时间线视图 ✅（first-parent
-  主线 + 白话翻译：✓ 验收合并/⚙ 自动保存/◔ 保存）、**Claude Code hooks 精确注意力标记 ✅**（设置页显式开关，claude_hooks.rs，
-  见架构 v3.32）、**内置技能种子 ✅**（v3.64：14 个内置技能 = 9 个原有补强 + 5 个外部仓库内化，include_str! 播种、不覆盖不复活，
+  主线 + 白话翻译：✓ 验收合并/⚙ 自动保存/◔ 保存）、**hooks 精确注意力标记 ✅**（设置页按 agent 显式开关，
+  hooks.rs 七家桥接；v3.32 Claude 首发，v3.99 推广到七家，见架构 v3.32/v3.99）、**内置技能种子 ✅**（v3.64：14 个内置技能 = 9 个原有补强 + 5 个外部仓库内化，include_str! 播种、不覆盖不复活，
   五套流水线模板按步骤挂载）、**定时雷达 ✅**（v3.75：scheduler.rs 每日/每周无头巡检 + lit-watch 多源精选升级，
   约定见 conventions/pipeline.md「定时雷达」）、**模板重设计与接壤 ✅**（v3.78：五套模板内容重设计（种子对准拍板点/技能挂载核对/
   学术 MCP 人工事项）+ 产物路径接壤（投稿与返修接综述/科研论文成稿）+ 编辑器「＋ 从模板追加」）；批量验收、云端会话双源调研留 backlog
@@ -289,8 +324,10 @@ src-tauri/src/
 
 **当前待办**：
 
-- P0 收尾当前批次：批次 A（文献雷达应用层，v3.95）与批次 B（沉浸阅读区，v3.96）均已落地待走查；
-  全量文档同步 → 走查 → [skip ci] 提交 → 可选发版；后续批次 C/D/E 待本批走查完成后按既定计划推进
+- P0 收尾当前批次：批次 A（文献雷达应用层，v3.95）、批次 B（沉浸阅读区，v3.96）与批次 E（LaTeX 支持，v3.97）
+  均已落地待走查；全量文档同步 → 走查 → [skip ci] 提交 → 可选发版。
+  批次顺序为用户拍板：E 先行，批次 C（实验数据分析）/D（表征分析）转待办；场景 4（agent 辅助做图）整批不做、
+  已移出路线（「只做场景必需、不做扩展性功能」原则，见架构 v3.97）
 - **定时任务与研究流程结合（部分落地 v3.95，细目见架构 §11.4 Backlog 细目）**：边界已定——不给每步配定时任务，
   结合点是「产出回流」而非「配置下沉」。产出回流三件套已上线（v3.95：lit_watch.rs 解析巡检产物 + LitWatchCard
   雷达卡片 + 收件箱 lit: 文献胶囊 / Schedule.linkedStep 关联步骤 + RunRecord.newEntries / staleLitHint 复用

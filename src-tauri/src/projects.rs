@@ -256,7 +256,7 @@ fn register_at(
     })
 }
 
-fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, String> {
+pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT path, name, created_at, last_opened_at FROM projects
@@ -2114,8 +2114,8 @@ fn demo_project_config() -> ProjectConfigDto {
                  2. 检索候选文献（学术数据库/网络），每篇记录标题、作者、年份、来源、链接或 DOI；\n\
                  3. 按标准逐条筛选，结果写入 papers/screening.md（含每篇的纳入/排除及理由）；拿不准相关性的一律纳入并标注「待确认」；\n\
                  4. 纳入的文献清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；\n\
-                 5. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的用 WebFetch/curl 直接下载到 papers/ 目录（文件名规范化：作者年份-短标题.pdf）；付费墙的不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI），等用户提供全文。\n\
-                 完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md 均存在（无付费文献则 to-fetch.md 注明为空），每条记录无空缺字段（未知则标「待补」）。"
+                 5. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的用 WebFetch/curl 直接下载到 papers/ 目录（文件名规范化：作者年份-短标题.pdf）；付费墙的不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时转成 papers/to-fetch.ris（RIS 2004，字段缺则留空不编造）供用户导入 Zotero 建待获取列表。\n\
+                 完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris 均存在（无付费文献则 to-fetch 两个文件注明为空），每条记录无空缺字段（未知则标「待补」）。"
                     .into(),
                 &["papers/"],
             ),
@@ -2123,7 +2123,7 @@ fn demo_project_config() -> ProjectConfigDto {
                 "文献精读与笔记",
                 "lit-notes",
                 "输入：上一步产物 papers/included.md（已随 main 合并在本工作区内）。\n\
-                 1. 按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题）；\n\
+                 1. 先整理人工补投：papers/ 中命名不符「作者年份-短标题.pdf」的 PDF 对照 included.md/to-fetch.md 判定归属后重命名规范，并在 to-fetch.md 勾掉已补行（拿不准归属的不改名、标注「待确认」）；再按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题）；\n\
                  2. 全文来源优先级：项目资源/papers/ 已有 PDF → 开放获取补下 → 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」；\n\
                  3. 每篇产出 notes/<序号-短标题>.md，固定结构：研究问题 / 方法 / 主要结果 / 局限 / 可引用点（原文关键句+页码或段落位置）；\n\
                  4. 每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」）；\n\
@@ -2173,8 +2173,10 @@ fn demo_project_config() -> ProjectConfigDto {
     steps[0].human_tasks = vec![
         HumanTaskDto {
             title: "下载付费墙文献全文".into(),
-            guidance: "渠道自选：机构图书馆 / Sci-Hub 以外的合法途径 / 作者邮件索取 preprint；\
-                       缺权限清单见 papers/to-fetch.md（agent 筛完会列出）".into(),
+            guidance: "渠道自选：机构图书馆 / 作者邮件索取 preprint 等；\
+                       缺权限清单见 papers/to-fetch.md（agent 筛完会列出，附 to-fetch.ris 可拖进 Zotero 建待获取列表）；\
+                       拿到后拖到这一行或放进 papers/（文件名随意，agent 会统一改名）"
+                .into(),
             target: "papers/*.pdf".into(),
             timing: "after".into(),
             optional: false,

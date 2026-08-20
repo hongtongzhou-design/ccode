@@ -39,7 +39,8 @@
   `src/pipeline-start.ts` 的 `startPipelineStep`**（ensure git → bootstrap 提交 → 建工作区 → 提货单/技能元数据 → TASK.md →
   run 脚本 → 终端交接），工作区页步进器大圆与评审「开始下一步」共用，组件态由调用方回调注入。**v3.64 起「开工」为两步**：
   步进器大圆与卡片「开工」先开 `KickoffConfirmDialog`（TASK.md 预览/编辑（草稿优先）+ 推荐技能区 + 人工事项区 +
-  主仓提醒），确认才走 startPipelineStep；评审「开始下一步」保留直开（连续流，结论已沉淀到下一步草稿），「继续」
+  主仓提醒），确认才走 startPipelineStep；评审「→ 去下一步」不直开（v3.97 改向：跳项目页聚焦下一步，
+  由用户在流程页自己点「开始」——直接开步跳终端会把不熟流程的用户扔进黑窗），「继续」
   不经弹层。**弹层人工事项区只显示 before/during，收尾（after）事项整组不出现**（agent 干完才轮到人做的活，
   开工时摆出来只会让人误以为现在就要做；收尾语境由 StepFlow 流程线节点与评审「收尾事项」行承担），
   步骤只剩 after 事项时整区不渲染、「N 件待做」计数同口径。**TASK.md 拼装单一出处 `renderTaskMd`**：弹层预览与实际落盘共用 `gatherTaskMdExtras`（提货单/技能元数据）
@@ -55,10 +56,10 @@
   `commit_project_bootstrap`（best-effort）：只把 `.ccode` 与 `.gitignore` 提交进主仓（literal pathspec，用户暂存文件
   绝不带走），防评审合并被主仓脏拦截；默认 .gitignore 含 `*.pdf` 与 `.ccode/handoff-*.md`。**TASK.md 不进 git**：落盘时自动追加进
   `.git/info/exclude`（`exclude_task_md`，全 worktree 与主仓生效，best-effort 不阻断）——TASK.md 是开步脚手架而非任务产物。
-- **流水线模板库**：内置模板集中在 `src/pipeline-presets.ts` 的 `PIPELINE_TEMPLATES`（综述/科研论文/数据处理/毕业论文/投稿与返修），
+- **流水线模板库**：内置模板集中在 `src/pipeline-presets.ts` 的 `PIPELINE_TEMPLATES`（综述/科研论文/数据处理/毕业论文/投稿与返修/LaTeX 论文），
   新增场景 = 数组加一项，简报必须遵守输入写死/决策写死/交付写死约定（auto 模式无歧义）；用户模板走后端
   `list/save/delete_pipeline_template`，选择器（TemplatePicker）合并展示，后端命令未就绪时优雅降级为仅内置模板。
-  **注册后模板选择层（TemplatePickModal）**：`register_project` 成功后弹出，选项 = 五套内置模板
+  **注册后模板选择层（TemplatePickModal）**：`register_project` 成功后弹出，选项 = 六套内置模板
   （名称 + 一句话说明 + 步骤数，数据直接用 PIPELINE_TEMPLATES，不另造表），选中即 `append_pipeline_steps`
   追加进 project.toml 后关闭并刷新。**两个出口语义不同**：「不使用研究流程」调 `set_pipeline_opt_out`
   把 `pipeline_opt_out = true` 显式写进 project.toml（记住选择）；「稍后再选」只关闭不留痕。
@@ -81,6 +82,13 @@
   `notes/`+`references.bib` 可被科研论文/毕业论文首步复用，数据处理的 `analysis/` 可接科研论文实验段。
   每套模板首步简报带双口径输入说明（接自上游模板随仓库合并自带 / 独立启动先放入对应目录或在资源面板绑定上游
   项目目录）；投稿与返修首步另有 before 人工事项「放入成稿与 references.bib」（落点 `manuscript/`）。
+  **第六套「LaTeX 论文」（v3.97，批次 E）**：搭建骨架 → 章节写作 → 编译与排错 → 定稿导出，
+  产物 `manuscript/main.tex` + `manuscript/main.pdf`；run 脚本 `render-pdf` 各步共用同一常量
+  （tectonic 优先 → latexmk 回落 → 都没有打印安装引导 + exit 1；应用内不做安装器），开步时经既有
+  ws_settings 机制写入 `.ccode/settings.toml`；期刊官方模板 zip 走可选 before 人工事项解压到
+  `manuscript/template/` 由 agent 读说明适配（无内置解析器）；文档类（elsarticle/IEEEtran/achemso/ctexart/
+  学位论文通用架）与 natbib/biblatex 为开工前决策项；引用沿用 references.bib（`\cite{bib键}`），
+  章节写作步挂 review-writing。不在前五套的接壤链上（首步可复用上游模板产出的 notes/ + references.bib）。
 - **流水线编辑器（RX1）是步骤编辑唯一入口**：`src/components/PipelineEditor.tsx` 全宽覆盖层（fixed inset-0 z-30，与评审
   覆盖层同级），每步一张卡片，整体写回 steps；新增步骤相关编辑一律进
   编辑器，不再开第二套入口。**卡片字段分三档（v3.85）**：常驻只留
@@ -100,7 +108,7 @@
   全部资源**；`renderTaskMd` 只在绑定非空时过滤「项目资源」段（单一出处在 `pipeline-start.ts`）。**例外（v3.67）**：
   开工确认弹层的推荐技能区可就地增删 steps[].skills——走专用小 command `update_step_skills`（读-改-原子写，
   不走整份 write_project_config 往返），步骤名/简报等结构字段仍只在编辑器改。**「＋ 从模板追加」（v3.78，
-  模板接壤的 UI 落点）**：编辑器工具区「+ 添加步骤」旁，列出内置五套 + 用户另存模板，选定后把模板步骤
+  模板接壤的 UI 落点）**：编辑器工具区「+ 添加步骤」旁，列出内置六套 + 用户另存模板，选定后把模板步骤
   **追加**到 steps 末尾（区别于「使用模板 = 整体替换」；步骤链/提货单/资源机制对新步骤天然生效）。后端
   command `append_pipeline_steps`（projects.rs）：过 `ensure_task_project_root` 写门槛；读-改-原子写；
   **重名跳过**——name 或非空 workspace_name 撞已有步骤、或撞本批次刚追加进来的，都跳过（避免覆盖已有
@@ -363,6 +371,19 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   绝对路径与 `..` 逃逸一律视为未交付（同产物核验口径）。检测根 = 项目根 + 步骤绑定的活跃工作区工作树
   （交付落在哪侧都算）。命令：`list_human_task_states`（list 口径无门槛）、`set_human_task_check`（过
   `ensure_task_project_root`）。
+- **命中计数（v3.97）**：`human_target_count` 与 hit 同口径但返回命中文件数（DTO 字段 `hitCount`，
+  两侧检测根取 **max**——合并后同一文件在项目根与工作树各有一份，相加会重复计数）；`papers/*.pdf` 落点且
+  同侧根存在 `papers/to-fetch.md` 时附 `expectedCount`（条目行 = 非空、非 # 标题、非「为空」注明行）。
+  UI 显示「已见到 N 个文件 / 清单共 M 篇」的进度感；**仍是存在性检测，不做逐篇对账**（标题匹配脆弱；
+  逐篇对齐靠精读步 agent 收尾复查的简报约定）。
+- **人工补投的命名规范化职责在下游 agent，不在用户（v3.97 拍板）**：人工补投的 PDF 文件名随意，
+  精读步（lit-notes）开工第一条 = 对照 included.md/to-fetch.md 判定归属后按「作者年份-短标题.pdf」
+  统一重命名并勾掉 to-fetch.md 已补行；拿不准归属的不改名、标「待确认」。模板 guidance 必须写明
+  「文件名随意」，不得暗示用户要自己整理命名。
+- **to-fetch.ris 是 Zotero 闭环的导出物（v3.97）**：检索步产出 to-fetch.md 时同步产出 to-fetch.ris
+  （RIS 2004，TY/TI/DO/UR 尽力而为、缺字段留空不编造），用户拖进 Zotero 自动建成待获取列表；
+  PDF 补进 Zotero 后回「文献与数据」重新导入即登记（只读引用不复制），再手动勾事项。
+  **Zotero 只读边界不动**——不在用户库里直写建列表（锁库/同步冲突风险）。
 - **提交交付**：`import_human_deliverable`（卡片 checklist 行「提交产物」按钮 / 拖文件到该行）= 复制进落点
   （目录/通配用源文件 basename，精确文件允许改名交付；已存在同名拒绝）+ best-effort 登记该根 artifacts.yaml
   （produced_by = 人工交付；登记失败只回告不否决复制——文件落位检测口径已算完成）。落点根 = 绑定工作区活跃时
@@ -379,7 +400,38 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   流程线区域布局：聚焦头部显示步骤名 + describeStep 白话状态（待开始按草稿是否已起草分
   「建议先点下方种子聊聊」/「想法已就位」），主推进入口并入流程线节点——待开始=开始（agent 节点）/
   工作区已归档=恢复工作区（agent 节点，替代开始）/待评审=去评审/阻塞=去处理冲突（评审节点，带
-  resolve-conflict 意图直达评审覆盖层不绕终端）/进行中=去终端看看。**「去终端」类入口（流程线
+  resolve-conflict 意图直达评审覆盖层不绕终端）/进行中=去终端看看。
+  **「进行中」的完成提示（v3.97）**：步骤状态只从工作区 git 派生（未提交=进行中、已提交=待评审、
+  合并=已完成），agent 不提交就永远「进行中」——故 TASK.md 模板固定带「## 收尾：产出全部 git 提交」
+  （pipeline-start.ts renderTaskMd）；会话尾部判定 done 时流程线 agent 节点按钮旁亮「✓ agent 已跑完」
+  （StepFlow agentAttention prop，ProjectGroup stepAttention 同一口径），WorkspacesPage 监听
+  terminalRunInputs 的「非 done → done」跃迁触发一次 refresh（按 cwd 去抖，不轮询）——agent 已提交的
+  步骤即刻翻「待评审」。**状态机本身不动：done 仍须评审合并**（验收层是护城河）。
+  **after 档人工事项一律进主干（v3.97 拍板）**：「补充付费墙文献」这类收尾项就是流程主干的倒数第二步
+  （评审之前），沉到可选分隔线下会让用户以为它不存在；optional 的仍带「可选」徽标、且**不参与
+  currentKey 判定**（不抢当前节点、不卡流程指示）。评审节点 hint 写清怎么验收（逐文件核对改动 →
+  对照预期产物 → 提交并合并；不满意回终端让 AI 继续改）。
+  **after 档入口的就绪口径（v3.97 放宽）**：原来死等 git 待评审（agentProduced = review/done）才给
+  操作入口——agent 跑完但没提交时步骤停在「进行中」，入口永远不出现（用户实测「没看见补充入口」）。
+  现放宽为三选一：待评审/已合并 ∥ 会话尾部判定 done（agent 跑完在等你）∥ 该事项的 expectedCount
+  现算到（to-fetch.md 存在 = 清单已列出）。未就绪仍降透明度、不摆入口（提前噪音口径不变）；
+  拖拽落点（data-human-task）不受就绪门控，随时可拖。
+  **评审节点的验收引导不看「当前节点」身份（v3.97）**：节点 hint 原本只在当前节点渲染——agent 跑完
+  没提交时当前节点一直停在 agent 上，评审 hint 永远显示不出来（用户实测「看不见验收引导」）。
+  评审 hint 已按 runStatus 门控（待开始无文案/进行中预告/待评审给步骤），渲染条件放开为
+  isCurrent ∥ kind==="review"。「去评审」按钮维持原状（待评审时评审节点本就是当前节点）。
+  **可选 after 事项的 guidance 同理放开（v3.97）**：guidance 原本只在当前节点就地展开，而可选 after
+  事项被设计成永不抢当前节点——说明只剩悬停 tooltip（用户实测「没说清怎么导入」）。就绪（afterReady）
+  且未完成时就地展开其 guidance；papers/ 落点事项的「到『文献与数据』导入」按钮按 litSource 传 focus
+  高亮对应进料口（zotero→Zotero 入口 / folder→题录入口），与「确定文献来源」节点的落地口径一致。
+  **产物核验的文本产物就地预览（v3.97）**：ArtifactChecklist 点 md/txt/ris/bib 开 TASK.md 同款
+  居中弹层（marked 渲染 + textarea 编辑 + save_file_preview 原子写，截断只读，Esc/背景点击关闭前
+  守未保存改动）；pdf/docx 维持跳终端页。
+  **产物文件 OS 级拖出（v3.97，tauri-plugin-drag）**：WebView 的 HTML5 拖拽出不了窗口，产物核验清单
+  每个文件行有「⠿」拖出手柄——mousedown 里同步调 `plugin:drag|start_drag`（macOS 要求拖拽会话挂在
+  鼠标按下事件上，故手柄独占图标、不与点击预览抢手势），产物（to-fetch.ris、PDF 等）可直接拖进
+  Zotero/Finder。拖拽图标是前端内联的 48×48 文档形 PNG data URL（无文件读盘）；失败静默
+  （拖拽没起来 = 没拖）。capabilities 加 `drag:default`。**「去终端」类入口（流程线
   「去终端看看」、工作区行「去终端」）是「回到那个对话」而非新开**（v3.93，用户拍板）：交接构造
   单一出处 `pipeline-start.ts buildWorkspaceTerminalRequest`——始终带 reuseKey `ws:<worktreePath>`
   （开工起的标签之后能找回，同一工作区永远回到同一个终端标签），无 initialPrompt 时自动 resume
@@ -393,7 +445,9 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   **人工事项是步骤级，不进卡片**（v3.69 修正：卡片是想法容器，一步多卡时步骤级清单在每张卡重复渲染 = 噪声）；
   **v3.70 起大圆点击语义从「终端入口」改为「步骤聚焦」**（用户拍板：圆上不再跳终端/开步——推进动作归流程
   线节点、卡片行、任务行）：点圆 = 卡片区只看该步骤（种子 + 卡片 + 人工事项清单一屏内），选中圆中性高亮环，
-  未选过时默认聚焦当前步骤（全部完成则落最后一步）；**v3.81 起删除总览态**（用户拍板：「总览全部步骤」与
+  未选过时默认聚焦当前步骤（全部完成则落最后一步）；**回页释放已完成聚焦（v3.97，用户实测）**：
+  页面常驻挂载，手动聚焦跨页留存——从终端页等切回来时若聚焦的步骤已「已完成」，放掉手动聚焦、
+  回落当前步骤（ProjectGroup `pageVisible` prop 边沿触发）；聚焦步骤仍在进行/待评审时不抢用户选择；**v3.81 起删除总览态**（用户拍板：「总览全部步骤」与
   「全部/按步骤」切换都是噪声）——卡片区恒单步骤聚焦，头部「‹ ›」箭头与大圆点击同口径切步骤；
   步骤 ⋯「人工事项（N 件待做）」**已于 v3.86 删除**（`onSelect` 就是 `focusByIndex`，与点大圆完全同效；
   「N 件待做」也是 v3.84 已删的「等你做」计数的最后残留）。
@@ -424,10 +478,16 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   `.ccode/help-wanted.md`，每条一行「- 」开头且**必带兜底句**「若未回复则按 ×× 继续」——agent 写完按兜底
   继续，不停工等待（偏差靠评审流兜底，不做阻断式请求）。Ccode 侧 `list_help_requests` 扫活跃工作区工作树 +
   主仓根（无工作区的项目不扫；上限 20 条 × 300 字符）→ 收件箱「人工请求」类条目（`help:<root>`），
-  「去查看」经 selectProjectReq 跳工作区页（消费方同时匹配 repoPath 与 worktreePath）；条目可 ✕ dismiss
+  「去查看」经 selectProjectReq 跳工作区页**并弹出该来源的完整内容层**（v3.97：strip 行只有 40 字截断预览、
+  只选中分组在已选中时零反馈，用户实测「点了没反应、内容看不全」——弹层给全部条目全文 + 回复指引 +
+  「忽略此来源」；store 一次性请求 `helpViewReq`，动作类型 `help`）；条目可 ✕ dismiss
   （localStorage `ccode.helpDismissed` 按 root 存 items 签名，内容变了自动复现）；新来源 edge-trigger +
   30s 去抖发 OS 通知（复用「长任务 OS 通知」开关，不新增设置项）。TASK.md 在步骤有人工事项时自动带
   该约定的说明段（renderTaskMd 单一出处）。
+  **收件箱「去核验」同理补强（v3.97）**：原只做「选中分组 + 展开产物清单」，已选中时零反馈且聚焦过滤可能
+  把目标行藏掉。现补齐三件套——经 `focusStepReq`（ProjectGroup prop，传工作区名、内部按 workspaceName
+  解析步骤名）把聚焦切到目标工作区所属步骤；行加 `data-ws-row` 锚点 scrollIntoView；ring-2 高亮 2.5s
+  消退（与「文献与数据」进料口 ring 口径一致）。
 - **收件箱分类胶囊（v3.68 同步改造）**：顶栏/页内 strip 的单一「待你处理 N」拆为按类别胶囊
   （冲突/待确认/可合并/待核验/待发送/配置失效/人工请求），点胶囊展开该类条目；类别推导与分组纯逻辑在
   `src/inbox.ts`（`inboxCategoryOf`/`groupInbox`，key 前缀即类别，confirm: 与 live: 合并「待确认」口径不变，
@@ -461,7 +521,16 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 - **执行复用 ai.rs 无头链路**（`run_agent_task`）：与 ai_prompt_impl 唯二差异 = cwd 用项目根（不建/删临时目录、
   不登记 internal_ai_run——token 归因给项目是对的）与 `headless_task_args`（codex 用 `-s workspace-write`，
   巡检要写 notes/inbox.md 与 watch-seen.md，read-only 跑不了）；10 分钟超时；安全口径照旧（密钥拉起瞬间注入、
-  background_command、出站脱敏）。
+  background_command、出站脱敏）。**codex 参数顺序坑（v3.98 实测踩坑）**：`exec` 是子命令，plan 注入的
+  `-c`/`-m` 必须跟在子命令头之后，且 plan 默认带的 `-s workspace-write` 要剥离、由 headless 尾部的档位定夺
+  （`-s` 单值参数，重复直接报「cannot be used multiple times」）；统一由 `compose_headless_args` 拼装
+  （ai_prompt / 定时任务两路共用，有测试钉住）——`-c` 放在 exec 前会被顶层解析
+  **静默吞掉**，provider 回落 `~/.codex/config.toml` 的桌面版默认 provider，表现为你配的端点/密钥整个不生效、
+  报 401 还以为是配置错了。交互式拉起（无子命令）不受影响，这正是「终端聊天正常、定时任务 401」的成因。**任务绑定的 profile 走「功能专属 id」槽**（v3.98：定时任务是长期住户，
+  绑定配置被删时按失效回落——AI 专用 → 最近使用——不硬报错哑跑；AI 专用配置指着已删 id 时再去掉专用槽
+  回落最近使用；回落发生时运行历史留一句「原绑定配置已删除，本次回落用「X」」；显式槽的硬报错口径只留给
+  交互场景）。**删除 profile 时同步清设置引用**（profiles.delete → settings::clear_profile_refs：
+  ai_profile_id / ai_profiles 指到已删 id 的一并清掉，持锁内联、失败只记日志），从源头减少悬空指针。
 - **投递**：跑完发 `scheduler-run-done` 事件（summary 已脱敏）→ App.tsx 全局监听弹 OS 通知（复用
   notificationsEnabled 开关，不新增设置项）；命中正文仍由技能本身写 `notes/inbox.md`，调度器不二次搬运。
 - **已知风险**：各家 CLI 无头模式的工具放行/写权限行为 matrix 无记录、未经全量实测（qwen 无头为位置参数兜底），

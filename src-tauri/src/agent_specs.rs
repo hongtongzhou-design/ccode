@@ -3,10 +3,13 @@
 //! 各模块从注册表读规格；会话/usage 解析器不可数据化，保持每 CLI 一段格式代码（sessions.rs / usage.rs）。
 //!
 //! 新增 CLI checklist：
-//! 1. 在 AGENT_SPECS 加一张规格（纯数据）——检测/启动/恢复/技能分发/安装更新/协议校验自动生效
+//! 1. 在 AGENT_SPECS 加一张规格（纯数据）——检测/启动/恢复/技能分发/安装更新/协议校验自动生效；
+//!    set_global/mcp_write/skill_dist 三项能力按支持面照实填（不支持必须带用户可见原因，fail-loud）
 //! 2. 启动注入形态若 Env / ByProtocol 表达不了，在 SpecialLaunch 加变体并在 agents::launch_plan 加分支
 //! 3. 会话/usage 格式：在 sessions.rs / usage.rs 写该 CLI 的解析器（注册表只做分发入口）
 //! 4. 补本文件完整性测试里的 id 清单
+
+use serde::Serialize;
 
 /// 一个 Agent CLI 的完整规格
 pub struct AgentSpec {
@@ -54,6 +57,39 @@ pub struct AgentSpec {
     /// 普通 \r 不提交）。kimi = true（0.36.1 实证）；xterm.js 不支持该协议，
     /// Ccode 在 xterm 键盘层与状态栏写入两处改写
     pub submit_csi_u: bool,
+    /// 「设为全局默认」写配置文件能力（global_config.rs plan_writes 的分发依据）
+    pub set_global: SetGlobalCap,
+    /// MCP 分发写入能力（mcp.rs apply_to_agent 的拒写依据；只读清单解析不受限）
+    pub mcp_write: McpWriteCap,
+    /// 技能分发方式（skills.rs allow_symlink_for 的判定依据）
+    pub skill_dist: SkillDist,
+}
+
+/// 「设为全局默认」能力：把 profile 写入 CLI 自己的配置文件
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetGlobalCap {
+    /// global_config::plan_writes 有该 agent 的写计划
+    Supported,
+    /// 不支持；值为直接给用户看的原因（fail-loud，不静默降级）
+    Unsupported(&'static str),
+}
+
+/// MCP 分发写入能力
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpWriteCap {
+    /// 读-改-写分发全支持
+    Full,
+    /// 只读清单可解析、分发/写入拒绝；值为直接给用户看的原因
+    ReadOnly(&'static str),
+}
+
+/// 技能分发方式
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillDist {
+    /// symlink 优先、失败回退 copy
+    SymlinkOrCopy,
+    /// 强制 copy；值为直接给用户看的原因
+    CopyOnly(&'static str),
 }
 
 /// 官方账号规格（P1a）：终端内登录、只读检测 auth 文件、拉起时净化残留 API env
@@ -306,6 +342,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
         model_switch: ModelSwitch::Direct("/model {model}"),
         effort_levels: Some((&["low", "medium", "high", "xhigh", "max"], "/effort {level}")),
         submit_csi_u: false,
+        set_global: SetGlobalCap::Supported,
+        mcp_write: McpWriteCap::Full,
+        skill_dist: SkillDist::SymlinkOrCopy,
     },
     AgentSpec {
         id: "codex",
@@ -347,6 +386,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
         model_switch: ModelSwitch::Picker("/model"),
         effort_levels: None,
         submit_csi_u: false,
+        set_global: SetGlobalCap::Supported,
+        mcp_write: McpWriteCap::Full,
+        skill_dist: SkillDist::SymlinkOrCopy,
     },
     AgentSpec {
         id: "gemini",
@@ -394,6 +436,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
         model_switch: ModelSwitch::Direct("/model set {model}"),
         effort_levels: None,
         submit_csi_u: false,
+        set_global: SetGlobalCap::Supported,
+        mcp_write: McpWriteCap::Full,
+        skill_dist: SkillDist::SymlinkOrCopy,
     },
     AgentSpec {
         id: "qwen",
@@ -459,6 +504,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
         model_switch: ModelSwitch::None,
         effort_levels: None,
         submit_csi_u: false,
+        set_global: SetGlobalCap::Supported,
+        mcp_write: McpWriteCap::Full,
+        skill_dist: SkillDist::SymlinkOrCopy,
     },
     AgentSpec {
         id: "opencode",
@@ -495,6 +543,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
         model_switch: ModelSwitch::Picker("/models"),
         effort_levels: None,
         submit_csi_u: false,
+        set_global: SetGlobalCap::Supported,
+        mcp_write: McpWriteCap::Full,
+        skill_dist: SkillDist::SymlinkOrCopy,
     },
     AgentSpec {
         id: "kimi",
@@ -565,6 +616,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
         // Enter（\x1b[13u），普通 \r 不提交（2026-08-17 pty 探针实证）——xterm.js 不支持
         // kitty 协议，Ccode 侧须把 Enter 改写成 CSI-u
         submit_csi_u: true,
+        set_global: SetGlobalCap::Supported,
+        mcp_write: McpWriteCap::Full,
+        skill_dist: SkillDist::SymlinkOrCopy,
     },
     AgentSpec {
         id: "codebuddy",
@@ -612,6 +666,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
         model_switch: ModelSwitch::None,
         effort_levels: None,
         submit_csi_u: false,
+        set_global: SetGlobalCap::Supported,
+        mcp_write: McpWriteCap::Full,
+        skill_dist: SkillDist::SymlinkOrCopy,
     },
     AgentSpec {
         id: "cursor",
@@ -633,7 +690,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         fixed_session_id: false,
         // --resume <uuid> 必须带 id（无参会卡 Ink TUI）；--continue 续最近（前端不用）
         resume: ResumeSpec { prepend: false, args: &["--resume", "{session}"] },
-        // 未验证 CLI 是否真读该目录，分发保守走 copy 模式（skills.rs allow_symlink_for）
+        // 未验证 CLI 是否真读该目录，分发保守走 copy 模式（见下方 skill_dist 字段）
         skills_dir: &[".cursor", "skills-cursor"],
         packaging: PackagingSpec {
             // 无 brew/npm 官方包：官方安装脚本装到 ~/.local/share/cursor-agent/versions/<ver>/
@@ -657,6 +714,13 @@ static AGENT_SPECS: &[AgentSpec] = &[
         model_switch: ModelSwitch::None,
         effort_levels: None,
         submit_csi_u: false,
+        set_global: SetGlobalCap::Unsupported(
+            "Cursor 的全局配置写入未适配，首版仅支持启动注入",
+        ),
+        mcp_write: McpWriteCap::Full,
+        skill_dist: SkillDist::CopyOnly(
+            "~/.cursor/skills-cursor 未验证 CLI 是否真读、且 ~/.cursor 与 IDE 共享，保守强制 copy",
+        ),
     },
     AgentSpec {
         id: "grok",
@@ -686,7 +750,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         fixed_session_id: true,
         // -r/--resume [ID_OR_TITLE] 按 ID 恢复；-c/--continue 续最近（前端不用）
         resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
-        // 与 Ccode SSOT 同构（目录 + SKILL.md）；首版未经实机验证，分发强制 copy（skills.rs）
+        // 与 Ccode SSOT 同构（目录 + SKILL.md）；首版未经实机验证，分发强制 copy（见下方 skill_dist 字段）
         skills_dir: &[".grok", "skills"],
         packaging: PackagingSpec {
             npm_install: Some("@xai-official/grok"),
@@ -713,6 +777,13 @@ static AGENT_SPECS: &[AgentSpec] = &[
         model_switch: ModelSwitch::None,
         effort_levels: None,
         submit_csi_u: false,
+        set_global: SetGlobalCap::Unsupported(
+            "Grok 的全局配置是 TOML [model.<name>] 段结构，首版仅支持启动注入",
+        ),
+        mcp_write: McpWriteCap::ReadOnly(
+            "Grok 的 MCP 分发暂不支持（TOML [mcp_servers] 段与 model 同文件）；请用 `grok mcp add` 或编辑 ~/.grok/config.toml",
+        ),
+        skill_dist: SkillDist::CopyOnly("~/.grok/skills 首版未经实机验证，保守强制 copy"),
     },
 ];
 
@@ -724,6 +795,61 @@ pub fn agent_spec(id: &str) -> Option<&'static AgentSpec> {
 /// 全部规格（detect / 更新检查等遍历入口）
 pub fn all_agent_specs() -> &'static [AgentSpec] {
     AGENT_SPECS
+}
+
+// ===== 能力表 → 前端 DTO（置灰与原因提示由表驱动，不另维护前端硬编码） =====
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityFlagDto {
+    pub supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDistDto {
+    /// "symlinkOrCopy" | "copyOnly"
+    pub mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCapabilitiesDto {
+    pub agent: &'static str,
+    pub set_global: CapabilityFlagDto,
+    pub mcp_write: CapabilityFlagDto,
+    pub skill_dist: SkillDistDto,
+}
+
+fn flag(supported: bool, reason: Option<&'static str>) -> CapabilityFlagDto {
+    CapabilityFlagDto { supported, reason }
+}
+
+/// 九家的三项能力一览（前端置灰/提示与后端报错同源）
+#[tauri::command]
+pub fn agent_capabilities() -> Vec<AgentCapabilitiesDto> {
+    AGENT_SPECS
+        .iter()
+        .map(|s| AgentCapabilitiesDto {
+            agent: s.id,
+            set_global: match s.set_global {
+                SetGlobalCap::Supported => flag(true, None),
+                SetGlobalCap::Unsupported(r) => flag(false, Some(r)),
+            },
+            mcp_write: match s.mcp_write {
+                McpWriteCap::Full => flag(true, None),
+                McpWriteCap::ReadOnly(r) => flag(false, Some(r)),
+            },
+            skill_dist: match s.skill_dist {
+                SkillDist::SymlinkOrCopy => SkillDistDto { mode: "symlinkOrCopy", reason: None },
+                SkillDist::CopyOnly(r) => SkillDistDto { mode: "copyOnly", reason: Some(r) },
+            },
+        })
+        .collect()
 }
 
 /// 新旧双变体探测（kimi）：按数据目录存在性返回 "new" | "legacy"，都无 → None
@@ -756,6 +882,7 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
         }
         out.push("/opt/homebrew/bin".into()); // Apple Silicon brew
         out.push("/usr/local/bin".into()); // Intel brew / 手动安装
+        out.push("/Library/TeX/texbin".into()); // MacTeX/TeXLive（latexmk/pdflatex；GUI 短 PATH 兜底）
     }
     #[cfg(target_os = "linux")]
     {
@@ -951,5 +1078,78 @@ mod tests {
                 "{id} 不应标 interactive_tui"
             );
         }
+    }
+
+    /// 三项能力（设为全局默认 / MCP 分发 / 技能分发方式）的九家取值：
+    /// 支持面必须与 global_config plan_writes 的 match arm、mcp/skills 消费点一致
+    #[test]
+    fn capability_fields_match_consumers() {
+        // 「设为全局默认」：global_config::plan_writes 有写计划的七家 Supported
+        for id in ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi", "codebuddy"] {
+            assert_eq!(
+                agent_spec(id).unwrap().set_global,
+                SetGlobalCap::Supported,
+                "{id} 应支持设为全局默认"
+            );
+        }
+        // grok/cursor 不支持且必须带用户可见原因（fail-loud）
+        for id in ["grok", "cursor"] {
+            let SetGlobalCap::Unsupported(reason) = agent_spec(id).unwrap().set_global else {
+                panic!("{id} 应为 Unsupported");
+            };
+            assert!(!reason.is_empty(), "{id} 缺原因文案");
+        }
+        assert!(agent_spec("grok").unwrap().set_global
+            == SetGlobalCap::Unsupported(
+                "Grok 的全局配置是 TOML [model.<name>] 段结构，首版仅支持启动注入"
+            ));
+        // MCP 分发：仅 grok 只读（原因指向 grok mcp add），其余八家 Full
+        assert_eq!(
+            agent_spec("grok").unwrap().mcp_write,
+            McpWriteCap::ReadOnly(
+                "Grok 的 MCP 分发暂不支持（TOML [mcp_servers] 段与 model 同文件）；请用 `grok mcp add` 或编辑 ~/.grok/config.toml"
+            )
+        );
+        for id in ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi", "codebuddy", "cursor"] {
+            assert_eq!(
+                agent_spec(id).unwrap().mcp_write,
+                McpWriteCap::Full,
+                "{id} 应支持 MCP 分发"
+            );
+        }
+        // 技能分发：cursor/grok 强制 copy（带原因），其余七家 symlink 优先
+        for id in ["cursor", "grok"] {
+            let SkillDist::CopyOnly(reason) = agent_spec(id).unwrap().skill_dist else {
+                panic!("{id} 应强制 copy");
+            };
+            assert!(!reason.is_empty(), "{id} 缺原因文案");
+        }
+        for id in ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi", "codebuddy"] {
+            assert_eq!(
+                agent_spec(id).unwrap().skill_dist,
+                SkillDist::SymlinkOrCopy,
+                "{id} 应保持 symlink 优先"
+            );
+        }
+        // claude 三项全支持
+        let claude = agent_spec("claude-code").unwrap();
+        assert_eq!(claude.set_global, SetGlobalCap::Supported);
+        assert_eq!(claude.mcp_write, McpWriteCap::Full);
+        assert_eq!(claude.skill_dist, SkillDist::SymlinkOrCopy);
+        // DTO 形态：grok 三项均带原因，supported/mode 正确
+        let dto = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "grok")
+            .unwrap();
+        assert!(!dto.set_global.supported && dto.set_global.reason.is_some());
+        assert!(!dto.mcp_write.supported && dto.mcp_write.reason.is_some());
+        assert_eq!(dto.skill_dist.mode, "copyOnly");
+        assert!(dto.skill_dist.reason.is_some());
+        let claude_dto = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "claude-code")
+            .unwrap();
+        assert!(claude_dto.set_global.supported && claude_dto.set_global.reason.is_none());
+        assert_eq!(claude_dto.skill_dist.mode, "symlinkOrCopy");
     }
 }

@@ -49,10 +49,10 @@ fn slugify_note_stem(stem: &str) -> String {
     if out.is_empty() { "paper".into() } else { out }
 }
 
-/// 新笔记模板：标题 + 来源行 + 固定小节（结构对齐 lit-notes 技能的精读笔记口径）
+/// 新笔记模板：标题 + 来源行 + 固定小节（精读八小节对齐 lit-notes 技能口径，尾部两节「译段」「我的想法」为阅读区机管小节）
 fn note_template(title: &str, rel_pdf: &str, date: &str) -> String {
     format!(
-        "# {title}\n\n> 来源：{rel_pdf} · 开始阅读 {date}\n\n## 研究问题\n\n## 方法\n\n## 主要结果\n\n## 局限\n\n## 可引用点\n\n## 译段\n\n## 我的想法\n"
+        "# {title}\n\n> 来源：{rel_pdf} · 开始阅读 {date}\n\n## 一句话总结\n\n## 研究问题\n\n## 方法\n\n## 主要结果\n\n## 局限\n\n## 可引用点\n\n## 与本课题的关系\n\n## 疑问与待跟进\n\n## 译段\n\n## 我的想法\n"
     )
 }
 
@@ -80,12 +80,6 @@ fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNot
     }
     // slug 已去路径分隔符，join 不会逃逸 canon_notes
     let target = canon_notes.join(format!("{}.md", slugify_note_stem(&stem)));
-    if target.exists() {
-        return Ok(PaperNoteDto {
-            path: target.to_string_lossy().into_owned(),
-            created: false,
-        });
-    }
     // 来源行写相对项目根的路径（统一正斜杠，同 discover_resources 口径）
     let rel_pdf = pdf
         .strip_prefix(&root)
@@ -96,11 +90,78 @@ fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNot
                 .join("/")
         })
         .unwrap_or_else(|_| file_name.clone());
+    // 配对优先：notes/ 里已有「来源行」指向本 PDF 的笔记（精读步骤产物）就直接打开它，
+    // 不另建 slug 笔记——同一篇只有一份笔记。此前误建的 slug 笔记若仍是空模板（从未写过内容），
+    // 顺带清进回收站（可反悔）；有内容的保留，不与精读笔记强行合并
+    if let Some(existing) = find_note_by_source(&canon_notes, &rel_pdf) {
+        if existing != target && target.exists() {
+            if let Ok(content) = fs::read_to_string(&target) {
+                if note_is_untouched(&content) {
+                    let _ = trash::delete(&target);
+                }
+            }
+        }
+        return Ok(PaperNoteDto {
+            path: existing.to_string_lossy().into_owned(),
+            created: false,
+        });
+    }
+    if target.exists() {
+        return Ok(PaperNoteDto {
+            path: target.to_string_lossy().into_owned(),
+            created: false,
+        });
+    }
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     crate::profiles::atomic_write(&target, &note_template(&stem, &rel_pdf, &date))?;
     Ok(PaperNoteDto {
         path: target.to_string_lossy().into_owned(),
         created: true,
+    })
+}
+
+/// 笔记「来源行」声明的 PDF 相对路径（只认头部 10 行）。兼容两种格式：
+/// 阅读区建档「> 来源：<path> · 开始阅读 …」与 lit-notes 精读笔记「> 来源 PDF：<path>」
+/// （路径本身可能含空格，只按「 · 」分隔符截尾）
+fn note_source_pdf(content: &str) -> Option<String> {
+    for line in content.lines().take(10) {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("> 来源") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix("PDF").unwrap_or(rest).trim_start();
+        let rest = rest.trim_start_matches(['：', ':']).trim();
+        let path = rest.split(" · ").next().unwrap_or(rest).trim();
+        if path.to_ascii_lowercase().ends_with(".pdf") {
+            return Some(path.replace('\\', "/"));
+        }
+    }
+    None
+}
+
+/// 在 notes/ 里找「来源行」指向本 PDF 的笔记（lit-notes 配对锚点）。只读各文件头部，返回绝对路径
+fn find_note_by_source(notes: &Path, rel_pdf: &str) -> Option<PathBuf> {
+    let mut entries: Vec<PathBuf> = fs::read_dir(notes)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect();
+    entries.sort();
+    entries.into_iter().find(|p| {
+        fs::read_to_string(p)
+            .ok()
+            .and_then(|c| note_source_pdf(&c))
+            .is_some_and(|src| src == rel_pdf)
+    })
+}
+
+/// 整份只剩模板骨架（标题/来源行/小节标题/空行）= 建好后没写过内容，配对归并时可安全清掉
+fn note_is_untouched(content: &str) -> bool {
+    content.lines().all(|l| {
+        let t = l.trim();
+        t.is_empty() || t.starts_with("# ") || t.starts_with("## ") || t.starts_with("> 来源")
     })
 }
 
@@ -120,6 +181,165 @@ fn gated_root(project_root: &str) -> Result<PathBuf, String> {
     crate::projects::ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
         project_root,
     )))
+}
+
+// ===== 笔记 ↔ PDF 配对（精读笔记产物进阅读区） =====
+
+/// 配对内核（canonical 根 + canonical 笔记）：先认笔记头部「来源行」声明的 PDF 相对路径
+/// （lit-notes 精读笔记的机读锚点）；无锚点回落到笔记 stem 与 project.toml 里 type="paper" 资源的
+/// 文件 stem 做规范化标题互相包含（口径与前端 lit-watch.ts paperResourceFor 一致；序号前缀不影响
+/// 包含判定）。多个命中取规范化标题最长者；无命中返回 None。返回 PDF 绝对路径。
+fn pair_pdf_at(root: &Path, note_c: &Path) -> Result<Option<String>, String> {
+    // 来源行锚点优先（lit-notes 精读笔记头部的「> 来源 PDF：<相对路径>」）——
+    // 中文短标题与英文 PDF 名配不上时也能认回
+    if let Ok(content) = fs::read_to_string(note_c) {
+        if let Some(rel) = note_source_pdf(&content) {
+            let pdf = root.join(&rel);
+            if pdf.exists() {
+                let c = pdf
+                    .canonicalize()
+                    .map_err(|e| format!("PDF 路径无效（{rel}）: {e}"))?;
+                if c.starts_with(root) {
+                    return Ok(Some(c.to_string_lossy().replace('\\', "/")));
+                }
+            }
+        }
+    }
+    let stem = note_c.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let want = crate::lit_watch::normalize_title(stem);
+    if want.is_empty() {
+        return Ok(None);
+    }
+    let cfg = crate::projects::read_config_at(root).config;
+    let mut best: Option<(usize, PathBuf)> = None;
+    for r in cfg.resources.iter().filter(|r| r.kind == "paper") {
+        let pdf = root.join(&r.path);
+        let pstem = pdf.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let norm = crate::lit_watch::normalize_title(pstem);
+        if norm.is_empty() || !(want.contains(&norm) || norm.contains(&want)) {
+            continue;
+        }
+        if !pdf.exists() {
+            continue;
+        }
+        let c = pdf
+            .canonicalize()
+            .map_err(|e| format!("PDF 路径无效（{}）: {e}", r.path))?;
+        if !c.starts_with(root) {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(len, _)| norm.len() > *len) {
+            best = Some((norm.len(), c));
+        }
+    }
+    Ok(best.map(|(_, p)| p.to_string_lossy().replace('\\', "/")))
+}
+
+/// 笔记 → 配对 PDF（产物清单入口：根由调用方给定，笔记必须在根内）
+fn pdf_for_note_sync(project_root: &str, note_path: &str) -> Result<Option<String>, String> {
+    let root = gated_root(project_root)?;
+    let note = PathBuf::from(crate::sessions::expand_tilde(note_path));
+    let is_md = note
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+    if !is_md {
+        return Err("只支持 Markdown 笔记（.md）".into());
+    }
+    let note_c = note
+        .canonicalize()
+        .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
+    if !note_c.starts_with(&root) {
+        return Err("笔记在项目目录之外，拒绝访问".into());
+    }
+    pair_pdf_at(&root, &note_c)
+}
+
+/// 精读笔记产物「⛶ 沉浸阅读」入口：给笔记找配对 PDF（找不到返回 null，前端给提示）
+#[tauri::command]
+pub async fn pdf_for_note(
+    project_root: String,
+    note_path: String,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || pdf_for_note_sync(&project_root, &note_path))
+        .await
+        .map_err(|e| format!("查找配对 PDF 失败: {e}"))?
+}
+
+/// reader_for_note 返回：归属项目根 + 配对 PDF + 实际编辑的笔记路径（工作区笔记映射回主仓副本）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderForNoteDto {
+    pub project_root: String,
+    pub pdf_path: String,
+    pub note_path: String,
+}
+
+/// 笔记 → 阅读区三要素（终端页文件树/预览工具条入口：根未知，反查归属）：
+/// 注册项目根直含 → 工作区 worktree 包含则映射主仓副本（主仓还没有 = 未合并，明确报错）→ 配对 PDF。
+fn reader_for_note_sync(note_path: &str) -> Result<ReaderForNoteDto, String> {
+    let note = PathBuf::from(crate::sessions::expand_tilde(note_path));
+    let is_md = note
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+    if !is_md {
+        return Err("只支持 Markdown 笔记（.md）".into());
+    }
+    let note_c = note
+        .canonicalize()
+        .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
+    let conn = crate::workspaces::db()?;
+    // 1. 注册项目根直含（canonical 后前缀判定，与 register_project 的 canonical_key 同口径）
+    let mut root: Option<PathBuf> = None;
+    let mut note_final = note_c.clone();
+    for p in crate::projects::list_projects_in(&conn)? {
+        let pr = PathBuf::from(crate::projects::canonical_key(Path::new(
+            &crate::sessions::expand_tilde(&p.path),
+        )));
+        if note_c.starts_with(&pr) {
+            root = Some(pr);
+            break;
+        }
+    }
+    // 2. 工作区 worktree 包含 → 映射主仓副本（编辑主仓文件，读写约束不需要扩白名单）
+    if root.is_none() {
+        for w in crate::workspaces::query_workspaces(&conn)? {
+            let wt = PathBuf::from(&w.worktree_path);
+            let wt = wt.canonicalize().unwrap_or(wt);
+            let Ok(rel) = note_c.strip_prefix(&wt) else { continue };
+            let repo = PathBuf::from(crate::sessions::expand_tilde(&w.repo_path));
+            let main_note = repo.join(rel);
+            if !main_note.exists() {
+                return Err(
+                    "这份笔记还在工作区里、尚未合并进主仓：评审合并后再进沉浸阅读（或先在主仓打开）"
+                        .into(),
+                );
+            }
+            note_final = main_note
+                .canonicalize()
+                .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
+            // 工作区所属仓库必须是任务项目（注册或含 .ccode/project.toml），顺带拿 canonical 根
+            root = Some(crate::projects::ensure_task_project_root(&repo)?);
+            break;
+        }
+    }
+    let root = root.ok_or("这份笔记不在任何已登记项目或工作区内")?;
+    let pdf = pair_pdf_at(&root, &note_final)?
+        .ok_or("未找到与这份笔记配对的 PDF（papers/ 里需有已登记的本篇 PDF）")?;
+    Ok(ReaderForNoteDto {
+        project_root: root.to_string_lossy().replace('\\', "/"),
+        pdf_path: pdf,
+        note_path: note_final.to_string_lossy().replace('\\', "/"),
+    })
+}
+
+/// 终端页 md 笔记「⛶ 沉浸阅读」入口：反查归属项目 + 配对 PDF 一次给齐（失败原因直接透出）
+#[tauri::command]
+pub async fn reader_for_note(note_path: String) -> Result<ReaderForNoteDto, String> {
+    tauri::async_runtime::spawn_blocking(move || reader_for_note_sync(&note_path))
+        .await
+        .map_err(|e| format!("打开沉浸阅读失败: {e}"))?
 }
 
 // ===== 批次 B2：图片通道 =====
@@ -636,6 +856,82 @@ mod tests {
         (root, pdf)
     }
 
+    // ===== 建档配对（来源行锚点） =====
+
+    #[test]
+    fn source_pdf_parses_both_formats() {
+        assert_eq!(
+            note_source_pdf("# T\n\n> 来源 PDF：papers/a b.pdf\n\n## 研究问题"),
+            Some("papers/a b.pdf".to_string())
+        );
+        assert_eq!(
+            note_source_pdf("# T\n\n> 来源：papers/a b.pdf · 开始阅读 2026-08-20\n"),
+            Some("papers/a b.pdf".to_string())
+        );
+        // 非来源行 / 非 pdf 结尾不认
+        assert_eq!(note_source_pdf("# T\n\n## 研究问题\n"), None);
+        assert_eq!(note_source_pdf("> 来源：notes/x.md\n"), None);
+    }
+
+    #[test]
+    fn untouched_template_detection() {
+        let tpl = note_template("T", "papers/a.pdf", "2026-08-20");
+        assert!(note_is_untouched(&tpl));
+        assert!(!note_is_untouched(&tpl.replace("## 研究问题", "## 研究问题\n\n写了内容")));
+    }
+
+    #[test]
+    fn ensure_returns_existing_sourced_note_without_creating_slug() {
+        let (root, pdf) = project_with_pdf("pair", "Some Paper.pdf");
+        let notes = root.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        // 精读步骤产物：序号-短标题命名 + 来源行锚点
+        let numbered = notes.join("01-某某主题精读.md");
+        fs::write(&numbered, "# 某某主题\n\n> 来源 PDF：papers/Some Paper.pdf\n\n## 研究问题\n").unwrap();
+        let dto = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        assert!(!dto.created);
+        assert_eq!(PathBuf::from(&dto.path), numbered);
+        // 没有另建 slug 笔记
+        assert!(!notes.join("Some-Paper.md").exists());
+    }
+
+    #[test]
+    fn ensure_prefers_sourced_note_and_cleans_untouched_slug() {
+        let (root, pdf) = project_with_pdf("merge", "Some Paper.pdf");
+        // 先建出 slug 模板笔记（模拟此前「开读」误建）
+        let first = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        assert!(first.created);
+        // 之后精读步骤产出了带来源行的正式笔记
+        let numbered = root.join("notes/01-正式精读.md");
+        fs::write(&numbered, "# 正式\n\n> 来源 PDF：papers/Some Paper.pdf\n\n## 研究问题\n").unwrap();
+        let dto = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        assert!(!dto.created);
+        assert_eq!(PathBuf::from(&dto.path), numbered);
+        // 空模板 slug 笔记被清掉（回收站不可用的环境则保留，两种情况都不许再当主笔记返回）
+        let slug = root.join("notes/Some-Paper.md");
+        if slug.exists() {
+            let content = fs::read_to_string(&slug).unwrap();
+            assert!(note_is_untouched(&content));
+        }
+    }
+
+    #[test]
+    fn pair_pdf_prefers_source_line_over_title_guess() {
+        let (root, pdf) = project_with_pdf("anchor", "English Title That Chinese Note Cannot Match.pdf");
+        let notes = root.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        let note = notes.join("02-中文短标题.md");
+        fs::write(
+            &note,
+            "# 中文短标题\n\n> 来源 PDF：papers/English Title That Chinese Note Cannot Match.pdf\n",
+        )
+        .unwrap();
+        let note_c = note.canonicalize().unwrap();
+        let root_c = root.canonicalize().unwrap();
+        let got = pair_pdf_at(&root_c, &note_c).unwrap();
+        assert_eq!(got, Some(pdf.canonicalize().unwrap().to_string_lossy().replace('\\', "/")));
+    }
+
     #[test]
     fn creates_note_from_template() {
         let (root, pdf) = project_with_pdf("create", "My Paper 2026.pdf");
@@ -646,11 +942,14 @@ mod tests {
         assert!(text.starts_with("# My Paper 2026\n"));
         assert!(text.contains("> 来源：papers/My Paper 2026.pdf · 开始阅读 "));
         for h in [
+            "## 一句话总结",
             "## 研究问题",
             "## 方法",
             "## 主要结果",
             "## 局限",
             "## 可引用点",
+            "## 与本课题的关系",
+            "## 疑问与待跟进",
             "## 译段",
             "## 我的想法",
         ] {
@@ -668,6 +967,54 @@ mod tests {
         assert!(!second.created);
         assert_eq!(second.path, first.path);
         assert_eq!(fs::read_to_string(&second.path).unwrap(), "人手改过的内容");
+    }
+
+    #[test]
+    fn pdf_for_note_matches_numbered_note() {
+        let root = tmpdir("pair");
+        let ccode = root.join(".ccode");
+        fs::create_dir_all(&ccode).unwrap();
+        fs::write(
+            ccode.join("project.toml"),
+            "name = \"t\"\n\n[[resources]]\nname = \"转化型正极Mg电池透视\"\npath = \"papers/转化型正极Mg电池透视.pdf\"\ntype = \"paper\"\n",
+        )
+        .unwrap();
+        let papers = root.join("papers");
+        fs::create_dir_all(&papers).unwrap();
+        fs::write(papers.join("转化型正极Mg电池透视.pdf"), b"%PDF-fake").unwrap();
+        let notes = root.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        // lit-notes 口径的序号前缀笔记：normalize 互相包含应命中
+        let note = notes.join("124-转化型正极Mg电池透视与迷你综述.md");
+        fs::write(&note, "# t").unwrap();
+        let got = pdf_for_note_sync(&root.to_string_lossy(), &note.to_string_lossy())
+            .unwrap()
+            .expect("应命中配对 PDF");
+        assert!(got.ends_with("papers/转化型正极Mg电池透视.pdf"), "{got}");
+    }
+
+    #[test]
+    fn pdf_for_note_none_when_no_match() {
+        let (root, _pdf) = project_with_pdf("pair-none", "My Paper 2026.pdf");
+        let notes = root.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        let note = notes.join("完全无关的笔记.md");
+        fs::write(&note, "# t").unwrap();
+        assert!(
+            pdf_for_note_sync(&root.to_string_lossy(), &note.to_string_lossy())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pdf_for_note_rejects_outside_root() {
+        let (root, _pdf) = project_with_pdf("pair-out", "a.pdf");
+        let outside = tmpdir("pair-out-note").join("x.md");
+        fs::write(&outside, "# t").unwrap();
+        let err = pdf_for_note_sync(&root.to_string_lossy(), &outside.to_string_lossy())
+            .unwrap_err();
+        assert!(err.contains("项目目录之外"), "{err}");
     }
 
     #[test]

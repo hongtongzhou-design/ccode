@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
-import type { McpEnvPair, McpHealthDto, McpServerDto } from "../types";
+import type {
+  AgentCapabilitiesDto,
+  McpEnvPair,
+  McpHealthDto,
+  McpServerDto,
+} from "../types";
 import { confirmDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
@@ -74,9 +79,6 @@ interface DiscoveredMcp {
 
 /** MCP 页（matrix §10 调研落地）：统一清单 + 一键分发到各 CLI 的用户级配置。
  *  分发只写用户级（项目级有审批闸），密钥用 $VAR 引用不落明文 */
-
-/** 首版只读、暂不支持 MCP 分发的 agent（后端决策）：展开区显示「只读」而非开关 */
-const MCP_DISTRIBUTE_UNSUPPORTED = new Set(["grok"]);
 
 const EMPTY_FORM = {
   name: "",
@@ -206,6 +208,16 @@ export default function McpPage({ visible }: { visible: boolean }) {
       stale = true;
     };
   }, [expanded, distStatus]);
+  // 能力表（agent_capabilities）：只读 agent 的分发开关换「只读」+ 原因提示，与后端报错同源
+  const [caps, setCaps] = useState<Record<string, AgentCapabilitiesDto>>({});
+  useEffect(() => {
+    if (!visible) return;
+    invoke<AgentCapabilitiesDto[]>("agent_capabilities")
+      .then((list) =>
+        setCaps(Object.fromEntries(list.map((c) => [c.agent, c]))),
+      )
+      .catch(() => {});
+  }, [visible]);
   // 收编现有配置 / 粘贴导入 / 内置预设（低频，收进顶部 ⋯ 菜单）
   const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
   // 页头「预设 ▾」下拉：内置预置一键预填（mcp-presets.ts，加预设 = 加一条）
@@ -706,10 +718,13 @@ export default function McpPage({ visible }: { visible: boolean }) {
                             )}
                             <span className="truncate">{agent.label}</span>
                           </span>
-                          {MCP_DISTRIBUTE_UNSUPPORTED.has(agent.id) ? (
+                          {caps[agent.id] && !caps[agent.id].mcpWrite.supported ? (
                             <span
                               className="text-xs text-l4"
-                              title="该 CLI 的 MCP 配置首版只读，暂不支持分发"
+                              title={
+                                caps[agent.id].mcpWrite.reason ??
+                                "该 CLI 的 MCP 配置只读，暂不支持分发"
+                              }
                             >
                               只读
                             </span>

@@ -27,6 +27,7 @@ import {
   secondaryActionClass,
 } from "../components/PageFrame";
 import type {
+  AgentCapabilitiesDto,
   GlobalApplyResultDto,
   OfficialAccountStatusDto,
   Profile,
@@ -1093,6 +1094,16 @@ export default function ProfilesPage() {
     refreshGlobalBackups().catch(() => {});
   }, [profiles]);
 
+  /** 能力表（agent_capabilities）：「设为全局」按 setGlobal 置灰 + 原因提示，与后端报错同源 */
+  const [caps, setCaps] = useState<Record<string, AgentCapabilitiesDto>>({});
+  useEffect(() => {
+    invoke<AgentCapabilitiesDto[]>("agent_capabilities")
+      .then((list) =>
+        setCaps(Object.fromEntries(list.map((c) => [c.agent, c]))),
+      )
+      .catch(() => {});
+  }, []);
+
   /** 三层验证结果镜像进 store（收件箱「配置失效」条目）；通过则摘除。原因取第一个未通过层 */
   function mirrorValidation(p: Profile, result: ProfileValidationDto) {
     const layers: [string, ValidationCheckDto][] = [
@@ -1998,6 +2009,10 @@ export default function ProfilesPage() {
             { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
             {
               label: "设为全局",
+              disabled:
+                caps[rowMenu.profile.agent] !== undefined &&
+                !caps[rowMenu.profile.agent].setGlobal.supported,
+              title: caps[rowMenu.profile.agent]?.setGlobal.reason,
               onSelect: () => void onApplyGlobal(rowMenu.profile),
             },
             ...(globalBackups[rowMenu.profile.agent]

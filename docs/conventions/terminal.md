@@ -24,7 +24,9 @@
   （`WorkspaceReviewRequest.action`：pr/archive/resolve-conflict）：仅 `resolve-conflict` 允许自动同步基准、准备冲突两侧。
 - **评审覆盖层以代码为中心**：顶部固定任务/分支/增删统计与唯一主动作，提交信息和批量冲突操作在第二工具行；右侧只做
   文件搜索/树形定位/简短进度；diff 连续浏览、标题吸顶、长段未修改折叠，右侧选中随主区滚动同步；冲突选边用文件标题下
-  紧凑双侧控件，AI 理由单行展示、用户显式执行。
+  紧凑双侧控件，AI 理由单行展示、用户显式执行。**提交信息可留空（v3.97，面向不懂编程的用户）**：留空走
+  `defaultCommitMessage` 本地规则默认信息（chore: 更新 N 个文件），不调 AI、不拦提交——评审与归档弹层同口径，
+  与改动面板「留空 = 快速提交」、主仓快速提交面板的先例一致；想写更好的点 ◈。
 - **改动面板跟随左栏文件树的根，而非终端标签 cwd**（v3.82，用户拍板）：「我在看哪个目录，改动就显示哪个」——
   FileTree 根切换（钻取/上级/项目区切根）成功后经 `onRootNavigated` 上报 TerminalPage（`treeRoot`），GitPanel 吃
   `treeRoot ?? activeCwd`；切标签/分屏焦点变化时 TerminalPage 主动清空分叉回落标签 cwd（树未挂载时无人上报，必须兜底）。
@@ -105,6 +107,16 @@
 
 ## 收件箱与注意力
 
+- **精确注意力标记（hooks 桥接，七家）**：`session_tail_state` 对设置页已开启的 agent 优先读 hooks 事件日志
+  （`<config>/ccode/hooks-state/<tag>-hooks.jsonl`，尾部窗口读取），日志缺失或超 10 分钟无更新回落尾部文本推断——
+  TTL 与回落语义不变，消费侧（终端注意力点/运行中聚合/OS 通知/收件箱）零改动。事件映射：用户提交→working /
+  轮次结束→done / 等待确认→confirm；各家原生事件名与 matcher 以 hooks.rs 的 BRIDGE_SPECS 为单一出处
+  （调研结论录 matrix §12），日志解析兼容 snake_case/camelCase 双信封、事件名去下划线小写归一、
+  grok Stop 只认 reason=end_turn（teardown 会以 shutdown/channel_closed 重发，跳过）、会话归属双键匹配
+  （session_id==会话文件主名 或 transcript_path==完整路径）。支持 claude/qwen/codebuddy/gemini/kimi/grok/codex
+  七家；cursor（无「等待确认」等价事件）与 opencode（无 shell hooks 形态）未接入。**两个生效条件**：codex 非托管
+  hook 首次需在其 TUI /hooks 面板人工信任后才执行（按 hook 定义 hash 记信任，改命令失效需重审——不自动 bypass，
+  安全优先，UI 备注引导）；codebuddy 启动时快照 hooks 配置，已运行的会话需重启后生效。
 - **收件箱条目通用忽略（v3.88）**：`filterDismissed`/`dismissInboxItem`（inbox.ts）把原先只有 `help:`
   才有的屏蔽能力推广到全部七类。签名口径同 help——`text|actionLabel` 变化即视为新事件、旧忽略自动失效，
   所以「忽略」不会真的漏掉事情。生产端（WorkspacesPage）在写入 store 前过滤。
@@ -184,28 +196,78 @@
 ## 沉浸阅读区（v3.96；批次 B1/B2/B3）
 
 - **覆盖层形态**：`ReaderOverlay` 挂在终端页内（`fixed inset-0 z-40` 页面模态档，与评审覆盖层同思路），
-  三栏「笔记｜PDF｜Agent 对话」，**不要底部终端**（用户拍板）；底下终端/PTY/右栏全程保持挂载，退出即回原样。
+  三栏「笔记｜PDF｜Agent 终端」，**不要底部终端**（用户拍板）；底下终端/PTY/右栏全程保持挂载，退出即回原样。
+  覆盖层会盖住 App 自绘标题栏，**覆盖层自带顶栏必须自担两件事**：可拖动 + macOS `pl-[78px]` 红绿灯让位
+  （口径同 App.tsx 顶栏）。拖拽用**手动 `startDragging`**（mousedown 落在按钮/链接等交互元素上才放行）——
+  `data-tauri-drag-region` 属性版只认落点元素本尊，顶栏几乎全被子元素占满，实测拖不动（v3.99 教训）。
+  任何 inset-0 覆盖层同理，漏了就是按钮重合 + 窗口拖不动。
   分隔条拖拽记宽度（localStorage `ccode.readerSplitL/R`，钳制与像素换算在 `src/reader.ts`），左右栏可收起；
+  右栏底部还有终端状态栏——TerminalStatusBar 节点随 xterm 宿主一并 DOM 搬移（`data-statusbar-host` 标记，
+  槽位缺席时留在原 pane，两槽位挂载时机不同步故 host/bar 独立判定）。
+  **建档配对（v3.99）**：`ensure_paper_note` 建档前先扫 notes/*.md 头部的「来源行」（lit-notes 的
+  `> 来源 PDF：<相对路径>` 或建档模板的 `> 来源：<path> · 开始阅读`）——命中即打开该笔记不另建 slug 笔记，
+  此前误建的空模板 slug 笔记顺带清进回收站；反向 `pair_pdf_at` 同样来源行优先、标题互相包含兜底。
   v1 单窗全屏，结构上预留 v2 独立弹窗能力（未做）。入口三处统一走 store 一次性请求
   `readerReq: { pdfPath, projectRoot }`：PDF 预览工具条「⛶ 沉浸阅读」、文献雷达精读清单「开读」、文件树 PDF 右键。
+- **指定笔记入口（v3.98，精读笔记产物）**：`readerReq`/阅读区 state 增加可选 `notePath`——`notePath` 非空时
+  ReaderOverlay **跳过 ensure_paper_note 建档**、笔记栏直接编辑这份 md（否则会按 PDF slug 再建一份模板笔记，
+  与 lit-notes 的 `<序号-短标题>.md` 并存打架）。md 入口三处：产物核验清单 md 就地预览弹层「⛶ 沉浸阅读」、
+  终端页文件树 md 右键、终端页 md 预览工具条「⛶ 沉浸阅读」（read 态；缺省仍是 FilePreviewEditor 自带单栏沉浸层）。
+  三处统一走 `reader_for_note`（reader.rs）一次给齐归属项目根 + 配对 PDF + 实际笔记路径：归属反查 = 注册项目根
+  canonical 前缀直含 → 工作区 worktree 包含则映射主仓副本（主仓还没有 = 未合并，明确报错「评审合并后再进」）；
+  配对 = 笔记 stem 与 project.toml `type="paper"` 资源的文件 stem 做 `normalize_title`（lit_watch.rs，已提
+  pub(crate) 复用）**互相包含**（与前端 lit-watch.ts `paperResourceFor` 同口径），多命中取规范化最长者，
+  无命中报错透出。另有根已知的变体 `pdf_for_note`（返回 Option，供已知 projectRoot 的调用方）。
+- **右栏 = 阅读会话标签的 xterm 终端画面**（2026-08-18 用户拍板：右栏从结构化对话视图改为真实终端，
+  用户看着终端直接敲）：TerminalPage 用 `useLayoutEffect` 把该标签的 xterm 宿主节点（TerminalView 容器 div，
+  `data-terminal-host=<tabId>`）appendChild 进覆盖层右栏槽位（槽位经回调 ref + state 上报，右栏收起槽位卸载时
+  自动回搬），关闭时插回原槽位最前——FilePreviewEditor 的 Monaco 宿主移动同款先例，PTY/xterm/scrollback
+  不重建不丢；容器上既有 ResizeObserver 在尺寸变化时自动 fit，无需额外触发。阅读区打开时该标签被提到活跃。
+  没有独立的对话视图与输入框：「◈ 问 AI」/圈选截图注入仍写该标签 PTY（`injectToReader`），文字出现在终端
+  输入行里正好可见。无配置引导卡、标签被关的「重新启动会话」卡片行为保留。标签的 ⌘F 搜索条与粘贴反馈小条
+  留在终端页原区域（阅读区里看不见，退出后可用）。**同日拍板：不做扩展性功能，只做场景必需**——快捷 chips
+  （图导游/总结这页/帮我改笔记）与「✦ 工具」页签（译历史/生词本表格/大纲三段）砍掉待需求，
+  `ReaderToolsPanel` 已删；⌘+点击段落对照的结果改在点击位置旁的选区同款浮卡呈现（可保存译段）。
 - **Esc 级联阅读区最优先**：阅读区自己的 keydown 监听带 `isComposing` 守卫（中文输入法组词中按 Esc 是取消候选）；
   TerminalPage 的专注/右栏全宽 Esc 在阅读区打开期间直接放行不拦（`if (reader) return`）；圈选模式内的 Esc 用
-  capture 相 + stopPropagation 抢在关阅读区之前（先退圈选，再退阅读区）。
+  capture 相 + stopPropagation 抢在关阅读区之前（先退圈选，再退阅读区）。**焦点在右栏 xterm 里时 Esc 被 xterm
+  就地消化（打断生成/vim），不冒泡、不关阅读区**（与终端页专注模式同一口径）——此时退出用「← 返回」或先点别处再 Esc。
+- **⌘E 翻转笔记栏阅读/编辑**（组合串 `READER_MODE_HOTKEY` 在 hotkeys.ts，mod = ⌘/Ctrl）：ReaderOverlay
+  全局 keydown 命中后经 `modeTick` 信号递进通知 FilePreviewEditor（tick/signal 先例：readerAgentTick），
+  变化即翻转、初挂载不动作；**焦点在右栏 xterm 时不拦**（`rightColRef.contains(e.target)` 判定，
+  Ctrl+E 是 readline 行尾——与 Esc 级联「键归终端」同语义）。切换按钮 title 只在接线（modeTick 存在）时
+  才带快捷键提示。
+- **保存译段/插入笔记的反馈口径**：成功 = 浮卡按钮变 ✓ + ReaderOverlay 右下角 toast + 笔记栏 watcher 自动
+  回显；**唯一不回显的场景是笔记栏停在编辑态且有未保存改动**（dirty 时 watcher 停订）——此时 toast 必须
+  明说「笔记栏有未保存改动，保存后可见」（dirty 状态经 FilePreviewEditor `onDirtyChange` 上报 ReaderOverlay，
+  文案口径纯函数 `translationSavedToast` 在 reader.ts，tests/reader.test.ts 锚定）；失败一律 loud
+  （PDF 栏顶部 hint 条 + toast ✗）。
+- **Agent 上下文简报**：note 就绪且 `agentStatus.running` 为真时，ReaderOverlay 自动向阅读会话**直发**一行
+  简报（「【阅读上下文】在读 PDF：<pdfPath>；配套笔记：<note.path>…」），按 note.path 去重一次性
+  （换 PDF 后 note.path 变 → 重新简报；发送失败不标记，下次 running 跃迁重试）。已知竞态：send=true 会把
+  用户输入行未发完的文字一起带出，running 守门后窗口极小，接受（注释在 ReaderOverlay 同效应处）。
 - **注入单一内核 `injectToTab(tabId, data, send)`**：原 `injectToActiveAgent` 抽成按 tabId 的共用内核，
   右栏选段（活跃标签）与阅读区注入（阅读会话标签）走同一条链路，行为口径不变（缺省不自动回车、`send=true`
-  一次拼接 `\r`）；选段「◈ 问 AI」/「↵ 直接发送」/圈选「发给 agent」/chips 全部经此。
+  一次拼接 `\r`）；选段「◈ 问 AI」/「↵ 直接发送」/圈选「发给 agent」全部经此。
 - **阅读会话 reuseKey 口径**：进入阅读区自动起一个阅读会话标签（项目根 + 默认配置 + autoStart，快速开聊同款
   机制），`reuseKey = reader:<projectRoot>`（`src/reader.ts readerReuseKey` 单一出处）——退出再进找回同一标签
   接着聊；恢复出的占位标签不带 reuseKey 不参与复用；用户手动关掉标签后不连环重建（一次性标记，栏内给
-  「重新启动」入口）；无可用配置时 Agent 栏给引导卡跳配置页，不自动起会话。
+  「重新启动」入口）；无可用配置时右栏给引导卡跳配置页，不自动起会话。
 - **圈选截图两个去向**（裁好的 PNG 由 PdfContinuousView 交来）：「◈ 发给 agent」= 走 `save_clipboard_image`
-  落**临时图**（终端粘贴图片同一命令/口径），路径 + 预填 prompt 写进阅读区输入框**不自动发送**（图是临时产物，
+  落**临时图**（终端粘贴图片同一命令/口径），路径 + 预填 prompt 写进终端输入行**不自动发送**（图是临时产物，
   不进项目目录）；「＋ 插入笔记」= 走 `save_reader_capture` 落 `notes/assets/`（PNG 魔数校验 + 同秒重名 -2/-3）
   并 `append_note_image` 追加进笔记「## 我的想法」小节（笔记栏经 watcher 自动刷新可见）。
 - **md 阅读版式图片与相对链接后处理**（批次 B2，FilePreviewEditor）：相对/绝对路径图片经 `read_image_bytes`
   （白名单判定复用 pdf.rs `read_whitelisted_sync` 内核，png/jpg/jpeg/gif/webp/svg，20MB）转 data URL 内嵌；
   **http(s) 图片不加载**（隐私，用户拍板——笔记渲染不发网络请求），只显示链接文本；相对链接在阅读区笔记栏
   **原地打开** + 顶栏「← 回笔记」退回（previewReq 会开在阅读区底下看不见，故不走它）。
+  异步落地守卫只用 `isConnected`、**不用 cancelled**（v3.99 修正）：该 setup 不幂等（img 换成占位 span），
+  StrictMode 双跑/阅读⇄编辑重挂时后一次 setup 找不到 img，占位只能靠前一次的异步结果落地；脱树守卫交给
+  `isConnected`。`renderMathInto`（md-math.ts）同理在 await 前快照 TeX 源码，重跑幂等。
+  **编辑→阅读同步（同日修复）**：编辑期间 `text` 状态不随键入更新（dirty 时 watcher 停订、保存又只动
+  lastSavedRef），直接切回阅读会停在旧盘稿（删除/新增都看不见）——`switchMode("read")` 时把
+  `editorRef.getValue()`（含未保存改动）setText 进去，阅读态 = 当前缓冲的预览；反向不走这条路
+  （external-reload effect 遇模型相同自行跳过）。
 - **笔记编辑态粘贴图片**：项目内 md（有 projectRoot 语境）落 `notes/assets/` 并在光标处插 `![](相对路径)`；
   非项目内文件回落临时图路径文本（终端粘贴同口径），不混用两条通道。
 - **术语淡高亮实现约束**：textLayer 落地后对**文本节点**跑整词匹配（`findGlossaryMatches`，大小写不敏感），
@@ -215,7 +277,24 @@
   （CSS filter，不动 canvas 数据），进度/护眼均按文件记忆（localStorage `ccode.readerProgress.`/`ccode.readerDark.`）。
 - **生词本/译段落盘契约**：`notes/glossary.md` 表格（`| 术语 | 释义 | 出处 |`）是机管文件，表外内容保留；
   格式契约与 `src/reader.ts` 双端镜像（前端不直接写文件，那组函数是格式的单一可读规格 + 测试锚点，
-  改动需同步）；译段追加进笔记「## 译段」小节，会话内译段对照卡是组件态不落库，「保存译段到笔记」才写盘。
+  改动需同步）；译段在选区旁浮卡就地呈现（不留历史列表），「保存译段到笔记」才经 `append_note_translation`
+  写进笔记「## 译段」小节（✓ 防重是浮卡组件态）。
+- **PDF 选区高亮 = pdf.js v6 DrawLayer 自绘**（v3.99 修正，PdfPageView）：原生 `::selection` 在 scaleX 变换的
+  textLayer 文本片上溢出/错位，官方 viewer 因此默认 `enableSelectionRendering`——textLayer 挂
+  `selectionRendering` 类（pdf_viewer.css 把原生高亮透明化），`pdfjs.DrawLayer`（`pageIndex` + textLayer 元素，
+  `setParent(页宿主)`，cleanup 必须 `destroy()`）按 selectionchange 把选区画成整页 div + SVG clip-path 贴字形；
+  该 div 的样式在 pdf_viewer.css 里 scoped 于 `.pdfViewer .canvasWrapper`，我们 DOM 没有这两个类，App.css
+  照抄一份 `[data-page-num] > .selection`。**WebKit 还有个坑（同日实测修复）**：`range.getClientRects()` 对同一行
+  会返回 span 边框盒（高 = line-height）与字形 A+D 内容盒两个错位矩形，DrawLayer 取并集 → 高亮比字形胖一截
+  压住邻行（Chrome 只返回一个，官方 viewer 无感）；App.css 给 `.textLayer span` 设 `line-height: normal`
+  （边框盒 = 字体自身 A+D，与内容盒重合，并集收敛成单盒，WKWebView 探针实测验证）——span 均绝对定位且
+  文字透明，此改动只影响选区几何。另对齐 viewer 两件套：textLayer 渲染完追加 `endOfContent` 页尾捕手
+  + mousedown 挂 `selecting` 类（拖过末行仍能扩到页尾；DrawLayer 的 MutationObserver 也靠它感知重渲染重算选区）；
+  `--total-scale-factor` 取 `viewport.scale × viewport.userUnit`（官方 = scale-factor × user-unit，userUnit≠1
+  的 PDF 才不等价于名义倍率）。**缩放/圈选控件是 PDF 栏顶部常驻细工具条**（Zotero 式：图标钮 28px 热区 +
+  页码居中 grid 三列 + ▦ 圈选右置）——不再是滚动层内 sticky 浮块（实测挡正文与圈选画面）；
+  **三栏顶条统一 h-8 + 底部 hairline**（FilePreviewEditor 工具条同步改成这个规格，栏间才严丝合缝）；
+  圈选 Esc/手势语义不变。
 
 ## 其余终端工作台条目
 
@@ -227,6 +306,8 @@
   `skillDraftReq` 一次性请求 → 技能页新建弹窗预填，保存走既有 create_skill（重名拒绝）。
 - **模型 combo-box（v3.42）**：启动栏模型 = 可输可选（profile 预设 + `ccode.modelHistory.<agent>` 历史去重，上限 10 条），
   启动成功即记历史；「新增模型」不再是配置概念。
-- **评审一键开下一步（v3.42）**：开步链路单一出处 `src/pipeline-start.ts`；评审覆盖层合并成功且保留工作区时，成功横幅
-  给出「▶ 开始下一步：步骤名」——下一步 = 同名步骤之后第一个无同名工作区（含已归档）的步骤；无下一步/未注册/无流水线
-  只显示合并成功横幅；「合并并归档」成功即关覆盖层，不出此入口。
+- **评审一键开下一步（v3.42；v3.97 改向）**：评审覆盖层合并成功且保留工作区时，成功横幅
+  给出「→ 去下一步：步骤名」——下一步 = 同名步骤之后第一个无同名工作区（含已归档）的步骤；无下一步/未注册/无流水线
+  只显示合并成功横幅；「合并并归档」成功即关覆盖层，不出此入口。**v3.97 起不再直接开步跳终端**
+  （用户拍板：直接开步会把不熟流程的用户扔进黑窗）——改为 `selectProjectReq` + 跳项目页，
+  聚焦逻辑自动落在刚解锁的下一步（第一个未完成步骤），流程线/TASK.md/人工事项先看再自己点「开始」。

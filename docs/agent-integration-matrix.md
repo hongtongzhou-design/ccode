@@ -4,6 +4,7 @@
 > 2026-08-05 补充核实各供应商 Anthropic/OpenAI 兼容端点（见 §1 附注），来源均为官方文档页面。
 > 2026-08-06 新增 §7 CodeBuddy Code（v2.132.0 实机验证，含真实会话样本与 product.json 核实）。
 > 2026-08 新增 §9 Grok Build（xai-org/grok-build 源码调研；标注「待实机验证」处未经实机核对）。
+> 2026-08-20 新增 §12 精确注意力 hooks 桥接调研（九家，实现 = hooks.rs 的 BRIDGE_SPECS；cursor/opencode 未接入结论同记）。
 > 标记「易漂移」的均为各 CLI 内部格式，解析必须防御式（跳过未知类型、容忍缺字段、容忍末行截断）。
 
 ## 1. Claude Code
@@ -224,3 +225,47 @@ Ccode 清单模型只收公共子集：stdio（command/args/env/cwd）+ remote�
   （多模态直读）；gemini/kimi/codebuddy/cursor 是路径原文进上下文、模型经工具读图。两派用户体验等价，
   Ccode 只需保证写进去的是**转义后的绝对路径**。
 - 临时落盘文件在 `<config>/ccode/tmp/paste-*`，保存时顺带清理 7 天前残留（clipboard.rs）。
+
+## 12. 精确注意力 hooks 桥接调研（2026-08-20；实现 = hooks.rs 的 BRIDGE_SPECS，写字段/事件名前以本节为准）
+
+**目标**：注意力标记从「会话尾部文本推断」升级为「CLI 原生事件实时驱动」——向各家 CLI 的 hooks 配置写入三个事件
+（用户提交→工作中 / 轮次结束→已回复 / 等待确认→待确认）的命令条目，事件触发时 CLI 把原始 payload（加 unix 秒前缀）
+追加到 `<config>/ccode/hooks-state/<tag>-hooks.jsonl`；注意力分类对已开启的 agent 优先读该日志，缺失或超 10 分钟
+无更新回落尾部推断（消费侧零改动）。
+
+### 12.1 桥接总表
+
+| CLI | 配置文件 | 格式/写入形态 | 三事件映射（工作中 / 已回复 / 待确认） | 生效门槛 | 证据与版本 | Ccode 状态 |
+|---|---|---|---|---|---|---|
+| claude-code | `~/.claude/settings.json` hooks 键 | JSON | UserPromptSubmit / Stop / Notification | 无 | 原有落地（v3.32） | ✅ 已接入 |
+| qwen | `~/.qwen/settings.json` hooks 键 | JSONC 容错读 | UserPromptSubmit / Stop / Notification（matcher `permission_prompt\|idle_prompt`） | 无 | 本机包源码核实 0.21.1 | ✅ 已接入 |
+| codebuddy | `~/.codebuddy/settings.json` hooks 键 | JSON | UserPromptSubmit / Stop / Notification（matcher `permission_prompt\|idle_prompt`）——与 Claude 完全同名同语义 | **启动快照 hooks 配置**：运行中外部改文件需在 /hooks 面板 review 才生效（该行为未实测） | 官方文档+本机包源码核实 2.132.0 | ✅ 已接入 |
+| gemini | `~/.gemini/settings.json` hooks 键 | JSONC 容错读 | **BeforeAgent / AfterAgent / Notification（matcher `*`，仅 ToolPermission 型）** | 无 | 本机包源码核实 0.46.0（官方 migrate 命令映射表确认事件对应） | ✅ 已接入 |
+| kimi | `~/.kimi-code/config.toml` `[[hooks]]` | TOML strict 四字段（event/matcher/command/timeout，多写字段整个配置加载失败） | UserPromptSubmit / Stop / **PermissionRequest**（kimi 的 Notification 是后台任务通知，陷阱勿用） | 无 | 二进制内嵌源码+官方文档核实 0.37.2 | ✅ 已接入 |
+| grok | `~/.grok/hooks/ccode.json`（整文件归 Ccode，全局目录免 folder trust） | JSON 整文件形态（开启=写文件，关闭=删文件，不含 marker 的外来文件拒绝覆盖） | UserPromptSubmit / Stop（**payload reason=end_turn 才算**，teardown 会以 shutdown/channel_closed 重发）/ Notification（matcher `permission_prompt\|idle_prompt`） | 无 | **实机验证 1.0.5** | ✅ 已接入 |
+| codex | `~/.codex/hooks.json` | JSON，handler 带 `async: true` | UserPromptSubmit / Stop / **PermissionRequest** | **非托管 hook 需在 TUI /hooks 面板审核信任后才执行**（按 hook 定义 hash 记信任，改命令失效需重审） | 本机 0.148.0 实测 features stable + 官方仓库源码核实 | ✅ 已接入 |
+| cursor | `~/.cursor/hooks.json`（扁平结构 `{version:1, hooks:{事件:[{command}]}}`） | JSON | beforeSubmitPrompt / stop / **无「等待确认」等价事件** | CLI 逐事件触发与 conversation_id↔会话文件映射未实机验证（未登录） | bundle 调用链+官方文档核实 2026.08.04 | ❌ 未接入（无等待确认等价事件 + 机制未实机验证） |
+| opencode | 无 shell hooks 形态 | — | —（仅进程内 JS 插件：`~/.config/opencode/plugins/*.ts`，事件 session.idle/permission.asked 等，事件名 v2 重构中不稳定） | — | 官方文档+SDK 类型核实 1.18.18，本机未装未实测 | ❌ 未接入（无 shell hooks 形态） |
+
+### 12.2 各家全事件集要点与陷阱（挂钩前核对）
+
+- **qwen（0.21.1）**：共 21 事件，含 idle_prompt/PermissionRequest/StopFailure；**UserPromptSubmit 语义比 Claude 宽**
+  （工具续轮也触发，`submitted_prompt` 才是纯用户提交）——桥接仍挂 UserPromptSubmit，多报的 working 会被后续 Stop 纠正。
+- **gemini（0.46.0）**：共 11 事件；**AfterModel 每 chunk 触发，勿挂**；SessionEnd 不等待 hook 完成（不能用于同步收尾）；
+  官方 migrate 命令的映射表确认 Claude→Gemini 对应（UserPromptSubmit→BeforeAgent / Stop→AfterAgent / Notification→Notification）。
+- **kimi（0.37.2）**：另有 SessionHeartbeat 每 60s 活性信号（本批未用）；`[[hooks]]` 是 TOML strict——event/matcher/command/timeout
+  四字段多写一个整个配置加载失败，写入走 toml_edit 保格式、只增删条目。
+- **codex（0.148.0）**：共 11 事件；另有 legacy `notify` 配置项（仅 agent-turn-complete 一个事件、payload 走 argv）——桥接不用它。
+- **grok（1.0.5）**：envelope 键是 camelCase（sessionId/hookEventName/transcriptPath）、事件值是 snake_case
+  （user_prompt_submit/stop/notification）；Stop 在会话 teardown 时会以 reason=shutdown/channel_closed 重复 fire。
+
+### 12.3 日志解析与写入防护统一口径（hooks.rs）
+
+- **双信封兼容**：claude/qwen/codebuddy/gemini/codex/kimi 的 payload 键是 snake_case，grok 是 camelCase——解析时两键都探。
+- **事件名归一化**：去下划线 + 全小写（grok 的 snake_case 值与其余各家的 PascalCase 归到同一判定表）。
+- **grok Stop 去重**：只认 reason 缺失或 `end_turn` 的记录，shutdown/channel_closed 跳过不更新状态。
+- **会话归属双键匹配**：`session_id == 会话文件主名` 或 `transcript_path == 会话文件完整路径`（grok 会话文件主名恒为
+  `updates`，必须靠 transcript_path 命中；kimi 无 transcript_path 自然只用前者）。
+- **写入防护**（同 global_config 约定）：写前备份（同前缀留 10 份）+ 原子写 + 只动 hooks 段/键 + 用户已有 hooks 合并
+  而非覆盖 + 移除只删含状态日志路径（marker 子串，匹配前反斜杠归一化为正斜杠）的条目并回收空壳键 + 配置损坏拒绝写入；
+  **grok 整文件形态例外**（文件归 Ccode，外来文件拒绝覆盖）。

@@ -55,6 +55,7 @@ export default function TaskCardsSection({
   focusStep,
   focusStatusText,
   focusRunStatus,
+  focusAgentAttention,
   reviewConflict,
   onRestoreWorkspace,
   onFocusIndex,
@@ -82,6 +83,8 @@ export default function TaskCardsSection({
   focusStatusText?: string | null;
   /** 聚焦步骤的执行状态（v3.71 流程线用；由父级从工作区派生——健康/漂移数据在本组件外） */
   focusRunStatus?: "pending" | "active" | "review" | "done";
+  /** 聚焦步骤工作区内终端的注意力（stepAttention 口径）：done 时流程线 agent 节点给「已跑完」提示 */
+  focusAgentAttention?: "confirm" | "done" | null;
   /** 聚焦步骤处于合并冲突阻塞：流程线评审节点入口改为「去处理冲突」 */
   reviewConflict?: boolean;
   /** 聚焦步骤的工作区已归档：流程线 agent 节点主入口改为「恢复工作区」 */
@@ -166,6 +169,11 @@ export default function TaskCardsSection({
   const focusIdx = focusStepDto
     ? steps.findIndex((s) => s.name === focusStepDto.name)
     : -1;
+  /** 想法区零态入口（「＋ 话题」）是否常显：有卡 → 常现（管理已有讨论）；
+   *  无卡 → 仅 role=you 的步骤常显（人主导的步骤开放讨论最有价值，如综述大纲聊角度/创新点）。
+   *  纯执行步骤（检索/清洗等 role≠you 且无卡）不显示——多个没约束对象的入口只会让人问「这是干嘛的」；
+   *  那些步骤要么有种子 chip 建首卡，要么真不需要想法（2026-08-20 两轮实测拍板） */
+  const showIdeaEntry = ideaCards.length > 0 || focusStepDto?.role === "you";
   /** 还没开聊过的预置话题（讨论种子）：开过的已经在话题清单里，不再出 chip */
   const openSeeds = focusStepDto
     ? unstartedSeeds(
@@ -249,6 +257,9 @@ export default function TaskCardsSection({
    *  想法期只读保护（卡片区标题行开关，默认开；allowEdit = ⋯ 菜单的单次豁免）：
    *  开 = 预填指令带不动文件约束 + readonly 标记（后端对支持的 CLI 注入只读/计划模式参数——硬保护）；
    *  关/豁免 = 纯聊天，不动参数。
+   *  预填指令还要给「该动手了」一个明确出口（回项目页开工/商量）——只读约束管得住文件、
+   *  管不住 agent 在项目根读到 project.toml 与草稿后主动请缨开工；没有出口话术，
+   *  它会把「用户点头」当成在主仓直接产出的授权（实测：聊想法会话里 agent 问「要现在开 outline 吗」）。
    *  kimi/opencode 无启动注入参数：启动栏保留指令文本由用户手动发送（promptDropped 既有处理） */
   function onDiscuss(card: TaskCardDto, allowEdit = false, topic?: string) {
     claimForCard(card);
@@ -263,7 +274,7 @@ export default function TaskCardsSection({
       title: card.name,
       readonly: protect || undefined,
       initialPrompt: protect
-        ? `${opening}。注意：现在只讨论方案，不要修改/新建/删除任何文件；我认为需要动手时会明确告诉你。`
+        ? `${opening}。注意：现在只讨论方案，不要修改/新建/删除任何文件，也不要在这里产出任何步骤产物（哪怕我点头）——聊到该动手的程度时，提醒我回项目页点「开工」或「跟 AI 商量一下」，那边会在独立工作区里执行。`
         : opening,
     });
     setPage("terminal");
@@ -612,22 +623,22 @@ export default function TaskCardsSection({
           <StepFlow
             bare
             discussContent={
+              // 零态且非人主导步骤：整个想法区不渲染（没有入口也没有约束对象）
+              !showIdeaEntry && !ideaFormOpen ? null : (
               <div className="mt-1">
                 {/* 想法区（v3.80）：自由想法卡（kind=idea）——只读纯聊 + ◈ 沉淀进任务书；
-                    「想法期只读保护」开关只管只读纯聊这一路，设置页不加行 */}
-                {/* 「话题」区（v3.89）：主聊天入口已合并到流程线的「跟 AI 商量一下」，
-                    这里只作**已聊过话题的归档清单**——没聊过时整个标签不渲染，
-                    否则「话题 / ＋ 聊个话题 / 跟 AI 商量」三个入口并排，新用户分不清 */}
+                    「想法期只读保护」开关只管只读纯聊这一路，设置页不加行。
+                    与「跟 AI 商量一下」是两层东西，文案对仗点破：商量=边聊边改 TASK.md（改合同），
+                    想法=先聊不改稿、点 ◈ 沉淀才进任务书（先发散后收编） */}
                 <div className="group flex items-center gap-2">
                   {ideaCards.length > 0 && (
                     <span className="text-xs text-l4">
                       聊过的（{ideaCards.length}）
                     </span>
                   )}
-                  {/* 「＋ 话题」只在已聊过话题时出现（v3.89）：主聊天入口是流程线的
-                      「跟 AI 商量一下」，这里是给已有讨论再起一个分支用的。
-                      零话题时它是个没有上下文的孤立按钮，用户只会问「这是干嘛的」 */}
-                  {ideaCards.length === 0 && !ideaFormOpen ? null : ideaFormOpen ? (
+                  {/* 「＋ 话题」零态可见性见上方 showIdeaEntry（R5：唯一入口不能消失，
+                      但没约束对象的入口也不白占一行） */}
+                  {ideaFormOpen ? (
                     <form
                       onSubmit={(e) => void submitCreateIdea(e)}
                       className="flex min-w-0 flex-1 items-center gap-1"
@@ -652,17 +663,27 @@ export default function TaskCardsSection({
                       </button>
                     </form>
                   ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIdeaName("");
-                        setIdeaFormOpen(true);
-                      }}
-                      title="自己起个话题开聊，结论可以沉淀进任务书"
-                      className={`${actionBtn} text-l4 hover:text-l1 ${hoverRevealClass}`}
-                    >
-                      ＋ 话题
-                    </button>
+                    <>
+                      {ideaCards.length === 0 && (
+                        <span
+                          className="text-xs text-l4"
+                          title="想法卡在只读会话里聊，不动任何文件；聊出结论后点卡片上的「◈ 沉淀进任务书」才追加进 TASK.md。要直接改 TASK.md 用上面的「跟 AI 商量一下」"
+                        >
+                          先聊不改稿，点 ◈ 沉淀才进任务书：
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIdeaName("");
+                          setIdeaFormOpen(true);
+                        }}
+                        title="自己起个话题开聊（如综述角度、创新点），结论可以沉淀进任务书"
+                        className={`${actionBtn} ${ideaCards.length === 0 ? "text-l3" : `text-l4 ${hoverRevealClass}`} hover:text-l1`}
+                      >
+                        ＋ 话题
+                      </button>
+                    </>
                   )}
                   {/* 跟随想法区同步出现（v3.89，用户要求）：没聊过话题时它没有约束对象，
                       孤零零挂在右下角只会让人问「这管的是什么」 */}
@@ -701,10 +722,12 @@ export default function TaskCardsSection({
                   </ul>
                 )}
               </div>
+              )
             }
             projectPath={projectPath}
             step={focusStepDto}
             runStatus={focusRunStatus ?? "pending"}
+            agentAttention={focusAgentAttention ?? null}
             hasDraft={!!focusDraft?.text?.trim()}
             draft={
               focusDraft

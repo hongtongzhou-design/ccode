@@ -489,7 +489,7 @@ fn parse_included(text: &str) -> Vec<IncludedEntryDto> {
 }
 
 /// 规范化标题（去重口径同 lit-search：忽略大小写与标点；is_alphanumeric 天然保留中日韩字符）
-fn normalize_title(t: &str) -> String {
+pub(crate) fn normalize_title(t: &str) -> String {
     t.chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(|c| c.to_lowercase())
@@ -653,28 +653,29 @@ async fn fetch_pdf_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// 落盘 + 资源登记（sync）：papers/ 目录 canonical 双校验在根内，重名避让，
-/// 写盘后把 PDF 登记进 project.toml 的 [[resources]]（type="paper"，name 取文件 stem；
-/// 复用 projects 的读-改-原子写，render_config 只替换已知段、其余原样保留）
-fn save_and_register_pdf(root: &Path, file_name_hint: &str, bytes: &[u8]) -> Result<DownloadedPaperDto, String> {
+/// papers/ 目录：不存在则创建，canonical 双校验在根内（堵 symlink 逃逸）
+fn papers_dir(root: &Path) -> Result<PathBuf, String> {
     let papers = root.join("papers");
     fs::create_dir_all(&papers).map_err(|e| format!("创建 papers 目录失败: {e}"))?;
-    let canon_papers = fs::canonicalize(&papers).map_err(|e| format!("papers 目录无效: {e}"))?;
-    if !canon_papers.starts_with(root) {
+    let canon = fs::canonicalize(&papers).map_err(|e| format!("papers 目录无效: {e}"))?;
+    if !canon.starts_with(root) {
         return Err("papers 指向项目目录之外，拒绝写入".into());
     }
-    let name = sanitize_pdf_name(file_name_hint);
-    let target = unique_pdf_path(&canon_papers, &name);
-    fs::write(&target, bytes).map_err(|e| format!("写入 PDF 失败: {e}"))?;
+    Ok(canon)
+}
+
+/// 把 papers/ 里已存在的 PDF 登记进 project.toml 的 [[resources]]（type="paper"，
+/// name 取文件 stem；path 存相对项目根、统一正斜杠，同 discover_resources 口径；
+/// 复用 projects 的读-改-原子写，已登记同路径不重复加）
+fn register_pdf(root: &Path, target: &Path) -> Result<DownloadedPaperDto, String> {
     let file_name = target
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| name.clone());
+        .ok_or("PDF 文件名无效")?;
     let stem = Path::new(&file_name)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| file_name.clone());
-    // 资源登记：path 存相对项目根（统一正斜杠，同 discover_resources 口径）；已登记同路径不重复加
     let rel = format!("papers/{file_name}");
     let mut cfg = crate::projects::read_config_at(root).config;
     if !cfg.resources.iter().any(|r| r.path == rel) {
@@ -691,6 +692,51 @@ fn save_and_register_pdf(root: &Path, file_name_hint: &str, bytes: &[u8]) -> Res
         path: target.to_string_lossy().into_owned(),
         name: stem,
     })
+}
+
+/// 落盘 + 资源登记（sync）：文件名清理 + 重名避让，写盘后登记
+fn save_and_register_pdf(root: &Path, file_name_hint: &str, bytes: &[u8]) -> Result<DownloadedPaperDto, String> {
+    let papers = papers_dir(root)?;
+    let name = sanitize_pdf_name(file_name_hint);
+    let target = unique_pdf_path(&papers, &name);
+    fs::write(&target, bytes).map_err(|e| format!("写入 PDF 失败: {e}"))?;
+    register_pdf(root, &target)
+}
+
+/// 关联本地 PDF（sync）：用户手动下载的 PDF 复制进 papers/ 并按标题登记。
+/// 源文件校验同下载口径（.pdf 扩展名 + %PDF- 魔数 + 60MB 上限），复制而非移动。
+fn attach_pdf_at(root: &Path, source_path: &str, title: &str) -> Result<DownloadedPaperDto, String> {
+    let src = PathBuf::from(crate::sessions::expand_tilde(source_path));
+    let meta = fs::metadata(&src).map_err(|e| format!("源文件不可读: {e}"))?;
+    if !meta.is_file() {
+        return Err("选择的不是文件".into());
+    }
+    if meta.len() > DOWNLOAD_CAP as u64 {
+        return Err(format!(
+            "文件超过 60 MB（{:.1} MB）",
+            meta.len() as f64 / 1024.0 / 1024.0
+        ));
+    }
+    let is_pdf_ext = src
+        .extension()
+        .is_some_and(|e| e.to_ascii_lowercase() == "pdf");
+    if !is_pdf_ext {
+        return Err("请选择 PDF 文件".into());
+    }
+    let mut head = [0u8; 1024];
+    let n = {
+        use std::io::Read as _;
+        fs::File::open(&src)
+            .and_then(|mut f| f.read(&mut head))
+            .map_err(|e| format!("读取源文件失败: {e}"))?
+    };
+    if !looks_like_pdf(&head[..n]) {
+        return Err("所选文件不是有效的 PDF".into());
+    }
+    let papers = papers_dir(root)?;
+    let target = unique_pdf_path(&papers, &sanitize_pdf_name(title));
+    fs::copy(&src, &target).map_err(|e| format!("复制 PDF 失败: {e}"))?;
+    register_pdf(root, &target)
 }
 
 // ===== Tauri commands =====
@@ -802,6 +848,22 @@ pub async fn download_paper_pdf(
     tauri::async_runtime::spawn_blocking(move || save_and_register_pdf(&root, &file_name_hint, &bytes))
         .await
         .map_err(|e| format!("保存 PDF 失败: {e}"))?
+}
+
+/// 关联本地 PDF（精读清单/新命中的「关联本地 PDF…」）：付费墙等自动下载失败的场景，
+/// 用户手动下载后选中文件，一步完成 复制进 papers/ + 登记 project.toml
+#[tauri::command]
+pub async fn attach_paper_pdf(
+    project_root: String,
+    source_path: String,
+    title: String,
+) -> Result<DownloadedPaperDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = gated_root(&project_root)?;
+        attach_pdf_at(&root, &source_path, &title)
+    })
+    .await
+    .map_err(|e| format!("关联 PDF 失败: {e}"))?
 }
 
 #[cfg(test)]
@@ -1080,6 +1142,46 @@ lone keyword
         let cfg2 = crate::projects::read_config_at(&dir).config;
         assert_eq!(cfg2.resources.len(), 2);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn attach_pdf_copies_and_registers() {
+        let dir = tmpdir("attach");
+        let src_dir = tmpdir("attach-src");
+        let src = src_dir.join("手动下载.pdf");
+        fs::write(&src, b"%PDF-1.7 body").unwrap();
+        let dto = attach_pdf_at(&dir, src.to_str().unwrap(), "My Paper Title").unwrap();
+        assert!(dto.path.ends_with("papers/My Paper Title.pdf"), "{}", dto.path);
+        assert_eq!(dto.name, "My Paper Title");
+        // 复制而非移动：源文件还在
+        assert!(src.exists());
+        let cfg = crate::projects::read_config_at(&dir).config;
+        assert_eq!(cfg.resources.len(), 1);
+        assert_eq!(cfg.resources[0].kind, "paper");
+        assert_eq!(cfg.resources[0].path, "papers/My Paper Title.pdf");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&src_dir).ok();
+    }
+
+    #[test]
+    fn attach_pdf_rejects_non_pdf() {
+        let dir = tmpdir("attach-bad");
+        let src_dir = tmpdir("attach-bad-src");
+        // 扩展名不对
+        let txt = src_dir.join("notes.txt");
+        fs::write(&txt, b"%PDF-1.7 disguised").unwrap();
+        let err = attach_pdf_at(&dir, txt.to_str().unwrap(), "t").unwrap_err();
+        assert!(err.contains("PDF"), "{err}");
+        // 扩展名对但魔数不对
+        let fake = src_dir.join("fake.pdf");
+        fs::write(&fake, b"<html>login page</html>").unwrap();
+        let err = attach_pdf_at(&dir, fake.to_str().unwrap(), "t").unwrap_err();
+        assert!(err.contains("不是有效的 PDF"), "{err}");
+        // 不存在的路径
+        let err = attach_pdf_at(&dir, "/nonexistent/x.pdf", "t").unwrap_err();
+        assert!(err.contains("不可读"), "{err}");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&src_dir).ok();
     }
 
     #[cfg(unix)] // 符号链接语义仅 unix；Windows 无权限创建

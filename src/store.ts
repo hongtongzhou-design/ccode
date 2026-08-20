@@ -63,8 +63,9 @@ export interface AppSettings {
   hiddenProfiles?: string[];
   /** 对话页「⇗ 外部恢复」的终端应用；auto/undefined = 按优先级探测 */
   externalTerminal?: string;
-  /** 精确注意力标记（Claude Code hooks，写 ~/.claude/settings.json，默认关） */
-  claudeHooksAttention?: boolean;
+  /** 精确注意力标记（agent hooks 桥接）：agent id → 开关，键缺失 = 关；
+      开/关走专用命令 set_hooks_attention（写各家 hooks 配置），勿单独 patch */
+  hooksAttention?: Record<string, boolean>;
   /** 快捷键绑定（"mod+shift+k" 格式，mod=⌘/Ctrl；空串 = 禁用） */
   hotkeyPalette?: string;
   hotkeyHideChrome?: string;
@@ -170,6 +171,7 @@ export interface InboxItem {
     | { type: "digest" }
     | { type: "artifacts"; workspaceId: string }
     | { type: "project"; projectRoot: string }
+    | { type: "help"; projectRoot: string }
     | { type: "profiles" };
 }
 
@@ -215,6 +217,11 @@ export function runInboxAction(item: InboxItem) {
     s.setPage("workspaces");
   } else if (item.action.type === "project") {
     s.setSelectProjectReq(item.action.projectRoot);
+    s.setPage("workspaces");
+  } else if (item.action.type === "help") {
+    // 人工请求「去查看」：选中项目之外还要弹出完整内容层——请求全文在 strip 行里只有 40 字截断预览
+    s.setSelectProjectReq(item.action.projectRoot);
+    s.setHelpViewReq(item.action.projectRoot);
     s.setPage("workspaces");
   } else {
     s.setPage("profiles");
@@ -265,9 +272,12 @@ interface AppState {
       root 可选：文本预览的后端根约束（不给则回落活动标签 cwd） */
   previewReq: { path: string; name: string; root?: string } | null;
   setPreviewReq: (r: { path: string; name: string; root?: string } | null) => void;
-  /** 沉浸式阅读区的一次性打开请求（终端页消费并清空）：PDF 绝对路径 + 所属项目根 */
-  readerReq: { pdfPath: string; projectRoot: string } | null;
-  setReaderReq: (r: { pdfPath: string; projectRoot: string } | null) => void;
+  /** 沉浸式阅读区的一次性打开请求（终端页消费并清空）：PDF 绝对路径 + 所属项目根；
+      notePath 指定后笔记栏直接编辑该 md（不按 PDF slug 另建模板笔记） */
+  readerReq: { pdfPath: string; projectRoot: string; notePath?: string } | null;
+  setReaderReq: (
+    r: { pdfPath: string; projectRoot: string; notePath?: string } | null,
+  ) => void;
   /** 步骤胶囊「📁」→ 终端页文件树切根的一次性交接（终端页消费并清空） */
   enterCwdReq: string | null;
   setEnterCwdReq: (p: string | null) => void;
@@ -322,6 +332,9 @@ interface AppState {
   contextLabel: { project: string; step: string | null } | null;
   setContextLabel: (v: { project: string; step: string | null } | null) => void;
   selectProjectReq: string | null;
+  /** 收件箱人工请求「去查看」的一次性请求（项目根路径）：工作区页弹出该来源的完整请求内容层 */
+  helpViewReq: string | null;
+  setHelpViewReq: (path: string | null) => void;
   /** 对话页作用域筛选的一次性请求（工作区页「本步骤的对话」→ 落成 step chip） */
   sessionScopeReq: { kind: "project" | "step" | "task" | "agent"; value: string; label: string } | null;
   setSessionScopeReq: (
@@ -493,6 +506,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   contextLabel: null,
   setContextLabel: (v) => set({ contextLabel: v }),
   selectProjectReq: null,
+  helpViewReq: null,
+  setHelpViewReq: (path) => set({ helpViewReq: path }),
   setSelectProjectReq: (path) => set({ selectProjectReq: path }),
   sessionScopeReq: null,
   setSessionScopeReq: (r) => set({ sessionScopeReq: r }),

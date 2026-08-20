@@ -47,6 +47,37 @@ pub struct WsSettingsDto {
     pub run: Vec<RunScriptDto>,
 }
 
+// ===== 生效来源标注（config_dump 自省快照用）：记录每个生效键来自哪一层 =====
+
+/// files_to_copy 单项的来源层（并集语义：同一文件可被多层定义，层名按合并顺序列出）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayeredFileDto {
+    pub value: String,
+    /// "user" / "repo" / "local"
+    pub layers: Vec<&'static str>,
+}
+
+/// run 脚本生效条目的来源层
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSourceDto {
+    pub name: String,
+    /// "user" / "repo" / "local"
+    pub layer: &'static str,
+}
+
+/// 三层合并的来源标注：标量键记录最终生效值来自哪一层（None = 三层都没定义，走缺省）
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsTraceDto {
+    pub files_to_copy: Vec<LayeredFileDto>,
+    pub run_mode: Option<&'static str>,
+    pub setup: Option<&'static str>,
+    pub archive: Option<&'static str>,
+    pub run: Vec<RunSourceDto>,
+}
+
 /// 合并后的内部形态：files_to_copy 为 None 表示三层都没定义（调用方回落 W1 固定清单）
 #[derive(Debug, Default)]
 pub(crate) struct MergedSettings {
@@ -62,25 +93,48 @@ fn parse_layer(path: &Path) -> Option<LayerSettings> {
     toml::from_str(&text).ok()
 }
 
-/// 单层并入累计结果：标量后层覆盖，files_to_copy 并集去重，run 按名字覆盖
-fn merge_into(acc: &mut MergedSettings, layer: LayerSettings) {
+/// 单层并入累计结果：标量后层覆盖，files_to_copy 并集去重，run 按名字覆盖；
+/// trace 同步记录每个生效键的来源层（config_dump 自省快照用）
+fn merge_into(
+    acc: &mut MergedSettings,
+    layer: LayerSettings,
+    layer_name: &'static str,
+    trace: &mut WsTraceDto,
+) {
     if let Some(files) = layer.files_to_copy {
         let acc_files = acc.files_to_copy.get_or_insert_with(Vec::new);
         for f in files {
-            if !f.is_empty() && !acc_files.contains(&f) {
-                acc_files.push(f);
+            if f.is_empty() {
+                continue;
+            }
+            if !acc_files.contains(&f) {
+                acc_files.push(f.clone());
+            }
+            match trace.files_to_copy.iter_mut().find(|t| t.value == f) {
+                Some(t) => {
+                    if !t.layers.contains(&layer_name) {
+                        t.layers.push(layer_name);
+                    }
+                }
+                None => trace.files_to_copy.push(LayeredFileDto {
+                    value: f,
+                    layers: vec![layer_name],
+                }),
             }
         }
     }
     if let Some(run_mode) = layer.run_mode {
         acc.run_mode = Some(run_mode);
+        trace.run_mode = Some(layer_name);
     }
     if let Some(scripts) = layer.scripts {
         if scripts.setup.is_some() {
             acc.setup = scripts.setup;
+            trace.setup = Some(layer_name);
         }
         if scripts.archive.is_some() {
             acc.archive = scripts.archive;
+            trace.archive = Some(layer_name);
         }
         if let Some(run) = scripts.run {
             for (name, script) in run {
@@ -94,6 +148,13 @@ fn merge_into(acc: &mut MergedSettings, layer: LayerSettings) {
                 } else {
                     acc.run.push(dto);
                 }
+                match trace.run.iter_mut().find(|r| r.name == name) {
+                    Some(t) => t.layer = layer_name,
+                    None => trace.run.push(RunSourceDto {
+                        name,
+                        layer: layer_name,
+                    }),
+                }
             }
         }
     }
@@ -101,28 +162,37 @@ fn merge_into(acc: &mut MergedSettings, layer: LayerSettings) {
 
 /// 三层合并：用户 ~/.config/ccode/settings.toml → 仓库 .ccode/settings.toml → .ccode/settings.local.toml
 pub(crate) fn merged_settings(repo: &Path) -> MergedSettings {
+    merged_settings_traced(repo).0
+}
+
+/// 同 merged_settings，附带每个生效键的来源层标注（config_dump 自省快照用）
+pub(crate) fn merged_settings_traced(repo: &Path) -> (MergedSettings, WsTraceDto) {
     let user = dirs::config_dir().map(|d| d.join("ccode").join("settings.toml"));
-    merged_settings_with_user(repo, user.as_deref())
+    merged_settings_traced_with_user(repo, user.as_deref())
 }
 
 /// user 层路径参数化，便于测试隔离
-fn merged_settings_with_user(repo: &Path, user_layer: Option<&Path>) -> MergedSettings {
-    let mut paths: Vec<PathBuf> = Vec::new();
+fn merged_settings_traced_with_user(
+    repo: &Path,
+    user_layer: Option<&Path>,
+) -> (MergedSettings, WsTraceDto) {
+    let mut paths: Vec<(PathBuf, &'static str)> = Vec::new();
     if let Some(u) = user_layer {
-        paths.push(u.to_path_buf());
+        paths.push((u.to_path_buf(), "user"));
     }
-    paths.push(repo.join(".ccode").join("settings.toml"));
-    paths.push(repo.join(".ccode").join("settings.local.toml"));
+    paths.push((repo.join(".ccode").join("settings.toml"), "repo"));
+    paths.push((repo.join(".ccode").join("settings.local.toml"), "local"));
     let mut acc = MergedSettings::default();
-    for p in paths {
+    let mut trace = WsTraceDto::default();
+    for (p, name) in paths {
         if let Some(layer) = parse_layer(&p) {
-            merge_into(&mut acc, layer);
+            merge_into(&mut acc, layer, name, &mut trace);
         }
     }
-    acc
+    (acc, trace)
 }
 
-fn to_dto(m: MergedSettings, fallback_files: &[&str]) -> WsSettingsDto {
+pub(crate) fn to_dto(m: MergedSettings, fallback_files: &[&str]) -> WsSettingsDto {
     WsSettingsDto {
         files_to_copy: m
             .files_to_copy
@@ -280,7 +350,7 @@ run_mode = "nonconcurrent"
 test = { command = "local test" }
 "#,
         );
-        let m = merged_settings_with_user(&repo, Some(&user));
+        let (m, _) = merged_settings_traced_with_user(&repo, Some(&user));
         // files_to_copy：三层并集去重，保持出现顺序
         assert_eq!(
             m.files_to_copy.unwrap(),
@@ -303,7 +373,7 @@ test = { command = "local test" }
     #[test]
     fn empty_layers_yield_defaults() {
         let dir = std::env::temp_dir().join(format!("ccode-wss-{}", uuid::Uuid::new_v4()));
-        let m = merged_settings_with_user(&dir, None);
+        let (m, _) = merged_settings_traced_with_user(&dir, None);
         assert!(m.files_to_copy.is_none(), "三层都没定义时由调用方回落固定清单");
         let dto = to_dto(m, &[".env", ".envrc"]);
         assert_eq!(dto.files_to_copy, vec![".env", ".envrc"]);
@@ -321,7 +391,7 @@ test = { command = "local test" }
             "future_key = 42\n[scripts]\nsetup = \"ok\"\n",
         );
         write(&repo.join(".ccode").join("settings.local.toml"), "not [valid toml");
-        let m = merged_settings_with_user(&repo, None);
+        let (m, _) = merged_settings_traced_with_user(&repo, None);
         assert_eq!(m.setup.as_deref(), Some("ok"), "坏掉的 local 层不影响有效层");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -353,7 +423,7 @@ test = { command = "local test" }
         let text = fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap();
         assert!(text.starts_with("# Ccode 项目层设置"), "新建文件必须带头注释: {text}");
         // 合并链路确实吃项目层：merged_settings 能读到刚写入的脚本
-        let m = merged_settings_with_user(&repo, None);
+        let (m, _) = merged_settings_traced_with_user(&repo, None);
         assert_eq!(m.run.len(), 1);
         assert_eq!(m.run[0].name, "render-draft");
         assert_eq!(m.run[0].command, "quarto render manuscript/draft.md --to pdf");
@@ -393,7 +463,7 @@ web = { command = "npm run dev" }
         assert!(text.contains("make setup"), "scripts 其余键保留: {text}");
         assert!(text.contains("npm run dev"), "其余 run 条目保留: {text}");
         assert!(!text.contains("old render"), "同名命令被覆盖: {text}");
-        let m = merged_settings_with_user(&repo, None);
+        let (m, _) = merged_settings_traced_with_user(&repo, None);
         assert_eq!(m.run.len(), 3);
         let draft = m.run.iter().find(|r| r.name == "render-draft").unwrap();
         assert_eq!(draft.command, "quarto render manuscript/draft.md --to pdf");
@@ -419,6 +489,83 @@ web = { command = "npm run dev" }
             fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap(),
             "not [valid toml"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trace_records_layer_sources() {
+        let dir = std::env::temp_dir().join(format!("ccode-wss-{}", uuid::Uuid::new_v4()));
+        let repo = dir.join("repo");
+        let user = dir.join("user-settings.toml");
+        write(
+            &user,
+            r#"files_to_copy = [".env", ".userrc"]
+run_mode = "concurrent"
+[scripts]
+setup = "user setup"
+archive = "user archive"
+[scripts.run]
+web = { command = "user dev", default = true }
+"#,
+        );
+        write(
+            &repo.join(".ccode").join("settings.toml"),
+            r#"files_to_copy = [".env.local"]
+[scripts]
+setup = "repo setup"
+[scripts.run]
+web = { command = "repo dev" }
+test = { command = "repo test" }
+"#,
+        );
+        write(
+            &repo.join(".ccode").join("settings.local.toml"),
+            r#"files_to_copy = [".env", ".secrets"]
+run_mode = "nonconcurrent"
+[scripts.run]
+test = { command = "local test" }
+"#,
+        );
+        let (_, trace) = merged_settings_traced_with_user(&repo, Some(&user));
+        // files_to_copy：并集语义，多层定义的文件记全部来源层（按合并顺序）
+        let layers_of = |v: &str| {
+            trace
+                .files_to_copy
+                .iter()
+                .find(|f| f.value == v)
+                .unwrap()
+                .layers
+                .clone()
+        };
+        assert_eq!(layers_of(".env"), vec!["user", "local"]);
+        assert_eq!(layers_of(".userrc"), vec!["user"]);
+        assert_eq!(layers_of(".env.local"), vec!["repo"]);
+        assert_eq!(layers_of(".secrets"), vec!["local"]);
+        // 标量键记录最终生效值来自哪一层
+        assert_eq!(trace.run_mode, Some("local"));
+        assert_eq!(trace.setup, Some("repo"), "setup 被 repo 层覆盖");
+        assert_eq!(trace.archive, Some("user"), "archive 只有 user 层定义");
+        // run 按名记录生效条目来源：web 被 repo 覆盖，test 被 local 覆盖
+        assert_eq!(
+            trace.run.iter().find(|r| r.name == "web").unwrap().layer,
+            "repo"
+        );
+        assert_eq!(
+            trace.run.iter().find(|r| r.name == "test").unwrap().layer,
+            "local"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trace_empty_when_no_layer_defines_anything() {
+        let dir = std::env::temp_dir().join(format!("ccode-wss-{}", uuid::Uuid::new_v4()));
+        let (_, trace) = merged_settings_traced_with_user(&dir, None);
+        assert!(trace.files_to_copy.is_empty());
+        assert_eq!(trace.run_mode, None, "三层都没定义 = None（调用方回落缺省）");
+        assert_eq!(trace.setup, None);
+        assert_eq!(trace.archive, None);
+        assert!(trace.run.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

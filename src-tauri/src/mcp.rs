@@ -115,8 +115,8 @@ fn validate_server_name(name: &str) -> Result<(), String> {
 
 // ===== JSONC 容错读（gemini/qwen/opencode/codebuddy 容忍注释与尾逗号） =====
 
-/// 去注释 + 尾逗号（字符串/转义状态机，不动字符串内容）
-fn strip_jsonc(text: &str) -> String {
+/// 去注释 + 尾逗号（字符串/转义状态机，不动字符串内容）；hooks.rs 的 JSONC 容错读也复用
+pub(crate) fn strip_jsonc(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut in_str = false;
@@ -707,10 +707,12 @@ fn write_codex_entry(name: &str, entry: Option<toml_edit::Table>) -> Result<(), 
 
 /// 写/删一个 agent 侧条目（entry=None 即删除）
 fn apply_to_agent(agent: &str, server: &McpServerDto, install: bool) -> Result<(), String> {
-    if agent == "grok" {
-        // grok 的 [mcp_servers.<name>] 在 config.toml 里与 model/hooks 同文件，且自带
-        // `grok mcp add` CLI 做读改写；首版不硬造 TOML 原子写管线，明确拒绝分发/写入
-        return Err("Grok 的 MCP 分发暂不支持（TOML [mcp_servers] 段与 model 同文件）；请用 `grok mcp add` 或编辑 ~/.grok/config.toml".into());
+    // 只读能力的 agent（grok：TOML [mcp_servers] 与 model 同文件，自带 `grok mcp add`
+    // CLI 做读改写，首版不硬造 TOML 原子写管线）按能力表带原因拒绝
+    if let Some(crate::agent_specs::McpWriteCap::ReadOnly(reason)) =
+        crate::agent_specs::agent_spec(agent).map(|s| s.mcp_write)
+    {
+        return Err(reason.into());
     }
     if agent == "codex" {
         let entry = if install {

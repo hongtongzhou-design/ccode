@@ -15,6 +15,15 @@ import {
   resolveMdPath,
 } from "../reader";
 import { escapeShellPath, imageExtFromMime } from "../terminal-input";
+import { comboLabel, READER_MODE_HOTKEY } from "../hotkeys";
+// md-math 模块作用域完成 marked 公式扩展注册（全局生效，占位=原始 $..$ 源码，未升级处观感不变）
+import { renderMathInto } from "../md-math";
+import {
+  LATEX_EXTENSIONS,
+  LATEX_LANGUAGE_ID,
+  latexMonarch,
+  matchLanguageByPath,
+} from "../editor-languages";
 
 // 只用基础 editor worker（不需要语言服务的 intellisense）
 self.MonacoEnvironment = {
@@ -41,16 +50,17 @@ function syncMonacoTheme() {
 }
 syncMonacoTheme();
 
+// LaTeX 语言注册（批次 E）：monaco 0.56 内置语言表没有 latex，注册自带 monarch 定义；
+// languageFor 按已注册语言表的扩展名自动命中，无需单独映射
+monaco.languages.register({
+  id: LATEX_LANGUAGE_ID,
+  extensions: [...LATEX_EXTENSIONS],
+});
+monaco.languages.setMonarchTokensProvider(LATEX_LANGUAGE_ID, latexMonarch);
+
 /** 按文件扩展名/文件名推断 Monaco 语言（无匹配则 plaintext） */
 function languageFor(path: string): string | undefined {
-  const name = path.split(/[\\/]/).pop() ?? "";
-  const dot = name.lastIndexOf(".");
-  const ext = dot >= 0 ? name.slice(dot).toLowerCase() : "";
-  for (const lang of monaco.languages.getLanguages()) {
-    if (lang.filenames?.includes(name)) return lang.id;
-    if (ext && lang.extensions?.includes(ext)) return lang.id;
-  }
-  return undefined;
+  return matchLanguageByPath(monaco.languages.getLanguages(), path);
 }
 
 /** 路径归属（workspaces::path_context）：防止误以为在改分支实际改了主仓库 */
@@ -143,11 +153,14 @@ function MarkdownView({
   }
 
   // 图片后处理（批次 B2）：相对/绝对路径经 read_image_bytes 换 data URL（白名单口径）；
-  // http(s) 图片不加载（笔记渲染不发网络请求），只显示链接文本
+  // http(s) 图片不加载（笔记渲染不发网络请求），只显示链接文本。
+  // 落地守卫只用 isConnected、不用 cancelled：本 setup 不幂等（img 被换成占位 span），
+  // StrictMode 双跑/阅读⇄编辑重挂时后一次 setup 已找不到 img，占位符只能靠前一次的
+  // 异步结果落地——cancelled 会把这条路掐死，占位符永远卡「图片加载中…」；
+  // 卸载/html 变更后旧占位符随 DOM 脱树，isConnected 自然挡住迟到的写入
   useEffect(() => {
     const host = bodyRef.current;
     if (!host) return;
-    let cancelled = false;
     for (const img of Array.from(host.querySelectorAll("img"))) {
       const src = img.getAttribute("src") ?? "";
       if (!src || src.startsWith("data:")) continue;
@@ -169,24 +182,28 @@ function MarkdownView({
         cwdHint: root,
       })
         .then((dto) => {
-          if (cancelled || !ph.isConnected) return;
+          if (!ph.isConnected) return;
           const el = document.createElement("img");
           el.src = `data:${dto.mime};base64,${dto.data}`;
           el.alt = alt;
           ph.replaceWith(el);
         })
         .catch(() => {
-          if (cancelled || !ph.isConnected) return;
+          if (!ph.isConnected) return;
           const span = document.createElement("span");
           span.className = "md-img-failed";
           span.textContent = `[图片不可读] ${src}`;
           ph.replaceWith(span);
         });
     }
-    return () => {
-      cancelled = true;
-    };
   }, [html, filePath, root]);
+
+  // 公式升级（批次 E）：.md-math 占位换 KaTeX 排版；无公式时函数直接返回、不加载 katex
+  useEffect(() => {
+    const host = bodyRef.current;
+    if (!host) return;
+    void renderMathInto(host);
+  }, [html]);
 
   /** 链接点击（批次 B2）：锚点默认滚动；外链走系统浏览器（openUrl，webview 内跳转会破坏应用）；
       相对/绝对路径原地打开——阅读区笔记栏由 onOpenFile 接管，否则 previewReq 跳终端页预览 */
@@ -269,6 +286,8 @@ function FilePreviewEditor({
   onDiscuss,
   hideImmersive,
   onOpenFile,
+  onOpenReader,
+  modeTick,
 }: {
   path: string;
   root: string;
@@ -279,6 +298,12 @@ function FilePreviewEditor({
   hideImmersive?: boolean;
   /** md 阅读视图相对链接的打开去向（阅读区笔记栏原地打开）；缺省走 previewReq 终端页预览 */
   onOpenFile?: (absPath: string) => void;
+  /** md 阅读态「⛶ 沉浸阅读」改为进三栏阅读区（笔记｜PDF｜Agent，配对失败由调用方提示）；
+      缺省保持自带的单栏沉浸层 */
+  onOpenReader?: () => void;
+  /** 外部触发「阅读/编辑」翻转的信号（阅读区 ⌘E；先例：TerminalPage readerAgentTick
+      同款 tick/signal 模式）——值变化即翻转，初挂载不动作；传了它才在按钮 title 上带快捷键 */
+  modeTick?: number;
 }) {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   // 编辑器宿主节点独立于 React 渲染树：沉浸编辑切换只移动 DOM 节点，
@@ -313,6 +338,26 @@ function FilePreviewEditor({
   const isMd = isMarkdownPath(path);
   const [mode, setMode] = useState<"read" | "edit">(isMd ? "read" : "edit");
   const [immersive, setImmersive] = useState(false);
+
+  /** 编辑→阅读：把编辑器缓冲（含未保存改动）同步进 text 状态。
+      编辑期间 text 不随键入更新、dirty 时 watcher 也停订，不同步的话
+      阅读态永远停在旧盘稿（新增/删除都看不见）；反向（text → 编辑器）
+      由既有的 external-reload effect 负责，模型相同会自行跳过 */
+  function switchMode(m: "read" | "edit") {
+    if (m === "read" && editorRef.current) {
+      setText(editorRef.current.getValue());
+    }
+    setMode(m);
+  }
+
+  // 外部快捷键翻转（阅读区 ⌘E）：tick 变化即翻转一次；初挂载跳过
+  const modeTickRef = useRef(modeTick);
+  useEffect(() => {
+    if (modeTickRef.current === modeTick) return;
+    modeTickRef.current = modeTick;
+    if (isMd) switchMode(mode === "read" ? "edit" : "read");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modeTick]);
 
   // 宿主节点挂到当前槽位（普通位置或沉浸覆盖层），移动不重建编辑器
   useEffect(() => {
@@ -576,7 +621,8 @@ function FilePreviewEditor({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-2 bg-strip px-3 py-1.5 text-xs">
+      {/* 工具条：h-8 + 底部 hairline 与阅读区三栏的顶条规格统一（栏间严丝合缝） */}
+      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-hairline bg-strip px-3 text-xs">
         <span className="truncate text-l3">{path.split(/[\\/]/).pop()}</span>
         {ctx?.kind === "worktree" && (
           <span
@@ -607,7 +653,13 @@ function FilePreviewEditor({
             {(["read", "edit"] as const).map((m) => (
               <button
                 key={m}
-                onClick={() => setMode(m)}
+                onClick={() => switchMode(m)}
+                // 快捷键只有外部接线（modeTick，阅读区 ⌘E）时才在 title 上承诺
+                title={
+                  modeTick !== undefined
+                    ? `${m === "read" ? "阅读" : "编辑"}（${comboLabel(READER_MODE_HOTKEY)} 切换）`
+                    : undefined
+                }
                 className={`rounded-sm px-2 py-0.5 ${
                   mode === m ? "bg-seg-sel text-l1" : "text-l3 hover:text-l2"
                 }`}
@@ -620,8 +672,16 @@ function FilePreviewEditor({
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {ready && !hideImmersive && (mode === "edit" || isMd) && (
             <button
-              onClick={() => setImmersive(true)}
-              title={`全宽沉浸${mode === "read" ? "阅读" : "编辑"}（Esc 退出）`}
+              onClick={() =>
+                isMd && mode === "read" && onOpenReader
+                  ? onOpenReader()
+                  : setImmersive(true)
+              }
+              title={
+                isMd && mode === "read" && onOpenReader
+                  ? "进沉浸阅读区（笔记｜PDF｜Agent 三栏，自动配对本篇 PDF）"
+                  : `全宽沉浸${mode === "read" ? "阅读" : "编辑"}（Esc 退出）`
+              }
               className="shrink-0 rounded-sm px-2 py-0.5 text-l2 hover:bg-hover"
             >
               ⛶ {mode === "read" ? "沉浸阅读" : "沉浸编辑"}
