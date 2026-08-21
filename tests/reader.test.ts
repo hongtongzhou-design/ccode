@@ -32,6 +32,13 @@ import {
   splitGlossaryRow,
   stripMdHrefSuffix,
   translationSavedToast,
+  upsertTlEntry,
+  markTlEntrySaved,
+  parseBilingual,
+  plainFromBilingual,
+  reflowBlockText,
+  READER_TL_HISTORY_MAX,
+  type TlHistoryEntry,
 } from "../src/reader.ts";
 
 test("clampReaderPct 坏值/非正数回落缺省", () => {
@@ -380,4 +387,117 @@ test("translationSavedToast：笔记栏脏时明示不回显，干净时简洁�
   const dirty = translationSavedToast(true);
   assert.ok(dirty.startsWith("已存到笔记「译段」"));
   assert.ok(dirty.includes("未保存改动"));
+});
+
+
+const tl = (original: string, over: Partial<TlHistoryEntry> = {}): TlHistoryEntry => ({
+  original,
+  translated: `译:${original}`,
+  page: 1,
+  saved: false,
+  at: "2026-08-20T00:00:00.000Z",
+  ...over,
+});
+
+test("upsertTlEntry：新条目置顶、封顶先进先出", () => {
+  let list: TlHistoryEntry[] = [];
+  list = upsertTlEntry(list, tl("b"));
+  list = upsertTlEntry(list, tl("a"));
+  assert.deepEqual(list.map((e) => e.original), ["a", "b"]);
+  // 封顶：灌满后再加，最旧的（尾部）裁掉
+  list = Array.from({ length: READER_TL_HISTORY_MAX }, (_, i) => tl(`t${i}`));
+  list = upsertTlEntry(list, tl("new"));
+  assert.equal(list.length, READER_TL_HISTORY_MAX);
+  assert.equal(list[0].original, "new");
+  assert.equal(list.at(-1)!.original, `t${READER_TL_HISTORY_MAX - 2}`);
+  assert.ok(!list.some((e) => e.original === `t${READER_TL_HISTORY_MAX - 1}`));
+});
+
+test("upsertTlEntry：同原文重翻 = 替换置顶且保留已存标记", () => {
+  let list = upsertTlEntry([tl("x")], tl("y"));
+  list = markTlEntrySaved(list, "x");
+  list = upsertTlEntry(list, tl("x", { translated: "新译", at: "2026-08-20T01:00:00.000Z" }));
+  assert.equal(list.length, 2);
+  assert.equal(list[0].original, "x");
+  assert.equal(list[0].translated, "新译");
+  assert.equal(list[0].saved, true, "重翻不洗掉已存状态");
+});
+
+test("markTlEntrySaved：按原文标记，找不到原样返回", () => {
+  const list = [tl("a"), tl("b")];
+  const marked = markTlEntrySaved(list, "b");
+  assert.equal(marked[1].saved, true);
+  assert.equal(marked[0].saved, false);
+  assert.deepEqual(markTlEntrySaved(list, "zzz").map((e) => e.saved), [false, false]);
+});
+
+
+test("parseBilingual：正常多对解析（全/半角冒号都收）", () => {
+  const raw = "原：Redox mediators are promising.\n译：氧化还原介体很有前景。\n\n原:They stabilize sulfur.\n译:它们能稳定硫。";
+  assert.deepEqual(parseBilingual(raw), [
+    { src: "Redox mediators are promising.", zh: "氧化还原介体很有前景。" },
+    { src: "They stabilize sulfur.", zh: "它们能稳定硫。" },
+  ]);
+});
+
+test("parseBilingual：缺对 / 乱序 / 空行拆对 → null", () => {
+  // 末尾缺译行
+  assert.equal(parseBilingual("原：A\n译：甲\n\n原：B"), null);
+  // 「译」在「原」前
+  assert.equal(parseBilingual("译：甲\n原：A"), null);
+  // 「原」接「原」（上一对缺译）
+  assert.equal(parseBilingual("原：A\n原：B\n译：乙"), null);
+  // 空行把一对拆开
+  assert.equal(parseBilingual("原：A\n\n译：甲"), null);
+  // 空句不收
+  assert.equal(parseBilingual("原：\n译：甲"), null);
+});
+
+test("parseBilingual：旧格式纯译文 / 混入其他行 → null（回落纯译文视图）", () => {
+  assert.equal(parseBilingual("这是一段纯译文，没有对照标记。"), null);
+  assert.equal(parseBilingual("原：A\n译：甲\n备注：多出来的一行"), null);
+  assert.equal(parseBilingual(""), null);
+});
+
+test("plainFromBilingual：只取译行逐句拼接（存进笔记的纯译文）", () => {
+  const pairs = parseBilingual("原：A one.\n译：甲一。\n\n原：B two.\n译：乙二。")!;
+  assert.equal(plainFromBilingual(pairs), "甲一。\n乙二。");
+});
+
+
+test("reflowBlockText：断词接回 / 英文单换行转空格", () => {
+  assert.equal(
+    reflowBlockText("com-\nprised of sev-\neral parts", { cjk: false }),
+    "comprised of several parts",
+  );
+  assert.equal(
+    reflowBlockText("first line\nsecond line", { cjk: false }),
+    "first line second line",
+  );
+});
+
+test("reflowBlockText：中文单换行直连不加空格", () => {
+  assert.equal(
+    reflowBlockText("氧化还原介体\n很有前景", { cjk: true }),
+    "氧化还原介体很有前景",
+  );
+});
+
+test("reflowBlockText：连续空行压成单换行（不留空行）+ 行首 trim", () => {
+  assert.equal(
+    reflowBlockText("  第一段 \n\n\n  第二段", { cjk: false }),
+    "第一段\n第二段",
+  );
+  assert.equal(
+    reflowBlockText("  第一段 \n\n\n  第二段", { cjk: true }),
+    "第一段\n第二段",
+  );
+});
+
+test("reflowBlockText：组合场景（断词 + 段内换行 + 空行 + trim）", () => {
+  const raw = "Redox medi-\nators show promise.\n\n  They stabil-\nize sulfur. ";
+  assert.equal(
+    reflowBlockText(raw, { cjk: false }),
+    "Redox mediators show promise.\nThey stabilize sulfur.",
+  );
 });

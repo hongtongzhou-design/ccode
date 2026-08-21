@@ -643,6 +643,7 @@ fn test_session(agent: &str, session_id: &str, project_path: &str, updated_at: &
         handoff_from_session: None,
         task_id: None,
         task_name: None,
+        provider: None,
     }
 }
 

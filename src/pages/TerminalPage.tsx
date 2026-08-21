@@ -51,6 +51,7 @@ import ReaderOverlay from "../components/ReaderOverlay";
 import { renderTaskMd } from "../pipeline-start";
 import { formatPdfExcerptPrompt, readerReuseKey } from "../reader";
 import { defaultCommitMessage } from "../git-commit-message";
+import { pickResumeProfile } from "../resume-profile";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
 import { XTERM_PALETTES, resolvePaletteId } from "../terminal-palettes";
 import { isLightTheme } from "../themes";
@@ -3093,17 +3094,25 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       // 显式打开另一任务的终端时，不让上一次任务审阅继续盖住新标签。
       setReviewPath(null);
       const pt = pendingTerminal;
-      // 会话恢复：profile 依次 autoLaunchProfileId → ccode.lastProfile → 该 agent 首个配置
+      // 会话恢复：profile 依次 autoLaunchProfileId → ccode.lastProfile → 该 agent 首个配置；
+      // codex 内联 provider 会话（rollout 记 model_provider="ccode"）只在带 Base URL 的
+      // 配置里挑——否则 -c 定义不注入，codex 报 "Model provider `ccode` not found"
+      // （兼容规则单一出处：resume-profile.ts pickResumeProfile）
       const agentId = pt.agentId ?? pt.resume?.agentId;
       let profileId = pt.profileId;
       let model = pt.model;
       if (pt.resume) {
-        profileId =
+        const wished =
           pt.autoLaunchProfileId ??
-          localStorage.getItem(`ccode.lastProfile.${pt.resume.agentId}`) ??
-          profiles.find((p) => p.agent === pt.resume!.agentId)?.id ??
-          "";
-        model = profiles.find((p) => p.id === profileId)?.models[0] ?? "";
+          localStorage.getItem(`ccode.lastProfile.${pt.resume.agentId}`);
+        const pick = pickResumeProfile(
+          profiles,
+          pt.resume.agentId,
+          pt.resume.provider,
+          wished,
+        );
+        profileId = pick?.id ?? "";
+        model = pick?.models[0] ?? "";
       }
       // 复用键：已有同 key 标签就切过去，不再新开（「快速开聊」「跟 AI 商量一下」等
       // 重复入口防标签堆积；恢复出的占位标签不带 reuseKey，不参与复用——会话已断，新开才诚实）。

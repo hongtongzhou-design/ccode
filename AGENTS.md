@@ -151,6 +151,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   hotkeys.ts                 # 快捷键组合串纯逻辑
   themes.ts                  # 主题清单单一出处 + isLightTheme() 亮暗判定单一出处（禁另造判定）
   profile-copy.ts            # profile 跨 agent 复制纯逻辑
+  resume-profile.ts          # 恢复会话的 profile 挑选纯逻辑：codex 内联 provider 会话（rollout 记
+                             # model_provider="ccode"）只用带 Base URL 的配置恢复（tests/resume-profile.test.ts）
   store.ts                   # zustand 状态
 src-tauri/src/
   agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/
@@ -162,6 +164,9 @@ src-tauri/src/
                              #   前端经 agent_capabilities command 读表置灰）；
                              #   resolve_binary 兜底候选目录 binary_candidate_dirs 同在本模块（macOS 含 /Library/TeX/texbin）
   agents.rs                  # 适配器分发入口 + resolve_binary 二进制解析（GUI 短 PATH 兜底）+ readonly_launch_args（聊想法只读注入）；
+                             # codex 内联 provider 参数 codex_inline_provider_args 单一出处（启动注入与外部恢复命令共用：
+                             #   rollout 记 model_provider="ccode"，外部恢复缺 -c 定义报 provider not found；定义只含
+                             #   base_url/env_key 引用不含密钥）；
                              # 选择器显示名统一「配置名 · 模型」（claude _NAME 槽 / codex catalog display_name /
                              #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）
   model_registry.rs          # 模型能力注册表（同 pricing.rs 口径）：内置前缀表 + model-capabilities.json 覆盖 +
@@ -185,6 +190,8 @@ src-tauri/src/
                              # 50MB 上限 + 每次顺带清理 7 天前残留（机制约定见 conventions/terminal.md「输入侧」）
   sessions.rs                # 会话浏览：九 agent 会话扫描/解析（Codex .zst、OpenCode SQLite/JSON）、session_meta、pin 快照、
                              # 会话删除、注意力分类（session_tail_state）、步骤名映射（RX3a）、
+                             # codex rollout 元信息 model_provider 记进 SessionMetaDto.provider（恢复按它挑兼容 profile，
+                             #   前端 pickResumeProfile 单一出处：provider=ccode 只用带 Base URL 的配置）、
                              # sessions_for_card（融合进任务书的按卡取会话：与列表同一归属口径）
   skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor/grok 固定 copy）、四路导入、ZIP 导出、卸载备份、
                              # 漂移检测 resync、create_skill/update_skill_content；apps 表是创建时快照，

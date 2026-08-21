@@ -68,6 +68,11 @@ pub struct SessionMetaDto {
     /// task_id 命中所属项目档案卡 [[tasks]] 时由后端回填的卡片名；卡片已删容忍为 None
     #[serde(default)]
     pub task_name: Option<String>,
+    /// Codex rollout 元信息的 model_provider（"ccode" = Ccode 启动时 -c 内联定义的 provider，
+    /// 不写用户全局配置——恢复时必须挑带 Base URL 的配置重新注入定义，否则 codex 报
+    /// "Model provider `ccode` not found"）；其他 agent 或无记录为 None
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -598,6 +603,7 @@ fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         handoff_from_session: None,
         task_id: None,
         task_name: None,
+            provider: None,
     })
 }
 
@@ -763,6 +769,8 @@ fn codex_file_meta(
     let (mut cwd, mut created, mut session_id, mut version, mut title) =
         (None, None, None, None, None);
     let mut forked_from_id = None;
+    // rollout 元信息的 model_provider：恢复会话时按它挑兼容 profile（"ccode" = 内联 provider）
+    let mut provider = None;
     for line in &head {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -778,6 +786,7 @@ fn codex_file_meta(
                     .map(String::from);
                 version = get_str(p, "cli_version").map(String::from);
                 forked_from_id = get_str(p, "forked_from_id").map(String::from);
+                provider = get_str(p, "model_provider").map(String::from);
                 if let Some(t) = get_str(p, "timestamp") {
                     created = Some(t.to_string());
                 }
@@ -837,6 +846,7 @@ fn codex_file_meta(
             handoff_from_session: None,
             task_id: None,
             task_name: None,
+            provider,
         },
         forked_from_id,
     ))
@@ -1110,6 +1120,7 @@ fn gemini_file_meta(
         handoff_from_session: None,
         task_id: None,
         task_name: None,
+            provider: None,
     })
 }
 
@@ -1326,6 +1337,7 @@ fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMet
         handoff_from_session: None,
         task_id: None,
         task_name: None,
+            provider: None,
     })
 }
 
@@ -1548,6 +1560,7 @@ fn kimi_wire_file_meta(
         handoff_from_session: None,
         task_id: None,
         task_name: None,
+            provider: None,
     })
 }
 
@@ -1809,6 +1822,7 @@ fn kimi_legacy_file_meta(
         handoff_from_session: None,
         task_id: None,
         task_name: None,
+            provider: None,
     })
 }
 
@@ -2007,6 +2021,7 @@ fn codebuddy_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         handoff_from_session: None,
         task_id: None,
         task_name: None,
+            provider: None,
     })
 }
 
@@ -2176,6 +2191,7 @@ fn cursor_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         handoff_from_session: None,
         task_id: None,
         task_name: None,
+            provider: None,
     })
 }
 
@@ -2339,6 +2355,7 @@ fn grok_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         handoff_from_session: None,
         task_id: None,
         task_name: None,
+            provider: None,
     })
 }
 
@@ -2576,6 +2593,7 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             handoff_from_session: None,
             task_id: None,
             task_name: None,
+            provider: None,
         });
     }
     // OpenCode 新会话常暂存为 "New Session"：只对占位标题的会话惰性补标题——
@@ -2948,6 +2966,7 @@ fn opencode_scan_legacy(storage: &Path) -> Vec<SessionMetaDto> {
             handoff_from_session: None,
             task_id: None,
             task_name: None,
+            provider: None,
         });
     }
     out
@@ -3362,6 +3381,7 @@ fn opencode_snapshot_meta(path: &Path, session_id: &str) -> Option<SessionMetaDt
         handoff_from_session: None,
         task_id: None,
         task_name: None,
+            provider: None,
     })
 }
 
@@ -5764,6 +5784,7 @@ mod tests {
             handoff_from_session: None,
             task_id: None,
             task_name: None,
+            provider: None,
             },
             fork.map(String::from),
         )
@@ -6637,6 +6658,7 @@ mod tests {
             handoff_from_session: None,
             task_id: None,
             task_name: None,
+            provider: None,
         }
     }
 

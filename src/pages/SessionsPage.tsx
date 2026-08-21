@@ -13,6 +13,7 @@ import {
   type ScopeChip,
 } from "../session-filter";
 import { AGENTS } from "../types";
+import { pickResumeProfile } from "../resume-profile";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
 import HandoffPicker from "../components/HandoffPicker";
@@ -75,6 +76,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const openSessionReq = useAppStore((s) => s.openSessionReq);
   const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   const liveSessions = useAppStore((s) => s.liveSessions);
+  const profiles = useAppStore((s) => s.profiles);
   const currentPage = useAppStore((s) => s.page);
   const focusTab = useAppStore((s) => s.focusTab);
   const sessionsQuery = useAppStore((s) => s.sessionsQuery);
@@ -201,15 +203,22 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     [searched, query],
   );
 
-  /** A. 会话恢复：把会话交给终端页以 resume 语义自动重启 */
+  /** A. 会话恢复：把会话交给终端页以 resume 语义自动重启（带 provider——
+   *  codex 内联 provider 会话要靠它挑带 Base URL 的兼容配置，见 resume-profile.ts） */
   function resumeInTerminal(s: SessionMetaDto) {
     setPendingTerminal({
       cwd: s.projectPath,
       extraEnv: {},
       title: s.customTitle || s.title || s.sessionId.slice(0, 8),
-      resume: { agentId: s.agent, sessionId: s.sessionId },
+      resume: { agentId: s.agent, sessionId: s.sessionId, provider: s.provider },
     });
     setPage("terminal");
+  }
+
+  /** 恢复用的兼容配置（codex 内联 provider 会话只认带 Base URL 的）；
+   *  外部恢复命令需要它补 -c provider 定义（定义不含密钥） */
+  function resumeBaseUrl(s: SessionMetaDto): string | null {
+    return pickResumeProfile(profiles, s.agent, s.provider, null)?.baseUrl ?? null;
   }
 
   /** A2. 复制恢复命令（cc-switch 风格）：粘贴到任意终端即可恢复该会话 */
@@ -219,6 +228,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         agentId: s.agent,
         sessionId: s.sessionId,
         cwd: s.projectPath,
+        baseUrl: resumeBaseUrl(s),
       });
       await navigator.clipboard.writeText(cmd);
       setCopiedId(sessionRuntimeKey(s.agent, s.sessionId));
@@ -235,6 +245,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         agentId: s.agent,
         sessionId: s.sessionId,
         cwd: s.projectPath,
+        baseUrl: resumeBaseUrl(s),
       });
     } catch (e) {
       await alertDialog(`打开外部终端失败：${e}`);

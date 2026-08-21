@@ -277,8 +277,31 @@
   （CSS filter，不动 canvas 数据），进度/护眼均按文件记忆（localStorage `ccode.readerProgress.`/`ccode.readerDark.`）。
 - **生词本/译段落盘契约**：`notes/glossary.md` 表格（`| 术语 | 释义 | 出处 |`）是机管文件，表外内容保留；
   格式契约与 `src/reader.ts` 双端镜像（前端不直接写文件，那组函数是格式的单一可读规格 + 测试锚点，
-  改动需同步）；译段在选区旁浮卡就地呈现（不留历史列表），「保存译段到笔记」才经 `append_note_translation`
-  写进笔记「## 译段」小节（✓ 防重是浮卡组件态）。
+  改动需同步）；翻译结果 v2 起直接进顶部翻译面板（在途骨架/失败重试同承载，选区旁浮卡已取消），
+  「存进笔记」才经 `append_note_translation` 写进笔记「## 译段」小节（✓ = 历史条目的持久 saved 标记）。
+- **翻译面板（右栏终端上方）+ 历史抽屉（v2 结构定稿）**：翻译默认**不进笔记**——选段浮动条「译」/
+  ⌘+点击段落只负责触发（PdfContinuousView 的 `onTranslate` 回调上送原文+页码），状态机与面板全部在
+  ReaderOverlay（`runTranslate`：`tlPending` 在途态 → 纯文本翻译 → 成功入历史；× 时递增 `tlReqRef`
+  作废在途结果）。面板 = 独立组件 `ReaderTranslatePanel`（右栏状态行之下、xterm/引导卡之上，占布局流；
+  右栏整体收起随终端一起不见；无 agent 标签的引导卡/重启分支照常可用——历史/存进笔记不依赖会话）。
+  **块级对照（唯一形态，无对照开关）**：原文整段弱色小字（text-xs/l4）在上、译文整段正文（text-sm/leading-6）
+  在下，两块均 `text-justify` 两端对齐、间距 mt-1；表头「原文」开关控制原文块显隐（默认显示）。
+  **原文/译文渲染与「存进笔记」前都先过 `reflowBlockText`**（reader.ts 纯函数：PDF 文本层的硬换行与
+  断词是排版产物——`-\n` 断词接回、段内单换行英文转空格/中文直连、连续空行压成单换行、行首尾 trim；
+  原文按 `{cjk:false}`、译文按 `{cjk:true}` 口径；抽屉两行摘要同样过）。封顶 40% 栏高、
+  超出内部滚动（% max-h 挂栏根 flex 子级才解析定高）。chevron 只折正文留表头
+  （组件内 state 不持久化、新翻译自动展开）；× = 面板整体消失本轮不再弹出（记当前显示条 at），收起态留
+  一行动作条让「历史 N」抽屉随时可开。**历史抽屉点行 = 载入主面板**（`viewingAt` 按条目 at 标识当前
+  显示条，不碰 latest 语义；新翻译进来自动回最新）；行内只留译文摘要（两行 clamp，第 N 页/相对时间已
+  拿掉）+「存进笔记」收到摘要下方（动作不占正文宽度）；「复制」挪到主面板表头小图标钮（复制当前显示条
+  的纯译文）。在途提示 = ◌ animate-spin +「正在翻译…」。**bilingual 逐句对照
+  prompt 已下线**（原文整段由条目 original 字段承担）：`buildReaderTranslatePrompt` 回到单参纯文本；
+  `parseBilingual`/`plainFromBilingual` 保留为**旧条目兼容 shim**（bilingual 期存的带标记 raw 在渲染/
+  复制/存进笔记时转纯译文，新条目永不命中），测试保留。「存进笔记」走 saveTranslation 既有链路
+  （toast/dirty 口径不变），存后条目标记持久 saved。数据源 localStorage `ccode.readerTlHistory:<pdfPath>`
+  （键不变），封顶 50 先进先出，同原文重翻 = 替换置顶且保留已存标记；纯逻辑在 reader.ts，
+  tests/reader.test.ts 锚定；写盘在 setState updater 里（StrictMode 双跑写同内容，幂等）。
+  **生词卡是带输入框的表单，浮卡保留**；其释义预填走 `onRequestTranslate` 纯文本 + 独立 `glossReqRef`。
 - **PDF 选区高亮 = pdf.js v6 DrawLayer 自绘**（v3.99 修正，PdfPageView）：原生 `::selection` 在 scaleX 变换的
   textLayer 文本片上溢出/错位，官方 viewer 因此默认 `enableSelectionRendering`——textLayer 挂
   `selectionRendering` 类（pdf_viewer.css 把原生高亮透明化），`pdfjs.DrawLayer`（`pageIndex` + textLayer 元素，

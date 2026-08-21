@@ -103,7 +103,13 @@ export interface PendingTerminal {
   /** run 脚本来源的工作区 id（nonconcurrent 互斥追踪用） */
   wsId?: string;
   /** 会话恢复：以 --resume/--continue 语义重启该会话（SessionLink 确定性锁定） */
-  resume?: { agentId: string; sessionId: string };
+  resume?: {
+    agentId: string;
+    sessionId: string;
+    /** 会话的 model_provider（codex rollout 元信息）：恢复时按它挑兼容 profile，
+     *  "ccode" = 内联 provider 会话，必须用带 Base URL 的配置（见 resume-profile.ts） */
+    provider?: string | null;
+  };
   /** 指定启动配置（未给则按 ccode.lastProfile → 该 agent 首个配置兜底） */
   autoLaunchProfileId?: string;
   /** 预填启动栏（工作区记住上次配置） */

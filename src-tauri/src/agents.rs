@@ -217,17 +217,7 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     // Codex 没有 base URL 环境变量，且只支持 Responses API：
                     // 用 -c 内联定义一个名为 ccode 的 provider 并指到它
                     if let Some(url) = &profile.base_url {
-                        for kv in [
-                            r#"model_providers.ccode.name="Ccode""#.to_string(),
-                            format!(r#"model_providers.ccode.base_url="{url}""#),
-                            format!(r#"model_providers.ccode.env_key="{key_env}""#),
-                            r#"model_providers.ccode.wire_api="responses""#.to_string(),
-                        ] {
-                            plan.args.push("-c".into());
-                            plan.args.push(kv);
-                        }
-                        plan.args.push("-c".into());
-                        plan.args.push(r#"model_provider="ccode""#.into());
+                        plan.args.extend(codex_inline_provider_args(url, key_env));
                     }
                     if let Some(model) = model {
                         plan.args.push("-m".into());
@@ -653,6 +643,43 @@ pub(crate) fn resume_args(agent_id: &str, session_id: &str) -> (bool, Vec<String
     }
 }
 
+/// Codex 内联 provider 的 -c 定义参数（启动注入与外部恢复命令同一出处）。
+/// rollout 元信息记录 model_provider="ccode"，恢复时没有这组定义 codex 报
+/// "Model provider `ccode` not found"。只含 base_url 与 env_key 变量名引用，不含密钥
+/// （密钥值由用户 shell 环境里的 CODEX_API_KEY 提供，不进命令行——关键约定不变）
+fn codex_inline_provider_args(base_url: &str, key_env: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for kv in [
+        r#"model_providers.ccode.name="Ccode""#.to_string(),
+        format!(r#"model_providers.ccode.base_url="{base_url}""#),
+        format!(r#"model_providers.ccode.env_key="{key_env}""#),
+        r#"model_providers.ccode.wire_api="responses""#.to_string(),
+    ] {
+        out.push("-c".into());
+        out.push(kv);
+    }
+    out.push("-c".into());
+    out.push(r#"model_provider="ccode""#.into());
+    out
+}
+
+/// 外部恢复命令的附加参数：仅 codex 且调用方给出 Base URL 时补 provider 定义；
+/// 其他 agent 的接入靠环境变量/全局配置，裸 resume 即可
+fn resume_extra_args(agent_id: &str, base_url: Option<&str>) -> Vec<String> {
+    match (agent_id, base_url) {
+        ("codex", Some(url)) if !url.trim().is_empty() => match agent_spec("codex") {
+            Some(spec) => match spec.launch {
+                crate::agent_specs::LaunchSpec::Special(
+                    crate::agent_specs::SpecialLaunch::CodexInlineProvider { key_env, .. },
+                ) => codex_inline_provider_args(url, key_env),
+                _ => vec![],
+            },
+            None => vec![],
+        },
+        _ => vec![],
+    }
+}
+
 /// shell 单引号转义（POSIX）；仅含安全字符时不加引号，保持 cc-switch 风格的干净命令行
 fn sh_quote_if_needed(s: &str) -> String {
     if s.chars()
@@ -672,6 +699,7 @@ fn resume_command_line_with(
     session_id: &str,
     cwd: &str,
     binary: &str,
+    extra_args: &[String],
 ) -> Result<String, String> {
     let (_, args) = resume_args(agent_id, session_id);
     if args.is_empty() {
@@ -683,33 +711,30 @@ fn resume_command_line_with(
         sh_quote_if_needed(cwd),
         sh_quote_if_needed(binary)
     );
-    for a in &args {
+    for a in args.iter().chain(extra_args) {
         cmd.push(' ');
         cmd.push_str(&sh_quote_if_needed(a));
     }
     Ok(cmd)
 }
 
-/// cmd.exe 方言的恢复命令行（cd /d + 双引号）。从结构化参数直接生成，
-/// 不做 POSIX 串解析——POSIX 转义（'it'\''s'）无法靠替换引号正确还原。
-/// 已知边角：cwd 含 %VAR% 形式子串时 cmd 仍会做变量展开（交互式 cmd 没有
-/// 转义 % 的手段），这类目录名需要在系统终端手工恢复。
 #[cfg(target_os = "windows")]
 fn windows_resume_command_line(
     agent_id: &str,
     session_id: &str,
     cwd: &str,
     binary: &str,
+    extra_args: &[String],
 ) -> Result<String, String> {
     let (_, args) = resume_args(agent_id, session_id);
     if args.is_empty() {
         return Err(format!("{agent_id} 不支持按 ID 恢复"));
     }
     // 路径/值一律双引号包裹（含空格路径与裸名统一处理）；内嵌 " doubling 是 cmd 的转义方式。
-    // flag 参数（-r/--session 等，来自 resume_args 固定表）保持裸名，与 unix 版风格一致
+    // flag 参数（-r/--session/-c 等）保持裸名，与 unix 版风格一致
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     let mut cmd = format!("cd /d {} && {}", q(cwd), q(binary));
-    for a in &args {
+    for a in args.iter().chain(extra_args) {
         cmd.push(' ');
         if a.starts_with('-') {
             cmd.push_str(a);
@@ -723,17 +748,25 @@ fn windows_resume_command_line(
 /// 复制用命令行：裸命令名（用户真实交互终端 rc 齐全，且 cc-switch 风格干净）
 pub fn resume_command_line(agent_id: &str, session_id: &str, cwd: &str) -> Result<String, String> {
     let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
-    resume_command_line_with(agent_id, session_id, cwd, binary)
+    resume_command_line_with(agent_id, session_id, cwd, binary, &[])
 }
 
-/// 复制用：返回该会话的恢复命令行
+/// 复制用：返回该会话的恢复命令行。
+/// base_url：codex 会话走 Ccode 内联 provider（rollout 记 model_provider="ccode"）时必须
+/// 补上 provider 定义才能在外部恢复——定义不含密钥（env_key 是变量名引用）
 #[tauri::command]
 pub fn session_resume_command(
     agent_id: &str,
     session_id: &str,
     cwd: &str,
+    base_url: Option<String>,
 ) -> Result<String, String> {
-    resume_command_line(agent_id, session_id, cwd)
+    let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
+    let extra = resume_extra_args(agent_id, base_url.as_deref());
+    #[cfg(target_os = "windows")]
+    return windows_resume_command_line(agent_id, session_id, cwd, binary, &extra);
+    #[cfg(not(target_os = "windows"))]
+    resume_command_line_with(agent_id, session_id, cwd, binary, &extra)
 }
 
 /// 在外部终端应用中恢复会话（macOS: Ghostty → iTerm → Terminal.app；Windows: cmd 新窗口；
@@ -745,6 +778,7 @@ pub fn resume_external_terminal(
     agent_id: &str,
     session_id: &str,
     cwd: &str,
+    base_url: Option<String>,
 ) -> Result<(), String> {
     let pref = crate::settings::read_current()
         .external_terminal
@@ -753,11 +787,13 @@ pub fn resume_external_terminal(
     let binary = resolve_binary(binary)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| binary.into());
+    // codex 内联 provider 会话必须带 provider 定义（同 session_resume_command 口径）
+    let extra = resume_extra_args(agent_id, base_url.as_deref());
     // Windows 直接生成 cmd 方言（POSIX 串解析无法正确还原引号转义）
     #[cfg(target_os = "windows")]
-    let cmd = windows_resume_command_line(agent_id, session_id, cwd, &binary)?;
+    let cmd = windows_resume_command_line(agent_id, session_id, cwd, &binary, &extra)?;
     #[cfg(not(target_os = "windows"))]
-    let cmd = resume_command_line_with(agent_id, session_id, cwd, &binary)?;
+    let cmd = resume_command_line_with(agent_id, session_id, cwd, &binary, &extra)?;
     open_external_terminal(&cmd, &pref)
 }
 
@@ -2388,14 +2424,40 @@ mod tests {
         assert!(resume_command_line("no-such", "abc", "/tmp").is_err());
         // 外部拉起变体：给定绝对路径直接用
         assert_eq!(
-            resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/.kimi-code/bin/kimi").unwrap(),
+            resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/.kimi-code/bin/kimi", &[]).unwrap(),
             "cd /tmp && /Users/x/.kimi-code/bin/kimi -S abc"
         );
         // 绝对路径含空格 → binary 也必须 shell 转义（否则命令行在空格处断裂）
         assert_eq!(
-            resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/My Apps/bin/kimi").unwrap(),
+            resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/My Apps/bin/kimi", &[]).unwrap(),
             "cd /tmp && '/Users/x/My Apps/bin/kimi' -S abc"
         );
+    }
+
+    #[test]
+    fn resume_command_with_codex_inline_provider() {
+        // codex 内联 provider 会话（rollout 记 model_provider="ccode"）外部恢复必须带 -c 定义，
+        // 否则报 "Model provider `ccode` not found"；定义只含 base_url/env_key 引用，不含密钥
+        let extra = resume_extra_args("codex", Some("https://relay.example.com/v1"));
+        let cmd =
+            resume_command_line_with("codex", "abc", "/tmp/proj", "codex", &extra).unwrap();
+        // kv 值含双引号 → 单引号包裹（sh_quote_if_needed），语义无损
+        assert!(cmd.contains(r#"-c 'model_providers.ccode.base_url="https://relay.example.com/v1"'"#));
+        assert!(cmd.contains(r#"-c 'model_provider="ccode"'"#));
+        assert!(cmd.starts_with("cd /tmp/proj && codex resume abc"));
+        // 非 codex / 无 base_url：不追加任何定义（env 注入型 agent 裸 resume 即可）
+        assert!(resume_extra_args("claude-code", Some("https://x")).is_empty());
+        assert!(resume_extra_args("codex", None).is_empty());
+        assert!(resume_extra_args("codex", Some("  ")).is_empty());
+        let bare = resume_command_line_with(
+            "codex",
+            "abc",
+            "/tmp/proj",
+            "codex",
+            &resume_extra_args("codex", None),
+        )
+        .unwrap();
+        assert_eq!(bare, "cd /tmp/proj && codex resume abc");
     }
 
     #[cfg(windows)]
@@ -2403,13 +2465,19 @@ mod tests {
     fn windows_resume_line_uses_cmd_dialect() {
         // cmd 方言：cd /d + 双引号；裸名与含空格路径统一包裹
         assert_eq!(
-            windows_resume_command_line("claude-code", "abc", r"C:\work\my proj", r"C:\tools\claude.cmd").unwrap(),
+            windows_resume_command_line("claude-code", "abc", r"C:\work\my proj", r"C:\tools\claude.cmd", &[]).unwrap(),
             r#"cd /d "C:\work\my proj" && "C:\tools\claude.cmd" -r "abc""#
         );
         // cwd 含单引号：从结构化参数生成，不受 POSIX 转义影响
-        let line = windows_resume_command_line("kimi", "abc", r"C:\it's\proj", "kimi").unwrap();
+        let line = windows_resume_command_line("kimi", "abc", r"C:\it's\proj", "kimi", &[]).unwrap();
         assert_eq!(line, r#"cd /d "C:\it's\proj" && "kimi" -S "abc""#);
-        assert!(windows_resume_command_line("no-such", "abc", r"C:\x", "x").is_err());
+        assert!(windows_resume_command_line("no-such", "abc", r"C:\x", "x", &[]).is_err());
+        // codex provider 定义：flag 裸名、kv 值双引号包裹（内嵌引号 doubling）
+        let with_provider = windows_resume_command_line(
+            "codex", "abc", r"C:\p", "codex",
+            &resume_extra_args("codex", Some("https://relay.example.com/v1")),
+        ).unwrap();
+        assert!(with_provider.contains(r#"-c "model_provider=""ccode"""#));
     }
 
     #[test]

@@ -109,8 +109,8 @@ function PdfContinuousView({
   onCaptureNote,
   glossTerms,
   dark,
+  onTranslate,
   onRequestTranslate,
-  onSaveTranslation,
   onAddGlossary,
 }: {
   path: string;
@@ -141,17 +141,14 @@ function PdfContinuousView({
   glossTerms?: readonly GlossaryEntry[];
   /** 护眼反色开关（只反 canvas 层，CSS filter，不动 canvas 数据） */
   dark?: boolean;
-  /** 翻译请求（译浮卡 / ＋生词预填 / ⌘+点击段落对照）；结果由本组件的浮卡就地呈现 */
+  /** 翻译触发（选段「译」/ ⌘+点击段落）：状态机与面板都在上层（ReaderOverlay
+      翻译面板，右栏终端上方），本组件只上送原文与页码 */
+  onTranslate?: (text: string, page: number) => void;
+  /** 纯文本翻译请求（＋生词预填要的是释义）；面板翻译走 onTranslate，不经本回调 */
   onRequestTranslate?: (
     text: string,
     page: number,
   ) => Promise<ReaderTranslateResult>;
-  /** 保存译段到笔记「## 译段」（笔记路径在 ReaderOverlay），返回 null 成功 */
-  onSaveTranslation?: (t: {
-    original: string;
-    translated: string;
-    page: number;
-  }) => Promise<string | null>;
   /** 写入生词本（返回 null 成功，否则提示） */
   onAddGlossary?: (
     term: string,
@@ -199,26 +196,23 @@ function PdfContinuousView({
     setFrozen(null);
   }
 
-  // ===== 批次 B3：划词翻译浮卡 / 生词卡 / ⌘+点击段落 / 大纲 / 进度记忆 / 术语悬停 =====
-  /** 选区旁浮卡（译 / 生词 共用锚点与壳）：anchor 相对滚动容器（同 SelectionFloatBar 坐标系） */
+  // ===== 批次 B3：划词翻译 / 生词卡 / ⌘+点击段落 / 大纲 / 进度记忆 / 术语悬停 =====
+  // （v2 形态修正：翻译结果不再弹选区旁浮卡，统一进顶部常驻翻译面板承载——含翻译中
+  //   骨架与失败重试；生词卡是带输入框的表单，浮卡保留）
+  /** 生词浮卡（＋ 生词 唯一保留的浮卡）：anchor 相对滚动容器（同 SelectionFloatBar 坐标系） */
   const [floatCard, setFloatCard] = useState<{
     anchor: { x: number; y: number };
-    kind: "translate" | "glossary";
     text: string;
     page: number;
   } | null>(null);
-  const [cardTranslating, setCardTranslating] = useState(false);
-  const [cardTranslated, setCardTranslated] = useState<string | null>(null);
-  const [cardError, setCardError] = useState<string | null>(null);
-  const [cardSaved, setCardSaved] = useState(false);
   /** 生词卡：释义输入 + 预填中 + 提交中 */
   const [glossMeaning, setGlossMeaning] = useState("");
   const [glossPrefilling, setGlossPrefilling] = useState(false);
   const [glossBusy, setGlossBusy] = useState(false);
   /** 术语悬停释义（事件代理，命中 .ccode-gloss 时定位 HoverTip） */
   const [glossTip, setGlossTip] = useState<{ x: number; y: number; text: string } | null>(null);
-  /** 翻译请求序号：连点「译」时只认最后一次的结果 */
-  const translateReqRef = useRef(0);
+  /** 生词卡预填的请求序号（独立——此前与翻译共用，开生词卡会误杀在途翻译） */
+  const glossReqRef = useRef(0);
   /** 进度恢复只跑一次（换文档重置）；恢复前的初始页不落盘 */
   const restoredRef = useRef(false);
 
@@ -229,53 +223,28 @@ function PdfContinuousView({
     setGlossTip(null);
   }, [path]);
 
-  /** 选区锚点 → 滚动容器坐标（同 SelectionFloatBar 的换算口径，右缘预留浮卡宽 288px） */
+  /** 选区锚点 → 滚动容器坐标（生词卡锚点；同 SelectionFloatBar 的换算口径，右缘预留浮卡宽 288px） */
   function anchorFromSelection(): { x: number; y: number } | null {
     const scroll = scrollRef.current;
     const sel = window.getSelection();
     if (!scroll || !sel || sel.isCollapsed) return null;
     const r = sel.getRangeAt(0).getBoundingClientRect();
-    return anchorFromPoint(r.left, r.bottom);
-  }
-
-  /** 任意 client 点 → 滚动容器坐标（⌘+点击段落对照的浮卡锚点；同一换算口径） */
-  function anchorFromPoint(clientX: number, clientY: number): { x: number; y: number } | null {
-    const scroll = scrollRef.current;
-    if (!scroll) return null;
     const sr = scroll.getBoundingClientRect();
     return {
       x: Math.max(
         8,
-        Math.min(clientX - sr.left + scroll.scrollLeft, sr.width - 296),
+        Math.min(r.left - sr.left + scroll.scrollLeft, sr.width - 296),
       ),
-      y: clientY - sr.top + scroll.scrollTop + 6,
+      y: r.bottom - sr.top + scroll.scrollTop + 6,
     };
   }
 
-  /** 「译」：选区旁浮出对照小卡 + 送翻译 */
-  function openTranslateCard() {
+  /** 「译」：选段译文交给上层翻译面板（右栏终端上方；触发即清选区） */
+  function translateSelection() {
     const excerpt = selectedExcerpt();
-    if (!excerpt || !onRequestTranslate) return;
-    const anchor = anchorFromSelection();
-    if (!anchor) return;
+    if (!excerpt || !onTranslate) return;
     clearSelection();
-    setFloatCard({ anchor, kind: "translate", text: excerpt.text, page: excerpt.page });
-    setCardTranslated(null);
-    setCardError(null);
-    setCardSaved(false);
-    void runCardTranslate(excerpt.text, excerpt.page);
-  }
-
-  async function runCardTranslate(text: string, page: number) {
-    if (!onRequestTranslate) return;
-    const my = ++translateReqRef.current;
-    setCardTranslating(true);
-    setCardError(null);
-    const r = await onRequestTranslate(text, page);
-    if (my !== translateReqRef.current) return;
-    setCardTranslating(false);
-    if (r.ok) setCardTranslated(r.text);
-    else setCardError(r.error);
+    onTranslate(excerpt.text, excerpt.page);
   }
 
   /** 「＋ 生词」：浮卡 = 术语（选中词）+ 释义（自动预填，手改不覆盖）+ 出处自动记 */
@@ -285,15 +254,15 @@ function PdfContinuousView({
     const anchor = anchorFromSelection();
     if (!anchor) return;
     clearSelection();
-    setFloatCard({ anchor, kind: "glossary", text: excerpt.text.slice(0, 60), page: excerpt.page });
+    setFloatCard({ anchor, text: excerpt.text.slice(0, 60), page: excerpt.page });
     setGlossMeaning("");
     setGlossBusy(false);
-    // 自动调 translate 预填释义（结果只进这张卡，不做别的记录）
+    // 自动调 translate 预填释义（结果只进这张卡，不做别的记录；独立序号，不打扰在途翻译）
     if (onRequestTranslate) {
-      const my = ++translateReqRef.current;
+      const my = ++glossReqRef.current;
       setGlossPrefilling(true);
       void onRequestTranslate(excerpt.text, excerpt.page).then((r) => {
-        if (my !== translateReqRef.current) return;
+        if (my !== glossReqRef.current) return;
         setGlossPrefilling(false);
         if (r.ok) setGlossMeaning((prev) => (prev.trim() ? prev : r.text));
       });
@@ -302,7 +271,7 @@ function PdfContinuousView({
 
   async function confirmGlossary() {
     const meaning = glossMeaning.trim();
-    if (!floatCard || floatCard.kind !== "glossary" || !meaning || glossBusy) return;
+    if (!floatCard || !meaning || glossBusy) return;
     setGlossBusy(true);
     const err =
       (await onAddGlossary?.(
@@ -315,22 +284,10 @@ function PdfContinuousView({
     else setFloatCard(null); // 成功：收卡（列表/高亮刷新与 toast 由 ReaderOverlay 负责）
   }
 
-  async function saveCardTranslation() {
-    if (!floatCard || !cardTranslated || cardSaved) return;
-    const err =
-      (await onSaveTranslation?.({
-        original: floatCard.text,
-        translated: cardTranslated,
-        page: floatCard.page,
-      })) ?? "当前环境不支持保存译段";
-    if (err) showHint(err);
-    else setCardSaved(true);
-  }
-
-  /** ⌘/Ctrl + 点击正文段落：从点击行按 y 连续性向上下扩展提取整段 → 段落对照翻译，
-   *  结果进点击位置旁的同款对照浮卡（可保存译段）。与圈选模式互斥（圈选交互层盖住内容层，这里再守一道） */
+  /** ⌘/Ctrl + 点击正文段落：从点击行按 y 连续性向上下扩展提取整段 → 交上层翻译面板。
+      与圈选模式互斥（圈选交互层盖住内容层，这里再守一道） */
   function onContentClick(e: React.MouseEvent<HTMLDivElement>) {
-    if (!onRequestTranslate || captureOn) return;
+    if (!onTranslate || captureOn) return;
     if (!e.metaKey && !e.ctrlKey) return;
     const host = (e.target as HTMLElement).closest("[data-page-num]");
     const layer = host?.querySelector(".textLayer");
@@ -353,13 +310,7 @@ function PdfContinuousView({
     const text = joinParagraphLines(lines.slice(start, end + 1));
     if (!text) return;
     e.preventDefault();
-    const anchor = anchorFromPoint(e.clientX, e.clientY);
-    if (!anchor) return;
-    setFloatCard({ anchor, kind: "translate", text, page });
-    setCardTranslated(null);
-    setCardError(null);
-    setCardSaved(false);
-    void runCardTranslate(text, page);
+    onTranslate(text, page);
   }
 
   /** 术语悬停释义：事件代理命中 .ccode-gloss（HoverTip 横向钳制同 useHoverTip 口径） */
@@ -801,10 +752,23 @@ function PdfContinuousView({
               {captureSupported && (
                 <button
                   type="button"
-                  className={`${zoomBtn} px-1.5 text-micro ${captureOn ? "bg-seg-sel text-l1" : ""}`}
+                  className={`${zoomBtn} gap-1 px-1.5 text-micro ${captureOn ? "bg-seg-sel text-l1" : ""}`}
                   onClick={() => (captureOn ? exitCapture() : setCaptureOn(true))}
                 >
-                  ▦ 圈选
+                  {/* 框选图标（四角框，TerminalStatusBar 同款内联 SVG 细线风格）；原 ▦ 字符太丑 */}
+                  <svg
+                    width="11"
+                    height="11"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M5.5 1.5h-4v4M10.5 1.5h4v4M14.5 10.5v4h-4M1.5 10.5v4h4" />
+                  </svg>
+                  圈选
                 </button>
               )}
             </div>
@@ -925,74 +889,12 @@ function PdfContinuousView({
             )}
           </div>
           {floatCard && (
-            // 选段旁浮卡（译对照 / ＋生词 共用壳）：ccode-float-surface，宽 288px
+            // 生词卡（＋ 生词 唯一保留的浮卡：带输入框的表单；翻译结果 v2 起进顶部面板）
             <div
               className="absolute z-30 w-72 rounded-md ccode-float-surface p-2.5"
               style={{ left: floatCard.anchor.x, top: floatCard.anchor.y }}
             >
-              {floatCard.kind === "translate" ? (
-                <>
-                  {/* 原文截 4 行 + 译文（骨架加载 / 失败重试行） */}
-                  <p className="line-clamp-4 whitespace-pre-line text-micro leading-4 text-l4">
-                    {floatCard.text}
-                  </p>
-                  {cardTranslating ? (
-                    <div className="mt-2 space-y-1.5">
-                      <div className="h-2.5 w-full animate-pulse rounded-sm bg-inset" />
-                      <div className="h-2.5 w-5/6 animate-pulse rounded-sm bg-inset" />
-                      <div className="h-2.5 w-2/3 animate-pulse rounded-sm bg-inset" />
-                    </div>
-                  ) : cardError ? (
-                    <div className="mt-2 flex items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate text-micro text-err-text">
-                        翻译失败：{cardError}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void runCardTranslate(floatCard.text, floatCard.page)
-                        }
-                        className="shrink-0 rounded-sm border border-field bg-strip px-2 py-0.5 text-xs text-l2 hover:bg-inset hover:text-l1"
-                      >
-                        重试
-                      </button>
-                    </div>
-                  ) : (
-                    <p className="mt-1.5 whitespace-pre-line text-xs leading-5 text-l1">
-                      {cardTranslated}
-                    </p>
-                  )}
-                  <div className="mt-2 flex items-center gap-1">
-                    <button
-                      type="button"
-                      disabled={!cardTranslated || cardSaved}
-                      onClick={() => void saveCardTranslation()}
-                      className="rounded-sm border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-inset hover:text-l1 disabled:opacity-50"
-                    >
-                      {cardSaved ? "✓ 已保存" : "保存译段到笔记"}
-                    </button>
-                    {onAddGlossary && floatCard.text.length <= 60 && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setFloatCard({ ...floatCard, kind: "glossary" })
-                        }
-                        className="rounded-sm px-2 py-1 text-xs text-l3 hover:bg-hover hover:text-l1"
-                      >
-                        ＋ 生词
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => setFloatCard(null)}
-                      className="ml-auto flex h-6 w-6 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1"
-                    >
-                      ×
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <>
+              <>
                   {/* 生词卡：术语（选中词）+ 释义（自动预填可改）+ 出处自动记 */}
                   <p className="break-words text-xs font-medium text-l1">
                     {floatCard.text}
@@ -1030,23 +932,22 @@ function PdfContinuousView({
                       ×
                     </button>
                   </div>
-                </>
-              )}
+              </>
             </div>
           )}
-          {(onAskAi || onRequestTranslate) && (
+          {(onAskAi || onTranslate || onAddGlossary) && (
             // 四个主钮（译 / ◈ 问 AI / ＋生词 / ⋯）并排的宽度预留约 260px，避免右缘溢出
             <SelectionFloatBar
               containerRef={scrollRef}
               withinSelector="[data-page-num]"
               reserveWidth={260}
             >
-              {onRequestTranslate && (
+              {onTranslate && (
                 <button
                   type="button"
                   // preventDefault 保住选区，click 时才读文字
                   onMouseDown={(e) => e.preventDefault()}
-                  onClick={openTranslateCard}
+                  onClick={translateSelection}
                   className="rounded-sm border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
                 >
                   译

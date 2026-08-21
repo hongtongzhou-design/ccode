@@ -24,12 +24,23 @@ import {
   formatReaderCapturePrompt,
   loadReaderDark,
   loadReaderPct,
+  loadTlHistory,
+  markTlEntrySaved,
+  parseBilingual,
+  plainFromBilingual,
   readerColumnWidths,
+  reflowBlockText,
   saveReaderDark,
+  saveTlHistory,
   translationSavedToast,
+  upsertTlEntry,
   type GlossaryEntry,
   type ReaderTranslateResult,
+  type TlHistoryEntry,
 } from "../reader";
+import ReaderTranslatePanel, {
+  type TlPending,
+} from "./ReaderTranslatePanel";
 import type { SessionLinkState, TabStatus } from "../pages/TerminalPage";
 
 // Monaco 与 pdf.js 都不进主包：首次进入阅读区才加载（同终端页预览的懒加载姿势）
@@ -286,7 +297,8 @@ export default function ReaderOverlay({
     };
   }, [projectRoot]);
 
-  /** 翻译统一入口（ai_prompt fnKey="translate"）：结果由调用方（浮卡）就地展示 */
+  /** 翻译统一入口（ai_prompt fnKey="translate"）：纯文本输出（bilingual 模式已随块级
+      对照改版下线）；面板翻译的状态机见下方 runTranslate，生词预填直接用本函数 */
   const requestTranslate = useCallback(
     async (text: string): Promise<ReaderTranslateResult> => {
       if (needsProfile) return { ok: false, error: "还没有可用的 API 配置" };
@@ -303,6 +315,49 @@ export default function ReaderOverlay({
     },
     [needsProfile],
   );
+
+  // ===== 翻译面板（右栏状态行之下、xterm 之上）：历史/pending 状态上提自 PdfContinuousView，
+  // 下栏只留触发（选段「译」/ ⌘+点击段落 → onTranslate）。localStorage 键不变 =====
+  const [tlHistory, setTlHistory] = useState<TlHistoryEntry[]>([]);
+  const [tlPending, setTlPending] = useState<TlPending | null>(null);
+  const [tlSaving, setTlSaving] = useState(false);
+  /** 连点/连触只认最后一次；× 收起时递增作废在途结果 */
+  const tlReqRef = useRef(0);
+
+  // 换文献：重读该文件的历史并清在途态
+  useEffect(() => {
+    setTlHistory(loadTlHistory(pdfPath));
+    setTlPending(null);
+  }, [pdfPath]);
+
+  /** 面板翻译主链路：在途态 → 纯文本翻译 → 成功入历史（同原文替换置顶）。
+      写盘放在 setState updater 里：StrictMode 双跑写同样内容，幂等无副作用 */
+  const runTranslate = useCallback(
+    async (text: string, page: number) => {
+      const my = ++tlReqRef.current;
+      setTlPending({ text, page, phase: "loading" });
+      const r = await requestTranslate(text);
+      if (my !== tlReqRef.current) return;
+      if (r.ok) {
+        setTlPending(null);
+        setTlHistory((prev) => {
+          const next = upsertTlEntry(prev, {
+            original: text,
+            translated: r.text,
+            page,
+            saved: false,
+            at: new Date().toISOString(),
+          });
+          saveTlHistory(pdfPath, next);
+          return next;
+        });
+      } else {
+        setTlPending({ text, page, phase: "error", error: r.error });
+      }
+    },
+    [requestTranslate, pdfPath],
+  );
+
 
   /** 保存译段到笔记「## 译段」（笔记栏 watcher 自动刷新） */
   const saveTranslation = useCallback(
@@ -330,6 +385,33 @@ export default function ReaderOverlay({
       }
     },
     [note, noteDirty, projectRoot],
+  );
+
+  /** 「存进笔记」：走既有 saveTranslation 链路（toast 与笔记栏回显口径都在里面），
+      成功后给条目打上持久 saved 标记；旧的对照格式条目只存纯译文（兼容 shim）；
+      原文/译文都先 reflow（PDF 断词断行不进笔记；译段格式不变：原文引用行 + 纯译文） */
+  const saveTlEntry = useCallback(
+    async (entry: TlHistoryEntry) => {
+      if (entry.saved || tlSaving) return;
+      setTlSaving(true);
+      const pairs = parseBilingual(entry.translated);
+      const err = await saveTranslation({
+        original: reflowBlockText(entry.original, { cjk: false }),
+        translated: reflowBlockText(
+          pairs ? plainFromBilingual(pairs) : entry.translated,
+          { cjk: true },
+        ),
+        page: entry.page,
+      });
+      setTlSaving(false);
+      if (err) return; // 失败文案已由 saveTranslation toast 透出
+      setTlHistory((prev) => {
+        const next = markTlEntrySaved(prev, entry.original);
+        saveTlHistory(pdfPath, next);
+        return next;
+      });
+    },
+    [saveTranslation, tlSaving, pdfPath],
   );
 
   const addGlossary = useCallback(
@@ -612,7 +694,7 @@ export default function ReaderOverlay({
               glossTerms={glossary}
               dark={readerDark}
               onRequestTranslate={requestTranslate}
-              onSaveTranslation={saveTranslation}
+              onTranslate={(text, page) => void runTranslate(text, page)}
               onAddGlossary={addGlossary}
             />
           </Suspense>
@@ -644,6 +726,22 @@ export default function ReaderOverlay({
                     : `${agentName ?? "Agent"}${agentModel ? ` · ${agentModel}` : ""} · ${agentStateText}`}
                 </span>
               </div>
+              {/* 翻译面板：状态行之下、xterm/引导卡之上，占布局流、可收起（chevron 只折正文）；
+                  无 agent 标签的引导卡/重启分支时面板仍正常可用（历史/存进笔记不依赖会话） */}
+              <ReaderTranslatePanel
+                latest={tlHistory[0] ?? null}
+                pending={tlPending}
+                history={tlHistory}
+                saving={tlSaving}
+                canSave
+                onRetry={(text, page) => void runTranslate(text, page)}
+                onCancelPending={() => {
+                  tlReqRef.current++;
+                  setTlPending(null);
+                }}
+                onSaveEntry={(e) => void saveTlEntry(e)}
+                onHint={showToast}
+              />
               {needsProfile ? (
                 // 无可用配置：引导卡（一句话 + 跳配置页）
                 <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-center">

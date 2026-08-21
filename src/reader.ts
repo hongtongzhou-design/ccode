@@ -254,9 +254,73 @@ export function relMdLinkPath(fromFile: string, targetAbs: string): string {
 
 // ===== 批次 B3：划词翻译 / 生词本 / 段落对照 / 进度记忆 =====
 
-/** 划词/段落翻译的统一 prompt（ai_prompt fnKey="translate"，设置页可配专用小模型） */
+/** 划词/段落翻译的统一 prompt（ai_prompt fnKey="translate"，设置页可配专用小模型）：
+ *  纯文本输出（曾有的 bilingual 逐句对照模式已随块级对照改版下线——原文整段由
+ *  历史条目的 original 字段承担，不再需要模型输出标记） */
 export function buildReaderTranslatePrompt(text: string): string {
   return `把以下学术文献内容翻译为中文。要求：学术语境直译，专业术语保留原词（必要时括注原文），不增减内容，只输出译文，不要任何解释：\n\n${text}`;
+}
+
+/** 逐句对照的一对（原句 + 译句） */
+export interface BilingualPair {
+  src: string;
+  zh: string;
+}
+
+/** 【兼容 shim，只为旧历史条目服务】bilingual 模式下线前，`ccode.readerTlHistory:*`
+ *  里存过带「原：/译：」标记的 raw；渲染/复制/存进笔记时经本函数识别并转纯译文。
+ *  新条目永远是纯译文，不会命中。严格校验：至少 1 对、「原」「译」行严格交替成对
+ *  （空行只允许出现在对之间；缺对/乱序/空句/混入其他行 → null） */
+export function parseBilingual(raw: string): BilingualPair[] | null {
+  const lines = raw.replace(/\r\n/g, "\n").split("\n");
+  const pairs: BilingualPair[] = [];
+  let pendingSrc: string | null = null;
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) {
+      if (pendingSrc !== null) return null; // 空行把一对拆开了 = 缺译行
+      continue;
+    }
+    const m = /^(原|译)\s*[:：]\s*(\S[\s\S]*)$/.exec(t);
+    if (!m) return null;
+    if (m[1] === "原") {
+      if (pendingSrc !== null) return null; // 「原」接「原」：上一对缺译
+      pendingSrc = m[2];
+    } else {
+      if (pendingSrc === null) return null; // 「译」在「原」前/多余译行
+      pairs.push({ src: pendingSrc, zh: m[2] });
+      pendingSrc = null;
+    }
+  }
+  if (pendingSrc !== null) return null; // 末尾缺译行
+  return pairs.length > 0 ? pairs : null;
+}
+
+/** 【兼容 shim，同上】对照对 → 纯译文（旧条目的渲染/复制/存进笔记都用纯译文，
+ *  不把「原：/译：」标记带出去；逐句换行拼接） */
+export function plainFromBilingual(pairs: readonly BilingualPair[]): string {
+  return pairs.map((p) => p.zh).join("\n");
+}
+
+/** 块文本回流（翻译面板/译段用）：PDF 文本层的硬换行与断词是排版产物，阅读时不保留——
+ *  `-\n` 断词直接接回（com-\nprised → comprised）；段内单换行英文（cjk:false）合成一个
+ *  空格、中文（cjk:true）直接相连不加空格；连续空行压成单个换行（任何情况不留空行）；
+ *  每行首尾 trim */
+export function reflowBlockText(text: string, opts: { cjk: boolean }): string {
+  const joiner = opts.cjk ? "" : " ";
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/-\n/g, "")
+    .split(/\n\s*\n+/) // 连续空行 = 段落界
+    .map((para) =>
+      para
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .join(joiner),
+    )
+    .filter(Boolean)
+    .join("\n"); // 段间只留单换行
 }
 
 /** 保存译段成功的 toast 口径：笔记栏停在编辑态且有未保存改动时 watcher 停订、
@@ -324,6 +388,80 @@ export function saveReaderDark(pdfPath: string, on: boolean): void {
     /* 同上静默 */
   }
 }
+
+// ----- 翻译历史（最近翻译条 + 历史抽屉；localStorage 按文件记忆） -----
+
+export const READER_TL_HISTORY_PREFIX = "ccode.readerTlHistory:";
+/** 历史上限：先进先出 */
+export const READER_TL_HISTORY_MAX = 50;
+
+export interface TlHistoryEntry {
+  /** 原文（去重键：同一原文重新翻译 = 替换旧条目并置顶） */
+  original: string;
+  translated: string;
+  page: number;
+  /** 「存进笔记」成功的持久标记（跨重开保留 ✓） */
+  saved: boolean;
+  /** ISO 时间戳（历史抽屉相对时间用 relTime 展示） */
+  at: string;
+}
+
+export function readerTlHistoryKey(pdfPath: string): string {
+  return `${READER_TL_HISTORY_PREFIX}${pdfPath}`;
+}
+
+/** 读历史（坏 JSON/非数组/缺字段的脏条目丢弃；localStorage 不可用 → 空） */
+export function loadTlHistory(pdfPath: string): TlHistoryEntry[] {
+  try {
+    const raw = localStorage.getItem(readerTlHistoryKey(pdfPath));
+    if (!raw) return [];
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(
+      (e): e is TlHistoryEntry =>
+        !!e &&
+        typeof e === "object" &&
+        typeof (e as TlHistoryEntry).original === "string" &&
+        typeof (e as TlHistoryEntry).translated === "string" &&
+        typeof (e as TlHistoryEntry).page === "number" &&
+        typeof (e as TlHistoryEntry).at === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function saveTlHistory(
+  pdfPath: string,
+  entries: readonly TlHistoryEntry[],
+): void {
+  try {
+    localStorage.setItem(readerTlHistoryKey(pdfPath), JSON.stringify(entries));
+  } catch {
+    /* 写不进就静默（容量满/隐私模式），历史条降级为当次会话内 */
+  }
+}
+
+/** 追加/更新一条：同原文 → 替换并置顶（saved 标记沿旧条目保留，重翻不洗掉已存状态）；
+ *  新条目置顶；超出上限从尾部（最旧）裁掉。返回新数组（不改入参） */
+export function upsertTlEntry(
+  entries: readonly TlHistoryEntry[],
+  entry: TlHistoryEntry,
+): TlHistoryEntry[] {
+  const kept = entries.filter((e) => e.original !== entry.original);
+  const prev = entries.find((e) => e.original === entry.original);
+  const next = { ...entry, saved: prev?.saved ?? entry.saved };
+  return [next, ...kept].slice(0, READER_TL_HISTORY_MAX);
+}
+
+/** 标记某条「已存进笔记」（按原文定位；找不到原样返回） */
+export function markTlEntrySaved(
+  entries: readonly TlHistoryEntry[],
+  original: string,
+): TlHistoryEntry[] {
+  return entries.map((e) => (e.original === original ? { ...e, saved: true } : e));
+}
+
 
 // ----- 生词本表格格式（notes/glossary.md） -----
 // 格式契约与 src-tauri/src/reader.rs 双端镜像（Rust 负责落盘读写），改动需同步；

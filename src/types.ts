@@ -129,6 +129,9 @@ export interface SessionMetaDto {
   /** 归入的任务卡（卡片 = 对话的文件夹）；后端按项目回填卡片名，卡片删除后两者回落 null */
   taskId: string | null;
   taskName: string | null;
+  /** Codex rollout 元信息的 model_provider："ccode" = Ccode 内联 provider 启动的会话，
+   *  恢复时只能用带 Base URL 的配置（否则 codex 报 provider not found）；其他 agent 为 null */
+  provider?: string | null;
 }
 
 /** 接力目标（handoff_targets）：各 CLI 的安装与启动注入支持情况 */
