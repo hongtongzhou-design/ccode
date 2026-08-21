@@ -10,6 +10,8 @@ export function useHoverTip(
   ref: RefObject<HTMLElement | null>,
   /** up=true 弹到锚点上方（行尾操作栏等下方贴边/易脱节的场景），缺省下方 */
   up = false,
+  /** side=true 从锚点右侧弹出（收起侧栏的图标导航专用） */
+  side = false,
 ) {
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
   useEffect(() => {
@@ -26,6 +28,12 @@ export function useHoverTip(
     const el = ref.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
+    if (side) {
+      const x = Math.min(r.right + 8, window.innerWidth - 12);
+      const y = Math.min(Math.max(r.top + r.height / 2, 12), window.innerHeight - 12);
+      setTip({ x, y });
+      return;
+    }
     // 横向钳制在窗口内（tooltip max-w-72 半宽 144 + 边距）
     const x = Math.min(
       Math.max(r.left + r.width / 2, 150),
@@ -42,6 +50,7 @@ export function HoverTip({
   text,
   warn,
   up,
+  side,
 }: {
   tip: { x: number; y: number } | null;
   text: string;
@@ -49,12 +58,14 @@ export function HoverTip({
   warn?: string | null;
   /** 与 useHoverTip 的 up 配对：tooltip 翻转到锚点上方 */
   up?: boolean;
+  /** 与 useHoverTip 的 side 配对：从锚点右侧弹出 */
+  side?: boolean;
 }) {
   if (!tip) return null;
   return createPortal(
     <div
       role="tooltip"
-      className={`pointer-events-none fixed z-50 max-w-72 -translate-x-1/2 whitespace-pre-line rounded-md border border-hairline ccode-float-surface px-2.5 py-1.5 text-left text-xs leading-5 text-l2 ${up ? "-translate-y-full" : ""}`}
+      className={`pointer-events-none fixed z-50 max-w-72 whitespace-pre-line rounded-md border border-hairline ccode-float-surface px-2.5 py-1.5 text-left text-xs leading-5 text-l2 ${side ? "-translate-y-1/2" : "-translate-x-1/2"} ${up && !side ? "-translate-y-full" : ""}`}
       style={{ left: tip.x, top: tip.y }}
     >
       {text}

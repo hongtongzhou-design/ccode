@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 interface Props {
   children: ReactNode;
@@ -17,6 +18,11 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: { componentStack: string }) {
     console.error("ErrorBoundary caught:", error, info.componentStack);
+    void invoke("log_event", {
+      level: "error",
+      source: "react-error-boundary",
+      message: `${error.stack ?? error.message}\n${info.componentStack}`,
+    }).catch(() => {});
   }
 
   render() {

@@ -13,6 +13,7 @@ import {
   normalizeStatusKeys,
   parentDir,
 } from "../path-utils";
+import { directoryErrorMessage } from "../terminal-cwd";
 
 export interface SearchResultDto {
   path: string;
@@ -203,6 +204,7 @@ function FileTree({
   onEnterProject,
   onRootChange,
   onRootNavigated,
+  onRecoverDirectory,
   belowRecent,
 }: {
   cwd: string;
@@ -221,6 +223,8 @@ function FileTree({
   onRootChange?: (path: string) => boolean | Promise<boolean>;
   /** 根目录切换成功后通知（供改动面板等跟随树根；与 onRootChange 守卫配对，只在真切换后触发） */
   onRootNavigated?: (path: string) => void;
+  /** 当前根不可用时，打开终端的目录选择器 */
+  onRecoverDirectory?: () => void;
   /** 插在搜索行（含最近项目下拉）与完整树之间的自定义区块（如项目树） */
   belowRecent?: ReactNode;
 }) {
@@ -269,6 +273,9 @@ function FileTree({
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
   const [error, setError] = useState<string | null>(null);
+  const [errorPath, setErrorPath] = useState<string | null>(null);
+  const errorPathRef = useRef<string | null>(null);
+  errorPathRef.current = errorPath;
   const [menu, setMenu] = useState<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
   const [gitMap, setGitMap] = useState<Record<string, string>>({});
   // 当前根的路径归属（主仓库/工作区分支）；other 或查询失败不显示徽标
@@ -308,12 +315,23 @@ function FileTree({
 
   const load = useCallback(
     async (path: string) => {
+      const treeRootAtStart = rootRef.current;
       try {
         const entries = await invoke<DirEntryDto[]>("list_dir", { path, showHidden });
         setCache((prev) => ({ ...prev, [path]: entries }));
-        setError(null);
+        if (
+          treeRootAtStart === rootRef.current &&
+          (path === treeRootAtStart || errorPathRef.current === path)
+        ) {
+          setError(null);
+          setErrorPath(null);
+        }
       } catch (e) {
-        setError(String(e));
+        // 根目录切换后，旧树请求的迟到错误不能污染当前目录；
+        // 当前树的根/子目录都显示同一套可恢复的人话。
+        if (treeRootAtStart !== rootRef.current) return;
+        setError(directoryErrorMessage(e, path));
+        setErrorPath(path);
       }
     },
     [showHidden],
@@ -369,6 +387,8 @@ function FileTree({
   useEffect(() => {
     setCache({});
     setExpanded(new Set());
+    setError(null);
+    setErrorPath(null);
   }, [root, showHidden]);
 
   // 手动刷新：只清缓存，展开状态保留（展开的节点会自动重载）
@@ -625,7 +645,20 @@ function FileTree({
           />
         </div>
       )}
-      {error && <p className="px-2 py-1 text-xs text-err-text">{error}</p>}
+      {error && (
+        <div className="mx-2 my-1 rounded-md border border-field bg-inset px-2 py-1.5 text-xs">
+          <p className="text-warn-text">{error}</p>
+          {errorPath === root && onRecoverDirectory && (
+            <button
+              type="button"
+              onClick={onRecoverDirectory}
+              className="mt-1 rounded-sm border border-field bg-inset px-1.5 py-0.5 text-micro text-l2 hover:bg-hover"
+            >
+              选择新目录
+            </button>
+          )}
+        </div>
+      )}
 
       {results !== null ? (
         <div className="min-h-0 flex-1 overflow-auto">

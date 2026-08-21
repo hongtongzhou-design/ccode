@@ -9,14 +9,15 @@ export const HOTKEY_DISABLED = "";
 /** 页切绑定清单单一出处（App.tsx 全局监听与设置页录制 UI 同源）：
  *  顺序与侧栏「工作→能力→管理」一致；combo 为该页默认绑定（settings.hotkeyPages 可按页覆盖） */
 export const PAGE_HOTKEY_DEFS = [
-  { id: "workspaces", label: "项目", combo: "mod+1" },
-  { id: "terminal", label: "终端", combo: "mod+2" },
-  { id: "sessions", label: "对话", combo: "mod+3" },
-  { id: "profiles", label: "配置", combo: "mod+4" },
-  { id: "skills", label: "技能", combo: "mod+5" },
-  { id: "mcp", label: "MCP", combo: "mod+6" },
-  { id: "stats", label: "统计", combo: "mod+7" },
-  { id: "settings", label: "设置", combo: "mod+8" },
+  { id: "workbench", label: "工作台", combo: "mod+1" },
+  { id: "workspaces", label: "项目", combo: "mod+2" },
+  { id: "terminal", label: "运行", combo: "mod+3" },
+  { id: "sessions", label: "对话", combo: "mod+4" },
+  { id: "profiles", label: "连接", combo: "mod+5" },
+  { id: "skills", label: "技能", combo: "mod+6" },
+  { id: "mcp", label: "MCP", combo: "mod+7" },
+  { id: "stats", label: "用量", combo: "mod+8" },
+  { id: "settings", label: "设置", combo: "mod+9" },
 ] as const;
 
 export interface Combo {

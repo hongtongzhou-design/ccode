@@ -1587,12 +1587,28 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       workspaceDrift?.healthy === true || !!driftFailed[workspace.id];
     const healthUnknown =
       !!healthFailed[workspace.id] && !workspaceHealth;
+    const conflict =
+      workspaceDrift?.canResolveMerge === true || workspaceHealth?.conflict === true;
+    const canOpenWorkspace =
+      workspace.status === "active" &&
+      (workspaceDrift?.healthy === true ||
+        conflict ||
+        !!driftFailed[workspace.id]);
+    const merged = isMerged(workspace, workspaceHealth);
     const items: {
       label: string;
       onSelect?: () => void;
       disabled?: boolean;
       title?: string;
     }[] = [];
+
+    // 普通评审收进更多；正在发生的冲突保留行内直达入口。
+    if (canOpenWorkspace && !merged && !conflict) {
+      items.push({
+        label: "评审",
+        onSelect: () => openReview(workspace),
+      });
+    }
 
     if (workspace.status === "active" && healthy) {
       const workspaceSettings = settings[workspace.repoPath];
@@ -2238,11 +2254,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             <button
                               type="button"
                               onClick={() => void openInTerminal(workspace)}
-                              className={`${actionBtn} ${hoverReveal}`}
+                              className={rowActionClass}
                             >
-                              ⌨ 终端
+                              继续
                             </button>
-                            {!merged && (
+                            {(canResolveConflict || workspaceHealth?.conflict) && !merged && (
                               <button
                                 type="button"
                                 onClick={() =>

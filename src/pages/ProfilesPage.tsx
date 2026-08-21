@@ -1329,7 +1329,7 @@ export default function ProfilesPage() {
         )}
         {/* 命令栏：标题 + 元信息，右侧动作 */}
         <PageHeader
-          title="配置中心"
+          title="连接"
           meta={`${profiles.length} 个配置 · ${new Set(profiles.map((p) => p.agent)).size} 个 agent`}
           actions={
             <>

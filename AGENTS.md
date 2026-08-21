@@ -50,6 +50,8 @@ npm run tauri build    # 打包
 
 开发预览必须使用 `npm run tauri:dev`：独立产品名 **Ccode Dev**、窗口标题 **Ccode Dev - 热更新**、bundle ID
 `com.ccode.dev.hmr`（`src-tauri/tauri.dev.conf.json`）。界面验证必须按该窗口标题或明确 `.app` 绝对路径定位，禁止用模糊应用名 `Ccode`。
+**界面核验不得混入旧打包前端**：`/Applications/Ccode.app`、`target/release`、普通 `com.ccode.dev` 与历史 `target/debug/bundle`
+均不可作为验收依据；只能验收 `tauri dev --config src-tauri/tauri.dev.conf.json` 启动、连接 17575 的热更新窗口。无法唯一确认窗口归属时停止界面操作，改报“未验收”，不得拿旧窗口截图或状态代替。
 
 ## 本机环境档案（踩坑记录，新会话必读）
 

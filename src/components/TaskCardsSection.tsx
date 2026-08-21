@@ -260,7 +260,7 @@ export default function TaskCardsSection({
    *  预填指令还要给「该动手了」一个明确出口（回项目页开工/商量）——只读约束管得住文件、
    *  管不住 agent 在项目根读到 project.toml 与草稿后主动请缨开工；没有出口话术，
    *  它会把「用户点头」当成在主仓直接产出的授权（实测：聊想法会话里 agent 问「要现在开 outline 吗」）。
-   *  kimi/opencode 无启动注入参数：启动栏保留指令文本由用户手动发送（promptDropped 既有处理） */
+   *  kimi 无启动注入参数：启动栏保留指令文本由用户手动发送（promptDropped 既有处理） */
   function onDiscuss(card: TaskCardDto, allowEdit = false, topic?: string) {
     claimForCard(card);
     const guard = useAppStore.getState().settings?.discussReadonly !== false;
@@ -320,7 +320,7 @@ export default function TaskCardsSection({
   }
 
   /** 继续（已绑定工作区的卡）：开终端新会话，cwd = 工作树，预填「阅读 TASK.md 并继续任务」。
-   *  kimi/opencode 无启动注入参数：启动栏保留指令文本由用户手动发送（pty_spawn promptDropped 既有处理） */
+   *  kimi 无启动注入参数：启动栏保留指令文本由用户手动发送（pty_spawn promptDropped 既有处理） */
   function onContinue(card: TaskCardDto) {
     const ws = card.workspace
       ? workspaces.find(

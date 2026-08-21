@@ -17,7 +17,7 @@ function agentLabel(id: string): string {
  * 写回 handoff-*.md 再继续，零改动直接用；任务书沉淀统一走草稿（append_step_draft），
  * 本弹窗不再落 brief-*.md 钉卡。
  * 三路径消费：内部同 Agent 新会话 / 内部其他 Agent / 外部（⧉ 复制命令、⇗ 外部终端）。
- * 骨架与 HandoffPicker 一致；kimi/opencode 无启动注入参数，走手动发送停留态。
+ * 骨架与 HandoffPicker 一致；目前仅 kimi 无启动注入参数，走手动发送停留态。
  * 生成走 store.digestJob 后台任务（v3.60）：关闭本弹窗不中断、重开复用结果不重复提炼；
  * ready 未消费时收件箱挂「待发送」条目。
  */
@@ -45,7 +45,7 @@ export default function DigestPicker({
   const [writtenBack, setWrittenBack] = useState(false);
   // 外部命令/指令的已复制反馈（按目标 agent 区分）
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  // kimi/opencode 无启动注入：简报就绪后停留展示手动发送提示
+  // kimi 无启动注入：简报就绪后停留展示手动发送提示
   const [ready, setReady] = useState<{
     target: HandoffTargetDto;
     prompt: string;
@@ -130,6 +130,32 @@ export default function DigestPicker({
     return `读 ${relPath(b.filePath)} 接力简报，在此基础上继续完成任务`;
   }
 
+  function targetProfile(target: HandoffTargetDto) {
+    const remembered = localStorage.getItem(`ccode.lastProfile.${target.id}`);
+    return (
+      profiles.find((p) => p.agent === target.id && p.id === remembered) ??
+      profiles.find((p) => p.agent === target.id) ??
+      null
+    );
+  }
+
+  function targetModel(target: HandoffTargetDto, profileId: string) {
+    try {
+      const last = JSON.parse(localStorage.getItem("ccode.lastLaunch") ?? "null") as
+        | { agentId?: string; profileId?: string; model?: string }
+        | null;
+      if (
+        last?.agentId === target.id &&
+        last.profileId === profileId &&
+        last.model?.trim()
+      )
+        return last.model.trim();
+    } catch {
+      /* 损坏的本地记忆不阻断外部接力 */
+    }
+    return profiles.find((p) => p.id === profileId)?.models[0] ?? null;
+  }
+
   /** 开新终端标签预填启动（同 cwd、目标 agent、读简报指令为首条 prompt） */
   function goTerminal(target: HandoffTargetDto, prompt: string) {
     const profileId =
@@ -166,7 +192,7 @@ export default function DigestPicker({
       if (t.promptSupported) {
         goTerminal(t, prompt);
       } else {
-        // 无交互注入参数（kimi/opencode）：复制指令文本，停留展示提示，由用户确认后前往
+        // 无交互注入参数（目前仅 kimi）：复制指令文本，停留展示提示，由用户确认后前往
         await navigator.clipboard.writeText(prompt).catch(() => {});
         setReady({ target: t, prompt });
         setBusy(null);
@@ -204,10 +230,17 @@ export default function DigestPicker({
     if (!brief) return;
     try {
       await writeBackIfChanged();
+      const profile = targetProfile(t);
+      if (!profile) {
+        setLocalError(`${agentLabel(t.id)} 没有可用的 Ccode 配置`);
+        return;
+      }
       await invoke("digest_external_terminal", {
         agentId: t.id,
         cwd: source.cwd,
         prompt: promptFor(brief),
+        profileId: profile.id,
+        model: targetModel(t, profile.id),
       });
     } catch (e) {
       setLocalError(String(e));

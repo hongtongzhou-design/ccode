@@ -246,13 +246,13 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   `cwd/.ccode/handoff-<时间>.md`（自定义路径不得出项目根）；简报是过程文件不进版本库：新项目默认 .gitignore 模板含
   `.ccode/handoff-*.md`，存量仓库在每次写简报时 best-effort 补齐该规则（`with_handoff_rule` 幂等追加，非仓库静默跳过）；
   接力链先按 agent+cwd 登记 `handoff_links`，新会话被扫描到时
-  固化进 `session_meta.handoff_from_*` 并消费登记（防同目录后续会话误标）；kimi/opencode 无启动注入参数，走复制简报路径 +
+  固化进 `session_meta.handoff_from_*` 并消费登记（防同目录后续会话误标）；目前仅 kimi 无启动注入参数，走复制简报路径 +
   手动发送，不得伪造注入成功。
 - **「◈ 提炼接力」是长会话续作的 AI 简报变体**（handoff.rs `build_session_digest`，AI 功能键 `digest`）：全会话文本（DTO 层
   已脱敏，`cap_text_middle` 24KB）经无头 AI 蒸馏成结构化简报（任务目标/关键决策/已完改动/状态待办/下一步/环境约束），AI 输出
   再过 `redact_and_cap` 才落盘；目标列表来源 agent 置顶（同 Agent 新会话，不走 resume 防上下文污染），跨 agent 与接力链登记
   复用既有链路；外部续作走 `digest_command_line`（按注册表 prompt_inject 拼「新会话 + 读简报首条指令」，**非 resume**；
-  Unsupported 的 kimi/opencode 复制指令文本手动发送）；无 AI profile 或调用失败行内报错可重试，不免 AI 静默降级（免 AI 场景
+  Unsupported 的 kimi 复制指令文本手动发送）；无 AI profile 或调用失败行内报错可重试，不免 AI 静默降级（免 AI 场景
   用原「◈ 接力到…」快速简报）。**v3.60 起生成是 store 后台任务（`digestJob` + `startDigestJob`）**：DigestPicker 可关可开，
   同一会话（agent+sessionId+filePath）复用结果不重复发起（费 token 且慢），失败重试走 force；ready 未消费进收件箱「待发送」
   （`{type:"digest"}` → `digestOpenReq` 由对话页消费重开 picker），选定目标或「暂不发送」即 `consumeDigestJob` 摘除。
@@ -271,7 +271,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   「未归置」恒最前同原「无工作区会话排最前」口径）。工作区页卡片区 = `TaskCardsSection`（ProjectGroup 内、步进器下方，
   展开手风琴按卡片 id 记忆、切项目随 key 重挂载清空）：「开工」= 打开开工确认弹层（TASK.md 预览/编辑，草稿优先），
   确认才走 startPipelineStep；「继续」= 有绑定工作区时可用：pendingTerminal initialPrompt「阅读 TASK.md 并继续任务」
-  （cwd = 卡片绑定工作区工作树否则项目根，工作树内引用用绝对路径；kimi/opencode 无注入由启动栏 promptDropped
+  （cwd = 卡片绑定工作区工作树否则项目根，工作树内引用用绝对路径；kimi 无注入由启动栏 promptDropped
   既有处理兜底）。**主仓改动协同**（v3.64）：聊想法在主仓进行，agent 改动留主仓合法——
   弹层顶部与卡片区标题行各一条警告色提醒（复用 `git_status`，进项目详情读一次 + 弹层打开刷新，不轮询，非 git 不渲染），
   卡片区点击经 `PendingTerminal.rightTab: "git"` 直达终端页改动面板；只提醒不阻断。对话页项目筛选下按卡片分组 + meta 行「▤ 卡片名」chip

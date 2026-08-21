@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { isLightTheme } from "./themes";
+import { createSessionRefreshCoordinator } from "./session-refresh";
 import {
   dismissHelp,
   dismissInboxItem,
@@ -57,7 +58,7 @@ export interface AppSettings {
   /** 每个 agent 的默认 profile（agent id → profile id）：启动栏选完 agent 后预选它。
    *  解析顺序 显式默认 > 上次使用 > 首个配置 */
   defaultProfiles?: Record<string, string>;
-  /** 启动时进入哪一页（页面 id）；缺省 = workspaces */
+  /** 启动时进入哪一页（页面 id）；缺省 = workbench */
   startPage?: string;
   /** 「隐藏」的 profile id：只影响启动栏下拉分组（沉到「更多」），不删数据、不改启动行为 */
   hiddenProfiles?: string[];
@@ -69,10 +70,10 @@ export interface AppSettings {
   /** 快捷键绑定（"mod+shift+k" 格式，mod=⌘/Ctrl；空串 = 禁用） */
   hotkeyPalette?: string;
   hotkeyHideChrome?: string;
-  /** ⌘1–⌘8 页切整组总开关（关 = 全部页切绑定不生效） */
+  /** ⌘1–⌘9 页切整组总开关（关 = 全部页切绑定不生效） */
   hotkeyPageSwitch?: boolean;
   /** 页切逐页绑定：键 = 页面 id（hotkeys.ts PAGE_HOTKEY_DEFS），值 = 组合串；
-      键缺失 = 该页用默认绑定（mod+1..mod+8） */
+      键缺失 = 该页用默认绑定（mod+1..mod+9） */
   hotkeyPages?: Record<string, string>;
   /** 想法期只读保护（卡片区「聊想法」，默认开）：开 = 支持的 CLI 注入只读/计划模式参数 +
       预填指令带不动文件约束；关 = 纯聊天 */
@@ -388,13 +389,20 @@ interface AppState {
   checkAppUpdate: () => Promise<void>;
   loadAll: () => Promise<void>;
   /** 拉取全部 agent 的会话元数据，返回最新列表供轮询比对 */
-  loadSessions: () => Promise<SessionMetaDto[]>;
+  loadSessions: (force?: boolean) => Promise<SessionMetaDto[]>;
   saveProfile: (id: string | null, input: ProfileInput) => Promise<void>;
   removeProfile: (id: string) => Promise<void>;
   duplicateProfile: (id: string) => Promise<void>;
 }
 
-export const useAppStore = create<AppState>((set, get) => ({
+export const useAppStore = create<AppState>((set, get) => {
+  const sessionRefresh = createSessionRefreshCoordinator(
+    () => invoke<SessionMetaDto[]>("list_sessions"),
+    () => get().sessions,
+    (sessions) => set({ sessions }),
+  );
+
+  return {
   profiles: [],
   agents: [],
   sessions: [],
@@ -412,7 +420,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ recentReposLoading: false });
     }
   },
-  page: "workspaces",
+  page: "workbench",
   setPage: (p) => set({ page: p }),
   navCollapsed: localStorage.getItem("ccode.navCollapsed") === "1",
   toggleNavCollapsed: () =>
@@ -543,11 +551,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     await invoke("delete_task_card", { projectRoot, taskId });
     await get().loadTaskCards(projectRoot);
     // 后端已清掉会话的 task_id：刷新会话列表让对话页 chip/分组即时消失
-    await get().loadSessions();
+    await get().loadSessions(true);
   },
   assignSessionTask: async (agent, sessionId, taskId) => {
     await invoke("assign_session_task", { agent, sessionId, taskId });
-    await get().loadSessions();
+    await get().loadSessions(true);
   },
   profileIssues: {},
   setProfileIssue: (id, issue) =>
@@ -586,11 +594,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ profiles, agents });
   },
 
-  loadSessions: async () => {
-    const sessions = await invoke<SessionMetaDto[]>("list_sessions");
-    set({ sessions });
-    return sessions;
-  },
+  loadSessions: (force = false) => sessionRefresh.load(force),
 
   saveProfile: async (id, input) => {
     if (id) {
@@ -613,7 +617,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     const profiles = await invoke<Profile[]>("list_profiles");
     set({ profiles });
   },
-}));
+  };
+});
 
 export function useProfilesByAgent(agentId: string): Profile[] {
   return useAppStore((s) => s.profiles).filter((p) => p.agent === agentId);

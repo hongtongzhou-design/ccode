@@ -320,7 +320,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
   return (
     <PageFrame width="wide">
       <PageHeader
-        title="用量统计"
+        title="用量"
         meta="按项目、任务与 Agent 查看投入"
       />
       <PageToolbar>

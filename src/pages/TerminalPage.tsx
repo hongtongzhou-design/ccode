@@ -14,6 +14,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import { exit } from "@tauri-apps/plugin-process";
 import {
   isPermissionGranted,
@@ -23,6 +24,7 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
@@ -73,6 +75,7 @@ import {
   TERMINAL_TABS_STORAGE_KEY,
 } from "../terminal-tab-persistence";
 import { clampTabDragDx, tabDragTarget } from "../tab-drag";
+import { directoryUnavailableMessage } from "../terminal-cwd";
 import type { RunOverviewInput } from "../run-overview";
 import type {
   ChatMessageDto,
@@ -147,6 +150,7 @@ export interface FocusTabActions {
   logLine: (text: string) => void;
   /** 状态栏 📂 浮层改工作目录（仅未启动时开放；cwd state 单一出处在 TerminalView） */
   setCwd: (cwd: string) => void;
+  chooseCwd: () => void;
 }
 
 /** TerminalView 上报的当前对话联动数据（右侧「对话」页签与阅读区 Agent 栏渲染用） */
@@ -413,6 +417,46 @@ const TerminalView = memo(function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, selectedProfile, model]);
   const [cwd, setCwd] = useState(initialCwd ?? saved.cwd ?? "~");
+  const [cwdIssue, setCwdIssue] = useState<string | null>(null);
+  const [cwdChecking, setCwdChecking] = useState(false);
+  const cwdCheckSeqRef = useRef(0);
+
+  async function checkWorkingDirectory(path = cwd): Promise<boolean> {
+    const seq = ++cwdCheckSeqRef.current;
+    setCwdChecking(true);
+    try {
+      await invoke("list_dir", { path, showHidden: false });
+      if (seq === cwdCheckSeqRef.current) setCwdIssue(null);
+      return true;
+    } catch {
+      if (seq === cwdCheckSeqRef.current) setCwdIssue(path);
+      return false;
+    } finally {
+      if (seq === cwdCheckSeqRef.current) setCwdChecking(false);
+    }
+  }
+
+  function setWorkingDirectory(path: string) {
+    const next = path.trim();
+    if (!next) return;
+    cwdCheckSeqRef.current += 1;
+    setCwd(next);
+    setCwdChecking(false);
+    setCwdIssue(null);
+    setError(null);
+    setBarExpanded(true);
+  }
+
+  async function chooseWorkingDirectory() {
+    const selected = await openDirectoryDialog({ directory: true, multiple: false });
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (typeof path === "string" && path.trim()) setWorkingDirectory(path);
+  }
+
+  async function returnToHomeDirectory() {
+    setWorkingDirectory("~");
+    await checkWorkingDirectory("~");
+  }
   // 一键开步的首条指令：开步预填过就展示编辑框；注入成功即清除（一次性）
   const [promptText, setPromptText] = useState(presetPrompt ?? "");
   const [showPrompt, setShowPrompt] = useState(!!presetPrompt);
@@ -601,6 +645,9 @@ const TerminalView = memo(function TerminalView({
   // 当前 agent 已分发的 MCP server 清单（MCP 页开关同步）；点击 pill 展开，一键提及/管理
   const [agentMcps, setAgentMcps] = useState<McpServerDto[]>([]);
   const [mcpMenuOpen, setMcpMenuOpen] = useState(false);
+  // 高级启动项默认收起：主栏只回答「用谁、用哪个模型、在哪运行」；
+  // 首条指令/技能/MCP 仍保留原能力，按需从「⋯」展开。
+  const [advancedLaunchOpen, setAdvancedLaunchOpen] = useState(false);
   // 向上弹出菜单的锚点与动态限高：固定 224px 在锚点上方空间不足时会顶出屏幕
   const skillAnchor = useRef<HTMLSpanElement>(null);
   const mcpAnchor = useRef<HTMLSpanElement>(null);
@@ -808,6 +855,7 @@ const TerminalView = memo(function TerminalView({
   // 启动栏第二行（状态提示行）有内容才渲染——只有 ⋯ 时整行像悬空碎片（v3.92 修）
   const showBarMeta = !!(
     error ||
+    cwdIssue ||
     (initialExtraEnv && Object.keys(initialExtraEnv).length > 0) ||
     (!running &&
       (shellActive || exited || restored))
@@ -921,9 +969,18 @@ const TerminalView = memo(function TerminalView({
     if (visible) setEverVisible(true);
   }, [visible]);
 
+  // 恢复占位标签只做目录检查，不自动启动或偷偷迁移目录；失效时把修复入口放进空态卡。
+  useEffect(() => {
+    if (!restored || !visible || !everVisible) return;
+    void checkWorkingDirectory(cwd);
+  }, [restored, visible, everVisible, cwd]);
+
   useEffect(() => {
     if (!everVisible) return;
     const term = new Terminal({
+      // Unicode11Addon 使用 xterm 的 proposed Unicode API；显式开启后才能在
+      // xterm 6 中加载宽度规则，否则 addon.activate 会抛错并触发顶层错误边界。
+      allowProposedApi: true,
       // 回退链补 Cascadia Mono（Win10+ 自带）与雅黑（CJK 兜底）——否则 Windows 上
       // JetBrains Mono 未装时中文落到通用 monospace 位图字体，发糊发虚
       fontFamily: `'${settingsRef.current?.terminalFontFamily ?? "JetBrains Mono"}', 'JetBrains Mono', 'SF Mono', Menlo, 'Cascadia Mono', Consolas, 'Microsoft YaHei', monospace`,
@@ -952,6 +1009,9 @@ const TerminalView = memo(function TerminalView({
     term.loadAddon(fit);
     const search = new SearchAddon();
     term.loadAddon(search);
+    // Ghostty/现代终端使用 Unicode 11 宽度规则；xterm 默认 Unicode 6
+    // 会让部分 emoji、组合字符和新 CJK 字符错列，尤其在 TUI 表格中明显。
+    term.loadAddon(new Unicode11Addon());
     term.open(containerRef.current!);
     try {
       fit.fit();
@@ -1205,9 +1265,10 @@ const TerminalView = memo(function TerminalView({
   useEffect(() => {
     if (!shellOnly || !visible || !everVisible || autoStartedRef.current)
       return;
-    autoStartedRef.current = true;
     void (async () => {
       try {
+        if (!(await checkWorkingDirectory(cwd))) return;
+        autoStartedRef.current = true;
         const ptyId = await invoke<string>("shell_spawn", {
           cwd,
           extraEnv: initialExtraEnv ?? null,
@@ -1235,10 +1296,10 @@ const TerminalView = memo(function TerminalView({
       return;
     autoLaunchedRef.current = true;
     if (profiles.some((p) => p.id === profileId)) {
-      void launch();
+      void (restored ? restoreTask() : launch());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, everVisible, autoStart, profileId, profiles]);
+  }, [visible, everVisible, autoStart, profileId, profiles, restored]);
 
   /** 把一个 PTY 接到 xterm 上；agent 退出时自动回落到 shell */
   async function attach(
@@ -1479,6 +1540,10 @@ const TerminalView = memo(function TerminalView({
 
   async function launch(resumeId?: string) {
     setError(null);
+    if (!(await checkWorkingDirectory(cwd))) {
+      setBarExpanded(true);
+      return;
+    }
     await cleanupPty();
     setLinkState("detecting");
     linkStartedAtRef.current = Date.now();
@@ -1562,7 +1627,7 @@ const TerminalView = memo(function TerminalView({
       setRunning(true);
       setStartedAt(Date.now());
       if (res.promptDropped) {
-        // 该 CLI 无交互注入参数（kimi/opencode）：保留启动栏展开与指令文本，
+        // 该 CLI 无交互注入参数（目前仅 kimi）：保留启动栏展开与指令文本，
         // 并自动复制到剪贴板（运行中输入框 disabled 不可选中），用户在终端里粘贴发送
         void navigator.clipboard.writeText(promptText).catch(() => {});
         setError("该 CLI 不支持启动注入：指令已复制，请在终端里粘贴发送");
@@ -1589,6 +1654,10 @@ const TerminalView = memo(function TerminalView({
 
   async function openShell() {
     setError(null);
+    if (!(await checkWorkingDirectory(cwd))) {
+      setBarExpanded(true);
+      return;
+    }
     await cleanupPty();
     try {
       const ptyId = await invoke<string>("shell_spawn", {
@@ -1615,10 +1684,7 @@ const TerminalView = memo(function TerminalView({
       setBarExpanded(true);
       return;
     }
-    try {
-      await invoke("list_dir", { path: cwd, showHidden: false });
-    } catch {
-      setError("上次工作目录不存在或不可读，请修改目录后再恢复");
+    if (!(await checkWorkingDirectory(cwd))) {
       setBarExpanded(true);
       return;
     }
@@ -1651,6 +1717,7 @@ const TerminalView = memo(function TerminalView({
     modify: () => {},
     logLine: () => {},
     setCwd: () => {},
+    chooseCwd: () => {},
   });
   actionsRef.current = {
     stop: () => void stop(),
@@ -1663,7 +1730,8 @@ const TerminalView = memo(function TerminalView({
     modify: () => setBarExpanded(true),
     // 暗淡色（SGR 2）写一行，不进 PTY 输入流
     logLine: (text) => termRef.current?.writeln(`\x1b[2m${text}\x1b[0m`),
-    setCwd: (c) => setCwd(c),
+    setCwd: (c) => setWorkingDirectory(c),
+    chooseCwd: () => void chooseWorkingDirectory(),
   };
   useEffect(() => {
     onActions?.(tabId, {
@@ -1675,6 +1743,7 @@ const TerminalView = memo(function TerminalView({
       modify: () => actionsRef.current.modify(),
       logLine: (t) => actionsRef.current.logLine(t),
       setCwd: (c) => actionsRef.current.setCwd(c),
+      chooseCwd: () => actionsRef.current.chooseCwd(),
     });
   }, [onActions, tabId]);
 
@@ -1735,6 +1804,10 @@ const TerminalView = memo(function TerminalView({
     ...(!running && !shellActive
       ? [{ label: "打开 Shell", onSelect: () => void openShell() }]
       : []),
+    {
+      label: advancedLaunchOpen ? "收起高级启动选项" : "显示高级启动选项",
+      onSelect: () => setAdvancedLaunchOpen((v) => !v),
+    },
     // 「快速开聊」的转正出口：把当前目录登记成项目，会话历史天然跟 cwd 走、
     // 自动归到新项目下（ProjectAggregator 既有归并口径，不需要迁移任何东西）。
     // 只登记，不建工作区、不选模板——模板从项目页的引导横幅或 ⋯ 里选。
@@ -1909,13 +1982,7 @@ const TerminalView = memo(function TerminalView({
               </>
             )}
             </div>
-            {/* 目录输入框已移除（v3.91 走查）：目录改由底部状态栏 📂 胶囊浮层编辑（仅未启动），
-                空间让给模型框；技能/MCP 胶囊右对齐收进本行末端（启动主流程：Agent→配置→模型→启动）。
-                注意必须在模型提示行之前——提示行是 w-full，排它后面会被挤到下一行（v3.92 修） */}
-            <span className="ml-auto flex shrink-0 items-center gap-2">
-              {renderSkillMenu(false, true)}
-              {renderMcpMenu(false, true)}
-            </span>
+            {/* 目录由底部状态栏 📂 胶囊编辑（仅未启动）；主栏保持 Agent → 配置 → 模型 → 启动。 */}
             {/* run 脚本（shellOnly）标签不走 agent 启动流程：隐藏启动/停止按钮，
                 避免误点「启动」无确认杀掉正在跑的脚本 shell */}
             {!shellOnly &&
@@ -1937,7 +2004,7 @@ const TerminalView = memo(function TerminalView({
                       : "border-cta-bd bg-cta text-cta-text hover:brightness-110"
                   }`}
                 >
-                  {restored ? "恢复任务" : "启动"}
+                  {restored ? "恢复任务" : "运行"}
                 </button>
               ))}
             <button
@@ -1975,32 +2042,49 @@ const TerminalView = memo(function TerminalView({
               ) : null;
             })()}
           </div>
-          {/* 一键开步的首条指令：可编辑，留空 = 不注入；注入成功即清除。
-              无注入参数的 CLI（kimi/opencode）运行中输入框 disabled 不可选中，给一键复制兜底 */}
-          {showPrompt && !shellOnly && (
-            <div className="mb-2 flex items-center gap-2">
-              <span className="shrink-0 text-xs text-l3">启动后自动发送：</span>
-              <input
-                className={`${select} min-w-0 flex-1 py-1 text-xs`}
-                value={promptText}
-                onChange={(e) => setPromptText(e.target.value)}
-                placeholder="留空则不注入首条指令"
-                disabled={running}
-              />
-              {running && promptText.trim() && (
-                <button
-                  type="button"
-                  title="复制指令到剪贴板"
-                  onClick={() =>
-                    void navigator.clipboard.writeText(promptText).catch(() => {})
-                  }
-                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
-                >
-                  ⧉
-                </button>
+          {advancedLaunchOpen || showPrompt ? (
+            <div className="mb-2 rounded-md bg-strip px-2.5 py-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="shrink-0 text-xs text-l3">高级启动选项</span>
+                {renderSkillMenu(false)}
+                {renderMcpMenu(false)}
+                {!showPrompt && !shellOnly && (
+                  <button
+                    type="button"
+                    className="ml-auto h-7 rounded-sm px-2 text-micro text-l4 hover:bg-hover hover:text-l2"
+                    onClick={() => setShowPrompt(true)}
+                  >
+                    添加首条指令
+                  </button>
+                )}
+              </div>
+              {/* 一键开步的首条指令：可编辑，留空 = 不注入；注入成功即清除。 */}
+              {showPrompt && !shellOnly && (
+                <div className="mt-2 flex items-center gap-2">
+                  <span className="shrink-0 text-xs text-l3">启动后自动发送：</span>
+                  <input
+                    className={`${select} min-w-0 flex-1 py-1 text-xs`}
+                    value={promptText}
+                    onChange={(e) => setPromptText(e.target.value)}
+                    placeholder="留空则不注入首条指令"
+                    disabled={running}
+                  />
+                  {running && promptText.trim() && (
+                    <button
+                      type="button"
+                      title="复制指令到剪贴板"
+                      onClick={() =>
+                        void navigator.clipboard.writeText(promptText).catch(() => {})
+                      }
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
+                    >
+                      ⧉
+                    </button>
+                  )}
+                </div>
               )}
             </div>
-          )}
+          ) : null}
           {/* 第二行（状态提示行）有内容才渲染；⋯ 已挪到第一行末尾（v3.92） */}
           {showBarMeta && (
           <div className="mb-2 flex min-h-7 flex-wrap items-center gap-2 border-t border-hairline pt-1 text-xs">
@@ -2022,6 +2106,11 @@ const TerminalView = memo(function TerminalView({
             )}
             {restored && !running && !shellActive && (
               <span className="text-l3">上次任务，可恢复</span>
+            )}
+            {cwdIssue && (
+              <span className="truncate text-warn-text" title={cwdIssue}>
+                {directoryUnavailableMessage(cwdIssue)}
+              </span>
             )}
             {error && <span className="truncate text-err-text">{error}</span>}
           </div>
@@ -2056,10 +2145,7 @@ const TerminalView = memo(function TerminalView({
           </span>
           {error && <span className="truncate text-err-text">{error}</span>}
           <span className="ml-auto flex shrink-0 items-center gap-1">
-            {/* 技能/MCP 入口在收缩态（运行中）同样可用——展开栏收起后不能丢入口；
-                pill 在 ml-auto 右侧，菜单须右对齐防溢出屏幕右缘 */}
-            {renderSkillMenu(false, true)}
-            {renderMcpMenu(false, true)}
+            {/* 高级启动项不在收缩态常驻；从标签栏 ⋯ → 修改启动配置后，在高级启动选项中访问。 */}
             <button
               type="button"
               onClick={() => setBarExpanded(true)}
@@ -2162,6 +2248,40 @@ const TerminalView = memo(function TerminalView({
                   "color-mix(in srgb, var(--color-l1) 12%, transparent)",
               }}
             >
+              {cwdIssue && (
+                <div className="w-full rounded-md border border-field bg-inset px-3 py-2 text-left text-xs">
+                  <div className="font-medium text-warn-text">工作目录不可用</div>
+                  <div className="mt-1 truncate font-mono text-micro text-l3" title={cwdIssue}>
+                    {cwdIssue}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => void chooseWorkingDirectory()}
+                      disabled={cwdChecking}
+                      className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-micro text-cta-text disabled:opacity-50"
+                    >
+                      选择新目录
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void returnToHomeDirectory()}
+                      disabled={cwdChecking}
+                      className="rounded-sm border border-field bg-inset px-2 py-1 text-micro text-l2 disabled:opacity-50"
+                    >
+                      回到主目录
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void checkWorkingDirectory()}
+                      disabled={cwdChecking}
+                      className="rounded-sm px-2 py-1 text-micro text-l3 hover:bg-hover disabled:opacity-50"
+                    >
+                      {cwdChecking ? "检查中…" : "重新检查"}
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="flex items-center gap-2 text-base font-medium text-l1">
                 {agentLabel(agentId)}
                 {selectedProfile && (
@@ -2186,10 +2306,10 @@ const TerminalView = memo(function TerminalView({
                     onClick={() =>
                       restored ? void restoreTask() : void launch()
                     }
-                    disabled={!profileId}
+                    disabled={!profileId || cwdChecking}
                     className="inline-flex h-9 min-w-40 cursor-pointer items-center justify-center gap-2 rounded-md border border-cta-bd bg-cta px-5 text-sm text-cta-text hover:brightness-110 disabled:cursor-default disabled:opacity-50"
                   >
-                    {restored ? "恢复任务" : "启动"}
+                    {restored ? "恢复任务" : "运行"}
                     {/* 快捷键说明：括号小字随按钮文字整体居中，不加胶囊底色
                         （18% 混合底在纯色按钮上是块显眼补丁，用户否为「色差」）；勿绝对定位钉右缘 */}
                     <span className="text-micro opacity-80">
@@ -3911,6 +4031,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               onEnterProject={setEnterCwd}
               onRootChange={closePreviewForRootChange}
               onRootNavigated={setTreeRoot}
+              onRecoverDirectory={() =>
+                tabActionsRef.current.get(focusedId)?.chooseCwd()
+              }
               onOpenReader={(path) =>
                 void (/\.pdf$/i.test(path)
                   ? openReaderForPdf(path)

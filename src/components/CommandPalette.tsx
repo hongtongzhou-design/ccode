@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../store";
 import { filterCommands, type PaletteCommand } from "../command-palette";
 import { THEMES } from "../themes";
+import { comboLabel } from "../hotkeys";
 
 const PAGE_COMMANDS: {
   id: string;
@@ -9,14 +10,15 @@ const PAGE_COMMANDS: {
   icon: string;
   hint: string;
 }[] = [
-  { id: "workspaces", label: "项目", icon: "⛁", hint: "⌘1" },
-  { id: "terminal", label: "终端", icon: "⌨", hint: "⌘2" },
-  { id: "sessions", label: "对话", icon: "◔", hint: "⌘3" },
-  { id: "profiles", label: "配置", icon: "⇄", hint: "⌘4" },
-  { id: "skills", label: "技能", icon: "✦", hint: "⌘5" },
-  { id: "mcp", label: "MCP", icon: "⌗", hint: "⌘6" },
-  { id: "stats", label: "统计", icon: "◫", hint: "⌘7" },
-  { id: "settings", label: "设置", icon: "⛭", hint: "⌘8" },
+  { id: "workbench", label: "工作台", icon: "⌂", hint: comboLabel("mod+1") },
+  { id: "workspaces", label: "项目", icon: "⛁", hint: comboLabel("mod+2") },
+  { id: "terminal", label: "运行", icon: "⌨", hint: comboLabel("mod+3") },
+  { id: "sessions", label: "对话", icon: "◔", hint: comboLabel("mod+4") },
+  { id: "profiles", label: "连接", icon: "⇄", hint: comboLabel("mod+5") },
+  { id: "skills", label: "技能", icon: "✦", hint: comboLabel("mod+6") },
+  { id: "mcp", label: "MCP", icon: "⌗", hint: comboLabel("mod+7") },
+  { id: "stats", label: "用量", icon: "◫", hint: comboLabel("mod+8") },
+  { id: "settings", label: "设置", icon: "⛭", hint: comboLabel("mod+9") },
 ];
 
 /**

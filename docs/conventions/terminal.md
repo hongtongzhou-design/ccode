@@ -4,6 +4,8 @@
 
 ## 终端行为（用户明确要求；配色 = VS Code Dark+ 调色板，集中在 `TerminalPage.tsx` 的 `theme` 一处）
 
+- **外部终端安全临时复现（2026-08-21）**：外部恢复/提炼接力不得把 profile 密钥拼进命令、剪贴板、前端 IPC 或普通日志。前端只传明确选中的 `profileId`、模型、provider、会话 ID/提示词等非敏感元数据；缺少 `profileId` 时后端必须 fail-closed，不能静默取第一个配置。后端从 `ProfileStore` 读取密钥，复用 `agents::launch_plan`/`prepare_launch` 生成一次性 wrapper。Unix wrapper 存于 `<config>/ccode/external-launch/`（目录 0700、文件 0600，通过 `/bin/sh` 按路径执行），启动首行自删，失败立即清理，60 秒兜底删除；Windows 使用一次性 PowerShell wrapper。Ghostty 运行中实例使用其原生 AppleScript `new surface configuration`/`new window`：工作目录单独写入 `initial working directory`，先启动 `/bin/sh`，再经 `initial input` 发送带 shell 引号的 wrapper 路径；不能把 `Application Support` 等带空格路径直接放进 `command`。该路径不依赖 System Events 辅助功能权限或剪贴板；未运行实例使用 `open -na`。iTerm/Terminal.app 只接收不含密钥的启动命令。复制命令继续保持全局配置模式，不自动携带 profile 密钥。
+
 - 「停止」或 agent 退出后必须**自动回落用户登录 shell**（`$SHELL -l`，同 cwd），不死在最终画面；手动 `exit` 不自动
   重开；回落 shell 不带 profile env；agent/shell 共用 `pty.rs` 的 `spawn_tracked`，退出事件按 PTY 类型区分。
 - **重启只恢复标签元数据，不恢复 PTY**：白名单限 label/cwd/agent/profile/model/sessionId，禁存 PTY id/scrollback/密钥/

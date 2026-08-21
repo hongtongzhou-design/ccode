@@ -217,8 +217,38 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   /** 恢复用的兼容配置（codex 内联 provider 会话只认带 Base URL 的）；
    *  外部恢复命令需要它补 -c provider 定义（定义不含密钥） */
+  function resumeProfile(s: SessionMetaDto) {
+    let wished = localStorage.getItem(`ccode.lastProfile.${s.agent}`);
+    try {
+      const last = JSON.parse(localStorage.getItem("ccode.lastLaunch") ?? "null") as
+        | { agentId?: string; profileId?: string }
+        | null;
+      if (last?.agentId === s.agent && last.profileId) wished = last.profileId;
+    } catch {
+      /* 损坏的本地记忆不阻断恢复 */
+    }
+    return pickResumeProfile(profiles, s.agent, s.provider, wished);
+  }
+
   function resumeBaseUrl(s: SessionMetaDto): string | null {
-    return pickResumeProfile(profiles, s.agent, s.provider, null)?.baseUrl ?? null;
+    return resumeProfile(s)?.baseUrl ?? null;
+  }
+
+  function resumeModel(s: SessionMetaDto): string | null {
+    try {
+      const last = JSON.parse(localStorage.getItem("ccode.lastLaunch") ?? "null") as
+        | { agentId?: string; profileId?: string; model?: string }
+        | null;
+      if (
+        last?.agentId === s.agent &&
+        last.model?.trim() &&
+        (!last.profileId || last.profileId === resumeProfile(s)?.id)
+      )
+        return last.model.trim();
+    } catch {
+      /* 损坏的本地记忆不阻断恢复 */
+    }
+    return resumeProfile(s)?.models?.[0] ?? null;
   }
 
   /** A2. 复制恢复命令（cc-switch 风格）：粘贴到任意终端即可恢复该会话 */
@@ -245,6 +275,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         agentId: s.agent,
         sessionId: s.sessionId,
         cwd: s.projectPath,
+        profileId: resumeProfile(s)?.id ?? null,
+        model: resumeModel(s),
+        provider: s.provider ?? null,
         baseUrl: resumeBaseUrl(s),
       });
     } catch (e) {
@@ -415,7 +448,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (!openSessionReq) return;
     let cancelled = false;
-    void loadSessions()
+    void loadSessions(true)
       .then((fresh) => {
         if (cancelled) return;
         const hit = fresh.find(
@@ -652,7 +685,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           filePath: s.filePath,
         });
       }
-      const fresh = await loadSessions();
+      const fresh = await loadSessions(true);
       // 头部按钮状态随最新数据刷新
       const cur = selectedRef.current;
       if (cur) {
@@ -677,7 +710,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         tags: s.tags,
         archived: !s.archived,
       });
-      await loadSessions();
+      await loadSessions(true);
     } catch (e) {
       setError(String(e));
     }
@@ -705,7 +738,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         setMessages([]);
         setConversationCursor(null);
       }
-      await loadSessions();
+      await loadSessions(true);
     } catch (e) {
       setError(String(e));
     }
@@ -738,7 +771,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         setMessages([]);
         setConversationCursor(null);
       }
-      await loadSessions();
+      await loadSessions(true);
     } catch (e) {
       setError(String(e));
     }
@@ -803,7 +836,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     }
     setBatchDeleting(false);
     exitSelectMode();
-    await loadSessions();
+    await loadSessions(true);
     if (failed.length > 0)
       setError(
         `已删除 ${targets.length - failed.length} 项，${failed.length} 项失败：${failed.join("、")}`,
@@ -828,7 +861,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         archived: cur?.archived ?? false,
       });
       setEditing(null);
-      await loadSessions();
+      await loadSessions(true);
     } catch (e) {
       setError(String(e));
     }

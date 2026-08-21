@@ -81,15 +81,15 @@ test("captureDecision：冲突拒绝（多冲突方任一命中即拒）/ 正常
   });
 });
 
-test("PAGE_HOTKEY_DEFS：八页、顺序与默认绑定唯一", () => {
-  assert.equal(PAGE_HOTKEY_DEFS.length, 8);
+test("PAGE_HOTKEY_DEFS：九页、顺序与默认绑定唯一", () => {
+  assert.equal(PAGE_HOTKEY_DEFS.length, 9);
   assert.deepEqual(
     PAGE_HOTKEY_DEFS.map((p) => p.id),
-    ["workspaces", "terminal", "sessions", "profiles", "skills", "mcp", "stats", "settings"],
+    ["workbench", "workspaces", "terminal", "sessions", "profiles", "skills", "mcp", "stats", "settings"],
   );
   const combos = PAGE_HOTKEY_DEFS.map((p) => p.combo);
-  assert.equal(new Set(combos).size, 8, "默认绑定不得互相冲突");
-  assert.deepEqual(combos, [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `mod+${n}`));
+  assert.equal(new Set(combos).size, 9, "默认绑定不得互相冲突");
+  assert.deepEqual(combos, [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `mod+${n}`));
 });
 
 
@@ -100,6 +100,6 @@ test("READER_MODE_HOTKEY：⌘E/Ctrl+E 命中，裸 E 与带 Shift 不命中", (
   assert.ok(
     !eventMatchesCombo(ev({ metaKey: true, shiftKey: true, key: "e" }), READER_MODE_HOTKEY),
   );
-  // 不与八页页切绑定（mod+1..8）冲突
+  // 不与九页页切绑定（mod+1..9）冲突
   assert.ok(!PAGE_HOTKEY_DEFS.some((p) => p.combo === READER_MODE_HOTKEY));
 });

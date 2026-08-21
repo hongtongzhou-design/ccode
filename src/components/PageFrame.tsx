@@ -161,13 +161,20 @@ export function EmptyState({
   title,
   detail,
   action,
+  compact = false,
 }: {
   title: string;
   detail?: ReactNode;
   action?: ReactNode;
+  /** 页面内嵌卡片使用的紧凑空态，不改变管理页默认留白。 */
+  compact?: boolean;
 }) {
   return (
-    <div className="flex min-h-48 flex-col items-center justify-center px-6 py-10 text-center">
+    <div
+      className={`flex flex-col items-center justify-center px-6 text-center ${
+        compact ? "min-h-32 py-6" : "min-h-48 py-10"
+      }`}
+    >
       {/* 原来这里有个空心圆图标：它不表达任何东西，纯占位。去掉后标题自然成为视觉起点 */}
       <p className="text-base font-medium text-l1">{title}</p>
       {detail && (

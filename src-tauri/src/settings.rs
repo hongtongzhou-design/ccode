@@ -25,8 +25,8 @@ const KNOWN_THEMES: [&str; 14] = [
 /// 单一出处在前端 `src/terminal-palettes.ts` 的 PALETTE_LIST，此处是持久化白名单，两边须同步
 /// （不在名单里的值会被静默丢弃，表现为「设置页选了调色板但没生效」）。
 /// 启动页白名单（与前端 hotkeys.ts PAGE_HOTKEY_DEFS 同步）
-const KNOWN_PAGES: [&str; 8] = [
-    "workspaces", "terminal", "sessions", "profiles",
+const KNOWN_PAGES: [&str; 9] = [
+    "workbench", "workspaces", "terminal", "sessions", "profiles",
     "skills", "mcp", "stats", "settings",
 ];
 const KNOWN_PALETTES: [&str; 8] = [
@@ -63,7 +63,7 @@ pub struct AppSettingsDto {
     /// 刻意不在 profiles.json 加 `enabled` 布尔：配置是**启动那一刻**注入的，
     /// 没有「全局激活态」，加 enabled 会与注入语义打架、也会和「设为全局」形成两套激活概念。
     pub default_profiles: Option<BTreeMap<String, String>>,
-    /// 启动时进入哪一页（页面 id，同 hotkeys.ts PAGE_HOTKEY_DEFS）；缺省 = workspaces
+    /// 启动时进入哪一页（页面 id，同 hotkeys.ts PAGE_HOTKEY_DEFS）；缺省 = workbench
     pub start_page: Option<String>,
     /// 「隐藏」的 profile id 列表：只影响终端启动栏下拉的分组（沉到「更多」），
     /// **不删数据、不改任何启动行为**——已选中它的标签照常工作，配置页照常列出。
@@ -81,10 +81,10 @@ pub struct AppSettingsDto {
     /// 快捷键绑定（"mod+shift+k" 格式，mod=⌘/Ctrl；空串 = 禁用该快捷键）
     pub hotkey_palette: Option<String>,
     pub hotkey_hide_chrome: Option<String>,
-    /// ⌘1–⌘8 页切整组总开关（关 = 全部页切绑定不生效）
+    /// ⌘1–⌘9 页切整组总开关（关 = 全部页切绑定不生效）
     pub hotkey_page_switch: Option<bool>,
     /// 页切逐页绑定：键 = 页面 id（前端 hotkeys.ts PAGE_HOTKEY_DEFS），值 = 组合串；
-    /// 键缺失 = 该页用默认绑定（mod+1..mod+8），整图覆盖（同 ai_profiles 口径）
+    /// 键缺失 = 该页用默认绑定（mod+1..mod+9），整图覆盖（同 ai_profiles 口径）
     pub hotkey_pages: Option<BTreeMap<String, String>>,
     /// 想法期只读保护（卡片区「聊想法」）：开 = 注入只读/计划模式参数（支持的 CLI）+
     /// 预填指令带不动文件约束；关 = 纯聊天不动参数。卡片区就地开关，设置页不加行

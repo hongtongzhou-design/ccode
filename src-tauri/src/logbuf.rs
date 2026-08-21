@@ -84,6 +84,8 @@ pub fn export_app_log() -> Result<String, String> {
 #[tauri::command]
 pub fn log_event(level: String, source: String, message: String) {
     record(&level, &source, &message);
+    #[cfg(debug_assertions)]
+    eprintln!("[{level}] {source}: {message}");
 }
 
 #[cfg(test)]

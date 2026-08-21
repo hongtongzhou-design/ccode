@@ -20,7 +20,7 @@ function agentLabel(id: string): string {
 /**
  * 「◈ 接力到…」目标选择器（P3 机制四）：从当前会话生成结构化简报落成文件，
  * 新 Agent 带简报启动——是简报接力，不是记忆转移。
- * 已安装且支持启动注入的优先；kimi/opencode 无交互注入参数，标注需手动发送。
+ * 已安装且支持启动注入的优先；目前仅 kimi 无交互注入参数，标注需手动发送。
  */
 export default function HandoffPicker({
   source,
@@ -104,7 +104,7 @@ export default function HandoffPicker({
       if (t.promptSupported) {
         goTerminal(t, prompt);
       } else {
-        // 无交互注入参数（kimi/opencode）：复制简报路径，停留展示提示，由用户确认后前往
+        // 无交互注入参数（目前仅 kimi）：复制简报路径，停留展示提示，由用户确认后前往
         await navigator.clipboard.writeText(brief.filePath).catch(() => {});
         setReady({ target: t, brief, prompt });
         setBusy(null);

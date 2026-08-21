@@ -37,11 +37,11 @@ pub struct HandoffTargetDto {
     pub id: String,
     /// 本机已安装（resolve_binary 命中）
     pub installed: bool,
-    /// 注册表 prompt_inject 非 Unsupported（kimi/opencode 需手动发送首条指令）
+    /// 注册表 prompt_inject 非 Unsupported（目前仅 kimi 需手动发送首条指令）
     pub prompt_supported: bool,
 }
 
-/// 接力目标清单：八 CLI 全量返回，前端按 installed/prompt_supported 排序与标注
+/// 接力目标清单：九 CLI 全量返回，前端按 installed/prompt_supported 排序与标注
 #[tauri::command]
 pub fn handoff_targets() -> Vec<HandoffTargetDto> {
     agent_specs::all_agent_specs()
@@ -941,7 +941,7 @@ mod tests {
         assert_eq!(links[0].from_session_id, "s2");
     }
 
-    /// 接力目标清单覆盖九 CLI，kimi/opencode 标注需手动注入
+    /// 接力目标清单覆盖九 CLI，目前仅 kimi 标注需手动注入
     #[test]
     fn handoff_targets_cover_registry() {
         let targets = handoff_targets();
@@ -951,6 +951,6 @@ mod tests {
             .filter(|t| !t.prompt_supported)
             .map(|t| t.id.as_str())
             .collect();
-        assert_eq!(manual, ["opencode", "kimi"]);
+        assert_eq!(manual, ["kimi"]);
     }
 }

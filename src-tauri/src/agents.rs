@@ -1,6 +1,7 @@
 use crate::agent_specs::{agent_spec, AgentSpec, LaunchSpec, SpecialLaunch};
-use crate::profiles::Profile;
+use crate::profiles::{Profile, ProfileStore};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
@@ -335,7 +336,7 @@ pub fn launch_plan_with_prompt(
             plan.prompt_args.push(flag.into());
             plan.prompt_args.push(prompt.into());
         }
-        // 该 CLI 无交互模式初始 prompt 参数（kimi/opencode）：不注入，让前端提示手动发送
+        // 该 CLI 无交互模式初始 prompt 参数（目前仅 kimi）：不注入，让前端提示手动发送
         Some(crate::agent_specs::PromptInject::Unsupported) | None => {
             plan.prompt_dropped = true;
         }
@@ -663,8 +664,8 @@ fn codex_inline_provider_args(base_url: &str, key_env: &str) -> Vec<String> {
     out
 }
 
-/// 外部恢复命令的附加参数：仅 codex 且调用方给出 Base URL 时补 provider 定义；
-/// 其他 agent 的接入靠环境变量/全局配置，裸 resume 即可
+/// 复制到用户终端的恢复命令附加参数：仅 codex 且调用方给出 Base URL 时补
+/// provider 定义；复制命令本身不携带 Ccode profile 密钥，其他 agent 依赖用户全局配置。
 fn resume_extra_args(agent_id: &str, base_url: Option<&str>) -> Vec<String> {
     match (agent_id, base_url) {
         ("codex", Some(url)) if !url.trim().is_empty() => match agent_spec("codex") {
@@ -677,6 +678,299 @@ fn resume_extra_args(agent_id: &str, base_url: Option<&str>) -> Vec<String> {
             None => vec![],
         },
         _ => vec![],
+    }
+}
+
+/// 外部终端启动的临时包装器：只把明确选中的 profile id/model 这类无敏感元数据从前端传进来，
+/// 缺少 profile id 时 fail-closed，避免多配置场景静默选错端点。密钥由后端从 ProfileStore
+/// 读取后写入一次性 0600 文件。包装器路径本身可以进入
+/// Ghostty 的启动命令，因为路径不含密钥；包装器经 /bin/sh 启动后立即自删，超时兜底清理。
+fn external_profile(
+    store: &ProfileStore,
+    agent_id: &str,
+    profile_id: Option<&str>,
+    provider: Option<&str>,
+    base_url: Option<&str>,
+) -> Result<Profile, String> {
+    let requested_id = require_external_profile_id(profile_id)?;
+    let profiles = store.list()?;
+    let pool: Vec<Profile> = profiles
+        .into_iter()
+        .filter(|p| p.agent == agent_id)
+        .filter(|p| provider != Some("ccode") || p.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some())
+        .collect();
+    if pool.is_empty() {
+        return Err(format!("没有可用于外部启动的 {agent_id} profile"));
+    }
+    let mut profile = pool
+        .into_iter()
+        .find(|p| p.id == requested_id)
+        .ok_or_else(|| format!("profile 不存在或与 {agent_id} 不兼容"))?;
+    // 兼容旧版调用方传入的 baseUrl；新路径优先使用 profile 自身配置。
+    if profile.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+        if let Some(url) = base_url.map(str::trim).filter(|s| !s.is_empty()) {
+            profile.base_url = Some(url.to_string());
+        }
+    }
+    Ok(profile)
+}
+
+fn require_external_profile_id(profile_id: Option<&str>) -> Result<&str, String> {
+    profile_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "外部启动必须指定 Ccode profile，请重新选择配置".to_string())
+}
+
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn sh_script_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn external_wrapper_dir() -> Result<PathBuf, String> {
+    let dir = dirs::config_dir()
+        .ok_or("无法确定平台配置目录")?
+        .join("ccode")
+        .join("external-launch");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建外部启动临时目录失败: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("收紧外部启动临时目录权限失败: {e}"))?;
+    }
+    Ok(dir)
+}
+
+fn schedule_wrapper_cleanup(path: PathBuf) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+#[cfg(unix)]
+fn write_external_wrapper(
+    binary: &str,
+    args: &[String],
+    env: &[(String, String)],
+    env_remove: &[String],
+) -> Result<PathBuf, String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    for (name, _) in env {
+        if !valid_env_name(name) {
+            return Err(format!("profile 附加环境变量名非法: {name}"));
+        }
+    }
+    let dir = external_wrapper_dir()?;
+    let path = dir.join(format!("launch-{}.sh", uuid::Uuid::new_v4()));
+    let mut text = String::from("#!/bin/sh\n\n# Ccode one-shot external launch; remove credentials before exec.\n\n");
+    text.push_str("self=\"$0\"\nrm -f -- \"$self\" 2>/dev/null || :\n");
+    for name in env_remove {
+        if valid_env_name(name) {
+            text.push_str("unset ");
+            text.push_str(name);
+            text.push('\n');
+        }
+    }
+    for (name, value) in env {
+        text.push_str("export ");
+        text.push_str(name);
+        text.push('=');
+        text.push_str(&sh_script_quote(value));
+        text.push('\n');
+    }
+    text.push_str("exec ");
+    text.push_str(&sh_script_quote(binary));
+    for arg in args {
+        text.push(' ');
+        text.push_str(&sh_script_quote(arg));
+    }
+    text.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| format!("创建外部启动包装器失败: {e}"))?;
+    file.write_all(text.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&path);
+            format!("写入外部启动包装器失败: {e}")
+        })?;
+    schedule_wrapper_cleanup(path.clone());
+    Ok(path)
+}
+
+#[cfg(windows)]
+fn write_external_wrapper(
+    binary: &str,
+    args: &[String],
+    env: &[(String, String)],
+    env_remove: &[String],
+) -> Result<PathBuf, String> {
+    // PowerShell 脚本只通过路径传给 cmd/Ghostty，密钥不进入命令行；脚本首行自删。
+    for (name, _) in env {
+        if !valid_env_name(name) {
+            return Err(format!("profile 附加环境变量名非法: {name}"));
+        }
+    }
+    let dir = external_wrapper_dir()?;
+    let path = dir.join(format!("launch-{}.ps1", uuid::Uuid::new_v4()));
+    let mut text = String::from("$self = $PSCommandPath\nRemove-Item -LiteralPath $self -Force -ErrorAction SilentlyContinue\n");
+    for name in env_remove {
+        if valid_env_name(name) {
+            text.push_str("Remove-Item Env:");
+            text.push_str(name);
+            text.push_str(" -ErrorAction SilentlyContinue\n");
+        }
+    }
+    for (name, value) in env {
+        text.push_str("$env:");
+        text.push_str(name);
+        text.push_str(" = ");
+        text.push_str(&format!("'{}'", value.replace('\'', "''")));
+        text.push('\n');
+    }
+    text.push_str("& ");
+    text.push_str(&format!("'{}'", binary.replace('\'', "''")));
+    for arg in args {
+        text.push(' ');
+        text.push_str(&format!("'{}'", arg.replace('\'', "''")));
+    }
+    text.push_str("\nexit $LASTEXITCODE\n");
+    std::fs::write(&path, text).map_err(|e| format!("写入外部启动包装器失败: {e}"))?;
+    schedule_wrapper_cleanup(path.clone());
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn external_wrapper_command(cwd: &str, wrapper: &Path) -> String {
+    let cwd = expand_home_path(cwd);
+    format!(
+        "cd {} && /bin/sh {}",
+        sh_quote_if_needed(&cwd),
+        sh_quote_if_needed(&wrapper.to_string_lossy())
+    )
+}
+
+#[cfg(windows)]
+fn external_wrapper_command(cwd: &str, wrapper: &Path) -> String {
+    let cwd = expand_home_path(cwd);
+    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    format!(
+        "cd /d {} && powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File {}",
+        q(&cwd),
+        q(&wrapper.to_string_lossy())
+    )
+}
+
+/// 外部终端命令交给 shell 前先展开用户输入的家目录缩写。
+/// 不能直接把 `~` 放进单引号，否则 POSIX shell 会按字面目录名处理。
+fn expand_home_path(cwd: &str) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return cwd.to_string();
+    };
+    let trimmed = cwd.trim();
+    if trimmed == "~" {
+        return home.to_string_lossy().into_owned();
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
+        return home.join(rest).to_string_lossy().into_owned();
+    }
+    cwd.to_string()
+}
+
+fn external_launch_args(
+    agent_id: &str,
+    profile: &Profile,
+    key: Option<String>,
+    model: Option<&str>,
+    resume_session_id: Option<&str>,
+    prompt: Option<&str>,
+) -> Result<(Vec<String>, Vec<(String, String)>, Vec<String>), String> {
+    let plan = match prompt {
+        Some(prompt) => launch_plan_with_prompt(profile, key, model, Some(prompt)),
+        None => launch_plan(profile, key, model),
+    };
+    if prompt.is_some() && plan.prompt_dropped {
+        return Err(format!("{agent_id} 不支持启动注入参数，简报指令需启动后手动发送"));
+    }
+    let extra = prepare_launch(profile)?;
+    let mut args = Vec::new();
+    if let Some(session_id) = resume_session_id {
+        let (prepend, resume) = resume_args(agent_id, session_id);
+        if prepend {
+            args.extend(resume.iter().cloned());
+        }
+        args.extend(plan.args);
+        args.extend(extra);
+        if !prepend {
+            args.extend(resume);
+        }
+    } else {
+        args.extend(plan.args);
+        args.extend(extra);
+        // 与内嵌启动保持同一会话归属语义：支持固定 session id 的 CLI
+        //（Claude/Qwen/CodeBuddy）在外部提炼接力时也锁定本次新会话文件名。
+        // 必须放在首条 prompt 之前，避免位置参数 CLI 把它误当成用户指令。
+        if agent_spec(agent_id).is_some_and(|spec| spec.fixed_session_id) {
+            args.push("--session-id".into());
+            args.push(uuid::Uuid::new_v4().to_string());
+        }
+        args.extend(plan.prompt_args);
+    }
+    Ok((args, plan.env, plan.env_remove))
+}
+
+fn open_external_profiled(
+    store: &ProfileStore,
+    agent_id: &str,
+    profile_id: Option<&str>,
+    provider: Option<&str>,
+    base_url: Option<&str>,
+    model: Option<&str>,
+    cwd: &str,
+    resume_session_id: Option<&str>,
+    prompt: Option<&str>,
+) -> Result<(), String> {
+    let profile = external_profile(store, agent_id, profile_id, provider, base_url)?;
+    let selected_model = model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .or_else(|| profile.models.first().map(String::as_str));
+    let key = crate::profiles::get_key(&profile.id)?;
+    let (args, env, env_remove) = external_launch_args(
+        agent_id,
+        &profile,
+        key,
+        selected_model,
+        resume_session_id,
+        prompt,
+    )?;
+    let binary = resolve_binary(binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?)
+        .ok_or_else(|| format!("未找到 {agent_id} 的 CLI 二进制"))?;
+    let wrapper = write_external_wrapper(&binary.to_string_lossy(), &args, &env, &env_remove)?;
+    let pref = crate::settings::read_current()
+        .external_terminal
+        .unwrap_or_else(|| "auto".into());
+    let cmd = external_wrapper_command(cwd, &wrapper);
+    match open_external_terminal(&cmd, &pref, cwd, &wrapper) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&wrapper);
+            Err(e)
+        }
     }
 }
 
@@ -769,37 +1063,35 @@ pub fn session_resume_command(
     resume_command_line_with(agent_id, session_id, cwd, binary, &extra)
 }
 
-/// 在外部终端应用中恢复会话（macOS: Ghostty → iTerm → Terminal.app；Windows: cmd 新窗口；
-/// Linux: 常见终端模拟器）。终端选择读设置页「外部终端」，auto = 上述优先级探测。
-/// 二进制用绝对路径：外部 shell 是非交互启动时可能不加载 .zshrc/.bashrc（kimi 这类
-/// 官方安装器目录只写在交互 rc 里），裸命令名会 command not found
+/// 在外部终端应用中恢复会话。profile、模型、provider 与 CLI 参数由后端复用
+/// launch_plan 生成；密钥只写入一次性 0600 wrapper，绝不进入 argv/剪贴板/前端 payload。
 #[tauri::command]
 pub fn resume_external_terminal(
+    store: tauri::State<'_, ProfileStore>,
     agent_id: &str,
     session_id: &str,
     cwd: &str,
+    profile_id: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
     base_url: Option<String>,
 ) -> Result<(), String> {
-    let pref = crate::settings::read_current()
-        .external_terminal
-        .unwrap_or_else(|| "auto".into());
-    let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
-    let binary = resolve_binary(binary)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| binary.into());
-    // codex 内联 provider 会话必须带 provider 定义（同 session_resume_command 口径）
-    let extra = resume_extra_args(agent_id, base_url.as_deref());
-    // Windows 直接生成 cmd 方言（POSIX 串解析无法正确还原引号转义）
-    #[cfg(target_os = "windows")]
-    let cmd = windows_resume_command_line(agent_id, session_id, cwd, &binary, &extra)?;
-    #[cfg(not(target_os = "windows"))]
-    let cmd = resume_command_line_with(agent_id, session_id, cwd, &binary, &extra)?;
-    open_external_terminal(&cmd, &pref)
+    open_external_profiled(
+        &store,
+        agent_id,
+        profile_id.as_deref(),
+        provider.as_deref(),
+        base_url.as_deref(),
+        model.as_deref(),
+        cwd,
+        Some(session_id),
+        None,
+    )
 }
 
 /// 「◈ 提炼接力」外部续作命令行：cd 到项目目录 + 新会话首条指令（读简报续作，非 resume）。
 /// 注入形态读注册表 prompt_inject：Positional → 位置参数，Flag → `-i '<prompt>'`；
-/// Unsupported（kimi/opencode）报错，由前端改为复制指令文本。
+/// Unsupported（目前仅 kimi）报错，由前端改为复制指令文本。
 /// 与 resume 命令同一口径：不带 profile env，外部用的是用户全局配置。
 fn digest_command_line_with(agent_id: &str, cwd: &str, prompt: &str, binary: &str) -> Result<String, String> {
     let mut cmd = format!(
@@ -860,39 +1152,46 @@ pub fn session_digest_command(agent_id: &str, cwd: &str, prompt: &str) -> Result
     digest_command_line_with(agent_id, cwd, prompt, binary)
 }
 
-/// 在外部终端应用中以「读简报续作」开新会话（终端偏好探测同 resume_external_terminal；
-/// 二进制用绝对路径：外部 shell 非交互启动可能不加载 rc）
+/// 在外部终端应用中以「读简报续作」开新会话；使用与内嵌启动相同的 profile 注入计划。
 #[tauri::command]
-pub fn digest_external_terminal(agent_id: &str, cwd: &str, prompt: &str) -> Result<(), String> {
-    let pref = crate::settings::read_current()
-        .external_terminal
-        .unwrap_or_else(|| "auto".into());
-    let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
-    let binary = resolve_binary(binary)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| binary.into());
-    #[cfg(target_os = "windows")]
-    let cmd = windows_digest_command_line(agent_id, cwd, prompt, &binary)?;
-    #[cfg(not(target_os = "windows"))]
-    let cmd = digest_command_line_with(agent_id, cwd, prompt, &binary)?;
-    open_external_terminal(&cmd, &pref)
+pub fn digest_external_terminal(
+    store: tauri::State<'_, ProfileStore>,
+    agent_id: &str,
+    cwd: &str,
+    prompt: &str,
+    profile_id: Option<String>,
+    model: Option<String>,
+) -> Result<(), String> {
+    open_external_profiled(
+        &store,
+        agent_id,
+        profile_id.as_deref(),
+        None,
+        None,
+        model.as_deref(),
+        cwd,
+        None,
+        Some(prompt),
+    )
 }
 
 #[cfg(target_os = "macos")]
-fn open_external_terminal(cmd: &str, pref: &str) -> Result<(), String> {
+fn open_external_terminal(cmd: &str, pref: &str, cwd: &str, wrapper: &Path) -> Result<(), String> {
     match pref {
-        "ghostty" => open_ghostty(cmd),
+        "ghostty" => open_ghostty(cmd, cwd, wrapper),
         "iterm" => open_iterm(cmd),
         "terminal" => open_terminal_app(cmd),
         // auto：Ghostty → iTerm → Terminal.app
-        _ if std::path::Path::new("/Applications/Ghostty.app").exists() => open_ghostty(cmd),
+        _ if std::path::Path::new("/Applications/Ghostty.app").exists() => {
+            open_ghostty(cmd, cwd, wrapper)
+        }
         _ if std::path::Path::new("/Applications/iTerm.app").exists() => open_iterm(cmd),
         _ => open_terminal_app(cmd),
     }
 }
 
 #[cfg(target_os = "macos")]
-fn open_ghostty(cmd: &str) -> Result<(), String> {
+fn open_ghostty(cmd: &str, cwd: &str, wrapper: &Path) -> Result<(), String> {
     if !std::path::Path::new("/Applications/Ghostty.app").exists() {
         return Err("未安装 Ghostty（设置页改选其他终端）".into());
     }
@@ -911,56 +1210,40 @@ fn open_ghostty(cmd: &str) -> Result<(), String> {
             "Ghostty",
         );
     }
-    // 已运行：open -n 会再开新实例（程序坞每点一次多一个图标），且 open 对运行中的实例
-    // 不投递 --args（实测）——改走 AppleScript：激活 → ⌘N 开新窗 → 剪贴板粘贴命令
-    // （keystroke 逐字输入对中文路径/键盘布局不可靠，故走剪贴板，用后还原）。
-    // 剪贴板读取用 try 容错（图片等非文本内容 as string 会抛错）；主体包在 try/on error
-    // 里，中途失败（如「控制 System Events」未授权）也先还原剪贴板再原样报错
-    let escaped = applescript_escape(cmd);
+    // 已运行：使用 Ghostty 自带 AppleScript 字典直接创建带 command 的窗口。
+    // 旧实现通过 System Events 模拟 ⌘N/⌘V/回车：辅助功能权限或脚本任一步失败时，
+    // 命令可能已经贴进终端但 wrapper 随错误返回被删除，最终变成「No such file」。
+    // 原生 new surface configuration 不需要控制 System Events，也不经过剪贴板。
+    // Ghostty 的 command 字段会自动包装成 `exec -l <command>`，所以不能传
+    // `cd ... && ...`；否则会变成 `exec -l cd ...`。另外，command 字段对带空格
+    // 的 shell 命令路径（本机 wrapper 位于 `Application Support`）不会可靠保留
+    // POSIX 引号。让 Ghostty 先启动 /bin/sh，再通过 initial input 交给 shell
+    // 解析一次路径，避免出现“wrapper 不存在”的假错误。
+    let initial_working_directory = expand_home_path(cwd);
+    let initial_input = format!(
+        "exec /bin/sh {}\n",
+        sh_quote_if_needed(&wrapper.to_string_lossy())
+    );
+    let escaped_cwd = applescript_escape(&initial_working_directory);
+    let escaped_input = applescript_escape(&initial_input);
     spawn_status(
         Command::new("osascript").args([
             "-e",
-            "set oldClip to \"\"",
+            "tell application \"Ghostty\"",
             "-e",
-            "try",
+            "set cfg to new surface configuration",
             "-e",
-            "set oldClip to the clipboard as string",
+            &format!("set initial working directory of cfg to \"{escaped_cwd}\""),
             "-e",
-            "end try",
+            "set command of cfg to \"/bin/sh\"",
             "-e",
-            "set errMsg to \"\"",
+            &format!("set initial input of cfg to \"{escaped_input}\""),
             "-e",
-            "try",
+            "new window with configuration cfg",
             "-e",
-            &format!("set the clipboard to \"{escaped}\""),
+            "activate",
             "-e",
-            "tell application \"Ghostty\" to activate",
-            "-e",
-            "delay 0.3",
-            "-e",
-            "tell application \"System Events\" to keystroke \"n\" using command down",
-            "-e",
-            "delay 0.4",
-            "-e",
-            "tell application \"System Events\" to keystroke \"v\" using command down",
-            "-e",
-            "delay 0.2",
-            "-e",
-            "tell application \"System Events\" to key code 36",
-            "-e",
-            "delay 0.2",
-            "-e",
-            "on error errMsg",
-            "-e",
-            "end try",
-            "-e",
-            "try",
-            "-e",
-            "set the clipboard to oldClip",
-            "-e",
-            "end try",
-            "-e",
-            "if errMsg is not \"\" then error errMsg",
+            "end tell",
         ]),
         "Ghostty",
     )
@@ -1024,7 +1307,7 @@ fn spawn_status(cmd: &mut Command, what: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn open_external_terminal(cmd: &str, _pref: &str) -> Result<(), String> {
+fn open_external_terminal(cmd: &str, _pref: &str, _cwd: &str, _wrapper: &Path) -> Result<(), String> {
     // cmd 已是 cmd.exe 方言（windows_resume_command_line 生成）；
     // start 开新窗口；/K 让窗口在 agent 退出后保留；内层引号 doubling 是 cmd 的转义方式
     let inner = cmd.replace('"', "\"\"");
@@ -1036,7 +1319,7 @@ fn open_external_terminal(cmd: &str, _pref: &str) -> Result<(), String> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn open_external_terminal(cmd: &str, pref: &str) -> Result<(), String> {
+fn open_external_terminal(cmd: &str, pref: &str, _cwd: &str, _wrapper: &Path) -> Result<(), String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     // auto 按优先级探测；显式选择只试指定终端，未装则报错（设置页可改选）
     let candidates: Vec<&str> = match pref {
@@ -1838,13 +2121,16 @@ mod tests {
 
     #[test]
     fn prompt_inject_unsupported_marks_dropped() {
-        // kimi/opencode 无交互模式初始 prompt 参数（-p 是非交互模式，禁用）：不注入 + 标记
-        for agent in ["kimi", "opencode"] {
-            let p = profile(agent, None);
-            let plan = launch_plan_with_prompt(&p, None, None, Some("开工"));
-            assert!(plan.prompt_args.is_empty(), "{agent} 不得注入");
-            assert!(plan.prompt_dropped, "{agent} 应置 dropped 标记");
-        }
+        // kimi 没有可用于交互新会话的初始 prompt 参数：不注入 + 标记。
+        let p = profile("kimi", None);
+        let plan = launch_plan_with_prompt(&p, None, None, Some("开工"));
+        assert!(plan.prompt_args.is_empty(), "kimi 不得注入");
+        assert!(plan.prompt_dropped, "kimi 应置 dropped 标记");
+        // OpenCode 1.18.x 的 --prompt 是交互会话可用的显式参数。
+        let p = profile("opencode", None);
+        let plan = launch_plan_with_prompt(&p, None, None, Some("开工"));
+        assert_eq!(plan.prompt_args, vec!["--prompt", "开工"]);
+        assert!(!plan.prompt_dropped);
         // 未知 agent：无从注入，同样标记
         let p = profile("no-such-agent", None);
         let plan = launch_plan_with_prompt(&p, None, None, Some("开工"));
@@ -2497,9 +2783,12 @@ mod tests {
             digest_command_line_with("gemini", "/tmp/proj", prompt, "gemini").unwrap(),
             format!("cd /tmp/proj && gemini -i '{prompt}'")
         );
-        // Unsupported（kimi/opencode）与未知 agent 报错
+        // Unsupported（kimi）与未知 agent 报错；OpenCode 1.18.x 已支持 --prompt
         assert!(digest_command_line_with("kimi", "/tmp/proj", prompt, "kimi").is_err());
-        assert!(digest_command_line_with("opencode", "/tmp/proj", prompt, "opencode").is_err());
+        assert_eq!(
+            digest_command_line_with("opencode", "/tmp/proj", prompt, "opencode").unwrap(),
+            format!("cd /tmp/proj && opencode --prompt '{prompt}'")
+        );
         assert!(digest_command_line_with("no-such", "/tmp", prompt, "x").is_err());
         // cwd 与绝对路径二进制的转义（同 resume 口径）
         assert_eq!(
@@ -2509,6 +2798,89 @@ mod tests {
         // prompt 内嵌单引号 → POSIX 转义
         let quoted = digest_command_line_with("claude-code", "/tmp", "读 it's 简报", "claude").unwrap();
         assert_eq!(quoted, "cd /tmp && claude '读 it'\\''s 简报'");
+    }
+
+    #[test]
+    fn external_plan_reuses_profile_injections_without_putting_key_in_args() {
+        let mut p = profile("codex", Some("https://relay.example.com/v1"));
+        p.models = vec!["deepseek-v4".into()];
+        let (args, env, _) = external_launch_args(
+            "codex",
+            &p,
+            Some("sk-secret".into()),
+            Some("deepseek-v4"),
+            Some("session-1"),
+            None,
+        )
+        .unwrap();
+        assert!(args.iter().any(|a| a == "model_provider=\"ccode\""));
+        assert!(args.iter().any(|a| a == "deepseek-v4"));
+        assert!(env.iter().any(|(k, v)| k == "CODEX_API_KEY" && v == "sk-secret"));
+        assert!(!args.iter().any(|a| a.contains("sk-secret")));
+    }
+
+    #[test]
+    fn external_launch_requires_an_explicit_profile_id() {
+        assert!(require_external_profile_id(None).is_err());
+        assert!(require_external_profile_id(Some("  ")).is_err());
+        assert_eq!(require_external_profile_id(Some(" p1 ")).unwrap(), "p1");
+    }
+
+    #[test]
+    fn external_digest_locks_fixed_session_agents_to_a_new_session_id() {
+        let mut p = profile("claude-code", Some("https://relay.example.com"));
+        p.models = vec!["sonnet-custom".into()];
+        let (args, _, _) = external_launch_args(
+            "claude-code",
+            &p,
+            Some("sk-secret".into()),
+            Some("sonnet-custom"),
+            None,
+            Some("读取简报继续"),
+        )
+        .unwrap();
+        let pos = args.iter().position(|a| a == "--session-id").unwrap();
+        assert!(!args[pos + 1].is_empty());
+        assert_eq!(args.last().map(String::as_str), Some("读取简报继续"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_wrapper_is_private_and_contains_no_secret_in_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let wrapper = write_external_wrapper(
+            "/bin/echo",
+            &["hello world".into()],
+            &[("CCODE_TEST_SECRET".into(), "sk-secret".into())],
+            &["NO_COLOR".into()],
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&wrapper).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!wrapper.to_string_lossy().contains("sk-secret"));
+        let body = std::fs::read_to_string(&wrapper).unwrap();
+        assert!(body.contains("CCODE_TEST_SECRET='sk-secret'"));
+        assert!(body.contains("exec '/bin/echo' 'hello world'"));
+        let _ = std::fs::remove_file(wrapper);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_wrapper_executes_and_removes_itself_before_agent_start() {
+        let wrapper = write_external_wrapper(
+            "/usr/bin/printf",
+            &["%s".into(), "ok".into()],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let out = std::process::Command::new("/bin/sh")
+            .arg(&wrapper)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "ok");
+        assert!(!wrapper.exists());
     }
 
     #[cfg(windows)]
@@ -2569,6 +2941,27 @@ mod tests {
     fn sh_quote_if_needed_escapes_single_quote() {
         assert_eq!(sh_quote_if_needed("plain-1.x"), "plain-1.x");
         assert_eq!(sh_quote_if_needed("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn expand_home_path_resolves_tilde_before_shell_quoting() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_home_path("~"), home.to_string_lossy());
+        assert_eq!(
+            expand_home_path("~/Ccode project"),
+            home.join("Ccode project").to_string_lossy()
+        );
+        assert_eq!(expand_home_path("/tmp/project"), "/tmp/project");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_wrapper_command_does_not_single_quote_tilde() {
+        let wrapper = Path::new("/tmp/ccode-wrapper.sh");
+        let cmd = external_wrapper_command("~/Ccode project", wrapper);
+        assert!(cmd.starts_with("cd "));
+        assert!(!cmd.contains("cd '~"));
+        assert!(cmd.contains("Ccode project"));
     }
 
     #[cfg(target_os = "macos")]

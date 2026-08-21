@@ -146,7 +146,7 @@ pub enum ModelSwitch {
 
 /// 交互模式初始 prompt 的注入形态（一键开步首条指令）。
 /// 各 CLI 传参方式本机 --help 已核实：claude/codex 吃位置参数，gemini/qwen 用 -i
-///（--prompt-interactive，执行后继续交互）；kimi/opencode 无此参数——不得用 -p
+///（--prompt-interactive，执行后继续交互）；kimi 无此参数——不得用 -p
 ///（那是非交互模式），填 Unsupported 让注入方跳过并提示用户手动发送。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PromptInject {
@@ -154,7 +154,7 @@ pub enum PromptInject {
     Positional,
     /// 以 flag 传参（gemini/qwen：-i <prompt>）
     Flag(&'static str),
-    /// 该 CLI 没有交互模式初始 prompt 参数（kimi/opencode）
+    /// 该 CLI 没有交互模式初始 prompt 参数（目前仅 kimi）
     Unsupported,
 }
 
@@ -518,7 +518,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             config_env: "OPENCODE_CONFIG_CONTENT",
             no_autoupdate_env: "OPENCODE_DISABLE_AUTOUPDATE",
         }),
-        prompt_inject: PromptInject::Unsupported,
+        // opencode 1.18.x exposes a top-level `--prompt` option for starting
+        // an interactive session with an initial prompt.
+        prompt_inject: PromptInject::Flag("--prompt"),
         readonly_args: &[],
         fixed_session_id: false,
         resume: ResumeSpec { prepend: false, args: &["--session", "{session}"] },

@@ -138,7 +138,7 @@ export interface SessionMetaDto {
 export interface HandoffTargetDto {
   id: string;
   installed: boolean;
-  /** false（kimi/opencode）= 无交互注入参数，简报路径需手动发送 */
+  /** false（目前仅 kimi）= 无交互注入参数，简报路径需手动发送 */
   promptSupported: boolean;
 }
 

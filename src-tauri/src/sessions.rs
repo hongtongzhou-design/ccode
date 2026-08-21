@@ -1124,6 +1124,22 @@ fn gemini_file_meta(
     })
 }
 
+/// Gemini 偶尔会为同一个 sessionId 留下多个 chats/*.jsonl（例如重启/恢复时重写启动记录）。
+/// 会话主键在 Ccode 中是 agent + session_id，因此列表只能保留最新落盘文件作为代表。
+fn dedupe_gemini_sessions(metas: Vec<SessionMetaDto>) -> Vec<SessionMetaDto> {
+    let mut latest: HashMap<String, SessionMetaDto> = HashMap::new();
+    for meta in metas {
+        let replace = latest.get(&meta.session_id).is_none_or(|current| {
+            meta.updated_at > current.updated_at
+                || (meta.updated_at == current.updated_at && meta.file_path > current.file_path)
+        });
+        if replace {
+            latest.insert(meta.session_id.clone(), meta);
+        }
+    }
+    latest.into_values().collect()
+}
+
 fn parse_gemini(lines: &[String]) -> Vec<ChatMessageDto> {
     let mut msgs: Vec<ChatMessageDto> = Vec::new();
     let mut ids: Vec<Option<String>> = Vec::new(); // 与 msgs 平行，供 $rewindTo 定位
@@ -3055,11 +3071,13 @@ pub fn scan_sessions() -> ScanResult {
         // 旧版单 JSON .json 文件不匹配 .jsonl 后缀，自然跳过（如需兼容再单开解析器）
         let mut gemini_files = Vec::new();
         collect_files(&home.join(".gemini").join("tmp"), 3, &mut gemini_files);
+        let mut gemini_metas = Vec::new();
         for f in gemini_files {
             if let Some(m) = gemini_file_meta(&f, true, &gemini_map) {
-                out.push(m);
+                gemini_metas.push(m);
             }
         }
+        out.extend(dedupe_gemini_sessions(gemini_metas));
         // Qwen：深度 4 覆盖 chats/archive/；archive 目录下的是归档（alive 但 archived）
         let mut qwen_files = Vec::new();
         collect_files(&home.join(".qwen").join("projects"), 4, &mut qwen_files);
@@ -6043,6 +6061,33 @@ mod tests {
         std::fs::write(&file2, r#"{"sessionId":"g2","startTime":"t"}"#).unwrap();
         assert!(gemini_file_meta(&file2, true, &HashMap::new()).is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gemini_duplicate_files_collapse_by_session_id() {
+        let older = claim_test_session(
+            "gemini",
+            "same-session",
+            "/tmp/project",
+            "2026-08-21T07:00:00Z",
+        );
+        let newer = claim_test_session(
+            "gemini",
+            "same-session",
+            "/tmp/project",
+            "2026-08-21T07:04:00Z",
+        );
+        let mut out = dedupe_gemini_sessions(vec![newer, older]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.pop().unwrap().updated_at.as_deref(), Some("2026-08-21T07:04:00Z"));
+
+        let different = claim_test_session(
+            "gemini",
+            "different-session",
+            "/tmp/project",
+            "2026-08-21T07:05:00Z",
+        );
+        assert_eq!(dedupe_gemini_sessions(vec![different]).len(), 1);
     }
 
     // ===== Qwen =====

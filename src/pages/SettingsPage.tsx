@@ -941,7 +941,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         <Row label="启动时进入" hint="下次启动生效">
           <select
             className={fieldFixed + " w-32"}
-            value={settings?.startPage ?? "workspaces"}
+            value={settings?.startPage ?? "workbench"}
             onChange={(e) => patch({ startPage: e.target.value })}
           >
             {PAGE_HOTKEY_DEFS.map((p) => (
@@ -958,7 +958,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         open={!collapsed.hotkeys}
         onToggle={() => toggleSection("hotkeys")}
       >
-        {/* 全部在用的绑定（命令面板/侧栏/八页切），供各行录制时互判冲突 */}
+        {/* 全部在用的绑定（命令面板/侧栏/九页切），供各行录制时互判冲突 */}
         {(() => {
           const palette = settings?.hotkeyPalette ?? "mod+k";
           const chrome = settings?.hotkeyHideChrome ?? "mod+\\";
@@ -987,7 +987,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               </Row>
               <Row
                 label="页面切换"
-                hint="整组总开关；关闭后下面八个绑定全部不生效"
+                hint="整组总开关；关闭后下面九个绑定全部不生效"
               >
                 <Toggle
                   checked={settings?.hotkeyPageSwitch !== false}
@@ -997,7 +997,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               </Row>
               <Row
                 label="逐页绑定"
-                hint="按侧栏顺序直接切页；点击绑定钮录制新组合（默认 ⌘1–⌘8）"
+                hint="按侧栏顺序直接切页；点击绑定钮录制新组合（默认 ⌘1–⌘9）"
               >
                 <div className="grid max-w-xl grid-cols-2 gap-x-4 gap-y-1.5">
                   {PAGE_HOTKEY_DEFS.map((p) => (

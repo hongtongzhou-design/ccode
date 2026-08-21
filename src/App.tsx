@@ -19,6 +19,7 @@ import QuickChatModal, {
 import QuickChatHistoryMenu from "./components/QuickChatHistoryMenu";
 import { pickQuickChatSessions } from "./quick-chat";
 import { ConfirmDialogHost } from "./components/ConfirmDialog";
+import { HoverTip, useHoverTip } from "./components/HoverTip";
 import { LoadingRows, rowActionClass } from "./components/PageFrame";
 import "./App.css";
 import { useAppStore, runInboxAction } from "./store";
@@ -41,6 +42,7 @@ const SkillsPage = lazy(() => import("./pages/SkillsPage"));
 const StatsPage = lazy(() => import("./pages/StatsPage"));
 const TerminalPage = lazy(() => import("./pages/TerminalPage"));
 const WorkspacesPage = lazy(() => import("./pages/WorkspacesPage"));
+const WorkbenchPage = lazy(() => import("./pages/WorkbenchPage"));
 
 function PageLoading() {
   return (
@@ -50,28 +52,58 @@ function PageLoading() {
   );
 }
 
+/** 侧栏收起态的应用内 tooltip：展开态已有文字，不再重复弹提示。 */
+function RailTooltip({
+  label,
+  collapsed,
+  children,
+}: {
+  label: string;
+  collapsed: boolean;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const { tip, show, hide } = useHoverTip(ref, false, true);
+  return (
+    <span
+      ref={ref}
+      className="block"
+      onMouseEnter={collapsed ? show : undefined}
+      onMouseLeave={collapsed ? hide : undefined}
+      onFocus={collapsed ? show : undefined}
+      onBlur={collapsed ? hide : undefined}
+    >
+      {children}
+      {collapsed && <HoverTip tip={tip} text={label} side />}
+    </span>
+  );
+}
+
 const NAV_GROUPS = [
   {
     label: "工作",
     items: [
+      { id: "workbench", label: "工作台", icon: "⌂" },
       { id: "workspaces", label: "项目", icon: "⛁" },
-      { id: "terminal", label: "终端", icon: "⌨" },
+      { id: "terminal", label: "运行", icon: "⌨" },
       { id: "sessions", label: "对话", icon: "◔" },
     ],
   },
   {
-    label: "能力",
+    label: "资源",
     items: [
-      { id: "profiles", label: "配置", icon: "⇄" },
+      { id: "profiles", label: "连接", icon: "⇄" },
       { id: "skills", label: "技能", icon: "✦" },
       { id: "mcp", label: "MCP", icon: "⌗" },
-      { id: "stats", label: "统计", icon: "◫" },
     ],
   },
 ] as const;
 
-// 底部管理区只保留设置（统计归入「能力」组）
-const NAV_BOTTOM = [{ id: "settings", label: "设置", icon: "⛭" }] as const;
+// 低频管理区与主路径分开：用量和设置都不抢工作流注意力。
+const NAV_BOTTOM = [
+  { id: "stats", label: "用量", icon: "◫" },
+  { id: "settings", label: "设置", icon: "⛭" },
+] as const;
 
 /** 路径末段作项目名（通知标题用；与 WorkspacesPage pathBaseName 同口径） */
 function baseName(path: string): string {
@@ -129,8 +161,11 @@ function App() {
       }
     })();
   }
-  // 终端里运行中的 agent 数（任意页面可见，徽标挂在「终端」图标上）
+  // 运行状态镜像（任意页面可见）：顶栏显示总数，侧栏只在运行页显示提示。
+  const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
   const runningCount = useAppStore((s) => Object.keys(s.liveSessions).length);
+  const visibleRunningCount = terminalRunInputs.filter((input) => input.running)
+    .length || runningCount;
   // 「待你处理」收件箱条目镜像（WorkspacesPage 写入）：侧栏圆点计数 + macOS 标题栏收件箱共用
   const inboxItems = useAppStore((s) => s.inboxItems);
   const inboxCount = inboxItems.length;
@@ -175,10 +210,10 @@ function App() {
   // 侧栏收展完全由用户手动控制（品牌区点击）；曾有的按页面自动收展被用户否决（v3.43）
 
   // 全局快捷键（设置页可自定义，存 settings.json）：命令面板（默认 ⌘K）、
-  // 隐藏/显示侧栏（默认 ⌘\）、页切逐页绑定（默认 ⌘1–⌘8，hotkeyPages 按页覆盖 + 整组总开关）。
+  // 隐藏/显示侧栏（默认 ⌘\）、页切逐页绑定（默认 ⌘1–⌘9，hotkeyPages 按页覆盖 + 整组总开关）。
   // 空串 = 禁用；⌘F 已被终端搜索占用故不用。
   const settings = useAppStore((s) => s.settings);
-  // 侧栏底部 ⌘K 常驻入口的键位标签：跟随设置页自定义绑定；禁用（空串）时回落默认展示
+  // 顶栏命令面板入口的键位标签：跟随设置页自定义绑定；禁用（空串）时回落默认展示
   const paletteComboLabel = comboLabel(settings?.hotkeyPalette || "mod+k");
   useEffect(() => {
     const paletteCombo = settings?.hotkeyPalette ?? "mod+k";
@@ -196,7 +231,7 @@ function App() {
         toggleChromeHidden();
         return;
       }
-      // 页切：逐页绑定（缺省回落默认 mod+1..8），冲突由设置页录制时拒绝兜底
+      // 页切：逐页绑定（缺省回落默认 mod+1..9），冲突由设置页录制时拒绝兜底
       if (pageSwitchOn) {
         const hit = PAGE_HOTKEY_DEFS.find((p) =>
           eventMatchesCombo(e, settings?.hotkeyPages?.[p.id] ?? p.combo),
@@ -344,23 +379,19 @@ function App() {
         {/* macOS 自绘标题栏（titleBarStyle: Overlay + hiddenTitle）：纯拖拽区 +
             Ghostty 式标题栏收件箱（按类别拆胶囊，点胶囊向下展开该类明细，遮罩/Esc/再点关闭）。
             窗口标题不在界面渲染（用户拍板删除，标题字符串仍保留在 tauri 配置里供自动化定位窗口）。
-            Windows/Linux 用原生标题栏，收件箱保留在工作区页内 strip。
+            Windows/Linux 用原生标题栏；客户端上下文栏仍统一承载项目、运行、命令面板与收件箱。
             执行态（chromeHidden）下也必须保留这条栏：Overlay 模式下红绿灯按钮始终悬浮在
             左上角，栏的 pl-[78px] 负责让位；整条隐藏会导致按钮压住页面内容、胶囊消失。
             执行态只省略底部分隔线，栏体保留以承接红绿灯与收件箱胶囊。 */}
-        {IS_MAC && (
-          <header
-            data-tauri-drag-region
-            className={`flex h-10 shrink-0 items-center gap-2.5 bg-rail pl-[78px] pr-3 ${
-              chromeHidden ? "" : "border-b border-hairline"
-            }`}
-          >
-            {/* 全局上下文栏（v3.88）：这条栏在 macOS 上因 Overlay 模式恒占 40px 且不可省
-                （红绿灯要靠 pl-[78px] 让位），此前只在有收件箱条目时才有内容、其余时间纯浪费。
+        <header
+          data-tauri-drag-region={IS_MAC ? true : undefined}
+          className={`flex h-10 shrink-0 items-center gap-2.5 bg-rail pr-3 ${
+            IS_MAC ? "pl-[78px]" : "pl-3"
+          } ${chromeHidden ? "" : "border-b border-hairline"}`}
+        >
+            {/* 全局上下文栏：macOS Overlay 与 Windows/Linux 原生标题栏都承载。
                 左=我在哪、右=在跑什么 + 等我处理什么。
-                （中间曾放过 ⌘K 假输入框，用户否决：顶栏摆输入框不好看；命令面板入口
-                仍在侧栏底部 + ⌘K 快捷键，不另设第二处。）
-                与 v3.38「否决全局顶栏」不冲突：那条否决的是新增垂直占用，这里是利用既有空间。
+                命令面板只保留这里一个可见入口，输入框仍只在面板打开后出现。
                 执行态（⌘\）下左中两段隐藏，只留红绿灯让位与收件箱胶囊。 */}
             {!chromeHidden && (
               <>
@@ -385,24 +416,37 @@ function App() {
                     </>
                   )}
                 </button>
-                {runningCount > 0 && (
+                {visibleRunningCount > 0 && (
                   <button
                     type="button"
                     onClick={() => setPage("terminal")}
-                    title={`${runningCount} 个 agent 正在运行（点击去终端）`}
+                    title={`${visibleRunningCount} 个 agent 正在运行（点击去运行）`}
                     className="flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
                   >
                     <span className="text-l4">⑂</span>
-                    {runningCount} 运行中
+                    {visibleRunningCount} 运行中
                   </button>
                 )}
-                <span className="ml-auto" />
               </>
             )}
-            {inboxGroups.length > 0 && (
-              <div className="relative flex items-center gap-1.5">
-                {inboxGroups.map((group) => (
-                  <div key={group.category} className="relative">
+            <div className="ml-auto flex min-w-0 items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setPaletteOpen(true)}
+                title={`打开命令面板（${paletteComboLabel}）`}
+                aria-label="打开命令面板"
+                className="flex h-6 items-center gap-1.5 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
+              >
+                <span className="font-mono">{paletteComboLabel}</span>
+                <span className="hidden sm:inline">命令面板</span>
+              </button>
+              {inboxGroups.length > 0 && (
+                <div className="relative flex items-center gap-1.5">
+                  <span className="shrink-0 text-micro text-l4">
+                    待处理 {inboxCount}
+                  </span>
+                  {inboxGroups.map((group) => (
+                    <div key={group.category} className="relative">
                     <button
                       type="button"
                       onClick={() =>
@@ -411,7 +455,7 @@ function App() {
                         )
                       }
                       aria-expanded={titleInboxCat === group.category}
-                      className="flex h-6 items-center gap-1.5 rounded-full border border-field bg-strip px-2.5 text-micro text-l2 hover:bg-hover"
+                      className="flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-field bg-strip px-2.5 text-micro text-l2 hover:bg-hover"
                     >
                       <span
                         className={`size-1.5 shrink-0 rounded-full ${group.items[0].dot}`}
@@ -424,11 +468,11 @@ function App() {
                     {titleInboxCat === group.category && (
                       // 右缘锚定（right-0）：胶囊在标题栏右侧（ml-auto 后），left-0 向右展开
                       // 420px 会超出视口右缘被窗口裁掉（v3.94 截图反馈）；向左展开永不越界
-                      <ul className="absolute right-0 top-full z-40 mt-1.5 max-h-80 w-[420px] max-w-[80vw] divide-y divide-hairline overflow-auto rounded-md border border-field ccode-float-surface">
+                      <ul className="absolute right-0 top-full z-40 mt-1.5 max-h-80 w-[360px] max-w-[80vw] space-y-0.5 overflow-auto rounded-md border border-field ccode-float-surface p-1">
                         {group.items.map((item) => (
                           <li
                             key={item.key}
-                            className="flex items-center gap-2.5 px-3 py-2 text-xs"
+                            className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-xs hover:bg-hover"
                           >
                             <span
                               className={`size-2 shrink-0 rounded-full ${item.dot}`}
@@ -467,12 +511,12 @@ function App() {
                         ))}
                       </ul>
                     )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </header>
-        )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+        </header>
         {titleInboxCat !== null && (
           <div
             className="fixed inset-0 z-20"
@@ -484,7 +528,7 @@ function App() {
         {!chromeHidden && (
         <aside
           className={`ccode-app-rail flex shrink-0 flex-col border-r border-hairline bg-rail transition-[width] duration-150 ${
-            collapsed ? "w-14" : "w-40"
+            collapsed ? "w-14" : "w-48"
           }`}
         >
           {/* 品牌区同时承担侧栏收起/展开，避免额外占用一个操作位。 */}
@@ -519,62 +563,67 @@ function App() {
                     ⌘K 入口永远开弹层，留作调整口；右键 = 随手聊历史浮层（跳过弹层的用户
                     左键看不到历史，右键是她们的回看口） */}
                 {group.label === "工作" && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (quickChatSkipEnabled()) {
-                        void launchQuickChatDirect().then((ok) => {
-                          if (!ok) setQuickChatOpen(true);
-                        });
-                      } else {
-                        setQuickChatOpen(true);
-                      }
-                    }}
-                    onContextMenu={(e) => void openQuickChatMenu(e)}
-                    title="快速开聊：不建项目直接开一个终端标签（右键看随手聊历史）"
-                    className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm text-l3 transition-colors hover:bg-hover hover:text-l2 ${
-                      collapsed ? "justify-center" : "px-2.5"
-                    }`}
-                  >
-                    <span
-                      className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"}`}
+                  <RailTooltip label="快速开聊" collapsed={collapsed}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (quickChatSkipEnabled()) {
+                          void launchQuickChatDirect().then((ok) => {
+                            if (!ok) setQuickChatOpen(true);
+                          });
+                        } else {
+                          setQuickChatOpen(true);
+                        }
+                      }}
+                      onContextMenu={(e) => void openQuickChatMenu(e)}
+                      aria-label="快速开聊"
+                      title="快速开聊：不建项目直接开一个终端标签（右键看随手聊历史）"
+                      className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm text-l3 transition-colors hover:bg-hover hover:text-l2 ${
+                        collapsed ? "justify-center" : "px-2.5"
+                      }`}
                     >
-                      ＋
-                    </span>
-                    {!collapsed && <span className="truncate">快速开聊</span>}
-                  </button>
+                      <span
+                        className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"}`}
+                      >
+                        ＋
+                      </span>
+                      {!collapsed && <span className="truncate">快速开聊</span>}
+                    </button>
+                  </RailTooltip>
                 )}
                 {group.items.map((n) => (
-                  <button
-                    key={n.id}
-                    type="button"
-                    onClick={() => setPage(n.id)}
-                    aria-current={page === n.id ? "page" : undefined}
-                    title={
-                      n.id === "terminal" && runningCount > 0
-                        ? `${n.label}（${runningCount} 个 agent 运行中）`
-                        : n.id === "workspaces" && inboxCount > 0
-                          ? `${n.label}（${inboxCount} 件待处理）`
-                          : n.label
-                    }
-                    className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm transition-colors ${
-                      collapsed ? "justify-center" : "px-2.5"
-                    } ${
-                      page === n.id
-                        ? "bg-rail-sel text-l1"
-                        : "text-l3 hover:bg-hover hover:text-l2"
-                    }`}
-                  >
-                    {page === n.id && (
-                      <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
-                    )}
-                    <span
-                      className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
+                  <RailTooltip key={n.id} label={n.label} collapsed={collapsed}>
+                    <button
+                      type="button"
+                      onClick={() => setPage(n.id)}
+                      aria-current={page === n.id ? "page" : undefined}
+                      aria-label={n.label}
+                      title={
+                        n.id === "terminal" && visibleRunningCount > 0
+                          ? `${n.label}（${visibleRunningCount} 个 agent 运行中）`
+                          : n.id === "workspaces" && inboxCount > 0
+                            ? `${n.label}（${inboxCount} 件待处理）`
+                            : n.label
+                      }
+                      className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm transition-colors ${
+                        collapsed ? "justify-center" : "px-2.5"
+                      } ${
+                        page === n.id
+                          ? "bg-rail-sel text-l1"
+                          : "text-l3 hover:bg-hover hover:text-l2"
+                      }`}
                     >
-                      {n.icon}
-                    </span>
-                    {!collapsed && <span className="truncate">{n.label}</span>}
-                  </button>
+                      {page === n.id && (
+                        <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
+                      )}
+                      <span
+                        className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
+                      >
+                        {n.icon}
+                      </span>
+                      {!collapsed && <span className="truncate">{n.label}</span>}
+                    </button>
+                  </RailTooltip>
                 ))}
               </div>
             ))}
@@ -582,53 +631,49 @@ function App() {
 
           {/* 底部管理区与导航之间只留一根隐约细线（5% 白 + 0.5px），不完全消失 */}
           <div className="shrink-0 border-t border-white/5 px-1.5 py-2">
-            {/* 命令面板常驻发现入口：弱一档（text-l4），标签跟随设置页自定义绑定 */}
-            <button
-              type="button"
-              onClick={() => setPaletteOpen(true)}
-              title="打开命令面板"
-              className={`relative mb-0.5 flex h-7 items-center rounded-md text-sm transition-colors ${
-                collapsed ? "w-11 justify-center" : "w-full px-2.5"
-              } text-l4 hover:bg-hover hover:text-l3`}
-            >
-              <span
-                className={`font-mono ${collapsed ? "text-xs" : "mr-2 w-5 text-center text-xs"}`}
-              >
-                {paletteComboLabel}
-              </span>
-              {!collapsed && <span>命令面板</span>}
-            </button>
             {NAV_BOTTOM.map((n) => (
-              <button
-                key={n.id}
-                type="button"
-                onClick={() => setPage(n.id)}
-                aria-current={page === n.id ? "page" : undefined}
-                title={n.label}
-                className={`relative mb-0.5 flex h-7 items-center rounded-md text-sm transition-colors ${
-                  collapsed ? "w-11 justify-center" : "w-full px-2.5"
-                } ${
-                  page === n.id
-                    ? "bg-rail-sel text-l1"
-                    : "text-l3 hover:bg-hover hover:text-l2"
-                }`}
-              >
-                {page === n.id && (
-                  <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
-                )}
-                <span
-                  className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
+              <RailTooltip key={n.id} label={n.label} collapsed={collapsed}>
+                <button
+                  type="button"
+                  onClick={() => setPage(n.id)}
+                  aria-current={page === n.id ? "page" : undefined}
+                  aria-label={n.label}
+                  title={n.label}
+                  className={`relative mb-0.5 flex h-7 items-center rounded-md text-sm transition-colors ${
+                    collapsed ? "w-11 justify-center" : "w-full px-2.5"
+                  } ${
+                    page === n.id
+                      ? "bg-rail-sel text-l1"
+                      : "text-l3 hover:bg-hover hover:text-l2"
+                  }`}
                 >
-                  {n.icon}
-                </span>
-                {!collapsed && <span>{n.label}</span>}
-              </button>
+                  {page === n.id && (
+                    <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
+                  )}
+                  <span
+                    className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
+                  >
+                    {n.icon}
+                  </span>
+                  {!collapsed && <span>{n.label}</span>}
+                </button>
+              </RailTooltip>
             ))}
           </div>
         </aside>
         )}
         <main className="ccode-app-main h-full min-h-0 min-w-0 flex-1">
           {/* 页面保持挂载，切换标签不销毁终端；未访问过的页不挂载（懒加载） */}
+          <div className={page === "workbench" ? "h-full overflow-auto" : "hidden"}>
+            {visited.has("workbench") && (
+              <Suspense fallback={<PageLoading />}>
+                <WorkbenchPage
+                  visible={page === "workbench"}
+                  onQuickChat={() => setQuickChatOpen(true)}
+                />
+              </Suspense>
+            )}
+          </div>
           <div
             className={page === "profiles" ? "h-full overflow-auto" : "hidden"}
           >
