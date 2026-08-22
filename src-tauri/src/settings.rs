@@ -16,6 +16,7 @@ pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
 pub const DEFAULT_HOTKEY_PALETTE: &str = "mod+k";
 pub const DEFAULT_HOTKEY_HIDE_CHROME: &str = "mod+\\";
 pub const DEFAULT_HOTKEY_PAGE_SWITCH: bool = true;
+pub const DEFAULT_NAV_CAPSULE_HIDE_DELAY_MS: u32 = 1000;
 const KNOWN_THEMES: [&str; 14] = [
     "midnight", "terracotta", "ayu", "mocha", "neutral", "dracula", "shadcn",
     "midnight-light", "terracotta-light", "ayu-light", "mocha-light",
@@ -37,6 +38,13 @@ const KNOWN_PALETTES: [&str; 8] = [
 const KNOWN_EXTERNAL_TERMINALS: [&str; 9] = [
     "auto", "ghostty", "iterm", "terminal", "cmd",
     "gnome-terminal", "konsole", "xfce4-terminal", "xterm",
+];
+const KNOWN_STARTUP_NAV_MODES: [&str; 3] = ["expanded", "collapsed", "hidden"];
+const KNOWN_NAV_CAPSULE_DELAYS_MS: [u32; 4] = [500, 1000, 2000, 5000];
+const KNOWN_NAV_CAPSULE_DISPLAY_MODES: [&str; 3] = ["both", "icons", "labels"];
+const KNOWN_NAV_CAPSULE_ITEMS: [&str; 10] = [
+    "quick-chat", "workbench", "workspaces", "terminal", "sessions",
+    "profiles", "skills", "mcp", "stats", "settings",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -65,6 +73,14 @@ pub struct AppSettingsDto {
     pub default_profiles: Option<BTreeMap<String, String>>,
     /// 启动时进入哪一页（页面 id，同 hotkeys.ts PAGE_HOTKEY_DEFS）；缺省 = workbench
     pub start_page: Option<String>,
+    /// 启动时的导航形态；缺省时前端尊重旧 navCollapsed 偏好
+    pub startup_nav_mode: Option<String>,
+    /// 顶部导航胶囊离开后的自动隐藏延迟（毫秒）
+    pub nav_capsule_hide_delay_ms: Option<u32>,
+    /// 顶部导航胶囊内容显示：both（符号+文字）/icons（仅符号）/labels（仅文字）
+    pub nav_capsule_display_mode: Option<String>,
+    /// 顶部导航胶囊中显示的入口 id；缺省 = 全部显示
+    pub nav_capsule_visible_items: Option<Vec<String>>,
     /// 「隐藏」的 profile id 列表：只影响终端启动栏下拉的分组（沉到「更多」），
     /// **不删数据、不改任何启动行为**——已选中它的标签照常工作，配置页照常列出。
     /// 与 default_profiles 一样存在设置里而不是 profiles.json：这是展示偏好，不是配置属性。
@@ -139,6 +155,23 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         start_page: s
             .start_page
             .filter(|p| KNOWN_PAGES.contains(&p.as_str())),
+        startup_nav_mode: s
+            .startup_nav_mode
+            .filter(|m| KNOWN_STARTUP_NAV_MODES.contains(&m.as_str())),
+        nav_capsule_hide_delay_ms: Some(
+            s.nav_capsule_hide_delay_ms
+                .filter(|delay| KNOWN_NAV_CAPSULE_DELAYS_MS.contains(delay))
+                .unwrap_or(DEFAULT_NAV_CAPSULE_HIDE_DELAY_MS),
+        ),
+        nav_capsule_display_mode: s
+            .nav_capsule_display_mode
+            .filter(|mode| KNOWN_NAV_CAPSULE_DISPLAY_MODES.contains(&mode.as_str())),
+        nav_capsule_visible_items: s.nav_capsule_visible_items.map(|items| {
+            items
+                .into_iter()
+                .filter(|id| KNOWN_NAV_CAPSULE_ITEMS.contains(&id.as_str()))
+                .collect()
+        }),
         hidden_profiles: s.hidden_profiles,
         external_terminal: Some(
             s.external_terminal
@@ -201,6 +234,18 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     // 按功能配置整图覆盖（前端每次提交完整 map；空 map = 全部跟随默认）
     if patch.start_page.is_some() {
         cur.start_page = patch.start_page;
+    }
+    if patch.startup_nav_mode.is_some() {
+        cur.startup_nav_mode = patch.startup_nav_mode;
+    }
+    if patch.nav_capsule_hide_delay_ms.is_some() {
+        cur.nav_capsule_hide_delay_ms = patch.nav_capsule_hide_delay_ms;
+    }
+    if patch.nav_capsule_display_mode.is_some() {
+        cur.nav_capsule_display_mode = patch.nav_capsule_display_mode;
+    }
+    if patch.nav_capsule_visible_items.is_some() {
+        cur.nav_capsule_visible_items = patch.nav_capsule_visible_items;
     }
     if patch.hidden_profiles.is_some() {
         cur.hidden_profiles = patch.hidden_profiles;
@@ -362,6 +407,50 @@ mod tests {
         assert_eq!(full.rate_usd_cny, Some(7.2));
         assert_eq!(full.brew_mirror, Some(true));
         assert_eq!(full.theme.as_deref(), Some("midnight"));
+        assert_eq!(full.startup_nav_mode, None);
+        assert_eq!(full.nav_capsule_hide_delay_ms, Some(1000));
+        assert_eq!(full.nav_capsule_display_mode, None);
+        assert_eq!(full.nav_capsule_visible_items, None);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn navigation_settings_validate_and_roundtrip() {
+        let p = tmp();
+        let mut cur = read_from(&p);
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                startup_nav_mode: Some("hidden".into()),
+                nav_capsule_hide_delay_ms: Some(2000),
+                nav_capsule_display_mode: Some("icons".into()),
+                nav_capsule_visible_items: Some(vec!["workbench".into(), "settings".into()]),
+                ..Default::default()
+            },
+        );
+        write_to(&p, &cur).unwrap();
+        let full = with_defaults(read_from(&p));
+        assert_eq!(full.startup_nav_mode.as_deref(), Some("hidden"));
+        assert_eq!(full.nav_capsule_hide_delay_ms, Some(2000));
+        assert_eq!(full.nav_capsule_display_mode.as_deref(), Some("icons"));
+        assert_eq!(full.nav_capsule_visible_items, Some(vec!["workbench".into(), "settings".into()]));
+
+        let mut invalid = read_from(&p);
+        merge(
+            &mut invalid,
+            AppSettingsDto {
+                startup_nav_mode: Some("nope".into()),
+                nav_capsule_hide_delay_ms: Some(999),
+                nav_capsule_display_mode: Some("text".into()),
+                nav_capsule_visible_items: Some(vec!["workbench".into(), "unknown".into()]),
+                ..Default::default()
+            },
+        );
+        let invalid_full = with_defaults(invalid);
+        assert_eq!(invalid_full.startup_nav_mode, None);
+        assert_eq!(invalid_full.nav_capsule_hide_delay_ms, Some(1000));
+        assert_eq!(invalid_full.nav_capsule_display_mode, None);
+        assert_eq!(invalid_full.nav_capsule_visible_items, Some(vec!["workbench".into()]));
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 

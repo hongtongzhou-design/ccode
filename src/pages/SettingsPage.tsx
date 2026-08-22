@@ -11,10 +11,19 @@ import {
   PageFrame,
   PageHeader,
   rowActionClass,
+  Checkbox,
   Toggle,
   secondaryActionClass,
 } from "../components/PageFrame";
 import { captureDecision, comboLabel, PAGE_HOTKEY_DEFS } from "../hotkeys";
+import {
+  NAV_CAPSULE_ITEM_IDS,
+  normalizeNavCapsuleDelay,
+  normalizeNavCapsuleDisplayMode,
+  normalizeNavCapsuleVisibleItems,
+  resolveStartupNavMode,
+  type NavCapsuleItemId,
+} from "../nav-capsule";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { StorageEntryDto } from "../types";
 import { AGENTS } from "../types";
@@ -29,6 +38,7 @@ import {
   resolvePaletteId,
 } from "../terminal-palettes";
 import { THEMES, isLightTheme } from "../themes";
+import { NAV_GROUPS, NAV_BOTTOM } from "../navigation";
 
 // 调色板清单单一出处在 ../terminal-palettes（PALETTE_LIST，含亮暗标记）
 
@@ -92,6 +102,17 @@ const AI_FN_ROWS: { key: string; label: string }[] = [
   { key: "digest", label: "提炼接力 / 评审沉淀" },
   { key: "conflict", label: "冲突建议" },
   { key: "translate", label: "翻译" },
+];
+
+const NAV_CAPSULE_SETTING_ITEMS: { id: NavCapsuleItemId; label: string }[] = [
+  { id: "quick-chat", label: "快速开聊" },
+  ...NAV_GROUPS.flatMap((group) =>
+    group.items.map((item) => ({ id: item.id as NavCapsuleItemId, label: item.label })),
+  ),
+  ...NAV_BOTTOM.map((item) => ({
+    id: item.id as NavCapsuleItemId,
+    label: item.label,
+  })),
 ];
 
 /** 诊断日志条目（与后端 logbuf::LogEntryDto 对应） */
@@ -1020,6 +1041,105 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               </option>
             ))}
           </select>
+        </Row>
+        <Row
+          label="默认导航形态"
+          hint="仅影响下次启动；运行中仍可通过侧栏按钮或 ⌘\\ 临时切换"
+        >
+          <select
+            className={fieldClass + " w-52"}
+            value={resolveStartupNavMode(
+              settings?.startupNavMode,
+              localStorage.getItem("ccode.navCollapsed") === "1",
+            )}
+            onChange={(e) =>
+              void patch({
+                startupNavMode: e.target.value as
+                  | "expanded"
+                  | "collapsed"
+                  | "hidden",
+              })
+            }
+          >
+            <option value="expanded">展开侧栏</option>
+            <option value="collapsed">图标侧栏</option>
+            <option value="hidden">完全隐藏 + 顶部导航胶囊</option>
+          </select>
+        </Row>
+        <Row
+          label="顶部导航自动隐藏"
+          hint="完全隐藏时，鼠标移动到上下文栏下方即可呼出顶部导航"
+        >
+          <select
+            className={fieldClass + " w-28"}
+            value={normalizeNavCapsuleDelay(settings?.navCapsuleHideDelayMs)}
+            onChange={(e) =>
+              void patch({ navCapsuleHideDelayMs: Number(e.target.value) })
+            }
+          >
+            <option value={500}>0.5 秒</option>
+            <option value={1000}>1 秒</option>
+            <option value={2000}>2 秒</option>
+            <option value={5000}>5 秒</option>
+          </select>
+        </Row>
+        <Row
+          label="顶部导航内容"
+          hint="完全隐藏时控制胶囊显示符号、文字，设置修改后立即生效"
+        >
+          <select
+            className={fieldClass + " w-40"}
+            value={normalizeNavCapsuleDisplayMode(settings?.navCapsuleDisplayMode)}
+            onChange={(e) =>
+              void patch({
+                navCapsuleDisplayMode: e.target.value as
+                  | "both"
+                  | "icons"
+                  | "labels",
+              })
+            }
+          >
+            <option value="both">符号 + 文字</option>
+            <option value="icons">仅显示符号</option>
+            <option value="labels">仅显示文字</option>
+          </select>
+        </Row>
+        <Row
+          label="顶部导航显示项目"
+          hint="恢复侧栏始终保留；隐藏当前页面时会临时保留该入口"
+          extra={
+            <div className="grid grid-cols-2 gap-x-5 gap-y-2 rounded-md bg-inset p-3 sm:grid-cols-3">
+              {NAV_CAPSULE_SETTING_ITEMS.map((item) => {
+                const selected = normalizeNavCapsuleVisibleItems(
+                  settings?.navCapsuleVisibleItems,
+                ).includes(item.id);
+                return (
+                  <Checkbox
+                    key={item.id}
+                    checked={selected}
+                    label={item.label}
+                    onChange={(checked) => {
+                      const current = normalizeNavCapsuleVisibleItems(
+                        settings?.navCapsuleVisibleItems,
+                      );
+                      const next = checked
+                        ? [...new Set([...current, item.id])]
+                        : current.filter((id) => id !== item.id);
+                      void patch({ navCapsuleVisibleItems: next });
+                    }}
+                  />
+                );
+              })}
+            </div>
+          }
+        >
+          <button
+            type="button"
+            className="rounded-md px-2 py-1 text-xs text-l3 hover:bg-hover hover:text-l1"
+            onClick={() => void patch({ navCapsuleVisibleItems: [...NAV_CAPSULE_ITEM_IDS] })}
+          >
+            全部显示
+          </button>
         </Row>
       </Section>
 

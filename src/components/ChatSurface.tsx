@@ -96,8 +96,8 @@ export default function ChatSurface({
 
   return (
     <div className="absolute inset-0 z-20 flex min-h-0 flex-col bg-canvas">
-      <header className="shrink-0 border-b border-hairline bg-canvas/95 px-5 py-3 backdrop-blur-sm">
-        <div className="mx-auto flex w-full max-w-4xl items-center gap-3">
+      <header className="shrink-0 border-b border-hairline bg-canvas/95 px-4 py-2.5 backdrop-blur-sm">
+        <div className="mx-auto flex w-full max-w-3xl items-center gap-2.5">
           <span className={`size-2 shrink-0 rounded-full ${statusClass}`} />
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
@@ -111,7 +111,6 @@ export default function ChatSurface({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            <span className="hidden text-micro text-l4 sm:inline">{skills.length} 技能 · {mcps.length} MCP</span>
             {readOnly && (
               <span
                 className="rounded-md bg-inset px-2 py-1 text-micro text-warn-text"
@@ -171,7 +170,7 @@ export default function ChatSurface({
         }}
         className="relative min-h-0 flex-1 overflow-auto"
       >
-        <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-5 pb-8 pt-10">
+        <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-4 pb-6 pt-8 sm:px-5">
           {state === "idle" && messages.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center pb-20 text-center">
               <div className="mb-3 flex size-10 items-center justify-center rounded-xl bg-raised text-lg text-l3">✦</div>
@@ -186,7 +185,7 @@ export default function ChatSurface({
             <ConversationView messages={messages} />
           )}
           {loading && (
-            <div className="mb-3 flex items-center gap-2 text-xs text-l4" aria-live="polite">
+            <div className="mb-2 flex items-center gap-2 text-micro text-l4" aria-live="polite">
               <span className="flex items-center gap-1" aria-hidden="true">
                 <span className="size-1.5 rounded-full bg-l4 animate-pulse" />
                 <span className="size-1.5 rounded-full bg-l4 animate-pulse [animation-delay:120ms]" />

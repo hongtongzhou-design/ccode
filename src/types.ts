@@ -677,6 +677,8 @@ export interface ProjectStepDto {
   workspaceName: string;
   brief: string;
   expectedArtifacts: string[];
+  /** 人可核对的内容级验收条件；路径存在只是最低门槛。 */
+  acceptanceCriteria?: string[];
   /** 结构化输入依赖；相对项目根路径或上游提货单路径。缺省兼容旧配置。 */
   inputs?: string[];
   /** 可选输入：存在则读取，不存在不阻断步骤。 */
@@ -684,6 +686,8 @@ export interface ProjectStepDto {
   /** 输入二选一/多选一组：每组至少满足一项即可。 */
   anyOfInputs?: string[][];
   skills: string[];
+  /** 必须执行的技能子集；未列出的挂载技能按可选处理。 */
+  requiredSkills?: string[];
   run: ProjectStepRunDto[];
   /** 资源绑定：[[resources]] 条目的 path；空/缺省 = 绑定全部资源（向后兼容旧后端与旧配置） */
   resources?: string[];

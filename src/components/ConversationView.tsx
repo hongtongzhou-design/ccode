@@ -257,7 +257,7 @@ export default function ConversationView({
           type="button"
           onClick={() => toggleExpand(run.key)}
           aria-expanded={isOpen}
-          className="flex h-7 w-full items-center gap-1.5 rounded-md bg-inset px-2 text-left text-xs text-l3 hover:bg-raised hover:text-l1"
+          className="flex h-7 w-full items-center gap-1.5 rounded-md bg-inset/65 px-2 text-xs text-l3 hover:bg-raised hover:text-l1"
         >
           <span className="shrink-0 text-micro text-l4">
             {isOpen ? "▾" : "▸"}
@@ -296,7 +296,7 @@ export default function ConversationView({
           // 用户消息：右对齐圆角气泡（bubble 令牌底，max-w 70%）
           <div key={mi} className="mb-3 flex justify-end">
             <div
-              className={`max-w-[70%] rounded-lg bg-bubble px-3 py-2 ${compact ? "text-xs" : "text-sm"}`}
+              className={`max-w-[70%] rounded-md bg-bubble/75 px-3 py-2 ${compact ? "text-xs" : "text-sm"}`}
             >
               {renderRuns(m, mi, true)}
             </div>

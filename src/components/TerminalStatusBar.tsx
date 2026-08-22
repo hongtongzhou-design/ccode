@@ -7,7 +7,7 @@ import type { GitSummary } from "./GitPanel";
 import type { TabStatus } from "../pages/TerminalPage";
 
 /**
- * 终端底部状态栏（胶囊化）：36px 固置于终端 pane 内部下缘，与终端同底同色。
+ * 终端底部状态栏（胶囊化）：32px 固置于终端 pane 内部下缘，与终端同底同色。
  * 左区 = 状态圆点 + agent · 配置 · 模型（可点切）+ 思考强度 step 滑块；
  * 中区 = git 连体胶囊（分支/变更 + Commit & Push（云上传图标）：AI 生成提交信息→提交并推送→Toast 预览）；
  * 右区 = 运行时长 · 本会话 token（等宽小字）。
@@ -354,7 +354,7 @@ export default function TerminalStatusBar({
 
   return (
     <div
-      className="relative flex h-9 shrink-0 items-center gap-3 overflow-visible px-3 text-[11px] whitespace-nowrap select-none"
+      className="relative flex h-8 shrink-0 items-center gap-2.5 overflow-visible px-3 text-[11px] whitespace-nowrap select-none"
       style={{
         background: colors.background,
         color: fg,

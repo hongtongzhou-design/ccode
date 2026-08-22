@@ -72,6 +72,7 @@
   `expected_count`、`manifest_path` 或可推导的 `papers/to-fetch.md`，无法得知总数时不判完成；`no_placeholders` 只允许文本文件。
   模板应用三处入口（注册后选择、项目页模板选择、编辑器追加）统一调用后端原子事务：步骤、缺失的项目级设定、投稿分支/轮次、
   topic 与 `pipeline_opt_out` 一次写入，已有真实设定按问题名保留。
+  模板自检还必须满足：步骤声明 Quarto `run` 时挂载 `quarto-render`；`lit-search` 步骤声明 screening/included/to-fetch/to-fetch.ris 四项固定产物；返修步骤的回复信、修订稿、对照表、引用报告和再投稿清单全部带 `rN` 轮次后缀。
   **注册后模板选择层（TemplatePickModal）**：`register_project` 成功后弹出，选项 = 六套内置模板
   （名称 + 一句话说明 + 步骤数，数据直接用 PIPELINE_TEMPLATES，不另造表），选中即调用统一的 `apply_pipeline_template`
   追加进 project.toml 后关闭并刷新。**两个出口语义不同**：「不使用研究流程」调 `set_pipeline_opt_out`
@@ -96,7 +97,7 @@
   每套模板首步简报带双口径输入说明（接自上游模板随仓库合并自带 / 独立启动先放入对应目录或在资源面板绑定上游
   项目目录）；投稿与返修首步另有 before 人工事项「放入成稿与 references.bib」（落点 `manuscript/`）。
   **第六套「LaTeX 论文」（v3.97，批次 E）**：搭建骨架 → 章节写作 → 编译与排错 → 定稿导出，
-  产物 `manuscript/main.tex` + `manuscript/main.pdf`；run 脚本 `render-pdf` 各步共用同一常量
+  源稿产物 `manuscript/main.tex`，编译 PDF 统一落在 `output/main.pdf`；run 脚本 `render-pdf` 各步共用同一常量
   （tectonic 优先 → latexmk 回落 → 都没有打印安装引导 + exit 1；应用内不做安装器），开步时经既有
   ws_settings 机制写入 `.ccode/settings.toml`；期刊官方模板 zip 走可选 before 人工事项解压到
   `manuscript/template/` 由 agent 读说明适配（无内置解析器）；文档类（elsarticle/IEEEtran/achemso/ctexart/
@@ -586,6 +587,13 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   （`[@key]`/`[@k1; @k2]`/`[-@key]`；保守口径——项必须以 `[-]@key` 起头，带前缀的 `[cf. @k]` 不收）对照
   references.bib（根目录优先、其次 manuscript/）+ 产物 X/Y 摘要（复用 ArtifactChecklist 定位机制）；
   无 bib/全文无引用/无预期产物时不渲染，进评审一次性读取不轮询。
+
+## 本轮合同增强（2026-08-22）
+
+- 步骤可声明 `acceptance_criteria`（内容级验收条件）与 `required_skills`（必需技能子集）。`TASK.md` 同时输出预期产物、验收条件、人工事项完成判定与技能必需/可选属性；路径存在只是最低门槛。
+- 提货单只按当前步骤的 `inputs`、`optional_inputs`、`any_of_inputs` 过滤，避免无关上游产物污染任务书。
+- 输入/产物通配统一按 `*` 匹配，末段通配代表目录下直接文件；空文件不算已产出。Quarto PDF/DOCX 与 LaTeX PDF 统一写入 `output/`，源稿保留在 `manuscript/`。
+- **技能报告也是步骤产物**：步骤挂载 `bib-check`、`stats-check` 等只读审查技能时，必须在 `expected_artifacts` 声明报告路径，并在简报中写明报告落点；跨轮次或同一项目内可能重复执行的报告使用步骤/轮次专属文件名，避免后一次运行覆盖前一轮证据。技能允许调用方覆写默认 `outputs` 路径，但 TASK.md 与验收清单必须采用覆写后的真实路径。
 
 - **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不在逻辑里写死「文献/数据/
   论文」概念。

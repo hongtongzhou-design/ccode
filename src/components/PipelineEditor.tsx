@@ -54,11 +54,13 @@ type StepDraft = {
   workspaceName: string;
   brief: string;
   artifactsText: string;
+  acceptanceText: string;
   inputsText: string;
   optionalInputsText: string;
   /** 每行一组，组内用 | 分隔，表示任一项满足即可 */
   anyOfInputsText: string;
   skills: string[];
+  requiredSkills: string[];
   run: ProjectStepRunDto[];
   /** 勾选中的资源绑定（path）；空 = 不绑定 = 使用项目全部资源 */
   resources: string[];
@@ -78,10 +80,13 @@ function toDraft(s: ProjectStepDto): StepDraft {
     workspaceName: s.workspaceName,
     brief: s.brief,
     artifactsText: s.expectedArtifacts.join(", "),
+    acceptanceText: (s.acceptanceCriteria ?? []).join("\n"),
     inputsText: (s.inputs ?? []).join(", "),
     optionalInputsText: (s.optionalInputs ?? []).join(", "),
     anyOfInputsText: (s.anyOfInputs ?? []).map((group) => group.join(" | ")).join("; "),
     skills: [...s.skills],
+    // 旧配置没有 required_skills 时，挂载技能沿用历史“全部执行”语义。
+    requiredSkills: [...(s.requiredSkills ?? s.skills)],
     run: s.run.map((r) => ({ ...r })),
     resources: [...(s.resources ?? [])],
     humanTasks: (s.humanTasks ?? []).map((t) => ({ ...t })),
@@ -107,6 +112,10 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
       .split(/[,，]/)
       .map((x) => x.trim())
       .filter(Boolean),
+    acceptanceCriteria: d.acceptanceText
+      .split(/[\n；;]/)
+      .map((x) => x.trim())
+      .filter(Boolean),
     inputs: d.inputsText
       .split(/[,，]/)
       .map((x) => x.trim())
@@ -125,6 +134,7 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
       )
       .filter((group) => group.length > 0),
     skills: d.skills,
+    requiredSkills: d.requiredSkills.filter((name) => d.skills.includes(name)),
     run: d.run
       .filter((r) => r.name.trim() && r.command.trim())
       .map((r) => ({ ...r, name: r.name.trim(), command: r.command.trim() })),
@@ -163,7 +173,7 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
 
 /**
  * 研究流程编辑器（全宽覆盖层）：项目研究流程的唯一编辑入口。
- * 每个步骤一张卡片（名称/工作区名/简报/预期产物/输入依赖/run 脚本/资源绑定），卡片可排序与增删；
+ * 每个步骤一张卡片（名称/工作区名/简报/预期产物/验收条件/输入依赖/run 脚本/资源绑定），卡片可排序与增删；
  * 「保存」把全部步骤整体写回 project.toml（write_project_config 由父组件执行），「取消」放弃草稿，
  * 有未保存改动时关闭需确认。
  */
@@ -551,6 +561,19 @@ export default function PipelineEditor({
 
         <label className="mb-2 block">
           <span className="mb-1 block text-xs text-l3">
+            内容级验收条件（每行一条；仅文件存在不等于通过）
+          </span>
+          <textarea
+            className={`${field} w-full font-mono text-xs`}
+            rows={3}
+            value={d.acceptanceText}
+            onChange={(e) => patch(i, { acceptanceText: e.target.value })}
+            placeholder="如：每条引用键都能在 references.bib 解析\n如：脚本从 main 重跑结果一致"
+          />
+        </label>
+
+        <label className="mb-2 block">
+          <span className="mb-1 block text-xs text-l3">
             必需输入（逗号分隔；缺失会提示）
           </span>
           <input
@@ -605,13 +628,28 @@ export default function PipelineEditor({
         <div className="mb-2">
           <StepSkillsChips
             skills={d.skills}
+            requiredSkills={d.requiredSkills}
             skillMeta={skillMeta}
             available={skillLib?.map((s) => s.name)}
             mcpRecommended={skillLib
               ?.filter((s) => s.mentionsMcp)
               .map((s) => s.name)}
             skillLib={skillLib}
-            onChange={(next) => patch(i, { skills: next })}
+            onChange={(next) =>
+              patch(i, {
+                skills: next,
+                // 新挂载技能默认必需；已有技能可通过芯片上的必需/可选切换单独调整。
+                requiredSkills: [
+                  ...d.requiredSkills.filter((name) => next.includes(name)),
+                  ...next.filter((name) => !d.skills.includes(name)),
+                ],
+              })
+            }
+            onRequiredChange={(next) =>
+              patch(i, {
+                requiredSkills: next.filter((name) => d.skills.includes(name)),
+              })
+            }
           />
         </div>
 
@@ -1141,10 +1179,12 @@ export default function PipelineEditor({
                     workspaceName: "",
                     brief: "",
                     artifactsText: "",
+                    acceptanceText: "",
                     inputsText: "",
                     optionalInputsText: "",
                     anyOfInputsText: "",
                     skills: [],
+                    requiredSkills: [],
                     run: [],
                     resources: [],
                     humanTasks: [],

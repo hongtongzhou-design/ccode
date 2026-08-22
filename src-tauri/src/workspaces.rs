@@ -1554,7 +1554,10 @@ fn artifact_produced_since(root: &Path, entry: &str, since: SystemTime) -> bool 
         };
         return rd.flatten().any(|e| {
             let Ok(m) = e.metadata() else { return false };
-            m.is_file() && wildcard_match(pattern, &e.file_name().to_string_lossy()) && fresh(&m)
+            m.is_file()
+                && m.len() > 0
+                && wildcard_match(pattern, &e.file_name().to_string_lossy())
+                && fresh(&m)
         });
     }
     if is_dir_entry {
@@ -1565,7 +1568,7 @@ fn artifact_produced_since(root: &Path, entry: &str, since: SystemTime) -> bool 
         };
         for e in rd.flatten() {
             let Ok(m) = e.metadata() else { continue };
-            if m.is_file() {
+            if m.is_file() && m.len() > 0 {
                 any_file = true;
                 if fresh(&m) {
                     any_fresh = true;
@@ -1575,7 +1578,7 @@ fn artifact_produced_since(root: &Path, entry: &str, since: SystemTime) -> bool 
         any_file && any_fresh
     } else {
         fs::metadata(&path)
-            .map(|m| m.is_file() && fresh(&m))
+            .map(|m| m.is_file() && m.len() > 0 && fresh(&m))
             .unwrap_or(false)
     }
 }

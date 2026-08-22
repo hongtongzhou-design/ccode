@@ -93,6 +93,8 @@ pub struct StepDto {
     pub workspace_name: String,
     pub brief: String,
     pub expected_artifacts: Vec<String>,
+    /// 内容级验收条件；不改变旧档案卡的路径验收兼容性。
+    pub acceptance_criteria: Vec<String>,
     /// 结构化输入依赖；缺省兼容旧档案卡。
     pub inputs: Vec<String>,
     /// 可选输入：存在则读取，不存在不阻断步骤。
@@ -100,6 +102,7 @@ pub struct StepDto {
     /// 输入二选一/多选一组：每组至少满足一项即可。
     pub any_of_inputs: Vec<Vec<String>>,
     pub skills: Vec<String>,
+    pub required_skills: Vec<String>,
     // 资源绑定：[[resources]] 条目的 path 精确匹配（相对/绝对均可）；
     // 空数组 = 不绑定 = 全部资源（向后兼容旧档案卡）
     pub resources: Vec<String>,
@@ -574,6 +577,8 @@ struct TomlStep {
     #[serde(default)]
     expected_artifacts: Vec<String>,
     #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    #[serde(default)]
     inputs: Vec<String>,
     #[serde(default)]
     optional_inputs: Vec<String>,
@@ -581,6 +586,9 @@ struct TomlStep {
     any_of_inputs: Vec<Vec<String>>,
     #[serde(default)]
     skills: Vec<String>,
+    /// None = 旧配置未声明，兼容为 skills 全部必需；Some([]) = 明确全部可选。
+    #[serde(default)]
+    required_skills: Option<Vec<String>>,
     #[serde(default)]
     run: BTreeMap<String, TomlStepRun>,
     #[serde(default)]
@@ -792,11 +800,19 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                             manifest_path: h.manifest_path.trim().to_string(),
                         });
                     }
+                    let step_skills = s.skills;
+                    let required_skills = s.required_skills;
                     config.steps.push(StepDto {
                         name: s.name,
                         workspace_name: s.workspace_name,
                         brief: s.brief,
                         expected_artifacts: s.expected_artifacts,
+                        acceptance_criteria: s
+                            .acceptance_criteria
+                            .into_iter()
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect(),
                         inputs: s
                             .inputs
                             .into_iter()
@@ -821,7 +837,16 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                             })
                             .filter(|group| !group.is_empty())
                             .collect(),
-                        skills: s.skills,
+                        skills: step_skills.clone(),
+                        required_skills: required_skills
+                            .map(|skills| {
+                                skills
+                                    .into_iter()
+                                    .map(|x| x.trim().to_string())
+                                    .filter(|x| !x.is_empty())
+                                    .collect()
+                            })
+                            .unwrap_or(step_skills),
                         resources: bound,
                         run: s
                             .run
@@ -906,6 +931,45 @@ pub(crate) fn validate_step(
     is_first_step: bool,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
+    fn glob_match(pattern: &str, value: &str) -> bool {
+        let p: Vec<char> = pattern.chars().collect();
+        let v: Vec<char> = value.chars().collect();
+        let (mut pi, mut vi) = (0usize, 0usize);
+        let (mut star, mut retry) = (None, None);
+        while vi < v.len() {
+            if pi < p.len() && p[pi] == v[vi] {
+                pi += 1;
+                vi += 1;
+            } else if pi < p.len() && p[pi] == '*' {
+                star = Some(pi);
+                retry = Some(vi);
+                pi += 1;
+            } else if let (Some(star), Some(retry_at)) = (star, retry) {
+                pi = star + 1;
+                vi = retry_at + 1;
+                retry = Some(vi);
+            } else {
+                return false;
+            }
+        }
+        while pi < p.len() && p[pi] == '*' {
+            pi += 1;
+        }
+        pi == p.len()
+    }
+    let path_match = |candidate: &str, pattern: &str| {
+        let candidate = candidate.trim().replace('\\', "/");
+        let pattern = pattern.trim().replace('\\', "/");
+        if candidate.is_empty() || pattern.is_empty() {
+            return false;
+        }
+        let pattern_is_dir = pattern.ends_with('/');
+        let candidate = candidate.trim_end_matches('/');
+        let pattern = pattern.trim_end_matches('/');
+        glob_match(pattern, candidate)
+            || (pattern_is_dir
+                && (candidate == pattern || candidate.starts_with(&format!("{pattern}/"))))
+    };
     for bound in &step.resources {
         if !resources.iter().any(|r| r.path == *bound) {
             warnings.push(format!("步骤「{}」绑定的资源不存在：{bound}", step.name));
@@ -914,10 +978,10 @@ pub(crate) fn validate_step(
     let covered_by_known = |input: &str| {
         prior_artifacts
             .iter()
-            .any(|e| e == input || e.starts_with(input) || input.starts_with(e))
+            .any(|e| path_match(e, input) || path_match(input, e))
             || resources
                 .iter()
-                .any(|r| r.path == input || r.path.starts_with(input) || input.starts_with(&r.path))
+                .any(|r| path_match(&r.path, input) || path_match(input, &r.path))
     };
     for input in &step.inputs {
         // 第一步的输入允许来自模板外部（上游项目、用户资源或尚未登记的主仓文件）。
@@ -942,7 +1006,7 @@ pub(crate) fn validate_step(
         if !step.brief.contains(token) {
             continue;
         }
-        let covered = |e: &String| e == token || e.starts_with(token);
+        let covered = |e: &String| path_match(e, token) || path_match(token, e);
         let own = step.expected_artifacts.iter().any(covered);
         let upstream = prior_artifacts.iter().any(covered);
         let resourced = resources.iter().any(|r| covered(&r.path));
@@ -1094,6 +1158,13 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                 }
                 t["expected_artifacts"] = value(artifacts);
             }
+            if !s.acceptance_criteria.is_empty() {
+                let mut criteria = toml_edit::Array::new();
+                for criterion in &s.acceptance_criteria {
+                    criteria.push(criterion.as_str());
+                }
+                t["acceptance_criteria"] = value(criteria);
+            }
             if !s.inputs.is_empty() {
                 let mut inputs = toml_edit::Array::new();
                 for input in &s.inputs {
@@ -1125,6 +1196,13 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                     skills.push(k.as_str());
                 }
                 t["skills"] = value(skills);
+            }
+            if !s.required_skills.is_empty() || !s.skills.is_empty() {
+                let mut required = toml_edit::Array::new();
+                for skill in &s.required_skills {
+                    required.push(skill.as_str());
+                }
+                t["required_skills"] = value(required);
             }
             // 空数组省略不写：空 = 不绑定 = 全部资源，与省略同语义，档案卡更简洁
             if !s.resources.is_empty() {
@@ -1721,7 +1799,7 @@ fn ensure_git_at(project: &Path) -> Result<EnsureGitDto, String> {
              \n\
              # 常见数据/产物目录（按需取消注释）\n\
              # /data/\n\
-             # /output/\n\
+             /output/\n\
              # /results/\n\
              # /figures/\n"
         );
@@ -1933,7 +2011,8 @@ fn update_step_skills_impl(
     update_step_skills_at(&root, step_name, skills)
 }
 
-/// 读-改-原子写 steps[].skills（root 需已过项目门槛校验；测试直接调这里）
+/// 读-改-原子写 steps[].skills（root 需已过项目门槛校验；测试直接调这里）。
+/// 新挂载技能沿用旧入口语义，默认加入 required_skills；编辑器若要改成可选，走整份配置保存。
 pub(crate) fn update_step_skills_at(
     root: &Path,
     step_name: &str,
@@ -1945,6 +2024,7 @@ pub(crate) fn update_step_skills_at(
         .iter_mut()
         .find(|s| s.name == step_name)
         .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
+    let previous = step.skills.clone();
     // 归一：去空白、去空项、保序去重
     let mut seen = std::collections::HashSet::new();
     step.skills = skills
@@ -1952,6 +2032,12 @@ pub(crate) fn update_step_skills_at(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && seen.insert(s.clone()))
         .collect();
+    step.required_skills.retain(|skill| step.skills.contains(skill));
+    for skill in &step.skills {
+        if !previous.contains(skill) && !step.required_skills.contains(skill) {
+            step.required_skills.push(skill.clone());
+        }
+    }
     write_config_at(root, &cfg)
 }
 
@@ -2300,10 +2386,12 @@ fn demo_project_config() -> ProjectConfigDto {
         workspace_name: ws.into(),
         brief,
         expected_artifacts: artifacts.iter().map(|a| a.to_string()).collect(),
+        acceptance_criteria: Vec::new(),
         inputs: Vec::new(),
         optional_inputs: Vec::new(),
         any_of_inputs: Vec::new(),
         skills: Vec::new(),
+        required_skills: Vec::new(),
         resources: Vec::new(),
         run: Vec::new(),
         human_tasks: Vec::new(),
@@ -3212,10 +3300,12 @@ mod tests {
                 workspace_name: "lit".into(),
                 brief: "读文献写笔记".into(),
                 expected_artifacts: vec!["notes/".into()],
+                acceptance_criteria: Vec::new(),
                 inputs: Vec::new(),
                 optional_inputs: Vec::new(),
                 any_of_inputs: Vec::new(),
                 skills: vec!["paper-notes".into()],
+                required_skills: vec!["paper-notes".into()],
                 resources: Vec::new(),
                 human_tasks: Vec::new(),
                 discussion_seeds: Vec::new(),
@@ -3285,6 +3375,33 @@ test = { command = "echo test" }
             "回读不应有警告: {back_warnings:?}"
         );
         assert_eq!(back, config);
+    }
+
+    #[test]
+    fn required_skills_defaults_to_all_and_preserves_explicit_optional_subset() {
+        let text = r#"[[steps]]
+name = "旧配置"
+skills = ["a", "b"]
+
+[[steps]]
+name = "部分必需"
+skills = ["a", "b"]
+required_skills = ["a"]
+
+[[steps]]
+name = "全部可选"
+skills = ["a", "b"]
+required_skills = []
+"#;
+        let (config, warnings) = parse_config(text);
+        assert!(warnings.is_empty(), "合法配置不应有警告: {warnings:?}");
+        assert_eq!(config.steps[0].required_skills, vec!["a", "b"]);
+        assert_eq!(config.steps[1].required_skills, vec!["a"]);
+        assert!(config.steps[2].required_skills.is_empty());
+        let rendered = render_config(Some(text), &config).unwrap();
+        let (back, back_warnings) = parse_config(&rendered);
+        assert!(back_warnings.is_empty(), "回读不应有警告: {back_warnings:?}");
+        assert_eq!(back.steps[2].required_skills, Vec::<String>::new());
     }
 
     #[test]
@@ -4147,10 +4264,12 @@ resources = ["ghost.pdf"]
                 workspace_name: "lit-notes".into(),
                 brief: "整理笔记".into(),
                 expected_artifacts: vec!["notes/".into()],
+                acceptance_criteria: Vec::new(),
                 inputs: Vec::new(),
                 optional_inputs: Vec::new(),
                 any_of_inputs: Vec::new(),
                 skills: vec!["paper-notes".into()],
+                required_skills: Vec::new(),
                 resources: Vec::new(),
                 human_tasks: Vec::new(),
                 discussion_seeds: Vec::new(),

@@ -4330,8 +4330,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     >
       {/* 左栏：工作树（专注终端/专注内容下整体隐藏；无手动收起态） */}
       {!focusMode && !rightExpanded && (
-        <div className="flex w-60 shrink-0 flex-col border-r border-hairline bg-rail2">
-          <div className="flex h-9 shrink-0 items-center gap-2 px-2">
+        <div className="flex w-56 shrink-0 flex-col border-r border-hairline bg-rail2">
+          <div className="flex h-8 shrink-0 items-center gap-2 px-2">
             <span className="mr-auto text-xs font-medium text-l3">
               上下文
             </span>
@@ -4395,7 +4395,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       {/* 中带：终端标签区 */}
       <div className="relative flex min-w-0 flex-1 flex-col">
         {/* 顶部标签条：常驻中带顶部，专注终端下也保留在原位 */}
-        <div className="flex h-9 items-center gap-1 overflow-x-auto bg-strip px-2">
+        <div className="flex h-8 items-center gap-1 overflow-x-auto bg-strip px-2">
           {tabs.map((t, tabIndex) => {
             const s = statuses[t.id];
             const active = t.id === activeId;
@@ -4449,7 +4449,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   position: isDragSource ? "relative" : undefined,
                   zIndex: isDragSource ? 10 : undefined,
                 }}
-                className={`group/tab flex h-9 w-[130px] min-w-[100px] shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-2.5 text-xs ${
+                className={`group/tab flex h-8 w-[130px] min-w-[100px] shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-2.5 text-xs ${
                   active
                     ? "border-cta text-l1"
                     : "border-transparent text-l3 hover:text-l1"
@@ -4534,7 +4534,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               }}
               title="布局与显示层"
               aria-label="布局与显示层"
-              className="flex items-center gap-1 rounded-sm px-2 py-1 text-xs text-l4 hover:bg-hover hover:text-l2"
+              className="flex items-center gap-1 rounded-sm px-1.5 py-1 text-micro text-l4 hover:bg-hover hover:text-l2"
             >
               <LayoutPanelTop size={14} />
               布局
@@ -4549,7 +4549,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               }}
               title="终端操作（停止/恢复/接力/聊天/查找/修改）"
               aria-label="终端操作"
-              className="rounded-sm px-2 py-0.5 text-xs text-l4 hover:text-l2"
+              className="rounded-sm px-1.5 py-0.5 text-micro text-l4 hover:text-l2"
             >
               ⋯
             </button>
@@ -4842,10 +4842,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           </div>
           <div
             style={{ width: rightWidth }}
-            className="flex shrink-0 flex-col border-l border-hairline bg-raised"
+            className="flex shrink-0 flex-col border-l border-hairline bg-raised/70"
           >
             {/* 右侧工作台只保留文件与改动；聊天已经进入主工作区，避免同一会话重复显示。 */}
-            <div className="group flex h-9 shrink-0 items-center gap-1 bg-raised px-2">
+            <div className="group flex h-8 shrink-0 items-center gap-1 bg-raised/70 px-2">
               {RIGHT_TABS.map(({ key: k, label, symbol }) => {
                 const gitBadge =
                   k === "git" && gitTotals && gitTotals.add + gitTotals.del > 0
@@ -4857,7 +4857,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     onClick={() => setRightTab(k)}
                     onDoubleClick={toggleRightExpanded}
                     title={`${label}；双击${rightExpanded ? "退出专注内容" : "进入专注内容"}`}
-                    className={`flex h-8 shrink-0 items-center gap-1 rounded-sm px-2.5 text-xs ${
+                    className={`flex h-7 shrink-0 items-center gap-1 rounded-sm px-2.5 text-xs ${
                       rightTab === k
                         ? "bg-seg-sel text-l1"
                         : "text-l3 hover:text-l1"

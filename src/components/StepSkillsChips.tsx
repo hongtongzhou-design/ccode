@@ -9,6 +9,7 @@ import type { SkillDto } from "../types";
  * 增删的持久化由调用方负责（update_step_skills 写回 project.toml steps[].skills）。
  * mcpRecommended 命中的技能 chip 旁加「推荐 MCP」小标记，点击跳 MCP 页配置。
  * 给了 skillLib 时检测挂载技能的产物路径冲突（outputs 相交），chips 下方逐行 ⚠ 提示（v3.79）。
+ * 给了 requiredSkills/onRequiredChange 时，编辑器可在技能 chip 上切换必需/可选；未提供时保持只读兼容。
  */
 export default function StepSkillsChips({
   skills,
@@ -17,9 +18,13 @@ export default function StepSkillsChips({
   mcpRecommended,
   skillLib,
   onChange,
+  requiredSkills,
+  onRequiredChange,
 }: {
   /** 步骤当前挂载的技能名（project.toml steps[].skills） */
   skills: string[];
+  /** 必需技能子集；缺省兼容为全部必需，显式空数组表示全部可选。 */
+  requiredSkills?: string[];
   /** 技能库元数据（name → 一句话描述）；缺省时 chip 只显示名字 */
   skillMeta: Record<string, string> | undefined;
   /** 可编辑时的候选清单（已安装技能名，调用方排除已挂载与否均可，组件内再过滤一次） */
@@ -30,11 +35,16 @@ export default function StepSkillsChips({
   skillLib?: SkillDto[] | null;
   /** 提供 = 可编辑模式；增删后的完整 skills 数组经此回调 */
   onChange?: (next: string[]) => void;
+  /** 编辑必需技能子集；仅在步骤编辑器提供。 */
+  onRequiredChange?: (next: string[]) => void;
 }) {
   // 只读模式下点击 chip 展开描述（按技能名记忆展开态）
   const [expanded, setExpanded] = useState<string | null>(null);
   const setPage = useAppStore((s) => s.setPage);
   const editable = !!onChange;
+  const canEditRequired = editable && !!onRequiredChange;
+  const required = new Set(requiredSkills ?? skills);
+  const showRequirement = requiredSkills !== undefined;
   const candidates = (available ?? []).filter((name) => !skills.includes(name));
   const outputConflicts = skillLib ? skillOutputConflicts(skills, skillLib) : [];
   if (skills.length === 0 && !editable) return null;
@@ -55,6 +65,11 @@ export default function StepSkillsChips({
           const label = (
             <>
               {name}
+              {!editable && showRequirement && (
+                <span className="text-micro text-l4">
+                  （{required.has(name) ? "必需" : "可选"}）
+                </span>
+              )}
               {!(name in (skillMeta ?? {})) && (
                 <span className="text-micro text-l4">（未安装）</span>
               )}
@@ -68,6 +83,22 @@ export default function StepSkillsChips({
                 {editable ? (
                   <span className={chipClass} title={desc ?? name}>
                     {label}
+                    {canEditRequired && (
+                      <button
+                        type="button"
+                        className="rounded-sm px-1 text-micro text-l4 hover:text-l1"
+                        title={required.has(name) ? "改为可选技能" : "改为必需技能"}
+                        aria-label={`${name}：${required.has(name) ? "改为可选技能" : "改为必需技能"}`}
+                        onClick={() => {
+                          const next = new Set(required);
+                          if (next.has(name)) next.delete(name);
+                          else next.add(name);
+                          onRequiredChange([...next].filter((skill) => skills.includes(skill)));
+                        }}
+                      >
+                        {required.has(name) ? "必需" : "可选"}
+                      </button>
+                    )}
                     <button
                       type="button"
                       aria-label={`移除技能 ${name}`}

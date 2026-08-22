@@ -3,6 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { isLightTheme } from "./themes";
+import {
+  cycleBrandState,
+  enterChromeHidden,
+  exitChromeHidden,
+  toggleChromeHiddenState,
+} from "./nav-capsule";
 import { createSessionRefreshCoordinator } from "./session-refresh";
 import {
   dismissHelp,
@@ -60,6 +66,14 @@ export interface AppSettings {
   defaultProfiles?: Record<string, string>;
   /** 启动时进入哪一页（页面 id）；缺省 = workbench */
   startPage?: string;
+  /** 启动时的导航形态；缺省时尊重旧 navCollapsed 偏好 */
+  startupNavMode?: "expanded" | "collapsed" | "hidden";
+  /** 顶部导航胶囊离开后的自动隐藏延迟（毫秒） */
+  navCapsuleHideDelayMs?: number;
+  /** 顶部导航胶囊内容显示：both（符号+文字）/icons（仅符号）/labels（仅文字） */
+  navCapsuleDisplayMode?: "both" | "icons" | "labels";
+  /** 顶部导航胶囊中显示的入口 id；缺省 = 全部显示 */
+  navCapsuleVisibleItems?: string[];
   /** 「隐藏」的 profile id：只影响启动栏下拉分组（沉到「更多」），不删数据、不改启动行为 */
   hiddenProfiles?: string[];
   /** 对话页「⇗ 外部恢复」的终端应用；auto/undefined = 按优先级探测 */
@@ -249,9 +263,15 @@ interface AppState {
   setPage: (p: string) => void;
   /** 侧栏收缩状态（localStorage 持久化，品牌区点击切换） */
   navCollapsed: boolean;
+  setNavCollapsed: (collapsed: boolean) => void;
   toggleNavCollapsed: () => void;
   /** 执行态全隐藏侧栏 chrome（⌘\ 切换，session 级不持久化） */
   chromeHidden: boolean;
+  /** 进入完全隐藏前的普通侧栏状态；退出时恢复该值 */
+  chromeHiddenReturnCollapsed: boolean | null;
+  cycleNavState: () => void;
+  enterChromeHidden: () => void;
+  exitChromeHidden: () => void;
   toggleChromeHidden: () => void;
   /** 待消费的终端启动请求；终端页可见时消费并清空 */
   pendingTerminal: PendingTerminal | null;
@@ -423,13 +443,43 @@ export const useAppStore = create<AppState>((set, get) => {
   page: "workbench",
   setPage: (p) => set({ page: p }),
   navCollapsed: localStorage.getItem("ccode.navCollapsed") === "1",
+  setNavCollapsed: (collapsed) => {
+    localStorage.setItem("ccode.navCollapsed", collapsed ? "1" : "0");
+    set({ navCollapsed: collapsed });
+  },
   toggleNavCollapsed: () =>
     set((s) => {
       localStorage.setItem("ccode.navCollapsed", s.navCollapsed ? "0" : "1");
       return { navCollapsed: !s.navCollapsed };
-    }),
+  }),
   chromeHidden: false,
-  toggleChromeHidden: () => set((s) => ({ chromeHidden: !s.chromeHidden })),
+  chromeHiddenReturnCollapsed: null,
+  cycleNavState: () =>
+    set((s) => {
+      const next = cycleBrandState(s);
+      if (next.navCollapsed !== s.navCollapsed) {
+        localStorage.setItem("ccode.navCollapsed", next.navCollapsed ? "1" : "0");
+      }
+      return { ...s, ...next };
+    }),
+  enterChromeHidden: () =>
+    set((s) => ({ ...s, ...enterChromeHidden(s) })),
+  exitChromeHidden: () =>
+    set((s) => {
+      const next = exitChromeHidden(s);
+      if (next.navCollapsed !== s.navCollapsed) {
+        localStorage.setItem("ccode.navCollapsed", next.navCollapsed ? "1" : "0");
+      }
+      return { ...s, ...next };
+    }),
+  toggleChromeHidden: () =>
+    set((s) => {
+      const next = toggleChromeHiddenState(s);
+      if (next.navCollapsed !== s.navCollapsed) {
+        localStorage.setItem("ccode.navCollapsed", next.navCollapsed ? "1" : "0");
+      }
+      return { ...s, ...next };
+    }),
   pendingTerminal: null,
   setPendingTerminal: (p) => set({ pendingTerminal: p }),
   workspaceReviewRequest: null,

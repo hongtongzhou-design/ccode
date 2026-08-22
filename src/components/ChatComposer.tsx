@@ -149,7 +149,7 @@ export default function ChatComposer({
   }
 
   return (
-    <div className="ccode-chat-composer shrink-0 bg-canvas px-4 pb-5 pt-3">
+    <div className="ccode-chat-composer shrink-0 bg-canvas px-4 pb-4 pt-2.5">
       <div className="mx-auto w-full max-w-3xl">
         <div className="overflow-visible rounded-xl border border-hairline bg-raised transition-colors focus-within:border-l4">
           <textarea
@@ -166,11 +166,11 @@ export default function ChatComposer({
                 void submit();
               }
             }}
-            rows={3}
+            rows={2}
             placeholder={placeholder ?? "输入消息…"}
-            className="block max-h-40 min-h-24 w-full resize-none bg-transparent px-4 pb-2 pt-3 text-sm leading-6 text-l1 outline-none focus:outline-none focus-visible:outline-none focus-visible:outline-offset-0 placeholder:text-l4 disabled:cursor-not-allowed disabled:opacity-60"
+            className="block max-h-40 min-h-16 w-full resize-none bg-transparent px-4 pb-2 pt-3 text-sm leading-6 text-l1 outline-none focus:outline-none focus-visible:outline-none focus-visible:outline-offset-0 placeholder:text-l4 disabled:cursor-not-allowed disabled:opacity-60"
           />
-          <div className="flex min-h-11 items-center justify-between gap-2 px-3 pb-2">
+          <div className="flex min-h-10 items-center justify-between gap-2 px-3 pb-1.5">
             <div className="flex min-w-0 items-center gap-0.5">
               <ResourceMenu
                 kind="skill"
@@ -201,8 +201,8 @@ export default function ChatComposer({
             </button>
           </div>
         </div>
-        <div className="mt-2 text-center text-micro text-l4">
-          消息会发送到当前终端会话 · 同一 PTY、同一上下文
+        <div className="mt-1.5 text-center text-micro text-l4/70">
+          当前会话 · 同一上下文
         </div>
       </div>
     </div>

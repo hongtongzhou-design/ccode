@@ -87,6 +87,17 @@ export function renderTaskMd(
       ...step.expectedArtifacts.map((a) => `- ${a}`),
     );
   }
+  const acceptanceCriteria = (step.acceptanceCriteria ?? [])
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (acceptanceCriteria.length > 0) {
+    lines.push(
+      "",
+      "## 验收条件",
+      ...acceptanceCriteria.map((criterion) => `- ${criterion}`),
+      "逐条核对上述条件；仅文件存在不代表内容合格。无法核对的项标记为待人工确认。",
+    );
+  }
   // 人工事项（人机分工清单）：告知 agent 这些事归人做、交付物会出现在落点路径，
   // 不要代做也不要干等；执行中另需人协助时写 .ccode/help-wanted.md（非阻断，自带兜底句）
   const humanTasks = step.humanTasks ?? [];
@@ -100,7 +111,17 @@ export function renderTaskMd(
             ? "收尾"
             : "进行中";
       lines.push(
-        `- [${when}] ${h.title}${h.target ? ` → 交付落点 \`${h.target}\`` : ""}`,
+        `- [${when}] ${h.title}${h.target ? ` → 交付落点 \`${h.target}\`` : ""}` +
+          `${h.optional ? "（可选）" : "（必办）"}` +
+          ` · 完成判定：${
+            h.completion === "manual"
+              ? "人工确认"
+              : h.completion === "all"
+                ? `全部目标满足${h.expectedCount != null ? `（${h.expectedCount} 项）` : ""}`
+                : h.completion === "no_placeholders"
+                  ? "清除占位后完成"
+                  : "落点出现"
+          }`,
       );
     }
     lines.push(
@@ -109,20 +130,25 @@ export function renderTaskMd(
         "（每条一行「- 」开头，附「若未回复则按 ×× 继续」的兜底方案），写完按兜底继续，不要停工等待。",
     );
   }
-  // 步骤挂载技能（RX3b）：只列名称 + 一句话描述，技能本体不进 TASK.md（保持简报轻量）
+  // 步骤挂载技能：区分必需/可选，技能本体不进 TASK.md（保持简报轻量）
   if (step.skills.length > 0) {
-    lines.push("", "## 本步骤推荐技能");
+    // 旧模板未声明 requiredSkills 时，沿用历史「挂载即推荐且应执行」语义。
+    const required = new Set(step.requiredSkills ?? step.skills);
+    lines.push("", "## 本步骤技能");
     for (const name of step.skills) {
+      const prefix = required.has(name) ? "必需" : "可选";
       if (!skillMeta) {
-        lines.push(`- ${name}`);
+        lines.push(`- ${prefix}：${name}`);
       } else if (name in skillMeta) {
         const desc = skillMeta[name];
-        lines.push(desc ? `- ${name}：${desc}` : `- ${name}`);
+        lines.push(desc ? `- ${prefix}：${name}：${desc}` : `- ${prefix}：${name}`);
       } else {
-        lines.push(`- ${name}（未安装，可在技能页新建或导入）`);
+        lines.push(`- ${prefix}：${name}（未安装，可在技能页新建或导入）`);
       }
     }
-    lines.push("已分发到所启动 Agent 的技能自动生效；未分发可在技能页开启。");
+    lines.push(
+      "必需技能缺失时先记录帮助请求；可选技能缺失可继续，但不得假装已执行其检查。",
+    );
   }
   // 资源绑定（RX1）：步骤 resources 非空时「项目资源」段只列绑定项；空/缺省保持全部（向后兼容）
   const boundPaths = step.resources ?? [];
@@ -144,10 +170,40 @@ export function renderTaskMd(
       );
     }
   }
-  if (artifacts && artifacts.length > 0) {
+  const inputPatterns = [
+    ...(step.inputs ?? []),
+    ...(step.optionalInputs ?? []),
+    ...((step.anyOfInputs ?? []).flat()),
+  ]
+    .map((x) => x.trim().replace(/\\/g, "/"))
+    .filter(Boolean);
+  const wildcardMatches = (value: string, pattern: string) => {
+    if (pattern.endsWith("/")) {
+      const dir = pattern.replace(/\/+$/, "");
+      return value === dir || value.startsWith(`${dir}/`);
+    }
+    const escaped = pattern.replace(/[.+^${}()|[\\]\\\\]/g, "\\$&");
+    return new RegExp(`^${escaped.replace(/\*/g, ".*")}$`).test(value);
+  };
+  const scopedArtifacts =
+    inputPatterns.length === 0
+      ? artifacts ?? []
+      : (artifacts ?? []).filter((artifact) => {
+          const path = artifact.path.replace(/\\/g, "/");
+          const root = projectPath.replace(/[\\/]+$/, "").replace(/\\/g, "/");
+          const relative = path.startsWith(`${root}/`)
+            ? path.slice(root.length + 1)
+            : path;
+          const base = relative.split("/").pop() ?? relative;
+          return inputPatterns.some(
+            (pattern) =>
+              wildcardMatches(relative, pattern) || wildcardMatches(base, pattern),
+          );
+        });
+  if (scopedArtifacts && scopedArtifacts.length > 0) {
     // 提货单（§11.3 机制五）：上一步产物按路径直读，产物本体不进 git
     lines.push("", "## 上一步产物（提货单）");
-    for (const a of artifacts) {
+    for (const a of scopedArtifacts) {
       lines.push(
         `- ${a.name}：${a.path}（md5 ${a.hash.slice(0, 8)}，来自「${a.producedBy}」）`,
       );

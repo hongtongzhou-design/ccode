@@ -17,6 +17,7 @@ import QuickChatModal, {
   resumeSessionInTerminal,
 } from "./components/QuickChatModal";
 import QuickChatHistoryMenu from "./components/QuickChatHistoryMenu";
+import TopNavCapsule from "./components/TopNavCapsule";
 import { pickQuickChatSessions } from "./quick-chat";
 import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import { HoverTip, useHoverTip } from "./components/HoverTip";
@@ -33,6 +34,8 @@ import {
   IS_MAC,
 } from "./hotkeys";
 import { NAV_ICONS } from "./navigation-icons";
+import { NAV_GROUPS, NAV_BOTTOM } from "./navigation";
+import { normalizeNavCapsuleDelay, resolveStartupNavMode } from "./nav-capsule";
 
 // 页面懒加载：首屏只拉当前页 chunk，其余页首次访问时才加载
 const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
@@ -80,32 +83,6 @@ function RailTooltip({
   );
 }
 
-const NAV_GROUPS = [
-  {
-    label: "工作",
-    items: [
-      { id: "workbench", label: "工作台", Icon: NAV_ICONS.workbench },
-      { id: "workspaces", label: "项目", Icon: NAV_ICONS.workspaces },
-      { id: "terminal", label: "运行", Icon: NAV_ICONS.terminal },
-      { id: "sessions", label: "对话", Icon: NAV_ICONS.sessions },
-    ],
-  },
-  {
-    label: "资源",
-    items: [
-      { id: "profiles", label: "连接", Icon: NAV_ICONS.profiles },
-      { id: "skills", label: "技能", Icon: NAV_ICONS.skills },
-      { id: "mcp", label: "MCP", Icon: NAV_ICONS.mcp },
-    ],
-  },
-] as const;
-
-// 低频管理区与主路径分开：用量和设置都不抢工作流注意力。
-const NAV_BOTTOM = [
-  { id: "stats", label: "用量", Icon: NAV_ICONS.stats },
-  { id: "settings", label: "设置", Icon: NAV_ICONS.settings },
-] as const;
-
 /** 路径末段作项目名（通知标题用；与 WorkspacesPage pathBaseName 同口径） */
 function baseName(path: string): string {
   const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
@@ -127,8 +104,9 @@ function App() {
   const page = useAppStore((s) => s.page);
   const setPage = useAppStore((s) => s.setPage);
   const collapsed = useAppStore((s) => s.navCollapsed);
-  const toggleCollapsed = useAppStore((s) => s.toggleNavCollapsed);
+  const cycleNavState = useAppStore((s) => s.cycleNavState);
   const chromeHidden = useAppStore((s) => s.chromeHidden);
+  const exitChromeHidden = useAppStore((s) => s.exitChromeHidden);
   const toggleChromeHidden = useAppStore((s) => s.toggleChromeHidden);
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 「快速开聊」弹层：侧栏常驻入口与 ⌘K 命令共用同一个宿主
@@ -214,6 +192,9 @@ function App() {
   // 隐藏/显示侧栏（默认 ⌘\）、页切逐页绑定（默认 ⌘1–⌘9，hotkeyPages 按页覆盖 + 整组总开关）。
   // 空串 = 禁用；⌘F 已被终端搜索占用故不用。
   const settings = useAppStore((s) => s.settings);
+  const navCapsuleDelay = normalizeNavCapsuleDelay(
+    settings?.navCapsuleHideDelayMs,
+  );
   // 顶栏命令面板入口的键位标签：跟随设置页自定义绑定；禁用（空串）时回落默认展示
   const paletteComboLabel = comboLabel(settings?.hotkeyPalette || "mod+k");
   useEffect(() => {
@@ -307,13 +288,22 @@ function App() {
     return () => unlisten?.();
   }, []);
 
-  // 启动页（设置页可选）：设置载入后只应用一次，之后用户翻页不受影响
+  // 启动页与导航形态（设置页可选）：设置载入后只应用一次，之后用户手动切换不受影响。
   const startPageAppliedRef = useRef(false);
   useEffect(() => {
     if (startPageAppliedRef.current || !settings) return;
     startPageAppliedRef.current = true;
     const target = settings.startPage;
     if (target && target !== page) setPage(target);
+    const legacyCollapsed = localStorage.getItem("ccode.navCollapsed") === "1";
+    const mode = resolveStartupNavMode(settings.startupNavMode, legacyCollapsed);
+    const store = useAppStore.getState();
+    if (mode === "hidden") {
+      store.enterChromeHidden();
+    } else {
+      store.setNavCollapsed(mode === "collapsed");
+      if (store.chromeHidden) store.exitChromeHidden();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
@@ -384,7 +374,7 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <div className="ccode-app-shell flex h-full flex-col overflow-hidden bg-rail text-l2">
+      <div className="ccode-app-shell relative flex h-full flex-col overflow-hidden bg-rail text-l2">
         {/* macOS 自绘标题栏（titleBarStyle: Overlay + hiddenTitle）：纯拖拽区 +
             Ghostty 式标题栏收件箱（按类别拆胶囊，点胶囊向下展开该类明细，遮罩/Esc/再点关闭）。
             窗口标题不在界面渲染（用户拍板删除，标题字符串仍保留在 tauri 配置里供自动化定位窗口）。
@@ -531,6 +521,28 @@ function App() {
               )}
             </div>
         </header>
+        {chromeHidden && (
+          <TopNavCapsule
+            page={page}
+            onPage={setPage}
+            onQuickChat={() => {
+              if (quickChatSkipEnabled()) {
+                void launchQuickChatDirect().then((ok) => {
+                  if (!ok) setQuickChatOpen(true);
+                });
+              } else {
+                setQuickChatOpen(true);
+              }
+            }}
+            onQuickChatContextMenu={(e) => void openQuickChatMenu(e)}
+            onRestore={exitChromeHidden}
+            runningCount={visibleRunningCount}
+            inboxCount={inboxCount}
+            hideDelayMs={navCapsuleDelay}
+            displayMode={settings?.navCapsuleDisplayMode}
+            visibleItems={settings?.navCapsuleVisibleItems}
+          />
+        )}
         {titleInboxCat !== null && (
           <div
             className="fixed inset-0 z-20"
@@ -545,10 +557,10 @@ function App() {
             collapsed ? "w-14" : "w-48"
           }`}
         >
-          {/* 品牌区同时承担侧栏收起/展开，避免额外占用一个操作位。 */}
+          {/* 品牌区在展开与图标侧栏之间切换；完全隐藏由 ⌘\\、命令面板或顶部胶囊控制。 */}
           <button
             type="button"
-            onClick={toggleCollapsed}
+            onClick={cycleNavState}
             title={collapsed ? "展开侧栏" : "收起为图标"}
             className={`ccode-brand-bar flex h-12 shrink-0 select-none items-center text-left text-l1 ${
               collapsed ? "justify-center text-sm" : "px-3"

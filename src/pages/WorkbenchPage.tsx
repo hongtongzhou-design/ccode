@@ -2,13 +2,11 @@ import { useEffect, useMemo } from "react";
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
-  ArrowUpRight,
   ChevronRight,
   CircleDot,
   FolderOpen,
   MessageSquare,
   MessagesSquare,
-  Play,
 } from "lucide-react";
 import { useAppStore, runInboxAction } from "../store";
 import { buildRunOverview } from "../run-overview";
@@ -41,9 +39,9 @@ function SectionHeading({
   action?: ReactNode;
 }) {
   return (
-    <div className="mb-3 flex items-center gap-2">
-      <Icon size={15} strokeWidth={1.8} className={iconClass} aria-hidden="true" />
-      <h2 className="text-sm font-medium text-l1">{title}</h2>
+    <div className="mb-2.5 flex items-center gap-2 px-1">
+      <Icon size={14} strokeWidth={1.8} className={iconClass} aria-hidden="true" />
+      <h2 className="text-xs font-medium text-l2">{title}</h2>
       {action && <div className="ml-auto">{action}</div>}
     </div>
   );
@@ -78,6 +76,7 @@ function WorkbenchPage({
     Object.keys(liveSessions).length;
   const recentSessions = sessions.slice(0, 6);
   const currentProject = contextLabel?.project ?? recentRepos[0]?.name ?? null;
+  const hasProjectContext = Boolean(contextLabel?.project);
 
   return (
     <PageFrame width="fluid" className="pb-12">
@@ -104,11 +103,11 @@ function WorkbenchPage({
         }
       />
 
-      <div className="grid gap-10 xl:grid-cols-[minmax(0,1.45fr)_minmax(18rem,0.75fr)]">
+      <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,0.42fr)]">
         <section className="min-w-0">
-          <div className="mb-3 flex items-center gap-2">
-            <CircleDot size={15} strokeWidth={1.8} className="text-nav-accent" aria-hidden="true" />
-            <h2 className="text-sm font-medium text-l1">继续当前工作</h2>
+          <div className="mb-2.5 flex items-center gap-2 px-1">
+            <CircleDot size={14} strokeWidth={1.8} className="text-nav-accent" aria-hidden="true" />
+            <h2 className="text-xs font-medium text-l2">继续当前工作</h2>
             {runningCount > 0 && (
               <span className="rounded-full bg-ok px-2 py-0.5 text-micro text-ok-text">
                 {runningCount} 个运行中
@@ -117,18 +116,18 @@ function WorkbenchPage({
           </div>
 
           {currentProject ? (
-            <div className="rounded-lg border border-hairline bg-raised p-5">
+            <div className="rounded-lg border border-hairline bg-raised/55 p-5 shadow-[0_1px_0_rgb(255_255_255_/_.02)]">
               <div className="flex flex-wrap items-start justify-between gap-5">
                 <div className="min-w-0">
-                  <p className="truncate text-lg font-medium tracking-tight text-l1">
+                  <p className="truncate text-xl font-medium tracking-tight text-l1">
                     {currentProject}
                   </p>
-                  <p className="mt-1.5 text-sm text-l3">
-                    {contextLabel?.step ?? "项目上下文已就绪"}
+                  <p className="mt-1 text-sm text-l3">
+                    {contextLabel?.step ?? (hasProjectContext ? "项目上下文已就绪" : "最近打开的项目")}
                   </p>
-                  {recentRepos[0]?.path && (
+                  {recentRepos[0]?.path && recentRepos[0].name === currentProject && (
                     <p
-                      className="mt-4 truncate font-mono text-micro text-l4"
+                      className="mt-3 truncate font-mono text-micro text-l4"
                       title={recentRepos[0].path}
                     >
                       {recentRepos[0].path}
@@ -143,9 +142,15 @@ function WorkbenchPage({
                   继续工作
                 </button>
               </div>
-              <div className="mt-5 flex items-center gap-2 text-xs text-l4">
+              <div className="mt-4 flex items-center gap-2 border-t border-hairline pt-3 text-xs text-l4">
                 <span className="size-1.5 rounded-full bg-ok-text" />
-                <span>{runningCount > 0 ? "Agent 正在工作" : "准备好从上次位置继续"}</span>
+                <span>
+                  {runningCount > 0
+                    ? "Agent 正在工作"
+                    : hasProjectContext
+                      ? "准备好从上次位置继续"
+                      : "可从最近位置继续"}
+                </span>
               </div>
             </div>
           ) : (
@@ -190,7 +195,7 @@ function WorkbenchPage({
             }
           />
           {inboxItems.length === 0 ? (
-            <p className="rounded-md bg-strip px-3 py-5 text-sm text-l3">
+            <p className="rounded-md bg-strip/60 px-3 py-4 text-sm text-l3">
               暂时没有待处理事项。
             </p>
           ) : (
@@ -218,7 +223,7 @@ function WorkbenchPage({
         </section>
       </div>
 
-      <div className="mt-12 grid gap-10 lg:grid-cols-2">
+      <div className="mt-10 grid gap-8 lg:grid-cols-2">
         <section className="min-w-0">
           <SectionHeading
             icon={FolderOpen}
@@ -237,7 +242,7 @@ function WorkbenchPage({
                 <button
                   key={repo.path}
                   type="button"
-                  className="group flex min-h-10 w-full items-center gap-3 rounded-md px-2.5 text-left transition-colors hover:bg-hover"
+                  className="group flex min-h-9 w-full items-center gap-3 rounded-md px-2.5 text-left transition-colors hover:bg-hover"
                   onClick={() => setPage("workspaces")}
                 >
                   <FolderOpen size={15} strokeWidth={1.8} className={iconClass} aria-hidden="true" />
@@ -273,7 +278,7 @@ function WorkbenchPage({
                 <button
                   key={`${session.agent}:${session.sessionId}`}
                   type="button"
-                  className="group flex min-h-10 w-full items-center gap-3 rounded-md px-2.5 text-left transition-colors hover:bg-hover"
+                  className="group flex min-h-9 w-full items-center gap-3 rounded-md px-2.5 text-left transition-colors hover:bg-hover"
                   onClick={() => setPage("sessions")}
                 >
                   <MessageSquare size={15} strokeWidth={1.8} className={iconClass} aria-hidden="true" />
@@ -292,17 +297,6 @@ function WorkbenchPage({
         </section>
       </div>
 
-      {currentProject && (
-        <button
-          type="button"
-          className="mt-10 inline-flex items-center gap-1.5 text-xs text-l3 transition-colors hover:text-l1"
-          onClick={() => setPage("terminal")}
-        >
-          <Play size={13} strokeWidth={1.8} aria-hidden="true" />
-          打开运行工作台
-          <ArrowUpRight size={13} strokeWidth={1.8} aria-hidden="true" />
-        </button>
-      )}
     </PageFrame>
   );
 }

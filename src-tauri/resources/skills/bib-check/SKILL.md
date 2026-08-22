@@ -22,7 +22,7 @@ outputs: [manuscript/citation-check.md]
 
 ### 2. 引用键核对
 
-- 从正文提取全部 `[@key]` 形式的引用键；
+- 从正文提取全部 `[@key]` 形式的引用键；LaTeX 稿件同时提取 `\\cite{key}`、`\\citep{key}`、`\\citet{key}`、`\\parencite{key}`、`\\textcite{key}`、`\\autocite{key}` 等命令中的键，逗号分隔的多键逐个展开。检查范围在报告开头注明（Markdown / LaTeX / 两者）；
 - 每个键必须在 `references.bib` 中存在——缺失的列入报告「未解析引用」节（含出现位置：节+行号）；
 - 占位引用扫描：正文中 `[CITATION NEEDED]`、`TODO: 补引用` 等占位标记列入「未解析引用」节（含位置）；
 - bib 重复键：同一键出现多条会静默覆盖前一条，列为 Critical 列入「重复 bib 键」节；
@@ -37,7 +37,7 @@ outputs: [manuscript/citation-check.md]
 
 ### 4. 全文对应核对
 
-- 若项目存在 `papers/included.md`：bib 条目应与清单中的文献对应，清单有而 bib 无、bib 有而清单无的分别列出；
+- 若项目存在 `papers/included.md`：bib 条目应与清单中的文献对应，清单有而 bib 无、bib 有而清单无的分别列出；LaTeX 项目若存在 `\\bibliography{...}` 或 `\\addbibresource{...}`，记录实际使用的 bib 文件；
 - 若项目存在 `papers/` 目录：抽查 bib 条目是否有对应 PDF（按「作者年份-短标题」命名口径匹配）；清单中标注「需自行获取」的跳过并在报告中计数说明。
 
 ### 5. 外部元数据核验（可选，联网工具可用时）

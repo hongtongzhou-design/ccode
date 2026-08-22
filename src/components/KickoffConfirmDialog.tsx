@@ -459,6 +459,7 @@ export default function KickoffConfirmDialog({
             mentionsMcp 的技能带「推荐 MCP」标记（点击跳 MCP 页配置） */}
         <StepSkillsChips
           skills={stepNow.skills}
+          requiredSkills={stepNow.requiredSkills}
           skillMeta={skillMeta}
           available={skillLib?.map((s) => s.name)}
           mcpRecommended={skillLib
