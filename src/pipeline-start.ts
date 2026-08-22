@@ -59,6 +59,23 @@ export function renderTaskMd(
       "",
     );
   }
+  const inputs = (step.inputs ?? []).map((x) => x.trim()).filter(Boolean);
+  const optionalInputs = (step.optionalInputs ?? [])
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const anyOfInputs = (step.anyOfInputs ?? [])
+    .map((group) => group.map((x) => x.trim()).filter(Boolean))
+    .filter((group) => group.length > 0);
+  if (inputs.length > 0 || optionalInputs.length > 0 || anyOfInputs.length > 0) {
+    lines.push(
+      "## 本步骤输入",
+      ...inputs.map((input) => `- 必需：${input}`),
+      ...optionalInputs.map((input) => `- 可选：${input}`),
+      ...anyOfInputs.map((group) => `- 任一：${group.join(" 或 ")}`),
+      "按上述规则读取上游产物或项目资源；必需输入缺失时先在 .ccode/help-wanted.md 说明，不要猜测替代输入；可选输入缺失可继续，任一组满足一项即可。",
+      "",
+    );
+  }
   lines.push(
     step.brief.trim() ||
       "（在 .ccode/project.toml 的 steps.brief 中补充本步骤任务简报）",

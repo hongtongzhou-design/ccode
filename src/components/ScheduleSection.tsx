@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
-import { Toggle, fieldClass } from "./PageFrame";
+import { inlineActionClass, Toggle, fieldClass } from "./PageFrame";
 import { useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
 import {
@@ -23,8 +23,7 @@ import type {
   SkillDto,
 } from "../types";
 
-const actionBtn =
-  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50";
+const actionBtn = inlineActionClass;
 
 /** 历史条目最多展开显示条数（DTO 保留最近 20 条，行内只看最近几条） */
 const HISTORY_PREVIEW = 5;

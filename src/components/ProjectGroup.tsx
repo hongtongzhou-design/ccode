@@ -16,7 +16,14 @@ import ScheduleSection from "./ScheduleSection";
 import LitWatchCard from "./LitWatchCard";
 import KickoffConfirmDialog from "./KickoffConfirmDialog";
 import { HoverTip, useHoverTip } from "./HoverTip";
-import { Checkbox, hoverRevealClass, NoticeBar } from "./PageFrame";
+import {
+  Checkbox,
+  compactFieldClass,
+  compactPrimaryActionClass,
+  hoverRevealClass,
+  inlineActionClass,
+  NoticeBar,
+} from "./PageFrame";
 import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import { startPipelineStep } from "../pipeline-start";
@@ -38,12 +45,9 @@ import type { RunOverviewInput } from "../run-overview";import type {
   WorkspaceHealthDto,
 } from "../types";
 
-const actionBtn =
-  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1";
-const ctaSm =
-  "inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
-const fieldSm =
-  "h-7 rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
+const actionBtn = inlineActionClass;
+const ctaSm = compactPrimaryActionClass;
+const fieldSm = compactFieldClass;
 
 // 家目录（项目路径缩略 ~ 显示用）：模块级缓存，全部项目组共用一次查询
 let homeDirPromise: Promise<string> | null = null;
@@ -63,9 +67,13 @@ export function abbrevHome(path: string, home: string): string {
 /** 步进器带级整条虚线链：真实 6×6px 方块按 12px 等距（6px 块 + 6px 间隙）铺满整个带宽。
  *  块位以圆心为锚分段计算（圆是列中心，列等宽，段长相等）——每个圆两侧的断口、
  *  每个步骤之间的块数与间隙严格一致（按全局相位铺排时圆会随机截断方块，用户反馈不规则）。
- *  段内余数（<12px）：步骤间段落对称均分、首段沉到最左端、尾段沉到末圆旁——
- *  末端方块贴齐链尾，菱形前保持 6px 标准间隙（余数若沉菱形前，该间隙最大 17px，用户反馈过远）。
+ *  段内余数（<12px）均摊到方块之间；圆旁的首尾断口固定，不随窗口宽度漂移。
  *  完成列区间内的块亮灰白（l2）、其余暗（hairline），300ms 颜色过渡 */
+const STEPPER_BLOCK_PX = 6;
+const STEPPER_GAP_PX = 6;
+const STEPPER_PITCH_PX = STEPPER_BLOCK_PX + STEPPER_GAP_PX;
+// 这里不能用 Tailwind 的 gap-1.5：项目根字号是 14px，它实际等于 5.25px，
+// 会让按 6px 计算的虚线链与每列圆心逐列产生累计偏差。
 const NODE_HALF = 17; // 圆遮罩半宽：22px 视觉圆（半径 11）+ 6px 语义空档——与块间间隙精确相等
 function StepperChain({
   dones,
@@ -89,25 +97,29 @@ function StepperChain({
   const blocks: { left: number; done: boolean }[] = [];
   if (width > 0 && nSteps > 0) {
     // 与下方 grid 完全相同的列几何：列间隙 6px，列 i 圆心 = i*(列宽+6) + 列宽/2
-    const colW = (width - 6 * (nSteps - 1)) / nSteps;
-    const center = (i: number) => i * (colW + 6) + colW / 2;
+    const colW = (width - STEPPER_GAP_PX * (nSteps - 1)) / nSteps;
+    const center = (i: number) =>
+      i * (colW + STEPPER_GAP_PX) + colW / 2;
     for (let seg = 0; seg <= nSteps; seg++) {
       const start = seg === 0 ? 0 : center(seg - 1) + NODE_HALF;
       const end = seg === nSteps ? width : center(seg) - NODE_HALF;
       const len = end - start;
-      const m = Math.max(0, Math.floor((len + 6) / 12));
-      if (m === 0) continue;
-      // 段内余数：首段贴圆（余数落左带缘）、尾段贴菱形（余数落末圆旁，末端方块贴齐链尾），
-      // 中间段对称均分——中间段布局完全相同
-      const extra = len - (12 * m - 6);
-      const offset =
-        seg === 0 || seg === nSteps ? extra : Math.floor(extra / 2);
+      if (len < STEPPER_BLOCK_PX) continue;
+      const m = Math.max(
+        1,
+        Math.floor((len + STEPPER_GAP_PX) / STEPPER_PITCH_PX),
+      );
+      // 两端方块分别贴住圆遮罩边界；剩余像素只均摊到段内间隙，
+      // 避免窗口变宽时余数累积到圆旁，造成右侧断口越来越远。
+      const extra = len - (STEPPER_PITCH_PX * m - STEPPER_GAP_PX);
+      const pitch =
+        m > 1 ? STEPPER_PITCH_PX + extra / (m - 1) : STEPPER_PITCH_PX;
       for (let b = 0; b < m; b++) {
-        const left = start + offset + b * 12;
-        const xCenter = left + 3;
+        const left = start + b * pitch;
+        const xCenter = left + STEPPER_BLOCK_PX / 2;
         const col = Math.min(
           nSteps - 1,
-          Math.max(0, Math.floor(xCenter / (colW + 6))),
+          Math.max(0, Math.floor(xCenter / (colW + STEPPER_GAP_PX))),
         );
         blocks.push({ left, done: dones[col] });
       }
@@ -119,7 +131,7 @@ function StepperChain({
         {blocks.map((b, i) => (
           <span
             key={i}
-            className={`absolute top-1/2 block h-1.5 w-1.5 -translate-y-1/2 rounded-[1px] transition-colors duration-300 ${
+            className={`absolute top-1/2 block size-[6px] -translate-y-1/2 rounded-[1px] transition-colors duration-300 ${
               b.done ? "bg-l2" : "bg-hairline"
             }`}
             style={{ left: b.left }}
@@ -178,7 +190,7 @@ function StepperCell({
           type="button"
           disabled={circleDisabled}
           aria-label={circleLabel}
-          className="group/circle flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-full disabled:cursor-not-allowed"
+          className="group/circle flex h-[28px] w-[28px] shrink-0 cursor-pointer items-center justify-center rounded-full disabled:cursor-not-allowed"
           onClick={() => {
             // 点击即关 tooltip：聚焦后不留残留悬浮
             hideTip();
@@ -265,7 +277,8 @@ function stepCircleClass(key: StepStatusKey): string {
   // 阻塞用 warn 的「文字/圆点」档而非底色档：底色档在浅色主题是浅黄（#fdf1cd），
   // 铺成 22px 实心圆会在近白 canvas 上消失；且同为实心圆的 done 本就用 -text 档口径
   if (key === "blocked") return "bg-warn-text";
-  if (key === "review") return "bg-cta-pill";
+  // 评审圆是实心状态形状，使用强调色文字档；深色主题的 cta-pill 底会显成深红块。
+  if (key === "review") return "bg-cta-pill-text";
   if (key === "active" || key === "checking") return "bg-cta";
   // 待开始：实心灰圆
   return "bg-l4";
@@ -648,17 +661,21 @@ export default function ProjectGroup({
     if (cfg.steps.length === 0) {
       setApplyingTemplate(true);
       try {
-        await invoke("append_pipeline_steps", {
+        await invoke("apply_pipeline_template", {
           projectRoot: projectPath,
           steps: item.steps,
+          projectSettings: item.projectSettings ?? [],
+          strategy: "append",
+          topic: templateTopic.trim() || null,
+          submissionMode:
+            item.id === "submission-rebuttal" ? item.mode ?? "initial" : null,
+          submissionRound:
+            item.id === "submission-rebuttal" && item.mode === "revision"
+              ? item.round ?? 1
+              : null,
         });
-        // 与编辑器「＋ 从模板追加」同一口径：重读配置刷新本地状态（含清掉的 opt-out 标记）
-        const fresh = await reloadCfg(projectPath);
-        // 首启横幅里的可选课题主题：append 不碰 topic，变了才单独写回
-        const topic = templateTopic.trim();
-        if (fresh && topic && topic !== (fresh.topic ?? "")) {
-          await saveConfig({ ...fresh, topic });
-        }
+        // 与编辑器及注册后选择层同一事务口径：重读配置刷新本地状态
+        await reloadCfg(projectPath);
         setPickerOpen(false);
         // 模板选完就该看到步进器，别把抽屉留在前面挡着
         setSettingsOpen(false);
@@ -680,14 +697,28 @@ export default function ProjectGroup({
     )
       return;
     setApplyingTemplate(true);
-    // 模板只填 steps（+ 可选课题主题）；resources/artifactDir 保持现状，
-    // 更换模板时模板输入框不渲染，topic 为空则保留既有课题主题
-    const topic = templateTopic.trim();
-    const ok = await saveConfig({
-      ...cfg,
-      topic: topic || cfg.topic || null,
-      steps: item.steps.map((s) => ({ ...s })),
-    });
+    // 后端一次性处理步骤替换、全局设定、投稿元数据、topic 与 opt-out；
+    // resources/artifactDir 保持现状。
+    let ok = true;
+    try {
+      await invoke("apply_pipeline_template", {
+        projectRoot: projectPath,
+        steps: item.steps.map((s) => ({ ...s })),
+        projectSettings: item.projectSettings ?? [],
+        strategy: "replace",
+        topic: templateTopic.trim() || null,
+        submissionMode:
+          item.id === "submission-rebuttal" ? item.mode ?? "initial" : null,
+        submissionRound:
+          item.id === "submission-rebuttal" && item.mode === "revision"
+            ? item.round ?? 1
+            : null,
+      });
+    } catch (reason) {
+      ok = false;
+      onError(String(reason));
+    }
+    if (ok) await reloadCfg(projectPath);
     setApplyingTemplate(false);
     if (ok) {
       setPickerOpen(false);
@@ -1104,22 +1135,16 @@ export default function ProjectGroup({
   }
 
   // ===== 渲染 =====
-  // 分组头状态聚合（CAO 风格小圆点计数）：只统计活跃工作区，全零不显示
-  const groupCounts = { active: 0, review: 0, blocked: 0 };
+  // 分组头只保留需要用户介入的阻塞提醒；进行中/待评审由下方流程线表达。
+  let blockedCount = 0;
   for (const ws of workspaces) {
     if (ws.status !== "active") continue;
     const h = health[ws.id];
     const d = drift[ws.id];
     if (d?.canResolveMerge === true || h?.conflict === true) {
-      groupCounts.blocked += 1;
-    } else if (h?.readyToMerge === true) {
-      groupCounts.review += 1;
-    } else {
-      groupCounts.active += 1;
+      blockedCount += 1;
     }
   }
-  const groupCountsTotal =
-    groupCounts.active + groupCounts.review + groupCounts.blocked;
   // 步骤状态表：每步算一次，下面各处派生共用同一份快照。
   // 原先 7 处各调一次 deriveStepStatus，每次都遍历 workspaces——N 步项目每渲染要跑 2N+ 次
   // find（describeStep 与 currentStep 还会互相嵌套调用）。纯派生无副作用，
@@ -1331,7 +1356,7 @@ export default function ProjectGroup({
     // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给研究流程等必要块
     <section className="mb-5">
       {/* 项目身份行：区间分隔一律用留白，不画横线（去线条化，v3.85；同 PageHeader 口径） */}
-      <div className="flex min-h-12 min-w-0 items-center gap-2 px-4 pb-3 pt-2.5">
+      <div className="flex min-h-14 min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 px-3 pb-3 pt-2.5">
         {renamingProject ? (
           <form
             onSubmit={submitRenameProject}
@@ -1404,30 +1429,15 @@ export default function ProjectGroup({
             未添加
           </span>
         )}
-        {groupCountsTotal > 0 && (
+        {blockedCount > 0 && (
           <span className="flex shrink-0 items-center gap-2 text-xs text-l3">
-            {/* 进行中/待评审是纯状态（不阻塞决策），用灰点；只有「阻塞」够格用语义色 */}
-            {groupCounts.active > 0 && (
-              <span className="flex items-center gap-1">
-                <span className="size-2 rounded-full bg-l4" />
-                {groupCounts.active} 进行中
-              </span>
-            )}
-            {groupCounts.review > 0 && (
-              <span className="flex items-center gap-1">
-                <span className="size-2 rounded-full bg-l4" />
-                {groupCounts.review} 待评审
-              </span>
-            )}
-            {groupCounts.blocked > 0 && (
-              <span className="flex items-center gap-1">
-                <span className="size-2 rounded-full bg-err-text" />
-                {groupCounts.blocked} 阻塞
-              </span>
-            )}
+            <span className="flex items-center gap-1">
+              <span className="size-2 rounded-full bg-err-text" />
+              {blockedCount} 阻塞
+            </span>
           </span>
         )}
-        {/* 校验提示（项目配置级，属于项目头而非研究流程条）：⚠ 徽标点开展开逐条全文浮层 */}
+        {/* 校验提示（项目配置级，属于项目头而非研究流程条）：单色语义徽标点开展开逐条全文浮层 */}
         {cfgWarnings.length > 0 && (
           <span className="relative shrink-0">
             <button
@@ -1437,7 +1447,7 @@ export default function ProjectGroup({
               className="rounded-sm px-1 text-xs text-warn-text hover:bg-hover"
               onClick={() => setWarnOpen((v) => !v)}
             >
-              ⚠ {cfgWarnings.length}
+              ! {cfgWarnings.length}
             </button>
             {warnOpen && (
               <>
@@ -1457,7 +1467,7 @@ export default function ProjectGroup({
           </span>
         )}
         <span
-          className="min-w-0 truncate font-mono text-xs text-l3"
+          className="min-w-0 max-w-[28rem] truncate font-mono text-xs text-l3"
           title={projectPath}
         >
           {abbrevHome(projectPath, homeDir)}
@@ -1491,7 +1501,7 @@ export default function ProjectGroup({
       </div>
 
       {/* 分组主体：左侧 1px 缩进线 + 透明度分层，保持原 p-4 留白节奏 */}
-      <div className="border-l border-white/5 p-4">
+      <div className="border-l border-white/5 pb-4 pl-3 pr-1">
       {editingTopic && cfg && (
         <form onSubmit={submitTopic} className="mb-2 flex items-center gap-1">
           <input
@@ -1647,6 +1657,27 @@ export default function ProjectGroup({
           （块位以圆心为锚分段等距计算，跨列无边界、各圆两侧断口一致），圆以 strip 底色遮罩压在链上 */}
       {registered && cfg && cfg.steps.length > 0 && (
         <div className="mb-3 rounded-md bg-strip px-3 py-2.5">
+          {cfg.steps.some((step) => step.role === "you" || step.role === "both") && (
+            <div
+              className="mb-1 flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-micro text-l4"
+              role="note"
+              aria-label="步骤角色提示"
+            >
+              <span>角色提示</span>
+              {cfg.steps.some((step) => step.role === "you") && (
+                <span className="inline-flex items-center gap-1">
+                  <span className="size-1.5 rounded-full bg-cta" aria-hidden />
+                  你主要负责
+                </span>
+              )}
+              {cfg.steps.some((step) => step.role === "both") && (
+                <span className="inline-flex items-center gap-1">
+                  <span className="size-1.5 rounded-full bg-l4" aria-hidden />
+                  你和 AI 一起定
+                </span>
+              )}
+            </div>
+          )}
           {/* 等分列网格：列宽下限 9rem 让更多步骤在常规窗口内完整可见；
               窗口过窄放不下全部步骤时保持整体横向滚动（不换行，虚线与各列大圆同轴） */}
           {/* 横向滚动容器必须显式 overflow-y-clip：overflow-x:auto 会把 y 轴也算成 auto，
@@ -1655,14 +1686,14 @@ export default function ProjectGroup({
             <div
               className="min-w-full"
               style={{
-                minWidth: `calc(${cfg.steps.length} * 9rem + ${cfg.steps.length - 1} * 0.375rem + 20px)`,
+                minWidth: `calc(${cfg.steps.length} * 9rem + ${cfg.steps.length - 1} * ${STEPPER_GAP_PX}px + 20px)`,
               }}
             >
               {/* 名称带：居中截断（悬浮全称）；⋯ 步骤菜单 hover/聚焦才现。
                   末尾占位与步进器带的终点菱形同宽（10px），两条带的列严格对齐 */}
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-[6px]">
                 <ol
-                  className="grid min-w-0 flex-1 gap-1.5"
+                  className="grid min-w-0 flex-1 gap-[6px]"
                   style={{
                     gridTemplateColumns: `repeat(${cfg.steps.length}, minmax(9rem, 1fr))`,
                   }}
@@ -1716,10 +1747,10 @@ export default function ProjectGroup({
               {/* 步进器带：StepperChain 在带级把虚线链一次铺满（6px 块 + 6px 间隙，跨列连续无边界），
                   圆用 strip 底色遮罩压在链上；与名称带同列同隙。
                   末端菱形 = 流程终点符号（装饰，无点击），全部步骤完成后点亮 */}
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-[6px]">
                 <StepperChain dones={stepDoneFlags}>
                   <ol
-                    className="relative grid gap-1.5"
+                    className="relative grid gap-[6px]"
                     style={{
                       gridTemplateColumns: `repeat(${cfg.steps.length}, minmax(9rem, 1fr))`,
                     }}
@@ -1800,16 +1831,21 @@ export default function ProjectGroup({
               </div>
             </div>
           </div>
+          {cfg.steps.length > 5 && (
+            <p className="mt-1 text-center text-micro text-l4">
+              步骤较多，可左右滚动查看后续步骤 →
+            </p>
+          )}
         </div>
       )}
 
-      {/* 应用模板成功的一次性引导条（顺序引导的入口提示）：把视线引到第 1 步与种子，可关 */}
+      {/* 应用模板成功的一次性引导条（顺序引导的入口提示）：把视线引到第 1 步，可关 */}
       {tplApplied && (
         <NoticeBar
           tone="info"
           className="mb-3"
           onDismiss={() => setTplApplied(false)}
-        >研究流程已就位。先到第 1 步「定方向」答几道选择题，再点「开始」。</NoticeBar>
+        >研究流程已就位。先打开第 1 步，按流程线确认输入与人工事项，再点「开始」。</NoticeBar>
       )}
 
       {/* 人工事项清单已并入聚焦视图（TaskCardsSection 聚焦步骤时顶部渲染）；原 ⋯ 手风琴面板删除 */}
@@ -2106,7 +2142,7 @@ export default function ProjectGroup({
                     folder: "我有一堆 PDF / 题录",
                   }[cfg.litSource?.trim() || "search"] ?? "让 agent 检索"}
                 </span>
-                <span className="text-micro text-l4" title="在流程线的「定方向 → 输入」里更改">
+                <span className="text-micro text-l4" title="在流程线的「确定文献来源」里更改">
                   在流程线里改
                 </span>
               </div>

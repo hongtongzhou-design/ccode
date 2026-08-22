@@ -344,7 +344,7 @@ export default function KickoffConfirmDialog({
         {/* 主仓改动协同（只提醒不阻断）：想法期实验性改动留在主仓是合法的 */}
         {mainDirty !== null && mainDirty > 0 && (
           <p className="mb-3 shrink-0 rounded-md bg-inset px-3 py-2 text-xs leading-5 text-l2">
-            <span className="mr-1 text-warn-text">⚠</span>
+            <span className="mr-1 text-warn-text">!</span>
             项目文件夹里有 {mainDirty} 处改动还没存入历史。这一步的 agent 会在一份
             独立副本里干活，只看得到最近一次存入历史的内容——如果刚放进去的文件要给它用，
             先到「改动」面板存一下再开始。
@@ -539,7 +539,7 @@ export default function KickoffConfirmDialog({
             第一次点「确认开始」只是表态知情，按钮变成「仍要开工」再点才真开 */}
         {prevClosing.length > 0 && prevStep && (
           <p className="mb-3 shrink-0 rounded-md bg-inset px-3 py-2 text-xs leading-5 text-l2">
-            <span className="mr-1 text-warn-text">⚠</span>
+            <span className="mr-1 text-warn-text">!</span>
             上一步「{prevStep.name}」还有 {prevClosing.length}{" "}
             件收尾事项没完成（{prevClosing.map((t) => t.title).join("、")}
             ）——跳过审阅直接开工，上一步要返工时这一步也得跟着作废。

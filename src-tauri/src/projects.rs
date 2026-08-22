@@ -64,6 +64,12 @@ pub struct HumanTaskDto {
     /// 流程线标「可选」并从「N 件待做」里排除，免得摆出一个永远做不完的必办项。
     /// 缺省 false = 必办（旧档案卡与旧模板照原样按必办处理）
     pub optional: bool,
+    /// 完成判定：exists（默认）| manual | all | no_placeholders。
+    pub completion: String,
+    /// `all` 的显式目标总数；缺省时仅对 papers/*.pdf 从 to-fetch.md 推导。
+    pub expected_count: Option<usize>,
+    /// `all` 的目标清单；每行一个目标，空行与 # 注释行不计数。
+    pub manifest_path: String,
 }
 
 /// 步骤决策项（模板预置的「开工前要拍板的选择题」）。
@@ -87,6 +93,12 @@ pub struct StepDto {
     pub workspace_name: String,
     pub brief: String,
     pub expected_artifacts: Vec<String>,
+    /// 结构化输入依赖；缺省兼容旧档案卡。
+    pub inputs: Vec<String>,
+    /// 可选输入：存在则读取，不存在不阻断步骤。
+    pub optional_inputs: Vec<String>,
+    /// 输入二选一/多选一组：每组至少满足一项即可。
+    pub any_of_inputs: Vec<Vec<String>>,
     pub skills: Vec<String>,
     // 资源绑定：[[resources]] 条目的 path 精确匹配（相对/绝对均可）；
     // 空数组 = 不绑定 = 全部资源（向后兼容旧档案卡）
@@ -128,10 +140,15 @@ pub struct ProjectConfigDto {
     /// zotero / folder = 用户已有文献库，检索这一步降级为「盘点已有 + 查漏补缺」。
     /// 纯透传标记——引擎不认科研语义，怎么变形由模板简报自述（§11.1 纪律一）
     pub lit_source: String,
+    /// 投稿流程分支：initial = 首投，revision = 返修；缺省表示尚未选择。
+    pub submission_mode: Option<String>,
+    /// 当前返修轮次；首投不使用。缺省按第 1 轮返修处理。
+    pub submission_round: Option<u32>,
 }
 
 /// 文献来源合法值；非法值解析期归一为 search
 pub const LIT_SOURCES: [&str; 3] = ["search", "zotero", "folder"];
+pub const SUBMISSION_MODES: [&str; 2] = ["initial", "revision"];
 
 impl Default for ProjectConfigDto {
     fn default() -> Self {
@@ -143,6 +160,8 @@ impl Default for ProjectConfigDto {
             steps: Vec::new(),
             pipeline_opt_out: false,
             lit_source: "search".into(),
+            submission_mode: None,
+            submission_round: None,
         }
     }
 }
@@ -169,7 +188,7 @@ pub struct DiscoveredResourceDto {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EnsureGitDto {
-    pub initialized: bool,      // 本次执行了 git init
+    pub initialized: bool,       // 本次执行了 git init
     pub gitignore_written: bool, // 本次新建了 .gitignore
 }
 
@@ -384,19 +403,21 @@ fn cleanup_project_db_traces(
     fn missing_table(e: &rusqlite::Error) -> bool {
         e.to_string().contains("no such table")
     }
-    let mut run = |sql: &str, p: &[&dyn rusqlite::ToSql], what: &str| {
-        match conn.execute(sql, p) {
-            Ok(n) => cleaned += n,
-            Err(e) if missing_table(&e) => {}
-            Err(e) => warnings.push(format!("{what}清理失败: {e}")),
-        }
+    let mut run = |sql: &str, p: &[&dyn rusqlite::ToSql], what: &str| match conn.execute(sql, p) {
+        Ok(n) => cleaned += n,
+        Err(e) if missing_table(&e) => {}
+        Err(e) => warnings.push(format!("{what}清理失败: {e}")),
     };
     run(
         "DELETE FROM human_task_checks WHERE project_path = ?1",
         &[&key],
         "人工事项勾选记录",
     );
-    run("DELETE FROM card_claims WHERE cwd = ?1", &[&key], "卡片认领登记");
+    run(
+        "DELETE FROM card_claims WHERE cwd = ?1",
+        &[&key],
+        "卡片认领登记",
+    );
     for id in task_ids {
         match conn.execute(
             "UPDATE session_meta SET task_id=NULL WHERE task_id=?1",
@@ -434,10 +455,7 @@ fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, Str
     trash::delete(&dir).map_err(|e| format!("移入回收站失败: {e}"))?;
     remove_project_at(conn, &dir)?;
     let (_, warn) = cleanup_project_db_traces(conn, &dir, &task_ids);
-    let tail = warn
-        .first()
-        .map(|w| format!("；{w}"))
-        .unwrap_or_default();
+    let tail = warn.first().map(|w| format!("；{w}")).unwrap_or_default();
     if deleted.is_empty() {
         Ok(format!("目录已移入回收站，注册记录已删除{tail}"))
     } else {
@@ -538,6 +556,12 @@ struct TomlHumanTask {
     timing: String,
     #[serde(default)]
     optional: bool,
+    #[serde(default)]
+    completion: String,
+    #[serde(default)]
+    expected_count: Option<usize>,
+    #[serde(default)]
+    manifest_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -549,6 +573,12 @@ struct TomlStep {
     brief: String,
     #[serde(default)]
     expected_artifacts: Vec<String>,
+    #[serde(default)]
+    inputs: Vec<String>,
+    #[serde(default)]
+    optional_inputs: Vec<String>,
+    #[serde(default)]
+    any_of_inputs: Vec<Vec<String>>,
     #[serde(default)]
     skills: Vec<String>,
     #[serde(default)]
@@ -578,6 +608,14 @@ fn normalize_human_timing(timing: &str) -> String {
     match timing.trim() {
         "before" | "after" | "during" => timing.trim().to_string(),
         _ => "during".into(),
+    }
+}
+
+/// 人工事项完成判定归一：未知值按 exists 处理，保证旧 project.toml 可读。
+pub(crate) fn normalize_human_completion(completion: &str) -> String {
+    match completion.trim() {
+        "manual" | "all" | "no_placeholders" => completion.trim().to_string(),
+        _ => "exists".into(),
     }
 }
 
@@ -650,6 +688,24 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
         }
         Some(_) => warnings.push("lit_source 不是字符串，已忽略".to_string()),
     }
+    // 投稿/返修分支：结构化保存，非法值不阻断旧档案卡读取。
+    match value.get("submission_mode") {
+        None => {}
+        Some(toml::Value::String(s)) if SUBMISSION_MODES.contains(&s.trim()) => {
+            config.submission_mode = Some(s.trim().to_string());
+        }
+        Some(toml::Value::String(s)) => {
+            warnings.push(format!("submission_mode 取值无效（{s}），已忽略"))
+        }
+        Some(_) => warnings.push("submission_mode 不是字符串，已忽略".to_string()),
+    }
+    match value.get("submission_round") {
+        None => {}
+        Some(toml::Value::Integer(n)) if *n >= 1 && *n <= u32::MAX as i64 => {
+            config.submission_round = Some(*n as u32);
+        }
+        Some(_) => warnings.push("submission_round 必须是大于等于 1 的整数，已忽略".to_string()),
+    }
     if let Some(resources) = value.get("resources").and_then(|v| v.as_array()) {
         for (i, item) in resources.iter().enumerate() {
             match item.clone().try_into::<TomlResource>() {
@@ -694,17 +750,17 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                                 }
                             }
                         }
-                        Some(_) => warnings
-                            .push(format!("steps[{i}] 的 resources 不是数组，已忽略")),
+                        Some(_) => {
+                            warnings.push(format!("steps[{i}] 的 resources 不是数组，已忽略"))
+                        }
                     }
                     // 人工事项：title 空白整条跳过；timing 非法值归一 warning（不拖垮步骤）
                     let mut human_tasks = Vec::new();
                     for (j, h) in s.human_tasks.into_iter().enumerate() {
                         let title = h.title.trim().to_string();
                         if title.is_empty() {
-                            warnings.push(format!(
-                                "steps[{i}] 的 human_tasks[{j}] 标题为空，已跳过"
-                            ));
+                            warnings
+                                .push(format!("steps[{i}] 的 human_tasks[{j}] 标题为空，已跳过"));
                             continue;
                         }
                         let timing = normalize_human_timing(&h.timing);
@@ -714,12 +770,26 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                                 h.timing.trim()
                             ));
                         }
+                        let completion = if h.target.trim().is_empty() {
+                            "manual".to_string()
+                        } else {
+                            normalize_human_completion(&h.completion)
+                        };
+                        if !h.completion.trim().is_empty() && completion != h.completion.trim() {
+                            warnings.push(format!(
+                                "步骤[{i}] 的人工事项「{title}」完成判定「{}」无法识别，已按 exists 处理",
+                                h.completion.trim()
+                            ));
+                        }
                         human_tasks.push(HumanTaskDto {
                             title,
                             guidance: h.guidance.trim().to_string(),
                             target: h.target.trim().to_string(),
                             timing,
                             optional: h.optional,
+                            completion,
+                            expected_count: h.expected_count,
+                            manifest_path: h.manifest_path.trim().to_string(),
                         });
                     }
                     config.steps.push(StepDto {
@@ -727,6 +797,30 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                         workspace_name: s.workspace_name,
                         brief: s.brief,
                         expected_artifacts: s.expected_artifacts,
+                        inputs: s
+                            .inputs
+                            .into_iter()
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect(),
+                        optional_inputs: s
+                            .optional_inputs
+                            .into_iter()
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect(),
+                        any_of_inputs: s
+                            .any_of_inputs
+                            .into_iter()
+                            .map(|group| {
+                                group
+                                    .into_iter()
+                                    .map(|x| x.trim().to_string())
+                                    .filter(|x| !x.is_empty())
+                                    .collect::<Vec<_>>()
+                            })
+                            .filter(|group| !group.is_empty())
+                            .collect(),
                         skills: s.skills,
                         resources: bound,
                         run: s
@@ -775,11 +869,16 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
     } else if value.get("steps").is_some() {
         warnings.push("steps 不是表数组，已忽略".to_string());
     }
-    // 语义级校验（绑定资源存在性、简报产物引用）并入 warnings，read_project_config 自动产出
+    // 语义级校验（绑定资源、结构化输入、简报产物引用）并入 warnings，read_project_config 自动产出
     // prior_artifacts 按步骤顺序累计：简报引用上游产物 = 合法输入，不报（见 validate_step ②）
     let mut prior_artifacts: Vec<String> = Vec::new();
-    for step in &config.steps {
-        warnings.extend(validate_step(step, &config.resources, &prior_artifacts));
+    for (index, step) in config.steps.iter().enumerate() {
+        warnings.extend(validate_step(
+            step,
+            &config.resources,
+            &prior_artifacts,
+            index == 0,
+        ));
         prior_artifacts.extend(step.expected_artifacts.iter().cloned());
     }
     (config, warnings)
@@ -788,24 +887,54 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
 // ===== 步骤资源绑定的轻量校验（纯函数，供 read 流程与后续 command 复用） =====
 
 /// brief 里约定俗成的产物路径引用：引用了但 expectedArtifacts 没有对应项时提示
-const BRIEF_ARTIFACT_REFS: [&str; 5] =
-    ["papers/", "notes/", "references.bib", "outline.md", "manuscript/"];
+const BRIEF_ARTIFACT_REFS: [&str; 5] = [
+    "papers/",
+    "notes/",
+    "references.bib",
+    "outline.md",
+    "manuscript/",
+];
 
 /// 校验单个步骤，返回中文提示文案（不做翻译层）：
 /// ① 绑定值必须在 [[resources]] 的 path 里精确存在；空数组 = 不绑定，不触发；
-/// ② brief 引用了约定产物路径，但三处都查无对应项时提示——本步 expectedArtifacts（产物）、
-///    上游步骤产物（引用上游产物 = 合法输入）、[[resources]]（登记资源 = 输入物料）。
+/// ② inputs 中的路径必须由上游产物或项目资源覆盖；
+/// ③ brief 引用了约定产物路径，但三处都查无对应项时提示。
 pub(crate) fn validate_step(
     step: &StepDto,
     resources: &[ResourceDto],
     prior_artifacts: &[String],
+    is_first_step: bool,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     for bound in &step.resources {
         if !resources.iter().any(|r| r.path == *bound) {
+            warnings.push(format!("步骤「{}」绑定的资源不存在：{bound}", step.name));
+        }
+    }
+    let covered_by_known = |input: &str| {
+        prior_artifacts
+            .iter()
+            .any(|e| e == input || e.starts_with(input) || input.starts_with(e))
+            || resources
+                .iter()
+                .any(|r| r.path == input || r.path.starts_with(input) || input.starts_with(&r.path))
+    };
+    for input in &step.inputs {
+        // 第一步的输入允许来自模板外部（上游项目、用户资源或尚未登记的主仓文件）。
+        // 没有上游步骤时给出“输入不存在”只会制造不可行动的噪声；从第二步起再严格检查链路。
+        if !is_first_step && !covered_by_known(input) {
             warnings.push(format!(
-                "步骤「{}」绑定的资源不存在：{bound}",
+                "步骤「{}」声明的输入不存在上游产物或项目资源：{input}",
                 step.name
+            ));
+        }
+    }
+    for group in &step.any_of_inputs {
+        if !is_first_step && !group.iter().any(|input| covered_by_known(input)) {
+            warnings.push(format!(
+                "步骤「{}」的任一输入组未接到上游产物或项目资源：{}",
+                step.name,
+                group.join(" 或 ")
             ));
         }
     }
@@ -910,6 +1039,22 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
     } else {
         doc.remove("lit_source");
     }
+    match config.submission_mode.as_deref() {
+        Some(mode) if SUBMISSION_MODES.contains(&mode) => {
+            doc["submission_mode"] = value(mode);
+        }
+        _ => {
+            doc.remove("submission_mode");
+        }
+    }
+    match config.submission_round {
+        Some(round) if round >= 1 => {
+            doc["submission_round"] = value(round as i64);
+        }
+        _ => {
+            doc.remove("submission_round");
+        }
+    }
     if config.resources.is_empty() {
         doc.remove("resources");
     } else {
@@ -948,6 +1093,31 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                     artifacts.push(a.as_str());
                 }
                 t["expected_artifacts"] = value(artifacts);
+            }
+            if !s.inputs.is_empty() {
+                let mut inputs = toml_edit::Array::new();
+                for input in &s.inputs {
+                    inputs.push(input.as_str());
+                }
+                t["inputs"] = value(inputs);
+            }
+            if !s.optional_inputs.is_empty() {
+                let mut inputs = toml_edit::Array::new();
+                for input in &s.optional_inputs {
+                    inputs.push(input.as_str());
+                }
+                t["optional_inputs"] = value(inputs);
+            }
+            if !s.any_of_inputs.is_empty() {
+                let mut groups = toml_edit::Array::new();
+                for group in &s.any_of_inputs {
+                    let mut values = toml_edit::Array::new();
+                    for input in group {
+                        values.push(input.as_str());
+                    }
+                    groups.push(values);
+                }
+                t["any_of_inputs"] = value(groups);
             }
             if !s.skills.is_empty() {
                 let mut skills = toml_edit::Array::new();
@@ -994,6 +1164,15 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                     // 默认值（必办）省略不写，同 timing 口径
                     if h.optional {
                         ht["optional"] = value(true);
+                    }
+                    if h.completion != "exists" && !h.completion.is_empty() {
+                        ht["completion"] = value(h.completion.as_str());
+                    }
+                    if let Some(expected) = h.expected_count {
+                        ht["expected_count"] = value(expected as i64);
+                    }
+                    if !h.manifest_path.trim().is_empty() {
+                        ht["manifest_path"] = value(h.manifest_path.trim());
                     }
                     hts.push(ht);
                 }
@@ -1065,7 +1244,13 @@ pub(crate) fn draft_rel_path(step_name: &str, workspace_name: &str) -> String {
     } else {
         step_name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect::<String>()
     };
     format!(".ccode/drafts/{base}.md")
@@ -1115,9 +1300,8 @@ pub async fn append_step_draft(
     content: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
-            &project_root,
-        )))?;
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
         append_step_draft_at(&root, &step_name, &heading, &content)
     })
     .await
@@ -1188,7 +1372,11 @@ fn infer_task_kind(kind: Option<String>, step: &Option<String>) -> String {
         Some("idea") => "idea",
         Some("draft") => "draft",
         _ => {
-            if step.is_some() { "draft" } else { "idea" }
+            if step.is_some() {
+                "draft"
+            } else {
+                "idea"
+            }
         }
     }
     .to_string()
@@ -1210,7 +1398,8 @@ fn parse_task_cards(text: &str) -> Vec<TaskCardDto> {
             if id.is_empty() || name.is_empty() {
                 continue;
             }
-            let clean = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let clean =
+                |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
             let step = clean(t.step);
             let kind = infer_task_kind(t.kind, &step);
             out.push(TaskCardDto {
@@ -1311,7 +1500,12 @@ fn new_task_id() -> String {
     format!("t-{}", hex.chars().take(8).collect::<String>())
 }
 
-pub(crate) fn create_task_card_at(root: &Path, name: &str, step: Option<&str>, kind: Option<&str>) -> Result<TaskCardDto, String> {
+pub(crate) fn create_task_card_at(
+    root: &Path,
+    name: &str,
+    step: Option<&str>,
+    kind: Option<&str>,
+) -> Result<TaskCardDto, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("卡片名不能为空".into());
@@ -1430,9 +1624,7 @@ fn walk_discover(
             };
             let rel_key = norm_path_key(&rel.to_string_lossy());
             let abs_key = norm_path_key(&entry_path.to_string_lossy());
-            let exists = registered
-                .iter()
-                .any(|r| *r == rel_key || *r == abs_key);
+            let exists = registered.iter().any(|r| *r == rel_key || *r == abs_key);
             let (size, mtime) = match entry.metadata() {
                 Ok(m) => (
                     m.len(),
@@ -1582,8 +1774,13 @@ fn commit_bootstrap_at(repo: &Path) -> Result<BootstrapCommitDto, String> {
     crate::workspaces::run_git(repo, &add_args, T)
         .map_err(|e| format!("暂存 .ccode/.gitignore 失败: {e}"))?;
     // 有暂存内容才提交；空仓库（unborn HEAD）下 diff --cached 与空树比较，也能列出新增文件
-    let mut staged_args: Vec<&str> =
-        vec!["--literal-pathspecs", "diff", "--cached", "--name-only", "--"];
+    let mut staged_args: Vec<&str> = vec![
+        "--literal-pathspecs",
+        "diff",
+        "--cached",
+        "--name-only",
+        "--",
+    ];
     staged_args.extend(existing.iter().copied());
     let staged = crate::workspaces::run_git(repo, &staged_args, T)
         .map_err(|e| format!("检查暂存内容失败: {e}"))?;
@@ -1614,7 +1811,12 @@ fn commit_bootstrap_at(repo: &Path) -> Result<BootstrapCommitDto, String> {
         args.extend(["-c", "user.email=ccode@localhost"]);
     }
     // pathspec 限定提交范围：用户先前自行暂存的其他文件留在暂存区，不被本次提交带走
-    args.extend(["commit", "-m", "Ccode: 项目档案卡与 gitignore 自动提交", "--"]);
+    args.extend([
+        "commit",
+        "-m",
+        "Ccode: 项目档案卡与 gitignore 自动提交",
+        "--",
+    ]);
     args.extend(existing.iter().copied());
     crate::workspaces::run_git(repo, &args, T).map_err(|e| format!("自动提交失败: {e}"))?;
     Ok(BootstrapCommitDto {
@@ -1697,10 +1899,7 @@ pub async fn read_project_config(path: String) -> ProjectConfigReadDto {
 }
 
 #[tauri::command]
-pub async fn write_project_config(
-    path: String,
-    config: ProjectConfigDto,
-) -> Result<(), String> {
+pub async fn write_project_config(path: String, config: ProjectConfigDto) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let project = PathBuf::from(crate::sessions::expand_tilde(&path));
         write_config_at(&project, &config)
@@ -1808,7 +2007,8 @@ pub async fn create_task_card(
     kind: Option<String>,
 ) -> Result<TaskCardDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
         create_task_card_at(&root, &name, step.as_deref(), kind.as_deref())
     })
     .await
@@ -1822,7 +2022,8 @@ pub async fn rename_task_card(
     new_name: String,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
         rename_task_card_at(&root, &task_id, &new_name)
     })
     .await
@@ -1833,7 +2034,8 @@ pub async fn rename_task_card(
 #[tauri::command]
 pub async fn delete_task_card(project_root: String, task_id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
         delete_task_card_at(&root, &task_id)?;
         if let Ok(conn) = crate::sessions::open_db() {
             let _ = crate::sessions::clear_task_assignment(&conn, &task_id);
@@ -1911,7 +2113,10 @@ fn fuse_card_into_draft_impl(
     }
     let mut discussion = String::new();
     for s in &sessions {
-        let text = crate::ai::conversation_text(&crate::sessions::conversation_impl(&s.agent, &s.file_path));
+        let text = crate::ai::conversation_text(&crate::sessions::conversation_impl(
+            &s.agent,
+            &s.file_path,
+        ));
         if text.trim().is_empty() {
             continue;
         }
@@ -1967,9 +2172,8 @@ pub async fn write_task_draft(
     content: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
-            &project_root,
-        )))?;
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
         let cfg = read_config_at(&root).config;
         let step = cfg
             .steps
@@ -2096,6 +2300,9 @@ fn demo_project_config() -> ProjectConfigDto {
         workspace_name: ws.into(),
         brief,
         expected_artifacts: artifacts.iter().map(|a| a.to_string()).collect(),
+        inputs: Vec::new(),
+        optional_inputs: Vec::new(),
+        any_of_inputs: Vec::new(),
         skills: Vec::new(),
         resources: Vec::new(),
         run: Vec::new(),
@@ -2117,7 +2324,12 @@ fn demo_project_config() -> ProjectConfigDto {
                  5. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的用 WebFetch/curl 直接下载到 papers/ 目录（文件名规范化：作者年份-短标题.pdf）；付费墙的不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时转成 papers/to-fetch.ris（RIS 2004，字段缺则留空不编造）供用户导入 Zotero 建待获取列表。\n\
                  完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris 均存在（无付费文献则 to-fetch 两个文件注明为空），每条记录无空缺字段（未知则标「待补」）。"
                     .into(),
-                &["papers/"],
+                &[
+                    "papers/screening.md",
+                    "papers/included.md",
+                    "papers/to-fetch.md",
+                    "papers/to-fetch.ris",
+                ],
             ),
             step(
                 "文献精读与笔记",
@@ -2130,7 +2342,7 @@ fn demo_project_config() -> ProjectConfigDto {
                  5. 若 notes/ 中「仅摘要」笔记对应的全文已出现在项目资源或 papers/（用户已补），重读全文并更新该笔记、去掉标记。\n\
                  完成标准：included.md 每篇都有对应笔记与 bib 条目；notes/ 与 references.bib 均已提交。"
                     .into(),
-                &["notes/", "references.bib"],
+                &["notes/*.md", "references.bib"],
             ),
             step(
                 "综述大纲",
@@ -2154,7 +2366,7 @@ fn demo_project_config() -> ProjectConfigDto {
                  4. 没有文献支撑的论断不得下；必须保留的判断在句末标 [待核实]。\n\
                  完成标准：manuscript/draft.md 覆盖大纲全部章节，引用键全部可在 references.bib 中解析。"
                     .into(),
-                &["manuscript/"],
+                &["manuscript/draft.md"],
             ),
             step(
                 "润色与定稿",
@@ -2180,6 +2392,9 @@ fn demo_project_config() -> ProjectConfigDto {
             target: "papers/*.pdf".into(),
             timing: "after".into(),
             optional: false,
+            completion: "all".into(),
+            expected_count: None,
+            manifest_path: String::new(),
         },
     ];
     // 讨论种子演示：开工前建议想清楚的问题，点击即聊（卡片以问题为名自动建立）
@@ -2213,6 +2428,8 @@ fn demo_project_config() -> ProjectConfigDto {
         steps,
         pipeline_opt_out: false,
         lit_source: "search".into(),
+        submission_mode: None,
+        submission_round: None,
     }
 }
 
@@ -2228,7 +2445,12 @@ const DEMO_STEP_DRAFT: &str = "结论：综述聚焦「心血管结局」方向�
 /// 幂等由 create_demo_at 顶部的早退保证——已注册直接返回、已存在目录只注册不补建）。
 fn seed_demo_task_card(root: &Path) -> Result<(), String> {
     create_task_card_at(root, "示例：确定综述角度", Some("文献检索与筛选"), None)?;
-    append_step_draft_at(root, "文献检索与筛选", "想法期讨论沉淀（示范）", DEMO_STEP_DRAFT)?;
+    append_step_draft_at(
+        root,
+        "文献检索与筛选",
+        "想法期讨论沉淀（示范）",
+        DEMO_STEP_DRAFT,
+    )?;
     Ok(())
 }
 
@@ -2296,10 +2518,7 @@ pub async fn create_demo_project() -> Result<ProjectDto, String> {
 /// 一键开步（§11.4 P1b）：把步骤简报落成工作区 TASK.md。
 /// 只写固定文件名且必须位于给定工作树根内；不存在则新建，原子写入。
 #[tauri::command]
-pub async fn write_workspace_task_md(
-    worktree_path: String,
-    content: String,
-) -> Result<(), String> {
+pub async fn write_workspace_task_md(worktree_path: String, content: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         const CAP: usize = 64 * 1024;
         if content.len() > CAP {
@@ -2446,12 +2665,12 @@ fn append_inbox_at(worktree_path: &Path, content: &str) -> Result<(), String> {
 
 /// 把选段追加到工作区 notes/inbox.md（P2b）；写入规则见 append_inbox_at。
 #[tauri::command]
-pub async fn append_workspace_inbox(
-    worktree_path: String,
-    content: String,
-) -> Result<(), String> {
+pub async fn append_workspace_inbox(worktree_path: String, content: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        append_inbox_at(Path::new(&crate::sessions::expand_tilde(&worktree_path)), &content)
+        append_inbox_at(
+            Path::new(&crate::sessions::expand_tilde(&worktree_path)),
+            &content,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2605,8 +2824,7 @@ pub async fn ensure_scratch_dir() -> Result<String, String> {
             .ok_or("无法确定用户主目录")?
             .join("ccode")
             .join("scratch");
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("创建 {} 失败: {e}", dir.display()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建 {} 失败: {e}", dir.display()))?;
         Ok(dir.to_string_lossy().to_string())
     })
     .await
@@ -2615,15 +2833,246 @@ pub async fn ensure_scratch_dir() -> Result<String, String> {
 
 // ===== 从模板追加步骤（模板接壤拼接：相邻段模板追加进同一项目续走） =====
 // 与「使用模板 = 整体替换 steps」不同：把模板步骤追加到 [[steps]] 末尾，
-// 步骤链/提货单/资源机制对新步骤天然生效。重名（name 或非空 workspace_name）
-// 的步骤跳过不追加，避免覆盖已有工作区绑定。
+// 步骤链/提货单/资源机制对新步骤天然生效。步骤名重复时跳过；非空 workspace_name
+// 冲突时自动加序号后缀，避免覆盖已有工作区绑定且不静默丢步骤。
 
-/// 追加结果：实际追加步数 + 因重名跳过的步骤名（前端据此行内提示）
+/// 追加结果：实际追加步数 + 因步骤名重复跳过的步骤名 + 因工作区名冲突自动改名的记录。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppendStepsResultDto {
     pub appended: usize,
     pub skipped: Vec<String>,
+    pub renamed: Vec<WorkspaceRenameDto>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRenameDto {
+    pub name: String,
+    pub from: String,
+    pub to: String,
+}
+
+fn setting_parts(line: &str) -> (&str, &str) {
+    if let Some((q, answer)) = line.split_once('：') {
+        (q.trim(), answer.trim())
+    } else if let Some((q, answer)) = line.split_once(':') {
+        (q.trim(), answer.trim())
+    } else {
+        (line.trim(), "")
+    }
+}
+
+fn setting_is_placeholder(line: &str) -> bool {
+    let (_, answer) = setting_parts(line);
+    answer.is_empty()
+        || (answer.starts_with('（') && answer.ends_with('）'))
+        || (answer.starts_with('(') && answer.ends_with(')'))
+}
+
+/// 合并模板建议的项目级设定：按问题名去重；已有真实答案优先，模板占位可被新答案替换。
+pub(crate) fn merge_project_settings(existing: &mut Vec<String>, candidates: &[String]) {
+    for candidate in candidates {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        let key = setting_parts(candidate).0;
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(index) = existing
+            .iter()
+            .position(|current| setting_parts(current).0 == key)
+        {
+            if setting_is_placeholder(&existing[index]) && !setting_is_placeholder(candidate) {
+                existing[index] = candidate.to_string();
+            }
+        } else {
+            existing.push(candidate.to_string());
+        }
+    }
+}
+
+/// 统一模板应用实现：追加与替换共用同一份读-改-原子写逻辑。
+pub(crate) fn apply_pipeline_template_at(
+    root: &Path,
+    steps: Vec<ProjectStepDto>,
+    project_settings: Vec<String>,
+    strategy: &str,
+    topic: Option<String>,
+    submission_mode: Option<&str>,
+    submission_round: Option<u32>,
+) -> Result<AppendStepsResultDto, String> {
+    if steps.is_empty() {
+        return Err("没有可应用的步骤（模板为空）".into());
+    }
+    if strategy != "append" && strategy != "replace" {
+        return Err(format!("模板应用策略无效：{strategy}"));
+    }
+    if let Some(mode) = submission_mode {
+        if !SUBMISSION_MODES.contains(&mode) {
+            return Err(format!("投稿分支取值无效：{mode}"));
+        }
+    }
+    let mut cfg = read_config_at(root).config;
+    let original_cfg = cfg.clone();
+    let mut result = AppendStepsResultDto {
+        appended: 0,
+        skipped: Vec::new(),
+        renamed: Vec::new(),
+    };
+
+    if strategy == "replace" {
+        let mut normalized_steps = Vec::with_capacity(steps.len());
+        for mut step in steps {
+            let name = step.name.trim().to_string();
+            if name.is_empty() {
+                return Err("替换模板包含未命名步骤".into());
+            }
+            if normalized_steps.iter().any(|s: &StepDto| s.name == name) {
+                return Err(format!("替换模板包含重复步骤名：{name}"));
+            }
+            let original_workspace_name = step.workspace_name.trim().to_string();
+            let mut workspace_name = original_workspace_name.clone();
+            if !workspace_name.is_empty()
+                && normalized_steps
+                    .iter()
+                    .any(|s: &StepDto| s.workspace_name == workspace_name)
+            {
+                let base = workspace_name.clone();
+                let mut n = 2usize;
+                loop {
+                    let candidate = format!("{base}-{n}");
+                    if !normalized_steps
+                        .iter()
+                        .any(|s: &StepDto| s.workspace_name == candidate)
+                    {
+                        workspace_name = candidate;
+                        break;
+                    }
+                    n += 1;
+                }
+                result.renamed.push(WorkspaceRenameDto {
+                    name: name.clone(),
+                    from: original_workspace_name,
+                    to: workspace_name.clone(),
+                });
+            }
+            step.name = name;
+            step.workspace_name = workspace_name;
+            normalized_steps.push(step);
+        }
+        result.appended = normalized_steps.len();
+        cfg.steps = normalized_steps;
+    } else {
+        for step in steps {
+            let name = step.name.trim().to_string();
+            if name.is_empty() {
+                result.skipped.push("（未命名步骤）".to_string());
+                continue;
+            }
+            if cfg.steps.iter().any(|s| s.name == name) {
+                result.skipped.push(name);
+                continue;
+            }
+            let original_workspace_name = step.workspace_name.trim().to_string();
+            let mut workspace_name = original_workspace_name.clone();
+            if !workspace_name.is_empty()
+                && cfg.steps.iter().any(|s| s.workspace_name == workspace_name)
+            {
+                let base = workspace_name.clone();
+                let mut n = 2usize;
+                loop {
+                    let candidate = format!("{base}-{n}");
+                    if !cfg.steps.iter().any(|s| s.workspace_name == candidate) {
+                        workspace_name = candidate;
+                        break;
+                    }
+                    n += 1;
+                }
+                result.renamed.push(WorkspaceRenameDto {
+                    name: name.clone(),
+                    from: original_workspace_name,
+                    to: workspace_name.clone(),
+                });
+            }
+            cfg.steps.push(StepDto {
+                name,
+                workspace_name,
+                ..step
+            });
+            result.appended += 1;
+        }
+    }
+
+    merge_project_settings(&mut cfg.settings, &project_settings);
+    let has_topic = topic
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let has_settings = project_settings.iter().any(|value| !value.trim().is_empty());
+    if let Some(topic) = topic.map(|x| x.trim().to_string()) {
+        if !topic.is_empty() {
+            cfg.topic = Some(topic);
+        }
+    }
+    // 选择模板或写入模板附带元数据都意味着启用研究流程；普通追加全部跳过且无元数据时
+    // 保留原文件，避免把一次无效操作伪装成成功写入。
+    let template_selected = strategy == "replace"
+        || result.appended > 0
+        || submission_mode.is_some()
+        || has_settings
+        || has_topic;
+    if template_selected {
+        cfg.pipeline_opt_out = false;
+    }
+    match submission_mode {
+        Some(mode) => {
+            cfg.submission_mode = Some(mode.to_string());
+            cfg.submission_round = if mode == "revision" {
+                Some(submission_round.unwrap_or(1).max(1))
+            } else {
+                None
+            };
+        }
+        None if strategy == "replace" => {
+            cfg.submission_mode = None;
+            cfg.submission_round = None;
+        }
+        None => {}
+    }
+    if cfg != original_cfg {
+        write_config_at(root, &cfg)?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn apply_pipeline_template(
+    project_root: String,
+    steps: Vec<ProjectStepDto>,
+    project_settings: Vec<String>,
+    strategy: String,
+    topic: Option<String>,
+    submission_mode: Option<String>,
+    submission_round: Option<u32>,
+) -> Result<AppendStepsResultDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
+        apply_pipeline_template_at(
+            &root,
+            steps,
+            project_settings,
+            &strategy,
+            topic,
+            submission_mode.as_deref(),
+            submission_round,
+        )
+    })
+    .await
+    .map_err(|e| format!("应用研究流程模板失败: {e}"))?
 }
 
 #[tauri::command]
@@ -2631,19 +3080,48 @@ pub async fn append_pipeline_steps(
     project_root: String,
     steps: Vec<ProjectStepDto>,
 ) -> Result<AppendStepsResultDto, String> {
+    if steps.is_empty() {
+        return Err("没有可追加的步骤（模板为空）".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
-        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
-            &project_root,
-        )))?;
-        append_pipeline_steps_at(&root, steps)
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
+        apply_pipeline_template_at(&root, steps, Vec::new(), "append", None, None, None)
     })
     .await
     .map_err(|e| format!("追加模板步骤失败: {e}"))?
 }
 
+/// 投稿/返修分支专用追加：步骤与分支元数据在同一次 project.toml 读-改-原子写中落盘。
+#[tauri::command]
+pub async fn append_pipeline_steps_with_submission(
+    project_root: String,
+    steps: Vec<StepDto>,
+    submission_mode: String,
+    submission_round: Option<u32>,
+) -> Result<AppendStepsResultDto, String> {
+    if steps.is_empty() {
+        return Err("没有可追加的步骤（模板为空）".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
+        apply_pipeline_template_at(
+            &root,
+            steps,
+            Vec::new(),
+            "append",
+            None,
+            Some(submission_mode.as_str()),
+            submission_round,
+        )
+    })
+    .await
+    .map_err(|e| format!("追加投稿/返修步骤失败: {e}"))?
+}
+
 /// 追加实现（root 需已过项目门槛校验；测试直接调这里）。
-/// 读-改-原子写：冲突判定对着随追加增长的步骤表做，模板内部重复也会跳过；
-/// 全部被跳过时不落盘（文件保持原样）。
+/// 保留旧测试/内部调用名，但实现统一委托给模板应用事务，避免三处入口再次分叉。
 pub(crate) fn append_pipeline_steps_at(
     root: &Path,
     steps: Vec<ProjectStepDto>,
@@ -2651,37 +3129,27 @@ pub(crate) fn append_pipeline_steps_at(
     if steps.is_empty() {
         return Err("没有可追加的步骤（模板为空）".into());
     }
-    let mut cfg = read_config_at(root).config;
-    let mut appended = 0usize;
-    let mut skipped: Vec<String> = Vec::new();
-    for step in steps {
-        let name = step.name.trim().to_string();
-        if name.is_empty() {
-            skipped.push("（未命名步骤）".to_string());
-            continue;
-        }
-        let workspace_name = step.workspace_name.trim().to_string();
-        let conflict = cfg.steps.iter().any(|s| {
-            s.name == name
-                || (!workspace_name.is_empty() && s.workspace_name == workspace_name)
-        });
-        if conflict {
-            skipped.push(name);
-            continue;
-        }
-        cfg.steps.push(StepDto {
-            name,
-            workspace_name,
-            ..step
-        });
-        appended += 1;
+    apply_pipeline_template_at(root, steps, Vec::new(), "append", None, None, None)
+}
+
+pub(crate) fn append_pipeline_steps_at_with_submission(
+    root: &Path,
+    steps: Vec<ProjectStepDto>,
+    submission_mode: Option<&str>,
+    submission_round: Option<u32>,
+) -> Result<AppendStepsResultDto, String> {
+    if steps.is_empty() {
+        return Err("没有可追加的步骤（模板为空）".into());
     }
-    if appended > 0 {
-        // 选了模板 = 启用流程：顺带清掉「不使用研究流程」标记（含编辑器「＋ 从模板追加」路径）
-        cfg.pipeline_opt_out = false;
-        write_config_at(root, &cfg)?;
-    }
-    Ok(AppendStepsResultDto { appended, skipped })
+    apply_pipeline_template_at(
+        root,
+        steps,
+        Vec::new(),
+        "append",
+        None,
+        submission_mode,
+        submission_round,
+    )
 }
 
 // ===== 「不使用研究流程」显式标记（pipeline_opt_out） =====
@@ -2695,14 +3163,10 @@ pub(crate) fn set_pipeline_opt_out_at(root: &Path, opt_out: bool) -> Result<(), 
 }
 
 #[tauri::command]
-pub async fn set_pipeline_opt_out(
-    project_root: String,
-    opt_out: bool,
-) -> Result<(), String> {
+pub async fn set_pipeline_opt_out(project_root: String, opt_out: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
-            &project_root,
-        )))?;
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
         set_pipeline_opt_out_at(&root, opt_out)
     })
     .await
@@ -2748,13 +3212,16 @@ mod tests {
                 workspace_name: "lit".into(),
                 brief: "读文献写笔记".into(),
                 expected_artifacts: vec!["notes/".into()],
+                inputs: Vec::new(),
+                optional_inputs: Vec::new(),
+                any_of_inputs: Vec::new(),
                 skills: vec!["paper-notes".into()],
                 resources: Vec::new(),
                 human_tasks: Vec::new(),
                 discussion_seeds: Vec::new(),
                 decisions: Vec::new(),
                 asks_lit_source: false,
-            role: "ai".into(),
+                role: "ai".into(),
                 run: vec![
                     StepRunDto {
                         name: "dev".into(),
@@ -2769,7 +3236,9 @@ mod tests {
                 ],
             }],
             pipeline_opt_out: false,
-        lit_source: "search".into(),
+            lit_source: "search".into(),
+            submission_mode: None,
+            submission_round: None,
         }
     }
 
@@ -2806,9 +3275,15 @@ test = { command = "echo test" }
         assert_eq!(config, sample_config());
         // 往返：渲染后再解析应还原；未知顶层键必须保留
         let rendered = render_config(Some(text), &config).unwrap();
-        assert!(rendered.contains("future_top_key = 42"), "未知顶层键丢失: {rendered}");
+        assert!(
+            rendered.contains("future_top_key = 42"),
+            "未知顶层键丢失: {rendered}"
+        );
         let (back, back_warnings) = parse_config(&rendered);
-        assert!(back_warnings.is_empty(), "回读不应有警告: {back_warnings:?}");
+        assert!(
+            back_warnings.is_empty(),
+            "回读不应有警告: {back_warnings:?}"
+        );
         assert_eq!(back, config);
     }
 
@@ -2844,12 +3319,21 @@ name = "好步骤"
 "#;
         let (config, warnings) = parse_config(text);
         assert_eq!(config.resources.len(), 1, "两条坏资源跳过，只留好的");
-        assert_eq!(config.resources[0].kind, "other", "无法识别的 type 归为 other");
+        assert_eq!(
+            config.resources[0].kind, "other",
+            "无法识别的 type 归为 other"
+        );
         assert_eq!(config.steps.len(), 1);
         assert_eq!(config.steps[0].name, "好步骤");
         let joined = warnings.join("\n");
-        assert!(joined.contains("resources[0]"), "缺字段条目要报告: {joined}");
-        assert!(joined.contains("resources[1]"), "类型非法条目要报告: {joined}");
+        assert!(
+            joined.contains("resources[0]"),
+            "缺字段条目要报告: {joined}"
+        );
+        assert!(
+            joined.contains("resources[1]"),
+            "类型非法条目要报告: {joined}"
+        );
         assert!(joined.contains("无法识别"), "未知 type 要报告: {joined}");
         assert!(joined.contains("steps[0]"), "缺 name 步骤要报告: {joined}");
     }
@@ -2860,6 +3344,47 @@ name = "好步骤"
         assert_eq!(config, ProjectConfigDto::default());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("解析失败"));
+    }
+
+    #[test]
+    fn structured_inputs_and_human_completion_round_trip() {
+        let text = r#"[[steps]]
+name = "实验执行"
+inputs = ["data/clean.csv"]
+optional_inputs = ["notes/" ]
+any_of_inputs = [["analysis/report.md", "analysis/report.qmd"]]
+
+[[steps.human_tasks]]
+title = "补齐数据授权"
+target = ""
+
+[[steps.human_tasks]]
+title = "上传实验记录"
+target = "records/*.csv"
+completion = "all"
+expected_count = 3
+manifest_path = "records/manifest.txt"
+"#;
+        let (config, warnings) = parse_config(text);
+        assert!(warnings.is_empty(), "结构化字段不应产生警告: {warnings:?}");
+        let step = &config.steps[0];
+        assert_eq!(step.inputs, vec!["data/clean.csv"]);
+        assert_eq!(step.optional_inputs, vec!["notes/"]);
+        assert_eq!(
+            step.any_of_inputs,
+            vec![vec!["analysis/report.md", "analysis/report.qmd"]]
+        );
+        assert_eq!(step.human_tasks[0].completion, "manual");
+        assert_eq!(step.human_tasks[1].expected_count, Some(3));
+        assert_eq!(step.human_tasks[1].manifest_path, "records/manifest.txt");
+
+        let rendered = render_config(Some(text), &config).unwrap();
+        let (back, back_warnings) = parse_config(&rendered);
+        assert!(
+            back_warnings.is_empty(),
+            "结构化字段回读不应有警告: {back_warnings:?}"
+        );
+        assert_eq!(back, config);
     }
 
     #[test]
@@ -2886,12 +3411,23 @@ type = "paper"
             }],
             steps: Vec::new(),
             pipeline_opt_out: false,
-        lit_source: "search".into(),
+            lit_source: "search".into(),
+            submission_mode: None,
+            submission_round: None,
         };
         let rendered = render_config(Some(existing), &config).unwrap();
-        assert!(rendered.contains("# 用户手写注释"), "注释必须保留: {rendered}");
-        assert!(rendered.contains("custom_pipeline"), "未知表必须保留: {rendered}");
-        assert!(!rendered.contains("旧资源"), "resources 全量替换: {rendered}");
+        assert!(
+            rendered.contains("# 用户手写注释"),
+            "注释必须保留: {rendered}"
+        );
+        assert!(
+            rendered.contains("custom_pipeline"),
+            "未知表必须保留: {rendered}"
+        );
+        assert!(
+            !rendered.contains("旧资源"),
+            "resources 全量替换: {rendered}"
+        );
         let (back, _) = parse_config(&rendered);
         assert_eq!(back, config);
         // 现有文件是坏 TOML 时停止写入，不覆盖未知内容
@@ -2911,17 +3447,32 @@ type = "paper"
         let text = "topic = \"GLP-1 受体激动剂的心血管结局\"\nfuture_top_key = 42\n";
         let (config, warnings) = parse_config(text);
         assert!(warnings.is_empty());
-        assert_eq!(config.topic.as_deref(), Some("GLP-1 受体激动剂的心血管结局"));
+        assert_eq!(
+            config.topic.as_deref(),
+            Some("GLP-1 受体激动剂的心血管结局")
+        );
         let rendered = render_config(Some(text), &config).unwrap();
-        assert!(rendered.contains("future_top_key = 42"), "未知顶层键丢失: {rendered}");
+        assert!(
+            rendered.contains("future_top_key = 42"),
+            "未知顶层键丢失: {rendered}"
+        );
         let (back, back_warnings) = parse_config(&rendered);
-        assert!(back_warnings.is_empty(), "回读不应有警告: {back_warnings:?}");
+        assert!(
+            back_warnings.is_empty(),
+            "回读不应有警告: {back_warnings:?}"
+        );
         assert_eq!(back, config);
 
         // 清空：渲染移除已有 topic 行
-        let cleared = ProjectConfigDto { topic: None, ..config };
+        let cleared = ProjectConfigDto {
+            topic: None,
+            ..config
+        };
         let rendered = render_config(Some(&rendered), &cleared).unwrap();
-        assert!(!rendered.contains("topic ="), "清空后应移除 topic 行: {rendered}");
+        assert!(
+            !rendered.contains("topic ="),
+            "清空后应移除 topic 行: {rendered}"
+        );
         let (back, _) = parse_config(&rendered);
         assert_eq!(back.topic, None);
 
@@ -2955,15 +3506,25 @@ resources = ["papers/a.pdf", "/shared/data/x.csv"]
 "#;
         let (config, warnings) = parse_config(text);
         assert!(warnings.is_empty(), "合法配置不应有警告: {warnings:?}");
-        assert_eq!(config.steps[0].resources, Vec::<String>::new(), "缺失默认空");
+        assert_eq!(
+            config.steps[0].resources,
+            Vec::<String>::new(),
+            "缺失默认空"
+        );
         assert_eq!(
             config.steps[1].resources,
             vec!["papers/a.pdf".to_string(), "/shared/data/x.csv".to_string()]
         );
         let rendered = render_config(Some(text), &config).unwrap();
-        assert!(rendered.contains("resources = ["), "绑定必须写回: {rendered}");
+        assert!(
+            rendered.contains("resources = ["),
+            "绑定必须写回: {rendered}"
+        );
         let (back, back_warnings) = parse_config(&rendered);
-        assert!(back_warnings.is_empty(), "回读不应有警告: {back_warnings:?}");
+        assert!(
+            back_warnings.is_empty(),
+            "回读不应有警告: {back_warnings:?}"
+        );
         assert_eq!(back, config);
         // 空数组渲染时省略不写（语义同省略）
         let cleared = StepDto {
@@ -2973,7 +3534,10 @@ resources = ["papers/a.pdf", "/shared/data/x.csv"]
         let mut cfg = config.clone();
         cfg.steps[1] = cleared;
         let rendered = render_config(Some(&rendered), &cfg).unwrap();
-        assert!(!rendered.contains("resources ="), "空绑定不应写入: {rendered}");
+        assert!(
+            !rendered.contains("resources ="),
+            "空绑定不应写入: {rendered}"
+        );
         let (back, _) = parse_config(&rendered);
         assert_eq!(back, cfg);
     }
@@ -2990,13 +3554,23 @@ name = "坏绑定二"
 resources = [1, "papers/a.pdf", "", 42]
 "#;
         let (config, warnings) = parse_config(text);
-        assert_eq!(config.steps.len(), 2, "坏 resources 不得拖垮步骤: {warnings:?}");
+        assert_eq!(
+            config.steps.len(),
+            2,
+            "坏 resources 不得拖垮步骤: {warnings:?}"
+        );
         assert!(config.steps[0].resources.is_empty());
         assert_eq!(config.steps[1].resources, vec!["papers/a.pdf".to_string()]);
         let joined = warnings.join("\n");
-        assert!(joined.contains("steps[0] 的 resources 不是数组"), "{joined}");
+        assert!(
+            joined.contains("steps[0] 的 resources 不是数组"),
+            "{joined}"
+        );
         assert!(joined.contains("steps[1] 的 resources[0]"), "{joined}");
-        assert!(joined.contains("steps[1] 的 resources[2]"), "空白项也要报告: {joined}");
+        assert!(
+            joined.contains("steps[1] 的 resources[2]"),
+            "空白项也要报告: {joined}"
+        );
         assert!(joined.contains("steps[1] 的 resources[3]"), "{joined}");
     }
 
@@ -3021,20 +3595,31 @@ resources = [1, "papers/a.pdf", "", 42]
         // 规则①：绑定 path 不在 [[resources]] 里 → 提示；精确命中（相对/绝对）与空绑定不提示
         let step = StepDto {
             name: "分析".into(),
-            resources: vec!["papers/a.pdf".into(), "/shared/x.csv".into(), "missing.pdf".into()],
+            resources: vec![
+                "papers/a.pdf".into(),
+                "/shared/x.csv".into(),
+                "missing.pdf".into(),
+            ],
             ..StepDto::default()
         };
-        let warnings = validate_step(&step, &resources, &[]);
+        let warnings = validate_step(&step, &resources, &[], true);
         assert_eq!(warnings.len(), 1, "只有不存在的绑定要提示: {warnings:?}");
-        assert!(warnings[0].contains("绑定的资源不存在：missing.pdf"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("绑定的资源不存在：missing.pdf"),
+            "{}",
+            warnings[0]
+        );
         let ok = StepDto {
             resources: vec!["papers/a.pdf".into()],
             ..StepDto::default()
         };
-        assert!(validate_step(&ok, &resources, &[]).is_empty(), "精确命中不提示");
+        assert!(
+            validate_step(&ok, &resources, &[], true).is_empty(),
+            "精确命中不提示"
+        );
         let unbound = StepDto::default();
         assert!(
-            validate_step(&unbound, &resources, &[]).is_empty(),
+            validate_step(&unbound, &resources, &[], true).is_empty(),
             "空数组 = 不绑定 = 全部资源，不校验"
         );
 
@@ -3046,21 +3631,21 @@ resources = [1, "papers/a.pdf", "", 42]
             expected_artifacts: vec!["notes/".into()],
             ..StepDto::default()
         };
-        let warnings = validate_step(&miss, &resources, &[]);
+        let warnings = validate_step(&miss, &resources, &[], true);
         assert_eq!(warnings.len(), 1, "只有 references.bib 提示: {warnings:?}");
         assert!(warnings[0].contains("「references.bib」"), "{warnings:?}");
         // 上游产物豁免：references.bib 与 papers/ 均由更早步骤产出 → 引用它们是合法输入，不报
         let prior = vec!["references.bib".to_string(), "papers/".to_string()];
         assert!(
-            validate_step(&miss, &[], &prior).is_empty(),
+            validate_step(&miss, &[], &prior, false).is_empty(),
             "上游产物被引用 = 合法输入，不提示"
         );
         // 只豁免一个时另一个仍报
-        let warnings = validate_step(&miss, &[], &["papers/".to_string()]);
+        let warnings = validate_step(&miss, &[], &["papers/".to_string()], false);
         assert_eq!(warnings.len(), 1, "references.bib 仍提示: {warnings:?}");
         // 本步产物/上游产物/资源三处皆无才提示（miss 去掉资源后 papers/ 也要报）
         assert_eq!(
-            validate_step(&miss, &[], &[]).len(),
+            validate_step(&miss, &[], &[], true).len(),
             2,
             "papers/ 与 references.bib 各提示一次"
         );
@@ -3070,14 +3655,17 @@ resources = [1, "papers/a.pdf", "", 42]
             ..StepDto::default()
         };
         assert!(
-            validate_step(&hit, &resources, &[]).is_empty(),
+            validate_step(&hit, &resources, &[], true).is_empty(),
             "目录前缀命中与文件精确命中都不提示"
         );
         let no_ref = StepDto {
             brief: "读文献写笔记".into(),
             ..StepDto::default()
         };
-        assert!(validate_step(&no_ref, &resources, &[]).is_empty(), "无引用不提示");
+        assert!(
+            validate_step(&no_ref, &resources, &[], true).is_empty(),
+            "无引用不提示"
+        );
     }
 
     #[test]
@@ -3099,7 +3687,11 @@ resources = ["ghost.pdf"]
         // 无问题的配置 warnings 为空
         write_config_at(&project, &sample_config()).unwrap();
         let read = read_config_at(&project);
-        assert!(read.warnings.is_empty(), "干净配置不应有警告: {:?}", read.warnings);
+        assert!(
+            read.warnings.is_empty(),
+            "干净配置不应有警告: {:?}",
+            read.warnings
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3146,7 +3738,10 @@ resources = ["ghost.pdf"]
         let read = read_config_at(&project);
         assert_eq!(read.config, config2);
         let on_disk = fs::read_to_string(config_path(&project)).unwrap();
-        assert!(!on_disk.contains("核心论文"), "resources 应被全量替换: {on_disk}");
+        assert!(
+            !on_disk.contains("核心论文"),
+            "resources 应被全量替换: {on_disk}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3254,7 +3849,10 @@ resources = ["ghost.pdf"]
         assert!(first.initialized && first.gitignore_written);
         assert!(project.join(".git").exists());
         let gitignore = fs::read_to_string(project.join(".gitignore")).unwrap();
-        assert!(gitignore.contains("/artifacts/"), "默认产物目录进 gitignore: {gitignore}");
+        assert!(
+            gitignore.contains("/artifacts/"),
+            "默认产物目录进 gitignore: {gitignore}"
+        );
         assert!(gitignore.contains(".DS_Store"));
         assert!(
             gitignore.contains(".ccode/handoff-*.md"),
@@ -3264,7 +3862,10 @@ resources = ["ghost.pdf"]
         // 幂等：已是仓库直接返回，不改写任何文件
         let second = ensure_git_at(&project).unwrap();
         assert!(!second.initialized && !second.gitignore_written);
-        assert_eq!(fs::read_to_string(project.join(".gitignore")).unwrap(), gitignore);
+        assert_eq!(
+            fs::read_to_string(project.join(".gitignore")).unwrap(),
+            gitignore
+        );
 
         // 自定义 artifact_dir 的项目：gitignore 用配置值
         let project2 = dir.join("proj2");
@@ -3306,7 +3907,7 @@ resources = ["ghost.pdf"]
         fs::create_dir_all(&project).unwrap();
         ensure_git_at(&project).unwrap(); // git init + 默认 .gitignore
         write_config_at(&project, &sample_config()).unwrap(); // .ccode/project.toml
-        // 用户文件：必须保持未跟踪，绝不纳入自动提交
+                                                              // 用户文件：必须保持未跟踪，绝不纳入自动提交
         write(&project.join("paper.pdf"), "pdf");
         write(&project.join("data/notes.txt"), "n");
         // 用户自行暂存的文件也不得被本次提交带走（commit 有 pathspec 限定）
@@ -3331,28 +3932,45 @@ resources = ["ghost.pdf"]
 
         // HEAD 树里只有 Ccode 自有路径
         let tree = git_ok(&project, &["ls-tree", "-r", "--name-only", "HEAD"]);
-        assert!(tree.contains(".gitignore") && tree.contains(".ccode/project.toml"), "{tree}");
         assert!(
-            !tree.contains("paper.pdf") && !tree.contains("notes.txt") && !tree.contains("staged.txt"),
+            tree.contains(".gitignore") && tree.contains(".ccode/project.toml"),
+            "{tree}"
+        );
+        assert!(
+            !tree.contains("paper.pdf")
+                && !tree.contains("notes.txt")
+                && !tree.contains("staged.txt"),
             "用户文件绝不进树: {tree}"
         );
         // 用户文件保持原状态：未跟踪的仍 ??，用户暂存的仍 A
-        let status = git_ok(&project, &["status", "--porcelain=v1", "--untracked-files=all"]);
+        let status = git_ok(
+            &project,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        );
         assert!(
-            status.lines().any(|l| l.starts_with("??") && l.contains("notes.txt")),
+            status
+                .lines()
+                .any(|l| l.starts_with("??") && l.contains("notes.txt")),
             "未跟踪用户文件不动: {status}"
         );
         assert!(
-            status.lines().any(|l| l.starts_with("A ") && l.contains("staged.txt")),
+            status
+                .lines()
+                .any(|l| l.starts_with("A ") && l.contains("staged.txt")),
             "用户暂存文件留在暂存区: {status}"
         );
 
         // 幂等：第二次 committed=false，用户暂存内容仍不被带走
         let r2 = commit_bootstrap_at(&project).unwrap();
-        assert!(!r2.committed && r2.paths.is_empty(), "第二次必须幂等: {r2:?}");
+        assert!(
+            !r2.committed && r2.paths.is_empty(),
+            "第二次必须幂等: {r2:?}"
+        );
         let status2 = git_ok(&project, &["status", "--porcelain=v1"]);
         assert!(
-            status2.lines().any(|l| l.starts_with("A ") && l.contains("staged.txt")),
+            status2
+                .lines()
+                .any(|l| l.starts_with("A ") && l.contains("staged.txt")),
             "{status2}"
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -3370,7 +3988,10 @@ resources = ["ghost.pdf"]
         ensure_git_at(&project).unwrap();
         // 只存在 .gitignore（无 .ccode）：只提交存在的路径
         let r1 = commit_bootstrap_at(&project).unwrap();
-        assert!(r1.committed && r1.paths == [".gitignore".to_string()], "{r1:?}");
+        assert!(
+            r1.committed && r1.paths == [".gitignore".to_string()],
+            "{r1:?}"
+        );
 
         // 修改已跟踪的 .gitignore：modified 也要被提交
         fs::write(project.join(".gitignore"), "# 用户改过的\n*.pdf\n").unwrap();
@@ -3407,7 +4028,10 @@ resources = ["ghost.pdf"]
         // HEAD 已存在：create_workspace 内的 ensure_initial_commit 见到 HEAD 直接 no-op
         assert!(git_has_head(&project), "bootstrap 后 HEAD 必须存在");
         let tree = git_ok(&project, &["ls-tree", "-r", "--name-only", "HEAD"]);
-        assert!(tree.contains(".gitignore") && tree.contains(".ccode/project.toml"), "{tree}");
+        assert!(
+            tree.contains(".gitignore") && tree.contains(".ccode/project.toml"),
+            "{tree}"
+        );
 
         // 空仓库且两个路径都不存在：committed=false，仓库保持 unborn，
         // 由 create_workspace 的 ensure_initial_commit 兜底空提交
@@ -3415,7 +4039,10 @@ resources = ["ghost.pdf"]
         fs::create_dir_all(&bare).unwrap();
         git_ok(&bare, &["init"]);
         let r = commit_bootstrap_at(&bare).unwrap();
-        assert!(!r.committed && r.paths.is_empty(), "无内容可提交时必须幂等: {r:?}");
+        assert!(
+            !r.committed && r.paths.is_empty(),
+            "无内容可提交时必须幂等: {r:?}"
+        );
         assert!(!git_has_head(&bare), "无内容时不得凭空制造提交");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3453,13 +4080,23 @@ resources = ["ghost.pdf"]
         append_inbox_at(&wt, "## a.pdf · 第 3 页 · 2026-08-05\n\n选段一\n").unwrap();
         let target = wt.join("notes/inbox.md");
         let text = fs::read_to_string(&target).unwrap();
-        assert!(text.starts_with("# 文献摘录收件箱"), "首次写入要有文件头: {text}");
+        assert!(
+            text.starts_with("# 文献摘录收件箱"),
+            "首次写入要有文件头: {text}"
+        );
         assert!(text.contains("选段一"));
         // 第二次：追加不覆盖，文件头不重复
         append_inbox_at(&wt, "## b.pdf · 第 1 页 · 2026-08-05\n\n选段二\n").unwrap();
         let text = fs::read_to_string(&target).unwrap();
-        assert!(text.contains("选段一") && text.ends_with("选段二\n"), "追加语义: {text}");
-        assert_eq!(text.matches("文献摘录收件箱").count(), 1, "文件头只出现一次: {text}");
+        assert!(
+            text.contains("选段一") && text.ends_with("选段二\n"),
+            "追加语义: {text}"
+        );
+        assert_eq!(
+            text.matches("文献摘录收件箱").count(),
+            1,
+            "文件头只出现一次: {text}"
+        );
         // 目录不存在要报错而不是静默
         assert!(append_inbox_at(&dir.join("missing"), "x").is_err());
         std::fs::remove_dir_all(&dir).ok();
@@ -3510,13 +4147,16 @@ resources = ["ghost.pdf"]
                 workspace_name: "lit-notes".into(),
                 brief: "整理笔记".into(),
                 expected_artifacts: vec!["notes/".into()],
+                inputs: Vec::new(),
+                optional_inputs: Vec::new(),
+                any_of_inputs: Vec::new(),
                 skills: vec!["paper-notes".into()],
                 resources: Vec::new(),
                 human_tasks: Vec::new(),
                 discussion_seeds: Vec::new(),
                 decisions: Vec::new(),
                 asks_lit_source: false,
-            role: "ai".into(),
+                role: "ai".into(),
                 run: vec![StepRunDto {
                     name: "dev".into(),
                     command: "echo hi".into(),
@@ -3566,7 +4206,10 @@ resources = ["ghost.pdf"]
         new_steps.pop();
         let second = save_template_at(&path, "模板A", "新描述", new_steps.clone()).unwrap();
         assert_eq!(second.id, first.id, "同名覆盖保留原 id");
-        assert_eq!(second.created_at, first.created_at, "同名覆盖保留 created_at");
+        assert_eq!(
+            second.created_at, first.created_at,
+            "同名覆盖保留 created_at"
+        );
         assert_eq!(second.description, "新描述");
         assert_eq!(second.steps, new_steps);
 
@@ -3592,7 +4235,10 @@ resources = ["ghost.pdf"]
             .collect();
         assert_eq!(backups.len(), 1, "应生成唯一 corrupt 备份: {backups:?}");
         // 损坏内容完整保留在备份里，可被人工恢复
-        assert_eq!(fs::read_to_string(dir.join(&backups[0])).unwrap(), "{ 不是合法 json");
+        assert_eq!(
+            fs::read_to_string(dir.join(&backups[0])).unwrap(),
+            "{ 不是合法 json"
+        );
         // 备份后正常保存不受影响
         save_template_at(&path, "模板A", "", sample_steps()).unwrap();
         assert_eq!(read_templates_at(&path).unwrap().len(), 1);
@@ -3677,7 +4323,7 @@ resources = ["ghost.pdf"]
     }
 
     #[test]
-    fn append_steps_skips_name_and_workspace_conflicts() {
+    fn append_steps_skips_name_conflicts_and_renames_workspace_conflicts() {
         let dir = temp_dir("append-skip");
         let root = dir.join("proj");
         let text = "[[steps]]\nname = \"读文献\"\nworkspace_name = \"lit-notes\"\n\n\
@@ -3694,15 +4340,23 @@ resources = ["ghost.pdf"]
             ..StepDto::default()
         });
         let res = append_pipeline_steps_at(&root, batch).unwrap();
-        assert_eq!(res.appended, 1, "只有「写论文」真正追加");
+        assert_eq!(
+            res.appended, 2,
+            "重名步骤跳过，工作区名冲突的步骤应自动追加并改名"
+        );
         assert_eq!(
             res.skipped,
-            vec!["读文献", "换个名字", "写论文"],
-            "name 撞车、workspace_name 撞车、批次内重复各跳过一条"
+            vec!["读文献", "写论文"],
+            "只因步骤名撞车跳过，workspace_name 撞车不应丢步骤"
         );
+        assert_eq!(res.renamed.len(), 1);
+        assert_eq!(res.renamed[0].name, "换个名字");
+        assert_eq!(res.renamed[0].from, "write");
+        assert_eq!(res.renamed[0].to, "write-2");
         let cfg = read_config_at(&root).config;
-        assert_eq!(cfg.steps.len(), 3);
+        assert_eq!(cfg.steps.len(), 4);
         assert_eq!(cfg.steps[2].name, "写论文");
+        assert_eq!(cfg.steps[3].workspace_name, "write-2");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3728,6 +4382,136 @@ resources = ["ghost.pdf"]
             before,
             "全部跳过时不落盘"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn apply_template_merges_settings_and_topic_without_overwriting_real_answers() {
+        let dir = temp_dir("apply-settings");
+        let root = dir.join("proj");
+        write(
+            &config_path(&root),
+            "pipeline_opt_out = true\ntopic = \"旧主题\"\nsettings = [\"目标读者：专家\", \"综述角度：（待填写）\"]\n",
+        );
+        let res = apply_pipeline_template_at(
+            &root,
+            vec![StepDto {
+                name: "新增步骤".into(),
+                ..StepDto::default()
+            }],
+            vec![
+                "目标读者：专家/小白".into(),
+                "综述角度：机制综述".into(),
+                "目标期刊：Nature".into(),
+            ],
+            "append",
+            Some("新主题".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(res.appended, 1);
+        let cfg = read_config_at(&root).config;
+        assert_eq!(cfg.topic.as_deref(), Some("新主题"));
+        assert_eq!(
+            cfg.settings,
+            vec![
+                "目标读者：专家".to_string(),
+                "综述角度：机制综述".to_string(),
+                "目标期刊：Nature".to_string(),
+            ]
+        );
+        assert!(!cfg.pipeline_opt_out);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn apply_template_all_skipped_without_metadata_leaves_opt_out_file_untouched() {
+        let dir = temp_dir("apply-allskip-optout");
+        let root = dir.join("proj");
+        write(
+            &config_path(&root),
+            "pipeline_opt_out = true\n\n[[steps]]\nname = \"已有步骤\"\n",
+        );
+        let before = fs::read_to_string(config_path(&root)).unwrap();
+        let res = apply_pipeline_template_at(
+            &root,
+            vec![StepDto {
+                name: "已有步骤".into(),
+                ..StepDto::default()
+            }],
+            Vec::new(),
+            "append",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(res.appended, 0);
+        assert_eq!(fs::read_to_string(config_path(&root)).unwrap(), before);
+        assert!(read_config_at(&root).config.pipeline_opt_out);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn replace_template_normalizes_names_and_workspace_conflicts() {
+        let dir = temp_dir("replace-normalize");
+        let root = dir.join("proj");
+        let res = apply_pipeline_template_at(
+            &root,
+            vec![
+                StepDto {
+                    name: "  第一步  ".into(),
+                    workspace_name: " work ".into(),
+                    ..StepDto::default()
+                },
+                StepDto {
+                    name: "第二步".into(),
+                    workspace_name: "work".into(),
+                    ..StepDto::default()
+                },
+            ],
+            Vec::new(),
+            "replace",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(res.appended, 2);
+        assert_eq!(res.renamed[0].to, "work-2");
+        let cfg = read_config_at(&root).config;
+        assert_eq!(cfg.steps[0].name, "第一步");
+        assert_eq!(cfg.steps[0].workspace_name, "work");
+        assert_eq!(cfg.steps[1].workspace_name, "work-2");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_submission_writes_branch_metadata_atomically_even_when_steps_skip() {
+        let dir = temp_dir("append-submission");
+        let root = dir.join("proj");
+        write(
+            &config_path(&root),
+            "pipeline_opt_out = true\n\n[[steps]]\nname = \"读文献\"\n\n[[steps]]\nname = \"写论文\"\n",
+        );
+
+        // 模板步骤全部因名称重复跳过，但返修分支仍必须在同一次读-改-原子写中生效。
+        let res = append_pipeline_steps_at_with_submission(
+            &root,
+            sample_steps(),
+            Some("revision"),
+            Some(0),
+        )
+        .unwrap();
+        assert_eq!(res.appended, 0);
+        assert_eq!(res.skipped, vec!["读文献", "写论文"]);
+
+        let cfg = read_config_at(&root).config;
+        assert!(!cfg.pipeline_opt_out, "选择返修分支应清掉 opt-out");
+        assert_eq!(cfg.submission_mode.as_deref(), Some("revision"));
+        assert_eq!(cfg.submission_round, Some(1), "轮次 0 应归一为第 1 轮");
+        assert_eq!(cfg.steps.len(), 2, "全跳过时不应重复追加步骤");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3763,14 +4547,12 @@ resources = ["ghost.pdf"]
         // 全 ASCII：字节偏移可直接按文本解析
         let text = String::from_utf8(pdf.clone()).unwrap();
         let sx = text.rfind("startxref").expect("缺 startxref");
-        let xref_pos: usize = text[sx..]
-            .lines()
-            .nth(1)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        assert_eq!(&pdf[xref_pos..xref_pos + 4], b"xref", "startxref 必须指向 xref 表");
+        let xref_pos: usize = text[sx..].lines().nth(1).unwrap().trim().parse().unwrap();
+        assert_eq!(
+            &pdf[xref_pos..xref_pos + 4],
+            b"xref",
+            "startxref 必须指向 xref 表"
+        );
         // 逐条 n 项的偏移必须精确指向 "N 0 obj"
         let xref = &text[xref_pos..];
         let entries: Vec<&str> = xref.lines().skip(2).take(6).collect();
@@ -3806,12 +4588,18 @@ resources = ["ghost.pdf"]
         assert!(root.join("references.bib").exists());
         assert!(root.join("README.md").exists());
         let pdf = fs::read(root.join("papers").join("sample-glp1-review.pdf")).unwrap();
-        assert!(pdf.starts_with(b"%PDF-") && pdf.ends_with(b"%%EOF\n"), "PDF 结构完整");
+        assert!(
+            pdf.starts_with(b"%PDF-") && pdf.ends_with(b"%%EOF\n"),
+            "PDF 结构完整"
+        );
         // 档案卡可读回：topic + 五步流水线 + 两条资源登记
         // （简报引用上一步产物路径属正常，parse_config 的引用提示类 warnings 不阻断，这里不断言为空）
         let text = fs::read_to_string(config_path(&root)).unwrap();
         let (config, _) = parse_config(&text);
-        assert_eq!(config.topic.as_deref(), Some("GLP-1 受体激动剂的心血管结局（演示课题）"));
+        assert_eq!(
+            config.topic.as_deref(),
+            Some("GLP-1 受体激动剂的心血管结局（演示课题）")
+        );
         assert_eq!(config.steps.len(), 5);
         assert_eq!(config.steps[0].workspace_name, "lit-search");
         assert_eq!(config.steps[4].workspace_name, "polish");
@@ -3824,8 +4612,12 @@ resources = ["ghost.pdf"]
         assert_eq!(demo_card.name, "示例：确定综述角度");
         assert_eq!(demo_card.step.as_deref(), Some("文献检索与筛选"));
         let draft_text = fs::read_to_string(root.join(".ccode/drafts/lit-search.md")).unwrap();
-        assert!(draft_text.starts_with("# 任务书草稿：文献检索与筛选"), "{draft_text}");
-        for marker in ["想法期讨论沉淀（示范）", "心血管结局", "已否决", "下一步"] {
+        assert!(
+            draft_text.starts_with("# 任务书草稿：文献检索与筛选"),
+            "{draft_text}"
+        );
+        for marker in ["想法期讨论沉淀（示范）", "心血管结局", "已否决", "下一步"]
+        {
             assert!(draft_text.contains(marker), "示范草稿缺内容: {marker}");
         }
         // 演示人工事项：第一步声明了「下载付费墙文献全文」（落点通配 papers/*.pdf）
@@ -3839,16 +4631,30 @@ resources = ["ghost.pdf"]
         write(&root.join("README.md"), "user edit");
         let p2 = create_demo_at(&base, &conn).unwrap();
         assert_eq!(p2.path, p.path);
-        assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "user edit");
-        assert_eq!(task_cards_at(&root).len(), 1, "幂等路径不得重复播种演示卡片");
+        assert_eq!(
+            fs::read_to_string(root.join("README.md")).unwrap(),
+            "user edit"
+        );
+        assert_eq!(
+            task_cards_at(&root).len(),
+            1,
+            "幂等路径不得重复播种演示卡片"
+        );
 
         // 目录已存在但未注册：只注册，不补建任何文件
         remove_project_at(&conn, &root).unwrap();
         fs::remove_file(root.join("references.bib")).unwrap();
         let p3 = create_demo_at(&base, &conn).unwrap();
         assert_eq!(p3.path, p.path);
-        assert!(!root.join("references.bib").exists(), "已存在目录只注册，不回补文件");
-        assert_eq!(task_cards_at(&root).len(), 1, "只注册路径不得重播种演示卡片");
+        assert!(
+            !root.join("references.bib").exists(),
+            "已存在目录只注册，不回补文件"
+        );
+        assert_eq!(
+            task_cards_at(&root).len(),
+            1,
+            "只注册路径不得重播种演示卡片"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3974,7 +4780,11 @@ resources = ["ghost.pdf"]
         update_step_skills_at(
             &root,
             "文献整理",
-            vec![" lit-search ".into(), "paper-notes".into(), "lit-search".into()],
+            vec![
+                " lit-search ".into(),
+                "paper-notes".into(),
+                "lit-search".into(),
+            ],
         )
         .unwrap();
         let cfg = read_config_at(&root).config;
@@ -4087,8 +4897,7 @@ resources = ["ghost.pdf"]
         let root = dir.join("proj");
         std::fs::create_dir_all(&root).unwrap();
         let conn = Connection::open_in_memory().unwrap();
-        let (cleaned, warn) =
-            cleanup_project_db_traces(&conn, &root, &["t-abc".to_string()]);
+        let (cleaned, warn) = cleanup_project_db_traces(&conn, &root, &["t-abc".to_string()]);
         assert_eq!(cleaned, 0);
         assert!(warn.is_empty(), "表不存在不该报错: {warn:?}");
         std::fs::remove_dir_all(&dir).ok();
@@ -4124,6 +4933,90 @@ resources = ["ghost.pdf"]
     }
 
     #[test]
+    fn inputs_and_submission_branch_round_trip() {
+        let text = r#"submission_mode = "revision"
+submission_round = 2
+
+[[steps]]
+name = "第 2 轮返修"
+workspace_name = "rebuttal-r2"
+inputs = ["reviews/round-2.md", "manuscript/revised-r1.md"]
+optional_inputs = ["supplementary.csv"]
+any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
+"#;
+        let (cfg, warnings) = parse_config(text);
+        assert!(
+            warnings.is_empty(),
+            "合法输入/投稿字段不应告警: {warnings:?}"
+        );
+        assert_eq!(cfg.submission_mode.as_deref(), Some("revision"));
+        assert_eq!(cfg.submission_round, Some(2));
+        assert_eq!(
+            cfg.steps[0].inputs,
+            vec!["reviews/round-2.md", "manuscript/revised-r1.md"]
+        );
+        assert_eq!(cfg.steps[0].optional_inputs, vec!["supplementary.csv"]);
+        assert_eq!(
+            cfg.steps[0].any_of_inputs,
+            vec![vec![
+                "manuscript/paper-final.md".to_string(),
+                "manuscript/review-final.md".to_string()
+            ]]
+        );
+        let rendered = render_config(Some(text), &cfg).unwrap();
+        let (back, back_warnings) = parse_config(&rendered);
+        assert!(back_warnings.is_empty(), "回读不应告警: {back_warnings:?}");
+        assert_eq!(back, cfg);
+        assert!(rendered.contains("submission_mode = \"revision\""));
+        assert!(rendered.contains("submission_round = 2"));
+    }
+
+    #[test]
+    fn project_settings_merge_keeps_answers_and_replaces_placeholders() {
+        let mut existing = vec![
+            "目标篇幅：6000-8000 词".into(),
+            "读者与文风：（偏同行专家 / 偏入门科普）".into(),
+        ];
+        merge_project_settings(
+            &mut existing,
+            &[
+                "目标篇幅：（如 5000 词）".into(),
+                "读者与文风：偏入门科普".into(),
+                "去向：（投期刊 / 课程作业）".into(),
+            ],
+        );
+        assert_eq!(existing[0], "目标篇幅：6000-8000 词");
+        assert_eq!(existing[1], "读者与文风：偏入门科普");
+        assert_eq!(existing[2], "去向：（投期刊 / 课程作业）");
+    }
+
+    #[test]
+    fn first_step_external_inputs_do_not_create_noise_but_later_missing_inputs_warn() {
+        let first = StepDto {
+            name: "入口".into(),
+            inputs: vec!["upstream/notes/".into(), "analysis-report.md".into()],
+            ..StepDto::default()
+        };
+        assert!(
+            validate_step(&first, &[], &[], true).is_empty(),
+            "第一步输入可来自上游项目/外部资源，不应制造不可行动警告"
+        );
+        let later = StepDto {
+            name: "后续".into(),
+            inputs: vec!["missing/result.md".into()],
+            ..StepDto::default()
+        };
+        let warnings = validate_step(&later, &[], &["previous.md".into()], false);
+        assert_eq!(warnings.len(), 1, "后续步骤缺失输入仍应提示: {warnings:?}");
+        let warnings = validate_step(&later, &[], &[], false);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "即使前一步没有声明产物，后续步骤缺失输入也应提示: {warnings:?}"
+        );
+    }
+
+    #[test]
     fn decisions_parse_render_roundtrip() {
         let dir = temp_dir("decisions");
         let root = dir.join("proj");
@@ -4138,7 +5031,12 @@ resources = ["ghost.pdf"]
         write(&config_path(&root), text);
         let (cfg, warnings) = parse_config(text);
         // 只留 q 与 options 都非空的条目；选项两端空白剔除、空项丢弃
-        assert_eq!(cfg.steps[0].decisions.len(), 1, "{:?}", cfg.steps[0].decisions);
+        assert_eq!(
+            cfg.steps[0].decisions.len(),
+            1,
+            "{:?}",
+            cfg.steps[0].decisions
+        );
         assert_eq!(cfg.steps[0].decisions[0].q, "综述角度怎么收");
         assert_eq!(
             cfg.steps[0].decisions[0].options,
@@ -4206,7 +5104,12 @@ resources = ["ghost.pdf"]
                     [[steps]]\nname = \"写作\"\n";
         write(&config_path(&root), text);
         let (cfg, warnings) = parse_config(text);
-        assert_eq!(cfg.steps[0].human_tasks.len(), 2, "{:?}", cfg.steps[0].human_tasks);
+        assert_eq!(
+            cfg.steps[0].human_tasks.len(),
+            2,
+            "{:?}",
+            cfg.steps[0].human_tasks
+        );
         // 讨论种子：去空白、空项剔除
         assert_eq!(
             cfg.steps[0].discussion_seeds,
@@ -4223,7 +5126,10 @@ resources = ["ghost.pdf"]
         let raw = fs::read_to_string(config_path(&root)).unwrap();
         let (cfg2, _) = parse_config(&raw);
         assert_eq!(cfg2.steps[0].human_tasks, cfg.steps[0].human_tasks);
-        assert_eq!(cfg2.steps[0].discussion_seeds, cfg.steps[0].discussion_seeds);
+        assert_eq!(
+            cfg2.steps[0].discussion_seeds,
+            cfg.steps[0].discussion_seeds
+        );
         assert!(raw.contains("[[steps.human_tasks]]"), "{raw}");
         assert!(raw.contains("discussion_seeds"), "{raw}");
         assert!(!raw.contains("during"), "默认时机省略不写: {raw}");
@@ -4232,15 +5138,22 @@ resources = ["ghost.pdf"]
     }
 
     #[test]
-    fn human_tasks_bad_entries_tolerated() {        // 空标题跳过、非法时机归一 during 并告警、无 human_tasks 段的步骤不受影响
+    fn human_tasks_bad_entries_tolerated() {
+        // 空标题跳过、非法时机归一 during 并告警、无 human_tasks 段的步骤不受影响
         let text = "[[steps]]\nname = \"检索\"\n\n\
                     [[steps.human_tasks]]\ntitle = \"  \"\n\n\
                     [[steps.human_tasks]]\ntitle = \"下载全文\"\ntiming = \"whenever\"\n";
         let (cfg, warnings) = parse_config(text);
         assert_eq!(cfg.steps[0].human_tasks.len(), 1);
         assert_eq!(cfg.steps[0].human_tasks[0].timing, "during");
-        assert!(warnings.iter().any(|w| w.contains("标题为空")), "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("whenever")), "{warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("标题为空")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("whenever")),
+            "{warnings:?}"
+        );
     }
 
     // ===== 任务书草稿（v3.72） =====
@@ -4276,7 +5189,10 @@ resources = ["ghost.pdf"]
         // 再次追加：原有内容保留，新小节在后
         append_step_draft_at(&root, "检索筛选", "二次沉淀", "结论 B");
         let text = fs::read_to_string(root.join(&rel)).unwrap();
-        assert!(text.contains("结论 A 保留") && text.contains("结论 B"), "{text}");
+        assert!(
+            text.contains("结论 A 保留") && text.contains("结论 B"),
+            "{text}"
+        );
         assert!(text.find("结论 A 保留") < text.find("结论 B"), "追加保序");
         // 步骤不存在报错
         assert!(append_step_draft_at(&root, "没有这步", "x", "y").is_err());
@@ -4284,7 +5200,8 @@ resources = ["ghost.pdf"]
     }
 
     #[test]
-    fn delete_project_dir_rejects_home_and_shallow() {        let dir = temp_dir("deldir-guard");
+    fn delete_project_dir_rejects_home_and_shallow() {
+        let dir = temp_dir("deldir-guard");
         // home 与文档目录本身一律拒绝
         let home = dirs::home_dir().unwrap();
         let err = guard_project_dir(&home).unwrap_err();
@@ -4325,7 +5242,10 @@ resources = ["ghost.pdf"]
         assert_eq!(cards.len(), 4);
         assert_eq!(cards[0].kind, "draft", "缺 kind + 有 step → draft");
         assert_eq!(cards[1].kind, "idea", "缺 kind + 无 step → idea");
-        assert_eq!(cards[2].kind, "idea", "显式 kind 保留（哪怕与 step 推断相反）");
+        assert_eq!(
+            cards[2].kind, "idea",
+            "显式 kind 保留（哪怕与 step 推断相反）"
+        );
         assert_eq!(cards[3].kind, "idea", "未知 kind 按缺省规则推断");
         // 写回固化推断值（免迁移脚本）
         write_tasks_at(&project, &cards).unwrap();
@@ -4343,7 +5263,12 @@ resources = ["ghost.pdf"]
     #[test]
     fn fuse_prompt_branches_on_draft_presence() {
         // 草稿非空：带上现有草稿做去重参照，但只要结论片段
-        let p = build_fuse_prompt("选角度", "文献检索", Some("# 任务书草稿\n\n## 待拍板\n"), "[用户] 聊角度");
+        let p = build_fuse_prompt(
+            "选角度",
+            "文献检索",
+            Some("# 任务书草稿\n\n## 待拍板\n"),
+            "[用户] 聊角度",
+        );
         assert!(p.contains("文献检索") && p.contains("选角度"));
         assert!(p.contains("当前任务书草稿"));
         assert!(p.contains("已经写过的结论不要重复"));
@@ -4377,7 +5302,10 @@ resources = ["ghost.pdf"]
         let path = root.join(&rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         crate::profiles::atomic_write(&path, "# 任务书草稿：检索筛选\n").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "# 任务书草稿：检索筛选\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# 任务书草稿：检索筛选\n"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4407,12 +5335,19 @@ resources = ["ghost.pdf"]
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].name, "文献筛选");
         let read = read_config_at(&project);
-        assert_eq!(read.config, sample_config(), "tasks 写回不得动 resources/steps");
+        assert_eq!(
+            read.config,
+            sample_config(),
+            "tasks 写回不得动 resources/steps"
+        );
 
         // 重名拒绝（大小写敏感：不同大小写允许）
         let err = create_task_card_at(&project, "文献筛选", None, None).unwrap_err();
         assert!(err.contains("同名卡片"), "{err}");
-        assert!(create_task_card_at(&project, "文献筛选 ", None, None).is_err(), "尾随空白去重后仍同名应拒绝");
+        assert!(
+            create_task_card_at(&project, "文献筛选 ", None, None).is_err(),
+            "尾随空白去重后仍同名应拒绝"
+        );
         // 空名拒绝
         assert!(create_task_card_at(&project, "   ", None, None).is_err());
 
@@ -4433,7 +5368,10 @@ resources = ["ghost.pdf"]
         delete_task_card_at(&project, &card3.id).unwrap();
         assert!(task_cards_at(&project).is_empty());
         let on_disk = fs::read_to_string(config_path(&project)).unwrap();
-        assert!(!on_disk.contains("[[tasks]]"), "空 tasks 不应落盘: {on_disk}");
+        assert!(
+            !on_disk.contains("[[tasks]]"),
+            "空 tasks 不应落盘: {on_disk}"
+        );
         // resources/steps 仍在
         let read = read_config_at(&project);
         assert_eq!(read.config, sample_config());
@@ -4467,19 +5405,27 @@ name = "坏 briefs 残留也忽略"
 briefs = "not-an-array"
 "#;
         let cards = parse_task_cards(text);
-        assert_eq!(cards.len(), 3, "缺 id 的整条跳过；残留 briefs 字段一律忽略: {cards:?}");
+        assert_eq!(
+            cards.len(),
+            3,
+            "缺 id 的整条跳过；残留 briefs 字段一律忽略: {cards:?}"
+        );
         assert_eq!(cards[1].step, None, "空白 step 归 None");
         assert_eq!(cards[1].created_at, "");
         // 整份坏掉 → 空表
         assert!(parse_task_cards("not [valid toml").is_empty());
 
         // 写回只替换 tasks 段，未知键与注释保留；残留 briefs 写回后自然丢弃
-        let existing = "# 用户注释\nfuture_top_key = 42\n\n[[tasks]]\nid = \"t-old\"\nname = \"旧卡\"\n";
+        let existing =
+            "# 用户注释\nfuture_top_key = 42\n\n[[tasks]]\nid = \"t-old\"\nname = \"旧卡\"\n";
         let rendered = render_tasks(Some(existing), &cards[..1]).unwrap();
         assert!(rendered.contains("# 用户注释"), "{rendered}");
         assert!(rendered.contains("future_top_key = 42"), "{rendered}");
         assert!(!rendered.contains("旧卡"), "{rendered}");
-        assert!(!rendered.contains("brief-1.md"), "残留 briefs 写回应丢弃: {rendered}");
+        assert!(
+            !rendered.contains("brief-1.md"),
+            "残留 briefs 写回应丢弃: {rendered}"
+        );
         let back = parse_task_cards(&rendered);
         assert_eq!(back, cards[..1].to_vec(), "tasks 往返一致");
         // 现有文件是坏 TOML 时停止写入，不覆盖未知内容

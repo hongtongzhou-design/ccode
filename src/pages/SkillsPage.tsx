@@ -1242,7 +1242,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   return (
     <div className="flex h-full">
       <div className="min-w-0 flex-1 overflow-auto">
-        <PageFrame width="wide">
+        <PageFrame width="fluid">
           <PageHeader
             title="技能"
             meta={`${skills.length} 个 · 已应用 ${appliedCount}`}
@@ -1253,7 +1253,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                   onClick={() => setEditor({ mode: "create" })}
                   className={primaryActionClass}
                 >
-                  + 新建技能
+                  + 创建技能
                 </button>
                 <button
                   type="button"
@@ -1316,13 +1316,22 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               title="还没有技能"
               detail="导入现有技能，或把自己的研究方法新建为可复用技能。"
               action={
-                <button
-                  type="button"
-                  onClick={() => setModal({ kind: "import" })}
-                  className={primaryActionClass}
-                >
-                  导入技能
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditor({ mode: "create" })}
+                    className={primaryActionClass}
+                  >
+                    创建技能
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setModal({ kind: "import" })}
+                    className={secondaryActionClass}
+                  >
+                    导入技能
+                  </button>
+                </div>
               }
             />
           ) : (
@@ -1348,7 +1357,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               )}
               {/* caps 式小字灰表头：弱化只作列定位，hairline 分隔无卡片外框；sticky 用页面底色遮挡滚动内容 */}
               <div>
-                <div className="sticky top-0 z-10 grid grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_92px] items-center gap-3 border-b border-hairline bg-canvas px-3 py-2 text-xs tracking-wider text-l4">
+                <div className="sticky top-0 z-10 grid grid-cols-[minmax(300px,560px)_minmax(180px,1fr)_120px_92px] items-center gap-3 bg-canvas px-3 py-2 text-xs tracking-wider text-l4">
                   <span>技能</span>
                   <span>来源</span>
                   <span>应用</span>
@@ -1371,7 +1380,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         aria-label={
                           catCollapsed.has(category) ? "展开" : "收起"
                         }
-                        className="flex h-9 w-full items-center gap-1.5 border-b border-hairline px-3 text-sm hover:bg-hover"
+                        className="flex h-9 w-full items-center gap-1.5 rounded-md px-3 text-sm hover:bg-hover"
                       >
                         <span className="w-3 text-l4">
                           {catCollapsed.has(category) ? "▸" : "▾"}
@@ -1389,7 +1398,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         )}
                       </button>
                       {!catCollapsed.has(category) && (
-                        <ul className="divide-y divide-hairline">
+                        <ul className="space-y-1 py-1">
                           {categorySkills.map((skill) => {
                             const stale = (skill.staleCopies ?? []).length > 0;
                             const update = updates[skill.id];
@@ -1397,9 +1406,9 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                               <li
                                 key={skill.id}
                                 onClick={() => void onView(skill)}
-                                className={`group grid min-h-14 cursor-pointer grid-cols-[minmax(220px,1fr)_minmax(140px,220px)_120px_92px] items-center gap-3 px-3 py-1.5 transition-colors hover:bg-hover ${
+                                className={`group grid min-h-14 cursor-pointer grid-cols-[minmax(300px,560px)_minmax(180px,1fr)_120px_92px] items-center gap-3 rounded-md border border-transparent px-3 py-1.5 transition-colors hover:border-hairline hover:bg-hover ${
                                   preview?.skill.id === skill.id
-                                    ? "bg-inset"
+                                    ? "border-hairline bg-inset"
                                     : ""
                                 }`}
                               >
@@ -1520,11 +1529,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                   skill={skill}
                                   onOpen={() => void onView(skill)}
                                 />
-                                {/* 行内高频操作收进悬浮胶囊栏（v3.93）：raised 底 + 细边 + 投影浮起，
+                                {/* 行内高频操作收进悬浮操作栏：raised 底 + 细边，
                                     hover 行才现；tooltip 挂按钮上方（RowAction）不再与图标脱节 */}
                                 <div className="flex items-center justify-end">
                                   <div
-                                    className={`flex items-center rounded-lg border border-hairline bg-raised px-1 py-0.5 shadow-lg ${hoverRevealClass}`}
+                                    className={`flex items-center rounded-md border border-hairline bg-raised px-1 py-0.5 ${hoverRevealClass}`}
                                   >
                                     <RowAction
                                       icon="✎"
@@ -1578,7 +1587,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
       {/* SKILL.md 预览面板 */}
       {preview && (
         <div className="flex w-[clamp(360px,34vw,460px)] shrink-0 flex-col border-l border-hairline bg-canvas">
-          <div className="flex h-11 shrink-0 items-center gap-2 border-b border-hairline bg-strip px-3">
+          <div className="flex h-11 shrink-0 items-center gap-2 bg-strip px-3">
             <span className="truncate text-sm font-semibold text-l1">
               {preview.skill.name}
             </span>

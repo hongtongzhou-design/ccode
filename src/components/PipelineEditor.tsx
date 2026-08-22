@@ -1,9 +1,26 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Checkbox, EmptyState } from "./PageFrame";
+import {
+  Checkbox,
+  compactFieldClass,
+  compactPrimaryActionClass,
+  EmptyState,
+  inlineActionClass,
+} from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
 import StepSkillsChips from "./StepSkillsChips";
-import { PIPELINE_TEMPLATES, RESOURCE_TYPE_LABELS } from "../pipeline-presets";
+import {
+  completionOptionsForTarget,
+  HUMAN_COMPLETION_LABELS,
+  isCompletionCompatible,
+  normalizeCompletion,
+} from "../human-task-completion";
+import {
+  PIPELINE_TEMPLATES,
+  pipelineStepsForTemplate,
+  RESOURCE_TYPE_LABELS,
+  type SubmissionMode,
+} from "../pipeline-presets";
 import type {
   AppendStepsResultDto,
   HumanTaskDto,
@@ -15,12 +32,9 @@ import type {
   SkillDto,
 } from "../types";
 
-const actionBtn =
-  "rounded-sm px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-40";
-const ctaSm =
-  "rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50";
-const field =
-  "rounded-sm border border-field bg-canvas px-2 py-1 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
+const actionBtn = inlineActionClass;
+const ctaSm = compactPrimaryActionClass;
+const field = compactFieldClass;
 
 /** 与后端 sanitize 一致：非 [A-Za-z0-9-] → -，去掉首尾 - */
 function sanitizeWsName(name: string): string {
@@ -34,12 +48,16 @@ const TIMING_OPTIONS: { value: string; label: string }[] = [
   { value: "after", label: "收尾" },
 ];
 
-/** 编辑器内的步骤草稿：预期产物用逗号分隔文本编辑，保存时再归一化为数组 */
+/** 编辑器内的步骤草稿：预期产物/输入依赖用逗号分隔文本编辑，保存时再归一化为数组 */
 type StepDraft = {
   name: string;
   workspaceName: string;
   brief: string;
   artifactsText: string;
+  inputsText: string;
+  optionalInputsText: string;
+  /** 每行一组，组内用 | 分隔，表示任一项满足即可 */
+  anyOfInputsText: string;
   skills: string[];
   run: ProjectStepRunDto[];
   /** 勾选中的资源绑定（path）；空 = 不绑定 = 使用项目全部资源 */
@@ -60,6 +78,9 @@ function toDraft(s: ProjectStepDto): StepDraft {
     workspaceName: s.workspaceName,
     brief: s.brief,
     artifactsText: s.expectedArtifacts.join(", "),
+    inputsText: (s.inputs ?? []).join(", "),
+    optionalInputsText: (s.optionalInputs ?? []).join(", "),
+    anyOfInputsText: (s.anyOfInputs ?? []).map((group) => group.join(" | ")).join("; "),
     skills: [...s.skills],
     run: s.run.map((r) => ({ ...r })),
     resources: [...(s.resources ?? [])],
@@ -86,6 +107,23 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
       .split(/[,，]/)
       .map((x) => x.trim())
       .filter(Boolean),
+    inputs: d.inputsText
+      .split(/[,，]/)
+      .map((x) => x.trim())
+      .filter(Boolean),
+    optionalInputs: d.optionalInputsText
+      .split(/[,，]/)
+      .map((x) => x.trim())
+      .filter(Boolean),
+    anyOfInputs: d.anyOfInputsText
+      .split(/[;；\n]/)
+      .map((group) =>
+        group
+          .split("|")
+          .map((x) => x.trim())
+          .filter(Boolean),
+      )
+      .filter((group) => group.length > 0),
     skills: d.skills,
     run: d.run
       .filter((r) => r.name.trim() && r.command.trim())
@@ -101,6 +139,12 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
         // optional 必须透传：内置模板用它标「不做也能跑」的事项，漏掉会让编辑器一保存
         // 就把这些事项静默升级为必办（v3.85 修）
         optional: t.optional ?? false,
+        completion: normalizeCompletion(t.target, t.completion),
+        expectedCount:
+          t.expectedCount != null && Number.isFinite(t.expectedCount)
+            ? Math.max(0, Math.floor(t.expectedCount))
+            : undefined,
+        manifestPath: t.manifestPath?.trim() || undefined,
       })),
     discussionSeeds: d.discussionSeeds.map((x) => x.trim()).filter(Boolean),
     // 与后端解析同一口径：问题与选项都非空才留（没有选项的题该写成讨论种子）
@@ -119,7 +163,7 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
 
 /**
  * 研究流程编辑器（全宽覆盖层）：项目研究流程的唯一编辑入口。
- * 每个步骤一张卡片（名称/工作区名/简报/预期产物/run 脚本/资源绑定），卡片可排序与增删；
+ * 每个步骤一张卡片（名称/工作区名/简报/预期产物/输入依赖/run 脚本/资源绑定），卡片可排序与增删；
  * 「保存」把全部步骤整体写回 project.toml（write_project_config 由父组件执行），「取消」放弃草稿，
  * 有未保存改动时关闭需确认。
  */
@@ -159,6 +203,11 @@ export default function PipelineEditor({
   const [appendResult, setAppendResult] = useState<AppendStepsResultDto | null>(
     null,
   );
+  const [submissionAppend, setSubmissionAppend] = useState<{
+    template: PipelineTemplateDto | (typeof PIPELINE_TEMPLATES)[number];
+    mode: SubmissionMode;
+    round: number;
+  } | null>(null);
   const [userTemplates, setUserTemplates] = useState<PipelineTemplateDto[]>([]);
   const resources = config.resources;
   // 技能库（推荐技能 chip 的展示元数据与「＋ 添加技能」候选）：挂载时读一次，失败降级为不可编辑 chip
@@ -248,9 +297,34 @@ export default function PipelineEditor({
   ) {
     patch(index, {
       humanTasks: drafts[index].humanTasks.map((t, x) =>
-        x === ti ? { ...t, ...part } : t,
+        x === ti
+          ? {
+              ...t,
+              ...part,
+              ...(part.target !== undefined
+                ? {
+                    completion: normalizeCompletion(
+                      part.target,
+                      t.completion,
+                    ),
+                  }
+                : {}),
+            }
+          : t,
       ),
     });
+  }
+
+  function inputSuggestions(index: number): string[] {
+    const upstream = drafts
+      .slice(0, index)
+      .flatMap((step) =>
+        step.artifactsText
+          .split(/[,，]/)
+          .map((x) => x.trim())
+          .filter(Boolean),
+      );
+    return [...new Set([...upstream, ...resources.map((r) => r.path)])];
   }
 
   async function tryClose() {
@@ -274,8 +348,17 @@ export default function PipelineEditor({
     onSave(drafts.map(toStep));
   }
 
-  /** 从模板追加：步骤直接写入 project.toml（后端跳过重名步骤），成功后重读配置刷新卡片 */
-  async function appendTemplate(tpl: { name: string; steps: ProjectStepDto[] }) {
+  /** 从模板追加：步骤直接写入 project.toml，成功后重读配置刷新卡片。 */
+  async function appendTemplate(
+    tpl: {
+      name: string;
+      steps: ProjectStepDto[];
+      id?: string;
+      projectSettings?: string[];
+    },
+    mode: SubmissionMode = "initial",
+    round = 1,
+  ) {
     if (appending) return;
     if (
       dirty &&
@@ -289,10 +372,29 @@ export default function PipelineEditor({
     setAppendResult(null);
     setError(null);
     try {
-      const res = await invoke<AppendStepsResultDto>("append_pipeline_steps", {
-        projectRoot: projectPath,
-        steps: tpl.steps,
-      });
+      const submissionSteps =
+        tpl.id === "submission-rebuttal"
+          ? pipelineStepsForTemplate(
+              tpl as (typeof PIPELINE_TEMPLATES)[number],
+              mode,
+              round,
+            )
+          : tpl.steps;
+      const res = await invoke<AppendStepsResultDto>(
+        "apply_pipeline_template",
+        {
+          projectRoot: projectPath,
+          steps: submissionSteps,
+          projectSettings: tpl.projectSettings ?? [],
+          strategy: "append",
+          topic: null,
+          submissionMode: tpl.id === "submission-rebuttal" ? mode : null,
+          submissionRound:
+            tpl.id === "submission-rebuttal" && mode === "revision"
+              ? Math.max(1, round)
+              : null,
+        },
+      );
       // 刷新编辑器步骤列表：与保存后同一口径重读配置，本地草稿与父组件状态一起更新
       const read = await invoke<ProjectConfigReadDto>("read_project_config", {
         path: projectPath,
@@ -301,6 +403,7 @@ export default function PipelineEditor({
       onConfigReload(read);
       setAppendResult(res);
       setAppendOpen(false);
+      setSubmissionAppend(null);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -309,8 +412,8 @@ export default function PipelineEditor({
   }
 
   /**
-   * 步骤卡的折叠区（v3.85 字段分档）：常驻只留「步骤名 / 简报 / 预期产物 / 推荐技能」——
-   * 这四项决定 TASK.md 的全部内容，是步骤的合同本体；其余按「人机分工」与「高级」两档收起。
+   * 步骤卡的折叠区（v3.85 字段分档）：常驻只留「步骤名 / 简报 / 预期产物 / 输入依赖 / 推荐技能」——
+   * 这五项决定 TASK.md 的全部内容，是步骤的合同本体；其余按「人机分工」与「高级」两档收起。
    * 字段一个没删（模板要用、向后兼容），只是默认不占视线：一屏从放不下一张卡变成放得下三张。
    *
    * **一律默认收起**：曾按「已填就展开」处理，结果模板步骤个个都填了 workspace_name 与
@@ -446,7 +549,58 @@ export default function PipelineEditor({
           />
         </label>
 
-        {/* 推荐技能：常驻第 4 项。与另外三项一起构成 TASK.md 的全部内容，是「合同」本体。
+        <label className="mb-2 block">
+          <span className="mb-1 block text-xs text-l3">
+            必需输入（逗号分隔；缺失会提示）
+          </span>
+          <input
+            className={`${field} w-full font-mono text-xs`}
+            value={d.inputsText}
+            onChange={(e) => patch(i, { inputsText: e.target.value })}
+            placeholder="如 survey/gap-analysis.md, references.bib"
+            title="填写本步骤实际要读取的上游产物或项目资源路径"
+            list={`step-input-suggestions-${i}`}
+          />
+          <datalist id={`step-input-suggestions-${i}`}>
+            {inputSuggestions(i).map((path) => (
+              <option key={path} value={path} />
+            ))}
+          </datalist>
+          {inputSuggestions(i).length > 0 && (
+            <span className="mt-0.5 block text-micro text-l4">
+              可从上游产物或项目资源建议中选择
+            </span>
+          )}
+          <div className="mt-1">
+            <span className="mb-0.5 block text-micro text-l4">
+              可选输入（缺失不阻断）
+            </span>
+            <input
+              className={`${field} w-full font-mono text-xs`}
+              value={d.optionalInputsText}
+              onChange={(e) => patch(i, { optionalInputsText: e.target.value })}
+              placeholder="如 supplementary.csv"
+              title="可选输入缺失不阻断本步骤"
+            />
+          </div>
+          <div className="mt-1">
+            <span className="mb-0.5 block text-micro text-l4">
+              任一输入（每组用 | 分隔）
+            </span>
+            <input
+              className={`${field} w-full font-mono text-xs`}
+              value={d.anyOfInputsText}
+              onChange={(e) => patch(i, { anyOfInputsText: e.target.value })}
+              placeholder="paper-final.md | review-final.md；多组用分号或换行分隔"
+              title="每组用 | 分隔，组内任一输入满足即可；多组用分号或换行分隔"
+            />
+          </div>
+          <span className="mt-0.5 block text-micro text-l4">
+            每组满足其中一个即可；多组之间用分号或换行分隔
+          </span>
+        </label>
+
+        {/* 推荐技能：常驻第 5 项。与另外四项一起构成 TASK.md 的全部内容，是「合同」本体。
             这里改的是草稿，随整份 steps 一起保存（不走 update_step_skills 的单步写回）。 */}
         <div className="mb-2">
           <StepSkillsChips
@@ -554,7 +708,72 @@ export default function PipelineEditor({
                     }
                   />
                 </span>
+                <select
+                  className={`${field} w-36 shrink-0 text-xs`}
+                  value={t.completion ?? "exists"}
+                  onChange={(e) =>
+                    patchHumanTask(i, ti, {
+                      completion: e.target.value as HumanTaskDto["completion"],
+                    })
+                  }
+                  title="完成判定：文件出现、必须人工确认、通配目标全部满足或清除占位"
+                >
+                  {!isCompletionCompatible(
+                    t.target,
+                    t.completion ?? "exists",
+                  ) && (
+                    <option value={t.completion}>
+                      当前配置：
+                      {HUMAN_COMPLETION_LABELS[
+                        t.completion as NonNullable<HumanTaskDto["completion"]>
+                      ] ?? t.completion}
+                    </option>
+                  )}
+                  {completionOptionsForTarget(t.target).map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
               </div>
+              {(t.completion ?? "exists") === "all" && (
+                <div className="mt-1 flex items-center gap-2">
+                  <input
+                    className={`${field} w-32 font-mono text-xs`}
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={t.expectedCount ?? ""}
+                    onChange={(e) =>
+                      patchHumanTask(i, ti, {
+                        expectedCount:
+                          e.target.value.trim() === ""
+                            ? undefined
+                            : Math.max(0, Number.parseInt(e.target.value, 10) || 0),
+                      })
+                    }
+                    placeholder="目标数量"
+                    title="all 的目标总数；不填时 papers/*.pdf 可从 to-fetch.md 推导"
+                  />
+                  <input
+                    className={`${field} min-w-0 flex-1 font-mono text-xs`}
+                    value={t.manifestPath ?? ""}
+                    onChange={(e) =>
+                      patchHumanTask(i, ti, { manifestPath: e.target.value })
+                    }
+                    placeholder="或清单路径，如 papers/to-fetch.md"
+                    title="每行一个目标；空行和 # 注释行不计数"
+                  />
+                </div>
+              )}
+              {!isCompletionCompatible(
+                t.target,
+                t.completion ?? "exists",
+              ) && (
+                <p className="mt-0.5 text-micro text-warn-text">
+                  当前落点不支持该判定；保存时会改为「出现即检测」
+                </p>
+              )}
             </div>
           ))}
           <button
@@ -570,6 +789,9 @@ export default function PipelineEditor({
                     target: "",
                     timing: "before",
                     optional: false,
+                    completion: "manual",
+                    expectedCount: undefined,
+                    manifestPath: "",
                   },
                 ],
               })
@@ -891,7 +1113,7 @@ export default function PipelineEditor({
           {warnings.length > 0 && (
             <div className="rounded-sm bg-strip p-2 text-xs">
               <p className="mb-1 text-warn-text">
-                ⚠ project.toml 有 {warnings.length} 条提示
+                ! project.toml 有 {warnings.length} 条提示
               </p>
               <ul className="space-y-0.5 text-l3">
                 {warnings.map((w) => (
@@ -919,6 +1141,9 @@ export default function PipelineEditor({
                     workspaceName: "",
                     brief: "",
                     artifactsText: "",
+                    inputsText: "",
+                    optionalInputsText: "",
+                    anyOfInputsText: "",
                     skills: [],
                     run: [],
                     resources: [],
@@ -936,7 +1161,7 @@ export default function PipelineEditor({
               type="button"
               className="flex-1 rounded-md bg-strip p-3 text-sm text-l3 hover:bg-inset hover:text-l1 disabled:opacity-40"
               disabled={appending}
-              title="把模板的步骤追加到当前流程末尾；同名/同工作区名的步骤自动跳过"
+              title="把模板的步骤追加到当前流程末尾；同名步骤跳过，工作区名冲突自动改名"
               onClick={() => setAppendOpen((v) => !v)}
             >
               ＋ 从模板追加
@@ -955,21 +1180,117 @@ export default function PipelineEditor({
                   {appendResult.skipped.join("、")}
                 </span>
               )}
+              {appendResult.renamed?.length > 0 && (
+                <span className="text-warn-text">
+                  {"；工作区名冲突已自动改名："}
+                  {appendResult.renamed
+                    .map((r) => `${r.name}（${r.from}→${r.to}）`)
+                    .join("、")}
+                </span>
+              )}
             </p>
           )}
           {appendOpen && (
             <div className="rounded-md bg-strip p-3">
               <p className="mb-2 text-xs text-l3">
-                选择模板，把它的步骤追加到当前流程末尾（与现有步骤同名/同工作区名的自动跳过）：
+                选择模板，把它的步骤追加到当前流程末尾（同名步骤跳过；工作区名冲突会自动加后缀）：
               </p>
-              <ul className="space-y-1.5">
+              {submissionAppend ? (
+                <div className="rounded-sm bg-inset p-3">
+                  <p className="text-xs font-medium text-l1">投稿与返修分支</p>
+                  <div className="mt-2 space-y-1.5 text-xs text-l2">
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        checked={submissionAppend.mode === "initial"}
+                        onChange={() =>
+                          setSubmissionAppend((s) =>
+                            s ? { ...s, mode: "initial" } : s,
+                          )
+                        }
+                      />
+                      首投：期刊格式适配 → 投稿材料
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        checked={submissionAppend.mode === "revision"}
+                        onChange={() =>
+                          setSubmissionAppend((s) =>
+                            s ? { ...s, mode: "revision" } : s,
+                          )
+                        }
+                      />
+                      返修：按轮次生成回复信、修订稿与再投稿清单
+                    </label>
+                    {submissionAppend.mode === "revision" && (
+                      <label className="flex items-center gap-2 pl-6">
+                        返修轮次
+                        <input
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={submissionAppend.round}
+                          onChange={(e) =>
+                            setSubmissionAppend((s) =>
+                              s
+                                ? {
+                                    ...s,
+                                    round: Math.max(
+                                      1,
+                                      Number.parseInt(e.target.value, 10) || 1,
+                                    ),
+                                  }
+                                : s,
+                            )
+                          }
+                          className={`${field} w-20`}
+                        />
+                      </label>
+                    )}
+                  </div>
+                  <div className="mt-3 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      className={actionBtn}
+                      disabled={appending}
+                      onClick={() => setSubmissionAppend(null)}
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      className={ctaSm}
+                      disabled={appending}
+                      onClick={() =>
+                        void appendTemplate(
+                          submissionAppend.template,
+                          submissionAppend.mode,
+                          submissionAppend.round,
+                        )
+                      }
+                    >
+                      追加此分支
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <ul className="space-y-1.5">
                 {PIPELINE_TEMPLATES.map((t) => (
                   <li key={t.id}>
                     <button
                       type="button"
                       className="w-full rounded-sm bg-inset p-2 text-left hover:bg-hover disabled:opacity-40"
                       disabled={appending}
-                      onClick={() => void appendTemplate(t)}
+                      onClick={() =>
+                        t.id === "submission-rebuttal"
+                          ? setSubmissionAppend({
+                              template: t,
+                              mode: "initial",
+                              round: 1,
+                            })
+                          : void appendTemplate(t)
+                      }
                     >
                       <span className="text-xs font-medium text-l1">
                         {t.name}
@@ -1006,7 +1327,8 @@ export default function PipelineEditor({
                     </button>
                   </li>
                 ))}
-              </ul>
+                </ul>
+              )}
               {appending && (
                 <p className="mt-2 text-xs text-l3">追加中…</p>
               )}

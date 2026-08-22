@@ -77,6 +77,23 @@ export interface DetectResult {
   submitCsiU: boolean;
 }
 
+/** 终端主工作区的显示层；仅运行时状态，不写入标签恢复数据。 */
+export type SurfaceMode = "chat" | "terminal";
+
+/** 聊天输入统一发送到当前标签 PTY 后的结果。 */
+export interface ChatSendResult {
+  error: string | null;
+  /** CLI 需要终端专属交互或不支持启动注入，调用方应切回终端。 */
+  needsTerminal?: boolean;
+}
+
+/** 会话文件同步通道状态。 */
+export type SessionSyncState =
+  | "detecting"
+  | "watching"
+  | "waiting"
+  | "polling";
+
 /** 单会话累计用量（终端状态栏 token 段） */
 export interface SessionUsageDto {
   input: number;
@@ -289,9 +306,16 @@ export interface HumanTaskDto {
   timing: string;
   /** 可选事项：不做也不影响这一步跑完；缺省 false = 必办 */
   optional?: boolean;
+  /** 完成判定：exists = 落点出现即检测完成；manual = 必须人工确认；
+   * all = 目标通配/清单全部满足；no_placeholders = 文件存在且不含待填占位。 */
+  completion?: "exists" | "manual" | "all" | "no_placeholders";
+  /** all 的显式目标总数；缺省时仅对 papers/*.pdf 从 to-fetch.md 推导 */
+  expectedCount?: number;
+  /** all 的目标清单；每行一个目标，空行与 # 注释行不计数 */
+  manifestPath?: string;
 }
 
-/** 人工事项派生状态（list_human_task_states）：done = manual || detected，手动优先 */
+/** 人工事项派生状态（list_human_task_states）：后端统一计算 done；显式取消会压过落点检测结果。 */
 export interface HumanTaskStateDto {
   step: string;
   title: string;
@@ -306,6 +330,8 @@ export interface HumanTaskStateDto {
   hitCount?: number;
   /** 待获取清单总篇数（v3.97，仅 papers/*.pdf 落点且存在 to-fetch.md 时有） */
   expectedCount?: number;
+  /** 后端采用的完成判定口径 */
+  completion?: "exists" | "manual" | "all" | "no_placeholders";
   /** 人手动勾过（勾了系统不再追问；取消勾选回到纯检测口径） */
   manual: boolean;
   done: boolean;
@@ -651,6 +677,12 @@ export interface ProjectStepDto {
   workspaceName: string;
   brief: string;
   expectedArtifacts: string[];
+  /** 结构化输入依赖；相对项目根路径或上游提货单路径。缺省兼容旧配置。 */
+  inputs?: string[];
+  /** 可选输入：存在则读取，不存在不阻断步骤。 */
+  optionalInputs?: string[];
+  /** 输入二选一/多选一组：每组至少满足一项即可。 */
+  anyOfInputs?: string[][];
   skills: string[];
   run: ProjectStepRunDto[];
   /** 资源绑定：[[resources]] 条目的 path；空/缺省 = 绑定全部资源（向后兼容旧后端与旧配置） */
@@ -685,6 +717,10 @@ export interface ProjectConfigDto {
    *  后两者 = 用户已有文献库，TASK.md 会加「文献来源」段把检索步骤降级为「盘点 + 查漏补缺」。
    *  缺省 = search（向后兼容旧后端与旧配置） */
   litSource?: string;
+  /** 投稿流程分支：initial = 首投，revision = 返修。缺省表示尚未选择。 */
+  submissionMode?: "initial" | "revision";
+  /** 当前返修轮次；首投不使用。 */
+  submissionRound?: number;
 }
 
 /** 任务卡（list_task_cards 等）：挂在项目下的「对话文件夹」，无独立状态机 */
@@ -718,10 +754,12 @@ export interface PipelineTemplateDto {
   createdAt: string;
 }
 
-/** append_pipeline_steps 返回：实际追加步数 + 因重名（name/workspaceName）跳过的步骤名 */
+/** append_pipeline_steps 返回：实际追加步数 + 因步骤名重复跳过的步骤名 + 工作区改名明细 */
 export interface AppendStepsResultDto {
   appended: number;
   skipped: string[];
+  /** 工作区名冲突时自动加后缀，避免模板步骤被静默丢弃 */
+  renamed: { name: string; from: string; to: string }[];
 }
 
 export interface DiscoveredResourceDto {

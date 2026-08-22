@@ -25,7 +25,7 @@ import {
 import { MCP_PRESETS, type McpPreset } from "../mcp-presets";
 
 /** 行首健康状态点（v3.93）：未检测不渲染（无状态不渲染状态点）；检测过 = 绿/红点 + 延迟，
- *  悬浮看 detail/error 全文，点击重新检测。⚡ 行内测试与这里是同一触发 */
+ *  悬浮看 detail/error 全文，点击重新检测。↯ 行内测试与这里是同一触发 */
 function HealthDot({
   health,
   onCheck,
@@ -305,7 +305,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
     }
   }
 
-  // 连通性检测结果缓存（server id → 结果 | 检测中）：仅手动触发（行内 ⚡ / 状态点点按），
+  // 连通性检测结果缓存（server id → 结果 | 检测中）：仅手动触发（行内 ↯ / 状态点点按），
   // 不进页面自动全量跑——拉起 N 个 stdio 进程的代价不该由打开页面承担
   const [health, setHealth] = useState<Record<string, McpHealthDto | "checking">>(
     {},
@@ -422,8 +422,8 @@ export default function McpPage({ visible }: { visible: boolean }) {
       !force &&
       !(await confirmDialog(
         n
-          ? `将删除 server「${server.name}」并同步从 ${n} 个 agent 的配置中移除。继续？`
-          : `将删除 server「${server.name}」。继续？`,
+          ? `将删除 MCP「${server.name}」并同步从 ${n} 个 agent 的配置中移除。继续？`
+          : `将删除 MCP「${server.name}」。继续？`,
         { danger: true },
       ))
     )
@@ -534,17 +534,17 @@ export default function McpPage({ visible }: { visible: boolean }) {
   ).length;
 
   return (
-    <PageFrame width="wide">
+    <PageFrame width="fluid">
       <PageHeader
         title="MCP"
-        meta={`${servers.length} 个 server · 已分发 ${distributed}`}
+        meta={`${servers.length} 个 MCP · 已分发 ${distributed}`}
         actions={
           <>
             <button
               className={primaryActionClass}
               onClick={() => setModal({ id: null, form: { ...EMPTY_FORM } })}
             >
-              + 添加 server
+              + 添加 MCP
             </button>
             <button
               type="button"
@@ -573,7 +573,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
         }
       />
       <p className="text-xs leading-5 text-l4">
-        统一维护 MCP server 清单，按开关分发到各 CLI。密钥用{" "}
+        统一维护 MCP 清单，按开关分发到各 CLI。密钥用{" "}
         <span className="font-mono">$VAR</span> 引用，不落明文。
       </p>
       {error && <p className="text-sm text-err-text">{error}</p>}
@@ -582,16 +582,19 @@ export default function McpPage({ visible }: { visible: boolean }) {
         <p className="py-8 text-center text-sm text-l4">加载中…</p>
       ) : servers.length === 0 ? (
         <EmptyState
-          title="还没有 MCP server"
-          detail="点右上「+ 添加 server」创建。"
+          title="还没有 MCP"
+          detail="点右上「+ 添加 MCP」创建。"
         />
       ) : (
-        <div className="divide-y divide-hairline">
+        <div className="space-y-1 py-1">
           {servers.map((s) => {
             const onCount = Object.values(s.apps).filter(Boolean).length;
             const open = expanded === s.id;
             return (
-              <div key={s.id} className="group py-2">
+              <div
+                key={s.id}
+                className="group rounded-md border border-transparent px-1 py-2 transition-colors hover:border-hairline hover:bg-hover"
+              >
                 <div className="flex items-center gap-3 px-1">
                   <button
                     type="button"
@@ -648,14 +651,14 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     )}
                     {onCount > 0 ? `已分发 ${onCount}` : "未分发"}
                   </button>
-                  {/* 行内悬浮操作（v3.93）：⚡ 测试连通 / ✎ 编辑 / ✕ 删除。
+                  {/* 行内悬浮操作（v3.93）：↯ 测试连通 / ✎ 编辑 / ✕ 删除。
                       裸图标钮 hover 淡入，不套胶囊容器——本页是素列表行，
                       raised 底 + 边框 + 投影的实体栏会与原层级脱节（技能页网格行才用胶囊栏） */}
                   <div
                     className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
                   >
                     <RowAction
-                      icon="⚡"
+                      icon="↯"
                       tip="测试连通性（stdio 拉起握手 / remote 探活）"
                       label={`测试 ${s.name} 连通性`}
                       onClick={() => void checkHealth(s)}
@@ -758,7 +761,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="mb-3 text-base font-semibold text-l1">
-              {modal.id ? "编辑 server" : "添加 server"}
+              {modal.id ? "编辑 MCP" : "添加 MCP"}
             </h2>
             {modal.note && (
               <p className="-mt-2 mb-3 text-xs leading-5 text-l4">
@@ -933,11 +936,11 @@ export default function McpPage({ visible }: { visible: boolean }) {
               收编现有配置
             </h2>
             <p className="mb-3 text-xs leading-5 text-l4">
-              这些 server 在 CLI 里已有、但不在 Ccode 清单中。收编后统一管理。
+              这些 MCP 在 CLI 里已有、但不在 Ccode 清单中。收编后统一管理。
             </p>
             {discovered.length === 0 ? (
               <p className="py-4 text-center text-sm text-l4">
-                没有可收编的 server
+                没有可收编的 MCP
               </p>
             ) : (
               <ul className="max-h-72 space-y-1 overflow-auto">
@@ -989,7 +992,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
           >
             <h2 className="mb-1 text-base font-semibold text-l1">粘贴导入</h2>
             <p className="mb-3 text-xs leading-5 text-l4">
-              粘贴 MCP server 文档里的标准 JSON 片段（形如{" "}
+              粘贴 MCP 文档里的标准 JSON 片段（形如{" "}
               <span className="font-mono">{'{"mcpServers": {"名称": {...}}}'}</span>
               ），解析后逐条入库；与清单同名自动跳过。
             </p>

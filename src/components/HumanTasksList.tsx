@@ -415,8 +415,8 @@ export default function HumanTasksList({
               <div key={g.timing}>
                 <div className="mb-0.5 text-micro text-l4">
                   {g.timing === "before"
-                    ? "开始前（建议先做，不做也能开工）"
-                    : "进行中（随时可做）"}
+                    ? "开始前"
+                    : "进行中"}
                 </div>
                 <ul className="space-y-1">
                   {g.items.map((task) => (
@@ -437,10 +437,14 @@ export default function HumanTasksList({
                   disabled={busyTitle === task.title}
                   onChange={(e) => void toggle(task, e.target.checked)}
                   title={
-                    task.detected && !task.manual
-                      ? "落点已检测到文件；取消勾选需移走文件（检测口径）"
+                    task.completion === "manual"
+                      ? task.manual
+                        ? "人工已确认；取消勾选回到待确认"
+                        : "必须由你明确确认完成"
+                      : task.detected && !task.manual
+                      ? "落点已检测到文件；取消勾选会保留为未完成，需重新勾选确认"
                       : task.manual
-                        ? "人工已确认；取消勾选回到文件检测口径"
+                        ? "人工已确认；取消勾选会保留为未完成"
                         : "勾选 = 人工确认完成（系统不再追问）"
                   }
                 />
@@ -455,6 +459,10 @@ export default function HumanTasksList({
                   <span className="shrink-0 text-micro text-done">
                     {task.manual
                       ? "已确认"
+                      : task.completion === "all"
+                        ? `全部目标已满足${task.expectedCount != null ? `（清单共 ${task.expectedCount} 篇）` : ""}`
+                        : task.completion === "no_placeholders"
+                          ? "已清除占位"
                       : task.hitCount != null
                         ? `已见到 ${task.hitCount} 个文件${task.expectedCount != null ? `（清单共 ${task.expectedCount} 篇）` : ""}`
                         : "已见到文件"}

@@ -173,7 +173,7 @@ fn new_skill(name: String, description: Option<String>, source: &str, repo: Opti
 /// 种子版本：内置技能集合有新增/修订时 +1；启动时 marker 低于此版本才补播缺失项。
 /// marker 是库目录下的 . 开头文件（发现逻辑跳过），记录已播种到的版本；
 /// 用户删掉某个内置技能后不会被复活——只有版本升级才补播「库里没有」的项。
-const BUILTIN_SEED_VERSION: u32 = 1;
+const BUILTIN_SEED_VERSION: u32 = 2;
 const BUILTIN_SEED_MARKER: &str = ".builtin-seed-version";
 
 /// 内置技能表：(技能名, SKILL.md 全文)。内容单一出处在 resources/skills/<name>/SKILL.md，
@@ -184,6 +184,7 @@ static BUILTIN_SKILLS: &[(&str, &str)] = &[
     ("lit-watch", include_str!("../resources/skills/lit-watch/SKILL.md")),
     ("review-framework", include_str!("../resources/skills/review-framework/SKILL.md")),
     ("review-writing", include_str!("../resources/skills/review-writing/SKILL.md")),
+    ("research-writing", include_str!("../resources/skills/research-writing/SKILL.md")),
     ("data-clean", include_str!("../resources/skills/data-clean/SKILL.md")),
     ("data-eda", include_str!("../resources/skills/data-eda/SKILL.md")),
     ("quarto-render", include_str!("../resources/skills/quarto-render/SKILL.md")),

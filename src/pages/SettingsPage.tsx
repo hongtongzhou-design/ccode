@@ -15,7 +15,7 @@ import {
   secondaryActionClass,
 } from "../components/PageFrame";
 import { captureDecision, comboLabel, PAGE_HOTKEY_DEFS } from "../hotkeys";
-import { openUrl, openPath } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { StorageEntryDto } from "../types";
 import { AGENTS } from "../types";
 import { getVersion } from "@tauri-apps/api/app";
@@ -147,27 +147,32 @@ function Section({
   open,
   onToggle,
   badge,
+  active = true,
   children,
 }: {
   title: string;
   open: boolean;
   onToggle: () => void;
   badge?: React.ReactNode;
+  active?: boolean;
   children: React.ReactNode;
 }) {
+  if (!active) return null;
+  // 选中的分区是当前工作面，不能被旧的折叠记忆或标题点击折成空白。
+  const effectiveOpen = active || open;
   return (
-    <section className="mt-7 first:mt-0">
+    <section className="mt-6 first:mt-0">
       <button
         type="button"
         onClick={onToggle}
-        aria-expanded={open}
-        className={`flex h-8 w-full items-center gap-1.5 text-left text-sm font-medium text-l1 ${open ? "border-b border-hairline" : ""}`}
+        aria-expanded={effectiveOpen}
+        className="flex h-8 w-full items-center gap-1.5 rounded-md px-2 text-left text-sm font-medium text-l1 transition-colors hover:bg-hover"
       >
-        <span className="w-3 text-xs text-l4">{open ? "▾" : "▸"}</span>
+        <span className="w-3 text-xs text-l4">{effectiveOpen ? "▾" : "▸"}</span>
         {title}
         {badge}
       </button>
-      {open && <div>{children}</div>}
+      {effectiveOpen && <div>{children}</div>}
     </section>
   );
 }
@@ -185,7 +190,7 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid grid-cols-[minmax(180px,1fr)_auto] items-center gap-x-5 border-b border-hairline py-3 last:border-b-0">
+    <div className="grid grid-cols-[minmax(180px,1fr)_auto] items-center gap-x-5 py-3">
       <div className="min-w-0">
         <div className="text-sm text-l2">{label}</div>
         {hint && <p className="mt-0.5 max-w-lg text-micro leading-4 text-l4">{hint}</p>}
@@ -297,6 +302,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState("appearance");
   // 数值输入的本地草稿（失焦/回车才提交，避免每击键一次 IPC）
   const [fontSize, setFontSize] = useState("");
   const [fontFamily, setFontFamily] = useState("JetBrains Mono");
@@ -369,12 +375,16 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   // 应用数据占用：展开「数据与存储」时读一次（递归求目录大小，不适合常驻轮询）
   const [storage, setStorage] = useState<StorageEntryDto[] | null>(null);
   useEffect(() => {
-    if (visible && !collapsed.storage && storage === null)
+    if (
+      visible &&
+      (activeSection === "storage" || !collapsed.storage) &&
+      storage === null
+    )
       invoke<StorageEntryDto[]>("app_storage_usage")
         .then(setStorage)
         .catch(() => setStorage([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, collapsed.storage]);
+  }, [visible, activeSection, collapsed.storage]);
 
   useEffect(() => {
     if (visible) {
@@ -652,14 +662,73 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  async function openStorageEntry(path: string) {
+    setError(null);
+    try {
+      // 条目既可能是文件也可能是目录；统一在系统文件管理器中定位，
+      // 避免把目录交给默认应用后看起来像按钮无效。
+      await revealItemInDir(path);
+    } catch (e) {
+      setError(`无法打开此位置：${String(e)}`);
+    }
+  }
+
   return (
-    <PageFrame width="standard">
+    <PageFrame width="settings">
       <PageHeader title="设置" meta="外观、终端与应用集成" />
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 
+      <div className="grid min-w-0 grid-cols-[150px_minmax(0,1fr)] gap-8">
+        <nav aria-label="设置分区" className="sticky top-14 self-start">
+          <p className="mb-2 px-2 text-micro uppercase tracking-wider text-l4">
+            设置
+          </p>
+          <div className="space-y-0.5">
+            {[
+              ["appearance", "外观"],
+              ["startup", "启动行为"],
+              ["hotkeys", "快捷键"],
+              ["stats", "统计"],
+              ["integration", "集成"],
+              ["update", "更新"],
+              ["diag", "诊断"],
+              ["storage", "数据与存储"],
+              ["about", "关于"],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => {
+                  setActiveSection(id);
+                  setCollapsed((prev) => {
+                    if (!prev[id]) return prev;
+                    const next = { ...prev, [id]: false };
+                    try {
+                      localStorage.setItem(SECTIONS_KEY, JSON.stringify(next));
+                    } catch {}
+                    return next;
+                  });
+                }}
+                className={`flex h-8 w-full items-center rounded-md px-2 text-left text-sm transition-colors ${
+                  activeSection === id
+                    ? "bg-rail-sel font-medium text-l1"
+                    : "text-l3 hover:bg-hover hover:text-l1"
+                }`}
+              >
+                {label}
+                {id === "update" && appUpdate && (
+                  <span className="ml-auto size-1.5 rounded-full bg-ok-text" />
+                )}
+              </button>
+            ))}
+          </div>
+        </nav>
+        <div className="min-w-0">
+
       <Section
         title="外观"
+        active={activeSection === "appearance"}
         open={!collapsed.appearance}
         onToggle={() => toggleSection("appearance")}
       >
@@ -923,6 +992,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       {/* 快捷键：点击绑定钮进入录制态，按下新组合即保存；空串 = 禁用 */}
       <Section
         title="启动行为"
+        active={activeSection === "startup"}
         open={!collapsed.startup}
         onToggle={() => toggleSection("startup")}
       >
@@ -955,6 +1025,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
       <Section
         title="快捷键"
+        active={activeSection === "hotkeys"}
         open={!collapsed.hotkeys}
         onToggle={() => toggleSection("hotkeys")}
       >
@@ -969,6 +1040,49 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           const pageCombos = PAGE_HOTKEY_DEFS.map((p) => pageCombo(p.id));
           return (
             <>
+              <Row
+                label="页面切换"
+                hint="按侧栏顺序切换页面；关闭后下面九个绑定全部不生效"
+              >
+                <Toggle
+                  checked={settings?.hotkeyPageSwitch !== false}
+                  onChange={(v) => void patch({ hotkeyPageSwitch: v })}
+                  label="页面切换"
+                />
+              </Row>
+              <div className="mb-1 mt-2 text-xs font-medium text-l3">页面快捷键</div>
+              <div className="flex w-full max-w-xl flex-col gap-1 rounded-md bg-strip p-1">
+                {PAGE_HOTKEY_DEFS.map((p) => (
+                  <span
+                    key={p.id}
+                    className="flex min-h-9 items-center justify-between gap-4 rounded-sm px-2 py-1 hover:bg-hover"
+                  >
+                    <span className="min-w-20 shrink-0 text-sm text-l2">
+                      {p.label}
+                    </span>
+                    <HotkeyCapture
+                      value={pageCombo(p.id)}
+                      defaultValue={p.combo}
+                      conflictsWith={[
+                        palette,
+                        chrome,
+                        ...PAGE_HOTKEY_DEFS.filter((x) => x.id !== p.id).map(
+                          (x) => pageCombo(x.id),
+                        ),
+                      ]}
+                      onSave={(combo) =>
+                        void patch({
+                          hotkeyPages: {
+                            ...(settings?.hotkeyPages ?? {}),
+                            [p.id]: combo,
+                          },
+                        })
+                      }
+                    />
+                  </span>
+                ))}
+              </div>
+              <div className="mb-1 mt-4 text-xs font-medium text-l3">全局快捷键</div>
               <Row label="命令面板" hint="呼出页面跳转 / 主题切换 / 侧栏显隐">
                 <HotkeyCapture
                   value={palette}
@@ -985,49 +1099,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                   onSave={(combo) => void patch({ hotkeyHideChrome: combo })}
                 />
               </Row>
-              <Row
-                label="页面切换"
-                hint="整组总开关；关闭后下面九个绑定全部不生效"
-              >
-                <Toggle
-                  checked={settings?.hotkeyPageSwitch !== false}
-                  onChange={(v) => void patch({ hotkeyPageSwitch: v })}
-                  label="页面切换"
-                />
-              </Row>
-              <Row
-                label="逐页绑定"
-                hint="按侧栏顺序直接切页；点击绑定钮录制新组合（默认 ⌘1–⌘9）"
-              >
-                <div className="grid max-w-xl grid-cols-2 gap-x-4 gap-y-1.5">
-                  {PAGE_HOTKEY_DEFS.map((p) => (
-                    <span key={p.id} className="flex items-center gap-2">
-                      <span className="w-9 shrink-0 text-xs text-l3">
-                        {p.label}
-                      </span>
-                      <HotkeyCapture
-                        value={pageCombo(p.id)}
-                        defaultValue={p.combo}
-                        conflictsWith={[
-                          palette,
-                          chrome,
-                          ...PAGE_HOTKEY_DEFS.filter((x) => x.id !== p.id).map(
-                            (x) => pageCombo(x.id),
-                          ),
-                        ]}
-                        onSave={(combo) =>
-                          void patch({
-                            hotkeyPages: {
-                              ...(settings?.hotkeyPages ?? {}),
-                              [p.id]: combo,
-                            },
-                          })
-                        }
-                      />
-                    </span>
-                  ))}
-                </div>
-              </Row>
             </>
           );
         })()}
@@ -1035,6 +1106,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
       <Section
         title="统计"
+        active={activeSection === "stats"}
         open={!collapsed.stats}
         onToggle={() => toggleSection("stats")}
       >
@@ -1157,6 +1229,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
       <Section
         title="集成"
+        active={activeSection === "integration"}
         open={!collapsed.integration}
         onToggle={() => toggleSection("integration")}
       >
@@ -1259,6 +1332,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
       <Section
         title="更新"
+        active={activeSection === "update"}
         open={appUpdate ? true : !collapsed.update}
         onToggle={() => toggleSection("update")}
         badge={
@@ -1314,6 +1388,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
       <Section
         title="诊断"
+        active={activeSection === "diag"}
         open={!collapsed.diag}
         onToggle={() => toggleSection("diag")}
       >
@@ -1422,6 +1497,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
       <Section
         title="数据与存储"
+        active={activeSection === "storage"}
         open={!collapsed.storage}
         onToggle={() => toggleSection("storage")}
       >
@@ -1429,9 +1505,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         {storage === null ? (
           <p className="py-2 text-xs text-l4">统计中…</p>
         ) : (
-          <ul className="divide-y divide-hairline">
+          <ul className="space-y-1">
             {storage.map((e) => (
-              <li key={e.path} className="flex items-center gap-2 py-2">
+              <li key={e.path} className="flex items-center gap-2 rounded-md bg-strip px-2 py-2">
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm text-l2">
                     {e.label}
@@ -1449,10 +1525,11 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 <button
                   type="button"
                   disabled={!e.exists}
-                  onClick={() => void openPath(e.path)}
+                  onClick={() => void openStorageEntry(e.path)}
+                  title="在系统文件管理器中定位"
                   className={`${secondaryActionClass} shrink-0 disabled:opacity-40`}
                 >
-                  打开
+                  定位
                 </button>
               </li>
             ))}
@@ -1465,6 +1542,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
       <Section
         title="关于"
+        active={activeSection === "about"}
         open={!collapsed.about}
         onToggle={() => toggleSection("about")}
       >
@@ -1483,6 +1561,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           </button>
         </Row>
       </Section>
+        </div>
+      </div>
     </PageFrame>
   );
 }

@@ -128,7 +128,7 @@ export default function StepSkillsChips({
       </div>
       {outputConflicts.map((c) => (
         <p key={`${c.a}|${c.b}`} className="mt-1 text-micro text-warn-text">
-          ⚠ 技能「{c.a}」与「{c.b}」的产物都指向 {c.output}
+          ! 技能「{c.a}」与「{c.b}」的产物都指向 {c.output}
           ——确认步骤简报里写明了分工（如“按 {c.a} 执行、{c.b} 只出报告”）
         </p>
       ))}

@@ -59,6 +59,11 @@ function extOf(name: string): string {
   return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
 }
 
+function wildcardMatch(pattern: string, value: string): boolean {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped.replace(/\*/g, ".*")}$`).test(value);
+}
+
 export function formatSize(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -93,6 +98,27 @@ export async function loadArtifactRows(
     entries.map(async (raw) => {
       const entry = raw.replace(/[\\/]+$/, "");
       const abs = absoluteResourcePath(root, entry);
+      // 通配条目：只允许最后一段带 *，列出父目录中的命中文件。
+      if (entry.includes("*")) {
+        const idx = Math.max(abs.lastIndexOf("/"), abs.lastIndexOf("\\"));
+        if (idx > 0 && !abs.slice(0, idx).includes("*")) {
+          try {
+            const siblings = await invoke<DirEntryDto[]>("list_dir", {
+              path: abs.slice(0, idx),
+              showHidden: false,
+            });
+            const pattern = abs.slice(idx + 1);
+            return {
+              entry,
+              files: siblings.filter(
+                (s) => !s.isDir && wildcardMatch(pattern, s.name),
+              ),
+            };
+          } catch {
+            return { entry, files: [] };
+          }
+        }
+      }
       // 目录条目：list_dir 成功即列一层文件
       try {
         const children = await invoke<DirEntryDto[]>("list_dir", {

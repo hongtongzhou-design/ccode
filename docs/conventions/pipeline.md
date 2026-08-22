@@ -59,8 +59,21 @@
 - **流水线模板库**：内置模板集中在 `src/pipeline-presets.ts` 的 `PIPELINE_TEMPLATES`（综述/科研论文/数据处理/毕业论文/投稿与返修/LaTeX 论文），
   新增场景 = 数组加一项，简报必须遵守输入写死/决策写死/交付写死约定（auto 模式无歧义）；用户模板走后端
   `list/save/delete_pipeline_template`，选择器（TemplatePicker）合并展示，后端命令未就绪时优雅降级为仅内置模板。
+  **步骤输入与完成判定（P0）**：`steps[].inputs` 只声明本步骤需要读取的上游产物或已登记项目资源；开工时由
+  `renderTaskMd` 原样写入 TASK.md 的「本步骤输入」段。读取配置时，从第二步起逐项检查输入是否被前序
+  `expected_artifacts` 或 `[[resources]]` 覆盖；第一步允许外部/跨项目输入，避免模板刚应用就产生不可行动警告。
+  目录型路径用末段 `*`（如 `notes/*.md`、`figures/*`）表达实际文件，旧的 `notes/` 等目录写法保持兼容。
+  `human_tasks[].completion` 取 `exists`（缺省）、`manual`、`all` 或 `no_placeholders`：前者检测落点，manual 只认人手确认；编辑器只对末段
+  通配落点提供 all（按命中数与 `papers/to-fetch.md` 条目数核对，零条目也能完成），只对精确文件提供 no_placeholders（还要清掉待填/待确认/TODO 等标记）。
+  旧档案卡若保存了与落点不兼容的组合，编辑器保存时归一为 `exists`，避免留下永远判不完的配置。
+  **结构化输入（P1）**：必需输入放 `inputs`；不影响推进的材料放 `optional_inputs`；二选一/多选一放
+  `any_of_inputs`（每组至少满足一项）。TASK.md 明确标为「必需 / 可选 / 任一」，校验只对必需项和任一组发缺失提示，
+  不再把合法的「paper-final 或 review-final」误报成阻塞。人工事项空落点统一按 `manual` 处理；`all` 必须有显式
+  `expected_count`、`manifest_path` 或可推导的 `papers/to-fetch.md`，无法得知总数时不判完成；`no_placeholders` 只允许文本文件。
+  模板应用三处入口（注册后选择、项目页模板选择、编辑器追加）统一调用后端原子事务：步骤、缺失的项目级设定、投稿分支/轮次、
+  topic 与 `pipeline_opt_out` 一次写入，已有真实设定按问题名保留。
   **注册后模板选择层（TemplatePickModal）**：`register_project` 成功后弹出，选项 = 六套内置模板
-  （名称 + 一句话说明 + 步骤数，数据直接用 PIPELINE_TEMPLATES，不另造表），选中即 `append_pipeline_steps`
+  （名称 + 一句话说明 + 步骤数，数据直接用 PIPELINE_TEMPLATES，不另造表），选中即调用统一的 `apply_pipeline_template`
   追加进 project.toml 后关闭并刷新。**两个出口语义不同**：「不使用研究流程」调 `set_pipeline_opt_out`
   把 `pipeline_opt_out = true` 显式写进 project.toml（记住选择）；「稍后再选」只关闭不留痕。
   **`pipeline_opt_out` 口径**：serde/toml 缺省 false；render_config 里 false 移除该行（同 topic 清除口径，
@@ -68,11 +81,11 @@
   同路径同语义）。**渲染规则（ProjectGroup）**：模板引导横幅只在 `steps 为空 && !pipelineOptOut` 时显示；
   ScheduleSection 不再受 opt-out 影响（定时任务技能可选后为通用能力，非科研项目照常显示）；
   资源面板不受影响。空步骤项目的 ⋯ 菜单项文案为「选择研究流程模板」（非空 = 「更换模板」），从这里应用模板
-  走 `append_pipeline_steps`（后端清标记）+ 前端重读 `read_project_config`；横幅里的可选课题主题 append
+  走 `apply_pipeline_template`（后端清标记）+ 前端重读 `read_project_config`；横幅里的可选课题主题 append
   不碰，值变了才单独 write_project_config 写回。
   **v3.78 起五套模板内容重设计并互相对齐（接壤）**：准绳 =「讨论种子 → 草稿 → TASK.md → 执行」全链相辅相成——
   种子逐条对准 TASK.md/执行中的真实拍板点（删空洞种子、补缺口种子；纯执行步骤不给种子，沿用 v3.69 口径）；
-  expectedArtifacts 精确化；技能挂载按 14 个内置技能核对（research-paper 首步 +lit-notes、结果分析/毕业论文
+  expectedArtifacts 精确化；技能挂载按 15 个内置技能核对（research-paper 检索步 +lit-search、精读步 +lit-notes、结果分析/毕业论文
   实验步 +stats-check、毕业论文初稿/定稿 +quarto-render、data-eda 步 +stats-check；submission-rebuttal 摘除
   不存在的假技能 pre-submission-reviewer，投稿前自查口径内联进简报）；lit-search 链路步骤新增 before 人工事项
   「（可选）配置学术检索 MCP」（MCP 页预设导入 Consensus/Undermind，key 走环境变量引用；不配也能跑——
@@ -92,7 +105,7 @@
 - **流水线编辑器（RX1）是步骤编辑唯一入口**：`src/components/PipelineEditor.tsx` 全宽覆盖层（fixed inset-0 z-30，与评审
   覆盖层同级），每步一张卡片，整体写回 steps；新增步骤相关编辑一律进
   编辑器，不再开第二套入口。**卡片字段分三档（v3.85）**：常驻只留
-  **步骤名 / 简报 / 预期产物 / 推荐技能**（这四项决定 TASK.md 的全部内容，是步骤的合同本体），
+  **步骤名 / 简报 / 预期产物 / 输入依赖 / 推荐技能**（这五项决定 TASK.md 的全部内容，是步骤的合同本体），
   其余按**「人机分工」**（人工事项 · 决策项 · 讨论种子，都是「人要参与的」，按 v3.69 的
   种子=要商量的 / 人工事项=要动手做的 同源归组）与**「高级」**（工作区名 · run 脚本 · 资源绑定，
   纯技术配置）两个折叠区收起。**字段一个不删**（模板要用、向后兼容 project.toml），
@@ -111,11 +124,13 @@
   模板接壤的 UI 落点）**：编辑器工具区「+ 添加步骤」旁，列出内置六套 + 用户另存模板，选定后把模板步骤
   **追加**到 steps 末尾（区别于「使用模板 = 整体替换」；步骤链/提货单/资源机制对新步骤天然生效）。后端
   command `append_pipeline_steps`（projects.rs）：过 `ensure_task_project_root` 写门槛；读-改-原子写；
-  **重名跳过**——name 或非空 workspace_name 撞已有步骤、或撞本批次刚追加进来的，都跳过（避免覆盖已有
-  工作区绑定），返回 `{appended, skipped}` 供行内提示「已追加 N 步；跳过 N 步（同名）：xx」；全部被跳过
+  **步骤名重复跳过**——name 撞已有步骤、或撞本批次刚追加进来的才跳过；仅非空 workspace_name 冲突时自动追加
+  `-2`、`-3` 等后缀，返回 `{appended, skipped, renamed}` 供行内提示，避免模板步骤因工作区名冲突被静默丢弃；全部被跳过
   不落盘、空批次直接拒绝。追加**直接写盘、不经编辑器未保存草稿**：dirty 时先弹确认（未保存改动将丢失），
   成功后前端重读 `read_project_config` 刷新步骤卡与脏检查基准（`onConfigReload` 回推父组件同步
-  cfg/warnings）。
+  cfg/warnings）。**投稿与返修模板例外走 `append_pipeline_steps_with_submission`**：所选首投/返修分支、返修轮次、追加步骤与
+  `pipeline_opt_out` 清理在同一次 project.toml 读-改-原子写中完成；返修轮次缺省或非法低值归一为第 1 轮，即使步骤名全部重复跳过，
+  分支元数据也会写入，避免「步骤没新增所以分支选择丢失」。
 
 > **界面侧的通则已抽到 `docs/conventions/step-panel.md`**（步骤面板设计规范：七条硬规则 +
 > 问题的时刻/层级归属表 + 新增模板检查清单）。本文件保留流程域的**机制**约定；
@@ -140,6 +155,8 @@
 - 决策项只留「开工前就能答、且答了确实影响执行」的；**凡是需要先看到数据才能定的，一律改按需问**，
   不得为了「表单看起来完整」摆在开工前。
 - 角色标记**不参与任何流程判定**，只影响界面提示。
+- 流程带中的角色点必须配可见图例（蓝点 = 你主要负责，灰点 = 你和 AI 一起定）；步骤超过 5 个时必须提示可横向查看后续步骤，避免长流程被截断后看起来像缺步骤。
+- 模板预览同时展示友好描述与实际步骤名时，实际步骤行必须标注「完整步骤」，不得让用户把两行误解为两套流程。
 
 **五套模板一体适用（v3.89 全量复盘）**：三处错配不是综述独有的，四套模板逐一按同一把尺子改过——
 

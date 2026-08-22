@@ -189,7 +189,7 @@ interface PathContext {
 }
 
 /**
- * 工作树（借鉴 VS Code Explorer 的懒加载）：外部锚点是活动终端标签的 cwd，
+ * 文件树（借鉴 VS Code Explorer 的懒加载）：外部锚点是活动终端标签的 cwd，
  * 用户可双击目录钻取重定根（manual root），切换标签时重置回该标签 cwd。
  * 单击目录 = 展开/收起；双击目录 = 进入（重定根）；右键 / 悬停按钮 = 在此打开新终端。
  */
@@ -572,7 +572,7 @@ function FileTree({
         )}
       </div>
       {belowRecent}
-      {/* 当前根：加粗 basename + 完整路径 tooltip；偏离锚点时给「回到当前项目」 */}
+      {/* 当前浏览根：终端 cwd 与浏览根是两种独立上下文，避免钻取目录偷偷改变 Agent 运行目录。 */}
       <div
         className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-l1"
         title={root}
@@ -621,13 +621,19 @@ function FileTree({
         {root !== cwd && (
           <button
             onClick={() => void nav(cwd)}
-            title="回到当前项目"
-            className="ml-auto shrink-0 text-l4 hover:text-l1"
+            title={`回到当前终端目录：${cwd}`}
+            className="ml-auto flex shrink-0 items-center gap-1 rounded-sm px-1 text-micro font-normal text-l4 hover:bg-hover hover:text-l1"
           >
-            ⌂
+            <span aria-hidden="true">⌂</span>
+            回到当前目录
           </button>
         )}
       </div>
+      {root !== cwd && (
+        <p className="truncate px-2 pb-1 text-micro text-l4" title={`浏览：${root}\n终端：${cwd}`}>
+          正在浏览：{basenameOf(root)} · 终端仍在：{basenameOf(cwd)}
+        </p>
+      )}
       {newFolderFor && (
         <div className="flex items-center gap-1 px-2 py-1">
           <span className="shrink-0 text-xs text-l4">新建于 {basenameOf(newFolderFor)}:</span>

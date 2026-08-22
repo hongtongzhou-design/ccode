@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
+import { useAppStore } from "../store";
 import type { UsageDayDto, UsageStatsDto } from "../types";
 import { axisLabels } from "../stats-trend";
 import { agentBrand } from "../agent-colors";
@@ -43,6 +45,15 @@ function fmtCost(
   return currency === "¥"
     ? `${prefix}¥${(c * rate).toFixed(2)}`
     : `${prefix}$${c.toFixed(2)}`;
+}
+
+/** 明细表费用列保持单行；金额过长时省略，完整值仍可通过悬浮查看。 */
+function CostText({ children }: { children: ReactNode }) {
+  return (
+    <span className="inline-block max-w-full truncate whitespace-nowrap" title={typeof children === "string" ? children : undefined}>
+      {children}
+    </span>
+  );
 }
 
 function basename(p: string): string {
@@ -193,6 +204,8 @@ function DailyTrend({
 }
 
 export default function StatsPage({ visible }: { visible: boolean }) {
+  const setPage = useAppStore((s) => s.setPage);
+  const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
   const [range, setRange] = useState<Range>("week");
   const [currency, setCurrency] = useState<"$" | "¥">(
     () => (localStorage.getItem("ccode.statsCurrency") as "$" | "¥") || "$",
@@ -259,6 +272,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     stats?.byAgent.reduce((s, a) => s + a.tokens, 0) ?? 1,
   );
   const rate = stats?.rateUsdCny ?? 7.2;
+  const totalTokens = (stats?.cards.input ?? 0) + (stats?.cards.output ?? 0);
   // 分布区表头：caps 式小字加字距（同 SkillsPage 表头规格），弱化只作列定位
   const th = "px-2 py-1.5 text-left text-micro font-normal tracking-wider text-l4";
 
@@ -318,7 +332,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
   }
 
   return (
-    <PageFrame width="wide">
+    <PageFrame width="fluid">
       <PageHeader
         title="用量"
         meta="按项目、任务与 Agent 查看投入"
@@ -391,7 +405,16 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               borderColor: "color-mix(in srgb, var(--color-l1) 12%, transparent)",
             };
             return (
-              <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-5">
+              <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-7">
+                <div className={`${cardCls} sm:col-span-2`} style={cardEdge}>
+                  总 tokens
+                  <div className="mt-1 text-3xl font-semibold tracking-tight tabular-nums text-l1">
+                    {compact(totalTokens)}
+                  </div>
+                  <div className="mt-0.5 text-micro font-normal tracking-normal text-l4">
+                    输入 {compact(stats.cards.input)} · 输出 {compact(stats.cards.output)}
+                  </div>
+                </div>
                 <div className={cardCls} style={cardEdge}>
                   输入 tokens
                   <div className={numCls}>{compact(stats.cards.input)}</div>
@@ -452,13 +475,13 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           {stats.byAgent.length > 0 && (
             <section className="mb-6">
               <h2 className="mb-2 text-xs font-medium text-l3">按 Agent</h2>
-              <ul className="divide-y divide-hairline">
+              <ul className="space-y-1">
                 {stats.byAgent.map((a) => {
                   const share = a.tokens / totalAgentTokens;
                   return (
                     <li
                       key={`${a.agent}-${a.official}`}
-                      className="flex items-center gap-3 py-2 text-sm"
+                      className="flex items-center gap-3 rounded-md bg-strip px-2 py-2 text-sm"
                     >
                       <span
                         className="size-2 shrink-0 rounded-full"
@@ -512,26 +535,42 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               <h2 className="mb-2 text-xs font-medium text-l3">
                 按项目（前 20）
               </h2>
-              <table className="w-full text-sm">
+              <table className="w-full table-fixed text-sm">
                 <thead>
                   <tr className="border-b border-hairline">
                     <th className={th}>项目</th>
                     <th className={`${th} text-right`}>对话数</th>
                     <th className={`${th} text-right`}>tokens</th>
-                    <th className={`${th} text-right`}>费用</th>
+                    <th className={`${th} w-24 text-right`}>费用</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {projectRows.slice(0, 20).map((p) => (
-                    <tr
-                      key={`${p.internal}-${p.official}-${p.source}-${p.projectPath}`}
-                      className="border-b border-hairline"
-                    >
-                      <td
-                        className="max-w-0 truncate px-2 py-2 text-l2"
-                        title={p.projectPath}
+                  {projectRows.slice(0, 20).map((p) => {
+                    const canJumpToProject = Boolean(p.projectPath) && !p.internal;
+                    return (
+                      <tr
+                        key={`${p.internal}-${p.official}-${p.source}-${p.projectPath}`}
+                        className="border-b border-hairline"
                       >
-                        {basename(p.projectPath)}
+                      <td className="max-w-0 truncate px-2 py-2 text-l2" title={p.projectPath}>
+                        {canJumpToProject ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectProjectReq(p.projectPath);
+                              setPage("workspaces");
+                            }}
+                            className="inline-flex max-w-full items-center truncate text-left hover:text-l1"
+                            title="跳转到项目页"
+                          >
+                            {basename(p.projectPath)}
+                            <span aria-hidden="true" className="ml-1 text-micro text-l4">
+                              ↗
+                            </span>
+                          </button>
+                        ) : (
+                          <span className="truncate">{basename(p.projectPath)}</span>
+                        )}
                       </td>
                       <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
                         {p.sessions}
@@ -539,15 +578,16 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                       <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l2">
                         {compact(p.tokens)}
                       </td>
-                      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
+                      <td className="w-24 max-w-24 overflow-hidden px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
                         {p.official ? (
-                          <SubscriptionCost />
+                          <CostText><SubscriptionCost /></CostText>
                         ) : (
-                          fmtCost(p.costUsd, currency, rate, p.costPartial)
+                          <CostText>{fmtCost(p.costUsd, currency, rate, p.costPartial)}</CostText>
                         )}
                       </td>
-                    </tr>
-                  ))}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </section>
@@ -557,12 +597,12 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           {workspaceRows.length > 0 && (
             <section className="mb-6">
               <h2 className="mb-2 text-xs font-medium text-l3">任务成本</h2>
-              <table className="w-full text-sm">
+              <table className="w-full table-fixed text-sm">
                 <thead>
                   <tr className="border-b border-hairline">
                     <th className={th}>任务</th>
                     <th className={`${th} text-right`}>tokens</th>
-                    <th className={`${th} text-right`}>费用</th>
+                    <th className={`${th} w-24 text-right`}>费用</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -585,11 +625,11 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                       >
                         {compact(w.tokensIn + w.tokensOut)}
                       </td>
-                      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
+                      <td className="w-24 max-w-24 overflow-hidden px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
                         {w.official ? (
-                          <SubscriptionCost />
+                          <CostText><SubscriptionCost /></CostText>
                         ) : (
-                          fmtCost(w.cost, currency, rate, w.costPartial)
+                          <CostText>{fmtCost(w.cost, currency, rate, w.costPartial)}</CostText>
                         )}
                       </td>
                     </tr>
@@ -603,13 +643,13 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           {modelRows.length > 0 && (
             <section className="mb-6">
               <h2 className="mb-2 text-xs font-medium text-l3">按模型</h2>
-              <table className="w-full text-sm">
+              <table className="w-full table-fixed text-sm">
                 <thead>
                   <tr className="border-b border-hairline">
                     <th className={th}>模型</th>
                     <th className={`${th} text-right`}>输入</th>
                     <th className={`${th} text-right`}>输出</th>
-                    <th className={`${th} text-right`}>费用</th>
+                    <th className={`${th} w-24 text-right`}>费用</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -630,8 +670,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                       <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
                         {compact(m.output)}
                       </td>
-                      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
-                        {fmtCost(m.costUsd, currency, rate, m.costPartial)}
+                      <td className="w-24 max-w-24 overflow-hidden px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
+                        <CostText>{fmtCost(m.costUsd, currency, rate, m.costPartial)}</CostText>
                       </td>
                     </tr>
                   ))}

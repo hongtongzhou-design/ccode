@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { FolderOpen } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
 import type { DetectResult, GitCommitResultDto, SessionUsageDto } from "../types";
@@ -76,7 +77,7 @@ export default function TerminalStatusBar({
   onGenerateMsg: (style: string) => Promise<string>;
   /** Commit & Push 流程第二步：以确认的信息提交 + 推送，返回结果（hash 用于成功态显示） */
   onCommitPush: (msg: string) => Promise<GitCommitResultDto>;
-  /** 📂 浮层改工作目录（仅未启动时可用；运行/shell 中由 pty_get_cwd 回写跟随） */
+  /** 浮层改工作目录（仅未启动时可用；运行/shell 中由 pty_get_cwd 回写跟随） */
   onCwdChange?: (cwd: string) => void;
   /** 往终端画面写一行浅灰日志（防黑盒：Commit & Push 流程的每步都回显） */
   onTermLog: (line: string) => void;
@@ -346,7 +347,7 @@ export default function TerminalStatusBar({
   const cwdRaw = status?.cwd ?? fallbackCwd;
   const cwdBase =
     cwdRaw.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? cwdRaw;
-  // 📂 浮层改目录：仅未启动可编辑；进程存活期间 cwd 由 pty_get_cwd 回写跟随（shell 里 cd 即可）
+  // 目录浮层改路径：仅未启动可编辑；进程存活期间 cwd 由 pty_get_cwd 回写跟随（shell 里 cd 即可）
   const cwdLocked = !!status?.ptyId;
   const [cwdMenuOpen, setCwdMenuOpen] = useState(false);
   const [cwdDraft, setCwdDraft] = useState("");
@@ -513,7 +514,7 @@ export default function TerminalStatusBar({
         )}
       </span>
 
-      {/* 中区：📂 目录胶囊常驻（点击浮层改目录，仅未启动可编辑）+ git 连体胶囊（有改动/未推送时）。
+      {/* 中区：目录胶囊常驻（点击浮层改目录，仅未启动可编辑）+ git 连体胶囊（有改动/未推送时）。
           终端内 TUI 自己那行状态是字符流删不掉，底栏侧把路径做出辨识度即是冗余的解 */}
       <span className="relative">
         <button
@@ -535,7 +536,8 @@ export default function TerminalStatusBar({
             cursor: cwdLocked || !onCwdChange ? "default" : "pointer",
           }}
         >
-          📂 {cwdBase}
+          <FolderOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+          {cwdBase}
         </button>
         {cwdMenuOpen && !cwdLocked && onCwdChange && (
           <>
@@ -544,11 +546,10 @@ export default function TerminalStatusBar({
               onClick={() => setCwdMenuOpen(false)}
             />
             <div
-              className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border p-2"
+              className="ccode-float-surface absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border p-2"
               style={{
-                background: colors.background,
                 borderColor: `${fg}33`,
-                boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
+                background: colors.background,
               }}
             >
               <div className="mb-1" style={{ color: faint }}>

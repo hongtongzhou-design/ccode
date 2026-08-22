@@ -1,8 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { File, FolderClosed, FolderOpen } from "lucide-react";
-import type { DirEntryDto } from "./FileTree";
+import { FolderOpen, GitBranch } from "lucide-react";
 import type {
   ProjectConfigReadDto,
   ProjectDto,
@@ -31,8 +30,8 @@ function pathWithin(path: string, base: string): boolean {
 /**
  * 左栏「项目」区：固定列出所有建有活跃工作区的仓库（每仓一个小节：主文件夹 + 活跃工作区列表），
  * 当前标签 cwd 命中的项目置顶并标注「当前」（无活跃工作区也保留，不消失）。
- * 点击名称 = 切根（复用 enterCwd「真进入」链路，文件树根与右侧面板随标签 cwd 联动）；
- * 箭头只展开该节点的一层目录（list_dir 只读，不点不拉）。已归档/未创建的工作区不列出。
+ * 点击名称 = 切换终端上下文（复用 enterCwd「真进入」链路）；目录浏览由下方 FileTree 单独负责。
+ * 已归档/未创建的工作区不列出。
  */
 
 /** 一个小节 = 一个有活跃工作区的仓库（或 cwd 命中的当前项目） */
@@ -49,6 +48,7 @@ function ProjectRail({
   agentRunning,
   tabs,
   onEnter,
+  onOpenNewTab,
 }: {
   /** 活动标签 cwd（项目归属与高亮判定的锚点） */
   cwd: string;
@@ -56,12 +56,14 @@ function ProjectRail({
   pageVisible: boolean;
   /** 左栏 ⟳ 刷新键（与文件树共用） */
   refreshKey: number;
-  /** 活动标签 agent 运行中：切根不落地（既有语义），只提示不打断 */
+  /** 活动标签 agent 运行中：切换目标改为新标签，不打断当前会话 */
   agentRunning: boolean;
   /** 全部终端标签的状态摘要（工作区行的注意力点） */
   tabs: RailTabSummary[];
   /** 复用 enterCwd「真进入」链路 */
   onEnter: (path: string) => void;
+  /** 当前标签运行中时，在新标签打开目标上下文，避免打断正在运行的 Agent */
+  onOpenNewTab: (path: string) => void;
 }) {
   // 项目区整体折叠：默认展开
   const [collapsed, setCollapsed] = useState(false);
@@ -69,9 +71,8 @@ function ProjectRail({
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   /** 仓库根 →（工作区名 → 流水线步骤名），按小节分别读 project.toml（best-effort） */
   const [stepNames, setStepNames] = useState<Record<string, Record<string, string>>>({});
-  /** 节点一层目录展开状态与缓存（组件内记忆即可） */
-  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
-  const [dirCache, setDirCache] = useState<Record<string, DirEntryDto[]>>({});
+  /** 仓库根 →（工作区名 → 流程顺序），仅用于项目 rail 的低噪声序号 */
+  const [stepOrders, setStepOrders] = useState<Record<string, Record<string, number>>>({});
   const [hint, setHint] = useState<string | null>(null);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
@@ -153,10 +154,15 @@ function ProjectRail({
         .then((read) => {
           if (cancelled) return;
           const map: Record<string, string> = {};
-          for (const s of read.config.steps) {
-            if (s.workspaceName) map[s.workspaceName] = s.name;
+          const orders: Record<string, number> = {};
+          for (const [index, s] of read.config.steps.entries()) {
+            if (s.workspaceName) {
+              map[s.workspaceName] = s.name;
+              orders[s.workspaceName] = index + 1;
+            }
           }
           setStepNames((prev) => ({ ...prev, [sec.repo]: map }));
+          setStepOrders((prev) => ({ ...prev, [sec.repo]: orders }));
         })
         .catch(() => {});
     }
@@ -165,71 +171,16 @@ function ProjectRail({
     };
   }, [sections]);
 
-  /** 名称点击 = 切根；agent 运行中 cwd 不落地（既有语义），提示但不打断 */
+  /** 项目/工作区点击 = 切换终端上下文；Agent 运行中改为新标签打开 */
   function enter(path: string) {
     if (agentRunning) {
-      setHint("agent 运行中，本标签目录暂不切换");
+      onOpenNewTab(path);
+      setHint(`当前 Agent 正在运行，已在新标签打开「${basenameOf(path)}」`);
       if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
       hintTimerRef.current = setTimeout(() => setHint(null), 3000);
       return;
     }
     onEnter(path);
-  }
-
-  /** 箭头：只展开/收起该节点的一层目录（list_dir 只读拉取，不点不拉） */
-  function toggleDir(path: string) {
-    setExpandedDirs((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-    if (!dirCache[path]) {
-      invoke<DirEntryDto[]>("list_dir", { path, showHidden: false })
-        .then((entries) => setDirCache((prev) => ({ ...prev, [path]: entries })))
-        .catch(() => {});
-    }
-  }
-
-  /** 一层目录条目（只读展示；子目录可点击切根） */
-  function renderDirRows(path: string, depth: number) {
-    if (!expandedDirs.has(path)) return null;
-    const entries = dirCache[path];
-    if (!entries) {
-      return (
-        <div className="py-1" style={{ paddingLeft: 6 + (depth + 1) * 12 }}>
-          <span className="block h-1.5 w-16 animate-pulse rounded-sm bg-inset" />
-        </div>
-      );
-    }
-    if (entries.length === 0) {
-      return (
-        <p
-          className="py-0.5 text-micro text-l4"
-          style={{ paddingLeft: 6 + (depth + 1) * 12 }}
-        >
-          空目录
-        </p>
-      );
-    }
-    return entries.map((e) => (
-      <div
-        key={e.path}
-        onClick={e.isDir ? () => enter(e.path) : undefined}
-        title={e.path}
-        className={`flex items-center gap-1 py-0.5 pr-2 text-xs ${
-          e.isDir ? "cursor-pointer hover:bg-hover" : ""
-        }`}
-        style={{ paddingLeft: 6 + (depth + 1) * 12 }}
-      >
-        {e.isDir ? (
-          <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-folder" />
-        ) : (
-          <File aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
-        )}
-        <span className="truncate text-l3">{e.name}</span>
-      </div>
-    ));
   }
 
   if (sections.length === 0) return null;
@@ -241,23 +192,16 @@ function ProjectRail({
     return (
       <div>
         <div
-          className={`flex items-center gap-1 py-0.5 pr-2 text-xs ${
-            mainActive ? "bg-white/10" : ""
+          className={`mx-1 flex items-center gap-1 rounded-md py-1.5 pr-2 text-xs transition-colors ${
+            mainActive ? "bg-rail-sel text-l1" : "hover:bg-hover"
           }`}
           style={{ paddingLeft: 6 }}
         >
-          <button
-            onClick={() => toggleDir(sec.repo)}
-            className="w-3 shrink-0 text-l4"
-            title={expandedDirs.has(sec.repo) ? "收起" : "展开一层目录"}
-          >
-            {expandedDirs.has(sec.repo) ? "▾" : "▸"}
-          </button>
-          {expandedDirs.has(sec.repo) ? (
-            <FolderOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-folder" />
-          ) : (
-            <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-folder" />
-          )}
+          <FolderOpen
+            aria-hidden="true"
+            className="h-3.5 w-3.5 shrink-0 text-l4"
+            strokeWidth={1.8}
+          />
           <span
             onClick={() => enter(sec.repo)}
             title={`${sec.repo}\n点击切到主文件夹`}
@@ -267,7 +211,6 @@ function ProjectRail({
           </span>
           <span className="shrink-0 text-micro text-l4">主</span>
         </div>
-        {renderDirRows(sec.repo, 0)}
       </div>
     );
   }
@@ -289,18 +232,25 @@ function ProjectRail({
     return (
       <div key={w.id}>
         <div
-          className={`flex items-center gap-1 py-0.5 pr-2 text-xs ${
-            wsActive ? "bg-white/10" : ""
+          className={`mx-1 flex items-center gap-1 rounded-md py-1.5 pr-2 text-xs transition-colors ${
+            wsActive ? "bg-rail-sel text-l1" : "hover:bg-hover"
           }`}
           style={{ paddingLeft: 18 }}
         >
-          <button
-            onClick={() => toggleDir(w.worktreePath)}
-            className="w-3 shrink-0 text-l4"
-            title={expandedDirs.has(w.worktreePath) ? "收起" : "展开一层目录"}
-          >
-            {expandedDirs.has(w.worktreePath) ? "▾" : "▸"}
-          </button>
+          {stepName ? (
+            <span
+              className="flex h-4 min-w-5 shrink-0 items-center justify-center rounded-sm bg-inset px-1 font-mono text-[10px] leading-none text-l4"
+              title={`研究流程第 ${stepOrders[sec.repo]?.[w.name] ?? ""} 步`}
+            >
+              {String(stepOrders[sec.repo]?.[w.name] ?? "·").padStart(2, "0")}
+            </span>
+          ) : (
+            <GitBranch
+              aria-hidden="true"
+              className="h-3.5 w-3.5 shrink-0 text-l4"
+              strokeWidth={1.8}
+            />
+          )}
           <span
             onClick={() => enter(w.worktreePath)}
             title={`${w.worktreePath}\n分支 ${w.branch}，点击切到该工作区`}
@@ -318,7 +268,6 @@ function ProjectRail({
             />
           )}
         </div>
-        {renderDirRows(w.worktreePath, 1)}
       </div>
     );
   }
@@ -334,6 +283,9 @@ function ProjectRail({
       </button>
       {!collapsed && (
         <div className="max-h-56 overflow-auto pb-1">
+          <p className="px-2 pb-1 text-micro text-l4">
+            项目与工作区
+          </p>
           {sections.map((sec) => (
             <div key={sec.repo}>
               {/* 多小节时组头标仓库名；当前项目标注「当前」（单小节保持原样，不加噪音） */}

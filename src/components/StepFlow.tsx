@@ -54,6 +54,16 @@ const LIT_SOURCES: {
   },
 ];
 
+function guidancePreview(text: string): string {
+  const full = text.trim();
+  const firstParagraph = full.split(/\n\s*\n/)[0]?.trim() ?? full;
+  if (firstParagraph.length <= 120) return firstParagraph;
+  const sentence = firstParagraph.match(/^.*?[。！？!?]/)?.[0]?.trim();
+  return sentence && sentence.length <= 120
+    ? sentence
+    : `${firstParagraph.slice(0, 117).trimEnd()}…`;
+}
+
 export default function StepFlow({
   projectPath,
   step,
@@ -544,6 +554,8 @@ export default function StepFlow({
   function renderNode(node: StepFlowNode, dense = false) {
     const isCurrent = node.key === flow.currentKey;
     const ic = icon(node);
+    const guidance = node.kind === "human" ? node.human?.guidance?.trim() : "";
+    const guidanceShort = guidance ? guidancePreview(guidance) : "";
     return (
       <li
         key={node.key}
@@ -599,7 +611,7 @@ export default function StepFlow({
               }
               title={
                 node.done
-                  ? "已完成；取消勾选回到文件检测口径"
+                  ? "已完成；取消勾选会保留为未完成，需重新勾选确认"
                   : "勾选 = 人工确认完成（系统不再追问）"
               }
             />
@@ -668,7 +680,7 @@ export default function StepFlow({
                     title={o.hint}
                     className={`rounded-full px-2 py-0.5 text-xs disabled:opacity-50 ${
                       on
-                        ? "border border-cta-bd bg-cta text-cta-text"
+                        ? "border border-cta-bd bg-cta-pill text-cta-pill-text"
                         : "bg-inset text-l3 hover:bg-hover hover:text-l1"
                     }`}
                   >
@@ -726,8 +738,8 @@ export default function StepFlow({
                       {decisionsOpen ? "▾" : "▸"}
                     </span>
                     {pendingDecisions.length > 0
-                      ? `方式一 · 点卡片直接定（还有 ${pendingDecisions.length} 题）`
-                      : `方式一 · 点卡片直接定（都定好了）`}
+                      ? `直接选择（${pendingDecisions.length} 项待定）`
+                      : "直接选择（已定）"}
                   </button>
                   {pendingDecisions.length > 0 && (
                     <button
@@ -777,7 +789,7 @@ export default function StepFlow({
                             }
                             className={`rounded-full px-2 py-0.5 text-xs disabled:opacity-50 ${
                               on
-                                ? "border border-cta-bd bg-cta text-cta-text"
+                                ? "border border-cta-bd bg-cta-pill text-cta-pill-text"
                                 : "bg-strip text-l3 hover:bg-hover hover:text-l1"
                             }`}
                           >
@@ -794,7 +806,7 @@ export default function StepFlow({
                             setWriteOwn({ q: d.q, text: picked })
                           }
                           title="你自己写的答案，点击可改"
-                          className="rounded-full border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110"
+                          className="rounded-full border border-cta-bd bg-cta-pill px-2 py-0.5 text-xs text-cta-pill-text hover:brightness-110"
                         >
                           {picked}
                         </button>
@@ -886,7 +898,7 @@ export default function StepFlow({
                     className="flex min-w-0 items-center gap-1 text-xs text-l3 hover:text-l1"
                   >
                     <span className="w-3 text-l4">{chatOpen ? "▾" : "▸"}</span>
-                    方式二 · 聊着定（可选）
+                    和 AI 商量（可选）
                   </button>
                   <span className="ml-auto flex items-center gap-2">
                     <button
@@ -910,9 +922,7 @@ export default function StepFlow({
                     >
                       {chatBusy ? "准备 TASK.md…" : "跟 AI 商量一下"}
                     </button>
-                    <span className="text-xs text-l4">
-                      它先读 TASK.md，拿不准的点逐个问你，按你的回答直接改稿
-                    </span>
+                    <span className="text-xs text-l4">结论会写入 TASK.md</span>
                   </div>
                 )}
               </div>
@@ -930,7 +940,7 @@ export default function StepFlow({
                 </button>
                 {!draftHasBody && (
                   <span className="text-xs text-l4">
-                    可选 · 边聊边改 TASK.md
+                    可选 · 结论写入 TASK.md
                   </span>
                 )}
                 <span className="ml-auto flex items-center gap-2">
@@ -979,25 +989,31 @@ export default function StepFlow({
         {node.kind === "agent" && agentContent && (
           <div className="mt-0.5 pl-9">{agentContent}</div>
         )}
-        {/* 说明常显、不再折叠：按钮收走之后行里本来就空，把唯一有信息量的
-            一句话藏进「怎么做 / 落点」等于既占地方又没人看。
-            只显示 guidance（真正的人机分工说明）；落点路径是实现细节，
-            拖拽/导入都不需要用户知道它，不再单列一行 */}
         {/* 说明只在当前节点显示：一屏同时摊开五段说明是这一页最大的噪音源。
             非当前节点的说明挂在行的 title 上（悬停可见），信息不丢。
             例外（v3.97）：可选的 after 档事项被设计成不抢「当前节点」，若死守 isCurrent，
             「下载付费墙文献全文」的导入说明就只剩悬停可见（用户实测「没说清怎么导入」）——
-            就绪（afterReady）且未完成时就地展开它的 guidance */}
+            就绪（afterReady）且未完成时就地展示摘要；长 guidance 的完整做法收进「怎么做」详情。 */}
         {!dense &&
           node.kind === "human" &&
-          node.human!.guidance &&
+          guidance &&
           (isCurrent ||
             (!node.done &&
               node.human!.timing === "after" &&
               afterReady(node.human!))) && (
-            <p className="mt-0.5 whitespace-pre-wrap pl-9 text-micro leading-5 text-l4">
-              {node.human!.guidance}
-            </p>
+            <div className="mt-0.5 pl-9 text-micro leading-5 text-l4">
+              <p className="whitespace-pre-wrap">{guidanceShort}</p>
+              {guidanceShort !== guidance && (
+                <details className="mt-0.5">
+                  <summary className="cursor-pointer select-none text-micro text-l4 hover:text-l2">
+                    怎么做
+                  </summary>
+                  <p className="mt-0.5 whitespace-pre-wrap text-l3">
+                    {guidance}
+                  </p>
+                </details>
+              )}
+            </div>
           )}
       </li>
     );

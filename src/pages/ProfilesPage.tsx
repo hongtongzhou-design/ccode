@@ -45,7 +45,7 @@ function ProfileModal({
   onSaved,
 }: {
   initial: Profile | null;
-  /** 从某个 agent 组的「+ 添加配置」打开时预选该 agent */
+  /** 从某个 agent 组的「+ 添加连接」打开时预选该 agent */
   presetAgent?: string;
   /** 各 agent 是否支持官方账号（来自 official_account_status） */
   officialSupported: Record<string, boolean>;
@@ -179,7 +179,7 @@ function ProfileModal({
         className="max-h-[90vh] w-[36rem] overflow-y-auto rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">
-          {initial ? "编辑配置" : "新建配置"}
+          {initial ? "编辑连接" : "添加连接"}
         </h2>
         <div className="mb-4 grid grid-cols-2 items-end gap-3">
           {/* 没有预设的 agent（gemini/cursor）不给空下拉——空选择器看起来像功能坏了，
@@ -448,7 +448,7 @@ function ProfileModal({
         </div>
         <details className="mb-4 border-t border-hairline pt-3">
           <summary className="cursor-pointer select-none text-xs font-medium text-l2">
-            高级配置
+            高级设置
           </summary>
           <div className="mt-3">
             {AGENT_PROTOCOLS[form.agent] && (
@@ -716,7 +716,7 @@ function ValidationDialog({
         <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-medium text-l1">
-              验证配置 · {profile.name}
+              验证连接 · {profile.name}
             </h2>
             <p className="mt-0.5 text-xs text-l4">
               密钥只在后端用于预检，不会返回界面
@@ -789,7 +789,7 @@ export default function ProfilesPage() {
     y: number;
     id: string;
   } | null>(null);
-  // 组头「⚠ N 项配置冲突」胶囊的点击弹层（锚定 agent 分组头）
+  // 组头「! N 项连接冲突」胶囊的点击弹层（锚定 agent 分组头）
   const [conflictPop, setConflictPop] = useState<{
     x: number;
     y: number;
@@ -827,7 +827,7 @@ export default function ProfilesPage() {
     };
   }, [profiles]);
 
-  // 悬浮卡（用量 / 配置冲突）：Escape / 任意滚动即关闭（同 ContextMenu；滚动关闭也避免与锚点脱离）
+  // 悬浮卡（用量 / 连接冲突）：Escape / 任意滚动即关闭（同 ContextMenu；滚动关闭也避免与锚点脱离）
   useEffect(() => {
     if (!usagePop && !conflictPop) return;
     const closeAll = () => {
@@ -1124,7 +1124,7 @@ export default function ProfilesPage() {
   async function onApplyGlobal(p: Profile) {
     if (
       !(await confirmDialog(
-        `将把该配置写入 ${labelOf(p.agent)} 的全局配置文件（影响其他终端里的使用）。全部文件会作为一个批次写入，失败会自动回滚；当前内容会先备份。继续？`,
+        `将把该连接写入 ${labelOf(p.agent)} 的全局配置文件（影响其他终端里的使用）。全部文件会作为一个批次写入，失败会自动回滚；当前内容会先备份。继续？`,
       ))
     )
       return;
@@ -1139,7 +1139,7 @@ export default function ProfilesPage() {
       mirrorValidation(p, applied.validation);
       const cli = applied.validation.cli;
       await alertDialog(
-        `已写入全局配置：\n${applied.files.join("\n")}\n\nCLI 配置检查：${
+        `已写入全局连接：\n${applied.files.join("\n")}\n\nCLI 配置检查：${
           cli.status === "passed" ? "通过" : "未通过"
         }\n${cli.message}`,
       );
@@ -1221,7 +1221,7 @@ export default function ProfilesPage() {
       const added = await invoke<number>("import_profiles", { path });
       await loadAll();
       setError(null);
-      await alertDialog(`已导入 ${added} 个配置（密钥需逐个补填）`);
+      await alertDialog(`已导入 ${added} 个连接（密钥需逐个补填）`);
     } catch (e) {
       setError(String(e));
     }
@@ -1229,7 +1229,7 @@ export default function ProfilesPage() {
 
   async function onDelete(p: Profile) {
     if (
-      !(await confirmDialog(`删除配置「${p.name}」？本地受限存储的密钥会一并删除。`, {
+      !(await confirmDialog(`删除连接「${p.name}」？本地受限存储的密钥会一并删除。`, {
         danger: true,
       }))
     )
@@ -1249,7 +1249,7 @@ export default function ProfilesPage() {
         targetAgent,
       });
       await loadAll();
-      setNotice(`已复制到 ${labelOf(targetAgent)}：「${created.name}」`);
+      setNotice(`已复制连接到 ${labelOf(targetAgent)}：「${created.name}」`);
       setTimeout(() => setNotice(null), 4000);
       setError(null);
     } catch (e) {
@@ -1318,7 +1318,7 @@ export default function ProfilesPage() {
 
   return (
     <div className="min-h-full bg-canvas">
-      <PageFrame>
+      <PageFrame width="fluid">
         {/* 注入模式的核心规则：配置只在**启动那一刻**注入子进程，改了对已在跑的标签无效。
             这条以前只写在用户手册里，用户改完配置回终端发现没变化，界面上没有任何解释
             （「有时候配置了无法切换模型」的第二个来源）。保存后有标签在跑才提示，平时不啰嗦。 */}
@@ -1330,7 +1330,7 @@ export default function ProfilesPage() {
         {/* 命令栏：标题 + 元信息，右侧动作 */}
         <PageHeader
           title="连接"
-          meta={`${profiles.length} 个配置 · ${new Set(profiles.map((p) => p.agent)).size} 个 agent`}
+          meta={`Agent、供应商与模型 · ${profiles.length} 个连接`}
           actions={
             <>
               <button
@@ -1338,7 +1338,7 @@ export default function ProfilesPage() {
                 onClick={() => setModal({ initial: null })}
                 className={primaryActionClass}
               >
-                + 新建配置
+                + 添加连接
               </button>
               <button
                 type="button"
@@ -1346,8 +1346,8 @@ export default function ProfilesPage() {
                   const rect = event.currentTarget.getBoundingClientRect();
                   setTopMenu({ x: rect.right - 176, y: rect.bottom + 4 });
                 }}
-                title="更多配置操作"
-                aria-label="更多配置操作"
+                title="更多连接操作"
+                aria-label="更多连接操作"
                 className="flex h-8 w-8 items-center justify-center rounded-sm text-sm text-l2 hover:bg-hover hover:text-l1"
               >
                 ⋯
@@ -1391,7 +1391,7 @@ export default function ProfilesPage() {
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="搜索名称 / 端点 / 模型"
+            placeholder="搜索连接 / 端点 / 模型"
             className={`${searchFieldClass} w-56`}
           />
         </PageToolbar>
@@ -1406,6 +1406,9 @@ export default function ProfilesPage() {
             const list = profiles.filter(
               (p) => p.agent === agent.id && matchProfile(p),
             );
+            const connectionCount = profiles.filter(
+              (p) => p.agent === agent.id,
+            ).length;
             if (q && list.length === 0) return null;
             const isCollapsed = collapsedGroups.has(agent.id);
             // 分组卡片化（v3.93 用户拍板）：field 细边 + strip 底色卡片给每个 agent 明确边界，
@@ -1421,7 +1424,7 @@ export default function ProfilesPage() {
                     : "border-hairline"
                 }`}
               >
-                <div className="group flex h-10 items-center gap-2 px-3">
+                <div className="group flex h-11 items-center gap-2 px-3">
                   <button
                     onClick={() => {
                       // 更新/安装进行中禁止折叠，避免交互输入行（如 brew [y/n]）被隐藏
@@ -1441,7 +1444,10 @@ export default function ProfilesPage() {
                   <h2 className="text-sm font-medium text-l1">
                     {agent.label}
                   </h2>
-                  {/* 配置冲突提升为组头琥珀胶囊（v3.93）：CLI 自读文件里的残留密钥会覆盖官方账号
+                  <span className="rounded-full bg-inset px-1.5 py-0.5 text-micro text-l4">
+                    {connectionCount} 个连接
+                  </span>
+                  {/* 连接冲突提升为组头琥珀胶囊（v3.93）：CLI 自读文件里的残留密钥会覆盖官方账号
                       登录并产生计费——藏在大段灰字里会被忽略；点击弹层列出具体文件/变量 */}
                   {(officialStatus[agent.id]?.conflicts.length ?? 0) > 0 && (
                     <button
@@ -1455,10 +1461,10 @@ export default function ProfilesPage() {
                           agentId: agent.id,
                         });
                       }}
-                      title="配置文件中的残留密钥会覆盖官方账号登录，点击查看明细"
+                      title="本地配置文件中的残留密钥会覆盖官方账号登录，点击查看明细"
                       className="flex h-5 shrink-0 items-center gap-1 rounded-full bg-warn px-2 text-micro text-warn-text transition-[filter] hover:brightness-125"
                     >
-                      ⚠ {officialStatus[agent.id].conflicts.length} 项配置冲突
+                      ! {officialStatus[agent.id].conflicts.length} 项连接冲突
                     </button>
                   )}
                   {/* 已安装显示包名+版本号（mono）；右侧状态：更新中… / 新版（可点更新）/ 更新（查不到最新版时的回退）；已是最新则不显示 */}
@@ -1472,11 +1478,21 @@ export default function ProfilesPage() {
                       不在 PATH）
                     </span>
                   )}
-                  {det?.binaryPath ? (
+                  <div className="ml-auto flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setModal({ initial: null, presetAgent: agent.id })
+                      }
+                      className="h-7 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+                    >
+                      + 添加连接
+                    </button>
+                    {det?.binaryPath ? (
                     (() => {
                       if (updating[agent.id])
                         return (
-                          <span className="ml-auto text-xs text-l2">
+                          <span className="text-xs text-l2">
                             更新中…
                           </span>
                         );
@@ -1488,7 +1504,7 @@ export default function ProfilesPage() {
                         const note = upstreamNoteText(info);
                         const cmd = upstreamCommand(info);
                         return note ? (
-                          <span className="ml-auto flex items-center gap-1 text-xs text-l4">
+                          <span className="flex items-center gap-1 text-xs text-l4">
                             <span title={note}>{note}</span>
                             {cmd && (
                               <button
@@ -1514,7 +1530,7 @@ export default function ProfilesPage() {
                                 ? `有新版本 ${info.latest ?? ""}；交互式更新（${tuiPrefill}），将在终端中打开，需方向键选择`
                                 : `有新版本 ${info.latest ?? ""}，点击更新`
                             }
-                            className="ml-auto flex h-8 items-center rounded-sm px-2 text-xs text-cta hover:bg-hover hover:brightness-125"
+                            className="flex h-8 items-center rounded-sm px-2 text-xs text-cta hover:bg-hover hover:brightness-125"
                           >
                             新版
                           </button>
@@ -1527,7 +1543,7 @@ export default function ProfilesPage() {
                               ? `交互式更新（${tuiPrefill}），将在终端中打开，需方向键选择`
                               : undefined
                           }
-                          className="ml-auto flex h-8 items-center rounded-sm px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
+                          className="flex h-8 items-center rounded-sm px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
                         >
                           更新
                         </button>
@@ -1537,11 +1553,12 @@ export default function ProfilesPage() {
                     <button
                       onClick={() => onInstall(agent.id)}
                       disabled={updating[agent.id]}
-                      className={`${secondaryActionClass} ml-auto px-2.5`}
+                      className={`${secondaryActionClass} px-2.5`}
                     >
                       {updating[agent.id] ? "安装中…" : "安装"}
                     </button>
-                  )}
+                    )}
+                  </div>
                 </div>
 
                 {!isCollapsed && (
@@ -1657,15 +1674,15 @@ export default function ProfilesPage() {
                           }
                           className="flex h-12 w-full items-center justify-center rounded-md border border-dashed border-field text-xs text-l3 transition-colors hover:border-l4 hover:bg-inset hover:text-l1"
                         >
-                          + 添加配置
+                          + 添加连接
                         </button>
                       </div>
                     ) : (
-                      <ul className="divide-y divide-hairline overflow-x-auto">
+                      <ul className="space-y-1 overflow-x-auto px-2 py-2">
                         {list.map((profile) => (
                           <li
                             key={profile.id}
-                            className="group grid min-h-14 grid-cols-[minmax(130px,1fr)_minmax(150px,1fr)_minmax(150px,1fr)_110px_92px] items-center gap-3 px-3 text-sm"
+                            className="group grid min-h-14 grid-cols-[minmax(150px,1.1fr)_minmax(140px,0.9fr)_minmax(150px,1fr)_110px_120px] items-center gap-3 rounded-md px-2 text-sm transition-colors hover:bg-hover/60"
                           >
                             <span className="min-w-0">
                               <span
@@ -1687,7 +1704,7 @@ export default function ProfilesPage() {
                                   profile.id && (
                                   <span
                                     className="ml-1.5 rounded-sm bg-inset px-1 py-0.5 text-micro font-normal text-l3"
-                                    title="终端启动栏选这个 agent 时默认用它"
+                                  title="终端启动栏选这个 agent 时默认使用"
                                   >
                                     默认
                                   </span>
@@ -1775,7 +1792,7 @@ export default function ProfilesPage() {
                                   profile.hasKey ? "bg-ok-text" : "bg-l4"
                                 }`}
                               />
-                              {profile.hasKey ? "已设置" : "未设置"}
+                              {profile.hasKey ? "已保存密钥" : "未设置"}
                             </span>
                             )}
                             <span className="flex items-center justify-end gap-1 whitespace-nowrap">
@@ -1784,15 +1801,15 @@ export default function ProfilesPage() {
                               <button
                                 type="button"
                                 onClick={() => useTerminalWith(profile)}
-                                title="用这个配置新开一个终端标签"
-                                className={`h-8 rounded-sm px-2 text-xs text-l2 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
+                                title="用这个连接新开一个终端标签"
+                                className={`${rowActionClass} ${hoverRevealClass}`}
                               >
                                 ⌨ 在终端使用
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setModal({ initial: profile })}
-                                className="h-8 rounded-sm px-2 text-xs text-l2 hover:bg-hover hover:text-l1"
+                                className={rowActionClass}
                               >
                                 编辑
                               </button>
@@ -1808,7 +1825,7 @@ export default function ProfilesPage() {
                                   });
                                 }}
                                 aria-label={`更多操作：${profile.name}`}
-                                className={`flex h-8 w-8 items-center justify-center rounded-sm text-sm text-l4 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
+                                className={`flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l4 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
                               >
                                 ⋯
                               </button>
@@ -1867,7 +1884,7 @@ export default function ProfilesPage() {
           </div>
         </div>
       )}
-      {/* 配置冲突弹层：组头琥珀胶囊点出，列出具体文件/变量；只含文件名与变量名，密钥值不出后端 */}
+      {/* 连接冲突弹层：组头琥珀胶囊点出，列出具体文件/变量；只含文件名与变量名，密钥值不出后端 */}
       {conflictPop &&
         (() => {
           const st = officialStatus[conflictPop.agentId];
@@ -1893,7 +1910,7 @@ export default function ProfilesPage() {
                 }}
               >
                 <div className="mb-1.5 font-medium text-warn-text">
-                  ⚠ {st.conflicts.length} 项配置冲突 ·{" "}
+                  ! {st.conflicts.length} 项连接冲突 ·{" "}
                   {labelOf(conflictPop.agentId)}
                 </div>
                 <ul className="space-y-1">
@@ -1926,7 +1943,7 @@ export default function ProfilesPage() {
             // 注入模式：改动只对**新启动**的标签生效，已在跑的要重开
             if (runningAgents.has(agent))
               setSavedNote(
-                `已保存「${name}」。这个 agent 有终端标签正在运行——配置是在启动那一刻注入的，改动要**重开标签**才生效。`,
+                `已保存「${name}」。这个 agent 有终端标签正在运行——连接是在启动那一刻注入的，改动要**重开标签**才生效。`,
               );
           }}
         />
@@ -1937,8 +1954,8 @@ export default function ProfilesPage() {
           y={topMenu.y}
           onClose={() => setTopMenu(null)}
           items={[
-            { label: "导入配置", onSelect: () => void onImport() },
-            { label: "导出配置", onSelect: () => void onExport() },
+            { label: "导入连接", onSelect: () => void onImport() },
+            { label: "导出连接", onSelect: () => void onExport() },
           ]}
         />
       )}
@@ -1954,7 +1971,7 @@ export default function ProfilesPage() {
               // 没被选中的配置本来就不产生任何作用
               label: (settings?.hiddenProfiles ?? []).includes(rowMenu.profile.id)
                 ? "取消隐藏"
-                : "隐藏此配置",
+                : "隐藏此连接",
               title:
                 "仍可正常使用，只是在启动栏下拉里沉到「更多」",
               onSelect: () => void toggleHiddenProfile(rowMenu.profile),
@@ -1984,7 +2001,7 @@ export default function ProfilesPage() {
                 ]
               : []),
             {
-              label: "复制配置",
+              label: "复制连接",
               onSelect: () => {
                 const p = rowMenu.profile;
                 void (async () => {

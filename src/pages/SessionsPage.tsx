@@ -121,6 +121,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [confirmBatch, setConfirmBatch] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [selected, setSelected] = useState<SessionMetaDto | null>(null);
+  const [registeredProjectPaths, setRegisteredProjectPaths] = useState<Set<string>>(
+    () => new Set(),
+  );
   // 「复制恢复命令」按钮的已复制反馈以 agent+sessionId 区分，避免跨 CLI 同 id 误显示。
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
@@ -158,6 +161,22 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   editingRef.current = editing !== null;
   const selectedRef = useRef<SessionMetaDto | null>(null);
   selectedRef.current = selected;
+
+  // 只有已注册项目才提供「查看项目」；随手聊和内部 AI 不伪装成项目。
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    void invoke<{ path: string }[]>("list_projects")
+      .then((projects) => {
+        if (!cancelled) setRegisteredProjectPaths(new Set(projects.map((p) => p.path)));
+      })
+      .catch(() => {
+        if (!cancelled) setRegisteredProjectPaths(new Set());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visible]);
 
   const q = query.trim().toLowerCase();
   // 工作区页「会话」跳转：接管搜索词（消费并清空）
@@ -1714,21 +1733,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       <div className="flex min-w-0 flex-1 flex-col bg-canvas">
         {selected ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-hairline bg-strip px-4 py-2">
-              <button
-                onClick={() => {
-                  conversationRequestRef.current += 1;
-                  setSelected(null);
-                  setMessages([]);
-                  setConversationCursor(null);
-                  setSummary(null);
-                  setExportPath(null);
-                  setReplayTab("chat");
-                }}
-                className="inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover"
-              >
-                ← 返回
-              </button>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-strip px-4 py-2">
               <span className="truncate text-sm font-medium text-l1">
                 {sessionTitle(selected)}
               </span>
@@ -1774,9 +1779,24 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 <button
                   onClick={() => resumeInTerminal(selected)}
                   disabled={!selected.alive && !selected.pinned}
-                  className="inline-flex h-7 items-center justify-center rounded-l-md px-2 text-xs text-l2 hover:bg-hover disabled:opacity-50"
+                  className="inline-flex h-7 items-center justify-center rounded-md bg-cta px-2.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
-                  恢复
+                  继续
+                </button>
+                <button
+                  onClick={() => setDigestFor(selected)}
+                  disabled={!selected.alive && !selected.pinned}
+                  className="ml-1 inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover disabled:opacity-50"
+                  title="提炼成紧凑简报，供新会话继续"
+                >
+                  ◈ 提炼简报
+                </button>
+                <button
+                  onClick={() => void onExport()}
+                  disabled={exporting || (!selected.alive && !selected.pinned)}
+                  className="ml-1 inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover disabled:opacity-50"
+                >
+                  {exporting ? "导出中…" : "导出"}
                 </button>
                 <button
                   onClick={(e) => {
@@ -1784,7 +1804,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     setResumeMenu({ x: r.right - 176, y: r.bottom + 4 });
                   }}
                   title="更多对话操作"
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-r-md text-xs text-l4 hover:bg-hover hover:text-l1"
+                  className="ml-1 inline-flex h-7 w-7 items-center justify-center rounded-md text-xs text-l4 hover:bg-hover hover:text-l1"
                 >
                   ⋯
                 </button>
@@ -1884,12 +1904,32 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     )}
                   </div>
                 </div>
-                {/* 底部圆角输入条（只读展示态）：chip 取 agent 名（会话 DTO 无模型字段）+ 免责小字 */}
-                <div className="shrink-0 border-t border-hairline px-4 pb-2 pt-2.5">
-                  <div className="mx-auto flex max-w-3xl items-center gap-2 rounded-full border border-hairline bg-inset py-1.5 pl-4 pr-2">
+                {/* 底部只读操作条：继续由头部主 CTA 负责，底部只保留外部路径和项目跳转。 */}
+                <div className="shrink-0 px-4 pb-2 pt-2.5">
+                  <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-2 rounded-xl bg-inset px-3 py-2">
                     <span className="min-w-0 flex-1 truncate text-xs text-l4">
-                      历史回放只读 · 点右上角「恢复」在终端继续该对话
+                      历史回放只读 · 需要继续时使用上方「继续」
                     </span>
+                    <button
+                      type="button"
+                      onClick={() => void resumeExternal(selected)}
+                      disabled={!selected.alive && !selected.pinned}
+                      className={ghostActionClass}
+                    >
+                      在外部继续
+                    </button>
+                    {registeredProjectPaths.has(selected.projectPath) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectProjectReq(selected.projectPath);
+                          setPage("workspaces");
+                        }}
+                        className={ghostActionClass}
+                      >
+                        查看项目
+                      </button>
+                    )}
                     <span
                       className="shrink-0 rounded-full px-2.5 py-0.5 text-micro font-medium"
                       style={agentBrandBadgeStyle(selected.agent)}

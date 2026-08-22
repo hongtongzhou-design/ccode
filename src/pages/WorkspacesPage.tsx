@@ -7,6 +7,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useAppStore, runInboxAction, type InboxItem } from "../store";
 import { absTime, relTime } from "../rel-time";
 import {
@@ -28,6 +29,7 @@ import { buildWorkspaceTerminalRequest } from "../pipeline-start";
 import {
   EmptyState,
   fieldClass,
+  inlineActionClass,
   NoticeBar,
   PageFrame,
   PageHeader,
@@ -77,6 +79,8 @@ function pathBaseName(path: string): string {
   const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || path;
 }
+
+const PROJECT_RAIL_COLLAPSED_KEY = "ccode.projectRailCollapsed";
 
 /** 人工请求新来源的系统通知：macOS 首次发送前必须显式申请权限（系统级弹窗，仅首次）；
     被拒则静默跳过。复用「长任务 OS 通知」设置开关，不新增设置项。 */
@@ -911,6 +915,13 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     ws: WorkspaceDto;
   } | null>(null);
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
+  const [projectRailCollapsed, setProjectRailCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(PROJECT_RAIL_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   // 任务行产物清单手风琴：按工作区 id 记忆展开态，切项目时清空
   const [artifactsOpen, setArtifactsOpen] = useState<Set<string>>(new Set());
   const openInTerminal = useOpenInTerminal();
@@ -1288,6 +1299,18 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     setArtifactsOpen(new Set());
   }, [shownGroupKey]);
 
+  function toggleProjectRail() {
+    setProjectRailCollapsed((collapsed) => {
+      const next = !collapsed;
+      try {
+        localStorage.setItem(PROJECT_RAIL_COLLAPSED_KEY, next ? "1" : "0");
+      } catch {
+        // 本地存储失败不应阻断界面切换。
+      }
+      return next;
+    });
+  }
+
   function toggleArtifacts(wsId: string) {
     setArtifactsOpen((prev) => {
       const next = new Set(prev);
@@ -1296,8 +1319,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       return next;
     });
   }
-  const actionBtn =
-    "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1";
+  const actionBtn = inlineActionClass;
   // hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
   const hoverReveal =
     "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
@@ -1847,7 +1869,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       )}
       {!IS_MAC && inboxItems.length > 0 && (
         <section className="relative z-20 shrink-0 px-6 pt-2">
-          <div className="relative mx-auto w-full max-w-[1440px]">
+          <div className="relative mx-auto w-full">
             <div className="flex h-8 items-center gap-2 rounded-md bg-strip px-3 text-xs text-l2">
               <span className="shrink-0 font-medium text-l1">
                 待你处理 {inboxItems.length}
@@ -1919,84 +1941,116 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         </section>
       )}
       <div className="flex min-h-0 flex-1">
-      <aside className="flex w-[230px] shrink-0 flex-col border-r border-hairline bg-rail2">
-        <div className="flex h-12 shrink-0 items-center gap-2 px-3">
-          <span className="text-sm font-medium text-l1">项目</span>
-          <span className="text-xs text-l4">{groups.length}</span>
-          {/* 添加项目收进 rail 头部 + 菜单（含示例课题常驻入口）；页头实心 CTA 不变 */}
-          <button
-            type="button"
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              setAddMenu({ x: rect.right - 176, y: rect.bottom + 4 });
-            }}
-            title="添加项目 / 创建示例课题"
-            aria-label="添加项目 / 创建示例课题"
-            className="ml-auto flex h-7 w-7 items-center justify-center rounded-md text-sm text-l3 hover:bg-hover hover:text-l1"
-          >
-            +
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto py-1.5">
-          {groups.map((group) => {
-            const groupActive = group.list.filter(
-              (workspace) => workspace.status === "active",
-            ).length;
-            // 待处理 = 工作区冲突/可合并 + 归属本项目的终端待确认/已完成/外部 live 待确认
-            const needsAttention =
-              group.list.filter((workspace) => {
-                const state = health[workspace.id];
-                return state?.conflict || state?.readyToMerge;
-              }).length + (navAttention.get(group.key) ?? 0);
-            const selected = selectedGroup?.key === group.key;
-            return (
+      <aside
+        className={`flex shrink-0 flex-col transition-[width,background-color,border-color] duration-150 ${
+          projectRailCollapsed
+            ? "w-0 overflow-hidden border-r-0 bg-transparent"
+            : "w-[230px] border-r border-hairline bg-rail2"
+        }`}
+      >
+        {!projectRailCollapsed && (
+          <>
+            <div className="flex h-12 shrink-0 items-center gap-2 px-3">
+              <span className="text-sm font-medium text-l1">项目</span>
+              <span className="text-xs text-l4">{groups.length}</span>
+              {/* 添加项目收进 rail 头部 + 菜单（含示例课题常驻入口）；页头实心 CTA 不变 */}
               <button
-                key={group.key}
                 type="button"
-                onClick={() => setSelectedGroupKey(group.key)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setRailMenu({ x: e.clientX, y: e.clientY, groupKey: group.key });
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setAddMenu({ x: rect.right - 176, y: rect.bottom + 4 });
                 }}
-                title={group.repoPath}
-                className={`mx-1.5 mb-1 flex w-[calc(100%-12px)] items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors ${
-                  selected
-                    ? "bg-rail-sel text-l1"
-                    : "text-l3 hover:bg-hover hover:text-l2"
-                }`}
+                title="添加项目 / 创建示例课题"
+                aria-label="添加项目 / 创建示例课题"
+                className="ml-auto flex h-7 w-7 items-center justify-center rounded-md text-sm text-l3 hover:bg-hover hover:text-l1"
               >
-                <span
-                  className={`mt-1 size-2 shrink-0 rounded-full ${
-                    needsAttention > 0
-                      ? "bg-warn-text"
-                      : groupActive > 0
-                        ? "bg-ok-text"
-                        : "bg-l4"
-                  }`}
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium">
-                    {group.project?.name ?? group.repoName}
-                  </span>
-                  {/* 副行只留「待处理」（与收件箱同口径）；活跃任务数是纯状态，不占注意力 */}
-                  {needsAttention > 0 && (
-                    <span className="mt-0.5 block truncate text-xs text-l4">
-                      {needsAttention} 个待处理
-                    </span>
-                  )}
-                </span>
+                +
               </button>
-            );
-          })}
-          {groups.length === 0 && (
-            <p className="px-3 py-4 text-xs text-l4">还没有项目</p>
-          )}
-        </div>
+              <button
+                type="button"
+                onClick={toggleProjectRail}
+                title="隐藏项目列表"
+                aria-label="隐藏项目列表"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-l3 hover:bg-hover hover:text-l1"
+              >
+                <PanelLeftClose aria-hidden="true" size={16} strokeWidth={1.8} />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto py-1.5">
+              {groups.map((group) => {
+                const groupActive = group.list.filter(
+                  (workspace) => workspace.status === "active",
+                ).length;
+                // 待处理 = 工作区冲突/可合并 + 归属本项目的终端待确认/已完成/外部 live 待确认
+                const needsAttention =
+                  group.list.filter((workspace) => {
+                    const state = health[workspace.id];
+                    return state?.conflict || state?.readyToMerge;
+                  }).length + (navAttention.get(group.key) ?? 0);
+                const selected = selectedGroup?.key === group.key;
+                return (
+                  <button
+                    key={group.key}
+                    type="button"
+                    onClick={() => setSelectedGroupKey(group.key)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setRailMenu({ x: e.clientX, y: e.clientY, groupKey: group.key });
+                    }}
+                    title={group.repoPath}
+                    className={`mx-1.5 mb-1 flex w-[calc(100%-12px)] items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors ${
+                      selected
+                        ? "bg-rail-sel text-l1"
+                        : "text-l3 hover:bg-hover hover:text-l2"
+                    }`}
+                  >
+                    <span
+                      className={`mt-1 size-2 shrink-0 rounded-full ${
+                        needsAttention > 0
+                          ? "bg-warn-text"
+                          : groupActive > 0
+                            ? "bg-ok-text"
+                            : "bg-l4"
+                      }`}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium">
+                        {group.project?.name ?? group.repoName}
+                      </span>
+                      {/* 副行只留「待处理」（与收件箱同口径）；活跃任务数是纯状态，不占注意力 */}
+                      {needsAttention > 0 && (
+                        <span className="mt-0.5 block truncate text-xs text-l4">
+                          {needsAttention} 个待处理
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+              {groups.length === 0 && (
+                <p className="px-3 py-4 text-xs text-l4">还没有项目</p>
+              )}
+            </div>
+          </>
+        )}
       </aside>
 
       <div className="min-w-0 flex-1 overflow-auto">
-        <PageFrame width="wide">
+        <PageFrame width="fluid">
       <PageHeader
+        leading={
+          projectRailCollapsed ? (
+            <button
+              type="button"
+              onClick={toggleProjectRail}
+              title="显示项目列表"
+              aria-label="显示项目列表"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-l3 hover:bg-hover hover:text-l1"
+            >
+              <PanelLeftOpen aria-hidden="true" size={16} strokeWidth={1.8} />
+            </button>
+          ) : undefined
+        }
         title="项目"
         meta={
           selectedGroup
@@ -2235,7 +2289,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             />
                             {state.label}
                             {(isDriftFailed || isHealthFailed) && (
-                              <span className="text-warn-text">⚠</span>
+                              <span className="text-warn-text">!</span>
                             )}
                           </button>
                           )}
@@ -2389,7 +2443,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                 : result.skipped.length > 0
                   ? `已添加 ${result.appended} 个步骤；${result.skipped.length} 个同名的跳过了`
                   : `已按「${templateName}」添加 ${result.appended} 个研究步骤`;
-            setNotice(`${base}${scanSuffix()}`);
+            const renamed =
+              result.renamed?.length > 0
+                ? `；${result.renamed.length} 个工作区名冲突，已自动改名`
+                : "";
+            setNotice(`${base}${renamed}${scanSuffix()}`);
             void refresh();
           }}
         />

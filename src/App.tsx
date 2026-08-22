@@ -32,6 +32,7 @@ import {
   PAGE_HOTKEY_DEFS,
   IS_MAC,
 } from "./hotkeys";
+import { NAV_ICONS } from "./navigation-icons";
 
 // 页面懒加载：首屏只拉当前页 chunk，其余页首次访问时才加载
 const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
@@ -83,26 +84,26 @@ const NAV_GROUPS = [
   {
     label: "工作",
     items: [
-      { id: "workbench", label: "工作台", icon: "⌂" },
-      { id: "workspaces", label: "项目", icon: "⛁" },
-      { id: "terminal", label: "运行", icon: "⌨" },
-      { id: "sessions", label: "对话", icon: "◔" },
+      { id: "workbench", label: "工作台", Icon: NAV_ICONS.workbench },
+      { id: "workspaces", label: "项目", Icon: NAV_ICONS.workspaces },
+      { id: "terminal", label: "运行", Icon: NAV_ICONS.terminal },
+      { id: "sessions", label: "对话", Icon: NAV_ICONS.sessions },
     ],
   },
   {
     label: "资源",
     items: [
-      { id: "profiles", label: "连接", icon: "⇄" },
-      { id: "skills", label: "技能", icon: "✦" },
-      { id: "mcp", label: "MCP", icon: "⌗" },
+      { id: "profiles", label: "连接", Icon: NAV_ICONS.profiles },
+      { id: "skills", label: "技能", Icon: NAV_ICONS.skills },
+      { id: "mcp", label: "MCP", Icon: NAV_ICONS.mcp },
     ],
   },
 ] as const;
 
 // 低频管理区与主路径分开：用量和设置都不抢工作流注意力。
 const NAV_BOTTOM = [
-  { id: "stats", label: "用量", icon: "◫" },
-  { id: "settings", label: "设置", icon: "⛭" },
+  { id: "stats", label: "用量", Icon: NAV_ICONS.stats },
+  { id: "settings", label: "设置", Icon: NAV_ICONS.settings },
 ] as const;
 
 /** 路径末段作项目名（通知标题用；与 WorkspacesPage pathBaseName 同口径） */
@@ -220,6 +221,14 @@ function App() {
     const chromeCombo = settings?.hotkeyHideChrome ?? "mod+\\";
     const pageSwitchOn = settings?.hotkeyPageSwitch !== false;
     const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      const target = e.target as HTMLElement | null;
+      const isEditable =
+        target?.isContentEditable ||
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT";
+      if (isEditable) return;
       if (eventMatchesCombo(e, paletteCombo)) {
         e.preventDefault();
         setPaletteOpen((v) => !v);
@@ -405,7 +414,12 @@ function App() {
                   }
                   className="flex h-6 min-w-0 shrink items-center gap-1.5 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
                 >
-                  <span className="shrink-0 text-l4">⛁</span>
+                  <NAV_ICONS.workspaces
+                    size={14}
+                    strokeWidth={1.8}
+                    className="shrink-0 text-l4"
+                    aria-hidden="true"
+                  />
                   <span className="min-w-0 truncate">
                     {contextLabel?.project ?? "Ccode"}
                   </span>
@@ -582,11 +596,12 @@ function App() {
                         collapsed ? "justify-center" : "px-2.5"
                       }`}
                     >
-                      <span
-                        className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"}`}
-                      >
-                        ＋
-                      </span>
+                      <NAV_ICONS.quickChat
+                        size={16}
+                        strokeWidth={1.8}
+                        className={collapsed ? "" : "mr-2 shrink-0"}
+                        aria-hidden="true"
+                      />
                       {!collapsed && <span className="truncate">快速开聊</span>}
                     </button>
                   </RailTooltip>
@@ -605,7 +620,7 @@ function App() {
                             ? `${n.label}（${inboxCount} 件待处理）`
                             : n.label
                       }
-                      className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm transition-colors ${
+                      className={`relative mb-0.5 flex h-8 w-full items-center rounded-md text-sm transition-colors ${
                         collapsed ? "justify-center" : "px-2.5"
                       } ${
                         page === n.id
@@ -613,14 +628,12 @@ function App() {
                           : "text-l3 hover:bg-hover hover:text-l2"
                       }`}
                     >
-                      {page === n.id && (
-                        <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
-                      )}
-                      <span
-                        className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
-                      >
-                        {n.icon}
-                      </span>
+                      <n.Icon
+                        size={16}
+                        strokeWidth={1.8}
+                        className={`${collapsed ? "" : "mr-2 shrink-0"} ${page === n.id ? "text-nav-accent" : ""}`}
+                        aria-hidden="true"
+                      />
                       {!collapsed && <span className="truncate">{n.label}</span>}
                     </button>
                   </RailTooltip>
@@ -647,14 +660,12 @@ function App() {
                       : "text-l3 hover:bg-hover hover:text-l2"
                   }`}
                 >
-                  {page === n.id && (
-                    <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-nav-accent" />
-                  )}
-                  <span
-                    className={`${collapsed ? "text-lg" : "mr-2 w-5 text-center text-base"} ${page === n.id ? "text-nav-accent" : ""}`}
-                  >
-                    {n.icon}
-                  </span>
+                  <n.Icon
+                    size={16}
+                    strokeWidth={1.8}
+                    className={`${collapsed ? "" : "mr-2 shrink-0"} ${page === n.id ? "text-nav-accent" : ""}`}
+                    aria-hidden="true"
+                  />
                   {!collapsed && <span>{n.label}</span>}
                 </button>
               </RailTooltip>

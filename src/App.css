@@ -546,6 +546,16 @@ select:focus-visible {
   outline-offset: 1px;
 }
 
+/* 聊天 composer 的焦点反馈由外层 rounded 容器承载；textarea 本身不能再出现直角黑框。 */
+.ccode-chat-composer textarea,
+.ccode-chat-composer textarea:focus,
+.ccode-chat-composer textarea:focus-visible {
+  border: 0 !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+  -webkit-appearance: none;
+}
+
 ::selection {
   background: var(--color-seg-sel);
   color: var(--color-l1);

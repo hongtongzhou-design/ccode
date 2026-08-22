@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
-import { hoverRevealClass, RoleBadge, Toggle } from "./PageFrame";
+import { hoverRevealClass, inlineActionClass, RoleBadge, Toggle } from "./PageFrame";
 import StepFlow from "./StepFlow";
 import FuseDraftModal from "./FuseDraftModal";
 import { useAppStore } from "../store";
@@ -21,8 +21,7 @@ import type {
   WorkspaceDto,
 } from "../types";
 
-const actionBtn =
-  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50";
+const actionBtn = inlineActionClass;
 const fieldSm =
   "h-7 rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
@@ -552,10 +551,11 @@ export default function TaskCardsSection({
   return (
     <div className="mb-2">
       <div className="flex items-center gap-2">
-        <span className="text-xs text-l3">
-          {focusStep ? "这一步的流程" : "任务卡"}
-          {!focusStep && cards && cards.length > 0 ? `（${cards.length}）` : ""}
-        </span>
+        {!focusStep && (
+          <span className="text-xs text-l3">
+            任务卡{cards && cards.length > 0 ? `（${cards.length}）` : ""}
+          </span>
+        )}
         {/* 主仓改动协同提醒（与开工弹层同款口径，只提醒不阻断）：小 chip 降噪，点击跳改动面板 */}
         {mainDirty !== null && mainDirty > 0 && (
           <button
@@ -613,7 +613,9 @@ export default function TaskCardsSection({
               ›
             </button>
           )}
-          {focusStatusText && (
+          {focusStatusText &&
+            (focusStatusText === "工作区已归档" ||
+              focusStatusText === "有合并冲突待处理") && (
             <span className="text-xs text-l3">{focusStatusText}</span>
           )}
         </div>
@@ -669,7 +671,7 @@ export default function TaskCardsSection({
                           className="text-xs text-l4"
                           title="想法卡在只读会话里聊，不动任何文件；聊出结论后点卡片上的「◈ 沉淀进任务书」才追加进 TASK.md。要直接改 TASK.md 用上面的「跟 AI 商量一下」"
                         >
-                          先聊不改稿，点 ◈ 沉淀才进任务书：
+                          想法先聊，确认后写入任务书
                         </span>
                       )}
                       <button

@@ -13,7 +13,7 @@
         "width": 1100,
         "height": 720,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": false
       }
     ]
   }

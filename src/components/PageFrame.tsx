@@ -5,7 +5,11 @@ import { HoverTip, useHoverTip } from "./HoverTip";
 const WIDTHS = {
   narrow: "max-w-2xl",
   standard: "max-w-4xl",
+  /** 设置页：给分区导航 + 设置内容留出稳定的中宽工作面。 */
+  settings: "max-w-[1080px]",
   wide: "max-w-[1440px]",
+  /** 连续工作区页面：使用主区全部可用宽度，内容自身维持固定密度。 */
+  fluid: "max-w-none",
 } as const;
 
 export function PageFrame({
@@ -30,18 +34,24 @@ export function PageHeader({
   title,
   meta,
   actions,
+  leading,
 }: {
   title: string;
   meta?: ReactNode;
   actions?: ReactNode;
+  /** 页面级标题前的轻量入口（例如工作区页收起后的项目列表恢复按钮）。 */
+  leading?: ReactNode;
 }) {
   return (
     <header className="ccode-page-header sticky top-0 z-20 mb-4 flex h-12 items-center justify-between gap-4 bg-canvas">
-      <div className="flex min-w-0 items-baseline gap-2.5">
-        <h1 className="shrink-0 text-base font-semibold tracking-tight text-l1">
-          {title}
-        </h1>
-        {meta && <span className="truncate text-micro text-l4">{meta}</span>}
+      <div className="flex min-w-0 items-center gap-2.5">
+        {leading}
+        <div className="flex min-w-0 items-baseline gap-2.5">
+          <h1 className="shrink-0 text-base font-semibold tracking-tight text-l1">
+            {title}
+          </h1>
+          {meta && <span className="truncate text-micro text-l4">{meta}</span>}
+        </div>
       </div>
       {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
     </header>
@@ -61,6 +71,18 @@ export const rowActionClass =
 /** 行内 28px 无框低调按钮：辅助/低频动作 */
 export const ghostActionClass =
   "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l3 transition-colors hover:bg-hover hover:text-l1 disabled:opacity-50";
+
+/** 流程卡片内的轻量操作：与列表行操作共用 28px 热区，但不带描边。 */
+export const inlineActionClass =
+  "inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 transition-colors hover:bg-hover hover:text-l1 disabled:opacity-50";
+
+/** 流程卡片内的紧凑主动作：仅用于卡片内部，不与页面主 CTA 抢层级。 */
+export const compactPrimaryActionClass =
+  "inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50";
+
+/** 紧凑表单控件：与标准 field 同源，只收窄高度和字号。 */
+export const compactFieldClass =
+  "h-7 rounded-md border border-field bg-canvas px-2 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4";
 
 /** 表单输入框：模态与内联表单统一（canvas 底 + field 边） */
 export const fieldClass =
@@ -285,8 +307,7 @@ export function NoticeBar({
   onDismiss?: () => void;
   className?: string;
 }) {
-  const icon =
-    tone === "ok" ? "✓" : tone === "warn" ? "⚠" : null;
+  const icon = tone === "ok" ? "✓" : tone === "warn" ? "!" : null;
   const iconCls =
     tone === "ok" ? "text-ok-text" : tone === "warn" ? "text-warn-text" : "";
   return (

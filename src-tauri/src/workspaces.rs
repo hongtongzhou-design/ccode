@@ -1540,6 +1540,23 @@ fn artifact_produced_since(root: &Path, entry: &str, since: SystemTime) -> bool 
     }
     let path = root.join(rel);
     let fresh = |m: &fs::Metadata| m.modified().map(|t| t >= since).unwrap_or(false);
+    if rel.contains('*') {
+        let Some(idx) = rel.rfind('/').or_else(|| rel.rfind('\\')) else {
+            return false;
+        };
+        let (dir, pattern) = rel.split_at(idx);
+        let pattern = &pattern[1..];
+        if pattern.is_empty() || dir.contains('*') {
+            return false;
+        }
+        let Ok(rd) = fs::read_dir(root.join(dir)) else {
+            return false;
+        };
+        return rd.flatten().any(|e| {
+            let Ok(m) = e.metadata() else { return false };
+            m.is_file() && wildcard_match(pattern, &e.file_name().to_string_lossy()) && fresh(&m)
+        });
+    }
     if is_dir_entry {
         let mut any_file = false;
         let mut any_fresh = fs::metadata(&path).map(|m| fresh(&m)).unwrap_or(false);
@@ -1616,8 +1633,8 @@ pub async fn pending_artifact_checks() -> Vec<PendingArtifactDto> {
 }
 
 // ===== 人工事项（步骤的人机分工清单）：声明在 project.toml steps[].human_tasks，
-// 状态不进档案卡——手动勾选存 app.db human_task_checks 表（行在 = 人勾了），
-// 落点检测按文件系统现算；done = 手动 || 检测，手动优先（勾了系统不再追问） =====
+// 状态不进档案卡——手动勾选存 app.db human_task_checks 表（checked=1/0 分别表示显式完成/未完成），
+// 落点检测按文件系统现算；没有显式状态时才回落检测结果 =====
 
 /// 单个人工事项的派生状态（list_human_task_states 返回，按步骤顺序平铺）
 #[derive(Debug, Clone, Serialize)]
@@ -1638,9 +1655,11 @@ pub struct HumanTaskStateDto {
     /// 待获取清单总篇数（仅 papers/*.pdf 落点且同侧根存在 papers/to-fetch.md 时现算，
     /// 数条目行：非空、非 # 开头、非「为空」注明行；否则 None）
     pub expected_count: Option<usize>,
-    /// 人手动勾过（优先于检测；取消勾选即回到纯检测口径）
+    /// 后端采用的完成判定口径
+    pub completion: String,
+    /// 人手动勾为完成；false 也可能表示显式取消，最终状态以 done 为准
     pub manual: bool,
-    /// done = manual || detected（前端不再重算）
+    /// 最终完成态（显式勾选/取消优先；无显式状态时回落 detected，前端不再重算）
     pub done: bool,
 }
 
@@ -1804,6 +1823,68 @@ fn to_fetch_entry_count(root: &Path, target: &str) -> Option<usize> {
     Some(count)
 }
 
+/// 通用人工事项清单计数：每行一个目标，忽略空行、标题和注释。
+fn manifest_entry_count(root: &Path, manifest_path: &str) -> Option<usize> {
+    let rel = manifest_path.trim();
+    if rel.is_empty() || rel.contains('*') || rel.contains("..") || Path::new(rel).is_absolute() {
+        return None;
+    }
+    let text = fs::read_to_string(root.join(rel)).ok()?;
+    Some(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .count(),
+    )
+}
+
+fn is_text_target(target: &str) -> bool {
+    let rel = target.trim().trim_end_matches(['/', '\\']);
+    let Some(ext) = Path::new(rel).extension().and_then(|x| x.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "md" | "qmd" | "txt" | "tex" | "sty" | "cls" | "bib" | "json" | "jsonl"
+            | "yaml" | "yml" | "toml" | "csv" | "tsv" | "rst"
+    )
+}
+
+/// `no_placeholders` 完成判定：精确文件存在且不再包含常见待填标记。
+fn no_placeholders_hit(root: &Path, target: &str) -> bool {
+    let rel = target.trim().trim_end_matches(['/', '\\']);
+    if rel.is_empty() || rel.contains('*') || rel.contains("..") || Path::new(rel).is_absolute() {
+        return false;
+    }
+    if !is_text_target(rel) {
+        return false;
+    }
+    let Ok(text) = fs::read_to_string(root.join(rel)) else {
+        return false;
+    };
+    !["待填", "待确认", "[待补", "TODO"].iter().any(|mark| text.contains(mark))
+}
+
+fn human_target_satisfied(
+    root: &Path,
+    target: &str,
+    completion: &str,
+    hit_count: Option<usize>,
+    expected_count: Option<usize>,
+    manifest_path: &str,
+) -> bool {
+    match completion {
+        "manual" => false,
+        "all" => match expected_count.or_else(|| manifest_entry_count(root, manifest_path)) {
+            Some(expected) if expected == 0 => true,
+            Some(expected) => hit_count.unwrap_or(0) >= expected,
+            None => false,
+        },
+        "no_placeholders" => no_placeholders_hit(root, target),
+        _ => hit_count.is_some(),
+    }
+}
+
 /// 步骤人工事项的检测根列表：项目根恒在；步骤绑定了活跃工作区时工作树根也算
 /// （交付落在哪一侧都算数——开工前的事项多在主仓，执行中的事项多在工作树）
 fn human_detection_roots(
@@ -1857,9 +1938,22 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
                 .max();
             let expected_count = roots
                 .iter()
-                .filter_map(|r| to_fetch_entry_count(r, &h.target))
+                .filter_map(|r| h.expected_count.or_else(|| {
+                    to_fetch_entry_count(r, &h.target)
+                        .or_else(|| manifest_entry_count(r, &h.manifest_path))
+                }))
                 .max();
-            let detected = hit_count.is_some();
+            let completion = crate::projects::normalize_human_completion(&h.completion);
+            let detected = roots.iter().any(|r| {
+                human_target_satisfied(
+                    r,
+                    &h.target,
+                    &completion,
+                    human_target_count(r, &h.target),
+                    h.expected_count.or_else(|| to_fetch_entry_count(r, &h.target)),
+                    &h.manifest_path,
+                )
+            });
             // 手动优先（v3.89）：显式取消（checked=0）时**检测命中也不算完成**——
             // 否则落点里有文件就会自动勾回来，用户取消不掉（实测 bug）
             let manual_state = manual.get(&(step.name.clone(), h.title.clone())).copied();
@@ -1873,6 +1967,7 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
                 detected,
                 hit_count,
                 expected_count,
+                completion,
                 manual: manual_state == Some(true),
                 done: match manual_state {
                     Some(v) => v,
@@ -4978,6 +5073,21 @@ mod tests {
     }
 
     #[test]
+    fn artifact_produced_since_supports_file_globs_without_accepting_empty_dirs() {
+        let dir = std::env::temp_dir().join(format!("ccode-artifact-glob-{}", uuid::Uuid::new_v4()));
+        let root = dir.join("proj");
+        fs::create_dir_all(root.join("figures")).unwrap();
+        let since = SystemTime::now() - Duration::from_secs(1);
+        assert!(!artifact_produced_since(&root, "figures/*.png", since));
+        fs::write(root.join("figures/result.pdf"), b"pdf").unwrap();
+        assert!(!artifact_produced_since(&root, "figures/*.png", since));
+        fs::write(root.join("figures/result.png"), b"png").unwrap();
+        assert!(artifact_produced_since(&root, "figures/*.png", since));
+        assert!(artifact_produced_since(&root, "figures/", since), "旧配置目录条目仍保持向后兼容");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn human_target_hit_three_forms() {
         let dir = std::env::temp_dir().join(format!("ccode-ht-{}", uuid::Uuid::new_v4()));
         let root = dir.join("proj");
@@ -5046,6 +5156,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(to_fetch_entry_count(&root, "papers/*.pdf"), Some(3));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn completion_modes_do_not_treat_file_presence_as_manual_confirmation() {
+        let dir = std::env::temp_dir().join(format!("ccode-completion-{}", uuid::Uuid::new_v4()));
+        let root = dir.join("proj");
+        fs::create_dir_all(root.join("submission")).unwrap();
+        fs::write(root.join("submission/checklist.md"), "作者：待填\n").unwrap();
+        assert!(
+            !human_target_satisfied(
+                &root,
+                "submission/checklist.md",
+                "manual",
+                Some(1),
+                None,
+                "",
+            ),
+            "manual 必须由人确认，文件出现不能自动完成"
+        );
+        assert!(
+            !human_target_satisfied(
+                &root,
+                "submission/checklist.md",
+                "no_placeholders",
+                Some(1),
+                None,
+                "",
+            ),
+            "no_placeholders 发现待填占位时不能完成"
+        );
+        fs::write(root.join("submission/checklist.md"), "作者：张三\n").unwrap();
+        assert!(human_target_satisfied(
+            &root,
+            "submission/checklist.md",
+            "no_placeholders",
+            Some(1),
+            None,
+            "",
+        ));
+        fs::create_dir_all(root.join("papers")).unwrap();
+        fs::write(
+            root.join("papers/to-fetch.md"),
+            "# 待获取\n\n（无付费文献则本清单为空）\n",
+        )
+        .unwrap();
+        assert!(human_target_satisfied(
+            &root,
+            "papers/*.pdf",
+            "all",
+            None,
+            Some(0),
+            "",
+        ));
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -1,8 +1,14 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { PIPELINE_TEMPLATES } from "../pipeline-presets";
-import type { PipelineTemplateDef } from "../pipeline-presets";
-import type { AppendStepsResultDto, ProjectConfigReadDto } from "../types";
+import {
+  PIPELINE_TEMPLATES,
+  pipelineStepsForTemplate,
+  type PipelineTemplateDef,
+  type SubmissionMode,
+} from "../pipeline-presets";
+import type {
+  AppendStepsResultDto,
+} from "../types";
 import { fieldClass, primaryActionClass, secondaryActionClass } from "./PageFrame";
 
 /**
@@ -41,6 +47,12 @@ export default function TemplatePickModal({
     null,
   );
   const [answers, setAnswers] = useState<string[]>([]);
+  // 投稿与返修模板先选真实分支；返修轮次写入 project.toml，产物由轮次化步骤生成。
+  const [submissionTpl, setSubmissionTpl] =
+    useState<PipelineTemplateDef | null>(null);
+  const [submissionMode, setSubmissionMode] =
+    useState<SubmissionMode>("initial");
+  const [submissionRound, setSubmissionRound] = useState(1);
 
   /** 「问题：（提示）」拆成问题与提示（提示去掉括号做输入占位） */
   function splitSetting(line: string): { q: string; hint: string } {
@@ -58,6 +70,13 @@ export default function TemplatePickModal({
   function pick(templateId: string) {
     const tpl = PIPELINE_TEMPLATES.find((t) => t.id === templateId);
     if (!tpl || busy) return;
+    if (tpl.id === "submission-rebuttal") {
+      setSubmissionTpl(tpl);
+      setSubmissionMode("initial");
+      setSubmissionRound(1);
+      setError(null);
+      return;
+    }
     if (tpl.projectSettings?.length) {
       setSettingsTpl(tpl);
       setAnswers(tpl.projectSettings.map(() => ""));
@@ -72,33 +91,25 @@ export default function TemplatePickModal({
     setBusy(tpl.id);
     setError(null);
     try {
-      const res = await invoke<AppendStepsResultDto>("append_pipeline_steps", {
-        projectRoot: projectPath,
-        steps: tpl.steps,
+      const mode = tpl.id === "submission-rebuttal" ? submissionMode : undefined;
+      const round = Math.max(1, Math.floor(submissionRound));
+      const submission = tpl.id === "submission-rebuttal";
+      const projectSettings = (tpl.projectSettings ?? []).map((line, i) => {
+        const answer = filled?.[i]?.trim();
+        return answer ? `${splitSetting(line).q}：${answer}` : line;
       });
-      // 全局设定（v3.89）：贯穿全程的决定预填进项目层。有答案的用「问题：答案」，
-      // 留空的保留模板提示行（答案留空，之后在项目设置抽屉里补）。
-      // 已有设定则不覆盖——用户自己填过的优先
-      if (tpl.projectSettings?.length) {
-        const lines = tpl.projectSettings.map((line, i) => {
-          const a = filled?.[i]?.trim();
-          if (!a) return line;
-          return `${splitSetting(line).q}：${a}`;
-        });
-        try {
-          const read = await invoke<ProjectConfigReadDto>(
-            "read_project_config",
-            { path: projectPath },
-          );
-          if ((read.config.settings ?? []).length === 0)
-            await invoke("write_project_config", {
-              path: projectPath,
-              config: { ...read.config, settings: lines },
-            });
-        } catch {
-          /* 预填失败不影响模板应用本身 */
-        }
-      }
+      const res = await invoke<AppendStepsResultDto>(
+        "apply_pipeline_template",
+        {
+          projectRoot: projectPath,
+          steps: pipelineStepsForTemplate(tpl, mode ?? "initial", round),
+          projectSettings,
+          strategy: "append",
+          topic: null,
+          submissionMode: submission ? mode ?? "initial" : null,
+          submissionRound: submission && mode === "revision" ? round : null,
+        },
+      );
       onApplied(res, tpl.name);
     } catch (reason) {
       setError(String(reason));
@@ -132,7 +143,96 @@ export default function TemplatePickModal({
         onClick={(e) => e.stopPropagation()}
         className="w-[36rem] rounded-md border border-field ccode-float-surface p-5"
       >
-        {settingsTpl ? (
+        {submissionTpl ? (
+          <>
+            <h2 className="mb-1 text-base font-semibold text-l1">
+              选择「投稿与返修」分支
+            </h2>
+            <p className="mb-4 text-xs text-l3">
+              首投与返修不是同一条流水线；返修会按轮次生成独立的意见、回复信、修订稿和再投稿清单。
+            </p>
+            <div className="space-y-2">
+              <label className="flex cursor-pointer items-start gap-2 rounded-sm bg-inset p-3">
+                <input
+                  type="radio"
+                  name="submission-mode"
+                  checked={submissionMode === "initial"}
+                  onChange={() => setSubmissionMode("initial")}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="block text-sm text-l1">首投</span>
+                  <span className="mt-0.5 block text-xs text-l3">
+                    期刊格式适配 → 投稿材料（cover letter、投稿前自查、投稿清单）
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2 rounded-sm bg-inset p-3">
+                <input
+                  type="radio"
+                  name="submission-mode"
+                  checked={submissionMode === "revision"}
+                  onChange={() => setSubmissionMode("revision")}
+                  className="mt-0.5"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm text-l1">返修</span>
+                  <span className="mt-0.5 block text-xs text-l3">
+                    读取对应轮次审稿意见，生成轮次化回复信、修订稿与再投稿清单
+                  </span>
+                  {submissionMode === "revision" && (
+                    <span className="mt-2 flex items-center gap-2 text-xs text-l2">
+                      返修轮次
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={submissionRound}
+                        onChange={(e) =>
+                          setSubmissionRound(
+                            Math.max(1, Number.parseInt(e.target.value, 10) || 1),
+                          )
+                        }
+                        className={`${fieldClass} w-20`}
+                      />
+                    </span>
+                  )}
+                </span>
+              </label>
+            </div>
+            {error && <p className="mt-3 text-sm text-err-text">{error}</p>}
+            <div className="mt-4 flex items-center justify-between">
+              <button
+                type="button"
+                disabled={busy !== null}
+                onClick={() => {
+                  setSubmissionTpl(null);
+                  setError(null);
+                }}
+                className="rounded-sm px-3 py-1.5 text-sm text-l3 hover:bg-hover hover:text-l2 disabled:opacity-50"
+              >
+                ‹ 换个模板
+              </button>
+              <button
+                type="button"
+                disabled={busy !== null}
+                onClick={() => {
+                  const tpl = submissionTpl;
+                  setSubmissionTpl(null);
+                  if (tpl.projectSettings?.length) {
+                    setSettingsTpl(tpl);
+                    setAnswers(tpl.projectSettings.map(() => ""));
+                  } else {
+                    void apply(tpl);
+                  }
+                }}
+                className={`${primaryActionClass} disabled:opacity-50`}
+              >
+                下一步
+              </button>
+            </div>
+          </>
+        ) : settingsTpl ? (
           /* 第二屏「全局设定」：贯穿全程的决定，注册当下就填（留空跳过，
              之后仍可在项目设置抽屉里补——抽屉是长期编辑处，这里是引导） */
           <>

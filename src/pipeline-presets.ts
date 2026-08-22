@@ -23,6 +23,8 @@ export interface PipelineTemplateDef {
   projectSettings?: string[];
 }
 
+export type SubmissionMode = "initial" | "revision";
+
 /** 英文综述（review）：文献检索 → 精读笔记 → 大纲 → 初稿 → 润色定稿 */
 const REVIEW_STEPS: ProjectStepDto[] = [
   {
@@ -56,6 +58,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       {
         title: "下载付费墙文献全文",
         guidance:
+          "拿到全文后导入文献与数据，或直接拖到这一行。\n\n" +
           "agent 筛完会把拿不到全文的列进 papers/to-fetch.md，并附 papers/to-fetch.ris——拖进 Zotero 会自动建成一个待获取列表。渠道自选：机构图书馆、作者邮件索取 preprint 等。拿到后三选一：直接把 PDF 拖到这一行；拷进项目 papers/ 目录；或放进你的文献库后到「文献与数据」重新导入（进库的导完回来手动勾一下）。文件名随意，下一步 agent 会统一改成 作者年份-短标题.pdf；不补的话 agent 按摘要写笔记并标注「仅摘要」。",
         target: "papers/*.pdf",
         timing: "after",
@@ -79,7 +82,8 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "5. 每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」、未经权威源核对标「待核」，不得编造）；\n" +
       "6. 收尾前复查：notes/ 中「仅摘要」笔记对应的全文若已出现在 papers/（人工补投），重读全文并更新该笔记、去掉标记；仍未补的保持标注并在报告末尾计数说明。\n" +
       "完成标准：included.md 每篇都有对应笔记与 bib 条目；notes/ 与 references.bib 均已提交。",
-    expectedArtifacts: ["notes/", "references.bib"],
+    inputs: ["papers/included.md", "papers/to-fetch.md"],
+    expectedArtifacts: ["notes/*.md", "references.bib"],
     skills: ["lit-notes"],
     run: [],
     humanTasks: [
@@ -111,6 +115,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "6. 只引用 references.bib 中存在的键，不为大纲新造引用。\n" +
       "完成标准：outline.md 结构完整，每节要点/引用键/回应空白齐全，「框架推演」段三块内容齐备。",
     expectedArtifacts: ["outline.md"],
+    inputs: ["notes/", "papers/included.md", "references.bib"],
     skills: ["review-framework"],
     run: [],
     humanTasks: [
@@ -140,6 +145,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "4. 没有文献支撑的论断不得下；必须保留的判断在句末标 [待核实]。\n" +
       "完成标准：manuscript/draft.md 覆盖大纲全部章节，引用键全部可在 references.bib 中解析。",
     expectedArtifacts: ["manuscript/draft.md"],
+    inputs: ["outline.md", "notes/", "references.bib"],
     skills: ["review-writing"],
     run: [],
   },
@@ -160,6 +166,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "manuscript/changelog.md",
       "manuscript/citation-check.md",
     ],
+    inputs: ["manuscript/draft.md", "references.bib"],
     skills: ["review-writing", "bib-check"],
     run: [],
     humanTasks: [
@@ -174,43 +181,63 @@ const REVIEW_STEPS: ProjectStepDto[] = [
   },
 ];
 
-/** 科研论文（research-paper）：选题调研 → 实验设计 → 实验执行 → 结果分析 → 初稿 → 投稿准备 */
+/** 科研论文（research-paper）：检索筛选 → 精读与研究空白 → 实验设计 → 实验执行 → 结果分析 → 初稿 → 投稿准备 */
 const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
   {
-    name: "选题与文献调研",
+    name: "文献检索与筛选",
     role: "both",
-    workspaceName: "lit-survey",
+    workspaceName: "lit-survey-search",
     brief:
       "输入：英文综述模板的 notes/ 与 references.bib、数据处理模板的 analysis/ 分析报告与清洗后数据（接自上游模板时随仓库合并自带；独立启动本项目时，先把上游产物放入对应目录，或在资源面板绑定上游项目目录；没有上游产物时按下面流程自行检索补齐）。\n" +
       "围绕课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源自行判断，并把假设写进 papers/screening.md 开头）执行：\n" +
       "1. 检索与筛选按 lit-search 技能：先定纳入/排除标准（年份、语言、来源级别、相关性），检索候选并逐条判定，产出 papers/screening.md（标准 + 各库检索式与命中数 + 每篇判定理由；拿不准相关性的一律纳入并标注「待确认」）与 papers/included.md（纳入清单，一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；用户导入的检索结果先解析去重、并入 screening.md 候选池再筛选——两处都要看：工作区内 papers/imports/ 目录，以及本文件「项目资源」段的「引文」条目与「上一步产物（提货单）」段中「人工交付」条目给出的绝对路径（按路径直读，勿复制进工作区）；\n" +
       "2. 全文获取：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的直接下载到 papers/（文件名：作者年份-短标题.pdf）；付费墙的不得尝试绕过，汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供，并同步转成 papers/to-fetch.ris（RIS 2004，字段缺则留空不编造）供用户导入 Zotero 建待获取列表；\n" +
-      "3. 精读按 lit-notes 技能：先整理人工补投（papers/ 中命名不符「作者年份-短标题.pdf」的对照清单判定归属后重命名，to-fetch.md 勾掉已补行；拿不准的不改名、标「待确认」）；再对 included.md 每篇产出 notes/<序号-短标题>.md（八段结构按 lit-notes 技能：一句话总结/研究问题/方法/主要结果/局限/可引用点/与本课题的关系/疑问与待跟进）；全文缺失（to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，开头标注「仅摘要」；每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」、未经权威源核对标「待核」）；\n" +
-      "4. 按主题归纳研究现状写入 survey/literature.md（主要线索、方法与结论的异同）；提炼 2-3 个候选研究问题，逐一分析现有工作的 gap（未解决的问题、方法的不足、数据的空白），写入 survey/gap-analysis.md；\n" +
-      "5. 从候选中选定一个研究问题：优先选 gap 明确且数据/方法可支撑的；拿不准时选文献支撑最多的，并在 gap-analysis.md 记录取舍理由。\n" +
-      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris（无付费文献则两个 to-fetch 文件注明为空）、notes/、survey/literature.md、survey/gap-analysis.md 均存在，研究问题明确唯一，references.bib 条目无空缺字段。",
-    expectedArtifacts: ["papers/", "notes/", "survey/", "references.bib"],
-    skills: ["lit-search", "lit-notes"],
+      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris（无付费文献则两个 to-fetch 文件注明为空）均已提交，筛选记录可复现。",
+    optionalInputs: ["notes/", "references.bib", "analysis-report.md", "artifacts/"],
+    expectedArtifacts: [
+      "papers/screening.md",
+      "papers/included.md",
+      "papers/to-fetch.md",
+      "papers/to-fetch.ris",
+      "references.bib",
+    ],
+    skills: ["lit-search"],
     // 这一步的输入是文献，开工前必须先拍板「从哪来」：流程线「定方向」里出现
     // 文献来源选择器 + 就地导入入口（答案写 config.litSource，与只写草稿的 decisions 分属两类）
     asksLitSource: true,
     run: [],
     humanTasks: [
       {
-        title: "确认研究问题",
-        guidance:
-          "agent 会从候选中选定一个并把取舍理由写进 survey/gap-analysis.md；方向性决策建议过目后再进入实验设计",
-        target: "",
-        timing: "after",
-        optional: true,
-      },
-      {
         title: "下载付费墙文献全文",
         guidance:
+          "拿到全文后导入文献与数据，或直接拖到这一行。\n\n" +
           "渠道自选：机构图书馆/作者邮件索取 preprint 等；缺权限清单见 papers/to-fetch.md（agent 筛完会列出，附 to-fetch.ris 可拖进 Zotero 建成待获取列表）。拿到后拖到这一行或放进 papers/（文件名随意，agent 会统一改名）；放进自己文献库的到「文献与数据」重新导入后回来手动勾一下。补齐后 agent 会重读全文、更新对应「仅摘要」笔记",
         target: "papers/*.pdf",
         timing: "after",
         optional: true,
+      },
+    ],
+    decisions: [],
+  },
+  {
+    name: "精读与研究空白",
+    role: "both",
+    workspaceName: "lit-survey-gap",
+    brief:
+      "输入：上一步的 papers/included.md、papers/to-fetch.md 与 references.bib。按 lit-notes 技能完成精读与笔记：先整理人工补投并更新 to-fetch.md，再逐篇产出 notes/<序号-短标题>.md；全文缺失时按摘要+可见元数据写笔记并标注「仅摘要·待全文」。\n" +
+      "在笔记基础上按主题归纳研究现状写入 survey/literature.md，提炼 2-3 个候选研究问题并逐一分析现有工作的 gap（未解决的问题、方法不足、数据空白），写入 survey/gap-analysis.md。先把候选、每个 gap 的证据与我建议的研究问题写入 .ccode/help-wanted.md 问用户一句（若未回复则按证据最充分且数据/方法可支撑的方案继续），写完不要停工。\n" +
+      "完成标准：included.md 每篇都有对应笔记与 references.bib 条目；survey/literature.md 与 survey/gap-analysis.md 齐全；研究问题唯一且取舍理由可追溯。",
+    inputs: ["papers/included.md", "papers/to-fetch.md", "references.bib"],
+    expectedArtifacts: ["notes/*.md", "survey/literature.md", "survey/gap-analysis.md", "references.bib"],
+    skills: ["lit-notes"],
+    run: [],
+    humanTasks: [
+      {
+        title: "确认研究问题",
+        guidance: "候选研究问题与证据见 survey/gap-analysis.md；确认后再进入实验设计",
+        target: "",
+        timing: "after",
+        completion: "manual",
       },
     ],
     decisions: [
@@ -230,6 +257,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "5. 统计设计自查（按 stats-check 技能的实验设计口径）：主要结局指标唯一明确、样本量有功效估算依据、剔除标准事先定义；涉及统计检验的实验在 design.md 中写明检验方法与多重比较校正口径。\n" +
       "完成标准：design.md 覆盖方法/数据/基线/指标/实验矩阵五项，无「待定」项，实验矩阵可逐项直接执行。",
     expectedArtifacts: ["design.md"],
+    inputs: ["survey/gap-analysis.md", "notes/", "references.bib"],
     skills: ["stats-check"],
     run: [],
     humanTasks: [
@@ -262,7 +290,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "3. 原始结果与日志写入项目产物目录（见下方「产物目录」段；未配置时用项目根 artifacts/），不要提交进 git；工作区内只提交代码与 results/summary.md（每行一项实验：配置、主指标数值、产物目录中的结果路径）；\n" +
       "4. 失败的实验不删除日志：在 results/summary.md 标注「失败」与原因，按 design.md 风险清单的备选方案重跑一次，仍失败则记录后继续下一项。\n" +
       "完成标准：矩阵中每项都有明确结果或失败记录，experiments/ 与 results/summary.md 已提交，原始数据全部落在产物目录。",
-    expectedArtifacts: ["experiments/", "results/summary.md"],
+    expectedArtifacts: ["experiments/*", "results/summary.md"],
     skills: [],
     run: [],
     humanTasks: [
@@ -290,15 +318,15 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "4. 异常结果（失败/离群）单独一节说明，不删除不美化；\n" +
       "5. 分析结论写入 analysis/findings.md：3-5 条，每条对应 results-table.md 中的具体数字。\n" +
       "完成标准：analysis/results-table.md、figures/、analysis/findings.md 均存在，每条结论可回溯到表格数字。",
-    expectedArtifacts: ["analysis/", "figures/"],
+    inputs: ["results/summary.md"],
+    expectedArtifacts: [
+      "analysis/results-table.md",
+      "analysis/findings.md",
+      "figures/*",
+    ],
     skills: ["stats-check", "figure-forge"],
     run: [],
-    decisions: [
-      {
-        q: "结果不如预期怎么办",
-        options: ["阴性结果如实写进论文", "换方向补实验"],
-      },
-    ],
+    decisions: [],
   },
   {
     name: "论文初稿",
@@ -310,8 +338,17 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "3. 数字与结论必须与 analysis/results-table.md 一致，不得新造实验结果；缺少的数据在文中标 [待补实验]；\n" +
       "4. 图表引用用占位形式（「Figure 1: …」），图片文件不复制进 manuscript/。\n" +
       "完成标准：manuscript/draft.md 覆盖 IMRaD 四节，引用键全部可在 references.bib 解析，数字与 analysis/ 一致。",
-    expectedArtifacts: ["manuscript/"],
-    skills: [],
+    inputs: [
+      "survey/",
+      "notes/",
+      "design.md",
+      "analysis/results-table.md",
+      "analysis/findings.md",
+      "figures/*",
+      "references.bib",
+    ],
+    expectedArtifacts: ["manuscript/draft.md", "manuscript/draft.pdf", "manuscript/draft.docx"],
+    skills: ["research-writing"],
     discussionSeeds: [
       "卖点怎么讲：贡献的三句话电梯陈述怎么定，Introduction 往哪个方向带？",
     ],
@@ -333,7 +370,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
   {
     name: "润色与投稿准备",
     role: "you",
-    workspaceName: "polish",
+    workspaceName: "research-paper-polish",
     brief:
       "输入：manuscript/draft.md、analysis/results-table.md、references.bib（已随 main 合并在本工作区内）。\n" +
       "1. 语言润色：语法、用词、句式与段落衔接，保持学术语气；只改表达，不改学术观点与数据；\n" +
@@ -344,9 +381,13 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "完成标准：paper-final.md 引用闭环、changelog.md 与 submission/checklist.md 已提交、analysis/stats-check.md 问题清零或逐条列入 checklist 投稿前必办项；[待补实验] 全部清除，确无法完成的列入 checklist 投稿前必办项。",
     expectedArtifacts: [
       "manuscript/paper-final.md",
+      "manuscript/paper-final.pdf",
+      "manuscript/paper-final.docx",
       "analysis/stats-check.md",
-      "submission/",
+      "submission/checklist.md",
+      "manuscript/changelog.md",
     ],
+    inputs: ["manuscript/draft.md", "analysis/results-table.md", "references.bib"],
     skills: ["bib-check", "stats-check"],
     humanTasks: [
       {
@@ -431,7 +472,12 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
       "4. 处理后的数据写入项目产物目录（见下方「产物目录」段；未配置时用项目根 artifacts/），不进 git；\n" +
       "5. 清洗报告 cleaning/cleaning-report.md：每条规则影响的行数、丢弃数据的清单与原因、清洗前后规模对比，[待确认] 规则单列一节。\n" +
       "完成标准：rules.md 无「视情况而定」项，脚本可重复跑通，报告数字与产物目录中的结果一致，原始数据字节级未被改动。",
-    expectedArtifacts: ["cleaning/"],
+    expectedArtifacts: [
+      "cleaning/rules.md",
+      "cleaning/cleaning-report.md",
+      "cleaning/*",
+    ],
+    inputs: ["data-dictionary.md"],
     skills: ["data-clean"],
     run: [],
     humanTasks: [
@@ -459,7 +505,8 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
       "4. 异常分析：按 rules.md 的口径复查残留异常，新发现的异常标 [待确认] 并给出样例行号；\n" +
       "5. 结论写入 eda-report.md：3-5 条可用于后续决策的发现，每条附对应图表或统计量；含统计检验/显著性表述的结论先按 stats-check 技能口径自查（检验方法与数据匹配、p 值给具体值、附效应量与置信区间）。\n" +
       "完成标准：analysis/ 脚本、figures/ 与 eda-report.md 均存在，每条发现可回溯到具体图表/数字，无主观臆断。",
-    expectedArtifacts: ["analysis/", "figures/", "eda-report.md"],
+    expectedArtifacts: ["analysis/*", "figures/*", "eda-report.md"],
+    inputs: ["cleaning/rules.md"],
     skills: ["data-eda", "stats-check"],
     run: [],
     discussionSeeds: [
@@ -477,6 +524,7 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
       "4. 局限单列一节：数据质量、样本偏差、方法局限，不回避。\n" +
       "完成标准：analysis-report.md 结构完整，建议与发现一一对应且优先级有据；[待确认] 全部清除，确无法核实的列入局限。",
     expectedArtifacts: ["analysis-report.md"],
+    inputs: ["eda-report.md", "figures/*", "data-dictionary.md"],
     skills: [],
     run: [],
     decisions: [
@@ -504,12 +552,17 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "5. 产出 chapters/literature-review.md 综述章节草稿：按主题聚类组织，只引用 references.bib 中存在的键，不为综述新造引用。\n" +
       "完成标准：papers/screening.md、included.md 与 to-fetch.ris 每条记录无空缺字段（未知标「待补」，无付费文献则 to-fetch 两个文件注明为空）；proposal.md 五节齐全；literature-review.md 引用键全部可解析；notes/ 与 references.bib 已提交。",
     expectedArtifacts: [
-      "papers/",
-      "notes/",
+      "papers/*.pdf",
+      "papers/screening.md",
+      "papers/included.md",
+      "papers/to-fetch.md",
+      "papers/to-fetch.ris",
+      "notes/*.md",
       "references.bib",
-      "proposal/",
+      "proposal/proposal.md",
       "chapters/literature-review.md",
     ],
+    inputs: ["notes/", "references.bib"],
     skills: ["lit-search", "lit-notes", "proposal-writer"],
     // 这一步的输入是文献，开工前必须先拍板「从哪来」：流程线「定方向」里出现
     // 文献来源选择器 + 就地导入入口（答案写 config.litSource，与只写草稿的 decisions 分属两类）
@@ -519,6 +572,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
       {
         title: "下载付费墙文献全文",
         guidance:
+          "拿到全文后导入文献与数据，或直接拖到这一行。\n\n" +
           "渠道自选：机构图书馆/作者邮件索取 preprint 等；缺权限清单见 papers/to-fetch.md（agent 检索后会列出，附 to-fetch.ris 可拖进 Zotero 建成待获取列表）。拿到后拖到这一行或放进 papers/（文件名随意，agent 会统一改名）；放进自己文献库的到「文献与数据」重新导入后回来手动勾一下。补齐后 agent 会重读全文、更新对应「仅摘要」笔记",
         target: "papers/*.pdf",
         timing: "during",
@@ -531,6 +585,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
         target: "proposal/",
         timing: "after",
         optional: true,
+        completion: "manual",
       },
     ],
     decisions: [
@@ -554,6 +609,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "4. 依赖的资源（数据集/预训练模型）不可获取时换用公开替代品并标注，不留「待定」。\n" +
       "完成标准：methodology.md 覆盖开题全部研究内容，design.md 实验矩阵可直接执行，无「待定」项。",
     expectedArtifacts: ["chapters/methodology.md", "design.md"],
+    inputs: ["proposal/proposal.md", "chapters/literature-review.md"],
     skills: ["stats-check"],
     run: [],
     humanTasks: [
@@ -574,22 +630,17 @@ const THESIS_STEPS: ProjectStepDto[] = [
     ],
   },
   {
-    name: "实验与结果",
-    workspaceName: "thesis-exp",
+    name: "实验执行",
+    workspaceName: "thesis-exp-run",
     brief:
       "输入：design.md 的实验矩阵、chapters/methodology.md（已随 main 合并在本工作区内）。\n" +
       "1. 实验代码放入 experiments/（可重复执行，参数集中在文件头或配置文件），逐项跑实验矩阵；\n" +
       "2. 原始结果与日志写入项目产物目录（见下方「产物目录」段；未配置时用项目根 artifacts/），不进 git；results/summary.md 逐项记录：配置、指标数值、产物目录路径；\n" +
       "3. 失败实验在 summary.md 标注原因并按 design.md 的备选方案重跑一次，仍失败则记录后继续；\n" +
-      "4. 产出 chapters/results.md 结果章节草稿：表格汇总（方法 × 指标，最优值加粗）+ 关键图表（figures/，出图按 figure-forge 技能）+ 逐项解读；解读只用 summary.md 中的数字，推测性内容标 [推测]；涉及统计显著性的表述按 stats-check 技能口径（p 值给具体值、附效应量与置信区间）。\n" +
-      "完成标准：矩阵每项有结果或失败记录，results.md 数字与 summary.md 一致，figures/ 已提交。",
-    expectedArtifacts: [
-      "experiments/",
-      "results/summary.md",
-      "chapters/results.md",
-      "figures/",
-    ],
-    skills: ["figure-forge", "stats-check"],
+      "完成标准：矩阵每项都有结果或失败记录，experiments/ 与 results/summary.md 已提交，原始结果全部落在产物目录。",
+    expectedArtifacts: ["experiments/*", "results/summary.md"],
+    inputs: ["design.md", "chapters/methodology.md"],
+    skills: [],
     run: [],
     humanTasks: [
       {
@@ -605,11 +656,22 @@ const THESIS_STEPS: ProjectStepDto[] = [
         q: "实验做到什么程度收手",
         options: ["核心结果出来就转写作", "矩阵全跑完"],
       },
-      {
-        q: "结果不如预期怎么办",
-        options: ["阴性结果如实写进论文", "换方向补实验"],
-      },
     ],
+  },
+  {
+    name: "结果分析与章节",
+    workspaceName: "thesis-exp-analysis",
+    brief:
+      "输入：上一步 results/summary.md 与产物目录中的原始结果（路径见 summary.md）。\n" +
+      "1. 汇总各实验主指标，与基线逐项对比，产出 chapters/results.md：表格（方法 × 指标，最优值加粗）+ 关键图表（figures/，出图按 figure-forge 技能）+ 逐项解读；\n" +
+      "2. 只用 summary.md 中的数字下结论，推测性内容标 [推测]；失败/离群结果单独说明，不删除不美化；涉及统计显著性的表述按 stats-check 技能口径（p 值给具体值、附效应量与置信区间）；\n" +
+      "3. 结果不如预期时，先基于实际异常、补实验成本与 design.md 的停止规则写入 .ccode/help-wanted.md 问用户；不得在看到结果前预设换方向。\n" +
+      "完成标准：chapters/results.md、figures/ 已提交，每条结论可追溯到 summary.md 的数字。",
+    inputs: ["results/summary.md"],
+    expectedArtifacts: ["chapters/results.md", "figures/*"],
+    skills: ["figure-forge", "stats-check"],
+    run: [],
+    decisions: [],
   },
   {
     name: "论文初稿",
@@ -623,7 +685,13 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "5. 产出 manuscript/revision-notes.md：组装过程中的取舍与待确认项；\n" +
       "6. 渲染验证：用本步骤 run 脚本渲染 PDF/docx（环境检查与产物登记按 quarto-render 技能），渲染报错先按技能指引补依赖，不绕路。\n" +
       "完成标准：thesis-draft.md 章节齐全、引用闭环、revision-notes.md 已提交、run 脚本渲染通过。",
-    expectedArtifacts: ["manuscript/"],
+    expectedArtifacts: [
+      "manuscript/thesis-draft.md",
+      "manuscript/revision-notes.md",
+      "manuscript/thesis-draft.pdf",
+      "manuscript/thesis-draft.docx",
+    ],
+    inputs: ["chapters/", "references.bib", "figures/*", "proposal/proposal.md"],
     skills: ["quarto-render"],
     discussionSeeds: [
       "章节权重怎么分：哪几章是答辩老师最看重、要重点打磨的？",
@@ -661,7 +729,10 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "manuscript/format-check.md",
       "manuscript/plagiarism-advice.md",
       "manuscript/changelog.md",
+      "manuscript/thesis-final.pdf",
+      "manuscript/thesis-final.docx",
     ],
+    inputs: ["manuscript/thesis-draft.md", "references.bib"],
     skills: ["bib-check", "quarto-render"],
     humanTasks: [
       {
@@ -702,7 +773,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
 ];
 
 /** 投稿与返修（submission-rebuttal）：期刊格式适配 → 投稿材料 → 审稿意见逐条回复 */
-const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
+const SUBMISSION_INITIAL_STEPS: ProjectStepDto[] = [
   {
     name: "期刊格式适配",
     workspaceName: "journal-format",
@@ -715,7 +786,13 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
       "5. 引用完整性自查（按 bib-check 技能）：正文引用键全部可在 references.bib 解析、bib 条目字段齐全，问题清单写入 submission/format-notes.md；\n" +
       "6. 作者单位/基金号/通讯邮箱等未知信息一律占位「待填」，不编造；所有未决项汇总进 submission/format-notes.md。\n" +
       "完成标准：submission/formatted.md 与 submission/target-journal.md、submission/format-notes.md 均已提交；format-notes.md 逐项给出处理结论。",
-    expectedArtifacts: ["submission/"],
+    expectedArtifacts: [
+      "submission/formatted.md",
+      "submission/target-journal.md",
+      "submission/format-notes.md",
+    ],
+    inputs: ["references.bib"],
+    anyOfInputs: [["manuscript/paper-final.md", "manuscript/review-final.md"]],
     skills: ["bib-check"],
     run: [],
     humanTasks: [
@@ -723,8 +800,9 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
         title: "放入成稿与 references.bib",
         guidance:
           "独立启动本模板时，把上游模板产出的成稿（manuscript/paper-final.md 或 manuscript/review-final.md）与 references.bib 放入项目对应目录；接自上游模板时随仓库合并自带，可跳过",
-        target: "manuscript/",
+        target: "",
         timing: "before",
+        completion: "manual",
       },
       {
         title: "写下已定目标期刊（如已确定）",
@@ -738,8 +816,9 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
         title: "拍板目标期刊、字数裁剪方案并补齐「待填」信息",
         guidance:
           "期刊候选与字数超限裁剪方案（如有）见 submission/target-journal.md 与 format-notes.md；作者单位/基金号/通讯邮箱等占位在 formatted.md 与 format-notes.md 中汇总",
-        target: "submission/",
+        target: "",
         timing: "after",
+        completion: "manual",
       },
     ],
     // 「目标期刊怎么选」提到项目层（它是这条流程的前提，不是第 1 步的战术问题）；
@@ -760,9 +839,11 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
       "完成标准：cover-letter.md、highlights.md、pre-review.md、checklist.md 均已提交；pre-review.md 中 CRITICAL/MAJOR 全部有处理结论。",
     expectedArtifacts: [
       "submission/cover-letter.md",
+      "submission/highlights.md",
       "submission/pre-review.md",
       "submission/checklist.md",
     ],
+    inputs: ["submission/formatted.md", "submission/target-journal.md"],
     skills: [],
     run: [],
     humanTasks: [
@@ -779,63 +860,89 @@ const SUBMISSION_REBUTTAL_STEPS: ProjectStepDto[] = [
       "推荐审稿人怎么圈：避开利益冲突又要懂行，从哪些组里挑？",
     ],
   },
-  {
-    name: "审稿意见回复",
-    role: "you",
-    workspaceName: "rebuttal",
-    brief:
-      "输入：reviews/round-1.md 审稿意见全文（用户把编辑来信粘贴保存为该文件；文件缺失时提示用户提供并停止，不得编造审稿意见）；submission/formatted.md（已随 main 合并在本工作区内）。\n" +
-      "全程按 rebuttal-crafter 技能执行；本步骤明确要求产出修订稿（技能默认不改稿件正文，此处以本简报为准）。\n" +
-      "1. 逐条拆分审稿意见并编号（R1.1、R1.2…，多位审稿人分节，编辑意见单列 E.1…），不遗漏任何一条；\n" +
-      "2. 产出 rebuttal/response-letter.md，逐条回应：意见摘要 → 回应（接受修改 / 部分接受并说明限制 / 礼貌反驳并给依据）→ 稿件修改位置（节+段落）；语气先谢后答；拿不准如何回应的一律按「部分接受+说明限制」写，并标 [待确认]；\n" +
-      "3. 能改的直接改进稿件，产出 manuscript/revised.md（在 formatted.md 基础上修改，标注各修改对应的意见编号）；无法靠修改解决的（需补实验/补数据）在回应中给出可执行的补做计划并标 [待补实验]，不开空头支票；\n" +
-      "4. 产出 rebuttal/revisions.md 修改对照表：每条意见 → 修改点 → revised.md 中的位置，逐条可核对；\n" +
-      "5. 第二轮起的返修：意见保存为 reviews/round-2.md（依此类推），在本轮 revised.md 基础上继续修订，产物命名加轮次后缀（response-letter-r2.md 等）。\n" +
-      "完成标准：response-letter.md 覆盖全部意见编号、revisions.md 与 revised.md 一一对应、均已提交；[待确认]/[待补实验] 在文件末尾汇总。",
-    expectedArtifacts: ["rebuttal/", "manuscript/revised.md"],
-    skills: ["rebuttal-crafter"],
-    run: [],
-    humanTasks: [
-      {
-        title: "保存审稿意见全文",
-        guidance:
-          "把编辑来信/审稿意见粘贴保存为 reviews/round-1.md（多位审稿人合在一个文件即可，agent 会分节编号）；缺该文件 agent 会停止",
-        target: "reviews/round-1.md",
-        timing: "before",
-      },
-      {
-        title: "确认 [待确认] 回应口径",
-        guidance:
-          "response-letter.md 中标注 [待确认] 的条目是 agent 拿不准的回应，逐条拍板",
-        target: "rebuttal/response-letter.md",
-        timing: "after",
-      },
-      {
-        title: "补做审稿人要求的实验（如有）",
-        guidance:
-          "response-letter.md 中 [待补实验] 条目逐条安排；新结果按项目产物目录口径存放，改稿与对照表对应位置由你或在下一轮让 agent 更新",
-        target: "",
-        timing: "after",
-      },
-      {
-        title: "返修定稿后到投稿系统提交",
-        guidance:
-          "response-letter.md 与 manuscript/revised.md 定稿后自行到投稿系统上传；提交前用 rebuttal/revisions.md 逐条核对一遍",
-        target: "",
-        timing: "after",
-      },
-    ],
-    decisions: [
-      {
-        q: "回复策略怎么定",
-        options: ["意见尽量接受修改", "该反驳的坚决反驳"],
-      },
-    ],
-    discussionSeeds: [
-      "补实验的底线在哪：审稿人要的新实验哪些做哪些拒，时间与资源预算卡在哪？",
-    ],
-  },
 ];
+
+/** 投稿模板的返修分支：每一轮都使用轮次化输入/产物，避免第二轮覆盖第一轮的证据链。 */
+function submissionRevisionSteps(round: number): ProjectStepDto[] {
+  const r = Math.max(1, Math.floor(round));
+  const previous = r === 1 ? "manuscript/paper-final.md" : `manuscript/revised-r${r - 1}.md`;
+  const previousLabel =
+    r === 1
+      ? "manuscript/paper-final.md 或 manuscript/review-final.md"
+      : previous;
+  const previousInputs =
+    r === 1 ? ["manuscript/paper-final.md", "manuscript/review-final.md"] : [previous];
+  return [
+    {
+      name: `审稿意见回复（第${r}轮）`,
+      role: "you",
+      workspaceName: `rebuttal-r${r}`,
+      brief:
+        `输入：reviews/round-${r}.md 审稿意见全文（用户把编辑来信保存为该文件；缺失时提示用户提供并停止，不得编造审稿意见）；${previousLabel}（上一版成稿）。\n` +
+        "全程按 rebuttal-crafter 技能执行；本步骤明确要求产出轮次化回复信、修改对照表、修订稿与再投稿清单。\n" +
+        "1. 逐条拆分审稿意见并编号（R1.1、R1.2…，多位审稿人分节，编辑意见单列 E.1…），不遗漏任何一条；\n" +
+        `2. 产出 rebuttal/response-letter-r${r}.md，逐条回应：意见摘要 → 回应（接受修改 / 部分接受并说明限制 / 礼貌反驳并给依据）→ 稿件修改位置；拿不准的一律标 [待确认]；\n` +
+        `3. 在 ${previousLabel} 基础上修改，产出 manuscript/revised-r${r}.md，并在修改处标注对应意见编号；需要补实验/补数据的只写可执行计划并标 [待补实验]，不开空头支票；\n` +
+        `4. 产出 rebuttal/revisions-r${r}.md：每条意见 → 修改点 → revised-r${r}.md 位置，逐条可核对；\n` +
+        `5. 产出 submission/resubmission-checklist-r${r}.md：上传文件、回复信/修订稿版本、逐项确认项与未决事项；提交前由人核对，不能把「已生成」当作「已提交」。\n` +
+        `完成标准：round-${r} 的回复信、修改对照表、修订稿、再投稿清单均存在且一一对应；[待确认]/[待补实验] 在清单末尾汇总。`,
+      inputs: [`reviews/round-${r}.md`, "references.bib"],
+      anyOfInputs: [previousInputs],
+      expectedArtifacts: [
+        `rebuttal/response-letter-r${r}.md`,
+        `rebuttal/revisions-r${r}.md`,
+        `manuscript/revised-r${r}.md`,
+        `submission/resubmission-checklist-r${r}.md`,
+      ],
+      skills: ["rebuttal-crafter"],
+      run: [],
+      humanTasks: [
+        {
+          title: `保存第${r}轮审稿意见全文`,
+          guidance: `把编辑来信/审稿意见保存为 reviews/round-${r}.md；缺该文件 agent 会停止`,
+          target: `reviews/round-${r}.md`,
+          timing: "before",
+        },
+        {
+          title: "确认 [待确认] 回应口径并安排补实验",
+          guidance:
+            `response-letter-r${r}.md 中标注 [待确认]/[待补实验] 的条目逐条拍板；处理结论写回再投稿清单`,
+          target: "",
+          timing: "after",
+          completion: "manual",
+        },
+        {
+          title: `返修第${r}轮定稿后提交`,
+          guidance: `用 submission/resubmission-checklist-r${r}.md 逐项核对后，到投稿系统上传修订稿与回复信`,
+          target: "",
+          timing: "after",
+          completion: "manual",
+        },
+      ],
+      decisions: [
+        {
+          q: "回复策略怎么定",
+          options: ["意见尽量接受修改", "该反驳的坚决反驳"],
+        },
+      ],
+      discussionSeeds: [
+        "补实验的底线在哪：审稿人要的新实验哪些做哪些拒，时间与资源预算卡在哪？",
+      ],
+    },
+  ];
+}
+
+/** 选择模板实际要追加的步骤；投稿模板必须先选首投/返修分支。 */
+export function pipelineStepsForTemplate(
+  template: PipelineTemplateDef,
+  mode: SubmissionMode = "initial",
+  round = 1,
+): ProjectStepDto[] {
+  if (template.id !== "submission-rebuttal") return template.steps;
+  return mode === "revision"
+    ? submissionRevisionSteps(round)
+    : SUBMISSION_INITIAL_STEPS;
+}
 
 /** LaTeX 论文（latex-paper）：搭建骨架 → 章节写作 → 编译与排错 → 定稿导出（批次 E）。
  *  编译脚本 render-pdf 四步共用：优先 tectonic（轻量、自动下载宏包），缺则 latexmk，
@@ -859,7 +966,8 @@ const LATEX_PAPER_STEPS: ProjectStepDto[] = [
       "4. 参考文献沿用 references.bib：natbib 或 biblatex 二选一（开工前决策；未选定则按文档类惯常搭配——elsarticle/IEEEtran 配 natbib 系，其余配 biblatex），在 main.tex 接好；\n" +
       "5. 冒烟编译：骨架必须能编译出 PDF（用本步骤 run 脚本 render-pdf；本机没装编译环境时把脚本打印的安装提示写进 .ccode/help-wanted.md 提醒用户，装好前不卡在等待）。\n" +
       "完成标准：manuscript/main.tex 与 chapters/ 各章文件存在且能编译出 PDF；references.bib 已接入；manuscript/README.md 记录文档类与宏包的选择依据。",
-    expectedArtifacts: ["manuscript/main.tex", "manuscript/chapters/"],
+    expectedArtifacts: ["manuscript/main.tex", "manuscript/chapters/*.tex", "manuscript/main.pdf"],
+    inputs: ["notes/", "references.bib", "manuscript/template/"],
     skills: [],
     run: [{ name: "render-pdf", command: LATEX_RENDER_PDF_CMD, default: true }],
     humanTasks: [
@@ -894,7 +1002,8 @@ const LATEX_PAPER_STEPS: ProjectStepDto[] = [
       "4. 没有文献支撑的论断不得下；必须保留的判断在该行行尾加 % TODO 待核实 注释；\n" +
       "5. 每写完一章跑一次本步骤 run 脚本 render-pdf 确认可编译，报错立即读 manuscript/main.log 定位修掉，不攒到最后。\n" +
       "完成标准：chapters/ 各章内容成文，全文编译通过，\\cite 键全部可在 references.bib 解析。",
-    expectedArtifacts: ["manuscript/chapters/"],
+    expectedArtifacts: ["manuscript/chapters/*.tex", "manuscript/main.pdf"],
+    inputs: ["manuscript/main.tex", "manuscript/chapters/*.tex"],
     skills: ["review-writing"],
     run: [{ name: "render-pdf", command: LATEX_RENDER_PDF_CMD, default: true }],
     discussionSeeds: [
@@ -913,6 +1022,7 @@ const LATEX_PAPER_STEPS: ProjectStepDto[] = [
       "5. 产出 manuscript/main.pdf 与 manuscript/compile-notes.md（编译口径、清零项、遗留警告清单）。\n" +
       "完成标准：render-pdf 退出码为 0，main.pdf 页数与结构符合骨架；Citation/Reference undefined 为零。",
     expectedArtifacts: ["manuscript/main.pdf", "manuscript/compile-notes.md"],
+    inputs: ["manuscript/"],
     skills: [],
     run: [{ name: "render-pdf", command: LATEX_RENDER_PDF_CMD, default: true }],
     humanTasks: [
@@ -943,6 +1053,7 @@ const LATEX_PAPER_STEPS: ProjectStepDto[] = [
       "manuscript/final-check.md",
       "manuscript/changelog.md",
     ],
+    inputs: ["manuscript/"],
     skills: [],
     run: [{ name: "render-pdf", command: LATEX_RENDER_PDF_CMD, default: true }],
     humanTasks: [
@@ -976,7 +1087,7 @@ export const PIPELINE_TEMPLATES: PipelineTemplateDef[] = [
     id: "research-paper",
     name: "科研论文",
     description:
-      "选题与 gap 分析 → 实验设计/执行/分析 → IMRaD 初稿 → 润色与投稿材料清单",
+      "文献检索与筛选 → 精读与研究空白 → 实验设计 → 执行 → 分析 → IMRaD 初稿 → 投稿准备",
     steps: RESEARCH_PAPER_STEPS,
     projectSettings: [
       "课题边界：（只盯一条线 / 铺满一个方向）",
@@ -1000,7 +1111,7 @@ export const PIPELINE_TEMPLATES: PipelineTemplateDef[] = [
     id: "thesis",
     name: "毕业论文",
     description:
-      "开题与综述 → 研究方法 → 实验与结果 → 全文初稿 → 格式与定稿",
+      "开题与综述 → 研究方法 → 实验执行 → 结果分析与章节 → 全文初稿 → 格式与定稿",
     steps: THESIS_STEPS,
     projectSettings: [
       "论文语种：（中文 / 英文）",
@@ -1013,11 +1124,10 @@ export const PIPELINE_TEMPLATES: PipelineTemplateDef[] = [
     id: "submission-rebuttal",
     name: "投稿与返修",
     description:
-      "期刊格式适配 → cover letter 与投稿清单 → 审稿意见逐条回复与修订稿",
-    steps: SUBMISSION_REBUTTAL_STEPS,
+      "首投：期刊格式适配 → 投稿材料；返修：按轮次回复审稿意见 → 修订稿 → 再投稿清单",
+    steps: SUBMISSION_INITIAL_STEPS,
     projectSettings: [
       "目标期刊：（决定格式、字数与文风，是这条流程的前提）",
-      "投稿轮次：（首投 / 返修第 N 轮）",
     ],
   },
   {

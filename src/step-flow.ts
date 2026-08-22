@@ -92,7 +92,7 @@ export function buildStepFlow(args: {
           : "先定几件事",
       hint:
         pendingDecisions > 0
-          ? "点卡片或跟 AI 聊，都进 TASK.md"
+          ? "结论会写进 TASK.md"
           : undefined,
       done: hasDraft && pendingDecisions === 0,
     });
@@ -104,7 +104,7 @@ export function buildStepFlow(args: {
       kind: "human",
       section: h.optional ? "optional" : "main",
       label: h.title,
-      hint: h.target ? `交付落点 ${h.target}` : "完成后手动勾选",
+      hint: undefined,
       done: h.done,
       human: h,
     });
@@ -115,14 +115,7 @@ export function buildStepFlow(args: {
     kind: "agent",
     section: "main",
     label: `AI 干活：${step.name}`,
-    hint:
-      runStatus === "pending"
-        ? undefined
-        : runStatus === "active"
-          ? "AI 正在干活"
-          : runStatus === "review"
-            ? "AI 做完了，等你验收"
-            : "已合并",
+    hint: undefined,
     done: runStatus === "review" || runStatus === "done",
   });
   // 4. during 人工事项（与 agent 并行段）
@@ -132,7 +125,7 @@ export function buildStepFlow(args: {
       kind: "human",
       section: h.optional ? "optional" : "main",
       label: h.title,
-      hint: `agent 干活期间随时可做${h.target ? `；交付落点 ${h.target}` : ""}`,
+      hint: undefined,
       done: h.done,
       human: h,
     });
@@ -147,9 +140,7 @@ export function buildStepFlow(args: {
       kind: "human",
       section: "main",
       label: h.title,
-      hint: h.target
-        ? `agent 干完后轮到你；把文件拖到这一行，或点右侧入口导入（落点 ${h.target}）`
-        : "agent 干完后轮到你，完成后手动勾选",
+      hint: undefined,
       done: h.done,
       human: h,
     });
@@ -162,9 +153,9 @@ export function buildStepFlow(args: {
     label: "你验收，合并进主文件夹",
     hint:
       runStatus === "review"
-        ? "点「去评审」：逐文件核对改动、对照预期产物清单，没问题点「提交并合并」；不满意回终端让 AI 继续改"
+        ? "逐文件核对改动与产物，确认无误后提交并合并；有问题回终端继续修改"
         : runStatus === "active"
-          ? "AI 提交产出后在这里验收：核对改动与产物后合并进主文件夹"
+          ? "AI 提交产出后，回来核对并合并"
           : undefined,
     done: runStatus === "done",
   });

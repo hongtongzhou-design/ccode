@@ -1,18 +1,25 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirmDialog } from "./ConfirmDialog";
-import { PIPELINE_TEMPLATES } from "../pipeline-presets";
+import { compactPrimaryActionClass, inlineActionClass } from "./PageFrame";
+import {
+  PIPELINE_TEMPLATES,
+  pipelineStepsForTemplate,
+  type SubmissionMode,
+} from "../pipeline-presets";
 import type { PipelineTemplateDto, ProjectStepDto } from "../types";
 
-const actionBtn =
-  "rounded-sm px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1";
-const ctaSm =
-  "rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50";
+const actionBtn = inlineActionClass;
+const ctaSm = compactPrimaryActionClass;
 
 /** 选择器向外抛出的模板：内置与用户模板同构，父组件只关心 steps */
 export interface TemplatePickItem {
+  id?: string;
   name: string;
   steps: ProjectStepDto[];
+  projectSettings?: string[];
+  mode?: SubmissionMode;
+  round?: number;
 }
 
 /**
@@ -31,6 +38,9 @@ export default function TemplatePicker({
 }) {
   const [userTemplates, setUserTemplates] = useState<PipelineTemplateDto[]>([]);
   const [backendMissing, setBackendMissing] = useState(false);
+  const [submissionMode, setSubmissionMode] =
+    useState<SubmissionMode>("initial");
+  const [submissionRound, setSubmissionRound] = useState(1);
 
   useEffect(() => {
     let stale = false;
@@ -63,7 +73,13 @@ export default function TemplatePicker({
   }
 
   function renderRow(
-    t: { name: string; description: string; steps: ProjectStepDto[] },
+    t: {
+      id?: string;
+      name: string;
+      description: string;
+      steps: ProjectStepDto[];
+      projectSettings?: string[];
+    },
     key: string,
     onDelete?: () => void,
   ) {
@@ -90,7 +106,26 @@ export default function TemplatePicker({
               type="button"
               className={ctaSm}
               disabled={applying}
-              onClick={() => onApply({ name: t.name, steps: t.steps })}
+              onClick={() => {
+                const mode =
+                  t.id === "submission-rebuttal" ? submissionMode : undefined;
+                const round = Math.max(1, Math.floor(submissionRound));
+                onApply({
+                  id: t.id,
+                  name: t.name,
+                steps:
+                    t.id === "submission-rebuttal"
+                      ? pipelineStepsForTemplate(
+                          t as (typeof PIPELINE_TEMPLATES)[number],
+                          mode ?? "initial",
+                          round,
+                        )
+                      : t.steps,
+                  projectSettings: t.projectSettings,
+                  mode,
+                  round: mode === "revision" ? round : undefined,
+                });
+              }}
             >
               {applying ? "写入中…" : "使用"}
             </button>
@@ -99,7 +134,48 @@ export default function TemplatePicker({
         {t.description && (
           <p className="mt-1 text-xs text-l3">{t.description}</p>
         )}
+        {t.id === "submission-rebuttal" && (
+          <div className="mt-2 flex items-center gap-2 text-xs text-l2">
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                name="template-submission-mode"
+                checked={submissionMode === "initial"}
+                onChange={() => setSubmissionMode("initial")}
+              />
+              首投
+            </label>
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                name="template-submission-mode"
+                checked={submissionMode === "revision"}
+                onChange={() => setSubmissionMode("revision")}
+              />
+              返修
+            </label>
+            {submissionMode === "revision" && (
+              <label className="flex items-center gap-1">
+                第
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={submissionRound}
+                  onChange={(e) =>
+                    setSubmissionRound(
+                      Math.max(1, Number.parseInt(e.target.value, 10) || 1),
+                    )
+                  }
+                  className="w-14 rounded-sm border border-field bg-inset px-1 py-0.5 text-xs"
+                />
+                轮
+              </label>
+            )}
+          </div>
+        )}
         <p className="mt-1 truncate text-xs text-l4" title={stepPreview}>
+          <span className="mr-1 text-l4">完整步骤：</span>
           {stepPreview}
         </p>
       </li>

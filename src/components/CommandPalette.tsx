@@ -7,18 +7,17 @@ import { comboLabel } from "../hotkeys";
 const PAGE_COMMANDS: {
   id: string;
   label: string;
-  icon: string;
   hint: string;
 }[] = [
-  { id: "workbench", label: "工作台", icon: "⌂", hint: comboLabel("mod+1") },
-  { id: "workspaces", label: "项目", icon: "⛁", hint: comboLabel("mod+2") },
-  { id: "terminal", label: "运行", icon: "⌨", hint: comboLabel("mod+3") },
-  { id: "sessions", label: "对话", icon: "◔", hint: comboLabel("mod+4") },
-  { id: "profiles", label: "连接", icon: "⇄", hint: comboLabel("mod+5") },
-  { id: "skills", label: "技能", icon: "✦", hint: comboLabel("mod+6") },
-  { id: "mcp", label: "MCP", icon: "⌗", hint: comboLabel("mod+7") },
-  { id: "stats", label: "用量", icon: "◫", hint: comboLabel("mod+8") },
-  { id: "settings", label: "设置", icon: "⛭", hint: comboLabel("mod+9") },
+  { id: "workbench", label: "工作台", hint: comboLabel("mod+1") },
+  { id: "workspaces", label: "项目", hint: comboLabel("mod+2") },
+  { id: "terminal", label: "运行", hint: comboLabel("mod+3") },
+  { id: "sessions", label: "对话", hint: comboLabel("mod+4") },
+  { id: "profiles", label: "连接", hint: comboLabel("mod+5") },
+  { id: "skills", label: "技能", hint: comboLabel("mod+6") },
+  { id: "mcp", label: "MCP", hint: comboLabel("mod+7") },
+  { id: "stats", label: "用量", hint: comboLabel("mod+8") },
+  { id: "settings", label: "设置", hint: comboLabel("mod+9") },
 ];
 
 /**
@@ -55,7 +54,7 @@ export default function CommandPalette({
       ...PAGE_COMMANDS.map((p) => ({
         cmd: {
           id: `page:${p.id}`,
-          title: `${p.icon} ${p.label}`,
+          title: p.label,
           hint: p.hint,
           keywords: [p.id, p.label, "页面", "page"],
         },

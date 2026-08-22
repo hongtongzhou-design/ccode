@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -7,6 +8,47 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+use tauri::{AppHandle, Emitter};
+
+// 会话文件监听独立于文件树 watcher：会话根目录通常位于隐藏目录，不能复用
+// fs_tree 的隐藏路径噪声过滤。监听只在目标文件/数据库变化时发事件。
+struct SessionWatchEntry {
+    _watcher: RecommendedWatcher,
+}
+
+static SESSION_WATCHERS: OnceLock<Mutex<HashMap<String, SessionWatchEntry>>> = OnceLock::new();
+
+fn session_watchers() -> &'static Mutex<HashMap<String, SessionWatchEntry>> {
+    SESSION_WATCHERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn normalized_watch_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn session_watch_targets(file_path: &str) -> (PathBuf, Vec<String>) {
+    let expanded = expand_tilde(file_path);
+    if let Some((db, _session_id)) = expanded.split_once('#') {
+        let db = PathBuf::from(db);
+        let mut targets = vec![normalized_watch_path(&db)];
+        targets.push(normalized_watch_path(Path::new(&format!("{}-wal", db.to_string_lossy()))));
+        let parent = db.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        // SQLite 可能通过替换/重建文件触发父目录事件；保留目录本身作为目标，
+        // 但不匹配同目录下其它具体文件，避免无关写入造成刷新风暴。
+        targets.push(normalized_watch_path(&parent));
+        return (parent, targets);
+    }
+    let path = PathBuf::from(expanded);
+    let parent = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    (parent, vec![normalized_watch_path(&path)])
+}
+
+fn watch_event_matches(paths: &[PathBuf], targets: &[String]) -> bool {
+    paths.iter().any(|path| {
+        let actual = normalized_watch_path(path);
+        targets.iter().any(|target| actual == *target || actual.ends_with(target))
+    })
+}
 
 // ===== 前端 DTO =====
 
@@ -739,6 +781,15 @@ fn codex_message_text(p: &Value) -> Option<String> {
     }
 }
 
+/** Codex 会把工作区规则/导入历史作为 user response_item 写入会话；这类上下文不是用户对话，不能展示在聊天层。 */
+fn is_injected_context_message(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("# AGENTS.md")
+        || trimmed.starts_with("\\# AGENTS.md")
+        || trimmed.starts_with("The following is the Codex agent history")
+        || trimmed.starts_with("The following is the Claude Code history")
+}
+
 fn codex_token_usage(v: &Value) -> Option<TokenUsageDto> {
     if get_str(v, "type") != Some("event_msg") {
         return None;
@@ -799,7 +850,7 @@ fn codex_file_meta(
                         let t = t.trim();
                         // 跳过注入的指令块和粘贴的导出历史，取第一条真实提问作标题
                         if !t.starts_with('<')
-                            && !t.starts_with("# AGENTS.md")
+                            && !is_injected_context_message(t)
                             && !t.starts_with("The following is the ")
                         {
                             title = usable_title(t);
@@ -874,6 +925,9 @@ fn parse_codex(lines: &[String]) -> Vec<ChatMessageDto> {
                             continue; // developer/system 指令不进对话视图
                         }
                         if let Some(text) = codex_message_text(p) {
+                            if role == "user" && is_injected_context_message(&text) {
+                                continue;
+                            }
                             has_response_message = true;
                             msgs.push(ChatMessageDto {
                                 role: role.into(),
@@ -919,6 +973,11 @@ fn parse_codex(lines: &[String]) -> Vec<ChatMessageDto> {
                     // 旧格式兜底：新文件里它与 response_item 重复，只在没有 response_item 消息时采用
                     Some("user_message") | Some("agent_message") => {
                         if let Some(t) = get_str(p, "message") {
+                            if get_str(p, "type") == Some("user_message")
+                                && is_injected_context_message(t)
+                            {
+                                continue;
+                            }
                             let role = if get_str(p, "type") == Some("user_message") {
                                 "user"
                             } else {
@@ -5191,6 +5250,64 @@ pub async fn session_file_sig(file_path: String) -> Option<(u64, u64)> {
     Some((mtime_ms, md.len()))
 }
 
+/// 监听已关联的会话文件。普通会话监听目标文件，OpenCode 监听数据库及其 WAL；
+/// 事件经过 200ms 静默防抖后发出 `session-changed-<watch_id>`。
+#[tauri::command]
+pub fn watch_session(
+    app: AppHandle,
+    _agent: String,
+    file_path: String,
+) -> Result<String, String> {
+    let (directory, targets) = session_watch_targets(&file_path);
+    if !directory.is_dir() {
+        return Err(format!("会话目录不存在：{}", directory.to_string_lossy()));
+    }
+    let watch_id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let callback_targets = targets.clone();
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        if let Ok(event) = result {
+            if watch_event_matches(&event.paths, &callback_targets) {
+                let _ = tx.send(());
+            }
+        }
+    })
+    .map_err(|e| format!("创建会话监听失败：{e}"))?;
+    watcher
+        .watch(&directory, RecursiveMode::Recursive)
+        .map_err(|e| format!("监听会话目录失败：{e}"))?;
+
+    let event_name = format!("session-changed-{watch_id}");
+    let app_for_thread = app.clone();
+    std::thread::spawn(move || loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(()) => {
+                while rx
+                    .recv_timeout(std::time::Duration::from_millis(200))
+                    .is_ok()
+                {}
+                let _ = app_for_thread.emit(&event_name, ());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    });
+    session_watchers()
+        .lock()
+        .map_err(|_| "会话监听锁已损坏".to_string())?
+        .insert(watch_id.clone(), SessionWatchEntry { _watcher: watcher });
+    Ok(watch_id)
+}
+
+#[tauri::command]
+pub fn unwatch_session(watch_id: String) -> Result<(), String> {
+    session_watchers()
+        .lock()
+        .map_err(|_| "会话监听锁已损坏".to_string())?
+        .remove(&watch_id);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5696,6 +5813,19 @@ mod tests {
         let msgs = parse_codex(&lines);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].blocks[0].text, "新的");
+    }
+
+    #[test]
+    fn codex_parse_skips_injected_agents_context_but_keeps_real_user_message() {
+        let lines = s(&[
+            r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\n\n<INSTRUCTIONS>\nengineering rules\n</INSTRUCTIONS>"}]}}"##,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"请分析这个项目"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"好的"}]}}"#,
+        ]);
+        let msgs = parse_codex(&lines);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].blocks[0].text, "请分析这个项目");
+        assert_eq!(msgs[1].blocks[0].text, "好的");
     }
 
     #[test]
@@ -7220,5 +7350,48 @@ mod tests {
         assert_eq!(sanitize_export_name(""), "session");
         assert_eq!(sanitize_export_name("..."), "session");
         assert_eq!(sanitize_export_name("x".repeat(100).as_str()).chars().count(), 60);
+    }
+
+    // ===== 会话 watcher 目标过滤 =====
+
+    #[test]
+    fn session_watch_targets_plain_file_listens_parent_and_exact_file() {
+        let (dir, targets) = session_watch_targets("/tmp/ccode/session.jsonl");
+        assert_eq!(dir, PathBuf::from("/tmp/ccode"));
+        assert_eq!(targets, vec!["/tmp/ccode/session.jsonl"]);
+        assert!(watch_event_matches(
+            &[PathBuf::from("/tmp/ccode/session.jsonl")],
+            &targets
+        ));
+        assert!(!watch_event_matches(
+            &[PathBuf::from("/tmp/ccode/session-other.jsonl")],
+            &targets
+        ));
+    }
+
+    #[test]
+    fn session_watch_targets_opencode_db_includes_wal_but_filters_other_files() {
+        let (dir, targets) = session_watch_targets("/tmp/ccode/opencode.db#ses_1");
+        assert_eq!(dir, PathBuf::from("/tmp/ccode"));
+        assert_eq!(
+            targets,
+            vec![
+                "/tmp/ccode/opencode.db".to_string(),
+                "/tmp/ccode/opencode.db-wal".to_string(),
+                "/tmp/ccode".to_string()
+            ]
+        );
+        assert!(watch_event_matches(
+            &[PathBuf::from("/tmp/ccode/opencode.db-wal")],
+            &targets
+        ));
+        assert!(watch_event_matches(
+            &[PathBuf::from("/tmp/ccode")],
+            &targets
+        ));
+        assert!(!watch_event_matches(
+            &[PathBuf::from("/tmp/ccode/opencode.db-shm")],
+            &targets
+        ));
     }
 }
