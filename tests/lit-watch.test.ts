@@ -115,6 +115,7 @@ test("pdfUrlFor：arXiv abs 转 pdf 直链，其余 http 原样，非 http(s) �
     "https://doi.org/10.1000/xyz",
   );
   assert.equal(pdfUrlFor("10.1000/xyz"), null);
+  assert.equal(pdfUrlFor("doi:10.1000/xyz"), null);
   assert.equal(pdfUrlFor(""), null);
   assert.equal(pdfUrlFor("  "), null);
 });
@@ -166,6 +167,7 @@ test("isRead：规范化标题与笔记文件名互相包含即已读；无笔�
   assert.equal(isRead(e, ["another-paper.md"]), false);
   assert.equal(isRead(e, []), false);
   assert.equal(isRead(entry({ title: "  " }), ["a.md"]), false);
+  assert.equal(isRead(entry({ title: "Battery" }), ["battery-review.md"]), false);
 });
 
 test("paperResourceFor：paper 类资源按文件名规范化匹配；非 paper 不参与", () => {
@@ -274,10 +276,18 @@ test("litInboxCandidates：最近一次成功 run 有新命中且 24h 内才入�
       { at: "2026-08-18T09:00:00Z", status: "ok", summary: "", newEntries: 2 },
     ],
   });
-  assert.deepEqual(
-    litInboxCandidates([failThenOk], now).map((c) => [c.scheduleId, c.count]),
-    [["s-5", 2]],
-  );
+  assert.deepEqual(litInboxCandidates([failThenOk], now), []);
+  // 最新一次成功运行后，随后失败不应刷新时间窗口或制造新的候选。
+  const okThenFail = schedule({
+    id: "s-6",
+    lastRunAt: "2026-08-18T10:00:00Z",
+    lastStatus: "ok",
+    history: [
+      { at: "2026-08-18T10:00:00Z", status: "ok", summary: "", newEntries: 2 },
+      { at: "2026-08-17T09:00:00Z", status: "ok", summary: "", newEntries: 1 },
+    ],
+  });
+  assert.deepEqual(litInboxCandidates([okThenFail], now).map((c) => [c.scheduleId, c.count]), [["s-6", 2]]);
 });
 
 test("filterLitDismissed：忽略表内的条目被过滤", () => {

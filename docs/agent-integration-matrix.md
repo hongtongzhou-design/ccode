@@ -33,7 +33,7 @@
 | 注入 env | `CODEX_API_KEY`（优先级高于 auth.json）、`OPENAI_API_KEY`。**没有 base URL / 默认模型的环境变量** |
 | base URL 注入方式 | 启动参数 `-c model_providers.<id>.base_url='"https://..."'`（需同时在 config 里定义 provider）或写 `~/.codex/config.toml`：`openai_base_url` 或 `[model_providers.<id>]`（`base_url` + `env_key` = 存放 key 的环境变量名） |
 | 全局配置 | `~/.codex/config.toml`（TOML）+ `~/.codex/auth.json`；`CODEX_HOME` 可整体搬迁（目录必须预先存在） |
-| 会话存储 | `~/.codex/sessions/YYYY/MM/DD/rollout-<时间>-<uuid>.jsonl`；旧文件会被后台 **zstd 压缩为 `.jsonl.zst`**（magic `28 b5 2f fd`），两者都要能读；另有 `history.jsonl`（仅用户 prompt）和 SQLite 镜像库（版本化文件名，勿依赖） |
+| 会话存储 | `~/.codex/sessions/YYYY/MM/DD/rollout-<时间>-<uuid>.jsonl`；旧文件会被后台 **zstd 压缩为 `.jsonl.zst`**（magic `28 b5 2f fd`），两者都要能读；另有 `history.jsonl`（仅用户 prompt）和 SQLite 镜像库（版本化文件名，勿依赖）。Ccode 观察到会话关联成功后，会在自己的 `app.db` 记录 profile 归属，历史/外部会话可能为空。 |
 | 会话格式 | JSONL `RolloutLine {timestamp, type, payload}`；首行 `session_meta`（含 **cwd** = 项目归属依据）；`response_item`（消息）、`event_msg`（含 token_count）、`turn_context`（每轮 model/cwd）。不按项目分目录，**项目归属靠 session_meta.cwd**。**易漂移** |
 | 关键启动参数 | `-m`、`--profile`、`-c key=value`（最高优先级）、`codex exec`（非交互，`--json` 输出事件流）、`codex resume` |
 | 坑 | **只支持 Responses API**（`wire_api="chat"` 已移除并报错）——中转必须实现 `/v1/responses`；`codex exec` 默认要求 git 仓库（`--skip-git-repo-check`）；凭证可能存 OS keyring 而非 auth.json；auth.json 顶层只有 `OPENAI_API_KEY` = API Key 模式（官方 `--api-key` 与第三方中转同一形状，**不算官方账号登录**，检测见 v3.55）；TUI `/model` 选择器的模型目录来自 `model_catalog_json` 指定的 JSON 文件（**仅启动时读取**，Ccode 已为每个 profile 生成 catalog：display_name = 「配置名 · 模型」，context_window/max_context_window 取自 model_registry；reasoning levels 全量模板 [low/medium/high]，与 cc-switch 同口径——模型不支持时端点忽略 effort） |

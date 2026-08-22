@@ -79,9 +79,12 @@ fn parse_toml_file(path: &Path, label: &str) -> Result<Option<String>, String> {
     Ok(Some(label.into()))
 }
 
-fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, String> {
+pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, String> {
     if agents::binary_for(&profile.agent).is_none() {
         return Err(format!("未知 agent: {}", profile.agent));
+    }
+    if profile.account_type == profiles::AccountType::Official && profile.no_auth {
+        return Err("官方账号不能设置为无密钥模式".into());
     }
     if profile.name.trim().is_empty() {
         return Err("配置名称不能为空".into());
@@ -107,6 +110,17 @@ fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, String> {
     for key in profile.extra_env.keys() {
         if key.trim().is_empty() || key.contains('=') || key.contains('\0') {
             return Err(format!("附加环境变量名不合法: {key:?}"));
+        }
+    }
+    if profile.no_auth {
+        const AUTH_KEYS: &[&str] = &[
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
+            "GEMINI_API_KEY", "GOOGLE_API_KEY", "CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN",
+            "CURSOR_API_KEY", "XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "KIMI_API_KEY",
+            "KIMI_MODEL_API_KEY", "OPENCODE_CONFIG_CONTENT",
+        ];
+        if let Some(key) = profile.extra_env.keys().find(|key| AUTH_KEYS.contains(&key.as_str())) {
+            return Err(format!("无密钥模式不能附加认证变量 {key}"));
         }
     }
     if profile.extra_env.values().any(|value| value.contains('\0')) {
@@ -574,6 +588,7 @@ mod tests {
             agent: agent.into(),
             name: "测试".into(),
             account_type: Default::default(),
+            no_auth: false,
             protocol: None,
             base_url: Some("https://relay.example.com/v1".into()),
             models: vec!["model-a".into()],

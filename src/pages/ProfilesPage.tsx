@@ -32,6 +32,7 @@ import type {
   OfficialAccountStatusDto,
   Profile,
   ProfileInput,
+  ModelCapabilityDto,
   ProfileUsageDto,
   ProfileValidationDto,
   ValidationCheckDto,
@@ -58,6 +59,7 @@ function ProfileModal({
     agent: initial?.agent ?? presetAgent ?? "claude-code",
     name: initial?.name ?? "",
     accountType: (initial?.accountType ?? "api") as "api" | "official",
+    noAuth: initial?.noAuth ?? false,
     protocol: (initial?.protocol ??
       AGENT_PROTOCOLS[initial?.agent ?? "claude-code"]?.default ??
       null) as string | null,
@@ -79,6 +81,25 @@ function ProfileModal({
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [capabilities, setCapabilities] = useState<ModelCapabilityDto[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!form.models.length) {
+      setCapabilities([]);
+      return;
+    }
+    void invoke<ModelCapabilityDto[]>("model_capabilities", { models: form.models })
+      .then((items) => {
+        if (!cancelled) setCapabilities(items);
+      })
+      .catch(() => {
+        if (!cancelled) setCapabilities([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [form.models]);
 
   /** 解析「每行 KEY=VALUE」文本为环境变量表，# 开头视为注释 */
   function parseEnvLines(text: string): Record<string, string> {
@@ -111,6 +132,8 @@ function ProfileModal({
         baseUrl: form.baseUrl.trim(),
         apiKey: form.apiKey || null,
         profileId: initial?.id ?? null,
+        agentId: form.agent,
+        protocol: form.protocol,
       });
       setTestResult({
         ok: true,
@@ -132,6 +155,8 @@ function ProfileModal({
         baseUrl: form.baseUrl.trim(),
         apiKey: form.apiKey || null,
         profileId: initial?.id ?? null,
+        agentId: form.agent,
+        protocol: form.protocol,
       });
       setFetchedModels(list);
     } catch (e) {
@@ -150,6 +175,7 @@ function ProfileModal({
       agent: form.agent,
       name: form.name.trim(),
       accountType: form.accountType,
+      noAuth: form.accountType === "api" && form.noAuth,
       protocol: AGENT_PROTOCOLS[form.agent] ? form.protocol : null,
       // 官方账号：认证交给 CLI 登录，不落端点/密钥
       baseUrl: form.accountType === "official" ? "" : form.baseUrl.trim(),
@@ -170,58 +196,90 @@ function ProfileModal({
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px] ccode-fade"
       onClick={onClose}
     >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="max-h-[90vh] w-[36rem] overflow-y-auto rounded-md border border-field ccode-float-surface p-5"
+        className="max-h-[min(680px,calc(100vh-32px))] w-full max-w-[500px] overflow-y-auto rounded-lg border border-field ccode-float-surface p-4 sm:p-5"
       >
-        <h2 className="mb-4 text-base font-semibold text-l1">
-          {initial ? "编辑连接" : "添加连接"}
-        </h2>
-        <div className="mb-4 grid grid-cols-2 items-end gap-3">
+        <div className="mb-4">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight text-l1">
+              {initial ? "编辑连接" : "添加连接"}
+            </h2>
+            <p className="mt-1 text-xs text-l4">
+              配置一个可在运行页启动的 Agent 连接。
+            </p>
+          </div>
+        </div>
+
+        <section className="mb-4 rounded-lg border border-hairline bg-strip/45 p-3">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="text-xs font-medium text-l2">快速开始</span>
+            <span className="text-micro text-l4">可选，选择后会自动填入基础字段</span>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
           {/* 没有预设的 agent（gemini/cursor）不给空下拉——空选择器看起来像功能坏了，
               而这两家「本来就不该有预设」（原因见 presets.ts NO_PRESET_REASON） */}
           {PRESETS.every((p) => p.agent !== form.agent) ? (
-            <p className="self-center text-micro leading-4 text-l4">
-              {NO_PRESET_REASON[form.agent] ?? "这个 agent 暂无内置端点预设，请手动填写 Base URL。"}
-            </p>
+            <div>
+              <span className="mb-1 block text-xs text-l3">端点预设</span>
+              <p className="rounded-md border border-dashed border-field px-2.5 py-2 text-micro leading-4 text-l4">
+                {NO_PRESET_REASON[form.agent] ?? "这个 agent 暂无内置端点预设，请手动填写 Base URL。"}
+              </p>
+            </div>
           ) : (
-          <select
-            className={fieldClass}
-            value=""
-            onChange={(e) => {
-              const preset = PRESETS.find(
-                (p) => p.agent === form.agent && p.name === e.target.value,
-              );
-              if (preset) {
-                setForm({
-                  ...form,
-                  baseUrl: preset.baseUrl,
-                  name: form.name || preset.name,
-                  protocol: preset.protocol ?? form.protocol,
-                });
-              }
-            }}
-          >
-            <option value="" disabled>
-              从预设快速填充（可选）…
-            </option>
-            {PRESETS.filter((p) => p.agent === form.agent).map((p) => (
-              <option key={p.name} value={p.name}>
-                {p.name}
-                {p.note ? `（${p.note}）` : ""}
-              </option>
-            ))}
-          </select>
+            <label className="block text-sm">
+              <span className="mb-1 block text-xs text-l3">端点预设</span>
+              <select
+                className={fieldClass}
+                value=""
+                onChange={(e) => {
+                  const preset = PRESETS.find(
+                    (p) => p.agent === form.agent && p.name === e.target.value,
+                  );
+                  if (preset) {
+                    setForm({
+                      ...form,
+                      baseUrl: preset.baseUrl,
+                      name: form.name || preset.name,
+                      protocol: preset.protocol ?? form.protocol,
+                      models: [],
+                      noAuth: false,
+                    });
+                    setTestResult(null);
+                    setFetchError(null);
+                    setFetchedModels(null);
+                  }
+                }}
+              >
+                <option value="" disabled>
+                  选择一个预设…
+                </option>
+                {PRESETS.filter((p) => p.agent === form.agent).map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name}
+                    {p.note ? `（${p.note}）` : ""}
+                    {p.confidence === "official"
+                      ? " · 官方"
+                      : p.confidence === "verified-compatible"
+                        ? " · 已验证兼容"
+                        : p.confidence === "address-only"
+                          ? " · 仅填地址"
+                          : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
           )}
           <label className="block text-sm">
             <span className="mb-1 block text-xs text-l3">Agent</span>
             <select
               className={fieldClass}
               value={form.agent}
+              disabled={!!initial}
               onChange={(e) => {
                 setForm({
                   ...form,
@@ -245,17 +303,25 @@ function ProfileModal({
               ))}
             </select>
           </label>
-        </div>
-        <label className="mb-3 block text-sm">
-          <span className="mb-1 block text-xs text-l3">名称</span>
-          <input
-            className={fieldClass}
-            required
-            placeholder="官方 / 中转 A"
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-          />
-        </label>
+          </div>
+        </section>
+
+        <section className="mb-4">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="text-xs font-medium text-l2">连接身份</span>
+            <span className="text-micro text-l4">用于在列表和运行页识别</span>
+          </div>
+          <label className="block text-sm">
+            <span className="mb-1 block text-xs text-l3">名称</span>
+            <input
+              className={fieldClass}
+              required
+              placeholder="官方 / 中转 A"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+            />
+          </label>
+        </section>
         {officialSupported[form.agent] && (
           <label className="mb-3 block text-sm">
             <span className="mb-1 block text-xs text-l3">账号类型</span>
@@ -266,6 +332,7 @@ function ProfileModal({
                 setForm({
                   ...form,
                   accountType: e.target.value as "api" | "official",
+                  noAuth: false,
                 })
               }
             >
@@ -276,6 +343,21 @@ function ProfileModal({
         )}
         {form.accountType === "official" && (
           <p className="-mt-1 mb-3 text-xs text-l3">用 CLI 自己的账号登录，不注入端点与密钥。请先在组内完成连接。</p>
+        )}
+        {form.accountType === "api" && (
+          <label className="mb-3 flex items-center gap-2 text-xs text-l2">
+            <input
+              type="checkbox"
+              className="peer sr-only"
+              checked={form.noAuth}
+              onChange={(e) => setForm({ ...form, noAuth: e.target.checked })}
+            />
+            <span
+              aria-hidden="true"
+              className="flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-field bg-canvas text-[10px] text-cta-text transition-colors peer-checked:border-cta-bd peer-checked:bg-cta peer-checked:after:content-['✓']"
+            />
+            本地端点无密钥（不会继承 shell 中的其他 API Key）
+          </label>
         )}
         {form.accountType === "api" && (
           <>
@@ -295,7 +377,7 @@ function ProfileModal({
               title={
                 form.baseUrl.trim() ? "验证端点与密钥连通性" : "先填写 Base URL"
               }
-              className="w-20 shrink-0 rounded-sm bg-btn px-2 py-1 text-xs text-l1 hover:brightness-125 disabled:opacity-50"
+              className={`${rowActionClass} w-20 shrink-0`}
             >
               {testing ? "测试中…" : "测试"}
             </button>
@@ -355,7 +437,7 @@ function ProfileModal({
                   ? "从 Base URL 拉取可用模型"
                   : "先填写 Base URL"
               }
-              className="shrink-0 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:brightness-125 disabled:opacity-50"
+              className={`${rowActionClass} shrink-0 whitespace-nowrap`}
             >
               {fetching ? "获取中…" : "获取模型"}
             </button>
@@ -402,6 +484,16 @@ function ProfileModal({
               {form.models.map((m, i) => (
                 <span
                   key={m}
+                  title={(() => {
+                    const c = capabilities.find((item) => item.model === m);
+                    if (!c) return undefined;
+                    const flags = [
+                      c.thinking ? "思考" : null,
+                      c.tools === true ? "工具" : c.tools === false ? "无工具" : "工具未知",
+                      c.vision === true ? "图像" : c.vision === false ? "无图像" : "图像未知",
+                    ].filter(Boolean);
+                    return `${flags.join(" · ")} · 上下文 ${(c.context / 1024).toFixed(0)}K`;
+                  })()}
                   className="flex items-center gap-1 rounded-sm bg-inset px-2 py-0.5 text-xs text-l2"
                 >
                   {m}
@@ -440,7 +532,7 @@ function ProfileModal({
               type="button"
               onClick={addModel}
               disabled={!modelInput.trim()}
-              className="shrink-0 rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:brightness-125 disabled:opacity-50"
+              className={`${rowActionClass} w-16 shrink-0 whitespace-nowrap`}
             >
               添加
             </button>
@@ -498,7 +590,7 @@ function ProfileModal({
           <button
             type="submit"
             disabled={saving}
-            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className={primaryActionClass}
           >
             保存
           </button>
@@ -783,7 +875,25 @@ function hasUsage(u: ProfileUsageDto | undefined): boolean {
 
 export default function ProfilesPage() {
   const profiles = useAppStore((s) => s.profiles);
+  const profileIssues = useAppStore((s) => s.profileIssues);
   const [usageMap, setUsageMap] = useState<Record<string, ProfileUsageDto>>({});
+  const [validationMap, setValidationMap] = useState<Record<string, { ok: boolean; checkedAt: string }>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("ccode.profileValidation") ?? "{}") as Record<string, { ok: boolean; checkedAt: string }>;
+    } catch {
+      return {};
+    }
+  });
+
+  function rememberValidation(profileId: string, result: ProfileValidationDto) {
+    const next = { ...validationMap, [profileId]: { ok: result.ok, checkedAt: result.checkedAt } };
+    setValidationMap(next);
+    try {
+      localStorage.setItem("ccode.profileValidation", JSON.stringify(next));
+    } catch {
+      /* localStorage unavailable: current view still shows the result */
+    }
+  }
   const [usagePop, setUsagePop] = useState<{
     x: number;
     y: number;
@@ -885,6 +995,21 @@ export default function ProfilesPage() {
       shellOnly: true,
     });
     setPage("terminal");
+  }
+
+  async function clearAccountConflicts(agentId: string) {
+    const st = officialStatus[agentId];
+    if (!st?.cleanupSupported) return;
+    if (!(await confirmDialog(`只移除 ${labelOf(agentId)} 已识别的 API 环境项，并保留其他配置。继续？`, { danger: true })))
+      return;
+    try {
+      const files = await invoke<string[]>("clear_account_conflicts", { agentId });
+      await refreshOfficial(agentId);
+      setNotice(files.length ? `已清理：${files.join("、")}` : "没有可清理的已识别冲突项");
+      setTimeout(() => setNotice(null), 5000);
+    } catch (e) {
+      setError(String(e));
+    }
   }
   const [modal, setModal] = useState<{
     initial: Profile | null;
@@ -1137,6 +1262,7 @@ export default function ProfilesPage() {
       );
       await refreshGlobalBackups();
       mirrorValidation(p, applied.validation);
+      rememberValidation(p.id, applied.validation);
       const cli = applied.validation.cli;
       await alertDialog(
         `已写入全局连接：\n${applied.files.join("\n")}\n\nCLI 配置检查：${
@@ -1163,6 +1289,7 @@ export default function ProfilesPage() {
         profileId: p.id,
       });
       mirrorValidation(p, result);
+      rememberValidation(p.id, result);
       setValidationDialog({ profile: p, result, running: false });
       setError(null);
     } catch (e) {
@@ -1241,6 +1368,19 @@ export default function ProfilesPage() {
     }
   }
 
+  async function onClearKey(p: Profile) {
+    if (!(await confirmDialog(`清除连接「${p.name}」的本地密钥？之后需要重新填写才可启动。`, { danger: true })))
+      return;
+    try {
+      await invoke("clear_profile_key", { id: p.id });
+      await loadAll();
+      setNotice(`已清除「${p.name}」的本地密钥`);
+      setTimeout(() => setNotice(null), 4000);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   /** 复制到其他 agent（#14）：密钥在后端 0600 文件内直读直写，不经前端；成功后刷新列表并提示 */
   async function onCopyToAgent(p: Profile, targetAgent: string) {
     try {
@@ -1294,6 +1434,33 @@ export default function ProfilesPage() {
       autoStart: !!cwd,
     });
     setPage("terminal");
+  }
+
+  async function useExternalWith(profile: Profile) {
+    let cwd = "";
+    try {
+      cwd =
+        (JSON.parse(localStorage.getItem("ccode.lastLaunch") ?? "{}") as { cwd?: string }).cwd ?? "";
+    } catch {
+      /* 损坏的本地记忆不阻断外部启动 */
+    }
+    if (!cwd.trim()) {
+      const picked = await open({ directory: true, multiple: false });
+      if (typeof picked === "string") cwd = picked;
+    }
+    if (!cwd.trim()) return;
+    try {
+      await invoke("new_external_terminal", {
+        agentId: profile.agent,
+        cwd,
+        profileId: profile.id,
+        model: profile.models[0] ?? null,
+      });
+      setNotice(`已在外部终端启动「${profile.name}」`);
+      setTimeout(() => setNotice(null), 4000);
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   /** 隐藏/取消隐藏（settings.hiddenProfiles 整表覆盖）：只影响启动栏下拉分组 */
@@ -1690,6 +1857,13 @@ export default function ProfilesPage() {
                                 title={profile.name}
                               >
                                 {profile.name}
+                                {profileIssues[profile.id] ? (
+                                  <span className="ml-1.5 rounded-sm bg-err px-1 py-0.5 text-micro text-err-text" title={profileIssues[profile.id].reason}>配置失效</span>
+                                ) : validationMap[profile.id]?.ok ? (
+                                  <span className="ml-1.5 rounded-sm bg-ok px-1 py-0.5 text-micro text-ok-text" title={`最近验证 ${validationMap[profile.id].checkedAt}`}>已验证</span>
+                                ) : (
+                                  <span className="ml-1.5 rounded-sm bg-inset px-1 py-0.5 text-micro text-l4">未验证</span>
+                                )}
                                 {(settings?.hiddenProfiles ?? []).includes(
                                   profile.id,
                                 ) && (
@@ -1805,6 +1979,14 @@ export default function ProfilesPage() {
                                 className={`${rowActionClass} ${hoverRevealClass}`}
                               >
                                 ⌨ 在终端使用
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void useExternalWith(profile)}
+                                title="用这个连接在外部终端新开会话"
+                                className={`${rowActionClass} ${hoverRevealClass}`}
+                              >
+                                ⇗ 外部终端
                               </button>
                               <button
                                 type="button"
@@ -1927,6 +2109,15 @@ export default function ProfilesPage() {
                   这些文件里残留的密钥会覆盖官方账号登录并产生 API
                   计费；请编辑对应文件删除后，点状态行的 ⟳ 重新检测。
                 </p>
+                {st.cleanupSupported && (
+                  <button
+                    type="button"
+                    className="mt-2 rounded-sm border border-warn-bd bg-warn px-2 py-1 text-xs text-warn-text hover:brightness-110"
+                    onClick={() => void clearAccountConflicts(conflictPop.agentId)}
+                  >
+                    备份后清理已识别项
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -2024,12 +2215,22 @@ export default function ProfilesPage() {
                 }),
             },
             { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
+            ...(rowMenu.profile.accountType === "api" && rowMenu.profile.hasKey
+              ? [{ label: "清除本地密钥", onSelect: () => void onClearKey(rowMenu.profile) }]
+              : []),
             {
               label: "设为全局",
               disabled:
-                caps[rowMenu.profile.agent] !== undefined &&
-                !caps[rowMenu.profile.agent].setGlobal.supported,
-              title: caps[rowMenu.profile.agent]?.setGlobal.reason,
+                rowMenu.profile.accountType === "official" ||
+                rowMenu.profile.noAuth ||
+                (caps[rowMenu.profile.agent] !== undefined &&
+                  !caps[rowMenu.profile.agent].setGlobal.supported),
+              title:
+                rowMenu.profile.accountType === "official"
+                  ? "官方账号不写入全局配置"
+                  : rowMenu.profile.noAuth
+                    ? "无密钥连接不写入全局配置"
+                    : caps[rowMenu.profile.agent]?.setGlobal.reason,
               onSelect: () => void onApplyGlobal(rowMenu.profile),
             },
             ...(globalBackups[rowMenu.profile.agent]

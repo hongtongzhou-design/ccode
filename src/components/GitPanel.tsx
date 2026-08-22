@@ -472,7 +472,7 @@ function GitPanel({
       setStatus(s);
       showToast(
         mode === "stage"
-          ? "已暂存这块改动，勾选该文件保存到历史时提交"
+          ? "已暂存这块改动，勾选该文件保存到任务分支时提交"
           : "已丢弃这块改动",
       );
     } catch (e) {
@@ -631,7 +631,7 @@ function GitPanel({
             )}
             {hunksStaged && (
               <p className="border-b border-hairline px-2 py-1 text-micro text-warn-text">
-                该文件已有部分内容暂存；勾选它「保存到历史」时只提交已暂存的块，下方的块留在工作区
+                该文件已有部分内容暂存；勾选它「保存到任务分支」时只提交已暂存的块，下方的块留在工作区
               </p>
             )}
             {hunks.map((h) => {
@@ -697,7 +697,7 @@ function GitPanel({
           <>
             {hunksStaged && (
               <p className="border-b border-hairline px-2 py-1 text-micro text-l3">
-                改动已全部暂存；勾选后「保存到历史」将提交这些内容
+                改动已全部暂存；勾选后「保存到任务分支」将提交这些内容
               </p>
             )}
             <pre className="overflow-auto py-1 font-mono text-xs leading-5">
@@ -957,7 +957,7 @@ function GitPanel({
             <button
               onClick={() => void doCommit(false)}
               disabled={!canCommit}
-              title="git commit：把勾选的改动提交到项目历史（⌘Enter）"
+              title="git commit：把勾选的改动提交到任务分支（⌘Enter）"
               className={`flex-1 rounded-sm border px-3 py-1.5 text-sm disabled:opacity-50 ${
                 canCommit
                   ? "border-cta-bd bg-cta text-cta-text hover:brightness-110"
@@ -973,7 +973,7 @@ function GitPanel({
             <button
               onClick={() => void doCommit(true)}
               disabled={!canCommit}
-              title="git commit + push：提交到历史并推送到远程"
+              title="git commit + push：提交到任务分支并推送到远程"
               className={`flex-1 rounded-sm px-3 py-1.5 text-sm disabled:opacity-50 ${
                 canCommit
                   ? "bg-[linear-gradient(90deg,var(--color-ok,#22c55e),#10b981)] text-[var(--color-bg)] hover:brightness-110"

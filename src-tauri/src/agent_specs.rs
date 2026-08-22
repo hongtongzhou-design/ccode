@@ -601,8 +601,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
                 "KIMI_BASE_URL",
             ],
             // config.toml 里手写的 providers.*.api_key 是独立 provider（需模型指向才生效），
-            // 不会静默覆盖 OAuth managed provider；且 config.toml 是 TOML，
-            // 冲突探测只支持 .env/.json 格式——无已核实的静默覆盖场景，留空
+            // 不会静默覆盖 OAuth managed provider；留空
             conflict_probes: &[],
             detection_note: Some("凭证文件名随 provider 名变化（credentials/<name>.json）；设了 KIMI_CODE_HOME 时数据目录整体搬迁，文件检测可能漏报"),
             api_key_fields: &[],
@@ -770,10 +769,14 @@ static AGENT_SPECS: &[AgentSpec] = &[
             login_cmd: &["login"],
             auth_file_paths: &[".grok/auth.json"],
             env_purge_list: &["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"],
-            // config.toml 顶层 api_key 是凭证优先级最高档，会静默覆盖官方账号登录；
-            // 但冲突探测只支持 .env/.json 格式（TOML 不支持），无法探测文件级冲突
-            conflict_probes: &[],
-            detection_note: Some("凭证在 ~/.grok/auth.json（scope→GrokAuth 顶层 map，grok 自己原子重写）；config.toml 顶层 api_key 优先级最高会覆盖登录态，TOML 冲突探测暂不支持"),
+            // config.toml 顶层 api_key/env_key 是凭证优先级最高档，会静默覆盖官方账号登录；
+            // 以 TOML 探测并提供带备份的清理动作
+            conflict_probes: &[ConflictProbe {
+                file: ".grok/config.toml",
+                keys: &["api_key", "env_key"],
+                note: "config.toml 中的 API 凭证会覆盖官方账号登录",
+            }],
+            detection_note: Some("凭证在 ~/.grok/auth.json（scope→GrokAuth 顶层 map，grok 自己原子重写）"),
             api_key_fields: &[],
         }),
         model_switch: ModelSwitch::None,

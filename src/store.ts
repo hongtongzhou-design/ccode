@@ -192,6 +192,7 @@ export interface InboxItem {
     | { type: "digest" }
     | { type: "artifacts"; workspaceId: string }
     | { type: "project"; projectRoot: string }
+    | { type: "litWatch"; projectRoot: string }
     | { type: "help"; projectRoot: string }
     | { type: "profiles" };
 }
@@ -238,6 +239,14 @@ export function runInboxAction(item: InboxItem) {
     s.setPage("workspaces");
   } else if (item.action.type === "project") {
     s.setSelectProjectReq(item.action.projectRoot);
+    s.setPage("workspaces");
+  } else if (item.action.type === "litWatch") {
+    s.setSelectProjectReq(item.action.projectRoot);
+    s.setProjectFocusReq({
+      projectRoot: item.action.projectRoot,
+      focus: "lit",
+      token: Date.now(),
+    });
     s.setPage("workspaces");
   } else if (item.action.type === "help") {
     // 人工请求「去查看」：选中项目之外还要弹出完整内容层——请求全文在 strip 行里只有 40 字截断预览
@@ -359,6 +368,12 @@ interface AppState {
   contextLabel: { project: string; step: string | null } | null;
   setContextLabel: (v: { project: string; step: string | null } | null) => void;
   selectProjectReq: string | null;
+  projectFocusReq: {
+    projectRoot: string;
+    focus: "lit" | "schedule";
+    token: number;
+  } | null;
+  setProjectFocusReq: (req: AppState["projectFocusReq"]) => void;
   /** 收件箱人工请求「去查看」的一次性请求（项目根路径）：工作区页弹出该来源的完整请求内容层 */
   helpViewReq: string | null;
   setHelpViewReq: (path: string | null) => void;
@@ -570,6 +585,8 @@ export const useAppStore = create<AppState>((set, get) => {
   contextLabel: null,
   setContextLabel: (v) => set({ contextLabel: v }),
   selectProjectReq: null,
+  projectFocusReq: null,
+  setProjectFocusReq: (req) => set({ projectFocusReq: req }),
   helpViewReq: null,
   setHelpViewReq: (path) => set({ helpViewReq: path }),
   setSelectProjectReq: (path) => set({ selectProjectReq: path }),

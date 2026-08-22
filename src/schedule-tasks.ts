@@ -40,9 +40,20 @@ export function schedulesForProject(
   return schedules.filter((s) => normPath(s.projectRoot) === root);
 }
 
+/** 文献雷达只消费 lit-watch 任务；项目可以同时配置其它定时技能。 */
+export function litWatchSchedules(
+  schedules: readonly ScheduleDto[],
+): ScheduleDto[] {
+  return schedules.filter((s) => s.skill === "lit-watch");
+}
+
 /** 运行完成通知标题：「文献雷达 · 项目名」，失败时带「失败」 */
-export function runDoneNotifyTitle(projectName: string, status: string): string {
-  return `文献雷达 · ${projectName}${status === "ok" ? "" : "（失败）"}`;
+export function runDoneNotifyTitle(
+  projectName: string,
+  status: string,
+  scheduleName = "定时任务",
+): string {
+  return `${scheduleName} · ${projectName}${status === "ok" ? "" : "（失败）"}`;
 }
 
 /** 通知正文：summary 首行，空白折叠后截断 */

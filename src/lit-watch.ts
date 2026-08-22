@@ -248,7 +248,12 @@ export function isRead(
   return noteFileNames.some((name) => {
     const stem = name.replace(/\.[^.]*$/, "");
     const n = normalizeTitle(stem);
-    return n !== "" && (n.includes(t) || t.includes(n));
+    if (n === "" || n === t) return n !== "";
+    if (!(n.includes(t) || t.includes(n))) return false;
+    // 仅允许较长、多词标题做包含匹配，避免「review」「battery」等短片段
+    // 把另一篇论文误判成已读。
+    const shorter = n.length < t.length ? n : t;
+    return shorter.length >= 20 && shorter.split(" ").filter(Boolean).length >= 4;
   });
 }
 
@@ -308,18 +313,19 @@ export function litInboxCandidates(
 ): LitInboxCandidate[] {
   const out: LitInboxCandidate[] = [];
   for (const s of schedules) {
-    if (!s.lastRunAt) continue;
-    const at = Date.parse(s.lastRunAt);
-    if (Number.isNaN(at) || nowMs - at >= windowMs || nowMs - at < 0) continue;
-    // history 新的在前：第一条 ok 记录即「最近一次成功 run」（老记录没有 newEntries 字段，缺省不算）
+    if (s.skill !== "lit-watch") continue;
+    if (s.lastStatus !== "ok") continue;
     const lastOk = s.history.find((r) => r.status === "ok");
+    if (!lastOk) continue;
+    const at = Date.parse(lastOk.at);
+    if (Number.isNaN(at) || nowMs - at >= windowMs || nowMs - at < 0) continue;
     const count = lastOk?.newEntries ?? 0;
     if (count <= 0) continue;
     out.push({
       scheduleId: s.id,
       projectRoot: s.projectRoot,
       count,
-      at: s.lastRunAt,
+      at: lastOk.at,
     });
   }
   return out;

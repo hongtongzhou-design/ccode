@@ -131,6 +131,7 @@ pub struct CreateScheduleInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSchedulePatch {
     pub name: Option<String>,
+    pub skill: Option<String>,
     #[serde(default)]
     pub profile_id: Option<Option<String>>,
     // 关联步骤补丁。注意 serde 对 Option<Option<T>> 不区分「缺失」与显式 null（都按 None = 不改），
@@ -150,6 +151,9 @@ pub struct UpdateSchedulePatch {
 struct RunDonePayload {
     schedule_id: String,
     project_root: String,
+    schedule_name: String,
+    skill: String,
+    new_entries: Option<u32>,
     status: String,
     summary: String,
 }
@@ -363,6 +367,13 @@ fn update_schedule_at(path: &Path, id: &str, patch: UpdateSchedulePatch) -> Resu
         }
         task.name = name;
     }
+    if let Some(skill) = patch.skill {
+        let skill = skill.trim().to_string();
+        if skill.is_empty() {
+            return Err("技能不能为空".into());
+        }
+        task.skill = skill;
+    }
     if let Some(profile_id) = patch.profile_id {
         task.profile_id = profile_id.filter(|v| !v.trim().is_empty());
     }
@@ -438,6 +449,9 @@ fn execute_one(id: &str) -> RunDonePayload {
             return RunDonePayload {
                 schedule_id: id.to_string(),
                 project_root: String::new(),
+                schedule_name: "定时任务".into(),
+                skill: String::new(),
+                new_entries: None,
                 status: "error".into(),
                 summary: e,
             }
@@ -457,6 +471,9 @@ fn execute_one(id: &str) -> RunDonePayload {
         return RunDonePayload {
             schedule_id: id.to_string(),
             project_root: String::new(),
+            schedule_name: "定时任务".into(),
+            skill: String::new(),
+            new_entries: None,
             status: "error".into(),
             summary: format!("定时任务不存在: {id}"),
         };
@@ -506,6 +523,14 @@ fn execute_one(id: &str) -> RunDonePayload {
         Ok(out) => ("ok", cap_summary(&crate::sessions::redact_sensitive_text(&out))),
         Err(e) => ("error", cap_summary(&crate::sessions::redact_sensitive_text(&e))),
     };
+    let summary = if status == "ok" && is_lit_watch {
+        match crate::lit_watch::output_note(Path::new(&task.project_root)) {
+            Some(note) => format!("{summary}；产物检查：{note}"),
+            None => summary,
+        }
+    } else {
+        summary
+    };
     let summary = match fallback_note {
         Some(note) => format!("{note}；{summary}"),
         None => summary,
@@ -516,6 +541,9 @@ fn execute_one(id: &str) -> RunDonePayload {
     RunDonePayload {
         schedule_id: id.to_string(),
         project_root: task.project_root,
+        schedule_name: task.name,
+        skill: task.skill,
+        new_entries,
         status: status.to_string(),
         summary,
     }

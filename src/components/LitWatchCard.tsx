@@ -30,6 +30,7 @@ import {
   pdfUrlFor,
   staleLitHint,
   weeklyBuckets,
+  normalizeTitle,
 } from "../lit-watch";
 import type {
   AddIncludedResultDto,
@@ -53,6 +54,13 @@ import type {
 function absResourcePath(projectRoot: string, path: string): string {
   if (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)) return path;
   return `${projectRoot}/${path}`;
+}
+
+function sourceUrl(url: string): string {
+  const trimmed = url.trim();
+  if (/^10\.\d{4,9}\/\S+$/i.test(trimmed)) return `https://doi.org/${trimmed}`;
+  if (/^doi:\s*10\.\d{4,9}\/\S+$/i.test(trimmed)) return `https://doi.org/${trimmed.replace(/^doi:\s*/i, "")}`;
+  return trimmed;
 }
 
 /** 近 8 周命中迷你趋势（手绘 SVG 柱，不引图表库）；悬停出 HoverTip（禁原生 title） */
@@ -137,6 +145,7 @@ function WatchEntryRow({
   onDownload,
   onAttach,
   onDismiss,
+  included,
 }: {
   entry: WatchEntryDto;
   explain: ExplainState | null;
@@ -147,6 +156,7 @@ function WatchEntryRow({
   onDownload: () => void;
   onAttach: () => void;
   onDismiss: () => void;
+  included: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -195,9 +205,10 @@ function WatchEntryRow({
         <button
           type="button"
           className={`${rowActionClass} shrink-0`}
+          disabled={included}
           onClick={onAddIncluded}
         >
-          → 精读
+          {included ? "✓ 已在清单" : "→ 精读"}
         </button>
         <span
           className={`flex shrink-0 items-center ${hoverRevealClass}`}
@@ -273,7 +284,7 @@ function WatchEntryRow({
               label: "打开来源",
               disabled: !entry.url.trim(),
               title: entry.url.trim() ? entry.url : "这条命中没有链接",
-              onSelect: () => void openUrl(entry.url),
+              onSelect: () => void openUrl(sourceUrl(entry.url)),
             },
             {
               label: "关联本地 PDF…",
@@ -476,7 +487,7 @@ function IncludedRow({
               label: "打开来源",
               disabled: !entry.link.trim(),
               title: entry.link.trim() ? entry.link : "这条没有链接",
-              onSelect: () => void openUrl(entry.link),
+              onSelect: () => void openUrl(sourceUrl(entry.link)),
             },
             { label: "移出清单", danger: true, onSelect: onRemove },
           ]}
@@ -728,6 +739,7 @@ export default function LitWatchCard({
   workspaces,
   onOpenSchedules,
   onConfigChanged,
+  focusToken,
 }: {
   projectRoot: string;
   cfg: ProjectConfigDto;
@@ -736,6 +748,8 @@ export default function LitWatchCard({
   onOpenSchedules: () => void;
   /** 下载 PDF 会登记进 project.toml 资源清单：通知父级重读档案卡 */
   onConfigChanged: () => void;
+  /** 收件箱跳转时切回「新命中」页签。 */
+  focusToken?: number | null;
 }) {
   const [entries, setEntries] = useState<WatchEntryDto[] | null>(null);
   const [followups, setFollowups] = useState<WatchFollowupDto[]>([]);
@@ -763,6 +777,7 @@ export default function LitWatchCard({
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setReaderReq = useAppStore((s) => s.setReaderReq);
   const setPage = useAppStore((s) => s.setPage);
+  const [runMenu, setRunMenu] = useState<{ x: number; y: number } | null>(null);
 
   function showToast(text: string) {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -780,12 +795,18 @@ export default function LitWatchCard({
     [],
   );
 
+  useEffect(() => {
+    if (focusToken == null) return;
+    setTab("new");
+  }, [focusToken]);
+
   async function load() {
     const [inbox, subList, includedList, scheduleList, notes] =
       await Promise.all([
         invoke<WatchInboxDto>("list_watch_entries", { projectRoot }).catch(
           (reason) => {
             setError(String(reason));
+            setEntries([]);
             return null;
           },
         ),
@@ -835,15 +856,20 @@ export default function LitWatchCard({
   }, [projectRoot]);
 
   /** 最近一次成功 run（卡头时间 / 立即跑 / 漂移提醒共用） */
+  const radarSchedules = (schedules ?? []).filter((s) => s.skill === "lit-watch");
   const lastOkRun = (s: ScheduleDto) => s.history.find((r) => r.status === "ok");
-  const lastRunAt = (schedules ?? [])
-    .map((s) => s.lastRunAt)
+  const latestRadarRun = radarSchedules
+    .map((s) => ({ schedule: s, run: lastOkRun(s) }))
+    .filter((x): x is { schedule: ScheduleDto; run: NonNullable<ReturnType<typeof lastOkRun>> } => !!x.run)
+    .sort((a, b) => Date.parse(b.run.at) - Date.parse(a.run.at))[0]?.run ?? null;
+  const lastRunAt = radarSchedules
+    .map((s) => lastOkRun(s)?.at ?? null)
     .filter((v): v is string => v !== null)
     .sort()
     .pop();
 
   async function runNow() {
-    const s = schedules?.find((x) => x.enabled) ?? schedules?.[0];
+    const s = radarSchedules.find((x) => x.enabled) ?? radarSchedules[0];
     if (!s) return;
     setRunning(true);
     setError(null);
@@ -980,10 +1006,13 @@ ${topicLine}
 
   const resources: ProjectResourceDto[] = cfg.resources ?? [];
   const visibleEntries = filterLitDismissed(entries ?? [], dismissed);
+  const includedTitles = new Set(
+    (included ?? []).map((item) => normalizeTitle(item.title)),
+  );
   const buckets = weeklyBuckets(entries ?? []);
   const hasSubs = (subs ?? []).length > 0;
   // 关联步骤漂移提醒（只提醒不阻断）：任一任务命中即显示
-  const staleStep = (schedules ?? []).find((s) => {
+    const staleStep = radarSchedules.find((s) => {
     if (!s.linkedStep) return false;
     const step = cfg.steps.find((st) => st.name === s.linkedStep);
     if (!step) return false;
@@ -991,7 +1020,7 @@ ${topicLine}
     const okRun = lastOkRun(s);
     return staleLitHint(
       s.linkedStep,
-      s.lastStatus === "ok" ? s.lastRunAt : (okRun?.at ?? null),
+      okRun?.at ?? null,
       okRun?.newEntries ?? 0,
       ws ? (ws.mergedAt ?? ws.createdAt) : null,
     );
@@ -1008,12 +1037,18 @@ ${topicLine}
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-1">
-          {schedules !== null && schedules.length > 0 && (
+          {radarSchedules.length > 0 && (
             <button
               type="button"
               className={ghostActionClass}
               disabled={running}
-              onClick={() => void runNow()}
+              onClick={(e) => {
+                if (radarSchedules.length === 1) void runNow();
+                else {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setRunMenu({ x: rect.right, y: rect.bottom + 4 });
+                }
+              }}
             >
               {running ? "◔ 运行中…" : "⟳ 立即跑"}
             </button>
@@ -1067,6 +1102,11 @@ ${topicLine}
             ) : (
               <>
                 <TrendChart buckets={buckets} />
+                {latestRadarRun && (
+                  <p className="mt-1 px-2 text-micro text-l4">
+                    最近一次成功巡检新增 {latestRadarRun.newEntries ?? "未知"} 条 · 未忽略 {visibleEntries.length} 条
+                  </p>
+                )}
                 {visibleEntries.length === 0 && (
                   <p className="mt-2 text-xs text-l4">暂无新命中</p>
                 )}
@@ -1108,6 +1148,7 @@ ${topicLine}
                           onDismiss={() =>
                             setDismissed((cur) => dismissLitEntry(cur, entry.id))
                           }
+                          included={includedTitles.has(normalizeTitle(entry.title))}
                         />
                       ))}
                     </ul>
@@ -1143,7 +1184,7 @@ ${topicLine}
                               <button
                                 type="button"
                                 className={`${ghostActionClass} shrink-0`}
-                                onClick={() => void openUrl(f.url)}
+                                onClick={() => void openUrl(sourceUrl(f.url))}
                               >
                                 打开来源
                               </button>
@@ -1188,6 +1229,27 @@ ${topicLine}
             setSubsOpen(false);
             void load();
           }}
+        />
+      )}
+      {runMenu && (
+        <ContextMenu
+          x={runMenu.x}
+          y={runMenu.y}
+          alignRight
+          onClose={() => setRunMenu(null)}
+          items={radarSchedules.map((s) => ({
+            label: `${s.name} · ${s.frequency === "weekly" ? "每周" : "每天"}`,
+            title: "立即运行这条文献雷达任务",
+            onSelect: () => {
+              setRunMenu(null);
+              setRunning(true);
+              setError(null);
+              void invoke("run_schedule_now", { id: s.id }).catch((reason) => {
+                setRunning(false);
+                setError(String(reason));
+              });
+            },
+          }))}
         />
       )}
       {toast && (

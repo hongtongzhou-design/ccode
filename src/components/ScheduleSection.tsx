@@ -264,6 +264,87 @@ function RunHistoryItem({ record }: { record: RunRecordDto }) {
   );
 }
 
+function EditScheduleModal({
+  schedule,
+  steps,
+  profiles,
+  onClose,
+  onSaved,
+}: {
+  schedule: ScheduleDto;
+  steps: { name: string }[];
+  profiles: { id: string; name: string }[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(schedule.name);
+  const [skill, setSkill] = useState(schedule.skill);
+  const [skills, setSkills] = useState<SkillDto[]>([]);
+  const [frequency, setFrequency] = useState<"daily" | "weekly">(
+    schedule.frequency === "weekly" ? "weekly" : "daily",
+  );
+  const [weekday, setWeekday] = useState(schedule.weekday ?? 1);
+  const [time, setTime] = useState(`${String(schedule.hour).padStart(2, "0")}:${String(schedule.minute).padStart(2, "0")}`);
+  const [profileId, setProfileId] = useState(schedule.profileId ?? "");
+  const [linkedStep, setLinkedStep] = useState(schedule.linkedStep ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    invoke<SkillDto[]>("list_skills").then(setSkills).catch(() => {});
+  }, []);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const [hour, minute] = time.split(":").map((v) => parseInt(v, 10));
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+      setError("时间格式不正确");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("update_schedule", {
+        id: schedule.id,
+        patch: {
+          name: name.trim(),
+          skill,
+          frequency,
+          weekday: frequency === "weekly" ? weekday : null,
+          hour,
+          minute,
+          profileId: profileId || null,
+          linkedStep: linkedStep || null,
+        },
+      });
+      onSaved();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade" onClick={onClose}>
+      <form onClick={(e) => e.stopPropagation()} onSubmit={submit} className="w-[26rem] rounded-md border border-field ccode-float-surface p-5">
+        <h2 className="mb-4 text-base font-semibold text-l1">编辑定时任务</h2>
+        <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">技能</span><select className={fieldClass} value={skill} onChange={(e) => setSkill(e.target.value)}>{scheduleSkillOptions(skills).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></label>
+        <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">任务名</span><input className={fieldClass} required value={name} onChange={(e) => setName(e.target.value)} /></label>
+        <div className="mb-3 flex gap-2">
+          <label className="block flex-1 text-sm"><span className="mb-1 block text-xs text-l3">周期</span><select className={fieldClass} value={frequency} onChange={(e) => setFrequency(e.target.value as "daily" | "weekly")}><option value="daily">每天</option><option value="weekly">每周</option></select></label>
+          {frequency === "weekly" && <label className="block flex-1 text-sm"><span className="mb-1 block text-xs text-l3">星期</span><select className={fieldClass} value={weekday} onChange={(e) => setWeekday(Number(e.target.value))}>{["一","二","三","四","五","六","日"].map((d, i) => <option key={d} value={i + 1}>周{d}</option>)}</select></label>}
+          <label className="block flex-1 text-sm"><span className="mb-1 block text-xs text-l3">时间</span><input className={fieldClass} type="time" required value={time} onChange={(e) => setTime(e.target.value)} /></label>
+        </div>
+        <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">运行配置</span><select className={fieldClass} value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">自动</option>{profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+        {steps.length > 0 && <label className="mb-4 block text-sm"><span className="mb-1 block text-xs text-l3">关联步骤</span><select className={fieldClass} value={linkedStep} onChange={(e) => setLinkedStep(e.target.value)}><option value="">不关联</option>{steps.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}</select></label>}
+        {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
+        <div className="flex justify-end gap-2"><button type="button" onClick={onClose} className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover">取消</button><button type="submit" disabled={busy} className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text">{busy ? "保存中…" : "保存"}</button></div>
+      </form>
+    </div>
+  );
+}
+
 /**
  * 项目分组内的「◔ 定时任务」区块（scheduler.rs）：只显示 projectRoot 命中本项目的任务。
  * 列表自取自刷：挂载时拉一次，scheduler-run-done 事件（全局通知在 App.tsx 另行监听）到达时重拉。
@@ -288,6 +369,7 @@ export default function ScheduleSection({
   );
   const [historyOpen, setHistoryOpen] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [editSchedule, setEditSchedule] = useState<ScheduleDto | null>(null);
 
   async function load() {
     try {
@@ -542,11 +624,18 @@ export default function ScheduleSection({
           onClose={() => setMenu(null)}
           items={[
             {
-              label: "删除任务",
+                    label: "删除任务",
               danger: true,
               onSelect: () => {
                 const s = schedules.find((t) => t.id === menu.id);
                 if (s) void removeSchedule(s);
+              },
+            },
+            {
+              label: "编辑任务",
+              onSelect: () => {
+                const s = schedules.find((t) => t.id === menu.id);
+                if (s) setEditSchedule(s);
               },
             },
           ]}
@@ -560,6 +649,18 @@ export default function ScheduleSection({
           onCreated={() => {
             setCreateOpen(false);
             setOpen(true);
+            void load();
+          }}
+        />
+      )}
+      {editSchedule && (
+        <EditScheduleModal
+          schedule={editSchedule}
+          steps={steps}
+          profiles={profiles}
+          onClose={() => setEditSchedule(null)}
+          onSaved={() => {
+            setEditSchedule(null);
             void load();
           }}
         />

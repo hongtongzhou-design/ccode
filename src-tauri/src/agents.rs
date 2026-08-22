@@ -312,6 +312,18 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
     for (k, v) in &profile.extra_env {
         plan.env.push((k.clone(), v.clone()));
     }
+    if profile.no_auth {
+        for key in [
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
+            "GEMINI_API_KEY", "GOOGLE_API_KEY", "CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN",
+            "CURSOR_API_KEY", "XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "KIMI_API_KEY",
+            "KIMI_MODEL_API_KEY",
+        ] {
+            if !plan.env_remove.iter().any(|existing| existing == key) {
+                plan.env_remove.push(key.into());
+            }
+        }
+    }
     plan
 }
 
@@ -712,6 +724,7 @@ fn external_profile(
             profile.base_url = Some(url.to_string());
         }
     }
+    crate::profile_validation::validate_profile_fields(&profile)?;
     Ok(profile)
 }
 
@@ -720,6 +733,16 @@ fn require_external_profile_id(profile_id: Option<&str>) -> Result<&str, String>
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .ok_or_else(|| "外部启动必须指定 Ccode profile，请重新选择配置".to_string())
+}
+
+pub(crate) fn ensure_launch_credentials(profile: &Profile, key: Option<&str>) -> Result<(), String> {
+    if profile.account_type == crate::profiles::AccountType::Api
+        && !profile.no_auth
+        && key.is_none_or(|value| value.trim().is_empty())
+    {
+        return Err("API 连接没有密钥；请回到连接页填写密钥，或明确勾选本地端点无密钥".into());
+    }
+    Ok(())
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -950,6 +973,7 @@ fn open_external_profiled(
         .filter(|m| !m.is_empty())
         .or_else(|| profile.models.first().map(String::as_str));
     let key = crate::profiles::get_key(&profile.id)?;
+    ensure_launch_credentials(&profile, key.as_deref())?;
     let (args, env, env_remove) = external_launch_args(
         agent_id,
         &profile,
@@ -1085,6 +1109,28 @@ pub fn resume_external_terminal(
         model.as_deref(),
         cwd,
         Some(session_id),
+        None,
+    )
+}
+
+/// 在外部终端按指定 Ccode profile 新建会话。与连接页「在终端使用」同一套注入计划。
+#[tauri::command]
+pub fn new_external_terminal(
+    store: tauri::State<'_, ProfileStore>,
+    agent_id: &str,
+    cwd: &str,
+    profile_id: String,
+    model: Option<String>,
+) -> Result<(), String> {
+    open_external_profiled(
+        &store,
+        agent_id,
+        Some(&profile_id),
+        None,
+        None,
+        model.as_deref(),
+        cwd,
+        None,
         None,
     )
 }
@@ -1435,6 +1481,8 @@ pub struct OfficialAccountStatusDto {
     pub login_command: Option<String>,
     /// 配置文件冲突告警（中文可读描述；只含文件名与变量名，绝不含密钥值）
     pub conflicts: Vec<String>,
+    /// Files that can be safely cleaned by removing only Ccode-owned API keys.
+    pub cleanup_supported: bool,
 }
 
 /// auth 文件里标识「官方账号已登录」的凭证字段名（各家结构不同，命中任一即算）：
@@ -1525,6 +1573,20 @@ fn settings_env_conflict_keys(text: &str, keys: &[&str]) -> Vec<String> {
         .collect()
 }
 
+fn toml_conflict_keys(text: &str, keys: &[&str]) -> Vec<String> {
+    let Ok(value) = text.parse::<toml::Value>() else { return Vec::new() };
+    let mut out = value
+        .as_table()
+        .into_iter()
+        .flat_map(|table| table.keys())
+        .filter(|key| keys.contains(&key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// 逐条执行注册表的冲突探测；文件缺失/不可读静默跳过（不算冲突）
 fn probe_conflicts(home: &std::path::Path, oa: &crate::agent_specs::OfficialAccountSpec) -> Vec<String> {
     let mut out = Vec::new();
@@ -1534,6 +1596,8 @@ fn probe_conflicts(home: &std::path::Path, oa: &crate::agent_specs::OfficialAcco
         };
         let hits = if probe.file.ends_with(".json") {
             settings_env_conflict_keys(&text, probe.keys)
+        } else if probe.file.ends_with(".toml") {
+            toml_conflict_keys(&text, probe.keys)
         } else {
             dotenv_conflict_keys(&text, probe.keys)
         };
@@ -1542,6 +1606,117 @@ fn probe_conflicts(home: &std::path::Path, oa: &crate::agent_specs::OfficialAcco
         }
     }
     out
+}
+
+fn clear_conflict_keys_in_file(path: &std::path::Path, probe: &crate::agent_specs::ConflictProbe) -> Result<bool, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+    if probe.file.ends_with(".json") {
+        let mut value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("{} 不是合法 JSON，已停止清理: {e}", path.display()))?;
+        let Some(env) = value.get_mut("env").and_then(|v| v.as_object_mut()) else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        for key in probe.keys {
+            changed |= env.remove(*key).is_some();
+        }
+        if changed {
+            let mut out = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+            out.push('\n');
+            crate::profiles::atomic_write(path, &out)?;
+            tighten_private_file(path)?;
+        }
+        return Ok(changed);
+    }
+    if probe.file.ends_with(".toml") {
+        let mut doc = text.parse::<toml_edit::DocumentMut>()
+            .map_err(|e| format!("{} 不是合法 TOML，已停止清理: {e}", path.display()))?;
+        let mut changed = false;
+        for key in probe.keys {
+            changed |= doc.remove(key).is_some();
+        }
+        if changed {
+            crate::profiles::atomic_write(path, &doc.to_string())?;
+            tighten_private_file(path)?;
+        }
+        return Ok(changed);
+    }
+    if probe.file.ends_with(".env") {
+        let mut changed = false;
+        let lines: Vec<String> = text
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                let assignment = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+                let name = assignment.split_once('=').map(|(name, _)| name.trim());
+                let remove = name.is_some_and(|name| probe.keys.contains(&name));
+                changed |= remove;
+                !remove
+            })
+            .map(String::from)
+            .collect();
+        if changed {
+            let mut out = lines.join("\n");
+            out.push('\n');
+            crate::profiles::atomic_write(path, &out)?;
+            tighten_private_file(path)?;
+        }
+        return Ok(changed);
+    }
+    Ok(false)
+}
+
+fn tighten_private_file(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("收紧冲突配置权限失败: {e}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_account_conflicts(agent_id: &str) -> Result<Vec<String>, String> {
+    let spec = agent_spec(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
+    let oa = spec
+        .official_account
+        .as_ref()
+        .ok_or_else(|| "该 agent 没有可清理的官方账号冲突项".to_string())?;
+    let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
+    let backup_dir = dirs::config_dir()
+        .ok_or("无法确定平台配置目录")?
+        .join("ccode")
+        .join("conflict-backups");
+    std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建冲突备份目录失败: {e}"))?;
+    let mut changed = Vec::new();
+    for probe in oa.conflict_probes {
+        if !probe.file.ends_with(".json") && !probe.file.ends_with(".env") && !probe.file.ends_with(".toml") {
+            continue;
+        }
+        let path = home.join(probe.file);
+        if path.is_file() {
+            let backup = backup_dir.join(format!(
+                "{}-{}-{}.bak",
+                agent_id,
+                uuid::Uuid::new_v4(),
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            std::fs::copy(&path, &backup).map_err(|e| format!("备份冲突文件失败: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| format!("设置冲突备份权限失败: {e}"))?;
+            }
+            if clear_conflict_keys_in_file(&path, probe)? {
+                changed.push(format!("~/{}（备份已保存）", probe.file));
+            } else {
+                let _ = std::fs::remove_file(&backup);
+            }
+        }
+    }
+    Ok(changed)
 }
 
 /// 展开 auth 文件候选：(展示路径, 绝对路径)。`/*` 结尾 = 目录扫描（kimi credentials/<name>.json
@@ -1589,6 +1764,7 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
             detail: Some(format!("未知 agent: {agent_id}")),
             login_command: None,
             conflicts: Vec::new(),
+            cleanup_supported: false,
         };
     };
     let Some(oa) = spec.official_account.as_ref() else {
@@ -1598,6 +1774,7 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
             detail: Some("该 CLI 暂未接入官方账号（不支持或无官方账号语义）".into()),
             login_command: None,
             conflicts: Vec::new(),
+            cleanup_supported: false,
         };
     };
     // login_cmd 为空 = 裸启动 CLI 后在 TUI 内登录（gemini / qwen）
@@ -1629,6 +1806,7 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
                     detail: Some(format!("已检测到登录凭证（~/{rel}）")),
                     login_command,
                     conflicts,
+                    cleanup_supported: oa.conflict_probes.iter().all(|probe| probe.file.ends_with(".json") || probe.file.ends_with(".env") || probe.file.ends_with(".toml")),
                 };
             }
             Some(AuthProbe::Unrecognized) => {
@@ -1669,6 +1847,7 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
         detail: Some(detail),
         login_command,
         conflicts,
+        cleanup_supported: oa.conflict_probes.iter().all(|probe| probe.file.ends_with(".json") || probe.file.ends_with(".env") || probe.file.ends_with(".toml")),
     }
 }
 
@@ -1682,6 +1861,7 @@ mod tests {
             agent: agent.into(),
             name: "测试".into(),
             account_type: Default::default(),
+            no_auth: false,
             protocol: None,
             base_url: base_url.map(|s| s.into()),
             models: vec![],
@@ -2824,6 +3004,15 @@ mod tests {
         assert!(require_external_profile_id(None).is_err());
         assert!(require_external_profile_id(Some("  ")).is_err());
         assert_eq!(require_external_profile_id(Some(" p1 ")).unwrap(), "p1");
+    }
+
+    #[test]
+    fn no_auth_profile_cleans_inherited_credentials() {
+        let mut p = profile("codex", Some("http://127.0.0.1:11434/v1"));
+        p.no_auth = true;
+        let plan = launch_plan(&p, None, Some("local-model"));
+        assert!(plan.env_remove.contains(&"OPENAI_API_KEY".to_string()));
+        assert!(plan.env_remove.contains(&"CODEX_API_KEY".to_string()));
     }
 
     #[test]

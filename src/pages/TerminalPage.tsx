@@ -58,12 +58,18 @@ import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
 import { XTERM_PALETTES, resolvePaletteId } from "../terminal-palettes";
 import { isLightTheme } from "../themes";
 import {
-  launchModelNote,
   looksLikeModelId,
   modelOnProfileSwitch,
 } from "../model-switch";
 import { isSoftwareWebGL } from "../diagnostics";
-import { Eye, EyeOff, LayoutPanelTop, RefreshCw } from "lucide-react";
+import {
+  Eye,
+  EyeOff,
+  LayoutPanelTop,
+  MessageSquare,
+  RefreshCw,
+  SquareTerminal,
+} from "lucide-react";
 import {
   attentionTransition,
   debounceAllows,
@@ -279,8 +285,6 @@ const TerminalView = memo(function TerminalView({
   onConsumeExternalCwd,
   onStatus,
   onSessionUpdate,
-  onHandoff,
-  onDigest,
   focusMode,
   onActions,
   onRestoreComplete,
@@ -333,10 +337,6 @@ const TerminalView = memo(function TerminalView({
   /** 上报回调带 tabId（父级共享 useCallback，memo 稳定） */
   onStatus: (id: string, s: TabStatus) => void;
   onSessionUpdate: (id: string, s: SessionLinkState) => void;
-  /** 「◈ 接力到…」：把当前关联会话交给父级的接力目标选择器 */
-  onHandoff?: (source: HandoffSource) => void;
-  /** 「◈ 提炼接力…」：把当前关联会话交给父级的提炼接力选择器（AI 蒸馏简报） */
-  onDigest?: (source: HandoffSource) => void;
   /** 专注终端：隐藏标签内状态条（动作移到标签条 ⋯ 菜单） */
   focusMode?: boolean;
   /** 向父级注册本标签的动作表（标签条 ⋯ 菜单调用） */
@@ -484,7 +484,12 @@ const TerminalView = memo(function TerminalView({
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 启动栏收缩：空闲时完整展示，启动成功后自动收成一行状态条（「修改」可重新展开）
-  const [barExpanded, setBarExpanded] = useState(true);
+  // 恢复占位标签默认使用紧凑行，避免「可恢复」卡片上方再堆一整套启动配置。
+  const [barExpanded, setBarExpanded] = useState(!restored);
+
+  useEffect(() => {
+    if (restored && !running && !shellActive) setBarExpanded(false);
+  }, [restored, running, shellActive]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -640,9 +645,27 @@ const TerminalView = memo(function TerminalView({
   const [conv, setConv] = useState<ChatMessageDto[]>([]);
   const [pendingReply, setPendingReplyState] = useState(false);
   const pendingReplyRef = useRef(false);
+  const pendingUserRef = useRef<ChatMessageDto | null>(null);
+  const pendingAssistantKeysRef = useRef<Set<string>>(new Set());
+  const pendingReplyTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  function stopPendingReplyPolling() {
+    if (pendingReplyTimerRef.current) {
+      clearInterval(pendingReplyTimerRef.current);
+      pendingReplyTimerRef.current = null;
+    }
+  }
+  function startPendingReplyPolling() {
+    if (pendingReplyTimerRef.current) return;
+    pendingReplyTimerRef.current = setInterval(() => {
+      if (pendingReplyRef.current) void fetchConversation(true);
+      else stopPendingReplyPolling();
+    }, 700);
+  }
   const setPendingReply = (value: boolean) => {
     pendingReplyRef.current = value;
     setPendingReplyState(value);
+    if (value) startPendingReplyPolling();
+    else stopPendingReplyPolling();
   };
   const lastResumeRef = useRef<string | null>(null);
   const linkCtxRef = useRef<{
@@ -888,7 +911,7 @@ const TerminalView = memo(function TerminalView({
     cwdIssue ||
     (initialExtraEnv && Object.keys(initialExtraEnv).length > 0) ||
     (!running &&
-      (shellActive || exited || restored))
+      (shellActive || exited))
   );
   // ⌘↵ 直启动作经 ref 转发（xterm 键盘层 handler 是挂载期闭包，只能经 ref 拿最新状态）
   const launchNowRef = useRef<() => void>(() => {});
@@ -1226,6 +1249,7 @@ const TerminalView = memo(function TerminalView({
       subs.forEach((s) => s.dispose());
       stopLinkTimer();
       stopSessionWatcher();
+      stopPendingReplyPolling();
       // 释放 liveSessions 登记（「进行中」标记随标签消失）
       const sid = linkCtxRef.current?.sessionId;
       const linkedAgent = linkCtxRef.current?.agentId;
@@ -1486,7 +1510,7 @@ const TerminalView = memo(function TerminalView({
     }).catch(() => null);
     if (sig) {
       nextSig = `${sig[0]}:${sig[1]}`;
-      if (!force && nextSig === convSigRef.current) return;
+      if (!force && !pendingReplyRef.current && nextSig === convSigRef.current) return;
     }
     try {
       const page = await invoke<ConversationPageDto>(
@@ -1499,10 +1523,43 @@ const TerminalView = memo(function TerminalView({
       );
       if (linkCtxRef.current !== ctx || requestId !== conversationRequestRef.current)
         return;
-      setConv(page.messages.slice(-50));
-      const lastMessage = page.messages[page.messages.length - 1];
-      if (pendingReplyRef.current && lastMessage?.role !== "user") {
+      const parsedMessages = page.messages.slice(-50);
+      const pendingUser = pendingUserRef.current;
+      const hasPendingUser = pendingUser
+        ? parsedMessages.some(
+            (message) =>
+              message.role === "user" &&
+              message.blocks.some(
+                (block) =>
+                  block.kind === "text" &&
+                  block.text === pendingUser.blocks[0]?.text,
+              ),
+          )
+        : false;
+      // 会话文件可能先写入旧快照或只写入用户消息；在真实 Agent 回复出现前，
+      // 保留本地即时消息，避免聊天区闪回空白。若后端暂时只解析到回复，
+      // 把本地用户消息插到第一条回复之前，确保阅读顺序仍然正确。
+      const mergedMessages =
+        pendingReplyRef.current && pendingUser && !hasPendingUser
+          ? (() => {
+              const next = [...parsedMessages];
+              const replyIndex = next.findIndex((message) => message.role !== "user");
+              next.splice(replyIndex < 0 ? next.length : replyIndex, 0, pendingUser);
+              return next;
+            })()
+          : parsedMessages;
+      setConv(mergedMessages.slice(-50));
+      const hasNewAssistant = parsedMessages.some(
+        (message) =>
+          message.role !== "user" &&
+          !pendingAssistantKeysRef.current.has(JSON.stringify(message.blocks)),
+      );
+      if (
+        pendingReplyRef.current &&
+        hasNewAssistant
+      ) {
         setPendingReply(false);
+        pendingUserRef.current = null;
       }
       if (nextSig) convSigRef.current = nextSig;
       setLinkState("linked");
@@ -1541,6 +1598,11 @@ const TerminalView = memo(function TerminalView({
     setLinkState("linked");
     setSyncState("polling");
     setLiveSession(ctx.agentId, sessionId, tabId);
+    void invoke("set_session_profile_command", {
+      agent: ctx.agentId,
+      sessionId,
+      profileId,
+    });
     void startSessionWatcher(filePath, ctx.agentId);
     // 关联成功后降低兜底轮询频率；实时刷新以 watcher 事件为主。
     startLinkPolling(5000);
@@ -1613,7 +1675,10 @@ const TerminalView = memo(function TerminalView({
       else setLinkState("timeout");
     }
     await fetchConversation(true);
-    setPendingReply(false);
+    // Agent 退出不代表会话文件已经完成落盘；保留短轮询，让最后一条 assistant
+    // 消息有机会在 shell 回落后进入聊天层。fetchConversation 成功解析到回复时
+    // 会自行清理 pending 状态。
+    if (pendingReplyRef.current) startPendingReplyPolling();
     const sid = linkCtxRef.current?.sessionId;
     const linkedAgent = linkCtxRef.current?.agentId;
     if (sid && linkedAgent) setLiveSession(linkedAgent, sid, null);
@@ -1635,6 +1700,8 @@ const TerminalView = memo(function TerminalView({
     setSyncState("waiting");
     setConv([]);
     setPendingReply(false);
+    pendingUserRef.current = null;
+    pendingAssistantKeysRef.current = new Set();
     setAttention(null);
   }
 
@@ -1811,10 +1878,10 @@ const TerminalView = memo(function TerminalView({
 
   async function writeChatMessage(ptyId: string, text: string): Promise<ChatSendResult> {
     try {
-      await invoke("pty_write", { ptyId, data: text });
-      await invoke("pty_write", {
+      await invoke("pty_write_submit", {
         ptyId,
-        data: submitCsiU ? "\x1b[13u" : "\r",
+        text,
+        submit: submitCsiU ? "\x1b[13u" : "\r",
       });
       return { error: null };
     } catch (e) {
@@ -1831,6 +1898,12 @@ const TerminalView = memo(function TerminalView({
       timestamp: new Date().toISOString(),
       usage: null,
     };
+    pendingAssistantKeysRef.current = new Set(
+      conv
+        .filter((item) => item.role !== "user")
+        .map((item) => JSON.stringify(item.blocks)),
+    );
+    pendingUserRef.current = message;
     setConv((current) => {
       const last = current[current.length - 1];
       const lastText = last?.blocks.map((block) => block.text).join("");
@@ -1843,8 +1916,11 @@ const TerminalView = memo(function TerminalView({
   async function sendMessage(text: string): Promise<ChatSendResult> {
     const message = text.trim();
     if (!message) return { error: null };
-    if (running && activePtyId) {
-      const result = await writeChatMessage(activePtyId, message);
+    // 发送链路以 PTY ref 为准，不依赖 running/activePtyId 的异步镜像状态。
+    // 聊天层与终端层共享这个 PTY；刚启动或刚从 shell 回落时，React 状态可能尚未完成一帧更新。
+    const currentPtyId = ptyIdRef.current;
+    if (ptyKindRef.current === "agent" && currentPtyId) {
+      const result = await writeChatMessage(currentPtyId, message);
       if (!result.error) showOptimisticUserMessage(message);
       return result;
     }
@@ -1962,46 +2038,6 @@ const TerminalView = memo(function TerminalView({
   }
 
   const terminalMenuItems = [
-    ...(running
-      ? [{ label: "停止（回落 Shell）", onSelect: () => void stop() }]
-      : []),
-    ...(lastResumeRef.current && shellActive
-      ? [
-          {
-            label: "⟳ 恢复对话",
-            onSelect: () => void launch(lastResumeRef.current ?? undefined),
-          },
-        ]
-      : []),
-    ...(sessionFile || lastResumeRef.current
-      ? [{ label: "⤴ 在对话页打开", onSelect: openConversationPage }]
-      : []),
-    ...(sessionFile && linkedSessionId
-      ? [
-          {
-            label: "◈ 接力到…",
-            onSelect: () =>
-              onHandoff?.({
-                agent: linkCtxRef.current?.agentId ?? agentId,
-                sessionId: linkedSessionId,
-                filePath: sessionFile,
-                cwd,
-                title: linkedSessionTitle,
-              }),
-          },
-          {
-            label: "◈ 提炼接力…",
-            onSelect: () =>
-              onDigest?.({
-                agent: linkCtxRef.current?.agentId ?? agentId,
-                sessionId: linkedSessionId,
-                filePath: sessionFile,
-                cwd,
-                title: linkedSessionTitle,
-              }),
-          },
-        ]
-      : []),
     ...(!running && !shellActive
       ? [{ label: "打开 Shell", onSelect: () => void openShell() }]
       : []),
@@ -2039,7 +2075,6 @@ const TerminalView = memo(function TerminalView({
         })();
       },
     },
-    { label: "◎ 查找终端输出", onSelect: () => setSearchOpen(true) },
   ];
 
   // 终端画布右键菜单：复制按打开菜单那一刻的选区裁剪（setTermCtxMenu 触发重渲染即取到最新值）
@@ -2059,16 +2094,16 @@ const TerminalView = memo(function TerminalView({
   ];
 
   return (
-    <div className="flex h-full flex-col px-2 pt-1">
+    <div className="flex h-full flex-col px-1 pt-2">
       {barExpanded ? (
         <>
-          <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
+          <div className="mb-1 flex min-w-0 flex-wrap items-start gap-x-1.5 gap-y-2">
             {/* Agent/配置/模型收进同一条分段工具条（v3.92）：去掉三个独立框线；
                 段间留空隙（容器 gap + 内边距）各自成小胶囊，不粘在一起。
                 v3.93：段间加 h-4 短竖线（不贯穿整行，居中一小段）强化三段的分组边界 */}
-            <div className="flex min-w-0 items-center gap-1 rounded-md border border-field bg-inset p-0.5">
+            <div className="flex w-fit min-w-0 max-w-full flex-[0_1_auto] items-center gap-1 overflow-hidden rounded-md border border-field bg-inset p-0.5">
             <select
-              className={`${seg} w-36 shrink-0`}
+              className={`${seg} w-[clamp(6.5rem,10vw,8rem)] min-w-[6rem] max-w-[8rem] shrink`}
               value={agentId}
               onChange={(e) => {
                 setAgentId(e.target.value);
@@ -2087,7 +2122,7 @@ const TerminalView = memo(function TerminalView({
             <span aria-hidden="true" className="h-4 w-px shrink-0 bg-field" />
             <select
               ref={profileSelectRef}
-              className={`${seg} w-40 shrink-0`}
+              className={`${seg} w-[clamp(7rem,12vw,9rem)] min-w-[6.5rem] max-w-[9rem] shrink`}
               value={profileId}
               onChange={(e) => {
                 const prevModels =
@@ -2138,7 +2173,7 @@ const TerminalView = memo(function TerminalView({
               // 自由输入的模型启动成功后记入历史（ccode.modelHistory.<agent>），下次直接可选
               <>
               <span aria-hidden="true" className="h-4 w-px shrink-0 bg-field" />
-              <span className="relative w-56 shrink-0">
+              <span className="relative w-[clamp(8rem,14vw,11rem)] min-w-[7rem] max-w-[11rem] shrink">
                 <input
                   className={`${seg} w-full`}
                   value={model}
@@ -2186,49 +2221,43 @@ const TerminalView = memo(function TerminalView({
               </>
             )}
             </div>
-            {/* 目录由底部状态栏胶囊编辑（仅未启动）；主栏保持 Agent → 配置 → 模型 → 启动。 */}
-            <span className="ml-auto flex shrink-0 items-center gap-2">
+            <span className="ml-auto flex shrink-0 items-center gap-1.5">
               {renderSkillMenu(false, true)}
               {renderMcpMenu(false, true)}
+              {!shellOnly &&
+                (running ? (
+                  <button
+                    onClick={stop}
+                    className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-field bg-inset px-3 text-sm text-err-text hover:bg-hover"
+                  >
+                    停止
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => (restored ? void restoreTask() : void launch())}
+                    disabled={!profileId}
+                    className={`inline-flex h-8 shrink-0 items-center justify-center rounded-md border px-3 text-sm disabled:opacity-50 ${
+                      welcomeVisible
+                        ? "border-field bg-inset text-l2 hover:bg-hover"
+                        : "border-cta-bd bg-cta text-cta-text hover:brightness-110"
+                    }`}
+                  >
+                    {restored ? "恢复任务" : "运行"}
+                  </button>
+                ))}
+              <button
+                type="button"
+                onClick={openTerminalActionMenu}
+                title="更多终端操作"
+                aria-label="更多终端操作"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-sm text-l3 hover:bg-hover hover:text-l1"
+              >
+                ⋯
+              </button>
             </span>
-            {/* run 脚本（shellOnly）标签不走 agent 启动流程：隐藏启动/停止按钮，
-                避免误点「启动」无确认杀掉正在跑的脚本 shell */}
-            {!shellOnly &&
-              (running ? (
-                <button
-                  onClick={stop}
-                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-field bg-inset px-3 text-sm text-err-text hover:bg-hover"
-                >
-                  停止
-                </button>
-              ) : (
-                /* 空态卡片在场时降级为线框——同一视野内只留卡片里一个高亮主按钮（v3.91） */
-                <button
-                  onClick={() => (restored ? void restoreTask() : void launch())}
-                  disabled={!profileId}
-                  className={`inline-flex h-8 shrink-0 items-center justify-center rounded-md border px-3 text-sm disabled:opacity-50 ${
-                    welcomeVisible
-                      ? "border-field bg-inset text-l2 hover:bg-hover"
-                      : "border-cta-bd bg-cta text-cta-text hover:brightness-110"
-                  }`}
-                >
-                  {restored ? "恢复任务" : "运行"}
-                </button>
-              ))}
-            <button
-              type="button"
-              onClick={openTerminalActionMenu}
-              title="更多终端操作"
-              aria-label="更多终端操作"
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-sm text-l3 hover:bg-hover hover:text-l1"
-            >
-              ⋯
-            </button>
-            {/* 模型相关的「为什么没生效」就近说清（v3.88）：
-                以前这些只写在配置页表单与用户手册里，用户在启动栏换模型没反应时看不到任何解释 */}
+            {/* 模型相关的异常提示独占下一行，不挤压右侧动作组。 */}
             {(() => {
               const prof = profiles.find((p) => p.id === profileId);
-              const cap = launchModelNote(agentId, prof?.models.length ?? 0);
               const emptyModels =
                 !!prof && prof.models.length === 0 && !model.trim();
               const odd = model.trim() !== "" && !looksLikeModelId(model);
@@ -2238,10 +2267,10 @@ const TerminalView = memo(function TerminalView({
                   ? "这个配置没填模型，会用 CLI 自己的默认值。"
                   : odd
                     ? "这串不太像模型名，确认一下。"
-                    : cap;
+                    : null;
               return line ? (
                 <span
-                  className={`w-full text-micro leading-4 ${
+                    className={`order-last w-full truncate text-micro leading-4 ${
                     modelKept || emptyModels || odd ? "text-warn-text" : "text-l4"
                   }`}
                 >
@@ -2293,7 +2322,7 @@ const TerminalView = memo(function TerminalView({
           ) : null}
           {/* 第二行（状态提示行）有内容才渲染；⋯ 已挪到第一行末尾（v3.92） */}
           {showBarMeta && (
-          <div className="mb-2 flex min-h-7 flex-wrap items-center gap-2 border-t border-hairline pt-1 text-xs">
+          <div className="mb-1 flex min-h-0 flex-wrap items-center gap-2 text-xs">
             {initialExtraEnv && Object.keys(initialExtraEnv).length > 0 && (
               <span
                 className="text-l4"
@@ -2309,9 +2338,6 @@ const TerminalView = memo(function TerminalView({
             )}
             {exited && !running && !shellActive && (
               <span className="text-l3">进程已退出</span>
-            )}
-            {restored && !running && !shellActive && (
-              <span className="text-l3">上次任务，可恢复</span>
             )}
             {cwdIssue && (
               <span className="truncate text-warn-text" title={cwdIssue}>
@@ -2331,7 +2357,7 @@ const TerminalView = memo(function TerminalView({
         </>
       ) : focusMode ? null : (
         /* 收缩态只保留启动配置入口；聊天统一从主工作区进入。 */
-        <div className="mb-1 flex h-7 items-center gap-2 text-xs text-l4">
+        <div className="mt-1 mb-1 flex h-7 items-center gap-2 text-xs text-l4">
           <span className="truncate">
             {agentLabel(agentId)}
             {selectedProfile ? ` · ${selectedProfile.name}` : ""}
@@ -2348,6 +2374,7 @@ const TerminalView = memo(function TerminalView({
             )}
             {shellActive && !running ? " · shell 模式" : ""}
             {exited && !running && !shellActive ? " · 已退出" : ""}
+            {restored && !running && !shellActive ? " · 上次任务，可恢复" : ""}
           </span>
           {error && <span className="truncate text-err-text">{error}</span>}
           <span className="ml-auto flex shrink-0 items-center gap-1">
@@ -2830,38 +2857,23 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             },
           ]
         : []),
-      ...(s?.running || sessFile
-        ? [
-            {
-              label: "聊天界面",
-              onSelect: () => {
-                setFocusMode(false);
-                switchSurface("chat");
-              },
-            },
-          ]
-        : []),
       { label: "◎ 查找终端输出", onSelect: () => acts?.search() },
       { label: "修改启动配置", onSelect: () => acts?.modify() },
-      { label: "⤢ 退出专注终端", onSelect: () => setFocusMode(false) },
+      ...(focusMode
+        ? [{ label: "⤢ 退出专注终端", onSelect: () => setFocusMode(false) }]
+        : []),
     ];
   }
+
+  // 快速开聊会自动进入专注终端；退出后关闭旧菜单，避免菜单仍保留「退出专注终端」语义。
+  useEffect(() => {
+    if (!focusMode) setFocusMenu(null);
+  }, [focusMode]);
+
   function layoutMenuItems() {
     return [
       {
-        label: focusedSurfaceMode === "chat" ? "✓ 聊天层" : "聊天层",
-        onSelect: () => switchSurface("chat"),
-      },
-      {
-        label: focusedSurfaceMode === "terminal" ? "✓ 终端层" : "终端层",
-        onSelect: () => switchSurface("terminal"),
-      },
-      {
-        label: splitActive
-          ? "✓ 分屏对照"
-          : tabs.length < 2
-            ? "分屏对照（需要两个标签）"
-            : "分屏对照",
+        label: splitActive ? "✓ 退出分屏" : tabs.length < 2 ? "分屏对照（需要两个标签）" : "分屏对照",
         disabled: !splitActive && tabs.length < 2,
         onSelect: () => {
           if (focusedSurfaceMode === "chat") switchSurface("terminal");
@@ -2869,11 +2881,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         },
       },
       {
-        label: rightOpen ? "✓ 显示成果面板" : "显示成果面板",
+        label: rightOpen ? "✓ 隐藏成果面板" : "显示成果面板",
         onSelect: () => setRightOpen((v) => !v),
       },
       {
-        label: focusMode ? "✓ 专注终端" : "专注终端",
+        label: focusMode ? "✓ 退出专注终端" : "专注终端",
         onSelect: () => setFocusMode((v) => !v),
       },
     ];
@@ -4395,7 +4407,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       {/* 中带：终端标签区 */}
       <div className="relative flex min-w-0 flex-1 flex-col">
         {/* 顶部标签条：常驻中带顶部，专注终端下也保留在原位 */}
-        <div className="flex h-8 items-center gap-1 overflow-x-auto bg-strip px-2">
+        <div className="flex h-9 items-center gap-1 overflow-hidden bg-strip px-2">
+          <div className="min-w-0 flex-1 overflow-x-auto">
+            <div className="flex w-full min-w-0 items-center">
           {tabs.map((t, tabIndex) => {
             const s = statuses[t.id];
             const active = t.id === activeId;
@@ -4449,10 +4463,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   position: isDragSource ? "relative" : undefined,
                   zIndex: isDragSource ? 10 : undefined,
                 }}
-                className={`group/tab flex h-8 w-[130px] min-w-[100px] shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-2.5 text-xs ${
+                className={`group/tab flex h-8 min-w-[72px] flex-1 basis-0 cursor-pointer items-center gap-1.5 border px-2.5 text-xs ${
                   active
-                    ? "border-cta text-l1"
-                    : "border-transparent text-l3 hover:text-l1"
+                    ? "rounded-full border-field bg-raised text-l1"
+                    : `border-transparent text-l3 hover:bg-hover hover:text-l1 ${tabIndex > 0 ? "border-l border-hairline" : ""}`
                 } ${isDragSource ? "bg-raised" : ""}`}
               >
                 {attentionDot && (
@@ -4499,30 +4513,39 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               </div>
             );
           })}
+            </div>
+          </div>
           <button
             onClick={() => addTab()}
             title="新建终端标签"
-            className="shrink-0 rounded-sm px-1.5 text-sm text-l4 hover:text-l1"
+            className="flex size-8 shrink-0 items-center justify-center rounded-full border border-hairline text-sm text-l4 hover:bg-hover hover:text-l1"
           >
             ＋
           </button>
-          <span className="ml-2 flex shrink-0 items-center gap-0.5 border-l border-hairline pl-2" aria-label="当前标签显示层">
+          <span
+            className="ml-2 flex shrink-0 items-center gap-0.5 border-l border-hairline pl-2"
+            role="group"
+            aria-label="当前标签显示层"
+          >
             <button
               type="button"
               onClick={() => switchSurface("chat")}
               aria-pressed={focusedSurfaceMode === "chat"}
-              className={`rounded-md px-1.5 py-1 text-micro transition-colors ${focusedSurfaceMode === "chat" ? "bg-seg-sel text-l1" : "text-l4 hover:bg-hover hover:text-l2"}`}
+              title="显示聊天界面"
+              aria-label="显示聊天界面"
+              className={`flex size-7 items-center justify-center rounded-md transition-colors ${focusedSurfaceMode === "chat" ? "bg-seg-sel text-l1" : "text-l4 hover:bg-hover hover:text-l2"}`}
             >
-              聊天
+              <MessageSquare size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
-            <span className="text-micro text-l4">·</span>
             <button
               type="button"
               onClick={() => switchSurface("terminal")}
               aria-pressed={focusedSurfaceMode === "terminal"}
-              className={`rounded-md px-1.5 py-1 text-micro transition-colors ${focusedSurfaceMode === "terminal" ? "bg-seg-sel text-l1" : "text-l4 hover:bg-hover hover:text-l2"}`}
+              title="显示终端界面"
+              aria-label="显示终端界面"
+              className={`flex size-7 items-center justify-center rounded-md transition-colors ${focusedSurfaceMode === "terminal" ? "bg-seg-sel text-l1" : "text-l4 hover:bg-hover hover:text-l2"}`}
             >
-              终端
+              <SquareTerminal size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
           </span>
           <span className="ml-auto flex shrink-0 items-center gap-1">
@@ -4534,10 +4557,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               }}
               title="布局与显示层"
               aria-label="布局与显示层"
-              className="flex items-center gap-1 rounded-sm px-1.5 py-1 text-micro text-l4 hover:bg-hover hover:text-l2"
+              className="flex size-7 items-center justify-center rounded-md text-l4 hover:bg-hover hover:text-l2"
             >
-              <LayoutPanelTop size={14} />
-              布局
+              <LayoutPanelTop size={14} aria-hidden="true" />
             </button>
             {/* ⋯ 改为常驻（v3.88）：原先只在专注模式渲染，非专注时同一批动作散在标签内
                 启动栏的 ⋯ 里，两套菜单内容高度重叠。现在合为一处、位置固定 */}
@@ -4613,8 +4635,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 onConsumeExternalCwd={consumeExternalCwd}
                 onStatus={reportStatus}
                 onSessionUpdate={reportSession}
-                onHandoff={setHandoffSource}
-                onDigest={setDigestSource}
                 focusMode={focusMode}
                 onActions={registerActions}
                 onRestoreComplete={finishRestore}

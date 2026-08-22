@@ -404,6 +404,12 @@ fn plan_writes(
     key: Option<&str>,
     models: &[String],
 ) -> Result<Vec<PlannedWrite>, String> {
+    if profile.account_type == crate::profiles::AccountType::Official {
+        return Err("官方账号不支持「设为全局」；请在 CLI 内登录，Ccode 只在启动时复现账号状态".into());
+    }
+    if profile.no_auth {
+        return Err("无密钥连接不支持「设为全局」；请使用启动注入，避免污染 CLI 全局配置".into());
+    }
     let base_url = profile.base_url.as_deref();
     // 全局模式没有运行时模型选择，默认取模型列表首个（与启动注入的兜底一致）
     let model = models.first().map(|s| s.as_str());
@@ -993,6 +999,7 @@ pub async fn apply_profile_global(
 ) -> Result<GlobalApplyResultDto, String> {
     let profile = store.get(&profile_id)?;
     let key = profiles::get_key(&profile_id)?;
+    crate::agents::ensure_launch_credentials(&profile, key.as_deref())?;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = GLOBAL_CONFIG_MUTEX
             .lock()
@@ -1058,6 +1065,7 @@ mod tests {
             agent: agent.into(),
             name: "测试".into(),
             account_type: Default::default(),
+            no_auth: false,
             protocol: None,
             base_url: Some("https://relay.example.com".into()),
             models: vec!["m1".into()],

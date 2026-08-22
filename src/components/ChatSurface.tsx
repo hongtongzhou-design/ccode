@@ -96,8 +96,8 @@ export default function ChatSurface({
 
   return (
     <div className="absolute inset-0 z-20 flex min-h-0 flex-col bg-canvas">
-      <header className="shrink-0 border-b border-hairline bg-canvas/95 px-4 py-2.5 backdrop-blur-sm">
-        <div className="mx-auto flex w-full max-w-3xl items-center gap-2.5">
+      <header className="shrink-0 border-b border-hairline bg-canvas/95 px-3 py-1.5 backdrop-blur-sm">
+        <div className="flex w-full items-center gap-3 px-2">
           <span className={`size-2 shrink-0 rounded-full ${statusClass}`} />
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
@@ -131,7 +131,7 @@ export default function ChatSurface({
               title={forkAvailable ? "从当前对话摘要新建一个分叉聊天" : "会话建立后才能分叉"}
               className="rounded-md px-2 py-1 text-micro text-l3 hover:bg-hover hover:text-l1 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              ＋ 新建聊天
+              ＋ 新建
             </button>
             {onOpenHistory && (
               <button
@@ -150,7 +150,7 @@ export default function ChatSurface({
 
       {attention === "confirm" && (
         <div className="shrink-0 bg-inset px-5 py-2">
-          <div className="mx-auto flex w-full max-w-3xl items-center justify-between gap-3 text-xs text-warn-text">
+          <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-3 text-xs text-warn-text">
             <span>Agent 需要终端确认、登录或菜单选择。</span>
             <button type="button" onClick={onOpenTerminal} className="shrink-0 rounded-md px-2 py-1 text-l2 hover:bg-hover">
               打开终端
@@ -170,7 +170,7 @@ export default function ChatSurface({
         }}
         className="relative min-h-0 flex-1 overflow-auto"
       >
-        <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-4 pb-6 pt-8 sm:px-5">
+        <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col px-4 pb-6 pt-8 sm:px-5">
           {state === "idle" && messages.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center pb-20 text-center">
               <div className="mb-3 flex size-10 items-center justify-center rounded-xl bg-raised text-lg text-l3">✦</div>

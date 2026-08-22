@@ -7,6 +7,19 @@
 //! 收错的能力声明（思考开了报错）比漏报更有害。
 
 use std::path::PathBuf;
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCapabilityDto {
+    pub model: String,
+    pub thinking: bool,
+    pub context: i64,
+    pub tools: Option<bool>,
+    pub vision: Option<bool>,
+    pub video: Option<bool>,
+    pub streaming: Option<bool>,
+}
 
 /// 单条能力：thinking = 支持思考档位；context = 上下文窗口（None = 走保守默认映射）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +188,49 @@ pub fn model_context_size(model: &str) -> i64 {
     lookup(model)
         .and_then(|c| c.context)
         .unwrap_or_else(|| fallback_context_size(model))
+}
+
+pub fn model_capability(model: &str) -> ModelCapabilityDto {
+    let normalized = normalize(model);
+    let vision = if normalized.contains("kimi-k3")
+        || normalized.starts_with("gemini-2.5")
+        || normalized.starts_with("gemini-3")
+        || normalized.starts_with("gpt-4o")
+        || normalized.starts_with("claude-opus-4")
+    {
+        Some(true)
+    } else {
+        None
+    };
+    let video = if normalized.contains("kimi-k3") { Some(true) } else { None };
+    let tools = if normalized.contains("coder")
+        || normalized.contains("gpt")
+        || normalized.contains("claude")
+        || normalized.contains("gemini")
+        || normalized.contains("kimi")
+        || normalized.contains("qwen")
+        || normalized.contains("deepseek")
+        || normalized.contains("grok")
+        || normalized.contains("glm")
+    {
+        Some(true)
+    } else {
+        None
+    };
+    ModelCapabilityDto {
+        model: model.to_string(),
+        thinking: model_thinking(model),
+        context: model_context_size(model),
+        tools,
+        vision,
+        video,
+        streaming: Some(true),
+    }
+}
+
+#[tauri::command]
+pub fn model_capabilities(models: Vec<String>) -> Vec<ModelCapabilityDto> {
+    models.iter().map(|model| model_capability(model)).collect()
 }
 
 #[cfg(test)]

@@ -4,6 +4,8 @@ export interface Profile {
   name: string;
   /** 账号类型：api = 端点+密钥；official = CLI 官方账号登录（P1a），缺省 api */
   accountType: "api" | "official";
+  /** API profile explicitly allows no credential, normally for localhost endpoints. */
+  noAuth: boolean;
   protocol: string | null;
   baseUrl: string | null;
   /** 可用模型列表，首个为默认 */
@@ -21,12 +23,23 @@ export interface ProfileInput {
   agent: string;
   name: string;
   accountType: "api" | "official";
+  noAuth: boolean;
   protocol: string | null;
   baseUrl: string | null;
   models: string[];
   extraEnv: Record<string, string>;
   /** 明文密钥，仅保存时提交；编辑时留空表示不修改 */
   apiKey: string | null;
+}
+
+export interface ModelCapabilityDto {
+  model: string;
+  thinking: boolean;
+  context: number;
+  tools: boolean | null;
+  vision: boolean | null;
+  video: boolean | null;
+  streaming: boolean | null;
 }
 
 /** 官方账号连接状态（official_account_status，P1a） */
@@ -41,6 +54,7 @@ export interface OfficialAccountStatusDto {
   loginCommand: string | null;
   /** 配置文件冲突告警（只含文件名与变量名，不含密钥值） */
   conflicts: string[];
+  cleanupSupported: boolean;
 }
 
 export interface ValidationCheckDto {
@@ -149,6 +163,8 @@ export interface SessionMetaDto {
   /** Codex rollout 元信息的 model_provider："ccode" = Ccode 内联 provider 启动的会话，
    *  恢复时只能用带 Base URL 的配置（否则 codex 报 provider not found）；其他 agent 为 null */
   provider?: string | null;
+  /** Ccode profile used to start this session, when the launch was observed by Ccode. */
+  profileId: string | null;
 }
 
 /** 接力目标（handoff_targets）：各 CLI 的安装与启动注入支持情况 */
@@ -854,7 +870,7 @@ export interface RunRecordDto {
   newEntries?: number | null;
 }
 
-/** 定时任务（serde camelCase）；skill 目前固定 "lit-watch" */
+  /** 定时任务（serde camelCase）；默认 lit-watch，也可运行技能库中的其它技能 */
 export interface ScheduleDto {
   id: string;
   name: string;
@@ -894,6 +910,7 @@ export interface CreateScheduleInput {
 /** 更新补丁：字段全可选（不传 = 不改）；profileId/linkedStep 显式传 null = 清掉回到未指定 */
 export interface UpdateSchedulePatch {
   name?: string;
+  skill?: string;
   profileId?: string | null;
   frequency?: string;
   weekday?: number | null;
@@ -907,6 +924,9 @@ export interface UpdateSchedulePatch {
 export interface SchedulerRunDonePayload {
   scheduleId: string;
   projectRoot: string;
+  scheduleName: string;
+  skill: string;
+  newEntries?: number | null;
   status: string;
   summary: string;
 }

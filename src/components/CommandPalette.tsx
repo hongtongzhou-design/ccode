@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Search } from "lucide-react";
 import { useAppStore } from "../store";
 import { filterCommands, type PaletteCommand } from "../command-palette";
 import { THEMES } from "../themes";
@@ -47,6 +48,7 @@ export default function CommandPalette({
         cmd: {
           id: "quick-chat",
           title: "＋ 快速开聊",
+          group: "快速操作",
           keywords: ["chat", "聊", "开聊", "随便聊", "quick", "新会话", "kuaisu"],
         },
         run: onQuickChat,
@@ -55,6 +57,7 @@ export default function CommandPalette({
         cmd: {
           id: `page:${p.id}`,
           title: p.label,
+          group: "页面",
           hint: p.hint,
           keywords: [p.id, p.label, "页面", "page"],
         },
@@ -64,6 +67,7 @@ export default function CommandPalette({
         cmd: {
           id: `theme:${t.id}`,
           title: `主题：${t.name}`,
+          group: "外观",
           keywords: ["theme", "主题", t.id, t.name],
         },
         run: () => void updateSettings({ theme: t.id }),
@@ -72,6 +76,7 @@ export default function CommandPalette({
         cmd: {
           id: "chrome:toggle",
           title: chromeHidden ? "显示侧栏" : "隐藏侧栏",
+          group: "外观",
           hint: "⌘\\",
           keywords: ["sidebar", "侧栏", "chrome"],
         },
@@ -105,40 +110,49 @@ export default function CommandPalette({
       <div
         role="dialog"
         aria-label="命令面板"
-        className="mt-[16vh] h-fit w-[30rem] overflow-hidden rounded-md border border-field ccode-float-surface"
+        className="ccode-command-palette mt-[10vh] h-fit w-[min(520px,calc(100vw-32px))] overflow-hidden rounded-xl border border-field ccode-float-surface"
         onClick={(e) => e.stopPropagation()}
       >
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "ArrowDown") {
-              e.preventDefault();
-              setIndex((i) => Math.min(i + 1, filtered.length - 1));
-            } else if (e.key === "ArrowUp") {
-              e.preventDefault();
-              setIndex((i) => Math.max(i - 1, 0));
-            } else if (e.key === "Enter") {
-              e.preventDefault();
-              runAt(index);
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              onClose();
-            }
-          }}
-          placeholder="跳页面、换主题、隐侧栏…"
-          className="h-11 w-full border-b border-hairline bg-transparent px-3.5 text-sm text-l1 outline-none placeholder:text-l4"
-        />
-        <ul className="max-h-80 overflow-auto py-1">
+        <div className="flex items-center gap-2 border-b border-hairline px-3.5">
+          <Search size={15} strokeWidth={1.8} className="shrink-0 text-l4" aria-hidden="true" />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setIndex((i) => Math.min(i + 1, filtered.length - 1));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setIndex((i) => Math.max(i - 1, 0));
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                runAt(index);
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                onClose();
+              }
+            }}
+            placeholder="跳转页面、换主题或管理侧栏…"
+            className="h-10 min-w-0 flex-1 bg-transparent text-sm text-l1 outline-none placeholder:text-l4"
+          />
+          <kbd className="rounded border border-field px-1.5 py-0.5 font-mono text-micro text-l4">Esc</kbd>
+        </div>
+        <ul className="max-h-[400px] overflow-auto p-1">
           {filtered.map((c, i) => (
             <li key={c.id}>
+              {(i === 0 || filtered[i - 1]?.group !== c.group) && c.group && (
+                <div className="px-2.5 pb-0.5 pt-1.5 text-micro font-medium uppercase tracking-[0.08em] text-l4">
+                  {c.group}
+                </div>
+              )}
               <button
                 type="button"
                 onClick={() => runAt(i)}
                 onMouseEnter={() => setIndex(i)}
-                className={`flex h-9 w-full items-center gap-2 px-3.5 text-left text-sm ${
-                  i === index ? "bg-seg-sel text-l1" : "text-l2"
+                className={`flex h-8 w-full items-center gap-2 rounded-md border-l-2 px-2.5 text-left text-sm transition-colors ${
+                  i === index ? "border-cta bg-seg-sel text-l1" : "border-transparent text-l2 hover:bg-hover"
                 }`}
               >
                 <span className="min-w-0 flex-1 truncate">{c.title}</span>
@@ -151,9 +165,14 @@ export default function CommandPalette({
             </li>
           ))}
           {filtered.length === 0 && (
-            <li className="px-3.5 py-4 text-xs text-l4">没有匹配的命令</li>
+            <li className="px-3.5 py-8 text-center text-xs text-l4">没有匹配的命令</li>
           )}
         </ul>
+        <div className="flex items-center gap-3 border-t border-hairline px-3.5 py-1.5 text-micro text-l4">
+          <span><kbd className="font-mono text-l3">↑↓</kbd> 选择</span>
+          <span><kbd className="font-mono text-l3">↵</kbd> 执行</span>
+          <span className="ml-auto">{filtered.length} 个命令</span>
+        </div>
       </div>
     </div>
   );

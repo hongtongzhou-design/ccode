@@ -146,8 +146,13 @@ export default function TopNavCapsule({
         aria-hidden="true"
       />
       {visible && (
-        <div
-          className="fixed left-1/2 top-[52px] z-[45] -translate-x-1/2"
+      <div
+        className="pointer-events-none fixed inset-x-0 top-[52px] z-[45] flex justify-center"
+      >
+        <nav
+          ref={capsuleRef}
+          aria-label="全局导航"
+          className="ccode-top-nav-capsule ccode-float-surface pointer-events-auto flex max-w-[calc(100vw-24px)] items-center gap-1 overflow-x-auto rounded-full border border-field px-1.5 py-1"
           onMouseEnter={() => {
             pointerInsideRef.current = true;
             reveal();
@@ -156,29 +161,28 @@ export default function TopNavCapsule({
             pointerInsideRef.current = false;
             hideLater();
           }}
-        >
-          <nav
-            ref={capsuleRef}
-            aria-label="全局导航"
-            className="ccode-top-nav-capsule ccode-float-surface flex max-w-[calc(100vw-24px)] items-center gap-1 overflow-x-auto rounded-full border border-field bg-raised/85 px-1.5 py-1 backdrop-blur-xl"
-            onFocus={() => {
-              reveal();
-              setFocused(true);
-            }}
-            onBlur={(e) => {
-              if (e.relatedTarget instanceof Node && capsuleRef.current?.contains(e.relatedTarget)) return;
+          onFocus={() => {
+            reveal();
+            setFocused(true);
+          }}
+          onBlur={(e) => {
+            if (
+              e.relatedTarget instanceof Node &&
+              capsuleRef.current?.contains(e.relatedTarget)
+            )
+              return;
+            setFocused(false);
+            hideLater();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
               setFocused(false);
-              hideLater();
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                e.preventDefault();
-                e.stopPropagation();
-                setFocused(false);
-                setVisible(false);
-              }
-            }}
-          >
+              setVisible(false);
+            }
+          }}
+        >
             {showQuickChat && (
               <button
                 ref={(el) => {

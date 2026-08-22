@@ -115,6 +115,9 @@ pub struct SessionMetaDto {
     /// "Model provider `ccode` not found"）；其他 agent 或无记录为 None
     #[serde(default)]
     pub provider: Option<String>,
+    /// Ccode profile used to start this session when known; historical/external sessions may be null.
+    #[serde(default)]
+    pub profile_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -645,7 +648,8 @@ fn claude_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         handoff_from_session: None,
         task_id: None,
         task_name: None,
-            provider: None,
+        provider: None,
+        profile_id: None,
     })
 }
 
@@ -898,6 +902,7 @@ fn codex_file_meta(
             task_id: None,
             task_name: None,
             provider,
+            profile_id: None,
         },
         forked_from_id,
     ))
@@ -1179,7 +1184,8 @@ fn gemini_file_meta(
         handoff_from_session: None,
         task_id: None,
         task_name: None,
-            provider: None,
+        provider: None,
+        profile_id: None,
     })
 }
 
@@ -1412,7 +1418,8 @@ fn qwen_file_meta(path: &Path, alive: bool, archived: bool) -> Option<SessionMet
         handoff_from_session: None,
         task_id: None,
         task_name: None,
-            provider: None,
+        provider: None,
+        profile_id: None,
     })
 }
 
@@ -1635,7 +1642,8 @@ fn kimi_wire_file_meta(
         handoff_from_session: None,
         task_id: None,
         task_name: None,
-            provider: None,
+        provider: None,
+        profile_id: None,
     })
 }
 
@@ -1897,7 +1905,8 @@ fn kimi_legacy_file_meta(
         handoff_from_session: None,
         task_id: None,
         task_name: None,
-            provider: None,
+        provider: None,
+        profile_id: None,
     })
 }
 
@@ -2096,7 +2105,8 @@ fn codebuddy_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         handoff_from_session: None,
         task_id: None,
         task_name: None,
-            provider: None,
+        provider: None,
+        profile_id: None,
     })
 }
 
@@ -2267,6 +2277,7 @@ fn cursor_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         task_id: None,
         task_name: None,
             provider: None,
+            profile_id: None,
     })
 }
 
@@ -2431,6 +2442,7 @@ fn grok_file_meta(path: &Path, alive: bool) -> Option<SessionMetaDto> {
         task_id: None,
         task_name: None,
             provider: None,
+            profile_id: None,
     })
 }
 
@@ -2669,6 +2681,7 @@ fn opencode_scan_db(db_path: &Path) -> Vec<SessionMetaDto> {
             task_id: None,
             task_name: None,
             provider: None,
+            profile_id: None,
         });
     }
     // OpenCode 新会话常暂存为 "New Session"：只对占位标题的会话惰性补标题——
@@ -3042,6 +3055,7 @@ fn opencode_scan_legacy(storage: &Path) -> Vec<SessionMetaDto> {
             task_id: None,
             task_name: None,
             provider: None,
+            profile_id: None,
         });
     }
     out
@@ -3459,6 +3473,7 @@ fn opencode_snapshot_meta(path: &Path, session_id: &str) -> Option<SessionMetaDt
         task_id: None,
         task_name: None,
             provider: None,
+            profile_id: None,
     })
 }
 
@@ -3538,6 +3553,7 @@ pub(crate) fn open_db() -> Result<Connection, String> {
           pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
           custom_title TEXT, tags TEXT NOT NULL DEFAULT '[]',
           note TEXT, pinned_at TEXT,
+          profile_id TEXT,
           PRIMARY KEY(agent, session_id));",
     )
     .map_err(|e| format!("初始化 session_meta 表失败: {e}"))?;
@@ -3554,6 +3570,7 @@ pub(crate) fn migrate_session_meta(conn: &Connection) {
         "handoff_from_session TEXT",
         "task_id TEXT",
         "step_name TEXT",
+        "profile_id TEXT",
     ] {
         let _ = conn.execute_batch(&format!("ALTER TABLE session_meta ADD COLUMN {col}"));
     }
@@ -3571,12 +3588,13 @@ struct MetaRow {
     task_id: Option<String>,
     /// 步骤认领固化后的步骤归属（「跟 AI 商量一下」等跑在项目根、落不到 worktree 的会话）
     step_name: Option<String>,
+    profile_id: Option<String>,
 }
 
 fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
     let mut map = HashMap::new();
     let Ok(mut stmt) = conn
-        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session, task_id, step_name FROM session_meta")
+        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session, task_id, step_name, profile_id FROM session_meta")
     else {
         return map;
     };
@@ -3593,10 +3611,11 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
             r.get::<_, Option<String>>(8)?,
             r.get::<_, Option<String>>(9)?,
             r.get::<_, Option<String>>(10)?,
+            r.get::<_, Option<String>>(11)?,
         ))
     });
     if let Ok(rows) = rows {
-        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session, task_id, step_name) in rows.flatten() {
+        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session, task_id, step_name, profile_id) in rows.flatten() {
             map.insert(
                 (agent, sid),
                 MetaRow {
@@ -3608,6 +3627,7 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
                     handoff_from: hf_agent.zip(hf_session),
                     task_id,
                     step_name,
+                    profile_id,
                 },
             );
         }
@@ -4009,6 +4029,7 @@ fn apply_meta(
             if s.step_name.is_none() {
                 s.step_name = row.step_name.clone();
             }
+            s.profile_id = row.profile_id.clone();
         }
     }
 }
@@ -4137,6 +4158,23 @@ pub(crate) fn register_session_claim(claim_id: &str, agent: &str, cwd: &str) {
         since_iso: now_iso(),
         excluded,
     });
+}
+
+pub(crate) fn set_session_profile(agent: &str, session_id: &str, profile_id: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO session_meta(agent, session_id, profile_id) VALUES(?1, ?2, ?3)
+         ON CONFLICT(agent, session_id) DO UPDATE SET profile_id=?3",
+        params![agent, session_id, profile_id],
+    )
+    .map_err(|e| format!("写入会话连接归属失败: {e}"))?;
+    invalidate_scan_cache();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_session_profile_command(agent: String, session_id: String, profile_id: String) -> Result<(), String> {
+    set_session_profile(&agent, &session_id, &profile_id)
 }
 
 pub(crate) fn release_session_claim_impl(claim_id: &str) {
@@ -5933,6 +5971,7 @@ mod tests {
             task_id: None,
             task_name: None,
             provider: None,
+            profile_id: None,
             },
             fork.map(String::from),
         )
@@ -5994,6 +6033,7 @@ mod tests {
                 handoff_from: None,
                 task_id: None,
                 step_name: None,
+                profile_id: None,
             },
         );
         apply_meta(&mut merged, &members, &meta);
@@ -6834,6 +6874,7 @@ mod tests {
             task_id: None,
             task_name: None,
             provider: None,
+            profile_id: None,
         }
     }
 

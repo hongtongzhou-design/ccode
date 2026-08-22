@@ -819,7 +819,7 @@ function MainRepoCommitPanel({
   return (
     <div className="mt-1.5 rounded-md bg-inset p-2 text-l2">
       <p className="mb-2 text-micro text-l4">
-        提交 = 把改动保存到项目历史。文件本身不会丢，保存后才能把成果合并回来。
+        提交 = 把改动保存到任务分支。合并后才会进入项目主线历史；文件本身不会丢。
       </p>
       {loadError ? (
         <p className="text-xs text-err-text">{loadError}</p>
@@ -2243,7 +2243,7 @@ export default function WorkspaceReviewView({
                     {blocker.key === "main-dirty" && (
                       <p className="pl-3 text-micro text-l4">
                         提交 =
-                        把改动保存到项目历史。文件本身不会丢，保存后才能把成果合并回来。
+                        把主文件夹改动保存到项目主线历史；文件本身不会丢，保存后才能继续合并。
                       </p>
                     )}
                   </li>

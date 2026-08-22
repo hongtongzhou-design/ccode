@@ -15,6 +15,7 @@ struct ProfileDumpDto {
     pub agent: String,
     /// "api"（端点+密钥注入）| "official"（官方账号登录，拉起不注入 API env）
     pub account_type: crate::profiles::AccountType,
+    pub no_auth: bool,
     pub protocol: Option<String>,
     pub base_url: Option<String>,
     pub models: Vec<String>,
@@ -30,6 +31,7 @@ impl ProfileDumpDto {
             name: p.name.clone(),
             agent: p.agent.clone(),
             account_type: p.account_type,
+            no_auth: p.no_auth,
             protocol: p.protocol.clone(),
             base_url: p.base_url.clone(),
             models: p.models.clone(),
@@ -153,6 +155,7 @@ mod tests {
             agent: "claude-code".into(),
             name: "测试配置".into(),
             account_type: crate::profiles::AccountType::Api,
+            no_auth: false,
             protocol: Some("anthropic".into()),
             base_url: Some(base_url.into()),
             models: vec!["claude-sonnet".into()],

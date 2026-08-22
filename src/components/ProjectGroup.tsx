@@ -329,6 +329,8 @@ export default function ProjectGroup({
   onError,
   children,
   focusStepReq,
+  projectFocusReq,
+  onProjectFocusHandled,
   pageVisible,
 }: {
   /** null = 未注册分组（仅按工作区 repo 归组） */
@@ -360,6 +362,13 @@ export default function ProjectGroup({
    *  传工作区名，步骤名按 steps[].workspaceName 在本组件内解析（父级没有 cfg）；
    *  token 变化才消费，同目标重复点不重复切 */
   focusStepReq?: { wsName: string; token: number } | null;
+  /** 收件箱精确跳转：定位到文献雷达/定时任务区块。 */
+  projectFocusReq?: {
+    projectRoot: string;
+    focus: "lit" | "schedule";
+    token: number;
+  } | null;
+  onProjectFocusHandled?: () => void;
   /** 页面可见性（v3.97）：项目页常驻挂载，手动聚焦会跨页留存——从终端页等回来时，
    *  若聚焦的步骤已完成（ merged ），放掉手动聚焦、回落到当前步骤（第一个未完成），
    *  否则用户看到的永远是上次点过的那一步（实测：已完成的「文献检索」一直占着聚焦） */
@@ -862,6 +871,7 @@ export default function ProjectGroup({
   const resPanelRef = useRef<HTMLDivElement>(null);
   /** 「◔ 定时任务」面板锚点：文献雷达卡片「◔ 定时」开抽屉后滚到这里 */
   const schedulePanelRef = useRef<HTMLDivElement>(null);
+  const litWatchRef = useRef<HTMLDivElement>(null);
   const [discoverLoading, setDiscoverLoading] = useState(false);
   // Zotero 进料口（只读适配器；不做文献库，见 zotero.rs 头注）：探测 → 选分类 → 导入
   const [zoteroBusy, setZoteroBusy] = useState(false);
@@ -870,6 +880,18 @@ export default function ProjectGroup({
   const [zoteroDir, setZoteroDir] = useState<string | null>(null);
   const [zoteroMsg, setZoteroMsg] = useState<string | null>(null);
   const [litBusy, setLitBusy] = useState(false);
+
+  useEffect(() => {
+    if (!projectFocusReq) return;
+    if (projectFocusReq.focus === "schedule") setSettingsOpen(true);
+    const ref = projectFocusReq.focus === "schedule" ? schedulePanelRef : litWatchRef;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      ref.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      ref.current?.classList.add("ring-2", "ring-cta");
+      window.setTimeout(() => ref.current?.classList.remove("ring-2", "ring-cta"), 2500);
+      onProjectFocusHandled?.();
+    }));
+  }, [projectFocusReq, onProjectFocusHandled]);
 
   /** 切换文献来源：改 project.toml 的 lit_source + 就地同步各步骤已编辑的 TASK.md 内容文件。
    *  v3.86 起改为**显式三值**（search / zotero / folder）——原先是两档开关，
@@ -1912,10 +1934,12 @@ export default function ProjectGroup({
       {/* ◔ 文献雷达卡片（工作段，任务卡与工作区卡之间）：新命中 + 精读清单双页签；
           「◔ 定时」开项目设置抽屉滚到定时区块（定时任务本体仍在抽屉里，单一入口不复制） */}
       {registered && cfg && (
+        <div ref={litWatchRef} className="rounded-lg transition-shadow">
         <LitWatchCard
           projectRoot={projectPath}
           cfg={cfg}
           workspaces={workspaces}
+          focusToken={projectFocusReq?.focus === "lit" ? projectFocusReq.token : null}
           onOpenSchedules={() => {
             setSettingsOpen(true);
             requestAnimationFrame(() =>
@@ -1927,6 +1951,7 @@ export default function ProjectGroup({
           }}
           onConfigChanged={() => void reloadCfg(projectPath)}
         />
+        </div>
       )}
 
       {/* ───── 项目设置抽屉（右侧滑出，不是页面、不进侧栏、不占路由） ─────

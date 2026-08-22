@@ -237,6 +237,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   /** 恢复用的兼容配置（codex 内联 provider 会话只认带 Base URL 的）；
    *  外部恢复命令需要它补 -c provider 定义（定义不含密钥） */
   function resumeProfile(s: SessionMetaDto) {
+    if (s.profileId) {
+      const exact = profiles.find((p) => p.id === s.profileId && p.agent === s.agent);
+      if (exact) return exact;
+    }
     let wished = localStorage.getItem(`ccode.lastProfile.${s.agent}`);
     try {
       const last = JSON.parse(localStorage.getItem("ccode.lastLaunch") ?? "null") as

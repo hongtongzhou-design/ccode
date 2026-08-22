@@ -39,6 +39,8 @@ pub async fn fetch_models(
     base_url: String,
     api_key: Option<String>,
     profile_id: Option<String>,
+    agent_id: Option<String>,
+    protocol: Option<String>,
 ) -> Result<Vec<String>, String> {
     let key = match api_key.filter(|k| !k.trim().is_empty()) {
         Some(k) => Some(k),
@@ -48,12 +50,25 @@ pub async fn fetch_models(
         },
     };
 
+    let agent = agent_id.as_deref().unwrap_or("openai");
+    if agent == "cursor" {
+        return Err("Cursor 使用专有协议，无法通过通用模型列表接口获取模型".into());
+    }
+    let gemini = agent == "gemini";
+    let anthropic = matches!(agent, "claude-code" | "codebuddy")
+        || matches!(protocol.as_deref(), Some("anthropic"));
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         return Err("请先填写 Base URL".into());
     }
     // 候选地址：已含 /v1 直接拼 /models；否则先试 /v1/models 再试 /models
-    let candidates: Vec<String> = if base.ends_with("/v1") {
+    let candidates: Vec<String> = if gemini {
+        if base.ends_with("/v1beta") || base.ends_with("/v1") {
+            vec![format!("{base}/models")]
+        } else {
+            vec![format!("{base}/v1beta/models"), format!("{base}/models")]
+        }
+    } else if base.ends_with("/v1") {
         vec![format!("{base}/models")]
     } else {
         vec![format!("{base}/v1/models"), format!("{base}/models")]
@@ -68,11 +83,19 @@ pub async fn fetch_models(
     for url in candidates {
         let mut req = client.get(&url);
         if let Some(k) = &key {
+            if gemini {
+                if let Ok(mut parsed) = reqwest::Url::parse(&url) {
+                    parsed.query_pairs_mut().append_pair("key", k);
+                    req = client.get(parsed);
+                }
+            }
             // 同时携带两种鉴权头：OpenAI 系认 Bearer，Anthropic 系认 x-api-key，多余的头无害
-            req = req
-                .header("Authorization", format!("Bearer {k}"))
-                .header("x-api-key", k)
-                .header("anthropic-version", "2023-06-01");
+            if !gemini {
+                req = req.header("Authorization", format!("Bearer {k}"));
+            }
+            if anthropic {
+                req = req.header("x-api-key", k).header("anthropic-version", "2023-06-01");
+            }
         }
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -160,4 +183,5 @@ mod tests {
         let v = json!(["claude-sonnet-4", " ", {"id": "claude-opus-4"}]);
         assert_eq!(parse_model_ids(&v), vec!["claude-sonnet-4", "claude-opus-4"]);
     }
+
 }

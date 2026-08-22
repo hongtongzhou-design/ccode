@@ -9,6 +9,8 @@ export interface PaletteCommand {
   title: string;
   /** 右侧弱化提示（如快捷键 ⌘1） */
   hint?: string;
+  /** 面板中的低权重分组标题；不参与过滤语义。 */
+  group?: string;
   /** 额外匹配词（英文别名、拼音等），大小写不敏感子串匹配 */
   keywords: string[];
 }

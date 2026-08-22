@@ -6,6 +6,10 @@ export interface Preset {
   note?: string;
   /** 多协议 agent（qwen/kimi）的预设隐含协议，填充时一并写入表单 */
   protocol?: string;
+  /** 鉴权/线路提示，仅用于启动前解释，不会写入密钥。 */
+  auth?: "bearer" | "x-api-key" | "gemini-key" | "none";
+  wireApi?: "chat-completions" | "responses" | "anthropic-messages" | "gemini" | "cursor";
+  confidence?: "official" | "verified-compatible" | "address-only";
 }
 
 export const PRESETS: Preset[] = [
@@ -24,7 +28,7 @@ export const PRESETS: Preset[] = [
     note: "ANTHROPIC_AUTH_TOKEN 鉴权",
   },
   // Codex 走 OpenAI Responses API，以下均为公开兼容端点
-  { name: "OpenAI 官方", agent: "codex", baseUrl: "https://api.openai.com/v1" },
+  { name: "OpenAI 官方", agent: "codex", baseUrl: "https://api.openai.com/v1", auth: "bearer", wireApi: "responses", confidence: "official" },
   { name: "OpenRouter", agent: "codex", baseUrl: "https://openrouter.ai/api/v1", note: "聚合多家" },
   { name: "DeepSeek", agent: "codex", baseUrl: "https://api.deepseek.com/v1" },
   { name: "Moonshot 月之暗面", agent: "codex", baseUrl: "https://api.moonshot.cn/v1" },
@@ -49,6 +53,7 @@ export const PRESETS: Preset[] = [
     note: "聚合多家",
     protocol: "openai",
   },
+  { name: "Moonshot 月之暗面", agent: "qwen", baseUrl: "https://api.moonshot.cn/v1", protocol: "openai" },
   { name: "DeepSeek", agent: "qwen", baseUrl: "https://api.deepseek.com/v1", protocol: "openai" },
   { name: "智谱 GLM", agent: "qwen", baseUrl: "https://open.bigmodel.cn/api/paas/v4", protocol: "openai" },
   // Kimi Code：Moonshot 官方端点，协议 kimi；兼容端点走 openai 协议（KIMI_MODEL_PROVIDER_TYPE=openai）
@@ -57,6 +62,12 @@ export const PRESETS: Preset[] = [
     agent: "kimi",
     baseUrl: "https://api.moonshot.cn/v1",
     protocol: "kimi",
+  },
+  {
+    name: "阿里云百炼（兼容模式）",
+    agent: "kimi",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    protocol: "openai",
   },
   { name: "DeepSeek", agent: "kimi", baseUrl: "https://api.deepseek.com/v1", protocol: "openai" },
   { name: "智谱 GLM", agent: "kimi", baseUrl: "https://open.bigmodel.cn/api/paas/v4", protocol: "openai" },
@@ -67,6 +78,7 @@ export const PRESETS: Preset[] = [
     baseUrl: "https://openrouter.ai/api/v1",
     note: "聚合多家",
   },
+  { name: "Moonshot 月之暗面", agent: "opencode", baseUrl: "https://api.moonshot.cn/v1" },
   { name: "DeepSeek", agent: "opencode", baseUrl: "https://api.deepseek.com/v1" },
   { name: "智谱 GLM", agent: "opencode", baseUrl: "https://open.bigmodel.cn/api/paas/v4" },
   {
@@ -93,9 +105,11 @@ export const PRESETS: Preset[] = [
   // Cursor 不设预设：端点是 Cursor 专有协议（CURSOR_API_ENDPOINT），非 OpenAI/Anthropic 兼容，
   // 第三方供应商端点接上也不通，列出来只会误导
   // Grok Build 是 OpenAI 兼容协议（XAI_API_KEY 鉴权），官方端点公开
-  { name: "xAI 官方", agent: "grok", baseUrl: "https://api.x.ai/v1" },
+  { name: "xAI 官方", agent: "grok", baseUrl: "https://api.x.ai/v1", auth: "bearer", wireApi: "chat-completions", confidence: "official" },
   // grok 归 OpenAI 兼容族，第三方兼容端点同样可用
   { name: "OpenRouter", agent: "grok", baseUrl: "https://openrouter.ai/api/v1", note: "聚合多家" },
+  { name: "Moonshot 月之暗面", agent: "grok", baseUrl: "https://api.moonshot.cn/v1" },
+  { name: "阿里云百炼（兼容模式）", agent: "grok", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
   { name: "DeepSeek", agent: "grok", baseUrl: "https://api.deepseek.com/v1" },
   {
     name: "智谱 GLM",

@@ -23,6 +23,10 @@ pub struct Profile {
     /// 账号类型；旧数据无此字段按 api 处理
     #[serde(default)]
     pub account_type: AccountType,
+    /// API profile explicitly allowed to run without a credential (normally a local endpoint).
+    /// This is fail-closed by default; it is not the same as inheriting a shell credential.
+    #[serde(default)]
+    pub no_auth: bool,
     pub protocol: Option<String>,
     pub base_url: Option<String>,
     /// 可用模型列表，首个为默认；同一端点下通常有多个模型可切换
@@ -51,6 +55,8 @@ pub struct ProfileInput {
     pub name: String,
     #[serde(default)]
     pub account_type: AccountType,
+    #[serde(default)]
+    pub no_auth: bool,
     pub protocol: Option<String>,
     pub base_url: Option<String>,
     #[serde(default)]
@@ -80,6 +86,13 @@ fn normalize_models(models: Vec<String>) -> Vec<String> {
         .filter(|m| !m.is_empty())
         .filter(|m| seen.insert(m.clone()))
         .collect()
+}
+
+fn sensitive_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH"]
+        .iter()
+        .any(|part| upper.contains(part))
 }
 
 pub struct ProfileStore {
@@ -116,7 +129,14 @@ impl ProfileStore {
 
     fn write_all(&self, profiles: &[Profile]) -> Result<(), String> {
         let text = serde_json::to_string_pretty(profiles).map_err(|e| e.to_string())?;
-        atomic_write(&self.path, &text)
+        atomic_write(&self.path, &text)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("设置 profiles.json 权限失败: {e}"))?;
+        }
+        Ok(())
     }
 
     /// list 的锁内版本：调用方须已持 store_lock
@@ -162,6 +182,7 @@ impl ProfileStore {
             agent: input.agent,
             name: input.name,
             account_type: input.account_type,
+            no_auth: input.no_auth,
             protocol: input.protocol,
             base_url: input.base_url.filter(|s| !s.is_empty()),
             models: normalize_models(input.models),
@@ -175,6 +196,10 @@ impl ProfileStore {
             set_key(&profile.id, &key)?;
             profile.key_hint = Some(key_hint_of(&key));
             profile.has_key = true;
+        }
+        if let Err(error) = crate::profile_validation::validate_profile_fields(&profile) {
+            delete_key(&profile.id);
+            return Err(error);
         }
         let mut profiles = self.read_all()?;
         profiles.push(profile.clone());
@@ -191,6 +216,7 @@ impl ProfileStore {
             agent: src.agent,
             name: format!("{} 副本", src.name),
             account_type: src.account_type,
+            no_auth: src.no_auth,
             protocol: src.protocol,
             base_url: src.base_url,
             models: src.models,
@@ -203,6 +229,10 @@ impl ProfileStore {
         if let Some(key) = get_key_locked(id)? {
             set_key(&copy.id, &key)?;
             copy.has_key = true;
+        }
+        if let Err(error) = crate::profile_validation::validate_profile_fields(&copy) {
+            delete_key(&copy.id);
+            return Err(error);
         }
         let mut profiles = self.read_all()?;
         profiles.push(copy.clone());
@@ -234,6 +264,7 @@ impl ProfileStore {
             agent: target_agent.to_string(),
             name,
             account_type: src.account_type,
+            no_auth: src.no_auth,
             protocol,
             base_url: src.base_url,
             models: src.models,
@@ -246,6 +277,10 @@ impl ProfileStore {
         if let Some(key) = get_key_locked(id)? {
             set_key(&copy.id, &key)?;
             copy.has_key = true;
+        }
+        if let Err(error) = crate::profile_validation::validate_profile_fields(&copy) {
+            delete_key(&copy.id);
+            return Err(error);
         }
         let mut profiles = profiles;
         profiles.push(copy.clone());
@@ -260,9 +295,27 @@ impl ProfileStore {
             .iter_mut()
             .find(|p| p.id == id)
             .ok_or_else(|| format!("profile 不存在: {id}"))?;
+        if profile.agent != input.agent {
+            return Err("连接创建后不能直接更换 Agent，请使用「复制到其他 Agent」".into());
+        }
+        let mut candidate = profile.clone();
+        candidate.name = input.name.clone();
+        candidate.account_type = input.account_type;
+        candidate.no_auth = input.no_auth;
+        candidate.protocol = input.protocol.clone();
+        candidate.base_url = input.base_url.clone().filter(|s| !s.trim().is_empty());
+        candidate.models = normalize_models(input.models.clone());
+        candidate.extra_env = input.extra_env.clone();
+        candidate.has_key = input.api_key.as_deref().is_some_and(|k| !k.trim().is_empty())
+            || get_key_locked(id)?.is_some();
+        crate::profile_validation::validate_profile_fields(&candidate)?;
+        if candidate.account_type == AccountType::Official && candidate.no_auth {
+            return Err("官方账号不能设置为无密钥模式".into());
+        }
         profile.agent = input.agent;
         profile.name = input.name;
         profile.account_type = input.account_type;
+        profile.no_auth = input.no_auth;
         profile.protocol = input.protocol;
         profile.base_url = input.base_url.filter(|s| !s.is_empty());
         profile.models = normalize_models(input.models);
@@ -271,7 +324,15 @@ impl ProfileStore {
         if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
             set_key(id, &key)?;
             profile.key_hint = Some(key_hint_of(&key));
+        } else if profile.account_type == AccountType::Official {
+            delete_key(id);
+            profile.key_hint = None;
+        } else if profile.no_auth {
+            delete_key(id);
+            profile.key_hint = None;
         }
+        profile.has_key = get_key_locked(id)?.is_some();
+        crate::profile_validation::validate_profile_fields(profile)?;
         let updated = profile.clone();
         self.write_all(&profiles)?;
         Ok(updated)
@@ -287,6 +348,19 @@ impl ProfileStore {
         // 持锁内联调用，失败只记日志不否决删除
         crate::settings::clear_profile_refs(id);
         Ok(())
+    }
+
+    pub fn clear_key(&self, id: &str) -> Result<(), String> {
+        let _g = store_lock();
+        let mut profiles = self.read_all()?;
+        let profile = profiles
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| format!("profile 不存在: {id}"))?;
+        delete_key(id);
+        profile.key_hint = None;
+        profile.has_key = false;
+        self.write_all(&profiles)
     }
 
     /// 每次用于启动即刷新 last_used_at（§6.12 E）；失败静默，不影响启动
@@ -539,6 +613,11 @@ pub fn delete_profile(store: tauri::State<'_, ProfileStore>, id: String) -> Resu
 }
 
 #[tauri::command]
+pub fn clear_profile_key(store: tauri::State<'_, ProfileStore>, id: String) -> Result<(), String> {
+    store.clear_key(&id)
+}
+
+#[tauri::command]
 pub fn duplicate_profile(
     store: tauri::State<'_, ProfileStore>,
     id: String,
@@ -563,6 +642,7 @@ pub fn export_profiles(store: tauri::State<'_, ProfileStore>, path: String) -> R
     for p in &mut profiles {
         p.has_key = false;
         p.key_hint = None;
+        p.extra_env.retain(|name, _| !sensitive_env_name(name));
     }
     let text = serde_json::to_string_pretty(&profiles).map_err(|e| e.to_string())?;
     atomic_write(std::path::Path::new(&path), &text)
@@ -592,6 +672,7 @@ pub fn import_profiles(store: tauri::State<'_, ProfileStore>, path: String) -> R
         p.has_key = false;
         p.key_hint = None;
         p.model = None;
+        p.no_auth = p.no_auth && p.account_type == AccountType::Api;
         profiles.push(p);
         added += 1;
     }
@@ -698,6 +779,7 @@ mod tests {
             agent: agent.into(),
             name: "n".into(),
             account_type: AccountType::Api,
+            no_auth: false,
             protocol: protocol.map(str::to_string),
             base_url: None,
             models: vec![],

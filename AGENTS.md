@@ -232,7 +232,7 @@ src-tauri/src/
                              # 历史留 20 条、跑完发 scheduler-run-done 事件（App.tsx 全局监听弹 OS 通知，复用长任务通知开关）；
                              # v3.95 起 Schedule.linkedStep 关联步骤（可空，update 空串归 None）+ RunRecord.newEntries 新命中计数
                              # （跑 lit-watch 前后数 inbox.md `## ` 标题数取差，超时/失败不记）
-  lit_watch.rs               # 文献雷达应用层（v3.95）：巡检产物解析 DTO（notes/inbox.md 条目含 watch-run 批次标记日期、上限 500 条；
+  lit_watch.rs               # 文献雷达应用层（v3.95）：巡检产物解析 DTO（notes/inbox.md 有效文献块含 watch-run 批次标记日期、上限 500 条；
                              # papers/watch-followup.md 付费墙待办、watchlist.md 订阅读写整表写回保留注释行、included.md 精读清单
                              # 增删去重）+ download_paper_pdf 白名单下载（仅 http/https、60MB 流式上限、%PDF- 魔数校验、
                              # 落 papers/ 自动登记 project.toml 资源）+ attach_paper_pdf 关联本地 PDF（付费墙手动下载后

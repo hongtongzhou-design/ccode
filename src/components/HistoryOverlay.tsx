@@ -56,7 +56,7 @@ export default function HistoryOverlay({
           {projectName} · 保存历史
         </h2>
         <span className="min-w-0 truncate text-xs text-l3">
-          提交到历史 = 把这一步的成果存进项目时间线（只读，最近 100 条主线记录）
+          主仓库提交才进入项目时间线；工作区过程提交在任务分支历史中保留（只读，最近 100 条主线记录）
         </span>
         <button
           type="button"

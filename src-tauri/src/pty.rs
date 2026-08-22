@@ -413,6 +413,7 @@ pub fn pty_spawn(
         .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
     // 密钥只在启动瞬间从钥匙串读出，注入子进程环境后即丢弃；keys.json 损坏时报错阻断启动
     let key = profiles::get_key(&profile_id)?;
+    agents::ensure_launch_credentials(&profile, key.as_deref())?;
     let model = model
         .filter(|m| !m.trim().is_empty())
         .or_else(|| profile.models.first().cloned());
@@ -564,6 +565,28 @@ pub fn pty_write(
     entry
         .writer
         .write_all(data.as_bytes())
+        .and_then(|_| entry.writer.flush())
+        .map_err(|e| format!("写入终端失败: {e}"))
+}
+
+/// 将一条聊天消息和提交键在同一把 PTY 锁内连续写入。
+/// 文本仍遵守 bracketed-paste 规则，提交键在粘贴包结束后单独写入，
+/// 避免前端两个 IPC 调用之间被 TUI 切帧，也避免多行消息把回车吞进粘贴文本。
+#[tauri::command]
+pub fn pty_write_submit(
+    manager: tauri::State<'_, PtyManager>,
+    pty_id: String,
+    text: String,
+    submit: String,
+) -> Result<(), String> {
+    let mut entries = manager.entries.lock().unwrap();
+    let entry = entries.get_mut(&pty_id).ok_or("终端不存在或已退出")?;
+    let paste_on = entry.bracketed_paste.load(Ordering::Relaxed);
+    let text = wrap_bracketed_paste(&text, paste_on);
+    entry
+        .writer
+        .write_all(text.as_bytes())
+        .and_then(|_| entry.writer.write_all(submit.as_bytes()))
         .and_then(|_| entry.writer.flush())
         .map_err(|e| format!("写入终端失败: {e}"))
 }

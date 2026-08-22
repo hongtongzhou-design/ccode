@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   frequencyLabel,
   hhmm,
+  litWatchSchedules,
   runDoneNotifyBody,
   runDoneNotifyTitle,
   schedulesForProject,
@@ -66,6 +67,14 @@ test("schedulesForProject：只留 projectRoot 命中的任务", () => {
   assert.deepEqual(schedulesForProject(list, "/repo/c"), []);
 });
 
+test("litWatchSchedules：雷达卡片不误跑其它技能任务", () => {
+  const list = [
+    schedule("/repo/a", "lit"),
+    { ...schedule("/repo/a", "eda"), name: "EDA", skill: "data-eda" },
+  ];
+  assert.deepEqual(litWatchSchedules(list).map((s) => s.id), ["lit"]);
+});
+
 test("schedulesForProject：尾部斜杠与分隔符差异不影响归属", () => {
   const list = [schedule("/repo/a", "s-1"), schedule("C:\\repo\\b\\", "s-2")];
   assert.deepEqual(
@@ -78,10 +87,11 @@ test("schedulesForProject：尾部斜杠与分隔符差异不影响归属", () =
   );
 });
 
-test("runDoneNotifyTitle：成功与失败的标题", () => {
-  assert.equal(runDoneNotifyTitle("我的课题", "ok"), "文献雷达 · 我的课题");
+test("runDoneNotifyTitle：任务名、成功与失败", () => {
+  assert.equal(runDoneNotifyTitle("我的课题", "ok", "文献雷达"), "文献雷达 · 我的课题");
+  assert.equal(runDoneNotifyTitle("我的课题", "ok", "数据检查"), "数据检查 · 我的课题");
   assert.equal(
-    runDoneNotifyTitle("我的课题", "error"),
+    runDoneNotifyTitle("我的课题", "error", "文献雷达"),
     "文献雷达 · 我的课题（失败）",
   );
 });

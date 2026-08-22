@@ -783,6 +783,7 @@ mod tests {
             agent: agent.into(),
             name: id.into(),
             account_type: Default::default(),
+            no_auth: false,
             protocol: None,
             base_url: None,
             models: vec![],

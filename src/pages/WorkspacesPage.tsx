@@ -947,6 +947,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   // 对话页卡片 chip → 选中对应项目的一次性请求（项目根路径）
   const selectProjectReq = useAppStore((s) => s.selectProjectReq);
   const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
+  const projectFocusReq = useAppStore((s) => s.projectFocusReq);
+  const setProjectFocusReq = useAppStore((s) => s.setProjectFocusReq);
+  const inboxDismissed = useAppStore((s) => s.inboxDismissed);
   // 产物待核验（后端只读检查，随 refresh 同频次拉取）：绑定步骤的预期产物全部产出且够新
   const [artifactReady, setArtifactReady] = useState<PendingArtifactDto[]>([]);
   // agent 人工请求（.ccode/help-wanted.md，随 refresh 同频次拉取；失败静默下轮重试）
@@ -1402,7 +1405,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       dot: "bg-ok-text",
       text: `文献雷达 · ${projects.find((p) => samePath(p.path, c.projectRoot))?.name ?? pathBaseName(c.projectRoot)}：${c.count} 条新命中`,
       actionLabel: "去看看",
-      action: { type: "project" as const, projectRoot: c.projectRoot },
+      action: { type: "litWatch" as const, projectRoot: c.projectRoot },
     })),
     ...active
       .filter((w) => health[w.id]?.readyToMerge && !health[w.id]?.conflict)
@@ -1490,7 +1493,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
 
   // 收件箱条目镜像进 store（本页常驻挂载，签名变更才写，防每 render 抖动订阅方）
-  const inboxLen = inboxItems.length;
   const inboxSig = inboxItems.map((it) => `${it.key}=${it.text}`).join("|");
   useEffect(() => {
     setInboxItems(filterDismissed(inboxItems, useAppStore.getState().inboxDismissed));
@@ -1543,14 +1545,21 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         samePath(gr.repoPath, selectProjectReq) ||
         gr.list.some((w) => samePath(w.worktreePath, selectProjectReq)),
     );
-    if (g) setSelectedGroupKey(g.key);
+    if (!g) {
+      // 页面刚切入时项目列表可能仍在加载；保留请求到下一次 groups 更新，
+      // 避免收件箱点击在空列表首帧被静默吞掉。
+      if (groups.length === 0) return;
+      setSelectProjectReq(null);
+      return;
+    }
+    setSelectedGroupKey(g.key);
     setSelectProjectReq(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectProjectReq, groups]);
 
   // 收件箱折叠 strip：默认收起只占单行，类别胶囊保留第一眼信息（点胶囊展开该类明细）
   const [inboxCat, setInboxCat] = useState<InboxCategory | null>(null);
-  const inboxGroups = groupInbox(inboxItems);
+  const inboxGroups = groupInbox(filterDismissed(inboxItems, inboxDismissed));
   // 空了就收回展开态；展开中的类别被清空（如最后一条 help 被忽略）同样收起
   useEffect(() => {
     if (
@@ -1558,8 +1567,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       !inboxGroups.some((g) => g.category === inboxCat)
     )
       setInboxCat(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inboxLen, inboxCat]);
+  }, [inboxGroups, inboxCat]);
   // 展开时 Esc 关闭
   useEffect(() => {
     if (inboxCat === null) return;
@@ -2153,7 +2161,14 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             health={health}
             drift={drift}
             refreshToken={refreshToken}
-            focusStepReq={focusStepReq}
+          focusStepReq={focusStepReq}
+            projectFocusReq={
+              projectFocusReq &&
+              samePath(projectFocusReq.projectRoot, selectedGroup.repoPath)
+                ? projectFocusReq
+                : null
+            }
+            onProjectFocusHandled={() => setProjectFocusReq(null)}
             pageVisible={visible}
             freshGitGuide={
               !!selectedGroup.project &&

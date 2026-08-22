@@ -277,11 +277,24 @@ impl EntryBuilder {
             raw_line_range: [self.start_line, self.last_line],
         }
     }
+
+    /// 巡检摘要也可能使用二级标题，但不是文献条目。只有至少有一个文献字段时
+    /// 才进入雷达；这样解析器与 scheduler 的新增计数保持同一口径。
+    fn is_literature_entry(&self) -> bool {
+        !self.source.is_empty()
+            || !self.authors.is_empty()
+            || !self.abstract_first.is_empty()
+            || !self.url.is_empty()
+            || !self.keywords_hit.is_empty()
+            || !self.relevance.is_empty()
+            || self.journal.is_some()
+            || !self.zh_summary.is_empty()
+    }
 }
 
 /// 解析 notes/inbox.md 全文为条目表（文件顺序，旧→新）。容错：坏行跳过；
 /// 任何 `## ` 块都算条目（不猜技能之外的块长什么样），缺字段给缺省。
-fn parse_inbox_entries(text: &str) -> Vec<WatchEntryDto> {
+fn parse_inbox_entries_with_cap(text: &str, cap: bool) -> Vec<WatchEntryDto> {
     let mut out: Vec<WatchEntryDto> = Vec::new();
     let mut cur: Option<EntryBuilder> = None;
     let mut cur_batch: Option<String> = None;
@@ -293,7 +306,9 @@ fn parse_inbox_entries(text: &str) -> Vec<WatchEntryDto> {
         }
         if let Some(title) = line.strip_prefix("## ") {
             if let Some(b) = cur.take() {
-                out.push(b.build());
+                if b.is_literature_entry() {
+                    out.push(b.build());
+                }
             }
             cur = Some(EntryBuilder::new(title.trim().to_string(), ln, cur_batch.clone()));
             continue;
@@ -325,13 +340,19 @@ fn parse_inbox_entries(text: &str) -> Vec<WatchEntryDto> {
         }
     }
     if let Some(b) = cur.take() {
-        out.push(b.build());
+        if b.is_literature_entry() {
+            out.push(b.build());
+        }
     }
     // 收件箱只增不改，最新的在文件末尾：超上限砍前面
-    if out.len() > MAX_ENTRIES {
+    if cap && out.len() > MAX_ENTRIES {
         out.drain(..out.len() - MAX_ENTRIES);
     }
     out
+}
+
+fn parse_inbox_entries(text: &str) -> Vec<WatchEntryDto> {
+    parse_inbox_entries_with_cap(text, true)
 }
 
 /// scheduler 用：lit-watch 运行前后各数一次条目数取差值（`## ` 标题计数，文件缺失按 0）
@@ -339,7 +360,23 @@ pub(crate) fn count_inbox_entries(root: &Path) -> u32 {
     let Ok(text) = fs::read_to_string(root.join("notes").join("inbox.md")) else {
         return 0;
     };
-    text.lines().filter(|l| l.starts_with("## ")).count() as u32
+    parse_inbox_entries_with_cap(&text, false).len() as u32
+}
+
+/// 定时任务成功后给出轻量产物提示，不把可恢复的格式瑕疵伪装成完全正常。
+/// 解析规则与 list/count 共用；这里只返回提示，不修改项目文件。
+pub(crate) fn output_note(root: &Path) -> Option<String> {
+    let text = fs::read_to_string(root.join("notes").join("inbox.md")).ok()?;
+    let raw_headers = text.lines().filter(|l| l.starts_with("## ")).count();
+    let valid = parse_inbox_entries_with_cap(&text, false).len();
+    let ignored = raw_headers.saturating_sub(valid);
+    if ignored > 0 {
+        return Some(format!("已忽略 {ignored} 个没有文献字段的巡检摘要块"));
+    }
+    if valid > 0 && !root.join("papers").join("watch-seen.md").is_file() {
+        return Some("已写入命中，但未找到 papers/watch-seen.md 去重台账".into());
+    }
+    None
 }
 
 // ===== papers/watch-followup.md 解析 =====
@@ -916,7 +953,7 @@ mod tests {
     #[test]
     fn parses_full_and_legacy_entries_with_batch_dates() {
         let entries = parse_inbox_entries(SAMPLE_INBOX);
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 2);
         let legacy = &entries[0];
         assert_eq!(legacy.title, "旧条目没有新增字段");
         assert_eq!(legacy.source, "arxiv");
@@ -935,11 +972,7 @@ mod tests {
         assert_eq!(full.zh_summary, "提出一种提升固态电解质界面稳定性的方法");
         assert_eq!(full.url, "10.1000/xyz123");
         assert_eq!(full.date.as_deref(), Some("2026-08-18"));
-        // 最小条目：缺字段回落（相关性按技能口径缺省「待确认」）
-        let minimal = &entries[2];
-        assert_eq!(minimal.relevance, "待确认");
-        assert_eq!(minimal.source, "");
-        assert_eq!(minimal.date.as_deref(), Some("2026-08-18"));
+        // 没有任何文献字段的标题块（如巡检摘要）不会进入雷达条目。
         // id 稳定且互不相同
         assert_ne!(legacy.id, full.id);
         assert!(legacy.id.starts_with("w-"));
@@ -951,11 +984,10 @@ mod tests {
     fn entries_before_any_marker_have_no_date_and_bad_lines_skipped() {
         let text = "## 无批次条目\n- 相关性：推荐\n这不是字段行\n- 摘要首句：x\n\n## 第二条\n";
         let entries = parse_inbox_entries(text);
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].date, None);
         assert_eq!(entries[0].abstract_first, "x");
         assert_eq!(entries[0].relevance, "推荐");
-        assert_eq!(entries[1].title, "第二条");
     }
 
     #[test]
@@ -987,11 +1019,31 @@ mod tests {
     }
 
     #[test]
-    fn count_inbox_entries_counts_headers_and_missing_file_is_zero() {
+    fn count_inbox_entries_counts_valid_literature_entries_and_missing_file_is_zero() {
         let dir = tmpdir("count");
         assert_eq!(count_inbox_entries(&dir), 0);
         write(&dir, "notes/inbox.md", SAMPLE_INBOX);
-        assert_eq!(count_inbox_entries(&dir), 3);
+        assert_eq!(count_inbox_entries(&dir), 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn output_note_reports_ignored_summary_blocks_and_missing_ledger() {
+        let dir = tmpdir("output-note");
+        write(
+            &dir,
+            "notes/inbox.md",
+            "## 2026-08-22 巡检（自动雷达）\n- 新命中 0 篇\n\n## 论文 A\n- 来源：arxiv — 2026-08-22 — https://arxiv.org/abs/1\n",
+        );
+        assert_eq!(
+            output_note(&dir).as_deref(),
+            Some("已忽略 1 个没有文献字段的巡检摘要块"),
+        );
+        write(&dir, "papers/watch-seen.md", "# ledger\n");
+        assert_eq!(
+            output_note(&dir).as_deref(),
+            Some("已忽略 1 个没有文献字段的巡检摘要块"),
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

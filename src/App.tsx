@@ -91,11 +91,15 @@ function baseName(path: string): string {
 
 /** 定时雷达运行完成的系统通知：复用通知权限申请模式（首次系统级弹窗，被拒静默跳过）。
  *  遵守「长任务 OS 通知」设置开关（notificationsEnabled），不新增设置项。 */
-async function fireScheduleNotification(title: string, body: string) {
+async function fireScheduleNotification(
+  title: string,
+  body: string,
+  extra: Record<string, unknown>,
+) {
   let granted = await isPermissionGranted();
   if (!granted) granted = (await requestPermission()) === "granted";
   if (!granted) return;
-  sendNotification({ title, body });
+  sendNotification({ title, body, actionTypeId: "ccode.schedule", extra });
 }
 
 /** 页切顺序/逐页绑定/默认值的单一出处在 hotkeys.ts PAGE_HOTKEY_DEFS（与侧栏工作→能力→管理一致） */
@@ -246,6 +250,10 @@ function App() {
         id: "ccode.attention",
         actions: [{ id: "open", title: "去处理", foreground: true }],
       },
+      {
+        id: "ccode.schedule",
+        actions: [{ id: "open", title: "去查看", foreground: true }],
+      },
     ]).catch(() => {});
     onAction((notification) => {
       getCurrentWindow()
@@ -254,11 +262,23 @@ function App() {
       const extra = (notification.extra ?? {}) as {
         tabId?: string;
         cwd?: string;
+        projectRoot?: string;
+        focus?: "lit" | "schedule";
       };
       void (async () => {
         if (extra.tabId) {
           setPage("terminal");
           setFocusTabReq(extra.tabId);
+          return;
+        }
+        if (extra.projectRoot) {
+          useAppStore.getState().setSelectProjectReq(extra.projectRoot);
+          useAppStore.getState().setProjectFocusReq({
+            projectRoot: extra.projectRoot,
+            focus: extra.focus ?? "schedule",
+            token: Date.now(),
+          });
+          setPage("workspaces");
           return;
         }
         setPage("workspaces");
@@ -279,8 +299,18 @@ function App() {
       const enabled = useAppStore.getState().settings?.notificationsEnabled ?? true;
       if (!enabled) return;
       void fireScheduleNotification(
-        runDoneNotifyTitle(baseName(e.payload.projectRoot), e.payload.status),
+        runDoneNotifyTitle(
+          baseName(e.payload.projectRoot),
+          e.payload.status,
+          e.payload.scheduleName || (e.payload.skill === "lit-watch" ? "文献雷达" : "定时任务"),
+        ),
         runDoneNotifyBody(e.payload.summary),
+        {
+          projectRoot: e.payload.projectRoot,
+          scheduleId: e.payload.scheduleId,
+          skill: e.payload.skill,
+          focus: e.payload.skill === "lit-watch" ? "lit" : "schedule",
+        },
       );
     })
       .then((u) => (unlisten = u))

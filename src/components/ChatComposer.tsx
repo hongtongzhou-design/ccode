@@ -150,7 +150,7 @@ export default function ChatComposer({
 
   return (
     <div className="ccode-chat-composer shrink-0 bg-canvas px-4 pb-4 pt-2.5">
-      <div className="mx-auto w-full max-w-3xl">
+      <div className="mx-auto w-full max-w-4xl">
         <div className="overflow-visible rounded-xl border border-hairline bg-raised transition-colors focus-within:border-l4">
           <textarea
             ref={ref}
@@ -200,9 +200,6 @@ export default function ChatComposer({
               {busy ? "发送中…" : "发送"}
             </button>
           </div>
-        </div>
-        <div className="mt-1.5 text-center text-micro text-l4/70">
-          当前会话 · 同一上下文
         </div>
       </div>
     </div>
