@@ -145,6 +145,13 @@ export default function CommandPalette({
               {(i === 0 || filtered[i - 1]?.group !== c.group) && c.group && (
                 <div className="px-2.5 pb-0.5 pt-1.5 text-micro font-medium uppercase tracking-[0.08em] text-l4">
                   {c.group}
+                  {/* 外观组带一句主题切换说明（与设置页主题区同口径）：Agent TUI 配色
+                      只在启动时探测终端底色（OSC 11），运行中会话重启后才会一致 */}
+                  {c.group === "外观" && (
+                    <div className="mt-0.5 normal-case tracking-normal text-l4">
+                      Agent 会话配色按启动时终端底色确定，运行中会话重启后生效
+                    </div>
+                  )}
                 </div>
               )}
               <button

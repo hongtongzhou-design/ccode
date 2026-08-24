@@ -29,6 +29,15 @@ export default function HistoryOverlay({
   const [entries, setEntries] = useState<HistoryEntryDto[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Esc 关闭（与应用内其他浮层一致）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   useEffect(() => {
     let stale = false;
     invoke<HistoryEntryDto[]>("project_history", { repoPath, limit: 100 })

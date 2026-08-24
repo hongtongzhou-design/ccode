@@ -1,7 +1,8 @@
 //! 二进制文件字节读取（§11.4 P2a PDF / RX4a docx）：供前端内嵌预览。
 //! 防任意文件读取——只有白名单来源内的路径才放行：
 //! 已注册项目的登记资源（project.toml resources）、已注册项目根内、
-//! 工作区/仓库根内、终端标签 cwd 根内（前端 hint，风格同 read_file_preview 的 root 约束），
+//! 工作区/仓库根内、终端标签 cwd 根内（前端 hint，风格同 read_file_preview 的 root 约束）、
+//! Ccode 自管的剪贴板图片目录（<config>/ccode/tmp/paste-*，clipboard.rs 写入侧白名单），
 //! 以及上述各根 artifacts.yaml 提货单中登记产物的精确路径（P4：登记产物可位于根之外）。
 //! 目标路径 canonicalize 后再判定，堵符号链接绕过。
 
@@ -60,6 +61,14 @@ pub(crate) fn read_whitelisted_sync(
     let (project_roots, project_resources) = crate::projects::project_roots_and_resources();
     roots.extend(project_roots.iter().filter_map(|p| canon(p)));
     resources.extend(project_resources.iter().filter_map(|p| canon(p)));
+    // Ccode 自管的剪贴板图片目录（clipboard.rs paste-*：写入侧已有扩展名白名单 +
+    // 50MB 上限 + 7 天清理）——终端/聊天里引用的粘贴图片要走同一读取通道
+    if let Some(c) = dirs::config_dir()
+        .map(|d| d.join("ccode").join("tmp"))
+        .and_then(|p| canon(&p))
+    {
+        roots.push(c);
+    }
     roots.extend(
         crate::workspaces::worktree_rows()
             .into_iter()

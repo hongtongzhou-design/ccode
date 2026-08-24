@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   filterLitDismissed,
   groupEntriesByDay,
+  groupEntriesByKeyword,
   includedLineFor,
   isRead,
   litInboxCandidates,
@@ -10,7 +11,9 @@ import {
   paperResourceFor,
   pdfUrlFor,
   relevanceRank,
+  sourceDisplayName,
   staleLitHint,
+  UNCATEGORIZED_KEYWORD,
   weeklyBuckets,
 } from "../src/lit-watch.ts";
 import type { WatchEntryDto } from "../src/lit-watch.ts";
@@ -32,6 +35,7 @@ function entry(patch: Partial<WatchEntryDto>): WatchEntryDto {
     url: "",
     date: null,
     rawLineRange: [1, 1],
+    metrics: null,
     ...patch,
   };
 }
@@ -69,6 +73,83 @@ test("groupEntriesByDay：今天/昨天/更早三桶，无 date 进更早，空�
 test("groupEntriesByDay：坏日期串诚实落「更早」，不抛错", () => {
   const groups = groupEntriesByDay([entry({ date: "not-a-date" })], NOW);
   assert.deepEqual(groups.map((g) => g.key), ["earlier"]);
+});
+
+test("groupEntriesByKeyword：每条只归第一个关键词，多命中不重复出现", () => {
+  const groups = groupEntriesByKeyword([
+    entry({ id: "a", keywordsHit: ["moe", "llm"] }),
+    entry({ id: "b", keywordsHit: ["llm", "moe"] }),
+  ]);
+  const flat = groups.flatMap((g) => g.entries.map((e) => e.id));
+  assert.deepEqual(flat.sort(), ["a", "b"]);
+  assert.equal(
+    groups.find((g) => g.keyword === "moe")?.entries.map((e) => e.id).join(),
+    "a",
+  );
+  assert.equal(
+    groups.find((g) => g.keyword === "llm")?.entries.map((e) => e.id).join(),
+    "b",
+  );
+});
+
+test("groupEntriesByKeyword：无关键词归「未分类」且恒排最后", () => {
+  const groups = groupEntriesByKeyword([
+    entry({ id: "u", keywordsHit: [] }),
+    entry({ id: "w", keywordsHit: ["  "] }), // 空白关键词同样算未分类
+    entry({ id: "a", keywordsHit: ["moe"] }),
+    entry({ id: "b", keywordsHit: ["moe"] }),
+  ]);
+  assert.deepEqual(
+    groups.map((g) => [g.keyword, g.entries.map((e) => e.id)]),
+    [
+      ["moe", ["a", "b"]],
+      [UNCATEGORIZED_KEYWORD, ["u", "w"]],
+    ],
+  );
+  // 未分类即使条目最多也排最后
+  const lastHeavy = groupEntriesByKeyword([
+    entry({ keywordsHit: [] }),
+    entry({ keywordsHit: [] }),
+    entry({ keywordsHit: ["moe"] }),
+  ]);
+  assert.deepEqual(
+    lastHeavy.map((g) => g.keyword),
+    ["moe", UNCATEGORIZED_KEYWORD],
+  );
+});
+
+test("groupEntriesByKeyword：组按条目数降序、同数按关键词字母序", () => {
+  const groups = groupEntriesByKeyword([
+    entry({ keywordsHit: ["beta"] }),
+    entry({ keywordsHit: ["gamma"] }),
+    entry({ keywordsHit: ["alpha"] }),
+    entry({ keywordsHit: ["alpha"] }),
+  ]);
+  assert.deepEqual(
+    groups.map((g) => [g.keyword, g.entries.length]),
+    [
+      ["alpha", 2],
+      ["beta", 1],
+      ["gamma", 1],
+    ],
+  );
+});
+
+test("groupEntriesByKeyword：组内按相关性排序（推荐>相关>待确认），同级稳定序", () => {
+  const groups = groupEntriesByKeyword([
+    entry({ id: "a", keywordsHit: ["moe"], relevance: "待确认" }),
+    entry({ id: "b", keywordsHit: ["moe"], relevance: "推荐" }),
+    entry({ id: "c", keywordsHit: ["moe"], relevance: "相关" }),
+    entry({ id: "d", keywordsHit: ["moe"], relevance: "待确认" }),
+  ]);
+  assert.deepEqual(
+    groups[0].entries.map((e) => e.id),
+    ["b", "c", "a", "d"],
+  );
+});
+
+test("groupEntriesByKeyword：空输入返回空表，无空组", () => {
+  assert.deepEqual(groupEntriesByKeyword([]), []);
 });
 
 test("weeklyBuckets：近 8 周计数，周一起点，无 date 不计", () => {
@@ -297,4 +378,21 @@ test("filterLitDismissed：忽略表内的条目被过滤", () => {
     ["w-2"],
   );
   assert.deepEqual(filterLitDismissed(entries, new Set()).length, 2);
+});
+
+test("sourceDisplayName：剥出版商括号尾巴", () => {
+  assert.equal(
+    sourceDisplayName("Advanced Functional Materials (Wiley)"),
+    "Advanced Functional Materials",
+  );
+  assert.equal(
+    sourceDisplayName("Industrial & Engineering Chemistry Research (ACS)"),
+    "Industrial & Engineering Chemistry Research",
+  );
+  // 全角括号、多级尾巴
+  assert.equal(sourceDisplayName(" Advanced Materials（Wiley） "), "Advanced Materials");
+  assert.equal(sourceDisplayName("2D Materials (IOP) (UK)"), "2D Materials");
+  // 无尾巴原样返回；整串就是括号（剥完为空）不剥
+  assert.equal(sourceDisplayName("arxiv"), "arxiv");
+  assert.equal(sourceDisplayName("(Wiley)"), "(Wiley)");
 });

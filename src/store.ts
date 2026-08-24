@@ -92,6 +92,8 @@ export interface AppSettings {
   /** 想法期只读保护（卡片区「聊想法」，默认开）：开 = 支持的 CLI 注入只读/计划模式参数 +
       预填指令带不动文件约束；关 = 纯聊天 */
   discussReadonly?: boolean;
+  /** 聊天页显示终端状态栏（默认开）；关 = 聊天页隐藏但保留占位，切层不改变终端行列数 */
+  statusBarInChat?: boolean;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效；

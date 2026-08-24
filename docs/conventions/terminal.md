@@ -91,8 +91,10 @@
 - **同会话双界面（v3.126）**：主工作区默认显示聊天，模式切换收进终端标签栏的轻量「聊天 · 终端」inline action，不再单独占用一行。两者共享同一个 TerminalView、xterm、PTY 和会话文件；聊天层隐藏终端画面但不卸载，切回终端不重建进程、不丢滚动缓冲。进入聊天模式自动退出分屏，切回终端不自动恢复分屏；聊天模式隐藏完整 TerminalStatusBar，必要上下文移到聊天头部与 composer，终端模式保留状态栏；该显示策略只存运行态，不增加持久化设置。右侧工作台只保留「文件 / 改动」，不再显示重复的对话面板。
 - **聊天资源入口（v3.126，v3.130 修订）**：聊天 composer 与 TerminalView 复用当前 Agent 的技能/MCP 清单。点技能或 MCP 只把提示插入聊天输入框，不自动调用发送链路；用户补充后按 Enter 才写入当前 PTY（未启动时沿用自动启动/首条 prompt 语义），MCP 菜单可跳转 MCP 管理页；不复制终端专属 TUI 菜单解析器。
 - **聊天发送链路（v3.125）**：Enter 发送、Shift+Enter 换行；运行中的 Agent 直接写当前 PTY，已结束会话自动 resume，未启动标签自动启动并把首条消息作为启动 prompt。Kimi 等不支持启动注入的 CLI 自动切到终端并保留/复制待发送文本；终端专属确认、登录和选择器统一提示「需要终端操作」，不复制脆弱菜单解析器。
-- **聊天回复反馈（v3.131）**：发送成功后先显示本地用户消息并展示「Agent 正在处理…」加载状态；会话文件刷新时保留尚未落盘的本地消息，只有检测到发送之后的真实 assistant 消息才结束加载。等待回复期间使用约 700ms 的短兜底刷新，防止单次 watcher 事件丢失导致回复永远不进入聊天层；回复到达后立即停止该兜底刷新。
-- **聊天写入 PTY（v3.133）**：聊天发送必须取 `TerminalView` 当前 `ptyIdRef/ptyKindRef` 作为目标，不依赖异步状态镜像；文本和提交键通过后端 `pty_write_submit` 在同一把 PTY 锁内连续写入，文本先遵守 bracketed-paste 规则，再单独写入提交键，避免 TUI 在两个 IPC 调用之间切帧或把多行消息的回车吞进粘贴内容。普通 CLI 使用 `\r`，Kimi 继续使用 CSI-u Enter。
+- **聊天回复反馈（v3.131）**：发送成功后先显示本地用户消息并展示「Agent 正在处理…」加载状态；会话文件刷新时保留尚未落盘的本地消息，只有检测到发送之后的真实 assistant 消息才结束加载。等待回复期间使用约 700ms 的短兜底刷新，防止单次 watcher 事件丢失导致回复永远不进入聊天层；回复到达后立即停止该兜底刷新。2026-08-24 起本地消息从单条改为队列（pendingUsersRef）：连发多条全部保留，已落盘的逐条移出，全部落盘且等到新回复才结束等待；兜底轮询有 3 分钟超时。
+- **聊天层审批卡片与打断（2026-08-24）**：注意力 confirm 时横幅升级为审批卡片——详情文案来自 hooks 日志 payload 的 `message`/`tool_name`/`title`（`session_confirm_detail` command，与 state_for_session_file 同一套门控；payload schema 各家未文档化，取不到回通用文案）；✓ 批准 / ✗ 拒绝 / Esc 取消三个按键经 `writePty` 写单字符（y/n/\x1b），是保守热键集，各家审批菜单形态未调研、按键无效引导「打开终端」，不复制菜单解析器（v3.125 决策不变）；「⏹ 打断」写 `\x03`。
+- **聊天写入 PTY（v3.133）**：聊天发送必须取 `TerminalView` 当前 `ptyIdRef/ptyKindRef` 作为目标，不依赖异步状态镜像；文本和提交键通过后端 `pty_write_submit` 写入，文本先遵守 bracketed-paste 规则。2026-08-24 起正文与提交键分两次写、中间留 60ms（spawn_blocking + thread::sleep，不占主线程）——背靠背写入时开了 bracketed paste 的 TUI 来不及把粘贴内容收进输入框，回车会被吞掉；恢复会话路径发送前再额外等 1.2s（进程引导/会话回放/信任提示期写入会落在未就绪的 TUI 上）。普通 CLI 使用 `\r`，Kimi 继续使用 CSI-u Enter。
+- **聊天层常驻挂载（2026-08-24）**：ChatSurface 不再随 chat⇄terminal 切换卸载（display:contents/none 仅隐藏），输入框草稿、滚动位置、ConversationView 展开状态切层不丢；ChatComposer 的一次性 autofocus 改为 `focusWhen` 可见性信号（隐藏态 focus() 被浏览器忽略，不会抢终端焦点）。AI 正文经 ChatMarkdown 渲染 Markdown（安全口径见 safety.md），超长未展开仍保持截断纯文本 + 展开按钮。
 - **会话同步（v3.125）**：关联成功后优先注册专用 session watcher，普通 JSONL 监听目标文件目录，OpenCode 监听数据库与 WAL；事件短防抖后通知前端，前端整段替换最近 50 条消息。签名轮询保留为 watcher 失败或丢事件时的兜底，并以请求代次防止旧读取覆盖新消息。同步状态显式区分识别中、已监听、等待文件、兜底轮询。
 - **分叉聊天（v3.125）**：新建聊天只在已有 session 文件和 session ID 时启用；复用结构化接力简报与 handoff 链，不复制完整原始历史。新标签继承 Agent/连接/模型/目录，默认聊天模式、自动启动、只读；不支持原生只读参数的 CLI 标注「提示约束」。点击「允许修改」确认风险后停止只读 PTY，以同一摘要和配置重启可写会话，原会话保持不变。
 - **启动栏与状态栏分工（v3.91）**：启动栏主流程 Agent → 配置 → 模型 → 启动，技能/MCP 胶囊右对齐在启动行末端；
@@ -218,6 +220,8 @@
   `data-tauri-drag-region` 属性版只认落点元素本尊，顶栏几乎全被子元素占满，实测拖不动（v3.99 教训）。
   任何 inset-0 覆盖层同理，漏了就是按钮重合 + 窗口拖不动。
   分隔条拖拽记宽度（localStorage `ccode.readerSplitL/R`，钳制与像素换算在 `src/reader.ts`），左右栏可收起；
+  右栏内「翻译面板 × 终端」的底缘横分割条同样可拖记高度（`ccode.readerSplitT`，% 右栏总高、12–70 钳制，
+  未拖过 = 内容自适应 40% 封顶不落键，双击复位自适应；拖拽为增量式——自适应态起点取当前渲染高度占比，不跳变）；
   右栏底部还有终端状态栏——TerminalStatusBar 节点随 xterm 宿主一并 DOM 搬移（`data-statusbar-host` 标记，
   槽位缺席时留在原 pane，两槽位挂载时机不同步故 host/bar 独立判定）。
   **建档配对（v3.99）**：`ensure_paper_note` 建档前先扫 notes/*.md 头部的「来源行」（lit-notes 的
@@ -305,7 +309,8 @@
   **原文/译文渲染与「存进笔记」前都先过 `reflowBlockText`**（reader.ts 纯函数：PDF 文本层的硬换行与
   断词是排版产物——`-\n` 断词接回、段内单换行英文转空格/中文直连、连续空行压成单换行、行首尾 trim；
   原文按 `{cjk:false}`、译文按 `{cjk:true}` 口径；抽屉两行摘要同样过）。封顶 40% 栏高、
-  超出内部滚动（% max-h 挂栏根 flex 子级才解析定高）。chevron 只折正文留表头
+  超出内部滚动（% max-h 挂栏根 flex 子级才解析定高；拖过底缘分割条后改显式 % 高，
+  仅正文展开时套用，chevron/× 收起回归自适应）。chevron 只折正文留表头
   （组件内 state 不持久化、新翻译自动展开）；× = 面板整体消失本轮不再弹出（记当前显示条 at），收起态留
   一行动作条让「历史 N」抽屉随时可开。**历史抽屉点行 = 载入主面板**（`viewingAt` 按条目 at 标识当前
   显示条，不碰 latest 语义；新翻译进来自动回最新）；行内只留译文摘要（两行 clamp，第 N 页/相对时间已
@@ -350,3 +355,26 @@
   只显示合并成功横幅；「合并并归档」成功即关覆盖层，不出此入口。**v3.97 起不再直接开步跳终端**
   （用户拍板：直接开步会把不熟流程的用户扔进黑窗）——改为 `selectProjectReq` + 跳项目页，
   聚焦逻辑自动落在刚解锁的下一步（第一个未完成步骤），流程线/TASK.md/人工事项先看再自己点「开始」。
+- **Codex TUI resize 重绘属上游行为（2026-08-24 实证，本端只能减次数）**：codex 主对话区是 inline viewport
+  （alt screen 只用于 /model 等覆盖层），PTY resize（开合聊天层/拖分屏/改字号）触发 SIGWINCH 后 resize reflow
+  会把整个 transcript 按新宽度重放，旧帧留在 scrollback，表现为每条消息成对出现（截断版 + 完整版）。
+  上游 issue 簇 openai/codex#38839/#38479/#25622 全部 open，原 reflow 开关已移除（恒开），
+  唯一官方旋钮 `tui.terminal_resize_reflow_max_rows` 有 resume 丢历史的副作用（#21635/#26570），不预设。
+  本端缓解：`term.onResize → pty_resize` trailing 防抖 150ms（TerminalPage），连续拖拽只触发一次重放；
+  底部状态栏跨聊天/终端模式常驻渲染（聊天页默认也显示模型/目录/git/token；设置页「聊天页显示状态栏」
+  关掉后以 `invisible` 纯占位）——无论开关，切层不改变终端行列数、不触发 SIGWINCH，
+  切层闪烁与 scrollback 副本同消（2026-08-24，settings 字段 status_bar_in_chat 默认 true）。
+  同类问题非 codex 独有：gemini 整区重绘闪烁（缓解 = settings `ui.useAlternateBuffer: true`，注入模式不动用户配置故不设）；
+  Ink 系（claude/cursor）原地重绘不留 scrollback 副本。
+  另实证：聊天层「等待回复」滞留的根因是 TUI 输入框残留草稿与发送文本拼接落盘（yyyyyy前缀案例），
+  isRecorded 已放宽为包含匹配（TerminalPage fetchConversation）。
+- **TUI 配色只在启动时探测终端底色（2026-08-24 实证，codex 0.149.1 源码级）**：codex 启动时经 OSC 10/11
+  查询终端默认前/背景色（terminal_probe.rs，仅启动一次，xterm.js 会如实应答当前主题色），据此选定
+  浅/深配色并用显式 RGB 画出用户消息行与输入框行（style.rs user_message_style_for(terminal_bg)）。
+  Ccode 运行时切主题 → xterm 默认背景即时翻转，但显式 RGB 单元格保持旧色，且进程收不到「调色板变了」
+  的推送（终端协议无此机制，DEC 2031 明暗通知 codex 未订阅）→ 运行中会话滞留旧配色，重启会话才一致。
+  codex 的 /theme 只是代码块语法高亮主题，不解决。对策 = 设置页主题区与 ⌘K 命令面板主题命令
+  **无条件常驻**说明（设置页主题区一行；⌘K 命令面板「外观」组头下一行，不逐行挂 hint）——曾按 liveSessions
+  门控，但页面 ⌘R 重载后标签恢复为占位、登记清空，提示恰好缺席（2026-08-24 实测教训），故不设门控；
+  不造全局 toast、不拦截切换；gemini/claude 等自适应终端底色的 TUI 同理。
+

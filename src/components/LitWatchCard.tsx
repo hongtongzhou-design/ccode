@@ -23,11 +23,13 @@ import {
   dismissLitEntry,
   filterLitDismissed,
   groupEntriesByDay,
+  groupEntriesByKeyword,
   includedLineFor,
   isRead,
   loadLitDismissed,
   paperResourceFor,
   pdfUrlFor,
+  sourceDisplayName,
   staleLitHint,
   weeklyBuckets,
   normalizeTitle,
@@ -36,6 +38,7 @@ import type {
   AddIncludedResultDto,
   DownloadedPaperDto,
   IncludedEntryDto,
+  JournalMetricsStatusDto,
   WatchEntryDto,
   WatchFollowupDto,
   WatchInboxDto,
@@ -163,6 +166,11 @@ function WatchEntryRow({
   // 有中文一句话时标题行显示它，英文原标题进 hover tooltip
   const titleRef = useRef<HTMLSpanElement>(null);
   const { tip, show, hide } = useHoverTip(titleRef);
+  // 期刊 pill 剥出版商尾巴（「(Wiley)」等）给标题让位；剥过时 hover 显示原始全称
+  const sourceName = sourceDisplayName(entry.source);
+  const sourceStripped = sourceName !== entry.source.trim();
+  const sourceRef = useRef<HTMLSpanElement>(null);
+  const sourceTip = useHoverTip(sourceRef, true);
   const pdfUrl = pdfUrlFor(entry.url);
   const pdfRef = useRef<HTMLButtonElement>(null);
   const pdfTip = useHoverTip(pdfRef, true);
@@ -184,18 +192,47 @@ function WatchEntryRow({
             {entry.relevance}
           </span>
         )}
+        {/* 标题不截断：长题整行换行显示全（对照 Stork 卡片式扫读） */}
         <span
           ref={titleRef}
           onMouseEnter={entry.zhSummary ? show : undefined}
           onMouseLeave={entry.zhSummary ? hide : undefined}
-          className="min-w-0 truncate text-sm text-l1"
+          className="min-w-0 text-sm text-l1"
         >
           {entry.zhSummary || entry.title}
         </span>
         {entry.zhSummary && <HoverTip tip={tip} text={entry.title} />}
-        <span className="shrink-0 rounded-sm bg-inset px-1 py-0.5 text-micro text-l4">
-          {entry.source}
+        <span
+          ref={sourceRef}
+          onMouseEnter={sourceStripped ? sourceTip.show : undefined}
+          onMouseLeave={sourceStripped ? sourceTip.hide : undefined}
+          className="shrink-0 rounded-sm bg-inset px-1 py-0.5 text-micro text-l4"
+        >
+          {sourceName}
         </span>
+        {sourceStripped && <HoverTip tip={sourceTip.tip} text={entry.source} up />}
+        {entry.metrics?.impactFactor && (
+          <span className="shrink-0 rounded-full bg-inset px-1.5 py-0.5 text-micro text-l3">
+            IF {entry.metrics.impactFactor}
+          </span>
+        )}
+        {entry.metrics?.casQuartile != null && (
+          /* 1 区用 cta-pill 强调（同「推荐」pill 口径），2-4 区回到 inset 灰底 */
+          <span
+            className={`shrink-0 rounded-full px-1.5 py-0.5 text-micro ${
+              entry.metrics.casQuartile === 1
+                ? "bg-cta-pill text-cta-pill-text"
+                : "bg-inset text-l3"
+            }`}
+          >
+            {entry.metrics.casQuartile}区
+          </span>
+        )}
+        {entry.metrics?.top && (
+          <span className="shrink-0 rounded-full bg-cta-pill px-1.5 py-0.5 text-micro text-cta-pill-text">
+            TOP
+          </span>
+        )}
         {entry.date && (
           <span className="shrink-0 text-micro text-l4">
             {relTime(entry.date)}
@@ -760,6 +797,12 @@ export default function LitWatchCard({
   const [schedules, setSchedules] = useState<ScheduleDto[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"new" | "included">("new");
+  /** 「新命中」页签内的分组视图：按日期（默认）/ 按关键词 */
+  const [groupBy, setGroupBy] = useState<"day" | "keyword">("day");
+  /** 期刊指标表状态；null = 未取到（命令缺失/失败，入口不显示） */
+  const [metricsStatus, setMetricsStatus] =
+    useState<JournalMetricsStatusDto | null>(null);
+  const [metricsDownloading, setMetricsDownloading] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(() =>
     loadLitDismissed(),
   );
@@ -841,6 +884,12 @@ export default function LitWatchCard({
       if (!stale) void load();
     };
     reload();
+    // 指标表缺失时卡头才出下载入口；失败（命令缺失等）静默，不打扰卡片主功能
+    invoke<JournalMetricsStatusDto>("journal_metrics_status")
+      .then((s) => {
+        if (!stale) setMetricsStatus(s);
+      })
+      .catch(() => {});
     let unlisten: (() => void) | undefined;
     listen<SchedulerRunDonePayload>("scheduler-run-done", () => {
       setRunning(false);
@@ -879,6 +928,23 @@ export default function LitWatchCard({
     } catch (reason) {
       setRunning(false);
       setError(String(reason));
+    }
+  }
+
+  /** 下载期刊指标表（可能耗时 1-4 分钟）：成功后就绪提示 + 重拉条目让徽章出现 */
+  async function downloadMetrics() {
+    setMetricsDownloading(true);
+    setError(null);
+    try {
+      const status =
+        await invoke<JournalMetricsStatusDto>("download_journal_metrics");
+      setMetricsStatus(status);
+      showToast(`期刊指标表已就绪（${status.journalCount} 种期刊）`);
+      void load();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setMetricsDownloading(false);
     }
   }
 
@@ -1010,6 +1076,21 @@ ${topicLine}
     (included ?? []).map((item) => normalizeTitle(item.title)),
   );
   const buckets = weeklyBuckets(entries ?? []);
+  // 「新命中」两种分组视图统一成同构组列表，下方渲染不分支；关键词组头要显眼（prominent）
+  const entryGroups: {
+    key: string;
+    label: string;
+    entries: WatchEntryDto[];
+    prominent: boolean;
+  }[] =
+    groupBy === "day"
+      ? groupEntriesByDay(visibleEntries).map((g) => ({ ...g, prominent: false }))
+      : groupEntriesByKeyword(visibleEntries).map((g) => ({
+          key: g.keyword,
+          label: g.keyword,
+          entries: g.entries,
+          prominent: true,
+        }));
   const hasSubs = (subs ?? []).length > 0;
   // 关联步骤漂移提醒（只提醒不阻断）：任一任务命中即显示
     const staleStep = radarSchedules.find((s) => {
@@ -1037,6 +1118,25 @@ ${topicLine}
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-1">
+          {metricsStatus && (
+            <button
+              type="button"
+              className={ghostActionClass}
+              disabled={metricsDownloading}
+              title={
+                metricsStatus.available
+                  ? `JCR2025 + 中科院分区表 2025 · ${metricsStatus.journalCount} 种期刊；出新版时点我重新下载即更新`
+                  : "从第三方仓库 ShowJCR 下载 JCR2025 + 中科院分区表（版权归原数据方，仅供个人科研参考），命中条目即可显示期刊徽章"
+              }
+              onClick={() => void downloadMetrics()}
+            >
+              {metricsDownloading
+                ? "下载中…"
+                : metricsStatus.available
+                  ? "↻ 期刊指标表"
+                  : "↓ 期刊指标表"}
+            </button>
+          )}
           {radarSchedules.length > 0 && (
             <button
               type="button"
@@ -1107,12 +1207,34 @@ ${topicLine}
                     最近一次成功巡检新增 {latestRadarRun.newEntries ?? "未知"} 条 · 未忽略 {visibleEntries.length} 条
                   </p>
                 )}
+                {visibleEntries.length > 0 && (
+                  <SegTabs
+                    className="mt-2"
+                    items={[
+                      { id: "day" as const, label: "按日期" },
+                      { id: "keyword" as const, label: "按关键词" },
+                    ]}
+                    value={groupBy}
+                    onChange={setGroupBy}
+                  />
+                )}
                 {visibleEntries.length === 0 && (
                   <p className="mt-2 text-xs text-l4">暂无新命中</p>
                 )}
-                {groupEntriesByDay(visibleEntries).map((group) => (
+                {entryGroups.map((group) => (
                   <div key={group.key} className="mt-2">
-                    <p className="px-2 text-micro text-l4">{group.label}</p>
+                    {group.prominent ? (
+                      /* 关键词组头：强调色竖条 + 粗体 + 条数（对照 Stork 关键词分区头） */
+                      <p className="flex items-center gap-1.5 px-2 pt-1 text-sm font-semibold text-l1">
+                        <span className="h-3.5 w-0.5 rounded-full bg-cta" />
+                        {group.label}
+                        <span className="text-xs font-normal text-l4">
+                          {group.entries.length}
+                        </span>
+                      </p>
+                    ) : (
+                      <p className="px-2 text-micro text-l4">{group.label}</p>
+                    )}
                     <ul className="space-y-0.5">
                       {group.entries.map((entry) => (
                         <WatchEntryRow

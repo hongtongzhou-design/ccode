@@ -7,9 +7,14 @@ import { escapeShellPath } from "./terminal-input.ts";
 
 export const READER_SPLIT_L_KEY = "ccode.readerSplitL";
 export const READER_SPLIT_R_KEY = "ccode.readerSplitR";
+/** 右栏「翻译面板 × 终端」纵向分割：面板高度占右栏高度的百分比（未拖过 = 内容自适应，不落键） */
+export const READER_SPLIT_T_KEY = "ccode.readerSplitT";
 /** 侧栏宽度百分比的可拖范围（相对三栏总宽） */
 export const READER_PCT_MIN = 12;
 export const READER_PCT_MAX = 40;
+/** 翻译面板高度百分比的可拖范围（相对右栏总高）：下限留表头+两行译文，上限给终端留可用高度 */
+export const READER_TL_PCT_MIN = 12;
+export const READER_TL_PCT_MAX = 70;
 /** 侧栏（笔记/Agent）最小像素宽：窗口再小也不压缩到不可用 */
 export const READER_SIDE_MIN_PX = 240;
 /** PDF 栏保底宽度：两侧合计不得把它压到这条线以下 */
@@ -31,6 +36,26 @@ export function loadReaderPct(key: string, fallback: number): number {
     return Number.isFinite(v) && v > 0 ? clampReaderPct(v, fallback) : fallback;
   } catch {
     return fallback;
+  }
+}
+
+/** 翻译面板高度百分比钳制：同 clampReaderPct 形状，范围用 READER_TL_PCT_* */
+export function clampReaderTlPct(pct: number, fallback: number): number {
+  if (!Number.isFinite(pct) || pct <= 0) return fallback;
+  return Math.min(READER_TL_PCT_MAX, Math.max(READER_TL_PCT_MIN, pct));
+}
+
+/** 读本地记忆的翻译面板高度百分比；未拖过（无键）/坏值返回 null = 内容自适应 */
+export function loadReaderTlPct(key: string): number | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return null;
+    const v = Number(raw);
+    return Number.isFinite(v) && v > 0
+      ? clampReaderTlPct(v, READER_TL_PCT_MIN)
+      : null;
+  } catch {
+    return null;
   }
 }
 

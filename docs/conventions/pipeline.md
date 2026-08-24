@@ -569,6 +569,13 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
     复用 staleUpstream 口径，只提醒不阻断。
   - **精读清单与已读判定**：included.md 是「先攒后读」主路径；已读 = notes/ 有匹配笔记文件（规范化标题互相包含
     判定），纯派生不建状态机；「开读」有已下载 PDF 走 previewReq 预览，没有则主按钮变「↓ 全文」先下载。
+  - **期刊指标徽章（journal_metrics.rs）**：条目徽章（IF / 中科院大类分区 / TOP）在 `list_watch_entries` 出口按
+    期刊名（journal 优先、source 回落）查表 enrichment，**展示时现算、不落 inbox.md**——技能规范与收件箱格式不变，
+    旧条目装表后同样生效。指标表 = 用户本机 `config_dir/ccode/journal-metrics/` 下两份 CSV（JCR2025-UTF8.csv +
+    FQBJCR2025-UTF8.csv，来源 github.com/hitfyd/ShowJCR，版权数据**只支持用户本机下载/放置，绝不内置分发**；
+    下载命令 jsDelivr 优先、raw 回落，.tmp 原子落盘后清进程内缓存）。匹配 = normalize_title 规范化精确匹配 +
+    末尾出版商括号尾巴剥除重试（来源常写成「Advanced Functional Materials (Wiley)」，前端 sourceDisplayName 同口径），
+    miss / 未装表一律 None 不虚构；合并表 HashMap 进程内 RwLock 缓存（7MB 不能每次 list 重解析）。
   - **下载白名单与资源登记**：download_paper_pdf 仅 http/https、60MB 上限流式中止、%PDF- 魔数校验、文件名
     sanitize、落 papers/ 重名 -2/-3、自动登记 project.toml `[[resources]]` type="paper"；非直链（出版商页）前端
     禁用并提示手动下载，付费墙文献仍走 watch-followup.md「待人工下载」。

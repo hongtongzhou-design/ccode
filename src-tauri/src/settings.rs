@@ -105,6 +105,9 @@ pub struct AppSettingsDto {
     /// 想法期只读保护（卡片区「聊想法」）：开 = 注入只读/计划模式参数（支持的 CLI）+
     /// 预填指令带不动文件约束；关 = 纯聊天不动参数。卡片区就地开关，设置页不加行
     pub discuss_readonly: Option<bool>,
+    /// 聊天页显示终端状态栏（模型/目录/git/token；默认开）。关 = 聊天页隐藏但保留
+    /// invisible 占位——终端几何高度跨模式恒定，切层不改行列数、不触发 codex resize reflow
+    pub status_bar_in_chat: Option<bool>,
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -198,6 +201,7 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         // 逐页绑定不做默认值填充：键缺失即「跟随默认」（同 ai_profiles 口径）
         hotkey_pages: s.hotkey_pages,
         discuss_readonly: s.discuss_readonly.or(Some(true)),
+        status_bar_in_chat: s.status_bar_in_chat.or(Some(true)),
     }
 }
 
@@ -281,6 +285,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.discuss_readonly.is_some() {
         cur.discuss_readonly = patch.discuss_readonly;
+    }
+    if patch.status_bar_in_chat.is_some() {
+        cur.status_bar_in_chat = patch.status_bar_in_chat;
     }
 }
 

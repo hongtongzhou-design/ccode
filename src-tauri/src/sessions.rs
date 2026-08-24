@@ -2457,7 +2457,11 @@ fn grok_time_field(v: &Value, key: &str) -> Option<String> {
 }
 
 fn parse_grok(lines: &[String]) -> Vec<ChatMessageDto> {
-    let mut msgs = Vec::new();
+    let mut msgs: Vec<ChatMessageDto> = Vec::new();
+    // 流式 chunk 聚合（2026-08-24）：grok 一条消息是多个连续 chunk，逐 chunk 独立成条会把
+    // 一句话刷成一屏碎片——连续同角色 chunk 追加进上一条消息；tool_call/tool_call_update
+    // 打断连续性（其后的 chunk 是工具回合后的新一轮输出）；plan/未知类型跳过且不打断
+    let mut break_run = true;
     for line in lines {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue; // 末行截断等坏行直接跳过
@@ -2467,29 +2471,32 @@ fn parse_grok(lines: &[String]) -> Vec<ChatMessageDto> {
         };
         let ts = grok_time(&v);
         match get_str(update, "sessionUpdate") {
-            Some("user_message_chunk") => {
+            Some(kind @ ("user_message_chunk" | "agent_message_chunk")) => {
                 let Some(text) = grok_content_text(update) else {
                     continue;
                 };
-                msgs.push(ChatMessageDto {
-                    role: "user".into(),
-                    blocks: vec![text_block(text)],
-                    timestamp: ts,
-                    usage: None,
-                });
-            }
-            Some("agent_message_chunk") => {
-                let Some(text) = grok_content_text(update) else {
-                    continue;
+                let role = if kind == "user_message_chunk" {
+                    "user"
+                } else {
+                    "assistant"
                 };
-                msgs.push(ChatMessageDto {
-                    role: "assistant".into(),
-                    blocks: vec![text_block(text)],
-                    timestamp: ts,
-                    usage: None,
-                });
+                if !break_run && msgs.last().is_some_and(|m| m.role == role) {
+                    let m = msgs.last_mut().unwrap();
+                    if let Some(b) = m.blocks.first_mut() {
+                        b.text.push_str(&text);
+                    }
+                } else {
+                    msgs.push(ChatMessageDto {
+                        role: role.into(),
+                        blocks: vec![text_block(text)],
+                        timestamp: ts,
+                        usage: None,
+                    });
+                }
+                break_run = false;
             }
-            // tool_call/tool_call_update/plan 及未知 sessionUpdate 类型（含 _x.ai/ 扩展）跳过
+            Some("tool_call" | "tool_call_update") => break_run = true,
+            // plan 及未知 sessionUpdate 类型（含 _x.ai/ 扩展）跳过且不打断流式连续性
             _ => {}
         }
     }
@@ -5671,6 +5678,25 @@ mod tests {
         assert_eq!(msgs[0].timestamp.as_deref(), Some("2026-08-06T08:37:21Z"), "unix 秒应转 ISO");
         assert_eq!(msgs[1].role, "assistant");
         assert_eq!(msgs[1].blocks[0].text, "好的，已写好");
+    }
+
+    #[test]
+    fn grok_parse_merges_streaming_chunks_and_tool_calls_split_runs() {
+        let lines = s(&[
+            r#"{"timestamp":1,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"我来"}}}}"#,
+            r#"{"timestamp":2,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"查一下。"}}}}"#,
+            r#"{"timestamp":3,"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"t1"}}}"#,
+            r#"{"timestamp":4,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"查到了。"}}}}"#,
+            r#"{"timestamp":5,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"好"}}}}"#,
+            r#"{"timestamp":6,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"，继续"}}}}"#,
+        ]);
+        let msgs = parse_grok(&lines);
+        assert_eq!(msgs.len(), 3, "连续同角色 chunk 合并；tool_call 打断");
+        assert_eq!(msgs[0].blocks[0].text, "我来查一下。");
+        assert_eq!(msgs[0].timestamp.as_deref().is_some(), true);
+        assert_eq!(msgs[1].blocks[0].text, "查到了。");
+        assert_eq!(msgs[2].role, "user");
+        assert_eq!(msgs[2].blocks[0].text, "好，继续");
     }
 
     #[test]

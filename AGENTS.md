@@ -86,8 +86,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态）、
                              # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑）、StepFlow（步骤内协同流程线）、
                              # ScheduleSection（项目分组「◔ 定时任务」区块）、
-                             # LitWatchCard（「◔ 文献雷达」卡片：新命中/精读清单双页签 + 近 8 周趋势 + →精读/◈解读/↓全文，
-                             #   挂项目详情工作段 TaskCardsSection 之后）、
+                             # LitWatchCard（「◔ 文献雷达」卡片：新命中/精读清单双页签 + 近 8 周趋势 + →精读/◈解读/↓全文 +
+                             #   期刊徽章（IF/中科院分区/TOP，数据源 journal_metrics.rs）+ 新命中按日期/按关键词分组切换 +
+                             #   卡头期刊指标表入口常驻（未装=↓下载 / 已装=↻重下即更新），挂项目详情工作段 TaskCardsSection 之后）、
                              # ReaderOverlay（沉浸阅读区全屏覆盖层，v3.96：三栏「笔记｜PDF｜Agent 终端」，fixed inset-0 z-40，
                              #   Esc 退出级联最优先，底下终端/PTY 保持挂载；右栏 = 阅读会话标签 xterm 宿主搬移，注入由 TerminalPage 供给）+
                              #   PdfContinuousView（连续滚动 PDF 栏：±2 页虚拟化懒渲染、选段浮动条（译/◈问 AI/＋生词/⋯）、▦ 圈选截图、
@@ -115,10 +116,12 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   mcp-display.ts             # MCP 页展示纯逻辑：协议徽章固定识别色（stdio 紫/remote 蓝）+ 命令路径智能缩略
                              # （家目录折 ~、段数>3 且 >28 字符才砍中段留首尾，tests/mcp-display.test.ts）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
-  lit-watch.ts               # 文献雷达纯逻辑：分组/趋势/直链转换/已读判定/漂移提醒（tests/lit-watch.test.ts）
+  lit-watch.ts               # 文献雷达纯逻辑：日分组/关键词分组（groupEntriesByKeyword，取 keywordsHit 首词、
+                             # 未分类恒末）/趋势/直链转换/已读判定/漂移提醒（tests/lit-watch.test.ts）
   reader.ts                  # 沉浸阅读区纯逻辑：分栏钳制与像素换算/圈选命中与 canvas 映射/截图注入格式/
                              # glossary 表格契约（与 reader.rs 双端镜像，改动需同步）/段落边界提取/术语匹配/
-                             # 进度与护眼存储键（tests/reader.test.ts）
+                             # 进度与护眼存储键/翻译面板高度键（readerSplitT，未拖过不落键 = 内容自适应，
+                             # tests/reader.test.ts）
   md-math.ts                 # md 阅读版式公式渲染（批次 E）：marked 扩展按 Pandoc 口径切分 $/$$
                              # （边界规则/转义/代码块不渲染/货币不误判）+ renderMathInto 懒加载
                              # katex+CSS（独立 chunk 不进主包，失败回落原文，tests/md-math.test.ts 25 例）
@@ -215,6 +218,7 @@ src-tauri/src/
   pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
   settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力
                              # （hooks_attention 按 agent map，旧 claude_hooks_attention 仅反序列化兼容迁移）/想法期只读保护
+                             # /聊天页状态栏开关（status_bar_in_chat 默认开；关 = 聊天页 invisible 占位，切层不改终端行列数）
   hooks.rs                   # 精确注意力标记（七家 hooks 桥接）：BRIDGE_SPECS 每 agent 一张桥接规格（claude/qwen/
                              # codebuddy/gemini/kimi/grok/codex；cursor 无「等待确认」等价事件、opencode 无 shell hooks
                              #   形态，两家未接入），写各家 hooks 配置（备份留 10 份 + 原子写 + marker 合并/移除 +
@@ -222,7 +226,9 @@ src-tauri/src/
                              # 事件日志解析双信封（snake_case/camelCase）+ 事件名去下划线小写归一 + grok Stop 只认
                              #   reason=end_turn + 会话归属双键匹配（session_id==文件主名 或 transcript_path==完整路径），
                              #   10 分钟 TTL 回落尾部推断不变；settings 字段 hooks_attention: map<agent,bool>
-                             #   （旧 claude_hooks_attention 仅保留反序列化兼容迁移）
+                             #   （旧 claude_hooks_attention 仅保留反序列化兼容迁移）；
+                             #   session_confirm_detail（2026-08-24）：confirm 时从 payload 提取「在等什么」摘要
+                             #   （message/tool_name/title 尽力而为），聊天层审批卡片用
   fonts.rs                   # 终端字体打包与 brew 一键安装（Maple/Sarasa/Iosevka）
   ai.rs                      # 无头 AI 调用层：一次性 prompt + 提交信息/摘要/PR 描述/冲突建议/提炼接力简报/评审沉淀起草生成；
                              # headless_task_args/run_agent_task 供 scheduler 复用（定时任务要写项目文件，codex 用 -s workspace-write）
@@ -237,6 +243,13 @@ src-tauri/src/
                              # 增删去重）+ download_paper_pdf 白名单下载（仅 http/https、60MB 流式上限、%PDF- 魔数校验、
                              # 落 papers/ 自动登记 project.toml 资源）+ attach_paper_pdf 关联本地 PDF（付费墙手动下载后
                              # 一步复制进 papers/ 并登记，源文件同口径校验、复制非移动）；门槛 = 注册项目根 + canonicalize + 读-改-原子写
+  journal_metrics.rs         # 期刊指标表（雷达徽章数据源）：config_dir/ccode/journal-metrics/ 下 JCR2025-UTF8.csv +
+                             # FQBJCR2025-UTF8.csv（来源 github.com/hitfyd/ShowJCR，用户本机下载、禁内置分发）合并成
+                             # HashMap（normalize_title 规范化精确匹配，miss 时剥末尾出版商括号尾巴（「(Wiley)」「（ACS）」可多级）
+                             # 重试，仍 miss = None 不虚构；前端 lit-watch.ts sourceDisplayName 同口径剥尾，两处同步），RwLock 进程内缓存；
+                             # list_watch_entries 出口 enrichment 进 WatchEntryDto.metrics（展示时现算不落 inbox.md，
+                             # 旧条目装表即生效）；download_journal_metrics（jsDelivr→raw 回落、.tmp 原子落盘、完清缓存）+
+                             # journal_metrics_status
   reader.rs                  # 沉浸阅读区后端（v3.96）：ensure_paper_note 建档 notes/<slug>.md（精读八小节对齐 lit-notes 技能口径 + 机管「译段」「我的想法」两节，已存在不覆盖；
                              # 建档前先扫 notes/ 头部「来源行」配对已有精读笔记，命中即复用不另建，空模板 slug 笔记顺带清回收站；
                              # pdf_for_note 笔记→配对 PDF（来源行锚点优先；无锚点回落笔记 stem × type=paper 资源 stem

@@ -544,6 +544,9 @@ struct HookRecord {
     /// 归一化事件名（去下划线 + 全小写；grok 值是 snake_case，其余 PascalCase）
     event: String,
     reason: Option<String>,
+    /// 「在等什么」的人类可读摘要（claude Notification 的 message、PermissionRequest 的工具名等）；
+    /// 尽力提取，schema 各家不同且未文档化，取不到就 None
+    detail: Option<String>,
 }
 
 fn normalize_event(raw: &str) -> String {
@@ -591,6 +594,13 @@ fn parse_log_records(text: &str) -> Vec<HookRecord> {
                 .get("reason")
                 .and_then(|x| x.as_str())
                 .map(String::from),
+            // 「在等什么」详情：各家 payload 字段未文档化，按已知形态尽力提取——
+            // claude/qwen/codebuddy/gemini Notification 有 message；kimi/codex PermissionRequest
+            // 可能带 tool_name/title；都取不到就 None（横幅退回通用文案）
+            detail: ["message", "tool_name", "toolName", "title"]
+                .iter()
+                .find_map(|k| v.get(*k).and_then(|x| x.as_str()))
+                .map(String::from),
         });
     }
     let mut out = Vec::new();
@@ -614,13 +624,18 @@ fn parse_log_records(text: &str) -> Vec<HookRecord> {
     out
 }
 
-/// 取该会话最新事件映射的注意力状态；无记录或最新事件已过期（>TTL）返回 None（回落尾部推断）。
+/// 取该会话最新事件映射的注意力状态与详情；无记录或最新事件已过期（>TTL）返回 None（回落尾部推断）。
 /// 会话归属双键匹配：记录 session_id == 会话文件主名，或 transcript_path == 会话文件完整路径
 /// （grok 会话文件主名恒为 updates，必须靠 transcript_path 命中；kimi 无 transcript_path 自然只用前者）。
 /// grok 的 Stop 在会话 teardown 时会以 reason=shutdown/channel_closed 重复 fire：
 /// stop 事件只认 reason 缺失或 "end_turn" 的记录，其余 reason 跳过不更新状态。
-fn state_from_text(text: &str, session_id: &str, file_path: &str, now: i64) -> Option<String> {
-    let mut best: Option<(i64, &str)> = None;
+fn latest_from_text(
+    text: &str,
+    session_id: &str,
+    file_path: &str,
+    now: i64,
+) -> Option<(&'static str, Option<String>)> {
+    let mut best: Option<(i64, &'static str, Option<String>)> = None;
     for rec in parse_log_records(text) {
         if rec.session_id != session_id && rec.transcript_path.as_deref() != Some(file_path) {
             continue;
@@ -629,15 +644,19 @@ fn state_from_text(text: &str, session_id: &str, file_path: &str, now: i64) -> O
             continue;
         }
         let Some(state) = event_state(&rec.event) else { continue };
-        if best.is_none_or(|(ts, _)| rec.ts >= ts) {
-            best = Some((rec.ts, state));
+        if best.as_ref().is_none_or(|(ts, _, _)| rec.ts >= *ts) {
+            best = Some((rec.ts, state, rec.detail));
         }
     }
-    let (ts, state) = best?;
+    let (ts, state, detail) = best?;
     if now - ts > HOOKS_TTL_SECS {
         return None;
     }
-    Some(state.to_string())
+    Some((state, detail))
+}
+
+fn state_from_text(text: &str, session_id: &str, file_path: &str, now: i64) -> Option<String> {
+    latest_from_text(text, session_id, file_path, now).map(|(state, _)| state.to_string())
 }
 
 fn read_log_tail(path: &Path) -> String {
@@ -710,6 +729,37 @@ pub async fn hooks_attention_support() -> Vec<HookSupportDto> {
             }
         })
         .collect()
+}
+
+/// 聊天层审批卡片的数据源：当前「等待确认」事件的详情（如 claude 的
+/// "Claude needs your permission to use Bash"，PermissionRequest 的工具名）。
+/// 与 state_for_session_file 同一套门控（注册表/设置开关/归属匹配/TTL）；
+/// 最新状态不是 confirm 或 payload 没带可读字段时返回 None（前端回落通用文案）。
+#[tauri::command]
+pub async fn session_confirm_detail(agent: String, file_path: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let spec = spec_for(&agent)?;
+        if !crate::settings::hooks_attention_enabled(&crate::settings::read_current(), &agent) {
+            return None;
+        }
+        let session_id = Path::new(&file_path)
+            .file_stem()?
+            .to_string_lossy()
+            .into_owned();
+        if session_id.is_empty() {
+            return None;
+        }
+        let log = hooks_log_path(spec).ok()?;
+        let (state, detail) =
+            latest_from_text(&read_log_tail(&log), &session_id, &file_path, now_unix())?;
+        if state != "confirm" {
+            return None;
+        }
+        detail
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// 设置页开关：先改该 agent 的 hooks 配置（备份+原子写），成功后记应用设置；

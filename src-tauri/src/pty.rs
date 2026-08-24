@@ -573,22 +573,38 @@ pub fn pty_write(
 /// 文本仍遵守 bracketed-paste 规则，提交键在粘贴包结束后单独写入，
 /// 避免前端两个 IPC 调用之间被 TUI 切帧，也避免多行消息把回车吞进粘贴文本。
 #[tauri::command]
-pub fn pty_write_submit(
+pub async fn pty_write_submit(
     manager: tauri::State<'_, PtyManager>,
     pty_id: String,
     text: String,
     submit: String,
 ) -> Result<(), String> {
-    let mut entries = manager.entries.lock().unwrap();
-    let entry = entries.get_mut(&pty_id).ok_or("终端不存在或已退出")?;
-    let paste_on = entry.bracketed_paste.load(Ordering::Relaxed);
-    let text = wrap_bracketed_paste(&text, paste_on);
-    entry
-        .writer
-        .write_all(text.as_bytes())
-        .and_then(|_| entry.writer.write_all(submit.as_bytes()))
-        .and_then(|_| entry.writer.flush())
-        .map_err(|e| format!("写入终端失败: {e}"))
+    let entries = manager.entries.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 正文与提交键分两次写、中间留 60ms：开了 bracketed paste 的 TUI 要把粘贴内容
+        // 收进输入框后才认得回车，背靠背写入时回车会被吞掉（消息躺在输入框里没发出去）
+        {
+            let mut entries = entries.lock().unwrap();
+            let entry = entries.get_mut(&pty_id).ok_or("终端不存在或已退出")?;
+            let paste_on = entry.bracketed_paste.load(Ordering::Relaxed);
+            let text = wrap_bracketed_paste(&text, paste_on);
+            entry
+                .writer
+                .write_all(text.as_bytes())
+                .and_then(|_| entry.writer.flush())
+                .map_err(|e| format!("写入终端失败: {e}"))?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let mut entries = entries.lock().unwrap();
+        let entry = entries.get_mut(&pty_id).ok_or("终端不存在或已退出")?;
+        entry
+            .writer
+            .write_all(submit.as_bytes())
+            .and_then(|_| entry.writer.flush())
+            .map_err(|e| format!("写入终端失败: {e}"))
+    })
+    .await
+    .map_err(|e| format!("写入终端失败: {e}"))?
 }
 
 /// 关窗守卫用：PTY 在管且子进程尚未退出才为 true。

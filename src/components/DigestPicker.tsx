@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
 import { AGENTS } from "../types";
@@ -109,10 +109,28 @@ export default function DigestPicker({
     setWrittenBack(true);
   }
 
+  /** 遮罩点击/Esc 关闭：有改动先写回（与「暂不发送」同一写回口径），但不摘除收件箱条目 */
+  async function closeKeepingJob() {
+    if (saving) return;
+    setSaving(true);
+    setLocalError(null);
+    try {
+      await writeBackIfChanged();
+      onClose();
+    } catch (e) {
+      setLocalError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+  // Esc 监听是挂载期闭包，经 ref 调最新的 closeKeepingJob（避免拿到旧 draft）
+  const closeKeepingJobRef = useRef(closeKeepingJob);
+  closeKeepingJobRef.current = closeKeepingJob;
+
   // Escape 关闭（同 HandoffPicker 语义）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") void closeKeepingJobRef.current();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -276,7 +294,7 @@ export default function DigestPicker({
     );
 
   return (
-    <div className="fixed inset-0 z-50" onClick={onClose}>
+    <div className="fixed inset-0 z-50" onClick={() => void closeKeepingJob()}>
       <div
         className={`absolute top-[12%] left-1/2 -translate-x-1/2 rounded-sm border border-field ccode-float-surface py-2 text-sm ${
           brief ? "w-[36rem]" : "w-96"

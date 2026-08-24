@@ -17,6 +17,7 @@ import {
   READER_PCT_DEFAULT_R,
   READER_SPLIT_L_KEY,
   READER_SPLIT_R_KEY,
+  READER_SPLIT_T_KEY,
   buildReaderTranslatePrompt,
   bytesToBase64,
   clampReaderPct,
@@ -24,6 +25,7 @@ import {
   formatReaderCapturePrompt,
   loadReaderDark,
   loadReaderPct,
+  loadReaderTlPct,
   loadTlHistory,
   markTlEntrySaved,
   parseBilingual,
@@ -318,6 +320,11 @@ export default function ReaderOverlay({
 
   // ===== 翻译面板（右栏状态行之下、xterm 之上）：历史/pending 状态上提自 PdfContinuousView，
   // 下栏只留触发（选段「译」/ ⌘+点击段落 → onTranslate）。localStorage 键不变 =====
+  /** 翻译面板高度占比（% 右栏总高）：null = 内容自适应（40% 封顶，未拖过）；拖过底缘分割条后
+      显式高度并记忆（同左右分栏口径），双击分割条复位自适应 */
+  const [tlPct, setTlPct] = useState<number | null>(() =>
+    loadReaderTlPct(READER_SPLIT_T_KEY),
+  );
   const [tlHistory, setTlHistory] = useState<TlHistoryEntry[]>([]);
   const [tlPending, setTlPending] = useState<TlPending | null>(null);
   const [tlSaving, setTlSaving] = useState(false);
@@ -734,6 +741,19 @@ export default function ReaderOverlay({
                 history={tlHistory}
                 saving={tlSaving}
                 canSave
+                heightPct={tlPct}
+                onResize={setTlPct}
+                onResizeEnd={(pct) => {
+                  setTlPct(pct);
+                  localStorage.setItem(
+                    READER_SPLIT_T_KEY,
+                    String(Math.round(pct)),
+                  );
+                }}
+                onResizeReset={() => {
+                  setTlPct(null);
+                  localStorage.removeItem(READER_SPLIT_T_KEY);
+                }}
                 onRetry={(text, page) => void runTranslate(text, page)}
                 onCancelPending={() => {
                   tlReqRef.current++;

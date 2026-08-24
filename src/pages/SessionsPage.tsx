@@ -157,6 +157,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   >(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const conversationRequestRef = useRef(0);
+  // 回放区「加载更早对话」前插的消息条数：轮询刷新只替换最新一页，靠前缀条数保住已加载的旧消息
+  const olderCountRef = useRef(0);
   const editingRef = useRef(false);
   editingRef.current = editing !== null;
   const selectedRef = useRef<SessionMetaDto | null>(null);
@@ -500,7 +502,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   async function openSession(s: SessionMetaDto) {
     // 源文件已删除且无快照，无法回放
-    if (!s.alive && !s.pinned) return;
+    if (!s.alive && !s.pinned) {
+      setError("该会话的源文件已被删除且没有快照，无法回放");
+      return;
+    }
     // 选中具体会话 = 浏览结束：收起分类筛选面板（筛选过程中的点选不收起，见 v3.43）
     setTreeOpen(false);
     setSelected(s);
@@ -522,6 +527,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         },
       );
       if (request !== conversationRequestRef.current) return;
+      olderCountRef.current = 0;
       setMessages(page.messages);
       setConversationCursor(page.cursor);
       requestAnimationFrame(() => {
@@ -541,7 +547,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     if (currentPage !== "sessions") return;
     function onKey(e: KeyboardEvent) {
       if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      // 输入法组词中用 ↑/↓ 选候选词，不切换会话
+      if (e.isComposing) return;
       if (menu || selecting) return;
+      // 上一次解析还没回时不连发（长按方向键扫列表 = 每次按键一次后端全量解析）
+      if (loadingConv) return;
       const el = document.activeElement as HTMLElement | null;
       if (el) {
         const tag = el.tagName;
@@ -575,7 +585,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPage, displayList, selected, menu, selecting]);
+    // loadingConv 必须在依赖里：否则打开会话期间注册的闭包永久捕获 true，↑/↓ 被一直挡住
+  }, [currentPage, displayList, selected, menu, selecting, loadingConv]);
 
   // 键盘切换/外部跳转后把选中行滚进可视区（block:nearest，在视野内则不动）
   useEffect(() => {
@@ -609,6 +620,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       )
         return;
       setMessages((current) => [...page.messages, ...current]);
+      olderCountRef.current += page.messages.length;
       setConversationCursor(page.cursor);
       requestAnimationFrame(() => {
         const current = scrollRef.current;
@@ -654,8 +666,22 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             stillSelected?.agent === updated.agent &&
             stillSelected.sessionId === updated.sessionId
           ) {
-            setMessages(page.messages);
-            setConversationCursor(page.cursor);
+            // 只替换最新一页：已前插的更早消息（olderCountRef 条）保留，
+            // cursor 维持旧边界不动（否则「加载更早」会重复拉已显示的页）。
+            // 前插在上方、新消息追加在下方，阅读位置天然不动；贴底用户跟随到底
+            const scroller = scrollRef.current;
+            const atBottom = scroller
+              ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40
+              : false;
+            setMessages((current) => [
+              ...current.slice(0, Math.min(olderCountRef.current, current.length)),
+              ...page.messages,
+            ]);
+            if (atBottom)
+              requestAnimationFrame(() => {
+                const el = scrollRef.current;
+                if (el) el.scrollTop = el.scrollHeight;
+              });
           }
         }
       } catch {
@@ -758,6 +784,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       const cur = selectedRef.current;
       if (cur && cur.agent === s.agent && cur.sessionId === s.sessionId) {
         setSelected(null);
+        olderCountRef.current = 0;
         setMessages([]);
         setConversationCursor(null);
       }
@@ -791,6 +818,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       const cur = selectedRef.current;
       if (cur && cur.agent === agent && cur.projectPath === path) {
         setSelected(null);
+        olderCountRef.current = 0;
         setMessages([]);
         setConversationCursor(null);
       }
@@ -854,6 +882,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     const cur = selectedRef.current;
     if (cur && checked.has(skey(cur))) {
       setSelected(null);
+      olderCountRef.current = 0;
       setMessages([]);
       setConversationCursor(null);
     }
@@ -1903,7 +1932,12 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                             </button>
                           </div>
                         )}
-                        <ConversationView messages={messages} />
+                        {/* key 按会话隔离展开状态：切会话时旧会话的展开集合不带进新会话 */}
+                        <ConversationView
+                          key={selected?.sessionId ?? "none"}
+                          messages={messages}
+                          cwd={selected?.projectPath ?? null}
+                        />
                       </>
                     )}
                   </div>

@@ -10,6 +10,7 @@ mod git_info;
 mod global_config;
 mod handoff;
 mod hooks;
+mod journal_metrics;
 mod lit_watch;
 mod logbuf;
 mod mcp;
@@ -265,6 +266,7 @@ pub fn run() {
             settings::update_settings,
             hooks::set_hooks_attention,
             hooks::hooks_attention_support,
+            hooks::session_confirm_detail,
             ai::ai_prompt,
             ai::ai_commit_message,
             ai::ai_summarize_session,
@@ -287,6 +289,8 @@ pub fn run() {
             lit_watch::remove_included_entry,
             lit_watch::download_paper_pdf,
             lit_watch::attach_paper_pdf,
+            journal_metrics::journal_metrics_status,
+            journal_metrics::download_journal_metrics,
             reader::ensure_paper_note,
             reader::pdf_for_note,
             reader::reader_for_note,

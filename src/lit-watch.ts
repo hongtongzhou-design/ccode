@@ -28,6 +28,24 @@ export interface WatchEntryDto {
   /** 巡检批次日期 YYYY-MM-DD；无批次标记为 null */
   date: string | null;
   rawLineRange: [number, number];
+  /** 期刊指标（JCR2025 + 中科院分区表2025 合并，按期刊名规范化匹配）；未匹配/未装表为 null */
+  metrics: JournalMetricsDto | null;
+}
+
+/** 单条命中的期刊指标（对照 lit_watch.rs 序列化） */
+export interface JournalMetricsDto {
+  /** JCR2025 IF 原样字符串，如 "29.1"；无数据为 null */
+  impactFactor: string | null;
+  /** 中科院升级版大类分区 1-4；无数据为 null */
+  casQuartile: number | null;
+  /** 中科院 Top 期刊 */
+  top: boolean;
+}
+
+/** journal_metrics_status / download_journal_metrics 返回 */
+export interface JournalMetricsStatusDto {
+  available: boolean;
+  journalCount: number;
 }
 
 /** watch-followup.md 待办（付费墙/无摘要，待人工获取全文） */
@@ -135,6 +153,59 @@ export function groupEntriesByDay(
   )
     .map((g) => ({ ...g, entries: [...g.entries].sort(byRank) }))
     .filter((g) => g.entries.length > 0);
+}
+
+// ===== 关键词分组 =====
+
+/** 无命中关键词条目的固定归属组名 */
+export const UNCATEGORIZED_KEYWORD = "未分类";
+
+export interface KeywordGroup {
+  keyword: string;
+  entries: WatchEntryDto[];
+}
+
+/** 按关键词分组：每条只归入 keywordsHit 的第一个关键词（多命中不重复出现），
+ *  无关键词归「未分类」；组按条目数降序、同数按关键词字母序，「未分类」恒排最后；
+ *  组内与日分组同口径（相关性排序 + 同级稳定序）；空组不出现 */
+export function groupEntriesByKeyword(
+  entries: readonly WatchEntryDto[],
+): KeywordGroup[] {
+  const buckets = new Map<string, WatchEntryDto[]>();
+  for (const entry of entries) {
+    const kw = entry.keywordsHit[0]?.trim() || UNCATEGORIZED_KEYWORD;
+    const bucket = buckets.get(kw);
+    if (bucket) bucket.push(entry);
+    else buckets.set(kw, [entry]);
+  }
+  const byRank = (a: WatchEntryDto, b: WatchEntryDto) =>
+    relevanceRank(a.relevance) - relevanceRank(b.relevance);
+  return [...buckets.entries()]
+    .map(([keyword, list]) => ({
+      keyword,
+      entries: [...list].sort(byRank),
+    }))
+    .sort((a, b) => {
+      if (a.keyword === UNCATEGORIZED_KEYWORD) return 1;
+      if (b.keyword === UNCATEGORIZED_KEYWORD) return -1;
+      return (
+        b.entries.length - a.entries.length ||
+        a.keyword.localeCompare(b.keyword)
+      );
+    });
+}
+
+// ===== 来源展示名 =====
+
+/** 来源 pill 展示名：剥掉末尾出版商括号尾巴（「(Wiley)」「（ACS）」，可多级）省横向空间；
+ *  剥完为空视为无尾巴（原文返回）。匹配侧（journal_metrics.rs lookup_in）同口径剥尾，两处同步 */
+export function sourceDisplayName(source: string): string {
+  let s = source.trim();
+  for (;;) {
+    const m = /^(.*?)\s*[(（][^()（）]*[)）]\s*$/.exec(s);
+    if (!m || !m[1].trim()) return s;
+    s = m[1].trim();
+  }
 }
 
 // ===== 周趋势（迷你柱状图） =====

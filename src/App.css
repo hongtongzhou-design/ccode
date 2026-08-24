@@ -236,7 +236,7 @@
 }
 [data-theme="terracotta-light"] {
   --color-rail: #ebe3db; --color-rail2: #f5f1ed; --color-rail-sel: #e0d9d3;
-  --color-strip: #f8f6f3; --color-canvas: #f2ece7; --color-inset: #fcfaf9;
+  --color-strip: #f8f6f3; --color-canvas: #f2ece7; --color-inset: #fefaf6;
   --color-raised: #ffffff; --color-bubble: #e8e1da;
   --color-seg-sel: #d3cbc3; --color-hairline: #d8d1ca; --color-field: #bcb3a9;
   --color-l1: #211d1a; --color-l2: #453f3a; --color-l3: #7a726b; --color-l4: #a49b92;
@@ -250,7 +250,7 @@
 }
 [data-theme="ayu-light"] {
   --color-rail: #e7e4da; --color-rail2: #f3f2ec; --color-rail-sel: #e2dfd9;
-  --color-strip: #f7f6f3; --color-canvas: #efede6; --color-inset: #fbfbf9;
+  --color-strip: #f7f6f3; --color-canvas: #efede6; --color-inset: #fefaf6;
   --color-raised: #ffffff; --color-bubble: #e7e4de;
   --color-seg-sel: #d4d0c8; --color-hairline: #d9d5cd; --color-field: #bab4a8;
   --color-l1: #20242e; --color-l2: #3f4754; --color-l3: #6c7380; --color-l4: #9ea3ac;
@@ -493,25 +493,31 @@ body {
   animation: ccode-pop 150ms var(--ccode-motion-ease);
 }
 
-/* 完全隐藏侧栏时的顶部导航胶囊：浮在上下文栏下方，不参与页面布局。 */
+/* 完全隐藏侧栏时的顶部导航胶囊：浮在上下文栏下方，不参与页面布局。
+   玻璃拟态三要素：低不透明度底（content 透上来）+ 强 backdrop blur/saturate + 边缘高光；
+   静止时背后若是纯色画布玻璃感天然偏弱（没有可模糊的内容），滚动时内容从底下穿过才完全显现 */
 .ccode-top-nav-capsule {
-  background: color-mix(in srgb, var(--color-raised) 74%, transparent);
-  -webkit-backdrop-filter: blur(18px) saturate(125%);
-  backdrop-filter: blur(18px) saturate(125%);
-  border-color: color-mix(in srgb, var(--color-l1) 16%, var(--color-field));
+  background: color-mix(in srgb, var(--color-raised) 58%, transparent);
+  -webkit-backdrop-filter: blur(26px) saturate(150%);
+  backdrop-filter: blur(26px) saturate(150%);
+  border-color: color-mix(in srgb, var(--color-l1) 12%, transparent);
   box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.22),
-    inset 0 -1px 0 rgb(0 0 0 / 0.08),
-    0 10px 28px rgb(0 0 0 / 0.18);
+    inset 0 1px 0 rgb(255 255 255 / 0.26),
+    inset 0 -1px 0 rgb(0 0 0 / 0.06),
+    0 12px 32px rgb(0 0 0 / 0.20);
   animation: ccode-nav-capsule-in 150ms var(--ccode-motion-ease);
   scrollbar-width: none;
 }
 
 [data-theme$="-light"] .ccode-top-nav-capsule {
+  background: color-mix(in srgb, var(--color-canvas) 55%, transparent);
+  -webkit-backdrop-filter: blur(30px) saturate(170%);
+  backdrop-filter: blur(30px) saturate(170%);
+  border-color: color-mix(in srgb, var(--color-l1) 9%, transparent);
   box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.72),
-    inset 0 -1px 0 rgb(44 48 64 / 0.08),
-    0 8px 24px rgb(63 70 92 / 0.14);
+    inset 0 1px 0 rgb(255 255 255 / 0.85),
+    inset 0 -1px 0 rgb(44 48 64 / 0.05),
+    0 10px 28px rgb(63 70 92 / 0.12);
 }
 
 .ccode-top-nav-capsule::-webkit-scrollbar {
@@ -880,6 +886,47 @@ select:focus-visible {
 }
 .md-body img {
   max-width: 100%;
+}
+/* 聊天消息里的 Markdown（ConversationView AI 正文，ChatMarkdown 渲染）：
+   比笔记阅读版式更紧凑——段距收窄、图片收为缩略卡（点击经预览页签放大） */
+.md-chat {
+  font-size: inherit;
+  line-height: 1.65;
+}
+.md-chat p,
+.md-chat ul,
+.md-chat ol {
+  margin: 0.45em 0;
+}
+.md-chat h1,
+.md-chat h2,
+.md-chat h3,
+.md-chat h4 {
+  margin: 0.9em 0 0.4em;
+}
+.md-chat h1,
+.md-chat h2 {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+.md-chat > :first-child {
+  margin-top: 0;
+}
+.md-chat > :last-child {
+  margin-bottom: 0;
+}
+.md-chat img {
+  max-width: min(420px, 100%);
+  max-height: 260px;
+  object-fit: contain;
+  border: 1px solid var(--color-hairline);
+  border-radius: 6px;
+  margin: 0.4em 0;
+  cursor: zoom-in;
+}
+.md-chat .md-img-pending {
+  min-height: 2.5rem;
+  margin: 0.4em 0;
 }
 /* 批次 B2 图片后处理的三种呈现：加载占位灰块 / 失败小字 / 外部图片不加载只显文本 */
 .md-body .md-img-pending {

@@ -790,6 +790,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               </button>
             ))}
           </div>
+          {/* Agent TUI 只在启动时探测一次终端底色（OSC 11），热切换主题后运行中会话保持
+              旧配色——无条件常驻说明：按 liveSessions 门控会在页面重载后（标签恢复为占位、
+              登记清空）恰好需要提示时缺席（2026-08-24 实测教训） */}
+          <div className="mt-2 text-micro text-l4">
+            Agent 会话的界面配色按启动时的终端底色确定，切换主题后运行中的会话保持旧配色，
+            重启会话后与新主题一致
+          </div>
         </div>
 
         <Row label="终端字号" hint="立即生效（11–18）">
@@ -1006,6 +1013,17 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             label="长任务 OS 通知"
             checked={settings?.notificationsEnabled ?? true}
             onChange={(checked) => patch({ notificationsEnabled: checked })}
+          />
+        </Row>
+
+        <Row
+          label="聊天页显示状态栏"
+          hint="聊天页底部显示模型/目录/git/token 状态栏；关闭后隐藏但保留占位，聊天⇄终端切换不改变终端尺寸、不闪烁"
+        >
+          <Toggle
+            label="聊天页显示状态栏"
+            checked={settings?.statusBarInChat ?? true}
+            onChange={(checked) => patch({ statusBarInChat: checked })}
           />
         </Row>
       </Section>

@@ -53,6 +53,8 @@ pub struct WatchEntryDto {
     pub date: Option<String>,
     /// 条目在 inbox.md 中的行范围（1 起，闭区间），供前端定位/高亮
     pub raw_line_range: [u32; 2],
+    /// 期刊指标徽章（IF/中科院分区/Top）；期刊指标表未下载或查不到为 None
+    pub metrics: Option<crate::journal_metrics::JournalMetricsDto>,
 }
 
 /// watch-followup.md 中的一条待办（付费墙/无摘要，待人工获取全文）
@@ -275,6 +277,8 @@ impl EntryBuilder {
             url: self.url,
             date,
             raw_line_range: [self.start_line, self.last_line],
+            // 期刊指标在 list_watch_entries 列表出口统一 enrichment，解析器不管
+            metrics: None,
         }
     }
 
@@ -782,10 +786,19 @@ fn attach_pdf_at(root: &Path, source_path: &str, title: &str) -> Result<Download
 pub async fn list_watch_entries(project_root: String) -> Result<WatchInboxDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = gated_root(&project_root)?;
-        let entries = match read_text_inside(&root, "notes/inbox.md")? {
+        let mut entries = match read_text_inside(&root, "notes/inbox.md")? {
             Some(text) => parse_inbox_entries(&text),
             None => Vec::new(),
         };
+        // 期刊指标徽章 enrichment：期刊字段（Some 且非空）优先，否则来源行第一段
+        // （arxiv 这类查不到自然 miss）；表未下载时 lookup 恒 None，静默无徽章
+        for e in &mut entries {
+            let name = match &e.journal {
+                Some(j) if !j.trim().is_empty() => j.as_str(),
+                _ => e.source.as_str(),
+            };
+            e.metrics = crate::journal_metrics::lookup(name);
+        }
         let followups = match read_text_inside(&root, "papers/watch-followup.md")? {
             Some(text) => parse_followups(&text),
             None => Vec::new(),

@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState } from "react";
 import {
+  clampReaderTlPct,
   parseBilingual,
   plainFromBilingual,
   reflowBlockText,
@@ -36,6 +37,10 @@ function ReaderTranslatePanel({
   history,
   saving,
   canSave,
+  heightPct,
+  onResize,
+  onResizeEnd,
+  onResizeReset,
   onRetry,
   onCancelPending,
   onSaveEntry,
@@ -49,6 +54,14 @@ function ReaderTranslatePanel({
   saving: boolean;
   /** onSaveTranslation 链路是否可用 */
   canSave: boolean;
+  /** 面板高度（% 右栏总高）：null = 内容自适应（40% 封顶）；拖过底缘分割条后由上层记忆 */
+  heightPct: number | null;
+  /** 拖动中实时回调（同右栏竖分割条口径：move 只更新 state） */
+  onResize: (pct: number) => void;
+  /** 松手落持久化 */
+  onResizeEnd: (pct: number) => void;
+  /** 双击分割条复位内容自适应（清记忆键） */
+  onResizeReset: () => void;
   /** 失败重试（回放上次的 text/page） */
   onRetry: (text: string, page: number) => void;
   /** × 时作废在途翻译（上层递增请求序号，迟到的结果直接丢弃） */
@@ -112,15 +125,50 @@ function ReaderTranslatePanel({
     };
   }, [drawerOpen]);
 
+  /** 底缘纵向拖拽（仿 ReaderOverlay startSideResize 的 pointer 模式）：
+      自适应高时起点取当前渲染高度的占比、按增量走不跳变；松手才落 localStorage */
+  function startResize(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const root = rootRef.current;
+    const col = root?.parentElement;
+    if (!root || !col) return;
+    const colH = col.getBoundingClientRect().height;
+    if (colH <= 0) return;
+    const startY = e.clientY;
+    const startPct = clampReaderTlPct(
+      heightPct ?? (root.getBoundingClientRect().height / colH) * 100,
+      heightPct ?? 40,
+    );
+    const pctOf = (clientY: number) =>
+      clampReaderTlPct(startPct + ((clientY - startY) / colH) * 100, startPct);
+    const onMove = (ev: PointerEvent) => onResize(pctOf(ev.clientY));
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      onResizeEnd(pctOf(ev.clientY));
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
   // 空历史且无在途翻译：面板整体不出现（空节点不出现）
   if (!latest && !pending) return null;
 
+  // 显式高度只在正文展开时套用（chevron 收起/× 收起后面板回归内容自适应高度）；
+  // 未拖过保持内容自适应 + 40% 封顶，超出内部滚动——整段长译文不能无限顶高挤压终端区
+  // （% 高/% max-h 挂栏根的 flex 子级上才解析得到定高，故放本容器而非内层）
+  const fixedH = heightPct != null && showBody && !collapsed;
+
   return (
-    // 封顶 40% 栏高、超出内部滚动——整段长译文不能无限顶高挤压终端区
-    // （% max-h 挂栏根的 flex 子级上才解析得到定高，故放本容器而非内层）
     <div
       ref={rootRef}
-      className="relative flex max-h-[40%] shrink-0 flex-col border-b border-hairline bg-strip"
+      style={fixedH ? { height: `${heightPct}%` } : undefined}
+      className={`relative flex shrink-0 flex-col border-b border-hairline bg-strip ${
+        fixedH ? "" : "max-h-[40%]"
+      }`}
     >
       {showBody ? (
         <>
@@ -317,6 +365,18 @@ function ReaderTranslatePanel({
               </li>
             ))}
           </ul>
+        </div>
+      )}
+      {showBody && !collapsed && (
+        // 底缘纵向分割条：抓取热区骑跨底边（translate-y-1/2），平时透明、悬停显色
+        // （右栏竖分割条同款手法）；chevron 收起/× 收起时不出现（无正文可调）
+        <div
+          onPointerDown={startResize}
+          onDoubleClick={onResizeReset}
+          title="拖动调整翻译区高度，双击恢复自适应"
+          className="group absolute inset-x-0 bottom-0 z-10 h-1.5 translate-y-1/2 cursor-row-resize"
+        >
+          <span className="absolute inset-x-0 top-0.5 h-0.5 bg-transparent transition-colors group-hover:bg-cta" />
         </div>
       )}
     </div>

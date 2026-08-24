@@ -14,6 +14,9 @@ export default function ChatSurface({
   syncState,
   title,
   loading,
+  active = true,
+  agentId,
+  confirmDetail,
   agentName,
   model,
   cwd,
@@ -32,12 +35,20 @@ export default function ChatSurface({
   onOpenTerminal,
   onOpenMcp,
   onOpenHistory,
+  onInterrupt,
+  onApprovalKey,
 }: {
   messages: ChatMessageDto[];
   state: "idle" | "detecting" | "linked" | "timeout";
   syncState: SessionSyncState;
   title: string | null;
   loading: boolean;
+  /** 聊天层当前可见（常驻挂载仅隐藏后，用作输入框聚焦信号） */
+  active?: boolean;
+  /** 当前 agent id（斜杠命令面板按 agent 出命令清单） */
+  agentId?: string | null;
+  /** hooks 精确注意力 confirm 时的「在等什么」摘要（审批卡片文案） */
+  confirmDetail?: string | null;
   agentName?: string | null;
   model?: string | null;
   cwd?: string | null;
@@ -56,6 +67,10 @@ export default function ChatSurface({
   onOpenTerminal: () => void;
   onOpenMcp: () => void;
   onOpenHistory?: () => void;
+  /** 打断当前生成（写 \x03） */
+  onInterrupt?: () => void;
+  /** 审批卡片按键：批准 y / 拒绝 n / 取消 Esc */
+  onApprovalKey?: (key: "y" | "n" | "esc") => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
@@ -111,6 +126,16 @@ export default function ChatSurface({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
+            {running && onInterrupt && (
+              <button
+                type="button"
+                onClick={onInterrupt}
+                title="打断当前生成（等效终端里按 Ctrl+C）"
+                className="rounded-md px-2 py-1 text-micro text-warn-text hover:bg-hover"
+              >
+                ⏹ 打断
+              </button>
+            )}
             {readOnly && (
               <span
                 className="rounded-md bg-inset px-2 py-1 text-micro text-warn-text"
@@ -149,12 +174,47 @@ export default function ChatSurface({
       </header>
 
       {attention === "confirm" && (
-        <div className="shrink-0 bg-inset px-5 py-2">
-          <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-3 text-xs text-warn-text">
-            <span>Agent 需要终端确认、登录或菜单选择。</span>
-            <button type="button" onClick={onOpenTerminal} className="shrink-0 rounded-md px-2 py-1 text-l2 hover:bg-hover">
-              打开终端
-            </button>
+        <div className="shrink-0 border-b border-hairline bg-inset px-5 py-2.5">
+          <div className="mx-auto w-full max-w-4xl">
+            <div className="text-xs text-warn-text">
+              Agent 正在等待你的确认
+              {confirmDetail ? `：${confirmDetail}` : "（终端里有待处理的批准、登录或菜单选择）"}
+            </div>
+            <div className="mt-1.5 flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onApprovalKey?.("y")}
+                title="往终端按 y（各 CLI 的批准热键）"
+                className="rounded-md bg-ok px-2.5 py-1 text-xs text-ok-text hover:opacity-85"
+              >
+                ✓ 批准
+              </button>
+              <button
+                type="button"
+                onClick={() => onApprovalKey?.("n")}
+                title="往终端按 n（各 CLI 的拒绝热键）"
+                className="rounded-md bg-err px-2.5 py-1 text-xs text-err-text hover:opacity-85"
+              >
+                ✗ 拒绝
+              </button>
+              <button
+                type="button"
+                onClick={() => onApprovalKey?.("esc")}
+                title="往终端按 Esc（取消当前提示）"
+                className="rounded-md px-2.5 py-1 text-xs text-l3 hover:bg-hover hover:text-l1"
+              >
+                Esc 取消
+              </button>
+              <span className="mx-1 h-3.5 w-px bg-hairline" />
+              <button
+                type="button"
+                onClick={onOpenTerminal}
+                title="选项更多或按键无效时，去终端里直接操作"
+                className="rounded-md px-2.5 py-1 text-xs text-l2 hover:bg-hover"
+              >
+                打开终端
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -182,7 +242,7 @@ export default function ChatSurface({
           ) : messages.length === 0 ? (
             <div className="flex flex-1 items-center justify-center pb-20 text-sm text-l4">等待第一条对话…</div>
           ) : (
-            <ConversationView messages={messages} />
+            <ConversationView messages={messages} cwd={cwd} />
           )}
           {loading && (
             <div className="mb-2 flex items-center gap-2 text-micro text-l4" aria-live="polite">
@@ -213,6 +273,8 @@ export default function ChatSurface({
         mcps={mcps}
         onSend={onSend}
         onOpenMcp={onOpenMcp}
+        focusWhen={active}
+        agentId={agentId}
         placeholder={readOnly ? "这是只读分叉；可以提问、分析和规划…" : undefined}
       />
     </div>

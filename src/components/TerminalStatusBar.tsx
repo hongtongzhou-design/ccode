@@ -171,9 +171,11 @@ export default function TerminalStatusBar({
 
   // 思考强度 step 滑块：隐形原生 range 负责拖动/键盘，自定义轨道负责视觉；松手才写命令
   const levels = effort?.levels ?? [];
-  const [effortIdx, setEffortIdx] = useState(() =>
+  const [effortIdxRaw, setEffortIdx] = useState(() =>
     Math.min(1, Math.max(0, levels.length - 1)),
   );
+  // 切到档位更少的 agent 后旧下标可能越界：渲染/写命令一律用钳制值
+  const effortIdx = Math.min(effortIdxRaw, Math.max(0, levels.length - 1));
   function commitEffort() {
     if (effort && levels[effortIdx]) {
       writeCmd(effort.command.replace("{level}", levels[effortIdx]));
@@ -265,9 +267,9 @@ export default function TerminalStatusBar({
     }
   }
 
-  // review 倒计时（auto 模式 3s）：hover 气泡暂停；Dry Run 模式停在预览不自动执行
+  // review 倒计时（auto 模式 3s）：hover 气泡或编辑提交信息时暂停；Dry Run 模式停在预览不自动执行
   useEffect(() => {
-    if (phase !== "review" || mode !== "auto" || paused) return;
+    if (phase !== "review" || mode !== "auto" || paused || editing) return;
     const started = Date.now();
     const from = countPct;
     const t = setInterval(() => {
@@ -281,13 +283,22 @@ export default function TerminalStatusBar({
     }, 50);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, mode, paused]);
+    // editing 必须在依赖里：否则进入编辑态后旧闭包里的倒计时继续跑，到点提交旧文案
+  }, [phase, mode, paused, editing]);
 
   // Esc 取消（generating/review）、Enter 立即执行（review）
   useEffect(() => {
     if (phase !== "generating" && phase !== "review") return;
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
+        if (editing) {
+          // 焦点在编辑框里：交给输入框自己处理（退出编辑、还原原文），不取消整个流程；
+          // 焦点已不在编辑框（点了别处）：Esc 退出编辑态，保留已改文案
+          const t = e.target as HTMLElement | null;
+          if (t && t.tagName === "INPUT") return;
+          setEditing(false);
+          return;
+        }
         e.stopPropagation();
         reset();
       } else if (e.key === "Enter" && phase === "review" && !editing) {
@@ -338,7 +349,11 @@ export default function TerminalStatusBar({
         ? "工作中"
         : attention === "done"
           ? "完成"
-          : "已退出";
+          : status.shell
+            ? startedAt != null
+              ? "Agent 已退出（Shell 运行中）"
+              : "Shell 运行中"
+            : "已退出";
 
   const hasGit = !!(git?.isRepo && (git.files.length > 0 || git.ahead > 0));
   const canCommitPush = !!git?.isRepo && git.files.length > 0;
@@ -915,7 +930,9 @@ export default function TerminalStatusBar({
         className="ml-auto flex min-w-0 items-center gap-3 overflow-hidden font-mono"
         style={{ color: faint }}
       >
-        {startedAt != null && (
+        {/* 时长只在 agent 运行中显示：退出回落 shell 后 alive 仍为 true，
+            定格的旧时长挂在底栏会误导（远看像还在计时） */}
+        {startedAt != null && running && (
           <span title="本次启动的运行时长">{fmtDuration(now - startedAt)}</span>
         )}
         {usage && (usage.input > 0 || usage.output > 0) && (

@@ -652,8 +652,8 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     {onCount > 0 ? `已分发 ${onCount}` : "未分发"}
                   </button>
                   {/* 行内悬浮操作（v3.93）：↯ 测试连通 / ✎ 编辑 / ✕ 删除。
-                      裸图标钮 hover 淡入，不套胶囊容器——本页是素列表行，
-                      raised 底 + 边框 + 投影的实体栏会与原层级脱节（技能页网格行才用胶囊栏） */}
+                      裸图标钮 hover 淡入，不套胶囊容器——raised 底 + 边框 + 投影的实体栏
+                      压在列表行上会层级脱节（2026-08-24 起技能页也统一为此口径） */}
                   <div
                     className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
                   >

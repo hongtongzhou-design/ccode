@@ -1,5 +1,8 @@
 import { useState } from "react";
 import type { BlockDto, ChatMessageDto } from "../types";
+import ChatMarkdown, { ChatImageCard } from "./ChatMarkdown";
+import { fmtTokens } from "./TerminalStatusBar";
+import { splitImagePaths } from "../chat-image";
 
 /** 文本块超过该长度先截断，点「展开全部」再看完整内容 */
 const TEXT_CAP = 4000;
@@ -74,11 +77,21 @@ type Run =
 export default function ConversationView({
   messages,
   compact,
+  cwd,
 }: {
   messages: ChatMessageDto[];
   compact?: boolean;
+  /** 会话工作目录：AI 正文里相对图片/链接的解析基准（ChatMarkdown 用） */
+  cwd?: string | null;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  /** 消息稳定键：角色+时间戳+块数+首段文本特征。前插分页/轮询刷新后数组下标会移位，
+   *  展开状态（思考过程/工具调用/长文本）必须跟随内容而非位置 */
+  function msgKey(m: ChatMessageDto, mi: number): string {
+    const firstText = m.blocks.find((b) => b.kind === "text")?.text ?? "";
+    return `${m.role}:${m.timestamp ?? `#${mi}`}:${m.blocks.length}:${firstText.length}:${firstText.slice(0, 24)}`;
+  }
 
   function toggleExpand(key: string) {
     setExpanded((prev) => {
@@ -169,7 +182,7 @@ export default function ConversationView({
       return (
         <div
           key={key}
-          className="my-1 inline-block max-w-full rounded-sm bg-inset px-2 py-1 font-mono text-xs text-l3"
+          className="my-1 inline-block max-w-full rounded-sm border border-hairline bg-inset px-2 py-1 font-mono text-xs text-l3"
         >
           <span className="mr-1 rounded-sm bg-seg-sel px-1 text-l2">{b.toolName ?? "tool"}</span>
           <span className="whitespace-pre-wrap break-all">
@@ -206,23 +219,48 @@ export default function ConversationView({
         </div>
       );
     }
-    // text（用户消息同样截断：超大粘贴不全量渲染）
+    // text（用户消息同样截断：超大粘贴不全量渲染）；
+    // 整行是图片路径的行剥离成内嵌图片卡（粘贴/拖拽图片在会话里就是一行路径文本）
+    const { text: bodyText, images } = splitImagePaths(b.text);
+    const imageRow = images.map((p) => (
+      <ChatImageCard key={p} path={p} cwd={cwd} />
+    ));
     if (isUser) {
       return (
         <div key={key} className="my-1">
-          {richText(key, b.text, "whitespace-pre-wrap")}
+          {bodyText && richText(key, bodyText, "whitespace-pre-wrap")}
+          {imageRow}
+        </div>
+      );
+    }
+    // AI 正文走 Markdown 渲染（ChatMarkdown：原始 HTML 转义 + 本地图片内嵌）；
+    // 超长未展开保持截断纯文本 + 展开按钮，展开后整段 Markdown
+    if (bodyText.length > TEXT_CAP && !expanded.has(key)) {
+      return (
+        <div key={key} className="my-1">
+          {richText(key, bodyText, `whitespace-pre-wrap ${compact ? "text-xs" : "text-sm"}`)}
+          {imageRow}
         </div>
       );
     }
     return (
       <div key={key} className="my-1">
-        {richText(key, b.text, `whitespace-pre-wrap ${compact ? "text-xs" : "text-sm"}`)}
+        {bodyText && <ChatMarkdown text={bodyText} cwd={cwd} />}
+        {imageRow}
+        {bodyText.length > TEXT_CAP && (
+          <button
+            onClick={() => toggleExpand(key)}
+            className="text-xs text-l3 hover:text-l1"
+          >
+            收起
+          </button>
+        )}
       </div>
     );
   }
 
   /** 连续 tool_use / tool_result 归并为一组（按消息内顺序），其余块保持原位 */
-  function runsOf(blocks: BlockDto[], mi: number): Run[] {
+  function runsOf(blocks: BlockDto[], mkey: string): Run[] {
     const runs: Run[] = [];
     blocks.forEach((b, bi) => {
       const isTool = b.kind === "tool_use" || b.kind === "tool_result";
@@ -230,9 +268,9 @@ export default function ConversationView({
       if (isTool && last && last.tool) {
         last.blocks.push(b);
       } else if (isTool) {
-        runs.push({ tool: true, blocks: [b], key: `${mi}:t${bi}` });
+        runs.push({ tool: true, blocks: [b], key: `${mkey}:t${bi}` });
       } else {
-        runs.push({ tool: false, block: b, key: `${mi}:${bi}` });
+        runs.push({ tool: false, block: b, key: `${mkey}:${bi}` });
       }
     });
     return runs;
@@ -244,6 +282,11 @@ export default function ConversationView({
     isUser: boolean,
   ) {
     const isOpen = expanded.has(run.key);
+    // 计数只算 tool_use：tool_result 与调用并入同一条消息（如 codex 解析），
+    // 直接数块数会把一次调用显示成两次
+    const callCount =
+      run.blocks.filter((b) => b.kind === "tool_use").length ||
+      run.blocks.length;
     const names = [
       ...new Set(
         run.blocks
@@ -262,7 +305,7 @@ export default function ConversationView({
           <span className="shrink-0 text-micro text-l4">
             {isOpen ? "▾" : "▸"}
           </span>
-          <span className="shrink-0">{run.blocks.length} 次工具调用</span>
+          <span className="shrink-0">{callCount} 次工具调用</span>
           {names.length > 0 && (
             <span className="min-w-0 truncate text-l4">
               {names.slice(0, 3).join("、")}
@@ -281,8 +324,8 @@ export default function ConversationView({
     );
   }
 
-  function renderRuns(m: ChatMessageDto, mi: number, isUser: boolean) {
-    return runsOf(m.blocks, mi).map((run) =>
+  function renderRuns(m: ChatMessageDto, mkey: string, isUser: boolean) {
+    return runsOf(m.blocks, mkey).map((run) =>
       run.tool
         ? renderToolRun(run, isUser)
         : renderBlock(run.block, run.key, isUser),
@@ -291,23 +334,32 @@ export default function ConversationView({
 
   return (
     <>
-      {messages.map((m, mi) =>
-        m.role === "user" ? (
+      {messages.map((m, mi) => {
+        const mk = msgKey(m, mi);
+        return m.role === "user" ? (
           // 用户消息：右对齐圆角气泡（bubble 令牌底，max-w 70%）
-          <div key={mi} className="mb-3 flex justify-end">
+          <div key={mk} className="mb-3 flex justify-end">
             <div
               className={`max-w-[70%] rounded-md bg-bubble/75 px-3 py-2 ${compact ? "text-xs" : "text-sm"}`}
             >
-              {renderRuns(m, mi, true)}
+              {renderRuns(m, mk, true)}
             </div>
           </div>
         ) : (
-          // AI 回复：直接排版，无气泡容器
-          <div key={mi} className="mb-3 max-w-full">
-            {renderRuns(m, mi, false)}
+          // AI 回复：直接排版，无气泡容器；有逐条 usage 的 agent 在消息末尾标 token
+          <div key={mk} className="mb-3 max-w-full">
+            {renderRuns(m, mk, false)}
+            {m.usage && (m.usage.input > 0 || m.usage.output > 0) && (
+              <div
+                className="mt-0.5 text-micro text-l4"
+                title="本条消息的 token 用量（输入↑ 输出↓）"
+              >
+                {fmtTokens(m.usage.input)}↑ {fmtTokens(m.usage.output)}↓
+              </div>
+            )}
           </div>
-        ),
-      )}
+        );
+      })}
     </>
   );
 }

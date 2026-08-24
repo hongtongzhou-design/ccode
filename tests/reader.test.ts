@@ -9,6 +9,7 @@ import {
   captureRectToCanvasPixels,
   captureRectUsable,
   clampReaderPct,
+  clampReaderTlPct,
   classifyMdHref,
   escapeGlossaryCell,
   findGlossaryMatches,
@@ -52,6 +53,19 @@ test("clampReaderPct 夹到 12–40", () => {
   assert.equal(clampReaderPct(5, 22), 12);
   assert.equal(clampReaderPct(60, 22), 40);
   assert.equal(clampReaderPct(25, 22), 25);
+});
+
+test("clampReaderTlPct 坏值/非正数回落缺省", () => {
+  assert.equal(clampReaderTlPct(Number.NaN, 40), 40);
+  assert.equal(clampReaderTlPct(0, 40), 40);
+  assert.equal(clampReaderTlPct(-5, 40), 40);
+  assert.equal(clampReaderTlPct(Infinity, 40), 40);
+});
+
+test("clampReaderTlPct 夹到 12–70", () => {
+  assert.equal(clampReaderTlPct(5, 40), 12);
+  assert.equal(clampReaderTlPct(80, 40), 70);
+  assert.equal(clampReaderTlPct(35, 40), 35);
 });
 
 test("readerColumnWidths 侧栏按百分比取整且保底 240px", () => {

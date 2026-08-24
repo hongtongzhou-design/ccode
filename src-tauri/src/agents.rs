@@ -223,6 +223,14 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     if let Some(model) = model {
                         plan.args.push("-m".into());
                         plan.args.push(model.into());
+                        // 会话内自省入口：codex 没有模型/base URL 环境变量（matrix §2），配置又走
+                        // 内联 -c 不落盘，agent 被问「你是什么模型」时 config.json/$CODEX_MODEL 全空。
+                        // 注入 Ccode 命名空间的显示名（配置名 · 模型，与选择器口径一致），
+                        // 对齐 kimi KIMI_MODEL_DISPLAY_NAME 先例；纯信息性，codex 本身不读
+                        plan.env.push((
+                            "CCODE_MODEL_DISPLAY_NAME".into(),
+                            format!("{} · {model}", profile.name),
+                        ));
                     }
                     // 默认沙箱：只能写当前工作目录（需全权限时在系统终端自行启动）
                     for arg in *sandbox_args {
@@ -2102,6 +2110,18 @@ mod tests {
         assert!(joined.contains(r#"model_providers.ccode.wire_api="responses""#));
         assert!(joined.contains(r#"model_provider="ccode""#));
         assert!(joined.contains("-m gpt-5-codex"));
+        // 会话内自省：模型显示名随启动注入（配置名 · 模型），agent 可查
+        assert!(plan.env.contains(&(
+            "CCODE_MODEL_DISPLAY_NAME".into(),
+            format!("{} · gpt-5-codex", p.name),
+        )));
+    }
+
+    #[test]
+    fn codex_plan_without_model_has_no_display_name_env() {
+        let p = profile("codex", Some("https://relay.example.com/v1"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), None);
+        assert!(!plan.env.iter().any(|(k, _)| k == "CCODE_MODEL_DISPLAY_NAME"));
     }
 
     #[test]

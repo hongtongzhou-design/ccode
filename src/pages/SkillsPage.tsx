@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -11,7 +11,6 @@ import {
   Checkbox,
   EmptyState,
   fieldClass,
-  hoverRevealClass,
   LoadingRows,
   PageFrame,
   PageHeader,
@@ -97,6 +96,32 @@ function AppliedCell({
         />
       )}
     </button>
+  );
+}
+
+/** 行内徽标悬浮底座：纯展示锚点 + 共享 HoverTip（原生 title 在 WKWebView 渲染白块且不稳定，
+ *  与 MCP 页 HealthDot / 本页 AppliedCell 同一口径）；非交互元素，事件直接挂在自身 span 上 */
+function TipBadge({
+  text,
+  className,
+  children,
+}: {
+  text: string;
+  className: string;
+  children?: ReactNode;
+}) {
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const { tip, show, hide } = useHoverTip(anchorRef);
+  return (
+    <span
+      ref={anchorRef}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      className={className}
+    >
+      {children}
+      <HoverTip tip={tip} text={text} />
+    </span>
   );
 }
 
@@ -1420,12 +1445,12 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     {/* 类型标签（v3.93）：有后端数据支撑的只有 MCP 提及
                                         （skills.rs 内容扫描）；Prompt/Tool 分类无来源，不编造 */}
                                     {skill.mentionsMcp && (
-                                      <span
+                                      <TipBadge
+                                        text="SKILL.md 正文提及 MCP 工具/服务器"
                                         className="shrink-0 rounded-sm bg-inset px-1 py-0.5 font-mono text-micro text-l4"
-                                        title="SKILL.md 正文提及 MCP 工具/服务器"
                                       >
                                         ⌗ MCP
-                                      </span>
+                                      </TipBadge>
                                     )}
                                     {/* 用户自定义标签 pill：名称后 1-4 个，无标签不渲染 */}
                                     {(skill.tags ?? []).slice(0, 4).map((tag) => (
@@ -1438,9 +1463,9 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     ))}
                                     {/* 状态聚合：副本过期/GitHub 可更新合并为一个警示点，明细在悬浮 */}
                                     {(stale || update?.updateAvailable) && (
-                                      <span
+                                      <TipBadge
                                         className="size-2 shrink-0 rounded-full bg-warn-text"
-                                        title={[
+                                        text={[
                                           stale
                                             ? `副本过期：${(skill.staleCopies ?? []).join("、")}`
                                             : "",
@@ -1529,12 +1554,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                   skill={skill}
                                   onOpen={() => void onView(skill)}
                                 />
-                                {/* 行内高频操作收进悬浮操作栏：raised 底 + 细边，
-                                    hover 行才现；tooltip 挂按钮上方（RowAction）不再与图标脱节 */}
+                                {/* 行内高频操作（2026-08-24 起与 MCP 页同口径）：裸图标钮 hover 淡入，
+                                    不套胶囊容器——实体栏压在列表行上层级脱节；tooltip 挂按钮上方（RowAction） */}
                                 <div className="flex items-center justify-end">
-                                  <div
-                                    className={`flex items-center rounded-md border border-hairline bg-raised px-1 py-0.5 ${hoverRevealClass}`}
-                                  >
+                                  <div className="flex items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                                     <RowAction
                                       icon="✎"
                                       tip="编辑内容"

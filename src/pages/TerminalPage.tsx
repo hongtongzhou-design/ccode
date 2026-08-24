@@ -163,6 +163,8 @@ export interface FocusTabActions {
   chooseCwd: () => void;
   sendMessage: (text: string) => Promise<ChatSendResult>;
   restartWritable: () => Promise<ChatSendResult>;
+  /** 往当前 PTY 直接写字节（聊天层审批按键 y/n/Esc、打断 \x03 用；无存活 PTY 时静默丢弃） */
+  writePty: (data: string) => void;
 }
 
 /** TerminalView 上报的当前会话联动数据（主工作区聊天层与阅读区 Agent 栏渲染用） */
@@ -177,6 +179,8 @@ export interface SessionLinkState {
   conv: ChatMessageDto[];
   /** 已发送用户消息，等待会话文件中出现对应 Agent 回复。 */
   pendingReply: boolean;
+  /** hooks 精确注意力为 confirm 时的「在等什么」摘要（无 hooks/无详情字段为 null） */
+  confirmDetail: string | null;
   /** 当前 agent 可从聊天界面直接调用的技能 / MCP 资源。 */
   skills: SkillDto[];
   mcps: McpServerDto[];
@@ -361,6 +365,12 @@ const TerminalView = memo(function TerminalView({
       settings.theme,
       settings.terminalPalette,
     );
+    // 字号/字体变了但容器像素尺寸没变，ResizeObserver 不触发——手动补 fit 让 PTY 行列跟随
+    try {
+      fitRef.current?.fit();
+    } catch {
+      // display:none 下尺寸为 0，fit 会抛；可见性 effect 里会补
+    }
   }, [settings]);
   // 记住上次启动选择（agent/profile/模型/目录），每个新标签以此为初始值（skipSeed 标签除外）
   const saved = skipSeed
@@ -494,6 +504,8 @@ const TerminalView = memo(function TerminalView({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // 组件卸载标记：attach/onPtyExit 的 await 途中关标签时，回落 shell 不得再碰已 dispose 的 xterm
+  const mountedRef = useRef(true);
   const searchRef = useRef<SearchAddon | null>(null);
   const ptyIdRef = useRef<string | null>(null);
   const ptyKindRef = useRef<PtyKind | null>(null);
@@ -645,9 +657,12 @@ const TerminalView = memo(function TerminalView({
   const [conv, setConv] = useState<ChatMessageDto[]>([]);
   const [pendingReply, setPendingReplyState] = useState(false);
   const pendingReplyRef = useRef(false);
-  const pendingUserRef = useRef<ChatMessageDto | null>(null);
+  // 本地即时/排队消息：已发送但会话文件尚未记下的用户消息队列（连发多条都保留）
+  const pendingUsersRef = useRef<ChatMessageDto[]>([]);
   const pendingAssistantKeysRef = useRef<Set<string>>(new Set());
   const pendingReplyTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 等待回复轮询的起始时刻（3 分钟超时兜底用）
+  const pendingReplySinceRef = useRef(0);
   function stopPendingReplyPolling() {
     if (pendingReplyTimerRef.current) {
       clearInterval(pendingReplyTimerRef.current);
@@ -656,16 +671,28 @@ const TerminalView = memo(function TerminalView({
   }
   function startPendingReplyPolling() {
     if (pendingReplyTimerRef.current) return;
+    pendingReplySinceRef.current = Date.now();
     pendingReplyTimerRef.current = setInterval(() => {
-      if (pendingReplyRef.current) void fetchConversation(true);
-      else stopPendingReplyPolling();
+      if (!pendingReplyRef.current) {
+        stopPendingReplyPolling();
+        return;
+      }
+      // 兜底：回复永远不来（进程崩溃/会话文件写入失败）时 3 分钟后停轮询并摘掉「等待回复」
+      if (Date.now() - pendingReplySinceRef.current > 3 * 60 * 1000) {
+        setPendingReply(false);
+        return;
+      }
+      void fetchConversation(true);
     }, 700);
   }
   const setPendingReply = (value: boolean) => {
     pendingReplyRef.current = value;
     setPendingReplyState(value);
-    if (value) startPendingReplyPolling();
-    else stopPendingReplyPolling();
+    // 每次进入等待都重置 3 分钟窗口（轮询已在跑时 start 会早退，超时不能按上一条消息算）
+    if (value) {
+      pendingReplySinceRef.current = Date.now();
+      startPendingReplyPolling();
+    } else stopPendingReplyPolling();
   };
   const lastResumeRef = useRef<string | null>(null);
   const linkCtxRef = useRef<{
@@ -922,6 +949,9 @@ const TerminalView = memo(function TerminalView({
   };
   const welcomeVisibleRef = useRef(welcomeVisible);
   welcomeVisibleRef.current = welcomeVisible;
+  // xterm 键盘层 handler 是挂载期闭包，agentId 也要经 ref 拿最新值（切 agent 后 Enter/Ctrl+V 改写才跟随）
+  const agentIdRef = useRef(agentId);
+  agentIdRef.current = agentId;
   // ⌘/Ctrl+Enter 直接启动（打字中不抢；终端聚焦时按键被 xterm 吞掉、走不到 window，
   // 那条路径由 attachCustomKeyEventHandler 里的同款分支兜底——与 ⌘F 同一处理模式）
   useEffect(() => {
@@ -946,6 +976,8 @@ const TerminalView = memo(function TerminalView({
     return () => window.removeEventListener("keydown", onKey);
   }, [visible, primaryFocus, welcomeVisible]);
   const [attention, setAttention] = useState<TabStatus["attention"]>(null);
+  // hooks 精确注意力 confirm 时的「在等什么」摘要（审批卡片用；无 hooks/无详情字段为 null）
+  const [confirmDetail, setConfirmDetail] = useState<string | null>(null);
   const lastReportRef = useRef("");
   useEffect(() => {
     const s: TabStatus = {
@@ -1001,6 +1033,7 @@ const TerminalView = memo(function TerminalView({
       sync: syncState,
       conv,
       pendingReply,
+      confirmDetail,
       skills: agentSkills,
       mcps: agentMcps,
     });
@@ -1013,6 +1046,7 @@ const TerminalView = memo(function TerminalView({
     agentId,
     conv,
     pendingReply,
+    confirmDetail,
     agentSkills,
     agentMcps,
     onSessionUpdate,
@@ -1080,6 +1114,7 @@ const TerminalView = memo(function TerminalView({
       // 容器隐藏时 fit 会算不出尺寸，可见时再 fit
     }
     termRef.current = term;
+    mountedRef.current = true;
     fitRef.current = fit;
     searchRef.current = search;
 
@@ -1089,7 +1124,7 @@ const TerminalView = memo(function TerminalView({
       // xterm.js 不支持该协议（手动回车发 \r，kimi 不提交）——在键盘层改写。
       // 仅拦无修饰的 Enter；Shift/Ctrl/Alt 组合键保持原样穿透
       if (
-        agentId === "kimi" &&
+        agentIdRef.current === "kimi" &&
         e.type === "keydown" &&
         e.key === "Enter" &&
         !e.metaKey &&
@@ -1128,7 +1163,7 @@ const TerminalView = memo(function TerminalView({
         if (id) {
           // kimi 开了 kitty 键盘协议后只认 CSI-u（v=118 + ctrl 修饰位 5），
           // 与同函数上方 Enter → \x1b[13u 同一改写模式——待实机验证
-          const data = agentId === "kimi" ? "\x1b[118;5u" : "\x16";
+          const data = agentIdRef.current === "kimi" ? "\x1b[118;5u" : "\x16";
           invoke("pty_write", { ptyId: id, data }).catch(() => {});
         }
         return false;
@@ -1229,21 +1264,41 @@ const TerminalView = memo(function TerminalView({
     });
     if (containerRef.current) resizeObs.observe(containerRef.current);
 
+    // codex 的 resize reflow 已无开关（上游恒开）：每次 SIGWINCH 都把整个 transcript
+    // 按新宽度重放一遍，旧帧留在 scrollback——拖分屏/拖窗口的连续 resize 会留下一串
+    // 重复帧。trailing 防抖把一串尺寸合并成最后一次，重放次数随之降到每次拖拽一次
+    let resizeCoalesceTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingResize: { cols: number; rows: number } | null = null;
     const subs = [
       term.onData((data) => {
         const id = ptyIdRef.current;
         if (id) invoke("pty_write", { ptyId: id, data }).catch(() => {});
       }),
       term.onResize(({ cols, rows }) => {
-        const id = ptyIdRef.current;
-        if (id) invoke("pty_resize", { ptyId: id, cols, rows }).catch(() => {});
+        pendingResize = { cols, rows };
+        if (resizeCoalesceTimer) clearTimeout(resizeCoalesceTimer);
+        resizeCoalesceTimer = setTimeout(() => {
+          resizeCoalesceTimer = null;
+          const size = pendingResize;
+          pendingResize = null;
+          const id = ptyIdRef.current;
+          if (id && size) {
+            invoke("pty_resize", {
+              ptyId: id,
+              cols: size.cols,
+              rows: size.rows,
+            }).catch(() => {});
+          }
+        }, 150);
       }),
     ];
 
     // 只在组件卸载（标签被关闭 / 应用退出）时清理 PTY；隐藏不触发
     return () => {
+      mountedRef.current = false;
       window.removeEventListener("resize", onWinResize);
       resizeObs.disconnect();
+      if (resizeCoalesceTimer) clearTimeout(resizeCoalesceTimer);
       container.removeEventListener("paste", onPasteCapture, true);
       void unlistenDrop.then((f) => f());
       subs.forEach((s) => s.dispose());
@@ -1368,9 +1423,14 @@ const TerminalView = memo(function TerminalView({
   async function attach(
     ptyId: string,
     kind: PtyKind,
-    opts?: { reset?: boolean },
+    opts?: { reset?: boolean; focus?: boolean },
   ) {
-    const term = termRef.current!;
+    // await 途中组件可能已卸载（关标签）：杀掉没人持有的 PTY，不碰已 dispose 的 xterm
+    if (!mountedRef.current || !termRef.current) {
+      invoke("pty_kill", { ptyId }).catch(() => {});
+      return;
+    }
+    const term = termRef.current;
     if (opts?.reset) term.reset();
     unlistenRef.current.forEach((u) => u());
     ptyIdRef.current = ptyId;
@@ -1382,6 +1442,17 @@ const TerminalView = memo(function TerminalView({
         void onPtyExit(ptyId);
       }),
     ];
+    // 两个 await listen 期间卸载：退掉刚注册的监听并杀掉 PTY，避免向已 dispose 的 term 写入
+    if (!mountedRef.current) {
+      unlistenRef.current.forEach((u) => u());
+      unlistenRef.current = [];
+      if (ptyIdRef.current === ptyId) {
+        ptyIdRef.current = null;
+        ptyKindRef.current = null;
+      }
+      invoke("pty_kill", { ptyId }).catch(() => {});
+      return;
+    }
     try {
       fitRef.current?.fit();
     } catch {}
@@ -1390,7 +1461,8 @@ const TerminalView = memo(function TerminalView({
       cols: term.cols,
       rows: term.rows,
     }).catch(() => {});
-    term.focus();
+    // 退出回落等被动 attach 不抢焦点（分屏下用户在另一个 pane 打字）
+    if (opts?.focus !== false) term.focus();
   }
 
   async function onPtyExit(exitedId: string) {
@@ -1420,7 +1492,10 @@ const TerminalView = memo(function TerminalView({
           invoke("pty_kill", { ptyId: id }).catch(() => {});
           return;
         }
-        await attach(id, "shell");
+        // 被动回落不抢焦点（分屏下用户可能在另一个 pane 打字）
+        await attach(id, "shell", { focus: false });
+        // attach 途中组件卸载：PTY 已被 attach 入口守卫杀掉，不再 setState
+        if (!mountedRef.current) return;
         setShellActive(true);
       } catch (e) {
         setError(String(e));
@@ -1524,27 +1599,40 @@ const TerminalView = memo(function TerminalView({
       if (linkCtxRef.current !== ctx || requestId !== conversationRequestRef.current)
         return;
       const parsedMessages = page.messages.slice(-50);
-      const pendingUser = pendingUserRef.current;
-      const hasPendingUser = pendingUser
-        ? parsedMessages.some(
-            (message) =>
-              message.role === "user" &&
-              message.blocks.some(
-                (block) =>
-                  block.kind === "text" &&
-                  block.text === pendingUser.blocks[0]?.text,
-              ),
-          )
-        : false;
+      // 本地已发送但会话文件还没记下的用户消息（排队中的也算：连续发送多条时
+      // 各 CLI 的 TUI 会缓冲输入逐条处理，文件落盘有先后）
+      const pendingUsers = pendingReplyRef.current
+        ? pendingUsersRef.current
+        : [];
+      const isRecorded = (pu: ChatMessageDto) =>
+        parsedMessages.some(
+          (message) =>
+            message.role === "user" &&
+            message.blocks.some((block) => {
+              if (block.kind !== "text") return false;
+              const sent = pu.blocks[0]?.text ?? "";
+              // TUI 输入框可能有残留草稿（先发一半、审批框吞键等），落盘文本会是
+              // 「残留 + 本文」的拼接（实证：yyyyyy你是什么模型），精确匹配永远落空、
+              // 「等待回复」挂到超时——放宽为包含匹配；重复发同一文本时旧记录会先命中，
+              // 清除仍受下方 hasNewAssistant（必须出现新回复）双闸门约束，不会提前结案
+              return (
+                block.text === sent ||
+                (sent.length > 0 && block.text.includes(sent))
+              );
+            }),
+        );
+      const missing = pendingUsers.filter((pu) => !isRecorded(pu));
+      // 已落盘的从等待队列移除；还没落盘的保留，等后续轮询
+      pendingUsersRef.current = missing;
       // 会话文件可能先写入旧快照或只写入用户消息；在真实 Agent 回复出现前，
       // 保留本地即时消息，避免聊天区闪回空白。若后端暂时只解析到回复，
-      // 把本地用户消息插到第一条回复之前，确保阅读顺序仍然正确。
+      // 把本地用户消息（按发送顺序）插到第一条回复之前，确保阅读顺序仍然正确。
       const mergedMessages =
-        pendingReplyRef.current && pendingUser && !hasPendingUser
+        missing.length > 0
           ? (() => {
               const next = [...parsedMessages];
               const replyIndex = next.findIndex((message) => message.role !== "user");
-              next.splice(replyIndex < 0 ? next.length : replyIndex, 0, pendingUser);
+              next.splice(replyIndex < 0 ? next.length : replyIndex, 0, ...missing);
               return next;
             })()
           : parsedMessages;
@@ -1554,12 +1642,9 @@ const TerminalView = memo(function TerminalView({
           message.role !== "user" &&
           !pendingAssistantKeysRef.current.has(JSON.stringify(message.blocks)),
       );
-      if (
-        pendingReplyRef.current &&
-        hasNewAssistant
-      ) {
+      if (pendingReplyRef.current && hasNewAssistant && missing.length === 0) {
+        // 全部排队消息都已落盘且等到了新回复，才结束「等待回复」
         setPendingReply(false);
-        pendingUserRef.current = null;
       }
       if (nextSig) convSigRef.current = nextSig;
       setLinkState("linked");
@@ -1579,9 +1664,22 @@ const TerminalView = memo(function TerminalView({
           ? state
           : null,
       );
+      // confirm 时顺带取「在等什么」（hooks payload 的 message/tool_name；取不到为 null）
+      if (state === "confirm") {
+        const detail = await invoke<string | null>("session_confirm_detail", {
+          agent: ctx.agentId,
+          filePath: ctx.filePath,
+        }).catch(() => null);
+        if (linkCtxRef.current !== ctx || requestId !== conversationRequestRef.current)
+          return;
+        setConfirmDetail(detail);
+      } else {
+        setConfirmDetail(null);
+      }
     } catch {
       if (linkCtxRef.current === ctx && requestId === conversationRequestRef.current) {
         setAttention(null);
+        setConfirmDetail(null);
       }
     }
   }
@@ -1700,9 +1798,10 @@ const TerminalView = memo(function TerminalView({
     setSyncState("waiting");
     setConv([]);
     setPendingReply(false);
-    pendingUserRef.current = null;
+    pendingUsersRef.current = [];
     pendingAssistantKeysRef.current = new Set();
     setAttention(null);
+    setConfirmDetail(null);
   }
 
   async function launch(
@@ -1903,7 +2002,7 @@ const TerminalView = memo(function TerminalView({
         .filter((item) => item.role !== "user")
         .map((item) => JSON.stringify(item.blocks)),
     );
-    pendingUserRef.current = message;
+    pendingUsersRef.current = [...pendingUsersRef.current, message];
     setConv((current) => {
       const last = current[current.length - 1];
       const lastText = last?.blocks.map((block) => block.text).join("");
@@ -1929,6 +2028,11 @@ const TerminalView = memo(function TerminalView({
     if (!running && shellActive && lastResumeRef.current) {
       const res = await launch(lastResumeRef.current, { prompt: "" });
       if (!res) return { error: error ?? "恢复会话失败，请切到终端检查" };
+      // 恢复启动要经历进程引导/会话回放（可能还有信任提示）：等一拍再写，
+      // 否则正文+提交键落在尚未就绪的 TUI 上，表现为消息躺在输入框里没发出去
+      await new Promise((r) => setTimeout(r, 1200));
+      if (!mountedRef.current || ptyIdRef.current !== res.ptyId)
+        return { error: null };
       const result = await writeChatMessage(res.ptyId, message);
       if (!result.error) showOptimisticUserMessage(message);
       return result;
@@ -1988,6 +2092,7 @@ const TerminalView = memo(function TerminalView({
     chooseCwd: () => {},
     sendMessage: async () => ({ error: "终端尚未准备好" }),
     restartWritable: async () => ({ error: "当前标签不是可写分叉" }),
+    writePty: () => {},
   });
   actionsRef.current = {
     stop: () => void stop(),
@@ -2007,6 +2112,11 @@ const TerminalView = memo(function TerminalView({
     chooseCwd: () => void chooseWorkingDirectory(),
     sendMessage,
     restartWritable,
+    // 聊天层审批按键（y/n/Esc）与打断（\x03）的写入通道
+    writePty: (data) => {
+      const id = ptyIdRef.current;
+      if (id) invoke("pty_write", { ptyId: id, data }).catch(() => {});
+    },
   };
   useEffect(() => {
     onActions?.(tabId, {
@@ -2021,6 +2131,7 @@ const TerminalView = memo(function TerminalView({
       chooseCwd: () => actionsRef.current.chooseCwd(),
       sendMessage: (text) => actionsRef.current.sendMessage(text),
       restartWritable: () => actionsRef.current.restartWritable(),
+      writePty: (data) => actionsRef.current.writePty(data),
     });
   }, [onActions, tabId]);
 
@@ -3124,6 +3235,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         cur.sync === s.sync &&
         cur.conv === s.conv &&
         cur.pendingReply === s.pendingReply &&
+        cur.confirmDetail === s.confirmDetail &&
         cur.skills === s.skills &&
         cur.mcps === s.mcps
       ) {
@@ -3327,6 +3439,19 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     } finally {
       setChatBusy(false);
     }
+  }
+
+  /** 聊天层打断当前生成（等效终端里按 Ctrl+C） */
+  function chatInterrupt() {
+    tabActionsRef.current.get(focusedId)?.writePty("\x03");
+  }
+
+  /** 聊天层审批卡片按键：批准 y / 拒绝 n / 取消 Esc（单键热键，各 CLI TUI 通用形态；
+      kimi 类 CSI-u 终端的 Enter 改写不涉及——审批热键不回车） */
+  function chatApprovalKey(key: "y" | "n" | "esc") {
+    tabActionsRef.current
+      .get(focusedId)
+      ?.writePty(key === "esc" ? "\x1b" : key);
   }
 
   async function allowWritableFork() {
@@ -4709,7 +4834,16 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 <div key="pane-body" className="flex min-h-0 flex-1 flex-col">
                   <div className="relative min-h-0 flex-1">
                     {view}
-                    {(surfaceModeByTab[t.id] ?? "chat") === "chat" && (
+                    {/* 聊天层常驻挂载、切层仅隐藏（display:contents 包装不参与布局，
+                        ChatSurface 的 absolute 仍相对上层容器）：输入框草稿、滚动位置、
+                        展开状态在 chat⇄terminal 切换间不丢 */}
+                    <div
+                      className={
+                        (surfaceModeByTab[t.id] ?? "chat") === "chat"
+                          ? "contents"
+                          : "hidden"
+                      }
+                    >
                       <ChatSurface
                         messages={sessionByTab[t.id]?.conv ?? []}
                         state={sessionByTab[t.id]?.state ?? "idle"}
@@ -4750,16 +4884,41 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                         onOpenTerminal={() => switchSurface("terminal")}
                         onOpenMcp={() => setPage("mcp")}
                         onOpenHistory={openActiveHistory}
+                        active={(surfaceModeByTab[t.id] ?? "chat") === "chat"}
+                        agentId={
+                          sessionByTab[t.id]?.agentId ??
+                          statuses[t.id]?.agentId ??
+                          null
+                        }
+                        confirmDetail={
+                          sessionByTab[t.id]?.confirmDetail ?? null
+                        }
+                        onInterrupt={chatInterrupt}
+                        onApprovalKey={chatApprovalKey}
                       />
-                    )}
+                    </div>
                   </div>
                   {/* 终端底部状态栏：在 pane 内部、贴 xterm 画面下缘，与终端同底同色
                       （视觉上是终端自己画的状态行）。常驻渲染——未启动也有 cwd/未启动态，
                       高度恒定不跳动；ResizeObserver 兜底尺寸变化后的 fit。
+                      聊天模式同样渲染（模型/目录/git/token 对聊天也有用）；用户在设置页
+                      关掉「聊天页显示状态栏」后以 invisible 纯占位——无论开关，终端几何
+                      高度跨模式恒定，切层不改行列数、不触发 codex resize reflow（每次
+                      SIGWINCH 重放整个 transcript，上游恒开），切层闪烁与 scrollback
+                      副本同消。（invisible 元素不接收指针事件，隐藏时栏内按钮不可误点）
                       分屏时各 pane 显示各标签；git 段只跟随活跃 pane（数据是 focusedId 的）。
                       data-statusbar-host：阅读区打开时随 xterm 宿主一并搬进覆盖层右栏槽位 */}
-                  <div data-statusbar-host={t.id} className="shrink-0">
-                  {(surfaceModeByTab[t.id] ?? "chat") === "terminal" && (() => {
+                  {(() => {
+                    const chatBarHidden =
+                      (surfaceModeByTab[t.id] ?? "chat") !== "terminal" &&
+                      !(appSettings?.statusBarInChat ?? true);
+                    return (
+                  <div
+                    data-statusbar-host={t.id}
+                    className={`shrink-0 ${chatBarHidden ? "invisible" : ""}`}
+                    aria-hidden={chatBarHidden}
+                  >
+                  {(() => {
                     const st = statuses[t.id] ?? null;
                     const prof = st
                       ? profiles.find((p) => p.id === st.profileId)
@@ -4797,6 +4956,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     );
                   })()}
                   </div>
+                    );
+                  })()}
                 </div>
               </div>
             );

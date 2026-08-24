@@ -73,9 +73,13 @@
   带出预填命令；配置页「新版/更新」命中时改走 `setPendingTerminal`（shellOnly + prefillCommand，同官方账号登录机制）开
   完整终端让用户方向键操作，普通渠道零变化。
 - 解析各 CLI 内部格式时**防御式**：跳过未知类型、容忍缺字段、容忍末行截断（格式随版本漂移）。
-- **PDF 预览（P2a）**：pdf.js 渲染器必须随 PdfPreview 组件动态 import 拆独立 chunk（禁进主包）；`read_pdf_bytes` 只放行四类
-  白名单（注册项目登记资源/注册项目根/工作区·仓库根/终端标签 cwd hint），canonicalize 后判定，传输用 base64 字符串（macOS
+- **PDF 预览（P2a）**：pdf.js 渲染器必须随 PdfPreview 组件动态 import 拆独立 chunk（禁进主包）；`read_pdf_bytes` 只放行五类
+  白名单（注册项目登记资源/注册项目根/工作区·仓库根/终端标签 cwd hint/Ccode 自管剪贴板图片目录 `<config>/ccode/tmp`
+  ——paste-* 写入侧已有扩展名白名单 + 50MB 上限 + 7 天清理），canonicalize 后判定，传输用 base64 字符串（macOS
   Raw 响应会退化为逐字节 JSON 数组，禁改 raw bytes）；选段问 AI 只 pty_write 注入活跃标签输入框，不自动回车。
+- **聊天区 Markdown 渲染（ChatMarkdown）**：会话内容可能含联网抓取文本，按不可信处理——独立 Marked 实例，
+  原始 HTML 一律转义（raw `<img>`/`<script>` 是追踪/注入通道）；http(s) 图片不加载只显示文本，本地图片经
+  `read_image_bytes` 白名单换 data URL，不新增任何读取通道。
 - **引用健康检查（v3.63，citation.rs）**：`check_citation_health` 只读扫描 .md 与 references.bib，目标目录沿用同一
   白名单口径（注册项目根 + 工作区工作树/主仓，canonicalize 后前缀判定，无 cwd hint 来源）；扫描有界（≤200 个 md、单文件 ≤1MB）。
 - **「整理为笔记」（P2b）**：归属判定只在后端 `pdf_owner_project`（登记资源 canonical 精确命中 → 项目根最长前缀命中，都未
