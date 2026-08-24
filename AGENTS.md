@@ -117,7 +117,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # （家目录折 ~、段数>3 且 >28 字符才砍中段留首尾，tests/mcp-display.test.ts）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
   lit-watch.ts               # 文献雷达纯逻辑：日分组/关键词分组（groupEntriesByKeyword，取 keywordsHit 首词、
-                             # 未分类恒末）/趋势/直链转换/已读判定/漂移提醒（tests/lit-watch.test.ts）
+                             # 未分类恒末）/趋势/直链转换/全文可得性分流（fulltextLinkFor：arxiv abs 与 .pdf 直链=可下载，
+                             # DOI/落地页=来源，不再摆禁用下载钮）/已读判定/漂移提醒（tests/lit-watch.test.ts）
   reader.ts                  # 沉浸阅读区纯逻辑：分栏钳制与像素换算/圈选命中与 canvas 映射/截图注入格式/
                              # glossary 表格契约（与 reader.rs 双端镜像，改动需同步）/段落边界提取/术语匹配/
                              # 进度与护眼存储键/翻译面板高度键（readerSplitT，未拖过不落键 = 内容自适应，

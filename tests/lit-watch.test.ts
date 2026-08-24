@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   filterLitDismissed,
+  fulltextLinkFor,
   groupEntriesByDay,
   groupEntriesByKeyword,
   includedLineFor,
@@ -395,4 +396,31 @@ test("sourceDisplayName：剥出版商括号尾巴", () => {
   // 无尾巴原样返回；整串就是括号（剥完为空）不剥
   assert.equal(sourceDisplayName("arxiv"), "arxiv");
   assert.equal(sourceDisplayName("(Wiley)"), "(Wiley)");
+});
+
+test("fulltextLinkFor：全文可得性分流", () => {
+  // arXiv abs 页 → pdf 直链（可免费下载）
+  assert.deepEqual(fulltextLinkFor("https://arxiv.org/abs/2401.12345"), {
+    kind: "pdf",
+    url: "https://arxiv.org/pdf/2401.12345",
+  });
+  // .pdf 结尾的直链 → 可下载（带 query 也算）
+  assert.deepEqual(fulltextLinkFor("https://example.com/paper.pdf?x=1"), {
+    kind: "pdf",
+    url: "https://example.com/paper.pdf?x=1",
+  });
+  // 裸 DOI / doi.org / 出版商落地页 → 来源页（不摆装死的下载钮）
+  assert.equal(fulltextLinkFor("10.1002/adma.74773").kind, "source");
+  assert.equal(fulltextLinkFor("doi: 10.1002/adma.74773").kind, "source");
+  assert.equal(
+    fulltextLinkFor("https://doi.org/10.1002/adma.74773").kind,
+    "source",
+  );
+  assert.equal(
+    fulltextLinkFor("https://www.nature.com/articles/s41586-026-00001").kind,
+    "source",
+  );
+  // 空串 / 无链接 → none
+  assert.equal(fulltextLinkFor("").kind, "none");
+  assert.equal(fulltextLinkFor("   ").kind, "none");
 });

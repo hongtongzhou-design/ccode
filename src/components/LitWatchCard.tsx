@@ -22,6 +22,7 @@ import { schedulesForProject } from "../schedule-tasks";
 import {
   dismissLitEntry,
   filterLitDismissed,
+  fulltextLinkFor,
   groupEntriesByDay,
   groupEntriesByKeyword,
   includedLineFor,
@@ -171,7 +172,8 @@ function WatchEntryRow({
   const sourceStripped = sourceName !== entry.source.trim();
   const sourceRef = useRef<HTMLSpanElement>(null);
   const sourceTip = useHoverTip(sourceRef, true);
-  const pdfUrl = pdfUrlFor(entry.url);
+  // 全文分流：免费直链 →「↓ 全文」可下载；出版商落地页/DOI → 直接给「↗ 来源」；无链接 → 不显示
+  const fulltext = fulltextLinkFor(entry.url);
   const pdfRef = useRef<HTMLButtonElement>(null);
   const pdfTip = useHoverTip(pdfRef, true);
   return (
@@ -257,18 +259,32 @@ function WatchEntryRow({
           >
             ◈ 解读
           </button>
-          <button
-            ref={pdfRef}
-            type="button"
-            className={ghostActionClass}
-            disabled={!pdfUrl || downloading}
-            onMouseEnter={!pdfUrl ? pdfTip.show : undefined}
-            onMouseLeave={!pdfUrl ? pdfTip.hide : undefined}
-            onClick={onDownload}
-          >
-            {downloading ? "↓ 下载中…" : "↓ 全文"}
-          </button>
-          {!pdfUrl && <HoverTip tip={pdfTip.tip} text="出版商页面，请手动下载" up />}
+          {fulltext.kind === "pdf" && (
+            <button
+              ref={pdfRef}
+              type="button"
+              className={ghostActionClass}
+              disabled={downloading}
+              onMouseEnter={pdfTip.show}
+              onMouseLeave={pdfTip.hide}
+              onClick={onDownload}
+            >
+              {downloading ? "↓ 下载中…" : "↓ 全文"}
+            </button>
+          )}
+          {fulltext.kind === "pdf" && (
+            <HoverTip tip={pdfTip.tip} text="开放获取全文，免费直接下载" up />
+          )}
+          {fulltext.kind === "source" && (
+            <button
+              type="button"
+              className={ghostActionClass}
+              title="没有免费全文直链，打开来源页面获取"
+              onClick={() => void openUrl(sourceUrl(entry.url))}
+            >
+              ↗ 来源
+            </button>
+          )}
           <button
             type="button"
             aria-label={`更多操作：${entry.title}`}
@@ -442,8 +458,8 @@ function IncludedRow({
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const dotRef = useRef<HTMLSpanElement>(null);
   const { tip, show, hide } = useHoverTip(dotRef);
-  const pdfUrl = pdfUrlFor(entry.link);
-  const canDownload = pdfUrl !== null;
+  // 与命中条目同一分流口径：免费直链可下载，落地页/DOI 直接给来源入口
+  const fulltext = fulltextLinkFor(entry.link);
   const pdfRef = useRef<HTMLButtonElement>(null);
   const pdfTip = useHoverTip(pdfRef, true);
   return (
@@ -469,24 +485,31 @@ function IncludedRow({
         >
           开读
         </button>
-      ) : (
+      ) : fulltext.kind === "pdf" ? (
         <>
           <button
             ref={pdfRef}
             type="button"
             className={`${rowActionClass} shrink-0`}
-            disabled={!canDownload || downloading}
-            onMouseEnter={!canDownload ? pdfTip.show : undefined}
-            onMouseLeave={!canDownload ? pdfTip.hide : undefined}
+            disabled={downloading}
+            onMouseEnter={pdfTip.show}
+            onMouseLeave={pdfTip.hide}
             onClick={onDownload}
           >
             {downloading ? "↓ 下载中…" : "↓ 全文"}
           </button>
-          {!canDownload && (
-            <HoverTip tip={pdfTip.tip} text="出版商页面，请手动下载" up />
-          )}
+          <HoverTip tip={pdfTip.tip} text="开放获取全文，免费直接下载" up />
         </>
-      )}
+      ) : fulltext.kind === "source" ? (
+        <button
+          type="button"
+          className={`${rowActionClass} shrink-0`}
+          title="没有免费全文直链，打开来源页面获取"
+          onClick={() => void openUrl(sourceUrl(entry.link))}
+        >
+          ↗ 来源
+        </button>
+      ) : null}
       <button
         type="button"
         aria-label={`更多操作：${entry.title}`}
@@ -509,8 +532,11 @@ function IncludedRow({
               ? [
                   {
                     label: "↓ 获取全文",
-                    disabled: !canDownload,
-                    title: canDownload ? pdfUrl! : "出版商页面，请手动下载",
+                    disabled: fulltext.kind !== "pdf",
+                    title:
+                      fulltext.kind === "pdf"
+                        ? fulltext.url
+                        : "没有免费全文直链，用「↗ 来源」打开来源页",
                     onSelect: onDownload,
                   },
                   {

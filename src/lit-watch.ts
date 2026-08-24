@@ -269,6 +269,30 @@ export function pdfUrlFor(url: string): string | null {
   return u;
 }
 
+// ===== 全文可得性 =====
+
+/** 全文链接分类：pdf = 开放获取直链（可下载）；source = 出版商落地页/DOI（只能打开来源）；none = 无链接 */
+export type FulltextLink =
+  | { kind: "pdf"; url: string }
+  | { kind: "source"; url: string }
+  | { kind: "none" };
+
+/** 判定命中的全文可得性，供「↓ 全文 / ↗ 来源」按钮分流：
+ *  只有 arXiv abs 页与 .pdf 结尾的 URL 视为可直接下载；DOI、doi.org 及其他 http(s) 落地页
+ *  一律当来源页（直链下载也过不了后端 %PDF- 魔数校验），前端直接给「来源」入口，不摆装死的下载钮 */
+export function fulltextLinkFor(rawUrl: string): FulltextLink {
+  const u = rawUrl.trim();
+  if (/^(?:doi:\s*)?10\.\d{4,9}\/\S+$/i.test(u)) {
+    return { kind: "source", url: u };
+  }
+  if (!/^https?:\/\//i.test(u)) return { kind: "none" };
+  if (/^https?:\/\/(?:www\.)?arxiv\.org\/abs\//i.test(u)) {
+    return { kind: "pdf", url: pdfUrlFor(u)! };
+  }
+  if (/\.pdf([?#].*)?$/i.test(u)) return { kind: "pdf", url: u };
+  return { kind: "source", url: u };
+}
+
 // ===== 精读清单 =====
 
 /**
