@@ -206,14 +206,21 @@ pub fn model_output_limit(model: &str) -> i64 {
         .unwrap_or(DEFAULT_OUTPUT_LIMIT)
 }
 
-pub fn model_capability(model: &str) -> ModelCapabilityDto {
+/// 是否支持图像输入：只认确知的多模态系列（宁缺毋滥——给纯文本模型声明图像
+/// 输入会让用户拖图进去才报错）。codex catalog 的 input_modalities 用
+pub fn model_supports_vision(model: &str) -> bool {
     let normalized = normalize(model);
-    let vision = if normalized.contains("kimi-k3")
+    normalized.contains("kimi-k3")
         || normalized.starts_with("gemini-2.5")
         || normalized.starts_with("gemini-3")
         || normalized.starts_with("gpt-4o")
         || normalized.starts_with("claude-opus-4")
-    {
+}
+
+pub fn model_capability(model: &str) -> ModelCapabilityDto {
+    let normalized = normalize(model);
+    // 与 model_supports_vision 同一判定，单一出处
+    let vision = if model_supports_vision(model) {
         Some(true)
     } else {
         None

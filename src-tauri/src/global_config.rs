@@ -147,6 +147,18 @@ fn patch_claude_settings(
         env.insert("ANTHROPIC_CUSTOM_MODEL_OPTION".into(), json!(fifth));
         env.insert("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(), json!(fifth));
     }
+    // claude 对不认识的第三方模型按 200K 上下文假设；注册表确知更大的（如 kimi-k3 1M）
+    // 必须显式写 CLAUDE_CODE_MAX_CONTEXT_TOKENS，否则长会话提前 compact（cc-switch 同口径）。
+    // 不需要时清掉旧值：该键随「设为全局」归 Ccode 管，留着过期大值比没有更有害
+    let max_ctx = models.first().map(|m| crate::model_registry::model_context_size(m));
+    match max_ctx {
+        Some(ctx) if ctx > 200_000 => {
+            env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), json!(ctx.to_string()));
+        }
+        _ => {
+            env.remove("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
+        }
+    }
     to_pretty(&v)
 }
 
@@ -1261,6 +1273,24 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v["env"].is_object());
         assert_eq!(v["env"].as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn claude_patch_writes_max_context_only_when_beyond_default_assumption() {
+        // 注册表确知 >200K 的模型（kimi-k3 = 1M）：必须显式声明，否则 claude 按 200K 假设提前 compact
+        let out = patch_claude_settings(None, None, None, &["kimi-k3".to_string()]).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1048576");
+        // ≤200K 的模型：不写；已有旧值时清掉（防上一个 profile 的 1M 残留误导）
+        let out = patch_claude_settings(
+            Some(r#"{"env": {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576"}}"#),
+            None,
+            None,
+            &["claude-sonnet-4".to_string()],
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v["env"].get("CLAUDE_CODE_MAX_CONTEXT_TOKENS").is_none());
     }
 
     #[test]

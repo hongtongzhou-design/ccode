@@ -776,7 +776,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
                 keys: &["api_key", "env_key"],
                 note: "config.toml 中的 API 凭证会覆盖官方账号登录",
             }],
-            detection_note: Some("凭证在 ~/.grok/auth.json（scope→GrokAuth 顶层 map，grok 自己原子重写）"),
+            detection_note: Some("凭证在 ~/.grok/auth.json（scope→GrokAuth 顶层 map，grok 自己原子重写）；「已连接」仅代表已登录——auth.json 不含订阅/会员字段，无会员的免费账号登录后同样显示已连接，能否用官方额度以实际使用为准"),
             api_key_fields: &[],
         }),
         model_switch: ModelSwitch::None,

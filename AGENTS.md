@@ -185,7 +185,8 @@ src-tauri/src/
   model_registry.rs          # 模型能力注册表（同 pricing.rs 口径）：内置前缀表 + model-capabilities.json 覆盖 +
                              # 关键词推断兜底；kimi capabilities/max_context_size、codex context_window、
                              #   opencode reasoning/limit 共用；limit.output 兜底 8192（1.18 起 schema 必填，
-                             #   覆盖文件可配 "output"）；内置表宁缺毋滥（收错比漏报有害）
+                             #   覆盖文件可配 "output"）；model_supports_vision 供 codex catalog input_modalities；
+                             # 内置表宁缺毋滥（收错比漏报有害）
   profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥；删除时同步清设置引用（settings::clear_profile_refs）
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
   global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）；写成功即记

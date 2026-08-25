@@ -573,6 +573,18 @@ fn codex_catalog_entry(profile_name: &str, model: &str) -> serde_json::Value {
         // 上下文窗口按能力注册表（cc-switch 的 catalog 条目同样带这两个字段）
         "context_window": ctx,
         "max_context_window": ctx,
+        // 有效上下文百分比：codex 按它算自动压缩阈值，缺了会用满窗口才压缩、
+        // 容易先撞上下文上限报错（cc-switch 模板同值 95）
+        "effective_context_window_percent": 95,
+        // 图像输入按能力注册表如实声明（只认确知多模态系列，纯文本模型不给 ["text","image"]）
+        "input_modalities": if crate::model_registry::model_supports_vision(model) {
+            vec!["text", "image"]
+        } else {
+            vec!["text"]
+        },
+        // codex 的 web_search 是官方 hosted tool，第三方中继不支持——如实声明 false，
+        // 不摆一个调了必挂的死工具（cc-switch 对拒收网关同样禁用）
+        "supports_search_tool": false,
         "supported_reasoning_levels": [
             { "effort": "low", "description": "Fast responses with lighter reasoning" },
             { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
@@ -2802,6 +2814,17 @@ mod tests {
             .filter_map(|l| l["effort"].as_str())
             .collect();
         assert_eq!(efforts, ["low", "medium", "high"]);
+        // 能力字段：有效上下文 95%（自动压缩阈值）、如实声明无 search tool
+        assert_eq!(e["effective_context_window_percent"], 95);
+        assert_eq!(e["supports_search_tool"], false);
+        // 图像输入按能力注册表：gpt-5 系不在确知多模态清单 → 仅 text
+        assert_eq!(e["input_modalities"], serde_json::json!(["text"]));
+        // 确知多模态（kimi-k3）→ text + image
+        let v2 = codex_catalog_json("测试", &["kimi-k3".into()]);
+        assert_eq!(
+            v2["models"][0]["input_modalities"],
+            serde_json::json!(["text", "image"])
+        );
     }
 
     #[test]
