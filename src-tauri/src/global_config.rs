@@ -375,13 +375,20 @@ fn patch_kimi_config(
                 t["max_context_size"] = value(crate::model_registry::model_context_size(m));
                 // 选择器 label 优先 display_name：用 profile 名避免显示成 provider id "ccode"
                 t["display_name"] = value(format!("{profile_name} · {m}"));
-                // 只在注册表判定为思考模型时显式声明；否则留空走 CLI registry 默认兜底，
-                // 避免把 CLI 自己认得的模型能力降级
-                if crate::model_registry::model_thinking(m) {
+                // 思考/视觉模型显式声明 capabilities；否则留空走 CLI registry 默认兜底，
+                // 避免把 CLI 自己认得的模型能力降级（兼容通道缺省只有 tool_use）
+                let thinking = crate::model_registry::model_thinking(m);
+                let vision = crate::model_registry::model_supports_vision(m);
+                if thinking || vision {
+                    let mut caps = vec!["tool_use"];
+                    if thinking {
+                        caps.push("thinking");
+                    }
+                    if vision {
+                        caps.push("image_in");
+                    }
                     t["capabilities"] = toml_edit::value(
-                        vec!["tool_use", "thinking"]
-                            .into_iter()
-                            .collect::<toml_edit::Array>(),
+                        caps.into_iter().collect::<toml_edit::Array>(),
                     );
                 }
             }
@@ -1535,12 +1542,16 @@ mod tests {
         let caps = &doc["models"]["kimi-k3"]["capabilities"];
         assert_eq!(
             caps.as_array().map(|a| a.len()),
-            Some(2),
-            "kimi-k3 应声明 tool_use + thinking"
+            Some(3),
+            "kimi-k3 应声明 tool_use + thinking + image_in（多模态思考）"
         );
         assert_eq!(
             doc["models"]["kimi-k3"]["capabilities"][1].as_str(),
             Some("thinking")
+        );
+        assert_eq!(
+            doc["models"]["kimi-k3"]["capabilities"][2].as_str(),
+            Some("image_in")
         );
         assert!(doc["models"]["deepseek-chat"].get("capabilities").is_none());
         // default_model = 首个模型的别名

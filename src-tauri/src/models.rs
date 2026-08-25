@@ -103,6 +103,9 @@ pub async fn fetch_models(
                     .json::<serde_json::Value>()
                     .await
                     .map_err(|e| format!("解析响应失败: {e}"))?;
+                // 顺带沉淀能力元数据（OpenRouter 风格响应带 context_length/modality 等；
+                // 纯 id 列表的网关此调用为 no-op）——能力注册表的最准数据源
+                crate::model_registry::record_relay_models(&body);
                 return Ok(parse_model_ids(&body));
             }
             Ok(resp) => {

@@ -80,6 +80,8 @@ pub fn run() {
             agents::session_digest_command,
             agents::digest_external_terminal,
             models::fetch_models,
+            model_registry::model_db_status,
+            model_registry::download_model_db,
             global_config::apply_profile_global,
             global_config::restore_global_backup,
             global_config::has_global_backup,

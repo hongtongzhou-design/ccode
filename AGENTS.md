@@ -182,11 +182,12 @@ src-tauri/src/
                              #   base_url/env_key 引用不含密钥）；
                              # 选择器显示名统一「配置名 · 模型」（claude _NAME 槽 / codex catalog display_name /
                              #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）
-  model_registry.rs          # 模型能力注册表（同 pricing.rs 口径）：内置前缀表 + model-capabilities.json 覆盖 +
-                             # 关键词推断兜底；kimi capabilities/max_context_size、codex context_window、
-                             #   opencode reasoning/limit 共用；limit.output 兜底 8192（1.18 起 schema 必填，
-                             #   覆盖文件可配 "output"）；model_supports_vision 供 codex catalog input_modalities；
-                             # 内置表宁缺毋滥（收错比漏报有害）
+  model_registry.rs          # 模型能力注册表：查询链 = 用户覆盖 > 网关实测缓存（fetch_models 顺带沉淀
+                             # OpenRouter 风格 /models 元数据）> 公共能力库（配置页 ⋯ 下载，models.dev 优先
+                             # OpenRouter 回落，download_model_db/model_db_status）> 内置前缀表 > 关键词兜底；
+                             # 字段 thinking/context/output/vision；kimi capabilities/max_context_size、
+                             # codex catalog、opencode reasoning/limit/modalities 全从这条链出；
+                             # limit.output 兜底 8192（1.18 起 schema 必填）；宁缺毋滥（收错比漏报有害）
   profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥；删除时同步清设置引用（settings::clear_profile_refs）
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
   global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）；写成功即记
@@ -199,7 +200,7 @@ src-tauri/src/
                              # gemini 双文件：.env 之外必须加写 settings.json 的 selectedType=gemini-api-key
                              #   （v3.147 审计：缺它 gemini ≥0.46 headless auth 报错起不来，JSONC 容错读）；
                              # kimi 的 [models.*] 随写 display_name（配置名·模型，选择器 label 优先它）
-                             # 与 capabilities（仅推断为思考模型时写，仅新版变体）
+                             # 与 capabilities（按注册表组合 tool_use/thinking/image_in，仅新版变体）
   projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
                              # update_step_skills（步骤推荐技能读-改-原子写）、append_pipeline_steps（从模板追加：重名跳过、全跳过不落盘、
                              # 追加成功自动清 pipeline_opt_out）、set_pipeline_opt_out（「不使用研究流程」显式标记读-改-原子写）、

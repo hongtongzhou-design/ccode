@@ -285,11 +285,22 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                             "KIMI_MODEL_MAX_CONTEXT_SIZE".into(),
                             crate::model_registry::model_context_size(model).to_string(),
                         ));
-                        if provider_type != "kimi" && crate::model_registry::model_thinking(model) {
-                            plan.env.push((
-                                "KIMI_MODEL_CAPABILITIES".into(),
-                                "tool_use,thinking".into(),
-                            ));
+                        if provider_type != "kimi" {
+                            // 兼容协议通道 capabilities 缺省只有 ["tool_use"]：
+                            // 思考/视觉模型都要显式声明，否则能力丧失（kimi 官方协议通道
+                            // 缺省 ["image_in","thinking"] 已合理，不动）
+                            let thinking = crate::model_registry::model_thinking(model);
+                            let vision = crate::model_registry::model_supports_vision(model);
+                            if thinking || vision {
+                                let mut caps = String::from("tool_use");
+                                if thinking {
+                                    caps.push_str(",thinking");
+                                }
+                                if vision {
+                                    caps.push_str(",image_in");
+                                }
+                                plan.env.push(("KIMI_MODEL_CAPABILITIES".into(), caps));
+                            }
                         }
                     }
                     if let Some(key) = &key {
@@ -537,6 +548,11 @@ pub(crate) fn opencode_provider_json(
         // 查不到条目时 opencode 按无思考能力处理
         if crate::model_registry::model_thinking(m) {
             entry["reasoning"] = serde_json::json!(true);
+        }
+        // 视觉模型补 modalities（input 加 image）；缺省 = 纯文本，中继视觉模型
+        // 不声明会在 opencode 里丢掉图像输入
+        if crate::model_registry::model_supports_vision(m) {
+            entry["modalities"] = serde_json::json!({ "input": ["text", "image"], "output": ["text"] });
         }
         models_map.insert(m.into(), entry);
     }
@@ -2723,6 +2739,30 @@ mod tests {
     }
 
     #[test]
+    fn kimi_plan_vision_model_declares_image_in_on_compat_protocol() {
+        // 多模态思考模型（kimi-k3）：tool_use + thinking + image_in
+        let mut p = profile("kimi", Some("https://relay.example.com/v1"));
+        p.protocol = Some("openai".into());
+        let plan = launch_plan(&p, None, Some("kimi-k3"));
+        assert!(plan.env.contains(&(
+            "KIMI_MODEL_CAPABILITIES".into(),
+            "tool_use,thinking,image_in".into()
+        )));
+        // 纯视觉非思考模型（gpt-4o）：tool_use + image_in，不带 thinking
+        let mut p = profile("kimi", Some("https://relay.example.com/v1"));
+        p.protocol = Some("openai".into());
+        let plan = launch_plan(&p, None, Some("gpt-4o"));
+        assert!(plan.env.contains(&(
+            "KIMI_MODEL_CAPABILITIES".into(),
+            "tool_use,image_in".into()
+        )));
+        // kimi 官方协议通道：CLI 缺省 ["image_in","thinking"] 已合理，不注入
+        let p = profile("kimi", None);
+        let plan = launch_plan(&p, None, Some("kimi-k3"));
+        assert!(!plan.env.iter().any(|(k, _)| k == "KIMI_MODEL_CAPABILITIES"));
+    }
+
+    #[test]
     fn kimi_plan_respects_protocol_for_provider_type() {
         let mut p = profile("kimi", None);
         p.protocol = Some("anthropic".into());
@@ -2770,6 +2810,18 @@ mod tests {
         assert_eq!(config["provider"]["ccode"]["name"].as_str(), Some("测试"));
         // 表外未知模型不声明 reasoning
         assert!(models["m1"].get("reasoning").is_none());
+        // 视觉模型补 modalities（input 含 image）；非视觉模型不声明
+        let v2 = opencode_provider_json(&{
+            let mut p2 = profile("opencode", Some("https://openrouter.ai/api/v1"));
+            p2.models = vec!["kimi-k3".into(), "deepseek-chat".into()];
+            p2
+        }, None, None);
+        let models2 = v2["models"].as_object().unwrap();
+        assert_eq!(
+            models2["kimi-k3"]["modalities"]["input"],
+            serde_json::json!(["text", "image"])
+        );
+        assert!(models2["deepseek-chat"].get("modalities").is_none());
     }
 
     #[test]

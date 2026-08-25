@@ -150,10 +150,21 @@
    grok（源码调研，待实机验证）：`--permission-mode dontAsk --sandbox read-only`（CI 严格白名单 + OS 级只读；
    `--permission-mode plan` 门控链路未确认，不用）。
    注册表落点：`agent_specs.rs` 的 `AgentSpec.readonly_args`，应用逻辑 `agents::readonly_launch_args`。
-7. **模型能力元数据统一走 `model_registry.rs`**（2026-08-17）：内置前缀表 + `<config>/ccode/model-capabilities.json`
-   覆盖 + 关键词推断兜底（同 pricing.rs 口径，最长前缀匹配、剥 provider/ 前缀）。kimi 的 capabilities/max_context_size、
-   codex catalog 的 context_window、opencode 的 reasoning/limit 全从这张表出；内置表宁缺毋滥（收错比漏报有害）。
-   有能力声明通道的只有 kimi/codex/opencode/claude（claude 仅显示名槽）；gemini/qwen/codebuddy/cursor/grok 无此机制。
+7. **模型能力元数据统一走 `model_registry.rs`**（2026-08-17 起；2026-08-26 扩为分层数据源）：查询链 =
+   用户覆盖文件（model-capabilities.json）> **网关实测缓存**（model-capabilities-relay.json，
+   「获取模型」时 fetch_models 顺带解析 OpenRouter 风格 /models 元数据落盘，最准）> **公共能力库**
+   （model-capabilities-db.json，配置页 ⋯ 菜单主动下载：models.dev 优先、OpenRouter 回落——
+   models.dev 本机直连超时实证）> 内置前缀表 > 关键词推断兜底。能力字段四项：thinking/context/output/vision。
+   kimi 的 capabilities/max_context_size、codex catalog、opencode 的 reasoning/limit/modalities 全从这条链出；
+   内置表宁缺毋滥（收错比漏报有害）。
+   有能力声明通道的只有 kimi/codex/opencode/claude；gemini/qwen/codebuddy/cursor/grok 无此机制（2026-08-25 逐家核实）。
+   各通道声明面（2026-08-25 补齐）：codex catalog = context_window + effective_context_window_percent(95) +
+   input_modalities（`model_supports_vision`）+ supports_search_tool(false) + reasoning levels；kimi = max_context_size +
+   capabilities（tool_use + thinking/image_in 按需，兼容协议通道才注入/写盘；官方协议通道 CLI 缺省已合理）；
+   opencode = limit.context/output + reasoning + modalities（视觉模型 input 加 image；tool_call 缺省即开，实测请求带全量
+   工具）；claude = 显示名槽 + CLAUDE_CODE_MAX_CONTEXT_TOKENS（注册表 >200K 才写，不需要时清旧值）。
+   注意边界：streaming/function calling/结构化输出是协议层能力（声明补不了）；web search/file search/code interpreter
+   等 hosted tools 是第一方服务端能力，第三方中继没有对应物，声明了等于摆死工具——如实不写。
 
 ## 10. MCP 配置分发调研（2026-08-10，八家经官方文档/源码/本机实测核实；grok 为 2026-08 源码调研，首版只读不分发）
 

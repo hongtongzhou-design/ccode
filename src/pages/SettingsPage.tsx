@@ -266,14 +266,14 @@ function HotkeyCapture({
   }, [listening, conflictsWith, onSave]);
 
   return (
-    <span className="flex items-center gap-1.5">
+    <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
       <button
         type="button"
         onClick={() => {
           setListening(true);
           setConflict(false);
         }}
-        className={`inline-flex h-7 min-w-16 items-center justify-center rounded-md border px-2 font-mono text-xs ${
+        className={`inline-flex h-7 min-w-16 shrink-0 items-center justify-center rounded-md border px-2 font-mono text-xs ${
           listening
             ? "border-cta-bd bg-inset text-cta"
             : conflict
@@ -284,30 +284,29 @@ function HotkeyCapture({
         {listening ? "按下新快捷键…" : comboLabel(value)}
       </button>
       {conflict && <span className="text-xs text-err-text">与其他快捷键冲突</span>}
-      {value !== defaultValue && (
-        <button
-          type="button"
-          onClick={() => {
-            setListening(false); // 监听中直接改绑定：退出监听态，防后续按键再覆盖
-            onSave(defaultValue);
-          }}
-          className={ghostActionClass}
-        >
-          恢复默认
-        </button>
-      )}
-      {value !== "" && (
-        <button
-          type="button"
-          onClick={() => {
-            setListening(false);
-            onSave("");
-          }}
-          className={ghostActionClass}
-        >
-          禁用
-        </button>
-      )}
+      {/* 两个低频钮用 invisible 占位而非条件渲染：否则改了绑定的行多出一个钮，
+          绑定键列与「禁用」列整列错位（白底块旁的排版投诉来源之一）；
+          shrink-0 防窄容器里按钮被压缩换行 */}
+      <button
+        type="button"
+        onClick={() => {
+          setListening(false); // 监听中直接改绑定：退出监听态，防后续按键再覆盖
+          onSave(defaultValue);
+        }}
+        className={`${ghostActionClass} shrink-0${value !== defaultValue ? "" : " invisible"}`}
+      >
+        恢复默认
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          setListening(false);
+          onSave("");
+        }}
+        className={`${ghostActionClass} shrink-0${value !== "" ? "" : " invisible"}`}
+      >
+        禁用
+      </button>
     </span>
   );
 }
@@ -1126,28 +1125,32 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           label="顶部导航显示项目"
           hint="恢复侧栏始终保留；隐藏当前页面时会临时保留该入口"
           extra={
-            <div className="grid grid-cols-2 gap-x-5 gap-y-2 rounded-md bg-inset p-3 sm:grid-cols-3">
-              {NAV_CAPSULE_SETTING_ITEMS.map((item) => {
-                const selected = normalizeNavCapsuleVisibleItems(
-                  settings?.navCapsuleVisibleItems,
-                ).includes(item.id);
-                return (
-                  <Checkbox
-                    key={item.id}
-                    checked={selected}
-                    label={item.label}
-                    onChange={(checked) => {
-                      const current = normalizeNavCapsuleVisibleItems(
-                        settings?.navCapsuleVisibleItems,
-                      );
-                      const next = checked
-                        ? [...new Set([...current, item.id])]
-                        : current.filter((id) => id !== item.id);
-                      void patch({ navCapsuleVisibleItems: next });
-                    }}
-                  />
-                );
-              })}
+            /* 与快捷键区同口径的 strip 卡片分组容器；卡内 10 项按 5 列 max-content 网格
+               排两行——列轨对齐（flex 包裹第二行会错位），列间固定间隙不摊宽 */
+            <div className="rounded-lg bg-strip p-3">
+              <div className="grid grid-cols-[repeat(5,max-content)] gap-x-8 gap-y-2">
+                {NAV_CAPSULE_SETTING_ITEMS.map((item) => {
+                  const selected = normalizeNavCapsuleVisibleItems(
+                    settings?.navCapsuleVisibleItems,
+                  ).includes(item.id);
+                  return (
+                    <Checkbox
+                      key={item.id}
+                      checked={selected}
+                      label={item.label}
+                      onChange={(checked) => {
+                        const current = normalizeNavCapsuleVisibleItems(
+                          settings?.navCapsuleVisibleItems,
+                        );
+                        const next = checked
+                          ? [...new Set([...current, item.id])]
+                          : current.filter((id) => id !== item.id);
+                        void patch({ navCapsuleVisibleItems: next });
+                      }}
+                    />
+                  );
+                })}
+              </div>
             </div>
           }
         >
@@ -1188,55 +1191,71 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                   label="页面切换"
                 />
               </Row>
-              <div className="mb-1 mt-2 text-xs font-medium text-l3">页面快捷键</div>
-              <div className="flex w-full max-w-xl flex-col gap-1 rounded-md bg-strip p-1">
-                {PAGE_HOTKEY_DEFS.map((p) => (
-                  <span
-                    key={p.id}
-                    className="flex min-h-9 items-center justify-between gap-4 rounded-sm px-2 py-1 hover:bg-hover"
-                  >
-                    <span className="min-w-20 shrink-0 text-sm text-l2">
-                      {p.label}
-                    </span>
-                    <HotkeyCapture
-                      value={pageCombo(p.id)}
-                      defaultValue={p.combo}
-                      conflictsWith={[
-                        palette,
-                        chrome,
-                        ...PAGE_HOTKEY_DEFS.filter((x) => x.id !== p.id).map(
-                          (x) => pageCombo(x.id),
-                        ),
-                      ]}
-                      onSave={(combo) =>
-                        void patch({
-                          hotkeyPages: {
-                            ...(settings?.hotkeyPages ?? {}),
-                            [p.id]: combo,
-                          },
-                        })
-                      }
-                    />
-                  </span>
-                ))}
+              {/* 两个快捷键组各自收进 strip 卡片容器：离散行收拢视线、消除右侧大片空白；
+                  卡内标准列表行 = 功能名在左、绑定键 + 操作靠右（invisible 占位保列对齐） */}
+              <div className="mt-2 rounded-lg bg-strip p-3">
+                <div className="mb-1 px-2 text-xs font-medium text-l3">页面快捷键</div>
+                <div className="grid grid-cols-1 gap-x-8 lg:grid-cols-2">
+                  {PAGE_HOTKEY_DEFS.map((p) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center justify-between gap-4 rounded-sm px-2 py-1.5 hover:bg-hover"
+                    >
+                      <span className="shrink-0 text-sm text-l2">{p.label}</span>
+                      <HotkeyCapture
+                        value={pageCombo(p.id)}
+                        defaultValue={p.combo}
+                        conflictsWith={[
+                          palette,
+                          chrome,
+                          ...PAGE_HOTKEY_DEFS.filter((x) => x.id !== p.id).map(
+                            (x) => pageCombo(x.id),
+                          ),
+                        ]}
+                        onSave={(combo) =>
+                          void patch({
+                            hotkeyPages: {
+                              ...(settings?.hotkeyPages ?? {}),
+                              [p.id]: combo,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div className="mb-1 mt-4 text-xs font-medium text-l3">全局快捷键</div>
-              <Row label="命令面板" hint="呼出页面跳转 / 主题切换 / 侧栏显隐">
-                <HotkeyCapture
-                  value={palette}
-                  defaultValue="mod+k"
-                  conflictsWith={[chrome, ...pageCombos]}
-                  onSave={(combo) => void patch({ hotkeyPalette: combo })}
-                />
-              </Row>
-              <Row label="隐藏 / 显示侧栏" hint="执行态：界面只剩工作内容">
-                <HotkeyCapture
-                  value={chrome}
-                  defaultValue="mod+\\"
-                  conflictsWith={[palette, ...pageCombos]}
-                  onSave={(combo) => void patch({ hotkeyHideChrome: combo })}
-                />
-              </Row>
+              <div className="mt-4 rounded-lg bg-strip p-3">
+                <div className="mb-1 px-2 text-xs font-medium text-l3">全局快捷键</div>
+                <div className="flex items-center justify-between gap-4 rounded-sm px-2 py-1.5 hover:bg-hover">
+                  <div className="min-w-0">
+                    <div className="text-sm text-l2">命令面板</div>
+                    <p className="mt-0.5 text-micro leading-4 text-l4">
+                      呼出页面跳转 / 主题切换 / 侧栏显隐
+                    </p>
+                  </div>
+                  <HotkeyCapture
+                    value={palette}
+                    defaultValue="mod+k"
+                    conflictsWith={[chrome, ...pageCombos]}
+                    onSave={(combo) => void patch({ hotkeyPalette: combo })}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-sm px-2 py-1.5 hover:bg-hover">
+                  <div className="min-w-0">
+                    <div className="text-sm text-l2">隐藏 / 显示侧栏</div>
+                    <p className="mt-0.5 text-micro leading-4 text-l4">
+                      执行态：界面只剩工作内容
+                    </p>
+                  </div>
+                  <HotkeyCapture
+                    value={chrome}
+                    defaultValue="mod+\\"
+                    conflictsWith={[palette, ...pageCombos]}
+                    onSave={(combo) => void patch({ hotkeyHideChrome: combo })}
+                  />
+                </div>
+              </div>
             </>
           );
         })()}
@@ -1530,36 +1549,30 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         open={!collapsed.diag}
         onToggle={() => toggleSection("diag")}
       >
-        <div className="mt-3 flex items-center gap-3 rounded-sm bg-strip p-3">
-          <div className="min-w-0">
-            <p className="text-sm text-l2">Windows 诊断包</p>
-            <p className="mt-0.5 text-xs leading-5 text-l4">
-              打包系统与运行信息供排查；已脱敏，不含环境变量
-            </p>
-          </div>
+        <Row
+          label="Windows 诊断包"
+          hint="打包系统与运行信息供排查；已脱敏，不含环境变量"
+        >
           <button
             onClick={exportDiagnosticsBundle}
             disabled={diagnosticsExporting}
-            className="ml-auto h-8 shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className={rowActionClass}
           >
             {diagnosticsExporting ? "正在采集…" : "导出诊断包"}
           </button>
-        </div>
-        <div className="mt-3 flex items-center gap-3 rounded-sm bg-strip p-3">
-          <div className="min-w-0">
-            <p className="text-sm text-l2">生效配置快照</p>
-            <p className="mt-0.5 text-xs leading-5 text-l4">
-              应用设置、九家配置清单与能力表的当前生效值，排查配置漂移用；已脱敏，不含密钥
-            </p>
-          </div>
+        </Row>
+        <Row
+          label="生效配置快照"
+          hint="应用设置、九家配置清单与能力表的当前生效值，排查配置漂移用；已脱敏，不含密钥"
+        >
           <button
             onClick={exportEffectiveConfig}
             disabled={configDumpExporting}
-            className="ml-auto h-8 shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className={rowActionClass}
           >
             {configDumpExporting ? "正在生成…" : "导出生效配置快照"}
           </button>
-        </div>
+        </Row>
         <div className="py-3">
           <div className="group mb-2 flex items-center gap-2">
             <span className="text-xs text-l4">
@@ -1643,9 +1656,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         {storage === null ? (
           <p className="py-2 text-xs text-l4">统计中…</p>
         ) : (
-          <ul className="space-y-1">
+          <ul>
             {storage.map((e) => (
-              <li key={e.path} className="flex items-center gap-2 rounded-md bg-strip px-2 py-2">
+              <li key={e.path} className="flex items-center gap-2 rounded-md px-2 py-2 hover:bg-hover">
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm text-l2">
                     {e.label}

@@ -1212,6 +1212,38 @@ export default function ProfilesPage() {
   const [originalBackups, setOriginalBackups] = useState<Record<string, boolean>>(
     {},
   );
+  // 公共模型能力库（models.dev/OpenRouter 下载）状态：顶部 ⋯ 菜单的下载/更新入口
+  const [modelDb, setModelDb] = useState<{
+    downloaded: boolean;
+    models: number;
+    downloadedAt?: string | null;
+  } | null>(null);
+  useEffect(() => {
+    invoke<{
+      downloaded: boolean;
+      models: number;
+      downloadedAt?: string | null;
+    }>("model_db_status")
+      .then(setModelDb)
+      .catch(() => {});
+  }, []);
+
+  /** 下载/更新公共模型能力库：下载后接入的模型自动带上正确的上下文/输出/视觉/推理声明 */
+  async function onModelDbDownload() {
+    try {
+      const s = await invoke<{
+        downloaded: boolean;
+        models: number;
+        downloadedAt?: string | null;
+      }>("download_model_db");
+      setModelDb(s);
+      setNotice(`模型能力库已就绪：${s.models} 个模型`);
+      setTimeout(() => setNotice(null), 4000);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
   // 各 agent 的升级/安装进行态、实时输出与最近结果（可并发操作多个 agent）
   const [updating, setUpdating] = useState<Record<string, boolean>>({});
   const [liveOutput, setLiveOutput] = useState<Record<string, string>>({});
@@ -2373,6 +2405,14 @@ export default function ProfilesPage() {
           items={[
             { label: "导入连接", onSelect: () => void onImport() },
             { label: "导出连接", onSelect: () => void onExport() },
+            {
+              label: modelDb?.downloaded
+                ? `更新模型能力库（已有 ${modelDb.models} 个模型）`
+                : "下载模型能力库（models.dev）",
+              title:
+                "第三方模型的能力声明（上下文/输出上限/视觉/推理）公共数据源；下载后接入模型自动带正确声明。表单里点「获取模型」时也会顺带沉淀网关实测数据",
+              onSelect: () => void onModelDbDownload(),
+            },
           ]}
         />
       )}
