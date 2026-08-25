@@ -488,6 +488,10 @@ export interface SkillDto {
   mentionsMcp: boolean;
   /** SKILL.md frontmatter 声明的产物路径（目录带尾斜杠，list 时现算）；空/缺 = 未声明，不参与产物冲突检测 */
   outputs?: string[];
+  /** SKILL.md frontmatter 声明的读取路径（口径同 outputs，list 时现算） */
+  inputs?: string[];
+  /** true = inputs/outputs 来自正文推断而非 frontmatter 声明（外部技能常见；提示按「推断」口径） */
+  interfaceInferred?: boolean;
 }
 
 /** skill_md_path 返回：SKILL.md 绝对路径 + 技能库目录（◈ 优化开终端的 cwd） */
@@ -741,6 +745,18 @@ export interface ProjectConfigDto {
   submissionMode?: "initial" | "revision";
   /** 当前返修轮次；首投不使用。 */
   submissionRound?: number;
+  /** 文献雷达筛选：新命中展示与推送计数按期刊指标过滤；null/全空 = 不筛选 */
+  litWatchFilter?: LitWatchFilterDto | null;
+}
+
+/** 文献雷达筛选（存 project.toml；指标未知的条目放行不误伤，口径见 lit-watch.ts entryPassesFilter） */
+export interface LitWatchFilterDto {
+  /** 只看 IF ≥ 此值的期刊；null/缺省 = 不限 */
+  minIf?: number | null;
+  /** 只收中科院 N 区及以上（1 = 仅 1 区 … 4 = 不限）；null/缺省 = 不限 */
+  maxCasQuartile?: number | null;
+  /** 只要中科院 Top 期刊 */
+  topOnly?: boolean;
 }
 
 /** 任务卡（list_task_cards 等）：挂在项目下的「对话文件夹」，无独立状态机 */

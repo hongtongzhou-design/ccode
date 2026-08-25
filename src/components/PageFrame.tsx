@@ -228,7 +228,8 @@ export function Toggle({
       }`}
     >
       {/* 滑块用专用令牌而非 bg-l1：l1 是「文字最亮档」，在浅色主题是近黑 #171a26，
-          直接当滑块会渲染成白底上的黑疙瘩（v3.85 修）。滑块永远是浅色，状态由轨道表达 */}
+          直接当滑块会渲染成白底上的黑疙瘩（v3.85 修）。滑块永远是浅色，状态由轨道表达。
+          开启态轨道 = 品牌色 bg-cta（随主题；2026-08-25 试过降调柔绿 bg-ok-text，用户拍板改回） */}
       <span
         className={`absolute top-0.5 h-3.5 w-3.5 rounded-full bg-switch-knob transition-[left] ${
           checked ? "left-[18px]" : "left-0.5"

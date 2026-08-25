@@ -53,9 +53,15 @@ pub struct SkillDto {
     #[serde(default)]
     pub mentions_mcp: bool,
     /// SKILL.md frontmatter 声明的产物路径（目录带尾斜杠、文件写全路径）：
-    /// list 时现算，不入库文件；空数组 = 未声明（自建/外部技能不参与产物冲突检测）
+    /// list 时现算，不入库文件；空数组 = 未声明（此时看 interface_inferred 是否经正文推断兜底）
     #[serde(default)]
     pub outputs: Vec<String>,
+    /// SKILL.md frontmatter 声明的读取路径（口径同 outputs，list 时现算）
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    /// inputs/outputs 来自正文推断而非 frontmatter 声明（外部技能常见；前端按「推断」口径提示）
+    #[serde(default)]
+    pub interface_inferred: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +171,8 @@ fn new_skill(name: String, description: Option<String>, source: &str, repo: Opti
         app_modes: HashMap::new(),
         mentions_mcp: false,
         outputs: Vec::new(),
+        inputs: Vec::new(),
+        interface_inferred: false,
     }
 }
 
@@ -222,7 +230,7 @@ fn seed_builtin_skills_impl(store: &SkillStore) -> Result<Vec<String>, String> {
         fs::create_dir_all(&dir).map_err(|e| format!("创建内置技能目录失败: {e}"))?;
         fs::write(dir.join("SKILL.md"), content)
             .map_err(|e| format!("写入内置技能 {name} 失败: {e}"))?;
-        let (_, description, _) = parse_skill_md(&dir.join("SKILL.md"));
+        let description = parse_skill_md(&dir.join("SKILL.md")).description;
         skills.push(new_skill(name.to_string(), description, "builtin", None));
         added.push(name.to_string());
     }
@@ -299,7 +307,7 @@ fn apply_builtin_skill_update_impl(store: &SkillStore, name: &str) -> Result<(),
     }
     let mut skills = store.read();
     if let Some(pos) = skills.iter().position(|s| s.name == name) {
-        let (_, description, _) = parse_skill_md(&md);
+        let description = parse_skill_md(&md).description;
         skills[pos].description = description.unwrap_or_default();
         store.write(&skills)?;
     }
@@ -314,78 +322,231 @@ fn apply_builtin_skill_update_impl(store: &SkillStore, name: &str) -> Result<(),
     Ok(())
 }
 
-// ===== SKILL.md 防御式解析（开放标准：frontmatter 取 name/description/outputs，扩展字段忽略） =====
+// ===== SKILL.md 防御式解析（开放标准：frontmatter 取 name/description/outputs/inputs，扩展字段忽略） =====
 
-fn parse_skill_md(path: &Path) -> (Option<String>, Option<String>, Vec<String>) {
+/// frontmatter 解析结果：outputs = 产物路径、inputs = 读取路径（目录带尾斜杠、文件写全路径）
+#[derive(Debug, Default, Clone, PartialEq)]
+struct SkillFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+    outputs: Vec<String>,
+    inputs: Vec<String>,
+}
+
+/// 多行列表收集态：`outputs:`/`inputs:` 空值行之后连续的 `- item` 行都算条目
+#[derive(Clone, Copy, PartialEq)]
+enum ListKey {
+    Outputs,
+    Inputs,
+}
+
+fn parse_skill_md(path: &Path) -> SkillFrontmatter {
     let Ok(raw) = fs::read(path) else {
-        return (None, None, Vec::new());
+        return SkillFrontmatter::default();
     };
-    let text = String::from_utf8_lossy(&raw);
+    parse_skill_md_text(&String::from_utf8_lossy(&raw))
+}
+
+fn parse_skill_md_text(text: &str) -> SkillFrontmatter {
     // BOM 与 CRLF 都容忍
     let text = text.trim_start_matches('\u{feff}');
     let mut lines = text.lines();
+    let mut parsed = SkillFrontmatter::default();
     if lines.next().map(|l| l.trim_end()) != Some("---") {
-        return (None, None, Vec::new());
+        return parsed;
     }
-    let (mut name, mut description) = (None, None);
-    let mut outputs: Vec<String> = Vec::new();
-    // outputs 多行列表收集态：`outputs:` 空值行之后连续的 `- item` 行都算条目
-    let mut in_outputs_list = false;
+    let mut collecting: Option<ListKey> = None;
     for line in lines {
         let line = line.trim_end();
         if line == "---" {
             break;
         }
-        if in_outputs_list {
+        if let Some(key) = collecting {
             if let Some(item) = line.trim_start().strip_prefix('-') {
                 let item = item.trim().trim_matches('"').trim_matches('\'');
                 if !item.is_empty() {
-                    outputs.push(item.to_string());
+                    match key {
+                        ListKey::Outputs => parsed.outputs.push(item.to_string()),
+                        ListKey::Inputs => parsed.inputs.push(item.to_string()),
+                    }
                 }
                 continue;
             }
-            in_outputs_list = false;
+            collecting = None;
         }
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
         let value = value.trim().trim_matches('"').trim_matches('\'');
+        let inline_list = |target: &mut Vec<String>| {
+            // 行内写法：`[a, b]` 或裸标量 `a`
+            let inner = value
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(value);
+            target.extend(
+                inner
+                    .split(',')
+                    .map(|s| s.trim().trim_matches('"').trim_matches('\''))
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            );
+        };
         match key.trim() {
-            "name" if !value.is_empty() => name = Some(value.to_string()),
-            "description" if !value.is_empty() => description = Some(value.to_string()),
+            "name" if !value.is_empty() => parsed.name = Some(value.to_string()),
+            "description" if !value.is_empty() => {
+                parsed.description = Some(value.to_string())
+            }
             "outputs" => {
                 if value.is_empty() {
-                    in_outputs_list = true;
+                    collecting = Some(ListKey::Outputs);
                 } else {
-                    // 行内写法：`[a, b]` 或裸标量 `a`
-                    let inner = value
-                        .strip_prefix('[')
-                        .and_then(|s| s.strip_suffix(']'))
-                        .unwrap_or(value);
-                    outputs.extend(
-                        inner
-                            .split(',')
-                            .map(|s| s.trim().trim_matches('"').trim_matches('\''))
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string),
-                    );
+                    inline_list(&mut parsed.outputs);
+                }
+            }
+            "inputs" => {
+                if value.is_empty() {
+                    collecting = Some(ListKey::Inputs);
+                } else {
+                    inline_list(&mut parsed.inputs);
                 }
             }
             _ => {}
         }
     }
-    (name, description, outputs)
+    parsed
 }
 
-/// 由名称/描述/正文组成 SKILL.md 全文（frontmatter 只写 name/description，与解析口径一致）。
-/// 描述强制单行：换行会破坏 frontmatter 的行解析
-fn compose_skill_md(name: &str, description: &str, content: &str) -> String {
+/// SKILL.md 正文（frontmatter 之后的部分）；无 frontmatter 或未闭合时按全文对待。
+/// split_inclusive 保留行尾 \r\n，偏移量逐字节精确（CRLF 不错位）
+fn skill_md_body(text: &str) -> &str {
+    let text = text.trim_start_matches('\u{feff}');
+    let mut segments = text.split_inclusive('\n');
+    let Some(first) = segments.next() else {
+        return text;
+    };
+    if first.trim_end() != "---" {
+        return text;
+    }
+    let mut offset = first.len();
+    for seg in segments {
+        offset += seg.len();
+        if seg.trim_end() == "---" {
+            return &text[offset..];
+        }
+    }
+    text
+}
+
+/// 正文路径推断（外部技能 frontmatter 未声明 inputs/outputs 时的兜底）：
+/// 逐行找「像路径」的 token（含 / 或已知扩展名，剔除 URL 与中文 token），
+/// 按行内动词线索分类读入/产出；行内无线索的不猜（宁缺毋滥，与内置表同原则）。
+/// 推断结果只进 DTO（interface_inferred = true），不回写 SKILL.md。
+fn infer_interface_from_body(body: &str) -> (Vec<String>, Vec<String>) {
+    const OUTPUT_HINTS: &[&str] = &[
+        "写入", "写到", "写出", "产出", "生成", "保存", "追加到", "输出到", "落盘", "落在",
+        "write", "save", "creat", "produc", "generat", "append", "output",
+    ];
+    const INPUT_HINTS: &[&str] = &[
+        "读取", "读入", "基于", "对照", "输入", "参考", "检查", "read", "load", "review",
+        "check", "based on",
+    ];
+    const KNOWN_EXTS: &[&str] = &[
+        ".md", ".bib", ".csv", ".pdf", ".tex", ".yaml", ".yml", ".json", ".toml", ".ris",
+        ".docx", ".qmd",
+    ];
+    /// 路径 token 判定：含 / 或已知扩展名；剔除 URL、过短、含中文（「数据/图片」类误伤）
+    fn looks_like_path(t: &str) -> bool {
+        if t.len() < 3 || t.starts_with("http") || t.contains("://") {
+            return false;
+        }
+        if t.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
+            return false;
+        }
+        t.contains('/') || KNOWN_EXTS.iter().any(|ext| t.ends_with(ext))
+    }
+    let mut inputs: Vec<String> = Vec::new();
+    let mut outputs: Vec<String> = Vec::new();
+    // 上限防噪：推断是兜底提示，不是全量清单
+    const CAP: usize = 8;
+    for line in body.lines() {
+        if inputs.len() >= CAP && outputs.len() >= CAP {
+            break;
+        }
+        let lower = line.to_lowercase();
+        let is_output = OUTPUT_HINTS.iter().any(|h| lower.contains(h));
+        let is_input = INPUT_HINTS.iter().any(|h| lower.contains(h));
+        if is_output == is_input {
+            continue; // 两侧都命中或都不命中 = 无线索，不猜
+        }
+        for token in line.split(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '`' | '"'
+                        | '\''
+                        | '('
+                        | ')'
+                        | '（'
+                        | '）'
+                        | '，'
+                        | '。'
+                        | '；'
+                        | '：'
+                        | '、'
+                        | ','
+                        | ';'
+                        | '<'
+                        | '>'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                )
+        }) {
+            // 剥掉紧贴路径的中英文非路径字符（「写入papers/x.md。」「notes/下」这类无空格连写）
+            let token = token
+                .trim_start_matches(|c: char| {
+                    !c.is_ascii_alphanumeric() && !matches!(c, '/' | '.' | '~' | '_')
+                })
+                .trim_end_matches(|c: char| {
+                    !c.is_ascii_alphanumeric() && !matches!(c, '/' | '-' | '_')
+                });
+            if !looks_like_path(token) {
+                continue;
+            }
+            let target = if is_output { &mut outputs } else { &mut inputs };
+            if target.len() < CAP && !target.iter().any(|p| p == token) {
+                target.push(token.to_string());
+            }
+        }
+    }
+    (inputs, outputs)
+}
+
+/// 由名称/描述/正文组成 SKILL.md 全文（frontmatter 写 name/description + 非空的 inputs/outputs
+/// 多行列表，与解析口径一致）。描述强制单行：换行会破坏 frontmatter 的行解析
+fn compose_skill_md(
+    name: &str,
+    description: &str,
+    content: &str,
+    inputs: &[String],
+    outputs: &[String],
+) -> String {
     let desc = description.replace(['\r', '\n'], " ");
-    format!(
-        "---\nname: {name}\ndescription: {}\n---\n\n{}\n",
-        desc.trim(),
-        content.trim()
-    )
+    let mut fm = format!("---\nname: {name}\ndescription: {}\n", desc.trim());
+    let mut push_list = |key: &str, items: &[String]| {
+        if items.is_empty() {
+            return;
+        }
+        fm.push_str(&format!("{key}:\n"));
+        for item in items {
+            fm.push_str(&format!("  - {item}\n"));
+        }
+    };
+    push_list("inputs", inputs);
+    push_list("outputs", outputs);
+    format!("{fm}---\n\n{}\n", content.trim())
 }
 
 // ===== 发现：含 SKILL.md 的目录即技能，找到不下钻，跳过 . 开头目录 =====
@@ -525,7 +686,7 @@ fn add_skill_from_dir(
 ) -> Result<(), String> {
     let dst = store.skill_dir(install_name);
     copy_dir_recursive(src_dir, &dst)?;
-    let (_, description, _) = parse_skill_md(&dst.join("SKILL.md"));
+    let description = parse_skill_md(&dst.join("SKILL.md")).description;
     skills.push(new_skill(install_name.to_string(), description, source, repo));
     if let Err(e) = store.write(skills) {
         skills.pop();
@@ -554,7 +715,7 @@ fn overwrite_skill_from_dir(
         }
         return Err(e);
     }
-    let (_, description, _) = parse_skill_md(&dst.join("SKILL.md"));
+    let description = parse_skill_md(&dst.join("SKILL.md")).description;
     match existing_pos {
         Some(pos) => {
             skills[pos].description = description.unwrap_or_default();
@@ -1194,8 +1355,21 @@ fn list_skills_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>) -> Vec<
         s.stale_copies = stale_agents(store, dirs, s);
         s.app_modes = app_modes(dirs, s);
         s.mentions_mcp = mentions_mcp(&store.skill_dir(&s.name).join("SKILL.md"));
-        let (_, _, outputs) = parse_skill_md(&store.skill_dir(&s.name).join("SKILL.md"));
-        s.outputs = outputs;
+        // 接口口径（outputs/inputs）：frontmatter 声明优先；外部技能未声明时从正文推断兜底
+        // （interface_inferred = true 供前端标注「推断」，不回写 SKILL.md）
+        let md = store.skill_dir(&s.name).join("SKILL.md");
+        let parsed = parse_skill_md(&md);
+        s.outputs = parsed.outputs;
+        s.inputs = parsed.inputs;
+        s.interface_inferred = false;
+        if s.outputs.is_empty() && s.inputs.is_empty() {
+            if let Ok(text) = fs::read_to_string(&md) {
+                let (inputs, outputs) = infer_interface_from_body(skill_md_body(&text));
+                s.interface_inferred = !inputs.is_empty() || !outputs.is_empty();
+                s.inputs = inputs;
+                s.outputs = outputs;
+            }
+        }
     }
     skills
 }
@@ -1594,7 +1768,7 @@ pub async fn discover_unmanaged() -> Vec<DiscoveredDto> {
             if name.is_empty() || known.contains(&name.as_str()) {
                 continue; // 已在库里的不重复收编
             }
-            let (_, description, _) = parse_skill_md(&dir.join("SKILL.md"));
+            let description = parse_skill_md(&dir.join("SKILL.md")).description;
             out.push(DiscoveredDto {
                 name,
                 description: description.unwrap_or_default(),
@@ -1671,12 +1845,12 @@ fn create_impl(
     fs::create_dir_all(&dst).map_err(|e| format!("创建技能目录失败: {e}"))?;
     if let Err(e) = fs::write(
         dst.join("SKILL.md"),
-        compose_skill_md(name, description, content),
+        compose_skill_md(name, description, content, &[], &[]),
     ) {
         let _ = fs::remove_dir_all(&dst);
         return Err(format!("写入 SKILL.md 失败: {e}"));
     }
-    let (_, parsed_desc, _) = parse_skill_md(&dst.join("SKILL.md"));
+    let parsed_desc = parse_skill_md(&dst.join("SKILL.md")).description;
     skills.push(new_skill(name.to_string(), parsed_desc, "local", None));
     if let Err(e) = store.write(skills) {
         skills.pop();
@@ -1688,12 +1862,15 @@ fn create_impl(
 
 /// 编辑技能内容：经临时目录走既有覆盖路径——SKILL.md 之外的辅助文件（模板等）原样保留，
 /// 覆盖前备份、失败回滚、元数据描述更新全部复用 overwrite_skill_from_dir。
+/// interface = Some((inputs, outputs)) 时改写 frontmatter 接口声明；None 时保留库中现状
+/// （编辑正文不该静默丢掉外部技能已声明的 inputs/outputs）。
 fn update_content_impl(
     store: &SkillStore,
     skills: &mut Vec<SkillDto>,
     name: &str,
     content: &str,
     description: Option<String>,
+    interface: Option<(Vec<String>, Vec<String>)>,
 ) -> Result<(), String> {
     validate_skill_name(name)?;
     let existing = skills
@@ -1709,9 +1886,13 @@ fn update_content_impl(
     let result = (|| {
         copy_dir_recursive(&lib_dir, &temp)?;
         let desc = description.unwrap_or_else(|| existing.description.clone());
+        let (inputs, outputs) = interface.unwrap_or_else(|| {
+            let keep = parse_skill_md(&lib_dir.join("SKILL.md"));
+            (keep.inputs, keep.outputs)
+        });
         fs::write(
             temp.join("SKILL.md"),
-            compose_skill_md(name, &desc, content),
+            compose_skill_md(name, &desc, content, &inputs, &outputs),
         )
         .map_err(|e| format!("写入 SKILL.md 失败: {e}"))?;
         // source/repo 保持原值：编辑不改写来源信息
@@ -1749,7 +1930,118 @@ pub async fn update_skill_content(
 ) -> Result<(), String> {
     let store = SkillStore::default_paths()?;
     let mut skills = store.read();
-    update_content_impl(&store, &mut skills, name.trim(), &content, description)
+    update_content_impl(&store, &mut skills, name.trim(), &content, description, None)
+}
+
+// ===== 「◈ 适配到流水线」（外部技能 → 流水线接口口径；两阶段：AI 出稿 → 人预览确认才落盘） =====
+
+/// 适配稿 command 返回：技能名 + 改写后的 SKILL.md 全文（已过 redact_and_cap 脱敏截断）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillAdaptDto {
+    pub name: String,
+    pub content: String,
+}
+
+/// 适配 prompt（纯函数，可测）：规范路径表单一出处，改约定只动这里。
+/// 口径与 pipeline-presets 模板的 expectedArtifacts/inputs 对齐
+pub(crate) fn build_adapt_prompt(name: &str, current: &str) -> String {
+    format!(
+        "你是技能改写助手。下面是一份 agent 技能文件 SKILL.md「{name}」，和 Ccode 科研工作台的流水线路径约定。\n\n\
+         【流水线路径约定（相对项目根）】\n\
+         - papers/ 文献检索与筛选：screening.md 初筛、included.md 精读清单、to-fetch.md 付费墙待办、watchlist.md 监控订阅\n\
+         - notes/ 精读笔记与文献雷达收件箱（inbox.md）\n\
+         - references.bib 引文库（引用一律用 [@键] 对照它）\n\
+         - outline.md 综述/论文大纲\n\
+         - manuscript/ 稿件（draft.md、review-final.md、changelog.md、citation-check.md）\n\
+         - output/ 渲染产物（draft.pdf、draft.docx）\n\
+         - data/ 数据（原始数据只读，禁原地修改）、analysis/ 分析脚本与报告、figures/ 图表\n\n\
+         【当前 SKILL.md】\n{current}\n\n\
+         【改写要求】\n\
+         1. 保持技能的核心方法论与检查清单不变，只把读取/产出路径对齐到上述约定；\
+         约定表里没有的新路径可保留，但与约定冲突的一律改按约定；\n\
+         2. frontmatter 保留 name/description，并补写 inputs: 与 outputs: 多行列表\
+         （`  - 路径` 写法，目录带尾斜杠、文件写全路径；没有的一侧省略）；\n\
+         3. 保持单文件轻量规范（约 100 行内），不加脚本/JSON 中间件/lint 体系；\n\
+         4. 只输出完整的新版 SKILL.md 全文（含 frontmatter），不要解释、不要代码围栏。"
+    )
+}
+
+/// AI 输出容错：剥掉首尾代码围栏（模型偶尔无视「不要代码围栏」）
+fn strip_code_fence(text: &str) -> &str {
+    let t = text.trim();
+    let Some(first_nl) = t.find('\n') else {
+        return t;
+    };
+    if !t.starts_with("```") {
+        return t;
+    }
+    let body = &t[first_nl + 1..];
+    body.strip_suffix("```").map(str::trim_end).unwrap_or(t)
+}
+
+fn adapt_skill_to_pipeline_impl(
+    profiles: Vec<crate::profiles::Profile>,
+    id: &str,
+) -> Result<SkillAdaptDto, String> {
+    let store = SkillStore::default_paths()?;
+    let skills = store.read();
+    let skill = skills
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| format!("技能不存在: {id}"))?;
+    let md_path = store.skill_dir(&skill.name).join("SKILL.md");
+    let current =
+        fs::read_to_string(&md_path).map_err(|e| format!("读取 SKILL.md 失败: {e}"))?;
+    // 与「◈ 融合进任务书」同口径：超长中段挖空截 24KB，profile 走设置页 distill 功能键
+    let prompt = build_adapt_prompt(
+        &skill.name,
+        &crate::ai::cap_text_middle(&current, 24 * 1024),
+    );
+    let ai_out = crate::ai::ai_prompt_impl(profiles, None, Some(crate::ai::FN_DISTILL), prompt)?;
+    let redacted = crate::handoff::redact_and_cap(&ai_out);
+    let text = strip_code_fence(redacted.trim());
+    if text.is_empty() {
+        return Err("AI 没有产出适配稿，请重试".into());
+    }
+    Ok(SkillAdaptDto {
+        name: skill.name.clone(),
+        content: text.to_string(),
+    })
+}
+
+/// 「◈ 适配到流水线」第一阶段：AI 按流水线路径约定改写 SKILL.md（不写盘，前端预览/编辑后确认）
+#[tauri::command]
+pub async fn adapt_skill_to_pipeline(
+    store: tauri::State<'_, crate::profiles::ProfileStore>,
+    id: String,
+) -> Result<SkillAdaptDto, String> {
+    let profiles = store.list()?;
+    tauri::async_runtime::spawn_blocking(move || adapt_skill_to_pipeline_impl(profiles, &id))
+        .await
+        .map_err(|e| format!("适配到流水线失败: {e}"))?
+}
+
+/// 整份 SKILL.md 落盘（适配稿确认用）：frontmatter 由后端重新解析组装——
+/// name 强制沿用库中条目（目录名不可改），description/inputs/outputs 取稿件解析值，
+/// 正文取 frontmatter 之后的部分；写路径复用 update_content_impl（备份/回滚同口径）
+#[tauri::command]
+pub async fn write_skill_md(name: String, full_text: String) -> Result<(), String> {
+    let store = SkillStore::default_paths()?;
+    let mut skills = store.read();
+    let parsed = parse_skill_md_text(&full_text);
+    let body = skill_md_body(&full_text);
+    if body.trim().is_empty() {
+        return Err("SKILL.md 正文为空，未写入".into());
+    }
+    update_content_impl(
+        &store,
+        &mut skills,
+        name.trim(),
+        body,
+        parsed.description,
+        Some((parsed.inputs, parsed.outputs)),
+    )
 }
 
 #[tauri::command]
@@ -1981,7 +2273,7 @@ mod tests {
         );
         let saved = fx.store.read();
         let s = saved.iter().find(|s| s.name == first).unwrap();
-        let (_, seed_desc, _) = parse_skill_md(&md);
+        let seed_desc = parse_skill_md(&md).description;
         assert_eq!(s.description, seed_desc.unwrap_or_default(), "描述同步为新版");
         assert_ne!(s.description, "旧描述");
         // 追平后检测归零
@@ -2081,13 +2373,19 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let f = dir.join("SKILL.md");
         fs::write(&f, "\u{feff}---\r\nname: pdf\r\ndescription: 处理 PDF 文件\r\nextra: ignored\r\n---\r\n# body\r\n").unwrap();
-        let (name, desc, _) = parse_skill_md(&f);
-        assert_eq!(name.as_deref(), Some("pdf"));
-        assert_eq!(desc.as_deref(), Some("处理 PDF 文件"));
+        let parsed = parse_skill_md(&f);
+        assert_eq!(parsed.name.as_deref(), Some("pdf"));
+        assert_eq!(parsed.description.as_deref(), Some("处理 PDF 文件"));
         fs::write(&f, "---\nname: only-name\n---\n").unwrap();
-        assert_eq!(parse_skill_md(&f), (Some("only-name".into()), None, Vec::new()));
+        assert_eq!(
+            parse_skill_md(&f),
+            SkillFrontmatter {
+                name: Some("only-name".into()),
+                ..Default::default()
+            }
+        );
         fs::write(&f, "# 没有 frontmatter\n").unwrap();
-        assert_eq!(parse_skill_md(&f), (None, None, Vec::new()));
+        assert_eq!(parse_skill_md(&f), SkillFrontmatter::default());
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -2122,27 +2420,206 @@ mod tests {
             "---\nname: s\noutputs: [papers/, references.bib]\n---\n# body\n",
         )
         .unwrap();
-        let (_, _, outputs) = parse_skill_md(&f);
-        assert_eq!(outputs, vec!["papers/".to_string(), "references.bib".to_string()]);
+        assert_eq!(
+            parse_skill_md(&f).outputs,
+            vec!["papers/".to_string(), "references.bib".to_string()]
+        );
         // 多行列表写法（允许缩进与引号）
         fs::write(
             &f,
             "---\nname: s\noutputs:\n  - notes/\n  - \"notes/inbox.md\"\ndescription: d\n---\n",
         )
         .unwrap();
-        let (_, desc, outputs) = parse_skill_md(&f);
-        assert_eq!(outputs, vec!["notes/".to_string(), "notes/inbox.md".to_string()]);
-        assert_eq!(desc.as_deref(), Some("d"), "列表结束后其他字段照常解析");
+        let parsed = parse_skill_md(&f);
+        assert_eq!(
+            parsed.outputs,
+            vec!["notes/".to_string(), "notes/inbox.md".to_string()]
+        );
+        assert_eq!(parsed.description.as_deref(), Some("d"), "列表结束后其他字段照常解析");
+        // inputs 同样支持多行列表写法
+        fs::write(
+            &f,
+            "---\nname: s\ninputs:\n  - papers/included.md\n  - references.bib\n---\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_skill_md(&f).inputs,
+            vec!["papers/included.md".to_string(), "references.bib".to_string()]
+        );
         // 裸标量写法容忍为单条
         fs::write(&f, "---\nname: s\noutputs: outline.md\n---\n").unwrap();
-        assert_eq!(parse_skill_md(&f).2, vec!["outline.md".to_string()]);
+        assert_eq!(parse_skill_md(&f).outputs, vec!["outline.md".to_string()]);
         // 缺字段 = 空数组
         fs::write(&f, "---\nname: s\ndescription: d\n---\n").unwrap();
-        assert!(parse_skill_md(&f).2.is_empty());
+        assert!(parse_skill_md(&f).outputs.is_empty());
         // 空行内列表 = 空数组
         fs::write(&f, "---\nname: s\noutputs: []\n---\n").unwrap();
-        assert!(parse_skill_md(&f).2.is_empty());
+        assert!(parse_skill_md(&f).outputs.is_empty());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn skill_md_body_splits_frontmatter_exactly() {
+        assert_eq!(skill_md_body("---\nname: s\n---\n正文\n"), "正文\n");
+        // CRLF 不错位
+        assert_eq!(skill_md_body("---\r\nname: s\r\n---\r\n正文\r\n"), "正文\r\n");
+        // 无 frontmatter / 未闭合：按全文对待
+        assert_eq!(skill_md_body("# 直接正文\n"), "# 直接正文\n");
+        assert_eq!(skill_md_body("---\nname: s\n没闭合"), "---\nname: s\n没闭合");
+    }
+
+    #[test]
+    fn infer_interface_classifies_paths_by_verb() {
+        let (inputs, outputs) = infer_interface_from_body(
+            "先读取 papers/included.md 与 references.bib，对照 notes/ 下的笔记。\n\
+             筛选结果写入 papers/screening.md，并保存到 papers/included.md。\n\
+             详细说明见 https://example.com/docs/x.md。\n\
+             读取 papers/a.md 并写入 papers/b.md（双侧动词，不猜）。\n\
+             参考文献用 bib 格式（无路径 token，不猜）。",
+        );
+        assert_eq!(
+            inputs,
+            vec![
+                "papers/included.md".to_string(),
+                "references.bib".to_string(),
+                "notes/".to_string()
+            ]
+        );
+        assert_eq!(
+            outputs,
+            vec!["papers/screening.md".to_string(), "papers/included.md".to_string()]
+        );
+        // URL、双侧动词行、无路径行都不进结果
+        assert!(!inputs.iter().chain(outputs.iter()).any(|p| p.contains("http")));
+        assert!(!inputs.iter().chain(outputs.iter()).any(|p| p.contains("a.md")));
+    }
+
+    #[test]
+    fn infer_interface_tolerates_unspaced_cjk_and_caps() {
+        // 无空格连写 + 反引号包裹都能认出；每侧最多 8 条防噪
+        let (inputs, outputs) = infer_interface_from_body(
+            "将结果写入papers/screening.md。\n把笔记追加到`notes/inbox.md`尾部。",
+        );
+        assert!(inputs.is_empty());
+        assert_eq!(
+            outputs,
+            vec!["papers/screening.md".to_string(), "notes/inbox.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn list_skills_infers_interface_when_frontmatter_silent() {
+        let fx = Fx::new();
+        fx.add_lib_skill("external", "外部技能");
+        fs::write(
+            fx.store.skill_dir("external").join("SKILL.md"),
+            "---\nname: external\n---\n读取 references.bib 后开始。\n产出 outline.md 即完成。\n",
+        )
+        .unwrap();
+        let skills = list_skills_impl(&fx.store, &HashMap::new());
+        let s = skills.iter().find(|s| s.name == "external").unwrap();
+        assert_eq!(s.inputs, vec!["references.bib".to_string()]);
+        assert_eq!(s.outputs, vec!["outline.md".to_string()]);
+        assert!(s.interface_inferred, "推断兜底必须打标");
+        // frontmatter 有声明时不走推断、不打标
+        fx.add_lib_skill("declared", "有声明");
+        fs::write(
+            fx.store.skill_dir("declared").join("SKILL.md"),
+            "---\nname: declared\noutputs: [x.md]\n---\n读取 references.bib。\n",
+        )
+        .unwrap();
+        let skills = list_skills_impl(&fx.store, &HashMap::new());
+        let s = skills.iter().find(|s| s.name == "declared").unwrap();
+        assert_eq!(s.outputs, vec!["x.md".to_string()]);
+        assert!(s.inputs.is_empty());
+        assert!(!s.interface_inferred);
+    }
+
+    #[test]
+    fn compose_skill_md_writes_interface_lists() {
+        let text = compose_skill_md(
+            "s",
+            "描述",
+            "正文",
+            &["papers/".to_string()],
+            &["notes/inbox.md".to_string()],
+        );
+        assert!(text.contains("inputs:\n  - papers/\n"));
+        assert!(text.contains("outputs:\n  - notes/inbox.md\n"));
+        // 往返一致：写出来的 frontmatter 能被解析回同样的接口
+        let parsed = parse_skill_md_text(&text);
+        assert_eq!(parsed.inputs, vec!["papers/".to_string()]);
+        assert_eq!(parsed.outputs, vec!["notes/inbox.md".to_string()]);
+        // 空接口不写键（保持既有格式不变）
+        let plain = compose_skill_md("s", "描述", "正文", &[], &[]);
+        assert!(!plain.contains("inputs:") && !plain.contains("outputs:"));
+    }
+
+    #[test]
+    fn strip_code_fence_unwraps_fenced_output() {
+        assert_eq!(
+            strip_code_fence("```markdown\n---\nname: s\n---\n正文\n```"),
+            "---\nname: s\n---\n正文"
+        );
+        assert_eq!(strip_code_fence("---\nname: s\n---\n正文"), "---\nname: s\n---\n正文");
+    }
+
+    #[test]
+    fn build_adapt_prompt_carries_conventions_and_skill() {
+        let prompt = build_adapt_prompt("my-skill", "---\nname: my-skill\n---\n正文");
+        assert!(prompt.contains("papers/"), "规范路径表必须在 prompt 里");
+        assert!(prompt.contains("screening.md"));
+        assert!(prompt.contains("references.bib"));
+        assert!(prompt.contains("【当前 SKILL.md】\n---\nname: my-skill\n---\n正文"));
+        assert!(prompt.contains("inputs:"), "必须要求补写接口声明");
+    }
+
+    #[test]
+    fn write_skill_md_rewrites_interface_and_preserves_name() {
+        let fx = Fx::new();
+        fx.add_lib_skill("ext", "旧描述");
+        let mut skills = fx.store.read();
+        // 适配稿：name 字段被篡改也不生效（目录名不可改），description/inputs/outputs 取稿件
+        let full = "---\nname: hacked\ndescription: 新描述\ninputs:\n  - papers/included.md\noutputs:\n  - notes/\n---\n新正文\n";
+        let parsed = parse_skill_md_text(full);
+        update_content_impl(
+            &fx.store,
+            &mut skills,
+            "ext",
+            skill_md_body(full),
+            parsed.description,
+            Some((parsed.inputs, parsed.outputs)),
+        )
+        .unwrap();
+        let written =
+            fs::read_to_string(fx.store.skill_dir("ext").join("SKILL.md")).unwrap();
+        let parsed = parse_skill_md_text(&written);
+        assert!(written.contains("name: ext"), "name 强制沿用库中条目");
+        assert!(!written.contains("hacked"));
+        assert_eq!(parsed.description.as_deref(), Some("新描述"));
+        assert_eq!(parsed.inputs, vec!["papers/included.md".to_string()]);
+        assert_eq!(parsed.outputs, vec!["notes/".to_string()]);
+        assert_eq!(skill_md_body(&written).trim(), "新正文");
+    }
+
+    #[test]
+    fn update_content_preserves_declared_interface_by_default() {
+        let fx = Fx::new();
+        fx.add_lib_skill("ext", "带接口");
+        fs::write(
+            fx.store.skill_dir("ext").join("SKILL.md"),
+            "---\nname: ext\ndescription: 带接口\ninputs: [papers/]\noutputs: [notes/]\n---\n旧正文\n",
+        )
+        .unwrap();
+        let mut skills = fx.store.read();
+        // 普通编辑（interface = None）：frontmatter 接口声明必须保留，不被静默丢弃
+        update_content_impl(&fx.store, &mut skills, "ext", "新正文", None, None).unwrap();
+        let written =
+            fs::read_to_string(fx.store.skill_dir("ext").join("SKILL.md")).unwrap();
+        let parsed = parse_skill_md_text(&written);
+        assert_eq!(parsed.inputs, vec!["papers/".to_string()]);
+        assert_eq!(parsed.outputs, vec!["notes/".to_string()]);
+        assert_eq!(skill_md_body(&written).trim(), "新正文");
     }
 
     #[test]
@@ -2297,7 +2774,7 @@ mod tests {
         // SKILL.md 之外的辅助文件（模板等）编辑后必须保留
         fs::write(fx.store.skill_dir("pdf").join("template.txt"), "模板内容").unwrap();
         let mut skills = fx.store.read();
-        update_content_impl(&fx.store, &mut skills, "pdf", "新正文", Some("新描述".into())).unwrap();
+        update_content_impl(&fx.store, &mut skills, "pdf", "新正文", Some("新描述".into()), None).unwrap();
         let dir = fx.store.skill_dir("pdf");
         assert!(fs::read_to_string(dir.join("SKILL.md")).unwrap().contains("新正文"));
         assert_eq!(
@@ -2320,9 +2797,9 @@ mod tests {
         assert!(backup.join("template.txt").exists());
         // description 缺省 = 保留原描述；不存在的技能报错
         let mut skills = fx.store.read();
-        update_content_impl(&fx.store, &mut skills, "pdf", "第三版", None).unwrap();
+        update_content_impl(&fx.store, &mut skills, "pdf", "第三版", None, None).unwrap();
         assert_eq!(fx.store.read()[0].description, "新描述");
-        let err = update_content_impl(&fx.store, &mut skills, "ghost", "x", None).unwrap_err();
+        let err = update_content_impl(&fx.store, &mut skills, "ghost", "x", None, None).unwrap_err();
         assert!(err.contains("不存在"), "{err}");
     }
 

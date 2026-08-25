@@ -1,6 +1,8 @@
 /** MCP 页展示纯逻辑：协议徽章固定识别色 + 命令/路径智能缩略。
- *  颜色固定 hex（同 file-icons / agent-colors 先例：识别色不随主题换色相），
- *  底色走 color-mix 10% 混合，深浅主题自动跟随。 */
+ *  色相固定 hex（同 file-icons / agent-colors 先例：识别色不随主题换色相），
+ *  底色走 color-mix 10% 混合，深浅主题自动跟随；
+ *  文字色向主题主文本色 var(--color-l1) 混 30%——浅色主题压深、深色主题提亮，
+ *  对比度自适应（2026-08-25 设计评审：原色在米白底上偏淡）。 */
 
 /** 协议类型徽章：stdio 紫 / remote 蓝（传输层架构一眼可辨） */
 export function mcpKindBadgeStyle(kind: string): {
@@ -9,7 +11,7 @@ export function mcpKindBadgeStyle(kind: string): {
 } {
   const c = kind === "remote" ? "#4f8ef7" : "#9a6ef3";
   return {
-    color: c,
+    color: `color-mix(in srgb, ${c} 70%, var(--color-l1))`,
     background: `color-mix(in srgb, ${c} 10%, transparent)`,
   };
 }

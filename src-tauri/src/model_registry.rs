@@ -21,15 +21,18 @@ pub struct ModelCapabilityDto {
     pub streaming: Option<bool>,
 }
 
-/// 单条能力：thinking = 支持思考档位；context = 上下文窗口（None = 走保守默认映射）
+/// 单条能力：thinking = 支持思考档位；context = 上下文窗口、output = 输出上限
+/// （None = 走保守默认）。output 只为 opencode 的 limit.output 服务（1.18 起 schema 必填），
+/// 内置表不逐模型收（宁缺毋滥同 context 口径），覆盖文件可配，缺省落 DEFAULT_OUTPUT_LIMIT
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelCaps {
     pub thinking: bool,
     pub context: Option<i64>,
+    pub output: Option<i64>,
 }
 
 const fn caps(thinking: bool, context: Option<i64>) -> ModelCaps {
-    ModelCaps { thinking, context }
+    ModelCaps { thinking, context, output: None }
 }
 
 /// 内置前缀表（最长前缀匹配：kimi-k2-thinking 优先于 kimi-k2）。
@@ -80,7 +83,7 @@ const BUILTIN_CAPS: &[(&str, ModelCaps)] = &[
 ];
 
 /// 覆盖文件：<config>/ccode/model-capabilities.json
-/// 格式：{"模型前缀": {"thinking": true, "context": 262144}}（两个字段都可选）
+/// 格式：{"模型前缀": {"thinking": true, "context": 262144, "output": 8192}}（三个字段都可选）
 fn override_path() -> Option<PathBuf> {
     Some(
         dirs::config_dir()?
@@ -107,12 +110,14 @@ fn load_override() -> Vec<(String, ModelCaps)> {
             let Some(c) = caps_v.as_object() else { continue };
             let thinking = c.get("thinking").and_then(|b| b.as_bool());
             let context = c.get("context").and_then(|n| n.as_i64()).filter(|n| *n > 0);
+            let output = c.get("output").and_then(|n| n.as_i64()).filter(|n| *n > 0);
             // 至少一个字段有效才算条目；thinking 缺省按 false（显式关思考也是合法覆盖）
             out.push((
                 prefix.to_lowercase(),
                 ModelCaps {
                     thinking: thinking.unwrap_or(false),
                     context,
+                    output,
                 },
             ));
         }
@@ -188,6 +193,17 @@ pub fn model_context_size(model: &str) -> i64 {
     lookup(model)
         .and_then(|c| c.context)
         .unwrap_or_else(|| fallback_context_size(model))
+}
+
+/// 输出上限兜底：models.dev 上多数 chat 模型的常见值，保守不越界
+/// （opencode 拿 limit.output 当 max output tokens 用，宁小勿大）
+const DEFAULT_OUTPUT_LIMIT: i64 = 8192;
+
+/// 模型输出上限：注册表（覆盖文件 > 内置表）→ 保守默认
+pub fn model_output_limit(model: &str) -> i64 {
+    lookup(model)
+        .and_then(|c| c.output)
+        .unwrap_or(DEFAULT_OUTPUT_LIMIT)
 }
 
 pub fn model_capability(model: &str) -> ModelCapabilityDto {
@@ -274,6 +290,14 @@ mod tests {
         // kimi-k2-thinking 必须命中 thinking 条目，而不是被 kimi-k2（无思考）截胡
         assert!(model_thinking("kimi-k2-thinking"));
         assert!(!model_thinking("kimi-k2-0905-preview"));
+    }
+
+    #[test]
+    fn output_limit_falls_back_to_conservative_default() {
+        // 内置表不收 output（None）→ 一律落 8192 保守默认；覆盖文件可逐前缀配
+        assert_eq!(model_output_limit("kimi-k3"), 8192);
+        assert_eq!(model_output_limit("gpt-5"), 8192);
+        assert_eq!(model_output_limit("some-relay/unknown-model"), 8192);
     }
 
     #[test]

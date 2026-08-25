@@ -26,17 +26,21 @@ pub const FN_TRANSLATE: &str = "translate";
 
 /// 显式 id 优先；其次该功能的专属 profile（ai_profiles[fn_key]）；再次设置页 AI 专用 profile；
 /// 最后最近使用（last_used_at 最新）；一个都没有才报错。
-/// 功能专属 id 已失效（被删）视为不存在继续回落；显式/全局专用 id 失效仍明确报错
+/// 功能专属 id 已失效（被删）视为不存在继续回落；显式/全局专用 id 失效仍明确报错。
+/// 软停用（settings.hidden_profiles）只作用于「最近使用」这一自动回落槽：停用项被跳过，
+/// 全部被停用时回落含停用项（好过报错哑掉）；显式/专属/专用槽是用户显式绑定，照常尊重
 pub(crate) fn resolve_profile_from(
     profiles: Vec<Profile>,
     profile_id: Option<String>,
     fn_profile_id: Option<String>,
     dedicated_id: Option<String>,
+    hidden_ids: &std::collections::HashSet<String>,
 ) -> Result<Profile, String> {
     if let Some(id) = profile_id.filter(|v| !v.trim().is_empty()) {
         return profiles
-            .into_iter()
+            .iter()
             .find(|p| p.id == id)
+            .cloned()
             .ok_or_else(|| format!("profile 不存在: {id}"));
     }
     if let Some(id) = fn_profile_id.filter(|v| !v.trim().is_empty()) {
@@ -46,13 +50,17 @@ pub(crate) fn resolve_profile_from(
     }
     if let Some(id) = dedicated_id.filter(|v| !v.trim().is_empty()) {
         return profiles
-            .into_iter()
+            .iter()
             .find(|p| p.id == id)
+            .cloned()
             .ok_or_else(|| format!("profile 不存在: {id}（如来自设置页的 AI 专用配置，请到设置页重选）"));
     }
     profiles
-        .into_iter()
+        .iter()
+        .filter(|p| !hidden_ids.contains(&p.id))
         .max_by(|a, b| a.last_used_at.cmp(&b.last_used_at))
+        .or_else(|| profiles.iter().max_by(|a, b| a.last_used_at.cmp(&b.last_used_at)))
+        .cloned()
         .ok_or_else(|| "请先在配置页创建并保存一个 profile".to_string())
 }
 
@@ -177,7 +185,17 @@ pub(crate) fn ai_prompt_impl(
             .as_ref()
             .and_then(|m| m.get(k).cloned())
     });
-    let profile = resolve_profile_from(profiles, profile_id, fn_profile, settings.ai_profile_id)?;
+    let profile = resolve_profile_from(
+        profiles,
+        profile_id,
+        fn_profile,
+        settings.ai_profile_id,
+        &settings
+            .hidden_profiles
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+    )?;
     let binary = agents::binary_for(&profile.agent)
         .ok_or_else(|| format!("profile 所属 agent 不支持无头调用: {}", profile.agent))?;
     let binary_path = agents::resolve_binary(binary)
@@ -802,20 +820,21 @@ mod tests {
             profile("b", "claude-code", Some("2026-07-30T00:00:00Z")),
             profile("c", "gemini", None),
         ];
+        let no_hidden = &Default::default();
         // 显式 id 优先
-        let p = resolve_profile_from(profiles.clone(), Some("a".into()), None, None).unwrap();
+        let p = resolve_profile_from(profiles.clone(), Some("a".into()), None, None, no_hidden).unwrap();
         assert_eq!(p.id, "a");
         // 否则 last_used_at 最新者；None 排最后
-        let p = resolve_profile_from(profiles.clone(), None, None, None).unwrap();
+        let p = resolve_profile_from(profiles.clone(), None, None, None, no_hidden).unwrap();
         assert_eq!(p.id, "b");
         // 全都没用过：取其一（max_by 的稳定首个），不报错
         let fresh = vec![profile("x", "codex", None), profile("y", "gemini", None)];
-        assert!(resolve_profile_from(fresh, None, None, None).is_ok());
+        assert!(resolve_profile_from(fresh, None, None, None, no_hidden).is_ok());
         // 空列表报错
-        let err = resolve_profile_from(vec![], None, None, None).unwrap_err();
+        let err = resolve_profile_from(vec![], None, None, None, no_hidden).unwrap_err();
         assert!(err.contains("请先在配置页创建并保存一个 profile"), "{err}");
         // 不存在的 id 报错
-        assert!(resolve_profile_from(profiles, Some("zzz".into()), None, None).is_err());
+        assert!(resolve_profile_from(profiles, Some("zzz".into()), None, None, no_hidden).is_err());
     }
 
     #[test]
@@ -824,14 +843,15 @@ mod tests {
             profile("a", "codex", Some("2026-07-01T00:00:00Z")),
             profile("b", "claude-code", Some("2026-07-30T00:00:00Z")),
         ];
+        let no_hidden = &Default::default();
         // 设置页专用 profile 盖过最近使用
-        let p = resolve_profile_from(profiles.clone(), None, None, Some("a".into())).unwrap();
+        let p = resolve_profile_from(profiles.clone(), None, None, Some("a".into()), no_hidden).unwrap();
         assert_eq!(p.id, "a");
         // 显式 id 仍最优先
-        let p = resolve_profile_from(profiles.clone(), Some("b".into()), None, Some("a".into())).unwrap();
+        let p = resolve_profile_from(profiles.clone(), Some("b".into()), None, Some("a".into()), no_hidden).unwrap();
         assert_eq!(p.id, "b");
         // 专用 id 已被删除：明确报错（提示去设置页重选），不静默回落
-        let err = resolve_profile_from(profiles, None, None, Some("gone".into())).unwrap_err();
+        let err = resolve_profile_from(profiles, None, None, Some("gone".into()), no_hidden).unwrap_err();
         assert!(err.contains("profile 不存在"), "{err}");
     }
 
@@ -841,17 +861,40 @@ mod tests {
             profile("a", "codex", Some("2026-07-01T00:00:00Z")),
             profile("b", "claude-code", Some("2026-07-30T00:00:00Z")),
         ];
+        let no_hidden = &Default::default();
         // 功能专属盖过全局专用
-        let p = resolve_profile_from(profiles.clone(), None, Some("b".into()), Some("a".into())).unwrap();
+        let p = resolve_profile_from(profiles.clone(), None, Some("b".into()), Some("a".into()), no_hidden).unwrap();
         assert_eq!(p.id, "b");
         // 显式 id 仍最优先
-        let p = resolve_profile_from(profiles.clone(), Some("a".into()), Some("b".into()), None).unwrap();
+        let p = resolve_profile_from(profiles.clone(), Some("a".into()), Some("b".into()), None, no_hidden).unwrap();
         assert_eq!(p.id, "a");
         // 功能专属 id 已失效（被删）：视为不存在，回落全局专用
-        let p = resolve_profile_from(profiles.clone(), None, Some("gone".into()), Some("a".into())).unwrap();
+        let p = resolve_profile_from(profiles.clone(), None, Some("gone".into()), Some("a".into()), no_hidden).unwrap();
         assert_eq!(p.id, "a");
         // 功能专属与全局都失效：继续回落最近使用（不报错）
-        let p = resolve_profile_from(profiles, None, Some("gone".into()), None).unwrap();
+        let p = resolve_profile_from(profiles, None, Some("gone".into()), None, no_hidden).unwrap();
+        assert_eq!(p.id, "b");
+    }
+
+    #[test]
+    fn profile_resolution_hidden_skipped_in_last_used_fallback() {
+        let profiles = vec![
+            profile("a", "codex", Some("2026-07-01T00:00:00Z")),
+            profile("b", "claude-code", Some("2026-07-30T00:00:00Z")),
+        ];
+        let hidden: std::collections::HashSet<String> = ["b".to_string()].into_iter().collect();
+        // 软停用只作用于「最近使用」自动回落：b 更新但被停用 → 挑 a
+        let p = resolve_profile_from(profiles.clone(), None, None, None, &hidden).unwrap();
+        assert_eq!(p.id, "a");
+        // 显式/专属槽是用户显式绑定，停用项照常尊重
+        let p = resolve_profile_from(profiles.clone(), Some("b".into()), None, None, &hidden).unwrap();
+        assert_eq!(p.id, "b");
+        let p = resolve_profile_from(profiles.clone(), None, Some("b".into()), None, &hidden).unwrap();
+        assert_eq!(p.id, "b");
+        // 全部被停用：回落含停用项，不报错哑掉
+        let all_hidden: std::collections::HashSet<String> =
+            ["a".to_string(), "b".to_string()].into_iter().collect();
+        let p = resolve_profile_from(profiles, None, None, None, &all_hidden).unwrap();
         assert_eq!(p.id, "b");
     }
 

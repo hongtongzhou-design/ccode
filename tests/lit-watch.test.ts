@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  entryPassesFilter,
   filterLitDismissed,
   fulltextLinkFor,
   groupEntriesByDay,
@@ -8,6 +9,9 @@ import {
   includedLineFor,
   isRead,
   litInboxCandidates,
+  litWatchFilterActive,
+  litWatchFilterLabel,
+  metricsTooltip,
   normalizeTitle,
   paperResourceFor,
   pdfUrlFor,
@@ -423,4 +427,93 @@ test("fulltextLinkFor：全文可得性分流", () => {
   // 空串 / 无链接 → none
   assert.equal(fulltextLinkFor("").kind, "none");
   assert.equal(fulltextLinkFor("   ").kind, "none");
+});
+
+test("metricsTooltip：刊数 + 下载时间 + 上游新版提示", () => {
+  const rel = (iso: string | null) => (iso ? `<${iso}>` : "");
+  const status = { journalCount: 20000, downloadedAt: "2025-06-20" };
+  // 常规：带下载时间 + 更新口径说明
+  assert.equal(
+    metricsTooltip(status, null, rel),
+    "JCR2025 + 中科院分区表 2025 · 20000 种期刊 · 下载于 <2025-06-20>；出新版时点我重新下载即更新",
+  );
+  // 查过上游但无新版：同口径
+  assert.equal(
+    metricsTooltip(
+      status,
+      { upstreamUpdatedAt: "2025-06-01", hasUpdate: false },
+      rel,
+    ),
+    "JCR2025 + 中科院分区表 2025 · 20000 种期刊 · 下载于 <2025-06-20>；出新版时点我重新下载即更新",
+  );
+  // 有新版：改口「点我更新」并带上游时间
+  assert.equal(
+    metricsTooltip(
+      status,
+      { upstreamUpdatedAt: "2025-07-01", hasUpdate: true },
+      rel,
+    ),
+    "JCR2025 + 中科院分区表 2025 · 20000 种期刊 · 下载于 <2025-06-20>；上游已有新版（<2025-07-01>），点我更新",
+  );
+  // 下载时间缺失（异常态）不拼「下载于」
+  assert.equal(
+    metricsTooltip({ journalCount: 5, downloadedAt: null }, null, rel),
+    "JCR2025 + 中科院分区表 2025 · 5 种期刊；出新版时点我重新下载即更新",
+  );
+  // 有新版但上游时间缺失：不给空括号
+  assert.equal(
+    metricsTooltip(status, { upstreamUpdatedAt: null, hasUpdate: true }, rel),
+    "JCR2025 + 中科院分区表 2025 · 20000 种期刊 · 下载于 <2025-06-20>；上游已有新版，点我更新",
+  );
+});
+
+test("雷达筛选：active 判定 / 条目过滤 / 摘要文案（与 Rust 同口径）", () => {
+  // active：全空 / null = 不筛选
+  assert.equal(litWatchFilterActive(null), false);
+  assert.equal(litWatchFilterActive({}), false);
+  assert.equal(litWatchFilterActive({ topOnly: false }), false);
+  assert.equal(litWatchFilterActive({ minIf: 10 }), true);
+  assert.equal(litWatchFilterActive({ maxCasQuartile: 2 }), true);
+  assert.equal(litWatchFilterActive({ topOnly: true }), true);
+
+  // 指标未知一律放行不误伤
+  assert.equal(entryPassesFilter(null, { minIf: 10, topOnly: true }), true);
+  const met = (
+    impactFactor: string | null,
+    casQuartile: number | null,
+    top: boolean,
+  ): WatchEntryDto["metrics"] => ({ impactFactor, casQuartile, top });
+
+  // IF 门槛：低于阈值排除；恰好等于通过；缺失/不可解析放行
+  assert.equal(entryPassesFilter(met("3.9", 3, false), { minIf: 10 }), false);
+  assert.equal(entryPassesFilter(met("29.1", 3, false), { minIf: 10 }), true);
+  assert.equal(entryPassesFilter(met("10", 3, false), { minIf: 10 }), true);
+  assert.equal(entryPassesFilter(met(null, 3, false), { minIf: 10 }), true);
+  assert.equal(entryPassesFilter(met("N/A", 3, false), { minIf: 10 }), true);
+
+  // 分区：超过 N 区排除；未知放行
+  assert.equal(entryPassesFilter(met(null, 3, false), { maxCasQuartile: 2 }), false);
+  assert.equal(entryPassesFilter(met(null, 1, false), { maxCasQuartile: 2 }), true);
+  assert.equal(entryPassesFilter(met(null, null, false), { maxCasQuartile: 2 }), true);
+
+  // TOP：已知非 TOP 排除；未知放行；条件之间是「且」
+  assert.equal(entryPassesFilter(met(null, null, false), { topOnly: true }), false);
+  assert.equal(entryPassesFilter(met(null, null, true), { topOnly: true }), true);
+  assert.equal(
+    entryPassesFilter(met("19.9", 1, true), { minIf: 10, maxCasQuartile: 2, topOnly: true }),
+    true,
+  );
+  assert.equal(
+    entryPassesFilter(met("19.9", 3, true), { minIf: 10, maxCasQuartile: 2, topOnly: true }),
+    false,
+  );
+
+  // 摘要文案
+  assert.equal(litWatchFilterLabel(null), "");
+  assert.equal(litWatchFilterLabel({ minIf: 10 }), "IF≥10");
+  assert.equal(litWatchFilterLabel({ maxCasQuartile: 1 }), "仅 1 区");
+  assert.equal(
+    litWatchFilterLabel({ minIf: 10, maxCasQuartile: 2, topOnly: true }),
+    "IF≥10 · 2 区及以上 · 仅 TOP",
+  );
 });

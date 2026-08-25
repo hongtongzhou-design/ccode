@@ -24,6 +24,11 @@ import {
 } from "../components/PageFrame";
 import { MCP_PRESETS, type McpPreset } from "../mcp-presets";
 
+/** MCP 列表五列网格模板（表头与数据行共用，保证列严格对齐）：
+ *  名称 | 类型 | 配置 | 分发 | 行内操作+启用开关（2026-08-25 设计评审：宽屏下左右信息不再跨整页） */
+const MCP_GRID =
+  "grid-cols-[minmax(150px,1.1fr)_64px_minmax(200px,1.4fr)_96px_140px]";
+
 /** 行首健康状态点（v3.93）：未检测不渲染（无状态不渲染状态点）；检测过 = 绿/红点 + 延迟，
  *  悬浮看 detail/error 全文，点击重新检测。↯ 行内测试与这里是同一触发 */
 function HealthDot({
@@ -533,8 +538,9 @@ export default function McpPage({ visible }: { visible: boolean }) {
     Object.values(s.apps).some(Boolean),
   ).length;
 
+  // 限宽 1080（原 fluid 满宽：宽屏下名称与开关分列两端、视线对不齐——2026-08-25 设计评审）
   return (
-    <PageFrame width="fluid">
+    <PageFrame width="settings">
       <PageHeader
         title="MCP"
         meta={`${servers.length} 个 MCP · 已分发 ${distributed}`}
@@ -586,22 +592,35 @@ export default function McpPage({ visible }: { visible: boolean }) {
           detail="点右上「+ 添加 MCP」创建。"
         />
       ) : (
-        <div className="space-y-1 py-1">
+        // 整表收进单张卡片容器（field 细边 + strip 底）+ 轻量表头：数据再少也有闭合边界，
+        // 行间 hairline 分割；表头与数据行共用 MCP_GRID 保证列严格对齐
+        <div className="mt-1 overflow-hidden rounded-md border border-field bg-strip">
+          <div
+            className={`grid ${MCP_GRID} items-center gap-3 border-b border-hairline px-3 py-2 text-micro tracking-wider text-l4`}
+          >
+            <span>名称</span>
+            <span>类型</span>
+            <span>配置</span>
+            <span>分发</span>
+            <span className="text-right">启用</span>
+          </div>
+          <ul className="divide-y divide-hairline">
           {servers.map((s) => {
             const onCount = Object.values(s.apps).filter(Boolean).length;
             const open = expanded === s.id;
             return (
-              <div
+              <li
                 key={s.id}
-                className="group rounded-md border border-transparent px-1 py-2 transition-colors hover:border-hairline hover:bg-hover"
+                className="group transition-colors hover:bg-hover/60"
               >
-                <div className="flex items-center gap-3 px-1">
+                <div className={`grid ${MCP_GRID} items-center gap-3 px-3 py-2`}>
                   <button
                     type="button"
-                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    className="flex min-w-0 items-center gap-2 text-left"
+                    title={open ? "收起" : "展开完整配置与分发管理"}
                     onClick={() => setExpanded(open ? null : s.id)}
                   >
-                    <span className="w-3 text-l4">{open ? "▾" : "▸"}</span>
+                    <span className="w-3 shrink-0 text-l4">{open ? "▾" : "▸"}</span>
                     <HealthDot
                       health={health[s.id]}
                       onCheck={() => void checkHealth(s)}
@@ -611,38 +630,40 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     >
                       {s.name}
                     </span>
-                    {/* 协议徽章固定识别色（stdio 紫 / remote 蓝，mcp-display.ts） */}
-                    <span
-                      className="shrink-0 rounded-sm px-1.5 py-0.5 font-mono text-micro"
-                      style={mcpKindBadgeStyle(s.kind)}
-                    >
-                      {s.kind}
-                    </span>
-                    {/* 命令智能缩略（~/…/尾段），完整命令悬浮给全文 */}
-                    <span
-                      className="min-w-0 truncate font-mono text-xs text-l4"
-                      title={
-                        s.kind === "stdio"
-                          ? `${s.command} ${s.args.join(" ")}`.trim()
-                          : s.url
-                      }
-                    >
-                      {s.kind === "stdio"
-                        ? shortenCommand(s.command, s.args)
-                        : s.url}
-                    </span>
                     {!s.enabled && (
                       <span className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-micro text-l4">
                         已停用
                       </span>
                     )}
                   </button>
+                  {/* 协议徽章固定识别色（stdio 紫 / remote 蓝，mcp-display.ts） */}
+                  <span>
+                    <span
+                      className="inline-block rounded-sm px-1.5 py-0.5 font-mono text-micro"
+                      style={mcpKindBadgeStyle(s.kind)}
+                    >
+                      {s.kind}
+                    </span>
+                  </span>
+                  {/* 命令智能缩略（~/…/尾段），完整命令悬浮给全文、展开面板也给全文 */}
+                  <span
+                    className="min-w-0 truncate font-mono text-xs text-l4"
+                    title={
+                      s.kind === "stdio"
+                        ? `${s.command} ${s.args.join(" ")}`.trim()
+                        : s.url
+                    }
+                  >
+                    {s.kind === "stdio"
+                      ? shortenCommand(s.command, s.args)
+                      : s.url}
+                  </span>
                   {/* 已分发列可点（v3.93）：点击展开/收起分发网格（勾选在展开区） */}
                   <button
                     type="button"
                     onClick={() => setExpanded(open ? null : s.id)}
                     title="展开分发管理"
-                    className={`flex shrink-0 items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-xs hover:bg-hover ${
+                    className={`flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-xs hover:bg-hover ${
                       onCount > 0 ? "text-l3" : "text-l4"
                     }`}
                   >
@@ -651,103 +672,136 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     )}
                     {onCount > 0 ? `已分发 ${onCount}` : "未分发"}
                   </button>
-                  {/* 行内悬浮操作（v3.93）：↯ 测试连通 / ✎ 编辑 / ✕ 删除。
-                      裸图标钮 hover 淡入，不套胶囊容器——raised 底 + 边框 + 投影的实体栏
-                      压在列表行上会层级脱节（2026-08-24 起技能页也统一为此口径） */}
-                  <div
-                    className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
-                  >
-                    <RowAction
-                      icon="↯"
-                      tip="测试连通性（stdio 拉起握手 / remote 探活）"
-                      label={`测试 ${s.name} 连通性`}
-                      onClick={() => void checkHealth(s)}
-                    />
-                    <RowAction
-                      icon="✎"
-                      tip="编辑"
-                      label={`编辑 ${s.name}`}
-                      onClick={() => setModal({ id: s.id, form: formFrom(s) })}
-                    />
-                    <RowAction
-                      icon="✕"
-                      tip="删除（同步从各 agent 配置移除）"
-                      label={`删除 ${s.name}`}
-                      onClick={() => void onDelete(s)}
-                    />
-                  </div>
-                  {/* 全局启用开关：停用不删配置，分发映射保留 */}
-                  <span
-                    title={
-                      s.enabled
-                        ? "停用：从各 agent 移除条目，分发映射保留"
-                        : "启用：按分发映射重新写入各 agent"
-                    }
-                  >
-                    <Toggle
-                      label={`${s.name} 启用开关`}
-                      checked={s.enabled}
-                      onChange={(v) => void setEnabled(s, v)}
-                    />
+                  <span className="flex items-center justify-end gap-1">
+                    {/* 行内悬浮操作（v3.93）：↯ 测试连通 / ✎ 编辑 / ✕ 删除。
+                        裸图标钮 hover 淡入，不套胶囊容器——实体栏压在列表行上层级脱节 */}
+                    <span
+                      className="flex items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+                    >
+                      <RowAction
+                        icon="↯"
+                        tip="测试连通性（stdio 拉起握手 / remote 探活）"
+                        label={`测试 ${s.name} 连通性`}
+                        onClick={() => void checkHealth(s)}
+                      />
+                      <RowAction
+                        icon="✎"
+                        tip="编辑"
+                        label={`编辑 ${s.name}`}
+                        onClick={() => setModal({ id: s.id, form: formFrom(s) })}
+                      />
+                      <RowAction
+                        icon="✕"
+                        tip="删除（同步从各 agent 配置移除）"
+                        label={`删除 ${s.name}`}
+                        onClick={() => void onDelete(s)}
+                      />
+                    </span>
+                    {/* 全局启用开关：停用不删配置，分发映射保留 */}
+                    <span
+                      title={
+                        s.enabled
+                          ? "停用：从各 agent 移除条目，分发映射保留"
+                          : "启用：按分发映射重新写入各 agent"
+                      }
+                    >
+                      <Toggle
+                        label={`${s.name} 启用开关`}
+                        checked={s.enabled}
+                        onChange={(v) => void setEnabled(s, v)}
+                      />
+                    </span>
                   </span>
                 </div>
                 {open && (
-                  <div className="mt-2 grid grid-cols-2 gap-1.5 px-1 pb-1 sm:grid-cols-4">
-                    {AGENTS.map((agent) => {
-                      const on = !!s.apps[agent.id];
-                      const key = `${s.id}:${agent.id}`;
-                      return (
+                  // 展开面板：浅底 + 细边 + 圆角的深层区，给嵌套内容（完整配置/变量/分发网格）
+                  // 一个明确的空间落点，不再直接摊在行下方
+                  <div className="px-3 pb-3">
+                    <div className="rounded-md border border-hairline bg-canvas p-2.5">
+                      <div className="break-all font-mono text-xs leading-5 text-l3">
+                        {s.kind === "stdio"
+                          ? `${s.command} ${s.args.join(" ")}`.trim()
+                          : s.url}
+                      </div>
+                      {s.env.length > 0 && (
                         <div
-                          key={agent.id}
-                          className="flex items-center justify-between gap-2 rounded-sm bg-inset px-2 py-1.5"
+                          className="mt-1 truncate font-mono text-micro text-l4"
+                          title={s.env
+                            .map((p) => `${p.key}=${p.value}`)
+                            .join("\n")}
                         >
-                          <span className="flex min-w-0 items-center gap-1 text-xs text-l3">
-                            {/* 分发三态（v3.88）：后端 entry_modified_externally 早有能力，
-                                此前只在删除/改投时用来拦「假状态」，界面上看不到——
-                                用户不知道自己在 agent 侧手改过的东西下次保存会被覆盖 */}
-                            {on && (
-                              <span
-                                className={`size-1.5 shrink-0 rounded-full ${
-                                  distStatus[s.id]?.[agent.id] === "modified"
-                                    ? "bg-warn-text"
-                                    : "bg-ok-text"
-                                }`}
-                                title={
-                                  distStatus[s.id]?.[agent.id] === "modified"
-                                    ? "已写入，但该 agent 侧的条目被外部改过——下次保存会按本清单覆盖"
-                                    : "已写入该 agent 的用户级配置"
-                                }
-                              />
-                            )}
-                            <span className="truncate">{agent.label}</span>
-                          </span>
-                          {caps[agent.id] && !caps[agent.id].mcpWrite.supported ? (
-                            <span
-                              className="text-xs text-l4"
-                              title={
-                                caps[agent.id].mcpWrite.reason ??
-                                "该 CLI 的 MCP 配置只读，暂不支持分发"
-                              }
-                            >
-                              只读
-                            </span>
-                          ) : (
-                            <Toggle
-                              label={agent.label}
-                              checked={on}
-                              onChange={(v) =>
-                                !applying[key] && void toggleApp(s, agent.id, v)
-                              }
-                            />
-                          )}
+                          环境变量：{s.env.map((p) => `${p.key}=${p.value}`).join("  ")}
                         </div>
-                      );
-                    })}
+                      )}
+                      {s.headers.length > 0 && (
+                        <div
+                          className="mt-1 truncate font-mono text-micro text-l4"
+                          title={s.headers
+                            .map((p) => `${p.key}=${p.value}`)
+                            .join("\n")}
+                        >
+                          请求头：{s.headers.map((p) => `${p.key}=${p.value}`).join("  ")}
+                        </div>
+                      )}
+                      <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                        {AGENTS.map((agent) => {
+                          const on = !!s.apps[agent.id];
+                          const key = `${s.id}:${agent.id}`;
+                          return (
+                            <div
+                              key={agent.id}
+                              className="flex items-center justify-between gap-2 rounded-sm bg-inset px-2 py-1.5"
+                            >
+                              <span className="flex min-w-0 items-center gap-1 text-xs text-l3">
+                                {/* 分发三态（v3.88）：后端 entry_modified_externally 早有能力，
+                                    此前只在删除/改投时用来拦「假状态」，界面上看不到——
+                                    用户不知道自己在 agent 侧手改过的东西下次保存会被覆盖 */}
+                                {on && (
+                                  <span
+                                    className={`size-1.5 shrink-0 rounded-full ${
+                                      distStatus[s.id]?.[agent.id] === "modified"
+                                        ? "bg-warn-text"
+                                        : "bg-ok-text"
+                                    }`}
+                                    title={
+                                      distStatus[s.id]?.[agent.id] === "modified"
+                                        ? "已写入，但该 agent 侧的条目被外部改过——下次保存会按本清单覆盖"
+                                        : "已写入该 agent 的用户级配置"
+                                    }
+                                  />
+                                )}
+                                <span className="truncate">{agent.label}</span>
+                              </span>
+                              {caps[agent.id] && !caps[agent.id].mcpWrite.supported ? (
+                                <span
+                                  className="text-xs text-l4"
+                                  title={
+                                    caps[agent.id].mcpWrite.reason ??
+                                    "该 CLI 的 MCP 配置只读，暂不支持分发"
+                                  }
+                                >
+                                  只读
+                                </span>
+                              ) : (
+                                <Toggle
+                                  label={agent.label}
+                                  checked={on}
+                                  onChange={(v) =>
+                                    !applying[key] && void toggleApp(s, agent.id, v)
+                                  }
+                                />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
                 )}
-              </div>
+              </li>
             );
           })}
+          </ul>
         </div>
       )}
 

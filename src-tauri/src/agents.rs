@@ -526,8 +526,12 @@ pub(crate) fn opencode_provider_json(
     for m in all {
         let mut entry = serde_json::json!({
             "name": format!("{} · {m}", profile.name),
-            // 上下文写入 limit（官方文档字段），供 opencode 计算剩余上下文
-            "limit": { "context": crate::model_registry::model_context_size(m) },
+            // 上下文与输出上限写入 limit（官方文档字段；1.18 起 schema 强制要求 output，
+            // 缺了直接 Configuration is invalid），供 opencode 算剩余上下文与 max output tokens
+            "limit": {
+                "context": crate::model_registry::model_context_size(m),
+                "output": crate::model_registry::model_output_limit(m),
+            },
         });
         // 思考模型补 reasoning: true（models.dev 覆盖语义）；否则 models.dev
         // 查不到条目时 opencode 按无思考能力处理
@@ -2745,8 +2749,10 @@ mod tests {
         for m in ["m1", "m2", "m3"] {
             assert!(models.contains_key(m), "provider.ccode.models 缺 {m}");
             // 每个条目带显示名（配置名 · 模型）与 limit.context（注册表保守默认 128K）
+            // + limit.output（opencode 1.18 起 schema 必填，缺省 8192）
             assert_eq!(models[m]["name"].as_str(), Some(format!("测试 · {m}").as_str()));
             assert_eq!(models[m]["limit"]["context"].as_i64(), Some(131_072));
+            assert_eq!(models[m]["limit"]["output"].as_i64(), Some(8192));
         }
         // provider 级 name = profile 名（选择器不再显示内部 id "ccode"）
         assert_eq!(config["provider"]["ccode"]["name"].as_str(), Some("测试"));

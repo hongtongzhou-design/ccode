@@ -74,8 +74,11 @@ export interface AppSettings {
   navCapsuleDisplayMode?: "both" | "icons" | "labels";
   /** 顶部导航胶囊中显示的入口 id；缺省 = 全部显示 */
   navCapsuleVisibleItems?: string[];
-  /** 「隐藏」的 profile id：只影响启动栏下拉分组（沉到「更多」），不删数据、不改启动行为 */
+  /** 「停用」的 profile id（字段名沿用旧称）：软停用 = 不被自动路径挑中，手动指定仍可用 */
   hiddenProfiles?: string[];
+  /** 「设为全局」追踪：agent id → 上次由 Ccode 写入该 agent 全局配置的 profile id
+      （只代表「上次写入」，Ccode 之外手改配置文件会失真；恢复备份后由后端清除） */
+  activeGlobalProfiles?: Record<string, string>;
   /** 对话页「⇗ 外部恢复」的终端应用；auto/undefined = 按优先级探测 */
   externalTerminal?: string;
   /** 精确注意力标记（agent hooks 桥接）：agent id → 开关，键缺失 = 关；

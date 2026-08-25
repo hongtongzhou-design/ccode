@@ -367,6 +367,71 @@ pub(crate) fn count_inbox_entries(root: &Path) -> u32 {
     parse_inbox_entries_with_cap(&text, false).len() as u32
 }
 
+// ===== 雷达筛选（project.toml 的 lit_watch_filter；前端 lit-watch.ts 同口径镜像） =====
+
+/// 指标是否通过筛选。指标未知（表未装 / 期刊未收录 / IF 不可解析）一律放行不误伤——
+/// 筛选只在有数据时生效，绝不用「查不到」当「不达标」
+pub(crate) fn metrics_pass_filter(
+    metrics: Option<&crate::journal_metrics::JournalMetricsDto>,
+    filter: &crate::projects::LitWatchFilterDto,
+) -> bool {
+    if filter.is_inert() {
+        return true;
+    }
+    let Some(m) = metrics else { return true };
+    if let Some(min) = filter.min_if {
+        if let Some(v) = m.impact_factor.as_deref().and_then(|s| s.parse::<f64>().ok()) {
+            if v < min {
+                return false;
+            }
+        }
+    }
+    if let Some(max_q) = filter.max_cas_quartile {
+        if let Some(q) = m.cas_quartile {
+            if q > max_q {
+                return false;
+            }
+        }
+    }
+    if filter.top_only && !m.top {
+        return false;
+    }
+    true
+}
+
+/// 条目级判定：期刊名取 journal 优先、source 回落（与 list_watch_entries enrichment 同口径）
+pub(crate) fn entry_passes_filter(
+    e: &WatchEntryDto,
+    filter: &crate::projects::LitWatchFilterDto,
+) -> bool {
+    if filter.is_inert() {
+        return true;
+    }
+    let name = match &e.journal {
+        Some(j) if !j.trim().is_empty() => j.as_str(),
+        _ => e.source.as_str(),
+    };
+    let m = crate::journal_metrics::lookup(name);
+    metrics_pass_filter(m.as_ref(), filter)
+}
+
+/// scheduler 用：数通过筛选的条目数（filter None/全空 = 全部条目，等价 count_inbox_entries）
+pub(crate) fn count_inbox_entries_matching(
+    root: &Path,
+    filter: Option<&crate::projects::LitWatchFilterDto>,
+) -> u32 {
+    let Some(f) = filter.filter(|f| !f.is_inert()) else {
+        return count_inbox_entries(root);
+    };
+    let Ok(text) = fs::read_to_string(root.join("notes").join("inbox.md")) else {
+        return 0;
+    };
+    parse_inbox_entries_with_cap(&text, false)
+        .iter()
+        .filter(|e| entry_passes_filter(e, f))
+        .count() as u32
+}
+
 /// 定时任务成功后给出轻量产物提示，不把可恢复的格式瑕疵伪装成完全正常。
 /// 解析规则与 list/count 共用；这里只返回提示，不修改项目文件。
 pub(crate) fn output_note(root: &Path) -> Option<String> {
@@ -1038,6 +1103,75 @@ mod tests {
         write(&dir, "notes/inbox.md", SAMPLE_INBOX);
         assert_eq!(count_inbox_entries(&dir), 2);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== 雷达筛选（metrics_pass_filter 纯判定；指标未知放行不误伤） =====
+
+    fn metrics(if_: Option<&str>, quartile: Option<u8>, top: bool) -> crate::journal_metrics::JournalMetricsDto {
+        crate::journal_metrics::JournalMetricsDto {
+            impact_factor: if_.map(|s| s.to_string()),
+            cas_quartile: quartile,
+            top,
+        }
+    }
+
+    #[test]
+    fn filter_inert_passes_everything() {
+        let f = crate::projects::LitWatchFilterDto::default();
+        assert!(f.is_inert());
+        assert!(metrics_pass_filter(None, &f));
+        assert!(metrics_pass_filter(Some(&metrics(Some("1.0"), Some(4), false)), &f));
+    }
+
+    #[test]
+    fn filter_min_if_compares_parsed_value() {
+        let f = crate::projects::LitWatchFilterDto {
+            min_if: Some(10.0),
+            ..Default::default()
+        };
+        assert!(metrics_pass_filter(Some(&metrics(Some("29.1"), None, false)), &f));
+        assert!(!metrics_pass_filter(Some(&metrics(Some("3.9"), None, false)), &f));
+        // 恰好等于阈值通过；IF 缺失/不可解析 = 未知 → 放行
+        assert!(metrics_pass_filter(Some(&metrics(Some("10"), None, false)), &f));
+        assert!(metrics_pass_filter(Some(&metrics(None, Some(4), false)), &f));
+        assert!(metrics_pass_filter(Some(&metrics(Some("N/A"), None, false)), &f));
+        assert!(metrics_pass_filter(None, &f));
+    }
+
+    #[test]
+    fn filter_quartile_and_top() {
+        let q2 = crate::projects::LitWatchFilterDto {
+            max_cas_quartile: Some(2),
+            ..Default::default()
+        };
+        assert!(metrics_pass_filter(Some(&metrics(None, Some(1), false)), &q2));
+        assert!(metrics_pass_filter(Some(&metrics(None, Some(2), false)), &q2));
+        assert!(!metrics_pass_filter(Some(&metrics(None, Some(3), false)), &q2));
+        // 分区未知放行
+        assert!(metrics_pass_filter(Some(&metrics(None, None, false)), &q2));
+
+        let top = crate::projects::LitWatchFilterDto {
+            top_only: true,
+            ..Default::default()
+        };
+        assert!(metrics_pass_filter(Some(&metrics(None, None, true)), &top));
+        assert!(!metrics_pass_filter(Some(&metrics(None, None, false)), &top));
+        // 指标完全未知放行不误伤
+        assert!(metrics_pass_filter(None, &top));
+    }
+
+    #[test]
+    fn filter_conditions_are_anded() {
+        let f = crate::projects::LitWatchFilterDto {
+            min_if: Some(10.0),
+            max_cas_quartile: Some(2),
+            top_only: true,
+        };
+        assert!(metrics_pass_filter(Some(&metrics(Some("19.9"), Some(1), true)), &f));
+        // 任一条件不达标即排除
+        assert!(!metrics_pass_filter(Some(&metrics(Some("5.0"), Some(1), true)), &f));
+        assert!(!metrics_pass_filter(Some(&metrics(Some("19.9"), Some(3), true)), &f));
+        assert!(!metrics_pass_filter(Some(&metrics(Some("19.9"), Some(1), false)), &f));
     }
 
     #[test]

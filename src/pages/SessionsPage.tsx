@@ -77,6 +77,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   const liveSessions = useAppStore((s) => s.liveSessions);
   const profiles = useAppStore((s) => s.profiles);
+  const appSettings = useAppStore((s) => s.settings);
   const currentPage = useAppStore((s) => s.page);
   const focusTab = useAppStore((s) => s.focusTab);
   const sessionsQuery = useAppStore((s) => s.sessionsQuery);
@@ -252,7 +253,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     } catch {
       /* 损坏的本地记忆不阻断恢复 */
     }
-    return pickResumeProfile(profiles, s.agent, s.provider, wished);
+    return pickResumeProfile(
+      profiles,
+      s.agent,
+      s.provider,
+      wished,
+      appSettings?.hiddenProfiles,
+    );
   }
 
   function resumeBaseUrl(s: SessionMetaDto): string | null {

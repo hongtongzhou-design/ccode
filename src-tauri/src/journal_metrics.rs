@@ -48,6 +48,18 @@ pub struct JournalMetricsStatusDto {
     pub available: bool,
     /// 合并后总刊数
     pub journal_count: u32,
+    /// 本地表下载时间（RFC3339；两份 CSV 取较新的 mtime），未装为 None
+    pub downloaded_at: Option<String>,
+}
+
+/// check_journal_metrics_update 返回：上游 ShowJCR 数据目录最近一次 commit 时间
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalMetricsUpdateDto {
+    /// 上游数据目录最近 commit 时间（RFC3339）
+    pub upstream_updated_at: Option<String>,
+    /// 上游比本地表新（本地未装恒 false——未装时按钮本来就是「下载」态）
+    pub has_update: bool,
 }
 
 // ===== 加载与缓存 =====
@@ -224,12 +236,25 @@ pub(crate) fn lookup(journal_name: &str) -> Option<JournalMetricsDto> {
     lookup_in(&table(), journal_name)
 }
 
+/// 本地表的下载时间：两份 CSV 的 mtime 取较新者（原子落盘即刷新 mtime，无需另记 meta）
+fn local_downloaded_at() -> Option<String> {
+    let dir = metrics_dir()?;
+    let mut newest: Option<std::time::SystemTime> = None;
+    for name in [JCR_FILE, FQB_FILE] {
+        if let Ok(mtime) = fs::metadata(dir.join(name)).and_then(|m| m.modified()) {
+            newest = Some(newest.map_or(mtime, |cur| cur.max(mtime)));
+        }
+    }
+    newest.map(|t| chrono::DateTime::<chrono::Local>::from(t).to_rfc3339())
+}
+
 fn compute_status() -> JournalMetricsStatusDto {
     let any_file = metrics_dir().is_some_and(|d| d.join(JCR_FILE).exists() || d.join(FQB_FILE).exists());
     let t = table();
     JournalMetricsStatusDto {
         available: any_file && !t.is_empty(),
         journal_count: t.len() as u32,
+        downloaded_at: local_downloaded_at(),
     }
 }
 
@@ -301,6 +326,70 @@ pub async fn download_journal_metrics() -> Result<JournalMetricsStatusDto, Strin
     .map_err(|e| format!("保存期刊指标表失败: {e}"))?
 }
 
+// ===== 上游更新检查 =====
+
+/// 更新检查超时：只取一条 commit 元数据，比整表下载轻得多
+const UPDATE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 从 GitHub commits API 响应提取最近 commit 时间（注入文本，便于单测）；
+/// 按数据目录查（path=目录），两份 CSV 任一有 commit 都算上游动过
+fn parse_upstream_commit_date(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let date = v
+        .as_array()?
+        .first()?
+        .get("commit")?
+        .get("committer")?
+        .get("date")?
+        .as_str()?;
+    Some(date.to_string())
+}
+
+/// 上游是否比本地表新：两边时间都能解析才比较，解析失败按「无新版」（不虚构提醒）
+fn upstream_is_newer(upstream: &str, local: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(upstream),
+        chrono::DateTime::parse_from_rfc3339(local),
+    ) {
+        (Ok(u), Ok(l)) => u > l,
+        _ => false,
+    }
+}
+
+/// 查上游 ShowJCR 仓库数据目录最近一次 commit，与本地表下载时间比对。
+/// 失败（网络/限流）返回 Err，前端静默吞掉——更新提示是增强信息，不打扰主功能。
+#[tauri::command]
+pub async fn check_journal_metrics_update() -> Result<JournalMetricsUpdateDto, String> {
+    let client = reqwest::Client::builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .user_agent("Ccode journal-metrics (https://github.com/hongtongzhou-design/ccode)")
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
+    let url =
+        format!("https://api.github.com/repos/hitfyd/ShowJCR/commits?path={REMOTE_DIR}&per_page=1");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("查询上游更新失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("查询上游更新失败: HTTP {}", resp.status()));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取上游响应失败: {e}"))?;
+    let upstream = parse_upstream_commit_date(&body);
+    let has_update = match (&upstream, local_downloaded_at()) {
+        (Some(up), Some(local)) => upstream_is_newer(up, &local),
+        _ => false,
+    };
+    Ok(JournalMetricsUpdateDto {
+        upstream_updated_at: upstream,
+        has_update,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +412,30 @@ Advanced Materials,2025,0935-9648/1521-4095,否,否,否,SCIE,,材料科学,1 [8/
         parse_jcr(JCR_SAMPLE, &mut map);
         parse_fqb(FQB_SAMPLE, &mut map);
         map
+    }
+
+    #[test]
+    fn parses_upstream_commit_date() {
+        let body = r#"[{"sha":"abc","commit":{"author":{"date":"2025-06-20T01:02:03Z"},"committer":{"date":"2025-06-21T04:05:06Z"}}}]"#;
+        assert_eq!(
+            parse_upstream_commit_date(body).as_deref(),
+            Some("2025-06-21T04:05:06Z")
+        );
+        // 空数组 / 非 JSON / 缺字段都诚实 None
+        assert_eq!(parse_upstream_commit_date("[]"), None);
+        assert_eq!(parse_upstream_commit_date("not json"), None);
+        assert_eq!(parse_upstream_commit_date(r#"[{"commit":{}}]"#), None);
+    }
+
+    #[test]
+    fn upstream_newer_only_when_strictly_later() {
+        let local = "2025-06-20T12:00:00+08:00";
+        assert!(upstream_is_newer("2025-06-20T12:00:01+08:00", local));
+        assert!(!upstream_is_newer("2025-06-20T12:00:00+08:00", local));
+        assert!(!upstream_is_newer("2025-06-19T12:00:00+08:00", local));
+        // 跨时区同一时刻不算新；解析失败不算新
+        assert!(!upstream_is_newer("2025-06-20T04:00:00Z", local));
+        assert!(!upstream_is_newer("garbage", local));
     }
 
     #[test]

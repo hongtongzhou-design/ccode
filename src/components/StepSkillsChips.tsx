@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { skillOutputConflicts } from "../skill-conflicts";
+import { skillChainWarnings, skillOutputConflicts } from "../skill-conflicts";
 import { useAppStore } from "../store";
 import type { SkillDto } from "../types";
 
@@ -20,6 +20,8 @@ export default function StepSkillsChips({
   onChange,
   requiredSkills,
   onRequiredChange,
+  chainSupply,
+  expectedArtifacts,
 }: {
   /** 步骤当前挂载的技能名（project.toml steps[].skills） */
   skills: string[];
@@ -31,12 +33,16 @@ export default function StepSkillsChips({
   available?: string[];
   /** SKILL.md 提及 MCP 工具的技能名（后端内容扫描）：chip 旁显示「推荐 MCP」标记 */
   mcpRecommended?: string[];
-  /** 技能库完整条目（产物冲突检测用；缺省 = 不检测） */
+  /** 技能库完整条目（产物冲突/链路校验用；缺省 = 不检测） */
   skillLib?: SkillDto[] | null;
   /** 提供 = 可编辑模式；增删后的完整 skills 数组经此回调 */
   onChange?: (next: string[]) => void;
   /** 编辑必需技能子集；仅在步骤编辑器提供。 */
   onRequiredChange?: (next: string[]) => void;
+  /** 链路校验供给侧：上游步骤产物 + 本步骤声明输入 + 项目资源（与 expectedArtifacts 一起给才启用） */
+  chainSupply?: string[];
+  /** 本步骤预期产物（链路校验：技能 outputs 未进清单时提示；空数组 = 不检 output 侧） */
+  expectedArtifacts?: string[];
 }) {
   // 只读模式下点击 chip 展开描述（按技能名记忆展开态）
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -47,6 +53,10 @@ export default function StepSkillsChips({
   const showRequirement = requiredSkills !== undefined;
   const candidates = (available ?? []).filter((name) => !skills.includes(name));
   const outputConflicts = skillLib ? skillOutputConflicts(skills, skillLib) : [];
+  const chainWarnings =
+    skillLib && chainSupply && expectedArtifacts
+      ? skillChainWarnings(skills, skillLib, chainSupply, expectedArtifacts)
+      : [];
   if (skills.length === 0 && !editable) return null;
   return (
     <div className="mb-3 shrink-0">
@@ -161,6 +171,17 @@ export default function StepSkillsChips({
         <p key={`${c.a}|${c.b}`} className="mt-1 text-micro text-warn-text">
           ! 技能「{c.a}」与「{c.b}」的产物都指向 {c.output}
           ——确认步骤简报里写明了分工（如“按 {c.a} 执行、{c.b} 只出报告”）
+        </p>
+      ))}
+      {chainWarnings.map((w) => (
+        <p
+          key={`${w.skill}|${w.kind}|${w.path}`}
+          className="mt-1 text-micro text-warn-text"
+        >
+          {w.kind === "input"
+            ? `! 技能「${w.skill}」预期读入 ${w.path}，但上游产物、本步骤输入与项目资源里都没有——确认上游落点或调整技能`
+            : `! 技能「${w.skill}」产出 ${w.path}，不在本步骤预期产物里——中间产物可忽略，关键产物建议补进步骤定义`}
+          {w.inferred ? "（接口为正文推断，供参考）" : ""}
         </p>
       ))}
     </div>

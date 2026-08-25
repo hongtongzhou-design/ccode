@@ -64,7 +64,7 @@ npm run tauri build    # 打包
   `conhost.exe` 闪窗；所有不需要独立可见窗口的命令必须走 `process::background_command`，统一加 `CREATE_NO_WINDOW`
   并在 spawn/wait 边界登记脱敏参数与生命周期。该包装和 250ms 进程扫描只在 Windows 生效；macOS/Linux 直接返回标准
   `Command`、不启动诊断监控线程。只有用户明确打开的外部终端允许保留可见窗口。
-- **本机 CLI 安装情况**：claude/codex/gemini/qwen 为 brew 或 npm 安装（检测见 updater.rs 报告）；opencode 未装；kimi 为新版（~/.kimi-code）。
+- **本机 CLI 安装情况**：claude/codex/gemini/qwen/opencode/codebuddy 均已装（brew 或 npm，检测见 updater.rs 报告）；kimi 为新版（~/.kimi-code）。
 - **dev 端口为 17575**（`vite.config.ts` + `tauri.conf.json` devUrl 两处同步；勿改回 1420——Codex 桌面版 NetworkService 占用）。vite 撞已占端口静默退出；**stdin EOF 也自杀**——后台拉起必须 `tail -f /dev/null | npm run tauri:dev`。
 - **git 提交**：常规提交加 `[skip ci]`，里程碑提交才跑三平台 CI。
 - **git 推送走 SSH:443 + repo deploy key**；发版推 tag 后先用 `gh run list --workflow build.yml` 确认是否已产生该 tag 的 push run，已触发则只保留该 run；30 秒内未触发才执行 `gh api repos/hongtongzhou-design/ccode/actions/workflows/build.yml/dispatches -f ref=<tag>`。禁止让 tag push 与 workflow_dispatch 两个打包 run 并行写同一 Release。workflow 已配 `permissions: contents: write`（tauri-action 建 Release 草稿必需）。**仓库 owner 与 tauri.conf 升级端点绑定**（同为 `hongtongzhou-design/ccode`）：仓库若转移，本命令、updater endpoint、README 链接三处必须同步改。
@@ -83,12 +83,13 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker/DigestPicker、
                              # KickoffConfirmDialog（开工确认弹层：TASK.md 预览/编辑（草稿优先）+ 旧简报并入兜底 + 技能区（含 MCP 归处标记）+ 人工事项区 + 主仓提醒 +
                              # 上一步收尾软门：紧邻上一步非可选 after 事项未勾 → 「确认开始」二击变「仍要开工」才开，只确认不阻断）、
-                             # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态）、
+                             # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态 + 产物冲突/跨步骤链路 ⚠ 警告行）、
                              # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑）、StepFlow（步骤内协同流程线）、
                              # ScheduleSection（项目分组「◔ 定时任务」区块）、
                              # LitWatchCard（「◔ 文献雷达」卡片：新命中/精读清单双页签 + 近 8 周趋势 + →精读/◈解读/↓全文 +
                              #   期刊徽章（IF/中科院分区/TOP，数据源 journal_metrics.rs）+ 新命中按日期/按关键词分组切换 +
-                             #   卡头期刊指标表入口常驻（未装=↓下载 / 已装=↻重下即更新），挂项目详情工作段 TaskCardsSection 之后）、
+                             #   卡头期刊指标表入口常驻（未装=↓下载 / 已装=↻重下即更新）+ 卡头「筛选」弹层
+                             #   （litWatchFilter：IF/分区/TOP 三条件，被筛掉条目「查看全部」临时态），挂项目详情工作段 TaskCardsSection 之后）、
                              # ReaderOverlay（沉浸阅读区全屏覆盖层，v3.96：三栏「笔记｜PDF｜Agent 终端」，fixed inset-0 z-40，
                              #   Esc 退出级联最优先，底下终端/PTY 保持挂载；右栏 = 阅读会话标签 xterm 宿主搬移，注入由 TerminalPage 供给）+
                              #   PdfContinuousView（连续滚动 PDF 栏：±2 页虚拟化懒渲染、选段浮动条（译/◈问 AI/＋生词/⋯）、▦ 圈选截图、
@@ -118,7 +119,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
   lit-watch.ts               # 文献雷达纯逻辑：日分组/关键词分组（groupEntriesByKeyword，取 keywordsHit 首词、
                              # 未分类恒末）/趋势/直链转换/全文可得性分流（fulltextLinkFor：arxiv abs 与 .pdf 直链=可下载，
-                             # DOI/落地页=来源，不再摆禁用下载钮）/已读判定/漂移提醒（tests/lit-watch.test.ts）
+                             # DOI/落地页=来源，不再摆禁用下载钮）/已读判定/漂移提醒/雷达筛选（entryPassesFilter
+                             # 与 lit_watch.rs 双端镜像，指标未知放行不误伤，tests/lit-watch.test.ts）
   reader.ts                  # 沉浸阅读区纯逻辑：分栏钳制与像素换算/圈选命中与 canvas 映射/截图注入格式/
                              # glossary 表格契约（与 reader.rs 双端镜像，改动需同步）/段落边界提取/术语匹配/
                              # 进度与护眼存储键/翻译面板高度键（readerSplitT，未拖过不落键 = 内容自适应，
@@ -130,6 +132,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # （tests/task-cards.test.ts）
   step-flow.ts               # 步骤内协同流程线纯逻辑：种子→before→agent→during→after→评审节点链
                              # （v3.97 起 after 档一律进主干，可选项带徽标但不抢当前节点；tests/step-flow.test.ts）
+  skill-conflicts.ts         # 技能接口对账纯逻辑：产物冲突（skillOutputConflicts，outputs 两两相交）+
+                             # 跨步骤链路（skillChainWarnings：inputs 找供给/outputs 对账预期产物，
+                             # 支持 * 通配与目录/文件互含，推断接口打标；tests/skill-conflicts.test.ts）
   schedule-tasks.ts          # 定时任务纯逻辑：周期白话/相对时间/按 projectRoot 过滤（tests/schedule-tasks.test.ts）
   schedule-skill.ts          # 定时巡检「技能」下拉与默认任务名跟随纯逻辑（lit-watch 恒最前/默认「文献雷达」、
                              # 手改不覆盖、空库兜底，tests/schedule-skill.test.ts）
@@ -158,7 +163,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   themes.ts                  # 主题清单单一出处 + isLightTheme() 亮暗判定单一出处（禁另造判定）
   profile-copy.ts            # profile 跨 agent 复制纯逻辑
   resume-profile.ts          # 恢复会话的 profile 挑选纯逻辑：codex 内联 provider 会话（rollout 记
-                             # model_provider="ccode"）只用带 Base URL 的配置恢复（tests/resume-profile.test.ts）
+                             # model_provider="ccode"）只用带 Base URL 的配置恢复；软停用（hiddenProfiles）
+                             # 跳过停用项——wishedId 指向停用项同样跳过，全停用时回落含停用项池不拦死
+                             # （tests/resume-profile.test.ts）
   store.ts                   # zustand 状态
 src-tauri/src/
   agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/
@@ -177,10 +184,19 @@ src-tauri/src/
                              #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）
   model_registry.rs          # 模型能力注册表（同 pricing.rs 口径）：内置前缀表 + model-capabilities.json 覆盖 +
                              # 关键词推断兜底；kimi capabilities/max_context_size、codex context_window、
-                             #   opencode reasoning/limit 共用；内置表宁缺毋滥（收错比漏报有害）
+                             #   opencode reasoning/limit 共用；limit.output 兜底 8192（1.18 起 schema 必填，
+                             #   覆盖文件可配 "output"）；内置表宁缺毋滥（收错比漏报有害）
   profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥；删除时同步清设置引用（settings::clear_profile_refs）
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
-  global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）；
+  global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）；写成功即记
+                             # settings.active_global_profiles（配置页「全局生效」徽标数据源），恢复备份后清除；
+                             # 恢复分两档——恢复备份（最近批次，每 tag 轮换留 5 份）与恢复初始状态
+                             #   （backups/<agent>/original/ 永久快照，首次 apply 时落、不参与轮换，
+                             #   has_original_backup/restore_original_backup）；
+                             # codex provider 带 requires_openai_auth=true（auth.json 直供密钥，外部终端零 export；
+                             #   旧写入遗留的 env_key 行随下次写入清除）；
+                             # gemini 双文件：.env 之外必须加写 settings.json 的 selectedType=gemini-api-key
+                             #   （v3.147 审计：缺它 gemini ≥0.46 headless auth 报错起不来，JSONC 容错读）；
                              # kimi 的 [models.*] 随写 display_name（配置名·模型，选择器 label 优先它）
                              # 与 capabilities（仅推断为思考模型时写，仅新版变体）
   projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
@@ -190,6 +206,7 @@ src-tauri/src/
                              # .ccode/drafts/）、旧简报一次性并入草稿（list_legacy_briefs）、
                              # 任务卡 kind（idea/draft，旧卡按 step 推断）、fuse_card_into_draft（想法卡会话 ×
                              # 当前步骤草稿 → AI 融合稿，出站 redact_and_cap 不写盘）+ write_task_draft（确认后整份落盘）、
+                             # update_lit_watch_filter（雷达筛选读-改-原子写，全空归一 None）、
                              # 项目移除三档（移除注册 / purge_project_traces 清除 Ccode 痕迹保留文件夹 / delete_project_dir）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用
   clipboard.rs               # 剪贴板图片落盘（save_clipboard_image）：<config>/ccode/tmp/paste-* 白名单扩展名 +
@@ -204,8 +221,13 @@ src-tauri/src/
                              #   list 时现算补齐注册表新 agent 的缺键（否则一键应用永远漏新 agent，不写盘）；内置技能种子（seed_builtin_skills：
                              # include_str! 内嵌 src-tauri/resources/skills/ 14 个技能，启动幂等播种，不覆盖/不复活用户改动）、
                              # 内置技能更新（check_builtin_skill_updates 种子逐字节比对 + apply_builtin_skill_update
-                             # 覆盖前备份 SKILL.md.bak-<yyyymmdd> 后原子写入）、产物冲突检测（frontmatter outputs
-                             # 解析进 SkillDto，list 时现算；前端 skill-conflicts.ts 判定 + StepSkillsChips 警告行）；
+                             # 覆盖前备份 SKILL.md.bak-<yyyymmdd> 后原子写入）、技能接口契约（frontmatter inputs/outputs
+                             # 解析进 SkillDto，list 时现算；外部技能未声明时 infer_interface_from_body 正文推断兜底、
+                             #   打 interface_inferred 标不回写；前端 skill-conflicts.ts 判定产物冲突 + 跨步骤链路
+                             #   （skillChainWarnings：inputs 找供给/outputs 对账预期产物）+ StepSkillsChips 警告行）；
+                             # ◈ 适配到流水线（adapt_skill_to_pipeline 出稿 FN_DISTILL + build_adapt_prompt 规范路径表
+                             #   单一出处 → write_skill_md 确认落盘，name 强制沿用库中条目；update_content_impl
+                             #   interface=None 时保留已声明 inputs/outputs 不静默丢弃）；
                              # 技能内容红线（2026-08-20 社区对标批量升级后确立）：单文件轻量规范（~100 行内，禁脚本/JSON 中间件/lint 体系）、
                              #   产出文件名与流水线接口（TASK.md 内联口径）不动、升级后同步 cp 进技能库（种子改完库不追平，见种子更新机制）
   mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §10）：统一模型→八家映射（grok 只读）、读-改-写一个键/段 + 备份 +
@@ -219,7 +241,10 @@ src-tauri/src/
   pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
   settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力
                              # （hooks_attention 按 agent map，旧 claude_hooks_attention 仅反序列化兼容迁移）/想法期只读保护
-                             # /聊天页状态栏开关（status_bar_in_chat 默认开；关 = 聊天页 invisible 占位，切层不改终端行列数）
+                             # /聊天页状态栏开关（status_bar_in_chat 默认开；关 = 聊天页 invisible 占位，切层不改终端行列数）；
+                             # hidden_profiles = 软停用（自动路径跳过、手动可用；v3.142 起不再是纯展示偏好）；
+                             # active_global_profiles = 「设为全局」追踪（agent→profile id，record/clear_active_global
+                             # 维护、不走 patch、clear_profile_refs 同步清引用；只代表「上次由 Ccode 写入」非绝对生效态）
   hooks.rs                   # 精确注意力标记（七家 hooks 桥接）：BRIDGE_SPECS 每 agent 一张桥接规格（claude/qwen/
                              # codebuddy/gemini/kimi/grok/codex；cursor 无「等待确认」等价事件、opencode 无 shell hooks
                              #   形态，两家未接入），写各家 hooks 配置（备份留 10 份 + 原子写 + marker 合并/移除 +
@@ -238,19 +263,23 @@ src-tauri/src/
                              # lit-watch 专用文案不动、其他技能通用模板，10 分钟超时）、
                              # 历史留 20 条、跑完发 scheduler-run-done 事件（App.tsx 全局监听弹 OS 通知，复用长任务通知开关）；
                              # v3.95 起 Schedule.linkedStep 关联步骤（可空，update 空串归 None）+ RunRecord.newEntries 新命中计数
-                             # （跑 lit-watch 前后数 inbox.md `## ` 标题数取差，超时/失败不记）
+                             # （跑 lit-watch 前后数 inbox.md `## ` 标题数取差，超时/失败不记；项目配了雷达筛选时
+                             # 前后各数一次过滤后条目取差，推送/收件箱胶囊只算符合筛选的）
   lit_watch.rs               # 文献雷达应用层（v3.95）：巡检产物解析 DTO（notes/inbox.md 有效文献块含 watch-run 批次标记日期、上限 500 条；
                              # papers/watch-followup.md 付费墙待办、watchlist.md 订阅读写整表写回保留注释行、included.md 精读清单
                              # 增删去重）+ download_paper_pdf 白名单下载（仅 http/https、60MB 流式上限、%PDF- 魔数校验、
                              # 落 papers/ 自动登记 project.toml 资源）+ attach_paper_pdf 关联本地 PDF（付费墙手动下载后
-                             # 一步复制进 papers/ 并登记，源文件同口径校验、复制非移动）；门槛 = 注册项目根 + canonicalize + 读-改-原子写
+                             # 一步复制进 papers/ 并登记，源文件同口径校验、复制非移动）；门槛 = 注册项目根 + canonicalize + 读-改-原子写；
+                             # 雷达筛选判定 metrics_pass_filter / count_inbox_entries_matching（scheduler 推送计数用，
+                             # 口径见 conventions/pipeline.md「雷达筛选」）
   journal_metrics.rs         # 期刊指标表（雷达徽章数据源）：config_dir/ccode/journal-metrics/ 下 JCR2025-UTF8.csv +
                              # FQBJCR2025-UTF8.csv（来源 github.com/hitfyd/ShowJCR，用户本机下载、禁内置分发）合并成
                              # HashMap（normalize_title 规范化精确匹配，miss 时剥末尾出版商括号尾巴（「(Wiley)」「（ACS）」可多级）
                              # 重试，仍 miss = None 不虚构；前端 lit-watch.ts sourceDisplayName 同口径剥尾，两处同步），RwLock 进程内缓存；
                              # list_watch_entries 出口 enrichment 进 WatchEntryDto.metrics（展示时现算不落 inbox.md，
                              # 旧条目装表即生效）；download_journal_metrics（jsDelivr→raw 回落、.tmp 原子落盘、完清缓存）+
-                             # journal_metrics_status
+                             # journal_metrics_status（含 downloadedAt：两份 CSV 取较新 mtime）+ check_journal_metrics_update
+                             # （GitHub commits API 按数据目录查最近 commit，与本地 mtime 比对出 hasUpdate，前端静默失败）
   reader.rs                  # 沉浸阅读区后端（v3.96）：ensure_paper_note 建档 notes/<slug>.md（精读八小节对齐 lit-notes 技能口径 + 机管「译段」「我的想法」两节，已存在不覆盖；
                              # 建档前先扫 notes/ 头部「来源行」配对已有精读笔记，命中即复用不另建，空模板 slug 笔记顺带清回收站；
                              # pdf_for_note 笔记→配对 PDF（来源行锚点优先；无锚点回落笔记 stem × type=paper 资源 stem

@@ -124,6 +124,27 @@ pub struct StepDto {
     pub asks_lit_source: bool,
 }
 
+/// 文献雷达筛选（可选，存 project.toml）：新命中的展示与推送计数按期刊指标过滤。
+/// 全空 = 不筛选（写盘时归一为 None，toml 不留空段）；指标未知的条目一律放行不误伤
+/// （判定口径在 lit_watch.rs::metrics_pass_filter，前端 lit-watch.ts 有镜像）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LitWatchFilterDto {
+    /// 只看 IF ≥ 此值的期刊；None = 不限
+    pub min_if: Option<f64>,
+    /// 只收中科院 N 区及以上（1 = 仅 1 区 … 4 = 不限）；None = 不限
+    pub max_cas_quartile: Option<u8>,
+    /// 只要中科院 Top 期刊
+    pub top_only: bool,
+}
+
+impl LitWatchFilterDto {
+    /// 全空 = 不筛选
+    pub fn is_inert(&self) -> bool {
+        self.min_if.is_none() && self.max_cas_quartile.is_none() && !self.top_only
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProjectConfigDto {
@@ -147,6 +168,8 @@ pub struct ProjectConfigDto {
     pub submission_mode: Option<String>,
     /// 当前返修轮次；首投不使用。缺省按第 1 轮返修处理。
     pub submission_round: Option<u32>,
+    /// 文献雷达筛选：新命中展示与推送计数按期刊指标过滤；None/全空 = 不筛选
+    pub lit_watch_filter: Option<LitWatchFilterDto>,
 }
 
 /// 文献来源合法值；非法值解析期归一为 search
@@ -165,6 +188,7 @@ impl Default for ProjectConfigDto {
             lit_source: "search".into(),
             submission_mode: None,
             submission_round: None,
+            lit_watch_filter: None,
         }
     }
 }
@@ -2011,6 +2035,32 @@ fn update_step_skills_impl(
     update_step_skills_at(&root, step_name, skills)
 }
 
+/// scheduler 用：读项目的雷达筛选（读失败/无配置/全空 = None，不阻断任务）
+pub(crate) fn lit_watch_filter_for(root: &Path) -> Option<LitWatchFilterDto> {
+    read_config_at(root)
+        .config
+        .lit_watch_filter
+        .filter(|f| !f.is_inert())
+}
+
+#[tauri::command]
+pub async fn update_lit_watch_filter(
+    project_root: String,
+    filter: Option<LitWatchFilterDto>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
+            &project_root,
+        )))?;
+        // 读-改-原子写；全空筛选归一为 None（toml 不留空段）
+        let mut cfg = read_config_at(&root).config;
+        cfg.lit_watch_filter = filter.filter(|f| !f.is_inert());
+        write_config_at(&root, &cfg)
+    })
+    .await
+    .map_err(|e| format!("更新文献筛选失败: {e}"))?
+}
+
 /// 读-改-原子写 steps[].skills（root 需已过项目门槛校验；测试直接调这里）。
 /// 新挂载技能沿用旧入口语义，默认加入 required_skills；编辑器若要改成可选，走整份配置保存。
 pub(crate) fn update_step_skills_at(
@@ -2518,6 +2568,7 @@ fn demo_project_config() -> ProjectConfigDto {
         lit_source: "search".into(),
         submission_mode: None,
         submission_round: None,
+        lit_watch_filter: None,
     }
 }
 
@@ -3329,7 +3380,31 @@ mod tests {
             lit_source: "search".into(),
             submission_mode: None,
             submission_round: None,
+            lit_watch_filter: None,
         }
+    }
+
+    #[test]
+    fn lit_watch_filter_round_trip_and_legacy_default() {
+        // 旧档案卡没有该字段：serde default → None（不筛选）
+        let legacy: ProjectConfigDto = toml::from_str(r#"artifact_dir = "outputs""#).unwrap();
+        assert_eq!(legacy.lit_watch_filter, None);
+        // 有筛选的档案卡：读回字段齐全；全空筛选在命令层归一为 None（is_inert 判定）
+        let with_filter: ProjectConfigDto = toml::from_str(
+            r#"artifact_dir = "outputs"
+[litWatchFilter]
+minIf = 10.0
+maxCasQuartile = 2
+topOnly = true
+"#,
+        )
+        .unwrap();
+        let f = with_filter.lit_watch_filter.unwrap();
+        assert_eq!(f.min_if, Some(10.0));
+        assert_eq!(f.max_cas_quartile, Some(2));
+        assert!(f.top_only);
+        assert!(!f.is_inert());
+        assert!(LitWatchFilterDto::default().is_inert());
     }
 
     #[test]
@@ -3531,6 +3606,7 @@ type = "paper"
             lit_source: "search".into(),
             submission_mode: None,
             submission_round: None,
+            lit_watch_filter: None,
         };
         let rendered = render_config(Some(existing), &config).unwrap();
         assert!(

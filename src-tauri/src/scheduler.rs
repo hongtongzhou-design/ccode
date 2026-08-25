@@ -480,8 +480,17 @@ fn execute_one(id: &str) -> RunDonePayload {
     };
     // 新增条目计数仅对 lit-watch 类任务有意义（只有它往 notes/inbox.md 追加条目）
     let is_lit_watch = task.skill == "lit-watch";
+    // 项目配了雷达筛选时，新增计数只算通过筛选的条目（推送口径 = 用户要看的口径）
+    let lit_filter = if is_lit_watch {
+        crate::projects::lit_watch_filter_for(Path::new(&task.project_root))
+    } else {
+        None
+    };
     let before_entries = if is_lit_watch {
-        Some(crate::lit_watch::count_inbox_entries(Path::new(&task.project_root)))
+        Some(crate::lit_watch::count_inbox_entries_matching(
+            Path::new(&task.project_root),
+            lit_filter.as_ref(),
+        ))
     } else {
         None
     };
@@ -497,11 +506,14 @@ fn execute_one(id: &str) -> RunDonePayload {
         // 定时任务是长期住户，配置被删不该让任务永久哑跑；AI 专用配置也可能指着已删 id
         // （删除时清引用是后加的，存量 settings 可能还带旧指针），硬报错时去掉专用槽再回落最近使用。
         // 显式槽的硬报错口径只留给交互场景
-        let dedicated = crate::settings::read_current().ai_profile_id;
+        let cur_settings = crate::settings::read_current();
+        let dedicated = cur_settings.ai_profile_id;
+        let hidden: std::collections::HashSet<String> =
+            cur_settings.hidden_profiles.unwrap_or_default().into_iter().collect();
         let pinned = task.profile_id.clone().filter(|v| !v.trim().is_empty());
         let profile =
-            crate::ai::resolve_profile_from(profiles.clone(), None, pinned.clone(), dedicated)
-                .or_else(|_| crate::ai::resolve_profile_from(profiles, None, pinned.clone(), None))?;
+            crate::ai::resolve_profile_from(profiles.clone(), None, pinned.clone(), dedicated, &hidden)
+                .or_else(|_| crate::ai::resolve_profile_from(profiles, None, pinned.clone(), None, &hidden))?;
         // 回落发生时在运行历史里留一句话，用户看得到「为什么换了配置」
         if let Some(p) = pinned {
             if p != profile.id {
@@ -513,8 +525,11 @@ fn execute_one(id: &str) -> RunDonePayload {
     // 超时/失败不记新增数：只有成功跑完才数第二次取差值（saturating_sub 防文件被外部截断）
     let new_entries = match (&result, before_entries) {
         (Ok(_), Some(before)) => Some(
-            crate::lit_watch::count_inbox_entries(Path::new(&task.project_root))
-                .saturating_sub(before),
+            crate::lit_watch::count_inbox_entries_matching(
+                Path::new(&task.project_root),
+                lit_filter.as_ref(),
+            )
+            .saturating_sub(before),
         ),
         _ => None,
     };

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { SquareArrowOutUpRight, SquareTerminal } from "lucide-react";
 import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS, NO_PRESET_REASON } from "../presets";
@@ -20,6 +21,7 @@ import {
   PageToolbar,
   SegTabs,
   fieldClass,
+  ghostActionClass,
   hoverRevealClass,
   primaryActionClass,
   rowActionClass,
@@ -675,8 +677,43 @@ function displayHost(baseUrl: string): string {
   }
 }
 
-/** 官方账号状态行：收纳为「● 官方账号 · 已连接/未连接」微型标签，
- *  排查指引（检测路径/登录命令/断开方式）收进悬浮 tooltip，右侧只留连接胶囊 + 刷新图标钮。
+/** 连接列表五列网格模板：名称 | 域名 | 模型 | 密钥状态 | 操作。
+ *  官方账号行与数据行共用同一模板，保证上下行严格垂直对齐；
+ *  操作列 170px 刚好容纳「两枚 hover 图标钮 + 编辑 + ⋯」，再宽会在中等窗口把行撑出横向滚动 */
+const PROFILE_GRID =
+  "grid-cols-[minmax(150px,1.1fr)_minmax(140px,0.9fr)_minmax(150px,1fr)_110px_170px]";
+
+/** 连接状态微型胶囊（Pill Badge）：每行只出一个最高优先级状态
+ *  （配置失效 > 已停用 > 已验证 > 未验证），不再多标记堆叠；
+ *  「默认」「全局生效」不是健康状态，收进名称下方 caption 行 */
+function StatusPill({
+  tone,
+  tip,
+  children,
+}: {
+  tone: "ok" | "err" | "muted";
+  tip: string;
+  children: string;
+}) {
+  const cls =
+    tone === "ok"
+      ? "bg-ok text-ok-text"
+      : tone === "err"
+        ? "bg-err text-err-text"
+        : "bg-inset text-l4";
+  return (
+    <span
+      className={`ml-1.5 inline-flex items-center whitespace-nowrap rounded-full px-1.5 py-px text-micro font-normal ${cls}`}
+      title={tip}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** 官方账号状态行：与数据行共用同一五列网格与行高（无独立背景/行高），
+ *  状态微型标签占「名称」列、操作占「操作」列，保证整列严格对齐；
+ *  排查指引（检测路径/登录命令/断开方式）收进悬浮 tooltip，右侧只留连接 + 刷新图标钮。
  *  hook 约束：状态行挂在 per-agent 组件上，useHoverTip 才能逐行实例化。 */
 function OfficialStatusRow({
   agentId,
@@ -701,7 +738,9 @@ function OfficialStatusRow({
     lines.push(`点「连接」将在终端执行：${st.loginCommand}`);
   }
   return (
-    <div className="flex items-center gap-2 border-b border-hairline px-3 py-1.5 text-xs">
+    <div
+      className={`grid min-h-14 ${PROFILE_GRID} items-center gap-3 border-b border-hairline px-4 text-sm`}
+    >
       <span
         ref={anchorRef}
         onMouseEnter={show}
@@ -709,7 +748,7 @@ function OfficialStatusRow({
         onFocus={show}
         onBlur={hide}
         tabIndex={0}
-        className="flex cursor-default items-center gap-1.5"
+        className="flex min-w-0 cursor-default items-center gap-1.5"
       >
         <span
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${st.connected ? "bg-ok-text" : "bg-l4"}`}
@@ -719,12 +758,15 @@ function OfficialStatusRow({
         </span>
       </span>
       {lines.length > 0 && <HoverTip tip={tip} text={lines.join("\n")} />}
-      <span className="ml-auto flex shrink-0 items-center gap-1">
+      <span />
+      <span />
+      <span />
+      <span className="flex shrink-0 items-center justify-end gap-1">
         {!st.connected && (
           <button
             onClick={onConnect}
             title={`在终端执行 ${st.loginCommand ?? ""}`}
-            className={rowActionClass}
+            className={ghostActionClass}
           >
             连接
           </button>
@@ -871,6 +913,113 @@ function ValidationDialog({
 /** 后端恒返回用量 DTO，零用量（全 0）不显示「用量与费用」入口 */
 function hasUsage(u: ProfileUsageDto | undefined): boolean {
   return !!u && (u.input > 0 || u.output > 0);
+}
+
+/** 「设为全局」进度/结果弹层：确认后立即弹出（写入 + CLI 复检含网络检查，要几秒到
+    十几秒，没反馈像点了没反应）；完成后同层切换为结果视图；验证未通过可一键展开
+    三层验证详情（复用 ValidationDialog）。进行中禁关（点遮罩无效、无关闭钮）防误触 */
+function GlobalApplyDialog({
+  profile,
+  running,
+  applied,
+  error,
+  onClose,
+  onShowValidation,
+}: {
+  profile: Profile;
+  running: boolean;
+  applied: GlobalApplyResultDto | null;
+  error: string | null;
+  onClose: () => void;
+  onShowValidation: () => void;
+}) {
+  const cli = applied?.validation.cli ?? null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 ccode-fade"
+      onClick={running ? undefined : onClose}
+    >
+      <section
+        role="alertdialog"
+        aria-modal="true"
+        className="w-full max-w-xl rounded-lg border border-field ccode-float-surface"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-medium text-l1">
+              设为全局 · {profile.name}
+            </h2>
+            <p className="mt-0.5 text-xs text-l4">
+              写入该 CLI 的全局配置文件，任何终端生效；失败自动回滚
+            </p>
+          </div>
+          {!running && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="ml-auto h-8 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+            >
+              关闭
+            </button>
+          )}
+        </header>
+        <div className="px-4 py-3 text-xs leading-5">
+          {running ? (
+            <p className="text-l3">
+              ◌ 正在写入全局配置并做 CLI 复检（含网络检查，可能要几秒到十几秒）…
+            </p>
+          ) : error ? (
+            <p className="break-words text-err-text">{error}</p>
+          ) : applied ? (
+            <div className="space-y-2">
+              <div>
+                <p className="font-medium text-l2">已写入全局连接：</p>
+                <ul className="mt-1 space-y-0.5 font-mono text-l3">
+                  {applied.files.map((f) => (
+                    <li key={f} className="break-all">
+                      {f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              {cli && (
+                <p
+                  className={`break-words ${
+                    cli.status === "passed" ? "text-ok-text" : "text-err-text"
+                  }`}
+                >
+                  CLI 配置检查：{cli.status === "passed" ? "通过" : "未通过"} —{" "}
+                  {cli.message}
+                </p>
+              )}
+            </div>
+          ) : null}
+        </div>
+        {!running && (
+          <footer className="flex justify-end gap-2 border-t border-hairline px-4 py-3">
+            {applied && !applied.validation.ok && (
+              <button
+                type="button"
+                onClick={onShowValidation}
+                className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1"
+              >
+                查看验证详情
+              </button>
+            )}
+            <button
+              type="button"
+              autoFocus
+              onClick={onClose}
+              className="inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-3 text-xs font-medium text-cta-text transition-[filter] hover:brightness-110"
+            >
+              知道了
+            </button>
+          </footer>
+        )}
+      </section>
+    </div>
+  );
 }
 
 export default function ProfilesPage() {
@@ -1059,6 +1208,10 @@ export default function ProfilesPage() {
   const [globalBackups, setGlobalBackups] = useState<Record<string, boolean>>(
     {},
   );
+  // 「首次写入前」原始快照（永久保留）：控制「恢复初始状态」入口显隐
+  const [originalBackups, setOriginalBackups] = useState<Record<string, boolean>>(
+    {},
+  );
   // 各 agent 的升级/安装进行态、实时输出与最近结果（可并发操作多个 agent）
   const [updating, setUpdating] = useState<Record<string, boolean>>({});
   const [liveOutput, setLiveOutput] = useState<Record<string, string>>({});
@@ -1201,7 +1354,8 @@ export default function ProfilesPage() {
   const labelOf = (agentId: string) =>
     AGENTS.find((a) => a.id === agentId)?.label ?? agentId;
 
-  /** 每个 agent 是否有可恢复的完整全局配置批次（控制「恢复备份」按钮显隐） */
+  /** 每个 agent 是否有可恢复的完整全局配置批次（控制「恢复备份」按钮显隐）；
+      顺带查「首次写入前」原始快照（控制「恢复初始状态」入口显隐） */
   async function refreshGlobalBackups() {
     const entries = await Promise.all(
       AGENTS.map(
@@ -1213,6 +1367,16 @@ export default function ProfilesPage() {
       ),
     );
     setGlobalBackups(Object.fromEntries(entries));
+    const originals = await Promise.all(
+      AGENTS.map(
+        async (a) =>
+          [
+            a.id,
+            await invoke<boolean>("has_original_backup", { agent: a.id }),
+          ] as const,
+      ),
+    );
+    setOriginalBackups(Object.fromEntries(originals));
   }
 
   useEffect(() => {
@@ -1247,12 +1411,15 @@ export default function ProfilesPage() {
 
   /** 把 profile 事务化写入该 CLI 的全部目标文件，UI 明示影响范围 */
   async function onApplyGlobal(p: Profile) {
+    if (applyDialog) return; // 已有写入在进行/结果在展示，禁止重入
     if (
       !(await confirmDialog(
         `将把该连接写入 ${labelOf(p.agent)} 的全局配置文件（影响其他终端里的使用）。全部文件会作为一个批次写入，失败会自动回滚；当前内容会先备份。继续？`,
       ))
     )
       return;
+    // 确认后立刻弹进度层：写文件 + doctor 复检要几秒到十几秒，静默等待像没反应
+    setApplyDialog({ profile: p, running: true, applied: null, error: null });
     try {
       const applied = await invoke<GlobalApplyResultDto>(
         "apply_profile_global",
@@ -1261,24 +1428,19 @@ export default function ProfilesPage() {
         },
       );
       await refreshGlobalBackups();
+      // 后端已把该连接记为「全局生效」（settings.activeGlobalProfiles），重拉设置刷新徽标
+      await loadSettings();
       mirrorValidation(p, applied.validation);
       rememberValidation(p.id, applied.validation);
-      const cli = applied.validation.cli;
-      await alertDialog(
-        `已写入全局连接：\n${applied.files.join("\n")}\n\nCLI 配置检查：${
-          cli.status === "passed" ? "通过" : "未通过"
-        }\n${cli.message}`,
-      );
-      if (!applied.validation.ok) {
-        setValidationDialog({
-          profile: p,
-          result: applied.validation,
-          running: false,
-        });
-      }
+      setApplyDialog({ profile: p, running: false, applied, error: null });
       setError(null);
     } catch (e) {
-      setError(String(e));
+      setApplyDialog({
+        profile: p,
+        running: false,
+        applied: null,
+        error: String(e),
+      });
     }
   }
 
@@ -1311,10 +1473,39 @@ export default function ProfilesPage() {
         agent: agentId,
       });
       await refreshGlobalBackups();
+      // 恢复后全局内容不再是任何连接的快照，后端已清「全局生效」标记，重拉设置刷新徽标
+      await loadSettings();
       await alertDialog(
         files.length
           ? `已恢复完整批次：\n${files.join("\n")}`
           : "没有可恢复的完整备份批次",
+      );
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** 恢复到「Ccode 首次写入前」的原始状态（永久快照，不参与批次轮换）。
+      当前状态会先存成常规批次，恢复后想反悔可再点「恢复备份」 */
+  async function onRestoreOriginal(agentId: string) {
+    if (
+      !(await confirmDialog(
+        `将把 ${labelOf(agentId)} 的全局配置恢复到 Ccode 首次写入前的原始状态（Ccode 当时新建的文件会被删除）。当前状态会先另存为新备份，可用「恢复备份」反悔。继续？`,
+      ))
+    )
+      return;
+    try {
+      const files = await invoke<string[]>("restore_original_backup", {
+        agent: agentId,
+      });
+      await refreshGlobalBackups();
+      // 后端已清「全局生效」标记，重拉设置刷新徽标
+      await loadSettings();
+      await alertDialog(
+        files.length
+          ? `已恢复首次写入前的原始状态：\n${files.join("\n")}`
+          : "首次写入前没有任何目标文件，已全部清除",
       );
       setError(null);
     } catch (e) {
@@ -1411,8 +1602,17 @@ export default function ProfilesPage() {
   const anyExpanded = visibleAgents.some((a) => !collapsedGroups.has(a.id));
   // 保存后的「要重启标签才生效」提示（仅当该 agent 确有标签在跑）
   const [savedNote, setSavedNote] = useState<string | null>(null);
+  // 「设为全局」进度/结果弹层：确认后立即弹出（写文件 + CLI 复检含网络检查要几秒到
+  // 十几秒，没反馈像点了没反应）；非 null 期间禁止重入
+  const [applyDialog, setApplyDialog] = useState<{
+    profile: Profile;
+    running: boolean;
+    applied: GlobalApplyResultDto | null;
+    error: string | null;
+  } | null>(null);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  const loadSettings = useAppStore((s) => s.loadSettings);
 
   /** 「在终端使用」：新开标签并直接启动（与快速开聊共用 pendingTerminal 链路）。
    *  目录取上次启动过的，没有就交给启动栏留空由用户填 */
@@ -1463,7 +1663,9 @@ export default function ProfilesPage() {
     }
   }
 
-  /** 隐藏/取消隐藏（settings.hiddenProfiles 整表覆盖）：只影响启动栏下拉分组 */
+  /** 停用/取消停用（settings.hiddenProfiles 整表覆盖；字段名沿用旧称不改存储）：
+      软停用 = 不被自动路径挑中（启动栏预选/兜底、恢复会话、AI 功能回落），
+      手动指定仍可用——启动栏下拉里沉到「已停用」分组可手选 */
   async function toggleHiddenProfile(profile: Profile) {
     const cur = new Set(settings?.hiddenProfiles ?? []);
     if (cur.has(profile.id)) cur.delete(profile.id);
@@ -1634,9 +1836,9 @@ export default function ProfilesPage() {
                       ! {officialStatus[agent.id].conflicts.length} 项连接冲突
                     </button>
                   )}
-                  {/* 已安装显示包名+版本号（mono）；右侧状态：更新中… / 新版（可点更新）/ 更新（查不到最新版时的回退）；已是最新则不显示 */}
+                  {/* 已安装显示包名+版本号（mono micro 灰字，弱化技术参数）；右侧状态：更新中… / 新版（可点更新）/ 更新（查不到最新版时的回退）；已是最新则不显示 */}
                   {det?.binaryPath ? (
-                    <span className="font-mono text-xs text-l4">
+                    <span className="font-mono text-micro text-l4">
                       {agent.binary} {det.version ?? ""}
                     </span>
                   ) : (
@@ -1651,7 +1853,7 @@ export default function ProfilesPage() {
                       onClick={() =>
                         setModal({ initial: null, presetAgent: agent.id })
                       }
-                      className="h-7 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+                      className={rowActionClass}
                     >
                       + 添加连接
                     </button>
@@ -1667,26 +1869,23 @@ export default function ProfilesPage() {
                       const tuiPrefill = interactiveUpdatePrefill(info);
                       if (updateResults[agent.id]?.ok) return null;
                       if (info && !info.outdated && info.latest) {
-                        // 已最新：仅在 brew 渠道滞后于上游 npm 时挂小字提示，否则不显示
+                        // brew 已最新但上游 npm 更高（渠道滞后边角场景）：不再常驻一串小字
+                        // 挤组头，收成一枚安静的 ⧉ 图标钮——tooltip 承载完整说明，点击复制渠道切换命令
                         const note = upstreamNoteText(info);
                         const cmd = upstreamCommand(info);
-                        return note ? (
-                          <span className="flex items-center gap-1 text-xs text-l4">
-                            <span title={note}>{note}</span>
-                            {cmd && (
-                              <button
-                                type="button"
-                                title={`复制渠道切换命令：${cmd}\n含义：卸载 brew 版本并改装 npm 版本（之后更新走 npm 渠道，Ccode 自动按 npm 检查）`}
-                                onClick={() =>
-                                  void navigator.clipboard.writeText(cmd)
-                                }
-                                className={`flex size-6 items-center justify-center rounded-sm text-l4 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
-                              >
-                                ⧉
-                              </button>
-                            )}
-                          </span>
-                        ) : null;
+                        if (!note || !cmd) return null;
+                        return (
+                          <button
+                            type="button"
+                            title={`${note}\n点击复制渠道切换命令：${cmd}\n含义：卸载 brew 版本并改装 npm 版本（之后更新走 npm 渠道，Ccode 自动按 npm 检查）`}
+                            onClick={() =>
+                              void navigator.clipboard.writeText(cmd)
+                            }
+                            className="flex size-6 shrink-0 items-center justify-center rounded-sm text-l4 transition-colors hover:bg-hover hover:text-cta"
+                          >
+                            ⧉
+                          </button>
+                        );
                       }
                       if (info?.outdated)
                         return (
@@ -1845,11 +2044,48 @@ export default function ProfilesPage() {
                         </button>
                       </div>
                     ) : (
-                      <ul className="space-y-1 overflow-x-auto px-2 py-2">
-                        {list.map((profile) => (
+                      // 行间极细分割线（hairline）替代卡片间距：整列垂直严格对齐，视觉节奏与官方账号行一致
+                      <ul className="divide-y divide-hairline overflow-x-auto">
+                        {list.map((profile) => {
+                          const hidden = (
+                            settings?.hiddenProfiles ?? []
+                          ).includes(profile.id);
+                          const isDefault =
+                            settings?.defaultProfiles?.[profile.agent] ===
+                            profile.id;
+                          const isGlobal =
+                            settings?.activeGlobalProfiles?.[profile.agent] ===
+                            profile.id;
+                          const verified =
+                            validationMap[profile.id]?.ok === true;
+                          // caption 行（名称下方次级辅助文本）：上次使用 · 默认 · 全局生效
+                          const caption: {
+                            text: string;
+                            tip: string;
+                            cls?: string;
+                          }[] = [];
+                          if (profile.lastUsedAt)
+                            caption.push({
+                              text: `上次使用 ${relTime(profile.lastUsedAt)}`,
+                              tip: `上次使用 ${absTime(profile.lastUsedAt)}`,
+                            });
+                          if (isDefault)
+                            caption.push({
+                              text: "默认",
+                              tip: "终端启动栏选这个 agent 时默认使用",
+                            });
+                          // 「设为全局」追踪标记：只代表上次由 Ccode 写入全局配置，
+                          // 外部手改配置文件后会失真——tip 照实说明，不声称绝对生效
+                          if (isGlobal)
+                            caption.push({
+                              text: "全局生效",
+                              tip: "上次由 Ccode 写入该 agent 的全局配置：外部终端/其他工具里的该 CLI 用这套。在 Ccode 之外手改配置文件后此标记可能失真",
+                              cls: "text-ok-text",
+                            });
+                          return (
                           <li
                             key={profile.id}
-                            className="group grid min-h-14 grid-cols-[minmax(150px,1.1fr)_minmax(140px,0.9fr)_minmax(150px,1fr)_110px_120px] items-center gap-3 rounded-md px-2 text-sm transition-colors hover:bg-hover/60"
+                            className={`group grid min-h-14 ${PROFILE_GRID} items-center gap-3 px-4 text-sm transition-colors hover:bg-hover/60`}
                           >
                             <span className="min-w-0">
                               <span
@@ -1858,39 +2094,24 @@ export default function ProfilesPage() {
                               >
                                 {profile.name}
                                 {profileIssues[profile.id] ? (
-                                  <span className="ml-1.5 rounded-sm bg-err px-1 py-0.5 text-micro text-err-text" title={profileIssues[profile.id].reason}>配置失效</span>
-                                ) : validationMap[profile.id]?.ok ? (
-                                  <span className="ml-1.5 rounded-sm bg-ok px-1 py-0.5 text-micro text-ok-text" title={`最近验证 ${validationMap[profile.id].checkedAt}`}>已验证</span>
+                                  <StatusPill tone="err" tip={profileIssues[profile.id].reason}>配置失效</StatusPill>
+                                ) : hidden ? (
+                                  <StatusPill tone="muted" tip="已停用：不会被恢复会话和 AI 功能自动挑中；启动栏下拉里沉到「已停用」分组，仍可手选">已停用</StatusPill>
+                                ) : verified ? (
+                                  <StatusPill tone="ok" tip={`最近验证 ${validationMap[profile.id].checkedAt}`}>已验证</StatusPill>
                                 ) : (
-                                  <span className="ml-1.5 rounded-sm bg-inset px-1 py-0.5 text-micro text-l4">未验证</span>
-                                )}
-                                {(settings?.hiddenProfiles ?? []).includes(
-                                  profile.id,
-                                ) && (
-                                  <span
-                                    className="ml-1.5 rounded-sm bg-inset px-1 py-0.5 text-micro font-normal text-l4"
-                                    title="已隐藏：仍可用，只是在启动栏下拉里沉到「更多」"
-                                  >
-                                    已隐藏
-                                  </span>
-                                )}
-                                {settings?.defaultProfiles?.[profile.agent] ===
-                                  profile.id && (
-                                  <span
-                                    className="ml-1.5 rounded-sm bg-inset px-1 py-0.5 text-micro font-normal text-l3"
-                                  title="终端启动栏选这个 agent 时默认使用"
-                                  >
-                                    默认
-                                  </span>
+                                  <StatusPill tone="muted" tip="尚未验证；行尾 ⋯ 菜单可手动「验证」">未验证</StatusPill>
                                 )}
                               </span>
-                              {/* 次级行：micro 档灰字，相对时间主显、悬浮给绝对时间（白话双层）；从未使用不渲染 */}
-                              {profile.lastUsedAt && (
-                                <span
-                                  className="mt-0.5 block truncate font-mono text-micro text-l4"
-                                  title={`上次使用 ${absTime(profile.lastUsedAt)}`}
-                                >
-                                  上次使用 {relTime(profile.lastUsedAt)}
+                              {/* caption 行：micro 档灰字，相对时间主显、悬浮给绝对时间（白话双层） */}
+                              {caption.length > 0 && (
+                                <span className="mt-0.5 block truncate text-micro text-l4">
+                                  {caption.map((c, i) => (
+                                    <span key={c.text} title={c.tip} className={c.cls}>
+                                      {i > 0 ? " · " : ""}
+                                      {c.text}
+                                    </span>
+                                  ))}
                                 </span>
                               )}
                             </span>
@@ -1910,10 +2131,10 @@ export default function ProfilesPage() {
                                   ? displayHost(profile.baseUrl)
                                   : "默认端点"}
                             </span>
-                            {/* 模型列 Code Tag 化（v3.93）：前 3 个平铺，其余折叠为 +N；
+                            {/* 模型列轻量化：mono micro 纯文字（不套底色块），前 3 个平铺，其余折叠为 +N；
                                 列宽装不下时 overflow 裁切，悬浮 title 始终给全文 */}
                             <span
-                              className="flex min-w-0 items-center gap-1 overflow-hidden"
+                              className="flex min-w-0 items-center gap-1.5 overflow-hidden"
                               title={
                                 profile.models.length > 0
                                   ? profile.models.join(" · ")
@@ -1925,13 +2146,13 @@ export default function ProfilesPage() {
                                   {profile.models.slice(0, 3).map((m) => (
                                     <span
                                       key={m}
-                                      className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 font-mono text-micro text-l2"
+                                      className="shrink-0 font-mono text-micro text-l3"
                                     >
                                       {m}
                                     </span>
                                   ))}
                                   {profile.models.length > 3 && (
-                                    <span className="shrink-0 rounded-sm bg-inset px-1 py-0.5 font-mono text-micro text-l4">
+                                    <span className="shrink-0 font-mono text-micro text-l4">
                                       +{profile.models.length - 3}
                                     </span>
                                   )}
@@ -1971,27 +2192,31 @@ export default function ProfilesPage() {
                             )}
                             <span className="flex items-center justify-end gap-1 whitespace-nowrap">
                               {/* 「在终端使用」（v3.88）：配置页原本没有任何通往终端的路——
-                                  建完配置只能自己去终端页再选一遍。hover 才现（常驻位给「编辑」） */}
+                                  建完配置只能自己去终端页再选一遍。
+                                  低频入口 = hover 才现的 28px 图标 ghost 钮（常驻位只留「编辑」），
+                                  操作列才塞得下、行高不被撑乱 */}
                               <button
                                 type="button"
                                 onClick={() => useTerminalWith(profile)}
-                                title="用这个连接新开一个终端标签"
-                                className={`${rowActionClass} ${hoverRevealClass}`}
+                                title="在终端使用：用这个连接新开一个终端标签"
+                                aria-label={`在终端使用：${profile.name}`}
+                                className={`flex h-7 w-7 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
                               >
-                                ⌨ 在终端使用
+                                <SquareTerminal size={14} strokeWidth={1.8} aria-hidden="true" />
                               </button>
                               <button
                                 type="button"
                                 onClick={() => void useExternalWith(profile)}
-                                title="用这个连接在外部终端新开会话"
-                                className={`${rowActionClass} ${hoverRevealClass}`}
+                                title="外部终端：用这个连接在外部终端新开会话"
+                                aria-label={`外部终端打开：${profile.name}`}
+                                className={`flex h-7 w-7 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
                               >
-                                ⇗ 外部终端
+                                <SquareArrowOutUpRight size={14} strokeWidth={1.8} aria-hidden="true" />
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setModal({ initial: profile })}
-                                className={rowActionClass}
+                                className={ghostActionClass}
                               >
                                 编辑
                               </button>
@@ -2013,7 +2238,8 @@ export default function ProfilesPage() {
                               </button>
                             </span>
                           </li>
-                        ))}
+                          );
+                        })}
                       </ul>
                     )}
                   </div>
@@ -2157,14 +2383,15 @@ export default function ProfilesPage() {
           onClose={() => setRowMenu(null)}
           items={[
             {
-              // 「停用」的准确形态：不动数据、不动行为，只让它别在启动栏下拉里挡路。
+              // 「停用」的准确形态（软停用）：不动数据、不动启动行为，只让自动路径
+              // （启动栏预选/兜底、恢复会话、AI 功能回落）不再挑中它；手动指定仍可用。
               // 真正的「禁用」在注入模式下无意义——配置只在启动那一刻生效，
               // 没被选中的配置本来就不产生任何作用
               label: (settings?.hiddenProfiles ?? []).includes(rowMenu.profile.id)
-                ? "取消隐藏"
-                : "隐藏此连接",
+                ? "取消停用"
+                : "停用此连接",
               title:
-                "仍可正常使用，只是在启动栏下拉里沉到「更多」",
+                "不再被恢复会话和 AI 功能自动挑中；启动栏下拉里沉到「已停用」分组，仍可手选",
               onSelect: () => void toggleHiddenProfile(rowMenu.profile),
             },
             {
@@ -2230,14 +2457,26 @@ export default function ProfilesPage() {
                   ? "官方账号不写入全局配置"
                   : rowMenu.profile.noAuth
                     ? "无密钥连接不写入全局配置"
-                    : caps[rowMenu.profile.agent]?.setGlobal.reason,
+                    : (caps[rowMenu.profile.agent]?.setGlobal.reason ??
+                      "写入该 agent 的全局配置文件（先备份、失败自动回滚）；成功后此连接标记「全局生效」，供外部终端使用"),
               onSelect: () => void onApplyGlobal(rowMenu.profile),
             },
             ...(globalBackups[rowMenu.profile.agent]
               ? [
                   {
                     label: "恢复备份",
+                    title: "恢复最近一次写入前的状态",
                     onSelect: () => void onRestoreBackup(rowMenu.profile.agent),
+                  },
+                ]
+              : []),
+            ...(originalBackups[rowMenu.profile.agent]
+              ? [
+                  {
+                    label: "恢复初始状态",
+                    title:
+                      "恢复到 Ccode 首次写入前的原始配置（永久快照，连续多次设为全局也回得去）",
+                    onSelect: () => void onRestoreOriginal(rowMenu.profile.agent),
                   },
                 ]
               : []),
@@ -2268,6 +2507,28 @@ export default function ProfilesPage() {
           running={validationDialog.running}
           onClose={() => {
             if (!validationDialog.running) setValidationDialog(null);
+          }}
+        />
+      )}
+      {applyDialog && (
+        <GlobalApplyDialog
+          profile={applyDialog.profile}
+          running={applyDialog.running}
+          applied={applyDialog.applied}
+          error={applyDialog.error}
+          onClose={() => {
+            if (!applyDialog.running) setApplyDialog(null);
+          }}
+          onShowValidation={() => {
+            // 「查看验证详情」：进度/结果层换三层验证层（同一份 validation 数据）
+            if (applyDialog.applied) {
+              setValidationDialog({
+                profile: applyDialog.profile,
+                result: applyDialog.applied.validation,
+                running: false,
+              });
+            }
+            setApplyDialog(null);
           }}
         />
       )}

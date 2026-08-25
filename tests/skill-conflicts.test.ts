@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { skillOutputConflicts } from "../src/skill-conflicts.ts";
+import { skillChainWarnings, skillOutputConflicts } from "../src/skill-conflicts.ts";
 import type { SkillDto } from "../src/types.ts";
 
 const skill = (name: string, outputs?: string[]) =>
@@ -65,4 +65,67 @@ test("skillOutputConflicts：多对冲突逐对列出", () => {
     { a: "a", b: "c", output: "analysis/" },
     { a: "b", b: "c", output: "analysis/stats-check.md" },
   ]);
+});
+
+const iface = (name: string, inputs?: string[], outputs?: string[], inferred = false) =>
+  ({ name, inputs, outputs, interfaceInferred: inferred }) as SkillDto;
+
+test("skillChainWarnings：读入有上游供给/目录覆盖/通配覆盖时不报", () => {
+  const lib = [
+    iface("lit-notes", ["papers/included.md", "references.bib"], ["notes/"]),
+  ];
+  // 精确供给 + 目录供给
+  assert.deepEqual(
+    skillChainWarnings(
+      ["lit-notes"],
+      lib,
+      ["papers/", "references.bib"],
+      ["notes/*.md"],
+    ),
+    [],
+  );
+  // 通配供给覆盖目录需求
+  assert.deepEqual(
+    skillChainWarnings(["lit-notes"], lib, ["papers/", "references.bib"], []),
+    [],
+  );
+  const lib2 = [iface("fw", ["notes/"], ["outline.md"])];
+  assert.deepEqual(
+    skillChainWarnings(["fw"], lib2, ["notes/*.md"], ["outline.md"]),
+    [],
+  );
+});
+
+test("skillChainWarnings：读入无供给与产出未进预期产物分别报 input/output", () => {
+  const lib = [
+    iface("ext-skill", ["papers/corpus.csv"], ["report/summary.md"], true),
+  ];
+  const warnings = skillChainWarnings(
+    ["ext-skill"],
+    lib,
+    ["papers/screening.md"],
+    ["report.md"],
+  );
+  assert.deepEqual(warnings, [
+    { skill: "ext-skill", kind: "input", path: "papers/corpus.csv", inferred: true },
+    { skill: "ext-skill", kind: "output", path: "report/summary.md", inferred: true },
+  ]);
+});
+
+test("skillChainWarnings：未入库/无接口技能不参与；预期产物为空不检 output 侧", () => {
+  const lib = [iface("plain")];
+  assert.deepEqual(
+    skillChainWarnings(["plain", "ghost"], lib, [], ["x.md"]),
+    [],
+  );
+  const lib2 = [iface("w", [], ["anything.md"])];
+  assert.deepEqual(skillChainWarnings(["w"], lib2, [], []), []);
+});
+
+test("skillChainWarnings：路径归一化后判定（./ 前缀、反斜杠）", () => {
+  const lib = [iface("s", ["./papers\\included.md"], [])];
+  assert.deepEqual(
+    skillChainWarnings(["s"], lib, ["papers/"], ["x.md"]),
+    [],
+  );
 });

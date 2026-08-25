@@ -1,6 +1,7 @@
 /**
  * 渠道间版本差提示（check_agent_updates 的 upstreamNote / upstreamPackage）：
- * brew 渠道已最新但上游 npm 已更新时给组头小字文案 + 可复制的 npm 安装命令；
+ * brew 渠道已最新但上游 npm 已更新时，组头版本区给一枚 ⧉ 图标钮——tooltip 说明 +
+ * 点击复制 npm 渠道切换命令（不常驻文字占位，见 ProfilesPage 组头）；
  * 有 brew 更新可升（outdated）或查不到上游版本时不提示。
  */
 export function upstreamNoteText(info: {

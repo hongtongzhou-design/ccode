@@ -46,8 +46,14 @@ test("shortenCommand 逐 token 缩略后拼接，短路径原样", () => {
   );
 });
 
-test("协议徽章：remote 蓝 / stdio 紫，底色 10% 混合", () => {
-  assert.equal(mcpKindBadgeStyle("remote").color, "#4f8ef7");
-  assert.equal(mcpKindBadgeStyle("stdio").color, "#9a6ef3");
+test("协议徽章：remote 蓝 / stdio 紫，文字色随主题主文本色混 30% 自适应对比度", () => {
+  assert.equal(
+    mcpKindBadgeStyle("remote").color,
+    "color-mix(in srgb, #4f8ef7 70%, var(--color-l1))",
+  );
+  assert.equal(
+    mcpKindBadgeStyle("stdio").color,
+    "color-mix(in srgb, #9a6ef3 70%, var(--color-l1))",
+  );
   assert.match(mcpKindBadgeStyle("stdio").background, /color-mix/);
 });

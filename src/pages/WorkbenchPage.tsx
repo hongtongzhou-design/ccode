@@ -1,6 +1,7 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   ChevronRight,
   CircleDot,
@@ -11,6 +12,8 @@ import {
 import { useAppStore, runInboxAction } from "../store";
 import { buildRunOverview } from "../run-overview";
 import { relTime } from "../rel-time";
+import { alertDialog } from "../components/ConfirmDialog";
+import type { ProjectDto, RepoDto } from "../types";
 import {
   EmptyState,
   PageFrame,
@@ -25,6 +28,12 @@ function sessionTitle(session: {
   title: string | null;
 }): string {
   return session.customTitle?.trim() || session.title?.trim() || "未命名对话";
+}
+
+/** 与 WorkspacesPage samePath 同口径：统一分隔符 + 去尾部斜杠 */
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  return norm(a) === norm(b);
 }
 
 const iconClass = "shrink-0 text-l4";
@@ -62,10 +71,42 @@ function WorkbenchPage({
   const sessions = useAppStore((s) => s.sessions);
   const recentRepos = useAppStore((s) => s.recentRepos);
   const loadRecentRepos = useAppStore((s) => s.loadRecentRepos);
+  const setEnterCwdReq = useAppStore((s) => s.setEnterCwdReq);
+  const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
+  const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
+
+  // 已注册项目列表：区分跳转落点（已注册 → 项目详情；未注册 → 终端真进入）
+  const [projects, setProjects] = useState<ProjectDto[]>([]);
 
   useEffect(() => {
     if (visible) void loadRecentRepos();
   }, [loadRecentRepos, visible]);
+
+  useEffect(() => {
+    if (!visible) return;
+    invoke<ProjectDto[]>("list_projects")
+      .then(setProjects)
+      .catch(() => {});
+  }, [visible]);
+
+  /** 最近项目/继续工作的统一点击落点：已注册 → 选中项目详情；
+      未注册（外部终端干的活）→ 终端「真进入」（同终端页最近项目口径，先验证目录仍在） */
+  async function enterRepo(repo: RepoDto) {
+    const registered = projects.find((p) => samePath(p.path, repo.path));
+    if (registered) {
+      setSelectProjectReq(registered.path);
+      setPage("workspaces");
+      return;
+    }
+    try {
+      await invoke("list_dir", { path: repo.path, showHidden: false });
+    } catch {
+      await alertDialog(`目录不存在或已移动：${repo.path}`);
+      return;
+    }
+    setEnterCwdReq(repo.path);
+    setPage("terminal");
+  }
 
   const runOverview = useMemo(
     () => buildRunOverview(terminalRunInputs),
@@ -137,7 +178,12 @@ function WorkbenchPage({
                 <button
                   type="button"
                   className={primaryActionClass}
-                  onClick={() => setPage("workspaces")}
+                  onClick={() => {
+                    // 有项目上下文 = 回项目详情（项目页保留上次选中）；
+                    // 回落到最近仓库（可能未在 Ccode 注册）= 按统一点击落点跳转
+                    if (hasProjectContext) setPage("workspaces");
+                    else if (recentRepos[0]) void enterRepo(recentRepos[0]);
+                  }}
                 >
                   继续工作
                 </button>
@@ -243,7 +289,7 @@ function WorkbenchPage({
                   key={repo.path}
                   type="button"
                   className="group flex min-h-9 w-full items-center gap-3 rounded-md px-2.5 text-left transition-colors hover:bg-hover"
-                  onClick={() => setPage("workspaces")}
+                  onClick={() => void enterRepo(repo)}
                 >
                   <FolderOpen size={15} strokeWidth={1.8} className={iconClass} aria-hidden="true" />
                   <span className="min-w-0 flex-1 truncate text-sm text-l2">{repo.name}</span>
@@ -279,7 +325,15 @@ function WorkbenchPage({
                   key={`${session.agent}:${session.sessionId}`}
                   type="button"
                   className="group flex min-h-9 w-full items-center gap-3 rounded-md px-2.5 text-left transition-colors hover:bg-hover"
-                  onClick={() => setPage("sessions")}
+                  onClick={() => {
+                    // 精确打开该会话回放（对话页按 agent+sessionId 定位，
+                    // 同终端页「⤴对话」口径），不只是进对话页
+                    setOpenSessionReq({
+                      agent: session.agent,
+                      sessionId: session.sessionId,
+                    });
+                    setPage("sessions");
+                  }}
                 >
                   <MessageSquare size={15} strokeWidth={1.8} className={iconClass} aria-hidden="true" />
                   <span className="min-w-0 flex-1 truncate text-sm text-l2">{sessionTitle(session)}</span>

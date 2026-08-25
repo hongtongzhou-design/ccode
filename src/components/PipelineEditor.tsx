@@ -476,6 +476,29 @@ export default function PipelineEditor({
     const stale = d.resources.filter(
       (p) => !resources.some((r) => r.path === p),
     );
+    // 链路校验供给侧：上游步骤产物与其技能 outputs + 本步骤声明输入 + 项目资源
+    // （inputSuggestions 已含上游产物与资源；文本框按全部分隔符粗切，供给是集合，过切无害）
+    const chainSupply = [
+      ...inputSuggestions(i),
+      ...[d.inputsText, d.optionalInputsText, d.anyOfInputsText].flatMap(
+        (t) =>
+          t
+            .split(/[,，;；\n|]/)
+            .map((x) => x.trim())
+            .filter(Boolean),
+      ),
+      ...drafts
+        .slice(0, i)
+        .flatMap((s2) =>
+          s2.skills.flatMap(
+            (n) => skillLib?.find((x) => x.name === n)?.outputs ?? [],
+          ),
+        ),
+    ];
+    const expectedArtifacts = d.artifactsText
+      .split(/[,，]/)
+      .map((x) => x.trim())
+      .filter(Boolean);
     return (
       <div
         key={i}
@@ -635,6 +658,8 @@ export default function PipelineEditor({
               ?.filter((s) => s.mentionsMcp)
               .map((s) => s.name)}
             skillLib={skillLib}
+            chainSupply={chainSupply}
+            expectedArtifacts={expectedArtifacts}
             onChange={(next) =>
               patch(i, {
                 skills: next,

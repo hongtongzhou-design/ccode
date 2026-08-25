@@ -4,7 +4,7 @@
  * 供 node --test 直接测；组件 LitWatchCard 保持薄。
  * DTO 与 src-tauri/src/lit_watch.rs 的 camelCase 序列化一一对应。
  */
-import type { ScheduleDto } from "./types.ts";
+import type { LitWatchFilterDto, ScheduleDto } from "./types.ts";
 
 // ===== DTO（对照 lit_watch.rs；新命令的类型在本文件就近声明） =====
 
@@ -46,6 +46,83 @@ export interface JournalMetricsDto {
 export interface JournalMetricsStatusDto {
   available: boolean;
   journalCount: number;
+  /** 本地表下载时间（RFC3339；两份 CSV 取较新 mtime），未装为 null */
+  downloadedAt: string | null;
+}
+
+/** check_journal_metrics_update 返回 */
+export interface JournalMetricsUpdateDto {
+  /** 上游 ShowJCR 数据目录最近 commit 时间（RFC3339） */
+  upstreamUpdatedAt: string | null;
+  /** 上游比本地表新 */
+  hasUpdate: boolean;
+}
+
+/** 指标表按钮悬浮说明（纯逻辑）：表名 + 刊数 + 下载时间；上游有新版时改口「点我更新」。
+ *  rel 为相对时间函数（组件传 relTime，测试可注入假值） */
+export function metricsTooltip(
+  status: Pick<JournalMetricsStatusDto, "journalCount" | "downloadedAt">,
+  update: Pick<JournalMetricsUpdateDto, "upstreamUpdatedAt" | "hasUpdate"> | null,
+  rel: (iso: string | null) => string,
+): string {
+  const ago = rel(status.downloadedAt);
+  const base = `JCR2025 + 中科院分区表 2025 · ${status.journalCount} 种期刊${
+    ago ? ` · 下载于 ${ago}` : ""
+  }`;
+  if (update?.hasUpdate) {
+    const up = rel(update.upstreamUpdatedAt);
+    return `${base}；上游已有新版${up ? `（${up}）` : ""}，点我更新`;
+  }
+  return `${base}；出新版时点我重新下载即更新`;
+}
+
+// ===== 雷达筛选（与 lit_watch.rs metrics_pass_filter 同口径，改动需双端同步） =====
+
+/** 筛选是否生效（全空 = 不筛选） */
+export function litWatchFilterActive(
+  f: LitWatchFilterDto | null | undefined,
+): boolean {
+  return !!f && (f.minIf != null || f.maxCasQuartile != null || !!f.topOnly);
+}
+
+/** 条目是否通过筛选。指标未知（表未装 / 期刊未收录 / IF 不可解析）一律放行不误伤——
+ *  筛选只在有数据时生效，绝不用「查不到」当「不达标」 */
+export function entryPassesFilter(
+  metrics: WatchEntryDto["metrics"],
+  f: LitWatchFilterDto | null | undefined,
+): boolean {
+  // 全空筛选各条件自然全部跳过，无需单独判 active
+  if (!f || !metrics) return true;
+  if (f.minIf != null && metrics.impactFactor != null) {
+    const v = Number(metrics.impactFactor);
+    // IF 存在但不可解析 = 未知 → 放行（Number("")=0 之类不纳入：后端空串不落字段）
+    if (Number.isFinite(v) && metrics.impactFactor.trim() !== "" && v < f.minIf) {
+      return false;
+    }
+  }
+  if (
+    f.maxCasQuartile != null &&
+    metrics.casQuartile != null &&
+    metrics.casQuartile > f.maxCasQuartile
+  ) {
+    return false;
+  }
+  if (f.topOnly && !metrics.top) return false;
+  return true;
+}
+
+/** 筛选摘要（按钮悬浮/提示行用）：「IF≥10 · 2 区及以上 · 仅 TOP」 */
+export function litWatchFilterLabel(
+  f: LitWatchFilterDto | null | undefined,
+): string {
+  if (!f) return "";
+  const parts: string[] = [];
+  if (f.minIf != null) parts.push(`IF≥${f.minIf}`);
+  if (f.maxCasQuartile != null) {
+    parts.push(f.maxCasQuartile === 1 ? "仅 1 区" : `${f.maxCasQuartile} 区及以上`);
+  }
+  if (f.topOnly) parts.push("仅 TOP");
+  return parts.join(" · ");
 }
 
 /** watch-followup.md 待办（付费墙/无摘要，待人工获取全文） */

@@ -28,7 +28,9 @@
 - **多阶段 Git 操作必须返回结构化阶段结果**：commit/push、merge/archive、push/PR 任一后阶段失败时，前阶段成功事实必须
   保留并明示；UI 只重试失败阶段，禁止把部分成功显示成整体失败或诱导重复提交、重复合并。
 - **全局配置写入/恢复按 agent 整批事务处理**：先生成并验证全部目标内容，再为同批目标建清单备份、写完并同步全部临时文件，
-  最后替换；中途失败自动回滚整批。恢复必须选最近一个完整批次，恢复前先备份当前状态，且不得移动/消耗原恢复点。
+  最后替换；中途失败自动回滚整批。恢复分两档：「恢复备份」选最近一个完整批次（每 tag 轮换留 5 份），恢复前先备份当前状态、
+  不得移动/消耗原恢复点；「恢复初始状态」走 `backups/<agent>/original/` 永久快照（首次 apply 时落、不参与轮换——
+  轮换窗口会被连续写入烧穿，见架构 v3.146），快照里不存在的文件恢复即删除。
 - **Profile“保存成功”不等于“可用”**：验证固定三层——本地字段/活配置解析、CLI doctor/启动预检、最小 API 请求；密钥仅在
   Rust 层参与验证，结果统一脱敏。「设为全局」成功后必须自动执行本地与 CLI 配置复检。
 - **官方账号 profile 只读检测 + env 净化**：CLI auth 文件只读探测「已连接」，断开引导用户用 CLI 自己的 logout；官方账号
@@ -111,5 +113,5 @@
   走 `create_skill`/`update_skill_content`：重名拒绝并引导改用「编辑内容」；编辑经临时目录走既有覆盖路径（覆盖前备份、
   辅助文件保留、source/repo 不改写）；◈ 优化开终端让 Agent 直改库文件，备份兜底仍靠保存/覆盖路径。**内置技能更新**
   （`apply_builtin_skill_update`）= 覆盖前原文件自动备份为同目录 `SKILL.md.bak-<yyyymmdd>`（同日重名追加 -2/-3），种子内容原子写入。
-- **技能产物冲突检测（outputs 声明）**：内置技能 SKILL.md frontmatter 声明 `outputs` 字段（YAML 列表，行内 `[a, b]` 与多行 `- a` 两种写法解析都容忍，缺字段 = 空数组；目录带尾斜杠、文件写全路径，只声明会写的主要产物），`parse_skill_md` 解析进 `SkillDto.outputs`（list 时现算，不入库文件；`compose_skill_md` 不写该字段——用户自建技能不参与检测）。分发随目录走不受影响，CLI 端对未知 frontmatter 字段一律忽略。检测为纯逻辑（`src/skill-conflicts.ts` 的 `skillOutputConflicts`）：同一步骤挂载技能的 outputs 两两比对，路径相同或互为目录前缀（如 `papers/` 与 `papers/inbox.md`）即报一对冲突，StepSkillsChips 警告行提示分工——只提醒不拦截。
+- **技能接口声明（inputs/outputs）与产物冲突/链路检测**：技能 SKILL.md frontmatter 可声明 `outputs`（产物路径）与 `inputs`（读取路径）字段（YAML 列表，行内 `[a, b]` 与多行 `- a` 两种写法解析都容忍，缺字段 = 空数组；目录带尾斜杠、文件写全路径，只声明主要读写产物），`parse_skill_md` 解析进 `SkillDto.outputs/inputs`（list 时现算，不入库文件）。`compose_skill_md`/`update_content_impl` 支持写接口声明，普通编辑（interface=None）保留库中已声明的 inputs/outputs 不静默丢弃。外部技能未声明时由 `infer_interface_from_body` 从正文推断兜底（逐行找路径 token、按行内动词分类读入/产出、双侧动词不猜、每侧上限 8 条；推断只进 DTO 并打 `interface_inferred` 标，不回写 SKILL.md）。分发随目录走不受影响，CLI 端对未知 frontmatter 字段一律忽略。检测为纯逻辑（`src/skill-conflicts.ts`）：① `skillOutputConflicts`——同一步骤挂载技能的 outputs 两两比对，路径相同或互为目录前缀即报冲突；② `skillChainWarnings`——技能 inputs 对「上游步骤产物 + 本步骤声明输入 + 项目资源」（调用方汇总成 supply）逐条找供给，outputs 对本步骤 expectedArtifacts 对账（含 `*` 通配与目录/文件互含判定），缺供给/未进预期产物即报；推断接口照检但文案标「推断」。StepSkillsChips 警告行逐条提示——只提醒不拦截。
 - **技能分类批量回填**：`backfill_skill_categories` 只给「GitHub 来源 + 无分类」的技能补仓库名分类（自动分类 #15 之前的存量导入），已有分类一律不动、幂等；入口在技能页顶部 ⋯。

@@ -56,7 +56,13 @@ fn target_specs(agent: &str) -> Vec<(&'static str, &'static str)> {
             ("config.toml", ".codex/config.toml"),
             ("auth.json", ".codex/auth.json"),
         ],
-        "gemini" => vec![(".env", ".gemini/.env")],
+        "gemini" => vec![
+            (".env", ".gemini/.env"),
+            // 光有 .env 不够：gemini ≥0.46 在 base URL 存在时把 env 推断为 gateway 认证，
+            // validateAuthMethod 不认 → headless 直接报 auth 错起不来；必须落
+            // settings.json 的 selectedType="gemini-api-key"（cc-switch 同口径，审计实证）
+            ("settings.json", ".gemini/settings.json"),
+        ],
         "qwen" => vec![("settings.json", ".qwen/settings.json")],
         "opencode" => vec![("opencode.json", ".config/opencode/opencode.json")],
         "codebuddy" => vec![("settings.json", ".codebuddy/settings.json")],
@@ -209,6 +215,22 @@ fn patch_codex_auth(existing: Option<&str>, key: &str) -> Result<String, String>
     to_pretty(&v)
 }
 
+/// gemini 的 settings.json：只补 security.auth.selectedType = "gemini-api-key"——
+/// 光有 .env 的 GEMINI_API_KEY 时 gemini ≥0.46 无法推断认证方式（base URL 存在时
+/// env 推断为 gateway，validateAuthMethod 不认 → headless 报 auth 错起不来），
+/// cc-switch 同口径。settings.json 是 JSONC（容忍注释/尾逗号，读侧剥注释后重写为
+/// 严格 JSON），其余字段一律保留
+fn patch_gemini_settings(existing: Option<&str>) -> Result<String, String> {
+    let mut v = match existing {
+        Some(text) => serde_json::from_str::<Value>(&crate::mcp::strip_jsonc(text))
+            .map_err(|e| format!("现有 settings.json 解析失败，已停止写入: {e}"))?,
+        None => json!({}),
+    };
+    ensure_obj(&mut v, &["security", "auth"])?
+        .insert("selectedType".into(), json!("gemini-api-key"));
+    to_pretty(&v)
+}
+
 fn patch_opencode_config(
     existing: Option<&str>,
     provider: Value,
@@ -257,14 +279,21 @@ fn patch_codex_config(
 ) -> Result<String, String> {
     use toml_edit::value;
     let mut doc = parse_toml_doc(existing)?;
-    // 与 launch_plan 的 -c 注入同构：内联一个名为 ccode 的 Responses API provider
+    // 与 launch_plan 的 -c 注入同构：内联一个名为 ccode 的 Responses API provider。
+    // 认证走 requires_openai_auth = true：codex 自定义 provider 只从 env_key 环境变量取
+    // 密钥、不读 auth.json（0.149.1 实测），该开关让它改用 OpenAI 认证 = auth.json 的
+    // OPENAI_API_KEY（patch_codex_auth 已写入）——外部终端零 export 直接可用。
+    // 旧版写入遗留的 env_key 行顺手清掉（该表归 Ccode 管，留着只会误导）
     let providers = sub_table(doc.as_item_mut(), "model_providers")?;
     let ccode = sub_table(providers, "ccode")?;
     ccode["name"] = value("Ccode");
     if let Some(u) = base_url {
         ccode["base_url"] = value(u);
     }
-    ccode["env_key"] = value("CODEX_API_KEY");
+    if let Some(t) = ccode.as_table_mut() {
+        t.remove("env_key");
+    }
+    ccode["requires_openai_auth"] = value(true);
     ccode["wire_api"] = value("responses");
     doc["model_provider"] = value("ccode");
     if let Some(m) = model {
@@ -482,6 +511,10 @@ fn plan_writes(
                 let content = patch_env_file(read_existing(&path).as_deref(), &pairs)?;
                 push(".env", path, content);
             }
+            // 认证方式落盘（见 patch_gemini_settings 注释：没有它 headless 起不来）
+            let path = home.join(".gemini/settings.json");
+            let content = patch_gemini_settings(read_existing(&path).as_deref())?;
+            push("settings.json", path, content);
         }
         "qwen" => {
             let protocol = profile.protocol.as_deref().unwrap_or("openai");
@@ -890,6 +923,11 @@ fn transact(
     }
     let id = batch_id();
     let originals = backup_actions(backups_dir, &id, operation, actions)?;
+    // apply 时顺带保证「首次写入前」原始快照存在（永久保留，不参与轮换）；
+    // 快照内容 = 本次读到的写入前状态，即使后面的提交失败回滚也依然准确
+    if operation == "apply" {
+        ensure_original_snapshot(backups_dir, actions, &originals);
+    }
     let staged = match stage_actions(actions, &id) {
         Ok(staged) => staged,
         Err(e) => {
@@ -924,6 +962,88 @@ fn apply_plans(
         })
         .collect();
     transact(backups_dir, home, &actions, "apply")
+}
+
+// ===== 「首次写入前」原始快照（永久保留，不参与 5 份轮换） =====
+//
+// 动机：常规批次备份每个 tag 只留 5 份、清单也只留 5 份——连续「设为全局」几次后，
+// 最早的「Ccode 动手之前」的状态就被轮换掉了，「恢复备份」只能回到上一次写入前，
+// 用户真正想要的「恢复默认」永远够不到。original/ 子目录在首次 apply 时落一份，
+// 之后任何 apply/restore 都不碰（prune 只扫扁平的 <tag>.*.bak 与 batch.*.json）。
+
+fn original_dir(backups_dir: &Path) -> PathBuf {
+    backups_dir.join("original")
+}
+
+/// 首次 apply 时用写入前内容（originals）落永久快照；已存在则不动。
+/// 失败只记日志不否决主流程（常规批次备份链仍可用）；半份快照清掉下次重试
+fn ensure_original_snapshot(
+    backups_dir: &Path,
+    actions: &[TxAction],
+    originals: &[Option<Vec<u8>>],
+) {
+    let dir = original_dir(backups_dir);
+    if dir.join("manifest.json").is_file() {
+        return;
+    }
+    let result = (|| -> Result<(), String> {
+        // 目录要先建：全部目标在首次写入前都不存在时，循环里不会走到建目录的分支
+        fs::create_dir_all(&dir).map_err(|e| format!("创建原始快照目录失败: {e}"))?;
+        let mut entries = Vec::new();
+        for (action, original) in actions.iter().zip(originals) {
+            let backup_file = if let Some(bytes) = original {
+                // 不可变快照，文件名直接用 tag（不需要时间戳）
+                write_private_file(&dir.join(&action.tag), bytes)?;
+                Some(action.tag.clone())
+            } else {
+                None
+            };
+            entries.push(BackupEntry {
+                tag: action.tag.clone(),
+                target: action.path.to_string_lossy().into_owned(),
+                existed: original.is_some(),
+                backup_file,
+            });
+        }
+        let mut text = serde_json::to_string_pretty(&BackupManifest {
+            batch_id: "original".into(),
+            operation: "original".into(),
+            entries,
+        })
+        .map_err(|e| e.to_string())?;
+        text.push('\n');
+        write_private_file(&dir.join("manifest.json"), text.as_bytes())
+    })();
+    if let Err(e) = result {
+        crate::logbuf::record("error", "global-config", &format!("写入原始快照失败: {e}"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// 恢复到「Ccode 首次写入前」的原始状态：快照里不存在的文件 = 当时是 Ccode 新建的，
+/// 恢复即删除（transact 会先把当前状态存成常规批次，可再恢复回来）
+fn restore_from_original(backups_dir: &Path, home: &Path) -> Result<Vec<String>, String> {
+    let dir = original_dir(backups_dir);
+    let manifest: BackupManifest = serde_json::from_str(
+        &fs::read_to_string(dir.join("manifest.json"))
+            .map_err(|e| format!("读取原始快照清单失败: {e}"))?,
+    )
+    .map_err(|e| format!("原始快照清单损坏: {e}"))?;
+    let mut actions = Vec::new();
+    for entry in manifest.entries {
+        let content = match &entry.backup_file {
+            Some(name) => Some(
+                fs::read(dir.join(name)).map_err(|e| format!("读取原始快照失败: {e}"))?,
+            ),
+            None => None,
+        };
+        actions.push(TxAction {
+            tag: entry.tag,
+            path: PathBuf::from(entry.target),
+            content,
+        });
+    }
+    transact(backups_dir, home, &actions, "restore-original")
 }
 
 fn latest_valid_manifest(dir: &Path) -> Option<BackupManifest> {
@@ -1008,6 +1128,9 @@ pub async fn apply_profile_global(
         let plans = plan_writes(&home, &profile, key.as_deref(), &profile.models)?;
         let backups_dir = backups_root()?.join(&profile.agent);
         let files = apply_plans(&backups_dir, &home, &plans)?;
+        // 写成功即记录「全局生效」追踪（settings.active_global_profiles）；后面的验证
+        // 失败不影响记录——文件已真实写入，验证只是体检报告
+        crate::settings::record_active_global(&profile.agent, &profile.id);
         let validation =
             crate::profile_validation::validate_after_global_write(&profile, key.as_deref());
         Ok(GlobalApplyResultDto { files, validation })
@@ -1024,7 +1147,38 @@ pub async fn restore_global_backup(agent: String) -> Result<Vec<String>, String>
             .unwrap_or_else(|e| e.into_inner());
         let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
         let dir = backups_root()?.join(&agent);
-        restore_from(&dir, &home, &agent)
+        let restored = restore_from(&dir, &home, &agent)?;
+        // 恢复后全局内容不再是任何 profile 的快照，清除「全局生效」追踪
+        crate::settings::clear_active_global(&agent);
+        Ok(restored)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn has_original_backup(agent: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || {
+        backups_root()
+            .map(|r| r.join(&agent).join("original").join("manifest.json").is_file())
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn restore_original_backup(agent: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = GLOBAL_CONFIG_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
+        let dir = backups_root()?.join(&agent);
+        let restored = restore_from_original(&dir, &home)?;
+        // 恢复初始状态后同样清除「全局生效」追踪
+        crate::settings::clear_active_global(&agent);
+        Ok(restored)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1111,7 +1265,7 @@ mod tests {
 
     #[test]
     fn codex_config_patch_preserves_other_tables() {
-        let existing = "[other]\nkeep = 1\n\n[model_providers.ccode]\nold = \"x\"\n";
+        let existing = "[other]\nkeep = 1\n\n[model_providers.ccode]\nold = \"x\"\nenv_key = \"CODEX_API_KEY\"\n";
         let out = patch_codex_config(
             Some(existing),
             Some("https://r.example.com/v1"),
@@ -1124,7 +1278,10 @@ mod tests {
         let ccode = &doc["model_providers"]["ccode"];
         assert_eq!(ccode["name"].as_str(), Some("Ccode"));
         assert_eq!(ccode["base_url"].as_str(), Some("https://r.example.com/v1"));
-        assert_eq!(ccode["env_key"].as_str(), Some("CODEX_API_KEY"));
+        // 认证改走 requires_openai_auth（auth.json 的 OPENAI_API_KEY 直接可用）；
+        // 旧版写入遗留的 env_key 行被清掉（自定义 provider 的 env_key 只认环境变量）
+        assert!(ccode.get("env_key").is_none());
+        assert_eq!(ccode["requires_openai_auth"].as_bool(), Some(true));
         assert_eq!(ccode["wire_api"].as_str(), Some("responses"));
         // 表内既有键不被清掉
         assert_eq!(ccode["old"].as_str(), Some("x"));
@@ -1145,6 +1302,21 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["OPENAI_API_KEY"], "sk-secret");
         assert_eq!(v["tokens"]["id_token"], "abc");
+    }
+
+    #[test]
+    fn gemini_settings_patch_adds_selected_type_and_tolerates_jsonc() {
+        // 从无到有
+        let v: Value = serde_json::from_str(&patch_gemini_settings(None).unwrap()).unwrap();
+        assert_eq!(v["security"]["auth"]["selectedType"], "gemini-api-key");
+        // JSONC 容错（注释 + 尾逗号），既有字段保留
+        let existing = "{\n  // 主题\n  \"theme\": \"dark\",\n}\n";
+        let v: Value =
+            serde_json::from_str(&patch_gemini_settings(Some(existing)).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["security"]["auth"]["selectedType"], "gemini-api-key");
+        // 损坏文件拒写（fail-loud），不静默覆盖
+        assert!(patch_gemini_settings(Some("{ not json")).is_err());
     }
 
     #[test]
@@ -1478,6 +1650,51 @@ mod tests {
         assert!(target.exists());
         restore_from(&backups, &home, "gemini").unwrap();
         assert!(!target.exists(), "应用前不存在的文件恢复时应被移除");
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&backups).ok();
+    }
+
+    #[test]
+    fn original_snapshot_survives_rotations_and_restores_first_write_state() {
+        let home = tmpdir("orig-home");
+        let backups = tmpdir("orig-bak");
+        let target_dir = home.join(".claude");
+        fs::create_dir_all(&target_dir).unwrap();
+        let target = target_dir.join("settings.json");
+        // Ccode 动手前的原始内容
+        fs::write(&target, r#"{"env": {"OTHER": "1"}}"#).unwrap();
+        let p = profile("claude-code");
+        // 连续 7 次 apply：常规批次窗口（5 份）被烧穿，原始快照必须始终在场
+        for _ in 0..7 {
+            let plans = plan_writes(&home, &p, Some("sk-secret"), &["m1".to_string()]).unwrap();
+            apply_plans(&backups, &home, &plans).unwrap();
+        }
+        assert!(list_backups(&backups, "settings.json").len() <= 5);
+        assert_eq!(
+            fs::read_to_string(original_dir(&backups).join("settings.json")).unwrap(),
+            r#"{"env": {"OTHER": "1"}}"#,
+            "原始快照必须保持首次写入前的内容"
+        );
+        // 恢复初始状态 = 回到首次写入前
+        restore_from_original(&backups, &home).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"env": {"OTHER": "1"}}"#);
+        // 原始快照不被恢复动作消耗，可再次恢复
+        assert!(original_dir(&backups).join("manifest.json").is_file());
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&backups).ok();
+    }
+
+    #[test]
+    fn restore_original_removes_file_created_by_first_apply() {
+        let home = tmpdir("orig-absent-home");
+        let backups = tmpdir("orig-absent-bak");
+        let target = home.join(".gemini/.env");
+        let p = profile("gemini");
+        let plans = plan_writes(&home, &p, Some("secret"), &["m1".to_string()]).unwrap();
+        apply_plans(&backups, &home, &plans).unwrap();
+        assert!(target.exists());
+        restore_from_original(&backups, &home).unwrap();
+        assert!(!target.exists(), "首次写入前不存在的文件，恢复初始状态时应删除");
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&backups).ok();
     }

@@ -118,6 +118,18 @@
   「自定义工作区名」只在与派生值不同时才计入。工作区名收进高级后，卡头以小字回显最终会用的派生名。
   **推荐技能补进编辑器**（原先只有开工确认弹层能改）：复用 `StepSkillsChips` 可编辑态，
   改的是草稿、随整份 steps 保存，不走 `update_step_skills` 单步写回。
+  **技能链路校验（外部技能适配三件套之一）**：StepSkillsChips 可选 `chainSupply`/`expectedArtifacts`
+  两个 prop（调用方汇总：上游步骤产物与其技能 outputs + 本步骤声明输入 + 项目资源）——技能
+  inputs 找不到供给、outputs 未进本步骤预期产物时 chips 下方逐条 ⚠ 提示（只提醒不拦截，
+  推断接口标「供参考」）；开工确认弹层与流水线编辑器两处调用方都传入。**TASK.md 路径兜底**：
+  「本步骤技能」段末固定一行「技能正文里的读取/产出路径若与本文件不一致，一律以本文件为准」
+  （pipeline-start.ts）——未适配的外部技能也会被拉回约定落点。**反向挂载**：技能页 ⋯ 菜单
+  「挂载到步骤」与预览面板「哪些步骤在用」区「＋ 挂载到步骤」，选项目 → 选步骤走
+  `update_step_skills` 追加（已挂载置灰）。**◈ 适配到流水线**：技能页 ⋯ 菜单入口，
+  `adapt_skill_to_pipeline`（ai.rs FN_DISTILL 功能键，规范路径表单一出处
+  `build_adapt_prompt`，输出剥代码围栏 + redact_and_cap）出稿 → 弹层预览/再编辑 →
+  `write_skill_md` 整份落盘（name 强制沿用库中条目，description/inputs/outputs 取稿件解析值，
+  备份/回滚复用 update_content_impl）。
   **`toStep` 必须透传 `humanTasks[].optional`**——v3.85 前漏了这一项，编辑器一保存就把内置模板
   标「不做也能跑」的事项静默升级为必办；同批在人工事项行补「可选」勾选框。`ProjectStepDto.resources?: string[]` = 资源绑定（`[[resources]]` 条目的 path），**空/缺省 =
   全部资源**；`renderTaskMd` 只在绑定非空时过滤「项目资源」段（单一出处在 `pipeline-start.ts`）。**例外（v3.67）**：
@@ -576,6 +588,17 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
     下载命令 jsDelivr 优先、raw 回落，.tmp 原子落盘后清进程内缓存）。匹配 = normalize_title 规范化精确匹配 +
     末尾出版商括号尾巴剥除重试（来源常写成「Advanced Functional Materials (Wiley)」，前端 sourceDisplayName 同口径），
     miss / 未装表一律 None 不虚构；合并表 HashMap 进程内 RwLock 缓存（7MB 不能每次 list 重解析）。
+    **条目行版式（2026-08-25 起）**：两行式——标题独占整行（长题换行显示全），出处与 IF/分区/TOP/日期降第二行，
+    操作组贴右上顶对齐；禁止回到单行全挤（标题被期刊名+徽章压成窄列的旧版式已被用户否决）。
+    **更新发现（v3.99+）**：status 带 downloadedAt（两份 CSV 取较新 mtime，不另记 meta）；check_journal_metrics_update
+    用 GitHub commits API 按数据目录查最近 commit，与本地 mtime 严比（解析失败/未装表 = 无新版，不虚构提醒），
+    前端卡头按钮有新版时标「（有新表）」、tooltip 显示下载于何时——只提示不自动下载，下载动作恒由用户发起。
+  - **雷达筛选（2026-08-25，project.toml `litWatchFilter`）**：三条可选条件（minIf / maxCasQuartile / topOnly，
+    全空归一 None 不留空段），update_lit_watch_filter 读-改-原子写；**两处生效、同一口径**——新命中列表展示
+    （前端 entryPassesFilter）与定时巡检 newEntries 计数（scheduler 前后各数一次过滤后条目取差，收件箱胶囊/通知
+    随之只算符合筛选的）。**指标未知（表未装/期刊未收录/IF 不可解析）一律放行不误伤**（lit_watch.rs
+    metrics_pass_filter ⇔ lit-watch.ts entryPassesFilter 双端镜像，改动需同步）；表未装时筛选不生效，
+    弹层与列表区均有明说提示。精读清单是用户自选的不过滤；被筛掉的条目不落任何状态，「查看全部」为纯前端临时态。
   - **下载白名单与资源登记**：download_paper_pdf 仅 http/https、60MB 上限流式中止、%PDF- 魔数校验、文件名
     sanitize、落 papers/ 重名 -2/-3、自动登记 project.toml `[[resources]]` type="paper"；非直链（出版商页）前端
     禁用并提示手动下载，付费墙文献仍走 watch-followup.md「待人工下载」。

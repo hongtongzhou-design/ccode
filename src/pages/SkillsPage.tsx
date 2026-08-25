@@ -23,6 +23,7 @@ import type {
   DiscoveredSkillDto,
   ProjectConfigReadDto,
   ProjectDto,
+  ProjectStepDto,
   SkillDto,
   SkillImportResultDto,
   SkillPathDto,
@@ -125,28 +126,13 @@ function TipBadge({
   );
 }
 
-/** 来源单元格：GitHub 来源渲染为可点小字链接（系统浏览器打开），其余为纯文本 */
-function SourceCell({ skill }: { skill: SkillDto }) {
-  const url = skillRepoUrl(skill);
-  // GitHub 来源展示具体可分辨的地址（owner/repo[/subdir]），其余来源保留类型标签
-  const label = skill.repo
+/** 来源标签纯文本：GitHub 来源为 owner/repo[/subdir]，其余来源保留类型标签。
+ *  行级来源列已拆除（2026-08-25 设计评审：逐行重复分组标题信息是噪音）——
+ *  用于组头「单来源组」标注；具体可点击的仓库链接在预览面板 */
+function sourceLabel(skill: SkillDto): string {
+  return skill.repo
     ? skill.repo + (skill.repoSubdir ? `/${skill.repoSubdir}` : "")
     : (SOURCE_LABEL[skill.source] ?? skill.source);
-  if (!url)
-    return <span className="truncate text-sm text-l4">{label}</span>;
-  return (
-    <button
-      type="button"
-      onClick={(event) => {
-        event.stopPropagation();
-        void openUrl(url);
-      }}
-      title={`在浏览器打开 ${url}`}
-      className="truncate text-left font-mono text-sm text-l4 underline decoration-white/20 underline-offset-2 hover:text-l2"
-    >
-      {label}
-    </button>
-  );
 }
 
 /** 把用户粘贴的 GitHub 网址/简写统一解析为 { repo, branch, subdir }：
@@ -810,6 +796,249 @@ function OptimizeModal({
   );
 }
 
+/** ◈ 适配到流水线（两阶段，与「融合进任务书」同口径）：AI 按流水线路径约定改写 SKILL.md →
+ *  人在此预览/再编辑 → 确认才经 write_skill_md 落盘（备份/回滚复用编辑路径）。
+ *  打开即自动生成；失败可重试，不写盘。 */
+function AdaptModal({
+  skill,
+  onClose,
+  onSaved,
+}: {
+  skill: SkillDto;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [content, setContent] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function generate() {
+    setBusy(true);
+    setError(null);
+    try {
+      const dto = await invoke<{ name: string; content: string }>(
+        "adapt_skill_to_pipeline",
+        { id: skill.id },
+      );
+      setContent(dto.content);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    void generate();
+    // 仅打开时生成一次（失败点「重试」）；skill 在弹层生命周期内不变
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function confirm() {
+    if (!content) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("write_skill_md", { name: skill.name, fullText: content });
+      await onSaved();
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="flex max-h-[85vh] w-[34rem] flex-col rounded-md border border-field ccode-float-surface p-5"
+      >
+        <h2 className="mb-1 text-base font-semibold text-l1">
+          ◈ 适配到流水线：{skill.name}
+        </h2>
+        <p className="mb-3 text-xs text-l3">
+          AI 按流水线路径约定（papers/、notes/、references.bib
+          等）改写技能，并补写 inputs/outputs 接口声明；可再手动改，确认后才写回技能库。
+        </p>
+        {content === null && !error ? (
+          <p className="py-8 text-center text-sm text-l4">正在生成适配稿…</p>
+        ) : (
+          <textarea
+            className={`${fieldClass} mb-3 min-h-64 flex-1 resize-y font-mono text-xs`}
+            value={content ?? ""}
+            onChange={(e) => setContent(e.target.value)}
+          />
+        )}
+        {error && <p className="mb-2 text-sm text-err-text">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
+          >
+            取消
+          </button>
+          {error && (
+            <button
+              onClick={() => void generate()}
+              disabled={busy}
+              className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover disabled:opacity-50"
+            >
+              重试
+            </button>
+          )}
+          <button
+            onClick={() => void confirm()}
+            disabled={busy || !content?.trim()}
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+          >
+            {busy ? "处理中…" : "确认写回技能库"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 挂载到步骤（反向入口）：选项目 → 选步骤，把当前技能追加进 project.toml steps[].skills。
+ *  已挂载的步骤置灰；写回走 update_step_skills（读-改-原子写）。 */
+function BindToStepModal({
+  skill,
+  onClose,
+  onBound,
+}: {
+  skill: SkillDto;
+  onClose: () => void;
+  onBound: (msg: string) => void;
+}) {
+  const [projects, setProjects] = useState<ProjectDto[] | null>(null);
+  const [projectPath, setProjectPath] = useState("");
+  const [steps, setSteps] = useState<ProjectStepDto[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<ProjectDto[]>("list_projects")
+      .then((list) => {
+        setProjects(list);
+        if (list.length > 0) setProjectPath(list[0].path);
+      })
+      .catch((reason) => setError(String(reason)));
+  }, []);
+
+  useEffect(() => {
+    if (!projectPath) return;
+    setSteps(null);
+    invoke<ProjectConfigReadDto>("read_project_config", { path: projectPath })
+      .then((read) => setSteps(read.config.steps))
+      .catch(() => setSteps([])); // 档案卡缺失/读取失败：按无步骤处理
+  }, [projectPath]);
+
+  async function bind(step: ProjectStepDto) {
+    if (busy || step.skills.includes(skill.name)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("update_step_skills", {
+        projectRoot: projectPath,
+        stepName: step.name,
+        skills: [...step.skills, skill.name],
+      });
+      onBound(`已挂载到「${step.name}」`);
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
+      >
+        <h2 className="mb-1 text-base font-semibold text-l1">
+          挂载到步骤：{skill.name}
+        </h2>
+        <p className="mb-3 text-xs text-l3">
+          把技能挂到项目研究流程的某一步；下次开工 TASK.md 的「本步骤技能」段会列出它。
+        </p>
+        {projects === null ? (
+          <p className="py-6 text-center text-sm text-l4">读取项目列表…</p>
+        ) : projects.length === 0 ? (
+          <p className="py-6 text-center text-sm text-l4">
+            还没有注册项目——先在项目页注册并配好研究流程
+          </p>
+        ) : (
+          <>
+            <select
+              value={projectPath}
+              onChange={(e) => setProjectPath(e.target.value)}
+              className={`${fieldClass} mb-2`}
+            >
+              {projects.map((p) => (
+                <option key={p.path} value={p.path}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <div className="max-h-56 overflow-auto rounded-sm border border-field">
+              {steps === null ? (
+                <p className="px-3 py-4 text-center text-xs text-l4">
+                  读取步骤…
+                </p>
+              ) : steps.length === 0 ? (
+                <p className="px-3 py-4 text-center text-xs text-l4">
+                  该项目还没有研究流程步骤
+                </p>
+              ) : (
+                steps.map((step) => {
+                  const mounted = step.skills.includes(skill.name);
+                  return (
+                    <button
+                      key={step.name}
+                      type="button"
+                      disabled={mounted || busy}
+                      onClick={() => void bind(step)}
+                      title={
+                        mounted ? "该步骤已挂载此技能" : `挂载到「${step.name}」`
+                      }
+                      className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm text-l2 hover:bg-hover disabled:opacity-50"
+                    >
+                      <span className="min-w-0 truncate">{step.name}</span>
+                      <span className="shrink-0 text-micro text-l4">
+                        {mounted ? "已挂载" : "＋ 挂载"}
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </>
+        )}
+        {error && <p className="mt-2 text-sm text-err-text">{error}</p>}
+        <div className="mt-3 flex justify-end">
+          <button
+            onClick={onClose}
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
+          >
+            关闭
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function SkillsPage({ visible }: { visible: boolean }) {
   const [skills, setSkills] = useState<SkillDto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -895,6 +1124,9 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   >(null);
   // ◈ 优化：内联收集意见后开终端让 Agent 改写 SKILL.md
   const [optimize, setOptimize] = useState<SkillDto | null>(null);
+  // ◈ 适配到流水线（AI 改写稿预览确认）与反向挂载到步骤
+  const [adapt, setAdapt] = useState<SkillDto | null>(null);
+  const [bindSkill, setBindSkill] = useState<SkillDto | null>(null);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
 
@@ -1380,14 +1612,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                   没有匹配「{query}」的技能
                 </p>
               )}
-              {/* caps 式小字灰表头：弱化只作列定位，hairline 分隔无卡片外框；sticky 用页面底色遮挡滚动内容 */}
+              {/* 分组卡片化（2026-08-25 设计评审）：同组技能裹进 field 细边 + strip 底卡片，
+                  组内行收窄 hover 不再通栏、不再重复来源列；列表不再伪装成贯穿整页的表格，
+                  列对齐只在卡片内部成立（名称 | 应用 | 操作） */}
               <div>
-                <div className="sticky top-0 z-10 grid grid-cols-[minmax(300px,560px)_minmax(180px,1fr)_120px_92px] items-center gap-3 bg-canvas px-3 py-2 text-xs tracking-wider text-l4">
-                  <span>技能</span>
-                  <span>来源</span>
-                  <span>应用</span>
-                  <span />
-                </div>
                 {[
                   // 分组顺序 = 技能数组首现顺序；未分类固定沉底（不挡已归组的内容）
                   ...new Set(matched.map((skill) => skill.category ?? "未分类")),
@@ -1397,15 +1625,24 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                   const categorySkills = matched.filter(
                     (skill) => (skill.category ?? "未分类") === category,
                   );
+                  // 组内来源全部一致时收进组头标一次（行级不再逐行重复）；混合来源不标，明细在预览面板
+                  const distinctSources = [
+                    ...new Set(categorySkills.map((s) => sourceLabel(s))),
+                  ];
+                  const groupSource =
+                    distinctSources.length === 1 ? distinctSources[0] : null;
                   return (
-                    <section key={category}>
+                    <section
+                      key={category}
+                      className="mb-3 overflow-hidden rounded-md border border-field bg-strip"
+                    >
                       <button
                         type="button"
                         onClick={() => toggleCat(category)}
                         aria-label={
                           catCollapsed.has(category) ? "展开" : "收起"
                         }
-                        className="flex h-9 w-full items-center gap-1.5 rounded-md px-3 text-sm hover:bg-hover"
+                        className="flex h-10 w-full items-center gap-1.5 px-3 text-sm transition-colors hover:bg-hover/60"
                       >
                         <span className="w-3 text-l4">
                           {catCollapsed.has(category) ? "▸" : "▾"}
@@ -1415,6 +1652,16 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         <span className="rounded-full bg-inset px-1.5 py-0.5 text-micro text-l4">
                           {categorySkills.length} 个技能
                         </span>
+                        {/* 单来源组的来源标注（替代原行级来源列）；嵌在折叠按钮内只能纯展示，
+                            仓库链接在预览面板 */}
+                        {groupSource && (
+                          <span
+                            className="truncate font-mono text-micro text-l4"
+                            title={`来源：${groupSource}`}
+                          >
+                            {groupSource}
+                          </span>
+                        )}
                         {/* 未分类组挂归类引导（实际入口是行内 ⋯ → 设置分类，无拖拽归类） */}
                         {category === "未分类" && (
                           <span className="ml-1 text-micro text-l4">
@@ -1423,7 +1670,9 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         )}
                       </button>
                       {!catCollapsed.has(category) && (
-                        <ul className="space-y-1 py-1">
+                        // 卡片体内留白：行 hover 带收进内边距与圆角内，不通栏切断分组边界
+                        <div className="border-t border-hairline px-2 pb-2 pt-1">
+                        <ul className="space-y-0.5">
                           {categorySkills.map((skill) => {
                             const stale = (skill.staleCopies ?? []).length > 0;
                             const update = updates[skill.id];
@@ -1431,7 +1680,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                               <li
                                 key={skill.id}
                                 onClick={() => void onView(skill)}
-                                className={`group grid min-h-14 cursor-pointer grid-cols-[minmax(300px,560px)_minmax(180px,1fr)_120px_92px] items-center gap-3 rounded-md border border-transparent px-3 py-1.5 transition-colors hover:border-hairline hover:bg-hover ${
+                                className={`group grid min-h-14 cursor-pointer grid-cols-[minmax(0,1fr)_120px_92px] items-center gap-3 rounded-md border border-transparent py-1.5 pl-5 pr-2 transition-colors hover:bg-hover ${
                                   preview?.skill.id === skill.id
                                     ? "border-hairline bg-inset"
                                     : ""
@@ -1447,7 +1696,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     {skill.mentionsMcp && (
                                       <TipBadge
                                         text="SKILL.md 正文提及 MCP 工具/服务器"
-                                        className="shrink-0 rounded-sm bg-inset px-1 py-0.5 font-mono text-micro text-l4"
+                                        className="shrink-0 rounded-sm bg-inset px-1 py-0.5 font-mono text-micro text-l3"
                                       >
                                         ⌗ MCP
                                       </TipBadge>
@@ -1456,7 +1705,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     {(skill.tags ?? []).slice(0, 4).map((tag) => (
                                       <span
                                         key={tag}
-                                        className="h-5 max-w-24 shrink-0 truncate rounded-full bg-inset px-1.5 text-xs leading-5 text-l3"
+                                        className="h-5 max-w-24 shrink-0 truncate rounded-full bg-inset px-1.5 text-xs leading-5 text-l2"
                                       >
                                         {tag}
                                       </span>
@@ -1478,14 +1727,15 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                       />
                                     )}
                                   </div>
-                                  {/* 描述次行（v3.93）：名称下挂一行简介提升扫视效率；
+                                  {/* 描述次行：名称下挂一行简介提升扫视效率（来源列拆除后横向空间
+                                      释放，上限放宽到 max-w-xl；对比度提到 xs/l3，米白底色上 micro/l4 太暗）；
                                       空/纯符号描述不渲染（displayDescription 同预览面板口径） */}
                                   {(() => {
                                     const desc = displayDescription(
                                       skill.description,
                                     );
                                     return desc ? (
-                                      <div className="mt-0.5 max-w-md truncate text-micro text-l4">
+                                      <div className="mt-0.5 max-w-xl truncate text-xs text-l3">
                                         {desc}
                                       </div>
                                     ) : null;
@@ -1548,8 +1798,6 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     />
                                   )}
                                 </div>
-                                {/* 来源弱化为淡灰，只作识别信息；GitHub 来源可点跳转 */}
-                                <SourceCell skill={skill} />
                                 <AppliedCell
                                   skill={skill}
                                   onOpen={() => void onView(skill)}
@@ -1597,6 +1845,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                             );
                           })}
                         </ul>
+                        </div>
                       )}
                     </section>
                   );
@@ -1634,7 +1883,17 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           {/* 哪些步骤在用（v3.88）：删技能前得知道会影响谁——这条以前完全没有。
               纯前端反查已注册项目的 steps[].skills，打开预览时读一次，不轮询 */}
           <div className="border-b border-hairline px-3 py-2.5 text-sm">
-            <div className="mb-1 text-xs text-l4">哪些步骤在用</div>
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-xs text-l4">哪些步骤在用</span>
+              <button
+                type="button"
+                onClick={() => setBindSkill(preview.skill)}
+                title="选项目与步骤，把此技能挂进研究流程（写回 project.toml）"
+                className="rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l1"
+              >
+                ＋ 挂载到步骤
+              </button>
+            </div>
             {skillUsage === null ? (
               <span className="text-xs text-l4">查询中…</span>
             ) : skillUsage.length === 0 ? (
@@ -1838,6 +2097,23 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           onConfirm={(opinion) => confirmOptimize(optimize, opinion)}
         />
       )}
+      {adapt && (
+        <AdaptModal
+          skill={adapt}
+          onClose={() => setAdapt(null)}
+          onSaved={async () => {
+            setNotice(`技能「${adapt.name}」已按流水线口径适配（原文件已备份）`);
+            await refresh();
+          }}
+        />
+      )}
+      {bindSkill && (
+        <BindToStepModal
+          skill={bindSkill}
+          onClose={() => setBindSkill(null)}
+          onBound={(msg) => setNotice(msg)}
+        />
+      )}
       {modal?.kind === "import" && (
         <ImportModal
           initialGithub={modal.github}
@@ -1906,6 +2182,14 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             {
               label: "◈ 优化",
               onSelect: () => setOptimize(rowMenu.skill),
+            },
+            {
+              label: "◈ 适配到流水线",
+              onSelect: () => setAdapt(rowMenu.skill),
+            },
+            {
+              label: "挂载到步骤",
+              onSelect: () => setBindSkill(rowMenu.skill),
             },
             {
               label: "设置分类",

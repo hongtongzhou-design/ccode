@@ -28,6 +28,10 @@ import {
   includedLineFor,
   isRead,
   loadLitDismissed,
+  entryPassesFilter,
+  litWatchFilterActive,
+  litWatchFilterLabel,
+  metricsTooltip,
   paperResourceFor,
   pdfUrlFor,
   sourceDisplayName,
@@ -40,6 +44,7 @@ import type {
   DownloadedPaperDto,
   IncludedEntryDto,
   JournalMetricsStatusDto,
+  JournalMetricsUpdateDto,
   WatchEntryDto,
   WatchFollowupDto,
   WatchInboxDto,
@@ -49,6 +54,7 @@ import type { DirEntryDto } from "./FileTree";
 import type {
   ProjectConfigDto,
   ProjectResourceDto,
+  LitWatchFilterDto,
   ScheduleDto,
   SchedulerRunDonePayload,
   WorkspaceDto,
@@ -178,14 +184,16 @@ function WatchEntryRow({
   const pdfTip = useHoverTip(pdfRef, true);
   return (
     <li className="group rounded-md px-2 py-2 hover:bg-hover">
-      <div className="flex min-w-0 items-center gap-2">
+      {/* 两行式：标题独占整行（长题换行显示全，对照 Stork 卡片式扫读），
+          出处与期刊指标降到标题下一行；操作组贴右上，不再和标题抢宽度 */}
+      <div className="flex items-start gap-2">
         {entry.relevance === "推荐" ? (
-          <span className="shrink-0 rounded-full bg-cta-pill px-2 py-0.5 text-micro text-cta-pill-text">
+          <span className="mt-0.5 shrink-0 rounded-full bg-cta-pill px-2 py-0.5 text-micro text-cta-pill-text">
             推荐
           </span>
         ) : (
           /* 纯状态 pill：inset 灰底 + 语义色小圆点（待确认=warn） */
-          <span className="flex shrink-0 items-center gap-1 rounded-full bg-inset px-2 py-0.5 text-micro text-l3">
+          <span className="mt-0.5 flex shrink-0 items-center gap-1 rounded-full bg-inset px-2 py-0.5 text-micro text-l3">
             <span
               className={`size-1.5 rounded-full ${
                 entry.relevance === "相关" ? "bg-l4" : "bg-warn-text"
@@ -194,109 +202,113 @@ function WatchEntryRow({
             {entry.relevance}
           </span>
         )}
-        {/* 标题不截断：长题整行换行显示全（对照 Stork 卡片式扫读） */}
-        <span
-          ref={titleRef}
-          onMouseEnter={entry.zhSummary ? show : undefined}
-          onMouseLeave={entry.zhSummary ? hide : undefined}
-          className="min-w-0 text-sm text-l1"
-        >
-          {entry.zhSummary || entry.title}
-        </span>
-        {entry.zhSummary && <HoverTip tip={tip} text={entry.title} />}
-        <span
-          ref={sourceRef}
-          onMouseEnter={sourceStripped ? sourceTip.show : undefined}
-          onMouseLeave={sourceStripped ? sourceTip.hide : undefined}
-          className="shrink-0 rounded-sm bg-inset px-1 py-0.5 text-micro text-l4"
-        >
-          {sourceName}
-        </span>
-        {sourceStripped && <HoverTip tip={sourceTip.tip} text={entry.source} up />}
-        {entry.metrics?.impactFactor && (
-          <span className="shrink-0 rounded-full bg-inset px-1.5 py-0.5 text-micro text-l3">
-            IF {entry.metrics.impactFactor}
-          </span>
-        )}
-        {entry.metrics?.casQuartile != null && (
-          /* 1 区用 cta-pill 强调（同「推荐」pill 口径），2-4 区回到 inset 灰底 */
+        <div className="min-w-0 flex-1">
+          {/* 有中文一句话时显示它，英文原标题进 hover tooltip */}
           <span
-            className={`shrink-0 rounded-full px-1.5 py-0.5 text-micro ${
-              entry.metrics.casQuartile === 1
-                ? "bg-cta-pill text-cta-pill-text"
-                : "bg-inset text-l3"
-            }`}
+            ref={titleRef}
+            onMouseEnter={entry.zhSummary ? show : undefined}
+            onMouseLeave={entry.zhSummary ? hide : undefined}
+            className="text-sm leading-5 text-l1"
           >
-            {entry.metrics.casQuartile}区
+            {entry.zhSummary || entry.title}
           </span>
-        )}
-        {entry.metrics?.top && (
-          <span className="shrink-0 rounded-full bg-cta-pill px-1.5 py-0.5 text-micro text-cta-pill-text">
-            TOP
-          </span>
-        )}
-        {entry.date && (
-          <span className="shrink-0 text-micro text-l4">
-            {relTime(entry.date)}
-          </span>
-        )}
-        <span className="min-w-0 flex-1" />
-        <button
-          type="button"
-          className={`${rowActionClass} shrink-0`}
-          disabled={included}
-          onClick={onAddIncluded}
-        >
-          {included ? "✓ 已在清单" : "→ 精读"}
-        </button>
-        <span
-          className={`flex shrink-0 items-center ${hoverRevealClass}`}
-        >
+          {entry.zhSummary && <HoverTip tip={tip} text={entry.title} />}
+          {/* 出处行：期刊 pill 剥出版商尾巴（「(Wiley)」等）；剥过时 hover 显示原始全称 */}
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            <span
+              ref={sourceRef}
+              onMouseEnter={sourceStripped ? sourceTip.show : undefined}
+              onMouseLeave={sourceStripped ? sourceTip.hide : undefined}
+              className="rounded-sm bg-inset px-1 py-0.5 text-micro text-l4"
+            >
+              {sourceName}
+            </span>
+            {sourceStripped && <HoverTip tip={sourceTip.tip} text={entry.source} up />}
+            {entry.metrics?.impactFactor && (
+              <span className="rounded-full bg-inset px-1.5 py-0.5 text-micro text-l3">
+                IF {entry.metrics.impactFactor}
+              </span>
+            )}
+            {entry.metrics?.casQuartile != null && (
+              /* 1 区用 cta-pill 强调（同「推荐」pill 口径），2-4 区回到 inset 灰底 */
+              <span
+                className={`rounded-full px-1.5 py-0.5 text-micro ${
+                  entry.metrics.casQuartile === 1
+                    ? "bg-cta-pill text-cta-pill-text"
+                    : "bg-inset text-l3"
+                }`}
+              >
+                {entry.metrics.casQuartile}区
+              </span>
+            )}
+            {entry.metrics?.top && (
+              <span className="rounded-full bg-cta-pill px-1.5 py-0.5 text-micro text-cta-pill-text">
+                TOP
+              </span>
+            )}
+            {entry.date && (
+              <span className="text-micro text-l4">{relTime(entry.date)}</span>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
           <button
             type="button"
-            className={ghostActionClass}
-            onClick={explain ? onCloseExplain : onExplain}
+            className={`${rowActionClass} shrink-0`}
+            disabled={included}
+            onClick={onAddIncluded}
           >
-            ◈ 解读
+            {included ? "✓ 已在清单" : "→ 精读"}
           </button>
-          {fulltext.kind === "pdf" && (
-            <button
-              ref={pdfRef}
-              type="button"
-              className={ghostActionClass}
-              disabled={downloading}
-              onMouseEnter={pdfTip.show}
-              onMouseLeave={pdfTip.hide}
-              onClick={onDownload}
-            >
-              {downloading ? "↓ 下载中…" : "↓ 全文"}
-            </button>
-          )}
-          {fulltext.kind === "pdf" && (
-            <HoverTip tip={pdfTip.tip} text="开放获取全文，免费直接下载" up />
-          )}
-          {fulltext.kind === "source" && (
+          <span
+            className={`flex shrink-0 items-center ${hoverRevealClass}`}
+          >
             <button
               type="button"
               className={ghostActionClass}
-              title="没有免费全文直链，打开来源页面获取"
-              onClick={() => void openUrl(sourceUrl(entry.url))}
+              onClick={explain ? onCloseExplain : onExplain}
             >
-              ↗ 来源
+              ◈ 解读
             </button>
-          )}
-          <button
-            type="button"
-            aria-label={`更多操作：${entry.title}`}
-            className="flex h-7 w-7 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1"
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              setMenu({ x: rect.right, y: rect.bottom + 4 });
-            }}
-          >
-            ⋯
-          </button>
-        </span>
+            {fulltext.kind === "pdf" && (
+              <button
+                ref={pdfRef}
+                type="button"
+                className={ghostActionClass}
+                disabled={downloading}
+                onMouseEnter={pdfTip.show}
+                onMouseLeave={pdfTip.hide}
+                onClick={onDownload}
+              >
+                {downloading ? "↓ 下载中…" : "↓ 全文"}
+              </button>
+            )}
+            {fulltext.kind === "pdf" && (
+              <HoverTip tip={pdfTip.tip} text="开放获取全文，免费直接下载" up />
+            )}
+            {fulltext.kind === "source" && (
+              <button
+                type="button"
+                className={ghostActionClass}
+                title="没有免费全文直链，打开来源页面获取"
+                onClick={() => void openUrl(sourceUrl(entry.url))}
+              >
+                ↗ 来源
+              </button>
+            )}
+            <button
+              type="button"
+              aria-label={`更多操作：${entry.title}`}
+              className="flex h-7 w-7 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1"
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                setMenu({ x: rect.right, y: rect.bottom + 4 });
+              }}
+            >
+              ⋯
+            </button>
+          </span>
+        </div>
       </div>
       {entry.abstractFirst && (
         <p
@@ -790,6 +802,154 @@ function SubscriptionsModal({
   );
 }
 
+/** 筛选弹层：按期刊指标过滤「新命中」与推送计数（存 project.toml 的 litWatchFilter）。
+ *  全条件清空 = 不筛选（后端归一为 None）；指标未知的条目放行不误伤 */
+function FilterModal({
+  projectRoot,
+  initial,
+  metricsAvailable,
+  onClose,
+  onSaved,
+}: {
+  projectRoot: string;
+  initial: LitWatchFilterDto | null | undefined;
+  metricsAvailable: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [minIf, setMinIf] = useState(
+    initial?.minIf != null ? String(initial.minIf) : "",
+  );
+  const [maxQuartile, setMaxQuartile] = useState<number | null>(
+    initial?.maxCasQuartile ?? null,
+  );
+  const [topOnly, setTopOnly] = useState(!!initial?.topOnly);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const QUARTILES: { v: number | null; label: string }[] = [
+    { v: null, label: "不限" },
+    { v: 1, label: "仅 1 区" },
+    { v: 2, label: "2 区及以上" },
+    { v: 3, label: "3 区及以上" },
+  ];
+
+  async function save(filter: LitWatchFilterDto | null) {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("update_lit_watch_filter", { projectRoot, filter });
+      onSaved();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = minIf.trim();
+    const parsed = trimmed === "" ? null : Number(trimmed);
+    if (parsed !== null && (!Number.isFinite(parsed) || parsed < 0)) {
+      setError("IF 门槛要是非负数字");
+      return;
+    }
+    void save({ minIf: parsed, maxCasQuartile: maxQuartile, topOnly });
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
+      onClick={onClose}
+    >
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
+      >
+        <h2 className="mb-1 text-base font-semibold text-l1">筛选新命中</h2>
+        <p className="mb-4 text-xs text-l3">
+          按期刊指标过滤「新命中」列表与定时巡检的推送计数；查不到指标的条目照常显示（不误伤），精读清单不受影响。
+        </p>
+        {!metricsAvailable && (
+          <p className="mb-3 text-xs text-warn-text">
+            期刊指标表还没装：筛选保存后暂不生效，点卡头「↓ 期刊指标表」装表即生效。
+          </p>
+        )}
+        <label className="mb-1 block text-xs text-l2">影响因子 IF 至少</label>
+        <input
+          className={fieldClass}
+          value={minIf}
+          onChange={(e) => setMinIf(e.target.value)}
+          placeholder="不限，如填 10 表示只看 IF≥10"
+          inputMode="decimal"
+        />
+        <label className="mb-1 mt-3 block text-xs text-l2">中科院大类分区</label>
+        <div className="flex items-center gap-1">
+          {QUARTILES.map((q) => (
+            <button
+              key={q.label}
+              type="button"
+              onClick={() => setMaxQuartile(q.v)}
+              className={`flex h-6 items-center rounded-full px-2 text-xs transition-colors ${
+                maxQuartile === q.v
+                  ? "bg-seg-sel text-l1"
+                  : "bg-inset text-l3 hover:text-l1"
+              }`}
+            >
+              {q.label}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() => setTopOnly((v) => !v)}
+          className="mt-3 flex items-center gap-2 text-xs text-l2 hover:text-l1"
+          aria-pressed={topOnly}
+        >
+          <span
+            className={`flex h-4 w-4 items-center justify-center rounded-xs border text-[10px] ${
+              topOnly
+                ? "border-cta-bd bg-cta text-cta-text"
+                : "border-field bg-inset text-transparent"
+            }`}
+          >
+            ✓
+          </span>
+          仅中科院 TOP 期刊
+        </button>
+        {error && <p className="mt-2 text-sm text-err-text">{error}</p>}
+        <div className="mt-4 flex items-center justify-end gap-2">
+          {litWatchFilterActive(initial) && (
+            <button
+              type="button"
+              disabled={busy}
+              className="mr-auto rounded-sm px-3 py-1.5 text-sm text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+              onClick={() => void save(null)}
+            >
+              清除筛选
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+          >
+            {busy ? "保存中…" : "保存筛选"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 /**
  * 项目详情工作段的「◔ 文献雷达」卡片（lit_watch.rs + scheduler.rs 的前端）：
  * 新命中（趋势 + 日分组 + 处置动作）/ 精读清单（已读状态 + 开读）双页签；
@@ -829,10 +989,16 @@ export default function LitWatchCard({
   const [metricsStatus, setMetricsStatus] =
     useState<JournalMetricsStatusDto | null>(null);
   const [metricsDownloading, setMetricsDownloading] = useState(false);
+  /** 上游是否有新版指标表；null = 未查/查询失败（静默） */
+  const [metricsUpdate, setMetricsUpdate] =
+    useState<JournalMetricsUpdateDto | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(() =>
     loadLitDismissed(),
   );
   const [subsOpen, setSubsOpen] = useState(false);
+  /** 筛选弹层；showFilteredOut = 临时查看全部被筛掉的条目 */
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [showFilteredOut, setShowFilteredOut] = useState(false);
   const [followupsOpen, setFollowupsOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
@@ -913,7 +1079,16 @@ export default function LitWatchCard({
     // 指标表缺失时卡头才出下载入口；失败（命令缺失等）静默，不打扰卡片主功能
     invoke<JournalMetricsStatusDto>("journal_metrics_status")
       .then((s) => {
-        if (!stale) setMetricsStatus(s);
+        if (stale) return;
+        setMetricsStatus(s);
+        // 已装表才顺带查上游有没有新版；本机访问 GitHub 慢，失败同样静默
+        if (s.available) {
+          invoke<JournalMetricsUpdateDto>("check_journal_metrics_update")
+            .then((u) => {
+              if (!stale) setMetricsUpdate(u);
+            })
+            .catch(() => {});
+        }
       })
       .catch(() => {});
     let unlisten: (() => void) | undefined;
@@ -965,6 +1140,8 @@ export default function LitWatchCard({
       const status =
         await invoke<JournalMetricsStatusDto>("download_journal_metrics");
       setMetricsStatus(status);
+      // 刚下完就是最新，清掉「有新表」标记
+      setMetricsUpdate(null);
       showToast(`期刊指标表已就绪（${status.journalCount} 种期刊）`);
       void load();
     } catch (reason) {
@@ -1097,7 +1274,18 @@ ${topicLine}
   }
 
   const resources: ProjectResourceDto[] = cfg.resources ?? [];
-  const visibleEntries = filterLitDismissed(entries ?? [], dismissed);
+  // 雷达筛选（存 project.toml）：只过滤「新命中」展示，精读清单是用户自选的不动；
+  // 指标未知的条目放行不误伤（entryPassesFilter 口径），「查看全部」可临时看被筛掉的
+  const filter = cfg.litWatchFilter;
+  const filterOn = litWatchFilterActive(filter);
+  const undismissed = filterLitDismissed(entries ?? [], dismissed);
+  const applyingFilter = filterOn && !showFilteredOut;
+  const visibleEntries = applyingFilter
+    ? undismissed.filter((e) => entryPassesFilter(e.metrics, filter))
+    : undismissed;
+  const hiddenByFilter = applyingFilter
+    ? undismissed.length - visibleEntries.length
+    : 0;
   const includedTitles = new Set(
     (included ?? []).map((item) => normalizeTitle(item.title)),
   );
@@ -1151,7 +1339,7 @@ ${topicLine}
               disabled={metricsDownloading}
               title={
                 metricsStatus.available
-                  ? `JCR2025 + 中科院分区表 2025 · ${metricsStatus.journalCount} 种期刊；出新版时点我重新下载即更新`
+                  ? metricsTooltip(metricsStatus, metricsUpdate, relTime)
                   : "从第三方仓库 ShowJCR 下载 JCR2025 + 中科院分区表（版权归原数据方，仅供个人科研参考），命中条目即可显示期刊徽章"
               }
               onClick={() => void downloadMetrics()}
@@ -1159,7 +1347,9 @@ ${topicLine}
               {metricsDownloading
                 ? "下载中…"
                 : metricsStatus.available
-                  ? "↻ 期刊指标表"
+                  ? metricsUpdate?.hasUpdate
+                    ? "↻ 期刊指标表（有新表）"
+                    : "↻ 期刊指标表"
                   : "↓ 期刊指标表"}
             </button>
           )}
@@ -1185,6 +1375,21 @@ ${topicLine}
             onClick={() => setSubsOpen(true)}
           >
             订阅
+          </button>
+          <button
+            type="button"
+            className={ghostActionClass}
+            title={
+              filterOn
+                ? `当前筛选：${litWatchFilterLabel(filter)}（点我修改）`
+                : "按期刊指标筛选新命中与推送（IF / 中科院分区 / TOP）"
+            }
+            onClick={() => setFilterOpen(true)}
+          >
+            筛选
+            {filterOn && (
+              <span className="ml-0.5 inline-block size-1.5 rounded-full bg-cta align-middle" />
+            )}
           </button>
           <button
             type="button"
@@ -1230,7 +1435,37 @@ ${topicLine}
                 <TrendChart buckets={buckets} />
                 {latestRadarRun && (
                   <p className="mt-1 px-2 text-micro text-l4">
-                    最近一次成功巡检新增 {latestRadarRun.newEntries ?? "未知"} 条 · 未忽略 {visibleEntries.length} 条
+                    最近一次成功巡检新增 {latestRadarRun.newEntries ?? "未知"} 条 · 未忽略 {undismissed.length} 条
+                  </p>
+                )}
+                {filterOn && metricsStatus && !metricsStatus.available && (
+                  /* 表未装时筛选实际不生效（指标未知一律放行）：明说，不让用户以为已生效 */
+                  <p className="mt-1 px-2 text-micro text-warn-text">
+                    筛选（{litWatchFilterLabel(filter)}）需要期刊指标表，装表后才生效
+                  </p>
+                )}
+                {filterOn && !showFilteredOut && hiddenByFilter > 0 && (
+                  <p className="mt-1 px-2 text-micro text-l4">
+                    筛选（{litWatchFilterLabel(filter)}）隐藏 {hiddenByFilter} 条 ·{" "}
+                    <button
+                      type="button"
+                      className="underline hover:text-l1"
+                      onClick={() => setShowFilteredOut(true)}
+                    >
+                      查看全部
+                    </button>
+                  </p>
+                )}
+                {filterOn && showFilteredOut && (
+                  <p className="mt-1 px-2 text-micro text-l4">
+                    正在显示全部 {undismissed.length} 条（含不符合筛选的） ·{" "}
+                    <button
+                      type="button"
+                      className="underline hover:text-l1"
+                      onClick={() => setShowFilteredOut(false)}
+                    >
+                      恢复筛选
+                    </button>
                   </p>
                 )}
                 {visibleEntries.length > 0 && (
@@ -1376,6 +1611,20 @@ ${topicLine}
           onSaved={() => {
             setSubsOpen(false);
             void load();
+          }}
+        />
+      )}
+      {filterOpen && (
+        <FilterModal
+          projectRoot={projectRoot}
+          initial={filter}
+          metricsAvailable={metricsStatus?.available ?? false}
+          onClose={() => setFilterOpen(false)}
+          onSaved={() => {
+            // 保存后重读档案卡（cfg.litWatchFilter 随 prop 更新），并退出「查看全部」临时态
+            setFilterOpen(false);
+            setShowFilteredOut(false);
+            onConfigChanged();
           }}
         />
       )}

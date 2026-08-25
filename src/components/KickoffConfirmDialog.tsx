@@ -77,6 +77,27 @@ export default function KickoffConfirmDialog({
         : undefined,
     [skillLib],
   );
+  // 链路校验供给侧：上游步骤的预期产物与其技能 outputs + 本步骤声明输入 + 项目资源
+  const chainSupply = useMemo(() => {
+    const idx = cfgLocal.steps.findIndex((s) => s.name === step.name);
+    const upstream = (idx > 0 ? cfgLocal.steps.slice(0, idx) : []).flatMap(
+      (s) => [
+        ...s.expectedArtifacts,
+        ...(skillLib
+          ? s.skills.flatMap(
+              (n) => skillLib.find((x) => x.name === n)?.outputs ?? [],
+            )
+          : []),
+      ],
+    );
+    return [
+      ...upstream,
+      ...(stepNow.inputs ?? []),
+      ...(stepNow.optionalInputs ?? []),
+      ...(stepNow.anyOfInputs ?? []).flat(),
+      ...cfgLocal.resources.map((r) => r.path),
+    ];
+  }, [cfgLocal, step.name, stepNow, skillLib]);
 
   // TASK.md 提货单/技能元数据（打开时读一次）
   const [extras, setExtras] = useState<{
@@ -466,6 +487,8 @@ export default function KickoffConfirmDialog({
             ?.filter((s) => s.mentionsMcp)
             .map((s) => s.name)}
           skillLib={skillLib}
+          chainSupply={chainSupply}
+          expectedArtifacts={stepNow.expectedArtifacts}
           onChange={(next) => void onSkillsChange(next)}
         />
         {skillError && (

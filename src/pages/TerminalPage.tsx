@@ -406,8 +406,8 @@ const TerminalView = memo(function TerminalView({
     const ok = profiles.find(
       (p) => p.id === pick && p.agent === agentId,
     )?.id;
-    // 兜底挑首个时跳过隐藏项（隐藏的本意就是「别默认落到我头上」）；
-    // 全被隐藏时仍从隐藏项里取，好过留空
+    // 兜底挑首个时跳过停用项（停用的本意就是「别自动落到我头上」）；
+    // 全被停用时仍从停用项里取，好过留空
     const visible = profiles.filter(
       (p) => p.agent === agentId && !hiddenProfiles.includes(p.id),
     );
@@ -2258,8 +2258,8 @@ const TerminalView = memo(function TerminalView({
               {profileId && !selectedProfile && (
                 <option value={profileId}>上次配置已不存在</option>
               )}
-              {/* 「隐藏此配置」的落点（v3.88）：隐藏项沉到「更多」optgroup，不从列表里消失
-                  ——真删掉会让已选中它的标签无从显示。配置本身与启动行为一字未改 */}
+              {/* 「停用」的落点（软停用）：停用项沉到「已停用」optgroup，不从列表里消失
+                  ——真删掉会让已选中它的标签无从显示；手动选它仍照常启动。配置本身与启动行为一字未改 */}
               {agentProfiles
                 .filter((p) => !hiddenProfiles.includes(p.id))
                 .map((p) => (
@@ -2268,7 +2268,7 @@ const TerminalView = memo(function TerminalView({
                   </option>
                 ))}
               {agentProfiles.some((p) => hiddenProfiles.includes(p.id)) && (
-                <optgroup label="更多（已隐藏）">
+                <optgroup label="已停用（可手选）">
                   {agentProfiles
                     .filter((p) => hiddenProfiles.includes(p.id))
                     .map((p) => (
@@ -3687,6 +3687,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           pt.resume.agentId,
           pt.resume.provider,
           wished,
+          appSettings?.hiddenProfiles,
         );
         profileId = pick?.id ?? "";
         model = pick?.models[0] ?? "";
@@ -3857,7 +3858,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       localStorage.getItem(`ccode.lastProfile.${agentId}`) ||
       "";
     const ok = st.profiles.find((p) => p.id === pick && p.agent === agentId)?.id;
-    // 兜底挑首个时跳过隐藏项（同启动栏口径）；全被隐藏时仍从隐藏项里取，好过留空
+    // 兜底挑首个时跳过停用项（同启动栏口径）；全被停用时仍从停用项里取，好过留空
     const hidden = st.settings?.hiddenProfiles ?? [];
     const visibleProfiles = st.profiles.filter(
       (p) => p.agent === agentId && !hidden.includes(p.id),

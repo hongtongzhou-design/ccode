@@ -81,10 +81,17 @@ pub struct AppSettingsDto {
     pub nav_capsule_display_mode: Option<String>,
     /// 顶部导航胶囊中显示的入口 id；缺省 = 全部显示
     pub nav_capsule_visible_items: Option<Vec<String>>,
-    /// 「隐藏」的 profile id 列表：只影响终端启动栏下拉的分组（沉到「更多」），
-    /// **不删数据、不改任何启动行为**——已选中它的标签照常工作，配置页照常列出。
-    /// 与 default_profiles 一样存在设置里而不是 profiles.json：这是展示偏好，不是配置属性。
+    /// 「停用」的 profile id 列表（字段名沿用旧称 hidden_profiles，不改存储）：软停用 =
+    /// 不被自动路径挑中（启动栏预选/兜底、恢复会话 pickResumeProfile、AI 功能最近使用回落），
+    /// 手动指定仍可用。**不删数据、不改任何启动行为**——已选中它的标签照常工作，配置页照常列出。
+    /// 存在设置里而不是 profiles.json：这是使用偏好，不是配置属性。
     pub hidden_profiles: Option<Vec<String>>,
+    /// 「设为全局」追踪：agent id → 上次由 Ccode 成功写入该 agent 全局配置的 profile id。
+    /// apply_profile_global 写成功后记录，restore_global_backup 后清除（恢复后全局内容
+    /// 不再是任何 profile 的快照）。只代表「上次由 Ccode 写入」，不是绝对生效态——
+    /// 在 Ccode 之外手改配置文件会失真，UI 文案照此口径（「全局生效」徽标 title 已注明）。
+    /// 由 record_active_global/clear_active_global 维护，不走 update_settings patch
+    pub active_global_profiles: Option<BTreeMap<String, String>>,
     /// 会话页「⇗ 外部恢复」使用的终端应用（KNOWN_EXTERNAL_TERMINALS）；None/auto = 自动探测
     pub external_terminal: Option<String>,
     /// 精确注意力标记（agent hooks 桥接）：agent id → 开关。键缺失 = 关。
@@ -176,6 +183,8 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
                 .collect()
         }),
         hidden_profiles: s.hidden_profiles,
+        // 后端维护的「设为全局」追踪：原样透传，不做默认值填充
+        active_global_profiles: s.active_global_profiles,
         external_terminal: Some(
             s.external_terminal
                 .filter(|v| KNOWN_EXTERNAL_TERMINALS.contains(&v.as_str()))
@@ -314,12 +323,71 @@ pub(crate) fn clear_profile_refs(id: &str) {
             cur.ai_profiles = None;
         }
     }
+    // 「全局生效」追踪同样清引用：已删 profile 不该继续顶着「全局生效」徽标
+    if let Some(map) = &mut cur.active_global_profiles {
+        let before = map.len();
+        map.retain(|_, v| v != id);
+        if map.len() != before {
+            touched = true;
+        }
+        if map.is_empty() {
+            cur.active_global_profiles = None;
+        }
+    }
     if touched {
         if let Err(e) = write_to(&path, &cur) {
             crate::logbuf::record(
                 "error",
                 "settings",
                 &format!("清理已删 profile 的设置引用失败: {e}"),
+            );
+        }
+    }
+}
+
+// ===== 「设为全局」追踪（active_global_profiles；见字段注释的口径说明） =====
+
+/// 记录/清除的共用内核（测试可注入路径）：Some(id) 记录或覆盖，None 清除；空 map 归一 None
+fn set_active_global_at(
+    path: &Path,
+    agent: &str,
+    profile_id: Option<&str>,
+) -> Result<(), String> {
+    let mut cur = read_from(path);
+    let mut map = cur.active_global_profiles.unwrap_or_default();
+    match profile_id {
+        Some(id) => {
+            map.insert(agent.to_string(), id.to_string());
+        }
+        None => {
+            map.remove(agent);
+        }
+    }
+    cur.active_global_profiles = if map.is_empty() { None } else { Some(map) };
+    write_to(path, &cur)
+}
+
+/// 「设为全局」写成功后记录（agent → profile id）；失败只记日志不影响主流程
+pub(crate) fn record_active_global(agent: &str, profile_id: &str) {
+    if let Ok(path) = settings_path() {
+        if let Err(e) = set_active_global_at(&path, agent, Some(profile_id)) {
+            crate::logbuf::record(
+                "error",
+                "settings",
+                &format!("记录全局生效 profile 失败: {e}"),
+            );
+        }
+    }
+}
+
+/// 恢复备份后全局内容不再是任何 profile 的快照，清除该 agent 的追踪标记
+pub(crate) fn clear_active_global(agent: &str) {
+    if let Ok(path) = settings_path() {
+        if let Err(e) = set_active_global_at(&path, agent, None) {
+            crate::logbuf::record(
+                "error",
+                "settings",
+                &format!("清除全局生效标记失败: {e}"),
             );
         }
     }
@@ -418,6 +486,30 @@ mod tests {
         assert_eq!(full.nav_capsule_hide_delay_ms, Some(1000));
         assert_eq!(full.nav_capsule_display_mode, None);
         assert_eq!(full.nav_capsule_visible_items, None);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn active_global_record_overwrite_and_clear() {
+        let p = tmp();
+        set_active_global_at(&p, "codex", Some("prof-1")).unwrap();
+        set_active_global_at(&p, "kimi", Some("prof-2")).unwrap();
+        let cur = read_from(&p);
+        assert_eq!(
+            cur.active_global_profiles.as_ref().unwrap().get("codex").map(String::as_str),
+            Some("prof-1")
+        );
+        // 同 agent 再记录 = 覆盖（切换「设为全局」的对象）
+        set_active_global_at(&p, "codex", Some("prof-3")).unwrap();
+        // 清除某个 agent 不影响其他 agent 的标记
+        set_active_global_at(&p, "codex", None).unwrap();
+        let cur = read_from(&p);
+        let map = cur.active_global_profiles.as_ref().unwrap();
+        assert!(!map.contains_key("codex"));
+        assert_eq!(map.get("kimi").map(String::as_str), Some("prof-2"));
+        // 全清后归一 None，不留空对象污染 settings.json
+        set_active_global_at(&p, "kimi", None).unwrap();
+        assert_eq!(read_from(&p).active_global_profiles, None);
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 
