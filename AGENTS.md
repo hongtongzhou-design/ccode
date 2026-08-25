@@ -182,12 +182,14 @@ src-tauri/src/
                              #   base_url/env_key 引用不含密钥）；
                              # 选择器显示名统一「配置名 · 模型」（claude _NAME 槽 / codex catalog display_name /
                              #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）
-  model_registry.rs          # 模型能力注册表：查询链 = 用户覆盖 > 网关实测缓存（fetch_models 顺带沉淀
+  model_registry.rs          # 模型能力注册表：逐字段查询链 = 用户覆盖 > 网关实测缓存（fetch_models 顺带沉淀
                              # OpenRouter 风格 /models 元数据）> 公共能力库（配置页 ⋯ 下载，models.dev 优先
                              # OpenRouter 回落，download_model_db/model_db_status）> 内置前缀表 > 关键词兜底；
-                             # 字段 thinking/context/output/vision；kimi capabilities/max_context_size、
+                             # 字段 thinking/context/output/vision 全 Option（这层不知道就继续向下找，
+                             # 显式 false 只在数据源如实给出时生效）；kimi capabilities/max_context_size、
                              # codex catalog、opencode reasoning/limit/modalities 全从这条链出；
-                             # limit.output 兜底 8192（1.18 起 schema 必填）；宁缺毋滥（收错比漏报有害）
+                             # limit.output 兜底 8192（1.18 起 schema 必填）；宁缺毋滥（收错比漏报有害）；
+                             # 文件型加载器 cfg!(test) 下不读本机真实缓存（链语义由 chain_field 单测覆盖）
   profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥；删除时同步清设置引用（settings::clear_profile_refs）
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
   global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）；写成功即记

@@ -22,19 +22,19 @@ pub struct ModelCapabilityDto {
 }
 
 /// 单条能力：thinking = 支持思考档位；context = 上下文窗口、output = 输出上限、
-/// vision = 图像输入（None = 走保守默认/确知清单）。output 为 opencode 的 limit.output
-/// 服务（1.18 起 schema 必填），内置表不逐模型收（宁缺毋滥同 context 口径）；
-/// 三个外部数据源（用户覆盖文件 > 网关实测缓存 > 公共能力库）可全字段覆盖
+/// vision = 图像输入。**全部字段 Option**：None = 「这层不知道」，查询链逐字段继续向下找
+/// （网关只报了上下文不代表它否认推理能力——显式 false 与缺数据必须分开）；
+/// 内置表不逐模型收 output/vision（宁缺毋滥同 context 口径）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelCaps {
-    pub thinking: bool,
+    pub thinking: Option<bool>,
     pub context: Option<i64>,
     pub output: Option<i64>,
     pub vision: Option<bool>,
 }
 
 const fn caps(thinking: bool, context: Option<i64>) -> ModelCaps {
-    ModelCaps { thinking, context, output: None, vision: None }
+    ModelCaps { thinking: Some(thinking), context, output: None, vision: None }
 }
 
 /// 内置前缀表（最长前缀匹配：kimi-k2-thinking 优先于 kimi-k2）。
@@ -111,15 +111,10 @@ fn parse_caps_map(text: &str) -> Vec<(String, ModelCaps)> {
             let context = c.get("context").and_then(|n| n.as_i64()).filter(|n| *n > 0);
             let output = c.get("output").and_then(|n| n.as_i64()).filter(|n| *n > 0);
             let vision = c.get("vision").and_then(|b| b.as_bool());
-            // 至少一个字段有效才算条目；thinking 缺省按 false（显式关思考也是合法覆盖）
+            // 至少一个字段有效才算条目；缺省字段 = None（这层不知道，查询链继续向下）
             out.push((
                 prefix.to_lowercase(),
-                ModelCaps {
-                    thinking: thinking.unwrap_or(false),
-                    context,
-                    output,
-                    vision,
-                },
+                ModelCaps { thinking, context, output, vision },
             ));
         }
     }
@@ -127,6 +122,10 @@ fn parse_caps_map(text: &str) -> Vec<(String, ModelCaps)> {
 }
 
 fn load_override() -> Vec<(String, ModelCaps)> {
+    // 单测不读本机真实文件：链语义由 chain_field 单测覆盖，本机缓存会让期望值随机器漂移
+    if cfg!(test) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     let Some(path) = override_path() else { return out };
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -163,6 +162,9 @@ fn db_path() -> Option<PathBuf> {
 }
 
 fn load_relay_cache() -> Vec<(String, ModelCaps)> {
+    if cfg!(test) {
+        return Vec::new(); // 同 load_override：单测不读本机真实文件
+    }
     let Some(path) = relay_cache_path() else { return Vec::new() };
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -174,6 +176,9 @@ static DB_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<Vec<(String, Model
     std::sync::OnceLock::new();
 
 fn load_db() -> Vec<(String, ModelCaps)> {
+    if cfg!(test) {
+        return Vec::new(); // 同 load_override：单测不读本机真实文件
+    }
     let cache = DB_CACHE.get_or_init(|| std::sync::RwLock::new(None));
     if let Some(cached) = cache.read().ok().and_then(|g| g.clone()) {
         return cached;
@@ -227,6 +232,8 @@ pub(crate) fn parse_openrouter_models(v: &serde_json::Value) -> Vec<(String, Mod
             .and_then(|a| a.get("input_modalities"))
             .and_then(|m| m.as_array())
             .map(|ms| ms.iter().any(|m| m.as_str() == Some("image")));
+        // supported_parameters 字段存在 → 按有没有 reasoning 给显式 true/false；
+        // 字段整个缺席 → None（这层不知道，查询链继续向下，不能错记成 false）
         let thinking = item
             .get("supported_parameters")
             .and_then(|p| p.as_array())
@@ -240,7 +247,7 @@ pub(crate) fn parse_openrouter_models(v: &serde_json::Value) -> Vec<(String, Mod
         out.push((
             normalize(id),
             ModelCaps {
-                thinking: thinking.unwrap_or(false),
+                thinking,
                 context,
                 output,
                 vision,
@@ -283,7 +290,7 @@ fn parse_models_dev(v: &serde_json::Value) -> Vec<(String, ModelCaps)> {
             out.push((
                 normalize(id),
                 ModelCaps {
-                    thinking: thinking.unwrap_or(false),
+                    thinking,
                     context,
                     output,
                     vision,
@@ -461,23 +468,37 @@ fn longest_match<'a>(table: &'a [(String, ModelCaps)], model: &str) -> Option<&'
         .map(|(_, c)| c)
 }
 
-/// 注册表查询链：用户覆盖 > 网关实测缓存 > 公共能力库 > 内置表（前者赢）
-fn lookup(model: &str) -> Option<ModelCaps> {
+/// 逐字段链式查询内核（测试可注入表）：每层取最长前缀命中，命中但字段为 None
+/// （这层不知道）时继续向下——不是整条命中即返回
+fn chain_field<T>(
+    tables: &[Vec<(String, ModelCaps)>],
+    model: &str,
+    f: impl Fn(&ModelCaps) -> Option<T>,
+) -> Option<T> {
     let m = normalize(model);
-    if let Some(c) = longest_match(&load_override(), &m) {
-        return Some(*c);
+    for table in tables {
+        if let Some(c) = longest_match(table, &m) {
+            if let Some(v) = f(c) {
+                return Some(v);
+            }
+        }
     }
-    if let Some(c) = longest_match(&load_relay_cache(), &m) {
-        return Some(*c);
-    }
-    if let Some(c) = longest_match(&load_db(), &m) {
-        return Some(*c);
-    }
-    let builtin: Vec<(String, ModelCaps)> = BUILTIN_CAPS
-        .iter()
-        .map(|(p, c)| (p.to_string(), *c))
-        .collect();
-    longest_match(&builtin, &m).copied()
+    None
+}
+
+/// 逐字段查询链：用户覆盖 > 网关实测缓存 > 公共能力库 > 内置表。
+/// 网关只报了上下文不代表它否认推理能力，缺的字段由更深的层补
+fn lookup_field<T>(model: &str, f: impl Fn(&ModelCaps) -> Option<T>) -> Option<T> {
+    let tables: [Vec<(String, ModelCaps)>; 4] = [
+        load_override(),
+        load_relay_cache(),
+        load_db(),
+        BUILTIN_CAPS
+            .iter()
+            .map(|(p, c)| (p.to_string(), *c))
+            .collect(),
+    ];
+    chain_field(&tables, model, f)
 }
 
 /// 关键词推断兜底（注册表未命中时）：覆盖中转改名/全新模型的常见命名。
@@ -508,39 +529,32 @@ fn fallback_context_size(model: &str) -> i64 {
     }
 }
 
-/// 模型是否支持思考：注册表（覆盖文件 > 内置表）→ 关键词推断
+/// 模型是否支持思考：逐字段查询链 → 关键词推断兜底
 pub fn model_thinking(model: &str) -> bool {
-    lookup(model)
-        .map(|c| c.thinking)
-        .unwrap_or_else(|| keyword_thinking(model))
+    lookup_field(model, |c| c.thinking).unwrap_or_else(|| keyword_thinking(model))
 }
 
-/// 模型上下文窗口：注册表（覆盖文件 > 内置表）→ 保守默认映射
+/// 模型上下文窗口：逐字段查询链 → 保守默认映射
 pub fn model_context_size(model: &str) -> i64 {
-    lookup(model)
-        .and_then(|c| c.context)
-        .unwrap_or_else(|| fallback_context_size(model))
+    lookup_field(model, |c| c.context).unwrap_or_else(|| fallback_context_size(model))
 }
 
 /// 输出上限兜底：models.dev 上多数 chat 模型的常见值，保守不越界
 /// （opencode 拿 limit.output 当 max output tokens 用，宁小勿大）
 const DEFAULT_OUTPUT_LIMIT: i64 = 8192;
 
-/// 模型输出上限：注册表（覆盖文件 > 内置表）→ 保守默认
+/// 模型输出上限：逐字段查询链 → 保守默认
 pub fn model_output_limit(model: &str) -> i64 {
-    lookup(model)
-        .and_then(|c| c.output)
-        .unwrap_or(DEFAULT_OUTPUT_LIMIT)
+    lookup_field(model, |c| c.output).unwrap_or(DEFAULT_OUTPUT_LIMIT)
 }
 
-/// 是否支持图像输入：外部数据源（覆盖/网关实测/公共库）声明了 vision 就听它的；
-/// 未声明时回落确知多模态清单（宁缺毋滥——给纯文本模型声明图像输入会让用户拖图进去才报错）。
+/// 是否支持图像输入：逐字段查询链有显式声明（true/false 都算数——网关如实报了
+/// input_modalities 就听它的）→ 未声明时回落确知多模态清单（宁缺毋滥——给纯文本
+/// 模型声明图像输入会让用户拖图进去才报错）。
 /// codex catalog 的 input_modalities / kimi capabilities image_in / opencode modalities 用
 pub fn model_supports_vision(model: &str) -> bool {
-    if let Some(c) = lookup(model) {
-        if c.vision == Some(true) {
-            return true;
-        }
+    if let Some(v) = lookup_field(model, |c| c.vision) {
+        return v;
     }
     let normalized = normalize(model);
     normalized.contains("kimi-k3")
@@ -661,16 +675,50 @@ mod tests {
         let map: std::collections::HashMap<String, ModelCaps> =
             parse_openrouter_models(&v).into_iter().collect();
         let d = map["deepseek-v3.2"];
-        assert!(d.thinking, "supported_parameters 含 reasoning → 思考");
+        assert_eq!(d.thinking, Some(true), "supported_parameters 含 reasoning → 思考");
         assert_eq!(d.context, Some(163840));
         assert_eq!(d.output, Some(147456));
         assert_eq!(d.vision, Some(false));
         let vx = map["vision-x"];
-        assert!(!vx.thinking);
+        // supported_parameters 在场但没有 reasoning → 显式 false（网关如实声明了参数全集）
+        assert_eq!(vx.thinking, Some(false));
         assert_eq!(vx.vision, Some(true));
         assert_eq!(vx.context, Some(262144));
         // 纯 id 无元数据的条目丢弃
         assert!(!map.contains_key("bare-id-only"));
+    }
+
+    #[test]
+    fn openrouter_entry_without_supported_parameters_leaves_thinking_unknown() {
+        // supported_parameters 整个缺席 = 这层不知道，必须 None（不能错记 false
+        // 挡住公共库的正确答案）
+        let v = serde_json::json!({"data": [{
+            "id": "relay/partial-model",
+            "context_length": 50000,
+            "architecture": {"input_modalities": ["text"]}
+        }]});
+        let map = parse_openrouter_models(&v);
+        assert_eq!(map[0].1.thinking, None);
+        assert_eq!(map[0].1.context, Some(50000));
+    }
+
+    #[test]
+    fn chain_field_falls_through_per_field_not_per_entry() {
+        // 用户场景：网关缓存只有 context（其余 None），公共库同模型有 thinking——
+        // 逐字段向下补：context 用网关实测，thinking 用公共库
+        let relay = vec![(
+            "model-x".to_string(),
+            ModelCaps { thinking: None, context: Some(99999), output: None, vision: None },
+        )];
+        let db = vec![(
+            "model-x".to_string(),
+            ModelCaps { thinking: Some(true), context: Some(11111), output: Some(4096), vision: None },
+        )];
+        let tables = [relay, db];
+        assert_eq!(chain_field(&tables, "model-x", |c| c.context), Some(99999));
+        assert_eq!(chain_field(&tables, "model-x", |c| c.thinking), Some(true));
+        assert_eq!(chain_field(&tables, "model-x", |c| c.output), Some(4096));
+        assert_eq!(chain_field(&tables, "model-x", |c| c.vision), None);
     }
 
     #[test]
@@ -690,7 +738,7 @@ mod tests {
         let map: std::collections::HashMap<String, ModelCaps> =
             parse_models_dev(&v).into_iter().collect();
         let k = map["kimi-k3"];
-        assert!(k.thinking);
+        assert_eq!(k.thinking, Some(true));
         assert_eq!(k.context, Some(1_048_576));
         assert_eq!(k.vision, Some(true));
         let g = map["gpt-5"];
@@ -711,7 +759,7 @@ mod tests {
         record_relay_models_to(&path, &v);
         let loaded = parse_caps_map(&std::fs::read_to_string(&path).unwrap());
         let c = longest_match(&loaded, "custom-model-x").unwrap();
-        assert!(c.thinking && c.vision == Some(true) && c.context == Some(99999));
+        assert!(c.thinking == Some(true) && c.vision == Some(true) && c.context == Some(99999));
         // 再记一条别的模型：合并不覆盖
         let v2 = serde_json::json!({"data": [{"id": "other", "context_length": 1000}]});
         record_relay_models_to(&path, &v2);

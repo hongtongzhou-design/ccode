@@ -150,11 +150,12 @@
    grok（源码调研，待实机验证）：`--permission-mode dontAsk --sandbox read-only`（CI 严格白名单 + OS 级只读；
    `--permission-mode plan` 门控链路未确认，不用）。
    注册表落点：`agent_specs.rs` 的 `AgentSpec.readonly_args`，应用逻辑 `agents::readonly_launch_args`。
-7. **模型能力元数据统一走 `model_registry.rs`**（2026-08-17 起；2026-08-26 扩为分层数据源）：查询链 =
+7. **模型能力元数据统一走 `model_registry.rs`**（2026-08-17 起；2026-08-26 扩为分层数据源）：**逐字段**查询链 =
    用户覆盖文件（model-capabilities.json）> **网关实测缓存**（model-capabilities-relay.json，
    「获取模型」时 fetch_models 顺带解析 OpenRouter 风格 /models 元数据落盘，最准）> **公共能力库**
    （model-capabilities-db.json，配置页 ⋯ 菜单主动下载：models.dev 优先、OpenRouter 回落——
-   models.dev 本机直连超时实证）> 内置前缀表 > 关键词推断兜底。能力字段四项：thinking/context/output/vision。
+   models.dev 本机直连超时实证）> 内置前缀表 > 关键词推断兜底。能力字段四项：thinking/context/output/vision，
+   **全 Option——「这层不知道」继续向下找，显式 false 只在数据源如实给出时生效**（网关只报上下文不挡公共库的推理声明）。
    kimi 的 capabilities/max_context_size、codex catalog、opencode 的 reasoning/limit/modalities 全从这条链出；
    内置表宁缺毋滥（收错比漏报有害）。
    有能力声明通道的只有 kimi/codex/opencode/claude；gemini/qwen/codebuddy/cursor/grok 无此机制（2026-08-25 逐家核实）。
