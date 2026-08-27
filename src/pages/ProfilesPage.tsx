@@ -38,6 +38,8 @@ import type {
   ProfileUsageDto,
   ProfileValidationDto,
   ValidationCheckDto,
+  RequestPolicy,
+  LaunchPlanPreviewDto,
 } from "../types";
 
 function ProfileModal({
@@ -70,8 +72,20 @@ function ProfileModal({
     extraEnvText: Object.entries(initial?.extraEnv ?? {})
       .map(([k, v]) => `${k}=${v}`)
       .join("\n"),
+    requestPolicy: {
+      temperature: initial?.requestPolicy?.temperature ?? null,
+      topP: initial?.requestPolicy?.topP ?? null,
+      maxOutputTokens: initial?.requestPolicy?.maxOutputTokens ?? null,
+      reasoningEffort: initial?.requestPolicy?.reasoningEffort ?? null,
+      headerEnv: initial?.requestPolicy?.headerEnv ?? {},
+    } as RequestPolicy,
     apiKey: "",
   });
+  const [headerEnvText, setHeaderEnvText] = useState(
+    Object.entries(initial?.requestPolicy?.headerEnv ?? {})
+      .map(([k, v]) => `${k}=${v}`)
+      .join("\n"),
+  );
   const [modelInput, setModelInput] = useState("");
   const [fetching, setFetching] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<string[] | null>(null);
@@ -84,6 +98,21 @@ function ProfileModal({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [capabilities, setCapabilities] = useState<ModelCapabilityDto[]>([]);
+  const [agentCapabilities, setAgentCapabilities] = useState<AgentCapabilitiesDto | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<AgentCapabilitiesDto[]>("agent_capabilities")
+      .then((items) => {
+        if (!cancelled) setAgentCapabilities(items.find((item) => item.agent === form.agent) ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setAgentCapabilities(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [form.agent]);
 
   useEffect(() => {
     let cancelled = false;
@@ -105,6 +134,19 @@ function ProfileModal({
 
   /** 解析「每行 KEY=VALUE」文本为环境变量表，# 开头视为注释 */
   function parseEnvLines(text: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const line of text.split("\n")) {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const eq = t.indexOf("=");
+      if (eq <= 0) continue;
+      out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+    }
+    return out;
+  }
+
+  /** 解析 Header 名=环境变量名；值只允许是变量名，不接受密文。 */
+  function parseHeaderEnvLines(text: string): Record<string, string> {
     const out: Record<string, string> = {};
     for (const line of text.split("\n")) {
       const t = line.trim();
@@ -183,6 +225,10 @@ function ProfileModal({
       baseUrl: form.accountType === "official" ? "" : form.baseUrl.trim(),
       models: form.models,
       extraEnv: parseEnvLines(form.extraEnvText),
+      requestPolicy: {
+        ...form.requestPolicy,
+        headerEnv: parseHeaderEnvLines(headerEnvText),
+      },
       apiKey: form.accountType === "official" ? null : form.apiKey || null,
     };
     try {
@@ -563,6 +609,19 @@ function ProfileModal({
                 </select>
               </label>
             )}
+            <div className="mb-3 rounded border border-hairline p-2">
+              <p className="mb-2 text-xs font-medium text-l2">请求策略声明（按 Agent 能力决定是否生效）</p>
+              <div className="grid grid-cols-3 gap-2">
+                {([[
+                  "temperature", "temperature", "temperature"], ["topP", "top_p", "topP"], ["maxOutputTokens", "max output", "maxOutputTokens"]] as const).map(([key, label, capability]) => {
+                  const support = agentCapabilities?.requestPolicy[capability];
+                  return <label key={key} className="text-xs text-l3">{label}<span className="ml-1 text-[10px] text-l4">协议{support === "supported" ? "支持" : support === "unsupported" ? "不支持" : "未知"}</span><input className={fieldClass} type="number" min={key === "temperature" ? "0" : key === "topP" ? "0" : "1"} max={key === "temperature" ? "2" : key === "topP" ? "1" : undefined} step={key === "temperature" ? "0.1" : key === "topP" ? "0.05" : "1"} placeholder="默认" value={form.requestPolicy[key] ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, [key]: e.target.value === "" ? null : Number(e.target.value) } })} /></label>;
+                })}
+              </div>
+              <label className="mt-2 block text-xs text-l3">reasoning effort<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.reasoningEffort === "supported" ? "支持" : agentCapabilities?.requestPolicy.reasoningEffort === "unsupported" ? "不支持" : "未知"}</span><input className={fieldClass} placeholder="如 low / medium / high" value={form.requestPolicy.reasoningEffort ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, reasoningEffort: e.target.value || null } })} /></label>
+              <label className="mt-2 block text-xs text-l3">自定义 Header（Header 名=环境变量名）<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.customHeaders === "supported" ? "支持" : agentCapabilities?.requestPolicy.customHeaders === "unsupported" ? "不支持" : "未知"}</span><textarea className={`${fieldClass} h-16 font-mono text-xs`} placeholder="X-Provider-Region=MODEL_REGION\nX-Trace-Id=TRACE_ID" value={headerEnvText} onChange={(e) => setHeaderEnvText(e.target.value)} /></label>
+              <p className="mt-1 text-[11px] text-l4">这是跨 Agent 的策略记录；当前不会伪造请求体，未适配字段不会注入。Header 值只填环境变量名，不保存密文。</p>
+            </div>
             <label className="block text-sm">
               <span className="mb-1 block text-xs text-l3">
                 附加环境变量（每行 KEY=VALUE，可覆盖内置值）
@@ -1528,6 +1587,24 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       setError(null);
     } catch (e) {
       setValidationDialog(null);
+      setError(String(e));
+    }
+  }
+
+  async function onPreviewLaunchPlan(p: Profile) {
+    try {
+      const preview = await invoke<LaunchPlanPreviewDto>("preview_launch_plan", { profileId: p.id, model: p.models[0] ?? null });
+      await alertDialog(
+        [
+          `二进制：${preview.binary ?? "未找到"}`,
+          `参数：${preview.args.length ? preview.args.join(" ") : "（无）"}`,
+          `注入环境变量：${preview.envNames.length ? preview.envNames.join("、") : "（无）"}`,
+          `清理继承变量：${preview.envRemove.length ? preview.envRemove.join("、") : "（无）"}`,
+          `初始指令注入：${preview.promptSupported ? "支持" : "不支持，需手动发送"}`,
+          "密钥值未显示；请求策略只作为声明保存，未适配字段不会被伪造注入。",
+        ].join("\n"),
+      );
+    } catch (e) {
       setError(String(e));
     }
   }
@@ -2522,6 +2599,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                 }),
             },
             { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
+            { label: "启动计划预览", onSelect: () => void onPreviewLaunchPlan(rowMenu.profile) },
             ...(rowMenu.profile.accountType === "api" && rowMenu.profile.hasKey
               ? [{ label: "清除本地密钥", onSelect: () => void onClearKey(rowMenu.profile) }]
               : []),

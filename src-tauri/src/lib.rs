@@ -72,6 +72,7 @@ pub fn run() {
             profiles::import_profiles,
             profile_validation::validate_profile,
             agents::detect_agents,
+            agents::preview_launch_plan,
             agents::official_account_status,
             agents::clear_account_conflicts,
             agents::session_resume_command,

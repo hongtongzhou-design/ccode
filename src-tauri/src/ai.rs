@@ -806,6 +806,7 @@ mod tests {
             base_url: None,
             models: vec![],
             extra_env: std::collections::HashMap::new(),
+            request_policy: crate::profiles::RequestPolicy::default(),
             key_hint: None,
             model: None,
             has_key: false,

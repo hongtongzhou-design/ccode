@@ -167,6 +167,12 @@
    注意边界：streaming/function calling/结构化输出是协议层能力（声明补不了）；web search/file search/code interpreter
    等 hosted tools 是第一方服务端能力，第三方中继没有对应物，声明了等于摆死工具——如实不写。
 
+8. **请求策略不是通用请求代理**（2026-08-27）：Profile 的 `requestPolicy` 只保存可迁移声明：
+   `temperature`、`top_p`、`max_output_tokens`、`reasoning_effort`，以及 Header 名到环境变量名的引用。
+   Ccode 当前在启动计划中只注入各 Agent 已核实的环境变量/命令行参数，不重写 HTTP body；能力未知或不支持时保留配置、
+   在校验结果提示并跳过强制注入。Header 值必须由用户在运行环境提供，Profile 不落密文。真实请求级注入若以后实现，
+   必须按「Agent + protocol」建立逐字段适配和测试矩阵，不能把 `max_output_tokens` 直接等同为所有 CLI 的 `max_tokens`。
+
 ## 10. MCP 配置分发调研（2026-08-10，八家经官方文档/源码/本机实测核实；grok 为 2026-08 源码调研，首版只读不分发）
 
 **目标**：Ccode 维护一份 MCP server 清单，一键分发进各 CLI 自己的配置文件。本节是实现规格的单一出处——写字段/路径前以此为准，不要凭印象。

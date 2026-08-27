@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -12,6 +13,18 @@ pub enum AccountType {
     #[default]
     Api,
     Official,
+}
+
+/// 请求级策略。这里仅保存“可安全复用的声明”，不会假设所有 Agent 都支持这些字段。
+/// header_env 的 value 是环境变量名，不保存 Header 密文本体；真正的值在启动时由 CLI/网关读取。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RequestPolicy {
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens: Option<u64>,
+    pub reasoning_effort: Option<String>,
+    pub header_env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +48,9 @@ pub struct Profile {
     /// 附加环境变量，启动时注入且优先级高于 adapter 内置 env（供覆盖）
     #[serde(default)]
     pub extra_env: std::collections::HashMap<String, String>,
+    /// 请求策略声明；是否实际生效由 Agent/协议能力表决定。
+    #[serde(default)]
+    pub request_policy: RequestPolicy,
     /// 密钥尾号提示（如 "···abc1"），仅用于界面区分多个 key，非敏感信息
     #[serde(default)]
     pub key_hint: Option<String>,
@@ -63,6 +79,8 @@ pub struct ProfileInput {
     pub models: Vec<String>,
     #[serde(default)]
     pub extra_env: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub request_policy: RequestPolicy,
     /// 明文密钥，写入钥匙串后丢弃；空 / None 表示不设置或不修改
     pub api_key: Option<String>,
 }
@@ -187,6 +205,7 @@ impl ProfileStore {
             base_url: input.base_url.filter(|s| !s.is_empty()),
             models: normalize_models(input.models),
             extra_env: input.extra_env,
+            request_policy: input.request_policy,
             key_hint: None,
             model: None,
             last_used_at: None,
@@ -221,6 +240,7 @@ impl ProfileStore {
             base_url: src.base_url,
             models: src.models,
             extra_env: src.extra_env,
+            request_policy: src.request_policy,
             key_hint: src.key_hint,
             model: None,
             last_used_at: None,
@@ -269,6 +289,7 @@ impl ProfileStore {
             base_url: src.base_url,
             models: src.models,
             extra_env: src.extra_env,
+            request_policy: src.request_policy,
             key_hint: src.key_hint,
             model: None,
             last_used_at: None,
@@ -306,6 +327,7 @@ impl ProfileStore {
         candidate.base_url = input.base_url.clone().filter(|s| !s.trim().is_empty());
         candidate.models = normalize_models(input.models.clone());
         candidate.extra_env = input.extra_env.clone();
+        candidate.request_policy = input.request_policy.clone();
         candidate.has_key = input.api_key.as_deref().is_some_and(|k| !k.trim().is_empty())
             || get_key_locked(id)?.is_some();
         crate::profile_validation::validate_profile_fields(&candidate)?;
@@ -321,6 +343,7 @@ impl ProfileStore {
         profile.models = normalize_models(input.models);
         profile.model = None;
         profile.extra_env = input.extra_env;
+        profile.request_policy = input.request_policy;
         if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
             set_key(id, &key)?;
             profile.key_hint = Some(key_hint_of(&key));
@@ -784,6 +807,7 @@ mod tests {
             base_url: None,
             models: vec![],
             extra_env: Default::default(),
+            request_policy: RequestPolicy::default(),
             key_hint: None,
             model: None,
             last_used_at: None,
@@ -827,5 +851,19 @@ mod tests {
         // api 序列化为 "api"（导出/导入兼容）
         let p = Profile { account_type: AccountType::Api, ..p };
         assert!(serde_json::to_string(&p).unwrap().contains("\"accountType\":\"api\""));
+    }
+
+    #[test]
+    fn profile_without_request_policy_defaults_to_empty_policy() {
+        let old = r#"{"id":"1","agent":"codex","name":"n","accountType":"api","protocol":null,"baseUrl":null,"models":[],"extraEnv":{},"hasKey":false}"#;
+        let p: Profile = serde_json::from_str(old).unwrap();
+        assert_eq!(p.request_policy, RequestPolicy::default());
+
+        let mut p = p;
+        p.request_policy.header_env.insert("X-Relay-Key".into(), "RELAY_KEY".into());
+        let text = serde_json::to_string(&p).unwrap();
+        assert!(text.contains("requestPolicy"));
+        assert!(text.contains("RELAY_KEY"));
+        assert!(!text.contains("sk-secret"));
     }
 }

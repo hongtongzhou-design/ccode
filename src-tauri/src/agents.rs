@@ -54,6 +54,46 @@ pub struct LaunchPlan {
     pub prompt_dropped: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchPlanPreviewDto {
+    pub agent: String,
+    pub binary: Option<String>,
+    pub args: Vec<String>,
+    pub env_names: Vec<String>,
+    pub env_remove: Vec<String>,
+    pub prompt_supported: bool,
+    pub request_policy: crate::profiles::RequestPolicy,
+}
+
+/// 返回不含密钥值的启动计划，供配置页诊断和跨平台问题排查使用。
+#[tauri::command]
+pub fn preview_launch_plan(
+    store: tauri::State<'_, ProfileStore>,
+    profile_id: String,
+    model: Option<String>,
+) -> Result<LaunchPlanPreviewDto, String> {
+    let profile = store.get(&profile_id)?;
+    let key = crate::profiles::get_key(&profile.id)?;
+    let selected = model.as_deref().or_else(|| profile.models.first().map(String::as_str));
+    let plan = launch_plan(&profile, key, selected);
+    let args = plan
+        .args
+        .into_iter()
+        .map(|arg| crate::sessions::redact_sensitive_text(&arg))
+        .collect();
+    Ok(LaunchPlanPreviewDto {
+        agent: profile.agent.clone(),
+        binary: resolve_binary(binary_for(&profile.agent).unwrap_or(""))
+            .map(|p| p.to_string_lossy().into_owned()),
+        args,
+        env_names: plan.env.into_iter().map(|(name, _)| name).collect(),
+        env_remove: plan.env_remove,
+        prompt_supported: !plan.prompt_dropped,
+        request_policy: profile.request_policy,
+    })
+}
+
 /// 解析 CLI 二进制的绝对路径：先 which（继承进程 PATH），miss 时按平台查常见
 /// 安装目录兜底。背景：macOS 打包版从 Finder 启动时 PATH 很短（/usr/bin:/bin），
 /// brew/npm 装的 CLI 不在其中（AGENTS.md 本机环境档案「GUI 应用 PATH 很短」）。
@@ -1913,6 +1953,7 @@ mod tests {
             base_url: base_url.map(|s| s.into()),
             models: vec![],
             extra_env: std::collections::HashMap::new(),
+            request_policy: crate::profiles::RequestPolicy::default(),
             key_hint: None,
             model: None,
             last_used_at: None,

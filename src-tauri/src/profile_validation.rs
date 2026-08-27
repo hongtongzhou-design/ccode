@@ -112,6 +112,31 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
             return Err(format!("附加环境变量名不合法: {key:?}"));
         }
     }
+    let policy = &profile.request_policy;
+    if let Some(v) = policy.temperature {
+        if !v.is_finite() || !(0.0..=2.0).contains(&v) {
+            return Err("temperature 必须是 0 到 2 之间的有限数字".into());
+        }
+    }
+    if let Some(v) = policy.top_p {
+        if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+            return Err("topP 必须是 0 到 1 之间的有限数字".into());
+        }
+    }
+    if matches!(policy.max_output_tokens, Some(0)) {
+        return Err("maxOutputTokens 必须大于 0".into());
+    }
+    if policy.reasoning_effort.as_deref().is_some_and(|v| v.trim().is_empty()) {
+        return Err("reasoningEffort 不能为空".into());
+    }
+    for (header, env_name) in &policy.header_env {
+        if header.trim().is_empty() || header.contains(['\r', '\n', ':']) {
+            return Err(format!("模型 Header 名不合法: {header:?}"));
+        }
+        if env_name.trim().is_empty() || env_name.contains(['=', '\0', '\r', '\n']) {
+            return Err(format!("模型 Header 环境变量名不合法: {env_name:?}"));
+        }
+    }
     if profile.no_auth {
         const AUTH_KEYS: &[&str] = &[
             "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
@@ -127,6 +152,31 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
         return Err("附加环境变量值不得包含 NUL 字符".into());
     }
     let mut notes = Vec::new();
+    let support = crate::agent_specs::request_policy_support(&profile.agent);
+    let policy = &profile.request_policy;
+    if policy.temperature.is_some()
+        || policy.top_p.is_some()
+        || policy.max_output_tokens.is_some()
+        || policy.reasoning_effort.is_some()
+        || !policy.header_env.is_empty()
+    {
+        notes.push("请求策略当前仅保存声明；Ccode 启动器不会改写 HTTP 请求体，是否生效取决于 Agent 原生读取或后续协议适配".into());
+    }
+    if policy.temperature.is_some() && support.temperature != "supported" {
+        notes.push(format!("当前 Agent 对 temperature 的协议支持状态为 {}，不会由 Ccode 强行注入", support.temperature));
+    }
+    if policy.top_p.is_some() && support.top_p != "supported" {
+        notes.push(format!("当前 Agent 对 topP 的协议支持状态为 {}，不会由 Ccode 强行注入", support.top_p));
+    }
+    if policy.max_output_tokens.is_some() && support.max_output_tokens != "supported" {
+        notes.push(format!("当前 Agent 对 maxOutputTokens 的协议支持状态为 {}，不会由 Ccode 强行注入", support.max_output_tokens));
+    }
+    if policy.reasoning_effort.is_some() && support.reasoning_effort != "supported" {
+        notes.push(format!("当前 Agent 对 reasoningEffort 的协议支持状态为 {}，不会由 Ccode 强行注入", support.reasoning_effort));
+    }
+    if !policy.header_env.is_empty() && support.custom_headers != "supported" {
+        notes.push(format!("当前 Agent 对模型自定义 Header 的协议支持状态为 {}，Header 仅记录为环境变量引用", support.custom_headers));
+    }
     if profile.models.is_empty() {
         notes.push("未指定模型，将使用 CLI 自身默认值".into());
     }
@@ -593,6 +643,7 @@ mod tests {
             base_url: Some("https://relay.example.com/v1".into()),
             models: vec!["model-a".into()],
             extra_env: Default::default(),
+            request_policy: crate::profiles::RequestPolicy::default(),
             key_hint: None,
             model: None,
             last_used_at: None,
@@ -614,6 +665,29 @@ mod tests {
                 .as_str(),
             "https://relay.example.com/gemini/v1beta/models"
         );
+    }
+
+    #[test]
+    fn request_policy_ranges_and_header_references_are_validated() {
+        let mut p = profile("claude-code");
+        p.request_policy.temperature = Some(2.1);
+        assert!(validate_profile_fields(&p).is_err());
+        p.request_policy.temperature = Some(0.7);
+        p.request_policy.top_p = Some(1.1);
+        assert!(validate_profile_fields(&p).is_err());
+        p.request_policy.top_p = Some(0.9);
+        p.request_policy.header_env.insert("X-Relay-Key".into(), "RELAY_KEY".into());
+        assert!(validate_profile_fields(&p).is_ok());
+        p.request_policy.header_env.insert("Bad:Header".into(), "RELAY_KEY".into());
+        assert!(validate_profile_fields(&p).is_err());
+    }
+
+    #[test]
+    fn unsupported_request_policy_is_a_warning_not_silent_success() {
+        let mut p = profile("codex");
+        p.request_policy.temperature = Some(0.2);
+        let notes = validate_profile_fields(&p).unwrap();
+        assert!(notes.iter().any(|n| n.contains("temperature")));
     }
 
     #[test]

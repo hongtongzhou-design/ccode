@@ -12,6 +12,7 @@ export interface Profile {
   models: string[];
   /** 附加环境变量，启动时注入，优先级高于 adapter 内置 env */
   extraEnv: Record<string, string>;
+  requestPolicy: RequestPolicy;
   /** 密钥尾号提示（如 "···abc1"），用于区分多个 key */
   keyHint: string | null;
   hasKey: boolean;
@@ -28,8 +29,19 @@ export interface ProfileInput {
   baseUrl: string | null;
   models: string[];
   extraEnv: Record<string, string>;
+  requestPolicy?: RequestPolicy;
   /** 明文密钥，仅保存时提交；编辑时留空表示不修改 */
   apiKey: string | null;
+}
+
+/** 请求级策略声明。仅在对应 Agent/协议支持时才会实际生效。 */
+export interface RequestPolicy {
+  temperature: number | null;
+  topP: number | null;
+  maxOutputTokens: number | null;
+  reasoningEffort: string | null;
+  /** Header 名 → 读取值的环境变量名，避免把密钥明文存入 Profile。 */
+  headerEnv: Record<string, string>;
 }
 
 export interface ModelCapabilityDto {
@@ -74,6 +86,17 @@ export interface ProfileValidationDto {
 export interface GlobalApplyResultDto {
   files: string[];
   validation: ProfileValidationDto;
+}
+
+/** 启动计划预览：只展示环境变量名称与脱敏参数，不返回密钥值。 */
+export interface LaunchPlanPreviewDto {
+  agent: string;
+  binary: string | null;
+  args: string[];
+  envNames: string[];
+  envRemove: string[];
+  promptSupported: boolean;
+  requestPolicy: RequestPolicy;
 }
 
 export interface DetectResult {
@@ -872,6 +895,13 @@ export interface AgentCapabilitiesDto {
   setGlobal: CapabilityFlagDto;
   mcpWrite: CapabilityFlagDto;
   skillDist: { mode: "symlinkOrCopy" | "copyOnly"; reason?: string };
+  requestPolicy: {
+    temperature: "supported" | "unsupported" | "unknown";
+    topP: "supported" | "unsupported" | "unknown";
+    maxOutputTokens: "supported" | "unsupported" | "unknown";
+    reasoningEffort: "supported" | "unsupported" | "unknown";
+    customHeaders: "supported" | "unsupported" | "unknown";
+  };
 }
 
 // ===== 定时雷达（src-tauri/src/scheduler.rs） =====

@@ -843,6 +843,30 @@ pub struct AgentCapabilitiesDto {
     pub set_global: CapabilityFlagDto,
     pub mcp_write: CapabilityFlagDto,
     pub skill_dist: SkillDistDto,
+    pub request_policy: RequestPolicySupportDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestPolicySupportDto {
+    pub temperature: &'static str,
+    pub top_p: &'static str,
+    pub max_output_tokens: &'static str,
+    pub reasoning_effort: &'static str,
+    pub custom_headers: &'static str,
+}
+
+pub(crate) fn request_policy_support(agent: &str) -> RequestPolicySupportDto {
+    let supported = |temperature, top_p, max_output_tokens, reasoning_effort, custom_headers| {
+        RequestPolicySupportDto { temperature, top_p, max_output_tokens, reasoning_effort, custom_headers }
+    };
+    match agent {
+        "claude-code" | "codebuddy" => supported("supported", "supported", "supported", "unknown", "unknown"),
+        "gemini" => supported("supported", "supported", "supported", "supported", "unknown"),
+        "codex" => supported("unsupported", "unknown", "supported", "supported", "unknown"),
+        "opencode" => supported("supported", "supported", "supported", "supported", "supported"),
+        _ => supported("unknown", "unknown", "unknown", "unknown", "unknown"),
+    }
 }
 
 fn flag(supported: bool, reason: Option<&'static str>) -> CapabilityFlagDto {
@@ -868,6 +892,7 @@ pub fn agent_capabilities() -> Vec<AgentCapabilitiesDto> {
                 SkillDist::SymlinkOrCopy => SkillDistDto { mode: "symlinkOrCopy", reason: None },
                 SkillDist::CopyOnly(r) => SkillDistDto { mode: "copyOnly", reason: Some(r) },
             },
+            request_policy: request_policy_support(s.id),
         })
         .collect()
 }
@@ -1180,6 +1205,7 @@ mod tests {
             .find(|c| c.agent == "claude-code")
             .unwrap();
         assert!(claude_dto.set_global.supported && claude_dto.set_global.reason.is_none());
+        assert_eq!(claude_dto.request_policy.temperature, "supported");
         assert_eq!(claude_dto.skill_dist.mode, "symlinkOrCopy");
     }
 }

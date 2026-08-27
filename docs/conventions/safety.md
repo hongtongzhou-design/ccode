@@ -12,6 +12,11 @@
   送到 React；只作用于 DTO/导出副本，不得回写会话源文件；前端遮盖不是安全边界。**AI 提交信息（ai_commit_message）
   的 git status/numstat/diff 同样先过 redact_sensitive_text 再进 prompt**（v3.92 补齐——diff 可能含误提交的 .env/密钥）。
 - **Profile 的 extra_env 排在 adapter 内置 env 之后注入**，供用户覆盖内置值（CommandBuilder 后者生效）。
+- **RequestPolicy 先声明、后适配**：temperature/topP/maxOutputTokens/reasoningEffort/Header 引用先保存并校验，
+  只有 AgentSpec 能力表明确支持时才允许后续注入；未知/不支持字段不得伪造 HTTP 请求体，必须在验证结果中提示。
+  Header 只保存环境变量名引用，不保存 Header 密文。
+- **跨平台文本换行统一**：仓库文本文件以 LF 存储，由 `.gitattributes` 固定 `eol=lf`；Windows 工作区可因
+  `core.autocrlf` 显示为 CRLF，但不得提交仅由换行转换造成的全文件差异。
 - **普通仓库与工作区提交语义分开**：普通仓库默认不选文件，`git_commit(paths)` 与 AI 提交信息只处理用户勾选且仍在当前
   status 的安全相对路径（literal pathspec）；工作区任务始终提交全部任务改动，禁止把选择提交扩散到 worktree 流程。
 - **Git 改动列表的单文件 diff 必须安全且可展开**：普通仓库只读当前 status 中经安全校验的相对路径，工作区只读当前累计
