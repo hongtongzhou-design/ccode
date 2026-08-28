@@ -115,6 +115,13 @@ pub struct AppSettingsDto {
     /// 聊天页显示终端状态栏（模型/目录/git/token；默认开）。关 = 聊天页隐藏但保留
     /// invisible 占位——终端几何高度跨模式恒定，切层不改行列数、不触发 codex resize reflow
     pub status_bar_in_chat: Option<bool>,
+    /// 向 agent 主动告知终端底色（Windows 专用，默认开）。ConPTY 双向都不转发
+    /// OSC 10/11 底色查询——子进程的查询到不了 xterm，回报也回不去子进程——
+    /// 浅色主题下 agent 探不到底色就回落深色配色（输入框变深灰）。开 = attach 后
+    /// 把当前主题前景/底色编码成 win32-input-mode 按键记录推给 agent。
+    /// 只推给会消费这个回报的 agent（前端 TERMINAL_BG_PROBING_AGENTS 白名单：
+    /// 目前 gemini / qwen）——推给不探测的 agent 会漏成输入框乱码，codex 实测如此。
+    pub terminal_color_report: Option<bool>,
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -211,6 +218,7 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         hotkey_pages: s.hotkey_pages,
         discuss_readonly: s.discuss_readonly.or(Some(true)),
         status_bar_in_chat: s.status_bar_in_chat.or(Some(true)),
+        terminal_color_report: s.terminal_color_report.or(Some(true)),
     }
 }
 
@@ -297,6 +305,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.status_bar_in_chat.is_some() {
         cur.status_bar_in_chat = patch.status_bar_in_chat;
+    }
+    if patch.terminal_color_report.is_some() {
+        cur.terminal_color_report = patch.terminal_color_report;
     }
 }
 

@@ -11,7 +11,8 @@
   与缩进线 border-white/5 仍在浅色下由 App.css 按类名翻转），运行时切 `document.documentElement.dataset.theme`，
   **改主题只动这一个文件**，组件里禁散落 hex。主题清单单一出处 `src/themes.ts`（settings.rs KNOWN_THEMES 与
   TerminalPage XTERM_BG_FG 需同步）。**切主题同时同步原生窗口外观**（`applyTheme` 调 `setTheme(light/dark)`，
-  浅色判定走 themes.ts 的 `light` 标记）——原生 `<select>` 下拉、滚动条等按 NSWindow appearance 渲染，
+  浅色判定走 themes.ts 的 `light` 标记）——Windows 原生 `<select>` 下拉、checkbox/radio、日期/数字输入等控件必须跟随主题的 `color-scheme` 渲染；Windows 浅色主题覆盖为 `light`，
+  深色主题保留 `dark`，不得让 Windows 浅色控件落到深色系统样式。macOS 原生窗口仍按 NSWindow appearance 渲染，
   只改 CSS 变量时深色主题下弹出系统浅色列表；capabilities 需保留 `core:window:allow-set-theme`。
   默认主题 CTA 粉 `#faa8d4`（cta-text 近黑）；`--color-raised`（浮起面板/pill 底）、
   `--color-bubble`（用户消息气泡）、`--color-nav-accent`（侧栏选中左条+选中图标，默认靛蓝、其余取各自 CTA 色）。
@@ -51,6 +52,10 @@
   按主题亮暗解析，亮暗不符自动换 twin；设置页只列出与当前主题亮暗匹配的四套。
   **三处同步点**：`terminal-palettes.ts PALETTE_LIST` ↔ `settings.rs KNOWN_PALETTES`（持久化白名单，
   漏加会让新调色板被静默丢弃、表现为「选了没生效」）↔ `TerminalPage XTERM_BG_FG`（每主题底/字色）。
+  Windows 浅色主题下启动 gemini / qwen 时，由 `pty_report_terminal_colors` 主动把当前浅色前景/底色
+  推给 agent（ConPTY 双向吞掉 OSC 10/11 查询，机制与白名单见 conventions/terminal.md）；
+  macOS/Linux、深色主题、普通 shell 以及不探测底色的 agent（codex / claude-code）都不走该路径，
+  禁止全局替换 ANSI 反显。
   **主题亮暗判定单一出处是 `themes.ts` 的 `isLightTheme()`**，禁另造判定。
 - **字体渲染按平台分口径（v3.60 后 Windows 糊字修复）**：入口（main.tsx）在 `<html>` 上落 `data-platform`
   （mac/windows/linux，判定在 hotkeys.ts `IS_MAC`/`IS_WINDOWS`）。Windows Chromium 下 `text-rendering:

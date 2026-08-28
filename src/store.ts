@@ -97,6 +97,9 @@ export interface AppSettings {
   discussReadonly?: boolean;
   /** 聊天页显示终端状态栏（默认开）；关 = 聊天页隐藏但保留占位，切层不改变终端行列数 */
   statusBarInChat?: boolean;
+  /** 向 agent 主动告知终端底色（Windows 专用，默认开）：ConPTY 吞掉 OSC 10/11
+      底色查询，浅色主题下 agent 会回落深色；开 = attach 后主动推当前主题前景/底色 */
+  terminalColorReport?: boolean;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效；

@@ -1,5 +1,7 @@
 //! 终端输入侧纯逻辑：图片粘贴 / 文件拖入 / 右键菜单共用的可测函数（tests/terminal-input.test.ts）。
 
+import { isLightTheme } from "./themes.ts";
+
 /** POSIX shell 安全字符：落进集合内的路径不包裹，直接写进终端更干净 */
 const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
 
@@ -41,4 +43,46 @@ export function imageExtFromMime(mime: string): string {
 export function pasteImageFeedback(path: string): string {
   const name = path.split(/[\\/]/).pop() ?? path;
   return `已粘贴图片路径：${name.length > 40 ? `${name.slice(0, 37)}…` : name}`;
+}
+
+/** OSC 10/11 前景/底色回报的 16-bit RGB 载荷（Windows 下主动推给 agent TUI）。 */
+export function xtermOscColorReport(
+  slot: 10 | 11,
+  color: string,
+): string | null {
+  const match = /^#([0-9a-f]{6})$/i.exec(color.trim());
+  if (!match) return null;
+  const rgb = [0, 2, 4]
+    .map((offset) => match[1].slice(offset, offset + 2).toLowerCase())
+    .map((channel) => `${channel}${channel}`);
+  return `\x1b]${slot};rgb:${rgb[0]}/${rgb[1]}/${rgb[2]}\x1b\\`;
+}
+
+/** 启动时会用 OSC 11 查询终端底色、并把回报**消费掉**的 agent（逐个核过 CLI 实现）。
+ *  - gemini 0.57.0：TerminalCapabilityManager.detectCapabilities，1s 超时，回报进 onData 后丢弃
+ *  - qwen 0.22.2（gemini-cli fork）：detectOsc11Theme，同款 onData 消费
+ *  白名单之外**一律不能推**：没人消费的字节会原样落进 TUI 输入框变成可见乱码——
+ *  codex 0.150.1 实测就是如此（其二进制里已无任何底色探测，tui.theme 只管代码块语法高亮），
+ *  claude-code 走 settings.json 的 theme 配置、同样不探测。 */
+const TERMINAL_BG_PROBING_AGENTS = new Set(["gemini", "qwen"]);
+
+/** 是否要在 attach 后主动把终端前景/底色推给 agent。
+ *  仅 Windows：ConPTY 两个方向都不转发 OSC 10/11 查询，agent 探不到底色只能回落深色。
+ *  仅 agent 且在探测白名单内：见 TERMINAL_BG_PROBING_AGENTS——推给不探测的 agent 会变乱码。
+ *  仅浅色：深色本就是 agent 探测失败时的回落值，推了没收益。
+ *  enabled = 设置页开关（默认开）：白名单里的 CLI 换了实现时可以整体关掉。 */
+export function shouldReportTerminalColors(opts: {
+  isWindows: boolean;
+  kind: "agent" | "shell";
+  agentId: string | undefined;
+  themeId: string | undefined;
+  enabled: boolean;
+}): boolean {
+  return (
+    opts.isWindows &&
+    opts.kind === "agent" &&
+    opts.enabled &&
+    TERMINAL_BG_PROBING_AGENTS.has(opts.agentId ?? "") &&
+    isLightTheme(opts.themeId)
+  );
 }

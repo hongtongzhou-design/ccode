@@ -15,7 +15,7 @@ import {
   Toggle,
   secondaryActionClass,
 } from "../components/PageFrame";
-import { captureDecision, comboLabel, PAGE_HOTKEY_DEFS } from "../hotkeys";
+import { captureDecision, comboLabel, IS_WINDOWS, PAGE_HOTKEY_DEFS } from "../hotkeys";
 import {
   NAV_CAPSULE_ITEM_IDS,
   normalizeNavCapsuleDelay,
@@ -1025,6 +1025,20 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             onChange={(checked) => patch({ statusBarInChat: checked })}
           />
         </Row>
+
+        {/* ConPTY 专属问题，非 Windows 平台 xterm.js 会如实应答 OSC 查询，不给这一行 */}
+        {IS_WINDOWS && (
+          <Row
+            label="向 agent 告知终端底色"
+            hint="Windows 的 ConPTY 会吞掉 agent 的终端底色查询，浅色主题下 gemini / qwen 探不到底色就回落深色配色（输入框变深灰）。开启后在浅色主题下主动告知，新开标签即为浅色。只对会读这个回报的 agent 生效（codex / Claude Code 不看终端底色，不受影响）"
+          >
+            <Toggle
+              label="向 agent 告知终端底色"
+              checked={settings?.terminalColorReport ?? true}
+              onChange={(checked) => patch({ terminalColorReport: checked })}
+            />
+          </Row>
+        )}
       </Section>
 
       {/* 快捷键：点击绑定钮进入录制态，按下新组合即保存；空串 = 禁用 */}

@@ -233,6 +233,34 @@ fn wrap_bracketed_paste(data: &str, paste_mode_on: bool) -> std::borrow::Cow<'_,
     }
 }
 
+/// 把文本编码成 win32-input-mode 按键记录（`ESC [ Vk;Sc;Uc;Kd;Cs;Rc _`），每字符一条 key-down。
+///
+/// Windows/ConPTY 会把写进 PTY 输入的**成形 OSC 序列整段剥掉**（ST / BEL 收尾都一样），
+/// 子进程收到空；同一时刻写纯文本却能原样送达。ConPTY 启动时发的 `ESC[?9001h` 宣告了
+/// win32-input-mode，按这个格式编码后 ConPTY 会在输入侧还原成原始字节交给子进程——
+/// 这是把 OSC 底色回报送进 agent 的唯一通道（2026-08-29 本机 portable-pty 实测）。
+///
+/// 逐条投递、条与条之间必须留间隔：一次性灌进去时 ConPTY 的输入解析器会丢同步，
+/// 把中间某条记录原样漏成可见文本（投递间隔见 `WIN32_INPUT_RECORD_GAP`）。
+fn win32_input_records(text: &str) -> Vec<String> {
+    text.chars()
+        .map(|ch| format!("\x1b[0;0;{};1;0;1_", ch as u32))
+        .collect()
+}
+
+/// win32 按键记录之间的投递间隔——低于此值 ConPTY 输入解析器会丢同步漏出字面记录
+const WIN32_INPUT_RECORD_GAP: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// 向指定 PTY 写字节。`PtyEntry.writer` 只受整表 `entries` 锁保护，
+/// 所以每次写都得取这把锁——调用方务必逐次取放，别攥着锁做带 sleep 的长投递。
+/// PTY 已消失（标签被秒关）时返回 Err，由调用方决定是否静默。
+fn write_pty_bytes(manager: &PtyManager, pty_id: &str, bytes: &[u8]) -> Result<(), String> {
+    let mut entries = manager.entries.lock().unwrap();
+    let entry = entries.get_mut(pty_id).ok_or("终端不存在或已退出")?;
+    entry.writer.write_all(bytes).map_err(|e| e.to_string())?;
+    entry.writer.flush().map_err(|e| e.to_string())
+}
+
 fn expand_tilde(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
@@ -556,6 +584,38 @@ pub fn pty_write(
         .write_all(data.as_bytes())
         .and_then(|_| entry.writer.flush())
         .map_err(|e| format!("写入终端失败: {e}"))
+}
+
+/// Windows 专用：把终端前景/底色（OSC 10/11 回报载荷）主动推给 agent。
+///
+/// agent TUI 启动时会用 OSC 11 查询终端底色来选浅/深配色，但 ConPTY **两个方向都不通**：
+/// 子进程发出的查询到不了宿主终端（xterm 的 OSC handler 永不触发），成形的回报也进不了
+/// 子进程。所以这里不等查询，attach 后直接按 win32-input-mode 记录推一次——ConPTY 会
+/// 缓冲，即便早于子进程开始读 stdin 也不会丢（详见 docs/conventions/terminal.md）。
+///
+/// 投递放后台线程：整串约 100ms（每条记录间隔 `WIN32_INPUT_RECORD_GAP`），不能阻塞 IPC，
+/// 更不能把 `entries` 锁攥满全程——那会卡住其它标签的按键。
+#[tauri::command]
+pub fn pty_report_terminal_colors(
+    manager: tauri::State<'_, PtyManager>,
+    pty_id: String,
+    reports: Vec<String>,
+) -> Result<(), String> {
+    let manager = PtyManager {
+        entries: manager.entries.clone(),
+    };
+    std::thread::spawn(move || {
+        for report in reports {
+            for record in win32_input_records(&report) {
+                // 标签被秒关 / agent 已退出：静默收手，这只是配色兜底，失败不该打扰用户
+                if write_pty_bytes(&manager, &pty_id, record.as_bytes()).is_err() {
+                    return;
+                }
+                std::thread::sleep(WIN32_INPUT_RECORD_GAP);
+            }
+        }
+    });
+    Ok(())
 }
 
 /// 将一条聊天消息和提交键在同一把 PTY 锁内连续写入。
@@ -925,8 +985,42 @@ mod tests {
         assert_eq!(wrap_bracketed_paste("one-liner", true), "one-liner");
     }
 
-    // ===== 输出批处理调优（16ms 帧 / 256KB cap） =====
+    // ===== win32-input-mode 底色回报（Windows/ConPTY 绕行通道） =====
 
+    #[test]
+    fn win32_input_records_encode_one_key_down_per_char() {
+        let recs = win32_input_records("ab");
+        // 每字符一条 key-down 记录：Vk/Sc 留 0，Uc 用码点，Kd=1，Cs=0，Rc=1
+        assert_eq!(recs, vec!["\x1b[0;0;97;1;0;1_", "\x1b[0;0;98;1;0;1_"]);
+    }
+
+    #[test]
+    fn win32_input_records_carry_esc_and_osc_payload_intact() {
+        // ESC(27) 是关键：裸 OSC 会被 ConPTY 剥掉，编码成记录后才能送进子进程
+        let report = "\x1b]11;rgb:fdfd/fdfd/fefe\x1b\\";
+        let recs = win32_input_records(report);
+        assert_eq!(recs.len(), report.chars().count());
+        assert_eq!(recs[0], "\x1b[0;0;27;1;0;1_");
+        assert_eq!(recs[1], "\x1b[0;0;93;1;0;1_"); // ']'
+        assert_eq!(recs[recs.len() - 1], "\x1b[0;0;92;1;0;1_"); // ST 的 '\'
+        // 把码点解回去应当还原成原文——ConPTY 输入侧做的就是这一步
+        let decoded: String = recs
+            .iter()
+            .map(|r| {
+                let uc: u32 = r.trim_start_matches("\x1b[0;0;").split(';').next().unwrap().parse().unwrap();
+                char::from_u32(uc).unwrap()
+            })
+            .collect();
+        assert_eq!(decoded, report);
+    }
+
+    #[test]
+    fn win32_input_record_gap_is_nonzero() {
+        // 间隔为 0 时 ConPTY 输入解析器会丢同步、把记录原样漏成可见文本（实测）
+        assert!(WIN32_INPUT_RECORD_GAP > std::time::Duration::ZERO);
+    }
+
+    // ===== 输出批处理调优（16ms 帧 / 256KB cap） =====
     #[test]
     fn coalescer_tuning_constants() {
         // 固化调优目标：高频小块更早合帧、大块更早 flush

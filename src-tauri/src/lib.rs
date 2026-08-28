@@ -91,6 +91,7 @@ pub fn run() {
             pty::shell_spawn,
             pty::pty_write,
             pty::pty_write_submit,
+            pty::pty_report_terminal_colors,
             pty::pty_resize,
             pty::pty_kill,
             clipboard::save_clipboard_image,

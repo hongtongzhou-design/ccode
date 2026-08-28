@@ -29,13 +29,15 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { sessionRuntimeKey, useAppStore } from "../store";
-import { IS_MAC } from "../hotkeys";
+import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import {
   escapeShellPath,
   firstImageItem,
   imageExtFromMime,
   joinDroppedPaths,
   pasteImageFeedback,
+  shouldReportTerminalColors,
+  xtermOscColorReport,
 } from "../terminal-input";
 import { AGENTS } from "../types";
 import ChatSurface from "../components/ChatSurface";
@@ -1452,6 +1454,31 @@ const TerminalView = memo(function TerminalView({
       }
       invoke("pty_kill", { ptyId }).catch(() => {});
       return;
+    }
+    // Windows/ConPTY 吞掉 agent 的 OSC 10/11 底色查询（两个方向都不通，见
+    // docs/conventions/terminal.md），xterm 的内置回报永远送不到子进程。
+    // 改为不等查询、attach 后主动推一次：浅色主题下把当前前景/底色告诉 agent，
+    // 让 gemini/qwen 的启动探测选到浅色配色。ConPTY 会缓冲，早于子进程读 stdin 也不丢。
+    if (
+      shouldReportTerminalColors({
+        isWindows: IS_WINDOWS,
+        kind,
+        agentId: agentIdRef.current,
+        themeId: settingsRef.current?.theme,
+        enabled: settingsRef.current?.terminalColorReport ?? true,
+      })
+    ) {
+      const themeColors = buildXtermTheme(
+        settingsRef.current?.theme ?? "midnight-light",
+        settingsRef.current?.terminalPalette,
+      );
+      const reports = [
+        xtermOscColorReport(10, themeColors.foreground),
+        xtermOscColorReport(11, themeColors.background),
+      ].filter((r): r is string => r !== null);
+      if (reports.length > 0) {
+        invoke("pty_report_terminal_colors", { ptyId, reports }).catch(() => {});
+      }
     }
     try {
       fitRef.current?.fit();

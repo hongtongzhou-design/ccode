@@ -217,7 +217,9 @@ src-tauri/src/
                              # 当前步骤草稿 → AI 融合稿，出站 redact_and_cap 不写盘）+ write_task_draft（确认后整份落盘）、
                              # update_lit_watch_filter（雷达筛选读-改-原子写，全空归一 None）、
                              # 项目移除三档（移除注册 / purge_project_traces 清除 Ccode 痕迹保留文件夹 / delete_project_dir）
-  pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用
+  pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用；
+                             # pty_report_terminal_colors = Windows 底色告知（win32-input-mode 记录逐条投递，
+                             #   条间 2ms；ConPTY 双向吞 OSC 的实测结论见 conventions/terminal.md，别改回 OSC）
   clipboard.rs               # 剪贴板图片落盘（save_clipboard_image）：<config>/ccode/tmp/paste-* 白名单扩展名 +
                              # 50MB 上限 + 每次顺带清理 7 天前残留（机制约定见 conventions/terminal.md「输入侧」）
   sessions.rs                # 会话浏览：九 agent 会话扫描/解析（Codex .zst、OpenCode SQLite/JSON）、session_meta、pin 快照、
@@ -251,6 +253,9 @@ src-tauri/src/
   settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力
                              # （hooks_attention 按 agent map，旧 claude_hooks_attention 仅反序列化兼容迁移）/想法期只读保护
                              # /聊天页状态栏开关（status_bar_in_chat 默认开；关 = 聊天页 invisible 占位，切层不改终端行列数）；
+                             # terminal_color_report 默认开（Windows：ConPTY 吞掉 OSC 底色查询，浅色主题下
+                             # 主动把前景/底色推给 gemini/qwen；白名单外的 agent 推了会变输入框乱码，
+                             # 见 docs/conventions/terminal.md）；
                              # hidden_profiles = 软停用（自动路径跳过、手动可用；v3.142 起不再是纯展示偏好）；
                              # active_global_profiles = 「设为全局」追踪（agent→profile id，record/clear_active_global
                              # 维护、不走 patch、clear_profile_refs 同步清引用；只代表「上次由 Ccode 写入」非绝对生效态）

@@ -377,4 +377,33 @@
   **无条件常驻**说明（设置页主题区一行；⌘K 命令面板「外观」组头下一行，不逐行挂 hint）——曾按 liveSessions
   门控，但页面 ⌘R 重载后标签恢复为占位、登记清空，提示恰好缺席（2026-08-24 实测教训），故不设门控；
   不造全局 toast、不拦截切换；gemini/claude 等自适应终端底色的 TUI 同理。
+- **Windows：OSC 底色握手被 ConPTY 双向封死，改走 win32-input-mode 主动告知（2026-08-29 实测，
+  portable-pty 0.9 + Windows 11 26200 复现工程）**。上一条的「xterm.js 会如实应答」只在 macOS/Linux 成立。
+  实测三条结论，**改这块前先看这里，别再往 xterm 层写 OSC handler**：
+  1. 子进程发出的 `ESC]11;?` **到不了宿主终端** —— PTY 输出流里完全没有这串字节，
+     `term.parser.registerOscHandler(10|11, …)` 永远不触发（曾按这个思路写过一版，是不可达代码，已删）。
+  2. 把成形的 OSC 回报写进 PTY 输入**也到不了子进程** —— ConPTY 输入侧会整段剥掉（ST / BEL 收尾一样），
+     子进程收到空串；同一时刻写纯文本 `HELLO` 却能原样送达，所以不是通道不通，是 OSC 被识别后吞了。
+  3. 唯一通道 = ConPTY 启动时用 `ESC[?9001h` 宣告的 **win32-input-mode**：把回报按
+     `ESC [ Vk;Sc;Uc;Kd;Cs;Rc _` 逐字符编码成 key-down 记录，ConPTY 会在输入侧还原成原始字节。
+     **条与条之间必须留间隔**（`WIN32_INPUT_RECORD_GAP` = 2ms）——一次性灌进去时输入解析器会丢同步，
+     把中间某条记录原样漏成可见文本（无间隔实测：`\x1b]11;rgb:fdfd/fdf` + 字面记录 + `/fefe\x1b\\`）。
+  所以 Windows 下不等查询、attach 后主动推一次：`pty_report_terminal_colors`（pty.rs）起后台线程
+  逐条投递，每条单独取放 `entries` 锁（`PtyEntry.writer` 只受整表锁保护，攥满全程会卡住其它标签的按键）。
+  网关判定 `shouldReportTerminalColors`（terminal-input.ts）：**仅 Windows + 仅浅色主题 +
+  仅 `TERMINAL_BG_PROBING_AGENTS` 白名单内的 agent + 设置开关开**。
+  **白名单是硬约束，不是保守起见**（2026-08-29 实机回归教训）：曾按「所有 agent 都推」上线，
+  结果 codex 输入框直接吐出可见乱码——没人消费的字节会原样落进 TUI 输入框。逐个核过各 CLI 实现：
+  - **gemini 0.57.0 ✅** `TerminalCapabilityManager.detectCapabilities`，OSC 11 查询 + 1s 超时，
+    回报进 onData 后被消费；`pickDefaultThemeName(terminalBackground, …)` 只在用户主题仍是默认值时才自动切。
+  - **qwen 0.22.2 ✅**（gemini-cli fork）`detectOsc11Theme` 同款消费；它额外还认 `COLORFGBG`。
+  - **codex 0.150.1 ❌ 不探测**：二进制里搜不到 OSC 10/11 查询、也没有 termbg/colorsaurus 一类库
+    （2026-08-24 那条记的 0.149.1 terminal_probe 已不复存在）。`[tui] theme` 的取值是
+    coldark-cold / dracula / gruvbox-light / solarized-light … 这些 **bat/syntect 语法高亮主题名**，
+    只影响代码块，控制不了输入框和用户消息行。**Ccode 侧对 codex 没有可用杠杆，别再试。**
+  - **claude-code ❌ 不探测**：走 `~/.claude/settings.json` 的 theme 配置。
+  只推浅色是因为深色本就是 agent 探测失败的回落值；不推 shell 是因为它不做这个探测。
+  设置页开关 `terminal_color_report`（默认开）留作白名单内 CLI 换实现时的兜底。
+  注入早于子进程读 stdin 也不会丢（ConPTY 会缓冲；300ms 注入 vs 2000ms 才挂监听，实测完整收到）。
+  这条只解决**启动**取色，运行中切主题仍是上一条的老问题（重启会话才一致），两条口径不冲突。
 
