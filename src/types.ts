@@ -54,6 +54,13 @@ export interface ModelCapabilityDto {
   streaming: boolean | null;
 }
 
+/** fetch_models 返回：模型列表 + 缓存命中标记 + 拉取时间（RFC3339 本地） */
+export interface FetchModelsResultDto {
+  models: string[];
+  fromCache: boolean;
+  fetchedAt: string;
+}
+
 /** 官方账号连接状态（official_account_status，P1a） */
 export interface OfficialAccountStatusDto {
   /** 注册表已填该 agent 的官方账号规格 */

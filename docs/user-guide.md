@@ -105,7 +105,7 @@ Ccode 是 AI 编码 Agent 的统一工作台：管理九个 CLI agent（Claude C
 | Base URL | 中转地址；「从预设快速填充」可选官方/公开端点。**Anthropic 通道（Claude Code/CodeBuddy 或 anthropic 协议）不要带末尾 `/v1`**——客户端会自动拼 `/v1/messages`，带 `/v1` 会变成 `/v1/v1/messages` 报 404（此时「测试」仍能成功，是列表接口与运行路径口径不同），界面会行内黄字提醒 |
 | API Key | 存 `keys.json`（0600），界面只显示尾号 |
 | 协议 | 仅 Qwen（openai/anthropic）与 Kimi 需要，位于「高级配置」 |
-| 模型列表 | **可多个**，首个默认；「获取模型」从端点拉取下拉选。表单上方会提示该 agent 的模型切换页上限：Claude Code 5 个、Gemini/Qwen/Kimi 注入模式仅首个生效（多模型需「设为全局」）、Codex/OpenCode 不限；超出上限会黄色提醒 |
+| 模型列表 | **可多个**，首个默认；行式槽位逐个填写（上限内自动给空槽，超上限仍可点「仍要添加」补充）。「获取模型」拉取后按厂商分组折叠选择（带筛选框）；列表拉一次即缓存并标注拉取时间，↻ 强制刷新。表单上方会提示该 agent 的模型切换页上限：Claude Code 5 个、Gemini/Qwen/Kimi 注入模式仅首个生效（多模型需「设为全局」）、Codex/OpenCode 不限；超出上限会黄色提醒 |
 | 附加环境变量 | 每行 `KEY=VALUE`，注入优先级最高，位于「高级配置」 |
 | 请求策略声明 | `temperature`、`top_p`、`max output`、`reasoning effort` 与自定义 Header 环境变量引用；按 Agent 能力表逐字段处理——有实证通道的字段启动时注入（已接线：Claude Code 五项全通、CodeBuddy 的 max output 与 Header、Codex 的 effort 与 Header、OpenCode 五项、Kimi 的 effort），其余仅保存声明并在验证结果中提示；effort 对已实证档位集的 agent 出下拉，其余自由输入 |
 | 无密钥模式 | 仅用于明确无需认证的本地/内网端点；勾选后 Ccode 会清除继承环境中的 API Key，不会静默使用其他账号。 |

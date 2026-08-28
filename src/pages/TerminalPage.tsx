@@ -1834,6 +1834,7 @@ const TerminalView = memo(function TerminalView({
         ptyId: string;
         sessionHint: string | null;
         promptDropped: boolean;
+        model: string | null;
       }>("pty_spawn", {
         agentId,
         profileId,
@@ -1849,12 +1850,16 @@ const TerminalView = memo(function TerminalView({
         // 「聊想法」只读模式：后端按注册表注入只读/计划模式参数（不支持的 CLI 只有 prompt 软约束）
         readonly: options?.readonly ?? readonly ?? null,
       });
+      // 后端兜底模型回传（前端留空 = profile 首个模型）：同步进标签状态，
+      // 否则状态栏/对话头部在兜底路径下没有模型可显示；lastLaunch/模型历史也记生效值
+      const effectiveModel = res.model ?? model;
+      if (res.model && res.model !== model) setModel(res.model);
       localStorage.setItem(
         "ccode.lastLaunch",
-        JSON.stringify({ agentId, profileId, model, cwd }),
+        JSON.stringify({ agentId, profileId, model: effectiveModel, cwd }),
       );
       // 模型历史（本 agent 维度，去重前置，上限 10 条）：模型 combo 下拉的可选项来源之一
-      if (model.trim()) {
+      if (effectiveModel.trim()) {
         try {
           const key = `ccode.modelHistory.${agentId}`;
           const list = JSON.parse(
@@ -1863,10 +1868,10 @@ const TerminalView = memo(function TerminalView({
           localStorage.setItem(
             key,
             JSON.stringify(
-              [model.trim(), ...list.filter((m) => m !== model.trim())].slice(
-                0,
-                10,
-              ),
+              [
+                effectiveModel.trim(),
+                ...list.filter((m) => m !== effectiveModel.trim()),
+              ].slice(0, 10),
             ),
           );
         } catch {

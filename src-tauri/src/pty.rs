@@ -251,6 +251,9 @@ pub struct SpawnResult {
     pub session_hint: Option<String>,
     /// 初始 prompt 因 CLI 不支持注入被丢弃（前端提示用户手动发送）
     pub prompt_dropped: bool,
+    /// 实际生效的模型（前端留空时后端兜底为 profile 首个模型）——
+    /// 回传给前端同步标签状态，否则状态栏在兜底路径下无模型可显示
+    pub model: Option<String>,
 }
 
 /// 支持 --session-id <uuid> 的 agent（AgentSpec.fixed_session_id；matrix：claude-code、qwen、codebuddy），
@@ -508,6 +511,7 @@ pub fn pty_spawn(
         pty_id,
         session_hint,
         prompt_dropped: plan.prompt_dropped,
+        model,
     })
 }
 

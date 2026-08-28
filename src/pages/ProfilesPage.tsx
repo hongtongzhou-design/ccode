@@ -9,6 +9,7 @@ import { PRESETS, NO_PRESET_REASON } from "../presets";
 import { upstreamNoteText, upstreamCommand } from "../upstream-note";
 import { copyTargets } from "../profile-copy";
 import { MODEL_SWITCH } from "../model-switch";
+import { groupModelsByVendor, vendorOf } from "../model-vendors";
 import { interactiveUpdatePrefill } from "../update-routing";
 import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
@@ -36,6 +37,7 @@ import type {
   Profile,
   ProfileInput,
   ModelCapabilityDto,
+  FetchModelsResultDto,
   ProfileUsageDto,
   ProfileValidationDto,
   ValidationCheckDto,
@@ -87,10 +89,14 @@ function ProfileModal({
       .map(([k, v]) => `${k}=${v}`)
       .join("\n"),
   );
-  const [modelInput, setModelInput] = useState("");
   const [fetching, setFetching] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<string[] | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  // 获取模型的厂商分组面板：开关 / 筛选词 / 展开的厂商组
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerFilter, setPickerFilter] = useState("");
+  const [openVendors, setOpenVendors] = useState<ReadonlySet<string>>(new Set());
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
     ok: boolean;
@@ -167,30 +173,49 @@ function ProfileModal({
     return Number.isFinite(n) ? n : undefined;
   }
 
-  function addModel() {
-    const m = modelInput.trim();
-    if (m && !form.models.includes(m)) {
-      setForm({ ...form, models: [...form.models, m] });
+  /** 模型槽位编辑：i 越界 = 尾部空槽首击，先追加再就位（后续击键走更新分支） */
+  function setModelSlot(i: number, v: string) {
+    if (i < form.models.length) {
+      const next = [...form.models];
+      next[i] = v;
+      setForm({ ...form, models: next });
+    } else {
+      setForm({ ...form, models: [...form.models, v] });
     }
-    setModelInput("");
   }
 
-  /** 验证端点+密钥连通性，显示延迟与模型数 */
+  function removeModelSlot(i: number) {
+    setForm({ ...form, models: form.models.filter((_, j) => j !== i) });
+  }
+
+  /** 从获取面板添加：优先填进第一个空槽，没有去尾部追加 */
+  function addModelToList(m: string) {
+    const v = m.trim();
+    if (!v || form.models.some((x) => x.trim() === v)) return;
+    const emptyIdx = form.models.findIndex((x) => !x.trim());
+    const next = [...form.models];
+    if (emptyIdx >= 0) next[emptyIdx] = v;
+    else next.push(v);
+    setForm({ ...form, models: next });
+  }
+
+  /** 验证端点+密钥连通性，显示延迟与模型数；连通测试必须走真实网络（force 跳过缓存） */
   async function testConnection() {
     setTesting(true);
     setTestResult(null);
     const started = Date.now();
     try {
-      const list = await invoke<string[]>("fetch_models", {
+      const res = await invoke<FetchModelsResultDto>("fetch_models", {
         baseUrl: form.baseUrl.trim(),
         apiKey: form.apiKey || null,
         profileId: initial?.id ?? null,
         agentId: form.agent,
         protocol: form.protocol,
+        force: true,
       });
       setTestResult({
         ok: true,
-        text: `✓ 连通 · ${list.length} 个模型 · ${Date.now() - started}ms`,
+        text: `✓ 连通 · ${res.models.length} 个模型 · ${Date.now() - started}ms`,
       });
     } catch (e) {
       setTestResult({ ok: false, text: `✗ ${String(e)}` });
@@ -199,22 +224,26 @@ function ProfileModal({
     }
   }
 
-  /** 从 Base URL 拉取模型列表；密钥用表单新填的，编辑时留空则用钥匙串已存的 */
-  async function fetchModels() {
+  /** 从 Base URL 拉取模型列表；密钥用表单新填的，编辑时留空则用钥匙串已存的。
+      默认走后端磁盘缓存（大网关全量列表 10s 级），force=true 强制刷新 */
+  async function fetchModels(force = false) {
     setFetching(true);
     setFetchError(null);
     try {
-      const list = await invoke<string[]>("fetch_models", {
+      const res = await invoke<FetchModelsResultDto>("fetch_models", {
         baseUrl: form.baseUrl.trim(),
         apiKey: form.apiKey || null,
         profileId: initial?.id ?? null,
         agentId: form.agent,
         protocol: form.protocol,
+        force,
       });
-      setFetchedModels(list);
+      setFetchedModels(res.models);
+      setFetchedAt(res.fetchedAt);
     } catch (e) {
       setFetchError(String(e));
       setFetchedModels(null);
+      setFetchedAt(null);
     } finally {
       setFetching(false);
     }
@@ -232,7 +261,8 @@ function ProfileModal({
       protocol: AGENT_PROTOCOLS[form.agent] ? form.protocol : null,
       // 官方账号：认证交给 CLI 登录，不落端点/密钥
       baseUrl: form.accountType === "official" ? "" : form.baseUrl.trim(),
-      models: form.models,
+      // 槽位化编辑允许空串/重复中间态，保存时归一：去空白、去空、去重（保序）
+      models: [...new Set(form.models.map((m) => m.trim()).filter(Boolean))],
       extraEnv: parseEnvLines(form.extraEnvText),
       requestPolicy: {
         ...form.requestPolicy,
@@ -475,7 +505,8 @@ function ProfileModal({
           {(() => {
             const sw = MODEL_SWITCH[form.agent];
             if (!sw) return null;
-            const over = sw.max != null && form.models.length > sw.max;
+            const filled = form.models.filter((m) => m.trim()).length;
+            const over = sw.max != null && filled > sw.max;
             return (
               <p
                 title={sw.hint}
@@ -484,7 +515,7 @@ function ProfileModal({
                 {sw.max != null
                   ? `最多 ${sw.max} 个模型可进入 CLI 选择器`
                   : "模型数量不限"}
-                {over && `；当前超出 ${form.models.length - (sw.max ?? 0)} 个`}
+                {over && `；当前超出 ${filled - (sw.max ?? 0)} 个`}
               </p>
             );
           })()}
@@ -493,7 +524,7 @@ function ProfileModal({
           <div className="mb-2 flex items-center gap-2">
             <button
               type="button"
-              onClick={fetchModels}
+              onClick={() => fetchModels()}
               disabled={fetching || !form.baseUrl.trim()}
               title={
                 form.baseUrl.trim()
@@ -505,30 +536,115 @@ function ProfileModal({
               {fetching ? "获取中…" : "获取模型"}
             </button>
             {fetchedModels && fetchedModels.length > 0 && (
-              <select
-                className={fieldClass}
-                value=""
-                onChange={(e) => {
-                  const m = e.target.value;
-                  if (m && !form.models.includes(m)) {
-                    setForm({ ...form, models: [...form.models, m] });
+              <button
+                type="button"
+                onClick={() => {
+                  // 首次打开时展开「已配置首个模型」所在的厂商组
+                  if (!pickerOpen && openVendors.size === 0) {
+                    const first = form.models.find((x) => x.trim());
+                    if (first) setOpenVendors(new Set([vendorOf(first)]));
                   }
+                  setPickerOpen(!pickerOpen);
                 }}
+                className={`${fieldClass} flex items-center justify-between gap-2 text-left`}
               >
-                <option value="" disabled>
+                <span className="text-l3">
                   从 {fetchedModels.length} 个模型中选择…
-                </option>
-                {fetchedModels.map((m) => (
-                  <option key={m} value={m}>
-                    {form.models.includes(m) ? `${m}（已添加）` : m}
-                  </option>
-                ))}
-              </select>
+                </span>
+                <span className="text-l4">{pickerOpen ? "▴" : "▾"}</span>
+              </button>
+            )}
+            {/* 缓存命中时给出刷新口 + 拉取时间，大网关全量列表 10s 级，没必要每次现拉 */}
+            {fetchedModels && fetchedModels.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => fetchModels(true)}
+                  disabled={fetching || !form.baseUrl.trim()}
+                  title="重新拉取（不用缓存）"
+                  className={`${rowActionClass} shrink-0`}
+                >
+                  ↻
+                </button>
+                {fetchedAt && (
+                  <span className="shrink-0 whitespace-nowrap text-xs text-l4">
+                    缓存 · {fmtFetchedAt(fetchedAt)}
+                  </span>
+                )}
+              </>
             )}
             {fetchedModels && fetchedModels.length === 0 && (
               <span className="text-xs text-l4">接口返回 0 个模型</span>
             )}
           </div>
+          {/* 厂商分组折叠面板：大网关 400+ 模型平铺没法选；筛选时全部强制展开 */}
+          {pickerOpen && fetchedModels && fetchedModels.length > 0 && (
+            <div className="mb-2 max-h-64 overflow-y-auto rounded-md bg-inset p-1">
+              <input
+                autoFocus
+                className={`${searchFieldClass} mb-1 w-full`}
+                placeholder="筛选模型名…"
+                value={pickerFilter}
+                onChange={(e) => setPickerFilter(e.target.value)}
+              />
+              {(() => {
+                const groups = groupModelsByVendor(fetchedModels, pickerFilter);
+                if (groups.length === 0) {
+                  return (
+                    <p className="px-2 py-1 text-xs text-l4">没有匹配的模型</p>
+                  );
+                }
+                return groups.map((g) => {
+                  const open =
+                    pickerFilter.trim() !== "" || openVendors.has(g.vendor);
+                  return (
+                    <div key={g.vendor}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenVendors((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(g.vendor)) next.delete(g.vendor);
+                            else next.add(g.vendor);
+                            return next;
+                          })
+                        }
+                        className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left text-xs font-medium text-l2 hover:bg-hover"
+                      >
+                        <span className="w-3 shrink-0 text-l4">
+                          {open ? "▾" : "▸"}
+                        </span>
+                        {g.vendor}
+                        <span className="text-micro text-l4">
+                          {g.models.length}
+                        </span>
+                      </button>
+                      {open &&
+                        g.models.map((m) => {
+                          const added = form.models.some((x) => x.trim() === m);
+                          return (
+                            <button
+                              key={m}
+                              type="button"
+                              disabled={added}
+                              onClick={() => addModelToList(m)}
+                              className="flex w-full items-center justify-between gap-2 rounded-sm py-1 pl-7 pr-2 text-left font-mono text-micro text-l2 hover:bg-hover disabled:opacity-40"
+                            >
+                              <span className="truncate">{m}</span>
+                              {added && (
+                                <span className="shrink-0 text-l4">
+                                  已添加
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          )}
           {fetchError && (
             <p className="mb-2 text-xs text-err-text">{fetchError}</p>
           )}
@@ -536,70 +652,92 @@ function ProfileModal({
           )}
           {/* 空模型是个静默陷阱（pty.rs）：models 为空时**完全不注入**模型环境变量，
               CLI 用自己的默认值——用户看到的现象就是「切了没反应」。API 类配置才提示，
-              官方账号本就由 CLI 自己决定模型 */}
-          {form.models.length === 0 && form.accountType !== "official" && (
-            <p className="mb-2 text-micro text-warn-text">
-              没填模型，会用 CLI 自己的默认值。
-            </p>
-          )}
-          {form.models.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-1.5">
-              {form.models.map((m, i) => (
-                <span
-                  key={m}
-                  title={(() => {
-                    const c = capabilities.find((item) => item.model === m);
-                    if (!c) return undefined;
-                    const flags = [
-                      c.thinking ? "思考" : null,
-                      c.tools === true ? "工具" : c.tools === false ? "无工具" : "工具未知",
-                      c.vision === true ? "图像" : c.vision === false ? "无图像" : "图像未知",
-                    ].filter(Boolean);
-                    return `${flags.join(" · ")} · 上下文 ${(c.context / 1024).toFixed(0)}K`;
-                  })()}
-                  className="flex items-center gap-1 rounded-sm bg-inset px-2 py-0.5 text-xs text-l2"
-                >
-                  {m}
-                  {i === 0 && <span className="text-l1">默认</span>}
+              官方账号本就由 CLI 自己决定模型；空串槽位不算已填 */}
+          {form.models.every((m) => !m.trim()) &&
+            form.accountType !== "official" && (
+              <p className="mb-2 text-micro text-warn-text">
+                没填模型，会用 CLI 自己的默认值。
+              </p>
+            )}
+          {/* 行式槽位列表：已有模型一行一个（首个非空 = 默认），空槽 = 待填输入框。
+              空槽数跟随 MODEL_SWITCH 选择器容量（max）；超容量仍可经「仍要添加」补充
+              （超出的不进 CLI 选择器，但启动栏/手输可用，见 model-switch.ts 语义） */}
+          {(() => {
+            const max = MODEL_SWITCH[form.agent]?.max ?? null;
+            const filled = form.models.filter((m) => m.trim()).length;
+            const slots = [...form.models];
+            if (max == null) {
+              if (slots.length === 0 || slots[slots.length - 1].trim() !== "")
+                slots.push("");
+            } else {
+              const emptyCount = slots.length - filled;
+              for (let i = emptyCount; i < Math.max(0, max - filled); i++)
+                slots.push("");
+            }
+            const firstFilled = slots.findIndex((m) => m.trim());
+            return (
+              <div className="space-y-0.5">
+                {slots.map((m, i) => (
+                  <div
+                    key={i}
+                    title={(() => {
+                      const c = capabilities.find(
+                        (item) => item.model === m.trim(),
+                      );
+                      if (!m.trim() || !c) return undefined;
+                      const flags = [
+                        c.thinking ? "思考" : null,
+                        c.tools === true
+                          ? "工具"
+                          : c.tools === false
+                            ? "无工具"
+                            : "工具未知",
+                        c.vision === true
+                          ? "图像"
+                          : c.vision === false
+                            ? "无图像"
+                            : "图像未知",
+                      ].filter(Boolean);
+                      return `${flags.join(" · ")} · 上下文 ${(c.context / 1024).toFixed(0)}K`;
+                    })()}
+                    className="group flex items-center gap-2 rounded-sm px-2 py-0.5 hover:bg-hover"
+                  >
+                    <span className="w-4 shrink-0 text-right text-micro text-l4">
+                      {i + 1}
+                    </span>
+                    <input
+                      className="min-w-0 flex-1 bg-transparent py-0.5 font-mono text-xs text-l2 outline-none placeholder:font-sans placeholder:text-l4"
+                      placeholder="模型名，如 gpt-5.6-sol"
+                      value={m}
+                      onChange={(e) => setModelSlot(i, e.target.value)}
+                    />
+                    {i === firstFilled && (
+                      <span className="shrink-0 text-micro text-l1">默认</span>
+                    )}
+                    <button
+                      type="button"
+                      aria-label={m.trim() ? `移除 ${m}` : "清空此行"}
+                      onClick={() => removeModelSlot(i)}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center text-l4 opacity-0 hover:text-err-text focus-visible:opacity-100 group-hover:opacity-100"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                {max != null && filled >= max && (
                   <button
                     type="button"
-                    aria-label={`移除 ${m}`}
                     onClick={() =>
-                      setForm({
-                        ...form,
-                        models: form.models.filter((x) => x !== m),
-                      })
+                      setForm({ ...form, models: [...form.models, ""] })
                     }
-                    className="text-l4 hover:text-err-text"
+                    className="px-2 py-1 text-xs text-l3 hover:text-l1"
                   >
-                    ×
+                    ＋ 仍要添加（选择器只显示前 {max} 个）
                   </button>
-                </span>
-              ))}
-            </div>
-          )}
-          <div className="flex gap-2">
-            <input
-              className={fieldClass}
-              placeholder="输入模型名后回车添加，如 claude-sonnet-4"
-              value={modelInput}
-              onChange={(e) => setModelInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  addModel();
-                }
-              }}
-            />
-            <button
-              type="button"
-              onClick={addModel}
-              disabled={!modelInput.trim()}
-              className={`${rowActionClass} w-16 shrink-0 whitespace-nowrap`}
-            >
-              添加
-            </button>
-          </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
         <details className="mb-4 border-t border-hairline pt-3">
           <summary className="cursor-pointer select-none text-xs font-medium text-l2">
@@ -742,6 +880,15 @@ const OFFICIAL_LOGOUT_HINT: Record<string, string> = {
   kimi: "TUI 内 /logout",
   qwen: "TUI 内 /auth",
 };
+
+/** 缓存拉取时间显示：当天只显示 HH:MM，跨天带 M/D */
+function fmtFetchedAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (d.toDateString() === new Date().toDateString()) return hm;
+  return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
 
 function displayHost(baseUrl: string): string {
   const value = baseUrl.trim();
