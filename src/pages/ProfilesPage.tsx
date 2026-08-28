@@ -158,6 +158,14 @@ function ProfileModal({
     return out;
   }
 
+  /** 请求策略数字输入：空 = null；非法中间态（NaN，如 "-"/"1e"）返回 undefined 不落表单，
+      避免 NaN 存进 profiles.json 时 serde_json 序列化直接失败 */
+  function parseOptionalNumber(raw: string): number | null | undefined {
+    if (raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : undefined;
+  }
+
   function addModel() {
     const m = modelInput.trim();
     if (m && !form.models.includes(m)) {
@@ -431,6 +439,12 @@ function ProfileModal({
             </button>
           </div>
         </label>
+        {(form.agent === "claude-code" || form.agent === "codebuddy" || form.protocol === "anthropic") &&
+          form.baseUrl.trim().replace(/\/+$/, "").endsWith("/v1") && (
+          <p className="-mt-2 mb-3 text-xs text-warn-text">
+            Anthropic 客户端会自动在 Base URL 后拼 /v1/messages，以 /v1 结尾将打成 /v1/v1/messages 报 404（此时「测试」仍能成功，不代表运行可用）——请去掉末尾的 /v1
+          </p>
+        )}
         {testResult && (
           <p
             className={`-mt-2 mb-3 text-xs ${testResult.ok ? "text-ok-text" : "text-err-text"}`}
@@ -615,7 +629,7 @@ function ProfileModal({
                 {([[
                   "temperature", "temperature", "temperature"], ["topP", "top_p", "topP"], ["maxOutputTokens", "max output", "maxOutputTokens"]] as const).map(([key, label, capability]) => {
                   const support = agentCapabilities?.requestPolicy[capability];
-                  return <label key={key} className="text-xs text-l3">{label}<span className="ml-1 text-[10px] text-l4">协议{support === "supported" ? "支持" : support === "unsupported" ? "不支持" : "未知"}</span><input className={fieldClass} type="number" min={key === "temperature" ? "0" : key === "topP" ? "0" : "1"} max={key === "temperature" ? "2" : key === "topP" ? "1" : undefined} step={key === "temperature" ? "0.1" : key === "topP" ? "0.05" : "1"} placeholder="默认" value={form.requestPolicy[key] ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, [key]: e.target.value === "" ? null : Number(e.target.value) } })} /></label>;
+                  return <label key={key} className="text-xs text-l3">{label}<span className="ml-1 text-[10px] text-l4">协议{support === "supported" ? "支持" : support === "unsupported" ? "不支持" : "未知"}</span><input className={fieldClass} type="number" min={key === "temperature" ? "0" : key === "topP" ? "0" : "1"} max={key === "temperature" ? "2" : key === "topP" ? "1" : undefined} step={key === "temperature" ? "0.1" : key === "topP" ? "0.05" : "1"} placeholder="默认" value={form.requestPolicy[key] ?? ""} onChange={(e) => { const n = parseOptionalNumber(e.target.value); if (n !== undefined) setForm({ ...form, requestPolicy: { ...form.requestPolicy, [key]: n } }); }} /></label>;
                 })}
               </div>
               <label className="mt-2 block text-xs text-l3">reasoning effort<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.reasoningEffort === "supported" ? "支持" : agentCapabilities?.requestPolicy.reasoningEffort === "unsupported" ? "不支持" : "未知"}</span><input className={fieldClass} placeholder="如 low / medium / high" value={form.requestPolicy.reasoningEffort ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, reasoningEffort: e.target.value || null } })} /></label>

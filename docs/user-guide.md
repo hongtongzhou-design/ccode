@@ -102,7 +102,7 @@ Ccode 是 AI 编码 Agent 的统一工作台：管理九个 CLI agent（Claude C
 |---|---|
 | Agent | CLI 类型 |
 | 名称 | 自定义标记，如「Zeta 中转」 |
-| Base URL | 中转地址；「从预设快速填充」可选官方/公开端点 |
+| Base URL | 中转地址；「从预设快速填充」可选官方/公开端点。**Anthropic 通道（Claude Code/CodeBuddy 或 anthropic 协议）不要带末尾 `/v1`**——客户端会自动拼 `/v1/messages`，带 `/v1` 会变成 `/v1/v1/messages` 报 404（此时「测试」仍能成功，是列表接口与运行路径口径不同），界面会行内黄字提醒 |
 | API Key | 存 `keys.json`（0600），界面只显示尾号 |
 | 协议 | 仅 Qwen（openai/anthropic）与 Kimi 需要，位于「高级配置」 |
 | 模型列表 | **可多个**，首个默认；「获取模型」从端点拉取下拉选。表单上方会提示该 agent 的模型切换页上限：Claude Code 5 个、Gemini/Qwen/Kimi 注入模式仅首个生效（多模型需「设为全局」）、Codex/OpenCode 不限；超出上限会黄色提醒 |

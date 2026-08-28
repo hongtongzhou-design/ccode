@@ -180,6 +180,21 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
     if profile.models.is_empty() {
         notes.push("未指定模型，将使用 CLI 自身默认值".into());
     }
+    // Anthropic 协议通道的 SDK 会在 Base URL 后自动拼 /v1/messages：base 以 /v1 结尾会打成
+    // /v1/v1/messages 404（2026-08-28 实测），且「获取模型」（OpenAI 风格 {base}/models）照样成功，
+    // 极具迷惑性——只提醒不阻断
+    let anthropic_wire = matches!(profile.agent.as_str(), "claude-code" | "codebuddy")
+        || profile.protocol.as_deref() == Some("anthropic");
+    if anthropic_wire {
+        if let Some(base) = profile.base_url.as_deref() {
+            if base.trim_end_matches('/').ends_with("/v1") {
+                notes.push(
+                    "Base URL 以 /v1 结尾：Anthropic 客户端会自动拼 /v1/messages，实际请求将变成 /v1/v1/messages 报 404（此时「获取模型」仍能成功，不代表运行可用）——请去掉末尾的 /v1"
+                        .into(),
+                );
+            }
+        }
+    }
     Ok(notes)
 }
 
@@ -688,6 +703,21 @@ mod tests {
         p.request_policy.temperature = Some(0.2);
         let notes = validate_profile_fields(&p).unwrap();
         assert!(notes.iter().any(|n| n.contains("temperature")));
+    }
+
+    #[test]
+    fn anthropic_base_url_trailing_v1_is_warned_not_blocked() {
+        // /v1 结尾会被 SDK 拼成 /v1/v1/messages 404：给提醒但保存不阻断
+        let mut p = profile("claude-code");
+        p.base_url = Some("https://relay.example.com/v1".into());
+        let notes = validate_profile_fields(&p).unwrap();
+        assert!(notes.iter().any(|n| n.contains("/v1/v1/messages")));
+        // 不带 /v1 不提醒；非 Anthropic 通道（如 codex 的 OpenAI 系 /v1 惯例）不提醒
+        p.base_url = Some("https://relay.example.com".into());
+        assert!(!validate_profile_fields(&p).unwrap().iter().any(|n| n.contains("/v1/v1")));
+        let mut c = profile("codex");
+        c.base_url = Some("https://relay.example.com/v1".into());
+        assert!(!validate_profile_fields(&c).unwrap().iter().any(|n| n.contains("/v1/v1")));
     }
 
     #[test]

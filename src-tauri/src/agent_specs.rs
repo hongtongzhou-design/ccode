@@ -856,15 +856,34 @@ pub struct RequestPolicySupportDto {
     pub custom_headers: &'static str,
 }
 
+/// 请求策略逐字段通道表（2026-08-28 本机安装二进制 strings/配置 schema 实证，调研录 matrix §9 第 8 条）。
+/// "supported" = 存在实证的用户可及通道（env/flag/配置键）能让该值进入真实请求；
+/// 协议本身支持但 CLI 无用户入口的记 "unsupported"（Ccode 不改写请求体，无通道即无效果）。
 pub(crate) fn request_policy_support(agent: &str) -> RequestPolicySupportDto {
     let supported = |temperature, top_p, max_output_tokens, reasoning_effort, custom_headers| {
         RequestPolicySupportDto { temperature, top_p, max_output_tokens, reasoning_effort, custom_headers }
     };
     match agent {
-        "claude-code" | "codebuddy" => supported("supported", "supported", "supported", "unknown", "unknown"),
-        "gemini" => supported("supported", "supported", "supported", "supported", "unknown"),
-        "codex" => supported("unsupported", "unknown", "supported", "supported", "unknown"),
+        // claude-code v2.x 二进制实证：无 temperature/top_p 用户通道（AUTO_MODE_TEMPERATURE 为内部用途）；
+        // CLAUDE_CODE_MAX_OUTPUT_TOKENS / CLAUDE_CODE_EFFORT_LEVEL（同 /effort）/ ANTHROPIC_CUSTOM_HEADERS
+        "claude-code" => supported("unsupported", "unsupported", "supported", "supported", "supported"),
+        // codebuddy 是 claude-code fork 但 env 前缀独立：CODEBUDDY_CODE_MAX_OUTPUT_TOKENS /
+        // CODEBUDDY_CUSTOM_HEADERS 实证；未见 effort 入口
+        "codebuddy" => supported("unsupported", "unsupported", "supported", "unknown", "supported"),
+        // gemini settings schema 无 temperature/topP/maxOutputTokens 键（bundle 实证），
+        // generationConfig 仅出现在 API 请求构造路径，非用户配置通道
+        "gemini" => supported("unsupported", "unsupported", "unsupported", "unknown", "unknown"),
+        // codex：temperature/top_p 仅存在于 wire schema（ModelPreferences），config 无键；
+        // max_output_tokens 字符串全部是 exec pragma（工具输出截断）非模型请求；
+        // reasoning_effort = config model_reasoning_effort；headers = provider http_headers/env_http_headers
+        "codex" => supported("unsupported", "unsupported", "unsupported", "supported", "supported"),
+        // opencode config schema 实证：agent/model options 含 temperature/topP/maxOutputTokens/
+        // reasoningEffort（枚举），provider options 支持 headers
         "opencode" => supported("supported", "supported", "supported", "supported", "supported"),
+        // kimi 新版合成通道 KIMI_MODEL_THINKING_EFFORT（matrix §6 二进制 strings 实证）
+        "kimi" => supported("unknown", "unknown", "unknown", "supported", "unknown"),
+        // qwen settings schema 无 temperature/topP/maxOutputTokens 键（bundle 实证，同 gemini 结论）
+        "qwen" => supported("unsupported", "unsupported", "unsupported", "unknown", "unknown"),
         _ => supported("unknown", "unknown", "unknown", "unknown", "unknown"),
     }
 }
@@ -1205,7 +1224,9 @@ mod tests {
             .find(|c| c.agent == "claude-code")
             .unwrap();
         assert!(claude_dto.set_global.supported && claude_dto.set_global.reason.is_none());
-        assert_eq!(claude_dto.request_policy.temperature, "supported");
+        assert_eq!(claude_dto.request_policy.temperature, "unsupported");
+        assert_eq!(claude_dto.request_policy.max_output_tokens, "supported");
+        assert_eq!(claude_dto.request_policy.custom_headers, "supported");
         assert_eq!(claude_dto.skill_dist.mode, "symlinkOrCopy");
     }
 }

@@ -173,6 +173,28 @@
    在校验结果提示并跳过强制注入。Header 值必须由用户在运行环境提供，Profile 不落密文。真实请求级注入若以后实现，
    必须按「Agent + protocol」建立逐字段适配和测试矩阵，不能把 `max_output_tokens` 直接等同为所有 CLI 的 `max_tokens`。
 
+   逐字段通道实证（2026-08-28，Windows 本机安装二进制 strings/配置 schema；实现见 `agent_specs.rs`
+   `request_policy_support`，"supported" = 存在实证的用户可及通道能让该值进入真实请求，协议支持但 CLI
+   无入口记 "unsupported"）：
+   - **claude-code**（v2.x exe）：temperature/top_p 无用户通道（`CLAUDE_CODE_AUTO_MODE_TEMPERATURE` 系内部
+     auto-mode 用途）→ unsupported；`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`CLAUDE_CODE_EFFORT_LEVEL`（同 `/effort`）、
+     `ANTHROPIC_CUSTOM_HEADERS` 实证 → supported。
+   - **codebuddy**（claude-code fork，env 前缀独立）：`CODEBUDDY_CODE_MAX_OUTPUT_TOKENS`、
+     `CODEBUDDY_CUSTOM_HEADERS` 实证；temperature/top_p 无通道；effort 未见入口 → unknown。
+   - **codex**：temperature/top_p 仅存在于 wire schema（ModelPreferences），config 无键；
+     二进制里的 `max_output_tokens` 全部是 exec pragma（工具输出截断）非模型请求 → unsupported；
+     `model_reasoning_effort`（config 键）与 provider `http_headers`/`env_http_headers` 实证 → supported。
+   - **gemini / qwen**：settings schema chunk 内 temperature/topP/maxOutputTokens 零命中
+     （generationConfig 仅出现在 API 请求构造路径）→ unsupported；effort/headers 未核实 → unknown。
+   - **opencode**：config schema 实证 agent/model options 含 temperature/topP/maxOutputTokens/
+     reasoningEffort（枚举），provider options 支持 headers → 全 supported。
+   - **kimi**：新版合成通道 `KIMI_MODEL_THINKING_EFFORT`（§6 二进制 strings 实证）→ reasoning_effort
+     supported；余 unknown。
+   - cursor/grok：未核实 → 全 unknown。
+   配套防护（2026-08-28）：Anthropic 通道 Base URL 以 `/v1` 结尾会被 SDK 拼成 `/v1/v1/messages` 404
+   （实测），且「获取模型」走 OpenAI 风格 `{base}/models` 照样成功、极具迷惑性——profile 校验给提醒
+   （不阻断保存），配置弹层 Base URL 行内同步警示。
+
 ## 10. MCP 配置分发调研（2026-08-10，八家经官方文档/源码/本机实测核实；grok 为 2026-08 源码调研，首版只读不分发）
 
 **目标**：Ccode 维护一份 MCP server 清单，一键分发进各 CLI 自己的配置文件。本节是实现规格的单一出处——写字段/路径前以此为准，不要凭印象。
