@@ -126,7 +126,7 @@ fn load_override() -> Vec<(String, ModelCaps)> {
     if cfg!(test) {
         return Vec::new();
     }
-    let mut out = Vec::new();
+    let out = Vec::new();
     let Some(path) = override_path() else { return out };
     let Ok(text) = std::fs::read_to_string(path) else {
         return out;

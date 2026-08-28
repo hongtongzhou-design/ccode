@@ -3261,6 +3261,7 @@ pub async fn append_pipeline_steps_with_submission(
 
 /// 追加实现（root 需已过项目门槛校验；测试直接调这里）。
 /// 保留旧测试/内部调用名，但实现统一委托给模板应用事务，避免三处入口再次分叉。
+#[cfg(test)]
 pub(crate) fn append_pipeline_steps_at(
     root: &Path,
     steps: Vec<ProjectStepDto>,
@@ -3271,6 +3272,7 @@ pub(crate) fn append_pipeline_steps_at(
     apply_pipeline_template_at(root, steps, Vec::new(), "append", None, None, None)
 }
 
+#[cfg(test)]
 pub(crate) fn append_pipeline_steps_at_with_submission(
     root: &Path,
     steps: Vec<ProjectStepDto>,

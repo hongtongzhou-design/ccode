@@ -798,6 +798,8 @@ fn valid_env_name(name: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
+// 运行路径仅 unix（外部终端 sh 包装器）；Windows 仅测试调用
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn sh_script_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -1046,6 +1048,8 @@ fn open_external_profiled(
 }
 
 /// shell 单引号转义（POSIX）；仅含安全字符时不加引号，保持 cc-switch 风格的干净命令行
+// 运行路径仅 unix；Windows 仅测试调用
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn sh_quote_if_needed(s: &str) -> String {
     if s.chars()
         .all(|c| c.is_ascii_alphanumeric() || "-._/".contains(c))
@@ -1059,6 +1063,8 @@ fn sh_quote_if_needed(s: &str) -> String {
 /// 会话恢复的完整命令行（cd 到项目目录 + CLI resume 参数）。
 /// 刻意不带 profile env——密钥只在 Ccode 自家拉起时注入（关键约定），
 /// 外部恢复用的是用户全局配置。binary 参数允许外部拉起时传绝对路径（见下）。
+// 运行路径仅 unix（Windows 走 windows_resume_command_line）；测试跨平台校验命令文本
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn resume_command_line_with(
     agent_id: &str,
     session_id: &str,
@@ -1111,6 +1117,8 @@ fn windows_resume_command_line(
 }
 
 /// 复制用命令行：裸命令名（用户真实交互终端 rc 齐全，且 cc-switch 风格干净）
+// 同上：运行路径仅 unix，Windows 仅测试调用
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 pub fn resume_command_line(agent_id: &str, session_id: &str, cwd: &str) -> Result<String, String> {
     let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
     resume_command_line_with(agent_id, session_id, cwd, binary, &[])
@@ -1186,6 +1194,8 @@ pub fn new_external_terminal(
 /// 注入形态读注册表 prompt_inject：Positional → 位置参数，Flag → `-i '<prompt>'`；
 /// Unsupported（目前仅 kimi）报错，由前端改为复制指令文本。
 /// 与 resume 命令同一口径：不带 profile env，外部用的是用户全局配置。
+// 运行路径仅 unix（sh 引号口径）；Windows 仅测试调用
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn digest_command_line_with(agent_id: &str, cwd: &str, prompt: &str, binary: &str) -> Result<String, String> {
     let mut cmd = format!(
         "cd {} && {}",
@@ -1713,6 +1723,8 @@ fn clear_conflict_keys_in_file(path: &std::path::Path, probe: &crate::agent_spec
     Ok(false)
 }
 
+// unix 收紧 0600；Windows 无 unix 权限位语义，空操作（参数仅 unix 分支消费）
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn tighten_private_file(path: &std::path::Path) -> Result<(), String> {
     #[cfg(unix)]
     {

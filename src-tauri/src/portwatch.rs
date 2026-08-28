@@ -88,6 +88,8 @@ fn run_capture(mut cmd: crate::process::BackgroundCommand, timeout: Duration) ->
 /// 解析 `lsof +c 0 -nP -iTCP -sTCP:LISTEN` 输出。
 /// 列：COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME；末列为 `地址:端口 (LISTEN)`。
 /// 防御式：表头/截断行/未知格式一律跳过；同 (pid, port) 的 IPv4/IPv6 双栈行合并为一条。
+// 运行路径仅 unix（Windows 走 netstat）；测试跨平台喂样本文本
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn parse_lsof_listeners(text: &str) -> Vec<Listener> {
     let mut out: Vec<Listener> = Vec::new();
     for line in text.lines() {
@@ -120,6 +122,8 @@ fn parse_lsof_listeners(text: &str) -> Vec<Listener> {
 }
 
 /// 解析 `lsof -a -p <pids> -d cwd -Fn` 输出：p<pid> / fcwd / n<路径> 字段行
+// 运行路径仅 unix；测试跨平台喂样本文本
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn parse_lsof_cwd(text: &str) -> Vec<(u32, PathBuf)> {
     let mut out = Vec::new();
     let mut cur_pid: Option<u32> = None;
