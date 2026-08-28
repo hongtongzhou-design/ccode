@@ -365,6 +365,38 @@
 [data-theme$="-light"] .ccode-app-shell :where(.border-white\/5) {
   border-color: rgb(0 0 0 / 0.07);
 }
+
+/* Windows 浅色主题：DirectWrite 下浅灰小字更容易显得发虚，
+   只压深 l3/l4 两档（正文 l2、标题 l1 保持主题原值），不改变 macOS/Linux 或深色主题。 */
+[data-platform="windows"][data-theme="midnight-light"] {
+  --color-l3: #5c6173;
+  --color-l4: #6d7282;
+}
+[data-platform="windows"][data-theme="terracotta-light"] {
+  --color-l3: #68615b;
+  --color-l4: #766f68;
+}
+[data-platform="windows"][data-theme="ayu-light"] {
+  --color-l3: #5d6370;
+  --color-l4: #727780;
+}
+[data-platform="windows"][data-theme="mocha-light"] {
+  --color-l3: #5f6277;
+  --color-l4: #747788;
+}
+[data-platform="windows"][data-theme="neutral-light"] {
+  --color-l3: #5c5c5c;
+  --color-l4: #6e6e6e;
+}
+[data-platform="windows"][data-theme="dracula-light"] {
+  --color-l3: #625b70;
+  --color-l4: #736d80;
+}
+[data-platform="windows"][data-theme="shadcn-light"] {
+  --color-l3: #555e72;
+  --color-l4: #687282;
+}
+
 /* 浅色滚动条：白拇指不可见，换黑色半透明 */
 [data-theme$="-light"] ::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, 0.16);
@@ -393,9 +425,22 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* Windows 下保持 rem 的标准 16px 根基，避免 text-xs/text-sm 被 14px 根字号整体缩小。
+   body 仍保持 14px 的默认正文视觉字号；macOS/Linux 不走此覆盖。 */
+[data-platform="windows"] {
+  font-size: 16px;
+}
+
 /* optimizeLegibility 在 Windows Chromium 会走 DirectWrite 的 natural 渲染模式，
    丢掉字体 hinting，小字号（12–13px）文本明显发糊——Windows 回退 auto */
 [data-platform="windows"] body {
+  /* Windows 11 的变量版 Segoe UI 在小字号下 hinting 更稳定；中文继续由雅黑回退。
+     仅替换 Windows 正文字体，等宽区（font-mono）和 macOS/Linux 保持原样。 */
+  font-family:
+    "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans SC", sans-serif;
+  font-optical-sizing: auto;
+  font-kerning: normal;
   text-rendering: auto;
 }
 
@@ -540,6 +585,10 @@ body {
   transition:
     background-color 120ms var(--ccode-motion-ease),
     color 120ms var(--ccode-motion-ease);
+}
+
+[data-platform="windows"] .ccode-top-nav-item {
+  text-rendering: auto;
 }
 
 .ccode-top-nav-item:hover,
