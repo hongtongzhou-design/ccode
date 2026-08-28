@@ -258,10 +258,13 @@ fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -
                 ));
             }
             Ok(None) if Instant::now() >= deadline => {
+                // 连带杀子孙：Windows 上包装层（cmd /d /c call）之下的 CLI 才是持有
+                // 管道写端的那个，只杀包装层会让下面两个 join 永久阻塞
+                crate::pty::kill_process_tree(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = out_handle.join();
-                let _ = err_handle.join();
+                let _ = crate::process::join_with_timeout(out_handle, Duration::from_secs(2));
+                let _ = crate::process::join_with_timeout(err_handle, Duration::from_secs(2));
                 return Err(format!("CLI 预检超时（{} 秒）", timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),

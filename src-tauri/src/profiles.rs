@@ -491,19 +491,42 @@ fn write_keys_at(
 }
 
 /// 原子写入：先写临时文件再 rename，避免中途崩溃留下半截 JSON（借鉴 CC Switch）。
-/// iCloud 等同步目录里新落盘的 tmp 偶发被同步代理瞬时介入，rename 吃 ENOENT——
-/// 短暂退避后重试一次（父目录真不存在时第二次照样失败，语义不变）
+/// 父目录不存在时先建（MCP 分发会写到尚未初始化的 agent 配置目录，如 ~/.cursor、
+/// ~/.config/opencode；缺了这步报的是「系统找不到指定的路径」，还会把用户没见过的
+/// .tmp 名字吐到界面上）。任何失败路径都清掉残留 tmp，不在用户项目树里留垃圾。
 pub(crate) fn atomic_write(path: &std::path::Path, text: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("创建目录 {} 失败: {e}", parent.display()))?;
+    }
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, text).map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
+    let result = rename_replacing(&tmp, path);
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// rename 覆盖目标，带两类重试：
+/// - ENOENT：iCloud 等同步目录里新落盘的 tmp 偶发被同步代理瞬时介入，短暂退避后重试一次
+///   （父目录真不存在时第二次照样失败，语义不变）。
+/// - PermissionDenied（仅 Windows）：`MoveFileExW` 对**只读属性**的目标返回
+///   ERROR_ACCESS_DENIED，而 POSIX `rename(2)` 只看父目录权限、不看目标 mode ——
+///   所以这是 Windows 独有的失败。先清掉目标（`remove_file` 能删只读文件）再重试。
+fn rename_replacing(tmp: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
+    match fs::rename(tmp, path) {
+        Ok(()) => return Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::thread::sleep(std::time::Duration::from_millis(50));
-            fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
         }
-        Err(e) => Err(format!("替换 {} 失败: {e}", path.display())),
+        #[cfg(windows)]
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let _ = fs::remove_file(path);
+        }
+        Err(e) => return Err(format!("替换 {} 失败: {e}", path.display())),
     }
+    fs::rename(tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
 }
 
 /// profiles.json / keys.json 的读-改-写序列化锁：多标签页并发保存时防互相覆盖
@@ -683,6 +706,40 @@ pub fn import_profiles(store: tauri::State<'_, ProfileStore>, path: String) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== atomic_write 的两条跨平台前置条件 =====
+
+    #[test]
+    fn atomic_write_creates_missing_parent_dirs() {
+        // MCP 分发会写到尚未初始化的 agent 配置目录（本机 ~/.cursor 就不存在）；
+        // 缺这步用户看到的是「系统找不到指定的路径」外加一个没见过的 .tmp 名字。
+        let dir = std::env::temp_dir().join(format!("ccode-aw-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("nested").join("deep").join("cfg.json");
+        atomic_write(&path, "{}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn atomic_write_replaces_readonly_target_and_leaves_no_tmp() {
+        // Windows 的 MoveFileExW 对只读目标返回 ERROR_ACCESS_DENIED，
+        // 而 POSIX rename(2) 只看父目录权限 —— 这条在 macOS 上本来就过。
+        let dir = std::env::temp_dir().join(format!("ccode-aw-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.md");
+        atomic_write(&path, "v1").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        atomic_write(&path, "v2").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v2");
+        assert!(
+            !dir.join("note.tmp").exists(),
+            "成功路径不得留下 .tmp"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn keys_file_roundtrip_with_0600_perms() {

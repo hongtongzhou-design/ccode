@@ -550,12 +550,11 @@ pub fn shell_spawn(
     // script = 工作区 run 脚本；其他/缺省 = 普通登录 shell
     purpose: Option<String>,
 ) -> Result<String, String> {
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/zsh".into());
+    let (shell, shell_args) = login_shell_argv();
     let mut cmd = CommandBuilder::new(&shell);
-    cmd.arg("-l");
+    for arg in &shell_args {
+        cmd.arg(arg);
+    }
     if let Some(env) = extra_env {
         for (k, v) in env {
             cmd.env(k, v);
@@ -567,6 +566,37 @@ pub fn shell_spawn(
         PtyPurpose::Shell
     };
     spawn_tracked(&app, manager.inner(), cmd, &expand_tilde(&cwd), purpose)
+}
+
+/// 登录 shell 的程序与参数（纯函数，便于单测）。
+///
+/// Windows 上**刻意不读 `SHELL`**：从资源管理器/开始菜单启动根本读不到；
+/// 从 Git Bash 启动读到的是 MSYS 路径（`/usr/bin/bash`），Win32 CreateProcess
+/// 同样找不到 —— 读了只会把失败从「没有该变量」变成「路径无效」。
+/// 选 PowerShell 而非 cmd：它是 Windows 10+ 标配与 Windows Terminal 的默认交互 shell，
+/// 且单引号引用语义与 POSIX 接近，前端预填的 `cd '<路径>'` 无需另写一套转义。
+/// `-l` 是 POSIX 登录 shell 专属参数，Windows 侧不传。
+#[cfg(windows)]
+fn login_shell_argv() -> (String, Vec<String>) {
+    if let Some(ps) = crate::agents::resolve_binary("powershell") {
+        return (
+            ps.to_string_lossy().into_owned(),
+            vec!["-NoLogo".to_string()],
+        );
+    }
+    (
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
+        Vec::new(),
+    )
+}
+
+#[cfg(not(windows))]
+fn login_shell_argv() -> (String, Vec<String>) {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".into());
+    (shell, vec!["-l".to_string()])
 }
 
 #[tauri::command]
@@ -772,6 +802,24 @@ pub(crate) fn kill_process_group(pid: u32) {
     let _ = std::process::Command::new("/bin/kill")
         .args(["-KILL", &format!("-{pid}")])
         .status();
+}
+
+/// 连带终止子孙进程（非 PTY、走裸管道的超时路径专用）。
+///
+/// 只杀直接子进程在 Windows 上必然留孤儿：`shell_cmd` 走的是 `cmd /C <script>`，
+/// cmd.exe 永不 exec-替换自己，真正干活的 npm/node 是**孙进程**。
+/// `TerminateProcess(cmd.exe)` 之后孙进程照常运行，且它继承了 stdout/stderr 管道写端
+/// ⇒ 读线程永远等不到 EOF，`join()` 永久阻塞、工作线程泄漏，构建进程还占着端口和工作树
+/// 文件让后续「归档工作区」失败。taskkill 的 `/T` 遍历整棵进程树。
+pub(crate) fn kill_process_tree(pid: u32) {
+    #[cfg(unix)]
+    kill_process_group(pid);
+    #[cfg(windows)]
+    {
+        let mut cmd = crate::process::background_command("taskkill");
+        cmd.args(["/T", "/F", "/PID", &pid.to_string()]);
+        let _ = cmd.output();
+    }
 }
 
 #[tauri::command]
@@ -983,6 +1031,34 @@ mod tests {
         assert_eq!(wrap_bracketed_paste("line1\nline2", false), "line1\nline2");
         // 单行 → 行为不变，即使已开 2004 也不包裹
         assert_eq!(wrap_bracketed_paste("one-liner", true), "one-liner");
+    }
+
+    // ===== 登录 shell 选取（平台方言） =====
+
+    #[test]
+    fn login_shell_is_executable_on_this_platform() {
+        let (shell, args) = login_shell_argv();
+        assert!(!shell.is_empty(), "登录 shell 不能为空");
+        #[cfg(windows)]
+        {
+            // 回归：曾经无条件用 $SHELL 回落 /bin/zsh，Windows 上必然 spawn 失败，
+            // 「开 shell」「run 脚本标签」「官方账号登录」全线不可用。
+            assert!(
+                !shell.starts_with('/'),
+                "Windows 上不得回落 POSIX 路径，实际: {shell}"
+            );
+            assert!(
+                !args.iter().any(|a| a == "-l"),
+                "-l 是 POSIX 登录 shell 专属参数，Windows shell 不认"
+            );
+            assert!(
+                std::path::Path::new(&shell).exists()
+                    || shell.eq_ignore_ascii_case("cmd.exe"),
+                "选出的 shell 必须真实存在: {shell}"
+            );
+        }
+        #[cfg(not(windows))]
+        assert_eq!(args, vec!["-l".to_string()], "POSIX 侧保持登录 shell 语义");
     }
 
     // ===== win32-input-mode 底色回报（Windows/ConPTY 绕行通道） =====

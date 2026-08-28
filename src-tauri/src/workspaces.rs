@@ -298,15 +298,21 @@ fn run_cmd_full(mut cmd: crate::process::BackgroundCommand, timeout: Duration) -
             }
             Ok(None) => {
                 if std::time::Instant::now() > deadline {
-                    let _ = child.kill();
+                    // 先杀整棵进程树再 kill 自己：Windows 上 `cmd /C <script>` 的真正
+                    // 干活进程是孙进程，只杀 cmd.exe 会留孤儿，而孤儿持有 stdout/stderr
+                    // 管道写端 ⇒ 下面两个读线程永远等不到 EOF。
+                    crate::pty::kill_process_tree(child.id());                    let _ = child.kill();
                     let _ = child.wait();
-                    let _ = out_handle.join();
-                    let _ = err_handle.join();
+                    // 即便如此也不无限等：任何漏网的子孙都不该把这个工作线程钉死。
+                    // 放弃的读线程会在管道最终关闭时自行退出。
+                    let grace = Duration::from_secs(2);
+                    let stdout = crate::process::join_with_timeout(out_handle, grace);
+                    let stderr = crate::process::join_with_timeout(err_handle, grace);
                     return Ok(CmdOutput {
                         success: false,
                         code: None,
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
+                        stdout,
+                        stderr,
                         timed_out: true,
                     });
                 }
@@ -3516,6 +3522,10 @@ mod tests {
             .unwrap();
         sh(&repo, &["config", "user.email", "t@t"]);
         sh(&repo, &["config", "user.name", "t"]);
+        // 与宿主 git 配置解耦：Windows 上 core.autocrlf 默认 true（Git for Windows 装机默认），
+        // checkout 会把 LF 转成 CRLF，断言文件内容的用例会莫名其妙对不上（"done\r\n" != "done\n"）。
+        sh(&repo, &["config", "core.autocrlf", "false"]);
+        sh(&repo, &["config", "core.eol", "lf"]);
         fs::write(repo.join("README.md"), "hi").unwrap();
         fs::write(repo.join(".env"), "SECRET=1").unwrap();
         fs::write(repo.join(".envrc"), "export X=1").unwrap();
@@ -4102,6 +4112,10 @@ mod tests {
             .unwrap();
         sh(&repo, &["config", "user.email", "t@t"]);
         sh(&repo, &["config", "user.name", "t"]);
+        // 与宿主 git 配置解耦：Windows 上 core.autocrlf 默认 true（Git for Windows 装机默认），
+        // checkout 会把 LF 转成 CRLF，断言文件内容的用例会莫名其妙对不上（"done\r\n" != "done\n"）。
+        sh(&repo, &["config", "core.autocrlf", "false"]);
+        sh(&repo, &["config", "core.eol", "lf"]);
         fs::write(repo.join("README.md"), "hi").unwrap();
         sh(&repo, &["add", "README.md"]);
         sh(&repo, &["commit", "-m", "init"]);
@@ -4162,7 +4176,7 @@ mod tests {
 
     // ===== W2：项目级脚本钩子 =====
 
-    #[cfg(unix)]
+    #[cfg(unix)] // 脚本体是 POSIX 语法；Windows 侧 shell_cmd 走 cmd /C，需另写用例
     #[test]
     fn create_runs_setup_script_and_custom_files_to_copy() {
         let Some(fx) = Fixture::new() else { return };
@@ -4219,7 +4233,7 @@ mod tests {
         assert!(Path::new(&w.worktree_path).exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // 脚本体是 POSIX 语法；Windows 侧 shell_cmd 走 cmd /C，需另写用例
     #[test]
     fn archive_script_failure_blocks_removal() {
         let Some(fx) = Fixture::new() else { return };
@@ -4338,7 +4352,6 @@ mod tests {
         assert!(!health.ready_to_merge, "空工作区不得启用合并");
     }
 
-    #[cfg(unix)]
     #[test]
     fn health_marks_stale_base_when_base_advanced_during_conflict() {
         let Some(fx) = Fixture::new() else { return };
@@ -4379,7 +4392,6 @@ mod tests {
         assert!(h.stale_base, "基准已前进：MERGE_HEAD ≠ tip 应标记 stale_base");
     }
 
-    #[cfg(unix)]
     #[test]
     fn pending_artifact_checks_reports_only_fresh_and_complete() {
         let Some(fx) = Fixture::new() else { return };
@@ -4702,7 +4714,6 @@ mod tests {
         assert!(drift.can_clean_record);
     }
 
-    #[cfg(unix)]
     #[test]
     fn merge_workspace_happy_path_merges_and_archives() {
         let Some(fx) = Fixture::new() else { return };
@@ -4730,7 +4741,6 @@ mod tests {
         assert!(!wt.exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn merge_success_archive_failure_is_reported_as_partial() {
         let Some(fx) = Fixture::new() else { return };
@@ -4771,7 +4781,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn merge_without_archive_keeps_workspace_active() {
         let Some(fx) = Fixture::new() else { return };

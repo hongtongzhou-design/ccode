@@ -147,10 +147,21 @@ pub(crate) fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: 
             }
             Ok(None) => {
                 if std::time::Instant::now() > deadline {
+                    // 连带杀子孙：Windows 上 shim 深化失败会回落 `cmd /d /c call`，
+                    // 只杀 cmd.exe 会留下仍持有管道写端的 agent 进程，join 永久阻塞
+                    crate::pty::kill_process_tree(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
-                    let out = String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
-                    let err = String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
+                    let out = String::from_utf8_lossy(&crate::process::join_with_timeout(
+                        out_handle,
+                        Duration::from_secs(2),
+                    ))
+                    .into_owned();
+                    let err = String::from_utf8_lossy(&crate::process::join_with_timeout(
+                        err_handle,
+                        Duration::from_secs(2),
+                    ))
+                    .into_owned();
                     return Err(format!(
                         "AI 调用超时（{}s）。部分输出:\n{}",
                         timeout.as_secs(),

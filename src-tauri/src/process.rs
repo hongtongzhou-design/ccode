@@ -287,6 +287,26 @@ impl DerefMut for TrackedChild {
     }
 }
 
+/// 带超时的读线程收尾：超时就放弃这个线程（它会在管道最终关闭时自行退出），
+/// 不让漏网的子孙进程把调用方的工作线程永久钉死。
+///
+/// 超时路径必须用它而不是裸 `join()`：Windows 上包装层（`cmd /C`）之下的孙进程
+/// 才是真正持有 stdout/stderr 管道写端的那个，只 kill 包装层的话读线程永远等不到 EOF。
+/// 配合 `pty::kill_process_tree` 使用——先杀树消除根因，这里只是最后一道兜底。
+pub(crate) fn join_with_timeout(
+    handle: std::thread::JoinHandle<Vec<u8>>,
+    timeout: std::time::Duration,
+) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + timeout;
+    while !handle.is_finished() {
+        if std::time::Instant::now() > deadline {
+            return Vec::new();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    handle.join().unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
