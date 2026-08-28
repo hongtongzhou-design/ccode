@@ -1407,10 +1407,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         {
-            let mut map = writers().lock().unwrap();
-            let w = map.get_mut(&key).unwrap();
-            w.write_all(b"hello\n").unwrap();
-            w.flush().unwrap();
+            let map = writers().lock().unwrap();
+            let w = map.get(&key).unwrap();
+            let mut g = w.lock().unwrap();
+            g.write_all(b"hello\n").unwrap();
+            g.flush().unwrap();
         }
         let (ok, _tail) = handle.join().unwrap();
         assert!(ok);
@@ -1456,10 +1457,11 @@ mod tests {
         assert!(msg.contains("正在运行"), "应提示已有运行中的任务: {msg}");
         // 放行第一个 run
         {
-            let mut map = writers().lock().unwrap();
-            let w = map.get_mut(&key).unwrap();
-            w.write_all(b"go\n").unwrap();
-            w.flush().unwrap();
+            let map = writers().lock().unwrap();
+            let w = map.get(&key).unwrap();
+            let mut g = w.lock().unwrap();
+            g.write_all(b"go\n").unwrap();
+            g.flush().unwrap();
         }
         let (ok1, _) = handle.join().unwrap();
         assert!(ok1);
