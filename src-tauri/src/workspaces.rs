@@ -1737,6 +1737,8 @@ fn wildcard_match(pattern: &str, name: &str) -> bool {
 /// 落点检测：root 下是否已有交付物。
 /// 三种形态：目录（结尾 /）= 内有任意非隐藏文件；目录/通配 = 目录内有匹配文件（不递归）；
 /// 精确文件 = 存在。只接受根的相对路径，绝对路径/.. 逃逸一律视为未交付（同产物核验口径）。
+// 仅测试调用（运行侧走 human_target_count 计数口径）
+#[cfg(test)]
 pub(crate) fn human_target_hit(root: &Path, target: &str) -> bool {
     human_target_count(root, target).is_some_and(|n| n > 0)
 }
