@@ -68,7 +68,14 @@ pub fn resolve_binary(name: &str) -> Option<std::path::PathBuf> {
 /// 在候选目录里按序找第一个存在的文件；Windows 下 npm 全局包是 .cmd shim，补扩展名匹配
 fn find_in_dirs(name: &str, dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
     let names: Vec<String> = if cfg!(windows) {
-        vec![name.into(), format!("{name}.exe"), format!("{name}.cmd")]
+        // Windows 上可执行的是 .exe/.cmd/.bat；npm 系目录里的裸名是 shell 脚本，
+        // CreateProcess 直接起会报 os error 193——扩展名匹配必须优先，裸名只作兜底
+        vec![
+            format!("{name}.exe"),
+            format!("{name}.cmd"),
+            format!("{name}.bat"),
+            name.into(),
+        ]
     } else {
         vec![name.into()]
     };
@@ -2941,6 +2948,13 @@ mod tests {
         assert_eq!(
             find_in_dirs("tool", &[base.clone()]),
             Some(base.join("tool.cmd"))
+        );
+        // 裸名（shell 脚本）与 .cmd 并存时 .cmd 胜出：裸名在 Windows 上不可执行（os error 193）
+        std::fs::write(base.join("tool2"), "x").unwrap();
+        std::fs::write(base.join("tool2.cmd"), "x").unwrap();
+        assert_eq!(
+            find_in_dirs("tool2", &[base.clone()]),
+            Some(base.join("tool2.cmd"))
         );
         std::fs::remove_dir_all(&base).ok();
     }

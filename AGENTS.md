@@ -65,6 +65,11 @@ npm run tauri build    # 打包
   并在 spawn/wait 边界登记脱敏参数与生命周期。该包装和 250ms 进程扫描只在 Windows 生效；macOS/Linux 直接返回标准
   `Command`、不启动诊断监控线程。只有用户明确打开的外部终端允许保留可见窗口。
 - **本机 CLI 安装情况**：claude/codex/gemini/qwen/opencode/codebuddy 均已装（brew 或 npm，检测见 updater.rs 报告）；kimi 为新版（~/.kimi-code）。
+- **Windows npm 系 CLI 是 .cmd 批处理 shim**：CreateProcess/ConPTY 直接起报 os error 193；同目录还有同名无扩展名
+  shell 脚本，`find_in_dirs` 必须 exe/cmd 优先于裸名（裸名只兜底）。且 ConPTY 里 npm 会发 DSR 光标位置查询
+  （ESC[6n）并读 stdin 等回答，无人应答永久挂起——`run_streaming_pty` 的 reader 代答 ESC[24;120R。
+  shim 深化（解析 JS 入口改 node 直启）统一在 `process.rs`：`pty_command`（PTY）与 `background_command`（后台）
+  双入口同一口径，npm.cmd 自身走固定布局 special case。
 - **dev 端口为 17575**（`vite.config.ts` + `tauri.conf.json` devUrl 两处同步；勿改回 1420——Codex 桌面版 NetworkService 占用）。vite 撞已占端口静默退出；**stdin EOF 也自杀**——后台拉起必须 `tail -f /dev/null | npm run tauri:dev`。
 - **git 提交**：常规提交加 `[skip ci]`，里程碑提交才跑三平台 CI。
 - **git 推送走 SSH:443 + repo deploy key**；发版推 tag 后先用 `gh run list --workflow build.yml` 确认是否已产生该 tag 的 push run，已触发则只保留该 run；30 秒内未触发才执行 `gh api repos/hongtongzhou-design/ccode/actions/workflows/build.yml/dispatches -f ref=<tag>`。禁止让 tag push 与 workflow_dispatch 两个打包 run 并行写同一 Release。workflow 已配 `permissions: contents: write`（tauri-action 建 Release 草稿必需）。**仓库 owner 与 tauri.conf 升级端点绑定**（同为 `hongtongzhou-design/ccode`）：仓库若转移，本命令、updater endpoint、README 链接三处必须同步改。
@@ -307,7 +312,7 @@ src-tauri/src/
   fs_tree.rs                 # 文件树与文件操作（删除走系统回收站 trash；重要路径删除保护，canonicalize 双校验；
                              #   家目录直下系统目录标 isSystem 供前端置灰）
   pdf.rs                     # PDF/docx 字节读取：read_pdf_bytes 白名单 + canonicalize + 上限，base64 传输
-  updater.rs                 # CLI 安装/更新（brew TUNA、npm_for 同目录 npm）+ 应用自身 Tauri updater
+  updater.rs                 # CLI 安装/更新（brew TUNA、npm_for 同目录 npm、Windows winget 渠道：claude/codex/opencode/kimi/grok 五家有官方包）+ 应用自身 Tauri updater
   logbuf.rs                  # 诊断日志环形缓冲
   diagnostics.rs             # 诊断包：系统/WebView/GPU/输入法、功能开关、日志、进程生命周期采集与 ZIP 导出
   config_dump.rs             # 生效配置自省（只读，不建/不改任何用户配置文件）：dump_effective_config /
@@ -316,7 +321,9 @@ src-tauri/src/
                              # 剔除 extra_env，绝无密钥）/hooksAttention/capabilities（复用 agent_capabilities）/
                              # workspaceSettings（传 root 时 ws_settings 三层合并终值 + 每键来源层标注）；
                              # 整份出站前过 sessions::redact_sensitive_text；设置页「诊断」区「生效配置快照」卡片消费
-  process.rs                 # 后台子进程统一创建（Windows CREATE_NO_WINDOW 防 conhost 闪窗）
+  process.rs                 # 后台子进程统一创建（Windows CREATE_NO_WINDOW 防 conhost 闪窗）+
+                             # pty_command（Windows .cmd/.bat shim 深化：npm 系 CLI 解析出 JS 入口改 node 直启，
+                             #   npm.cmd 走固定布局 special case，解析失败回落 cmd /c call；updater 与终端拉起共用）
   models.rs                  # 共享 DTO
   lib.rs                     # 模块与 Tauri command 注册
 ```

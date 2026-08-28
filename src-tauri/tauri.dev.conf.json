@@ -3,8 +3,8 @@
   "productName": "Ccode Dev",
   "identifier": "com.ccode.dev.hmr",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:17575"
+    "beforeDevCommand": "npm run dev -- --host 127.0.0.1",
+    "devUrl": "http://127.0.0.1:17575"
   },
   "app": {
     "windows": [

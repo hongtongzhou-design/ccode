@@ -4,7 +4,7 @@
 
 use crate::agent_specs::{agent_spec, BrewPackage, UpdateChannel};
 use crate::agents;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -12,8 +12,35 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-// 慢网络下 brew/npm 下载可能远超 5 分钟，给 15 分钟
+// 慢网络下 brew/npm/winget 下载可能远超 5 分钟，给 15 分钟
 const TIMEOUT: Duration = Duration::from_secs(900);
+/// npm 默认重试/等待可能持续数分钟且几乎没有可见输出；安装和更新使用
+/// 明确的网络参数，让失败在约 30 秒内反馈到界面，避免被误认为 Ccode 卡死。
+const NPM_FETCH_ARGS: [&str; 5] = [
+    "--no-audit",
+    "--no-fund",
+    "--fetch-retries=0",
+    "--fetch-timeout=30000",
+    "--loglevel=notice",
+];
+
+/// winget 安装/升级/查询的公共参数：精确匹配 ID、固定 winget 源、自动接受协议、
+/// 禁用交互（PTY 里 winget 的交互提示无法被 updater_write 应答）
+const WINGET_COMMON_ARGS: [&str; 6] = [
+    "-e",
+    "--source",
+    "winget",
+    "--accept-source-agreements",
+    "--accept-package-agreements",
+    "--disable-interactivity",
+];
+
+/// winget install/upgrade 的参数列表（action 为 "install" 或 "upgrade"）
+fn winget_args(action: &str, id: &str) -> Vec<String> {
+    let mut args: Vec<String> = [action, "--id", id].iter().map(|s| s.to_string()).collect();
+    args.extend(WINGET_COMMON_ARGS.iter().map(|s| s.to_string()));
+    args
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +65,13 @@ fn detect_method(resolved_path: &str) -> &'static str {
         "brew"
     } else if resolved_path.contains("uv/tools") || resolved_path.contains(".local/share/uv") {
         "uv"
+    } else if resolved_path.to_lowercase().contains(r"roaming\npm\") {
+        // Windows npm 全局 prefix（%APPDATA%\npm）下的 .cmd shim：路径不含 node_modules，
+        // 显式识别，否则会被当成自安装而走错更新渠道
+        "npm"
+    } else if resolved_path.to_lowercase().contains("winget") {
+        // winget portable：Links\codex.exe 及其 canonicalize 后的 Packages\ 实体路径
+        "winget"
     } else {
         "self"
     }
@@ -79,8 +113,19 @@ fn npm_for(binary_path: &str) -> String {
 /// 否则双变体 CLI 先看旧版变体渠道，最后按 update_fallback 顺序展开
 fn update_commands(agent_id: &str, method: &str, binary_path: &str) -> Vec<UpdateCmd> {
     let npm_cmd = |pkg: &str| {
-        let npm = npm_for(binary_path);
-        cmd("npm", npm, &["install", "-g", &format!("{pkg}@latest")])
+        let mut args: Vec<String> = ["install", "-g"].iter().map(|s| s.to_string()).collect();
+        args.push(format!("{pkg}@latest"));
+        args.extend(NPM_FETCH_ARGS.iter().map(|s| s.to_string()));
+        UpdateCmd {
+            method: "npm",
+            program: npm_for(binary_path),
+            args,
+        }
+    };
+    let winget_upgrade = |id: &str| UpdateCmd {
+        method: "winget",
+        program: "winget".into(),
+        args: winget_args("upgrade", id),
     };
     let bin = || binary_path.to_string();
     let Some(aspec) = agent_spec(agent_id) else {
@@ -98,6 +143,14 @@ fn update_commands(agent_id: &str, method: &str, binary_path: &str) -> Vec<Updat
         match channel {
             UpdateChannel::Brew => p.brew_upgrade.as_ref().map(brew_upgrade).into_iter().collect(),
             UpdateChannel::Npm => p.npm_update.map(|pkg| npm_cmd(pkg)).into_iter().collect(),
+            // winget 是 Windows 原生渠道：其他平台展开为空候选，不产生噪音报错
+            UpdateChannel::Winget => {
+                if cfg!(windows) {
+                    p.winget.map(|id| winget_upgrade(id)).into_iter().collect()
+                } else {
+                    vec![]
+                }
+            }
             UpdateChannel::Uv => p
                 .uv
                 .map(|pkg| cmd("uv", "uv".into(), &["tool", "upgrade", pkg]))
@@ -115,6 +168,9 @@ fn update_commands(agent_id: &str, method: &str, binary_path: &str) -> Vec<Updat
             return vec![brew_upgrade(p.brew_upgrade.as_ref().unwrap())];
         }
         "npm" if p.npm_update.is_some() => return vec![npm_cmd(p.npm_update.unwrap())],
+        "winget" if cfg!(windows) && p.winget.is_some() => {
+            return vec![winget_upgrade(p.winget.unwrap())];
+        }
         "uv" if p.uv.is_some() => {
             return vec![cmd("uv", "uv".into(), &["tool", "upgrade", p.uv.unwrap()])];
         }
@@ -173,10 +229,12 @@ fn utf8_len(first: u8) -> usize {
 }
 
 /// 进行中的 run 的 PTY 写入端（每 agent 同时最多一个 run；前端经 updater_write 交互，
-/// 例如回答 brew 的 [y/n] 确认）。run 结束（成功/超时/出错）时务必移除。
-static UPDATER_WRITERS: OnceLock<Mutex<HashMap<String, Box<dyn Write + Send>>>> = OnceLock::new();
+/// 例如回答 brew 的 [y/n] 确认；reader 线程也共享它应答终端查询）。run 结束
+/// （成功/超时/出错）时务必移除。
+type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+static UPDATER_WRITERS: OnceLock<Mutex<HashMap<String, SharedWriter>>> = OnceLock::new();
 
-fn writers() -> &'static Mutex<HashMap<String, Box<dyn Write + Send>>> {
+fn writers() -> &'static Mutex<HashMap<String, SharedWriter>> {
     UPDATER_WRITERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -208,10 +266,13 @@ impl Drop for RunGuard {
 
 #[tauri::command]
 pub fn updater_write(agent_id: String, data: String) -> Result<(), String> {
-    let mut map = writers().lock().unwrap();
-    let w = map
-        .get_mut(&agent_id)
-        .ok_or("该 agent 没有正在运行的安装/更新")?;
+    let w = {
+        let map = writers().lock().unwrap();
+        map.get(&agent_id)
+            .cloned()
+            .ok_or("该 agent 没有正在运行的安装/更新")?
+    };
+    let mut w = w.lock().unwrap();
     w.write_all(data.as_bytes())
         .and_then(|_| w.flush())
         .map_err(|e| format!("写入失败: {e}"))
@@ -306,6 +367,9 @@ pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String
 /// TERM=dumb 让 brew/npm 放弃彩色和花式重绘，但保留 TTY 行为。
 /// 带 900s 超时（unix 下杀整个进程组）；reader 在子进程退出后最多等 1 秒 drain，
 /// 其子孙（curl 等）可能持有 slave 导致永远无 EOF，绝不无限 join。
+/// reader 同时客串最小终端应答：子进程（实测 npm on Windows ConPTY）会发 DSR 光标
+/// 位置查询（ESC[6n）并读 stdin 等回答，无人应答就永久挂起——reader 代答
+/// ESC[24;120R（与下方 PtySize 一致）。展示前 strip_ansi 会把查询序列剥掉。
 /// 同一 key 同时只允许一个 run：入口抢占，并发请求直接拒绝。
 /// updater（key=agent_id）与 fonts（key="fonts"）共用本函数。
 pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program: &str, args: &[String], emit: F) -> (bool, String) {
@@ -329,10 +393,7 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program
         Ok(p) => p,
         Err(e) => return (false, format!("创建 PTY 失败: {e}")),
     };
-    let mut cmd = CommandBuilder::new(&program_path);
-    for a in args {
-        cmd.arg(a);
-    }
+    let mut cmd = crate::process::pty_command(&program_path, args);
     for (k, v) in brew_env_pairs(program, crate::settings::brew_mirror_enabled()) {
         cmd.env(&k, &v);
     }
@@ -363,7 +424,8 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program
     };
     // slave 必须立刻 drop：子进程退出后 reader 才能看到 EOF
     drop(pair.slave);
-    writers().lock().unwrap().insert(key.to_string(), writer);
+    let writer = Arc::new(Mutex::new(writer));
+    writers().lock().unwrap().insert(key.to_string(), writer.clone());
     let _writer_guard = WriterGuard(key.to_string());
 
     let collected = Arc::new(Mutex::new(String::new()));
@@ -380,6 +442,13 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program
                     pending.extend_from_slice(&buf[..n]);
                     let (text, used) = crate::pty::split_utf8(&pending);
                     if used > 0 {
+                        // DSR 光标位置查询（ESC[6n）：无人应答子进程会挂住 stdin 读取
+                        // （实测 npm on Windows ConPTY），代答当前 PTY 尺寸
+                        if text.contains("\u{1b}[6n") {
+                            let mut w = writer.lock().unwrap();
+                            let _ = w.write_all(b"\x1b[24;120R");
+                            let _ = w.flush();
+                        }
                         let text = strip_ansi(&text);
                         if !text.is_empty() {
                             emit(&text);
@@ -443,6 +512,13 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program
 fn run_streaming(app: &AppHandle, agent_id: &str, program: &str, args: &[String]) -> (bool, String) {
     let event = format!("agent-update-output-{agent_id}");
     let app = app.clone();
+    // PTY 子进程（尤其是 Windows 下的 npm.cmd）可能在建立网络连接前暂时没有任何
+    // stdout。先发一条明确的启动状态，避免前端只能显示「运行中，等待输出…」而被误认为
+    // Ccode 没有执行命令。
+    let _ = app.emit(
+        &event,
+        format!("已启动 {program}，正在连接安装源；若网络不可达，稍后会显示失败原因。\n"),
+    );
     run_streaming_pty(agent_id, program, args, move |text| {
         let _ = app.emit(&event, text);
     })
@@ -541,8 +617,8 @@ fn spec(tool: &'static str, method: &'static str, program: &str, args: &[&str]) 
     }
 }
 
-/// 全部候选，渠道来自 AgentSpec.packaging，固定按 brew > npm > uv > 官方脚本优先级
-/// 排序（脚本兜底，仅无其他方式时用）
+/// 全部候选，渠道来自 AgentSpec.packaging，固定按 brew > npm > winget > uv > 官方脚本
+/// 优先级排序（winget 仅 Windows 出现；脚本兜底，仅无其他方式时用）
 fn install_specs(agent_id: &str) -> Vec<InstallSpec> {
     let Some(aspec) = agent_spec(agent_id) else {
         return vec![];
@@ -557,7 +633,25 @@ fn install_specs(agent_id: &str) -> Vec<InstallSpec> {
         }
     }
     if let Some(pkg) = p.npm_install {
-        out.push(spec("npm", "npm", "npm", &["install", "-g", pkg]));
+        let mut args: Vec<String> = ["install", "-g", pkg].iter().map(|s| s.to_string()).collect();
+        args.extend(NPM_FETCH_ARGS.iter().map(|s| s.to_string()));
+        out.push(InstallSpec {
+            tool: "npm",
+            method: "npm",
+            program: "npm".into(),
+            args,
+        });
+    }
+    // winget 仅 Windows：无 Node.js 的机器也有原生渠道可装（如 codex 的 OpenAI.Codex）
+    if cfg!(windows) {
+        if let Some(id) = p.winget {
+            out.push(InstallSpec {
+                tool: "winget",
+                method: "winget",
+                program: "winget".into(),
+                args: winget_args("install", id),
+            });
+        }
     }
     if let Some(pkg) = p.uv {
         // kimi 的 uv 包装的是旧版 kimi-cli（Python）
@@ -602,9 +696,14 @@ fn install_agent_sync(app: &AppHandle, agent_id: &str) -> Result<UpdateResultDto
     }
     let available = |tool: &str| agents::resolve_binary(tool).is_some();
     let Some(s) = pick_install(agent_id, &available) else {
+        let tools = if cfg!(windows) {
+            "brew / npm / winget / uv / curl"
+        } else {
+            "brew / npm / uv / curl"
+        };
         return Ok(UpdateResultDto {
             ok: false,
-            output: "未找到可用的安装工具（brew / npm / uv / curl 均不可用）".into(),
+            output: format!("未找到可用的安装工具（{tools} 均不可用）"),
             method: "none".into(),
             version_before: None,
             version_after: None,
@@ -734,6 +833,32 @@ fn brew_latest(pkg: &str, cask: bool) -> Option<String> {
     v.map(|s| s.to_string())
 }
 
+/// winget show 输出是本地化的（中文「版本:」/英文「Version:」）：逐行找版本标签行取
+/// x.y.z；解析不到不瞎猜（None → UI 回落普通「更新」按钮，升级本身不受影响）
+fn winget_show_version(output: &str) -> Option<String> {
+    output
+        .lines()
+        .filter(|l| {
+            let lower = l.to_lowercase();
+            lower.contains("version") || l.contains("版本")
+        })
+        .find_map(semver_token)
+}
+
+fn winget_latest(id: &str) -> Option<String> {
+    let winget = agents::resolve_binary("winget")?;
+    let mut c = crate::process::background_command(winget);
+    c.args(["show", "--id", id]);
+    for a in WINGET_COMMON_ARGS {
+        c.arg(a);
+    }
+    let out = c.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    winget_show_version(&String::from_utf8_lossy(&out.stdout))
+}
+
 /// 最新版查询口与 update_commands 同渠道（包管理器装的查包管理器）；
 /// 自更新渠道（claude/kimi 自更新、opencode 非 npm）没有轻量查询口，返回 None。
 /// brew 查询名单独声明（brew_latest）：opencode 升级用 tap 短名，brew info 会命中歧义，不查
@@ -747,6 +872,11 @@ fn latest_version(agent_id: &str, method: &str) -> Option<String> {
     if method == "npm" {
         if let Some(pkg) = p.npm_update {
             return npm_latest(pkg);
+        }
+    }
+    if method == "winget" {
+        if let Some(id) = p.winget {
+            return winget_latest(id);
         }
     }
     // 有 npm 包名即可作为 latest 查询口：自更新渠道（kimi/opencode）本身没有轻量查询口，
@@ -831,18 +961,32 @@ fn check_one(agent_id: &str) -> AgentUpdateInfoDto {
     }
 }
 
-/// 与 DETECT_CACHE 同模式：检查要起 6 组子进程，按进程缓存一次；更新/安装成功后失效
-static CHECK_CACHE: std::sync::Mutex<Option<Vec<AgentUpdateInfoDto>>> = std::sync::Mutex::new(None);
+/// 与 DETECT_CACHE 同模式：检查要起 6+ 组子进程，按进程缓存；更新/安装成功后失效。
+/// 另外加 2 分钟 TTL：kimi 启动自动更新、终端里手动 brew upgrade 等外部变更绕过
+/// update_agent 的失效链路，靠 TTL 自愈；「刚从终端跑完交互式自更新回来」由前端
+/// 传 force 立即重查（同时失效 detect 缓存，列表版本号一并刷新）
+const CHECK_CACHE_TTL: Duration = Duration::from_secs(120);
+static CHECK_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<AgentUpdateInfoDto>)>> =
+    std::sync::Mutex::new(None);
 
 pub(crate) fn invalidate_check_cache() {
     *CHECK_CACHE.lock().unwrap() = None;
 }
 
-/// 6 个 agent 并行查最新版（brew info 走本地元数据；npm view 限 8s fetch-timeout）
+/// 6+ 个 agent 并行查最新版（brew info 走本地元数据；npm view 限 8s fetch-timeout）
 #[tauri::command]
-pub async fn check_agent_updates() -> Vec<AgentUpdateInfoDto> {
-    if let Some(cached) = CHECK_CACHE.lock().unwrap().clone() {
-        return cached;
+pub async fn check_agent_updates(force: Option<bool>) -> Vec<AgentUpdateInfoDto> {
+    if force == Some(true) {
+        invalidate_check_cache();
+        agents::invalidate_detect_cache();
+    }
+    {
+        let cache = CHECK_CACHE.lock().unwrap();
+        if let Some((ts, cached)) = &*cache {
+            if ts.elapsed() < CHECK_CACHE_TTL {
+                return cached.clone();
+            }
+        }
     }
     let out = tauri::async_runtime::spawn_blocking(|| {
         let handles: Vec<_> = crate::agent_specs::all_agent_specs()
@@ -856,7 +1000,7 @@ pub async fn check_agent_updates() -> Vec<AgentUpdateInfoDto> {
     })
     .await
     .unwrap_or_default();
-    *CHECK_CACHE.lock().unwrap() = Some(out.clone());
+    *CHECK_CACHE.lock().unwrap() = Some((std::time::Instant::now(), out.clone()));
     out
 }
 
@@ -907,6 +1051,21 @@ mod tests {
         std::fs::remove_file(bin.join("npm")).unwrap();
         assert!(!npm_for(&target).is_empty());
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// 实机冒烟（需本机装有 Node，CI 跳过）：完整走 resolve_binary 找 npm.cmd →
+    /// pty_command 深化为 node 直启 → ConPTY 拉起 → 收输出。手动跑：
+    /// cargo test --lib -- --ignored npm_via_pty_smoke
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn npm_via_pty_smoke() {
+        let (ok, out) = run_streaming_pty("test-npm-smoke", "npm", &["--version".to_string()], |_| {});
+        assert!(ok, "npm --version 经 PTY 失败：{out}");
+        assert!(
+            out.trim().chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "输出不像版本号：{out}"
+        );
     }
 
     #[test]
@@ -1030,6 +1189,20 @@ mod tests {
         assert_eq!(detect_method("/Users/x/.local/uv/tools/kimi/bin/kimi"), "uv");
         assert_eq!(detect_method("/Users/x/.kimi-code/bin/kimi"), "self");
         assert_eq!(detect_method("/usr/local/bin/opencode"), "self");
+        // winget portable：Links shim 与 canonicalize 后的 Packages 实体路径
+        assert_eq!(
+            detect_method(r"C:\Users\x\AppData\Local\Microsoft\WinGet\Links\codex.exe"),
+            "winget"
+        );
+        assert_eq!(
+            detect_method(r"C:\Users\x\AppData\Local\Microsoft\WinGet\Packages\OpenAI.Codex_x\codex.exe"),
+            "winget"
+        );
+        // Windows npm 全局 prefix 下的 .cmd shim（路径不含 node_modules）
+        assert_eq!(
+            detect_method(r"C:\Users\x\AppData\Roaming\npm\codex.cmd"),
+            "npm"
+        );
     }
 
     #[test]
@@ -1054,6 +1227,94 @@ mod tests {
         assert_eq!(pick_install("kimi", &only_script).unwrap().method, "script");
         // 未知 agent → None
         assert!(pick_install("nope", &all).is_none());
+        // winget 渠道仅 Windows 出现：无 brew/npm 时 codex 回落 winget，离开 Windows 不出现
+        #[cfg(windows)]
+        {
+            let no_brew_npm = |t: &str| !matches!(t, "brew" | "npm");
+            assert_eq!(pick_install("codex", &no_brew_npm).unwrap().method, "winget");
+        }
+        #[cfg(not(windows))]
+        {
+            let no_brew_npm = |t: &str| !matches!(t, "brew" | "npm");
+            assert!(pick_install("codex", &no_brew_npm).is_none());
+        }
+    }
+
+    #[test]
+    fn winget_show_version_parses_localized_output() {
+        // 中文输出（本机实测格式）
+        let zh = "已找到 Codex CLI [OpenAI.Codex]\n版本: 0.146.1\n发布者: OpenAI, Inc.\n";
+        assert_eq!(winget_show_version(zh).as_deref(), Some("0.146.1"));
+        // 英文输出
+        let en = "Found Codex CLI [OpenAI.Codex]\nVersion: 0.146.1\nPublisher: OpenAI, Inc.\n";
+        assert_eq!(winget_show_version(en).as_deref(), Some("0.146.1"));
+        // 无版本标签行 → None（不拿别的数字瞎猜）
+        assert_eq!(winget_show_version("Found Codex CLI [OpenAI.Codex]\nPublisher: OpenAI"), None);
+    }
+
+    /// winget 渠道的安装/更新/fallback 全链路（仅 Windows 有这些候选）
+    #[cfg(windows)]
+    #[test]
+    fn winget_channels_for_codex_on_windows() {
+        // 安装候选：brew > npm > winget（codex 无 uv/script）
+        let specs = install_specs("codex");
+        let methods: Vec<&str> = specs.iter().map(|s| s.method).collect();
+        assert_eq!(methods, vec!["brew", "npm", "winget"]);
+        let w = &specs[2];
+        assert_eq!(w.program, "winget");
+        assert_eq!(w.args[0], "install");
+        assert!(w.args.join(" ").contains("--id OpenAI.Codex"));
+        // winget 装的走 winget upgrade 更新
+        let cmds = update_commands(
+            "codex",
+            "winget",
+            r"C:\Users\x\AppData\Local\Microsoft\WinGet\Links\codex.exe",
+        );
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].method, "winget");
+        assert_eq!(cmds[0].args[0], "upgrade");
+        assert!(cmds[0].args.join(" ").contains("--id OpenAI.Codex"));
+        // 自装/未知渠道：fallback 链 npm → winget
+        let cmds = update_commands("codex", "self", r"C:\Tools\codex.exe");
+        let ms: Vec<&str> = cmds.iter().map(|c| c.method).collect();
+        assert_eq!(ms, vec!["npm", "winget"]);
+    }
+
+    /// 五家有官方 winget 包的 agent（2026-08-27 实机核实 winget 仓库），包 ID 防写错
+    #[cfg(windows)]
+    #[test]
+    fn winget_channels_registered_for_five_agents() {
+        for (id, pkg) in [
+            ("claude-code", "Anthropic.ClaudeCode"),
+            ("codex", "OpenAI.Codex"),
+            ("opencode", "SST.opencode"),
+            ("kimi", "MoonshotAI.KimiCodeCLI"),
+            ("grok", "xAI.GrokBuild"),
+        ] {
+            let specs = install_specs(id);
+            let w = specs
+                .iter()
+                .find(|s| s.method == "winget")
+                .unwrap_or_else(|| panic!("{id} 缺 winget 渠道"));
+            assert!(
+                w.args.join(" ").contains(&format!("--id {pkg}")),
+                "{id} winget 包 ID 不符"
+            );
+        }
+        // gemini/qwen/codebuddy/cursor 无官方 winget 包，不出现废渠道
+        for id in ["gemini", "qwen", "codebuddy", "cursor"] {
+            assert!(install_specs(id).iter().all(|s| s.method != "winget"), "{id} 不应有 winget 渠道");
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn winget_channels_absent_off_windows() {
+        // 非 Windows：安装候选无 winget，fallback 链里的 winget 展开为空（无噪音报错）
+        assert!(install_specs("codex").iter().all(|s| s.method != "winget"));
+        let cmds = update_commands("codex", "self", "/usr/local/bin/codex");
+        let ms: Vec<&str> = cmds.iter().map(|c| c.method).collect();
+        assert_eq!(ms, vec!["npm"]);
     }
 
     #[test]

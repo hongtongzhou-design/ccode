@@ -1328,7 +1328,7 @@ lone keyword
     fn save_pdf_registers_resource_in_project_toml() {
         let dir = tmpdir("save");
         let dto = save_and_register_pdf(&dir, "my paper", b"%PDF-1.7 fake").unwrap();
-        assert!(dto.path.ends_with("papers/my paper.pdf"), "{}", dto.path);
+        assert!(std::path::Path::new(&dto.path).ends_with("papers/my paper.pdf"), "{}", dto.path);
         assert_eq!(dto.name, "my paper");
         let cfg = crate::projects::read_config_at(&dir).config;
         assert_eq!(cfg.resources.len(), 1);
@@ -1337,7 +1337,7 @@ lone keyword
         assert_eq!(cfg.resources[0].path, "papers/my paper.pdf");
         // 同 hint 再下载：文件避让 -2，资源另登记一条
         let dto2 = save_and_register_pdf(&dir, "my paper", b"%PDF-1.7 fake2").unwrap();
-        assert!(dto2.path.ends_with("papers/my paper-2.pdf"), "{}", dto2.path);
+        assert!(std::path::Path::new(&dto2.path).ends_with("papers/my paper-2.pdf"), "{}", dto2.path);
         let cfg2 = crate::projects::read_config_at(&dir).config;
         assert_eq!(cfg2.resources.len(), 2);
         fs::remove_dir_all(&dir).ok();
@@ -1350,7 +1350,7 @@ lone keyword
         let src = src_dir.join("手动下载.pdf");
         fs::write(&src, b"%PDF-1.7 body").unwrap();
         let dto = attach_pdf_at(&dir, src.to_str().unwrap(), "My Paper Title").unwrap();
-        assert!(dto.path.ends_with("papers/My Paper Title.pdf"), "{}", dto.path);
+        assert!(std::path::Path::new(&dto.path).ends_with("papers/My Paper Title.pdf"), "{}", dto.path);
         assert_eq!(dto.name, "My Paper Title");
         // 复制而非移动：源文件还在
         assert!(src.exists());

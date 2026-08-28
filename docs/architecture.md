@@ -430,6 +430,8 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 
 ## 10. 决策记录
 
+- **Windows 安装渠道补 winget + .cmd shim 深化（2026-08-27）**：Windows 无 Node.js 的机器上 codex 等曾无任何可用安装渠道（brew 仅 macOS、官方脚本渠道不支持 Windows），表现为「无法安装」。决策：① PackagingSpec 新增 `winget` 包 ID 字段（已实机核实并登记五家官方包：Anthropic.ClaudeCode / OpenAI.Codex / SST.opencode / MoonshotAI.KimiCodeCLI / xAI.GrokBuild，均 portable 免管理员；gemini/qwen/codebuddy 无官方包、cursor 官方脚本拒装 Windows，这四家维持 npm/脚本渠道）；安装候选顺序 brew > npm > winget（仅 Windows）> uv > 官方脚本；winget 安装走 `winget install --id <id> -e --source winget --accept-* --disable-interactivity`，更新同 ID `winget upgrade`，检测口径为二进制路径含 `WinGet`（Links shim 与 canonicalize 后 Packages 实体同判），最新版查 `winget show` 本地化输出（找「版本:/Version:」标签行取 x.y.z，解析失败回落普通「更新」按钮不虚构）；winget 的 Links/WindowsApps 两目录进 `binary_candidate_dirs`（装完不用重启即可检测到）。② Windows 上 npm 系 CLI 是 .cmd 批处理 shim，ConPTY/CreateProcess 不能直接执行：`process::pty_command` 统一把 shim 深化为 node 直启（cmd-shim 两代文本格式解析 %~dp0/%dp0% 入口；npm.cmd 自身是安装器变量化脚本，走固定布局 node_modules/npm/bin/npm-cli.js special case），解析失败才回落 `cmd /c call`——参数不过 cmd 解析，含引号/%/& 的 prompt 不被吞；`background_command` 同口径深化（--version 探测也走它）。③ 两个实机新坑一并修复并记入 AGENTS.md 环境档案：候选目录同名 shell 脚本抢在 .cmd 前命中（os error 193，find_in_dirs 改扩展名优先）；ConPTY 里 npm 发 DSR 光标查询（ESC[6n）读 stdin 等回答、无人应答永久挂起（run_streaming_pty reader 代答）。updater 安装更新与终端 agent 拉起共用此入口。
+
 - **运行页显示层切换符号化（2026-08-22）**：聊天/终端切换属于高频但窄空间操作，使用 28×28px 符号按钮并保留 tooltip/aria-label；不改变每个标签独立保存的 surface mode 与 PTY/会话联动。
 
 - **终端聊天头部宽度（2026-08-22）**：聊天标题与低频操作不占满终端主区，使用较窄阅读宽度并避免无意义的 `flex-1` 横向拉伸；操作可用性与会话状态机不变。

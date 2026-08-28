@@ -7,6 +7,8 @@
 
 ## 未发布
 
+- **修复 Windows 上 agent CLI 无法安装**：此前 Windows 机器没装 Node.js 时 codex/claude 等没有任何可用安装渠道（brew 仅 macOS）；新增 winget 原生渠道——claude/codex/opencode/kimi/grok 五家有官方包（Anthropic.ClaudeCode / OpenAI.Codex / SST.opencode / MoonshotAI.KimiCodeCLI / xAI.GrokBuild，portable 免管理员），装完立即可检测、可更新（`winget upgrade`）、可查新版；claude 顺带补了 npm 渠道（`@anthropic-ai/claude-code`）。同时修复 Windows 上经 PTY 执行 npm 系 .cmd shim 必挂的两个叠加问题：候选目录里同名 shell 脚本抢在 .cmd 前被选中（os error 193），以及 ConPTY 里 npm 发终端光标查询无人应答导致永久挂起（安装器现在会代答）；shim 统一解析出 JS 入口改用 node 直启（安装/更新、版本探测与终端拉起 agent 同口径），npm 安装/更新附加明确网络参数（30 秒请求超时、不重试），registry 不可达时快速报错而不是长时间无输出；另修复 grok 精确注意力开关在 Windows 上二次切换被误判「外来文件」拒绝（JSON 转义的 `\\` 路径分隔符归一化漏按对处理）
+
 - **外部技能流水线适配五件套**：GitHub 下载的科研技能现在即装即配——① TASK.md「本步骤技能」段固定带「路径冲突以本文件为准」兜底句，未适配技能也会把产物写进约定落点；② 技能 frontmatter 新增 `inputs`/`outputs` 接口声明解析，外部技能没声明时自动从正文推断（标注「推断」）；③ 步骤技能区新增链路校验 ⚠：技能要读的文件上游没人产出、或产出不在本步骤预期产物里，挂载时即提示（开工确认弹层与研究流程编辑器都有）；④ 技能页「⋯ → ◈ 适配到流水线」：AI 按流水线路径约定改写技能并补写接口声明，预览确认后才写回（有备份）；⑤ 技能页「⋯ → 挂载到步骤」/ 详情面板「＋ 挂载到步骤」：选项目选步骤一步挂进研究流程
 
 - **「草稿」概念并入 TASK.md**：界面上没有「草稿」了——流程线「预览 TASK.md」与「预览/编辑草稿」合并为一个「预览/编辑 TASK.md」：没编辑过看到的是模板默认拼装，可直接改，保存后开工就以这份为准；「跟 AI 商量一下」开聊时若还没编辑过，先把模板拼装（简报/预期产物/提货单）整份写入作为起点，Agent 先通读、把拿不准的点逐个问你、按回答直接改这份文件——商量的结果就是最终落盘的 TASK.md，不再从零起草丢掉模板内容；「确定文献来源」的切换会就地同步进已编辑过的 TASK.md（「文献来源」段跟着配置走，不会停在旧快照）

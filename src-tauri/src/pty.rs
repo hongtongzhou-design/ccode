@@ -437,42 +437,31 @@ pub fn pty_spawn(
         plan.args.clone()
     };
 
-    let mut cmd = CommandBuilder::new(&binary_path);
+    let mut command_args = Vec::new();
     if let Some(sid) = &resume_session_id {
         let (prepend, args) = agents::resume_args(&agent_id, sid);
         if prepend {
-            for arg in &args {
-                cmd.arg(arg);
-            }
+            command_args.extend(args.iter().cloned());
         }
-        for arg in &plan_args {
-            cmd.arg(arg);
-        }
-        for arg in &extra_args {
-            cmd.arg(arg);
-        }
+        command_args.extend(plan_args.iter().cloned());
+        command_args.extend(extra_args.iter().cloned());
         if !prepend {
-            for arg in &args {
-                cmd.arg(arg);
-            }
+            command_args.extend(args.iter().cloned());
         }
     } else {
-        for arg in &plan_args {
-            cmd.arg(arg);
-        }
-        for arg in &extra_args {
-            cmd.arg(arg);
-        }
+        command_args.extend(plan_args.iter().cloned());
+        command_args.extend(extra_args.iter().cloned());
         // 确定性关联：会话文件名 = 该 uuid，启动即锁定（architecture §6.7）
         if let Some(sid) = &session_hint {
-            cmd.arg("--session-id");
-            cmd.arg(sid);
+            command_args.push("--session-id".into());
+            command_args.push(sid.clone());
         }
         // 初始 prompt 放最后：位置参数形态（claude/codex）必须是命令行最后一个参数
         for arg in &plan.prompt_args {
-            cmd.arg(arg);
+            command_args.push(arg.clone());
         }
     }
+    let mut cmd = crate::process::pty_command(&binary_path, &command_args);
     for (k, v) in &plan.env {
         cmd.env(k, v);
     }

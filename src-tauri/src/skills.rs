@@ -2162,6 +2162,8 @@ mod tests {
         // 内置 SKILL.md 必须能被解析口径读出 name/description，且 name 与目录名一致；
         // outputs 声明（行内列表）是产物冲突检测的数据源，内置技能必须带
         for (name, content) in BUILTIN_SKILLS {
+            // include_str! 嵌入的是工作区字节：Windows 检出（core.autocrlf）是 CRLF，先归一
+            let content = content.replace("\r\n", "\n");
             assert!(
                 content.starts_with(&format!("---\nname: {name}\n")),
                 "{name} 的 frontmatter name 与目录名不一致"

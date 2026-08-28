@@ -732,7 +732,7 @@ function App() {
           >
             {visited.has("profiles") && (
               <Suspense fallback={<PageLoading />}>
-                <ProfilesPage />
+                <ProfilesPage visible={page === "profiles"} />
               </Suspense>
             )}
           </div>

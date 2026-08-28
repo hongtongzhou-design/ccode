@@ -802,12 +802,30 @@ function diagnose(output: string, method: string): string | null {
     return "网络连接问题：检查代理设置；如在国内网络，brew 已自动走 TUNA 镜像，npm 可配置 registry.npmmirror.com 镜像";
   }
   if (output.includes("EACCES") || lower.includes("permission denied")) {
+    if (/Windows/i.test(navigator.userAgent)) {
+      return "Windows 权限不足：请先安装 Node.js LTS 并重新打开 Ccode；若 Node.js 已安装，请确认 npm 全局目录可写，再重试。";
+    }
     return "权限不足：该命令需要写入全局目录，检查安装目录权限";
   }
   if (output.includes("命令超时")) {
-    return "命令超过 15 分钟未完成被终止：通常是下载过慢，重试或检查网络";
+    return method.includes("npm")
+      ? "npm 安装超过 15 分钟仍未完成，已自动终止：请检查 registry/代理设置后重试"
+      : "命令超过 15 分钟未完成，已自动终止：通常是下载过慢，重试或检查网络";
   }
   return null;
+}
+
+/** Windows 上有官方 winget 包的 agent（与 agent_specs.rs 的 winget 字段同源，新增时同步） */
+const WINGET_AGENTS = new Set(["claude-code", "codex", "opencode", "kimi", "grok"]);
+
+function installToolHelp(agentId: string): string {
+  if (/Windows/i.test(navigator.userAgent)) {
+    if (WINGET_AGENTS.has(agentId)) {
+      return "未找到可用的安装工具：winget 与 Node.js 都不可用。该 agent 在 Windows 上有两条路——① 系统自带 winget：若被卸载，请在 Microsoft Store 安装「应用安装程序」；② 安装 Node.js LTS 走 npm 渠道（下载：https://nodejs.org/en/download）。完成后完全退出并重新打开 Ccode。";
+    }
+    return "未找到可用的安装工具：该 agent 在 Windows 上只能走 npm 渠道。请先安装 Node.js LTS（自带 npm），安装完成后完全退出并重新打开 Ccode 再重试。下载：https://nodejs.org/en/download";
+  }
+  return "未找到可用的安装工具。请先安装 Node.js（会同时提供 npm），然后完全退出并重新打开 Ccode 再重试。";
 }
 
 function fmtTokens(n: number): string {
@@ -1022,7 +1040,7 @@ function GlobalApplyDialog({
   );
 }
 
-export default function ProfilesPage() {
+export default function ProfilesPage({ visible }: { visible: boolean }) {
   const profiles = useAppStore((s) => s.profiles);
   const profileIssues = useAppStore((s) => s.profileIssues);
   const [usageMap, setUsageMap] = useState<Record<string, ProfileUsageDto>>({});
@@ -1255,14 +1273,35 @@ export default function ProfilesPage() {
     {},
   );
 
-  async function refreshUpdateInfo() {
+  async function refreshUpdateInfo(force = false) {
     try {
-      const list = await invoke<AgentUpdateInfo[]>("check_agent_updates");
+      const list = await invoke<AgentUpdateInfo[]>("check_agent_updates", {
+        force,
+      });
       setUpdateInfo(Object.fromEntries(list.map((i) => [i.id, i])));
     } catch {
       /* 检查失败（网络等）不影响页面 */
     }
   }
+  // 交互式自更新（kimi upgrade 等）路由到终端执行，绕过后端的缓存失效链路：
+  // 记下待重查标记，回切本页时 force 刷新（页面在 App.tsx 保持挂载，不会重新 mount）
+  const interactiveUpdateLaunchedRef = useRef(false);
+  const visibleRef = useRef(visible);
+  useEffect(() => {
+    const was = visibleRef.current;
+    visibleRef.current = visible;
+    if (!visible || was) return;
+    if (interactiveUpdateLaunchedRef.current) {
+      interactiveUpdateLaunchedRef.current = false;
+      void (async () => {
+        await refreshUpdateInfo(true);
+        await loadAll();
+      })();
+    } else {
+      // 未标记的回切也顺手刷一次：后端缓存有 2 分钟 TTL，未过期时是纯缓存命中
+      void refreshUpdateInfo();
+    }
+  }, [visible]);
   // 挂载查一次；更新/安装跑完（后端缓存已失效）后重查
   useEffect(() => {
     void refreshUpdateInfo();
@@ -1347,6 +1386,7 @@ export default function ProfilesPage() {
   async function onUpdate(agentId: string) {
     const prefill = interactiveUpdatePrefill(updateInfo[agentId]);
     if (prefill) {
+      interactiveUpdateLaunchedRef.current = true;
       setPendingTerminal({
         cwd: "~",
         extraEnv: {},
@@ -1367,7 +1407,7 @@ export default function ProfilesPage() {
         agentId,
       });
       if (!method) {
-        setError("未找到可用的安装工具（brew / npm / uv / curl 都不在 PATH）");
+        setError(installToolHelp(agentId));
         return;
       }
       if (

@@ -414,7 +414,9 @@ fn whole_file_doc(spec: &BridgeSpec, command: &str) -> Result<String, String> {
 }
 
 fn has_marker(text: &str, marker: &str) -> bool {
-    text.replace('\\', "/").contains(marker)
+    // JSON 文本里 Windows 路径分隔符被转义成两个字符 \\：必须先按对归一，
+    // 否则单字符替换会得到双斜杠（C://..//hooks-state//...）匹配不上 marker
+    text.replace("\\\\", "/").replace('\\', "/").contains(marker)
 }
 
 // ===== 备份与事务写入 =====

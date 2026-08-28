@@ -89,8 +89,8 @@ Ccode 是 AI 编码 Agent 的统一工作台：管理九个 CLI agent（Claude C
 
 - 未安装的 agent 显示「**安装**」（确认框告知将执行的命令，brew 优先，自动走 TUNA 镜像）
 - 已安装的显示版本号，右侧按更新检查结果分三态：「**新版**」（有更新，点击即升级，悬停显示新版本号）/「**已更新**」（已是最新或刚更新完）/「**更新**」（该渠道查不到最新版时的普通按钮，如自更新安装的 claude/kimi）；检查走 brew info / npm view，进程内缓存，更新成功后自动重查。brew 渠道已最新但上游 npm 已有更高版本时，组头显示小字提示「brew 渠道最新；上游 npm 已到 X（渠道通常滞后）」——brew 公式更新慢于 npm 属正常现象，等 brew 跟进即可，勿按 CLI 提示改用 npm 装第二份
-- 更新/安装过程是**实时终端**：输出滚动、可输入（`[y/n]` 在下方 `>` 行回答）、2 分钟无输出提醒、失败带诊断建议。渠道与安装方式一致：brew 安装的走 `brew upgrade`（含 opencode，不走其交互式自更新）；npm 安装的用**与目标二进制同目录的 npm**（同机多份 node/npm 时不会装错 prefix）
-- **交互式自更新在终端中打开**：kimi 这类自更新（`kimi upgrade`）是方向键选择的交互界面，行输入无法应答，点「新版/更新」会改为在内嵌终端新开标签执行该命令，用方向键选择、回车确认（按钮悬停有提示）；kimi 默认开启启动时自动更新，多数情况下无需手动点更新
+- 更新/安装过程是**实时终端**：输出滚动、可输入（`[y/n]` 在下方 `>` 行回答）、无输出时持续显示连接状态、失败带诊断建议；包管理器命令最多运行 15 分钟，避免 Windows 慢网络被过早终止。渠道与安装方式一致：brew 安装的走 `brew upgrade`（含 opencode，不走其交互式自更新）；npm 安装的用**与目标二进制同目录的 npm**（同机多份 node/npm 时不会装错 prefix）；Windows 上 claude/codex/opencode/kimi/grok 五家另有 winget 原生渠道（确认框显示 `winget install --id <官方包ID>`，没装 Node.js 也能装），winget 安装的走 `winget upgrade` 更新；gemini/qwen/codebuddy 没有官方 winget 包，需先装 Node.js 走 npm
+- **交互式自更新在终端中打开**：kimi 这类自更新（`kimi upgrade`）是方向键选择的交互界面，行输入无法应答，点「新版/更新」会改为在内嵌终端新开标签执行该命令，用方向键选择、回车确认（按钮悬停有提示）；kimi 默认开启启动时自动更新，多数情况下无需手动点更新；在终端里更新完回切配置页会自动强制重查版本与更新状态（其余外部变更由 2 分钟缓存 TTL 自愈）
 
 ### 1.2 创建配置（profile）
 
@@ -471,7 +471,7 @@ A：macOS WKWebView 不支持原生 JS 对话框——需要输入的地方已�
 A：已内置修复（注入 TERM/COLORTERM、剔除 NO_COLOR）。
 
 **Q：安装/更新卡在下载？**
-A：brew 已走 TUNA 镜像（设置页可关）；npm 慢的话在 profile 附加环境变量加 `npm_config_registry=https://registry.npmmirror.com`。
+A：brew 已走 TUNA 镜像（设置页可关）；npm 慢或不可达时，可先在系统终端执行 `npm config get registry` 检查源，必要时临时使用 `npm_config_registry=https://registry.npmmirror.com`；Ccode 的 npm 单次请求超时为 30 秒、整体安装最多 15 分钟。若仍失败，请查看实时输出中的 `npm ERR!` 原因，不要只根据“超时”判断包不存在。
 
 API 连接默认必须有 Ccode 密钥；只有明确勾选「本地端点无密钥」才允许无 key 启动，并会清理继承环境中的其他 API Key。连接创建后 Agent 不可直接改，跨 Agent 请用「复制到其他 agent」。
 

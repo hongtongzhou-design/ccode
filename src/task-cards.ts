@@ -2,13 +2,16 @@ import type { HumanTaskStateDto, TaskCardDto } from "./types";
 
 /** 任务卡纯逻辑：分桶/排序/会话分组，供工作区页卡片区、对话页分组与评审沉淀共用（单一出处，测试在 tests/task-cards.test.ts） */
 
-/** 卡片排序：创建时间升序（先建在前），同刻按名称字典序兜底，保证渲染顺序稳定 */
+/** 卡片排序：创建时间升序（先建在前），同刻按名称码位序兜底，保证渲染顺序稳定。
+ *  兜底禁用 localeCompare：默认 locale 随系统走（Windows 中文机 = 拼音序，英文 CI = 码位序），
+ *  同一数据不同机器排出两种顺序，测试与界面都不稳 */
 export function sortCards(cards: TaskCardDto[]): TaskCardDto[] {
   return cards
     .slice()
     .sort(
       (a, b) =>
-        a.createdAt.localeCompare(b.createdAt) || a.name.localeCompare(b.name),
+        a.createdAt.localeCompare(b.createdAt) ||
+        (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
     );
 }
 

@@ -222,6 +222,8 @@ pub struct BrewPackage {
 pub enum UpdateChannel {
     Brew,
     Npm,
+    /// Windows 原生包管理器（仅 Windows 生效；包 ID 如 OpenAI.Codex）
+    Winget,
     Uv,
     SelfUpdate,
 }
@@ -236,7 +238,8 @@ pub struct LegacyVariantSpec {
     pub legacy_channel: UpdateChannel,
 }
 
-/// 安装与更新渠道；安装候选固定按 brew > npm > uv > 官方脚本优先级（脚本兜底）
+/// 安装与更新渠道；安装候选固定按 brew > npm > winget > uv > 官方脚本优先级
+/// 排序（winget 仅 Windows；脚本兜底，仅无其他方式时用）
 pub struct PackagingSpec {
     /// brew 安装包（install）
     pub brew_install: Option<BrewPackage>,
@@ -248,6 +251,8 @@ pub struct PackagingSpec {
     pub npm_install: Option<&'static str>,
     /// npm 升级包（kimi 的 npm 包装新二进制但升级走自更新，故与安装分开）
     pub npm_update: Option<&'static str>,
+    /// winget 包 ID（仅 Windows；安装与升级同 ID，如 OpenAI.Codex）
+    pub winget: Option<&'static str>,
     /// uv tool 包（安装与升级同名）
     pub uv: Option<&'static str>,
     /// 自更新子命令（不含二进制名）
@@ -270,6 +275,7 @@ const NO_PACKAGING: PackagingSpec = PackagingSpec {
     brew_latest: None,
     npm_install: None,
     npm_update: None,
+    winget: None,
     uv: None,
     self_update: None,
     interactive_tui: false,
@@ -319,6 +325,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             brew_install: Some(BrewPackage { name: "claude-code", cask: true }),
             brew_upgrade: Some(BrewPackage { name: "claude-code", cask: true }),
             brew_latest: Some(BrewPackage { name: "claude-code", cask: true }),
+            npm_install: Some("@anthropic-ai/claude-code"),
+            npm_update: Some("@anthropic-ai/claude-code"),
+            winget: Some("Anthropic.ClaudeCode"),
             self_update: Some(&["update"]),
             install_script: Some("curl -fsSL https://claude.ai/install.sh | bash"),
             update_fallback: &[UpdateChannel::SelfUpdate, UpdateChannel::Brew],
@@ -367,7 +376,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             brew_latest: Some(BrewPackage { name: "codex", cask: true }),
             npm_install: Some("@openai/codex"),
             npm_update: Some("@openai/codex"),
-            update_fallback: &[UpdateChannel::Npm],
+            // Windows 无 Node.js 时的原生渠道（portable zip，无需管理员）；实机包 ID 已核实
+            winget: Some("OpenAI.Codex"),
+            update_fallback: &[UpdateChannel::Npm, UpdateChannel::Winget],
             ..NO_PACKAGING
         },
         // matrix §2 已核实；login status / doctor 命令复用同一 login 子命令族
@@ -530,6 +541,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
             brew_upgrade: Some(BrewPackage { name: "opencode", cask: false }),
             npm_install: Some("opencode-ai"),
             npm_update: Some("opencode-ai"),
+            winget: Some("SST.opencode"),
             // 自更新是交互 TUI（方向键选择），仅非 brew/npm 安装时尝试（brew 装的走 brew 防冲突）
             self_update: Some(&["upgrade"]),
             interactive_tui: true,
@@ -565,6 +577,8 @@ static AGENT_SPECS: &[AgentSpec] = &[
             npm_install: Some("@moonshot-ai/kimi-code"),
             // npm registry 与自更新渠道同版本发布：latest 查询口（自更新渠道本身没有轻量查询口）
             npm_update: Some("@moonshot-ai/kimi-code"),
+            // winget 的是新版 Kimi Code CLI（非旧版 Python kimi-cli）
+            winget: Some("MoonshotAI.KimiCodeCLI"),
             uv: Some("kimi-cli"),
             // kimi upgrade 是方向键选择的交互式 TUI，行输入无法应答（interactive_tui 的注释见 PackagingSpec）
             self_update: Some(&["upgrade"]),
@@ -756,6 +770,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         packaging: PackagingSpec {
             npm_install: Some("@xai-official/grok"),
             npm_update: Some("@xai-official/grok"),
+            winget: Some("xAI.GrokBuild"),
             // grok update 是非交互自更新（grok update --check --json 机器可读）
             self_update: Some(&["update"]),
             install_script: Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
@@ -900,9 +915,12 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        // %LOCALAPPDATA%\Programs、%APPDATA%\npm（npm 全局 bin 目录）
+        // %LOCALAPPDATA%\Programs、%APPDATA%\npm（npm 全局 bin 目录）、
+        // winget portable 包的 shim 目录（Links）与 winget 本体（WindowsApps）
         if let Some(local) = dirs::data_local_dir() {
             out.push(local.join("Programs"));
+            out.push(local.join("Microsoft").join("WinGet").join("Links"));
+            out.push(local.join("Microsoft").join("WindowsApps"));
         }
         if let Some(roaming) = dirs::data_dir() {
             out.push(roaming.join("npm"));
@@ -910,6 +928,13 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
         if let Some(h) = dirs::home_dir() {
             out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
             out.push(h.join(".grok/bin")); // Grok Build 官方安装器（%USERPROFILE%\.grok\bin\grok.exe）
+        }
+        // Node.js 官方 Windows 安装器默认目录；GUI 启动时 PATH 可能未继承，
+        // 仍应能找到 node/npm.cmd。
+        for key in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(root) = std::env::var_os(key) {
+                out.push(std::path::PathBuf::from(root).join("nodejs"));
+            }
         }
     }
     out
