@@ -385,10 +385,16 @@ fn is_registered_at(conn: &Connection, path: &Path) -> bool {
 /// 目录删除防护：拒绝 home/document_dir 本身、少于两级的浅层路径（防误传 ~/Documents
 /// 这类）、系统与关键用户目录（复用 fs_tree 的重要路径黑名单，含 canonicalize 双校验）。
 fn guard_project_dir(dir: &Path) -> Result<(), String> {
-    if dirs::home_dir().is_some_and(|h| dir == h) {
+    // 两侧都归一到 canonicalize 口径再比。调用方（:464 / :501）传进来的是 canonicalize
+    // 过的路径，Windows 上带 `\\?\` verbatim 前缀，而 home_dir()/document_dir() 是普通形式，
+    // 只归一一侧就永远比不中、这两道闸静默失效（workspaces.rs:3156 同款修法）。
+    // dir 也归一是为了兼容直接传普通路径的调用（含单测）。
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let dir_c = canon(dir);
+    if dirs::home_dir().is_some_and(|h| dir_c == canon(&h)) {
         return Err("不能删除用户主目录".to_string());
     }
-    if dirs::document_dir().is_some_and(|d| dir == d) {
+    if dirs::document_dir().is_some_and(|d| dir_c == canon(&d)) {
         return Err("不能删除文档目录本身".to_string());
     }
     // 规范化路径的有效段数（去掉根/盘符）少于 2 拒绝，如 /tmp、C:\proj
@@ -5403,6 +5409,12 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
         let home = dirs::home_dir().unwrap();
         let err = guard_project_dir(&home).unwrap_err();
         assert!(err.contains("主目录"), "{err}");
+        // 回归：Windows 上 canonicalize 带 `\\?\` 前缀，两侧口径不一致会让这道闸静默失效。
+        // 两种写法都必须拦下（生产调用方传的正是 canonicalize 后的形式）。
+        if let Ok(home_c) = std::fs::canonicalize(&home) {
+            let err = guard_project_dir(&home_c).unwrap_err();
+            assert!(err.contains("主目录"), "canonicalize 形式也必须拦下: {err}");
+        }
         if let Some(docs) = dirs::document_dir() {
             let err = guard_project_dir(&docs).unwrap_err();
             assert!(err.contains("文档目录"), "{err}");

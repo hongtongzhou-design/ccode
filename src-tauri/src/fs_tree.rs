@@ -533,6 +533,30 @@ fn norm_sep(s: &str) -> String {
     s.replace('\\', "/")
 }
 
+/// 保护名单比较用的归一化。Windows 上必须做三件事，否则整张名单拼不上实际路径：
+/// ① 分隔符统一（home 是 `C:\Users\x`，与 `format!("{home}/Documents")` 拼出的混合分隔符对不上）；
+/// ② 剥掉 `canonicalize` 带的 `\\?\` verbatim 前缀；③ 文件系统大小写不敏感，统一小写。
+/// macOS 上只做 ①②（① 与同文件 lexical_in_root 既有口径一致），大小写语义保持不变。
+fn protect_key(s: &str) -> String {
+    let s = norm_sep(s);
+    let s = s.strip_prefix("//?/").map(str::to_string).unwrap_or(s);
+    let s = s.trim_end_matches('/').to_string();
+    #[cfg(windows)]
+    let s = s.to_lowercase();
+    s
+}
+
+/// Windows 系统目录（按环境变量取，不假定盘符为 C:）
+#[cfg(windows)]
+fn windows_system_dirs() -> Vec<String> {
+    ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .filter(|v| !v.is_empty())
+        .map(|v| protect_key(&v))
+        .collect()
+}
+
 fn lexical_in_root(path: &str, root: &str) -> bool {
     let root_norm = norm_sep(&expand_tilde(root)).trim_end_matches('/').to_string();
     let path_exp = norm_sep(&expand_tilde(path));
@@ -565,9 +589,11 @@ pub(crate) fn is_protected_path(path: &str) -> bool {
 }
 
 fn is_protected_str(p: &str) -> bool {
-    let home = dirs::home_dir()
-        .map(|h| h.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let home = protect_key(
+        &dirs::home_dir()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
     let exact: Vec<String> = [
         home.clone(),
         format!("{home}/Documents"),
@@ -580,11 +606,13 @@ fn is_protected_str(p: &str) -> bool {
         format!("{home}/.gitconfig"),
     ]
     .into_iter()
-    .map(|s| s.trim_end_matches('/').to_string())
+    .map(|s| protect_key(&s))
     .collect();
-    let pn = p.trim_end_matches('/');
+    let pn = protect_key(p);
+    let pn = pn.as_str();
     // 精确匹配保护 home 与 shell 配置；关键目录（Library/ssh/CLI 配置/Ccode 数据）连同子路径一并保护
-    let dir_prefixes: Vec<String> = [
+    #[allow(unused_mut)]
+    let mut dir_prefixes: Vec<String> = [
         format!("{home}/Library"),
         format!("{home}/.ssh"),
         format!("{home}/.claude"),
@@ -596,8 +624,11 @@ fn is_protected_str(p: &str) -> bool {
         format!("{home}/Library/Application Support/ccode"),
     ]
     .into_iter()
-    .map(|s| s.trim_end_matches('/').to_string())
+    .map(|s| protect_key(&s))
     .collect();
+    // Windows 的系统目录不在 POSIX PREFIXES 里，单独并入（macOS 不编译此段）
+    #[cfg(windows)]
+    dir_prefixes.extend(windows_system_dirs());
     if exact.iter().any(|e| pn == e)
         || dir_prefixes
             .iter()
@@ -608,7 +639,7 @@ fn is_protected_str(p: &str) -> bool {
     const PREFIXES: [&str; 8] = [
         "/System", "/usr", "/bin", "/sbin", "/etc", "/Library", "/Applications", "/opt",
     ];
-    let home_lib = format!("{home}/Library");
+    let home_lib = protect_key(&format!("{home}/Library"));
     // macOS 的 /etc、/tmp 等是 /private 下的符号链接，canonicalize 后会带 /private 前缀，剥掉再比
     let pn_depriv = pn
         .strip_prefix("/private/")
@@ -730,5 +761,69 @@ mod system_dir_tests {
             true,
             "Library"
         )); // 父目录不是 home
+    }
+
+    // ===== 删除保护名单（跨平台路径方言） =====
+
+    /// 用平台原生分隔符拼 home 下的路径——Windows 上得到 `C:\Users\x\Documents`，
+    /// 正是文件树右键删除真正传进来的形式。
+    fn under_home(rel: &str) -> String {
+        dirs::home_dir()
+            .unwrap()
+            .join(rel)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn protected_list_matches_native_separator_paths() {
+        // 回归：曾经名单用 format!("{home}/Documents") 拼，而 Windows 的 home 是反斜杠，
+        // 拼出 `C:\Users\x/Documents` 与实际输入永不相等 ⇒ 整张名单在 Windows 上失效。
+        for rel in [
+            "Documents",
+            "Desktop",
+            "Downloads",
+            ".ssh",
+            ".claude",
+            ".codex",
+            ".gitconfig",
+        ] {
+            assert!(
+                is_protected_str(&under_home(rel)),
+                "home 下的 {rel} 必须受保护（实际传入形式：{}）",
+                under_home(rel)
+            );
+        }
+        assert!(is_protected_str(&under_home("")), "家目录自身必须受保护");
+        // 关键目录的子路径一并保护
+        assert!(is_protected_str(&under_home(".ssh/id_rsa")));
+        // 普通工作目录不该被误伤
+        assert!(!is_protected_str(&under_home("code/myproject")));
+    }
+
+    #[test]
+    fn protected_list_covers_git_internals_in_both_dialects() {
+        assert!(is_protected_str("/repo/.git/config"));
+        assert!(is_protected_str(r"C:\repo\.git\config"));
+        assert!(!is_protected_str("/repo/src/main.rs"));
+    }
+
+    #[test]
+    fn protected_list_survives_verbatim_and_trailing_sep() {
+        // canonicalize 在 Windows 上返回 \\?\ 前缀；带尾分隔符的形式也要认
+        assert!(is_protected_str(&format!(r"\\?\{}", under_home(".ssh"))));
+        assert!(is_protected_str(&format!("{}/", under_home("Documents"))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_list_covers_windows_system_dirs_case_insensitively() {
+        let sysroot = std::env::var("SystemRoot").unwrap();
+        assert!(is_protected_str(&sysroot));
+        assert!(is_protected_str(&sysroot.to_uppercase()));
+        assert!(is_protected_str(&sysroot.to_lowercase()));
+        assert!(is_protected_str(&format!(r"{sysroot}\System32")));
+        // 盘符大小写不同也要命中（Windows 文件系统大小写不敏感）
+        assert!(is_protected_str(&under_home(".ssh").to_uppercase()));
     }
 }
