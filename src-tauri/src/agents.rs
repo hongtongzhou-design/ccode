@@ -896,7 +896,14 @@ fn write_external_wrapper(
     }
     let dir = external_wrapper_dir()?;
     let path = dir.join(format!("launch-{}.ps1", uuid::Uuid::new_v4()));
-    let mut text = String::from("$self = $PSCommandPath\nRemove-Item -LiteralPath $self -Force -ErrorAction SilentlyContinue\n");
+    // 首字符必须是 UTF-8 BOM：powershell.exe（5.1）对**无 BOM** 文件按系统 ANSI 代码页
+    // 解析（中文系统 = GBK936）。脚本里的中文（用户名 C:\Users\张三、项目名、prompt 参数）
+    // 会被按 GBK 错位解码，把后面的引号当成汉字的 trail byte 吞掉，直接报
+    // 「字符串缺少终止符」——整个脚本一行都不执行，外部终端一闪而过，
+    // 且首行自删语句也没跑到，带密钥的 wrapper 会滞留到 60 秒后的兜底清理。
+    // 是否触发取决于具体汉字的字节序列（「中文路径」侥幸无损、「技能张三」必炸），
+    // 是数据相关的间歇故障，务必不要因为某次没复现就把 BOM 去掉。
+    let mut text = String::from("\u{FEFF}$self = $PSCommandPath\nRemove-Item -LiteralPath $self -Force -ErrorAction SilentlyContinue\n");
     for name in env_remove {
         if valid_env_name(name) {
             text.push_str("Remove-Item Env:");

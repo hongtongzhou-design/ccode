@@ -1140,9 +1140,14 @@ fn find_worktree_row<'a>(
     wt: &str,
     rows: &'a [crate::workspaces::WorktreeRow],
 ) -> Option<&'a crate::workspaces::WorktreeRow> {
+    // 按路径分量比，不做字符串前缀拼接：DB 里的 worktree_path 在 Windows 上是全反斜杠，
+    // 而原先的 `format!("{p}/")` 只认正斜杠 ⇒ 工作树**子目录**（文件树导航进去、
+    // 或从子目录开终端）永远匹配不到，改动面板静默退回普通 git_status。
+    // Path::starts_with 按分量匹配、正反斜杠混写都认，与 workspaces.rs:2322 口径一致。
+    let target = std::path::Path::new(wt);
     rows.iter().find(|r| {
-        let p = r.worktree_path.trim_end_matches('/');
-        wt == p || wt.starts_with(&format!("{p}/"))
+        let p = std::path::Path::new(r.worktree_path.trim_end_matches(['/', '\\']));
+        target == p || target.starts_with(p)
     })
 }
 
@@ -2508,5 +2513,51 @@ mod tests {
             "origin/main"
         );
         assert!(parse_merged_branch("普通提交信息").is_empty());
+    }
+
+    // ===== 工作树归属（路径方言） =====
+
+    fn wt_row(path: &str) -> crate::workspaces::WorktreeRow {
+        crate::workspaces::WorktreeRow {
+            id: "id".into(),
+            worktree_path: path.into(),
+            repo_path: "repo".into(),
+            name: "task".into(),
+            branch: "ccode/task".into(),
+            base_branch: "main".into(),
+        }
+    }
+
+    #[test]
+    fn worktree_row_matches_subdirectories_in_native_separator() {
+        // 回归：原先用 format!("{p}/") 拼前缀，只认正斜杠。Windows 的 worktree_path
+        // 是全反斜杠 ⇒ 子目录恒不命中，改动面板静默退回普通 git_status。
+        #[cfg(windows)]
+        let (root, sub, other) = (
+            r"C:\Users\u\ccode\workspaces\repo\task",
+            r"C:\Users\u\ccode\workspaces\repo\task\manuscript",
+            r"C:\Users\u\ccode\workspaces\repo\other",
+        );
+        #[cfg(not(windows))]
+        let (root, sub, other) = (
+            "/Users/u/ccode/workspaces/repo/task",
+            "/Users/u/ccode/workspaces/repo/task/manuscript",
+            "/Users/u/ccode/workspaces/repo/other",
+        );
+        let rows = vec![wt_row(root)];
+        assert!(find_worktree_row(root, &rows).is_some(), "工作树根必须命中");
+        assert!(find_worktree_row(sub, &rows).is_some(), "子目录必须命中");
+        assert!(find_worktree_row(other, &rows).is_none(), "同级目录不得命中");
+    }
+
+    #[test]
+    fn worktree_row_does_not_match_sibling_with_shared_prefix() {
+        // task2 与 task 共享字符串前缀，但不是子目录——按分量比才不会误判
+        #[cfg(windows)]
+        let (root, sibling) = (r"C:\ws\task", r"C:\ws\task2");
+        #[cfg(not(windows))]
+        let (root, sibling) = ("/ws/task", "/ws/task2");
+        let rows = vec![wt_row(root)];
+        assert!(find_worktree_row(sibling, &rows).is_none());
     }
 }

@@ -202,11 +202,21 @@ fn hook_command(log_path: &Path) -> String {
     }
     #[cfg(windows)]
     {
-        // \s+ 折叠换行，保证一行一条记录（hook stdin 可能是 pretty JSON）
+        // \s+ 折叠换行，保证一行一条记录（hook stdin 可能是 pretty JSON）。
+        //
+        // 读写都必须显式钉 UTF-8，不能用 [Console]::In / Add-Content：那两者按系统 ANSI
+        // 代码页（中文机器 = GBK936）解码再编码，UTF-8 的中文字节被错位配对后会把紧跟的
+        // ASCII 字符当 trail byte 吞掉。实测 {"message":"新项目"} 往返后闭合引号消失，
+        // serde_json 解析失败 ⇒ 整条 hook 记录被丢弃（transcript_path 一旦中招，
+        // grok 这类只能靠它归属会话的 agent 会永久丢失精确注意力标记）。
+        // 是否触发取决于具体汉字的字节序列，是数据相关的间歇故障。
+        // 用 UTF8Encoding::new($false) 而非 -Encoding utf8：PS 5.1 的后者会写 BOM，
+        // 首行多出 U+FEFF 会让读取侧的 unix 秒 parse::<i64>() 失败。
         format!(
             "powershell -NoProfile -Command \"$d={dir};New-Item -ItemType Directory -Force -Path $d|Out-Null;\
-             $l=[Console]::In.ReadToEnd();Add-Content -LiteralPath {log} \
-             -Value (([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()).ToString()+' '+($l -replace '\\s+',' '))\""
+             $u=New-Object Text.UTF8Encoding $false;\
+             $l=(New-Object IO.StreamReader ([Console]::OpenStandardInput()),$u).ReadToEnd();\
+             [IO.File]::AppendAllText({log},(([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()).ToString()+' '+($l -replace '\\s+',' ')+[Environment]::NewLine),$u)\""
         )
     }
 }
