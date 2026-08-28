@@ -458,9 +458,13 @@ body {
   --ccode-radius-control: 7px;
   --ccode-radius-panel: 9px;
   --ccode-motion-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
-  /* 原生表单控件配色模式：不声明时 WebView 一律按浅色 UA 样式画控件，
-     深色主题下 input/select 等原生件发白（浅色主题在下方 [data-theme$="-light"] 覆写） */
+  /* 原生表单控件配色模式：保留全局深色默认值；Windows 浅色主题单独覆盖，
+     避免 WebView2 把浅色下拉/复选框画成黑色，同时不改变 macOS/Linux 的原有路径。 */
   color-scheme: dark;
+}
+
+[data-platform="windows"][data-theme$="-light"] {
+  color-scheme: light;
 }
 
 .ccode-app-shell {

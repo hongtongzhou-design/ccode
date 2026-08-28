@@ -139,3 +139,21 @@ test("开关令牌深浅都成立：滑块必须比轨道浅", () => {
     );
   }
 });
+
+test("原生表单控件配色跟随主题，浅色下不被全局 dark 覆盖", () => {
+  assert.match(
+    css,
+    /:root\s*\{[\s\S]*?color-scheme:\s*dark;/,
+    "默认原生控件仍保持深色配色",
+  );
+  assert.match(
+    css,
+    /\[data-platform="windows"\]\[data-theme\$="-light"\]\s*\{\s*color-scheme:\s*light;/,
+    "Windows 浅色主题必须覆盖为 light color-scheme",
+  );
+  assert.doesNotMatch(
+    css,
+    /:root:not\(\[data-theme\$="-light"\]\)/,
+    "不要通过改变根节点选择器影响 macOS/Linux 的其它主题变量",
+  );
+});
