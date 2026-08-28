@@ -438,7 +438,9 @@ export function paperResourceFor(
   if (!t) return null;
   for (const r of resources) {
     if (r.type !== "paper") continue;
-    const fileName = r.path.split("/").pop() ?? r.path;
+    // 后端 discover 出的路径已由 norm_path_key 统一成正斜杠，但配置文件里手写的
+    // resources.path 可能是 Windows 反斜杠，取文件名前先归一化，否则整条路径会被当成文件名参与匹配
+    const fileName = r.path.replace(/\\/g, "/").split("/").pop() ?? r.path;
     const n = normalizeTitle(fileName.replace(/\.[^.]*$/, ""));
     if (n !== "" && (n.includes(t) || t.includes(n))) return r.path;
   }

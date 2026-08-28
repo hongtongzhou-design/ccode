@@ -22,6 +22,19 @@ test("escapeShellPath 含空格/引号/反斜杠整体单引号包裹", () => {
   assert.equal(escapeShellPath("it's.png"), "'it'\\''s.png'");
 });
 
+test("escapeShellPath Windows 分支：反斜杠是常规成分，只有空格才加双引号", () => {
+  // 回归：POSIX 安全集不含 `\`，导致 Windows 上**每一条**绝对路径都被套引号，
+  // 而 macOS 干净路径是裸写的 —— agent 收到的形态平白分叉。
+  assert.equal(escapeShellPath("C:\\tmp\\a.png", true), "C:\\tmp\\a.png");
+  // 含空格用双引号：PowerShell / cmd / agent TUI 都认，cmd 里单引号只是字面字符
+  assert.equal(
+    escapeShellPath("C:\\Users\\a b\\x.png", true),
+    '"C:\\Users\\a b\\x.png"',
+  );
+  // 路径里的双引号自身双写
+  assert.equal(escapeShellPath('C:\\a"b\\x.png', true), '"C:\\a""b\\x.png"');
+});
+
 test("joinDroppedPaths 多路径转义后空格拼接", () => {
   assert.equal(
     joinDroppedPaths(["/tmp/a.png", "/tmp/b c.png", "/tmp/d'e.txt"]),

@@ -15,7 +15,7 @@ import {
   resolveMdPath,
 } from "../reader";
 import { escapeShellPath, imageExtFromMime } from "../terminal-input";
-import { comboLabel, READER_MODE_HOTKEY } from "../hotkeys";
+import { comboLabel, IS_WINDOWS, READER_MODE_HOTKEY } from "../hotkeys";
 // md-math 模块作用域完成 marked 公式扩展注册（全局生效，占位=原始 $..$ 源码，未升级处观感不变）
 import { renderMathInto } from "../md-math";
 import {
@@ -554,7 +554,7 @@ function FilePreviewEditor({
           bytes: Array.from(bytes),
           ext: imageExtFromMime(file.type),
         });
-        insert = escapeShellPath(p);
+        insert = escapeShellPath(p, IS_WINDOWS);
       }
       const sel = ed.getSelection();
       if (!sel) return;

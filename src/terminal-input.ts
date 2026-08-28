@@ -4,16 +4,29 @@ import { isLightTheme } from "./themes.ts";
 
 /** POSIX shell 安全字符：落进集合内的路径不包裹，直接写进终端更干净 */
 const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+/** Windows 追加反斜杠：它是路径的常规成分，不该仅因为它就给每条路径都套上引号 */
+const SHELL_SAFE_WIN = /^[A-Za-z0-9_@%+=:,./\\-]+$/;
 
-/** shell 路径转义：含空格/引号/反斜杠等特殊字符时整体单引号包裹，单引号自身转 '\'' */
-export function escapeShellPath(path: string): string {
+/** shell 路径转义：含空格/引号等特殊字符时整体包裹。
+ *  POSIX 用单引号（单引号自身转 '\''）；Windows 用双引号（自身双写）——
+ *  PowerShell / cmd / 各家 agent TUI 都认双引号，而 cmd 里单引号只是字面字符。
+ *  注意 Windows 分支不能沿用 POSIX 规则：`\` 不在 POSIX 安全集里，会导致**每一条**
+ *  Windows 绝对路径都被套引号，而 macOS 上干净路径是裸写的——agent 收到的形态平白分叉。 */
+export function escapeShellPath(path: string, isWindows = false): string {
+  if (isWindows) {
+    if (SHELL_SAFE_WIN.test(path)) return path;
+    return `"${path.replace(/"/g, '""')}"`;
+  }
   if (SHELL_SAFE.test(path)) return path;
   return `'${path.replace(/'/g, "'\\''")}'`;
 }
 
 /** 拖入的多个路径转义后以空格拼接（不换行——只进输入框，避免直接执行） */
-export function joinDroppedPaths(paths: string[]): string {
-  return paths.filter((p) => p.length > 0).map(escapeShellPath).join(" ");
+export function joinDroppedPaths(paths: string[], isWindows = false): string {
+  return paths
+    .filter((p) => p.length > 0)
+    .map((p) => escapeShellPath(p, isWindows))
+    .join(" ");
 }
 
 /** 剪贴板条目里挑出第一张图片（image/*），无图片返回 null（不干预默认文本粘贴） */

@@ -8,7 +8,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { IS_MAC, eventMatchesCombo, READER_MODE_HOTKEY } from "../hotkeys";
+import { IS_MAC, IS_WINDOWS, eventMatchesCombo, READER_MODE_HOTKEY } from "../hotkeys";
 import { HoverTip, useHoverTip } from "./HoverTip";
 import { LoadingRows } from "./PageFrame";
 import { AGENTS } from "../types";
@@ -482,7 +482,7 @@ export default function ReaderOverlay({
           bytes: Array.from(bytes),
           ext: "png",
         });
-        return onInject(formatReaderCapturePrompt(absPath, page, fileName), false);
+        return onInject(formatReaderCapturePrompt(absPath, page, fileName, IS_WINDOWS), false);
       } catch (e) {
         return `截图发送准备失败：${String(e)}`;
       }

@@ -7,16 +7,19 @@ const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg)$/i;
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 /** 一行文本是否是本地图片路径：绝对路径（/、~/、盘符）或含分隔符的相对路径，
- *  且以图片扩展名结尾；允许 shell 单引号包裹（escapeShellPath 的产物）。
- *  裸文件名（无分隔符）不识别——无法和正文短语区分。命中返回剥离引号后的路径。 */
+ *  且以图片扩展名结尾；允许 shell 引号包裹（escapeShellPath 的产物：POSIX 单引号、
+ *  Windows 双引号）。裸文件名（无分隔符）不识别——无法和正文短语区分。
+ *  命中返回剥离引号后的路径。 */
 export function imagePathFromLine(line: string): string | null {
   const t = line.trim();
   if (!t || URL_SCHEME.test(t)) return null;
-  // 剥 shell 单引号包裹（含 '\'' 回转）
-  const unquoted =
-    t.length > 1 && t.startsWith("'") && t.endsWith("'")
-      ? t.slice(1, -1).replace(/'\\''/g, "'")
-      : t;
+  // 剥 shell 引号包裹：单引号含 '\'' 回转，双引号含 "" 回转
+  let unquoted = t;
+  if (t.length > 1 && t.startsWith("'") && t.endsWith("'")) {
+    unquoted = t.slice(1, -1).replace(/'\\''/g, "'");
+  } else if (t.length > 1 && t.startsWith('"') && t.endsWith('"')) {
+    unquoted = t.slice(1, -1).replace(/""/g, '"');
+  }
   if (!IMAGE_EXT.test(unquoted)) return null;
   const isAbs =
     unquoted.startsWith("/") ||

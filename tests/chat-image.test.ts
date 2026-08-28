@@ -17,6 +17,18 @@ test("带空格的路径 + shell 单引号包裹", () => {
   );
 });
 
+test("Windows 双引号包裹也要剥掉（escapeShellPath 的 Windows 分支产物）", () => {
+  assert.equal(
+    imagePathFromLine('"C:\\Users\\a b\\shots\\x.png"'),
+    "C:\\Users\\a b\\shots\\x.png",
+  );
+  // 双引号自身双写的回转
+  assert.equal(
+    imagePathFromLine('"C:\\a""b\\x.png"'),
+    'C:\\a"b\\x.png',
+  );
+});
+
 test("单引号回转 '\\'' 还原", () => {
   assert.equal(imagePathFromLine("'/tmp/it'\\''s.png'"), "/tmp/it's.png");
 });

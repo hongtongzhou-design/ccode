@@ -179,13 +179,16 @@ export function captureRectToCanvasPixels(
   return { sx, sy, sw: ex - sx, sh: ey - sy };
 }
 
-/** 圈选截图「发给 agent」的注入格式：转义路径（终端粘贴图片同一口径）+ 预填 prompt 与出处 */
+/** 圈选截图「发给 agent」的注入格式：转义路径（终端粘贴图片同一口径）+ 预填 prompt 与出处。
+ *  isWindows 由调用方显式传入而不是在这里读 IS_WINDOWS——本模块是纯逻辑层，
+ *  隐式依赖平台会让单测结果随宿主机器变化（Node 的 navigator.platform 在 Windows 上是 Win32）。 */
 export function formatReaderCapturePrompt(
   absPath: string,
   page: number,
   fileName: string,
+  isWindows = false,
 ): string {
-  return `${escapeShellPath(absPath)}\n这张图/这段讲了什么？请结合论文解释。（${fileName}，第 ${page} 页圈选）`;
+  return `${escapeShellPath(absPath, isWindows)}\n这张图/这段讲了什么？请结合论文解释。（${fileName}，第 ${page} 页圈选）`;
 }
 
 /** Uint8Array → base64（分块 btoa，避免大参数上限；btoa 只接受 latin1 串） */

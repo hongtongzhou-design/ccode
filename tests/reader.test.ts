@@ -189,6 +189,12 @@ test("formatReaderCapturePrompt 路径转义 + 预填 prompt + 出处", () => {
   // 含空格路径整体单引号包裹（终端粘贴图片同一口径）
   const out = formatReaderCapturePrompt("/tmp/my dir/p.png", 1, "a.pdf");
   assert.ok(out.startsWith("'/tmp/my dir/p.png'\n"), out);
+  // Windows 侧显式传参（不读 IS_WINDOWS：Node 的 navigator.platform 在 Windows 上是
+  // "Win32"，纯逻辑层若隐式读它，同一份用例在 mac 与 Windows 上结论会不一样）
+  const win = formatReaderCapturePrompt("C:\\my dir\\p.png", 1, "a.pdf", true);
+  assert.ok(win.startsWith('"C:\\my dir\\p.png"\n'), win);
+  const winPlain = formatReaderCapturePrompt("C:\\d\\p.png", 1, "a.pdf", true);
+  assert.ok(winPlain.startsWith("C:\\d\\p.png\n"), winPlain);
 });
 
 test("bytesToBase64 与 atob 互逆（分块编码）", () => {

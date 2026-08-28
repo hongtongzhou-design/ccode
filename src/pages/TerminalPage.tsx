@@ -550,7 +550,7 @@ const TerminalView = memo(function TerminalView({
         bytes: Array.from(new Uint8Array(buf)),
         ext: imageExtFromMime(file.type),
       });
-      await invoke("pty_write", { ptyId: id, data: escapeShellPath(path) }).catch(
+      await invoke("pty_write", { ptyId: id, data: escapeShellPath(path, IS_WINDOWS) }).catch(
         () => {},
       );
       flashInputNote(pasteImageFeedback(path));
@@ -1238,7 +1238,7 @@ const TerminalView = memo(function TerminalView({
       );
       if (!hit) return;
       const paths = event.payload.paths;
-      const text = joinDroppedPaths(paths);
+      const text = joinDroppedPaths(paths, IS_WINDOWS);
       if (!text) return;
       const id = ptyIdRef.current;
       if (id) {
