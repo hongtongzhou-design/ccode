@@ -844,6 +844,22 @@ pub struct AgentCapabilitiesDto {
     pub mcp_write: CapabilityFlagDto,
     pub skill_dist: SkillDistDto,
     pub request_policy: RequestPolicySupportDto,
+    /// 请求策略 reasoningEffort 的已知档位（非空 = 前端出下拉，空 = 自由输入）。
+    /// 只收实证值集：claude /effort 闭集、opencode 配置枚举、codex catalog 模板、grok README
+    pub effort_options: Vec<&'static str>,
+}
+
+/// 逐 agent 的 reasoningEffort 已知档位（与 request_policy_support 同实证口径）
+pub(crate) fn effort_options(agent: &str) -> Vec<&'static str> {
+    match agent {
+        "claude-code" => vec!["low", "medium", "high", "xhigh", "max"],
+        "codex" => vec!["low", "medium", "high"],
+        "opencode" => vec!["none", "minimal", "low", "medium", "high"],
+        "grok" => vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        // kimi 合法值随模型 catalog 漂移（low/medium/high/xhigh/max/on/off），env 通道无闭集
+        // 校验且官方明确原样透传——自由输入反而更准，不给下拉
+        _ => vec![],
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -864,11 +880,12 @@ pub(crate) fn request_policy_support(agent: &str) -> RequestPolicySupportDto {
         RequestPolicySupportDto { temperature, top_p, max_output_tokens, reasoning_effort, custom_headers }
     };
     match agent {
-        // claude-code v2.x 二进制实证：无 temperature/top_p 用户通道（AUTO_MODE_TEMPERATURE 为内部用途）；
-        // CLAUDE_CODE_MAX_OUTPUT_TOKENS / CLAUDE_CODE_EFFORT_LEVEL（同 /effort）/ ANTHROPIC_CUSTOM_HEADERS
-        "claude-code" => supported("unsupported", "unsupported", "supported", "supported", "supported"),
-        // codebuddy 是 claude-code fork 但 env 前缀独立：CODEBUDDY_CODE_MAX_OUTPUT_TOKENS /
-        // CODEBUDDY_CUSTOM_HEADERS 实证；未见 effort 入口
+        // claude-code v2.x 二进制实证：temperature/top_p 经 CLAUDE_CODE_EXTRA_BODY（JSON 对象
+        // 展开进请求体）；max_output_tokens=CLAUDE_CODE_MAX_OUTPUT_TOKENS；
+        // effort=CLAUDE_CODE_EFFORT_LEVEL（同 /effort）；headers=ANTHROPIC_CUSTOM_HEADERS
+        "claude-code" => supported("supported", "supported", "supported", "supported", "supported"),
+        // codebuddy 是 claude-code fork 但 env 前缀独立且无 EXTRA_BODY/EFFORT 入口：
+        // CODEBUDDY_CODE_MAX_OUTPUT_TOKENS / CODEBUDDY_CUSTOM_HEADERS 实证，其余无通道
         "codebuddy" => supported("unsupported", "unsupported", "supported", "unknown", "supported"),
         // gemini settings schema 无 temperature/topP/maxOutputTokens 键（bundle 实证），
         // generationConfig 仅出现在 API 请求构造路径，非用户配置通道
@@ -880,10 +897,17 @@ pub(crate) fn request_policy_support(agent: &str) -> RequestPolicySupportDto {
         // opencode config schema 实证：agent/model options 含 temperature/topP/maxOutputTokens/
         // reasoningEffort（枚举），provider options 支持 headers
         "opencode" => supported("supported", "supported", "supported", "supported", "supported"),
-        // kimi 新版合成通道 KIMI_MODEL_THINKING_EFFORT（matrix §6 二进制 strings 实证）
+        // kimi 新版合成通道 KIMI_MODEL_THINKING_EFFORT（2026-08-28 二进制实证：原样透传 +
+        // 小写归一，无闭集校验；仅 kimi 协议通道生效，anthropic/openai 通道静默忽略）
         "kimi" => supported("unknown", "unknown", "unknown", "supported", "unknown"),
         // qwen settings schema 无 temperature/topP/maxOutputTokens 键（bundle 实证，同 gemini 结论）
         "qwen" => supported("unsupported", "unsupported", "unsupported", "unknown", "unknown"),
+        // grok v1.0.5 二进制 + 随附 README 双实证：config.toml [model.*] 表 temperature/top_p/
+        // max_completion_tokens（注意键名）/reasoning_effort，headers 走 [model.*].extra_headers
+        // （静态值）与 env_http_headers（环境变量引用）；另有 CLI flag --reasoning-effort。
+        // 通道走 config 不走 env（GROK_* 无此类变量）——Ccode 侧 GROK_CONFIG overlay 接线留后续
+        "grok" => supported("supported", "supported", "supported", "supported", "supported"),
+        // cursor 本机未安装（2026-08-28），无法 strings 实证——保持 unknown 如实标注
         _ => supported("unknown", "unknown", "unknown", "unknown", "unknown"),
     }
 }
@@ -912,6 +936,7 @@ pub fn agent_capabilities() -> Vec<AgentCapabilitiesDto> {
                 SkillDist::CopyOnly(r) => SkillDistDto { mode: "copyOnly", reason: Some(r) },
             },
             request_policy: request_policy_support(s.id),
+            effort_options: effort_options(s.id),
         })
         .collect()
 }
@@ -1224,8 +1249,7 @@ mod tests {
             .find(|c| c.agent == "claude-code")
             .unwrap();
         assert!(claude_dto.set_global.supported && claude_dto.set_global.reason.is_none());
-        assert_eq!(claude_dto.request_policy.temperature, "unsupported");
-        assert_eq!(claude_dto.request_policy.max_output_tokens, "supported");
+        assert_eq!(claude_dto.request_policy.temperature, "supported");
         assert_eq!(claude_dto.request_policy.custom_headers, "supported");
         assert_eq!(claude_dto.skill_dist.mode, "symlinkOrCopy");
     }

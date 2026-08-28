@@ -176,11 +176,13 @@
    逐字段通道实证（2026-08-28，Windows 本机安装二进制 strings/配置 schema；实现见 `agent_specs.rs`
    `request_policy_support`，"supported" = 存在实证的用户可及通道能让该值进入真实请求，协议支持但 CLI
    无入口记 "unsupported"）：
-   - **claude-code**（v2.x exe）：temperature/top_p 无用户通道（`CLAUDE_CODE_AUTO_MODE_TEMPERATURE` 系内部
-     auto-mode 用途）→ unsupported；`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`CLAUDE_CODE_EFFORT_LEVEL`（同 `/effort`）、
-     `ANTHROPIC_CUSTOM_HEADERS` 实证 → supported。
-   - **codebuddy**（claude-code fork，env 前缀独立）：`CODEBUDDY_CODE_MAX_OUTPUT_TOKENS`、
-     `CODEBUDDY_CUSTOM_HEADERS` 实证；temperature/top_p 无通道；effort 未见入口 → unknown。
+   - **claude-code**（v2.x exe，全五项 supported）：temperature/top_p 经 `CLAUDE_CODE_EXTRA_BODY`
+     （env 解析为 JSON 对象后展开进 API 请求体，反编译实证）；`CLAUDE_CODE_MAX_OUTPUT_TOKENS`；
+     `CLAUDE_CODE_EFFORT_LEVEL`（同 `/effort`，档位闭集 low/medium/high/xhigh/max，保存期校验）；
+     `ANTHROPIC_CUSTOM_HEADERS`（`Name: value` 逐行）。
+   - **codebuddy**（claude-code fork，env 前缀独立，无 EXTRA_BODY/EFFORT 入口）：
+     `CODEBUDDY_CODE_MAX_OUTPUT_TOKENS`、`CODEBUDDY_CUSTOM_HEADERS` 实证 → supported；
+     temperature/top_p → unsupported；effort → unknown。
    - **codex**：temperature/top_p 仅存在于 wire schema（ModelPreferences），config 无键；
      二进制里的 `max_output_tokens` 全部是 exec pragma（工具输出截断）非模型请求 → unsupported；
      `model_reasoning_effort`（config 键）与 provider `http_headers`/`env_http_headers` 实证 → supported。
@@ -188,9 +190,37 @@
      （generationConfig 仅出现在 API 请求构造路径）→ unsupported；effort/headers 未核实 → unknown。
    - **opencode**：config schema 实证 agent/model options 含 temperature/topP/maxOutputTokens/
      reasoningEffort（枚举），provider options 支持 headers → 全 supported。
-   - **kimi**：新版合成通道 `KIMI_MODEL_THINKING_EFFORT`（§6 二进制 strings 实证）→ reasoning_effort
-     supported；余 unknown。
-   - cursor/grok：未核实 → 全 unknown。
+   - **kimi**（2026-08-28 二进制反编译实证）：`KIMI_MODEL_THINKING_EFFORT` 原样透传 + 小写归一，
+     env 路径无闭集校验（合法值随模型 catalog 漂移：low/medium/high/xhigh/max/on/off），但**仅
+     kimi 协议通道读取**，anthropic/openai 兼容通道静默忽略 → reasoning_effort supported；余 unknown。
+     配套：`KIMI_MODEL_ADAPTIVE_THINKING` 是布尔开关（true/false/1/0/yes/no/on/off），
+     `KIMI_MODEL_REASONING_KEY` 是 dialect 键名（known：reasoning_content/reasoning_details/reasoning）。
+   - **grok**（v1.0.5 二进制 + 随附 README 双实证，全五项 supported）：config.toml `[model.*]` 表
+     temperature/top_p/max_completion_tokens（注意键名非 max_output_tokens）/reasoning_effort
+     （档位 none/minimal/low/medium/high/xhigh/max，另有 CLI flag `--reasoning-effort`）；
+     headers 走 `[model.*].extra_headers`（静态值）/ `env_http_headers`（环境变量引用）。通道走
+     config/flag 不走 env（GROK_* 无此类变量）——Ccode 侧 GROK_CONFIG overlay 白名单是否含
+     `model` 表未经实机验证，接线留待实证。
+   - **cursor**：本机未安装（2026-08-28），无法 strings 实证——保持全 unknown，装机后补。
+   - cursor/grok 之外汇总：claude-code 全五项、codebuddy 两条、codex effort+headers、
+     gemini/qwen 前三项 unsupported、opencode 全五项、kimi effort。
+
+   接线状态（2026-08-28 第二批）：`launch_plan` 已接 claude-code（EXTRA_BODY 合并
+   temperature/top_p + MAX_OUTPUT_TOKENS + EFFORT_LEVEL + CUSTOM_HEADERS）、codebuddy
+   （CODEBUDDY_ 前缀两条）、codex（`-c model_reasoning_effort` + provider `env_http_headers`，
+   无 base_url 时 headers 无处挂载不注）、opencode（OPENCODE_CONFIG_CONTENT 的 model options 四项
+   + provider options.headers，headers 值拉起瞬间从进程环境解析——只在 env 内联合并不进
+   opencode_provider_json，防全局写入路径把密文落盘）、kimi（KIMI_MODEL_THINKING_EFFORT，仅
+   kimi 协议通道）。只注用户填了的字段；extra_env 仍最后注入可覆盖；官方账号拉起不注策略。
+   grok overlay 接线留待白名单实机验证。
+
+   网关体检探针（2026-08-28，`profile_validation.rs probe_gateway`）：绕过 CLI 直连端点发
+   max_tokens=16 的最小请求，观测裸响应回答「网关把请求怎么了」——① 基础请求（鉴权+模型存在）
+   ② 裸 stream:true 看回不回 SSE ③ 带请求策略参数再发流式（对比②定位「加参数就不流式」的降级）
+   ④ 自定义 Header 接受度（值从进程环境解析，未设置的变量名在结果里点名）。鉴权镜像 CLI 真实
+   形态（claude/codebuddy 走 Bearer 同 ANTHROPIC_AUTH_TOKEN 口径）；cursor 专有协议与 gemini
+   协议暂不支持探针。出站文案统一过 redact_sensitive_text。
+
    配套防护（2026-08-28）：Anthropic 通道 Base URL 以 `/v1` 结尾会被 SDK 拼成 `/v1/v1/messages` 404
    （实测），且「获取模型」走 OpenAI 风格 `{base}/models` 照样成功、极具迷惑性——profile 校验给提醒
    （不阻断保存），配置弹层 Base URL 行内同步警示。

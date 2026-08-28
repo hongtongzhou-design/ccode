@@ -30,6 +30,7 @@ import {
 } from "../components/PageFrame";
 import type {
   AgentCapabilitiesDto,
+  GatewayProbeDto,
   GlobalApplyResultDto,
   OfficialAccountStatusDto,
   Profile,
@@ -632,7 +633,16 @@ function ProfileModal({
                   return <label key={key} className="text-xs text-l3">{label}<span className="ml-1 text-[10px] text-l4">协议{support === "supported" ? "支持" : support === "unsupported" ? "不支持" : "未知"}</span><input className={fieldClass} type="number" min={key === "temperature" ? "0" : key === "topP" ? "0" : "1"} max={key === "temperature" ? "2" : key === "topP" ? "1" : undefined} step={key === "temperature" ? "0.1" : key === "topP" ? "0.05" : "1"} placeholder="默认" value={form.requestPolicy[key] ?? ""} onChange={(e) => { const n = parseOptionalNumber(e.target.value); if (n !== undefined) setForm({ ...form, requestPolicy: { ...form.requestPolicy, [key]: n } }); }} /></label>;
                 })}
               </div>
-              <label className="mt-2 block text-xs text-l3">reasoning effort<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.reasoningEffort === "supported" ? "支持" : agentCapabilities?.requestPolicy.reasoningEffort === "unsupported" ? "不支持" : "未知"}</span><input className={fieldClass} placeholder="如 low / medium / high" value={form.requestPolicy.reasoningEffort ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, reasoningEffort: e.target.value || null } })} /></label>
+              <label className="mt-2 block text-xs text-l3">reasoning effort<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.reasoningEffort === "supported" ? "支持" : agentCapabilities?.requestPolicy.reasoningEffort === "unsupported" ? "不支持" : "未知"}</span>{agentCapabilities?.effortOptions?.length ? (
+                <select className={fieldClass} value={form.requestPolicy.reasoningEffort ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, reasoningEffort: e.target.value || null } })}>
+                  <option value="">默认</option>
+                  {agentCapabilities.effortOptions.map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+              ) : (
+                <input className={fieldClass} placeholder="如 low / medium / high" value={form.requestPolicy.reasoningEffort ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, reasoningEffort: e.target.value || null } })} />
+              )}</label>
               <label className="mt-2 block text-xs text-l3">自定义 Header（Header 名=环境变量名）<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.customHeaders === "supported" ? "支持" : agentCapabilities?.requestPolicy.customHeaders === "unsupported" ? "不支持" : "未知"}</span><textarea className={`${fieldClass} h-16 font-mono text-xs`} placeholder="X-Provider-Region=MODEL_REGION\nX-Trace-Id=TRACE_ID" value={headerEnvText} onChange={(e) => setHeaderEnvText(e.target.value)} /></label>
               <p className="mt-1 text-[11px] text-l4">这是跨 Agent 的策略记录；当前不会伪造请求体，未适配字段不会注入。Header 值只填环境变量名，不保存密文。</p>
             </div>
@@ -1001,6 +1011,197 @@ function ValidationDialog({
   );
 }
 
+/** 网关体检弹层：绕过 CLI 直连端点的裸探针结果（probe_gateway），结构与 ValidationDialog 一致 */
+function ProbeDialog({
+  profile,
+  result,
+  running,
+  onClose,
+}: {
+  profile: Profile;
+  result: GatewayProbeDto | null;
+  running: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 ccode-fade"
+      onClick={onClose}
+    >
+      <section
+        className="w-full max-w-xl rounded-lg border border-field ccode-float-surface"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-medium text-l1">
+              网关体检 · {profile.name}
+            </h2>
+            <p className="mt-0.5 text-xs text-l4">
+              {result
+                ? `模型 ${result.model} · 探针只发 max_tokens=16 的 ping，成本可忽略`
+                : "探针只发 max_tokens=16 的 ping，成本可忽略"}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto h-8 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+          >
+            关闭
+          </button>
+        </header>
+        <div className="divide-y divide-hairline">
+          {result?.checks.length ? (
+            result.checks.map((item, index) => (
+              <div
+                key={index}
+                className="grid grid-cols-[24px_1fr] gap-2 px-4 py-3 text-xs"
+              >
+                <span className={validationTone(item.status)}>
+                  {item.status === "passed"
+                    ? "✓"
+                    : item.status === "failed"
+                      ? "✗"
+                      : "—"}
+                </span>
+                <div className="min-w-0 text-l3">
+                  <p className="break-words">{item.message}</p>
+                  {item.latencyMs != null && (
+                    <span className="mt-1 block font-mono text-l4">
+                      {item.latencyMs}ms
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="px-4 py-3 text-xs text-l3">
+              {running ? "正在探测…" : "等待探测"}
+            </div>
+          )}
+        </div>
+        <footer className="border-t border-hairline px-4 py-3 text-xs">
+          {running ? (
+            <span className="text-l3">正在逐项探测网关行为…</span>
+          ) : result ? (
+            <span className={result.ok ? "text-ok-text" : "text-err-text"}>
+              {result.ok ? "✓ 体检通过" : "✗ 存在问题项"}
+            </span>
+          ) : null}
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+/** 启动计划预览弹层：结构化展示二进制/参数/注入 env（含来源）/清理变量/初始指令注入，
+    密钥值永不显示 */
+function PreviewDialog({
+  profile,
+  result,
+  onClose,
+}: {
+  profile: Profile;
+  result: LaunchPlanPreviewDto;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 ccode-fade"
+      onClick={onClose}
+    >
+      <section
+        className="w-full max-w-xl rounded-lg border border-field ccode-float-surface"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-medium text-l1">
+              启动计划预览 · {profile.name}
+            </h2>
+            <p className="mt-0.5 text-xs text-l4">
+              启动时实际注入的完整参数与环境变量
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto h-8 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+          >
+            关闭
+          </button>
+        </header>
+        <div className="max-h-[60vh] space-y-4 overflow-y-auto px-4 py-3 text-xs">
+          <div>
+            <p className="mb-1 font-medium text-l2">二进制</p>
+            <p className="break-all font-mono text-l3">
+              {result.binary ?? "未找到"}
+            </p>
+          </div>
+          <div>
+            <p className="mb-1 font-medium text-l2">参数</p>
+            {result.args.length ? (
+              <ul className="space-y-0.5">
+                {result.args.map((arg, index) => (
+                  <li key={index} className="break-all font-mono text-l3">
+                    {arg}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-l4">（无）</p>
+            )}
+          </div>
+          <div>
+            <p className="mb-1 font-medium text-l2">注入环境变量</p>
+            {result.env.length ? (
+              <ul className="space-y-1">
+                {result.env.map((item, index) => (
+                  <li key={index} className="flex flex-wrap items-baseline gap-2">
+                    <span className="rounded border border-hairline px-1.5 py-0.5 font-mono text-[11px] text-l2">
+                      {item.name}
+                    </span>
+                    <span className="text-l4">{item.source}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-l4">（无）</p>
+            )}
+          </div>
+          <div>
+            <p className="mb-1 font-medium text-l2">清理继承变量</p>
+            {result.envRemove.length ? (
+              <div className="flex flex-wrap gap-1.5">
+                {result.envRemove.map((name) => (
+                  <span
+                    key={name}
+                    className="rounded border border-hairline px-1.5 py-0.5 font-mono text-[11px] text-l2"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="text-l4">（无）</p>
+            )}
+          </div>
+          <div>
+            <p className="mb-1 font-medium text-l2">初始指令注入</p>
+            <p className="text-l3">
+              {result.promptSupported ? "支持" : "不支持，需手动发送"}
+            </p>
+          </div>
+        </div>
+        <footer className="border-t border-hairline px-4 py-3 text-xs text-l4">
+          密钥值永不显示；同名变量后者覆盖前者（附加环境变量优先级最高）
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 /** 后端恒返回用量 DTO，零用量（全 0）不显示「用量与费用」入口 */
 function hasUsage(u: ProfileUsageDto | undefined): boolean {
   return !!u && (u.input > 0 || u.output > 0);
@@ -1271,6 +1472,17 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     profile: Profile;
     result: ProfileValidationDto | null;
     running: boolean;
+  } | null>(null);
+  // 网关体检弹层（probe_gateway）：结构与 validationDialog 一致
+  const [probeDialog, setProbeDialog] = useState<{
+    profile: Profile;
+    result: GatewayProbeDto | null;
+    running: boolean;
+  } | null>(null);
+  // 启动计划预览弹层（preview_launch_plan）：结构化展示，替代旧 alertDialog 堆文本
+  const [previewDialog, setPreviewDialog] = useState<{
+    profile: Profile;
+    result: LaunchPlanPreviewDto;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 操作成功提示（复制到其他 agent 等），几秒后自动消失
@@ -1605,19 +1817,26 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
 
+  async function onProbeGateway(p: Profile) {
+    setProbeDialog({ profile: p, result: null, running: true });
+    try {
+      const result = await invoke<GatewayProbeDto>("probe_gateway", {
+        profileId: p.id,
+        model: p.models[0] ?? null,
+      });
+      setProbeDialog({ profile: p, result, running: false });
+      setError(null);
+    } catch (e) {
+      setProbeDialog(null);
+      setError(String(e));
+    }
+  }
+
   async function onPreviewLaunchPlan(p: Profile) {
     try {
-      const preview = await invoke<LaunchPlanPreviewDto>("preview_launch_plan", { profileId: p.id, model: p.models[0] ?? null });
-      await alertDialog(
-        [
-          `二进制：${preview.binary ?? "未找到"}`,
-          `参数：${preview.args.length ? preview.args.join(" ") : "（无）"}`,
-          `注入环境变量：${preview.envNames.length ? preview.envNames.join("、") : "（无）"}`,
-          `清理继承变量：${preview.envRemove.length ? preview.envRemove.join("、") : "（无）"}`,
-          `初始指令注入：${preview.promptSupported ? "支持" : "不支持，需手动发送"}`,
-          "密钥值未显示；请求策略只作为声明保存，未适配字段不会被伪造注入。",
-        ].join("\n"),
-      );
+      const result = await invoke<LaunchPlanPreviewDto>("preview_launch_plan", { profileId: p.id, model: p.models[0] ?? null });
+      setPreviewDialog({ profile: p, result });
+      setError(null);
     } catch (e) {
       setError(String(e));
     }
@@ -2614,6 +2833,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
             },
             { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
             { label: "启动计划预览", onSelect: () => void onPreviewLaunchPlan(rowMenu.profile) },
+            { label: "网关体检", onSelect: () => void onProbeGateway(rowMenu.profile) },
             ...(rowMenu.profile.accountType === "api" && rowMenu.profile.hasKey
               ? [{ label: "清除本地密钥", onSelect: () => void onClearKey(rowMenu.profile) }]
               : []),
@@ -2680,6 +2900,23 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
           onClose={() => {
             if (!validationDialog.running) setValidationDialog(null);
           }}
+        />
+      )}
+      {probeDialog && (
+        <ProbeDialog
+          profile={probeDialog.profile}
+          result={probeDialog.result}
+          running={probeDialog.running}
+          onClose={() => {
+            if (!probeDialog.running) setProbeDialog(null);
+          }}
+        />
+      )}
+      {previewDialog && (
+        <PreviewDialog
+          profile={previewDialog.profile}
+          result={previewDialog.result}
+          onClose={() => setPreviewDialog(null)}
         />
       )}
       {applyDialog && (

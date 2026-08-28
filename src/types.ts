@@ -93,10 +93,18 @@ export interface LaunchPlanPreviewDto {
   agent: string;
   binary: string | null;
   args: string[];
-  envNames: string[];
+  /** 注入环境变量（名称 + 来源标注）；同键重复属正常（覆盖语义），原样列出 */
+  env: { name: string; source: string }[];
   envRemove: string[];
   promptSupported: boolean;
   requestPolicy: RequestPolicy;
+}
+
+/** 网关体检探针结果：绕过 CLI 直连端点的裸响应观测（流式/参数透传/Header 接受度） */
+export interface GatewayProbeDto {
+  ok: boolean;
+  model: string;
+  checks: ValidationCheckDto[];
 }
 
 export interface DetectResult {
@@ -902,6 +910,8 @@ export interface AgentCapabilitiesDto {
     reasoningEffort: "supported" | "unsupported" | "unknown";
     customHeaders: "supported" | "unsupported" | "unknown";
   };
+  /** reasoningEffort 已知档位集（非空 = 表单出下拉，空 = 自由输入） */
+  effortOptions: string[];
 }
 
 // ===== 定时雷达（src-tauri/src/scheduler.rs） =====

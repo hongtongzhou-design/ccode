@@ -56,14 +56,49 @@ pub struct LaunchPlan {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EnvPreviewDto {
+    pub name: String,
+    /// 来源标注（展示用启发式：命名即来源约定；同键多次出现 = 后者覆盖前者）
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LaunchPlanPreviewDto {
     pub agent: String,
     pub binary: Option<String>,
     pub args: Vec<String>,
-    pub env_names: Vec<String>,
+    pub env: Vec<EnvPreviewDto>,
     pub env_remove: Vec<String>,
     pub prompt_supported: bool,
     pub request_policy: crate::profiles::RequestPolicy,
+}
+
+/// 预览里的 env 来源启发式分类（只读展示，不影响注入本身）
+fn env_preview_source(name: &str, profile: &Profile) -> &'static str {
+    if profile.extra_env.contains_key(name) {
+        return "附加环境变量";
+    }
+    match name {
+        // apply_request_policy_env 与各臂策略注入的键全集
+        "CLAUDE_CODE_EXTRA_BODY"
+        | "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+        | "CLAUDE_CODE_EFFORT_LEVEL"
+        | "ANTHROPIC_CUSTOM_HEADERS"
+        | "CODEBUDDY_CODE_MAX_OUTPUT_TOKENS"
+        | "CODEBUDDY_CUSTOM_HEADERS"
+        | "KIMI_MODEL_THINKING_EFFORT" => return "请求策略",
+        _ => {}
+    }
+    if name.starts_with("ANTHROPIC_DEFAULT_") || name.starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION") {
+        return "模型选择器";
+    }
+    match name {
+        "ANTHROPIC_MODEL" | "CODEBUDDY_MODEL" | "KIMI_MODEL_NAME" => "默认模型",
+        n if n.contains("BASE_URL") || n == "CURSOR_API_ENDPOINT" => "端点",
+        n if n.contains("API_KEY") || n.contains("AUTH_TOKEN") => "密钥注入",
+        _ => "内置注入",
+    }
 }
 
 /// 返回不含密钥值的启动计划，供配置页诊断和跨平台问题排查使用。
@@ -82,12 +117,20 @@ pub fn preview_launch_plan(
         .into_iter()
         .map(|arg| crate::sessions::redact_sensitive_text(&arg))
         .collect();
+    let env = plan
+        .env
+        .into_iter()
+        .map(|(name, _)| {
+            let source = env_preview_source(&name, &profile).to_string();
+            EnvPreviewDto { name, source }
+        })
+        .collect();
     Ok(LaunchPlanPreviewDto {
         agent: profile.agent.clone(),
         binary: resolve_binary(binary_for(&profile.agent).unwrap_or(""))
             .map(|p| p.to_string_lossy().into_owned()),
         args,
-        env_names: plan.env.into_iter().map(|(name, _)| name).collect(),
+        env,
         env_remove: plan.env_remove,
         prompt_supported: !plan.prompt_dropped,
         request_policy: profile.request_policy,
@@ -185,6 +228,66 @@ fn detect(spec: &AgentSpec) -> (Option<String>, Option<String>) {
 /// model 为启动时选中的模型（调用方已兜底为 profile 模型列表的首个）。
 /// env 名/固定参数等差异化数据全部来自 AgentSpec（agent_specs.rs）；
 /// 只有无法纯数据化的注入形态保留分支逻辑（SpecialLaunch 各变体）。
+/// 请求策略注入（仅 api 模式；官方账号拉起在上方已 early-return，不会走到这里）。
+/// 只接 matrix §9 第 8 条实证过的通道，未实证 agent/字段一律不注（fail-loud 由能力表
+/// 与校验提示承担）。getenv 解析 Header 值（Profile 只存变量名引用，不落密文）；
+/// 变量不存在或为空时跳过该条 Header。
+fn apply_request_policy_env(
+    plan: &mut LaunchPlan,
+    agent: &str,
+    policy: &crate::profiles::RequestPolicy,
+    getenv: &dyn Fn(&str) -> Option<String>,
+) {
+    // Header 名=环境变量名 → "Name: value" 逐行（claude/codebuddy 同格式，\n 连接，二进制实证）
+    let inject_headers = |plan: &mut LaunchPlan, env_key: &str| {
+        let lines: Vec<String> = policy
+            .header_env
+            .iter()
+            .filter_map(|(h, var)| {
+                getenv(var).filter(|v| !v.is_empty()).map(|v| format!("{h}: {v}"))
+            })
+            .collect();
+        if !lines.is_empty() {
+            plan.env.push((env_key.into(), lines.join("\n")));
+        }
+    };
+    match agent {
+        "claude-code" => {
+            // temperature/top_p 无独立 env：CLAUDE_CODE_EXTRA_BODY 解析为 JSON 对象后展开进
+            // API 请求体（v2.x 二进制反编译实证），只写用户填了的字段
+            let mut extra = serde_json::Map::new();
+            if let Some(v) = policy.temperature {
+                extra.insert("temperature".into(), serde_json::json!(v));
+            }
+            if let Some(v) = policy.top_p {
+                extra.insert("top_p".into(), serde_json::json!(v));
+            }
+            if !extra.is_empty() {
+                plan.env.push((
+                    "CLAUDE_CODE_EXTRA_BODY".into(),
+                    serde_json::Value::Object(extra).to_string(),
+                ));
+            }
+            if let Some(v) = policy.max_output_tokens {
+                plan.env.push(("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), v.to_string()));
+            }
+            if let Some(v) = &policy.reasoning_effort {
+                plan.env.push(("CLAUDE_CODE_EFFORT_LEVEL".into(), v.clone()));
+            }
+            inject_headers(plan, "ANTHROPIC_CUSTOM_HEADERS");
+        }
+        "codebuddy" => {
+            // claude-code fork 但 env 前缀独立（v2.132.0 实测 ANTHROPIC_* 无效）；
+            // 无 EXTRA_BODY/EFFORT 入口，只接两条实证通道
+            if let Some(v) = policy.max_output_tokens {
+                plan.env.push(("CODEBUDDY_CODE_MAX_OUTPUT_TOKENS".into(), v.to_string()));
+            }
+            inject_headers(plan, "CODEBUDDY_CUSTOM_HEADERS");
+        }
+        _ => {}
+    }
+}
+
 pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) -> LaunchPlan {
     let mut plan = LaunchPlan::default();
     // 官方账号模式：不注入 base_url/密钥（用 CLI 自己的账号登录），仅按需注入选中模型；
@@ -287,6 +390,21 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     // 这里放开沙箱内联网（只影响 workspace-write 档，read-only 下该键被忽略）
                     plan.args.push("-c".into());
                     plan.args.push("sandbox_workspace_write.network_access=true".into());
+                    // 请求策略（实证通道）：effort = config 键 model_reasoning_effort；
+                    // Header = provider env_http_headers（值是环境变量名引用，不落密文）。
+                    // 后者依赖内联 provider 定义存在，无 base_url 时没有 ccode provider 可挂
+                    if let Some(effort) = profile.request_policy.reasoning_effort.as_deref() {
+                        plan.args.push("-c".into());
+                        plan.args.push(format!(r#"model_reasoning_effort="{effort}""#));
+                    }
+                    if profile.base_url.is_some() {
+                        for (header, env_name) in &profile.request_policy.header_env {
+                            plan.args.push("-c".into());
+                            plan.args.push(format!(
+                                r#"model_providers.ccode.env_http_headers."{header}"="{env_name}""#
+                            ));
+                        }
+                    }
                 }
                 SpecialLaunch::OpenCodeInlineConfig { config_env, no_autoupdate_env } => {
                     // OpenCode 没有通用 key/baseURL 环境变量：用 OPENCODE_CONFIG_CONTENT 内联配置注入，
@@ -295,6 +413,47 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     let mut config = serde_json::json!({ "provider": { "ccode": provider } });
                     if let Some(m) = model {
                         config["model"] = serde_json::json!(format!("ccode/{m}"));
+                    }
+                    // 请求策略（config schema 实证：model options 含 temperature/topP/
+                    // maxOutputTokens/reasoningEffort；provider options 支持 headers）。
+                    // 在这里合并而不进 opencode_provider_json：该函数与全局写入共用，
+                    // headers 值是拉起瞬间从进程环境解析的密文，绝不能走落盘路径
+                    let policy = &profile.request_policy;
+                    let mut model_opts = serde_json::Map::new();
+                    if let Some(v) = policy.temperature {
+                        model_opts.insert("temperature".into(), serde_json::json!(v));
+                    }
+                    if let Some(v) = policy.top_p {
+                        model_opts.insert("topP".into(), serde_json::json!(v));
+                    }
+                    if let Some(v) = policy.max_output_tokens {
+                        model_opts.insert("maxOutputTokens".into(), serde_json::json!(v));
+                    }
+                    if let Some(v) = policy.reasoning_effort.as_deref() {
+                        model_opts.insert("reasoningEffort".into(), serde_json::json!(v));
+                    }
+                    if !model_opts.is_empty() {
+                        if let Some(models) =
+                            config["provider"]["ccode"]["models"].as_object_mut()
+                        {
+                            for entry in models.values_mut() {
+                                entry["options"] = serde_json::Value::Object(model_opts.clone());
+                            }
+                        }
+                    }
+                    let headers: serde_json::Map<String, serde_json::Value> = policy
+                        .header_env
+                        .iter()
+                        .filter_map(|(h, var)| {
+                            std::env::var(var)
+                                .ok()
+                                .filter(|v| !v.is_empty())
+                                .map(|v| (h.clone(), serde_json::json!(v)))
+                        })
+                        .collect();
+                    if !headers.is_empty() {
+                        config["provider"]["ccode"]["options"]["headers"] =
+                            serde_json::Value::Object(headers);
                     }
                     plan.env.push(((*config_env).into(), config.to_string()));
                     // 防止自更新在启动时替换掉我们检测到的二进制
@@ -348,6 +507,14 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                                 }
                                 plan.env.push(("KIMI_MODEL_CAPABILITIES".into(), caps));
                             }
+                        } else if let Some(effort) = &profile.request_policy.reasoning_effort {
+                            // KIMI_MODEL_THINKING_EFFORT（2026-08-28 二进制实证：原样透传 +
+                            // 小写归一，env 路径无闭集校验；仅 kimi 协议通道读取，
+                            // 兼容协议通道会被静默忽略所以干脆不注）
+                            plan.env.push((
+                                "KIMI_MODEL_THINKING_EFFORT".into(),
+                                effort.to_lowercase(),
+                            ));
                         }
                     }
                     if let Some(key) = &key {
@@ -374,6 +541,10 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
             },
         }
     }
+    // 请求策略注入：按能力表实证通道落地（当前 claude-code/codebuddy），extra_env 仍可最后覆盖
+    apply_request_policy_env(&mut plan, &profile.agent, &profile.request_policy, &|k| {
+        std::env::var(k).ok()
+    });
     // 附加环境变量放在最后：CommandBuilder 重复 env 后者生效，用户可借此覆盖 adapter 内置值
     for (k, v) in &profile.extra_env {
         plan.env.push((k.clone(), v.clone()));
@@ -2029,6 +2200,173 @@ mod tests {
         assert!(plan
             .env
             .contains(&("ANTHROPIC_MODEL".into(), "claude-sonnet-4".into())));
+    }
+
+    #[test]
+    fn claude_request_policy_injects_verified_channels() {
+        let mut p = profile("claude-code", None);
+        p.request_policy.temperature = Some(0.7);
+        p.request_policy.top_p = Some(0.9);
+        p.request_policy.max_output_tokens = Some(8192);
+        p.request_policy.reasoning_effort = Some("high".into());
+        p.request_policy
+            .header_env
+            .insert("X-Region".into(), "MODEL_REGION".into());
+        p.request_policy
+            .header_env
+            .insert("X-Miss".into(), "MISSING_VAR".into());
+        let mut plan = LaunchPlan::default();
+        apply_request_policy_env(&mut plan, "claude-code", &p.request_policy, &|k| {
+            (k == "MODEL_REGION").then(|| "cn-1".to_string())
+        });
+        // temperature/top_p 合并进同一个 EXTRA_BODY JSON（只含填了的字段）
+        let body = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == "CLAUDE_CODE_EXTRA_BODY")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["temperature"], 0.7);
+        assert_eq!(v["top_p"], 0.9);
+        assert!(plan
+            .env
+            .contains(&("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), "8192".into())));
+        assert!(plan
+            .env
+            .contains(&("CLAUDE_CODE_EFFORT_LEVEL".into(), "high".into())));
+        // 解析不到的环境变量跳过该 header，不注空值
+        assert!(plan
+            .env
+            .contains(&("ANTHROPIC_CUSTOM_HEADERS".into(), "X-Region: cn-1".into())));
+    }
+
+    #[test]
+    fn codebuddy_request_policy_uses_own_prefix_and_skips_unverified() {
+        let mut p = profile("codebuddy", None);
+        p.request_policy.temperature = Some(0.7); // 无 EXTRA_BODY 通道：不注
+        p.request_policy.max_output_tokens = Some(4096);
+        p.request_policy.reasoning_effort = Some("high".into()); // unknown：不注
+        p.request_policy
+            .header_env
+            .insert("X-Region".into(), "MODEL_REGION".into());
+        let mut plan = LaunchPlan::default();
+        apply_request_policy_env(&mut plan, "codebuddy", &p.request_policy, &|k| {
+            (k == "MODEL_REGION").then(|| "cn-1".to_string())
+        });
+        assert_eq!(plan.env.len(), 2);
+        assert!(plan
+            .env
+            .contains(&("CODEBUDDY_CODE_MAX_OUTPUT_TOKENS".into(), "4096".into())));
+        assert!(plan
+            .env
+            .contains(&("CODEBUDDY_CUSTOM_HEADERS".into(), "X-Region: cn-1".into())));
+    }
+
+    #[test]
+    fn request_policy_not_injected_for_unverified_agents_or_official() {
+        // 未实证 agent（codex）：任何策略字段都不产生 env
+        let mut p = profile("codex", None);
+        p.request_policy.temperature = Some(0.2);
+        let plan = launch_plan(&p, None, None);
+        assert!(!plan.env.iter().any(|(k, _)| {
+            k.contains("EXTRA_BODY")
+                || k.contains("EFFORT")
+                || k.contains("CUSTOM_HEADERS")
+                || k.contains("MAX_OUTPUT_TOKENS")
+        }));
+        // 官方账号模式：early-return 路径不经过策略注入
+        let mut p = profile("claude-code", None);
+        p.account_type = crate::profiles::AccountType::Official;
+        p.request_policy.max_output_tokens = Some(8192);
+        let plan = launch_plan(&p, None, None);
+        assert!(!plan
+            .env
+            .iter()
+            .any(|(k, _)| k == "CLAUDE_CODE_MAX_OUTPUT_TOKENS"));
+    }
+
+    #[test]
+    fn extra_env_overrides_policy_injection() {
+        // 用户 extra_env 与策略注入同键时排在最后（CommandBuilder 后者生效）
+        let mut p = profile("claude-code", None);
+        p.request_policy.temperature = Some(0.7);
+        p.extra_env
+            .insert("CLAUDE_CODE_EXTRA_BODY".into(), "{\"temperature\":0.1}".into());
+        let plan = launch_plan(&p, None, None);
+        let last = plan
+            .env
+            .iter()
+            .rposition(|(k, _)| k == "CLAUDE_CODE_EXTRA_BODY")
+            .unwrap();
+        assert_eq!(plan.env[last].1, "{\"temperature\":0.1}");
+    }
+
+    #[test]
+    fn codex_request_policy_injects_effort_and_env_headers() {
+        let mut p = profile("codex", Some("https://relay.example.com/v1"));
+        p.request_policy.reasoning_effort = Some("high".into());
+        p.request_policy.temperature = Some(0.2); // 无通道：不注
+        p.request_policy
+            .header_env
+            .insert("X-Region".into(), "MODEL_REGION".into());
+        let plan = launch_plan(&p, None, Some("gpt-x"));
+        assert!(plan
+            .args
+            .iter()
+            .any(|a| a == r#"model_reasoning_effort="high""#));
+        assert!(plan
+            .args
+            .iter()
+            .any(|a| a == r#"model_providers.ccode.env_http_headers."X-Region"="MODEL_REGION""#));
+        // 无 base_url = 无内联 provider 可挂，headers 不注；effort 是全局键照常
+        let mut p2 = profile("codex", None);
+        p2.request_policy
+            .header_env
+            .insert("X-Region".into(), "MODEL_REGION".into());
+        let plan2 = launch_plan(&p2, None, None);
+        assert!(!plan2.args.iter().any(|a| a.contains("env_http_headers")));
+    }
+
+    #[test]
+    fn opencode_request_policy_merges_into_inline_config() {
+        let mut p = profile("opencode", Some("https://relay.example.com/v1"));
+        p.models = vec!["m1".into()];
+        p.request_policy.temperature = Some(0.3);
+        p.request_policy.max_output_tokens = Some(4096);
+        p.request_policy.reasoning_effort = Some("low".into());
+        let plan = launch_plan(&p, None, Some("m1"));
+        let raw = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .unwrap()
+            .1
+            .clone();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let opts = &v["provider"]["ccode"]["models"]["m1"]["options"];
+        assert_eq!(opts["temperature"], 0.3);
+        assert_eq!(opts["maxOutputTokens"], 4096);
+        assert_eq!(opts["reasoningEffort"], "low");
+        // headers 引用的环境变量未设置时不进配置（不落空值/密文）
+        assert!(v["provider"]["ccode"]["options"].get("headers").is_none());
+    }
+
+    #[test]
+    fn kimi_request_policy_effort_only_on_kimi_channel() {
+        let mut p = profile("kimi", Some("https://api.moonshot.cn"));
+        p.request_policy.reasoning_effort = Some("High".into());
+        let plan = launch_plan(&p, None, Some("kimi-k3"));
+        assert!(plan
+            .env
+            .contains(&("KIMI_MODEL_THINKING_EFFORT".into(), "high".into())));
+        // anthropic 兼容通道该 env 被 CLI 静默忽略——干脆不注
+        p.protocol = Some("anthropic".into());
+        let plan = launch_plan(&p, None, Some("kimi-k3"));
+        assert!(!plan
+            .env
+            .iter()
+            .any(|(k, _)| k == "KIMI_MODEL_THINKING_EFFORT"));
     }
 
     #[test]

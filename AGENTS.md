@@ -183,6 +183,9 @@ src-tauri/src/
                              #   set_global（cursor/grok 不支持）/ mcp_write（grok 只读，请用 grok mcp add）/
                              #   skill_dist（cursor/grok 强制 copy）——global_config/mcp.rs/skills.rs 全部改查表，
                              #   前端经 agent_capabilities command 读表置灰）；
+                             #   请求策略通道表 request_policy_support（逐字段 supported/unsupported/unknown，
+                             #   只认二进制/配置 schema 实证，调研录 matrix §9 第 8 条；agents.rs
+                             #   apply_request_policy_env 按表注入启动 env，未实证一律不注）；
                              #   resolve_binary 兜底候选目录 binary_candidate_dirs 同在本模块（macOS 含 /Library/TeX/texbin）
   agents.rs                  # 适配器分发入口 + resolve_binary 二进制解析（GUI 短 PATH 兜底）+ readonly_launch_args（聊想法只读注入）；
                              # codex 内联 provider 参数 codex_inline_provider_args 单一出处（启动注入与外部恢复命令共用：
@@ -199,7 +202,11 @@ src-tauri/src/
                              # limit.output 兜底 8192（1.18 起 schema 必填）；宁缺毋滥（收错比漏报有害）；
                              # 文件型加载器 cfg!(test) 下不读本机真实缓存（链语义由 chain_field 单测覆盖）
   profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥；删除时同步清设置引用（settings::clear_profile_refs）
-  profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）
+  profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）；
+                             # 网关体检探针 probe_gateway（绕过 CLI 直连端点发 max_tokens=16 最小请求：
+                             # 基础鉴权/裸流式 SSE 检测/带策略参数对比降级定位/自定义 Header 接受度，
+                             # matrix §9 第 8 条）；请求策略字段校验（范围、claude effort 闭集、
+                             # Header 名禁引号冒号、环境变量名 POSIX 字符集）
   global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）；写成功即记
                              # settings.active_global_profiles（配置页「全局生效」徽标数据源），恢复备份后清除；
                              # 恢复分两档——恢复备份（最近批次，每 tag 轮换留 5 份）与恢复初始状态
