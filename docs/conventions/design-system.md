@@ -123,7 +123,10 @@
 - **字号阶梯令牌化**：正文阶梯 `text-micro`(11/15) → `text-xs`(12) → `text-sm`(14) → `text-base`(16)，**禁 `text-[Npx]` 任意值**；
   语义分工：micro = badge/时间戳/副注释（11px 是可读下限，不再用 10px），xs = 次级说明，sm = 正文/列表行，base = 页面标题。
   终端工作台整体提高一档（`.terminal-workbench` 覆写 micro→12、xs→13）。同类信息必须用同一档，禁止同页相邻出现两档灰字。
-  Windows 额外保持 `html` 根字号 16px、`body` 默认字号 14px，并优先使用 `Segoe UI Variable`（中文回退雅黑）；浅色主题仅在 Windows 下压深 l3/l4 两档以补偿 DirectWrite 的小字号灰化。以上覆盖不得作用于 macOS/Linux。
+  Windows 额外保持 `html` 根字号 16px、`body` 默认字号 14px，并优先使用 `Segoe UI Variable`（中文回退雅黑）。
+  浅色主题文字梯队按平台压深 l3/l4 两档（正文 l2、标题 l1 保持主题原值）：Windows 压最多（补偿 DirectWrite 小字号灰化），
+  macOS 取原值→Windows 值 65% 的中间档（CoreText 字干较重，但原始 l3/l4 在 canvas 上仅 4.0/2.2:1 不过 WCAG AA；
+  中间档 l3 ≥ 4.7、l4 ≥ 3.1，数值由 tests/theme-contrast.test.ts 锁定），Linux 保持主题原值。
   **已定现状，勿动（v3.90 否决）**：`App.css` 的全局 `button/input { font: inherit }` 未包 cascade layer，
   优先级高于 Tailwind v4 工具类——按钮上的 `text-*` 类实际不生效，**全站按钮按继承字号渲染**。
   曾尝试包进 `@layer base` 修复，全站按钮整体变小一档，用户实测「还不如之前」否决，已回退。

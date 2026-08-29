@@ -397,6 +397,39 @@
   --color-l4: #687282;
 }
 
+/* macOS 浅色主题：CoreText 字干渲染比 DirectWrite 重，不需要 Windows 那么深，
+   但原始 l3/l4 在 canvas 上只有 4.0/2.2:1（WCAG AA 不过），取原值→Windows 值
+   之间 65% 的中间档：l3 ≥ 4.7:1（正文过 AA）、l4 ≥ 3.1:1（最浅辅助档过 AA 大字线）。
+   数值由 tests/theme-contrast.test.ts 锁定，改动需同步。 */
+[data-platform="mac"][data-theme="midnight-light"] {
+  --color-l3: #62677a;
+  --color-l4: #7d8294;
+}
+[data-platform="mac"][data-theme="terracotta-light"] {
+  --color-l3: #6e6761;
+  --color-l4: #867e77;
+}
+[data-platform="mac"][data-theme="ayu-light"] {
+  --color-l3: #626976;
+  --color-l4: #81868f;
+}
+[data-platform="mac"][data-theme="mocha-light"] {
+  --color-l3: #64677c;
+  --color-l4: #828596;
+}
+[data-platform="mac"][data-theme="neutral-light"] {
+  --color-l3: #626262;
+  --color-l4: #7e7e7e;
+}
+[data-platform="mac"][data-theme="dracula-light"] {
+  --color-l3: #676076;
+  --color-l4: #827c8f;
+}
+[data-platform="mac"][data-theme="shadcn-light"] {
+  --color-l3: #5b6479;
+  --color-l4: #798393;
+}
+
 /* 浅色滚动条：白拇指不可见，换黑色半透明 */
 [data-theme$="-light"] ::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, 0.16);

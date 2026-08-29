@@ -157,3 +157,39 @@ test("原生表单控件配色跟随主题，浅色下不被全局 dark 覆盖",
     "不要通过改变根节点选择器影响 macOS/Linux 的其它主题变量",
   );
 });
+
+/** 取平台覆写块里的令牌值：[data-platform="mac"][data-theme="id"] { ... } */
+function platformTokens(
+  platform: string,
+  themeId: string,
+): Record<string, string> {
+  const src = new RegExp(
+    `\\[data-platform="${platform}"\\]\\[data-theme="${themeId}"\\] \\{(.*?)\\n\\}`,
+    "s",
+  ).exec(css)?.[1];
+  assert.ok(src, `找不到平台覆写块 ${platform}/${themeId}`);
+  const out: Record<string, string> = {};
+  for (const m of src.matchAll(/--color-([a-z0-9-]+):\s*(#[0-9a-fA-F]{6})/g))
+    out[m[1]] = m[2];
+  return out;
+}
+
+test("macOS 浅色中间档：l3 过 AA 正文线、l4 过 AA 大字线", () => {
+  for (const id of LIGHT_THEMES) {
+    const base = tokens(id);
+    const mac = platformTokens("mac", id);
+    const win = platformTokens("windows", id);
+    // 中间档必须落在「原值 < mac < Windows 值」的压深方向上
+    for (const k of ["l3", "l4"]) {
+      assert.ok(
+        lum(mac[k]) < lum(base[k]) && lum(mac[k]) > lum(win[k]),
+        `${id}: mac ${k} 不在原值与 Windows 值之间`,
+      );
+    }
+    // l3 ≥ 4.5:1（WCAG AA 正文）；l4 ≥ 3:1（AA 大字线，最浅辅助档的设计底线）
+    const c3 = contrast(mac.l3, base.canvas);
+    const c4 = contrast(mac.l4, base.canvas);
+    assert.ok(c3 >= 4.5, `${id}: mac l3/canvas 对比度仅 ${c3.toFixed(2)}:1`);
+    assert.ok(c4 >= 3.0, `${id}: mac l4/canvas 对比度仅 ${c4.toFixed(2)}:1`);
+  }
+});
