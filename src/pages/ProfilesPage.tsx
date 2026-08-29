@@ -9,6 +9,7 @@ import { PRESETS, NO_PRESET_REASON } from "../presets";
 import { upstreamNoteText, upstreamCommand } from "../upstream-note";
 import { copyTargets } from "../profile-copy";
 import { MODEL_SWITCH } from "../model-switch";
+import { groupModelsByVendor, vendorOf } from "../model-vendors";
 import { interactiveUpdatePrefill } from "../update-routing";
 import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
@@ -30,14 +31,18 @@ import {
 } from "../components/PageFrame";
 import type {
   AgentCapabilitiesDto,
+  GatewayProbeDto,
   GlobalApplyResultDto,
   OfficialAccountStatusDto,
   Profile,
   ProfileInput,
   ModelCapabilityDto,
+  FetchModelsResultDto,
   ProfileUsageDto,
   ProfileValidationDto,
   ValidationCheckDto,
+  RequestPolicy,
+  LaunchPlanPreviewDto,
 } from "../types";
 
 function ProfileModal({
@@ -70,12 +75,28 @@ function ProfileModal({
     extraEnvText: Object.entries(initial?.extraEnv ?? {})
       .map(([k, v]) => `${k}=${v}`)
       .join("\n"),
+    requestPolicy: {
+      temperature: initial?.requestPolicy?.temperature ?? null,
+      topP: initial?.requestPolicy?.topP ?? null,
+      maxOutputTokens: initial?.requestPolicy?.maxOutputTokens ?? null,
+      reasoningEffort: initial?.requestPolicy?.reasoningEffort ?? null,
+      headerEnv: initial?.requestPolicy?.headerEnv ?? {},
+    } as RequestPolicy,
     apiKey: "",
   });
-  const [modelInput, setModelInput] = useState("");
+  const [headerEnvText, setHeaderEnvText] = useState(
+    Object.entries(initial?.requestPolicy?.headerEnv ?? {})
+      .map(([k, v]) => `${k}=${v}`)
+      .join("\n"),
+  );
   const [fetching, setFetching] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<string[] | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  // 获取模型的厂商分组面板：开关 / 筛选词 / 展开的厂商组
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerFilter, setPickerFilter] = useState("");
+  const [openVendors, setOpenVendors] = useState<ReadonlySet<string>>(new Set());
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
     ok: boolean;
@@ -84,6 +105,21 @@ function ProfileModal({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [capabilities, setCapabilities] = useState<ModelCapabilityDto[]>([]);
+  const [agentCapabilities, setAgentCapabilities] = useState<AgentCapabilitiesDto | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<AgentCapabilitiesDto[]>("agent_capabilities")
+      .then((items) => {
+        if (!cancelled) setAgentCapabilities(items.find((item) => item.agent === form.agent) ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setAgentCapabilities(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [form.agent]);
 
   useEffect(() => {
     let cancelled = false;
@@ -116,30 +152,70 @@ function ProfileModal({
     return out;
   }
 
-  function addModel() {
-    const m = modelInput.trim();
-    if (m && !form.models.includes(m)) {
-      setForm({ ...form, models: [...form.models, m] });
+  /** 解析 Header 名=环境变量名；值只允许是变量名，不接受密文。 */
+  function parseHeaderEnvLines(text: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const line of text.split("\n")) {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const eq = t.indexOf("=");
+      if (eq <= 0) continue;
+      out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
     }
-    setModelInput("");
+    return out;
   }
 
-  /** 验证端点+密钥连通性，显示延迟与模型数 */
+  /** 请求策略数字输入：空 = null；非法中间态（NaN，如 "-"/"1e"）返回 undefined 不落表单，
+      避免 NaN 存进 profiles.json 时 serde_json 序列化直接失败 */
+  function parseOptionalNumber(raw: string): number | null | undefined {
+    if (raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : undefined;
+  }
+
+  /** 模型槽位编辑：i 越界 = 尾部空槽首击，先追加再就位（后续击键走更新分支） */
+  function setModelSlot(i: number, v: string) {
+    if (i < form.models.length) {
+      const next = [...form.models];
+      next[i] = v;
+      setForm({ ...form, models: next });
+    } else {
+      setForm({ ...form, models: [...form.models, v] });
+    }
+  }
+
+  function removeModelSlot(i: number) {
+    setForm({ ...form, models: form.models.filter((_, j) => j !== i) });
+  }
+
+  /** 从获取面板添加：优先填进第一个空槽，没有去尾部追加 */
+  function addModelToList(m: string) {
+    const v = m.trim();
+    if (!v || form.models.some((x) => x.trim() === v)) return;
+    const emptyIdx = form.models.findIndex((x) => !x.trim());
+    const next = [...form.models];
+    if (emptyIdx >= 0) next[emptyIdx] = v;
+    else next.push(v);
+    setForm({ ...form, models: next });
+  }
+
+  /** 验证端点+密钥连通性，显示延迟与模型数；连通测试必须走真实网络（force 跳过缓存） */
   async function testConnection() {
     setTesting(true);
     setTestResult(null);
     const started = Date.now();
     try {
-      const list = await invoke<string[]>("fetch_models", {
+      const res = await invoke<FetchModelsResultDto>("fetch_models", {
         baseUrl: form.baseUrl.trim(),
         apiKey: form.apiKey || null,
         profileId: initial?.id ?? null,
         agentId: form.agent,
         protocol: form.protocol,
+        force: true,
       });
       setTestResult({
         ok: true,
-        text: `✓ 连通 · ${list.length} 个模型 · ${Date.now() - started}ms`,
+        text: `✓ 连通 · ${res.models.length} 个模型 · ${Date.now() - started}ms`,
       });
     } catch (e) {
       setTestResult({ ok: false, text: `✗ ${String(e)}` });
@@ -148,22 +224,26 @@ function ProfileModal({
     }
   }
 
-  /** 从 Base URL 拉取模型列表；密钥用表单新填的，编辑时留空则用钥匙串已存的 */
-  async function fetchModels() {
+  /** 从 Base URL 拉取模型列表；密钥用表单新填的，编辑时留空则用钥匙串已存的。
+      默认走后端磁盘缓存（大网关全量列表 10s 级），force=true 强制刷新 */
+  async function fetchModels(force = false) {
     setFetching(true);
     setFetchError(null);
     try {
-      const list = await invoke<string[]>("fetch_models", {
+      const res = await invoke<FetchModelsResultDto>("fetch_models", {
         baseUrl: form.baseUrl.trim(),
         apiKey: form.apiKey || null,
         profileId: initial?.id ?? null,
         agentId: form.agent,
         protocol: form.protocol,
+        force,
       });
-      setFetchedModels(list);
+      setFetchedModels(res.models);
+      setFetchedAt(res.fetchedAt);
     } catch (e) {
       setFetchError(String(e));
       setFetchedModels(null);
+      setFetchedAt(null);
     } finally {
       setFetching(false);
     }
@@ -181,8 +261,13 @@ function ProfileModal({
       protocol: AGENT_PROTOCOLS[form.agent] ? form.protocol : null,
       // 官方账号：认证交给 CLI 登录，不落端点/密钥
       baseUrl: form.accountType === "official" ? "" : form.baseUrl.trim(),
-      models: form.models,
+      // 槽位化编辑允许空串/重复中间态，保存时归一：去空白、去空、去重（保序）
+      models: [...new Set(form.models.map((m) => m.trim()).filter(Boolean))],
       extraEnv: parseEnvLines(form.extraEnvText),
+      requestPolicy: {
+        ...form.requestPolicy,
+        headerEnv: parseHeaderEnvLines(headerEnvText),
+      },
       apiKey: form.accountType === "official" ? null : form.apiKey || null,
     };
     try {
@@ -385,6 +470,12 @@ function ProfileModal({
             </button>
           </div>
         </label>
+        {(form.agent === "claude-code" || form.agent === "codebuddy" || form.protocol === "anthropic") &&
+          form.baseUrl.trim().replace(/\/+$/, "").endsWith("/v1") && (
+          <p className="-mt-2 mb-3 text-xs text-warn-text">
+            Anthropic 客户端会自动在 Base URL 后拼 /v1/messages，以 /v1 结尾将打成 /v1/v1/messages 报 404（此时「测试」仍能成功，不代表运行可用）——请去掉末尾的 /v1
+          </p>
+        )}
         {testResult && (
           <p
             className={`-mt-2 mb-3 text-xs ${testResult.ok ? "text-ok-text" : "text-err-text"}`}
@@ -414,7 +505,8 @@ function ProfileModal({
           {(() => {
             const sw = MODEL_SWITCH[form.agent];
             if (!sw) return null;
-            const over = sw.max != null && form.models.length > sw.max;
+            const filled = form.models.filter((m) => m.trim()).length;
+            const over = sw.max != null && filled > sw.max;
             return (
               <p
                 title={sw.hint}
@@ -423,7 +515,7 @@ function ProfileModal({
                 {sw.max != null
                   ? `最多 ${sw.max} 个模型可进入 CLI 选择器`
                   : "模型数量不限"}
-                {over && `；当前超出 ${form.models.length - (sw.max ?? 0)} 个`}
+                {over && `；当前超出 ${filled - (sw.max ?? 0)} 个`}
               </p>
             );
           })()}
@@ -432,7 +524,7 @@ function ProfileModal({
           <div className="mb-2 flex items-center gap-2">
             <button
               type="button"
-              onClick={fetchModels}
+              onClick={() => fetchModels()}
               disabled={fetching || !form.baseUrl.trim()}
               title={
                 form.baseUrl.trim()
@@ -444,30 +536,115 @@ function ProfileModal({
               {fetching ? "获取中…" : "获取模型"}
             </button>
             {fetchedModels && fetchedModels.length > 0 && (
-              <select
-                className={fieldClass}
-                value=""
-                onChange={(e) => {
-                  const m = e.target.value;
-                  if (m && !form.models.includes(m)) {
-                    setForm({ ...form, models: [...form.models, m] });
+              <button
+                type="button"
+                onClick={() => {
+                  // 首次打开时展开「已配置首个模型」所在的厂商组
+                  if (!pickerOpen && openVendors.size === 0) {
+                    const first = form.models.find((x) => x.trim());
+                    if (first) setOpenVendors(new Set([vendorOf(first)]));
                   }
+                  setPickerOpen(!pickerOpen);
                 }}
+                className={`${fieldClass} flex items-center justify-between gap-2 text-left`}
               >
-                <option value="" disabled>
+                <span className="text-l3">
                   从 {fetchedModels.length} 个模型中选择…
-                </option>
-                {fetchedModels.map((m) => (
-                  <option key={m} value={m}>
-                    {form.models.includes(m) ? `${m}（已添加）` : m}
-                  </option>
-                ))}
-              </select>
+                </span>
+                <span className="text-l4">{pickerOpen ? "▴" : "▾"}</span>
+              </button>
+            )}
+            {/* 缓存命中时给出刷新口 + 拉取时间，大网关全量列表 10s 级，没必要每次现拉 */}
+            {fetchedModels && fetchedModels.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => fetchModels(true)}
+                  disabled={fetching || !form.baseUrl.trim()}
+                  title="重新拉取（不用缓存）"
+                  className={`${rowActionClass} shrink-0`}
+                >
+                  ↻
+                </button>
+                {fetchedAt && (
+                  <span className="shrink-0 whitespace-nowrap text-xs text-l4">
+                    缓存 · {fmtFetchedAt(fetchedAt)}
+                  </span>
+                )}
+              </>
             )}
             {fetchedModels && fetchedModels.length === 0 && (
               <span className="text-xs text-l4">接口返回 0 个模型</span>
             )}
           </div>
+          {/* 厂商分组折叠面板：大网关 400+ 模型平铺没法选；筛选时全部强制展开 */}
+          {pickerOpen && fetchedModels && fetchedModels.length > 0 && (
+            <div className="mb-2 max-h-64 overflow-y-auto rounded-md bg-inset p-1">
+              <input
+                autoFocus
+                className={`${searchFieldClass} mb-1 w-full`}
+                placeholder="筛选模型名…"
+                value={pickerFilter}
+                onChange={(e) => setPickerFilter(e.target.value)}
+              />
+              {(() => {
+                const groups = groupModelsByVendor(fetchedModels, pickerFilter);
+                if (groups.length === 0) {
+                  return (
+                    <p className="px-2 py-1 text-xs text-l4">没有匹配的模型</p>
+                  );
+                }
+                return groups.map((g) => {
+                  const open =
+                    pickerFilter.trim() !== "" || openVendors.has(g.vendor);
+                  return (
+                    <div key={g.vendor}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenVendors((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(g.vendor)) next.delete(g.vendor);
+                            else next.add(g.vendor);
+                            return next;
+                          })
+                        }
+                        className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left text-xs font-medium text-l2 hover:bg-hover"
+                      >
+                        <span className="w-3 shrink-0 text-l4">
+                          {open ? "▾" : "▸"}
+                        </span>
+                        {g.vendor}
+                        <span className="text-micro text-l4">
+                          {g.models.length}
+                        </span>
+                      </button>
+                      {open &&
+                        g.models.map((m) => {
+                          const added = form.models.some((x) => x.trim() === m);
+                          return (
+                            <button
+                              key={m}
+                              type="button"
+                              disabled={added}
+                              onClick={() => addModelToList(m)}
+                              className="flex w-full items-center justify-between gap-2 rounded-sm py-1 pl-7 pr-2 text-left font-mono text-micro text-l2 hover:bg-hover disabled:opacity-40"
+                            >
+                              <span className="truncate">{m}</span>
+                              {added && (
+                                <span className="shrink-0 text-l4">
+                                  已添加
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          )}
           {fetchError && (
             <p className="mb-2 text-xs text-err-text">{fetchError}</p>
           )}
@@ -475,70 +652,92 @@ function ProfileModal({
           )}
           {/* 空模型是个静默陷阱（pty.rs）：models 为空时**完全不注入**模型环境变量，
               CLI 用自己的默认值——用户看到的现象就是「切了没反应」。API 类配置才提示，
-              官方账号本就由 CLI 自己决定模型 */}
-          {form.models.length === 0 && form.accountType !== "official" && (
-            <p className="mb-2 text-micro text-warn-text">
-              没填模型，会用 CLI 自己的默认值。
-            </p>
-          )}
-          {form.models.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-1.5">
-              {form.models.map((m, i) => (
-                <span
-                  key={m}
-                  title={(() => {
-                    const c = capabilities.find((item) => item.model === m);
-                    if (!c) return undefined;
-                    const flags = [
-                      c.thinking ? "思考" : null,
-                      c.tools === true ? "工具" : c.tools === false ? "无工具" : "工具未知",
-                      c.vision === true ? "图像" : c.vision === false ? "无图像" : "图像未知",
-                    ].filter(Boolean);
-                    return `${flags.join(" · ")} · 上下文 ${(c.context / 1024).toFixed(0)}K`;
-                  })()}
-                  className="flex items-center gap-1 rounded-sm bg-inset px-2 py-0.5 text-xs text-l2"
-                >
-                  {m}
-                  {i === 0 && <span className="text-l1">默认</span>}
+              官方账号本就由 CLI 自己决定模型；空串槽位不算已填 */}
+          {form.models.every((m) => !m.trim()) &&
+            form.accountType !== "official" && (
+              <p className="mb-2 text-micro text-warn-text">
+                没填模型，会用 CLI 自己的默认值。
+              </p>
+            )}
+          {/* 行式槽位列表：已有模型一行一个（首个非空 = 默认），空槽 = 待填输入框。
+              空槽数跟随 MODEL_SWITCH 选择器容量（max）；超容量仍可经「仍要添加」补充
+              （超出的不进 CLI 选择器，但启动栏/手输可用，见 model-switch.ts 语义） */}
+          {(() => {
+            const max = MODEL_SWITCH[form.agent]?.max ?? null;
+            const filled = form.models.filter((m) => m.trim()).length;
+            const slots = [...form.models];
+            if (max == null) {
+              if (slots.length === 0 || slots[slots.length - 1].trim() !== "")
+                slots.push("");
+            } else {
+              const emptyCount = slots.length - filled;
+              for (let i = emptyCount; i < Math.max(0, max - filled); i++)
+                slots.push("");
+            }
+            const firstFilled = slots.findIndex((m) => m.trim());
+            return (
+              <div className="space-y-0.5">
+                {slots.map((m, i) => (
+                  <div
+                    key={i}
+                    title={(() => {
+                      const c = capabilities.find(
+                        (item) => item.model === m.trim(),
+                      );
+                      if (!m.trim() || !c) return undefined;
+                      const flags = [
+                        c.thinking ? "思考" : null,
+                        c.tools === true
+                          ? "工具"
+                          : c.tools === false
+                            ? "无工具"
+                            : "工具未知",
+                        c.vision === true
+                          ? "图像"
+                          : c.vision === false
+                            ? "无图像"
+                            : "图像未知",
+                      ].filter(Boolean);
+                      return `${flags.join(" · ")} · 上下文 ${(c.context / 1024).toFixed(0)}K`;
+                    })()}
+                    className="group flex items-center gap-2 rounded-sm px-2 py-0.5 hover:bg-hover"
+                  >
+                    <span className="w-4 shrink-0 text-right text-micro text-l4">
+                      {i + 1}
+                    </span>
+                    <input
+                      className="min-w-0 flex-1 bg-transparent py-0.5 font-mono text-xs text-l2 outline-none placeholder:font-sans placeholder:text-l4"
+                      placeholder="模型名，如 gpt-5.6-sol"
+                      value={m}
+                      onChange={(e) => setModelSlot(i, e.target.value)}
+                    />
+                    {i === firstFilled && (
+                      <span className="shrink-0 text-micro text-l1">默认</span>
+                    )}
+                    <button
+                      type="button"
+                      aria-label={m.trim() ? `移除 ${m}` : "清空此行"}
+                      onClick={() => removeModelSlot(i)}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center text-l4 opacity-0 hover:text-err-text focus-visible:opacity-100 group-hover:opacity-100"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                {max != null && filled >= max && (
                   <button
                     type="button"
-                    aria-label={`移除 ${m}`}
                     onClick={() =>
-                      setForm({
-                        ...form,
-                        models: form.models.filter((x) => x !== m),
-                      })
+                      setForm({ ...form, models: [...form.models, ""] })
                     }
-                    className="text-l4 hover:text-err-text"
+                    className="px-2 py-1 text-xs text-l3 hover:text-l1"
                   >
-                    ×
+                    ＋ 仍要添加（选择器只显示前 {max} 个）
                   </button>
-                </span>
-              ))}
-            </div>
-          )}
-          <div className="flex gap-2">
-            <input
-              className={fieldClass}
-              placeholder="输入模型名后回车添加，如 claude-sonnet-4"
-              value={modelInput}
-              onChange={(e) => setModelInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  addModel();
-                }
-              }}
-            />
-            <button
-              type="button"
-              onClick={addModel}
-              disabled={!modelInput.trim()}
-              className={`${rowActionClass} w-16 shrink-0 whitespace-nowrap`}
-            >
-              添加
-            </button>
-          </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
         <details className="mb-4 border-t border-hairline pt-3">
           <summary className="cursor-pointer select-none text-xs font-medium text-l2">
@@ -563,6 +762,28 @@ function ProfileModal({
                 </select>
               </label>
             )}
+            <div className="mb-3 rounded border border-hairline p-2">
+              <p className="mb-2 text-xs font-medium text-l2">请求策略声明（按 Agent 能力决定是否生效）</p>
+              <div className="grid grid-cols-3 gap-2">
+                {([[
+                  "temperature", "temperature", "temperature"], ["topP", "top_p", "topP"], ["maxOutputTokens", "max output", "maxOutputTokens"]] as const).map(([key, label, capability]) => {
+                  const support = agentCapabilities?.requestPolicy[capability];
+                  return <label key={key} className="text-xs text-l3">{label}<span className="ml-1 text-[10px] text-l4">协议{support === "supported" ? "支持" : support === "unsupported" ? "不支持" : "未知"}</span><input className={fieldClass} type="number" min={key === "temperature" ? "0" : key === "topP" ? "0" : "1"} max={key === "temperature" ? "2" : key === "topP" ? "1" : undefined} step={key === "temperature" ? "0.1" : key === "topP" ? "0.05" : "1"} placeholder="默认" value={form.requestPolicy[key] ?? ""} onChange={(e) => { const n = parseOptionalNumber(e.target.value); if (n !== undefined) setForm({ ...form, requestPolicy: { ...form.requestPolicy, [key]: n } }); }} /></label>;
+                })}
+              </div>
+              <label className="mt-2 block text-xs text-l3">reasoning effort<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.reasoningEffort === "supported" ? "支持" : agentCapabilities?.requestPolicy.reasoningEffort === "unsupported" ? "不支持" : "未知"}</span>{agentCapabilities?.effortOptions?.length ? (
+                <select className={fieldClass} value={form.requestPolicy.reasoningEffort ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, reasoningEffort: e.target.value || null } })}>
+                  <option value="">默认</option>
+                  {agentCapabilities.effortOptions.map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+              ) : (
+                <input className={fieldClass} placeholder="如 low / medium / high" value={form.requestPolicy.reasoningEffort ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, reasoningEffort: e.target.value || null } })} />
+              )}</label>
+              <label className="mt-2 block text-xs text-l3">自定义 Header（Header 名=环境变量名）<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.customHeaders === "supported" ? "支持" : agentCapabilities?.requestPolicy.customHeaders === "unsupported" ? "不支持" : "未知"}</span><textarea className={`${fieldClass} h-16 font-mono text-xs`} placeholder="X-Provider-Region=MODEL_REGION\nX-Trace-Id=TRACE_ID" value={headerEnvText} onChange={(e) => setHeaderEnvText(e.target.value)} /></label>
+              <p className="mt-1 text-[11px] text-l4">这是跨 Agent 的策略记录；当前不会伪造请求体，未适配字段不会注入。Header 值只填环境变量名，不保存密文。</p>
+            </div>
             <label className="block text-sm">
               <span className="mb-1 block text-xs text-l3">
                 附加环境变量（每行 KEY=VALUE，可覆盖内置值）
@@ -659,6 +880,15 @@ const OFFICIAL_LOGOUT_HINT: Record<string, string> = {
   kimi: "TUI 内 /logout",
   qwen: "TUI 内 /auth",
 };
+
+/** 缓存拉取时间显示：当天只显示 HH:MM，跨天带 M/D */
+function fmtFetchedAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (d.toDateString() === new Date().toDateString()) return hm;
+  return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
 
 function displayHost(baseUrl: string): string {
   const value = baseUrl.trim();
@@ -922,6 +1152,197 @@ function ValidationDialog({
                 : "✗ 存在未通过项目，请按上方信息修复后重试"}
             </span>
           ) : null}
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+/** 网关体检弹层：绕过 CLI 直连端点的裸探针结果（probe_gateway），结构与 ValidationDialog 一致 */
+function ProbeDialog({
+  profile,
+  result,
+  running,
+  onClose,
+}: {
+  profile: Profile;
+  result: GatewayProbeDto | null;
+  running: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 ccode-fade"
+      onClick={onClose}
+    >
+      <section
+        className="w-full max-w-xl rounded-lg border border-field ccode-float-surface"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-medium text-l1">
+              网关体检 · {profile.name}
+            </h2>
+            <p className="mt-0.5 text-xs text-l4">
+              {result
+                ? `模型 ${result.model} · 探针只发 max_tokens=16 的 ping，成本可忽略`
+                : "探针只发 max_tokens=16 的 ping，成本可忽略"}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto h-8 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+          >
+            关闭
+          </button>
+        </header>
+        <div className="divide-y divide-hairline">
+          {result?.checks.length ? (
+            result.checks.map((item, index) => (
+              <div
+                key={index}
+                className="grid grid-cols-[24px_1fr] gap-2 px-4 py-3 text-xs"
+              >
+                <span className={validationTone(item.status)}>
+                  {item.status === "passed"
+                    ? "✓"
+                    : item.status === "failed"
+                      ? "✗"
+                      : "—"}
+                </span>
+                <div className="min-w-0 text-l3">
+                  <p className="break-words">{item.message}</p>
+                  {item.latencyMs != null && (
+                    <span className="mt-1 block font-mono text-l4">
+                      {item.latencyMs}ms
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="px-4 py-3 text-xs text-l3">
+              {running ? "正在探测…" : "等待探测"}
+            </div>
+          )}
+        </div>
+        <footer className="border-t border-hairline px-4 py-3 text-xs">
+          {running ? (
+            <span className="text-l3">正在逐项探测网关行为…</span>
+          ) : result ? (
+            <span className={result.ok ? "text-ok-text" : "text-err-text"}>
+              {result.ok ? "✓ 体检通过" : "✗ 存在问题项"}
+            </span>
+          ) : null}
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+/** 启动计划预览弹层：结构化展示二进制/参数/注入 env（含来源）/清理变量/初始指令注入，
+    密钥值永不显示 */
+function PreviewDialog({
+  profile,
+  result,
+  onClose,
+}: {
+  profile: Profile;
+  result: LaunchPlanPreviewDto;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 ccode-fade"
+      onClick={onClose}
+    >
+      <section
+        className="w-full max-w-xl rounded-lg border border-field ccode-float-surface"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-medium text-l1">
+              启动计划预览 · {profile.name}
+            </h2>
+            <p className="mt-0.5 text-xs text-l4">
+              启动时实际注入的完整参数与环境变量
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto h-8 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+          >
+            关闭
+          </button>
+        </header>
+        <div className="max-h-[60vh] space-y-4 overflow-y-auto px-4 py-3 text-xs">
+          <div>
+            <p className="mb-1 font-medium text-l2">二进制</p>
+            <p className="break-all font-mono text-l3">
+              {result.binary ?? "未找到"}
+            </p>
+          </div>
+          <div>
+            <p className="mb-1 font-medium text-l2">参数</p>
+            {result.args.length ? (
+              <ul className="space-y-0.5">
+                {result.args.map((arg, index) => (
+                  <li key={index} className="break-all font-mono text-l3">
+                    {arg}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-l4">（无）</p>
+            )}
+          </div>
+          <div>
+            <p className="mb-1 font-medium text-l2">注入环境变量</p>
+            {result.env.length ? (
+              <ul className="space-y-1">
+                {result.env.map((item, index) => (
+                  <li key={index} className="flex flex-wrap items-baseline gap-2">
+                    <span className="rounded border border-hairline px-1.5 py-0.5 font-mono text-[11px] text-l2">
+                      {item.name}
+                    </span>
+                    <span className="text-l4">{item.source}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-l4">（无）</p>
+            )}
+          </div>
+          <div>
+            <p className="mb-1 font-medium text-l2">清理继承变量</p>
+            {result.envRemove.length ? (
+              <div className="flex flex-wrap gap-1.5">
+                {result.envRemove.map((name) => (
+                  <span
+                    key={name}
+                    className="rounded border border-hairline px-1.5 py-0.5 font-mono text-[11px] text-l2"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="text-l4">（无）</p>
+            )}
+          </div>
+          <div>
+            <p className="mb-1 font-medium text-l2">初始指令注入</p>
+            <p className="text-l3">
+              {result.promptSupported ? "支持" : "不支持，需手动发送"}
+            </p>
+          </div>
+        </div>
+        <footer className="border-t border-hairline px-4 py-3 text-xs text-l4">
+          密钥值永不显示；同名变量后者覆盖前者（附加环境变量优先级最高）
         </footer>
       </section>
     </div>
@@ -1198,6 +1619,17 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     profile: Profile;
     result: ProfileValidationDto | null;
     running: boolean;
+  } | null>(null);
+  // 网关体检弹层（probe_gateway）：结构与 validationDialog 一致
+  const [probeDialog, setProbeDialog] = useState<{
+    profile: Profile;
+    result: GatewayProbeDto | null;
+    running: boolean;
+  } | null>(null);
+  // 启动计划预览弹层（preview_launch_plan）：结构化展示，替代旧 alertDialog 堆文本
+  const [previewDialog, setPreviewDialog] = useState<{
+    profile: Profile;
+    result: LaunchPlanPreviewDto;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 操作成功提示（复制到其他 agent 等），几秒后自动消失
@@ -1528,6 +1960,31 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       setError(null);
     } catch (e) {
       setValidationDialog(null);
+      setError(String(e));
+    }
+  }
+
+  async function onProbeGateway(p: Profile) {
+    setProbeDialog({ profile: p, result: null, running: true });
+    try {
+      const result = await invoke<GatewayProbeDto>("probe_gateway", {
+        profileId: p.id,
+        model: p.models[0] ?? null,
+      });
+      setProbeDialog({ profile: p, result, running: false });
+      setError(null);
+    } catch (e) {
+      setProbeDialog(null);
+      setError(String(e));
+    }
+  }
+
+  async function onPreviewLaunchPlan(p: Profile) {
+    try {
+      const result = await invoke<LaunchPlanPreviewDto>("preview_launch_plan", { profileId: p.id, model: p.models[0] ?? null });
+      setPreviewDialog({ profile: p, result });
+      setError(null);
+    } catch (e) {
       setError(String(e));
     }
   }
@@ -2522,6 +2979,8 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                 }),
             },
             { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
+            { label: "启动计划预览", onSelect: () => void onPreviewLaunchPlan(rowMenu.profile) },
+            { label: "网关体检", onSelect: () => void onProbeGateway(rowMenu.profile) },
             ...(rowMenu.profile.accountType === "api" && rowMenu.profile.hasKey
               ? [{ label: "清除本地密钥", onSelect: () => void onClearKey(rowMenu.profile) }]
               : []),
@@ -2588,6 +3047,23 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
           onClose={() => {
             if (!validationDialog.running) setValidationDialog(null);
           }}
+        />
+      )}
+      {probeDialog && (
+        <ProbeDialog
+          profile={probeDialog.profile}
+          result={probeDialog.result}
+          running={probeDialog.running}
+          onClose={() => {
+            if (!probeDialog.running) setProbeDialog(null);
+          }}
+        />
+      )}
+      {previewDialog && (
+        <PreviewDialog
+          profile={previewDialog.profile}
+          result={previewDialog.result}
+          onClose={() => setPreviewDialog(null)}
         />
       )}
       {applyDialog && (

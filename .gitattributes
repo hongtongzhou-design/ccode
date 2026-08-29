@@ -1,0 +1,27 @@
+# Keep repository text files stable across Windows, macOS and Linux.
+# Developers may use core.autocrlf, but GitHub diffs and merges use LF.
+* text=auto eol=lf
+
+# Explicit source/config/document formats used by Ccode.
+*.rs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.jsonc text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.svg text eol=lf
+
+# Do not inspect or normalize binary assets.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary

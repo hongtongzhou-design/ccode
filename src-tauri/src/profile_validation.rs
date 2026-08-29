@@ -112,6 +112,52 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
             return Err(format!("附加环境变量名不合法: {key:?}"));
         }
     }
+    let policy = &profile.request_policy;
+    if let Some(v) = policy.temperature {
+        if !v.is_finite() || !(0.0..=2.0).contains(&v) {
+            return Err("temperature 必须是 0 到 2 之间的有限数字".into());
+        }
+    }
+    if let Some(v) = policy.top_p {
+        if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+            return Err("topP 必须是 0 到 1 之间的有限数字".into());
+        }
+    }
+    if matches!(policy.max_output_tokens, Some(0)) {
+        return Err("maxOutputTokens 必须大于 0".into());
+    }
+    if policy.reasoning_effort.as_deref().is_some_and(|v| v.trim().is_empty()) {
+        return Err("reasoningEffort 不能为空".into());
+    }
+    // claude-code 的 effort 档位有实证闭集（/effort 与 CLAUDE_CODE_EFFORT_LEVEL 同口径，
+    // matrix §1 v2.1.212 strings 实证）——保存期拦掉无效值，免得启动才被 CLI 拒
+    if profile.agent == "claude-code" {
+        if let Some(v) = policy.reasoning_effort.as_deref() {
+            const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+            if !EFFORTS.contains(&v) {
+                return Err(format!(
+                    "Claude Code 的 reasoningEffort 只接受 {}",
+                    EFFORTS.join(" / ")
+                ));
+            }
+        }
+    }
+    for (header, env_name) in &policy.header_env {
+        // header 名禁冒号/引号/控制符（引号会撞 codex TOML 内联键的引号段）
+        if header.trim().is_empty() || header.contains(['\r', '\n', ':', '"']) {
+            return Err(format!("模型 Header 名不合法: {header:?}"));
+        }
+        // 环境变量名收 POSIX 字符集：值会进 codex -c 的 TOML 字符串与 shell，
+        // 放宽字符集会留出注入面
+        let valid_env_name = env_name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && env_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid_env_name {
+            return Err(format!("模型 Header 环境变量名不合法: {env_name:?}"));
+        }
+    }
     if profile.no_auth {
         const AUTH_KEYS: &[&str] = &[
             "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
@@ -127,8 +173,48 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
         return Err("附加环境变量值不得包含 NUL 字符".into());
     }
     let mut notes = Vec::new();
+    let support = crate::agent_specs::request_policy_support(&profile.agent);
+    let policy = &profile.request_policy;
+    if policy.temperature.is_some()
+        || policy.top_p.is_some()
+        || policy.max_output_tokens.is_some()
+        || policy.reasoning_effort.is_some()
+        || !policy.header_env.is_empty()
+    {
+        notes.push("请求策略按能力表逐字段处理：有实证通道的字段在启动时注入对应环境变量（当前已接线 claude-code/codebuddy），不支持或未知的字段仅保存声明、不会伪造注入".into());
+    }
+    if policy.temperature.is_some() && support.temperature != "supported" {
+        notes.push(format!("当前 Agent 对 temperature 的协议支持状态为 {}，不会由 Ccode 强行注入", support.temperature));
+    }
+    if policy.top_p.is_some() && support.top_p != "supported" {
+        notes.push(format!("当前 Agent 对 topP 的协议支持状态为 {}，不会由 Ccode 强行注入", support.top_p));
+    }
+    if policy.max_output_tokens.is_some() && support.max_output_tokens != "supported" {
+        notes.push(format!("当前 Agent 对 maxOutputTokens 的协议支持状态为 {}，不会由 Ccode 强行注入", support.max_output_tokens));
+    }
+    if policy.reasoning_effort.is_some() && support.reasoning_effort != "supported" {
+        notes.push(format!("当前 Agent 对 reasoningEffort 的协议支持状态为 {}，不会由 Ccode 强行注入", support.reasoning_effort));
+    }
+    if !policy.header_env.is_empty() && support.custom_headers != "supported" {
+        notes.push(format!("当前 Agent 对模型自定义 Header 的协议支持状态为 {}，Header 仅记录为环境变量引用", support.custom_headers));
+    }
     if profile.models.is_empty() {
         notes.push("未指定模型，将使用 CLI 自身默认值".into());
+    }
+    // Anthropic 协议通道的 SDK 会在 Base URL 后自动拼 /v1/messages：base 以 /v1 结尾会打成
+    // /v1/v1/messages 404（2026-08-28 实测），且「获取模型」（OpenAI 风格 {base}/models）照样成功，
+    // 极具迷惑性——只提醒不阻断
+    let anthropic_wire = matches!(profile.agent.as_str(), "claude-code" | "codebuddy")
+        || profile.protocol.as_deref() == Some("anthropic");
+    if anthropic_wire {
+        if let Some(base) = profile.base_url.as_deref() {
+            if base.trim_end_matches('/').ends_with("/v1") {
+                notes.push(
+                    "Base URL 以 /v1 结尾：Anthropic 客户端会自动拼 /v1/messages，实际请求将变成 /v1/v1/messages 报 404（此时「获取模型」仍能成功，不代表运行可用）——请去掉末尾的 /v1"
+                        .into(),
+                );
+            }
+        }
     }
     Ok(notes)
 }
@@ -539,6 +625,317 @@ async fn api_check(profile: &Profile, key: Option<&str>) -> ValidationCheckDto {
     }
 }
 
+// ===== 网关体检探针（2026-08-28）：绕过 CLI 直连端点发最小请求，观测裸响应 =====
+// 回答「网关把请求怎么了」：流式还是整段、请求策略参数被接受还是被拒/触发降级。
+// 探针只发 max_tokens=16 的 ping，单次成本可忽略；它证明的是「网关对这种请求的行为」，
+// 是 CLI 实际流量的强代理证据（要 100% 还原 CLI 流量只能靠 CLI 自身 debug 日志，不属于本探针）。
+// 密钥不出本模块；所有出站文案经 check() 统一脱敏。
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayProbeDto {
+    pub ok: bool,
+    pub model: String,
+    pub checks: Vec<ValidationCheckDto>,
+}
+
+/// 对话端点 URL：与 models_url 同口径——base 已含 /v1（gemini /v1beta）直接拼资源名，
+/// 否则补协议默认版本段
+fn chat_url(base: &str, kind: ApiKind) -> Result<reqwest::Url, String> {
+    let mut url = reqwest::Url::parse(base).map_err(|e| format!("API 地址格式错误: {e}"))?;
+    let path = url.path().trim_end_matches('/');
+    let (version, resource) = match kind {
+        ApiKind::Anthropic => ("v1", "messages"),
+        ApiKind::OpenAi => ("v1", "chat/completions"),
+        ApiKind::Gemini => return Err("Gemini 协议暂不支持探针".into()),
+    };
+    let next = if path.ends_with("/v1") || path.ends_with("/v1beta") {
+        format!("{path}/{resource}")
+    } else if path.is_empty() {
+        format!("/{version}/{resource}")
+    } else {
+        format!("{path}/{version}/{resource}")
+    };
+    url.set_path(&next);
+    Ok(url)
+}
+
+/// 探针请求体：stream 控制流式；with_policy 时把 profile 请求策略按协议字段名带上。
+/// anthropic 的 effort 没有线协议字段，CLI 内部翻译成 thinking 块——探针同样翻译成
+/// thinking.enabled（budget 1024，max_tokens 同步抬到 2048 满足 > budget 的协议要求）
+fn probe_body(
+    kind: ApiKind,
+    model: &str,
+    policy: &profiles::RequestPolicy,
+    with_policy: bool,
+    stream: bool,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": "ping" }],
+        "stream": stream,
+    });
+    let max_tokens = if with_policy {
+        policy.max_output_tokens.unwrap_or(16)
+    } else {
+        16
+    };
+    match kind {
+        ApiKind::Anthropic => {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
+        _ => {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
+    }
+    if with_policy {
+        if let Some(v) = policy.temperature {
+            body["temperature"] = serde_json::json!(v);
+        }
+        if let Some(v) = policy.top_p {
+            body["top_p"] = serde_json::json!(v);
+        }
+        if let Some(effort) = policy.reasoning_effort.as_deref() {
+            match kind {
+                ApiKind::Anthropic => {
+                    body["thinking"] =
+                        serde_json::json!({ "type": "enabled", "budget_tokens": 1024 });
+                    if max_tokens <= 1024 {
+                        body["max_tokens"] = serde_json::json!(2048);
+                    }
+                    let _ = effort; // 档位本身不进 anthropic 请求体，只体现为 thinking 开关
+                }
+                _ => {
+                    body["reasoning_effort"] = serde_json::json!(effort);
+                }
+            }
+        }
+    }
+    body
+}
+
+struct ProbeOutcome {
+    status: reqwest::StatusCode,
+    /// content-type 含 event-stream
+    sse: bool,
+    content_type: String,
+    /// 非 2xx 时的响应尾部（截断）
+    error_tail: String,
+}
+
+async fn send_probe(request: reqwest::RequestBuilder) -> Result<ProbeOutcome, String> {
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let sse = content_type.contains("event-stream");
+    // SSE 成功响应不读全文（流会挂住）；只在非 2xx 时取错误尾部
+    let error_tail = if status.is_success() {
+        String::new()
+    } else {
+        tail_chars(
+            response
+                .text()
+                .await
+                .unwrap_or_default()
+                .trim(),
+            300,
+        )
+    };
+    Ok(ProbeOutcome { status, sse, content_type, error_tail })
+}
+
+#[tauri::command]
+pub async fn probe_gateway(
+    store: tauri::State<'_, ProfileStore>,
+    profile_id: String,
+    model: Option<String>,
+) -> Result<GatewayProbeDto, String> {
+    let profile = store.get(&profile_id)?;
+    if profile.agent == "cursor" {
+        return Err("Cursor 为专有协议，不支持网关体检".into());
+    }
+    let kind = api_kind(&profile);
+    if matches!(kind, ApiKind::Gemini) {
+        return Err("Gemini 协议暂不支持网关体检".into());
+    }
+    let model = model
+        .or_else(|| profile.models.first().cloned())
+        .filter(|m| !m.trim().is_empty())
+        .ok_or("请先在配置里填写模型")?;
+    let key = profiles::get_key(&profile_id)?;
+    let base = profile
+        .base_url
+        .as_deref()
+        .unwrap_or_else(|| default_base(&profile, kind))
+        .to_string();
+    let url = chat_url(&base, kind)?;
+    let client = reqwest::Client::builder()
+        .timeout(API_TIMEOUT)
+        .build()
+        .map_err(|e| format!("创建 API 客户端失败: {e}"))?;
+
+    // 鉴权镜像 CLI 真实形态：Ccode 给 claude 注入的是 ANTHROPIC_AUTH_TOKEN（Bearer），
+    // 探针同口径；codebuddy 协议 Anthropic 兼容同走 Bearer
+    let build = |body: serde_json::Value, with_headers: bool| {
+        let mut req = client.post(url.clone()).json(&body);
+        if let Some(k) = key.as_deref().filter(|k| !k.trim().is_empty()) {
+            req = match kind {
+                ApiKind::Anthropic => req
+                    .bearer_auth(k)
+                    .header("anthropic-version", "2023-06-01"),
+                _ => req.bearer_auth(k),
+            };
+        }
+        if with_headers {
+            // Header 名=环境变量名引用，值从进程环境解析（与启动注入同口径）
+            for (header, env_name) in &profile.request_policy.header_env {
+                if let Ok(value) = std::env::var(env_name) {
+                    if !value.is_empty() {
+                        req = req.header(header, value);
+                    }
+                }
+            }
+        }
+        req
+    };
+
+    let policy = &profile.request_policy;
+    let has_policy = policy.temperature.is_some()
+        || policy.top_p.is_some()
+        || policy.max_output_tokens.is_some()
+        || policy.reasoning_effort.is_some();
+    let mut checks = Vec::new();
+
+    // ① 基础请求：鉴权 + 模型存在（不流式、不带策略）
+    let started = Instant::now();
+    let basic = send_probe(build(probe_body(kind, &model, policy, false, false), false)).await;
+    let basic_ok = matches!(&basic, Ok(o) if o.status.is_success());
+    checks.push(match &basic {
+        Ok(o) if o.status.is_success() => check(
+            "passed",
+            "基础请求",
+            Some(started.elapsed().as_millis()),
+        ),
+        Ok(o) => check(
+            "failed",
+            format!("基础请求 HTTP {}：{}", o.status, o.error_tail),
+            Some(started.elapsed().as_millis()),
+        ),
+        Err(e) => check("failed", format!("基础请求：{e}"), Some(started.elapsed().as_millis())),
+    });
+    if !basic_ok {
+        // 基础请求挂了，流式/参数探测无意义
+        for label in ["流式响应", "请求策略参数", "自定义 Header"] {
+            checks.push(check("skipped", format!("{label}：基础请求未通过，跳过"), None));
+        }
+        let ok = false;
+        return Ok(GatewayProbeDto { ok, model, checks });
+    }
+
+    // ② 流式：裸 stream:true，看网关回不回 SSE
+    let started = Instant::now();
+    let bare_stream = send_probe(build(probe_body(kind, &model, policy, false, true), false)).await;
+    let bare_sse = matches!(&bare_stream, Ok(o) if o.status.is_success() && o.sse);
+    checks.push(match &bare_stream {
+        Ok(o) if o.status.is_success() && o.sse => {
+            check("passed", "流式响应：网关返回 SSE", Some(started.elapsed().as_millis()))
+        }
+        Ok(o) if o.status.is_success() => check(
+            "failed",
+            format!(
+                "流式响应：HTTP 200 但非 SSE（content-type: {}），该模型/端点不流式",
+                o.content_type
+            ),
+            Some(started.elapsed().as_millis()),
+        ),
+        Ok(o) => check(
+            "failed",
+            format!("流式响应 HTTP {}：{}", o.status, o.error_tail),
+            Some(started.elapsed().as_millis()),
+        ),
+        Err(e) => check("failed", format!("流式响应：{e}"), Some(started.elapsed().as_millis())),
+    });
+
+    // ③ 请求策略参数：带上策略再发流式，对比 ② 定位「加参数就不流式」
+    let started = Instant::now();
+    if !has_policy {
+        checks.push(check("skipped", "请求策略参数：未配置请求策略字段", None));
+    } else {
+        let with_policy =
+            send_probe(build(probe_body(kind, &model, policy, true, true), false)).await;
+        checks.push(match &with_policy {
+            Ok(o) if o.status.is_success() && o.sse => check(
+                "passed",
+                "请求策略参数：被接受且保持流式",
+                Some(started.elapsed().as_millis()),
+            ),
+            Ok(o) if o.status.is_success() => check(
+                "failed",
+                "请求策略参数：被接受（HTTP 200）但响应不再流式——疑似网关对带参请求降级，这正是不流式的触发源",
+                Some(started.elapsed().as_millis()),
+            ),
+            Ok(o) => check(
+                "failed",
+                format!("请求策略参数：被拒（HTTP {}）：{}", o.status, o.error_tail),
+                Some(started.elapsed().as_millis()),
+            ),
+            Err(e) => check(
+                "failed",
+                format!("请求策略参数：{e}"),
+                Some(started.elapsed().as_millis()),
+            ),
+        });
+    }
+
+    // ④ 自定义 Header：带上解析后的 header 发一次基础请求
+    let started = Instant::now();
+    if policy.header_env.is_empty() {
+        checks.push(check("skipped", "自定义 Header：未配置", None));
+    } else {
+        let unresolved: Vec<&str> = policy
+            .header_env
+            .values()
+            .filter(|var| std::env::var(var).map(|v| v.is_empty()).unwrap_or(true))
+            .map(String::as_str)
+            .collect();
+        let with_headers =
+            send_probe(build(probe_body(kind, &model, policy, false, false), true)).await;
+        let suffix = if unresolved.is_empty() {
+            String::new()
+        } else {
+            format!("；环境变量 {} 未设置，对应 Header 未发送", unresolved.join("、"))
+        };
+        checks.push(match &with_headers {
+            Ok(o) if o.status.is_success() => check(
+                "passed",
+                format!("自定义 Header：网关接受{suffix}"),
+                Some(started.elapsed().as_millis()),
+            ),
+            Ok(o) => check(
+                "failed",
+                format!("自定义 Header：HTTP {}：{}{}", o.status, o.error_tail, suffix),
+                Some(started.elapsed().as_millis()),
+            ),
+            Err(e) => check(
+                "failed",
+                format!("自定义 Header：{e}{suffix}"),
+                Some(started.elapsed().as_millis()),
+            ),
+        });
+    }
+
+    let ok = checks.iter().all(|c| c.status != "failed");
+    Ok(GatewayProbeDto { ok, model, checks })
+}
+
 pub(crate) fn validate_after_global_write(
     profile: &Profile,
     key: Option<&str>,
@@ -596,6 +993,7 @@ mod tests {
             base_url: Some("https://relay.example.com/v1".into()),
             models: vec!["model-a".into()],
             extra_env: Default::default(),
+            request_policy: crate::profiles::RequestPolicy::default(),
             key_hint: None,
             model: None,
             last_used_at: None,
@@ -617,6 +1015,57 @@ mod tests {
                 .as_str(),
             "https://relay.example.com/gemini/v1beta/models"
         );
+    }
+
+    #[test]
+    fn request_policy_ranges_and_header_references_are_validated() {
+        let mut p = profile("claude-code");
+        p.request_policy.temperature = Some(2.1);
+        assert!(validate_profile_fields(&p).is_err());
+        p.request_policy.temperature = Some(0.7);
+        p.request_policy.top_p = Some(1.1);
+        assert!(validate_profile_fields(&p).is_err());
+        p.request_policy.top_p = Some(0.9);
+        p.request_policy.header_env.insert("X-Relay-Key".into(), "RELAY_KEY".into());
+        assert!(validate_profile_fields(&p).is_ok());
+        p.request_policy.header_env.insert("Bad:Header".into(), "RELAY_KEY".into());
+        assert!(validate_profile_fields(&p).is_err());
+    }
+
+    #[test]
+    fn unsupported_request_policy_is_a_warning_not_silent_success() {
+        let mut p = profile("codex");
+        p.request_policy.temperature = Some(0.2);
+        let notes = validate_profile_fields(&p).unwrap();
+        assert!(notes.iter().any(|n| n.contains("temperature")));
+    }
+
+    #[test]
+    fn anthropic_base_url_trailing_v1_is_warned_not_blocked() {
+        // /v1 结尾会被 SDK 拼成 /v1/v1/messages 404：给提醒但保存不阻断
+        let mut p = profile("claude-code");
+        p.base_url = Some("https://relay.example.com/v1".into());
+        let notes = validate_profile_fields(&p).unwrap();
+        assert!(notes.iter().any(|n| n.contains("/v1/v1/messages")));
+        // 不带 /v1 不提醒；非 Anthropic 通道（如 codex 的 OpenAI 系 /v1 惯例）不提醒
+        p.base_url = Some("https://relay.example.com".into());
+        assert!(!validate_profile_fields(&p).unwrap().iter().any(|n| n.contains("/v1/v1")));
+        let mut c = profile("codex");
+        c.base_url = Some("https://relay.example.com/v1".into());
+        assert!(!validate_profile_fields(&c).unwrap().iter().any(|n| n.contains("/v1/v1")));
+    }
+
+    #[test]
+    fn claude_effort_closed_set_is_validated() {
+        let mut p = profile("claude-code");
+        p.request_policy.reasoning_effort = Some("ultra".into());
+        assert!(validate_profile_fields(&p).is_err());
+        p.request_policy.reasoning_effort = Some("xhigh".into());
+        assert!(validate_profile_fields(&p).is_ok());
+        // 其他 agent 不套用 claude 的档位闭集
+        let mut k = profile("kimi");
+        k.request_policy.reasoning_effort = Some("ultra".into());
+        assert!(validate_profile_fields(&k).is_ok());
     }
 
     #[test]

@@ -33,7 +33,9 @@ keyring = "3"
 portable-pty = "0.9"
 uuid = { version = "1", features = ["v4"] }
 which = "6"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# gzip/brotli/deflate：部分中转网关无视 Accept-Encoding 强制压缩响应，不解压则 JSON 解析报
+# "error decoding response body"；解压库均为纯 Rust 实现，三平台行为一致，不改变 Mac 端既有行为
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli", "deflate"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 zstd = "0.13"
 md5 = "0.7"

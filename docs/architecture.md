@@ -118,7 +118,16 @@ struct Profile {
     key_hint: Option<String>,  // 密钥尾号提示（"···abc1"），仅界面区分用
     models: Vec<String>,       // 可用模型列表，首个为默认；启动时在终端页下拉选择
     extra_env: Map<String,String>, // 附加环境变量，注入优先级高于 adapter 内置 env
+    request_policy: RequestPolicy, // 请求策略声明；由 Agent 能力表决定是否实际注入
     extra: JsonValue,          // agent 特有字段（透传给 adapter）
+}
+
+struct RequestPolicy {
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    max_output_tokens: Option<u64>,
+    reasoning_effort: Option<String>,
+    header_env: Map<String,String>, // Header 名 → 环境变量名，不保存 Header 密文
 }
 
 struct Project {               // 聚合后的项目条目
@@ -447,6 +456,8 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 - **工作台与运行外壳视觉收敛（2026-08-22）**：工作台只保留当前工作主卡、待处理和活动流，删除重复的底部运行入口；最近项目仅作为恢复线索，不冒充当前项目上下文。聊天头部、消息区和 composer 统一限宽、降低附属信息密度；运行页工作树固定 224px、标签/成果面板/状态栏采用紧凑高度。该决策只改变表现层，PTY 生命周期、会话同步、技能/MCP 插入与文件/改动状态机不变。
 
 - **运行页上下文与显示层（2026-08-22）**：项目/工作区导航与文件树浏览分离；浏览根不改变终端 cwd，运行中切换项目改为新标签打开；聊天/终端显示层按标签隔离；布局相关入口统一收进「布局」菜单。
+
+- **模型请求策略的安全边界（2026-08-27）**：Profile 可以保存 `temperature`、`top_p`、`max_output_tokens`、`reasoning_effort` 与「Header 名→环境变量名」引用，作为跨 Agent 的可迁移声明；保存时做格式/范围校验，并按 Agent 能力表提示支持、未知或不支持。当前启动器只负责环境变量/命令行注入，不伪造 HTTP 请求体，也不把 Header 密文写入 Profile。后续若实现真实请求注入，必须新增按 Agent + 协议逐字段适配，并保留启动计划预览与验证提示。
 
 | 版本 | 决策 |
 |---|---|

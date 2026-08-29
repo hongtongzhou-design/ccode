@@ -1243,6 +1243,7 @@ mod tests {
             base_url: Some("https://relay.example.com".into()),
             models: vec!["m1".into()],
             extra_env: Default::default(),
+            request_policy: crate::profiles::RequestPolicy::default(),
             key_hint: None,
             model: None,
             last_used_at: None,

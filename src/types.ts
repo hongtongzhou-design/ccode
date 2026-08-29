@@ -12,6 +12,7 @@ export interface Profile {
   models: string[];
   /** 附加环境变量，启动时注入，优先级高于 adapter 内置 env */
   extraEnv: Record<string, string>;
+  requestPolicy: RequestPolicy;
   /** 密钥尾号提示（如 "···abc1"），用于区分多个 key */
   keyHint: string | null;
   hasKey: boolean;
@@ -28,8 +29,19 @@ export interface ProfileInput {
   baseUrl: string | null;
   models: string[];
   extraEnv: Record<string, string>;
+  requestPolicy?: RequestPolicy;
   /** 明文密钥，仅保存时提交；编辑时留空表示不修改 */
   apiKey: string | null;
+}
+
+/** 请求级策略声明。仅在对应 Agent/协议支持时才会实际生效。 */
+export interface RequestPolicy {
+  temperature: number | null;
+  topP: number | null;
+  maxOutputTokens: number | null;
+  reasoningEffort: string | null;
+  /** Header 名 → 读取值的环境变量名，避免把密钥明文存入 Profile。 */
+  headerEnv: Record<string, string>;
 }
 
 export interface ModelCapabilityDto {
@@ -40,6 +52,13 @@ export interface ModelCapabilityDto {
   vision: boolean | null;
   video: boolean | null;
   streaming: boolean | null;
+}
+
+/** fetch_models 返回：模型列表 + 缓存命中标记 + 拉取时间（RFC3339 本地） */
+export interface FetchModelsResultDto {
+  models: string[];
+  fromCache: boolean;
+  fetchedAt: string;
 }
 
 /** 官方账号连接状态（official_account_status，P1a） */
@@ -74,6 +93,25 @@ export interface ProfileValidationDto {
 export interface GlobalApplyResultDto {
   files: string[];
   validation: ProfileValidationDto;
+}
+
+/** 启动计划预览：只展示环境变量名称与脱敏参数，不返回密钥值。 */
+export interface LaunchPlanPreviewDto {
+  agent: string;
+  binary: string | null;
+  args: string[];
+  /** 注入环境变量（名称 + 来源标注）；同键重复属正常（覆盖语义），原样列出 */
+  env: { name: string; source: string }[];
+  envRemove: string[];
+  promptSupported: boolean;
+  requestPolicy: RequestPolicy;
+}
+
+/** 网关体检探针结果：绕过 CLI 直连端点的裸响应观测（流式/参数透传/Header 接受度） */
+export interface GatewayProbeDto {
+  ok: boolean;
+  model: string;
+  checks: ValidationCheckDto[];
 }
 
 export interface DetectResult {
@@ -872,6 +910,15 @@ export interface AgentCapabilitiesDto {
   setGlobal: CapabilityFlagDto;
   mcpWrite: CapabilityFlagDto;
   skillDist: { mode: "symlinkOrCopy" | "copyOnly"; reason?: string };
+  requestPolicy: {
+    temperature: "supported" | "unsupported" | "unknown";
+    topP: "supported" | "unsupported" | "unknown";
+    maxOutputTokens: "supported" | "unsupported" | "unknown";
+    reasoningEffort: "supported" | "unsupported" | "unknown";
+    customHeaders: "supported" | "unsupported" | "unknown";
+  };
+  /** reasoningEffort 已知档位集（非空 = 表单出下拉，空 = 自由输入） */
+  effortOptions: string[];
 }
 
 // ===== 定时雷达（src-tauri/src/scheduler.rs） =====
