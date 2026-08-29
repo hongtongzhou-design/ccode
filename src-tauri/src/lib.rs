@@ -16,6 +16,7 @@ mod logbuf;
 mod mcp;
 mod model_registry;
 mod models;
+mod paths;
 mod pdf;
 mod portwatch;
 mod process;

@@ -10,6 +10,30 @@ export function normSep(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
+/** 剥掉 Windows `canonicalize` 带出的 `\\?\` verbatim 前缀（`\\?\UNC\srv\s` → `\\srv\s`）。
+ *  后端 canonical_key 现在落库前已经剥过，但**存量库里仍有 verbatim 记录**，
+ *  显示与比较前都要过一道，否则界面上会直接出现 `\\?\C:\Users\...`。
+ *  非 Windows 路径是恒等变换。 */
+export function stripVerbatim(p: string): string {
+  if (p.startsWith("\\\\?\\UNC\\")) return `\\\\${p.slice(8)}`;
+  if (p.startsWith("\\\\?\\")) return p.slice(4);
+  return p;
+}
+
+/** 跨来源路径比较键：剥 verbatim 前缀 + 分隔符统一 + 去尾分隔符，Windows 下折叠大小写。
+ *  只用于比较，不要拿它显示或回写（有损）。
+ *  后端同名口径见 src-tauri/src/paths.rs 的 path_key。 */
+export function pathKey(p: string, isWindows = false): string {
+  const s = normSep(stripVerbatim(p));
+  const trimmed = s.length > 1 ? s.replace(/\/+$/, "") : s;
+  return isWindows ? trimmed.toLowerCase() : trimmed;
+}
+
+/** 两条路径是否指向同一位置（跨方言） */
+export function samePath(a: string, b: string, isWindows = false): boolean {
+  return pathKey(a, isWindows) === pathKey(b, isWindows);
+}
+
 /** git 装饰表键归一：后端混合分隔符的键统一成 /，与归一后的 entry.path 同口径匹配 */
 export function normalizeStatusKeys(
   map: Record<string, string>,

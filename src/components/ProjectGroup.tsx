@@ -6,6 +6,7 @@ import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
 import PipelineEditor from "./PipelineEditor";
 import HistoryOverlay from "./HistoryOverlay";
+import { IS_WINDOWS } from "../hotkeys";
 import TemplatePicker, { type TemplatePickItem } from "./TemplatePicker";
 import ArtifactChecklist, {
   absoluteResourcePath,
@@ -29,7 +30,7 @@ import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import { startPipelineStep } from "../pipeline-start";
 import { upsertLitSourceSection } from "../task-md-sections";
 import { isDecisionsOnly } from "../step-decisions";
-import { normSep } from "../path-utils";
+import { normSep, stripVerbatim } from "../path-utils";
 import type { RunOverviewInput } from "../run-overview";import type {
   DiscoveredResourceDto,
   ZoteroLibraryDto,
@@ -55,14 +56,21 @@ function getHomeDir(): Promise<string> {
   homeDirPromise ??= invoke<string>("home_dir").catch(() => "");
   return homeDirPromise;
 }
-/** 绝对路径缩略：家目录前缀 → ~（完整路径仍在外层 title 悬浮里） */
+/** 绝对路径缩略：家目录前缀 → ~（完整路径仍在外层 title 悬浮里）。
+ *  两侧都先剥 verbatim 前缀：存量库里的项目路径可能仍是 `\\?\C:\Users\...`，
+ *  而 home 是普通形式，不剥就永远缩不掉、界面直接把 `\\?\` 显示给用户。
+ *  Windows 文件系统大小写不敏感，前缀判定同样要折叠大小写。 */
 export function abbrevHome(path: string, home: string): string {
   if (!home) return path;
-  const h = home.replace(/[\\/]+$/, "");
-  if (path === h) return "~";
-  return path.startsWith(h + "/") || path.startsWith(h + "\\")
-    ? `~${path.slice(h.length)}`
-    : path;
+  const shown = stripVerbatim(path);
+  const h = stripVerbatim(home).replace(/[\\/]+$/, "");
+  const fold = (s: string) => (IS_WINDOWS ? s.toLowerCase() : s);
+  if (fold(shown) === fold(h)) return "~";
+  const head = fold(shown).slice(0, h.length);
+  const next = shown[h.length];
+  return head === fold(h) && (next === "/" || next === "\\")
+    ? `~${shown.slice(h.length)}`
+    : shown;
 }
 /** 步进器带级整条虚线链：真实 6×6px 方块按 12px 等距（6px 块 + 6px 间隙）铺满整个带宽。
  *  块位以圆心为锚分段计算（圆是列中心，列等宽，段长相等）——每个圆两侧的断口、

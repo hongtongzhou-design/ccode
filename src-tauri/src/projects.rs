@@ -258,8 +258,12 @@ fn db() -> Result<Connection, String> {
 /// 注册用主键：能 canonicalize 就用 canonical 路径，不同写法指向同一目录时去重
 /// （pub(crate)：workspaces.rs 人工事项检测根归属同一口径）
 pub(crate) fn canonical_key(path: &Path) -> String {
-    fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
+    // 剥掉 canonicalize 在 Windows 带出的 `\\?\` 前缀再落库：verbatim 形式与普通形式
+    // （子进程报告的 cwd、dirs::home_dir()、用户手输）按 PathBuf 分量比永不相等，
+    // 直接进库会让「已注册项目的会话被当成随手聊」「worktree 被误判为仓库候选」
+    // 这一串跨方言比较全部失效，界面上还会直接显示 `\\?\C:\Users\...`。
+    // 剥完仍是可直接用于文件操作的合法路径；macOS 上是恒等变换。
+    crate::paths::strip_verbatim(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
         .to_string_lossy()
         .into_owned()
 }
@@ -1345,22 +1349,34 @@ pub(crate) fn write_config_at(project: &Path, config: &ProjectConfigDto) -> Resu
 // 工作区 TASK.md 是开工那一刻的产物）；聊想法 = agent 只允许改这一个文件；开工弹层预览
 // 草稿优先于模板拼装；评审沉淀从「钉卡」改为追加进下一步草稿。
 
-/// 草稿相对路径（单一出处）：文件名取 workspace_name（已 sanitize），空则步骤名替换不安全字符
+/// 草稿相对路径（单一出处）：文件名取 workspace_name，空则回落步骤名。
+/// **两个分支都必须清洗**——原注释写「workspace_name 已 sanitize」但写入链路
+/// （write_project_config → render_config）全程原样落 TOML，从未清洗过，
+/// 而它来自 PipelineEditor 的裸输入框。含 `: ? * |` 时在 Windows 上落盘直接
+/// os error 123，「聊想法 / 评审沉淀 / 融合进任务书」在该步骤永久不可用；
+/// `../../evil` 更会写到项目根之外（这一条 macOS 同样中招）。
 pub(crate) fn draft_rel_path(step_name: &str, workspace_name: &str) -> String {
-    let base = if !workspace_name.trim().is_empty() {
-        workspace_name.trim().to_string()
+    let raw = if !workspace_name.trim().is_empty() {
+        workspace_name
     } else {
         step_name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>()
     };
+    // 沿用既有口径：只留字母数字（含中文）与 - _，其余（含空格）换成 -。
+    // 草稿路径会被写进给 agent 的 prompt，不留空格省得两边都要加引号。
+    let narrowed: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // 再过一道通用落盘校验兜底（保留设备名、尾部点/空格）；全非法时回落固定名，
+    // 不让整条草稿链路因为一个名字失败
+    let base = crate::paths::sanitize_fs_name(&narrowed).unwrap_or_else(|_| "draft".to_string());
     format!(".ccode/drafts/{base}.md")
 }
 
@@ -5372,6 +5388,26 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
             draft_rel_path("综述 大纲/初稿", ""),
             ".ccode/drafts/综述-大纲-初稿.md"
         );
+        // 回归：注释曾写「workspace_name 已 sanitize」，实际写入链路全程原样落 TOML，
+        // 而它来自裸输入框。含 Windows 非法字符时落盘 os error 123，
+        // 「聊想法 / 评审沉淀 / 融合进任务书」在该步骤永久不可用。
+        assert_eq!(
+            draft_rel_path("步骤", "draft:v2"),
+            ".ccode/drafts/draft-v2.md"
+        );
+        assert_eq!(
+            draft_rel_path("步骤", "方案?"),
+            ".ccode/drafts/方案-.md"
+        );
+        // 路径逃逸（这条 macOS 同样中招）：不锚定 - 的个数，只断言逃不出 drafts 目录
+        let escaped = draft_rel_path("步骤", "../../../evil");
+        assert!(
+            escaped.starts_with(".ccode/drafts/") && !escaped.contains(".."),
+            "{escaped}"
+        );
+        assert_eq!(escaped.matches('/').count(), 2, "不得多出目录层级: {escaped}");
+        // 保留设备名：拼出的 .ccode/drafts/CON.md 在 Windows 上是设备而非文件
+        assert_eq!(draft_rel_path("步骤", "CON"), ".ccode/drafts/CON-.md");
     }
 
     #[test]
@@ -5390,7 +5426,7 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
         assert!(text.contains("## 上一步评审沉淀"), "{text}");
         assert!(text.contains("结论 A 保留"), "{text}");
         // 再次追加：原有内容保留，新小节在后
-        append_step_draft_at(&root, "检索筛选", "二次沉淀", "结论 B");
+        append_step_draft_at(&root, "检索筛选", "二次沉淀", "结论 B").unwrap();
         let text = fs::read_to_string(root.join(&rel)).unwrap();
         assert!(
             text.contains("结论 A 保留") && text.contains("结论 B"),

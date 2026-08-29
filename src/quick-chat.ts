@@ -2,6 +2,7 @@
  *  只排除「点了也没法恢复」的——归档 / Ccode 内部无头会话 / 源文件已不在的 /
  *  进程仍活着的（live，resume 同会话会被 CLI 拒：active writer 冲突）。 */
 import type { SessionMetaDto } from "./types";
+import { pathKey } from "./path-utils.ts";
 
 /** 「没法恢复」的会话统一排除口径 */
 function recoverable(s: SessionMetaDto): boolean {
@@ -15,15 +16,20 @@ export function pickQuickChatSessions(
   sessions: SessionMetaDto[],
   projectPaths: string[],
   limit = 8,
+  isWindows = false,
 ): SessionMetaDto[] {
-  const norm = (p: string) => p.replace(/[\\/]+$/, "");
-  const projects = projectPaths.map(norm);
+  // 注册项目路径来自后端注册表、会话 projectPath 来自 CLI 写的 cwd —— 两种来源在
+  // Windows 上可能是 verbatim/普通、大小写、分隔符三重不同。只去尾斜杠比不中，
+  // 后果是已注册项目里的所有对话都被当成「随手聊」涌进快速开聊历史。
+  // isWindows 显式传入而非在此读 IS_WINDOWS：本模块是纯逻辑层，
+  // 隐式依赖平台会让单测随宿主机器变化（Node 的 navigator.platform 在 Windows 上是 Win32）。
+  const projects = new Set(projectPaths.map((p) => pathKey(p, isWindows)));
   return sessions
     .filter(
       (s) =>
         recoverable(s) &&
         s.workspace === null &&
-        !projects.includes(norm(s.projectPath)),
+        !projects.has(pathKey(s.projectPath, isWindows)),
     )
     .slice(0, limit);
 }

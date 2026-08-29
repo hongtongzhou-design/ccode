@@ -32,6 +32,7 @@ import {
   comboLabel,
   PAGE_HOTKEY_DEFS,
   IS_MAC,
+  IS_WINDOWS,
 } from "./hotkeys";
 import { NAV_ICONS } from "./navigation-icons";
 import { NAV_GROUPS, NAV_BOTTOM } from "./navigation";
@@ -137,6 +138,8 @@ function App() {
         const sessions = pickQuickChatSessions(
           all,
           projects.map((p) => p.path),
+          undefined,
+          IS_WINDOWS,
         );
         setQuickChatMenu((cur) => (cur ? { ...cur, sessions } : cur));
       } catch {

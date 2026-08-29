@@ -615,6 +615,10 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
     {
         return Err(format!("技能名称必须是单个安全目录名: {name:?}"));
     }
+    // 全平台同一套落盘规则：技能库要跨机同步，在 macOS 上放行 `图表*` 只会让它到了
+    // Windows 建目录时抛 os error 123（用户看到裸系统错误）；尾部点/空格被 Windows
+    // 静默剥掉后，skills.json 记的名字与盘上目录名会对不上，发现/漂移检测随之报错名。
+    crate::paths::validate_fs_name(name).map_err(|e| format!("技能名称不合法：{e}"))?;
     Ok(())
 }
 

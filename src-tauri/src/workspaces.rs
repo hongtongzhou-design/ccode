@@ -354,6 +354,12 @@ fn sanitize_name(name: &str) -> Result<String, String> {
     if cleaned.is_empty() {
         return Err("任务名清洗后为空，请换一个名字".into());
     }
+    // 白名单只留 [A-Za-z0-9-]，非法字符已被换成 `-`，唯独**保留设备名整个活下来**
+    //（CON/AUX/NUL/COM1-9/LPT1-9 全是 ASCII 字母数字）。实测 git worktree add 建
+    // `refs/heads/ccode/CON.lock` 会 `Invalid argument` 失败，用户只看到
+    // 「创建 worktree 失败；已回滚」完全无法自解释；macOS 上 CON 是合法名字。
+    crate::paths::validate_fs_name(&cleaned)
+        .map_err(|e| format!("任务名不可用：{e}"))?;
     Ok(cleaned)
 }
 
@@ -3157,21 +3163,29 @@ pub async fn list_repos() -> Vec<RepoDto> {
                 return hit;
             }
         }
-        // 会话路径统一走了 canonicalize（Windows 上带 \\?\ 前缀），home 必须同口径
-        // 才能比中，否则 home 排除在 Windows 上静默失效（诊断包实测 home 仍被探测）
-        let home = dirs::home_dir().map(|h| std::fs::canonicalize(&h).unwrap_or(h));
+        // 会话路径、home、工作区根三者来源不同（canonicalize / dirs / 配置拼接），
+        // Windows 上 verbatim 与普通形式混杂且大小写不敏感 —— 全部走 paths::path_key
+        // 折成同一口径再比。此前 home 用 canonicalize 对齐过，ws_root 漏了：
+        // starts_with 恒假 ⇒ 每个 worktree 都会作为「仓库候选」冒出来。
+        let home = dirs::home_dir().map(|h| crate::paths::path_key(&h.to_string_lossy()));
         let ws_root = workspaces_root().unwrap_or_default();
+        let ws_root_key = crate::paths::path_key(&ws_root.to_string_lossy());
         let mut activity = std::collections::HashMap::<PathBuf, Option<String>>::new();
         for session in crate::sessions::cached_scan().sessions {
             let Ok(path) = std::fs::canonicalize(&session.project_path) else {
                 continue;
             };
-            if !path.is_dir() || Some(path.clone()) == home || path.starts_with(&ws_root) {
+            let path_key = crate::paths::path_key(&path.to_string_lossy());
+            let in_ws_root = path_key == ws_root_key
+                || path_key.starts_with(&format!("{ws_root_key}/"));
+            if !path.is_dir() || Some(&path_key) == home.as_ref() || in_ws_root {
                 continue;
             }
             let updated = session.updated_at;
+            // 剥掉 verbatim 前缀再入表：这张表的 key 会直接变成 RepoDto.path 交给前端，
+            // 既要显示给用户看，也要和前端手里的普通形式路径比较
             activity
-                .entry(path)
+                .entry(crate::paths::strip_verbatim(path))
                 .and_modify(|current| {
                     if updated.as_deref() > current.as_deref() {
                         current.clone_from(&updated);

@@ -2884,7 +2884,11 @@ fn opencode_export_session(db_path: &Path, session_id: &str) -> Result<Value, St
     let conn = open_opencode_db(db_path).ok_or("OpenCode 数据库不可读")?;
     let sid = session_id.to_string();
     let mut session_json = serde_json::json!({ "id": sid });
-    for row in query_rows(&conn, "SELECT * FROM session WHERE id=?", &[&sid]) {
+    // id 是主键，最多一行；查不到时保留只含 id 的兜底对象
+    if let Some(row) = query_rows(&conn, "SELECT * FROM session WHERE id=?", &[&sid])
+        .into_iter()
+        .next()
+    {
         let row = DbRow { names: row.0, vals: row.1 };
         let mut obj = serde_json::Map::new();
         for (i, name) in row.names.iter().enumerate() {
@@ -2898,7 +2902,6 @@ fn opencode_export_session(db_path: &Path, session_id: &str) -> Result<Value, St
             obj.insert(name.clone(), v);
         }
         session_json = Value::Object(obj);
-        break;
     }
     let messages: Vec<Value> = query_rows(&conn, "SELECT * FROM message WHERE session_id=? ORDER BY time_created ASC", &[&sid])
         .into_iter()
@@ -3350,14 +3353,12 @@ fn resolve_worktree_project(
     project_path: &str,
     rows: &[crate::workspaces::WorktreeRow],
 ) -> Option<(String, String)> {
-    // Windows 上 worktree 路径与会话记录的 cwd 都用 '\'，两种分隔符都认
+    // worktree 路径来自 DB、会话 cwd 来自 CLI 写的 JSONL、启动 cwd 可能来自注册表——
+    // 三种来源在 Windows 上分隔符、verbatim 前缀、大小写都可能不同，统一走 path_within
     let mut best: Option<&crate::workspaces::WorktreeRow> = None;
     for r in rows {
         let wt = r.worktree_path.trim_end_matches(&['/', '\\'][..]);
-        let under = project_path == wt
-            || project_path
-                .strip_prefix(wt)
-                .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'));
+        let under = crate::paths::path_within(project_path, wt);
         if under {
             let len = wt.len();
             if best.map_or(true, |b| len > b.worktree_path.trim_end_matches(&['/', '\\'][..]).len()) {
@@ -4152,7 +4153,7 @@ pub(crate) fn register_session_claim(claim_id: &str, agent: &str, cwd: &str) {
     let project_path = link_project_path(cwd);
     // 启动命令是同步路径，只读取已有缓存，禁止为关联声明阻塞扫描数百个历史文件。
     let excluded = recent_cached_scan().unwrap_or_default().sessions.into_iter()
-        .filter(|session| session.agent == agent && session.project_path == project_path)
+        .filter(|session| session.agent == agent && crate::paths::same_path(&session.project_path, &project_path))
         .map(|session| session.session_id)
         .collect();
     let mut registry = session_claims().lock().unwrap();
@@ -4212,7 +4213,7 @@ pub async fn claim_session_for(claim_id: String) -> Option<SessionMetaDto> {
         .filter(|(id, candidate)| {
             !registry.assignments.contains_key(*id)
                 && candidate.agent == context.agent
-                && candidate.project_path == context.project_path
+                && crate::paths::same_path(&candidate.project_path, &context.project_path)
         })
         .map(|(id, candidate)| (id.clone(), candidate.clone()))
         .collect();
@@ -4222,7 +4223,7 @@ pub async fn claim_session_for(claim_id: String) -> Option<SessionMetaDto> {
     already_assigned.extend(registry.assignments.values().cloned());
     let mut candidates: Vec<SessionMetaDto> = scan.sessions.into_iter()
         .filter(|session| {
-            session.agent == context.agent && session.project_path == context.project_path
+            session.agent == context.agent && crate::paths::same_path(&session.project_path, &context.project_path)
                 && !already_assigned.contains(&(session.agent.clone(), session.session_id.clone()))
         })
         .collect();
@@ -5216,7 +5217,7 @@ pub async fn delete_project_sessions(agent: String, project_path: String) -> Res
     let targets: Vec<SessionMetaDto> = scan
         .sessions
         .into_iter()
-        .filter(|s| s.agent == agent && s.project_path == project_path)
+        .filter(|s| s.agent == agent && crate::paths::same_path(&s.project_path, &project_path))
         .collect();
     tauri::async_runtime::spawn_blocking(move || delete_project_sessions_impl(targets, chain_members))
         .await

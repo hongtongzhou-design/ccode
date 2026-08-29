@@ -5,6 +5,7 @@ import { useAppStore } from "../store";
 import { AGENTS, type SessionMetaDto } from "../types";
 import { agentBrandBadgeStyle } from "../agent-colors";
 import { relTime } from "../rel-time";
+import { IS_WINDOWS } from "../hotkeys";
 import {
   pickQuickChatSessions,
   sessionHomeLabel,
@@ -120,6 +121,8 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
           pickQuickChatSessions(
             all,
             projects.map((p) => p.path),
+            undefined,
+            IS_WINDOWS,
           ),
         );
       } catch {

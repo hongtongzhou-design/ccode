@@ -5,6 +5,9 @@ import {
   normSep,
   normalizeStatusKeys,
   parentDir,
+  pathKey,
+  samePath,
+  stripVerbatim,
 } from "../src/path-utils.ts";
 
 test("normSep 统一反斜杠为正斜杠", () => {
@@ -55,4 +58,26 @@ test("parentDir Windows 盘符边角", () => {
   assert.equal(parentDir("C:\\"), null);
   assert.equal(parentDir("C:"), null);
   assert.equal(parentDir("D:\\a\\b\\c"), "D:\\a\\b");
+});
+
+test("stripVerbatim 剥掉 Windows canonicalize 的 verbatim 前缀", () => {
+  assert.equal(stripVerbatim("\\\\?\\C:\\Users\\x"), "C:\\Users\\x");
+  assert.equal(stripVerbatim("\\\\?\\UNC\\srv\\share\\p"), "\\\\srv\\share\\p");
+  // 普通路径恒等（macOS 上本函数不做任何事）
+  assert.equal(stripVerbatim("C:\\Users\\x"), "C:\\Users\\x");
+  assert.equal(stripVerbatim("/Users/x"), "/Users/x");
+});
+
+test("pathKey 折叠 verbatim/分隔符/尾斜杠；大小写只在 Windows 折叠", () => {
+  // 回归：后端 canonical_key 曾把 \\?\C:\... 落库，与前端手里的普通形式永不相等 ⇒
+  // 已注册项目的会话被当成「随手聊」、项目根会话没有「查看项目」按钮
+  assert.equal(pathKey("\\\\?\\C:\\Users\\x"), pathKey("C:\\Users\\x"));
+  assert.equal(pathKey("C:\\Users\\x"), pathKey("C:/Users/x"));
+  assert.equal(pathKey("/Users/x/"), pathKey("/Users/x"));
+  // POSIX 上大小写有意义，不能折叠
+  assert.notEqual(pathKey("/Users/Foo"), pathKey("/users/foo"));
+  assert.ok(!samePath("/Users/Foo", "/users/foo"));
+  // Windows 侧显式传参：NTFS 大小写不敏感
+  assert.equal(pathKey("C:\\Users\\Foo", true), pathKey("c:/users/foo", true));
+  assert.ok(samePath("\\\\?\\C:\\Users\\Foo", "c:\\users\\foo", true));
 });

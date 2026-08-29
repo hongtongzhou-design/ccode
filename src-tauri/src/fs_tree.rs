@@ -565,10 +565,19 @@ fn lexical_in_root(path: &str, root: &str) -> bool {
 
 fn create_dir_sync(root: &str, name: &str) -> Result<String, String> {
     let name = name.trim();
-    if name.is_empty() || name.contains(['/', '\\', '.']) {
-        return Err("文件夹名称无效（不能含 / 或 .）".into());
+    if name.contains('.') {
+        return Err("文件夹名称无效（不能含 .）".into());
     }
+    // 非法字符/保留名/路径逃逸统一走 paths::validate_fs_name：原先只挡 `/ \ .`，
+    // `a?b` 之类到 Windows 上是 os error 123（用户看到「系统找不到指定的路径」这种
+    // 对不上因果的提示），而 `C:evil` 因为不含这三个字符会通过校验，再被
+    // PathBuf::join 整体替换掉 root —— 目录直接建到 C 盘去、脱离项目根。
+    crate::paths::validate_fs_name(name).map_err(|e| format!("文件夹名称无效（{e}）"))?;
     let dir = PathBuf::from(expand_tilde(root)).join(name);
+    // 落盘前再验一次词法归属：校验通过不代表拼出来的路径一定还在 root 内
+    if !lexical_in_root(&dir.to_string_lossy(), root) {
+        return Err("路径超出项目根目录，拒绝创建".into());
+    }
     if dir.exists() {
         return Err("已存在同名文件或目录".into());
     }
