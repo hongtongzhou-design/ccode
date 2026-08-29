@@ -71,8 +71,10 @@
   即可离线分析。系统级活动只额外观察 CTF/TextInputHost，禁止借诊断之名采集无关应用的命令行。
 - **「是否 git 仓库」探测带 30s 负缓存**（`git_info::probe_is_work_tree`）：轮询入口（git_status/git_status_map）对非仓库
   cwd 不得每轮真 spawn git（诊断包实测 Windows 安装版 85 秒 73 次同目录探测）；只缓存否定结果，应用内 `git init` 成功后
-  必须调 `invalidate_repo_probe` 主动失效。**跨路径比较先统一 canonicalize 口径**：Windows 上 `canonicalize` 带 `\\?\`
-  前缀，与 `dirs::home_dir()` 等未规范化路径直接比较会静默失效（recent_repos 的 home 排除曾因此被绕过）。
+  必须调 `invalidate_repo_probe` 主动失效。**跨来源路径比较一律走 `paths::path_key` 口径**（same_path/path_within，
+  前端 `src/path-utils.ts` 同函数）：Windows 上同一路径有 verbatim（`\\?\C:\x`）与普通两种写法、分隔符与大小写都可能
+  不同，字符串直接比较会静默失效（删除防护名单、recent_repos 的 home 排除、worktree 归属都曾因此被绕过）；落库与显示
+  先 `strip_verbatim`。仅「同一路径判等」可用 canonicalize，且要双校验防 symlink 逃逸。
 - **npm 更新用与目标二进制同目录的 npm（`updater::npm_for`）**（用错 npm 会把包装进另一个 prefix）；brew 安装的 CLI 一律
   走 `brew upgrade`。
 - **交互式 TUI 自更新不走 run_streaming_pty**：kimi/opencode 的 `upgrade` 是方向键选择界面，行输入无法应答——规格标

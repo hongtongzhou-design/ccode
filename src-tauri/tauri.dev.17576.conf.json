@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ccode Dev",
+  "identifier": "com.ccode.dev.hmr",
+  "build": {
+    "beforeDevCommand": "npm run dev -- --host 127.0.0.1 --port 17576 --strictPort",
+    "devUrl": "http://127.0.0.1:17576"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Ccode Dev - 热更新 :17576",
+        "width": 1100,
+        "height": 720,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": false
+      }
+    ]
+  }
+}

@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "node --experimental-strip-types --test \"tests/**/*.test.ts\"",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json"
+    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:dev:17576": "tauri dev --config src-tauri/tauri.dev.17576.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
