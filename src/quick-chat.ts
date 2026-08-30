@@ -44,5 +44,5 @@ export function sessionHomeLabel(s: SessionMetaDto): string {
 /** 列表行标题：自定义标题 > 会话标题 > 摘要 > 兜底。
  *  会话标题来自后端解析器（首条实质 user 消息；纯问候语已在 usable_title 层跳过） */
 export function sessionDisplayTitle(s: SessionMetaDto): string {
-  return s.customTitle ?? s.title ?? s.summary ?? "（无标题）";
+  return s.customTitle ?? s.title ?? s.summary ?? "未命名对话";
 }

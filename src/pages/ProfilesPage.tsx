@@ -13,6 +13,7 @@ import { groupModelsByVendor, vendorOf } from "../model-vendors";
 import { interactiveUpdatePrefill } from "../update-routing";
 import { absTime, relTime } from "../rel-time";
 import ContextMenu from "../components/ContextMenu";
+import GatewayLibrary from "../components/GatewayLibrary";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
 import {
@@ -22,6 +23,7 @@ import {
   PageToolbar,
   SegTabs,
   fieldClass,
+  FoldMark,
   ghostActionClass,
   hoverRevealClass,
   primaryActionClass,
@@ -31,14 +33,16 @@ import {
 } from "../components/PageFrame";
 import type {
   AgentCapabilitiesDto,
-  GatewayProbeDto,
+  BindingInput,
+  ComboSurfaceDto,
+  GlobalDriftDto,
+  ImportV2Result,
   GlobalApplyResultDto,
   OfficialAccountStatusDto,
   Profile,
   ProfileInput,
   ModelCapabilityDto,
   FetchModelsResultDto,
-  ProfileUsageDto,
   ProfileValidationDto,
   ValidationCheckDto,
   RequestPolicy,
@@ -51,6 +55,7 @@ function ProfileModal({
   officialSupported,
   onClose,
   onSaved,
+  onOpenGateway,
 }: {
   initial: Profile | null;
   /** 从某个 agent 组的「+ 添加连接」打开时预选该 agent */
@@ -60,8 +65,17 @@ function ProfileModal({
   onClose: () => void;
   /** 保存成功回调：页面据此判断要不要提示「该 agent 有标签在跑，需重开才生效」 */
   onSaved?: (agent: string, name: string) => void;
+  onOpenGateway?: (id: string) => void;
 }) {
   const saveProfile = useAppStore((s) => s.saveProfile);
+  const bindGateway = useAppStore((s) => s.bindGateway);
+  const gateways = useAppStore((s) => s.gateways);
+  const loadGateways = useAppStore((s) => s.loadGateways);
+  const [bindMode, setBindMode] = useState<"new" | "existing">(
+    initial ? "new" : "new",
+  );
+  const [bindGatewayId, setBindGatewayId] = useState("");
+  const [combo, setCombo] = useState<ComboSurfaceDto | null>(null);
   const [form, setForm] = useState({
     agent: initial?.agent ?? presetAgent ?? "claude-code",
     name: initial?.name ?? "",
@@ -106,6 +120,22 @@ function ProfileModal({
   const [saving, setSaving] = useState(false);
   const [capabilities, setCapabilities] = useState<ModelCapabilityDto[]>([]);
   const [agentCapabilities, setAgentCapabilities] = useState<AgentCapabilitiesDto | null>(null);
+  const showGatewayFields =
+    form.accountType === "api" && !initial && bindMode !== "existing";
+  // 模型选择器数据源：新建网关 = 「获取模型」拉取结果；选用已有网关/编辑绑定 = 该网关目录
+  // （null = 无网关语境——官方账号或纯新建，不出选择器）
+  const catalogGatewayId =
+    !initial && bindMode === "existing"
+      ? bindGatewayId
+      : (initial?.gatewayId ?? null);
+  const gatewayCatalog = catalogGatewayId
+    ? (gateways.find((g) => g.id === catalogGatewayId)?.models ?? []).map(
+        (m) => m.id,
+      )
+    : null;
+  const pickerModels = showGatewayFields
+    ? (fetchedModels ?? [])
+    : (gatewayCatalog ?? []);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,6 +150,32 @@ function ProfileModal({
       cancelled = true;
     };
   }, [form.agent]);
+
+  useEffect(() => {
+    // 编辑绑定也要拿网关目录（模型选择器的数据源），不再仅限新建
+    void loadGateways();
+  }, [loadGateways]);
+
+  useEffect(() => {
+    if (!initial?.id) {
+      setCombo(null);
+      return;
+    }
+    let cancelled = false;
+    void invoke<ComboSurfaceDto>("combo_surface", {
+      profileId: initial.id,
+      model: form.models[0] || null,
+    })
+      .then((c) => {
+        if (!cancelled) setCombo(c);
+      })
+      .catch(() => {
+        if (!cancelled) setCombo(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [initial?.id, form.models]);
 
   useEffect(() => {
     let cancelled = false;
@@ -271,6 +327,22 @@ function ProfileModal({
       apiKey: form.accountType === "official" ? null : form.apiKey || null,
     };
     try {
+      if (!initial && bindMode === "existing") {
+        if (!bindGatewayId) throw new Error("请选择网关");
+        const gw = gateways.find((g) => g.id === bindGatewayId);
+        const bind: BindingInput = {
+          agent: input.agent,
+          gatewayId: bindGatewayId,
+          kind: "api",
+          protocol: input.protocol,
+          models: input.models,
+          extraEnv: input.extraEnv,
+        };
+        await bindGateway(bind);
+        onSaved?.(input.agent, gw?.name ?? input.name);
+        onClose();
+        return;
+      }
       await saveProfile(initial?.id ?? null, input);
       onSaved?.(input.agent, input.name);
       onClose();
@@ -297,12 +369,97 @@ function ProfileModal({
               {initial ? "编辑连接" : "添加连接"}
             </h2>
             <p className="mt-1 text-xs text-l4">
-              配置一个可在运行页启动的 Agent 连接。
+              {initial
+                ? "改这份绑定用的模型名单和附加环境变量。"
+                : "配置一个可在运行页启动的 Agent 连接。"}
             </p>
+            {!initial && (
+              <div className="mt-2 flex gap-3 text-xs">
+                <label className="flex items-center gap-1 text-l2">
+                  <input
+                    type="radio"
+                    checked={bindMode === "new"}
+                    onChange={() => {
+                      setBindMode("new");
+                      setPickerOpen(false);
+                    }}
+                  />
+                  新建网关
+                </label>
+                <label className="flex items-center gap-1 text-l2">
+                  <input
+                    type="radio"
+                    checked={bindMode === "existing"}
+                    onChange={() => {
+                      setBindMode("existing");
+                      setPickerOpen(false);
+                    }}
+                  />
+                  选用已有网关
+                </label>
+              </div>
+            )}
+            {!initial && bindMode === "existing" && (
+              <label className="mt-2 block text-sm">
+                <span className="mb-1 block text-xs text-l3">网关</span>
+                <select
+                  className={fieldClass}
+                  value={bindGatewayId}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    setBindGatewayId(id);
+                    const gw = gateways.find((g) => g.id === id);
+                    if (gw)
+                      setForm((f) => ({
+                        ...f,
+                        name: gw.name,
+                        models: [],
+                        accountType: "api",
+                      }));
+                    // 模型从该网关目录勾选，不预填全量；换网关打开选择器
+                    setPickerOpen(Boolean(gw && gw.models.length > 0));
+                    setPickerFilter("");
+                    setOpenVendors(new Set());
+                  }}
+                >
+                  <option value="">选择网关…</option>
+                  {gateways.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name}
+                      {g.keyHint ? ` · ${g.keyHint}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
         </div>
 
-        <section className="mb-4 rounded-lg border border-hairline bg-strip/45 p-3">
+        {!initial && bindMode === "existing" && (
+          <label className="mb-4 block text-sm">
+            <span className="mb-1 block text-xs text-l3">Agent</span>
+            <select
+              className={fieldClass}
+              value={form.agent}
+              onChange={(e) => {
+                setForm({
+                  ...form,
+                  agent: e.target.value,
+                  accountType: "api",
+                  protocol: AGENT_PROTOCOLS[e.target.value]?.default ?? null,
+                });
+              }}
+            >
+              {AGENTS.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {!initial && bindMode === "new" && <section className="mb-4 rounded-lg border border-hairline bg-strip/45 p-3">
           <div className="mb-3 flex items-center gap-2">
             <span className="text-xs font-medium text-l2">快速开始</span>
             <span className="text-micro text-l4">可选，选择后会自动填入基础字段</span>
@@ -391,8 +548,9 @@ function ProfileModal({
             </select>
           </label>
           </div>
-        </section>
+        </section>}
 
+        {(initial || bindMode === "new") && (
         <section className="mb-4">
           <div className="mb-2 flex items-center gap-2">
             <span className="text-xs font-medium text-l2">连接身份</span>
@@ -409,7 +567,25 @@ function ProfileModal({
             />
           </label>
         </section>
-        {officialSupported[form.agent] && (
+        )}
+        {initial?.gatewayId && (
+          <p className="mb-3 rounded-md border border-hairline bg-inset px-2 py-1.5 text-xs text-l3">
+            端点、密钥和按模型策略在网关库里改。
+            {onOpenGateway && (
+              <button
+                type="button"
+                className="ml-2 text-cta hover:underline"
+                onClick={() => {
+                  onOpenGateway(initial.gatewayId!);
+                  onClose();
+                }}
+              >
+                打开网关库
+              </button>
+            )}
+          </p>
+        )}
+        {officialSupported[form.agent] && !initial && bindMode === "new" && (
           <label className="mb-3 block text-sm">
             <span className="mb-1 block text-xs text-l3">账号类型</span>
             <select
@@ -431,7 +607,7 @@ function ProfileModal({
         {form.accountType === "official" && (
           <p className="-mt-1 mb-3 text-xs text-l3">用 CLI 自己的账号登录，不注入端点与密钥。请先在组内完成连接。</p>
         )}
-        {form.accountType === "api" && (
+        {showGatewayFields && (
           <label className="mb-3 flex items-center gap-2 text-xs text-l2">
             <input
               type="checkbox"
@@ -446,7 +622,7 @@ function ProfileModal({
             本地端点无密钥（不会继承 shell 中的其他 API Key）
           </label>
         )}
-        {form.accountType === "api" && (
+        {showGatewayFields && (
           <>
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">Base URL（可选）</span>
@@ -519,7 +695,7 @@ function ProfileModal({
               </p>
             );
           })()}
-          {form.accountType === "api" && (
+          {showGatewayFields && (
             <>
           <div className="mb-2 flex items-center gap-2">
             <button
@@ -577,8 +753,56 @@ function ProfileModal({
               <span className="text-xs text-l4">接口返回 0 个模型</span>
             )}
           </div>
-          {/* 厂商分组折叠面板：大网关 400+ 模型平铺没法选；筛选时全部强制展开 */}
-          {pickerOpen && fetchedModels && fetchedModels.length > 0 && (
+          {fetchError && (
+            <p className="mb-2 text-xs text-err-text">{fetchError}</p>
+          )}
+            </>
+          )}
+          {/* 选用已有网关 / 编辑绑定：选择器数据源 = 该网关目录（目录在网关库维护，
+              此处不给拉取按钮）；空目录给网关库入口，手填槽位始终可用 */}
+          {!showGatewayFields && gatewayCatalog && (
+            <div className="mb-2">
+              {gatewayCatalog.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    // 首次打开时展开「已配置首个模型」所在的厂商组
+                    if (!pickerOpen && openVendors.size === 0) {
+                      const first = form.models.find((x) => x.trim());
+                      if (first) setOpenVendors(new Set([vendorOf(first)]));
+                    }
+                    setPickerOpen(!pickerOpen);
+                  }}
+                  className={`${fieldClass} flex w-full items-center justify-between gap-2 text-left`}
+                >
+                  <span className="text-l3">
+                    从网关目录 {gatewayCatalog.length} 个模型中选择…
+                  </span>
+                  <span className="text-l4">{pickerOpen ? "▴" : "▾"}</span>
+                </button>
+              ) : (
+                <p className="text-micro text-l4">
+                  这个网关还没有模型目录，可
+                  {onOpenGateway && catalogGatewayId && (
+                    <button
+                      type="button"
+                      className="mx-1 text-cta hover:underline"
+                      onClick={() => {
+                        onOpenGateway(catalogGatewayId);
+                        onClose();
+                      }}
+                    >
+                      去网关库「获取模型」
+                    </button>
+                  )}
+                  或直接在下方手填模型名。
+                </p>
+              )}
+            </div>
+          )}
+          {/* 厂商分组折叠面板：大网关 400+ 模型平铺没法选；筛选时全部强制展开。
+              数据源 = pickerModels（新建网关 = 拉取结果；选用已有/编辑绑定 = 网关目录） */}
+          {pickerOpen && pickerModels.length > 0 && (
             <div className="mb-2 max-h-64 overflow-y-auto rounded-md bg-inset p-1">
               <input
                 autoFocus
@@ -588,7 +812,7 @@ function ProfileModal({
                 onChange={(e) => setPickerFilter(e.target.value)}
               />
               {(() => {
-                const groups = groupModelsByVendor(fetchedModels, pickerFilter);
+                const groups = groupModelsByVendor(pickerModels, pickerFilter);
                 if (groups.length === 0) {
                   return (
                     <p className="px-2 py-1 text-xs text-l4">没有匹配的模型</p>
@@ -611,9 +835,7 @@ function ProfileModal({
                         }
                         className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left text-xs font-medium text-l2 hover:bg-hover"
                       >
-                        <span className="w-3 shrink-0 text-l4">
-                          {open ? "▾" : "▸"}
-                        </span>
+                        <FoldMark open={open} />
                         {g.vendor}
                         <span className="text-micro text-l4">
                           {g.models.length}
@@ -645,11 +867,6 @@ function ProfileModal({
               })()}
             </div>
           )}
-          {fetchError && (
-            <p className="mb-2 text-xs text-err-text">{fetchError}</p>
-          )}
-            </>
-          )}
           {/* 空模型是个静默陷阱（pty.rs）：models 为空时**完全不注入**模型环境变量，
               CLI 用自己的默认值——用户看到的现象就是「切了没反应」。API 类配置才提示，
               官方账号本就由 CLI 自己决定模型；空串槽位不算已填 */}
@@ -666,7 +883,9 @@ function ProfileModal({
             const max = MODEL_SWITCH[form.agent]?.max ?? null;
             const filled = form.models.filter((m) => m.trim()).length;
             const slots = [...form.models];
-            if (max == null) {
+            // 选用已有网关 / 编辑绑定：只留 1 个空槽手填，不按选择器容量铺一排空行。
+            const compactSlots = Boolean(initial) || bindMode === "existing";
+            if (max == null || compactSlots) {
               if (slots.length === 0 || slots[slots.length - 1].trim() !== "")
                 slots.push("");
             } else {
@@ -677,6 +896,26 @@ function ProfileModal({
             const firstFilled = slots.findIndex((m) => m.trim());
             return (
               <div className="space-y-0.5">
+                {max != null && filled > max && (
+                  <div className="mb-1 flex items-center gap-2 text-xs text-warn-text">
+                    <span>选择器只显示前 {max} 个，另有 {filled - max} 个不会进 CLI</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setForm({
+                          ...form,
+                          models: form.models
+                            .map((m) => m.trim())
+                            .filter(Boolean)
+                            .slice(0, max),
+                        })
+                      }
+                      className="text-l3 hover:text-l1"
+                    >
+                      只保留前 {max} 个
+                    </button>
+                  </div>
+                )}
                 {slots.map((m, i) => (
                   <div
                     key={i}
@@ -763,7 +1002,18 @@ function ProfileModal({
               </label>
             )}
             <div className="mb-3 rounded border border-hairline p-2">
-              <p className="mb-2 text-xs font-medium text-l2">请求策略声明（按 Agent 能力决定是否生效）</p>
+              <p className="mb-2 text-xs font-medium text-l2">请求策略</p>
+              {combo?.effortReadonly && (
+                <p className="mb-1 text-[11px] text-l3">思考档已保存在网关，当前 CLI 没有注入通道，启动时不会写进去。</p>
+              )}
+              {combo && !combo.injectTemperatureAllowed && form.requestPolicy.temperature != null && (
+                <p className="mb-1 text-[11px] text-l3">温度已保存在网关，当前 CLI 没有通道，启动时不会注入。</p>
+              )}
+              {combo?.mixedModelsNote && (
+                <p className="mb-1 text-[11px] text-warn-text">{combo.mixedModelsNote}</p>
+              )}
+              {!initial && bindMode === "new" && (
+                <>
               <div className="grid grid-cols-3 gap-2">
                 {([[
                   "temperature", "temperature", "temperature"], ["topP", "top_p", "topP"], ["maxOutputTokens", "max output", "maxOutputTokens"]] as const).map(([key, label, capability]) => {
@@ -781,8 +1031,15 @@ function ProfileModal({
               ) : (
                 <input className={fieldClass} placeholder="如 low / medium / high" value={form.requestPolicy.reasoningEffort ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, reasoningEffort: e.target.value || null } })} />
               )}</label>
+                </>
+              )}
+              {initial && (
+                <p className="mb-2 text-[11px] text-l4">思考档 / 温度 / 输出上限在网关库里按模型编辑，这里改了也不会覆盖已有逐模型策略。</p>
+              )}
+              {showGatewayFields && (
               <label className="mt-2 block text-xs text-l3">自定义 Header（Header 名=环境变量名）<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.customHeaders === "supported" ? "支持" : agentCapabilities?.requestPolicy.customHeaders === "unsupported" ? "不支持" : "未知"}</span><textarea className={`${fieldClass} h-16 font-mono text-xs`} placeholder="X-Provider-Region=MODEL_REGION\nX-Trace-Id=TRACE_ID" value={headerEnvText} onChange={(e) => setHeaderEnvText(e.target.value)} /></label>
-              <p className="mt-1 text-[11px] text-l4">这是跨 Agent 的策略记录；当前不会伪造请求体，未适配字段不会注入。Header 值只填环境变量名，不保存密文。</p>
+              )}
+              <p className="mt-1 text-[11px] text-l4">Header 跟网关；思考档/温度跟每个模型。当前不会伪造请求体。Header 值只填环境变量名，不保存密文。</p>
             </div>
             <label className="block text-sm">
               <span className="mb-1 block text-xs text-l3">
@@ -826,11 +1083,18 @@ function ProfileModal({
 /** 分组折叠状态持久化的 localStorage key：值为折叠中的 agent id 数组 */
 const COLLAPSED_KEY = "ccode.profiles.collapsed";
 
-/** 读取已持久化的折叠分组；无记录（首次使用）或数据损坏时返回空集（全部展开） */
+/** 读取已持久化的折叠分组；无记录时默认折叠「还没有连接」的组，避免空组淹没已有连接 */
 function loadCollapsedGroups(): Set<string> {
   try {
     const raw = localStorage.getItem(COLLAPSED_KEY);
-    if (!raw) return new Set();
+    if (!raw) {
+      const list = useAppStore.getState().profiles;
+      return new Set(
+        AGENTS.filter((a) => !list.some((p) => p.agent === a.id)).map(
+          (a) => a.id,
+        ),
+      );
+    }
     const arr: unknown = JSON.parse(raw);
     if (!Array.isArray(arr)) return new Set();
     return new Set(arr.filter((x): x is string => typeof x === "string"));
@@ -941,76 +1205,57 @@ function StatusPill({
   );
 }
 
-/** 官方账号状态行：与数据行共用同一五列网格与行高（无独立背景/行高），
- *  状态微型标签占「名称」列、操作占「操作」列，保证整列严格对齐；
- *  排查指引（检测路径/登录命令/断开方式）收进悬浮 tooltip，右侧只留连接 + 刷新图标钮。
- *  hook 约束：状态行挂在 per-agent 组件上，useHoverTip 才能逐行实例化。 */
-function OfficialStatusRow({
+/** 官方账号状态：收进组头芯片（已安装才挂），不再占一整行「未连接」。
+ *  未连接仍出「连接」——那是 CLI 登录入口，不是「+ 添加连接」。
+ *  hook 约束：挂在 per-agent 组头上，useHoverTip 才能逐组实例化。 */
+function OfficialStatusChip({
   agentId,
   st,
   onConnect,
-  onRefresh,
 }: {
   agentId: string;
   st: OfficialAccountStatusDto;
   onConnect: () => void;
-  onRefresh: () => void;
 }) {
-  const anchorRef = useRef<HTMLSpanElement>(null);
+  const anchorRef = useRef<HTMLElement>(null);
   const { tip, show, hide } = useHoverTip(anchorRef);
-  // 悬浮正文：检测说明（含凭证路径）+ 下一步操作引导
   const lines: string[] = [];
   if (st.detail) lines.push(st.detail);
   if (st.connected) {
     const hint = OFFICIAL_LOGOUT_HINT[agentId];
     if (hint) lines.push(`断开方式：${hint}`);
   } else if (st.loginCommand) {
-    lines.push(`点「连接」将在终端执行：${st.loginCommand}`);
+    lines.push(`点「登录」将在终端执行：${st.loginCommand}`);
   }
-  return (
-    <div
-      className={`grid min-h-14 ${PROFILE_GRID} items-center gap-3 border-b border-hairline px-4 text-sm`}
-    >
+  if (st.connected) {
+    return (
       <span
         ref={anchorRef}
         onMouseEnter={show}
         onMouseLeave={hide}
-        onFocus={show}
-        onBlur={hide}
         tabIndex={0}
-        className="flex min-w-0 cursor-default items-center gap-1.5"
+        className="flex cursor-default items-center gap-1 px-1 text-micro text-ok-text"
       >
-        <span
-          className={`h-1.5 w-1.5 shrink-0 rounded-full ${st.connected ? "bg-ok-text" : "bg-l4"}`}
-        />
-        <span className={st.connected ? "text-ok-text" : "text-l3"}>
-          官方账号 · {st.connected ? "已连接" : "未连接"}
-        </span>
+        <span className="h-1.5 w-1.5 rounded-full bg-ok-text" />
+        官方
+        {lines.length > 0 && <HoverTip tip={tip} text={lines.join("\n")} />}
       </span>
+    );
+  }
+  return (
+    <span ref={anchorRef} className="inline-flex text-xs">
+      <button
+        type="button"
+        onMouseEnter={show}
+        onMouseLeave={hide}
+        onClick={onConnect}
+        title={lines.join("\n") || "在终端登录官方账号"}
+        className={rowActionClass}
+      >
+        登录
+      </button>
       {lines.length > 0 && <HoverTip tip={tip} text={lines.join("\n")} />}
-      <span />
-      <span />
-      <span />
-      <span className="flex shrink-0 items-center justify-end gap-1">
-        {!st.connected && (
-          <button
-            onClick={onConnect}
-            title={`在终端执行 ${st.loginCommand ?? ""}`}
-            className={ghostActionClass}
-          >
-            连接
-          </button>
-        )}
-        <button
-          onClick={onRefresh}
-          title="重新检测连接状态"
-          aria-label="重新检测连接状态"
-          className="flex h-7 w-7 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1"
-        >
-          ⟳
-        </button>
-      </span>
-    </div>
+    </span>
   );
 }
 
@@ -1056,12 +1301,6 @@ function installToolHelp(agentId: string): string {
     return "未找到可用的安装工具：该 agent 在 Windows 上只能走 npm 渠道。请先安装 Node.js LTS（自带 npm），安装完成后完全退出并重新打开 Ccode 再重试。下载：https://nodejs.org/en/download";
   }
   return "未找到可用的安装工具。请先安装 Node.js（会同时提供 npm），然后完全退出并重新打开 Ccode 再重试。";
-}
-
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
 }
 
 function validationTone(status: ValidationCheckDto["status"]): string {
@@ -1150,90 +1389,6 @@ function ValidationDialog({
               {result.ok
                 ? "✓ 三层验证完成"
                 : "✗ 存在未通过项目，请按上方信息修复后重试"}
-            </span>
-          ) : null}
-        </footer>
-      </section>
-    </div>
-  );
-}
-
-/** 网关体检弹层：绕过 CLI 直连端点的裸探针结果（probe_gateway），结构与 ValidationDialog 一致 */
-function ProbeDialog({
-  profile,
-  result,
-  running,
-  onClose,
-}: {
-  profile: Profile;
-  result: GatewayProbeDto | null;
-  running: boolean;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 ccode-fade"
-      onClick={onClose}
-    >
-      <section
-        className="w-full max-w-xl rounded-lg border border-field ccode-float-surface"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
-          <div className="min-w-0">
-            <h2 className="truncate text-sm font-medium text-l1">
-              网关体检 · {profile.name}
-            </h2>
-            <p className="mt-0.5 text-xs text-l4">
-              {result
-                ? `模型 ${result.model} · 探针只发 max_tokens=16 的 ping，成本可忽略`
-                : "探针只发 max_tokens=16 的 ping，成本可忽略"}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="ml-auto h-8 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
-          >
-            关闭
-          </button>
-        </header>
-        <div className="divide-y divide-hairline">
-          {result?.checks.length ? (
-            result.checks.map((item, index) => (
-              <div
-                key={index}
-                className="grid grid-cols-[24px_1fr] gap-2 px-4 py-3 text-xs"
-              >
-                <span className={validationTone(item.status)}>
-                  {item.status === "passed"
-                    ? "✓"
-                    : item.status === "failed"
-                      ? "✗"
-                      : "—"}
-                </span>
-                <div className="min-w-0 text-l3">
-                  <p className="break-words">{item.message}</p>
-                  {item.latencyMs != null && (
-                    <span className="mt-1 block font-mono text-l4">
-                      {item.latencyMs}ms
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))
-          ) : (
-            <div className="px-4 py-3 text-xs text-l3">
-              {running ? "正在探测…" : "等待探测"}
-            </div>
-          )}
-        </div>
-        <footer className="border-t border-hairline px-4 py-3 text-xs">
-          {running ? (
-            <span className="text-l3">正在逐项探测网关行为…</span>
-          ) : result ? (
-            <span className={result.ok ? "text-ok-text" : "text-err-text"}>
-              {result.ok ? "✓ 体检通过" : "✗ 存在问题项"}
             </span>
           ) : null}
         </footer>
@@ -1349,11 +1504,6 @@ function PreviewDialog({
   );
 }
 
-/** 后端恒返回用量 DTO，零用量（全 0）不显示「用量与费用」入口 */
-function hasUsage(u: ProfileUsageDto | undefined): boolean {
-  return !!u && (u.input > 0 || u.output > 0);
-}
-
 /** 「设为全局」进度/结果弹层：确认后立即弹出（写入 + CLI 复检含网络检查，要几秒到
     十几秒，没反馈像点了没反应）；完成后同层切换为结果视图；验证未通过可一键展开
     三层验证详情（复用 ValidationDialog）。进行中禁关（点遮罩无效、无关闭钮）防误触 */
@@ -1464,7 +1614,7 @@ function GlobalApplyDialog({
 export default function ProfilesPage({ visible }: { visible: boolean }) {
   const profiles = useAppStore((s) => s.profiles);
   const profileIssues = useAppStore((s) => s.profileIssues);
-  const [usageMap, setUsageMap] = useState<Record<string, ProfileUsageDto>>({});
+  const [driftByAgent, setDriftByAgent] = useState<Record<string, GlobalDriftDto>>({});
   const [validationMap, setValidationMap] = useState<Record<string, { ok: boolean; checkedAt: string }>>(() => {
     try {
       return JSON.parse(localStorage.getItem("ccode.profileValidation") ?? "{}") as Record<string, { ok: boolean; checkedAt: string }>;
@@ -1482,11 +1632,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       /* localStorage unavailable: current view still shows the result */
     }
   }
-  const [usagePop, setUsagePop] = useState<{
-    x: number;
-    y: number;
-    id: string;
-  } | null>(null);
+
   // 组头「! N 项连接冲突」胶囊的点击弹层（锚定 agent 分组头）
   const [conflictPop, setConflictPop] = useState<{
     x: number;
@@ -1496,29 +1642,21 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
 
   // 各 profile 用量（按模型近似归属；模型跨 profile 共享时会重复计入）
   useEffect(() => {
-    // profiles 清空时同步清表，避免残留已删除 profile 的陈旧条目
-    if (!profiles.length) {
-      setUsageMap({});
-      return;
-    }
-    // profiles 快速变化时旧批次可能晚返回，cancelled 阻止整表覆盖新结果
+    const agents = [...new Set(profiles.map((p) => p.agent))];
     let cancelled = false;
     Promise.all(
-      profiles.map(async (p) => {
+      agents.map(async (agent) => {
         try {
-          return [
-            p.id,
-            await invoke<ProfileUsageDto>("profile_usage", { profileId: p.id }),
-          ] as const;
+          return [agent, await invoke<GlobalDriftDto>("check_global_drift", { agent })] as const;
         } catch {
           return null;
         }
       }),
     ).then((entries) => {
       if (cancelled) return;
-      const m: Record<string, ProfileUsageDto> = {};
+      const m: Record<string, GlobalDriftDto> = {};
       for (const e of entries) if (e) m[e[0]] = e[1];
-      setUsageMap(m);
+      setDriftByAgent(m);
     });
     return () => {
       cancelled = true;
@@ -1527,9 +1665,8 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
 
   // 悬浮卡（用量 / 连接冲突）：Escape / 任意滚动即关闭（同 ContextMenu；滚动关闭也避免与锚点脱离）
   useEffect(() => {
-    if (!usagePop && !conflictPop) return;
+    if (!conflictPop) return;
     const closeAll = () => {
-      setUsagePop(null);
       setConflictPop(null);
     };
     const onKey = (e: KeyboardEvent) => {
@@ -1542,10 +1679,9 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", closeAll, true);
     };
-  }, [usagePop, conflictPop]);
+  }, [conflictPop]);
   const agents = useAppStore((s) => s.agents);
   const removeProfile = useAppStore((s) => s.removeProfile);
-  const duplicateProfile = useAppStore((s) => s.duplicateProfile);
   const loadAll = useAppStore((s) => s.loadAll);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
@@ -1603,11 +1739,18 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     initial: Profile | null;
     presetAgent?: string;
   } | null>(null);
+  const [gwLib, setGwLib] = useState(false);
+  const [gwFocus, setGwFocus] = useState<string | null>(null);
   const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
   const [rowMenu, setRowMenu] = useState<{
     x: number;
     y: number;
     profile: Profile;
+  } | null>(null);
+  const [groupMenu, setGroupMenu] = useState<{
+    x: number;
+    y: number;
+    agentId: string;
   } | null>(null);
   // 「复制到其他 agent…」二级菜单（#14）：点 rowMenu 项后替换弹出，列出同协议族目标
   const [copyMenu, setCopyMenu] = useState<{
@@ -1618,12 +1761,6 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
   const [validationDialog, setValidationDialog] = useState<{
     profile: Profile;
     result: ProfileValidationDto | null;
-    running: boolean;
-  } | null>(null);
-  // 网关体检弹层（probe_gateway）：结构与 validationDialog 一致
-  const [probeDialog, setProbeDialog] = useState<{
-    profile: Profile;
-    result: GatewayProbeDto | null;
     running: boolean;
   } | null>(null);
   // 启动计划预览弹层（preview_launch_plan）：结构化展示，替代旧 alertDialog 堆文本
@@ -1639,9 +1776,23 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     "all" | "installed" | "uninstalled"
   >("all");
   const [search, setSearch] = useState("");
-  // 组折叠状态：首次使用默认全部展开，手动折叠后持久化到 localStorage
+  // 组折叠状态：首次默认折叠空组，手动折叠后持久化到 localStorage
   const [collapsedGroups, setCollapsedGroups] =
     useState<Set<string>>(loadCollapsedGroups);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(COLLAPSED_KEY)) return;
+    } catch {
+      return;
+    }
+    setCollapsedGroups(
+      new Set(
+        AGENTS.filter((a) => !profiles.some((p) => p.agent === a.id)).map(
+          (a) => a.id,
+        ),
+      ),
+    );
+  }, [profiles]);
 
   /** 更新折叠集合并同步写入 localStorage */
   function updateCollapsed(updater: (prev: Set<string>) => Set<string>) {
@@ -1668,6 +1819,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     models: number;
     downloadedAt?: string | null;
   } | null>(null);
+  const [modelDbBusy, setModelDbBusy] = useState(false);
   useEffect(() => {
     invoke<{
       downloaded: boolean;
@@ -1680,6 +1832,9 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
 
   /** 下载/更新公共模型能力库：下载后接入的模型自动带上正确的上下文/输出/视觉/推理声明 */
   async function onModelDbDownload() {
+    if (modelDbBusy) return;
+    setModelDbBusy(true);
+    setNotice("正在下载模型能力库…");
     try {
       const s = await invoke<{
         downloaded: boolean;
@@ -1691,7 +1846,10 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       setTimeout(() => setNotice(null), 4000);
       setError(null);
     } catch (e) {
+      setNotice(null);
       setError(String(e));
+    } finally {
+      setModelDbBusy(false);
     }
   }
   // 各 agent 的升级/安装进行态、实时输出与最近结果（可并发操作多个 agent）
@@ -1964,21 +2122,6 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
 
-  async function onProbeGateway(p: Profile) {
-    setProbeDialog({ profile: p, result: null, running: true });
-    try {
-      const result = await invoke<GatewayProbeDto>("probe_gateway", {
-        profileId: p.id,
-        model: p.models[0] ?? null,
-      });
-      setProbeDialog({ profile: p, result, running: false });
-      setError(null);
-    } catch (e) {
-      setProbeDialog(null);
-      setError(String(e));
-    }
-  }
-
   async function onPreviewLaunchPlan(p: Profile) {
     try {
       const result = await invoke<LaunchPlanPreviewDto>("preview_launch_plan", { profileId: p.id, model: p.models[0] ?? null });
@@ -2042,22 +2185,34 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
 
-  /** 导出为 JSON（不含密钥），路径由系统保存对话框给出 */
+  /** 导出网关+绑定 v2；含密钥须二次确认，文件权限 0600 */
   async function onExport() {
     try {
+      const wantKeys = await confirmDialog(
+        "导出是否包含密钥？包含时文件是明文，请只放在本机可信位置。点取消则导出不含密钥。",
+      );
+      let includeKeys = !!wantKeys;
+      if (includeKeys) {
+        const sure = await confirmDialog(
+          "再确认一次：导出文件将写入明文密钥，并设为仅你可读。确定包含？",
+          { danger: true, confirmText: "仍要包含密钥" },
+        );
+        if (!sure) return;
+      }
       const path = await save({
-        defaultPath: "ccode-profiles.json",
+        defaultPath: "ccode-gateways.json",
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
       if (!path) return;
-      await invoke("export_profiles", { path });
+      await invoke("export_gateways_v2", { path, includeKeys });
       setError(null);
+      setNotice(includeKeys ? "已导出（含密钥，请妥善保管文件）" : "已导出网关与绑定（不含密钥）");
     } catch (e) {
       setError(String(e));
     }
   }
 
-  /** 从 JSON 导入，跳过重复项；密钥不在文件里，需导入后补填 */
+  /** 导入 v2 网关包；失败再走旧 profiles 数组 */
   async function onImport() {
     try {
       const path = await open({
@@ -2065,10 +2220,20 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
       if (!path) return;
-      const added = await invoke<number>("import_profiles", { path });
-      await loadAll();
-      setError(null);
-      await alertDialog(`已导入 ${added} 个连接（密钥需逐个补填）`);
+      try {
+        const res = await invoke<ImportV2Result>("import_gateways_v2", { path });
+        await loadAll();
+        setError(null);
+        const skip = res.skippedSlots.length
+          ? `\n跳过 ${res.skippedSlots.length} 项：\n${res.skippedSlots.join("\n")}`
+          : "";
+        await alertDialog(`已导入 ${res.addedGateways} 个网关、${res.addedBindings} 条绑定${skip}`);
+      } catch {
+        const added = await invoke<number>("import_profiles", { path });
+        await loadAll();
+        setError(null);
+        await alertDialog(`已导入 ${added} 个连接（旧格式，密钥需逐个补填）`);
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -2076,26 +2241,16 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
 
   async function onDelete(p: Profile) {
     if (
-      !(await confirmDialog(`删除连接「${p.name}」？本地受限存储的密钥会一并删除。`, {
-        danger: true,
-      }))
+      !(await confirmDialog(
+        `解绑「${p.name}」？网关和密钥会留下，其它 Agent 的绑定不受影响。`,
+        {
+          danger: true,
+        },
+      ))
     )
       return;
     try {
       await removeProfile(p.id);
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  async function onClearKey(p: Profile) {
-    if (!(await confirmDialog(`清除连接「${p.name}」的本地密钥？之后需要重新填写才可启动。`, { danger: true })))
-      return;
-    try {
-      await invoke("clear_profile_key", { id: p.id });
-      await loadAll();
-      setNotice(`已清除「${p.name}」的本地密钥`);
-      setTimeout(() => setNotice(null), 4000);
     } catch (e) {
       setError(String(e));
     }
@@ -2109,6 +2264,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
         targetAgent,
       });
       await loadAll();
+      invoke("rebuild_tray").catch(() => {});
       setNotice(`已复制连接到 ${labelOf(targetAgent)}：「${created.name}」`);
       setTimeout(() => setNotice(null), 4000);
       setError(null);
@@ -2228,9 +2384,16 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
         {/* 命令栏：标题 + 元信息，右侧动作 */}
         <PageHeader
           title="连接"
-          meta={`Agent、供应商与模型 · ${profiles.length} 个连接`}
+          meta={`每个 Agent 绑哪个网关、用哪些模型 · ${profiles.length} 个连接`}
           actions={
             <>
+              <button
+                type="button"
+                onClick={() => setGwLib(true)}
+                className={secondaryActionClass}
+              >
+                网关库
+              </button>
               <button
                 type="button"
                 onClick={() => setModal({ initial: null })}
@@ -2335,15 +2498,22 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                       });
                     }}
                     aria-label={isCollapsed ? "展开" : "收起"}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-sm text-l2 hover:bg-hover hover:text-l1"
+                    className="flex shrink-0 items-center justify-center rounded-md hover:brightness-110"
                   >
-                    {isCollapsed ? "▸" : "▾"}
+                    <FoldMark open={!isCollapsed} boxed />
                   </button>
-                  <h2 className="text-sm font-medium text-l1">
+                  <h2
+                    className="text-sm font-medium text-l1"
+                    title={
+                      det?.binaryPath
+                        ? `${agent.binary} ${det.version ?? ""}`.trim()
+                        : undefined
+                    }
+                  >
                     {agent.label}
                   </h2>
                   <span className="rounded-full bg-inset px-1.5 py-0.5 text-micro text-l4">
-                    {connectionCount} 个连接
+                    {connectionCount}
                   </span>
                   {/* 连接冲突提升为组头琥珀胶囊（v3.93）：CLI 自读文件里的残留密钥会覆盖官方账号
                       登录并产生计费——藏在大段灰字里会被忽略；点击弹层列出具体文件/变量 */}
@@ -2365,26 +2535,32 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                       ! {officialStatus[agent.id].conflicts.length} 项连接冲突
                     </button>
                   )}
-                  {/* 已安装显示包名+版本号（mono micro 灰字，弱化技术参数）；右侧状态：更新中… / 新版（可点更新）/ 更新（查不到最新版时的回退）；已是最新则不显示 */}
-                  {det?.binaryPath ? (
-                    <span className="font-mono text-micro text-l4">
-                      {agent.binary} {det.version ?? ""}
-                    </span>
-                  ) : (
-                    <span className="text-xs text-l2">
-                      未安装（<span className="font-mono">{agent.binary}</span>{" "}
-                      不在 PATH）
-                    </span>
+                  {!det?.binaryPath && (
+                    <span className="text-xs text-l4">未安装</span>
+                  )}
+                  {officialStatus[agent.id]?.supported && det?.binaryPath && (
+                    <OfficialStatusChip
+                      agentId={agent.id}
+                      st={officialStatus[agent.id]}
+                      onConnect={() => connectOfficial(agent.id)}
+                    />
                   )}
                   <div className="ml-auto flex items-center gap-1">
                     <button
                       type="button"
-                      onClick={() =>
-                        setModal({ initial: null, presetAgent: agent.id })
-                      }
-                      className={rowActionClass}
+                      onClick={(event) => {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setGroupMenu({
+                          x: rect.right - 176,
+                          y: rect.bottom + 4,
+                          agentId: agent.id,
+                        });
+                      }}
+                      aria-label={`${agent.label} 全局备份`}
+                      title="恢复全局配置备份"
+                      className="flex h-8 w-8 items-center justify-center rounded-sm text-sm text-l2 hover:bg-hover hover:text-l1"
                     >
-                      + 添加连接
+                      ⋯
                     </button>
                     {det?.binaryPath ? (
                     (() => {
@@ -2458,15 +2634,6 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
 
                 {!isCollapsed && (
                   <div className="border-t border-hairline">
-                    {/* 官方账号状态行（P1a）：支持官方账号的 agent 固定展示；断开走 CLI 自己的 logout，Ccode 不删 auth 文件 */}
-                    {officialStatus[agent.id]?.supported && (
-                      <OfficialStatusRow
-                        agentId={agent.id}
-                        st={officialStatus[agent.id]}
-                        onConnect={() => connectOfficial(agent.id)}
-                        onRefresh={() => void refreshOfficial(agent.id)}
-                      />
-                    )}
                     {/* 安装/更新实时输出（全宽，行为不变） */}
                     {updating[agent.id] && (
                       <div className="mx-3 mt-2">
@@ -2559,19 +2726,9 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                     )}
 
                     {list.length === 0 ? (
-                      // 空状态虚线引导框（v3.93）：整框即「+ 添加配置」按钮，强化可点击创建的暗示；
-                      // 分组内小区块虚线，不属于被否决的大面积页面级虚线空状态
-                      <div className="px-3 py-3">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setModal({ initial: null, presetAgent: agent.id })
-                          }
-                          className="flex h-12 w-full items-center justify-center rounded-md border border-dashed border-field text-xs text-l3 transition-colors hover:border-l4 hover:bg-inset hover:text-l1"
-                        >
-                          + 添加连接
-                        </button>
-                      </div>
+                      <p className="px-4 py-3 text-xs text-l4">
+                        还没有连接。用页头「+ 添加连接」绑定网关。
+                      </p>
                     ) : (
                       // 行间极细分割线（hairline）替代卡片间距：整列垂直严格对齐，视觉节奏与官方账号行一致
                       <ul className="divide-y divide-hairline overflow-x-auto">
@@ -2585,8 +2742,6 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                           const isGlobal =
                             settings?.activeGlobalProfiles?.[profile.agent] ===
                             profile.id;
-                          const verified =
-                            validationMap[profile.id]?.ok === true;
                           // caption 行（名称下方次级辅助文本）：上次使用 · 默认 · 全局生效
                           const caption: {
                             text: string;
@@ -2605,11 +2760,22 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                             });
                           // 「设为全局」追踪标记：只代表上次由 Ccode 写入全局配置，
                           // 外部手改配置文件后会失真——tip 照实说明，不声称绝对生效
-                          if (isGlobal)
+                          if (isGlobal) {
+                            const drift = driftByAgent[profile.agent];
+                            const drifted = drift?.status === "drifted";
                             caption.push({
-                              text: "全局生效",
-                              tip: "上次由 Ccode 写入该 agent 的全局配置：外部终端/其他工具里的该 CLI 用这套。在 Ccode 之外手改配置文件后此标记可能失真",
-                              cls: "text-ok-text",
+                              text: drifted ? "全局生效 · 已被外部修改" : "全局生效",
+                              tip: drifted
+                                ? `磁盘与 Ccode 写入不一致：${(drift?.files ?? []).join("、") || "配置文件"}。可用「设为全局」以 Ccode 为准重写，或「恢复备份」。`
+                                : "上次由 Ccode 写入该 agent 的全局配置：外部终端/其他工具里的该 CLI 用这套。在 Ccode 之外手改配置文件后此标记可能失真",
+                              cls: drifted ? "text-warn-text" : "text-ok-text",
+                            });
+                          }
+                          if (profile.slotMissing)
+                            caption.push({
+                              text: "缺槽",
+                              tip: "这个网关还没配该协议的端点，启动栏不能选；请先在网关库补槽",
+                              cls: "text-warn-text",
                             });
                           return (
                           <li
@@ -2626,11 +2792,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                                   <StatusPill tone="err" tip={profileIssues[profile.id].reason}>配置失效</StatusPill>
                                 ) : hidden ? (
                                   <StatusPill tone="muted" tip="已停用：不会被恢复会话和 AI 功能自动挑中；启动栏下拉里沉到「已停用」分组，仍可手选">已停用</StatusPill>
-                                ) : verified ? (
-                                  <StatusPill tone="ok" tip={`最近验证 ${validationMap[profile.id].checkedAt}`}>已验证</StatusPill>
-                                ) : (
-                                  <StatusPill tone="muted" tip="尚未验证；行尾 ⋯ 菜单可手动「验证」">未验证</StatusPill>
-                                )}
+                                ) : null}
                               </span>
                               {/* caption 行：micro 档灰字，相对时间主显、悬浮给绝对时间（白话双层） */}
                               {caption.length > 0 && (
@@ -2778,49 +2940,6 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
           })}
         </div>
       </PageFrame>
-      {usagePop && usageMap[usagePop.id] && (
-        <div className="fixed inset-0 z-20" onClick={() => setUsagePop(null)}>
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="absolute w-56 rounded-md border border-field ccode-float-surface p-3 text-xs"
-            // 防出屏：往左/往上收（卡片 w-56 约 224px、高约 170px）
-            style={{
-              left: Math.max(8, Math.min(usagePop.x, window.innerWidth - 240)),
-              top: Math.max(8, Math.min(usagePop.y, window.innerHeight - 180)),
-            }}
-          >
-            {(() => {
-              const u = usageMap[usagePop.id]!;
-              return (
-                <>
-                  <div className="mb-1 font-medium text-l1">
-                    用量 / 费用（官方价）
-                  </div>
-                  <div className="flex justify-between py-0.5 text-l2">
-                    <span>输入</span>
-                    <span>{fmtTokens(u.input)}</span>
-                  </div>
-                  <div className="flex justify-between py-0.5 text-l2">
-                    <span>输出</span>
-                    <span>{fmtTokens(u.output)}</span>
-                  </div>
-                  <div className="flex justify-between py-0.5 text-l2">
-                    <span>费用</span>
-                    <span>
-                      {u.costUsd != null
-                        ? `${u.costPartial ? "≥" : ""}$${u.costUsd.toFixed(2)}`
-                        : "~"}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-l4">
-                    按模型近似归属；模型跨配置共享时会重复计入
-                  </p>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
       {/* 连接冲突弹层：组头琥珀胶囊点出，列出具体文件/变量；只含文件名与变量名，密钥值不出后端 */}
       {conflictPop &&
         (() => {
@@ -2877,6 +2996,21 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
             </div>
           );
         })()}
+      {gwLib && (
+        <GatewayLibrary
+          initialId={gwFocus}
+          onClose={() => {
+            setGwLib(false);
+            setGwFocus(null);
+          }}
+          onJumpUsage={(id) => {
+            sessionStorage.setItem("ccode.statsGateway", id);
+            setGwLib(false);
+            setGwFocus(null);
+            setPage("stats");
+          }}
+        />
+      )}
       {modal && (
         <ProfileModal
           initial={modal.initial}
@@ -2885,6 +3019,11 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
             Object.entries(officialStatus).map(([k, v]) => [k, v.supported]),
           )}
           onClose={() => setModal(null)}
+          onOpenGateway={(id) => {
+            setModal(null);
+            setGwFocus(id);
+            setGwLib(true);
+          }}
           onSaved={(agent, name) => {
             // 注入模式：改动只对**新启动**的标签生效，已在跑的要重开
             if (runningAgents.has(agent))
@@ -2903,11 +3042,18 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
             { label: "导入连接", onSelect: () => void onImport() },
             { label: "导出连接", onSelect: () => void onExport() },
             {
-              label: modelDb?.downloaded
-                ? `更新模型能力库（已有 ${modelDb.models} 个模型）`
-                : "下载模型能力库（models.dev）",
+              label: modelDbBusy
+                ? "正在下载模型能力库…"
+                : modelDb?.downloaded
+                  ? `更新模型能力库（${modelDb.models} 个${
+                      modelDb.downloadedAt
+                        ? ` · ${modelDb.downloadedAt.slice(0, 10)}`
+                        : ""
+                    }）`
+                  : "下载模型能力库（models.dev）",
+              disabled: modelDbBusy,
               title:
-                "第三方模型的能力声明（上下文/输出上限/视觉/推理）公共数据源；下载后接入模型自动带正确声明。表单里点「获取模型」时也会顺带沉淀网关实测数据",
+                "第三方模型的能力声明（上下文/输出上限/视觉/推理）公共数据源。models.dev 不可达时自动换 OpenRouter。点「获取模型」时也会沉淀该网关实测数据。",
               onSelect: () => void onModelDbDownload(),
             },
           ]}
@@ -2942,84 +3088,80 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
               title: "终端启动栏选完这个 agent 后自动预选该配置",
               onSelect: () => void toggleDefaultProfile(rowMenu.profile),
             },
-            ...(hasUsage(usageMap[rowMenu.profile.id])
-              ? [
-                  {
-                    label: "用量与费用",
-                    onSelect: () =>
-                      setUsagePop({
-                        x: Math.max(8, rowMenu.x - 232),
-                        y: rowMenu.y,
-                        id: rowMenu.profile.id,
-                      }),
-                  },
-                ]
-              : []),
-            {
-              label: "复制连接",
-              onSelect: () => {
-                const p = rowMenu.profile;
-                void (async () => {
-                  try {
-                    await duplicateProfile(p.id);
-                  } catch (e) {
-                    setError(String(e));
-                  }
-                })();
-              },
-            },
             {
               label: "复制到其他 agent…",
               onSelect: () =>
-                // rowMenu 已随本次点击关闭，二级菜单在同一锚点弹出
                 setCopyMenu({
                   x: rowMenu.x,
                   y: rowMenu.y,
                   profile: rowMenu.profile,
                 }),
             },
-            { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
-            { label: "启动计划预览", onSelect: () => void onPreviewLaunchPlan(rowMenu.profile) },
-            { label: "网关体检", onSelect: () => void onProbeGateway(rowMenu.profile) },
-            ...(rowMenu.profile.accountType === "api" && rowMenu.profile.hasKey
-              ? [{ label: "清除本地密钥", onSelect: () => void onClearKey(rowMenu.profile) }]
-              : []),
             {
-              label: "设为全局",
+              label: rowMenu.profile.accountType === "official" ? "设为全局（恢复官方）" : "设为全局",
               disabled:
-                rowMenu.profile.accountType === "official" ||
                 rowMenu.profile.noAuth ||
-                (caps[rowMenu.profile.agent] !== undefined &&
+                !!rowMenu.profile.slotMissing ||
+                (rowMenu.profile.accountType !== "official" &&
+                  caps[rowMenu.profile.agent] !== undefined &&
                   !caps[rowMenu.profile.agent].setGlobal.supported),
               title:
                 rowMenu.profile.accountType === "official"
-                  ? "官方账号不写入全局配置"
+                  ? "恢复该 CLI 首次写入前的配置，让官方账号接手外部终端"
+                  : rowMenu.profile.slotMissing
+                    ? "这个网关还没配该协议的端点"
                   : rowMenu.profile.noAuth
                     ? "无密钥连接不写入全局配置"
                     : (caps[rowMenu.profile.agent]?.setGlobal.reason ??
                       "写入该 agent 的全局配置文件（先备份、失败自动回滚）；成功后此连接标记「全局生效」，供外部终端使用"),
               onSelect: () => void onApplyGlobal(rowMenu.profile),
             },
-            ...(globalBackups[rowMenu.profile.agent]
+            {
+              label: "解绑",
+              danger: true,
+              onSelect: () => void onDelete(rowMenu.profile),
+            },
+            { separator: true },
+            { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
+            { label: "启动计划预览", onSelect: () => void onPreviewLaunchPlan(rowMenu.profile) },
+          ]}
+        />
+      )}
+      {groupMenu && (
+        <ContextMenu
+          x={groupMenu.x}
+          y={groupMenu.y}
+          onClose={() => setGroupMenu(null)}
+          items={[
+            ...(officialStatus[groupMenu.agentId]?.supported
               ? [
                   {
-                    label: "恢复备份",
-                    title: "恢复最近一次写入前的状态",
-                    onSelect: () => void onRestoreBackup(rowMenu.profile.agent),
+                    label: officialStatus[groupMenu.agentId].connected
+                      ? "刷新官方账号"
+                      : "登录官方账号",
+                    onSelect: () =>
+                      officialStatus[groupMenu.agentId].connected
+                        ? void refreshOfficial(groupMenu.agentId)
+                        : connectOfficial(groupMenu.agentId),
                   },
                 ]
               : []),
-            ...(originalBackups[rowMenu.profile.agent]
-              ? [
-                  {
-                    label: "恢复初始状态",
-                    title:
-                      "恢复到 Ccode 首次写入前的原始配置（永久快照，连续多次设为全局也回得去）",
-                    onSelect: () => void onRestoreOriginal(rowMenu.profile.agent),
-                  },
-                ]
-              : []),
-            { label: "删除", onSelect: () => void onDelete(rowMenu.profile) },
+            {
+              label: "恢复备份",
+              disabled: !globalBackups[groupMenu.agentId],
+              title: globalBackups[groupMenu.agentId]
+                ? "恢复最近一次写入前的状态"
+                : "还没有可恢复的备份",
+              onSelect: () => void onRestoreBackup(groupMenu.agentId),
+            },
+            {
+              label: "恢复初始状态",
+              disabled: !originalBackups[groupMenu.agentId],
+              title: originalBackups[groupMenu.agentId]
+                ? "恢复到 Ccode 首次写入前的原始配置（永久快照，连续多次设为全局也回得去）"
+                : "还没有首次写入前的快照",
+              onSelect: () => void onRestoreOriginal(groupMenu.agentId),
+            },
           ]}
         />
       )}
@@ -3046,16 +3188,6 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
           running={validationDialog.running}
           onClose={() => {
             if (!validationDialog.running) setValidationDialog(null);
-          }}
-        />
-      )}
-      {probeDialog && (
-        <ProbeDialog
-          profile={probeDialog.profile}
-          result={probeDialog.result}
-          running={probeDialog.running}
-          onClose={() => {
-            if (!probeDialog.running) setProbeDialog(null);
           }}
         />
       )}

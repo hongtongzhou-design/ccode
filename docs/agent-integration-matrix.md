@@ -36,7 +36,7 @@
 | 会话存储 | `~/.codex/sessions/YYYY/MM/DD/rollout-<时间>-<uuid>.jsonl`；旧文件会被后台 **zstd 压缩为 `.jsonl.zst`**（magic `28 b5 2f fd`），两者都要能读；另有 `history.jsonl`（仅用户 prompt）和 SQLite 镜像库（版本化文件名，勿依赖）。Ccode 观察到会话关联成功后，会在自己的 `app.db` 记录 profile 归属，历史/外部会话可能为空。 |
 | 会话格式 | JSONL `RolloutLine {timestamp, type, payload}`；首行 `session_meta`（含 **cwd** = 项目归属依据）；`response_item`（消息）、`event_msg`（含 token_count）、`turn_context`（每轮 model/cwd）。不按项目分目录，**项目归属靠 session_meta.cwd**。**易漂移** |
 | 关键启动参数 | `-m`、`--profile`、`-c key=value`（最高优先级）、`codex exec`（非交互，`--json` 输出事件流）、`codex resume` |
-| 坑 | **只支持 Responses API**（`wire_api="chat"` 已移除并报错）——中转必须实现 `/v1/responses`；`codex exec` 默认要求 git 仓库（`--skip-git-repo-check`）；凭证可能存 OS keyring 而非 auth.json；auth.json 顶层只有 `OPENAI_API_KEY` = API Key 模式（官方 `--api-key` 与第三方中转同一形状，**不算官方账号登录**，检测见 v3.55）；TUI `/model` 选择器的模型目录来自 `model_catalog_json` 指定的 JSON 文件（**仅启动时读取**，Ccode 已为每个 profile 生成 catalog：display_name = 「配置名 · 模型」，context_window/max_context_window 取自 model_registry；reasoning levels 全量模板 [low/medium/high]，与 cc-switch 同口径——模型不支持时端点忽略 effort） |
+| 坑 | **只支持 Responses API**（`wire_api="chat"` 已移除并报错）——中转必须实现 `/v1/responses`；`codex exec` 默认要求 git 仓库（`--skip-git-repo-check`）；凭证可能存 OS keyring 而非 auth.json；auth.json 顶层只有 `OPENAI_API_KEY` = API Key 模式（官方 `--api-key` 与第三方中转同一形状，**不算官方账号登录**，检测见 v3.55）；TUI `/model` 选择器的模型目录来自 `model_catalog_json` 指定的 JSON 文件（**仅启动时读取**，Ccode 已为每条绑定生成 catalog：display_name = 「配置名 · 模型」，context_window/max_context_window 取自 model_registry；reasoning levels 全量模板 [low/medium/high]，与 cc-switch 同口径——模型不支持时端点忽略 effort） |
 
 ## 3. Gemini CLI
 
@@ -60,7 +60,7 @@
 | 会话存储 | `~/.qwen/projects/<sanitize(cwd)>/chats/<uuid>.jsonl`（sanitize 规则同 Claude）；归档在 `chats/archive/`；目录名可能碰撞，**项目归属以首条记录的 `cwd` 为准** |
 | 会话格式 | JSONL `ChatRecord {uuid, parentUuid, sessionId, timestamp, type: user/assistant/tool_result/system, subtype, cwd, version, message（genai Content 格式）, usageMetadata, model}`；`custom_title` 系统记录给标题。旧版（约 <0.10，具体版本未核实）是单 JSON 文件。**易漂移** |
 | 关键启动参数 | `-m`、`--auth-type`、`--openai-api-key/--openai-base-url`（仅有的凭证 flags）、`--session-id`、`--continue/--resume` |
-| 坑 | Qwen OAuth 免费额度已于 2026-04 停；profile 需记录协议类型（多协议 agent）；录制可被关闭（`general.chatRecording:false`），此时无会话文件；TUI `/model` 对话框列出的就是 `modelProviders.<协议>.models` 条目（仅全局写入模式可注入多模型，注入模式单模型是 CLI 限制） |
+| 坑 | Qwen OAuth 免费额度已于 2026-04 停；绑定需记录协议类型（多协议 agent）；录制可被关闭（`general.chatRecording:false`），此时无会话文件；TUI `/model` 对话框列出的就是 `modelProviders.<协议>.models` 条目（仅全局写入模式可注入多模型，注入模式单模型是 CLI 限制） |
 
 **兼容端点（2026-08-05 核实）**：openai 协议可接智谱 GLM（`https://open.bigmodel.cn/api/paas/v4`，官方 quick-start 仍在用）；anthropic 协议（`--auth-type anthropic` + `ANTHROPIC_*` 三件套）理论上可接 §1 附注的 GLM/DeepSeek Anthropic 兼容端点，但未实测，接入前需验证。
 
@@ -123,7 +123,7 @@
 | 项 | 值 |
 |---|---|
 | 二进制 / 检测 | **`grok`**（xAI 官方终端编码 agent，二进制也叫 grok）；`grok --version` 单行输出 `grok 0.2.180 (abc1234)`（非 stable 频道追加 ` [alpha]`）；`grok version --json` 给 `{"currentVersion":"X.Y.Z (commit)","channel":"stable"}`。官方安装落 `~/.grok/bin/grok`（另尝试 `~/.local/bin`、`/usr/local/bin` symlink；resolve_binary 已把 `~/.grok/bin` 收进三平台候选目录） |
-| 注入 env | **`XAI_API_KEY`**（别名 `GROK_CODE_XAI_API_KEY`）、模型 **`GROK_DEFAULT_MODEL`**、base url 覆盖 **`GROK_MODELS_BASE_URL`**（1.0.5 实机核实，自带 user-guide 11-custom-models.md：模型目录从 `{base_url}/models` 拉取、推理同走该 base，`XAI_API_KEY` 作 Bearer；另可用 `GROK_MODELS_LIST_URL` 单独覆盖列表地址）。**`GROK_DEFAULT_MODEL` 只是「偏好」**：与可用模型目录比对，不在目录里走 `preferred model not in available models, falling back` 静默回退默认——第三方模型必须配 `GROK_MODELS_BASE_URL` 让目录来自网关自身。勿用 `GROK_CLI_CHAT_PROXY_BASE_URL`（xAI 内部 CLI chat API 代理覆盖口，非推理端点，第三方端点注进去模型流量不走它）。**模型列表收敛（1.0.5 实机核实）**：`GROK_CONFIG` env 是 JSON overlay 深合并进 config.toml（白名单含 `models` 表），注入 `{"models":{"allowed_models":[...]}}` 可把选择器/`-m` 可选范围收敛到 profile 模型列表（不注则网关全量目录进选择器；空列表勿注——fail-closed 全不匹配），选中模型兜底并入。凭证优先级：config.toml `api_key` > `env_key` > 登录 session token > `XAI_API_KEY` |
+| 注入 env | **`XAI_API_KEY`**（别名 `GROK_CODE_XAI_API_KEY`）、模型 **`GROK_DEFAULT_MODEL`**、base url 覆盖 **`GROK_MODELS_BASE_URL`**（1.0.5 实机核实，自带 user-guide 11-custom-models.md：模型目录从 `{base_url}/models` 拉取、推理同走该 base，`XAI_API_KEY` 作 Bearer；另可用 `GROK_MODELS_LIST_URL` 单独覆盖列表地址）。**`GROK_DEFAULT_MODEL` 只是「偏好」**：与可用模型目录比对，不在目录里走 `preferred model not in available models, falling back` 静默回退默认——第三方模型必须配 `GROK_MODELS_BASE_URL` 让目录来自网关自身。勿用 `GROK_CLI_CHAT_PROXY_BASE_URL`（xAI 内部 CLI chat API 代理覆盖口，非推理端点，第三方端点注进去模型流量不走它）。**模型列表收敛（1.0.5 实机核实）**：`GROK_CONFIG` env 是 JSON overlay 深合并进 config.toml（白名单含 `models` 表），注入 `{"models":{"allowed_models":[...]}}` 可把选择器/`-m` 可选范围收敛到绑定模型列表（不注则网关全量目录进选择器；空列表勿注——fail-closed 全不匹配），选中模型兜底并入。凭证优先级：config.toml `api_key` > `env_key` > 登录 session token > `XAI_API_KEY` |
 | 官方端点 | xAI 官方 API 是 OpenAI chat_completions 兼容：`https://api.x.ai/v1`；config.toml `[model.<name>]` 的 `api_backend` 支持 chat_completions/responses/messages 三种 |
 | 全局配置 | `$GROK_HOME`（缺省 `~/.grok`，三平台同）下 `config.toml`（主配置 TOML：`[model.<name>]` 段 + `[mcp_servers.<name>]` 段）；项目级 `<cwd>/.grok/config.toml` 只贡献 `[mcp_servers]` 等少数段。**「设为全局默认」首版不支持**（TOML `[model.<name>]` 段结构 + 设为默认的字段未核实，风险高于收益；仅启动注入） |
 | 官方账号 | `grok login`（浏览器 OAuth，auth.x.ai）/ `grok login --device-auth` / `grok logout`；凭证落 `~/.grok/auth.json`（0600，顶层 map：scope → GrokAuth{key, auth_mode, refresh_token, expires_at}，grok 自己原子重写——我们只读）。官方账号拉起必须 `env_remove XAI_API_KEY`/`GROK_CODE_XAI_API_KEY` |
@@ -167,10 +167,11 @@
    注意边界：streaming/function calling/结构化输出是协议层能力（声明补不了）；web search/file search/code interpreter
    等 hosted tools 是第一方服务端能力，第三方中继没有对应物，声明了等于摆死工具——如实不写。
 
-8. **请求策略不是通用请求代理**（2026-08-27）：Profile 的 `requestPolicy` 只保存可迁移声明：
-   `temperature`、`top_p`、`max_output_tokens`、`reasoning_effort`，以及 Header 名到环境变量名的引用。
-   Ccode 当前在启动计划中只注入各 Agent 已核实的环境变量/命令行参数，不重写 HTTP body；能力未知或不支持时保留配置、
-   在校验结果提示并跳过强制注入。Header 值必须由用户在运行环境提供，Profile 不落密文。真实请求级注入若以后实现，
+8. **请求策略不是通用请求代理**（2026-08-27；2026-08-30 拆层后载体改到网关模型行）：
+   可迁移声明仍是 `temperature`、`top_p`、`max_output_tokens`、`reasoning_effort`，以及 Header 名到环境变量名的引用。
+   Header 存在**网关**；思考档/温度/输出上限存在**网关的每个模型**。启动只取当时选中模型上、且求交允许的字段。
+   扁平 `Profile.requestPolicy` 是物化视图，不是落盘形状。Ccode 当前在启动计划中只注入各 Agent 已核实的环境变量/命令行参数，不重写 HTTP body；能力未知或不支持时保留配置、
+   在校验结果提示并跳过强制注入。Header 值必须由用户在运行环境提供，网关不落密文。真实请求级注入若以后实现，
    必须按「Agent + protocol」建立逐字段适配和测试矩阵，不能把 `max_output_tokens` 直接等同为所有 CLI 的 `max_tokens`。
 
    逐字段通道实证（2026-08-28，Windows 本机安装二进制 strings/配置 schema；实现见 `agent_specs.rs`

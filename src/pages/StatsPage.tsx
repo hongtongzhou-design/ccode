@@ -3,12 +3,23 @@ import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
 import { useAppStore } from "../store";
-import type { UsageDayDto, UsageStatsDto } from "../types";
+import type {
+  GatewayUsageRow,
+  UsageStatsDto,
+  UsageTopSessionDto,
+  UsageTrendDto,
+} from "../types";
 import { axisLabels } from "../stats-trend";
+import {
+  cacheHitRate,
+  sessionDisplayTitle,
+  weekOverWeek,
+} from "../stats-insight";
 import { agentBrand } from "../agent-colors";
 import {
   Checkbox,
   EmptyState,
+  FoldMark,
   LoadingRows,
   PageFrame,
   PageHeader,
@@ -16,8 +27,24 @@ import {
   rowActionClass,
   SegTabs,
 } from "../components/PageFrame";
+import type { WeekOverWeek } from "../stats-insight";
 
 type Range = "today" | "week" | "month" | "all";
+type DistView = "sessions" | "agent" | "project" | "gateway" | "task";
+type ChartMetric = "cost" | "tokens";
+
+const DIST: { id: DistView; label: string }[] = [
+  { id: "sessions", label: "最贵" },
+  { id: "agent", label: "Agent" },
+  { id: "project", label: "项目" },
+  { id: "gateway", label: "网关" },
+  { id: "task", label: "任务" },
+];
+
+const CHART_METRICS: { id: ChartMetric; label: string }[] = [
+  { id: "cost", label: "花费" },
+  { id: "tokens", label: "用量" },
+];
 
 const RANGES: { id: Range; label: string }[] = [
   { id: "today", label: "今日" },
@@ -73,32 +100,35 @@ const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 /** agent 进度条色相：v3.94 起走品牌色 AGENT_BRAND（与对话页胶囊同一出处，
     共享自 src/agent-colors.ts；原令牌色 AGENT_COLORS 仅剩其它用途时保留） */
 
-/**
- * 每日用量折线（手绘 SVG，不引图表库）：
- * - 直折线段 + 渐变面积（用户拍板：不要平滑曲线，保留折线形式；v3.94 面积改垂直渐变）
- * - 底部日期轴常驻（v3.94 起：原「悬停才显」被用户否为不悬浮时无法定位时间节点）；
- *   跨度 ≤45 天按「MM-DD」标注，更久自动降为按月（跨年带年份）
- * - 悬停时显示竖向指示线 + 命中点 + 当日明细（合计 tokens / 费用）
- */
-function DailyTrend({
-  pts,
-  currency,
-  rate,
-}: {
-  pts: UsageDayDto[];
-  currency: "$" | "¥";
-  rate: number;
-}) {
+function wowLabel(
+  wow: WeekOverWeek | null,
+  currency: "$" | "¥",
+  rate: number,
+): { text: string; tone: "up" | "down" | "flat" } | null {
+  if (!wow) return null;
+  const amount = fmtCost(wow.thisWeek, currency, rate, false);
+  if (wow.percent == null) return { text: `本周 ${amount}`, tone: "flat" };
+  if (wow.percent === 0)
+    return { text: `本周 ${amount} · 与上周持平`, tone: "flat" };
+  const arrow = wow.percent > 0 ? "▲" : "▼";
+  return {
+    text: `本周 ${amount} · 较上周 ${arrow}${Math.abs(wow.percent)}%`,
+    tone: wow.percent > 0 ? "up" : "down",
+  };
+}
+
+type ChartPt = { day: string; value: number; tip: string };
+
+/** 花费/用量共用折线（手绘 SVG）。日期轴常驻，悬停才出当日数字。 */
+function UsageChart({ pts, aria }: { pts: ChartPt[]; aria: string }) {
   const [hover, setHover] = useState<number | null>(null);
-  const peak = Math.max(1, ...pts.map((d) => d.input + d.output));
+  const peak = Math.max(0.01, ...pts.map((d) => d.value));
   const W = 720;
   const H = 96;
-  // 上下留白，峰值点与零值点不贴边
   const PAD = 6;
   const stepX = W / Math.max(1, pts.length - 1);
   const coords = pts.map((d, i) => {
-    const v = d.input + d.output;
-    return [i * stepX, H - PAD - (v / peak) * (H - PAD * 2)] as const;
+    return [i * stepX, H - PAD - (d.value / peak) * (H - PAD * 2)] as const;
   });
   const line = coords
     .map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`)
@@ -118,7 +148,7 @@ function DailyTrend({
   const hy = hover !== null ? (coords[hover][1] / H) * 100 : 0;
 
   return (
-    <div className="rounded-lg bg-strip p-3">
+    <div>
       <div
         className="relative"
         onMouseMove={onMove}
@@ -129,17 +159,15 @@ function DailyTrend({
           preserveAspectRatio="none"
           className="block h-24 w-full"
           role="img"
-          aria-label={`每日 token 折线，峰值 ${peak.toLocaleString()}`}
+          aria-label={aria}
         >
-          {/* 面积填充走垂直渐变（折线处 15% → X 轴处 0%，Stripe/Vercel 式），
-              stop 引用 cta 令牌、随主题换色 */}
           <defs>
-            <linearGradient id="dailyTrendFill" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id="usageChartFill" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0" stopColor="var(--color-cta)" stopOpacity="0.15" />
               <stop offset="1" stopColor="var(--color-cta)" stopOpacity="0" />
             </linearGradient>
           </defs>
-          <path d={area} fill="url(#dailyTrendFill)" />
+          <path d={area} fill="url(#usageChartFill)" />
           <path
             d={line}
             className="stroke-cta"
@@ -150,7 +178,6 @@ function DailyTrend({
         </svg>
         {hd && (
           <>
-            {/* 指示线与命中点走 HTML 覆盖层：preserveAspectRatio="none" 会把 SVG 圆拉成椭圆 */}
             <div
               className="pointer-events-none absolute bottom-0 top-0 w-px bg-cta/40"
               style={{ left: `${hx}%` }}
@@ -161,25 +188,20 @@ function DailyTrend({
             />
             <div
               className="pointer-events-none absolute top-0 z-10 whitespace-nowrap rounded-md border border-field px-2 py-1 text-micro text-l2 ccode-float-surface"
-              // 边缘钳制，tooltip 不出图区
               style={{
                 left: `${Math.min(85, Math.max(15, hx))}%`,
                 transform: "translateX(-50%)",
               }}
             >
-              {hd.day} · 合计 {compact(hd.input + hd.output)} tokens（入{" "}
-              {compact(hd.input)} / 出 {compact(hd.output)}） ·{" "}
-              {fmtCost(hd.costUsd, currency, rate, hd.costPartial)}
+              {hd.day} · {hd.tip}
             </div>
           </>
         )}
       </div>
-      {/* 日期轴常驻；nowrap：「08-15」的连字符是 CSS 断行机会，右端标签会在那里换行被截断 */}
       <div className="relative mt-1 h-4 text-micro text-l4">
         {labels.map((l) => (
           <span
             key={l.index}
-            // nowrap：「08-15」的连字符是 CSS 断行机会，右端标签会在那里换行被截断
             className="absolute whitespace-nowrap"
             style={{
               left: `${(l.index / last) * 100}%`,
@@ -195,10 +217,6 @@ function DailyTrend({
           </span>
         ))}
       </div>
-      <div className="mt-1 flex justify-between text-micro text-l4">
-        <span>峰值 {peak.toLocaleString()} tokens/天</span>
-        <span>{pts.length} 天有用量</span>
-      </div>
     </div>
   );
 }
@@ -206,11 +224,32 @@ function DailyTrend({
 export default function StatsPage({ visible }: { visible: boolean }) {
   const setPage = useAppStore((s) => s.setPage);
   const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
+  const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
+  const sessions = useAppStore((s) => s.sessions);
+  const loadSessions = useAppStore((s) => s.loadSessions);
   const [range, setRange] = useState<Range>("week");
+  const [view, setView] = useState<DistView>(() =>
+    sessionStorage.getItem("ccode.statsGateway") ? "gateway" : "sessions",
+  );
+  const [chartMetric, setChartMetric] = useState<ChartMetric>(
+    () =>
+      (localStorage.getItem("ccode.stats.chartMetric") as ChartMetric) || "cost",
+  );
+  const [modelsOpen, setModelsOpen] = useState(
+    () => localStorage.getItem("ccode.stats.modelsOpen") === "1",
+  );
+  const [gatewayRows, setGatewayRows] = useState<GatewayUsageRow[]>([]);
+  const [focusGateway, setFocusGateway] = useState<string | null>(() => {
+    const v = sessionStorage.getItem("ccode.statsGateway");
+    if (v) sessionStorage.removeItem("ccode.statsGateway");
+    return v;
+  });
   const [currency, setCurrency] = useState<"$" | "¥">(
     () => (localStorage.getItem("ccode.statsCurrency") as "$" | "¥") || "$",
   );
   const [stats, setStats] = useState<UsageStatsDto | null>(null);
+  const [trend, setTrend] = useState<UsageTrendDto | null>(null);
+  const [topSessions, setTopSessions] = useState<UsageTopSessionDto[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -226,9 +265,21 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await invoke<UsageStatsDto>("get_usage_stats", { range: r });
+      const [res, gw, tr, top] = await Promise.all([
+        invoke<UsageStatsDto>("get_usage_stats", { range: r }),
+        invoke<GatewayUsageRow[]>("usage_by_gateway", { range: r }).catch(
+          () => [] as GatewayUsageRow[],
+        ),
+        invoke<UsageTrendDto>("usage_trend", { range: r }).catch(() => null),
+        invoke<UsageTopSessionDto[]>("top_sessions", { range: r }).catch(
+          () => [] as UsageTopSessionDto[],
+        ),
+      ]);
       if (seq !== loadSeq.current) return;
       setStats(res);
+      setGatewayRows(gw);
+      setTrend(tr);
+      setTopSessions(top);
       setError(null);
     } catch (e) {
       if (seq === loadSeq.current) setError(String(e));
@@ -238,7 +289,10 @@ export default function StatsPage({ visible }: { visible: boolean }) {
   }
 
   useEffect(() => {
-    if (visible) void load(range);
+    if (visible) {
+      void load(range);
+      void loadSessions();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, range]);
 
@@ -325,6 +379,57 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     return showInternal ? rows : rows.filter((w) => !w.internal);
   }, [showInternal, stats]);
 
+  const hit = stats
+    ? cacheHitRate(stats.cards.input, stats.cards.cacheRead)
+    : null;
+  const trendLive = Boolean(trend?.days.some((d) => d.hasUsage));
+  const wow =
+    trendLive && trend && trend.days.length > 0
+      ? weekOverWeek(
+          trend.days.map((d) => ({
+            day: d.day,
+            costUsd: d.costUsd,
+            hasUsage: d.hasUsage,
+          })),
+          trend.days[trend.days.length - 1].day,
+        )
+      : null;
+  const badge = wowLabel(wow, currency, rate);
+  const inShare =
+    totalTokens > 0 && stats
+      ? Math.round((stats.cards.input / totalTokens) * 100)
+      : 0;
+  const perChat =
+    stats && stats.cards.sessions > 0 && stats.cards.costUsd != null
+      ? stats.cards.costUsd / stats.cards.sessions
+      : null;
+  const distItems = DIST.filter((item) => {
+    if (item.id === "sessions") return topSessions.length > 0;
+    if (item.id === "agent") return (stats?.byAgent.length ?? 0) > 0;
+    if (item.id === "project") return projectRows.length > 0;
+    if (item.id === "gateway") return gatewayRows.length > 0;
+    return workspaceRows.length > 0;
+  });
+  const dist: DistView = distItems.some((item) => item.id === view)
+    ? view
+    : (distItems[0]?.id ?? "agent");
+  const rangeLabel = RANGES.find((item) => item.id === range)?.label ?? "";
+  const costPts: ChartPt[] = (trend?.days ?? []).map((d) => ({
+    day: d.day,
+    value: d.costUsd ?? 0,
+    tip: fmtCost(d.costUsd, currency, rate, d.costPartial),
+  }));
+  const tokenPts: ChartPt[] = (stats?.daily ?? []).map((d) => ({
+    day: d.day,
+    value: d.input + d.output,
+    tip: `${compact(d.input + d.output)} tokens · ${fmtCost(d.costUsd, currency, rate, d.costPartial)}`,
+  }));
+  const canCost = trendLive && costPts.length > 1;
+  const canTokens = tokenPts.length > 1;
+  const metric: ChartMetric =
+    chartMetric === "cost" && canCost ? "cost" : canTokens ? "tokens" : "cost";
+  const chartPts = metric === "cost" ? costPts : tokenPts;
+
   function toggleCurrency() {
     const next = currency === "$" ? "¥" : "$";
     setCurrency(next);
@@ -335,7 +440,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     <PageFrame width="fluid">
       <PageHeader
         title="用量"
-        meta="按项目、任务与 Agent 查看投入"
+        meta="只计经 Ccode 记下归属的会话。费用按公开价估算，≥ 含未计价，~ 无价格。"
       />
       <PageToolbar>
         <SegTabs items={RANGES} value={range} onChange={setRange} />
@@ -374,9 +479,6 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           )}
         </div>
       </PageToolbar>
-      <p className="mb-3 text-xs text-l4">
-        费用按官方公开价估算；≥ 表示另含未计价用量，~ 表示没有可用价格
-      </p>
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 
@@ -389,99 +491,214 @@ export default function StatsPage({ visible }: { visible: boolean }) {
         />
       ) : (
         <>
-          {/* 概览 KPI 卡（v3.94，用户拍板卡片化取代纯文本平铺）：strip 底 + l1 12% 极浅勾边
-              （启动栏卡片同款精致边线，field 档浅色偏蓝、hairline 档糊进点阵）；
-              标签 text-xs font-medium + 最淡 l4，与 24px semibold 数字拉开层级；
-              费用卡的高亮两次迭代（cta-pill 蓝底、warn 琥珀底均被否为难看）后定为：
-              去底色、边框略粗一档（1px + l1 25% 勾边，介于全站 0.5px 与 2px 之间）——
-              走内联 style 不带 border 类，否则 App.css 全站 0.5px 覆写会把它压回去；
-              数字一律 tabular-nums */}
-          {(() => {
-            const cardCls =
-              "rounded-lg border bg-strip p-4 text-xs font-medium tracking-wider text-l4";
-            const numCls =
-              "mt-1 text-2xl font-semibold tracking-tight tabular-nums text-l1";
-            const cardEdge = {
-              borderColor: "color-mix(in srgb, var(--color-l1) 12%, transparent)",
-            };
-            return (
-              <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-7">
-                <div className={`${cardCls} sm:col-span-2`} style={cardEdge}>
-                  总 tokens
-                  <div className="mt-1 text-3xl font-semibold tracking-tight tabular-nums text-l1">
-                    {compact(totalTokens)}
-                  </div>
-                  <div className="mt-0.5 text-micro font-normal tracking-normal text-l4">
-                    输入 {compact(stats.cards.input)} · 输出 {compact(stats.cards.output)}
-                  </div>
-                </div>
-                <div className={cardCls} style={cardEdge}>
-                  输入 tokens
-                  <div className={numCls}>{compact(stats.cards.input)}</div>
-                </div>
-                <div className={cardCls} style={cardEdge}>
-                  输出 tokens
-                  <div className={numCls}>{compact(stats.cards.output)}</div>
-                </div>
-                <div className={cardCls} style={cardEdge}>
-                  缓存读 tokens
-                  <div className={numCls}>{compact(stats.cards.cacheRead)}</div>
-                  <div className="mt-0.5 text-micro text-l4">
-                    缓存写 {compact(stats.cards.cacheWrite)}
-                  </div>
-                </div>
-                <div className={cardCls} style={cardEdge}>
-                  对话数
-                  <div className={numCls}>{compact(stats.cards.sessions)}</div>
-                </div>
-                <div
-                  className="rounded-lg bg-strip p-4 text-xs font-medium tracking-wider text-l4"
-                  style={{
-                    border:
-                      "1px solid color-mix(in srgb, var(--color-l1) 25%, transparent)",
-                  }}
-                >
+          <div className="mb-6 rounded-lg bg-strip p-4">
+            <div className="flex flex-wrap items-start gap-x-8 gap-y-3">
+              <div>
+                <div className="text-xs font-medium tracking-wider text-l4">
                   费用
-                  <div className={numCls}>
-                    {fmtCost(
-                      stats.cards.costUsd,
-                      currency,
-                      rate,
-                      stats.cards.costPartial,
-                    )}
+                </div>
+                <div className="mt-0.5 text-3xl font-semibold tracking-tight tabular-nums text-l1">
+                  {fmtCost(
+                    stats.cards.costUsd,
+                    currency,
+                    rate,
+                    stats.cards.costPartial,
+                  )}
+                </div>
+                {badge && (
+                  <div
+                    className={`mt-1 text-xs tabular-nums ${
+                      badge.tone === "up"
+                        ? "text-warn-text"
+                        : badge.tone === "down"
+                          ? "text-ok-text"
+                          : "text-l3"
+                    }`}
+                  >
+                    {badge.text}
                   </div>
+                )}
+              </div>
+              <div>
+                <div className="text-xs font-medium tracking-wider text-l4">
+                  tokens
+                </div>
+                <div className="mt-0.5 text-3xl font-semibold tracking-tight tabular-nums text-l1">
+                  {compact(totalTokens)}
+                </div>
+                <div className="mt-1 text-micro text-l4">
+                  输入 {inShare}% · 输出 {100 - inShare}%
                 </div>
               </div>
-            );
-          })()}
+            </div>
+            <p className="mt-3 text-xs text-l3">
+              {stats.cards.sessions} 次对话
+              {perChat != null && (
+                <>
+                  {" "}
+                  · 场均 {fmtCost(perChat, currency, rate, stats.cards.costPartial)}
+                </>
+              )}
+              {hit != null && (
+                <>
+                  {" "}
+                  · 缓存 {(hit * 100).toFixed(0)}%
+                  {stats.cards.cacheSavingsUsd != null &&
+                    stats.cards.costUsd != null && (
+                      <>
+                        {" "}
+                        · 若无缓存约{" "}
+                        {fmtCost(
+                          stats.cards.costUsd + stats.cards.cacheSavingsUsd,
+                          currency,
+                          rate,
+                          stats.cards.costPartial,
+                        )}
+                      </>
+                    )}
+                </>
+              )}
+            </p>
+            {chartPts.length > 1 && (
+              <div className="mt-4">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  {canCost && canTokens ? (
+                    <SegTabs
+                      items={CHART_METRICS}
+                      value={metric}
+                      onChange={(id) => {
+                        setChartMetric(id);
+                        localStorage.setItem("ccode.stats.chartMetric", id);
+                      }}
+                    />
+                  ) : (
+                    <span className="text-xs text-l3">
+                      {metric === "cost"
+                        ? `${rangeLabel}花费`
+                        : `${rangeLabel}用量`}
+                    </span>
+                  )}
+                  {canCost && canTokens && (
+                    <span className="text-micro text-l4">{rangeLabel}</span>
+                  )}
+                </div>
+                <UsageChart
+                  pts={chartPts}
+                  aria={
+                    metric === "cost"
+                      ? `${rangeLabel}花费折线`
+                      : `${rangeLabel}用量折线`
+                  }
+                />
+              </div>
+            )}
+          </div>
 
-          {/* 趋势（v3.88）：区间总数看不出「这周比上周多花多少」——这是统计页最核心的缺口。
-              手绘 SVG 平滑折线，不引图表库（package.json 保持零图表依赖）；纯逻辑（平滑路径/
-              自适应日期轴）在 stats-trend.ts。日期轴常驻（v3.94 起，原悬停才显被否为定位不便），
-              数值 tooltip 仍悬停才淡入。 */}
-          {stats.daily.length > 1 && (
-            <section className="mb-6">
-              <h2 className="mb-2 text-xs font-medium text-l3">
-                每日用量
-                <span className="ml-2 font-normal text-l4">
-                  {stats.daily[0].day} → {stats.daily[stats.daily.length - 1].day}
-                </span>
-              </h2>
-              <DailyTrend pts={stats.daily} currency={currency} rate={rate} />
-            </section>
+          {distItems.length > 0 && (
+          <div className="mb-6 rounded-lg bg-strip p-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <SegTabs items={distItems} value={dist} onChange={setView} />
+              {dist === "gateway" && focusGateway && (
+                <button
+                  type="button"
+                  className={rowActionClass}
+                  onClick={() => setFocusGateway(null)}
+                >
+                  查看全部
+                </button>
+              )}
+            </div>
+          {dist === "sessions" && (
+            <ul className="space-y-0.5">
+              {topSessions.map((s) => {
+                const scanned = sessions.find(
+                  (x) => x.agent === s.agent && x.sessionId === s.sessionId,
+                );
+                const title = sessionDisplayTitle({
+                  customTitle: s.title,
+                  scannedTitle: scanned?.customTitle ?? scanned?.title,
+                  sessionId: s.sessionId,
+                });
+                return (
+                  <li key={`${s.agent}-${s.sessionId}`}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenSessionReq({
+                          agent: s.agent,
+                          sessionId: s.sessionId,
+                        });
+                        setPage("sessions");
+                      }}
+                      className="flex w-full items-baseline gap-2 rounded-md px-1.5 py-1.5 text-left hover:bg-hover"
+                    >
+                      <span className="min-w-0 flex-1 truncate text-sm text-l2">
+                        {title}
+                      </span>
+                      <span className="max-w-[7rem] shrink-0 truncate text-micro text-l4">
+                        {basename(s.projectPath)}
+                      </span>
+                      <span className="shrink-0 font-mono text-xs tabular-nums text-l2">
+                        {fmtCost(s.costUsd, currency, rate, s.costPartial)}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {dist === "gateway" && (
+              <table className="w-full table-fixed text-sm">
+                <thead>
+                  <tr className="border-b border-hairline">
+                    <th className={th}>网关</th>
+                    <th className={`${th} text-right`}>会话</th>
+                    <th className={`${th} text-right`}>tokens</th>
+                    <th className={`${th} w-24 text-right`}>费用</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gatewayRows.map((g) => {
+                    const tokens = g.tokensIn + g.tokensOut;
+                    const focused = focusGateway && g.gatewayId === focusGateway;
+                    const official = g.bucket === "official";
+                    return (
+                      <tr
+                        key={`${g.bucket}-${g.gatewayId}`}
+                        className={`border-b border-hairline ${focused ? "bg-hover/60" : ""}`}
+                      >
+                        <td className="max-w-0 truncate px-2 py-2 text-l2" title={g.gatewayName}>
+                          {g.gatewayName}
+                          <span className="ml-1 text-micro text-l4">{g.agents.join("、")}</span>
+                        </td>
+                        <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
+                          {g.sessionCount}
+                        </td>
+                        <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l2">
+                          {compact(tokens)}
+                        </td>
+                        <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-l3">
+                          {official ? (
+                            <SubscriptionCost />
+                          ) : (
+                            fmtCost(g.costUsd, currency, rate, g.costPartial)
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
           )}
 
-          {/* 按 agent：用量占比进度条（占比 = 该 agent tokens / 全部合计） */}
-          {stats.byAgent.length > 0 && (
-            <section className="mb-6">
-              <h2 className="mb-2 text-xs font-medium text-l3">按 Agent</h2>
+          {dist === "agent" && (
               <ul className="space-y-1">
                 {stats.byAgent.map((a) => {
                   const share = a.tokens / totalAgentTokens;
                   return (
                     <li
                       key={`${a.agent}-${a.official}`}
-                      className="flex items-center gap-3 rounded-md bg-strip px-2 py-2 text-sm"
+                      className="flex items-center gap-3 rounded-md px-2 py-2 text-sm hover:bg-hover"
                     >
                       <span
                         className="size-2 shrink-0 rounded-full"
@@ -526,15 +743,9 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                   );
                 })}
               </ul>
-            </section>
           )}
 
-          {/* 按项目 */}
-          {projectRows.length > 0 && (
-            <section className="mb-6">
-              <h2 className="mb-2 text-xs font-medium text-l3">
-                按项目（前 20）
-              </h2>
+          {dist === "project" && (
               <table className="w-full table-fixed text-sm">
                 <thead>
                   <tr className="border-b border-hairline">
@@ -590,13 +801,9 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                   })}
                 </tbody>
               </table>
-            </section>
           )}
 
-          {/* 任务成本（按工作区归因，仅列出命中工作区的用量） */}
-          {workspaceRows.length > 0 && (
-            <section className="mb-6">
-              <h2 className="mb-2 text-xs font-medium text-l3">任务成本</h2>
+          {dist === "task" && (
               <table className="w-full table-fixed text-sm">
                 <thead>
                   <tr className="border-b border-hairline">
@@ -636,13 +843,32 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                   ))}
                 </tbody>
               </table>
-            </section>
+          )}
+          </div>
           )}
 
-          {/* 按模型 */}
           {modelRows.length > 0 && (
-            <section className="mb-6">
-              <h2 className="mb-2 text-xs font-medium text-l3">按模型</h2>
+            <section className="mb-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !modelsOpen;
+                  setModelsOpen(next);
+                  localStorage.setItem(
+                    "ccode.stats.modelsOpen",
+                    next ? "1" : "0",
+                  );
+                }}
+                aria-expanded={modelsOpen}
+                className="flex h-9 w-full items-center gap-2 rounded-md px-1 text-left text-sm font-medium text-l1 hover:bg-hover"
+              >
+                <FoldMark open={modelsOpen} boxed />
+                按模型
+                <span className="text-micro font-normal text-l4">
+                  {modelRows.length}
+                </span>
+              </button>
+              {modelsOpen && (
               <table className="w-full table-fixed text-sm">
                 <thead>
                   <tr className="border-b border-hairline">
@@ -677,6 +903,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                   ))}
                 </tbody>
               </table>
+              )}
             </section>
           )}
         </>

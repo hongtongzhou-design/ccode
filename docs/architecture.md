@@ -55,7 +55,7 @@
 │  └─ (后期) FilesPage / 编辑器 / 统计面板                │
 ├────────────────── Tauri IPC（commands + events）────────┤
 │ Rust 核心                                               │
-│  ├─ ProfileStore    profile 持久化（JSON + 系统钥匙串） │
+│  ├─ ProfileStore    网关+绑定持久化（JSON + 0600 keys.json） │
 │  ├─ AgentAdapter    trait，九个实现（见 §4）            │
 │  ├─ PtyManager      portable-pty 拉起/管理 CLI 进程     │
 │  ├─ SessionIndexer  扫描各 agent 会话目录 → 统一索引    │
@@ -108,18 +108,35 @@ trait AgentAdapter {
 ## 5. 核心数据模型
 
 ```rust
-struct Profile {
+// 存储真相（已落地，见 docs/conventions/profiles.md）：
+struct Gateway {
     id: Uuid,
+    slots: { anthropic, openai, responses, gemini, cursor },
+    header_env: Map<String,String>,
+    models: Vec<GatewayModel>, // 稀疏：temperature / top_p / max_output / reasoning_effort
+    last_probe: Vec<ProbeRecord>,
+}
+struct Binding {
+    id: Uuid,                  // 复用旧 profile id，会话/定时任务锚不变
     agent: AgentId,
-    name: String,              // "官方" / "中转A"
-    protocol: Option<String>,  // qwen/opencode 需要: "openai" | "anthropic" | ...
-    base_url: Option<String>,
-    key_ref: Option<KeyRef>,   // 密钥本体进系统钥匙串，这里只存引用
-    key_hint: Option<String>,  // 密钥尾号提示（"···abc1"），仅界面区分用
-    models: Vec<String>,       // 可用模型列表，首个为默认；启动时在终端页下拉选择
-    extra_env: Map<String,String>, // 附加环境变量，注入优先级高于 adapter 内置 env
-    request_policy: RequestPolicy, // 请求策略声明；由 Agent 能力表决定是否实际注入
-    extra: JsonValue,          // agent 特有字段（透传给 adapter）
+    gateway_id: Option<Uuid>,  // None = 官方账号
+    models: Vec<String>,
+    extra_env: Map<String,String>,
+}
+
+// Profile 是启动/列表用的扁平 DTO（Binding × Gateway 物化），不是落盘形状。
+struct Profile {
+    id: Uuid,                  // = binding id
+    agent: AgentId,
+    name: String,              // 来自网关名 / 「官方账号」
+    protocol: Option<String>,
+    base_url: Option<String>,  // 该 Agent 对应槽的 URL
+    key_hint: Option<String>,
+    models: Vec<String>,
+    extra_env: Map<String,String>,
+    request_policy: RequestPolicy, // 启动时按选中模型现算，不是连接级单份
+    gateway_id: Option<Uuid>,
+    slot_missing: bool,
 }
 
 struct RequestPolicy {
@@ -438,6 +455,14 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 | Windows 上 Gemini/Qwen/Kimi 依赖 Node 或 Git Bash 环境 | detect 结果里给出缺失依赖提示，不静默失败 |
 
 ## 10. 决策记录
+
+- **统计页花费洞察（2026-08-30）**：用量页在概览卡下回答「花得快不快 / 钱花在哪几次 / 缓存省了多少」。环比与命中率纯逻辑在 `src/stats-insight.ts`（本周=近 7 天、上周=前 7 天、无上周数据不出徽章；所选范围盖不住上周时也不出）。后端 `usage_trend` / `top_sessions` 走现有定价链；官方账号与 internal 活动不进花费折线和最贵榜；会话自定义标题出站前过 `redact_sensitive_text`。折线与最贵榜均跟随页顶范围。
+
+- **界面注意力收口（2026-08-30）**：每屏一个主 CTA、全局待办单入口（顶栏圆点，文献雷达留在项目页）、项目身份行只留名称+课题（全局设定芯片进抽屉）、运行页默认只留会话画布（文件树/成果面板按需滑出并记忆）、连接页空组默认折叠且「+ 添加连接」只留页头、选用已有网关从目录勾选模型不得整表预填。步骤面板 R1–R7 不动：「开始」仍是唯一实心主路径，TASK.md 预览降为 ghost。规格见 `docs/conventions/design-system.md`。
+
+- **网关库体验批次（2026-08-30）**：网关库补齐按槽测速摘要、求交三态（绑了该网关的 Agent 通道并集）、顺序拉取模型目录、配置漂移子集比对（只对 Ccode 写入的键）、用量按网关归因（session_meta.profile_id ⋈ binding.gateway_id，未关联/官方订阅/已删网关三桶如实呈现）、导出 v2。不引入本地代理。规格见 `docs/conventions/profiles.md`。
+
+- **网关 + 绑定拆层（2026-08-30，已落地）**：配置模型层从「一条 Profile 粘住 Agent+端点+密钥+模型+策略」拆成网关（密钥+协议分槽+逐模型策略+Header）与绑定（某 Agent 选用的网关与模型名单）。产品承诺是按 Agent×启动模型×网关槽×体检诚实呈现，不走本地代理、不解析 TUI `/model`。托盘只写「设为全局」、不改注入默认。规格见 `docs/conventions/profiles.md`。
 
 - **Windows 安装渠道补 winget + .cmd shim 深化（2026-08-27）**：Windows 无 Node.js 的机器上 codex 等曾无任何可用安装渠道（brew 仅 macOS、官方脚本渠道不支持 Windows），表现为「无法安装」。决策：① PackagingSpec 新增 `winget` 包 ID 字段（已实机核实并登记五家官方包：Anthropic.ClaudeCode / OpenAI.Codex / SST.opencode / MoonshotAI.KimiCodeCLI / xAI.GrokBuild，均 portable 免管理员；gemini/qwen/codebuddy 无官方包、cursor 官方脚本拒装 Windows，这四家维持 npm/脚本渠道）；安装候选顺序 brew > npm > winget（仅 Windows）> uv > 官方脚本；winget 安装走 `winget install --id <id> -e --source winget --accept-* --disable-interactivity`，更新同 ID `winget upgrade`，检测口径为二进制路径含 `WinGet`（Links shim 与 canonicalize 后 Packages 实体同判），最新版查 `winget show` 本地化输出（找「版本:/Version:」标签行取 x.y.z，解析失败回落普通「更新」按钮不虚构）；winget 的 Links/WindowsApps 两目录进 `binary_candidate_dirs`（装完不用重启即可检测到）。② Windows 上 npm 系 CLI 是 .cmd 批处理 shim，ConPTY/CreateProcess 不能直接执行：`process::pty_command` 统一把 shim 深化为 node 直启（cmd-shim 两代文本格式解析 %~dp0/%dp0% 入口；npm.cmd 自身是安装器变量化脚本，走固定布局 node_modules/npm/bin/npm-cli.js special case），解析失败才回落 `cmd /c call`——参数不过 cmd 解析，含引号/%/& 的 prompt 不被吞；`background_command` 同口径深化（--version 探测也走它）。③ 两个实机新坑一并修复并记入 AGENTS.md 环境档案：候选目录同名 shell 脚本抢在 .cmd 前命中（os error 193，find_in_dirs 改扩展名优先）；ConPTY 里 npm 发 DSR 光标查询（ESC[6n）读 stdin 等回答、无人应答永久挂起（run_streaming_pty reader 代答）。updater 安装更新与终端 agent 拉起共用此入口。
 

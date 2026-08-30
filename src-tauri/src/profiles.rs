@@ -60,8 +60,188 @@ pub struct Profile {
     /// 上次用于启动的时间（ISO），配置页据此识别活跃/闲置配置（§6.12 E）
     #[serde(default)]
     pub last_used_at: Option<String>,
-    /// 密钥本体在系统钥匙串里，这里只反映「钥匙串中是否存在」
+    /// 密钥本体在 0600 keys.json，这里只反映是否已存
     pub has_key: bool,
+    /// 所属网关；官方账号绑定为 None。物化视图字段，旧 profiles.json 无此键。
+    #[serde(default)]
+    pub gateway_id: Option<String>,
+    /// 该 Agent 所需协议槽未填
+    #[serde(default)]
+    pub slot_missing: bool,
+    /// 仅启动瞬间现算：按会话 meta.provider 对齐 rollout 名字，不落盘。
+    #[serde(default, skip_serializing)]
+    pub provider_override: Option<String>,
+}
+
+impl Profile {
+    pub fn provider_name(&self) -> String {
+        if let Some(p) = &self.provider_override {
+            return p.clone();
+        }
+        match &self.gateway_id {
+            Some(gid) => crate::provider_id::provider_id(gid),
+            None => crate::provider_id::LEGACY.to_string(),
+        }
+    }
+
+    /// 恢复会话时按 rollout 记下的 provider 现算注入名。
+    /// `ccode` → 注 LEGACY；`ccode-<短id>` → 注该派生名；其它/空 → 用网关派生。
+    pub fn apply_session_provider(&mut self, session_provider: Option<&str>) {
+        let Some(p) = session_provider.map(str::trim).filter(|s| !s.is_empty()) else {
+            self.provider_override = None;
+            return;
+        };
+        if crate::provider_id::is_ccode_provider(p) {
+            self.provider_override = Some(p.to_string());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BindingKind {
+    #[default]
+    Api,
+    Official,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeStatus {
+    #[default]
+    Never,
+    Passed,
+    Failed,
+}
+
+impl ProbeStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProbeStatus::Never => "never",
+            ProbeStatus::Passed => "passed",
+            ProbeStatus::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProtocolSlots {
+    pub anthropic: Option<String>,
+    pub openai: Option<String>,
+    pub responses: Option<String>,
+    pub gemini: Option<String>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GatewayModel {
+    pub id: String,
+    pub source: String,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens: Option<u64>,
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeRecord {
+    pub slot: String,
+    pub model: Option<String>,
+    pub url_fp: String,
+    pub key_fp: String,
+    pub streaming: ProbeStatus,
+    pub effort: ProbeStatus,
+    pub headers: ProbeStatus,
+    pub basic: ProbeStatus,
+    pub probed_at: String,
+    /// 基础请求延迟；旧记录无此键。
+    #[serde(default)]
+    pub latency_ms: Option<u64>,
+}
+
+/// 每槽体检摘要（list 时现算，不落盘）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SlotProbeSummary {
+    pub slot: String,
+    pub last_latency_ms: Option<u64>,
+    pub last_probe_at: Option<String>,
+    pub last_ok: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Gateway {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub no_auth: bool,
+    #[serde(default)]
+    pub key_hint: Option<String>,
+    #[serde(default)]
+    pub slots: ProtocolSlots,
+    #[serde(default)]
+    pub header_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub models: Vec<GatewayModel>,
+    #[serde(default)]
+    pub catalog_fetched_at: Option<String>,
+    #[serde(default)]
+    pub catalog_from_slot: Option<String>,
+    #[serde(default)]
+    pub last_probe: Vec<ProbeRecord>,
+    /// list 现算，不落盘
+    #[serde(default, skip_deserializing, skip_serializing_if = "Vec::is_empty")]
+    pub slot_probes: Vec<SlotProbeSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Binding {
+    pub id: String,
+    pub agent: String,
+    #[serde(default)]
+    pub kind: BindingKind,
+    #[serde(default)]
+    pub gateway_id: Option<String>,
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub extra_env: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayInput {
+    pub name: String,
+    #[serde(default)]
+    pub no_auth: bool,
+    pub slots: ProtocolSlots,
+    #[serde(default)]
+    pub header_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub models: Vec<GatewayModel>,
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindingInput {
+    pub agent: String,
+    pub gateway_id: Option<String>,
+    #[serde(default)]
+    pub kind: BindingKind,
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub extra_env: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,7 +261,7 @@ pub struct ProfileInput {
     pub extra_env: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub request_policy: RequestPolicy,
-    /// 明文密钥，写入钥匙串后丢弃；空 / None 表示不设置或不修改
+    /// 明文密钥，写入 keys.json 后丢弃；空 / None 表示不设置或不修改
     pub api_key: Option<String>,
 }
 
@@ -106,7 +286,7 @@ fn normalize_models(models: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn sensitive_env_name(name: &str) -> bool {
+pub(crate) fn sensitive_env_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     ["KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH"]
         .iter()
@@ -137,7 +317,7 @@ impl ProfileStore {
         })
     }
 
-    fn read_all(&self) -> Result<Vec<Profile>, String> {
+    fn read_legacy_profiles(&self) -> Result<Vec<Profile>, String> {
         match fs::read_to_string(&self.path) {
             Ok(text) => serde_json::from_str(&text).map_err(|e| format!("解析 profiles.json 失败: {e}")),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -145,32 +325,72 @@ impl ProfileStore {
         }
     }
 
-    fn write_all(&self, profiles: &[Profile]) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(profiles).map_err(|e| e.to_string())?;
-        atomic_write(&self.path, &text)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("设置 profiles.json 权限失败: {e}"))?;
+    /// 首次把 profiles.json 拆成 gateways.json + bindings.json。调用方须已持 store_lock。
+    pub(crate) fn ensure_split_locked(&self) -> Result<(), String> {
+        if crate::gateway_store::split_migrated() {
+            return Ok(());
         }
+        let old = self.read_legacy_profiles()?;
+        if old.is_empty() && !self.path.exists() {
+            crate::gateway_store::save_gateways(&[])?;
+            crate::gateway_store::save_bindings(&[])?;
+            return Ok(());
+        }
+        let keys_file = keys_path()?;
+        let mut old_keys = read_keys_at(&keys_file)?;
+        for p in &old {
+            if old_keys.contains_key(&p.id) {
+                continue;
+            }
+            if let Some(k) = key_entry(&p.id)
+                .ok()
+                .and_then(|e| e.get_password().ok())
+                .filter(|s| !s.is_empty())
+            {
+                old_keys.insert(p.id.clone(), k);
+            }
+        }
+        let result = crate::gateway_store::migrate_from_profiles(old, old_keys);
+        backup_split_sidecars(&self.path, &keys_file);
+        crate::gateway_store::save_gateways(&result.gateways)?;
+        crate::gateway_store::save_bindings(&result.bindings)?;
+        write_keys_at(&keys_file, &result.keys)?;
+        if !result.journal.entries.is_empty() {
+            let text = serde_json::to_string_pretty(&result.journal).map_err(|e| e.to_string())?;
+            atomic_write(&crate::gateway_store::merge_journal_path()?, &text)?;
+        }
+        crate::gateway_store::apply_rewrites_to_settings_and_schedules(&result.rewrites);
         Ok(())
     }
 
-    /// list 的锁内版本：调用方须已持 store_lock
-    fn list_locked(&self) -> Result<Vec<Profile>, String> {
-        let mut profiles = self.read_all()?;
-        for p in &mut profiles {
-            // 旧版单模型字段迁移进列表
+    fn materialize_locked(&self, selected_model: Option<&str>) -> Result<Vec<Profile>, String> {
+        self.ensure_split_locked()?;
+        let gateways = crate::gateway_store::load_gateways()?;
+        let bindings = crate::gateway_store::load_bindings()?;
+        let mut out = Vec::with_capacity(bindings.len());
+        for b in &bindings {
+            let gw = b
+                .gateway_id
+                .as_deref()
+                .and_then(|id| gateways.iter().find(|g| g.id == id));
+            let mut p = crate::gateway_store::materialize(b, gw, selected_model);
+            p.has_key = match &b.gateway_id {
+                Some(gid) => has_key_locked(gid)?,
+                None => false,
+            };
             if p.models.is_empty() {
                 if let Some(m) = p.model.take() {
                     p.models = vec![m];
                 }
             }
-            // keys.json 损坏时向上报错，不能把全部 profile 谎报成「无密钥」
-            p.has_key = has_key_locked(&p.id)?;
+            out.push(p);
         }
-        Ok(profiles)
+        Ok(out)
+    }
+
+    /// list 的锁内版本：调用方须已持 store_lock
+    fn list_locked(&self) -> Result<Vec<Profile>, String> {
+        self.materialize_locked(None)
     }
 
     pub fn list(&self) -> Result<Vec<Profile>, String> {
@@ -179,228 +399,584 @@ impl ProfileStore {
     }
 
     pub fn get(&self, id: &str) -> Result<Profile, String> {
-        self.list()?
-            .into_iter()
-            .find(|p| p.id == id)
-            .ok_or_else(|| format!("profile 不存在: {id}"))
+        self.get_with_model(id, None)
+    }
+
+    /// 按启动选中模型物化策略字段（温度/effort 取该模型，不是名单首个）。
+    pub fn get_with_model(&self, id: &str, selected_model: Option<&str>) -> Result<Profile, String> {
+        let _g = store_lock();
+        self.get_locked_with_model(id, selected_model)
     }
 
     /// get 的锁内版本：调用方须已持 store_lock
     fn get_locked(&self, id: &str) -> Result<Profile, String> {
-        self.list_locked()?
-            .into_iter()
-            .find(|p| p.id == id)
-            .ok_or_else(|| format!("profile 不存在: {id}"))
+        self.get_locked_with_model(id, None)
+    }
+
+    fn get_locked_with_model(
+        &self,
+        id: &str,
+        selected_model: Option<&str>,
+    ) -> Result<Profile, String> {
+        self.ensure_split_locked()?;
+        let bindings = crate::gateway_store::load_bindings()?;
+        let b = bindings
+            .iter()
+            .find(|b| b.id == id)
+            .ok_or_else(|| format!("profile 不存在: {id}"))?;
+        let gateways = crate::gateway_store::load_gateways()?;
+        let gw = b
+            .gateway_id
+            .as_deref()
+            .and_then(|gid| gateways.iter().find(|g| g.id == gid));
+        let mut p = crate::gateway_store::materialize(b, gw, selected_model);
+        p.has_key = match &b.gateway_id {
+            Some(gid) => has_key_locked(gid)?,
+            None => false,
+        };
+        Ok(p)
     }
 
     pub fn create(&self, input: ProfileInput) -> Result<Profile, String> {
         let _g = store_lock();
-        let mut profile = Profile {
-            id: uuid::Uuid::new_v4().to_string(),
-            agent: input.agent,
-            name: input.name,
-            account_type: input.account_type,
-            no_auth: input.no_auth,
-            protocol: input.protocol,
-            base_url: input.base_url.filter(|s| !s.is_empty()),
-            models: normalize_models(input.models),
-            extra_env: input.extra_env,
-            request_policy: input.request_policy,
-            key_hint: None,
-            model: None,
-            last_used_at: None,
-            has_key: false,
-        };
-        if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
-            set_key(&profile.id, &key)?;
-            profile.key_hint = Some(key_hint_of(&key));
-            profile.has_key = true;
+        self.ensure_split_locked()?;
+        if input.account_type == AccountType::Official {
+            let mut bindings = crate::gateway_store::load_bindings()?;
+            if bindings
+                .iter()
+                .any(|b| b.agent == input.agent && b.kind == BindingKind::Official)
+            {
+                return Err("该 Agent 已有官方账号绑定".into());
+            }
+            let binding = Binding {
+                id: uuid::Uuid::new_v4().to_string(),
+                agent: input.agent,
+                kind: BindingKind::Official,
+                gateway_id: None,
+                protocol: None,
+                models: normalize_models(input.models),
+                extra_env: input.extra_env,
+                last_used_at: None,
+            };
+            let profile = crate::gateway_store::materialize(&binding, None, None);
+            crate::profile_validation::validate_profile_fields(&profile)?;
+            bindings.push(binding);
+            crate::gateway_store::save_bindings(&bindings)?;
+            return Ok(profile);
         }
+        let models = normalize_models(input.models);
+        let mut gateway = Gateway {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: input.name.clone(),
+            no_auth: input.no_auth,
+            key_hint: None,
+            slots: ProtocolSlots::default(),
+            header_env: input.request_policy.header_env.clone(),
+            models: models
+                .iter()
+                .map(|id| GatewayModel {
+                    id: id.clone(),
+                    source: "user".into(),
+                    temperature: input.request_policy.temperature,
+                    top_p: input.request_policy.top_p,
+                    max_output_tokens: input.request_policy.max_output_tokens,
+                    reasoning_effort: input.request_policy.reasoning_effort.clone(),
+                })
+                .collect(),
+            catalog_fetched_at: None,
+            catalog_from_slot: None,
+            last_probe: Vec::new(),
+            slot_probes: Vec::new(),
+        };
+        let slot = crate::gateway_store::slot_for_agent(&input.agent, input.protocol.as_deref());
+        crate::gateway_store::set_slot_url(
+            &mut gateway.slots,
+            slot,
+            input.base_url.clone().filter(|s| !s.is_empty()),
+        );
+        if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
+            set_key(&gateway.id, &key)?;
+            gateway.key_hint = Some(key_hint_of(&key));
+        }
+        let binding = Binding {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent: input.agent.clone(),
+            kind: BindingKind::Api,
+            gateway_id: Some(gateway.id.clone()),
+            protocol: input.protocol.clone(),
+            models: models.clone(),
+            extra_env: input.extra_env.clone(),
+            last_used_at: None,
+        };
+        let mut profile = crate::gateway_store::materialize(&binding, Some(&gateway), None);
+        profile.has_key = gateway.key_hint.is_some();
         if let Err(error) = crate::profile_validation::validate_profile_fields(&profile) {
-            delete_key(&profile.id);
+            delete_key(&gateway.id);
             return Err(error);
         }
-        let mut profiles = self.read_all()?;
-        profiles.push(profile.clone());
-        self.write_all(&profiles)?;
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        let mut bindings = crate::gateway_store::load_bindings()?;
+        gateways.push(gateway);
+        bindings.push(binding);
+        crate::gateway_store::save_gateways(&gateways)?;
+        crate::gateway_store::save_bindings(&bindings)?;
         Ok(profile)
     }
 
-    /// 复制配置：字段全部拷贝，钥匙串密钥一并复制到新 id，名称加「副本」
+    /// 复制配置：克隆网关（新 id）再绑到同一 Agent。同一网关不能绑两次。
     pub fn duplicate(&self, id: &str) -> Result<Profile, String> {
         let _g = store_lock();
+        self.ensure_split_locked()?;
         let src = self.get_locked(id)?;
-        let mut copy = Profile {
-            id: uuid::Uuid::new_v4().to_string(),
-            agent: src.agent,
-            name: format!("{} 副本", src.name),
-            account_type: src.account_type,
-            no_auth: src.no_auth,
-            protocol: src.protocol,
-            base_url: src.base_url,
-            models: src.models,
-            extra_env: src.extra_env,
-            request_policy: src.request_policy,
-            key_hint: src.key_hint,
-            model: None,
-            last_used_at: None,
-            has_key: false,
-        };
-        if let Some(key) = get_key_locked(id)? {
-            set_key(&copy.id, &key)?;
-            copy.has_key = true;
+        if src.account_type == AccountType::Official {
+            return Err("官方账号绑定不能复制".into());
         }
+        let Some(gid) = src.gateway_id.clone() else {
+            return Err("这条绑定没有网关".into());
+        };
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        let src_gw = gateways
+            .iter()
+            .find(|g| g.id == gid)
+            .ok_or("网关不存在")?
+            .clone();
+        let mut gw = src_gw;
+        gw.id = uuid::Uuid::new_v4().to_string();
+        let existing: Vec<&str> = gateways.iter().map(|g| g.name.as_str()).collect();
+        gw.name = copy_name(&existing, &gw.name);
+        gw.last_probe.clear();
+        if let Some(key) = get_key_locked(&gid)? {
+            set_key(&gw.id, &key)?;
+        }
+        let binding = Binding {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent: src.agent.clone(),
+            kind: BindingKind::Api,
+            gateway_id: Some(gw.id.clone()),
+            protocol: src.protocol.clone(),
+            models: src.models.clone(),
+            extra_env: src.extra_env.clone(),
+            last_used_at: None,
+        };
+        let mut copy = crate::gateway_store::materialize(&binding, Some(&gw), None);
+        copy.has_key = has_key_locked(&gw.id)?;
         if let Err(error) = crate::profile_validation::validate_profile_fields(&copy) {
-            delete_key(&copy.id);
+            delete_key(&gw.id);
             return Err(error);
         }
-        let mut profiles = self.read_all()?;
-        profiles.push(copy.clone());
-        self.write_all(&profiles)?;
+        let mut bindings = crate::gateway_store::load_bindings()?;
+        gateways.push(gw);
+        bindings.push(binding);
+        crate::gateway_store::save_gateways(&gateways)?;
+        crate::gateway_store::save_bindings(&bindings)?;
         Ok(copy)
     }
 
-    /// 复制配置到其他 agent（#14）：密钥在本进程内从 keys.json 直读直写（0600 文件内操作，
-    /// 密钥不出站、不经前端）；名称在目标 agent 内防重名（重名追加 -2/-3…）；
-    /// 目标 agent 必须与源同协议族，多协议目标取与源同族的协议取值
+    /// 把该网关绑到目标 Agent。缺槽时把源 URL 填进目标槽（与旧「复制」同 URL 行为）。
     pub fn copy_to_agent(&self, id: &str, target_agent: &str) -> Result<Profile, String> {
         let _g = store_lock();
+        self.ensure_split_locked()?;
         let src = self.get_locked(id)?;
         if target_agent == src.agent {
             return Err("目标与来源是同一个 agent，请用「复制配置」".into());
         }
+        if src.account_type == AccountType::Official {
+            return Err("官方账号不能绑到其他 Agent".into());
+        }
         let protocol = pick_copy_protocol(&src, target_agent)?;
-        let profiles = self.read_all()?;
-        let name = copy_name(
-            &profiles
-                .iter()
-                .filter(|p| p.agent == target_agent)
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>(),
-            &src.name,
-        );
-        let mut copy = Profile {
+        let Some(gid) = src.gateway_id.clone() else {
+            return Err("这条绑定没有网关".into());
+        };
+        let mut bindings = crate::gateway_store::load_bindings()?;
+        if bindings
+            .iter()
+            .any(|b| b.agent == target_agent && b.gateway_id.as_deref() == Some(gid.as_str()))
+        {
+            return Err("该 Agent 已经绑过这个网关".into());
+        }
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        let gw = gateways
+            .iter_mut()
+            .find(|g| g.id == gid)
+            .ok_or("网关不存在")?;
+        let slot = crate::gateway_store::slot_for_agent(target_agent, protocol.as_deref());
+        if crate::gateway_store::slot_url(&gw.slots, slot).is_none() {
+            crate::gateway_store::set_slot_url(&mut gw.slots, slot, src.base_url.clone());
+        }
+        let binding = Binding {
             id: uuid::Uuid::new_v4().to_string(),
             agent: target_agent.to_string(),
-            name,
-            account_type: src.account_type,
-            no_auth: src.no_auth,
+            kind: BindingKind::Api,
+            gateway_id: Some(gid.clone()),
             protocol,
-            base_url: src.base_url,
-            models: src.models,
-            extra_env: src.extra_env,
-            request_policy: src.request_policy,
-            key_hint: src.key_hint,
-            model: None,
+            models: src.models.clone(),
+            extra_env: src.extra_env.clone(),
             last_used_at: None,
-            has_key: false,
         };
-        if let Some(key) = get_key_locked(id)? {
-            set_key(&copy.id, &key)?;
-            copy.has_key = true;
-        }
-        if let Err(error) = crate::profile_validation::validate_profile_fields(&copy) {
-            delete_key(&copy.id);
-            return Err(error);
-        }
-        let mut profiles = profiles;
-        profiles.push(copy.clone());
-        self.write_all(&profiles)?;
+        let mut copy = crate::gateway_store::materialize(&binding, Some(gw), None);
+        copy.has_key = has_key_locked(&gid)?;
+        crate::profile_validation::validate_profile_fields(&copy)?;
+        bindings.push(binding);
+        crate::gateway_store::save_gateways(&gateways)?;
+        crate::gateway_store::save_bindings(&bindings)?;
         Ok(copy)
     }
 
     pub fn update(&self, id: &str, input: ProfileInput) -> Result<Profile, String> {
         let _g = store_lock();
-        let mut profiles = self.read_all()?;
-        let profile = profiles
-            .iter_mut()
-            .find(|p| p.id == id)
+        self.ensure_split_locked()?;
+        let mut bindings = crate::gateway_store::load_bindings()?;
+        let idx = bindings
+            .iter()
+            .position(|b| b.id == id)
             .ok_or_else(|| format!("profile 不存在: {id}"))?;
-        if profile.agent != input.agent {
+        if bindings[idx].agent != input.agent {
             return Err("连接创建后不能直接更换 Agent，请使用「复制到其他 Agent」".into());
         }
-        let mut candidate = profile.clone();
-        candidate.name = input.name.clone();
-        candidate.account_type = input.account_type;
-        candidate.no_auth = input.no_auth;
-        candidate.protocol = input.protocol.clone();
-        candidate.base_url = input.base_url.clone().filter(|s| !s.trim().is_empty());
-        candidate.models = normalize_models(input.models.clone());
-        candidate.extra_env = input.extra_env.clone();
-        candidate.request_policy = input.request_policy.clone();
-        candidate.has_key = input.api_key.as_deref().is_some_and(|k| !k.trim().is_empty())
-            || get_key_locked(id)?.is_some();
-        crate::profile_validation::validate_profile_fields(&candidate)?;
-        if candidate.account_type == AccountType::Official && candidate.no_auth {
+        if input.account_type == AccountType::Official && input.no_auth {
             return Err("官方账号不能设置为无密钥模式".into());
         }
-        profile.agent = input.agent;
-        profile.name = input.name;
-        profile.account_type = input.account_type;
-        profile.no_auth = input.no_auth;
-        profile.protocol = input.protocol;
-        profile.base_url = input.base_url.filter(|s| !s.is_empty());
-        profile.models = normalize_models(input.models);
-        profile.model = None;
-        profile.extra_env = input.extra_env;
-        profile.request_policy = input.request_policy;
-        if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
-            set_key(id, &key)?;
-            profile.key_hint = Some(key_hint_of(&key));
-        } else if profile.account_type == AccountType::Official {
-            delete_key(id);
-            profile.key_hint = None;
-        } else if profile.no_auth {
-            delete_key(id);
-            profile.key_hint = None;
+        bindings[idx].protocol = input.protocol.clone();
+        bindings[idx].models = normalize_models(input.models.clone());
+        bindings[idx].extra_env = input.extra_env.clone();
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        if bindings[idx].kind == BindingKind::Official {
+            if input.account_type != AccountType::Official {
+                return Err("官方账号绑定不能改成 API 连接，请新建".into());
+            }
+            let profile = crate::gateway_store::materialize(&bindings[idx], None, None);
+            crate::profile_validation::validate_profile_fields(&profile)?;
+            crate::gateway_store::save_bindings(&bindings)?;
+            return Ok(profile);
         }
-        profile.has_key = get_key_locked(id)?.is_some();
-        crate::profile_validation::validate_profile_fields(profile)?;
-        let updated = profile.clone();
-        self.write_all(&profiles)?;
-        Ok(updated)
+        let gid = bindings[idx]
+            .gateway_id
+            .clone()
+            .ok_or("这条绑定没有网关")?;
+        let gw_idx = gateways
+            .iter()
+            .position(|g| g.id == gid)
+            .ok_or("网关不存在")?;
+        let old_url = {
+            let slot = crate::gateway_store::slot_for_agent(&input.agent, input.protocol.as_deref());
+            crate::gateway_store::slot_url(&gateways[gw_idx].slots, slot).map(str::to_string)
+        };
+        let key_changed = input.api_key.as_deref().is_some_and(|k| !k.is_empty());
+        let no_auth_changed = gateways[gw_idx].no_auth != input.no_auth;
+        gateways[gw_idx].name = input.name.clone();
+        gateways[gw_idx].no_auth = input.no_auth;
+        gateways[gw_idx].header_env = input.request_policy.header_env.clone();
+        let slot = crate::gateway_store::slot_for_agent(&input.agent, input.protocol.as_deref());
+        let new_url = input.base_url.clone().filter(|s| !s.trim().is_empty());
+        crate::gateway_store::set_slot_url(&mut gateways[gw_idx].slots, slot, new_url.clone());
+        if old_url != new_url {
+            crate::gateway_store::invalidate_slot_probes(&mut gateways[gw_idx], slot);
+        }
+        if key_changed || no_auth_changed {
+            crate::gateway_store::invalidate_all_probes(&mut gateways[gw_idx]);
+        }
+        // 绑定名单里没有的模型只补空条目，不覆盖网关库里已设的逐模型策略
+        for id in &bindings[idx].models {
+            if !gateways[gw_idx].models.iter().any(|m| m.id == *id) {
+                gateways[gw_idx].models.push(GatewayModel {
+                    id: id.clone(),
+                    source: "user".into(),
+                    temperature: None,
+                    top_p: None,
+                    max_output_tokens: None,
+                    reasoning_effort: None,
+                });
+            }
+        }
+        if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
+            set_key(&gid, &key)?;
+            gateways[gw_idx].key_hint = Some(key_hint_of(&key));
+        } else if input.no_auth {
+            delete_key(&gid);
+            gateways[gw_idx].key_hint = None;
+        }
+        let mut profile =
+            crate::gateway_store::materialize(&bindings[idx], Some(&gateways[gw_idx]), None);
+        profile.has_key = has_key_locked(&gid)?;
+        crate::profile_validation::validate_profile_fields(&profile)?;
+        crate::gateway_store::save_gateways(&gateways)?;
+        crate::gateway_store::save_bindings(&bindings)?;
+        Ok(profile)
     }
 
+    /// 解绑。不删网关、不动密钥。
     pub fn delete(&self, id: &str) -> Result<(), String> {
         let _g = store_lock();
-        let mut profiles = self.read_all()?;
-        profiles.retain(|p| p.id != id);
-        self.write_all(&profiles)?;
-        delete_key(id);
-        // 同步清掉设置里的引用（AI 专用/按功能绑定指到已删 id 会让解析链硬报错）；
-        // 持锁内联调用，失败只记日志不否决删除
+        self.ensure_split_locked()?;
+        let mut bindings = crate::gateway_store::load_bindings()?;
+        bindings.retain(|b| b.id != id);
+        crate::gateway_store::save_bindings(&bindings)?;
+        let catalog = crate::agents::codex_catalog_path(id);
+        if let Some(p) = catalog {
+            let _ = fs::remove_file(p);
+        }
         crate::settings::clear_profile_refs(id);
         Ok(())
     }
 
     pub fn clear_key(&self, id: &str) -> Result<(), String> {
         let _g = store_lock();
-        let mut profiles = self.read_all()?;
-        let profile = profiles
-            .iter_mut()
-            .find(|p| p.id == id)
+        self.ensure_split_locked()?;
+        let bindings = crate::gateway_store::load_bindings()?;
+        let b = bindings
+            .iter()
+            .find(|b| b.id == id)
             .ok_or_else(|| format!("profile 不存在: {id}"))?;
-        delete_key(id);
-        profile.key_hint = None;
-        profile.has_key = false;
-        self.write_all(&profiles)
+        let Some(gid) = &b.gateway_id else {
+            return Ok(());
+        };
+        delete_key(gid);
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        if let Some(g) = gateways.iter_mut().find(|g| g.id == *gid) {
+            g.key_hint = None;
+            crate::gateway_store::invalidate_all_probes(g);
+        }
+        crate::gateway_store::save_gateways(&gateways)
     }
 
     /// 每次用于启动即刷新 last_used_at（§6.12 E）；失败静默，不影响启动
     pub fn touch_last_used(&self, id: &str) {
         let _g = store_lock();
         let _ = (|| -> Result<(), String> {
-            let mut profiles = self.read_all()?;
-            if let Some(p) = profiles.iter_mut().find(|p| p.id == id) {
-                p.last_used_at = Some(crate::sessions::now_iso());
-                self.write_all(&profiles)?;
+            self.ensure_split_locked()?;
+            let mut bindings = crate::gateway_store::load_bindings()?;
+            if let Some(b) = bindings.iter_mut().find(|b| b.id == id) {
+                b.last_used_at = Some(crate::sessions::now_iso());
+                crate::gateway_store::save_bindings(&bindings)?;
             }
             Ok(())
         })();
     }
+
+    pub fn list_gateways(&self) -> Result<Vec<Gateway>, String> {
+        let _g = store_lock();
+        self.ensure_split_locked()?;
+        let mut items = crate::gateway_store::load_gateways()?;
+        for g in &mut items {
+            g.key_hint = if has_key_locked(&g.id)? {
+                g.key_hint.clone().or(Some("····".into()))
+            } else {
+                None
+            };
+            g.slot_probes = crate::gateway_store::slot_probe_summaries(&g.last_probe);
+        }
+        Ok(items)
+    }
+
+    pub fn save_gateway(&self, id: Option<String>, input: GatewayInput) -> Result<Gateway, String> {
+        let _g = store_lock();
+        self.ensure_split_locked()?;
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        if let Some(id) = id {
+            let idx = gateways
+                .iter()
+                .position(|g| g.id == id)
+                .ok_or("网关不存在")?;
+            let old = gateways[idx].clone();
+            gateways[idx].name = input.name;
+            gateways[idx].no_auth = input.no_auth;
+            gateways[idx].slots = input.slots;
+            gateways[idx].header_env = input.header_env;
+            gateways[idx].models = input.models;
+            if old.slots.anthropic != gateways[idx].slots.anthropic {
+                crate::gateway_store::invalidate_slot_probes(&mut gateways[idx], crate::gateway_store::Slot::Anthropic);
+            }
+            if old.slots.openai != gateways[idx].slots.openai {
+                crate::gateway_store::invalidate_slot_probes(&mut gateways[idx], crate::gateway_store::Slot::Openai);
+            }
+            if old.slots.responses != gateways[idx].slots.responses {
+                crate::gateway_store::invalidate_slot_probes(&mut gateways[idx], crate::gateway_store::Slot::Responses);
+            }
+            if old.slots.gemini != gateways[idx].slots.gemini {
+                crate::gateway_store::invalidate_slot_probes(&mut gateways[idx], crate::gateway_store::Slot::Gemini);
+            }
+            if old.slots.cursor != gateways[idx].slots.cursor {
+                crate::gateway_store::invalidate_slot_probes(&mut gateways[idx], crate::gateway_store::Slot::Cursor);
+            }
+            let key_changed = input.api_key.as_deref().is_some_and(|k| !k.is_empty());
+            if key_changed || old.no_auth != gateways[idx].no_auth {
+                crate::gateway_store::invalidate_all_probes(&mut gateways[idx]);
+            }
+            if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
+                set_key(&id, &key)?;
+                gateways[idx].key_hint = Some(key_hint_of(&key));
+            } else if input.no_auth {
+                delete_key(&id);
+                gateways[idx].key_hint = None;
+            }
+            let saved = gateways[idx].clone();
+            crate::gateway_store::save_gateways(&gateways)?;
+            Ok(saved)
+        } else {
+            let mut gw = Gateway {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: input.name,
+                no_auth: input.no_auth,
+                key_hint: None,
+                slots: input.slots,
+                header_env: input.header_env,
+                models: input.models,
+                catalog_fetched_at: None,
+                catalog_from_slot: None,
+                last_probe: Vec::new(),
+                slot_probes: Vec::new(),
+            };
+            if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
+                set_key(&gw.id, &key)?;
+                gw.key_hint = Some(key_hint_of(&key));
+            }
+            gateways.push(gw.clone());
+            crate::gateway_store::save_gateways(&gateways)?;
+            Ok(gw)
+        }
+    }
+
+    pub fn delete_gateway(&self, id: &str) -> Result<(), String> {
+        let _g = store_lock();
+        self.ensure_split_locked()?;
+        let bindings = crate::gateway_store::load_bindings()?;
+        if bindings.iter().any(|b| b.gateway_id.as_deref() == Some(id)) {
+            return Err("还有 Agent 绑着这个网关，请先解绑".into());
+        }
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        gateways.retain(|g| g.id != id);
+        crate::gateway_store::save_gateways(&gateways)?;
+        delete_key(id);
+        crate::model_registry::purge_relay_for_gateway(id);
+        Ok(())
+    }
+
+    pub fn bind_gateway(&self, input: BindingInput) -> Result<Profile, String> {
+        let _g = store_lock();
+        self.ensure_split_locked()?;
+        if input.kind == BindingKind::Official {
+            return self.create(ProfileInput {
+                agent: input.agent,
+                name: "官方账号".into(),
+                account_type: AccountType::Official,
+                no_auth: false,
+                protocol: None,
+                base_url: None,
+                models: input.models,
+                extra_env: input.extra_env,
+                request_policy: RequestPolicy::default(),
+                api_key: None,
+            });
+        }
+        let gid = input.gateway_id.clone().ok_or("请选择网关")?;
+        let mut bindings = crate::gateway_store::load_bindings()?;
+        if bindings
+            .iter()
+            .any(|b| b.agent == input.agent && b.gateway_id.as_deref() == Some(gid.as_str()))
+        {
+            return Err("该 Agent 已经绑过这个网关".into());
+        }
+        let gateways = crate::gateway_store::load_gateways()?;
+        let gw = gateways.iter().find(|g| g.id == gid).ok_or("网关不存在")?;
+        let slot = crate::gateway_store::slot_for_agent(&input.agent, input.protocol.as_deref());
+        if crate::gateway_store::slot_url(&gw.slots, slot).is_none() {
+            return Err("这个网关还没配该协议的端点，请先在网关库补槽".into());
+        }
+        let binding = Binding {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent: input.agent,
+            kind: BindingKind::Api,
+            gateway_id: Some(gid.clone()),
+            protocol: input.protocol,
+            models: normalize_models(input.models),
+            extra_env: input.extra_env,
+            last_used_at: None,
+        };
+        let mut profile = crate::gateway_store::materialize(&binding, Some(gw), None);
+        profile.has_key = has_key_locked(&gid)?;
+        crate::profile_validation::validate_profile_fields(&profile)?;
+        bindings.push(binding);
+        crate::gateway_store::save_bindings(&bindings)?;
+        Ok(profile)
+    }
+
+    pub fn record_probe(&self, gateway_id: &str, rec: ProbeRecord) -> Result<(), String> {
+        let _g = store_lock();
+        self.ensure_split_locked()?;
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        let gw = gateways
+            .iter_mut()
+            .find(|g| g.id == gateway_id)
+            .ok_or("网关不存在")?;
+        gw.last_probe
+            .retain(|p| !(p.slot == rec.slot && p.model == rec.model));
+        gw.last_probe.push(rec);
+        crate::gateway_store::save_gateways(&gateways)
+    }
+
+    pub fn merge_fetched_models(
+        &self,
+        gateway_id: &str,
+        slot: &str,
+        ids: Vec<String>,
+    ) -> Result<Gateway, String> {
+        let _g = store_lock();
+        self.ensure_split_locked()?;
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        let gw = gateways
+            .iter_mut()
+            .find(|g| g.id == gateway_id)
+            .ok_or("网关不存在")?;
+        let ids = normalize_models(ids);
+        if crate::gateway_store::Slot::from_str(slot).is_none() {
+            return Err(format!("未知协议槽: {slot}"));
+        }
+        for id in &ids {
+            if !gw.models.iter().any(|m| m.id == *id) {
+                gw.models.push(GatewayModel {
+                    id: id.clone(),
+                    source: "fetched".into(),
+                    temperature: None,
+                    top_p: None,
+                    max_output_tokens: None,
+                    reasoning_effort: None,
+                });
+            }
+        }
+        gw.catalog_fetched_at = Some(crate::sessions::now_iso());
+        gw.catalog_from_slot = Some(slot.to_string());
+        let mut saved = gw.clone();
+        saved.slot_probes = crate::gateway_store::slot_probe_summaries(&saved.last_probe);
+        crate::gateway_store::save_gateways(&gateways)?;
+        Ok(saved)
+    }
+
+    pub fn clear_gateway_key(&self, id: &str) -> Result<(), String> {
+        let _g = store_lock();
+        self.ensure_split_locked()?;
+        delete_key(id);
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        if let Some(g) = gateways.iter_mut().find(|g| g.id == id) {
+            g.key_hint = None;
+            crate::gateway_store::invalidate_all_probes(g);
+        }
+        crate::gateway_store::save_gateways(&gateways)
+    }
 }
 
-/// 目标 agent 内不重名的副本名（copy_to_agent 用）：原名未被占用则沿用，否则追加 -2/-3…
+/// 迁移前备份 profiles.json 与 keys.json（.json.bak-gateway-split），已存在则覆盖。
+fn backup_split_sidecars(profiles_path: &std::path::Path, keys_path: &std::path::Path) {
+    if profiles_path.exists() {
+        let bak = profiles_path.with_extension("json.bak-gateway-split");
+        let _ = fs::copy(profiles_path, &bak);
+    }
+    if keys_path.exists() {
+        let bak = keys_path.with_extension("json.bak-gateway-split");
+        let _ = fs::copy(keys_path, &bak);
+    }
+}
+
+/// 目标名未被占用则沿用，否则追加 -2/-3…
 fn copy_name(existing: &[&str], base: &str) -> String {
     if !existing.contains(&base) {
         return base.to_string();
@@ -513,6 +1089,14 @@ fn write_keys_at(
     fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
 }
 
+fn restrict_file_mode(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+}
+
 /// 原子写入：先写临时文件再 rename，避免中途崩溃留下半截 JSON（借鉴 CC Switch）。
 /// 父目录不存在时先建（MCP 分发会写到尚未初始化的 agent 配置目录，如 ~/.cursor、
 /// ~/.config/opencode；缺了这步报的是「系统找不到指定的路径」，还会把用户没见过的
@@ -593,6 +1177,17 @@ fn get_key_locked(id: &str) -> Result<Option<String>, String> {
 pub fn get_key(id: &str) -> Result<Option<String>, String> {
     let _g = store_lock();
     get_key_locked(id)
+}
+
+/// 启动/写入用：官方账号无密钥；API 从网关 id 取（迁移后 keys.json 键是网关 id）。
+pub fn get_key_for_profile(profile: &Profile) -> Result<Option<String>, String> {
+    if profile.account_type == AccountType::Official {
+        return Ok(None);
+    }
+    if let Some(gid) = &profile.gateway_id {
+        return get_key(gid);
+    }
+    get_key(&profile.id)
 }
 
 /// 仅供后端展示脱敏使用；调用方不得把返回值序列化给前端或写入日志。
@@ -698,32 +1293,475 @@ pub fn export_profiles(store: tauri::State<'_, ProfileStore>, path: String) -> R
 /// 密钥不包含在文件里，导入后需逐个补填。返回新增数量。
 #[tauri::command]
 pub fn import_profiles(store: tauri::State<'_, ProfileStore>, path: String) -> Result<usize, String> {
-    // 读-改-写全程持锁，与 create/update 互斥，防并发保存互相覆盖
-    let _g = store_lock();
     let text = fs::read_to_string(&path).map_err(|e| format!("读取导入文件失败: {e}"))?;
     let incoming: Vec<Profile> =
         serde_json::from_str(&text).map_err(|e| format!("导入文件格式不正确: {e}"))?;
-    let mut profiles = store.read_all()?;
+    let existing = store.list()?;
     let mut added = 0;
-    for mut p in incoming {
-        let dup = profiles.iter().any(|q| {
+    for p in incoming {
+        let dup = existing.iter().any(|q| {
             q.agent == p.agent && q.name == p.name && q.base_url == p.base_url
         });
         if dup {
             continue;
         }
-        if p.id.is_empty() || profiles.iter().any(|q| q.id == p.id) {
-            p.id = uuid::Uuid::new_v4().to_string();
-        }
-        p.has_key = false;
-        p.key_hint = None;
-        p.model = None;
-        p.no_auth = p.no_auth && p.account_type == AccountType::Api;
-        profiles.push(p);
+        store.create(ProfileInput {
+            agent: p.agent,
+            name: p.name,
+            account_type: p.account_type,
+            no_auth: p.no_auth && p.account_type == AccountType::Api,
+            protocol: p.protocol,
+            base_url: p.base_url,
+            models: p.models,
+            extra_env: p.extra_env,
+            request_policy: p.request_policy,
+            api_key: None,
+        })?;
         added += 1;
     }
-    store.write_all(&profiles)?;
     Ok(added)
+}
+
+fn slot_fingerprint(slots: &ProtocolSlots) -> String {
+    let pairs = [
+        ("anthropic", slots.anthropic.as_deref()),
+        ("openai", slots.openai.as_deref()),
+        ("responses", slots.responses.as_deref()),
+        ("gemini", slots.gemini.as_deref()),
+        ("cursor", slots.cursor.as_deref()),
+    ];
+    let mut parts = Vec::new();
+    for (name, url) in pairs {
+        if let Some(u) = url.map(str::trim).filter(|s| !s.is_empty()) {
+            parts.push(format!("{name}={}", u.trim_end_matches('/')));
+        }
+    }
+    parts.join("|")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewayExportV2 {
+    name: String,
+    no_auth: bool,
+    slots: ProtocolSlots,
+    header_env: BTreeMap<String, String>,
+    models: Vec<GatewayModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BindingExportV2 {
+    agent: String,
+    gateway_ref: GatewayRefV2,
+    protocol: Option<String>,
+    models: Vec<String>,
+    extra_env: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewayRefV2 {
+    name: String,
+    slot_fp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigExportV2 {
+    version: u32,
+    gateways: Vec<GatewayExportV2>,
+    bindings: Vec<BindingExportV2>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportV2Result {
+    pub added_gateways: usize,
+    pub added_bindings: usize,
+    pub skipped_slots: Vec<String>,
+}
+
+fn extra_env_for_export(
+    env: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    env.iter()
+        .filter(|(name, _)| !sensitive_env_name(name))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+fn build_export_v2(
+    gateways: &[Gateway],
+    bindings: &[Binding],
+    keys: &std::collections::HashMap<String, String>,
+    include_keys: bool,
+) -> Result<(ConfigExportV2, String), String> {
+    let mut out_gws = Vec::new();
+    for g in gateways {
+        out_gws.push(GatewayExportV2 {
+            name: g.name.clone(),
+            no_auth: g.no_auth,
+            slots: g.slots.clone(),
+            header_env: g.header_env.clone(),
+            models: g.models.clone(),
+            api_key: None,
+        });
+    }
+    let out_binds: Vec<BindingExportV2> = bindings
+        .iter()
+        .filter(|b| b.kind == BindingKind::Api)
+        .filter_map(|b| {
+            let gw = gateways
+                .iter()
+                .find(|g| Some(g.id.as_str()) == b.gateway_id.as_deref())?;
+            Some(BindingExportV2 {
+                agent: b.agent.clone(),
+                gateway_ref: GatewayRefV2 {
+                    name: gw.name.clone(),
+                    slot_fp: slot_fingerprint(&gw.slots),
+                },
+                protocol: b.protocol.clone(),
+                models: b.models.clone(),
+                extra_env: extra_env_for_export(&b.extra_env),
+            })
+        })
+        .collect();
+    let mut doc = ConfigExportV2 {
+        version: 2,
+        gateways: out_gws,
+        bindings: out_binds,
+    };
+    let mut text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    text = crate::sessions::redact_sensitive_text(&text);
+    if include_keys {
+        doc = serde_json::from_str(&text).unwrap_or(doc);
+        for (g, ge) in gateways.iter().zip(doc.gateways.iter_mut()) {
+            ge.api_key = keys.get(&g.id).cloned();
+        }
+        text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    }
+    Ok((doc, text))
+}
+
+#[tauri::command]
+pub fn export_gateways_v2(
+    store: tauri::State<'_, ProfileStore>,
+    path: String,
+    include_keys: bool,
+) -> Result<(), String> {
+    let _g = store_lock();
+    store.ensure_split_locked()?;
+    let gateways = crate::gateway_store::load_gateways()?;
+    let bindings = crate::gateway_store::load_bindings()?;
+    let mut keys = std::collections::HashMap::new();
+    if include_keys {
+        for g in &gateways {
+            if let Ok(Some(k)) = get_key_locked(&g.id) {
+                keys.insert(g.id.clone(), k);
+            }
+        }
+    }
+    let (_, text) = build_export_v2(&gateways, &bindings, &keys, include_keys)?;
+    let dest = std::path::Path::new(&path);
+    atomic_write(dest, &text)?;
+    if include_keys {
+        restrict_file_mode(dest);
+    }
+    Ok(())
+}
+
+fn match_existing_gateway(
+    gateways: &[Gateway],
+    incoming: &GatewayExportV2,
+    keys: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let fp = slot_fingerprint(&incoming.slots);
+    if let Some(k) = incoming.api_key.as_deref().filter(|s| !s.is_empty()) {
+        let kfp = format!("{:x}", md5::compute(k.as_bytes()));
+        if let Some(id) = gateways.iter().find(|g| {
+            keys.get(&g.id)
+                .map(|live| format!("{:x}", md5::compute(live.as_bytes())) == kfp)
+                .unwrap_or(false)
+        }).map(|g| g.id.clone()) {
+            return Some(id);
+        }
+    }
+    if !fp.is_empty() {
+        return gateways
+            .iter()
+            .find(|g| slot_fingerprint(&g.slots) == fp)
+            .map(|g| g.id.clone());
+    }
+    None
+}
+
+fn apply_import_v2(
+    doc: ConfigExportV2,
+    gateways: &mut Vec<Gateway>,
+    bindings: &mut Vec<Binding>,
+    keys: &mut std::collections::HashMap<String, String>,
+) -> ImportV2Result {
+    let mut skipped = Vec::new();
+    let mut added_gws = 0;
+    let mut added_binds = 0;
+    let mut ref_to_id: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+
+    for incoming in doc.gateways {
+        let fp = slot_fingerprint(&incoming.slots);
+        let existing = match_existing_gateway(gateways, &incoming, keys);
+        let gid = if let Some(id) = existing {
+            if let Some(idx) = gateways.iter().position(|g| g.id == id) {
+                merge_incoming_slots(&mut gateways[idx], &incoming, &mut skipped);
+                if let Some(k) = incoming.api_key.as_deref().filter(|s| !s.is_empty()) {
+                    keys.insert(id.clone(), k.to_string());
+                    gateways[idx].key_hint = Some(key_hint_of(k));
+                }
+            }
+            id
+        } else {
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut gw = Gateway {
+                id: id.clone(),
+                name: incoming.name.clone(),
+                no_auth: incoming.no_auth,
+                key_hint: None,
+                slots: incoming.slots.clone(),
+                header_env: incoming.header_env.clone(),
+                models: incoming.models.clone(),
+                catalog_fetched_at: None,
+                catalog_from_slot: None,
+                last_probe: Vec::new(),
+                slot_probes: Vec::new(),
+            };
+            if let Some(k) = incoming.api_key.as_deref().filter(|s| !s.is_empty()) {
+                keys.insert(id.clone(), k.to_string());
+                gw.key_hint = Some(key_hint_of(k));
+            }
+            gateways.push(gw);
+            added_gws += 1;
+            id
+        };
+        ref_to_id.insert((incoming.name, fp), gid);
+    }
+
+    for b in doc.bindings {
+        let Some(gid) = ref_to_id
+            .get(&(b.gateway_ref.name.clone(), b.gateway_ref.slot_fp.clone()))
+            .cloned()
+            .or_else(|| {
+                gateways
+                    .iter()
+                    .find(|g| {
+                        g.name == b.gateway_ref.name
+                            && slot_fingerprint(&g.slots) == b.gateway_ref.slot_fp
+                    })
+                    .map(|g| g.id.clone())
+            })
+        else {
+            skipped.push(format!("绑定 {} 找不到对应网关", b.agent));
+            continue;
+        };
+        if let Some(existing) = bindings
+            .iter_mut()
+            .find(|x| x.agent == b.agent && x.gateway_id.as_deref() == Some(gid.as_str()))
+        {
+            merge_incoming_binding(existing, &b, &mut skipped);
+            continue;
+        }
+        bindings.push(Binding {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent: b.agent,
+            kind: BindingKind::Api,
+            gateway_id: Some(gid),
+            protocol: b.protocol,
+            models: b.models,
+            extra_env: b.extra_env,
+            last_used_at: None,
+        });
+        added_binds += 1;
+    }
+    ImportV2Result {
+        added_gateways: added_gws,
+        added_bindings: added_binds,
+        skipped_slots: skipped,
+    }
+}
+
+#[tauri::command]
+pub fn import_gateways_v2(
+    store: tauri::State<'_, ProfileStore>,
+    path: String,
+) -> Result<ImportV2Result, String> {
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取导入文件失败: {e}"))?;
+    let doc: ConfigExportV2 =
+        serde_json::from_str(&text).map_err(|e| format!("导入文件格式不正确: {e}"))?;
+    if doc.version != 2 {
+        return Err("不是 v2 网关导出".into());
+    }
+    let _g = store_lock();
+    store.ensure_split_locked()?;
+    let mut gateways = crate::gateway_store::load_gateways()?;
+    let mut bindings = crate::gateway_store::load_bindings()?;
+    let mut keys = std::collections::HashMap::new();
+    for g in &gateways {
+        if let Ok(Some(k)) = get_key_locked(&g.id) {
+            keys.insert(g.id.clone(), k);
+        }
+    }
+    let result = apply_import_v2(doc, &mut gateways, &mut bindings, &mut keys);
+    for g in &gateways {
+        if let Some(k) = keys.get(&g.id) {
+            let _ = set_key(&g.id, k);
+        }
+    }
+    crate::gateway_store::save_gateways(&gateways)?;
+    crate::gateway_store::save_bindings(&bindings)?;
+    Ok(result)
+}
+
+fn merge_incoming_slots(gw: &mut Gateway, incoming: &GatewayExportV2, skipped: &mut Vec<String>) {
+    merge_one_slot("anthropic", incoming.slots.anthropic.as_deref(), &mut gw.slots.anthropic, &gw.name, skipped);
+    merge_one_slot("openai", incoming.slots.openai.as_deref(), &mut gw.slots.openai, &gw.name, skipped);
+    merge_one_slot("responses", incoming.slots.responses.as_deref(), &mut gw.slots.responses, &gw.name, skipped);
+    merge_one_slot("gemini", incoming.slots.gemini.as_deref(), &mut gw.slots.gemini, &gw.name, skipped);
+    merge_one_slot("cursor", incoming.slots.cursor.as_deref(), &mut gw.slots.cursor, &gw.name, skipped);
+    for m in &incoming.models {
+        if !gw.models.iter().any(|x| x.id == m.id) {
+            gw.models.push(m.clone());
+        }
+    }
+    for (k, v) in &incoming.header_env {
+        match gw.header_env.get(k) {
+            None => {
+                gw.header_env.insert(k.clone(), v.clone());
+            }
+            Some(existing) if existing == v => {}
+            Some(_) => skipped.push(format!("{} 的 Header {k} 冲突，已跳过", gw.name)),
+        }
+    }
+}
+
+fn merge_incoming_binding(existing: &mut Binding, incoming: &BindingExportV2, skipped: &mut Vec<String>) {
+    for m in &incoming.models {
+        if !existing.models.contains(m) {
+            existing.models.push(m.clone());
+        }
+    }
+    match (&existing.protocol, &incoming.protocol) {
+        (None, Some(p)) => existing.protocol = Some(p.clone()),
+        (Some(a), Some(b)) if a != b => {
+            skipped.push(format!("{} 的协议冲突（{a} / {b}），已跳过", incoming.agent));
+        }
+        _ => {}
+    }
+    for (k, v) in &incoming.extra_env {
+        match existing.extra_env.get(k) {
+            None => {
+                existing.extra_env.insert(k.clone(), v.clone());
+            }
+            Some(existing_v) if existing_v == v => {}
+            Some(_) => skipped.push(format!("{} 的 extraEnv {k} 冲突，已跳过", incoming.agent)),
+        }
+    }
+}
+
+fn merge_one_slot(
+    name: &str,
+    incoming: Option<&str>,
+    live: &mut Option<String>,
+    gw_name: &str,
+    skipped: &mut Vec<String>,
+) {
+    let Some(url) = incoming.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    match live.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => *live = Some(url.to_string()),
+        Some(existing) if existing.trim_end_matches('/') == url.trim_end_matches('/') => {}
+        Some(_) => skipped.push(format!("{gw_name} 的 {name} 槽冲突，已跳过")),
+    }
+}
+
+#[tauri::command]
+pub fn list_gateways(store: tauri::State<'_, ProfileStore>) -> Result<Vec<Gateway>, String> {
+    store.list_gateways()
+}
+
+#[tauri::command]
+pub fn merge_gateway_models(
+    store: tauri::State<'_, ProfileStore>,
+    gateway_id: String,
+    slot: String,
+    ids: Vec<String>,
+) -> Result<Gateway, String> {
+    store.merge_fetched_models(&gateway_id, &slot, ids)
+}
+
+#[tauri::command]
+pub fn save_gateway(
+    store: tauri::State<'_, ProfileStore>,
+    id: Option<String>,
+    input: GatewayInput,
+) -> Result<Gateway, String> {
+    store.save_gateway(id, input)
+}
+
+#[tauri::command]
+pub fn delete_gateway(store: tauri::State<'_, ProfileStore>, id: String) -> Result<(), String> {
+    store.delete_gateway(&id)
+}
+
+#[tauri::command]
+pub fn bind_gateway(
+    store: tauri::State<'_, ProfileStore>,
+    input: BindingInput,
+) -> Result<Profile, String> {
+    store.bind_gateway(input)
+}
+
+#[tauri::command]
+pub fn unbind_split_merge(store: tauri::State<'_, ProfileStore>) -> Result<usize, String> {
+    let _g = store_lock();
+    store.ensure_split_locked()?;
+    let path = crate::gateway_store::merge_journal_path()?;
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("读取合并清单失败: {e}")),
+    };
+    let journal: crate::gateway_store::MergeJournal =
+        serde_json::from_str(&text).map_err(|e| format!("合并清单损坏: {e}"))?;
+    if journal.entries.is_empty() {
+        return Ok(0);
+    }
+    let mut gateways = crate::gateway_store::load_gateways()?;
+    let mut bindings = crate::gateway_store::load_bindings()?;
+    let (restored, copies) =
+        crate::gateway_store::restore_merged_bindings(&journal, &mut gateways, &mut bindings);
+    for (from, to) in copies {
+        if let Ok(Some(k)) = get_key_locked(&from) {
+            let _ = set_key(&to, &k);
+            if let Some(g) = gateways.iter_mut().find(|g| g.id == to) {
+                g.key_hint = Some(key_hint_of(&k));
+            }
+        }
+    }
+    crate::gateway_store::save_gateways(&gateways)?;
+    crate::gateway_store::save_bindings(&bindings)?;
+    let _ = fs::remove_file(&path);
+    Ok(restored)
+}
+
+#[tauri::command]
+pub fn clear_gateway_key(
+    store: tauri::State<'_, ProfileStore>,
+    id: String,
+) -> Result<(), String> {
+    store.clear_gateway_key(&id)
 }
 
 #[cfg(test)]
@@ -869,6 +1907,9 @@ mod tests {
             model: None,
             last_used_at: None,
             has_key: false,
+            gateway_id: None,
+            slot_missing: false,
+            provider_override: None,
         };
         // 同族可行：anthropic → qwen 取 anthropic；openai 源保留源协议取值
         assert_eq!(
@@ -922,5 +1963,256 @@ mod tests {
         assert!(text.contains("requestPolicy"));
         assert!(text.contains("RELAY_KEY"));
         assert!(!text.contains("sk-secret"));
+    }
+
+    #[test]
+    fn apply_session_provider_uses_rollout_name() {
+        let gid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        let mut p = Profile {
+            id: "b".into(),
+            agent: "codex".into(),
+            name: "n".into(),
+            account_type: AccountType::Api,
+            no_auth: false,
+            protocol: None,
+            base_url: Some("https://example.com".into()),
+            models: vec![],
+            extra_env: Default::default(),
+            request_policy: RequestPolicy::default(),
+            key_hint: None,
+            model: None,
+            last_used_at: None,
+            has_key: true,
+            gateway_id: Some(gid.into()),
+            slot_missing: false,
+            provider_override: None,
+        };
+        assert_eq!(p.provider_name(), crate::provider_id::provider_id(gid));
+        p.apply_session_provider(Some("ccode"));
+        assert_eq!(p.provider_name(), crate::provider_id::LEGACY);
+        p.apply_session_provider(Some("ccode-a1b2c3d4"));
+        assert_eq!(p.provider_name(), "ccode-a1b2c3d4");
+        p.apply_session_provider(None);
+        assert_eq!(p.provider_name(), crate::provider_id::provider_id(gid));
+        p.apply_session_provider(Some("openai"));
+        assert_eq!(p.provider_name(), crate::provider_id::provider_id(gid));
+    }
+
+    #[test]
+    fn backup_split_sidecars_copies_both_files() {
+        let dir = std::env::temp_dir().join(format!("ccode-bak-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let profiles = dir.join("profiles.json");
+        let keys = dir.join("keys.json");
+        std::fs::write(&profiles, "{\"a\":1}").unwrap();
+        std::fs::write(&keys, "{\"k\":\"v\"}").unwrap();
+        backup_split_sidecars(&profiles, &keys);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("profiles.json.bak-gateway-split")).unwrap(),
+            "{\"a\":1}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("keys.json.bak-gateway-split")).unwrap(),
+            "{\"k\":\"v\"}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn sample_gw(id: &str, name: &str, url: &str) -> Gateway {
+        Gateway {
+            id: id.into(),
+            name: name.into(),
+            no_auth: false,
+            key_hint: None,
+            slots: ProtocolSlots {
+                anthropic: Some(url.into()),
+                ..Default::default()
+            },
+            header_env: Default::default(),
+            models: vec![],
+            catalog_fetched_at: None,
+            catalog_from_slot: None,
+            last_probe: vec![],
+            slot_probes: vec![],
+        }
+    }
+
+    fn sample_bind(agent: &str, gid: &str, models: &[&str]) -> Binding {
+        Binding {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent: agent.into(),
+            kind: BindingKind::Api,
+            gateway_id: Some(gid.into()),
+            protocol: None,
+            models: models.iter().map(|s| (*s).to_string()).collect(),
+            extra_env: Default::default(),
+            last_used_at: None,
+        }
+    }
+
+    #[test]
+    fn extra_env_for_export_drops_key_token_names() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
+        env.insert("CUSTOM_API_KEY".into(), "sk-should-not-export".into());
+        env.insert("AUTH_TOKEN".into(), "tok".into());
+        let out = extra_env_for_export(&env);
+        assert_eq!(out.get("HTTPS_PROXY").map(String::as_str), Some("http://127.0.0.1:7890"));
+        assert!(!out.contains_key("CUSTOM_API_KEY"));
+        assert!(!out.contains_key("AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn export_import_v2_roundtrip_and_unique_constraint() {
+        let gw = sample_gw("g1", "中转 A", "https://api.example.com");
+        let b = sample_bind("claude-code", "g1", &["m1"]);
+        let mut keys = std::collections::HashMap::new();
+        keys.insert("g1".into(), "sk-live-secret-abcdef".into());
+        let (doc, text) = build_export_v2(&[gw.clone()], &[b.clone()], &keys, true).unwrap();
+        assert!(text.contains("sk-live-secret-abcdef"));
+        assert_eq!(doc.gateways[0].api_key.as_deref(), Some("sk-live-secret-abcdef"));
+
+        let mut gateways = vec![gw.clone()];
+        let mut bindings = vec![b.clone()];
+        let mut live_keys = keys.clone();
+        let incoming = ConfigExportV2 {
+            version: 2,
+            gateways: vec![GatewayExportV2 {
+                name: "中转 A".into(),
+                no_auth: false,
+                slots: gw.slots.clone(),
+                header_env: {
+                    let mut h = std::collections::BTreeMap::new();
+                    h.insert("X-Trace".into(), "TRACE_ID".into());
+                    h
+                },
+                models: vec![],
+                api_key: Some("sk-live-secret-abcdef".into()),
+            }],
+            bindings: vec![BindingExportV2 {
+                agent: "claude-code".into(),
+                gateway_ref: GatewayRefV2 {
+                    name: "中转 A".into(),
+                    slot_fp: slot_fingerprint(&gw.slots),
+                },
+                protocol: Some("anthropic".into()),
+                models: vec!["m2".into()],
+                extra_env: {
+                    let mut e = std::collections::HashMap::new();
+                    e.insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
+                    e
+                },
+            }],
+        };
+        let res = apply_import_v2(incoming, &mut gateways, &mut bindings, &mut live_keys);
+        assert_eq!(res.added_gateways, 0);
+        assert_eq!(res.added_bindings, 0);
+        assert!(res.skipped_slots.is_empty(), "{:?}", res.skipped_slots);
+        assert_eq!(gateways.len(), 1);
+        assert_eq!(bindings.len(), 1);
+        assert!(bindings[0].models.contains(&"m1".into()));
+        assert!(bindings[0].models.contains(&"m2".into()));
+        assert_eq!(bindings[0].protocol.as_deref(), Some("anthropic"));
+        assert_eq!(
+            bindings[0].extra_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+        assert_eq!(gateways[0].header_env.get("X-Trace").map(String::as_str), Some("TRACE_ID"));
+    }
+
+    #[test]
+    fn import_v2_rotated_key_falls_back_to_slot_fingerprint() {
+        let gw = sample_gw("g1", "中转 A", "https://api.example.com");
+        let mut gateways = vec![gw.clone()];
+        let mut bindings = vec![];
+        let mut keys = std::collections::HashMap::new();
+        keys.insert("g1".into(), "sk-old-key-11111111".into());
+        let incoming = ConfigExportV2 {
+            version: 2,
+            gateways: vec![GatewayExportV2 {
+                name: "中转 A".into(),
+                no_auth: false,
+                slots: gw.slots.clone(),
+                header_env: Default::default(),
+                models: vec![],
+                api_key: Some("sk-new-key-22222222".into()),
+            }],
+            bindings: vec![],
+        };
+        let res = apply_import_v2(incoming, &mut gateways, &mut bindings, &mut keys);
+        assert_eq!(res.added_gateways, 0, "换密钥的同一槽应并入已有网关");
+        assert_eq!(gateways.len(), 1);
+        assert_eq!(keys.get("g1").map(String::as_str), Some("sk-new-key-22222222"));
+    }
+
+    #[test]
+    fn import_v2_slot_conflict_and_header_conflict_are_skipped_with_detail() {
+        let mut gw = sample_gw("g1", "中转 A", "https://api.example.com");
+        gw.header_env.insert("X-Trace".into(), "OLD".into());
+        let mut gateways = vec![gw.clone()];
+        let mut bindings = vec![];
+        let mut keys = std::collections::HashMap::new();
+        keys.insert("g1".into(), "sk-same".into());
+        let mut slots = gw.slots.clone();
+        slots.anthropic = Some("https://other.example.com".into());
+        let incoming = ConfigExportV2 {
+            version: 2,
+            gateways: vec![GatewayExportV2 {
+                name: "中转 A".into(),
+                no_auth: false,
+                slots,
+                header_env: {
+                    let mut h = std::collections::BTreeMap::new();
+                    h.insert("X-Trace".into(), "NEW".into());
+                    h
+                },
+                models: vec![],
+                api_key: Some("sk-same".into()),
+            }],
+            bindings: vec![],
+        };
+        let res = apply_import_v2(incoming, &mut gateways, &mut bindings, &mut keys);
+        assert_eq!(res.added_gateways, 0);
+        assert!(
+            res.skipped_slots.iter().any(|s| s.contains("anthropic") && s.contains("跳过")),
+            "{:?}",
+            res.skipped_slots
+        );
+        assert!(
+            res.skipped_slots.iter().any(|s| s.contains("Header X-Trace")),
+            "{:?}",
+            res.skipped_slots
+        );
+        assert_eq!(gateways[0].slots.anthropic.as_deref(), Some("https://api.example.com"));
+        assert_eq!(gateways[0].header_env.get("X-Trace").map(String::as_str), Some("OLD"));
+    }
+
+    #[test]
+    fn export_v2_redact_reload_keeps_keys_when_requested() {
+        let gw = sample_gw("g1", "中转 A", "https://api.example.com");
+        let mut keys = std::collections::HashMap::new();
+        keys.insert("g1".into(), "sk-live-secret-abcdef".into());
+        let (_, text) = build_export_v2(&[gw], &[], &keys, true).unwrap();
+        let doc: ConfigExportV2 = serde_json::from_str(&text).unwrap();
+        let mut gateways = vec![];
+        let mut bindings = vec![];
+        let mut live = std::collections::HashMap::new();
+        let res = apply_import_v2(doc, &mut gateways, &mut bindings, &mut live);
+        assert_eq!(res.added_gateways, 1);
+        assert_eq!(live.values().next().map(String::as_str), Some("sk-live-secret-abcdef"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_with_keys_sets_0600() {
+        let dir = std::env::temp_dir().join(format!("ccode-exp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.json");
+        atomic_write(&path, "{\"k\":\"v\"}").unwrap();
+        restrict_file_mode(&path);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

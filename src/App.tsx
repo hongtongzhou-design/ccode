@@ -479,35 +479,32 @@ function App() {
               </button>
               {inboxGroups.length > 0 && (
                 <div className="relative flex items-center gap-1.5">
-                  <span className="shrink-0 text-micro text-l4">
-                    待处理 {inboxCount}
-                  </span>
-                  {inboxGroups.map((group) => (
-                    <div key={group.category} className="relative">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setTitleInboxCat((v) =>
-                          v === group.category ? null : group.category,
-                        )
-                      }
-                      aria-expanded={titleInboxCat === group.category}
-                      className="flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-field bg-strip px-2.5 text-micro text-l2 hover:bg-hover"
-                    >
-                      <span
-                        className={`size-1.5 shrink-0 rounded-full ${group.items[0].dot}`}
-                      />
-                      {group.label} {group.items.length}
-                      <span className="text-l4">
-                        {titleInboxCat === group.category ? "▴" : "▾"}
-                      </span>
-                    </button>
-                    {titleInboxCat === group.category && (
-                      // 右缘锚定（right-0）：胶囊在标题栏右侧（ml-auto 后），left-0 向右展开
-                      // 420px 会超出视口右缘被窗口裁掉（v3.94 截图反馈）；向左展开永不越界
-                      <ul className="absolute right-0 top-full z-40 mt-1.5 max-h-80 w-[360px] max-w-[80vw] space-y-0.5 overflow-auto rounded-md border border-field ccode-float-surface p-1">
-                        {group.items.map((item) => (
-                          <li
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setTitleInboxCat((v) => (v ? null : inboxGroups[0].category))
+                    }
+                    aria-expanded={titleInboxCat !== null}
+                    className="flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
+                    title="待处理"
+                  >
+                    <span
+                      className={`size-1.5 shrink-0 rounded-full ${inboxGroups[0].items[0].dot}`}
+                    />
+                    {inboxCount}
+                    <span className="text-l4">
+                      {titleInboxCat !== null ? "▴" : "▾"}
+                    </span>
+                  </button>
+                  {titleInboxCat !== null && (
+                    <ul className="absolute right-0 top-full z-40 mt-1.5 max-h-80 w-[360px] max-w-[80vw] space-y-2 overflow-auto rounded-md border border-field ccode-float-surface p-1">
+                      {inboxGroups.map((group) => (
+                        <li key={group.category}>
+                          <div className="px-2.5 py-1 text-micro text-l4">
+                            {group.label} {group.items.length}
+                          </div>
+                          {group.items.map((item) => (
+                          <div
                             key={item.key}
                             className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-xs hover:bg-hover"
                           >
@@ -544,12 +541,12 @@ function App() {
                             >
                               {item.actionLabel}
                             </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    </div>
-                  ))}
+                          </div>
+                          ))}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
             </div>

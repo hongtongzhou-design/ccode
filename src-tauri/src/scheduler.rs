@@ -181,6 +181,58 @@ fn write_schedules_at(path: &Path, list: &[Schedule]) -> Result<(), String> {
     crate::profiles::atomic_write(path, &text)
 }
 
+/// 项目被移除/删除时清掉挂在该根上的全部定时任务（含文献雷达）。
+/// 路径比较走 `paths::same_path`，避免斜杠/大小写把孤儿留下。
+pub(crate) fn delete_schedules_for_project(project_root: &Path) -> Result<usize, String> {
+    let _g = sched_lock();
+    delete_schedules_for_project_at(&schedules_path()?, project_root)
+}
+
+fn delete_schedules_for_project_at(store: &Path, project_root: &Path) -> Result<usize, String> {
+    let mut list = read_schedules_at(store)?;
+    let before = list.len();
+    let root = project_root.to_string_lossy();
+    list.retain(|t| !crate::paths::same_path(&t.project_root, root.as_ref()));
+    let n = before.saturating_sub(list.len());
+    if n > 0 {
+        write_schedules_at(store, &list)?;
+    }
+    Ok(n)
+}
+
+/// 丢掉项目已经不在注册表里的定时任务。`registered` 读失败时不要调用——空表会清光全部任务。
+fn prune_unregistered(list: Vec<Schedule>, registered: &[String]) -> (Vec<Schedule>, usize) {
+    let before = list.len();
+    let kept: Vec<Schedule> = list
+        .into_iter()
+        .filter(|t| {
+            registered
+                .iter()
+                .any(|k| crate::paths::same_path(k, &t.project_root))
+        })
+        .collect();
+    let n = before.saturating_sub(kept.len());
+    (kept, n)
+}
+
+pub(crate) fn rewrite_profile_ids(rewrites: &[(String, String)]) {
+    let Ok(path) = schedules_path() else { return };
+    let _g = sched_lock();
+    let Ok(mut list) = read_schedules_at(&path) else { return };
+    let mut touched = false;
+    for s in &mut list {
+        if let Some(id) = &mut s.profile_id {
+            if let Some((_, to)) = rewrites.iter().find(|(from, _)| from == id) {
+                *id = to.clone();
+                touched = true;
+            }
+        }
+    }
+    if touched {
+        let _ = write_schedules_at(&path, &list);
+    }
+}
+
 /// schedules.json 读-改-写进程内锁（同 profiles.rs 的 store_lock 模式）
 static SCHED_MUTEX: Mutex<()> = Mutex::new(());
 
@@ -590,8 +642,18 @@ fn collect_due_ids() -> Vec<String> {
         }
     };
     let now = Local::now().naive_local();
+    let registered = crate::projects::registered_path_keys().ok();
     list.into_iter()
         .filter(|t| t.enabled)
+        .filter(|t| {
+            registered
+                .as_ref()
+                .map(|keys| {
+                    keys.iter()
+                        .any(|k| crate::paths::same_path(k, &t.project_root))
+                })
+                .unwrap_or(true)
+        })
         .filter(|t| {
             is_due(
                 &t.frequency,
@@ -629,8 +691,29 @@ pub fn start_scheduler(app: tauri::AppHandle) {
 
 #[tauri::command]
 pub fn list_schedules() -> Result<Vec<ScheduleDto>, String> {
+    // 已删项目留下的 schedules 会继续把「N 条新命中」送进收件箱；列表出口顺手清孤儿。
+    // 注册表读失败则不动盘（空清单会误删全部任务）。
+    let registered = match crate::projects::registered_path_keys() {
+        Ok(v) => Some(v),
+        Err(e) => {
+            crate::logbuf::record(
+                "warn",
+                "scheduler",
+                &format!("读注册项目失败，跳过定时任务孤儿清理: {e}"),
+            );
+            None
+        }
+    };
     let _g = sched_lock();
-    let list = read_schedules_at(&schedules_path()?)?;
+    let path = schedules_path()?;
+    let mut list = read_schedules_at(&path)?;
+    if let Some(registered) = registered.as_deref() {
+        let n;
+        (list, n) = prune_unregistered(list, registered);
+        if n > 0 {
+            write_schedules_at(&path, &list)?;
+        }
+    }
     Ok(list.into_iter().map(ScheduleDto::from).collect())
 }
 
@@ -696,6 +779,60 @@ mod tests {
 
     fn tmp_schedules_path(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("ccode-scheduler-test-{}-{}", tag, uuid::Uuid::new_v4()))
+    }
+
+    fn sample_task(id: &str, root: &str) -> Schedule {
+        Schedule {
+            id: id.into(),
+            name: "文献雷达".into(),
+            project_root: root.into(),
+            skill: "lit-watch".into(),
+            profile_id: None,
+            linked_step: None,
+            frequency: "daily".into(),
+            weekday: None,
+            hour: 8,
+            minute: 0,
+            enabled: true,
+            last_run_at: None,
+            last_status: None,
+            history: vec![],
+        }
+    }
+
+    #[test]
+    fn delete_schedules_for_project_matches_across_slash_dialect() {
+        let path = tmp_schedules_path("delete-for-project");
+        write_schedules_at(
+            &path,
+            &[
+                sample_task("keep", "/Users/me/other"),
+                sample_task("gone", "/Users/me/综述文献"),
+            ],
+        )
+        .unwrap();
+        let n = delete_schedules_for_project_at(
+            &path,
+            Path::new("/Users/me/综述文献/"),
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        let left = read_schedules_at(&path).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, "keep");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prune_unregistered_drops_orphan_roots() {
+        let list = vec![
+            sample_task("alive", "/repo/a"),
+            sample_task("ghost", "/repo/deleted"),
+        ];
+        let (kept, n) = prune_unregistered(list, &["/repo/a".into()]);
+        assert_eq!(n, 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "alive");
     }
 
     #[test]

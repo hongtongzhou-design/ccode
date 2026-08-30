@@ -120,6 +120,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   components/QuickChatHistoryMenu.tsx # 侧栏「快速开聊」右键的随手聊历史浮层（命令面板式行：色点+标题+时间；
                              # 勾了「下次直接开聊」的用户左键直达终端看不到弹层历史，右键是回看口）
                              # 行样式与弹层「随手聊历史」一致：品牌胶囊 + 标题 + 归属 · 时间
+  components/GatewayLibrary.tsx # 连接页网关库：五槽/密钥/获取模型/按槽体检/逐模型策略三态
   components/HoverTip.tsx      # 应用内 tooltip 共享件（v3.93 提取自 ProjectGroup）：useHoverTip + HoverTip，
                              # portal 到 body（免疫祖先 opacity/transform 的 fixed 包含块问题）、滚动/缩放即关、
                              # up 参数支持锚点上方弹出（行内动作栏 tooltip 专用）；PageFrame 的 RowAction 内置上方 tooltip
@@ -176,13 +177,15 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   quick-chat.ts              # 快速开聊弹层「随手聊历史」纯逻辑：pickQuickChatSessions（不落工作区/注册项目，
                              # 且排除归档/内部/live/源文件已删——列了也恢复不了的）+ 标题展示（tests/quick-chat.test.ts）
   command-palette.ts         # 命令面板过滤纯逻辑
+  stats-insight.ts           # 统计页花费环比 / 缓存命中率 / 会话标题回落纯逻辑（tests/stats-insight.test.ts）
   hotkeys.ts                 # 快捷键组合串纯逻辑
   themes.ts                  # 主题清单单一出处 + isLightTheme() 亮暗判定单一出处（禁另造判定）
   profile-copy.ts            # profile 跨 agent 复制纯逻辑
   resume-profile.ts          # 恢复会话的 profile 挑选纯逻辑：codex 内联 provider 会话（rollout 记
-                             # model_provider="ccode"）只用带 Base URL 的配置恢复；软停用（hiddenProfiles）
+                             # model_provider="ccode" 或派生名 ccode-<网关短id>）按网关挑绑定；软停用（hiddenProfiles）
                              # 跳过停用项——wishedId 指向停用项同样跳过，全停用时回落含停用项池不拦死
                              # （tests/resume-profile.test.ts）
+  combo-field.ts             # 网关库逐模型策略三态（edit/readonly/hidden）纯逻辑（tests/combo-field.test.ts）
   store.ts                   # zustand 状态
 src-tauri/src/
   agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/
@@ -198,7 +201,7 @@ src-tauri/src/
                              #   resolve_binary 兜底候选目录 binary_candidate_dirs 同在本模块（macOS 含 /Library/TeX/texbin）
   agents.rs                  # 适配器分发入口 + resolve_binary 二进制解析（GUI 短 PATH 兜底）+ readonly_launch_args（聊想法只读注入）；
                              # codex 内联 provider 参数 codex_inline_provider_args 单一出处（启动注入与外部恢复命令共用：
-                             #   rollout 记 model_provider="ccode"，外部恢复缺 -c 定义报 provider not found；定义只含
+                             #   新会话 provider 名 ccode-<网关短id>；旧 rollout 仍记 model_provider="ccode"，外部恢复缺 -c 定义报 provider not found；定义只含
                              #   base_url/env_key 引用不含密钥）；
                              # 选择器显示名统一「配置名 · 模型」（claude _NAME 槽 / codex catalog display_name /
                              #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）
@@ -210,7 +213,14 @@ src-tauri/src/
                              # codex catalog、opencode reasoning/limit/modalities 全从这条链出；
                              # limit.output 兜底 8192（1.18 起 schema 必填）；宁缺毋滥（收错比漏报有害）；
                              # 文件型加载器 cfg!(test) 下不读本机真实缓存（链语义由 chain_field 单测覆盖）
-  profiles.rs                # ProfileStore：profiles.json + 0600 keys.json 存密钥；删除时同步清设置引用（settings::clear_profile_refs）
+  profiles.rs                # 网关+绑定：gateways.json / bindings.json；keys.json 键=网关 id（0600）；
+                             # list 物化成 Profile 视图（binding id 复用旧 profile id）；删除绑定=解绑不清密钥；
+                             # 有绑定的网关禁删；导出/导入 v2；见 docs/conventions/profiles.md
+  combo.rs                   # Agent×模型×槽×体检求交器，DTO 下发；网关库走多 Agent 并集
+  drift.rs                   # 全局配置漂移：只比对 Ccode 写入键的子集，无关字段不算漂移
+  gateway_store.rs           # 网关/绑定落盘与迁移；每槽体检摘要 latest-per-slot
+  provider_id.rs             # provider 名 ccode-<网关短id> 单一出处；LEGACY="ccode" 仅旧 rollout
+  tray.rs                    # 系统托盘：按 Agent 列绑定一键设为全局；选中态 dry-run 子集比对；不改启动栏默认
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）；
                              # 网关体检探针 probe_gateway（绕过 CLI 直连端点发 max_tokens=16 最小请求：
                              # 基础鉴权/裸流式 SSE 检测/带策略参数对比降级定位/自定义 Header 接受度，
@@ -244,7 +254,7 @@ src-tauri/src/
   sessions.rs                # 会话浏览：九 agent 会话扫描/解析（Codex .zst、OpenCode SQLite/JSON）、session_meta、pin 快照、
                              # 会话删除、注意力分类（session_tail_state）、步骤名映射（RX3a）、
                              # codex rollout 元信息 model_provider 记进 SessionMetaDto.provider（恢复按它挑兼容 profile，
-                             #   前端 pickResumeProfile 单一出处：provider=ccode 只用带 Base URL 的配置）、
+                             #   前端 pickResumeProfile 单一出处：ccode 或 ccode-<短id> 前缀按网关挑绑定）、
                              # sessions_for_card（融合进任务书的按卡取会话：与列表同一归属口径）
   skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor/grok 固定 copy）、四路导入、ZIP 导出、卸载备份、
                              # 漂移检测 resync、create_skill/update_skill_content；apps 表是创建时快照，
@@ -267,7 +277,9 @@ src-tauri/src/
                              #   连通性检测 check_mcp_server（stdio 拉起 initialize 握手 / remote POST 探活，8s 上限，
                              #   env/header 的 $VAR 引用检测时按宿主环境展开）
   usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径、
-                             # session_usage 单会话聚合（终端状态栏 token 段，先增量索引再按 session_id 汇总）
+                             # session_usage 单会话聚合（终端状态栏 token 段，先增量索引再按 session_id 汇总）；
+                             # usage_trend / top_sessions：花费折线与最贵会话均跟随页顶范围，官方账号与 internal 不计费不进榜，
+                             # 自定义标题出站前过 redact_sensitive_text
   pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
   settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力
                              # （hooks_attention 按 agent map，旧 claude_hooks_attention 仅反序列化兼容迁移）/想法期只读保护
@@ -357,7 +369,7 @@ src-tauri/src/
 以下硬约束**任何会话都必须遵守**；各领域的细则（评审覆盖层交互、流水线开步参数、步进器视觉规格、MCP 字段映射等）
 已按主题迁入 `docs/conventions/`，改动对应领域前必读对应文件，日常会话不必加载。
 
-- **密钥绝不回显/进 shell**：存 0600 `keys.json`，只在拉起瞬间注入子进程 env；`profiles.json` 只存尾号 key_hint；
+- **密钥绝不回显/进 shell**：存 0600 `keys.json`（键=网关 id），只在拉起瞬间注入子进程 env；绑定/网关 JSON 只存尾号 key_hint；
   `NO_COLOR` 必须 `env_remove`；`TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Ccode` 必须显式设置。
 - **会话文本出站前必须在 Rust 层脱敏**：标题/摘要、结构化回放、AI 摘要、Markdown 导出均不得把已保存密钥或常见密钥前缀
   送到 React；只作用于 DTO/导出副本，不得回写会话源文件；前端遮盖不是安全边界。
@@ -386,6 +398,7 @@ src-tauri/src/
 | 流水线与项目域 | `docs/conventions/pipeline.md` | 工作区创建/漂移/归档/删除、流水线开步/模板/编辑器、接力与提炼接力、任务卡、人工事项与讨论种子、agent 人工请求（help-wanted）、收件箱分类胶囊、示例课题、白话双层 |
 | 步骤工作面板 | `docs/conventions/step-panel.md` | **新增步骤/模板前必读**：七条硬规则（顺序即语义、空节点不出现、同一事实只说一次、孤立按钮、主路径唯一不设门控、角色标注）、问题该在什么时刻与层级出现（项目层/决策项/按需问/种子/人工事项五选一）、文案与术语、新增模板检查清单 |
 | 主题与设计系统 | `docs/conventions/design-system.md` | 主题令牌、字体栈、线条语言、控件密度、页面框架、对话页三栏、步进器规格、已否决设计 |
+| 网关与绑定（配置模型层） | `docs/conventions/profiles.md` | **改配置/注入/设为全局/模型能力/托盘前必读（已落地）**：网关×绑定拆层、binding id 复用、provider 派生名、relay 缓存键、求交器、体检与通道表不对称、迁移合并 |
 
 ## 路线图（见 docs/architecture.md §11 演进线）
 

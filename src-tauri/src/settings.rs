@@ -356,6 +356,41 @@ pub(crate) fn clear_profile_refs(id: &str) {
     }
 }
 
+/// 迁移合并时把被丢弃的 binding id 改写成保留 id。调用方须已持 store_lock。
+pub(crate) fn rewrite_profile_refs(rewrites: &[(String, String)]) {
+    let Ok(path) = settings_path() else { return };
+    let mut cur = read_from(&path);
+    let mut touched = false;
+    let subst = |v: &mut String, touched: &mut bool| {
+        if let Some((_, to)) = rewrites.iter().find(|(from, _)| from == v) {
+            *v = to.clone();
+            *touched = true;
+        }
+    };
+    if let Some(v) = cur.ai_profile_id.as_mut() {
+        subst(v, &mut touched);
+    }
+    for map in [
+        &mut cur.ai_profiles,
+        &mut cur.default_profiles,
+        &mut cur.active_global_profiles,
+    ] {
+        if let Some(m) = map {
+            for v in m.values_mut() {
+                subst(v, &mut touched);
+            }
+        }
+    }
+    if let Some(list) = &mut cur.hidden_profiles {
+        for v in list.iter_mut() {
+            subst(v, &mut touched);
+        }
+    }
+    if touched {
+        let _ = write_to(&path, &cur);
+    }
+}
+
 // ===== 「设为全局」追踪（active_global_profiles；见字段注释的口径说明） =====
 
 /// 记录/清除的共用内核（测试可注入路径）：Some(id) 记录或覆盖，None 清除；空 map 归一 None

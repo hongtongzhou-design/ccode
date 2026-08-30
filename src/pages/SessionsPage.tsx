@@ -22,6 +22,7 @@ import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
 import {
   Checkbox,
   EmptyState,
+  FoldMark,
   ghostActionClass,
   hoverRevealClass,
   LoadingRows,
@@ -291,6 +292,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         sessionId: s.sessionId,
         cwd: s.projectPath,
         baseUrl: resumeBaseUrl(s),
+        provider: s.provider ?? null,
       });
       await navigator.clipboard.writeText(cmd);
       setCopiedId(sessionRuntimeKey(s.agent, s.sessionId));
@@ -422,6 +424,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setSelected(null);
   }
 
+  /** 分类选择：选到项目/全部即关掉选择面回到列表；点 Agent 行则展开项目并保持选择面。 */
+  function pickScope(f: Filter, keepOpen = false) {
+    selectFilter(f);
+    if (f.kind === "agent") setExpandedAgent(f.agent);
+    setTreeOpen(keepOpen);
+  }
+
   // 项目筛选激活时预取该项目任务卡（「移到卡片…」菜单候选；非项目目录后端返回空表）
   const projectFilterPath = filter.kind === "project" ? filter.path : null;
   useEffect(() => {
@@ -513,7 +522,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       setError("该会话的源文件已被删除且没有快照，无法回放");
       return;
     }
-    // 选中具体会话 = 浏览结束：收起分类筛选面板（筛选过程中的点选不收起，见 v3.43）
+    // 选中具体会话 = 浏览结束：收起分类下拉（筛选过程中的点选不收起，见 v3.43）
     setTreeOpen(false);
     setSelected(s);
     setReplayTab("chat");
@@ -594,6 +603,17 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // loadingConv 必须在依赖里：否则打开会话期间注册的闭包永久捕获 true，↑/↓ 被一直挡住
   }, [currentPage, displayList, selected, menu, selecting, loadingConv]);
+
+  useEffect(() => {
+    if (!treeOpen && !moreFiltersOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setTreeOpen(false);
+      setMoreFiltersOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [treeOpen, moreFiltersOpen]);
 
   // 键盘切换/外部跳转后把选中行滚进可视区（block:nearest，在视野内则不动）
   useEffect(() => {
@@ -1159,9 +1179,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               ))}
             </div>
           )}
-          {/* 一行 chip 快筛（v3.88）+ 分类筛选入口并入本行（v3.92 控制区瘦身，省一行常驻高度）：
-              常用 3 个常驻；近 7 天/内部 AI/已归档收进「更多 ▾」，激活的提到行内常显、不漏状态 */}
-          <div className="mt-2 flex flex-wrap items-center gap-1">
+          {/* 一行 chip 快筛 + 当前分类下拉（不挤会话列表）：
+              常用 3 个常驻；近 7 天/内部 AI/已归档收进「更多 ▾」，激活的提到行内常显。
+              分类是下拉而不是内嵌手风琴：展开时列表高度不变，点选项目后面板保持开（边筛边浏览）。 */}
+          <div className="relative mt-2">
+          <div className="flex flex-wrap items-center gap-1">
             {!selecting && (
               <>
                 {QUICK_FILTERS.filter(
@@ -1235,41 +1257,58 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 </span>
               </>
             )}
-            {/* 分类筛选手风琴入口（原独立标题行并入本行） */}
-            <button
-              type="button"
-              onClick={() => setTreeOpen(!treeOpen)}
-              aria-expanded={treeOpen}
-              className="ml-auto flex h-6 min-w-0 items-center gap-1 rounded-sm px-1.5 text-micro text-l3 hover:bg-hover hover:text-l1"
-            >
-              <span className="shrink-0 text-l4">{treeOpen ? "▾" : "▸"}</span>
-              分类筛选
-              <span className="max-w-28 truncate text-l4">
-                {filterChipLabel ?? "全部对话"}
-              </span>
-            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => setTreeOpen((v) => !v)}
+            aria-expanded={treeOpen}
+            title="按 Agent / 项目筛选"
+            className={`mt-1.5 flex h-7 w-full items-center gap-1 rounded-md px-2 text-xs ${
+              filterChipLabel || treeOpen
+                ? "bg-seg-sel text-l1"
+                : "bg-inset text-l3 hover:bg-hover hover:text-l1"
+            }`}
+          >
+            <span className="shrink-0 text-l4">范围</span>
+            <span className="min-w-0 flex-1 truncate text-left">
+              {filterChipLabel ?? "全部对话"}
+            </span>
             {filterChipLabel && (
-              <button
-                type="button"
-                onClick={() => selectFilter({ kind: "all" })}
+              <span
+                role="button"
                 title="清除分类筛选"
-                className="flex h-6 shrink-0 items-center rounded-sm px-1 text-xs text-l4 hover:text-l1"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  selectFilter({ kind: "all" });
+                  setTreeOpen(false);
+                }}
+                className="px-1 text-l4 hover:text-l1"
               >
                 ×
-              </button>
+              </span>
             )}
+            <span className="shrink-0 text-l4">{treeOpen ? "▴" : "▾"}</span>
+          </button>
           </div>
         </div>
-        {/* 分类筛选：标题行已并入上方快筛行（v3.92）；展开为单列纵向手风琴
-            （点 agent 展开项目子列表，项目行落筛选），面板保持展开、边筛边浏览 */}
-        <div className="shrink-0 border-b border-hairline">
-          {treeOpen && (
-            // 单列纵向手风琴：点 agent 只展开/收起其项目子列表（不动筛选、不关回放），
-            // 「全部项目」/单项目行落筛选后面板保持展开（边筛边浏览）；层级靠左侧缩进线
-            <div className="max-h-72 overflow-auto py-1">
+        {error && !selected && (
+          <p className="shrink-0 px-3 py-1 text-xs text-err-text">{error}</p>
+        )}
+        {treeOpen ? (
+            <div className="min-h-0 flex-1 overflow-auto py-1">
+              <div className="mb-1 flex items-center justify-between px-3">
+                <span className="text-micro text-l4">选择范围</span>
+                <button
+                  type="button"
+                  className={ghostActionClass}
+                  onClick={() => setTreeOpen(false)}
+                >
+                  完成
+                </button>
+              </div>
               <button
                 onClick={() => {
-                  selectFilter({ kind: "all" });
+                  pickScope({ kind: "all" });
                 }}
                 className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 text-left text-xs ${
                   filterActive({ kind: "all" })
@@ -1287,7 +1326,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               {internalVisible.length > 0 && (
                 <button
                   onClick={() => {
-                    selectFilter({ kind: "internal" });
+                    pickScope({ kind: "internal" });
                   }}
                   title="Ccode 自己调用 AI 生成提交信息、摘要等产生的内部对话"
                   className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 text-left text-xs ${
@@ -1316,17 +1355,22 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 return (
                   <div key={g.agent}>
                     <button
-                      onClick={() => setExpandedAgent(open ? null : g.agent)}
+                      onClick={() => {
+                        if (filter.kind === "agent" && filter.agent === g.agent) {
+                          setExpandedAgent(open ? null : g.agent);
+                          return;
+                        }
+                        pickScope({ kind: "agent", agent: g.agent }, true);
+                      }}
                       aria-expanded={open}
+                      title="筛选这个 Agent 的对话；再点一次展开或收起项目"
                       className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center gap-1.5 rounded-md px-2 text-left text-xs ${
                         active
                           ? "bg-rail-sel text-l1"
                           : "text-l3 hover:bg-hover"
                       }`}
                     >
-                      <span className="w-3 shrink-0 text-micro text-l4">
-                        {open ? "▾" : "▸"}
-                      </span>
+                      <FoldMark open={open} />
                       <span className="min-w-0 flex-1 truncate">
                         {agentLabel(g.agent)}
                       </span>
@@ -1340,7 +1384,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       <div className="mx-1 mb-0.5 ml-4 border-l border-white/5 pl-1.5">
                         <button
                           onClick={() => {
-                            selectFilter({ kind: "agent", agent: g.agent });
+                            pickScope({ kind: "agent", agent: g.agent });
                           }}
                           className={`flex h-7 w-full items-center justify-between gap-2 rounded-md px-2 text-left text-xs ${
                             filterActive({ kind: "agent", agent: g.agent })
@@ -1365,7 +1409,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                             <button
                               key={p.path}
                               onClick={() => {
-                                selectFilter({
+                                pickScope({
                                   kind: "project",
                                   agent: g.agent,
                                   path: p.path,
@@ -1425,12 +1469,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 />
               )}
             </div>
-          )}
-        </div>
-        {error && !selected && (
-          <p className="shrink-0 px-3 py-1 text-xs text-err-text">{error}</p>
-        )}
-        {/* 会话行：标题 + meta 双行，hairline 分行，选中行浅填充 */}
+        ) : (
         <div className="min-h-0 flex-1 overflow-auto">
             {displayList.map(({ header, s }) => {
               const isEditing =
@@ -1767,6 +1806,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               />
             )}
         </div>
+        )}
       </div>
 
       {/* 回放区（canvas 底）：与列表栏并列常驻，未选中显示空态 */}

@@ -18,7 +18,10 @@ import {
 } from "./inbox";
 import type { RunOverviewInput } from "./run-overview";
 import type {
+  BindingInput,
   DetectResult,
+  Gateway,
+  GatewayInput,
   HandoffBriefDto,
   Profile,
   ProfileInput,
@@ -268,6 +271,7 @@ export function runInboxAction(item: InboxItem) {
 
 interface AppState {
   profiles: Profile[];
+  gateways: Gateway[];
   agents: DetectResult[];
   sessions: SessionMetaDto[];
   /** 后端按最近会话活跃度排序的仓库；本地缓存用于终端首开即时展示。 */
@@ -436,6 +440,10 @@ interface AppState {
   saveProfile: (id: string | null, input: ProfileInput) => Promise<void>;
   removeProfile: (id: string) => Promise<void>;
   duplicateProfile: (id: string) => Promise<void>;
+  loadGateways: () => Promise<void>;
+  saveGateway: (id: string | null, input: GatewayInput) => Promise<void>;
+  removeGateway: (id: string) => Promise<void>;
+  bindGateway: (input: BindingInput) => Promise<void>;
 }
 
 export const useAppStore = create<AppState>((set, get) => {
@@ -447,6 +455,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   return {
   profiles: [],
+  gateways: [],
   agents: [],
   sessions: [],
   recentRepos: cachedRecentRepos(),
@@ -662,11 +671,12 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   loadAll: async () => {
-    const [profiles, agents] = await Promise.all([
+    const [profiles, agents, gateways] = await Promise.all([
       invoke<Profile[]>("list_profiles"),
       invoke<DetectResult[]>("detect_agents"),
+      invoke<Gateway[]>("list_gateways").catch(() => [] as Gateway[]),
     ]);
-    set({ profiles, agents });
+    set({ profiles, agents, gateways });
   },
 
   loadSessions: (force = false) => sessionRefresh.load(force),
@@ -679,18 +689,50 @@ export const useAppStore = create<AppState>((set, get) => {
     }
     const profiles = await invoke<Profile[]>("list_profiles");
     set({ profiles });
+    invoke("rebuild_tray").catch(() => {});
   },
 
   removeProfile: async (id) => {
     await invoke("delete_profile", { id });
     const profiles = await invoke<Profile[]>("list_profiles");
     set({ profiles });
+    invoke("rebuild_tray").catch(() => {});
   },
 
   duplicateProfile: async (id) => {
     await invoke("duplicate_profile", { id });
     const profiles = await invoke<Profile[]>("list_profiles");
     set({ profiles });
+    invoke("rebuild_tray").catch(() => {});
+  },
+
+  loadGateways: async () => {
+    const gateways = await invoke<Gateway[]>("list_gateways");
+    set({ gateways });
+  },
+  saveGateway: async (id, input) => {
+    await invoke("save_gateway", { id, input });
+    const [gateways, profiles] = await Promise.all([
+      invoke<Gateway[]>("list_gateways"),
+      invoke<Profile[]>("list_profiles"),
+    ]);
+    set({ gateways, profiles });
+    invoke("rebuild_tray").catch(() => {});
+  },
+  removeGateway: async (id) => {
+    await invoke("delete_gateway", { id });
+    const gateways = await invoke<Gateway[]>("list_gateways");
+    set({ gateways });
+    invoke("rebuild_tray").catch(() => {});
+  },
+  bindGateway: async (input) => {
+    await invoke("bind_gateway", { input });
+    const [gateways, profiles] = await Promise.all([
+      invoke<Gateway[]>("list_gateways"),
+      invoke<Profile[]>("list_profiles"),
+    ]);
+    set({ gateways, profiles });
+    invoke("rebuild_tray").catch(() => {});
   },
   };
 });

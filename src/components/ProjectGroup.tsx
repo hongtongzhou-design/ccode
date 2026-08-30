@@ -20,6 +20,7 @@ import { HoverTip, useHoverTip } from "./HoverTip";
 import {
   Checkbox,
   compactFieldClass,
+  FoldMark,
   compactPrimaryActionClass,
   hoverRevealClass,
   inlineActionClass,
@@ -30,7 +31,7 @@ import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import { startPipelineStep } from "../pipeline-start";
 import { upsertLitSourceSection } from "../task-md-sections";
 import { isDecisionsOnly } from "../step-decisions";
-import { normSep, stripVerbatim } from "../path-utils";
+import { abbrevHome, normSep } from "../path-utils";
 import type { RunOverviewInput } from "../run-overview";import type {
   DiscoveredResourceDto,
   ZoteroLibraryDto,
@@ -60,18 +61,7 @@ function getHomeDir(): Promise<string> {
  *  两侧都先剥 verbatim 前缀：存量库里的项目路径可能仍是 `\\?\C:\Users\...`，
  *  而 home 是普通形式，不剥就永远缩不掉、界面直接把 `\\?\` 显示给用户。
  *  Windows 文件系统大小写不敏感，前缀判定同样要折叠大小写。 */
-export function abbrevHome(path: string, home: string): string {
-  if (!home) return path;
-  const shown = stripVerbatim(path);
-  const h = stripVerbatim(home).replace(/[\\/]+$/, "");
-  const fold = (s: string) => (IS_WINDOWS ? s.toLowerCase() : s);
-  if (fold(shown) === fold(h)) return "~";
-  const head = fold(shown).slice(0, h.length);
-  const next = shown[h.length];
-  return head === fold(h) && (next === "/" || next === "\\")
-    ? `~${shown.slice(h.length)}`
-    : shown;
-}
+export { abbrevHome } from "../path-utils";
 /** 步进器带级整条虚线链：真实 6×6px 方块按 12px 等距（6px 块 + 6px 间隙）铺满整个带宽。
  *  块位以圆心为锚分段计算（圆是列中心，列等宽，段长相等）——每个圆两侧的断口、
  *  每个步骤之间的块数与间隙严格一致（按全局相位铺排时圆会随机截断方块，用户反馈不规则）。
@@ -1385,8 +1375,10 @@ export default function ProjectGroup({
   return (
     // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给研究流程等必要块
     <section className="mb-5">
-      {/* 项目身份行：区间分隔一律用留白，不画横线（去线条化，v3.85；同 PageHeader 口径） */}
-      <div className="flex min-h-14 min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 px-3 pb-3 pt-2.5">
+      {/* 身份段：名称 + 课题主题一行；路径 / 全局设定次行。篇幅、读者、去向仍在项目头
+          （step-panel 项目层）但收成一粒可点芯片，全文进抽屉，避免扫成一段灰字。 */}
+      <div className="px-3 pb-3 pt-2.5">
+      <div className="flex min-h-9 min-w-0 items-center gap-2">
         {renamingProject ? (
           <form
             onSubmit={submitRenameProject}
@@ -1417,14 +1409,12 @@ export default function ProjectGroup({
         )}
         {topicText ? (
           <span
-            className="min-w-0 max-w-72 truncate text-xs text-l3"
+            className="min-w-0 flex-1 truncate text-sm text-l3"
             title={topicText}
           >
             {topicText}
           </span>
         ) : (
-          // 课题主题是给 Agent 看的（随 TASK.md 走），空着时给个能点的占位，
-          // 别让它只存在于 ⋯ 菜单深处
           registered &&
           cfg && (
             <button
@@ -1440,19 +1430,6 @@ export default function ProjectGroup({
             </button>
           )
         )}
-        {/* 全局设定（v3.89）：贯穿全程的决定摆在项目头，与课题主题并排——
-            它们决定后面每一步，躲在第 1 步的折叠区里属层级错配（用户实测反馈）。
-            点击进项目设置抽屉编辑 */}
-        {registered && filledSettings.length > 0 && (
-          <button
-            type="button"
-            onClick={() => setSettingsOpen(true)}
-            title={filledSettings.join("\n")}
-            className="min-w-0 shrink truncate rounded-sm px-1 text-xs text-l4 hover:bg-hover hover:text-l2"
-          >
-            {filledSettings.join(" · ")}
-          </button>
-        )}
         {!registered && (
           <span className="inline-flex shrink-0 items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l3">
             <span className="size-2 rounded-full bg-l4" />
@@ -1460,14 +1437,11 @@ export default function ProjectGroup({
           </span>
         )}
         {blockedCount > 0 && (
-          <span className="flex shrink-0 items-center gap-2 text-xs text-l3">
-            <span className="flex items-center gap-1">
-              <span className="size-2 rounded-full bg-err-text" />
-              {blockedCount} 阻塞
-            </span>
+          <span className="flex shrink-0 items-center gap-1 text-xs text-l3">
+            <span className="size-2 rounded-full bg-err-text" />
+            {blockedCount} 阻塞
           </span>
         )}
-        {/* 校验提示（项目配置级，属于项目头而非研究流程条）：单色语义徽标点开展开逐条全文浮层 */}
         {cfgWarnings.length > 0 && (
           <span className="relative shrink-0">
             <button
@@ -1496,12 +1470,6 @@ export default function ProjectGroup({
             )}
           </span>
         )}
-        <span
-          className="min-w-0 max-w-[28rem] truncate font-mono text-xs text-l3"
-          title={projectPath}
-        >
-          {abbrevHome(projectPath, homeDir)}
-        </span>
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {!registered && (
             <button
@@ -1528,6 +1496,25 @@ export default function ProjectGroup({
             </button>
           )}
         </div>
+      </div>
+      <div className="mt-1 flex min-w-0 items-center gap-2">
+        {registered && filledSettings.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            title={filledSettings.join("\n")}
+            className="shrink-0 rounded-sm px-1 text-micro text-l4 hover:bg-hover hover:text-l2"
+          >
+            全局设定
+          </button>
+        )}
+        <span
+          className="min-w-0 truncate font-mono text-micro text-l4"
+          title={projectPath}
+        >
+          {abbrevHome(projectPath, homeDir, IS_WINDOWS)}
+        </span>
+      </div>
       </div>
 
       {/* 分组主体：左侧 1px 缩进线 + 透明度分层，保持原 p-4 留白节奏 */}
@@ -2148,7 +2135,7 @@ export default function ProjectGroup({
               onClick={() => setResOpen((v) => !v)}
               aria-expanded={resOpen}
             >
-              <span>{resOpen ? "▾" : "▸"}</span>
+              <FoldMark open={resOpen} boxed />
               文献与数据（{cfg.resources.length}）
             </button>
             {/* 折叠态也要说清「有什么」和「还能补」：只在新注册或零资源时才提示，

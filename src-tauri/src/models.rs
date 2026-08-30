@@ -100,7 +100,7 @@ pub struct FetchModelsResult {
 }
 
 /// 从 profile 的端点拉取可用模型列表。
-/// 密钥优先用表单里新输入的，否则取钥匙串中已存的；只用于本次请求，不持久化。
+/// 密钥优先用表单里新输入的，否则取 keys.json 已存的；只用于本次请求，不持久化。
 #[tauri::command]
 pub async fn fetch_models(
     base_url: String,
@@ -108,15 +108,33 @@ pub async fn fetch_models(
     profile_id: Option<String>,
     agent_id: Option<String>,
     protocol: Option<String>,
+    gateway_id: Option<String>,
     // true = 跳过缓存强制走网络（↻ 刷新、「测试」按钮）
     force: Option<bool>,
 ) -> Result<FetchModelsResult, String> {
+    let resolved_gateway = gateway_id.clone().or_else(|| {
+        profile_id.as_deref().and_then(|id| {
+            crate::profiles::ProfileStore::new()
+                .ok()
+                .and_then(|s| s.get(id).ok())
+                .and_then(|p| p.gateway_id)
+        })
+    });
     let key = match api_key.filter(|k| !k.trim().is_empty()) {
         Some(k) => Some(k),
-        None => match profile_id.as_deref() {
-            Some(id) => profiles::get_key(id)?,
-            None => None,
-        },
+        None => {
+            if let Some(gid) = resolved_gateway.as_deref() {
+                profiles::get_key(gid)?
+            } else if let Some(id) = profile_id.as_deref() {
+                let store = crate::profiles::ProfileStore::new()?;
+                match store.get(id) {
+                    Ok(p) => profiles::get_key_for_profile(&p)?,
+                    Err(_) => profiles::get_key(id)?,
+                }
+            } else {
+                None
+            }
+        }
     };
 
     let agent = agent_id.as_deref().unwrap_or("openai");
@@ -130,7 +148,11 @@ pub async fn fetch_models(
     if base.is_empty() {
         return Err("请先填写 Base URL".into());
     }
-    let cache_key = format!("{agent}|{}|{base}", protocol.as_deref().unwrap_or(""));
+    let slot = crate::gateway_store::slot_for_agent(agent, protocol.as_deref());
+    let cache_key = match resolved_gateway.as_deref() {
+        Some(gid) => format!("{gid}|{}", slot.as_str()),
+        None => format!("{agent}|{}|{base}", protocol.as_deref().unwrap_or("")),
+    };
     if !force.unwrap_or(false) {
         if let Some(hit) = model_list_cache_get(&cache_key) {
             return Ok(FetchModelsResult {
@@ -190,7 +212,7 @@ pub async fn fetch_models(
                 })?;
                 // 顺带沉淀能力元数据（OpenRouter 风格响应带 context_length/modality 等；
                 // 纯 id 列表的网关此调用为 no-op）——能力注册表的最准数据源
-                crate::model_registry::record_relay_models(&body);
+                crate::model_registry::record_relay_models(&body, resolved_gateway.as_deref());
                 let fetched_at = chrono::Local::now().to_rfc3339();
                 let models = parse_model_ids(&body);
                 model_list_cache_put(
@@ -207,14 +229,32 @@ pub async fn fetch_models(
                 });
             }
             Ok(resp) => {
-                last_err = format!("{url} 返回 HTTP {}", resp.status());
+                last_err = redact_fetch_error(
+                    &format!("{url} 返回 HTTP {}", resp.status()),
+                    key.as_deref(),
+                );
             }
             Err(e) => {
-                last_err = format!("{url} 请求失败: {e}");
+                last_err = redact_fetch_error(
+                    &format!("{url} 请求失败: {e}"),
+                    key.as_deref(),
+                );
             }
         }
     }
-    Err(format!("获取模型列表失败：{last_err}"))
+    Err(format!(
+        "获取模型列表失败：{}",
+        crate::sessions::redact_sensitive_text(&last_err)
+    ))
+}
+
+/// 拉目录失败文案：reqwest Display 常带完整请求 URL，gemini 槽密钥在 query 里。
+fn redact_fetch_error(message: &str, key: Option<&str>) -> String {
+    let mut s = message.to_string();
+    if let Some(k) = key.filter(|k| k.chars().count() >= 8) {
+        s = s.replace(k, "[已隐藏密钥]");
+    }
+    crate::sessions::redact_sensitive_text(&s)
 }
 
 /// 解析失败时附进报错的响应预览：压平空白、截断、过脱敏（网关错误页可能回显 key）
@@ -275,6 +315,49 @@ fn parse_model_ids(v: &serde_json::Value) -> Vec<String> {
     out
 }
 
+/// 按 openai → anthropic → gemini → responses 顺序拉目录，第一个成功的写入 catalogFromSlot。
+#[tauri::command]
+pub async fn fetch_gateway_catalog(
+    store: tauri::State<'_, crate::profiles::ProfileStore>,
+    gateway_id: String,
+) -> Result<crate::profiles::Gateway, String> {
+    let gw = store
+        .list_gateways()?
+        .into_iter()
+        .find(|g| g.id == gateway_id)
+        .ok_or("网关不存在")?;
+    let order = [
+        ("opencode", crate::gateway_store::Slot::Openai, None),
+        ("claude-code", crate::gateway_store::Slot::Anthropic, None),
+        ("gemini", crate::gateway_store::Slot::Gemini, None),
+        ("codex", crate::gateway_store::Slot::Responses, None),
+    ];
+    let mut last_err = "没有可拉取的协议槽".to_string();
+    for (agent, slot, protocol) in order {
+        let Some(url) = crate::gateway_store::slot_url(&gw.slots, slot) else {
+            continue;
+        };
+        match fetch_models(
+            url.to_string(),
+            None,
+            None,
+            Some(agent.to_string()),
+            protocol,
+            Some(gateway_id.clone()),
+            Some(true),
+        )
+        .await
+        {
+            Ok(res) if !res.models.is_empty() => {
+                return store.merge_fetched_models(&gateway_id, slot.as_str(), res.models);
+            }
+            Ok(_) => last_err = format!("{} 槽返回空目录", slot.as_str()),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +384,17 @@ mod tests {
     #[test]
     fn body_preview_flattens_whitespace() {
         assert_eq!(body_preview("<html>\n  <body>oops</body>\n</html>"), "<html> <body>oops</body> </html>");
+    }
+
+    #[test]
+    fn fetch_error_redacts_key_in_reqwest_url() {
+        let key = "super-secret-gateway-key-zzzz";
+        let msg = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models 请求失败: error sending request for url (https://generativelanguage.googleapis.com/v1beta/models?key={key})"
+        );
+        let out = redact_fetch_error(&msg, Some(key));
+        assert!(!out.contains(key), "{out}");
+        assert!(out.contains("[已隐藏密钥]"), "{out}");
     }
 
     #[test]

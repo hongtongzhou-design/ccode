@@ -41,6 +41,32 @@ struct TxAction {
 
 static GLOBAL_CONFIG_MUTEX: Mutex<()> = Mutex::new(());
 
+/// 与 apply_profile_global 同一口径：选中模型求交后再 plan。
+fn profile_for_global_write(store: &ProfileStore, profile_id: &str) -> Result<Profile, String> {
+    let mut profile = store.get_with_model(profile_id, None)?;
+    let first = profile.models.first().cloned();
+    crate::combo::apply_to_profile(&mut profile, first.as_deref());
+    Ok(profile)
+}
+
+fn disk_matches_plans(plans: &[PlannedWrite]) -> bool {
+    plans
+        .iter()
+        .all(|p| crate::drift::planned_matches_live(&p.path, &p.content))
+}
+
+/// 托盘选中态：计划产物与磁盘是否一致（子集比对）。None = dry-run 失败，回落「上次写入」。
+pub(crate) fn dry_run_matches(store: &ProfileStore, profile: &Profile) -> Option<bool> {
+    if profile.account_type == crate::profiles::AccountType::Official {
+        return None;
+    }
+    let profile = profile_for_global_write(store, &profile.id).ok()?;
+    let key = crate::profiles::get_key_for_profile(&profile).ok().flatten();
+    let home = dirs::home_dir()?;
+    let plans = plan_writes(&home, &profile, key.as_deref(), &profile.models).ok()?;
+    Some(disk_matches_plans(&plans))
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GlobalApplyResultDto {
@@ -125,6 +151,8 @@ fn patch_claude_settings(
     base_url: Option<&str>,
     key: Option<&str>,
     models: &[String],
+    gateway_id: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<String, String> {
     let mut v = parse_json_doc(existing)?;
     let env = ensure_obj(&mut v, &["env"])?;
@@ -150,7 +178,9 @@ fn patch_claude_settings(
     // claude 对不认识的第三方模型按 200K 上下文假设；注册表确知更大的（如 kimi-k3 1M）
     // 必须显式写 CLAUDE_CODE_MAX_CONTEXT_TOKENS，否则长会话提前 compact（cc-switch 同口径）。
     // 不需要时清掉旧值：该键随「设为全局」归 Ccode 管，留着过期大值比没有更有害
-    let max_ctx = models.first().map(|m| crate::model_registry::model_context_size(m));
+    let max_ctx = models
+        .first()
+        .map(|m| crate::model_registry::model_context_size_for(m, gateway_id));
     match max_ctx {
         Some(ctx) if ctx > 200_000 => {
             env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), json!(ctx.to_string()));
@@ -158,6 +188,11 @@ fn patch_claude_settings(
         _ => {
             env.remove("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
         }
+    }
+    if let Some(e) = effort.filter(|s| !s.is_empty()) {
+        env.insert("CLAUDE_CODE_EFFORT_LEVEL".into(), json!(e));
+    } else {
+        env.remove("CLAUDE_CODE_EFFORT_LEVEL");
     }
     to_pretty(&v)
 }
@@ -247,15 +282,61 @@ fn patch_opencode_config(
     existing: Option<&str>,
     provider: Value,
     model: Option<&str>,
+    provider_id: &str,
 ) -> Result<String, String> {
     let mut v = parse_json_doc(existing)?;
-    ensure_obj(&mut v, &["provider"])?.insert("ccode".into(), provider);
+    let map = ensure_obj(&mut v, &["provider"])?;
+    if provider_id != crate::provider_id::LEGACY {
+        map.remove(crate::provider_id::LEGACY);
+    }
+    map.insert(provider_id.into(), provider);
     let root = v.as_object_mut().unwrap();
     if let Some(m) = model {
-        root.insert("model".into(), json!(format!("ccode/{m}")));
+        root.insert("model".into(), json!(format!("{provider_id}/{m}")));
     }
     root.insert("autoupdate".into(), json!(false));
     to_pretty(&v)
+}
+
+/// OpenCode 全局写入：每个模型写自己的 options，不再把一份策略套到全部模型。
+fn overlay_opencode_per_model(provider: &mut Value, profile: &Profile) {
+    let Some(models_map) = provider.get_mut("models").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    let gw = profile
+        .gateway_id
+        .as_deref()
+        .and_then(crate::gateway_store::find_gateway);
+    for m in &profile.models {
+        let mut tmp = profile.clone();
+        if let Some(gm) = gw.as_ref().and_then(|g| g.models.iter().find(|x| x.id == *m)) {
+            tmp.request_policy.temperature = gm.temperature;
+            tmp.request_policy.top_p = gm.top_p;
+            tmp.request_policy.max_output_tokens = gm.max_output_tokens;
+            tmp.request_policy.reasoning_effort = gm.reasoning_effort.clone();
+        }
+        crate::combo::apply_to_profile(&mut tmp, Some(m));
+        let policy = &tmp.request_policy;
+        let mut opts = serde_json::Map::new();
+        if let Some(v) = policy.temperature {
+            opts.insert("temperature".into(), json!(v));
+        }
+        if let Some(v) = policy.top_p {
+            opts.insert("topP".into(), json!(v));
+        }
+        if let Some(v) = policy.max_output_tokens {
+            opts.insert("maxOutputTokens".into(), json!(v));
+        }
+        if let Some(v) = policy.reasoning_effort.as_deref() {
+            opts.insert("reasoningEffort".into(), json!(v));
+        }
+        if opts.is_empty() {
+            continue;
+        }
+        if let Some(entry) = models_map.get_mut(m) {
+            entry["options"] = Value::Object(opts);
+        }
+    }
 }
 
 // ===== TOML 补丁（toml_edit 保留文档其余部分） =====
@@ -288,16 +369,19 @@ fn patch_codex_config(
     base_url: Option<&str>,
     model: Option<&str>,
     catalog: Option<&std::path::Path>,
+    provider_id: &str,
+    effort: Option<&str>,
 ) -> Result<String, String> {
     use toml_edit::value;
     let mut doc = parse_toml_doc(existing)?;
-    // 与 launch_plan 的 -c 注入同构：内联一个名为 ccode 的 Responses API provider。
-    // 认证走 requires_openai_auth = true：codex 自定义 provider 只从 env_key 环境变量取
-    // 密钥、不读 auth.json（0.149.1 实测），该开关让它改用 OpenAI 认证 = auth.json 的
-    // OPENAI_API_KEY（patch_codex_auth 已写入）——外部终端零 export 直接可用。
-    // 旧版写入遗留的 env_key 行顺手清掉（该表归 Ccode 管，留着只会误导）
+    // 认证走 requires_openai_auth = true：自定义 provider 改用 auth.json 的 OPENAI_API_KEY。
     let providers = sub_table(doc.as_item_mut(), "model_providers")?;
-    let ccode = sub_table(providers, "ccode")?;
+    if provider_id != crate::provider_id::LEGACY {
+        if let Some(t) = providers.as_table_mut() {
+            t.remove(crate::provider_id::LEGACY);
+        }
+    }
+    let ccode = sub_table(providers, provider_id)?;
     ccode["name"] = value("Ccode");
     if let Some(u) = base_url {
         ccode["base_url"] = value(u);
@@ -307,13 +391,16 @@ fn patch_codex_config(
     }
     ccode["requires_openai_auth"] = value(true);
     ccode["wire_api"] = value("responses");
-    doc["model_provider"] = value("ccode");
+    doc["model_provider"] = value(provider_id);
     if let Some(m) = model {
         doc["model"] = value(m);
     }
     // /model 选择器的模型目录（仅启动时读取）
     if let Some(p) = catalog {
         doc["model_catalog_json"] = value(p.to_string_lossy().as_ref());
+    }
+    if let Some(e) = effort.filter(|s| !s.is_empty()) {
+        doc["model_reasoning_effort"] = value(e);
     }
     Ok(doc.to_string())
 }
@@ -340,11 +427,18 @@ fn patch_kimi_config(
     key: Option<&str>,
     models: &[String],
     require_context_size: bool,
+    provider_id: &str,
+    gateway_id: Option<&str>,
 ) -> Result<String, String> {
     use toml_edit::value;
     let mut doc = parse_toml_doc(existing)?;
     let providers = sub_table(doc.as_item_mut(), "providers")?;
-    let ccode = sub_table(providers, "ccode")?;
+    if provider_id != crate::provider_id::LEGACY {
+        if let Some(t) = providers.as_table_mut() {
+            t.remove(crate::provider_id::LEGACY);
+        }
+    }
+    let ccode = sub_table(providers, provider_id)?;
     ccode["type"] = value(provider_type);
     if let Some(u) = base_url {
         ccode["base_url"] = value(u);
@@ -356,29 +450,29 @@ fn patch_kimi_config(
     if models.is_empty() {
         // 向后兼容：无模型列表时仍写单个 models.ccode 占位
         let models_tbl = sub_table(doc.as_item_mut(), "models")?;
-        let mc = sub_table(models_tbl, "ccode")?;
-        mc["provider"] = value("ccode");
+        let mc = sub_table(models_tbl, provider_id)?;
+        mc["provider"] = value(provider_id);
         if require_context_size {
             mc["max_context_size"] = value(131_072);
         }
-        doc["default_model"] = value("ccode");
+        doc["default_model"] = value(provider_id);
     } else {
         let models_tbl = sub_table(doc.as_item_mut(), "models")?;
         for m in models {
             let t = sub_table(models_tbl, &kimi_model_alias(m))?;
-            t["provider"] = value("ccode");
+            t["provider"] = value(provider_id);
             t["model"] = value(m.as_str());
             // 新版 0.31+ 必填 max_context_size；旧版 kimi-cli 不写（未知字段可能报错），
             // display_name/capabilities 同理只写新版（alias.display_name 与 capabilities
             // 数组均为新版字段，2026-08-17 二进制实证）
             if require_context_size {
-                t["max_context_size"] = value(crate::model_registry::model_context_size(m));
+                t["max_context_size"] = value(crate::model_registry::model_context_size_for(m, gateway_id));
                 // 选择器 label 优先 display_name：用 profile 名避免显示成 provider id "ccode"
                 t["display_name"] = value(format!("{profile_name} · {m}"));
                 // 思考/视觉模型显式声明 capabilities；否则留空走 CLI registry 默认兜底，
                 // 避免把 CLI 自己认得的模型能力降级（兼容通道缺省只有 tool_use）
-                let thinking = crate::model_registry::model_thinking(m);
-                let vision = crate::model_registry::model_supports_vision(m);
+                let thinking = crate::model_registry::model_thinking_for(m, gateway_id);
+                let vision = crate::model_registry::model_supports_vision_for(m, gateway_id);
                 if thinking || vision {
                     let mut caps = vec!["tool_use"];
                     if thinking {
@@ -481,8 +575,14 @@ fn plan_writes(
     match profile.agent.as_str() {
         "claude-code" => {
             let path = home.join(".claude/settings.json");
-            let content =
-                patch_claude_settings(read_existing(&path).as_deref(), base_url, key, models)?;
+            let content = patch_claude_settings(
+                read_existing(&path).as_deref(),
+                base_url,
+                key,
+                models,
+                profile.gateway_id.as_deref(),
+                profile.request_policy.reasoning_effort.as_deref(),
+            )?;
             push("settings.json", path, content);
         }
         "codex" => {
@@ -491,9 +591,10 @@ fn plan_writes(
                 None
             } else {
                 let path = agents::codex_catalog_path(&profile.id).ok_or("无法确定平台配置目录")?;
-                let mut content = serde_json::to_string_pretty(&agents::codex_catalog_json(
+                let mut content = serde_json::to_string_pretty(&agents::codex_catalog_json_for(
                     &profile.name,
                     &profile.models,
+                    profile.gateway_id.as_deref(),
                 ))
                 .map_err(|e| e.to_string())?;
                 content.push('\n');
@@ -506,6 +607,8 @@ fn plan_writes(
                 base_url,
                 model,
                 catalog.as_deref(),
+                &profile.provider_name(),
+                profile.request_policy.reasoning_effort.as_deref(),
             )?;
             push("config.toml", path, content);
             // 密钥不写 config.toml，走 auth.json 合并
@@ -549,9 +652,15 @@ fn plan_writes(
             push("settings.json", path, content);
         }
         "opencode" => {
-            let provider = agents::opencode_provider_json(profile, key, model);
+            let mut provider = agents::opencode_provider_json(profile, key, model);
+            overlay_opencode_per_model(&mut provider, profile);
             let path = home.join(".config/opencode/opencode.json");
-            let content = patch_opencode_config(read_existing(&path).as_deref(), provider, model)?;
+            let content = patch_opencode_config(
+                read_existing(&path).as_deref(),
+                provider,
+                model,
+                &profile.provider_name(),
+            )?;
             push("opencode.json", path, content);
         }
         "codebuddy" => {
@@ -589,6 +698,8 @@ fn plan_writes(
                     key,
                     &profile.models,
                     tag == "config.toml",
+                    &profile.provider_name(),
+                    profile.gateway_id.as_deref(),
                 )?;
                 push(tag, path, content);
             }
@@ -1131,15 +1242,96 @@ fn display_path(home: &Path, path: &Path) -> String {
     }
 }
 
+pub(crate) fn drift_status(store: &ProfileStore, agent: &str) -> crate::drift::GlobalDriftDto {
+    let settings = crate::settings::read_current();
+    let Some(pid) = settings
+        .active_global_profiles
+        .as_ref()
+        .and_then(|m| m.get(agent))
+        .cloned()
+    else {
+        return crate::drift::classify(true, None, Vec::new());
+    };
+    let profile = match profile_for_global_write(store, &pid) {
+        Ok(p) => p,
+        Err(e) => return crate::drift::classify(false, Some(e), Vec::new()),
+    };
+    if profile.account_type == crate::profiles::AccountType::Official {
+        return crate::drift::classify(true, None, Vec::new());
+    }
+    let key = crate::profiles::get_key_for_profile(&profile).ok().flatten();
+    let Some(home) = dirs::home_dir() else {
+        return crate::drift::classify(false, Some("无法确定用户主目录".into()), Vec::new());
+    };
+    let plans = match plan_writes(&home, &profile, key.as_deref(), &profile.models) {
+        Ok(p) => p,
+        Err(e) => return crate::drift::classify(false, Some(e), Vec::new()),
+    };
+    let mut drifted = Vec::new();
+    for p in &plans {
+        if !crate::drift::planned_matches_live(&p.path, &p.content) {
+            drifted.push(p.tag.to_string());
+        }
+    }
+    crate::drift::classify(false, None, drifted)
+}
+
+#[tauri::command]
+pub fn check_global_drift(
+    store: tauri::State<'_, ProfileStore>,
+    agent: String,
+) -> Result<crate::drift::GlobalDriftDto, String> {
+    Ok(drift_status(&store, &agent))
+}
+
 #[tauri::command]
 pub async fn apply_profile_global(
+    app: tauri::AppHandle,
     store: tauri::State<'_, ProfileStore>,
     profile_id: String,
 ) -> Result<GlobalApplyResultDto, String> {
-    let profile = store.get(&profile_id)?;
-    let key = profiles::get_key(&profile_id)?;
+    let profile = profile_for_global_write(&store, &profile_id)?;
+    if profile.account_type == crate::profiles::AccountType::Official {
+        let agent = profile.agent.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let _guard = GLOBAL_CONFIG_MUTEX
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dir = backups_root()?.join(&agent);
+            if !dir.join("original").join("manifest.json").is_file() {
+                return Err("当前全局文件不是 Ccode 写的，无需恢复".into());
+            }
+            let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
+            let files = restore_from_original(&dir, &home)?;
+            crate::settings::clear_active_global(&agent);
+            let skip = |msg: &str| crate::profile_validation::ValidationCheckDto {
+                status: "skipped".into(),
+                message: msg.into(),
+                latency_ms: None,
+            };
+            Ok(GlobalApplyResultDto {
+                files,
+                validation: crate::profile_validation::ProfileValidationDto {
+                    ok: true,
+                    checked_at: crate::sessions::now_iso(),
+                    local: crate::profile_validation::ValidationCheckDto {
+                        status: "passed".into(),
+                        message: "已恢复初始状态（官方账号）".into(),
+                        latency_ms: None,
+                    },
+                    cli: skip("官方账号不跑 CLI 复检"),
+                    api: skip(""),
+                },
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let _ = crate::tray::rebuild_and_wait(app.clone()).await;
+        return result;
+    }
+    let key = profiles::get_key_for_profile(&profile)?;
     crate::agents::ensure_launch_credentials(&profile, key.as_deref())?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = GLOBAL_CONFIG_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1155,12 +1347,17 @@ pub async fn apply_profile_global(
         Ok(GlobalApplyResultDto { files, validation })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let _ = crate::tray::rebuild_and_wait(app.clone()).await;
+    result
 }
 
 #[tauri::command]
-pub async fn restore_global_backup(agent: String) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+pub async fn restore_global_backup(
+    app: tauri::AppHandle,
+    agent: String,
+) -> Result<Vec<String>, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = GLOBAL_CONFIG_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1172,7 +1369,9 @@ pub async fn restore_global_backup(agent: String) -> Result<Vec<String>, String>
         Ok(restored)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let _ = crate::tray::rebuild_and_wait(app.clone()).await;
+    result
 }
 
 #[tauri::command]
@@ -1187,8 +1386,11 @@ pub async fn has_original_backup(agent: String) -> bool {
 }
 
 #[tauri::command]
-pub async fn restore_original_backup(agent: String) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+pub async fn restore_original_backup(
+    app: tauri::AppHandle,
+    agent: String,
+) -> Result<Vec<String>, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = GLOBAL_CONFIG_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1200,7 +1402,9 @@ pub async fn restore_original_backup(agent: String) -> Result<Vec<String>, Strin
         Ok(restored)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let _ = crate::tray::rebuild_and_wait(app.clone()).await;
+    result
 }
 
 #[tauri::command]
@@ -1248,6 +1452,9 @@ mod tests {
             model: None,
             last_used_at: None,
             has_key: false,
+            gateway_id: None,
+            slot_missing: false,
+            provider_override: None,
         }
     }
 
@@ -1259,6 +1466,8 @@ mod tests {
             Some("https://relay.example.com"),
             Some("sk-secret"),
             &["claude-sonnet-4".to_string(), "m2".to_string()],
+            None,
+            None,
         )
         .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -1277,7 +1486,7 @@ mod tests {
 
     #[test]
     fn claude_patch_from_missing_file_creates_env_only() {
-        let out = patch_claude_settings(None, None, None, &[]).unwrap();
+        let out = patch_claude_settings(None, None, None, &[], None, None).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v["env"].is_object());
         assert_eq!(v["env"].as_object().unwrap().len(), 0);
@@ -1286,7 +1495,7 @@ mod tests {
     #[test]
     fn claude_patch_writes_max_context_only_when_beyond_default_assumption() {
         // 注册表确知 >200K 的模型（kimi-k3 = 1M）：必须显式声明，否则 claude 按 200K 假设提前 compact
-        let out = patch_claude_settings(None, None, None, &["kimi-k3".to_string()]).unwrap();
+        let out = patch_claude_settings(None, None, None, &["kimi-k3".to_string()], None, None).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1048576");
         // ≤200K 的模型：不写；已有旧值时清掉（防上一个 profile 的 1M 残留误导）
@@ -1295,6 +1504,8 @@ mod tests {
             None,
             None,
             &["claude-sonnet-4".to_string()],
+            None,
+            None,
         )
         .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -1309,6 +1520,8 @@ mod tests {
             Some("https://r.example.com/v1"),
             Some("gpt-5"),
             Some(std::path::Path::new("/cfg/ccode/catalogs/codex-p1.json")),
+            "ccode",
+            None,
         )
         .unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
@@ -1463,7 +1676,7 @@ mod tests {
         let existing = r#"{"provider": {"other": {"npm": "x"}}, "theme": "dark"}"#;
         let p = profile("opencode");
         let provider = agents::opencode_provider_json(&p, Some("sk-secret"), Some("m1"));
-        let out = patch_opencode_config(Some(existing), provider, Some("m1")).unwrap();
+        let out = patch_opencode_config(Some(existing), provider, Some("m1"), "ccode").unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["provider"]["other"]["npm"], "x");
         assert_eq!(v["provider"]["ccode"]["npm"], "@ai-sdk/openai-compatible");
@@ -1507,6 +1720,8 @@ mod tests {
             Some("sk-secret"),
             &["kimi-k3".into(), "kimi.k2.5 turbo".into(), "deepseek-chat".into()],
             true,
+            "ccode",
+            None,
         )
         .unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
@@ -1561,7 +1776,7 @@ mod tests {
 
     #[test]
     fn kimi_patch_without_models_keeps_single_ccode_alias() {
-        let out = patch_kimi_config(None, "openai", "P", None, None, &[], true).unwrap();
+        let out = patch_kimi_config(None, "openai", "P", None, None, &[], true, "ccode", None).unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
         assert_eq!(doc["providers"]["ccode"]["type"].as_str(), Some("openai"));
         assert_eq!(doc["models"]["ccode"]["provider"].as_str(), Some("ccode"));
@@ -1577,7 +1792,7 @@ mod tests {
         // 旧版 kimi-cli（~/.kimi）：不写 max_context_size/display_name/capabilities，
         // 防止老版本解析未知字段报错
         let out =
-            patch_kimi_config(None, "kimi", "P", None, None, &["kimi-k3".into()], false).unwrap();
+            patch_kimi_config(None, "kimi", "P", None, None, &["kimi-k3".into()], false, "ccode", None).unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
         assert!(doc["models"]["kimi-k3"].get("max_context_size").is_none());
         assert!(doc["models"]["kimi-k3"].get("display_name").is_none());
@@ -1762,5 +1977,26 @@ mod tests {
         let (y, m, d) = civil_from_days(20454); // 2026-01-01
         assert_eq!((y, m, d), (2026, 1, 1));
         assert_eq!(timestamp_now().len(), 15); // yyyymmdd-hhmmss
+    }
+
+    #[test]
+    fn disk_matches_plans_uses_json_subset_not_full_trim() {
+        let dir = tmpdir("dry-subset");
+        let path = dir.join("settings.json");
+        fs::write(&path, "{\n  \"env\": {\"A\": \"1\"},\n  \"theme\": \"dark\"\n}\n").unwrap();
+        let planned = PlannedWrite {
+            tag: "settings.json",
+            path: path.clone(),
+            content: "{\"env\":{\"A\":\"1\"}}".into(),
+        };
+        assert!(disk_matches_plans(&[planned]), "CLI 多出来的键不算漂移");
+        fs::write(&path, "{\"env\":{\"A\":\"2\"}}").unwrap();
+        let planned2 = PlannedWrite {
+            tag: "settings.json",
+            path,
+            content: "{\"env\":{\"A\":\"1\"}}".into(),
+        };
+        assert!(!disk_matches_plans(&[planned2]));
+        fs::remove_dir_all(&dir).ok();
     }
 }

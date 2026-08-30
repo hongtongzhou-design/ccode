@@ -233,14 +233,12 @@ export default function ChatSurface({
         <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col px-4 pb-6 pt-8 sm:px-5">
           {state === "idle" && messages.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center pb-20 text-center">
-              <div className="mb-3 flex size-10 items-center justify-center rounded-xl bg-raised text-lg text-l3">✦</div>
               <p className="text-sm text-l2">从一个问题开始</p>
-              <p className="mt-1 text-xs text-l4">聊天和终端共享同一个会话上下文</p>
             </div>
           ) : state === "detecting" && messages.length === 0 ? (
             <div className="flex flex-1 items-center justify-center pb-20 text-sm text-l4">正在连接当前会话…</div>
           ) : messages.length === 0 ? (
-            <div className="flex flex-1 items-center justify-center pb-20 text-sm text-l4">等待第一条对话…</div>
+            <div className="flex flex-1" />
           ) : (
             <ConversationView messages={messages} cwd={cwd} />
           )}

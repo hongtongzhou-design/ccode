@@ -6,6 +6,7 @@ import {
   reflowBlockText,
   type TlHistoryEntry,
 } from "../reader";
+import { FoldMark } from "./PageFrame";
 
 /** 在途翻译（ReaderOverlay 持有并下传）：loading 在途 / error 可重试 */
 export interface TlPending {
@@ -178,7 +179,9 @@ function ReaderTranslatePanel({
               onClick={() => setCollapsed((v) => !v)}
               className="flex items-center gap-0.5 rounded-sm px-1 py-0.5 text-l4 hover:bg-hover hover:text-l2"
             >
-              {collapsed ? "▸" : "▾"} 译 · 第 {(pending ?? current!).page} 页
+              <span className="inline-flex items-center gap-1">
+                <FoldMark open={!collapsed} /> 译 · 第 {(pending ?? current!).page} 页
+              </span>
             </button>
             <div className="ml-auto flex items-center gap-0.5">
               {!pending && current && (

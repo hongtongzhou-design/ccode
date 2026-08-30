@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useReducer, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Checkbox, LoadingRows } from "./PageFrame";
+import { Checkbox, FoldMark, LoadingRows } from "./PageFrame";
 import StepSkillsChips from "./StepSkillsChips";
 import HumanTasksList from "./HumanTasksList";
 import {
@@ -505,11 +505,9 @@ export default function KickoffConfirmDialog({
             title={
               taskMdOpen ? "收起 TASK.md" : "展开查看/编辑本步交给 agent 的合同"
             }
-            className="rounded-sm px-1 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
+            className="flex items-center gap-1 rounded-sm px-1 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
           >
-            <span className="inline-block w-3 text-l4">
-              {taskMdOpen ? "▾" : "▸"}
-            </span>
+            <FoldMark open={taskMdOpen} boxed />
             本步合同 TASK.md
             <span className="ml-1 text-micro text-l4">
               {editor.dirty

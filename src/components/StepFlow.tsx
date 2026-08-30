@@ -4,6 +4,7 @@ import { marked } from "marked";
 import { renderMathInto } from "../md-math";
 import { useAppStore } from "../store";
 import { confirmDialog } from "./ConfirmDialog";
+import { Checkbox, FoldMark } from "./PageFrame";
 import { buildStepFlow, type StepFlowNode } from "../step-flow";
 import {
   parseDecisions,
@@ -601,14 +602,11 @@ export default function StepFlow({
             {node.kind === "human" ? "" : ic.text}
           </span>
           {node.kind === "human" ? (
-            <input
-              type="checkbox"
-              className="size-4 shrink-0 accent-[var(--color-cta)]"
+            <Checkbox
+              className="shrink-0"
               checked={node.done}
               disabled={busyTitle === node.human!.title}
-              onChange={(e) =>
-                void toggle(node.human!, e.target.checked)
-              }
+              onChange={(checked) => void toggle(node.human!, checked)}
               title={
                 node.done
                   ? "已完成；取消勾选会保留为未完成，需重新勾选确认"
@@ -734,9 +732,7 @@ export default function StepFlow({
                     aria-expanded={decisionsOpen}
                     className="flex min-w-0 items-center gap-1 text-xs text-l3 hover:text-l1"
                   >
-                    <span className="w-3 text-l4">
-                      {decisionsOpen ? "▾" : "▸"}
-                    </span>
+                    <FoldMark open={decisionsOpen} boxed />
                     {pendingDecisions.length > 0
                       ? `直接选择（${pendingDecisions.length} 项待定）`
                       : "直接选择（已定）"}
@@ -897,7 +893,7 @@ export default function StepFlow({
                     aria-expanded={chatOpen}
                     className="flex min-w-0 items-center gap-1 text-xs text-l3 hover:text-l1"
                   >
-                    <span className="w-3 text-l4">{chatOpen ? "▾" : "▸"}</span>
+                    <FoldMark open={chatOpen} boxed />
                     和 AI 商量（可选）
                   </button>
                   <span className="ml-auto flex items-center gap-2">
@@ -906,9 +902,9 @@ export default function StepFlow({
                       disabled={!draft}
                       onClick={() => void openDraftInline()}
                       title="查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
-                      className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                      className="rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2 disabled:opacity-50"
                     >
-                      预览/编辑 TASK.md
+                      TASK.md
                     </button>
                   </span>
                 </div>
@@ -949,9 +945,9 @@ export default function StepFlow({
                     disabled={!draft}
                     onClick={() => void openDraftInline()}
                     title="查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
-                    className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                    className="rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2 disabled:opacity-50"
                   >
-                    预览/编辑 TASK.md
+                    TASK.md
                   </button>
                 </span>
               </div>

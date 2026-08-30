@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { File, FolderClosed, FolderOpen } from "lucide-react";
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
-import { ghostActionClass, LoadingRows } from "./PageFrame";
+import { FoldMark, ghostActionClass, LoadingRows } from "./PageFrame";
 import { useAppStore } from "../store";
 import {
   hasChangedInside,
@@ -119,8 +119,8 @@ const FileTreeNode = memo(function FileTreeNode({
         } ${entry.isSystem ? "opacity-50" : ""}`}
         style={{ paddingLeft: 6 + depth * 12 }}
       >
-        <span className="w-3 shrink-0 text-l4">
-          {entry.isDir ? (isOpen ? "▾" : "▸") : ""}
+        <span className="inline-flex w-5 shrink-0 justify-center">
+          {entry.isDir ? <FoldMark open={isOpen} /> : null}
         </span>
         {entry.isDir ? (
           isOpen ? (

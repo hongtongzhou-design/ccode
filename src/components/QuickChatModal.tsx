@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { primaryActionClass, secondaryActionClass, fieldClass } from "./PageFrame";
+import { Checkbox, primaryActionClass, secondaryActionClass, fieldClass } from "./PageFrame";
 import { useAppStore } from "../store";
 import { AGENTS, type SessionMetaDto } from "../types";
 import { agentBrandBadgeStyle } from "../agent-colors";
 import { relTime } from "../rel-time";
 import { IS_WINDOWS } from "../hotkeys";
+import { abbrevHome } from "../path-utils";
 import {
   pickQuickChatSessions,
   sessionHomeLabel,
@@ -152,6 +153,7 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   const agentProfiles = profiles.filter((p) => p.agent === agentId);
   const [profileId, setProfileId] = useState(() => remembered.profileId ?? "");
   const [cwd, setCwd] = useState(remembered.cwd ?? "");
+  const [homeDir, setHomeDir] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [skipNext, setSkipNext] = useState(quickChatSkipEnabled);
 
@@ -166,6 +168,11 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (cwd) return;
     let stale = false;
+    invoke<string>("home_dir")
+      .then((h) => {
+        if (!stale) setHomeDir(h);
+      })
+      .catch(() => {});
     invoke<string>("ensure_scratch_dir")
       .then((dir) => {
         if (!stale) setCwd(dir);
@@ -183,21 +190,28 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
     AGENTS.find((a) => a.id === agentId)?.label ?? agentId;
 
   function start() {
-    if (!cwd.trim()) {
+    const resolvedCwd = (() => {
+      const raw = cwd.trim();
+      if (raw === "~") return homeDir || raw;
+      if ((raw.startsWith("~/") || raw.startsWith("~\\")) && homeDir)
+        return `${homeDir}${raw.slice(1)}`;
+      return raw;
+    })();
+    if (!resolvedCwd) {
       setError("还没有确定开聊目录");
       return;
     }
     try {
       localStorage.setItem(
         LAST_KEY,
-        JSON.stringify({ agentId, profileId, cwd }),
+        JSON.stringify({ agentId, profileId, cwd: resolvedCwd }),
       );
       localStorage.setItem(SKIP_KEY, skipNext ? "1" : "0");
     } catch {
       /* 隐私模式写不进就只用本次 */
     }
     setPendingTerminal({
-      cwd: cwd.trim(),
+      cwd: resolvedCwd,
       extraEnv: {},
       title: `随手聊 · ${agentLabel}`,
       agentId,
@@ -273,8 +287,13 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
           <span className="mb-1 block text-xs text-l3">目录</span>
           <input
             className={`${fieldClass} font-mono text-xs`}
-            value={cwd}
-            onChange={(e) => setCwd(e.target.value)}
+            value={homeDir ? abbrevHome(cwd, homeDir, IS_WINDOWS) : cwd}
+            onChange={(e) => {
+              const v = e.target.value;
+              if ((v.startsWith("~/") || v === "~") && homeDir)
+                setCwd(v === "~" ? homeDir : `${homeDir}${v.slice(1)}`);
+              else setCwd(v);
+            }}
             placeholder="~/ccode/scratch"
           />
         </label>
@@ -283,15 +302,12 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
 
         {/* 跳过弹层：勾选后下次点侧栏「快速开聊」按这套选择直接落终端；
             ⌘K 里的「快速开聊」永远打开本弹层，留作调整口 */}
-        <label className="mb-3 flex items-center gap-2 text-xs text-l3">
-          <input
-            type="checkbox"
-            className="size-3.5 accent-[var(--color-cta)]"
-            checked={skipNext}
-            onChange={(e) => setSkipNext(e.target.checked)}
-          />
-          下次直接开聊，不再询问（要调整就从 ⌘K 命令面板进）
-        </label>
+        <Checkbox
+          className="mb-3 text-xs text-l3"
+          checked={skipNext}
+          onChange={setSkipNext}
+          label="下次跳过询问"
+        />
 
         <div className="flex items-center justify-end gap-2">
           <button type="button" className={secondaryActionClass} onClick={onClose}>

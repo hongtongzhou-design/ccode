@@ -7,6 +7,7 @@ import type {
   ProjectDto,
   WorkspaceDto,
 } from "../types";
+import { FoldMark } from "./PageFrame";
 
 /** 标签状态摘要：工作区注意力点的数据源，复用 TerminalPage 的 statuses 上报，不新增轮询通道 */
 export interface RailTabSummary {
@@ -278,7 +279,7 @@ function ProjectRail({
         onClick={() => setCollapsed((v) => !v)}
         className="flex w-full items-center gap-1 px-2 py-2 text-left text-micro text-l4 hover:text-l2"
       >
-        <span>{collapsed ? "▸" : "▾"}</span>
+        <FoldMark open={!collapsed} boxed />
         <span>项目</span>
       </button>
       {!collapsed && (

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { BlockDto, ChatMessageDto } from "../types";
+import { FoldMark } from "./PageFrame";
 import ChatMarkdown, { ChatImageCard } from "./ChatMarkdown";
 import { fmtTokens } from "./TerminalStatusBar";
 import { splitImagePaths } from "../chat-image";
@@ -166,7 +167,9 @@ export default function ConversationView({
             onClick={() => toggleExpand(key)}
             className="text-xs text-l4 hover:text-l2"
           >
-            {isOpen ? "▾" : "▸"} 思考过程
+            <span className="inline-flex items-center gap-1">
+              <FoldMark open={isOpen} /> 思考过程
+            </span>
           </button>
           {isOpen && (
             <div className="mt-1 whitespace-pre-wrap rounded-sm bg-inset p-2 text-xs italic text-l3">
@@ -302,9 +305,7 @@ export default function ConversationView({
           aria-expanded={isOpen}
           className="flex h-7 w-full items-center gap-1.5 rounded-md bg-inset/65 px-2 text-xs text-l3 hover:bg-raised hover:text-l1"
         >
-          <span className="shrink-0 text-micro text-l4">
-            {isOpen ? "▾" : "▸"}
-          </span>
+          <FoldMark open={isOpen} />
           <span className="shrink-0">{callCount} 次工具调用</span>
           {names.length > 0 && (
             <span className="min-w-0 truncate text-l4">

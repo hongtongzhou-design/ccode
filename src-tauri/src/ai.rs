@@ -212,8 +212,11 @@ pub(crate) fn ai_prompt_impl(
     let binary_path = agents::resolve_binary(binary)
         .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
     // 密钥只在调用瞬间读出注入子进程，与终端启动同一约束
-    let key = profiles::get_key(&profile.id)?;
-    let plan = agents::launch_plan(&profile, key, profile.models.first().map(|s| s.as_str()));
+    let key = profiles::get_key_for_profile(&profile)?;
+    let mut profile = profile;
+    let selected = profile.models.first().cloned();
+    crate::combo::apply_to_profile(&mut profile, selected.as_deref());
+    let plan = agents::launch_plan(&profile, key, selected.as_deref());
     let mut cmd = crate::process::background_command(&binary_path);
     for a in compose_headless_args(&profile.agent, &plan.args, &headless_args(&profile.agent, &prompt)) {
         cmd.arg(a);
@@ -292,8 +295,11 @@ pub(crate) fn run_agent_task(
         .ok_or_else(|| format!("profile 所属 agent 不支持无头调用: {}", profile.agent))?;
     let binary_path = agents::resolve_binary(binary)
         .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
-    let key = profiles::get_key(&profile.id)?;
-    let plan = agents::launch_plan(profile, key, profile.models.first().map(|s| s.as_str()));
+    let key = profiles::get_key_for_profile(&profile)?;
+    let mut profile = profile.clone();
+    let selected = profile.models.first().cloned();
+    crate::combo::apply_to_profile(&mut profile, selected.as_deref());
+    let plan = agents::launch_plan(&profile, key, selected.as_deref());
     let mut cmd = crate::process::background_command(&binary_path);
     for a in compose_headless_args(&profile.agent, &plan.args, &headless_task_args(&profile.agent, prompt)) {
         cmd.arg(a);
@@ -822,6 +828,9 @@ mod tests {
             model: None,
             has_key: false,
             last_used_at: last_used_at.map(String::from),
+            gateway_id: None,
+            slot_missing: false,
+            provider_override: None,
         }
     }
 

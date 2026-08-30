@@ -91,7 +91,7 @@ test("标题优先级：自定义 > 会话标题 > 摘要 > 兜底", () => {
   );
   assert.equal(
     sessionDisplayTitle(session({ title: null, summary: null })),
-    "（无标题）",
+    "未命名对话",
   );
 });
 

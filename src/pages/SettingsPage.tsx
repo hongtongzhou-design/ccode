@@ -6,6 +6,7 @@ import { useAppStore } from "../store";
 import type { AppSettings } from "../store";
 import {
   fieldClass,
+  FoldMark,
   ghostActionClass,
   hoverRevealClass,
   PageFrame,
@@ -50,7 +51,7 @@ function paletteDots(id: string): string[] {
 
 // 主题清单单一出处在 ../themes（命令面板共用）
 
-type ThemeSwatch = { rail: string; canvas: string; accent: string };
+type ThemeSwatch = { rail: string; canvas: string; accent: string; ink: string };
 
 /** 预览色运行时从 CSS 变量读取：临时切 data-theme 同步读回再还原，
     避免与 src/App.css 双份维护色值漂移（App.css 无 transition，同步还原不会闪烁） */
@@ -63,6 +64,7 @@ function readThemeSwatch(id: string): ThemeSwatch {
     rail: cs.getPropertyValue("--color-rail").trim(),
     canvas: cs.getPropertyValue("--color-canvas").trim(),
     accent: cs.getPropertyValue("--color-cta").trim(),
+    ink: cs.getPropertyValue("--color-l1").trim(),
   };
   if (prev === undefined) el.removeAttribute("data-theme");
   else el.dataset.theme = prev;
@@ -162,6 +164,18 @@ const DEFAULT_COLLAPSED: Record<string, boolean> = {
   diag: true,
 };
 
+const SETTING_NAV: { id: string; label: string }[] = [
+  { id: "appearance", label: "外观" },
+  { id: "startup", label: "启动行为" },
+  { id: "hotkeys", label: "快捷键" },
+  { id: "stats", label: "统计" },
+  { id: "integration", label: "集成" },
+  { id: "update", label: "更新" },
+  { id: "diag", label: "诊断" },
+  { id: "storage", label: "数据与存储" },
+  { id: "about", label: "关于" },
+];
+
 /** 可折叠分区：标题行整行可点（高 32px），▸/▾ 指示展开状态；badge 为标题右侧状态标记 */
 function Section({
   title,
@@ -187,9 +201,9 @@ function Section({
         type="button"
         onClick={onToggle}
         aria-expanded={effectiveOpen}
-        className="flex h-8 w-full items-center gap-1.5 rounded-md px-2 text-left text-sm font-medium text-l1 transition-colors hover:bg-hover"
+        className="flex h-9 w-full items-center gap-2 rounded-md px-1 text-left text-sm font-medium text-l1 transition-colors hover:bg-hover"
       >
-        <span className="w-3 text-xs text-l4">{effectiveOpen ? "▾" : "▸"}</span>
+        <FoldMark open={effectiveOpen} boxed />
         {title}
         {badge}
       </button>
@@ -266,14 +280,14 @@ function HotkeyCapture({
   }, [listening, conflictsWith, onSave]);
 
   return (
-    <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
+    <span className="flex shrink-0 items-center gap-1 whitespace-nowrap text-xs">
       <button
         type="button"
         onClick={() => {
           setListening(true);
           setConflict(false);
         }}
-        className={`inline-flex h-7 min-w-16 shrink-0 items-center justify-center rounded-md border px-2 font-mono text-xs ${
+        className={`inline-flex h-7 min-w-14 shrink-0 items-center justify-center rounded-md border px-2 font-mono ${
           listening
             ? "border-cta-bd bg-inset text-cta"
             : conflict
@@ -283,30 +297,31 @@ function HotkeyCapture({
       >
         {listening ? "按下新快捷键…" : comboLabel(value)}
       </button>
-      {conflict && <span className="text-xs text-err-text">与其他快捷键冲突</span>}
-      {/* 两个低频钮用 invisible 占位而非条件渲染：否则改了绑定的行多出一个钮，
-          绑定键列与「禁用」列整列错位（白底块旁的排版投诉来源之一）；
-          shrink-0 防窄容器里按钮被压缩换行 */}
-      <button
-        type="button"
-        onClick={() => {
-          setListening(false); // 监听中直接改绑定：退出监听态，防后续按键再覆盖
-          onSave(defaultValue);
-        }}
-        className={`${ghostActionClass} shrink-0${value !== defaultValue ? "" : " invisible"}`}
-      >
-        恢复默认
-      </button>
-      <button
-        type="button"
-        onClick={() => {
-          setListening(false);
-          onSave("");
-        }}
-        className={`${ghostActionClass} shrink-0${value !== "" ? "" : " invisible"}`}
-      >
-        禁用
-      </button>
+      {conflict && <span className="text-err-text">与其他快捷键冲突</span>}
+      {value !== defaultValue && (
+        <button
+          type="button"
+          onClick={() => {
+            setListening(false);
+            onSave(defaultValue);
+          }}
+          className={`${ghostActionClass} shrink-0`}
+        >
+          恢复
+        </button>
+      )}
+      {value !== "" && (
+        <button
+          type="button"
+          onClick={() => {
+            setListening(false);
+            onSave("");
+          }}
+          className={`${ghostActionClass} shrink-0`}
+        >
+          禁用
+        </button>
+      )}
     </span>
   );
 }
@@ -699,50 +714,38 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 
-      <div className="grid min-w-0 grid-cols-[150px_minmax(0,1fr)] gap-8">
-        <nav aria-label="设置分区" className="sticky top-14 self-start">
-          <p className="mb-2 px-2 text-micro uppercase tracking-wider text-l4">
-            设置
-          </p>
-          <div className="space-y-0.5">
-            {[
-              ["appearance", "外观"],
-              ["startup", "启动行为"],
-              ["hotkeys", "快捷键"],
-              ["stats", "统计"],
-              ["integration", "集成"],
-              ["update", "更新"],
-              ["diag", "诊断"],
-              ["storage", "数据与存储"],
-              ["about", "关于"],
-            ].map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => {
-                  setActiveSection(id);
-                  setCollapsed((prev) => {
-                    if (!prev[id]) return prev;
-                    const next = { ...prev, [id]: false };
-                    try {
-                      localStorage.setItem(SECTIONS_KEY, JSON.stringify(next));
-                    } catch {}
-                    return next;
-                  });
-                }}
-                className={`flex h-8 w-full items-center rounded-md px-2 text-left text-sm transition-colors ${
-                  activeSection === id
-                    ? "bg-rail-sel font-medium text-l1"
-                    : "text-l3 hover:bg-hover hover:text-l1"
-                }`}
-              >
-                {label}
-                {id === "update" && appUpdate && (
-                  <span className="ml-auto size-1.5 rounded-full bg-ok-text" />
-                )}
-              </button>
-            ))}
-          </div>
+      <div className="min-w-0">
+        <nav
+          aria-label="设置分区"
+          className="mb-6 flex flex-wrap gap-1.5"
+        >
+          {SETTING_NAV.map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => {
+                setActiveSection(id);
+                setCollapsed((prev) => {
+                  if (!prev[id]) return prev;
+                  const next = { ...prev, [id]: false };
+                  try {
+                    localStorage.setItem(SECTIONS_KEY, JSON.stringify(next));
+                  } catch {}
+                  return next;
+                });
+              }}
+              className={`flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors ${
+                activeSection === id
+                  ? "border-field bg-seg-sel font-medium text-l1"
+                  : "border-field bg-strip text-l3 hover:bg-hover hover:text-l1"
+              }`}
+            >
+              {label}
+              {id === "update" && appUpdate && (
+                <span className="size-1.5 rounded-full bg-ok-text" />
+              )}
+            </button>
+          ))}
         </nav>
         <div className="min-w-0">
 
@@ -752,42 +755,46 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         open={!collapsed.appearance}
         onToggle={() => toggleSection("appearance")}
       >
-        {/* 主题：七套深色一行，对应浅色正下方一列对齐（grid-cols-7） */}
+        {/* 主题：七列深浅成对。色卡是该主题的小窗（左栏 + 画布 + 强调点），
+            名称写在画布上用该主题自己的标题色，深浅一眼可辨。 */}
         <div className="border-b border-hairline py-3">
           <div className="mb-2 text-sm text-l2">主题</div>
           <div className="grid grid-cols-7 gap-2 overflow-x-auto">
-            {themeSwatches.map((t) => (
+            {themeSwatches.map((t) => {
+              const selected = settings?.theme === t.id;
+              return (
               <button
                 key={t.id}
                 onClick={() => patch({ theme: t.id })}
                 title={`切换到${t.name}`}
-                className={`w-20 rounded-md border p-1.5 text-center text-xs ${
-                  settings?.theme === t.id
-                    ? "border-cta-bd text-l1"
-                    : "border-field text-l3 hover:text-l1"
+                className={`min-w-0 overflow-hidden rounded-md text-left ${
+                  selected ? "ring-2 ring-l1 ring-offset-1 ring-offset-canvas" : "ring-1 ring-hairline hover:ring-field"
                 }`}
+                style={{ background: t.canvas }}
               >
-                <span className="mb-1 flex h-8 overflow-hidden rounded-sm">
+                <span className="flex h-14">
                   <span
-                    className="h-full w-1/2"
+                    className="w-2.5 shrink-0"
                     style={{ background: t.rail }}
+                    aria-hidden="true"
                   />
-                  <span
-                    className="h-full w-1/2"
-                    style={{ background: t.canvas }}
-                  />
-                  <span
-                    className="h-full w-1.5"
-                    style={{ background: t.accent }}
-                    title="强调色"
-                  />
+                  <span className="flex min-w-0 flex-1 flex-col justify-between px-1.5 py-1.5">
+                    <span
+                      className="h-1.5 w-1.5 self-end rounded-full"
+                      style={{ background: t.accent }}
+                      aria-hidden="true"
+                    />
+                    <span
+                      className="truncate text-micro font-medium"
+                      style={{ color: t.ink }}
+                    >
+                      {t.name}
+                    </span>
+                  </span>
                 </span>
-                {t.name}
-                {settings?.theme === t.id && (
-                  <span className="ml-0.5 text-ok-text">✓</span>
-                )}
               </button>
-            ))}
+              );
+            })}
           </div>
           {/* Agent TUI 只在启动时探测一次终端底色（OSC 11），热切换主题后运行中会话保持
               旧配色——无条件常驻说明：按 liveSessions 门控会在页面重载后（标签恢复为占位、
@@ -1135,47 +1142,51 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             <option value="labels">仅显示文字</option>
           </select>
         </Row>
-        <Row
-          label="顶部导航显示项目"
-          hint="恢复侧栏始终保留；隐藏当前页面时会临时保留该入口"
-          extra={
-            /* 与快捷键区同口径的 strip 卡片分组容器；卡内 10 项按 5 列 max-content 网格
-               排两行——列轨对齐（flex 包裹第二行会错位），列间固定间隙不摊宽 */
-            <div className="rounded-lg bg-strip p-3">
-              <div className="grid grid-cols-[repeat(5,max-content)] gap-x-8 gap-y-2">
-                {NAV_CAPSULE_SETTING_ITEMS.map((item) => {
-                  const selected = normalizeNavCapsuleVisibleItems(
-                    settings?.navCapsuleVisibleItems,
-                  ).includes(item.id);
-                  return (
-                    <Checkbox
-                      key={item.id}
-                      checked={selected}
-                      label={item.label}
-                      onChange={(checked) => {
-                        const current = normalizeNavCapsuleVisibleItems(
-                          settings?.navCapsuleVisibleItems,
-                        );
-                        const next = checked
-                          ? [...new Set([...current, item.id])]
-                          : current.filter((id) => id !== item.id);
-                        void patch({ navCapsuleVisibleItems: next });
-                      }}
-                    />
-                  );
-                })}
-              </div>
+        <div className="mt-2 rounded-lg bg-strip p-3">
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm text-l2">顶部导航显示项目</div>
+              <p className="mt-0.5 text-micro leading-4 text-l4">
+                恢复侧栏始终保留；隐藏当前页面时会临时保留该入口
+              </p>
             </div>
-          }
-        >
-          <button
-            type="button"
-            className="rounded-md px-2 py-1 text-xs text-l3 hover:bg-hover hover:text-l1"
-            onClick={() => void patch({ navCapsuleVisibleItems: [...NAV_CAPSULE_ITEM_IDS] })}
-          >
-            全部显示
-          </button>
-        </Row>
+            <button
+              type="button"
+              className={`${ghostActionClass} shrink-0 text-xs`}
+              onClick={() => void patch({ navCapsuleVisibleItems: [...NAV_CAPSULE_ITEM_IDS] })}
+            >
+              全部显示
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {NAV_CAPSULE_SETTING_ITEMS.map((item) => {
+              const selected = normalizeNavCapsuleVisibleItems(
+                settings?.navCapsuleVisibleItems,
+              ).includes(item.id);
+              return (
+                <Checkbox
+                  key={item.id}
+                  className={`h-8 rounded-md border px-2.5 text-xs ${
+                    selected
+                      ? "border-field bg-raised text-l1"
+                      : "border-hairline bg-canvas text-l3"
+                  }`}
+                  checked={selected}
+                  label={item.label}
+                  onChange={(checked) => {
+                    const current = normalizeNavCapsuleVisibleItems(
+                      settings?.navCapsuleVisibleItems,
+                    );
+                    const next = checked
+                      ? [...new Set([...current, item.id])]
+                      : current.filter((id) => id !== item.id);
+                    void patch({ navCapsuleVisibleItems: next });
+                  }}
+                />
+              );
+            })}
+          </div>
+        </div>
       </Section>
 
       <Section
@@ -1205,17 +1216,15 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                   label="页面切换"
                 />
               </Row>
-              {/* 两个快捷键组各自收进 strip 卡片容器：离散行收拢视线、消除右侧大片空白；
-                  卡内标准列表行 = 功能名在左、绑定键 + 操作靠右（invisible 占位保列对齐） */}
               <div className="mt-2 rounded-lg bg-strip p-3">
-                <div className="mb-1 px-2 text-xs font-medium text-l3">页面快捷键</div>
-                <div className="grid grid-cols-1 gap-x-8 lg:grid-cols-2">
+                <div className="mb-2 text-xs font-medium text-l3">页面快捷键</div>
+                <div className="grid grid-cols-3 gap-2">
                   {PAGE_HOTKEY_DEFS.map((p) => (
                     <div
                       key={p.id}
-                      className="flex items-center justify-between gap-4 rounded-sm px-2 py-1.5 hover:bg-hover"
+                      className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover"
                     >
-                      <span className="shrink-0 text-sm text-l2">{p.label}</span>
+                      <span className="min-w-0 truncate text-sm text-l2">{p.label}</span>
                       <HotkeyCapture
                         value={pageCombo(p.id)}
                         defaultValue={p.combo}
@@ -1238,36 +1247,30 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                     </div>
                   ))}
                 </div>
-              </div>
-              <div className="mt-4 rounded-lg bg-strip p-3">
-                <div className="mb-1 px-2 text-xs font-medium text-l3">全局快捷键</div>
-                <div className="flex items-center justify-between gap-4 rounded-sm px-2 py-1.5 hover:bg-hover">
-                  <div className="min-w-0">
-                    <div className="text-sm text-l2">命令面板</div>
-                    <p className="mt-0.5 text-micro leading-4 text-l4">
-                      呼出页面跳转 / 主题切换 / 侧栏显隐
-                    </p>
+                <div className="mb-2 mt-3 text-xs font-medium text-l3">全局快捷键</div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover">
+                    <span className="min-w-0 truncate text-sm text-l2" title="页面跳转 / 主题 / 侧栏">
+                      命令面板
+                    </span>
+                    <HotkeyCapture
+                      value={palette}
+                      defaultValue="mod+k"
+                      conflictsWith={[chrome, ...pageCombos]}
+                      onSave={(combo) => void patch({ hotkeyPalette: combo })}
+                    />
                   </div>
-                  <HotkeyCapture
-                    value={palette}
-                    defaultValue="mod+k"
-                    conflictsWith={[chrome, ...pageCombos]}
-                    onSave={(combo) => void patch({ hotkeyPalette: combo })}
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-4 rounded-sm px-2 py-1.5 hover:bg-hover">
-                  <div className="min-w-0">
-                    <div className="text-sm text-l2">隐藏 / 显示侧栏</div>
-                    <p className="mt-0.5 text-micro leading-4 text-l4">
-                      执行态：界面只剩工作内容
-                    </p>
+                  <div className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover">
+                    <span className="min-w-0 truncate text-sm text-l2" title="界面只剩工作内容">
+                      隐藏侧栏
+                    </span>
+                    <HotkeyCapture
+                      value={chrome}
+                      defaultValue="mod+\\"
+                      conflictsWith={[palette, ...pageCombos]}
+                      onSave={(combo) => void patch({ hotkeyHideChrome: combo })}
+                    />
                   </div>
-                  <HotkeyCapture
-                    value={chrome}
-                    defaultValue="mod+\\"
-                    conflictsWith={[palette, ...pageCombos]}
-                    onSave={(combo) => void patch({ hotkeyHideChrome: combo })}
-                  />
                 </div>
               </div>
             </>

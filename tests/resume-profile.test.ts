@@ -9,6 +9,16 @@ const api = (id: string, baseUrl = "https://relay.example.com/v1") => ({
 });
 const official = (id: string) => ({ id, agent: "codex", baseUrl: null });
 
+test("provider=ccode-<短id>：只在匹配网关的绑定里挑", () => {
+  const gid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+  const profiles = [
+    { id: "p-old", agent: "codex", baseUrl: "https://a.example", gatewayId: "ffffffff-ffff-ffff-ffff-ffffffffffff" },
+    { id: "p-new", agent: "codex", baseUrl: "https://b.example", gatewayId: gid },
+  ];
+  const pick = pickResumeProfile(profiles, "codex", "ccode-a1b2c3d4", null);
+  assert.equal(pick?.id, "p-new");
+});
+
 test("provider=ccode：跳过官方账号型，挑带 Base URL 的配置", () => {
   const profiles = [official("p-official"), api("p-api")];
   const pick = pickResumeProfile(profiles, "codex", "ccode", null);

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
-import { inlineActionClass, Toggle, fieldClass } from "./PageFrame";
+import { FoldMark, inlineActionClass, Toggle, fieldClass } from "./PageFrame";
 import { useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
 import {
@@ -478,7 +478,7 @@ export default function ScheduleSection({
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
         >
-          <span>{open ? "▾" : "▸"}</span>
+          <FoldMark open={open} boxed />
           ◔ 定时任务{count > 0 ? `（${count}）` : ""}
         </button>
         <button
@@ -534,14 +534,14 @@ export default function ScheduleSection({
                     {s.history.length > 0 && (
                       <button
                         type="button"
-                        className={`${actionBtn} shrink-0`}
+                        className={`${actionBtn} inline-flex shrink-0 items-center gap-1`}
                         aria-expanded={historyOpen === s.id}
                         title="最近运行记录"
                         onClick={() =>
                           setHistoryOpen((v) => (v === s.id ? null : s.id))
                         }
                       >
-                        {historyOpen === s.id ? "▾" : "▸"} 历史
+                        <FoldMark open={historyOpen === s.id} /> 历史
                       </button>
                     )}
                     <button

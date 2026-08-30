@@ -63,3 +63,21 @@ export function parentDir(p: string): string | null {
   if (idx === 2 && /^[A-Za-z]:/.test(trimmed)) return trimmed.slice(0, 3);
   return trimmed.slice(0, idx);
 }
+
+/** 家目录前缀折成 ~（显示用）。两侧先剥 verbatim；Windows 比较折叠大小写。 */
+export function abbrevHome(
+  path: string,
+  home: string,
+  isWindows = false,
+): string {
+  if (!home) return path;
+  const shown = stripVerbatim(path);
+  const h = stripVerbatim(home).replace(/[\\/]+$/, "");
+  const fold = (s: string) => (isWindows ? s.toLowerCase() : s);
+  if (fold(shown) === fold(h)) return "~";
+  const head = fold(shown).slice(0, h.length);
+  const next = shown[h.length];
+  return head === fold(h) && (next === "/" || next === "\\")
+    ? `~${shown.slice(h.length).replace(/\\/g, "/")}`
+    : shown;
+}

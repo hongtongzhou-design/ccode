@@ -54,6 +54,13 @@ test("七套浅色主题都存在", () => {
   for (const id of LIGHT_THEMES) assert.ok(Object.keys(tokens(id)).length > 0);
 });
 
+test("mocha-light 与 shadcn-light 底色不得相同", () => {
+  const m = tokens("mocha-light");
+  const s = tokens("shadcn-light");
+  assert.notEqual(m.canvas, s.canvas, "两套浅色曾共用同一 canvas hex");
+  assert.notEqual(m.rail, s.rail, "两套浅色曾共用同一 rail hex");
+});
+
 test("浅色浮起梯度每一档都可分辨（canvas→strip→inset→raised 亮度差 ≥4）", () => {
   for (const id of LIGHT_THEMES) {
     const t = tokens(id);

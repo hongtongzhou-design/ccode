@@ -4168,6 +4168,17 @@ pub(crate) fn register_session_claim(claim_id: &str, agent: &str, cwd: &str) {
     });
 }
 
+pub(crate) fn rewrite_session_profile_ids(rewrites: &[(String, String)]) {
+    let Ok(conn) = open_db() else { return };
+    for (from, to) in rewrites {
+        let _ = conn.execute(
+            "UPDATE session_meta SET profile_id=?1 WHERE profile_id=?2",
+            params![to, from],
+        );
+    }
+    invalidate_scan_cache();
+}
+
 pub(crate) fn set_session_profile(agent: &str, session_id: &str, profile_id: &str) -> Result<(), String> {
     let conn = open_db()?;
     conn.execute(

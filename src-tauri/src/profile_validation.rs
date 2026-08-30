@@ -759,6 +759,75 @@ pub async fn probe_gateway(
     model: Option<String>,
 ) -> Result<GatewayProbeDto, String> {
     let profile = store.get(&profile_id)?;
+    probe_loaded_profile(&store, profile, model, false).await
+}
+
+#[tauri::command]
+pub async fn probe_gateway_slot(
+    store: tauri::State<'_, ProfileStore>,
+    gateway_id: String,
+    slot: String,
+    model: Option<String>,
+    basic_only: Option<bool>,
+) -> Result<GatewayProbeDto, String> {
+    let slot = crate::gateway_store::Slot::from_str(&slot).ok_or_else(|| format!("未知协议槽: {slot}"))?;
+    let gateways = store.list_gateways()?;
+    let gw = gateways
+        .iter()
+        .find(|g| g.id == gateway_id)
+        .ok_or("网关不存在")?
+        .clone();
+    let model = Some(default_probe_model(&gw, slot, model));
+    let binding = crate::profiles::Binding {
+        id: format!("probe-{}", gw.id),
+        agent: crate::gateway_store::agent_for_slot(slot).into(),
+        kind: crate::profiles::BindingKind::Api,
+        gateway_id: Some(gw.id.clone()),
+        protocol: None,
+        models: gw.models.iter().map(|m| m.id.clone()).collect(),
+        extra_env: Default::default(),
+        last_used_at: None,
+    };
+    let mut profile = crate::gateway_store::materialize(&binding, Some(&gw), model.as_deref());
+    profile.has_key = gw.key_hint.is_some();
+    probe_loaded_profile(&store, profile, model, basic_only.unwrap_or(false)).await
+}
+
+fn default_probe_model(
+    gw: &crate::profiles::Gateway,
+    slot: crate::gateway_store::Slot,
+    explicit: Option<String>,
+) -> String {
+    if let Some(m) = explicit.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        return m;
+    }
+    if let Ok(bindings) = crate::gateway_store::load_bindings() {
+        for b in bindings {
+            if b.gateway_id.as_deref() != Some(gw.id.as_str()) {
+                continue;
+            }
+            if crate::gateway_store::slot_for_agent(&b.agent, b.protocol.as_deref()) != slot {
+                continue;
+            }
+            if let Some(m) = b.models.iter().find(|s| !s.is_empty()) {
+                return m.clone();
+            }
+        }
+    }
+    gw.models
+        .iter()
+        .map(|m| m.id.clone())
+        .find(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
+async fn probe_loaded_profile(
+    store: &ProfileStore,
+    profile: crate::profiles::Profile,
+    model: Option<String>,
+    basic_only: bool,
+) -> Result<GatewayProbeDto, String> {
+    let key = profiles::get_key_for_profile(&profile)?;
     if profile.agent == "cursor" {
         return Err("Cursor 为专有协议，不支持网关体检".into());
     }
@@ -770,7 +839,6 @@ pub async fn probe_gateway(
         .or_else(|| profile.models.first().cloned())
         .filter(|m| !m.trim().is_empty())
         .ok_or("请先在配置里填写模型")?;
-    let key = profiles::get_key(&profile_id)?;
     let base = profile
         .base_url
         .as_deref()
@@ -831,13 +899,21 @@ pub async fn probe_gateway(
         ),
         Err(e) => check("failed", format!("基础请求：{e}"), Some(started.elapsed().as_millis())),
     });
+    let basic_latency = checks
+        .last()
+        .and_then(|c| c.latency_ms)
+        .map(|n| n as u64);
     if !basic_ok {
         // 基础请求挂了，流式/参数探测无意义
         for label in ["流式响应", "请求策略参数", "自定义 Header"] {
             checks.push(check("skipped", format!("{label}：基础请求未通过，跳过"), None));
         }
-        let ok = false;
-        return Ok(GatewayProbeDto { ok, model, checks });
+        persist_slot_probe(store, &profile, &model, &base, key.as_deref(), &checks, basic_latency, basic_only);
+        return Ok(GatewayProbeDto { ok: false, model, checks });
+    }
+    if basic_only {
+        persist_slot_probe(store, &profile, &model, &base, key.as_deref(), &checks, basic_latency, true);
+        return Ok(GatewayProbeDto { ok: true, model, checks });
     }
 
     // ② 流式：裸 stream:true，看网关回不回 SSE
@@ -933,7 +1009,96 @@ pub async fn probe_gateway(
     }
 
     let ok = checks.iter().all(|c| c.status != "failed");
+    if let Some(gid) = profile.gateway_id.clone() {
+        let slot = crate::gateway_store::slot_for_agent(&profile.agent, profile.protocol.as_deref());
+        let st = |prefix: &str| -> crate::profiles::ProbeStatus {
+            match checks.iter().find(|c| c.message.starts_with(prefix)) {
+                Some(c) if c.status == "passed" => crate::profiles::ProbeStatus::Passed,
+                Some(c) if c.status == "failed" => crate::profiles::ProbeStatus::Failed,
+                _ => crate::profiles::ProbeStatus::Never,
+            }
+        };
+        let rec = crate::profiles::ProbeRecord {
+            slot: slot.as_str().into(),
+            model: Some(model.clone()),
+            url_fp: format!("{:x}", md5::compute(base.as_bytes())),
+            key_fp: if key.as_deref().is_some_and(|k| !k.is_empty()) {
+                "has".into()
+            } else {
+                "none".into()
+            },
+            streaming: st("流式"),
+            effort: st("请求策略"),
+            headers: st("自定义 Header"),
+            basic: st("基础请求"),
+            probed_at: crate::sessions::now_iso(),
+            latency_ms: checks
+                .iter()
+                .find(|c| c.message.starts_with("基础请求"))
+                .and_then(|c| c.latency_ms)
+                .map(|n| n as u64),
+        };
+        let _ = store.record_probe(&gid, rec);
+    }
     Ok(GatewayProbeDto { ok, model, checks })
+}
+
+fn persist_slot_probe(
+    store: &ProfileStore,
+    profile: &crate::profiles::Profile,
+    model: &str,
+    base: &str,
+    key: Option<&str>,
+    checks: &[ValidationCheckDto],
+    latency_ms: Option<u64>,
+    basic_only: bool,
+) {
+    let Some(gid) = profile.gateway_id.clone() else {
+        return;
+    };
+    let slot = crate::gateway_store::slot_for_agent(&profile.agent, profile.protocol.as_deref());
+    let st = |prefix: &str| -> crate::profiles::ProbeStatus {
+        match checks.iter().find(|c| c.message.starts_with(prefix)) {
+            Some(c) if c.status == "passed" => crate::profiles::ProbeStatus::Passed,
+            Some(c) if c.status == "failed" => crate::profiles::ProbeStatus::Failed,
+            _ => crate::profiles::ProbeStatus::Never,
+        }
+    };
+    let mut rec = crate::profiles::ProbeRecord {
+        slot: slot.as_str().into(),
+        model: Some(model.to_string()),
+        url_fp: format!("{:x}", md5::compute(base.as_bytes())),
+        key_fp: if key.is_some_and(|k| !k.is_empty()) {
+            "has".into()
+        } else {
+            "none".into()
+        },
+        streaming: st("流式"),
+        effort: st("请求策略"),
+        headers: st("自定义 Header"),
+        basic: st("基础请求"),
+        probed_at: crate::sessions::now_iso(),
+        latency_ms,
+    };
+    if basic_only {
+        if let Ok(gws) = crate::gateway_store::load_gateways() {
+            if let Some(prev) = gws
+                .iter()
+                .find(|g| g.id == gid)
+                .and_then(|g| {
+                    g.last_probe
+                        .iter()
+                        .filter(|p| p.slot == rec.slot)
+                        .max_by_key(|p| p.probed_at.as_str())
+                })
+            {
+                rec.streaming = prev.streaming;
+                rec.effort = prev.effort;
+                rec.headers = prev.headers;
+            }
+        }
+    }
+    let _ = store.record_probe(&gid, rec);
 }
 
 pub(crate) fn validate_after_global_write(
@@ -955,7 +1120,7 @@ pub async fn validate_profile(
     profile_id: String,
 ) -> Result<ProfileValidationDto, String> {
     let profile = store.get(&profile_id)?;
-    let key = profiles::get_key(&profile_id)?;
+    let key = profiles::get_key_for_profile(&profile)?;
     let local_profile = profile.clone();
     let local = tauri::async_runtime::spawn_blocking(move || match dirs::home_dir() {
         Some(home) => local_check_at(&home, &local_profile),
@@ -998,6 +1163,9 @@ mod tests {
             model: None,
             last_used_at: None,
             has_key: true,
+            gateway_id: None,
+            slot_missing: false,
+            provider_override: None,
         }
     }
 

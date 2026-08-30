@@ -221,17 +221,18 @@
    （深底浅字 pill 在浅底上同样成立）；link/tabline 按浅底加深。 */
 
 [data-theme="midnight-light"] {
-  --color-rail: #e5e5dd; --color-rail2: #f2f2ee; --color-rail-sel: #dcdfe8;
+  /* 与深色沉浸黑同性格：暖纸面。选中/线条/正文原先还是去蓝前的冷灰，会和暖画布打架。 */
+  --color-rail: #e5e5dd; --color-rail2: #f2f2ee; --color-rail-sel: #ddd9d1;
   --color-strip: #f6f6f4; --color-canvas: #edede9; --color-inset: #fbfbf9;
-  --color-raised: #ffffff; --color-bubble: #e4e7ef;
-  --color-seg-sel: #cfd3df; --color-hairline: #d5d8e2; --color-field: #b9bdcf;
-  --color-l1: #171a26; --color-l2: #3a3f52; --color-l3: #6d7386; --color-l4: #9ba1b4;
+  --color-raised: #ffffff; --color-bubble: #e4e1d8;
+  --color-seg-sel: #cfcbc2; --color-hairline: #d4d1c8; --color-field: #b8b4a8;
+  --color-l1: #1a1814; --color-l2: #3f3c36; --color-l3: #6f6b62; --color-l4: #9a958b;
   --color-cta: #c2447f; --color-cta-text: #ffffff; --color-cta-bd: #a33368;
   --color-nav-accent: #5249c4;
   --color-cta-pill: #f6d7e6; --color-cta-pill-text: #a33368;
-  --color-folder: #66748f;
-  --color-link: #2470d8; --color-tabline: #5a6070;
-  --color-editor-bg: #ffffff; --color-editor-fg: #242839; --color-editor-line: #a3a8ba;
+  --color-folder: #7a7368;
+  --color-link: #2470d8; --color-tabline: #5a564e;
+  --color-editor-bg: #ffffff; --color-editor-fg: #2a2620; --color-editor-line: #a39e93;
   --color-done: #2e7d5f;
 }
 [data-theme="terracotta-light"] {
@@ -263,19 +264,18 @@
   --color-done: #567d3d;
 }
 [data-theme="mocha-light"] {
-  /* 基于 Catppuccin Latte 色相，按浮起阶梯重排（官方 base/mantle/crust 是「越深越低」，
-     与本应用「越亮越浮起」的方向相反，直接照搬会让 strip/inset/raised 挤在一起） */
-  --color-rail: #e0e4ec; --color-rail2: #f0f2f5; --color-rail-sel: #d5dae4;
-  --color-strip: #f5f6f9; --color-canvas: #ebedf2; --color-inset: #fafbfc;
-  --color-raised: #ffffff; --color-bubble: #dfe3ee;
-  --color-seg-sel: #c6cadb; --color-hairline: #c9cedd; --color-field: #a6adc2;
-  --color-l1: #2a2c3f; --color-l2: #4c4f69; --color-l3: #6c6f85; --color-l4: #9ca0b0;
+  /* Catppuccin Latte：灰里带 Mauve，和 shadcn-light 的冷石板灰分开（原先两套底色同 hex）。 */
+  --color-rail: #e3dfea; --color-rail2: #f2f0f6; --color-rail-sel: #d8d3e4;
+  --color-strip: #f6f5fa; --color-canvas: #eeebf3; --color-inset: #fbfafc;
+  --color-raised: #ffffff; --color-bubble: #e2ddec;
+  --color-seg-sel: #c9c3d8; --color-hairline: #d0cadc; --color-field: #aea7c0;
+  --color-l1: #2c2a3d; --color-l2: #4e4b63; --color-l3: #6e6b82; --color-l4: #9c99ad;
   --color-cta: #8839ef; --color-cta-text: #ffffff; --color-cta-bd: #6d2bd0;
   --color-nav-accent: var(--color-cta);
   --color-cta-pill: #e6d6fb; --color-cta-pill-text: #6d2bd0;
-  --color-folder: #7c84a8;
-  --color-link: #1e66f5; --color-tabline: #5c5f77;
-  --color-editor-bg: #ffffff; --color-editor-fg: #2a2c3f; --color-editor-line: #9ca0b0;
+  --color-folder: #7d7898;
+  --color-link: #1e66f5; --color-tabline: #5c5870;
+  --color-editor-bg: #ffffff; --color-editor-fg: #2c2a3d; --color-editor-line: #9c99ad;
   --color-done: #3f7d6a;
 }
 [data-theme="neutral-light"] {
@@ -307,11 +307,12 @@
   --color-done: #2f8a63;
 }
 [data-theme="shadcn-light"] {
-  /* shadcn 官方浅色骨架（background/foreground/muted/border 映射到浮起梯度） */
-  --color-rail: #e0e4ec; --color-rail2: #f0f2f5; --color-rail-sel: #d2d7e3;
-  --color-strip: #f5f6f9; --color-canvas: #ebedf2; --color-inset: #fafbfc;
-  --color-raised: #ffffff; --color-bubble: #e6e9ee;
-  --color-seg-sel: #c2cad9; --color-hairline: #d8dce2; --color-field: #b7bdc7;
+  /* 深色灰蓝正红的冷石板浅色：偏蓝灰，不跟 mocha-light 的 Mauve 灰抢同一套底。
+     strip 压半档、inset 抬向白，保证 canvas→strip→inset 每档亮度差 ≥4。 */
+  --color-rail: #dde3ee; --color-rail2: #eef1f6; --color-rail-sel: #d0d7e4;
+  --color-strip: #f3f5f9; --color-canvas: #e8ecf3; --color-inset: #fafbfc;
+  --color-raised: #ffffff; --color-bubble: #dfe5ee;
+  --color-seg-sel: #c5cddb; --color-hairline: #cdd3de; --color-field: #aeb6c4;
   --color-l1: #101828; --color-l2: #344054; --color-l3: #667085; --color-l4: #98a2b3;
   --color-cta: #dc2626; --color-cta-text: #ffffff; --color-cta-bd: #a83232;
   --color-nav-accent: var(--color-cta);
@@ -369,8 +370,8 @@
 /* Windows 浅色主题：DirectWrite 下浅灰小字更容易显得发虚，
    只压深 l3/l4 两档（正文 l2、标题 l1 保持主题原值），不改变 macOS/Linux 或深色主题。 */
 [data-platform="windows"][data-theme="midnight-light"] {
-  --color-l3: #5c6173;
-  --color-l4: #6d7282;
+  --color-l3: #5c5850;
+  --color-l4: #6f6b63;
 }
 [data-platform="windows"][data-theme="terracotta-light"] {
   --color-l3: #68615b;
@@ -381,8 +382,8 @@
   --color-l4: #727780;
 }
 [data-platform="windows"][data-theme="mocha-light"] {
-  --color-l3: #5f6277;
-  --color-l4: #747788;
+  --color-l3: #5b5870;
+  --color-l4: #736f86;
 }
 [data-platform="windows"][data-theme="neutral-light"] {
   --color-l3: #5c5c5c;
@@ -402,8 +403,8 @@
    之间 65% 的中间档：l3 ≥ 4.7:1（正文过 AA）、l4 ≥ 3.1:1（最浅辅助档过 AA 大字线）。
    数值由 tests/theme-contrast.test.ts 锁定，改动需同步。 */
 [data-platform="mac"][data-theme="midnight-light"] {
-  --color-l3: #62677a;
-  --color-l4: #7d8294;
+  --color-l3: #635f56;
+  --color-l4: #7e7a71;
 }
 [data-platform="mac"][data-theme="terracotta-light"] {
   --color-l3: #6e6761;
@@ -414,8 +415,8 @@
   --color-l4: #81868f;
 }
 [data-platform="mac"][data-theme="mocha-light"] {
-  --color-l3: #64677c;
-  --color-l4: #828596;
+  --color-l3: #625f76;
+  --color-l4: #817e94;
 }
 [data-platform="mac"][data-theme="neutral-light"] {
   --color-l3: #626262;

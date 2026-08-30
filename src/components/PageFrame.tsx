@@ -239,26 +239,73 @@ export function Toggle({
   );
 }
 
+/** 折叠指示：旋转 chevron，替代 ▸/▾ 小字。
+ *  boxed = 分区/组头用的 28px 模块；列表行、树节点用默认紧凑档。 */
+export function FoldMark({
+  open,
+  boxed = false,
+}: {
+  open: boolean;
+  boxed?: boolean;
+}) {
+  const svg = (
+    <svg
+      aria-hidden="true"
+      width={boxed ? 12 : 10}
+      height={boxed ? 12 : 10}
+      viewBox="0 0 12 12"
+      fill="none"
+      className={`shrink-0 transition-transform duration-150 ${open ? "rotate-0" : "-rotate-90"}`}
+    >
+      <path
+        d="M2.75 4.25 L6 8 L9.25 4.25"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+  return (
+    <span
+      aria-hidden="true"
+      className={
+        boxed
+          ? "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-inset text-l2"
+          : "inline-flex h-5 w-5 shrink-0 items-center justify-center text-l3"
+      }
+    >
+      {svg}
+    </span>
+  );
+}
+
 export function Checkbox({
   checked,
   onChange,
   label,
   className = "",
   align = "center",
+  disabled = false,
+  title,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
-  label: ReactNode;
+  label?: ReactNode;
   className?: string;
   align?: "center" | "start";
+  disabled?: boolean;
+  title?: string;
 }) {
   return (
     <label
-      className={`flex cursor-pointer gap-1.5 ${align === "start" ? "items-start" : "items-center"} ${className}`}
+      title={title}
+      className={`flex gap-1.5 ${disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"} ${align === "start" ? "items-start" : "items-center"} ${className}`}
     >
       <input
         type="checkbox"
         checked={checked}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
         className="sr-only"
       />

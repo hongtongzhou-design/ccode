@@ -15,6 +15,8 @@
 - **RequestPolicy 先声明、后适配**：temperature/topP/maxOutputTokens/reasoningEffort/Header 引用先保存并校验，
   只有 AgentSpec 能力表明确支持时才允许后续注入；未知/不支持字段不得伪造 HTTP 请求体，必须在验证结果中提示。
   Header 只保存环境变量名引用，不保存 Header 密文。
+  **拆层已落地**（`docs/conventions/profiles.md`）：Header 跟网关，思考档/温度/输出上限跟网关内每个模型；
+  启动按选中模型求交后注入。
 - **跨平台文本换行统一**：仓库文本文件以 LF 存储，由 `.gitattributes` 固定 `eol=lf`；Windows 工作区可因
   `core.autocrlf` 显示为 CRLF，但不得提交仅由换行转换造成的全文件差异。
 - **普通仓库与工作区提交语义分开**：普通仓库默认不选文件，`git_commit(paths)` 与 AI 提交信息只处理用户勾选且仍在当前

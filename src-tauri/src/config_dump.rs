@@ -167,6 +167,9 @@ mod tests {
             model: None,
             last_used_at: None,
             has_key: true,
+            gateway_id: None,
+            slot_missing: false,
+            provider_override: None,
         }
     }
 

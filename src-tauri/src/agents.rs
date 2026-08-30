@@ -108,10 +108,14 @@ pub fn preview_launch_plan(
     profile_id: String,
     model: Option<String>,
 ) -> Result<LaunchPlanPreviewDto, String> {
-    let profile = store.get(&profile_id)?;
-    let key = crate::profiles::get_key(&profile.id)?;
-    let selected = model.as_deref().or_else(|| profile.models.first().map(String::as_str));
-    let plan = launch_plan(&profile, key, selected);
+    let mut profile = store.get_with_model(&profile_id, model.as_deref())?;
+    let key = crate::profiles::get_key_for_profile(&profile)?;
+    let selected = model
+        .clone()
+        .filter(|m| !m.trim().is_empty())
+        .or_else(|| profile.models.first().cloned());
+    crate::combo::apply_to_profile(&mut profile, selected.as_deref());
+    let plan = launch_plan(&profile, key, selected.as_deref());
     let args = plan
         .args
         .into_iter()
@@ -224,7 +228,7 @@ fn detect(spec: &AgentSpec) -> (Option<String>, Option<String>) {
     (Some(path.to_string_lossy().into_owned()), version)
 }
 
-/// 把 profile + 钥匙串密钥翻译成启动 env/args。key 只在启动时刻读取，不外传。
+/// 把 profile + keys.json 密钥翻译成启动 env/args。key 只在启动时刻读取，不外传。
 /// model 为启动时选中的模型（调用方已兜底为 profile 模型列表的首个）。
 /// env 名/固定参数等差异化数据全部来自 AgentSpec（agent_specs.rs）；
 /// 只有无法纯数据化的注入形态保留分支逻辑（SpecialLaunch 各变体）。
@@ -366,9 +370,10 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         plan.env.push(((*key_env).into(), key));
                     }
                     // Codex 没有 base URL 环境变量，且只支持 Responses API：
-                    // 用 -c 内联定义一个名为 ccode 的 provider 并指到它
+                    // 用 -c 内联定义 provider（名从网关派生；旧 rollout 回落 ccode）
+                    let pid = profile.provider_name();
                     if let Some(url) = &profile.base_url {
-                        plan.args.extend(codex_inline_provider_args(url, key_env));
+                        plan.args.extend(codex_inline_provider_args(url, key_env, &pid));
                     }
                     if let Some(model) = model {
                         plan.args.push("-m".into());
@@ -401,7 +406,7 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         for (header, env_name) in &profile.request_policy.header_env {
                             plan.args.push("-c".into());
                             plan.args.push(format!(
-                                r#"model_providers.ccode.env_http_headers."{header}"="{env_name}""#
+                                r#"model_providers.{pid}.env_http_headers."{header}"="{env_name}""#
                             ));
                         }
                     }
@@ -409,10 +414,13 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                 SpecialLaunch::OpenCodeInlineConfig { config_env, no_autoupdate_env } => {
                     // OpenCode 没有通用 key/baseURL 环境变量：用 OPENCODE_CONFIG_CONTENT 内联配置注入，
                     // 该层优先级高于 auth.json 和 env（matrix §5），行为确定
+                    let pid = profile.provider_name();
                     let provider = opencode_provider_json(profile, key.as_deref(), model);
-                    let mut config = serde_json::json!({ "provider": { "ccode": provider } });
+                    let mut providers = serde_json::Map::new();
+                    providers.insert(pid.clone(), provider);
+                    let mut config = serde_json::json!({ "provider": providers });
                     if let Some(m) = model {
-                        config["model"] = serde_json::json!(format!("ccode/{m}"));
+                        config["model"] = serde_json::json!(format!("{pid}/{m}"));
                     }
                     // 请求策略（config schema 实证：model options 含 temperature/topP/
                     // maxOutputTokens/reasoningEffort；provider options 支持 headers）。
@@ -433,11 +441,10 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         model_opts.insert("reasoningEffort".into(), serde_json::json!(v));
                     }
                     if !model_opts.is_empty() {
-                        if let Some(models) =
-                            config["provider"]["ccode"]["models"].as_object_mut()
-                        {
-                            for entry in models.values_mut() {
-                                entry["options"] = serde_json::Value::Object(model_opts.clone());
+                        if let Some(m) = model {
+                            if let Some(entry) = config["provider"][&pid]["models"].get_mut(m) {
+                                entry["options"] =
+                                    serde_json::Value::Object(model_opts.clone());
                             }
                         }
                     }
@@ -452,7 +459,7 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         })
                         .collect();
                     if !headers.is_empty() {
-                        config["provider"]["ccode"]["options"]["headers"] =
+                        config["provider"][&pid]["options"]["headers"] =
                             serde_json::Value::Object(headers);
                     }
                     plan.env.push(((*config_env).into(), config.to_string()));
@@ -489,14 +496,24 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         ));
                         plan.env.push((
                             "KIMI_MODEL_MAX_CONTEXT_SIZE".into(),
-                            crate::model_registry::model_context_size(model).to_string(),
+                            crate::model_registry::model_context_size_for(
+                                model,
+                                profile.gateway_id.as_deref(),
+                            )
+                            .to_string(),
                         ));
                         if provider_type != "kimi" {
                             // 兼容协议通道 capabilities 缺省只有 ["tool_use"]：
                             // 思考/视觉模型都要显式声明，否则能力丧失（kimi 官方协议通道
                             // 缺省 ["image_in","thinking"] 已合理，不动）
-                            let thinking = crate::model_registry::model_thinking(model);
-                            let vision = crate::model_registry::model_supports_vision(model);
+                            let thinking = crate::model_registry::model_thinking_for(
+                                model,
+                                profile.gateway_id.as_deref(),
+                            );
+                            let vision = crate::model_registry::model_supports_vision_for(
+                                model,
+                                profile.gateway_id.as_deref(),
+                            );
                             if thinking || vision {
                                 let mut caps = String::from("tool_use");
                                 if thinking {
@@ -758,18 +775,18 @@ pub(crate) fn opencode_provider_json(
             // 上下文与输出上限写入 limit（官方文档字段；1.18 起 schema 强制要求 output，
             // 缺了直接 Configuration is invalid），供 opencode 算剩余上下文与 max output tokens
             "limit": {
-                "context": crate::model_registry::model_context_size(m),
-                "output": crate::model_registry::model_output_limit(m),
+                "context": crate::model_registry::model_context_size_for(m, profile.gateway_id.as_deref()),
+                "output": crate::model_registry::model_output_limit_for(m, profile.gateway_id.as_deref()),
             },
         });
         // 思考模型补 reasoning: true（models.dev 覆盖语义）；否则 models.dev
         // 查不到条目时 opencode 按无思考能力处理
-        if crate::model_registry::model_thinking(m) {
+        if crate::model_registry::model_thinking_for(m, profile.gateway_id.as_deref()) {
             entry["reasoning"] = serde_json::json!(true);
         }
         // 视觉模型补 modalities（input 加 image）；缺省 = 纯文本，中继视觉模型
         // 不声明会在 opencode 里丢掉图像输入
-        if crate::model_registry::model_supports_vision(m) {
+        if crate::model_registry::model_supports_vision_for(m, profile.gateway_id.as_deref()) {
             entry["modalities"] = serde_json::json!({ "input": ["text", "image"], "output": ["text"] });
         }
         models_map.insert(m.into(), entry);
@@ -798,8 +815,12 @@ pub fn codex_catalog_path(profile_id: &str) -> Option<std::path::PathBuf> {
 /// （reasoning levels 取其 low/medium/high 子集全量给——cc-switch 的 catalog 同样全量模板
 /// （自家资源 codex_native_responses_template.json），模型不支持时端点忽略 effort，口径稳妥；
 /// display_name 带 profile 名，选择器里不再是裸模型 id）
-fn codex_catalog_entry(profile_name: &str, model: &str) -> serde_json::Value {
-    let ctx = crate::model_registry::model_context_size(model);
+fn codex_catalog_entry_for(
+    profile_name: &str,
+    model: &str,
+    gateway_id: Option<&str>,
+) -> serde_json::Value {
+    let ctx = crate::model_registry::model_context_size_for(model, gateway_id);
     serde_json::json!({
         "slug": model,
         "display_name": format!("{profile_name} · {model}"),
@@ -811,7 +832,7 @@ fn codex_catalog_entry(profile_name: &str, model: &str) -> serde_json::Value {
         // 容易先撞上下文上限报错（cc-switch 模板同值 95）
         "effective_context_window_percent": 95,
         // 图像输入按能力注册表如实声明（只认确知多模态系列，纯文本模型不给 ["text","image"]）
-        "input_modalities": if crate::model_registry::model_supports_vision(model) {
+        "input_modalities": if crate::model_registry::model_supports_vision_for(model, gateway_id) {
             vec!["text", "image"]
         } else {
             vec!["text"]
@@ -842,9 +863,21 @@ fn codex_catalog_entry(profile_name: &str, model: &str) -> serde_json::Value {
 }
 
 /// ModelsResponse { models: [ModelInfo] }：每个 profile 模型一条目
+#[cfg(test)]
 pub fn codex_catalog_json(profile_name: &str, models: &[String]) -> serde_json::Value {
+    codex_catalog_json_for(profile_name, models, None)
+}
+
+pub fn codex_catalog_json_for(
+    profile_name: &str,
+    models: &[String],
+    gateway_id: Option<&str>,
+) -> serde_json::Value {
     serde_json::json!({
-        "models": models.iter().map(|m| codex_catalog_entry(profile_name, m)).collect::<Vec<_>>(),
+        "models": models
+            .iter()
+            .map(|m| codex_catalog_entry_for(profile_name, m, gateway_id))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -852,12 +885,17 @@ fn write_codex_catalog_to(
     path: &std::path::Path,
     profile_name: &str,
     models: &[String],
+    gateway_id: Option<&str>,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建 catalog 目录失败: {e}"))?;
     }
-    let text = serde_json::to_string_pretty(&codex_catalog_json(profile_name, models))
-        .map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(&codex_catalog_json_for(
+        profile_name,
+        models,
+        gateway_id,
+    ))
+    .map_err(|e| e.to_string())?;
     crate::profiles::atomic_write(path, &text)
 }
 
@@ -867,7 +905,12 @@ pub fn write_codex_catalog(profile: &Profile) -> Result<Option<std::path::PathBu
         return Ok(None);
     }
     let path = codex_catalog_path(&profile.id).ok_or("无法确定平台配置目录")?;
-    write_codex_catalog_to(&path, &profile.name, &profile.models)?;
+    write_codex_catalog_to(
+        &path,
+        &profile.name,
+        &profile.models,
+        profile.gateway_id.as_deref(),
+    )?;
     Ok(Some(path))
 }
 
@@ -915,34 +958,45 @@ pub(crate) fn resume_args(agent_id: &str, session_id: &str) -> (bool, Vec<String
 }
 
 /// Codex 内联 provider 的 -c 定义参数（启动注入与外部恢复命令同一出处）。
-/// rollout 元信息记录 model_provider="ccode"，恢复时没有这组定义 codex 报
-/// "Model provider `ccode` not found"。只含 base_url 与 env_key 变量名引用，不含密钥
+/// 新会话 provider 名是 ccode-<网关短id>；旧 rollout 仍可能记 model_provider="ccode"，
+/// 恢复时没有这组定义 codex 报 "Model provider `ccode` not found"。
+/// 只含 base_url 与 env_key 变量名引用，不含密钥
 /// （密钥值由用户 shell 环境里的 CODEX_API_KEY 提供，不进命令行——关键约定不变）
-fn codex_inline_provider_args(base_url: &str, key_env: &str) -> Vec<String> {
+fn codex_inline_provider_args(base_url: &str, key_env: &str, provider: &str) -> Vec<String> {
     let mut out = Vec::new();
     for kv in [
-        r#"model_providers.ccode.name="Ccode""#.to_string(),
-        format!(r#"model_providers.ccode.base_url="{base_url}""#),
-        format!(r#"model_providers.ccode.env_key="{key_env}""#),
-        r#"model_providers.ccode.wire_api="responses""#.to_string(),
+        format!(r#"model_providers.{provider}.name="Ccode""#),
+        format!(r#"model_providers.{provider}.base_url="{base_url}""#),
+        format!(r#"model_providers.{provider}.env_key="{key_env}""#),
+        format!(r#"model_providers.{provider}.wire_api="responses""#),
     ] {
         out.push("-c".into());
         out.push(kv);
     }
     out.push("-c".into());
-    out.push(r#"model_provider="ccode""#.into());
+    out.push(format!(r#"model_provider="{provider}""#));
     out
 }
 
 /// 复制到用户终端的恢复命令附加参数：仅 codex 且调用方给出 Base URL 时补
 /// provider 定义；复制命令本身不携带 Ccode profile 密钥，其他 agent 依赖用户全局配置。
-fn resume_extra_args(agent_id: &str, base_url: Option<&str>) -> Vec<String> {
+fn resume_extra_args(
+    agent_id: &str,
+    base_url: Option<&str>,
+    session_provider: Option<&str>,
+) -> Vec<String> {
     match (agent_id, base_url) {
         ("codex", Some(url)) if !url.trim().is_empty() => match agent_spec("codex") {
             Some(spec) => match spec.launch {
                 crate::agent_specs::LaunchSpec::Special(
                     crate::agent_specs::SpecialLaunch::CodexInlineProvider { key_env, .. },
-                ) => codex_inline_provider_args(url, key_env),
+                ) => {
+                    let pid = match session_provider.map(str::trim).filter(|s| !s.is_empty()) {
+                        Some(p) if crate::provider_id::is_ccode_provider(p) => p,
+                        _ => crate::provider_id::LEGACY,
+                    };
+                    codex_inline_provider_args(url, key_env, pid)
+                }
                 _ => vec![],
             },
             None => vec![],
@@ -961,21 +1015,35 @@ fn external_profile(
     profile_id: Option<&str>,
     provider: Option<&str>,
     base_url: Option<&str>,
+    selected_model: Option<&str>,
 ) -> Result<Profile, String> {
     let requested_id = require_external_profile_id(profile_id)?;
-    let profiles = store.list()?;
-    let pool: Vec<Profile> = profiles
-        .into_iter()
-        .filter(|p| p.agent == agent_id)
-        .filter(|p| provider != Some("ccode") || p.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some())
-        .collect();
-    if pool.is_empty() {
-        return Err(format!("没有可用于外部启动的 {agent_id} profile"));
+    let mut profile = store.get_with_model(requested_id, selected_model)?;
+    if profile.agent != agent_id {
+        return Err(format!("profile 不存在或与 {agent_id} 不兼容"));
     }
-    let mut profile = pool
-        .into_iter()
-        .find(|p| p.id == requested_id)
-        .ok_or_else(|| format!("profile 不存在或与 {agent_id} 不兼容"))?;
+    // 与前端 pickResumeProfile 一致：派生 provider 时绑定的网关必须对得上。
+    if let Some(prov) = provider
+        .map(str::trim)
+        .filter(|p| p.starts_with(crate::provider_id::PREFIX))
+    {
+        if !profile
+            .gateway_id
+            .as_deref()
+            .is_some_and(|g| crate::provider_id::gateway_matches_provider(g, prov))
+        {
+            let all = store.list()?;
+            if let Some(alt) = all.iter().find(|p| {
+                p.agent == agent_id
+                    && p.gateway_id
+                        .as_deref()
+                        .is_some_and(|g| crate::provider_id::gateway_matches_provider(g, prov))
+            }) {
+                profile = store.get_with_model(&alt.id, selected_model)?;
+            }
+        }
+    }
+    profile.apply_session_provider(provider);
     // 兼容旧版调用方传入的 baseUrl；新路径优先使用 profile 自身配置。
     if profile.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
         if let Some(url) = base_url.map(str::trim).filter(|s| !s.is_empty()) {
@@ -1234,18 +1302,20 @@ fn open_external_profiled(
     resume_session_id: Option<&str>,
     prompt: Option<&str>,
 ) -> Result<(), String> {
-    let profile = external_profile(store, agent_id, profile_id, provider, base_url)?;
+    let mut profile = external_profile(store, agent_id, profile_id, provider, base_url, model)?;
     let selected_model = model
         .map(str::trim)
         .filter(|m| !m.is_empty())
-        .or_else(|| profile.models.first().map(String::as_str));
-    let key = crate::profiles::get_key(&profile.id)?;
+        .map(str::to_string)
+        .or_else(|| profile.models.first().cloned());
+    crate::combo::apply_to_profile(&mut profile, selected_model.as_deref());
+    let key = crate::profiles::get_key_for_profile(&profile)?;
     ensure_launch_credentials(&profile, key.as_deref())?;
     let (args, env, env_remove) = external_launch_args(
         agent_id,
         &profile,
         key,
-        selected_model,
+        selected_model.as_deref(),
         resume_session_id,
         prompt,
     )?;
@@ -1351,9 +1421,10 @@ pub fn session_resume_command(
     session_id: &str,
     cwd: &str,
     base_url: Option<String>,
+    provider: Option<String>,
 ) -> Result<String, String> {
     let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
-    let extra = resume_extra_args(agent_id, base_url.as_deref());
+    let extra = resume_extra_args(agent_id, base_url.as_deref(), provider.as_deref());
     #[cfg(target_os = "windows")]
     return windows_resume_command_line(agent_id, session_id, cwd, binary, &extra);
     #[cfg(not(target_os = "windows"))]
@@ -2148,6 +2219,9 @@ mod tests {
             model: None,
             last_used_at: None,
             has_key: false,
+            gateway_id: None,
+            slot_missing: false,
+            provider_override: None,
         }
     }
 
@@ -3288,7 +3362,7 @@ mod tests {
     fn codex_catalog_written_atomically() {
         let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
         let path = dir.join("catalogs").join("codex-p1.json");
-        write_codex_catalog_to(&path, "测试", &["m1".into()]).unwrap();
+        write_codex_catalog_to(&path, "测试", &["m1".into()], None).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["models"][0]["slug"], "m1");
@@ -3417,7 +3491,7 @@ mod tests {
     fn resume_command_with_codex_inline_provider() {
         // codex 内联 provider 会话（rollout 记 model_provider="ccode"）外部恢复必须带 -c 定义，
         // 否则报 "Model provider `ccode` not found"；定义只含 base_url/env_key 引用，不含密钥
-        let extra = resume_extra_args("codex", Some("https://relay.example.com/v1"));
+        let extra = resume_extra_args("codex", Some("https://relay.example.com/v1"), None);
         let cmd =
             resume_command_line_with("codex", "abc", "/tmp/proj", "codex", &extra).unwrap();
         // kv 值含双引号 → 单引号包裹（sh_quote_if_needed），语义无损
@@ -3425,18 +3499,28 @@ mod tests {
         assert!(cmd.contains(r#"-c 'model_provider="ccode"'"#));
         assert!(cmd.starts_with("cd /tmp/proj && codex resume abc"));
         // 非 codex / 无 base_url：不追加任何定义（env 注入型 agent 裸 resume 即可）
-        assert!(resume_extra_args("claude-code", Some("https://x")).is_empty());
-        assert!(resume_extra_args("codex", None).is_empty());
-        assert!(resume_extra_args("codex", Some("  ")).is_empty());
+        assert!(resume_extra_args("claude-code", Some("https://x"), None).is_empty());
+        assert!(resume_extra_args("codex", None, None).is_empty());
+        assert!(resume_extra_args("codex", Some("  "), None).is_empty());
         let bare = resume_command_line_with(
             "codex",
             "abc",
             "/tmp/proj",
             "codex",
-            &resume_extra_args("codex", None),
+            &resume_extra_args("codex", None, None),
         )
         .unwrap();
         assert_eq!(bare, "cd /tmp/proj && codex resume abc");
+        let derived = resume_extra_args(
+            "codex",
+            Some("https://relay.example.com/v1"),
+            Some("ccode-a1b2c3d4"),
+        );
+        let derived_cmd =
+            resume_command_line_with("codex", "abc", "/tmp/proj", "codex", &derived).unwrap();
+        assert!(derived_cmd.contains(r#"-c 'model_providers.ccode-a1b2c3d4.base_url="https://relay.example.com/v1"'"#));
+        assert!(derived_cmd.contains(r#"-c 'model_provider="ccode-a1b2c3d4"'"#));
+        assert!(!derived_cmd.contains(r#"model_provider="ccode""#));
     }
 
     #[cfg(windows)]
@@ -3454,7 +3538,7 @@ mod tests {
         // codex provider 定义：flag 裸名、kv 值双引号包裹（内嵌引号 doubling）
         let with_provider = windows_resume_command_line(
             "codex", "abc", r"C:\p", "codex",
-            &resume_extra_args("codex", Some("https://relay.example.com/v1")),
+            &resume_extra_args("codex", Some("https://relay.example.com/v1"), None),
         ).unwrap();
         assert!(with_provider.contains(r#"-c "model_provider=""ccode"""#));
     }

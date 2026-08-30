@@ -1,13 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export interface ContextMenuItem {
-  label: string;
+  label?: string;
   onSelect?: () => void;
   /** 禁用项：渲染为不可点，title 说明原因（如互斥脚本运行中） */
   disabled?: boolean;
   /** 危险项：红色警示文字（删除类不可逆操作） */
   danger?: boolean;
   title?: string;
+  separator?: boolean;
 }
 
 /** 面板最大宽度（px，对应 max-w-80）：超长 label 截断，防止菜单被顶出屏幕 */
@@ -89,27 +90,35 @@ export default function ContextMenu({
         style={style}
         onClick={(e) => e.stopPropagation()}
       >
-        {items.map((it) => (
-          <button
-            key={it.label}
-            disabled={it.disabled}
-            title={it.title}
-            onClick={() => {
-              if (it.disabled) return;
-              onClose();
-              it.onSelect?.();
-            }}
-            className={`block w-full truncate px-3 py-1.5 text-left text-sm ${
-              it.disabled
-                ? "cursor-not-allowed text-l4"
-                : it.danger
-                  ? "text-err-text hover:bg-hover"
-                  : "text-l2 hover:bg-hover"
-            }`}
-          >
-            {it.label}
-          </button>
-        ))}
+        {items.map((it, i) =>
+          it.separator ? (
+            <div
+              key={`sep-${i}`}
+              className="my-1 border-t border-hairline"
+              role="separator"
+            />
+          ) : (
+            <button
+              key={it.label ?? `item-${i}`}
+              disabled={it.disabled}
+              title={it.title}
+              onClick={() => {
+                if (it.disabled) return;
+                onClose();
+                it.onSelect?.();
+              }}
+              className={`block w-full truncate px-3 py-1.5 text-left text-sm ${
+                it.disabled
+                  ? "cursor-not-allowed text-l4"
+                  : it.danger
+                    ? "text-err-text hover:bg-hover"
+                    : "text-l2 hover:bg-hover"
+              }`}
+            >
+              {it.label}
+            </button>
+          ),
+        )}
       </div>
     </div>
   );

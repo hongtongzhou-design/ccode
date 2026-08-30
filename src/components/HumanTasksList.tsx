@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Checkbox } from "./PageFrame";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type {
@@ -430,12 +431,11 @@ export default function HumanTasksList({
               }`}
             >
               <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  className="size-3.5 shrink-0 accent-[var(--color-cta)]"
+                <Checkbox
+                  className="shrink-0"
                   checked={task.done}
                   disabled={busyTitle === task.title}
-                  onChange={(e) => void toggle(task, e.target.checked)}
+                  onChange={(checked) => void toggle(task, checked)}
                   title={
                     task.completion === "manual"
                       ? task.manual

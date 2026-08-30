@@ -8,7 +8,7 @@ import type {
   GitFileDto,
   WorkspaceDiffDto,
 } from "../types";
-import { Checkbox, EmptyState, hoverRevealClass, LoadingRows } from "./PageFrame";
+import { Checkbox, EmptyState, FoldMark, hoverRevealClass, LoadingRows } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
 import ImagePairView, { isImagePath } from "./ImagePairView";
 import { useAppStore } from "../store";
@@ -533,9 +533,7 @@ function GitPanel({
             title={`${expanded ? "收起" : "查看"} ${f.path} 的 diff`}
             className="group flex min-w-0 flex-1 items-center gap-1.5 rounded-sm px-1 py-1 text-left hover:bg-hover"
           >
-            <span className="w-3 shrink-0 text-center text-l3">
-              {expanded ? "▾" : "▸"}
-            </span>
+            <FoldMark open={expanded} />
             <span title={statusBadgeTitle(f.status)} className="contents">
               <FileTypeBadge path={f.path} />
             </span>

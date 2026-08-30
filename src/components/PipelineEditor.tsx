@@ -5,6 +5,7 @@ import {
   compactFieldClass,
   compactPrimaryActionClass,
   EmptyState,
+  FoldMark,
   inlineActionClass,
 } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
@@ -450,7 +451,7 @@ export default function PipelineEditor({
           onClick={() => setFolds((m) => ({ ...m, [key]: !open }))}
           className="flex w-full items-center gap-1.5 rounded-sm py-1 text-left text-xs text-l3 hover:text-l1"
         >
-          <span className="w-3 text-l4">{open ? "▾" : "▸"}</span>
+          <FoldMark open={open} boxed />
           {title}
           <span className="min-w-0 truncate text-micro text-l4">
             {filled.length

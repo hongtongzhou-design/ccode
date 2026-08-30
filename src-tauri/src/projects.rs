@@ -361,11 +361,27 @@ pub(crate) fn registered_project_rows() -> Vec<(String, String)> {
         .collect()
 }
 
+/// 当前已注册项目的路径清单（定时任务孤儿清理用）。读库失败上抛，
+/// 调用方不得把失败当成「零项目」——否则会把全部 schedules 清掉。
+pub(crate) fn registered_path_keys() -> Result<Vec<String>, String> {
+    let conn = db()?;
+    Ok(list_projects_in(&conn)?
+        .into_iter()
+        .map(|p| p.path)
+        .collect())
+}
+
 /// 只删注册记录，磁盘上的项目目录一概不动
 fn remove_project_at(conn: &Connection, path: &Path) -> Result<(), String> {
     let key = canonical_key(path);
     conn.execute("DELETE FROM projects WHERE path=?1", params![key])
         .map_err(|e| format!("移除项目注册失败: {e}"))?;
+    // 定时任务挂在应用级 schedules.json，不跟项目目录走；摘注册后 UI 管不到它，
+    // 不删就会继续巡检、收件箱还拿已删项目的「N 条新命中」来烦。失败只记日志，
+    // 主路径已经成功（同 cleanup_project_db_traces 口径）。
+    if let Err(e) = crate::scheduler::delete_schedules_for_project(path) {
+        crate::logbuf::record("warn", "projects", &format!("清理定时任务失败: {e}"));
+    }
     Ok(())
 }
 

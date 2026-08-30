@@ -69,6 +69,8 @@ import {
   EyeOff,
   LayoutPanelTop,
   MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   SquareTerminal,
 } from "lucide-react";
@@ -137,6 +139,8 @@ export interface TabStatus {
   agentId: string;
   profileId: string;
   model: string;
+  /** 启动时注入的模型；状态栏求交用这个，不跟 CLI 内换模 */
+  launchModel: string | null;
   cwd: string;
   /** 当前 PTY id（可见性门控用；无存活 PTY 时为 null） */
   ptyId: string | null;
@@ -236,10 +240,10 @@ const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
     neutral: { background: "#111111", foreground: "#c9c9c9" },
     dracula: { background: "#282a36", foreground: "#cfcfc9" },
     shadcn: { background: "#111827", foreground: "#b9b9c0" },
-    "midnight-light": { background: "#fdfdfe", foreground: "#3a3f52" },
+    "midnight-light": { background: "#fbfbf9", foreground: "#3f3c36" },
     "terracotta-light": { background: "#fefcfa", foreground: "#453f3a" },
     "ayu-light": { background: "#fffefd", foreground: "#3f4754" },
-    "mocha-light": { background: "#fafbfe", foreground: "#4c4f69" },
+    "mocha-light": { background: "#fbfafc", foreground: "#4e4b63" },
     "neutral-light": { background: "#fdfdfd", foreground: "#3a3a3a" },
     "dracula-light": { background: "#fefdff", foreground: "#403a4e" },
     "shadcn-light": { background: "#fefefe", foreground: "#344054" },
@@ -279,6 +283,7 @@ const TerminalView = memo(function TerminalView({
   initialProfileId,
   initialModel,
   resumeSessionId,
+  resumeProvider,
   autoStart,
   prefillCommand,
   shellOnly,
@@ -321,6 +326,8 @@ const TerminalView = memo(function TerminalView({
   initialModel?: string;
   /** 会话恢复：pty_spawn 的 resumeSessionId */
   resumeSessionId?: string;
+  /** 会话恢复：rollout 记下的 provider */
+  resumeProvider?: string;
   /** 首次可见时自动启动（会话恢复；有 profile 才启动，否则只预填） */
   autoStart?: boolean;
   /** run 脚本：进入 shell 后立即写入的命令行 */
@@ -411,7 +418,10 @@ const TerminalView = memo(function TerminalView({
     // 兜底挑首个时跳过停用项（停用的本意就是「别自动落到我头上」）；
     // 全被停用时仍从停用项里取，好过留空
     const visible = profiles.filter(
-      (p) => p.agent === agentId && !hiddenProfiles.includes(p.id),
+      (p) =>
+        p.agent === agentId &&
+        !hiddenProfiles.includes(p.id) &&
+        !p.slotMissing,
     );
     setProfileId(
       ok ??
@@ -422,6 +432,8 @@ const TerminalView = memo(function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, profiles, settings?.defaultProfiles, settings?.hiddenProfiles]);
   const [model, setModel] = useState(initialModel ?? saved.model ?? "");
+  /** 本次启动实际注入的模型（状态栏求交用它，不跟 CLI 内 /model 或启动栏事后改选） */
+  const [launchModel, setLaunchModel] = useState<string | null>(null);
   const selectedProfile = profiles.find(
     (p) => p.id === profileId && p.agent === agentId,
   );
@@ -990,6 +1002,7 @@ const TerminalView = memo(function TerminalView({
       agentId,
       profileId,
       model,
+      launchModel,
       cwd,
       ptyId: activePtyId,
       // 注意力标记只在 agent 运行中且已联动会话时有意义
@@ -1015,6 +1028,7 @@ const TerminalView = memo(function TerminalView({
     agentId,
     profileId,
     model,
+    launchModel,
     cwd,
     activePtyId,
     attention,
@@ -1871,6 +1885,7 @@ const TerminalView = memo(function TerminalView({
         extraEnv: initialExtraEnv ?? null,
         // 会话恢复（无则全新会话）
         resumeSessionId: resumeId ?? resumeSessionId ?? null,
+        resumeProvider: resumeProvider ?? null,
         // 一键开步的首条指令（恢复会话由后端忽略注入）
         initialPrompt: (options?.prompt ?? promptText).trim() || null,
         linkClaimId: tabId,
@@ -1881,6 +1896,7 @@ const TerminalView = memo(function TerminalView({
       // 否则状态栏/对话头部在兜底路径下没有模型可显示；lastLaunch/模型历史也记生效值
       const effectiveModel = res.model ?? model;
       if (res.model && res.model !== model) setModel(res.model);
+      setLaunchModel(effectiveModel.trim() || null);
       localStorage.setItem(
         "ccode.lastLaunch",
         JSON.stringify({ agentId, profileId, model: effectiveModel, cwd }),
@@ -2378,7 +2394,7 @@ const TerminalView = memo(function TerminalView({
                 ) : (
                   <button
                     onClick={() => (restored ? void restoreTask() : void launch())}
-                    disabled={!profileId}
+                    disabled={!profileId || !!profiles.find((p) => p.id === profileId)?.slotMissing}
                     className={`inline-flex h-8 shrink-0 items-center justify-center rounded-md border px-3 text-sm disabled:opacity-50 ${
                       welcomeVisible
                         ? "border-field bg-inset text-l2 hover:bg-hover"
@@ -2684,7 +2700,7 @@ const TerminalView = memo(function TerminalView({
                     onClick={() =>
                       restored ? void restoreTask() : void launch()
                     }
-                    disabled={!profileId || cwdChecking}
+                    disabled={!profileId || cwdChecking || !!profiles.find((p) => p.id === profileId)?.slotMissing}
                     className="inline-flex h-9 min-w-40 cursor-pointer items-center justify-center gap-2 rounded-md border border-cta-bd bg-cta px-5 text-sm text-cta-text hover:brightness-110 disabled:cursor-default disabled:opacity-50"
                   >
                     {restored ? "恢复任务" : "运行"}
@@ -2746,6 +2762,8 @@ interface Tab {
   initialModel?: string;
   /** 会话恢复：pty_spawn 的 resumeSessionId */
   resumeSessionId?: string;
+  /** 会话恢复：rollout 记下的 provider */
+  resumeProvider?: string;
   /** 首次可见自动启动（会话恢复） */
   autoStart?: boolean;
   /** run 脚本：进入 shell 后立即写入的命令行 */
@@ -2923,7 +2941,20 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   /** 最近项目「真进入」：待注入活动标签启动栏的目录 */
   const [enterCwd, setEnterCwd] = useState<string | null>(null);
   // 右侧成果工作台默认可见；文件、改动在同一处切换，聊天留在主工作区。
-  const [rightOpen, setRightOpen] = useState(true);
+  const [treeOpen, setTreeOpen] = useState(() => {
+    try {
+      return localStorage.getItem("ccode.terminal.treeOpen") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [rightOpen, setRightOpen] = useState(() => {
+    try {
+      return localStorage.getItem("ccode.terminal.rightOpen") === "1";
+    } catch {
+      return false;
+    }
+  });
   const [rightWidth, setRightWidth] = useState(() => {
     const saved = Number(localStorage.getItem(RIGHT_PANEL_WIDTH_KEY));
     const width =
@@ -3013,6 +3044,23 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     if (!focusMode) setFocusMenu(null);
   }, [focusMode]);
 
+  function persistTreeOpen(next: boolean) {
+    setTreeOpen(next);
+    try {
+      localStorage.setItem("ccode.terminal.treeOpen", next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }
+  function persistRightOpen(next: boolean) {
+    setRightOpen(next);
+    try {
+      localStorage.setItem("ccode.terminal.rightOpen", next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }
+
   function layoutMenuItems() {
     return [
       {
@@ -3024,8 +3072,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         },
       },
       {
+        label: treeOpen ? "✓ 隐藏文件树" : "显示文件树",
+        onSelect: () => persistTreeOpen(!treeOpen),
+      },
+      {
         label: rightOpen ? "✓ 隐藏成果面板" : "显示成果面板",
-        onSelect: () => setRightOpen((v) => !v),
+        onSelect: () => persistRightOpen(!rightOpen),
       },
       {
         label: focusMode ? "✓ 退出专注终端" : "专注终端",
@@ -3182,7 +3234,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       setRightExpanded(false);
       setRightWidth(clampRightWidth(normalRightWidthRef.current, false));
     }
-    setRightOpen(false);
+    persistRightOpen(false);
   }
 
   function startRightResize(event: React.PointerEvent<HTMLDivElement>) {
@@ -3533,6 +3585,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       profileId?: string;
       model?: string;
       resumeSessionId?: string;
+      resumeProvider?: string;
       autoStart?: boolean;
       prefillCommand?: string;
       shellOnly?: boolean;
@@ -3554,6 +3607,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         initialProfileId: init?.profileId,
         initialModel: init?.model,
         resumeSessionId: init?.resumeSessionId,
+        resumeProvider: init?.resumeProvider,
         autoStart: init?.autoStart,
         prefillCommand: init?.prefillCommand,
         shellOnly: init?.shellOnly,
@@ -3663,7 +3717,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       st.previewReq !== null ||
       st.pendingTerminal?.rightTab != null ||
       st.pendingTerminal?.previewPath != null;
-    if (!handoff) setRightOpen(false);
+    if (!handoff) {
+      let pinned = false;
+      try {
+        pinned = localStorage.getItem("ccode.terminal.rightOpen") === "1";
+      } catch {
+        pinned = false;
+      }
+      if (!pinned) setRightOpen(false);
+    }
   }, [visible]);
 
   // 消费工作区页/会话页交来的终端启动请求（可见时才消费，保证标签能立刻聚焦启动栏）
@@ -3758,6 +3820,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         profileId,
         model,
         resumeSessionId: pt.resume?.sessionId,
+        resumeProvider: pt.resume?.provider ?? undefined,
         autoStart: !!pt.resume || !!pt.autoStart,
         prefillCommand: pt.prefillCommand,
         shellOnly: pt.shellOnly,
@@ -4498,8 +4561,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       ref={terminalRootRef}
       className="terminal-workbench relative flex h-full bg-canvas"
     >
-      {/* 左栏：工作树（专注终端/专注内容下整体隐藏；无手动收起态） */}
-      {!focusMode && !rightExpanded && (
+      {/* 左栏：工作树（专注终端/专注内容下整体隐藏；默认完全收起，标签栏左侧钮或布局菜单打开） */}
+      {!focusMode && !rightExpanded && treeOpen && (
         <div className="flex w-56 shrink-0 flex-col border-r border-hairline bg-rail2">
           <div className="flex h-8 shrink-0 items-center gap-2 px-2">
             <span className="mr-auto text-xs font-medium text-l3">
@@ -4520,6 +4583,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               className={railBtn}
             >
               <RefreshCw size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => persistTreeOpen(false)}
+              title="隐藏文件树"
+              aria-label="隐藏文件树"
+              className={railBtn}
+            >
+              <PanelLeftClose size={14} />
             </button>
           </div>
           <div className="min-h-0 flex-1 overflow-auto py-1">
@@ -4566,6 +4638,17 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       <div className="relative flex min-w-0 flex-1 flex-col">
         {/* 顶部标签条：常驻中带顶部，专注终端下也保留在原位 */}
         <div className="flex h-9 items-center gap-1 overflow-hidden bg-strip px-2">
+          {!focusMode && !rightExpanded && !treeOpen && (
+            <button
+              type="button"
+              title="显示文件树"
+              aria-label="显示文件树"
+              onClick={() => persistTreeOpen(true)}
+              className="flex size-7 shrink-0 items-center justify-center rounded-md text-l4 hover:bg-hover hover:text-l2"
+            >
+              <PanelLeftOpen size={16} strokeWidth={1.8} aria-hidden="true" />
+            </button>
+          )}
           <div className="min-w-0 flex-1 overflow-x-auto">
             <div className="flex w-full min-w-0 items-center">
           {tabs.map((t, tabIndex) => {
@@ -4777,6 +4860,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 initialProfileId={t.initialProfileId}
                 initialModel={t.initialModel}
                 resumeSessionId={t.resumeSessionId}
+                resumeProvider={t.resumeProvider}
                 autoStart={t.autoStart}
                 prefillCommand={t.prefillCommand}
                 shellOnly={t.shellOnly}
@@ -4964,8 +5048,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       <TerminalStatusBar
                         status={st}
                         fallbackCwd={t.initialCwd ?? ""}
+                        profileId={st?.profileId ?? null}
                         profileName={prof?.name ?? null}
                         profileModels={prof?.models ?? []}
+                        launchModel={st?.launchModel ?? null}
                         modelSwitch={det?.modelSwitch ?? null}
                         effort={det?.effort ?? null}
                         git={focused ? gitTotals : null}

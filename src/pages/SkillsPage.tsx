@@ -11,6 +11,7 @@ import {
   Checkbox,
   EmptyState,
   fieldClass,
+  FoldMark,
   LoadingRows,
   PageFrame,
   PageHeader,
@@ -58,8 +59,7 @@ function skillRepoUrl(skill: SkillDto): string | null {
   return `${base}/tree/${skill.repoRef ?? "HEAD"}/${skill.repoSubdir}`;
 }
 
-/** 应用列单元格（v3.93）：未应用 = 浅灰「0 个 Agent」无状态点；已应用 = 绿点 +「N 个 Agent」，各 agent
- *  名称收进悬浮 tooltip（共享 HoverTip——原生 title 在 WKWebView 不稳定）；点击进右侧详情管理分发 */
+/** 应用列单元格：未用 = 浅灰「未用」；已用 = 绿点 + 数量，agent 名收进 tooltip；点击进右侧详情 */
 function AppliedCell({
   skill,
   onOpen,
@@ -88,12 +88,12 @@ function AppliedCell({
       {/* 无状态不渲染状态点：未应用时不画灰点，计数文字已表达 */}
       {has && <span className="size-2 shrink-0 rounded-full bg-ok-text" />}
       <span className={has ? "text-l3 hover:text-l1" : "text-l4"}>
-        {appliedNames.length} 个 Agent
+        {has ? `${appliedNames.length} 处` : "未用"}
       </span>
       {has && (
         <HoverTip
           tip={tip}
-          text={`已应用到：\n${appliedNames.join("、")}\n点击在右侧管理分发`}
+          text={`已用：\n${appliedNames.join("、")}\n点击在右侧管理`}
         />
       )}
     </button>
@@ -1514,13 +1514,6 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setModal({ kind: "import" })}
-                  className={secondaryActionClass}
-                >
-                  导入
-                </button>
-                <button
-                  type="button"
                   onClick={(event) => {
                     const rect = event.currentTarget.getBoundingClientRect();
                     setTopMenu({ x: rect.right - 176, y: rect.bottom + 4 });
@@ -1644,9 +1637,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                         }
                         className="flex h-10 w-full items-center gap-1.5 px-3 text-sm transition-colors hover:bg-hover/60"
                       >
-                        <span className="w-3 text-l4">
-                          {catCollapsed.has(category) ? "▸" : "▾"}
-                        </span>
+                        <FoldMark open={!catCollapsed.has(category)} boxed />
                         {/* 分组标题加深到 l1（原 l3 太淡层级不清）；计数改微型胶囊 */}
                         <span className="font-medium text-l1">{category}</span>
                         <span className="rounded-full bg-inset px-1.5 py-0.5 text-micro text-l4">
@@ -2140,6 +2131,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           y={topMenu.y}
           onClose={() => setTopMenu(null)}
           items={[
+            {
+              label: "导入技能",
+              onSelect: () => setModal({ kind: "import" }),
+            },
             ...(skills.length
               ? [
                   {

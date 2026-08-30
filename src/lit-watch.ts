@@ -4,6 +4,7 @@
  * 供 node --test 直接测；组件 LitWatchCard 保持薄。
  * DTO 与 src-tauri/src/lit_watch.rs 的 camelCase 序列化一一对应。
  */
+import { samePath } from "./path-utils.ts";
 import type { LitWatchFilterDto, ScheduleDto } from "./types.ts";
 
 // ===== DTO（对照 lit_watch.rs；新命令的类型在本文件就近声明） =====
@@ -503,6 +504,17 @@ export function litInboxCandidates(
     });
   }
   return out;
+}
+
+/** 收件箱只对还在注册表里的项目出文献条目。已删/已移除的项目 schedules 可能还在，不能拿文件夹名继续提示。 */
+export function litInboxForRegisteredProjects(
+  candidates: readonly LitInboxCandidate[],
+  projectPaths: readonly string[],
+  isWindows = false,
+): LitInboxCandidate[] {
+  return candidates.filter((c) =>
+    projectPaths.some((p) => samePath(c.projectRoot, p, isWindows)),
+  );
 }
 
 // ===== 条目忽略（dismiss） =====

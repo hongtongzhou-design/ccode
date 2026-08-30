@@ -18,6 +18,131 @@ export interface Profile {
   hasKey: boolean;
   /** 最近一次用该配置启动的时间（ISO）；null = 从未使用 */
   lastUsedAt: string | null;
+  /** 所属网关；官方账号为 null */
+  gatewayId?: string | null;
+  /** 该 Agent 所需协议槽未填 */
+  slotMissing?: boolean;
+}
+
+export type ProbeStatus = "never" | "passed" | "failed";
+
+export interface ComboSurfaceDto {
+  agent: string;
+  agents: string[];
+  model: string;
+  gatewayId: string | null;
+  slot: string | null;
+  thinking: boolean;
+  vision: boolean;
+  context: number;
+  output: number;
+  showNativeEffort: boolean;
+  injectEffortAllowed: boolean;
+  injectTemperatureAllowed: boolean;
+  injectTopPAllowed: boolean;
+  injectMaxTokensAllowed: boolean;
+  injectHeadersAllowed: boolean;
+  effortReadonly: boolean;
+  temperatureReadonly: boolean;
+  topPReadonly: boolean;
+  maxTokensReadonly: boolean;
+  mixedModelsNote: string | null;
+  probeEffort: ProbeStatus;
+  probeTemperature: ProbeStatus;
+  probeHeaders: ProbeStatus;
+  probeNote: string | null;
+  missingSlot: boolean;
+}
+
+export interface ProtocolSlots {
+  anthropic?: string | null;
+  openai?: string | null;
+  responses?: string | null;
+  gemini?: string | null;
+  cursor?: string | null;
+}
+
+export interface GatewayModel {
+  id: string;
+  source: string;
+  temperature: number | null;
+  topP: number | null;
+  maxOutputTokens: number | null;
+  reasoningEffort: string | null;
+}
+
+export interface ProbeRecord {
+  slot: string;
+  model: string | null;
+  streaming: ProbeStatus;
+  effort: ProbeStatus;
+  headers: ProbeStatus;
+  basic: ProbeStatus;
+  probedAt: string;
+  latencyMs?: number | null;
+}
+
+export interface SlotProbeSummary {
+  slot: string;
+  lastLatencyMs: number | null;
+  lastProbeAt: string | null;
+  lastOk: boolean | null;
+}
+
+export interface Gateway {
+  id: string;
+  name: string;
+  noAuth: boolean;
+  keyHint: string | null;
+  slots: ProtocolSlots;
+  headerEnv: Record<string, string>;
+  models: GatewayModel[];
+  catalogFetchedAt: string | null;
+  catalogFromSlot: string | null;
+  lastProbe: ProbeRecord[];
+  slotProbes?: SlotProbeSummary[];
+}
+
+export interface GlobalDriftDto {
+  status: "matches" | "drifted" | "neverWritten" | "error" | string;
+  files: string[];
+  message: string | null;
+}
+
+export interface GatewayUsageRow {
+  gatewayId: string;
+  gatewayName: string;
+  bucket: string;
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number | null;
+  costPartial: boolean;
+  sessionCount: number;
+  agents: string[];
+}
+
+export interface ImportV2Result {
+  addedGateways: number;
+  addedBindings: number;
+  skippedSlots: string[];
+}
+
+export interface GatewayInput {
+  name: string;
+  noAuth: boolean;
+  slots: ProtocolSlots;
+  headerEnv: Record<string, string>;
+  models: GatewayModel[];
+  apiKey: string | null;
+}
+
+export interface BindingInput {
+  agent: string;
+  gatewayId: string | null;
+  kind: "api" | "official";
+  protocol: string | null;
+  models: string[];
+  extraEnv: Record<string, string>;
 }
 
 export interface ProfileInput {
@@ -577,6 +702,30 @@ export interface UsageCardsDto {
   sessions: number;
   costUsd: number | null;
   /** true = 桶里另含未计价模型的用量，costUsd 只是已计价份额 */
+  costPartial: boolean;
+  /** 已计价模型的缓存读相对全价输入省下的钱（官方账号不计）；无定价缓存为 null */
+  cacheSavingsUsd: number | null;
+}
+
+export interface UsageTrendDayDto {
+  day: string;
+  costUsd: number | null;
+  costPartial: boolean;
+  hasUsage: boolean;
+}
+
+export interface UsageTrendDto {
+  days: UsageTrendDayDto[];
+  rateUsdCny: number;
+}
+
+export interface UsageTopSessionDto {
+  agent: string;
+  sessionId: string;
+  projectPath: string;
+  title: string | null;
+  tokens: number;
+  costUsd: number | null;
   costPartial: boolean;
 }
 

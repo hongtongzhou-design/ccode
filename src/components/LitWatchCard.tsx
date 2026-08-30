@@ -9,6 +9,7 @@ import ContextMenu from "./ContextMenu";
 const FilePreviewEditor = lazy(() => import("./FilePreviewEditor"));
 import { HoverTip, useHoverTip } from "./HoverTip";
 import {
+  FoldMark,
   LoadingRows,
   SegTabs,
   fieldClass,
@@ -424,9 +425,12 @@ function IncludedList({
             onClick={() => setShowAllUnread((v) => !v)}
             className="text-xs text-l4 hover:text-l2"
           >
-            {showAllUnread
-              ? "▾ 收起"
-              : `▸ 展开其余 ${unread.length - UNREAD_CAP} 条未读`}
+            <span className="inline-flex items-center gap-1">
+              <FoldMark open={showAllUnread} />
+              {showAllUnread
+                ? "收起"
+                : `展开其余 ${unread.length - UNREAD_CAP} 条未读`}
+            </span>
           </button>
         </li>
       )}
@@ -437,7 +441,9 @@ function IncludedList({
             onClick={() => setReadOpen((v) => !v)}
             className="text-xs text-l4 hover:text-l2"
           >
-            {readOpen ? "▾" : "▸"} 已读 {readOnes.length} 条
+            <span className="inline-flex items-center gap-1">
+              <FoldMark open={readOpen} /> 已读 {readOnes.length} 条
+            </span>
           </button>
         </li>
       )}
@@ -1321,6 +1327,34 @@ ${topicLine}
     );
   })?.linkedStep;
 
+  if (subs !== null && !hasSubs) {
+    return (
+      <>
+      <div className="mb-4 flex items-center gap-2 px-1">
+        <span className="text-xs text-l4">文献雷达 · 还没订阅读</span>
+        <button
+          type="button"
+          className={ghostActionClass}
+          onClick={() => setSubsOpen(true)}
+        >
+          添加
+        </button>
+      </div>
+      {subsOpen && (
+        <SubscriptionsModal
+          projectRoot={projectRoot}
+          initial={subs}
+          onClose={() => setSubsOpen(false)}
+          onSaved={() => {
+            setSubsOpen(false);
+            void load();
+          }}
+        />
+      )}
+      </>
+    );
+  }
+
   return (
     <section className="mb-4 rounded-lg bg-strip p-3">
       {/* 卡头：标题 + 上次巡检相对时间；右侧次级动作（立即跑有任务才显示） */}
@@ -1407,16 +1441,7 @@ ${topicLine}
       )}
       {error && <p className="mt-1 text-xs text-err-text">{error}</p>}
 
-      {subs !== null && !hasSubs ? (
-        /* 无订阅：整卡引导（虚线引导卡先例），整块即「添加第一条」按钮 */
-        <button
-          type="button"
-          className="mt-2 block w-full rounded-md border border-dashed border-field px-3 py-4 text-center text-xs text-l3 hover:bg-hover hover:text-l1"
-          onClick={() => setSubsOpen(true)}
-        >
-          还没有追踪关键词，添加第一条
-        </button>
-      ) : (
+      {subs !== null && !hasSubs ? null : (
         <>
           <SegTabs
             className="mt-2"
@@ -1545,7 +1570,7 @@ ${topicLine}
                       onClick={() => setFollowupsOpen((v) => !v)}
                       aria-expanded={followupsOpen}
                     >
-                      <span>{followupsOpen ? "▾" : "▸"}</span>
+                      <FoldMark open={followupsOpen} />
                       待人工下载（{followups.length}）
                     </button>
                     {followupsOpen && (

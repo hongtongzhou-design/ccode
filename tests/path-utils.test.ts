@@ -8,6 +8,7 @@ import {
   pathKey,
   samePath,
   stripVerbatim,
+  abbrevHome,
 } from "../src/path-utils.ts";
 
 test("normSep 统一反斜杠为正斜杠", () => {
@@ -80,4 +81,14 @@ test("pathKey 折叠 verbatim/分隔符/尾斜杠；大小写只在 Windows 折�
   // Windows 侧显式传参：NTFS 大小写不敏感
   assert.equal(pathKey("C:\\Users\\Foo", true), pathKey("c:/users/foo", true));
   assert.ok(samePath("\\\\?\\C:\\Users\\Foo", "c:\\users\\foo", true));
+});
+
+test("abbrevHome 把家目录前缀折成 ~", () => {
+  assert.equal(abbrevHome("/Users/me/src", "/Users/me"), "~/src");
+  assert.equal(abbrevHome("/Users/me", "/Users/me"), "~");
+  assert.equal(abbrevHome("/opt/app", "/Users/me"), "/opt/app");
+  assert.equal(
+    abbrevHome("C:\\Users\\me\\src", "C:\\Users\\me", true),
+    "~/src",
+  );
 });

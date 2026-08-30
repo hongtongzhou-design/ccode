@@ -14,8 +14,17 @@
  * 是「上次使用」的记忆而非用户当下的显式选择，指向停用项同样跳过。全被停用时回落
  * 含停用项的池（好过恢复不出来）；用户显式手选停用项不经过本函数，不受影响。
  */
+export function isCcodeProvider(provider: string | null | undefined): boolean {
+  return provider === "ccode" || !!provider?.startsWith("ccode-");
+}
+
 export function pickResumeProfile<
-  T extends { id: string; agent: string; baseUrl: string | null },
+  T extends {
+    id: string;
+    agent: string;
+    baseUrl: string | null;
+    gatewayId?: string | null;
+  },
 >(
   profiles: T[],
   agentId: string,
@@ -24,8 +33,21 @@ export function pickResumeProfile<
   hiddenIds?: readonly string[],
 ): T | null {
   const all = profiles.filter((p) => p.agent === agentId);
-  const compat =
-    provider === "ccode" ? all.filter((p) => p.baseUrl?.trim()) : all;
+  const derived = provider?.startsWith("ccode-") ? provider.slice("ccode-".length) : null;
+  const byGateway =
+    derived
+      ? all.filter((p) => {
+          const hex = (p.gatewayId ?? "").replace(/-/g, "");
+          return hex.startsWith(derived);
+        })
+      : [];
+  const compat = derived
+    ? byGateway.length > 0
+      ? byGateway
+      : all.filter((p) => p.baseUrl?.trim())
+    : provider === "ccode"
+      ? all.filter((p) => p.baseUrl?.trim())
+      : all;
   const pool = compat.length > 0 ? compat : all;
   const visible = pool.filter((p) => !(hiddenIds ?? []).includes(p.id));
   const finalPool = visible.length > 0 ? visible : pool;

@@ -161,15 +161,34 @@ fn db_path() -> Option<PathBuf> {
     )
 }
 
-fn load_relay_cache() -> Vec<(String, ModelCaps)> {
+fn load_relay_for(gateway_id: Option<&str>) -> Vec<(String, ModelCaps)> {
     if cfg!(test) {
-        return Vec::new(); // 同 load_override：单测不读本机真实文件
+        return Vec::new();
     }
+    let Some(gid) = gateway_id.filter(|s| !s.is_empty()) else {
+        return Vec::new(); // 无网关维度不读 relay（含无前缀旧键）
+    };
     let Some(path) = relay_cache_path() else { return Vec::new() };
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
+    let prefix = format!("{gid}|");
     parse_caps_map(&text)
+        .into_iter()
+        .filter_map(|(k, c)| k.strip_prefix(&prefix).map(|rest| (rest.to_string(), c)))
+        .collect()
+}
+
+pub(crate) fn purge_relay_for_gateway(gateway_id: &str) {
+    let Some(path) = relay_cache_path() else { return };
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let Some(obj) = v.as_object_mut() else { return };
+    let prefix = format!("{gateway_id}|");
+    obj.retain(|k, _| !k.starts_with(&prefix));
+    if let Ok(out) = serde_json::to_string_pretty(&v) {
+        let _ = crate::profiles::atomic_write(&path, &out);
+    }
 }
 
 static DB_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<Vec<(String, ModelCaps)>>>> =
@@ -301,15 +320,16 @@ fn parse_models_dev(v: &serde_json::Value) -> Vec<(String, ModelCaps)> {
     out
 }
 
-/// fetch_models 顺带调用：把网关 /models 响应里的元数据合并进实测缓存（同模型最新赢）。
-/// 只写能力字段；纯 id 列表（无元数据）不动缓存
-pub(crate) fn record_relay_models(v: &serde_json::Value) {
+/// fetch_models 顺带调用：把网关 /models 响应里的元数据合并进实测缓存。
+/// 键为 `{gatewayId}|{model}`；无网关 id 不写（禁止再写无前缀键互踩）。
+pub(crate) fn record_relay_models(v: &serde_json::Value, gateway_id: Option<&str>) {
+    let Some(gid) = gateway_id.filter(|s| !s.is_empty()) else { return };
     let Some(path) = relay_cache_path() else { return };
-    record_relay_models_to(&path, v);
+    record_relay_models_to(&path, v, gid);
 }
 
 /// record_relay_models 的可注入内核（测试用）
-fn record_relay_models_to(path: &Path, v: &serde_json::Value) {
+fn record_relay_models_to(path: &Path, v: &serde_json::Value, gateway_id: &str) {
     let fresh = parse_openrouter_models(v);
     if fresh.is_empty() {
         return;
@@ -321,7 +341,7 @@ fn record_relay_models_to(path: &Path, v: &serde_json::Value) {
         .unwrap_or_default();
     for (id, c) in fresh {
         map.insert(
-            id,
+            format!("{gateway_id}|{id}"),
             serde_json::json!({
                 "thinking": c.thinking,
                 "context": c.context,
@@ -387,22 +407,29 @@ pub fn model_db_status() -> ModelDbStatusDto {
     }
 }
 
-const MODEL_DB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// models.dev 本机常超时；先 8s 再换 OpenRouter，避免空等 60s。
+const MODELS_DEV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+const OPENROUTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// 下载公共模型能力库：models.dev 优先（社区中立库），不可达回落 OpenRouter /models
 /// （两家解析进同一形状；本机实测 models.dev 直连超时、OpenRouter 可达）
 #[tauri::command]
 pub async fn download_model_db() -> Result<ModelDbStatusDto, String> {
-    let client = reqwest::Client::builder()
-        .timeout(MODEL_DB_TIMEOUT)
-        .build()
-        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
     let mut last_err = String::new();
     let mut parsed: Option<Vec<(String, ModelCaps)>> = None;
     for (url, is_models_dev) in [
         ("https://models.dev/api.json", true),
         ("https://openrouter.ai/api/v1/models", false),
     ] {
+        let timeout = if is_models_dev {
+            MODELS_DEV_TIMEOUT
+        } else {
+            OPENROUTER_TIMEOUT
+        };
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
         match client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await
             {
@@ -486,12 +513,15 @@ fn chain_field<T>(
     None
 }
 
-/// 逐字段查询链：用户覆盖 > 网关实测缓存 > 公共能力库 > 内置表。
-/// 网关只报了上下文不代表它否认推理能力，缺的字段由更深的层补
-fn lookup_field<T>(model: &str, f: impl Fn(&ModelCaps) -> Option<T>) -> Option<T> {
+/// 逐字段查询链：用户覆盖 > 网关实测缓存（需 gateway_id）> 公共能力库 > 内置表。
+fn lookup_field_for<T>(
+    model: &str,
+    gateway_id: Option<&str>,
+    f: impl Fn(&ModelCaps) -> Option<T>,
+) -> Option<T> {
     let tables: [Vec<(String, ModelCaps)>; 4] = [
         load_override(),
-        load_relay_cache(),
+        load_relay_for(gateway_id),
         load_db(),
         BUILTIN_CAPS
             .iter()
@@ -531,12 +561,20 @@ fn fallback_context_size(model: &str) -> i64 {
 
 /// 模型是否支持思考：逐字段查询链 → 关键词推断兜底
 pub fn model_thinking(model: &str) -> bool {
-    lookup_field(model, |c| c.thinking).unwrap_or_else(|| keyword_thinking(model))
+    model_thinking_for(model, None)
+}
+
+pub fn model_thinking_for(model: &str, gateway_id: Option<&str>) -> bool {
+    lookup_field_for(model, gateway_id, |c| c.thinking).unwrap_or_else(|| keyword_thinking(model))
 }
 
 /// 模型上下文窗口：逐字段查询链 → 保守默认映射
 pub fn model_context_size(model: &str) -> i64 {
-    lookup_field(model, |c| c.context).unwrap_or_else(|| fallback_context_size(model))
+    model_context_size_for(model, None)
+}
+
+pub fn model_context_size_for(model: &str, gateway_id: Option<&str>) -> i64 {
+    lookup_field_for(model, gateway_id, |c| c.context).unwrap_or_else(|| fallback_context_size(model))
 }
 
 /// 输出上限兜底：models.dev 上多数 chat 模型的常见值，保守不越界
@@ -545,7 +583,11 @@ const DEFAULT_OUTPUT_LIMIT: i64 = 8192;
 
 /// 模型输出上限：逐字段查询链 → 保守默认
 pub fn model_output_limit(model: &str) -> i64 {
-    lookup_field(model, |c| c.output).unwrap_or(DEFAULT_OUTPUT_LIMIT)
+    model_output_limit_for(model, None)
+}
+
+pub fn model_output_limit_for(model: &str, gateway_id: Option<&str>) -> i64 {
+    lookup_field_for(model, gateway_id, |c| c.output).unwrap_or(DEFAULT_OUTPUT_LIMIT)
 }
 
 /// 是否支持图像输入：逐字段查询链有显式声明（true/false 都算数——网关如实报了
@@ -553,7 +595,11 @@ pub fn model_output_limit(model: &str) -> i64 {
 /// 模型声明图像输入会让用户拖图进去才报错）。
 /// codex catalog 的 input_modalities / kimi capabilities image_in / opencode modalities 用
 pub fn model_supports_vision(model: &str) -> bool {
-    if let Some(v) = lookup_field(model, |c| c.vision) {
+    model_supports_vision_for(model, None)
+}
+
+pub fn model_supports_vision_for(model: &str, gateway_id: Option<&str>) -> bool {
+    if let Some(v) = lookup_field_for(model, gateway_id, |c| c.vision) {
         return v;
     }
     let normalized = normalize(model);
@@ -565,9 +611,13 @@ pub fn model_supports_vision(model: &str) -> bool {
 }
 
 pub fn model_capability(model: &str) -> ModelCapabilityDto {
+    model_capability_for(model, None)
+}
+
+pub fn model_capability_for(model: &str, gateway_id: Option<&str>) -> ModelCapabilityDto {
     let normalized = normalize(model);
     // 与 model_supports_vision 同一判定，单一出处
-    let vision = if model_supports_vision(model) {
+    let vision = if model_supports_vision_for(model, gateway_id) {
         Some(true)
     } else {
         None
@@ -589,8 +639,8 @@ pub fn model_capability(model: &str) -> ModelCapabilityDto {
     };
     ModelCapabilityDto {
         model: model.to_string(),
-        thinking: model_thinking(model),
-        context: model_context_size(model),
+        thinking: model_thinking_for(model, gateway_id),
+        context: model_context_size_for(model, gateway_id),
         tools,
         vision,
         video,
@@ -599,8 +649,19 @@ pub fn model_capability(model: &str) -> ModelCapabilityDto {
 }
 
 #[tauri::command]
-pub fn model_capabilities(models: Vec<String>) -> Vec<ModelCapabilityDto> {
-    models.iter().map(|model| model_capability(model)).collect()
+pub fn model_capability_brief(gateway_id: String, model_id: String) -> ModelCapabilityDto {
+    model_capability_for(&model_id, Some(gateway_id.as_str()))
+}
+
+#[tauri::command]
+pub fn model_capabilities(
+    models: Vec<String>,
+    gateway_id: Option<String>,
+) -> Vec<ModelCapabilityDto> {
+    models
+        .iter()
+        .map(|model| model_capability_for(model, gateway_id.as_deref()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -622,6 +683,8 @@ mod tests {
         assert!(model_thinking("qwen3-32b"));
         assert!(!model_thinking("qwen3-coder-plus"));
         assert!(model_thinking("grok-4-1"));
+        assert!(model_supports_vision("kimi-k3"));
+        assert!(model_capability("kimi-k3").thinking);
     }
 
     #[test]
@@ -756,18 +819,18 @@ mod tests {
             "architecture": {"input_modalities": ["text", "image"]},
             "supported_parameters": ["tools", "reasoning"]
         }]});
-        record_relay_models_to(&path, &v);
+        record_relay_models_to(&path, &v, "gw1");
         let loaded = parse_caps_map(&std::fs::read_to_string(&path).unwrap());
-        let c = longest_match(&loaded, "custom-model-x").unwrap();
+        let c = longest_match(&loaded, "gw1|custom-model-x").unwrap();
         assert!(c.thinking == Some(true) && c.vision == Some(true) && c.context == Some(99999));
         // 再记一条别的模型：合并不覆盖
         let v2 = serde_json::json!({"data": [{"id": "other", "context_length": 1000}]});
-        record_relay_models_to(&path, &v2);
+        record_relay_models_to(&path, &v2, "gw1");
         let loaded = parse_caps_map(&std::fs::read_to_string(&path).unwrap());
         assert_eq!(loaded.len(), 2);
         // 纯 id 列表不动缓存
         let before = std::fs::read_to_string(&path).unwrap();
-        record_relay_models_to(&path, &serde_json::json!({"data": [{"id": "no-meta"}]}));
+        record_relay_models_to(&path, &serde_json::json!({"data": [{"id": "no-meta"}]}), "gw1");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         std::fs::remove_dir_all(&dir).ok();
     }

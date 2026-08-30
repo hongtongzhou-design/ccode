@@ -434,20 +434,26 @@ pub fn pty_spawn(
     link_claim_id: Option<String>,
     // 「聊想法」只读模式：对支持的 CLI 注入注册表 readonly_args（仅全新会话生效）
     readonly: Option<bool>,
+    // 恢复会话时 rollout 记下的 provider（旧 "ccode" 或派生名 ccode-<gid>）
+    resume_provider: Option<String>,
 ) -> Result<SpawnResult, String> {
-    let profile = store.get(&profile_id)?;
+    let selected = model.filter(|m| !m.trim().is_empty());
+    let mut profile = store.get_with_model(&profile_id, selected.as_deref())?;
     if profile.agent != agent_id {
         return Err("profile 与所选 agent 不匹配".into());
     }
+    if profile.slot_missing && profile.account_type != crate::profiles::AccountType::Official {
+        return Err("这个网关还没配该协议的端点，请先在网关库补槽".into());
+    }
+    profile.apply_session_provider(resume_provider.as_deref());
     let binary = agents::binary_for(&agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
     let binary_path = agents::resolve_binary(binary)
         .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
-    // 密钥只在启动瞬间从钥匙串读出，注入子进程环境后即丢弃；keys.json 损坏时报错阻断启动
-    let key = profiles::get_key(&profile_id)?;
+    // 密钥只在启动瞬间从 keys.json 读出，注入子进程环境后即丢弃；keys.json 损坏时报错阻断启动
+    let key = profiles::get_key_for_profile(&profile)?;
     agents::ensure_launch_credentials(&profile, key.as_deref())?;
-    let model = model
-        .filter(|m| !m.trim().is_empty())
-        .or_else(|| profile.models.first().cloned());
+    let model = selected.or_else(|| profile.models.first().cloned());
+    crate::combo::apply_to_profile(&mut profile, model.as_deref());
     // 恢复会话不注入初始 prompt（那是既有会话的延续，不是开步）
     let prompt = match &resume_session_id {
         Some(_) => None,

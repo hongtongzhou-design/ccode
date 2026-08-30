@@ -547,6 +547,8 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   三行以内简报…定时雷达自动触发」），调度器不替其他技能发明任务内容。
 - **存储**：app 级 `schedules.json`（config_dir/ccode/，原子写 + 进程内锁，同 profiles/skills 口径）；历史留最近
   20 条（简报脱敏 + 截 2000 字符）；周期只支持「每日/每周 + 时分」（本地时区），**不引入 cron 表达式**。
+  **项目移除/清除痕迹/删除目录必须同步删该根上的定时任务**（`delete_schedules_for_project`，路径走 `same_path`）；
+  `list_schedules` 出口再丢掉注册表里已经没有的孤儿。收件箱文献条目只对还在的项目生成，禁止用文件夹名给已删项目续命。
 - **due 判定即补跑**：「最近应跑时刻 > last_run_at」即 due——应用没开错过的时间点在启动后首个 tick 自动补跑，
   多次漏跑 coalesce 只补一次；防重入用进程内 Mutex<HashSet>，tick 与「立即跑」共用。
 - **执行复用 ai.rs 无头链路**（`run_agent_task`）：与 ai_prompt_impl 唯二差异 = cwd 用项目根（不建/删临时目录、

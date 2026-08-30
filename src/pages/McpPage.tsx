@@ -13,6 +13,7 @@ import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { mcpKindBadgeStyle, shortenCommand } from "../mcp-display";
 import {
   EmptyState,
+  FoldMark,
   PageFrame,
   PageHeader,
   primaryActionClass,
@@ -534,16 +535,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
     }
   }
 
-  const distributed = servers.filter((s) =>
-    Object.values(s.apps).some(Boolean),
-  ).length;
-
   // 限宽 1080（原 fluid 满宽：宽屏下名称与开关分列两端、视线对不齐——2026-08-25 设计评审）
   return (
     <PageFrame width="settings">
       <PageHeader
         title="MCP"
-        meta={`${servers.length} 个 MCP · 已分发 ${distributed}`}
+        meta={`${servers.length} 个`}
         actions={
           <>
             <button
@@ -578,10 +575,6 @@ export default function McpPage({ visible }: { visible: boolean }) {
           </>
         }
       />
-      <p className="text-xs leading-5 text-l4">
-        统一维护 MCP 清单，按开关分发到各 CLI。密钥用{" "}
-        <span className="font-mono">$VAR</span> 引用，不落明文。
-      </p>
       {error && <p className="text-sm text-err-text">{error}</p>}
       {notice && <p className="text-sm text-ok-text">{notice}</p>}
       {loading ? (
@@ -601,7 +594,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
             <span>名称</span>
             <span>类型</span>
             <span>配置</span>
-            <span>分发</span>
+            <span>用于</span>
             <span className="text-right">启用</span>
           </div>
           <ul className="divide-y divide-hairline">
@@ -620,7 +613,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     title={open ? "收起" : "展开完整配置与分发管理"}
                     onClick={() => setExpanded(open ? null : s.id)}
                   >
-                    <span className="w-3 shrink-0 text-l4">{open ? "▾" : "▸"}</span>
+                    <FoldMark open={open} />
                     <HealthDot
                       health={health[s.id]}
                       onCheck={() => void checkHealth(s)}
@@ -658,7 +651,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                       ? shortenCommand(s.command, s.args)
                       : s.url}
                   </span>
-                  {/* 已分发列可点（v3.93）：点击展开/收起分发网格（勾选在展开区） */}
+                  {/* 用于列可点：点击展开/收起分发网格（勾选在展开区） */}
                   <button
                     type="button"
                     onClick={() => setExpanded(open ? null : s.id)}
@@ -670,7 +663,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     {onCount > 0 && (
                       <span className="size-1.5 rounded-full bg-ok-text" />
                     )}
-                    {onCount > 0 ? `已分发 ${onCount}` : "未分发"}
+                    {onCount > 0 ? `${onCount} 个 CLI` : "未用"}
                   </button>
                   <span className="flex items-center justify-end gap-1">
                     {/* 行内悬浮操作（v3.93）：↯ 测试连通 / ✎ 编辑 / ✕ 删除。

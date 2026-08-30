@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { FolderOpen } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
-import type { DetectResult, GitCommitResultDto, SessionUsageDto } from "../types";
+import type { ComboSurfaceDto, DetectResult, GitCommitResultDto, SessionUsageDto } from "../types";
 import type { GitSummary } from "./GitPanel";
 import type { TabStatus } from "../pages/TerminalPage";
 
@@ -44,8 +44,10 @@ function fmtDuration(ms: number): string {
 export default function TerminalStatusBar({
   status,
   fallbackCwd,
+  profileId,
   profileName,
   profileModels,
+  launchModel,
   modelSwitch,
   effort,
   git,
@@ -63,8 +65,11 @@ export default function TerminalStatusBar({
   /** null = 终端尚未上报（刚挂载）：显示 cwd + 未启动占位 */
   status: TabStatus | null;
   fallbackCwd: string;
+  profileId: string | null;
   profileName: string | null;
   profileModels: string[];
+  /** 启动时注入的模型；求交不跟 CLI 内 /model */
+  launchModel: string | null;
   modelSwitch: DetectResult["modelSwitch"];
   effort: DetectResult["effort"];
   git: GitSummary | null;
@@ -169,16 +174,50 @@ export default function TerminalStatusBar({
     }
   }
 
+  const [combo, setCombo] = useState<ComboSurfaceDto | null>(null);
+  const [comboReady, setComboReady] = useState(false);
+  useEffect(() => {
+    if (!profileId || !launchModel) {
+      setCombo(null);
+      setComboReady(true);
+      return;
+    }
+    let cancelled = false;
+    setComboReady(false);
+    invoke<ComboSurfaceDto>("combo_surface", {
+      profileId,
+      model: launchModel,
+    })
+      .then((c) => {
+        if (!cancelled) {
+          setCombo(c);
+          setComboReady(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCombo(null);
+          setComboReady(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileId, launchModel]);
+  // 未确认不显示：combo 未加载或求交明确不允许时藏 /effort
+  const effortLive =
+    comboReady && combo?.showNativeEffort === true ? effort : null;
+
   // 思考强度 step 滑块：隐形原生 range 负责拖动/键盘，自定义轨道负责视觉；松手才写命令
-  const levels = effort?.levels ?? [];
+  const levels = effortLive?.levels ?? [];
   const [effortIdxRaw, setEffortIdx] = useState(() =>
     Math.min(1, Math.max(0, levels.length - 1)),
   );
   // 切到档位更少的 agent 后旧下标可能越界：渲染/写命令一律用钳制值
   const effortIdx = Math.min(effortIdxRaw, Math.max(0, levels.length - 1));
   function commitEffort() {
-    if (effort && levels[effortIdx]) {
-      writeCmd(effort.command.replace("{level}", levels[effortIdx]));
+    if (effortLive && levels[effortIdx]) {
+      writeCmd(effortLive.command.replace("{level}", levels[effortIdx]));
     }
   }
 
@@ -459,7 +498,12 @@ export default function TerminalStatusBar({
             <span className="truncate">· {shownModel}</span>
           ))}
         {/* 思考强度：档位表 ≥2 = step 滑块直切（claude）；空档位表 = chip 唤 TUI 选择器（kimi） */}
-        {effort && running && levels.length > 1 && (
+        {combo?.mixedModelsNote && (
+          <span className="ml-1 truncate" style={{ color: faint }} title={combo.mixedModelsNote}>
+            换模请重开
+          </span>
+        )}
+        {effortLive && running && levels.length > 1 && (
           <span
             className="ml-1 flex items-center gap-1.5 rounded-full px-2 py-0.5"
             style={{ background: `${fg}0f` }}
@@ -516,10 +560,10 @@ export default function TerminalStatusBar({
             </span>
           </span>
         )}
-        {effort && running && levels.length <= 1 && (
+        {effortLive && running && levels.length <= 1 && (
           <button
             type="button"
-            onClick={() => writeCmd(effort.command)}
+            onClick={() => writeCmd(effortLive.command)}
             title="切换思考档位（在终端里打开选择器）"
             className="ml-1 cursor-pointer border-0 bg-transparent p-0 font-mono"
             style={{ color: colors.blue }}

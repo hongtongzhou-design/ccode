@@ -17,7 +17,6 @@ import {
   helpSignature,
   isHelpDismissed,
   filterDismissed,
-  type InboxCategory,
 } from "../inbox";
 import ContextMenu from "../components/ContextMenu";
 import { confirmDialog } from "../components/ConfirmDialog";
@@ -29,6 +28,7 @@ import { buildWorkspaceTerminalRequest } from "../pipeline-start";
 import {
   EmptyState,
   fieldClass,
+  FoldMark,
   inlineActionClass,
   NoticeBar,
   PageFrame,
@@ -38,8 +38,12 @@ import {
   secondaryActionClass,
 } from "../components/PageFrame";
 import { attributeToProject, buildRunOverview } from "../run-overview";
-import { litInboxCandidates, type LitInboxCandidate } from "../lit-watch";
-import { IS_MAC } from "../hotkeys";
+import {
+  litInboxCandidates,
+  litInboxForRegisteredProjects,
+  type LitInboxCandidate,
+} from "../lit-watch";
+import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import { AGENTS } from "../types";
 import type {
   HelpRequestDto,
@@ -774,7 +778,7 @@ function PortsSection() {
           aria-expanded={open}
           className="flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-sm font-medium text-l1"
         >
-          <span className="w-3 text-xs text-l4">{open ? "▾" : "▸"}</span>
+          <FoldMark open={open} boxed />
           端口
           {/* 计数只在展开后显示——「有几个端口在监听」是信息不是警报，折叠态不占注意力 */}
           {open && ports !== null && (
@@ -959,6 +963,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   // help: 条目屏蔽表（store 镜像 localStorage）：签名一致不生成条目，内容变了自动复现
   const helpDismissed = useAppStore((s) => s.helpDismissed);
   const dismissHelpRequest = useAppStore((s) => s.dismissHelpRequest);
+  const dismissInbox = useAppStore((s) => s.dismissInbox);
   // 人工请求「去查看」的完整内容层（v3.97）：strip 行只有 40 字截断预览，
   // 「选中项目」单独作为动作反馈太弱（已选中时像没反应）——弹出该来源的全部请求全文
   const helpViewReq = useAppStore((s) => s.helpViewReq);
@@ -1399,8 +1404,13 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         },
       })),
     // 文献雷达新命中（lit:<scheduleId>:<lastRunAt>；24h 窗口与 newEntries 判定在
-    // lit-watch.ts 的 litInboxCandidates）：点击经 selectProjectReq 跳该项目详情
-    ...litCandidates.map((c) => ({
+    // lit-watch.ts 的 litInboxCandidates）：点击经 selectProjectReq 跳该项目详情。
+    // 已删项目的定时任务可能还在 schedules.json，不能拿文件夹名继续提示。
+    ...litInboxForRegisteredProjects(
+      litCandidates,
+      projects.map((p) => p.path),
+      IS_WINDOWS,
+    ).map((c) => ({
       key: `lit:${c.scheduleId}:${c.at}`,
       dot: "bg-ok-text",
       text: `文献雷达 · ${projects.find((p) => samePath(p.path, c.projectRoot))?.name ?? pathBaseName(c.projectRoot)}：${c.count} 条新命中`,
@@ -1557,28 +1567,20 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectProjectReq, groups]);
 
-  // 收件箱折叠 strip：默认收起只占单行，类别胶囊保留第一眼信息（点胶囊展开该类明细）
-  const [inboxCat, setInboxCat] = useState<InboxCategory | null>(null);
+  // Windows/Linux 页内收件箱：与标题栏同一套「待处理 N」单入口，点开列出全部分组
+  const [inboxOpen, setInboxOpen] = useState(false);
   const inboxGroups = groupInbox(filterDismissed(inboxItems, inboxDismissed));
-  // 空了就收回展开态；展开中的类别被清空（如最后一条 help 被忽略）同样收起
   useEffect(() => {
-    if (
-      inboxCat !== null &&
-      !inboxGroups.some((g) => g.category === inboxCat)
-    )
-      setInboxCat(null);
-  }, [inboxGroups, inboxCat]);
-  // 展开时 Esc 关闭
+    if (inboxOpen && inboxGroups.length === 0) setInboxOpen(false);
+  }, [inboxGroups, inboxOpen]);
   useEffect(() => {
-    if (inboxCat === null) return;
+    if (!inboxOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setInboxCat(null);
+      if (e.key === "Escape") setInboxOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [inboxCat]);
-  const openInboxGroup =
-    inboxGroups.find((g) => g.category === inboxCat) ?? null;
+  }, [inboxOpen]);
 
   // 人工请求 OS 通知（复用「长任务 OS 通知」开关，不新增设置项）：help 条目集合出现新
   // 来源（edge-trigger，对比上一轮 key 集合）且窗口隐藏时发一条系统通知；同一来源 30s
@@ -1869,78 +1871,72 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       {/* 待你处理（全局收件箱）：文档流单行 strip（只占 32px，不顶开工作台）；
           全空不渲染。按类别拆胶囊，点胶囊展开该类明细（悬浮下拉，遮罩/Esc 关闭）。
           macOS 上收件箱收进自绘标题栏（Ghostty 式），页内 strip 不渲染（Windows/Linux 保留本 strip） */}
-      {!IS_MAC && inboxCat !== null && (
+      {!IS_MAC && inboxOpen && (
         <div
           className="fixed inset-0 z-10"
-          onClick={() => setInboxCat(null)}
+          onClick={() => setInboxOpen(false)}
         />
       )}
       {!IS_MAC && inboxItems.length > 0 && (
         <section className="relative z-20 shrink-0 px-6 pt-2">
           <div className="relative mx-auto w-full">
-            <div className="flex h-8 items-center gap-2 rounded-md bg-strip px-3 text-xs text-l2">
-              <span className="shrink-0 font-medium text-l1">
-                待你处理 {inboxItems.length}
-              </span>
-              <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
+            <button
+              type="button"
+              onClick={() => setInboxOpen((v) => !v)}
+              aria-expanded={inboxOpen}
+              className="flex h-7 items-center gap-1.5 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
+            >
+              <span
+                className={`size-1.5 shrink-0 rounded-full ${inboxGroups[0]?.items[0]?.dot ?? "bg-l4"}`}
+              />
+              待处理 {inboxItems.length}
+              <span className="text-l4">{inboxOpen ? "▴" : "▾"}</span>
+            </button>
+            {inboxOpen && (
+              <ul className="absolute left-0 top-full z-20 mt-1 max-h-80 w-[360px] max-w-[80vw] space-y-2 overflow-auto rounded-md border border-field ccode-float-surface p-1">
                 {inboxGroups.map((group) => (
-                  <button
-                    key={group.category}
-                    type="button"
-                    onClick={() =>
-                      setInboxCat((v) =>
-                        v === group.category ? null : group.category,
-                      )
-                    }
-                    aria-expanded={inboxCat === group.category}
-                    className="flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-field px-2.5 text-micro text-l2 hover:bg-hover"
-                  >
-                    <span
-                      className={`size-1.5 shrink-0 rounded-full ${group.items[0].dot}`}
-                    />
-                    {group.label} {group.items.length}
-                    <span className="text-l4">
-                      {inboxCat === group.category ? "▴" : "▾"}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-            {openInboxGroup && (
-              <ul className="absolute inset-x-0 top-full z-20 mt-1 max-h-80 divide-y divide-hairline overflow-auto rounded-md border border-field ccode-float-surface">
-                {openInboxGroup.items.map((item) => (
-                  <li
-                    key={item.key}
-                    className="flex items-center gap-2.5 px-3 py-2 text-xs"
-                  >
-                    <span
-                      className={`size-2 shrink-0 rounded-full ${item.dot}`}
-                    />
-                    <span className="min-w-0 flex-1 truncate text-l2">
-                      {item.text}
-                    </span>
-                    {item.key.startsWith("help:") && (
-                      <button
-                        type="button"
-                        title="忽略此来源（内容变化后重新出现）"
-                        onClick={() =>
-                          dismissHelpRequest(
-                            item.key.slice("help:".length),
-                            item.dismissSignature ?? "",
-                          )
-                        }
-                        className="shrink-0 text-l4 hover:text-l1"
+                  <li key={group.category}>
+                    <div className="px-2.5 py-1 text-micro text-l4">
+                      {group.label} {group.items.length}
+                    </div>
+                    {group.items.map((item) => (
+                      <div
+                        key={item.key}
+                        className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-xs hover:bg-hover"
                       >
-                        ✕
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => runInboxAction(item)}
-                      className={rowActionClass}
-                    >
-                      {item.actionLabel}
-                    </button>
+                        <span
+                          className={`size-2 shrink-0 rounded-full ${item.dot}`}
+                        />
+                        <span className="min-w-0 flex-1 truncate text-l2">
+                          {item.text}
+                        </span>
+                        <button
+                          type="button"
+                          title="忽略（状态变化后会重新出现）"
+                          onClick={() =>
+                            item.key.startsWith("help:")
+                              ? dismissHelpRequest(
+                                  item.key.slice("help:".length),
+                                  item.dismissSignature ?? "",
+                                )
+                              : dismissInbox(item)
+                          }
+                          className="shrink-0 text-l4 hover:text-l1"
+                        >
+                          ✕
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInboxOpen(false);
+                            runInboxAction(item);
+                          }}
+                          className={rowActionClass}
+                        >
+                          {item.actionLabel}
+                        </button>
+                      </div>
+                    ))}
                   </li>
                 ))}
               </ul>
@@ -2075,7 +2071,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             <button
               type="button"
               onClick={() => void onAddProject()}
-              className={primaryActionClass}
+              className={selectedGroup ? secondaryActionClass : primaryActionClass}
             >
               + 添加项目
             </button>

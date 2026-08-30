@@ -1054,6 +1054,31 @@ fn cost_of(acc: &TokenAcc, price: (f64, f64)) -> f64 {
         / 1_000_000.0
 }
 
+/// 缓存读相对「按输入全价」省下的钱：实际按 1 折计，省 9 折。无定价或 0 读则 None。
+fn cache_savings_usd(model: &str, cache_read: u64, table: &[(String, (f64, f64))]) -> Option<f64> {
+    if cache_read == 0 {
+        return None;
+    }
+    price_of(model, table).map(|(ir, _)| cache_read as f64 * ir * 0.9 / 1_000_000.0)
+}
+
+fn parse_day(iso: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(iso, "%Y-%m-%d").ok()
+}
+
+fn each_day(from: NaiveDate, to: NaiveDate) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut d = from;
+    while d <= to {
+        out.push(d.format("%Y-%m-%d").to_string());
+        d = match d.checked_add_days(Days::new(1)) {
+            Some(n) => n,
+            None => break,
+        };
+    }
+    out
+}
+
 // ===== 查询 =====
 
 fn cutoff_day_from(range: &str, today: NaiveDate) -> Option<String> {
@@ -1137,6 +1162,8 @@ fn build_stats(
     rate_usd_cny: f64,
 ) -> UsageStatsDto {
     let mut cards = Bucket::default();
+    let mut cache_savings = 0.0;
+    let mut cache_savings_any = false;
     // (agent, official)：官方账号用量与 API 用量分桶，费用栏分别显示「订阅」与估算金额
     let mut by_agent: HashMap<(String, bool), Bucket> = HashMap::new();
     let mut by_project: HashMap<(String, String, bool, bool), Bucket> = HashMap::new();
@@ -1154,6 +1181,12 @@ fn build_stats(
             cache_write: cw as u64,
         };
         cards.add(&model, &sid, acc);
+        if !official {
+            if let Some(saved) = cache_savings_usd(&model, acc.cache_read, table) {
+                cache_savings += saved;
+                cache_savings_any = true;
+            }
+        }
         if !_day.is_empty() {
             by_day.entry(_day).or_default().add(&model, &sid, acc);
         }
@@ -1277,6 +1310,11 @@ fn build_stats(
             sessions: cards.sessions.len() as u64,
             cost_usd: cards_cost,
             cost_partial: cards_partial,
+            cache_savings_usd: if cache_savings_any {
+                Some(cache_savings)
+            } else {
+                None
+            },
         },
         by_agent: agent_rows,
         by_project: project_rows,
@@ -1358,6 +1396,8 @@ pub struct UsageCardsDto {
     pub cost_usd: Option<f64>,
     /// 桶里还混有不明价模型的用量（费用应显示为 ≥）
     pub cost_partial: bool,
+    /// 已计价且非官方账号的缓存读相对全价输入省下的钱；无定价缓存为 None
+    pub cache_savings_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1519,6 +1559,285 @@ pub async fn get_usage_stats(range: String) -> Result<UsageStatsDto, String> {
             rebuild_impl()?;
         }
         query_stats(&range)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTrendDayDto {
+    pub day: String,
+    pub cost_usd: Option<f64>,
+    pub cost_partial: bool,
+    pub has_usage: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTrendDto {
+    pub days: Vec<UsageTrendDayDto>,
+    pub rate_usd_cny: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTopSessionDto {
+    pub agent: String,
+    pub session_id: String,
+    pub project_path: String,
+    pub title: Option<String>,
+    pub tokens: u64,
+    pub cost_usd: Option<f64>,
+    pub cost_partial: bool,
+}
+
+type TrendQueryRow = (
+    String, // day
+    String, // agent
+    String, // model
+    String, // project_path
+    String, // session_id
+    i64,
+    i64,
+    i64,
+    i64,
+    bool, // official
+    bool, // internal
+);
+
+fn select_daily_rows(conn: &Connection, cutoff: Option<&str>) -> Result<Vec<TrendQueryRow>, String> {
+    let sql = if cutoff.is_some() {
+        "SELECT day, agent, model, project_path, session_id, input, output, cache_read, cache_write, official, internal
+         FROM usage_daily WHERE day >= ?1"
+    } else {
+        "SELECT day, agent, model, project_path, session_id, input, output, cache_read, cache_write, official, internal
+         FROM usage_daily"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let map_row = |r: &rusqlite::Row| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, i64>(5)?,
+            r.get::<_, i64>(6)?,
+            r.get::<_, i64>(7)?,
+            r.get::<_, i64>(8)?,
+            r.get::<_, i64>(9)? != 0,
+            r.get::<_, i64>(10)? != 0,
+        ))
+    };
+    let collected: rusqlite::Result<Vec<_>> = if let Some(c) = cutoff {
+        stmt.query_map(params![c], map_row)
+            .map_err(|e| e.to_string())?
+            .collect()
+    } else {
+        stmt.query_map([], map_row)
+            .map_err(|e| e.to_string())?
+            .collect()
+    };
+    collected.map_err(|e| e.to_string())
+}
+
+struct DayAgg {
+    billed: Bucket,
+    has_usage: bool,
+}
+
+fn usage_trend_from(
+    conn: &Connection,
+    range: &str,
+    today: NaiveDate,
+    table: &[(String, (f64, f64))],
+    rate: f64,
+) -> Result<UsageTrendDto, String> {
+    let cutoff = cutoff_day_from(range, today);
+    let rows = select_daily_rows(conn, cutoff.as_deref())?;
+    let mut by_day: std::collections::BTreeMap<String, DayAgg> = Default::default();
+    for (day, _agent, model, _project, sid, i, o, cr, cw, official, internal) in &rows {
+        if day.is_empty() || *internal {
+            continue;
+        }
+        let slot = by_day.entry(day.clone()).or_insert_with(|| DayAgg {
+            billed: Bucket::default(),
+            has_usage: false,
+        });
+        slot.has_usage = true;
+        if !official {
+            slot.billed.add(
+                model,
+                sid,
+                TokenAcc {
+                    input: *i as u64,
+                    output: *o as u64,
+                    cache_read: *cr as u64,
+                    cache_write: *cw as u64,
+                },
+            );
+        }
+    }
+    let to = today;
+    let from = match cutoff.as_deref().and_then(parse_day) {
+        Some(d) => d,
+        None => by_day
+            .keys()
+            .next()
+            .and_then(|d| parse_day(d))
+            .unwrap_or(today),
+    };
+    let days = each_day(from, to)
+        .into_iter()
+        .map(|day| match by_day.remove(&day) {
+            Some(agg) => {
+                let (cost_usd, cost_partial) = agg.billed.cost(table);
+                UsageTrendDayDto {
+                    day,
+                    // 当天没有任何 API 行（空天或纯订阅）记 0；只有未计价模型时保持 None（~）
+                    cost_usd: if agg.billed.by_model.is_empty() {
+                        Some(0.0)
+                    } else {
+                        cost_usd
+                    },
+                    cost_partial,
+                    has_usage: agg.has_usage,
+                }
+            }
+            None => UsageTrendDayDto {
+                day,
+                cost_usd: Some(0.0),
+                cost_partial: false,
+                has_usage: false,
+            },
+        })
+        .collect();
+    Ok(UsageTrendDto {
+        days,
+        rate_usd_cny: rate,
+    })
+}
+
+fn session_custom_title(conn: &Connection, agent: &str, session_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT custom_title FROM session_meta WHERE agent=?1 AND session_id=?2",
+        params![agent, session_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .and_then(|t| {
+        let s = t.trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(crate::sessions::redact_sensitive_text(&s))
+        }
+    })
+}
+
+fn top_sessions_from(
+    conn: &Connection,
+    range: &str,
+    today: NaiveDate,
+    table: &[(String, (f64, f64))],
+) -> Result<Vec<UsageTopSessionDto>, String> {
+    let cutoff = cutoff_day_from(range, today);
+    let rows = select_daily_rows(conn, cutoff.as_deref())?;
+    let mut by_session: HashMap<(String, String), (Bucket, String)> = HashMap::new();
+    for (_day, agent, model, project, sid, i, o, cr, cw, official, internal) in rows {
+        if official || internal || sid.is_empty() {
+            continue;
+        }
+        let sid_key = sid.clone();
+        let entry = by_session
+            .entry((agent, sid))
+            .or_insert_with(|| (Bucket::default(), project.clone()));
+        if entry.1.is_empty() && !project.is_empty() {
+            entry.1 = project;
+        }
+        entry.0.add(
+            &model,
+            &sid_key,
+            TokenAcc {
+                input: i as u64,
+                output: o as u64,
+                cache_read: cr as u64,
+                cache_write: cw as u64,
+            },
+        );
+    }
+    let mut ranked: Vec<(f64, UsageTopSessionDto)> = by_session
+        .into_iter()
+        .filter_map(|((agent, session_id), (bucket, project_path))| {
+            let (cost_usd, cost_partial) = bucket.cost(table);
+            cost_usd.map(|cost| {
+                (
+                    cost,
+                    UsageTopSessionDto {
+                        title: None,
+                        tokens: bucket.tokens.input + bucket.tokens.output,
+                        cost_usd: Some(cost),
+                        cost_partial,
+                        agent,
+                        session_id,
+                        project_path,
+                    },
+                )
+            })
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.1.tokens.cmp(&a.1.tokens))
+            .then(a.1.agent.cmp(&b.1.agent))
+            .then(a.1.session_id.cmp(&b.1.session_id))
+    });
+    ranked.truncate(5);
+    Ok(ranked
+        .into_iter()
+        .map(|(_, mut row)| {
+            // 红线：标题出站前必须脱敏（用户可能在自定义标题里粘过密钥），同 redact_session_meta 口径
+            row.title = session_custom_title(conn, &row.agent, &row.session_id)
+                .map(|t| crate::sessions::redact_sensitive_text(&t));
+            row
+        })
+        .collect())
+}
+
+fn pricing_table_and_rate() -> (Vec<(String, (f64, f64))>, f64) {
+    let pricing_path = dirs::config_dir().map(|d| d.join("ccode").join("pricing.json"));
+    (
+        load_pricing(pricing_path.as_deref()),
+        load_rate(pricing_path.as_deref()),
+    )
+}
+
+#[tauri::command]
+pub async fn usage_trend(range: String) -> Result<UsageTrendDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = usage_db()?;
+        let (table, rate) = pricing_table_and_rate();
+        usage_trend_from(
+            &conn,
+            &range,
+            Local::now().date_naive(),
+            &table,
+            rate,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn top_sessions(range: String) -> Result<Vec<UsageTopSessionDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = usage_db()?;
+        let (table, _) = pricing_table_and_rate();
+        top_sessions_from(&conn, &range, Local::now().date_naive(), &table)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2066,6 +2385,237 @@ mod tests {
         assert_eq!(cutoff_day_from("all", today), None);
     }
 
+    fn insert_daily(
+        conn: &Connection,
+        day: &str,
+        agent: &str,
+        model: &str,
+        project: &str,
+        sid: &str,
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        official: bool,
+    ) {
+        conn.execute(
+            "INSERT INTO usage_daily(day, agent, model, project_path, session_id,
+             input, output, cache_read, cache_write, official)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0,?9)",
+            rusqlite::params![
+                day, agent, model, project, sid, input, output, cache_read, i64::from(official)
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn usage_trend_empty_db_fills_month_zeros() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 3, 15).unwrap();
+        let dto = usage_trend_from(&conn, "month", today, &load_pricing(None), 7.2).unwrap();
+        assert_eq!(dto.days.len(), 30, "近 30 天含 today");
+        assert_eq!(dto.days[0].day, "2026-02-14");
+        assert_eq!(dto.days[29].day, "2026-03-15");
+        assert!(dto.days.iter().all(|d| !d.has_usage && d.cost_usd == Some(0.0)));
+    }
+
+    #[test]
+    fn usage_trend_fills_today_and_week_length() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 3, 15).unwrap();
+        let table = load_pricing(None);
+        let day = usage_trend_from(&conn, "today", today, &table, 7.2).unwrap();
+        assert_eq!(day.days.len(), 1, "今日只填当天");
+        assert_eq!(day.days[0].day, "2026-03-15");
+        let week = usage_trend_from(&conn, "week", today, &table, 7.2).unwrap();
+        assert_eq!(week.days.len(), 7, "近 7 天含 today");
+        assert_eq!(week.days[0].day, "2026-03-09");
+        assert_eq!(week.days[6].day, "2026-03-15");
+    }
+
+    #[test]
+    fn usage_trend_fills_across_month_and_skips_official_cost() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 3, 5).unwrap();
+        insert_daily(
+            &conn, "2026-02-28", "codex", "gpt-5", "/p", "s-api", 1_000_000, 0, 0, false,
+        );
+        insert_daily(
+            &conn, "2026-02-28", "gemini", "gemini-3-pro", "/p", "s-off", 9_000_000, 0, 0, true,
+        );
+        insert_daily(
+            &conn, "2026-03-05", "codex", "mystery-x", "/p", "s-unk", 100, 10, 0, false,
+        );
+        let dto = usage_trend_from(&conn, "month", today, &load_pricing(None), 7.2).unwrap();
+        assert_eq!(dto.days.first().map(|d| d.day.as_str()), Some("2026-02-04"));
+        let feb = dto.days.iter().find(|d| d.day == "2026-02-28").unwrap();
+        assert!(feb.has_usage);
+        assert!(feb.cost_usd.unwrap() > 0.0, "官方账号那行不计费，API 行仍计价");
+        let mar = dto.days.iter().find(|d| d.day == "2026-03-05").unwrap();
+        assert!(mar.has_usage);
+        assert_eq!(mar.cost_usd, None, "当天只有未计价模型 → ~ 而不是 0");
+        let gap = dto.days.iter().find(|d| d.day == "2026-03-01").unwrap();
+        assert!(!gap.has_usage);
+        assert_eq!(gap.cost_usd, Some(0.0));
+    }
+
+    #[test]
+    fn top_sessions_ranks_billed_skips_official_and_unpriced() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_meta(
+               agent TEXT NOT NULL, session_id TEXT NOT NULL,
+               custom_title TEXT, PRIMARY KEY(agent, session_id));",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_meta(agent, session_id, custom_title) VALUES('codex','s-big','飞了的长会话')",
+            [],
+        )
+        .unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 30).unwrap();
+        insert_daily(&conn, "2026-08-20", "codex", "gpt-5", "/proj/a", "s-big", 2_000_000, 0, 0, false);
+        insert_daily(&conn, "2026-08-21", "codex", "gpt-5", "/proj/a", "s-small", 100_000, 0, 0, false);
+        insert_daily(&conn, "2026-08-22", "gemini", "gemini-3-pro", "/proj/b", "s-off", 9_000_000, 0, 0, true);
+        insert_daily(&conn, "2026-08-23", "codex", "mystery-x", "/proj/c", "s-unk", 9_000_000, 0, 0, false);
+        insert_daily(&conn, "2026-07-01", "codex", "gpt-5", "/proj/a", "s-old", 9_000_000, 0, 0, false);
+        let top = top_sessions_from(&conn, "month", today, &load_pricing(None)).unwrap();
+        assert_eq!(top.len(), 2, "官方与未计价不进榜，区间外的旧会话也不进");
+        assert_eq!(top[0].session_id, "s-big");
+        assert_eq!(top[0].title.as_deref(), Some("飞了的长会话"));
+        assert_eq!(top[1].session_id, "s-small");
+        assert!(top[0].cost_usd.unwrap() > top[1].cost_usd.unwrap());
+    }
+
+    #[test]
+    fn usage_trend_and_top_sessions_skip_internal() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 30).unwrap();
+        insert_daily(
+            &conn, "2026-08-20", "codex", "gpt-5", "/p", "s-user", 100_000, 0, 0, false,
+        );
+        conn.execute(
+            "INSERT INTO usage_daily(day, agent, model, project_path, session_id,
+             input, output, cache_read, cache_write, official, internal)
+             VALUES ('2026-08-21','kimi','kimi-k2','/tmp/ccode-ai','s-radar',9000000,0,0,0,0,1)",
+            [],
+        )
+        .unwrap();
+        let dto = usage_trend_from(&conn, "month", today, &load_pricing(None), 7.2).unwrap();
+        let radar = dto.days.iter().find(|d| d.day == "2026-08-21").unwrap();
+        assert!(!radar.has_usage, "内部活动不得进入花费折线");
+        assert_eq!(radar.cost_usd, Some(0.0));
+        let user = dto.days.iter().find(|d| d.day == "2026-08-20").unwrap();
+        assert!(user.has_usage);
+        let top = top_sessions_from(&conn, "month", today, &load_pricing(None)).unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].session_id, "s-user");
+    }
+
+    #[test]
+    fn top_session_title_is_redacted() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_meta(
+               agent TEXT NOT NULL, session_id TEXT NOT NULL,
+               custom_title TEXT, PRIMARY KEY(agent, session_id));",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_meta(agent, session_id, custom_title)
+             VALUES('codex','s-leak','任务 sk-live-secret-987654')",
+            [],
+        )
+        .unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 30).unwrap();
+        insert_daily(
+            &conn, "2026-08-20", "codex", "gpt-5", "/p", "s-leak", 1_000_000, 0, 0, false,
+        );
+        let top = top_sessions_from(&conn, "month", today, &load_pricing(None)).unwrap();
+        let title = top[0].title.as_deref().unwrap();
+        assert!(!title.contains("sk-live-secret-987654"));
+        assert!(title.contains("已隐藏密钥"));
+    }
+
+    #[test]
+    fn top_sessions_equal_cost_uses_stable_tiebreak() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 30).unwrap();
+        insert_daily(
+            &conn, "2026-08-20", "codex", "gpt-5", "/p", "s-b", 1_000_000, 0, 0, false,
+        );
+        insert_daily(
+            &conn, "2026-08-21", "codex", "gpt-5", "/p", "s-a", 1_000_000, 0, 0, false,
+        );
+        let top = top_sessions_from(&conn, "month", today, &load_pricing(None)).unwrap();
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].session_id, "s-a", "花费相同按 session_id 升序");
+        assert_eq!(top[1].session_id, "s-b");
+    }
+
+    #[test]
+    fn top_sessions_empty_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 30).unwrap();
+        let top = top_sessions_from(&conn, "all", today, &load_pricing(None)).unwrap();
+        assert!(top.is_empty());
+    }
+
+    #[test]
+    fn cache_savings_priced_only_skips_official() {
+        let table = load_pricing(None);
+        let rows: Vec<StoredUsageRow> = vec![
+            (
+                "2026-08-01".into(),
+                "codex".into(),
+                "gpt-5".into(),
+                "/p".into(),
+                "s1".into(),
+                0,
+                0,
+                1_000_000,
+                0,
+                SOURCE_CLI.into(),
+                false,
+                String::new(),
+                false,
+            ),
+            (
+                "2026-08-01".into(),
+                "codex".into(),
+                "mystery-x".into(),
+                "/p".into(),
+                "s2".into(),
+                0,
+                0,
+                1_000_000,
+                0,
+                SOURCE_CLI.into(),
+                false,
+                String::new(),
+                false,
+            ),
+            {
+                let mut r = ws_row("/p", "s3", "gpt-5", 0, 0, false, "");
+                r.7 = 1_000_000; // cache_read
+                r.12 = true; // official
+                r
+            },
+        ];
+        let stats = build_stats(rows, &table, 7.2);
+        // gpt-5 输入 1.25 / MTok，省 90% → 1.125；未计价与官方不计入
+        let saved = stats.cards.cache_savings_usd.unwrap();
+        assert!((saved - 1.125).abs() < 1e-9, "{saved}");
+    }
+
     #[test]
     fn bucket_cost_partial_semantics() {
         let table = load_pricing(None);
@@ -2200,6 +2750,204 @@ mod tests {
 
 
 
+// ===== 按网关归因：usage_daily ⋈ session_meta.profile_id ⋈ binding.gateway_id =====
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayUsageRow {
+    pub gateway_id: String,
+    pub gateway_name: String,
+    pub bucket: String,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost_usd: Option<f64>,
+    pub cost_partial: bool,
+    pub session_count: u64,
+    pub agents: Vec<String>,
+}
+
+fn usage_by_gateway_impl(
+    conn: &Connection,
+    range: &str,
+    bindings: &[crate::profiles::Binding],
+    gateways: &[crate::profiles::Gateway],
+) -> Result<Vec<GatewayUsageRow>, String> {
+    let sql = match cutoff_day(range) {
+        Some(_) => "SELECT d.agent, d.model, d.session_id, d.input, d.output, d.cache_read, d.cache_write, d.official,
+                           m.profile_id
+                    FROM usage_daily d
+                    LEFT JOIN session_meta m ON m.agent = d.agent AND m.session_id = d.session_id
+                    WHERE d.day >= ?1",
+        None => "SELECT d.agent, d.model, d.session_id, d.input, d.output, d.cache_read, d.cache_write, d.official,
+                        m.profile_id
+                 FROM usage_daily d
+                 LEFT JOIN session_meta m ON m.agent = d.agent AND m.session_id = d.session_id",
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let cutoff = cutoff_day(range);
+    let map_row = |r: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, i64, i64, i64, i64, Option<String>)> {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            r.get(6)?,
+            r.get(7)?,
+            r.get(8)?,
+        ))
+    };
+    let rows: Vec<_> = match &cutoff {
+        Some(c) => stmt
+            .query_map(params![c], map_row)
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?,
+        None => stmt
+            .query_map([], map_row)
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?,
+    };
+    let bind_by_id: HashMap<&str, &crate::profiles::Binding> =
+        bindings.iter().map(|b| (b.id.as_str(), b)).collect();
+    let gw_by_id: HashMap<&str, &crate::profiles::Gateway> =
+        gateways.iter().map(|g| (g.id.as_str(), g)).collect();
+
+    #[derive(Default)]
+    struct Acc {
+        bucket: Bucket,
+        agents: HashSet<String>,
+        name: String,
+        kind: String,
+        gid: String,
+    }
+    let mut accs: HashMap<String, Acc> = HashMap::new();
+    for (agent, model, session_id, input, output, cr, cw, official, profile_id) in rows {
+        let official_row = official != 0;
+        let (key, name, kind, gid) = if official_row {
+            (
+                "official".to_string(),
+                "官方订阅".to_string(),
+                "official".to_string(),
+                String::new(),
+            )
+        } else {
+            match profile_id.as_deref().filter(|s| !s.is_empty()) {
+                None => (
+                    "unlinked".into(),
+                    "未关联".into(),
+                    "unlinked".into(),
+                    String::new(),
+                ),
+                Some(pid) => match bind_by_id.get(pid) {
+                    None => (
+                        "unlinked".into(),
+                        "未关联".into(),
+                        "unlinked".into(),
+                        String::new(),
+                    ),
+                    Some(b) if b.kind == crate::profiles::BindingKind::Official => (
+                        "official".into(),
+                        "官方订阅".into(),
+                        "official".into(),
+                        String::new(),
+                    ),
+                    Some(b) => match b.gateway_id.as_deref() {
+                        None => (
+                            "unlinked".into(),
+                            "未关联".into(),
+                            "unlinked".into(),
+                            String::new(),
+                        ),
+                        Some(id) if gw_by_id.contains_key(id) => {
+                            let n = gw_by_id.get(id).map(|g| g.name.clone()).unwrap_or_default();
+                            (id.to_string(), n, "gateway".into(), id.to_string())
+                        }
+                        Some(id) => {
+                            let short: String = id.chars().filter(|c| c.is_ascii_hexdigit()).take(8).collect();
+                            (
+                                format!("deleted:{id}"),
+                                format!("已删除网关 · {short}"),
+                                "deleted".into(),
+                                id.to_string(),
+                            )
+                        }
+                    },
+                },
+            }
+        };
+        let e = accs.entry(key).or_insert_with(|| Acc {
+            name,
+            kind,
+            gid,
+            ..Default::default()
+        });
+        e.agents.insert(agent);
+        e.bucket.add(
+            &model,
+            &session_id,
+            TokenAcc {
+                input: input as u64,
+                output: output as u64,
+                cache_read: cr as u64,
+                cache_write: cw as u64,
+            },
+        );
+    }
+    let table = load_pricing(None);
+    let mut out: Vec<GatewayUsageRow> = accs
+        .into_iter()
+        .map(|(_, a)| {
+            let (cost_usd, cost_partial) = a.bucket.cost(&table);
+            let mut agents: Vec<String> = a.agents.into_iter().collect();
+            agents.sort();
+            GatewayUsageRow {
+                gateway_id: a.gid,
+                gateway_name: a.name,
+                bucket: a.kind,
+                tokens_in: a.bucket.tokens.input,
+                tokens_out: a.bucket.tokens.output,
+                cost_usd,
+                cost_partial,
+                session_count: a.bucket.sessions.len() as u64,
+                agents,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| (b.tokens_in + b.tokens_out).cmp(&(a.tokens_in + a.tokens_out)));
+    Ok(out)
+}
+
+pub(crate) fn month_cost_usd_by_gateway() -> std::collections::HashMap<String, Option<f64>> {
+    let bindings = crate::gateway_store::load_bindings().unwrap_or_default();
+    let gateways = crate::gateway_store::load_gateways().unwrap_or_default();
+    let Ok(conn) = usage_db() else {
+        return Default::default();
+    };
+    let Ok(rows) = usage_by_gateway_impl(&conn, "month", &bindings, &gateways) else {
+        return Default::default();
+    };
+    rows.into_iter()
+        .filter(|r| r.bucket == "gateway")
+        .map(|r| (r.gateway_id, r.cost_usd))
+        .collect()
+}
+
+#[tauri::command]
+pub async fn usage_by_gateway(range: String) -> Result<Vec<GatewayUsageRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = crate::profiles::ProfileStore::new().and_then(|s| s.list());
+        let bindings = crate::gateway_store::load_bindings().unwrap_or_default();
+        let gateways = crate::gateway_store::load_gateways().unwrap_or_default();
+        let conn = usage_db()?;
+        usage_by_gateway_impl(&conn, &range, &bindings, &gateways)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ===== profile 用量近似归属（按模型名匹配，含 provider 前缀剥离）=====
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2264,6 +3012,7 @@ fn profile_usage_impl(conn: &rusqlite::Connection, models: &[String]) -> Result<
     })
 }
 
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn profile_usage(
     store: tauri::State<'_, crate::profiles::ProfileStore>,
@@ -2301,5 +3050,77 @@ mod profile_usage_tests {
         // kimi-k3 在定价表（官方 ¥20/¥100 ≈ $2.78/$13.89），应有费用且不 partial
         assert!(dto.cost_usd.is_some());
         assert!(!dto.cost_partial);
+    }
+}
+
+#[cfg(test)]
+mod gateway_usage_tests {
+    use super::*;
+    use crate::profiles::{Binding, BindingKind, Gateway, ProtocolSlots};
+
+    fn gw(id: &str, name: &str) -> Gateway {
+        Gateway {
+            id: id.into(),
+            name: name.into(),
+            no_auth: false,
+            key_hint: None,
+            slots: ProtocolSlots::default(),
+            header_env: Default::default(),
+            models: vec![],
+            catalog_fetched_at: None,
+            catalog_from_slot: None,
+            last_probe: vec![],
+            slot_probes: vec![],
+        }
+    }
+
+    fn bind(id: &str, agent: &str, gid: Option<&str>, kind: BindingKind) -> Binding {
+        Binding {
+            id: id.into(),
+            agent: agent.into(),
+            kind,
+            gateway_id: gid.map(|s| s.into()),
+            protocol: None,
+            models: vec![],
+            extra_env: Default::default(),
+            last_used_at: None,
+        }
+    }
+
+    #[test]
+    fn usage_join_three_missing_buckets_and_live_gateway() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_daily(day TEXT, agent TEXT, model TEXT, project_path TEXT, session_id TEXT,
+             input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, official INTEGER);
+             CREATE TABLE session_meta(agent TEXT, session_id TEXT, profile_id TEXT);
+             INSERT INTO usage_daily VALUES
+             ('2026-08-30','claude-code','m','/p','s-gw',10,1,0,0,0),
+             ('2026-08-30','codex','m','/p','s-none',20,2,0,0,0),
+             ('2026-08-30','claude-code','m','/p','s-dead',30,3,0,0,0),
+             ('2026-08-30','gemini','m','/p','s-off',40,4,0,0,1),
+             ('2026-08-30','claude-code','m','/p','s-del',50,5,0,0,0);
+             INSERT INTO session_meta VALUES
+             ('claude-code','s-gw','b-live'),
+             ('claude-code','s-dead','gone'),
+             ('claude-code','s-del','b-del');",
+        )
+        .unwrap();
+        let gws = vec![gw("g-live", "Zeta")];
+        let bindings = vec![
+            bind("b-live", "claude-code", Some("g-live"), BindingKind::Api),
+            bind("b-del", "claude-code", Some("g-gone"), BindingKind::Api),
+        ];
+        let rows = usage_by_gateway_impl(&conn, "all", &bindings, &gws).unwrap();
+        let live = rows.iter().find(|r| r.bucket == "gateway").unwrap();
+        assert_eq!(live.gateway_name, "Zeta");
+        assert_eq!(live.tokens_in, 10);
+        let unlinked = rows.iter().find(|r| r.bucket == "unlinked").unwrap();
+        assert_eq!(unlinked.tokens_in, 20 + 30); // no meta + deleted binding id
+        let official = rows.iter().find(|r| r.bucket == "official").unwrap();
+        assert_eq!(official.tokens_in, 40);
+        let deleted = rows.iter().find(|r| r.bucket == "deleted").unwrap();
+        assert!(deleted.gateway_name.contains("已删除网关"));
+        assert_eq!(deleted.tokens_in, 50);
     }
 }

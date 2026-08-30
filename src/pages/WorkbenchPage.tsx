@@ -10,6 +10,8 @@ import {
   MessagesSquare,
 } from "lucide-react";
 import { useAppStore, runInboxAction } from "../store";
+import { abbrevHome } from "../path-utils";
+import { IS_WINDOWS } from "../hotkeys";
 import { buildRunOverview } from "../run-overview";
 import { relTime } from "../rel-time";
 import { alertDialog } from "../components/ConfirmDialog";
@@ -77,10 +79,17 @@ function WorkbenchPage({
 
   // 已注册项目列表：区分跳转落点（已注册 → 项目详情；未注册 → 终端真进入）
   const [projects, setProjects] = useState<ProjectDto[]>([]);
+  const [homeDir, setHomeDir] = useState("");
 
   useEffect(() => {
     if (visible) void loadRecentRepos();
   }, [loadRecentRepos, visible]);
+
+  useEffect(() => {
+    void invoke<string>("home_dir")
+      .then(setHomeDir)
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!visible) return;
@@ -116,31 +125,46 @@ function WorkbenchPage({
     runOverview.items.filter((item) => item.running).length ||
     Object.keys(liveSessions).length;
   const recentSessions = sessions.slice(0, 6);
-  const currentProject = contextLabel?.project ?? recentRepos[0]?.name ?? null;
-  const hasProjectContext = Boolean(contextLabel?.project);
+  const hero = useMemo(() => {
+    if (contextLabel?.project) {
+      const byName = projects.find((p) => p.name === contextLabel.project);
+      const byRecent = recentRepos.find((r) => r.name === contextLabel.project);
+      return {
+        name: contextLabel.project,
+        path: byName?.path ?? byRecent?.path ?? null,
+        registered: true,
+      };
+    }
+    const registeredRepo = recentRepos.find((r) =>
+      projects.some((p) => samePath(p.path, r.path)),
+    );
+    if (registeredRepo)
+      return { name: registeredRepo.name, path: registeredRepo.path, registered: true };
+    if (recentRepos[0])
+      return { name: recentRepos[0].name, path: recentRepos[0].path, registered: false };
+    return null;
+  }, [contextLabel, projects, recentRepos]);
+  const currentProject = hero?.name ?? null;
+  const hasProjectContext = Boolean(hero?.registered);
+  const recentProjectRows = useMemo(
+    () =>
+      [...recentRepos].sort((a, b) => {
+        const ar = projects.some((p) => samePath(p.path, a.path)) ? 0 : 1;
+        const br = projects.some((p) => samePath(p.path, b.path)) ? 0 : 1;
+        return ar - br;
+      }),
+    [projects, recentRepos],
+  );
 
   return (
     <PageFrame width="fluid" className="pb-12">
       <PageHeader
         title="工作台"
-        meta={
-          currentProject
-            ? `${currentProject}${contextLabel?.step ? ` · ${contextLabel.step}` : ""}`
-            : "从当前工作开始"
-        }
+        meta={contextLabel?.step ?? "从当前工作开始"}
         actions={
-          <>
-            <button type="button" className={secondaryActionClass} onClick={onQuickChat}>
-              快速开聊
-            </button>
-            <button
-              type="button"
-              className={primaryActionClass}
-              onClick={() => setPage("workspaces")}
-            >
-              添加项目
-            </button>
-          </>
+          <button type="button" className={secondaryActionClass} onClick={onQuickChat}>
+            快速开聊
+          </button>
         }
       />
 
@@ -166,12 +190,14 @@ function WorkbenchPage({
                   <p className="mt-1 text-sm text-l3">
                     {contextLabel?.step ?? (hasProjectContext ? "项目上下文已就绪" : "最近打开的项目")}
                   </p>
-                  {recentRepos[0]?.path && recentRepos[0].name === currentProject && (
+                  {hero?.path && (
                     <p
                       className="mt-3 truncate font-mono text-micro text-l4"
-                      title={recentRepos[0].path}
+                      title={hero.path}
                     >
-                      {recentRepos[0].path}
+                      {homeDir
+                        ? abbrevHome(hero.path, homeDir, IS_WINDOWS)
+                        : hero.path}
                     </p>
                   )}
                 </div>
@@ -182,7 +208,11 @@ function WorkbenchPage({
                     // 有项目上下文 = 回项目详情（项目页保留上次选中）；
                     // 回落到最近仓库（可能未在 Ccode 注册）= 按统一点击落点跳转
                     if (hasProjectContext) setPage("workspaces");
-                    else if (recentRepos[0]) void enterRepo(recentRepos[0]);
+                    else if (hero?.path) {
+                      const repo = recentRepos.find((r) => samePath(r.path, hero.path!));
+                      if (repo) void enterRepo(repo);
+                      else setPage("workspaces");
+                    }
                   }}
                 >
                   继续工作
@@ -228,23 +258,18 @@ function WorkbenchPage({
           )}
         </section>
 
+        {inboxItems.length > 0 && (
         <section className="min-w-0">
           <SectionHeading
             icon={CircleDot}
             title="待你处理"
             action={
-              inboxItems.length > 0 ? (
-                <span className="rounded-full bg-warn px-2 py-0.5 text-micro text-warn-text">
-                  {inboxItems.length}
-                </span>
-              ) : undefined
+              <span className="rounded-full bg-warn px-2 py-0.5 text-micro text-warn-text">
+                {inboxItems.length}
+              </span>
             }
           />
-          {inboxItems.length === 0 ? (
-            <p className="rounded-md bg-strip/60 px-3 py-4 text-sm text-l3">
-              暂时没有待处理事项。
-            </p>
-          ) : (
+          {inboxItems.length === 0 ? null : (
             <div className="space-y-0.5">
               {inboxItems.slice(0, 5).map((item) => (
                 <div
@@ -267,6 +292,7 @@ function WorkbenchPage({
             </div>
           )}
         </section>
+        )}
       </div>
 
       <div className="mt-10 grid gap-8 lg:grid-cols-2">
@@ -280,11 +306,11 @@ function WorkbenchPage({
               </button>
             }
           />
-          {recentRepos.length === 0 ? (
+          {recentProjectRows.length === 0 ? (
             <p className="py-5 text-sm text-l3">最近打开的项目会显示在这里。</p>
           ) : (
             <div className="space-y-0.5">
-              {recentRepos.slice(0, 5).map((repo) => (
+              {recentProjectRows.slice(0, 5).map((repo) => (
                 <button
                   key={repo.path}
                   type="button"

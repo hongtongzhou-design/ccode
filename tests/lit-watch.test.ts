@@ -9,6 +9,7 @@ import {
   includedLineFor,
   isRead,
   litInboxCandidates,
+  litInboxForRegisteredProjects,
   litWatchFilterActive,
   litWatchFilterLabel,
   metricsTooltip,
@@ -374,6 +375,18 @@ test("litInboxCandidates：最近一次成功 run 有新命中且 24h 内才入�
     ],
   });
   assert.deepEqual(litInboxCandidates([okThenFail], now).map((c) => [c.scheduleId, c.count]), [["s-6", 2]]);
+});
+
+test("litInboxForRegisteredProjects：已删项目不进收件箱", () => {
+  const candidates = [
+    { scheduleId: "s-1", projectRoot: "/repo/alive", count: 2, at: "2026-08-18T09:00:00Z" },
+    { scheduleId: "s-2", projectRoot: "/repo/综述文献", count: 3, at: "2026-08-18T09:00:00Z" },
+  ];
+  assert.deepEqual(
+    litInboxForRegisteredProjects(candidates, ["/repo/alive"]).map((c) => c.scheduleId),
+    ["s-1"],
+  );
+  assert.deepEqual(litInboxForRegisteredProjects(candidates, []), []);
 });
 
 test("filterLitDismissed：忽略表内的条目被过滤", () => {

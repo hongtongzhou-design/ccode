@@ -21,8 +21,13 @@ mod pdf;
 mod portwatch;
 mod process;
 mod pricing;
+mod combo;
+mod drift;
+mod gateway_store;
+mod tray;
 mod profiles;
 mod profile_validation;
+mod provider_id;
 mod projects;
 mod pty;
 mod reader;
@@ -59,6 +64,9 @@ pub fn run() {
             }
             // 定时雷达：60s tick 调度，启动首 tick 自动补跑关闭期间漏掉的任务
             scheduler::start_scheduler(app.handle().clone());
+            if let Err(e) = tray::setup(app.handle()) {
+                logbuf::record("warn", "tray", &format!("托盘初始化失败: {e}"));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -71,8 +79,21 @@ pub fn run() {
             profiles::copy_profile_to_agent,
             profiles::export_profiles,
             profiles::import_profiles,
+            profiles::export_gateways_v2,
+            profiles::import_gateways_v2,
+            profiles::list_gateways,
+            profiles::merge_gateway_models,
+            profiles::save_gateway,
+            profiles::delete_gateway,
+            profiles::bind_gateway,
+            profiles::unbind_split_merge,
+            profiles::clear_gateway_key,
+            combo::combo_surface,
+            combo::combo_surface_for_gateway,
+            tray::rebuild_tray,
             profile_validation::validate_profile,
             profile_validation::probe_gateway,
+            profile_validation::probe_gateway_slot,
             agents::detect_agents,
             agents::preview_launch_plan,
             agents::official_account_status,
@@ -83,8 +104,11 @@ pub fn run() {
             agents::session_digest_command,
             agents::digest_external_terminal,
             models::fetch_models,
+            models::fetch_gateway_catalog,
             model_registry::model_db_status,
             model_registry::download_model_db,
+            model_registry::model_capability_brief,
+            global_config::check_global_drift,
             global_config::apply_profile_global,
             global_config::restore_global_backup,
             global_config::has_global_backup,
@@ -268,8 +292,10 @@ pub fn run() {
             skills::resync_skill_copies,
             usage::rebuild_usage_index,
             usage::get_usage_stats,
+            usage::usage_trend,
+            usage::top_sessions,
             usage::session_usage,
-            usage::profile_usage,
+            usage::usage_by_gateway,
             settings::get_settings,
             settings::app_storage_usage,
             mcp::mcp_distribution_status,
