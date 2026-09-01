@@ -513,7 +513,9 @@ static AGENT_SPECS: &[AgentSpec] = &[
             api_key_fields: &[],
         }),
         model_switch: ModelSwitch::None,
-        effort_levels: None,
+        // 0.22.0 bundle 实证 /effort 直切命令（写运行时 reasoning.effort；0.21.1 无此命令，
+        // 旧版用户点状态栏档位会报未知命令——按现状如实标注，不另行版本门控）
+        effort_levels: Some((&["low", "medium", "high", "xhigh", "max"], "/effort {level}")),
         submit_csi_u: false,
         set_global: SetGlobalCap::Supported,
         mcp_write: McpWriteCap::Full,
@@ -797,9 +799,10 @@ static AGENT_SPECS: &[AgentSpec] = &[
         model_switch: ModelSwitch::None,
         effort_levels: None,
         submit_csi_u: false,
-        set_global: SetGlobalCap::Unsupported(
-            "Grok 的全局配置是 TOML [model.<name>] 段结构，首版仅支持启动注入",
-        ),
+        // 「设为全局默认」（2026-09-01 落地）：~/.grok/config.toml 写顶层 api_key +
+        // [endpoints].models_base_url + [models].default/请求策略全局默认；
+        // 写入面与冲突探针（顶层 api_key/env_key 压官方登录）语义自洽，见 global_config::patch_grok_config
+        set_global: SetGlobalCap::Supported,
         mcp_write: McpWriteCap::ReadOnly(
             "Grok 的 MCP 分发暂不支持（TOML [mcp_servers] 段与 model 同文件）；请用 `grok mcp add` 或编辑 ~/.grok/config.toml",
         ),
@@ -849,6 +852,17 @@ pub struct AgentCapabilitiesDto {
     pub effort_options: Vec<&'static str>,
 }
 
+/// 逐 agent 的策略通道形态说明（求交 DTO 下发，前端策略编辑区展示；None = 标准形态不用说）
+pub(crate) fn policy_channel_note(agent: &str) -> Option<&'static str> {
+    match agent {
+        // 0.22.0 实证：温度/topP 只经设为全局的 generationConfig.samplingParams 生效
+        "qwen" => Some("temperature / topP 只在「设为全局默认」写入后生效；启动注入仅 max output 一条通道"),
+        // overlay 白名单只放行 [models] 全局默认；逐模型 api_backend/context_window 走设为全局
+        "grok" => Some("策略经 GROK_CONFIG overlay 的 [models] 全局默认注入；api_backend / context_window 需绑定「API 后端」字段 + 设为全局默认写入"),
+        _ => None,
+    }
+}
+
 /// 逐 agent 的 reasoningEffort 已知档位（与 request_policy_support 同实证口径）
 pub(crate) fn effort_options(agent: &str) -> Vec<&'static str> {
     match agent {
@@ -873,42 +887,55 @@ pub struct RequestPolicySupportDto {
 }
 
 /// 请求策略逐字段通道表（2026-08-28 本机安装二进制 strings/配置 schema 实证，调研录 matrix §9 第 8 条）。
-/// "supported" = 存在实证的用户可及通道（env/flag/配置键）能让该值进入真实请求；
-/// 协议本身支持但 CLI 无用户入口的记 "unsupported"（Ccode 不改写请求体，无通道即无效果）。
+/// 取值按**入口**记账（2026-09-01 拆分，此前 supported 一词被求交器误当「启动可注」）：
+/// - "inject" = 启动注入通道（env/flag/内联配置/overlay），内嵌终端拉起即生效
+/// - "persist" = 仅「设为全局默认」写 CLI 配置文件可达（启动注入够不到）
+/// - "tui" = 仅进程内原生命令（如 /effort），Ccode 不携带存储值
+/// - "unsupported" = 协议支持但 CLI 无用户入口；"unknown" = 未实证
 pub(crate) fn request_policy_support(agent: &str) -> RequestPolicySupportDto {
-    let supported = |temperature, top_p, max_output_tokens, reasoning_effort, custom_headers| {
+    let row = |temperature, top_p, max_output_tokens, reasoning_effort, custom_headers| {
         RequestPolicySupportDto { temperature, top_p, max_output_tokens, reasoning_effort, custom_headers }
     };
     match agent {
         // claude-code v2.x 二进制实证：temperature/top_p 经 CLAUDE_CODE_EXTRA_BODY（JSON 对象
         // 展开进请求体）；max_output_tokens=CLAUDE_CODE_MAX_OUTPUT_TOKENS；
         // effort=CLAUDE_CODE_EFFORT_LEVEL（同 /effort）；headers=ANTHROPIC_CUSTOM_HEADERS
-        "claude-code" => supported("supported", "supported", "supported", "supported", "supported"),
+        "claude-code" => row("inject", "inject", "inject", "inject", "inject"),
         // codebuddy 是 claude-code fork 但 env 前缀独立且无 EXTRA_BODY/EFFORT 入口：
         // CODEBUDDY_CODE_MAX_OUTPUT_TOKENS / CODEBUDDY_CUSTOM_HEADERS 实证，其余无通道
-        "codebuddy" => supported("unsupported", "unsupported", "supported", "unknown", "supported"),
+        "codebuddy" => row("unsupported", "unsupported", "inject", "unknown", "inject"),
         // gemini settings schema 无 temperature/topP/maxOutputTokens 键（bundle 实证），
         // generationConfig 仅出现在 API 请求构造路径，非用户配置通道
-        "gemini" => supported("unsupported", "unsupported", "unsupported", "unknown", "unknown"),
+        "gemini" => row("unsupported", "unsupported", "unsupported", "unknown", "unknown"),
         // codex：temperature/top_p 仅存在于 wire schema（ModelPreferences），config 无键；
         // max_output_tokens 字符串全部是 exec pragma（工具输出截断）非模型请求；
         // reasoning_effort = config model_reasoning_effort；headers = provider http_headers/env_http_headers
-        "codex" => supported("unsupported", "unsupported", "unsupported", "supported", "supported"),
+        "codex" => row("unsupported", "unsupported", "unsupported", "inject", "inject"),
         // opencode config schema 实证：agent/model options 含 temperature/topP/maxOutputTokens/
         // reasoningEffort（枚举），provider options 支持 headers
-        "opencode" => supported("supported", "supported", "supported", "supported", "supported"),
+        "opencode" => row("inject", "inject", "inject", "inject", "inject"),
         // kimi 新版合成通道 KIMI_MODEL_THINKING_EFFORT（2026-08-28 二进制实证：原样透传 +
-        // 小写归一，无闭集校验；仅 kimi 协议通道生效，anthropic/openai 通道静默忽略）
-        "kimi" => supported("unknown", "unknown", "unknown", "supported", "unknown"),
-        // qwen settings schema 无 temperature/topP/maxOutputTokens 键（bundle 实证，同 gemini 结论）
-        "qwen" => supported("unsupported", "unsupported", "unsupported", "unknown", "unknown"),
-        // grok v1.0.5 二进制 + 随附 README 双实证：config.toml [model.*] 表 temperature/top_p/
-        // max_completion_tokens（注意键名）/reasoning_effort，headers 走 [model.*].extra_headers
-        // （静态值）与 env_http_headers（环境变量引用）；另有 CLI flag --reasoning-effort。
-        // 通道走 config 不走 env（GROK_* 无此类变量）——Ccode 侧 GROK_CONFIG overlay 接线留后续
-        "grok" => supported("supported", "supported", "supported", "supported", "supported"),
+        // 小写归一，无闭集校验；**仅 kimi 协议通道读取**——求交器按绑定 protocol 再门控，
+        // 见 combo.rs channel_status_for），anthropic/openai 通道静默忽略
+        "kimi" => row("unknown", "unknown", "unknown", "inject", "unknown"),
+        // qwen 0.22.0 bundle 实证（2026-09-01 复核，旧「无通道」结论修正）：temperature/top_p/
+        // max_tokens 通道 = settings.json 条目级 generationConfig.samplingParams（snake_case
+        // 线格式键名；dialog schema 未列该子键但运行时任其生效）——「设为全局」写入可达，
+        // 启动 env 只有 QWEN_CODE_MAX_OUTPUT_TOKENS 一条（条目已配 samplingParams 时被跳过）。
+        // effort：无注入/写盘通道，但 0.22.0 有 /effort 直切命令（见 effort_levels 字段）→ tui；
+        // headers：generationConfig.customHeaders 在白名单内但请求注入点未逐键实证 → 保守 unknown
+        "qwen" => row("persist", "persist", "inject", "tui", "unknown"),
+        // grok v1.0.5 二进制 + 随附 README 双实证：temperature/top_p/max_completion_tokens
+        // （注意键名）/reasoning_effort 与 headers 的通道是 config 不是 env（GROK_* 无此类变量）。
+        // Ccode 侧接线（2026-08-31，grok-build main 源码实证）：GROK_CONFIG overlay 白名单
+        // （config_override.rs OVERLAY_ALLOW_PATHS，fail-closed）只放行 [models] 全局块——
+        // 五项全经 [models] 全局默认注入（temperature/top_p/max_completion_tokens/
+        // default_reasoning_effort/extra_headers=$VAR 引用，见 agents::grok_config_overlay）；
+        // 逐模型 [model.<id>] 表明确不在白名单内，api_backend/context_window 注不进，
+        // 走绑定「API 后端」+ 设为全局（global_config::patch_grok_config）或中转目录声明
+        "grok" => row("inject", "inject", "inject", "inject", "inject"),
         // cursor 本机未安装（2026-08-28），无法 strings 实证——保持 unknown 如实标注
-        _ => supported("unknown", "unknown", "unknown", "unknown", "unknown"),
+        _ => row("unknown", "unknown", "unknown", "unknown", "unknown"),
     }
 }
 
@@ -1183,25 +1210,28 @@ mod tests {
     /// 支持面必须与 global_config plan_writes 的 match arm、mcp/skills 消费点一致
     #[test]
     fn capability_fields_match_consumers() {
-        // 「设为全局默认」：global_config::plan_writes 有写计划的七家 Supported
-        for id in ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi", "codebuddy"] {
+        // 「设为全局默认」：global_config::plan_writes 有写计划的八家 Supported
+        for id in [
+            "claude-code",
+            "codex",
+            "gemini",
+            "qwen",
+            "opencode",
+            "kimi",
+            "codebuddy",
+            "grok",
+        ] {
             assert_eq!(
                 agent_spec(id).unwrap().set_global,
                 SetGlobalCap::Supported,
                 "{id} 应支持设为全局默认"
             );
         }
-        // grok/cursor 不支持且必须带用户可见原因（fail-loud）
-        for id in ["grok", "cursor"] {
-            let SetGlobalCap::Unsupported(reason) = agent_spec(id).unwrap().set_global else {
-                panic!("{id} 应为 Unsupported");
-            };
-            assert!(!reason.is_empty(), "{id} 缺原因文案");
-        }
-        assert!(agent_spec("grok").unwrap().set_global
-            == SetGlobalCap::Unsupported(
-                "Grok 的全局配置是 TOML [model.<name>] 段结构，首版仅支持启动注入"
-            ));
+        // cursor 不支持且必须带用户可见原因（fail-loud）
+        let SetGlobalCap::Unsupported(reason) = agent_spec("cursor").unwrap().set_global else {
+            panic!("cursor 应为 Unsupported");
+        };
+        assert!(!reason.is_empty(), "cursor 缺原因文案");
         // MCP 分发：仅 grok 只读（原因指向 grok mcp add），其余八家 Full
         assert_eq!(
             agent_spec("grok").unwrap().mcp_write,
@@ -1235,12 +1265,12 @@ mod tests {
         assert_eq!(claude.set_global, SetGlobalCap::Supported);
         assert_eq!(claude.mcp_write, McpWriteCap::Full);
         assert_eq!(claude.skill_dist, SkillDist::SymlinkOrCopy);
-        // DTO 形态：grok 三项均带原因，supported/mode 正确
+        // DTO 形态：grok 的 MCP/技能两项带原因，set_global 已支持（2026-09-01 起）
         let dto = agent_capabilities()
             .into_iter()
             .find(|c| c.agent == "grok")
             .unwrap();
-        assert!(!dto.set_global.supported && dto.set_global.reason.is_some());
+        assert!(dto.set_global.supported && dto.set_global.reason.is_none());
         assert!(!dto.mcp_write.supported && dto.mcp_write.reason.is_some());
         assert_eq!(dto.skill_dist.mode, "copyOnly");
         assert!(dto.skill_dist.reason.is_some());
@@ -1249,8 +1279,74 @@ mod tests {
             .find(|c| c.agent == "claude-code")
             .unwrap();
         assert!(claude_dto.set_global.supported && claude_dto.set_global.reason.is_none());
-        assert_eq!(claude_dto.request_policy.temperature, "supported");
-        assert_eq!(claude_dto.request_policy.custom_headers, "supported");
+        // 通道表按入口记账：inject/persist/tui/unsupported/unknown
+        assert_eq!(claude_dto.request_policy.temperature, "inject");
+        assert_eq!(claude_dto.request_policy.custom_headers, "inject");
+        let qwen_dto = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "qwen")
+            .unwrap();
+        assert_eq!(qwen_dto.request_policy.temperature, "persist");
+        assert_eq!(qwen_dto.request_policy.reasoning_effort, "tui");
+        assert_eq!(qwen_dto.request_policy.max_output_tokens, "inject");
+        assert_eq!(qwen_dto.request_policy.custom_headers, "unknown");
+        assert_eq!(qwen_dto.effort_options, Vec::<&str>::new());
+        assert_eq!(agent_spec("qwen").unwrap().effort_levels.map(|(l, _)| l.len()), Some(5));
+        assert_eq!(agent_spec("gemini").unwrap().effort_levels, None);
+        assert_eq!(agent_spec("codex").unwrap().effort_levels, None);
+        assert_eq!(agent_spec("grok").unwrap().effort_levels, None);
+        let kimi_dto = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "kimi")
+            .unwrap();
+        assert_eq!(kimi_dto.request_policy.reasoning_effort, "inject");
+        assert_eq!(kimi_dto.request_policy.temperature, "unknown");
+        assert_eq!(kimi_dto.request_policy.custom_headers, "unknown");
+        let cursor_dto = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "cursor")
+            .unwrap();
+        assert_eq!(cursor_dto.request_policy.temperature, "unknown");
+        let codebuddy_dto = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "codebuddy")
+            .unwrap();
+        assert_eq!(codebuddy_dto.request_policy.temperature, "unsupported");
+        assert_eq!(codebuddy_dto.request_policy.custom_headers, "inject");
+        assert_eq!(codebuddy_dto.request_policy.reasoning_effort, "unknown");
+        assert_eq!(codebuddy_dto.request_policy.max_output_tokens, "inject");
+        assert_eq!(codebuddy_dto.request_policy.top_p, "unsupported");
+        let gemini_dto = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "gemini")
+            .unwrap();
+        assert_eq!(gemini_dto.request_policy.temperature, "unsupported");
+        assert_eq!(gemini_dto.request_policy.reasoning_effort, "unknown");
+        assert_eq!(gemini_dto.request_policy.custom_headers, "unknown");
+        assert_eq!(gemini_dto.request_policy.max_output_tokens, "unsupported");
+        assert_eq!(gemini_dto.request_policy.top_p, "unsupported");
+        let codex_dto = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "codex")
+            .unwrap();
+        assert_eq!(codex_dto.request_policy.reasoning_effort, "inject");
+        assert_eq!(codex_dto.request_policy.custom_headers, "inject");
+        assert_eq!(codex_dto.request_policy.temperature, "unsupported");
+        let opencode_dto = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "opencode")
+            .unwrap();
+        assert_eq!(opencode_dto.request_policy.temperature, "inject");
+        assert_eq!(opencode_dto.request_policy.reasoning_effort, "inject");
+        let grok_dto2 = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "grok")
+            .unwrap();
+        assert_eq!(grok_dto2.request_policy.temperature, "inject");
+        assert_eq!(grok_dto2.request_policy.custom_headers, "inject");
+        assert_eq!(grok_dto2.request_policy.reasoning_effort, "inject");
+        assert_eq!(grok_dto2.request_policy.max_output_tokens, "inject");
+        assert_eq!(grok_dto2.request_policy.top_p, "inject");
         assert_eq!(claude_dto.skill_dist.mode, "symlinkOrCopy");
     }
 }

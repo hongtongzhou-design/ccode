@@ -96,6 +96,7 @@ fn target_specs(agent: &str) -> Vec<(&'static str, &'static str)> {
             ("config.toml", ".kimi-code/config.toml"),
             ("legacy-config.toml", ".kimi/config.toml"),
         ],
+        "grok" => vec![("config.toml", ".grok/config.toml")],
         _ => vec![],
     }
 }
@@ -194,17 +195,26 @@ fn patch_claude_settings(
     } else {
         env.remove("CLAUDE_CODE_EFFORT_LEVEL");
     }
+    // 子 agent（Task 工具）模型：2.1.226 二进制实证解析链 env > Task 参数 > frontmatter >
+    // inherit 主模型；缺省继承主模型 = 第三方网关上子 agent 与主循环同档同价。
+    // 绑定名单 ≥3 个时把 HAIKU 槽（models[2]，「便宜/快」角色槽）复用为子 agent 模型
+    //（DeepSeek 官方推荐同口径，matrix §25；cc-switch 有独立 Subagent 行）。
+    // 注意 env 优先级最高：会压过 frontmatter 的 model 声明（含内置 Explore 类小模型声明）
+    if let Some(haiku) = models.get(2) {
+        env.insert("CLAUDE_CODE_SUBAGENT_MODEL".into(), json!(haiku));
+    }
     to_pretty(&v)
 }
 
 fn patch_qwen_settings(
     existing: Option<&str>,
-    protocol: &str,
-    base_url: Option<&str>,
     key: Option<&str>,
-    model: Option<&str>,
-    models: &[String],
+    profile: &Profile,
 ) -> Result<String, String> {
+    let protocol = profile.protocol.as_deref().unwrap_or("openai");
+    let base_url = profile.base_url.as_deref();
+    let models = &profile.models;
+    let model = models.first().map(String::as_str);
     let mut v = parse_json_doc(existing)?;
     ensure_obj(&mut v, &["security", "auth"])?.insert("selectedType".into(), json!(protocol));
     let env = ensure_obj(&mut v, &["env"])?;
@@ -239,12 +249,44 @@ fn patch_qwen_settings(
         } else {
             "OPENAI_API_KEY"
         };
+        // 逐模型 generationConfig.samplingParams（0.22.0 bundle 实证：条目级优先于顶层
+        // model.generationConfig，键名是 snake_case 线格式 temperature/top_p/max_tokens；
+        // dialog schema 未列该子键但运行时任其生效——「代码读、schema 未写」的半隐藏通道）。
+        // 策略取各模型自己的值（网关行 → apply_to_profile 物化，与 opencode 全局写入同口径）。
+        // 注意：条目配了 samplingParams 会跳过 qwen 的 known-model max_tokens 自动钳制——
+        // 用户显式值原样下发，超上限 400 风险在网关策略侧自控（matrix §9 第 8 条）
+        let gw = profile
+            .gateway_id
+            .as_deref()
+            .and_then(crate::gateway_store::find_gateway);
         let entries: Vec<Value> = models
             .iter()
             .map(|m| {
                 let mut e = json!({ "id": m, "name": m, "envKey": env_key });
                 if let Some(u) = base_url {
                     e["baseUrl"] = json!(u);
+                }
+                let mut tmp = profile.clone();
+                if let Some(gm) = gw.as_ref().and_then(|g| g.models.iter().find(|x| x.id == *m)) {
+                    tmp.request_policy.temperature = gm.temperature;
+                    tmp.request_policy.top_p = gm.top_p;
+                    tmp.request_policy.max_output_tokens = gm.max_output_tokens;
+                    tmp.request_policy.reasoning_effort = gm.reasoning_effort.clone();
+                }
+                crate::combo::apply_to_profile(&mut tmp, Some(m));
+                let policy = &tmp.request_policy;
+                let mut sp = serde_json::Map::new();
+                if let Some(val) = policy.temperature {
+                    sp.insert("temperature".into(), json!(val));
+                }
+                if let Some(val) = policy.top_p {
+                    sp.insert("top_p".into(), json!(val));
+                }
+                if let Some(val) = policy.max_output_tokens {
+                    sp.insert("max_tokens".into(), json!(val));
+                }
+                if !sp.is_empty() {
+                    e["generationConfig"] = json!({ "samplingParams": Value::Object(sp) });
                 }
                 e
             })
@@ -262,12 +304,24 @@ fn patch_codex_auth(existing: Option<&str>, key: &str) -> Result<String, String>
     to_pretty(&v)
 }
 
-/// gemini 的 settings.json：只补 security.auth.selectedType = "gemini-api-key"——
+/// gemini 的 settings.json：补 security.auth.selectedType = "gemini-api-key"——
 /// 光有 .env 的 GEMINI_API_KEY 时 gemini ≥0.46 无法推断认证方式（base URL 存在时
 /// env 推断为 gateway，validateAuthMethod 不认 → headless 报 auth 错起不来），
 /// cc-switch 同口径。settings.json 是 JSONC（容忍注释/尾逗号，读侧剥注释后重写为
 /// 严格 JSON），其余字段一律保留
-fn patch_gemini_settings(existing: Option<&str>) -> Result<String, String> {
+///
+/// 自定义模型进 /model 选择器（0.46.0 bundle 实证，2026-09-01）：唯一通道 =
+/// experimental.dynamicModelConfiguration 开关 + modelConfigs.modelDefinitions
+/// （env/flag 无等价物，启动注入够不到）；isVisible 必须显式 true，tier=custom 最稳
+/// （auto 挤主视图、pro 被无权限账号过滤）；与内置表浅合并不丢官方模型；
+/// 消费侧全门控该开关且 requiresRestart——已在跑的 gemini 会话要重启才生效。
+/// 只写/更新当前名单的条目，不删旧条目（键是模型 id，用户可能手维护）。
+fn patch_gemini_settings(
+    existing: Option<&str>,
+    profile_name: &str,
+    models: &[String],
+    gateway_id: Option<&str>,
+) -> Result<String, String> {
     let mut v = match existing {
         Some(text) => serde_json::from_str::<Value>(&crate::mcp::strip_jsonc(text))
             .map_err(|e| format!("现有 settings.json 解析失败，已停止写入: {e}"))?,
@@ -275,6 +329,33 @@ fn patch_gemini_settings(existing: Option<&str>) -> Result<String, String> {
     };
     ensure_obj(&mut v, &["security", "auth"])?
         .insert("selectedType".into(), json!("gemini-api-key"));
+    if !models.is_empty() {
+        ensure_obj(&mut v, &["experimental"])?
+            .insert("dynamicModelConfiguration".into(), json!(true));
+        let defs = ensure_obj(&mut v, &["modelConfigs", "modelDefinitions"])?;
+        for m in models {
+            let mut def = json!({
+                // 选择器显示名与 claude/kimi/codex 同口径：配置名 · 模型
+                "displayName": format!("{profile_name} · {m}"),
+                "tier": "custom",
+                "family": "custom",
+                "isPreview": false,
+                "isVisible": true,
+            });
+            // 能力标记宁缺毋滥：注册链确知才写，否则留空走 CLI 缺省
+            let mut feats = serde_json::Map::new();
+            if crate::model_registry::model_thinking_for(m, gateway_id) {
+                feats.insert("thinking".into(), json!(true));
+            }
+            if crate::model_registry::model_supports_vision_for(m, gateway_id) {
+                feats.insert("multimodalToolUse".into(), json!(true));
+            }
+            if !feats.is_empty() {
+                def["features"] = Value::Object(feats);
+            }
+            defs.insert(m.clone(), def);
+        }
+    }
     to_pretty(&v)
 }
 
@@ -405,6 +486,48 @@ fn patch_codex_config(
     Ok(doc.to_string())
 }
 
+/// 「注册到 Codex 客户端（不切换默认）」的 config.toml 补丁：只写 provider 定义块，
+/// 顶层 model_provider/model 一律不动——matrix §2：[model_providers.x] 只有显式设为
+/// 默认才接管请求；客户端续聊会话只需要定义可查（查不到才报「Model provider not found」）
+fn patch_codex_config_register(
+    existing: Option<&str>,
+    base_url: Option<&str>,
+    provider_id: &str,
+) -> Result<String, String> {
+    use toml_edit::value;
+    let mut doc = parse_toml_doc(existing)?;
+    let providers = sub_table(doc.as_item_mut(), "model_providers")?;
+    let blk = sub_table(providers, provider_id)?;
+    blk["name"] = value("Ccode");
+    if let Some(u) = base_url {
+        blk["base_url"] = value(u);
+    }
+    if let Some(t) = blk.as_table_mut() {
+        t.remove("env_key");
+    }
+    // 与「设为全局」同口径：认证走 auth.json 的 OPENAI_API_KEY（客户端是 GUI 进程，
+    // 读不到 shell 环境变量，env_key 引用在客户端解析不到）
+    blk["requires_openai_auth"] = value(true);
+    blk["wire_api"] = value("responses");
+    Ok(doc.to_string())
+}
+
+/// 「移除客户端注册」的 config.toml 补丁（注册的逆操作）：只删目标 provider 定义块，
+/// 顶层 model_provider/model 与其余块一律不动。返回 (新内容, 是否真的删到了)——
+/// 块不存在时调用方应跳过写入（不制造空备份批次）
+fn patch_codex_config_unregister(
+    existing: Option<&str>,
+    provider_id: &str,
+) -> Result<(String, bool), String> {
+    let mut doc = parse_toml_doc(existing)?;
+    let removed = doc
+        .get_mut("model_providers")
+        .and_then(|i| i.as_table_mut())
+        .map(|t| t.remove(provider_id).is_some())
+        .unwrap_or(false);
+    Ok((doc.to_string(), removed))
+}
+
 /// kimi 模型别名：清洗为 TOML 裸键字符集 [A-Za-z0-9_-]，无需引号
 fn kimi_model_alias(model: &str) -> String {
     model
@@ -491,6 +614,84 @@ fn patch_kimi_config(
     }
     Ok(doc.to_string())
 }
+
+/// Grok：~/.grok/config.toml（TOML）。写入面与启动注入同口径（matrix §9）：
+/// 顶层 api_key（凭证优先级最高档；官方账号冲突探针本就盯着它，语义自洽）+
+/// [endpoints].models_base_url（= 注入的 GROK_MODELS_BASE_URL）+
+/// [models].default（首个模型）。请求策略落 [models] 全局默认（键名与 GROK_CONFIG
+/// overlay 一致：temperature/top_p/max_completion_tokens/default_reasoning_effort）；
+/// Header 写 $VAR 引用——grok 读磁盘配置同样过 expand_env_vars_in_toml
+///（loader.rs load_toml_file 实证），密文不落盘。
+/// 与 claude 的 Ccode 专有键（EFFORT_LEVEL 随写随清）不同：[models] 这些是通用键，
+/// 用户手写的同名值也可能是本意——只设不删，过期值靠「撤销上次写入/恢复初始状态」兜底。
+/// 逐模型 [model.<id>] 段（2026-09-01 起）：绑定设了 API 后端（api_backend，overlay
+/// 白名单够不到、全局写入是 Ccode 侧唯一通道）或权威层确知 context_window 时才建段，
+/// name 随段写（配置名 · 模型，选择器口径一致）；权威层 = 用户覆盖/网关实测缓存
+///（model_context_size_authoritative_for——config 优先级高于中转目录，估值层不配写）。
+/// 段键 = 目录模型 id，含 / 或 . 的 id 依赖 toml_edit 自动加引号（测试锁死）。
+/// [mcp_servers] 等其他段与用户手写的 [model.*] 其他字段一律不动。
+fn patch_grok_config(
+    existing: Option<&str>,
+    key: Option<&str>,
+    profile: &Profile,
+) -> Result<String, String> {
+    use toml_edit::value;
+    let base_url = profile.base_url.as_deref();
+    let model = profile.models.first().map(String::as_str);
+    let policy = &profile.request_policy;
+    let mut doc = parse_toml_doc(existing)?;
+    if let Some(k) = key {
+        doc["api_key"] = value(k);
+    }
+    if let Some(u) = base_url {
+        let endpoints = sub_table(doc.as_item_mut(), "endpoints")?;
+        endpoints["models_base_url"] = value(u);
+    }
+    let models_tbl = sub_table(doc.as_item_mut(), "models")?;
+    if let Some(m) = model {
+        models_tbl["default"] = value(m);
+    }
+    if let Some(v) = policy.temperature {
+        models_tbl["temperature"] = value(v);
+    }
+    if let Some(v) = policy.top_p {
+        models_tbl["top_p"] = value(v);
+    }
+    if let Some(v) = policy.max_output_tokens {
+        models_tbl["max_completion_tokens"] = value(v as i64);
+    }
+    if let Some(v) = policy.reasoning_effort.as_deref().filter(|s| !s.is_empty()) {
+        models_tbl["default_reasoning_effort"] = value(v);
+    }
+    if !policy.header_env.is_empty() {
+        let mut headers = toml_edit::InlineTable::new();
+        for (h, var) in &policy.header_env {
+            headers.insert(h.as_str(), toml_edit::Value::from(format!("${var}")));
+        }
+        models_tbl["extra_headers"] = toml_edit::value(headers);
+    }
+    let api_backend = profile.api_backend.as_deref().filter(|s| !s.is_empty());
+    for m in &profile.models {
+        let ctx = crate::model_registry::model_context_size_authoritative_for(
+            m,
+            profile.gateway_id.as_deref(),
+        );
+        if api_backend.is_none() && ctx.is_none() {
+            continue;
+        }
+        let model_tbl = sub_table(doc.as_item_mut(), "model")?;
+        let entry = sub_table(model_tbl, m)?;
+        entry["name"] = value(format!("{} · {m}", profile.name));
+        if let Some(b) = api_backend {
+            entry["api_backend"] = value(b);
+        }
+        if let Some(c) = ctx {
+            entry["context_window"] = value(c);
+        }
+    }
+    Ok(doc.to_string())
+}
+
 
 /// CodeBuddy：settings.json 的 env 块写 CODEBUDDY_* 三件套（无模型槽位机制，结构最简单）
 fn patch_codebuddy_settings(
@@ -633,22 +834,21 @@ fn plan_writes(
                 let content = patch_env_file(read_existing(&path).as_deref(), &pairs)?;
                 push(".env", path, content);
             }
-            // 认证方式落盘（见 patch_gemini_settings 注释：没有它 headless 起不来）
+            // 认证方式落盘（见 patch_gemini_settings 注释：没有它 headless 起不来）；
+            // 顺带登记自定义模型进 /model 选择器（experimental 段，重启生效）
             let path = home.join(".gemini/settings.json");
-            let content = patch_gemini_settings(read_existing(&path).as_deref())?;
+            let content = patch_gemini_settings(
+                read_existing(&path).as_deref(),
+                &profile.name,
+                &profile.models,
+                profile.gateway_id.as_deref(),
+            )?;
             push("settings.json", path, content);
         }
         "qwen" => {
-            let protocol = profile.protocol.as_deref().unwrap_or("openai");
             let path = home.join(".qwen/settings.json");
-            let content = patch_qwen_settings(
-                read_existing(&path).as_deref(),
-                protocol,
-                base_url,
-                key,
-                model,
-                &profile.models,
-            )?;
+            let content =
+                patch_qwen_settings(read_existing(&path).as_deref(), key, profile)?;
             push("settings.json", path, content);
         }
         "opencode" => {
@@ -703,6 +903,11 @@ fn plan_writes(
                 )?;
                 push(tag, path, content);
             }
+        }
+        "grok" => {
+            let path = home.join(".grok/config.toml");
+            let content = patch_grok_config(read_existing(&path).as_deref(), key, profile)?;
+            push("config.toml", path, content);
         }
         // 防御兜底：能力表标 Supported 但这里漏了 arm（两表漂移），属内部错误
         other => return Err(format!(
@@ -1352,6 +1557,117 @@ pub async fn apply_profile_global(
     result
 }
 
+/// 注册到 Codex 客户端（不切换默认渠道）：只写 provider 定义块与 auth.json 密钥，
+/// 之后 Ccode 里此网关发起的会话可在 Codex 桌面客户端直接续聊（深链 codex://threads/<id>）。
+/// 与「设为全局」共用备份/原子写/事务回滚，后悔走「撤销上次写入」；
+/// 不 record_active_global——没有切换默认渠道，不产生「全局生效」语义
+#[tauri::command]
+pub async fn codex_register_client_provider(
+    store: tauri::State<'_, ProfileStore>,
+    profile_id: String,
+) -> Result<Vec<String>, String> {
+    let profile = profile_for_global_write(&store, &profile_id)?;
+    if profile.agent != "codex" {
+        return Err("只有 Codex 绑定支持注册到客户端".into());
+    }
+    if profile.account_type == crate::profiles::AccountType::Official {
+        return Err("官方账号无需注册：客户端与 CLI 共享官方登录态，天然可续聊".into());
+    }
+    if profile.no_auth {
+        return Err("无密钥连接不支持注册：客户端拿不到凭证，注册了也无法续聊".into());
+    }
+    if profile.base_url.is_none() {
+        return Err("这个网关还没配端点，没有可注册的 provider 定义".into());
+    }
+    let key = profiles::get_key_for_profile(&profile)?.ok_or("该配置没有已保存的密钥")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = GLOBAL_CONFIG_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
+        let cfg_path = home.join(".codex/config.toml");
+        let auth_path = home.join(".codex/auth.json");
+        let plans = vec![
+            PlannedWrite {
+                tag: "config.toml",
+                path: cfg_path.clone(),
+                content: patch_codex_config_register(
+                    read_existing(&cfg_path).as_deref(),
+                    profile.base_url.as_deref(),
+                    &profile.provider_name(),
+                )?,
+            },
+            PlannedWrite {
+                tag: "auth.json",
+                path: auth_path.clone(),
+                content: patch_codex_auth(read_existing(&auth_path).as_deref(), &key)?,
+            },
+        ];
+        let backups_dir = backups_root()?.join("codex");
+        apply_plans(&backups_dir, &home, &plans)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 移除 Codex 客户端注册（注册的逆操作）：只删 config.toml 里该网关的 provider 定义块。
+/// **auth.json 不动**——OPENAI_API_KEY 是单槽共享凭证（requires_openai_auth 渠道与
+/// API Key 登录态同读此槽），按注册清理会误删在用的凭证；密钥生命周期由 keys.json 管。
+/// 移除后客户端回到「Model provider not found」——此渠道的会话又无法在客户端续聊，
+/// Ccode 内启动注入不受影响。与注册共用备份/原子写
+#[tauri::command]
+pub async fn codex_unregister_client_provider(
+    store: tauri::State<'_, ProfileStore>,
+    profile_id: String,
+) -> Result<Vec<String>, String> {
+    let profile = profile_for_global_write(&store, &profile_id)?;
+    if profile.agent != "codex" {
+        return Err("只有 Codex 绑定有客户端注册可移除".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = GLOBAL_CONFIG_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
+        let cfg_path = home.join(".codex/config.toml");
+        let (content, removed) = patch_codex_config_unregister(
+            read_existing(&cfg_path).as_deref(),
+            &profile.provider_name(),
+        )?;
+        if !removed {
+            return Err("该渠道未注册到客户端（config.toml 里找不到它的定义块）".into());
+        }
+        let plans = vec![PlannedWrite {
+            tag: "config.toml",
+            path: cfg_path,
+            content,
+        }];
+        let backups_dir = backups_root()?.join("codex");
+        apply_plans(&backups_dir, &home, &plans)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 当前已注册到 Codex 客户端的 profile id 列表：config.toml 里存在其派生 provider
+/// 定义块即视为已注册（名字单一出处 provider_id.rs，与会话 rollout 记录同口径）
+#[tauri::command]
+pub fn codex_client_registered_profiles(
+    store: tauri::State<'_, ProfileStore>,
+) -> Result<Vec<String>, String> {
+    let names = crate::agents::codex_client_config_providers();
+    let profiles = store.list()?;
+    Ok(profiles
+        .into_iter()
+        .filter(|p| {
+            p.agent == "codex"
+                && p.account_type != crate::profiles::AccountType::Official
+                && names.contains(&p.provider_name())
+        })
+        .map(|p| p.id)
+        .collect())
+}
+
 #[tauri::command]
 pub async fn restore_global_backup(
     app: tauri::AppHandle,
@@ -1444,6 +1760,7 @@ mod tests {
             account_type: Default::default(),
             no_auth: false,
             protocol: None,
+            api_backend: None,
             base_url: Some("https://relay.example.com".into()),
             models: vec!["m1".into()],
             extra_env: Default::default(),
@@ -1547,6 +1864,63 @@ mod tests {
     }
 
     #[test]
+    fn codex_register_patch_writes_definition_without_switching_default() {
+        // 注册到客户端：只写 provider 定义块，顶层默认渠道与模型原样不动
+        let existing = "model_provider = \"custom\"\nmodel = \"gpt-5.6-luna\"\n\n[model_providers.custom]\nbase_url = \"https://old.example.com/v1\"\n";
+        let out = patch_codex_config_register(
+            Some(existing),
+            Some("https://relay.example.com/v1"),
+            "ccode-a1b2c3d4",
+        )
+        .unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["model_provider"].as_str(), Some("custom"), "默认渠道不动");
+        assert_eq!(doc["model"].as_str(), Some("gpt-5.6-luna"), "默认模型不动");
+        assert_eq!(
+            doc["model_providers"]["custom"]["base_url"].as_str(),
+            Some("https://old.example.com/v1"),
+            "既有 provider 块不动"
+        );
+        let blk = &doc["model_providers"]["ccode-a1b2c3d4"];
+        assert_eq!(blk["base_url"].as_str(), Some("https://relay.example.com/v1"));
+        assert_eq!(blk["requires_openai_auth"].as_bool(), Some(true));
+        assert_eq!(blk["wire_api"].as_str(), Some("responses"));
+        // 空文档也能建块；无 model_provider 的文档不会被补出开关行
+        let out2 = patch_codex_config_register(None, Some("https://r.example.com/v1"), "ccode-x").unwrap();
+        let doc2: toml_edit::DocumentMut = out2.parse().unwrap();
+        assert!(doc2.get("model_provider").is_none());
+        assert_eq!(
+            doc2["model_providers"]["ccode-x"]["base_url"].as_str(),
+            Some("https://r.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn codex_unregister_patch_removes_only_target_block() {
+        // 移除注册：只删目标 provider 块，顶层默认与其余块原样保留
+        let existing = "model_provider = \"custom\"\nmodel = \"gpt-5.6-luna\"\n\n[model_providers.custom]\nbase_url = \"https://a.example.com/v1\"\n\n[model_providers.ccode-a1b2c3d4]\nbase_url = \"https://b.example.com/v1\"\nrequires_openai_auth = true\n";
+        let (out, removed) = patch_codex_config_unregister(Some(existing), "ccode-a1b2c3d4").unwrap();
+        assert!(removed);
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["model_provider"].as_str(), Some("custom"), "默认渠道不动");
+        assert!(
+            doc["model_providers"].get("custom").is_some(),
+            "其余 provider 块不动"
+        );
+        assert!(
+            doc["model_providers"].get("ccode-a1b2c3d4").is_none(),
+            "目标块已删除"
+        );
+        // 块不存在：removed=false，调用方跳过写入
+        let (_out2, removed2) =
+            patch_codex_config_unregister(Some(existing), "ccode-absent").unwrap();
+        assert!(!removed2);
+        // 空文档同样安全
+        let (_out3, removed3) = patch_codex_config_unregister(None, "ccode-x").unwrap();
+        assert!(!removed3);
+    }
+
+    #[test]
     fn codex_auth_patch_merges() {
         let existing = r#"{"tokens": {"id_token": "abc"}}"#;
         let out = patch_codex_auth(Some(existing), "sk-secret").unwrap();
@@ -1558,16 +1932,46 @@ mod tests {
     #[test]
     fn gemini_settings_patch_adds_selected_type_and_tolerates_jsonc() {
         // 从无到有
-        let v: Value = serde_json::from_str(&patch_gemini_settings(None).unwrap()).unwrap();
+        let v: Value =
+            serde_json::from_str(&patch_gemini_settings(None, "测试", &[], None).unwrap())
+                .unwrap();
         assert_eq!(v["security"]["auth"]["selectedType"], "gemini-api-key");
+        // 无模型名单时不写 experimental 段
+        assert!(v.get("experimental").is_none());
         // JSONC 容错（注释 + 尾逗号），既有字段保留
         let existing = "{\n  // 主题\n  \"theme\": \"dark\",\n}\n";
         let v: Value =
-            serde_json::from_str(&patch_gemini_settings(Some(existing)).unwrap()).unwrap();
+            serde_json::from_str(&patch_gemini_settings(Some(existing), "测试", &[], None).unwrap())
+                .unwrap();
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["security"]["auth"]["selectedType"], "gemini-api-key");
         // 损坏文件拒写（fail-loud），不静默覆盖
-        assert!(patch_gemini_settings(Some("{ not json")).is_err());
+        assert!(patch_gemini_settings(Some("{ not json"), "测试", &[], None).is_err());
+    }
+
+    #[test]
+    fn gemini_settings_patch_registers_custom_models_for_picker() {
+        // /model 选择器登记（0.46.0 bundle 实证）：experimental 开关 + modelDefinitions，
+        // isVisible 必显式 true，tier=custom；既有字段与用户条目保留
+        let existing = r#"{"modelConfigs": {"modelDefinitions": {"user-one": {"tier": "custom", "isVisible": true}}}}"#;
+        let out = patch_gemini_settings(
+            Some(existing),
+            "我的网关",
+            &["gemini-3-pro".into(), "kimi-k3".into()],
+            None,
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["experimental"]["dynamicModelConfiguration"], true);
+        let defs = &v["modelConfigs"]["modelDefinitions"];
+        assert_eq!(defs["gemini-3-pro"]["tier"], "custom");
+        assert_eq!(defs["gemini-3-pro"]["isVisible"], true);
+        assert_eq!(defs["gemini-3-pro"]["displayName"], "我的网关 · gemini-3-pro");
+        // 用户手维护的条目不动
+        assert_eq!(defs["user-one"]["isVisible"], true);
+        // kimi-k3 注册链确知思考+视觉 → features 声明；gemini-3-pro 视觉确知
+        assert_eq!(defs["kimi-k3"]["features"]["thinking"], true);
+        assert_eq!(defs["gemini-3-pro"]["features"]["multimodalToolUse"], true);
     }
 
     #[test]
@@ -1597,15 +2001,10 @@ mod tests {
     #[test]
     fn qwen_patch_openai_protocol() {
         let existing = r#"{"security": {"auth": {"other": true}}}"#;
-        let out = patch_qwen_settings(
-            Some(existing),
-            "openai",
-            Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
-            Some("sk-secret"),
-            Some("qwen3-coder"),
-            &["qwen3-coder".into(), "qwen3-max".into()],
-        )
-        .unwrap();
+        let mut p = profile("qwen");
+        p.base_url = Some("https://dashscope.aliyuncs.com/compatible-mode/v1".into());
+        p.models = vec!["qwen3-coder".into(), "qwen3-max".into()];
+        let out = patch_qwen_settings(Some(existing), Some("sk-secret"), &p).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["security"]["auth"]["selectedType"], "openai");
         assert_eq!(v["security"]["auth"]["other"], true);
@@ -1624,19 +2023,36 @@ mod tests {
         );
         assert_eq!(models[0]["envKey"], "OPENAI_API_KEY");
         assert_eq!(models[1]["id"], "qwen3-max");
+        // 无策略时不写 generationConfig
+        assert!(models[0].get("generationConfig").is_none());
+    }
+
+    #[test]
+    fn qwen_patch_entries_carry_generation_config_from_policy() {
+        // generationConfig.samplingParams（0.22.0 bundle 实证，snake_case 线格式键名），
+        // 逐模型取各模型的策略值
+        let mut p = profile("qwen");
+        p.models = vec!["qwen3-coder".into(), "qwen3-max".into()];
+        p.request_policy.temperature = Some(0.6);
+        p.request_policy.top_p = Some(0.95);
+        p.request_policy.max_output_tokens = Some(8192);
+        let out = patch_qwen_settings(None, Some("sk-secret"), &p).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let models = v["modelProviders"]["openai"]["models"].as_array().unwrap();
+        let sp = &models[0]["generationConfig"]["samplingParams"];
+        assert_eq!(sp["temperature"], 0.6);
+        assert_eq!(sp["top_p"], 0.95);
+        assert_eq!(sp["max_tokens"], 8192);
+        assert!(sp.get("topP").is_none(), "键名必须是 snake_case 线格式");
     }
 
     #[test]
     fn qwen_patch_anthropic_protocol() {
-        let out = patch_qwen_settings(
-            None,
-            "anthropic",
-            Some("https://r.example.com"),
-            Some("k"),
-            None,
-            &[],
-        )
-        .unwrap();
+        let mut p = profile("qwen");
+        p.protocol = Some("anthropic".into());
+        p.base_url = Some("https://r.example.com".into());
+        p.models = vec![];
+        let out = patch_qwen_settings(None, Some("k"), &p).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["security"]["auth"]["selectedType"], "anthropic");
         assert_eq!(v["env"]["ANTHROPIC_API_KEY"], "k");
@@ -1649,15 +2065,10 @@ mod tests {
     fn qwen_patch_model_providers_preserves_other_protocols() {
         let existing =
             r#"{"modelProviders": {"gemini": {"models": [{"id": "g1"}]}, "openai": {"extra": 1}}}"#;
-        let out = patch_qwen_settings(
-            Some(existing),
-            "openai",
-            None,
-            None,
-            None,
-            &["qwen3-coder".into()],
-        )
-        .unwrap();
+        let mut p = profile("qwen");
+        p.base_url = None;
+        p.models = vec!["qwen3-coder".into()];
+        let out = patch_qwen_settings(Some(existing), None, &p).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         // 其他协议原样保留，本协议的既有字段不清掉
         assert_eq!(v["modelProviders"]["gemini"]["models"][0]["id"], "g1");
@@ -1803,6 +2214,108 @@ mod tests {
     fn kimi_alias_sanitizes_to_bare_key_charset() {
         assert_eq!(kimi_model_alias("kimi-k2"), "kimi-k2");
         assert_eq!(kimi_model_alias("a.b/c d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn grok_config_patch_writes_and_preserves() {
+        // 既有 [mcp_servers] 段与外来键原样保留；写入面 = 顶层 api_key +
+        // [endpoints].models_base_url + [models].default/策略全局默认
+        let existing = "theme = \"dark\"\n\n[mcp_servers.fs]\ncommand = \"npx\"\n\n[models]\nallowed_models = [\"grok-4.5\"]\n";
+        let mut p = profile("grok");
+        p.models = vec!["grok-code-fast-1".into()];
+        p.request_policy.temperature = Some(0.7);
+        p.request_policy.top_p = Some(0.95);
+        p.request_policy.max_output_tokens = Some(8192);
+        p.request_policy.reasoning_effort = Some("high".into());
+        p.request_policy
+            .header_env
+            .insert("X-Tenant".into(), "TENANT_TOKEN".into());
+        let out = patch_grok_config(Some(existing), Some("xai-secret"), &p).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["api_key"].as_str(), Some("xai-secret"));
+        assert_eq!(
+            doc["endpoints"]["models_base_url"].as_str(),
+            Some("https://relay.example.com")
+        );
+        let models = &doc["models"];
+        assert_eq!(models["default"].as_str(), Some("grok-code-fast-1"));
+        assert_eq!(models["temperature"].as_float(), Some(0.7));
+        assert_eq!(models["top_p"].as_float(), Some(0.95));
+        assert_eq!(models["max_completion_tokens"].as_integer(), Some(8192));
+        assert_eq!(models["default_reasoning_effort"].as_str(), Some("high"));
+        // Header 是 $VAR 引用（grok 读盘时展开），密文不落盘
+        assert_eq!(
+            models["extra_headers"]["X-Tenant"].as_str(),
+            Some("$TENANT_TOKEN")
+        );
+        // 用户既有内容一律不动
+        assert_eq!(doc["theme"].as_str(), Some("dark"));
+        assert_eq!(doc["mcp_servers"]["fs"]["command"].as_str(), Some("npx"));
+        assert_eq!(
+            models["allowed_models"].as_array().unwrap().len(),
+            1,
+            "allowed_models 属用户选择器过滤，不接管"
+        );
+        // 未设 api_backend 且权威层无 context → 不建 [model.*] 段
+        assert!(doc.get("model").is_none());
+    }
+
+    #[test]
+    fn grok_config_patch_set_only_never_removes_user_keys() {
+        // [models] 是通用键表：策略未设时只设不删——用户手写的 temperature 保留
+        //（过期 Ccode 值靠「撤销上次写入/恢复初始状态」兜底，不靠静默删除）
+        let existing = "[models]\ntemperature = 0.3\ndefault = \"grok-4.5\"\n";
+        let mut p = profile("grok");
+        p.models = vec!["grok-code-fast-1".into()];
+        let out = patch_grok_config(Some(existing), Some("xai-secret"), &p).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["models"]["temperature"].as_float(), Some(0.3));
+        assert_eq!(doc["models"]["default"].as_str(), Some("grok-code-fast-1"));
+        assert!(doc["models"].get("top_p").is_none());
+        assert!(doc["models"].get("extra_headers").is_none());
+        // 无 base_url / 无密钥 / 无模型时不建对应键
+        p.base_url = None;
+        p.models = vec![];
+        let out = patch_grok_config(None, None, &p).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert!(doc.get("api_key").is_none());
+        assert!(doc.get("endpoints").is_none());
+    }
+
+    #[test]
+    fn grok_config_patch_writes_per_model_sections_with_api_backend() {
+        // 绑定设了 API 后端 → 逐模型建 [model.<id>] 段（api_backend + name）；
+        // 含 / 的模型 id 依赖 toml_edit 自动加引号，round-trip 解析验证合法且键名原样
+        let mut p = profile("grok");
+        p.name = "我的中转".into();
+        p.models = vec!["openai/gpt-5.1".into(), "grok-4.5".into()];
+        p.api_backend = Some("responses".into());
+        let existing = "[model.\"openai/gpt-5.1\"]\ndescription = \"用户手写\"\n";
+        let out = patch_grok_config(Some(existing), Some("xai-secret"), &p).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        let gpt = &doc["model"]["openai/gpt-5.1"];
+        assert_eq!(gpt["api_backend"].as_str(), Some("responses"));
+        assert_eq!(gpt["name"].as_str(), Some("我的中转 · openai/gpt-5.1"));
+        // 用户手写的同段其他字段不动
+        assert_eq!(gpt["description"].as_str(), Some("用户手写"));
+        assert_eq!(
+            doc["model"]["grok-4.5"]["api_backend"].as_str(),
+            Some("responses")
+        );
+        // 权威层（用户覆盖/网关实测）在测试环境为空 → 不写 context_window
+        assert!(gpt.get("context_window").is_none());
+    }
+
+    #[test]
+    fn grok_plan_writes_targets_grok_config_toml() {
+        let home = tmpdir("grok-plan");
+        let p = profile("grok");
+        let plans = plan_writes(&home, &p, Some("xai-secret"), &["m1".to_string()]).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].path.ends_with(".grok/config.toml"));
+        assert!(plans[0].content.contains("api_key"));
+        assert!(plans[0].content.contains("models_base_url"));
+        fs::remove_dir_all(&home).ok();
     }
 
     #[test]

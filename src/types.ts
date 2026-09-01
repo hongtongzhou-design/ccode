@@ -7,6 +7,8 @@ export interface Profile {
   /** API profile explicitly allows no credential, normally for localhost endpoints. */
   noAuth: boolean;
   protocol: string | null;
+  /** Grok 专用：API 后端（chat_completions/responses/messages），仅「设为全局默认」写入消费 */
+  apiBackend?: string | null;
   baseUrl: string | null;
   /** 可用模型列表，首个为默认 */
   models: string[];
@@ -47,10 +49,18 @@ export interface ComboSurfaceDto {
   topPReadonly: boolean;
   maxTokensReadonly: boolean;
   mixedModelsNote: string | null;
+  /** 逐字段通道种类并集（inject/persist/tui/unsupported/unknown） */
+  channelEffort: string;
+  channelTemperature: string;
+  channelTopP: string;
+  channelMaxTokens: string;
+  channelHeaders: string;
   probeEffort: ProbeStatus;
   probeTemperature: ProbeStatus;
   probeHeaders: ProbeStatus;
   probeNote: string | null;
+  /** 策略通道形态说明（如 qwen「温度/topP 仅设为全局生效」） */
+  policyChannelNote?: string | null;
   missingSlot: boolean;
 }
 
@@ -141,6 +151,7 @@ export interface BindingInput {
   gatewayId: string | null;
   kind: "api" | "official";
   protocol: string | null;
+  apiBackend?: string | null;
   models: string[];
   extraEnv: Record<string, string>;
 }
@@ -151,6 +162,7 @@ export interface ProfileInput {
   accountType: "api" | "official";
   noAuth: boolean;
   protocol: string | null;
+  apiBackend?: string | null;
   baseUrl: string | null;
   models: string[];
   extraEnv: Record<string, string>;
@@ -230,6 +242,10 @@ export interface LaunchPlanPreviewDto {
   envRemove: string[];
   promptSupported: boolean;
   requestPolicy: RequestPolicy;
+  /** 配置 overlay 预览（白名单放行、值里无密文才带原文）；note 交代注不进的字段去向 */
+  overlays: { name: string; content: string; note: string | null }[];
+  /** agent 级协议/上下文说明行（如 codex 的 Responses 与 catalog 上下文窗口） */
+  notes: string[];
 }
 
 /** 网关体检探针结果：绕过 CLI 直连端点的裸响应观测（流式/参数透传/Header 接受度） */

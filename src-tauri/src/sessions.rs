@@ -96,7 +96,8 @@ pub struct SessionMetaDto {
     /// 会话来源；普通 CLI 为 cli，Ccode 无头 AI 为 ccode-ai。
     #[serde(default = "default_session_source")]
     pub source: String,
-    /// 仅由后端精确 provenance 标记，前端不得按路径名猜测。
+    /// 内部 AI：provenance 命中，或 Ccode 自建 `ccode-ai-<uuid>` 临时 cwd（登记被清后的会话）。
+    /// 用量统计仍只认 provenance 表，不按路径改写。
     #[serde(default)]
     pub internal: bool,
     /// 接力来源（P3 机制四）：该会话由哪个 agent 的哪个会话接力而来；非接力会话为 None
@@ -4089,6 +4090,9 @@ fn apply_provenance(
         if let Some((source, internal)) = map.get(&(session.agent.clone(), path)) {
             session.source.clone_from(source);
             session.internal = *internal;
+        } else if crate::usage::is_ccode_ai_temp_cwd(&session.project_path) {
+            session.source = "ccode-ai".into();
+            session.internal = true;
         }
     }
 }

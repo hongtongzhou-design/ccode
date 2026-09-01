@@ -8,6 +8,7 @@
  *
  * 与 DOM/Tauri 解耦，node --test 直接测。
  */
+import { pathKey } from "./path-utils.ts";
 import type { SessionMetaDto } from "./types";
 
 /** 一行 chip 快筛的 id（互不排斥，可与作用域 chip 叠加） */
@@ -145,6 +146,60 @@ export function buildScopeSuggestions(
 export function baseName(path: string): string {
   const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || path;
+}
+
+/** Ccode 无头 AI 的临时 cwd 名：`ccode-ai-<uuid>`（与 ai.rs 命名同步）。 */
+const CCODE_AI_TEMP_RE =
+  /^ccode-ai-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * 是否为 Ccode 自建的无头 AI 临时目录。
+ * 用量统计仍只认 provenance；对话页范围用它把已过期登记的临时目录从「项目」里拿开。
+ */
+export function isCcodeAiTempCwd(path: string): boolean {
+  return CCODE_AI_TEMP_RE.test(baseName(path));
+}
+
+/** 对话列表是否按内部 AI 归并：后端标记，或 Ccode 自建临时 cwd（登记被清后会话还在）。 */
+export function sessionLooksInternal(s: { internal: boolean; projectPath: string }): boolean {
+  return s.internal || isCcodeAiTempCwd(s.projectPath);
+}
+
+export interface ProjectGroup {
+  /** 组内第一条会话的原始路径（显示/回写用，不拿 pathKey） */
+  path: string;
+  list: SessionMetaDto[];
+}
+
+function latestStamp(list: readonly SessionMetaDto[]): string {
+  let max = "";
+  for (const s of list) {
+    const t = s.updatedAt ?? s.createdAt ?? "";
+    if (t > max) max = t;
+  }
+  return max;
+}
+
+/**
+ * 跨 Agent 按项目路径分组（对话页「范围 → 按项目」）。
+ * 比较键走 pathKey（Windows 折叠大小写、剥 verbatim）；空路径不进组。
+ */
+export function groupSessionsByProjectPath(
+  sessions: readonly SessionMetaDto[],
+  isWindows = false,
+): ProjectGroup[] {
+  const byKey = new Map<string, ProjectGroup>();
+  for (const s of sessions) {
+    const p = s.projectPath?.trim();
+    if (!p || isCcodeAiTempCwd(p)) continue;
+    const key = pathKey(p, isWindows);
+    const g = byKey.get(key);
+    if (g) g.list.push(s);
+    else byKey.set(key, { path: p, list: [s] });
+  }
+  return [...byKey.values()].sort((a, b) =>
+    latestStamp(b.list).localeCompare(latestStamp(a.list)),
+  );
 }
 
 export const SCOPE_KIND_LABEL: Record<ScopeChip["kind"], string> = {

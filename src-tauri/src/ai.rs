@@ -820,6 +820,7 @@ mod tests {
             account_type: Default::default(),
             no_auth: false,
             protocol: None,
+            api_backend: None,
             base_url: None,
             models: vec![],
             extra_env: std::collections::HashMap::new(),

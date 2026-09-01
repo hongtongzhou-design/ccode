@@ -44,6 +44,8 @@ const TABLE: Record<string, SlashCommand[]> = {
   ],
   qwen: [
     { cmd: "/model", hint: "切换模型" },
+    // 0.22.0 bundle 实证 /effort 直切命令（effortCommand；0.21.1 无）
+    { cmd: "/effort", hint: "切换思考档位（0.22+）" },
     { cmd: "/clear", hint: "清空会话重新开始" },
     HELP,
   ],

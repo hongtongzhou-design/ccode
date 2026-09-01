@@ -1,5 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
 import { agentBrandBadgeStyle } from "../agent-colors";
@@ -9,9 +11,12 @@ import {
   SCOPE_KIND_LABEL,
   applySessionFilters,
   buildScopeSuggestions,
+  groupSessionsByProjectPath,
+  sessionLooksInternal,
   type QuickFilterId,
   type ScopeChip,
 } from "../session-filter";
+import { pathKey, samePath } from "../path-utils";
 import { AGENTS } from "../types";
 import { pickResumeProfile } from "../resume-profile";
 import ConversationView from "../components/ConversationView";
@@ -47,7 +52,13 @@ type Filter =
   | { kind: "internal" }
   | { kind: "agent"; agent: string }
   // 项目挂在 agent 下，筛选必须同时限定 agent 和路径（同名目录可能跨 agent）
-  | { kind: "project"; agent: string; path: string };
+  | { kind: "project"; agent: string; path: string }
+  // 「范围 → 按项目」：只按路径、跨 Agent
+  | { kind: "projectPath"; path: string };
+
+function projectScopePath(f: Filter): string | null {
+  return f.kind === "project" || f.kind === "projectPath" ? f.path : null;
+}
 
 function fmtTokens(u: TokenUsageDto | null): string {
   if (!u) return "";
@@ -115,8 +126,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   // 子列表（不动列表筛选、不关回放）；「全部项目」/单项目行落筛选且**面板保持展开**（v3.43：
   // 用户要边筛边浏览，选中不收起），手动点标题行或 × 清除才收。
   const [treeOpen, setTreeOpen] = useState(false);
-  // 当前展开项目子列表的 agent：点选记录；失效（该 agent 已无会话）/未点选时回落当前筛选所属
+  // 当前展开项目子列表的 agent：只认显式点开/点收，不跟当前筛选（否则选中的 Agent 永远收不回去）
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
+  /** 「范围」里「按项目」段默认展开，让项目分类不用再点一层 */
+  const [projectsOpen, setProjectsOpen] = useState(true);
   // 批量删除：选择模式 + 勾选集合（键为 agent+sessionId 复合键，防跨 agent 撞 id）
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -126,6 +139,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [registeredProjectPaths, setRegisteredProjectPaths] = useState<Set<string>>(
     () => new Set(),
   );
+  // Codex 客户端跳转可行性：客户端打开会话时按记录的 provider 在 config.toml
+  // 找定义，找不到报「Model provider not found」（见 openInClient/clientOpenable）
+  const [codexClientProviders, setCodexClientProviders] = useState<Set<
+    string
+  > | null>(null);
   // 「复制恢复命令」按钮的已复制反馈以 agent+sessionId 区分，避免跨 CLI 同 id 误显示。
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
@@ -319,6 +337,33 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  /** A4. 在 Codex 桌面客户端中打开该会话（codex://threads/<id> 深链，0.151 实测）。
+   *  客户端与 CLI 共享本地 threads 库，CLI 发起的对话同样能跳过去继续聊 */
+  async function openInClient(s: SessionMetaDto) {
+    try {
+      await openUrl(`codex://threads/${s.sessionId}`);
+    } catch (e) {
+      await alertDialog(`唤起 Codex 客户端失败：${e}`);
+    }
+  }
+
+  // 页面保持挂载：挂载与每次回切本页都重查（「注册到 Codex 客户端」在连接页写入后，
+  // 回来要立即解禁「在客户端打开」；查询是本地 config.toml 只读解析，成本低）
+  useEffect(() => {
+    if (!visible) return;
+    invoke<string[]>("codex_client_config_providers")
+      .then((list) => setCodexClientProviders(new Set(list)))
+      .catch(() => setCodexClientProviders(new Set()));
+  }, [visible]);
+
+  /** 客户端打开会话时按 rollout 记录的 provider 在 config.toml 找定义，缺失即报
+   *  「Model provider not found」无法继续（内置 openai / 无记录的旧会话恒可跳） */
+  function clientOpenable(s: SessionMetaDto): boolean {
+    if (s.agent !== "codex" || !(IS_MAC || IS_WINDOWS)) return false;
+    if (!s.provider || s.provider === "openai") return true;
+    return codexClientProviders?.has(s.provider) ?? false;
+  }
+
   /** B. 「进行中」反向跳转：聚焦该会话所在的终端标签 */
   function jumpToLive(s: SessionMetaDto) {
     const tabId = liveSessions[sessionRuntimeKey(s.agent, s.sessionId)];
@@ -344,12 +389,17 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     [quickFiltered, showArchived],
   );
   const regularVisible = useMemo(
-    () => archiveVisible.filter((s) => !s.internal),
+    () => archiveVisible.filter((s) => !sessionLooksInternal(s)),
     [archiveVisible],
   );
+  // 内部 AI 入口不能吃 applySessionFilters 的默认排除（否则计数恒为 0）。
+  // 无头 AI 临时目录在 provenance 过期后 DTO.internal 仍可能是 false。
   const internalVisible = useMemo(
-    () => archiveVisible.filter((s) => s.internal),
-    [archiveVisible],
+    () =>
+      searched.filter(
+        (s) => (showArchived || !s.archived) && sessionLooksInternal(s),
+      ),
+    [searched, showArchived],
   );
 
   // 分类树：agent → 项目分组；内部 AI 会话固定归并到一个独立入口，不污染普通项目树。
@@ -384,16 +434,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       );
   }, [regularVisible]);
 
-  // 展开哪个 agent 的项目子列表：显式点开优先（该 agent 已无会话即失效回落），其次当前筛选所属
+  const projectGroups = useMemo(
+    () => groupSessionsByProjectPath(regularVisible, IS_WINDOWS),
+    [regularVisible],
+  );
+
+  // 展开哪个 agent 的项目子列表：只跟手风琴开关，该 agent 已无会话则视为收起
   const expandedGroup = useMemo(() => {
-    const id =
-      expandedAgent && tree.some((g) => g.agent === expandedAgent)
-        ? expandedAgent
-        : filter.kind === "agent" || filter.kind === "project"
-          ? filter.agent
-          : null;
-    return tree.find((g) => g.agent === id) ?? null;
-  }, [expandedAgent, tree, filter]);
+    if (!expandedAgent) return null;
+    return tree.find((g) => g.agent === expandedAgent) ?? null;
+  }, [expandedAgent, tree]);
 
   const sessionList = useMemo(() => {
     let src = filter.kind === "internal" ? internalVisible : regularVisible;
@@ -403,6 +453,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       src = src.filter(
         (s) => s.agent === filter.agent && s.projectPath === filter.path,
       );
+    else if (filter.kind === "projectPath")
+      src = src.filter((s) => samePath(s.projectPath, filter.path, IS_WINDOWS));
     return src;
   }, [regularVisible, internalVisible, filter]);
 
@@ -410,12 +462,12 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   // 排最前」同口径）：组内保持时间降序，组按各自最近活跃排序；其余筛选保持纯时间序（跨项目分组无意义）。
   // header 只挂在每组首条上，渲染时据此插组名小标题。
   const displayList = useMemo(() => {
-    if (filter.kind !== "project")
+    if (projectScopePath(filter) == null)
       return sessionList.map((s) => ({ header: null as string | null, s }));
     return groupSessionsByTask(sessionList).flatMap((g) =>
       g.list.map((s, i) => ({ header: i === 0 ? g.name : null, s })),
     );
-  }, [sessionList, filter.kind]);
+  }, [sessionList, filter]);
 
   /** 切换树筛选：同时退出回放态回到列表，保证右栏与所选节点对应 */
   function selectFilter(f: Filter) {
@@ -424,7 +476,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setSelected(null);
   }
 
-  /** 分类选择：选到项目/全部即关掉选择面回到列表；点 Agent 行则展开项目并保持选择面。 */
+  /** 分类选择：选到项目/全部即关掉选择面回到列表。Agent 行自己负责展开/收起，不走这里。 */
   function pickScope(f: Filter, keepOpen = false) {
     selectFilter(f);
     if (f.kind === "agent") setExpandedAgent(f.agent);
@@ -432,7 +484,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   }
 
   // 项目筛选激活时预取该项目任务卡（「移到卡片…」菜单候选；非项目目录后端返回空表）
-  const projectFilterPath = filter.kind === "project" ? filter.path : null;
+  const projectFilterPath = projectScopePath(filter);
   useEffect(() => {
     if (projectFilterPath) void loadTaskCards(projectFilterPath).catch(() => {});
   }, [projectFilterPath, loadTaskCards]);
@@ -1020,8 +1072,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   // 「未归置」组标题行右侧的归类提示：仅项目筛选下且该项目已有卡片时显示
   // （没有卡片时不教用户做还做不了的事）
+  const scopePath = projectScopePath(filter);
   const projectHasCards =
-    filter.kind === "project" && (taskCards[filter.path] ?? []).length > 0;
+    scopePath != null && (taskCards[scopePath] ?? []).length > 0;
 
   const filterActive = (f: Filter) =>
     (filter.kind === "all" && f.kind === "all") ||
@@ -1032,7 +1085,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     (filter.kind === "project" &&
       f.kind === "project" &&
       filter.agent === f.agent &&
-      filter.path === f.path);
+      filter.path === f.path) ||
+    (filter.kind === "projectPath" &&
+      f.kind === "projectPath" &&
+      samePath(filter.path, f.path, IS_WINDOWS));
   const filterChipLabel =
     filter.kind === "internal"
       ? "Ccode 内部 AI"
@@ -1040,7 +1096,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         ? agentLabel(filter.agent)
         : filter.kind === "project"
           ? `${agentLabel(filter.agent)} · ${basename(filter.path)}`
-          : null;
+          : filter.kind === "projectPath"
+            ? basename(filter.path)
+            : null;
 
   return (
     <div className="flex h-full bg-canvas">
@@ -1356,14 +1414,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   <div key={g.agent}>
                     <button
                       onClick={() => {
-                        if (filter.kind === "agent" && filter.agent === g.agent) {
-                          setExpandedAgent(open ? null : g.agent);
-                          return;
-                        }
-                        pickScope({ kind: "agent", agent: g.agent }, true);
+                        setExpandedAgent(open ? null : g.agent);
                       }}
                       aria-expanded={open}
-                      title="筛选这个 Agent 的对话；再点一次展开或收起项目"
+                      title="展开或收起这个 Agent 的项目"
                       className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center gap-1.5 rounded-md px-2 text-left text-xs ${
                         active
                           ? "bg-rail-sel text-l1"
@@ -1462,6 +1516,56 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   </div>
                 );
               })}
+              {projectGroups.length > 0 && (
+                <>
+                  <div className="mx-2 my-1 border-t border-hairline" />
+                  <button
+                    type="button"
+                    onClick={() => setProjectsOpen((v) => !v)}
+                    aria-expanded={projectsOpen}
+                    title="按项目筛选（不限 Agent）"
+                    className="mx-1 flex h-7 w-[calc(100%-8px)] items-center gap-1.5 rounded-md px-2 text-left text-xs text-l3 hover:bg-hover"
+                  >
+                    <FoldMark open={projectsOpen} />
+                    <span className="min-w-0 flex-1 truncate">按项目</span>
+                    <span className="shrink-0 text-xs text-l4 opacity-70">
+                      {projectGroups.length}
+                    </span>
+                  </button>
+                  {projectsOpen && (
+                    <div className="mx-1 mb-0.5 ml-4 border-l border-hairline pl-1.5">
+                      {projectGroups.map((p) => {
+                        const pActive = filterActive({
+                          kind: "projectPath",
+                          path: p.path,
+                        });
+                        return (
+                          <button
+                            key={pathKey(p.path, IS_WINDOWS)}
+                            type="button"
+                            onClick={() =>
+                              pickScope({ kind: "projectPath", path: p.path })
+                            }
+                            title={p.path}
+                            className={`flex h-7 w-full items-center justify-between gap-2 rounded-md px-2 text-left text-xs ${
+                              pActive
+                                ? "bg-rail-sel text-l1"
+                                : "text-l3 hover:bg-hover"
+                            }`}
+                          >
+                            <span className="truncate">{basename(p.path)}</span>
+                            <span
+                              className={`shrink-0 text-xs opacity-70 ${pActive ? "text-l2" : "text-l4"}`}
+                            >
+                              {p.list.length}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
               {tree.length === 0 && (
                 <EmptyState
                   title="还没有对话"
@@ -2003,6 +2107,21 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     >
                       在外部继续
                     </button>
+                    {selected.agent === "codex" && (IS_MAC || IS_WINDOWS) && (
+                      <button
+                        type="button"
+                        onClick={() => void openInClient(selected)}
+                        disabled={!clientOpenable(selected)}
+                        title={
+                          clientOpenable(selected)
+                            ? "唤起 Codex 桌面客户端直接打开这条对话，可接着聊"
+                            : `这条会话记录的渠道「${selected.provider}」在客户端 config.toml 里没有定义，跳过去客户端会报「Model provider not found」无法继续；用上方「继续」在终端续聊（Ccode 会自动补渠道定义）`
+                        }
+                        className={ghostActionClass}
+                      >
+                        在客户端打开
+                      </button>
+                    )}
                     {registeredProjectPaths.has(selected.projectPath) && (
                       <button
                         type="button"
@@ -2208,7 +2327,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   编辑
                 </button>
                 {/* 移到卡片：仅项目筛选下可用（此时才知道 project_root）——属「整理」 */}
-                {filter.kind === "project" && (
+                {projectScopePath(filter) != null && (
                   <button
                     className={menuItem}
                     title="把该对话归入本项目的一张任务卡"
@@ -2251,6 +2370,18 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     >
                       在外部继续 · 复制命令
                     </button>
+                    {clientOpenable(menu.session) && (
+                      <button
+                        className={menuItem}
+                        title="唤起 Codex 桌面客户端直接打开这条对话（客户端与 CLI 共享本地会话库，可接着聊）"
+                        onClick={() => {
+                          setMenu(null);
+                          void openInClient(menu.session);
+                        }}
+                      >
+                        在客户端打开 · Codex
+                      </button>
+                    )}
                     <button
                       className={menuItem}
                       title="AI 提炼全会话成紧凑简报，新会话读简报续作（不带旧上下文）"
@@ -2294,7 +2425,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         </div>
       )}
       {/* 「移到卡片…」子面板：列出当前筛选项目的卡片；无卡片给置灰提示 */}
-      {taskPickerFor && filter.kind === "project" && (
+      {taskPickerFor && scopePath != null && (
         <div
           className="fixed inset-0 z-20"
           onClick={() => setTaskPickerFor(null)}
@@ -2304,14 +2435,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             onClick={(e) => e.stopPropagation()}
           >
             <p className="px-3 pb-1 pt-1.5 text-xs text-l4">
-              移到卡片（{basename(filter.path)}）
+              移到卡片（{basename(scopePath)}）
             </p>
-            {(taskCards[filter.path] ?? []).length === 0 ? (
+            {(taskCards[scopePath] ?? []).length === 0 ? (
               <p className="px-3 py-1.5 text-sm text-l4">
                 该项目还没有任务卡，可在项目页新建。
               </p>
             ) : (
-              (taskCards[filter.path] ?? []).map((c) => (
+              (taskCards[scopePath] ?? []).map((c) => (
                 <button
                   key={c.id}
                   className={`${menuItem} flex items-center justify-between gap-2`}

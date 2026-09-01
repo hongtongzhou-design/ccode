@@ -29,7 +29,7 @@ Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）—�
 
 **已确认的产品决策**（用户拍板，勿擅自更改）：
 
-- 应用名 **Ccode**；九个 agent 全部支持（CodeBuddy Code、Cursor CLI、Grok Build 见 matrix §7/§8/§9；grok 首版：「设为全局默认」不支持、MCP 只读不分发、技能强制 copy）
+- 应用名 **Ccode**；九个 agent 全部支持（CodeBuddy Code、Cursor CLI、Grok Build 见 matrix §7/§8/§9；grok：MCP 只读不分发、技能强制 copy；「设为全局默认」2026-09-01 起支持，写 ~/.grok/config.toml）
 - 配置切换**双模式**：默认启动注入环境变量（零污染），另提供「设为全局默认」（写配置文件，先备份）
 - 终端为内嵌形态，且**与结构化会话视图联动**（同一会话双栏观看）
 - 项目列表**从各 agent 历史会话自动聚合并分类**，辅以手动添加
@@ -120,7 +120,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   components/QuickChatHistoryMenu.tsx # 侧栏「快速开聊」右键的随手聊历史浮层（命令面板式行：色点+标题+时间；
                              # 勾了「下次直接开聊」的用户左键直达终端看不到弹层历史，右键是回看口）
                              # 行样式与弹层「随手聊历史」一致：品牌胶囊 + 标题 + 归属 · 时间
-  components/GatewayLibrary.tsx # 连接页网关库：五槽/密钥/获取模型/按槽体检/逐模型策略三态
+  components/GatewayLibrary.tsx # 连接页网关库：五槽/密钥/获取模型/按槽体检/逐模型策略三态；
+                             # Base URL 主输入（2026-08-31）：空槽与仍等于旧主值的槽跟随主输入、手改即脱离；
+                             # 全部测速按 URL 去重（同址只探一次，摘要前端镜像给同址槽）
   components/HoverTip.tsx      # 应用内 tooltip 共享件（v3.93 提取自 ProjectGroup）：useHoverTip + HoverTip，
                              # portal 到 body（免疫祖先 opacity/transform 的 fixed 包含块问题）、滚动/缩放即关、
                              # up 参数支持锚点上方弹出（行内动作栏 tooltip 专用）；PageFrame 的 RowAction 内置上方 tooltip
@@ -190,12 +192,14 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
 src-tauri/src/
   agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/
                              #   model_switch 运行中切模型（claude/gemini 直切、codex/kimi/opencode 唤选择器）与
-                             #   effort_levels 思考档槽位（本期仅 claude /effort 实证，kimi/codex 待实机）；
+                             #   effort_levels 思考档槽位（claude /effort 五档、kimi on/off、qwen 0.22.0
+                             #   /effort 五档实证；codex 待实机）；
                              #   能力表三字段 fail-loud（原因即用户可见文案，后端报错与前端置灰同源）：
-                             #   set_global（cursor/grok 不支持）/ mcp_write（grok 只读，请用 grok mcp add）/
+                             #   set_global（cursor 不支持）/ mcp_write（grok 只读，请用 grok mcp add）/
                              #   skill_dist（cursor/grok 强制 copy）——global_config/mcp.rs/skills.rs 全部改查表，
                              #   前端经 agent_capabilities command 读表置灰）；
-                             #   请求策略通道表 request_policy_support（逐字段 supported/unsupported/unknown，
+                             #   请求策略通道表 request_policy_support（逐字段按入口记账：
+                             #   inject=启动注入 / persist=仅设为全局 / tui=仅会话内命令 / unsupported / unknown；
                              #   只认二进制/配置 schema 实证，调研录 matrix §9 第 8 条；agents.rs
                              #   apply_request_policy_env 按表注入启动 env，未实证一律不注）；
                              #   resolve_binary 兜底候选目录 binary_candidate_dirs 同在本模块（macOS 含 /Library/TeX/texbin）
@@ -203,8 +207,16 @@ src-tauri/src/
                              # codex 内联 provider 参数 codex_inline_provider_args 单一出处（启动注入与外部恢复命令共用：
                              #   新会话 provider 名 ccode-<网关短id>；旧 rollout 仍记 model_provider="ccode"，外部恢复缺 -c 定义报 provider not found；定义只含
                              #   base_url/env_key 引用不含密钥）；
+                             # grok GROK_CONFIG overlay 单一出处 grok_config_overlay：白名单（grok-build OVERLAY_ALLOW_PATHS，
+                             #   fail-closed）只放行 [models] 全局块——allowed_models 收敛 + 请求策略五项全局默认（headers 走
+                             #   $VAR 引用不落密文）；[model.<id>] 不在白名单，api_backend/context_window 由中转 /models 目录
+                             #   条目 apiBackend/contextWindow 或 config.toml 提供（调研录 matrix §9 第 8 条）；
                              # 选择器显示名统一「配置名 · 模型」（claude _NAME 槽 / codex catalog display_name /
-                             #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）
+                             #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）；
+                             # claude 名单 ≥3 时 HAIKU 槽复用注入 CLAUDE_CODE_SUBAGENT_MODEL（Task 子 agent 模型，
+                             #   解析链 env>Task 参数>frontmatter>inherit 主模型，设为全局写入同键）；
+                             # claude 长上下文声明 CLAUDE_CODE_MAX_CONTEXT_TOKENS 启动注入与设为全局同键同条件
+                             #   （注册链确知 >200K 才注，防第三方模型被按 200K 提前 compact）
   model_registry.rs          # 模型能力注册表：逐字段查询链 = 用户覆盖 > 网关实测缓存（fetch_models 顺带沉淀
                              # OpenRouter 风格 /models 元数据）> 公共能力库（配置页 ⋯ 下载，models.dev 优先
                              # OpenRouter 回落，download_model_db/model_db_status）> 内置前缀表 > 关键词兜底；
@@ -212,11 +224,25 @@ src-tauri/src/
                              # 显式 false 只在数据源如实给出时生效）；kimi capabilities/max_context_size、
                              # codex catalog、opencode reasoning/limit/modalities 全从这条链出；
                              # limit.output 兜底 8192（1.18 起 schema 必填）；宁缺毋滥（收错比漏报有害）；
-                             # 文件型加载器 cfg!(test) 下不读本机真实缓存（链语义由 chain_field 单测覆盖）
+                             # 字段新增 api_backend（grok 目录 apiBackend，闭集只收 chat_completions/responses/
+                             #   messages；仅权威层有值，model_api_backend_for 供预览说实话）；
+                             # fetch 沉淀解析兼容 grok 目录别名（contextWindow/context_window/_meta.totalContextTokens）；
+                             # 文件型加载器 cfg!(test) 下不读本机真实缓存（链语义由 chain_field 单测覆盖）；
+                             # model_context_size_authoritative_for = 仅权威层（用户覆盖+网关实测）的 context
+                             #   访问器——grok 设为全局写 [model.*].context_window 专用（估值层不配覆盖中转目录）；
+                             # 下载公共库顺带提取定价（models.dev cost / OpenRouter pricing → 条目 cost 字段），
+                             #   db_price_table 供 usage.rs 定价链消费
   profiles.rs                # 网关+绑定：gateways.json / bindings.json；keys.json 键=网关 id（0600）；
                              # list 物化成 Profile 视图（binding id 复用旧 profile id）；删除绑定=解绑不清密钥；
+                             # 绑定级 api_backend 字段（grok 专用，仅设为全局写 [model.*] 消费；闭集校验 +
+                             #   导出/导入 v2 随绑定走、非 grok 导入丢弃）；
                              # 有绑定的网关禁删；导出/导入 v2；见 docs/conventions/profiles.md
-  combo.rs                   # Agent×模型×槽×体检求交器，DTO 下发；网关库走多 Agent 并集
+  combo.rs                   # Agent×模型×槽×体检求交器，DTO 下发；网关库走多 Agent 并集；
+                             # 逐字段通道种类 channel_*（inject>persist>tui>unsupported>unknown 并集）随 DTO 下发，
+                             #   inject_*_allowed 只认 inject，apply_to_profile 保留 persist 字段（设为全局要写）；
+                             #   协议维度门控 channel_status_for（kimi effort 仅 kimi 协议通道，非 kimi 协议绑定按 unknown 计）；
+                             #   混注提示覆盖思考与采样两种不一致（换模不重注）；
+                             # policy_channel_note 通道形态说明（qwen 仅设为全局 / grok overlay 边界）随 DTO 下发
   drift.rs                   # 全局配置漂移：只比对 Ccode 写入键的子集，无关字段不算漂移
   gateway_store.rs           # 网关/绑定落盘与迁移；每槽体检摘要 latest-per-slot
   provider_id.rs             # provider 名 ccode-<网关短id> 单一出处；LEGACY="ccode" 仅旧 rollout
@@ -226,17 +252,34 @@ src-tauri/src/
                              # 基础鉴权/裸流式 SSE 检测/带策略参数对比降级定位/自定义 Header 接受度，
                              # matrix §9 第 8 条）；请求策略字段校验（范围、claude effort 闭集、
                              # Header 名禁引号冒号、环境变量名 POSIX 字符集）
-  global_config.rs           # 「设为全局」：agent 级事务批次写入（备份/回滚/恢复）；写成功即记
-                             # settings.active_global_profiles（配置页「全局生效」徽标数据源），恢复备份后清除；
-                             # 恢复分两档——恢复备份（最近批次，每 tag 轮换留 5 份）与恢复初始状态
+  global_config.rs           # 「设为全局默认」：agent 级事务批次写入（备份/回滚/恢复）；写成功即记
+                             # settings.active_global_profiles（配置页「全局生效」徽标数据源），恢复后清除；
+                             # 恢复分两档——撤销上次写入（UI 名；最近批次，每 tag 轮换留 5 份）与恢复初始状态
                              #   （backups/<agent>/original/ 永久快照，首次 apply 时落、不参与轮换，
                              #   has_original_backup/restore_original_backup）；
+                             # codex 轻量注册 codex_register_client_provider：只写 provider 定义块 + auth.json 密钥
+                             #   （patch_codex_config_register），顶层 model_provider/model 不动、不记 active_global——
+                             #   供桌面客户端按 rollout 记录的 provider 名查定义续聊（matrix §2：不设默认不接管请求）；
+                             #   逆操作 codex_unregister_client_provider 只删定义块（块不在则拒写不造空备份），
+                             #   **auth.json 不动**——OPENAI_API_KEY 是单槽共享凭证（requires_openai_auth 渠道
+                             #   与 API Key 登录态同读），按注册清理会误删在用 key；
+                             #   codex_client_registered_profiles 供连接页菜单「注册 ⇄ 移除注册」同位状态化；
+                             #   多网关注册同槽互相覆盖 + 影响共享渠道凭证是已知边界（实机验证待做）；
                              # codex provider 带 requires_openai_auth=true（auth.json 直供密钥，外部终端零 export；
                              #   旧写入遗留的 env_key 行随下次写入清除）；
                              # gemini 双文件：.env 之外必须加写 settings.json 的 selectedType=gemini-api-key
-                             #   （v3.147 审计：缺它 gemini ≥0.46 headless auth 报错起不来，JSONC 容错读）；
+                             #   （v3.147 审计：缺它 gemini ≥0.46 headless auth 报错起不来，JSONC 容错读），
+                             #   并登记 modelConfigs.modelDefinitions 让自定义模型进 /model 选择器
+                             #   （experimental.dynamicModelConfiguration 开关，requiresRestart，只写不删）；
+                             # qwen 条目级 generationConfig.samplingParams（snake_case 线格式，逐模型取值；
+                             #   配了就跳过 CLI 的 max_tokens 自动钳制）；
                              # kimi 的 [models.*] 随写 display_name（配置名·模型，选择器 label 优先它）
-                             # 与 capabilities（按注册表组合 tool_use/thinking/image_in，仅新版变体）
+                             # 与 capabilities（按注册表组合 tool_use/thinking/image_in，仅新版变体）；
+                             # grok（2026-09-01 起）写 ~/.grok/config.toml：顶层 api_key + [endpoints].models_base_url +
+                             #   [models].default 与请求策略全局默认（通用键只设不删，防误清用户手写值）；
+                             #   绑定设了「API 后端」或权威层确知上下文时逐模型写 [model.<id>] 段
+                             #   （api_backend/context_window/name；段键 = 目录模型 id 自动加引号）——api_backend
+                             #   在 Ccode 侧的唯一通道（overlay 白名单不放行 [model.*]）
   projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
                              # update_step_skills（步骤推荐技能读-改-原子写）、append_pipeline_steps（从模板追加：重名跳过、全跳过不落盘、
                              # 追加成功自动清 pipeline_opt_out）、set_pipeline_opt_out（「不使用研究流程」显式标记读-改-原子写）、
@@ -279,8 +322,11 @@ src-tauri/src/
   usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径、
                              # session_usage 单会话聚合（终端状态栏 token 段，先增量索引再按 session_id 汇总）；
                              # usage_trend / top_sessions：花费折线与最贵会话均跟随页顶范围，官方账号与 internal 不计费不进榜，
-                             # 自定义标题出站前过 redact_sensitive_text
-  pricing.rs                 # 内置定价表 + pricing.json 覆盖（写入校验）
+                             # 自定义标题出站前过 redact_sensitive_text；
+                             # 定价链 PriceChain 三层：用户 pricing.json > 公共能力库 cost > 内置表 BUILTIN_PRICING
+                             #   （高层任意前缀命中即胜、同层最长前缀优先——用户写短前缀即覆盖低层细分代；
+                             #   内置表口径 2026-08-31 各官方页，跨代改价给新代加更长前缀、旧价留给老会话归属）
+  pricing.rs                 # pricing.json 读写与校验（定价链最高层，原子写）
   settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力
                              # （hooks_attention 按 agent map，旧 claude_hooks_attention 仅反序列化兼容迁移）/想法期只读保护
                              # /聊天页状态栏开关（status_bar_in_chat 默认开；关 = 聊天页 invisible 占位，切层不改终端行列数）；

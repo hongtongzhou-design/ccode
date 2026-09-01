@@ -5,6 +5,7 @@ import {
   policyFieldMode,
   READONLY_CHANNEL_HINT,
   READONLY_PROBE_HINT,
+  READONLY_TUI_HINT,
 } from "../src/combo-field.ts";
 
 test("不会思考：思考档隐藏，即使存了值", () => {
@@ -116,6 +117,59 @@ test("优先级：体检失败优先于可注入，锁只读", () => {
     policyFieldMode({
       capable: true,
       injectAllowed: true,
+      probeFailed: true,
+      stored: true,
+    }),
+    "readonly",
+  );
+});
+
+test("persist 通道（仅设为全局生效）：可编辑，启动不注", () => {
+  // qwen 温度/top_p 形态：injectAllowed=false 但 channel=persist → 可改可存
+  assert.equal(
+    policyFieldMode({
+      capable: true,
+      injectAllowed: false,
+      channel: "persist",
+      probeFailed: false,
+      stored: false,
+    }),
+    "edit",
+  );
+});
+
+test("tui 通道（仅会话内命令）：已存值只读挂 TUI 文案", () => {
+  // qwen effort 形态：/effort 直切存在，但存储值不随启动/写盘携带
+  const input = {
+    capable: true,
+    injectAllowed: false,
+    channel: "tui",
+    probeFailed: false,
+    stored: true,
+  };
+  assert.equal(policyFieldMode(input), "readonly");
+  assert.equal(policyFieldHint(input), READONLY_TUI_HINT);
+});
+
+test("tui 通道未存值：不出现空编辑框", () => {
+  assert.equal(
+    policyFieldMode({
+      capable: true,
+      injectAllowed: false,
+      channel: "tui",
+      probeFailed: false,
+      stored: false,
+    }),
+    "hidden",
+  );
+});
+
+test("persist 通道体检失败：仍锁只读", () => {
+  assert.equal(
+    policyFieldMode({
+      capable: true,
+      injectAllowed: false,
+      channel: "persist",
       probeFailed: true,
       stored: true,
     }),

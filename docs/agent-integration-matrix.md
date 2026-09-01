@@ -17,7 +17,7 @@
 | 会话存储 | `~/.claude/projects/<sanitize(cwd)>/<session-uuid>.jsonl`；目录名 = 路径中所有非字母数字字符替换为 `-` |
 | 会话格式 | JSONL。envelope：`uuid/parentUuid/timestamp/sessionId/cwd/gitBranch/version/isSidechain/type`；`type=user/assistant`，assistant 的 `message` 是原始 API 响应（content blocks + usage）；另有 `ai-title`（会话标题）、`summary`、`file-history-snapshot` 等类型，未知 type 必须跳过。**易漂移** |
 | 关键启动参数 | `--model`、`-p`（非交互）、`-c/-r`（续会话）、`--session-id`（固定会话 ID=文件名）、`--settings` |
-| 坑 | 非官方 base URL 会禁用 Remote Control 与部分 MCP 行为；CLI 自己会给配置文件做时间戳备份（我们不是唯一写者）；`CLAUDE_CONFIG_DIR` 可整体搬迁配置目录（完全隔离方案，但会话也随之隔离）；`/model` 选择器默认只显示内置别名，Ccode 用 `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL`(+`_NAME`) 注册前 4 个模型、第 5 个走 `ANTHROPIC_CUSTOM_MODEL_OPTION`，更多模型需 `/model <id>` 手输；`_NAME` 是选择器显示名（Ccode 填「配置名 · 模型」）。运行中切换（2026-08-17 v2.1.212 strings 实证，终端状态栏用）：`/model <name>` 带参直切（session 级）、`/effort <low\|medium\|high\|xhigh\|max>` 带参直切 |
+| 坑 | 非官方 base URL 会禁用 Remote Control 与部分 MCP 行为；CLI 自己会给配置文件做时间戳备份（我们不是唯一写者）；`CLAUDE_CONFIG_DIR` 可整体搬迁配置目录（完全隔离方案，但会话也随之隔离）；`/model` 选择器默认只显示内置别名，Ccode 用 `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL`(+`_NAME`) 注册前 4 个模型、第 5 个走 `ANTHROPIC_CUSTOM_MODEL_OPTION`，更多模型需 `/model <id>` 手输；`_NAME` 是选择器显示名（Ccode 填「配置名 · 模型」）。运行中切换（2026-08-17 v2.1.212 strings 实证，终端状态栏用）：`/model <name>` 带参直切（session 级）、`/effort <low\|medium\|high\|xhigh\|max>` 带参直切。**子 agent 模型**（2.1.226 二进制实证）：`CLAUDE_CODE_SUBAGENT_MODEL` 解析链 = env > Task 工具参数 > agent frontmatter `model:` > inherit 主模型；缺省继承主模型（第三方网关上子 agent 与主循环同档同价）。Ccode 绑定名单 ≥3 时把 HAIKU 槽（「便宜/快」角色槽）复用注入该键（DeepSeek 官方推荐同口径，见下；设为全局写入同键）。注意 env 优先级最高，会压过 frontmatter 的 model 声明（含内置 Explore 类小模型声明）。**长上下文声明**（2026-09-01 起启动注入与设为全局同键同条件）：claude 对不认识的第三方模型按 200K 上下文假设，`CLAUDE_CODE_MAX_CONTEXT_TOKENS` 在注册链确知 >200K 时注入，防长会话提前 compact |
 
 **Anthropic 兼容端点（2026-08-05 核实，来源均为官方文档）**：
 
@@ -33,9 +33,10 @@
 | 注入 env | `CODEX_API_KEY`（优先级高于 auth.json）、`OPENAI_API_KEY`。**没有 base URL / 默认模型的环境变量** |
 | base URL 注入方式 | 启动参数 `-c model_providers.<id>.base_url='"https://..."'`（需同时在 config 里定义 provider）或写 `~/.codex/config.toml`：`openai_base_url` 或 `[model_providers.<id>]`（`base_url` + `env_key` = 存放 key 的环境变量名） |
 | 全局配置 | `~/.codex/config.toml`（TOML）+ `~/.codex/auth.json`；`CODEX_HOME` 可整体搬迁（目录必须预先存在） |
-| 会话存储 | `~/.codex/sessions/YYYY/MM/DD/rollout-<时间>-<uuid>.jsonl`；旧文件会被后台 **zstd 压缩为 `.jsonl.zst`**（magic `28 b5 2f fd`），两者都要能读；另有 `history.jsonl`（仅用户 prompt）和 SQLite 镜像库（版本化文件名，勿依赖）。Ccode 观察到会话关联成功后，会在自己的 `app.db` 记录 profile 归属，历史/外部会话可能为空。 |
-| 会话格式 | JSONL `RolloutLine {timestamp, type, payload}`；首行 `session_meta`（含 **cwd** = 项目归属依据）；`response_item`（消息）、`event_msg`（含 token_count）、`turn_context`（每轮 model/cwd）。不按项目分目录，**项目归属靠 session_meta.cwd**。**易漂移** |
+| 会话存储 | `~/.codex/sessions/YYYY/MM/DD/rollout-<时间>-<uuid>.jsonl`；旧文件会被后台 **zstd 压缩为 `.jsonl.zst`**（magic `28 b5 2f fd`），两者都要能读；归档目录 `archived_sessions/` 是**扁平结构**（rollout 直接在根下、无日期分层，0.151 实测，扫描须兼容两种形态）；另有 `history.jsonl`（仅用户 prompt）和 SQLite 镜像库（版本化文件名，勿依赖）。Ccode 观察到会话关联成功后，会在自己的 `app.db` 记录 profile 归属，历史/外部会话可能为空。 |
+| 会话格式 | JSONL `RolloutLine {timestamp, type, payload}`；首行 `session_meta`（含 **cwd** = 项目归属依据）；`response_item`（消息）、`event_msg`（含 token_count）、`turn_context`（每轮 model/cwd）。不按项目分目录，**项目归属靠 session_meta.cwd**。**易漂移**。`session_meta.model_provider` 记的是 **config 里的 provider 名，不记认证身份**：`requires_openai_auth=true` 时官方账号（ChatGPT 登录）对话同样落本地 rollout 且记该 provider 名（2026-08-31 实测）；同一 provider 名下换过 Key 的历史会话事后无法区分 |
 | 关键启动参数 | `-m`、`--profile`、`-c key=value`（最高优先级）、`codex exec`（非交互，`--json` 输出事件流）、`codex resume` |
+| 桌面客户端 | 内嵌于 ChatGPT.app（`Contents/Frameworks/Codex Framework/…/Helpers/Codex`，无独立 Codex.app；2026-08-31 实测 151.0.7922）。会话进统一注册表 `~/.codex/state_5.sqlite` 的 `threads` 表：cli/exec/vscode/桌面端来源混存、**不按登录身份分区**（host 仅 `local`）——切换登录方式不碰会话存储，双向实测对话不丢；`thread_history_1.sqlite` 为内容缓存。rollout→DB 有迁移机制，失败文件记 `rollout_migration_skipped_rollouts`（带 skip_reason）——**文件在盘但客户端不显示**，Ccode 直扫文件免疫。「换登录方式丢对话」的真凶多为云端线程（网页版/云任务不落本地），非本地过滤。登出即删 `auth.json`，客户端 UI 登录态可能滞后于磁盘（注销「没反应」多为已生效未刷新，重启客户端即正常）。深链 **`codex://threads/<session_id>`** 精确打开指定对话（macOS 实测跳转成功；Windows 待验证）——Ccode 对话页「在客户端打开 · Codex」用之；**客户端打开会话时校验 `model_provider` 须在 config.toml 有定义**——Ccode 内联 provider（`ccode`/`ccode-<短id>`）会话跳转会报「Model provider `ccode` not found」无法继续（2026-08-31 实测），Ccode 按 `codex_client_config_providers`（读 config.toml 的 model_providers 名单）对这类会话置灰跳转入口；连接页「注册到 Codex 客户端」写定义块补齐渠道（逆操作「移除注册」只删块、auth.json 单槽共享密钥不动） |
 | 坑 | **只支持 Responses API**（`wire_api="chat"` 已移除并报错）——中转必须实现 `/v1/responses`；`codex exec` 默认要求 git 仓库（`--skip-git-repo-check`）；凭证可能存 OS keyring 而非 auth.json；auth.json 顶层只有 `OPENAI_API_KEY` = API Key 模式（官方 `--api-key` 与第三方中转同一形状，**不算官方账号登录**，检测见 v3.55）；TUI `/model` 选择器的模型目录来自 `model_catalog_json` 指定的 JSON 文件（**仅启动时读取**，Ccode 已为每条绑定生成 catalog：display_name = 「配置名 · 模型」，context_window/max_context_window 取自 model_registry；reasoning levels 全量模板 [low/medium/high]，与 cc-switch 同口径——模型不支持时端点忽略 effort） |
 
 ## 3. Gemini CLI
@@ -48,14 +49,14 @@
 | 会话存储 | `~/.gemini/tmp/<slug>/chats/session-<时间>-<id8>.jsonl`；**slug 映射读 `~/.gemini/projects.json` 和目录内 `.project_root` 标记，不要自己推导**（旧版是 sha256 目录，有迁移） |
 | 会话格式 | JSONL。首行 metadata；消息 `{id, timestamp, content, type: user/info/error/warning/gemini}`，gemini 类型带 `toolCalls` 和 `tokens{input,output,cached,thoughts,tool,total}`；**控制记录 `$rewindTo`（截断后续消息）和 `$set`（patch 元数据）必须处理**，不能简单拼接。旧版单 JSON 文件仍需兼容。若多个落盘文件声明同一 `sessionId`，按最新文件作为唯一会话代表。**易漂移** |
 | 关键启动参数 | `-m`、`-p`（进入 headless）、`--output-format stream-json`、`-r/--resume`、`--list-sessions` |
-| 坑 | **默认 30 天自动删除会话**（`general.sessionRetention`）；新目录首次运行有信任确认（`--skip-trust` 绕过）；管道 stdio 会静默进入 headless；会话文件边写边追加，末行可能残缺；**多模型切换无配置注入机制**（已核实），只能在 TUI 里 `/model set <id>` 手动切换。**0.46 实机核实补充**：`/model` 的「Select Model」选择器列表**硬编码**（main 视图 Auto/Manual 两项 + Manual 子视图官方模型），`GEMINI_MODEL` env 的值不进列表（优先级 `--model` > `GEMINI_MODEL` > settings `model.name`）；`/model set <id>` 零校验任意 id 当场生效。自定义模型进选择器的官方机制：`experimental.dynamicModelConfiguration: true` + `modelConfigs.modelDefinitions`（与内置表 merge，`tier:"custom"` + `isVisible:true` 进 Manual 子视图；实验开关，requiresRestart）。**闪烁**：inline 模式 UI 高度超终端行数即整区重绘（内置 useFlickerDetector 检测；上游已知问题簇，官方 Epic google-gemini/gemini-cli#10673，与终端种类无关，维护者背书 alternate buffer 可根治），缓解 = settings `ui.useAlternateBuffer: true`（默认 false；开了之后 `ui.incrementalRendering`（默认 true）才生效），可叠加 `ui.showSpinner: false` / `ui.loadingPhrases: "off"` |
+| 坑 | **默认 30 天自动删除会话**（`general.sessionRetention`）；新目录首次运行有信任确认（`--skip-trust` 绕过）；管道 stdio 会静默进入 headless；会话文件边写边追加，末行可能残缺；**多模型切换无配置注入机制**（已核实），只能在 TUI 里 `/model set <id>` 手动切换。**0.46 实机核实补充**：`/model` 的「Select Model」选择器列表**硬编码**（main 视图 Auto/Manual 两项 + Manual 子视图官方模型），`GEMINI_MODEL` env 的值不进列表（优先级 `--model` > `GEMINI_MODEL` > settings `model.name`）；`/model set <id>` 零校验任意 id 当场生效。自定义模型进选择器的官方机制：`experimental.dynamicModelConfiguration: true` + `modelConfigs.modelDefinitions`（与内置表 merge，`tier:"custom"` + `isVisible:true` 进 Manual 子视图；实验开关，requiresRestart）——**Ccode「设为全局默认」已写入该登记**（2026-09-01：开关 + 逐模型 definition，displayName = 配置名·模型，thinking/multimodalToolUse 按注册表确知才写；只写不删旧条目）。**闪烁**：inline 模式 UI 高度超终端行数即整区重绘（内置 useFlickerDetector 检测；上游已知问题簇，官方 Epic google-gemini/gemini-cli#10673，与终端种类无关，维护者背书 alternate buffer 可根治），缓解 = settings `ui.useAlternateBuffer: true`（默认 false；开了之后 `ui.incrementalRendering`（默认 true）才生效），可叠加 `ui.showSpinner: false` / `ui.loadingPhrases: "off"` |
 
 ## 4. Qwen Code
 
 | 项 | 值 |
 |---|---|
 | 二进制 / 检测 | `qwen`（npm `@qwen-code/qwen-code`，Node ≥ 22；或 brew）；`qwen --version` |
-| 注入 env（按协议） | openai 协议：`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`；anthropic 协议：`ANTHROPIC_*` 三件套；配合 `--auth-type openai|anthropic`。credential 优先级：CLI flags > shell env > .env > settings env |
+| 注入 env（按协议） | openai 协议：`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`；anthropic 协议：`ANTHROPIC_*` 三件套；配合 `--auth-type openai|anthropic`。credential 优先级：CLI flags > shell env > .env > settings env。策略 env（0.22.0 bundle 全量扫 `QWEN_CODE_*` 实证）：仅 `QWEN_CODE_MAX_OUTPUT_TOKENS` 与 `QWEN_CODE_API_TIMEOUT_MS` 两条，无 temperature/top_p |
 | 全局配置 | `~/.qwen/settings.json`：`modelProviders.<协议>.models[{id, baseUrl, envKey, generationConfig}]` + `security.auth.selectedType` + `model.name`；`QWEN_HOME` 整体搬迁 |
 | 会话存储 | `~/.qwen/projects/<sanitize(cwd)>/chats/<uuid>.jsonl`（sanitize 规则同 Claude）；归档在 `chats/archive/`；目录名可能碰撞，**项目归属以首条记录的 `cwd` 为准** |
 | 会话格式 | JSONL `ChatRecord {uuid, parentUuid, sessionId, timestamp, type: user/assistant/tool_result/system, subtype, cwd, version, message（genai Content 格式）, usageMetadata, model}`；`custom_title` 系统记录给标题。旧版（约 <0.10，具体版本未核实）是单 JSON 文件。**易漂移** |
@@ -123,9 +124,9 @@
 | 项 | 值 |
 |---|---|
 | 二进制 / 检测 | **`grok`**（xAI 官方终端编码 agent，二进制也叫 grok）；`grok --version` 单行输出 `grok 0.2.180 (abc1234)`（非 stable 频道追加 ` [alpha]`）；`grok version --json` 给 `{"currentVersion":"X.Y.Z (commit)","channel":"stable"}`。官方安装落 `~/.grok/bin/grok`（另尝试 `~/.local/bin`、`/usr/local/bin` symlink；resolve_binary 已把 `~/.grok/bin` 收进三平台候选目录） |
-| 注入 env | **`XAI_API_KEY`**（别名 `GROK_CODE_XAI_API_KEY`）、模型 **`GROK_DEFAULT_MODEL`**、base url 覆盖 **`GROK_MODELS_BASE_URL`**（1.0.5 实机核实，自带 user-guide 11-custom-models.md：模型目录从 `{base_url}/models` 拉取、推理同走该 base，`XAI_API_KEY` 作 Bearer；另可用 `GROK_MODELS_LIST_URL` 单独覆盖列表地址）。**`GROK_DEFAULT_MODEL` 只是「偏好」**：与可用模型目录比对，不在目录里走 `preferred model not in available models, falling back` 静默回退默认——第三方模型必须配 `GROK_MODELS_BASE_URL` 让目录来自网关自身。勿用 `GROK_CLI_CHAT_PROXY_BASE_URL`（xAI 内部 CLI chat API 代理覆盖口，非推理端点，第三方端点注进去模型流量不走它）。**模型列表收敛（1.0.5 实机核实）**：`GROK_CONFIG` env 是 JSON overlay 深合并进 config.toml（白名单含 `models` 表），注入 `{"models":{"allowed_models":[...]}}` 可把选择器/`-m` 可选范围收敛到绑定模型列表（不注则网关全量目录进选择器；空列表勿注——fail-closed 全不匹配），选中模型兜底并入。凭证优先级：config.toml `api_key` > `env_key` > 登录 session token > `XAI_API_KEY` |
+| 注入 env | **`XAI_API_KEY`**（别名 `GROK_CODE_XAI_API_KEY`）、模型 **`GROK_DEFAULT_MODEL`**、base url 覆盖 **`GROK_MODELS_BASE_URL`**（1.0.5 实机核实，自带 user-guide 11-custom-models.md：模型目录从 `{base_url}/models` 拉取、推理同走该 base，`XAI_API_KEY` 作 Bearer；另可用 `GROK_MODELS_LIST_URL` 单独覆盖列表地址）。**`GROK_DEFAULT_MODEL` 只是「偏好」**：与可用模型目录比对，不在目录里走 `preferred model not in available models, falling back` 静默回退默认——第三方模型必须配 `GROK_MODELS_BASE_URL` 让目录来自网关自身。勿用 `GROK_CLI_CHAT_PROXY_BASE_URL`（xAI 内部 CLI chat API 代理覆盖口，非推理端点，第三方端点注进去模型流量不走它）。**模型列表收敛（1.0.5 实机核实）**：`GROK_CONFIG` env 是 JSON overlay 深合并进 config.toml（白名单含 `models` 表），注入 `{"models":{"allowed_models":[...]}}` 可把选择器/`-m` 可选范围收敛到绑定模型列表（不注则网关全量目录进选择器；空列表勿注——fail-closed 全不匹配），选中模型兜底并入。**白名单边界（2026-08-31 main 源码实证，`OVERLAY_ALLOW_PATHS` fail-closed）**：只放行 `[models]` 全局块/`[features]`/少量 toolset 叶子，逐模型 `[model.<id>]` 明确除外——`api_backend`/`context_window` overlay 注不进，由中转 `/models` 目录条目字段 `apiBackend`（responses/chat_completions/messages）/`contextWindow`（缺省 256_000）或 config.toml 提供；Ccode 另经 overlay 注入请求策略的 `[models]` 全局默认（五项，见第 8 条）。凭证优先级：config.toml `api_key` > `env_key` > 登录 session token > `XAI_API_KEY` |
 | 官方端点 | xAI 官方 API 是 OpenAI chat_completions 兼容：`https://api.x.ai/v1`；config.toml `[model.<name>]` 的 `api_backend` 支持 chat_completions/responses/messages 三种 |
-| 全局配置 | `$GROK_HOME`（缺省 `~/.grok`，三平台同）下 `config.toml`（主配置 TOML：`[model.<name>]` 段 + `[mcp_servers.<name>]` 段）；项目级 `<cwd>/.grok/config.toml` 只贡献 `[mcp_servers]` 等少数段。**「设为全局默认」首版不支持**（TOML `[model.<name>]` 段结构 + 设为默认的字段未核实，风险高于收益；仅启动注入） |
+| 全局配置 | `$GROK_HOME`（缺省 `~/.grok`，三平台同）下 `config.toml`（主配置 TOML：`[model.<name>]` 段 + `[mcp_servers.<name>]` 段）；项目级 `<cwd>/.grok/config.toml` 只贡献 `[mcp_servers]` 等少数段。**「设为全局默认」2026-09-01 起支持**（`global_config.rs patch_grok_config`）：写顶层 `api_key` + `[endpoints].models_base_url` + `[models].default`（首个绑定模型）与请求策略 `[models]` 全局默认（temperature/top_p/max_completion_tokens/default_reasoning_effort/extra_headers=`$VAR` 引用，`load_toml_file` 读盘时展开，密文不落盘）；`[models]` 通用键**只设不删**（防误清用户手写值）。绑定设了「API 后端」或权威层确知上下文窗口时逐模型写 `[model.<id>]` 段（api_backend / context_window / name=配置名·模型；段键 = 目录模型 id，含 `/` 的 id 自动加引号）——这是 api_backend 在 Ccode 侧的唯一通道（overlay 白名单不放行 [model.*]），中转目录声明仍优先推荐。首版不支持的旧决策作废——`[models].default` 字段与 `[endpoints]` 段已从官方 user-guide 实证 |
 | 官方账号 | `grok login`（浏览器 OAuth，auth.x.ai）/ `grok login --device-auth` / `grok logout`；凭证落 `~/.grok/auth.json`（0600，顶层 map：scope → GrokAuth{key, auth_mode, refresh_token, expires_at}，grok 自己原子重写——我们只读）。官方账号拉起必须 `env_remove XAI_API_KEY`/`GROK_CODE_XAI_API_KEY` |
 | 会话存储 | `~/.grok/sessions/<encoded-cwd>/<session-id-uuidv7>/` 目录式会话（目录 0700）：`summary.json`（info{id,cwd}、generated_title、created_at/updated_at、num_messages、current_model_id）+ **`updates.jsonl`（权威对话日志，append-only）** + `chat_history.jsonl` 等；`<encoded-cwd>` 是 cwd 的 URL 编码（超长则 slug+hash 且目录内有 `.cwd` 元数据文件）。**`~/.grok/sessions/session_search.sqlite` 只是 FTS 索引不是会话本体**，扫描须排除。项目归属以 `summary.json` 的 `info.cwd` 为准（比解码目录名可靠） |
 | 会话格式 | `updates.jsonl` 每行 `{"timestamp": <unix秒>, "method": "session/update", "params": <ACP SessionNotification>}`；消费方式 = `params.update.sessionUpdate`：`user_message_chunk`/`agent_message_chunk`（content 为 ACP ContentBlock，text 在 `content.text`）/`tool_call`/`tool_call_update`/`plan` 等，另有 `_x.ai/` 前缀扩展通知；未识别类型跳过（防御式）。token usage 在 turn 结束的 ACP 通知 `_meta.usage`（PromptUsage）：`input_tokens`/`output_tokens`/`total_tokens`/`cached_read_tokens` + `modelUsage{<model>:{...}}`（可能在 `params._meta` 或 `params.update._meta`，两层都探） |
@@ -175,36 +176,63 @@
    必须按「Agent + protocol」建立逐字段适配和测试矩阵，不能把 `max_output_tokens` 直接等同为所有 CLI 的 `max_tokens`。
 
    逐字段通道实证（2026-08-28，Windows 本机安装二进制 strings/配置 schema；实现见 `agent_specs.rs`
-   `request_policy_support`，"supported" = 存在实证的用户可及通道能让该值进入真实请求，协议支持但 CLI
-   无入口记 "unsupported"）：
-   - **claude-code**（v2.x exe，全五项 supported）：temperature/top_p 经 `CLAUDE_CODE_EXTRA_BODY`
+   `request_policy_support`）。**2026-09-01 起取值按入口记账**（旧 supported 一词被求交器误当
+   「启动可注」，qwen 温度被画成可注入即此案）：`inject` = 启动注入（env/flag/内联/overlay，
+   拉起即生效）；`persist` = 仅「设为全局默认」写 CLI 配置文件可达；`tui` = 仅进程内原生命令
+   （如 /effort），Ccode 不携带存储值；`unsupported` = 协议支持但 CLI 无入口；`unknown` = 未实证。
+   求交器 `combo.rs` 的 `inject_*_allowed` 只认 inject；persist 字段存储可携带（可编辑、
+   设为全局要写）但启动不注；协议维度在 `channel_status_for` 门控（kimi effort 仅 kimi 协议通道）：
+   - **claude-code**（v2.x exe，全五项 inject）：temperature/top_p 经 `CLAUDE_CODE_EXTRA_BODY`
      （env 解析为 JSON 对象后展开进 API 请求体，反编译实证）；`CLAUDE_CODE_MAX_OUTPUT_TOKENS`；
      `CLAUDE_CODE_EFFORT_LEVEL`（同 `/effort`，档位闭集 low/medium/high/xhigh/max，保存期校验）；
      `ANTHROPIC_CUSTOM_HEADERS`（`Name: value` 逐行）。
    - **codebuddy**（claude-code fork，env 前缀独立，无 EXTRA_BODY/EFFORT 入口）：
-     `CODEBUDDY_CODE_MAX_OUTPUT_TOKENS`、`CODEBUDDY_CUSTOM_HEADERS` 实证 → supported；
+     `CODEBUDDY_CODE_MAX_OUTPUT_TOKENS`、`CODEBUDDY_CUSTOM_HEADERS` 实证 → inject；
      temperature/top_p → unsupported；effort → unknown。
    - **codex**：temperature/top_p 仅存在于 wire schema（ModelPreferences），config 无键；
      二进制里的 `max_output_tokens` 全部是 exec pragma（工具输出截断）非模型请求 → unsupported；
-     `model_reasoning_effort`（config 键）与 provider `http_headers`/`env_http_headers` 实证 → supported。
-   - **gemini / qwen**：settings schema chunk 内 temperature/topP/maxOutputTokens 零命中
-     （generationConfig 仅出现在 API 请求构造路径）→ unsupported；effort/headers 未核实 → unknown。
+     `model_reasoning_effort`（config 键）与 provider `http_headers`/`env_http_headers` 实证 → inject。
+   - **gemini**：settings schema chunk 内 temperature/topP/maxOutputTokens 零命中 → unsupported；
+     effort/headers 未核实 → unknown（modelConfigs.customAliases 可挂生成参数但需 experimental
+     开关且消费链未逐键实证，不接线）。
+   - **qwen**（0.22.0 bundle 复核，2026-09-01，旧「无通道」结论修正）：temperature/top_p/
+     max_output_tokens 通道 = settings.json **条目级** `generationConfig.samplingParams`
+     （snake_case 线格式键名 temperature/top_p/max_tokens；dialog schema 未列该子键——「代码读、
+     schema 未写」的半隐藏通道，条目级优先于顶层 model.generationConfig，逐字段合并实证）
+     → persist（「设为全局」写入；启动 env 够不到）。env 侧仅 `QWEN_CODE_MAX_OUTPUT_TOKENS`
+     一条策略通道（条目已配 samplingParams 时被跳过）。注意：条目配了 samplingParams 会跳过
+     qwen 的 known-model max_tokens 自动钳制，用户显式值原样下发（超上限 400 风险自控）。
+     effort：无注入通道；但 0.22.0 有 `/effort low|medium|high|xhigh|max` 直切命令
+     （写运行时 reasoning.effort，effortCommand 实证）→ effort_levels 状态栏槽位已接。
+     headers：`generationConfig.customHeaders` 在字段白名单内但请求注入点未逐键实证 → 保守 unknown。
    - **opencode**：config schema 实证 agent/model options 含 temperature/topP/maxOutputTokens/
-     reasoningEffort（枚举），provider options 支持 headers → 全 supported。
+     reasoningEffort（枚举），provider options 支持 headers → 全 inject。
    - **kimi**（2026-08-28 二进制反编译实证）：`KIMI_MODEL_THINKING_EFFORT` 原样透传 + 小写归一，
      env 路径无闭集校验（合法值随模型 catalog 漂移：low/medium/high/xhigh/max/on/off），但**仅
-     kimi 协议通道读取**，anthropic/openai 兼容通道静默忽略 → reasoning_effort supported；余 unknown。
-     配套：`KIMI_MODEL_ADAPTIVE_THINKING` 是布尔开关（true/false/1/0/yes/no/on/off），
-     `KIMI_MODEL_REASONING_KEY` 是 dialect 键名（known：reasoning_content/reasoning_details/reasoning）。
-   - **grok**（v1.0.5 二进制 + 随附 README 双实证，全五项 supported）：config.toml `[model.*]` 表
-     temperature/top_p/max_completion_tokens（注意键名非 max_output_tokens）/reasoning_effort
-     （档位 none/minimal/low/medium/high/xhigh/max，另有 CLI flag `--reasoning-effort`）；
-     headers 走 `[model.*].extra_headers`（静态值）/ `env_http_headers`（环境变量引用）。通道走
-     config/flag 不走 env（GROK_* 无此类变量）——Ccode 侧 GROK_CONFIG overlay 白名单是否含
-     `model` 表未经实机验证，接线留待实证。
+     kimi 协议通道读取**，anthropic/openai 兼容通道静默忽略 → reasoning_effort inject；余 unknown。
+     求交按绑定 protocol 门控（combo.rs channel_status_for：非 kimi 协议的绑定该字段按 unknown 计）。
+     配套（2026-09-01 语义核实，判决**不接入自动注入**，留 extra_env 逃生口）：
+     `KIMI_MODEL_ADAPTIVE_THINKING`（布尔）是 Anthropic 思考 wire 形态开关（true=adaptive 新形态
+     带 effort 透传 / false=budget 旧形态收敛档位 / 未设=按模型家族+档位自动推断），**仅 anthropic
+     兼容通道读**——Ccode 缺省 kimi 原生通道下是死参数，且形态正误取决于模型代际+中转实现，
+     注错 = 请求 400；`KIMI_MODEL_REASONING_KEY` 是思考字段方言 pin，**仅 openai 兼容通道读**，
+     正确取值取决于中转方言（本地无可推导依据），缺省三键自动探测已覆盖常态（DeepSeek/
+     OpenRouter），explicit pin 是异常中转的修复手段。
+   - **grok**（v1.0.5 二进制 + 随附 README 双实证，全五项 inject）：通道是 config 不是 env
+     （GROK_* 无此类变量）。Ccode 侧接线（2026-08-31，main 源码实证）：GROK_CONFIG overlay 白名单
+     （`config_override.rs OVERLAY_ALLOW_PATHS`，fail-closed 丢弃未列出键）只放行 `[models]` 全局块，
+     **逐模型 `[model.<id>]` 明确不在内**（源码注释原话 "not the per-model [model.<id>] block"）——
+     故五项全经 `[models]` 全局默认注入（temperature/top_p/max_completion_tokens/
+     default_reasoning_effort/extra_headers=`$VAR` 引用，overlay 管线会展开 env 变量）；
+     `api_backend`/`context_window` 是 `[model.<id>]` 字段，overlay 注不进——Ccode 侧通道 =
+     绑定级「API 后端」字段 +「设为全局默认」写 `[model.*]` 段（2026-09-01 起；context_window
+     只写权威层值：用户覆盖/网关实测缓存，估值层不配覆盖目录声明）；中转 `/models` 目录条目
+     （`apiBackend`/`contextWindow`，`parse_remote_model_value` 实证解析）仍是首选渠道；
+     目录缺 contextWindow 时 grok 按 256_000 计。
    - **cursor**：本机未安装（2026-08-28），无法 strings 实证——保持全 unknown，装机后补。
-   - cursor/grok 之外汇总：claude-code 全五项、codebuddy 两条、codex effort+headers、
-     gemini/qwen 前三项 unsupported、opencode 全五项、kimi effort。
+   - 汇总：claude-code 全五项 inject、codebuddy max output+headers inject、codex effort+headers inject、
+     gemini 前三项 unsupported、qwen 温度/topP persist + max output inject + effort tui、
+     opencode 全五项 inject、kimi effort inject（协议门控）、grok 全五项 inject（overlay [models] 全局默认）。
 
    接线状态（2026-08-28 第二批）：`launch_plan` 已接 claude-code（EXTRA_BODY 合并
    temperature/top_p + MAX_OUTPUT_TOKENS + EFFORT_LEVEL + CUSTOM_HEADERS）、codebuddy
@@ -212,8 +240,13 @@
    无 base_url 时 headers 无处挂载不注）、opencode（OPENCODE_CONFIG_CONTENT 的 model options 四项
    + provider options.headers，headers 值拉起瞬间从进程环境解析——只在 env 内联合并不进
    opencode_provider_json，防全局写入路径把密文落盘）、kimi（KIMI_MODEL_THINKING_EFFORT，仅
-   kimi 协议通道）。只注用户填了的字段；extra_env 仍最后注入可覆盖；官方账号拉起不注策略。
-   grok overlay 接线留待白名单实机验证。
+   kimi 协议通道）、grok（GROK_CONFIG overlay 的 [models] 全局默认五项，2026-08-31 白名单
+   源码实证后接线；headers 以 $VAR 引用透传不解析密文）、qwen（QWEN_CODE_MAX_OUTPUT_TOKENS
+   一条 env，2026-09-01；temperature/top_p 走「设为全局」的条目级 generationConfig.samplingParams）。
+   「设为全局」侧的条目级策略写入：opencode models.*.options 四项、kimi [models.*]、qwen
+   generationConfig.samplingParams 三项（均按各模型自己的值）。claude 另接
+   CLAUDE_CODE_SUBAGENT_MODEL（名单 ≥3 时复用 HAIKU 槽，启动注入与设为全局同键，2026-09-01）。
+   只注用户填了的字段；extra_env 仍最后注入可覆盖；官方账号拉起不注策略。
 
    网关体检探针（2026-08-28，`profile_validation.rs probe_gateway`）：绕过 CLI 直连端点发
    max_tokens=16 的最小请求，观测裸响应回答「网关把请求怎么了」——① 基础请求（鉴权+模型存在）

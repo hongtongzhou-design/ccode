@@ -41,6 +41,9 @@ pub struct Profile {
     #[serde(default)]
     pub no_auth: bool,
     pub protocol: Option<String>,
+    /// Grok 专用：API 后端（绑定级，仅设为全局写入消费；其余 agent 不消费）
+    #[serde(default)]
+    pub api_backend: Option<String>,
     pub base_url: Option<String>,
     /// 可用模型列表，首个为默认；同一端点下通常有多个模型可切换
     #[serde(default)]
@@ -208,6 +211,10 @@ pub struct Binding {
     #[serde(default)]
     pub gateway_id: Option<String>,
     pub protocol: Option<String>,
+    /// Grok 专用：API 后端（chat_completions/responses/messages），仅「设为全局默认」
+    /// 写 [model.*] 段时消费；启动注入够不到（overlay 白名单不含 [model.*]）
+    #[serde(default)]
+    pub api_backend: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default)]
@@ -239,6 +246,8 @@ pub struct BindingInput {
     pub kind: BindingKind,
     pub protocol: Option<String>,
     #[serde(default)]
+    pub api_backend: Option<String>,
+    #[serde(default)]
     pub models: Vec<String>,
     #[serde(default)]
     pub extra_env: std::collections::HashMap<String, String>,
@@ -254,6 +263,8 @@ pub struct ProfileInput {
     #[serde(default)]
     pub no_auth: bool,
     pub protocol: Option<String>,
+    #[serde(default)]
+    pub api_backend: Option<String>,
     pub base_url: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
@@ -454,6 +465,7 @@ impl ProfileStore {
                 kind: BindingKind::Official,
                 gateway_id: None,
                 protocol: None,
+                api_backend: None,
                 models: normalize_models(input.models),
                 extra_env: input.extra_env,
                 last_used_at: None,
@@ -504,6 +516,7 @@ impl ProfileStore {
             kind: BindingKind::Api,
             gateway_id: Some(gateway.id.clone()),
             protocol: input.protocol.clone(),
+            api_backend: input.api_backend.clone(),
             models: models.clone(),
             extra_env: input.extra_env.clone(),
             last_used_at: None,
@@ -554,6 +567,7 @@ impl ProfileStore {
             kind: BindingKind::Api,
             gateway_id: Some(gw.id.clone()),
             protocol: src.protocol.clone(),
+            api_backend: src.api_backend.clone(),
             models: src.models.clone(),
             extra_env: src.extra_env.clone(),
             last_used_at: None,
@@ -609,6 +623,8 @@ impl ProfileStore {
             kind: BindingKind::Api,
             gateway_id: Some(gid.clone()),
             protocol,
+            // grok 专用字段不跨 agent 携带；绑到 grok 时取缺省（chat_completions）
+            api_backend: None,
             models: src.models.clone(),
             extra_env: src.extra_env.clone(),
             last_used_at: None,
@@ -637,6 +653,7 @@ impl ProfileStore {
             return Err("官方账号不能设置为无密钥模式".into());
         }
         bindings[idx].protocol = input.protocol.clone();
+        bindings[idx].api_backend = input.api_backend.clone();
         bindings[idx].models = normalize_models(input.models.clone());
         bindings[idx].extra_env = input.extra_env.clone();
         let mut gateways = crate::gateway_store::load_gateways()?;
@@ -861,6 +878,7 @@ impl ProfileStore {
                 account_type: AccountType::Official,
                 no_auth: false,
                 protocol: None,
+                api_backend: None,
                 base_url: None,
                 models: input.models,
                 extra_env: input.extra_env,
@@ -888,6 +906,7 @@ impl ProfileStore {
             kind: BindingKind::Api,
             gateway_id: Some(gid.clone()),
             protocol: input.protocol,
+            api_backend: input.api_backend,
             models: normalize_models(input.models),
             extra_env: input.extra_env,
             last_used_at: None,
@@ -1311,6 +1330,7 @@ pub fn import_profiles(store: tauri::State<'_, ProfileStore>, path: String) -> R
             account_type: p.account_type,
             no_auth: p.no_auth && p.account_type == AccountType::Api,
             protocol: p.protocol,
+            api_backend: p.api_backend,
             base_url: p.base_url,
             models: p.models,
             extra_env: p.extra_env,
@@ -1357,6 +1377,8 @@ struct BindingExportV2 {
     agent: String,
     gateway_ref: GatewayRefV2,
     protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_backend: Option<String>,
     models: Vec<String>,
     extra_env: std::collections::HashMap<String, String>,
 }
@@ -1424,6 +1446,7 @@ fn build_export_v2(
                     slot_fp: slot_fingerprint(&gw.slots),
                 },
                 protocol: b.protocol.clone(),
+                api_backend: b.api_backend.clone(),
                 models: b.models.clone(),
                 extra_env: extra_env_for_export(&b.extra_env),
             })
@@ -1574,6 +1597,8 @@ fn apply_import_v2(
         }
         bindings.push(Binding {
             id: uuid::Uuid::new_v4().to_string(),
+            // grok 专用字段：导入对象非 grok 时丢弃
+            api_backend: if b.agent == "grok" { b.api_backend.clone() } else { None },
             agent: b.agent,
             kind: BindingKind::Api,
             gateway_id: Some(gid),
@@ -1655,6 +1680,14 @@ fn merge_incoming_binding(existing: &mut Binding, incoming: &BindingExportV2, sk
         (None, Some(p)) => existing.protocol = Some(p.clone()),
         (Some(a), Some(b)) if a != b => {
             skipped.push(format!("{} 的协议冲突（{a} / {b}），已跳过", incoming.agent));
+        }
+        _ => {}
+    }
+    // grok 的 api_backend 同协议口径合并：空则补、冲突记 skipped
+    match (&existing.api_backend, &incoming.api_backend) {
+        (None, Some(v)) if incoming.agent == "grok" => existing.api_backend = Some(v.clone()),
+        (Some(a), Some(b)) if a != b => {
+            skipped.push(format!("{} 的 API 后端冲突（{a} / {b}），已跳过", incoming.agent));
         }
         _ => {}
     }
@@ -1899,6 +1932,7 @@ mod tests {
             account_type: AccountType::Api,
             no_auth: false,
             protocol: protocol.map(str::to_string),
+            api_backend: None,
             base_url: None,
             models: vec![],
             extra_env: Default::default(),
@@ -1975,6 +2009,7 @@ mod tests {
             account_type: AccountType::Api,
             no_auth: false,
             protocol: None,
+            api_backend: None,
             base_url: Some("https://example.com".into()),
             models: vec![],
             extra_env: Default::default(),
@@ -2044,6 +2079,7 @@ mod tests {
             kind: BindingKind::Api,
             gateway_id: Some(gid.into()),
             protocol: None,
+            api_backend: None,
             models: models.iter().map(|s| (*s).to_string()).collect(),
             extra_env: Default::default(),
             last_used_at: None,
@@ -2096,6 +2132,7 @@ mod tests {
                     slot_fp: slot_fingerprint(&gw.slots),
                 },
                 protocol: Some("anthropic".into()),
+                api_backend: None,
                 models: vec!["m2".into()],
                 extra_env: {
                     let mut e = std::collections::HashMap::new();

@@ -71,6 +71,8 @@ import {
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   RefreshCw,
   SquareTerminal,
 } from "lucide-react";
@@ -3072,14 +3074,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         },
       },
       {
-        label: treeOpen ? "✓ 隐藏文件树" : "显示文件树",
-        onSelect: () => persistTreeOpen(!treeOpen),
-      },
-      {
-        label: rightOpen ? "✓ 隐藏成果面板" : "显示成果面板",
-        onSelect: () => persistRightOpen(!rightOpen),
-      },
-      {
         label: focusMode ? "✓ 退出专注终端" : "专注终端",
         onSelect: () => setFocusMode((v) => !v),
       },
@@ -3235,6 +3229,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       setRightWidth(clampRightWidth(normalRightWidthRef.current, false));
     }
     persistRightOpen(false);
+  }
+
+  function toggleRightPanel() {
+    if (rightOpen) closeRightPanel();
+    else persistRightOpen(true);
   }
 
   function startRightResize(event: React.PointerEvent<HTMLDivElement>) {
@@ -3829,6 +3828,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         reuseKey: pt.reuseKey,
         stepName: pt.stepName,
       });
+      // 纯 shell/脚本标签（登录、CLI 自更新、run 脚本）没有会话可供聊天层展示——
+      // 默认 chat 面会把终端盖住、停在「等待会话文件」，用户看不见登录命令的输出。
+      // 直接落终端面（同分叉不支持注入时落终端的口径，3684 行附近）
+      if (tabId && (pt.shellOnly || pt.prefillCommand)) {
+        setSurfaceModeByTab((prev) => ({ ...prev, [tabId]: "terminal" }));
+      }
       // run 脚本标签：登记 nonconcurrent 互斥追踪
       if (pt.wsId && tabId) setRunningScript(pt.wsId, tabId);
       // 「快速开聊」：落到最干净的终端——收起工作树与右栏，只剩标签条 + 终端。
@@ -4561,7 +4566,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       ref={terminalRootRef}
       className="terminal-workbench relative flex h-full bg-canvas"
     >
-      {/* 左栏：工作树（专注终端/专注内容下整体隐藏；默认完全收起，标签栏左侧钮或布局菜单打开） */}
+      {/* 左栏：工作树（专注终端/专注内容下整体隐藏；默认完全收起，标签栏左侧钮打开） */}
       {!focusMode && !rightExpanded && treeOpen && (
         <div className="flex w-56 shrink-0 flex-col border-r border-hairline bg-rail2">
           <div className="flex h-8 shrink-0 items-center gap-2 px-2">
@@ -4763,41 +4768,56 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           >
             ＋
           </button>
-          <span
-            className="ml-2 flex shrink-0 items-center gap-0.5 border-l border-hairline pl-2"
-            role="group"
-            aria-label="当前标签显示层"
-          >
+          <span className="ml-2 flex shrink-0 items-center border-l border-hairline pl-2">
             <button
               type="button"
-              onClick={() => switchSurface("chat")}
-              aria-pressed={focusedSurfaceMode === "chat"}
-              title="显示聊天界面"
-              aria-label="显示聊天界面"
-              className={`flex size-7 items-center justify-center rounded-md transition-colors ${focusedSurfaceMode === "chat" ? "bg-seg-sel text-l1" : "text-l4 hover:bg-hover hover:text-l2"}`}
+              onClick={() =>
+                switchSurface(focusedSurfaceMode === "chat" ? "terminal" : "chat")
+              }
+              title={
+                focusedSurfaceMode === "chat" ? "切换到终端" : "切换到聊天"
+              }
+              aria-label={
+                focusedSurfaceMode === "chat" ? "切换到终端" : "切换到聊天"
+              }
+              className="flex size-7 items-center justify-center rounded-md text-l4 hover:bg-hover hover:text-l2"
             >
-              <MessageSquare size={14} strokeWidth={1.8} aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              onClick={() => switchSurface("terminal")}
-              aria-pressed={focusedSurfaceMode === "terminal"}
-              title="显示终端界面"
-              aria-label="显示终端界面"
-              className={`flex size-7 items-center justify-center rounded-md transition-colors ${focusedSurfaceMode === "terminal" ? "bg-seg-sel text-l1" : "text-l4 hover:bg-hover hover:text-l2"}`}
-            >
-              <SquareTerminal size={14} strokeWidth={1.8} aria-hidden="true" />
+              {focusedSurfaceMode === "chat" ? (
+                <MessageSquare size={14} strokeWidth={1.8} aria-hidden="true" />
+              ) : (
+                <SquareTerminal size={14} strokeWidth={1.8} aria-hidden="true" />
+              )}
             </button>
           </span>
           <span className="ml-auto flex shrink-0 items-center gap-1">
+            {!focusMode && (
+              <button
+                type="button"
+                onClick={toggleRightPanel}
+                aria-pressed={rightOpen}
+                title={rightOpen ? "隐藏成果面板" : "显示成果面板"}
+                aria-label={rightOpen ? "隐藏成果面板" : "显示成果面板"}
+                className={`flex size-7 items-center justify-center rounded-md transition-colors ${
+                  rightOpen
+                    ? "bg-seg-sel text-l1"
+                    : "text-l4 hover:bg-hover hover:text-l2"
+                }`}
+              >
+                {rightOpen ? (
+                  <PanelRightClose size={14} strokeWidth={1.8} aria-hidden="true" />
+                ) : (
+                  <PanelRightOpen size={14} strokeWidth={1.8} aria-hidden="true" />
+                )}
+              </button>
+            )}
             <button
               type="button"
               onClick={(e) => {
                 const r = e.currentTarget.getBoundingClientRect();
                 setLayoutMenu({ x: r.right, y: r.bottom + 4 });
               }}
-              title="布局与显示层"
-              aria-label="布局与显示层"
+              title="布局"
+              aria-label="布局"
               className="flex size-7 items-center justify-center rounded-md text-l4 hover:bg-hover hover:text-l2"
             >
               <LayoutPanelTop size={14} aria-hidden="true" />

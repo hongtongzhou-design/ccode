@@ -1,5 +1,6 @@
 //! 用量与费用统计（§6.11）：各 agent 的会话 usage 按天聚合进 app.db，
-//! 内置定价表（可被 <config>/ccode/pricing.json 覆盖）估算 USD 费用；价格不明的只显示 token。
+//! 定价链（用户 pricing.json > 公共能力库 cost > 内置表，高层任意前缀命中即胜、
+//! 同层最长前缀优先）估算 USD 费用；价格不明的只显示 token。
 
 use chrono::{DateTime, Days, Local, NaiveDate, TimeZone};
 use rusqlite::{params, Connection};
@@ -705,6 +706,24 @@ fn register_provenance_impl(
     Ok(())
 }
 
+/// Ccode 无头 AI 临时 cwd 的目录名：`ccode-ai-<uuid>`（与 `ai.rs` 命名同步）。
+/// 对话列表用它在 provenance 被清理后仍把这些会话归入内部 AI；用量统计不走这条。
+pub(crate) fn is_ccode_ai_temp_cwd(path: &str) -> bool {
+    let name = path
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("");
+    let Some(rest) = name.strip_prefix("ccode-ai-") else {
+        return false;
+    };
+    rest.len() == 36
+        && rest.as_bytes().iter().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => *b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
 pub(crate) fn normalize_provenance_path(path: &str) -> String {
     let expanded = crate::sessions::expand_tilde(path);
     let resolved = std::fs::canonicalize(&expanded)
@@ -792,8 +811,8 @@ fn meta_set(conn: &Connection, key: &str, value: &str) {
     );
 }
 
-/// usage_provenance 只增不减：无头 AI 用的临时工作区（系统临时目录下）用完即删，
-/// 登记行会越积越多。清理「临时目录下、目录已不存在、且登记超过 7 天」的行；
+/// 非内部登记：临时目录下、目录已不存在、且超过 7 天的行可清。
+/// 内部 AI 登记不清——清掉后会话文件还在，对话页会把 `ccode-ai-<uuid>` 当成普通项目。
 /// 真实项目目录的行一律不动（可能暂时未挂载，不能误清）。created_at 是 ISO 字符串可字典序比较
 fn prune_stale_provenance(conn: &Connection) {
     const PRUNE_AFTER_SECS: u64 = 7 * 24 * 3600;
@@ -809,17 +828,25 @@ fn prune_stale_provenance(conn: &Connection) {
     // 先收集再删：活跃 SELECT 语句上直接写同连接可能撞 SQLITE_LOCKED
     let rows = {
         let Ok(mut stmt) = conn.prepare(
-            "SELECT agent, project_path FROM usage_provenance WHERE created_at < ?1",
+            "SELECT agent, project_path, internal FROM usage_provenance WHERE created_at < ?1",
         ) else {
             return;
         };
         stmt.query_map(params![cutoff], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? != 0,
+            ))
         })
         .map(|rows| rows.flatten().collect::<Vec<_>>())
         .unwrap_or_default()
     };
-    for (agent, path) in rows {
+    for (agent, path, internal) in rows {
+        // 内部 AI 登记一旦清掉，会话文件还在、项目树就会冒出一串 ccode-ai-<uuid>
+        if internal {
+            continue;
+        }
         let under_tmp = path == tmp || path.starts_with(&format!("{tmp}/"));
         if under_tmp && !std::path::Path::new(&path).exists() {
             let _ = conn.execute(
@@ -948,38 +975,83 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
 // ===== 定价 =====
 
 /// 内置前缀价目（美元 / 每百万 token）；最长前缀匹配（gpt-5-codex 优先于 gpt-5、
-/// grok-4.1-fast 优先于 grok-4、qwen3-coder 优先于 qwen3）
-const BUILTIN_PRICING: [(&str, (f64, f64)); 27] = [
-    ("claude-opus", (15.0, 75.0)),
-    ("claude-sonnet", (3.0, 15.0)),
-    ("claude-haiku", (0.8, 4.0)),
-    ("claude-fable", (15.0, 75.0)),
+/// grok-4.1-fast 优先于 grok-4、qwen3-coder 优先于 qwen3）。
+/// 数据口径：2026-08-31 各官方定价页（xAI 官方站不可达，grok 系据 OpenRouter/LiteLLM
+/// 归档价）。同前缀跨代价格不同的一律给新代加更长前缀、旧价留给老会话归属；
+/// 价格随时间漂移的模型（gemini-3.6-flash 推广价、deepseek 峰谷价、上下文档位、
+/// qwen 阶梯价）取当前首档，精度损失由公共能力库/用户覆盖两层兜底修正。
+const BUILTIN_PRICING: &[(&str, (f64, f64))] = &[
+    // Anthropic（Opus 4.5 起降至 5/25，仅 4.1 为 15/75；Sonnet 5 起 2/10；Haiku 4.5 = 1/5）
+    ("claude-opus-4-1", (15.0, 75.0)),
+    ("claude-opus", (5.0, 25.0)),
+    ("claude-sonnet-4", (3.0, 15.0)),
+    ("claude-sonnet", (2.0, 10.0)),
+    ("claude-haiku", (1.0, 5.0)),
+    ("claude-fable", (10.0, 50.0)),
+    // OpenAI（codex 版与同代基础模型同价：5.1-codex 命中 gpt-5.1、5.2-codex 命中 gpt-5.2）
+    ("gpt-5.6-sol", (4.0, 20.0)),
+    ("gpt-5.6-terra", (2.0, 12.0)),
+    ("gpt-5.6-luna", (0.2, 1.2)),
+    ("gpt-5.5", (5.0, 30.0)),
+    ("gpt-5.4", (2.5, 15.0)),
+    ("gpt-5.3-codex", (1.75, 14.0)),
+    ("gpt-5.2", (1.75, 14.0)),
+    ("gpt-5.1", (1.25, 10.0)),
+    ("gpt-5-mini", (0.25, 2.0)),
+    ("gpt-5-nano", (0.05, 0.4)),
     ("gpt-5-codex", (1.25, 10.0)),
     ("gpt-5", (1.25, 10.0)),
-    // kimi-k3 官方价 ¥20/¥100（输入缓存未命中/输出，每 1M；缓存命中 ¥2 = 一折，
-    // 与 cost_of 的 cache_read×0.1 系数一致），按默认汇率 7.2 折美元
-    ("kimi-k3", (2.78, 13.89)),
+    // Kimi（官方国际站 USD 价，缓存未命中输入；缓存命中约一折，与 cost_of 的
+    // cache_read×0.1 系数一致。国内站人民币价折算略低，k2 初代已退役留作旧会话归属）
+    ("kimi-k3", (3.0, 15.0)),
+    ("kimi-k2.7", (0.95, 4.0)),
+    ("kimi-k2.6", (0.95, 4.0)),
+    ("kimi-k2.5", (0.6, 3.0)),
     ("kimi-k2", (0.6, 2.5)),
-    ("moonshot", (0.6, 3.0)),
-    ("gemini-3.6-flash", (0.3, 2.5)),
-    ("gemini-3.5-flash", (0.3, 2.5)),
+    ("moonshot", (0.6, 3.0)), // V1 系 2026-08-31 全线下线，留作旧会话归属
+    // Google（2.5-pro/3.1-pro 的 >200K 档更贵，取首档；3.6-flash 为推广价，
+    // 2027-01-01 起恢复 1.5/7.5；3-pro 已关停，留作旧会话归属）
+    ("gemini-3.6-flash", (0.75, 3.75)),
+    ("gemini-3.5-flash", (1.5, 9.0)),
     ("gemini-3.1-pro", (2.0, 12.0)),
     ("gemini-3-pro", (2.0, 12.0)),
-    ("gemini-3-flash", (0.3, 2.5)),
+    ("gemini-3-flash", (0.5, 3.0)),
     ("gemini-2.5-pro", (1.25, 10.0)),
     ("gemini-2.5-flash", (0.3, 2.5)),
+    // xAI（官方站不可达，据 OpenRouter 现行目录 + LiteLLM 归档；3 系与初代 4
+    // 2026 年上半年已停售，留作旧会话归属；>200k 档翻倍不单列）
     ("grok-4.1-fast", (0.2, 0.5)),
+    ("grok-4-fast", (0.2, 0.5)),
+    ("grok-4.6", (2.0, 6.0)),
+    ("grok-4.5", (2.0, 6.0)),
+    ("grok-4.3", (1.25, 2.5)),
+    ("grok-4.2", (1.25, 2.5)), // 含 grok-4.20
     ("grok-4", (3.0, 15.0)),
     ("grok-3-mini", (0.3, 0.5)),
     ("grok-3", (3.0, 15.0)),
     ("grok-code-fast", (0.2, 1.5)),
+    ("grok-build", (1.0, 2.0)),
+    // 智谱 z.ai 官方国际价（国内站人民币价另有口径；Flash 免费款不收条目——
+    // 0 价会参与计费把桶标成「已计价」，免费模型应走公共库如实 0 价）
+    ("glm-5.3-flash", (0.15, 0.5)),
+    ("glm-5.3", (1.4, 4.4)),
+    ("glm-5.2", (1.4, 4.4)),
+    ("glm-5p2", (1.4, 4.4)), // 中转对 GLM-5.2 的常见改名
+    ("glm-5.1", (1.4, 4.4)),
+    ("glm-5", (1.0, 3.2)),
+    ("glm-4.5-air", (0.2, 1.1)),
+    ("glm-4.5-x", (2.2, 8.9)),
+    ("glm-4.7", (0.6, 2.2)),
     ("glm-4.6", (0.6, 2.2)),
     ("glm-4.5", (0.6, 2.2)),
-    // 中转里的 glm-5 系（如 glm-5p2）暂按 4.6 同价估算，官方价出来后单列
-    ("glm-5", (0.6, 2.2)),
-    ("qwen3-coder", (0.5, 2.0)),
+    // 阿里百炼国际价 ≤32K 首档（国内区约六折；32K 以上阶梯档不展开）
+    ("qwen3-coder-flash", (0.3, 1.5)),
+    ("qwen3-coder", (1.0, 5.0)),
+    ("qwen3-max", (1.2, 6.0)),
     ("qwen3", (0.5, 2.0)),
-    ("deepseek", (0.27, 1.1)),
+    // DeepSeek 峰时价（谷时半价；表不带时间维度，V3 旧会话按现价归属）
+    ("deepseek-v4-pro", (1.32, 3.96)),
+    ("deepseek", (0.44, 1.32)),
 ];
 
 /// 汇率取值链：settings.json 的 rate_usd_cny > pricing.json 的 "_rate" > 默认 7.2
@@ -999,11 +1071,21 @@ fn load_rate(override_path: Option<&Path>) -> f64 {
     load_rate_with(crate::settings::rate_setting(), override_path)
 }
 
-fn load_pricing(override_path: Option<&Path>) -> Vec<(String, (f64, f64))> {
-    let mut table: Vec<(String, (f64, f64))> = BUILTIN_PRICING
+/// 定价链：按优先级升序的三层（内置表 < 公共能力库 < 用户 pricing.json）。
+/// 查询时从高层往低层找，**高层任意前缀命中即胜**，同层内最长前缀优先——
+/// 与 model_registry 逐字段查询链同语义：用户写「claude-sonnet」就是覆盖全系
+/// sonnet，低层更长的代际前缀（claude-sonnet-4 旧代价）不挡路
+type PriceChain = [Vec<(String, (f64, f64))>; 3];
+
+fn load_pricing(override_path: Option<&Path>) -> PriceChain {
+    let builtin: Vec<(String, (f64, f64))> = BUILTIN_PRICING
         .iter()
         .map(|(p, v)| (p.to_string(), *v))
         .collect();
+    // 公共能力库层（models.dev/OpenRouter 下载快照，model-capabilities-db.json 的
+    // cost 字段）：比内置表新、跟随数据源更新
+    let db = crate::model_registry::db_price_table();
+    let mut user: Vec<(String, (f64, f64))> = Vec::new();
     if let Some(path) = override_path {
         if let Ok(text) = std::fs::read_to_string(path) {
             if let Ok(v) = serde_json::from_str::<Value>(&text) {
@@ -1016,7 +1098,7 @@ fn load_pricing(override_path: Option<&Path>) -> Vec<(String, (f64, f64))> {
                         if let Some(pair) = price.as_array() {
                             if pair.len() == 2 {
                                 if let (Some(i), Some(o)) = (pair[0].as_f64(), pair[1].as_f64()) {
-                                    table.push((prefix.to_lowercase(), (i, o)));
+                                    user.push((prefix.to_lowercase(), (i, o)));
                                 }
                             }
                         }
@@ -1025,17 +1107,28 @@ fn load_pricing(override_path: Option<&Path>) -> Vec<(String, (f64, f64))> {
             }
         }
     }
-    table
+    [builtin, db, user]
 }
 
-fn price_of(model: &str, table: &[(String, (f64, f64))]) -> Option<(f64, f64)> {
-    // 中转/聚合的 provider 前缀（accounts/fireworks/models/x、zetatechs/x）剥掉，按末段模型名匹配
-    let model = model.rsplit('/').next().unwrap_or(model).to_lowercase();
+/// 单层内最长前缀命中
+fn longest_price_in(table: &[(String, (f64, f64))], model: &str) -> Option<(f64, f64)> {
     table
         .iter()
         .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
         .max_by_key(|(prefix, _)| prefix.len())
         .map(|(_, price)| *price)
+}
+
+fn price_of(model: &str, chain: &PriceChain) -> Option<(f64, f64)> {
+    // 中转/聚合的 provider 前缀（accounts/fireworks/models/x、zetatechs/x）剥掉，按末段模型名匹配
+    let model = model.rsplit('/').next().unwrap_or(model).to_lowercase();
+    // 高层先问：用户覆盖 > 公共库 > 内置
+    for layer in chain.iter().rev() {
+        if let Some(p) = longest_price_in(layer, &model) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1055,11 +1148,11 @@ fn cost_of(acc: &TokenAcc, price: (f64, f64)) -> f64 {
 }
 
 /// 缓存读相对「按输入全价」省下的钱：实际按 1 折计，省 9 折。无定价或 0 读则 None。
-fn cache_savings_usd(model: &str, cache_read: u64, table: &[(String, (f64, f64))]) -> Option<f64> {
+fn cache_savings_usd(model: &str, cache_read: u64, chain: &PriceChain) -> Option<f64> {
     if cache_read == 0 {
         return None;
     }
-    price_of(model, table).map(|(ir, _)| cache_read as f64 * ir * 0.9 / 1_000_000.0)
+    price_of(model, chain).map(|(ir, _)| cache_read as f64 * ir * 0.9 / 1_000_000.0)
 }
 
 fn parse_day(iso: &str) -> Option<NaiveDate> {
@@ -1120,7 +1213,7 @@ impl Bucket {
 
     /// 部分计价：只累加有价格的模型份额；(费用, 是否含未计价模型用量)。
     /// 全部不明价 → 费用 None（前端显示 ~）；混有不明价 → costPartial=true（前端显示 ≥）
-    fn cost(&self, table: &[(String, (f64, f64))]) -> (Option<f64>, bool) {
+    fn cost(&self, table: &PriceChain) -> (Option<f64>, bool) {
         let mut total = 0.0;
         let mut has_priced = false;
         let mut has_unpriced = false;
@@ -1158,7 +1251,7 @@ type StoredUsageRow = (
 
 fn build_stats(
     rows: Vec<StoredUsageRow>,
-    table: &[(String, (f64, f64))],
+    table: &PriceChain,
     rate_usd_cny: f64,
 ) -> UsageStatsDto {
     let mut cards = Bucket::default();
@@ -1651,7 +1744,7 @@ fn usage_trend_from(
     conn: &Connection,
     range: &str,
     today: NaiveDate,
-    table: &[(String, (f64, f64))],
+    table: &PriceChain,
     rate: f64,
 ) -> Result<UsageTrendDto, String> {
     let cutoff = cutoff_day_from(range, today);
@@ -1741,7 +1834,7 @@ fn top_sessions_from(
     conn: &Connection,
     range: &str,
     today: NaiveDate,
-    table: &[(String, (f64, f64))],
+    table: &PriceChain,
 ) -> Result<Vec<UsageTopSessionDto>, String> {
     let cutoff = cutoff_day_from(range, today);
     let rows = select_daily_rows(conn, cutoff.as_deref())?;
@@ -1807,7 +1900,7 @@ fn top_sessions_from(
         .collect())
 }
 
-fn pricing_table_and_rate() -> (Vec<(String, (f64, f64))>, f64) {
+fn pricing_table_and_rate() -> (PriceChain, f64) {
     let pricing_path = dirs::config_dir().map(|d| d.join("ccode").join("pricing.json"));
     (
         load_pricing(pricing_path.as_deref()),
@@ -2133,28 +2226,31 @@ mod tests {
     }
 
     #[test]
-    fn prune_stale_provenance_removes_only_old_gone_tmp_rows() {
+    fn prune_stale_provenance_keeps_internal_ai_rows() {
         let conn = Connection::open_in_memory().unwrap();
         ensure_usage_schema(&conn).unwrap();
         let tmp = normalize_provenance_path(&std::env::temp_dir().to_string_lossy());
-        let gone_old = format!("{tmp}/ccode-prune-gone-{}", uuid::Uuid::new_v4());
-        let gone_recent = format!("{tmp}/ccode-prune-recent-{}", uuid::Uuid::new_v4());
-        // 固定选一个永远早于「现在-7 天」的日期（2020 年），不做墙钟硬断言
+        let internal_old = format!("{tmp}/ccode-ai-{}", uuid::Uuid::new_v4());
+        let cli_old = format!("{tmp}/ccode-prune-cli-{}", uuid::Uuid::new_v4());
         let old = "2020-01-01T00:00:00Z";
-        let recent = crate::sessions::now_iso();
-        for (path, at) in [
-            (gone_old.as_str(), old),               // tmp 下 + 不存在 + 老 → 删
-            (gone_recent.as_str(), recent.as_str()), // tmp 下 + 不存在 + 新 → 留
-            (tmp.as_str(), old),                    // tmp 下 + 老但目录还在 → 留
-            ("/ccode-test-real-project", old),      // 不在 tmp 下 → 留
-        ] {
-            conn.execute(
-                "INSERT INTO usage_provenance(agent, project_path, source, internal, created_at)
-                 VALUES('kimi', ?1, ?2, 1, ?3)",
-                params![path, SOURCE_CCODE_AI, at],
-            )
-            .unwrap();
-        }
+        conn.execute(
+            "INSERT INTO usage_provenance(agent, project_path, source, internal, created_at)
+             VALUES('kimi', ?1, ?2, 1, ?3)",
+            params![internal_old.as_str(), SOURCE_CCODE_AI, old],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_provenance(agent, project_path, source, internal, created_at)
+             VALUES('kimi', ?1, 'cli', 0, ?2)",
+            params![cli_old.as_str(), old],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_provenance(agent, project_path, source, internal, created_at)
+             VALUES('kimi', '/ccode-test-real-project', 'cli', 0, ?1)",
+            params![old],
+        )
+        .unwrap();
         prune_stale_provenance(&conn);
         let mut rows: Vec<String> = conn
             .prepare("SELECT project_path FROM usage_provenance")
@@ -2164,9 +2260,25 @@ mod tests {
             .flatten()
             .collect();
         rows.sort();
-        let mut expected = vec!["/ccode-test-real-project".to_string(), gone_recent, tmp];
+        let mut expected = vec!["/ccode-test-real-project".to_string(), internal_old];
         expected.sort();
-        assert_eq!(rows, expected, "只有「tmp 下 + 目录已消失 + 超 7 天」的行被清");
+        assert_eq!(
+            rows, expected,
+            "内部 AI 登记保留；非内部且 tmp 下已消失的老行仍清"
+        );
+    }
+
+    #[test]
+    fn ccode_ai_temp_cwd_only_matches_uuid_dir_name() {
+        assert!(is_ccode_ai_temp_cwd(
+            "/var/folders/xx/T/ccode-ai-2666326a-de4f-48c0-92aa-1979d2e1abcd"
+        ));
+        assert!(is_ccode_ai_temp_cwd(
+            "C:\\Users\\me\\AppData\\Local\\Temp\\ccode-ai-2666326a-de4f-48c0-92aa-1979d2e1abcd"
+        ));
+        assert!(!is_ccode_ai_temp_cwd("/tmp/ccode-ai-not-a-uuid"));
+        assert!(!is_ccode_ai_temp_cwd("/Users/me/Ccode"));
+        assert!(!is_ccode_ai_temp_cwd("/tmp/user-task"));
     }
 
     #[test]
@@ -2316,33 +2428,59 @@ mod tests {
     fn pricing_longest_prefix_and_unknown() {
         let table = load_pricing(None);
         assert_eq!(price_of("gpt-5-codex-mini", &table), Some((1.25, 10.0)));
-        assert_eq!(price_of("claude-sonnet-4-5", &table), Some((3.0, 15.0)));
+        assert_eq!(price_of("claude-sonnet-4-5", &table), Some((3.0, 15.0)), "旧代 Sonnet 4.x 价");
+        assert_eq!(price_of("claude-sonnet-5", &table), Some((2.0, 10.0)), "Sonnet 5 起降价");
+        assert_eq!(price_of("claude-opus-4-1-20250805", &table), Some((15.0, 75.0)), "仅 Opus 4.1 为旧高价");
+        assert_eq!(price_of("claude-opus-5", &table), Some((5.0, 25.0)));
         assert_eq!(price_of("some-relay-model", &table), None);
         assert_eq!(price_of("", &table), None, "未知模型无价格");
         // 扩充的中转/聚合模型走官方价
-        assert_eq!(price_of("grok-4.5", &table), Some((3.0, 15.0)), "grok-4 前缀");
+        assert_eq!(price_of("grok-4.5", &table), Some((2.0, 6.0)), "grok-4.5 新代价，不再落 grok-4 旧价");
+        assert_eq!(price_of("grok-4-0709", &table), Some((3.0, 15.0)), "初代 grok-4 保留旧价");
         assert_eq!(price_of("grok-4.1-fast-mini", &table), Some((0.2, 0.5)), "更长前缀优先于 grok-4");
         assert_eq!(price_of("grok-3-mini-128k", &table), Some((0.3, 0.5)));
         assert_eq!(price_of("grok-code-fast-1", &table), Some((0.2, 1.5)));
         assert_eq!(price_of("glm-4.6-air", &table), Some((0.6, 2.2)));
-        assert_eq!(price_of("qwen3-coder-plus", &table), Some((0.5, 2.0)), "qwen3-coder 优先于 qwen3");
-        assert_eq!(price_of("qwen3-max", &table), Some((0.5, 2.0)));
+        assert_eq!(price_of("glm-5.2", &table), Some((1.4, 4.4)), "glm-5 新代官方价已出");
+        assert_eq!(price_of("qwen3-coder-plus", &table), Some((1.0, 5.0)), "qwen3-coder 优先于 qwen3");
+        assert_eq!(price_of("qwen3-max", &table), Some((1.2, 6.0)));
         assert_eq!(price_of("moonshot-v1-8k", &table), Some((0.6, 3.0)));
         assert_eq!(price_of("gemini-3-pro-preview", &table), Some((2.0, 12.0)));
-        assert_eq!(price_of("gemini-3.6-flash-lite", &table), Some((0.3, 2.5)));
+        assert_eq!(price_of("gemini-3.6-flash-lite", &table), Some((0.75, 3.75)), "3.6-flash 推广价");
         assert_eq!(price_of("gemini-2.5-pro", &table), Some((1.25, 10.0)), "旧条目保留");
-        // 新增条目
-        assert_eq!(price_of("claude-fable-2", &table), Some((15.0, 75.0)));
-        assert_eq!(price_of("gemini-3.5-flash-tts", &table), Some((0.3, 2.5)));
+        // 新代条目
+        assert_eq!(price_of("claude-fable-2", &table), Some((10.0, 50.0)));
+        assert_eq!(price_of("gemini-3.5-flash-tts", &table), Some((1.5, 9.0)));
         assert_eq!(price_of("gemini-3.1-pro-preview", &table), Some((2.0, 12.0)));
+        assert_eq!(price_of("kimi-k2.6", &table), Some((0.95, 4.0)));
+        assert_eq!(price_of("deepseek-v4-pro-0813", &table), Some((1.32, 3.96)));
+    }
+
+    #[test]
+    fn pricing_layer_precedence_high_layer_wins() {
+        // 层序契约：高层任意前缀命中即胜（用户写短前缀即覆盖低层长前缀旧价）；
+        // 同层内最长前缀优先
+        let chain: PriceChain = [
+            vec![("m-x".into(), (1.0, 1.0)), ("m-y-pro".into(), (1.0, 1.0))], // 内置
+            vec![("m-x".into(), (2.0, 2.0))], // 公共能力库
+            vec![("m-x".into(), (3.0, 3.0)), ("m-y".into(), (9.0, 9.0))], // 用户覆盖
+        ];
+        assert_eq!(price_of("m-x-pro", &chain), Some((3.0, 3.0)), "用户覆盖 > 公共库 > 内置");
+        assert_eq!(price_of("m-y-pro", &chain), Some((9.0, 9.0)), "高层短前缀覆盖低层长前缀");
+        let chain2: PriceChain = [
+            vec![("m-z".into(), (1.0, 1.0)), ("m-z-pro".into(), (2.0, 2.0))],
+            vec![],
+            vec![],
+        ];
+        assert_eq!(price_of("m-z-pro", &chain2), Some((2.0, 2.0)), "同层最长前缀优先");
     }
 
     #[test]
     fn pricing_strips_provider_prefix() {
         let table = load_pricing(None);
         // 中转/聚合的 provider 前缀：按最后一个 / 之后的末段匹配
-        assert_eq!(price_of("accounts/fireworks/models/glm-5p2", &table), Some((0.6, 2.2)), "glm 前缀命中");
-        assert_eq!(price_of("zetatechs/kimi-k3", &table), Some((2.78, 13.89)));
+        assert_eq!(price_of("accounts/fireworks/models/glm-5p2", &table), Some((1.4, 4.4)), "glm 前缀命中");
+        assert_eq!(price_of("zetatechs/kimi-k3", &table), Some((3.0, 15.0)));
         assert_eq!(price_of("openrouter/claude-sonnet-4", &table), Some((3.0, 15.0)));
         assert_eq!(price_of("relay/mystery-x", &table), None, "末段不明依然不明价");
     }
@@ -2370,9 +2508,10 @@ mod tests {
         let p = dir.join("pricing.json");
         std::fs::write(&p, r#"{"claude-sonnet": [1.0, 5.0], "relay-x": [0.1, 0.2]}"#).unwrap();
         let table = load_pricing(Some(&p));
-        assert_eq!(price_of("claude-sonnet-4", &table), Some((1.0, 5.0)), "覆盖内置");
+        assert_eq!(price_of("claude-sonnet-4", &table), Some((1.0, 5.0)), "覆盖内置（含低层更长前缀的旧代价）");
         assert_eq!(price_of("relay-x-pro", &table), Some((0.1, 0.2)), "新增自定义前缀");
-        assert_eq!(price_of("claude-opus-4", &table), Some((15.0, 75.0)), "内置保留");
+        assert_eq!(price_of("claude-opus-4-1", &table), Some((15.0, 75.0)), "内置旧代价保留");
+        assert_eq!(price_of("claude-opus-4-5", &table), Some((5.0, 25.0)), "内置新代价保留");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3081,6 +3220,7 @@ mod gateway_usage_tests {
             kind,
             gateway_id: gid.map(|s| s.into()),
             protocol: None,
+            api_backend: None,
             models: vec![],
             extra_env: Default::default(),
             last_used_at: None,

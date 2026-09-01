@@ -64,6 +64,18 @@ pub struct EnvPreviewDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConfigOverlayPreviewDto {
+    /// 载体环境变量名（如 GROK_CONFIG）
+    pub name: String,
+    /// 美化后的 overlay 内容。白名单放行前提 = 值里无密文
+    ///（grok 的 Header 是 $VAR 引用）；出站前仍统一过一遍脱敏兜底
+    pub content: String,
+    /// 该 overlay 的能力边界说明（如实交代注不进的字段去向）
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LaunchPlanPreviewDto {
     pub agent: String,
     pub binary: Option<String>,
@@ -72,6 +84,10 @@ pub struct LaunchPlanPreviewDto {
     pub env_remove: Vec<String>,
     pub prompt_supported: bool,
     pub request_policy: crate::profiles::RequestPolicy,
+    /// 配置 overlay 预览（env 只显示名称，overlay 内容无密文才展示原文）
+    pub overlays: Vec<ConfigOverlayPreviewDto>,
+    /// agent 级的协议/上下文说明行（如 codex 的 wire_api 与 catalog 上下文窗口）
+    pub notes: Vec<String>,
 }
 
 /// 预览里的 env 来源启发式分类（只读展示，不影响注入本身）
@@ -87,11 +103,20 @@ fn env_preview_source(name: &str, profile: &Profile) -> &'static str {
         | "ANTHROPIC_CUSTOM_HEADERS"
         | "CODEBUDDY_CODE_MAX_OUTPUT_TOKENS"
         | "CODEBUDDY_CUSTOM_HEADERS"
-        | "KIMI_MODEL_THINKING_EFFORT" => return "请求策略",
+        | "KIMI_MODEL_THINKING_EFFORT"
+        | "QWEN_CODE_MAX_OUTPUT_TOKENS" => return "请求策略",
+        // grok 的模型名单收敛 + 请求策略 [models] 全局默认都装在这个 overlay 里
+        "GROK_CONFIG" => return "Grok overlay",
         _ => {}
     }
     if name.starts_with("ANTHROPIC_DEFAULT_") || name.starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION") {
         return "模型选择器";
+    }
+    if name == "CLAUDE_CODE_SUBAGENT_MODEL" {
+        return "模型选择器（haiku 槽复用）";
+    }
+    if name == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" {
+        return "能力声明（注册链 >200K 才注入）";
     }
     match name {
         "ANTHROPIC_MODEL" | "CODEBUDDY_MODEL" | "KIMI_MODEL_NAME" => "默认模型",
@@ -116,6 +141,61 @@ pub fn preview_launch_plan(
         .or_else(|| profile.models.first().cloned());
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
     let plan = launch_plan(&profile, key, selected.as_deref());
+    // 配置 overlay 预览白名单：只有值里确定无密文的才展示原文
+    //（GROK_CONFIG 的 Header 是 $VAR 引用，grok 进程内展开；CLAUDE_CODE_EXTRA_BODY
+    // 只装 temperature/top_p 数值。OPENCODE_CONFIG_CONTENT 等含密钥载体永远不进这里）
+    let overlays = plan
+        .env
+        .iter()
+        .filter(|(name, _)| matches!(name.as_str(), "GROK_CONFIG" | "CLAUDE_CODE_EXTRA_BODY"))
+        .map(|(name, value)| {
+            let pretty = serde_json::from_str::<serde_json::Value>(value)
+                .and_then(|j| serde_json::to_string_pretty(&j))
+                .unwrap_or_else(|_| value.clone());
+            let note = match name.as_str() {
+                "GROK_CONFIG" => Some(grok_overlay_note()),
+                _ => None,
+            };
+            ConfigOverlayPreviewDto {
+                name: name.clone(),
+                content: crate::sessions::redact_sensitive_text(&pretty),
+                note,
+            }
+        })
+        .collect();
+    // agent 级协议/上下文说明（不含密钥；只写能实证的事实）
+    let mut notes: Vec<String> = Vec::new();
+    if profile.agent == "grok" {
+        if let Some(b) = profile.api_backend.as_deref().filter(|s| !s.is_empty()) {
+            notes.push(format!(
+                "API 后端：{b}（仅「设为全局默认」写入 [model.*] 段生效，启动注入不携带）"
+            ));
+        }
+        if let Some(m) = selected.as_deref() {
+            // 只写权威层确知的事实（中转目录/用户覆盖）；估值层不说，256000 默认由 overlay 附注交代
+            if let Some(ctx) = crate::model_registry::model_context_size_authoritative_for(
+                m,
+                profile.gateway_id.as_deref(),
+            ) {
+                notes.push(format!("上下文窗口：{ctx}（中转目录 / 用户覆盖声明）"));
+            }
+            if let Some(b) =
+                crate::model_registry::model_api_backend_for(m, profile.gateway_id.as_deref())
+            {
+                notes.push(format!("中转目录声明 apiBackend={b}（grok 自读，无需设置绑定字段）"));
+            }
+        }
+    }
+    if profile.agent == "codex" && profile.account_type != crate::profiles::AccountType::Official {
+        notes.push("协议：Responses（wire_api=responses，中转必须实现 /v1/responses）".into());
+        if let Some(m) = selected.as_deref() {
+            let ctx = crate::model_registry::model_context_size_for(
+                m,
+                profile.gateway_id.as_deref(),
+            );
+            notes.push(format!("上下文窗口：{ctx}（catalog 声明，有效窗口按 95% 计）"));
+        }
+    }
     let args = plan
         .args
         .into_iter()
@@ -138,6 +218,8 @@ pub fn preview_launch_plan(
         env_remove: plan.env_remove,
         prompt_supported: !plan.prompt_dropped,
         request_policy: profile.request_policy,
+        overlays,
+        notes,
     })
 }
 
@@ -288,8 +370,76 @@ fn apply_request_policy_env(
             }
             inject_headers(plan, "CODEBUDDY_CUSTOM_HEADERS");
         }
+        "qwen" => {
+            // 0.22.0 bundle 实证：temperature/top_p 的通道只有 settings.json 条目级
+            // generationConfig.samplingParams（「设为全局」写入），env 侧够不到；
+            // env 唯一实证的策略通道是 QWEN_CODE_MAX_OUTPUT_TOKENS——注意若全局配置
+            // 条目已带 samplingParams，qwen 会跳过该 env（条目优先）
+            if let Some(v) = policy.max_output_tokens {
+                plan.env.push(("QWEN_CODE_MAX_OUTPUT_TOKENS".into(), v.to_string()));
+            }
+        }
         _ => {}
     }
+}
+
+/// grok 的 GROK_CONFIG overlay 构建（launch 注入与 preview 展示共用这一处）。
+/// 实证口径（2026-08-31 grok-build main 源码 + 官方 user-guide 11-custom-models）：
+/// overlay 白名单（config_override.rs OVERLAY_ALLOW_PATHS，fail-closed 丢弃未列出的键）
+/// 只放行 [models] 全局块 / [features] / 少量 toolset 叶子，**[model.<id>] 明确不在内**
+/// ——api_backend / context_window 经 overlay 注不进，只能由中转 /models 目录条目的
+/// apiBackend / contextWindow 字段或用户 ~/.grok/config.toml 的 [model.*] 段提供。
+/// 可注的是 [models] 全局默认：temperature/top_p/max_completion_tokens（注意键名）/
+/// default_reasoning_effort/extra_headers；逐模型 [model.*] 与中转目录声明优先于它们。
+/// Header 以 "$VAR" 引用透传（overlay 管线 expand_env_vars_in_toml 在 grok 进程内展开），
+/// 密文不进 env 值、不进预览；变量缺失时 grok 行为未实证，按原样发送处理（用户自查）。
+fn grok_config_overlay(profile: &Profile, model: Option<&str>) -> Option<serde_json::Value> {
+    let mut models = serde_json::Map::new();
+    // allowed_models：把模型列表收敛进选择器（不注则 GROK_MODELS_BASE_URL 网关的全量
+    // 目录，动辄几百个，全进选择器）。空列表不注（allowed_models 空 = fail-closed
+    // 一个都不匹配）；选中模型兜底并入，防选择器与默认模型脱节
+    if !profile.models.is_empty() {
+        let mut allowed = profile.models.clone();
+        if let Some(m) = model {
+            if !allowed.iter().any(|x| x == m) {
+                allowed.push(m.into());
+            }
+        }
+        models.insert("allowed_models".into(), serde_json::json!(allowed));
+    }
+    // 请求策略 → [models] 全局默认（effort 键名 default_reasoning_effort，
+    // 档位集见 agent_specs::effort_options）
+    let policy = &profile.request_policy;
+    if let Some(v) = policy.temperature {
+        models.insert("temperature".into(), serde_json::json!(v));
+    }
+    if let Some(v) = policy.top_p {
+        models.insert("top_p".into(), serde_json::json!(v));
+    }
+    if let Some(v) = policy.max_output_tokens {
+        models.insert("max_completion_tokens".into(), serde_json::json!(v));
+    }
+    if let Some(v) = policy.reasoning_effort.as_deref() {
+        models.insert("default_reasoning_effort".into(), serde_json::json!(v));
+    }
+    if !policy.header_env.is_empty() {
+        let headers: serde_json::Map<String, serde_json::Value> = policy
+            .header_env
+            .iter()
+            .map(|(h, var)| (h.clone(), serde_json::json!(format!("${var}"))))
+            .collect();
+        models.insert("extra_headers".into(), serde_json::Value::Object(headers));
+    }
+    if models.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({ "models": models }))
+    }
+}
+
+/// GROK_CONFIG overlay 的预览附注（preview_launch_plan 用）：如实交代注不进的字段去向
+fn grok_overlay_note() -> String {
+    "api_backend / context_window 不在 grok overlay 白名单内（[model.*] 表会被静默丢弃）；渠道有二：中转 /models 目录条目带 apiBackend / contextWindow 字段，或绑定设「API 后端」后经「设为全局默认」写入 ~/.grok/config.toml 的 [model.*] 段；目录缺 contextWindow 时 grok 按 256000 计".into()
 }
 
 pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) -> LaunchPlan {
@@ -310,21 +460,12 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
         match &spec.launch {
             LaunchSpec::Env(env) => {
                 apply_env_inject(&mut plan, env, profile, key.as_deref(), model);
-                // grok：把模型列表收敛进选择器——GROK_CONFIG 是 JSON overlay（深合并进 config.toml，
-                // 白名单含 models 表），allowed_models 支持精确名/通配；不注则 GROK_MODELS_BASE_URL
-                // 网关的全量目录（动辄几百个）全进选择器。空列表不注（allowed_models 空 = fail-closed
-                // 一个都不匹配）；选中模型兜底并入，防选择器与默认模型脱节
-                if profile.agent == "grok" && !profile.models.is_empty() {
-                    let mut allowed = profile.models.clone();
-                    if let Some(m) = model {
-                        if !allowed.iter().any(|x| x == m) {
-                            allowed.push(m.into());
-                        }
+                // grok：GROK_CONFIG 是 JSON overlay（深合并进 config.toml）——模型名单
+                // 收敛 + 请求策略 [models] 全局默认，构建与白名单口径见 grok_config_overlay
+                if profile.agent == "grok" {
+                    if let Some(overlay) = grok_config_overlay(profile, model) {
+                        plan.env.push(("GROK_CONFIG".into(), overlay.to_string()));
                     }
-                    plan.env.push((
-                        "GROK_CONFIG".into(),
-                        serde_json::json!({ "models": { "allowed_models": allowed } }).to_string(),
-                    ));
                 }
             }
             LaunchSpec::ByProtocol(entries) => {
@@ -363,6 +504,29 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                             "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(),
                             format!("{} · {fifth}", profile.name),
                         ));
+                    }
+                    // 子 agent（Task 工具）模型：2.1.226 二进制实证解析链 env > Task 参数 >
+                    // frontmatter > inherit 主模型；不设 = 子 agent 继承主模型，第三方网关上
+                    // 与主循环同档同价。名单 ≥3 时把 HAIKU 槽（「便宜/快」角色）复用为子 agent
+                    // 模型（DeepSeek 官方推荐同口径；与设为全局写入同键）。
+                    // 注意 env 优先级最高：会压过 frontmatter 的 model 声明
+                    if let Some(haiku) = profile.models.get(2) {
+                        plan.env
+                            .push(("CLAUDE_CODE_SUBAGENT_MODEL".into(), haiku.clone()));
+                    }
+                    // 长上下文声明（与设为全局同条件同键）：claude 对不认识的第三方模型按
+                    // 200K 上下文假设，注册链确知更大时必须显式声明，否则长会话提前 compact
+                    if let Some(m) = model {
+                        let ctx = crate::model_registry::model_context_size_for(
+                            m,
+                            profile.gateway_id.as_deref(),
+                        );
+                        if ctx > 200_000 {
+                            plan.env.push((
+                                "CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(),
+                                ctx.to_string(),
+                            ));
+                        }
                     }
                 }
                 SpecialLaunch::CodexInlineProvider { key_env, sandbox_args } => {
@@ -1412,6 +1576,35 @@ pub fn resume_command_line(agent_id: &str, session_id: &str, cwd: &str) -> Resul
     resume_command_line_with(agent_id, session_id, cwd, binary, &[])
 }
 
+/// Codex 桌面客户端可识别的 provider 名单：客户端打开会话时按 rollout 记录的
+/// model_provider 在 config.toml 里找定义，缺失即报「Model provider `X` not found」
+/// 拒绝继续（2026-08-31 实测）。内置 "openai" 恒可用、不在表内；
+/// 文件缺失/损坏返回空表，前端对内置名以外的渠道保守置灰。
+#[tauri::command]
+pub fn codex_client_config_providers() -> Vec<String> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let base = std::env::var_os("CODEX_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"));
+    let Ok(text) = std::fs::read_to_string(base.join("config.toml")) else {
+        return Vec::new();
+    };
+    codex_config_provider_names(&text)
+}
+
+fn codex_config_provider_names(text: &str) -> Vec<String> {
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    doc.get("model_providers")
+        .and_then(|i| i.as_table())
+        .map(|t| t.iter().map(|(k, _)| k.to_string()).collect())
+        .unwrap_or_default()
+}
+
 /// 复制用：返回该会话的恢复命令行。
 /// base_url：codex 会话走 Ccode 内联 provider（rollout 记 model_provider="ccode"）时必须
 /// 补上 provider 定义才能在外部恢复——定义不含密钥（env_key 是变量名引用）
@@ -2203,6 +2396,15 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
 mod tests {
     use super::*;
 
+    #[test]
+    fn codex_config_provider_names_parses_table() {
+        let text = "model = \"gpt-5\"\n\n[model_providers.custom]\nbase_url = \"https://a\"\n\n[model_providers.ccode]\nrequires_openai_auth = true\n";
+        assert_eq!(codex_config_provider_names(text), vec!["custom", "ccode"]);
+        assert!(codex_config_provider_names("").is_empty());
+        assert!(codex_config_provider_names("not toml [[[").is_empty());
+        assert!(codex_config_provider_names("model = \"gpt-5\"\n").is_empty());
+    }
+
     fn profile(agent: &str, base_url: Option<&str>) -> Profile {
         Profile {
             id: "test".into(),
@@ -2211,6 +2413,7 @@ mod tests {
             account_type: Default::default(),
             no_auth: false,
             protocol: None,
+            api_backend: None,
             base_url: base_url.map(|s| s.into()),
             models: vec![],
             extra_env: std::collections::HashMap::new(),
@@ -2251,6 +2454,34 @@ mod tests {
             "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(),
             "测试 · m5".into()
         )));
+        // 名单 ≥3：HAIKU 槽（m3）复用为子 agent 模型
+        assert!(plan
+            .env
+            .contains(&("CLAUDE_CODE_SUBAGENT_MODEL".into(), "m3".into())));
+    }
+
+    #[test]
+    fn claude_plan_declares_context_over_200k() {
+        // 注册链确知 >200K（kimi-k3 = 1M 内置表）→ 注入 MAX_CONTEXT_TOKENS；
+        // 未知模型（兜底 128K）不注入
+        let mut p = profile("claude-code", None);
+        p.models = vec!["kimi-k3".into()];
+        let plan = launch_plan(&p, None, Some("kimi-k3"));
+        assert!(plan
+            .env
+            .contains(&("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "1048576".into())));
+        let mut p2 = profile("claude-code", None);
+        p2.models = vec!["unknown-model".into()];
+        let plan2 = launch_plan(&p2, None, Some("unknown-model"));
+        assert!(!plan2
+            .env
+            .iter()
+            .any(|(k, _)| k == "CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
+        // 名单 <3 不注子 agent 模型
+        assert!(!plan2
+            .env
+            .iter()
+            .any(|(k, _)| k == "CLAUDE_CODE_SUBAGENT_MODEL"));
     }
 
     #[test]
@@ -2522,6 +2753,47 @@ mod tests {
         // 空模型列表不注入 GROK_CONFIG（allowed_models 空 = fail-closed 全不匹配）
         let empty = profile("grok", Some("https://relay.example.com/v1"));
         let plan = launch_plan(&empty, Some("xai-secret".into()), None);
+        assert!(!plan.env.iter().any(|(k, _)| k == "GROK_CONFIG"));
+    }
+
+    #[test]
+    fn grok_overlay_carries_models_defaults_from_policy() {
+        // 请求策略 → overlay [models] 全局默认（白名单实证只放行 [models] 全局块，
+        // [model.<id>] 注不进）；注意键名 max_completion_tokens / default_reasoning_effort
+        let mut p = profile("grok", Some("https://relay.example.com/v1"));
+        p.request_policy.temperature = Some(0.7);
+        p.request_policy.top_p = Some(0.95);
+        p.request_policy.max_output_tokens = Some(8192);
+        p.request_policy.reasoning_effort = Some("high".into());
+        p.request_policy
+            .header_env
+            .insert("X-Tenant".into(), "TENANT_TOKEN".into());
+        // 空模型列表 + 有策略：仍注入（overlay 不止 allowed_models 一个用途）
+        let plan = launch_plan(&p, Some("xai-secret".into()), None);
+        let grok_config = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == "GROK_CONFIG")
+            .map(|(_, v)| v.clone())
+            .expect("有请求策略时必须注入 GROK_CONFIG");
+        let v: serde_json::Value = serde_json::from_str(&grok_config).unwrap();
+        // 无模型列表 → 不注 allowed_models（fail-closed 全不匹配）
+        assert!(v["models"].get("allowed_models").is_none());
+        assert_eq!(v["models"]["temperature"], serde_json::json!(0.7));
+        assert_eq!(v["models"]["top_p"], serde_json::json!(0.95));
+        assert_eq!(v["models"]["max_completion_tokens"], serde_json::json!(8192));
+        assert_eq!(
+            v["models"]["default_reasoning_effort"],
+            serde_json::json!("high")
+        );
+        // Header 是 $VAR 引用（grok 进程内展开），密文不进 env 值
+        assert_eq!(
+            v["models"]["extra_headers"],
+            serde_json::json!({ "X-Tenant": "$TENANT_TOKEN" })
+        );
+        // 无策略、无模型 → 完全不注
+        let bare = profile("grok", Some("https://relay.example.com/v1"));
+        let plan = launch_plan(&bare, None, None);
         assert!(!plan.env.iter().any(|(k, _)| k == "GROK_CONFIG"));
     }
 

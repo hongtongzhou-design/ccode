@@ -4,6 +4,9 @@ import {
   QUICK_FILTERS,
   applySessionFilters,
   buildScopeSuggestions,
+  groupSessionsByProjectPath,
+  isCcodeAiTempCwd,
+  sessionLooksInternal,
   sessionTime,
   type QuickFilterId,
   type ScopeChip,
@@ -153,3 +156,68 @@ test("建议每类有条数上限", () => {
 test("快筛清单 id 唯一", () => {
   assert.equal(new Set(QUICK_FILTERS.map((f) => f.id)).size, QUICK_FILTERS.length);
 });
+
+test("按项目分组：跨 Agent 合并、空路径跳过、按最近更新排序", () => {
+  const older = s({
+    agent: "claude-code",
+    projectPath: "/w/alpha",
+    updatedAt: at(3),
+  });
+  const newer = s({
+    agent: "codex",
+    projectPath: "/w/alpha",
+    updatedAt: at(0),
+  });
+  const beta = s({
+    agent: "kimi",
+    projectPath: "/w/beta",
+    updatedAt: at(1),
+  });
+  const empty = s({ projectPath: "  ", updatedAt: at(0) });
+  const groups = groupSessionsByProjectPath([older, newer, beta, empty]);
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].path, "/w/alpha");
+  assert.equal(groups[0].list.length, 2);
+  assert.equal(groups[1].path, "/w/beta");
+});
+
+test("按项目分组：Windows 路径大小写与分隔符视为同一项目", () => {
+  const a = s({ projectPath: "C:\\w\\Alpha", updatedAt: at(0) });
+  const b = s({ projectPath: "c:/w/alpha", updatedAt: at(1) });
+  const groups = groupSessionsByProjectPath([a, b], true);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].list.length, 2);
+});
+
+test("Ccode 无头 AI 临时目录：只认 ccode-ai-<uuid> 目录名", () => {
+  assert.equal(
+    isCcodeAiTempCwd("/var/folders/xx/T/ccode-ai-2666326a-de4f-48c0-92aa-1979d2e1abcd"),
+    true,
+  );
+  assert.equal(isCcodeAiTempCwd("/tmp/ccode-ai-not-a-uuid"), false);
+  assert.equal(isCcodeAiTempCwd("/Users/me/Ccode"), false);
+  assert.equal(
+    sessionLooksInternal(
+      s({
+        internal: false,
+        projectPath:
+          "/private/var/folders/xx/T/ccode-ai-2666326a-de4f-48c0-92aa-1979d2e1abcd",
+      }),
+    ),
+    true,
+  );
+  assert.equal(sessionLooksInternal(s({ internal: true, projectPath: "/w/alpha" })), true);
+  assert.equal(sessionLooksInternal(s({ internal: false, projectPath: "/w/alpha" })), false);
+});
+
+test("按项目分组跳过无头 AI 临时目录", () => {
+  const temp = s({
+    projectPath: "/tmp/ccode-ai-2666326a-de4f-48c0-92aa-1979d2e1abcd",
+  });
+  const real = s({ projectPath: "/w/alpha" });
+  const groups = groupSessionsByProjectPath([temp, real]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].path, "/w/alpha");
+});
+
+

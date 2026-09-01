@@ -1,5 +1,5 @@
-//! 自定义模型定价文件（<config>/ccode/pricing.json）的读写。
-//! 统计页估算费用时由后端读取该文件；这里只做带校验的安全落盘。
+//! 自定义模型定价文件（<config>/ccode/pricing.json）的读写——定价链最高层
+//! （盖过公共能力库 cost 与内置价目）。这里只做带校验的安全落盘。
 
 use std::path::PathBuf;
 

@@ -73,6 +73,9 @@ export default function GatewayLibrary({
   const [name, setName] = useState("");
   const [noAuth, setNoAuth] = useState(false);
   const [slots, setSlots] = useState<ProtocolSlots>(emptySlots());
+  // Base URL 主输入：中转站九成情况五个协议槽同址。值为空的槽与「仍等于旧主值」的槽
+  // 跟随主输入；手动改过的槽脱离跟随（镜像到改写为止的经典交互）
+  const [masterUrl, setMasterUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [headerText, setHeaderText] = useState("");
   const [models, setModels] = useState<GatewayModel[]>([]);
@@ -116,6 +119,7 @@ export default function GatewayLibrary({
       setName("");
       setNoAuth(false);
       setSlots(emptySlots());
+      setMasterUrl("");
       setApiKey("");
       setHeaderText("");
       setModels([]);
@@ -124,13 +128,17 @@ export default function GatewayLibrary({
     setEditing(g);
     setName(g.name);
     setNoAuth(g.noAuth);
-    setSlots({
+    const next = {
       anthropic: g.slots.anthropic ?? "",
       openai: g.slots.openai ?? "",
       responses: g.slots.responses ?? "",
       gemini: g.slots.gemini ?? "",
       cursor: g.slots.cursor ?? "",
-    });
+    };
+    setSlots(next);
+    // 主输入初值：所有已填槽同址时取该址（跟随关系天然成立），混址时留空不强猜
+    const filled = Object.values(next).filter((v) => v.trim());
+    setMasterUrl(filled.length > 0 && filled.every((v) => v.trim() === filled[0].trim()) ? filled[0] : "");
     setApiKey("");
     setHeaderText(
       Object.entries(g.headerEnv)
@@ -138,6 +146,20 @@ export default function GatewayLibrary({
         .join("\n"),
     );
     setModels(g.models.map((m) => ({ ...m })));
+  }
+
+  /** 主输入变更：空槽与跟随中的槽（仍等于旧主值）一起改，手动改过的槽不动 */
+  function onMasterChange(v: string) {
+    const prev = masterUrl;
+    setMasterUrl(v);
+    setSlots((s) => {
+      const out = { ...s };
+      for (const { key } of SLOT_LABELS) {
+        const cur = (s[key] ?? "").trim();
+        if (cur === "" || cur === prev.trim()) out[key] = v;
+      }
+      return out;
+    });
   }
 
   useEffect(() => {
@@ -328,11 +350,19 @@ export default function GatewayLibrary({
     const filled = SLOT_LABELS.map((s) => s.key).filter(
       (k) => slots[k]?.trim() && k !== "cursor" && k !== "gemini",
     );
-    for (const slot of filled) {
+    // 按 URL 去重：同址槽只探一次（体检结果只取决于地址+密钥），探完把摘要镜像给同址槽
+    const byUrl = new Map<string, (keyof ProtocolSlots)[]>();
+    for (const k of filled) {
+      const u = slots[k]!.trim();
+      const group = byUrl.get(u) ?? [];
+      group.push(k);
+      byUrl.set(u, group);
+    }
+    for (const group of byUrl.values()) {
       try {
         await invoke<GatewayProbeDto>("probe_gateway_slot", {
           gatewayId,
-          slot,
+          slot: group[0],
           model: null,
           basicOnly: true,
         });
@@ -342,7 +372,21 @@ export default function GatewayLibrary({
     }
     const list = await invoke<Gateway[]>("list_gateways");
     const fresh = list.find((g) => g.id === gatewayId);
-    if (fresh) setEditing(fresh);
+    if (fresh) {
+      // 同址槽的后端摘要在保存前不会逐槽刷新——同址同结果，前端镜像一份展示
+      const probes = (fresh.slotProbes ??= []);
+      for (const group of byUrl.values()) {
+        if (group.length < 2) continue;
+        const src = probes.find((s) => s.slot === group[0]);
+        if (!src) continue;
+        for (const k of group.slice(1)) {
+          const i = probes.findIndex((s) => s.slot === k);
+          if (i >= 0) probes[i] = { ...src, slot: k };
+          else probes.push({ ...src, slot: k });
+        }
+      }
+      setEditing(fresh);
+    }
     await loadGateways();
     setProbingAll(false);
   }
@@ -444,11 +488,31 @@ export default function GatewayLibrary({
                 )}
               </div>
             )}
-            {SLOT_LABELS.map(({ key, label }) => (
+            <label className="block text-sm text-l2">
+              <span className="flex items-center justify-between gap-2">
+                <span>Base URL</span>
+                <span className="text-micro text-l4">主输入：空槽与跟随中的槽一起改</span>
+              </span>
+              <input
+                className={`${fieldClass} mt-1 w-full font-mono text-xs`}
+                value={masterUrl}
+                placeholder="https://…（五个协议槽同址时只填这里）"
+                onChange={(e) => onMasterChange(e.target.value)}
+              />
+            </label>
+            {SLOT_LABELS.map(({ key, label }) => {
+              const follows =
+                !slots[key]?.trim() && !!masterUrl.trim();
+              return (
               <div key={key} className="space-y-1">
                 <label className="block text-sm text-l2">
                   <span className="flex items-center justify-between gap-2">
-                    <span>{label}</span>
+                    <span>
+                      {label}
+                      {follows && (
+                        <span className="ml-1.5 text-micro text-l4">跟随 Base URL</span>
+                      )}
+                    </span>
                     {editing !== "new" && (
                       <span className="font-mono text-micro text-l4">{probeSummaryText(slotSum(key))}</span>
                     )}
@@ -456,7 +520,8 @@ export default function GatewayLibrary({
                   <input
                     className={`${fieldClass} mt-1 w-full font-mono text-xs`}
                     value={slots[key] ?? ""}
-                    placeholder="https://…"
+                    placeholder={follows ? masterUrl : "https://…"}
+                    title={follows ? "留空 = 跟随 Base URL；填入即脱离跟随" : undefined}
                     onChange={(e) => setSlots((s) => ({ ...s, [key]: e.target.value }))}
                   />
                 </label>
@@ -479,7 +544,8 @@ export default function GatewayLibrary({
                   </button>
                 )}
               </div>
-            ))}
+              );
+            })}
             <label className="block text-sm text-l2">
               密钥（留空不改）
               <input
@@ -549,24 +615,28 @@ export default function GatewayLibrary({
                     const effortMode = policyFieldMode({
                       capable: combo?.thinking ?? cap?.thinking ?? false,
                       injectAllowed: combo?.injectEffortAllowed ?? false,
+                      channel: combo?.channelEffort,
                       probeFailed: combo?.probeEffort === "failed",
                       stored: m.reasoningEffort != null,
                     });
                     const tempMode = policyFieldMode({
                       capable: true,
                       injectAllowed: combo?.injectTemperatureAllowed ?? false,
+                      channel: combo?.channelTemperature,
                       probeFailed: combo?.probeTemperature === "failed",
                       stored: m.temperature != null,
                     });
                     const topPMode = policyFieldMode({
                       capable: true,
                       injectAllowed: combo?.injectTopPAllowed ?? false,
+                      channel: combo?.channelTopP,
                       probeFailed: combo?.probeTemperature === "failed",
                       stored: m.topP != null,
                     });
                     const maxMode = policyFieldMode({
                       capable: true,
                       injectAllowed: combo?.injectMaxTokensAllowed ?? false,
+                      channel: combo?.channelMaxTokens,
                       probeFailed: false,
                       stored: m.maxOutputTokens != null,
                     });
@@ -590,6 +660,9 @@ export default function GatewayLibrary({
                             {combo?.probeNote && (
                               <p className="text-[11px] text-warn-text">{combo.probeNote}</p>
                             )}
+                            {combo?.policyChannelNote && (
+                              <p className="text-[11px] text-l4">{combo.policyChannelNote}</p>
+                            )}
                             {effortMode !== "hidden" && (
                               <label className="block text-micro text-l3">
                                 思考档
@@ -597,6 +670,7 @@ export default function GatewayLibrary({
                                   <span className="ml-1 text-l4">{policyFieldHint({
                                     capable: combo?.thinking ?? cap?.thinking ?? false,
                                     injectAllowed: combo?.injectEffortAllowed ?? false,
+                                    channel: combo?.channelEffort,
                                     probeFailed: combo?.probeEffort === "failed",
                                     stored: m.reasoningEffort != null,
                                   })}</span>
@@ -619,6 +693,7 @@ export default function GatewayLibrary({
                                   <span className="ml-1 text-l4">{policyFieldHint({
                                     capable: true,
                                     injectAllowed: combo?.injectTemperatureAllowed ?? false,
+                                    channel: combo?.channelTemperature,
                                     probeFailed: combo?.probeTemperature === "failed",
                                     stored: m.temperature != null,
                                   })}</span>
@@ -644,6 +719,7 @@ export default function GatewayLibrary({
                                   <span className="ml-1 text-l4">{policyFieldHint({
                                     capable: true,
                                     injectAllowed: combo?.injectTopPAllowed ?? false,
+                                    channel: combo?.channelTopP,
                                     probeFailed: combo?.probeTemperature === "failed",
                                     stored: m.topP != null,
                                   })}</span>
@@ -667,6 +743,7 @@ export default function GatewayLibrary({
                                   <span className="ml-1 text-l4">{policyFieldHint({
                                     capable: true,
                                     injectAllowed: combo?.injectMaxTokensAllowed ?? false,
+                                    channel: combo?.channelMaxTokens,
                                     probeFailed: false,
                                     stored: m.maxOutputTokens != null,
                                   })}</span>

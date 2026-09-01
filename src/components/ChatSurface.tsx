@@ -75,6 +75,18 @@ export default function ChatSurface({
   const scrollRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
   const [hasNew, setHasNew] = useState(false);
+  // 启动被终端内交互卡住的安全网：agent 进程在跑但会话文件迟迟不出现（典型：「信任此目录」
+  // 确认、登录菜单、/hooks 信任）时聊天层不能无声干等——延迟 8s 给出指向终端的出口，
+  // 正常启动几秒内会话文件就会出现，不会误闪现
+  const [stuckWaiting, setStuckWaiting] = useState(false);
+  useEffect(() => {
+    if (!(running && syncState === "waiting" && messages.length === 0)) {
+      setStuckWaiting(false);
+      return;
+    }
+    const t = setTimeout(() => setStuckWaiting(true), 8000);
+    return () => clearTimeout(t);
+  }, [running, syncState, messages.length]);
 
   function scrollBottom() {
     const el = scrollRef.current;
@@ -233,7 +245,22 @@ export default function ChatSurface({
         <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col px-4 pb-6 pt-8 sm:px-5">
           {state === "idle" && messages.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center pb-20 text-center">
-              <p className="text-sm text-l2">从一个问题开始</p>
+              {stuckWaiting ? (
+                <>
+                  <p className="max-w-md text-sm text-warn-text">
+                    会话文件迟迟未出现——终端里可能有待处理的确认（信任此目录 / 登录 / 菜单选择）
+                  </p>
+                  <button
+                    type="button"
+                    onClick={onOpenTerminal}
+                    className="mt-3 rounded-md border border-field bg-raised px-3 py-1.5 text-xs text-l2 hover:bg-inset hover:text-l1"
+                  >
+                    打开终端处理
+                  </button>
+                </>
+              ) : (
+                <p className="text-sm text-l2">从一个问题开始</p>
+              )}
             </div>
           ) : state === "detecting" && messages.length === 0 ? (
             <div className="flex flex-1 items-center justify-center pb-20 text-sm text-l4">正在连接当前会话…</div>

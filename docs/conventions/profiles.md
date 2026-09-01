@@ -47,6 +47,7 @@ Binding
   kind          api | official
   gatewayId     api 必填；official 为空
   protocol      仅 qwen / kimi 需要（同一 openai 槽可当 kimi 或 openai）
+  apiBackend    仅 grok（chat_completions/responses/messages；仅「设为全局」写 [model.*] 消费，启动注入够不到）
   models[]      有序，首个 = 启动默认
   extraEnv      CLI 专用，不自动拆去网关
   lastUsedAt
@@ -137,12 +138,13 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 - `lastProbe`（§8）。
 - Agent TUI 原生命令：`effort_levels` / `model_switch`。
 
-显示规则：
+显示规则（2026-09-01 起通道按入口记账：`inject` 启动注入 / `persist` 仅设为全局 / `tui` 仅会话内命令 / `unsupported` / `unknown`）：
 
-- **可改** = 模型能力允许 ∧ 通道 `supported` ∧ 体检未失败。
-- **只读可见** = 模型上已存值，但当前 Agent 无通道 → 「已保存在网关，当前 CLI 没有通道」。
+- **可改** = 模型能力允许 ∧ 通道 `inject`（体检未失败）∨ 通道 `persist`（启动不注、设为全局生效）。
+- **只读可见** = 模型上已存值，但通道为 `tui`/`unsupported`/`unknown` → 「已保存在网关，当前 CLI 没有通道」（tui 另有专用文案「仅会话内原生命令生效」）。
 - **不出现** = 模型不会思考，或托管工具（web search 等）在第三方上。继续如实不声明 hosted tools。
-- **状态栏 `/effort`** = 仅启动时选中模型求交为「原生档位可用」。绑定名单能力混杂 → 固定一句重开提示。
+- **状态栏 `/effort`** = 仅启动时选中模型求交为「原生档位可用」。绑定名单能力混杂（思考或已存采样策略不一致）→ 固定一句重开提示。
+- **协议维度**：kimi 的 effort 通道仅 kimi 协议读取，绑 anthropic/openai 协议的绑定求交按 unknown 计（`channel_status_for`）。
 - **从未体检 ≠ 体检失败**，见 §8。
 
 「未实证一律不注」仍只约束 **Agent 通道表** 为 unknown/unsupported 的字段，与体检无关。
@@ -334,7 +336,7 @@ Codex            → …
 {
   version: 2,
   gateways: [{ name, noAuth, slots, headerEnv, models, apiKey? }],
-  bindings: [{ agent, gatewayRef: { name, slotFp }, protocol, models, extraEnv }]
+  bindings: [{ agent, gatewayRef: { name, slotFp }, protocol, apiBackend?, models, extraEnv }]
 }
 ```
 

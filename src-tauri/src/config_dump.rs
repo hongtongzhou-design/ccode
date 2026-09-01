@@ -159,6 +159,7 @@ mod tests {
             account_type: crate::profiles::AccountType::Api,
             no_auth: false,
             protocol: Some("anthropic".into()),
+            api_backend: None,
             base_url: Some(base_url.into()),
             models: vec!["claude-sonnet".into()],
             extra_env: Default::default(),

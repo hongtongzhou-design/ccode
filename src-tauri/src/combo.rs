@@ -33,25 +33,73 @@ pub struct ComboSurfaceDto {
     pub top_p_readonly: bool,
     pub max_tokens_readonly: bool,
     pub mixed_models_note: Option<String>,
+    /// 逐字段通道种类（inject/persist/tui/unsupported/unknown 的并集结果）：
+    /// 前端三态按它区分「启动可注」与「仅设为全局生效」
+    pub channel_effort: &'static str,
+    pub channel_temperature: &'static str,
+    pub channel_top_p: &'static str,
+    pub channel_max_tokens: &'static str,
+    pub channel_headers: &'static str,
     pub probe_effort: &'static str,
     pub probe_temperature: &'static str,
     pub probe_headers: &'static str,
     pub probe_note: Option<String>,
+    /// 策略通道形态说明（如 qwen「温度/topP 仅设为全局生效」）；多 agent 求交时去重拼接
+    pub policy_channel_note: Option<String>,
     pub missing_slot: bool,
 }
 
 fn channel_ok(status: &str) -> bool {
-    status == "supported"
+    status == "inject"
+}
+
+/// 注入与设为全局共享的「可携带」判定：inject/persist 都保留存储值
+///（persist 字段启动注入不注，但设为全局要写，apply_to_profile 不得剥掉）
+fn channel_carries(status: &str) -> bool {
+    matches!(status, "inject" | "persist")
+}
+
+/// 单 agent 单字段的通道状态（含协议维度门控）：kimi 的 KIMI_MODEL_THINKING_EFFORT
+/// 仅 kimi 协议通道读取（2026-08-28 二进制实证），绑 anthropic/openai 协议时静默忽略——
+/// 该绑定按无通道计（unknown），防止求交把「静默不注」画成「启动会注」
+fn channel_status_for(agent: &str, protocol: Option<&str>, field: &str) -> &'static str {
+    let status = field_status(agent, field);
+    if agent == "kimi" && field == "effort" && protocol.is_some_and(|p| p != "kimi") {
+        return "unknown";
+    }
+    status
+}
+
+fn field_status(agent: &str, field: &str) -> &'static str {
+    let s = request_policy_support(agent);
+    match field {
+        "temperature" => s.temperature,
+        "top_p" => s.top_p,
+        "max_tokens" => s.max_output_tokens,
+        "effort" => s.reasoning_effort,
+        _ => s.custom_headers,
+    }
+}
+
+/// 多 agent 并集的通道种类：inject > persist > tui > unsupported > unknown
+///（网关库同一网关可能绑多家；只要有一家能注入即算可注入）
+fn union_channel_kind(agents: &[(&str, Option<&str>)], field: &str) -> &'static str {
+    let mut best = "unknown";
+    for &(a, proto) in agents {
+        let s = channel_status_for(a, proto, field);
+        best = match (best, s) {
+            ("inject", _) | (_, "inject") => "inject",
+            ("persist", _) | (_, "persist") => "persist",
+            ("tui", _) | (_, "tui") => "tui",
+            ("unsupported", _) | (_, "unsupported") => "unsupported",
+            _ => "unknown",
+        };
+    }
+    best
 }
 
 fn probe_blocks(status: ProbeStatus) -> bool {
     status == ProbeStatus::Failed
-}
-
-fn union_channel(agents: &[&str], pick: impl Fn(&crate::agent_specs::RequestPolicySupportDto) -> &str) -> bool {
-    agents
-        .iter()
-        .any(|a| channel_ok(pick(&request_policy_support(a))))
 }
 
 fn probe_status_any(gateway: Option<&Gateway>, slot: Option<Slot>, field: &str) -> ProbeStatus {
@@ -112,7 +160,7 @@ pub fn surface_for(
     missing_slot: bool,
 ) -> ComboSurfaceDto {
     surface_for_agents(
-        &[agent],
+        &[(agent, None)],
         model,
         gateway,
         slot,
@@ -126,7 +174,7 @@ pub fn surface_for(
 }
 
 pub fn surface_for_agents(
-    agents: &[&str],
+    agents: &[(&str, Option<&str>)],
     model: &str,
     gateway: Option<&Gateway>,
     slot: Option<Slot>,
@@ -142,12 +190,12 @@ pub fn surface_for_agents(
     let vision = model_registry::model_supports_vision_for(model, gid);
     let context = model_registry::model_context_size_for(model, gid);
     let output = model_registry::model_output_limit_for(model, gid);
-    let effort_ch = union_channel(agents, |s| s.reasoning_effort);
-    let temp_ch = union_channel(agents, |s| s.temperature);
-    let top_p_ch = union_channel(agents, |s| s.top_p);
-    let max_ch = union_channel(agents, |s| s.max_output_tokens);
-    let headers_ch = union_channel(agents, |s| s.custom_headers);
-    let has_native_effort = agents.iter().any(|agent| {
+    let channel_effort = union_channel_kind(agents, "effort");
+    let channel_temperature = union_channel_kind(agents, "temperature");
+    let channel_top_p = union_channel_kind(agents, "top_p");
+    let channel_max_tokens = union_channel_kind(agents, "max_tokens");
+    let channel_headers = union_channel_kind(agents, "headers");
+    let has_native_effort = agents.iter().any(|(agent, _)| {
         agent_specs::agent_spec(agent)
             .and_then(|s| s.effort_levels)
             .is_some_and(|(levels, _)| levels.len() > 1)
@@ -157,29 +205,49 @@ pub fn surface_for_agents(
     let probe_temp = probe_status_any(gateway, slot, "temperature");
     let probe_headers = probe_status_any(gateway, slot, "headers");
 
-    let inject_effort_allowed = thinking && effort_ch && !probe_blocks(probe_effort);
+    let inject_effort_allowed =
+        thinking && channel_ok(channel_effort) && !probe_blocks(probe_effort);
     let show_native_effort = thinking && has_native_effort && !probe_blocks(probe_effort);
-    // 不会思考 → 隐藏思考档，不算「通道不通」只读
-    let effort_readonly = stored_effort && thinking && !effort_ch;
+    // 不会思考 → 隐藏思考档；persist/tui 的已存值仍可改/可见，不算「通道不通」
+    let effort_readonly =
+        stored_effort && thinking && !channel_carries(channel_effort);
 
     let mixed = if binding_models.len() > 1 {
         let flags: Vec<bool> = binding_models
             .iter()
             .map(|m| model_registry::model_thinking_for(m, gid))
             .collect();
-        flags.iter().any(|x| *x) && flags.iter().any(|x| !*x)
+        let thinking_mixed = flags.iter().any(|x| *x) && flags.iter().any(|x| !*x);
+        // 混采样也算：各模型在网关上存的策略不一致时，换模不换策略（进程级注入不重注）。
+        // f64 无 Eq/Hash，按 bit  pattern 进集合
+        let policy_mixed = gateway.is_some_and(|g| {
+            let tuples: std::collections::HashSet<_> = binding_models
+                .iter()
+                .filter_map(|m| g.models.iter().find(|x| x.id == *m))
+                .map(|gm| {
+                    (
+                        gm.temperature.map(|f| f.to_bits()),
+                        gm.top_p.map(|f| f.to_bits()),
+                        gm.max_output_tokens,
+                        gm.reasoning_effort.clone(),
+                    )
+                })
+                .collect();
+            tuples.len() > 1
+        });
+        thinking_mixed || policy_mixed
     } else {
         false
     };
     let mixed_models_note = if mixed {
-        Some("此绑定含会思考与不会思考的模型。启动后在 CLI 里换模不会重注策略，要按新模型请重开标签。".into())
+        Some("此绑定的模型在思考能力或已存策略上不一致。启动后在 CLI 里换模不会重注策略，要按新模型请重开标签。".into())
     } else {
         None
     };
 
     ComboSurfaceDto {
-        agent: agents.first().copied().unwrap_or("").into(),
-        agents: agents.iter().map(|s| (*s).to_string()).collect(),
+        agent: agents.first().copied().unwrap_or(("", None)).0.into(),
+        agents: agents.iter().map(|(s, _)| (*s).to_string()).collect(),
         model: model.into(),
         gateway_id: gid.map(str::to_string),
         slot: slot.map(|s| s.as_str().to_string()),
@@ -189,38 +257,62 @@ pub fn surface_for_agents(
         output,
         show_native_effort,
         inject_effort_allowed,
-        inject_temperature_allowed: temp_ch && !probe_blocks(probe_temp),
-        inject_top_p_allowed: top_p_ch && !probe_blocks(probe_temp),
-        inject_max_tokens_allowed: max_ch,
-        inject_headers_allowed: headers_ch && !probe_blocks(probe_headers),
+        inject_temperature_allowed: channel_ok(channel_temperature) && !probe_blocks(probe_temp),
+        inject_top_p_allowed: channel_ok(channel_top_p) && !probe_blocks(probe_temp),
+        inject_max_tokens_allowed: channel_ok(channel_max_tokens),
+        inject_headers_allowed: channel_ok(channel_headers) && !probe_blocks(probe_headers),
         effort_readonly,
-        temperature_readonly: stored_temp && !temp_ch,
-        top_p_readonly: stored_top_p && !top_p_ch,
-        max_tokens_readonly: stored_max && !max_ch,
+        temperature_readonly: stored_temp && !channel_carries(channel_temperature),
+        top_p_readonly: stored_top_p && !channel_carries(channel_top_p),
+        max_tokens_readonly: stored_max && !channel_carries(channel_max_tokens),
         mixed_models_note,
+        channel_effort,
+        channel_temperature,
+        channel_top_p,
+        channel_max_tokens,
+        channel_headers,
         probe_effort: probe_effort.as_str(),
         probe_temperature: probe_temp.as_str(),
         probe_headers: probe_headers.as_str(),
         probe_note: probe_note_for(gateway, probe_effort),
+        policy_channel_note: {
+            let mut notes: Vec<&str> = agents
+                .iter()
+                .filter_map(|(a, _)| agent_specs::policy_channel_note(a))
+                .collect();
+            notes.dedup();
+            if notes.is_empty() {
+                None
+            } else {
+                Some(notes.join("；"))
+            }
+        },
         missing_slot,
     }
 }
 
 pub fn apply_to_profile(profile: &mut Profile, model: Option<&str>) {
     let surface = surface_for_profile(profile, model);
-    if !surface.inject_effort_allowed {
+    // 剥的是「任何入口都到不了」（无 inject/persist 通道）或「体检明确失败」的存储值；
+    // persist 字段保留——启动不注，但「设为全局」要写（qwen generationConfig 路径）。
+    // effort 另要求模型会思考（不思考=注入无意义）
+    let probe_failed = |s: &str| s == "failed";
+    if !(channel_carries(surface.channel_effort)
+        && surface.thinking
+        && !probe_failed(surface.probe_effort))
+    {
         profile.request_policy.reasoning_effort = None;
     }
-    if !surface.inject_temperature_allowed {
+    if !(channel_carries(surface.channel_temperature) && !probe_failed(surface.probe_temperature)) {
         profile.request_policy.temperature = None;
     }
-    if !surface.inject_top_p_allowed {
+    if !(channel_carries(surface.channel_top_p) && !probe_failed(surface.probe_temperature)) {
         profile.request_policy.top_p = None;
     }
-    if !surface.inject_max_tokens_allowed {
+    if !channel_carries(surface.channel_max_tokens) {
         profile.request_policy.max_output_tokens = None;
     }
-    if !surface.inject_headers_allowed {
+    if !(channel_carries(surface.channel_headers) && !probe_failed(surface.probe_headers)) {
         profile.request_policy.header_env.clear();
     }
 }
@@ -246,7 +338,7 @@ pub fn surface_for_profile(profile: &Profile, model: Option<&str>) -> ComboSurfa
     let stored_max = profile.request_policy.max_output_tokens.is_some()
         || gm.and_then(|m| m.max_output_tokens).is_some();
     surface_for_agents(
-        &[profile.agent.as_str()],
+        &[(profile.agent.as_str(), profile.protocol.as_deref())],
         model,
         gw.as_ref(),
         Some(slot),
@@ -279,18 +371,17 @@ pub fn combo_surface_for_gateway(
     let _ = store;
     let gw = gateway_store::find_gateway(&gateway_id).ok_or("网关不存在")?;
     let bindings = gateway_store::load_bindings().unwrap_or_default();
-    let agents: Vec<String> = bindings
+    let agents: Vec<(String, Option<String>)> = bindings
         .iter()
         .filter(|b| b.gateway_id.as_deref() == Some(gateway_id.as_str()))
-        .map(|b| b.agent.clone())
+        .map(|b| (b.agent.clone(), b.protocol.clone()))
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let agent_refs: Vec<&str> = if agents.is_empty() {
-        vec![]
-    } else {
-        agents.iter().map(String::as_str).collect()
-    };
+    let agent_refs: Vec<(&str, Option<&str>)> = agents
+        .iter()
+        .map(|(a, p)| (a.as_str(), p.as_deref()))
+        .collect();
     let gm = gw.models.iter().find(|m| m.id == model);
     let binding_models: Vec<String> = bindings
         .iter()
@@ -438,7 +529,7 @@ mod tests {
     #[test]
     fn agent_union_effort_channel_from_any_bound() {
         let dto = surface_for_agents(
-            &["gemini", "claude-code"],
+            &[("gemini", None), ("claude-code", None)],
             "claude-opus-4",
             None,
             Some(Slot::Anthropic),
@@ -452,6 +543,64 @@ mod tests {
         assert!(dto.inject_effort_allowed);
         assert!(!dto.effort_readonly);
         assert!(dto.inject_temperature_allowed);
+    }
+
+    #[test]
+    fn kimi_effort_channel_gated_by_protocol() {
+        // KIMI_MODEL_THINKING_EFFORT 仅 kimi 协议通道读取：protocol=openai 的 kimi 绑定
+        // 求交必须关掉思考档注入（否则画成「启动会注」实际静默不注）
+        let kimi_openai = surface_for_agents(
+            &[("kimi", Some("openai"))],
+            "kimi-k3",
+            None,
+            Some(Slot::Openai),
+            true,
+            false,
+            false,
+            false,
+            &["kimi-k3".into()],
+            false,
+        );
+        assert!(!kimi_openai.inject_effort_allowed);
+        assert_eq!(kimi_openai.channel_effort, "unknown");
+        assert!(kimi_openai.effort_readonly, "已存值但通道被协议关掉 → 只读");
+        let kimi_native = surface_for_agents(
+            &[("kimi", Some("kimi"))],
+            "kimi-k3",
+            None,
+            Some(Slot::Openai),
+            true,
+            false,
+            false,
+            false,
+            &["kimi-k3".into()],
+            false,
+        );
+        assert!(kimi_native.inject_effort_allowed);
+        assert_eq!(kimi_native.channel_effort, "inject");
+    }
+
+    #[test]
+    fn qwen_sampling_channels_are_persist_only() {
+        // qwen 温度/top_p：仅设为全局通道——启动不注（inject=false）但存储可携带（非只读）
+        let dto = surface_for_agents(
+            &[("qwen", None)],
+            "qwen3-coder",
+            None,
+            Some(Slot::Openai),
+            false,
+            true,
+            false,
+            false,
+            &["qwen3-coder".into()],
+            false,
+        );
+        assert!(!dto.inject_temperature_allowed);
+        assert_eq!(dto.channel_temperature, "persist");
+        assert!(!dto.temperature_readonly, "persist 通道的已存值仍可编辑");
+        assert_eq!(dto.channel_max_tokens, "inject");
+        assert!(dto.inject_max_tokens_allowed);
+        assert_eq!(dto.channel_effort, "tui");
     }
 
     #[test]

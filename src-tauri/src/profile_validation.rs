@@ -107,6 +107,18 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
             }
         }
     }
+    // grok 的 API 后端（绑定级，仅设为全局写 [model.*] 段消费）：闭集 + 仅 grok
+    if let Some(backend) = profile.api_backend.as_deref() {
+        if profile.agent != "grok" {
+            return Err("apiBackend 仅 Grok Build 支持".into());
+        }
+        const GROK_BACKENDS: [&str; 3] = ["chat_completions", "responses", "messages"];
+        if !GROK_BACKENDS.contains(&backend) {
+            return Err(format!(
+                "Grok 不支持 API 后端 {backend}（可选 chat_completions / responses / messages）"
+            ));
+        }
+    }
     for key in profile.extra_env.keys() {
         if key.trim().is_empty() || key.contains('=') || key.contains('\0') {
             return Err(format!("附加环境变量名不合法: {key:?}"));
@@ -181,25 +193,66 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
         || policy.reasoning_effort.is_some()
         || !policy.header_env.is_empty()
     {
-        notes.push("请求策略按能力表逐字段处理：有实证通道的字段在启动时注入对应环境变量（当前已接线 claude-code/codebuddy），不支持或未知的字段仅保存声明、不会伪造注入".into());
+        notes.push("请求策略按能力表逐字段处理：有实证通道的字段在启动时注入（已接线 claude-code/codebuddy/codex/opencode/kimi/grok，qwen 仅 max output 一条 env），不支持或未知的字段仅保存声明、不会伪造注入".into());
     }
-    if policy.temperature.is_some() && support.temperature != "supported" {
-        notes.push(format!("当前 Agent 对 temperature 的协议支持状态为 {}，不会由 Ccode 强行注入", support.temperature));
+    // 通道表按入口记账（inject/persist/tui/unsupported/unknown），提示文案分入口
+    let channel_note = |label: &str, status: &str| -> Option<String> {
+        match status {
+            "inject" => None,
+            "persist" => Some(format!(
+                "{label} 的通道是「设为全局默认」写入 CLI 配置文件；启动注入不携带此字段"
+            )),
+            "tui" => Some(format!(
+                "{label} 仅支持会话内原生命令切换（如 /effort），启动与写盘均不携带"
+            )),
+            other => Some(format!(
+                "当前 Agent 对 {label} 的协议支持状态为 {other}，不会由 Ccode 强行注入"
+            )),
+        }
+    };
+    if let Some(note) = policy
+        .temperature
+        .is_some()
+        .then(|| channel_note("temperature", support.temperature))
+        .flatten()
+    {
+        notes.push(note);
     }
-    if policy.top_p.is_some() && support.top_p != "supported" {
-        notes.push(format!("当前 Agent 对 topP 的协议支持状态为 {}，不会由 Ccode 强行注入", support.top_p));
+    if let Some(note) = policy
+        .top_p
+        .is_some()
+        .then(|| channel_note("topP", support.top_p))
+        .flatten()
+    {
+        notes.push(note);
     }
-    if policy.max_output_tokens.is_some() && support.max_output_tokens != "supported" {
-        notes.push(format!("当前 Agent 对 maxOutputTokens 的协议支持状态为 {}，不会由 Ccode 强行注入", support.max_output_tokens));
+    if let Some(note) = policy
+        .max_output_tokens
+        .is_some()
+        .then(|| channel_note("maxOutputTokens", support.max_output_tokens))
+        .flatten()
+    {
+        notes.push(note);
     }
-    if policy.reasoning_effort.is_some() && support.reasoning_effort != "supported" {
-        notes.push(format!("当前 Agent 对 reasoningEffort 的协议支持状态为 {}，不会由 Ccode 强行注入", support.reasoning_effort));
+    if let Some(note) = policy
+        .reasoning_effort
+        .is_some()
+        .then(|| channel_note("reasoningEffort", support.reasoning_effort))
+        .flatten()
+    {
+        notes.push(note);
     }
-    if !policy.header_env.is_empty() && support.custom_headers != "supported" {
-        notes.push(format!("当前 Agent 对模型自定义 Header 的协议支持状态为 {}，Header 仅记录为环境变量引用", support.custom_headers));
+    if !policy.header_env.is_empty() {
+        if let Some(note) = channel_note("模型自定义 Header", support.custom_headers) {
+            notes.push(note);
+        }
     }
     if profile.models.is_empty() {
         notes.push("未指定模型，将使用 CLI 自身默认值".into());
+    }
+    // grok 的 api_backend 只随设为全局落盘，启动注入不携带——只提醒不阻断
+    if profile.agent == "grok" && profile.api_backend.is_some() {
+        notes.push("API 后端（apiBackend）只在「设为全局默认」写入 ~/.grok/config.toml 后生效；启动注入不携带此设置".into());
     }
     // Anthropic 协议通道的 SDK 会在 Base URL 后自动拼 /v1/messages：base 以 /v1 结尾会打成
     // /v1/v1/messages 404（2026-08-28 实测），且「获取模型」（OpenAI 风格 {base}/models）照样成功，
@@ -471,6 +524,8 @@ fn api_kind(profile: &Profile) -> ApiKind {
         "qwen" | "kimi" if profile.protocol.as_deref() == Some("anthropic") => {
             ApiKind::Anthropic
         }
+        // grok 绑定声明了 messages 后端（仅设为全局写入生效）→ 探针走 Anthropic 形状
+        "grok" if profile.api_backend.as_deref() == Some("messages") => ApiKind::Anthropic,
         _ => ApiKind::OpenAi,
     }
 }
@@ -784,6 +839,7 @@ pub async fn probe_gateway_slot(
         kind: crate::profiles::BindingKind::Api,
         gateway_id: Some(gw.id.clone()),
         protocol: None,
+        api_backend: None,
         models: gw.models.iter().map(|m| m.id.clone()).collect(),
         extra_env: Default::default(),
         last_used_at: None,
@@ -1155,6 +1211,7 @@ mod tests {
             account_type: Default::default(),
             no_auth: false,
             protocol: None,
+            api_backend: None,
             base_url: Some("https://relay.example.com/v1".into()),
             models: vec!["model-a".into()],
             extra_env: Default::default(),

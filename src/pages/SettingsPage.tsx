@@ -1312,7 +1312,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           <div className="mb-1 flex items-center gap-3">
             <span className="w-32 shrink-0 text-sm text-l2">自定义定价</span>
             <span className="text-xs text-l4">
-              美元 / 每百万 token，按模型名前缀匹配（覆盖内置价目）
+              美元 / 每百万 token，按模型名前缀匹配（覆盖内置价目与模型能力库价目）
             </span>
             <button
               onClick={savePricing}

@@ -1,6 +1,8 @@
 //! 模型能力注册表（2026-08-17 起）：内置前缀表 + <config>/ccode/model-capabilities.json
-//! 覆盖 + 关键词推断兜底，同 pricing.rs「内置定价表 + pricing.json 覆盖」口径
+//! 覆盖 + 关键词推断兜底，同 usage.rs「内置定价表 + pricing.json 覆盖」口径
 //! （最长前缀匹配、剥中转 provider/ 前缀）。
+//! 2026-08-31 起公共能力库下载顺带提取定价（models.dev cost / OpenRouter pricing →
+//! 条目的 cost 字段），经 db_price_table 供 usage.rs 定价链消费。
 //! 消费方：kimi（KIMI_MODEL_CAPABILITIES / KIMI_MODEL_MAX_CONTEXT_SIZE / [models.*] 的
 //! capabilities）、codex（catalog context_window）、opencode（models 条目 reasoning/limit）。
 //! 内置表宁缺毋滥：只收官方文档明确支持思考的模型，不确定的不收（落关键词推断），
@@ -25,16 +27,19 @@ pub struct ModelCapabilityDto {
 /// vision = 图像输入。**全部字段 Option**：None = 「这层不知道」，查询链逐字段继续向下找
 /// （网关只报了上下文不代表它否认推理能力——显式 false 与缺数据必须分开）；
 /// 内置表不逐模型收 output/vision（宁缺毋滥同 context 口径）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelCaps {
     pub thinking: Option<bool>,
     pub context: Option<i64>,
     pub output: Option<i64>,
     pub vision: Option<bool>,
+    /// Grok 目录条目的 apiBackend（responses/chat_completions/messages）；
+    /// 仅权威层（用户覆盖/网关实测缓存）可能有值，供设为全局与预览说实话
+    pub api_backend: Option<String>,
 }
 
 const fn caps(thinking: bool, context: Option<i64>) -> ModelCaps {
-    ModelCaps { thinking: Some(thinking), context, output: None, vision: None }
+    ModelCaps { thinking: Some(thinking), context, output: None, vision: None, api_backend: None }
 }
 
 /// 内置前缀表（最长前缀匹配：kimi-k2-thinking 优先于 kimi-k2）。
@@ -111,10 +116,15 @@ fn parse_caps_map(text: &str) -> Vec<(String, ModelCaps)> {
             let context = c.get("context").and_then(|n| n.as_i64()).filter(|n| *n > 0);
             let output = c.get("output").and_then(|n| n.as_i64()).filter(|n| *n > 0);
             let vision = c.get("vision").and_then(|b| b.as_bool());
+            let api_backend = c
+                .get("api_backend")
+                .and_then(|b| b.as_str())
+                .filter(|s| GROK_API_BACKENDS.contains(s))
+                .map(str::to_string);
             // 至少一个字段有效才算条目；缺省字段 = None（这层不知道，查询链继续向下）
             out.push((
                 prefix.to_lowercase(),
-                ModelCaps { thinking, context, output, vision },
+                ModelCaps { thinking, context, output, vision, api_backend },
             ));
         }
     }
@@ -193,6 +203,9 @@ pub(crate) fn purge_relay_for_gateway(gateway_id: &str) {
 
 static DB_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<Vec<(String, ModelCaps)>>>> =
     std::sync::OnceLock::new();
+static DB_PRICE_CACHE: std::sync::OnceLock<
+    std::sync::RwLock<Option<Vec<(String, (f64, f64))>>>,
+> = std::sync::OnceLock::new();
 
 fn load_db() -> Vec<(String, ModelCaps)> {
     if cfg!(test) {
@@ -212,16 +225,47 @@ fn load_db() -> Vec<(String, ModelCaps)> {
     parsed
 }
 
+/// 公共能力库的定价层（usage.rs 定价链消费：内置表 < 公共库 < 用户 pricing.json）。
+/// 同一份 model-capabilities-db.json 里的 cost 字段；单测不读本机真实文件
+pub(crate) fn db_price_table() -> Vec<(String, (f64, f64))> {
+    if cfg!(test) {
+        return Vec::new();
+    }
+    let cache = DB_PRICE_CACHE.get_or_init(|| std::sync::RwLock::new(None));
+    if let Some(cached) = cache.read().ok().and_then(|g| g.clone()) {
+        return cached;
+    }
+    let parsed = db_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| parse_price_map(&t))
+        .unwrap_or_default();
+    if let Ok(mut g) = cache.write() {
+        *g = Some(parsed.clone());
+    }
+    parsed
+}
+
 fn invalidate_db_cache() {
     if let Some(c) = DB_CACHE.get() {
         if let Ok(mut g) = c.write() {
             *g = None;
         }
     }
+    if let Some(c) = DB_PRICE_CACHE.get() {
+        if let Ok(mut g) = c.write() {
+            *g = None;
+        }
+    }
 }
 
+/// grok 的 apiBackend 合法值（grok-build parse_remote_model_value 实证闭集）
+const GROK_API_BACKENDS: [&str; 3] = ["chat_completions", "responses", "messages"];
+
 /// OpenRouter 风格 /models 响应 → 能力表（网关实测缓存与公共库回落共用）。
-/// 只提取四个能力字段；一个字段都没有的条目丢弃（纯 id 列表不动缓存）
+/// 只提取能力字段；一个字段都没有的条目丢弃（纯 id 列表不动缓存）。
+/// context 兼容 grok 目录的驼峰/snake 别名（contextWindow/context_window/
+/// _meta.totalContextTokens，与 grok parse_remote_model_value 同口径）；
+/// apiBackend/api_backend 只收闭集值
 pub(crate) fn parse_openrouter_models(v: &serde_json::Value) -> Vec<(String, ModelCaps)> {
     let mut out = Vec::new();
     let Some(arr) = v.get("data").and_then(|d| d.as_array()) else {
@@ -239,6 +283,10 @@ pub(crate) fn parse_openrouter_models(v: &serde_json::Value) -> Vec<(String, Mod
                     .get("context_length")?
                     .as_i64()
             })
+            // grok 目录别名（parse_remote_model_value 同口径链）
+            .or_else(|| item.get("contextWindow")?.as_i64())
+            .or_else(|| item.get("context_window")?.as_i64())
+            .or_else(|| item.get("_meta")?.get("totalContextTokens")?.as_i64())
             .filter(|n| *n > 0);
         let output = item
             .get("top_provider")
@@ -260,7 +308,18 @@ pub(crate) fn parse_openrouter_models(v: &serde_json::Value) -> Vec<(String, Mod
                 ps.iter()
                     .any(|p| matches!(p.as_str(), Some("reasoning") | Some("include_reasoning")))
             });
-        if context.is_none() && output.is_none() && vision.is_none() && thinking.is_none() {
+        let api_backend = item
+            .get("apiBackend")
+            .or_else(|| item.get("api_backend"))
+            .and_then(|b| b.as_str())
+            .filter(|s| GROK_API_BACKENDS.contains(s))
+            .map(str::to_string);
+        if context.is_none()
+            && output.is_none()
+            && vision.is_none()
+            && thinking.is_none()
+            && api_backend.is_none()
+        {
             continue;
         }
         out.push((
@@ -270,6 +329,7 @@ pub(crate) fn parse_openrouter_models(v: &serde_json::Value) -> Vec<(String, Mod
                 context,
                 output,
                 vision,
+                api_backend,
             },
         ));
     }
@@ -313,8 +373,94 @@ fn parse_models_dev(v: &serde_json::Value) -> Vec<(String, ModelCaps)> {
                     context,
                     output,
                     vision,
+                    api_backend: None, // models.dev 公共库不携带 wire 后端
                 },
             ));
+        }
+    }
+    out
+}
+
+// ===== 定价提取（2026-08-31）：同一份公共库响应顺带落 cost，usage.rs 定价链消费 =====
+
+/// models.dev 条目的 cost.{input,output}（美元/每百万 token）→ (id, (输入价, 输出价))
+fn parse_models_dev_prices(v: &serde_json::Value) -> Vec<(String, (f64, f64))> {
+    let mut out = Vec::new();
+    let Some(providers) = v.as_object() else {
+        return out;
+    };
+    for (_provider, pv) in providers {
+        let Some(models) = pv.get("models").and_then(|m| m.as_object()) else {
+            continue;
+        };
+        for (id, mv) in models {
+            let Some(cost) = mv.get("cost") else { continue };
+            let pair = match (
+                cost.get("input").and_then(|n| n.as_f64()),
+                cost.get("output").and_then(|n| n.as_f64()),
+            ) {
+                (Some(i), Some(o)) if i.is_finite() && i >= 0.0 && o.is_finite() && o >= 0.0 => {
+                    (i, o)
+                }
+                _ => continue,
+            };
+            out.push((normalize(id), pair));
+        }
+    }
+    out
+}
+
+/// OpenRouter 风格条目的 pricing.{prompt,completion}（每 token 美元，字符串）→
+/// 每百万 token 价格。两家数据源解析进同一形状
+fn parse_openrouter_prices(v: &serde_json::Value) -> Vec<(String, (f64, f64))> {
+    let mut out = Vec::new();
+    let Some(arr) = v.get("data").and_then(|d| d.as_array()) else {
+        return out;
+    };
+    for item in arr {
+        let Some(id) = item.get("id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        let per_million = |key: &str| {
+            item.get("pricing")?
+                .get(key)?
+                .as_str()?
+                .parse::<f64>()
+                .ok()
+                .filter(|n| n.is_finite() && *n >= 0.0)
+                .map(|n| n * 1_000_000.0)
+        };
+        let (Some(i), Some(o)) = (per_million("prompt"), per_million("completion")) else {
+            continue;
+        };
+        out.push((normalize(id), (i, o)));
+    }
+    out
+}
+
+/// 公共库落盘文件里的 cost 字段解析（{"模型": {"cost": [输入价, 输出价], ...}}）
+fn parse_price_map(text: &str) -> Vec<(String, (f64, f64))> {
+    let mut out = Vec::new();
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return out;
+    };
+    if let Some(obj) = v.as_object() {
+        for (prefix, entry) in obj {
+            // 空前缀会匹配一切模型名，视为配置错误直接忽略（同 caps 口径）
+            if prefix.trim().is_empty() {
+                continue;
+            }
+            let Some(pair) = entry.get("cost").and_then(|c| c.as_array()) else {
+                continue;
+            };
+            if pair.len() != 2 {
+                continue;
+            }
+            if let (Some(i), Some(o)) = (pair[0].as_f64(), pair[1].as_f64()) {
+                if i.is_finite() && i >= 0.0 && o.is_finite() && o >= 0.0 {
+                    out.push((prefix.to_lowercase(), (i, o)));
+                }
+            }
         }
     }
     out
@@ -366,6 +512,8 @@ fn record_relay_models_to(path: &Path, v: &serde_json::Value, gateway_id: &str) 
 pub struct ModelDbStatusDto {
     pub downloaded: bool,
     pub models: usize,
+    /// 带定价（cost 字段）的条目数：统计页费用估算的数据源覆盖度
+    pub priced_models: usize,
     /// 下载时间（本地文件 mtime，RFC3339）
     pub downloaded_at: Option<String>,
 }
@@ -377,6 +525,7 @@ pub fn model_db_status() -> ModelDbStatusDto {
         return ModelDbStatusDto {
             downloaded: false,
             models: 0,
+            priced_models: 0,
             downloaded_at: None,
         };
     };
@@ -384,12 +533,13 @@ pub fn model_db_status() -> ModelDbStatusDto {
         return ModelDbStatusDto {
             downloaded: false,
             models: 0,
+            priced_models: 0,
             downloaded_at: None,
         };
     };
-    let models = std::fs::read_to_string(&path)
-        .map(|t| parse_caps_map(&t).len())
-        .unwrap_or(0);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let models = parse_caps_map(&text).len();
+    let priced_models = parse_price_map(&text).len();
     let downloaded_at = meta
         .modified()
         .ok()
@@ -403,6 +553,7 @@ pub fn model_db_status() -> ModelDbStatusDto {
     ModelDbStatusDto {
         downloaded: true,
         models,
+        priced_models,
         downloaded_at,
     }
 }
@@ -412,11 +563,13 @@ const MODELS_DEV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8
 const OPENROUTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// 下载公共模型能力库：models.dev 优先（社区中立库），不可达回落 OpenRouter /models
-/// （两家解析进同一形状；本机实测 models.dev 直连超时、OpenRouter 可达）
+/// （两家解析进同一形状；本机实测 models.dev 直连超时、OpenRouter 可达）。
+/// 能力之外顺带提取定价（cost），统计页费用估算与能力声明共用同一份快照
 #[tauri::command]
 pub async fn download_model_db() -> Result<ModelDbStatusDto, String> {
     let mut last_err = String::new();
-    let mut parsed: Option<Vec<(String, ModelCaps)>> = None;
+    #[allow(clippy::type_complexity)]
+    let mut parsed: Option<(Vec<(String, ModelCaps)>, Vec<(String, (f64, f64))>)> = None;
     for (url, is_models_dev) in [
         ("https://models.dev/api.json", true),
         ("https://openrouter.ai/api/v1/models", false),
@@ -443,7 +596,13 @@ pub async fn download_model_db() -> Result<ModelDbStatusDto, String> {
                         last_err = format!("{url} 响应解析为空");
                         continue;
                     }
-                    parsed = Some(entries);
+                    // 定价提取失败不判死：能力库仍是主用途，cost 缺失 = 那层不知道
+                    let prices = if is_models_dev {
+                        parse_models_dev_prices(&v)
+                    } else {
+                        parse_openrouter_prices(&v)
+                    };
+                    parsed = Some((entries, prices));
                     break;
                 }
                 Err(e) => last_err = format!("{url} 解析失败: {e}"),
@@ -452,20 +611,29 @@ pub async fn download_model_db() -> Result<ModelDbStatusDto, String> {
             Err(e) => last_err = format!("{url} 请求失败: {e}"),
         }
     }
-    let entries = parsed.ok_or_else(|| format!("模型能力库下载失败：{last_err}"))?;
+    let (entries, prices) = parsed.ok_or_else(|| format!("模型能力库下载失败：{last_err}"))?;
     tauri::async_runtime::spawn_blocking(move || {
         let path = db_path().ok_or("无法确定平台配置目录")?;
+        let price_of_id: std::collections::HashMap<&str, (f64, f64)> =
+            prices.iter().map(|(id, p)| (id.as_str(), *p)).collect();
         let mut map = serde_json::Map::new();
         for (id, c) in &entries {
-            map.insert(
-                id.clone(),
-                serde_json::json!({
-                    "thinking": c.thinking,
-                    "context": c.context,
-                    "output": c.output,
-                    "vision": c.vision,
-                }),
-            );
+            let mut entry = serde_json::json!({
+                "thinking": c.thinking,
+                "context": c.context,
+                "output": c.output,
+                "vision": c.vision,
+            });
+            if let Some((i, o)) = price_of_id.get(id.as_str()) {
+                entry["cost"] = serde_json::json!([i, o]);
+            }
+            map.insert(id.clone(), entry);
+        }
+        // 只有定价、没有能力字段的条目也保留（费用估算不需要能力声明）
+        for (id, p) in &prices {
+            if !map.contains_key(id) {
+                map.insert(id.clone(), serde_json::json!({"cost": [p.0, p.1]}));
+            }
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(map))
             .map_err(|e| e.to_string())?;
@@ -525,10 +693,29 @@ fn lookup_field_for<T>(
         load_db(),
         BUILTIN_CAPS
             .iter()
-            .map(|(p, c)| (p.to_string(), *c))
+            .map(|(p, c)| (p.to_string(), c.clone()))
             .collect(),
     ];
     chain_field(&tables, model, f)
+}
+
+/// 上下文窗口（仅限权威层：用户覆盖 + 网关实测缓存，公共库/内置表/关键词一律不算）。
+/// 供 grok「设为全局」写 [model.*].context_window——grok 里 config 的 [model.*] 优先级
+/// 高于中转 /models 目录，估值层不配覆盖目录声明；这两层都不知道就不写（grok 按目录或
+/// 256_000 默认计）
+pub(crate) fn model_context_size_authoritative_for(
+    model: &str,
+    gateway_id: Option<&str>,
+) -> Option<i64> {
+    let tables = [load_override(), load_relay_for(gateway_id)];
+    chain_field(&tables, model, |c| c.context)
+}
+
+/// Grok 目录声明的 apiBackend（仅权威层：用户覆盖/网关实测缓存）。
+/// 供预览说实话（「目录已声明 responses」）与设为全局参考
+pub(crate) fn model_api_backend_for(model: &str, gateway_id: Option<&str>) -> Option<String> {
+    let tables = [load_override(), load_relay_for(gateway_id)];
+    chain_field(&tables, model, |c| c.api_backend.clone())
 }
 
 /// 关键词推断兜底（注册表未命中时）：覆盖中转改名/全新模型的常见命名。
@@ -737,12 +924,12 @@ mod tests {
         ]});
         let map: std::collections::HashMap<String, ModelCaps> =
             parse_openrouter_models(&v).into_iter().collect();
-        let d = map["deepseek-v3.2"];
+        let d = &map["deepseek-v3.2"];
         assert_eq!(d.thinking, Some(true), "supported_parameters 含 reasoning → 思考");
         assert_eq!(d.context, Some(163840));
         assert_eq!(d.output, Some(147456));
         assert_eq!(d.vision, Some(false));
-        let vx = map["vision-x"];
+        let vx = &map["vision-x"];
         // supported_parameters 在场但没有 reasoning → 显式 false（网关如实声明了参数全集）
         assert_eq!(vx.thinking, Some(false));
         assert_eq!(vx.vision, Some(true));
@@ -766,16 +953,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_openrouter_models_accepts_grok_catalog_aliases() {
+        // grok 目录字段（与 grok parse_remote_model_value 同口径）：驼峰/蛇形/_meta 的
+        // context 别名 + apiBackend 闭集
+        let v = serde_json::json!({"data": [
+            {"id": "relay/grok-fast", "contextWindow": 262144, "apiBackend": "responses"},
+            {"id": "relay/grok-snake", "context_window": 131072},
+            {"id": "relay/grok-meta", "_meta": {"totalContextTokens": 200000}},
+            {"id": "relay/bad-backend", "apiBackend": "weird"}
+        ]});
+        let map: std::collections::HashMap<String, ModelCaps> =
+            parse_openrouter_models(&v).into_iter().collect();
+        assert_eq!(map["grok-fast"].context, Some(262144));
+        assert_eq!(map["grok-fast"].api_backend.as_deref(), Some("responses"));
+        assert_eq!(map["grok-snake"].context, Some(131072));
+        assert_eq!(map["grok-meta"].context, Some(200000));
+        // 闭集外的 apiBackend 丢弃；该条目只有这一个字段 → 整条不沉淀
+        assert!(!map.contains_key("bad-backend"));
+    }
+
+    #[test]
+    fn authoritative_context_ignores_estimated_layers() {
+        // cfg!(test) 下文件型加载器不读本机真实缓存 → 用户覆盖与网关缓存都为空；
+        // kimi-k3 在内置表/兜底里有值（1M），权威层访问器必须仍返回 None——
+        // 估值层不配写进 grok config（那里优先级高于中转目录）
+        assert_eq!(model_context_size_authoritative_for("kimi-k3", None), None);
+        assert_eq!(
+            model_context_size_authoritative_for("openai/gpt-5", Some("gw")),
+            None
+        );
+    }
+
+    #[test]
     fn chain_field_falls_through_per_field_not_per_entry() {
         // 用户场景：网关缓存只有 context（其余 None），公共库同模型有 thinking——
         // 逐字段向下补：context 用网关实测，thinking 用公共库
         let relay = vec![(
             "model-x".to_string(),
-            ModelCaps { thinking: None, context: Some(99999), output: None, vision: None },
+            ModelCaps { thinking: None, context: Some(99999), output: None, vision: None, api_backend: None },
         )];
         let db = vec![(
             "model-x".to_string(),
-            ModelCaps { thinking: Some(true), context: Some(11111), output: Some(4096), vision: None },
+            ModelCaps { thinking: Some(true), context: Some(11111), output: Some(4096), vision: None, api_backend: None },
         )];
         let tables = [relay, db];
         assert_eq!(chain_field(&tables, "model-x", |c| c.context), Some(99999));
@@ -800,13 +1019,61 @@ mod tests {
         });
         let map: std::collections::HashMap<String, ModelCaps> =
             parse_models_dev(&v).into_iter().collect();
-        let k = map["kimi-k3"];
+        let k = &map["kimi-k3"];
         assert_eq!(k.thinking, Some(true));
         assert_eq!(k.context, Some(1_048_576));
         assert_eq!(k.vision, Some(true));
-        let g = map["gpt-5"];
+        let g = &map["gpt-5"];
         assert_eq!(g.output, Some(128000));
         assert_eq!(g.vision, Some(false));
+    }
+
+    #[test]
+    fn parse_models_dev_prices_extracts_cost() {
+        let v = serde_json::json!({
+            "moonshot": {"models": {
+                "kimi-k3": {"cost": {"input": 3.0, "output": 15.0, "cache_read": 0.3}},
+                "kimi-free-x": {"cost": {"input": 0, "output": 0}},
+                "kimi-no-cost": {"reasoning": true},
+                "kimi-bad-cost": {"cost": {"input": -1, "output": 2}}
+            }}
+        });
+        let map: std::collections::HashMap<String, (f64, f64)> =
+            parse_models_dev_prices(&v).into_iter().collect();
+        assert_eq!(map["kimi-k3"], (3.0, 15.0));
+        assert_eq!(map["kimi-free-x"], (0.0, 0.0), "免费模型的如实 0 价保留");
+        assert!(!map.contains_key("kimi-no-cost"), "无 cost = 这层不知道");
+        assert!(!map.contains_key("kimi-bad-cost"), "非法数值丢弃");
+    }
+
+    #[test]
+    fn parse_openrouter_prices_converts_per_token_to_per_million() {
+        let v = serde_json::json!({"data": [
+            {"id": "anthropic/claude-sonnet-5", "pricing": {"prompt": "0.000002", "completion": "0.00001"}},
+            {"id": "openai/gpt-5.2", "pricing": {"prompt": "0.00000175", "completion": "0.000014"}},
+            {"id": "bare/no-pricing"}
+        ]});
+        let map: std::collections::HashMap<String, (f64, f64)> =
+            parse_openrouter_prices(&v).into_iter().collect();
+        assert_eq!(map["claude-sonnet-5"], (2.0, 10.0));
+        assert_eq!(map["gpt-5.2"], (1.75, 14.0));
+        assert!(!map.contains_key("no-pricing"));
+    }
+
+    #[test]
+    fn parse_price_map_reads_cost_field() {
+        // 公共库落盘形状：能力与 cost 同条目共存；无 cost 的条目不产生定价
+        let text = r#"{
+            "kimi-k3": {"thinking": true, "cost": [3.0, 15.0]},
+            "gpt-5": {"thinking": true, "context": 400000},
+            "price-only-x": {"cost": [0.5, 1.5]},
+            "": {"cost": [9.0, 9.0]}
+        }"#;
+        let map: std::collections::HashMap<String, (f64, f64)> =
+            parse_price_map(text).into_iter().collect();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["kimi-k3"], (3.0, 15.0));
+        assert_eq!(map["price-only-x"], (0.5, 1.5), "纯定价条目同样入定价层");
     }
 
     #[test]

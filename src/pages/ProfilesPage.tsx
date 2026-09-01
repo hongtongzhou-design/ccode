@@ -8,6 +8,7 @@ import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PRESETS, NO_PRESET_REASON } from "../presets";
 import { upstreamNoteText, upstreamCommand } from "../upstream-note";
 import { copyTargets } from "../profile-copy";
+import { channelLabel } from "../combo-field";
 import { MODEL_SWITCH } from "../model-switch";
 import { groupModelsByVendor, vendorOf } from "../model-vendors";
 import { interactiveUpdatePrefill } from "../update-routing";
@@ -84,6 +85,7 @@ function ProfileModal({
     protocol: (initial?.protocol ??
       AGENT_PROTOCOLS[initial?.agent ?? "claude-code"]?.default ??
       null) as string | null,
+    apiBackend: (initial?.apiBackend ?? null) as string | null,
     baseUrl: initial?.baseUrl ?? "",
     models: initial?.models ?? ([] as string[]),
     extraEnvText: Object.entries(initial?.extraEnv ?? {})
@@ -136,6 +138,36 @@ function ProfileModal({
   const pickerModels = showGatewayFields
     ? (fetchedModels ?? [])
     : (gatewayCatalog ?? []);
+
+  // 协议推导（选用已有网关 / 编辑绑定）：qwen/kimi 的候选协议各自落固定槽位
+  //（与后端 gateway_store::slot_for_agent 同口径）。所选网关恰好只填了一个候选槽时
+  // 协议唯一确定——高级设置里只读展示，不再让手选（多槽已填 = 真选择，保留下拉）
+  const PROTOCOL_SLOT: Record<string, Record<string, "anthropic" | "openai">> = {
+    qwen: { openai: "openai", anthropic: "anthropic" },
+    kimi: { kimi: "openai", openai: "openai", anthropic: "anthropic" },
+  };
+  const derivedProtocol = (() => {
+    if (showGatewayFields) return null; // 新建网关：协议决定 Base URL 落哪个槽，保持手选
+    const mapping = PROTOCOL_SLOT[form.agent];
+    if (!mapping) return null;
+    const gw = gateways.find((g) => g.id === catalogGatewayId);
+    if (!gw) return null;
+    const filledSlots = new Set(
+      Object.values(mapping).filter((slot) => (gw.slots[slot] ?? "").trim()),
+    );
+    if (filledSlots.size !== 1) return null;
+    const slot = [...filledSlots][0];
+    const candidates = Object.entries(mapping)
+      .filter(([, s]) => s === slot)
+      .map(([p]) => p);
+    const def = AGENT_PROTOCOLS[form.agent]?.default;
+    return candidates.includes(def ?? "") ? (def ?? null) : (candidates[0] ?? null);
+  })();
+  useEffect(() => {
+    if (derivedProtocol && form.protocol !== derivedProtocol)
+      setForm((f) => ({ ...f, protocol: derivedProtocol }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [derivedProtocol]);
 
   useEffect(() => {
     let cancelled = false;
@@ -315,6 +347,8 @@ function ProfileModal({
       accountType: form.accountType,
       noAuth: form.accountType === "api" && form.noAuth,
       protocol: AGENT_PROTOCOLS[form.agent] ? form.protocol : null,
+      // grok 专用：API 后端（仅设为全局写入消费），其余 agent 不携带
+      apiBackend: form.agent === "grok" ? form.apiBackend : null,
       // 官方账号：认证交给 CLI 登录，不落端点/密钥
       baseUrl: form.accountType === "official" ? "" : form.baseUrl.trim(),
       // 槽位化编辑允许空串/重复中间态，保存时归一：去空白、去空、去重（保序）
@@ -335,6 +369,7 @@ function ProfileModal({
           gatewayId: bindGatewayId,
           kind: "api",
           protocol: input.protocol,
+          apiBackend: input.apiBackend,
           models: input.models,
           extraEnv: input.extraEnv,
         };
@@ -619,7 +654,7 @@ function ProfileModal({
               aria-hidden="true"
               className="flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-field bg-canvas text-[10px] text-cta-text transition-colors peer-checked:border-cta-bd peer-checked:bg-cta peer-checked:after:content-['✓']"
             />
-            本地端点无密钥（不会继承 shell 中的其他 API Key）
+            本地端点无密钥（网关级设置，保存后可在网关库改；不会继承 shell 中的其他 API Key）
           </label>
         )}
         {showGatewayFields && (
@@ -632,13 +667,12 @@ function ProfileModal({
               placeholder="https://api.example.com"
               value={form.baseUrl}
               onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
-            />
-            <button
+            />            <button
               type="button"
               onClick={testConnection}
               disabled={testing || !form.baseUrl.trim()}
               title={
-                form.baseUrl.trim() ? "验证端点与密钥连通性" : "先填写 Base URL"
+                form.baseUrl.trim() ? "轻量验证端点与密钥连通性（完整的三层验证在保存后的 ⋯ 菜单）" : "先填写 Base URL"
               }
               className={`${rowActionClass} w-20 shrink-0`}
             >
@@ -672,6 +706,9 @@ function ProfileModal({
             onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
           />
         </label>
+        <p className="-mt-2 mb-3 text-micro text-l4">
+          端点与密钥随网关保存（进网关库，多协议槽可同址跟随）；之后统一在网关库修改。
+        </p>
           </>
         )}
         <div className="mb-4 text-sm">
@@ -872,27 +909,19 @@ function ProfileModal({
               官方账号本就由 CLI 自己决定模型；空串槽位不算已填 */}
           {form.models.every((m) => !m.trim()) &&
             form.accountType !== "official" && (
-              <p className="mb-2 text-micro text-warn-text">
+              <p className="mb-2 text-micro text-l4">
                 没填模型，会用 CLI 自己的默认值。
               </p>
             )}
-          {/* 行式槽位列表：已有模型一行一个（首个非空 = 默认），空槽 = 待填输入框。
-              空槽数跟随 MODEL_SWITCH 选择器容量（max）；超容量仍可经「仍要添加」补充
+          {/* 行式槽位列表：已有模型一行一个（首个非空 = 默认），尾部只留 1 个空槽手填——
+              不按选择器容量铺一排空行（视觉噪音）；超容量仍可经「仍要添加」补充
               （超出的不进 CLI 选择器，但启动栏/手输可用，见 model-switch.ts 语义） */}
           {(() => {
             const max = MODEL_SWITCH[form.agent]?.max ?? null;
             const filled = form.models.filter((m) => m.trim()).length;
             const slots = [...form.models];
-            // 选用已有网关 / 编辑绑定：只留 1 个空槽手填，不按选择器容量铺一排空行。
-            const compactSlots = Boolean(initial) || bindMode === "existing";
-            if (max == null || compactSlots) {
-              if (slots.length === 0 || slots[slots.length - 1].trim() !== "")
-                slots.push("");
-            } else {
-              const emptyCount = slots.length - filled;
-              for (let i = emptyCount; i < Math.max(0, max - filled); i++)
-                slots.push("");
-            }
+            if (slots.length === 0 || slots[slots.length - 1].trim() !== "")
+              slots.push("");
             const firstFilled = slots.findIndex((m) => m.trim());
             return (
               <div className="space-y-0.5">
@@ -984,6 +1013,15 @@ function ProfileModal({
           </summary>
           <div className="mt-3">
             {AGENT_PROTOCOLS[form.agent] && (
+              derivedProtocol ? (
+                <div className="mb-3 text-sm">
+                  <span className="mb-1 block text-xs text-l3">协议</span>
+                  <p className="text-xs text-l2">
+                    {derivedProtocol}
+                    <span className="ml-1.5 text-micro text-l4">按网关已填槽位自动确定</span>
+                  </p>
+                </div>
+              ) : (
               <label className="mb-3 block text-sm">
                 <span className="mb-1 block text-xs text-l3">协议</span>
                 <select
@@ -1000,14 +1038,38 @@ function ProfileModal({
                   ))}
                 </select>
               </label>
+              )
             )}
+            {form.agent === "grok" && form.accountType === "api" && (
+              <label className="mb-3 block text-sm">
+                <span className="mb-1 block text-xs text-l3">API 后端</span>
+                <select
+                  className={fieldClass}
+                  value={form.apiBackend ?? ""}
+                  onChange={(e) =>
+                    setForm({ ...form, apiBackend: e.target.value || null })
+                  }
+                >
+                  <option value="">默认（chat_completions）</option>
+                  <option value="responses">responses</option>
+                  <option value="messages">messages</option>
+                </select>
+                <span className="mt-1 block text-[10px] text-l4">
+                  启动注入改不了后端（grok overlay 白名单不放行），此项随「设为全局默认」写入 ~/.grok/config.toml 的 [model.*] 段；中转目录条目带 apiBackend 字段时以目录为准之外的另一渠道
+                </span>
+              </label>
+            )}
+            {form.accountType === "api" && (
             <div className="mb-3 rounded border border-hairline p-2">
               <p className="mb-2 text-xs font-medium text-l2">请求策略</p>
+              {combo?.policyChannelNote && (
+                <p className="mb-1 text-[11px] text-l3">{combo.policyChannelNote}</p>
+              )}
               {combo?.effortReadonly && (
                 <p className="mb-1 text-[11px] text-l3">思考档已保存在网关，当前 CLI 没有注入通道，启动时不会写进去。</p>
               )}
-              {combo && !combo.injectTemperatureAllowed && form.requestPolicy.temperature != null && (
-                <p className="mb-1 text-[11px] text-l3">温度已保存在网关，当前 CLI 没有通道，启动时不会注入。</p>
+              {combo && combo.channelTemperature !== "inject" && form.requestPolicy.temperature != null && (
+                <p className="mb-1 text-[11px] text-l3">{combo.channelTemperature === "persist" ? "温度已保存在网关，仅「设为全局默认」写入后生效，启动注入不携带。" : "温度已保存在网关，当前 CLI 没有通道，启动时不会注入。"}</p>
               )}
               {combo?.mixedModelsNote && (
                 <p className="mb-1 text-[11px] text-warn-text">{combo.mixedModelsNote}</p>
@@ -1018,10 +1080,10 @@ function ProfileModal({
                 {([[
                   "temperature", "temperature", "temperature"], ["topP", "top_p", "topP"], ["maxOutputTokens", "max output", "maxOutputTokens"]] as const).map(([key, label, capability]) => {
                   const support = agentCapabilities?.requestPolicy[capability];
-                  return <label key={key} className="text-xs text-l3">{label}<span className="ml-1 text-[10px] text-l4">协议{support === "supported" ? "支持" : support === "unsupported" ? "不支持" : "未知"}</span><input className={fieldClass} type="number" min={key === "temperature" ? "0" : key === "topP" ? "0" : "1"} max={key === "temperature" ? "2" : key === "topP" ? "1" : undefined} step={key === "temperature" ? "0.1" : key === "topP" ? "0.05" : "1"} placeholder="默认" value={form.requestPolicy[key] ?? ""} onChange={(e) => { const n = parseOptionalNumber(e.target.value); if (n !== undefined) setForm({ ...form, requestPolicy: { ...form.requestPolicy, [key]: n } }); }} /></label>;
+                  return <label key={key} className="text-xs text-l3">{label}<span className="ml-1 text-[10px] text-l4">协议{channelLabel(support)}</span><input className={fieldClass} type="number" min={key === "temperature" ? "0" : key === "topP" ? "0" : "1"} max={key === "temperature" ? "2" : key === "topP" ? "1" : undefined} step={key === "temperature" ? "0.1" : key === "topP" ? "0.05" : "1"} placeholder="默认" value={form.requestPolicy[key] ?? ""} onChange={(e) => { const n = parseOptionalNumber(e.target.value); if (n !== undefined) setForm({ ...form, requestPolicy: { ...form.requestPolicy, [key]: n } }); }} /></label>;
                 })}
               </div>
-              <label className="mt-2 block text-xs text-l3">reasoning effort<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.reasoningEffort === "supported" ? "支持" : agentCapabilities?.requestPolicy.reasoningEffort === "unsupported" ? "不支持" : "未知"}</span>{agentCapabilities?.effortOptions?.length ? (
+              <label className="mt-2 block text-xs text-l3">reasoning effort<span className="ml-1 text-[10px] text-l4">协议{channelLabel(agentCapabilities?.requestPolicy.reasoningEffort)}</span>{agentCapabilities?.effortOptions?.length ? (
                 <select className={fieldClass} value={form.requestPolicy.reasoningEffort ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, reasoningEffort: e.target.value || null } })}>
                   <option value="">默认</option>
                   {agentCapabilities.effortOptions.map((opt) => (
@@ -1037,10 +1099,11 @@ function ProfileModal({
                 <p className="mb-2 text-[11px] text-l4">思考档 / 温度 / 输出上限在网关库里按模型编辑，这里改了也不会覆盖已有逐模型策略。</p>
               )}
               {showGatewayFields && (
-              <label className="mt-2 block text-xs text-l3">自定义 Header（Header 名=环境变量名）<span className="ml-1 text-[10px] text-l4">协议{agentCapabilities?.requestPolicy.customHeaders === "supported" ? "支持" : agentCapabilities?.requestPolicy.customHeaders === "unsupported" ? "不支持" : "未知"}</span><textarea className={`${fieldClass} h-16 font-mono text-xs`} placeholder="X-Provider-Region=MODEL_REGION\nX-Trace-Id=TRACE_ID" value={headerEnvText} onChange={(e) => setHeaderEnvText(e.target.value)} /></label>
+              <label className="mt-2 block text-xs text-l3">自定义 Header（Header 名=环境变量名）<span className="ml-1 text-[10px] text-l4">协议{channelLabel(agentCapabilities?.requestPolicy.customHeaders)}</span><textarea className={`${fieldClass} h-16 font-mono text-xs`} placeholder="X-Provider-Region=MODEL_REGION\nX-Trace-Id=TRACE_ID" value={headerEnvText} onChange={(e) => setHeaderEnvText(e.target.value)} /></label>
               )}
               <p className="mt-1 text-[11px] text-l4">Header 跟网关；思考档/温度跟每个模型。当前不会伪造请求体。Header 值只填环境变量名，不保存密文。</p>
             </div>
+            )}
             <label className="block text-sm">
               <span className="mb-1 block text-xs text-l3">
                 附加环境变量（每行 KEY=VALUE，可覆盖内置值）
@@ -1048,7 +1111,7 @@ function ProfileModal({
               <textarea
                 className={`${fieldClass} h-20 font-mono text-xs`}
                 placeholder={
-                  "HTTPS_PROXY=http://127.0.0.1:7890\nANTHROPIC_SMALL_FAST_MODEL=claude-haiku"
+                  "HTTPS_PROXY=http://127.0.0.1:7890\nNO_PROXY=localhost,127.0.0.1"
                 }
                 value={form.extraEnvText}
                 onChange={(e) =>
@@ -1056,6 +1119,11 @@ function ProfileModal({
                 }
               />
             </label>
+            {form.agent === "kimi" && (
+              <p className="mt-1 text-[10px] text-l4">
+                Kimi 窄通道（不自动注入，按需在此声明）：KIMI_MODEL_ADAPTIVE_THINKING=true/false（Anthropic 通道思考形态）、KIMI_MODEL_REASONING_KEY=reasoning_content/reasoning_details/reasoning（OpenAI 通道思考字段方言，中转异常时 pin）
+              </p>
+            )}
           </div>
         </details>
         {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
@@ -1472,6 +1540,36 @@ function PreviewDialog({
               <p className="text-l4">（无）</p>
             )}
           </div>
+          {result.notes.length > 0 && (
+            <div>
+              <p className="mb-1 font-medium text-l2">协议与上下文</p>
+              <ul className="space-y-0.5">
+                {result.notes.map((note, index) => (
+                  <li key={index} className="text-l3">
+                    {note}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {result.overlays.length > 0 && (
+            <div>
+              <p className="mb-1 font-medium text-l2">配置 overlay</p>
+              {result.overlays.map((overlay, index) => (
+                <div key={index} className="mb-2">
+                  <span className="rounded border border-hairline px-1.5 py-0.5 font-mono text-[11px] text-l2">
+                    {overlay.name}
+                  </span>
+                  <pre className="mt-1 overflow-x-auto rounded border border-hairline p-2 font-mono text-[11px] text-l3">
+                    {overlay.content}
+                  </pre>
+                  {overlay.note && (
+                    <p className="mt-1 text-[11px] text-l4">{overlay.note}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           <div>
             <p className="mb-1 font-medium text-l2">清理继承变量</p>
             {result.envRemove.length ? (
@@ -1703,11 +1801,15 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
 
+  // 页面保持挂载：挂载与每次回切本页都重新探测（登录在终端页完成后回来要能看到已连接；
+  // 探测是本地 auth 文件只读扫描，成本低）
   useEffect(() => {
+    if (!visible) return;
     for (const a of AGENTS) void refreshOfficial(a.id);
-  }, []);
+  }, [visible]);
 
-  /** 「连接」：在内嵌终端开新标签执行 CLI 登录命令（OAuth 会弹浏览器）；完成后回本页点「刷新」 */
+  /** 「连接」：在内嵌终端开新标签执行 CLI 登录命令（OAuth 会弹浏览器）；回切本页自动刷新状态。
+   *  reuseKey 去重：重复点「登录」聚焦已有标签而不是再开一个——两个 login 进程会各弹一个浏览器页 */
   function connectOfficial(agentId: string) {
     const st = officialStatus[agentId];
     if (!st?.loginCommand) return;
@@ -1717,6 +1819,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       title: `登录 ${labelOf(agentId)}`,
       prefillCommand: st.loginCommand,
       shellOnly: true,
+      reuseKey: `login:${agentId}`,
     });
     setPage("terminal");
   }
@@ -1817,6 +1920,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
   const [modelDb, setModelDb] = useState<{
     downloaded: boolean;
     models: number;
+    pricedModels?: number;
     downloadedAt?: string | null;
   } | null>(null);
   const [modelDbBusy, setModelDbBusy] = useState(false);
@@ -1824,13 +1928,14 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     invoke<{
       downloaded: boolean;
       models: number;
+      pricedModels?: number;
       downloadedAt?: string | null;
     }>("model_db_status")
       .then(setModelDb)
       .catch(() => {});
   }, []);
 
-  /** 下载/更新公共模型能力库：下载后接入的模型自动带上正确的上下文/输出/视觉/推理声明 */
+  /** 下载/更新公共模型能力库：下载后接入的模型自动带上正确的上下文/输出/视觉/推理声明与定价 */
   async function onModelDbDownload() {
     if (modelDbBusy) return;
     setModelDbBusy(true);
@@ -1839,10 +1944,13 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       const s = await invoke<{
         downloaded: boolean;
         models: number;
+        pricedModels?: number;
         downloadedAt?: string | null;
       }>("download_model_db");
       setModelDb(s);
-      setNotice(`模型能力库已就绪：${s.models} 个模型`);
+      setNotice(
+        `模型能力库已就绪：${s.models} 个模型 · ${s.pricedModels ?? 0} 个带价`,
+      );
       setTimeout(() => setNotice(null), 4000);
       setError(null);
     } catch (e) {
@@ -2016,7 +2124,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
   const labelOf = (agentId: string) =>
     AGENTS.find((a) => a.id === agentId)?.label ?? agentId;
 
-  /** 每个 agent 是否有可恢复的完整全局配置批次（控制「恢复备份」按钮显隐）；
+  /** 每个 agent 是否有可恢复的完整全局配置批次（控制「撤销上次写入」按钮显隐）；
       顺带查「首次写入前」原始快照（控制「恢复初始状态」入口显隐） */
   async function refreshGlobalBackups() {
     const entries = await Promise.all(
@@ -2043,6 +2151,23 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
 
   useEffect(() => {
     refreshGlobalBackups().catch(() => {});
+  }, [profiles]);
+
+  /** 已注册到 Codex 客户端的 profile id 集（config.toml 里有其 provider 定义块）：
+      驱动连接行菜单「注册到客户端 ⇄ 移除注册」状态化 */
+  const [clientRegistered, setClientRegistered] = useState<Set<string>>(
+    () => new Set(),
+  );
+  async function refreshClientRegistrations() {
+    try {
+      const ids = await invoke<string[]>("codex_client_registered_profiles");
+      setClientRegistered(new Set(ids));
+    } catch {
+      /* 检测失败按「未注册」显示，不阻断页面 */
+    }
+  }
+  useEffect(() => {
+    refreshClientRegistrations().catch(() => {});
   }, [profiles]);
 
   /** 能力表（agent_capabilities）：「设为全局」按 setGlobal 置灰 + 原因提示，与后端报错同源 */
@@ -2106,6 +2231,53 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
 
+  /** 注册到 Codex 客户端（不切换默认渠道）：只写 provider 定义 + auth.json 密钥，
+      之后此网关发起的会话可在桌面客户端续聊；与「设为全局」共用备份，可「撤销上次写入」 */
+  async function onRegisterClient(p: Profile) {
+    if (
+      !(await confirmDialog(
+        "将把此网关的 provider 定义与密钥写入 codex 的 config.toml / auth.json（先备份、可撤销）。**默认渠道不动**——之后 Ccode 里此网关发起的会话，可以在 Codex 桌面客户端直接打开续聊。继续？",
+      ))
+    )
+      return;
+    try {
+      const files = await invoke<string[]>("codex_register_client_provider", {
+        profileId: p.id,
+      });
+      // 注册也产生备份批次，「撤销上次写入」入口可能由灰变可用
+      await refreshGlobalBackups();
+      await refreshClientRegistrations();
+      setNotice(`已注册到 Codex 客户端：${files.join("、")}`);
+      setTimeout(() => setNotice(null), 5000);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** 移除客户端注册（注册的逆操作）：只删 config.toml 的 provider 定义块；
+      auth.json 的 OPENAI_API_KEY 是单槽共享凭证（多条渠道与登录态同读），不做按注册清理 */
+  async function onUnregisterClient(p: Profile) {
+    if (
+      !(await confirmDialog(
+        "将从 codex 的 config.toml 删除此网关的 provider 定义块（先备份、可撤销）。之后此网关发起的会话在 Codex 桌面客户端又会无法打开；Ccode 内使用不受影响。auth.json 的共享密钥槽不动。继续？",
+      ))
+    )
+      return;
+    try {
+      const files = await invoke<string[]>("codex_unregister_client_provider", {
+        profileId: p.id,
+      });
+      await refreshGlobalBackups();
+      await refreshClientRegistrations();
+      setNotice(`已移除客户端注册：${files.join("、")}`);
+      setTimeout(() => setNotice(null), 5000);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function onValidate(p: Profile) {
     setValidationDialog({ profile: p, result: null, running: true });
     try {
@@ -2159,11 +2331,11 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
   }
 
   /** 恢复到「Ccode 首次写入前」的原始状态（永久快照，不参与批次轮换）。
-      当前状态会先存成常规批次，恢复后想反悔可再点「恢复备份」 */
+      当前状态会先存成常规批次，恢复后想反悔可再点「撤销上次写入」 */
   async function onRestoreOriginal(agentId: string) {
     if (
       !(await confirmDialog(
-        `将把 ${labelOf(agentId)} 的全局配置恢复到 Ccode 首次写入前的原始状态（Ccode 当时新建的文件会被删除）。当前状态会先另存为新备份，可用「恢复备份」反悔。继续？`,
+        `将把 ${labelOf(agentId)} 的全局配置恢复到 Ccode 首次写入前的原始状态（Ccode 当时新建的文件会被删除）。当前状态会先另存为新备份，可用「撤销上次写入」反悔。继续？`,
       ))
     )
       return;
@@ -3053,7 +3225,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                   : "下载模型能力库（models.dev）",
               disabled: modelDbBusy,
               title:
-                "第三方模型的能力声明（上下文/输出上限/视觉/推理）公共数据源。models.dev 不可达时自动换 OpenRouter。点「获取模型」时也会沉淀该网关实测数据。",
+                "第三方模型的能力声明（上下文/输出上限/视觉/推理）与官方定价的公共数据源：下载后统计页费用估算随之更新（定价优先级：自定义定价 > 本库 > 内置价目）。models.dev 不可达时自动换 OpenRouter。点「获取模型」时也会沉淀该网关实测数据。",
               onSelect: () => void onModelDbDownload(),
             },
           ]}
@@ -3098,7 +3270,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                 }),
             },
             {
-              label: rowMenu.profile.accountType === "official" ? "设为全局（恢复官方）" : "设为全局",
+              label: rowMenu.profile.accountType === "official" ? "设为全局默认（恢复官方）" : "设为全局默认…",
               disabled:
                 rowMenu.profile.noAuth ||
                 !!rowMenu.profile.slotMissing ||
@@ -3113,9 +3285,35 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                   : rowMenu.profile.noAuth
                     ? "无密钥连接不写入全局配置"
                     : (caps[rowMenu.profile.agent]?.setGlobal.reason ??
-                      "写入该 agent 的全局配置文件（先备份、失败自动回滚）；成功后此连接标记「全局生效」，供外部终端使用"),
+                      "把默认渠道切到此配置：写入全局配置文件（先备份、失败自动回滚）；之后外部终端与桌面客户端默认都走它，此连接标记「全局生效」"),
               onSelect: () => void onApplyGlobal(rowMenu.profile),
             },
+            // 轻量版：只注册 provider 定义不切换默认，让此网关的会话能在 Codex 桌面客户端续聊；
+            // 已注册的同位变「移除注册」（config.toml 里存在其 provider 块即视为已注册）
+            ...(rowMenu.profile.agent === "codex" &&
+            rowMenu.profile.accountType !== "official"
+              ? [
+                  clientRegistered.has(rowMenu.profile.id)
+                    ? {
+                        label: "移除 Codex 客户端注册…",
+                        danger: true,
+                        title:
+                          "从 config.toml 删除此网关的 provider 定义块（先备份、可撤销）；之后此渠道发起的会话在客户端又打不开了，Ccode 内不受影响；auth.json 共享密钥槽不动",
+                        onSelect: () => void onUnregisterClient(rowMenu.profile),
+                      }
+                    : {
+                        label: "注册到 Codex 客户端（不切换默认）…",
+                        disabled:
+                          rowMenu.profile.noAuth || !!rowMenu.profile.slotMissing,
+                        title: rowMenu.profile.noAuth
+                          ? "无密钥连接没有可注册的凭证"
+                          : rowMenu.profile.slotMissing
+                            ? "这个网关还没配该协议的端点"
+                            : "只把 provider 定义与密钥写进 codex 配置（先备份、可撤销），默认渠道不动；之后此网关发起的会话可在 Codex 桌面客户端直接续聊",
+                        onSelect: () => void onRegisterClient(rowMenu.profile),
+                      },
+                ]
+              : []),
             {
               label: "解绑",
               danger: true,
@@ -3147,18 +3345,18 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                 ]
               : []),
             {
-              label: "恢复备份",
+              label: "撤销上次写入",
               disabled: !globalBackups[groupMenu.agentId],
               title: globalBackups[groupMenu.agentId]
-                ? "恢复最近一次写入前的状态"
-                : "还没有可恢复的备份",
+                ? "回到最近一次写入（设为全局默认 / 注册到客户端）前的状态；写了几遍就要撤销几遍。想彻底回到 Ccode 介入前的手工配置，用下面的「恢复初始状态」"
+                : "还没有可撤销的写入",
               onSelect: () => void onRestoreBackup(groupMenu.agentId),
             },
             {
               label: "恢复初始状态",
               disabled: !originalBackups[groupMenu.agentId],
               title: originalBackups[groupMenu.agentId]
-                ? "恢复到 Ccode 首次写入前的原始配置（永久快照，连续多次设为全局也回得去）"
+                ? "彻底回到 Ccode 首次写入前的原始配置（永久快照，连续多次写入也一次回到底）"
                 : "还没有首次写入前的快照",
               onSelect: () => void onRestoreOriginal(groupMenu.agentId),
             },
