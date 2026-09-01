@@ -140,7 +140,10 @@ fn check_citation_health_sync(path: &str) -> Result<CitationHealthDto, String> {
             .flat_map(|w| [w.worktree_path, w.repo_path])
             .filter_map(|p| canon(&PathBuf::from(p))),
     );
-    if !roots.iter().any(|r| root.starts_with(r)) {
+    if !roots
+        .iter()
+        .any(|r| crate::paths::path_within_path(&root, r))
+    {
         return Err("路径不在项目/工作区范围内，拒绝扫描".into());
     }
 

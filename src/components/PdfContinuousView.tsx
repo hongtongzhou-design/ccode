@@ -6,6 +6,7 @@ import { HoverTip } from "./HoverTip";
 import {
   PdfPageView,
   base64ToBytes,
+  openPdfDocument,
   type PdfBytesDto,
 } from "./PdfPreview";
 import {
@@ -16,6 +17,7 @@ import {
   joinParagraphLines,
   loadReaderProgress,
   nearestLineIndex,
+  nextFitScale,
   normCaptureRect,
   paragraphBounds,
   saveReaderProgress,
@@ -162,7 +164,6 @@ function PdfContinuousView({
   /** null = 适配宽度模式（随容器宽度换算，默认） */
   const [fixedScale, setFixedScale] = useState<number | null>(null);
   const [fitScale, setFitScale] = useState(1);
-  const [renderKey, setRenderKey] = useState(0);
   /** 各页 scale=1 的原始尺寸缓存：占位高度与缩放后真实高度都从这里换算（缩放不 invalidate） */
   const [pageSizes, setPageSizes] = useState<
     Record<number, { w: number; h: number }>
@@ -171,6 +172,8 @@ function PdfContinuousView({
   const [seenPages, setSeenPages] = useState<ReadonlySet<number>>(new Set([1]));
   const [hint, setHint] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fitScaleRef = useRef(fitScale);
+  fitScaleRef.current = fitScale;
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scale = fixedScale ?? fitScale;
 
@@ -363,7 +366,7 @@ function PdfContinuousView({
           cwdHint,
         });
         if (cancelled) return;
-        task = pdfjs.getDocument({ data: base64ToBytes(dto.data) });
+        task = openPdfDocument(base64ToBytes(dto.data));
         const loaded = await task.promise;
         if (cancelled) {
           void task.destroy();
@@ -393,7 +396,8 @@ function PdfContinuousView({
         if (cancelled) return;
         const w = page.getViewport({ scale: 1 }).width;
         const avail = el.clientWidth - 24; // 左右留白
-        if (w > 0 && avail > 0) setFitScale(avail / w);
+        const next = nextFitScale(w, avail, fitScaleRef.current);
+        if (next !== null) setFitScale(next);
       } catch {
         /* 页读取失败交给渲染层报错 */
       }
@@ -401,7 +405,6 @@ function PdfContinuousView({
     void compute();
     const ro = new ResizeObserver(() => {
       void compute();
-      setRenderKey((k) => k + 1);
     });
     ro.observe(el);
     return () => {
@@ -777,7 +780,7 @@ function PdfContinuousView({
             ref={scrollRef}
             onScroll={() => setGlossTip(null)}
             onMouseOver={onContentMouseOver}
-            className="relative min-h-0 flex-1 overflow-auto"
+            className="ccode-pdf-scroll relative min-h-0 flex-1 overflow-auto"
           >
           <div
             ref={contentRef}
@@ -807,7 +810,6 @@ function PdfContinuousView({
                       pageNum={n}
                       scale={scale}
                       active
-                      renderKey={renderKey}
                       glossTerms={glossTerms}
                     />
                   ) : (

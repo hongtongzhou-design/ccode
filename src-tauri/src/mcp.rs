@@ -275,15 +275,31 @@ fn resolve_command_deep(command: &str, args: &[String]) -> (String, Vec<String>)
     let Some(bin) = crate::agents::resolve_binary(name) else {
         return (name.to_string(), args.to_vec());
     };
-    let real = std::fs::canonicalize(&bin).unwrap_or(bin.clone());
+    // canonicalize 后必须剥 verbatim：`\\?\C:\…\npx.cmd` 写进 claude/codex 配置
+    // 部分 CLI 不认，且与前端/其他比较口径分裂。
+    let real = crate::paths::canonicalize_plain(&bin)
+        .unwrap_or_else(|_| crate::paths::strip_verbatim(bin.clone()));
+    #[cfg(windows)]
+    if let Some((node, entry)) = crate::process::node_entry_from_cmd_shim(&real) {
+        let mut new_args = vec![mcp_path_text(entry)];
+        new_args.extend(args.iter().cloned());
+        return (mcp_path_text(node), new_args);
+    }
     if is_node_shim(&real) {
         if let Some(node) = crate::agents::resolve_binary("node") {
-            let mut new_args = vec![real.to_string_lossy().into_owned()];
+            let mut new_args = vec![mcp_path_text(real)];
             new_args.extend(args.iter().cloned());
-            return (node.to_string_lossy().into_owned(), new_args);
+            return (mcp_path_text(node), new_args);
         }
     }
-    (bin.to_string_lossy().into_owned(), args.to_vec())
+    (mcp_path_text(bin), args.to_vec())
+}
+
+/// MCP 配置里的路径：剥 Windows verbatim，避免 `\\?\` 落盘。
+fn mcp_path_text(path: PathBuf) -> String {
+    crate::paths::strip_verbatim(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// 首行 shebang 是 `#!/usr/bin/env node` 的脚本（只读前 128 字节）
@@ -304,7 +320,16 @@ fn is_node_shim(path: &Path) -> bool {
 /// 启动都找不到——拒写并报错引导改绝对路径，比静默写一个必然 ENOENT 的配置诚实
 fn reject_relative_command(command: &str) -> Result<(), String> {
     let c = command.trim();
-    if c.starts_with("./") || c.starts_with("../") || c.starts_with(".\\") || c.starts_with("..\\") {
+    if c.is_empty() {
+        return Ok(());
+    }
+    let looks_like_path = c.contains('/')
+        || c.contains('\\')
+        || (c.len() >= 2 && c.as_bytes()[1] == b':');
+    // Unix 形态 `/abs/...` 在 Windows 上 Path::is_absolute 为 false（缺盘符前缀），
+    // 但仍不是「随 cwd 漂移」的相对路径，不当成相对路径拒写。
+    let absolute = Path::new(c).is_absolute() || c.starts_with('/');
+    if looks_like_path && !absolute {
         return Err(format!(
             "该 server 的命令是相对路径（{c}），换个 agent 的工作目录就找不到；请把命令改为绝对路径后再分发"
         ));
@@ -608,6 +633,30 @@ fn check_managed_guard(agent: &str) -> Result<(), String> {
         for p in paths {
             if Path::new(&p).exists() {
                 return Err("检测到企业托管 MCP 配置（managed-mcp.json），用户级分发被独占，已跳过".into());
+            }
+        }
+    }
+    if agent == "opencode" {
+        let mut paths = Vec::new();
+        if let Ok(home) = home() {
+            let base = std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".config"))
+                .join("opencode");
+            paths.push(base.join("managed"));
+        }
+        #[cfg(windows)]
+        if let Some(pd) = std::env::var_os("ProgramData") {
+            paths.push(PathBuf::from(pd).join("opencode").join("managed"));
+        }
+        #[cfg(target_os = "macos")]
+        paths.push(PathBuf::from("/Library/Application Support/opencode/managed"));
+        #[cfg(target_os = "linux")]
+        paths.push(PathBuf::from("/etc/opencode/managed"));
+        for p in paths {
+            if p.exists() {
+                return Err("检测到 OpenCode 企业托管配置目录（managed），用户级分发被独占，已跳过".into());
             }
         }
     }
@@ -1416,6 +1465,13 @@ mod tests {
         // 绝对路径与裸名不受影响（用 claude-code 做正例：kimi 会拒写 stdio_server 里的 env 引用）
         s.command = "/abs/path/serve".into();
         assert!(entry_json(&s, "claude-code").is_ok());
+        #[cfg(windows)]
+        {
+            s.command = r"C:\abs\path\serve.exe".into();
+            assert!(entry_json(&s, "claude-code").is_ok());
+            s.command = r"dir\sub\serve.exe".into();
+            assert!(entry_json(&s, "claude-code").is_err());
+        }
         s.command = "ccode-test-nonexistent-bin".into();
         assert!(entry_json(&s, "claude-code").is_ok());
     }
@@ -1503,7 +1559,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn reverse_mapping_codex_refs_and_bearer() {
         let v = serde_json::json!({
             "url": "https://x/mcp",
@@ -1558,7 +1613,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn plaintext_secret_detection() {
         let mut s = stdio_server();
         s.env = vec![
@@ -1577,6 +1631,31 @@ mod tests {
         assert!(suspects.iter().any(|x| x.contains("Authorization")));
         assert!(!suspects.iter().any(|x| x.contains("REF")));
         assert!(!suspects.iter().any(|x| x.contains("OK")));
+    }
+
+    #[test]
+    fn mcp_path_text_strips_verbatim_prefix() {
+        let p = PathBuf::from(r"\\?\C:\Users\x\AppData\Roaming\npm\npx.cmd");
+        let text = mcp_path_text(p);
+        assert!(!text.starts_with(r"\\?\"), "{text}");
+        assert!(text.ends_with(r"\npx.cmd") || text.ends_with("/npx.cmd"), "{text}");
+    }
+
+    #[test]
+    fn reject_relative_command_catches_windows_and_unix_shapes() {
+        assert!(reject_relative_command("npx").is_ok());
+        assert!(reject_relative_command("/usr/bin/npx").is_ok() || cfg!(windows));
+        assert!(reject_relative_command("./serve").is_err());
+        assert!(reject_relative_command("../bin/serve").is_err());
+        assert!(reject_relative_command(r".\serve").is_err());
+        assert!(reject_relative_command(r"dir\sub\serve.exe").is_err());
+        assert!(reject_relative_command("dir/sub/serve").is_err());
+        #[cfg(windows)]
+        {
+            assert!(reject_relative_command(r"C:\tools\serve.exe").is_ok());
+            assert!(reject_relative_command("C:rel.exe").is_err());
+            assert!(reject_relative_command(r"\\?\C:\tools\serve.exe").is_ok());
+        }
     }
 
     #[test]
@@ -1766,6 +1845,7 @@ fn check_stdio(server: &McpServerDto) -> McpHealthDto {
         .and_then(|_| stdin.write_all(body.as_bytes()))
         .and_then(|_| stdin.flush())
     {
+        crate::pty::kill_process_tree(child.id());
         let _ = child.kill();
         let _ = child.wait();
         return health_fail(
@@ -1806,12 +1886,21 @@ fn check_stdio(server: &McpServerDto) -> McpHealthDto {
         let _ = tx.send(r);
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(8));
+    let pid = child.id();
+    let mut stderr = child.stderr.take();
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stderr.take() {
+            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+        }
+        buf
+    });
+    crate::pty::kill_process_tree(pid);
     let _ = child.kill();
-    let mut err_text = String::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let _ = stderr.read_to_string(&mut err_text);
-    }
     let _ = child.wait();
+    let err_bytes =
+        crate::process::join_with_timeout(err_handle, std::time::Duration::from_secs(2));
+    let err_text = String::from_utf8_lossy(&err_bytes).into_owned();
     match outcome {
         Ok(Ok(frame)) => match serde_json::from_str::<serde_json::Value>(&frame) {
             Ok(v) => {

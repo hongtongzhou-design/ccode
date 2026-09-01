@@ -250,6 +250,7 @@ pub(crate) fn run_git(repo: &Path, args: &[&str], timeout: Duration) -> Result<S
     let mut cmd = crate::process::background_command(git);
     cmd.arg("-C")
         .arg(repo)
+        .args(["-c", "core.quotepath=false"])
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -991,9 +992,13 @@ fn workspace_env_impl(conn: &Connection, worktree_path: &str) -> Vec<(String, St
 
 #[cfg(windows)]
 fn shell_cmd(script: &str) -> Result<crate::process::BackgroundCommand, String> {
-    // cmd 是 Windows 系统组件，固定在 System32 且不受用户 PATH 影响，无需 resolve_binary
-    let mut c = crate::process::background_command("cmd");
-    c.args(["/C", script]);
+    // 仓库级 setup/archive 钩子是 bash 脚本；cmd /C 逐字执行必失败。
+    // Git for Windows 的 bash 是唯一可靠解释器（装 git 做 worktree 时默认带上）。
+    let bash = crate::agents::resolve_git_bash().ok_or(
+        "找不到 Git Bash，无法运行项目 setup/archive 钩子（脚本是 bash）。请安装 Git for Windows 后重启 Ccode。",
+    )?;
+    let mut c = crate::process::background_command(bash);
+    c.args(["-c", script]);
     Ok(c)
 }
 
@@ -2857,6 +2862,7 @@ pub(crate) fn run_git_raw(repo: &Path, args: &[&str]) -> Result<String, String> 
     let mut cmd = crate::process::background_command(git);
     cmd.arg("-C")
         .arg(repo)
+        .args(["-c", "core.quotepath=false"])
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

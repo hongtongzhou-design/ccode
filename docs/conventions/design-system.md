@@ -12,7 +12,9 @@
   **改主题只动这一个文件**，组件里禁散落 hex。主题清单单一出处 `src/themes.ts`（settings.rs KNOWN_THEMES 与
   TerminalPage XTERM_BG_FG 需同步）。**切主题同时同步原生窗口外观**（`applyTheme` 调 `setTheme(light/dark)`，
   浅色判定走 themes.ts 的 `light` 标记）——Windows 原生 `<select>` 下拉、checkbox/radio、日期/数字输入等控件必须跟随主题的 `color-scheme` 渲染；Windows 浅色主题覆盖为 `light`，
-  深色主题保留 `dark`，不得让 Windows 浅色控件落到深色系统样式。macOS 原生窗口仍按 NSWindow appearance 渲染，
+  深色主题保留 `dark`，不得让 Windows 浅色控件落到深色系统样式。**PDF 页宿主是例外**：`[data-page-num]` 锁定
+  `color-scheme: only light`（pdf.js 不透明 canvas 在 WebView2 深色文档里会合成白屏，见 conventions/terminal.md v3.154），
+  不得把全局 dark color-scheme 套到 PDF canvas 上。macOS 原生窗口仍按 NSWindow appearance 渲染，
   只改 CSS 变量时深色主题下弹出系统浅色列表；capabilities 需保留 `core:window:allow-set-theme`。
   默认主题 CTA 粉 `#faa8d4`（cta-text 近黑）；`--color-raised`（浮起面板/pill 底）、
   `--color-bubble`（用户消息气泡）、`--color-nav-accent`（侧栏选中左条+选中图标，默认靛蓝、其余取各自 CTA 色）。
@@ -129,10 +131,17 @@
 - **字号阶梯令牌化**：正文阶梯 `text-micro`(11/15) → `text-xs`(12) → `text-sm`(14) → `text-base`(16)，**禁 `text-[Npx]` 任意值**；
   语义分工：micro = badge/时间戳/副注释（11px 是可读下限，不再用 10px），xs = 次级说明，sm = 正文/列表行，base = 页面标题。
   终端工作台整体提高一档（`.terminal-workbench` 覆写 micro→12、xs→13）。同类信息必须用同一档，禁止同页相邻出现两档灰字。
-  Windows 额外保持 `html` 根字号 16px、`body` 默认字号 14px，并优先使用 `Segoe UI Variable`（中文回退雅黑）。
+  Windows 额外保持 `html` 根字号 16px、`body` 默认字号 14px，正文优先 `Segoe UI Variable`（中文回退雅黑）。
+  **顶部上下文栏与导航胶囊不用 Variable**：WebView2 对可变字体不走 GDI hinting，小字发糊；
+  `.ccode-titlebar` / `.ccode-top-nav-capsule` / Markdown 阅读（`.md-body`，含对话回放 `.md-chat`、
+  笔记与产物预览）改静态 Segoe UI；字重不动。`.md-body` 在 Windows 把 13.5px 对齐到 14px（半像素发糊），
+  `.md-chat` 仍 inherit。胶囊的 backdrop-filter 放到 `::before`。macOS/Linux 不走此块。
   浅色主题文字梯队按平台压深 l3/l4 两档（正文 l2、标题 l1 保持主题原值）：Windows 压最多（补偿 DirectWrite 小字号灰化），
   macOS 取原值→Windows 值 65% 的中间档（CoreText 字干较重，但原始 l3/l4 在 canvas 上仅 4.0/2.2:1 不过 WCAG AA；
   中间档 l3 ≥ 4.7、l4 ≥ 3.1，数值由 tests/theme-contrast.test.ts 锁定），Linux 保持主题原值。
+  **强调色也可按平台微调**（2026-08-31：灰蓝正红的红在 Windows WebView2 直出 sRGB 下比 macOS P3 色彩管理显鲜，
+  `[data-platform="windows"]` 覆写 shadcn/shadcn-light 的 cta 族只降饱和度不动色相，macOS/Linux 原值不变；
+  平台覆写块必须排在 l3/l4 覆写之后——theme-contrast.test.ts 按选择器首个匹配块解析）。
   **已定现状，勿动（v3.90 否决）**：`App.css` 的全局 `button/input { font: inherit }` 未包 cascade layer，
   优先级高于 Tailwind v4 工具类——按钮上的 `text-*` 类实际不生效，**全站按钮按继承字号渲染**。
   曾尝试包进 `@layer base` 修复，全站按钮整体变小一档，用户实测「还不如之前」否决，已回退。

@@ -19,6 +19,7 @@ import GitPanel from "../components/GitPanel";
 import HandoffPicker from "../components/HandoffPicker";
 import DigestPicker from "../components/DigestPicker";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
+import { IS_WINDOWS } from "../hotkeys";
 import {
   Checkbox,
   EmptyState,
@@ -38,6 +39,41 @@ import type {
 
 /** GitPanel 的 onTotals 占位（会话页不消费改动总量；稳定引用避免击穿 memo） */
 const NOOP_TOTALS = () => {};
+
+/** 复制恢复命令：Windows 默认交互 shell 是 PowerShell，后端产出的也是该方言 */
+const COPY_RESUME_LABEL = IS_WINDOWS
+  ? "⧉ 复制恢复命令（PowerShell）"
+  : "⧉ 复制恢复命令";
+const COPY_RESUME_HINT = IS_WINDOWS
+  ? "复制 PowerShell 命令（粘贴到 PowerShell，不要粘到 cmd）"
+  : "复制恢复命令，粘贴到任意终端";
+const COPY_RESUME_DONE = IS_WINDOWS ? "已复制（PowerShell）" : "已复制";
+const COPY_RESUME_MENU = IS_WINDOWS
+  ? "在外部继续 · 复制命令（PowerShell）"
+  : "在外部继续 · 复制命令";
+
+function deleteSessionPrompt(s: SessionMetaDto): string {
+  if (s.agent === "opencode") {
+    return "删除该 OpenCode 对话？将从共享数据库抹掉记录，不能进回收站。整理数据和保留的快照会一并清掉。";
+  }
+  return "删除该对话的本地文件？源文件将移入系统回收站（可找回）；整理数据和保留的快照会一并清掉。";
+}
+
+function deleteProjectSessionsPrompt(
+  agent: string,
+  path: string,
+  count: number,
+  extra: number,
+): string {
+  const extraHint =
+    extra > 0
+      ? `该项目另有 ${extra} 个已归档/内部对话不在当前列表中，也会被一并删除。`
+      : "";
+  if (agent === "opencode") {
+    return `将从 OpenCode 数据库删除 ${agentLabel(agent)} 下 ${basename(path)} 的 ${count} 条记录（不能进回收站）。${extraHint}继续？`;
+  }
+  return `将删除 ${agentLabel(agent)} 下 ${basename(path)} 的 ${count} 个对话文件（源文件进回收站，可找回）。${extraHint}继续？`;
+}
 
 /** 常驻行内的快筛（其余收进「更多 ▾」，激活的会提到行内常显） */
 const PRIMARY_QUICK: ReadonlySet<string> = new Set(["pinned", "live", "today"]);
@@ -797,7 +833,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setError(null);
     if (
       !(await confirmDialog(
-        "删除该对话的本地文件？保留的快照和整理数据会一并删除，不可恢复。",
+        deleteSessionPrompt(s),
         { danger: true },
       ))
     )
@@ -831,11 +867,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setError(null);
     if (
       !(await confirmDialog(
-        `将删除 ${agentLabel(agent)} 下 ${basename(path)} 的 ${count} 个对话文件，不可恢复。${
-          extra > 0
-            ? `该项目另有 ${extra} 个已归档/内部对话不在当前列表中，也会被一并删除。`
-            : ""
-        }继续？`,
+        deleteProjectSessionsPrompt(agent, path, count, extra),
         { danger: true },
       ))
     )
@@ -2060,6 +2092,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             <button
               className={`${menuItem} disabled:opacity-50`}
               disabled={!selected.alive && !selected.pinned}
+              title={COPY_RESUME_HINT}
               onClick={() => {
                 setResumeMenu(null);
                 void copyResumeCommand(selected);
@@ -2067,8 +2100,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             >
               {copiedId ===
               sessionRuntimeKey(selected.agent, selected.sessionId)
-                ? "已复制"
-                : "⧉ 复制恢复命令"}
+                ? COPY_RESUME_DONE
+                : COPY_RESUME_LABEL}
             </button>
             <button
               className={`${menuItem} disabled:opacity-50`}
@@ -2244,12 +2277,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     </button>
                     <button
                       className={menuItem}
+                      title={COPY_RESUME_HINT}
                       onClick={() => {
                         setMenu(null);
                         void copyResumeCommand(menu.session);
                       }}
                     >
-                      在外部继续 · 复制命令
+                      {COPY_RESUME_MENU}
                     </button>
                     <button
                       className={menuItem}

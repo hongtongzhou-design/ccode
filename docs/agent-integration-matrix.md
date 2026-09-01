@@ -71,11 +71,11 @@
 | 二进制 / 检测 | `opencode`（npm `opencode-ai`；仓库已更名 anomalyco/opencode）；`opencode --version` |
 | 注入方式 | **无通用 key/baseURL env**。用 `OPENCODE_CONFIG_CONTENT`（内联配置 JSON，优先级几乎最高）+ `OPENCODE_AUTH_CONTENT`（内联凭证 JSON，未文档化但源码确认）做启动注入。provider 配置：`provider.<id>.options.{apiKey, baseURL}` + `npm: "@ai-sdk/openai-compatible"` 接任意中转；provider 级 `name` 与 models 条目 `name`/`reasoning`/`limit.context` 是 models.dev 覆盖语义（官方文档 2026-08-17 核实），Ccode 填显示名（配置名 · 模型）+ 思考模型 `reasoning: true` + 上下文 limit（model_registry） |
 | 全局配置 | `~/.config/opencode/opencode.json(c)`（支持 `{env:VAR}` 插值）。**优先级坑：config > auth.json > env**，注入必须走 config 层才确定 |
-| 会话存储 | **v1.2.0+：单一 SQLite** `~/.local/share/opencode/opencode.db`（WAL 模式；表：`session/message/part/project`，`message.data`/`part.data` 为 JSON 列）。更早版本是 `storage/` 目录的扁平 JSON 文件（需双解析） |
+| 会话存储 | **v1.2.0+：单一 SQLite**。Unix：`~/.local/share/opencode/opencode.db`；Windows：优先 `%LOCALAPPDATA%\opencode\opencode.db`，回落 `%APPDATA%\opencode` 与 unix 形态路径（`OPENCODE_DB` 环境变量仍优先）。WAL 模式；表：`session/message/part/project`，`message.data`/`part.data` 为 JSON 列。更早版本是 `storage/` 目录的扁平 JSON 文件（需双解析） |
 | 会话格式 | `session` 表直接有 `title/cost/tokens_*/time_*`；项目 = git 首个 commit hash，`project.worktree` 列给路径；message.data：`{role, time, model, tokens, cost, ...}`；part.data：`type: text/reasoning/tool/...` 判别联合。**drizzle 迁移频繁，易漂移** |
 | 官方替代路径（推荐优先用） | `opencode export <id>`（完整 JSON）、`opencode session list --format json`、`opencode db "<sql>" --format json`、`opencode serve`（HTTP+OpenAPI）——比解析内部 DB 稳定 |
 | 关键启动参数 | `-m/--model`、`--prompt`（交互会话首条指令）、`-s/--session`（按 ID 继续） |
-| 坑 | 自更新会在启动时替换二进制（`OPENCODE_DISABLE_AUTOUPDATE=1`）；provider SDK 运行时下载（首跑要联网）；Windows 数据路径文档与源码不一致（未核实） |
+| 坑 | 自更新会在启动时替换二进制（`OPENCODE_DISABLE_AUTOUPDATE=1`）；provider SDK 运行时下载（首跑要联网）；Windows 数据路径已按 `%LOCALAPPDATA%\opencode` 优先探测（2026-08-31） |
 
 ## 6. Kimi Code（注意：两个产品都叫 `kimi`）
 

@@ -1,6 +1,7 @@
 /** 沉浸式阅读区的纯逻辑：分栏百分比钳制/像素换算、阅读会话复用键、
  *  PDF 选段注入格式（B1）；圈选矩形映射/命中判定、md 图片与相对链接判定、截图注入格式（B2）；
- *  划词翻译 prompt、生词本表格契约、段落边界提取、术语匹配、进度/护眼存储键（B3）。
+ *  划词翻译 prompt、生词本表格契约、段落边界提取、术语匹配、进度/护眼存储键（B3）；
+ *  PDF 适配宽度 nextFitScale（预览与连续滚动共用，防滚动条槽振荡）。
  *  布局常量与换算全部集中这里，组件（ReaderOverlay/PdfContinuousView/FilePreviewEditor）只做绑定。 */
 
 import { escapeShellPath } from "./terminal-input.ts";
@@ -22,6 +23,22 @@ export const READER_PDF_MIN_PX = 280;
 /** 侧栏缺省百分比（笔记栏窄些、Agent 栏宽些——对话内容比笔记目录长） */
 export const READER_PCT_DEFAULT_L = 22;
 export const READER_PCT_DEFAULT_R = 28;
+
+/**
+ * 适配宽度：新 scale 换算回页面 CSS 宽度后与当前差不到半像素则保持原值。
+ * Windows 经典滚动条出现/消失会让 clientWidth 跳约 17px；每次都改 scale
+ * 会拆掉 canvas 重渲，PDF 预览表现为闪白屏。
+ */
+export function nextFitScale(
+  pageWidth: number,
+  availWidth: number,
+  current: number,
+): number | null {
+  if (pageWidth <= 0 || availWidth <= 0) return null;
+  const next = availWidth / pageWidth;
+  if (Math.abs(next - current) * pageWidth < 0.5) return null;
+  return next;
+}
 
 /** 栏宽百分比钳制：非有限数/非正数回落 fallback，其余夹到 [min, max] */
 export function clampReaderPct(pct: number, fallback: number): number {

@@ -971,8 +971,8 @@ export function pipelineStepsForTemplate(
 const LATEX_RENDER_PDF_CMD =
   'mkdir -p output && cd manuscript && if command -v tectonic >/dev/null 2>&1; then tectonic --outdir ../output main.tex; ' +
   'elif command -v latexmk >/dev/null 2>&1; then latexmk -pdf -interaction=nonstopmode -outdir=../output -auxdir=../output main.tex; ' +
-  'else echo "未检测到 LaTeX 编译环境：brew install tectonic（轻量，编译时自动下载宏包），' +
-  '或安装 MacTeX/TeXLive 获得 latexmk"; exit 1; fi';
+  'else echo "未检测到 LaTeX 编译环境：macOS 用 brew install tectonic；Windows 用 winget install Tectonic.Tectonic；' +
+  '或安装 MacTeX / TeX Live / MiKTeX 获得 latexmk"; exit 1; fi';
 
 const LATEX_PAPER_STEPS: ProjectStepDto[] = [
   {

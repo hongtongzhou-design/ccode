@@ -431,6 +431,17 @@
   --color-l4: #798393;
 }
 
+/* Windows 灰蓝正红：同一 hex 在 macOS（P3 色彩管理）下观感柔和，WebView2 直出 sRGB 偏鲜。
+   只降饱和度、不动色相与明暗结构（浅色版顺带把白字对比度从 4.8 提到 5.3），macOS/Linux 保持原值。
+   位置必须排在两处 l3/l4 平台覆写之后——theme-contrast.test.ts 按选择器首个匹配块解析。 */
+[data-platform="windows"][data-theme="shadcn"] {
+  --color-cta: #e96767;
+  --color-cta-pill-text: #ec8a8a;
+}
+[data-platform="windows"][data-theme="shadcn-light"] {
+  --color-cta: #c23838;
+}
+
 /* 浅色滚动条：白拇指不可见，换黑色半透明 */
 [data-theme$="-light"] ::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, 0.16);
@@ -468,7 +479,7 @@ body {
 /* optimizeLegibility 在 Windows Chromium 会走 DirectWrite 的 natural 渲染模式，
    丢掉字体 hinting，小字号（12–13px）文本明显发糊——Windows 回退 auto */
 [data-platform="windows"] body {
-  /* Windows 11 的变量版 Segoe UI 在小字号下 hinting 更稳定；中文继续由雅黑回退。
+  /* 正文可用 Variable；顶栏小字不用（见 .ccode-titlebar）。中文继续由雅黑回退。
      仅替换 Windows 正文字体，等宽区（font-mono）和 macOS/Linux 保持原样。 */
   font-family:
     "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei",
@@ -476,6 +487,18 @@ body {
   font-optical-sizing: auto;
   font-kerning: normal;
   text-rendering: auto;
+}
+
+/* 顶部上下文栏 + 导航胶囊：Chromium/WebView2 对 Segoe UI Variable 不走 GDI
+   hinting，小字发糊。只换静态 Segoe UI、关掉 optical sizing；字号/字重
+   仍继承正文（14px / 400），不另压小或加粗。macOS/Linux 不走此块。 */
+[data-platform="windows"] .ccode-titlebar,
+[data-platform="windows"] .ccode-top-nav-capsule {
+  font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-optical-sizing: none;
+  font-kerning: none;
+  text-rendering: auto;
+  -webkit-font-smoothing: auto;
 }
 
 #root {
@@ -580,6 +603,8 @@ body {
    玻璃拟态三要素：低不透明度底（content 透上来）+ 强 backdrop blur/saturate + 边缘高光；
    静止时背后若是纯色画布玻璃感天然偏弱（没有可模糊的内容），滚动时内容从底下穿过才完全显现 */
 .ccode-top-nav-capsule {
+  position: relative;
+  isolation: isolate;
   background: color-mix(in srgb, var(--color-raised) 58%, transparent);
   -webkit-backdrop-filter: blur(26px) saturate(150%);
   backdrop-filter: blur(26px) saturate(150%);
@@ -590,6 +615,24 @@ body {
     0 12px 32px rgb(0 0 0 / 0.20);
   animation: ccode-nav-capsule-in 150ms var(--ccode-motion-ease);
   scrollbar-width: none;
+}
+
+/* Windows：backdrop-filter 画在同一层会把文字一起栅格化发糊。
+   模糊挪到伪元素，文字在上层按 hinted 字体画。macOS 玻璃效果保持原样。 */
+[data-platform="windows"] .ccode-top-nav-capsule {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+[data-platform="windows"] .ccode-top-nav-capsule::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: inherit;
+  -webkit-backdrop-filter: blur(26px) saturate(150%);
+  backdrop-filter: blur(26px) saturate(150%);
+  pointer-events: none;
 }
 
 [data-theme$="-light"] .ccode-top-nav-capsule {
@@ -626,7 +669,10 @@ body {
 }
 
 [data-platform="windows"] .ccode-top-nav-item {
+  font-family: inherit;
+  font-optical-sizing: none;
   text-rendering: auto;
+  -webkit-font-smoothing: auto;
 }
 
 .ccode-top-nav-item:hover,
@@ -846,6 +892,17 @@ select:focus-visible {
   /* 长 URL / DOI 不断行时允许折行，避免撑出横向滚动 */
   overflow-wrap: break-word;
 }
+
+/* Windows：笔记阅读、对话回放、产物 md 预览共用这套。静态 Segoe UI，
+   13.5px 对齐到 14px 避免半像素发糊；字重不动。对话 .md-chat 仍 inherit。 */
+[data-platform="windows"] .md-body {
+  font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  font-optical-sizing: none;
+  font-kerning: none;
+  text-rendering: auto;
+  -webkit-font-smoothing: auto;
+}
 .md-body-lg {
   font-size: 16px;
   line-height: 1.9;
@@ -980,6 +1037,11 @@ select:focus-visible {
   font-size: inherit;
   line-height: 1.65;
 }
+
+/* 对话层覆盖字号为 inherit（跟气泡/正文 14px）；字体栈已由 .md-body 的 Windows 块覆盖。 */
+[data-platform="windows"] .md-chat {
+  font-size: inherit;
+}
 .md-chat p,
 .md-chat ul,
 .md-chat ol {
@@ -1077,6 +1139,22 @@ select:focus-visible {
   text-decoration: underline dotted;
   text-decoration-color: var(--color-l2);
   text-underline-offset: 2px;
+}
+
+/* PDF 页宿主：从全局 color-scheme:dark 里隔离出来。pdf.js 默认不透明 canvas +
+   pdf_viewer.css 的 .textLayer { color-scheme:only light; inset:0 } 在
+   Chromium/WebView2 里会给盖住 canvas 的 stacking context 铺一层 Canvas 白底，
+   深色主题下整页白屏。页宿主锁定 light，textLayer 保持透明。macOS WKWebView
+   无此合成问题，规则全平台生效、不改视觉。 */
+[data-page-num] {
+  color-scheme: only light;
+}
+[data-page-num] > .textLayer {
+  background-color: transparent;
+}
+/* 预留滚动条槽，避免 Windows 经典滚动条出现时 clientWidth 跳变触发适配振荡 */
+.ccode-pdf-scroll {
+  scrollbar-gutter: stable;
 }
 
 /* PDF 选区高亮层：pdf.js v6 DrawLayer 把选区画成整页 div + SVG clip-path 贴合字形

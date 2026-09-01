@@ -417,7 +417,7 @@ function App() {
             执行态只省略底部分隔线，栏体保留以承接红绿灯与收件箱胶囊。 */}
         <header
           data-tauri-drag-region={IS_MAC ? true : undefined}
-          className={`flex h-10 shrink-0 items-center gap-2.5 bg-rail pr-3 ${
+          className={`ccode-titlebar flex h-10 shrink-0 items-center gap-2.5 bg-rail pr-3 ${
             IS_MAC ? "pl-[78px]" : "pl-3"
           } ${chromeHidden ? "" : "border-b border-hairline"}`}
         >

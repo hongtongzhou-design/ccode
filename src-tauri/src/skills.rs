@@ -137,12 +137,11 @@ impl SkillStore {
     }
 }
 
-/// 八个 agent 的技能目录（§6.13；目录来自 AgentSpec.skills_dir，opencode 在 ~/.config 下）
+/// 九个 agent 的技能目录（§6.13；跟随与 MCP 相同的 *_HOME 搬迁变量）
 fn agent_dirs() -> HashMap<String, PathBuf> {
     let mut m = HashMap::new();
-    if let Some(home) = dirs::home_dir() {
-        for spec in crate::agent_specs::all_agent_specs() {
-            let dir = spec.skills_dir.iter().fold(home.clone(), |p, seg| p.join(seg));
+    for spec in crate::agent_specs::all_agent_specs() {
+        if let Some(dir) = crate::agent_specs::skills_dir_for(spec) {
             m.insert(spec.id.to_string(), dir);
         }
     }
@@ -266,7 +265,7 @@ fn check_builtin_skill_updates_impl(store: &SkillStore) -> Vec<String> {
         let Ok(current) = fs::read(store.skill_dir(name).join("SKILL.md")) else {
             continue;
         };
-        if current != seed.as_bytes() {
+        if !bytes_eq_ignore_crlf(&current, seed.as_bytes()) {
             outdated.push(name.to_string());
         }
     }
@@ -921,6 +920,13 @@ fn prune_backups(backups: &Path, name: &str) {
     }
 }
 
+fn bytes_eq_ignore_crlf(a: &[u8], b: &[u8]) -> bool {
+    a.iter()
+        .copied()
+        .filter(|&c| c != b'\r')
+        .eq(b.iter().copied().filter(|&c| c != b'\r'))
+}
+
 fn delete_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>, backups: &Path, id: &str) -> Result<(), String> {
     let mut skills = store.read();
     let pos = skills
@@ -928,18 +934,18 @@ fn delete_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>, backups: &Pa
         .position(|s| s.id == id)
         .ok_or_else(|| format!("技能不存在: {id}"))?;
     let name = skills[pos].name.clone();
-    // 先全量卸载再备份删除
-    for spec in crate::agent_specs::all_agent_specs() {
-        if let Some(root) = dirs.get(spec.id) {
-            let _ = remove_ours(&root.join(&name), &store.lib);
-        }
-    }
+    // 先备份再卸载：Windows 文件锁下 rename 失败时不得留下「显示启用但盘上无物」
     let lib_dir = store.skill_dir(&name);
     if lib_dir.exists() {
         fs::create_dir_all(backups).map_err(|e| format!("创建备份目录失败: {e}"))?;
         let dst = backups.join(format!("{name}.{}", now_compact()));
         fs::rename(&lib_dir, &dst).map_err(|e| format!("备份失败: {e}"))?;
         prune_backups(backups, &name);
+    }
+    for spec in crate::agent_specs::all_agent_specs() {
+        if let Some(root) = dirs.get(spec.id) {
+            let _ = remove_ours(&root.join(&name), &store.lib);
+        }
     }
     skills.remove(pos);
     store.write(&skills)
@@ -2074,6 +2080,13 @@ mod tests {
         dir: PathBuf,
         store: SkillStore,
         agents: HashMap<String, PathBuf>,
+    }
+
+    #[test]
+    fn builtin_update_ignores_crlf_vs_lf() {
+        assert!(bytes_eq_ignore_crlf(b"a\r\nb\r\n", b"a\nb\n"));
+        assert!(bytes_eq_ignore_crlf(b"a\nb\n", b"a\nb\n"));
+        assert!(!bytes_eq_ignore_crlf(b"a\nb\n", b"a\nc\n"));
     }
 
     impl Fx {
