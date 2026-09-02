@@ -1623,7 +1623,11 @@ fn write_tasks_at(root: &Path, tasks: &[TaskCardDto]) -> Result<(), String> {
 /// 任务卡写入门槛：已注册项目或含 .ccode/project.toml（沿用项目删除的判定口径）。
 /// 返回 canonical 项目根。list 不需要门槛（无档案卡读为空表），写操作一律先过这里。
 pub(crate) fn ensure_task_project_root(project_root: &Path) -> Result<PathBuf, String> {
-    let root = fs::canonicalize(project_root).map_err(|e| format!("项目目录无效: {e}"))?;
+    // 剥 verbatim：Windows canonicalize 带 `\\?\`，与 strip 过的项目根 / 前端路径
+    // 按分量永不相等，reader/lit_watch/citation 的前缀判定会误报「不在项目内」。
+    // macOS/Linux 上 strip_verbatim 是恒等变换。
+    let root = crate::paths::canonicalize_plain(project_root)
+        .map_err(|e| format!("项目目录无效: {e}"))?;
     if !root.is_dir() {
         return Err("项目路径不是目录".into());
     }

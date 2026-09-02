@@ -2,6 +2,7 @@ use crate::agent_specs::{agent_spec, AgentSpec, LaunchSpec, SpecialLaunch};
 use crate::profiles::{Profile, ProfileStore};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
@@ -232,6 +233,36 @@ pub fn resolve_binary(name: &str) -> Option<std::path::PathBuf> {
         return Some(p);
     }
     find_in_dirs(name, &crate::agent_specs::binary_candidate_dirs())
+}
+
+/// Git for Windows 自带的 bash（流水线钩子 / run 脚本）。
+/// 不认 `System32\bash.exe`（那是 WSL 启动器，Win32 路径的 bash 脚本会挂）。
+/// macOS/Linux 上就是 `resolve_binary("bash")`，调用方若已有自己的 bash 解析则不必走这里。
+pub fn resolve_git_bash() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        for key in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(root) = std::env::var_os(key) {
+                let p = std::path::PathBuf::from(root)
+                    .join("Git")
+                    .join("bin")
+                    .join("bash.exe");
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+        let p = resolve_binary("bash")?;
+        let s = p.to_string_lossy().to_ascii_lowercase();
+        if s.contains("\\system32\\") || s.contains("/system32/") || s.contains("windowsapps") {
+            return None;
+        }
+        Some(p)
+    }
+    #[cfg(not(windows))]
+    {
+        resolve_binary("bash")
+    }
 }
 
 /// 在候选目录里按序找第一个存在的文件；Windows 下 npm 全局包是 .cmd shim，补扩展名匹配
@@ -1078,11 +1109,14 @@ pub fn write_codex_catalog(profile: &Profile) -> Result<Option<std::path::PathBu
     Ok(Some(path))
 }
 
-/// -c 注入的 catalog 路径参数：-c 的值是 TOML，路径必须带引号成 TOML 字符串
+/// -c 注入的 catalog 路径参数：-c 的值是 TOML，路径必须带引号成 TOML 字符串。
+/// Windows 反斜杠必须换成正斜杠：TOML 基本字符串里 `\U` 是 Unicode 转义起始，
+/// `C:\Users\…` 会解析失败，codex 起不来。正斜杠 Windows API 与 TOML 都接受。
 fn catalog_args(path: &std::path::Path) -> Vec<String> {
+    let p = path.to_string_lossy().replace('\\', "/");
     vec![
         "-c".into(),
-        format!(r#"model_catalog_json="{}""#, path.to_string_lossy()),
+        format!(r#"model_catalog_json="{p}""#),
     ]
 }
 
@@ -1241,8 +1275,8 @@ fn valid_env_name(name: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-// 运行路径仅 unix（外部终端 sh 包装器）；Windows 仅测试调用
-#[cfg_attr(not(any(unix, test)), allow(dead_code))]
+// 运行路径仅 unix（外部终端 sh 包装器）
+#[cfg_attr(not(unix), allow(dead_code))]
 fn sh_script_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -1259,6 +1293,8 @@ fn external_wrapper_dir() -> Result<PathBuf, String> {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| format!("收紧外部启动临时目录权限失败: {e}"))?;
     }
+    // Windows：目录在 %APPDATA%\ccode 下，默认 ACL 已是当前用户；不要在启动热路径
+    // 同步跑 icacls（Defender 下可卡数秒，表现为「在外部继续」点了很久才弹出窗口）。
     Ok(dir)
 }
 
@@ -1367,7 +1403,7 @@ fn write_external_wrapper(
         text.push(' ');
         text.push_str(&format!("'{}'", arg.replace('\'', "''")));
     }
-    text.push_str("\nexit $LASTEXITCODE\n");
+    text.push('\n');
     std::fs::write(&path, text).map_err(|e| format!("写入外部启动包装器失败: {e}"))?;
     schedule_wrapper_cleanup(path.clone());
     Ok(path)
@@ -1380,17 +1416,6 @@ fn external_wrapper_command(cwd: &str, wrapper: &Path) -> String {
         "cd {} && /bin/sh {}",
         sh_quote_if_needed(&cwd),
         sh_quote_if_needed(&wrapper.to_string_lossy())
-    )
-}
-
-#[cfg(windows)]
-fn external_wrapper_command(cwd: &str, wrapper: &Path) -> String {
-    let cwd = expand_home_path(cwd);
-    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    format!(
-        "cd /d {} && powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File {}",
-        q(&cwd),
-        q(&wrapper.to_string_lossy())
     )
 }
 
@@ -1485,16 +1510,30 @@ fn open_external_profiled(
     )?;
     let binary = resolve_binary(binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?)
         .ok_or_else(|| format!("未找到 {agent_id} 的 CLI 二进制"))?;
-    let wrapper = write_external_wrapper(&binary.to_string_lossy(), &args, &env, &env_remove)?;
     let pref = crate::settings::read_current()
         .external_terminal
         .unwrap_or_else(|| "auto".into());
-    let cmd = external_wrapper_command(cwd, &wrapper);
-    match open_external_terminal(&cmd, &pref, cwd, &wrapper) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&wrapper);
-            Err(e)
+    #[cfg(windows)]
+    {
+        return open_windows_external(
+            &pref,
+            cwd,
+            &binary.to_string_lossy(),
+            &args,
+            &env,
+            &env_remove,
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let wrapper = write_external_wrapper(&binary.to_string_lossy(), &args, &env, &env_remove)?;
+        let cmd = external_wrapper_command(cwd, &wrapper);
+        match open_external_terminal(&cmd, &pref, cwd, &wrapper) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&wrapper);
+                Err(e)
+            }
         }
     }
 }
@@ -1541,7 +1580,36 @@ fn resume_command_line_with(
     Ok(cmd)
 }
 
-#[cfg(target_os = "windows")]
+/// PowerShell 单引号包裹（内嵌 ' 加倍）。复制命令给用户粘贴到 Windows 默认交互 shell。
+#[cfg(any(windows, test))]
+fn ps_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+#[cfg(any(windows, test))]
+fn ps_arg(a: &str) -> String {
+    if a.starts_with('-') && !a.chars().any(|c| c.is_whitespace() || c == '\'' || c == '"') {
+        a.to_string()
+    } else {
+        ps_quote(a)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_ps_invoke(
+    cwd: &str,
+    binary: &str,
+    args: impl IntoIterator<Item = impl AsRef<str>>,
+) -> String {
+    let mut cmd = format!("Set-Location {}; & {}", ps_quote(cwd), ps_quote(binary));
+    for a in args {
+        cmd.push(' ');
+        cmd.push_str(&ps_arg(a.as_ref()));
+    }
+    cmd
+}
+
+#[cfg(any(windows, test))]
 fn windows_resume_command_line(
     agent_id: &str,
     session_id: &str,
@@ -1553,19 +1621,11 @@ fn windows_resume_command_line(
     if args.is_empty() {
         return Err(format!("{agent_id} 不支持按 ID 恢复"));
     }
-    // 路径/值一律双引号包裹（含空格路径与裸名统一处理）；内嵌 " doubling 是 cmd 的转义方式。
-    // flag 参数（-r/--session/-c 等）保持裸名，与 unix 版风格一致
-    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    let mut cmd = format!("cd /d {} && {}", q(cwd), q(binary));
-    for a in args.iter().chain(extra_args) {
-        cmd.push(' ');
-        if a.starts_with('-') {
-            cmd.push_str(a);
-        } else {
-            cmd.push_str(&q(a));
-        }
-    }
-    Ok(cmd)
+    Ok(windows_ps_invoke(
+        cwd,
+        binary,
+        args.iter().chain(extra_args),
+    ))
 }
 
 /// 复制用命令行：裸命令名（用户真实交互终端 rc 齐全，且 cc-switch 风格干净）
@@ -1703,28 +1763,20 @@ fn digest_command_line_with(agent_id: &str, cwd: &str, prompt: &str, binary: &st
     Ok(cmd)
 }
 
-/// cmd.exe 方言的提炼接力命令行（镜像 windows_resume_command_line：双引号包裹路径与 prompt）
-#[cfg(target_os = "windows")]
+/// PowerShell 方言的提炼接力命令行（镜像 windows_resume_command_line）
+#[cfg(any(windows, test))]
 fn windows_digest_command_line(agent_id: &str, cwd: &str, prompt: &str, binary: &str) -> Result<String, String> {
-    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    let mut cmd = format!("cd /d {} && {}", q(cwd), q(binary));
-    match agent_spec(agent_id).map(|s| s.prompt_inject) {
-        Some(crate::agent_specs::PromptInject::Positional) => {
-            cmd.push(' ');
-            cmd.push_str(&q(prompt));
-        }
+    let extra: Vec<String> = match agent_spec(agent_id).map(|s| s.prompt_inject) {
+        Some(crate::agent_specs::PromptInject::Positional) => vec![prompt.to_string()],
         Some(crate::agent_specs::PromptInject::Flag(flag)) => {
-            cmd.push(' ');
-            cmd.push_str(flag);
-            cmd.push(' ');
-            cmd.push_str(&q(prompt));
+            vec![flag.to_string(), prompt.to_string()]
         }
         Some(crate::agent_specs::PromptInject::Unsupported) => {
             return Err(format!("{agent_id} 无启动注入参数，简报指令需启动后手动发送"));
         }
         None => return Err(format!("未知 agent: {agent_id}")),
-    }
-    Ok(cmd)
+    };
+    Ok(windows_ps_invoke(cwd, binary, extra))
 }
 
 /// 复制用：提炼接力的外部续作命令行（裸命令名，同 session_resume_command 口径）
@@ -1891,16 +1943,162 @@ fn spawn_status(cmd: &mut Command, what: &str) -> Result<(), String> {
     }
 }
 
+/// cmd.exe 参数引用：无特殊字符原样；否则双引号包裹，内嵌 `"` 加倍、`%` 加倍防展开。
+#[cfg(any(windows, test))]
+fn cmd_quote_arg(s: &str) -> String {
+    let special = s.is_empty()
+        || s.bytes().any(|b| {
+            matches!(
+                b,
+                b' ' | b'\t' | b'"' | b'&' | b'|' | b'<' | b'>' | b'^' | b'%' | b'!' | b'(' | b')'
+            )
+        });
+    if !special {
+        return s.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\"\""),
+            '%' => out.push_str("%%"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(any(windows, test))]
+fn windows_start_prefix(cwd: &str) -> String {
+    // 标题必须非空：start "" 会给新控制台留下空标题，GetConsoleTitleW 对空标题返回 0，
+    // 旧版 libuv（<1.52，kimi 等自带运行时的 CLI 可能内嵌）uv_get_process_title
+    // 把 0 当成功、process_title 缓存仍是 NULL，随后 assert(process_title) 直接 abort
+    // （win/util.c:412，start "" 场景 100% 复现，见 nodejs/node#58695）。
+    let mut line = String::from("start \"Ccode\"");
+    if !cwd.trim().is_empty() {
+        line.push_str(&format!(" /D \"{}\"", cwd.replace('"', "")));
+    }
+    line
+}
+
+/// 设置「命令提示符」：可见宿主是 cmd，密钥走父进程环境块经 start 继承，不经 PowerShell。
+#[cfg(any(windows, test))]
+fn windows_external_start_line_cmd(cwd: &str, binary: &str, args: &[String]) -> String {
+    let mut line = windows_start_prefix(cwd);
+    line.push_str(" cmd.exe /K ");
+    line.push_str(&cmd_quote_arg(binary));
+    for a in args {
+        line.push(' ');
+        line.push_str(&cmd_quote_arg(a));
+    }
+    line
+}
+
+/// 设置「PowerShell」：可见宿主是 powershell -NoExit -File wrapper（密钥在 ps1 里）。
+#[cfg(any(windows, test))]
+fn windows_external_start_line_ps(cwd: &str, wrapper: &Path) -> String {
+    let mut line = windows_start_prefix(cwd);
+    line.push_str(" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File ");
+    line.push_str(&format!(
+        "\"{}\"",
+        wrapper.to_string_lossy().replace('"', "")
+    ));
+    line
+}
+
+/// cmd 命令行上限约 8191；超了改写无密钥的 .cmd 再 /K 它。
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+const WINDOWS_START_LINE_MAX: usize = 7000;
+
+#[cfg(windows)]
+fn write_external_cmd_wrapper(binary: &str, args: &[String]) -> Result<PathBuf, String> {
+    let dir = external_wrapper_dir()?;
+    let path = dir.join(format!("launch-{}.cmd", uuid::Uuid::new_v4()));
+    // cmd 批处理必须是单字节编码（UTF-16 会被读成乱码）；前两行 ASCII，chcp 65001 之后
+    // cmd 按 UTF-8 解码后续行——命令行里的中文 prompt 靠这个存活，别写成 UTF-16/带 BOM
+    let mut body = String::from("@echo off\r\nchcp 65001 >nul\r\n");
+    body.push_str(&cmd_quote_arg(binary));
+    for a in args {
+        body.push(' ');
+        body.push_str(&cmd_quote_arg(a));
+    }
+    body.push_str("\r\n");
+    std::fs::write(&path, body.as_bytes()).map_err(|e| format!("写入外部启动包装器失败: {e}"))?;
+    // 只含 binary+args（密钥走环境块不经这里），无需额外 ACL；60s 兜底清理
+    schedule_wrapper_cleanup(path.clone());
+    Ok(path)
+}
+
 #[cfg(target_os = "windows")]
-fn open_external_terminal(cmd: &str, _pref: &str, _cwd: &str, _wrapper: &Path) -> Result<(), String> {
-    // cmd 已是 cmd.exe 方言（windows_resume_command_line 生成）；
-    // start 开新窗口；/K 让窗口在 agent 退出后保留；内层引号 doubling 是 cmd 的转义方式
-    let inner = cmd.replace('"', "\"\"");
-    Command::new("cmd")
-        .args(["/C", &format!("start \"\" cmd /K \"{inner}\"")])
+fn spawn_windows_start(
+    line: &str,
+    env: &[(String, String)],
+    env_remove: &[String],
+) -> Result<(), String> {
+    // 两个坑都别改回去：
+    // 1) 预加引号的复合命令不能走 Command::args——Rust 会把 " 加壳成 \"，而 cmd 对 /C
+    //    之后的文本不认反斜杠转义，start 会把引号标题当程序名。必须 raw_arg 原文直投。
+    // 2) 不能直接 spawn powershell/cmd + CREATE_NEW_CONSOLE：dev 实例从 npm/Git Bash
+    //    链路继承的 std 句柄是管道不是控制台，会原样遗传给子进程。start 经 ShellExecute
+    //    拉起，子进程的 std 挂到它自己的新控制台。外层 cmd CREATE_NO_WINDOW 不可见，
+    //    可见窗口由 start 创建——符合「只有用户明确打开的外部终端允许可见窗口」。
+    // 3) 更不能 output()/pipe 收尾：start 的子进程继承 cmd 的管道句柄，read-to-EOF
+    //    会阻塞到用户关掉外部窗口——同步 command 堵死、整个应用「未响应」（实测复现）。
+    //    start 立即返回、cmd 随即退出，wait 只收 cmd 自己，毫秒级。
+    let mut c = crate::process::background_command("cmd");
+    for (k, v) in env {
+        if valid_env_name(k) {
+            c.env(k, v);
+        }
+    }
+    for k in env_remove {
+        if valid_env_name(k) {
+            c.env_remove(k);
+        }
+    }
+    c.arg("/C");
+    c.raw_arg(line);
+    let mut child = c
         .spawn()
         .map_err(|e| format!("启动外部终端失败: {e}"))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("启动外部终端失败: {e}"))?;
+    if !status.success() {
+        return Err(format!("启动外部终端失败: {status}"));
+    }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_windows_external(
+    pref: &str,
+    cwd: &str,
+    binary: &str,
+    args: &[String],
+    env: &[(String, String)],
+    env_remove: &[String],
+) -> Result<(), String> {
+    let cwd = expand_home_path(cwd);
+    if pref == "powershell" {
+        let wrapper = write_external_wrapper(binary, args, env, env_remove)?;
+        let line = windows_external_start_line_ps(&cwd, &wrapper);
+        return spawn_windows_start(&line, &[], &[]).map_err(|e| {
+            let _ = std::fs::remove_file(&wrapper);
+            e
+        });
+    }
+    // cmd / auto：密钥放在父进程环境块，start 继承进可见 cmd。不经 PowerShell，
+    // 避免 5.1 当 conhost 把 TUI 卡住，也避免 AMSI 扫描每次新写的 ps1。
+    let line = windows_external_start_line_cmd(&cwd, binary, args);
+    let line = if line.len() <= WINDOWS_START_LINE_MAX {
+        line
+    } else {
+        let wrapper = write_external_cmd_wrapper(binary, args)?;
+        windows_external_start_line_cmd(&cwd, &wrapper.to_string_lossy(), &[])
+    };
+    spawn_windows_start(&line, env, env_remove)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -1944,9 +2142,11 @@ fn kimi_variant_hint() -> Option<&'static str> {
     }
 }
 
-/// 检测结果按进程缓存一次（要 spawn 8 个子进程跑 --version，没必要每次重算）；
-/// 更新成功后由 updater 调 invalidate_detect_cache 清空
-static DETECT_CACHE: std::sync::Mutex<Option<Vec<DetectResult>>> = std::sync::Mutex::new(None);
+/// 检测结果按进程缓存；更新成功后由 updater 调 invalidate_detect_cache 清空。
+/// 另加 2 分钟 TTL：用户在 Ccode 外自行安装 CLI 后不必重启才认（与 CHECK_CACHE 同口径）。
+const DETECT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+static DETECT_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<DetectResult>)>> =
+    std::sync::Mutex::new(None);
 
 pub(crate) fn invalidate_detect_cache() {
     *DETECT_CACHE.lock().unwrap() = None;
@@ -1984,8 +2184,13 @@ fn detect_one(spec: &'static AgentSpec) -> DetectResult {
 
 #[tauri::command]
 pub async fn detect_agents() -> Vec<DetectResult> {
-    if let Some(cached) = DETECT_CACHE.lock().unwrap().clone() {
-        return cached;
+    {
+        let cache = DETECT_CACHE.lock().unwrap();
+        if let Some((ts, cached)) = &*cache {
+            if ts.elapsed() < DETECT_CACHE_TTL {
+                return cached.clone();
+            }
+        }
     }
     // --version 要 spawn 8 个子进程，放阻塞线程池并并行跑（与 updater 的更新检查同模式；
     // 单个 CLI 卡死由 version_with_timeout 的 5s 超时兜底）
@@ -2001,7 +2206,7 @@ pub async fn detect_agents() -> Vec<DetectResult> {
     })
     .await
     .unwrap_or_default();
-    *DETECT_CACHE.lock().unwrap() = Some(results.clone());
+    *DETECT_CACHE.lock().unwrap() = Some((std::time::Instant::now(), results.clone()));
     results
 }
 
@@ -3658,6 +3863,20 @@ mod tests {
     }
 
     #[test]
+    fn codex_catalog_arg_uses_forward_slashes() {
+        // TOML 基本字符串里 `\U` 是非法转义；Windows 路径必须改成正斜杠
+        let args = catalog_args(std::path::Path::new(
+            r"C:\Users\x\AppData\Roaming\ccode\catalogs\codex-1.json",
+        ));
+        assert!(!args[1].contains('\\'), "不得残留反斜杠: {}", args[1]);
+        assert!(
+            args[1].contains("C:/Users/x/AppData/Roaming/ccode/catalogs/codex-1.json"),
+            "{}",
+            args[1]
+        );
+    }
+
+    #[test]
     fn find_in_dirs_picks_first_existing_candidate() {
         let base = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
         let d1 = base.join("d1");
@@ -3795,24 +4014,22 @@ mod tests {
         assert!(!derived_cmd.contains(r#"model_provider="ccode""#));
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_resume_line_uses_cmd_dialect() {
-        // cmd 方言：cd /d + 双引号；裸名与含空格路径统一包裹
+    fn windows_resume_line_uses_powershell_dialect() {
+        // PowerShell：Set-Location + & 调用操作符；单引号包裹路径
         assert_eq!(
             windows_resume_command_line("claude-code", "abc", r"C:\work\my proj", r"C:\tools\claude.cmd", &[]).unwrap(),
-            r#"cd /d "C:\work\my proj" && "C:\tools\claude.cmd" -r "abc""#
+            r#"Set-Location 'C:\work\my proj'; & 'C:\tools\claude.cmd' -r 'abc'"#
         );
-        // cwd 含单引号：从结构化参数生成，不受 POSIX 转义影响
         let line = windows_resume_command_line("kimi", "abc", r"C:\it's\proj", "kimi", &[]).unwrap();
-        assert_eq!(line, r#"cd /d "C:\it's\proj" && "kimi" -S "abc""#);
+        assert_eq!(line, r#"Set-Location 'C:\it''s\proj'; & 'kimi' -S 'abc'"#);
         assert!(windows_resume_command_line("no-such", "abc", r"C:\x", "x", &[]).is_err());
-        // codex provider 定义：flag 裸名、kv 值双引号包裹（内嵌引号 doubling）
         let with_provider = windows_resume_command_line(
             "codex", "abc", r"C:\p", "codex",
             &resume_extra_args("codex", Some("https://relay.example.com/v1"), None),
         ).unwrap();
-        assert!(with_provider.contains(r#"-c "model_provider=""ccode"""#));
+        assert!(with_provider.contains("-c"));
+        assert!(with_provider.contains(r#"model_provider="ccode""#) || with_provider.contains("'model_provider="));
     }
 
     #[test]
@@ -3941,14 +4158,50 @@ mod tests {
         assert!(!wrapper.exists());
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_digest_line_uses_cmd_dialect() {
+    fn windows_digest_line_uses_powershell_dialect() {
         let line = windows_digest_command_line("claude-code", r"C:\work\my proj", "读简报", r"C:\tools\claude.cmd").unwrap();
-        assert_eq!(line, r#"cd /d "C:\work\my proj" && "C:\tools\claude.cmd" "读简报""#);
+        assert_eq!(line, r#"Set-Location 'C:\work\my proj'; & 'C:\tools\claude.cmd' '读简报'"#);
         let line = windows_digest_command_line("gemini", r"C:\x", "读简报", "gemini").unwrap();
-        assert_eq!(line, r#"cd /d "C:\x" && "gemini" -i "读简报""#);
+        assert_eq!(line, r#"Set-Location 'C:\x'; & 'gemini' -i '读简报'"#);
         assert!(windows_digest_command_line("kimi", r"C:\x", "读简报", "kimi").is_err());
+    }
+
+    #[test]
+    fn windows_external_cmd_host_quotes_and_skips_powershell() {
+        let line = windows_external_start_line_cmd(
+            r"C:\work\my proj",
+            r"C:\tools\claude.cmd",
+            &["-r".into(), "abc".into()],
+        );
+        assert_eq!(
+            line,
+            r#"start "Ccode" /D "C:\work\my proj" cmd.exe /K C:\tools\claude.cmd -r abc"#
+        );
+        assert!(!line.contains("powershell"));
+        let spaced = windows_external_start_line_cmd(
+            r"C:\work",
+            r"C:\Program Files\kimi\kimi.exe",
+            &["-S".into(), "sid".into()],
+        );
+        assert!(spaced.contains(r#""C:\Program Files\kimi\kimi.exe""#));
+        assert!(spaced.contains(" -S sid"));
+        assert_eq!(cmd_quote_arg(r#"a"b"#), r#""a""b""#);
+        assert_eq!(cmd_quote_arg("a%PATH%"), r#""a%%PATH%%""#);
+    }
+
+    #[test]
+    fn windows_external_powershell_host_uses_noexit_file() {
+        let line = windows_external_start_line_ps(
+            r"C:\work\my proj",
+            Path::new(r"C:\Users\x\AppData\Roaming\ccode\external-launch\launch-1.ps1"),
+        );
+        assert_eq!(
+            line,
+            "start \"Ccode\" /D \"C:\\work\\my proj\" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File \"C:\\Users\\x\\AppData\\Roaming\\ccode\\external-launch\\launch-1.ps1\""
+        );
+        assert!(line.contains("-NoExit"));
+        assert!(!line.contains("cmd.exe /K"));
     }
 
     #[cfg(unix)]

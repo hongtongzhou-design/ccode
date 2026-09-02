@@ -6,10 +6,27 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import "pdfjs-dist/web/pdf_viewer.css";
 import SelectionFloatBar, { DistillSkillButton } from "./SelectionFloatBar";
 import { HoverTip, useHoverTip } from "./HoverTip";
-import { findGlossaryMatches, type GlossaryEntry } from "../reader";
+import { IS_WINDOWS } from "../hotkeys";
+import {
+  findGlossaryMatches,
+  nextFitScale,
+  type GlossaryEntry,
+} from "../reader";
 
 // vite 惯例：worker 走 ?url 资源，不进主包（本组件整体被动态 import）
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+
+/** 打开 PDF 文档的单一入口（预览与连续滚动共用）。
+ *  Windows WebView2 的 ImageDecoder 会把部分 JPEG/JBIG2 解成空白位图（整页白屏），
+ *  关掉后走 pdf.js 自带解码；macOS WKWebView 无此问题，保持默认加速。 */
+export function openPdfDocument(
+  data: Uint8Array,
+): pdfjs.PDFDocumentLoadingTask {
+  return pdfjs.getDocument({
+    data,
+    isImageDecoderSupported: !IS_WINDOWS,
+  });
+}
 
 export interface PdfBytesDto {
   data: string; // base64（macOS WKWebView 的 raw bytes 响应会退化成数字数组，故走字符串）
@@ -41,15 +58,12 @@ export function PdfPageView({
   pageNum,
   scale,
   active,
-  renderKey,
   glossTerms,
 }: {
   doc: pdfjs.PDFDocumentProxy;
   pageNum: number;
   scale: number;
   active: boolean;
-  /** scale 之外的强制重渲染信号（适配宽度随容器尺寸变化） */
-  renderKey: number;
   /** 生词高亮术语表（阅读区 B3；空/缺省不高亮） */
   glossTerms?: readonly GlossaryEntry[];
 }) {
@@ -103,6 +117,14 @@ export function PdfPageView({
           "--total-scale-factor",
           String(viewport.scale * viewport.userUnit),
         );
+        // pdf.js 默认 getContext("2d", { alpha: false })。Chromium/WebView2 在
+        // 全局 color-scheme:dark 下会把不透明 canvas 合成白块（整页白屏）。
+        // 先以 alpha:true 绑定，后续 getContext 只能拿到已有上下文、忽略新属性。
+        const ctx = canvas.getContext("2d", {
+          alpha: true,
+          willReadFrequently: true,
+        });
+        if (!ctx) throw new Error("无法创建画布");
         renderTask = page.render({
           canvas,
           viewport,
@@ -147,7 +169,7 @@ export function PdfPageView({
       textLayer?.cancel();
       drawLayer?.destroy();
     };
-  }, [doc, pageNum, scale, renderKey]);
+  }, [doc, pageNum, scale]);
 
   // 术语高亮：textLayer 落地后（或术语表增删后）对文本节点跑整词匹配，命中处包
   // <span class="ccode-gloss">（点状下划线，悬停释义由 PdfContinuousView 事件代理出 HoverTip）；
@@ -198,7 +220,7 @@ export function PdfPageView({
       data-page-num={pageNum}
       className={`relative bg-white ${active ? "" : "hidden"}`}
     >
-      <canvas ref={canvasRef} className="block" />
+      <canvas ref={canvasRef} className="block bg-transparent" />
       {/* selectionRendering：关掉原生 ::selection（透明化），高亮由 DrawLayer 自绘 */}
       <div ref={textRef} className="textLayer selectionRendering" />
       {error && (
@@ -264,10 +286,11 @@ function PdfPreview({
   /** null = 适配宽度模式（随容器宽度换算） */
   const [fixedScale, setFixedScale] = useState<number | null>(null);
   const [fitScale, setFitScale] = useState(1);
-  const [renderKey, setRenderKey] = useState(0);
   const [hint, setHint] = useState<Hint | null>(null);
   const [organizing, setOrganizing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fitScaleRef = useRef(fitScale);
+  fitScaleRef.current = fitScale;
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 「⛶ 沉浸阅读」钮的应用内 tooltip（原生 title 在 WKWebView 上行为不稳定）
   const readerBtnRef = useRef<HTMLButtonElement>(null);
@@ -292,7 +315,7 @@ function PdfPreview({
           cwdHint,
         });
         if (cancelled) return;
-        task = pdfjs.getDocument({ data: base64ToBytes(dto.data) });
+        task = openPdfDocument(base64ToBytes(dto.data));
         const loaded = await task.promise;
         if (cancelled) {
           void task.destroy();
@@ -322,7 +345,8 @@ function PdfPreview({
         if (cancelled) return;
         const w = page.getViewport({ scale: 1 }).width;
         const avail = el.clientWidth - 24; // 左右留白
-        if (w > 0 && avail > 0) setFitScale(avail / w);
+        const next = nextFitScale(w, avail, fitScaleRef.current);
+        if (next !== null) setFitScale(next);
       } catch {
         /* 页读取失败交给渲染层报错 */
       }
@@ -330,7 +354,6 @@ function PdfPreview({
     void compute();
     const ro = new ResizeObserver(() => {
       void compute();
-      setRenderKey((k) => k + 1);
     });
     ro.observe(el);
     return () => {
@@ -531,16 +554,18 @@ function PdfPreview({
           <p className="text-sm text-l4">正在加载 PDF…</p>
         </div>
       ) : (
-        <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto">
+        <div
+          ref={scrollRef}
+          className="ccode-pdf-scroll relative min-h-0 flex-1 overflow-auto"
+        >
           <div className="flex min-w-max flex-col items-center p-3">
             {pages.map((n) => (
               <PdfPageView
-                key={`${n}-${scale.toFixed(3)}-${renderKey}`}
+                key={n}
                 doc={doc}
                 pageNum={n}
                 scale={scale}
                 active={n === pageNum}
-                renderKey={renderKey}
               />
             ))}
           </div>

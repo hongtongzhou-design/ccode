@@ -22,6 +22,7 @@ import {
   isParagraphBreak,
   joinParagraphLines,
   nearestLineIndex,
+  nextFitScale,
   normCaptureRect,
   paragraphBounds,
   parseGlossaryTable,
@@ -44,6 +45,20 @@ import {
   READER_TL_HISTORY_MAX,
   type TlHistoryEntry,
 } from "../src/reader.ts";
+
+test("nextFitScale：无效宽返回 null，亚像素变化保持原值", () => {
+  assert.equal(nextFitScale(0, 800, 1), null);
+  assert.equal(nextFitScale(595, 0, 1), null);
+  assert.equal(nextFitScale(-1, 800, 1), null);
+  // 半像素以内的 clientWidth 抖动（滚动条槽）不改 scale
+  const current = 800 / 595;
+  assert.equal(nextFitScale(595, 800.4, current), null);
+  assert.equal(nextFitScale(595, 799.6, current), null);
+  // 超过半像素才给出新值
+  const jumped = nextFitScale(595, 800 - 17, current);
+  assert.ok(jumped !== null);
+  assert.ok(Math.abs((jumped as number) - (783 / 595)) < 1e-9);
+});
 
 test("clampReaderPct 坏值/非正数回落缺省", () => {
   assert.equal(clampReaderPct(Number.NaN, 22), 22);

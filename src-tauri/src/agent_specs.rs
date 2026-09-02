@@ -711,6 +711,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         skills_dir: &[".cursor", "skills-cursor"],
         packaging: PackagingSpec {
             // 无 brew/npm 官方包：官方安装脚本装到 ~/.local/share/cursor-agent/versions/<ver>/
+            // Windows 安装渠道官方不支持（updater pick_install 直接 None，文案指 WSL）
             install_script: Some("curl -fsSL https://cursor.com/install | bash"),
             // cursor-agent update 是非交互自更新
             self_update: Some(&["update"]),
@@ -1028,12 +1029,17 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
         if let Some(h) = dirs::home_dir() {
             out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
             out.push(h.join(".grok/bin")); // Grok Build 官方安装器（%USERPROFILE%\.grok\bin\grok.exe）
+            out.push(h.join(".local").join("bin")); // 官方 install.sh 在 MINGW 下落点
         }
         // Node.js 官方 Windows 安装器默认目录；GUI 启动时 PATH 可能未继承，
         // 仍应能找到 node/npm.cmd。
         for key in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
             if let Some(root) = std::env::var_os(key) {
-                out.push(std::path::PathBuf::from(root).join("nodejs"));
+                let root = std::path::PathBuf::from(root);
+                out.push(root.join("nodejs"));
+                // Git for Windows：bash.exe 在 bin/，流水线钩子与 run 脚本需要
+                out.push(root.join("Git").join("bin"));
+                out.push(root.join("Git").join("usr").join("bin"));
             }
         }
         // Git for Windows（winget Git.Git / 官方安装器）默认落点
@@ -1044,6 +1050,57 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+fn env_path(var: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// 该 agent 的技能目录：搬迁变量优先，缺省 = home + `skills_dir` 段。
+/// MCP 的 agent_paths 用同一套搬迁变量；两处必须同源，避免 `KIMI_CODE_HOME` 等
+/// 只对 MCP 生效、技能静默落到默认家目录。
+pub fn skills_dir_for(spec: &AgentSpec) -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    match spec.id {
+        "claude-code" => {
+            let base = env_path("CLAUDE_CONFIG_DIR").unwrap_or(home);
+            Some(base.join(".claude").join("skills"))
+        }
+        "codex" => {
+            let base = env_path("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
+            Some(base.join("skills"))
+        }
+        "gemini" => {
+            let base = env_path("GEMINI_CLI_HOME").unwrap_or_else(|| home.join(".gemini"));
+            Some(base.join("skills"))
+        }
+        "qwen" => {
+            let base = env_path("QWEN_HOME").unwrap_or_else(|| home.join(".qwen"));
+            Some(base.join("skills"))
+        }
+        "opencode" => {
+            let base = env_path("XDG_CONFIG_HOME")
+                .unwrap_or_else(|| home.join(".config"))
+                .join("opencode");
+            Some(base.join("skills"))
+        }
+        "kimi" => {
+            let base = env_path("KIMI_CODE_HOME").unwrap_or_else(|| home.join(".kimi-code"));
+            Some(base.join("skills"))
+        }
+        "codebuddy" => {
+            let base = env_path("CODEBUDDY_CONFIG_DIR").unwrap_or_else(|| home.join(".codebuddy"));
+            Some(base.join("skills"))
+        }
+        "cursor" => Some(home.join(".cursor").join("skills-cursor")),
+        "grok" => {
+            let base = env_path("GROK_HOME").unwrap_or_else(|| home.join(".grok"));
+            Some(base.join("skills"))
+        }
+        _ => Some(spec.skills_dir.iter().fold(home, |p, seg| p.join(seg))),
+    }
 }
 
 #[cfg(test)]
@@ -1102,6 +1159,37 @@ mod tests {
                 assert!(!oa.env_purge_list.is_empty(), "{id} 官方账号缺 env 净化清单");
             }
         }
+    }
+
+    #[test]
+    fn skills_dir_default_matches_spec_segments() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        for spec in all_agent_specs() {
+            if spec.id == "opencode" && std::env::var_os("XDG_CONFIG_HOME").is_some() {
+                continue;
+            }
+            let dir = skills_dir_for(spec).expect(spec.id);
+            let expected = spec.skills_dir.iter().fold(home.clone(), |p, s| p.join(s));
+            assert_eq!(dir, expected, "{}", spec.id);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_candidate_dirs_include_local_bin_and_git() {
+        let dirs = binary_candidate_dirs();
+        if let Some(h) = dirs::home_dir() {
+            assert!(
+                dirs.iter().any(|d| d == &h.join(".local").join("bin")),
+                "缺 ~/.local/bin: {dirs:?}"
+            );
+        }
+        assert!(
+            dirs.iter().any(|d| d.ends_with(std::path::Path::new("Git").join("bin"))),
+            "缺 Git\\bin: {dirs:?}"
+        );
     }
 
     /// 查找往返一致：遍历注册表拿到的 id 再查回同一张规格，且 id 全局唯一

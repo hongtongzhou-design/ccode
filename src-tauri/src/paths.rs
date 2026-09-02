@@ -59,6 +59,18 @@ pub(crate) fn path_within(child: &str, root: &str) -> bool {
     child == root || child.starts_with(&format!("{root}/"))
 }
 
+/// [`path_within`] 的 `Path` 包装，供 canonicalize 结果与剥过 verbatim 的根比较。
+pub(crate) fn path_within_path(child: &std::path::Path, root: &std::path::Path) -> bool {
+    path_within(&child.to_string_lossy(), &root.to_string_lossy())
+}
+
+/// canonicalize 后再剥 Windows verbatim 前缀。macOS/Linux 上与 `canonicalize` 相同。
+/// 门檻函数返回值、以及随后的 `starts_with`/`strip_prefix` 都应走这里，避免
+/// `\\?\C:\…` 与 `C:\…` 按分量永不相等。
+pub(crate) fn canonicalize_plain(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    Ok(strip_verbatim(std::fs::canonicalize(path)?))
+}
+
 /// Windows 文件名非法字符（macOS/Linux 上除 `/` 与 NUL 外都合法）
 const FS_ILLEGAL: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
@@ -181,6 +193,17 @@ mod tests {
     fn path_key_is_case_sensitive_on_posix() {
         // POSIX 上大小写是有意义的，不能折叠
         assert_ne!(path_key("/Users/Foo"), path_key("/users/foo"));
+    }
+
+    #[test]
+    fn canonicalize_plain_strips_verbatim_prefix() {
+        let p = std::env::temp_dir();
+        let plain = canonicalize_plain(&p).unwrap();
+        let text = plain.to_string_lossy();
+        assert!(
+            !text.starts_with(r"\\?\"),
+            "canonicalize_plain 不得残留 verbatim 前缀: {text}"
+        );
     }
 
     #[test]

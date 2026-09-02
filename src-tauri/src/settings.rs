@@ -35,8 +35,8 @@ const KNOWN_PALETTES: [&str; 8] = [
     "light-plus", "solarized-light", "one-light", "latte",
 ];
 /// 会话页「⇗ 外部恢复」可选的终端应用；auto = 按平台优先级探测
-const KNOWN_EXTERNAL_TERMINALS: [&str; 9] = [
-    "auto", "ghostty", "iterm", "terminal", "cmd",
+const KNOWN_EXTERNAL_TERMINALS: [&str; 10] = [
+    "auto", "ghostty", "iterm", "terminal", "powershell", "cmd",
     "gnome-terminal", "konsole", "xfce4-terminal", "xterm",
 ];
 const KNOWN_STARTUP_NAV_MODES: [&str; 3] = ["expanded", "collapsed", "hidden"];
@@ -192,11 +192,14 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         hidden_profiles: s.hidden_profiles,
         // 后端维护的「设为全局」追踪：原样透传，不做默认值填充
         active_global_profiles: s.active_global_profiles,
-        external_terminal: Some(
-            s.external_terminal
-                .filter(|v| KNOWN_EXTERNAL_TERMINALS.contains(&v.as_str()))
-                .unwrap_or_else(|| "auto".to_string()),
-        ),
+        external_terminal: Some({
+            let v = s.external_terminal.as_deref().unwrap_or("auto");
+            if KNOWN_EXTERNAL_TERMINALS.contains(&v) {
+                v.to_string()
+            } else {
+                "auto".into()
+            }
+        }),
         // 旧字段迁移：claude_hooks_attention=true 且新 map 无 claude-code 键 → 视为开
         hooks_attention: Some({
             let mut map = s.hooks_attention.unwrap_or_default();
@@ -653,6 +656,16 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(full.external_terminal.as_deref(), Some("ghostty"));
+        let full = with_defaults(AppSettingsDto {
+            external_terminal: Some("cmd".into()),
+            ..Default::default()
+        });
+        assert_eq!(full.external_terminal.as_deref(), Some("cmd"));
+        let full = with_defaults(AppSettingsDto {
+            external_terminal: Some("powershell".into()),
+            ..Default::default()
+        });
+        assert_eq!(full.external_terminal.as_deref(), Some("powershell"));
     }
 
     #[test]

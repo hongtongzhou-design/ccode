@@ -4,6 +4,7 @@ import { useAppStore } from "../store";
 import { AGENTS } from "../types";
 import type { HandoffBriefDto, HandoffTargetDto } from "../types";
 import type { HandoffSource } from "./HandoffPicker";
+import { IS_WINDOWS } from "../hotkeys";
 
 function agentLabel(id: string): string {
   return AGENTS.find((a) => a.id === id)?.label ?? id;
@@ -424,7 +425,9 @@ export default function DigestPicker({
                       className="rounded-sm px-1 py-0.5 text-xs text-l4 hover:bg-white/10 hover:text-l1"
                       title={
                         t.promptSupported
-                          ? "复制外部终端续作命令（新会话读简报，非恢复旧会话）"
+                          ? IS_WINDOWS
+                            ? "复制 PowerShell 续作命令（粘贴到 PowerShell，不要粘到 cmd；新会话读简报，非恢复旧会话）"
+                            : "复制外部终端续作命令（新会话读简报，非恢复旧会话）"
                           : "该 CLI 无启动注入参数：复制简报指令，外部启动后手动粘贴"
                       }
                       onClick={(e) => {
@@ -432,7 +435,11 @@ export default function DigestPicker({
                         void copyExternal(t);
                       }}
                     >
-                      {copiedId === t.id ? "✓ 已复制" : "⧉"}
+                      {copiedId === t.id
+                        ? IS_WINDOWS && t.promptSupported
+                          ? "✓ 已复制（PowerShell）"
+                          : "✓ 已复制"
+                        : "⧉"}
                     </button>
                     {t.promptSupported && (
                       <button

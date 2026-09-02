@@ -56,11 +56,15 @@ fn note_template(title: &str, rel_pdf: &str, date: &str) -> String {
     )
 }
 
+fn inside(child: &Path, root: &Path) -> bool {
+    crate::paths::path_within_path(child, root)
+}
+
 fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNoteDto, String> {
     let root = gated_root(project_root)?;
-    let pdf = fs::canonicalize(Path::new(&crate::sessions::expand_tilde(pdf_path)))
+    let pdf = crate::paths::canonicalize_plain(Path::new(&crate::sessions::expand_tilde(pdf_path)))
         .map_err(|e| format!("PDF 不存在或不可读: {e}"))?;
-    if !pdf.starts_with(&root) {
+    if !inside(&pdf, &root) {
         return Err("PDF 不在项目目录内，拒绝建立笔记".into());
     }
     let file_name = pdf
@@ -74,8 +78,9 @@ fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNot
     let notes = root.join("notes");
     fs::create_dir_all(&notes).map_err(|e| format!("创建 notes 目录失败: {e}"))?;
     // notes 若是指向根外的 symlink 要拦下（同 lit_watch 落盘的双校验口径）
-    let canon_notes = fs::canonicalize(&notes).map_err(|e| format!("notes 目录无效: {e}"))?;
-    if !canon_notes.starts_with(&root) {
+    let canon_notes = crate::paths::canonicalize_plain(&notes)
+        .map_err(|e| format!("notes 目录无效: {e}"))?;
+    if !inside(&canon_notes, &root) {
         return Err("notes 指向项目目录之外，拒绝写入".into());
     }
     // slug 已去路径分隔符，join 不会逃逸 canon_notes
@@ -153,7 +158,7 @@ fn find_note_by_source(notes: &Path, rel_pdf: &str) -> Option<PathBuf> {
         fs::read_to_string(p)
             .ok()
             .and_then(|c| note_source_pdf(&c))
-            .is_some_and(|src| src == rel_pdf)
+            .is_some_and(|src| crate::paths::same_path(&src, rel_pdf))
     })
 }
 
@@ -196,10 +201,9 @@ fn pair_pdf_at(root: &Path, note_c: &Path) -> Result<Option<String>, String> {
         if let Some(rel) = note_source_pdf(&content) {
             let pdf = root.join(&rel);
             if pdf.exists() {
-                let c = pdf
-                    .canonicalize()
+                let c = crate::paths::canonicalize_plain(&pdf)
                     .map_err(|e| format!("PDF 路径无效（{rel}）: {e}"))?;
-                if c.starts_with(root) {
+                if inside(&c, root) {
                     return Ok(Some(c.to_string_lossy().replace('\\', "/")));
                 }
             }
@@ -222,10 +226,9 @@ fn pair_pdf_at(root: &Path, note_c: &Path) -> Result<Option<String>, String> {
         if !pdf.exists() {
             continue;
         }
-        let c = pdf
-            .canonicalize()
+        let c = crate::paths::canonicalize_plain(&pdf)
             .map_err(|e| format!("PDF 路径无效（{}）: {e}", r.path))?;
-        if !c.starts_with(root) {
+        if !inside(&c, root) {
             continue;
         }
         if best.as_ref().is_none_or(|(len, _)| norm.len() > *len) {
@@ -246,10 +249,9 @@ fn pdf_for_note_sync(project_root: &str, note_path: &str) -> Result<Option<Strin
     if !is_md {
         return Err("只支持 Markdown 笔记（.md）".into());
     }
-    let note_c = note
-        .canonicalize()
+    let note_c = crate::paths::canonicalize_plain(&note)
         .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
-    if !note_c.starts_with(&root) {
+    if !inside(&note_c, &root) {
         return Err("笔记在项目目录之外，拒绝访问".into());
     }
     pair_pdf_at(&root, &note_c)
@@ -286,18 +288,17 @@ fn reader_for_note_sync(note_path: &str) -> Result<ReaderForNoteDto, String> {
     if !is_md {
         return Err("只支持 Markdown 笔记（.md）".into());
     }
-    let note_c = note
-        .canonicalize()
+    let note_c = crate::paths::canonicalize_plain(&note)
         .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
     let conn = crate::workspaces::db()?;
-    // 1. 注册项目根直含（canonical 后前缀判定，与 register_project 的 canonical_key 同口径）
+    // 1. 注册项目根直含（剥 verbatim 后的分量判定，与 register_project 的 canonical_key 同口径）
     let mut root: Option<PathBuf> = None;
     let mut note_final = note_c.clone();
     for p in crate::projects::list_projects_in(&conn)? {
         let pr = PathBuf::from(crate::projects::canonical_key(Path::new(
             &crate::sessions::expand_tilde(&p.path),
         )));
-        if note_c.starts_with(&pr) {
+        if inside(&note_c, &pr) {
             root = Some(pr);
             break;
         }
@@ -306,7 +307,7 @@ fn reader_for_note_sync(note_path: &str) -> Result<ReaderForNoteDto, String> {
     if root.is_none() {
         for w in crate::workspaces::query_workspaces(&conn)? {
             let wt = PathBuf::from(&w.worktree_path);
-            let wt = wt.canonicalize().unwrap_or(wt);
+            let wt = crate::paths::canonicalize_plain(&wt).unwrap_or(wt);
             let Ok(rel) = note_c.strip_prefix(&wt) else { continue };
             let repo = PathBuf::from(crate::sessions::expand_tilde(&w.repo_path));
             let main_note = repo.join(rel);
@@ -316,8 +317,7 @@ fn reader_for_note_sync(note_path: &str) -> Result<ReaderForNoteDto, String> {
                         .into(),
                 );
             }
-            note_final = main_note
-                .canonicalize()
+            note_final = crate::paths::canonicalize_plain(&main_note)
                 .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
             // 工作区所属仓库必须是任务项目（注册或含 .ccode/project.toml），顺带拿 canonical 根
             root = Some(crate::projects::ensure_task_project_root(&repo)?);
@@ -459,8 +459,9 @@ fn save_reader_capture_sync(
     let assets = root.join("notes").join("assets");
     fs::create_dir_all(&assets).map_err(|e| format!("创建 notes/assets 目录失败: {e}"))?;
     // notes/assets 若是指向根外的 symlink 要拦下（同 ensure_paper_note 的双校验口径）
-    let canon_assets = fs::canonicalize(&assets).map_err(|e| format!("notes/assets 目录无效: {e}"))?;
-    if !canon_assets.starts_with(&root) {
+    let canon_assets = crate::paths::canonicalize_plain(&assets)
+        .map_err(|e| format!("notes/assets 目录无效: {e}"))?;
+    if !inside(&canon_assets, &root) {
         return Err("notes/assets 指向项目目录之外，拒绝写入".into());
     }
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
@@ -546,17 +547,18 @@ fn append_note_image_sync(
     rel_image_path: &str,
 ) -> Result<(), String> {
     let root = gated_root(project_root)?;
-    let note = fs::canonicalize(Path::new(&crate::sessions::expand_tilde(note_path)))
+    let note = crate::paths::canonicalize_plain(Path::new(&crate::sessions::expand_tilde(note_path)))
         .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
-    let canon_notes =
-        fs::canonicalize(root.join("notes")).map_err(|e| format!("notes 目录无效: {e}"))?;
-    if !note.starts_with(&canon_notes) {
+    let canon_notes = crate::paths::canonicalize_plain(&root.join("notes"))
+        .map_err(|e| format!("notes 目录无效: {e}"))?;
+    if !inside(&note, &canon_notes) {
         return Err("笔记必须在项目 notes/ 目录内，拒绝写入".into());
     }
     // 图片按项目根相对路径解析，canonical 后同样必须在 notes/ 内（防 ../ 逃逸与绝对路径）
     let rel_img = rel_image_path.replace('\\', "/");
-    let img = fs::canonicalize(root.join(&rel_img)).map_err(|e| format!("图片不存在: {e}"))?;
-    if !img.starts_with(&canon_notes) {
+    let img = crate::paths::canonicalize_plain(&root.join(&rel_img))
+        .map_err(|e| format!("图片不存在: {e}"))?;
+    if !inside(&img, &canon_notes) {
         return Err("图片必须在项目 notes/ 目录内".into());
     }
     let note_dir = note.parent().ok_or("笔记路径无效")?;
@@ -692,8 +694,9 @@ fn splice_glossary(text: &str, entries: &[GlossaryEntryDto]) -> String {
 fn glossary_path(root: &Path) -> Result<PathBuf, String> {
     let notes = root.join("notes");
     fs::create_dir_all(&notes).map_err(|e| format!("创建 notes 目录失败: {e}"))?;
-    let canon_notes = fs::canonicalize(&notes).map_err(|e| format!("notes 目录无效: {e}"))?;
-    if !canon_notes.starts_with(root) {
+    let canon_notes = crate::paths::canonicalize_plain(&notes)
+        .map_err(|e| format!("notes 目录无效: {e}"))?;
+    if !inside(&canon_notes, root) {
         return Err("notes 指向项目目录之外，拒绝写入".into());
     }
     Ok(canon_notes.join("glossary.md"))
@@ -814,11 +817,11 @@ fn append_note_translation_sync(
     page: u32,
 ) -> Result<(), String> {
     let root = gated_root(project_root)?;
-    let note = fs::canonicalize(Path::new(&crate::sessions::expand_tilde(note_path)))
+    let note = crate::paths::canonicalize_plain(Path::new(&crate::sessions::expand_tilde(note_path)))
         .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
-    let canon_notes =
-        fs::canonicalize(root.join("notes")).map_err(|e| format!("notes 目录无效: {e}"))?;
-    if !note.starts_with(&canon_notes) {
+    let canon_notes = crate::paths::canonicalize_plain(&root.join("notes"))
+        .map_err(|e| format!("notes 目录无效: {e}"))?;
+    if !inside(&note, &canon_notes) {
         return Err("笔记必须在项目 notes/ 目录内，拒绝写入".into());
     }
     let original = original.trim();
@@ -856,9 +859,9 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("ccode-reader-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        // 生产路径下 root 恒为 canonical（ensure_task_project_root），测试同口径：
-        // macOS 的 temp_dir 在 /var（软链到 /private/var），不 canonicalize 会让 starts_with 双校验误杀
-        dir.canonicalize().unwrap()
+        // 生产路径下 root 恒为剥过 verbatim 的 canonical（ensure_task_project_root），测试同口径：
+        // macOS 的 temp_dir 在 /var（软链到 /private/var），不 canonicalize 会让前缀判定误杀
+        crate::paths::canonicalize_plain(&dir).unwrap()
     }
 
     /// 造一个「含 .ccode/project.toml + papers/一篇.pdf」的临时项目，返回 (canonical 根, pdf 路径)
@@ -875,6 +878,23 @@ mod tests {
     }
 
     // ===== 建档配对（来源行锚点） =====
+
+    #[test]
+    fn find_note_by_source_uses_path_same_on_windows() {
+        let notes = tmpdir("src-case").join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(
+            notes.join("a.md"),
+            "> 来源 PDF：Papers\\Foo.PDF\n",
+        )
+        .unwrap();
+        let hit = find_note_by_source(&notes, "papers/foo.pdf");
+        #[cfg(windows)]
+        assert_eq!(hit, Some(notes.join("a.md")));
+        #[cfg(not(windows))]
+        assert!(hit.is_none(), "POSIX 大小写敏感，不误配: {hit:?}");
+        let _ = fs::remove_dir_all(notes.parent().unwrap());
+    }
 
     #[test]
     fn source_pdf_parses_both_formats() {
@@ -944,10 +964,18 @@ mod tests {
             "# 中文短标题\n\n> 来源 PDF：papers/English Title That Chinese Note Cannot Match.pdf\n",
         )
         .unwrap();
-        let note_c = note.canonicalize().unwrap();
-        let root_c = root.canonicalize().unwrap();
+        let note_c = crate::paths::canonicalize_plain(&note).unwrap();
+        let root_c = crate::paths::canonicalize_plain(&root).unwrap();
         let got = pair_pdf_at(&root_c, &note_c).unwrap();
-        assert_eq!(got, Some(pdf.canonicalize().unwrap().to_string_lossy().replace('\\', "/")));
+        assert_eq!(
+            got,
+            Some(
+                crate::paths::canonicalize_plain(&pdf)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            )
+        );
     }
 
     #[test]

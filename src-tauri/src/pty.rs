@@ -560,7 +560,11 @@ pub fn shell_spawn(
     // script = 工作区 run 脚本；其他/缺省 = 普通登录 shell
     purpose: Option<String>,
 ) -> Result<String, String> {
-    let (shell, shell_args) = login_shell_argv();
+    let (shell, shell_args) = if purpose.as_deref() == Some("script") {
+        script_shell_argv()?
+    } else {
+        login_shell_argv()
+    };
     let mut cmd = CommandBuilder::new(&shell);
     for arg in &shell_args {
         cmd.arg(arg);
@@ -607,6 +611,24 @@ fn login_shell_argv() -> (String, Vec<String>) {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/bin/zsh".into());
     (shell, vec!["-l".to_string()])
+}
+
+/// 流水线 run 脚本（render-pdf 等）是 bash。Windows 交互 shell 是 PowerShell，
+/// 必须改走 Git Bash，否则 `mkdir -p` / `command -v` 整链失败。
+#[cfg(windows)]
+fn script_shell_argv() -> Result<(String, Vec<String>), String> {
+    let bash = crate::agents::resolve_git_bash().ok_or(
+        "找不到 Git Bash，无法运行流水线脚本（setup/archive 钩子与 render-pdf）。请安装 Git for Windows 后重启 Ccode。",
+    )?;
+    Ok((
+        bash.to_string_lossy().into_owned(),
+        vec!["-l".to_string()],
+    ))
+}
+
+#[cfg(not(windows))]
+fn script_shell_argv() -> Result<(String, Vec<String>), String> {
+    Ok(login_shell_argv())
 }
 
 #[tauri::command]
@@ -1069,6 +1091,29 @@ mod tests {
         }
         #[cfg(not(windows))]
         assert_eq!(args, vec!["-l".to_string()], "POSIX 侧保持登录 shell 语义");
+    }
+
+    #[test]
+    fn script_shell_is_login_shell_or_git_bash() {
+        #[cfg(not(windows))]
+        {
+            let (login, login_args) = login_shell_argv();
+            let (script, script_args) = script_shell_argv().unwrap();
+            assert_eq!(script, login, "macOS/Linux 的 run 脚本仍走登录 shell");
+            assert_eq!(script_args, login_args);
+        }
+        #[cfg(windows)]
+        match script_shell_argv() {
+            Ok((shell, args)) => {
+                let lower = shell.to_ascii_lowercase();
+                assert!(
+                    lower.contains("bash"),
+                    "Windows run 脚本必须走 Git Bash，实际: {shell}"
+                );
+                assert!(args.iter().any(|a| a == "-l"), "Git Bash 用登录 shell 加载 PATH");
+            }
+            Err(e) => assert!(e.contains("Git Bash"), "{e}"),
+        }
     }
 
     // ===== win32-input-mode 底色回报（Windows/ConPTY 绕行通道） =====

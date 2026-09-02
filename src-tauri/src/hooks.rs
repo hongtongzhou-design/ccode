@@ -649,7 +649,12 @@ fn latest_from_text(
 ) -> Option<(&'static str, Option<String>)> {
     let mut best: Option<(i64, &'static str, Option<String>)> = None;
     for rec in parse_log_records(text) {
-        if rec.session_id != session_id && rec.transcript_path.as_deref() != Some(file_path) {
+        if rec.session_id != session_id
+            && !rec
+                .transcript_path
+                .as_deref()
+                .is_some_and(|p| crate::paths::same_path(p, file_path))
+        {
             continue;
         }
         if rec.event == "stop" && rec.reason.as_deref().is_some_and(|r| r != "end_turn") {
@@ -1127,6 +1132,21 @@ mod tests {
         );
         // 双键都不中 → None
         assert_eq!(state_from_text(text, "other", "/elsewhere/x.jsonl", 210), None);
+        #[cfg(windows)]
+        {
+            let win = "100 {\"sessionId\": \"grok-abc\", \"hookEventName\": \"notification\", \"transcriptPath\": \"C:\\\\Users\\\\u\\\\.grok\\\\sessions\\\\proj\\\\updates.jsonl\"}\n";
+            assert_eq!(
+                state_from_text(
+                    win,
+                    "updates",
+                    r"c:\users\u\.grok\sessions\proj\updates.jsonl",
+                    110
+                )
+                .as_deref(),
+                Some("confirm"),
+                "Windows 下分隔符与盘符大小写差异仍应命中"
+            );
+        }
     }
 
     // ===== 事务写入（claude 为代表，覆盖备份/清理/无操作） =====

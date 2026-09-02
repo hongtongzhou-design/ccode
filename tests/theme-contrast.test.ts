@@ -165,6 +165,19 @@ test("原生表单控件配色跟随主题，浅色下不被全局 dark 覆盖",
   );
 });
 
+test("PDF 页宿主从全局 dark color-scheme 隔离（WebView2 白屏）", () => {
+  assert.match(
+    css,
+    /\[data-page-num\]\s*\{\s*color-scheme:\s*only light;/,
+    "PDF 页必须锁定 light，不能继承 :root dark",
+  );
+  assert.match(
+    css,
+    /\[data-page-num\]\s*>\s*\.textLayer\s*\{\s*background-color:\s*transparent;/,
+    "textLayer 不得铺 Canvas 白底盖住 canvas",
+  );
+});
+
 /** 取平台覆写块里的令牌值：[data-platform="mac"][data-theme="id"] { ... } */
 function platformTokens(
   platform: string,

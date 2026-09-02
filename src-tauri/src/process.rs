@@ -133,8 +133,11 @@ fn js_entry_from_shim(content: &str) -> Option<String> {
 /// npm.cmd 自身是 Node 安装器的变量化脚本（SET NPM_CLI_JS=...，文本解析拿不到
 /// 入口），但布局固定为 node_modules/npm/bin/npm-cli.js，走特殊 case；
 /// 其余 shim（cmd-shim 包生成，如 codex.cmd）直接解析文本里的 %~dp0 入口。
+///
+/// MCP 分发也走这里：各 CLI 的 stdio server 必须落成 `node + js`，不能把 `.cmd`
+/// 绝对路径写进 claude/codex 配置（CreateProcess 对 .cmd 是 os error 193）。
 #[cfg(windows)]
-fn node_entry_from_cmd_shim(program: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+pub(crate) fn node_entry_from_cmd_shim(program: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     if !is_cmd_batch_shim(program) {
         return None;
     }
@@ -214,6 +217,14 @@ impl BackgroundCommand {
 
     pub fn stderr<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self {
         self.inner.stderr(cfg);
+        self
+    }
+
+    /// 透传 `CommandExt::raw_arg`：复合命令原文直投，绕过 Command::args 的引号加壳。
+    /// 只供「cmd /C + start」这类 Windows 外部终端拉起调用点使用。
+    pub fn raw_arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Self {
+        use std::os::windows::process::CommandExt;
+        self.inner.raw_arg(arg);
         self
     }
 

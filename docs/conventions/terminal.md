@@ -15,7 +15,7 @@
 - **聊天资源入口不自动发送（v3.130）**：聊天 composer 的技能/MCP 菜单点击只插入提示文本并保留焦点，用户可继续补充后按 Enter 发送；不得直接调用发送链路。终端启动栏的技能/MCP 入口继续只写入 PTY 输入缓冲、不自动回车。全局命令面板/页面快捷键忽略 `input`、`textarea`、`select`、`contenteditable` 和 IME 组合输入。
 - **项目 rail 图标语义（v3.129）**：主项目使用 `FolderOpen`；绑定研究流程的工作区使用两位流程序号（01、02…），让步骤先后可扫读；未绑定流程的手动工作区使用 `GitBranch`。不使用抽象斜线或重复 Unicode 符号冒充步骤图标。
 
-- **外部终端安全临时复现（2026-08-21）**：外部恢复/提炼接力不得把 profile 密钥拼进命令、剪贴板、前端 IPC 或普通日志。前端只传明确选中的 `profileId`、模型、provider、会话 ID/提示词等非敏感元数据；缺少 `profileId` 时后端必须 fail-closed，不能静默取第一个配置。后端从 `ProfileStore` 读取密钥，复用 `agents::launch_plan`/`prepare_launch` 生成一次性 wrapper。Unix wrapper 存于 `<config>/ccode/external-launch/`（目录 0700、文件 0600，通过 `/bin/sh` 按路径执行），启动首行自删，失败立即清理，60 秒兜底删除；Windows 使用一次性 PowerShell wrapper。Ghostty 运行中实例使用其原生 AppleScript `new surface configuration`/`new window`：工作目录单独写入 `initial working directory`，先启动 `/bin/sh`，再经 `initial input` 发送带 shell 引号的 wrapper 路径；不能把 `Application Support` 等带空格路径直接放进 `command`。该路径不依赖 System Events 辅助功能权限或剪贴板；未运行实例使用 `open -na`。iTerm/Terminal.app 只接收不含密钥的启动命令。复制命令继续保持全局配置模式，不自动携带 profile 密钥。
+- **外部终端安全临时复现（2026-08-21；2026-08-31 Windows 收口）**：外部恢复/提炼接力不得把 profile 密钥拼进命令、剪贴板、前端 IPC 或普通日志。前端只传明确选中的 `profileId`、模型、provider、会话 ID/提示词等非敏感元数据；缺少 `profileId` 时后端必须 fail-closed，不能静默取第一个配置。后端从 `ProfileStore` 读取密钥，复用 `agents::launch_plan`/`prepare_launch` 生成一次性 wrapper。Unix wrapper 存于 `<config>/ccode/external-launch/`（目录 0700、文件 0600，通过 `/bin/sh` 按路径执行），启动首行自删，失败立即清理，60 秒兜底删除。Windows 由设置页二选一（立即生效）：**cmd**（默认）走 `start "Ccode" /D <cwd> cmd.exe /K <binary> <args>`，密钥在父进程环境块经 start 继承、不写 ps1（命令行超过约 7000 字才写无密钥的 `.cmd`——批处理必须单字节编码：前两行 ASCII + `chcp 65001` 后按 UTF-8 读，禁 UTF-16/带 BOM）；**powershell** 走一次性 UTF-8 BOM 的 `.ps1` wrapper + `start powershell.exe -NoExit -File`。两条都经 **`background_command("cmd")` + `raw_arg` 直投 start**。五个坑都别改回去：① 预加引号的复合命令不能走 `Command::args`（Rust 加壳成 `\"`，cmd 对 /C 后文本不认反斜杠转义，start 把 `\"\"` 当程序名）；② 不能直接 spawn powershell/cmd + CREATE_NEW_CONSOLE（dev 实例从 npm/Git Bash 链路继承的 std 句柄是管道不是控制台，会遗传给子进程——TUI 写进管道、读不到键盘，新窗口只剩黑屏光标、agent 随即退出，grok 实测复现；start 经 ShellExecute 拉起时子进程 std 才挂到自己的新控制台）；③ 启动热路径不要同步 icacls（`%APPDATA%\ccode` 默认 ACL 已是当前用户）；④ **start 的窗口标题必须非空**（空标题下 GetConsoleTitleW 返回 0，旧版 libuv <1.52 的 uv_get_process_title 会 assert(process_title) 直接 abort——kimi 这类内嵌旧运行时的 CLI 必崩，win/util.c:412，实测复现）；⑤ **拉起后不能 output()/pipe 收尾**（start 的子进程继承 cmd 的管道句柄，read-to-EOF 会阻塞到用户关掉外部窗口，同步 command 堵死、整个应用未响应；start 立即返回，只 spawn+wait 收外层 cmd，毫秒级）。外层 cmd CREATE_NO_WINDOW 不可见，可见窗口由 start 创建——这是「用户明确打开外部终端」例外。Ghostty 运行中实例使用其原生 AppleScript `new surface configuration`/`new window`：工作目录单独写入 `initial working directory`，先启动 `/bin/sh`，再经 `initial input` 发送带 shell 引号的 wrapper 路径；不能把 `Application Support` 等带空格路径直接放进 `command`。该路径不依赖 System Events 辅助功能权限或剪贴板；未运行实例使用 `open -na`。iTerm/Terminal.app 只接收不含密钥的启动命令。复制命令继续保持全局配置模式，不自动携带 profile 密钥；Windows 复制的是 PowerShell 方言。
 
 - 「停止」或 agent 退出后必须**自动回落用户登录 shell**（`$SHELL -l`，同 cwd），不死在最终画面；手动 `exit` 不自动
   重开；回落 shell 不带 profile env；agent/shell 共用 `pty.rs` 的 `spawn_tracked`，退出事件按 PTY 类型区分。
@@ -368,6 +368,16 @@
   页码居中 grid 三列 + ▦ 圈选右置）——不再是滚动层内 sticky 浮块（实测挡正文与圈选画面）；
   **三栏顶条统一 h-8 + 底部 hairline**（FilePreviewEditor 工具条同步改成这个规格，栏间才严丝合缝）；
   圈选 Esc/手势语义不变。
+- **PDF 画布不得在深色 color-scheme 下走不透明 2d**（v3.154，Windows WebView2 实测白屏）：pdf.js 默认
+  `getContext("2d", { alpha:false })`，Chromium 在 `:root { color-scheme: dark }` 下把不透明 canvas 合成白块；
+  pdf_viewer.css 的 `.textLayer { color-scheme: only light; inset: 0 }` 再给盖住 canvas 的层铺 Canvas 白底。
+  渲染前必须先以 `{ alpha: true, willReadFrequently: true }` 绑定上下文（后续 getContext 忽略新属性），
+  页宿主 `[data-page-num]` 锁定 `color-scheme: only light`，`.textLayer` 保持透明底。Windows 另关
+  `isImageDecoderSupported`（ImageDecoder 会把部分 JPEG/JBIG2 解成空白位图）；macOS 保持默认加速。
+  **适配宽度禁止拿 ResizeObserver 当强制重挂信号**：经典滚动条出现会让 `clientWidth` 跳约 17px，
+  `key` 绑 renderKey 会拆掉 canvas 振荡闪白。scale 变化已足够触发重绘；新 scale 换算回页面宽度差不到半像素
+  保持原值（`nextFitScale`，`src/reader.ts`）；滚动容器加 `scrollbar-gutter: stable`。勿把 renderKey 写进
+  React `key`，勿在 RO 回调里无条件 bump。
 
 ## 其余终端工作台条目
 

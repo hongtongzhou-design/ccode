@@ -666,6 +666,11 @@ fn install_specs(agent_id: &str) -> Vec<InstallSpec> {
 
 /// 按工具可用性挑第一个候选；available 可注入以便测试
 fn pick_install(agent_id: &str, available: &dyn Fn(&str) -> bool) -> Option<InstallSpec> {
+    // Cursor 官方安装渠道只有 curl|bash，Windows 上既无 npm 包也无 winget；
+    // 即便 Git Bash 能跑脚本，落点 ~/.local/bin 的 symlink 也无法被 ConPTY spawn。
+    if cfg!(windows) && agent_id == "cursor" {
+        return None;
+    }
     install_specs(agent_id).into_iter().find(|s| match s.tool {
         "script" => available("bash") && available("curl"),
         tool => available(tool),
@@ -696,9 +701,18 @@ fn install_agent_sync(app: &AppHandle, agent_id: &str) -> Result<UpdateResultDto
         });
     }
     let available = |tool: &str| agents::resolve_binary(tool).is_some();
+    if cfg!(windows) && agent_id == "cursor" {
+        return Ok(UpdateResultDto {
+            ok: false,
+            output: "Cursor CLI 官方仅支持 macOS/Linux。Windows 请在 WSL 中安装 cursor-agent，或改用其他 Agent。".into(),
+            method: "none".into(),
+            version_before: None,
+            version_after: None,
+        });
+    }
     let Some(s) = pick_install(agent_id, &available) else {
         let tools = if cfg!(windows) {
-            "brew / npm / winget / uv / curl"
+            "npm / winget / uv / curl"
         } else {
             "brew / npm / uv / curl"
         };
@@ -1238,6 +1252,14 @@ mod tests {
         {
             let no_brew_npm = |t: &str| !matches!(t, "brew" | "npm");
             assert!(pick_install("codex", &no_brew_npm).is_none());
+        }
+        #[cfg(windows)]
+        {
+            let all = |_: &str| true;
+            assert!(
+                pick_install("cursor", &all).is_none(),
+                "Windows 上不得把 cursor 的 curl|bash 脚本亮成可执行安装方式"
+            );
         }
     }
 

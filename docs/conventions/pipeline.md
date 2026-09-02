@@ -10,6 +10,7 @@
 - **合并拖底（gitignored 产物）**：git merge 成功后、归档前，把工作区未跟踪/被忽略的 `papers/**`、项目产物目录、`output/**` 拷到主仓同相对路径（已存在不覆盖、失败不阻断合并）。防止 Agent 把 PDF/数据写在工作区导致下一步读不到。
 - **工作区创建是补偿事务**：先以 SQLite `BEGIN IMMEDIATE` 原子预留端口并写 `creating`，再创建 worktree/复制文件/激活；
   任一步失败必须移除 worktree、prune、删分支、删 creating 行并释放端口。复制错误不得忽略；setup 失败维持非阻断。
+  Windows 上 setup/archive 钩子走 Git Bash（`resolve_git_bash`，不认 System32\bash.exe），找不到 Git Bash 时明确报错，禁止 `cmd /C` 逐字执行 bash 脚本。
   `ready_to_merge` 必须要求 `ahead > 0`，空工作区禁止合并。
 - **create_workspace 落库 repo_path 统一 canonical 口径**：`create_impl_with_copy` 在 expand_tilde 后过
   `projects::canonical_key`（与 register_project 同口径），落库/分支检测/worktree 路径派生全用 canonical 路径——
@@ -104,8 +105,9 @@
   `output/`；人工导入 `papers/` 强制项目根；合并时把工作区未跟踪的这三类目录拷到主仓（已有不覆盖）。
   **第六套「LaTeX 论文」**：有成稿则转写（排版后端，不改学术内容），无成稿才从笔记从零写。搭建骨架 → 章节写作 → 编译与排错 → 定稿导出，
   源稿产物 `manuscript/main.tex`，编译 PDF 统一落在 `output/main.pdf`；run 脚本 `render-pdf` 各步共用同一常量
-  （tectonic 优先 → latexmk 回落 → 都没有打印安装引导 + exit 1；应用内不做安装器），开步时经既有
-  ws_settings 机制写入 `.ccode/settings.toml`；期刊官方模板 zip 走可选 before 人工事项解压到
+  （tectonic 优先 → latexmk 回落 → 都没有打印跨平台安装引导 + exit 1；应用内不做安装器）。
+  Windows 上 purpose=script 的 PTY 走 Git Bash 执行该 bash 脚本（交互 shell 仍是 PowerShell）；
+  开步时经既有 ws_settings 机制写入 `.ccode/settings.toml`；期刊官方模板 zip 走可选 before 人工事项解压到
   `manuscript/template/` 由 agent 读说明适配（无内置解析器）；文档类（elsarticle/IEEEtran/achemso/ctexart/
   学位论文通用架）与 natbib/biblatex 为开工前决策项；引用沿用 references.bib（`\cite{bib键}`），
   章节写作挂 `research-writing`（可选）+ `bib-check`。可吃上游 `paper-final` / `review-final` / `thesis-final` / `draft.md`。

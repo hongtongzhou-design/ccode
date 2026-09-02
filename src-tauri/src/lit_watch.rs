@@ -138,8 +138,9 @@ fn gated_root(project_root: &str) -> Result<PathBuf, String> {
 fn resolve_inside(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let p = root.join(rel);
     if p.exists() || p.is_symlink() {
-        let c = fs::canonicalize(&p).map_err(|e| format!("路径无效（{rel}）: {e}"))?;
-        if !c.starts_with(root) {
+        let c = crate::paths::canonicalize_plain(&p)
+            .map_err(|e| format!("路径无效（{rel}）: {e}"))?;
+        if !crate::paths::path_within_path(&c, root) {
             return Err(format!("{rel} 指向项目目录之外，拒绝访问"));
         }
     }
@@ -759,12 +760,15 @@ async fn fetch_pdf_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// papers/ 目录：不存在则创建，canonical 双校验在根内（堵 symlink 逃逸）
+/// papers/ 目录：不存在则创建，canonical 双校验在根内（堵 symlink 逃逸）。
+/// 必须剥 verbatim：root 来自 ensure_task_project_root（已 strip），裸 canonicalize
+/// 的 `\\?\` 与普通根按分量永不相等，下载/登记会误拒。
 fn papers_dir(root: &Path) -> Result<PathBuf, String> {
     let papers = root.join("papers");
     fs::create_dir_all(&papers).map_err(|e| format!("创建 papers 目录失败: {e}"))?;
-    let canon = fs::canonicalize(&papers).map_err(|e| format!("papers 目录无效: {e}"))?;
-    if !canon.starts_with(root) {
+    let canon = crate::paths::canonicalize_plain(&papers)
+        .map_err(|e| format!("papers 目录无效: {e}"))?;
+    if !crate::paths::path_within_path(&canon, root) {
         return Err("papers 指向项目目录之外，拒绝写入".into());
     }
     Ok(canon)
@@ -988,9 +992,24 @@ mod tests {
     fn tmpdir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ccode-litwatch-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        // 生产路径下 root 恒为 canonical（ensure_task_project_root），测试同口径：
-        // macOS 的 temp_dir 在 /var（软链到 /private/var），不 canonicalize 会让 starts_with 双校验误杀
-        dir.canonicalize().unwrap()
+        // 生产路径下 root 恒为剥过 verbatim 的 canonical（ensure_task_project_root），测试同口径
+        crate::paths::canonicalize_plain(&dir).unwrap()
+    }
+
+    #[test]
+    fn papers_dir_strips_verbatim_and_stays_inside() {
+        let root = tmpdir("papers-verb");
+        let papers = papers_dir(&root).unwrap();
+        let text = papers.to_string_lossy();
+        assert!(
+            !text.starts_with(r"\\?\"),
+            "papers_dir 不得返回 verbatim 前缀: {text}"
+        );
+        assert!(
+            crate::paths::path_within_path(&papers, &root),
+            "papers 必须落在项目根内: {papers:?} / {root:?}"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     fn write(root: &Path, rel: &str, text: &str) {

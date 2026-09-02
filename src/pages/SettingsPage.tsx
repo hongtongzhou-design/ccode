@@ -93,7 +93,11 @@ const EXTERNAL_TERMINALS: { id: string; label: string }[] = (() => {
       { id: "iterm", label: "iTerm2" },
       { id: "terminal", label: "终端 Terminal.app" },
     ];
-  if (p.startsWith("Win")) return [{ id: "cmd", label: "cmd 新窗口" }];
+  if (p.startsWith("Win"))
+    return [
+      { id: "cmd", label: "命令提示符 (cmd)" },
+      { id: "powershell", label: "PowerShell" },
+    ];
   return [
     { id: "auto", label: "自动（按优先级探测）" },
     { id: "gnome-terminal", label: "GNOME Terminal" },
@@ -102,6 +106,13 @@ const EXTERNAL_TERMINALS: { id: string; label: string }[] = (() => {
     { id: "xterm", label: "XTerm" },
   ];
 })();
+
+/** 下拉当前值必须落在本平台选项里：Windows 旧存档 auto 回落到 cmd。 */
+function externalTerminalSelectValue(stored: string | undefined): string {
+  const ids = EXTERNAL_TERMINALS.map((t) => t.id);
+  if (stored && ids.includes(stored)) return stored;
+  return ids[0] ?? "auto";
+}
 
 /** 内置 AI 功能按功能独立配置的行（key 与后端 ai.rs FN_* 常量对应） */
 const AI_FN_ROWS: { key: string; label: string }[] = [
@@ -1560,11 +1571,11 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="外部终端"
-          hint="对话页「⇗ 外部恢复」使用的终端应用，立即生效"
+          hint="对话页「⇗ 外部恢复」使用的终端应用，立即生效。Windows 可在命令提示符和 PowerShell 之间切换：cmd 不经过 PowerShell，通常更快"
         >
           <select
             className={fieldFixed}
-            value={settings?.externalTerminal ?? "auto"}
+            value={externalTerminalSelectValue(settings?.externalTerminal)}
             onChange={(e) => patch({ externalTerminal: e.target.value })}
           >
             {EXTERNAL_TERMINALS.map((t) => (

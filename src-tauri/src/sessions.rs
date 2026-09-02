@@ -1153,9 +1153,14 @@ fn gemini_file_meta(
             None
         }
     });
-    // 项目归属：slug 映射 → metadata.directories，都拿不到就跳过该会话（不猜 slug）
+    // 项目归属：slug 映射 → metadata.directories。活会话都拿不到就跳过（不猜 slug）；
+    // pin 快照允许占位，apply_meta 再用 session_meta.project_path 回填。
     let slug = path.parent()?.parent()?.file_name()?.to_string_lossy().into_owned();
-    let project_path = slug_to_path.get(&slug).cloned().or(directories)?;
+    let project_path = match slug_to_path.get(&slug).cloned().or(directories) {
+        Some(p) => p,
+        None if !alive => "已固定".into(),
+        None => return None,
+    };
     let session_id = session_id
         .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_default();
@@ -2530,14 +2535,64 @@ fn grok_tail_state(lines: &[String]) -> &'static str {
 }
 
 
-/// OPENCODE_DB 环境变量优先，其次 ~/.local/share/opencode/opencode.db
-fn opencode_db_path() -> Option<PathBuf> {
+/// OpenCode 数据目录候选：OPENCODE_DB 优先；Windows 再探 %LOCALAPPDATA%\opencode
+/// 与 %APPDATA%\opencode；最后回落 unix 形态 ~/.local/share/opencode。
+fn opencode_db_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
     if let Ok(p) = std::env::var("OPENCODE_DB") {
         if !p.is_empty() {
-            return Some(PathBuf::from(p));
+            out.push(PathBuf::from(p));
         }
     }
-    dirs::home_dir().map(|h| h.join(".local").join("share").join("opencode").join("opencode.db"))
+    #[cfg(windows)]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            out.push(local.join("opencode").join("opencode.db"));
+        }
+        if let Some(roaming) = dirs::data_dir() {
+            out.push(roaming.join("opencode").join("opencode.db"));
+        }
+    }
+    if let Some(h) = dirs::home_dir() {
+        out.push(
+            h.join(".local")
+                .join("share")
+                .join("opencode")
+                .join("opencode.db"),
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(crate::paths::path_key(&p.to_string_lossy())));
+    out
+}
+
+#[cfg(test)]
+fn opencode_db_path() -> Option<PathBuf> {
+    let cands = opencode_db_candidates();
+    cands
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        .or_else(|| cands.into_iter().next())
+}
+
+fn is_known_opencode_db(path: &Path) -> bool {
+    let got = crate::paths::path_key(&path.to_string_lossy());
+    let got_canon = path
+        .canonicalize()
+        .ok()
+        .map(|p| crate::paths::path_key(&p.to_string_lossy()));
+    opencode_db_candidates().iter().any(|c| {
+        let k = crate::paths::path_key(&c.to_string_lossy());
+        if k == got {
+            return true;
+        }
+        let c_canon = c
+            .canonicalize()
+            .ok()
+            .map(|p| crate::paths::path_key(&p.to_string_lossy()));
+        matches!((got_canon.as_ref(), c_canon.as_ref()), (Some(a), Some(b)) if a == b)
+    })
 }
 
 /// WAL 模式只读打开 + busy_timeout；库不存在/打不开都返回 None（扫描时跳过）
@@ -2968,8 +3023,21 @@ fn opencode_parse_snapshot(v: &Value) -> Vec<ChatMessageDto> {
 // ----- 旧版（pre-v1.2）storage/ 扁平 JSON -----
 // 更老的 project/<slug>/storage/... 布局不兼容（此处只读 v1.1 的 storage/ 结构）
 
-fn opencode_legacy_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".local").join("share").join("opencode").join("storage"))
+fn opencode_legacy_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    #[cfg(windows)]
+    if let Some(local) = dirs::data_local_dir() {
+        roots.push(local.join("opencode").join("storage"));
+    }
+    if let Some(h) = dirs::home_dir() {
+        roots.push(
+            h.join(".local")
+                .join("share")
+                .join("opencode")
+                .join("storage"),
+        );
+    }
+    roots
 }
 
 /// legacy 目录下的一层 .json 文件（collect_files 只认 .jsonl[.zst]，不能复用）
@@ -3232,14 +3300,19 @@ pub fn scan_sessions() -> ScanResult {
             }
         }
         // OpenCode：v1.2+ 读共享 SQLite（WAL 只读）；旧版读 storage/ 扁平 JSON
-        if let Some(db) = opencode_db_path() {
+        let mut found_db = false;
+        for db in opencode_db_candidates() {
             if db.exists() {
                 out.extend(opencode_scan_db(&db));
-            } else if let Some(storage) = opencode_legacy_root() {
-                out.extend(opencode_scan_legacy(&storage));
+                found_db = true;
             }
-        } else if let Some(storage) = opencode_legacy_root() {
-            out.extend(opencode_scan_legacy(&storage));
+        }
+        if !found_db {
+            for storage in opencode_legacy_roots() {
+                if storage.exists() {
+                    out.extend(opencode_scan_legacy(&storage));
+                }
+            }
         }
         // CodeBuddy：projects/<slug>/<uuid>.jsonl（深度 2 恰好到文件）
         let mut codebuddy_files = Vec::new();
@@ -3580,6 +3653,7 @@ pub(crate) fn migrate_session_meta(conn: &Connection) {
         "task_id TEXT",
         "step_name TEXT",
         "profile_id TEXT",
+        "project_path TEXT",
     ] {
         let _ = conn.execute_batch(&format!("ALTER TABLE session_meta ADD COLUMN {col}"));
     }
@@ -3598,12 +3672,14 @@ struct MetaRow {
     /// 步骤认领固化后的步骤归属（「跟 AI 商量一下」等跑在项目根、落不到 worktree 的会话）
     step_name: Option<String>,
     profile_id: Option<String>,
+    /// pin 时固化的项目归属（gemini 快照脱离 slug 目录后靠这一列回填）
+    project_path: Option<String>,
 }
 
 fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
     let mut map = HashMap::new();
     let Ok(mut stmt) = conn
-        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session, task_id, step_name, profile_id FROM session_meta")
+        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session, task_id, step_name, profile_id, project_path FROM session_meta")
     else {
         return map;
     };
@@ -3621,10 +3697,11 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
             r.get::<_, Option<String>>(9)?,
             r.get::<_, Option<String>>(10)?,
             r.get::<_, Option<String>>(11)?,
+            r.get::<_, Option<String>>(12)?,
         ))
     });
     if let Ok(rows) = rows {
-        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session, task_id, step_name, profile_id) in rows.flatten() {
+        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session, task_id, step_name, profile_id, project_path) in rows.flatten() {
             map.insert(
                 (agent, sid),
                 MetaRow {
@@ -3637,6 +3714,7 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
                     task_id,
                     step_name,
                     profile_id,
+                    project_path,
                 },
             );
         }
@@ -4039,6 +4117,12 @@ fn apply_meta(
                 s.step_name = row.step_name.clone();
             }
             s.profile_id = row.profile_id.clone();
+            // 快照脱离原目录后归属可能丢失：用 pin 时写入的 project_path 回填
+            if !s.alive {
+                if let Some(p) = row.project_path.as_ref().filter(|p| !p.is_empty()) {
+                    s.project_path = p.clone();
+                }
+            }
         }
     }
 }
@@ -4736,6 +4820,15 @@ pub async fn pin_session(agent: String, session_id: String, file_path: String) -
         .map_err(|e| e.to_string())?
 }
 
+fn infer_pin_project_path(agent: &str, session_id: &str) -> Option<String> {
+    cached_scan()
+        .sessions
+        .iter()
+        .find(|s| s.agent == agent && s.session_id == session_id)
+        .map(|s| s.project_path.clone())
+        .filter(|p| !p.is_empty() && p != "已固定")
+}
+
 fn pin_session_impl(agent: &str, session_id: &str, file_path: &str) -> Result<(), String> {
     if agent == "opencode" {
         // OpenCode 没有单会话文件：从共享 db 导出自包含 JSON 快照
@@ -4751,9 +4844,9 @@ fn pin_session_impl(agent: &str, session_id: &str, file_path: &str) -> Result<()
         fs::write(&dst, text).map_err(|e| format!("写入快照失败: {e}"))?;
         let conn = open_db()?;
         conn.execute(
-            "INSERT INTO session_meta(agent, session_id, pinned, pinned_at) VALUES(?1, ?2, 1, ?3)
-             ON CONFLICT(agent, session_id) DO UPDATE SET pinned=1, pinned_at=?3",
-            params![agent, session_id, now_iso()],
+            "INSERT INTO session_meta(agent, session_id, pinned, pinned_at, project_path) VALUES(?1, ?2, 1, ?3, ?4)
+             ON CONFLICT(agent, session_id) DO UPDATE SET pinned=1, pinned_at=?3, project_path=COALESCE(excluded.project_path, session_meta.project_path)",
+            params![agent, session_id, now_iso(), infer_pin_project_path(agent, session_id)],
         )
         .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
         invalidate_scan_cache();
@@ -4771,9 +4864,9 @@ fn pin_session_impl(agent: &str, session_id: &str, file_path: &str) -> Result<()
     fs::copy(&src, &dst).map_err(|e| format!("复制快照失败: {e}"))?;
     let conn = open_db()?;
     conn.execute(
-        "INSERT INTO session_meta(agent, session_id, pinned, pinned_at) VALUES(?1, ?2, 1, ?3)
-         ON CONFLICT(agent, session_id) DO UPDATE SET pinned=1, pinned_at=?3",
-        params![agent, session_id, now_iso()],
+        "INSERT INTO session_meta(agent, session_id, pinned, pinned_at, project_path) VALUES(?1, ?2, 1, ?3, ?4)
+         ON CONFLICT(agent, session_id) DO UPDATE SET pinned=1, pinned_at=?3, project_path=COALESCE(excluded.project_path, session_meta.project_path)",
+        params![agent, session_id, now_iso(), infer_pin_project_path(agent, session_id)],
     )
     .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
     invalidate_scan_cache();
@@ -5203,22 +5296,17 @@ fn delete_source_file(file_path: &str) -> Result<bool, String> {
         if !deletable_session_file(&p, &dirs) {
             return Err(format!("拒绝删除非会话文件（不在会话数据目录或后缀不符）: {c}"));
         }
-        fs::remove_file(&p).map_err(|e| format!("删除 {c} 失败: {e}"))?;
+        trash::delete(&p).map_err(|e| format!("删除 {c} 失败: {e}"))?;
         deleted = true;
     }
     Ok(deleted)
 }
 
 /// OpenCode v1.2+ 的会话在共享 SQLite 里：读写连接 + 事务删 session/message/part 行
-/// （只读扫描路径不变，仅删除开读写连接）。db_path 来自前端，只接受 opencode_db_path()
-/// 指向的库，防把任意 SQLite 文件当会话库删
+/// （只读扫描路径不变，仅删除开读写连接）。db_path 来自前端，只接受
+/// `is_known_opencode_db` 候选路径之一，防把任意 SQLite 文件当会话库删
 fn delete_opencode_rows(db_path: &Path, session_id: &str) -> Result<(), String> {
-    let expected = opencode_db_path().ok_or("无法确定 OpenCode 数据库路径")?;
-    let canon = db_path
-        .canonicalize()
-        .map_err(|e| format!("OpenCode 数据库不可访问: {e}"))?;
-    let expected = expected.canonicalize().unwrap_or(expected);
-    if canon != expected {
+    if !is_known_opencode_db(db_path) {
         return Err("拒绝操作未知的 OpenCode 数据库".into());
     }
     delete_opencode_rows_impl(db_path, session_id)
@@ -6231,6 +6319,7 @@ mod tests {
                 task_id: None,
                 step_name: None,
                 profile_id: None,
+                project_path: None,
             },
         );
         apply_meta(&mut merged, &members, &meta);
@@ -6745,7 +6834,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = opencode_fixture_db(&dir);
-        // 非 opencode_db_path() 指向的库：整批拒绝且行不动
+        // 非已知 OpenCode 库候选：整批拒绝且行不动
         let err = delete_opencode_rows(&db, "ses_1").unwrap_err();
         assert!(err.contains("拒绝"), "未知库必须拒绝: {err}");
         assert!(!opencode_parse_db(&db, "ses_1").is_empty(), "被拒绝后行必须还在");
@@ -6762,6 +6851,37 @@ mod tests {
         );
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opencode_db_candidates_include_platform_paths() {
+        let cands = opencode_db_candidates();
+        assert!(!cands.is_empty());
+        assert!(opencode_db_path().is_some());
+        #[cfg(windows)]
+        {
+            if let Some(local) = dirs::data_local_dir() {
+                let root = local.join("opencode");
+                assert!(
+                    cands.iter().any(|p| crate::paths::path_within_path(p, &root)),
+                    "Windows 应探 %LOCALAPPDATA%\\opencode: {cands:?}"
+                );
+            }
+        }
+        if let Some(h) = dirs::home_dir() {
+            assert!(
+                cands.iter().any(|p| p.ends_with(
+                    std::path::Path::new(".local")
+                        .join("share")
+                        .join("opencode")
+                        .join("opencode.db")
+                ) || crate::paths::path_within_path(
+                    p,
+                    &h.join(".local").join("share").join("opencode")
+                )),
+                "应保留 unix 形态回落: {cands:?}"
+            );
+        }
     }
 
     #[test]
