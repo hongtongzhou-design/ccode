@@ -3,12 +3,11 @@ import type { SessionMetaDto } from "../types";
 import { AGENTS } from "../types";
 import { agentBrandBadgeStyle } from "../agent-colors";
 import { relTime } from "../rel-time";
-import { sessionDisplayTitle, sessionHomeLabel } from "../quick-chat";
+import { sessionDisplayTitle } from "../quick-chat";
 
 /**
- * 侧栏「快速开聊」右键 = 随手聊历史浮层（v3.93 用户拍板：勾了「下次直接开聊」的用户
- * 左键直达终端、永远看不到弹层里的历史区，右键是她们的回看口）。
- * 行样式与弹层「随手聊历史」完全一致（用户拍板）：品牌胶囊 + 标题 + 归属 · 时间。
+ * 侧栏「快速开聊」右键 = 继续上次（scratch 里的随手聊）。
+ * 左键直达时看不到弹层历史，右键是回看口。行样式与弹层「继续上次」一致。
  * 定位/关闭语义与 ContextMenu 一致：点外/Esc/滚动即关，实测后钳制在视口内。
  */
 export default function QuickChatHistoryMenu({
@@ -20,8 +19,7 @@ export default function QuickChatHistoryMenu({
 }: {
   x: number;
   y: number;
-  /** null = 还在读取 */
-  sessions: SessionMetaDto[] | null;
+  sessions: SessionMetaDto[];
   onPick: (s: SessionMetaDto) => void;
   onClose: () => void;
 }) {
@@ -74,14 +72,12 @@ export default function QuickChatHistoryMenu({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="border-b border-hairline px-3.5 py-2 text-xs text-l3">
-          随手聊历史
+          继续上次
         </div>
         <ul className="max-h-80 space-y-0.5 overflow-auto py-1">
-          {sessions === null ? (
-            <li className="px-3.5 py-3 text-xs text-l4">读取中…</li>
-          ) : sessions.length === 0 ? (
+          {sessions.length === 0 ? (
             <li className="px-3.5 py-3 text-xs text-l4">
-              还没有随手聊的会话
+              还没有 ~/ccode/scratch 里的随手聊
             </li>
           ) : (
             sessions.map((s) => (
@@ -105,7 +101,7 @@ export default function QuickChatHistoryMenu({
                     {sessionDisplayTitle(s)}
                   </span>
                   <span className="shrink-0 text-micro text-l4">
-                    {sessionHomeLabel(s)} · {relTime(s.updatedAt)}
+                    {relTime(s.updatedAt)}
                   </span>
                 </button>
               </li>

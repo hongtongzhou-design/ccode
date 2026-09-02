@@ -346,6 +346,81 @@ export interface SessionMetaDto {
   profileId: string | null;
 }
 
+export interface SessionSearchHitDto {
+  agent: string;
+  sessionId: string;
+  score: number;
+  snippet: string | null;
+  matchedKeywords: string[];
+  /** jsonl 字节偏移 / OpenCode time_created；没有正文命中时为 null */
+  around: number | null;
+  matchTimestamp: string | null;
+  matchRole: string | null;
+}
+
+export interface SessionExportKey {
+  agent: string;
+  sessionId: string;
+  filePath: string;
+  title: string | null;
+  projectPath: string;
+  provider?: string | null;
+  pinned: boolean;
+  customTitle: string | null;
+  tags: string[];
+  summary: string | null;
+}
+
+export interface ImportPreviewEntryDto {
+  index: number;
+  agent: string;
+  sessionId: string;
+  title: string | null;
+  projectPath: string;
+  /** 会话文件里的真实 cwd；工作区会话可能与 projectPath（主仓）不同 */
+  cwd: string | null;
+  provider: string | null;
+  status: "ok" | "needs-path" | "conflict" | "unsupported" | string;
+  reason: string | null;
+  needsClientRegister: boolean;
+}
+
+export interface CodexBindingDto {
+  id: string;
+  name: string;
+  baseUrl: string | null;
+  hasKey: boolean;
+}
+
+export interface ImportPreviewDto {
+  exportedAt: string;
+  appVersion: string;
+  entries: ImportPreviewEntryDto[];
+  codexBindings: CodexBindingDto[];
+}
+
+export interface ImportDecisionDto {
+  index: number;
+  skip: boolean;
+  targetDir: string | null;
+}
+
+export interface ImportItemReportDto {
+  index: number;
+  agent: string;
+  sessionId: string;
+  status: string;
+  reason: string | null;
+}
+
+export interface ImportReportDto {
+  imported: number;
+  skipped: number;
+  failed: number;
+  items: ImportItemReportDto[];
+  registerNote: string | null;
+}
+
 /** 接力目标（handoff_targets）：各 CLI 的安装与启动注入支持情况 */
 export interface HandoffTargetDto {
   id: string;

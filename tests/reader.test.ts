@@ -11,6 +11,8 @@ import {
   clampReaderPct,
   clampReaderTlPct,
   classifyMdHref,
+  fileUrlToPath,
+  mdImageAbsPath,
   escapeGlossaryCell,
   findGlossaryMatches,
   formatPdfExcerptPrompt,
@@ -30,6 +32,7 @@ import {
   relMdLinkPath,
   renderGlossaryTable,
   resolveMdPath,
+  rewriteMdImageHtml,
   splitGlossaryRow,
   stripMdHrefSuffix,
   translationSavedToast,
@@ -203,6 +206,39 @@ test("bytesToBase64 与 atob 互逆（分块编码）", () => {
   const bin = atob(b64);
   assert.equal(bin.length, bytes.length);
   assert.equal(bin.charCodeAt(65536), bytes[65536]);
+});
+
+test("rewriteMdImageHtml 把待加载图换成占位 span，避免 WebView 拉相对路径", () => {
+  const html = rewriteMdImageHtml(
+    `<p><img src="./demo.gif" alt="演示"><img src="https://x/a.png"></p>`,
+  );
+  assert.equal(/<img\b/i.test(html), false);
+  assert.match(html, /data-md-src="\.\/demo\.gif"/);
+  assert.match(html, /data-md-alt="演示"/);
+  assert.match(html, /data-md-src="https:\/\/x\/a\.png"/);
+  assert.match(html, /md-img-pending/);
+  assert.equal(
+    rewriteMdImageHtml(`<img src="data:image/png;base64,xx">`),
+    `<img src="data:image/png;base64,xx">`,
+  );
+});
+
+test("fileUrlToPath / mdImageAbsPath", () => {
+  assert.equal(fileUrlToPath("file:///Users/a/x.png"), "/Users/a/x.png");
+  assert.equal(fileUrlToPath("file:///C:/a/x.png"), "C:/a/x.png");
+  assert.equal(fileUrlToPath("https://a/x.png"), null);
+  assert.equal(
+    mdImageAbsPath("./demo.gif", "/proj/readme.md"),
+    "/proj/demo.gif",
+  );
+  assert.equal(mdImageAbsPath("https://a/x.gif", "/proj/readme.md"), null);
+  assert.equal(
+    mdImageAbsPath(
+      "/Users/u/Desktop/uTools/%E6%95%88%E6%9E%9C%E6%BC%94%E7%A4%BA/%E6%BC%94%E7%A4%BA1.png",
+      "/Users/u/Desktop/uTools/uTools.md",
+    ),
+    "/Users/u/Desktop/uTools/效果演示/演示1.png",
+  );
 });
 
 test("classifyMdHref 锚点/外链/其它协议/本地路径", () => {

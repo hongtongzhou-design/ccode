@@ -995,6 +995,8 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
             out.push(h.join("bin"));
             out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
             out.push(h.join(".grok/bin")); // Grok Build 官方安装器（x.ai/cli/install.sh）
+            out.push(h.join(".volta/bin")); // Volta（node 版本管理器）固定 shim 目录
+            out.push(h.join(".local/share/mise/shims")); // mise（node 版本管理器）固定 shim 目录
         }
         out.push("/opt/homebrew/bin".into()); // Apple Silicon brew
         out.push("/usr/local/bin".into()); // Intel brew / 手动安装
@@ -1006,6 +1008,8 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
             out.push(h.join(".local/bin"));
             out.push(h.join(".kimi-code/bin")); // Kimi Code 新版官方安装器
             out.push(h.join(".grok/bin")); // Grok Build 官方安装器
+            out.push(h.join(".volta/bin")); // Volta（node 版本管理器）固定 shim 目录
+            out.push(h.join(".local/share/mise/shims")); // mise（node 版本管理器）固定 shim 目录
         }
         out.push("/usr/local/bin".into());
     }
@@ -1030,6 +1034,12 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
         for key in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
             if let Some(root) = std::env::var_os(key) {
                 out.push(std::path::PathBuf::from(root).join("nodejs"));
+            }
+        }
+        // Git for Windows（winget Git.Git / 官方安装器）默认落点
+        for key in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(root) = std::env::var_os(key) {
+                out.push(std::path::PathBuf::from(root).join("Git").join("cmd"));
             }
         }
     }

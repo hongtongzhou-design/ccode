@@ -42,6 +42,15 @@ struct TxAction {
 static GLOBAL_CONFIG_MUTEX: Mutex<()> = Mutex::new(());
 
 /// 与 apply_profile_global 同一口径：选中模型求交后再 plan。
+pub(crate) fn profile_for_register(
+    store: &ProfileStore,
+    profile_id: &str,
+) -> Result<(Profile, String), String> {
+    let profile = profile_for_global_write(store, profile_id)?;
+    let key = crate::profiles::get_key_for_profile(&profile)?.ok_or("该配置没有已保存的密钥")?;
+    Ok((profile, key))
+}
+
 fn profile_for_global_write(store: &ProfileStore, profile_id: &str) -> Result<Profile, String> {
     let mut profile = store.get_with_model(profile_id, None)?;
     let first = profile.models.first().cloned();
@@ -469,6 +478,9 @@ fn patch_codex_config(
     }
     if let Some(t) = ccode.as_table_mut() {
         t.remove("env_key");
+        // 「注册到客户端」写入的静态认证头一并清掉：两条认证路线互斥
+        // （requires_openai_auth 与静态 Authorization 并存时的优先级未实证）
+        t.remove("http_headers");
     }
     ccode["requires_openai_auth"] = value(true);
     ccode["wire_api"] = value("responses");
@@ -489,10 +501,17 @@ fn patch_codex_config(
 /// 「注册到 Codex 客户端（不切换默认）」的 config.toml 补丁：只写 provider 定义块，
 /// 顶层 model_provider/model 一律不动——matrix §2：[model_providers.x] 只有显式设为
 /// 默认才接管请求；客户端续聊会话只需要定义可查（查不到才报「Model provider not found」）
+///
+/// 认证走块内静态 http_headers.Authorization（2026-09-02 本机 0.151.0 实测：无 auth.json /
+/// env_key / requires_openai_auth 时 codex 照常发请求并只带静态头；auth.json 里有另一把
+/// key 也不会被顶用）。不写 auth.json——OPENAI_API_KEY 是单槽共享凭证，写它会顶掉客户端
+/// 自己的 API-Key 登录态（用户实测自动退出登录）。代价 = 密钥明文落 config.toml（codex
+/// 无通用插值、客户端读不到 env 引用，静态头是唯一通道），属「设为全局」同类先例
 fn patch_codex_config_register(
     existing: Option<&str>,
     base_url: Option<&str>,
     provider_id: &str,
+    key: &str,
 ) -> Result<String, String> {
     use toml_edit::value;
     let mut doc = parse_toml_doc(existing)?;
@@ -503,11 +522,14 @@ fn patch_codex_config_register(
         blk["base_url"] = value(u);
     }
     if let Some(t) = blk.as_table_mut() {
+        // 旧版注册/「设为全局」遗留的认证键清掉：env_key 客户端读不到 env；
+        // requires_openai_auth 与静态头并存时的优先级未实证，两条认证路线互斥
         t.remove("env_key");
+        t.remove("requires_openai_auth");
     }
-    // 与「设为全局」同口径：认证走 auth.json 的 OPENAI_API_KEY（客户端是 GUI 进程，
-    // 读不到 shell 环境变量，env_key 引用在客户端解析不到）
-    blk["requires_openai_auth"] = value(true);
+    let mut headers = toml_edit::Table::new();
+    headers["Authorization"] = value(format!("Bearer {key}"));
+    blk["http_headers"] = toml_edit::Item::Table(headers);
     blk["wire_api"] = value("responses");
     Ok(doc.to_string())
 }
@@ -1557,16 +1579,36 @@ pub async fn apply_profile_global(
     result
 }
 
-/// 注册到 Codex 客户端（不切换默认渠道）：只写 provider 定义块与 auth.json 密钥，
-/// 之后 Ccode 里此网关发起的会话可在 Codex 桌面客户端直接续聊（深链 codex://threads/<id>）。
-/// 与「设为全局」共用备份/原子写/事务回滚，后悔走「撤销上次写入」；
-/// 不 record_active_global——没有切换默认渠道，不产生「全局生效」语义
+/// 注册到 Codex 客户端（不切换默认渠道）：只写 config.toml 的 provider 定义块
+/// （含块内静态 http_headers 认证，**不动 auth.json**——单槽密钥是客户端自身登录态的
+/// 凭证），之后 Ccode 里此网关发起的会话可在 Codex 桌面客户端直接续聊（深链
+/// codex://threads/<id>）。与「设为全局」共用备份/原子写/事务回滚，后悔走
+/// 「撤销上次写入」；不 record_active_global——没有切换默认渠道，不产生「全局生效」语义
 #[tauri::command]
 pub async fn codex_register_client_provider(
     store: tauri::State<'_, ProfileStore>,
     profile_id: String,
+    provider_name: Option<String>,
 ) -> Result<Vec<String>, String> {
     let profile = profile_for_global_write(&store, &profile_id)?;
+    let key = profiles::get_key_for_profile(&profile)?.ok_or("该配置没有已保存的密钥")?;
+    let block = provider_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| profile.provider_name());
+    tauri::async_runtime::spawn_blocking(move || {
+        register_codex_client_provider_named(profile, key, block)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 把绑定的 base_url + 密钥写成 config.toml 里名为 `block_name` 的 provider 定义块。
+/// 会话导入可传入 rollout 记录的原始名（A 机 `ccode-<A短id>`）。
+pub(crate) fn register_codex_client_provider_named(
+    profile: Profile,
+    key: String,
+    block_name: String,
+) -> Result<Vec<String>, String> {
     if profile.agent != "codex" {
         return Err("只有 Codex 绑定支持注册到客户端".into());
     }
@@ -1579,40 +1621,29 @@ pub async fn codex_register_client_provider(
     if profile.base_url.is_none() {
         return Err("这个网关还没配端点，没有可注册的 provider 定义".into());
     }
-    let key = profiles::get_key_for_profile(&profile)?.ok_or("该配置没有已保存的密钥")?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = GLOBAL_CONFIG_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
-        let cfg_path = home.join(".codex/config.toml");
-        let auth_path = home.join(".codex/auth.json");
-        let plans = vec![
-            PlannedWrite {
-                tag: "config.toml",
-                path: cfg_path.clone(),
-                content: patch_codex_config_register(
-                    read_existing(&cfg_path).as_deref(),
-                    profile.base_url.as_deref(),
-                    &profile.provider_name(),
-                )?,
-            },
-            PlannedWrite {
-                tag: "auth.json",
-                path: auth_path.clone(),
-                content: patch_codex_auth(read_existing(&auth_path).as_deref(), &key)?,
-            },
-        ];
-        let backups_dir = backups_root()?.join("codex");
-        apply_plans(&backups_dir, &home, &plans)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let _guard = GLOBAL_CONFIG_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
+    let cfg_path = home.join(".codex/config.toml");
+    // 只写 config.toml：认证在 provider 块内静态 http_headers，auth.json 完全不碰
+    // （单槽 OPENAI_API_KEY 是客户端自身 API-Key 登录态的凭证，写它会顶掉登录）
+    let plans = vec![PlannedWrite {
+        tag: "config.toml",
+        path: cfg_path.clone(),
+        content: patch_codex_config_register(
+            read_existing(&cfg_path).as_deref(),
+            profile.base_url.as_deref(),
+            &block_name,
+            &key,
+        )?,
+    }];
+    let backups_dir = backups_root()?.join("codex");
+    apply_plans(&backups_dir, &home, &plans)
 }
 
-/// 移除 Codex 客户端注册（注册的逆操作）：只删 config.toml 里该网关的 provider 定义块。
-/// **auth.json 不动**——OPENAI_API_KEY 是单槽共享凭证（requires_openai_auth 渠道与
-/// API Key 登录态同读此槽），按注册清理会误删在用的凭证；密钥生命周期由 keys.json 管。
+/// 移除 Codex 客户端注册（注册的逆操作）：只删 config.toml 里该网关的 provider 定义块
+/// （块内静态认证头随块一起删除，即完成密钥清理）。
 /// 移除后客户端回到「Model provider not found」——此渠道的会话又无法在客户端续聊，
 /// Ccode 内启动注入不受影响。与注册共用备份/原子写
 #[tauri::command]
@@ -1831,7 +1862,7 @@ mod tests {
 
     #[test]
     fn codex_config_patch_preserves_other_tables() {
-        let existing = "[other]\nkeep = 1\n\n[model_providers.ccode]\nold = \"x\"\nenv_key = \"CODEX_API_KEY\"\n";
+        let existing = "[other]\nkeep = 1\n\n[model_providers.ccode]\nold = \"x\"\nenv_key = \"CODEX_API_KEY\"\nhttp_headers = { Authorization = \"Bearer sk-stale\" }\n";
         let out = patch_codex_config(
             Some(existing),
             Some("https://r.example.com/v1"),
@@ -1847,8 +1878,10 @@ mod tests {
         assert_eq!(ccode["name"].as_str(), Some("Ccode"));
         assert_eq!(ccode["base_url"].as_str(), Some("https://r.example.com/v1"));
         // 认证改走 requires_openai_auth（auth.json 的 OPENAI_API_KEY 直接可用）；
-        // 旧版写入遗留的 env_key 行被清掉（自定义 provider 的 env_key 只认环境变量）
+        // 旧版写入遗留的 env_key 行被清掉（自定义 provider 的 env_key 只认环境变量）；
+        // 「注册到客户端」遗留的静态认证头同样清掉（两条认证路线互斥）
         assert!(ccode.get("env_key").is_none());
+        assert!(ccode.get("http_headers").is_none());
         assert_eq!(ccode["requires_openai_auth"].as_bool(), Some(true));
         assert_eq!(ccode["wire_api"].as_str(), Some("responses"));
         // 表内既有键不被清掉
@@ -1865,12 +1898,13 @@ mod tests {
 
     #[test]
     fn codex_register_patch_writes_definition_without_switching_default() {
-        // 注册到客户端：只写 provider 定义块，顶层默认渠道与模型原样不动
-        let existing = "model_provider = \"custom\"\nmodel = \"gpt-5.6-luna\"\n\n[model_providers.custom]\nbase_url = \"https://old.example.com/v1\"\n";
+        // 注册到客户端：只写 provider 定义块（含块内静态认证头），顶层默认渠道与模型原样不动
+        let existing = "model_provider = \"custom\"\nmodel = \"gpt-5.6-luna\"\n\n[model_providers.custom]\nbase_url = \"https://old.example.com/v1\"\n\n[model_providers.ccode-a1b2c3d4]\nrequires_openai_auth = true\nenv_key = \"CODEX_API_KEY\"\n";
         let out = patch_codex_config_register(
             Some(existing),
             Some("https://relay.example.com/v1"),
             "ccode-a1b2c3d4",
+            "sk-relay-key",
         )
         .unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
@@ -1883,10 +1917,16 @@ mod tests {
         );
         let blk = &doc["model_providers"]["ccode-a1b2c3d4"];
         assert_eq!(blk["base_url"].as_str(), Some("https://relay.example.com/v1"));
-        assert_eq!(blk["requires_openai_auth"].as_bool(), Some(true));
+        // 认证 = 块内静态 Authorization 头；旧路线的 requires_openai_auth/env_key 被清掉
+        assert_eq!(
+            blk["http_headers"]["Authorization"].as_str(),
+            Some("Bearer sk-relay-key")
+        );
+        assert!(blk.get("requires_openai_auth").is_none());
+        assert!(blk.get("env_key").is_none());
         assert_eq!(blk["wire_api"].as_str(), Some("responses"));
         // 空文档也能建块；无 model_provider 的文档不会被补出开关行
-        let out2 = patch_codex_config_register(None, Some("https://r.example.com/v1"), "ccode-x").unwrap();
+        let out2 = patch_codex_config_register(None, Some("https://r.example.com/v1"), "ccode-x", "sk-k").unwrap();
         let doc2: toml_edit::DocumentMut = out2.parse().unwrap();
         assert!(doc2.get("model_provider").is_none());
         assert_eq!(

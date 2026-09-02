@@ -1,0 +1,82 @@
+---
+name: origin-plot
+description: 用 Origin（OriginLab）驱动出图的规范。当用户在 Windows 上要求用 Origin 处理数据、绘制图表，或流水线出图步骤指定用 Origin 出图时使用。外部 Python 经 originpro 包（COM 自动化）为主路、LabTalk 命令行隐藏批处理为备路；图型选择与期刊规格决策归 figure-forge 技能，本技能只管 Origin 驱动机制与产物落盘。仅适用 Windows + 已安装 Origin 2021 及以上。
+outputs: [analysis/, figures/]
+---
+
+# Origin 驱动出图（origin-plot）
+
+本技能规定「项目数据 → Origin → 图表产物」的驱动机制：agent 在终端里用脚本驱动 Origin 完成出图，全程无人值守、可复现。图型选择、论点契约、期刊规格（尺寸/分辨率/字体）**不在本技能射程**，一律按 figure-forge 技能定好后再用本技能落地。
+
+## 何时使用
+
+- 用户明确要求用 Origin 出图或处理数据（常见于需要 Origin 专精分析/拟合，或投稿要求 Origin 工程文件的场景）
+- 流水线「结果分析/探索性分析」步骤的出图环节，用户已把本技能挂为推荐技能
+- 用户没有要求 Origin 时不要主动选用：Python/matplotlib 路线（figure-forge + data-eda）是默认主路
+
+## 前置检测（开工先做，不过则停）
+
+- 平台必须是 Windows 且本机安装 Origin 2021+：按 `C:\Program Files\OriginLab\Origin *\Origin*_64.exe`  glob 找到可执行文件（exe 名随版本变），找不到即停止
+- 主路检测：`python -c "import originpro"`；缺包则 `pip install originpro`（该包 Windows only 且要求本机 Origin 2021+），装不上转备路
+- 检测不过时在报告中写明缺什么、怎么补，然后停止；**不得静默改用 matplotlib 充数**（用户指定 Origin 通常因为有 Origin 工程/格式要求，偷换工具等于没做）
+
+## 操作规范
+
+### 1. 主路：外部 Python + originpro（COM 自动化）
+
+- 骨架（示意，函数签名以实机 `help(originpro.xxx)` 与官方 API 文档为准，动手前先核对实机版本）：
+
+  ```python
+  import originpro as op        # 首次调用即拉起 Origin 实例（COM）
+  op.set_show(False)            # 隐藏窗口，批处理不打扰用户
+  wks = op.new_sheet('w')       # 新建 workbook
+  wks.from_file(DATA_CSV)       # 只读导入项目数据
+  gp = op.new_graph(template='scatter')   # 或实机已有模板/主题
+  gp[0].add_plot(wks, coly=1, colx=0)     # 图层加曲线
+  gp.save_fig(str(OUT_PNG))     # 导出位图；分辨率/宽度参数按实机签名设置
+  op.exit()                     # 收尾必须退出实例
+  ```
+
+- 需要 Origin 专精能力（拟合/分析 X-Function）时，Python 里用 `op.lt_exec('LabTalk 命令')` 直送 LabTalk
+- 出图风格参数（字号/配色/线宽/尺寸）按 figure-forge 已定的规格集中定义为脚本顶部常量，全图共享
+
+### 2. 备路：LabTalk 命令行隐藏批处理
+
+- 无 Python 环境时用：写 `<脚本>.ogs`（含 `[main]` 段，段尾必须 `exit`），命令行拉起：
+
+  ```
+  "C:\Program Files\OriginLab\Origin 2025\Origin96_64.exe" -hs -rs run.section("C:\abs\plot.ogs", main)
+  ```
+
+- `-hs` 连脚本窗也不弹（官方注明供计划任务可靠运行）；脚本内用 `impASC` 导数据、`expGraph` 导出图（X-Function 参数以实机 `expGraph -d` 对话框口径为准）
+- 脚本报错不弹窗不挂起：出口处把结果/错误写进日志文件，agent 读日志判定成败
+
+### 3. 数据与产物口径
+
+- 原始数据**只读**：从项目数据文件/产物目录导入 worksheet，不改源文件一个字节
+- 脚本放 `analysis/`：一图一函数、`main()` 入口、路径集中为模块顶部常量，从 `main` 重跑产出相同图片（沿用 data-eda 约定）
+- 图表写入 `figures/`，文件名与报告/TASK.md 引用一一对应；位图 ≥ 300 dpi，矢量（EMF/PDF）按 figure-forge 规格
+- 用户要 Origin 工程留档时另存 `.opju` 到 `figures/src/` 并在报告注明；默认不要求
+- 产物完成后按项目惯例登记提货单 artifacts.yaml（路径 + 生成命令）
+
+### 4. 失败口径
+
+- COM 实例起不来、版本不符、授权未激活：报错写明原因并停止，不绕路、不降级冒充
+- 单张图导出失败不静默跳过：记录失败图名与原因，其余继续，收尾统一汇报
+- 大批量出图（>20 张）先把「共 N 张、预计耗时」写进 .ccode/help-wanted.md 报数（附兜底：未回复按全量跑），不停工
+
+## 产出格式
+
+- `analysis/<出图脚本>`：可复现，`main()` 入口，顶部常量集中路径与风格参数
+- `figures/`：全部图表产物，命名与引用一一对应；可选 `figures/src/*.opju` 工程留档
+- 报告内逐图一行：产物文件名 + 驱动方式（originpro / LabTalk）+ 状态；「待人工确认」的视觉项如实标注（agent 读图不可靠，目检归人）
+
+## 完成标准
+
+前置检测通过记录存在；`analysis/` 脚本从 `main` 重跑产出与 `figures/` 一致的图；Origin 实例全部正常退出无残留；失败项逐条有原因；产物已登记提货单。
+
+- 写作约定：不使用彩色 emoji；强调标记用「注意：」或单色 ⚠（U+26A0 U+FE0E）。
+
+---
+
+接口依据：OriginLab 官方文档——COM Automation（originlab.com/doc/COM）、Python 双通道与 originpro 包（originlab.com/doc/en/Python）、命令行开关表（docs.originlab.com/origin-help/startup-adjustbycomline/，-h/-hs/-rs）、无头批处理 FAQ-656。内容为按 Ccode 科研工作流编写。

@@ -10,12 +10,25 @@ import {
   MessagesSquare,
 } from "lucide-react";
 import { useAppStore, runInboxAction } from "../store";
-import { abbrevHome } from "../path-utils";
+import { abbrevHome, samePath } from "../path-utils";
 import { IS_WINDOWS } from "../hotkeys";
-import { buildRunOverview } from "../run-overview";
 import { relTime } from "../rel-time";
 import { alertDialog } from "../components/ConfirmDialog";
-import type { ProjectDto, RepoDto } from "../types";
+import { AGENTS } from "../types";
+import type {
+  ProjectConfigReadDto,
+  ProjectDto,
+  ProjectStepDto,
+  RepoDto,
+  WorkspaceDto,
+} from "../types";
+import {
+  continueWorkbenchTarget,
+  firstOpenStepName,
+  heroStatusLine,
+  namedSessionTitle,
+  pickWorkbenchHero,
+} from "../workbench-hero";
 import {
   EmptyState,
   PageFrame,
@@ -25,20 +38,12 @@ import {
   secondaryActionClass,
 } from "../components/PageFrame";
 
-function sessionTitle(session: {
-  customTitle: string | null;
-  title: string | null;
-}): string {
-  return session.customTitle?.trim() || session.title?.trim() || "未命名对话";
-}
-
-/** 与 WorkspacesPage samePath 同口径：统一分隔符 + 去尾部斜杠 */
-function samePath(a: string, b: string): boolean {
-  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-  return norm(a) === norm(b);
-}
-
 const iconClass = "shrink-0 text-l4";
+
+function agentLabel(id: string | null): string | null {
+  if (!id) return null;
+  return AGENTS.find((a) => a.id === id)?.label ?? id;
+}
 
 function SectionHeading({
   icon: Icon,
@@ -68,7 +73,6 @@ function WorkbenchPage({
   const setPage = useAppStore((s) => s.setPage);
   const contextLabel = useAppStore((s) => s.contextLabel);
   const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
-  const liveSessions = useAppStore((s) => s.liveSessions);
   const inboxItems = useAppStore((s) => s.inboxItems);
   const sessions = useAppStore((s) => s.sessions);
   const recentRepos = useAppStore((s) => s.recentRepos);
@@ -76,9 +80,11 @@ function WorkbenchPage({
   const setEnterCwdReq = useAppStore((s) => s.setEnterCwdReq);
   const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
+  const setFocusTabReq = useAppStore((s) => s.setFocusTabReq);
 
-  // 已注册项目列表：区分跳转落点（已注册 → 项目详情；未注册 → 终端真进入）
   const [projects, setProjects] = useState<ProjectDto[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceDto[]>([]);
+  const [steps, setSteps] = useState<ProjectStepDto[]>([]);
   const [homeDir, setHomeDir] = useState("");
 
   useEffect(() => {
@@ -91,17 +97,56 @@ function WorkbenchPage({
       .catch(() => {});
   }, []);
 
+  const runCwdSig = terminalRunInputs
+    .filter((item) => item.running || item.attention === "confirm")
+    .map((item) => item.cwd)
+    .join("\n");
+
   useEffect(() => {
     if (!visible) return;
     invoke<ProjectDto[]>("list_projects")
       .then(setProjects)
       .catch(() => {});
-  }, [visible]);
+    invoke<WorkspaceDto[]>("list_workspaces")
+      .then(setWorkspaces)
+      .catch(() => setWorkspaces([]));
+  }, [visible, runCwdSig]);
 
-  /** 最近项目/继续工作的统一点击落点：已注册 → 选中项目详情；
-      未注册（外部终端干的活）→ 终端「真进入」（同终端页最近项目口径，先验证目录仍在） */
+  const hero = useMemo(
+    () =>
+      pickWorkbenchHero({
+        projects,
+        recentRepos,
+        workspaces,
+        runs: terminalRunInputs,
+        contextName: contextLabel?.project ?? null,
+        isWindows: IS_WINDOWS,
+      }),
+    [projects, recentRepos, workspaces, terminalRunInputs, contextLabel],
+  );
+
+  useEffect(() => {
+    if (!visible || !hero?.registered) {
+      setSteps([]);
+      return;
+    }
+    let cancelled = false;
+    invoke<ProjectConfigReadDto>("read_project_config", { path: hero.path })
+      .then((read) => {
+        if (!cancelled) setSteps(read.config.steps ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setSteps([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, hero?.registered, hero?.path]);
+
   async function enterRepo(repo: RepoDto) {
-    const registered = projects.find((p) => samePath(p.path, repo.path));
+    const registered = projects.find((p) =>
+      samePath(p.path, repo.path, IS_WINDOWS),
+    );
     if (registered) {
       setSelectProjectReq(registered.path);
       setPage("workspaces");
@@ -117,50 +162,82 @@ function WorkbenchPage({
     setPage("terminal");
   }
 
-  const runOverview = useMemo(
-    () => buildRunOverview(terminalRunInputs),
-    [terminalRunInputs],
-  );
-  const runningCount =
-    runOverview.items.filter((item) => item.running).length ||
-    Object.keys(liveSessions).length;
-  const recentSessions = sessions.slice(0, 6);
-  const hero = useMemo(() => {
-    if (contextLabel?.project) {
-      const byName = projects.find((p) => p.name === contextLabel.project);
-      const byRecent = recentRepos.find((r) => r.name === contextLabel.project);
-      return {
-        name: contextLabel.project,
-        path: byName?.path ?? byRecent?.path ?? null,
-        registered: true,
-      };
+  async function continueWork() {
+    if (!hero) return;
+    const target = continueWorkbenchTarget(hero);
+    if (target.kind === "terminal") {
+      setFocusTabReq(target.tabId);
+      setPage("terminal");
+      return;
     }
-    const registeredRepo = recentRepos.find((r) =>
-      projects.some((p) => samePath(p.path, r.path)),
+    if (target.kind === "project") {
+      setSelectProjectReq(target.path);
+      setPage("workspaces");
+      return;
+    }
+    const repo = recentRepos.find((r) =>
+      samePath(r.path, target.path, IS_WINDOWS),
     );
-    if (registeredRepo)
-      return { name: registeredRepo.name, path: registeredRepo.path, registered: true };
-    if (recentRepos[0])
-      return { name: recentRepos[0].name, path: recentRepos[0].path, registered: false };
-    return null;
-  }, [contextLabel, projects, recentRepos]);
-  const currentProject = hero?.name ?? null;
-  const hasProjectContext = Boolean(hero?.registered);
-  const recentProjectRows = useMemo(
-    () =>
-      [...recentRepos].sort((a, b) => {
-        const ar = projects.some((p) => samePath(p.path, a.path)) ? 0 : 1;
-        const br = projects.some((p) => samePath(p.path, b.path)) ? 0 : 1;
-        return ar - br;
-      }),
-    [projects, recentRepos],
-  );
+    if (repo) {
+      await enterRepo(repo);
+      return;
+    }
+    try {
+      await invoke("list_dir", { path: target.path, showHidden: false });
+    } catch {
+      await alertDialog(`目录不存在或已移动：${target.path}`);
+      return;
+    }
+    setEnterCwdReq(target.path);
+    setPage("terminal");
+  }
+
+  const stepName = useMemo(() => {
+    if (!hero?.registered) return null;
+    const mine = workspaces.filter((w) =>
+      samePath(w.repoPath, hero.path, IS_WINDOWS),
+    );
+    return firstOpenStepName(steps, mine);
+  }, [hero, steps, workspaces]);
+
+  const recentSessions = useMemo(() => {
+    const rows: { agent: string; sessionId: string; title: string; updatedAt: string | null }[] =
+      [];
+    for (const session of sessions) {
+      const title = namedSessionTitle(session);
+      if (!title) continue;
+      rows.push({
+        agent: session.agent,
+        sessionId: session.sessionId,
+        title,
+        updatedAt: session.updatedAt,
+      });
+      if (rows.length >= 6) break;
+    }
+    return rows;
+  }, [sessions]);
+
+  const hasInbox = inboxItems.length > 0;
+  const statusText = hero
+    ? heroStatusLine({
+        runningCount: hero.runningCount,
+        agentLabel: agentLabel(hero.agentId),
+        attention: hero.attention,
+        registered: hero.registered,
+      })
+    : "";
+  const statusDot =
+    hero?.attention === "confirm"
+      ? "bg-warn-text"
+      : hero && hero.runningCount > 0
+        ? "bg-ok-text"
+        : "bg-l4";
 
   return (
     <PageFrame width="fluid" className="pb-12">
       <PageHeader
         title="工作台"
-        meta={contextLabel?.step ?? "从当前工作开始"}
+        meta={stepName ?? "从当前工作开始"}
         actions={
           <button type="button" className={secondaryActionClass} onClick={onQuickChat}>
             快速开聊
@@ -168,65 +245,54 @@ function WorkbenchPage({
         }
       />
 
-      <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,0.42fr)]">
+      <div
+        className={
+          hasInbox
+            ? "grid gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,0.42fr)]"
+            : undefined
+        }
+      >
         <section className="min-w-0">
           <div className="mb-2.5 flex items-center gap-2 px-1">
             <CircleDot size={14} strokeWidth={1.8} className="text-nav-accent" aria-hidden="true" />
             <h2 className="text-xs font-medium text-l2">继续当前工作</h2>
-            {runningCount > 0 && (
+            {hero && hero.runningCount > 0 && (
               <span className="rounded-full bg-ok px-2 py-0.5 text-micro text-ok-text">
-                {runningCount} 个运行中
+                {hero.runningCount} 个运行中
               </span>
             )}
           </div>
 
-          {currentProject ? (
+          {hero ? (
             <div className="rounded-lg border border-hairline bg-raised/55 p-5 shadow-[0_1px_0_rgb(255_255_255_/_.02)]">
               <div className="flex flex-wrap items-start justify-between gap-5">
                 <div className="min-w-0">
                   <p className="truncate text-xl font-medium tracking-tight text-l1">
-                    {currentProject}
+                    {hero.name}
                   </p>
-                  <p className="mt-1 text-sm text-l3">
-                    {contextLabel?.step ?? (hasProjectContext ? "项目上下文已就绪" : "最近打开的项目")}
-                  </p>
-                  {hero?.path && (
-                    <p
-                      className="mt-3 truncate font-mono text-micro text-l4"
-                      title={hero.path}
-                    >
-                      {homeDir
-                        ? abbrevHome(hero.path, homeDir, IS_WINDOWS)
-                        : hero.path}
-                    </p>
+                  {stepName && (
+                    <p className="mt-1 text-sm text-l3">{stepName}</p>
                   )}
+                  <p
+                    className="mt-3 truncate font-mono text-micro text-l4"
+                    title={hero.path}
+                  >
+                    {homeDir
+                      ? abbrevHome(hero.path, homeDir, IS_WINDOWS)
+                      : hero.path}
+                  </p>
                 </div>
                 <button
                   type="button"
                   className={primaryActionClass}
-                  onClick={() => {
-                    // 有项目上下文 = 回项目详情（项目页保留上次选中）；
-                    // 回落到最近仓库（可能未在 Ccode 注册）= 按统一点击落点跳转
-                    if (hasProjectContext) setPage("workspaces");
-                    else if (hero?.path) {
-                      const repo = recentRepos.find((r) => samePath(r.path, hero.path!));
-                      if (repo) void enterRepo(repo);
-                      else setPage("workspaces");
-                    }
-                  }}
+                  onClick={() => void continueWork()}
                 >
                   继续工作
                 </button>
               </div>
               <div className="mt-4 flex items-center gap-2 border-t border-hairline pt-3 text-xs text-l4">
-                <span className="size-1.5 rounded-full bg-ok-text" />
-                <span>
-                  {runningCount > 0
-                    ? "Agent 正在工作"
-                    : hasProjectContext
-                      ? "准备好从上次位置继续"
-                      : "可从最近位置继续"}
-                </span>
+                <span className={`size-1.5 rounded-full ${statusDot}`} />
+                <span>{statusText}</span>
               </div>
             </div>
           ) : (
@@ -258,7 +324,7 @@ function WorkbenchPage({
           )}
         </section>
 
-        {inboxItems.length > 0 && (
+        {hasInbox && (
         <section className="min-w-0">
           <SectionHeading
             icon={CircleDot}
@@ -269,28 +335,26 @@ function WorkbenchPage({
               </span>
             }
           />
-          {inboxItems.length === 0 ? null : (
-            <div className="space-y-0.5">
-              {inboxItems.slice(0, 5).map((item) => (
-                <div
-                  key={item.key}
-                  className="group flex min-h-10 items-center gap-2 rounded-md px-2.5 transition-colors hover:bg-hover"
+          <div className="space-y-0.5">
+            {inboxItems.slice(0, 5).map((item) => (
+              <div
+                key={item.key}
+                className="group flex min-h-10 items-center gap-2 rounded-md px-2.5 transition-colors hover:bg-hover"
+              >
+                <span className={`size-1.5 shrink-0 rounded-full ${item.dot}`} />
+                <span className="min-w-0 flex-1 truncate text-xs text-l2">
+                  {item.text}
+                </span>
+                <button
+                  type="button"
+                  className={`${rowActionClass} opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100`}
+                  onClick={() => runInboxAction(item)}
                 >
-                  <span className={`size-1.5 shrink-0 rounded-full ${item.dot}`} />
-                  <span className="min-w-0 flex-1 truncate text-xs text-l2">
-                    {item.text}
-                  </span>
-                  <button
-                    type="button"
-                    className={`${rowActionClass} opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100`}
-                    onClick={() => runInboxAction(item)}
-                  >
-                    {item.actionLabel}
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+                  {item.actionLabel}
+                </button>
+              </div>
+            ))}
+          </div>
         </section>
         )}
       </div>
@@ -306,11 +370,11 @@ function WorkbenchPage({
               </button>
             }
           />
-          {recentProjectRows.length === 0 ? (
+          {recentRepos.length === 0 ? (
             <p className="py-5 text-sm text-l3">最近打开的项目会显示在这里。</p>
           ) : (
             <div className="space-y-0.5">
-              {recentProjectRows.slice(0, 5).map((repo) => (
+              {recentRepos.slice(0, 5).map((repo) => (
                 <button
                   key={repo.path}
                   type="button"
@@ -352,8 +416,6 @@ function WorkbenchPage({
                   type="button"
                   className="group flex min-h-9 w-full items-center gap-3 rounded-md px-2.5 text-left transition-colors hover:bg-hover"
                   onClick={() => {
-                    // 精确打开该会话回放（对话页按 agent+sessionId 定位，
-                    // 同终端页「⤴对话」口径），不只是进对话页
                     setOpenSessionReq({
                       agent: session.agent,
                       sessionId: session.sessionId,
@@ -362,7 +424,7 @@ function WorkbenchPage({
                   }}
                 >
                   <MessageSquare size={15} strokeWidth={1.8} className={iconClass} aria-hidden="true" />
-                  <span className="min-w-0 flex-1 truncate text-sm text-l2">{sessionTitle(session)}</span>
+                  <span className="min-w-0 flex-1 truncate text-sm text-l2">{session.title}</span>
                   <span className="shrink-0 text-micro text-l4">{relTime(session.updatedAt)}</span>
                   <ChevronRight
                     size={14}

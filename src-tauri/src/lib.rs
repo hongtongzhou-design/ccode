@@ -4,6 +4,7 @@ mod ai;
 mod citation;
 mod clipboard;
 mod config_dump;
+mod dep_check;
 mod diagnostics;
 mod fonts;mod fs_tree;
 mod git_info;
@@ -18,6 +19,7 @@ mod model_registry;
 mod models;
 mod paths;
 mod pdf;
+mod sheet_preview;
 mod portwatch;
 mod process;
 mod pricing;
@@ -33,6 +35,8 @@ mod pty;
 mod reader;
 mod scheduler;
 mod sessions;
+mod session_search;
+mod session_transfer;
 mod settings;
 mod skills;
 mod updater;
@@ -130,6 +134,7 @@ pub fn run() {
             pty::pty_get_cwd,
             pty::pty_has_running_process,
             sessions::list_sessions,
+            session_search::search_sessions,
             sessions::claim_session_for,
             sessions::release_session_claim,
             sessions::get_session_conversation,
@@ -148,6 +153,9 @@ pub fn run() {
             sessions::delete_project_sessions,
             sessions::session_tail_state,
             sessions::export_session_markdown,
+            session_transfer::export_sessions,
+            session_transfer::import_sessions_inspect,
+            session_transfer::import_sessions_apply,
             handoff::handoff_targets,
             handoff::build_handoff_brief,
             handoff::build_session_digest,
@@ -185,6 +193,7 @@ pub fn run() {
             fs_tree::home_dir,
             pdf::read_pdf_bytes,
             pdf::read_docx_bytes,
+            sheet_preview::read_sheet_preview,
             citation::check_citation_health,
             git_info::git_status,
             git_info::git_file_diff,
@@ -202,6 +211,8 @@ pub fn run() {
             updater::install_method_preview,
             updater::updater_write,
             updater::check_agent_updates,
+            dep_check::check_dependencies,
+            dep_check::install_dependency,
             fonts::font_status,
             fonts::install_font,
             workspaces::create_workspace,

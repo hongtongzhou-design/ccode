@@ -7,6 +7,7 @@
 
 ## 工作区生命周期（无损口径）
 
+- **合并拖底（gitignored 产物）**：git merge 成功后、归档前，把工作区未跟踪/被忽略的 `papers/**`、项目产物目录、`output/**` 拷到主仓同相对路径（已存在不覆盖、失败不阻断合并）。防止 Agent 把 PDF/数据写在工作区导致下一步读不到。
 - **工作区创建是补偿事务**：先以 SQLite `BEGIN IMMEDIATE` 原子预留端口并写 `creating`，再创建 worktree/复制文件/激活；
   任一步失败必须移除 worktree、prune、删分支、删 creating 行并释放端口。复制错误不得忽略；setup 失败维持非阻断。
   `ready_to_merge` 必须要求 `ahead > 0`，空工作区禁止合并。
@@ -93,17 +94,21 @@
   「（可选）配置学术检索 MCP」（MCP 页预设导入 Consensus/Undermind，key 走环境变量引用；不配也能跑——
   OpenAlex/Semantic Scholar 免 key 兜底），付费墙文献全程有人工事项接应（落点 `papers/*.pdf`）。
   **接壤路径约定**：五套是同一条科研流水线的相邻段，产物路径固定对齐——综述末步产 `manuscript/review-final.md`、
-  科研论文末步产 `manuscript/paper-final.md`，投稿与返修首步输入精确指向两者 + `references.bib`；综述的
-  `notes/`+`references.bib` 可被科研论文/毕业论文首步复用，数据处理的 `analysis/` 可接科研论文实验段。
+  科研论文末步产 `manuscript/paper-final.md`、毕业论文末步产 `manuscript/thesis-final.md`，投稿与返修首步
+  `any_of_inputs` 指向这三者 + `references.bib`；返修第 1 轮优先读 `submission/formatted.md`。综述的
+  `notes/`+`references.bib` 可被科研论文/毕业论文复用（有则查漏补缺、不覆盖旧笔记），数据处理的
+  `analysis-report.md` 与产物目录可接科研论文实验设计/执行。毕业论文文献两步与英文综述**同名**，追加时跳过。
   每套模板首步简报带双口径输入说明（接自上游模板随仓库合并自带 / 独立启动先放入对应目录或在资源面板绑定上游
   项目目录）；投稿与返修首步另有 before 人工事项「放入成稿与 references.bib」（落点 `manuscript/`）。
-  **第六套「LaTeX 论文」（v3.97，批次 E）**：搭建骨架 → 章节写作 → 编译与排错 → 定稿导出，
+  **gitignored 产物写项目根**：文献 PDF、清洗数据、渲染成品不进 git，必须落在项目根 `papers/`、产物目录或
+  `output/`；人工导入 `papers/` 强制项目根；合并时把工作区未跟踪的这三类目录拷到主仓（已有不覆盖）。
+  **第六套「LaTeX 论文」**：有成稿则转写（排版后端，不改学术内容），无成稿才从笔记从零写。搭建骨架 → 章节写作 → 编译与排错 → 定稿导出，
   源稿产物 `manuscript/main.tex`，编译 PDF 统一落在 `output/main.pdf`；run 脚本 `render-pdf` 各步共用同一常量
   （tectonic 优先 → latexmk 回落 → 都没有打印安装引导 + exit 1；应用内不做安装器），开步时经既有
   ws_settings 机制写入 `.ccode/settings.toml`；期刊官方模板 zip 走可选 before 人工事项解压到
   `manuscript/template/` 由 agent 读说明适配（无内置解析器）；文档类（elsarticle/IEEEtran/achemso/ctexart/
   学位论文通用架）与 natbib/biblatex 为开工前决策项；引用沿用 references.bib（`\cite{bib键}`），
-  章节写作步挂 review-writing。不在前五套的接壤链上（首步可复用上游模板产出的 notes/ + references.bib）。
+  章节写作挂 `research-writing`（可选）+ `bib-check`。可吃上游 `paper-final` / `review-final` / `thesis-final` / `draft.md`。
 - **流水线编辑器（RX1）是步骤编辑唯一入口**：`src/components/PipelineEditor.tsx` 全宽覆盖层（fixed inset-0 z-30，与评审
   覆盖层同级），每步一张卡片，整体写回 steps；新增步骤相关编辑一律进
   编辑器，不再开第二套入口。**卡片字段分三档（v3.85）**：常驻只留
@@ -169,7 +174,7 @@
 - 决策项只留「开工前就能答、且答了确实影响执行」的；**凡是需要先看到数据才能定的，一律改按需问**，
   不得为了「表单看起来完整」摆在开工前。
 - 角色标记**不参与任何流程判定**，只影响界面提示。
-- 流程带中的角色点必须配可见图例（蓝点 = 你主要负责，灰点 = 你和 AI 一起定）；步骤超过 5 个时必须提示可横向查看后续步骤，避免长流程被截断后看起来像缺步骤。
+- 流程带中的角色点必须配可见图例（蓝点 = 你主要负责，灰点 = 你和 AI 一起定）；步进器内容确实超出可视宽度时才提示可左右滚动（按溢出检测，不按步骤数常驻），避免长流程被截断后看起来像缺步骤，也避免宽屏空挂一句。
 - 模板预览同时展示友好描述与实际步骤名时，实际步骤行必须标注「完整步骤」，不得让用户把两行误解为两套流程。
 
 **五套模板一体适用（v3.89 全量复盘）**：三处错配不是综述独有的，四套模板逐一按同一把尺子改过——
@@ -417,8 +422,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   **Zotero 只读边界不动**——不在用户库里直写建列表（锁库/同步冲突风险）。
 - **提交交付**：`import_human_deliverable`（卡片 checklist 行「提交产物」按钮 / 拖文件到该行）= 复制进落点
   （目录/通配用源文件 basename，精确文件允许改名交付；已存在同名拒绝）+ best-effort 登记该根 artifacts.yaml
-  （produced_by = 人工交付；登记失败只回告不否决复制——文件落位检测口径已算完成）。落点根 = 绑定工作区活跃时
-  工作树优先，否则项目根。**v3.74 扩展**：新增可选 `target_override`（检索结果导入固定落 `papers/imports/`，
+  （produced_by = 人工交付；登记失败只回告不否决复制——文件落位检测口径已算完成）。落点根 = 绑定工作区活跃时工作树优先，否则项目根；**例外**：落点在 `papers/` 或源文件是 PDF 时强制项目根（不进 git）。**v3.74 扩展**：新增可选 `target_override`（检索结果导入固定落 `papers/imports/`，
   lit-search 人肉中转协议：Undermind/Consensus/Elicit 导出 RIS/BibTeX/CSV 放入，agent 开工自动解析、去重、
   合并进筛选清单）；`step`/`title` 转可选——无步骤语境（资源面板「导入检索结果」入口）= 纯导入落项目根、
   不登记提货单。两处入口：StepFlow 人工节点（落点在 `papers/` 的事项旁「导入检索结果」按钮，多选）与

@@ -68,6 +68,9 @@ npm run tauri build    # 打包
   并在 spawn/wait 边界登记脱敏参数与生命周期。该包装和 250ms 进程扫描只在 Windows 生效；macOS/Linux 直接返回标准
   `Command`、不启动诊断监控线程。只有用户明确打开的外部终端允许保留可见窗口。
 - **本机 CLI 安装情况**：claude/codex/gemini/qwen/opencode/codebuddy 均已装（brew 或 npm，检测见 updater.rs 报告）；kimi 为新版（~/.kimi-code）。
+- **macOS 的 `/usr/bin/git` 是 CLT stub**：没装 Xcode 命令行工具时 which 也能命中它，直接跑会弹系统安装窗、
+  还会被版本探测的 5s 超时杀掉——判定必须先用 `xcode-select -p`（background_command）探 CLT 在不在，
+  stub 场景禁跑 `git --version`（dep_check.rs 的 clt_stub 三态就是这么来的，别退回直接探测）。
 - **Windows npm 系 CLI 是 .cmd 批处理 shim**：CreateProcess/ConPTY 直接起报 os error 193；同目录还有同名无扩展名
   shell 脚本，`find_in_dirs` 必须 exe/cmd 优先于裸名（裸名只兜底）。且 ConPTY 里 npm 会发 DSR 光标位置查询
   （ESC[6n）并读 stdin 等回答，无人应答永久挂起——`run_streaming_pty` 的 reader 代答 ESC[24;120R。
@@ -97,7 +100,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   components/                # WorkspaceReviewView、PipelineEditor（含「＋ 从模板追加」）、ProjectGroup/ProjectRail、ArtifactChecklist（文本类产物就地预览层 +
                              # md 笔记「⛶ 沉浸阅读」入口（v3.98：pdf_for_note 配对后发 readerReq 带 notePath 进阅读区）+
                              # ⠿ 拖出手柄经 tauri-plugin-drag 做 OS 级文件拖出——WebView HTML5 拖拽出不了窗口）、TaskCardsSection、FileTree、
-                             # FilePreviewEditor、PdfPreview/DocxPreview/ImagePairView、GitPanel、HandoffPicker/DigestPicker、
+                             # FilePreviewEditor、PdfPreview/DocxPreview/XlsxPreview/ImagePreview、ImagePairView、GitPanel、HandoffPicker/DigestPicker、
                              # KickoffConfirmDialog（开工确认弹层：TASK.md 预览/编辑（草稿优先）+ 旧简报并入兜底 + 技能区（含 MCP 归处标记）+ 人工事项区 + 主仓提醒 +
                              # 上一步收尾软门：紧邻上一步非可选 after 事项未勾 → 「确认开始」二击变「仍要开工」才开，只确认不阻断）、
                              # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态 + 产物冲突/跨步骤链路 ⚠ 警告行）、
@@ -117,9 +120,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # TerminalStatusBar（终端底部常驻状态栏：模型/思考档可点切 + 📂 胶囊浮层改目录（仅未启动）+
                              #   git 芯片/保存/推送 + 状态点/时长/本会话 token，吸收旧中带底条） 等
   components/CommandPalette.tsx # ⌘K 面板
-  components/QuickChatHistoryMenu.tsx # 侧栏「快速开聊」右键的随手聊历史浮层（命令面板式行：色点+标题+时间；
-                             # 勾了「下次直接开聊」的用户左键直达终端看不到弹层历史，右键是回看口）
-                             # 行样式与弹层「随手聊历史」一致：品牌胶囊 + 标题 + 归属 · 时间
+  components/QuickChatHistoryMenu.tsx # 侧栏「快速开聊」右键的 scratch 历史浮层（继续上次）
+                             # 记住选择后左键直达、右键回看；行样式与弹层「继续上次」一致
   components/GatewayLibrary.tsx # 连接页网关库：五槽/密钥/获取模型/按槽体检/逐模型策略三态；
                              # Base URL 主输入（2026-08-31）：空槽与仍等于旧主值的槽跟随主输入、手改即脱离；
                              # 全部测速按 URL 去重（同址只探一次，摘要前端镜像给同址槽）
@@ -127,6 +129,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # portal 到 body（免疫祖先 opacity/transform 的 fixed 包含块问题）、滚动/缩放即关、
                              # up 参数支持锚点上方弹出（行内动作栏 tooltip 专用）；PageFrame 的 RowAction 内置上方 tooltip
   pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES（六套，含 v3.97「LaTeX 论文」）
+  task-md.ts                 # TASK.md 拼装纯函数（项目根/产物目录绝对路径）；pipeline-start 再导出
   pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras 单一出处，弹层预览与落盘共用）；
                              # 工作区→终端交接单一出处 buildWorkspaceTerminalRequest（reuseKey 找回同工作区标签 +
                              # 无 prompt 时 resume 最近会话）
@@ -137,10 +140,14 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   mcp-display.ts             # MCP 页展示纯逻辑：协议徽章固定识别色（stdio 紫/remote 蓝）+ 命令路径智能缩略
                              # （家目录折 ~、段数>3 且 >28 字符才砍中段留首尾，tests/mcp-display.test.ts）
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
+  workbench-hero.ts          # 工作台主卡纯逻辑：当前工作按运行标签归属（注册名优先）、
+                             # 步骤取流水线第一个未合并步、「继续工作」有标签则聚焦否则进项目/真进入
+                             # （tests/workbench-hero.test.ts）
   lit-watch.ts               # 文献雷达纯逻辑：日分组/关键词分组（groupEntriesByKeyword，取 keywordsHit 首词、
                              # 未分类恒末）/趋势/直链转换/全文可得性分流（fulltextLinkFor：arxiv abs 与 .pdf 直链=可下载，
                              # DOI/落地页=来源，不再摆禁用下载钮）/已读判定/漂移提醒/雷达筛选（entryPassesFilter
                              # 与 lit_watch.rs 双端镜像，指标未知放行不误伤，tests/lit-watch.test.ts）
+  md-image-hydrate.ts        # md 阅读/聊天图片占位水合：每次 layout 扫 data-md-src，本地图缓存
   reader.ts                  # 沉浸阅读区纯逻辑：分栏钳制与像素换算/圈选命中与 canvas 映射/截图注入格式/
                              # glossary 表格契约（与 reader.rs 双端镜像，改动需同步）/段落边界提取/术语匹配/
                              # 进度与护眼存储键/翻译面板高度键（readerSplitT，未拖过不落键 = 内容自适应，
@@ -159,15 +166,21 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   schedule-skill.ts          # 定时巡检「技能」下拉与默认任务名跟随纯逻辑（lit-watch 恒最前/默认「文献雷达」、
                              # 手改不覆盖、空库兜底，tests/schedule-skill.test.ts）
   inbox.ts                   # 收件箱分类胶囊纯逻辑：key 前缀→类别、分组、help dismiss 签名、人工请求通知 edge-trigger（tests/inbox.test.ts）
+  chat-handoff.ts            # 聊天⇄终端交接表：chat_ok / peek / must_switch、等待态文案、斜杠是否要窥视 TUI（tests/chat-handoff.test.ts）
+  slash-commands.ts          # 聊天斜杠命令保守常用集（未全量调研的 agent 只给 /help；tests/slash-commands.test.ts）
+  ime-guard.ts               # 聊天 Enter 是否处于输入法组词（WKWebView 确认候选时 isComposing 已假；tests/ime-guard.test.ts）
   notify.ts                  # 长任务 OS 通知（仅「待确认」跃迁 + 未聚焦 + 30s 去抖；「已回复」不通知）
   git-status-groups.ts       # 改动列表状态分组/白话双层纯逻辑
-  file-icons.ts              # 文件类型小徽标纯逻辑：扩展名 → 短标签 + 固定识别色（tests/file-icons.test.ts）
+  file-icons.ts              # 文件类型小徽标纯逻辑：扩展名 → 短标签 + 固定识别色；
+                             # isPreviewableImagePath（png/jpg/gif/webp/svg，tests/file-icons.test.ts）
+  sheet-preview.ts           # Excel 预览纯逻辑：列字母 / 单元格引用 / 截断文案（tests/sheet-preview.test.ts）
   editor-languages.ts        # monaco 语言注册（批次 E）：monaco-editor 0.56 ESM 不带 latex，
                              # 自带紧凑 Monarch 定义覆盖 .tex/.sty/.cls/.bib（tests/editor-languages.test.ts）
   workspace-visibility.ts    # 聚焦步骤工作区可见性过滤纯逻辑（不匹配任何步骤的手动工作区始终可见，
                              # tests/workspace-visibility.test.ts）
   git-commit-message.ts      # 空提交信息的本地默认信息生成
   terminal-input.ts          # 终端输入侧纯逻辑：shell 路径转义 escapeShellPath、拖入多路径拼接 joinDroppedPaths、
+                             # 聊天拖入 joinDroppedChatPaths、dropHitsRect、Kimi CSI-u 序列、
                              # 剪贴板图片条目判定/MIME→扩展名/粘贴反馈文案（tests/terminal-input.test.ts）
   terminal-tab-persistence.ts # 终端标签重启恢复白名单（不含 PTY/密钥/env）
   tab-drag.ts                # 标签条拖拽排序纯逻辑：位移钳制 + 目标槽位判定（>= 中线守末槽边界，
@@ -176,8 +189,10 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # ANSI 16 色 + 光标 + 选区全在表内；resolvePaletteId 按主题亮暗自动换 twin
                              # （新增调色板须同步 settings.rs KNOWN_PALETTES，否则被静默丢弃，tests/terminal-palettes.test.ts）
   upstream-note.ts           # brew 最新但上游 npm 更高版本的提示
-  quick-chat.ts              # 快速开聊弹层「随手聊历史」纯逻辑：pickQuickChatSessions（不落工作区/注册项目，
-                             # 且排除归档/内部/live/源文件已删——列了也恢复不了的）+ 标题展示（tests/quick-chat.test.ts）
+  quick-chat.ts              # 快速开聊弹层「随手聊历史」纯逻辑：只列 ~/ccode/scratch（isScratchCwd），
+                             # 排除工作区/已注册项目/其他仓库/归档/内部/live/源文件已删；
+                             # pickQuickChatHistory 用 store 会话列表现算；sidebarLaunchesDirect
+                             # 侧栏记住选择后直达（tests/quick-chat.test.ts）
   command-palette.ts         # 命令面板过滤纯逻辑
   stats-insight.ts           # 统计页花费环比 / 缓存命中率 / 会话标题回落纯逻辑（tests/stats-insight.test.ts）
   hotkeys.ts                 # 快捷键组合串纯逻辑
@@ -257,14 +272,18 @@ src-tauri/src/
                              # 恢复分两档——撤销上次写入（UI 名；最近批次，每 tag 轮换留 5 份）与恢复初始状态
                              #   （backups/<agent>/original/ 永久快照，首次 apply 时落、不参与轮换，
                              #   has_original_backup/restore_original_backup）；
-                             # codex 轻量注册 codex_register_client_provider：只写 provider 定义块 + auth.json 密钥
-                             #   （patch_codex_config_register），顶层 model_provider/model 不动、不记 active_global——
+                             # codex 轻量注册 codex_register_client_provider：只写 config.toml provider 定义块
+                             #   （patch_codex_config_register；认证 = 块内静态 http_headers.Authorization——
+                             #   2026-09-02 本机 0.151.0 实测：无 auth.json/env_key/requires_openai_auth 时 codex
+                             #   照常发请求且只带静态头，auth.json 里另一把 key 不被顶用；**不写 auth.json**——
+                             #   单槽共享凭证是客户端自身登录态，旧写法会顶掉登录；代价 = 密钥明文落 config.toml），
+                             #   顶层 model_provider/model 不动、不记 active_global——
                              #   供桌面客户端按 rollout 记录的 provider 名查定义续聊（matrix §2：不设默认不接管请求）；
                              #   逆操作 codex_unregister_client_provider 只删定义块（块不在则拒写不造空备份），
-                             #   **auth.json 不动**——OPENAI_API_KEY 是单槽共享凭证（requires_openai_auth 渠道
-                             #   与 API Key 登录态同读），按注册清理会误删在用 key；
+                             #   块内密钥随块一并删除即完成清理；
                              #   codex_client_registered_profiles 供连接页菜单「注册 ⇄ 移除注册」同位状态化；
-                             #   多网关注册同槽互相覆盖 + 影响共享渠道凭证是已知边界（实机验证待做）；
+                             #   注册（静态头）与「设为全局」（requires_openai_auth）两条认证路线互斥，
+                             #   写任一条时清对方的键（http_headers ⇄ requires_openai_auth）；
                              # codex provider 带 requires_openai_auth=true（auth.json 直供密钥，外部终端零 export；
                              #   旧写入遗留的 env_key 行随下次写入清除）；
                              # gemini 双文件：.env 之外必须加写 settings.json 的 selectedType=gemini-api-key
@@ -299,6 +318,9 @@ src-tauri/src/
                              # codex rollout 元信息 model_provider 记进 SessionMetaDto.provider（恢复按它挑兼容 profile，
                              #   前端 pickResumeProfile 单一出处：ccode 或 ccode-<短id> 前缀按网关挑绑定）、
                              # sessions_for_card（融合进任务书的按卡取会话：与列表同一归属口径）
+  session_transfer.rs        # 会话包导出/导入（.ccode-sessions.zip，八家不含 opencode）：原文打包装、导入时改写 cwd 并按 B 机
+                             #   目录重建落位；zip-slip/大小/后缀/白名单；同 id 跳过不覆盖；Ccode 元数据写 app.db；
+                             #   kimi 新版 wd_<basename>_<sha256[:12]> + session_index.jsonl；grok URL 编码 cwd
   skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor/grok 固定 copy）、四路导入、ZIP 导出、卸载备份、
                              # 漂移检测 resync、create_skill/update_skill_content；apps 表是创建时快照，
                              #   list 时现算补齐注册表新 agent 的缺键（否则一键应用永远漏新 agent，不写盘）；内置技能种子（seed_builtin_skills：
@@ -394,7 +416,13 @@ src-tauri/src/
   fs_tree.rs                 # 文件树与文件操作（删除走系统回收站 trash；重要路径删除保护，canonicalize 双校验；
                              #   家目录直下系统目录标 isSystem 供前端置灰）
   pdf.rs                     # PDF/docx 字节读取：read_pdf_bytes 白名单 + canonicalize + 上限，base64 传输
-  updater.rs                 # CLI 安装/更新（brew TUNA、npm_for 同目录 npm、Windows winget 渠道：claude/codex/opencode/kimi/grok 五家有官方包）+ 应用自身 Tauri updater
+  sheet_preview.rs           # Excel/ODS 预览：同一套白名单读字节，calamine 抽指定工作表（200×256）
+  updater.rs                 # CLI 安装/更新（brew TUNA、npm_for 同目录 npm、Windows winget 渠道：claude/codex/opencode/kimi/grok 五家有官方包）+ 应用自身 Tauri updater；
+                             #   run_streaming_pty/run_streaming/emit_done/winget_args 为 pub(crate)，dep_check 复用同一管线
+  dep_check.rs               # 依赖体检 + 一键安装（git/node，非九 CLI 本身）：check_dependencies（git 三态 ok/missing/
+                             #   clt_stub + node + 渠道 brew/winget/xcode/none，启动时前端拉一次进 store）+ install_dependency
+                             #   （macOS brew 优先、无 brew 时 git 触发 xcode-select --install 系统弹窗不等待；Windows winget
+                             #   Git.Git/OpenJS.NodeJS.LTS；Linux 只给指引）；缺 git 走收件箱 dep: 类别常驻提醒（不造横幅）
   logbuf.rs                  # 诊断日志环形缓冲
   diagnostics.rs             # 诊断包：系统/WebView/GPU/输入法、功能开关、日志、进程生命周期采集与 ZIP 导出
   config_dump.rs             # 生效配置自省（只读，不建/不改任何用户配置文件）：dump_effective_config /
@@ -419,8 +447,9 @@ src-tauri/src/
   `NO_COLOR` 必须 `env_remove`；`TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Ccode` 必须显式设置。
 - **会话文本出站前必须在 Rust 层脱敏**：标题/摘要、结构化回放、AI 摘要、Markdown 导出均不得把已保存密钥或常见密钥前缀
   送到 React；只作用于 DTO/导出副本，不得回写会话源文件；前端遮盖不是安全边界。
-- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作（设为全局默认、hooks 精确注意力开关（七家，见 hooks.rs）、会话删除、工作树文件删除——
-  工作树文件删除走系统回收站（trash crate）可反悔，四类均有备份/白名单防护口径，见 `docs/conventions/safety.md`）。
+- **gitignored 科研产物写项目根**：文献 PDF、清洗后数据、渲染 PDF/docx 不进 git，必须落在项目根 `papers/`、产物目录或 `output/`，禁止只写在工作区。人工导入 `papers/` 与 PDF 强制项目根；合并成功后把工作区未跟踪的这三类目录拷到主仓（已有不覆盖）。TASK.md 必须给出项目根绝对路径。
+- **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作（设为全局默认、hooks 精确注意力开关（七家，见 hooks.rs）、会话删除、工作树文件删除、**会话导入**——
+  工作树文件删除走系统回收站（trash crate）可反悔；五类均有备份/白名单防护口径，见 `docs/conventions/safety.md`）。
 - **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底；新增 CLI/工具调用点一律
   用它，禁直接 `which::which` 或裸名 spawn（候选目录清单见 `docs/conventions/safety.md` 对应实现 `agents.rs`）。
 - **路径比较与文件名统一走方言层**（2026-08-29 Windows 协作批确立）：后端跨来源路径比较一律 `paths::same_path` /
@@ -482,6 +511,10 @@ src-tauri/src/
   均已落地待走查；全量文档同步 → 走查 → [skip ci] 提交 → 可选发版。
   批次顺序为用户拍板：E 先行，批次 C（实验数据分析）/D（表征分析）转待办；场景 4（agent 辅助做图）整批不做、
   已移出路线（「只做场景必需、不做扩展性功能」原则，见架构 v3.97）
+- **科研外部工具三线（技能已备档、未融入，2026-09-01 用户拍板）**：origin-plot / zotero-sync / endnote-bridge
+  三个技能文件已在 `src-tauri/resources/skills/` 下落盘，但**未注册 BUILTIN_SKILLS、不挂模板、不进第一版发布**；
+  Origin 只做 Windows 实机（Mac 虚拟机方案否决）、EndNote 只走格式桥接（CWYW 无人值守否决）、Zotero 本地 API 全自动。
+  实机适配跑通后第二版再融入（注册 → 挂载 → 手册，清单见架构 §10 末行）；场景 4 就此以技能形态重新纳入。
 - **定时任务与研究流程结合（部分落地 v3.95，细目见架构 §11.4 Backlog 细目）**：边界已定——不给每步配定时任务，
   结合点是「产出回流」而非「配置下沉」。产出回流三件套已上线（v3.95：lit_watch.rs 解析巡检产物 + LitWatchCard
   雷达卡片 + 收件箱 lit: 文献胶囊 / Schedule.linkedStep 关联步骤 + RunRecord.newEntries / staleLitHint 复用

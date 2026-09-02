@@ -34,6 +34,19 @@ export function samePath(a: string, b: string, isWindows = false): boolean {
   return pathKey(a, isWindows) === pathKey(b, isWindows);
 }
 
+/** 子路径是否落在根目录内（段边界，含根自身）。比较走 pathKey。 */
+export function pathWithin(
+  child: string,
+  root: string,
+  isWindows = false,
+): boolean {
+  if (!child || !root) return false;
+  const c = pathKey(child, isWindows);
+  const r = pathKey(root, isWindows);
+  if (!c || !r) return false;
+  return c === r || c.startsWith(`${r}/`);
+}
+
 /** git 装饰表键归一：后端混合分隔符的键统一成 /，与归一后的 entry.path 同口径匹配 */
 export function normalizeStatusKeys(
   map: Record<string, string>,

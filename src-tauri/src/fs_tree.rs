@@ -194,8 +194,9 @@ struct WatchEntry {
     _watcher: notify::RecommendedWatcher,
 }
 
-static WATCHERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, WatchEntry>>> =
-    std::sync::OnceLock::new();
+static WATCHERS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, WatchEntry>>,
+> = std::sync::OnceLock::new();
 
 fn watchers() -> &'static std::sync::Mutex<std::collections::HashMap<String, WatchEntry>> {
     WATCHERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -205,7 +206,11 @@ fn watchers() -> &'static std::sync::Mutex<std::collections::HashMap<String, Wat
 /// agent 会话文件和应用 db 都写在隐藏目录，home 根监听时不过滤会形成刷新风暴
 fn fs_noise_skip(path: &std::path::Path) -> bool {
     let s = norm_sep(&path.to_string_lossy());
-    if s.contains("/.git/") || s.contains("/node_modules/") || s.contains("/target/") || s.contains("/dist/") {
+    if s.contains("/.git/")
+        || s.contains("/node_modules/")
+        || s.contains("/target/")
+        || s.contains("/dist/")
+    {
         return true;
     }
     // .ccode 豁免：drafts（任务书草稿）/help-wanted 等是应用自己展示的内容，
@@ -266,7 +271,10 @@ pub fn watch_dir(app: tauri::AppHandle, path: String) -> Result<String, String> 
         }
     });
 
-    watchers().lock().unwrap().insert(id.clone(), WatchEntry { _watcher: watcher });
+    watchers()
+        .lock()
+        .unwrap()
+        .insert(id.clone(), WatchEntry { _watcher: watcher });
     Ok(id)
 }
 
@@ -281,7 +289,8 @@ mod tests {
     use super::*;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ccode-fstree-{name}-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("ccode-fstree-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -315,13 +324,16 @@ mod tests {
         let secret = outside.join("secret.txt");
         fs::write(&secret, "nope").unwrap();
         // 直接给根外绝对路径
-        let err = read_file_preview_sync(secret.to_str().unwrap(), root.to_str().unwrap())
-            .unwrap_err();
+        let err =
+            read_file_preview_sync(secret.to_str().unwrap(), root.to_str().unwrap()).unwrap_err();
         assert!(err.contains("超出项目根目录"), "{err}");
         // ../ 逃逸
         let escape = format!("{}/../", root.display());
         let err2 = read_file_preview_sync(&escape, root.to_str().unwrap()).unwrap_err();
-        assert!(err2.contains("超出项目根目录") || err2.contains("目录"), "{err2}");
+        assert!(
+            err2.contains("超出项目根目录") || err2.contains("目录"),
+            "{err2}"
+        );
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&outside).ok();
     }
@@ -357,7 +369,8 @@ mod tests {
         let dir = tmpdir("save");
         let f = dir.join("edit.txt");
         fs::write(&f, "old").unwrap();
-        save_file_preview_sync(f.to_str().unwrap(), dir.to_str().unwrap(), "new content\n").unwrap();
+        save_file_preview_sync(f.to_str().unwrap(), dir.to_str().unwrap(), "new content\n")
+            .unwrap();
         assert_eq!(fs::read_to_string(&f).unwrap(), "new content\n");
         // 超限拒绝且不改动文件
         let big = "x".repeat(PREVIEW_CAP + 1);
@@ -372,8 +385,8 @@ mod tests {
         let outside = tmpdir("save-outside");
         let secret = outside.join("s.txt");
         fs::write(&secret, "nope").unwrap();
-        let err =
-            save_file_preview_sync(secret.to_str().unwrap(), root.to_str().unwrap(), "x").unwrap_err();
+        let err = save_file_preview_sync(secret.to_str().unwrap(), root.to_str().unwrap(), "x")
+            .unwrap_err();
         assert!(err.contains("超出项目根目录"), "{err}");
         assert_eq!(fs::read_to_string(&secret).unwrap(), "nope");
         fs::remove_dir_all(&root).ok();
@@ -397,11 +410,17 @@ mod fix_tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.join("real.txt"), root.join("link.txt")).unwrap();
         // 符号链接解析到根外：词法检查应放行
-        let r = read_file_preview_sync(root.join("link.txt").to_str().unwrap(), root.to_str().unwrap());
+        let r = read_file_preview_sync(
+            root.join("link.txt").to_str().unwrap(),
+            root.to_str().unwrap(),
+        );
         assert!(r.is_ok(), "{r:?}");
         assert_eq!(r.unwrap().text, "hello");
         // 根外路径仍拒绝
-        let r2 = read_file_preview_sync(outside.join("real.txt").to_str().unwrap(), root.to_str().unwrap());
+        let r2 = read_file_preview_sync(
+            outside.join("real.txt").to_str().unwrap(),
+            root.to_str().unwrap(),
+        );
         assert!(r2.is_err());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -411,19 +430,34 @@ mod fix_tests {
         use std::path::Path;
         assert!(fs_noise_skip(Path::new("/home/u/.claude/projects/x.jsonl")));
         assert!(fs_noise_skip(Path::new("/home/u/proj/.git/index")));
-        assert!(fs_noise_skip(Path::new("/home/u/proj/node_modules/x/index.js")));
+        assert!(fs_noise_skip(Path::new(
+            "/home/u/proj/node_modules/x/index.js"
+        )));
         assert!(!fs_noise_skip(Path::new("/home/u/proj/src/main.rs")));
-        assert!(fs_noise_skip(Path::new("/home/u/proj/target/debug/build/x")));
-        assert!(fs_noise_skip(Path::new("/home/u/proj/dist/assets/index.js")));
+        assert!(fs_noise_skip(Path::new(
+            "/home/u/proj/target/debug/build/x"
+        )));
+        assert!(fs_noise_skip(Path::new(
+            "/home/u/proj/dist/assets/index.js"
+        )));
         assert!(!fs_noise_skip(Path::new("/home/u/proj/.env")));
         // .ccode 豁免：任务书草稿 AI 改稿要触发预览实时重载
-        assert!(!fs_noise_skip(Path::new("/home/u/proj/.ccode/drafts/lit-search.md")));
+        assert!(!fs_noise_skip(Path::new(
+            "/home/u/proj/.ccode/drafts/lit-search.md"
+        )));
         // 其他隐藏目录照旧过滤
         assert!(fs_noise_skip(Path::new("/home/u/proj/.idea/workspace.xml")));
     }
 }
 
-// ===== 项目内文件搜索（P4 补充）：限定根目录内，跳过隐藏/噪声目录 =====
+// ===== 项目内文件搜索（P4 补充）：限定根目录内，跳过噪声目录 =====
+///
+/// 隐藏目录默认不进（与 list_dir 同口径），例外：
+/// - `.ccode` 恒进（任务书草稿）
+/// - `show_hidden=true`（工作树开了「显示隐藏文件」）
+/// - 查询以 `.` 开头（用户在搜点文件）
+/// - 隐藏目录名本身命中查询（搜 `kimi-code` 能找到 `.kimi-code` 并进入）
+/// `.git` / `node_modules` / `target` / `dist` / `Library` 始终跳过。
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -435,64 +469,213 @@ pub struct SearchResultDto {
     pub rel: String,
 }
 
+fn search_skip_dir(name: &str, show_hidden: bool, query: &str) -> bool {
+    if name == ".git" || matches!(name, "node_modules" | "target" | "dist" | "Library") {
+        return true;
+    }
+    if name == ".ccode" || !name.starts_with('.') {
+        return false;
+    }
+    if show_hidden || query.starts_with('.') {
+        return false;
+    }
+    !name.to_lowercase().contains(query)
+}
+
+/// 文件名最后一个扩展名（小写、不含点）。`.env`、无扩展名 → None
+fn file_ext(name: &str) -> Option<&str> {
+    let dot = name.rfind('.')?;
+    if dot == 0 || dot + 1 == name.len() {
+        return None;
+    }
+    Some(&name[dot + 1..])
+}
+
+fn is_simple_ext_token(s: &str) -> bool {
+    let len = s.len();
+    (1..=8).contains(&len) && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// `doc` 同时找 .doc/.docx；`pdf` / `.pdf` / `*.pdf` 都认成后缀。
+fn expand_ext_aliases(ext: &str) -> Vec<String> {
+    let group: &[&str] = match ext {
+        "doc" | "docx" => &["doc", "docx"],
+        "ppt" | "pptx" => &["ppt", "pptx"],
+        "xls" | "xlsx" => &["xls", "xlsx"],
+        "jpg" | "jpeg" => &["jpg", "jpeg"],
+        "htm" | "html" => &["htm", "html"],
+        "md" | "markdown" | "mdx" => &["md", "markdown", "mdx", "qmd"],
+        "qmd" => &["qmd", "md"],
+        _ => &[],
+    };
+    if group.is_empty() {
+        vec![ext.to_string()]
+    } else {
+        group.iter().map(|s| (*s).to_string()).collect()
+    }
+}
+
+struct SearchQuery {
+    raw: String,
+    exts: Vec<String>,
+    /// `.pdf` / `*.pdf`：只按后缀，不拿文件名里偶然出现的 "pdf" 凑数
+    ext_only: bool,
+}
+
+fn parse_search_query(raw: &str) -> Option<SearchQuery> {
+    let raw = raw.trim().to_lowercase();
+    if raw.is_empty() {
+        return None;
+    }
+    let (token, ext_only) = if let Some(rest) = raw.strip_prefix("*.") {
+        (rest, true)
+    } else if raw.starts_with('.') && is_simple_ext_token(&raw[1..]) {
+        (&raw[1..], true)
+    } else if is_simple_ext_token(&raw) {
+        (raw.as_str(), false)
+    } else {
+        return Some(SearchQuery {
+            raw,
+            exts: Vec::new(),
+            ext_only: false,
+        });
+    };
+    if !is_simple_ext_token(token) {
+        return Some(SearchQuery {
+            raw,
+            exts: Vec::new(),
+            ext_only: false,
+        });
+    }
+    let token = token.to_string();
+    let exts = expand_ext_aliases(&token);
+    Some(SearchQuery {
+        raw,
+        exts,
+        ext_only,
+    })
+}
+
+fn is_ext_hit(name: &str, is_dir: bool, q: &SearchQuery) -> bool {
+    if is_dir || q.exts.is_empty() {
+        return false;
+    }
+    file_ext(name).is_some_and(|e| q.exts.iter().any(|x| x == e))
+}
+
+fn search_entry_matches(name: &str, is_dir: bool, q: &SearchQuery) -> bool {
+    if is_ext_hit(name, is_dir, q) {
+        return true;
+    }
+    if q.ext_only {
+        // `.env` / `.gitignore` 整名；`.kimi` 仍能命中目录 `.kimi-code`
+        return name == q.raw || (is_dir && name.contains(&q.raw));
+    }
+    name.contains(&q.raw)
+}
+
+const SEARCH_MAX_DEPTH: usize = 10;
+const SEARCH_MAX_VISITED: usize = 50000;
+const SEARCH_MAX_RESULTS: usize = 50;
+
 fn search_walk(
     root: &std::path::Path,
     dir: &std::path::Path,
-    query: &str,
+    query: &SearchQuery,
+    show_hidden: bool,
     depth: usize,
     visited: &mut usize,
-    out: &mut Vec<SearchResultDto>,
+    ext_out: &mut Vec<SearchResultDto>,
+    name_out: &mut Vec<SearchResultDto>,
 ) {
-    const MAX_DEPTH: usize = 10;
-    const MAX_VISITED: usize = 50000;
-    const MAX_RESULTS: usize = 50;
-    if depth > MAX_DEPTH || *visited >= MAX_VISITED || out.len() >= MAX_RESULTS {
+    if depth > SEARCH_MAX_DEPTH
+        || *visited >= SEARCH_MAX_VISITED
+        || ext_out.len() >= SEARCH_MAX_RESULTS
+    {
         return;
     }
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
-        if out.len() >= MAX_RESULTS || *visited >= MAX_VISITED {
+        if *visited >= SEARCH_MAX_VISITED || ext_out.len() >= SEARCH_MAX_RESULTS {
             return;
         }
         *visited += 1;
         let name = e.file_name().to_string_lossy().into_owned();
         let path = e.path();
         let is_dir = path.is_dir();
-        if is_dir
-            && (name.starts_with('.')
-                || matches!(name.as_str(), "node_modules" | "target" | "dist" | "Library"))
-        {
+        if is_dir && search_skip_dir(&name, show_hidden, &query.raw) {
             continue;
         }
-        if name.to_lowercase().contains(query) {
-            out.push(SearchResultDto {
+        let name_l = name.to_lowercase();
+        if search_entry_matches(&name_l, is_dir, query) {
+            let dto = SearchResultDto {
                 rel: path
                     .strip_prefix(root)
                     .map(|r| r.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| name.clone()),
                 path: path.to_string_lossy().into_owned(),
-                name,
+                name: name.clone(),
                 is_dir,
-            });
+            };
+            if is_ext_hit(&name_l, is_dir, query) {
+                ext_out.push(dto);
+            } else if name_out.len() < SEARCH_MAX_RESULTS {
+                name_out.push(dto);
+            }
         }
         if is_dir {
-            search_walk(root, &path, query, depth + 1, visited, out);
+            search_walk(
+                root,
+                &path,
+                query,
+                show_hidden,
+                depth + 1,
+                visited,
+                ext_out,
+                name_out,
+            );
         }
     }
 }
 
+fn assemble_search_hits(
+    mut ext_out: Vec<SearchResultDto>,
+    name_out: Vec<SearchResultDto>,
+) -> Vec<SearchResultDto> {
+    if ext_out.len() >= SEARCH_MAX_RESULTS {
+        ext_out.truncate(SEARCH_MAX_RESULTS);
+        return ext_out;
+    }
+    let room = SEARCH_MAX_RESULTS - ext_out.len();
+    ext_out.extend(name_out.into_iter().take(room));
+    ext_out
+}
+
 #[tauri::command]
-pub async fn search_files(root: String, query: String) -> Result<Vec<SearchResultDto>, String> {
+pub async fn search_files(
+    root: String,
+    query: String,
+    show_hidden: bool,
+) -> Result<Vec<SearchResultDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
+        let Some(q) = parse_search_query(&query) else {
             return Ok(Vec::new());
-        }
-        let mut out = Vec::new();
+        };
+        let mut ext_out = Vec::new();
+        let mut name_out = Vec::new();
         let mut visited = 0;
         let root_path = std::path::PathBuf::from(expand_tilde(&root));
-        search_walk(&root_path, &root_path, &q, 0, &mut visited, &mut out);
-        Ok(out)
+        search_walk(
+            &root_path,
+            &root_path,
+            &q,
+            show_hidden,
+            0,
+            &mut visited,
+            &mut ext_out,
+            &mut name_out,
+        );
+        Ok(assemble_search_hits(ext_out, name_out))
     })
     .await
     .map_err(|e| format!("搜索失败: {e}"))?
@@ -502,6 +685,24 @@ pub async fn search_files(root: String, query: String) -> Result<Vec<SearchResul
 mod search_tests {
     use super::*;
 
+    fn run_search(dir: &std::path::Path, query: &str, show_hidden: bool) -> Vec<SearchResultDto> {
+        let q = parse_search_query(query).expect("query");
+        let mut ext_out = Vec::new();
+        let mut name_out = Vec::new();
+        let mut visited = 0;
+        search_walk(
+            dir,
+            dir,
+            &q,
+            show_hidden,
+            0,
+            &mut visited,
+            &mut ext_out,
+            &mut name_out,
+        );
+        assemble_search_hits(ext_out, name_out)
+    }
+
     #[test]
     fn search_finds_nested_and_skips_noise() {
         let dir = std::env::temp_dir().join(format!("ccode-search-{}", uuid::Uuid::new_v4()));
@@ -510,9 +711,7 @@ mod search_tests {
         fs::write(dir.join("src/deep/apple.rs"), "").unwrap();
         fs::write(dir.join("node_modules/pkg/apple.js"), "").unwrap();
         fs::write(dir.join("banana.md"), "").unwrap();
-        let mut out = Vec::new();
-        let mut visited = 0;
-        search_walk(&dir, &dir, "apple", 0, &mut visited, &mut out);
+        let out = run_search(&dir, "apple", false);
         assert_eq!(out.len(), 1);
         assert!(std::path::Path::new(&out[0].path).ends_with("src/deep/apple.rs"));
         assert!(std::path::Path::new(&out[0].rel).ends_with("src/deep/apple.rs"));
@@ -522,6 +721,115 @@ mod search_tests {
         let r = read_file_preview_sync(home_file.to_str().unwrap(), "~");
         assert!(r.is_ok(), "{r:?}");
         let _ = fs::remove_file(&home_file);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_skip_dir_rules() {
+        assert!(search_skip_dir(".git", true, "git"));
+        assert!(search_skip_dir("node_modules", true, "pkg"));
+        assert!(!search_skip_dir(".ccode", false, "draft"));
+        assert!(search_skip_dir(".kimi-code", false, "config"));
+        assert!(!search_skip_dir(".kimi-code", false, "kimi-code"));
+        assert!(!search_skip_dir(".kimi-code", false, ".kimi"));
+        assert!(!search_skip_dir(".kimi-code", true, "config"));
+        assert!(!search_skip_dir("src", false, "config"));
+    }
+
+    #[test]
+    fn search_finds_hidden_config_dir() {
+        let dir = std::env::temp_dir().join(format!("ccode-search-dot-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join(".kimi-code")).unwrap();
+        fs::write(dir.join(".kimi-code/config.toml"), "").unwrap();
+        fs::write(dir.join(".env"), "").unwrap();
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".git/config"), "").unwrap();
+
+        let out = run_search(&dir, "kimi-code", false);
+        assert!(
+            out.iter().any(|e| e.name == ".kimi-code" && e.is_dir),
+            "目录名命中时应找到 .kimi-code: {out:?}"
+        );
+
+        let out = run_search(&dir, "config", false);
+        assert!(
+            !out.iter().any(|e| e.path.contains(".kimi-code")),
+            "未开隐藏、查询也不点开头时不进 .kimi-code: {out:?}"
+        );
+
+        let out = run_search(&dir, "config", true);
+        assert!(
+            out.iter().any(|e| e.name == "config.toml"),
+            "开隐藏后应找到 .kimi-code/config.toml: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|e| e.path.contains(".git")),
+            ".git 始终跳过: {out:?}"
+        );
+
+        let out = run_search(&dir, ".kimi", false);
+        assert!(
+            out.iter().any(|e| e.name == ".kimi-code"),
+            "查询以 . 开头应走进隐藏目录: {out:?}"
+        );
+
+        let out = run_search(&dir, ".env", false);
+        assert!(
+            out.iter().any(|e| e.name == ".env"),
+            "根下隐藏文件本就可搜: {out:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_by_extension_ranks_suffix_first() {
+        let dir = std::env::temp_dir().join(format!("ccode-search-ext-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("notes")).unwrap();
+        fs::create_dir_all(dir.join("papers")).unwrap();
+        for i in 0..20 {
+            fs::write(dir.join("notes").join(format!("pdf-notes-{i}.md")), "").unwrap();
+        }
+        fs::write(dir.join("papers/review.PDF"), "").unwrap();
+        fs::write(dir.join("draft.docx"), "").unwrap();
+        fs::write(dir.join("old.doc"), "").unwrap();
+        fs::write(dir.join("document.md"), "").unwrap();
+
+        let out = run_search(&dir, "pdf", false);
+        assert!(
+            out[0].name.to_lowercase().ends_with(".pdf"),
+            "后缀命中排在文件名包含之前: {out:?}"
+        );
+        assert!(out.iter().any(|e| e.name.starts_with("pdf-notes-")));
+
+        let out = run_search(&dir, ".pdf", false);
+        assert!(
+            out.iter().any(|e| e.name.to_lowercase().ends_with(".pdf")),
+            ".pdf 只按后缀: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|e| e.name.ends_with(".md")),
+            ".pdf 不应命中 pdf-notes.md: {out:?}"
+        );
+
+        let out = run_search(&dir, "*.PDF", false);
+        assert!(out.iter().any(|e| e.name.to_lowercase().ends_with(".pdf")));
+        assert!(!out.iter().any(|e| e.name.ends_with(".md")));
+
+        let out = run_search(&dir, "doc", false);
+        assert!(
+            out.iter().any(|e| e.name == "draft.docx"),
+            "doc 别名含 docx: {out:?}"
+        );
+        assert!(out.iter().any(|e| e.name == "old.doc"));
+        let first_names: Vec<_> = out.iter().take(2).map(|e| e.name.as_str()).collect();
+        assert!(
+            first_names
+                .iter()
+                .all(|n| n.ends_with(".doc") || n.ends_with(".docx")),
+            "doc/docx 应排在 document.md 前: {out:?}"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
@@ -549,16 +857,23 @@ fn protect_key(s: &str) -> String {
 /// Windows 系统目录（按环境变量取，不假定盘符为 C:）
 #[cfg(windows)]
 fn windows_system_dirs() -> Vec<String> {
-    ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"]
-        .iter()
-        .filter_map(|k| std::env::var(k).ok())
-        .filter(|v| !v.is_empty())
-        .map(|v| protect_key(&v))
-        .collect()
+    [
+        "SystemRoot",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+    ]
+    .iter()
+    .filter_map(|k| std::env::var(k).ok())
+    .filter(|v| !v.is_empty())
+    .map(|v| protect_key(&v))
+    .collect()
 }
 
 fn lexical_in_root(path: &str, root: &str) -> bool {
-    let root_norm = norm_sep(&expand_tilde(root)).trim_end_matches('/').to_string();
+    let root_norm = norm_sep(&expand_tilde(root))
+        .trim_end_matches('/')
+        .to_string();
     let path_exp = norm_sep(&expand_tilde(path));
     path_exp == root_norm || path_exp.starts_with(&format!("{root_norm}/"))
 }
@@ -646,7 +961,14 @@ fn is_protected_str(p: &str) -> bool {
         return true;
     }
     const PREFIXES: [&str; 8] = [
-        "/System", "/usr", "/bin", "/sbin", "/etc", "/Library", "/Applications", "/opt",
+        "/System",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/etc",
+        "/Library",
+        "/Applications",
+        "/opt",
     ];
     let home_lib = protect_key(&format!("{home}/Library"));
     // macOS 的 /etc、/tmp 等是 /private 下的符号链接，canonicalize 后会带 /private 前缀，剥掉再比
@@ -738,7 +1060,11 @@ mod fsops_tests {
             fs::create_dir_all(&proj).unwrap();
             let link = proj.join("x");
             std::os::unix::fs::symlink("/etc", &link).unwrap();
-            assert!(delete_path_sync(&link.to_string_lossy(), &proj.to_string_lossy().into_owned()).is_err());
+            assert!(delete_path_sync(
+                &link.to_string_lossy(),
+                &proj.to_string_lossy().into_owned()
+            )
+            .is_err());
             let _ = fs::remove_file(&link);
         }
         let _ = fs::remove_dir_all(&dir);

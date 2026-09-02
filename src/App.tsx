@@ -18,7 +18,7 @@ import QuickChatModal, {
 } from "./components/QuickChatModal";
 import QuickChatHistoryMenu from "./components/QuickChatHistoryMenu";
 import TopNavCapsule from "./components/TopNavCapsule";
-import { pickQuickChatSessions } from "./quick-chat";
+import { pickQuickChatHistory } from "./quick-chat";
 import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import { HoverTip, useHoverTip } from "./components/HoverTip";
 import { LoadingRows, rowActionClass } from "./components/PageFrame";
@@ -116,36 +116,26 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 「快速开聊」弹层：侧栏常驻入口与 ⌘K 命令共用同一个宿主
   const [quickChatOpen, setQuickChatOpen] = useState(false);
-  // 侧栏「快速开聊」右键 = 随手聊历史浮层（v3.93 用户拍板）：勾了「下次直接开聊」的用户
-  // 左键直达终端、永远看不到弹层里的历史区，右键浮层是她们的回看口；
-  // 只列随手聊会话（不落工作区/已注册项目），与弹层「随手聊历史」同一口径
+  // 侧栏「快速开聊」右键 = scratch 随手聊历史（记住选择后左键直达，右键是回看口）
   const [quickChatMenu, setQuickChatMenu] = useState<{
     x: number;
     y: number;
-    sessions: SessionMetaDto[] | null;
+    sessions: SessionMetaDto[];
   } | null>(null);
-  /** 右键先弹读取中浮层，数据到达即替换（list_sessions 有 10s 缓存、list_projects 本地读） */
   function openQuickChatMenu(e: React.MouseEvent) {
     e.preventDefault();
     const { clientX: x, clientY: y } = e;
-    setQuickChatMenu({ x, y, sessions: null });
-    void (async () => {
-      try {
-        const [all, projects] = await Promise.all([
-          invoke<SessionMetaDto[]>("list_sessions"),
-          invoke<{ path: string }[]>("list_projects"),
-        ]);
-        const sessions = pickQuickChatSessions(
-          all,
-          projects.map((p) => p.path),
-          undefined,
-          IS_WINDOWS,
-        );
-        setQuickChatMenu((cur) => (cur ? { ...cur, sessions } : cur));
-      } catch {
-        setQuickChatMenu((cur) => (cur ? { ...cur, sessions: [] } : cur));
-      }
-    })();
+    const s = useAppStore.getState();
+    setQuickChatMenu({
+      x,
+      y,
+      sessions: pickQuickChatHistory(
+        s.sessions,
+        s.projectPaths,
+        s.liveSessions,
+        IS_WINDOWS,
+      ),
+    });
   }
   // 运行状态镜像（任意页面可见）：顶栏显示总数，侧栏只在运行页显示提示。
   const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
@@ -181,6 +171,7 @@ function App() {
   }, [titleInboxCat]);
   const loadAll = useAppStore((s) => s.loadAll);
   const loadSessions = useAppStore((s) => s.loadSessions);
+  const loadProjects = useAppStore((s) => s.loadProjects);
   const loadRecentRepos = useAppStore((s) => s.loadRecentRepos);
   const loadSettings = useAppStore((s) => s.loadSettings);
   const checkAppUpdate = useAppStore((s) => s.checkAppUpdate);
@@ -343,12 +334,15 @@ function App() {
   useEffect(() => {
     loadAll().catch((e) => console.error(e));
     loadSessions().catch((e) => console.error(e));
+    loadProjects().catch(() => {});
     loadRecentRepos().catch(() => {});
     // 设置（含主题）在启动时加载并应用
     loadSettings().catch((e) => console.error(e));
     // 启动时静默检查应用更新（内部已吞错，命中后在设置页「更新」分区提示）
     checkAppUpdate().catch(() => {});
-  }, [loadAll, loadSessions, loadRecentRepos, loadSettings, checkAppUpdate]);
+    // 依赖体检（git/node/安装渠道）：缺 git 时收件箱常驻「依赖」条目；失败静默不阻塞首屏
+    useAppStore.getState().refreshDepCheck();
+  }, [loadAll, loadSessions, loadProjects, loadRecentRepos, loadSettings, checkAppUpdate]);
 
   // 前端未捕获异常上报到进程内日志缓冲（设置页「诊断」可见）；同消息 5s 去重防刷屏
   useEffect(() => {
@@ -392,6 +386,7 @@ function App() {
       loadAll().catch(() => {});
       loadSettings().catch(() => {});
       loadSessions().catch(() => {});
+      loadProjects().catch(() => {});
       loadRecentRepos().catch(() => {});
     };
     const onVis = () => {
@@ -403,7 +398,7 @@ function App() {
       window.removeEventListener("focus", sync);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [loadAll, loadSessions, loadRecentRepos, loadSettings]);
+  }, [loadAll, loadSessions, loadProjects, loadRecentRepos, loadSettings]);
 
   return (
     <ErrorBoundary>
@@ -615,9 +610,8 @@ function App() {
                 )}
                 {/* 「快速开聊」是动作不是页面：放在「工作」组首位，回答「我就想随便聊聊」——
                     其余入口全是项目/流程优先，进来先要建项目太重。
-                    弹层里勾过「下次直接开聊」就跳过弹层直接落终端（记住上次选择），
-                    ⌘K 入口永远开弹层，留作调整口；右键 = 随手聊历史浮层（跳过弹层的用户
-                    左键看不到历史，右键是她们的回看口） */}
+                    记住过选择则跳过弹层直接落终端；勾了「每次都先问我」或 ⌘K 永远开弹层。
+                    右键 = 随手聊历史（scratch 里的对话） */}
                 {group.label === "工作" && (
                   <RailTooltip label="快速开聊" collapsed={collapsed}>
                     <button
@@ -633,7 +627,7 @@ function App() {
                       }}
                       onContextMenu={(e) => void openQuickChatMenu(e)}
                       aria-label="快速开聊"
-                      title="快速开聊：不建项目直接开一个终端标签（右键看随手聊历史）"
+                      title="快速开聊：不建项目直接开一个终端标签（右键看 scratch 里的随手聊）"
                       className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm text-l3 transition-colors hover:bg-hover hover:text-l2 ${
                         collapsed ? "justify-center" : "px-2.5"
                       }`}

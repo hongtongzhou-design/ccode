@@ -29,6 +29,40 @@ export function joinDroppedPaths(paths: string[], isWindows = false): string {
     .join(" ");
 }
 
+/** 聊天层拖入：一行一个路径（和粘贴图片附件同形，发给 Agent 当正文） */
+export function joinDroppedChatPaths(
+  paths: string[],
+  isWindows = false,
+): string {
+  return paths
+    .filter((p) => p.length > 0)
+    .map((p) => escapeShellPath(p, isWindows))
+    .join("\n");
+}
+
+/** Tauri 拖放坐标命中检测：物理像素与 CSS 像素都试（HumanTasksList / 终端同款） */
+export function dropHitsRect(
+  position: { x: number; y: number },
+  rect: { left: number; top: number; right: number; bottom: number },
+  devicePixelRatio = 1,
+): boolean {
+  const scale = devicePixelRatio || 1;
+  return [
+    [position.x, position.y],
+    [position.x / scale, position.y / scale],
+  ].some(
+    ([px, py]) =>
+      px >= rect.left &&
+      px <= rect.right &&
+      py >= rect.top &&
+      py <= rect.bottom,
+  );
+}
+
+/** kimi TUI 开了 kitty 键盘协议后只认的 CSI-u 序列（xterm.js 不支持该协议，由宿主改写） */
+export const KIMI_CSI_U_ENTER = "\x1b[13u";
+export const KIMI_CSI_U_CTRL_V = "\x1b[118;5u";
+
 /** 剪贴板条目里挑出第一张图片（image/*），无图片返回 null（不干预默认文本粘贴） */
 export function firstImageItem(
   items: readonly { type: string }[],

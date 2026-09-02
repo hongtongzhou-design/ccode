@@ -372,6 +372,22 @@ fn image_mime_for(path: &Path) -> Option<&'static str> {
     }
 }
 
+fn image_magic_ok(mime: &str, bytes: &[u8]) -> bool {
+    match mime {
+        "image/png" => bytes.starts_with(b"\x89PNG"),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/jpeg" => bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF,
+        "image/webp" => {
+            bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+        }
+        "image/svg+xml" => {
+            let head = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]);
+            head.to_ascii_lowercase().contains("<svg")
+        }
+        _ => false,
+    }
+}
+
 fn read_image_sync(path: &str, cwd_hint: Option<&str>) -> Result<ImageBytesDto, String> {
     let expanded = crate::sessions::expand_tilde(path);
     let mime = image_mime_for(Path::new(&expanded))
@@ -380,7 +396,9 @@ fn read_image_sync(path: &str, cwd_hint: Option<&str>) -> Result<ImageBytesDto, 
     let (bytes, _size) = crate::pdf::read_whitelisted_sync(path, cwd_hint, IMAGE_CAP, |mb| {
         format!("图片超过 20 MB（{mb:.1} MB），暂不支持内嵌显示")
     })?;
-    // svg 是文本格式，直接按字节编码即可（与其它位图同一通道）
+    if !image_magic_ok(mime, &bytes) {
+        return Err("文件内容不是有效的图片（扩展名对但内容不是 png/gif/jpg/webp/svg）".into());
+    }
     Ok(ImageBytesDto {
         mime: mime.into(),
         data: base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -1074,6 +1092,14 @@ mod tests {
         fs::write(&svg, "<svg/>").unwrap();
         let dto2 = read_image_sync(svg.to_str().unwrap(), Some(dir.to_str().unwrap())).unwrap();
         assert_eq!(dto2.mime, "image/svg+xml");
+        let gif = dir.join("a.gif");
+        fs::write(&gif, b"GIF89a\x01\x00\x01\x00").unwrap();
+        let dto3 = read_image_sync(gif.to_str().unwrap(), Some(dir.to_str().unwrap())).unwrap();
+        assert_eq!(dto3.mime, "image/gif");
+        let fake = dir.join("lfs.gif");
+        fs::write(&fake, "version https://git-lfs.github.com/spec/v1\n").unwrap();
+        let err = read_image_sync(fake.to_str().unwrap(), Some(dir.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("不是有效的图片"), "{err}");
         fs::remove_dir_all(&dir).ok();
     }
 

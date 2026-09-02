@@ -1,11 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import { isGitMissingError } from "./dep-check";
 import { orderedAnswers, parseDecisions } from "./step-decisions";
-import { litSourceSectionLines } from "./task-md-sections";
 import { pickWorkspaceResume } from "./workspace-resume";
-import {
-  DEFAULT_KICKOFF_PROMPT,
-  RESOURCE_TYPE_LABELS,
-} from "./pipeline-presets";
+import { DEFAULT_KICKOFF_PROMPT } from "./pipeline-presets";
+import { renderTaskMd } from "./task-md";
+export { renderTaskMd };
 import type { PendingTerminal } from "./store";
 import type {
   ArtifactEntryDto,
@@ -17,219 +16,6 @@ import type {
   SkillDto,
   WorkspaceDto,
 } from "./types";
-
-/** TASK.md 内容：标题 + 课题主题（非空时） + 简报 + 预期产物 + 人工事项（可选） + 推荐技能 + 项目资源（步骤有资源绑定时只列绑定项，一键开步落成工作区）。
- *  一键开步（开工确认弹层 / 评审「开始下一步」）与 TerminalPage 的「整理为笔记」开步链路共用，保持各处 TASK.md 一致。
- *  artifacts 为项目根提货单（上一步产物），非空时在「项目资源」后追加提货单段。
- *  skillMeta 为技能库元数据（name → 一句话描述）：步骤 skills 非空时渲染「本步骤推荐技能」段；
- *  缺省（库读取失败）时只列技能名，不误标未安装 */
-export function renderTaskMd(
-  step: ProjectStepDto,
-  cfg: ProjectConfigDto,
-  projectPath: string,
-  artifacts?: ArtifactEntryDto[],
-  skillMeta?: Record<string, string>,
-  decisions?: { q: string; answer: string }[],
-): string {
-  const lines = [`# ${step.name}`, ""];
-  // 课题主题放在简报之前：auto 模式的 Agent 据此明确综述主题
-  const topic = cfg.topic?.trim();
-  if (topic) {
-    lines.push("## 课题主题", topic, "");
-  }
-  // 全局设定：贯穿全程的决定，每一步的 TASK.md 都要带上（这正是它挂项目层的意义）
-  const globals = (cfg.settings ?? []).map((x) => x.trim()).filter(Boolean);
-  if (globals.length > 0) {
-    lines.push("## 全局设定", ...globals.map((x) => `- ${x}`), "");
-  }
-  // 文献来源：用户已有文献库时，检索这一步的性质变了——不是「去检索」而是「盘点 + 查漏」
-  const litLines = litSourceSectionLines(cfg.litSource);
-  if (litLines) {
-    lines.push(...litLines, "");
-  }
-  // 已定方向紧跟主题、排在简报之前：这是人对本步骤的显式约束，
-  // agent 应当在读简报之前先知道哪些口径已经被拍死
-  if (decisions && decisions.length > 0) {
-    lines.push(
-      "## 已定方向",
-      ...decisions.map((d) => `- ${d.q}：${d.answer}`),
-      // 空行不能省：紧贴列表的段落会被 markdown 当成最后一个列表项的续行
-      "",
-      "以上为人已拍板的口径，按此执行；与简报冲突时以本节为准。",
-      "",
-    );
-  }
-  const inputs = (step.inputs ?? []).map((x) => x.trim()).filter(Boolean);
-  const optionalInputs = (step.optionalInputs ?? [])
-    .map((x) => x.trim())
-    .filter(Boolean);
-  const anyOfInputs = (step.anyOfInputs ?? [])
-    .map((group) => group.map((x) => x.trim()).filter(Boolean))
-    .filter((group) => group.length > 0);
-  if (inputs.length > 0 || optionalInputs.length > 0 || anyOfInputs.length > 0) {
-    lines.push(
-      "## 本步骤输入",
-      ...inputs.map((input) => `- 必需：${input}`),
-      ...optionalInputs.map((input) => `- 可选：${input}`),
-      ...anyOfInputs.map((group) => `- 任一：${group.join(" 或 ")}`),
-      "按上述规则读取上游产物或项目资源；必需输入缺失时先在 .ccode/help-wanted.md 说明，不要猜测替代输入；可选输入缺失可继续，任一组满足一项即可。",
-      "",
-    );
-  }
-  lines.push(
-    step.brief.trim() ||
-      "（在 .ccode/project.toml 的 steps.brief 中补充本步骤任务简报）",
-  );
-  if (step.expectedArtifacts.length > 0) {
-    lines.push(
-      "",
-      "## 预期产物",
-      ...step.expectedArtifacts.map((a) => `- ${a}`),
-    );
-  }
-  const acceptanceCriteria = (step.acceptanceCriteria ?? [])
-    .map((x) => x.trim())
-    .filter(Boolean);
-  if (acceptanceCriteria.length > 0) {
-    lines.push(
-      "",
-      "## 验收条件",
-      ...acceptanceCriteria.map((criterion) => `- ${criterion}`),
-      "逐条核对上述条件；仅文件存在不代表内容合格。无法核对的项标记为待人工确认。",
-    );
-  }
-  // 人工事项（人机分工清单）：告知 agent 这些事归人做、交付物会出现在落点路径，
-  // 不要代做也不要干等；执行中另需人协助时写 .ccode/help-wanted.md（非阻断，自带兜底句）
-  const humanTasks = step.humanTasks ?? [];
-  if (humanTasks.length > 0) {
-    lines.push("", "## 人工事项（由人完成，不要代做）");
-    for (const h of humanTasks) {
-      const when =
-        h.timing === "before"
-          ? "开始前"
-          : h.timing === "after"
-            ? "收尾"
-            : "进行中";
-      lines.push(
-        `- [${when}] ${h.title}${h.target ? ` → 交付落点 \`${h.target}\`` : ""}` +
-          `${h.optional ? "（可选）" : "（必办）"}` +
-          ` · 完成判定：${
-            h.completion === "manual"
-              ? "人工确认"
-              : h.completion === "all"
-                ? `全部目标满足${h.expectedCount != null ? `（${h.expectedCount} 项）` : ""}`
-                : h.completion === "no_placeholders"
-                  ? "清除占位后完成"
-                  : "落点出现"
-          }`,
-      );
-    }
-    lines.push(
-      "上述事项由人完成，交付物会出现在对应落点路径；落点为空前请按既有内容推进可推进的部分。",
-      "执行中若另需人协助（如补检索词、缺权限全文），把请求逐条写进 .ccode/help-wanted.md" +
-        "（每条一行「- 」开头，附「若未回复则按 ×× 继续」的兜底方案），写完按兜底继续，不要停工等待。",
-    );
-  }
-  // 步骤挂载技能：区分必需/可选，技能本体不进 TASK.md（保持简报轻量）
-  if (step.skills.length > 0) {
-    // 旧模板未声明 requiredSkills 时，沿用历史「挂载即推荐且应执行」语义。
-    const required = new Set(step.requiredSkills ?? step.skills);
-    lines.push("", "## 本步骤技能");
-    for (const name of step.skills) {
-      const prefix = required.has(name) ? "必需" : "可选";
-      if (!skillMeta) {
-        lines.push(`- ${prefix}：${name}`);
-      } else if (name in skillMeta) {
-        const desc = skillMeta[name];
-        lines.push(desc ? `- ${prefix}：${name}：${desc}` : `- ${prefix}：${name}`);
-      } else {
-        lines.push(`- ${prefix}：${name}（未安装，可在技能页新建或导入）`);
-      }
-    }
-    lines.push(
-      "必需技能缺失时先记录帮助请求；可选技能缺失可继续，但不得假装已执行其检查。",
-      // 外部下载的技能常自带一套产出路径约定，与流水线接口（papers/、notes/ 等）未必一致；
-      // TASK.md 是直接合同，优先级压过技能正文，未适配的技能也会被拉回约定落点
-      "技能正文里的读取/产出路径若与本文件（预期产物、项目资源、验收条件）不一致，一律以本文件为准。",
-    );
-  }
-  // 资源绑定（RX1）：步骤 resources 非空时「项目资源」段只列绑定项；空/缺省保持全部（向后兼容）
-  const boundPaths = step.resources ?? [];
-  const resources =
-    boundPaths.length > 0
-      ? cfg.resources.filter((r) => boundPaths.includes(r.path))
-      : cfg.resources;
-  if (resources.length > 0) {
-    // 资源只引用不复制：相对路径按项目根拼成绝对路径，Agent 可直接读取
-    const root = projectPath.replace(/[\\/]+$/, "");
-    lines.push("", "## 项目资源（只读引用，勿复制到本工作区）");
-    for (const r of resources) {
-      const abs = /^([a-zA-Z]:[\\/]|\/)/.test(r.path)
-        ? r.path
-        : `${root}/${r.path}`;
-      const label = RESOURCE_TYPE_LABELS[r.type] ?? r.type;
-      lines.push(
-        `- [${label}] ${r.name}：${abs}${r.readonly ? "（只读）" : ""}`,
-      );
-    }
-  }
-  const inputPatterns = [
-    ...(step.inputs ?? []),
-    ...(step.optionalInputs ?? []),
-    ...((step.anyOfInputs ?? []).flat()),
-  ]
-    .map((x) => x.trim().replace(/\\/g, "/"))
-    .filter(Boolean);
-  const wildcardMatches = (value: string, pattern: string) => {
-    if (pattern.endsWith("/")) {
-      const dir = pattern.replace(/\/+$/, "");
-      return value === dir || value.startsWith(`${dir}/`);
-    }
-    const escaped = pattern.replace(/[.+^${}()|[\\]\\\\]/g, "\\$&");
-    return new RegExp(`^${escaped.replace(/\*/g, ".*")}$`).test(value);
-  };
-  const scopedArtifacts =
-    inputPatterns.length === 0
-      ? artifacts ?? []
-      : (artifacts ?? []).filter((artifact) => {
-          const path = artifact.path.replace(/\\/g, "/");
-          const root = projectPath.replace(/[\\/]+$/, "").replace(/\\/g, "/");
-          const relative = path.startsWith(`${root}/`)
-            ? path.slice(root.length + 1)
-            : path;
-          const base = relative.split("/").pop() ?? relative;
-          return inputPatterns.some(
-            (pattern) =>
-              wildcardMatches(relative, pattern) || wildcardMatches(base, pattern),
-          );
-        });
-  if (scopedArtifacts && scopedArtifacts.length > 0) {
-    // 提货单（§11.3 机制五）：上一步产物按路径直读，产物本体不进 git
-    lines.push("", "## 上一步产物（提货单）");
-    for (const a of scopedArtifacts) {
-      lines.push(
-        `- ${a.name}：${a.path}（md5 ${a.hash.slice(0, 8)}，来自「${a.producedBy}」）`,
-      );
-    }
-    lines.push(
-      "产物文件按路径直接读取，勿复制；新产物请通过改动面板登记进提货单。",
-    );
-  }
-  if (cfg.artifactDir?.trim()) {
-    lines.push(
-      "",
-      "## 产物目录",
-      `大型产物（数据/图/PDF）放入项目产物目录 \`${cfg.artifactDir}\`（相对项目根），不要提交进本分支。`,
-    );
-  }
-  // 步骤状态从工作区 git 派生（未提交=进行中、已提交=待评审）：不提交就永远停在「进行中」
-  lines.push(
-    "",
-    "## 收尾",
-    "完成时把本步产出全部 git 提交（产物目录里的大型产物除外）——不提交，系统会认为这一步仍在进行中。",
-  );
-  return `${lines.join("\n")}\n`;
-}
 
 /** TASK.md 的提货单/技能元数据收集（best-effort，失败回落空）：开工确认弹层预览与实际开工共用 */
 export async function gatherTaskMdExtras(
@@ -317,7 +103,18 @@ export async function startPipelineStep({
     initialPrompt?: string,
   ) => void | Promise<void>;
 }): Promise<void> {
-  await invoke<EnsureGitDto>("ensure_git_repo", { path: projectPath });
+  try {
+    await invoke<EnsureGitDto>("ensure_git_repo", { path: projectPath });
+  } catch (reason) {
+    // git 缺失（如 macOS 新机未装 CLT）：走调用方既有错误面提示后中止开步，
+    // 不再抛——错误串原样透出（isGitMissingError 可识别，诊断区/改动面板有一键安装）
+    const msg = String(reason);
+    if (isGitMissingError(msg)) {
+      onError(msg);
+      return;
+    }
+    throw reason;
+  }
   // 档案卡/gitignore 自动提交为 best-effort（沿用 TASK.md 同款模式）：
   // git init 后 .ccode 与 .gitignore 未跟踪会被工作区合并的「主文件夹里还有没保存的改动」拦截；
   // 后端只提交这两个 Ccode 自有路径，用户文件绝不纳入，失败不阻断开步

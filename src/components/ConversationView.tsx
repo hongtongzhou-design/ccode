@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { BlockDto, ChatMessageDto } from "../types";
 import { FoldMark } from "./PageFrame";
 import ChatMarkdown, { ChatImageCard } from "./ChatMarkdown";
@@ -79,13 +79,25 @@ export default function ConversationView({
   messages,
   compact,
   cwd,
+  focusIndex = -1,
 }: {
   messages: ChatMessageDto[];
   compact?: boolean;
   /** 会话工作目录：AI 正文里相对图片/链接的解析基准（ChatMarkdown 用） */
   cwd?: string | null;
+  /** 搜索命中的消息下标；≥0 时高亮并滚进视野 */
+  focusIndex?: number;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const didFocusScroll = useRef(false);
+
+  useLayoutEffect(() => {
+    if (focusIndex < 0 || didFocusScroll.current) return;
+    const el = document.querySelector("[data-search-hit='1']");
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    didFocusScroll.current = true;
+  }, [focusIndex]);
 
   /** 消息稳定键：角色+时间戳+块数+首段文本特征。前插分页/轮询刷新后数组下标会移位，
    *  展开状态（思考过程/工具调用/长文本）必须跟随内容而非位置 */
@@ -337,18 +349,29 @@ export default function ConversationView({
     <>
       {messages.map((m, mi) => {
         const mk = msgKey(m, mi);
+        const hit = mi === focusIndex;
         return m.role === "user" ? (
           // 用户消息：右对齐圆角气泡（bubble 令牌底，max-w 70%）
-          <div key={mk} className="mb-3 flex justify-end">
+          <div
+            key={mk}
+            data-search-hit={hit ? "1" : undefined}
+            className="mb-3 flex justify-end"
+          >
             <div
-              className={`max-w-[70%] rounded-md bg-bubble/75 px-3 py-2 ${compact ? "text-xs" : "text-sm"}`}
+              className={`max-w-[70%] rounded-md bg-bubble/75 px-3 py-2 ${compact ? "text-xs" : "text-sm"} ${
+                hit ? "ring-1 ring-cta-bd" : ""
+              }`}
             >
               {renderRuns(m, mk, true)}
             </div>
           </div>
         ) : (
           // AI 回复：直接排版，无气泡容器；有逐条 usage 的 agent 在消息末尾标 token
-          <div key={mk} className="mb-3 max-w-full">
+          <div
+            key={mk}
+            data-search-hit={hit ? "1" : undefined}
+            className={`mb-3 max-w-full ${hit ? "rounded-md bg-seg-sel px-2 py-1" : ""}`}
+          >
             {renderRuns(m, mk, false)}
             {m.usage && (m.usage.input > 0 || m.usage.output > 0) && (
               <div

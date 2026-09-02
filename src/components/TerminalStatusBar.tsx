@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { FolderOpen } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
+import { KIMI_CSI_U_ENTER } from "../terminal-input";
 import type { ComboSurfaceDto, DetectResult, GitCommitResultDto, SessionUsageDto } from "../types";
 import type { GitSummary } from "./GitPanel";
 import type { TabStatus } from "../pages/TerminalPage";
@@ -152,7 +153,7 @@ export default function TerminalStatusBar({
     if (status?.ptyId) {
       // Enter 形式按各家 TUI 键盘协议分派：kimi 开了 kitty 协议只认 CSI-u（\x1b[13u），
       // 其余认 \r（与 injectToActiveAgent 的「send 补 \r」同口径）
-      const enter = submitCsiU ? "\x1b[13u" : "\r";
+      const enter = submitCsiU ? KIMI_CSI_U_ENTER : "\r";
       invoke("pty_write", { ptyId: status.ptyId, data: `${cmd}${enter}` }).catch(
         () => {},
       );

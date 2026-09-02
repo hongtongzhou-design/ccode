@@ -8,13 +8,16 @@ import { relTime } from "../rel-time";
 import { IS_WINDOWS } from "../hotkeys";
 import { abbrevHome } from "../path-utils";
 import {
-  pickQuickChatSessions,
-  sessionHomeLabel,
+  pickQuickChatHistory,
   sessionDisplayTitle,
 } from "../quick-chat";
 
+const SCRATCH_PLACEHOLDER = "~/ccode/scratch";
+
 const LAST_KEY = "ccode.quickChat";
-/** 「下次直接开聊」开关：勾选后侧栏「快速开聊」跳过弹层直接落终端（⌘K 入口永远开弹层，留作调整口） */
+/** 勾选后侧栏「快速开聊」仍打开弹层。未勾且记住过选择 = 侧栏直达。⌘K 永远开弹层。 */
+const ASK_KEY = "ccode.quickChatAlwaysAsk";
+/** 旧键：1 = 下次跳过询问。仅作迁移，不再写入。 */
 const SKIP_KEY = "ccode.quickChatSkip";
 
 type Remembered = { agentId?: string; profileId?: string; cwd?: string };
@@ -30,12 +33,20 @@ function loadRemembered(): Remembered {
   }
 }
 
-export function quickChatSkipEnabled(): boolean {
+export function quickChatAlwaysAsk(): boolean {
   try {
-    return localStorage.getItem(SKIP_KEY) === "1";
+    const v = localStorage.getItem(ASK_KEY);
+    if (v === "1") return true;
+    if (v === "0") return false;
+    return localStorage.getItem(SKIP_KEY) === "0";
   } catch {
     return false;
   }
+}
+
+export function quickChatSkipEnabled(): boolean {
+  if (quickChatAlwaysAsk()) return false;
+  return Boolean(loadRemembered().agentId);
 }
 
 /** 跳过弹层的直接开聊：按上次选择落终端。返回 false = 没有可用的记住选择，调用方退回弹层 */
@@ -96,8 +107,8 @@ export function resumeSessionInTerminal(s: SessionMetaDto): void {
  * 不 git init）——改动面板对它显示「不是 git 仓库」是预期行为。
  * 聊出东西了再从终端标签 ⋯「转为项目…」转正，会话历史跟着 cwd 走、自动归到新项目下。
  *
- * v3.93 起弹层下半带「最近对话」区（用户拍板：想继续之前聊的还要去对话页翻，太远）——
- * 点一条直接 resume 进终端（不开新会话）。勾了「下次直接开聊」的用户从 ⌘K 进弹层仍可见。
+ * 下半是「继续上次」（只列 ~/ccode/scratch）。侧栏记住选择后直达；勾「每次都先问我」才每次开弹层。
+ * ⌘K / 工作台页头永远开弹层。
  */
 export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   const profiles = useAppStore((s) => s.profiles);
@@ -106,34 +117,22 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   const setPage = useAppStore((s) => s.setPage);
 
   const remembered = useMemo(loadRemembered, []);
-  // 最近对话（随手聊口径：不落工作区/已注册项目）：弹层每次打开拉一轮
-  // （list_sessions 有 10s 扫描缓存，list_projects 是本地 db 读，都不重）
-  const [recent, setRecent] = useState<SessionMetaDto[] | null>(null);
-  useEffect(() => {
-    let stale = false;
-    void (async () => {
-      try {
-        const [all, projects] = await Promise.all([
-          invoke<SessionMetaDto[]>("list_sessions"),
-          invoke<{ path: string }[]>("list_projects"),
-        ]);
-        if (stale) return;
-        setRecent(
-          pickQuickChatSessions(
-            all,
-            projects.map((p) => p.path),
-            undefined,
-            IS_WINDOWS,
-          ),
-        );
-      } catch {
-        if (!stale) setRecent([]);
-      }
-    })();
-    return () => {
-      stale = true;
-    };
-  }, []);
+  const sessions = useAppStore((s) => s.sessions);
+  const projectPaths = useAppStore((s) => s.projectPaths);
+  const liveSessions = useAppStore((s) => s.liveSessions);
+  // 随手聊历史用启动时已进 store 的会话列表现算，打开弹层不再 round-trip
+  const recent = useMemo(
+    () =>
+      pickQuickChatHistory(
+        sessions,
+        projectPaths,
+        liveSessions,
+        IS_WINDOWS,
+      ),
+    [sessions, projectPaths, liveSessions],
+  );
+  const latest = recent[0] ?? null;
+  const older = recent.slice(1);
   // 已检测到的 agent 排在前面：没装的排后面并标注，不直接隐藏（用户可能刚装完还没重新检测）
   const installed = useMemo(
     () => new Set(agents.filter((a) => a.binaryPath).map((a) => a.id)),
@@ -152,10 +151,13 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   );
   const agentProfiles = profiles.filter((p) => p.agent === agentId);
   const [profileId, setProfileId] = useState(() => remembered.profileId ?? "");
-  const [cwd, setCwd] = useState(remembered.cwd ?? "");
+  const [cwd, setCwd] = useState(
+    () => remembered.cwd?.trim() || SCRATCH_PLACEHOLDER,
+  );
   const [homeDir, setHomeDir] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [skipNext, setSkipNext] = useState(quickChatSkipEnabled);
+  const [alwaysAsk, setAlwaysAsk] = useState(quickChatAlwaysAsk);
+  const [starting, setStarting] = useState(false);
 
   // 换 agent 时把配置落到该 agent 的可用项（记住的那个可能属于别的 agent）
   useEffect(() => {
@@ -164,68 +166,82 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, profiles]);
 
-  // 目录缺省值：上次用过的优先，否则问后端要 ~/ccode/scratch（顺带创建）
   useEffect(() => {
-    if (cwd) return;
     let stale = false;
     invoke<string>("home_dir")
       .then((h) => {
         if (!stale) setHomeDir(h);
       })
       .catch(() => {});
-    invoke<string>("ensure_scratch_dir")
-      .then((dir) => {
-        if (!stale) setCwd(dir);
-      })
-      .catch((e) => {
-        if (!stale) setError(String(e));
-      });
     return () => {
       stale = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const agentLabel =
     AGENTS.find((a) => a.id === agentId)?.label ?? agentId;
 
-  function start() {
-    const resolvedCwd = (() => {
-      const raw = cwd.trim();
-      if (raw === "~") return homeDir || raw;
-      if ((raw.startsWith("~/") || raw.startsWith("~\\")) && homeDir)
-        return `${homeDir}${raw.slice(1)}`;
-      return raw;
-    })();
-    if (!resolvedCwd) {
-      setError("还没有确定开聊目录");
-      return;
-    }
+  function expandCwd(raw: string, home: string): string {
+    const t = raw.trim();
+    if (t === "~") return home || t;
+    if ((t.startsWith("~/") || t.startsWith("~\\")) && home)
+      return `${home}${t.slice(1)}`;
+    return t;
+  }
+
+  function isScratchPlaceholder(raw: string, home: string): boolean {
+    const t = raw.trim();
+    if (t === SCRATCH_PLACEHOLDER || t === "~\\ccode\\scratch") return true;
+    if (!home) return false;
+    return t === `${home}/ccode/scratch` || t === `${home}\\ccode\\scratch`;
+  }
+
+  async function start() {
+    if (starting) return;
+    setStarting(true);
+    setError(null);
     try {
-      localStorage.setItem(
-        LAST_KEY,
-        JSON.stringify({ agentId, profileId, cwd: resolvedCwd }),
-      );
-      localStorage.setItem(SKIP_KEY, skipNext ? "1" : "0");
-    } catch {
-      /* 隐私模式写不进就只用本次 */
+      let home = homeDir;
+      const raw = cwd.trim();
+      if ((raw === "~" || raw.startsWith("~/") || raw.startsWith("~\\")) && !home) {
+        home = await invoke<string>("home_dir");
+        setHomeDir(home);
+      }
+      let resolvedCwd = expandCwd(raw, home);
+      if (!resolvedCwd || isScratchPlaceholder(raw, home) || isScratchPlaceholder(resolvedCwd, home)) {
+        resolvedCwd = await invoke<string>("ensure_scratch_dir");
+      }
+      if (!resolvedCwd) {
+        setError("还没有确定开聊目录");
+        return;
+      }
+      try {
+        localStorage.setItem(
+          LAST_KEY,
+          JSON.stringify({ agentId, profileId, cwd: resolvedCwd }),
+        );
+        localStorage.setItem(ASK_KEY, alwaysAsk ? "1" : "0");
+        localStorage.removeItem(SKIP_KEY);
+      } catch {
+        /* 隐私模式写不进就只用本次 */
+      }
+      setPendingTerminal({
+        cwd: resolvedCwd,
+        extraEnv: {},
+        title: `随手聊 · ${agentLabel}`,
+        agentId,
+        profileId: profileId || undefined,
+        autoStart: !!profileId,
+        clean: true,
+        reuseKey: `quickchat:${agentId}:${profileId}:${resolvedCwd}`,
+      });
+      setPage("terminal");
+      onClose();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setStarting(false);
     }
-    setPendingTerminal({
-      cwd: resolvedCwd,
-      extraEnv: {},
-      title: `随手聊 · ${agentLabel}`,
-      agentId,
-      profileId: profileId || undefined,
-      // 弹层里已经确认过 agent/配置/目录，落到终端页不该再要一次「启动」；
-      // 没有可用配置时 TerminalView 会自动降级为只预填
-      autoStart: !!profileId,
-      // 随手聊没有项目上下文：收起工作树与右栏，落地就是一个干净终端
-      clean: true,
-      // 同一套选择的重复开聊切回已有标签，不堆新标签
-      reuseKey: `quickchat:${agentId}:${profileId}:${cwd.trim()}`,
-    });
-    setPage("terminal");
-    onClose();
   }
 
   /** 点「最近对话」行：resume 进终端（模块级 resumeSessionInTerminal 与侧栏右键菜单共用） */
@@ -248,6 +264,12 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
           不建项目，直接开个终端聊。
         </p>
 
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void start();
+          }}
+        >
         <label className="mb-2 block">
           <span className="mb-1 block text-xs text-l3">Agent</span>
           <select
@@ -294,19 +316,17 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
                 setCwd(v === "~" ? homeDir : `${homeDir}${v.slice(1)}`);
               else setCwd(v);
             }}
-            placeholder="~/ccode/scratch"
+            placeholder={SCRATCH_PLACEHOLDER}
           />
         </label>
 
         {error && <p className="mb-2 text-xs text-err-text">{error}</p>}
 
-        {/* 跳过弹层：勾选后下次点侧栏「快速开聊」按这套选择直接落终端；
-            ⌘K 里的「快速开聊」永远打开本弹层，留作调整口 */}
         <Checkbox
           className="mb-3 text-xs text-l3"
-          checked={skipNext}
-          onChange={setSkipNext}
-          label="下次跳过询问"
+          checked={alwaysAsk}
+          onChange={setAlwaysAsk}
+          label="每次都先问我"
         />
 
         <div className="flex items-center justify-end gap-2">
@@ -314,22 +334,20 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
             取消
           </button>
           <button
-            type="button"
+            type="submit"
             className={primaryActionClass}
-            onClick={start}
-            disabled={!cwd.trim()}
+            disabled={!cwd.trim() || starting}
+            autoFocus
           >
             开聊
           </button>
         </div>
+        </form>
 
-        {/* 随手聊历史（v3.93）：回到之前的散聊不用去对话页翻。只列随手聊会话
-            （不落工作区/已注册项目）且可恢复的（排除归档/内部/源文件已删/进程活着的）；
-            与侧栏「快速开聊」右键浮层同一口径；空列表时整区不渲染 */}
-        {recent && recent.length > 0 && (
-          <div className="mt-4">
-            <div className="mb-1 flex items-center justify-between">
-              <span className="text-xs text-l3">随手聊历史</span>
+        {recent.length > 0 && (
+          <div className="mt-4 border-t border-hairline pt-3">
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-xs text-l3">继续上次</span>
               <button
                 type="button"
                 className="text-micro text-l4 hover:text-l2"
@@ -341,8 +359,30 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
                 查看全部 →
               </button>
             </div>
-            <ul className="max-h-52 space-y-0.5 overflow-auto">
-              {recent.map((s) => (
+            {latest && (
+              <button
+                type="button"
+                onClick={() => resumeSession(latest)}
+                title={`${sessionDisplayTitle(latest)}\n点按恢复该对话`}
+                className="mb-1 flex h-8 w-full items-center gap-2 rounded-md border border-field bg-strip px-2.5 text-left text-xs text-l2 transition-colors hover:bg-inset hover:text-l1"
+              >
+                <span
+                  className="shrink-0 rounded-sm px-1 py-0.5 text-micro"
+                  style={agentBrandBadgeStyle(latest.agent)}
+                >
+                  {AGENTS.find((a) => a.id === latest.agent)?.label ?? latest.agent}
+                </span>
+                <span className="min-w-0 flex-1 truncate">
+                  {sessionDisplayTitle(latest)}
+                </span>
+                <span className="shrink-0 text-micro text-l4">
+                  {relTime(latest.updatedAt)}
+                </span>
+              </button>
+            )}
+            {older.length > 0 && (
+            <ul className="max-h-40 space-y-0.5 overflow-auto">
+              {older.map((s) => (
                 <li key={`${s.agent}:${s.sessionId}`}>
                   <button
                     type="button"
@@ -360,12 +400,13 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
                       {sessionDisplayTitle(s)}
                     </span>
                     <span className="shrink-0 text-micro text-l4">
-                      {sessionHomeLabel(s)} · {relTime(s.updatedAt)}
+                      {relTime(s.updatedAt)}
                     </span>
                   </button>
                 </li>
               ))}
             </ul>
+            )}
           </div>
         )}
       </div>

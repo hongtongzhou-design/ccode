@@ -3,11 +3,15 @@ import test from "node:test";
 import {
   escapeShellPath,
   joinDroppedPaths,
+  joinDroppedChatPaths,
+  dropHitsRect,
   firstImageItem,
   imageExtFromMime,
   pasteImageFeedback,
   shouldReportTerminalColors,
   xtermOscColorReport,
+  KIMI_CSI_U_ENTER,
+  KIMI_CSI_U_CTRL_V,
 } from "../src/terminal-input.ts";
 
 test("escapeShellPath 安全字符路径原样返回", () => {
@@ -42,6 +46,27 @@ test("joinDroppedPaths 多路径转义后空格拼接", () => {
   );
   assert.equal(joinDroppedPaths([]), "");
   assert.equal(joinDroppedPaths(["/tmp/a.png", ""]), "/tmp/a.png");
+});
+
+test("joinDroppedChatPaths 一行一个路径", () => {
+  assert.equal(
+    joinDroppedChatPaths(["/tmp/a.png", "/tmp/b c.png"]),
+    "/tmp/a.png\n'/tmp/b c.png'",
+  );
+  assert.equal(joinDroppedChatPaths([]), "");
+});
+
+test("dropHitsRect 物理像素与 CSS 像素都算命中", () => {
+  const rect = { left: 10, top: 10, right: 110, bottom: 110 };
+  assert.equal(dropHitsRect({ x: 50, y: 50 }, rect, 1), true);
+  assert.equal(dropHitsRect({ x: 200, y: 200 }, rect, 1), false);
+  // 2x 屏：报物理像素 100 = CSS 50
+  assert.equal(dropHitsRect({ x: 100, y: 100 }, rect, 2), true);
+});
+
+test("kimi CSI-u 序列是 kitty 键盘协议的 Enter 与 Ctrl+V", () => {
+  assert.equal(KIMI_CSI_U_ENTER, "\x1b[13u");
+  assert.equal(KIMI_CSI_U_CTRL_V, "\x1b[118;5u");
 });
 
 test("firstImageItem 挑出第一个 image/* 条目", () => {

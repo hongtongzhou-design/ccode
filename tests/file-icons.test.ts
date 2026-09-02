@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fileTypeIcon } from "../src/file-icons.ts";
+import { fileTypeIcon, isPreviewableImagePath } from "../src/file-icons.ts";
 
 test("常见类型命中固定识别色标签", () => {
   assert.deepEqual(fileTypeIcon("docs/guide.md"), {
@@ -31,4 +31,12 @@ test("Windows 反斜杠路径与无扩展名/未知类型的兜底", () => {
   assert.equal(fileTypeIcon("Makefile"), null);
   assert.equal(fileTypeIcon(".gitignore"), null);
   assert.equal(fileTypeIcon("archive.tar.unknownext"), null);
+});
+
+test("isPreviewableImagePath 覆盖 png/gif 大小写与 Windows 路径", () => {
+  assert.equal(isPreviewableImagePath("/Users/a/效果演示/演示1.png"), true);
+  assert.equal(isPreviewableImagePath("C:\\shots\\A.PNG"), true);
+  assert.equal(isPreviewableImagePath("anim.gif"), true);
+  assert.equal(isPreviewableImagePath("notes.md"), false);
+  assert.equal(isPreviewableImagePath("photo.bmp"), false);
 });

@@ -1121,12 +1121,21 @@ fn restrict_file_mode(path: &std::path::Path) {
 /// ~/.config/opencode；缺了这步报的是「系统找不到指定的路径」，还会把用户没见过的
 /// .tmp 名字吐到界面上）。任何失败路径都清掉残留 tmp，不在用户项目树里留垃圾。
 pub(crate) fn atomic_write(path: &std::path::Path, text: &str) -> Result<(), String> {
+    atomic_write_bytes(path, text.as_bytes())
+}
+
+/// 二进制原子写（会话导入的 jsonl/zst）。临时名挂在原文件名后（`.cwd` → `.cwd.tmp`），
+/// 不用 `with_extension`——那会把 `.cwd` 整段换成 `.tmp`。
+pub(crate) fn atomic_write_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)
             .map_err(|e| format!("创建目录 {} 失败: {e}", parent.display()))?;
     }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, text).map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
+    let tmp = match path.file_name() {
+        Some(name) => path.with_file_name(format!("{}.tmp", name.to_string_lossy())),
+        None => path.with_extension("tmp"),
+    };
+    fs::write(&tmp, bytes).map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
     let result = rename_replacing(&tmp, path);
     if result.is_err() {
         let _ = fs::remove_file(&tmp);

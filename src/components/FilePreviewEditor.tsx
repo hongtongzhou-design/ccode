@@ -1,4 +1,13 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -13,11 +22,15 @@ import {
   classifyMdHref,
   relMdLinkPath,
   resolveMdPath,
+  rewriteMdImageHtml,
 } from "../reader";
 import { escapeShellPath, imageExtFromMime } from "../terminal-input";
 import { comboLabel, IS_WINDOWS, READER_MODE_HOTKEY } from "../hotkeys";
 // md-math 模块作用域完成 marked 公式扩展注册（全局生效，占位=原始 $..$ 源码，未升级处观感不变）
 import { renderMathInto } from "../md-math";
+import { hydrateMdImages } from "../md-image-hydrate";
+import { isPreviewableImagePath } from "../file-icons";
+import ImagePreview from "./ImagePreview";
 import {
   LATEX_EXTENSIONS,
   LATEX_LANGUAGE_ID,
@@ -83,8 +96,10 @@ function isMarkdownPath(path: string): boolean {
  * 选中文字出现浮动按钮「◈ 讨论/改写此段」（与 PDF 问 AI 共用 SelectionFloatBar），
  * 点击把选段 + 出处交给调用方写入活跃终端输入（「↵ 直接发送」立即回车发送）；沉浸阅读覆盖层同款生效。
  * 另有「✦ 沉淀为技能」（DistillSkillButton）：AI 把选段提炼成技能草稿，跳技能页新建表单预填。
- * 批次 B2 后处理：相对/绝对路径图片经 read_image_bytes 换 data URL（http(s) 图片不加载，
- * 只显示链接文本——笔记渲染不发网络请求）；相对链接点击在阅读区笔记栏/预览页签内打开。
+ * 批次 B2 / v3.161 后处理：渲染前把 img 换成 data-md-src 占位 span（避免 WebView
+ * 把相对/绝对本地 png/gif 当成网站地址拉成裂图，也避免无 src 的 img 直接画问号）；
+ * 本地图经 read_image_bytes 换 data URL。本机打开的 md 允许显示 https 图；
+ * 相对链接点击在阅读区笔记栏/预览页签内打开。
  */
 function MarkdownView({
   text,
@@ -113,11 +128,13 @@ function MarkdownView({
     // FE0E 让其按文字颜色单色渲染。只改显示、不改文件内容；
     // 实测 font-variant-emoji: text 在 WKWebView 无效，故走字符替换
     () =>
-      marked.parse(text.replace(/\u26A0\uFE0F/g, "\u26A0\uFE0E"), {
-        gfm: true,
-        breaks: false,
-        async: false,
-      }),
+      rewriteMdImageHtml(
+        marked.parse(text.replace(/\u26A0\uFE0F/g, "\u26A0\uFE0E"), {
+          gfm: true,
+          breaks: false,
+          async: false,
+        }) as string,
+      ),
     [text],
   );
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -152,51 +169,17 @@ function MarkdownView({
     if (!err) window.getSelection()?.removeAllRanges();
   }
 
-  // 图片后处理（批次 B2）：相对/绝对路径经 read_image_bytes 换 data URL（白名单口径）；
-  // http(s) 图片不加载（笔记渲染不发网络请求），只显示链接文本。
-  // 落地守卫只用 isConnected、不用 cancelled：本 setup 不幂等（img 被换成占位 span），
-  // StrictMode 双跑/阅读⇄编辑重挂时后一次 setup 已找不到 img，占位符只能靠前一次的
-  // 异步结果落地——cancelled 会把这条路掐死，占位符永远卡「图片加载中…」；
-  // 卸载/html 变更后旧占位符随 DOM 脱树，isConnected 自然挡住迟到的写入
-  useEffect(() => {
+  // 每次 layout 都扫剩余 [data-md-src]：父级重绘若把 innerHTML 盖回占位，
+  // deps 不变就不会进这个 effect，图会永远停在「图片加载中」。
+  useLayoutEffect(() => {
     const host = bodyRef.current;
     if (!host) return;
-    for (const img of Array.from(host.querySelectorAll("img"))) {
-      const src = img.getAttribute("src") ?? "";
-      if (!src || src.startsWith("data:")) continue;
-      const alt = img.getAttribute("alt") ?? "";
-      if (classifyMdHref(src) === "external") {
-        const span = document.createElement("span");
-        span.className = "md-img-remote";
-        span.textContent = `[外部图片未加载] ${src}`;
-        img.replaceWith(span);
-        continue;
-      }
-      const abs = resolveMdPath(filePath, src);
-      const ph = document.createElement("span");
-      ph.className = "md-img-pending";
-      ph.textContent = "图片加载中…";
-      img.replaceWith(ph);
-      void invoke<{ mime: string; data: string }>("read_image_bytes", {
-        path: abs,
-        cwdHint: root,
-      })
-        .then((dto) => {
-          if (!ph.isConnected) return;
-          const el = document.createElement("img");
-          el.src = `data:${dto.mime};base64,${dto.data}`;
-          el.alt = alt;
-          ph.replaceWith(el);
-        })
-        .catch(() => {
-          if (!ph.isConnected) return;
-          const span = document.createElement("span");
-          span.className = "md-img-failed";
-          span.textContent = `[图片不可读] ${src}`;
-          ph.replaceWith(span);
-        });
-    }
-  }, [html, filePath, root]);
+    hydrateMdImages(host, {
+      fromFile: filePath,
+      cwdHint: root,
+      allowHttps: true,
+    });
+  });
 
   // 公式升级（批次 E）：.md-math 占位换 KaTeX 排版；无公式时函数直接返回、不加载 katex
   useEffect(() => {
@@ -278,8 +261,9 @@ function MarkdownView({
  * 文件预览编辑器（P4）：Monaco 取代只读 pre。
  * 内容经 read_file_preview 加载（根目录约束、二进制/截断处理沿用后端），
  * 脏状态上报给调用方（预览页签的脏点），保存走 save_file_preview（原子写）。
+ * png/jpg/gif/webp/svg 在入口处改走 ImagePreview，避免 NUL 嗅探报「二进制不支持」。
  */
-function FilePreviewEditor({
+function TextFilePreviewEditor({
   path,
   root,
   onDirtyChange,
@@ -771,6 +755,15 @@ function FilePreviewEditor({
       )}
     </div>
   );
+}
+
+function FilePreviewEditor(
+  props: ComponentProps<typeof TextFilePreviewEditor>,
+) {
+  if (isPreviewableImagePath(props.path)) {
+    return <ImagePreview path={props.path} cwdHint={props.root} />;
+  }
+  return <TextFilePreviewEditor {...props} />;
 }
 
 /** memo：父级重渲染不级联到 Monaco 编辑器 */

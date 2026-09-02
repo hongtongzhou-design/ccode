@@ -55,7 +55,7 @@ outputs: [analysis/, figures/, eda-report.md]
 ### 5. 代码风格（matplotlib/pandas）
 
 - 每个分析脚本设 `main()` 与 `if __name__ == "__main__":` 入口，从 `main` 重跑全流程
-- 路径集中为模块顶部常量，读产物目录数据、写 figures/
+- 路径集中为模块顶部常量，读 TASK.md「产物目录」绝对路径下的数据、写 figures/（主交付 SVG/PNG）
 - 一图一函数，函数名说明图意；不依赖交互式状态，不手写中间结果进代码
 - 依赖只用项目已有的 pandas/matplotlib/numpy，不新增未声明依赖
 - 行内审计注释：每个筛选/聚合/派生列带一行 `# 意图:` / `# 依据:` 注释，复查时读得出为什么这么写

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Marked } from "marked";
 import { useAppStore } from "../store";
-import { classifyMdHref, resolveMdPath } from "../reader";
+import { classifyMdHref, resolveMdPath, rewriteMdImageHtml } from "../reader";
+import { hydrateMdImages } from "../md-image-hydrate";
 
 /**
  * 聊天消息 Markdown 渲染（AI 回复正文；用户气泡保持纯文本）。
@@ -11,7 +12,8 @@ import { classifyMdHref, resolveMdPath } from "../reader";
  * 按不可信处理——用独立 Marked 实例（不碰 md-math 注册的全局实例），原始 HTML 一律转义
  * （raw <img> 会成为追踪像素/外泄通道）；聊天场景单换行很常见，开 breaks。
  * 图片与链接口径同 MarkdownView（批次 B2）：http(s) 图片不加载只显示文本，
- * 本地图片经 read_image_bytes 白名单换 data URL；外链走系统浏览器，本地路径跳终端页预览。
+ * 本地图片经 read_image_bytes 白名单换 data URL（rewrite 先换成 data-md-src 占位 span）；
+ * 外链走系统浏览器，本地路径跳终端页预览。
  */
 function escapeHtml(s: string): string {
   return s
@@ -38,54 +40,25 @@ export default function ChatMarkdown({
   /** 会话工作目录：相对图片/链接的解析基准 + read_image_bytes 的 cwdHint */
   cwd?: string | null;
 }) {
-  const html = useMemo(() => chatMarked.parse(text) as string, [text]);
+  const html = useMemo(
+    () => rewriteMdImageHtml(chatMarked.parse(text) as string),
+    [text],
+  );
   const bodyRef = useRef<HTMLDivElement>(null);
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);
   // resolveMdPath 按「文件所在目录」解析相对路径：传 cwd 下的伪文件名，目录即 cwd
   const baseFile = cwd ? `${cwd}/_` : null;
 
-  // 图片后处理（同 MarkdownView 口径；落地守卫只用 isConnected，理由见该文件注释）。
-  // 成功换 data URL 时把绝对路径记在 dataset 上，点击可跳预览页签放大看
-  useEffect(() => {
+  // 每次 layout 都扫剩余占位（理由见 FilePreviewEditor MarkdownView）。
+  useLayoutEffect(() => {
     const host = bodyRef.current;
     if (!host) return;
-    for (const img of Array.from(host.querySelectorAll("img"))) {
-      const src = img.getAttribute("src") ?? "";
-      if (!src || src.startsWith("data:")) continue;
-      const alt = img.getAttribute("alt") ?? "";
-      if (classifyMdHref(src) === "external" || !baseFile) {
-        const span = document.createElement("span");
-        span.className = "md-img-remote";
-        span.textContent = `[图片] ${alt || src}`;
-        img.replaceWith(span);
-        continue;
-      }
-      const abs = resolveMdPath(baseFile, src);
-      const ph = document.createElement("span");
-      ph.className = "md-img-pending";
-      ph.textContent = "图片加载中…";
-      img.replaceWith(ph);
-      void invoke<{ mime: string; data: string }>("read_image_bytes", {
-        path: abs,
-        cwdHint: cwd,
-      })
-        .then((dto) => {
-          if (!ph.isConnected) return;
-          const el = document.createElement("img");
-          el.src = `data:${dto.mime};base64,${dto.data}`;
-          el.alt = alt;
-          el.dataset.ccodePath = abs;
-          ph.replaceWith(el);
-        })
-        .catch(() => {
-          if (!ph.isConnected) return;
-          const span = document.createElement("span");
-          span.className = "md-img-failed";
-          span.textContent = `[图片不可读] ${src}`;
-          ph.replaceWith(span);
-        });
-    }
-  }, [html, baseFile, cwd]);
+    hydrateMdImages(host, {
+      fromFile: baseFile,
+      cwdHint: cwd,
+      allowHttps: false,
+    });
+  });
 
   /** 链接：锚点默认；外链系统浏览器；本地路径跳终端页预览。图片点击 = 预览放大 */
   function onBodyClick(e: React.MouseEvent<HTMLDivElement>) {

@@ -49,6 +49,17 @@ const TABLE: Record<string, SlashCommand[]> = {
     { cmd: "/clear", hint: "清空会话重新开始" },
     HELP,
   ],
+  opencode: [
+    { cmd: "/models", hint: "打开模型选择器（在露出的终端里用方向键完成）" },
+    HELP,
+  ],
+  codebuddy: [
+    { cmd: "/login", hint: "登录官方账号（会打开浏览器）" },
+    HELP,
+  ],
+  // cursor / grok 的斜杠命令未做源码级全量调研，只给 /help，写错的代价是 CLI 回「未知命令」
+  cursor: [HELP],
+  grok: [HELP],
 };
 
 /** 该 agent 的斜杠命令清单；未收录的 agent 只给 /help 兜底 */

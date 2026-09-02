@@ -36,7 +36,7 @@ const WINGET_COMMON_ARGS: [&str; 6] = [
 ];
 
 /// winget install/upgrade 的参数列表（action 为 "install" 或 "upgrade"）
-fn winget_args(action: &str, id: &str) -> Vec<String> {
+pub(crate) fn winget_args(action: &str, id: &str) -> Vec<String> {
     let mut args: Vec<String> = [action, "--id", id].iter().map(|s| s.to_string()).collect();
     args.extend(WINGET_COMMON_ARGS.iter().map(|s| s.to_string()));
     args
@@ -509,7 +509,8 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program
 
 /// Tauri 事件封装：输出块经 `agent-update-output-<agent_id>` 实时推给前端，
 /// writer 以 agent_id 为 key 入 UPDATER_WRITERS 供 updater_write 交互
-fn run_streaming(app: &AppHandle, agent_id: &str, program: &str, args: &[String]) -> (bool, String) {
+/// （dep_check 的安装也复用本函数，key 形如 "dep-git"）
+pub(crate) fn run_streaming(app: &AppHandle, agent_id: &str, program: &str, args: &[String]) -> (bool, String) {
     let event = format!("agent-update-output-{agent_id}");
     let app = app.clone();
     // PTY 子进程（尤其是 Windows 下的 npm.cmd）可能在建立网络连接前暂时没有任何
@@ -581,7 +582,7 @@ fn update_agent_sync(app: &AppHandle, agent_id: &str) -> Result<UpdateResultDto,
 }
 
 /// 构建结果并经 `agent-update-done-<agent_id>` 推送（前端以事件为准，invoke 返回值兜底）
-fn emit_done(app: &AppHandle, agent_id: &str, result: UpdateResultDto) -> UpdateResultDto {
+pub(crate) fn emit_done(app: &AppHandle, agent_id: &str, result: UpdateResultDto) -> UpdateResultDto {
     let _ = app.emit(&format!("agent-update-done-{agent_id}"), &result);
     result
 }

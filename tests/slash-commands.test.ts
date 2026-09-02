@@ -12,6 +12,12 @@ test("已知 agent 返回各自清单，未知 agent 只有 /help", () => {
     slashCommandsFor("cursor").map((c) => c.cmd),
     ["/help"],
   );
+  assert.deepEqual(
+    slashCommandsFor("grok").map((c) => c.cmd),
+    ["/help"],
+  );
+  assert.ok(slashCommandsFor("opencode").some((c) => c.cmd === "/models"));
+  assert.ok(slashCommandsFor("codebuddy").some((c) => c.cmd === "/login"));
   assert.deepEqual(slashCommandsFor(null).map((c) => c.cmd), ["/help"]);
 });
 

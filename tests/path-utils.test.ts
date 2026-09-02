@@ -6,6 +6,7 @@ import {
   normalizeStatusKeys,
   parentDir,
   pathKey,
+  pathWithin,
   samePath,
   stripVerbatim,
   abbrevHome,
@@ -81,6 +82,20 @@ test("pathKey 折叠 verbatim/分隔符/尾斜杠；大小写只在 Windows 折�
   // Windows 侧显式传参：NTFS 大小写不敏感
   assert.equal(pathKey("C:\\Users\\Foo", true), pathKey("c:/users/foo", true));
   assert.ok(samePath("\\\\?\\C:\\Users\\Foo", "c:\\users\\foo", true));
+});
+
+test("pathWithin 段边界命中，含根自身；Windows 折叠大小写", () => {
+  assert.equal(pathWithin("/repo/a/notes", "/repo/a"), true);
+  assert.equal(pathWithin("/repo/a", "/repo/a"), true);
+  assert.equal(pathWithin("/repo/ab/notes", "/repo/a"), false);
+  assert.equal(pathWithin("", "/repo/a"), false);
+  assert.ok(
+    pathWithin(
+      "C:\\Users\\me\\Demo\\.ccode\\ws",
+      "c:/users/me/demo",
+      true,
+    ),
+  );
 });
 
 test("abbrevHome 把家目录前缀折成 ~", () => {

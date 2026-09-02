@@ -17,6 +17,7 @@ import {
   loadInboxDismissed,
 } from "./inbox";
 import type { RunOverviewInput } from "./run-overview";
+import type { DepCheckDto } from "./dep-check";
 import type {
   BindingInput,
   DetectResult,
@@ -205,6 +206,7 @@ export interface InboxItem {
     | { type: "project"; projectRoot: string }
     | { type: "litWatch"; projectRoot: string }
     | { type: "help"; projectRoot: string }
+    | { type: "settings"; section: string }
     | { type: "profiles" };
 }
 
@@ -264,6 +266,10 @@ export function runInboxAction(item: InboxItem) {
     s.setSelectProjectReq(item.action.projectRoot);
     s.setHelpViewReq(item.action.projectRoot);
     s.setPage("workspaces");
+  } else if (item.action.type === "settings") {
+    // 依赖体检条目：跳设置页并选中目标分区（设置页消费 settingsSectionReq 后清空）
+    s.setSettingsSectionReq(item.action.section);
+    s.setPage("settings");
   } else {
     s.setPage("profiles");
   }
@@ -274,6 +280,10 @@ interface AppState {
   gateways: Gateway[];
   agents: DetectResult[];
   sessions: SessionMetaDto[];
+  /** 已添加项目路径（注册表）；快速开聊随手聊历史现算用，启动时拉一次 */
+  projectPaths: string[];
+  setProjectPaths: (paths: string[]) => void;
+  loadProjects: () => Promise<void>;
   /** 后端按最近会话活跃度排序的仓库；本地缓存用于终端首开即时展示。 */
   recentRepos: RepoDto[];
   recentReposLoading: boolean;
@@ -313,6 +323,14 @@ interface AppState {
   /** 通用条目屏蔽表（v3.88）：任意收件箱条目可忽略，状态变化后自动复现 */
   inboxDismissed: Record<string, string>;
   dismissInbox: (item: InboxItem) => void;
+  /** 依赖体检结果（git/node/安装渠道，dep_check.rs）：启动时静默探测一次，
+      设置页诊断区「重新检测」与一键安装完成后就地刷新；null = 尚未探测/探测失败 */
+  depCheck: DepCheckDto | null;
+  /** 每次调用重新探测（无缓存）；失败静默——体检失败不影响主流程 */
+  refreshDepCheck: () => Promise<void>;
+  /** 一次性「跳设置页并选中分区」请求（收件箱 dep: 条目发起），设置页消费并清空 */
+  settingsSectionReq: string | null;
+  setSettingsSectionReq: (section: string | null) => void;
   /** 一次性「跳终端页并激活标签」请求（首页待办点击发起），终端页可见时消费并清空 */
   focusTabReq: string | null;
   setFocusTabReq: (tabId: string | null) => void;
@@ -458,6 +476,12 @@ export const useAppStore = create<AppState>((set, get) => {
   gateways: [],
   agents: [],
   sessions: [],
+  projectPaths: [],
+  setProjectPaths: (paths) => set({ projectPaths: paths }),
+  loadProjects: async () => {
+    const list = await invoke<{ path: string }[]>("list_projects");
+    set({ projectPaths: list.map((p) => p.path) });
+  },
   recentRepos: cachedRecentRepos(),
   recentReposLoading: false,
   recentReposLoaded: false,
@@ -524,6 +548,16 @@ export const useAppStore = create<AppState>((set, get) => {
   inboxDismissed: loadInboxDismissed(),
   dismissInbox: (item) =>
     set((st) => ({ inboxDismissed: dismissInboxItem(item, st.inboxDismissed) })),
+  depCheck: null,
+  refreshDepCheck: async () => {
+    try {
+      set({ depCheck: await invoke<DepCheckDto>("check_dependencies") });
+    } catch {
+      /* 体检失败静默：不打扰主流程，设置页可点「重新检测」重试 */
+    }
+  },
+  settingsSectionReq: null,
+  setSettingsSectionReq: (section) => set({ settingsSectionReq: section }),
   helpDismissed: loadHelpDismissed(),
   dismissHelpRequest: (root, signature) =>
     set({ helpDismissed: dismissHelp(root, signature) }),

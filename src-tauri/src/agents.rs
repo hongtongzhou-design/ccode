@@ -4030,5 +4030,25 @@ mod tests {
         assert!(dirs.iter().any(|d| d == std::path::Path::new("/usr/local/bin")));
         // MacTeX/TeXLive（latexmk）：GUI 短 PATH 兜底，批次 E LaTeX 编译链
         assert!(dirs.iter().any(|d| d == std::path::Path::new("/Library/TeX/texbin")));
+        // node 版本管理器（volta/mise）固定 shim 目录：GUI 短 PATH 兜底
+        assert!(dirs.iter().any(|d| d.ends_with(".volta/bin")));
+        assert!(dirs.iter().any(|d| d.ends_with(".local/share/mise/shims")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn candidate_dirs_cover_node_manager_shims() {
+        let dirs = crate::agent_specs::binary_candidate_dirs();
+        // node 版本管理器（volta/mise）固定 shim 目录
+        assert!(dirs.iter().any(|d| d.ends_with(".volta/bin")));
+        assert!(dirs.iter().any(|d| d.ends_with(".local/share/mise/shims")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn candidate_dirs_cover_git_for_windows() {
+        let dirs = crate::agent_specs::binary_candidate_dirs();
+        // winget Git.Git / 官方安装器默认落点 %ProgramFiles%\Git\cmd
+        assert!(dirs.iter().any(|d| d.ends_with(std::path::Path::new("Git").join("cmd"))));
     }
 }

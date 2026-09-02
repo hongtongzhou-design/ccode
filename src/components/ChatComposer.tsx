@@ -7,6 +7,7 @@ import {
   slashCommandsFor,
   slashQueryOf,
 } from "../slash-commands";
+import { imeBlocksEnter } from "../ime-guard";
 
 function InsertMenu({
   skills,
@@ -126,6 +127,8 @@ export default function ChatComposer({
   onOpenMcp,
   focusWhen = true,
   agentId,
+  seedInsert,
+  onSeedConsumed,
 }: {
   disabled?: boolean;
   busy?: boolean;
@@ -138,10 +141,42 @@ export default function ChatComposer({
   focusWhen?: boolean;
   /** 当前 agent id：斜杠命令面板按 agent 出命令清单 */
   agentId?: string | null;
+  /** 拖入文件等外部插入：追加到输入框并消费 */
+  seedInsert?: string | null;
+  onSeedConsumed?: () => void;
 }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
+  // WKWebView：确认候选的 Enter 在 compositionend 之后、isComposing 已是 false。
+  // 组词开始锁上，compositionend 后再留一帧，让那次 Enter 只上屏不发送。
+  const composingLockRef = useRef(false);
+  const composingFrameRef = useRef<number | null>(null);
+
+  function lockIme() {
+    if (composingFrameRef.current != null) {
+      cancelAnimationFrame(composingFrameRef.current);
+      composingFrameRef.current = null;
+    }
+    composingLockRef.current = true;
+  }
+
+  function unlockImeAfterFrame() {
+    composingLockRef.current = true;
+    composingFrameRef.current = requestAnimationFrame(() => {
+      composingLockRef.current = false;
+      composingFrameRef.current = null;
+    });
+  }
+
+  useEffect(
+    () => () => {
+      if (composingFrameRef.current != null) {
+        cancelAnimationFrame(composingFrameRef.current);
+      }
+    },
+    [],
+  );
   // 图片附件（缩略卡）：粘贴的图片经 save_clipboard_image 落盘后按路径随消息发送，
   // url 是本地 object URL 只用于输入框里的预览缩略图
   const [attachments, setAttachments] = useState<
@@ -186,8 +221,22 @@ export default function ChatComposer({
   function insertResourceText(text: string) {
     setError(null);
     setValue((current) => (current ? `${current}\n${text}` : text));
-    requestAnimationFrame(() => ref.current?.focus());
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus();
+      el.style.height = "0";
+      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+    });
   }
+
+  useEffect(() => {
+    if (!seedInsert) return;
+    insertResourceText(seedInsert);
+    onSeedConsumed?.();
+    // 只在 seedInsert 翻转时插入一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedInsert]);
 
   useEffect(() => {
     if (!disabled && focusWhen) ref.current?.focus();
@@ -315,9 +364,19 @@ export default function ChatComposer({
               el.style.height = "0";
               el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
             }}
+            onCompositionStart={lockIme}
+            onCompositionEnd={unlockImeAfterFrame}
             onKeyDown={(e) => {
-              // 输入法组词中按 Enter 是确认候选，不是发送
-              if (e.nativeEvent.isComposing) return;
+              // 组词中 / 确认候选的 Enter：只上屏，不发送（WKWebView 上 isComposing 不可靠）
+              if (
+                imeBlocksEnter({
+                  isComposing: e.nativeEvent.isComposing,
+                  keyCode: e.keyCode,
+                  composingLock: composingLockRef.current,
+                })
+              ) {
+                return;
+              }
               // 斜杠面板开着时：↑/↓ 移动、Enter 选中并发送、Tab 仅补全、Esc 收起
               if (slashList.length > 0) {
                 if (e.key === "ArrowDown" || e.key === "ArrowUp") {

@@ -61,8 +61,11 @@ test("投稿返修第 1 轮兼容综述定稿与科研论文定稿两种上游�
   assert.ok(template);
   const [revision] = pipelineStepsForTemplate(template, "revision", 1);
   assert.deepEqual(revision.inputs, ["reviews/round-1.md", "references.bib"]);
-  assert.deepEqual(revision.anyOfInputs, [["manuscript/paper-final.md", "manuscript/review-final.md"]]);
-  assert.ok(revision.brief.includes("manuscript/paper-final.md 或 manuscript/review-final.md"));
+  assert.ok(revision.anyOfInputs?.[0]?.includes("submission/formatted.md"));
+  assert.ok(revision.anyOfInputs?.[0]?.includes("manuscript/paper-final.md"));
+  assert.ok(revision.anyOfInputs?.[0]?.includes("manuscript/review-final.md"));
+  assert.ok(revision.anyOfInputs?.[0]?.includes("manuscript/thesis-final.md"));
+  assert.ok(revision.brief.includes("submission/formatted.md"));
   assert.ok(revision.expectedArtifacts.includes("manuscript/revised-r1.md"));
 });
 
@@ -256,6 +259,95 @@ test("内置模板不再用空目录作为预期产物", () => {
           `${template.id}/${step.name} 仍有过宽目录产物`,
         );
       }
+    }
+  }
+});
+
+test("毕业论文拆成与综述同名的文献两步再开题", () => {
+  const thesis = PIPELINE_TEMPLATES.find((t) => t.id === "thesis");
+  const review = PIPELINE_TEMPLATES.find((t) => t.id === "review");
+  assert.ok(thesis && review);
+  assert.deepEqual(
+    thesis.steps.slice(0, 3).map((s) => s.name),
+    ["文献检索与筛选", "文献精读与笔记", "开题报告与综述"],
+  );
+  assert.equal(thesis.steps[0].workspaceName, review.steps[0].workspaceName);
+  assert.equal(thesis.steps[1].workspaceName, review.steps[1].workspaceName);
+  assert.equal(thesis.steps.length, 8);
+});
+
+test("独立启动的首步不得把笔记库当成必需输入", () => {
+  for (const id of ["thesis", "latex-paper"]) {
+    const template = PIPELINE_TEMPLATES.find((t) => t.id === id);
+    assert.ok(template);
+    const first = template.steps[0];
+    assert.ok(
+      !(first.inputs ?? []).some((x) => x === "notes/" || x === "references.bib"),
+      `${id} 首步把 notes/bib 标成了必需`,
+    );
+  }
+});
+
+test("实验执行必须声明 design.md，精读必须声明 included", () => {
+  for (const template of PIPELINE_TEMPLATES) {
+    for (const step of template.steps) {
+      if (step.name.includes("实验执行")) {
+        assert.ok(
+          (step.inputs ?? []).includes("design.md"),
+          `${template.id}/${step.name} 缺少 design.md 输入`,
+        );
+      }
+      if (step.skills.includes("lit-notes")) {
+        assert.ok(
+          (step.inputs ?? []).includes("papers/included.md"),
+          `${template.id}/${step.name} 精读缺少 included.md`,
+        );
+      }
+    }
+  }
+});
+
+test("科研论文与投稿的清单文件不对撞，投稿能吃毕业论文成稿", () => {
+  const paper = PIPELINE_TEMPLATES.find((t) => t.id === "research-paper");
+  const sub = PIPELINE_TEMPLATES.find((t) => t.id === "submission-rebuttal");
+  assert.ok(paper && sub);
+  const polish = paper.steps.find((s) => s.name === "润色与投稿准备");
+  const format = pipelineStepsForTemplate(sub, "initial")[0];
+  assert.ok(polish?.expectedArtifacts.includes("submission/pre-submission-checklist.md"));
+  assert.ok(!polish?.expectedArtifacts.includes("submission/checklist.md"));
+  assert.ok(format.anyOfInputs?.[0]?.includes("manuscript/thesis-final.md"));
+  assert.ok(format.expectedArtifacts.includes("output/formatted.pdf"));
+  assert.ok(format.skills.includes("quarto-render"));
+});
+
+test("声明了 Quarto 渲染的步骤简报必须写明要跑渲染", () => {
+  for (const template of PIPELINE_TEMPLATES) {
+    const steps =
+      template.id === "submission-rebuttal"
+        ? pipelineStepsForTemplate(template, "initial")
+        : template.steps;
+    for (const step of steps) {
+      if (step.run.some((run) => /quarto render/.test(run.command))) {
+        assert.ok(
+          /渲染/.test(step.brief),
+          `${template.id}/${step.name} 挂了 quarto 但简报没写渲染`,
+        );
+      }
+    }
+  }
+});
+
+test("检索步带可选 MCP 事项，文献 PDF 指引落到项目根", () => {
+  for (const template of PIPELINE_TEMPLATES) {
+    for (const step of template.steps) {
+      if (!step.skills.includes("lit-search")) continue;
+      assert.ok(
+        (step.humanTasks ?? []).some((t) => t.title.includes("学术检索 MCP")),
+        `${template.id}/${step.name} 缺少 MCP 事项`,
+      );
+      const pdf = (step.humanTasks ?? []).find((t) => t.target === "papers/*.pdf");
+      assert.ok(pdf, `${template.id}/${step.name} 缺少付费全文事项`);
+      assert.match(pdf.guidance, /项目根/);
     }
   }
 });

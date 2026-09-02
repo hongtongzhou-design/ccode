@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  isScratchCwd,
+  pickQuickChatHistory,
   pickQuickChatSessions,
   sessionHomeLabel,
   sessionDisplayTitle,
+  sidebarLaunchesDirect,
+  withLiveSessionFlags,
 } from "../src/quick-chat.ts";
 import type { SessionMetaDto } from "../src/types.ts";
 
@@ -38,9 +42,11 @@ function session(over: Partial<SessionMetaDto>): SessionMetaDto {
   };
 }
 
+const SCRATCH = "/Users/u/ccode/scratch";
+
 test("随手聊历史：按顺序取前 N 条", () => {
   const list = Array.from({ length: 12 }, (_, i) =>
-    session({ sessionId: `s-${i}` }),
+    session({ sessionId: `s-${i}`, projectPath: SCRATCH }),
   );
   const out = pickQuickChatSessions(list, [], 8);
   assert.equal(out.length, 8);
@@ -55,7 +61,7 @@ test("随手聊历史：排除归档/内部/live/源文件已删的（这些都�
       session({ sessionId: "s-internal", internal: true }),
       session({ sessionId: "s-live", live: true }),
       session({ sessionId: "s-gone", alive: false }),
-      session({ sessionId: "s-ok" }),
+      session({ sessionId: "s-ok", projectPath: SCRATCH }),
     ],
     [],
     8,
@@ -95,23 +101,73 @@ test("标题优先级：自定义 > 会话标题 > 摘要 > 兜底", () => {
   );
 });
 
-test("随手聊历史：只列不落工作区、不落已注册项目的会话", () => {
+test("随手聊历史：只列 scratch，排除工作区/已注册项目/其他仓库", () => {
   const out = pickQuickChatSessions(
     [
-      session({ sessionId: "s-scratch", projectPath: "/Users/u/ccode/scratch" }),
-      session({ sessionId: "s-ws", workspace: "lit-search" }),
+      session({ sessionId: "s-scratch", projectPath: SCRATCH }),
+      session({
+        sessionId: "s-ccode",
+        projectPath: "/Users/u/Documents/Ccode",
+      }),
+      session({ sessionId: "s-ws", workspace: "lit-search", projectPath: SCRATCH }),
       session({
         sessionId: "s-project",
         projectPath: "/Users/u/papers/proj",
       }),
-      session({ sessionId: "s-archived", projectPath: "/tmp/x", archived: true }),
       session({ sessionId: "s-loose", projectPath: "/tmp/elsewhere" }),
     ],
     ["/Users/u/papers/proj/"],
   );
   assert.deepEqual(
     out.map((s) => s.sessionId),
-    ["s-scratch", "s-loose"],
-    "工作区会话、项目内会话、不可恢复会话都不算随手聊",
+    ["s-scratch"],
+    "未注册的编码仓库、工作区、项目内会话都不算随手聊",
+  );
+});
+
+test("isScratchCwd 认家目录下 ccode/scratch，含子路径；Windows 折叠大小写", () => {
+  assert.equal(isScratchCwd("/Users/u/ccode/scratch"), true);
+  assert.equal(isScratchCwd("/Users/u/ccode/scratch/notes"), true);
+  assert.equal(isScratchCwd("/Users/u/Documents/Ccode"), false);
+  assert.equal(isScratchCwd("C:\\Users\\u\\ccode\\scratch", true), true);
+  assert.equal(isScratchCwd("c:/users/u/ccode/scratch", true), true);
+});
+
+test("sidebarLaunchesDirect：记住过且没勾每次都问才直达", () => {
+  assert.equal(
+    sidebarLaunchesDirect({ hasRemembered: true, alwaysAsk: false }),
+    true,
+  );
+  assert.equal(
+    sidebarLaunchesDirect({ hasRemembered: true, alwaysAsk: true }),
+    false,
+  );
+  assert.equal(
+    sidebarLaunchesDirect({ hasRemembered: false, alwaysAsk: false }),
+    false,
+  );
+});
+
+test("withLiveSessionFlags：终端页正在跑的会话补标 live", () => {
+  const listed = session({ sessionId: "s-run", live: false });
+  const out = withLiveSessionFlags([listed], {
+    "claude-code\ns-run": "tab-1",
+  });
+  assert.equal(out[0].live, true);
+  assert.equal(listed.live, false, "不改入参");
+});
+
+test("pickQuickChatHistory：正在跑的随手聊不进列表", () => {
+  const out = pickQuickChatHistory(
+    [
+      session({ sessionId: "s-live", projectPath: SCRATCH, live: false }),
+      session({ sessionId: "s-ok", projectPath: SCRATCH }),
+    ],
+    [],
+    { "claude-code\ns-live": "tab-1" },
+  );
+  assert.deepEqual(
+    out.map((s) => s.sessionId),
+    ["s-ok"],
   );
 });

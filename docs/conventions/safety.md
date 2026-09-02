@@ -60,7 +60,13 @@
      限定 `projects/*/agent-transcripts/**/*.jsonl`；OpenCode 事务删库行且 db 必须等于已知 opencode.db；Codex resume 链删除
      连带成员文件）；
   4. 工作树文件删除（限定树当前根 + 重要路径黑名单：系统目录/关键用户目录/CLI 配置/.git 一律拒绝；黑名单 canonicalize
-     双校验堵 symlink 绕过）。
+     双校验堵 symlink 绕过）；
+  5. **会话导入**（`session_transfer.rs`：用户显式选 zip 并确认目标目录后，才把会话文件写入各 CLI 会话数据目录）。防护：
+     zip 解压防 zip-slip（`enclosed_name` + 禁 `..` / 绝对路径，条目只允许 `manifest.json` 与 `sessions/`）；单文件 200MB / 整包解压 512MB / 条目数 2 万上限；
+     目标路径必须落在 `session_data_dirs_at` 白名单内（cursor 另限 `projects/*/agent-transcripts/**/*.jsonl`）；
+     额外放行的索引写点仅 `~/.kimi-code/session_index.jsonl`、`~/.kimi/kimi.json`、gemini `.project_root`、grok 组目录 `.cwd`（codex `config.toml` 走现有注册命令，不经本模块直写）；
+     已存在同 agent 同 sessionId 一律跳过不覆盖；写入走 `atomic_write_bytes`（tmp+rename）；索引类读-改-写。
+     导出是只读拷贝：会话原文进包（可能含密钥），弹层明示「分享前请自查」；密钥/网关/profile 不进包；B 机浏览仍过 `redact_sensitive_text`。
 - **「设为全局」/MCP 写入/技能分发的各家支持面统一查 AgentSpec 能力表**（agent_specs.rs 的 set_global/mcp_write/
   skill_dist 三字段，fail-loud：不支持必须带用户可见原因，后端报错与前端置灰同源），不再散写硬编码名单
   （mcp.rs 的 grok 只读、skills.rs 的 allow_symlink_for 等旧硬编码均已改查表）。

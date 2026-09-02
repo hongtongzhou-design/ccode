@@ -48,8 +48,8 @@ outputs: [papers/]
 
 Elicit / Undermind / X-MOL / Google Scholar 等闭源站点无法程序化检索时，由用户在网页端检索并导出 RIS / BibTeX / CSV：
 
-1. 导出文件放入项目 `papers/imports/`，命名「来源-日期」，如 `elicit-20260812.ris`；
-2. Agent 负责解析题录、去重、合并进 `papers/screening.md` 候选池与 `references.bib`；**导出文件有两个落点，都要看**：工作区内的 `papers/imports/` 目录，以及 TASK.md「项目资源」段里类型为「引文」的条目、「上一步产物（提货单）」段里来自「人工交付」的条目——后两类给的是绝对路径，按路径直读、不要复制进工作区（开工前导入的题录通常在这里，工作区不含主仓未提交的文件）；
+1. 导出文件放入**项目根** `papers/imports/`（见 TASK.md「项目根」），命名「来源-日期」，如 `elicit-20260812.ris`；
+2. Agent 负责解析题录、去重、合并进 `papers/screening.md` 候选池与 `references.bib`；**导出文件有三处都要看**：项目根 `papers/imports/`、工作区内的 `papers/imports/`，以及 TASK.md「项目资源」段里类型为「引文」的条目、「上一步产物（提货单）」段里来自「人工交付」的条目——后两类给的是绝对路径，按路径直读、不要复制进工作区；
 3. 去重口径：DOI 精确匹配优先，标题模糊匹配（忽略大小写与标点）兜底；
 4. 每条记录保留来源标注（如「来源：Elicit 导出」），便于回溯检索渠道。
 
@@ -115,4 +115,4 @@ Elicit / Undermind / X-MOL / Google Scholar 等闭源站点无法程序化检索
 
 ## 人工补投的命名整理
 
-全文 PDF 由 agent 下载的一律命名「作者年份-短标题.pdf」；**人工补投的文件名随意，不改名压力不交给用户**——下一步精读（lit-notes）开工时由 agent 对照 included.md/to-fetch.md 判定归属后统一重命名，并在 to-fetch.md 勾掉已补行；拿不准归属的不改名、标注「待确认」。
+开放获取全文下载到 **TASK.md 写明的项目根 `papers/`**，不要写当前工作区（PDF 不进 git，写在工作区会在合并后丢失）。文件名「作者年份-短标题.pdf」。**人工补投的文件名随意，不改名压力不交给用户**——下一步精读（lit-notes）开工时由 agent 对照 included.md/to-fetch.md 判定归属后统一重命名，并在 to-fetch.md 勾掉已补行；拿不准归属的不改名、标注「待确认」。

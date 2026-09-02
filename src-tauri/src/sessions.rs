@@ -787,7 +787,7 @@ fn codex_message_text(p: &Value) -> Option<String> {
 }
 
 /** Codex 会把工作区规则/导入历史作为 user response_item 写入会话；这类上下文不是用户对话，不能展示在聊天层。 */
-fn is_injected_context_message(text: &str) -> bool {
+pub(crate) fn is_injected_context_message(text: &str) -> bool {
     let trimmed = text.trim_start();
     trimmed.starts_with("# AGENTS.md")
         || trimmed.starts_with("\\# AGENTS.md")
@@ -4097,30 +4097,29 @@ fn apply_provenance(
     }
 }
 
-#[tauri::command]
-pub async fn list_sessions() -> Vec<SessionMetaDto> {
-    // cached_scan 是 CPU 密集的全量扫描，移出 async worker（10s 缓存命中时也走这里，开销可忽略）
-    let Ok(scan) = tauri::async_runtime::spawn_blocking(cached_scan).await else {
-        return Vec::new();
-    };
+pub(crate) fn list_sessions_sync() -> Vec<SessionMetaDto> {
+    let scan = cached_scan();
     let mut sessions = scan.sessions;
     if let Ok(conn) = open_db() {
         let meta = read_all_meta(&conn);
         apply_meta(&mut sessions, &scan.chain_members, &meta);
         apply_provenance(&conn, &mut sessions, &scan.provenance_paths);
-        // 接力链：新会话被扫描到后标注并固化「接自 <agent>」
         crate::handoff::apply_handoff(&conn, &mut sessions);
-        // 卡片认领：从卡片发起聊天后的新会话归进该卡片
         apply_card_claims(&conn, &mut sessions);
-        // 步骤认领：「跟 AI 商量一下」等按步骤上下文发起的会话归进该步骤（没落 worktree 也能命中）
         apply_step_claims(&conn, &mut sessions);
     }
-    // 归卡回填在 db 块外：task_id 来自 meta，卡片名只读项目档案卡
     apply_task_names(&mut sessions);
-    // 最近活跃在前；ISO 字符串可直接字典序比较
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     redact_session_meta(&mut sessions);
     sessions
+}
+
+#[tauri::command]
+pub async fn list_sessions() -> Vec<SessionMetaDto> {
+    // cached_scan 是 CPU 密集的全量扫描，移出 async worker（10s 缓存命中时也走这里，开销可忽略）
+    tauri::async_runtime::spawn_blocking(list_sessions_sync)
+        .await
+        .unwrap_or_default()
 }
 
 #[derive(Clone)]
@@ -4297,7 +4296,7 @@ pub async fn get_session_conversation(agent: String, file_path: String) -> Vec<C
 const CONVERSATION_PAGE_BYTES: u64 = 192 * 1024;
 const OPENCODE_PAGE_MESSAGES: usize = 80;
 
-fn parse_session_lines(agent: &str, lines: &[String]) -> Vec<ChatMessageDto> {
+pub(crate) fn parse_session_lines(agent: &str, lines: &[String]) -> Vec<ChatMessageDto> {
     match agent {
         "codex" => parse_codex(lines),
         "gemini" => parse_gemini(lines),
@@ -4312,12 +4311,30 @@ fn parse_session_lines(agent: &str, lines: &[String]) -> Vec<ChatMessageDto> {
     }
 }
 
-fn plain_conversation_page(agent: &str, path: &Path, before: Option<u64>) -> Result<ConversationPageDto, String> {
+fn plain_conversation_page(
+    agent: &str,
+    path: &Path,
+    before: Option<u64>,
+    around: Option<u64>,
+) -> Result<ConversationPageDto, String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(path).map_err(|e| format!("读取会话失败: {e}"))?;
     let len = file.metadata().map_err(|e| format!("读取会话信息失败: {e}"))?.len();
-    let end = before.unwrap_or(len).min(len);
-    let start = end.saturating_sub(CONVERSATION_PAGE_BYTES);
+    let (start, end) = if let Some(at) = around {
+        let half = CONVERSATION_PAGE_BYTES / 2;
+        let mut s = at.saturating_sub(half);
+        let mut e = at.saturating_add(half).min(len);
+        if e.saturating_sub(s) < CONVERSATION_PAGE_BYTES {
+            s = e.saturating_sub(CONVERSATION_PAGE_BYTES);
+        }
+        if e.saturating_sub(s) < CONVERSATION_PAGE_BYTES {
+            e = (s + CONVERSATION_PAGE_BYTES).min(len);
+        }
+        (s, e)
+    } else {
+        let end = before.unwrap_or(len).min(len);
+        (end.saturating_sub(CONVERSATION_PAGE_BYTES), end)
+    };
     let mut previous = None;
     if start > 0 {
         file.seek(SeekFrom::Start(start - 1)).map_err(|e| format!("定位会话失败: {e}"))?;
@@ -4342,22 +4359,67 @@ fn plain_conversation_page(agent: &str, path: &Path, before: Option<u64>) -> Res
     Ok(ConversationPageDto { messages, cursor })
 }
 
-fn opencode_conversation_page(db_path: &Path, session_id: &str, before: Option<u64>) -> Result<ConversationPageDto, String> {
+fn opencode_conversation_page(
+    db_path: &Path,
+    session_id: &str,
+    before: Option<u64>,
+    around: Option<u64>,
+) -> Result<ConversationPageDto, String> {
     let conn = open_opencode_db(db_path).ok_or("OpenCode 数据库不可读")?;
     let sid = session_id.to_string();
     let before_i64 = before.map(|value| value.min(i64::MAX as u64) as i64);
-    let rows = if let Some(before) = before_i64 {
-        query_rows(&conn, "SELECT * FROM message WHERE session_id=? AND time_created<? ORDER BY time_created DESC LIMIT 80", &[&sid, &before])
+    let (message_rows, cursor) = if let Some(at) = around {
+        let at_i = at.min(i64::MAX as u64) as i64;
+        let mut older: Vec<DbRow> = query_rows(
+            &conn,
+            "SELECT * FROM message WHERE session_id=? AND time_created<=? ORDER BY time_created DESC LIMIT 40",
+            &[&sid, &at_i],
+        )
+        .into_iter()
+        .map(|row| DbRow { names: row.0, vals: row.1 })
+        .collect();
+        let newer: Vec<DbRow> = query_rows(
+            &conn,
+            "SELECT * FROM message WHERE session_id=? AND time_created>? ORDER BY time_created ASC LIMIT 40",
+            &[&sid, &at_i],
+        )
+        .into_iter()
+        .map(|row| DbRow { names: row.0, vals: row.1 })
+        .collect();
+        let cursor = if older.len() == 40 {
+            older
+                .last()
+                .and_then(|row| row.as_i64("time_created"))
+                .filter(|time| *time >= 0)
+                .map(|time| time as u64)
+        } else {
+            None
+        };
+        older.reverse();
+        older.extend(newer);
+        (older, cursor)
     } else {
-        query_rows(&conn, "SELECT * FROM message WHERE session_id=? ORDER BY time_created DESC LIMIT 80", &[&sid])
+        let rows = if let Some(before) = before_i64 {
+            query_rows(&conn, "SELECT * FROM message WHERE session_id=? AND time_created<? ORDER BY time_created DESC LIMIT 80", &[&sid, &before])
+        } else {
+            query_rows(&conn, "SELECT * FROM message WHERE session_id=? ORDER BY time_created DESC LIMIT 80", &[&sid])
+        };
+        let mut message_rows: Vec<DbRow> = rows
+            .into_iter()
+            .map(|row| DbRow { names: row.0, vals: row.1 })
+            .collect();
+        let cursor = if message_rows.len() == OPENCODE_PAGE_MESSAGES {
+            message_rows
+                .last()
+                .and_then(|row| row.as_i64("time_created"))
+                .filter(|time| *time >= 0)
+                .map(|time| time as u64)
+        } else {
+            None
+        };
+        message_rows.reverse();
+        (message_rows, cursor)
     };
-    let mut message_rows: Vec<DbRow> = rows.into_iter()
-        .map(|row| DbRow { names: row.0, vals: row.1 }).collect();
-    let cursor = if message_rows.len() == OPENCODE_PAGE_MESSAGES {
-        message_rows.last().and_then(|row| row.as_i64("time_created"))
-            .filter(|time| *time >= 0).map(|time| time as u64)
-    } else { None };
-    message_rows.reverse();
     let ids: Vec<String> = message_rows.iter().filter_map(|row| row.as_str("id")).collect();
     let mut parts_by_msg: HashMap<String, Vec<Value>> = HashMap::new();
     if !ids.is_empty() {
@@ -4385,11 +4447,16 @@ fn opencode_conversation_page(db_path: &Path, session_id: &str, before: Option<u
     Ok(ConversationPageDto { messages, cursor })
 }
 
-pub(crate) fn conversation_page_impl(agent: &str, file_path: &str, before: Option<u64>) -> Result<ConversationPageDto, String> {
+pub(crate) fn conversation_page_impl(
+    agent: &str,
+    file_path: &str,
+    before: Option<u64>,
+    around: Option<u64>,
+) -> Result<ConversationPageDto, String> {
     if agent == "opencode" {
         if let Some((db, sid)) = file_path.split_once('#') {
             if Path::new(db).exists() {
-                return opencode_conversation_page(Path::new(db), sid, before);
+                return opencode_conversation_page(Path::new(db), sid, before, around);
             }
         }
         let mut messages = conversation_impl_raw(agent, file_path);
@@ -4406,6 +4473,9 @@ pub(crate) fn conversation_page_impl(agent: &str, file_path: &str, before: Optio
     let compressed = fs::File::open(&path).and_then(|mut file| file.read_exact(&mut magic)).is_ok()
         && magic == ZSTD_MAGIC;
     if compressed {
+        if let Some(at) = around {
+            return zstd_conversation_window(agent, &path, at);
+        }
         let (head, tail) = read_head_tail(&path, CONVERSATION_PAGE_BYTES as usize).ok_or("压缩会话不可读")?;
         let lines = if tail.is_empty() { head } else { tail };
         let mut messages = parse_session_lines(agent, &lines);
@@ -4414,15 +4484,72 @@ pub(crate) fn conversation_page_impl(agent: &str, file_path: &str, before: Optio
         redact_conversation(&mut messages);
         return Ok(ConversationPageDto { messages, cursor: None });
     }
-    plain_conversation_page(agent, &path, before)
+    plain_conversation_page(agent, &path, before, around)
+}
+
+/// zstd 不能按压缩文件偏移 seek；从流开头解到目标附近，取出一窗。不可再向前翻页。
+fn zstd_conversation_window(agent: &str, path: &Path, around: u64) -> Result<ConversationPageDto, String> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|e| format!("读取会话失败: {e}"))?;
+    let mut dec = zstd::stream::read::Decoder::new(file).map_err(|e| format!("解压会话失败: {e}"))?;
+    let half = CONVERSATION_PAGE_BYTES as u64 / 2;
+    let win_start = around.saturating_sub(half);
+    let win_end = around.saturating_add(half);
+    let mut buf = [0u8; 65536];
+    let mut total = 0u64;
+    let mut window = Vec::new();
+    loop {
+        match dec.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let chunk_start = total;
+                let chunk_end = total + n as u64;
+                total = chunk_end;
+                if chunk_end <= win_start {
+                    continue;
+                }
+                if chunk_start >= win_end && !window.is_empty() {
+                    break;
+                }
+                let from = if chunk_start < win_start {
+                    (win_start - chunk_start) as usize
+                } else {
+                    0
+                };
+                let to = if chunk_end > win_end {
+                    (win_end - chunk_start) as usize
+                } else {
+                    n
+                };
+                let from = from.min(n);
+                let to = to.min(n).max(from);
+                window.extend_from_slice(&buf[from..to]);
+            }
+        }
+    }
+    let lines = to_lines(&String::from_utf8_lossy(&window));
+    let mut messages = parse_session_lines(agent, &lines);
+    redact_conversation(&mut messages);
+    Ok(ConversationPageDto {
+        messages,
+        cursor: None,
+    })
 }
 
 /// 长会话按尾部窗口分页读取；终端只取最近消息，会话页可按 cursor 向前加载。
+/// `around` 为搜索命中位置：jsonl 是文件（或解压流）字节偏移，OpenCode 是 time_created。
 #[tauri::command]
-pub async fn get_session_conversation_page(agent: String, file_path: String, before: Option<u64>) -> Result<ConversationPageDto, String> {
-    tauri::async_runtime::spawn_blocking(move || conversation_page_impl(&agent, &file_path, before))
-        .await
-        .map_err(|e| format!("读取会话分页失败: {e}"))?
+pub async fn get_session_conversation_page(
+    agent: String,
+    file_path: String,
+    before: Option<u64>,
+    around: Option<u64>,
+) -> Result<ConversationPageDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        conversation_page_impl(&agent, &file_path, before, around)
+    })
+    .await
+    .map_err(|e| format!("读取会话分页失败: {e}"))?
 }
 
 /// 会话全文解析（get_session_conversation 与 ai_summarize_session 共用）
@@ -4432,7 +4559,7 @@ pub(crate) fn conversation_impl(agent: &str, file_path: &str) -> Vec<ChatMessage
     messages
 }
 
-fn conversation_impl_raw(agent: &str, file_path: &str) -> Vec<ChatMessageDto> {
+pub(crate) fn conversation_impl_raw(agent: &str, file_path: &str) -> Vec<ChatMessageDto> {
     if agent == "opencode" {
         // "<db路径>#<session_id>"：db 在就直接读库；db 不在了读 pin 快照
         if let Some((db, sid)) = file_path.split_once('#') {
@@ -4956,30 +5083,9 @@ pub(crate) fn assign_session_step_at(
 /// 必须是各 CLI 实际存放会话文件的子目录，而不是 CLI 家目录整根——
 /// 整根放行会让 file_path 指向同根的 auth.json、session_index.jsonl 等非会话文件
 fn session_data_dirs() -> Vec<(PathBuf, bool)> {
-    let mut dirs = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        // claude: projects/<dir>/<uuid>.jsonl；codex: sessions|archived_sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]
-        dirs.push((home.join(".claude").join("projects"), false));
-        dirs.push((home.join(".codex").join("sessions"), false));
-        dirs.push((home.join(".codex").join("archived_sessions"), false));
-        // gemini: tmp/<slug>/chats/*.jsonl；qwen: projects/**/chats/**/*.jsonl
-        dirs.push((home.join(".gemini").join("tmp"), false));
-        dirs.push((home.join(".qwen").join("projects"), false));
-        // kimi 旧版 sessions/<md5>/<uuid>/context.jsonl（同目录 state.json 不许删 → .json 不放行）
-        dirs.push((home.join(".kimi").join("sessions"), false));
-        // kimi 新版 sessions/<wd_*>/<id>/agents/main/wire.jsonl；
-        // 枚举入口 session_index.jsonl 在 ~/.kimi-code 根上，限定 sessions/ 子目录后自然排除
-        dirs.push((home.join(".kimi-code").join("sessions"), false));
-        // OpenCode legacy storage：session/message/part 都是 .json（v1.2+ 的共享 SQLite 走删行，不在这里）
-        dirs.push((home.join(".local").join("share").join("opencode").join("storage"), true));
-        // codebuddy: projects/<slug>/<uuid>.jsonl（同根的 .credentials.json 等不许删 → 限定 projects 子目录）
-        dirs.push((home.join(".codebuddy").join("projects"), false));
-        // grok: sessions/<encoded-cwd>/<session-id>/updates.jsonl（同根的 auth.json/config.toml
-        // 与 sessions 根的 session_search.sqlite 不许删 → 限定 sessions 子目录）
-        dirs.push((home.join(".grok").join("sessions"), false));
-        // cursor 不进目录级白名单：~/.cursor 与 IDE 共享，projects 下也有非会话 jsonl，
-        // 目录粒度太粗——由 deletable_session_file 里的 cursor_deletable 精确判定
-    }
+    let mut dirs = dirs::home_dir()
+        .map(|h| session_data_dirs_at(&h))
+        .unwrap_or_default();
     if let Some(snap) = snapshots_root() {
         // pin 快照：.jsonl/.jsonl.zst，opencode 快照是导出的 .json
         dirs.push((snap, true));
@@ -4987,10 +5093,44 @@ fn session_data_dirs() -> Vec<(PathBuf, bool)> {
     dirs
 }
 
+/// 相对给定 home 的各 CLI 会话数据目录（不含 Ccode pin 快照）。
+/// 导入白名单与删除白名单同源；测试可注入假 home。
+pub(crate) fn session_data_dirs_at(home: &Path) -> Vec<(PathBuf, bool)> {
+    vec![
+        // claude: projects/<dir>/<uuid>.jsonl；codex: sessions|archived_sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]
+        (home.join(".claude").join("projects"), false),
+        (home.join(".codex").join("sessions"), false),
+        (home.join(".codex").join("archived_sessions"), false),
+        // gemini: tmp/<slug>/chats/*.jsonl；qwen: projects/**/chats/**/*.jsonl
+        (home.join(".gemini").join("tmp"), false),
+        (home.join(".qwen").join("projects"), false),
+        // kimi 旧版 sessions/<md5>/<uuid>/context.jsonl（同目录 state.json 不许删 → .json 不放行）
+        (home.join(".kimi").join("sessions"), false),
+        // kimi 新版 sessions/<wd_*>/<id>/agents/main/wire.jsonl；
+        // 枚举入口 session_index.jsonl 在 ~/.kimi-code 根上，限定 sessions/ 子目录后自然排除
+        (home.join(".kimi-code").join("sessions"), false),
+        // OpenCode legacy storage：session/message/part 都是 .json（v1.2+ 的共享 SQLite 走删行，不在这里）
+        (
+            home.join(".local")
+                .join("share")
+                .join("opencode")
+                .join("storage"),
+            true,
+        ),
+        // codebuddy: projects/<slug>/<uuid>.jsonl（同根的 .credentials.json 等不许删 → 限定 projects 子目录）
+        (home.join(".codebuddy").join("projects"), false),
+        // grok: sessions/<encoded-cwd>/<session-id>/updates.jsonl（同根的 auth.json/config.toml
+        // 与 sessions 根的 session_search.sqlite 不许删 → 限定 sessions 子目录）
+        (home.join(".grok").join("sessions"), false),
+        // cursor 不进目录级白名单：~/.cursor 与 IDE 共享，projects 下也有非会话 jsonl，
+        // 目录粒度太粗——由 deletable_session_file 里的 cursor_deletable 精确判定
+    ]
+}
+
 /// cursor 会话删除的精确判定（projects_root = ~/.cursor/projects，调用方已 canonicalize）：
 /// 只放行 <编码cwd>/agent-transcripts/**/*.jsonl；同根的 auth.json、IDE 数据、
 /// projects 下 agent-transcripts 之外的 jsonl 一律拒绝
-fn cursor_deletable(canon: &Path, projects_root: &Path) -> bool {
+pub(crate) fn cursor_deletable(canon: &Path, projects_root: &Path) -> bool {
     let Ok(rel) = canon.strip_prefix(projects_root) else {
         return false;
     };
@@ -5011,7 +5151,12 @@ fn cursor_deletable(canon: &Path, projects_root: &Path) -> bool {
 
 /// 删除目标两道闸：canonicalize 后必须落在已知会话数据目录内（防符号链接绕过），
 /// 且后缀是会话文件（.jsonl/.jsonl.zst；仅明确允许的目录放行 .json）
-fn deletable_session_file(path: &Path, dirs: &[(PathBuf, bool)]) -> bool {
+/// 源文件是否落在会话白名单内（导出只读、删除共用）
+pub(crate) fn session_file_in_whitelist(path: &Path) -> bool {
+    deletable_session_file(path, &session_data_dirs())
+}
+
+pub(crate) fn deletable_session_file(path: &Path, dirs: &[(PathBuf, bool)]) -> bool {
     let Ok(canon) = path.canonicalize() else {
         return false;
     };
@@ -5197,6 +5342,7 @@ fn delete_session_impl(agent: &str, session_id: &str, file_path: &str) -> Result
         params![agent, session_id],
     )
     .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
+    crate::session_search::forget_in_tx(&tx, agent, session_id);
     for id in &member_ids {
         // 链成员 id 上的整理数据一并清掉，避免换代表后冒出幽灵行
         tx.execute(
@@ -5204,6 +5350,7 @@ fn delete_session_impl(agent: &str, session_id: &str, file_path: &str) -> Result
             params![agent, id],
         )
         .map_err(|e| format!("删除 session_meta 失败: {e}"))?;
+        crate::session_search::forget_in_tx(&tx, agent, id);
     }
     tx.commit().map_err(|e| format!("提交事务失败: {e}"))?;
     invalidate_scan_cache();
@@ -5813,13 +5960,21 @@ mod tests {
                 "x".repeat(80)
             ));
         }
-        std::fs::write(&file, content).unwrap();
-        let latest = plain_conversation_page("claude-code", &file, None).unwrap();
+        std::fs::write(&file, &content).unwrap();
+        let latest = plain_conversation_page("claude-code", &file, None, None).unwrap();
         assert!(latest.cursor.is_some(), "长会话首屏应提供更早页 cursor");
         assert!(latest.messages.last().is_some_and(|message| message.blocks[0].text.contains("消息 3999")));
-        let older = plain_conversation_page("claude-code", &file, latest.cursor).unwrap();
+        let older = plain_conversation_page("claude-code", &file, latest.cursor, None).unwrap();
         assert!(!older.messages.is_empty());
         assert_ne!(older.messages.last().unwrap().blocks[0].text, latest.messages.first().unwrap().blocks[0].text);
+
+        let needle = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"消息 0100 ";
+        let at = content.find(needle).expect("early message") as u64;
+        let mid = plain_conversation_page("claude-code", &file, None, Some(at)).unwrap();
+        assert!(
+            mid.messages.iter().any(|m| m.blocks[0].text.contains("消息 0100")),
+            "around 窗口应包含命中那一条"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

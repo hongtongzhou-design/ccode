@@ -72,7 +72,7 @@
 - **前端不直接碰文件系统**，一切经 Tauri command；终端字节流和会话增量更新走 Tauri event/channel 推送。
 - **AgentAdapter 是唯一的差异隔离层**。新增 agent = 新增一个 adapter 实现，其他模块不动。
 - **SessionIndexer 只做索引**（session 列表 + 元数据），**SessionParser 按需解析**单个会话全文，避免启动时全量解析几百 MB 历史。
-- 解析全部**只读**。我们永远不写各 CLI 的会话目录；唯一写操作是用户显式点「设为全局默认」时的配置文件改写（先备份）。
+- 解析全部**只读**。写各 CLI 会话目录仅限用户显式操作（会话删除、会话导入，防护见 `docs/conventions/safety.md`）；写配置仅限用户显式点「设为全局默认」（先备份）。
 
 ## 4. AgentAdapter 接口设计
 
@@ -231,7 +231,7 @@ struct ChatMessage {
 
 - **整理数据存 app.db，源文件只读**：`session_meta` 表以 `(agent, session_id)` 为键，存 `{ pinned, archived, custom_title, tags[], note, pinned_at }`。借鉴 Wave 的 namespaced meta 思路——语义全在我们这边演进，不碰 CLI 任何文件。
 - **pin 即保留（快照拷贝）**：借鉴 Wave「named = saved」的零按钮理念——用户点 pin 时，Ccode 把会话源文件**拷贝**为 `<app-data>/ccode/snapshots/<agent>/<session_id>.jsonl`（OpenCode 则导出该会话的消息行）。此后 CLI 端无论自动清除还是迁移，回放都走快照；未 pin 的会话源文件消失时，仅在列表标注「已失效」。
-- **分类三个维度**：① 自动——按项目聚合（§6.6 的 ProjectAggregator）；② 手动——tags + custom_title；③ 状态——pinned / archived / 默认。列表页支持按 agent、tag、时间范围过滤与标题搜索（Wave 恰恰没有全局搜索，这是我们可以做透的空白）。
+- **分类三个维度**：① 自动——按项目聚合（§6.6 的 ProjectAggregator）；② 手动——tags + custom_title；③ 状态——pinned / archived / 默认。列表页支持按 agent、tag、时间范围过滤，以及标题 + **会话正文**关键词搜索（Wave 恰恰没有全局搜索，这是我们可以做透的空白；机制见 v3.166）。
 - **注意力标记（后续）**：Wave 用 Claude Code hooks + badge 做「哪个会话需要输入」的优先级汇总，P3 可借鉴，配合 SessionLink 在终端标签上显示状态。
 
 ### 6.6 项目聚合与分类（ProjectAggregator）
@@ -267,7 +267,7 @@ VS Code 的五区布局（活动栏/侧栏/编辑器区/面板/状态栏）映�
 
 - **工作树（Explorer）**：终端页左侧可折叠栏，根目录 = 活动终端标签的 cwd，切标签即切根。借鉴 VS Code Explorer 的懒加载（展开才读子目录，`list_dir` command）与单击预览（右侧预览面板，只读、文本上限 256KB、二进制拒绝，`read_file_preview` command，路径限制在项目根内）。刷新：切回标签自动 + 手动按钮；文件监听自动刷新留 P4。
 - **运行中总览**：工作树下方固定面板，列出全部终端标签（借鉴 VS Code 终端标签列表）：状态点（绿=agent 运行 / 蓝=shell / 灰=已退出）、agent、profile、模型、项目 basename、启动时长；点击激活标签。这是并行工作的可视化入口；P3 接 hooks badge 后叠加「等待输入」标记（Wave 思路）。
-- **布局**：终端页三带 `[上下文（项目/工作区/文件树） | Agent 聊天/终端 | 成果工作台（文件 / 改动）]`，左栏可折叠，主工作区默认以聊天层展示当前会话。聊天与终端共享同一 TerminalView、PTY、xterm 和会话文件；右侧工作台只负责文件预览编辑和 Git 改动，避免重复渲染实时对话；任务审阅仍从改动页进入既有全宽覆盖层。右侧宽度可拖拽并记忆，宽屏动作只隐藏工作树、不杀终端。App 主区与终端三带均以 `h-full/min-h-0` 约束，外层裁切溢出，滚动只落在文件树、聊天消息、diff 等具体内容区；避免页面级滚动或无约束 flex 子项在窗口缩放、拖动或长内容后留下黑屏/空白。
+- **布局**：终端页三带 `[上下文（项目/工作区/文件树） | Agent 聊天/终端 | 成果工作台（文件 / 改动）]`，左栏可折叠，主工作区默认以终端层展示当前会话（2026-09-02 起，此前默认聊天层）。聊天与终端共享同一 TerminalView、PTY、xterm 和会话文件；聊天可窥视同一会话的终端：底栏真实分栏并 fit（v3.168；不能裁全高 xterm 底部，Codex inline 底下是空行）。右侧工作台只负责文件预览编辑和 Git 改动，避免重复渲染实时对话；任务审阅仍从改动页进入既有全宽覆盖层。右侧宽度可拖拽并记忆，宽屏动作只隐藏工作树、不杀终端。App 主区与终端三带均以 `h-full/min-h-0` 约束，外层裁切溢出，滚动只落在文件树、聊天消息、diff 等具体内容区；避免页面级滚动或无约束 flex 子项在窗口缩放、拖动或长内容后留下黑屏/空白。
 - **改动面板（借鉴 VS Code Source Control 与 Codex 环境信息）**：右栏第三页签，量化 agent 的工作成果——当前分支、领先/落后远程、对比 HEAD 的 `+/-` 行数（含未跟踪文件）、文件级列表。普通仓库默认不选择文件，`git_commit(paths)` 与 `ai_commit_message(paths)` 使用 `--literal-pathspecs` 且重新校验当前 status，只暂存/读取用户勾选项；工作区任务维持全量提交语义。提交信息非空时按原文执行「提交 / 提交并推送」，留空时同一按钮切为「快速提交 / 快速提交并推送」，前端按所选文件状态或数量即时生成中性默认信息，不启动 AI。Git 失败保留默认信息。独立 ◈ 仍可按需生成更完整的信息。8 秒轮询刷新，非 git 仓库明确提示；git 写操作始终只由用户点击触发，命令输出与错误回显。
 - **明确不借鉴**：VS Code 服务化 workbench 架构（过重）；文件树 git 装饰（标改动）留 P4；真正的编辑器留 P4 Monaco，预览只读先行。
 
@@ -686,6 +686,24 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 | v3.154 | **对话页范围增加「按项目」**（用户拍板）：范围选择面在 Agent 手风琴下方增加跨 Agent 的项目分组（`groupSessionsByProjectPath`，比较键 `pathKey`，按最近更新排序）。点项目落 `projectPath` 筛选（不限 Agent），点完回到会话列表；Agent 行展开该 Agent 下项目的既有口径不变。 |
 | v3.155 | **对话页范围 Agent 手风琴可收起**：展开态只认 `expandedAgent` 显式开关，不再用当前筛选 agent 做回落（选中后点同一行无法折叠）。Agent 行只展开/收起项目；筛这家改点其下「全部项目」。 |
 | v3.156 | **对话页范围排除无头 AI 临时目录**：`ccode-ai-<uuid>` 是 `ai.rs` 为 ◈ 无头调用建的临时 cwd，用完即删。provenance 原 7 天清理后会话文件仍在，被当成普通项目铺满「按项目」。现：① 对话列表把该目录名归入内部 AI（`isCcodeAiTempCwd` / `is_ccode_ai_temp_cwd`，与 UUID 命名同步）；② 内部 provenance 不再 prune；③ 用量统计仍只认 provenance 表，不按路径改写 `usage_daily`。 |
+| v3.157 | **运行页文件树搜索隐藏配置 + 折叠钮与双击进入分离**：`search_files` 不再跳过全部 `.` 目录（`.kimi-code` / `.claude` 配置搜不到）；噪声目录仍跳过，隐藏目录在「显示隐藏文件 / 查询以 `.` 开头 / 目录名命中」时进入，点结果自动打开隐藏显示。折叠 chevron 只 toggle，双击进入仍在行上其它区域。 |
+| v3.158 | **文件树按后缀搜索**：`pdf` / `.pdf` / `*.pdf` 按扩展名匹配；`doc` 覆盖 `.doc`/`.docx`（ppt/xls/jpg/htm/md 同组）。后缀命中单独成桶优先于文件名包含，避免 50 条上限被名字里带 pdf 的笔记挤掉。 |
+| v3.159 | **运行页空白标签默认主仓库 + 表格预览**：无任务标签的默认 cwd 回升到工作区 `repoPath` / 最近注册项目，不继承 lastLaunch 工作树。`.xlsx`/`.xls`/`.ods` 走 calamine 第一张表只读预览（白名单同 PDF/docx）。 |
+| v3.160 | **md 阅读本地 png/gif**：渲染前把 img src 改成 data-md-src，避免 WebView 相对路径 404 裂图；本地图走 `read_image_bytes`（加魔数校验）。文件预览允许 https 图；聊天仍不加载外链图。 |
+| v3.161 | **md 本地图占位 + 文件树图片预览**：rewrite 把待加载 img 换成 `md-img-pending` span（无 src 的 img 在 WKWebView 仍会画问号）；水合覆盖绝对路径与 marked 百分号编码的中文文件名。文件树点 png/jpg/gif/webp/svg 走 `ImagePreview`（`read_image_bytes` 同一通道），不再落入文本预览的「二进制不支持」。 |
+| v3.163 | **运行页空白标签改回家目录**：用户拍板：没必要一直显示当前项目主仓，点进项目再展示其目录。第一次进运行 / 关最后标签 /「＋」空标签默认 `~`，不预填主仓、不继承 lastLaunch 工作树。点项目走既有「真进入」。恢复的任务标签仍用记下的 cwd。 |
+| v3.164 | **Excel 宽表预览**：不再 32 列截断 + 每格 `max-w-56` 挤扁。抽指定工作表最多 200×256，列字母/行号冻结可横滑；点格子在顶栏看全文（WKWebView 无 title）。多表底栏切换。只读，不当编辑器。 |
+| v3.165 | **md 内嵌图卡在「图片加载中」**：`dangerouslySetInnerHTML` 被父级重绘盖回占位后，水合 effect 因 html 未变不重跑。改为每次 layout 扫剩余 `data-md-src`，本地图读盘结果缓存 32 张。 |
+| v3.162 | **会话导出/导入（session-transfer）**：把本机八家 agent（不含 opencode）的会话打成 `.ccode-sessions.zip`（manifest v1 + 原文文件），在另一台 Ccode 导入后列表/回放/注意力/外部恢复可用；跨机路径由向导选定 B 机目录，导入时 JSON 行级改写已知 cwd 键并按各家布局重建落位。manifest 同时记 `projectPath`（列表侧主仓，向导推荐目录）与 `cwd`（会话文件真实工作目录，改写与「本机是否还在」用它）。工作区会话二者不同：改写旧路径取文件 cwd，不以归并后的主仓为准。Mac→Win 落盘目录名经 `fs_safe_component` 去掉非法字符。Codex 内联 `ccode-*` provider 可按 rollout 原名注册到客户端（一批多名指向用户选的一个绑定）。安全是只读原则第五个写例外（zip-slip/白名单/同 id 跳过/原子写）。**已知边界（不藏）**：同 id 只跳过不覆盖；嵌套 tool-call 文件路径不改写；cursor cwd 字段名本机无 jsonl 样本，按扫描器候选名单存在才改；grok 超长路径 slug 的 hash 算法未开源（写 `.cwd` + `info.cwd`，Ccode 列表不依赖目录名）；codex 多网关联名会话全部指向所选绑定；A 机自定义密钥若不符常见前缀，B 机脱敏遮不住（与导出警告一致）。opencode / hooks-state / 云端同步不做。 |
+| v3.171 | **科研模板全量收口（用户确认方案）**：① gitignored 产物写项目根——TASK.md 给出项目根与产物目录绝对路径；`papers/` 与 PDF 人工导入强制主仓；合并成功后把工作区未跟踪的 `papers/`、产物目录、`output/` 拷到主仓（已有不覆盖）。② 毕业论文拆成与综述同名的「文献检索与筛选 → 文献精读与笔记 → 开题报告与综述」再接原方法/实验链（8 步）；开题挂 `review-framework`。③ 投稿 `any_of` 含 `thesis-final.md`，返修 r1 优先 `submission/formatted.md`，格式适配渲染 `output/formatted.pdf`。④ 科研论文承认计算实验、有上游笔记则查漏补缺不覆盖；实验设计/findings 审阅改为非可选；清单改名避免与投稿 `checklist.md` 对撞。⑤ LaTeX 改为排版后端（有成稿转写）。⑥ 图主交付 SVG/PNG 进 `figures/`。存量 project.toml 不迁移。 |
+| v3.166 | **对话页正文搜索**：搜索框从元数据（标题/标签/步骤/摘要）扩到会话 user/assistant 文本。查询按空白分词（短英文丢掉、汉字单字保留），OR 打分：标题最重、正文按是否命中 + 词频封顶，全部词都中有加分，完整短语再加分；同分按 `updated_at`。正文不进 React，只回脱敏摘录。抽出文本缓存在 `app.db` 的 `session_search_text`（mtime/size 变了才重抽，单次刷新 1.2s 预算），源文件只读；thinking / 工具参数不进索引。已知边界：超长会话只抽前约 8MB JSONL / 96KB 文本。 |
+| v3.167 | **搜索命中打开即定位**：命中正文时记下 jsonl 字节偏移（zstd 为解压流偏移）或 OpenCode `time_created`。`get_session_conversation_page` 增加 `around`，打开该对话加载命中附近一窗而不是总是尾部；前端按时间戳/摘录/关键词对准那条消息滚进视野并高亮。压缩会话不能再向前翻页（与原先 zstd 尾窗相同）。定位最多对排序后前 80 条正文命中做二次扫描。 |
+| v3.171 | **快速开聊三处收口（用户拍板）**：① 随手聊历史只认 `~/ccode/scratch`（`isScratchCwd`），未注册的编码仓库不再涌进。② 侧栏记住过 agent 即直达终端；勾「每次都先问我」才每次开弹层（旧 `ccode.quickChatSkip=0` 迁成 always-ask）。⌘K / 工作台页头仍开弹层。③ 弹层下半改「继续上次」：最近一条独立按钮，其余列表跟在后面，与「开聊」主路径分开。 |
+| v3.170 | **快速开聊随手聊历史同步显示**：弹层打开时不再 `list_sessions` + `list_projects` round-trip（历史区后到把弹层撑高，表现为「顿一下」）。改用启动已进 store 的 `sessions` + `projectPaths` 现算 `pickQuickChatHistory`；`live` 用终端页 `liveSessions` 补标，正在跑的随手聊仍排除。侧栏右键浮层去掉「读取中…」。默认目录即时显示 `~/ccode/scratch`（点开聊才 `ensure_scratch_dir`）；弹层回车提交。 |
+| v3.169 | **工作台主卡跟真实运行对齐（用户拍板）**：主卡回答「现在最值得做什么」，数据源不再是「上次选中的项目名 + 全应用运行计数」。① 有 `running` 或待确认的终端标签时，按 cwd 归到已添加项目根（含工作树）或最近仓库，名称用注册名；「N 个运行中」与底栏状态只计这张卡所属目录，点「继续工作」走 `focusTabReq` 激活该标签。② 没有存活工作时才回落项目页上次选中项 / 时间序里最近的已添加项目 / 最近仓库；已添加项读档案卡，副标题为流水线第一个未合并步骤（全完成回末步）。③ 待你处理空着不占右栏，主卡拉满；最近项目不再把已添加项抬到时间序之前；最近对话丢掉无标题条目。纯逻辑 `src/workbench-hero.ts`。 |
+| v3.168 | **聊天 ⇄ 终端交接与窥视（不复制 TUI 解析器）**：聊天仍是同一 PTY 的结构化层。新增 `src/chat-handoff.ts` 交接表（chat_ok / peek / must_switch）：普通发送与带参直切命令留在聊天；picker / 审批 / 登录与信任目录默认底栏真实分栏并 fit（约 32% 高度；裁全高 xterm 底部会看到 Codex inline 的空行）；Kimi 首条注入失败仍整层切终端并复制指令。等待文案改为已送出/正在写盘/正在用工具；工具块进会话文件即渲染，assistant 正文才结束等待。聊天尾窗可向前翻页（zstd 无更早页）。头部复用状态栏的模型/思考档；文件拖入聊天输入框（盖住终端的坐标不写 PTY）。斜杠表补 opencode `/models`、codebuddy `/login`。Kimi CSI-u 序列收到 `terminal-input.ts`。聊天 Enter 组词未上屏不发送（WKWebView 上 compositionend 后 isComposing 已假，见 `ime-guard.ts`）。 |
+| 2026-09-01（备档） | **科研外部工具三线定级与技能备档**（用户拍板「三手准备都做」，但**不融入第一版发布**——Origin/EndNote/Zotero 适配需实机迭代，跑通后第二版再融入）：① **定级（官方文档实证）**——Origin = COM Automation + originpro Python 包 + LabTalk `-hs -rs` 隐藏批处理，全自动但 Windows 限定（无 Mac 版，虚拟机方案用户否决）；Zotero = 本地 API（127.0.0.1:23119）+ Better BibTeX JSON-RPC/autoexport，全自动；EndNote = 桌面端无官方 API（Clarivate 开发者门户无 EndNote），只走 EndNote XML/RIS 格式桥接，**CWYW 无人值守（Word COM/域代码 hack）明确否决**——脆弱、绑版本组合、易卡对话框。② **形态 = 三个内置技能备档**：`resources/skills/` 下 origin-plot / zotero-sync / endnote-bridge 已落盘（遵守技能红线：单文件轻量规范、禁捆绑脚本），**未注册 BUILTIN_SKILLS、不挂模板、不进第一版**；内核零改动，figure-forge 不动（origin-plot 是它的工具适配层，图型/规格决策仍归 figure-forge）。③ **第二版融入清单**：skills.rs BUILTIN_SKILLS 注册三行 → zotero-sync 挂三套模板检索步（简报本已提 Zotero）→ tests/pipeline-presets.test.ts 内置集合 +3 → user-guide 内置技能 15→18 → cargo/npm 测试 + dev 走查。④ **路线口径**：场景 4「agent 辅助做图」以技能形态重新纳入——v3.97「整批不做」针对的是 Ccode 内建做图功能，经终端驱动外部工具是另一层，不冲突。 |
+| 2026-09-02 | **依赖体检 + 一键安装（git/node，三平台）**（用户给的参考流程：首启检测不阻断 → 用到再提示 → 一键装 → 自动复检；两处修正经对齐：git 提到首启检测——worktree 是核心机制，node 不进首启——它只是 npm 渠道依赖）：① **后端 `dep_check.rs`**——`check_dependencies`（git 三态 ok/missing/`clt_stub` + node + 渠道 brew/winget/xcode/none；启动时前端拉一次进 store，不持久化）+ `install_dependency("git"|"node")`：macOS brew 优先（TUNA 镜像自动带）、无 brew 时 git 触发 `xcode-select --install` 系统弹窗**不等待**（弹窗异步、无法流式观测的妥协）由「重新检测」收口；Windows 走 winget `Git.Git`/`OpenJS.NodeJS.LTS`（复用 updater 的 winget_args 模板）；Linux 只给发行版命令指引不一键装（碎片化）。复用 updater.rs 的 `run_streaming_pty` 管线（提 pub(crate)，行为零变化），装完 invalidate 缓存 + 复检写 versionAfter。② **macOS CLT stub 判定**——`/usr/bin/git` 未装 CLT 时是 stub：which 命中但一跑就弹系统窗、还会被版本探测 5s 超时杀掉；必须先 `xcode-select -p` 判定，stub 场景禁跑 `git --version`。③ **缺 git 常驻提醒走收件箱 `dep:` 类别**（不造顶部横幅——v3.146 用户已否「顶部横幅不明显」；dismiss 走既有签名机制，装好自动消失）；设置页「诊断」区加「依赖体检」Row（状态三行 + 重新检测 + 一键安装，照字体安装的 listen+invoke 模式，共享 `useDepInstall` hook）；改动面板与一键开步的「找不到 git」报错经 `isGitMissingError` 升级为带「一键安装 Git」按钮；node 只在连接页 npm 渠道装 CLI 缺它时提示（`installToolHelp` 升级带按钮）。④ **候选目录补齐**——Windows 加 `Program Files\Git\cmd` 三件套（winget 装完 GUI 短 PATH 也能复检命中）；macOS/Linux 加 volta/mise 固定 shim 目录；nvm/fnm 动态版本目录不做（find_in_dirs 不支持 glob，过度工程）。**不做**：首启向导页（体检是 backlog 首启引导完整版的素材但不绑定）、brew/winget 本体一键装（brew 安装要 sudo 交互）。Windows 全流程与 macOS CLT 路径未实机走查，CI 编译 + 单测保底。 |
 
 ## 11. 演进线（2026-08 定稿）
 

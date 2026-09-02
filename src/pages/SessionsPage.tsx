@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { Download, Upload } from "lucide-react";
 import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
@@ -16,6 +18,12 @@ import {
   type QuickFilterId,
   type ScopeChip,
 } from "../session-filter";
+import {
+  applySearchHits,
+  findFocusMessageIndex,
+  searchHitKey,
+  type SearchFocus,
+} from "../session-search";
 import { pathKey, samePath } from "../path-utils";
 import { AGENTS } from "../types";
 import { pickResumeProfile } from "../resume-profile";
@@ -24,6 +32,8 @@ import GitPanel from "../components/GitPanel";
 import HandoffPicker from "../components/HandoffPicker";
 import DigestPicker from "../components/DigestPicker";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
+import SessionImportModal from "../components/SessionImportModal";
+import { SECRET_EXPORT_WARNING } from "../session-transfer";
 import {
   Checkbox,
   EmptyState,
@@ -37,7 +47,9 @@ import {
 import type {
   ChatMessageDto,
   ConversationPageDto,
+  SessionExportKey,
   SessionMetaDto,
+  SessionSearchHitDto,
   TokenUsageDto,
 } from "../types";
 
@@ -106,6 +118,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     null,
   );
   const [query, setQuery] = useState("");
+  const [contentHits, setContentHits] = useState<SessionSearchHitDto[] | null>(
+    null,
+  );
+  const [searchingBody, setSearchingBody] = useState(false);
+  const searchGenRef = useRef(0);
+  const [searchFocus, setSearchFocus] = useState<SearchFocus | null>(null);
+  const searchFocusRef = useRef<SearchFocus | null>(null);
+  searchFocusRef.current = searchFocus;
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [showArchived, setShowArchived] = useState(false);
   // 一行 chip 快筛 + 搜索建议落成的作用域 chip（v3.88，纯逻辑在 session-filter.ts）
@@ -209,6 +229,32 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     }
   }, [sessionsQuery, setSessionsQuery]);
 
+  useEffect(() => {
+    if (!q) {
+      searchGenRef.current += 1;
+      setContentHits(null);
+      setSearchingBody(false);
+      return;
+    }
+    setContentHits(null);
+    setSearchingBody(true);
+    const gen = ++searchGenRef.current;
+    const timer = window.setTimeout(() => {
+      void invoke<SessionSearchHitDto[]>("search_sessions", { query: query.trim() })
+        .then((hits) => {
+          if (searchGenRef.current !== gen) return;
+          setContentHits(hits);
+          setSearchingBody(false);
+        })
+        .catch(() => {
+          if (searchGenRef.current !== gen) return;
+          setContentHits(null);
+          setSearchingBody(false);
+        });
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [query, q]);
+
   // 工作区页「本步骤的对话」：落成作用域 chip（结构化筛选，不是往搜索框塞字符串）
   useEffect(() => {
     if (!sessionScopeReq) return;
@@ -220,23 +266,32 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     );
     setSessionScopeReq(null);
   }, [sessionScopeReq, setSessionScopeReq]);
-  const searched = useMemo(() => {
-    if (!q) return sessions;
-    return sessions.filter((s) =>
-      [
-        s.projectPath,
-        s.title ?? "",
-        s.customTitle ?? "",
-        s.workspace ?? "",
-        s.stepName ?? "",
-        s.summary ?? "",
-        ...s.tags,
-      ]
-        .join("\n")
-        .toLowerCase()
-        .includes(q),
-    );
-  }, [sessions, q]);
+  const searchedResult = useMemo(
+    () => applySearchHits(sessions, query, contentHits),
+    [sessions, query, contentHits],
+  );
+  const searched = searchedResult.list;
+  const searchSnippets = searchedResult.snippets;
+  const hitByKey = useMemo(() => {
+    const m = new Map<string, SessionSearchHitDto>();
+    for (const h of contentHits ?? []) {
+      m.set(searchHitKey(h.agent, h.sessionId), h);
+    }
+    return m;
+  }, [contentHits]);
+
+  function focusFor(s: SessionMetaDto): SearchFocus | null {
+    const h = hitByKey.get(searchHitKey(s.agent, s.sessionId));
+    if (!h) return null;
+    if (!h.snippet && h.around == null) return null;
+    return {
+      around: h.around,
+      matchTimestamp: h.matchTimestamp,
+      matchRole: h.matchRole,
+      snippet: h.snippet,
+      matchedKeywords: h.matchedKeywords,
+    };
+  }
 
   // 搜索建议从「已按文本命中」的集合里提，输入越具体建议越准
   const suggestions = useMemo(
@@ -462,12 +517,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   // 排最前」同口径）：组内保持时间降序，组按各自最近活跃排序；其余筛选保持纯时间序（跨项目分组无意义）。
   // header 只挂在每组首条上，渲染时据此插组名小标题。
   const displayList = useMemo(() => {
-    if (projectScopePath(filter) == null)
+    // 搜索时按相关度排，不再按任务卡分组打乱
+    if (q || projectScopePath(filter) == null)
       return sessionList.map((s) => ({ header: null as string | null, s }));
     return groupSessionsByTask(sessionList).flatMap((g) =>
       g.list.map((s, i) => ({ header: i === 0 ? g.name : null, s })),
     );
-  }, [sessionList, filter]);
+  }, [sessionList, filter, q]);
 
   /** 切换树筛选：同时退出回放态回到列表，保证右栏与所选节点对应 */
   function selectFilter(f: Filter) {
@@ -494,6 +550,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   // 导出 Markdown 结果路径（小字提示，随切换会话清空）
   const [exporting, setExporting] = useState(false);
   const [exportPath, setExportPath] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [exportingPack, setExportingPack] = useState(false);
   /** 回放区页签：对话 / 当前项目改动（只读当前磁盘状态，不是历史快照） */
   const [replayTab, setReplayTab] = useState<"chat" | "diff">("chat");
 
@@ -537,6 +595,57 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  function toExportKey(s: SessionMetaDto): SessionExportKey {
+    return {
+      agent: s.agent,
+      sessionId: s.sessionId,
+      filePath: s.filePath,
+      title: s.customTitle || s.title,
+      projectPath: s.projectPath,
+      provider: s.provider ?? null,
+      pinned: s.pinned,
+      customTitle: s.customTitle,
+      tags: s.tags,
+      summary: s.summary,
+    };
+  }
+
+  /** 导出会话包（.ccode-sessions.zip），原文拷贝不含密钥/连接 */
+  async function onExportPack(targets: SessionMetaDto[]) {
+    const packable = targets.filter((s) => s.agent !== "opencode");
+    if (packable.length === 0) {
+      setError("OpenCode 会话不能打进会话包（会话在 SQLite 里，留到下一版）");
+      return;
+    }
+    if (
+      !(await confirmDialog(SECRET_EXPORT_WARNING, {
+        confirmText: "仍要导出",
+      }))
+    )
+      return;
+    const dest = await save({
+      defaultPath: "ccode-sessions.zip",
+      filters: [{ name: "ZIP", extensions: ["zip"] }],
+    });
+    if (!dest) return;
+    setExportingPack(true);
+    setError(null);
+    try {
+      const path = await invoke<string>("export_sessions", {
+        entries: packable.map(toExportKey),
+        destPath: dest,
+      });
+      setExportPath(path);
+      if (packable.length < targets.length) {
+        setError("已跳过 OpenCode 会话（不能打进会话包）");
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setExportingPack(false);
+    }
+  }
+
   // 终端页「⤴对话」/「完整回放」跳转：先刷新索引，再按 agent+sessionId 精确打开。
   useEffect(() => {
     if (!openSessionReq) return;
@@ -554,7 +663,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           setFilter(hit.internal ? { kind: "internal" } : { kind: "all" });
           // 目标已归档时同步打开归档开关，保证跳转后在列表中可见
           if (hit.archived) setShowArchived(true);
-          void openSession(hit);
+          void openSession(hit, null);
         } else {
           setError("未找到该对话，可能尚未写入完成或已被 CLI 清理");
         }
@@ -568,7 +677,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openSessionReq, loadSessions]);
 
-  async function openSession(s: SessionMetaDto) {
+  async function openSession(s: SessionMetaDto, focus: SearchFocus | null = null) {
     // 源文件已删除且无快照，无法回放
     if (!s.alive && !s.pinned) {
       setError("该会话的源文件已被删除且没有快照，无法回放");
@@ -578,6 +687,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setTreeOpen(false);
     setSelected(s);
     setReplayTab("chat");
+    setSearchFocus(focus);
     // 摘要缓存命中：已有 summary 直接展示，不再调用 AI
     setSummary(s.summary ?? null);
     setExportPath(null);
@@ -592,16 +702,19 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           agent: s.agent,
           filePath: s.filePath,
           before: null,
+          around: focus?.around ?? null,
         },
       );
       if (request !== conversationRequestRef.current) return;
       olderCountRef.current = 0;
       setMessages(page.messages);
       setConversationCursor(page.cursor);
-      requestAnimationFrame(() => {
-        const el = scrollRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
-      });
+      if (!focus) {
+        requestAnimationFrame(() => {
+          const el = scrollRef.current;
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      }
     } catch (e) {
       if (request === conversationRequestRef.current) setError(String(e));
     } finally {
@@ -648,13 +761,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             : rows[rows.length - 1]
           : rows[Math.min(rows.length - 1, Math.max(0, idx + delta))];
       if (next && (selected?.agent !== next.agent || selected?.sessionId !== next.sessionId))
-        void openSession(next);
+        void openSession(next, focusFor(next));
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // loadingConv 必须在依赖里：否则打开会话期间注册的闭包永久捕获 true，↑/↓ 被一直挡住
-  }, [currentPage, displayList, selected, menu, selecting, loadingConv]);
+  }, [currentPage, displayList, selected, menu, selecting, loadingConv, hitByKey]);
 
   useEffect(() => {
     if (!treeOpen && !moreFiltersOpen) return;
@@ -690,6 +803,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           agent: selected.agent,
           filePath: selected.filePath,
           before: conversationCursor,
+          around: null,
         },
       );
       const currentSelected = selectedRef.current;
@@ -731,12 +845,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         );
         if (updated && updated.updatedAt !== cur.updatedAt) {
           setSelected(updated);
+          if (searchFocusRef.current) return;
           const page = await invoke<ConversationPageDto>(
             "get_session_conversation_page",
             {
               agent: updated.agent,
               filePath: updated.filePath,
               before: null,
+              around: null,
             },
           );
           const stillSelected = selectedRef.current;
@@ -1138,6 +1254,25 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       : `删除 ${checkedInView} 项`}
                 </button>
                 <button
+                  disabled={checkedInView === 0 || exportingPack}
+                  onClick={() => {
+                    const targets = sessionList.filter((s) =>
+                      checked.has(skey(s)),
+                    );
+                    void onExportPack(targets);
+                  }}
+                  className={`${ghostActionClass} gap-1`}
+                >
+                  {exportingPack ? (
+                    "导出中…"
+                  ) : (
+                    <>
+                      <Upload size={14} strokeWidth={1.8} aria-hidden="true" />
+                      导出
+                    </>
+                  )}
+                </button>
+                <button
                   onClick={exitSelectMode}
                   className={ghostActionClass}
                 >
@@ -1160,6 +1295,15 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 {/* 「显示已归档」已并入快筛 chip（toggleQuick 单控点，v3.92），页头不再重复 */}
                 <button
                   type="button"
+                  onClick={() => setImportOpen(true)}
+                  className={`${rowActionClass} gap-1`}
+                  title="从另一台机器导入会话包"
+                >
+                  <Download size={14} strokeWidth={1.8} aria-hidden="true" />
+                  导入
+                </button>
+                <button
+                  type="button"
                   onClick={() => setSelecting(true)}
                   className={rowActionClass}
                 >
@@ -1171,7 +1315,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           {/* 搜索框：inset 底色分层（无描边），共享 searchFieldClass */}
           <input
             className={`mt-2 w-full ${searchFieldClass}`}
-            placeholder="搜索项目 / 对话 / 步骤 / 标签"
+            placeholder="搜索标题、标签，或对话里说过的话"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -1212,6 +1356,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               >
                 搜索：{query.trim()} ×
               </button>
+              {searchingBody && (
+                <span className="text-micro text-l4">正在搜正文…</span>
+              )}
             </div>
           )}
           {/* 已落作用域 chip（可叠加、可逐个 ×） */}
@@ -1651,7 +1798,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   data-session-key={`${s.agent}:${s.sessionId}`}
                   onClick={() => {
                     if (selecting) toggleChecked(s);
-                    else if (clickable) void openSession(s);
+                    else if (clickable) void openSession(s, focusFor(s));
                   }}
                   onContextMenu={(event) => {
                     event.preventDefault();
@@ -1875,6 +2022,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       </span>
                     )}
                   </div>
+                  {searchSnippets[searchHitKey(s.agent, s.sessionId)] && (
+                    <p
+                      className="mt-0.5 truncate text-micro text-l4"
+                      title={searchSnippets[searchHitKey(s.agent, s.sessionId)]}
+                    >
+                      正文 {searchSnippets[searchHitKey(s.agent, s.sessionId)]}
+                    </p>
+                  )}
                 </div>
                 </Fragment>
               );
@@ -1890,7 +2045,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 }
                 detail={
                   q || filter.kind !== "all"
-                    ? "换个关键词，或清除筛选看全部。"
+                    ? "换个词试试。多个词用空格分开，会按相关程度和时间排。也可以搜对话里说过的话。"
                     : "去终端页跑几个 agent 会话，回来就能在这里翻记录。"
                 }
                 action={
@@ -2085,9 +2240,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         )}
                         {/* key 按会话隔离展开状态：切会话时旧会话的展开集合不带进新会话 */}
                         <ConversationView
-                          key={selected?.sessionId ?? "none"}
+                          key={`${selected?.sessionId ?? "none"}:${searchFocus?.around ?? "tail"}`}
                           messages={messages}
                           cwd={selected?.projectPath ?? null}
+                          focusIndex={findFocusMessageIndex(messages, searchFocus)}
                         />
                       </>
                     )}
@@ -2231,6 +2387,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               {exporting ? "导出中…" : "导出 Markdown"}
             </button>
             <button
+              className={`${menuItem} disabled:opacity-50`}
+              disabled={exportingPack || (!selected.alive && !selected.pinned)}
+              onClick={() => {
+                setResumeMenu(null);
+                void onExportPack([selected]);
+              }}
+            >
+              {exportingPack ? "导出中…" : "导出会话包"}
+            </button>
+            <button
               className={menuItem}
               onClick={() => {
                 setResumeMenu(null);
@@ -2325,6 +2491,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   }}
                 >
                   编辑
+                </button>
+                <button
+                  className={`${menuItem} disabled:opacity-50`}
+                  disabled={exportingPack || (!menu.session.alive && !menu.session.pinned)}
+                  onClick={() => {
+                    setMenu(null);
+                    void onExportPack([menu.session]);
+                  }}
+                >
+                  导出会话包
                 </button>
                 {/* 移到卡片：仅项目筛选下可用（此时才知道 project_root）——属「整理」 */}
                 {projectScopePath(filter) != null && (
@@ -2465,6 +2641,15 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             )}
           </div>
         </div>
+      )}
+      {importOpen && (
+        <SessionImportModal
+          registeredPaths={[...registeredProjectPaths]}
+          onClose={() => setImportOpen(false)}
+          onImported={() => {
+            void loadSessions(true);
+          }}
+        />
       )}
     </div>
   );

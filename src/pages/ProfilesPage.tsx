@@ -9,6 +9,8 @@ import { PRESETS, NO_PRESET_REASON } from "../presets";
 import { upstreamNoteText, upstreamCommand } from "../upstream-note";
 import { copyTargets } from "../profile-copy";
 import { channelLabel } from "../combo-field";
+import { canOneClickInstall } from "../dep-check";
+import { DepInstallLog, useDepInstall } from "../dep-install";
 import { MODEL_SWITCH } from "../model-switch";
 import { groupModelsByVendor, vendorOf } from "../model-vendors";
 import { interactiveUpdatePrefill } from "../update-routing";
@@ -1783,6 +1785,16 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
   const loadAll = useAppStore((s) => s.loadAll);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
+  // npm 渠道不可用时的「一键安装 Node.js」：渠道判定用依赖体检结果（dep-check.ts）
+  const depCheck = useAppStore((s) => s.depCheck);
+  const refreshDepCheck = useAppStore((s) => s.refreshDepCheck);
+  const [nodeInstallOffer, setNodeInstallOffer] = useState(false);
+  const depInstall = useDepInstall((_tool, res) => {
+    if (res.ok) {
+      void refreshDepCheck();
+      setNodeInstallOffer(false);
+    }
+  });
   // 各 agent 官方账号连接状态（P1a；仅 supported 的 agent 会展示状态行）
   const [officialStatus, setOfficialStatus] = useState<
     Record<string, OfficialAccountStatusDto>
@@ -2100,12 +2112,16 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
 
   /** 安装未装的 agent：先亮出将执行的命令，用户确认后才跑 */
   async function onInstall(agentId: string) {
+    setNodeInstallOffer(false);
     try {
       const method = await invoke<string | null>("install_method_preview", {
         agentId,
       });
       if (!method) {
         setError(installToolHelp(agentId));
+        // 文案之外给出口：渠道允许时错误旁追加「一键安装 Node.js」；尚未体检先探测一次
+        if (!useAppStore.getState().depCheck) void refreshDepCheck();
+        setNodeInstallOffer(true);
         return;
       }
       if (
@@ -2231,18 +2247,20 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
 
-  /** 注册到 Codex 客户端（不切换默认渠道）：只写 provider 定义 + auth.json 密钥，
+  /** 注册到 Codex 客户端（不切换默认渠道）：只写 config.toml 的 provider 定义块
+      （认证在块内静态 http_headers，不动 auth.json、不影响客户端自身登录态），
       之后此网关发起的会话可在桌面客户端续聊；与「设为全局」共用备份，可「撤销上次写入」 */
   async function onRegisterClient(p: Profile) {
     if (
       !(await confirmDialog(
-        "将把此网关的 provider 定义与密钥写入 codex 的 config.toml / auth.json（先备份、可撤销）。**默认渠道不动**——之后 Ccode 里此网关发起的会话，可以在 Codex 桌面客户端直接打开续聊。继续？",
+        "将把此网关的 provider 定义写入 codex 的 config.toml（密钥以静态请求头形式写在定义块内，先备份、可撤销）。**默认渠道不动，auth.json 与客户端登录态也不动**——之后 Ccode 里此网关发起的会话，可以在 Codex 桌面客户端直接打开续聊。继续？",
       ))
     )
       return;
     try {
       const files = await invoke<string[]>("codex_register_client_provider", {
         profileId: p.id,
+        providerName: null,
       });
       // 注册也产生备份批次，「撤销上次写入」入口可能由灰变可用
       await refreshGlobalBackups();
@@ -2255,12 +2273,12 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
 
-  /** 移除客户端注册（注册的逆操作）：只删 config.toml 的 provider 定义块；
-      auth.json 的 OPENAI_API_KEY 是单槽共享凭证（多条渠道与登录态同读），不做按注册清理 */
+  /** 移除客户端注册（注册的逆操作）：只删 config.toml 的 provider 定义块，
+      块内静态认证头随块一并删除（即完成密钥清理）；auth.json 本就不动 */
   async function onUnregisterClient(p: Profile) {
     if (
       !(await confirmDialog(
-        "将从 codex 的 config.toml 删除此网关的 provider 定义块（先备份、可撤销）。之后此网关发起的会话在 Codex 桌面客户端又会无法打开；Ccode 内使用不受影响。auth.json 的共享密钥槽不动。继续？",
+        "将从 codex 的 config.toml 删除此网关的 provider 定义块（含块内密钥，先备份、可撤销）。之后此网关发起的会话在 Codex 桌面客户端又会无法打开；Ccode 内使用与客户端登录态都不受影响。继续？",
       ))
     )
       return;
@@ -2630,6 +2648,24 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
         </PageToolbar>
 
         {error && <p className="mt-4 text-sm text-err-text">{error}</p>}
+        {/* npm 渠道不可用（无 Node.js）时的一键安装出口：渠道由依赖体检判定，
+            渠道不允许（无 brew/winget）时保持纯文案不画按钮 */}
+        {nodeInstallOffer && (
+          <div className="mt-2">
+            {depCheck && canOneClickInstall("node", depCheck.channel) && (
+              <button
+                onClick={() => void depInstall.install("node")}
+                disabled={depInstall.entries.node.running}
+                className={`${secondaryActionClass} text-xs`}
+              >
+                {depInstall.entries.node.running
+                  ? "安装中…"
+                  : "一键安装 Node.js"}
+              </button>
+            )}
+            <DepInstallLog entry={depInstall.entries.node} />
+          </div>
+        )}
         {notice && <p className="mt-4 text-xs text-ok-text">{notice}</p>}
 
         {/* agent 分组（可折叠） */}
@@ -3298,7 +3334,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                         label: "移除 Codex 客户端注册…",
                         danger: true,
                         title:
-                          "从 config.toml 删除此网关的 provider 定义块（先备份、可撤销）；之后此渠道发起的会话在客户端又打不开了，Ccode 内不受影响；auth.json 共享密钥槽不动",
+                          "从 config.toml 删除此网关的 provider 定义块（含块内密钥，先备份、可撤销）；之后此渠道发起的会话在客户端又打不开了，Ccode 内与客户端登录态都不受影响",
                         onSelect: () => void onUnregisterClient(rowMenu.profile),
                       }
                     : {
@@ -3309,7 +3345,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                           ? "无密钥连接没有可注册的凭证"
                           : rowMenu.profile.slotMissing
                             ? "这个网关还没配该协议的端点"
-                            : "只把 provider 定义与密钥写进 codex 配置（先备份、可撤销），默认渠道不动；之后此网关发起的会话可在 Codex 桌面客户端直接续聊",
+                            : "只把 provider 定义写进 codex 的 config.toml（密钥在块内静态头，先备份、可撤销），默认渠道与客户端登录态都不动；之后此网关发起的会话可在 Codex 桌面客户端直接续聊",
                         onSelect: () => void onRegisterClient(rowMenu.profile),
                       },
                 ]

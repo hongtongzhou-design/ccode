@@ -16,7 +16,15 @@ import {
   Toggle,
   secondaryActionClass,
 } from "../components/PageFrame";
-import { captureDecision, comboLabel, IS_WINDOWS, PAGE_HOTKEY_DEFS } from "../hotkeys";
+import { captureDecision, comboLabel, IS_MAC, IS_WINDOWS, PAGE_HOTKEY_DEFS } from "../hotkeys";
+import {
+  canOneClickInstall,
+  installGuidance,
+  type DepItemDto,
+  type DepPlatform,
+  type DepTool,
+} from "../dep-check";
+import { DepInstallLog, useDepInstall, type DepInstallEntry } from "../dep-install";
 import {
   NAV_CAPSULE_ITEM_IDS,
   normalizeNavCapsuleDelay,
@@ -176,6 +184,71 @@ const SETTING_NAV: { id: string; label: string }[] = [
   { id: "about", label: "关于" },
 ];
 
+/** 依赖体检指引文案的平台参数（installGuidance 显式传参，纯逻辑不读平台） */
+const DEP_PLATFORM: DepPlatform = IS_MAC ? "mac" : IS_WINDOWS ? "win" : "linux";
+
+/** 依赖体检单行状态：ok = ✓ + 版本 + 路径；缺失/CLT stub = ✗ + 说明 +
+ *  一键安装钮（渠道允许时）或指引文案；安装进行/结果跟随该行展示 */
+function DepStatusLine({
+  label,
+  item,
+  tool,
+  channel,
+  entry,
+  onInstall,
+}: {
+  label: string;
+  item: DepItemDto;
+  tool: DepTool;
+  channel: string;
+  entry: DepInstallEntry;
+  onInstall: (tool: DepTool) => void;
+}) {
+  if (item.status === "ok") {
+    return (
+      <div className="flex items-center gap-2 py-1 text-xs">
+        <span className="text-ok-text">✓</span>
+        <span className="text-l2">{label}</span>
+        <span className="text-l4">{item.version ?? "版本未知"}</span>
+        {item.path && (
+          <span className="min-w-0 truncate font-mono text-l4" title={item.path}>
+            {item.path}
+          </span>
+        )}
+      </div>
+    );
+  }
+  const reason =
+    item.status === "clt_stub" ? "需要安装 Xcode 命令行工具" : "未安装";
+  return (
+    <div className="py-1 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-err-text">✗</span>
+        <span className="text-l2">{label}</span>
+        <span className="text-l4">{reason}</span>
+        {canOneClickInstall(tool, channel) ? (
+          <button
+            onClick={() => onInstall(tool)}
+            disabled={entry.running}
+            className={`${rowActionClass} shrink-0`}
+          >
+            {entry.running
+              ? "安装中…"
+              : item.status === "clt_stub"
+                ? "安装"
+                : "一键安装"}
+          </button>
+        ) : (
+          <span className="text-l4">
+            {installGuidance(tool, channel, DEP_PLATFORM)}
+          </span>
+        )}
+      </div>
+      <DepInstallLog entry={entry} />
+    </div>
+  );
+}
+
 /** 可折叠分区：标题行整行可点（高 32px），▸/▾ 指示展开状态；badge 为标题右侧状态标记 */
 function Section({
   title,
@@ -334,6 +407,16 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const loadAll = useAppStore((s) => s.loadAll);
   const appUpdate = useAppStore((s) => s.appUpdate);
   const checkAppUpdate = useAppStore((s) => s.checkAppUpdate);
+  // 依赖体检（诊断区 Row）：store 共享，启动时已静默探测一次；一键安装完成后就地刷新
+  const depCheck = useAppStore((s) => s.depCheck);
+  const refreshDepCheck = useAppStore((s) => s.refreshDepCheck);
+  const depInstall = useDepInstall((_tool, res) => {
+    // xcode 渠道只是触发系统弹窗（versionAfter 恒 null），装没装完都靠「重新检测」收口
+    if (res.ok && res.method !== "xcode") void refreshDepCheck();
+  });
+  // 外部「跳设置页并选中分区」的一次性请求（收件箱 dep: 条目发起）
+  const settingsSectionReq = useAppStore((s) => s.settingsSectionReq);
+  const setSettingsSectionReq = useAppStore((s) => s.setSettingsSectionReq);
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -617,11 +700,30 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  // 「诊断」分区展开（且页面可见）时拉取日志
+  // 「诊断」分区展开（且页面可见）时拉取日志；依赖体检尚无结果时顺带探测一次
   useEffect(() => {
-    if (visible && !collapsed.diag) loadLogs();
+    if (visible && !collapsed.diag) {
+      loadLogs();
+      if (!useAppStore.getState().depCheck) void refreshDepCheck();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, collapsed.diag]);
+
+  // 收件箱 dep: 条目等外部请求：选中目标分区并强制展开（消费后清空请求）
+  useEffect(() => {
+    if (!visible || !settingsSectionReq) return;
+    const target = settingsSectionReq;
+    setSettingsSectionReq(null);
+    setActiveSection(target);
+    setCollapsed((prev) => {
+      if (!prev[target]) return prev;
+      const next = { ...prev, [target]: false };
+      try {
+        localStorage.setItem(SECTIONS_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, [visible, settingsSectionReq, setSettingsSectionReq]);
 
   async function clearLogs() {
     setError(null);
@@ -1588,6 +1690,53 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             className={rowActionClass}
           >
             {configDumpExporting ? "正在生成…" : "导出生效配置快照"}
+          </button>
+        </Row>
+        <Row
+          label="依赖体检"
+          hint="Git / Node.js / 安装渠道"
+          extra={
+            depCheck ? (
+              <div className="rounded-sm bg-inset p-2">
+                <DepStatusLine
+                  label="Git"
+                  item={depCheck.git}
+                  tool="git"
+                  channel={depCheck.channel}
+                  entry={depInstall.entries.git}
+                  onInstall={(t) => void depInstall.install(t)}
+                />
+                <DepStatusLine
+                  label="Node.js"
+                  item={depCheck.node}
+                  tool="node"
+                  channel={depCheck.channel}
+                  entry={depInstall.entries.node}
+                  onInstall={(t) => void depInstall.install(t)}
+                />
+                <div className="flex items-center gap-2 py-1 text-xs text-l4">
+                  <span className="text-l2">安装渠道</span>
+                  {depCheck.channel === "brew" && "Homebrew（可一键安装）"}
+                  {depCheck.channel === "winget" && "winget（可一键安装）"}
+                  {depCheck.channel === "xcode" &&
+                    "无 Homebrew（Git 可走系统安装窗口）"}
+                  {depCheck.channel === "none" &&
+                    "无自动安装渠道（按指引手动安装）"}
+                  <span className="ml-auto shrink-0">
+                    上次检测 {depCheck.checkedAt}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-l4">尚未检测</p>
+            )
+          }
+        >
+          <button
+            onClick={() => void refreshDepCheck()}
+            className={rowActionClass}
+          >
+            重新检测
           </button>
         </Row>
         <div className="py-3">

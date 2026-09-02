@@ -34,7 +34,7 @@ quarto check
 quarto render manuscript/<稿件>.md --to pdf      # 或 .qmd / docx / html
 ```
 
-- 渲染产物统一归入产物目录（如 `output/`），通过 `_quarto.yml` 的 `output-dir` 或命令行 `--output-dir` 指定；产物目录必须在 `.gitignore` 中，**产物不进 git**。
+- 渲染产物统一写入 **项目根 `output/`**（见 TASK.md「项目根」，不要写当前工作区），通过 `_quarto.yml` 的 `output-dir` 或命令行 `--output-dir` 指定；该目录必须在 `.gitignore` 中，**产物不进 git**。
 - 缺产物目录约定时，先在工作区根建立 `output/` 并补 `.gitignore`，再渲染。
 - 源稿、`_quarto.yml`、`references.bib` 等源文件照常随 git 管理。
 

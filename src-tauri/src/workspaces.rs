@@ -1244,6 +1244,13 @@ fn merge_impl_with_guard(
             ));
         }
     };
+    let salvage = copy_untracked_deliverables(Path::new(&w.worktree_path), &repo);
+    if !salvage.is_empty() {
+        if !log.is_empty() {
+            log.push('\n');
+        }
+        log.push_str(&salvage);
+    }
     let merged_at = crate::sessions::now_iso();
     if let Err(e) = conn.execute(
         "UPDATE workspaces SET merged_at=?1 WHERE id=?2",
@@ -2055,11 +2062,131 @@ pub struct ImportDeliverableDto {
     pub dest_path: String,
     /// 相对落点根（项目根或工作树根），正斜杠
     pub dest_rel: String,
-    /// 落点根（工作树根优先，无活跃工作区 = 项目根）
+    /// 落点根（文献 PDF 与 papers/ 强制项目根；其余工作树优先，无活跃工作区 = 项目根）
     pub dest_root: String,
     /// 提货单登记是否成功（文件已复制；失败原因在 register_error）
     pub registered: bool,
     pub register_error: Option<String>,
+}
+
+/// 文献 PDF 与 papers/ 下落点：强制项目根。这些文件不进 git，写在工作区会在合并后丢失。
+fn project_root_deliverable_target(target: &str, source: &Path) -> bool {
+    let t = target
+        .replace('\\', "/")
+        .trim()
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    if t == "papers" || t.starts_with("papers/") || t.ends_with(".pdf") {
+        return true;
+    }
+    source
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
+const DELIVERABLE_COPY_CAP: usize = 2000;
+
+/// 合并后把工作区里未进 git 的 papers/、产物目录、output/ 拷到主仓同相对路径。
+/// 已存在不覆盖；失败不阻断合并。返回空串表示无事可做。
+fn copy_untracked_deliverables(worktree: &Path, repo: &Path) -> String {
+    if crate::paths::same_path(
+        &worktree.to_string_lossy(),
+        &repo.to_string_lossy(),
+    ) {
+        return String::new();
+    }
+    if !worktree.is_dir() || !repo.is_dir() {
+        return String::new();
+    }
+    let artifact_dir = {
+        let raw = crate::projects::read_config_at(repo).config.artifact_dir;
+        let trimmed = raw.trim().trim_matches(['/', '\\']).replace('\\', "/");
+        if trimmed.is_empty() || trimmed.contains("..") {
+            "artifacts".to_string()
+        } else {
+            trimmed
+        }
+    };
+    let prefixes = [
+        "papers".to_string(),
+        artifact_dir,
+        "output".to_string(),
+    ];
+    let mut copied = 0usize;
+    let mut skipped = 0usize;
+    let mut walked = 0usize;
+    for prefix in &prefixes {
+        let src_root = worktree.join(prefix);
+        if !src_root.is_dir() {
+            continue;
+        }
+        let mut stack = vec![src_root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for ent in entries.flatten() {
+                walked += 1;
+                if walked > DELIVERABLE_COPY_CAP {
+                    break;
+                }
+                let name = ent.file_name();
+                if name.to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let path = ent.path();
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+                if meta.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !meta.is_file() {
+                    continue;
+                }
+                let Ok(rel) = path.strip_prefix(worktree) else {
+                    continue;
+                };
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                if rel_str.is_empty() || rel_str.contains("..") {
+                    continue;
+                }
+                let dest = repo.join(rel);
+                if !crate::paths::path_within(
+                    &dest.to_string_lossy(),
+                    &repo.to_string_lossy(),
+                ) {
+                    continue;
+                }
+                if dest.exists() {
+                    skipped += 1;
+                    continue;
+                }
+                if ensure_copy_dest_safe(repo, &rel_str).is_err() {
+                    skipped += 1;
+                    continue;
+                }
+                match fs::copy(&path, &dest) {
+                    Ok(_) => copied += 1,
+                    Err(_) => skipped += 1,
+                }
+            }
+        }
+    }
+    if copied == 0 && skipped == 0 {
+        return String::new();
+    }
+    let skip_note = if skipped > 0 {
+        format!("，跳过 {skipped} 个已存在或无法拷贝")
+    } else {
+        String::new()
+    };
+    format!("已把工作区未进 git 的文献/数据/渲染成品拷到主文件夹（{copied} 个文件{skip_note}）")
 }
 
 /// target → 目标目录与文件名策略：目录/通配 = 目录取静态前缀、文件名用源文件 basename；
@@ -2137,15 +2264,17 @@ pub async fn import_human_deliverable(
         if !source.is_file() {
             return Err("源路径不是文件".into());
         }
-        // 落点根：人工事项语境（带步骤）= 步骤绑定的活跃工作区优先（agent 在工作树里干活），
-        // 否则项目根；纯导入（无步骤，资源面板入口）一律落项目根
+        // 落点根：文献 PDF / papers/ 强制项目根（不进 git，写工作区合并后会丢）；
+        // 其余人工事项语境 = 活跃工作区优先；纯导入一律项目根
         let conn = db().ok();
         let dest_root = match step_cfg {
-            Some(sc) => human_detection_roots(conn.as_ref(), &root, &sc.workspace_name)
-                .into_iter()
-                .last()
-                .unwrap_or_else(|| root.clone()),
-            None => root.clone(),
+            Some(sc) if !project_root_deliverable_target(&target, &source) => {
+                human_detection_roots(conn.as_ref(), &root, &sc.workspace_name)
+                    .into_iter()
+                    .last()
+                    .unwrap_or_else(|| root.clone())
+            }
+            _ => root.clone(),
         };
         let dest = dest_for_target(&dest_root, &target, &source)?;
         if dest.exists() {
@@ -5346,5 +5475,73 @@ mod tests {
             "显式取消要留痕，不能删行",
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn project_root_deliverable_target_covers_papers_and_pdf() {
+        let pdf = Path::new("/tmp/foo.pdf");
+        let csv = Path::new("/tmp/foo.csv");
+        assert!(project_root_deliverable_target("papers/*.pdf", pdf));
+        assert!(project_root_deliverable_target("papers/", csv));
+        assert!(project_root_deliverable_target("papers/imports/", csv));
+        assert!(project_root_deliverable_target("manuscript/x.pdf", csv));
+        assert!(project_root_deliverable_target("figures/plot.png", pdf));
+        assert!(!project_root_deliverable_target("cleaning/rules.md", csv));
+        assert!(!project_root_deliverable_target("", csv));
+    }
+
+    #[test]
+    fn copy_untracked_deliverables_skips_existing_and_stays_in_tree() {
+        let dir = std::env::temp_dir().join(format!("ccode-salvage-{}", uuid::Uuid::new_v4()));
+        let wt = dir.join("wt");
+        let repo = dir.join("repo");
+        fs::create_dir_all(wt.join("papers")).unwrap();
+        fs::create_dir_all(repo.join("papers")).unwrap();
+        fs::create_dir_all(wt.join("output")).unwrap();
+        fs::write(wt.join("papers/a.pdf"), b"new-a").unwrap();
+        fs::write(repo.join("papers/a.pdf"), b"old-a").unwrap();
+        fs::write(wt.join("papers/b.pdf"), b"new-b").unwrap();
+        fs::write(wt.join("output/main.pdf"), b"pdf").unwrap();
+        fs::write(wt.join("secret.txt"), b"nope").unwrap();
+        let note = copy_untracked_deliverables(&wt, &repo);
+        assert!(note.contains("2 个文件"), "{note}");
+        assert_eq!(fs::read(repo.join("papers/a.pdf")).unwrap(), b"old-a");
+        assert_eq!(fs::read(repo.join("papers/b.pdf")).unwrap(), b"new-b");
+        assert_eq!(fs::read(repo.join("output/main.pdf")).unwrap(), b"pdf");
+        assert!(!repo.join("secret.txt").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn merge_copies_worktree_pdf_into_main() {
+        let Some(fx) = Fixture::new() else { return };
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "env"],
+        );
+        let w = create_impl(
+            &fx.conn,
+            &fx.ws_root,
+            fx.repo.to_str().unwrap(),
+            "pdf-salvage",
+        )
+        .unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("feature.txt"), "done\n").unwrap();
+        commit_all_in_worktree(&wt, "任务完成");
+        fs::create_dir_all(wt.join("papers")).unwrap();
+        fs::write(wt.join("papers/paper.pdf"), b"%PDF-fake").unwrap();
+        let out = merge_impl(&fx.conn, &w.id, false).unwrap();
+        assert!(out.merged);
+        assert!(
+            out.output.contains("拷到主文件夹"),
+            "{}",
+            out.output
+        );
+        assert_eq!(
+            fs::read(fx.repo.join("papers/paper.pdf")).unwrap(),
+            b"%PDF-fake"
+        );
     }
 }

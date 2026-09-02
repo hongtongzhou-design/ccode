@@ -870,6 +870,24 @@ export default function ProjectGroup({
   /** 「◔ 定时任务」面板锚点：文献雷达卡片「◔ 定时」开抽屉后滚到这里 */
   const schedulePanelRef = useRef<HTMLDivElement>(null);
   const litWatchRef = useRef<HTMLDivElement>(null);
+  const stepperScrollerRef = useRef<HTMLDivElement>(null);
+  const [stepperOverflows, setStepperOverflows] = useState(false);
+  useEffect(() => {
+    const el = stepperScrollerRef.current;
+    if (!el) {
+      setStepperOverflows(false);
+      return;
+    }
+    const update = () => {
+      setStepperOverflows(el.scrollWidth - el.clientWidth > 1);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    const inner = el.firstElementChild;
+    if (inner) ro.observe(inner);
+    return () => ro.disconnect();
+  }, [cfg?.steps.length, registered]);
   const [discoverLoading, setDiscoverLoading] = useState(false);
   // Zotero 进料口（只读适配器；不做文献库，见 zotero.rs 头注）：探测 → 选分类 → 导入
   const [zoteroBusy, setZoteroBusy] = useState(false);
@@ -1699,7 +1717,10 @@ export default function ProjectGroup({
               窗口过窄放不下全部步骤时保持整体横向滚动（不换行，虚线与各列大圆同轴） */}
           {/* 横向滚动容器必须显式 overflow-y-clip：overflow-x:auto 会把 y 轴也算成 auto，
               圆的 28px 热区/tooltip 溢出纵向就会冒出滚动条，宽度变化又触发链重算（左右晃动） */}
-          <div className="overflow-x-auto overflow-y-clip pb-1">
+          <div
+            ref={stepperScrollerRef}
+            className="overflow-x-auto overflow-y-clip pb-1"
+          >
             <div
               className="min-w-full"
               style={{
@@ -1848,7 +1869,7 @@ export default function ProjectGroup({
               </div>
             </div>
           </div>
-          {cfg.steps.length > 5 && (
+          {stepperOverflows && (
             <p className="mt-1 text-center text-micro text-l4">
               步骤较多，可左右滚动查看后续步骤 →
             </p>

@@ -203,6 +203,55 @@ export function bytesToBase64(bytes: Uint8Array): string {
 
 export type MdHrefKind = "anchor" | "external" | "other" | "local";
 
+function matchHtmlAttr(attrs: string, name: string): string | null {
+  const re = new RegExp(
+    `\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+    "i",
+  );
+  const m = re.exec(` ${attrs}`);
+  if (!m) return null;
+  return m[1] ?? m[2] ?? m[3] ?? null;
+}
+
+function escapeHtmlAttr(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+/**
+ * 把 md HTML 里需要后处理的 &lt;img&gt; 换成带 data-md-src 的占位 span。
+ * 不能留「无 src 的 img」：WKWebView 会立刻画裂图问号；相对路径/绝对本地路径
+ * 若仍写在 src 上，又会被当成 localhost 地址 404。data:/blob: 原样保留。
+ */
+export function rewriteMdImageHtml(html: string): string {
+  return html.replace(/<img\b([^>]*?)\/?\s*>/gi, (_full, attrs: string) => {
+    const src = matchHtmlAttr(attrs, "src");
+    if (!src || /^(data:|blob:)/i.test(src)) return _full;
+    const alt = matchHtmlAttr(attrs, "alt") ?? "";
+    return `<span class="md-img-pending" data-md-src="${escapeHtmlAttr(src)}" data-md-alt="${escapeHtmlAttr(alt)}">图片加载中…</span>`;
+  });
+}
+
+/** file:///Users/x.png 或 file:///C:/x.png → 本地路径；不是 file: 返回 null */
+export function fileUrlToPath(src: string): string | null {
+  const t = src.trim();
+  if (!/^file:/i.test(t)) return null;
+  try {
+    let p = decodeURIComponent(t.replace(/^file:\/\/(localhost)?/i, ""));
+    if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1);
+    return p || null;
+  } catch {
+    return null;
+  }
+}
+
+/** md 图片 src → 本地绝对路径；http(s) 返回 null（由调用方决定是否直链显示） */
+export function mdImageAbsPath(src: string, fromFile: string): string | null {
+  const fromFileUrl = fileUrlToPath(src);
+  if (fromFileUrl) return fromFileUrl;
+  if (classifyMdHref(src) !== "local") return null;
+  return resolveMdPath(fromFile, src);
+}
+
 /** md 链接分类：# 锚点 / http(s) 与协议相对 // 外链 / mailto: 等其它协议 / 本地路径（相对与绝对） */
 export function classifyMdHref(href: string): MdHrefKind {
   const t = href.trim();

@@ -57,12 +57,30 @@ const EXT_ICONS: Record<string, FileTypeIcon> = {
   svg: { label: "▨", color: "#a074c4" },
   pdf: { label: "PDF", color: "#e5534b" },
   docx: { label: "W", color: "#2b6cb0" },
+  doc: { label: "W", color: "#2b6cb0" },
+  xlsx: { label: "X", color: "#217346" },
+  xlsm: { label: "X", color: "#217346" },
+  xls: { label: "X", color: "#217346" },
+  ods: { label: "X", color: "#217346" },
 };
 
-/** 按路径取文件类型图标；无扩展名或未收录类型返回 null */
-export function fileTypeIcon(path: string): FileTypeIcon | null {
+function extOf(path: string): string | null {
   const name = path.split(/[\\/]/).pop() ?? path;
   const dot = name.lastIndexOf(".");
   if (dot <= 0 || dot === name.length - 1) return null;
-  return EXT_ICONS[name.slice(dot + 1).toLowerCase()] ?? null;
+  return name.slice(dot + 1).toLowerCase();
+}
+
+/** 按路径取文件类型图标；无扩展名或未收录类型返回 null */
+export function fileTypeIcon(path: string): FileTypeIcon | null {
+  const ext = extOf(path);
+  return ext ? (EXT_ICONS[ext] ?? null) : null;
+}
+
+/** 文件树/预览可内嵌显示的图片（与 read_image_bytes 白名单一致） */
+const PREVIEW_IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg"]);
+
+export function isPreviewableImagePath(path: string): boolean {
+  const ext = extOf(path);
+  return ext !== null && PREVIEW_IMAGE_EXTS.has(ext);
 }

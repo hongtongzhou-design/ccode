@@ -307,7 +307,7 @@ fn build_handoff_brief_impl(
     target_path: Option<&str>,
 ) -> Result<HandoffBriefDto, String> {
     // 有界尾窗（现有分页接口末页）：长会话只读尾部窗口，消息已过脱敏
-    let page = sessions::conversation_page_impl(agent, file_path, None)?;
+    let page = sessions::conversation_page_impl(agent, file_path, None, None)?;
     let git = crate::git_info::git_status_sync(cwd).ok();
     let brief = render_handoff_brief(agent, session_id, cwd, title, &page.messages, git.as_ref());
     let text = redact_and_cap(&brief);

@@ -62,6 +62,11 @@ function pathWithin(path: string, base: string): boolean {
   return normalizedPath === normalizedBase || normalizedPath.startsWith(`${normalizedBase}/`);
 }
 
+/** 搜索结果是否落在隐藏目录/文件上（`.ccode` 本来就显示，不算） */
+function relNeedsHidden(rel: string): boolean {
+  return rel.split(/[\\/]/).some((seg) => seg.startsWith(".") && seg !== "." && seg !== ".." && seg !== ".ccode");
+}
+
 /** FileTreeNode 的下传上下文：父组件需保证这些回调/引用稳定，memo 才有效 */
 interface TreeNodeCtx {
   root: string;
@@ -120,7 +125,24 @@ const FileTreeNode = memo(function FileTreeNode({
         style={{ paddingLeft: 6 + depth * 12 }}
       >
         <span className="inline-flex w-5 shrink-0 justify-center">
-          {entry.isDir ? <FoldMark open={isOpen} /> : null}
+          {entry.isDir ? (
+            <button
+              type="button"
+              aria-label={isOpen ? `收起 ${entry.name}` : `展开 ${entry.name}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (e.detail > 1) return;
+                toggle(entry.path);
+              }}
+              onDoubleClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              className="inline-flex h-5 w-5 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1"
+            >
+              <FoldMark open={isOpen} />
+            </button>
+          ) : null}
         </span>
         {entry.isDir ? (
           isOpen ? (
@@ -205,10 +227,13 @@ function FileTree({
   onRootChange,
   onRootNavigated,
   onRecoverDirectory,
+  onShowHidden,
   belowRecent,
 }: {
   cwd: string;
   showHidden: boolean;
+  /** 定位到隐藏路径时自动打开「显示隐藏文件」 */
+  onShowHidden?: (show: boolean) => void;
   refreshKey: number;
   onOpenFile: (path: string, name: string, root: string) => void;
   onOpenTerminal: (path: string) => void;
@@ -383,13 +408,18 @@ function FileTree({
     };
   }, [root, load, loadGitMap, onFsEvent]);
 
-  // 重定根 / 显隐切换：清空缓存与展开状态
+  // 重定根：清空缓存与展开状态
   useEffect(() => {
     setCache({});
     setExpanded(new Set());
     setError(null);
     setErrorPath(null);
-  }, [root, showHidden]);
+  }, [root]);
+
+  // 显隐切换只清缓存：已展开的目录保持打开并按新口径重载
+  useEffect(() => {
+    setCache({});
+  }, [showHidden]);
 
   // 手动刷新：只清缓存，展开状态保留（展开的节点会自动重载）
   useEffect(() => {
@@ -441,6 +471,7 @@ function FileTree({
 
   /** 搜索结果定位：跳到所在目录并高亮（不打开预览） */
   async function locate(r: SearchResultDto) {
+    if (relNeedsHidden(r.rel) && !showHidden) onShowHidden?.(true);
     const target = r.isDir ? r.path : parentDir(r.path);
     if (target) {
       if (!(await nav(target))) return;
@@ -462,12 +493,12 @@ function FileTree({
       return;
     }
     const t = setTimeout(() => {
-      invoke<SearchResultDto[]>("search_files", { root, query: q })
+      invoke<SearchResultDto[]>("search_files", { root, query: q, showHidden })
         .then(setResults)
         .catch(() => setResults([]));
     }, 300);
     return () => clearTimeout(t);
-  }, [query, root]);
+  }, [query, root, showHidden]);
   // 树节点上下文：useMemo 保持身份稳定，搜索输入等无关状态变化时令 memo 节点跳过重渲染
   const nodeCtx = useMemo<TreeNodeCtx>(
     () => ({
@@ -500,7 +531,7 @@ function FileTree({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === "Escape" && setQuery("")}
-            placeholder={`搜索 ${basenameOf(root)}…`}
+            placeholder="搜索文件名或后缀（pdf / .docx）"
             className="min-w-0 flex-1 rounded-md bg-inset px-2 py-1 text-xs text-l2 outline-none transition-colors placeholder:text-l4 focus:bg-raised"
           />
           {(recent.length > 0 || (!recentReposLoaded && recentReposLoading)) && (

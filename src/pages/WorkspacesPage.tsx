@@ -38,6 +38,7 @@ import {
   secondaryActionClass,
 } from "../components/PageFrame";
 import { attributeToProject, buildRunOverview } from "../run-overview";
+import { depInboxItem } from "../dep-check";
 import {
   litInboxCandidates,
   litInboxForRegisteredProjects,
@@ -945,6 +946,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   // profile 三层验证失败镜像（ProfilesPage 写入），收件箱只读；已删除的 profile 惰性剔除
   const profileIssues = useAppStore((s) => s.profileIssues);
   const profiles = useAppStore((s) => s.profiles);
+  // 依赖体检镜像（store，启动时探测一次）：git 非 ok → 收件箱常驻「依赖」条目
+  const depCheck = useAppStore((s) => s.depCheck);
   // 收件箱「去核验」一次性请求：选中该工作区所属项目并展开其任务行的产物清单
   const artifactCheckReq = useAppStore((s) => s.artifactCheckReq);
   const setArtifactCheckReq = useAppStore((s) => s.setArtifactCheckReq);
@@ -1020,7 +1023,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       setWorkspaces(list);
       // 项目注册表：失败不阻断工作区列表，分组退化为仅按 repo 归组
       invoke<ProjectDto[]>("list_projects")
-        .then(setProjects)
+        .then((list) => {
+          setProjects(list);
+          useAppStore.getState().setProjectPaths(list.map((p) => p.path));
+        })
         .catch(() => {});
       setRefreshToken((t) => t + 1);
       const driftFailures: Record<string, boolean> = {};
@@ -1358,6 +1364,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     `${agentId ? `${AGENTS.find((a) => a.id === agentId)?.label ?? agentId} · ` : ""}${title}（${cwdLabel}）`;
   // 收件箱条目为可序列化数据（action 描述而非闭包）：镜像进 store 供 App 标题栏收件箱共用，
   // 点击统一走 store.ts 的 runInboxAction 派发
+  const depItem = depInboxItem(depCheck);
   const inboxItems: InboxItem[] = [
     ...active
       .filter((w) => health[w.id]?.conflict)
@@ -1477,6 +1484,19 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         actionLabel: "去修复",
         action: { type: "profiles" as const },
       })),
+    // 缺 git 的常驻提醒（node 缺失不进收件箱——它只是 npm 渠道依赖，装 CLI 时才提示）：
+    // 装好后 depCheck 刷新为 ok，条目自动消失；dismiss 走现成签名机制
+    ...(depItem
+      ? [
+          {
+            key: depItem.key,
+            dot: "bg-warn-text",
+            text: depItem.text,
+            actionLabel: "去处理",
+            action: { type: "settings" as const, section: "diag" },
+          },
+        ]
+      : []),
   ];
 
   // 项目导航行的「待处理」分布（收件箱同款口径按项目摊开）：终端待确认 +
@@ -1756,7 +1776,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     try {
       const project = await invoke<ProjectDto>("create_demo_project");
       // 先落项目列表再选中分组：分组表由 projects 派生，反了会被空表 effect 重置
-      setProjects(await invoke<ProjectDto[]>("list_projects"));
+      const list = await invoke<ProjectDto[]>("list_projects");
+      setProjects(list);
+      useAppStore.getState().setProjectPaths(list.map((p) => p.path));
       setSelectedGroupKey(`p:${project.path}`);
       await refresh();
     } catch (e) {

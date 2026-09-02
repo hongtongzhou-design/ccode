@@ -31,14 +31,23 @@ import "@xterm/xterm/css/xterm.css";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import {
+  dropHitsRect,
   escapeShellPath,
   firstImageItem,
   imageExtFromMime,
   joinDroppedPaths,
+  KIMI_CSI_U_CTRL_V,
+  KIMI_CSI_U_ENTER,
   pasteImageFeedback,
   shouldReportTerminalColors,
   xtermOscColorReport,
 } from "../terminal-input";
+import {
+  confirmHandoffEvent,
+  hasAssistantText,
+  mergeConversationPages,
+  shouldAutoPeek,
+} from "../chat-handoff";
 import { AGENTS } from "../types";
 import ChatSurface from "../components/ChatSurface";
 import { confirmDialog, alertDialog } from "../components/ConfirmDialog";
@@ -57,6 +66,7 @@ import { formatPdfExcerptPrompt, readerReuseKey } from "../reader";
 import { defaultCommitMessage } from "../git-commit-message";
 import { pickResumeProfile } from "../resume-profile";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
+import { isPreviewableImagePath } from "../file-icons";
 import { XTERM_PALETTES, resolvePaletteId } from "../terminal-palettes";
 import { isLightTheme } from "../themes";
 import {
@@ -114,8 +124,17 @@ const FilePreviewEditor = lazy(() => import("../components/FilePreviewEditor"));
 const PdfPreview = lazy(() => import("../components/PdfPreview"));
 // mammoth 拆懒加载 chunk，首次打开 docx 预览时才加载
 const DocxPreview = lazy(() => import("../components/DocxPreview"));
+const XlsxPreview = lazy(() => import("../components/XlsxPreview"));
+const ImagePreview = lazy(() => import("../components/ImagePreview"));
 
 type PtyKind = "agent" | "shell";
+
+/** 主工作区默认面层：新标签未显式切层时落终端（聊天层交互尚未完善），
+    分叉聊天等明确聊天意图的入口仍显式置 "chat"，不受默认值影响 */
+const DEFAULT_SURFACE_MODE: SurfaceMode = "terminal";
+/** 聊天层窥视终端：底栏占主区高度的比例。必须是真实分栏（终端按此高度 fit），
+    不能只裁全高 xterm 的底部——Codex 主对话是 inline，内容靠上、底下是空行，裁底就是白板。 */
+const CHAT_PEEK_RATIO = 0.32;
 
 function basename(p: string): string {
   const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
@@ -173,6 +192,10 @@ export interface FocusTabActions {
   restartWritable: () => Promise<ChatSendResult>;
   /** 往当前 PTY 直接写字节（聊天层审批按键 y/n/Esc、打断 \x03 用；无存活 PTY 时静默丢弃） */
   writePty: (data: string) => void;
+  /** 往 PTY 写一条 TUI 命令并提交（模型/思考档直切；picker 由调用方再窥视终端） */
+  writeCommand: (cmd: string) => void;
+  /** 聊天层向前翻页（会话文件 cursor；压缩会话可能没有更早一页） */
+  loadOlderConversation: () => Promise<void>;
 }
 
 /** TerminalView 上报的当前会话联动数据（主工作区聊天层与阅读区 Agent 栏渲染用） */
@@ -185,6 +208,9 @@ export interface SessionLinkState {
   /** 会话文件同步通道：识别中 / 已监听 / 等待文件 / 签名轮询兜底。 */
   sync: SessionSyncState;
   conv: ChatMessageDto[];
+  /** 下一页上界；null = 没有更早的一窗（短会话或压缩包） */
+  convCursor: number | null;
+  loadingOlder: boolean;
   /** 已发送用户消息，等待会话文件中出现对应 Agent 回复。 */
   pendingReply: boolean;
   /** hooks 精确注意力为 confirm 时的「在等什么」摘要（无 hooks/无详情字段为 null） */
@@ -299,6 +325,7 @@ const TerminalView = memo(function TerminalView({
   onStatus,
   onSessionUpdate,
   focusMode,
+  embedInPeek = false,
   onActions,
   onRestoreComplete,
   onConsumeResume,
@@ -354,6 +381,8 @@ const TerminalView = memo(function TerminalView({
   onSessionUpdate: (id: string, s: SessionLinkState) => void;
   /** 专注终端：隐藏标签内状态条（动作移到标签条 ⋯ 菜单） */
   focusMode?: boolean;
+  /** 聊天窥视底栏：只留 xterm，收起启动栏，让这一栏高度都给 TUI */
+  embedInPeek?: boolean;
   /** 向父级注册本标签的动作表（标签条 ⋯ 菜单调用） */
   onActions?: (id: string, a: FocusTabActions) => void;
   onRestoreComplete?: (id: string) => void;
@@ -457,7 +486,7 @@ const TerminalView = memo(function TerminalView({
     ].filter(Boolean);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, selectedProfile, model]);
-  const [cwd, setCwd] = useState(initialCwd ?? saved.cwd ?? "~");
+  const [cwd, setCwd] = useState(initialCwd ?? "~");
   const [cwdIssue, setCwdIssue] = useState<string | null>(null);
   const [cwdChecking, setCwdChecking] = useState(false);
   const cwdCheckSeqRef = useRef(0);
@@ -671,6 +700,11 @@ const TerminalView = memo(function TerminalView({
   const [linkState, setLinkState] = useState<SessionLinkState["state"]>("idle");
   const [syncState, setSyncState] = useState<SessionLinkState["sync"]>("waiting");
   const [conv, setConv] = useState<ChatMessageDto[]>([]);
+  const olderRef = useRef<ChatMessageDto[]>([]);
+  const latestWindowRef = useRef<ChatMessageDto[]>([]);
+  const convCursorRef = useRef<number | null>(null);
+  const [convCursor, setConvCursor] = useState<number | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [pendingReply, setPendingReplyState] = useState(false);
   const pendingReplyRef = useRef(false);
   // 本地即时/排队消息：已发送但会话文件尚未记下的用户消息队列（连发多条都保留）
@@ -1050,6 +1084,8 @@ const TerminalView = memo(function TerminalView({
       state: linkState,
       sync: syncState,
       conv,
+      convCursor,
+      loadingOlder,
       pendingReply,
       confirmDetail,
       skills: agentSkills,
@@ -1063,6 +1099,8 @@ const TerminalView = memo(function TerminalView({
     syncState,
     agentId,
     conv,
+    convCursor,
+    loadingOlder,
     pendingReply,
     confirmDetail,
     agentSkills,
@@ -1152,7 +1190,9 @@ const TerminalView = memo(function TerminalView({
       ) {
         const id = ptyIdRef.current;
         if (id)
-          invoke("pty_write", { ptyId: id, data: "\x1b[13u" }).catch(() => {});
+          invoke("pty_write", { ptyId: id, data: KIMI_CSI_U_ENTER }).catch(
+            () => {},
+          );
         return false;
       }
       if (
@@ -1180,8 +1220,9 @@ const TerminalView = memo(function TerminalView({
         const id = ptyIdRef.current;
         if (id) {
           // kimi 开了 kitty 键盘协议后只认 CSI-u（v=118 + ctrl 修饰位 5），
-          // 与同函数上方 Enter → \x1b[13u 同一改写模式——待实机验证
-          const data = agentIdRef.current === "kimi" ? "\x1b[118;5u" : "\x16";
+          // 与同函数上方 Enter → CSI-u 同一改写模式
+          const data =
+            agentIdRef.current === "kimi" ? KIMI_CSI_U_CTRL_V : "\x16";
           invoke("pty_write", { ptyId: id, data }).catch(() => {});
         }
         return false;
@@ -1244,15 +1285,16 @@ const TerminalView = memo(function TerminalView({
       if (!rect || rect.width === 0) return; // display:none 的隐藏标签 rect 全 0
       const scale = window.devicePixelRatio || 1;
       const { x, y } = event.payload.position;
-      // Tauri 报物理像素 → CSS 像素换算；个别平台口径不一，两种都试（HumanTasksList 同款防御）
-      const hit = [
+      if (!dropHitsRect({ x, y }, rect, scale)) return;
+      // 聊天层盖住这块坐标时由 ChatSurface 接管（拖入进输入框，不写 PTY）
+      const overChat = [
         [x, y],
         [x / scale, y / scale],
-      ].some(
-        ([px, py]) =>
-          px >= rect.left && px <= rect.right && py >= rect.top && py <= rect.bottom,
-      );
-      if (!hit) return;
+      ].some(([px, py]) => {
+        const el = document.elementFromPoint(px, py);
+        return Boolean(el?.closest("[data-chat-drop]"));
+      });
+      if (overChat) return;
       const paths = event.payload.paths;
       const text = joinDroppedPaths(paths, IS_WINDOWS);
       if (!text) return;
@@ -1353,7 +1395,7 @@ const TerminalView = memo(function TerminalView({
         fitRef.current?.fit();
       } catch {}
     });
-  }, [visible, rightOpen, layoutKey, barExpanded]);
+  }, [visible, rightOpen, layoutKey, barExpanded, embedInPeek]);
 
   // 最近项目/⇄「真进入」：外部注入的 cwd 落地到启动栏；shell 存活时写 cd 让终端真正跟上
   //（否则树走了 shell 还在原地，真实 cwd 轮询会把路径拉回旧目录）
@@ -1637,11 +1679,12 @@ const TerminalView = memo(function TerminalView({
           agent: ctx.agentId,
           filePath: ctx.filePath,
           before: null,
+          around: null,
         },
       );
       if (linkCtxRef.current !== ctx || requestId !== conversationRequestRef.current)
         return;
-      const parsedMessages = page.messages.slice(-50);
+      const parsedMessages = page.messages;
       // 本地已发送但会话文件还没记下的用户消息（排队中的也算：连续发送多条时
       // 各 CLI 的 TUI 会缓冲输入逐条处理，文件落盘有先后）
       const pendingUsers = pendingReplyRef.current
@@ -1657,7 +1700,7 @@ const TerminalView = memo(function TerminalView({
               // TUI 输入框可能有残留草稿（先发一半、审批框吞键等），落盘文本会是
               // 「残留 + 本文」的拼接（实证：yyyyyy你是什么模型），精确匹配永远落空、
               // 「等待回复」挂到超时——放宽为包含匹配；重复发同一文本时旧记录会先命中，
-              // 清除仍受下方 hasNewAssistant（必须出现新回复）双闸门约束，不会提前结案
+              // 清除仍受下方 hasNewAssistantText（必须出现新回复正文）双闸门约束
               return (
                 block.text === sent ||
                 (sent.length > 0 && block.text.includes(sent))
@@ -1665,11 +1708,7 @@ const TerminalView = memo(function TerminalView({
             }),
         );
       const missing = pendingUsers.filter((pu) => !isRecorded(pu));
-      // 已落盘的从等待队列移除；还没落盘的保留，等后续轮询
       pendingUsersRef.current = missing;
-      // 会话文件可能先写入旧快照或只写入用户消息；在真实 Agent 回复出现前，
-      // 保留本地即时消息，避免聊天区闪回空白。若后端暂时只解析到回复，
-      // 把本地用户消息（按发送顺序）插到第一条回复之前，确保阅读顺序仍然正确。
       const mergedMessages =
         missing.length > 0
           ? (() => {
@@ -1679,14 +1718,19 @@ const TerminalView = memo(function TerminalView({
               return next;
             })()
           : parsedMessages;
-      setConv(mergedMessages.slice(-50));
-      const hasNewAssistant = parsedMessages.some(
+      latestWindowRef.current = mergedMessages;
+      if (olderRef.current.length === 0) {
+        convCursorRef.current = page.cursor;
+        setConvCursor(page.cursor);
+      }
+      setConv(mergeConversationPages(olderRef.current, mergedMessages));
+      const hasNewAssistantText = parsedMessages.some(
         (message) =>
           message.role !== "user" &&
+          hasAssistantText([message]) &&
           !pendingAssistantKeysRef.current.has(JSON.stringify(message.blocks)),
       );
-      if (pendingReplyRef.current && hasNewAssistant && missing.length === 0) {
-        // 全部排队消息都已落盘且等到了新回复，才结束「等待回复」
+      if (pendingReplyRef.current && hasNewAssistantText && missing.length === 0) {
         setPendingReply(false);
       }
       if (nextSig) convSigRef.current = nextSig;
@@ -1727,12 +1771,45 @@ const TerminalView = memo(function TerminalView({
     }
   }
 
+  async function loadOlderConversation() {
+    const ctx = linkCtxRef.current;
+    const cursor = convCursorRef.current;
+    if (!ctx?.filePath || cursor == null || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const page = await invoke<ConversationPageDto>(
+        "get_session_conversation_page",
+        {
+          agent: ctx.agentId,
+          filePath: ctx.filePath,
+          before: cursor,
+          around: null,
+        },
+      );
+      if (linkCtxRef.current !== ctx) return;
+      olderRef.current = mergeConversationPages(page.messages, olderRef.current);
+      convCursorRef.current = page.cursor;
+      setConvCursor(page.cursor);
+      setConv(
+        mergeConversationPages(olderRef.current, latestWindowRef.current),
+      );
+    } catch {
+      // 没有更早一窗或文件正在写，下次再试
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+
   /** 会话文件锁定：登记 liveSessions（会话页「进行中」+ 反向跳转） */
   function lockLink(filePath: string, sessionId: string, title: string | null) {
     const ctx = linkCtxRef.current;
     if (!ctx || ctx.filePath) return;
     ctx.filePath = filePath;
     ctx.sessionId = sessionId;
+    olderRef.current = [];
+    latestWindowRef.current = [];
+    convCursorRef.current = null;
+    setConvCursor(null);
     setSessionFile(filePath);
     setLinkedSessionId(sessionId);
     setLinkedSessionTitle(title);
@@ -1834,6 +1911,11 @@ const TerminalView = memo(function TerminalView({
     invoke("release_session_claim", { claimId: tabId }).catch(() => {});
     linkCtxRef.current = null;
     convSigRef.current = "";
+    olderRef.current = [];
+    latestWindowRef.current = [];
+    convCursorRef.current = null;
+    setConvCursor(null);
+    setLoadingOlder(false);
     setSessionFile(null);
     setLinkedSessionId(null);
     setLinkedSessionTitle(null);
@@ -2030,7 +2112,7 @@ const TerminalView = memo(function TerminalView({
       await invoke("pty_write_submit", {
         ptyId,
         text,
-        submit: submitCsiU ? "\x1b[13u" : "\r",
+        submit: submitCsiU ? KIMI_CSI_U_ENTER : "\r",
       });
       return { error: null };
     } catch (e) {
@@ -2143,6 +2225,8 @@ const TerminalView = memo(function TerminalView({
     sendMessage: async () => ({ error: "终端尚未准备好" }),
     restartWritable: async () => ({ error: "当前标签不是可写分叉" }),
     writePty: () => {},
+    writeCommand: () => {},
+    loadOlderConversation: async () => {},
   });
   actionsRef.current = {
     stop: () => void stop(),
@@ -2167,6 +2251,13 @@ const TerminalView = memo(function TerminalView({
       const id = ptyIdRef.current;
       if (id) invoke("pty_write", { ptyId: id, data }).catch(() => {});
     },
+    writeCommand: (cmd) => {
+      const id = ptyIdRef.current;
+      if (!id) return;
+      const enter = submitCsiU ? KIMI_CSI_U_ENTER : "\r";
+      invoke("pty_write", { ptyId: id, data: `${cmd}${enter}` }).catch(() => {});
+    },
+    loadOlderConversation: () => loadOlderConversation(),
   };
   useEffect(() => {
     onActions?.(tabId, {
@@ -2182,6 +2273,8 @@ const TerminalView = memo(function TerminalView({
       sendMessage: (text) => actionsRef.current.sendMessage(text),
       restartWritable: () => actionsRef.current.restartWritable(),
       writePty: (data) => actionsRef.current.writePty(data),
+      writeCommand: (cmd) => actionsRef.current.writeCommand(cmd),
+      loadOlderConversation: () => actionsRef.current.loadOlderConversation(),
     });
   }, [onActions, tabId]);
 
@@ -2228,6 +2321,7 @@ const TerminalView = memo(function TerminalView({
             return;
           try {
             await invoke("register_project", { path: dir, name });
+            void useAppStore.getState().loadProjects();
             useAppStore.getState().setSelectProjectReq(dir);
             useAppStore.getState().setPage("workspaces");
           } catch (e) {
@@ -2255,8 +2349,8 @@ const TerminalView = memo(function TerminalView({
   ];
 
   return (
-    <div className="flex h-full flex-col px-1 pt-2">
-      {barExpanded ? (
+    <div className={`flex h-full flex-col ${embedInPeek ? "" : "px-1 pt-2"}`}>
+      {embedInPeek ? null : barExpanded ? (
         <>
           <div className="mb-1 flex min-w-0 flex-wrap items-start gap-x-1.5 gap-y-2">
             {/* Agent/配置/模型收进同一条分段工具条（v3.92）：去掉三个独立框线；
@@ -3077,11 +3171,22 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         label: focusMode ? "✓ 退出专注终端" : "专注终端",
         onSelect: () => setFocusMode((v) => !v),
       },
+      ...(focusedSurfaceMode === "chat"
+        ? [
+            {
+              label: peekByTab[focusedId] ? "✓ 窥视终端" : "窥视终端（同一会话）",
+              onSelect: () =>
+                setPeek(focusedId, !peekByTab[focusedId], true),
+            },
+          ]
+        : []),
     ];
   }
   const [rightTab, setRightTab] = useState<RightTab>("preview");
   // 主工作区模式按标签隔离；切换只改变显示层，不改变标签/PTY/会话。
   const [surfaceModeByTab, setSurfaceModeByTab] = useState<Record<string, SurfaceMode>>({});
+  const [peekByTab, setPeekByTab] = useState<Record<string, boolean>>({});
+  const [peekLocked, setPeekLocked] = useState<Record<string, boolean>>({});
   const [writableForks, setWritableForks] = useState<Record<string, boolean>>({});
   const [chatBusy, setChatBusy] = useState(false);
   const [gitTotals, setGitTotals] = useState<GitSummary | null>(null);
@@ -3119,8 +3224,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     tabs.some((t) => t.id === splitTabId);
   const focusedId =
     splitActive && activePane === "right" && splitTabId ? splitTabId : activeId;
-  const activeCwd = statuses[focusedId]?.cwd ?? "~";
-  const focusedSurfaceMode = surfaceModeByTab[focusedId] ?? "chat";
+  const focusedTab = tabs.find((t) => t.id === focusedId);
+  const activeCwd =
+    statuses[focusedId]?.cwd ?? focusedTab?.initialCwd ?? "~";
+  const focusedSurfaceMode = surfaceModeByTab[focusedId] ?? DEFAULT_SURFACE_MODE;
   /** 左栏文件树当前根（钻取/切根后与 activeCwd 分叉）：改动面板跟随它而不是终端标签 cwd，
       未分叉时为 null 回落 activeCwd（v3.82 口径：「我在看哪个目录，改动就显示哪个」） */
   const [treeRoot, setTreeRoot] = useState<string | null>(null);
@@ -3169,6 +3276,58 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     }
     setSurfaceModeByTab((prev) => ({ ...prev, [focusedId]: mode }));
   }
+
+  function setPeek(tabId: string, open: boolean, userToggle = false) {
+    if (open && peekLocked[tabId] && !userToggle) return;
+    setPeekByTab((prev) =>
+      prev[tabId] === open ? prev : { ...prev, [tabId]: open },
+    );
+    if (userToggle) {
+      setPeekLocked((prev) =>
+        open
+          ? (() => {
+              const next = { ...prev };
+              delete next[tabId];
+              return next;
+            })()
+          : { ...prev, [tabId]: true },
+      );
+    }
+  }
+
+  useEffect(() => {
+    if ((surfaceModeByTab[focusedId] ?? DEFAULT_SURFACE_MODE) !== "chat") return;
+    if (statuses[focusedId]?.attention !== "confirm") return;
+    if (
+      !shouldAutoPeek(
+        confirmHandoffEvent(
+          statuses[focusedId]?.agentId,
+          Boolean(
+            useAppStore.getState().settings?.hooksAttention?.[
+              statuses[focusedId]?.agentId ?? ""
+            ],
+          ),
+        ),
+      )
+    ) {
+      return;
+    }
+    setPeek(focusedId, true);
+    // peekLocked / 用户手动收起由 setPeek 守
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statuses[focusedId]?.attention, focusedId, surfaceModeByTab[focusedId]]);
+
+  useEffect(() => {
+    const att = statuses[focusedId]?.attention;
+    const sync = sessionByTab[focusedId]?.sync;
+    if (att === "confirm" || sync === "waiting") return;
+    setPeekLocked((prev) => {
+      if (!prev[focusedId]) return prev;
+      const next = { ...prev };
+      delete next[focusedId];
+      return next;
+    });
+  }, [statuses[focusedId]?.attention, sessionByTab[focusedId]?.sync, focusedId]);
 
   /** 分屏分隔条拖拽（沿用右栏拖拽的记忆宽度模式；双击恢复对半） */
   const splitAreaRef = useRef<HTMLDivElement>(null);
@@ -3318,6 +3477,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         cur.sync === s.sync &&
         cur.conv === s.conv &&
         cur.pendingReply === s.pendingReply &&
+        cur.convCursor === s.convCursor &&
+        cur.loadingOlder === s.loadingOlder &&
         cur.confirmDetail === s.confirmDetail &&
         cur.skills === s.skills &&
         cur.mcps === s.mcps
@@ -3522,6 +3683,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     } finally {
       setChatBusy(false);
     }
+  }
+
+  function chatWriteCommand(cmd: string, opts?: { peek?: boolean }) {
+    tabActionsRef.current.get(focusedId)?.writeCommand(cmd);
+    if (opts?.peek) setPeek(focusedId, true);
   }
 
   /** 聊天层打断当前生成（等效终端里按 Ctrl+C） */
@@ -3829,8 +3995,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         stepName: pt.stepName,
       });
       // 纯 shell/脚本标签（登录、CLI 自更新、run 脚本）没有会话可供聊天层展示——
-      // 默认 chat 面会把终端盖住、停在「等待会话文件」，用户看不见登录命令的输出。
-      // 直接落终端面（同分叉不支持注入时落终端的口径，3684 行附近）
+      // 显式落终端面（当前默认面层已是终端，这里守住「未来默认值再变也不回到 chat」的口径；
+      // 同分叉不支持注入时落终端的处理，3688 行附近）
       if (tabId && (pt.shellOnly || pt.prefillCommand)) {
         setSurfaceModeByTab((prev) => ({ ...prev, [tabId]: "terminal" }));
       }
@@ -4358,7 +4524,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     let nextActiveId = activeId;
     if (next.length === 0) {
       // 至少保留一个标签
-      const fresh: Tab = { id: crypto.randomUUID(), skipSeed: true };
+      const fresh: Tab = {
+        id: crypto.randomUUID(),
+        skipSeed: true,
+      };
       nextActiveId = fresh.id;
       setTabs([fresh]);
       setActiveId(fresh.id);
@@ -4603,6 +4772,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             <FileTree
               cwd={activeCwd}
               showHidden={showHidden}
+              onShowHidden={setShowHidden}
               refreshKey={refreshKey}
               onOpenFile={openPreview}
               onOpenTerminal={openTerminalAt}
@@ -4869,7 +5039,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 visible={tabVisible}
                 primaryFocus={t.id === focusedId}
                 rightOpen={rightOpen}
-                layoutKey={`${focusMode}-${rightOpen}-${Math.round(rightWidth)}-${rightExpanded}-${splitActive ? `split${Math.round(splitPct)}` : "single"}`}
+                layoutKey={`${focusMode}-${rightOpen}-${Math.round(rightWidth)}-${rightExpanded}-${splitActive ? `split${Math.round(splitPct)}` : "single"}-${(surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) === "chat" && peekByTab[t.id] ? "peek" : "full"}`}
+                embedInPeek={
+                  (surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) === "chat" &&
+                  Boolean(peekByTab[t.id])
+                }
                 gitTotals={t.id === focusedId ? gitTotals : null}
                 tabId={t.id}
                 skipSeed={t.skipSeed}
@@ -4969,16 +5143,53 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   </div>
                 )}
                 <div key="pane-body" className="flex min-h-0 flex-1 flex-col">
-                  <div className="relative min-h-0 flex-1">
-                    {view}
-                    {/* 聊天层常驻挂载、切层仅隐藏（display:contents 包装不参与布局，
-                        ChatSurface 的 absolute 仍相对上层容器）：输入框草稿、滚动位置、
-                        展开状态在 chat⇄terminal 切换间不丢 */}
+                  {(() => {
+                    const chatOn =
+                      (surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) ===
+                      "chat";
+                    const peek = Boolean(peekByTab[t.id]);
+                    const agentKey =
+                      sessionByTab[t.id]?.agentId ??
+                      statuses[t.id]?.agentId ??
+                      t.initialAgentId;
+                    const det = agents.find((a) => a.id === agentKey);
+                    const prof = profiles.find(
+                      (p) =>
+                        p.id ===
+                        (statuses[t.id]?.profileId ?? t.initialProfileId),
+                    );
+                    return (
+                  <div
+                    className={
+                      chatOn && peek
+                        ? "relative flex min-h-0 flex-1 flex-col"
+                        : "relative min-h-0 flex-1"
+                    }
+                  >
+                    {/* 窥视 = 底栏真实分栏（终端按此高度 fit）。不能只裁全高 xterm 的
+                        底部：Codex 主对话是 inline，内容靠上、底下空行，裁底就是白板。
+                        切聊天/终端仍用绝对铺满，行列数不变。窥视开合会 SIGWINCH 一次。 */}
                     <div
                       className={
-                        (surfaceModeByTab[t.id] ?? "chat") === "chat"
-                          ? "contents"
-                          : "hidden"
+                        chatOn && peek
+                          ? "relative order-2 min-h-[7.5rem] shrink-0 overflow-hidden border-t border-hairline"
+                          : "absolute inset-0"
+                      }
+                      style={
+                        chatOn && peek
+                          ? { height: `${Math.round(CHAT_PEEK_RATIO * 100)}%` }
+                          : undefined
+                      }
+                    >
+                      {view}
+                    </div>
+                    <div
+                      className={
+                        !chatOn
+                          ? "hidden"
+                          : peek
+                            ? "relative order-1 min-h-0 min-w-0 flex-1"
+                            : "absolute inset-0 z-20"
                       }
                     >
                       <ChatSurface
@@ -5005,13 +5216,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                             sessionByTab[t.id]?.agentId,
                         )}
                         readOnly={Boolean(t.readonly && !writableForks[t.id])}
-                        readonlySupported={
-                          agents.find(
-                            (a) =>
-                              a.id ===
-                              (sessionByTab[t.id]?.agentId ?? statuses[t.id]?.agentId),
-                          )?.readonlySupported ?? false
-                        }
+                        readonlySupported={det?.readonlySupported ?? false}
                         busy={chatBusy}
                         skills={sessionByTab[t.id]?.skills ?? []}
                         mcps={sessionByTab[t.id]?.mcps ?? []}
@@ -5021,20 +5226,40 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                         onOpenTerminal={() => switchSurface("terminal")}
                         onOpenMcp={() => setPage("mcp")}
                         onOpenHistory={openActiveHistory}
-                        active={(surfaceModeByTab[t.id] ?? "chat") === "chat"}
-                        agentId={
-                          sessionByTab[t.id]?.agentId ??
-                          statuses[t.id]?.agentId ??
-                          null
-                        }
+                        active={chatOn}
+                        agentId={agentKey ?? null}
                         confirmDetail={
                           sessionByTab[t.id]?.confirmDetail ?? null
                         }
                         onInterrupt={chatInterrupt}
                         onApprovalKey={chatApprovalKey}
+                        peek={peek}
+                        onTogglePeek={() => setPeek(t.id, !peek, true)}
+                        onRequestPeek={() => setPeek(t.id, true)}
+                        modelSwitch={det?.modelSwitch ?? null}
+                        effort={det?.effort ?? null}
+                        profileModels={prof?.models ?? []}
+                        profileId={
+                          statuses[t.id]?.profileId ?? t.initialProfileId ?? null
+                        }
+                        launchModel={statuses[t.id]?.launchModel ?? t.initialModel ?? null}
+                        hooksEnabled={Boolean(
+                          appSettings?.hooksAttention?.[agentKey ?? ""],
+                        )}
+                        ptyAlive={Boolean(statuses[t.id]?.ptyId)}
+                        onWriteCommand={chatWriteCommand}
+                        hasOlder={sessionByTab[t.id]?.convCursor != null}
+                        loadingOlder={sessionByTab[t.id]?.loadingOlder ?? false}
+                        onLoadOlder={() =>
+                          void tabActionsRef.current
+                            .get(t.id)
+                            ?.loadOlderConversation()
+                        }
                       />
                     </div>
                   </div>
+                      );
+                    })()}
                   {/* 终端底部状态栏：在 pane 内部、贴 xterm 画面下缘，与终端同底同色
                       （视觉上是终端自己画的状态行）。常驻渲染——未启动也有 cwd/未启动态，
                       高度恒定不跳动；ResizeObserver 兜底尺寸变化后的 fit。
@@ -5047,7 +5272,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       data-statusbar-host：阅读区打开时随 xterm 宿主一并搬进覆盖层右栏槽位 */}
                   {(() => {
                     const chatBarHidden =
-                      (surfaceModeByTab[t.id] ?? "chat") !== "terminal" &&
+                      (surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) !== "terminal" &&
                       !(appSettings?.statusBarInChat ?? true);
                     return (
                   <div
@@ -5246,6 +5471,22 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     />
                   ) : /\.docx$/i.test(preview.path) ? (
                     <DocxPreview
+                      path={preview.path}
+                      cwdHint={preview.root ?? activeCwd}
+                    />
+                  ) : /\.(xlsx|xlsm|xls|ods)$/i.test(preview.path) ? (
+                    <XlsxPreview
+                      path={preview.path}
+                      cwdHint={preview.root ?? activeCwd}
+                    />
+                  ) : /\.doc$/i.test(preview.path) ? (
+                    <div className="p-3">
+                      <p className="text-sm text-l3">
+                        旧版 .doc 不能内嵌预览，请用 Word 另存为 .docx 后再打开。
+                      </p>
+                    </div>
+                  ) : isPreviewableImagePath(preview.path) ? (
+                    <ImagePreview
                       path={preview.path}
                       cwdHint={preview.root ?? activeCwd}
                     />

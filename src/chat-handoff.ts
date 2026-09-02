@@ -1,0 +1,204 @@
+//! 聊天层 ⇄ 终端层交接纯逻辑（tests/chat-handoff.test.ts）。
+//!
+//! 聊天是同一 PTY 的结构化显示层，不复制九家 TUI 菜单解析器。
+//! 能用已知字符串写进 PTY 的（直切 /model、/effort、y/n/Esc、Ctrl+C）留在聊天；
+//! 方向键选择器、登录、信任目录交给终端画面——默认「窥视」（露出同一 xterm 底部，
+//! 不改行列数），只有启动注入失败等必须粘贴进 TUI 输入框的才整层切走。
+
+import type { ChatMessageDto, SessionSyncState } from "./types.ts";
+
+/** 已接入 hooks 精确注意力的七家（cursor / opencode 无等价事件） */
+export const HOOKS_AGENTS: ReadonlySet<string> = new Set([
+  "claude",
+  "qwen",
+  "codebuddy",
+  "gemini",
+  "kimi",
+  "grok",
+  "codex",
+]);
+
+export type ChatHandoffEvent =
+  | "send_message"
+  | "direct_slash"
+  | "picker_model"
+  | "hooks_confirm"
+  | "no_hooks_confirm"
+  | "login_or_trust"
+  | "prompt_dropped"
+  | "self_update";
+
+/** chat_ok = 聊天层独立完成；peek = 露出同一会话 TUI；must_switch = 整层切到终端 */
+export type ChatHandoffAction = "chat_ok" | "peek" | "must_switch";
+
+export type ChatWaitKind =
+  | "idle"
+  | "sent"
+  | "writing"
+  | "using_tool"
+  | "no_session";
+
+export function agentHasHooks(agentId: string | null | undefined): boolean {
+  return Boolean(agentId && HOOKS_AGENTS.has(agentId));
+}
+
+export function confirmHandoffEvent(
+  agentId: string | null | undefined,
+  hooksEnabled: boolean,
+): Extract<ChatHandoffEvent, "hooks_confirm" | "no_hooks_confirm"> {
+  return agentHasHooks(agentId) && hooksEnabled
+    ? "hooks_confirm"
+    : "no_hooks_confirm";
+}
+
+export function handoffFor(event: ChatHandoffEvent): ChatHandoffAction {
+  switch (event) {
+    case "send_message":
+    case "direct_slash":
+      return "chat_ok";
+    case "picker_model":
+    case "hooks_confirm":
+    case "no_hooks_confirm":
+    case "login_or_trust":
+      return "peek";
+    case "prompt_dropped":
+    case "self_update":
+      return "must_switch";
+  }
+}
+
+export function shouldAutoPeek(event: ChatHandoffEvent): boolean {
+  const action = handoffFor(event);
+  return action === "peek" || action === "must_switch";
+}
+
+/** 审批卡片附加说明：不解析 TUI，只提示已知失效原因 */
+export function approvalExtraHint(
+  agentId: string | null | undefined,
+  hooksEnabled: boolean,
+): string | null {
+  if (agentId === "codex") {
+    return "若按键无效，请到终端里打开 /hooks，确认已信任该 hook";
+  }
+  if (!agentHasHooks(agentId) || !hooksEnabled) {
+    return "这家 Agent 没有精确注意力标记，批准菜单请在露出的终端里操作";
+  }
+  return null;
+}
+
+export function latestToolName(
+  messages: Pick<ChatMessageDto, "role" | "blocks">[],
+): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === "user") return null;
+    for (let j = message.blocks.length - 1; j >= 0; j--) {
+      const block = message.blocks[j];
+      if (block.kind === "tool_use" && block.toolName) return block.toolName;
+    }
+  }
+  return null;
+}
+
+export function hasAssistantText(
+  messages: Pick<ChatMessageDto, "role" | "blocks">[],
+): boolean {
+  return messages.some(
+    (message) =>
+      message.role !== "user" &&
+      message.blocks.some(
+        (block) => block.kind === "text" && Boolean(block.text?.trim()),
+      ),
+  );
+}
+
+export function chatWaitKind(input: {
+  pendingReply: boolean;
+  running: boolean;
+  syncState: SessionSyncState;
+  messageCount: number;
+  stuckWaiting: boolean;
+  toolName: string | null;
+}): ChatWaitKind {
+  if (input.stuckWaiting) return "no_session";
+  if (!input.pendingReply) {
+    if (
+      input.running &&
+      input.syncState === "waiting" &&
+      input.messageCount === 0
+    ) {
+      return "idle";
+    }
+    return "idle";
+  }
+  if (input.toolName) return "using_tool";
+  if (input.syncState === "watching" || input.syncState === "polling") {
+    return "writing";
+  }
+  return "sent";
+}
+
+export function chatWaitText(
+  kind: ChatWaitKind,
+  toolName?: string | null,
+): string {
+  switch (kind) {
+    case "sent":
+      return "已送出";
+    case "writing":
+      return "正在写盘";
+    case "using_tool":
+      return toolName ? `正在用 ${toolName}` : "正在调用工具";
+    case "no_session":
+      return "会话文件还没出现（去终端看确认）";
+    default:
+      return "";
+  }
+}
+
+/** 斜杠发出后要不要露出 TUI：无参 /model、/models、/login 会唤选择器或登录页 */
+export function slashHandoff(
+  text: string,
+  modelSwitchKind: "direct" | "picker" | null,
+): ChatHandoffEvent {
+  const trimmed = text.trim();
+  const space = trimmed.search(/\s/);
+  const cmd = (space < 0 ? trimmed : trimmed.slice(0, space)).toLowerCase();
+  const hasArgs = space >= 0 && trimmed.slice(space).trim().length > 0;
+  if (cmd === "/login" || cmd === "/models") return "picker_model";
+  if (cmd === "/model" && (!hasArgs || modelSwitchKind === "picker")) {
+    return "picker_model";
+  }
+  return "direct_slash";
+}
+
+export function chatMessageKey(
+  message: Pick<ChatMessageDto, "role" | "blocks" | "timestamp">,
+): string {
+  const firstText = message.blocks.find((block) => block.kind === "text")?.text ?? "";
+  return `${message.role}:${message.timestamp ?? ""}:${message.blocks.length}:${firstText.slice(0, 24)}`;
+}
+
+/** 向前翻页时把旧窗接到最新窗前面，按内容键去重（最新窗优先） */
+export function mergeConversationPages(
+  older: ChatMessageDto[],
+  latest: ChatMessageDto[],
+): ChatMessageDto[] {
+  const seen = new Set(latest.map(chatMessageKey));
+  const head = older.filter((message) => !seen.has(chatMessageKey(message)));
+  return [...head, ...latest];
+}
+
+/** kimi /model 吃的是别名：非法字符清洗为 _，与状态栏 / global_config 同规则 */
+export function kimiModelArg(model: string): string {
+  return model.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+export function modelSwitchCommand(
+  template: string,
+  model: string,
+  agentId: string | null | undefined,
+): string {
+  const arg = agentId === "kimi" ? kimiModelArg(model) : model;
+  return template.replace("{model}", arg);
+}
