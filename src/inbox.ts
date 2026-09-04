@@ -157,6 +157,26 @@ export function helpPreview(text: string, max = 40): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+/** 收件箱任务名：工作区 / 分支优先，标签标题其次，目录尾段兜底。 */
+export function inboxTaskLabel(opts: {
+  title?: string | null;
+  cwdLabel?: string | null;
+  workspaceName?: string | null;
+  branch?: string | null;
+}): string {
+  const named = opts.workspaceName?.trim() || opts.branch?.trim();
+  if (named) return named;
+  const title = opts.title?.trim();
+  if (title && title !== "终端") return title;
+  return opts.cwdLabel?.trim() || "这项工作";
+}
+
+/** 收件箱主文案：去「任务」做什么。 */
+export function inboxTaskLine(taskLabel: string, action: string): string {
+  const label = taskLabel.trim() || "这项工作";
+  return `去「${label}」${action}`;
+}
+
 /**
  * 人工请求新来源判定（edge-trigger）：next 中存在而 prev 中不存在的 key，
  * 且距上次通知该 key 已满去抖窗口（同 root 30 秒内最多一条）。

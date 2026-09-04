@@ -351,6 +351,26 @@ pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, Str
     Ok(rows.flatten().map(attach_work_mode).collect())
 }
 
+/// 注册项目根：cwd 落在哪个项目里（最长前缀）。scratch / 未注册返回 None。
+pub(crate) fn project_root_containing(path: &str) -> Option<String> {
+    let Ok(conn) = db() else {
+        return None;
+    };
+    let Ok(list) = list_projects_in(&conn) else {
+        return None;
+    };
+    let mut best: Option<(usize, String)> = None;
+    for p in list {
+        if crate::paths::path_within(path, &p.path) {
+            let len = p.path.len();
+            if best.as_ref().map(|(l, _)| len > *l).unwrap_or(true) {
+                best = Some((len, p.path));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 /// P2a PDF 白名单用（pdf.rs）：全部注册项目根 + 各项目 project.toml 登记资源的绝对路径。
 /// 资源相对路径按项目根解析；读不到配置的项目静默跳过（白名单宁缺勿滥）。
 pub(crate) fn project_roots_and_resources() -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -2873,7 +2893,7 @@ pub async fn inspect_step_inputs(
 
 /// 把 TASK.md 追加到仓库共享的 .git/info/exclude（对所有 worktree 与主仓生效）。
 /// best-effort：拿不到 git 公共目录（非仓库/异常）时静默跳过，不阻断 TASK.md 写入。
-fn exclude_task_md(worktree_root: &Path) {
+pub(crate) fn exclude_task_md(worktree_root: &Path) {
     let Ok(common) = crate::workspaces::run_git(
         worktree_root,
         &["rev-parse", "--git-common-dir"],

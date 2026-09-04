@@ -28,7 +28,7 @@ import {
   scheduleSkillOptionsForEdit,
 } from "../schedule-skill";
 import { beginAskAi } from "./AskAiModal";
-import { AGENTS } from "../types";
+import { AGENTS, type AgentCapabilitiesDto } from "../types";
 import type {
   RunRecordDto,
   ScheduleDto,
@@ -36,8 +36,40 @@ import type {
   SkillDto,
   WatchSkillDraftDto,
 } from "../types";
+import { headlessWriteBlocked, headlessWriteNote } from "../agent-caps";
 
 const NEW_WATCH = "__new__";
+
+function useAgentCaps(): Record<string, AgentCapabilitiesDto> {
+  const [caps, setCaps] = useState<Record<string, AgentCapabilitiesDto>>({});
+  useEffect(() => {
+    let stale = false;
+    invoke<AgentCapabilitiesDto[]>("agent_capabilities")
+      .then((list) => {
+        if (stale) return;
+        setCaps(Object.fromEntries(list.map((c) => [c.agent, c])));
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, []);
+  return caps;
+}
+
+function profileScheduleMeta(
+  p: { agent: string; name: string },
+  caps: Record<string, AgentCapabilitiesDto>,
+): { label: string; disabled: boolean; blockReason: string | null } {
+  const cap = caps[p.agent]?.headlessWrite;
+  const blocked = headlessWriteBlocked(cap);
+  const note = headlessWriteNote(cap);
+  const agent = AGENTS.find((a) => a.id === p.agent)?.label ?? p.agent;
+  let label = `${p.name}（${agent}）`;
+  if (blocked) label += ` · ${blocked}`;
+  else if (note) label += ` · ${note}`;
+  return { label, disabled: Boolean(blocked), blockReason: blocked };
+}
 
 /** 弹层挂到 body：页头 sticky z-20 在 overflow 滚动容器里会盖住同树里的 fixed 遮罩，浅色下像顶部一条白。 */
 function FloatLayer({ children }: { children: ReactNode }) {
@@ -64,6 +96,7 @@ function CreateScheduleModal({
   onDraftStarted: () => void;
 }) {
   const profiles = useAppStore((s) => s.profiles);
+  const caps = useAgentCaps();
   const [name, setName] = useState("文献雷达");
   const [skill, setSkill] = useState(LIT_WATCH_SKILL);
   const [skills, setSkills] = useState<SkillDto[]>([]);
@@ -120,6 +153,14 @@ function CreateScheduleModal({
     if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
       setError("时间格式不正确");
       return;
+    }
+    const picked = profiles.find((p) => p.id === profileId);
+    if (picked) {
+      const blocked = profileScheduleMeta(picked, caps).blockReason;
+      if (blocked) {
+        setError(blocked);
+        return;
+      }
     }
     setBusy(true);
     setError(null);
@@ -285,12 +326,14 @@ function CreateScheduleModal({
             onChange={(e) => setProfileId(e.target.value)}
           >
             <option value="">自动（跟随默认解析）</option>
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}（{AGENTS.find((a) => a.id === p.agent)?.label ??
-                  p.agent}）
-              </option>
-            ))}
+            {profiles.map((p) => {
+              const meta = profileScheduleMeta(p, caps);
+              return (
+                <option key={p.id} value={p.id} disabled={meta.disabled}>
+                  {meta.label}
+                </option>
+              );
+            })}
           </select>
         </label>
         {steps.length > 0 && (
@@ -378,7 +421,7 @@ function EditScheduleModal({
 }: {
   schedule: ScheduleDto;
   steps: { name: string }[];
-  profiles: { id: string; name: string }[];
+  profiles: { id: string; name: string; agent: string }[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -394,6 +437,7 @@ function EditScheduleModal({
   const [linkedStep, setLinkedStep] = useState(schedule.linkedStep ?? "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const caps = useAgentCaps();
 
   useEffect(() => {
     invoke<SkillDto[]>("list_skills").then(setSkills).catch(() => {});
@@ -405,6 +449,14 @@ function EditScheduleModal({
     if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
       setError("时间格式不正确");
       return;
+    }
+    const picked = profiles.find((p) => p.id === profileId);
+    if (picked) {
+      const blocked = profileScheduleMeta(picked, caps).blockReason;
+      if (blocked) {
+        setError(blocked);
+        return;
+      }
     }
     setBusy(true);
     setError(null);
@@ -448,7 +500,7 @@ function EditScheduleModal({
           {frequency === "weekly" && <label className="block flex-1 text-sm"><span className="mb-1 block text-xs text-l3">星期</span><select className={fieldClass} value={weekday} onChange={(e) => setWeekday(Number(e.target.value))}>{["一","二","三","四","五","六","日"].map((d, i) => <option key={d} value={i + 1}>周{d}</option>)}</select></label>}
           <label className="block flex-1 text-sm"><span className="mb-1 block text-xs text-l3">时间</span><input className={fieldClass} type="time" required value={time} onChange={(e) => setTime(e.target.value)} /></label>
         </div>
-        <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">运行配置</span><select className={fieldClass} value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">自动</option>{profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+        <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">运行配置</span><select className={fieldClass} value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">自动</option>{profiles.map((p) => { const meta = profileScheduleMeta(p, caps); return <option key={p.id} value={p.id} disabled={meta.disabled}>{meta.label}</option>; })}</select></label>
         {steps.length > 0 && <label className="mb-4 block text-sm"><span className="mb-1 block text-xs text-l3">关联步骤</span><select className={fieldClass} value={linkedStep} onChange={(e) => setLinkedStep(e.target.value)}><option value="">不关联</option>{steps.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}</select></label>}
         {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
         <div className="flex justify-end gap-2"><button type="button" onClick={onClose} className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover">取消</button><button type="submit" disabled={busy} className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text">{busy ? "保存中…" : "保存"}</button></div>
@@ -642,6 +694,7 @@ export default function ScheduleSection({
   const [error, setError] = useState<string | null>(null);
   /** 运行配置下拉（行内可改）：profile 列表从 store 取 */
   const profiles = useAppStore((s) => s.profiles);
+  const caps = useAgentCaps();
   /** 手动「立即跑」中的任务 id：靠 scheduler-run-done 事件清除并触发重拉 */
   const [running, setRunning] = useState<Set<string>>(new Set());
   const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(
@@ -721,6 +774,14 @@ export default function ScheduleSection({
 
   /** 行内改运行配置：空串 = 清掉绑定回到「自动」（后端归一为 None，每次运行现解析） */
   async function changeProfile(s: ScheduleDto, profileId: string) {
+    const picked = profiles.find((p) => p.id === profileId);
+    if (picked) {
+      const blocked = profileScheduleMeta(picked, caps).blockReason;
+      if (blocked) {
+        setError(blocked);
+        return;
+      }
+    }
     try {
       await invoke("update_schedule", {
         id: s.id,
@@ -993,11 +1054,18 @@ export default function ScheduleSection({
                             原配置已删除（自动回落中）
                           </option>
                         )}
-                      {profiles.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
+                      {profiles.map((p) => {
+                        const meta = profileScheduleMeta(p, caps);
+                        return (
+                          <option
+                            key={p.id}
+                            value={p.id}
+                            disabled={meta.disabled}
+                          >
+                            {meta.label}
+                          </option>
+                        );
+                      })}
                     </select>
                   </div>
                   {historyOpen === s.id && (

@@ -34,7 +34,7 @@ import {
   type NavCapsuleItemId,
 } from "../nav-capsule";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { StorageEntryDto } from "../types";
+import type { CustomRuntimeDto, StorageEntryDto } from "../types";
 import { AGENTS } from "../types";
 import { getVersion } from "@tauri-apps/api/app";
 import { collectFrontendDiagnostics } from "../diagnostics";
@@ -472,6 +472,123 @@ function HotkeyCapture({
         </button>
       )}
     </span>
+  );
+}
+
+function CustomRuntimeBlock({
+  onError,
+  onNotice,
+}: {
+  onError: (msg: string) => void;
+  onNotice: (msg: string) => void;
+}) {
+  const [list, setList] = useState<CustomRuntimeDto[]>([]);
+  const [name, setName] = useState("");
+  const [command, setCommand] = useState("");
+  const [args, setArgs] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function reload() {
+    try {
+      setList(await invoke<CustomRuntimeDto[]>("list_custom_runtimes"));
+    } catch (e) {
+      onError(String(e));
+    }
+  }
+
+  useEffect(() => {
+    void reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function save() {
+    setBusy(true);
+    try {
+      const argList = args
+        .split(/\s+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      await invoke("save_custom_runtime", {
+        id: null,
+        name,
+        command,
+        args: argList,
+      });
+      setName("");
+      setCommand("");
+      setArgs("");
+      onNotice("已保存自定义运行时");
+      await reload();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 border-t border-hairline pt-3">
+      <div className="mb-1 text-sm text-l2">自定义运行时</div>
+      <p className="mb-2 text-micro text-l4">
+        登记一条本机命令，在工作树里当普通终端跑。不注入密钥、不解析会话。相对路径命令不能用。
+      </p>
+      {list.length > 0 && (
+        <ul className="mb-2 space-y-1">
+          {list.map((r) => (
+            <li
+              key={r.id}
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-hover"
+            >
+              <span className="min-w-0 flex-1 truncate text-sm text-l2">
+                {r.name}
+                <span className="ml-2 font-mono text-micro text-l4">
+                  {r.command}
+                </span>
+              </span>
+              <button
+                type="button"
+                className={`${ghostActionClass} shrink-0 text-micro`}
+                onClick={() => {
+                  void invoke("delete_custom_runtime", { id: r.id })
+                    .then(() => reload())
+                    .catch((e) => onError(String(e)));
+                }}
+              >
+                删除
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <input
+          className={`${fieldClass} h-8 min-w-28 flex-1 py-0`}
+          placeholder="名称"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+        <input
+          className={`${fieldClass} h-8 min-w-36 flex-1 py-0`}
+          placeholder="命令（绝对路径或 PATH 名）"
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+        />
+        <input
+          className={`${fieldClass} h-8 min-w-24 flex-1 py-0`}
+          placeholder="参数（可选，空格分开）"
+          value={args}
+          onChange={(e) => setArgs(e.target.value)}
+        />
+        <button
+          type="button"
+          className={`${rowActionClass} shrink-0`}
+          disabled={busy || !name.trim() || !command.trim()}
+          onClick={() => void save()}
+        >
+          添加
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -2379,6 +2496,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         <p className="pt-2 text-micro text-l4">
           快照 / 备份 / 缓存可以直接删，配置与索引别手动删。
         </p>
+        <CustomRuntimeBlock onError={setError} onNotice={setNotice} />
       </Section>
 
       <Section

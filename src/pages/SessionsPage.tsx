@@ -27,7 +27,10 @@ import {
 } from "../session-search";
 import { pathKey, samePath } from "../path-utils";
 import { AGENTS } from "../types";
-import { pickResumeProfile } from "../resume-profile";
+import {
+  codexSessionChannelChip,
+  pickResumeProfile,
+} from "../resume-profile";
 import ConversationView from "../components/ConversationView";
 import GitPanel from "../components/GitPanel";
 import HandoffPicker from "../components/HandoffPicker";
@@ -49,6 +52,7 @@ import {
 import type {
   ChatMessageDto,
   ConversationPageDto,
+  OfficialAccountStatusDto,
   SessionExportKey,
   SessionMetaDto,
   SessionSearchHitDto,
@@ -201,6 +205,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [codexClientProviders, setCodexClientProviders] = useState<Set<
     string
   > | null>(null);
+  const [codexOfficialConnected, setCodexOfficialConnected] = useState<
+    boolean | undefined
+  >(undefined);
   // 「复制恢复命令」按钮的已复制反馈以 agent+sessionId 区分，避免跨 CLI 同 id 误显示。
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
@@ -363,6 +370,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       s.provider,
       wished,
       appSettings?.hiddenProfiles,
+      s.agent === "codex"
+        ? { officialConnected: codexOfficialConnected }
+        : undefined,
     );
   }
 
@@ -439,6 +449,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     invoke<string[]>("codex_client_config_providers")
       .then((list) => setCodexClientProviders(new Set(list)))
       .catch(() => setCodexClientProviders(new Set()));
+    invoke<OfficialAccountStatusDto>("official_account_status", {
+      agentId: "codex",
+    })
+      .then((st) => setCodexOfficialConnected(st.connected))
+      .catch(() => setCodexOfficialConnected(undefined));
   }, [visible]);
 
   /** 客户端打开会话时按 rollout 记录的 provider 在 config.toml 找定义，缺失即报
@@ -2111,6 +2126,19 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   进行中
                 </span>
               )}
+              {selected.agent === "codex" &&
+                (() => {
+                  const chip = codexSessionChannelChip(selected.provider);
+                  if (!chip) return null;
+                  return (
+                    <span
+                      className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l2"
+                      title={chip.tip}
+                    >
+                      {chip.label}
+                    </span>
+                  );
+                })()}
               {selected.workspace && (
                 <span
                   className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l2"

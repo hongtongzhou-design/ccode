@@ -378,7 +378,19 @@ pub(crate) fn ai_prompt_impl(
     }
     cmd.current_dir(&cwd);
     let host = endpoint_host(profile.base_url.as_deref());
+    let reuse = format!("headless:ai-prompt:{}", fn_key.unwrap_or("generic"));
+    let run = crate::runs::open_headless(
+        &profile.agent,
+        &profile.id,
+        &cwd.to_string_lossy(),
+        &reuse,
+        false,
+        "discuss",
+    );
     let result = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, AI_TIMEOUT);
+    if let Ok(r) = run {
+        let _ = crate::runs::close_run_impl(&r.id, None);
+    }
     let _ = fs::remove_dir_all(&cwd);
     result
 }
@@ -432,6 +444,8 @@ pub(crate) fn run_agent_task(
     prompt: &str,
     cwd: &std::path::Path,
     timeout: Duration,
+    reuse_key: Option<&str>,
+    sentinel: bool,
 ) -> Result<String, String> {
     let binary = agents::binary_for(&profile.agent)
         .ok_or_else(|| format!("profile 所属 agent 不支持无头调用: {}", profile.agent))?;
@@ -461,7 +475,21 @@ pub(crate) fn run_agent_task(
     }
     cmd.current_dir(cwd);
     let host = endpoint_host(profile.base_url.as_deref());
-    run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, timeout)
+    let default_reuse = format!("headless:ai:{}", cwd.display());
+    let reuse = reuse_key.unwrap_or(&default_reuse);
+    let run = crate::runs::open_headless(
+        &profile.agent,
+        &profile.id,
+        &cwd.to_string_lossy(),
+        reuse,
+        sentinel,
+        if sentinel { "write_tree" } else { "discuss" },
+    );
+    let out = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, timeout);
+    if let Ok(r) = run {
+        let _ = crate::runs::close_run_impl(&r.id, None);
+    }
+    out
 }
 
 // ===== prompt 构造（纯函数，可测） =====

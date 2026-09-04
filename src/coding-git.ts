@@ -203,3 +203,15 @@ export function remotePickerRows(
     : rows;
   return filtered.slice(0, cap);
 }
+
+/** 「再开一条」预填分支名：feature/login → feature/login-2，已有 -N 则 +1。 */
+export function nextLaneBranchName(branch: string): string {
+  const t = branch.trim();
+  if (!t) return "";
+  const m = t.match(/^(.*)-(\d+)$/);
+  if (!m) return `${t}-2`;
+  const stem = m[1] ?? t;
+  const n = Number(m[2]);
+  if (!Number.isFinite(n) || n < 1) return `${t}-2`;
+  return `${stem}-${n + 1}`;
+}

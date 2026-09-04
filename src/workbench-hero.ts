@@ -4,6 +4,7 @@
  */
 import { pathKey, pathWithin, samePath } from "./path-utils.ts";
 import { cwdBasename, buildRunOverview, type RunOverviewInput } from "./run-overview.ts";
+import { isWorkbenchSurfaceRun } from "./run-model.ts";
 
 export type WorkbenchHeroSource =
   | "running"
@@ -40,17 +41,28 @@ export interface WorkbenchWorkspaceRef {
   mergedAt: string | null;
 }
 
+/** 一张工作台卡上的一次活着的干活（终端标签视图）。 */
+export interface WorkbenchRunChip {
+  tabId: string;
+  agentId: string;
+  attention: "confirm" | "working" | "done" | null;
+  /** 工作区名 / 分支 / 文档名，不是 CLI 名 */
+  taskLabel: string;
+}
+
 export interface WorkbenchHero {
   name: string;
   path: string;
   registered: boolean;
-  /** 属于这张卡的运行标签（有则「继续工作」聚焦它） */
+  /** 属于这张卡的运行标签（有则「继续工作」聚焦它）= runs 里优先级最高的一条 */
   tabId: string | null;
   agentId: string | null;
   model: string | null;
   attention: "confirm" | "working" | "done" | null;
   /** 这张卡所属项目/目录上的存活工作数（不是全应用） */
   runningCount: number;
+  /** 同一项目上的多次 Run（待确认在前）；单次时状态行已够，UI 可不重复列 */
+  runs: WorkbenchRunChip[];
   source: WorkbenchHeroSource;
   workMode?: "research" | "coding" | "office" | null;
   subtitle?: string | null;
@@ -84,7 +96,50 @@ interface PathGroup {
 }
 
 function isLiveWork(run: RunOverviewInput): boolean {
-  return run.running || run.attention === "confirm";
+  return isWorkbenchSurfaceRun(run);
+}
+
+/** 标签标题优先；占位「终端」回落到目录尾段。 */
+export function taskLabelForRun(run: {
+  title: string;
+  cwd: string;
+}): string {
+  const title = run.title.trim();
+  if (title && title !== "终端") return title;
+  return cwdBasename(run.cwd) || "这项工作";
+}
+
+function toRunChip(run: RunOverviewInput): WorkbenchRunChip {
+  return {
+    tabId: run.tabId,
+    agentId: run.agentId,
+    attention: run.attention,
+    taskLabel: taskLabelForRun(run),
+  };
+}
+
+function runChipRank(chip: WorkbenchRunChip): number {
+  if (chip.attention === "confirm") return 0;
+  if (chip.attention === "working") return 1;
+  return 2;
+}
+
+function sortRunChips(runs: WorkbenchRunChip[]): WorkbenchRunChip[] {
+  return [...runs].sort((a, b) => runChipRank(a) - runChipRank(b));
+}
+
+function pointerFromRuns(runs: readonly WorkbenchRunChip[]): {
+  tabId: string | null;
+  agentId: string | null;
+  attention: "confirm" | "working" | "done" | null;
+} {
+  const top = runs[0];
+  if (!top) return { tabId: null, agentId: null, attention: null };
+  return {
+    tabId: top.tabId,
+    agentId: top.agentId || null,
+    attention: top.attention,
+  };
 }
 
 function attributePath(
@@ -244,11 +299,13 @@ function heroAt(
     model: string;
     attention: "confirm" | "working" | "done" | null;
     runningCount: number;
+    runs: WorkbenchRunChip[];
   },
 ): WorkbenchHero {
   const registered = projects.some((p) => samePath(p.path, path, isWindows));
   const workMode =
     projects.find((p) => samePath(p.path, path, isWindows))?.workMode ?? null;
+  const runs = live?.runs ?? [];
   return {
     name: nameForPath(path, projects, recentRepos, isWindows),
     path,
@@ -258,6 +315,7 @@ function heroAt(
     model: live?.model || null,
     attention: live?.attention ?? null,
     runningCount: live?.runningCount ?? 0,
+    runs,
     source,
     workMode,
   };
@@ -292,6 +350,9 @@ export function pickWorkbenchHero(input: {
         pathWithin(path, run.cwd, isWindows)
       );
     });
+    const runs = sortRunChips(mine.map(toRunChip));
+    const pointer = pointerFromRuns(runs);
+    const pointed = mine.find((run) => run.tabId === pointer.tabId) ?? top;
     return heroAt(
       path,
       "running",
@@ -299,11 +360,12 @@ export function pickWorkbenchHero(input: {
       input.recentRepos,
       isWindows,
       {
-        tabId: top.tabId,
-        agentId: top.agentId,
-        model: top.model,
-        attention: top.attention,
-        runningCount: mine.length,
+        tabId: pointer.tabId ?? pointed.tabId,
+        agentId: pointer.agentId ?? pointed.agentId,
+        model: pointed.model,
+        attention: pointer.attention ?? pointed.attention,
+        runningCount: runs.length,
+        runs,
       },
     );
   }
@@ -401,6 +463,7 @@ export function pickWorkbenchNow(input: {
       model: null,
       attention: null,
       runningCount: 0,
+      runs: [],
       source,
       workMode: seed?.workMode ?? null,
       subtitle: seed?.subtitle ?? null,
@@ -413,18 +476,7 @@ export function pickWorkbenchNow(input: {
   for (const run of live) {
     const key = attributePath(run.cwd, groups, isWindows) ?? run.cwd;
     const item = ensure(key, "running");
-    item.runningCount += 1;
-    if (!item.tabId) {
-      item.tabId = run.tabId;
-      item.agentId = run.agentId || null;
-      item.model = run.model || null;
-      item.attention = run.attention;
-    } else if (run.attention === "confirm" && item.attention !== "confirm") {
-      item.tabId = run.tabId;
-      item.agentId = run.agentId || null;
-      item.model = run.model || null;
-      item.attention = run.attention;
-    }
+    item.runs.push(toRunChip(run));
   }
 
   for (const seed of input.seeds) {
@@ -436,11 +488,18 @@ export function pickWorkbenchNow(input: {
 
   const items = [...byPath.values()].map((item) => {
     const seed = input.seeds.find((s) => samePath(s.path, item.path, isWindows));
+    const runs = sortRunChips(item.runs);
+    const pointer = pointerFromRuns(runs);
     return {
       ...item,
+      runs,
+      runningCount: runs.length,
+      tabId: pointer.tabId,
+      agentId: pointer.agentId,
+      attention: pointer.attention,
       rank: nowRank({
-        attention: item.attention,
-        runningCount: item.runningCount,
+        attention: pointer.attention,
+        runningCount: runs.length,
         needsYou: seed?.needsYou ?? false,
       }),
     };
@@ -487,8 +546,14 @@ export function heroStatusLine(opts: {
 }): string {
   if (opts.runningCount > 0) {
     const who = opts.agentLabel?.trim() || "Agent";
-    if (opts.attention === "confirm") return `${who} 在等你确认`;
-    return `${who} 正在工作`;
+    if (opts.runningCount === 1) {
+      if (opts.attention === "confirm") return `${who} 在等你确认`;
+      return `${who} 正在工作`;
+    }
+    if (opts.attention === "confirm") {
+      return `${opts.runningCount} 个 Agent 在跑 · ${who} 在等你确认`;
+    }
+    return `${opts.runningCount} 个 Agent 在跑`;
   }
   return opts.registered ? "准备好从上次位置继续" : "可从最近位置继续";
 }

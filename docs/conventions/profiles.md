@@ -232,6 +232,8 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 
 **Codex 官方绑定额外注入** `-c model_provider="openai"`：磁盘 `config.toml` 的 `model_provider` 指向自定义网关时会盖过 ChatGPT 登录（选官方账号仍走网关计费）。`-c` 优先级最高，只影响本进程，不改用户文件、不写 `[model_providers.*]`。登录走 `codex login --device-auth`（设备码印在内嵌终端；不在 Ccode 内自建 OAuth）。未选模型时磁盘 `model` 仍会生效。`chatgpt.com` 401 / `token_revoked` 是 ChatGPT 登录态本身失效，不是官方/API 凭证串台。
 
+**Codex 恢复不得串台（v3.223）**：rollout 的 `model_provider` 分三条——`ccode`/`ccode-<短id>` = Ccode 网关；`openai` = ChatGPT 官方；其他名字（磁盘 `custom` 等）= 客户端/全局配置渠道。自动恢复时客户端渠道只挑带 Base URL 的网关，绝不落到官方账号（否则强制 `api.openai.com` 且 `env_remove` 密钥，报 401 Missing bearer，同一会话在客户端却能继续）。官方未登录时 `openai` 会话也改挑网关；启动栏未登录的官方账号不自动预选，硬启动先确认。纯逻辑 `src/resume-profile.ts`。
+
 **无头调用（雷达解读 / 提交信息等）** 的「最近使用」回落跳过官方账号：OAuth 过期会把 CLI stderr 甩到界面。有 API 配置就走 API；只有官方才回落官方。显式 id、功能专属、AI 专用仍尊重官方。失败文案走 `summarize_headless_error`，不回整段日志。终端里手选「官方账号」不受这条约束。
 
 **Codex 网关绑定额外注入** `-c web_search="disabled"` 与 `-c service_tier="auto"`：ChatGPT 登录/磁盘默认会把官方 hosted 网页搜索和订阅优先档带进本进程；catalog 的 `supports_search_tool: false` 挡不住请求。DeepSeek 等中转会拒 `web_search`（有的网关转成 Anthropic `web_search_20250305`）。只盖本进程，官方账号启动不注。

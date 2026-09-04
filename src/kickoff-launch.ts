@@ -2,7 +2,7 @@
  * 科研开步启动配置：弹层里选 Agent/连接，确认后自动拉起。
  * 与问 AI 的记忆键独立（ccode.askAi），但挑选规则相同：记住的连接还在就用，否则该 Agent 第一个，再否则全局第一个。
  */
-import type { AskAiRemembered } from "./ask-ai.ts";
+import { askAiCanSkip, type AskAiRemembered } from "./ask-ai.ts";
 
 export interface KickoffLaunch {
   agentId: string;
@@ -33,6 +33,24 @@ export function pickKickoffLaunch(
       ? wanted
       : (models[0] ?? "");
   return { agentId: profile.agent, profileId: profile.id, model };
+}
+
+/** 编程开工 / 进入工作树：记住的默认连接可直接拉起，否则只预填。 */
+export function codingTerminalLaunch(
+  profiles: readonly { id: string; agent: string; models?: string[] }[],
+  remembered: AskAiRemembered | null,
+): {
+  agentId: string;
+  profileId: string;
+  model: string;
+  autoStart: boolean;
+} | null {
+  const launch = pickKickoffLaunch(profiles, remembered);
+  if (!launch) return null;
+  return {
+    ...launch,
+    autoStart: askAiCanSkip(remembered, profiles),
+  };
 }
 
 export function kickoffLaunchLabel(

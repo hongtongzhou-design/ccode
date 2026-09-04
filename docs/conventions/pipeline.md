@@ -7,6 +7,8 @@
 > 档案卡文件头固定两行勿删注释（`with_project_toml_header`：缺则写入时补、已有不重复）。删掉 `project.toml` 后缺省 research——Git 客户端把未跟踪的 `.ccode/` 当普通改动，丢弃即掉回科研。
 > 一个项目终身一张主界面，不做转换。重复添加已登记或档案卡已落盘的目录必须预填并锁定，禁止改选、禁止再弹模板。
 > 项目页左侧列表按工作方式分段（科研 → 编程 → 办公；未添加仓库沉底），组内保持最近打开序；行上不再重复写类型。
+> **与多 Agent 工作台对象的关系（v3.221）**：科研一步 = Task，步骤工作区 = Isolation，开步 = 一次 Run（弹层已选 Agent）。不要把编程「并行车道」套到研究流程上——步骤默认顺序、人开步、评审才合并。对象总表见 `docs/conventions/agent-workbench.md`。
+>
 > 科研才走本文件的工作区 / 流水线 / 雷达合同；
 > 编程走 `coding.rs` git 原语工作树（`~/ccode/worktrees`），界面是左工作树右会话（v3.190）；Git + GitHub 环（从基准开工、origin、Desktop CLI、开 PR）见 `docs/conventions/coding-git.md`（v3.202）。办公走文档库。仓库里论文和代码可以并存。
 > 编程 `git init` 写编程用 `.gitignore`（不含科研 `*.pdf`）；macOS CLT stub 禁跑 git。

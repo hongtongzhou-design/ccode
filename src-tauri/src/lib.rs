@@ -34,6 +34,8 @@ mod provider_id;
 mod projects;
 mod pty;
 mod reader;
+mod runs;
+mod custom_runtime;
 mod scheduler;
 mod sessions;
 mod session_search;
@@ -124,6 +126,15 @@ pub fn run() {
             global_config::has_original_backup,
             global_config::restore_original_backup,
             pty::pty_spawn,
+            runs::run_open,
+            runs::run_open_custom,
+            runs::run_close,
+            runs::run_attach_session,
+            runs::run_get,
+            custom_runtime::list_custom_runtimes,
+            custom_runtime::save_custom_runtime,
+            custom_runtime::delete_custom_runtime,
+            coding::coding_upsert_lane,
             pty::shell_spawn,
             pty::pty_write,
             pty::pty_write_submit,

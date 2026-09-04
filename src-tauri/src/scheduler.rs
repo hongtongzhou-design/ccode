@@ -578,7 +578,15 @@ fn execute_one(id: &str) -> RunDonePayload {
         if task.skill != "lit-watch" {
             crate::skills::require_skill_distributed(&task.skill, &profile.agent)?;
         }
-        crate::ai::run_agent_task(&profile, &build_task_prompt(&task.skill), root, RUN_TIMEOUT)
+        let reuse = format!("watch:{}:{}", task.id, task.project_root);
+        crate::ai::run_agent_task(
+            &profile,
+            &build_task_prompt(&task.skill),
+            root,
+            RUN_TIMEOUT,
+            Some(&reuse),
+            true,
+        )
     })();
     // 超时/失败不记新增数：只有成功跑完才数第二次取差值（saturating_sub 防文件被外部截断）
     let new_entries = match (&result, before_entries) {

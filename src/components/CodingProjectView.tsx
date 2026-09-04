@@ -24,10 +24,19 @@ import { useAppStore } from "../store";
 import { abbrevHome, pathWithin } from "../path-utils";
 import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import {
+  nextLaneBranchName,
   parseGitRemoteUrl,
   remotePickerRows,
   shouldWarnEnterPrimaryBase,
 } from "../coding-git";
+import {
+  groupLanesByTheme,
+  laneActivityLabel,
+  lastLaneTheme,
+  overlayLanes,
+} from "../coding-lanes";
+import { loadAskAiRemembered } from "../ask-ai";
+import { codingTerminalLaunch } from "../kickoff-launch";
 import { absTime, relTime } from "../rel-time";
 import { imeBlocksEnter } from "../ime-guard";
 import {
@@ -44,12 +53,14 @@ import ProjectSessionsSection, {
 } from "./ProjectSessionsSection";
 import ScheduleSection from "./ScheduleSection";
 import PortsSection from "./PortsSection";
+import { AGENTS } from "../types";
 import type {
   CodingBranchDto,
   CodingMergeDto,
   CodingOpDto,
   CodingOverviewDto,
   CodingWorktreeDto,
+  CustomRuntimeDto,
   ProjectDto,
 } from "../types";
 
@@ -255,11 +266,16 @@ export default function CodingProjectView({
 }) {
   const setPage = useAppStore((s) => s.setPage);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
+  const profiles = useAppStore((s) => s.profiles);
+  const branchInputRef = useRef<HTMLInputElement>(null);
   const [ov, setOv] = useState<CodingOverviewDto | null>(
     () => overviewCache.get(repoPath) ?? null,
   );
   const [loading, setLoading] = useState(() => !overviewCache.has(repoPath));
   const [branchName, setBranchName] = useState("");
+  const [laneTheme, setLaneTheme] = useState("");
+  const [laneName, setLaneName] = useState("");
+  const [customRuntimes, setCustomRuntimes] = useState<CustomRuntimeDto[]>([]);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [initNote, setInitNote] = useState(false);
@@ -285,6 +301,11 @@ export default function CodingProjectView({
       });
       overviewCache.set(repoPath, next);
       setOv(next);
+      try {
+        setCustomRuntimes(await invoke<CustomRuntimeDto[]>("list_custom_runtimes"));
+      } catch {
+        /* 自定义运行时列表失败不挡工作树 */
+      }
     } catch (e) {
       onError(String(e));
     } finally {
@@ -331,6 +352,11 @@ export default function CodingProjectView({
     });
   }, [ov]);
 
+  const laneGroups = useMemo(
+    () => groupLanesByTheme(overlayLanes(trees, ov?.lanes ?? [], IS_WINDOWS)),
+    [trees, ov],
+  );
+
   async function enterTree(w: CodingWorktreeDto, title: string) {
     const primaryPath = trees.find((t) => t.isPrimary)?.path ?? repoPath;
     const runningOnPrimary = terminalRunInputs.some(
@@ -354,9 +380,50 @@ export default function CodingProjectView({
       cwd: w.path,
       extraEnv: {},
       title,
-      reuseKey: `wt:${w.path}`,
+      reuseKey: `lane:${w.path}`,
+      ...codingTerminalLaunch(profiles, loadAskAiRemembered()),
     });
     setPage("terminal");
+  }
+
+  async function startCustomRuntime(cwd: string, runtime?: CustomRuntimeDto) {
+    try {
+      let r = runtime;
+      if (!r) {
+        const list =
+          customRuntimes.length > 0
+            ? customRuntimes
+            : await invoke<CustomRuntimeDto[]>("list_custom_runtimes");
+        if (list.length === 0) {
+          useAppStore.getState().setSettingsSectionReq("storage");
+          useAppStore.getState().setPage("settings");
+          onNotice("还没有自定义运行时，已打开设置页「数据与存储」。");
+          return;
+        }
+        r = list[0]!;
+      }
+      const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+      const line = [r.command, ...r.args].map(q).join(" ");
+      const reuseKey = `custom:${r.id}:${cwd}`;
+      const run = await invoke<{ id: string }>("run_open_custom", {
+        cwd,
+        reuseKey,
+        runId: null,
+      });
+      setPendingTerminal({
+        cwd,
+        extraEnv: {},
+        title: r.name,
+        shellOnly: true,
+        prefillCommand: line,
+        reuseKey,
+        runId: run.id,
+        surface: "terminal",
+      });
+      setPage("terminal");
+    } catch (e) {
+      onError(String(e));
+    }
   }
 
   function openGit(path: string, title: string) {
@@ -364,7 +431,7 @@ export default function CodingProjectView({
       cwd: path,
       extraEnv: {},
       title,
-      reuseKey: `wt:${path}`,
+      reuseKey: `lane:${path}`,
       rightTab: "git",
       surface: "terminal",
     });
@@ -403,6 +470,32 @@ export default function CodingProjectView({
         setPickerOpen(false);
         onNotice(r.message);
         await reload();
+        if (r.worktree) {
+          const theme = laneTheme.trim() || lastLaneTheme(ov?.lanes ?? []);
+          const name = laneName.trim() || r.worktree.branch;
+          try {
+            await invoke("coding_upsert_lane", {
+              repoPath,
+              worktreePath: r.worktree.path,
+              branch: r.worktree.branch,
+              name,
+              theme: theme || null,
+            });
+          } catch {
+            /* 车道覆盖层失败不阻断开工 */
+          }
+          setLaneName("");
+          const launch = codingTerminalLaunch(profiles, loadAskAiRemembered());
+          setPendingTerminal({
+            cwd: r.worktree.path,
+            extraEnv: {},
+            title: name || r.worktree.branch || branch,
+            reuseKey: `lane:${r.worktree.path}`,
+            initialPrompt: "先读 TASK.md 再动手",
+            ...(launch ?? {}),
+          });
+          setPage("terminal");
+        }
         return;
       }
     } catch (e) {
@@ -784,6 +877,7 @@ export default function CodingProjectView({
               </div>
               <div className="mb-3 flex gap-2">
                 <input
+                  ref={branchInputRef}
                   className={`${fieldClass} h-8 py-0`}
                   value={branchName}
                   placeholder="feature/login"
@@ -817,10 +911,45 @@ export default function CodingProjectView({
                 >
                   {creating ? "创建中…" : `从 ${base || "基准"} 开工`}
                 </button>
+                {trees.some((w) => !w.isPrimary && !w.detached) && (
+                  <button
+                    type="button"
+                    className={`${ghostActionClass} shrink-0`}
+                    onClick={() => {
+                      const last = [...trees]
+                        .reverse()
+                        .find((w) => !w.isPrimary && !w.detached);
+                      const next = nextLaneBranchName(
+                        last?.branch || branchName || "feature/work",
+                      );
+                      if (!next) return;
+                      setBranchName(next);
+                      branchInputRef.current?.focus();
+                    }}
+                  >
+                    再开一条
+                  </button>
+                )}
               </div>
               <p className="mb-2 text-micro text-l4">
-                从基准拉出新分支，在独立目录里给 Agent 改。
+                从基准拉出新分支，在独立目录里给 Agent 改。已有工作树时可「再开一条」并行。
               </p>
+              <div className="mb-3 flex gap-2">
+                <input
+                  className={`${fieldClass} h-8 min-w-0 flex-1 py-0`}
+                  value={laneName}
+                  placeholder="名称（可选，默认分支名）"
+                  aria-label="车道名称"
+                  onChange={(e) => setLaneName(e.target.value)}
+                />
+                <input
+                  className={`${fieldClass} h-8 min-w-0 flex-1 py-0`}
+                  value={laneTheme}
+                  placeholder={`主题分组（可选）${lastLaneTheme(ov?.lanes ?? []) ? `，上次「${lastLaneTheme(ov?.lanes ?? [])}」` : ""}`}
+                  aria-label="车道主题分组"
+                  onChange={(e) => setLaneTheme(e.target.value)}
+                />
+              </div>
               <button
                 type="button"
                 className={`${ghostActionClass} mb-3`}
@@ -872,11 +1001,34 @@ export default function CodingProjectView({
                 </div>
               )}
               <ul className="flex flex-col gap-2">
-                {trees.map((w) => {
+                {laneGroups.flatMap((group) => {
+                  const head =
+                    group.label === "主仓" ? null : (
+                      <li
+                        key={`theme:${group.label}`}
+                        className="px-0.5 pt-1 text-micro font-medium text-l4"
+                      >
+                        {group.label}
+                      </li>
+                    );
+                  const rows = group.items.map((w) => {
                   const kind = kindOfWorktree(w, base);
                   const label = w.detached
                     ? "游离 HEAD"
                     : w.branch || "（无分支）";
+                  const displayName = w.isPrimary
+                    ? "主仓"
+                    : w.lane.name || label;
+                  const activity = laneActivityLabel(
+                    w.path,
+                    terminalRunInputs,
+                    IS_WINDOWS,
+                  );
+                  const activityText =
+                    activity === "空闲"
+                      ? "空闲"
+                      : (AGENTS.find((a) => a.id === activity)?.label ??
+                        activity);
                   const merging = !!ov?.merging && ov.mergingCwd === w.path;
                   const moreItems: ContextMenuItem[] = [];
                   if (merging) {
@@ -884,6 +1036,19 @@ export default function CodingProjectView({
                       label: "取消合并",
                       onSelect: () => void abortMerge(),
                     });
+                  }
+                  if (customRuntimes.length === 0) {
+                    moreItems.push({
+                      label: "用自定义运行时…",
+                      onSelect: () => void startCustomRuntime(w.path),
+                    });
+                  } else {
+                    for (const r of customRuntimes) {
+                      moreItems.push({
+                        label: `运行「${r.name}」`,
+                        onSelect: () => void startCustomRuntime(w.path, r),
+                      });
+                    }
                   }
                   if (!w.isPrimary) {
                     moreItems.push({ separator: true });
@@ -899,10 +1064,21 @@ export default function CodingProjectView({
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="min-w-0 flex-1">
                           <p className="flex min-w-0 items-center gap-2 text-sm font-medium text-l1">
-                            <span className="shrink-0">
-                              {w.isPrimary ? "主仓" : "工作树"}
+                            <span className="shrink-0">{displayName}</span>
+                            {!w.isPrimary &&
+                              w.lane.branch &&
+                              w.lane.branch !== displayName && (
+                                <BranchLabel
+                                  name={w.lane.branch}
+                                  detached={w.detached}
+                                />
+                              )}
+                            {w.isPrimary && (
+                              <BranchLabel name={label} detached={w.detached} />
+                            )}
+                            <span className="shrink-0 text-micro font-normal text-l4">
+                              {activityText}
                             </span>
-                            <BranchLabel name={label} detached={w.detached} />
                             {merging && (
                               <span className="text-xs text-warn-text">
                                 有冲突
@@ -924,10 +1100,31 @@ export default function CodingProjectView({
                               <button
                                 type="button"
                                 className={rowActionClass}
-                                onClick={() => void enterTree(w, label)}
+                                onClick={() =>
+                                  void enterTree(w, w.lane.name || label)
+                                }
                               >
                                 进入
                               </button>
+                              {!w.isPrimary && !w.detached && (
+                                <button
+                                  type="button"
+                                  className={ghostActionClass}
+                                  onClick={() => {
+                                    const next = nextLaneBranchName(
+                                      w.branch || "feature/work",
+                                    );
+                                    if (!next) return;
+                                    setBranchName(next);
+                                    branchInputRef.current?.focus();
+                                    branchInputRef.current?.scrollIntoView({
+                                      block: "nearest",
+                                    });
+                                  }}
+                                >
+                                  再开一条
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 className={ghostActionClass}
@@ -1051,6 +1248,8 @@ export default function CodingProjectView({
                       </p>
                     </li>
                   );
+                  });
+                  return head ? [head, ...rows] : rows;
                 })}
               </ul>
             </section>

@@ -1,13 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickResumeProfile } from "../src/resume-profile.ts";
+import {
+  codexResumeKind,
+  codexResumeKindLabel,
+  codexSessionChannelChip,
+  pickResumeProfile,
+  skipDisconnectedOfficial,
+} from "../src/resume-profile.ts";
 
 const api = (id: string, baseUrl = "https://relay.example.com/v1") => ({
   id,
   agent: "codex",
   baseUrl,
+  accountType: "api" as const,
 });
-const official = (id: string) => ({ id, agent: "codex", baseUrl: null });
+const official = (id: string) => ({
+  id,
+  agent: "codex",
+  baseUrl: null,
+  accountType: "official" as const,
+});
 
 test("provider=ccode-<短id>：只在匹配网关的绑定里挑", () => {
   const gid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
@@ -37,16 +49,81 @@ test("provider=ccode：期望 id 兼容时优先用它", () => {
   assert.equal(pick?.id, "p-b");
 });
 
-test("provider 非 ccode（官方/无记录）：维持原顺序，不被过滤", () => {
+test("provider=openai：ChatGPT 渠道挑官方账号", () => {
   const profiles = [official("p-official"), api("p-api")];
   assert.equal(
     pickResumeProfile(profiles, "codex", "openai", null)?.id,
     "p-official",
   );
-  assert.equal(pickResumeProfile(profiles, "codex", null, null)?.id, "p-official");
   assert.equal(
     pickResumeProfile(profiles, "codex", undefined, "p-api")?.id,
     "p-api",
+  );
+});
+
+test("provider=openai 且官方未登录：改挑网关，避免 401 Missing bearer", () => {
+  const profiles = [official("p-official"), api("p-api")];
+  assert.equal(
+    pickResumeProfile(profiles, "codex", "openai", null, undefined, {
+      officialConnected: false,
+    })?.id,
+    "p-api",
+  );
+});
+
+test("provider=custom：客户端/磁盘渠道只挑网关，不掉进官方", () => {
+  const profiles = [official("p-official"), api("p-api")];
+  assert.equal(
+    pickResumeProfile(profiles, "codex", "custom", null)?.id,
+    "p-api",
+  );
+  assert.equal(
+    pickResumeProfile(profiles, "codex", "custom", "p-official")?.id,
+    "p-api",
+  );
+});
+
+test("Codex 无记录：未确认官方已登录时跳过官方", () => {
+  const profiles = [official("p-official"), api("p-api")];
+  assert.equal(pickResumeProfile(profiles, "codex", null, null)?.id, "p-api");
+  assert.equal(
+    pickResumeProfile(profiles, "codex", null, "p-official", undefined, {
+      officialConnected: true,
+    })?.id,
+    "p-official",
+  );
+});
+
+test("codexResumeKind / 文案", () => {
+  assert.equal(codexResumeKind("ccode-a1b2c3d4"), "gateway");
+  assert.equal(codexResumeKind("openai"), "chatgpt");
+  assert.equal(codexResumeKind("custom"), "disk");
+  assert.equal(codexResumeKind(null), "unknown");
+  assert.equal(codexResumeKindLabel("gateway"), "Ccode 网关");
+  assert.equal(codexResumeKindLabel("chatgpt"), "ChatGPT 官方");
+  assert.equal(codexResumeKindLabel("disk", "custom"), "Codex 客户端 · custom");
+  assert.equal(codexResumeKindLabel("unknown"), "");
+  assert.equal(codexSessionChannelChip(null), null);
+  assert.equal(codexSessionChannelChip("ccode")?.label, "Ccode 网关");
+  assert.equal(
+    codexSessionChannelChip("custom")?.label,
+    "Codex 客户端 · custom",
+  );
+});
+
+test("skipDisconnectedOfficial：未登录跳过官方，没有网关才回落", () => {
+  const profiles = [official("p-official"), api("p-api")];
+  assert.deepEqual(
+    skipDisconnectedOfficial(profiles, false).map((p) => p.id),
+    ["p-api"],
+  );
+  assert.deepEqual(
+    skipDisconnectedOfficial(profiles, true).map((p) => p.id),
+    ["p-official", "p-api"],
+  );
+  assert.deepEqual(
+    skipDisconnectedOfficial([official("p-official")], false).map((p) => p.id),
+    ["p-official"],
   );
 });
 

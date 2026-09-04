@@ -20,6 +20,8 @@ import {
   helpNotifyKeys,
   helpPreview,
   helpSignature,
+  inboxTaskLabel,
+  inboxTaskLine,
   isHelpDismissed,
   filterDismissed,
 } from "../inbox";
@@ -52,7 +54,6 @@ import {
   type WatchInboxDto,
 } from "../lit-watch";
 import { IS_MAC, IS_WINDOWS } from "../hotkeys";
-import { AGENTS } from "../types";
 import type {
   HelpRequestDto,
   PendingArtifactDto,
@@ -1366,8 +1367,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   // 排序：冲突 > 待确认 > 可合并；为空时整个区块不渲染（零噪音）。
   // 「已回复」不进收件箱——回合结束每轮都发生、不阻塞决策（同口径：标签/项目区/通知均不打点）。
   const runItems = buildRunOverview(terminalRunInputs).items;
-  const tabLabel = (agentId: string, title: string, cwdLabel: string) =>
-    `${agentId ? `${AGENTS.find((a) => a.id === agentId)?.label ?? agentId} · ` : ""}${title}（${cwdLabel}）`;
+
   // 收件箱条目为可序列化数据（action 描述而非闭包）：镜像进 store 供 App 标题栏收件箱共用，
   // 点击统一走 store.ts 的 runInboxAction 派发
   const depItem = depInboxItem(depCheck);
@@ -1384,8 +1384,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         dot: "bg-warn-text",
         // 基准已前进：继续按旧两侧选边是在解过期冲突，必须先重新同步
         text: health[w.id]?.staleBase
-          ? `「${w.repoName} / ${w.name}」有合并冲突，且基准已前进——需重新同步`
-          : `「${w.repoName} / ${w.name}」有合并冲突`,
+          ? inboxTaskLine(w.name, "重新同步（基准已前进）")
+          : inboxTaskLine(w.name, "解决冲突"),
         actionLabel: health[w.id]?.staleBase ? "重新同步" : "解决冲突",
         action: {
           type: "review" as const,
@@ -1398,9 +1398,14 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       .map((it) => ({
         key: `confirm:${it.tabId}`,
         dot: "bg-warn-text",
-        text: `${tabLabel(it.agentId, it.title, it.cwdLabel)} 待你确认`,
+        text: inboxTaskLine(
+          inboxTaskLabel({ title: it.title, cwdLabel: it.cwdLabel }),
+          "看待确认",
+        ),
         actionLabel: "去处理",
-        action: { type: "tab" as const, tabId: it.tabId },
+        action: it.runId
+          ? { type: "run" as const, runId: it.runId }
+          : { type: "tab" as const, tabId: it.tabId },
       })),
     // 外部运行（无终端标签）的会话：后端直查尾部状态，待确认时进收件箱
     ...sessions
@@ -1413,7 +1418,13 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       .map((s) => ({
         key: `live:${s.agent}:${s.sessionId}`,
         dot: "bg-warn-text",
-        text: `${AGENTS.find((a) => a.id === s.agent)?.label ?? s.agent} · ${s.customTitle ?? s.title ?? "未命名对话"}（${pathBaseName(s.projectPath)}）外部运行中，待你确认`,
+        text: inboxTaskLine(
+          inboxTaskLabel({
+            title: s.customTitle ?? s.title,
+            cwdLabel: pathBaseName(s.projectPath),
+          }),
+          "看待确认",
+        ),
         actionLabel: "去查看",
         action: {
           type: "session" as const,
@@ -1463,7 +1474,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       .map((w) => ({
         key: `ready:${w.id}`,
         dot: "bg-ok-text",
-        text: `「${w.repoName} / ${w.name}」可以合并`,
+        text: inboxTaskLine(w.name, "评审"),
         actionLabel: "去评审",
         action: { type: "review" as const, worktreePath: w.worktreePath },
       })),
@@ -1477,7 +1488,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       .map((a) => ({
         key: `artifacts:${a.workspaceId}`,
         dot: "bg-ok-text",
-        text: `「${a.repoName} / ${a.workspaceName}」预期产物已备齐，待你核验`,
+        text: inboxTaskLine(a.workspaceName, "核验产物"),
         actionLabel: "去核验",
         action: { type: "artifacts" as const, workspaceId: a.workspaceId },
       })),
@@ -1491,7 +1502,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       .map((h) => ({
         key: `help:${h.root}`,
         dot: "bg-warn-text",
-        text: `「${h.repoName} / ${h.workspaceName ?? "主仓"}」有 ${h.items.length} 条人工请求：${helpPreview(h.items[0])}`,
+        text: inboxTaskLine(
+          h.workspaceName ?? "主仓",
+          `看人工请求（${helpPreview(h.items[0])}）`,
+        ),
         actionLabel: "去查看",
         dismissSignature: helpSignature(h.items),
         action: { type: "help" as const, projectRoot: h.root },

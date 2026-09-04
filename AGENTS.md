@@ -35,6 +35,7 @@ Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）—�
 - 项目列表**从各 agent 历史会话自动聚合并分类**，辅以手动添加
 - token/费用统计随 P3 顺带做，不提前
 - **三平台（macOS/Windows/Linux）同步**支持，功能不得以平台为由裁剪
+- **多 Agent 工作台（v3.221 / v3.222）**：产品一等对象是 Project → Task → Run，终端标签是 Run 的视图；并行只来自人声明或模板，禁止自动拆任务 / 智能路由；Agent 是 Runtime，CLI 是第一种实现。科研/编程两套 worktree 库不合并。工作台「正在进行」只列交互活，无头（定时雷达等）不进主卡、不进本项目会话。改工作台主卡、标签生命周期、编程并行、无头入口、AgentSpec 执行形态前必读 `docs/conventions/agent-workbench.md`
 
 ## 构建与运行
 
@@ -156,6 +157,12 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 分发状态徽标 mcpDistBadge（modified/missing/disabled_externally 三异常态文案与识别色）+
                              # 命令路径告警徽标 mcpCmdPathBadge（relative/missing）与收编解析附注 mcpPathResolveNote
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
+  run-model.ts               # Project→Task→Run 前端镜像：inferTaskKind / 工作台白名单 isWorkbenchSurfaceRun
+                             # （登录/无头/空闲 shell 不进「正在进行」；阅读标签还开着则进；tests/run-model.test.ts）
+  coding-lanes.ts            # 编程车道覆盖层：有树无行按分支现算、theme 分组、空闲/Agent
+                             # （tests/coding-lanes.test.ts）
+  agent-caps.ts              # 能力表前端消费：定时任务禁选未验证无头、grok 无沙箱附注
+                             # （tests/agent-caps.test.ts）
   work-mode.ts               # 项目工作方式（科研/编程/办公）与编程状态归类、办公文档类型/预览形态；
                              # 文件行「进行中」只认 officeFileReuseKey 对上的活标签（仓级仍 isOfficeInProgress）
                              # （lockWorkModeFromConfig / codingFactChips / groupByWorkMode 项目栏分段；
@@ -247,8 +254,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # （tests/custom-theme.test.ts）
   profile-copy.ts            # profile 跨 agent 复制纯逻辑
   resume-profile.ts          # 恢复会话的 profile 挑选纯逻辑：codex 内联 provider 会话（rollout 记
-                             # model_provider="ccode" 或派生名 ccode-<网关短id>）按网关挑绑定；软停用（hiddenProfiles）
-                             # 跳过停用项——wishedId 指向停用项同样跳过，全停用时回落含停用项池不拦死
+                             # model_provider="ccode" 或派生名 ccode-<网关短id>）按网关挑绑定；
+                             # openai→官方账号（未登录改网关）；其他名字（客户端 custom 等）只挑网关、不掉进官方；
+                             # 软停用（hiddenProfiles）跳过停用项——wishedId 指向停用项同样跳过，全停用时回落含停用项池不拦死
                              # （tests/resume-profile.test.ts）
   combo-field.ts             # 网关库逐模型策略三态（edit/readonly/hidden）纯逻辑（tests/combo-field.test.ts）
   store.ts                   # zustand 状态
@@ -493,6 +501,9 @@ src-tauri/src/
   citation.rs                # 引用健康检查：.md 引用键（[@key]/多键/[-@key]）对照 references.bib（白名单同 pdf.rs 口径）
   handoff.rs                 # 接力（§11.3 机制四）：简报生成（脱敏+64KB）、提炼接力（build_session_digest AI 蒸馏全会话 +
                              # finalize_digest_brief 初稿写回）、handoff_links 接力链登记/固化
+  runs.rs                    # 一次干活身份（app.db runs 表）：交互 pty_spawn 必有 id，无头 internal；
+                             # 关标签不删行；收件箱 action.run 可恢复；登录标签不建行
+  custom_runtime.rs          # 自定义 Runtime：用户登记命令，隔离目录里当 shell 跑；相对路径拒写；无密钥/会话/MCP
   coding.rs                  # 编程项目 git 原语：worktree list / 从基准或已有本地·远程分支建树（~/ccode/worktrees）、
                              # origin 身份 + 相对上游 behind、fetch / pull --ff-only / push、合并进基准、
                              # Desktop CLI 打开该树 / gh --web 开 PR（CodingOpDto；不走科研工作区库）；overview 按树/分支并行 git
@@ -570,6 +581,7 @@ src-tauri/src/
 | 终端与工作台 | `docs/conventions/terminal.md` | PTY 回落 shell、标签持久化白名单、评审/冲突覆盖层、改动面板、收件箱与注意力规则、键盘流、分屏、关窗守卫、WebGL 探针、输入侧（图片粘贴/文件拖入/右键菜单/链接点击）、沉浸阅读区 |
 | 流水线与项目域 | `docs/conventions/pipeline.md` | 工作区创建/漂移/归档/删除、流水线开步/模板/编辑器、接力与提炼接力、任务卡、人工事项与讨论种子、agent 人工请求（help-wanted）、收件箱分类胶囊、示例课题、白话双层 |
 | 编程 Git / GitHub | `docs/conventions/coding-git.md` | **改编程页 git 前必读**：工作树 vs 主仓 vs GitHub Desktop、从基准开工、远程身份、PR 环、不做任意 git 命令框 |
+| 多 Agent 工作台对象 | `docs/conventions/agent-workbench.md` | **改工作台/并行/无头/Runtime 前必读（v3.221 定稿，v3.223 第 0–3 期已落地）**：Project→Task→Run、编程车道、RuntimeKind、禁止自动拆工；定时隔离树待拍板 |
 | 步骤工作面板 | `docs/conventions/step-panel.md` | **新增步骤/模板前必读**：七条硬规则（顺序即语义、空节点不出现、同一事实只说一次、孤立按钮、主路径唯一不设门控、角色标注）、问题该在什么时刻与层级出现（项目层/决策项/按需问/种子/人工事项五选一）、文案与术语、新增模板检查清单 |
 | 主题与设计系统 | `docs/conventions/design-system.md` | 主题令牌、字体栈、线条语言、控件密度、页面框架、对话页三栏、步进器规格、已否决设计 |
 | 网关与绑定（配置模型层） | `docs/conventions/profiles.md` | **改配置/注入/设为全局/模型能力/托盘前必读（已落地）**：网关×绑定拆层、binding id 复用、provider 派生名、relay 缓存键、求交器、体检与通道表不对称、迁移合并 |

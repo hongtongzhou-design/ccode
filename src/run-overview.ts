@@ -19,6 +19,8 @@ export interface RunOverviewInput {
   attention: "done" | "working" | "confirm" | null;
   /** 开聊复用键（办公问 AI 按文件）；恢复占位标签没有 */
   reuseKey?: string;
+  /** 第 1 期 Run 身份；无头不进此列表 */
+  runId?: string;
 }
 
 export interface RunOverviewItem extends RunOverviewInput {

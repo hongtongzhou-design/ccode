@@ -528,6 +528,43 @@ function WorkbenchPage({
                   </button>
                 )}
               </div>
+              {hero.runs.length > 1 && (
+                <ul className="mt-2 space-y-0.5">
+                  {hero.runs.map((r) => (
+                    <li key={r.tabId}>
+                      <button
+                        type="button"
+                        className="flex h-7 w-full items-center gap-2 rounded-md px-1 text-left text-xs text-l3 hover:bg-hover hover:text-l2"
+                        onClick={() => {
+                          setFocusTabReq(r.tabId);
+                          setPage("terminal");
+                        }}
+                      >
+                        <span
+                          className={`size-1.5 shrink-0 rounded-full ${
+                            r.attention === "confirm"
+                              ? "bg-warn-text"
+                              : "bg-ok-text"
+                          }`}
+                        />
+                        <span className="min-w-0 flex-1 truncate">
+                          {r.taskLabel}
+                          {r.agentId ? (
+                            <span className="ml-1.5 text-l4">
+                              {agentLabel(r.agentId)}
+                            </span>
+                          ) : null}
+                        </span>
+                        {r.attention === "confirm" ? (
+                          <span className="shrink-0 text-micro text-warn-text">
+                            待确认
+                          </span>
+                        ) : null}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
             {nowItems.slice(1).map((item) => (
               <div
@@ -562,11 +599,19 @@ function WorkbenchPage({
                       <span className="ml-2 text-l4">{item.subtitle}</span>
                     ) : null}
                   </span>
-                  {item.runningCount > 0 && (
+                  {item.runningCount > 1 ? (
                     <span className="shrink-0 text-micro text-ok-text">
                       {item.runningCount} 个运行中
                     </span>
-                  )}
+                  ) : item.runs[0]?.taskLabel ? (
+                    <span className="max-w-[9rem] shrink-0 truncate text-micro text-l4">
+                      {item.runs[0].taskLabel}
+                    </span>
+                  ) : item.runningCount > 0 ? (
+                    <span className="shrink-0 text-micro text-ok-text">
+                      运行中
+                    </span>
+                  ) : null}
                   <span className="shrink-0 text-micro text-l4">继续</span>
                 </button>
                 {showCodexJump && (

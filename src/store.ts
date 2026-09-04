@@ -217,6 +217,8 @@ export interface PendingTerminal {
       claim_next_session_for_step，让会话归到该步骤（「本步骤的对话」按 stepName 过滤）。
       不在发起时提前登记——启动栏还可改 agent/目录，spawn 时的实时值才作数 */
   stepName?: string;
+  /** 第 1 期 Run 身份；恢复同一 Run 时带上 */
+  runId?: string;
 }
 
 /** 工作区页 / 改动面板 → 终端全宽审阅视图的一次性交接。 */
@@ -262,6 +264,7 @@ export interface InboxItem {
         url?: string;
       }
     | { type: "help"; projectRoot: string }
+    | { type: "run"; runId: string }
     | { type: "settings"; section: string }
     | { type: "profiles" };
 }
@@ -348,6 +351,38 @@ export function runInboxAction(item: InboxItem) {
       requestId: crypto.randomUUID(),
     });
     s.setPage("terminal");
+  } else if (item.action.type === "run") {
+    const runId = item.action.runId;
+    const live = s.terminalRunInputs.find((r) => r.runId === runId);
+    if (live) {
+      s.setFocusTabReq(live.tabId);
+      s.setPage("terminal");
+    } else {
+      void import("@tauri-apps/api/core").then(({ invoke }) =>
+        invoke<{
+          isolationPath: string;
+          agent: string;
+          profileId: string | null;
+          sessionId: string | null;
+          reuseKey: string | null;
+        } | null>("run_get", { id: runId }).then((run) => {
+          if (!run) return;
+          s.setPendingTerminal({
+            cwd: run.isolationPath,
+            extraEnv: {},
+            agentId: run.agent,
+            profileId: run.profileId ?? undefined,
+            reuseKey: run.reuseKey ?? undefined,
+            runId,
+            resume: run.sessionId
+              ? { agentId: run.agent, sessionId: run.sessionId }
+              : undefined,
+            autoStart: Boolean(run.sessionId),
+          });
+          s.setPage("terminal");
+        }),
+      );
+    }
   } else if (item.action.type === "tab") {
     s.setFocusTabReq(item.action.tabId);
     s.setPage("terminal");

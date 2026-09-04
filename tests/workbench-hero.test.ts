@@ -8,6 +8,7 @@ import {
   namedSessionTitle,
   pickWorkbenchHero,
   pickWorkbenchNow,
+  taskLabelForRun,
   workbenchRecentRows,
   workbenchRecentSessions,
   WORKBENCH_RECENT_LIMIT,
@@ -212,6 +213,14 @@ test("继续工作：有标签去终端，已添加去项目详情，否则真�
     model: "",
     attention: "working",
     runningCount: 1,
+    runs: [
+      {
+        tabId: "t9",
+        agentId: "codex",
+        attention: "working",
+        taskLabel: "Ccode",
+      },
+    ],
     source: "running",
   };
   assert.deepEqual(continueWorkbenchTarget(running), {
@@ -291,7 +300,16 @@ test("heroStatusLine 只描述这张卡上的 Agent", () => {
       attention: "working",
       registered: true,
     }),
-    "Codex 正在工作",
+    "2 个 Agent 在跑",
+  );
+  assert.equal(
+    heroStatusLine({
+      runningCount: 2,
+      agentLabel: "Codex",
+      attention: "confirm",
+      registered: true,
+    }),
+    "2 个 Agent 在跑 · Codex 在等你确认",
   );
   assert.equal(
     heroStatusLine({
@@ -446,4 +464,121 @@ test("正在进行：确认优先，并行项目都在，安静项目不进", ()
   assert.equal(items[1]?.subtitle, "文献检索");
   assert.equal(items[0]?.runningCount, 1);
   assert.equal(items[0]?.attention, "confirm");
+  assert.equal(items[0]?.runs.length, 1);
+  assert.equal(items[0]?.runs[0]?.tabId, "pay");
+});
+
+test("正在进行：还开着的阅读标签算干活，无头不算", () => {
+  const items = pickWorkbenchNow({
+    seeds: [
+      {
+        path: demo.path,
+        name: demo.name,
+        registered: true,
+        workMode: "research",
+        subtitle: null,
+        needsYou: false,
+      },
+    ],
+    runs: [
+      run({
+        tabId: "read",
+        reuseKey: `reader:${demo.path}`,
+        running: false,
+        shell: true,
+        cwd: demo.path,
+        title: "阅读 · paper",
+      }),
+      run({
+        tabId: "watch",
+        reuseKey: "watch:1:/p",
+        running: true,
+        cwd: demo.path,
+      }),
+    ],
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.runs[0]?.tabId, "read");
+});
+
+test("正在进行：登录标签不算干活", () => {
+  const items = pickWorkbenchNow({
+    seeds: [
+      {
+        path: ccode.path,
+        name: ccode.name,
+        registered: true,
+        workMode: "coding",
+        subtitle: null,
+        needsYou: false,
+      },
+    ],
+    runs: [
+      run({
+        tabId: "login",
+        reuseKey: "login:codex",
+        running: true,
+        cwd: ccode.path,
+      }),
+    ],
+  });
+  assert.equal(items.length, 0);
+});
+
+test("taskLabelForRun：占位「终端」回落到目录尾段", () => {
+  assert.equal(
+    taskLabelForRun({ title: "feature/login", cwd: "/repo/wt" }),
+    "feature/login",
+  );
+  assert.equal(
+    taskLabelForRun({ title: "终端", cwd: "/Users/me/ccode/worktrees/app/login" }),
+    "login",
+  );
+});
+
+test("正在进行：同一项目两次 Run 都挂在卡上，待确认排前面", () => {
+  const items = pickWorkbenchNow({
+    seeds: [
+      {
+        path: ccode.path,
+        name: ccode.name,
+        registered: true,
+        workMode: "coding",
+        subtitle: null,
+        needsYou: false,
+        extraRoots: [
+          "/Users/me/ccode/worktrees/Ccode/login-ui",
+          "/Users/me/ccode/worktrees/Ccode/login-api",
+        ],
+      },
+    ],
+    runs: [
+      run({
+        tabId: "ui",
+        title: "feature/login-ui",
+        agentId: "claude-code",
+        running: true,
+        attention: "working",
+        cwd: "/Users/me/ccode/worktrees/Ccode/login-ui",
+      }),
+      run({
+        tabId: "api",
+        title: "feature/login-api",
+        agentId: "codex",
+        running: true,
+        attention: "confirm",
+        cwd: "/Users/me/ccode/worktrees/Ccode/login-api",
+      }),
+    ],
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.runningCount, 2);
+  assert.equal(items[0]?.tabId, "api");
+  assert.equal(items[0]?.agentId, "codex");
+  assert.equal(items[0]?.attention, "confirm");
+  assert.deepEqual(
+    items[0]?.runs.map((r) => r.tabId),
+    ["api", "ui"],
+  );
+  assert.equal(items[0]?.runs[0]?.taskLabel, "feature/login-api");
 });

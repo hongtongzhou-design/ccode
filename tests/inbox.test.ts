@@ -7,6 +7,8 @@ import {
   helpSignature,
   inboxCategoryOf,
   inboxCategoryLabel,
+  inboxTaskLabel,
+  inboxTaskLine,
   isHelpDismissed,
   parseHelpDismissed,
 } from "../src/inbox.ts";
@@ -23,6 +25,26 @@ test("inboxCategoryOf：key 前缀推导类别，confirm: 与 live: 合并为待
   assert.equal(inboxCategoryOf("lit:s-1:2026-08-18"), "lit");
   assert.equal(inboxCategoryOf("dep:git"), "dep");
   assert.equal(inboxCategoryOf("update:0.1.1"), "update");
+});
+
+test("inboxTaskLine：去「任务」做什么", () => {
+  assert.equal(inboxTaskLine("文献精读", "看待确认"), "去「文献精读」看待确认");
+  assert.equal(inboxTaskLine("  ", "解决冲突"), "去「这项工作」解决冲突");
+});
+
+test("inboxTaskLabel：工作区名优先，占位标题回落目录", () => {
+  assert.equal(
+    inboxTaskLabel({ workspaceName: "lit-notes", title: "终端", cwdLabel: "notes" }),
+    "lit-notes",
+  );
+  assert.equal(
+    inboxTaskLabel({ title: "终端", cwdLabel: "feature-login" }),
+    "feature-login",
+  );
+  assert.equal(
+    inboxTaskLabel({ title: "feature/login", cwdLabel: "login" }),
+    "feature/login",
+  );
 });
 
 test("inboxCategoryOf：未知前缀回落待确认（不静默丢失）", () => {

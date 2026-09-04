@@ -8,6 +8,7 @@ import {
   parseGitRemoteUrl,
   remotePickerRows,
   shouldWarnEnterPrimaryBase,
+  nextLaneBranchName,
 } from "../src/coding-git.ts";
 
 function ok(url: string) {
@@ -190,4 +191,10 @@ test("选择层：占用禁用、远程已有本地不重复、cap 与搜索", (
     ).length,
     0,
   );
+});
+
+test("nextLaneBranchName：再开一条预填", () => {
+  assert.equal(nextLaneBranchName("feature/login"), "feature/login-2");
+  assert.equal(nextLaneBranchName("feature/login-2"), "feature/login-3");
+  assert.equal(nextLaneBranchName("  "), "");
 });

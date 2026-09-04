@@ -1,6 +1,7 @@
 //! 编程项目：git 原语工作树 / 分支台（不走科研工作区库）。
 //! 新工作树落 `~/ccode/worktrees/<仓库名>/<分支路径>`；`git worktree list` 是事实来源。
 
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -312,6 +313,21 @@ pub struct CodingOverviewDto {
     pub merging_cwd: Option<String>,
     pub origin: Option<CodingRemoteDto>,
     pub remote_branches: Vec<CodingRemoteBranchDto>,
+    /// 车道覆盖层（app.db）；有树无行时前端按分支名现算
+    #[serde(default)]
+    pub lanes: Vec<CodingLaneDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodingLaneDto {
+    pub id: String,
+    pub repo_path: String,
+    pub name: String,
+    pub theme: Option<String>,
+    pub branch: String,
+    pub worktree_path: String,
+    pub current_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -486,6 +502,7 @@ fn overview_at(repo: &Path) -> Result<CodingOverviewDto, String> {
             merging_cwd: None,
             origin: None,
             remote_branches: Vec::new(),
+            lanes: Vec::new(),
         });
     }
     let base = crate::workspaces::detect_base_branch(&repo);
@@ -740,7 +757,160 @@ fn overview_at(repo: &Path) -> Result<CodingOverviewDto, String> {
         merging_cwd,
         origin: origin_dto(&repo),
         remote_branches,
+        lanes: list_lanes_for(&repo),
     })
+}
+
+fn ensure_lanes_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS coding_lanes (
+          id TEXT PRIMARY KEY,
+          repo_path TEXT NOT NULL,
+          name TEXT NOT NULL,
+          theme TEXT,
+          branch TEXT NOT NULL,
+          worktree_path TEXT NOT NULL,
+          current_run_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_coding_lanes_repo ON coding_lanes(repo_path);",
+    )
+    .map_err(|e| format!("初始化 coding_lanes 表失败: {e}"))
+}
+
+fn list_lanes_for(repo: &Path) -> Vec<CodingLaneDto> {
+    let Ok(conn) = crate::sessions::open_db() else {
+        return Vec::new();
+    };
+    if ensure_lanes_schema(&conn).is_err() {
+        return Vec::new();
+    }
+    let key = crate::projects::canonical_key(repo);
+    let mut stmt = match conn.prepare(
+        "SELECT id, repo_path, name, theme, branch, worktree_path, current_run_id
+         FROM coding_lanes WHERE repo_path = ?1 ORDER BY created_at",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(params![key], |r| {
+        Ok(CodingLaneDto {
+            id: r.get(0)?,
+            repo_path: r.get(1)?,
+            name: r.get(2)?,
+            theme: r.get(3)?,
+            branch: r.get(4)?,
+            worktree_path: r.get(5)?,
+            current_run_id: r.get(6)?,
+        })
+    });
+    match rows {
+        Ok(iter) => iter.flatten().collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+pub(crate) fn repo_path_for_worktree(isolation: &str) -> Option<String> {
+    let Ok(conn) = crate::sessions::open_db() else {
+        return None;
+    };
+    if ensure_lanes_schema(&conn).is_err() {
+        return None;
+    }
+    let mut stmt = conn
+        .prepare("SELECT repo_path, worktree_path FROM coding_lanes")
+        .ok()?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .ok()?;
+    let mut best: Option<(usize, String)> = None;
+    for (repo, wt) in rows.flatten() {
+        if crate::paths::path_within(isolation, &wt) {
+            let len = wt.len();
+            if best.as_ref().map(|(l, _)| len > *l).unwrap_or(true) {
+                best = Some((len, repo));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+pub(crate) fn touch_lane_current_run(worktree: &str, run_id: &str) {
+    let Ok(conn) = crate::sessions::open_db() else {
+        return;
+    };
+    if ensure_lanes_schema(&conn).is_err() {
+        return;
+    }
+    let _ = conn.execute(
+        "UPDATE coding_lanes SET current_run_id=?2 WHERE worktree_path=?1",
+        params![worktree, run_id],
+    );
+    let key = crate::projects::canonical_key(Path::new(worktree));
+    if key != worktree {
+        let _ = conn.execute(
+            "UPDATE coding_lanes SET current_run_id=?2 WHERE worktree_path=?1",
+            params![key, run_id],
+        );
+    }
+}
+
+#[tauri::command]
+pub async fn coding_upsert_lane(
+    repo_path: String,
+    worktree_path: String,
+    branch: String,
+    name: Option<String>,
+    theme: Option<String>,
+    id: Option<String>,
+) -> Result<CodingLaneDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo = PathBuf::from(crate::projects::canonical_key(&expand(&repo_path)));
+        let wt = expand(&worktree_path);
+        let conn = crate::sessions::open_db()?;
+        ensure_lanes_schema(&conn)?;
+        let id = id
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let name = name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| branch.clone());
+        let theme = theme.and_then(|s| {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        });
+        let now = chrono::Local::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO coding_lanes (id, repo_path, name, theme, branch, worktree_path, current_run_id, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,NULL,?7)
+             ON CONFLICT(id) DO UPDATE SET name=?3, theme=?4, branch=?5, worktree_path=?6",
+            params![
+                id,
+                repo.to_string_lossy().as_ref(),
+                name,
+                theme,
+                branch,
+                wt.to_string_lossy().as_ref(),
+                now,
+            ],
+        )
+        .map_err(|e| format!("保存车道失败: {e}"))?;
+        Ok(CodingLaneDto {
+            id,
+            repo_path: repo.to_string_lossy().into_owned(),
+            name,
+            theme,
+            branch,
+            worktree_path: wt.to_string_lossy().into_owned(),
+            current_run_id: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("保存车道失败: {e}"))?
 }
 
 fn local_branch_exists(repo: &Path, branch: &str) -> bool {
@@ -770,14 +940,29 @@ fn finish_create(
     created_initial: bool,
 ) -> Result<CodingOpDto, String> {
     let ov = overview_at(repo)?;
+    let base = ov.base_branch.clone();
     let Some(wt) = ov.worktrees.into_iter().find(|w| w.branch == branch) else {
         let _ = fs::remove_dir_all(dest);
         return Ok(op_err("git_failed", "工作树已创建，但列表里还看不到"));
     };
+    write_lane_task_md(dest, branch, &base);
     let mut dto = op_ok(format!("已创建工作树 {branch}"));
     dto.created_initial_commit = Some(created_initial);
     dto.worktree = Some(wt);
     Ok(dto)
+}
+
+/// 编程树最短任务书：已有不覆盖；失败不阻断建树。TASK.md 进 .git/info/exclude。
+fn write_lane_task_md(dest: &Path, branch: &str, base: &str) {
+    crate::projects::exclude_task_md(dest);
+    let path = dest.join("TASK.md");
+    if path.exists() {
+        return;
+    }
+    let body = format!(
+        "# {branch}\n\n- 基准：{base}\n- 意图：{branch}\n\n先读本文件再改代码。只改这棵树，不要切回主仓文件夹。\n"
+    );
+    let _ = crate::profiles::atomic_write(&path, &body);
 }
 
 fn create_with_source(
@@ -1622,6 +1807,11 @@ mod tests {
         assert_eq!(wt.branch, "feature/login");
         assert!(!wt.is_primary);
         assert!(Path::new(&wt.path).is_dir());
+        let task = Path::new(&wt.path).join("TASK.md");
+        assert!(task.is_file());
+        let task_text = fs::read_to_string(&task).unwrap();
+        assert!(task_text.contains("feature/login"));
+        assert!(task_text.contains("main"));
         let ov2 = overview_at(&repo).unwrap();
         assert!(ov2.worktrees.iter().any(|w| w.branch == "feature/login"));
         assert!(ov2.branches.iter().any(|b| b.name == "feature/login"));

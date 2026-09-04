@@ -1192,6 +1192,7 @@ export interface CodingOverviewDto {
   mergingCwd?: string | null;
   origin?: CodingRemoteDto | null;
   remoteBranches?: CodingRemoteBranchDto[];
+  lanes?: CodingLaneDto[];
 }
 
 export interface CodingMergeDto {
@@ -1293,6 +1294,48 @@ export interface AgentCapabilitiesDto {
   };
   /** reasoningEffort 已知档位集（非空 = 表单出下拉，空 = 自由输入） */
   effortOptions: string[];
+  /** 想法期只读硬保护（readonly_args 非空） */
+  readonly: CapabilityFlagDto;
+  /** 无头/定时写盘：不支持则禁选；支持但有 reason 则当附注（grok 无沙箱） */
+  headlessWrite: CapabilityFlagDto;
+  /** local_cli / headless；cloud 不预研 */
+  runtimeKinds: string[];
+}
+
+export interface RunDto {
+  id: string;
+  projectRoot: string | null;
+  taskKind: string;
+  taskRef: string | null;
+  isolationPath: string;
+  runtime: string;
+  agent: string;
+  profileId: string | null;
+  permission: string;
+  reuseKey: string | null;
+  sessionId: string | null;
+  internal: boolean;
+  sentinel: boolean;
+  createdAt: string;
+  closedAt: string | null;
+}
+
+export interface CustomRuntimeDto {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  createdAt: string;
+}
+
+export interface CodingLaneDto {
+  id: string;
+  repoPath: string;
+  name: string;
+  theme: string | null;
+  branch: string;
+  worktreePath: string;
+  currentRunId: string | null;
 }
 
 // ===== 定时雷达（src-tauri/src/scheduler.rs） =====

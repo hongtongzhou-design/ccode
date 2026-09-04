@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  codingTerminalLaunch,
   kickoffLaunchLabel,
   pickKickoffLaunch,
 } from "../src/kickoff-launch.ts";
@@ -48,6 +49,28 @@ test("pickKickoffLaunch：都没有则用列表第一个", () => {
   const picked = pickKickoffLaunch(profiles, null);
   assert.equal(picked?.profileId, "p-claude");
   assert.equal(picked?.model, "sonnet");
+});
+
+test("codingTerminalLaunch：勾过默认才自动启动", () => {
+  assert.equal(codingTerminalLaunch(profiles, null)?.autoStart, false);
+  assert.equal(
+    codingTerminalLaunch(profiles, {
+      agentId: "codex",
+      profileId: "p-codex",
+      model: "gpt-5",
+      useDefault: true,
+    })?.autoStart,
+    true,
+  );
+  assert.equal(
+    codingTerminalLaunch(profiles, {
+      agentId: "codex",
+      profileId: "gone",
+      model: "gpt-5",
+      useDefault: true,
+    })?.autoStart,
+    false,
+  );
 });
 
 test("kickoffLaunchLabel：没有连接时说人话", () => {

@@ -763,6 +763,11 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 | v3.218 | **自定义定时任务 = 巡检技能 + 挂日程**（用户：除文献雷达外技能下拉不能用；复杂技能要跟 Agent 写完再落盘）。种类 = 文献雷达 / 已有「巡检」技能 / 新建。新建：意图+日程 → 跟 AI 写 `.ccode/drafts/watch-*.md` → 确认才入库并分发、再 `create_schedule`。`Schedule.skill` 用目录名。非 lit-watch 跑前检查已分发。不在任务记录里存 prompt。 |
 | v3.219 | **定时任务入口按工作方式露面**（用户：无流程科研页没有；编程要不要放）。无流程科研挂主区雷达下（该页无 ⋯，抽屉进不去）；有流程仍在项目设置抽屉。编程右侧会话栏下与办公同款。 |
 | v3.220 | **档案卡文件头勿删注释**（用户：GitHub Desktop 丢弃未跟踪 `.ccode/` 后网页设计掉回科研）。`work_mode` 只在 `project.toml`，缺省 research。写入时补两行文件头（缺则补、已有不重复），Git 客户端 diff 先看到勿删说明。不把工作方式再抄一份进 app.db。 |
+| v3.221 | **多 Agent 工作台对象模型定稿**（规格 `docs/conventions/agent-workbench.md`）。产品合同：人指挥的工作台，不是 CLI 聚合器，也不是自动拆工的 OS。一等对象 Project → Task → Run；终端标签是 Run 的视图。并行只来自人声明或模板（编程「再开一条」/Lane），禁止自动拆任务与智能路由（v3.5/v3.7 维持）。科研/编程两套 worktree 库不合并。Agent 是 Runtime，CLI 是第一种实现（LocalCli / Headless / Custom；Cloud 等稳定官方 API 再加规格，不预研不自建）。分期：0 表面优化（工作台列出多次 Run、编程再开一条与最短 TASK.md、标签/收件箱先任务名、能力表只读/无头）→ 1 Run 表 → 2 编程 Lane → 3 RuntimeKind+Custom。定时写入进隔离树仍待拍板（推荐方案已写入该约定 §7）。不为 OS 叙事重做八页信息架构。 |
+| v3.222 | **第 1 期「正在进行」不含无头**（用户：定时雷达/阅读问 AI/无头没有保留价值，会变成信息噪声）。机器层仍可给无头 Run 编号（对账、失败归因、继续标 `internal` 不进本项目会话）；人看见的工作台「正在进行」只列交互活（开步、工作树、普通终端、阅读区**仍开着的**标签）。无头成功只更新雷达/收件箱，失败一条「巡检没跑完」，不冒充可恢复对话。规格改 `docs/conventions/agent-workbench.md` §4。 |
+| v3.223 | **第 1–3 期落地**：`runs` 表（交互 spawn 必有 id，无头 internal；工作台过滤 login/watch；收件箱 `action.run` 可恢复）；编程 `coding_lanes` 主题分组 + 再开一条可填主题；自定义运行时（设置「数据与存储」登记，工作树 ⋯ 跑，相对路径拒写）。Cloud Runtime 不实现。 |
+| v3.223 | **Codex 三条渠道分开**（用户：Ccode 里 401 Missing bearer，同一会话在 Codex 客户端能继续）。根因是自动恢复把磁盘 `custom` / 未登录官方接到 `-c model_provider="openai"` 且清掉密钥。`pickResumeProfile`：`ccode*`→网关，`openai`→官方（未登录改网关），其他名字→只挑网关；启动栏未登录官方不预选，硬启动先说明；对话页标渠道。不把客户端渠道伪装成官方。 |
+| v3.224 | **第 0–3 期收口**：工作台「正在进行」含还开着的阅读/任务标签（含自定义运行时），仍排除登录、无头、空闲未命名 shell；交互 Run 补 project_root/task_ref，无头一次性 prompt = discuss；编程行展示车道名与空闲/Agent，⋯ 点选自定义运行时并登记 `runtime=custom` 的 Run。定时隔离树仍待拍板（§7）。 |
 
 ## 11. 演进线（2026-08 定稿）
 
@@ -833,6 +838,9 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 - AI 全自动写论文绕过评审（底线）
 - keyring 回退（cdhash 坑，v0.3 已定论）
 - 会话「无缝继续」表述（技术不存在，一律称接力）
+- 把科研 `workspaces` 与编程 `coding.rs` 并成一个库（隔离语义统一、表不合并；v3.202 / v3.221）
+- 为「操作系统」叙事重做侧栏与八页信息架构（v3.221：对象模型升级，表面仍是工作台）
+- 自研云端 Agent / 预研未存在的 Cloud API（v3.221：有稳定官方 API 再加 Adapter）
 
 ### 11.6 主要风险
 
@@ -850,3 +858,4 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 - API 连接默认必须有 Ccode 密钥；只有用户明确勾选「本地端点无密钥」时才清理继承环境并允许无 key 启动。连接创建后 Agent 不可直接改，跨 Agent 使用复制；会话成功关联后记录 profile provenance。
 - 「接力」是唯一的跨 Agent 交接表述，禁用「无缝继续」。
 - 科研语义只进模板/数据/技能包，不进引擎逻辑。
+- **多 Agent 工作台（v3.221 / v3.222 / v3.224）**：一等对象是 Project → Task → Run，不是终端标签；并行只来自人声明或模板；Agent 是 Runtime，CLI 是第一种实现。工作台「正在进行」只列交互活（含还开着的阅读标签），无头不进主卡。细则 `docs/conventions/agent-workbench.md`。

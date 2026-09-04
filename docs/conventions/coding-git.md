@@ -7,6 +7,7 @@
 | 状态 | Accepted（v3.202） |
 | 范围 | `work_mode = coding` 的项目页（`CodingProjectView` + `coding.rs`），不改科研工作区库 |
 | 前置决策 | 架构 v3.179 / v3.180 / v3.190：编程 = git 原语工作树台，**不做转换、不做任意 git 命令框** |
+| 上层对象 | 工作树仍是 Git 事实来源。人声明的并行（「再开一条」、Lane 主题分组）是覆盖层，规格见 `docs/conventions/agent-workbench.md` 第 0/2 期；**不**把本文件的树并进科研 `workspaces` 表 |
 
 ---
 

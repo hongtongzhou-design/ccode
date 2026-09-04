@@ -10,6 +10,7 @@ export interface RecoverableTerminalTab {
   profileId: string;
   model: string;
   sessionId: string | null;
+  runId?: string | null;
 }
 
 export interface RecoverableTerminalState {
@@ -38,6 +39,7 @@ function parseTab(value: unknown): RecoverableTerminalTab | null {
     profileId: textField(tab.profileId, 256) ?? "",
     model: textField(tab.model, 512) ?? "",
     sessionId: textField(tab.sessionId, 256),
+    runId: textField(tab.runId, 64),
   };
 }
 
@@ -71,6 +73,7 @@ export function serializeRecoverableTerminalState(
     profileId: tab.profileId.slice(0, 256),
     model: tab.model.slice(0, 512),
     sessionId: tab.sessionId?.slice(0, 256) ?? null,
+    runId: tab.runId?.slice(0, 64) ?? null,
   }));
   const activeIndex = tabs.length > 0
     ? Math.min(Math.max(Math.trunc(state.activeIndex), 0), tabs.length - 1)

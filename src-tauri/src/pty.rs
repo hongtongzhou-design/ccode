@@ -35,6 +35,8 @@ struct PtyEntry {
     purpose: PtyPurpose,
     /// 启动目录用于工作区生命周期保护；不用实时 cwd，避免 agent 子命令短暂切目录造成漏判。
     initial_cwd: String,
+    /// 交互 Run 身份；进程退出时 close。
+    run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +284,8 @@ pub struct SpawnResult {
     /// 实际生效的模型（前端留空时后端兜底为 profile 首个模型）——
     /// 回传给前端同步标签状态，否则状态栏在兜底路径下无模型可显示
     pub model: Option<String>,
+    /// 交互 Run id；登录标签为空
+    pub run_id: Option<String>,
 }
 
 /// 支持 --session-id <uuid> 的 agent（AgentSpec.fixed_session_id；matrix：claude-code、qwen、codebuddy），
@@ -299,6 +303,7 @@ fn spawn_tracked(
     mut cmd: CommandBuilder,
     cwd: &str,
     purpose: PtyPurpose,
+    run_id: Option<String>,
 ) -> Result<String, String> {
     // 声明现代终端能力：缺少这些时 CLI 会按哑终端处理，输出退化为黑白
     cmd.env("TERM", "xterm-256color");
@@ -355,6 +360,7 @@ fn spawn_tracked(
             bracketed_paste: bracketed_paste.clone(),
             purpose,
             initial_cwd: cwd.to_string(),
+            run_id: run_id.clone(),
         },
     );
 
@@ -407,6 +413,9 @@ fn spawn_tracked(
         if let Some(mut entry) = entry {
             // wait 失败按异常退出（-1）上报，不误报正常退出
             let code = entry.child.wait().map(|s| s.exit_code() as i64).unwrap_or(-1);
+            if let Some(run_id) = entry.run_id {
+                let _ = crate::runs::close_run_impl(&run_id, None);
+            }
             let _ = app.emit(&exit_event, code);
         }
     });
@@ -436,6 +445,8 @@ pub fn pty_spawn(
     readonly: Option<bool>,
     // 恢复会话时 rollout 记下的 provider（旧 "ccode" 或派生名 ccode-<gid>）
     resume_provider: Option<String>,
+    reuse_key: Option<String>,
+    run_id: Option<String>,
 ) -> Result<SpawnResult, String> {
     let selected = model.filter(|m| !m.trim().is_empty());
     let mut profile = store.get_with_model(&profile_id, selected.as_deref())?;
@@ -519,17 +530,40 @@ pub fn pty_spawn(
     } else {
         None
     };
+    let opened = crate::runs::open_for_interactive_spawn(
+        &agent_id,
+        &profile_id,
+        &expand_tilde(&cwd),
+        reuse_key.as_deref(),
+        resume_session_id.as_deref().or(session_hint.as_deref()),
+        readonly.unwrap_or(false),
+        run_id.as_deref(),
+    )?;
+    if opened.is_none() {
+        let reuse = reuse_key.as_deref().unwrap_or("");
+        if !reuse.starts_with("login:") {
+            return Err("交互启动必须先登记任务".into());
+        }
+    }
+    let opened_id = opened.as_ref().map(|r| r.id.clone());
+    if let (Some(id), Some(sid)) = (opened_id.as_deref(), session_hint.as_deref()) {
+        let _ = crate::runs::attach_session_impl(id, sid);
+    }
     let pty_id = match spawn_tracked(
         &app,
         manager.inner(),
         cmd,
         &expand_tilde(&cwd),
         PtyPurpose::Agent,
+        opened_id.clone(),
     ) {
         Ok(pty_id) => pty_id,
         Err(error) => {
             if let Some(claim_id) = registered_claim {
                 crate::sessions::release_session_claim_impl(&claim_id);
+            }
+            if let Some(id) = opened_id {
+                let _ = crate::runs::close_run_impl(&id, None);
             }
             return Err(error);
         }
@@ -546,6 +580,7 @@ pub fn pty_spawn(
         session_hint,
         prompt_dropped: plan.prompt_dropped,
         model,
+        run_id: opened_id,
     })
 }
 
@@ -559,6 +594,8 @@ pub fn shell_spawn(
     extra_env: Option<std::collections::HashMap<String, String>>,
     // script = 工作区 run 脚本；其他/缺省 = 普通登录 shell
     purpose: Option<String>,
+    // 自定义 Runtime 等：进程退出时 close 该 Run
+    run_id: Option<String>,
 ) -> Result<String, String> {
     let (shell, shell_args) = if purpose.as_deref() == Some("script") {
         script_shell_argv()?
@@ -579,7 +616,14 @@ pub fn shell_spawn(
     } else {
         PtyPurpose::Shell
     };
-    spawn_tracked(&app, manager.inner(), cmd, &expand_tilde(&cwd), purpose)
+    spawn_tracked(
+        &app,
+        manager.inner(),
+        cmd,
+        &expand_tilde(&cwd),
+        purpose,
+        run_id.filter(|s| !s.trim().is_empty()),
+    )
 }
 
 /// 登录 shell 的程序与参数（纯函数，便于单测）。

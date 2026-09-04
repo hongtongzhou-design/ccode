@@ -854,6 +854,12 @@ pub struct AgentCapabilitiesDto {
     /// 请求策略 reasoningEffort 的已知档位（非空 = 前端出下拉，空 = 自由输入）。
     /// 只收实证值集：claude /effort 闭集、opencode 配置枚举、codex catalog 模板、grok README
     pub effort_options: Vec<&'static str>,
+    /// 想法期只读硬保护：readonly_args 非空 = supported
+    pub readonly: CapabilityFlagDto,
+    /// 无头/定时写盘：未实证则 supported=false 或 reason 写人话（qwen 禁选、grok 标无沙箱）
+    pub headless_write: CapabilityFlagDto,
+    /// 执行形态：九家均为 local_cli + headless；cloud 不预研
+    pub runtime_kinds: Vec<&'static str>,
 }
 
 /// 逐 agent 的策略通道形态说明（求交 DTO 下发，前端策略编辑区展示；None = 标准形态不用说）
@@ -947,6 +953,27 @@ fn flag(supported: bool, reason: Option<&'static str>) -> CapabilityFlagDto {
     CapabilityFlagDto { supported, reason }
 }
 
+fn readonly_cap(spec: &AgentSpec) -> CapabilityFlagDto {
+    if spec.readonly_args.is_empty() {
+        flag(
+            false,
+            Some("没有只读/计划模式参数，只有对话里的软约束"),
+        )
+    } else {
+        flag(true, None)
+    }
+}
+
+/// 定时/无头写盘能力：只认二进制与既有调研，未实证不假装安全。
+fn headless_write_cap(agent: &str) -> CapabilityFlagDto {
+    match agent {
+        "qwen" => flag(false, Some("无头写盘未验证，定时任务请换别家")),
+        "grok" => flag(true, Some("无沙箱（--yolo 全放行）")),
+        "codex" => flag(true, None),
+        _ => flag(true, Some("权限未实测")),
+    }
+}
+
 /// 九家的三项能力一览（前端置灰/提示与后端报错同源）
 #[tauri::command]
 pub fn agent_capabilities() -> Vec<AgentCapabilitiesDto> {
@@ -968,6 +995,9 @@ pub fn agent_capabilities() -> Vec<AgentCapabilitiesDto> {
             },
             request_policy: request_policy_support(s.id),
             effort_options: effort_options(s.id),
+            readonly: readonly_cap(s),
+            headless_write: headless_write_cap(s.id),
+            runtime_kinds: vec!["local_cli", "headless"],
         })
         .collect()
 }
@@ -1417,6 +1447,16 @@ mod tests {
         assert_eq!(qwen_dto.request_policy.max_output_tokens, "inject");
         assert_eq!(qwen_dto.request_policy.custom_headers, "unknown");
         assert_eq!(qwen_dto.effort_options, Vec::<&str>::new());
+        assert!(!qwen_dto.readonly.supported);
+        assert!(!qwen_dto.headless_write.supported);
+        assert!(qwen_dto.headless_write.reason.unwrap().contains("未验证"));
+        assert!(claude_dto.readonly.supported);
+        let grok_caps = agent_capabilities()
+            .into_iter()
+            .find(|c| c.agent == "grok")
+            .unwrap();
+        assert!(grok_caps.headless_write.supported);
+        assert!(grok_caps.headless_write.reason.unwrap().contains("无沙箱"));
         assert_eq!(agent_spec("qwen").unwrap().effort_levels.map(|(l, _)| l.len()), Some(5));
         assert_eq!(agent_spec("gemini").unwrap().effort_levels, None);
         assert_eq!(agent_spec("codex").unwrap().effort_levels, None);

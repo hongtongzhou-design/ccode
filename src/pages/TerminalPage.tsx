@@ -48,7 +48,7 @@ import {
   mergeConversationPages,
   shouldAutoPeek,
 } from "../chat-handoff";
-import { AGENTS } from "../types";
+import { AGENTS, type OfficialAccountStatusDto } from "../types";
 import { cwdIsCodingWorktree } from "../coding-git";
 import { loadCodingOverview } from "../components/CodingProjectView";
 import { normalizeWorkMode } from "../work-mode";
@@ -65,7 +65,10 @@ import ReaderOverlay from "../components/ReaderOverlay";
 import { renderTaskMd } from "../pipeline-start";
 import { formatPdfExcerptPrompt, readerReuseKey } from "../reader";
 import { defaultCommitMessage } from "../git-commit-message";
-import { pickResumeProfile } from "../resume-profile";
+import {
+  pickResumeProfile,
+  skipDisconnectedOfficial,
+} from "../resume-profile";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
 import {
   isUnsafeLitProjectDir,
@@ -238,6 +241,7 @@ export interface TabStatus {
   sessionId: string | null;
   /** agent 启动成功时刻（ms epoch；终端状态栏运行时长用；shell/未启动为 null） */
   startedAt: number | null;
+  runId: string | null;
 }
 
 /** TerminalView 暴露给父级的动作表（查找图标 / 聊天发送 / 改目录等；回调经 ref 转发，始终最新） */
@@ -392,6 +396,8 @@ const TerminalView = memo(function TerminalView({
   submitCsiU = false,
   restored,
   stepClaimName,
+  reuseKey,
+  initialRunId,
   externalCwd,
   onConsumeExternalCwd,
   onStatus,
@@ -444,6 +450,8 @@ const TerminalView = memo(function TerminalView({
   restored?: boolean;
   /** 步骤认领（「跟 AI 商量一下」）：launch 时以最终 agent/cwd 登记会话归该步骤 */
   stepClaimName?: string;
+  reuseKey?: string;
+  initialRunId?: string;
   /** 最近项目「真进入」：把目标目录注入活动标签的启动栏（TerminalView 消费后清空） */
   externalCwd?: string | null;
   onConsumeExternalCwd?: () => void;
@@ -505,17 +513,44 @@ const TerminalView = memo(function TerminalView({
   const [profileId, setProfileId] = useState(
     initialProfileId ?? saved.profileId ?? "",
   );
+  const [officialSt, setOfficialSt] = useState<OfficialAccountStatusDto | null>(
+    null,
+  );
+  useEffect(() => {
+    let cancelled = false;
+    setOfficialSt(null);
+    invoke<OfficialAccountStatusDto>("official_account_status", { agentId })
+      .then((st) => {
+        if (!cancelled) setOfficialSt(st);
+      })
+      .catch(() => {
+        if (!cancelled) setOfficialSt(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
   // 换 agent 后按「显式默认 > 上次使用 > 该 agent 首个配置」预选（v3.88）。
   // 这才是用户心里的「启用某个配置」——不加 enabled 布尔（与注入语义打架，见 settings.rs）
+  // 官方账号未登录时不要自动预选：选了会打官方接口且不带密钥，报 401 Missing bearer。
   useEffect(() => {
     if (running || profileId) return;
+    const hasOfficial = profiles.some(
+      (p) => p.agent === agentId && p.accountType === "official",
+    );
+    if (hasOfficial && officialSt === null) return;
     const pick =
       settings?.defaultProfiles?.[agentId] ||
       localStorage.getItem(`ccode.lastProfile.${agentId}`) ||
       "";
-    const ok = profiles.find(
+    const remembered = profiles.find(
       (p) => p.id === pick && p.agent === agentId,
-    )?.id;
+    );
+    const rememberedOk =
+      remembered &&
+      (remembered.accountType !== "official" || officialSt?.connected)
+        ? remembered.id
+        : undefined;
     // 兜底挑首个时跳过停用项（停用的本意就是「别自动落到我头上」）；
     // 全被停用时仍从停用项里取，好过留空
     const visible = profiles.filter(
@@ -524,14 +559,22 @@ const TerminalView = memo(function TerminalView({
         !hiddenProfiles.includes(p.id) &&
         !p.slotMissing,
     );
+    const auto = skipDisconnectedOfficial(visible, officialSt?.connected);
     setProfileId(
-      ok ??
+      rememberedOk ??
+        auto[0]?.id ??
         visible[0]?.id ??
         profiles.find((p) => p.agent === agentId)?.id ??
         "",
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentId, profiles, settings?.defaultProfiles, settings?.hiddenProfiles]);
+  }, [
+    agentId,
+    profiles,
+    settings?.defaultProfiles,
+    settings?.hiddenProfiles,
+    officialSt,
+  ]);
   // 指定了配置时不要沿用上次启动留下的模型（官方账号会被 DeepSeek 顶掉）
   const [model, setModel] = useState(
     initialModel ?? (initialProfileId ? "" : saved.model) ?? "",
@@ -1046,7 +1089,10 @@ const TerminalView = memo(function TerminalView({
   }
 
   // 向标签条上报标题/运行状态；值没变就不惊动父组件
-  const title = initialTitle ?? selectedProfile?.name ?? agentLabel(agentId);
+  const title =
+    initialTitle?.trim() ||
+    (cwd ? basename(cwd) : "") ||
+    "终端";
   const [activePtyId, setActivePtyId] = useState<string | null>(null);
   // 真实 cwd 跟随：进程存活期间每 4s 问一次后端 PTY 进程的真实 cwd——shell 内 cd 后
   // 文件树/git 面板也能跟上（此前只认启动栏路径，切标签「不跟随」的根源之一）。
@@ -1119,6 +1165,7 @@ const TerminalView = memo(function TerminalView({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [visible, primaryFocus, welcomeVisible]);
+  const [runId, setRunId] = useState<string | null>(initialRunId ?? null);
   const [attention, setAttention] = useState<TabStatus["attention"]>(null);
   // hooks 精确注意力 confirm 时的「在等什么」摘要（审批卡片用；无 hooks/无详情字段为 null）
   const [confirmDetail, setConfirmDetail] = useState<string | null>(null);
@@ -1145,6 +1192,7 @@ const TerminalView = memo(function TerminalView({
         lastResumeRef.current ??
         resumeSessionId ??
         null,
+      runId,
     };
     const key = JSON.stringify(s);
     if (key !== lastReportRef.current) {
@@ -1165,6 +1213,7 @@ const TerminalView = memo(function TerminalView({
     sessionFile,
     resumeSessionId,
     startedAt,
+    runId,
     onStatus,
   ]);
 
@@ -1546,6 +1595,7 @@ const TerminalView = memo(function TerminalView({
           cwd,
           extraEnv: initialExtraEnv ?? null,
           purpose: "script",
+          runId: runId ?? initialRunId ?? null,
         });
         await attach(ptyId, "shell", { reset: true });
         setExited(false);
@@ -1556,6 +1606,8 @@ const TerminalView = memo(function TerminalView({
           await invoke("pty_write", { ptyId, data: `${prefillCommand}\n` });
         }
       } catch (e) {
+        const rid = runId ?? initialRunId;
+        if (rid) invoke("run_close", { id: rid }).catch(() => {});
         setError(String(e));
       }
     })();
@@ -1912,6 +1964,9 @@ const TerminalView = memo(function TerminalView({
     setLinkState("linked");
     setSyncState("polling");
     setLiveSession(ctx.agentId, sessionId, tabId);
+    if (runId) {
+      invoke("run_attach_session", { id: runId, sessionId }).catch(() => {});
+    }
     void invoke("set_session_profile_command", {
       agent: ctx.agentId,
       sessionId,
@@ -2030,6 +2085,20 @@ const TerminalView = memo(function TerminalView({
     options?: { prompt?: string; readonly?: boolean },
   ): Promise<{ ptyId: string; promptDropped: boolean } | null> {
     setError(null);
+    if (
+      selectedProfile?.accountType === "official" &&
+      officialSt &&
+      !officialSt.connected
+    ) {
+      const ok = await confirmDialog(
+        "「官方账号」走 ChatGPT / OpenAI 官方接口，不带网关密钥。当前还没登录，启动会变成 401（Missing bearer）。请到连接页登录，或改选网关配置。",
+        { confirmText: "仍要启动" },
+      );
+      if (!ok) {
+        setBarExpanded(true);
+        return null;
+      }
+    }
     if (!(await checkWorkingDirectory(cwd))) {
       setBarExpanded(true);
       return null;
@@ -2056,6 +2125,7 @@ const TerminalView = memo(function TerminalView({
         sessionHint: string | null;
         promptDropped: boolean;
         model: string | null;
+        runId: string | null;
       }>("pty_spawn", {
         agentId,
         profileId,
@@ -2081,7 +2151,10 @@ const TerminalView = memo(function TerminalView({
         linkClaimId: tabId,
         // 「聊想法」只读模式：后端按注册表注入只读/计划模式参数（不支持的 CLI 只有 prompt 软约束）
         readonly: options?.readonly ?? readonly ?? null,
+        reuseKey: reuseKey ?? null,
+        runId: runId ?? initialRunId ?? null,
       });
+      if (res.runId) setRunId(res.runId);
       // 后端兜底模型回传（前端留空 = profile 首个模型）：同步进标签状态，
       // 否则状态栏/对话头部在兜底路径下没有模型可显示；lastLaunch/模型历史也记生效值
       const effectiveModel = res.model ?? model;
@@ -2514,7 +2587,9 @@ const TerminalView = memo(function TerminalView({
                 .filter((p) => !hiddenProfiles.includes(p.id))
                 .map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.name}
+                    {p.accountType === "official" && officialSt && !officialSt.connected
+                      ? `${p.name}（未登录）`
+                      : p.name}
                   </option>
                 ))}
               {agentProfiles.some((p) => hiddenProfiles.includes(p.id)) && (
@@ -2523,7 +2598,9 @@ const TerminalView = memo(function TerminalView({
                     .filter((p) => hiddenProfiles.includes(p.id))
                     .map((p) => (
                       <option key={p.id} value={p.id}>
-                        {p.name}
+                        {p.accountType === "official" && officialSt && !officialSt.connected
+                          ? `${p.name}（未登录）`
+                          : p.name}
                       </option>
                     ))}
                 </optgroup>
@@ -2981,6 +3058,7 @@ interface Tab {
   /** 步骤认领（pendingTerminal.stepName 透传）：launch 时以最终 agent/cwd 登记，
       让该标签产出的会话归到该步骤。仅内存标记，不进重启持久化白名单 */
   stepName?: string;
+  runId?: string;
 }
 
 export default function TerminalPage({ visible }: { visible: boolean }) {
@@ -3003,6 +3081,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       initialProfileId: tab.profileId,
       initialModel: tab.model,
       resumeSessionId: tab.sessionId ?? undefined,
+      runId: tab.runId ?? undefined,
       restored: true,
     }));
     return {
@@ -3569,16 +3648,16 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           tabId: tab.id,
           value: {
             label:
-              status?.title ??
-              tab.initialTitle ??
-              agentLabel(
-                status?.agentId ?? tab.initialAgentId ?? "claude-code",
-              ),
+              (status?.title ??
+                tab.initialTitle ??
+                basename(status?.cwd ?? tab.initialCwd ?? "")) ||
+              "终端",
             cwd: status?.cwd ?? tab.initialCwd ?? "~",
             agentId: status?.agentId ?? tab.initialAgentId ?? "claude-code",
             profileId,
             model: status?.model ?? tab.initialModel ?? "",
             sessionId,
+            runId: status?.runId ?? tab.runId ?? null,
           },
         },
       ];
@@ -3819,6 +3898,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       reuseKey?: string;
       /** 步骤认领（pendingTerminal.stepName 透传）：launch 时登记会话归步骤 */
       stepName?: string;
+      runId?: string;
     }): string => {
       const t: Tab = {
         id: crypto.randomUUID(),
@@ -3838,6 +3918,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         forkSource: init?.forkSource,
         reuseKey: init?.reuseKey,
         stepName: init?.stepName,
+        runId: init?.runId,
       };
       setTabs((prev) => [...prev, t]);
       setActiveId(t.id);
@@ -3918,7 +3999,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   /** 工作树「在此打开新终端」：新建标签并预填 cwd，用户选 agent/profile 后启动 */
   const openTerminalAt = useCallback(
     (path: string) => {
-      addTab({ cwd: path });
+      addTab({ cwd: path, title: basename(path) });
     },
     [addTab],
   );
@@ -3989,10 +4070,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       setReviewPath(null);
       const pt = pendingTerminal;
       // 会话恢复：profile 依次 autoLaunchProfileId → ccode.lastProfile → 该 agent 首个配置；
-      // codex 内联 provider 会话（rollout 记 model_provider="ccode"）只在带 Base URL 的
-      // 配置里挑——否则 -c 定义不注入，codex 报 "Model provider `ccode` not found"
-      // （兼容规则单一出处：resume-profile.ts pickResumeProfile）
-      const agentId = pt.agentId ?? pt.resume?.agentId;
+      // Codex 三条渠道分开挑（网关 / ChatGPT 官方 / 客户端磁盘渠道），见 pickResumeProfile。
+      const launchAgentId = pt.agentId ?? pt.resume?.agentId;
       let profileId = pt.profileId;
       let model = pt.model;
       if (pt.resume) {
@@ -4044,7 +4123,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         cwd: pt.cwd,
         extraEnv: pt.extraEnv,
         title: pt.title,
-        agentId,
+        agentId: launchAgentId,
         profileId,
         model,
         resumeSessionId: pt.resume?.sessionId,
@@ -4056,6 +4135,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         readonly: pt.readonly,
         reuseKey: pt.reuseKey,
         stepName: pt.stepName,
+        runId: pt.runId,
       });
       // 纯 shell/脚本标签（登录、CLI 自更新、run 脚本）没有会话可供聊天层展示——
       // 显式落终端面（当前默认面层已是终端，这里守住「未来默认值再变也不回到 chat」的口径；
@@ -4193,16 +4273,24 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       st.settings?.defaultProfiles?.[agentId] ||
       localStorage.getItem(`ccode.lastProfile.${agentId}`) ||
       "";
-    const ok = st.profiles.find((p) => p.id === pick && p.agent === agentId)?.id;
+    const remembered = st.profiles.find(
+      (p) => p.id === pick && p.agent === agentId,
+    );
+    const ok =
+      remembered && remembered.accountType !== "official"
+        ? remembered.id
+        : undefined;
     // 兜底挑首个时跳过停用项（同启动栏口径）；全被停用时仍从停用项里取，好过留空
     const hidden = st.settings?.hiddenProfiles ?? [];
     const visibleProfiles = st.profiles.filter(
       (p) => p.agent === agentId && !hidden.includes(p.id),
     );
+    const auto = skipDisconnectedOfficial(visibleProfiles, false);
     return {
       agentId,
       profileId:
         ok ??
+        auto[0]?.id ??
         visibleProfiles[0]?.id ??
         st.profiles.find((p) => p.agent === agentId)?.id ??
         "",
@@ -4719,6 +4807,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           shell: s?.shell ?? false,
           attention: s?.attention ?? null,
           reuseKey: t.reuseKey,
+          runId: s?.runId ?? t.runId,
         };
       }),
     [tabs, statuses],
@@ -5157,6 +5246,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 }
                 restored={t.restored}
                 stepClaimName={t.stepName}
+                reuseKey={t.reuseKey}
+                initialRunId={t.runId}
                 externalCwd={t.id === focusedId ? enterCwd : null}
                 onConsumeExternalCwd={consumeExternalCwd}
                 onStatus={reportStatus}
