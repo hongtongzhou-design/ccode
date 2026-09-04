@@ -7,6 +7,7 @@ import {
   groupSessionsByProjectPath,
   isCcodeAiTempCwd,
   sessionLooksInternal,
+  sessionExcludedFromProjectList,
   sessionTime,
   type QuickFilterId,
   type ScopeChip,
@@ -208,6 +209,51 @@ test("Ccode 无头 AI 临时目录：只认 ccode-ai-<uuid> 目录名", () => {
   );
   assert.equal(sessionLooksInternal(s({ internal: true, projectPath: "/w/alpha" })), true);
   assert.equal(sessionLooksInternal(s({ internal: false, projectPath: "/w/alpha" })), false);
+  assert.equal(
+    sessionLooksInternal(
+      s({
+        internal: false,
+        projectPath: "/w/alpha",
+        title: "你是科研文献快筛助手。根据下面给出的题录写解读",
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    sessionLooksInternal(
+      s({
+        internal: false,
+        projectPath: "/w/alpha",
+        title: "请使用 lit-watch 技能执行一次文献巡检：按 papers/watchlist.md",
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    sessionLooksInternal(s({ source: "ccode-ai", projectPath: "/w/alpha" })),
+    true,
+  );
+  const ask = s({
+    title: '请看这份文件："Addressing the failure of sulfonated"',
+  });
+  assert.equal(sessionLooksInternal(ask), false);
+  assert.equal(sessionExcludedFromProjectList(ask), true);
+  assert.equal(
+    sessionExcludedFromProjectList(
+      s({ title: "【阅读上下文】我在沉浸阅读区读 PDF：/tmp/a.pdf" }),
+    ),
+    true,
+  );
+  assert.equal(
+    sessionExcludedFromProjectList(
+      s({ title: "读 .ccode/handoff-20260822T021523Z.md 分叉简报" }),
+    ),
+    true,
+  );
+  assert.equal(
+    sessionExcludedFromProjectList(s({ title: "继续写实验" })),
+    false,
+  );
 });
 
 test("按项目分组跳过无头 AI 临时目录", () => {
@@ -218,6 +264,11 @@ test("按项目分组跳过无头 AI 临时目录", () => {
   const groups = groupSessionsByProjectPath([temp, real]);
   assert.equal(groups.length, 1);
   assert.equal(groups[0].path, "/w/alpha");
+  const radar = s({
+    projectPath: "/w/alpha",
+    title: "请使用 lit-watch 技能执行一次文献巡检：按 papers/watchlist.md",
+  });
+  assert.equal(groupSessionsByProjectPath([radar]).length, 0);
 });
 
 

@@ -1,6 +1,6 @@
 /**
  * 文献雷达（lit-watch）前端纯逻辑：日分组、周趋势、PDF 直链、精读清单拼接、
- * 已读判定、关联步骤漂移提醒、收件箱候选。与 DOM/Tauri 解耦（localStorage 薄层除外），
+ * 已读判定、关联步骤漂移提醒、收件箱候选、快筛解读 prompt/拆节。与 DOM/Tauri 解耦（localStorage 薄层除外），
  * 供 node --test 直接测；组件 LitWatchCard 保持薄。
  * DTO 与 src-tauri/src/lit_watch.rs 的 camelCase 序列化一一对应。
  */
@@ -31,6 +31,8 @@ export interface WatchEntryDto {
   rawLineRange: [number, number];
   /** 期刊指标（JCR2025 + 中科院分区表2025 合并，按期刊名规范化匹配）；未匹配/未装表为 null */
   metrics: JournalMetricsDto | null;
+  /** 已落盘的快筛解读（`.ccode/watch-explains.json`）；未解读为 null */
+  explain: string | null;
 }
 
 /** 单条命中的期刊指标（对照 lit_watch.rs 序列化） */
@@ -430,6 +432,73 @@ export function isRead(
   });
 }
 
+export interface PaperNoteLink {
+  notePath: string;
+  noteName: string;
+  pdfRel: string | null;
+}
+
+function fileStem(path: string): string {
+  const name = path.replace(/\\/g, "/").split("/").pop() ?? path;
+  return name.replace(/\.[^.]*$/, "");
+}
+
+/** 文献 PDF → 已有笔记：来源行优先，其次文件名规范化互相包含 */
+export function noteLinkForPaper(
+  pdfPath: string,
+  links: readonly PaperNoteLink[],
+): PaperNoteLink | null {
+  const pdfNorm = pdfPath.replace(/\\/g, "/").replace(/^\.\//, "");
+  const pdfFile = pdfNorm.split("/").pop() ?? pdfPath;
+  for (const link of links) {
+    const rel = link.pdfRel?.replace(/\\/g, "/").replace(/^\.\//, "");
+    if (!rel) continue;
+    if (
+      rel === pdfNorm ||
+      rel === pdfFile ||
+      pdfNorm.endsWith(`/${rel}`) ||
+      rel.endsWith(`/${pdfFile}`)
+    ) {
+      return link;
+    }
+  }
+  const pdfStem = normalizeTitle(fileStem(pdfPath));
+  if (!pdfStem) return null;
+  let best: PaperNoteLink | null = null;
+  let bestLen = 0;
+  for (const link of links) {
+    const n = normalizeTitle(fileStem(link.noteName));
+    if (!n) continue;
+    if (n === pdfStem) return link;
+    if (!(n.includes(pdfStem) || pdfStem.includes(n))) continue;
+    const shorter = n.length < pdfStem.length ? n : pdfStem;
+    if (shorter.length < 12) continue;
+    const len = Math.min(n.length, pdfStem.length);
+    if (len > bestLen) {
+      best = link;
+      bestLen = len;
+    }
+  }
+  return best;
+}
+
+/** 文献 PDF 是否已在精读清单：文件名 stem 与条目标题规范化互相包含 */
+export function paperIsIncluded(
+  pdfPath: string,
+  included: readonly { title: string }[],
+): boolean {
+  const n = normalizeTitle(fileStem(pdfPath));
+  if (!n) return false;
+  return included.some((e) => {
+    const t = normalizeTitle(e.title);
+    if (!t) return false;
+    if (n === t) return true;
+    if (!(n.includes(t) || t.includes(n))) return false;
+    const shorter = n.length < t.length ? n : t;
+    return shorter.length >= 12;
+  });
+}
+
 /** 精读条目对应的已下载 PDF：登记资源里 type=paper 且文件名与标题规范化互相包含 */
 export function paperResourceFor(
   entry: { title: string },
@@ -506,6 +575,78 @@ export function litInboxCandidates(
   return out;
 }
 
+// ===== 雷达快筛解读（标题+摘要，不是精读笔记） =====
+
+/** 解读输出的固定小标题；改 prompt 时同步 parseWatchExplain */
+export const WATCH_EXPLAIN_HEADINGS = [
+  "问题与动机",
+  "做法与对象",
+  "摘要声称的结果",
+  "局限与未写明",
+  "对本课题的用处",
+  "适用研究方向",
+] as const;
+
+/** 快筛解读 prompt：学术书面语、五节、禁止编造。有课题时末节对准课题。 */
+export function watchExplainPrompt(
+  entry: Pick<
+    WatchEntryDto,
+    "title" | "authors" | "source" | "journal" | "abstractFirst"
+  >,
+  topic: string | null | undefined,
+): string {
+  const topicText = topic?.trim() ?? "";
+  const lastHeading = topicText ? "对本课题的用处" : "适用研究方向";
+  const journal = entry.journal?.trim() ?? "";
+  const abs = entry.abstractFirst.trim() || "（无摘要）";
+  const authors = entry.authors.trim() || "（未提供）";
+  const source = entry.source.trim() || "（未提供）";
+  return `你是科研文献快筛助手。根据下面给出的题录写解读，供课题组扫读，不是精读笔记，不要装成读过全文。
+
+要求：
+- 中文学术书面语；不用「新路径」「高度有前景」「填补空白」这类空话
+- 只依据给定材料，不编造数据、机理细节、页码或参考文献
+- 摘要没写的写「摘要未写明」，不要脑补
+- 严格按下面五个小标题输出，标题单独成行，每节 2–4 句，不要开场白、不要编号、不要 Markdown
+
+问题与动机
+做法与对象
+摘要声称的结果
+局限与未写明
+${lastHeading}
+
+标题：${entry.title}
+作者：${authors}
+来源：${source}${journal ? `\n期刊：${journal}` : ""}
+摘要：${abs}${topicText ? `\n本课题：${topicText}` : ""}`;
+}
+
+/** 把模型输出拆成小标题 + 正文。对不上五个小标题则返回 null，调用方整段展示。 */
+export function parseWatchExplain(
+  text: string,
+): { heading: string; body: string }[] | null {
+  const headingSet = new Set<string>(WATCH_EXPLAIN_HEADINGS);
+  const sections: { heading: string; body: string }[] = [];
+  let current: { heading: string; lines: string[] } | null = null;
+  for (const line of text.replace(/\r\n/g, "\n").split("\n")) {
+    const t = line.trim();
+    if (headingSet.has(t)) {
+      if (current) {
+        const body = current.lines.join("\n").trim();
+        if (body) sections.push({ heading: current.heading, body });
+      }
+      current = { heading: t, lines: [] };
+      continue;
+    }
+    current?.lines.push(line);
+  }
+  if (current) {
+    const body = current.lines.join("\n").trim();
+    if (body) sections.push({ heading: current.heading, body });
+  }
+  return sections.length >= 3 ? sections : null;
+}
+
 /** 收件箱只对还在注册表里的项目出文献条目。已删/已移除的项目 schedules 可能还在，不能拿文件夹名继续提示。 */
 export function litInboxForRegisteredProjects(
   candidates: readonly LitInboxCandidate[],
@@ -515,6 +656,17 @@ export function litInboxForRegisteredProjects(
   return candidates.filter((c) =>
     projectPaths.some((p) => samePath(c.projectRoot, p, isWindows)),
   );
+}
+
+/** 收件箱按篇展开：取 inbox 末尾 count 条（新命中追加在后），每项目最多 maxPer 篇。 */
+export function papersForLitCandidate(
+  candidate: LitInboxCandidate,
+  entries: readonly WatchEntryDto[],
+  maxPer = 5,
+): WatchEntryDto[] {
+  const n = Math.min(Math.max(candidate.count, 0), maxPer, entries.length);
+  if (n <= 0) return [];
+  return entries.slice(-n).reverse();
 }
 
 // ===== 条目忽略（dismiss） =====

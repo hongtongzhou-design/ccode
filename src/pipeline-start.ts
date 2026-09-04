@@ -5,6 +5,7 @@ import { pickWorkspaceResume } from "./workspace-resume";
 import { DEFAULT_KICKOFF_PROMPT } from "./pipeline-presets";
 import { renderTaskMd } from "./task-md";
 export { renderTaskMd };
+import type { KickoffLaunch } from "./kickoff-launch";
 import type { PendingTerminal } from "./store";
 import type {
   ArtifactEntryDto,
@@ -89,6 +90,7 @@ export async function startPipelineStep({
   taskMdOverride,
   onError,
   onOpenTerminal,
+  launch,
 }: {
   projectPath: string;
   step: ProjectStepDto;
@@ -101,7 +103,10 @@ export async function startPipelineStep({
   onOpenTerminal: (
     ws: WorkspaceDto,
     initialPrompt?: string,
+    opts?: { autoStart?: boolean; launch?: KickoffLaunch },
   ) => void | Promise<void>;
+  /** 弹层已选定的 Agent/连接：有 profile 时自动启动，不再让人去运行页点「启动」 */
+  launch?: KickoffLaunch | null;
 }): Promise<void> {
   try {
     await invoke<EnsureGitDto>("ensure_git_repo", { path: projectPath });
@@ -172,7 +177,10 @@ export async function startPipelineStep({
     }
   }
   // 预填首条指令：跳到终端后用户确认配置点「启动」即自动注入，无需手动打字
-  await onOpenTerminal(ws, DEFAULT_KICKOFF_PROMPT);
+  await onOpenTerminal(ws, DEFAULT_KICKOFF_PROMPT, {
+    autoStart: Boolean(launch?.profileId),
+    launch: launch ?? undefined,
+  });
 }
 
 /** 工作区 → 终端的交接 payload：取端口段 env + 预填该目录上次使用的配置
@@ -183,6 +191,7 @@ export async function startPipelineStep({
 export async function buildWorkspaceTerminalRequest(
   ws: WorkspaceDto,
   initialPrompt?: string,
+  opts?: { autoStart?: boolean; launch?: KickoffLaunch },
 ): Promise<PendingTerminal> {
   const pairs = await invoke<[string, string][]>("workspace_env_for", {
     worktreePath: ws.worktreePath,
@@ -203,11 +212,12 @@ export async function buildWorkspaceTerminalRequest(
     title: ws.name,
     // resume 命中时以会话的 agent 为准（TerminalPage 的 resume 分支会自选 profile/model）；
     // 未命中按该目录上次使用的配置预填
-    agentId: resume?.agentId ?? last.agentId,
-    profileId: resume ? undefined : last.profileId,
-    model: resume ? undefined : last.model,
+    agentId: resume?.agentId ?? opts?.launch?.agentId ?? last.agentId,
+    profileId: resume ? undefined : (opts?.launch?.profileId ?? last.profileId),
+    model: resume ? undefined : (opts?.launch?.model ?? last.model),
     resume: resume ?? undefined,
     initialPrompt,
+    autoStart: Boolean(opts?.autoStart && (opts.launch?.profileId || last.profileId)),
     reuseKey: workspaceReuseKey(ws),
   };
 }

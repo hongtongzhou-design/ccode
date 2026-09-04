@@ -60,6 +60,8 @@ export default function TaskCardsSection({
   onFocusIndex,
   onHumanChanged,
   onStartStep,
+  onReadPaper,
+  readPaperPrimary,
   focusDraft,
   onDraftChanged,
   onOpenResources,
@@ -94,6 +96,8 @@ export default function TaskCardsSection({
   onHumanChanged?: () => void;
   /** 卡片「开工」：打开开工确认弹层（originCardId = 出处卡）；返回 Promise 供行内 busy 态跟随 */
   onStartStep: (index: number, originCardId?: string) => Promise<void> | void;
+  onReadPaper?: () => void;
+  readPaperPrimary?: boolean;
   /** 聚焦步骤的任务书草稿（v3.72；ProjectGroup 单一加载点下发）：discuss 节点状态与「聊任务书」指令用 */
   focusDraft?: { relPath: string; text: string | null } | null;
   /** 「◈ 沉淀进任务书」落盘后回调：ProjectGroup 即刻重读 focusDraft（不等页面刷新） */
@@ -781,6 +785,8 @@ export default function TaskCardsSection({
                 steps.findIndex((s) => s.name === focusStepDto.name),
               )
             }
+            onReadPaper={onReadPaper}
+            readPaperPrimary={readPaperPrimary}
             onChanged={onHumanChanged}
           />
         </div>

@@ -59,6 +59,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: npm ci
+      - name: 校验 tag 与应用版本一致
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const tag = process.env.GITHUB_REF_NAME.replace(/^v/, "");
+            const conf = require("./src-tauri/tauri.conf.json").version;
+            const pkg = require("./package.json").version;
+            const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8").match(/^version = "([^"]+)"/m)[1];
+            console.log({ tag, conf, pkg, cargo });
+            if (tag !== conf || tag !== pkg || tag !== cargo) {
+              console.error("发版 tag 必须与 package.json / tauri.conf.json / Cargo.toml 的 version 一致，否则 updater 不会提示已安装用户");
+              process.exit(1);
+            }
+          '
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

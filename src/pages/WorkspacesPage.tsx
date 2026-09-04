@@ -8,7 +8,12 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
-import { useAppStore, runInboxAction, type InboxItem } from "../store";
+import {
+  appUpdateInboxEntry,
+  runInboxAction,
+  useAppStore,
+  type InboxItem,
+} from "../store";
 import { absTime, relTime } from "../rel-time";
 import {
   groupInbox,
@@ -28,7 +33,6 @@ import { buildWorkspaceTerminalRequest } from "../pipeline-start";
 import {
   EmptyState,
   fieldClass,
-  FoldMark,
   inlineActionClass,
   NoticeBar,
   PageFrame,
@@ -38,18 +42,20 @@ import {
   secondaryActionClass,
 } from "../components/PageFrame";
 import { attributeToProject, buildRunOverview } from "../run-overview";
-import { depInboxItem } from "../dep-check";
+import { depInboxItem, type DepCheckDto } from "../dep-check";
 import {
   litInboxCandidates,
   litInboxForRegisteredProjects,
+  papersForLitCandidate,
   type LitInboxCandidate,
+  type WatchEntryDto,
+  type WatchInboxDto,
 } from "../lit-watch";
 import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import { AGENTS } from "../types";
 import type {
   HelpRequestDto,
   PendingArtifactDto,
-  PortInfoDto,
   DiscoveredResourceDto,
   ProjectConfigReadDto,
   ProjectDto,
@@ -61,6 +67,21 @@ import type {
   WorkspaceHealthDto,
   WsSettingsDto,
 } from "../types";
+import CodingProjectView, {
+  prefetchCodingOverview,
+} from "../components/CodingProjectView";
+import OfficeProjectView from "../components/OfficeProjectView";
+import {
+  WORK_MODE_HINT,
+  WORK_MODE_LABEL,
+  WORK_MODES,
+  RAIL_WORK_MODE_LABEL,
+  groupByWorkMode,
+  lockWorkModeFromConfig,
+  normalizeWorkMode,
+  type WorkMode,
+} from "../work-mode";
+import { sortWorkspacesByAttention } from "../project-status";
 
 /** 保留工作区的合并已完成，且分支尚未产生新的待合并提交。 */
 function isMerged(
@@ -99,55 +120,135 @@ async function fireHelpNotification(sourceCount: number) {
   });
 }
 
-/** 添加项目（§11.4 P1b）：目录已在弹窗外经系统对话框选定，这里只内联命名（WKWebView 无 window.prompt） */
+/** 添加项目：选目录后填名称并选工作方式（科研 / 编程 / 办公） */
 function AddProjectModal({
   path,
+  existingMode,
   onClose,
   onRegistered,
 }: {
   path: string;
+  /** 已注册项目的工作方式；有值则禁止改选（终身一张主界面） */
+  existingMode: WorkMode | null;
   onClose: () => void;
-  /** autoAdded = 注册时自动扫描并登记的资源条数（0 = 目录里没有 PDF/数据/引文） */
   onRegistered: (
     project: ProjectDto,
     scan: { added: number; total: number },
+    mode: WorkMode,
+    skipTemplate: boolean,
   ) => void;
 }) {
+  const depCheck = useAppStore((s) => s.depCheck);
   const [name, setName] = useState(pathBaseName(path));
-  const [topic, setTopic] = useState("");
+  const [mode, setMode] = useState<WorkMode>(existingMode ?? "research");
+  const [modeLocked, setModeLocked] = useState(existingMode != null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<ProjectConfigReadDto>("read_project_config", { path })
+      .then((read) => {
+        if (cancelled) return;
+        const lock = lockWorkModeFromConfig({
+          existingMode,
+          fileMode: read.config.workMode,
+          stepCount: read.config.steps?.length ?? 0,
+          pipelineOptOut: !!read.config.pipelineOptOut,
+        });
+        if (lock.locked) {
+          setMode(lock.mode);
+          setModeLocked(true);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [path, existingMode]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
+      // 提交时再读一遍档案卡：弹窗打开后立刻点添加时，预填 effect 可能还没回来，
+      // 不能把已是编程/办公的项目静默写回科研。
+      let chosen = mode;
+      let skipTemplate = modeLocked;
+      try {
+        const probe = await invoke<ProjectConfigReadDto>("read_project_config", {
+          path,
+        });
+        const lock = lockWorkModeFromConfig({
+          existingMode,
+          fileMode: probe.config.workMode,
+          stepCount: probe.config.steps?.length ?? 0,
+          pipelineOptOut: !!probe.config.pipelineOptOut,
+        });
+        if (lock.locked) {
+          chosen = lock.mode;
+          skipTemplate = true;
+          setMode(lock.mode);
+          setModeLocked(true);
+        }
+      } catch {
+        /* 尚无档案卡：用弹窗里选的 */
+      }
+      if (chosen === "coding") {
+        let dep = depCheck;
+        if (!dep) {
+          try {
+            dep = await invoke<DepCheckDto>("check_dependencies");
+          } catch {
+            setError(
+              "无法检测 Git 是否可用。请到设置页「诊断」里检查依赖后再添加。",
+            );
+            setBusy(false);
+            return;
+          }
+        }
+        if (dep.git.status === "clt_stub") {
+          setError(
+            "需要先安装 Xcode 命令行工具才能使用 Git。请到设置页「诊断」里安装。",
+          );
+          setBusy(false);
+          return;
+        }
+        const isRepo = await invoke<boolean>("git_is_repo", { path });
+        if (!isRepo) {
+          const ok = await confirmDialog(
+            "这个文件夹还不是 git 仓库。继续会在其中创建 .git，并写入一份编程用的 .gitignore（不含科研那套忽略 PDF 的规则）。之后才能用工作树和分支台。",
+            { confirmText: "初始化 git 并继续" },
+          );
+          if (!ok) {
+            setBusy(false);
+            return;
+          }
+          await invoke("ensure_git_repo", { path, workMode: "coding" });
+        }
+      }
       const project = await invoke<ProjectDto>("register_project", {
         path,
         name: name.trim(),
       });
-      const topicText = topic.trim();
-      // 注册即扫一次资源并登记：discover_at 是深度 3 的只读 stat（只认 pdf/csv/bib 等），
-      // 很便宜。原先要用户自己想起来去点「发现资源」——新用户根本不知道有这一步，
-      // 结果 TASK.md 的「项目资源」段空着，agent 看不到手边已有的文献。
-      // 只记路径不复制（机制一），条目可在资源面板随时删。
       let autoAdded = 0;
       let totalResources = 0;
       try {
         const read = await invoke<ProjectConfigReadDto>("read_project_config", {
           path,
         });
-        const found = await invoke<DiscoveredResourceDto[]>(
-          "discover_resources",
-          { path },
-        );
+        const found =
+          chosen === "research"
+            ? await invoke<DiscoveredResourceDto[]>("discover_resources", {
+                path,
+              })
+            : [];
         const fresh = found.filter((d) => !d.exists);
-        // 上限兜底：目录里堆着几百个 csv 时不把资源面板灌满，超了留给用户手动挑
         const AUTO_MAX = 60;
         const next = {
           ...read.config,
-          ...(topicText ? { topic: topicText } : {}),
+          workMode: chosen,
           resources: [
             ...read.config.resources,
             ...fresh.slice(0, AUTO_MAX).map((d) => ({
@@ -161,17 +262,24 @@ function AddProjectModal({
         };
         autoAdded = Math.min(fresh.length, AUTO_MAX);
         totalResources = next.resources.length;
-        if (autoAdded > 0 || topicText) {
-          await invoke("write_project_config", { path, config: next });
-        }
+        await invoke("write_project_config", { path, config: next });
       } catch (reason) {
-        // 注册已成功：扫描/写入失败不回滚，留在弹窗内报错由用户决定重试
+        try {
+          await invoke("set_work_mode", { projectRoot: path, mode: chosen });
+        } catch {
+          /* 注册已成功 */
+        }
         setError(
           `项目已注册，但写入 project.toml 失败：${String(reason)}`,
         );
         return;
       }
-      onRegistered(project, { added: autoAdded, total: totalResources });
+      onRegistered(
+        project,
+        { added: autoAdded, total: totalResources },
+        chosen,
+        skipTemplate,
+      );
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -206,20 +314,36 @@ function AddProjectModal({
             autoFocus
           />
         </label>
-        <label className="mb-4 block text-sm">
-          <span
-            className="mb-1 block text-xs text-l3"
-            title="每次开工时写进 TASK.md，给 Agent 交代研究背景"
-          >
-            课题主题（可选）
-          </span>
-          <input
-            className={fieldClass}
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            placeholder="如 GLP-1 受体激动剂的心血管结局"
-          />
-        </label>
+        <p className="mb-1 text-xs text-l3">工作方式</p>
+        <div
+          className="mb-4 grid gap-1.5"
+          role="radiogroup"
+          aria-label="工作方式"
+        >
+          {WORK_MODES.map((id) => (
+            <button
+              key={id}
+              type="button"
+              role="radio"
+              aria-checked={mode === id}
+              disabled={modeLocked && mode !== id}
+              onClick={() => {
+                if (!modeLocked) setMode(id);
+              }}
+              className={`rounded-md border px-3 py-2 text-left ${
+                mode === id
+                  ? "border-cta-bd bg-cta/15"
+                  : "border-field hover:bg-hover"
+              } disabled:cursor-not-allowed disabled:opacity-50`}
+            >
+              <span className="block text-sm text-l1">{WORK_MODE_LABEL[id]}</span>
+              <span className="block text-micro text-l4">
+                {WORK_MODE_HINT[id]}
+                {modeLocked && mode === id ? "（已选定，不可更改）" : ""}
+              </span>
+            </button>
+          ))}
+        </div>
         {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
         <div className="flex justify-end gap-2">
           <button
@@ -324,8 +448,14 @@ function useOpenInTerminal() {
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
   // 交接构造单一出处在 pipeline-start.ts（reuseKey 找回同工作区标签 + 无 prompt 时 resume 最近会话）
-  return async (ws: WorkspaceDto, initialPrompt?: string) => {
-    setPendingTerminal(await buildWorkspaceTerminalRequest(ws, initialPrompt));
+  return async (
+    ws: WorkspaceDto,
+    initialPrompt?: string,
+    opts?: Parameters<typeof buildWorkspaceTerminalRequest>[2],
+  ) => {
+    setPendingTerminal(
+      await buildWorkspaceTerminalRequest(ws, initialPrompt, opts),
+    );
     setPage("terminal");
   };
 }
@@ -671,170 +801,6 @@ function WorkspaceDetailsPopover({
   );
 }
 
-/** 端口运行时监控：默认折叠，首次展开才拉取，手动刷新，不轮询。
- *  归属点色：工作区/项目=绿（已认归属），段归属=琥珀（占了端口段但进程不在树内），其他=灰；
- *  列表按归属分「本应用」与「系统/其他」两段：本应用直接 SIGTERM，系统/其他终止前弹确认防误杀 */
-function PortsSection() {
-  const [open, setOpen] = useState(false);
-  const [ports, setPorts] = useState<PortInfoDto[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [killing, setKilling] = useState<number | null>(null);
-
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      setPorts(await invoke<PortInfoDto[]>("list_listening_ports"));
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function toggle() {
-    if (!open && ports === null) void load();
-    setOpen(!open);
-  }
-
-  async function onKill(port: PortInfoDto) {
-    // 只有 Ccode 之外的进程需要确认；本应用归属（工作区/项目/端口段）直接终止
-    if (
-      port.ownerKind === "other" &&
-      !(await confirmDialog(
-        `「${port.process || "未知进程"}」不是 Ccode 启动的进程（PID ${port.pid}，端口 ${port.port}）。终止它可能影响其他正在运行的应用。继续？`,
-        { danger: true },
-      ))
-    )
-      return;
-    setKilling(port.pid);
-    setError(null);
-    try {
-      await invoke("kill_port_process", { pid: port.pid });
-      await load();
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setKilling(null);
-    }
-  }
-
-  const dotClass: Record<PortInfoDto["ownerKind"], string> = {
-    workspace: "bg-ok-text",
-    project: "bg-ok-text",
-    range: "bg-warn-text",
-    other: "bg-l4",
-  };
-
-  // 归属分层：本应用（工作区/项目/端口段）与系统/其他分两段展示
-  const internalPorts = (ports ?? []).filter((p) => p.ownerKind !== "other");
-  const externalPorts = (ports ?? []).filter((p) => p.ownerKind === "other");
-
-  function renderPortRow(port: PortInfoDto) {
-    return (
-      <li
-        key={`${port.pid}-${port.port}`}
-        className="flex items-center gap-3 py-2"
-      >
-        <span className="w-14 shrink-0 font-mono text-sm text-l1">
-          {port.port}
-        </span>
-        <span
-          className="w-32 shrink-0 truncate text-xs text-l2"
-          title={`PID ${port.pid}`}
-        >
-          {port.process || `PID ${port.pid}`}
-        </span>
-        <span className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-inset px-2 text-xs text-l2">
-          <span className={`size-2 rounded-full ${dotClass[port.ownerKind]}`} />
-          {port.ownerLabel}
-        </span>
-        <span
-          className="min-w-0 flex-1 truncate font-mono text-xs text-l4"
-          title={port.cwd ?? ""}
-        >
-          {port.cwd ?? ""}
-        </span>
-        <button
-          type="button"
-          onClick={() => void onKill(port)}
-          disabled={killing === port.pid}
-          title={`终止进程（PID ${port.pid}）`}
-          className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-err-text disabled:opacity-50"
-        >
-          {killing === port.pid ? "终止中…" : "终止"}
-        </button>
-      </li>
-    );
-  }
-
-  return (
-    <section className="mt-7">
-      {/* 折叠区标题不画横线（区间分隔优先留白，去线条化 v3.85） */}
-      <div className="flex h-8 items-center">
-        <button
-          type="button"
-          onClick={toggle}
-          aria-expanded={open}
-          className="flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-sm font-medium text-l1"
-        >
-          <FoldMark open={open} boxed />
-          端口
-          {/* 计数只在展开后显示——「有几个端口在监听」是信息不是警报，折叠态不占注意力 */}
-          {open && ports !== null && (
-            <span className="text-xs font-normal text-l4">
-              {ports.length} 个监听中
-            </span>
-          )}
-        </button>
-        {open && (
-          <button
-            type="button"
-            onClick={() => void load()}
-            disabled={loading}
-            className="mr-2 inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
-          >
-            {loading ? "刷新中…" : "刷新"}
-          </button>
-        )}
-      </div>
-      {open && (
-        <div className="pb-1">
-          <p className="pt-2 text-xs text-l4">
-            「终止」发送退出信号（SIGTERM）；进程未退出时可稍候刷新再试。
-          </p>
-          {error && <p className="mt-2 text-sm text-err-text">{error}</p>}
-          {ports !== null && ports.length === 0 && !loading && (
-            <p className="py-3 text-xs text-l4">当前没有监听中的端口。</p>
-          )}
-          {ports !== null && ports.length > 0 && (
-            <div className="mt-1 space-y-3">
-              {(
-                [
-                  ["本应用", internalPorts, "本应用当前没有监听中的端口。"],
-                  ["系统/其他", externalPorts, "没有系统或其他进程占用的端口。"],
-                ] as const
-              ).map(([title, list, empty]) => (
-                <div key={title}>
-                  <p className="pt-1 text-micro text-l4">{title}</p>
-                  {list.length === 0 ? (
-                    <p className="py-1.5 text-xs text-l4">{empty}</p>
-                  ) : (
-                    <ul className="divide-y divide-hairline">
-                      {list.map(renderPortRow)}
-                    </ul>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
-
 export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [workspaces, setWorkspaces] = useState<WorkspaceDto[]>([]);
   const [settings, setSettings] = useState<Record<string, WsSettingsDto>>({});
@@ -883,6 +849,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   // P1b 项目分组：注册项目列表 + 每次刷新自增的令牌（触发各分组重读 project.toml）
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   const [refreshToken, setRefreshToken] = useState(0);
+  const [homeDir, setHomeDir] = useState("");
+  useEffect(() => {
+    invoke<string>("home_dir")
+      .then(setHomeDir)
+      .catch(() => {});
+  }, []);
   const [addProjectPath, setAddProjectPath] = useState<string | null>(null);
   // 刚注册的项目路径：对应分组显示一次性 git 初始化引导
   const [freshProjectPath, setFreshProjectPath] = useState<string | null>(null);
@@ -948,6 +920,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const profiles = useAppStore((s) => s.profiles);
   // 依赖体检镜像（store，启动时探测一次）：git 非 ok → 收件箱常驻「依赖」条目
   const depCheck = useAppStore((s) => s.depCheck);
+  const appUpdate = useAppStore((s) => s.appUpdate);
   // 收件箱「去核验」一次性请求：选中该工作区所属项目并展开其任务行的产物清单
   const artifactCheckReq = useAppStore((s) => s.artifactCheckReq);
   const setArtifactCheckReq = useAppStore((s) => s.setArtifactCheckReq);
@@ -963,6 +936,34 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const [helpRequests, setHelpRequests] = useState<HelpRequestDto[]>([]);
   // 文献雷达新命中（收件箱「文献」胶囊）：随 refresh 同频次拉 schedules，判定纯逻辑在 lit-watch.ts
   const [litCandidates, setLitCandidates] = useState<LitInboxCandidate[]>([]);
+  const [litEntriesByRoot, setLitEntriesByRoot] = useState<
+    Record<string, WatchEntryDto[]>
+  >({});
+
+  async function loadLitInbox() {
+    try {
+      const list = await invoke<ScheduleDto[]>("list_schedules");
+      const cands = litInboxCandidates(list);
+      setLitCandidates(cands);
+      const roots = [...new Set(cands.map((c) => c.projectRoot))];
+      const entries: Record<string, WatchEntryDto[]> = {};
+      await Promise.all(
+        roots.map(async (root) => {
+          try {
+            const inbox = await invoke<WatchInboxDto>("list_watch_entries", {
+              projectRoot: root,
+            });
+            entries[root] = inbox.entries;
+          } catch {
+            entries[root] = [];
+          }
+        }),
+      );
+      setLitEntriesByRoot(entries);
+    } catch {
+      /* 下轮重试 */
+    }
+  }
   // help: 条目屏蔽表（store 镜像 localStorage）：签名一致不生成条目，内容变了自动复现
   const helpDismissed = useAppStore((s) => s.helpDismissed);
   const dismissHelpRequest = useAppStore((s) => s.dismissHelpRequest);
@@ -1026,6 +1027,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         .then((list) => {
           setProjects(list);
           useAppStore.getState().setProjectPaths(list.map((p) => p.path));
+          for (const p of list) {
+            if (normalizeWorkMode(p.workMode) === "coding") {
+              prefetchCodingOverview(p.path);
+            }
+          }
         })
         .catch(() => {});
       setRefreshToken((t) => t + 1);
@@ -1112,9 +1118,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         .then(setHelpRequests)
         .catch(() => {});
       // 文献雷达新命中（收件箱「文献」胶囊）：同频次拉取，失败静默（下轮重试）
-      invoke<ScheduleDto[]>("list_schedules")
-        .then((list) => setLitCandidates(litInboxCandidates(list)))
-        .catch(() => {});
+      void loadLitInbox();
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -1164,9 +1168,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     listen<SchedulerRunDonePayload>("scheduler-run-done", () => {
-      invoke<ScheduleDto[]>("list_schedules")
-        .then((list) => setLitCandidates(litInboxCandidates(list)))
-        .catch(() => {});
+      void loadLitInbox();
     })
       .then((u) => (unlisten = u))
       .catch(() => {});
@@ -1287,6 +1289,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         list: workspaces.filter((w) => w.repoPath === repoPath),
       })),
   ];
+  // 栏内按工作方式分段；groups 本身仍是 last_opened 序，默认选中最近打开的那一项
+  const railSections = groupByWorkMode(groups, (g) =>
+    g.project ? g.project.workMode : "unregistered",
+  );
   const selectedGroup =
     groups.find((group) => group.key === selectedGroupKey) ?? groups[0] ?? null;
   // 顶栏上下文镜像（v3.88）：本页是唯一写入方，顶栏跨页只读消费，不新增任何请求
@@ -1365,6 +1371,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   // 收件箱条目为可序列化数据（action 描述而非闭包）：镜像进 store 供 App 标题栏收件箱共用，
   // 点击统一走 store.ts 的 runInboxAction 派发
   const depItem = depInboxItem(depCheck);
+  const updateItem = appUpdateInboxEntry(
+    appUpdate
+      ? { version: appUpdate.version, currentVersion: appUpdate.currentVersion }
+      : null,
+  );
   const inboxItems: InboxItem[] = [
     ...active
       .filter((w) => health[w.id]?.conflict)
@@ -1417,13 +1428,36 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       litCandidates,
       projects.map((p) => p.path),
       IS_WINDOWS,
-    ).map((c) => ({
-      key: `lit:${c.scheduleId}:${c.at}`,
-      dot: "bg-ok-text",
-      text: `文献雷达 · ${projects.find((p) => samePath(p.path, c.projectRoot))?.name ?? pathBaseName(c.projectRoot)}：${c.count} 条新命中`,
-      actionLabel: "去看看",
-      action: { type: "litWatch" as const, projectRoot: c.projectRoot },
-    })),
+    ).flatMap((c) => {
+      const papers = papersForLitCandidate(
+        c,
+        litEntriesByRoot[c.projectRoot] ?? [],
+      );
+      if (papers.length === 0) {
+        return [
+          {
+            key: `lit:${c.scheduleId}:${c.at}`,
+            dot: "bg-ok-text",
+            text: `文献雷达 · ${projects.find((p) => samePath(p.path, c.projectRoot))?.name ?? pathBaseName(c.projectRoot)}：${c.count} 条新命中`,
+            actionLabel: "去看看",
+            action: { type: "litWatch" as const, projectRoot: c.projectRoot },
+          },
+        ];
+      }
+      return papers.map((paper) => ({
+        key: `lit:${c.scheduleId}:${paper.id}`,
+        dot: "bg-ok-text",
+        text: paper.zhSummary || paper.title,
+        actionLabel: "开读",
+        action: {
+          type: "litWatch" as const,
+          projectRoot: c.projectRoot,
+          entryId: paper.id,
+          title: paper.title,
+          url: paper.url,
+        },
+      }));
+    }),
     ...active
       .filter((w) => health[w.id]?.readyToMerge && !health[w.id]?.conflict)
       .map((w) => ({
@@ -1497,6 +1531,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           },
         ]
       : []),
+    ...(updateItem ? [updateItem] : []),
   ];
 
   // 项目导航行的「待处理」分布（收件箱同款口径按项目摊开）：终端待确认 +
@@ -2003,56 +2038,74 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
               </button>
             </div>
             <div className="min-h-0 flex-1 overflow-auto py-1.5">
-              {groups.map((group) => {
-                const groupActive = group.list.filter(
-                  (workspace) => workspace.status === "active",
-                ).length;
-                // 待处理 = 工作区冲突/可合并 + 归属本项目的终端待确认/已完成/外部 live 待确认
-                const needsAttention =
-                  group.list.filter((workspace) => {
-                    const state = health[workspace.id];
-                    return state?.conflict || state?.readyToMerge;
-                  }).length + (navAttention.get(group.key) ?? 0);
-                const selected = selectedGroup?.key === group.key;
-                return (
-                  <button
-                    key={group.key}
-                    type="button"
-                    onClick={() => setSelectedGroupKey(group.key)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setRailMenu({ x: e.clientX, y: e.clientY, groupKey: group.key });
-                    }}
-                    title={group.repoPath}
-                    className={`mx-1.5 mb-1 flex w-[calc(100%-12px)] items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors ${
-                      selected
-                        ? "bg-rail-sel text-l1"
-                        : "text-l3 hover:bg-hover hover:text-l2"
+              {railSections.map((section, sectionIndex) => (
+                <section
+                  key={section.mode}
+                  aria-label={RAIL_WORK_MODE_LABEL[section.mode]}
+                >
+                  <p
+                    className={`px-4 text-micro text-l4 ${
+                      sectionIndex === 0 ? "pb-0.5 pt-0.5" : "pb-0.5 pt-2.5"
                     }`}
                   >
-                    <span
-                      className={`mt-1 size-2 shrink-0 rounded-full ${
-                        needsAttention > 0
-                          ? "bg-warn-text"
-                          : groupActive > 0
-                            ? "bg-ok-text"
-                            : "bg-l4"
-                      }`}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">
-                        {group.project?.name ?? group.repoName}
-                      </span>
-                      {/* 副行只留「待处理」（与收件箱同口径）；活跃任务数是纯状态，不占注意力 */}
-                      {needsAttention > 0 && (
-                        <span className="mt-0.5 block truncate text-xs text-l4">
-                          {needsAttention} 个待处理
+                    {RAIL_WORK_MODE_LABEL[section.mode]}
+                  </p>
+                  {section.items.map((group) => {
+                    const groupActive = group.list.filter(
+                      (workspace) => workspace.status === "active",
+                    ).length;
+                    // 待处理 = 工作区冲突/可合并 + 归属本项目的终端待确认/已完成/外部 live 待确认
+                    const needsAttention =
+                      group.list.filter((workspace) => {
+                        const state = health[workspace.id];
+                        return state?.conflict || state?.readyToMerge;
+                      }).length + (navAttention.get(group.key) ?? 0);
+                    const selected = selectedGroup?.key === group.key;
+                    return (
+                      <button
+                        key={group.key}
+                        type="button"
+                        onClick={() => setSelectedGroupKey(group.key)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setRailMenu({
+                            x: e.clientX,
+                            y: e.clientY,
+                            groupKey: group.key,
+                          });
+                        }}
+                        title={group.repoPath}
+                        className={`mx-1.5 mb-1 flex w-[calc(100%-12px)] items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors ${
+                          selected
+                            ? "bg-rail-sel text-l1"
+                            : "text-l3 hover:bg-hover hover:text-l2"
+                        }`}
+                      >
+                        <span
+                          className={`mt-1 size-2 shrink-0 rounded-full ${
+                            needsAttention > 0
+                              ? "bg-warn-text"
+                              : groupActive > 0
+                                ? "bg-ok-text"
+                                : "bg-l4"
+                          }`}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium">
+                            {group.project?.name ?? group.repoName}
+                          </span>
+                          {/* 副行只留「待处理」（与收件箱同口径）；类型已在组头，不逐行重复 */}
+                          {needsAttention > 0 && (
+                            <span className="mt-0.5 block truncate text-xs text-l4">
+                              {needsAttention} 个待处理
+                            </span>
+                          )}
                         </span>
-                      )}
-                    </span>
-                  </button>
-                );
-              })}
+                      </button>
+                    );
+                  })}
+                </section>
+              ))}
               {groups.length === 0 && (
                 <p className="px-3 py-4 text-xs text-l4">还没有项目</p>
               )}
@@ -2147,7 +2200,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       {groups.length === 0 ? (
         <EmptyState
           title="从一个项目文件夹开始"
-          detail="选一个放着文献、数据的文件夹，Ccode 排出步骤交给 AI 跑，你验收。"
+          detail="选一个文件夹添加进来，并选择科研、编程或办公。"
           action={
             <div className="flex items-center justify-center gap-2">
               <button
@@ -2170,6 +2223,22 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           }
         />
       ) : selectedGroup ? (
+        normalizeWorkMode(selectedGroup.project?.workMode) === "coding" ? (
+          <CodingProjectView
+            project={selectedGroup.project}
+            repoPath={selectedGroup.repoPath}
+            homeDir={homeDir}
+            onError={setError}
+            onNotice={setNotice}
+          />
+        ) : normalizeWorkMode(selectedGroup.project?.workMode) === "office" ? (
+          <OfficeProjectView
+            project={selectedGroup.project}
+            repoPath={selectedGroup.repoPath}
+            homeDir={homeDir}
+            onError={setError}
+          />
+        ) : (
           <ProjectGroup
             key={selectedGroup.key}
             project={selectedGroup.project}
@@ -2205,10 +2274,18 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             // 聚焦步骤可见性（纯逻辑 src/workspace-visibility.ts）：聚焦 = 绑定该步骤的工作区
             // + 不匹配任何步骤的手动工作区（手动建的任何东西都不能被默认视图藏掉）
             const focusStepName = wsView.focusStepName;
-            const wsList = filterWorkspacesByFocus(
-              selectedGroup.list,
-              wsView.steps,
-              focusStepName,
+            const wsList = sortWorkspacesByAttention(
+              filterWorkspacesByFocus(
+                selectedGroup.list,
+                wsView.steps,
+                focusStepName,
+              ),
+              (workspace) => ({
+                ahead: health[workspace.id]?.ahead,
+                conflict: health[workspace.id]?.conflict,
+                canResolveMerge: drift[workspace.id]?.canResolveMerge,
+                readyToMerge: health[workspace.id]?.readyToMerge,
+              }),
             );
             return (
             <>
@@ -2432,21 +2509,53 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             );
             }}
           </ProjectGroup>
+        )
       ) : null}
-      {/* 端口监控：一个项目都没有时不出现——它是技术面板，
-          在首屏只会给新用户添一个看不懂的词 */}
-      {groups.length > 0 && <PortsSection />}
       {addProjectPath && (
         <AddProjectModal
           path={addProjectPath}
           onClose={() => setAddProjectPath(null)}
-          onRegistered={(project, scan) => {
+          existingMode={
+            projects.find((p) => samePath(p.path, addProjectPath))
+              ? normalizeWorkMode(
+                  projects.find((p) => samePath(p.path, addProjectPath))
+                    ?.workMode,
+                )
+              : null
+          }
+          onRegistered={(project, scan, mode, skipTemplate) => {
             setAddProjectPath(null);
             setFreshProjectPath(project.path);
             setJustScanned(scan);
-            setSelectedGroupKey(`p:${project.path}`);
-            // 注册成功后接研究流程模板选择层（选模板 = append_pipeline_steps 追加步骤）
-            setTemplatePick({ path: project.path, name: project.name });
+            // 先落进列表再选中：分组表由 projects 派生，反了会被空表 effect
+            // 重置成原来的第一项（示例课题创建已经踩过同一坑）
+            const next = { ...project, workMode: mode };
+            setProjects((prev) => [
+              next,
+              ...prev.filter((p) => !samePath(p.path, next.path)),
+            ]);
+            useAppStore.getState().setProjectPaths(
+              [
+                next.path,
+                ...useAppStore
+                  .getState()
+                  .projectPaths.filter((p) => !samePath(p, next.path)),
+              ],
+            );
+            setSelectedGroupKey(`p:${next.path}`);
+            if (mode === "research" && !skipTemplate) {
+              setTemplatePick({ path: next.path, name: next.name });
+            } else {
+              const tail = scan.added
+                ? `；扫到并登记了 ${scan.added} 个文献/数据文件`
+                : "";
+              setNotice(
+                skipTemplate
+                  ? `已更新「${project.name}」${tail}`
+                  : `已添加为${WORK_MODE_LABEL[mode]}项目${tail}`,
+              );
+              setJustScanned(null);
+            }
             void refresh();
           }}
         />

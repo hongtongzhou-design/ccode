@@ -3,6 +3,12 @@ import { Search } from "lucide-react";
 import { useAppStore } from "../store";
 import { filterCommands, type PaletteCommand } from "../command-palette";
 import { THEMES } from "../themes";
+import {
+  customThemeIdFromSeeds,
+  DEFAULT_CUSTOM_THEME,
+  normalizeCustomTheme,
+  normalizeCustomThemeCards,
+} from "../custom-theme";
 import { comboLabel } from "../hotkeys";
 
 const PAGE_COMMANDS: {
@@ -34,7 +40,10 @@ export default function CommandPalette({
   onQuickChat: () => void;
 }) {
   const setPage = useAppStore((s) => s.setPage);
+  const setSettingsSectionReq = useAppStore((s) => s.setSettingsSectionReq);
+  const appUpdate = useAppStore((s) => s.appUpdate);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  const settings = useAppStore((s) => s.settings);
   const chromeHidden = useAppStore((s) => s.chromeHidden);
   const toggleChromeHidden = useAppStore((s) => s.toggleChromeHidden);
 
@@ -53,6 +62,22 @@ export default function CommandPalette({
         },
         run: onQuickChat,
       },
+      ...(appUpdate
+        ? [
+            {
+              cmd: {
+                id: "app-update",
+                title: `安装 Ccode v${appUpdate.version}`,
+                group: "快速操作",
+                keywords: ["update", "更新", "升级", "安装", "gengxin"],
+              },
+              run: () => {
+                setSettingsSectionReq("update");
+                setPage("settings");
+              },
+            },
+          ]
+        : []),
       ...PAGE_COMMANDS.map((p) => ({
         cmd: {
           id: `page:${p.id}`,
@@ -70,7 +95,45 @@ export default function CommandPalette({
           group: "外观",
           keywords: ["theme", "主题", t.id, t.name],
         },
-        run: () => void updateSettings({ theme: t.id }),
+        run: () =>
+          void updateSettings({ theme: t.id, customThemeCardId: "" }),
+      })),
+      {
+        cmd: {
+          id: "theme:custom",
+          title: "主题：自定义",
+          group: "外观",
+          keywords: ["theme", "主题", "custom", "自定义", "diy", "zidingyi"],
+        },
+        run: () => {
+          const seeds =
+            normalizeCustomTheme(settings?.customTheme) ?? DEFAULT_CUSTOM_THEME;
+          void updateSettings({
+            theme: customThemeIdFromSeeds(seeds),
+            customTheme: seeds,
+            customThemeCardId: "",
+          });
+        },
+      },
+      ...normalizeCustomThemeCards(settings?.customThemes).map((card) => ({
+        cmd: {
+          id: `theme:card:${card.id}`,
+          title: `主题：${card.name}`,
+          group: "外观",
+          keywords: ["theme", "主题", "custom", "自定义", "色卡", card.name, card.id],
+        },
+        run: () => {
+          const seeds = {
+            rail: card.rail,
+            canvas: card.canvas,
+            accent: card.accent,
+          };
+          void updateSettings({
+            theme: customThemeIdFromSeeds(seeds),
+            customTheme: seeds,
+            customThemeCardId: card.id,
+          });
+        },
       })),
       {
         cmd: {
@@ -83,7 +146,16 @@ export default function CommandPalette({
         run: toggleChromeHidden,
       },
     ],
-    [setPage, updateSettings, chromeHidden, toggleChromeHidden, onQuickChat],
+    [
+      setPage,
+      setSettingsSectionReq,
+      appUpdate,
+      updateSettings,
+      settings,
+      chromeHidden,
+      toggleChromeHidden,
+      onQuickChat,
+    ],
   );
 
   const filtered = useMemo(

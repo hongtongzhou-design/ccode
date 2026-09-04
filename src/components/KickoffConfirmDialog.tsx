@@ -1,8 +1,29 @@
 import { useEffect, useMemo, useReducer, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Checkbox, FoldMark, LoadingRows } from "./PageFrame";
+import {
+  Checkbox,
+  FoldMark,
+  LoadingRows,
+  compactFieldClass,
+  primaryActionClass,
+  secondaryActionClass,
+} from "./PageFrame";
 import StepSkillsChips from "./StepSkillsChips";
 import HumanTasksList from "./HumanTasksList";
+import { useAppStore } from "../store";
+import { AGENTS } from "../types";
+import { officialModelAllowed } from "../model-switch";
+import { loadAskAiRemembered, saveAskAiRemembered } from "../ask-ai";
+import {
+  kickoffLaunchLabel,
+  pickKickoffLaunch,
+  type KickoffLaunch,
+} from "../kickoff-launch";
+import {
+  expectedDeliverNames,
+  formatKickoffChip,
+  type KickoffInputChip,
+} from "../kickoff-inputs";
 import {
   blockingHumanTasks,
   closingHumanTasks,
@@ -57,8 +78,8 @@ export default function KickoffConfirmDialog({
   /** 确认开工后的链路进行中（父组件自持 starting） */
   busy: boolean;
   onCancel: () => void;
-  /** 确认开工：taskMd = 编辑区最终内容（覆盖默认拼装落盘） */
-  onConfirm: (taskMd: string) => void;
+  /** 确认开工：taskMd = 编辑区最终内容；launch = 将自动拉起的连接 */
+  onConfirm: (taskMd: string, launch: KickoffLaunch | null) => void;
   /** 技能区增删写回 project.toml 后同步父级 cfg（保持步进器/下次打开一致） */
   onCfgChange?: (cfg: ProjectConfigDto) => void;
 }) {
@@ -149,6 +170,75 @@ export default function KickoffConfirmDialog({
   // TASK.md 编辑区默认折叠：它是自动拼装的合同，绝大多数开工不需要看，
   // 更不该摆在正中暗示「你得先改这个」。想看/想改一点即展开
   const [taskMdOpen, setTaskMdOpen] = useState(false);
+  const [inputChips, setInputChips] = useState<KickoffInputChip[] | null>(null);
+  const [chipPreview, setChipPreview] = useState<{
+    path: string;
+    text: string;
+  } | null>(null);
+  const profiles = useAppStore((s) => s.profiles);
+  const agents = useAppStore((s) => s.agents);
+  const setPage = useAppStore((s) => s.setPage);
+  const remembered = useMemo(loadAskAiRemembered, []);
+  const installed = useMemo(
+    () => new Set(agents.filter((a) => a.binaryPath).map((a) => a.id)),
+    [agents],
+  );
+  const picked = useMemo(
+    () => pickKickoffLaunch(profiles, remembered),
+    [profiles, remembered],
+  );
+  const [agentId, setAgentId] = useState(
+    () => picked?.agentId ?? "claude-code",
+  );
+  const agentProfiles = profiles.filter((p) => p.agent === agentId);
+  const [profileId, setProfileId] = useState(() => picked?.profileId ?? "");
+  const [model, setModel] = useState(() => picked?.model ?? "");
+  const [useDefault, setUseDefault] = useState(
+    () => remembered?.useDefault ?? false,
+  );
+  const [editingLaunch, setEditingLaunch] = useState(
+    () => !remembered?.useDefault,
+  );
+
+  useEffect(() => {
+    const next = pickKickoffLaunch(profiles, loadAskAiRemembered());
+    if (!next) {
+      setProfileId("");
+      return;
+    }
+    setAgentId(next.agentId);
+    setProfileId(next.profileId);
+    setModel(next.model);
+  }, [profiles]);
+
+  useEffect(() => {
+    if (!agentProfiles.some((p) => p.id === profileId))
+      setProfileId(agentProfiles[0]?.id ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId, profiles]);
+
+  const selected = agentProfiles.find((p) => p.id === profileId);
+  const official = selected?.accountType === "official";
+  useEffect(() => {
+    if (!selected) return;
+    if (official && !officialModelAllowed(agentId, model)) {
+      setModel(selected.models[0] ?? "");
+    } else if (
+      selected.models.length > 0 &&
+      model &&
+      !selected.models.includes(model)
+    ) {
+      setModel(selected.models[0] ?? "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId]);
+
+  const launch: KickoffLaunch | null = profileId
+    ? { agentId, profileId, model: model.trim() }
+    : null;
+  const launchLine = kickoffLaunchLabel(launch, profiles, (id) =>
+    AGENTS.find((a) => a.id === id)?.label ?? id,
+  );
 
   // 打开时一次性加载：提货单/技能元数据 + 主仓状态 + 技能库 + 未登记资源 + 任务书草稿 + 旧版简报；不轮询
   useEffect(() => {
@@ -156,6 +246,16 @@ export default function KickoffConfirmDialog({
     gatherTaskMdExtras(projectPath, step).then((value) => {
       if (!stale) setExtras(value);
     });
+    invoke<KickoffInputChip[]>("inspect_step_inputs", {
+      projectRoot: projectPath,
+      stepName: step.name,
+    })
+      .then((chips) => {
+        if (!stale) setInputChips(chips);
+      })
+      .catch(() => {
+        if (!stale) setInputChips([]);
+      });
     invoke<GitStatusBrief>("git_status", { cwd: projectPath })
       .then((status) => {
         if (!stale) setMainDirty(status.isRepo ? status.files.length : null);
@@ -352,23 +452,189 @@ export default function KickoffConfirmDialog({
       }}
     >
       <div
-        className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-md border border-field ccode-float-surface p-5"
+        className="flex max-h-[85vh] w-full max-w-xl flex-col rounded-lg border border-field ccode-float-surface"
         onClick={(event) => event.stopPropagation()}
+        title={step.workspaceName ? `工作区 ${step.workspaceName}` : undefined}
       >
-        <h2 className="mb-1 shrink-0 text-base font-semibold text-l1">
-          开始：{step.name}
-        </h2>
-        <p className="mb-3 shrink-0 font-mono text-xs text-l4">
-          工作区 {step.workspaceName}
-        </p>
+        <div className="shrink-0 px-5 pt-5">
+          <h2 className="text-base font-semibold text-l1">开始 {step.name}</h2>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 pt-3">
+        {(() => {
+          const deliver = expectedDeliverNames(stepNow.expectedArtifacts);
+          return deliver.length > 0 ? (
+            <div className="mb-3">
+              <p className="mb-1 text-micro text-l4">本步产物</p>
+              <div className="flex flex-wrap gap-1">
+                {deliver.map((name) => (
+                  <span
+                    key={name}
+                    className="rounded-sm bg-inset px-1.5 py-0.5 text-micro text-l2"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null;
+        })()}
+        {inputChips && inputChips.length > 0 && (
+          <div className="mb-3">
+            <p className="mb-1 text-micro text-l4">上一步接到</p>
+            <div className="flex flex-wrap gap-1">
+              {inputChips.map((chip) => {
+                const view = formatKickoffChip(chip);
+                return (
+                  <button
+                    key={`${chip.role}:${chip.pattern}`}
+                    type="button"
+                    disabled={!chip.previewPath}
+                    title={chip.pattern}
+                    onClick={() => {
+                      if (!chip.previewPath) return;
+                      invoke<{ text: string }>("read_file_preview", {
+                        path: chip.previewPath,
+                        root: projectPath,
+                      })
+                        .then((p) =>
+                          setChipPreview({
+                            path: chip.pattern,
+                            text: p.text.slice(0, 2000),
+                          }),
+                        )
+                        .catch(() =>
+                          setChipPreview({
+                            path: chip.pattern,
+                            text: "无法预览这个文件。",
+                          }),
+                        );
+                    }}
+                    className={`rounded-sm px-1.5 py-0.5 text-micro ${
+                      view.missing
+                        ? "bg-warn text-warn-text"
+                        : "bg-inset text-l2 hover:bg-hover"
+                    } disabled:cursor-default`}
+                  >
+                    {view.label}
+                  </button>
+                );
+              })}
+            </div>
+            {chipPreview && (
+              <pre className="mt-1.5 max-h-24 overflow-auto rounded-md bg-inset p-2 font-mono text-micro text-l3">
+                {chipPreview.path}
+                {"\n"}
+                {chipPreview.text}
+              </pre>
+            )}
+          </div>
+        )}
+
+        {profiles.length === 0 ? (
+          <p className="mb-3 text-xs text-l2">
+            还没有可用连接。
+            <button
+              type="button"
+              className="ml-1 text-cta-pill-text hover:underline"
+              onClick={() => {
+                onCancel();
+                setPage("profiles");
+              }}
+            >
+              去添加
+            </button>
+          </p>
+        ) : launch && !editingLaunch ? (
+          <div className="mb-3 flex items-center gap-2 text-xs text-l2">
+            <span className="min-w-0 truncate" title={launchLine}>
+              {launchLine}
+            </span>
+            <button
+              type="button"
+              className="shrink-0 text-micro text-l4 hover:text-l1"
+              onClick={() => setEditingLaunch(true)}
+            >
+              更换
+            </button>
+          </div>
+        ) : (
+          <div className="mb-3">
+            <div className="grid grid-cols-3 gap-1.5">
+              <label className="min-w-0 text-micro text-l4">
+                Agent
+                <select
+                  className={`${compactFieldClass} mt-0.5 w-full`}
+                  value={agentId}
+                  onChange={(e) => setAgentId(e.target.value)}
+                >
+                  {[...AGENTS]
+                    .sort(
+                      (a, b) =>
+                        Number(installed.has(b.id)) -
+                        Number(installed.has(a.id)),
+                    )
+                    .map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.label}
+                        {!installed.has(a.id) ? "（未安装）" : ""}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label className="min-w-0 text-micro text-l4">
+                连接
+                <select
+                  className={`${compactFieldClass} mt-0.5 w-full`}
+                  value={profileId}
+                  onChange={(e) => setProfileId(e.target.value)}
+                >
+                  {agentProfiles.length === 0 ? (
+                    <option value="">没有连接</option>
+                  ) : (
+                    agentProfiles.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="min-w-0 text-micro text-l4">
+                模型
+                <select
+                  className={`${compactFieldClass} mt-0.5 w-full`}
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  disabled={!selected}
+                >
+                  {(selected?.models.length
+                    ? selected.models
+                    : model
+                      ? [model]
+                      : [""]
+                  ).map((m) => (
+                    <option key={m || "default"} value={m}>
+                      {m || "默认"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <Checkbox
+              className="mt-2 text-micro text-l3"
+              checked={useDefault}
+              onChange={setUseDefault}
+              label="记住这次选择"
+            />
+          </div>
+        )}
 
         {/* 主仓改动协同（只提醒不阻断）：想法期实验性改动留在主仓是合法的 */}
         {mainDirty !== null && mainDirty > 0 && (
-          <p className="mb-3 shrink-0 rounded-md bg-inset px-3 py-2 text-xs leading-5 text-l2">
+          <p className="mb-3 rounded-md bg-inset px-2.5 py-1.5 text-xs leading-5 text-l2">
             <span className="mr-1 text-warn-text">!</span>
-            项目文件夹里有 {mainDirty} 处改动还没存入历史。这一步的 agent 会在一份
-            独立副本里干活，只看得到最近一次存入历史的内容——如果刚放进去的文件要给它用，
-            先到「改动」面板存一下再开始。
+            项目里有 {mainDirty} 处改动还没存入历史。Agent 只看得到上次存入的内容。
           </p>
         )}
 
@@ -455,7 +721,7 @@ export default function KickoffConfirmDialog({
             勾选/提交交付直接可在这里做，与卡片区同一个 HumanTasksList。
             收尾（after）事项不出现（agent 干完才轮到人做），步骤只剩 after 事项时整区不渲染 */}
         {(stepNow.humanTasks?.some((t) => t.timing !== "after") ?? false) && (
-          <div className="mb-3 max-h-44 shrink-0 overflow-auto rounded-md bg-inset px-2.5 py-2">
+          <div className="mb-3">
             {(() => {
               const blocking = humanStates
                 ? blockingHumanTasks(humanStates, step.name)
@@ -463,12 +729,13 @@ export default function KickoffConfirmDialog({
               return blocking.length > 0 ? (
                 <p className="mb-1.5 text-xs text-warn-text">
                   开始前还有 {blocking.length}{" "}
-                  件事没完成（{blocking.map((t) => t.title).join("、")}
-                  ）——做完再开始更顺；现在开始也可以，系统只提醒不拦你
+                  件必办（{blocking.map((t) => t.title).join("、")}
+                  ）。现在开始也可以。
                 </p>
               ) : null;
             })()}
             <HumanTasksList
+              compact
               projectPath={projectPath}
               stepName={step.name}
               onStates={setHumanStates}
@@ -479,6 +746,7 @@ export default function KickoffConfirmDialog({
         {/* 推荐技能区（可编辑）：增删写回步骤定义（project.toml），预览即时联动；
             mentionsMcp 的技能带「推荐 MCP」标记（点击跳 MCP 页配置） */}
         <StepSkillsChips
+          hint={false}
           skills={stepNow.skills}
           requiredSkills={stepNow.requiredSkills}
           skillMeta={skillMeta}
@@ -508,14 +776,10 @@ export default function KickoffConfirmDialog({
             className="flex items-center gap-1 rounded-sm px-1 py-0.5 text-xs text-l3 hover:bg-hover hover:text-l1"
           >
             <FoldMark open={taskMdOpen} boxed />
-            本步合同 TASK.md
-            <span className="ml-1 text-micro text-l4">
-              {editor.dirty
-                ? "（已手改）"
-                : draftText?.trim() && !isDecisionsOnly(draftText.trim())
-                  ? "（来自你已编辑的 TASK.md）"
-                  : "（自动生成，一般不用改）"}
-            </span>
+            任务书
+            {editor.dirty ? (
+              <span className="ml-1 text-micro text-l4">已改</span>
+            ) : null}
           </button>
           {taskMdOpen && editor.dirty && (
             <button
@@ -571,32 +835,41 @@ export default function KickoffConfirmDialog({
           </p>
         )}
 
-        <div className="mt-4 flex shrink-0 justify-end gap-2">
+        </div>
+
+        <div className="flex shrink-0 justify-end gap-2 px-5 py-4">
           <button
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover disabled:opacity-50"
+            className={secondaryActionClass}
           >
             取消
           </button>
           <button
             type="button"
-            disabled={busy || !editorReady}
+            disabled={busy || !editorReady || !launch}
             onClick={() => {
               if (prevClosing.length > 0 && !closingAcked) {
                 setClosingAcked(true);
                 return;
               }
-              onConfirm(editor.text);
+              if (launch && useDefault) {
+                saveAskAiRemembered({ ...launch, useDefault: true });
+              } else if (launch) {
+                saveAskAiRemembered({ ...launch, useDefault });
+              }
+              onConfirm(editor.text, launch);
             }}
-            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            className={primaryActionClass}
           >
             {busy
               ? "开始中…"
-              : prevClosing.length > 0 && closingAcked
-                ? "仍要开工"
-                : "确认开始"}
+              : !launch
+                ? "先加连接"
+                : prevClosing.length > 0 && closingAcked
+                  ? "仍要开工"
+                  : "确认开始"}
           </button>
         </div>
       </div>

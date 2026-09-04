@@ -381,13 +381,16 @@ static AGENT_SPECS: &[AgentSpec] = &[
             update_fallback: &[UpdateChannel::Npm, UpdateChannel::Winget],
             ..NO_PACKAGING
         },
-        // matrix §2 已核实；login status / doctor 命令复用同一 login 子命令族
+        // matrix §2 已核实；login status / doctor 命令复用同一 login 子命令族。
+        // 登录走设备码（--device-auth，0.152.1 核实）：内嵌 PTY 里浏览器回调常写不出
+        // auth.json；设备码在终端打印 user code，与 cc-switch 官方登录同路、由 CLI 自己完成。
         official_account: Some(OfficialAccountSpec {
-            login_cmd: &["login"],
+            login_cmd: &["login", "--device-auth"],
             auth_file_paths: &[".codex/auth.json"],
             env_purge_list: &["CODEX_API_KEY", "OPENAI_API_KEY"],
-            // matrix §2：config.toml 的 [model_providers.x] 只有显式设了 model_provider 才接管请求，
-            // 无法只靠变量名判定是否覆盖 ChatGPT 登录态，保守留空不探测
+            // 磁盘 config.toml 的 model_provider 指向自定义网关会盖过 ChatGPT 登录。
+            // ConflictProbe 不解析 TOML 顶层键，无法按变量名探测；官方启动用
+            // `-c model_provider="openai"` 本进程盖过（见 apply_official_inject），不改用户文件。
             conflict_probes: &[],
             detection_note: Some("凭证也可能存于 OS 钥匙串（cli_auth_credentials_store），以 codex login status 为准"),
             // auth.json 顶层 OPENAI_API_KEY = API Key 模式（官方 --api-key 或第三方中转同一形状），
@@ -1022,6 +1025,8 @@ pub(crate) fn binary_candidate_dirs() -> Vec<std::path::PathBuf> {
             out.push(local.join("Programs"));
             out.push(local.join("Microsoft").join("WinGet").join("Links"));
             out.push(local.join("Microsoft").join("WindowsApps"));
+            // GitHub Desktop 捆绑 CLI github.bat（打开指定工作树）
+            out.push(local.join("GitHubDesktop").join("bin"));
         }
         if let Some(roaming) = dirs::data_dir() {
             out.push(roaming.join("npm"));
@@ -1224,6 +1229,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 第一批官方账号登录命令（claude / codex / gemini）
+    #[test]
+    fn first_batch_official_account_login_cmds() {
+        let claude = agent_spec("claude-code")
+            .unwrap()
+            .official_account
+            .as_ref()
+            .unwrap();
+        assert_eq!(claude.login_cmd, &["auth", "login"]);
+        let codex = agent_spec("codex")
+            .unwrap()
+            .official_account
+            .as_ref()
+            .unwrap();
+        assert_eq!(codex.login_cmd, &["login", "--device-auth"]);
+        let gemini = agent_spec("gemini")
+            .unwrap()
+            .official_account
+            .as_ref()
+            .unwrap();
+        assert!(gemini.login_cmd.is_empty());
     }
 
     /// 第二批官方账号规格与实机调研结论一致（kimi/qwen 填，opencode 保持 None）

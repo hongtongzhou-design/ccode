@@ -22,6 +22,8 @@ pub struct ProjectDto {
     pub name: String,
     pub created_at: Option<String>,
     pub last_opened_at: Option<String>,
+    /// research / coding / office；读自 project.toml，缺省 research
+    pub work_mode: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -122,6 +124,9 @@ pub struct StepDto {
     /// 语义进模板不进引擎：哪一步该问由模板说了算，引擎不去猜（曾评估过按 skills 含 lit-search
     /// 推断，属隐式魔法，用户删个技能就没了，否决）。
     pub asks_lit_source: bool,
+    /// 预置完成：本步产物已在主仓（示例课题的检索步），步进器视为已完成。
+    /// 一旦用户真的建了该步工作区，以工作区状态为准。缺省 false。
+    pub seed_complete: bool,
 }
 
 /// 文献雷达筛选（可选，存 project.toml）：新命中的展示与推送计数按期刊指标过滤。
@@ -170,11 +175,23 @@ pub struct ProjectConfigDto {
     pub submission_round: Option<u32>,
     /// 文献雷达筛选：新命中展示与推送计数按期刊指标过滤；None/全空 = 不筛选
     pub lit_watch_filter: Option<LitWatchFilterDto>,
+    /// 工作方式：research / coding / office。缺省 research（旧档案卡 = 科研）
+    pub work_mode: String,
 }
 
 /// 文献来源合法值；非法值解析期归一为 search
 pub const LIT_SOURCES: [&str; 3] = ["search", "zotero", "folder"];
 pub const SUBMISSION_MODES: [&str; 2] = ["initial", "revision"];
+pub const WORK_MODES: [&str; 3] = ["research", "coding", "office"];
+
+pub(crate) fn normalize_work_mode(value: &str) -> String {
+    let v = value.trim();
+    if WORK_MODES.contains(&v) {
+        v.to_string()
+    } else {
+        "research".into()
+    }
+}
 
 impl Default for ProjectConfigDto {
     fn default() -> Self {
@@ -189,6 +206,7 @@ impl Default for ProjectConfigDto {
             submission_mode: None,
             submission_round: None,
             lit_watch_filter: None,
+            work_mode: "research".into(),
         }
     }
 }
@@ -298,12 +316,18 @@ fn register_at(
             |r| r.get(0),
         )
         .ok();
-    Ok(ProjectDto {
+    Ok(attach_work_mode(ProjectDto {
         path: key,
         name,
         created_at,
         last_opened_at: Some(now.to_string()),
-    })
+        work_mode: "research".into(),
+    }))
+}
+
+fn attach_work_mode(mut p: ProjectDto) -> ProjectDto {
+    p.work_mode = normalize_work_mode(&read_config_at(Path::new(&p.path)).config.work_mode);
+    p
 }
 
 pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, String> {
@@ -320,10 +344,11 @@ pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, Str
                 name: r.get(1)?,
                 created_at: r.get(2)?,
                 last_opened_at: r.get(3)?,
+                work_mode: "research".into(),
             })
         })
         .map_err(|e| format!("读取项目列表失败: {e}"))?;
-    Ok(rows.flatten().collect())
+    Ok(rows.flatten().map(attach_work_mode).collect())
 }
 
 /// P2a PDF 白名单用（pdf.rs）：全部注册项目根 + 各项目 project.toml 登记资源的绝对路径。
@@ -650,6 +675,8 @@ struct TomlStep {
     #[serde(default)]
     asks_lit_source: bool,
     #[serde(default)]
+    seed_complete: bool,
+    #[serde(default)]
     role: String,
 }
 
@@ -734,6 +761,17 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
         None => {}
         Some(toml::Value::Boolean(b)) => config.pipeline_opt_out = *b,
         Some(_) => warnings.push("pipeline_opt_out 不是布尔值，已忽略".to_string()),
+    }
+    match value.get("work_mode") {
+        None => {}
+        Some(toml::Value::String(s)) if WORK_MODES.contains(&s.trim()) => {
+            config.work_mode = s.trim().to_string();
+        }
+        Some(toml::Value::String(s)) => {
+            warnings.push(format!("work_mode 取值无效（{s}），已按 research 处理"));
+            config.work_mode = "research".into();
+        }
+        Some(_) => warnings.push("work_mode 不是字符串，已忽略".to_string()),
     }
     // 文献来源：非法值归一为 search（同 resource type 口径，坏字段不阻断整份解析）
     match value.get("lit_source") {
@@ -931,6 +969,7 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                             .filter(|d| !d.q.is_empty() && !d.options.is_empty())
                             .collect(),
                         asks_lit_source: s.asks_lit_source,
+                        seed_complete: s.seed_complete,
                         role: match s.role.trim() {
                             "you" => "you".to_string(),
                             "both" => "both".to_string(),
@@ -1148,6 +1187,12 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
     } else {
         doc.remove("pipeline_opt_out");
     }
+    let work_mode = normalize_work_mode(&config.work_mode);
+    if work_mode != "research" {
+        doc["work_mode"] = value(work_mode);
+    } else {
+        doc.remove("work_mode");
+    }
     if config.lit_source != "search" {
         doc["lit_source"] = value(config.lit_source.as_str());
     } else {
@@ -1332,6 +1377,9 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
             // 缺省 false 时不写这一行（同 pipeline_opt_out 的清除口径，档案卡保持简洁）
             if s.asks_lit_source {
                 t["asks_lit_source"] = value(true);
+            }
+            if s.seed_complete {
+                t["seed_complete"] = value(true);
             }
             if s.role != "ai" && !s.role.is_empty() {
                 t["role"] = value(s.role.as_str());
@@ -1816,7 +1864,40 @@ fn discover_at(project: &Path) -> Result<Vec<DiscoveredResourceDto>, String> {
 
 // ===== git 引导（幂等：已是仓库直接返回） =====
 
+fn gitignore_text(work_mode: &str, artifact_dir: &str) -> String {
+    if work_mode == "coding" {
+        return "# Ccode 生成：系统垃圾与过程文件不进 git\n\
+             .DS_Store\n\
+             \n\
+             # Ccode 过程文件\n\
+             .ccode/handoff-*.md\n\
+             /output/\n"
+            .into();
+    }
+    format!(
+        "# Ccode 生成：产物与系统垃圾不进 git\n\
+         /{artifact_dir}/\n\
+         .DS_Store\n\
+         \n\
+         # Ccode 接力简报：过程文件，不进版本库\n\
+         .ccode/handoff-*.md\n\
+         \n\
+         # 文献 PDF 等大文件登记为资源引用，不进 git\n\
+         *.pdf\n\
+         \n\
+         # 常见数据/产物目录（按需取消注释）\n\
+         # /data/\n\
+         /output/\n\
+         # /results/\n\
+         # /figures/\n"
+    )
+}
+
 fn ensure_git_at(project: &Path) -> Result<EnsureGitDto, String> {
+    ensure_git_at_mode(project, "research")
+}
+
+fn ensure_git_at_mode(project: &Path, work_mode: &str) -> Result<EnsureGitDto, String> {
     if !project.is_dir() {
         return Err(format!("项目目录不存在或不是目录: {}", project.display()));
     }
@@ -1852,23 +1933,7 @@ fn ensure_git_at(project: &Path) -> Result<EnsureGitDto, String> {
         } else {
             artifact_dir
         };
-        let text = format!(
-            "# Ccode 生成：产物与系统垃圾不进 git\n\
-             /{artifact_dir}/\n\
-             .DS_Store\n\
-             \n\
-             # Ccode 接力简报：过程文件，不进版本库\n\
-             .ccode/handoff-*.md\n\
-             \n\
-             # 文献 PDF 等大文件登记为资源引用，不进 git\n\
-             *.pdf\n\
-             \n\
-             # 常见数据/产物目录（按需取消注释）\n\
-             # /data/\n\
-             /output/\n\
-             # /results/\n\
-             # /figures/\n"
-        );
+        let text = gitignore_text(work_mode, artifact_dir);
         crate::profiles::atomic_write(&gitignore, &text)
             .map_err(|e| format!("写入 .gitignore 失败: {e}"))?;
         gitignore_written = true;
@@ -1967,6 +2032,43 @@ fn commit_bootstrap_at(repo: &Path) -> Result<BootstrapCommitDto, String> {
         committed: true,
         paths,
     })
+}
+
+/// 示例课题：把检索步演示产物（清单/bib/README）提交进主仓，精读步才能直接读到。
+/// PDF 走 *.pdf gitignore，不提交。失败不阻断创建。
+fn commit_demo_seed_at(repo: &Path) -> Result<(), String> {
+    const T: Duration = Duration::from_secs(30);
+    const PATHS: [&str; 6] = [
+        "papers/included.md",
+        "papers/screening.md",
+        "papers/to-fetch.md",
+        "papers/to-fetch.ris",
+        "references.bib",
+        "README.md",
+    ];
+    let existing: Vec<&str> = PATHS.into_iter().filter(|p| repo.join(p).exists()).collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    let mut add_args: Vec<&str> = vec!["--literal-pathspecs", "add", "--"];
+    add_args.extend(existing.iter().copied());
+    crate::workspaces::run_git(repo, &add_args, T)?;
+    let configured = |key: &str| {
+        crate::workspaces::run_git(repo, &["config", "--get", key], T)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    };
+    let mut args: Vec<&str> = vec!["-c", "commit.gpgsign=false", "--literal-pathspecs"];
+    if !configured("user.name") {
+        args.extend(["-c", "user.name=Ccode"]);
+    }
+    if !configured("user.email") {
+        args.extend(["-c", "user.email=ccode@localhost"]);
+    }
+    args.extend(["commit", "-m", "Ccode: 示例课题检索步演示产物", "--"]);
+    args.extend(existing.iter().copied());
+    crate::workspaces::run_git(repo, &args, T)?;
+    Ok(())
 }
 
 // ===== Tauri commands =====
@@ -2144,10 +2246,17 @@ pub async fn discover_resources(path: String) -> Result<Vec<DiscoveredResourceDt
 }
 
 #[tauri::command]
-pub async fn ensure_git_repo(path: String) -> Result<EnsureGitDto, String> {
+pub async fn ensure_git_repo(
+    path: String,
+    work_mode: Option<String>,
+) -> Result<EnsureGitDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let project = PathBuf::from(crate::sessions::expand_tilde(&path));
-        ensure_git_at(&project)
+        let mode = work_mode
+            .as_deref()
+            .map(normalize_work_mode)
+            .unwrap_or_else(|| "research".into());
+        ensure_git_at_mode(&project, &mode)
     })
     .await
     .map_err(|e| format!("git 初始化失败: {e}"))?
@@ -2403,15 +2512,25 @@ const DEMO_BIB: &str = r#"@article{marso2016liraglutide,
 
 const DEMO_README: &str = r#"# 示例课题（演示）
 
-这是 Ccode 自动创建的演示课题，用来体验「项目 → 研究流程 → 工作区」的完整流程：
+15 分钟走完「开读一篇文献」：检索步已经筛完，点「开读这一篇」进入笔记｜PDF｜终端三栏。
+划一段写进笔记，看左边大圆下一步是「综述大纲」。完整五步留给你自己的课题。
 
-- `.ccode/project.toml`：课题档案卡，内置英文综述五步研究流程（检索筛选 → 精读笔记 → 大纲 → 初稿 → 润色定稿）；
-- `papers/sample-glp1-review.pdf`：一页示例文献摘要（程序生成的演示文件，不是真实论文）；
-- `references.bib`：两条真实示例引文（LEADER / SUSTAIN-6 试验）。
+- `papers/included.md`：一篇演示纳入文献；
+- `papers/Liraglutide-and-Cardiovascular-Outcomes-in-Type-2-Diabetes.pdf`：可划词的一页摘要（演示文件，不是真论文）；
+- `references.bib`：LEADER / SUSTAIN-6 两条真实引文。
 
-可以在这个项目上随意试验：开步、编辑研究流程、建工作区。整个目录可随时删除，
-删除前在工作区页右键项目导航行「移除注册」即可。
+整个目录可随时删除。
 "#;
+
+const DEMO_INCLUDED: &str = "Liraglutide and Cardiovascular Outcomes in Type 2 Diabetes — Marso SP, 2016 — N Engl J Med — https://doi.org/10.1056/NEJMoa1603827\n";
+
+const DEMO_SCREENING: &str = "# 筛选记录（演示）\n\n检索主题假设：GLP-1 受体激动剂的心血管结局。\n\n本课题是 Ccode 示例，检索步已预置完成，不必再跑 OpenAlex。\n纳入 1 篇：Marso 2016 LEADER（见 papers/included.md）。\n";
+
+const DEMO_TO_FETCH: &str = "# 待获取全文（演示）\n\n（无付费文献）\n";
+
+const DEMO_TO_FETCH_RIS: &str = "# 空：演示课题没有付费墙条目\n";
+
+const DEMO_PDF_REL: &str = "papers/Liraglutide-and-Cardiovascular-Outcomes-in-Type-2-Diabetes.pdf";
 
 /// PDF 文本对象的内容串转义（反斜杠与括号在 PDF 字符串里是控制字符）
 fn pdf_escape_text(s: &str) -> String {
@@ -2424,16 +2543,30 @@ fn pdf_escape_text(s: &str) -> String {
 /// 全部内容为 ASCII，字节偏移 = 字符偏移；演示课题的示例文献，不依赖任何外部库。
 fn build_demo_pdf() -> Vec<u8> {
     let lines = [
-        "Sample Abstract (Demo): GLP-1 Receptor Agonists and Cardiovascular Outcomes",
+        "Liraglutide and Cardiovascular Outcomes in Type 2 Diabetes",
+        "Marso SP et al. N Engl J Med 2016;375:311-322. (demo abstract)",
         "",
-        "Background: Glucagon-like peptide-1 (GLP-1) receptor agonists are widely used",
-        "in type 2 diabetes; their cardiovascular effects required dedicated trials.",
-        "Methods: This document stands in for a cardiovascular outcome trial abstract.",
-        "It is generated by Ccode as demonstration content, not a real paper.",
-        "Results: In large randomized trials, liraglutide and semaglutide reduced",
-        "major adverse cardiovascular events versus placebo in high-risk patients.",
-        "Conclusions: GLP-1 receptor agonists show cardiovascular benefit in type 2",
-        "diabetes. Replace this file with real literature for your own project.",
+        "Background. GLP-1 receptor agonists lower glucose in type 2 diabetes.",
+        "Whether they also reduce major cardiovascular events was uncertain until",
+        "dedicated outcome trials reported. This page is a readable stand-in so you",
+        "can highlight a sentence, send it to the note, and see the next pipeline",
+        "step. It is not a real paper; replace it with your own PDF later.",
+        "",
+        "Methods. Adults with type 2 diabetes and high cardiovascular risk were",
+        "randomized to liraglutide or placebo, both added to standard care.",
+        "The primary outcome was a composite of cardiovascular death, nonfatal",
+        "myocardial infarction, or nonfatal stroke.",
+        "",
+        "Results. Liraglutide reduced the primary composite versus placebo. The",
+        "authors reported fewer cardiovascular deaths; heart-failure hospitalization",
+        "did not increase. Gastrointestinal events were more common with liraglutide.",
+        "",
+        "Limitations. This demo does not reproduce tables or the full discussion.",
+        "Treat numbers here as placeholders. For a real review, read the original.",
+        "",
+        "Relation to this topic. The trial is a common anchor for reviews of GLP-1",
+        "cardiovascular benefit. Use it to practice the reading pane, then move on",
+        "to the outline step when you are ready.",
     ];
     let mut stream = String::from("BT /F1 11 Tf 72 740 Td 16 TL\n");
     for (i, line) in lines.iter().enumerate() {
@@ -2471,128 +2604,40 @@ fn build_demo_pdf() -> Vec<u8> {
     out
 }
 
-/// 演示课题档案卡：五步与前端内置「英文综述」模板（pipeline-presets.ts REVIEW_STEPS）逐项对应
+/// 与前端 `PIPELINE_TEMPLATES` 的「英文综述」同步：JSON 由
+/// `scripts/export-review-template.ts` 从 `pipeline-presets.ts` 导出。
+/// 演示只叠加：课题主题、资源、检索步 `seed_complete`（产物已预置）。
+#[derive(Debug, Deserialize)]
+struct ReviewTemplateFile {
+    steps: Vec<StepDto>,
+    #[serde(default, rename = "projectSettings")]
+    project_settings: Vec<String>,
+}
+
+const REVIEW_TEMPLATE_JSON: &str = include_str!("../resources/pipeline-review.json");
+
+fn demo_review_template() -> ReviewTemplateFile {
+    serde_json::from_str(REVIEW_TEMPLATE_JSON)
+        .expect("src-tauri/resources/pipeline-review.json 损坏；请运行 node --experimental-strip-types scripts/export-review-template.ts")
+}
+
 fn demo_project_config() -> ProjectConfigDto {
-    let step = |name: &str, ws: &str, brief: String, artifacts: &[&str]| StepDto {
-        name: name.into(),
-        workspace_name: ws.into(),
-        brief,
-        expected_artifacts: artifacts.iter().map(|a| a.to_string()).collect(),
-        acceptance_criteria: Vec::new(),
-        inputs: Vec::new(),
-        optional_inputs: Vec::new(),
-        any_of_inputs: Vec::new(),
-        skills: Vec::new(),
-        required_skills: Vec::new(),
-        resources: Vec::new(),
-        run: Vec::new(),
-        human_tasks: Vec::new(),
-        discussion_seeds: Vec::new(),
-        decisions: Vec::new(),
-        asks_lit_source: false,
-        role: "ai".into(),
-    };
-    let mut steps = vec![
-            step(
-                "文献检索与筛选",
-                "lit-search",
-                "围绕课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源自行判断，并把假设写进筛选记录）执行：\n\
-                 1. 制定纳入/排除标准（年份、语言、来源级别、相关性），写进 papers/screening.md；\n\
-                 2. 检索候选文献（学术数据库/网络），每篇记录标题、作者、年份、来源、链接或 DOI；\n\
-                 3. 按标准逐条筛选，结果写入 papers/screening.md（含每篇的纳入/排除及理由）；拿不准相关性的一律纳入并标注「待确认」；\n\
-                 4. 纳入的文献清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；\n\
-                 5. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）的用 WebFetch/curl 直接下载到**项目根 papers/**（文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙的不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时转成 papers/to-fetch.ris（RIS 2004，字段缺则留空不编造）供用户导入 Zotero 建待获取列表。\n\
-                 完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris 均存在（无付费文献则 to-fetch 两个文件注明为空），每条记录无空缺字段（未知则标「待补」）。"
-                    .into(),
-                &[
-                    "papers/screening.md",
-                    "papers/included.md",
-                    "papers/to-fetch.md",
-                    "papers/to-fetch.ris",
-                ],
-            ),
-            step(
-                "文献精读与笔记",
-                "lit-notes",
-                "输入：上一步产物 papers/included.md（已随 main 合并在本工作区内）。\n\
-                 1. 先整理人工补投：项目根 papers/ 中命名不符「作者年份-短标题.pdf」的 PDF 对照 included.md/to-fetch.md 判定归属后重命名规范，并在 to-fetch.md 勾掉已补行（拿不准归属的不改名、标注「待确认」）；再按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题）；\n\
-                 2. 全文来源优先级：项目根 papers/ 已有 PDF → 开放获取补下到项目根 papers/ → 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」；\n\
-                 3. 每篇产出 notes/<序号-短标题>.md，固定结构：研究问题 / 方法 / 主要结果 / 局限 / 可引用点（原文关键句+页码或段落位置）；\n\
-                 4. 每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」）；\n\
-                 5. 若 notes/ 中「仅摘要」笔记对应的全文已出现在项目资源或 papers/（用户已补），重读全文并更新该笔记、去掉标记。\n\
-                 完成标准：included.md 每篇都有对应笔记与 bib 条目；notes/ 与 references.bib 均已提交。"
-                    .into(),
-                &["notes/*.md", "references.bib"],
-            ),
-            step(
-                "综述大纲",
-                "outline",
-                "输入：notes/ 全部笔记与 references.bib（已随 main 合并在本工作区内）。\n\
-                 1. 通读笔记，按主题聚类归纳研究现状的主要线索（方法/问题/结论的异同）；\n\
-                 2. 产出 outline.md：章节结构（引言 / 背景 / 主题各节 / 讨论 / 结论）、每节要点（3-6 条）、每节拟引用的 bib 键、分类框架的一句话说明；\n\
-                 3. 分类框架优先按主题聚类；主题过于发散时改按时间线；有分歧时选覆盖文献最多的框架，并在 outline.md 末尾记录取舍理由；\n\
-                 4. 只引用 references.bib 中存在的键，不为大纲新造引用。\n\
-                 完成标准：outline.md 结构完整、每节要点与引用键齐全、取舍理由已记录。"
-                    .into(),
-                &["outline.md"],
-            ),
-            step(
-                "综述初稿",
-                "draft",
-                "输入：outline.md、notes/、references.bib（已随 main 合并在本工作区内）。\n\
-                 1. 按 outline.md 用规范学术英文撰写综述初稿，产出 manuscript/draft.md（目标 6000-8000 词，课题主题段另有约定时从其约定）；\n\
-                 2. 引用一律用 [@bib键] 形式，且只能引用 references.bib 中已存在的键——严禁编造文献；\n\
-                 3. 图表以占位形式给出（「图 1：…（待绘制）」「表 1：…」），不虚构数据；\n\
-                 4. 没有文献支撑的论断不得下；必须保留的判断在句末标 [待核实]。\n\
-                 完成标准：manuscript/draft.md 覆盖大纲全部章节，引用键全部可在 references.bib 中解析。"
-                    .into(),
-                &["manuscript/draft.md"],
-            ),
-            step(
-                "润色与定稿",
-                "polish",
-                "输入：manuscript/draft.md、references.bib（已随 main 合并在本工作区内）。\n\
-                 1. 语言润色：语法、用词、句式与段落衔接，保持学术语气；只改表达，不改学术观点；\n\
-                 2. 一致性核对：每个论断都有引用、每个 bib 条目都被引用（未用的在报告中列出）、图表占位编号连续；发现内容性错误标 [待核实]，不得自行改写事实；\n\
-                 3. 产出 manuscript/review-final.md 定稿，并附 manuscript/changelog.md（逐条列出主要修改点）；\n\
-                 4. 文末 References 节按 references.bib 生成完整文献列表。\n\
-                 完成标准：review-final.md 无语法硬伤、引用闭环、changelog.md 已提交。"
-                    .into(),
-                &["manuscript/review-final.md"],
-            ),
-        ];
-    // 人工事项演示：付费全文下载正是「人做机器做不了」的典型（落点检测 papers/ 下的 PDF）
-    steps[0].human_tasks = vec![
-        HumanTaskDto {
-            title: "下载付费墙文献全文".into(),
-            guidance: "渠道自选：机构图书馆 / 作者邮件索取 preprint 等；\
-                       缺权限清单见 papers/to-fetch.md（agent 筛完会列出，附 to-fetch.ris 可拖进 Zotero 建待获取列表）；\
-                       拿到后拖到这一行或拷进项目根 papers/（文件会落到项目根，不是当前工作区；文件名随意，agent 会统一改名）"
-                .into(),
-            target: "papers/*.pdf".into(),
-            timing: "after".into(),
-            optional: false,
-            completion: "all".into(),
-            expected_count: None,
-            manifest_path: String::new(),
-        },
-    ];
-    // 讨论种子演示：开工前建议想清楚的问题，点击即聊（卡片以问题为名自动建立）
-    steps[0].discussion_seeds = vec![
-        "综述角度怎么收：全适应症还是聚焦心血管结局？".into(),
-        "纳入排除标准定多严：只要 RCT 还是观察性研究也要？".into(),
-        "检索哪几个数据库：结合你自己的机构权限".into(),
-    ];
-    // 第一步的输入是文献，开工前先拍板从哪来（流程线「定方向」出现输入准备块）
-    steps[0].asks_lit_source = true;
+    let file = demo_review_template();
+    let mut steps = file.steps;
+    if let Some(search) = steps
+        .iter_mut()
+        .find(|s| s.workspace_name == "lit-search" || s.name == "文献检索与筛选")
+    {
+        search.seed_complete = true;
+    }
     ProjectConfigDto {
         topic: Some("GLP-1 受体激动剂的心血管结局（演示课题）".into()),
-        settings: Vec::new(),
+        settings: file.project_settings,
         artifact_dir: DEFAULT_ARTIFACT_DIR.into(),
         resources: vec![
             ResourceDto {
                 name: "示例文献（演示 PDF）".into(),
-                path: "papers/sample-glp1-review.pdf".into(),
+                path: DEMO_PDF_REL.into(),
                 kind: "paper".into(),
                 readonly: true,
                 note: "程序生成的演示文件，可替换为真实文献".into(),
@@ -2611,24 +2656,25 @@ fn demo_project_config() -> ProjectConfigDto {
         submission_mode: None,
         submission_round: None,
         lit_watch_filter: None,
+        work_mode: "research".into(),
     }
 }
 
 /// 示例课题预置的示范任务书草稿：演示「讨论结论沉淀进 .ccode/drafts/ 草稿」长什么样，
 /// 让新用户点开第一步就理解草稿的用途（对话是过程，草稿是下一步任务书的积累区）。
-const DEMO_STEP_DRAFT: &str = "结论：综述聚焦「心血管结局」方向。\n\n\
-- 理由：该方向有多项大型 RCT 佐证、证据链完整，适合作综述主线；\n\
-- 已否决：减肥适应症全综述（范围太大，文献量不可控）、药物化学机制（偏离临床结局导向）；\n\
-- 下一步：开工「文献检索与筛选」时，Agent 会参考本草稿制定纳入/排除标准。\n\n\
+const DEMO_STEP_DRAFT: &str = "结论：先精读演示里这一篇 LEADER 试验摘要，再决定要不要开工「文献精读与笔记」。\n\n\
+- 请用「开读这一篇」进三栏（笔记｜PDF｜终端），划一段写进笔记；\n\
+- 检索步已预置完成，不必先跑 OpenAlex；\n\
+- 下一步大圆是「综述大纲」。\n\n\
 —— 这是 Ccode 预置的示范草稿。你自己的草稿由「评审沉淀 / ◈ 提炼接力」追加到这里（.ccode/drafts/）。";
 
 /// 预置演示任务卡 + 第一步示范任务书草稿（best-effort：播种失败不阻断示例课题创建；
 /// 幂等由 create_demo_at 顶部的早退保证——已注册直接返回、已存在目录只注册不补建）。
 fn seed_demo_task_card(root: &Path) -> Result<(), String> {
-    create_task_card_at(root, "示例：确定综述角度", Some("文献检索与筛选"), None)?;
+    create_task_card_at(root, "示例：开读这一篇", Some("文献精读与笔记"), None)?;
     append_step_draft_at(
         root,
-        "文献检索与筛选",
+        "文献精读与笔记",
         "想法期讨论沉淀（示范）",
         DEMO_STEP_DRAFT,
     )?;
@@ -2641,12 +2687,13 @@ fn demo_registered(conn: &Connection, key: &str) -> Result<Option<ProjectDto>, S
         "SELECT path, name, created_at, last_opened_at FROM projects WHERE path=?1",
         params![key],
         |r| {
-            Ok(ProjectDto {
+            Ok(attach_work_mode(ProjectDto {
                 path: r.get(0)?,
                 name: r.get(1)?,
                 created_at: r.get(2)?,
                 last_opened_at: r.get(3)?,
-            })
+                work_mode: "research".into(),
+            }))
         },
     ) {
         Ok(p) => Ok(Some(p)),
@@ -2667,17 +2714,19 @@ fn create_demo_at(base: &Path, conn: &Connection) -> Result<ProjectDto, String> 
     }
     fs::create_dir_all(dir.join("papers")).map_err(|e| format!("创建示例课题目录失败: {e}"))?;
     fs::create_dir_all(dir.join("notes")).map_err(|e| format!("创建示例课题目录失败: {e}"))?;
-    fs::write(
-        dir.join("papers").join("sample-glp1-review.pdf"),
-        build_demo_pdf(),
-    )
-    .map_err(|e| format!("写入示例 PDF 失败: {e}"))?;
+    fs::write(dir.join(DEMO_PDF_REL), build_demo_pdf())
+        .map_err(|e| format!("写入示例 PDF 失败: {e}"))?;
+    crate::profiles::atomic_write(&dir.join("papers/included.md"), DEMO_INCLUDED)?;
+    crate::profiles::atomic_write(&dir.join("papers/screening.md"), DEMO_SCREENING)?;
+    crate::profiles::atomic_write(&dir.join("papers/to-fetch.md"), DEMO_TO_FETCH)?;
+    crate::profiles::atomic_write(&dir.join("papers/to-fetch.ris"), DEMO_TO_FETCH_RIS)?;
     crate::profiles::atomic_write(&dir.join("references.bib"), DEMO_BIB)?;
     crate::profiles::atomic_write(&dir.join("README.md"), DEMO_README)?;
     write_config_at(&dir, &demo_project_config())?;
     ensure_git_at(&dir)?;
     // best-effort：自动提交失败不阻断演示课题创建（档案卡未提交只影响后续评审合并提示）
     let _ = commit_bootstrap_at(&dir);
+    let _ = commit_demo_seed_at(&dir);
     let project = register_at(conn, &dir, DEMO_PROJECT_NAME, &crate::sessions::now_iso())?;
     // 演示任务卡 + 示范定稿简报（best-effort：播种失败不阻断创建）
     let _ = seed_demo_task_card(&dir);
@@ -2714,6 +2763,95 @@ pub async fn write_workspace_task_md(worktree_path: String, content: String) -> 
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepInputChipDto {
+    pub pattern: String,
+    pub role: String,
+    pub present: bool,
+    pub count: u32,
+    pub preview_path: Option<String>,
+}
+
+fn count_list_lines(path: &Path) -> u32 {
+    fs::read_to_string(path)
+        .map(|text| {
+            text.lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.is_empty() && !t.starts_with('#')
+                })
+                .count() as u32
+        })
+        .unwrap_or(0)
+}
+
+fn chips_for_patterns(
+    root: &Path,
+    patterns: &[String],
+    role: &str,
+) -> Vec<StepInputChipDto> {
+    let mut out = Vec::new();
+    for pattern in patterns {
+        let p = pattern.trim();
+        if p.is_empty() {
+            continue;
+        }
+        let files = crate::workspaces::glob_files_at(root, p);
+        let mut count = files.len() as u32;
+        if p.replace('\\', "/").ends_with("included.md") {
+            if let Some(f) = files.first() {
+                let n = count_list_lines(f);
+                if n > 0 {
+                    count = n;
+                }
+            }
+        }
+        let preview_path = files
+            .first()
+            .map(|f| f.to_string_lossy().into_owned());
+        out.push(StepInputChipDto {
+            pattern: p.to_string(),
+            role: role.into(),
+            present: count > 0,
+            count,
+            preview_path,
+        });
+    }
+    out
+}
+
+fn inspect_step_inputs_at(root: &Path, step_name: &str) -> Result<Vec<StepInputChipDto>, String> {
+    let cfg = read_config_at(root).config;
+    let step = cfg
+        .steps
+        .iter()
+        .find(|s| s.name == step_name)
+        .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
+    let mut chips = chips_for_patterns(root, &step.inputs, "required");
+    chips.extend(chips_for_patterns(root, &step.optional_inputs, "optional"));
+    for group in &step.any_of_inputs {
+        chips.extend(chips_for_patterns(root, group, "any"));
+    }
+    Ok(chips)
+}
+
+/// 开步确认弹层：扫本步 inputs 在项目根的实文件，供芯片展示（不读提货单）。
+#[tauri::command]
+pub async fn inspect_step_inputs(
+    project_root: String,
+    step_name: String,
+) -> Result<Vec<StepInputChipDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
+            &project_root,
+        )))?;
+        inspect_step_inputs_at(&root, &step_name)
+    })
+    .await
+    .map_err(|e| format!("检查步骤输入失败: {e}"))?
 }
 
 /// 把 TASK.md 追加到仓库共享的 .git/info/exclude（对所有 worktree 与主仓生效）。
@@ -2798,7 +2936,8 @@ fn pdf_owner_at(pdf_path: &Path) -> Result<Option<ProjectDto>, String> {
     Ok(resolve_owner(&target, &entries).map(|i| projects[i].clone()))
 }
 
-/// 按 PDF 路径反查归属项目：登记资源精确命中 → 项目根前缀命中 → Ok(None)（前端提示去登记）。
+/// 按 PDF 路径反查归属项目：登记资源精确命中 → 项目根前缀命中 → Ok(None)
+/// （前端询问是否把所在文件夹添加为项目，默认不挂研究流程）。
 #[tauri::command]
 pub async fn pdf_owner_project(pdf_path: String) -> Result<Option<ProjectDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -3345,6 +3484,22 @@ pub(crate) fn set_pipeline_opt_out_at(root: &Path, opt_out: bool) -> Result<(), 
     write_config_at(root, &cfg)
 }
 
+pub(crate) fn set_work_mode_at(root: &Path, mode: &str) -> Result<(), String> {
+    let mut cfg = read_config_at(root).config;
+    cfg.work_mode = normalize_work_mode(mode);
+    write_config_at(root, &cfg)
+}
+
+#[tauri::command]
+pub async fn set_work_mode(project_root: String, mode: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = PathBuf::from(crate::sessions::expand_tilde(&project_root));
+        set_work_mode_at(&root, &mode)
+    })
+    .await
+    .map_err(|e| format!("写入工作方式失败: {e}"))?
+}
+
 #[tauri::command]
 pub async fn set_pipeline_opt_out(project_root: String, opt_out: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -3406,6 +3561,7 @@ mod tests {
                 discussion_seeds: Vec::new(),
                 decisions: Vec::new(),
                 asks_lit_source: false,
+                seed_complete: false,
                 role: "ai".into(),
                 run: vec![
                     StepRunDto {
@@ -3425,6 +3581,7 @@ mod tests {
             submission_mode: None,
             submission_round: None,
             lit_watch_filter: None,
+            work_mode: "research".into(),
         }
     }
 
@@ -3651,6 +3808,7 @@ type = "paper"
             submission_mode: None,
             submission_round: None,
             lit_watch_filter: None,
+            work_mode: "research".into(),
         };
         let rendered = render_config(Some(existing), &config).unwrap();
         assert!(
@@ -4096,6 +4254,14 @@ resources = ["ghost.pdf"]
             "接力简报规则进默认 gitignore: {gitignore}"
         );
 
+        let coding = dir.join("proj-coding");
+        fs::create_dir_all(&coding).unwrap();
+        let c = ensure_git_at_mode(&coding, "coding").unwrap();
+        assert!(c.initialized && c.gitignore_written);
+        let cgi = fs::read_to_string(coding.join(".gitignore")).unwrap();
+        assert!(!cgi.contains("*.pdf"), "编程项目不应忽略 pdf: {cgi}");
+        assert!(cgi.contains(".DS_Store"));
+
         // 幂等：已是仓库直接返回，不改写任何文件
         let second = ensure_git_at(&project).unwrap();
         assert!(!second.initialized && !second.gitignore_written);
@@ -4395,6 +4561,7 @@ resources = ["ghost.pdf"]
                 discussion_seeds: Vec::new(),
                 decisions: Vec::new(),
                 asks_lit_source: false,
+                seed_complete: false,
                 role: "ai".into(),
                 run: vec![StepRunDto {
                     name: "dev".into(),
@@ -4516,6 +4683,23 @@ resources = ["ghost.pdf"]
         assert_eq!(cfg.steps[1].run.len(), 1);
         let raw = fs::read_to_string(config_path(&root)).unwrap();
         assert!(raw.contains("future_top_key = 42"), "未知顶层键丢失: {raw}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn work_mode_roundtrip_default_research_omitted() {
+        let dir = temp_dir("work-mode");
+        let root = dir.join("proj");
+        set_work_mode_at(&root, "coding").unwrap();
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(raw.contains("work_mode = \"coding\""), "{raw}");
+        assert_eq!(read_config_at(&root).config.work_mode, "coding");
+        set_work_mode_at(&root, "research").unwrap();
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(!raw.contains("work_mode"), "{raw}");
+        assert_eq!(read_config_at(&root).config.work_mode, "research");
+        set_work_mode_at(&root, "nope").unwrap();
+        assert_eq!(read_config_at(&root).config.work_mode, "research");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4822,49 +5006,59 @@ resources = ["ghost.pdf"]
 
         let p = create_demo_at(&base, &conn).unwrap();
         assert_eq!(p.name, DEMO_PROJECT_NAME);
-        assert!(root.join("papers").join("sample-glp1-review.pdf").exists());
+        assert!(root.join(DEMO_PDF_REL).exists());
         assert!(root.join("notes").is_dir());
         assert!(root.join("references.bib").exists());
         assert!(root.join("README.md").exists());
-        let pdf = fs::read(root.join("papers").join("sample-glp1-review.pdf")).unwrap();
+        let pdf = fs::read(root.join(DEMO_PDF_REL)).unwrap();
         assert!(
             pdf.starts_with(b"%PDF-") && pdf.ends_with(b"%%EOF\n"),
             "PDF 结构完整"
         );
-        // 档案卡可读回：topic + 五步流水线 + 两条资源登记
-        // （简报引用上一步产物路径属正常，parse_config 的引用提示类 warnings 不阻断，这里不断言为空）
+        // 档案卡 = 当前英文综述模板 + 检索步 seed_complete；不另写一套旧简报
         let text = fs::read_to_string(config_path(&root)).unwrap();
         let (config, _) = parse_config(&text);
+        let canon = demo_review_template();
         assert_eq!(
             config.topic.as_deref(),
             Some("GLP-1 受体激动剂的心血管结局（演示课题）")
         );
-        assert_eq!(config.steps.len(), 5);
+        assert_eq!(config.steps.len(), canon.steps.len());
         assert_eq!(config.steps[0].workspace_name, "lit-search");
+        assert_eq!(config.steps[0].skills, vec!["lit-search".to_string()]);
+        assert!(config.steps[0].seed_complete);
+        assert_eq!(config.steps[0].brief, canon.steps[0].brief);
+        assert_eq!(
+            config.steps[1].skills,
+            canon.steps[1].skills,
+            "精读步技能应与英文综述模板一致"
+        );
+        assert_eq!(config.steps[1].brief, canon.steps[1].brief);
+        assert_eq!(config.steps[3].run.len(), canon.steps[3].run.len());
         assert_eq!(config.steps[4].workspace_name, "polish");
         assert_eq!(config.resources.len(), 2);
         assert!(git_has_head(&root), "bootstrap 应已产生初始提交");
-        // 预置演示卡片：挂「文献检索与筛选」步骤；第一步播一份示范任务书草稿
         let cards = task_cards_at(&root);
         assert_eq!(cards.len(), 1, "示例课题应预置一张演示卡片");
         let demo_card = &cards[0];
-        assert_eq!(demo_card.name, "示例：确定综述角度");
-        assert_eq!(demo_card.step.as_deref(), Some("文献检索与筛选"));
-        let draft_text = fs::read_to_string(root.join(".ccode/drafts/lit-search.md")).unwrap();
+        assert_eq!(demo_card.name, "示例：开读这一篇");
+        assert_eq!(demo_card.step.as_deref(), Some("文献精读与笔记"));
+        let draft_text = fs::read_to_string(root.join(".ccode/drafts/lit-notes.md")).unwrap();
         assert!(
-            draft_text.starts_with("# 任务书草稿：文献检索与筛选"),
+            draft_text.starts_with("# 任务书草稿：文献精读与笔记"),
             "{draft_text}"
         );
-        for marker in ["想法期讨论沉淀（示范）", "心血管结局", "已否决", "下一步"]
-        {
+        for marker in ["想法期讨论沉淀（示范）", "开读这一篇", "综述大纲"] {
             assert!(draft_text.contains(marker), "示范草稿缺内容: {marker}");
         }
-        // 演示人工事项：第一步声明了「下载付费墙文献全文」（落点通配 papers/*.pdf）
-        // v3.87：「补充你已知的关键文献」删除（与流程线「输入准备」重合，且 papers/ 落点
-        // 对 Zotero 路径永不成立）——示例课题只剩「下载付费墙文献全文」这一条真人工事项
-        assert_eq!(config.steps[0].human_tasks.len(), 1);
-        assert_eq!(config.steps[0].human_tasks[0].timing, "after");
-        assert_eq!(config.steps[0].human_tasks[0].title, "下载付费墙文献全文");
+        assert!(
+            config.steps[0]
+                .human_tasks
+                .iter()
+                .any(|h| h.title.contains("下载付费墙文献全文")),
+            "检索步应保留模板的付费墙事项: {:?}",
+            config.steps[0].human_tasks
+        );
 
         // 幂等：二次调用返回同一项目，且不覆盖用户改过的内容
         write(&root.join("README.md"), "user edit");
@@ -5328,6 +5522,67 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
         let (cfg2, w2) = parse_config(&raw);
         assert!(cfg2.steps[0].asks_lit_source, "{raw}");
         assert!(w2.is_empty(), "{w2:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn seed_complete_round_trips_and_defaults_false() {
+        let dir = temp_dir("seed-complete");
+        let root = dir.join("proj");
+        let plain = "[[steps]]\nname = \"检索\"\nworkspace_name = \"lit\"\n";
+        let (cfg0, w0) = parse_config(plain);
+        assert!(!cfg0.steps[0].seed_complete);
+        assert!(w0.is_empty(), "{w0:?}");
+        write(&config_path(&root), plain);
+        write_config_at(&root, &cfg0).unwrap();
+        let raw0 = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(!raw0.contains("seed_complete"), "{raw0}");
+
+        let text = "[[steps]]\nname = \"检索\"\nworkspace_name = \"lit\"\n\
+                    seed_complete = true\n";
+        let (cfg, warnings) = parse_config(text);
+        assert!(cfg.steps[0].seed_complete);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        write_config_at(&root, &cfg).unwrap();
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        let (cfg2, w2) = parse_config(&raw);
+        assert!(cfg2.steps[0].seed_complete, "{raw}");
+        assert!(w2.is_empty(), "{w2:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn inspect_step_inputs_counts_included_lines_and_notes() {
+        let dir = temp_dir("inspect-inputs");
+        let root = dir.join("proj");
+        fs::create_dir_all(root.join("papers")).unwrap();
+        fs::create_dir_all(root.join("notes")).unwrap();
+        fs::write(
+            root.join("papers/included.md"),
+            "# skip\nPaper A — a, 2020 — j — doi\nPaper B — b, 2021 — j — doi\n",
+        )
+        .unwrap();
+        fs::write(root.join("notes/a.md"), b"n1").unwrap();
+        fs::write(root.join("notes/b.md"), b"n2").unwrap();
+        let cfg = ProjectConfigDto {
+            steps: vec![StepDto {
+                name: "精读".into(),
+                workspace_name: "lit-notes".into(),
+                inputs: vec!["papers/included.md".into(), "notes/*.md".into()],
+                optional_inputs: vec!["outline.md".into()],
+                ..StepDto::default()
+            }],
+            ..ProjectConfigDto::default()
+        };
+        write_config_at(&root, &cfg).unwrap();
+        let chips = inspect_step_inputs_at(&root, "精读").unwrap();
+        let included = chips.iter().find(|c| c.pattern.ends_with("included.md")).unwrap();
+        assert_eq!(included.count, 2);
+        assert!(included.present);
+        let notes = chips.iter().find(|c| c.pattern.contains("notes")).unwrap();
+        assert_eq!(notes.count, 2);
+        let missing = chips.iter().find(|c| c.pattern == "outline.md").unwrap();
+        assert!(!missing.present);
         std::fs::remove_dir_all(&dir).ok();
     }
 

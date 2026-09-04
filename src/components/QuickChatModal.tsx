@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Checkbox, primaryActionClass, secondaryActionClass, fieldClass } from "./PageFrame";
-import { useAppStore } from "../store";
+import { sessionRuntimeKey, useAppStore } from "../store";
 import { AGENTS, type SessionMetaDto } from "../types";
 import { agentBrandBadgeStyle } from "../agent-colors";
 import { relTime } from "../rel-time";
@@ -83,17 +83,29 @@ export async function launchQuickChatDirect(): Promise<boolean> {
   return true;
 }
 
-/** 恢复一条历史会话进终端（弹层「最近对话」行与侧栏右键菜单共用）：不开新会话。
+/** 恢复一条历史会话进终端（弹层「最近对话」行、侧栏右键、项目区「继续」共用）：不开新会话。
     cwd 用会话原目录——worktree 会话的 projectPath 已归并回真实仓库（展示层另有工作区标注）。
+    终端里已经在跑这条会话时只切过去，不重复 resume。
     reuseKey 按会话 id：同一对话重复点切回同一标签；终端页消费处另有 cwd 活标签兜底
     （进程活着时不重复 resume，防 active writer 冲突） */
 export function resumeSessionInTerminal(s: SessionMetaDto): void {
-  const { setPendingTerminal, setPage } = useAppStore.getState();
+  const { setPendingTerminal, setPage, liveSessions, focusTab } =
+    useAppStore.getState();
+  const liveTab = liveSessions[sessionRuntimeKey(s.agent, s.sessionId)];
+  if (liveTab) {
+    setPage("terminal");
+    focusTab(liveTab);
+    return;
+  }
   setPendingTerminal({
     cwd: s.projectPath,
     extraEnv: {},
     title: sessionDisplayTitle(s),
-    resume: { agentId: s.agent, sessionId: s.sessionId },
+    resume: {
+      agentId: s.agent,
+      sessionId: s.sessionId,
+      provider: s.provider,
+    },
     reuseKey: `resume:${s.agent}:${s.sessionId}`,
   });
   setPage("terminal");

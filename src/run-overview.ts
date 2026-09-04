@@ -17,6 +17,8 @@ export interface RunOverviewInput {
   shell: boolean;
   /** 会话尾部注意力状态；无联动 / shell / 已退出 / 未知为 null */
   attention: "done" | "working" | "confirm" | null;
+  /** 开聊复用键（办公问 AI 按文件）；恢复占位标签没有 */
+  reuseKey?: string;
 }
 
 export interface RunOverviewItem extends RunOverviewInput {

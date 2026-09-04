@@ -1,5 +1,14 @@
+import {
+  CUSTOM_LIGHT_THEME_ID,
+  CUSTOM_THEME_ID,
+  isCustomThemeId,
+} from "./custom-theme.ts";
+
+export { CUSTOM_LIGHT_THEME_ID, CUSTOM_THEME_ID, isCustomThemeId };
+
 /** 主题清单（设置页色卡与 ⌘K 命令面板共用，单一出处）。
- *  七套深色 + 七套同名浅色（light 标记），浅色在设置页排在对应深色正下方。 */
+ *  七套深色 + 七套同名浅色（light 标记），浅色在设置页排在对应深色正下方。
+ *  自定义主题不进本表（custom / custom-light）。 */
 export const THEMES = [
   { id: "midnight", name: "沉浸黑" },
   { id: "terracotta", name: "陶土" },
@@ -19,7 +28,10 @@ export const THEMES = [
 
 export type ThemeId = (typeof THEMES)[number]["id"];
 
-/** 主题亮暗判定单一出处：原生窗口外观、终端调色板 twin、浅色分支都走它，禁另造判定 */
+/** 主题亮暗判定单一出处：原生窗口外观、终端调色板 twin、浅色分支都走它，禁另造判定。
+ *  自定义浅色 id 为 custom-light（画布亮度现算后写入），不进 THEMES 十四套清单。 */
 export function isLightTheme(id: string | undefined): boolean {
+  if (id === CUSTOM_LIGHT_THEME_ID) return true;
+  if (id === CUSTOM_THEME_ID) return false;
   return THEMES.some((t) => t.id === id && "light" in t && t.light);
 }

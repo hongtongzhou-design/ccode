@@ -4,6 +4,11 @@
 pub const LEGACY: &str = "ccode";
 pub const PREFIX: &str = "ccode-";
 
+/// Codex 内置 ChatGPT 登录渠道名（保留字，读 auth.json / 钥匙串的 ChatGPT 凭证）。
+/// 官方账号启动用 `-c model_provider="openai"` 盖过磁盘 `config.toml` 的网关默认；
+/// 不得写成 `ccode` / `ccode-<短id>`（那是中转内联渠道）。
+pub const CODEX_CHATGPT: &str = "openai";
+
 /// `ccode-` + 网关 UUID 去掉连字符后的前 8 位十六进制。
 pub fn provider_id(gateway_id: &str) -> String {
     let hex: String = gateway_id
@@ -67,6 +72,7 @@ mod tests {
         assert!(!gateway_matches_provider(gid, LEGACY));
         assert!(is_ccode_provider(LEGACY));
         assert!(is_ccode_provider(&pid));
-        assert!(!is_ccode_provider("openai"));
+        assert!(!is_ccode_provider(CODEX_CHATGPT));
+        assert_eq!(CODEX_CHATGPT, "openai");
     }
 }

@@ -25,7 +25,12 @@ pub struct SkillDto {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub source: String, // builtin | local | zip | github | discovered
+    /// 来源标记（删除保护的 origin 口径，单一出处即本字段，不另加 origin 列）：
+    /// builtin=内置种子（播种器写入）/ ccode=Ccode 新建 / local=本地目录导入 /
+    /// zip=ZIP 导入 / github=GitHub 导入 / discovered=从 agent 目录收编。
+    /// fail-safe：ccode 是后加的，旧数据的自建与本地导入同记 local 无法区分，
+    /// 前端删除提示一律按「非自建（外部导入）」对待——宁可多提示来源，不错过警告
+    pub source: String,
     pub repo: Option<String>,
     #[serde(default)]
     pub repo_ref: Option<String>,
@@ -1409,6 +1414,108 @@ pub async fn apply_skill(id: String, agent: String, enabled: bool) -> Result<(),
     apply_impl(&store, &agent_dirs(), &id, &agent, enabled, allow_symlink_for(&agent))
 }
 
+/// 定时任务跑前：技能必须在库里且已分发到该 agent。
+pub(crate) fn require_skill_distributed(skill_name: &str, agent: &str) -> Result<(), String> {
+    let store = SkillStore::default_paths()?;
+    require_skill_distributed_at(&store, skill_name, agent)
+}
+
+fn require_skill_distributed_at(
+    store: &SkillStore,
+    skill_name: &str,
+    agent: &str,
+) -> Result<(), String> {
+    let skills = store.read();
+    let skill = skills.iter().find(|s| s.name == skill_name).ok_or_else(|| {
+        format!("技能库没有「{skill_name}」，定时任务找不到规范")
+    })?;
+    if skill.apps.get(agent).copied().unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(format!(
+            "技能「{skill_name}」未分发到 {agent}，去技能页打开开关"
+        ))
+    }
+}
+
+pub(crate) fn skill_id_by_name(name: &str) -> Result<String, String> {
+    let store = SkillStore::default_paths()?;
+    store
+        .read()
+        .into_iter()
+        .find(|s| s.name == name)
+        .map(|s| s.id)
+        .ok_or_else(|| format!("技能库没有「{name}」"))
+}
+
+pub(crate) fn apply_skill_by_id(id: &str, agent: &str, enabled: bool) -> Result<(), String> {
+    let store = SkillStore::default_paths()?;
+    apply_impl(
+        &store,
+        &agent_dirs(),
+        id,
+        agent,
+        enabled,
+        allow_symlink_for(agent),
+    )
+}
+
+/// 从完整 SKILL.md 落盘进库（确认后才调用）。category 如「巡检」。
+pub(crate) fn create_skill_from_full_md(
+    full_md: &str,
+    fallback_name: &str,
+    category: Option<&str>,
+) -> Result<SkillDto, String> {
+    let store = SkillStore::default_paths()?;
+    create_skill_from_full_md_at(&store, full_md, fallback_name, category)
+}
+
+fn create_skill_from_full_md_at(
+    store: &SkillStore,
+    full_md: &str,
+    fallback_name: &str,
+    category: Option<&str>,
+) -> Result<SkillDto, String> {
+    let text = extract_skill_md(full_md);
+    let parsed = parse_skill_md_text(text);
+    let body = skill_md_body(text);
+    if body.trim().is_empty() {
+        return Err("SKILL.md 正文为空，未写入".into());
+    }
+    let name = parsed
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && validate_skill_name(n).is_ok())
+        .unwrap_or(fallback_name.trim())
+        .to_string();
+    validate_skill_name(&name)?;
+    let desc = parsed.description.clone().unwrap_or_default();
+    let mut skills = store.read();
+    create_impl(store, &mut skills, &name, &desc, body)?;
+    if !parsed.inputs.is_empty() || !parsed.outputs.is_empty() {
+        update_content_impl(
+            store,
+            &mut skills,
+            &name,
+            body,
+            Some(desc),
+            Some((parsed.inputs, parsed.outputs)),
+        )?;
+    }
+    if let Some(cat) = category.map(str::trim).filter(|c| !c.is_empty()) {
+        if let Some(s) = skills.iter_mut().find(|s| s.name == name) {
+            s.category = Some(cat.to_string());
+            store.write(&skills)?;
+        }
+    }
+    store
+        .read()
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| "技能已写入但读取失败".into())
+}
+
 #[tauri::command]
 pub async fn delete_skill(id: String) -> Result<(), String> {
     let store = SkillStore::default_paths()?;
@@ -1861,7 +1968,8 @@ fn create_impl(
         return Err(format!("写入 SKILL.md 失败: {e}"));
     }
     let parsed_desc = parse_skill_md(&dst.join("SKILL.md")).description;
-    skills.push(new_skill(name.to_string(), parsed_desc, "local", None));
+    // 新建标记 source="ccode"（删除保护的来源分类用；旧数据自建记 local，前端按导入对待）
+    skills.push(new_skill(name.to_string(), parsed_desc, "ccode", None));
     if let Err(e) = store.write(skills) {
         skills.pop();
         let _ = fs::remove_dir_all(&dst);
@@ -1988,6 +2096,24 @@ fn strip_code_fence(text: &str) -> &str {
     }
     let body = &t[first_nl + 1..];
     body.strip_suffix("```").map(str::trim_end).unwrap_or(t)
+}
+
+/// 草稿里可能夹着前言和代码围栏：取第一段 `---` frontmatter 起的 SKILL.md。
+fn extract_skill_md(text: &str) -> &str {
+    let t = strip_code_fence(text).trim();
+    let start = if t.starts_with("---") {
+        t
+    } else if let Some(i) = t.find("\n---") {
+        t[i + 1..].trim()
+    } else {
+        t
+    };
+    if let Some((head, tail)) = start.rsplit_once("\n```") {
+        if tail.trim().is_empty() {
+            return head.trim();
+        }
+    }
+    start
 }
 
 fn adapt_skill_to_pipeline_impl(
@@ -2775,7 +2901,7 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].name, "my-method");
         assert_eq!(saved[0].description, "我的方法", "元数据描述从落盘 SKILL.md 解析");
-        assert_eq!(saved[0].source, "local");
+        assert_eq!(saved[0].source, "ccode", "新建技能标记为 Ccode 自建（删除保护来源分类）");
         // 重名拒绝并提示改用编辑（不覆盖、不静默跳过）
         let mut again = fx.store.read();
         let err = create_impl(&fx.store, &mut again, "my-method", "x", "y").unwrap_err();
@@ -3168,5 +3294,42 @@ mod tests {
             "失败后元数据必须回落为未启用，不能显示启用但盘上无物"
         );
         assert!(!fx.agents["codex"].join("pdf").join(MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn extract_skill_md_strips_fence_and_preamble() {
+        let raw = "好的，我写好了：\n\n```markdown\n---\nname: model-watch\ndescription: 查模型\n---\n\n正文\n```\n";
+        let got = extract_skill_md(raw);
+        assert!(got.starts_with("---"));
+        assert!(got.contains("name: model-watch"));
+        assert!(got.contains("正文"));
+        assert!(!got.contains("```"));
+    }
+
+    #[test]
+    fn create_from_full_md_sets_category_and_outputs() {
+        let fx = Fx::new();
+        let md = "---\nname: model-watch\ndescription: 查各家模型\noutputs:\n  - notes/watch-inbox.md\n---\n\n只追加清单，不改表。\n";
+        let skill = create_skill_from_full_md_at(&fx.store, md, "fallback", Some("巡检")).unwrap();
+        assert_eq!(skill.name, "model-watch");
+        assert_eq!(skill.category.as_deref(), Some("巡检"));
+        assert_eq!(skill.source, "ccode");
+        let parsed = parse_skill_md(&fx.store.skill_dir("model-watch").join("SKILL.md"));
+        assert_eq!(parsed.outputs, vec!["notes/watch-inbox.md".to_string()]);
+    }
+
+    #[test]
+    fn require_distributed_needs_apps_flag() {
+        let fx = Fx::new();
+        let skill = fx.add_lib_skill("model-watch", "查模型");
+        let err = require_skill_distributed_at(&fx.store, "model-watch", "codex").unwrap_err();
+        assert!(err.contains("未分发"));
+        let mut skills = fx.store.read();
+        skills[0].apps.insert("codex".into(), true);
+        fx.store.write(&skills).unwrap();
+        require_skill_distributed_at(&fx.store, "model-watch", "codex").unwrap();
+        let err = require_skill_distributed_at(&fx.store, "ghost", "codex").unwrap_err();
+        assert!(err.contains("技能库没有"));
+        let _ = skill;
     }
 }

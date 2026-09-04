@@ -209,6 +209,7 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 主列表按 Agent 分组（启动路径不变）。每行一条绑定：网关名、模型摘要、两个徽标：
 
 - **默认**：启动栏预选（`default_profiles`，值 = binding id）。
+- **官方账号模型（v3.186）**：启动不得把中转/国产网关模型名（deepseek / qwen / glm…）注入官方通道。Codex 官方只接受 `gpt-` / `o1`/`o3`/`o4` / 含 `codex` 的模型；否则不传 `-m`，避免 ChatGPT 订阅的 `service_tier=priority` 打到 DeepSeek 上。前端 `officialModelAllowed` 与 `agents.rs official_model_allowed` 双端镜像。
 - **全局生效**：上次由 Ccode 写入该 CLI 文件的绑定（`active_global_profiles`）。口径仍是「上次写入」不是绝对生效态；托盘见 §12。
 
 行内：编辑绑定（模型名单 / 默认模型 / extraEnv）· 在终端使用 · 设为全局 · 停用 · 解绑。
@@ -228,6 +229,14 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 需要「启动时把名单注册进选择器」的 CLI（Claude 最多 5 槽、Codex catalog、OpenCode models、Grok `allowed_models`）：写入绑定的整份名单。Codex catalog 路径仍 `codex-<binding_id>.json`（§3）。
 
 官方绑定：不注 API、`env_remove` 残留密钥变量（现口径）。`extraEnv` 仍最后注入。
+
+**Codex 官方绑定额外注入** `-c model_provider="openai"`：磁盘 `config.toml` 的 `model_provider` 指向自定义网关时会盖过 ChatGPT 登录（选官方账号仍走网关计费）。`-c` 优先级最高，只影响本进程，不改用户文件、不写 `[model_providers.*]`。登录走 `codex login --device-auth`（设备码印在内嵌终端；不在 Ccode 内自建 OAuth）。未选模型时磁盘 `model` 仍会生效。`chatgpt.com` 401 / `token_revoked` 是 ChatGPT 登录态本身失效，不是官方/API 凭证串台。
+
+**无头调用（雷达解读 / 提交信息等）** 的「最近使用」回落跳过官方账号：OAuth 过期会把 CLI stderr 甩到界面。有 API 配置就走 API；只有官方才回落官方。显式 id、功能专属、AI 专用仍尊重官方。失败文案走 `summarize_headless_error`，不回整段日志。终端里手选「官方账号」不受这条约束。
+
+**Codex 网关绑定额外注入** `-c web_search="disabled"` 与 `-c service_tier="auto"`：ChatGPT 登录/磁盘默认会把官方 hosted 网页搜索和订阅优先档带进本进程；catalog 的 `supports_search_tool: false` 挡不住请求。DeepSeek 等中转会拒 `web_search`（有的网关转成 Anthropic `web_search_20250305`）。只盖本进程，官方账号启动不注。
+
+**出网代理**（设置 `outbound_proxy`）：只注入官方启动与组头登录（`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY`）。网关 API 启动不走。连接 `extraEnv` 同名键最后覆盖。不建本地反代理，官方失败不回落中转。
 
 ## 12. 设为全局与托盘
 

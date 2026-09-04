@@ -483,12 +483,12 @@ fn search_skip_dir(name: &str, show_hidden: bool, query: &str) -> bool {
 }
 
 /// 文件名最后一个扩展名（小写、不含点）。`.env`、无扩展名 → None
-fn file_ext(name: &str) -> Option<&str> {
+fn file_ext(name: &str) -> Option<String> {
     let dot = name.rfind('.')?;
     if dot == 0 || dot + 1 == name.len() {
         return None;
     }
-    Some(&name[dot + 1..])
+    Some(name[dot + 1..].to_ascii_lowercase())
 }
 
 fn is_simple_ext_token(s: &str) -> bool {
@@ -560,7 +560,7 @@ fn is_ext_hit(name: &str, is_dir: bool, q: &SearchQuery) -> bool {
     if is_dir || q.exts.is_empty() {
         return false;
     }
-    file_ext(name).is_some_and(|e| q.exts.iter().any(|x| x == e))
+    file_ext(name).is_some_and(|e| q.exts.iter().any(|x| x == &e))
 }
 
 fn search_entry_matches(name: &str, is_dir: bool, q: &SearchQuery) -> bool {
@@ -651,6 +651,148 @@ fn assemble_search_hits(
     ext_out
 }
 
+const OFFICE_EXTS: &[&str] = &[
+    "md", "markdown", "mdx", "qmd", "txt", "doc", "docx", "rtf", "xls", "xlsx", "xlsm", "ods",
+    "csv", "tsv", "ppt", "pptx", "odp", "pdf", "png", "jpg", "jpeg", "gif", "webp", "svg",
+];
+const OFFICE_MAX: usize = 400;
+const OFFICE_DEPTH: usize = 8;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficeDocDto {
+    pub path: String,
+    pub name: String,
+    pub rel: String,
+    pub size: u64,
+    pub modified: Option<String>,
+}
+
+fn list_office_docs_sync(root: &str) -> Result<Vec<OfficeDocDto>, String> {
+    let root_path = std::path::PathBuf::from(expand_tilde(root));
+    if !root_path.is_dir() {
+        return Err("目录不存在".into());
+    }
+    let mut out = Vec::new();
+    let mut visited = 0;
+    office_walk(&root_path, &root_path, 0, &mut visited, &mut out);
+    out.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.rel.cmp(&b.rel)));
+    out.truncate(OFFICE_MAX);
+    Ok(out)
+}
+
+fn office_walk(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    depth: usize,
+    visited: &mut usize,
+    out: &mut Vec<OfficeDocDto>,
+) {
+    if depth > OFFICE_DEPTH || *visited >= SEARCH_MAX_VISITED || out.len() >= OFFICE_MAX {
+        return;
+    }
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        *visited += 1;
+        if *visited >= SEARCH_MAX_VISITED || out.len() >= OFFICE_MAX {
+            break;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        let path = e.path();
+        if fs_noise_skip(&path) {
+            continue;
+        }
+        let Ok(md) = e.metadata() else {
+            continue;
+        };
+        if md.is_dir() {
+            if name.starts_with('.')
+                || matches!(name.as_str(), "node_modules" | "target" | "dist" | "Library")
+            {
+                continue;
+            }
+            office_walk(root, &path, depth + 1, visited, out);
+            continue;
+        }
+        let Some(ext) = file_ext(&name) else {
+            continue;
+        };
+        if !OFFICE_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| name.clone());
+        let modified = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| iso_from_unix(d.as_secs()));
+        out.push(OfficeDocDto {
+            path: path.to_string_lossy().into_owned(),
+            name,
+            rel,
+            size: md.len(),
+            modified,
+        });
+    }
+}
+
+#[tauri::command]
+pub async fn list_office_docs(root: String) -> Result<Vec<OfficeDocDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_office_docs_sync(&root))
+        .await
+        .map_err(|e| format!("列出文档失败: {e}"))?
+}
+
+/// 系统打开前的门槛：项目根内（canonicalize + path_within）且扩展名在办公白名单。
+/// 不把 `opener:allow-open-path` 交给 WebView——那会让前端打开任意可执行文件。
+fn prepare_open_in_system(path: &str, root: &str) -> Result<PathBuf, String> {
+    let root_exp = expand_tilde(root);
+    let path_exp = expand_tilde(path);
+    if !crate::paths::path_within(&path_exp, &root_exp) {
+        return Err("路径超出项目根目录，拒绝打开".into());
+    }
+    let root_c = crate::paths::canonicalize_plain(std::path::Path::new(&root_exp))
+        .map_err(|e| format!("项目根目录无效: {e}"))?;
+    let path_c = crate::paths::canonicalize_plain(std::path::Path::new(&path_exp))
+        .map_err(|e| format!("文件不存在或不可读: {e}"))?;
+    if !crate::paths::path_within_path(&path_c, &root_c) {
+        return Err("路径超出项目根目录，拒绝打开".into());
+    }
+    if path_c.is_dir() {
+        return Err("目录请用「显示」在文件管理器里打开".into());
+    }
+    let name = path_c
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Some(ext) = file_ext(&name) else {
+        return Err("这种文件不能用系统应用打开".into());
+    };
+    if !OFFICE_EXTS.contains(&ext.as_str()) {
+        return Err("这种文件不能用系统应用打开".into());
+    }
+    Ok(path_c)
+}
+
+fn open_in_system_sync(path: &str, root: &str) -> Result<(), String> {
+    let target = prepare_open_in_system(path, root)?;
+    tauri_plugin_opener::open_path(&target, None::<&str>)
+        .map_err(|e| format!("无法用系统应用打开: {e}"))
+}
+
+/// 用系统默认应用打开项目内文档（Excel / Word / 幻灯等）。用户点「系统打开」才走这里。
+#[tauri::command]
+pub async fn open_in_system(path: String, root: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_in_system_sync(&path, &root))
+        .await
+        .map_err(|e| format!("无法用系统应用打开: {e}"))?
+}
+
 #[tauri::command]
 pub async fn search_files(
     root: String,
@@ -701,6 +843,63 @@ mod search_tests {
             &mut name_out,
         );
         assemble_search_hits(ext_out, name_out)
+    }
+
+    #[test]
+    fn list_office_docs_skips_noise_and_keeps_md() {
+        let dir = std::env::temp_dir().join(format!("ccode-office-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("notes")).unwrap();
+        fs::create_dir_all(dir.join("node_modules")).unwrap();
+        fs::write(dir.join("notes/a.md"), "hi").unwrap();
+        fs::write(dir.join("node_modules/x.md"), "no").unwrap();
+        fs::write(dir.join("skip.rs"), "code").unwrap();
+        let out = list_office_docs_sync(dir.to_str().unwrap()).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].rel.replace('\\', "/").ends_with("notes/a.md"));
+        fs::write(dir.join("REPORT.PDF"), "%PDF-").unwrap();
+        let out2 = list_office_docs_sync(dir.to_str().unwrap()).unwrap();
+        assert!(
+            out2.iter()
+                .any(|d| d.name.eq_ignore_ascii_case("REPORT.PDF")),
+            "{:?}",
+            out2.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prepare_open_in_system_allows_xlsx_inside_root() {
+        let dir = std::env::temp_dir().join(format!("ccode-open-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("表.XLSX");
+        fs::write(&f, b"PK").unwrap();
+        let got = prepare_open_in_system(f.to_str().unwrap(), dir.to_str().unwrap()).unwrap();
+        assert!(got.ends_with("表.XLSX") || got.ends_with("表.xlsx"), "{got:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prepare_open_in_system_rejects_outside_and_scripts() {
+        let root = std::env::temp_dir().join(format!("ccode-open-root-{}", uuid::Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!("ccode-open-out-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("a.xlsx");
+        fs::write(&secret, b"PK").unwrap();
+        let err = prepare_open_in_system(secret.to_str().unwrap(), root.to_str().unwrap())
+            .unwrap_err();
+        assert!(err.contains("超出项目根目录"), "{err}");
+
+        let sh = root.join("run.sh");
+        fs::write(&sh, "echo hi").unwrap();
+        let err = prepare_open_in_system(sh.to_str().unwrap(), root.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("这种文件"), "{err}");
+
+        let err = prepare_open_in_system(root.to_str().unwrap(), root.to_str().unwrap())
+            .unwrap_err();
+        assert!(err.contains("目录"), "{err}");
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
     }
 
     #[test]

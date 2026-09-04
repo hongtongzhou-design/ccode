@@ -15,8 +15,12 @@ import {
   fieldClass,
   ghostActionClass,
   hoverRevealClass,
+  projectWellClass,
   rowActionClass,
+  searchFieldClass,
 } from "./PageFrame";
+import { LIST_PREVIEW_CAP } from "../lit-list";
+import { ListPreviewToggle } from "./FolderGroupedList";
 import { useAppStore } from "../store";
 import { relTime } from "../rel-time";
 import { schedulesForProject } from "../schedule-tasks";
@@ -35,10 +39,11 @@ import {
   metricsTooltip,
   paperResourceFor,
   pdfUrlFor,
-  sourceDisplayName,
   staleLitHint,
   weeklyBuckets,
   normalizeTitle,
+  parseWatchExplain,
+  watchExplainPrompt,
 } from "../lit-watch";
 import type {
   AddIncludedResultDto,
@@ -144,6 +149,37 @@ type ExplainState =
   | { status: "ok"; text: string }
   | { status: "error"; error: string };
 
+function WatchExplainBody({
+  text,
+  onRerun,
+}: {
+  text: string;
+  onRerun: () => void;
+}) {
+  const sections = parseWatchExplain(text);
+  return (
+    <div className="space-y-2">
+      {sections ? (
+        sections.map((s) => (
+          <div key={s.heading}>
+            <p className="text-micro font-medium text-l3">{s.heading}</p>
+            <p className="whitespace-pre-line">{s.body}</p>
+          </div>
+        ))
+      ) : (
+        <p className="whitespace-pre-line">{text}</p>
+      )}
+      <button
+        type="button"
+        className="text-micro text-l4 hover:text-l2"
+        onClick={onRerun}
+      >
+        重跑
+      </button>
+    </div>
+  );
+}
+
 /** 新命中条目行：双行（pill + 标题 + 来源 + 日期 / 摘要截断两行点击展开），
  *  主按钮「→ 精读」常驻，◈ 解读 / ↓ 全文 / ⋯ hover 才现 */
 function WatchEntryRow({
@@ -153,10 +189,12 @@ function WatchEntryRow({
   onAddIncluded,
   onExplain,
   onCloseExplain,
+  onRerun,
   onDownload,
   onAttach,
   onDismiss,
   included,
+  startOpen,
 }: {
   entry: WatchEntryDto;
   explain: ExplainState | null;
@@ -164,109 +202,71 @@ function WatchEntryRow({
   onAddIncluded: () => void;
   onExplain: () => void;
   onCloseExplain: () => void;
+  onRerun: () => void;
   onDownload: () => void;
   onAttach: () => void;
   onDismiss: () => void;
   included: boolean;
+  startOpen?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(!!startOpen);
+  useEffect(() => {
+    if (startOpen) setExpanded(true);
+  }, [startOpen]);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // 有中文一句话时标题行显示它，英文原标题进 hover tooltip
   const titleRef = useRef<HTMLSpanElement>(null);
   const { tip, show, hide } = useHoverTip(titleRef);
   // 期刊 pill 剥出版商尾巴（「(Wiley)」等）给标题让位；剥过时 hover 显示原始全称
-  const sourceName = sourceDisplayName(entry.source);
-  const sourceStripped = sourceName !== entry.source.trim();
-  const sourceRef = useRef<HTMLSpanElement>(null);
-  const sourceTip = useHoverTip(sourceRef, true);
   // 全文分流：免费直链 →「↓ 全文」可下载；出版商落地页/DOI → 直接给「↗ 来源」；无链接 → 不显示
   const fulltext = fulltextLinkFor(entry.url);
   const pdfRef = useRef<HTMLButtonElement>(null);
   const pdfTip = useHoverTip(pdfRef, true);
+  const actionBtn = `${rowActionClass} shrink-0 whitespace-nowrap`;
   return (
-    <li className="group rounded-md px-2 py-2 hover:bg-hover">
-      {/* 两行式：标题独占整行（长题换行显示全，对照 Stork 卡片式扫读），
-          出处与期刊指标降到标题下一行；操作组贴右上，不再和标题抢宽度 */}
-      <div className="flex items-start gap-2">
-        {entry.relevance === "推荐" ? (
-          <span className="mt-0.5 shrink-0 rounded-full bg-cta-pill px-2 py-0.5 text-micro text-cta-pill-text">
-            推荐
-          </span>
-        ) : (
-          /* 纯状态 pill：inset 灰底 + 语义色小圆点（待确认=warn） */
-          <span className="mt-0.5 flex shrink-0 items-center gap-1 rounded-full bg-inset px-2 py-0.5 text-micro text-l3">
-            <span
-              className={`size-1.5 rounded-full ${
-                entry.relevance === "相关" ? "bg-l4" : "bg-warn-text"
-              }`}
-            />
-            {entry.relevance}
-          </span>
-        )}
-        <div className="min-w-0 flex-1">
-          {/* 有中文一句话时显示它，英文原标题进 hover tooltip */}
+    <li className="group rounded-md px-2.5 hover:bg-hover">
+      <div className="flex min-h-10 items-center gap-2">
+        <button
+          type="button"
+          className="min-w-0 flex-1 truncate text-left text-sm text-l2"
+          onClick={() => setExpanded((v) => !v)}
+          title={entry.title}
+        >
           <span
             ref={titleRef}
             onMouseEnter={entry.zhSummary ? show : undefined}
             onMouseLeave={entry.zhSummary ? hide : undefined}
-            className="text-sm leading-5 text-l1"
           >
             {entry.zhSummary || entry.title}
           </span>
-          {entry.zhSummary && <HoverTip tip={tip} text={entry.title} />}
-          {/* 出处行：期刊 pill 剥出版商尾巴（「(Wiley)」等）；剥过时 hover 显示原始全称 */}
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-            <span
-              ref={sourceRef}
-              onMouseEnter={sourceStripped ? sourceTip.show : undefined}
-              onMouseLeave={sourceStripped ? sourceTip.hide : undefined}
-              className="rounded-sm bg-inset px-1 py-0.5 text-micro text-l4"
-            >
-              {sourceName}
+        </button>
+        {entry.zhSummary && <HoverTip tip={tip} text={entry.title} />}
+        <span className="flex shrink-0 items-center gap-1">
+          {entry.relevance === "推荐" ? (
+            <span className="rounded-full bg-cta-pill px-1.5 py-px text-micro text-cta-pill-text">
+              推荐
             </span>
-            {sourceStripped && <HoverTip tip={sourceTip.tip} text={entry.source} up />}
-            {entry.metrics?.impactFactor && (
-              <span className="rounded-full bg-inset px-1.5 py-0.5 text-micro text-l3">
-                IF {entry.metrics.impactFactor}
-              </span>
-            )}
-            {entry.metrics?.casQuartile != null && (
-              /* 1 区用 cta-pill 强调（同「推荐」pill 口径），2-4 区回到 inset 灰底 */
-              <span
-                className={`rounded-full px-1.5 py-0.5 text-micro ${
-                  entry.metrics.casQuartile === 1
-                    ? "bg-cta-pill text-cta-pill-text"
-                    : "bg-inset text-l3"
-                }`}
-              >
-                {entry.metrics.casQuartile}区
-              </span>
-            )}
-            {entry.metrics?.top && (
-              <span className="rounded-full bg-cta-pill px-1.5 py-0.5 text-micro text-cta-pill-text">
-                TOP
-              </span>
-            )}
-            {entry.date && (
-              <span className="text-micro text-l4">{relTime(entry.date)}</span>
-            )}
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <button
-            type="button"
-            className={`${rowActionClass} shrink-0`}
-            disabled={included}
-            onClick={onAddIncluded}
-          >
-            {included ? "✓ 已在清单" : "→ 精读"}
-          </button>
-          <span
-            className={`flex shrink-0 items-center ${hoverRevealClass}`}
-          >
+          ) : (
+            <span className="rounded-full border border-field bg-canvas px-1.5 py-px text-micro text-l3">
+              {entry.relevance}
+            </span>
+          )}
+          {entry.metrics?.impactFactor && (
+            <span className="rounded-full bg-canvas px-1.5 py-px text-micro text-l4">
+              IF {entry.metrics.impactFactor}
+            </span>
+          )}
+        </span>
+        {entry.date && (
+          <span className="w-14 shrink-0 text-right text-micro text-l4">
+            {relTime(entry.date)}
+          </span>
+        )}
+        <span className="flex shrink-0 items-center gap-1">
+          <span className="hidden gap-1 group-hover:flex group-focus-within:flex">
             <button
               type="button"
-              className={ghostActionClass}
+              className={actionBtn}
               onClick={explain ? onCloseExplain : onExplain}
             >
               ◈ 解读
@@ -275,7 +275,7 @@ function WatchEntryRow({
               <button
                 ref={pdfRef}
                 type="button"
-                className={ghostActionClass}
+                className={actionBtn}
                 disabled={downloading}
                 onMouseEnter={pdfTip.show}
                 onMouseLeave={pdfTip.hide}
@@ -290,7 +290,7 @@ function WatchEntryRow({
             {fulltext.kind === "source" && (
               <button
                 type="button"
-                className={ghostActionClass}
+                className={actionBtn}
                 title="没有免费全文直链，打开来源页面获取"
                 onClick={() => void openUrl(sourceUrl(entry.url))}
               >
@@ -299,8 +299,8 @@ function WatchEntryRow({
             )}
             <button
               type="button"
+              className={actionBtn}
               aria-label={`更多操作：${entry.title}`}
-              className="flex h-7 w-7 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1"
               onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
                 setMenu({ x: rect.right, y: rect.bottom + 4 });
@@ -309,7 +309,15 @@ function WatchEntryRow({
               ⋯
             </button>
           </span>
-        </div>
+          <button
+            type="button"
+            className={actionBtn}
+            disabled={included}
+            onClick={onAddIncluded}
+          >
+            {included ? "已在清单" : "→ 精读"}
+          </button>
+        </span>
       </div>
       {entry.abstractFirst && (
         <p
@@ -321,21 +329,34 @@ function WatchEntryRow({
       )}
       {explain && (
         <div className="mt-1 rounded-md bg-inset p-2 text-xs leading-5 text-l2">
-          {explain.status === "loading" && <LoadingRows compact />}
+          {explain.status === "loading" && (
+            <div
+              className="flex items-center gap-2 py-1 text-l3"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="flex items-center gap-1" aria-hidden="true">
+                <span className="size-1.5 animate-pulse rounded-full bg-l3" />
+                <span className="size-1.5 animate-pulse rounded-full bg-l3 [animation-delay:120ms]" />
+                <span className="size-1.5 animate-pulse rounded-full bg-l3 [animation-delay:240ms]" />
+              </span>
+              解读进行中…
+            </div>
+          )}
           {explain.status === "error" && (
-            <p className="text-err-text">
+            <p className="break-words text-err-text">
               解读失败：{explain.error}{" "}
               <button
                 type="button"
                 className="underline hover:text-l1"
-                onClick={onExplain}
+                onClick={onRerun}
               >
                 重试
               </button>
             </p>
           )}
           {explain.status === "ok" && (
-            <p className="whitespace-pre-line">{explain.text}</p>
+            <WatchExplainBody text={explain.text} onRerun={onRerun} />
           )}
         </div>
       )}
@@ -969,6 +990,7 @@ export default function LitWatchCard({
   onOpenSchedules,
   onConfigChanged,
   focusToken,
+  focusEntryId,
 }: {
   projectRoot: string;
   cfg: ProjectConfigDto;
@@ -979,6 +1001,8 @@ export default function LitWatchCard({
   onConfigChanged: () => void;
   /** 收件箱跳转时切回「新命中」页签。 */
   focusToken?: number | null;
+  /** 收件箱点的那一篇：展开这一条 */
+  focusEntryId?: string | null;
 }) {
   const [entries, setEntries] = useState<WatchEntryDto[] | null>(null);
   const [followups, setFollowups] = useState<WatchFollowupDto[]>([]);
@@ -989,6 +1013,7 @@ export default function LitWatchCard({
   const [schedules, setSchedules] = useState<ScheduleDto[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"new" | "included">("new");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   /** 「新命中」页签内的分组视图：按日期（默认）/ 按关键词 */
   const [groupBy, setGroupBy] = useState<"day" | "keyword">("day");
   /** 期刊指标表状态；null = 未取到（命令缺失/失败，入口不显示） */
@@ -1019,6 +1044,9 @@ export default function LitWatchCard({
   const setReaderReq = useAppStore((s) => s.setReaderReq);
   const setPage = useAppStore((s) => s.setPage);
   const [runMenu, setRunMenu] = useState<{ x: number; y: number } | null>(null);
+  const [bodyOpen, setBodyOpen] = useState(true);
+  const [hitQuery, setHitQuery] = useState("");
+  const [showAllHits, setShowAllHits] = useState(false);
 
   function showToast(text: string) {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -1039,7 +1067,9 @@ export default function LitWatchCard({
   useEffect(() => {
     if (focusToken == null) return;
     setTab("new");
-  }, [focusToken]);
+    setBodyOpen(true);
+    if (focusEntryId) setExpandedId(focusEntryId);
+  }, [focusToken, focusEntryId]);
 
   async function load() {
     const [inbox, subList, includedList, scheduleList, notes] =
@@ -1068,6 +1098,17 @@ export default function LitWatchCard({
       setEntries(inbox.entries);
       setFollowups(inbox.followups);
       setError(null);
+      setExplains((cur) => {
+        const next = { ...cur };
+        for (const e of inbox.entries) {
+          const text = e.explain?.trim();
+          if (!text) continue;
+          const prev = next[e.id];
+          if (prev?.status === "loading" || prev?.status === "error") continue;
+          next[e.id] = { status: "ok", text };
+        }
+        return next;
+      });
     }
     if (subList) setSubs(subList);
     if (includedList) setIncluded(includedList);
@@ -1157,30 +1198,36 @@ export default function LitWatchCard({
     }
   }
 
-  /** ◈ 解读：ai_prompt 不传功能键（走自动回落链）；结果随组件状态缓存，失败行内报错可重试 */
+  /** ◈ 解读：快筛五节；已落盘的直接展开。ai_prompt 不传功能键（走自动回落链）。 */
   async function explain(entry: WatchEntryDto) {
     setExplainOpen((cur) => new Set(cur).add(entry.id));
     setExplains((cur) => ({ ...cur, [entry.id]: { status: "loading" } }));
-    const topicLine = cfg.topic?.trim()
-      ? `3. 和本课题的关系（课题：${cfg.topic.trim()}）`
-      : "3. 它适合用在什么研究方向";
-    const prompt = `请用中文解读下面这篇文献，严格输出三行，每行不超过 40 字，不要任何额外内容：
-1. 做了什么
-2. 为什么重要
-${topicLine}
-
-标题：${entry.title}
-摘要：${entry.abstractFirst || "（无摘要）"}`;
+    const prompt = watchExplainPrompt(entry, cfg.topic);
     try {
-      const text = await invoke<string>("ai_prompt", {
+      const text = (await invoke<string>("ai_prompt", {
         profileId: null,
         fnKey: null,
         prompt,
-      });
+      })).trim();
+      if (!text) throw new Error("AI 返回为空");
       setExplains((cur) => ({
         ...cur,
-        [entry.id]: { status: "ok", text: text.trim() },
+        [entry.id]: { status: "ok", text },
       }));
+      setEntries((cur) =>
+        cur
+          ? cur.map((e) => (e.id === entry.id ? { ...e, explain: text } : e))
+          : cur,
+      );
+      try {
+        await invoke("save_watch_explain", {
+          projectRoot,
+          title: entry.title,
+          text,
+        });
+      } catch (reason) {
+        showToast(`解读已出，但没写进项目：${String(reason)}`);
+      }
     } catch (reason) {
       setExplains((cur) => ({
         ...cur,
@@ -1205,6 +1252,8 @@ ${topicLine}
       } else {
         showToast("已在精读清单");
       }
+      const pdf = paperResourceFor(entry, cfg.resources ?? []);
+      if (pdf) openPdf(pdf);
     } catch (reason) {
       setError(String(reason));
     }
@@ -1292,6 +1341,19 @@ ${topicLine}
   const hiddenByFilter = applyingFilter
     ? undismissed.length - visibleEntries.length
     : 0;
+  const qHit = hitQuery.trim().toLowerCase();
+  const searchedHits = qHit
+    ? visibleEntries.filter(
+        (e) =>
+          e.title.toLowerCase().includes(qHit) ||
+          (e.zhSummary ?? "").toLowerCase().includes(qHit) ||
+          e.source.toLowerCase().includes(qHit),
+      )
+    : visibleEntries;
+  const listedHits =
+    qHit || showAllHits
+      ? searchedHits
+      : searchedHits.slice(0, LIST_PREVIEW_CAP);
   const includedTitles = new Set(
     (included ?? []).map((item) => normalizeTitle(item.title)),
   );
@@ -1304,8 +1366,8 @@ ${topicLine}
     prominent: boolean;
   }[] =
     groupBy === "day"
-      ? groupEntriesByDay(visibleEntries).map((g) => ({ ...g, prominent: false }))
-      : groupEntriesByKeyword(visibleEntries).map((g) => ({
+      ? groupEntriesByDay(listedHits).map((g) => ({ ...g, prominent: false }))
+      : groupEntriesByKeyword(listedHits).map((g) => ({
           key: g.keyword,
           label: g.keyword,
           entries: g.entries,
@@ -1356,16 +1418,36 @@ ${topicLine}
   }
 
   return (
-    <section className="mb-4 rounded-lg bg-strip p-3">
-      {/* 卡头：标题 + 上次巡检相对时间；右侧次级动作（立即跑有任务才显示） */}
-      <div className="flex items-center gap-2">
-        <span className="text-sm font-medium text-l1">◔ 文献雷达</span>
+    <section>
+      <div className="mb-2.5 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="flex min-w-0 items-center gap-2 text-left"
+          onClick={() => setBodyOpen((v) => !v)}
+          aria-expanded={bodyOpen}
+        >
+          <FoldMark open={bodyOpen} boxed />
+          <h2 className="text-xs font-medium text-l2">
+            文献雷达
+            {visibleEntries.length > 0 ? `（${visibleEntries.length}）` : ""}
+          </h2>
+        </button>
         {lastRunAt && (
           <span className="text-micro text-l4">
             上次巡检 {relTime(lastRunAt)}
           </span>
         )}
-        <div className="ml-auto flex shrink-0 items-center gap-1">
+        {bodyOpen && (
+          <>
+          <input
+            type="search"
+            value={hitQuery}
+            onChange={(e) => setHitQuery(e.target.value)}
+            placeholder="搜索新命中"
+            className={`${searchFieldClass} ml-auto w-44`}
+            aria-label="搜索新命中"
+          />
+        <div className="flex shrink-0 items-center gap-1">
           {metricsStatus && (
             <button
               type="button"
@@ -1433,15 +1515,18 @@ ${topicLine}
             ◔ 定时
           </button>
         </div>
+          </>
+        )}
       </div>
-      {staleStep && (
-        <p className="mt-1 text-xs text-warn-text">
+      {bodyOpen && staleStep && (
+        <p className="mb-2 text-xs text-warn-text">
           雷达有新命中，「{staleStep}」步的产物可能过期
         </p>
       )}
-      {error && <p className="mt-1 text-xs text-err-text">{error}</p>}
+      {error && <p className="mb-2 text-xs text-err-text">{error}</p>}
 
-      {subs !== null && !hasSubs ? null : (
+      {bodyOpen && (subs !== null && !hasSubs ? null : (
+        <div className={projectWellClass}>
         <>
           <SegTabs
             className="mt-2"
@@ -1493,7 +1578,7 @@ ${topicLine}
                     </button>
                   </p>
                 )}
-                {visibleEntries.length > 0 && (
+                {searchedHits.length > 0 && (
                   <SegTabs
                     className="mt-2"
                     items={[
@@ -1504,8 +1589,10 @@ ${topicLine}
                     onChange={setGroupBy}
                   />
                 )}
-                {visibleEntries.length === 0 && (
-                  <p className="mt-2 text-xs text-l4">暂无新命中</p>
+                {searchedHits.length === 0 && (
+                  <p className="mt-2 text-xs text-l4">
+                    {qHit ? "没有匹配" : "暂无新命中"}
+                  </p>
                 )}
                 {entryGroups.map((group) => (
                   <div key={group.key} className="mt-2">
@@ -1535,12 +1622,24 @@ ${topicLine}
                           onAddIncluded={() => void addToIncluded(entry)}
                           onExplain={() => {
                             const cur = explains[entry.id];
-                            if (cur && cur.status !== "error") {
-                              // 已有结果：只展开不重调（缓存复用）；失败态点「重试」才重调
+                            if (cur?.status === "loading") {
                               setExplainOpen((c) => new Set(c).add(entry.id));
-                            } else {
-                              void explain(entry);
+                              return;
                             }
+                            const saved =
+                              (cur?.status === "ok" ? cur.text : null) ||
+                              entry.explain;
+                            if (saved && cur?.status !== "error") {
+                              setExplainOpen((c) => new Set(c).add(entry.id));
+                              if (cur?.status !== "ok") {
+                                setExplains((c) => ({
+                                  ...c,
+                                  [entry.id]: { status: "ok", text: saved },
+                                }));
+                              }
+                              return;
+                            }
+                            void explain(entry);
                           }}
                           onCloseExplain={() =>
                             setExplainOpen((cur) => {
@@ -1549,6 +1648,7 @@ ${topicLine}
                               return next;
                             })
                           }
+                          onRerun={() => void explain(entry)}
                           onDownload={() =>
                             void download(entry.id, entry.url, entry.title)
                           }
@@ -1557,11 +1657,21 @@ ${topicLine}
                             setDismissed((cur) => dismissLitEntry(cur, entry.id))
                           }
                           included={includedTitles.has(normalizeTitle(entry.title))}
+                          startOpen={entry.id === expandedId}
                         />
                       ))}
                     </ul>
                   </div>
                 ))}
+                {!qHit && searchedHits.length > LIST_PREVIEW_CAP && (
+                  <ListPreviewToggle
+                    className="mt-2"
+                    open={showAllHits}
+                    hidden={searchedHits.length - LIST_PREVIEW_CAP}
+                    unit="条"
+                    onToggle={() => setShowAllHits((v) => !v)}
+                  />
+                )}
                 {followups.length > 0 && (
                   <div className="mt-2">
                     <button
@@ -1626,7 +1736,8 @@ ${topicLine}
               />
             ))}
         </>
-      )}
+        </div>
+      ))}
 
       {subsOpen && subs !== null && (
         <SubscriptionsModal

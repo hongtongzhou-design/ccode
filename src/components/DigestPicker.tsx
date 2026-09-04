@@ -146,7 +146,7 @@ export default function DigestPicker({
   }
 
   function promptFor(b: HandoffBriefDto): string {
-    return `读 ${relPath(b.filePath)} 接力简报，在此基础上继续完成任务`;
+    return `读 ${relPath(b.filePath)} 接力简报，按这份简报接着做`;
   }
 
   function targetProfile(target: HandoffTargetDto) {

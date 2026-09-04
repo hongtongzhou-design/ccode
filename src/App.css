@@ -530,6 +530,12 @@ body {
   isolation: isolate;
 }
 
+/* 项目页内容井：落在 canvas→strip 之间。浅色纯 strip 会漂成白纸，62% 画布又贴底看不出层；
+   40% 画布 / 60% strip 再抬半档，色相仍跟画布。禁改回 bg-strip / bg-raised。 */
+.ccode-well {
+  background: color-mix(in srgb, var(--color-canvas) 40%, var(--color-strip));
+}
+
 .ccode-app-rail {
   border-color: var(--color-hairline);
   background: var(--color-rail);
@@ -842,6 +848,16 @@ select:focus-visible {
   line-height: 1rem;
 }
 
+/* 终端未启动空态点阵（v3.213 补齐 v3.92 口径）：1px 点 / 18px 格距，走令牌。 */
+.terminal-welcome-dots {
+  background-image: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--color-l1) 7%, transparent) 1px,
+    transparent 1.5px
+  );
+  background-size: 18px 18px;
+}
+
 /* 全站线条细化（用户反馈"线条再细一点"）：1px → 0.5px。
    Retina 屏出真·发丝线；1x 屏浏览器把 0.5px 兜底渲染为 1 物理像素，不会消失。
    焦点 outline（focus-visible 可达性）不受影响，保持 1px。 */
@@ -1063,6 +1079,19 @@ select:focus-visible {
 }
 .md-chat > :last-child {
   margin-bottom: 0;
+}
+/* 行内代码去描边：笔记阅读的胶囊边在对话里会把 `model` 挤成标签云。围栏代码块不动。 */
+.md-chat :not(pre) > code {
+  border: none;
+  padding: 0.1em 0.28em;
+  border-radius: 3px;
+}
+/* 引用只留左线：不要整块 inset 底，警告/摘录才不会占半屏。 */
+.md-chat blockquote {
+  margin: 0.5em 0;
+  padding: 0.1em 0 0.1em 0.75em;
+  border-radius: 0;
+  background: transparent;
 }
 .md-chat img {
   max-width: min(420px, 100%);

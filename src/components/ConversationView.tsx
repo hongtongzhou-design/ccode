@@ -71,6 +71,38 @@ type Run =
   | { tool: false; block: BlockDto; key: string }
   | { tool: true; blocks: BlockDto[]; key: string };
 
+/** 在命中消息里标出第一个关键词并返回该节点，供滚进视野。失败则返回 null。 */
+function markFirstKeyword(root: Element, keywords: string[]): HTMLElement | null {
+  const terms = keywords
+    .map((k) => k.toLowerCase())
+    .filter((k) => k.length >= 2);
+  if (terms.length === 0) return null;
+  const existing = root.querySelector("[data-search-mark='1']");
+  if (existing instanceof HTMLElement) return existing;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const text = node.textContent ?? "";
+    const lower = text.toLowerCase();
+    const hit = terms.find((t) => lower.includes(t));
+    if (!hit) continue;
+    const idx = lower.indexOf(hit);
+    const range = document.createRange();
+    range.setStart(node, idx);
+    range.setEnd(node, Math.min(text.length, idx + hit.length));
+    const mark = document.createElement("mark");
+    mark.dataset.searchMark = "1";
+    mark.className = "rounded-sm bg-warn/40";
+    try {
+      range.surroundContents(mark);
+      return mark;
+    } catch {
+      return node.parentElement;
+    }
+  }
+  return null;
+}
+
 /**
  * 结构化对话渲染（用户右对齐气泡 / AI 直接排版 / 围栏代码块 / 工具调用折叠行 / 长文本截断）。
  * 会话页回放与终端侧栏共用；滚动容器由调用方提供。
@@ -80,6 +112,7 @@ export default function ConversationView({
   compact,
   cwd,
   focusIndex = -1,
+  focusKeywords,
 }: {
   messages: ChatMessageDto[];
   compact?: boolean;
@@ -87,17 +120,21 @@ export default function ConversationView({
   cwd?: string | null;
   /** 搜索命中的消息下标；≥0 时高亮并滚进视野 */
   focusIndex?: number;
+  /** 搜索关键词，用来在命中消息里标出那一句 */
+  focusKeywords?: string[];
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const hitRef = useRef<HTMLDivElement | null>(null);
   const didFocusScroll = useRef(false);
 
   useLayoutEffect(() => {
     if (focusIndex < 0 || didFocusScroll.current) return;
-    const el = document.querySelector("[data-search-hit='1']");
+    const el = hitRef.current;
     if (!el) return;
-    el.scrollIntoView({ block: "center" });
+    const marked = markFirstKeyword(el, focusKeywords ?? []);
+    (marked ?? el).scrollIntoView({ block: "center" });
     didFocusScroll.current = true;
-  }, [focusIndex]);
+  }, [focusIndex, focusKeywords]);
 
   /** 消息稳定键：角色+时间戳+块数+首段文本特征。前插分页/轮询刷新后数组下标会移位，
    *  展开状态（思考过程/工具调用/长文本）必须跟随内容而非位置 */
@@ -116,8 +153,8 @@ export default function ConversationView({
   }
 
   /** 长文本截断渲染，key 用于记录展开状态；短文本/已展开走围栏代码拆分 */
-  function richText(key: string, text: string, cls: string) {
-    const isOpen = expanded.has(key);
+  function richText(key: string, text: string, cls: string, forceOpen = false) {
+    const isOpen = forceOpen || expanded.has(key);
     if (text.length > TEXT_CAP && !isOpen) {
       return (
         <div className={cls}>
@@ -170,7 +207,7 @@ export default function ConversationView({
     );
   }
 
-  function renderBlock(b: BlockDto, key: string, isUser: boolean) {
+  function renderBlock(b: BlockDto, key: string, isUser: boolean, forceOpen = false) {
     if (b.kind === "thinking") {
       const isOpen = expanded.has(key);
       return (
@@ -243,14 +280,14 @@ export default function ConversationView({
     if (isUser) {
       return (
         <div key={key} className="my-1">
-          {bodyText && richText(key, bodyText, "whitespace-pre-wrap")}
+          {bodyText && richText(key, bodyText, "whitespace-pre-wrap", forceOpen)}
           {imageRow}
         </div>
       );
     }
     // AI 正文走 Markdown 渲染（ChatMarkdown：原始 HTML 转义 + 本地图片内嵌）；
     // 超长未展开保持截断纯文本 + 展开按钮，展开后整段 Markdown
-    if (bodyText.length > TEXT_CAP && !expanded.has(key)) {
+    if (bodyText.length > TEXT_CAP && !forceOpen && !expanded.has(key)) {
       return (
         <div key={key} className="my-1">
           {richText(key, bodyText, `whitespace-pre-wrap ${compact ? "text-xs" : "text-sm"}`)}
@@ -337,11 +374,11 @@ export default function ConversationView({
     );
   }
 
-  function renderRuns(m: ChatMessageDto, mkey: string, isUser: boolean) {
+  function renderRuns(m: ChatMessageDto, mkey: string, isUser: boolean, forceOpen = false) {
     return runsOf(m.blocks, mkey).map((run) =>
       run.tool
         ? renderToolRun(run, isUser)
-        : renderBlock(run.block, run.key, isUser),
+        : renderBlock(run.block, run.key, isUser, forceOpen),
     );
   }
 
@@ -354,6 +391,7 @@ export default function ConversationView({
           // 用户消息：右对齐圆角气泡（bubble 令牌底，max-w 70%）
           <div
             key={mk}
+            ref={hit ? hitRef : undefined}
             data-search-hit={hit ? "1" : undefined}
             className="mb-3 flex justify-end"
           >
@@ -362,17 +400,18 @@ export default function ConversationView({
                 hit ? "ring-1 ring-cta-bd" : ""
               }`}
             >
-              {renderRuns(m, mk, true)}
+              {renderRuns(m, mk, true, hit)}
             </div>
           </div>
         ) : (
           // AI 回复：直接排版，无气泡容器；有逐条 usage 的 agent 在消息末尾标 token
           <div
             key={mk}
+            ref={hit ? hitRef : undefined}
             data-search-hit={hit ? "1" : undefined}
             className={`mb-3 max-w-full ${hit ? "rounded-md bg-seg-sel px-2 py-1" : ""}`}
           >
-            {renderRuns(m, mk, false)}
+            {renderRuns(m, mk, false, hit)}
             {m.usage && (m.usage.input > 0 || m.usage.output > 0) && (
               <div
                 className="mt-0.5 text-micro text-l4"

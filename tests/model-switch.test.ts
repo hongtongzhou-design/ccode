@@ -5,6 +5,7 @@ import {
   launchModelNote,
   looksLikeModelId,
   modelOnProfileSwitch,
+  officialModelAllowed,
 } from "../src/model-switch.ts";
 import { AGENTS } from "../src/types.ts";
 
@@ -76,4 +77,13 @@ test("换 profile 不再静默清掉手填的模型", () => {
     model: "",
     kept: false,
   });
+});
+
+test("官方账号不接受中转 DeepSeek 等模型名", () => {
+  assert.equal(officialModelAllowed("codex", "deepseek-v4-flash-0731"), false);
+  assert.equal(officialModelAllowed("codex", "gpt-5.1"), true);
+  assert.equal(officialModelAllowed("codex", "gpt-5-codex"), true);
+  assert.equal(officialModelAllowed("claude-code", "deepseek-chat"), false);
+  assert.equal(officialModelAllowed("claude-code", "claude-sonnet-4"), true);
+  assert.equal(officialModelAllowed("codex", ""), false);
 });

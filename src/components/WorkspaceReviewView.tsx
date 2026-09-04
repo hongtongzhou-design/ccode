@@ -16,7 +16,7 @@ import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
 import ImagePairView, { isImagePath } from "./ImagePairView";
 import { loadArtifactRows } from "./ArtifactChecklist";
-import { Checkbox, LoadingRows } from "./PageFrame";
+import { Checkbox, LoadingRows, secondaryActionClass } from "./PageFrame";
 import { defaultCommitMessage } from "../git-commit-message";
 import { useAppStore } from "../store";
 import type {
@@ -722,7 +722,7 @@ function ConflictFileSection({
           <button
             type="button"
             onClick={() => onRetry(path)}
-            className="mt-2 rounded-sm bg-btn px-2 py-1 text-l1 hover:brightness-125"
+            className={`mt-2 ${secondaryActionClass}`}
           >
             重试加载
           </button>
@@ -1217,11 +1217,36 @@ export default function WorkspaceReviewView({
   /** 「→ 去下一步」（v3.97 改向）：合并成功后**不直接开步**，而是把用户带到项目页——
    *  聚焦自动落在第一个未完成步骤（即刚解锁的下一步），先看流程线/TASK.md/人工事项，
    *  准备好了自己点「开始」。直接开步跳终端会把非编程用户扔进黑窗（用户拍板） */
-  function goNextStep() {
+  async function goNextStep() {
     if (!nextStep) return;
+    const heading = `上一步（${diff?.workspaceName ?? "未知步骤"}）评审沉淀`;
+    let content = distillText.trim();
+    if (!content && diff) {
+      try {
+        content = (
+          await invoke<string>("ai_distill_review", {
+            id: diff.workspaceId,
+            stepName: nextStep.step.name,
+          })
+        ).trim();
+      } catch {
+        content = `「${diff.workspaceName}」已验收合并。请读项目根已有产物与本步 TASK.md 接着做，不要编造未出现的文献。`;
+      }
+    }
+    if (content) {
+      try {
+        await invoke("append_step_draft", {
+          projectRoot: nextStep.projectPath,
+          stepName: nextStep.step.name,
+          heading,
+          content,
+        });
+      } catch {
+        /* 草稿写失败不挡去下一步 */
+      }
+    }
     setSelectProjectReq(nextStep.projectPath);
     setPage("workspaces");
-    // 收起入口防重复点击；项目页聚焦逻辑自己会落到下一步
     setNextStep(null);
   }
 
@@ -2289,7 +2314,7 @@ export default function WorkspaceReviewView({
           {mergeDone && nextStep && (
             <button
               type="button"
-              onClick={goNextStep}
+              onClick={() => void goNextStep()}
               title={`到项目页看「${nextStep.step.name}」这一步：流程线、TASK.md、要补的东西都在那里，准备好了点「开始」`}
               className="inline-flex h-7 shrink-0 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
             >

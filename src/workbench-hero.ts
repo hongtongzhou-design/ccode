@@ -14,11 +14,22 @@ export type WorkbenchHeroSource =
 export interface WorkbenchProject {
   path: string;
   name: string;
+  workMode?: "research" | "coding" | "office" | null;
+  lastOpenedAt?: string | null;
+  createdAt?: string | null;
 }
 
 export interface WorkbenchRepo {
   path: string;
   name: string;
+  lastActive?: string | null;
+}
+
+export interface WorkbenchRecentRow {
+  path: string;
+  name: string;
+  lastActive: string | null;
+  registered: boolean;
 }
 
 export interface WorkbenchWorkspaceRef {
@@ -41,12 +52,30 @@ export interface WorkbenchHero {
   /** 这张卡所属项目/目录上的存活工作数（不是全应用） */
   runningCount: number;
   source: WorkbenchHeroSource;
+  workMode?: "research" | "coding" | "office" | null;
+  subtitle?: string | null;
 }
 
 export type WorkbenchContinue =
   | { kind: "terminal"; tabId: string }
   | { kind: "project"; path: string }
   | { kind: "enter-cwd"; path: string };
+
+export interface WorkbenchNowSeed {
+  path: string;
+  name: string;
+  registered: boolean;
+  workMode: "research" | "coding" | "office" | null;
+  subtitle: string | null;
+  needsYou: boolean;
+  extraRoots?: string[];
+}
+
+export interface WorkbenchNowItem extends WorkbenchHero {
+  workMode: "research" | "coding" | "office" | null;
+  subtitle: string | null;
+  rank: number;
+}
 
 interface PathGroup {
   key: string;
@@ -72,6 +101,92 @@ function attributePath(
     }
   }
   return best?.key ?? null;
+}
+
+/** 工作台「最近项目 / 最近对话」最多条数。 */
+export const WORKBENCH_RECENT_LIMIT = 10;
+
+function laterIso(a?: string | null, b?: string | null): string | null {
+  const left = a?.trim() || "";
+  const right = b?.trim() || "";
+  if (!left) return right || null;
+  if (!right) return left;
+  const lt = Date.parse(left);
+  const rt = Date.parse(right);
+  if (!Number.isNaN(lt) && !Number.isNaN(rt)) return lt >= rt ? left : right;
+  return left >= right ? left : right;
+}
+
+function compareRecent(a: string | null, b: string | null): number {
+  const left = a ?? "";
+  const right = b ?? "";
+  if (!left && !right) return 0;
+  if (!left) return 1;
+  if (!right) return -1;
+  const lt = Date.parse(left);
+  const rt = Date.parse(right);
+  if (!Number.isNaN(lt) && !Number.isNaN(rt) && lt !== rt) return rt - lt;
+  return right < left ? -1 : right > left ? 1 : 0;
+}
+
+/**
+ * 工作台「最近项目」行：已添加项目 ∪ 会话扫出的仓库。
+ * 办公/新建项目没有 Agent 会话、甚至不是 git，也必须出现。
+ * 已添加用注册名；未添加（外部 Codex 等）标出来。按最近活动降序，默认最多 10 条。
+ * 正在进行的主卡项目仍列入：刚添加的办公项目否则会从「最近」里消失。
+ */
+export function workbenchRecentRows(input: {
+  recentRepos: readonly WorkbenchRepo[];
+  projects: readonly WorkbenchProject[];
+  excludePaths?: readonly string[];
+  isWindows?: boolean;
+  limit?: number;
+}): WorkbenchRecentRow[] {
+  const isWindows = input.isWindows ?? false;
+  const limit = input.limit ?? WORKBENCH_RECENT_LIMIT;
+  const exclude = input.excludePaths ?? [];
+  const skipped = (path: string) =>
+    exclude.some((p) => samePath(p, path, isWindows));
+  const rows: WorkbenchRecentRow[] = [];
+
+  for (const project of input.projects) {
+    if (skipped(project.path)) continue;
+    const repo = input.recentRepos.find((r) =>
+      samePath(r.path, project.path, isWindows),
+    );
+    const name =
+      project.name.trim() ||
+      repo?.name.trim() ||
+      cwdBasename(project.path) ||
+      project.path;
+    rows.push({
+      path: project.path,
+      name,
+      lastActive: laterIso(
+        laterIso(project.lastOpenedAt, project.createdAt),
+        repo?.lastActive,
+      ),
+      registered: true,
+    });
+  }
+
+  for (const repo of input.recentRepos) {
+    if (skipped(repo.path)) continue;
+    if (rows.some((row) => samePath(row.path, repo.path, isWindows))) continue;
+    rows.push({
+      path: repo.path,
+      name: repo.name.trim() || cwdBasename(repo.path) || repo.path,
+      lastActive: repo.lastActive ?? null,
+      registered: false,
+    });
+  }
+
+  rows.sort((a, b) => {
+    const byTime = compareRecent(a.lastActive, b.lastActive);
+    if (byTime !== 0) return byTime;
+    return a.name.localeCompare(b.name, "zh");
+  });
+  return rows.slice(0, Math.max(0, limit));
 }
 
 function nameForPath(
@@ -132,6 +247,8 @@ function heroAt(
   },
 ): WorkbenchHero {
   const registered = projects.some((p) => samePath(p.path, path, isWindows));
+  const workMode =
+    projects.find((p) => samePath(p.path, path, isWindows))?.workMode ?? null;
   return {
     name: nameForPath(path, projects, recentRepos, isWindows),
     path,
@@ -142,6 +259,7 @@ function heroAt(
     attention: live?.attention ?? null,
     runningCount: live?.runningCount ?? 0,
     source,
+    workMode,
   };
 }
 
@@ -243,6 +361,94 @@ export function pickWorkbenchHero(input: {
   return null;
 }
 
+function nowRank(opts: {
+  attention: "confirm" | "working" | "done" | null;
+  runningCount: number;
+  needsYou: boolean;
+}): number {
+  if (opts.attention === "confirm") return 0;
+  if (opts.attention === "working" || opts.runningCount > 0) return 1;
+  if (opts.needsYou) return 2;
+  return 3;
+}
+
+/** 正在进行的项目：有存活 Agent 或该方式下「要你管」。最多 5 条，第一条最大。 */
+export function pickWorkbenchNow(input: {
+  seeds: readonly WorkbenchNowSeed[];
+  runs: readonly RunOverviewInput[];
+  isWindows?: boolean;
+}): WorkbenchNowItem[] {
+  const isWindows = input.isWindows ?? false;
+  const groups: PathGroup[] = input.seeds.map((s) => ({
+    key: s.path,
+    roots: [s.path, ...(s.extraRoots ?? [])],
+    registered: s.registered,
+  }));
+  const live = buildRunOverview([...input.runs]).items.filter(isLiveWork);
+  const byPath = new Map<string, WorkbenchNowItem>();
+
+  function ensure(path: string, source: WorkbenchHeroSource): WorkbenchNowItem {
+    const seed = input.seeds.find((s) => samePath(s.path, path, isWindows));
+    const key = seed?.path ?? path;
+    const existing = byPath.get(key);
+    if (existing) return existing;
+    const item: WorkbenchNowItem = {
+      name: seed?.name ?? cwdBasename(path) ?? path,
+      path: key,
+      registered: seed?.registered ?? false,
+      tabId: null,
+      agentId: null,
+      model: null,
+      attention: null,
+      runningCount: 0,
+      source,
+      workMode: seed?.workMode ?? null,
+      subtitle: seed?.subtitle ?? null,
+      rank: 3,
+    };
+    byPath.set(key, item);
+    return item;
+  }
+
+  for (const run of live) {
+    const key = attributePath(run.cwd, groups, isWindows) ?? run.cwd;
+    const item = ensure(key, "running");
+    item.runningCount += 1;
+    if (!item.tabId) {
+      item.tabId = run.tabId;
+      item.agentId = run.agentId || null;
+      item.model = run.model || null;
+      item.attention = run.attention;
+    } else if (run.attention === "confirm" && item.attention !== "confirm") {
+      item.tabId = run.tabId;
+      item.agentId = run.agentId || null;
+      item.model = run.model || null;
+      item.attention = run.attention;
+    }
+  }
+
+  for (const seed of input.seeds) {
+    if (!seed.needsYou && !byPath.has(seed.path)) continue;
+    const item = ensure(seed.path, byPath.has(seed.path) ? "running" : "recent-registered");
+    if (!item.subtitle) item.subtitle = seed.subtitle;
+    if (!item.workMode) item.workMode = seed.workMode;
+  }
+
+  const items = [...byPath.values()].map((item) => {
+    const seed = input.seeds.find((s) => samePath(s.path, item.path, isWindows));
+    return {
+      ...item,
+      rank: nowRank({
+        attention: item.attention,
+        runningCount: item.runningCount,
+        needsYou: seed?.needsYou ?? false,
+      }),
+    };
+  });
+  items.sort((a, b) => a.rank - b.rank);
+  return items.slice(0, 5);
+}
+
 export function continueWorkbenchTarget(hero: WorkbenchHero): WorkbenchContinue {
   if (hero.tabId) return { kind: "terminal", tabId: hero.tabId };
   if (hero.registered) return { kind: "project", path: hero.path };
@@ -251,7 +457,11 @@ export function continueWorkbenchTarget(hero: WorkbenchHero): WorkbenchContinue 
 
 /** 流水线里第一个尚未合并的步骤名；全做完回末步；没有步骤返回 null */
 export function firstOpenStepName(
-  steps: readonly { name: string; workspaceName: string }[],
+  steps: readonly {
+    name: string;
+    workspaceName: string;
+    seedComplete?: boolean;
+  }[],
   workspaces: readonly Pick<
     WorkbenchWorkspaceRef,
     "name" | "status" | "mergedAt"
@@ -259,6 +469,7 @@ export function firstOpenStepName(
 ): string | null {
   if (steps.length === 0) return null;
   for (const step of steps) {
+    if (step.seedComplete) continue;
     const ws = workspaces.find(
       (w) => w.name === step.workspaceName && w.status !== "archived",
     );
@@ -289,4 +500,18 @@ export function namedSessionTitle(session: {
 }): string | null {
   const text = session.customTitle?.trim() || session.title?.trim() || "";
   return text || null;
+}
+
+/** 工作台「最近对话」：有标题才列，默认最多 10 条（沿用传入顺序，通常已按 updated_at 降序）。 */
+export function workbenchRecentSessions<T extends {
+  customTitle: string | null;
+  title: string | null;
+}>(sessions: readonly T[], limit = WORKBENCH_RECENT_LIMIT): T[] {
+  const out: T[] = [];
+  for (const session of sessions) {
+    if (!namedSessionTitle(session)) continue;
+    out.push(session);
+    if (out.length >= limit) break;
+  }
+  return out;
 }

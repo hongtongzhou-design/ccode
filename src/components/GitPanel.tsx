@@ -26,6 +26,7 @@ interface GitStatusDto {
   files: GitFileDto[];
   totalAdd: number;
   totalDel: number;
+  merging?: boolean;
 }
 
 interface GitFileDiffDto {
@@ -133,6 +134,7 @@ function GitPanel({
   refreshKey,
   onTotals,
   onOpenReview,
+  onOpenPr,
   readOnly = false,
 }: {
   cwd: string;
@@ -143,6 +145,8 @@ function GitPanel({
   onTotals: (t: GitSummary) => void;
   /** 工作区任务进入全宽审阅；普通仓库不显示入口。 */
   onOpenReview?: (cwd: string) => void;
+  /** 编程工作树推送成功后打开 PR；缺省不渲染。GitPanel 不识别 GitHub。 */
+  onOpenPr?: (cwd: string) => void | Promise<void>;
   /** 会话页只展示当前项目状态，不允许从历史上下文提交或推送。 */
   readOnly?: boolean;
 }) {
@@ -152,7 +156,9 @@ function GitPanel({
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
-  const [running, setRunning] = useState<"commit" | "push" | null>(null);
+  const [running, setRunning] = useState<"commit" | "push" | "abort" | null>(
+    null,
+  );
   const [output, setOutput] = useState<{
     phase: "push" | "error";
     text: string;
@@ -174,12 +180,17 @@ function GitPanel({
   const [hunkBusy, setHunkBusy] = useState(false);
   const diffRequestRef = useRef(0);
   // 成功 toast（主题 CTA 绿，右下角浮出 2.5s 自动淡出）；失败仍走 output 红字详情
-  const [toast, setToast] = useState<{ text: string; hiding: boolean } | null>(null);
+  const [toast, setToast] = useState<{
+    text: string;
+    hiding: boolean;
+    afterPush?: boolean;
+  } | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [prOpening, setPrOpening] = useState(false);
 
-  function showToast(text: string) {
+  function showToast(text: string, afterPush = false) {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    setToast({ text, hiding: false });
+    setToast({ text, hiding: false, afterPush });
     toastTimerRef.current = setTimeout(() => {
       setToast((t) => (t ? { ...t, hiding: true } : t));
       toastTimerRef.current = setTimeout(() => setToast(null), 300);
@@ -298,6 +309,29 @@ function GitPanel({
     [],
   );
 
+  async function abortMerge() {
+    if (running || readOnly) return;
+    if (
+      !(await confirmDialog("取消这次合并？未解决的冲突会丢弃。", {
+        danger: true,
+        confirmText: "取消合并",
+      }))
+    ) {
+      return;
+    }
+    setRunning("abort");
+    setOutput(null);
+    try {
+      const text = await invoke<string>("git_abort_merge", { cwd });
+      setOutput({ phase: "push", text: text || "已取消合并" });
+      await refresh();
+    } catch (reason) {
+      setOutput({ phase: "error", text: String(reason) });
+    } finally {
+      setRunning(null);
+    }
+  }
+
   async function doCommit(push: boolean) {
     const selectedFiles = wsDiff?.inWorkspace
       ? (status?.files ?? [])
@@ -322,7 +356,10 @@ function GitPanel({
       if (out.failedPhase === "push") {
         setOutput({ phase: "push", text: `${out.message}\n${out.output}`.trim() });
       } else {
-        showToast(`${out.message}${bracket ? ` · ${bracket}` : ""} · ${title}`);
+        showToast(
+          `${out.message}${bracket ? ` · ${bracket}` : ""} · ${title}`,
+          push,
+        );
       }
     } catch (e) {
       setOutput({ phase: "error", text: String(e) });
@@ -338,7 +375,7 @@ function GitPanel({
     setOutput(null);
     try {
       await invoke<string>("git_push", { cwd });
-      showToast("推送成功");
+      showToast("推送成功", true);
       setError(null);
     } catch (e) {
       setOutput({ phase: "push", text: `推送仍未完成：${e}` });
@@ -802,6 +839,21 @@ function GitPanel({
           <span className="text-l4">git</span>
         )}
       </div>
+      {status?.merging && !readOnly && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-warn px-3 py-2 text-xs text-warn-text">
+          <span className="min-w-0 flex-1">
+            正在合并，有冲突。解决后提交，或取消合并。
+          </span>
+          <button
+            type="button"
+            className="shrink-0 rounded-md border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+            disabled={running !== null}
+            onClick={() => void abortMerge()}
+          >
+            {running === "abort" ? "取消中…" : "取消合并"}
+          </button>
+        </div>
+      )}
 
       {/* 改动主从视图：未选中全宽文件列表；选中后左栏 diff 主区 + 右栏紧凑文件列 */}
       <div className="min-h-0 flex-1 overflow-hidden">
@@ -859,7 +911,11 @@ function GitPanel({
             >
               {groupFilesByStatus(files).map((group) => (
                 <div key={group.key}>
-                  <p className="px-1 pb-0.5 pt-1.5 text-micro text-l4">
+                  <p
+                    className={`px-1 pb-0.5 pt-1.5 text-micro ${
+                      group.key === "unmerged" ? "text-warn-text" : "text-l4"
+                    }`}
+                  >
                     {group.label} {group.files.length}
                   </p>
                   {group.files.map((f) =>
@@ -1039,6 +1095,28 @@ function GitPanel({
         >
           <span>✓</span>
           <span>{toast.text}</span>
+          {toast.afterPush && onOpenPr && (
+            <button
+              type="button"
+              className="ml-1 underline decoration-cta-text/50 underline-offset-2 hover:decoration-cta-text disabled:no-underline disabled:opacity-80"
+              disabled={prOpening}
+              onClick={() => {
+                if (prOpening) return;
+                if (toastTimerRef.current) {
+                  clearTimeout(toastTimerRef.current);
+                  toastTimerRef.current = null;
+                }
+                setPrOpening(true);
+                void Promise.resolve(onOpenPr(cwd)).finally(() => {
+                  setPrOpening(false);
+                  setToast((t) => (t ? { ...t, hiding: true } : t));
+                  toastTimerRef.current = setTimeout(() => setToast(null), 300);
+                });
+              }}
+            >
+              {prOpening ? "打开中…" : "打开 Pull Request"}
+            </button>
+          )}
         </div>
       )}
     </div>

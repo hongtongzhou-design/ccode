@@ -21,13 +21,15 @@ pub struct GitStatusDto {
     pub files: Vec<GitFileDto>,
     pub total_add: u64,
     pub total_del: u64,
+    /// 正在 merge（MERGE_HEAD 存在）：改动面板给取消合并出口
+    pub merging: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitFileDto {
     pub path: String,
-    /// "M" | "A" | "D" | "R" | "??"
+    /// "M" | "A" | "D" | "R" | "??" | "U"（冲突未合并）
     pub status: String,
     /// 二进制文件为 None（numstat 显示 -\t-）
     pub additions: Option<u64>,
@@ -157,8 +159,12 @@ fn parse_porcelain(text: &str) -> (String, u32, u32, Vec<(String, String)>) {
         if xy == "!!" {
             continue; // gitignore 忽略的条目
         }
+        // unmerged：DD/AU/UD/UA/DU/AA/UU。不能压成单字母，否则 AA 会被当成新增。
+        const UNMERGED: &[&str] = &["DD", "AU", "UD", "UA", "DU", "AA", "UU"];
         let status = if xy == "??" {
             "??".to_string()
+        } else if UNMERGED.contains(&xy) {
+            "U".to_string()
         } else {
             xy.chars()
                 .find(|c| !c.is_whitespace())
@@ -291,6 +297,9 @@ pub(crate) fn git_status_sync(cwd: &str) -> Result<GitStatusDto, String> {
             deletions,
         });
     }
+    let merging = run_git(&cwd, &["rev-parse", "--verify", "-q", "MERGE_HEAD"])
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     Ok(GitStatusDto {
         is_repo: true,
         branch,
@@ -299,6 +308,7 @@ pub(crate) fn git_status_sync(cwd: &str) -> Result<GitStatusDto, String> {
         files,
         total_add,
         total_del,
+        merging,
     })
 }
 
@@ -674,7 +684,7 @@ fn commit_selected_with_index(
     std::fs::remove_file(&tmp).ok();
     result
 }
-fn git_push_sync(cwd: &str) -> Result<String, String> {
+pub(crate) fn git_push_sync(cwd: &str) -> Result<String, String> {
     do_push(&expand_tilde(cwd))
 }
 
@@ -713,6 +723,21 @@ pub async fn git_push(cwd: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || git_push_sync(&cwd))
         .await
         .map_err(|e| format!("推送失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn git_abort_merge(cwd: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cwd = expand_tilde(&cwd);
+        crate::workspaces::run_git(
+            Path::new(&cwd),
+            &["merge", "--abort"],
+            Duration::from_secs(30),
+        )
+        .map_err(|e| format!("取消合并失败: {e}"))
+    })
+    .await
+    .map_err(|e| format!("取消合并失败: {e}"))?
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1839,6 +1864,11 @@ mod tests {
         let (_, _, _, files5) =
             parse_porcelain("R  old.rs -> \"\\346\\226\\207\\346\\221\\230.md\"\n");
         assert_eq!(files5[0], ("R".to_string(), "文摘.md".to_string()));
+
+        let (_, _, _, files6) = parse_porcelain("UU conflict.rs\nAA both.rs\nDU deleted.rs\n");
+        assert_eq!(files6[0], ("U".to_string(), "conflict.rs".to_string()));
+        assert_eq!(files6[1], ("U".to_string(), "both.rs".to_string()));
+        assert_eq!(files6[2], ("U".to_string(), "deleted.rs".to_string()));
     }
 
     #[test]

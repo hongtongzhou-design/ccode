@@ -21,6 +21,18 @@ pub struct McpEnvPair {
     pub value: String,
 }
 
+/// 最近一次连通性体检的沉淀（随清单落盘；DTO 直出前端，error 文案同 check_mcp_server 口径）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpLastCheck {
+    /// ISO 时间戳（sessions::now_iso 同口径）
+    pub at: String,
+    pub ok: bool,
+    pub latency_ms: u64,
+    /// 失败原因；成功为 null
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerDto {
@@ -49,6 +61,18 @@ pub struct McpServerDto {
     /// 但保留 apps 映射，重新启用时按原样重投；旧清单无此字段，serde 默认 true
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// 来源标记：ccode = 本应用新建；imported:<agent> = 从该 agent 收编；imported:json = 粘贴导入。
+    /// 旧清单无此字段反序列化为空串 = 来源未知，删除分流按收编条目对待（宁可少删不可错删）
+    #[serde(default)]
+    pub origin: String,
+    /// 慢启动 server 的启动超时声明（毫秒）：收编 codex/grok 的 startup_timeout_sec 自动带入，
+    /// 也可在编辑表单手调；只被体检消费（check_stdio 按 clamp(8s, 30s) 生效），
+    /// 分发映射不写它（matrix §10.2：别家无实证等价字段）
+    #[serde(default)]
+    pub startup_timeout_ms: Option<u64>,
+    /// 最近一次体检沉淀（单条/批量检测都会更新；旧清单无此字段）
+    #[serde(default)]
+    pub last_check: Option<McpLastCheck>,
 }
 
 fn default_enabled() -> bool {
@@ -57,7 +81,19 @@ fn default_enabled() -> bool {
 
 // ===== 清单存储 =====
 
+// 测试接缝（同 coding.rs TEST_WT_ROOT 先例）：thread_local 只影响设置它的测试线程
+#[cfg(test)]
+thread_local! {
+    static TEST_STORE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TEST_BACKUP: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 fn store_path() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(p) = TEST_STORE.with(|c| c.borrow().clone()) {
+        return Ok(p);
+    }
     Ok(dirs::config_dir()
         .ok_or("无法确定平台配置目录")?
         .join("ccode")
@@ -211,6 +247,16 @@ fn backup_once(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
+    #[cfg(test)]
+    let dir = match TEST_BACKUP.with(|c| c.borrow().clone()) {
+        Some(p) => p,
+        None => dirs::config_dir()
+            .ok_or("无法确定平台配置目录")?
+            .join("ccode")
+            .join("backups")
+            .join("mcp"),
+    };
+    #[cfg(not(test))]
     let dir = dirs::config_dir()
         .ok_or("无法确定平台配置目录")?
         .join("ccode")
@@ -315,26 +361,122 @@ fn is_node_shim(path: &Path) -> bool {
         .is_some_and(|l| l.starts_with("#!") && l.contains("env node"))
 }
 
-/// stdio 命令若是相对路径（./ ../ 及 Windows 反斜杠变体），分发出去必挂：
-/// 相对路径的基准是来源 agent 自己的运行语境（如 codex 插件目录），其他 CLI 从任意目录
-/// 启动都找不到——拒写并报错引导改绝对路径，比静默写一个必然 ENOENT 的配置诚实
-fn reject_relative_command(command: &str) -> Result<(), String> {
+/// stdio 命令是否是相对路径（./ ../ 及 Windows 反斜杠变体、目录相向前缀）。
+/// 相对路径的基准是来源 agent 自己的运行语境（如 codex 插件目录），换个工作目录就找不到
+fn is_relative_command(command: &str) -> bool {
     let c = command.trim();
     if c.is_empty() {
-        return Ok(());
+        return false;
     }
     let looks_like_path = c.contains('/')
         || c.contains('\\')
         || (c.len() >= 2 && c.as_bytes()[1] == b':');
     // Unix 形态 `/abs/...` 在 Windows 上 Path::is_absolute 为 false（缺盘符前缀），
-    // 但仍不是「随 cwd 漂移」的相对路径，不当成相对路径拒写。
+    // 但仍不是「随 cwd 漂移」的相对路径，不当成相对路径处理。
     let absolute = Path::new(c).is_absolute() || c.starts_with('/');
-    if looks_like_path && !absolute {
-        return Err(format!(
-            "该 server 的命令是相对路径（{c}），换个 agent 的工作目录就找不到；请把命令改为绝对路径后再分发"
-        ));
+    looks_like_path && !absolute
+}
+
+/// 相对路径命令的解析结果：绝对路径命令 + 规范化后的工作目录
+///（cwd 是相对形态（"." "./x" 等）时改成命中所用的基准目录，保留条目对工作目录的语义；
+/// 绝对 cwd 保留原值，空 cwd 不动——原配置没声明工作目录，不替它猜）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCommandFix {
+    pub command: String,
+    pub cwd: String,
+}
+
+/// 相对路径命令的解析基准目录，按序（命中即停，序位即优先级）：
+/// 1. 条目自己声明的 cwd（绝对路径时）——条目自带的运行语境最可信；
+/// 2. 来源 agent 的配置家目录（agent_paths 写目标的父目录，尊重 CODEX_HOME 等搬迁变量）；
+/// 3. 来源 agent 的已知插件/缓存目录（只放有实证的，没有实证的不放）。
+/// 去重靠 paths::path_key（禁字符串前缀比较，AGENTS.md 方言层约定）。
+fn relative_resolution_bases(cwd: &str, agent: Option<&str>) -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut push = |p: PathBuf, bases: &mut Vec<PathBuf>, seen: &mut HashSet<String>| {
+        if seen.insert(crate::paths::path_key(&p.to_string_lossy())) {
+            bases.push(p);
+        }
+    };
+    let c = cwd.trim();
+    if !c.is_empty() && Path::new(c).is_absolute() {
+        push(PathBuf::from(c), &mut bases, &mut seen);
     }
-    Ok(())
+    if let Some(agent) = agent {
+        if let Ok((write_target, _)) = agent_paths(agent) {
+            if let Some(home) = write_target.parent() {
+                push(home.to_path_buf(), &mut bases, &mut seen);
+                // 有实证的插件/缓存目录（2026-09-03 实机：ChatGPT 桌面版写入 codex 的
+                // [mcp_servers.computer-use] 为 command="./Codex Computer Use.app/…" + cwd="."，
+                // 只有以 ~/.codex/computer-use 为工作目录拉起才解析得到；2026-08-17 案例同属
+                // codex 插件目录）。其余家未观察到相对路径条目，不放
+                if agent == "codex" {
+                    push(home.join("computer-use"), &mut bases, &mut seen);
+                    push(home.join("plugins"), &mut bases, &mut seen);
+                }
+            }
+        }
+    }
+    bases
+}
+
+/// 相对路径命令 → 绝对路径候选（按基准序，路径去重）。
+/// base.join(command) 命中已存在的文件即收；多基准同时命中时序位最前的在前，
+/// 收编取首候选，一键修复弹层把全量候选交给用户选。
+/// Windows 不补 .exe 猜测：实机案例均为精确相对路径，猜扩展名命中率低且会误导选择
+fn resolve_relative_candidates(
+    command: &str,
+    cwd: &str,
+    agent: Option<&str>,
+) -> Vec<McpCommandFix> {
+    if !is_relative_command(command) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for base in relative_resolution_bases(cwd, agent) {
+        let joined = base.join(command.trim());
+        if !joined.is_file() {
+            continue;
+        }
+        // join("./bin/serve") 会保留 "." 分量：canonicalize 落干净绝对路径（顺带解 symlink）；
+        // 失败兜底按分量 lexical 归一（去掉 "." 与重复分隔符）
+        let resolved = crate::paths::canonicalize_plain(&joined)
+            .unwrap_or_else(|_| joined.components().collect());
+        let text = mcp_path_text(resolved);
+        if !seen.insert(crate::paths::path_key(&text)) {
+            continue;
+        }
+        let c = cwd.trim();
+        let normalized_cwd = if !c.is_empty() && !Path::new(c).is_absolute() {
+            mcp_path_text(base.clone())
+        } else {
+            c.to_string()
+        };
+        out.push(McpCommandFix {
+            command: text,
+            cwd: normalized_cwd,
+        });
+    }
+    out
+}
+
+/// 分发入口的相对路径处理（先解后拦）：先以条目自己的 cwd（绝对时）为基准尝试解析成
+/// 绝对路径；解不出维持拒写，文案具体化——比静默写一个必然 ENOENT 的配置诚实
+///（2026-09-03 起替代旧的直接拒写，实机案例见 matrix §10.4）
+fn resolve_or_reject_relative(server: &McpServerDto) -> Result<String, String> {
+    let c = server.command.trim();
+    if !is_relative_command(c) {
+        return Ok(c.to_string());
+    }
+    if let Some(fix) = resolve_relative_candidates(c, &server.cwd, None).first() {
+        return Ok(fix.command.clone());
+    }
+    Err(format!(
+        "该 server 的命令是相对路径（{c}）且无法确定基准目录，请改为绝对路径（如 /usr/local/bin/xx）后重试"
+    ))
 }
 
 fn entry_json(server: &McpServerDto, agent: &str) -> Result<serde_json::Value, String> {
@@ -364,8 +506,9 @@ fn entry_json(server: &McpServerDto, agent: &str) -> Result<serde_json::Value, S
         if server.command.trim().is_empty() {
             return Err("stdio 类型必须填命令".into());
         }
-        reject_relative_command(&server.command)?;
-        let (command, args) = resolve_command_deep(&server.command, &server.args);
+        // 相对路径先解后拦：解出绝对路径继续分发，解不出拒写（resolve_or_reject_relative）
+        let command = resolve_or_reject_relative(server)?;
+        let (command, args) = resolve_command_deep(&command, &server.args);
         if agent == "opencode" {
             // opencode：command 是命令+参数合成的一个数组
             let mut cmd = vec![Value::String(command)];
@@ -453,8 +596,9 @@ fn entry_toml(server: &McpServerDto) -> Result<toml_edit::Table, String> {
         if server.command.trim().is_empty() {
             return Err("stdio 类型必须填命令".into());
         }
-        reject_relative_command(&server.command)?;
-        let (command, args) = resolve_command_deep(&server.command, &server.args);
+        // 相对路径先解后拦：解出绝对路径继续分发，解不出拒写（resolve_or_reject_relative）
+        let command = resolve_or_reject_relative(server)?;
+        let (command, args) = resolve_command_deep(&command, &server.args);
         t["command"] = toml_edit::value(command.as_str());
         if !args.is_empty() {
             let mut arr = toml_edit::Array::new();
@@ -526,6 +670,10 @@ fn entry_toml(server: &McpServerDto) -> Result<toml_edit::Table, String> {
 // ===== 各家目标文件解析（尊重整体搬迁环境变量；三平台由 home 推导） =====
 
 fn home() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(p) = TEST_HOME.with(|c| c.borrow().clone()) {
+        return Ok(p);
+    }
     dirs::home_dir().ok_or_else(|| "无法确定用户目录".to_string())
 }
 
@@ -695,6 +843,17 @@ fn write_json_entry(agent: &str, name: &str, entry: Option<serde_json::Value>) -
                 servers.remove(name);
             }
         }
+        // codebuddy 的 disabledMcpServers 是与条目并列的禁用名单：分发/移除时把本条目
+        // 从名单里清掉（只动自己名下这一项，其余名字保留）——否则外部禁用后，Ccode 重新
+        // 分发重写了条目却仍被名单压着禁用，与 codex 重写即恢复启用的语义不一致
+        if agent == "codebuddy" {
+            if let Some(list) = obj
+                .get_mut("disabledMcpServers")
+                .and_then(|v| v.as_array_mut())
+            {
+                list.retain(|x| x.as_str() != Some(name));
+            }
+        }
     }
     backup_once(&path)?;
     let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
@@ -855,6 +1014,17 @@ fn agent_entries(agent: &str) -> Result<Vec<(String, serde_json::Value)>, String
 
 // ===== 反向映射：各家条目 → 统一模型（收编现有配置用；未知字段防御式丢弃） =====
 
+/// 来源配置里的启动超时声明（codex/grok TOML 的 startup_timeout_sec，matrix §10.2）→ 毫秒；
+/// 其余家未实证等价字段，不读不猜
+fn parse_startup_timeout_ms(v: &serde_json::Value) -> Option<u64> {
+    let secs = v.get("startup_timeout_sec").and_then(|x| x.as_f64())?;
+    if secs.is_finite() && secs > 0.0 {
+        Some((secs * 1000.0) as u64)
+    } else {
+        None
+    }
+}
+
 fn reverse_entry(agent: &str, name: &str, v: &serde_json::Value) -> McpServerDto {
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     let arr = |k: &str| {
@@ -903,6 +1073,10 @@ fn reverse_entry(agent: &str, name: &str, v: &serde_json::Value) -> McpServerDto
         headers: vec![],
         apps: HashMap::new(),
         enabled: true,
+        // 来源由调用方标记（import_mcp_from_agent / parse_pasted），此处一律未知
+        origin: String::new(),
+        startup_timeout_ms: parse_startup_timeout_ms(v),
+        last_check: None,
     };
     match agent {
         "opencode" => {
@@ -1053,6 +1227,46 @@ fn entry_modified_externally(agent: &str, server: &McpServerDto) -> Result<bool,
     Ok(current != expected)
 }
 
+/// 条目级禁用语义只认实证过的三家（matrix §10.1/§10.2 + 2026-09-03 codex 本机实测
+/// `enabled = false` 后 `codex mcp list` 显示 disabled）：codex/grok 的 TOML `enabled` 键、
+/// codebuddy 的顶层并列 `disabledMcpServers` 名单。其余家未实证有 enabled 语义，
+/// 一律不产出「外部已禁用」状态（宁缺毋滥，不猜）。
+fn agent_has_enabled_semantics(agent: &str) -> bool {
+    matches!(agent, "codex" | "grok" | "codebuddy")
+}
+
+/// TOML 系（codex/grok）：条目 `enabled` 缺省 = true
+fn toml_entry_disabled(entries: &[(String, serde_json::Value)], name: &str) -> bool {
+    entries
+        .iter()
+        .find(|(n, _)| *n == name)
+        .and_then(|(_, v)| v.get("enabled").and_then(|x| x.as_bool()))
+        .map(|b| !b)
+        .unwrap_or(false)
+}
+
+/// codebuddy：顶层 `disabledMcpServers` 名单命中即禁用（与 mcpServers 并列键）
+fn codebuddy_disabled(root: &serde_json::Value, name: &str) -> bool {
+    root.get("disabledMcpServers")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(name)))
+}
+
+/// 该条目当前是否在 agent 侧被禁用；不支持 enabled 语义的家恒 false
+fn entry_disabled_externally(agent: &str, name: &str) -> Result<bool, String> {
+    match agent {
+        "codex" | "grok" => Ok(toml_entry_disabled(&agent_entries(agent)?, name)),
+        "codebuddy" => {
+            let (_, candidates) = agent_paths(agent)?;
+            let Some(path) = candidates.iter().find(|p| p.exists()) else {
+                return Ok(false);
+            };
+            Ok(codebuddy_disabled(&jsonc_read(path)?, name))
+        }
+        _ => Ok(false),
+    }
+}
+
 // ===== Tauri 命令 =====
 
 #[tauri::command]
@@ -1064,51 +1278,56 @@ pub async fn list_mcp_servers() -> Result<Vec<McpServerDto>, String> {
 
 #[tauri::command]
 pub async fn save_mcp_server(
-    mut server: McpServerDto,
+    server: McpServerDto,
     allow_plaintext: bool,
 ) -> Result<Vec<McpServerDto>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        server.name = server.name.trim().to_string();
-        validate_server_name(&server.name)?;
-        if server.kind != "stdio" && server.kind != "remote" {
-            return Err("类型必须是 stdio 或 remote".into());
+    tauri::async_runtime::spawn_blocking(move || save_impl(server, allow_plaintext))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn save_impl(mut server: McpServerDto, allow_plaintext: bool) -> Result<Vec<McpServerDto>, String> {
+    server.name = server.name.trim().to_string();
+    validate_server_name(&server.name)?;
+    if server.kind != "stdio" && server.kind != "remote" {
+        return Err("类型必须是 stdio 或 remote".into());
+    }
+    // 明文密钥拦截：引用形式（$VAR）才允许静默通过；PLAINDETECT 前缀供前端识别后确认重试
+    let suspects = suspect_plaintext_keys(&server);
+    if !allow_plaintext && !suspects.is_empty() {
+        return Err(format!("PLAINDETECT:{}", suspects.join("、")));
+    }
+    let mut list = read_store()?;
+    let is_new = server.id.is_empty();
+    if is_new {
+        if list.iter().any(|s| s.name == server.name) {
+            return Err(format!("已存在同名 server: {}", server.name));
         }
-        // 明文密钥拦截：引用形式（$VAR）才允许静默通过；PLAINDETECT 前缀供前端识别后确认重试
-        let suspects = suspect_plaintext_keys(&server);
-        if !allow_plaintext && !suspects.is_empty() {
-            return Err(format!("PLAINDETECT:{}", suspects.join("、")));
+        server.id = uuid::Uuid::new_v4().to_string();
+        server.origin = "ccode".into(); // 新建只此一个入口（前端传值一律忽略）
+        list.push(server.clone());
+    } else {
+        let Some(pos) = list.iter().position(|s| s.id == server.id) else {
+            return Err("该 server 不存在（可能已删除）".into());
+        };
+        if list.iter().any(|s| s.name == server.name && s.id != server.id) {
+            return Err(format!("已存在同名 server: {}", server.name));
         }
-        let mut list = read_store()?;
-        let is_new = server.id.is_empty();
-        if is_new {
-            if list.iter().any(|s| s.name == server.name) {
-                return Err(format!("已存在同名 server: {}", server.name));
-            }
-            server.id = uuid::Uuid::new_v4().to_string();
-            list.push(server.clone());
-        } else {
-            let Some(pos) = list.iter().position(|s| s.id == server.id) else {
-                return Err("该 server 不存在（可能已删除）".into());
-            };
-            if list.iter().any(|s| s.name == server.name && s.id != server.id) {
-                return Err(format!("已存在同名 server: {}", server.name));
-            }
-            server.apps = list[pos].apps.clone(); // 分发开关以开关命令为准，编辑不夹带
-            server.enabled = list[pos].enabled; // 全局启用开关同理（set_mcp_server_enabled 管辖）
-            list[pos] = server.clone();
+        server.apps = list[pos].apps.clone(); // 分发开关以开关命令为准，编辑不夹带
+        server.enabled = list[pos].enabled; // 全局启用开关同理（set_mcp_server_enabled 管辖）
+        server.origin = list[pos].origin.clone(); // 来源标记同理（整结构替换不能丢）
+        server.last_check = list[pos].last_check.clone(); // 体检沉淀同理（编辑不是重新检测）
+        list[pos] = server.clone();
+    }
+    // 先重投放到已开启的 agent（内容跟随最新清单），全成功才落库——
+    // 顺序反过来会留下「清单说已分发但 agent 侧没写成」的假状态
+    for (agent, on) in server.apps.clone() {
+        if on {
+            apply_to_agent(&agent, &server, true)?;
         }
-        // 先重投放到已开启的 agent（内容跟随最新清单），全成功才落库——
-        // 顺序反过来会留下「清单说已分发但 agent 侧没写成」的假状态
-        for (agent, on) in server.apps.clone() {
-            if on {
-                apply_to_agent(&agent, &server, true)?;
-            }
-        }
-        write_store(&list)?;
-        Ok(list)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    }
+    write_store(&list)?;
+    Ok(list)
 }
 
 /// 分发开关：开 = 写入该 agent 用户级配置；关 = 移除同名条目
@@ -1185,43 +1404,61 @@ pub async fn set_mcp_server_enabled(
     .map_err(|e| e.to_string())?
 }
 
+/// 删除分流：keep_agent_configs=true = 收编条目的安全出口，只从清单移除，
+/// 不碰任何 agent 配置文件（跳过 EXTMOD 预检与移除循环——整条目都是从 agent 侧收编的，
+/// 默认动作绝不能反向删用户原有配置）；false = 维持完整行为（预检 + 逐 agent 移除）
 #[tauri::command]
-pub async fn delete_mcp_server(id: String, force: bool) -> Result<Vec<McpServerDto>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut list = read_store()?;
-        let Some(pos) = list.iter().position(|s| s.id == id) else {
-            return Err("该 server 不存在（可能已删除）".into());
-        };
-        let server = list[pos].clone();
-        // 外部修改预检全做完再动手（防部分移除后清单与 agent 侧状态错位）
-        if !force {
-            let modified: Vec<String> = server
-                .apps
-                .iter()
-                .filter(|(_, on)| **on)
-                .filter_map(|(agent, _)| {
-                    entry_modified_externally(agent, &server)
-                        .ok()
-                        .filter(|m| *m)
-                        .map(|_| agent.clone())
-                })
-                .collect();
-            if !modified.is_empty() {
-                return Err(format!("EXTMOD:{}", modified.join("、")));
-            }
-        }
-        // 先逐 agent 移除已分发条目（单个失败即停，清单保留便于排查）
-        for (agent, on) in &server.apps {
-            if *on {
-                apply_to_agent(agent, &server, false)?;
-            }
-        }
+pub async fn delete_mcp_server(
+    id: String,
+    force: bool,
+    keep_agent_configs: bool,
+) -> Result<Vec<McpServerDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_impl(&id, force, keep_agent_configs))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn delete_impl(
+    id: &str,
+    force: bool,
+    keep_agent_configs: bool,
+) -> Result<Vec<McpServerDto>, String> {
+    let mut list = read_store()?;
+    let Some(pos) = list.iter().position(|s| s.id == id) else {
+        return Err("该 server 不存在（可能已删除）".into());
+    };
+    if keep_agent_configs {
         list.remove(pos);
         write_store(&list)?;
-        Ok(list)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        return Ok(list);
+    }
+    let server = list[pos].clone();
+    // 外部修改预检全做完再动手（防部分移除后清单与 agent 侧状态错位）
+    if !force {
+        let modified: Vec<String> = server
+            .apps
+            .iter()
+            .filter(|(_, on)| **on)
+            .filter_map(|(agent, _)| {
+                entry_modified_externally(agent, &server)
+                    .ok()
+                    .filter(|m| *m)
+                    .map(|_| agent.clone())
+            })
+            .collect();
+        if !modified.is_empty() {
+            return Err(format!("EXTMOD:{}", modified.join("、")));
+        }
+    }
+    // 先逐 agent 移除已分发条目（单个失败即停，清单保留便于排查）
+    for (agent, on) in &server.apps {
+        if *on {
+            apply_to_agent(agent, &server, false)?;
+        }
+    }
+    list.remove(pos);
+    write_store(&list)?;
+    Ok(list)
 }
 
 /// 各 agent 用户级配置里现有的 server 名（含非 Ccode 管理的；前端用于漂移/现状展示）
@@ -1245,6 +1482,9 @@ pub struct DiscoveredMcpDto {
     pub agent: String,
     pub name: String,
     pub summary: String,
+    /// 命令是相对路径（./ ../ 开头）：来源 agent 自己的运行语境下才解析得到，
+    /// 收编时 resolver 会尝试落绝对路径；前端在列表行上预警
+    pub relative_command: bool,
 }
 
 /// 扫描各家用户级配置，列出不在 Ccode 清单里的 server（「发现未纳管」同套路）
@@ -1265,6 +1505,8 @@ pub async fn discover_mcp_servers() -> Result<Vec<DiscoveredMcpDto>, String> {
                 let server = reverse_entry(spec.id, &name, &value);
                 out.push(DiscoveredMcpDto {
                     agent: spec.id.to_string(),
+                    relative_command: server.kind == "stdio"
+                        && is_relative_command(&server.command),
                     summary: entry_summary(&server),
                     name,
                 });
@@ -1277,33 +1519,76 @@ pub async fn discover_mcp_servers() -> Result<Vec<DiscoveredMcpDto>, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// 收编结果：更新后的清单 + 相对路径命令的处理计数（前端 toast 附注用）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpImportOutcome {
+    pub servers: Vec<McpServerDto>,
+    /// 相对路径已解析为绝对路径的条数
+    pub resolved: usize,
+    /// 相对路径未能解析、照原样收进来的条数（清单页有告警与一键修复兜底）
+    pub unresolved: usize,
+}
+
+/// stdio 相对路径命令的收编解析：命中首候选 → 存绝对路径 + cwd 规范化；
+/// 全不命中 → 照原样收进来（fail-open：收编不是写 agent 配置，存下来让用户在清单里
+/// 看到再修比拒收好；未解析条目由 mcp_command_path_status 的 relative 态持续告警）。
+/// 返回 (resolved, unresolved) 计数
+fn resolve_on_import(server: &mut McpServerDto, agent: Option<&str>) -> (usize, usize) {
+    if server.kind != "stdio" || !is_relative_command(&server.command) {
+        return (0, 0);
+    }
+    match resolve_relative_candidates(&server.command, &server.cwd, agent).first() {
+        Some(fix) => {
+            server.command = fix.command.clone();
+            server.cwd = fix.cwd.clone();
+            (1, 0)
+        }
+        None => (0, 1),
+    }
+}
+
 /// 收编：把某 agent 配置里的既有 server 读进 Ccode 清单，并标记已分发到该 agent
 #[tauri::command]
-pub async fn import_mcp_from_agent(agent: String, name: String) -> Result<Vec<McpServerDto>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::agent_specs::agent_spec(&agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
-        let mut list = read_store()?;
-        if list.iter().any(|s| s.name == name) {
-            return Err(format!("清单里已有同名 server: {name}"));
-        }
-        let entries = agent_entries(&agent)?;
-        let Some((_, value)) = entries.into_iter().find(|(n, _)| *n == name) else {
-            return Err(format!("{} 的配置里找不到 server {name}", agent));
-        };
-        let mut server = reverse_entry(&agent, &name, &value);
-        server.id = uuid::Uuid::new_v4().to_string();
-        server.apps.insert(agent, true); // 已在该 agent 配置里，标记已分发
-        list.push(server);
-        write_store(&list)?;
-        Ok(list)
+pub async fn import_mcp_from_agent(
+    agent: String,
+    name: String,
+) -> Result<McpImportOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || import_from_agent_impl(&agent, &name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn import_from_agent_impl(agent: &str, name: &str) -> Result<McpImportOutcome, String> {
+    crate::agent_specs::agent_spec(agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
+    let mut list = read_store()?;
+    if list.iter().any(|s| s.name == name) {
+        return Err(format!("清单里已有同名 server: {name}"));
+    }
+    let entries = agent_entries(agent)?;
+    let Some((_, value)) = entries.into_iter().find(|(n, _)| *n == name) else {
+        return Err(format!("{} 的配置里找不到 server {name}", agent));
+    };
+    let mut server = reverse_entry(agent, name, &value);
+    let (resolved, unresolved) = resolve_on_import(&mut server, Some(agent));
+    server.id = uuid::Uuid::new_v4().to_string();
+    server.apps.insert(agent.to_string(), true); // 已在该 agent 配置里，标记已分发
+    server.origin = format!("imported:{agent}"); // 收编来源：删除分流据此默认仅从清单移除
+    list.push(server);
+    write_store(&list)?;
+    Ok(McpImportOutcome {
+        servers: list,
+        resolved,
+        unresolved,
     })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 /// 粘贴 JSON 的纯解析（不写库）：剥包裹层 + 通用形状解析 + 标出将与清单重名被跳过的。
-/// 返回 (解析出的 server 预览, 同名跳过名单, 疑似明文密钥清单)
-fn parse_pasted(text: &str) -> Result<(Vec<McpServerDto>, Vec<String>, Vec<String>), String> {
+/// 相对路径命令同收编口径尝试解析（粘贴无来源 agent，基准只有条目自己的 cwd）。
+/// 返回 (解析出的 server 预览, 同名跳过名单, 疑似明文密钥清单, (相对路径已解析数, 未解析数))
+fn parse_pasted(
+    text: &str,
+) -> Result<(Vec<McpServerDto>, Vec<String>, Vec<String>, (usize, usize)), String> {
     let v: serde_json::Value = serde_json::from_str(strip_jsonc(text).as_str())
         .map_err(|e| format!("不是合法 JSON: {e}"))?;
     let obj = v.as_object().ok_or("必须是 JSON 对象")?;
@@ -1318,6 +1603,8 @@ fn parse_pasted(text: &str) -> Result<(Vec<McpServerDto>, Vec<String>, Vec<Strin
     let mut parsed = Vec::new();
     let mut skipped = Vec::new();
     let mut suspects = Vec::new();
+    let mut resolved = 0usize;
+    let mut unresolved = 0usize;
     for (name, value) in map {
         let name = name.trim().to_string();
         if name.is_empty() || !value.is_object() {
@@ -1337,14 +1624,18 @@ fn parse_pasted(text: &str) -> Result<(Vec<McpServerDto>, Vec<String>, Vec<Strin
         if server.kind == "remote" && server.url.is_empty() {
             server.url = s_get(value, "httpUrl");
         }
+        let (r, u) = resolve_on_import(&mut server, None);
+        resolved += r;
+        unresolved += u;
         server.id = uuid::Uuid::new_v4().to_string();
+        server.origin = "imported:json".into(); // 粘贴导入同收编对待：删除默认仅从清单移除
         suspects.extend(suspect_plaintext_keys(&server));
         parsed.push(server);
     }
     if parsed.is_empty() && skipped.is_empty() {
         return Err("没有解析出任何 server 条目（期望 {\"mcpServers\": {...}} 形状）".into());
     }
-    Ok((parsed, skipped, suspects))
+    Ok((parsed, skipped, suspects, (resolved, unresolved)))
 }
 
 /// 粘贴导入预览：只解析不写库（前端展示将添加的命令清单，确认后才调 import_mcp_json）
@@ -1352,20 +1643,23 @@ fn parse_pasted(text: &str) -> Result<(Vec<McpServerDto>, Vec<String>, Vec<Strin
 pub async fn parse_mcp_json(
     text: String,
 ) -> Result<(Vec<McpServerDto>, Vec<String>, Vec<String>), String> {
-    tauri::async_runtime::spawn_blocking(move || parse_pasted(&text))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let (parsed, skipped, suspects, _) = parse_pasted(&text)?;
+        Ok((parsed, skipped, suspects))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 粘贴 JSON 导入：确认预览后落库。同名跳过。明文密钥需 allow_plaintext 确认。
-/// 返回 (新增, 跳过)
+/// 返回 (新增, 跳过, 相对路径已解析数, 相对路径未解析数)
 #[tauri::command]
 pub async fn import_mcp_json(
     text: String,
     allow_plaintext: bool,
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> Result<(Vec<String>, Vec<String>, usize, usize), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (parsed, skipped, suspects) = parse_pasted(&text)?;
+        let (parsed, skipped, suspects, counts) = parse_pasted(&text)?;
         if !allow_plaintext && !suspects.is_empty() {
             return Err(format!("PLAINDETECT:{}", suspects.join("、")));
         }
@@ -1373,7 +1667,7 @@ pub async fn import_mcp_json(
         let added: Vec<String> = parsed.iter().map(|s| s.name.clone()).collect();
         list.extend(parsed);
         write_store(&list)?;
-        Ok((added, skipped))
+        Ok((added, skipped, counts.0, counts.1))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1406,6 +1700,9 @@ mod tests {
             headers: vec![],
             apps: HashMap::new(),
             enabled: true,
+            origin: String::new(),
+            startup_timeout_ms: None,
+            last_check: None,
         }
     }
 
@@ -1425,6 +1722,9 @@ mod tests {
             }],
             apps: HashMap::new(),
             enabled: true,
+            origin: String::new(),
+            startup_timeout_ms: None,
+            last_check: None,
         }
     }
 
@@ -1451,13 +1751,14 @@ mod tests {
 
     #[test]
     fn relative_stdio_command_rejected_on_distribute() {
-        // 相对路径的基准是来源 agent 的运行语境（如 codex 插件目录），分发到别家必 ENOENT：
-        // 拒写并引导改绝对路径，比静默写必挂配置诚实
+        // 先解后拦：条目 cwd（/tmp，绝对）下解不出 ./plugins/foo/bin/serve → 维持拒写
+        // 并引导改绝对路径，比静默写必挂配置诚实
         let mut s = stdio_server();
         s.command = "./plugins/foo/bin/serve".into();
         let err = entry_json(&s, "kimi").unwrap_err();
         assert!(err.contains("相对路径"), "{err}");
         assert!(err.contains("绝对路径"), "{err}");
+        assert!(err.contains("无法确定基准目录"), "{err}");
         let err = entry_toml(&s).unwrap_err();
         assert!(err.contains("相对路径"), "{err}");
         s.command = "../up/serve".into();
@@ -1642,19 +1943,19 @@ mod tests {
     }
 
     #[test]
-    fn reject_relative_command_catches_windows_and_unix_shapes() {
-        assert!(reject_relative_command("npx").is_ok());
-        assert!(reject_relative_command("/usr/bin/npx").is_ok() || cfg!(windows));
-        assert!(reject_relative_command("./serve").is_err());
-        assert!(reject_relative_command("../bin/serve").is_err());
-        assert!(reject_relative_command(r".\serve").is_err());
-        assert!(reject_relative_command(r"dir\sub\serve.exe").is_err());
-        assert!(reject_relative_command("dir/sub/serve").is_err());
+    fn is_relative_command_catches_windows_and_unix_shapes() {
+        assert!(!is_relative_command("npx"));
+        assert!(!is_relative_command("/usr/bin/npx"));
+        assert!(is_relative_command("./serve"));
+        assert!(is_relative_command("../bin/serve"));
+        assert!(is_relative_command(r".\serve"));
+        assert!(is_relative_command(r"dir\sub\serve.exe"));
+        assert!(is_relative_command("dir/sub/serve"));
         #[cfg(windows)]
         {
-            assert!(reject_relative_command(r"C:\tools\serve.exe").is_ok());
-            assert!(reject_relative_command("C:rel.exe").is_err());
-            assert!(reject_relative_command(r"\\?\C:\tools\serve.exe").is_ok());
+            assert!(!is_relative_command(r"C:\tools\serve.exe"));
+            assert!(is_relative_command("C:rel.exe"));
+            assert!(!is_relative_command(r"\\?\C:\tools\serve.exe"));
         }
     }
 
@@ -1688,39 +1989,657 @@ mod tests {
         assert_eq!(back["mcpServers"]["fs-tools"]["command"], "npx");
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // ===== origin 来源标记与收编条目删除分流 =====
+
+    /// 临时 HOME + 临时清单 + 临时备份根的封闭夹具（thread_local 接缝，只影响本测试线程）。
+    /// 写入目标用 cursor：agent_paths 里它是唯一没有环境变量搬迁口的家，路径完全由 home 推导
+    struct Fixture {
+        dir: PathBuf,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("ccode-mcp-origin-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            TEST_HOME.with(|c| *c.borrow_mut() = Some(dir.clone()));
+            TEST_STORE.with(|c| *c.borrow_mut() = Some(dir.join("mcp-servers.json")));
+            TEST_BACKUP.with(|c| *c.borrow_mut() = Some(dir.join("backups")));
+            Self { dir }
+        }
+        /// 造假 cursor 用户级配置（含一个既有 MCP 条目），返回文件路径
+        fn seed_cursor_config(&self) -> PathBuf {
+            let path = self.dir.join(".cursor").join("mcp.json");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                r#"{"mcpServers": {"adopted": {"command": "npx", "args": ["-y", "some-mcp"]}}}"#,
+            )
+            .unwrap();
+            path
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            TEST_HOME.with(|c| *c.borrow_mut() = None);
+            TEST_STORE.with(|c| *c.borrow_mut() = None);
+            TEST_BACKUP.with(|c| *c.borrow_mut() = None);
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    #[test]
+    fn origin_defaults_to_empty_for_legacy_entries() {
+        // 旧清单没有 origin 字段：反序列化为空串（前端按收编条目对待，宁可少删不可错删）
+        let v = serde_json::json!({
+            "id": "old1", "name": "legacy", "kind": "stdio",
+            "command": "npx", "url": ""
+        });
+        let s: McpServerDto = serde_json::from_value(v).unwrap();
+        assert_eq!(s.origin, "");
+        assert!(s.enabled, "enabled 的 serde 默认值同样回归覆盖");
+    }
+
+    #[test]
+    fn origin_written_on_create_adopt_and_paste() {
+        let fx = Fixture::new();
+        // 路径一：Ccode 新建（save 唯一入口，前端传值被忽略）
+        let mut s = stdio_server();
+        s.id = String::new();
+        s.origin = "bogus-from-frontend".into();
+        let list = save_impl(s, false).unwrap();
+        assert_eq!(list[0].origin, "ccode");
+        // 路径二：收编 agent 既有条目
+        fx.seed_cursor_config();
+        let outcome = import_from_agent_impl("cursor", "adopted").unwrap();
+        let adopted = outcome.servers.iter().find(|s| s.name == "adopted").unwrap();
+        assert_eq!(adopted.origin, "imported:cursor");
+        assert_eq!(adopted.apps.get("cursor"), Some(&true));
+        // 路径三：粘贴 JSON 导入（parse 阶段就标好，确认落库不另设）
+        let (parsed, _, _, _) =
+            parse_pasted(r#"{"mcpServers": {"pasted": {"command": "npx"}}}"#).unwrap();
+        assert_eq!(parsed[0].origin, "imported:json");
+    }
+
+    #[test]
+    fn edit_preserves_origin() {
+        // 编辑是整结构替换：origin 必须像 apps/enabled 一样保留旧值，前端传值不能夹带
+        let fx = Fixture::new();
+        fx.seed_cursor_config();
+        let outcome = import_from_agent_impl("cursor", "adopted").unwrap();
+        let mut edited = outcome
+            .servers
+            .iter()
+            .find(|s| s.name == "adopted")
+            .unwrap()
+            .clone();
+        edited.args = vec!["-y".into(), "other-mcp".into()];
+        edited.origin = "ccode".into(); // 前端无论传什么都会被旧值覆盖
+        let list = save_impl(edited, false).unwrap();
+        assert_eq!(list[0].origin, "imported:cursor");
+        assert_eq!(list[0].args, vec!["-y", "other-mcp"], "编辑内容正常生效");
+    }
+
+    #[test]
+    fn delete_keep_agent_configs_leaves_agent_files_untouched() {
+        let fx = Fixture::new();
+        let agent_file = fx.seed_cursor_config();
+        let before = std::fs::read_to_string(&agent_file).unwrap();
+        let outcome = import_from_agent_impl("cursor", "adopted").unwrap();
+        let id = outcome.servers[0].id.clone();
+        // 仅从清单移除：agent 配置文件一字节不动（EXTMOD 预检与移除循环整体跳过）
+        let list = delete_impl(&id, false, true).unwrap();
+        assert!(list.is_empty());
+        assert_eq!(std::fs::read_to_string(&agent_file).unwrap(), before);
+        assert!(!fx.dir.join("backups").exists(), "不动 agent 文件就不该产生备份");
+        // 对照组：连同配置删除（force 跳过预检）确实会把条目从 agent 配置里移除
+        let outcome = import_from_agent_impl("cursor", "adopted").unwrap();
+        let list = delete_impl(&outcome.servers[0].id, true, false).unwrap();
+        assert!(list.is_empty());
+        let after = jsonc_read(&agent_file).unwrap();
+        assert!(after["mcpServers"].get("adopted").is_none());
+    }
+
+    // ===== check_stdio 双帧格式自适应（unix 专属：假 server 走 shell 脚本） =====
+
+    /// 临时可执行 shell 脚本假 server；返回（目录守卫用路径, 指向脚本的 server DTO）
+    #[cfg(unix)]
+    fn script_server(body: &str) -> (PathBuf, McpServerDto) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ccode-mcp-stdio-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-server.sh");
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut s = stdio_server();
+        s.command = script.to_string_lossy().into_owned();
+        s.args = vec![];
+        s.cwd = String::new();
+        s.env = vec![];
+        (dir, s)
+    }
+
+    /// 规范 NDJSON server：收到 `{` 开头行回一行 JSON 结果
+    #[cfg(unix)]
+    const NDJSON_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    '{'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake-ndjson","version":"1.0"}}}'
+      exit 0
+      ;;
+  esac
+done
+"#;
+
+    /// 旧式 Content-Length server：收到 `{` 开头行直接退出（不认 NDJSON），
+    /// 收到 Content-Length 头按头+定长体读入并回同格式帧
+    #[cfg(unix)]
+    const CONTENT_LENGTH_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  line=$(printf '%s' "$line" | tr -d '\r')
+  case "$line" in
+    '{'*)
+      exit 1
+      ;;
+    [Cc]ontent-[Ll]ength:*)
+      len=$(printf '%s' "$line" | sed 's/[^0-9]//g')
+      IFS= read -r _blank
+      dd bs=1 count="$len" of=/dev/null 2>/dev/null
+      resp='{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"legacy-lsp","version":"0.9"}}}'
+      printf 'Content-Length: %s\r\n\r\n%s' "${#resp}" "$resp"
+      exit 0
+      ;;
+  esac
+done
+"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn check_stdio_ndjson_server_passes_first_try() {
+        let (dir, s) = script_server(NDJSON_SERVER);
+        let h = check_stdio(&s);
+        assert!(h.ok, "{:?}", h.error);
+        assert_eq!(h.detail.as_deref(), Some("fake-ndjson@1.0"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_stdio_content_length_server_passes_via_fallback() {
+        // NDJSON 尝试下 server 见 `{` 行即退出（进程未响应就退出）→ 换 Content-Length 重试成功
+        let (dir, s) = script_server(CONTENT_LENGTH_SERVER);
+        let h = check_stdio(&s);
+        assert!(h.ok, "{:?}", h.error);
+        assert_eq!(h.detail.as_deref(), Some("legacy-lsp@0.9"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_stdio_both_frames_dead_report_combined_error() {
+        // 两种帧格式都进程秒退：报错区分「两种帧格式均无响应」，且保留 env 缺失提示
+        let (dir, mut s) = script_server("#!/bin/sh\nexit 1\n");
+        s.env = vec![McpEnvPair {
+            key: "TOKEN".into(),
+            value: "${CCODE_TEST_DEFINITELY_MISSING_VAR}".into(),
+        }];
+        let h = check_stdio(&s);
+        assert!(!h.ok);
+        let err = h.error.unwrap();
+        assert!(err.contains("两种帧格式均无响应"), "{err}");
+        assert!(err.contains("NDJSON") && err.contains("Content-Length"), "{err}");
+        assert!(err.contains("进程未响应就退出了"), "{err}");
+        assert!(err.contains("环境变量 CCODE_TEST_DEFINITELY_MISSING_VAR 未设置"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== 分发状态五态（mcp_distribution_status） =====
+
+    #[test]
+    fn toml_enabled_semantics() {
+        let on = vec![(
+            "s".to_string(),
+            serde_json::json!({"command": "npx", "enabled": true}),
+        )];
+        let off = vec![(
+            "s".to_string(),
+            serde_json::json!({"command": "npx", "enabled": false}),
+        )];
+        let absent = vec![("s".to_string(), serde_json::json!({"command": "npx"}))];
+        assert!(!toml_entry_disabled(&on, "s"));
+        assert!(toml_entry_disabled(&off, "s"));
+        assert!(!toml_entry_disabled(&absent, "s"), "enabled 缺省 = 启用");
+        assert!(!toml_entry_disabled(&off, "other"), "条目不存在不算禁用");
+        assert!(agent_has_enabled_semantics("codex"));
+        assert!(agent_has_enabled_semantics("grok"));
+        assert!(agent_has_enabled_semantics("codebuddy"));
+        assert!(!agent_has_enabled_semantics("claude-code"), "未实证的家不产出该态");
+    }
+
+    #[test]
+    fn codebuddy_disabled_list_semantics() {
+        let root = serde_json::json!({
+            "mcpServers": {"a": {"command": "npx"}},
+            "disabledMcpServers": ["a", "other"]
+        });
+        assert!(codebuddy_disabled(&root, "a"));
+        assert!(!codebuddy_disabled(&root, "b"), "不在名单 = 启用");
+        let no_key = serde_json::json!({"mcpServers": {"a": {}}});
+        assert!(!codebuddy_disabled(&no_key, "a"), "缺键 = 启用");
+        let wrong_shape = serde_json::json!({"disabledMcpServers": "a"});
+        assert!(!codebuddy_disabled(&wrong_shape, "a"), "非数组不猜");
+    }
+
+    /// 造一份 cursor 配置为「与清单产物一致」的辅助：直接走真实分发写入
+    fn seed_server_distributed(server: &McpServerDto) {
+        write_store(&[server.clone()]).unwrap();
+        apply_to_agent("cursor", server, true).unwrap();
+    }
+
+    #[test]
+    fn distribution_status_ok_modified_missing_off() {
+        let fx = Fixture::new();
+        let mut s = stdio_server();
+        s.apps.insert("cursor".into(), true);
+        s.apps.insert("kimi".into(), false);
+        seed_server_distributed(&s);
+        let st = distribution_status_impl("t1").unwrap();
+        assert_eq!(st.get("cursor").map(String::as_str), Some("ok"));
+        assert_eq!(st.get("kimi").map(String::as_str), Some("off"));
+        // 外部改内容 → modified
+        let path = fx.dir.join(".cursor").join("mcp.json");
+        let mut root = jsonc_read(&path).unwrap();
+        root["mcpServers"]["fs-tools"]["args"] = serde_json::json!(["-y", "other"]);
+        std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap()).unwrap();
+        let st = distribution_status_impl("t1").unwrap();
+        assert_eq!(st.get("cursor").map(String::as_str), Some("modified"));
+        // 外部删除条目 → missing（清单 apps 仍标已分发）
+        root["mcpServers"]
+            .as_object_mut()
+            .unwrap()
+            .remove("fs-tools");
+        std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap()).unwrap();
+        let st = distribution_status_impl("t1").unwrap();
+        assert_eq!(st.get("cursor").map(String::as_str), Some("missing"));
+        // 整个配置文件没了也算 missing，不报警崩溃
+        std::fs::remove_file(&path).unwrap();
+        let st = distribution_status_impl("t1").unwrap();
+        assert_eq!(st.get("cursor").map(String::as_str), Some("missing"));
+        // 配置损坏 → 不报警原则，按 ok 处理
+        std::fs::write(&path, "{ not json").unwrap();
+        let st = distribution_status_impl("t1").unwrap();
+        assert_eq!(st.get("cursor").map(String::as_str), Some("ok"));
+        s.apps.clear();
+    }
+
+    #[test]
+    fn distribution_status_disabled_externally_codex_and_codebuddy() {
+        // 这两家的路径有环境变量搬迁口（CODEX_HOME / CODEBUDDY_CONFIG_DIR），
+        // 设了就跳过——Fixture 的 thread_local HOME 压不住它们
+        if std::env::var_os("CODEX_HOME").is_some() || std::env::var_os("CODEBUDDY_CONFIG_DIR").is_some() {
+            return;
+        }
+        let fx = Fixture::new();
+        let mut s = stdio_server();
+        s.apps.insert("codex".into(), true);
+        s.apps.insert("codebuddy".into(), true);
+        write_store(&[s.clone()]).unwrap();
+        apply_to_agent("codex", &s, true).unwrap();
+        apply_to_agent("codebuddy", &s, true).unwrap();
+        let st = distribution_status_impl("t1").unwrap();
+        assert_eq!(st.get("codex").map(String::as_str), Some("ok"), "{st:?}");
+        assert_eq!(st.get("codebuddy").map(String::as_str), Some("ok"), "{st:?}");
+        // codex：外部加 enabled = false → disabled_externally（而不是 modified）
+        let codex_path = fx.dir.join(".codex").join("config.toml");
+        let mut doc = std::fs::read_to_string(&codex_path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        doc["mcp_servers"]["fs-tools"]["enabled"] = toml_edit::value(false);
+        std::fs::write(&codex_path, doc.to_string()).unwrap();
+        // codebuddy：外部把名字加进 disabledMcpServers
+        let cb_path = fx.dir.join(".codebuddy").join(".mcp.json");
+        let mut root = jsonc_read(&cb_path).unwrap();
+        root["disabledMcpServers"] = serde_json::json!(["fs-tools", "someone-else"]);
+        std::fs::write(&cb_path, serde_json::to_string_pretty(&root).unwrap()).unwrap();
+        let st = distribution_status_impl("t1").unwrap();
+        assert_eq!(
+            st.get("codex").map(String::as_str),
+            Some("disabled_externally"),
+            "{st:?}"
+        );
+        assert_eq!(
+            st.get("codebuddy").map(String::as_str),
+            Some("disabled_externally"),
+            "{st:?}"
+        );
+        // codebuddy 重新分发会把本条目从禁用名单清掉（名单里别人的名字保留），
+        // codex 重写条目即丢掉 enabled=false——两边「拨开开关 = 恢复启用」语义一致
+        apply_to_agent("codebuddy", &s, true).unwrap();
+        apply_to_agent("codex", &s, true).unwrap();
+        let root = jsonc_read(&cb_path).unwrap();
+        assert_eq!(
+            root["disabledMcpServers"],
+            serde_json::json!(["someone-else"]),
+            "只清自己名下的名字，键与别人的名字保留"
+        );
+        let st = distribution_status_impl("t1").unwrap();
+        assert_eq!(st.get("codex").map(String::as_str), Some("ok"), "{st:?}");
+        assert_eq!(st.get("codebuddy").map(String::as_str), Some("ok"), "{st:?}");
+    }
+
+    // ===== 体检沉淀 / 启动超时 / env 引用预检 =====
+
+    #[test]
+    fn stdio_check_timeout_defaults_and_clamps() {
+        let mut s = stdio_server();
+        assert_eq!(
+            stdio_check_timeout(&s),
+            std::time::Duration::from_secs(8),
+            "未声明维持 8s"
+        );
+        s.startup_timeout_ms = Some(2_000);
+        assert_eq!(
+            stdio_check_timeout(&s),
+            std::time::Duration::from_secs(8),
+            "声明值低于 8s 仍按 8s"
+        );
+        s.startup_timeout_ms = Some(20_000);
+        assert_eq!(
+            stdio_check_timeout(&s),
+            std::time::Duration::from_secs(20),
+            "声明值生效"
+        );
+        s.startup_timeout_ms = Some(120_000);
+        assert_eq!(
+            stdio_check_timeout(&s),
+            std::time::Duration::from_secs(30),
+            "声明值封顶 30s"
+        );
+    }
+
+    #[test]
+    fn startup_timeout_reverse_parsed_from_toml_fields() {
+        // codex/grok 的 startup_timeout_sec（秒）→ 毫秒；缺键/非正数不落字段
+        let v = serde_json::json!({"command": "npx", "startup_timeout_sec": 15});
+        assert_eq!(reverse_entry("codex", "s", &v).startup_timeout_ms, Some(15_000));
+        let v = serde_json::json!({"command": "npx", "startup_timeout_sec": 0.5});
+        assert_eq!(reverse_entry("grok", "s", &v).startup_timeout_ms, Some(500));
+        let v = serde_json::json!({"command": "npx"});
+        assert_eq!(reverse_entry("codex", "s", &v).startup_timeout_ms, None);
+        let v = serde_json::json!({"command": "npx", "startup_timeout_sec": -3});
+        assert_eq!(reverse_entry("codex", "s", &v).startup_timeout_ms, None);
+        // 粘贴导入（claude 形状 JSON）里带了该键也顺带带入，没带则为空
+        let fx = Fixture::new();
+        let (parsed, _, _, _) = parse_pasted(
+            r#"{"mcpServers": {"slow": {"command": "npx", "startup_timeout_sec": 12}}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed[0].startup_timeout_ms, Some(12_000));
+        drop(fx);
+    }
+
+    #[test]
+    fn last_check_record_roundtrip_and_edit_preserves() {
+        let fx = Fixture::new();
+        let mut s = stdio_server();
+        s.id = String::new();
+        let list = save_impl(s, false).unwrap();
+        let id = list[0].id.clone();
+        assert!(list[0].last_check.is_none());
+        // 沉淀：只动 last_check，其余字段原样
+        let mut results = HashMap::new();
+        results.insert(
+            id.clone(),
+            McpHealthDto {
+                ok: false,
+                latency_ms: 8_123,
+                error: Some("8 秒未响应 initialize（超时）".into()),
+                detail: None,
+            },
+        );
+        record_last_checks(&results);
+        let back = read_store().unwrap();
+        let lc = back[0].last_check.as_ref().expect("应已沉淀");
+        assert!(!lc.ok);
+        assert_eq!(lc.latency_ms, 8_123);
+        assert_eq!(lc.error.as_deref(), Some("8 秒未响应 initialize（超时）"));
+        assert!(!lc.at.is_empty());
+        assert_eq!(back[0].name, "fs-tools", "其他字段不动");
+        // 编辑整结构替换不丢沉淀（与 origin/apps/enabled 同口径）
+        let mut edited = back[0].clone();
+        edited.args = vec!["-y".into(), "other".into()];
+        edited.last_check = None; // 前端即使传空也被旧值覆盖
+        let list = save_impl(edited, false).unwrap();
+        assert_eq!(list[0].args, vec!["-y", "other"]);
+        let lc = list[0].last_check.as_ref().expect("编辑后沉淀保留");
+        assert_eq!(lc.latency_ms, 8_123);
+        drop(fx);
+    }
+
+    #[test]
+    fn missing_env_refs_collects_unset_only() {
+        // 必定未设置的变量名；PATH 全平台必设；字面值与内嵌引用（Bearer $X 非整值）不算
+        let pairs = vec![
+            McpEnvPair { key: "A".into(), value: "${CCODE_TEST_DEFINITELY_MISSING_VAR}".into() },
+            McpEnvPair { key: "B".into(), value: "$CCODE_TEST_DEFINITELY_MISSING_VAR".into() }, // 去重
+            McpEnvPair { key: "C".into(), value: "$PATH".into() },
+            McpEnvPair { key: "D".into(), value: "plain-literal".into() },
+            McpEnvPair { key: "E".into(), value: "Bearer ${CCODE_TEST_DEFINITELY_MISSING_VAR}".into() },
+        ];
+        let missing = missing_env_refs_impl(&pairs);
+        assert_eq!(missing, vec!["CCODE_TEST_DEFINITELY_MISSING_VAR"], "{missing:?}");
+        // 空值算未设置（edition 2021，set_var 安全；用独立变量名不与并行测试互踩）
+        std::env::set_var("CCODE_TEST_EMPTY_VAR", "");
+        let missing = missing_env_refs_impl(&[McpEnvPair {
+            key: "K".into(),
+            value: "${CCODE_TEST_EMPTY_VAR}".into(),
+        }]);
+        assert_eq!(missing, vec!["CCODE_TEST_EMPTY_VAR"]);
+        std::env::remove_var("CCODE_TEST_EMPTY_VAR");
+    }
+
+    // ===== 相对路径命令解析（resolver）与路径健康探测 =====
+
+    /// 造一个临时文件，返回 canonicalize 后的绝对路径字符串
+    ///（macOS 的 temp_dir 是 /var → /private/var symlink，与 resolver 产物同口径才好断言）
+    fn touch_file(path: &Path) -> String {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+        mcp_path_text(crate::paths::canonicalize_plain(path).unwrap())
+    }
+
+    #[test]
+    fn resolver_base_order_and_unique_hit() {
+        let fx = Fixture::new();
+        // 基准 1（条目绝对 cwd）与基准 2（cursor 配置家目录 = 临时 HOME/.cursor）都命中时
+        // cwd 基准序位最前胜出
+        let cwd_dir = fx.dir.join("plugin-a");
+        let hit_a = touch_file(&cwd_dir.join("bin").join("serve"));
+        let _hit_b = touch_file(&fx.dir.join(".cursor").join("bin").join("serve"));
+        let hits = resolve_relative_candidates(
+            "./bin/serve",
+            &cwd_dir.to_string_lossy(),
+            Some("cursor"),
+        );
+        assert_eq!(hits.len(), 2, "两个基准各命中一次（路径不同不去重）: {hits:?}");
+        assert_eq!(hits[0].command, hit_a, "序位最前 = 条目自己的 cwd 基准");
+        // 原 cwd 已是绝对路径：规范化保留原值
+        assert_eq!(hits[0].cwd, cwd_dir.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn resolver_normalizes_relative_cwd_to_hit_base() {
+        let fx = Fixture::new();
+        // 2026-09-03 实机形状：command 相对 + cwd "." —— 命中基准后 cwd 一并规范化
+        let hit = touch_file(&fx.dir.join(".cursor").join("bin").join("serve"));
+        let hits = resolve_relative_candidates("./bin/serve", ".", Some("cursor"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].command, hit);
+        assert_eq!(
+            hits[0].cwd,
+            fx.dir.join(".cursor").to_string_lossy().as_ref(),
+            "相对 cwd（.）改成命中所用的基准目录"
+        );
+    }
+
+    #[test]
+    fn resolver_miss_returns_empty_and_ignores_non_relative() {
+        let fx = Fixture::new();
+        assert!(
+            resolve_relative_candidates("./no/such/file", ".", Some("cursor")).is_empty(),
+            "全部基准不命中 = 空候选（调用方 fail-open / 拒写）"
+        );
+        assert!(resolve_relative_candidates("npx", "", Some("cursor")).is_empty());
+        assert!(resolve_relative_candidates("/abs/serve", "", Some("cursor")).is_empty());
+        // 粘贴导入无来源 agent：只有条目自己的绝对 cwd 一个基准
+        let cwd_dir = fx.dir.join("pasted");
+        let hit = touch_file(&cwd_dir.join("serve"));
+        let hits = resolve_relative_candidates("./serve", &cwd_dir.to_string_lossy(), None);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].command, hit);
+        assert!(
+            resolve_relative_candidates("./serve", "", None).is_empty(),
+            "无 agent 且无绝对 cwd = 无基准可解"
+        );
+    }
+
+    #[test]
+    fn import_resolves_relative_command_and_normalizes_cwd() {
+        let fx = Fixture::new();
+        // codex 形状实机案例的 cursor 重演：./bin/serve + cwd "."，配置家目录下命中
+        let hit = touch_file(&fx.dir.join(".cursor").join("bin").join("serve"));
+        let path = fx.dir.join(".cursor").join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers": {"rel-srv": {"command": "./bin/serve", "cwd": "."}}}"#,
+        )
+        .unwrap();
+        let outcome = import_from_agent_impl("cursor", "rel-srv").unwrap();
+        assert_eq!(outcome.resolved, 1);
+        assert_eq!(outcome.unresolved, 0);
+        let s = &outcome.servers[0];
+        assert_eq!(s.command, hit, "收编入库的是解析后的绝对路径");
+        assert_eq!(s.cwd, fx.dir.join(".cursor").to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn import_unresolvable_relative_kept_as_is_fail_open() {
+        let fx = Fixture::new();
+        // fail-open：解不出也照原样收进来（收编不是写 agent 配置，清单页 relative 告警兜底）
+        let path = fx.dir.join(".cursor").join("mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers": {"rel-srv": {"command": "./bin/serve", "cwd": "."}}}"#,
+        )
+        .unwrap();
+        let outcome = import_from_agent_impl("cursor", "rel-srv").unwrap();
+        assert_eq!(outcome.resolved, 0);
+        assert_eq!(outcome.unresolved, 1);
+        assert_eq!(outcome.servers[0].command, "./bin/serve", "原样收进来不拒收");
+        assert_eq!(outcome.servers[0].cwd, ".");
+        // 清单页探测能把这条标出来
+        assert_eq!(command_path_status(&outcome.servers[0].command), Some("relative"));
+    }
+
+    #[test]
+    fn distribute_resolves_relative_via_own_cwd_before_rejecting() {
+        let fx = Fixture::new();
+        // 先解：条目自己的绝对 cwd 下有该文件 → 分发产物直接落绝对路径
+        let hit = touch_file(&fx.dir.join("plug").join("bin").join("serve"));
+        let mut s = stdio_server();
+        s.command = "./bin/serve".into();
+        s.cwd = fx.dir.join("plug").to_string_lossy().into_owned();
+        let v = entry_json(&s, "claude-code").unwrap();
+        assert_eq!(v["command"], serde_json::json!(hit));
+        // 后拦：cwd 下没有该文件 → 拒写文案具体化
+        s.cwd = fx.dir.join("empty-dir").to_string_lossy().into_owned();
+        std::fs::create_dir_all(fx.dir.join("empty-dir")).unwrap();
+        let err = entry_json(&s, "claude-code").unwrap_err();
+        assert!(err.contains("无法确定基准目录"), "{err}");
+    }
+
+    #[test]
+    fn command_path_status_closed_set() {
+        let fx = Fixture::new();
+        // relative：./ ../ 形态必挂
+        assert_eq!(command_path_status("./bin/serve"), Some("relative"));
+        // ok：绝对路径存在
+        let hit = touch_file(&fx.dir.join("exists").join("serve"));
+        assert_eq!(command_path_status(&hit), Some("ok"));
+        // missing：绝对路径不存在（版本升级路径失效）
+        let gone = fx.dir.join("gone").join("serve").to_string_lossy().into_owned();
+        assert_eq!(command_path_status(&gone), Some("missing"));
+        // missing：裸命令名解析不到（必定不存在的名字，同 stdio_server 夹具口径）
+        assert_eq!(command_path_status("ccode-test-nonexistent-bin"), Some("missing"));
+        // 不判：$VAR 引用式与空命令
+        assert_eq!(command_path_status("$MCP_BIN"), None);
+        assert_eq!(command_path_status("${MCP_BIN}"), None);
+        assert_eq!(command_path_status(""), None);
+        // 裸名可解析 = ok（机器上有 node 才验这条，没有就跳过——不绑 CI 环境）
+        if crate::agents::resolve_binary("node").is_some() {
+            assert_eq!(command_path_status("node"), Some("ok"));
+        }
+    }
 }
 
-/// 分发三态（v3.88 设置页/MCP 页用）：已开启的 agent 里，哪些的实际落盘条目
-/// 与当前清单产物不一致（= 被外部改过）。
+/// 分发状态五态闭集（MCP 页开关旁徽标用；开关本身仍表达清单分发意图 apps，
+/// 这里只报告磁盘事实）：
+/// - `off`：apps 未分发到该 agent；
+/// - `ok`：落盘条目与清单产物一致；
+/// - `modified`：条目存在但内容被外部改过；
+/// - `missing`：apps 标记已分发但磁盘上条目不存在（外部删除）；
+/// - `disabled_externally`：条目存在但在 agent 侧被禁用——只在该格式确有 enabled
+///   语义时产出（codex/grok 的 TOML `enabled`、codebuddy 的 `disabledMcpServers`，
+///   其余家不产出，宁缺毋滥）。
 ///
 /// 只读探测，不写任何文件。此前 `entry_modified_externally` 只在删除/改投时用来
 /// 拦「假状态」，界面上看不到——用户不知道自己在 agent 侧手改过的东西会被覆盖。
+/// 探测失败（配置损坏/读不到）维持「不报警」原则按 `ok` 处理：假警报比漏报更烦人。
 #[tauri::command]
 pub async fn mcp_distribution_status(
     id: String,
 ) -> Result<std::collections::BTreeMap<String, String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let server = read_store()?
-            .into_iter()
-            .find(|s| s.id == id)
-            .ok_or("找不到该 MCP server")?;
-        let mut out = std::collections::BTreeMap::new();
-        for (agent, on) in &server.apps {
-            if !*on {
-                out.insert(agent.clone(), "off".to_string());
-                continue;
-            }
-            // 探测失败按「已写入」处理：不确定不该报警（假警报比漏报更烦人）
-            let state = match entry_modified_externally(agent, &server) {
-                Ok(true) => "modified",
-                _ => "ok",
-            };
-            out.insert(agent.clone(), state.to_string());
+    tauri::async_runtime::spawn_blocking(move || distribution_status_impl(&id))
+        .await
+        .map_err(|e| format!("查询 MCP 分发状态失败: {e}"))?
+}
+
+fn distribution_status_impl(id: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let server = read_store()?
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or("找不到该 MCP server")?;
+    let mut out = std::collections::BTreeMap::new();
+    for (agent, on) in &server.apps {
+        if !*on {
+            out.insert(agent.clone(), "off".to_string());
+            continue;
         }
-        Ok(out)
-    })
-    .await
-    .map_err(|e| format!("查询 MCP 分发状态失败: {e}"))?
+        let state = match agent_entries(agent) {
+            // 探测失败按「已写入」处理：不确定不该报警
+            Err(_) => "ok",
+            Ok(entries) => {
+                if !entries.iter().any(|(n, _)| *n == server.name) {
+                    "missing"
+                } else if agent_has_enabled_semantics(agent)
+                    && entry_disabled_externally(agent, &server.name).unwrap_or(false)
+                {
+                    // 禁用优先于 modified 报：codex 外部禁用会给条目加 enabled 键，
+                    // 内容比对必然也算 modified，先报更准确的「被禁用」
+                    "disabled_externally"
+                } else if entry_modified_externally(agent, &server).unwrap_or(false) {
+                    "modified"
+                } else {
+                    "ok"
+                }
+            }
+        };
+        out.insert(agent.clone(), state.to_string());
+    }
+    Ok(out)
 }
 
 // ===== 连通性健康检测（v3.93） =====
@@ -1795,13 +2714,77 @@ fn initialize_body() -> serde_json::Value {
     })
 }
 
+/// stdio 发送帧格式：MCP 规范是换行分隔 JSON（NDJSON，无头部）；
+/// 少数旧实现说 LSP 风格 Content-Length 帧，做一次性回退兼容
+#[derive(Clone, Copy)]
+enum StdioFrame {
+    Ndjson,
+    ContentLength,
+}
+
+impl StdioFrame {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ndjson => "NDJSON",
+            Self::ContentLength => "Content-Length",
+        }
+    }
+}
+
+/// 单次 stdio 探测结局：Done = 终局（成功 / server 明确应答拒绝 / 命令级失败）；
+/// FrameMismatch = 疑似帧格式不兼容（进程退出、首帧非法、超时），值得换格式重试，
+/// 携带的错误文案已含 env 缺失提示与 stderr 末尾，供合并报告
+enum StdioAttempt {
+    Done(McpHealthDto),
+    FrameMismatch(String),
+}
+
+/// stdio 体检每次尝试（NDJSON / Content-Length 各一次）的等待上限：
+/// server 声明了启动超时的按 clamp(8s, 30s) 生效（慢启动 server 给足声明值、
+/// 也不无限放大），未声明维持 8s。remote 探活恒 8s 不走这里
+fn stdio_check_timeout(server: &McpServerDto) -> std::time::Duration {
+    std::time::Duration::from_millis(
+        server
+            .startup_timeout_ms
+            .map(|ms| ms.clamp(8_000, 30_000))
+            .unwrap_or(8_000),
+    )
+}
+
 /// stdio 检测：按分发同一口径解析命令（resolve_command_deep 含 node shim 深化）→
-/// 拉起进程 → stdin 写 initialize 帧 → 8s 内等首帧响应。覆盖最常见断连：
+/// 拉起进程 → stdin 写 initialize 帧 → 上限内等首帧响应（8s，server 声明启动超时按
+/// clamp(8s, 30s) 放宽）。覆盖最常见断连：
 /// 路径失效/node 缺失（spawn ENOENT）、进程秒退、协议不应答（超时）。
+/// 帧格式自适应：先发规范的 NDJSON 帧；server 未响应就退出 / 首帧解析失败 / 超时
+/// 时换 Content-Length 帧重试一次（每次尝试各按上述上限）。
 fn check_stdio(server: &McpServerDto) -> McpHealthDto {
+    let started = std::time::Instant::now();
+    let first_err = match check_stdio_attempt(server, StdioFrame::Ndjson, started) {
+        StdioAttempt::Done(dto) => return dto,
+        StdioAttempt::FrameMismatch(e) => e,
+    };
+    match check_stdio_attempt(server, StdioFrame::ContentLength, started) {
+        StdioAttempt::Done(dto) => dto,
+        StdioAttempt::FrameMismatch(second_err) => health_fail(
+            started,
+            format!(
+                "两种帧格式均无响应（{}：{first_err}；{}：{second_err}）",
+                StdioFrame::Ndjson.label(),
+                StdioFrame::ContentLength.label(),
+            ),
+        ),
+    }
+}
+
+/// 拉起一次进程按指定帧格式发 initialize 并等首帧；响应读取器两种帧都认
+/// （`{` 开头的行 = NDJSON 帧直接解析；Content-Length: 头走头+定长体路径）
+fn check_stdio_attempt(
+    server: &McpServerDto,
+    frame: StdioFrame,
+    started: std::time::Instant,
+) -> StdioAttempt {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::process::Stdio;
-    let started = std::time::Instant::now();
     let (cmd, args) = resolve_command_deep(&server.command, &server.args);
     let mut command = crate::process::background_command(&cmd);
     command
@@ -1826,34 +2809,41 @@ fn check_stdio(server: &McpServerDto) -> McpHealthDto {
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return health_fail(
+            return StdioAttempt::Done(health_fail(
                 started,
                 append_missing_hint(format!("命令不存在或路径失效：{cmd}"), &missing),
-            );
+            ));
         }
         Err(e) => {
-            return health_fail(
+            return StdioAttempt::Done(health_fail(
                 started,
                 append_missing_hint(format!("命令启动失败（{cmd}）：{e}"), &missing),
-            );
+            ));
         }
     };
     let body = initialize_body().to_string();
     let mut stdin = child.stdin.take().expect("stdin 已 pipe");
-    if let Err(e) = stdin
-        .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
-        .and_then(|_| stdin.write_all(body.as_bytes()))
-        .and_then(|_| stdin.flush())
-    {
+    // 发送帧按本次尝试的格式；读取器两种回包都认，server 用哪种帧回都能解析
+    let write = match frame {
+        StdioFrame::Ndjson => stdin
+            .write_all(body.as_bytes())
+            .and_then(|_| stdin.write_all(b"\n")),
+        StdioFrame::ContentLength => stdin
+            .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+            .and_then(|_| stdin.write_all(body.as_bytes())),
+    }
+    .and_then(|_| stdin.flush());
+    if let Err(e) = write {
         crate::pty::kill_process_tree(child.id());
         let _ = child.kill();
         let _ = child.wait();
-        return health_fail(
+        return StdioAttempt::Done(health_fail(
             started,
             append_missing_hint(format!("写入 initialize 失败（进程可能已退出）：{e}"), &missing),
-        );
+        ));
     }
-    // 响应读取搬进线程，主线程 recv_timeout 实现 8s 上限（CI 不挂死兜底）
+    // 响应读取搬进线程，主线程 recv_timeout 实现等待上限（CI 不挂死兜底）；
+    // 上限 = stdio_check_timeout（默认 8s，server 声明启动超时按 clamp(8s, 30s) 放宽）
     let mut stdout = child.stdout.take().expect("stdout 已 pipe");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -1874,6 +2864,10 @@ fn check_stdio(server: &McpServerDto) -> McpHealthDto {
                     }
                     continue;
                 }
+                // NDJSON 帧：`{` 开头的一整行 JSON，直接作为响应体
+                if t.starts_with('{') {
+                    return Ok(t.to_string());
+                }
                 if let Some(rest) = t.to_ascii_lowercase().strip_prefix("content-length:") {
                     content_len = rest.trim().parse().ok();
                 }
@@ -1885,7 +2879,7 @@ fn check_stdio(server: &McpServerDto) -> McpHealthDto {
         })();
         let _ = tx.send(r);
     });
-    let outcome = rx.recv_timeout(std::time::Duration::from_secs(8));
+    let outcome = rx.recv_timeout(stdio_check_timeout(server));
     let pid = child.id();
     let mut stderr = child.stderr.take();
     let err_handle = std::thread::spawn(move || {
@@ -1901,14 +2895,32 @@ fn check_stdio(server: &McpServerDto) -> McpHealthDto {
     let err_bytes =
         crate::process::join_with_timeout(err_handle, std::time::Duration::from_secs(2));
     let err_text = String::from_utf8_lossy(&err_bytes).into_owned();
+    // stderr 末尾尽力拼进错误文案，帮助定位 server 侧协议报错
+    let with_stderr = |e: String| {
+        if err_text.trim().is_empty() {
+            e
+        } else {
+            let tail: String = err_text
+                .trim()
+                .chars()
+                .rev()
+                .take(200)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            format!("{e}；stderr 末尾：{tail}")
+        }
+    };
     match outcome {
-        Ok(Ok(frame)) => match serde_json::from_str::<serde_json::Value>(&frame) {
+        Ok(Ok(frame_json)) => match serde_json::from_str::<serde_json::Value>(&frame_json) {
             Ok(v) => {
                 if let Some(err) = v.get("error") {
-                    return health_fail(
+                    // server 正常应答了 JSON-RPC error：协议互通无问题，不重试
+                    return StdioAttempt::Done(health_fail(
                         started,
                         append_missing_hint(format!("server 拒绝 initialize：{err}"), &missing),
-                    );
+                    ));
                 }
                 let info = v.pointer("/result/serverInfo");
                 let detail = info.map(|i| {
@@ -1921,37 +2933,26 @@ fn check_stdio(server: &McpServerDto) -> McpHealthDto {
                             .unwrap_or_default()
                     )
                 });
-                health_ok(started, detail.filter(|d| !d.is_empty()))
+                StdioAttempt::Done(health_ok(started, detail.filter(|d| !d.is_empty())))
             }
-            Err(e) => health_fail(
-                started,
-                append_missing_hint(format!("响应不是合法 JSON-RPC 帧：{e}"), &missing),
-            ),
-        },
-        Ok(Err(e)) => health_fail(
-            started,
-            append_missing_hint(
-                if err_text.trim().is_empty() {
-                    e
-                } else {
-                    let tail: String = err_text
-                        .trim()
-                        .chars()
-                        .rev()
-                        .take(200)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-                    format!("{e}；stderr 末尾：{tail}")
-                },
+            Err(e) => StdioAttempt::FrameMismatch(append_missing_hint(
+                with_stderr(format!("响应不是合法 JSON-RPC 帧：{e}")),
                 &missing,
-            ),
-        ),
-        Err(_) => health_fail(
-            started,
-            append_missing_hint("8 秒未响应 initialize（超时）".to_string(), &missing),
-        ),
+            )),
+        },
+        Ok(Err(e)) => StdioAttempt::FrameMismatch(append_missing_hint(with_stderr(e), &missing)),
+        Err(_) => StdioAttempt::FrameMismatch(append_missing_hint(
+            match server.startup_timeout_ms {
+                // 声明了更长启动时间仍超时：点明已按声明等待（声明值即来源，UI 表单可改）
+                Some(ms) => format!(
+                    "{} 秒未响应 initialize（超时；该 server 声明的启动超时为 {}s，已按此等待）",
+                    ms.clamp(8_000, 30_000) / 1_000,
+                    ms / 1_000
+                ),
+                None => "8 秒未响应 initialize（超时）".to_string(),
+            },
+            &missing,
+        )),
     }
 }
 
@@ -2002,8 +3003,46 @@ async fn check_remote(server: &McpServerDto) -> McpHealthDto {
     }
 }
 
+/// 单条体检分发（单条命令与批量检测共用）：remote 异步探活 / stdio 搬进 blocking 线程拉起握手
+async fn check_one(server: &McpServerDto) -> McpHealthDto {
+    if server.kind == "remote" {
+        check_remote(server).await
+    } else {
+        let s = server.clone();
+        match tauri::async_runtime::spawn_blocking(move || check_stdio(&s)).await {
+            Ok(h) => h,
+            Err(e) => health_fail(std::time::Instant::now(), format!("检测任务失败: {e}")),
+        }
+    }
+}
+
+/// 体检结果沉淀进清单的 last_check 字段（读-改-写只动该字段，其余一律保留；
+/// 落盘失败静默——检测结果已经拿到，不该被持久化失败拖垮）
+fn record_last_checks(results: &HashMap<String, McpHealthDto>) {
+    let _ = (|| -> Result<(), String> {
+        let mut list = read_store()?;
+        let mut dirty = false;
+        for s in list.iter_mut() {
+            if let Some(h) = results.get(&s.id) {
+                s.last_check = Some(McpLastCheck {
+                    at: crate::sessions::now_iso(),
+                    ok: h.ok,
+                    latency_ms: h.latency_ms,
+                    error: h.error.clone(),
+                });
+                dirty = true;
+            }
+        }
+        if dirty {
+            write_store(&list)?;
+        }
+        Ok(())
+    })();
+}
+
 /// 现场连通性检测（行内 ⚡ / 状态点点按触发）：不进页面时自动跑——
-/// 拉起 N 个 stdio 进程的代价不该由打开页面承担，检测过才显示状态点
+/// 拉起 N 个 stdio 进程的代价不该由打开页面承担，检测过才显示状态点。
+/// 结果沉淀进清单 last_check（回页/刷新后行内仍能显示上次状态）
 #[tauri::command]
 pub async fn check_mcp_server(id: String) -> Result<McpHealthDto, String> {
     let server = tauri::async_runtime::spawn_blocking(move || {
@@ -2014,12 +3053,136 @@ pub async fn check_mcp_server(id: String) -> Result<McpHealthDto, String> {
     })
     .await
     .map_err(|e| e.to_string())??;
-    if server.kind == "remote" {
-        Ok(check_remote(&server).await)
-    } else {
-        let s = server.clone();
-        tauri::async_runtime::spawn_blocking(move || check_stdio(&s))
-            .await
-            .map_err(|e| e.to_string())
+    let health = check_one(&server).await;
+    let mut one = HashMap::new();
+    one.insert(server.id.clone(), health.clone());
+    tauri::async_runtime::spawn_blocking(move || record_last_checks(&one))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(health)
+}
+
+/// 批量体检（MCP 页「全部检测」）：对清单里所有启用的 server 分波并发检测
+///（每波最多 4 个，避免一次拉起十几个 stdio 进程），全部完成后一次性沉淀
+/// last_check 并返回 id → 结果（前端一次性回填，不做渐进式事件）
+#[tauri::command]
+pub async fn check_all_mcp_servers() -> Result<HashMap<String, McpHealthDto>, String> {
+    let servers = tauri::async_runtime::spawn_blocking(|| {
+        read_store().map(|l| l.into_iter().filter(|s| s.enabled).collect::<Vec<_>>())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let mut results: HashMap<String, McpHealthDto> = HashMap::new();
+    for chunk in servers.chunks(4) {
+        let mut handles = Vec::with_capacity(chunk.len());
+        for s in chunk {
+            let s = s.clone();
+            handles.push(tauri::async_runtime::spawn(async move {
+                let id = s.id.clone();
+                (id, check_one(&s).await)
+            }));
+        }
+        for h in handles {
+            let (id, health) = h.await.map_err(|e| format!("体检任务失败: {e}"))?;
+            results.insert(id, health);
+        }
     }
+    let persisted = results.clone();
+    tauri::async_runtime::spawn_blocking(move || record_last_checks(&persisted))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(results)
+}
+
+/// $VAR 引用分发预检（只读）：提取 env/header 值里的整值引用（env_ref 同口径），
+/// 查宿主环境返回未设置（空值算未设置）的变量名清单，去重排序。
+/// 前端在保存/拨开分发开关前调用，缺失时给非阻断警告（GUI 应用读不到 shell rc 的 export）
+#[tauri::command]
+pub async fn mcp_missing_env_refs(pairs: Vec<McpEnvPair>) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || missing_env_refs_impl(&pairs))
+        .await
+        .unwrap_or_default()
+}
+
+fn missing_env_refs_impl(pairs: &[McpEnvPair]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in pairs {
+        let Some(var) = env_ref(&p.value) else {
+            continue;
+        };
+        let set = std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false);
+        if !set && !out.iter().any(|x| x == var) {
+            out.push(var.to_string());
+        }
+    }
+    out.sort();
+    out
+}
+
+// ===== 命令路径健康探测与一键修复（只读探测 + 相对路径解析，2026-09-03） =====
+
+/// 单条 stdio 命令的路径健康判定（闭集 ok/relative/missing）：
+/// - `relative`：./ ../ 相对路径——基准是来源 agent 的运行语境，Ccode 内嵌终端拉起必挂；
+/// - `missing`：绝对路径但磁盘上不存在（app 卸载/版本升级后路径失效），
+///   或裸命令名连 resolve_binary 候选目录都解析不到；
+/// - `ok`：绝对路径存在，或裸命令名可解析（裸名合法，分发时才绝对化，不误报）。
+/// None = 不判：空命令 / $VAR 引用式命令（宿主环境展开，静态判不了）/ 非 stdio。
+fn command_path_status(command: &str) -> Option<&'static str> {
+    let c = command.trim();
+    if c.is_empty() || env_ref(c).is_some() {
+        return None;
+    }
+    if is_relative_command(c) {
+        return Some("relative");
+    }
+    let looks_like_path = c.contains('/')
+        || c.contains('\\')
+        || (c.len() >= 2 && c.as_bytes()[1] == b':');
+    if looks_like_path {
+        return Some(if Path::new(c).exists() { "ok" } else { "missing" });
+    }
+    Some(if crate::agents::resolve_binary(c).is_some() {
+        "ok"
+    } else {
+        "missing"
+    })
+}
+
+/// 清单全量命令路径探测（只读；MCP 页告警徽标数据源）：
+/// stdio server id → "ok" | "relative" | "missing"；不判的条目不进 map
+#[tauri::command]
+pub async fn mcp_command_path_status() -> Result<HashMap<String, String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let list = read_store()?;
+        Ok(list
+            .iter()
+            .filter(|s| s.kind == "stdio")
+            .filter_map(|s| command_path_status(&s.command).map(|st| (s.id.clone(), st.to_string())))
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 相对路径命令的一键修复候选（MCP 页「修复为绝对路径」）：与收编同一套 resolver，
+/// 来源 agent 从 origin（imported:<agent>）推断以启用配置家目录/插件目录基准；
+/// 空 vec = 无命中（前端提示手工编辑），多候选由前端弹层交给用户选
+#[tauri::command]
+pub async fn resolve_mcp_command_fix(id: String) -> Result<Vec<McpCommandFix>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let list = read_store()?;
+        let Some(server) = list.iter().find(|s| s.id == id) else {
+            return Err("该 server 不存在（可能已删除）".into());
+        };
+        if server.kind != "stdio" || !is_relative_command(&server.command) {
+            return Ok(Vec::new());
+        }
+        let agent = server
+            .origin
+            .strip_prefix("imported:")
+            .filter(|a| *a != "json" && crate::agent_specs::agent_spec(a).is_some());
+        Ok(resolve_relative_candidates(&server.command, &server.cwd, agent))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

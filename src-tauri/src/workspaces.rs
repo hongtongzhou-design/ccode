@@ -366,7 +366,7 @@ fn sanitize_name(name: &str) -> Result<String, String> {
 
 /// 取 4000-4300 间最低的空闲 10 端口块起点；活跃工作区少时自然等于 4000+10*n
 /// 基准分支探测：origin/HEAD → origin/main|master → 本地 main|master → 当前分支
-fn detect_base_branch(repo: &std::path::Path) -> String {
+pub(crate) fn detect_base_branch(repo: &std::path::Path) -> String {
     const T: Duration = Duration::from_secs(10);
     if let Ok(s) = run_git(
         repo,
@@ -390,11 +390,11 @@ fn detect_base_branch(repo: &std::path::Path) -> String {
 /// 可能是 master，禁止硬编码），提交后继续走正常创建流程。
 /// 身份优先沿用仓库/全局已配置的 user.name/user.email；未配置时仅本次提交用 -c 注入临时身份，
 /// 不写入用户 git config。
-fn ensure_initial_commit(repo: &Path) -> Result<(), String> {
+pub(crate) fn ensure_initial_commit(repo: &Path) -> Result<bool, String> {
     const T: Duration = Duration::from_secs(30);
     // 已有任一提交则不是 unborn，直接返回（非空仓库零行为变化）
     if run_git(repo, &["rev-parse", "--verify", "--quiet", "HEAD"], T).is_ok() {
-        return Ok(());
+        return Ok(false);
     }
     let configured = |key: &str| {
         run_git(repo, &["config", "--get", key], T)
@@ -411,7 +411,7 @@ fn ensure_initial_commit(repo: &Path) -> Result<(), String> {
     }
     args.extend(["commit", "--allow-empty", "-m", "初始化空仓库（Ccode 自动创建）"]);
     run_git(repo, &args, T).map_err(|e| format!("空仓库初始化提交失败: {e}"))?;
-    Ok(())
+    Ok(true)
 }
 
 fn alloc_port_base(conn: &Connection) -> Result<i64, String> {
@@ -1256,6 +1256,13 @@ fn merge_impl_with_guard(
         }
         log.push_str(&salvage);
     }
+    let auto_manifest = register_expected_artifacts_at(&repo, &w.name);
+    if !auto_manifest.is_empty() {
+        if !log.is_empty() {
+            log.push('\n');
+        }
+        log.push_str(&auto_manifest);
+    }
     let merged_at = crate::sessions::now_iso();
     if let Err(e) = conn.execute(
         "UPDATE workspaces SET merged_at=?1 WHERE id=?2",
@@ -1756,6 +1763,117 @@ fn wildcard_match(pattern: &str, name: &str) -> bool {
         pi += 1;
     }
     pi == pc.len()
+}
+
+/// 列出相对 `root`、匹配 pattern 的现有文件（空文件不计）。
+/// `notes/*.md` = 该目录下一层；`notes/` = 该目录下所有非隐藏文件；精确路径 = 该文件。
+/// 绝对路径 / `..` 一律空。供开步输入芯片与合并后自动提货共用。
+pub(crate) fn glob_files_at(root: &Path, pattern: &str) -> Vec<PathBuf> {
+    let pattern = pattern.trim().replace('\\', "/");
+    if pattern.is_empty() || pattern.contains("..") {
+        return Vec::new();
+    }
+    if Path::new(&pattern).is_absolute() {
+        return Vec::new();
+    }
+    let is_file_ok = |p: &Path| {
+        fs::metadata(p)
+            .map(|m| m.is_file() && m.len() > 0)
+            .unwrap_or(false)
+    };
+    if let Some(star) = pattern.rfind('*') {
+        if pattern[..star].contains('*') {
+            return Vec::new();
+        }
+        let (dir, file_pat) = match pattern.rfind('/') {
+            Some(idx) => (&pattern[..idx], &pattern[idx + 1..]),
+            None => ("", pattern.as_str()),
+        };
+        if file_pat.is_empty() {
+            return Vec::new();
+        }
+        let dir_path = if dir.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(dir)
+        };
+        let Ok(rd) = fs::read_dir(&dir_path) else {
+            return Vec::new();
+        };
+        let mut out: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                is_file_ok(p)
+                    && wildcard_match(
+                        file_pat,
+                        &p.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                    )
+            })
+            .collect();
+        out.sort();
+        return out;
+    }
+    if pattern.ends_with('/') {
+        let dir_path = root.join(pattern.trim_end_matches('/'));
+        let Ok(rd) = fs::read_dir(&dir_path) else {
+            return Vec::new();
+        };
+        let mut out: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                is_file_ok(p)
+                    && !p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().starts_with('.'))
+                        .unwrap_or(true)
+            })
+            .collect();
+        out.sort();
+        return out;
+    }
+    let path = root.join(&pattern);
+    if is_file_ok(&path) {
+        vec![path]
+    } else {
+        Vec::new()
+    }
+}
+
+/// 合并后按本步 expected_artifacts 扫项目根，命中且未被 git 跟踪的文件自动登记提货单。
+/// 已跟踪的（笔记、源稿）跳过——它们随分支走。失败单条跳过，不阻断合并。
+fn register_expected_artifacts_at(repo: &Path, workspace_name: &str) -> String {
+    let cfg = crate::projects::read_config_at(repo).config;
+    let Some(step) = cfg
+        .steps
+        .iter()
+        .find(|s| !s.workspace_name.is_empty() && s.workspace_name == workspace_name)
+    else {
+        return String::new();
+    };
+    if step.expected_artifacts.is_empty() {
+        return String::new();
+    }
+    let mut n = 0usize;
+    for pattern in &step.expected_artifacts {
+        for file in glob_files_at(repo, pattern) {
+            let name = file
+                .file_name()
+                .map(|x| x.to_string_lossy().into_owned())
+                .unwrap_or_else(|| pattern.clone());
+            if register_artifact_impl(repo, &name, &file, workspace_name).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        String::new()
+    } else {
+        format!("已自动登记 {n} 个产物进提货单")
+    }
 }
 
 /// 落点检测：root 下是否已有交付物。
@@ -5233,6 +5351,50 @@ mod tests {
         assert!(wildcard_match("*", "任意.txt"));
         assert!(!wildcard_match("a*", "ba"));
         assert!(wildcard_match("s*.pdf", "smith-2024.pdf"));
+    }
+
+    #[test]
+    fn glob_files_at_matches_exact_glob_and_dir() {
+        let dir = std::env::temp_dir().join(format!("ccode-glob-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("notes")).unwrap();
+        fs::create_dir_all(dir.join("papers")).unwrap();
+        fs::write(dir.join("notes/a.md"), b"note").unwrap();
+        fs::write(dir.join("notes/b.md"), b"note2").unwrap();
+        fs::write(dir.join("notes/skip.txt"), b"x").unwrap();
+        fs::write(dir.join("papers/included.md"), "# x\nPaper A -- a, 2020 -- j -- doi\n").unwrap();
+        fs::write(dir.join("papers/empty.md"), b"").unwrap();
+        let notes = glob_files_at(&dir, "notes/*.md");
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let dir_files = glob_files_at(&dir, "notes/");
+        assert_eq!(dir_files.len(), 3, "{dir_files:?}");
+        assert_eq!(glob_files_at(&dir, "papers/included.md").len(), 1);
+        assert!(glob_files_at(&dir, "papers/empty.md").is_empty());
+        assert!(glob_files_at(&dir, "../escape").is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn register_expected_artifacts_skips_tracked_and_fills_yaml() {
+        let Some(fx) = Fixture::new() else { return };
+        fs::create_dir_all(fx.repo.join("papers")).unwrap();
+        fs::write(fx.repo.join("papers/a.pdf"), b"%PDF-1.4 demo").unwrap();
+        fs::write(fx.repo.join("notes.md"), b"tracked").unwrap();
+        sh(&fx.repo, &["add", "notes.md"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "note"],
+        );
+        fs::create_dir_all(fx.repo.join(".ccode")).unwrap();
+        fs::write(
+            fx.repo.join(".ccode/project.toml"),
+            "[[steps]]\nname = \"出图\"\nworkspace_name = \"art\"\nexpected_artifacts = [\"papers/*.pdf\", \"notes.md\"]\n",
+        )
+        .unwrap();
+        let note = register_expected_artifacts_at(&fx.repo, "art");
+        assert!(note.contains("1 个产物"), "{note}");
+        let entries = read_artifacts_manifest_impl(&fx.repo);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(entries[0].path.replace('\\', "/").ends_with("papers/a.pdf"));
     }
 
     #[test]

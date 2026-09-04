@@ -73,6 +73,7 @@ type StepDraft = {
   decisions: { q: string; optionsText: string }[];
   /** 这一步要先拍板文献从哪来（流程线「定方向」出现输入准备块） */
   asksLitSource: boolean;
+  seedComplete: boolean;
 };
 
 function toDraft(s: ProjectStepDto): StepDraft {
@@ -97,6 +98,7 @@ function toDraft(s: ProjectStepDto): StepDraft {
       optionsText: d.options.join(", "),
     })),
     asksLitSource: s.asksLitSource ?? false,
+    seedComplete: s.seedComplete ?? false,
   };
 }
 
@@ -169,6 +171,7 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
       }))
       .filter((x) => x.q && x.options.length > 0),
     asksLitSource: d.asksLitSource,
+    seedComplete: d.seedComplete,
   };
 }
 
@@ -1217,6 +1220,7 @@ export default function PipelineEditor({
                     discussionSeeds: [],
                     decisions: [],
                     asksLitSource: false,
+                    seedComplete: false,
                   },
                 ])
               }

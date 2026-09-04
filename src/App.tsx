@@ -16,6 +16,7 @@ import QuickChatModal, {
   quickChatSkipEnabled,
   resumeSessionInTerminal,
 } from "./components/QuickChatModal";
+import AskAiModal from "./components/AskAiModal";
 import QuickChatHistoryMenu from "./components/QuickChatHistoryMenu";
 import TopNavCapsule from "./components/TopNavCapsule";
 import { pickQuickChatHistory } from "./quick-chat";
@@ -23,7 +24,7 @@ import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import { HoverTip, useHoverTip } from "./components/HoverTip";
 import { LoadingRows, rowActionClass } from "./components/PageFrame";
 import "./App.css";
-import { useAppStore, runInboxAction } from "./store";
+import { useAppStore, runInboxAction, visibleInboxItems } from "./store";
 import { groupInbox, type InboxCategory } from "./inbox";
 import { runDoneNotifyBody, runDoneNotifyTitle } from "./schedule-tasks";
 import type { SchedulerRunDonePayload, SessionMetaDto } from "./types";
@@ -37,6 +38,7 @@ import {
 import { NAV_ICONS } from "./navigation-icons";
 import { NAV_GROUPS, NAV_BOTTOM } from "./navigation";
 import { normalizeNavCapsuleDelay, resolveStartupNavMode } from "./nav-capsule";
+import { macOverlayPadClass, useMacFullscreen } from "./mac-titlebar";
 
 // 页面懒加载：首屏只拉当前页 chunk，其余页首次访问时才加载
 const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
@@ -116,6 +118,7 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 「快速开聊」弹层：侧栏常驻入口与 ⌘K 命令共用同一个宿主
   const [quickChatOpen, setQuickChatOpen] = useState(false);
+  const macFullscreen = useMacFullscreen(IS_MAC);
   // 侧栏「快速开聊」右键 = scratch 随手聊历史（记住选择后左键直达，右键是回看口）
   const [quickChatMenu, setQuickChatMenu] = useState<{
     x: number;
@@ -142,8 +145,17 @@ function App() {
   const runningCount = useAppStore((s) => Object.keys(s.liveSessions).length);
   const visibleRunningCount = terminalRunInputs.filter((input) => input.running)
     .length || runningCount;
-  // 「待你处理」收件箱条目镜像（WorkspacesPage 写入）：侧栏圆点计数 + macOS 标题栏收件箱共用
-  const inboxItems = useAppStore((s) => s.inboxItems);
+  // 「待你处理」收件箱：业务条目由 WorkspacesPage 写入，应用更新由 visibleInboxItems 现算合并
+  const rawInboxItems = useAppStore((s) => s.inboxItems);
+  const appUpdate = useAppStore((s) => s.appUpdate);
+  const inboxDismissed = useAppStore((s) => s.inboxDismissed);
+  const inboxItems = visibleInboxItems(
+    rawInboxItems,
+    appUpdate
+      ? { version: appUpdate.version, currentVersion: appUpdate.currentVersion }
+      : null,
+    inboxDismissed,
+  );
   const inboxCount = inboxItems.length;
   const contextLabel = useAppStore((s) => s.contextLabel);
   const dismissHelpRequest = useAppStore((s) => s.dismissHelpRequest);
@@ -337,9 +349,12 @@ function App() {
     loadProjects().catch(() => {});
     loadRecentRepos().catch(() => {});
     // 设置（含主题）在启动时加载并应用
-    loadSettings().catch((e) => console.error(e));
-    // 启动时静默检查应用更新（内部已吞错，命中后在设置页「更新」分区提示）
-    checkAppUpdate().catch(() => {});
+    loadSettings()
+      .catch((e) => console.error(e))
+      .finally(() => {
+        // 等设置读完再检查：出网代理若配了会带上。开发模式内部直接标 dev，不打 GitHub。
+        checkAppUpdate().catch(() => {});
+      });
     // 依赖体检（git/node/安装渠道）：缺 git 时收件箱常驻「依赖」条目；失败静默不阻塞首屏
     useAppStore.getState().refreshDepCheck();
   }, [loadAll, loadSessions, loadProjects, loadRecentRepos, loadSettings, checkAppUpdate]);
@@ -407,14 +422,16 @@ function App() {
             Ghostty 式标题栏收件箱（按类别拆胶囊，点胶囊向下展开该类明细，遮罩/Esc/再点关闭）。
             窗口标题不在界面渲染（用户拍板删除，标题字符串仍保留在 tauri 配置里供自动化定位窗口）。
             Windows/Linux 用原生标题栏；客户端上下文栏仍统一承载项目、运行、命令面板与收件箱。
-            执行态（chromeHidden）下也必须保留这条栏：Overlay 模式下红绿灯按钮始终悬浮在
-            左上角，栏的 pl-[78px] 负责让位；整条隐藏会导致按钮压住页面内容、胶囊消失。
+            执行态（chromeHidden）下也必须保留这条栏：窗口态 Overlay 红绿灯靠 pl-[78px] 让位；
+            全屏时系统收起三个按钮，让位取消（否则左边空一块）。整条隐藏会导致胶囊消失。
             执行态只省略底部分隔线，栏体保留以承接红绿灯与收件箱胶囊。 */}
         <header
           data-tauri-drag-region={IS_MAC ? true : undefined}
-          className={`ccode-titlebar flex h-10 shrink-0 items-center gap-2.5 bg-rail pr-3 ${
-            IS_MAC ? "pl-[78px]" : "pl-3"
-          } ${chromeHidden ? "" : "border-b border-hairline"}`}
+          className={`ccode-titlebar flex h-10 shrink-0 items-center gap-2.5 bg-rail pr-3 ${macOverlayPadClass(
+            IS_MAC,
+            macFullscreen,
+            "pl-3",
+          )} ${chromeHidden ? "" : "border-b border-hairline"}`}
         >
             {/* 全局上下文栏：macOS Overlay 与 Windows/Linux 原生标题栏都承载。
                 左=我在哪、右=在跑什么 + 等我处理什么。
@@ -792,6 +809,7 @@ function App() {
         {quickChatOpen && (
           <QuickChatModal onClose={() => setQuickChatOpen(false)} />
         )}
+        <AskAiModal />
         {quickChatMenu && (
           <QuickChatHistoryMenu
             x={quickChatMenu.x}

@@ -4,6 +4,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Download, Upload } from "lucide-react";
 import { IS_MAC, IS_WINDOWS } from "../hotkeys";
+import { codexThreadDeeplink } from "../codex-client";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
 import { agentBrandBadgeStyle } from "../agent-colors";
@@ -32,6 +33,7 @@ import GitPanel from "../components/GitPanel";
 import HandoffPicker from "../components/HandoffPicker";
 import DigestPicker from "../components/DigestPicker";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
+import { resumeSessionInTerminal } from "../components/QuickChatModal";
 import SessionImportModal from "../components/SessionImportModal";
 import { SECRET_EXPORT_WARNING } from "../session-transfer";
 import {
@@ -334,16 +336,9 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     [searched, query],
   );
 
-  /** A. 会话恢复：把会话交给终端页以 resume 语义自动重启（带 provider——
-   *  codex 内联 provider 会话要靠它挑带 Base URL 的兼容配置，见 resume-profile.ts） */
+  /** A. 会话恢复：把会话交给终端页以 resume 语义自动重启 */
   function resumeInTerminal(s: SessionMetaDto) {
-    setPendingTerminal({
-      cwd: s.projectPath,
-      extraEnv: {},
-      title: s.customTitle || s.title || s.sessionId.slice(0, 8),
-      resume: { agentId: s.agent, sessionId: s.sessionId, provider: s.provider },
-    });
-    setPage("terminal");
+    resumeSessionInTerminal(s);
   }
 
   /** 恢复用的兼容配置（codex 内联 provider 会话只认带 Base URL 的）；
@@ -431,7 +426,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
    *  客户端与 CLI 共享本地 threads 库，CLI 发起的对话同样能跳过去继续聊 */
   async function openInClient(s: SessionMetaDto) {
     try {
-      await openUrl(`codex://threads/${s.sessionId}`);
+      await openUrl(codexThreadDeeplink(s.sessionId));
     } catch (e) {
       await alertDialog(`唤起 Codex 客户端失败：${e}`);
     }
@@ -2275,6 +2270,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                           messages={messages}
                           cwd={selected?.projectPath ?? null}
                           focusIndex={findFocusMessageIndex(messages, searchFocus)}
+                          focusKeywords={searchFocus?.matchedKeywords ?? []}
                         />
                       </>
                     )}

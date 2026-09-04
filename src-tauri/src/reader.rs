@@ -268,6 +268,64 @@ pub async fn pdf_for_note(
         .map_err(|e| format!("查找配对 PDF 失败: {e}"))?
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaperNoteLinkDto {
+    pub note_path: String,
+    pub note_name: String,
+    /// 笔记头部来源行里的 PDF 相对路径；没有来源行则为 None（仍可用文件名配对）
+    pub pdf_rel: Option<String>,
+}
+
+fn list_paper_notes_sync(project_root: &str) -> Result<Vec<PaperNoteLinkDto>, String> {
+    let root = gated_root(project_root)?;
+    let notes = root.join("notes");
+    if !notes.is_dir() {
+        return Ok(Vec::new());
+    }
+    let Ok(rd) = fs::read_dir(&notes) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let path = e.path();
+        let is_md = path
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| x.eq_ignore_ascii_case("md"));
+        if !is_md {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.eq_ignore_ascii_case("glossary.md")
+            || name.eq_ignore_ascii_case("inbox.md")
+        {
+            continue;
+        }
+        let pdf_rel = fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| note_source_pdf(&c));
+        out.push(PaperNoteLinkDto {
+            note_path: path.to_string_lossy().replace('\\', "/"),
+            note_name: name,
+            pdf_rel,
+        });
+    }
+    out.sort_by(|a, b| a.note_name.cmp(&b.note_name));
+    Ok(out)
+}
+
+/// 文献列表：notes/ 里每篇笔记及其来源 PDF（只读头部，不建档）
+#[tauri::command]
+pub async fn list_paper_notes(project_root: String) -> Result<Vec<PaperNoteLinkDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_paper_notes_sync(&project_root))
+        .await
+        .map_err(|e| format!("读取笔记配对失败: {e}"))?
+}
+
 /// reader_for_note 返回：归属项目根 + 配对 PDF + 实际编辑的笔记路径（工作区笔记映射回主仓副本）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1037,6 +1095,24 @@ mod tests {
             .unwrap()
             .expect("应命中配对 PDF");
         assert!(got.ends_with("papers/转化型正极Mg电池透视.pdf"), "{got}");
+        fs::write(
+            &note,
+            "> 来源 PDF：papers/转化型正极Mg电池透视.pdf\n\n# t\n",
+        )
+        .unwrap();
+        fs::write(notes.join("inbox.md"), "# 雷达收件箱").unwrap();
+        let links = list_paper_notes_sync(&root.to_string_lossy()).unwrap();
+        assert!(
+            links.iter().any(|l| l.pdf_rel.as_deref()
+                == Some("papers/转化型正极Mg电池透视.pdf")),
+            "{links:?}"
+        );
+        assert!(
+            !links
+                .iter()
+                .any(|l| l.note_name.eq_ignore_ascii_case("inbox.md")),
+            "{links:?}"
+        );
     }
 
     #[test]

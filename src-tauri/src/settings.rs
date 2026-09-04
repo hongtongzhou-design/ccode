@@ -2,7 +2,7 @@
 //! 消费点：终端外观（前端）、usage 汇率、updater 的 brew 镜像开关、长任务 OS 通知开关（前端）。
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
@@ -17,10 +17,11 @@ pub const DEFAULT_HOTKEY_PALETTE: &str = "mod+k";
 pub const DEFAULT_HOTKEY_HIDE_CHROME: &str = "mod+\\";
 pub const DEFAULT_HOTKEY_PAGE_SWITCH: bool = true;
 pub const DEFAULT_NAV_CAPSULE_HIDE_DELAY_MS: u32 = 1000;
-const KNOWN_THEMES: [&str; 14] = [
+const KNOWN_THEMES: [&str; 16] = [
     "midnight", "terracotta", "ayu", "mocha", "neutral", "dracula", "shadcn",
     "midnight-light", "terracotta-light", "ayu-light", "mocha-light",
     "neutral-light", "dracula-light", "shadcn-light",
+    "custom", "custom-light",
 ];
 /// 终端 ANSI 调色板：四套深色 + 四套配对浅色。
 /// 单一出处在前端 `src/terminal-palettes.ts` 的 PALETTE_LIST，此处是持久化白名单，两边须同步
@@ -47,6 +48,110 @@ const KNOWN_NAV_CAPSULE_ITEMS: [&str; 10] = [
     "profiles", "skills", "mcp", "stats", "settings",
 ];
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CustomThemeDto {
+    pub rail: Option<String>,
+    pub canvas: Option<String>,
+    pub accent: Option<String>,
+}
+
+fn parse_hex_color(s: &str) -> Option<String> {
+    let h = s.trim().trim_start_matches('#').to_ascii_lowercase();
+    let bytes = h.as_bytes();
+    let hex = |b: u8| b.is_ascii_hexdigit();
+    match bytes.len() {
+        3 if bytes.iter().copied().all(hex) => Some(format!(
+            "#{0}{0}{1}{1}{2}{2}",
+            bytes[0] as char, bytes[1] as char, bytes[2] as char
+        )),
+        6 if bytes.iter().copied().all(hex) => Some(format!("#{h}")),
+        _ => None,
+    }
+}
+
+fn sanitize_custom_theme(v: Option<CustomThemeDto>) -> Option<CustomThemeDto> {
+    let v = v?;
+    Some(CustomThemeDto {
+        rail: Some(parse_hex_color(v.rail.as_deref()?)?),
+        canvas: Some(parse_hex_color(v.canvas.as_deref()?)?),
+        accent: Some(parse_hex_color(v.accent.as_deref()?)?),
+    })
+}
+
+const CUSTOM_THEME_CARDS_MAX: usize = 12;
+const CUSTOM_THEME_CARD_NAME_MAX: usize = 12;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CustomThemeCardDto {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub rail: Option<String>,
+    pub canvas: Option<String>,
+    pub accent: Option<String>,
+}
+
+fn sanitize_card_id(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() || t.len() > 32 {
+        return None;
+    }
+    if t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        Some(t.to_string())
+    } else {
+        None
+    }
+}
+
+fn sanitize_card_name(s: &str) -> String {
+    let t: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t: String = t.chars().take(CUSTOM_THEME_CARD_NAME_MAX).collect();
+    if t.is_empty() {
+        "色卡".into()
+    } else {
+        t
+    }
+}
+
+fn sanitize_custom_theme_cards(
+    v: Option<Vec<CustomThemeCardDto>>,
+) -> Option<Vec<CustomThemeCardDto>> {
+    let v = v?;
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for c in v {
+        let Some(id) = c.id.as_deref().and_then(sanitize_card_id) else {
+            continue;
+        };
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(colors) = sanitize_custom_theme(Some(CustomThemeDto {
+            rail: c.rail,
+            canvas: c.canvas,
+            accent: c.accent,
+        })) else {
+            continue;
+        };
+        out.push(CustomThemeCardDto {
+            id: Some(id),
+            name: Some(sanitize_card_name(c.name.as_deref().unwrap_or(""))),
+            rail: colors.rail,
+            canvas: colors.canvas,
+            accent: colors.accent,
+        });
+        if out.len() >= CUSTOM_THEME_CARDS_MAX {
+            break;
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettingsDto {
@@ -60,6 +165,12 @@ pub struct AppSettingsDto {
     /// 长任务 OS 通知开关（注意力跃迁且窗口未聚焦时发系统通知）
     pub notifications_enabled: Option<bool>,
     pub theme: Option<String>,
+    /// 自定义主题三色（左栏/画布/强调）。theme 为 custom / custom-light 时由前端派生全套令牌
+    pub custom_theme: Option<CustomThemeDto>,
+    /// 另存的可点色卡（最多 12 套）
+    pub custom_themes: Option<Vec<CustomThemeCardDto>>,
+    /// 当前选中的另存色卡 id；不在列表里则读侧清掉
+    pub custom_theme_card_id: Option<String>,
     /// ◈ AI 功能（提交信息/摘要/PR 描述）固定使用的 profile id；None = 自动（最近使用）
     pub ai_profile_id: Option<String>,
     /// ◈ AI 功能按功能独立配置：键 = 功能 key（见 ai.rs FN_* 常量），值 = profile id；
@@ -122,6 +233,79 @@ pub struct AppSettingsDto {
     /// 只推给会消费这个回报的 agent（前端 TERMINAL_BG_PROBING_AGENTS 白名单：
     /// 目前 gemini / qwen）——推给不探测的 agent 会漏成输入框乱码，codex 实测如此。
     pub terminal_color_report: Option<bool>,
+    /// 出网代理 URL（官方账号启动与组头登录注入 HTTPS_PROXY/HTTP_PROXY/ALL_PROXY）。
+    /// 空/缺省 = 不注入。网关 API 启动不走这条（国内中转被全局代理绕路常挂）。
+    /// 连接 extra_env 同名键排在后面覆盖。
+    pub outbound_proxy: Option<String>,
+    /// NO_PROXY；出网代理有值且此项空时默认 localhost,127.0.0.1,::1
+    pub outbound_no_proxy: Option<String>,
+}
+
+pub const DEFAULT_NO_PROXY: &str = "localhost,127.0.0.1,::1";
+
+/// 出网代理须是 http(s) / socks 地址。空串视为未配置。
+pub fn validate_outbound_proxy(raw: &str) -> Result<(), String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(());
+    }
+    let lower = t.to_ascii_lowercase();
+    let ok_scheme = [
+        "http://",
+        "https://",
+        "socks5://",
+        "socks5h://",
+        "socks4://",
+    ]
+    .iter()
+    .any(|s| lower.starts_with(s));
+    if !ok_scheme {
+        return Err(
+            "出网代理须是 http(s):// 或 socks5:// 地址，例如 http://127.0.0.1:7890".into(),
+        );
+    }
+    let after = t.splitn(2, "://").nth(1).unwrap_or("");
+    let hostport = after.split('/').next().unwrap_or("");
+    let host = hostport.rsplit('@').next().unwrap_or("");
+    if host.is_empty() || host.starts_with(':') {
+        return Err("出网代理缺少主机".into());
+    }
+    Ok(())
+}
+
+/// 由设置算出官方账号要注入的代理 env（不含 extra_env 覆盖）。
+pub fn official_outbound_env_from(s: &AppSettingsDto) -> Vec<(String, String)> {
+    let Some(proxy) = s
+        .outbound_proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return Vec::new();
+    };
+    if validate_outbound_proxy(proxy).is_err() {
+        return Vec::new();
+    }
+    let no_proxy = s
+        .outbound_no_proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(DEFAULT_NO_PROXY);
+    vec![
+        ("HTTPS_PROXY".into(), proxy.to_string()),
+        ("HTTP_PROXY".into(), proxy.to_string()),
+        ("ALL_PROXY".into(), proxy.to_string()),
+        ("NO_PROXY".into(), no_proxy.to_string()),
+    ]
+}
+
+/// 生产路径读 settings.json；单测不读本机文件（避免用户代理污染官方启动断言）。
+pub fn official_outbound_env() -> Vec<(String, String)> {
+    if cfg!(test) {
+        return Vec::new();
+    }
+    official_outbound_env_from(&read_current())
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -146,6 +330,23 @@ fn write_to(path: &Path, settings: &AppSettingsDto) -> Result<(), String> {
 
 /// 合并默认值：get_settings 永远返回完整对象；未知 theme 值回落默认
 fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
+    let custom_theme = sanitize_custom_theme(s.custom_theme);
+    let custom_themes = sanitize_custom_theme_cards(s.custom_themes);
+    let custom_theme_card_id = s.custom_theme_card_id.filter(|id| {
+        custom_themes.as_ref().is_some_and(|cs| {
+            cs.iter().any(|c| c.id.as_deref() == Some(id.as_str()))
+        })
+    });
+    let theme = {
+        let t = s.theme.filter(|t| KNOWN_THEMES.contains(&t.as_str()));
+        match t.as_deref() {
+            Some("custom" | "custom-light") if custom_theme.is_none() => {
+                DEFAULT_THEME.to_string()
+            }
+            Some(v) => v.to_string(),
+            None => DEFAULT_THEME.to_string(),
+        }
+    };
     AppSettingsDto {
         terminal_font_size: s.terminal_font_size.or(Some(DEFAULT_TERMINAL_FONT_SIZE)),
         terminal_font_family: s
@@ -160,11 +361,10 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         notifications_enabled: s
             .notifications_enabled
             .or(Some(DEFAULT_NOTIFICATIONS_ENABLED)),
-        theme: Some(
-            s.theme
-                .filter(|t| KNOWN_THEMES.contains(&t.as_str()))
-                .unwrap_or_else(|| DEFAULT_THEME.to_string()),
-        ),
+        theme: Some(theme),
+        custom_theme,
+        custom_themes,
+        custom_theme_card_id,
         ai_profile_id: s.ai_profile_id.filter(|v| !v.trim().is_empty()),
         // 按功能配置不做默认值填充：键缺失即「跟随默认」
         ai_profiles: s.ai_profiles,
@@ -222,6 +422,8 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         discuss_readonly: s.discuss_readonly.or(Some(true)),
         status_bar_in_chat: s.status_bar_in_chat.or(Some(true)),
         terminal_color_report: s.terminal_color_report.or(Some(true)),
+        outbound_proxy: s.outbound_proxy.filter(|v| !v.trim().is_empty()),
+        outbound_no_proxy: s.outbound_no_proxy.filter(|v| !v.trim().is_empty()),
     }
 }
 
@@ -250,6 +452,17 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.theme.is_some() {
         cur.theme = patch.theme;
+    }
+    if patch.custom_theme.is_some() {
+        cur.custom_theme = sanitize_custom_theme(patch.custom_theme);
+    }
+    if patch.custom_themes.is_some() {
+        cur.custom_themes = sanitize_custom_theme_cards(patch.custom_themes);
+    }
+    if patch.custom_theme_card_id.is_some() {
+        cur.custom_theme_card_id = patch
+            .custom_theme_card_id
+            .filter(|id| !id.trim().is_empty());
     }
     // 支持清空：传空字符串 → None（回到「自动=最近使用」）
     if patch.ai_profile_id.is_some() {
@@ -311,6 +524,12 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.terminal_color_report.is_some() {
         cur.terminal_color_report = patch.terminal_color_report;
+    }
+    if patch.outbound_proxy.is_some() {
+        cur.outbound_proxy = patch.outbound_proxy.filter(|v| !v.trim().is_empty());
+    }
+    if patch.outbound_no_proxy.is_some() {
+        cur.outbound_no_proxy = patch.outbound_no_proxy.filter(|v| !v.trim().is_empty());
     }
 }
 
@@ -506,6 +725,9 @@ pub async fn update_settings(patch: AppSettingsDto) -> Result<AppSettingsDto, St
     // 本函数持锁期间不再获取其他锁，与全局写入（GLOBAL_CONFIG_MUTEX 内不调 profiles）锁序一致
     let _g = crate::profiles::store_lock();
     let path = settings_path()?;
+    if let Some(ref proxy) = patch.outbound_proxy {
+        validate_outbound_proxy(proxy)?;
+    }
     let mut cur = read_from(&path);
     merge(&mut cur, patch);
     write_to(&path, &cur)?;
@@ -638,6 +860,74 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(full.theme.as_deref(), Some("midnight"));
+    }
+
+    #[test]
+    fn custom_theme_roundtrip_and_invalid_hex_dropped() {
+        let ok = with_defaults(AppSettingsDto {
+            theme: Some("custom".into()),
+            custom_theme: Some(CustomThemeDto {
+                rail: Some("#abc".into()),
+                canvas: Some("101218".into()),
+                accent: Some("#FAA8D4".into()),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(ok.theme.as_deref(), Some("custom"));
+        assert_eq!(
+            ok.custom_theme,
+            Some(CustomThemeDto {
+                rail: Some("#aabbcc".into()),
+                canvas: Some("#101218".into()),
+                accent: Some("#faa8d4".into()),
+            })
+        );
+        let bad = with_defaults(AppSettingsDto {
+            theme: Some("custom-light".into()),
+            custom_theme: Some(CustomThemeDto {
+                rail: Some("#111111".into()),
+                canvas: Some("not-a-color".into()),
+                accent: Some("#ff0000".into()),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(bad.theme.as_deref(), Some("midnight"));
+        assert_eq!(bad.custom_theme, None);
+    }
+
+    #[test]
+    fn custom_theme_cards_sanitize_and_card_id() {
+        let full = with_defaults(AppSettingsDto {
+            custom_themes: Some(vec![
+                CustomThemeCardDto {
+                    id: Some("c1".into()),
+                    name: Some("  实验  室 ".into()),
+                    rail: Some("#111".into()),
+                    canvas: Some("#222222".into()),
+                    accent: Some("#f00".into()),
+                },
+                CustomThemeCardDto {
+                    id: Some("bad id".into()),
+                    name: Some("x".into()),
+                    rail: Some("#111111".into()),
+                    canvas: Some("#222222".into()),
+                    accent: Some("#ff0000".into()),
+                },
+            ]),
+            custom_theme_card_id: Some("c1".into()),
+            ..Default::default()
+        });
+        let cards = full.custom_themes.as_ref().expect("cards");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id.as_deref(), Some("c1"));
+        assert_eq!(cards[0].name.as_deref(), Some("实验 室"));
+        assert_eq!(full.custom_theme_card_id.as_deref(), Some("c1"));
+        let miss = with_defaults(AppSettingsDto {
+            custom_themes: full.custom_themes.clone(),
+            custom_theme_card_id: Some("gone".into()),
+            ..Default::default()
+        });
+        assert_eq!(miss.custom_theme_card_id, None);
     }
 
     #[test]
@@ -801,6 +1091,66 @@ mod tests {
         merge(&mut cur2, AppSettingsDto::default());
         assert_eq!(cur2.discuss_readonly, Some(false));
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn outbound_proxy_env_and_validation() {
+        assert!(validate_outbound_proxy("").is_ok());
+        assert!(validate_outbound_proxy("  http://127.0.0.1:7890  ").is_ok());
+        assert!(validate_outbound_proxy("socks5://127.0.0.1:7891").is_ok());
+        assert!(validate_outbound_proxy("https://proxy.example.com:443").is_ok());
+        assert!(validate_outbound_proxy("ftp://127.0.0.1:21").is_err());
+        assert!(validate_outbound_proxy("127.0.0.1:7890").is_err());
+        assert!(validate_outbound_proxy("http://").is_err());
+
+        let empty = official_outbound_env_from(&AppSettingsDto::default());
+        assert!(empty.is_empty());
+
+        let env = official_outbound_env_from(&AppSettingsDto {
+            outbound_proxy: Some("http://127.0.0.1:7890".into()),
+            outbound_no_proxy: None,
+            ..Default::default()
+        });
+        assert_eq!(
+            env,
+            vec![
+                ("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into()),
+                ("HTTP_PROXY".into(), "http://127.0.0.1:7890".into()),
+                ("ALL_PROXY".into(), "http://127.0.0.1:7890".into()),
+                ("NO_PROXY".into(), DEFAULT_NO_PROXY.into()),
+            ]
+        );
+
+        let custom = official_outbound_env_from(&AppSettingsDto {
+            outbound_proxy: Some("http://127.0.0.1:7890".into()),
+            outbound_no_proxy: Some("localhost,example.com".into()),
+            ..Default::default()
+        });
+        assert!(custom.iter().any(|(k, v)| k == "NO_PROXY" && v == "localhost,example.com"));
+
+        let bad = official_outbound_env_from(&AppSettingsDto {
+            outbound_proxy: Some("not-a-url".into()),
+            ..Default::default()
+        });
+        assert!(bad.is_empty(), "磁盘脏值不注入");
+
+        let mut cur = AppSettingsDto::default();
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                outbound_proxy: Some("http://127.0.0.1:7890".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cur.outbound_proxy.as_deref(), Some("http://127.0.0.1:7890"));
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                outbound_proxy: Some("  ".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cur.outbound_proxy, None, "空串清掉出网代理");
     }
 }
 

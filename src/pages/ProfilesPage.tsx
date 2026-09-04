@@ -1108,7 +1108,8 @@ function ProfileModal({
             )}
             <label className="block text-sm">
               <span className="mb-1 block text-xs text-l3">
-                附加环境变量（每行 KEY=VALUE，可覆盖内置值）
+                附加环境变量（每行 KEY=VALUE，可覆盖内置值
+                {form.accountType === "official" ? "与设置页出网代理" : ""}）
               </span>
               <textarea
                 className={`${fieldClass} h-20 font-mono text-xs`}
@@ -1289,6 +1290,9 @@ function OfficialStatusChip({
 }) {
   const anchorRef = useRef<HTMLElement>(null);
   const { tip, show, hide } = useHoverTip(anchorRef);
+  const hasOutboundProxy = Boolean(
+    useAppStore((s) => s.settings?.outboundProxy?.trim()),
+  );
   const lines: string[] = [];
   if (st.detail) lines.push(st.detail);
   if (st.connected) {
@@ -1296,6 +1300,9 @@ function OfficialStatusChip({
     if (hint) lines.push(`断开方式：${hint}`);
   } else if (st.loginCommand) {
     lines.push(`点「登录」将在终端执行：${st.loginCommand}`);
+  }
+  if (!hasOutboundProxy) {
+    lines.push("官方通道直连厂商；国内网络请在设置 → 网络填写出网代理");
   }
   if (st.connected) {
     return (
@@ -1823,14 +1830,17 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     for (const a of AGENTS) void refreshOfficial(a.id);
   }, [visible]);
 
-  /** 「连接」：在内嵌终端开新标签执行 CLI 登录命令（OAuth 会弹浏览器）；回切本页自动刷新状态。
+  /** 「连接」：在内嵌终端开新标签执行 CLI 登录命令（Codex 走设备码，其余多为浏览器 OAuth）；回切本页自动刷新状态。
    *  reuseKey 去重：重复点「登录」聚焦已有标签而不是再开一个——两个 login 进程会各弹一个浏览器页 */
   function connectOfficial(agentId: string) {
     const st = officialStatus[agentId];
     if (!st?.loginCommand) return;
+    const official = profiles.find(
+      (p) => p.agent === agentId && p.accountType === "official",
+    );
     setPendingTerminal({
       cwd: "~",
-      extraEnv: {},
+      extraEnv: { ...(st.loginEnv ?? {}), ...(official?.extraEnv ?? {}) },
       title: `登录 ${labelOf(agentId)}`,
       prefillCommand: st.loginCommand,
       shellOnly: true,

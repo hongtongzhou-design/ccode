@@ -55,11 +55,28 @@ pub(crate) fn resolve_profile_from(
             .cloned()
             .ok_or_else(|| format!("profile 不存在: {id}（如来自设置页的 AI 专用配置，请到设置页重选）"));
     }
-    profiles
+    // 最近使用：先跳过官方账号（无头调用吃 OAuth，过期会甩一大段 401 日志）；
+    // 显式/专属/专用槽仍尊重官方账号。没有 API 配置才回落官方。
+    let visible: Vec<&Profile> = profiles
         .iter()
         .filter(|p| !hidden_ids.contains(&p.id))
+        .collect();
+    visible
+        .iter()
+        .copied()
+        .filter(|p| p.account_type != crate::profiles::AccountType::Official)
         .max_by(|a, b| a.last_used_at.cmp(&b.last_used_at))
-        .or_else(|| profiles.iter().max_by(|a, b| a.last_used_at.cmp(&b.last_used_at)))
+        .or_else(|| {
+            visible
+                .iter()
+                .copied()
+                .max_by(|a, b| a.last_used_at.cmp(&b.last_used_at))
+        })
+        .or_else(|| {
+            profiles
+                .iter()
+                .max_by(|a, b| a.last_used_at.cmp(&b.last_used_at))
+        })
         .cloned()
         .ok_or_else(|| "请先在配置页创建并保存一个 profile".to_string())
 }
@@ -100,6 +117,61 @@ pub(crate) fn headless_task_args(agent: &str, prompt: &str) -> Vec<String> {
 
 // ===== 进程执行（不走 PTY；stdout/stderr 各开线程读，超时 kill 并返回部分输出） =====
 
+/// 无头失败不要把 CLI 整段日志甩给用户。官方账号过期、401 等收成一句中文。
+/// expected_host = 当前配置应请求的端点（绑定 base_url 的 host 部分），用于把
+/// 401 invalid_api_key 细分成两条修复路径：报错 URL 是 api.openai.com 而配置是网关
+/// = 渠道路由错（model_provider 没指向自定义渠道，引导重设全局默认）；URL 是网关
+/// 自己 = 密钥被拒（引导重填密钥）。没有网关上下文时按 OpenAI 官方密钥处理。
+pub(crate) fn summarize_headless_error(detail: &str, expected_host: Option<&str>) -> String {
+    let low = detail.to_ascii_lowercase();
+    if low.contains("token_revoked")
+        || low.contains("refresh_token_invalidated")
+        || low.contains("invalidated oauth")
+        || low.contains("your session has ended")
+        || low.contains("please log out and sign in")
+        || low.contains("refresh token was revoked")
+        || (low.contains("401")
+            && !low.contains("invalid_api_key")
+            && !low.contains("incorrect api key")
+            && (low.contains("chatgpt.com")
+                || low.contains("oauth")
+                || low.contains("unauthorized")))
+    {
+        return "官方账号登录已失效，请到连接页重新登录。后台调用请在设置里指定一套 API 配置。".into();
+    }
+    // 密钥被 401 拒绝：按报错 URL 与期望端点的关系区分「发错端点」和「密钥本身被拒」
+    if low.contains("invalid_api_key") || low.contains("incorrect api key") {
+        let gateway = expected_host.filter(|h| !h.ends_with("openai.com"));
+        return match gateway {
+            Some(host) if low.contains("api.openai.com") => format!(
+                "请求被发到了 OpenAI 官方端点，而不是当前配置的网关（{host}）——通常是 model_provider 没指向自定义渠道（可能被其他工具改写了配置）。请到连接页对该配置重新「设为全局默认」，或检查对应 CLI 的配置文件。"
+            ),
+            Some(host) => format!(
+                "网关（{host}）拒绝了密钥（401）——密钥可能填错或已过期。请到连接页编辑该配置重新填写密钥，保存后可用「验证」确认。"
+            ),
+            None => {
+                "OpenAI 官方端点拒绝了密钥（401 invalid_api_key）——密钥可能填错或已吊销，请检查后重试。".into()
+            }
+        };
+    }
+    let mut last_err: Option<&str> = None;
+    for line in detail.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("Reading additional input") {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("ERROR:") {
+            last_err = Some(rest.trim());
+        } else if t.contains(" ERROR ") {
+            last_err = Some(t);
+        }
+    }
+    if let Some(e) = last_err {
+        return tail_chars(e, 200);
+    }
+    tail_chars(detail, 240)
+}
+
 fn tail_chars(text: &str, max: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= max {
@@ -109,7 +181,64 @@ fn tail_chars(text: &str, max: usize) -> String {
     }
 }
 
-pub(crate) fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -> Result<String, String> {
+/// 绑定 base_url → host（小写，剥 scheme/路径）；空或畸形返回 None
+fn endpoint_host(base_url: Option<&str>) -> Option<String> {
+    let s = base_url?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let no_scheme = s.split("://").nth(1).unwrap_or(s);
+    let host = no_scheme.split('/').next().unwrap_or(no_scheme).trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// 从 CLI 输出里抠会话 id（Codex exec 打在 stderr：`session id: <uuid>`）。
+pub(crate) fn extract_headless_session_id(detail: &str) -> Option<String> {
+    for line in detail.lines() {
+        let t = line.trim();
+        let lower = t.to_ascii_lowercase();
+        if !(lower.starts_with("session id:")
+            || lower.starts_with("session_id:")
+            || lower.starts_with("sessionid:"))
+        {
+            continue;
+        }
+        let Some((_, rest)) = t.split_once(':') else {
+            continue;
+        };
+        let id: String = rest
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
+            .collect();
+        if id.len() >= 8 {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn remember_headless_session(agent: &str, out: &str, err: &str) {
+    if let Some(id) = extract_headless_session_id(&format!("{out}\n{err}")) {
+        let _ = crate::sessions::mark_session_internal(agent, &id);
+    }
+}
+
+/// 支持 --session-id 的 CLI：无头启动前锁死文件名并立刻标 internal。
+fn lock_headless_session(agent: &str) -> (Option<String>, Vec<String>) {
+    let supported = crate::agent_specs::agent_spec(agent).is_some_and(|s| s.fixed_session_id);
+    if !supported {
+        return (None, Vec::new());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    (Some(id.clone()), vec!["--session-id".into(), id])
+}
+
+fn run_capture_for(agent: Option<&str>, expected_host: Option<&str>, cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -> Result<String, String> {
     // stdin 置空：GUI 环境无控制终端，子进程若读 stdin 会永久挂起
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("启动 agent 失败: {e}"))?;
@@ -135,6 +264,9 @@ pub(crate) fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: 
             Ok(Some(status)) => {
                 let out = String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
                 let err = String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
+                if let Some(agent) = agent {
+                    remember_headless_session(agent, &out, &err);
+                }
                 if status.success() {
                     let text = out.trim().to_string();
                     if text.is_empty() {
@@ -143,7 +275,7 @@ pub(crate) fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: 
                     return Ok(text);
                 }
                 let detail = if err.trim().is_empty() { out } else { err };
-                return Err(format!("agent 退出码 {:?}:\n{}", status.code(), tail_chars(detail.trim(), 4000)));
+                return Err(summarize_headless_error(detail.trim(), expected_host));
             }
             Ok(None) => {
                 if std::time::Instant::now() > deadline {
@@ -162,11 +294,12 @@ pub(crate) fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: 
                         Duration::from_secs(2),
                     ))
                     .into_owned();
-                    return Err(format!(
-                        "AI 调用超时（{}s）。部分输出:\n{}",
-                        timeout.as_secs(),
-                        tail_chars(format!("{out}\n{err}").trim(), 4000)
-                    ));
+                    if let Some(agent) = agent {
+                        remember_headless_session(agent, &out, &err);
+                    }
+                    let summarized =
+                        summarize_headless_error(format!("{out}\n{err}").trim(), expected_host);
+                    return Err(format!("AI 调用超时（{}s）。{summarized}", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -218,7 +351,14 @@ pub(crate) fn ai_prompt_impl(
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
     let plan = agents::launch_plan(&profile, key, selected.as_deref());
     let mut cmd = crate::process::background_command(&binary_path);
+    let (lock_id, lock_args) = lock_headless_session(&profile.agent);
+    if let Some(id) = &lock_id {
+        let _ = crate::sessions::mark_session_internal(&profile.agent, id);
+    }
     for a in compose_headless_args(&profile.agent, &plan.args, &headless_args(&profile.agent, &prompt)) {
+        cmd.arg(a);
+    }
+    for a in lock_args {
         cmd.arg(a);
     }
     for (k, v) in &plan.env {
@@ -237,14 +377,16 @@ pub(crate) fn ai_prompt_impl(
         return Err(error);
     }
     cmd.current_dir(&cwd);
-    let result = run_capture(&mut cmd, AI_TIMEOUT);
+    let host = endpoint_host(profile.base_url.as_deref());
+    let result = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, AI_TIMEOUT);
     let _ = fs::remove_dir_all(&cwd);
     result
 }
 
 /// 定时任务执行段（scheduler 用）：与 ai_prompt_impl 同一注入链路，但 cwd 是传入的
-/// 项目目录——不建/删临时目录，也不登记 usage 内部运行：任务跑在用户项目里，
-/// token 本来就该按该项目的正常活动归因。密钥同样只在拉起瞬间读出注入。
+/// 项目目录——不建/删临时目录，也不登记 usage_provenance.internal（那会把该 Agent
+/// 在此项目的交互会话一并标成内部）。会话按 session id 标 internal，不进本项目会话。
+/// token 仍按项目归因。密钥同样只在拉起瞬间读出注入。
 /// 去掉 plan 参数里的沙箱档位（-s/--sandbox 键值对）：无头场景沙箱档位由各调用点的
 /// headless 参数定夺（一次性 prompt = read-only、定时任务 = workspace-write），
 /// 与 plan 的默认 workspace-write 并存会让 codex 报「-s 不能重复」直接退出
@@ -301,7 +443,14 @@ pub(crate) fn run_agent_task(
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
     let plan = agents::launch_plan(&profile, key, selected.as_deref());
     let mut cmd = crate::process::background_command(&binary_path);
+    let (lock_id, lock_args) = lock_headless_session(&profile.agent);
+    if let Some(id) = &lock_id {
+        let _ = crate::sessions::mark_session_internal(&profile.agent, id);
+    }
     for a in compose_headless_args(&profile.agent, &plan.args, &headless_task_args(&profile.agent, prompt)) {
+        cmd.arg(a);
+    }
+    for a in lock_args {
         cmd.arg(a);
     }
     for (k, v) in &plan.env {
@@ -311,7 +460,8 @@ pub(crate) fn run_agent_task(
         cmd.env_remove(k);
     }
     cmd.current_dir(cwd);
-    run_capture(&mut cmd, timeout)
+    let host = endpoint_host(profile.base_url.as_deref());
+    run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, timeout)
 }
 
 // ===== prompt 构造（纯函数，可测） =====
@@ -374,17 +524,17 @@ fn build_summary_prompt(conversation: &str) -> String {
 /// 用户消息是思想锚点：关键用户消息必须原文摘录；AI 回复只提炼结论。
 pub(crate) fn build_digest_prompt(conversation: &str) -> String {
     format!(
-        "下面是一个 AI 编程会话的完整对话记录。请把它提炼成一份「接力简报」，\
-         供另一个全新的 AI 会话阅读后接着把任务做完——目标是保留续作所需的全部关键信息，\
-         同时丢掉寒暄、试错过程与重复内容。\n\
+        "下面是一个科研工作台里的 AI 会话完整记录（可能是文献精读、综述写作或数据处理）。\
+         请把它提炼成一份「接力简报」，供另一个全新的 AI 会话阅读后接着把课题做完——\
+         保留续作所需的全部关键信息，丢掉寒暄、试错与重复。\n\
          用户的消息是思想锚点：用户的关键消息（拍板、约束、纠正、偏好）必须原文摘录\
          （用引用块逐条列出），不得改写、翻译或概括掉语气与限定词；助手回复只提炼结论，附在对应用户消息之后。\n\
          只输出中文 markdown 正文（不要解释、不要用代码块包裹全文），按以下小节组织：\n\
-         ## 任务目标\n## 关键决策与结论\n## 思路与理由\n## 已否决方向\n\
-         ## 已完成的改动（文件 + 要点）\n## 当前状态与未完成事项\n## 下一步建议\n## 环境与约束\n\
-         要求：「思路与理由」为每个关键决策附上对话中出现过的理由/动机；\
-         「已否决方向」列出考虑过但被否掉的方向及其否决原因，没有则写「无」；\
-         不复述工具调用细节；涉及文件写具体路径；其余没有内容的小节写「（无）」。\n\n\
+         ## 课题与当前步骤\n## 已纳入 / 已精读 / 仅摘要\n## 关键结论\n## 待拍板\n\
+         ## 下一步要读的文件\n## 已否决方向\n## 当前状态与未完成事项\n## 下一步建议\n\
+         要求：关键结论里用户拍板必须原文摘录；已纳入/已精读只列对话里出现过的文献与笔记路径；\
+         下一步要读的文件写具体路径（如 notes/、papers/included.md、outline.md）；\
+         不要编造未出现的文献、DOI、页码或数据；没有内容的小节写「（无）」；不复述工具调用细节。\n\n\
          ## 会话记录\n{conversation}"
     )
 }
@@ -810,7 +960,7 @@ pub async fn ai_conflict_advice(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profiles::Profile;
+    use crate::profiles::{AccountType, Profile};
 
     fn profile(id: &str, agent: &str, last_used_at: Option<&str>) -> Profile {
         Profile {
@@ -918,6 +1068,96 @@ mod tests {
             ["a".to_string(), "b".to_string()].into_iter().collect();
         let p = resolve_profile_from(profiles, None, None, None, &all_hidden).unwrap();
         assert_eq!(p.id, "b");
+    }
+
+    #[test]
+    fn profile_resolution_last_used_skips_official_when_api_exists() {
+        let mut official = profile("off", "codex", Some("2026-09-03T08:00:00Z"));
+        official.account_type = AccountType::Official;
+        let api = profile("api", "codex", Some("2026-08-01T00:00:00Z"));
+        let profiles = vec![official.clone(), api];
+        let no_hidden = &Default::default();
+        // 官方更新，但无头自动回落跳过它，改走带密钥的 API 配置
+        let p = resolve_profile_from(profiles.clone(), None, None, None, no_hidden).unwrap();
+        assert_eq!(p.id, "api");
+        // 显式/专用仍尊重官方
+        let p = resolve_profile_from(profiles.clone(), Some("off".into()), None, None, no_hidden)
+            .unwrap();
+        assert_eq!(p.id, "off");
+        let p = resolve_profile_from(profiles, None, None, Some("off".into()), no_hidden).unwrap();
+        assert_eq!(p.id, "off");
+        // 只有官方时才回落官方（好过报错哑掉）
+        let only = vec![official];
+        let p = resolve_profile_from(only, None, None, None, no_hidden).unwrap();
+        assert_eq!(p.id, "off");
+    }
+
+    #[test]
+    fn summarize_headless_error_collapses_codex_oauth_dump() {
+        let dump = r#"Reading additional input from stdin...
+2026-09-03T08:51:28.634104Z ERROR codex_models_manager::manager: failed to refresh available models: unexpected status 401 Unauthorized: Encountered invalidated oauth token for user, failing request, url: https://chatgpt.com/backend-api/codex/models?client_version=0.153.0, auth error code: token_revoked
+ERROR: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again."#;
+        let msg = summarize_headless_error(dump, None);
+        assert!(msg.contains("官方账号登录已失效"), "{msg}");
+        assert!(!msg.contains("Reading additional input"), "{msg}");
+        assert!(!msg.contains("chatgpt.com/backend-api"), "{msg}");
+        assert!(msg.chars().count() < 80, "{msg}");
+        // 普通 ERROR 行只留最后一句，不甩整段
+        let other = "INFO start\nERROR: model not found\nERROR: rate limited";
+        assert_eq!(summarize_headless_error(other, None), "rate limited");
+    }
+
+    #[test]
+    fn summarize_headless_error_distinguishes_401_routing_from_bad_key() {
+        // 用户真实报错：网关 key 被发到 api.openai.com（model_provider 未指向自定义渠道）
+        let routed_wrong = "unexpected status 401 Unauthorized: Incorrect API key provided: sk-ab***. \
+            url: https://api.openai.com/v1/responses, auth error code: invalid_api_key";
+        let msg = summarize_headless_error(routed_wrong, Some("ent.zetatechs.com"));
+        assert!(msg.contains("OpenAI 官方端点"), "{msg}");
+        assert!(msg.contains("ent.zetatechs.com"), "{msg}");
+        assert!(msg.contains("设为全局默认"), "{msg}");
+        // 不能被笼统归成官方账号登录失效
+        assert!(!msg.contains("官方账号登录已失效"), "{msg}");
+        // 报错 URL 是网关自己 = 密钥被拒，引导重填
+        let bad_key = "unexpected status 401 Unauthorized: Incorrect API key provided, \
+            url: https://ent.zetatechs.com/v1/responses, auth error code: invalid_api_key";
+        let msg = summarize_headless_error(bad_key, Some("ent.zetatechs.com"));
+        assert!(msg.contains("拒绝了密钥"), "{msg}");
+        assert!(msg.contains("重新填写密钥"), "{msg}");
+        // 无网关上下文（官方端点 / 官方 key 场景）
+        let msg = summarize_headless_error(routed_wrong, None);
+        assert!(msg.contains("OpenAI 官方端点拒绝了密钥"), "{msg}");
+        // 网关地址本身就是 openai 官方（直连官方 API）时按官方密钥口径
+        let msg = summarize_headless_error(routed_wrong, Some("api.openai.com"));
+        assert!(msg.contains("OpenAI 官方端点拒绝了密钥"), "{msg}");
+        // token_revoked 优先级不变
+        let revoked = "401 Unauthorized token_revoked";
+        assert!(summarize_headless_error(revoked, Some("ent.zetatechs.com")).contains("官方账号登录已失效"));
+    }
+
+    #[test]
+    fn endpoint_host_parses_base_url() {
+        assert_eq!(
+            endpoint_host(Some("https://ent.zetatechs.com/v1")).as_deref(),
+            Some("ent.zetatechs.com")
+        );
+        assert_eq!(endpoint_host(Some("http://127.0.0.1:8317")).as_deref(), Some("127.0.0.1:8317"));
+        assert_eq!(endpoint_host(Some("  ")), None);
+        assert_eq!(endpoint_host(None), None);
+    }
+
+    #[test]
+    fn extract_headless_session_id_from_codex_banner() {
+        let dump = "OpenAI Codex v0.153.0\n--------\nworkdir: /tmp/x\nsession id: 01a06677-48fa-7991-b99d-cdfd5d7f6fd4\n--------\nuser\n请用中文解读";
+        assert_eq!(
+            extract_headless_session_id(dump).as_deref(),
+            Some("01a06677-48fa-7991-b99d-cdfd5d7f6fd4")
+        );
+        assert_eq!(extract_headless_session_id("no session here"), None);
+        assert_eq!(
+            extract_headless_session_id("Session ID: abcdef12-3456-7890-abcd-ef1234567890 extra").as_deref(),
+            Some("abcdef12-3456-7890-abcd-ef1234567890")
+        );
     }
 
     #[test]
@@ -1037,14 +1277,14 @@ mod tests {
     fn digest_prompt_has_sections_and_constraints() {
         let p = build_digest_prompt("[用户] 做一个提炼接力功能");
         for section in [
-            "任务目标",
-            "关键决策与结论",
-            "思路与理由",
+            "课题与当前步骤",
+            "已纳入 / 已精读 / 仅摘要",
+            "关键结论",
+            "待拍板",
+            "下一步要读的文件",
             "已否决方向",
-            "已完成的改动",
             "当前状态与未完成事项",
             "下一步建议",
-            "环境与约束",
         ] {
             assert!(p.contains(section), "缺小节 {section}");
         }

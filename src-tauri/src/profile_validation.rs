@@ -653,7 +653,7 @@ async fn api_check(profile: &Profile, key: Option<&str>) -> ValidationCheckDto {
         if !status.is_success() {
             let detail = tail_chars(body.trim(), 500);
             return Err(match status.as_u16() {
-                401 | 403 => format!("密钥未通过认证（HTTP {status}）：{detail}"),
+                401 | 403 => format!("密钥被端点拒绝（HTTP {status}）——密钥可能填错、过期或已被吊销，请核对后重新填写。{detail}"),
                 404 | 405 => format!("模型列表接口不存在，可能是 endpoint 或协议不匹配（HTTP {status}）：{detail}"),
                 _ => format!("API 返回 HTTP {status}：{detail}"),
             });

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { useAppStore } from "../store";
+import { applyTheme, useAppStore } from "../store";
 import type { AppSettings } from "../store";
 import {
   fieldClass,
@@ -38,6 +38,11 @@ import type { StorageEntryDto } from "../types";
 import { AGENTS } from "../types";
 import { getVersion } from "@tauri-apps/api/app";
 import { collectFrontendDiagnostics } from "../diagnostics";
+import {
+  appUpdateProgressLabel,
+  appUpdateProgressPct,
+  appUpdateStatusHint,
+} from "../app-update";
 
 /** 七套深色主题：色板双格预览（左=侧栏色，右=内容底色）+ 名称 */
 import {
@@ -46,7 +51,28 @@ import {
   PALETTE_LIST,
   resolvePaletteId,
 } from "../terminal-palettes";
-import { THEMES, isLightTheme } from "../themes";
+import { THEMES, isCustomThemeId, isLightTheme } from "../themes";
+import { confirmDialog } from "../components/ConfirmDialog";
+import {
+  addCustomThemeCard,
+  chipInk,
+  CUSTOM_THEME_CARDS_MAX,
+  customThemeIdFromSeeds,
+  DEFAULT_CUSTOM_THEME,
+  deriveThemeTokens,
+  nextCardName,
+  normalizeCustomTheme,
+  normalizeCustomThemeCards,
+  normalizeHex,
+  removeCustomThemeCard,
+  renameCustomThemeCard,
+  resolveCustomThemeCardId,
+  seedsFromComputed,
+  snapshotCustomThemeVars,
+  restoreCustomThemeVars,
+  type CustomThemeCard,
+  type CustomThemeSeeds,
+} from "../custom-theme";
 import { NAV_GROUPS, NAV_BOTTOM } from "../navigation";
 
 // 调色板清单单一出处在 ../terminal-palettes（PALETTE_LIST，含亮暗标记）
@@ -66,6 +92,8 @@ type ThemeSwatch = { rail: string; canvas: string; accent: string; ink: string }
 function readThemeSwatch(id: string): ThemeSwatch {
   const el = document.documentElement;
   const prev = el.dataset.theme;
+  const customSnap = snapshotCustomThemeVars(el);
+  restoreCustomThemeVars(el, {});
   el.dataset.theme = id;
   const cs = getComputedStyle(el);
   const swatch = {
@@ -76,7 +104,42 @@ function readThemeSwatch(id: string): ThemeSwatch {
   };
   if (prev === undefined) el.removeAttribute("data-theme");
   else el.dataset.theme = prev;
+  restoreCustomThemeVars(el, customSnap);
   return swatch;
+}
+
+/** 整块点开系统取色器；名称和色值只展示，不在色块上改 */
+function ColorChip({
+  label,
+  value,
+  onLive,
+}: {
+  label: string;
+  value: string;
+  onLive: (hex: string) => void;
+}) {
+  const hex = normalizeHex(value) ?? "#000000";
+  const ink = chipInk(hex);
+  return (
+    <label className="relative h-14 w-[6.5rem] shrink-0 cursor-pointer overflow-hidden rounded-md ring-1 ring-hairline hover:ring-field">
+      <span className="pointer-events-none block h-full" style={{ background: hex }} />
+      <span
+        className="pointer-events-none absolute inset-x-0 bottom-0 px-1.5 py-1"
+        style={{ color: ink }}
+      >
+        <span className="block text-micro font-medium">{label}</span>
+        <span className="block font-mono text-micro leading-4">{hex}</span>
+      </span>
+      <input
+        type="color"
+        aria-label={label}
+        className="absolute inset-0 m-0 h-full w-full cursor-pointer border-0 p-0 opacity-0"
+        value={hex}
+        onInput={(e) => onLive((e.target as HTMLInputElement).value)}
+        onChange={(e) => onLive(e.target.value)}
+      />
+    </label>
+  );
 }
 
 // fieldClass 自带 w-full：本页 Row 右列是收缩到内容的 auto 列，定宽控件（w-20/w-24/w-40）
@@ -179,6 +242,7 @@ const DEFAULT_COLLAPSED: Record<string, boolean> = {
   about: true,
   stats: true,
   integration: true,
+  network: true,
   update: true,
   diag: true,
 };
@@ -189,6 +253,7 @@ const SETTING_NAV: { id: string; label: string }[] = [
   { id: "hotkeys", label: "快捷键" },
   { id: "stats", label: "统计" },
   { id: "integration", label: "集成" },
+  { id: "network", label: "网络" },
   { id: "update", label: "更新" },
   { id: "diag", label: "诊断" },
   { id: "storage", label: "数据与存储" },
@@ -309,12 +374,12 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid grid-cols-[minmax(180px,1fr)_auto] items-center gap-x-5 py-3">
+    <div className="grid grid-cols-[minmax(12rem,20rem)_minmax(0,1fr)] items-center gap-x-5 py-3">
       <div className="min-w-0">
         <div className="text-sm text-l2">{label}</div>
         {hint && <p className="mt-0.5 max-w-lg text-micro leading-4 text-l4">{hint}</p>}
       </div>
-      <div className="flex min-w-0 items-center justify-end gap-2">{children}</div>
+      <div className="flex min-w-0 flex-wrap items-center justify-start gap-2">{children}</div>
       {extra && <div className="col-span-2 mt-2">{extra}</div>}
     </div>
   );
@@ -417,6 +482,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const profiles = useAppStore((s) => s.profiles);
   const loadAll = useAppStore((s) => s.loadAll);
   const appUpdate = useAppStore((s) => s.appUpdate);
+  const appUpdateStatus = useAppStore((s) => s.appUpdateStatus);
+  const appUpdateError = useAppStore((s) => s.appUpdateError);
   const checkAppUpdate = useAppStore((s) => s.checkAppUpdate);
   // 依赖体检（诊断区 Row）：store 共享，启动时已静默探测一次；一键安装完成后就地刷新
   const depCheck = useAppStore((s) => s.depCheck);
@@ -429,7 +496,12 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const settingsSectionReq = useAppStore((s) => s.settingsSectionReq);
   const setSettingsSectionReq = useAppStore((s) => s.setSettingsSectionReq);
   const [installing, setInstalling] = useState(false);
+  const [installProgress, setInstallProgress] = useState<{
+    downloaded: number;
+    total: number | null;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const autoOpenedUpdate = useRef(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState("appearance");
   // 数值输入的本地草稿（失焦/回车才提交，避免每击键一次 IPC）
@@ -438,6 +510,14 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [customFont, setCustomFont] = useState("");
   const [scrollback, setScrollback] = useState("");
   const [rate, setRate] = useState("");
+  const [outboundProxy, setOutboundProxy] = useState("");
+  const [customDraft, setCustomDraft] = useState<CustomThemeSeeds | null>(null);
+  const customPatchTimer = useRef<number | null>(null);
+  const [savingCard, setSavingCard] = useState(false);
+  const [cardNameDraft, setCardNameDraft] = useState("");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [outboundNoProxy, setOutboundNoProxy] = useState("");
   // 自定义定价的表格草稿（保存时序列化为 pricing.json 的 {"前缀":[输入,输出]} 格式，后端校验不变）
   const [pricingRows, setPricingRows] = useState<
     { prefix: string; input: string; output: string }[]
@@ -565,6 +645,10 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         setFontSize(String(settings.terminalFontSize));
       if (!dirty.has("scrollback")) setScrollback(String(settings.scrollback));
       if (!dirty.has("rate")) setRate(String(settings.rateUsdCny));
+      if (!dirty.has("outboundProxy"))
+        setOutboundProxy(settings.outboundProxy ?? "");
+      if (!dirty.has("outboundNoProxy"))
+        setOutboundNoProxy(settings.outboundNoProxy ?? "");
       if (!dirty.has("customFont")) {
         const fam = settings.terminalFontFamily ?? "JetBrains Mono";
         if (["JetBrains Mono", "Maple Mono NF CN", "Sarasa Mono SC", "Iosevka", "SF Mono", "Menlo", "Consolas"].includes(fam)) {
@@ -582,6 +666,137 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     () => THEMES.map((t) => ({ ...t, ...readThemeSwatch(t.id) })),
     [],
   );
+  const customCards = normalizeCustomThemeCards(settings?.customThemes);
+  const selectedCardId = resolveCustomThemeCardId(
+    customCards,
+    settings?.customThemeCardId,
+  );
+  const customSelected = isCustomThemeId(settings?.theme) && !selectedCardId;
+  const savedCustom = normalizeCustomTheme(settings?.customTheme);
+  const customSeeds =
+    customDraft ??
+    (customSelected ? savedCustom : null) ??
+    seedsFromComputed(getComputedStyle(document.documentElement)) ??
+    savedCustom ??
+    DEFAULT_CUSTOM_THEME;
+  const customDerived = useMemo(
+    () => deriveThemeTokens(savedCustom ?? customSeeds),
+    [
+      savedCustom?.rail,
+      savedCustom?.canvas,
+      savedCustom?.accent,
+      customSeeds.rail,
+      customSeeds.canvas,
+      customSeeds.accent,
+    ],
+  );
+  const pickerDerived = useMemo(
+    () => deriveThemeTokens(customSeeds),
+    [customSeeds.rail, customSeeds.canvas, customSeeds.accent],
+  );
+
+  function persistCustom(next: CustomThemeSeeds) {
+    const id = customThemeIdFromSeeds(next);
+    applyTheme(id, next);
+    void patch({ theme: id, customTheme: next, customThemeCardId: "" });
+  }
+
+  function liveCustom(next: CustomThemeSeeds) {
+    setCustomDraft(next);
+    applyTheme(customThemeIdFromSeeds(next), next);
+    if (customPatchTimer.current) window.clearTimeout(customPatchTimer.current);
+    customPatchTimer.current = window.setTimeout(() => {
+      persistCustom(next);
+    }, 180);
+  }
+
+  function commitCustom(next: CustomThemeSeeds) {
+    if (customPatchTimer.current) {
+      window.clearTimeout(customPatchTimer.current);
+      customPatchTimer.current = null;
+    }
+    setCustomDraft(next);
+    persistCustom(next);
+  }
+
+  function activateCustom(fromCurrent: boolean) {
+    const saved = normalizeCustomTheme(settings?.customTheme);
+    const computed = seedsFromComputed(getComputedStyle(document.documentElement));
+    const next =
+      fromCurrent || !saved
+        ? (computed ?? saved ?? DEFAULT_CUSTOM_THEME)
+        : saved;
+    commitCustom(next);
+  }
+
+  function applySavedCard(card: CustomThemeCard) {
+    if (customPatchTimer.current) {
+      window.clearTimeout(customPatchTimer.current);
+      customPatchTimer.current = null;
+    }
+    const seeds = {
+      rail: card.rail,
+      canvas: card.canvas,
+      accent: card.accent,
+    };
+    setCustomDraft(null);
+    applyTheme(customThemeIdFromSeeds(seeds), seeds);
+    void patch({
+      theme: customThemeIdFromSeeds(seeds),
+      customTheme: seeds,
+      customThemeCardId: card.id,
+    });
+  }
+
+  function startSaveCard() {
+    if (customCards.length >= CUSTOM_THEME_CARDS_MAX) return;
+    setCardNameDraft(nextCardName(customCards));
+    setSavingCard(true);
+  }
+
+  function confirmSaveCard() {
+    const result = addCustomThemeCard(customCards, customSeeds, cardNameDraft);
+    if (!result.ok) {
+      setError(result.reason);
+      return;
+    }
+    setSavingCard(false);
+    const seeds = {
+      rail: result.card.rail,
+      canvas: result.card.canvas,
+      accent: result.card.accent,
+    };
+    setCustomDraft(null);
+    applyTheme(customThemeIdFromSeeds(seeds), seeds);
+    void patch({
+      theme: customThemeIdFromSeeds(seeds),
+      customTheme: seeds,
+      customThemes: result.list,
+      customThemeCardId: result.card.id,
+    });
+  }
+
+  async function deleteSavedCard(card: CustomThemeCard) {
+    if (
+      !(await confirmDialog(`删除色卡「${card.name}」？`, {
+        danger: true,
+        confirmText: "删除",
+      }))
+    )
+      return;
+    const next = removeCustomThemeCard(customCards, card.id);
+    const patchBody: Parameters<typeof updateSettings>[0] = {
+      customThemes: next,
+    };
+    if (selectedCardId === card.id) patchBody.customThemeCardId = "";
+    void patch(patchBody);
+  }
+
+  function commitRename(card: CustomThemeCard) {
+    const next = renameCustomThemeCard(customCards, card.id, renameDraft);
+    setRenamingId(null);
+    void patch({ customThemes: next });
+  }
 
   async function patch(p: Parameters<typeof updateSettings>[0]) {
     setError(null);
@@ -736,6 +951,15 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     });
   }, [visible, settingsSectionReq, setSettingsSectionReq]);
 
+  // 有可用更新且用户还停在默认「外观」时切到更新分区，避免芯片上一个小点没人看见。
+  // 已经点过别的分区或外部指定了分区（收件箱 dep: 等）不抢。
+  useEffect(() => {
+    if (!visible || !appUpdate || autoOpenedUpdate.current) return;
+    autoOpenedUpdate.current = true;
+    if (settingsSectionReq) return;
+    setActiveSection((cur) => (cur === "appearance" ? "update" : cur));
+  }, [visible, appUpdate, settingsSectionReq]);
+
   async function clearLogs() {
     setError(null);
     try {
@@ -750,9 +974,27 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   async function installUpdate() {
     if (!appUpdate || installing) return;
     setInstalling(true);
+    setInstallProgress({ downloaded: 0, total: null });
     setError(null);
     try {
-      await appUpdate.downloadAndInstall();
+      await appUpdate.downloadAndInstall((ev) => {
+        if (ev.event === "Started") {
+          setInstallProgress({
+            downloaded: 0,
+            total: ev.data.contentLength ?? null,
+          });
+        } else if (ev.event === "Progress") {
+          setInstallProgress((prev) => ({
+            downloaded: (prev?.downloaded ?? 0) + ev.data.chunkLength,
+            total: prev?.total ?? null,
+          }));
+        } else if (ev.event === "Finished") {
+          setInstallProgress((prev) => ({
+            downloaded: prev?.total ?? prev?.downloaded ?? 0,
+            total: prev?.total ?? null,
+          }));
+        }
+      });
       await relaunch();
     } catch (e) {
       setError(String(e));
@@ -822,7 +1064,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   }
 
   return (
-    <PageFrame width="settings">
+    <PageFrame width="fluid">
       <PageHeader title="设置" meta="外观、终端与应用集成" />
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
@@ -855,7 +1097,10 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             >
               {label}
               {id === "update" && appUpdate && (
-                <span className="size-1.5 rounded-full bg-ok-text" />
+                <span className="inline-flex items-center gap-1 text-micro text-ok-text">
+                  <span className="size-1.5 rounded-full bg-ok-text" />
+                  可更新
+                </span>
               )}
             </button>
           ))}
@@ -878,7 +1123,10 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               return (
               <button
                 key={t.id}
-                onClick={() => patch({ theme: t.id })}
+                onClick={() => {
+                  setCustomDraft(null);
+                  void patch({ theme: t.id, customThemeCardId: "" });
+                }}
                 title={`切换到${t.name}`}
                 className={`min-w-0 overflow-hidden rounded-md text-left ${
                   selected ? "ring-2 ring-l1 ring-offset-1 ring-offset-canvas" : "ring-1 ring-hairline hover:ring-field"
@@ -909,13 +1157,189 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               );
             })}
           </div>
-          {/* Agent TUI 只在启动时探测一次终端底色（OSC 11），热切换主题后运行中会话保持
-              旧配色——无条件常驻说明：按 liveSessions 门控会在页面重载后（标签恢复为占位、
-              登记清空）恰好需要提示时缺席（2026-08-24 实测教训） */}
-          <div className="mt-2 text-micro text-l4">
-            Agent 会话的界面配色按启动时的终端底色确定，切换主题后运行中的会话保持旧配色，
-            重启会话后与新主题一致
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => activateCustom(false)}
+              title="自定义主题"
+              className={`h-14 w-[7.5rem] overflow-hidden rounded-md text-left ${
+                customSelected
+                  ? "ring-2 ring-l1 ring-offset-1 ring-offset-canvas"
+                  : "ring-1 ring-hairline hover:ring-field"
+              }`}
+              style={{ background: customDerived.tokens.canvas }}
+            >
+              <span className="flex h-full">
+                <span
+                  className="w-2.5 shrink-0"
+                  style={{ background: customDerived.tokens.rail }}
+                  aria-hidden="true"
+                />
+                <span className="flex min-w-0 flex-1 flex-col justify-end px-1.5 py-1.5">
+                  <span
+                    className="truncate text-micro font-medium"
+                    style={{ color: customDerived.tokens.l1 }}
+                  >
+                    自定义
+                  </span>
+                </span>
+              </span>
+            </button>
+            <ColorChip
+              label="左栏"
+              value={customSeeds.rail}
+              onLive={(hex) => liveCustom({ ...customSeeds, rail: hex })}
+            />
+            <ColorChip
+              label="画布"
+              value={customSeeds.canvas}
+              onLive={(hex) => liveCustom({ ...customSeeds, canvas: hex })}
+            />
+            <ColorChip
+              label="强调"
+              value={customSeeds.accent}
+              onLive={(hex) => liveCustom({ ...customSeeds, accent: hex })}
+            />
+            <button
+              type="button"
+              className={`${rowActionClass} shrink-0`}
+              onClick={() => activateCustom(true)}
+            >
+              从当前主题拷入
+            </button>
+            {savingCard ? (
+              <span className="flex items-center gap-1.5">
+                <input
+                  className={`${fieldFixed} w-28`}
+                  value={cardNameDraft}
+                  autoFocus
+                  maxLength={12}
+                  onChange={(e) => setCardNameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") confirmSaveCard();
+                    if (e.key === "Escape") setSavingCard(false);
+                  }}
+                />
+                <button
+                  type="button"
+                  className={rowActionClass}
+                  onClick={confirmSaveCard}
+                >
+                  保存
+                </button>
+                <button
+                  type="button"
+                  className={ghostActionClass}
+                  onClick={() => setSavingCard(false)}
+                >
+                  取消
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                className={`${rowActionClass} shrink-0 disabled:opacity-40`}
+                disabled={customCards.length >= CUSTOM_THEME_CARDS_MAX}
+                title={
+                  customCards.length >= CUSTOM_THEME_CARDS_MAX
+                    ? `最多 ${CUSTOM_THEME_CARDS_MAX} 套`
+                    : "把当前三个颜色存成一张可点的色卡"
+                }
+                onClick={startSaveCard}
+              >
+                另存为色卡
+              </button>
+            )}
           </div>
+          {customCards.length > 0 && (
+            <div className="mt-2 grid grid-cols-7 gap-2">
+              {customCards.map((card) => {
+                const derived = deriveThemeTokens(card);
+                const selected = selectedCardId === card.id;
+                return (
+                  <div key={card.id} className="group relative min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (renamingId === card.id) return;
+                        applySavedCard(card);
+                      }}
+                      onDoubleClick={(e) => {
+                        e.preventDefault();
+                        setRenamingId(card.id);
+                        setRenameDraft(card.name);
+                      }}
+                      title={`${card.name}（双击改名）`}
+                      className={`h-14 w-full overflow-hidden rounded-md text-left ${
+                        selected
+                          ? "ring-2 ring-l1 ring-offset-1 ring-offset-canvas"
+                          : "ring-1 ring-hairline hover:ring-field"
+                      }`}
+                      style={{ background: derived.tokens.canvas }}
+                    >
+                      <span className="flex h-full">
+                        <span
+                          className="w-2.5 shrink-0"
+                          style={{ background: derived.tokens.rail }}
+                          aria-hidden="true"
+                        />
+                        <span className="flex min-w-0 flex-1 flex-col justify-between px-1.5 py-1.5">
+                          <span
+                            className="h-1.5 w-1.5 self-end rounded-full"
+                            style={{ background: derived.tokens.cta }}
+                            aria-hidden="true"
+                          />
+                          {renamingId === card.id ? (
+                            <input
+                              className="w-full border-0 bg-transparent p-0 text-micro font-medium outline-none"
+                              style={{ color: derived.tokens.l1 }}
+                              value={renameDraft}
+                              autoFocus
+                              maxLength={12}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => setRenameDraft(e.target.value)}
+                              onBlur={() => commitRename(card)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.currentTarget.blur();
+                                }
+                                if (e.key === "Escape") {
+                                  setRenamingId(null);
+                                }
+                              }}
+                            />
+                          ) : (
+                            <span
+                              className="truncate text-micro font-medium"
+                              style={{ color: derived.tokens.l1 }}
+                            >
+                              {card.name}
+                            </span>
+                          )}
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      title="删除"
+                      className={`${hoverRevealClass} ${ghostActionClass} absolute right-0.5 top-0.5 z-10 h-6 w-6 text-l3 hover:text-l1`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void deleteSavedCard(card);
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {pickerDerived.warnings.length > 0 && customSelected && (
+            <p className="mt-1.5 text-micro text-l4">
+              {pickerDerived.warnings.join("；")}
+            </p>
+          )}
         </div>
 
         <Row label="终端字号" hint="立即生效（11–18）">
@@ -1618,12 +2042,65 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       </Section>
 
       <Section
+        title="网络"
+        active={activeSection === "network"}
+        open={!collapsed.network}
+        onToggle={() => toggleSection("network")}
+      >
+        <Row
+          label="出网代理"
+          hint="只注入官方账号启动和组头「登录」。网关/中转启动不走，以免国内端点被绕到境外。连接上的附加环境变量同名键可覆盖。空 = 不注入。"
+        >
+          <input
+            className={`${fieldFixed} w-72 font-mono text-xs`}
+            placeholder="http://127.0.0.1:7890"
+            value={outboundProxy}
+            onChange={(e) => {
+              draftDirty.current.add("outboundProxy");
+              setOutboundProxy(e.target.value);
+            }}
+            onBlur={() => {
+              draftDirty.current.delete("outboundProxy");
+              void patch({ outboundProxy: outboundProxy.trim() });
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              draftDirty.current.delete("outboundProxy");
+              void patch({ outboundProxy: outboundProxy.trim() });
+            }}
+          />
+        </Row>
+        <Row
+          label="不走代理的地址"
+          hint="对应 NO_PROXY。填了出网代理但此项留空时，默认 localhost,127.0.0.1,::1"
+        >
+          <input
+            className={`${fieldFixed} w-72 font-mono text-xs`}
+            placeholder="localhost,127.0.0.1,::1"
+            value={outboundNoProxy}
+            onChange={(e) => {
+              draftDirty.current.add("outboundNoProxy");
+              setOutboundNoProxy(e.target.value);
+            }}
+            onBlur={() => {
+              draftDirty.current.delete("outboundNoProxy");
+              void patch({ outboundNoProxy: outboundNoProxy.trim() });
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              draftDirty.current.delete("outboundNoProxy");
+              void patch({ outboundNoProxy: outboundNoProxy.trim() });
+            }}
+          />
+        </Row>
+      </Section>
+
+      <Section
         title="更新"
         active={activeSection === "update"}
         open={appUpdate ? true : !collapsed.update}
         onToggle={() => toggleSection("update")}
         badge={
-          // 有新版本时强制展开并在标题加标记，避免静默检查结果无人感知
           appUpdate ? (
             <span className="ml-1 inline-flex items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-xs font-normal text-l3">
               <span className="size-1.5 rounded-full bg-ok-text" />
@@ -1635,7 +2112,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         <div className="py-3">
           {appUpdate ? (
             <>
-              <div className="mb-2 flex items-center gap-2">
+              <div className="mb-2 flex flex-wrap items-center gap-2">
                 <span className="text-sm text-l2">
                   发现新版本{" "}
                   <span className="text-l1">v{appUpdate.version}</span>
@@ -1646,11 +2123,37 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 <button
                   onClick={installUpdate}
                   disabled={installing}
-                  className="ml-auto h-8 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className="h-8 shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
-                  {installing ? "下载安装中…" : "下载并安装"}
+                  {installing
+                    ? appUpdateProgressLabel(
+                        installProgress?.downloaded ?? 0,
+                        installProgress?.total ?? null,
+                      )
+                    : "下载并安装"}
                 </button>
               </div>
+              <p className="mb-2 text-xs text-l4">
+                安装完成后会自动重启。进行中的对话请先保存。
+              </p>
+              {installing && (
+                <div className="mb-2">
+                  <div className="h-1 overflow-hidden rounded-full bg-inset">
+                    <div
+                      className="h-full bg-ok-text transition-[width]"
+                      style={{
+                        width: `${appUpdateProgressPct(
+                          installProgress?.downloaded ?? 0,
+                          installProgress?.total ?? null,
+                        ) ?? 15}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+              {appUpdateError && (
+                <p className="mb-2 text-xs text-err-text">{appUpdateError}</p>
+              )}
               {appUpdate.body && (
                 <div className="max-h-48 overflow-auto whitespace-pre-line rounded-sm bg-inset p-2 text-xs leading-5 text-l3">
                   {appUpdate.body}
@@ -1658,16 +2161,26 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               )}
             </>
           ) : (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-l4">
-                未发现新版本（启动时已自动检查）
+                {appUpdateStatus === "error"
+                  ? appUpdateError ?? appUpdateStatusHint("error")
+                  : appUpdateStatusHint(appUpdateStatus)}
               </span>
-              <button
-                onClick={() => checkAppUpdate()}
-                className={`ml-auto ${rowActionClass}`}
-              >
-                重新检查
-              </button>
+              {appUpdateStatus !== "dev" &&
+                appUpdateStatus !== "checking" &&
+                appUpdateStatus !== "idle" && (
+                  <button
+                    onClick={() => checkAppUpdate()}
+                    className={`shrink-0 ${rowActionClass}`}
+                  >
+                    重新检查
+                  </button>
+                )}
+              {(appUpdateStatus === "checking" ||
+                appUpdateStatus === "idle") && (
+                <span className="text-xs text-l4">请稍候</span>
+              )}
             </div>
           )}
         </div>
@@ -1874,8 +2387,28 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         open={!collapsed.about}
         onToggle={() => toggleSection("about")}
       >
-        <Row label="版本" hint="">
-          <span className="font-mono text-xs text-l2">{appVersion ?? "…"}</span>
+        <Row
+          label="版本"
+          hint={
+            appUpdate
+              ? `有新版本 v${appUpdate.version}，到「更新」分区安装`
+              : undefined
+          }
+        >
+          <span className="flex items-center gap-2">
+            <span className="font-mono text-xs text-l2">
+              {appVersion ?? "…"}
+            </span>
+            {appUpdate && (
+              <button
+                type="button"
+                className={rowActionClass}
+                onClick={() => setActiveSection("update")}
+              >
+                去安装
+              </button>
+            )}
+          </span>
         </Row>
         <Row label="项目主页" hint="MIT 许可">
           <button

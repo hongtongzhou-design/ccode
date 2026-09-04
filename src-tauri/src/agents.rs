@@ -123,6 +123,7 @@ fn env_preview_source(name: &str, profile: &Profile) -> &'static str {
         "ANTHROPIC_MODEL" | "CODEBUDDY_MODEL" | "KIMI_MODEL_NAME" => "默认模型",
         n if n.contains("BASE_URL") || n == "CURSOR_API_ENDPOINT" => "端点",
         n if n.contains("API_KEY") || n.contains("AUTH_TOKEN") => "密钥注入",
+        "HTTPS_PROXY" | "HTTP_PROXY" | "ALL_PROXY" | "NO_PROXY" => "出网代理",
         _ => "内置注入",
     }
 }
@@ -196,6 +197,22 @@ pub fn preview_launch_plan(
             );
             notes.push(format!("上下文窗口：{ctx}（catalog 声明，有效窗口按 95% 计）"));
         }
+    }
+    if profile.agent == "codex" && profile.account_type == crate::profiles::AccountType::Official {
+        notes.push(format!(
+            "本进程用 -c model_provider=\"{}\" 盖过磁盘 config.toml 的默认渠道，走 ChatGPT 登录（不改用户文件）",
+            crate::provider_id::CODEX_CHATGPT
+        ));
+        if selected.is_none() {
+            notes.push(
+                "启动栏未选模型时，磁盘 config.toml 的 model 仍会生效；网关专用模型名在 ChatGPT 上可能不可用，请在启动栏选官方模型，或登录后在 TUI 里 /model"
+                    .into(),
+            );
+        }
+        notes.push(
+            "官方通道直连 OpenAI；国内网络请在设置 → 网络填写出网代理（连接附加环境变量可覆盖）。网关启动不走这份代理"
+                .into(),
+        );
     }
     let args = plan
         .args
@@ -481,6 +498,10 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
         if let Some(spec) = agent_spec(&profile.agent) {
             apply_official_inject(&mut plan, spec, profile, model);
         }
+        // 出网代理：只给官方账号（网关启动不走）。extra_env 同名键排在后面覆盖。
+        for (k, v) in crate::settings::official_outbound_env() {
+            plan.env.push((k, v));
+        }
         // extra_env 依旧最后注入（用户显式覆盖的逃生口，与 api 模式一致）
         for (k, v) in &profile.extra_env {
             plan.env.push((k.clone(), v.clone()));
@@ -569,6 +590,8 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     let pid = profile.provider_name();
                     if let Some(url) = &profile.base_url {
                         plan.args.extend(codex_inline_provider_args(url, key_env, &pid));
+                        // 中转不支持 ChatGPT 订阅档和官方 hosted 网页搜索；-c 只盖本进程
+                        plan.args.extend(codex_relay_compat_args());
                     }
                     if let Some(model) = model {
                         plan.args.push("-m".into());
@@ -839,14 +862,51 @@ pub fn readonly_launch_args(agent_id: &str, base_args: &[String]) -> Option<Vec<
     Some(args)
 }
 
+/// 官方账号禁止把中转/国产网关模型名跟着注入。
+/// 与前端 `officialModelAllowed` 双端镜像：否则 Codex `-m deepseek` 还会带上
+/// ChatGPT 订阅的 `service_tier=priority`，CLI 报模型不支持该档。
+fn official_model_allowed(agent: &str, model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    if m.is_empty() {
+        return false;
+    }
+    const FOREIGN: &[&str] = &[
+        "deepseek", "qwen", "glm-", "glm/", "moonshot", "kimi-", "doubao",
+        "hunyuan", "yi-", "ernie", "baichuan", "minimax", "spark-",
+    ];
+    if FOREIGN.iter().any(|p| m.contains(p)) {
+        return false;
+    }
+    if agent == "codex" {
+        return m.starts_with("gpt-")
+            || m.starts_with("o1")
+            || m.starts_with("o3")
+            || m.starts_with("o4")
+            || m.contains("codex");
+    }
+    true
+}
+
 /// 官方账号模式的注入：purge 残留密钥 env（规格 env_purge_list），模型非空才注入模型 env/参数。
-/// 凭证与 base URL 一律不注入——认证完全交给 CLI 自己的账号登录
+/// 凭证与 base URL 一律不注入——认证完全交给 CLI 自己的账号登录。
+/// Codex 例外：必须 `-c model_provider="openai"` 盖过磁盘默认渠道（见该臂注释）。
 fn apply_official_inject(
     plan: &mut LaunchPlan,
     spec: &AgentSpec,
     profile: &Profile,
     model: Option<&str>,
 ) {
+    let owned = model.and_then(|m| {
+        let t = m.trim();
+        if !official_model_allowed(&profile.agent, t) {
+            return None;
+        }
+        if !profile.models.is_empty() && !profile.models.iter().any(|x| x == t) {
+            return None;
+        }
+        Some(t.to_string())
+    });
+    let model = owned.as_deref();
     if let Some(oa) = &spec.official_account {
         for var in oa.env_purge_list {
             plan.env_remove.push((*var).into());
@@ -891,6 +951,14 @@ fn apply_official_inject(
                 }
                 plan.args.push("-c".into());
                 plan.args.push("sandbox_workspace_write.network_access=true".into());
+                // 磁盘 config.toml 的 model_provider 指向自定义网关时会盖过 ChatGPT
+                // 登录（选官方账号仍走网关计费）。-c 优先级最高，本进程切到内置
+                // openai 渠道（读 ChatGPT 凭证），不改用户文件、不写 model_providers 块。
+                plan.args.push("-c".into());
+                plan.args.push(format!(
+                    r#"model_provider="{}""#,
+                    crate::provider_id::CODEX_CHATGPT
+                ));
             }
             // cursor 官方账号：不注入密钥/端点，模型 flag 与认证方式无关照常可用
             SpecialLaunch::CursorFlags { model_flag, .. } => {
@@ -1035,6 +1103,8 @@ fn codex_catalog_entry_for(
         // codex 的 web_search 是官方 hosted tool，第三方中继不支持——如实声明 false，
         // 不摆一个调了必挂的死工具（cc-switch 对拒收网关同样禁用）
         "supports_search_tool": false,
+        // 空 = 不声明 ChatGPT 的 priority 档；请求时的 web_search 仍靠启动 -c 关掉
+        "service_tiers": [],
         "supported_reasoning_levels": [
             { "effort": "low", "description": "Fast responses with lighter reasoning" },
             { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
@@ -1155,6 +1225,23 @@ pub(crate) fn resume_args(agent_id: &str, session_id: &str) -> (bool, Vec<String
     }
 }
 
+/// 中转 Codex 盖掉磁盘/ChatGPT 登录带进本进程的官方能力（不写 config.toml）。
+/// `web_search` 默认开，catalog 的 `supports_search_tool` 挡不住请求（cc-switch 同结论）；
+/// DeepSeek 等会拒服务端搜索（有的中转转成 Anthropic `web_search_20250305`）。
+/// `service_tier=priority` 是订阅档，中转模型不声明，CLI 警告后省略——改 `auto` 不再带 priority。
+/// `features.apps=false` 关掉内置 codex_apps MCP（ChatGPT apps 连接器，只认 ChatGPT OAuth，
+/// 网关会话用不上；本机留有失效登录态时启动必刷 401 token_revoked，0.153.0 实证该键可关）。
+fn codex_relay_compat_args() -> Vec<String> {
+    vec![
+        "-c".into(),
+        r#"web_search="disabled""#.into(),
+        "-c".into(),
+        r#"service_tier="auto""#.into(),
+        "-c".into(),
+        "features.apps=false".into(),
+    ]
+}
+
 /// Codex 内联 provider 的 -c 定义参数（启动注入与外部恢复命令同一出处）。
 /// 新会话 provider 名是 ccode-<网关短id>；旧 rollout 仍可能记 model_provider="ccode"，
 /// 恢复时没有这组定义 codex 报 "Model provider `ccode` not found"。
@@ -1193,7 +1280,9 @@ fn resume_extra_args(
                         Some(p) if crate::provider_id::is_ccode_provider(p) => p,
                         _ => crate::provider_id::LEGACY,
                     };
-                    codex_inline_provider_args(url, key_env, pid)
+                    let mut args = codex_inline_provider_args(url, key_env, pid);
+                    args.extend(codex_relay_compat_args());
+                    args
                 }
                 _ => vec![],
             },
@@ -2227,6 +2316,8 @@ pub struct OfficialAccountStatusDto {
     pub conflicts: Vec<String>,
     /// Files that can be safely cleaned by removing only Ccode-owned API keys.
     pub cleanup_supported: bool,
+    /// 组头登录标签要注入的环境（出网代理；连接 extra_env 由前端再覆盖）
+    pub login_env: std::collections::BTreeMap<String, String>,
 }
 
 /// auth 文件里标识「官方账号已登录」的凭证字段名（各家结构不同，命中任一即算）：
@@ -2501,8 +2592,15 @@ fn auth_probe_candidates(
 
 /// 官方账号连接状态（P1a）。supported = 注册表有规格；connected = auth 文件检出凭证。
 /// 断开不做文件删除——引导用户用 CLI 自己的 logout（前端文案）
+fn official_login_env() -> std::collections::BTreeMap<String, String> {
+    crate::settings::official_outbound_env()
+        .into_iter()
+        .collect()
+}
+
 #[tauri::command]
 pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
+    let login_env = official_login_env();
     let Some(spec) = agent_spec(agent_id) else {
         return OfficialAccountStatusDto {
             supported: false,
@@ -2511,6 +2609,7 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
             login_command: None,
             conflicts: Vec::new(),
             cleanup_supported: false,
+            login_env,
         };
     };
     let Some(oa) = spec.official_account.as_ref() else {
@@ -2521,6 +2620,7 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
             login_command: None,
             conflicts: Vec::new(),
             cleanup_supported: false,
+            login_env,
         };
     };
     // login_cmd 为空 = 裸启动 CLI 后在 TUI 内登录（gemini / qwen）
@@ -2553,6 +2653,7 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
                     login_command,
                     conflicts,
                     cleanup_supported: oa.conflict_probes.iter().all(|probe| probe.file.ends_with(".json") || probe.file.ends_with(".env") || probe.file.ends_with(".toml")),
+                    login_env: login_env.clone(),
                 };
             }
             Some(AuthProbe::Unrecognized) => {
@@ -2594,6 +2695,7 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
         login_command,
         conflicts,
         cleanup_supported: oa.conflict_probes.iter().all(|probe| probe.file.ends_with(".json") || probe.file.ends_with(".env") || probe.file.ends_with(".toml")),
+        login_env,
     }
 }
 
@@ -3098,6 +3200,9 @@ mod tests {
         assert!(joined.contains(r#"model_providers.ccode.wire_api="responses""#));
         assert!(joined.contains(r#"model_provider="ccode""#));
         assert!(joined.contains("-m gpt-5-codex"));
+        assert!(joined.contains(r#"web_search="disabled""#));
+        assert!(joined.contains(r#"service_tier="auto""#));
+        assert!(joined.contains("features.apps=false"));
         // 会话内自省：模型显示名随启动注入（配置名 · 模型），agent 可查
         assert!(plan.env.contains(&(
             "CCODE_MODEL_DISPLAY_NAME".into(),
@@ -3224,20 +3329,25 @@ mod tests {
     }
 
     #[test]
-    fn official_codex_plan_has_no_provider_args_but_keeps_sandbox() {
+    fn official_codex_plan_overrides_provider_to_chatgpt_and_keeps_sandbox() {
         let p = official_profile("codex");
         let plan = launch_plan(&p, Some("sk-secret".into()), Some("gpt-5-codex"));
         assert!(plan.env.is_empty());
         let joined = plan.args.join(" ");
+        // 不写中转 provider 块；只把本进程默认渠道切到内置 ChatGPT
         assert!(!joined.contains("model_providers"));
-        assert!(!joined.contains("model_provider="));
+        assert!(joined.contains(r#"model_provider="openai""#));
+        assert!(!joined.contains(r#"web_search="disabled""#));
+        assert!(!joined.contains(r#"service_tier="auto""#));
+        // 官方账号保留内置 codex_apps（ChatGPT 订阅的 apps 功能可用），不跟着网关关
+        assert!(!joined.contains("features.apps=false"));
         assert!(joined.contains("-m gpt-5-codex"));
         // 默认沙箱与认证方式无关，官方账号同样生效；沙箱内联网同步放开
         assert!(joined.contains("-s workspace-write"));
         assert!(joined.contains("sandbox_workspace_write.network_access=true"));
         assert!(plan.env_remove.contains(&"CODEX_API_KEY".into()));
         assert!(plan.env_remove.contains(&"OPENAI_API_KEY".into()));
-        // 模型为空：只剩沙箱参数
+        // 模型为空：沙箱 + 本进程切 ChatGPT 渠道
         let bare = launch_plan(&p, None, None);
         assert_eq!(
             bare.args,
@@ -3245,9 +3355,27 @@ mod tests {
                 "-s",
                 "workspace-write",
                 "-c",
-                "sandbox_workspace_write.network_access=true"
+                "sandbox_workspace_write.network_access=true",
+                "-c",
+                r#"model_provider="openai""#,
             ]
         );
+    }
+
+    #[test]
+    fn official_codex_drops_deepseek_model() {
+        let p = official_profile("codex");
+        let plan = launch_plan(&p, None, Some("deepseek-v4-flash-0731"));
+        assert!(
+            !plan.args.iter().any(|a| a.contains("deepseek")),
+            "{:?}",
+            plan.args
+        );
+        assert!(!plan.args.iter().any(|a| a == "-m"));
+        assert!(plan
+            .args
+            .iter()
+            .any(|a| a.contains(r#"model_provider="openai""#)));
     }
 
     #[test]
@@ -3825,6 +3953,7 @@ mod tests {
         // 能力字段：有效上下文 95%（自动压缩阈值）、如实声明无 search tool
         assert_eq!(e["effective_context_window_percent"], 95);
         assert_eq!(e["supports_search_tool"], false);
+        assert_eq!(e["service_tiers"], serde_json::json!([]));
         // 图像输入按能力注册表：gpt-5 系不在确知多模态清单 → 仅 text
         assert_eq!(e["input_modalities"], serde_json::json!(["text"]));
         // 确知多模态（kimi-k3）→ text + image
@@ -3988,6 +4117,9 @@ mod tests {
         // kv 值含双引号 → 单引号包裹（sh_quote_if_needed），语义无损
         assert!(cmd.contains(r#"-c 'model_providers.ccode.base_url="https://relay.example.com/v1"'"#));
         assert!(cmd.contains(r#"-c 'model_provider="ccode"'"#));
+        assert!(cmd.contains(r#"-c 'web_search="disabled"'"#));
+        assert!(cmd.contains(r#"-c 'service_tier="auto"'"#));
+        assert!(cmd.contains("-c 'features.apps=false'"));
         assert!(cmd.starts_with("cd /tmp/proj && codex resume abc"));
         // 非 codex / 无 base_url：不追加任何定义（env 注入型 agent 裸 resume 即可）
         assert!(resume_extra_args("claude-code", Some("https://x"), None).is_empty());

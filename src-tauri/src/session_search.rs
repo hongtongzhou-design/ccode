@@ -519,22 +519,94 @@ fn locate_in_messages(msgs: &[sessions::ChatMessageDto], tokens: &[String]) -> O
 
 fn locate_jsonl(agent: &str, path: &Path, tokens: &[String]) -> Option<MatchLoc> {
     let iter = jsonl_lines_with_offset(path)?;
+    let mut items: Vec<(u64, String)> = Vec::new();
     let mut decoded = 0usize;
     for (offset, line) in iter {
         decoded = decoded.saturating_add(line.len());
-        let msgs = parse_session_lines(agent, std::slice::from_ref(&line));
-        if let Some(m) = msgs.into_iter().find(|m| message_has_token(m, tokens)) {
-            return Some(MatchLoc {
-                around: offset,
-                timestamp: m.timestamp,
-                role: m.role,
-            });
-        }
+        items.push((offset, line));
         if decoded >= DECODE_CAP {
             break;
         }
     }
+    if items.is_empty() {
+        return None;
+    }
+    // kimi 等把一条 assistant 拆成 step.begin + 多条 content.part；单行 parse 会丢掉正文。
+    let lines: Vec<String> = items.iter().map(|(_, l)| l.clone()).collect();
+    let msgs = parse_session_lines(agent, &lines);
+    let m = msgs.iter().find(|msg| message_has_token(msg, tokens))?;
+    let around = offset_of_message(&items, m, tokens).unwrap_or(items[0].0);
+    Some(MatchLoc {
+        around,
+        timestamp: m.timestamp.clone(),
+        role: m.role.clone(),
+    })
+}
+
+/// 从命中消息里取一段不易撞车的原文，去 jsonl 里找对应行的字节偏移。
+fn offset_of_message(
+    items: &[(u64, String)],
+    m: &sessions::ChatMessageDto,
+    tokens: &[String],
+) -> Option<u64> {
+    if let Some(n) = text_needle(m, tokens) {
+        if n.chars().count() >= 2 {
+            for (off, line) in items {
+                if line_has_fragment(line, &n) {
+                    return Some(*off);
+                }
+            }
+        }
+    }
+    for (off, line) in items {
+        let lower = line.to_lowercase();
+        if tokens.iter().any(|t| lower.contains(t.as_str())) {
+            return Some(*off);
+        }
+    }
     None
+}
+
+fn text_needle(m: &sessions::ChatMessageDto, tokens: &[String]) -> Option<String> {
+    for b in &m.blocks {
+        if b.kind != "text" {
+            continue;
+        }
+        let lower = b.text.to_lowercase();
+        for t in tokens {
+            let Some(byte_at) = lower.find(t.as_str()) else {
+                continue;
+            };
+            let char_at = lower[..byte_at].chars().count();
+            let chars: Vec<char> = b.text.chars().collect();
+            let tok_len = t.chars().count();
+            let to = (char_at + tok_len + 24).min(chars.len());
+            let mut n = String::new();
+            for c in chars.iter().take(to).skip(char_at) {
+                if *c == '\n' {
+                    break;
+                }
+                n.push(*c);
+            }
+            if n.chars().count() >= 2 {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+fn line_has_fragment(line: &str, fragment: &str) -> bool {
+    if line.contains(fragment) {
+        return true;
+    }
+    if let Ok(escaped) = serde_json::to_string(fragment) {
+        let inner = escaped.trim_matches('"');
+        if inner.len() >= 2 && line.contains(inner) {
+            return true;
+        }
+    }
+    line.to_lowercase().contains(&fragment.to_lowercase())
 }
 
 fn jsonl_lines_with_offset(path: &Path) -> Option<LineOffsetIter> {
@@ -759,6 +831,36 @@ mod tests {
         assert_eq!(loc.around, expect);
         assert_eq!(loc.role, "user");
         assert_eq!(loc.timestamp.as_deref(), Some("2026-09-02T01:00:00Z"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn locate_jsonl_kimi_loop_events_needs_full_parse() {
+        let dir = std::env::temp_dir().join(format!("ccode-ss-kimi-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("wire.jsonl");
+        let lines = [
+            r#"{"type":"metadata","protocol_version":"1.4","created_at":1785307071000}"#,
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"跑一下测试"}],"origin":{"kind":"user"},"time":1785307072000}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"step.begin","step":1},"time":1785307072100}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"think","think":"先想"}},"time":1785307072200}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"我来跑 web_search 参数"}},"time":1785307072300}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"step.end","usage":{"inputOther":500,"output":60}},"time":1785307072600}"#,
+        ];
+        let mut content = String::new();
+        let mut hit_at = 0u64;
+        for (i, line) in lines.iter().enumerate() {
+            if i == 4 {
+                hit_at = content.len() as u64;
+            }
+            content.push_str(line);
+            content.push('\n');
+        }
+        std::fs::write(&file, &content).unwrap();
+        let loc = locate_jsonl("kimi", &file, &["web".into()]).expect("kimi 流式正文应能定位");
+        assert_eq!(loc.around, hit_at);
+        assert_eq!(loc.role, "assistant");
+        assert!(loc.timestamp.is_some());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

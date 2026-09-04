@@ -80,6 +80,39 @@ export function looksLikeModelId(value: string): boolean {
   return /[-./:]/.test(v) || /\d/.test(v);
 }
 
+/** 官方账号禁止把中转/国产网关模型名跟着注入（否则 Codex 会 -m deepseek 还带 service_tier=priority）。
+ *  与 agents.rs official_model_allowed 双端镜像。 */
+export function officialModelAllowed(agent: string, model: string): boolean {
+  const m = model.trim().toLowerCase();
+  if (!m) return false;
+  const foreign = [
+    "deepseek",
+    "qwen",
+    "glm-",
+    "glm/",
+    "moonshot",
+    "kimi-",
+    "doubao",
+    "hunyuan",
+    "yi-",
+    "ernie",
+    "baichuan",
+    "minimax",
+    "spark-",
+  ];
+  if (foreign.some((p) => m.includes(p))) return false;
+  if (agent === "codex") {
+    return (
+      m.startsWith("gpt-") ||
+      m.startsWith("o1") ||
+      m.startsWith("o3") ||
+      m.startsWith("o4") ||
+      m.includes("codex")
+    );
+  }
+  return true;
+}
+
 /**
  * 换 profile 时模型输入怎么处理（v3.88 修「静默清空」）：
  * 原实现无条件把模型重置为新 profile 的 models[0]，用户手填的模型被悄悄丢掉。

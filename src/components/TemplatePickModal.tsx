@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   PIPELINE_TEMPLATES,
@@ -6,9 +6,7 @@ import {
   type PipelineTemplateDef,
   type SubmissionMode,
 } from "../pipeline-presets";
-import type {
-  AppendStepsResultDto,
-} from "../types";
+import type { AppendStepsResultDto, ProjectConfigReadDto } from "../types";
 import { fieldClass, primaryActionClass, secondaryActionClass } from "./PageFrame";
 
 /**
@@ -16,6 +14,7 @@ import { fieldClass, primaryActionClass, secondaryActionClass } from "./PageFram
  * 选项 = 内置六套模板（名称 + 一句话说明 + 步骤数），选中即把模板步骤追加进
  * project.toml（append_pipeline_steps：重名跳过、全跳过不落盘、顺带清 pipeline_opt_out）；
  * 「不使用研究流程」= 显式写 pipeline_opt_out = true（记住选择，不再显示模板引导），
+ * 课题主题只在本层顶部填（科研流程开工才写进 TASK.md），不在「添加项目」弹窗。
  * 「稍后再选」= 只关闭不留痕；两条路事后都可从项目组 ⋯ 或编辑器「＋ 从模板追加」补。
  *
  * v3.90 第二屏「全局设定」：模板带 projectSettings（贯穿全程的决定）时，
@@ -32,7 +31,7 @@ export default function TemplatePickModal({
 }: {
   projectPath: string;
   projectName: string;
-  /** 「稍后再选」/遮罩点击：只关闭，不写任何标记 */
+  /** 「稍后再选」/遮罩点击：不写流程标记；已填的课题主题会落盘 */
   onClose: () => void;
   /** 「不使用研究流程」：已把 pipeline_opt_out = true 写进 project.toml，父级关闭并刷新 */
   onOptOut: () => void;
@@ -53,6 +52,44 @@ export default function TemplatePickModal({
   const [submissionMode, setSubmissionMode] =
     useState<SubmissionMode>("initial");
   const [submissionRound, setSubmissionRound] = useState(1);
+  const [topic, setTopic] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<ProjectConfigReadDto>("read_project_config", { path: projectPath })
+      .then((read) => {
+        if (cancelled) return;
+        const t = read.config.topic?.trim();
+        if (t) setTopic(t);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPath]);
+
+  async function persistTopicIfFilled() {
+    const t = topic.trim();
+    if (!t) return;
+    try {
+      const read = await invoke<ProjectConfigReadDto>("read_project_config", {
+        path: projectPath,
+      });
+      if ((read.config.topic ?? "").trim() === t) return;
+      await invoke("write_project_config", {
+        path: projectPath,
+        config: { ...read.config, topic: t },
+      });
+    } catch {
+      /* 稍后仍可在项目头补 */
+    }
+  }
+
+  async function closeLater() {
+    if (busy) return;
+    await persistTopicIfFilled();
+    onClose();
+  }
 
   /** 「问题：（提示）」拆成问题与提示（提示去掉括号做输入占位） */
   function splitSetting(line: string): { q: string; hint: string } {
@@ -105,7 +142,7 @@ export default function TemplatePickModal({
           steps: pipelineStepsForTemplate(tpl, mode ?? "initial", round),
           projectSettings,
           strategy: "append",
-          topic: null,
+          topic: topic.trim() || null,
           submissionMode: submission ? mode ?? "initial" : null,
           submissionRound: submission && mode === "revision" ? round : null,
         },
@@ -123,6 +160,7 @@ export default function TemplatePickModal({
     setBusy("__optout__");
     setError(null);
     try {
+      await persistTopicIfFilled();
       await invoke("set_pipeline_opt_out", {
         projectRoot: projectPath,
         optOut: true,
@@ -137,7 +175,7 @@ export default function TemplatePickModal({
   return (
     <div
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
+      onClick={() => void closeLater()}
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -302,8 +340,23 @@ export default function TemplatePickModal({
               选择研究流程模板
             </h2>
             <p className="mb-4 text-xs text-l3">
-              「{projectName}」已添加。挑一套研究流程，也可以先空着。
+              「{projectName}」已添加。写论文请挑一套流程；只读文献、写笔记，选下面的「不使用研究流程」。
             </p>
+            <label className="mb-4 block">
+              <span
+                className="mb-1 block text-xs text-l3"
+                title="每次开工时写进 TASK.md，给 Agent 交代研究背景"
+              >
+                课题主题（可选）
+              </span>
+              <input
+                className={fieldClass}
+                value={topic}
+                onChange={(e) => setTopic(e.target.value)}
+                placeholder="如 GLP-1 受体激动剂的心血管结局"
+                autoFocus
+              />
+            </label>
             <ul className="space-y-1.5">
               {PIPELINE_TEMPLATES.map((t) => (
                 <li key={t.id}>
@@ -335,14 +388,14 @@ export default function TemplatePickModal({
                 type="button"
                 disabled={busy !== null}
                 onClick={() => void optOut()}
-                title="项目保持空白，只作为目录与任务的分组管理（记住这个选择，不再显示模板引导）"
+                title="不挂步进器，只把这个文件夹当文献库：沉浸阅读和笔记都写在这里（记住选择，不再显示模板引导）"
                 className="rounded-sm px-3 py-1.5 text-sm text-l3 hover:bg-hover hover:text-l2 disabled:opacity-50"
               >
-                {busy === "__optout__" ? "保存中…" : "不用，别再提示"}
+                {busy === "__optout__" ? "保存中…" : "不使用研究流程"}
               </button>
               <button
                 type="button"
-                onClick={onClose}
+                onClick={() => void closeLater()}
                 title="之后可从项目组 ⋯「选择研究流程模板」或编辑器「＋ 从模板追加」随时添加"
                 className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
               >

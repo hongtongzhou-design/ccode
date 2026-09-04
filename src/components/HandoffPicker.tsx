@@ -100,7 +100,7 @@ export default function HandoffPicker({
         fromAgent: source.agent,
         fromSessionId: source.sessionId,
       });
-      const prompt = `读 ${relPath(brief.filePath)} 接力简报，继续完成任务`;
+      const prompt = `读 ${relPath(brief.filePath)} 接力简报，按这份简报接着做`;
       if (t.promptSupported) {
         goTerminal(t, prompt);
       } else {
@@ -134,7 +134,7 @@ export default function HandoffPicker({
       >
         <div className="px-3 pb-2">
           <p className="font-medium text-l1">◈ 接力到…</p>
-          <p className="mt-1 text-xs text-l4">生成一份简报交给新 Agent 继续（不是完整记忆）。</p>
+          <p className="mt-1 text-xs text-l4">生成一份简报交给新 Agent 接着做（不是完整记忆）。</p>
         </div>
         {error && <p className="px-3 pb-1 text-xs text-err-text">{error}</p>}
         {ready ? (

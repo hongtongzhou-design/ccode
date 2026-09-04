@@ -8,6 +8,11 @@ import ContextMenu from "../components/ContextMenu";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { confirmDialog } from "../components/ConfirmDialog";
 import {
+  isBuiltinSkill,
+  skillDeleteImpact,
+  skillOriginLabel,
+} from "../skill-delete";
+import {
   Checkbox,
   EmptyState,
   fieldClass,
@@ -33,6 +38,7 @@ import type {
 
 const SOURCE_LABEL: Record<string, string> = {
   builtin: "内置",
+  ccode: "自建",
   local: "本地",
   zip: "ZIP",
   github: "GitHub",
@@ -302,33 +308,15 @@ function ImportModal({
           {tabBtn("github", "GitHub 仓库")}
         </div>
         {tab === "dir" && (
-          <div className="mb-4">
-            <p className="mb-3 text-xs text-l3">
-              选择包含技能（SKILL.md）的目录。
-            </p>
-            <button
-              onClick={pickDir}
-              disabled={busy}
-              className="rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:brightness-125 disabled:opacity-50"
-            >
-              选择目录…
-            </button>
-          </div>
+          <p className="text-xs text-l3">
+            选择包含技能（SKILL.md）的目录。
+          </p>
         )}
         {tab === "zip" && (
-          <div className="mb-4">
-            <p className="mb-3 text-xs text-l3">选择技能打包的 .zip 文件。</p>
-            <button
-              onClick={pickZip}
-              disabled={busy}
-              className="rounded-sm bg-btn px-3 py-1.5 text-sm text-l1 hover:brightness-125 disabled:opacity-50"
-            >
-              选择 ZIP…
-            </button>
-          </div>
+          <p className="text-xs text-l3">选择技能打包的 .zip 文件。</p>
         )}
         {tab === "github" && (
-          <div className="mb-4">
+          <div>
             <div className="mb-2 flex flex-wrap gap-1.5">
               {GITHUB_PRESETS.map((p) => (
                 <button
@@ -371,29 +359,13 @@ function ImportModal({
                 />
               </label>
             </div>
-            <div className="mt-3 flex justify-end">
-              <button
-                onClick={() => {
-                  const parsed = parseGithubInput(repo);
-                  run("import_skills_from_github", {
-                    repo: parsed.repo,
-                    branch: branch.trim() || parsed.branch,
-                    subdir: subdir.trim() || parsed.subdir,
-                  });
-                }}
-                disabled={busy || !repo.trim()}
-                className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
-              >
-                {busy ? "下载中…" : "导入"}
-              </button>
-            </div>
           </div>
         )}
-        {busy && tab !== "github" && (
-          <p className="mb-2 text-xs text-l3">导入中…</p>
+        {busy && tab !== "github" && !result && (
+          <p className="mt-2 text-xs text-l3">导入中…</p>
         )}
         {result && (
-          <div className="mb-3 rounded-sm border border-field bg-inset p-3 text-xs">
+          <div className="mt-3 rounded-sm border border-field bg-inset p-3 text-xs">
             <p className="text-l2">{summary(result)}</p>
             {result.added.length > 0 && (
               <p className="mt-1 break-words text-ok-text">
@@ -460,7 +432,7 @@ function ImportModal({
                         (item) => !renameTargets[item.name]?.trim(),
                       )
                     }
-                    className="rounded-sm bg-btn px-2 py-1 text-l1 hover:brightness-125 disabled:opacity-50"
+                    className={secondaryActionClass}
                   >
                     全部另存为
                   </button>
@@ -477,11 +449,49 @@ function ImportModal({
             )}
           </div>
         )}
-        {error && <p className="mb-2 text-sm text-err-text">{error}</p>}
-        <div className="flex justify-end">
+        {error && <p className="mt-2 text-sm text-err-text">{error}</p>}
+        <div className="mt-4 flex justify-end gap-2">
+          {tab === "dir" && (
+            <button
+              type="button"
+              onClick={pickDir}
+              disabled={busy}
+              className={primaryActionClass}
+            >
+              {busy ? "导入中…" : "选择目录…"}
+            </button>
+          )}
+          {tab === "zip" && (
+            <button
+              type="button"
+              onClick={pickZip}
+              disabled={busy}
+              className={primaryActionClass}
+            >
+              {busy ? "导入中…" : "选择 ZIP…"}
+            </button>
+          )}
+          {tab === "github" && (
+            <button
+              type="button"
+              onClick={() => {
+                const parsed = parseGithubInput(repo);
+                void run("import_skills_from_github", {
+                  repo: parsed.repo,
+                  branch: branch.trim() || parsed.branch,
+                  subdir: subdir.trim() || parsed.subdir,
+                });
+              }}
+              disabled={busy || !repo.trim()}
+              className={primaryActionClass}
+            >
+              {busy ? "下载中…" : "导入"}
+            </button>
+          )}
           <button
+            type="button"
             onClick={onClose}
-            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
+            className={secondaryActionClass}
           >
             关闭
           </button>
@@ -590,6 +600,89 @@ function DiscoverModal({
               {busy ? "导入中…" : `导入选中（${checked.size}）`}
             </button>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 删除确认弹层（删除保护，与 MCP 收编条目弹层同思路但语义不同——技能删除没有
+ *  「保留 agent 侧副本」选项：分发出去的本就是 Ccode 管的链接/带标记副本，删除即回收）：
+ *  所有技能列出影响面（apps 已分发的 agent）；内置种子额外警告不会复活；
+ *  外部导入提示来源；删除前库目录自动备份（delete_impl 先备份再卸载，保留最近 5 份）。 */
+function DeleteSkillModal({
+  skill,
+  onClose,
+  onConfirm,
+}: {
+  skill: SkillDto;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const impact = skillDeleteImpact(skill.apps, AGENTS);
+  const origin = skillOriginLabel(skill);
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm();
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
+      >
+        <h2 className="mb-2 text-base font-semibold text-l1">
+          删除技能「{skill.name}」？
+        </h2>
+        {isBuiltinSkill(skill.source) && (
+          <p className="mb-1 text-xs leading-5 text-warn-text">
+            这是内置技能：删除后不会随启动恢复（内置技能只在种子升级时补播缺失的，
+            不复活已删除的）。
+          </p>
+        )}
+        {origin && (
+          <p className="mb-1 text-xs leading-5 text-l3">来源：{origin}。</p>
+        )}
+        {impact.length > 0 && (
+          <p className="mb-1 text-xs leading-5 text-l3">
+            将从以下 agent 的技能目录移除：{impact.join("、")}
+            （只移除 Ccode 分发的副本/链接，你自己放的同名内容不受影响）。
+          </p>
+        )}
+        <p className="mb-1 text-xs leading-5 text-l4">
+          删除前会把技能库目录自动备份（每个技能保留最近 5 份），需要时可从备份手动找回。
+        </p>
+        {error && <p className="mb-2 text-sm text-err-text">{error}</p>}
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
+          >
+            取消
+          </button>
+          <button
+            onClick={() => void submit()}
+            disabled={busy}
+            autoFocus
+            className="rounded-sm bg-err px-3 py-1.5 text-sm text-err-text hover:brightness-110 disabled:opacity-50"
+          >
+            {busy ? "删除中…" : "删除"}
+          </button>
         </div>
       </div>
     </div>
@@ -1352,21 +1445,13 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  async function onDelete(skill: SkillDto) {
-    if (
-      !(await confirmDialog(
-        `将删除技能「${skill.name}」并同步从各 agent 移除（库文件自动备份）。继续？`,
-        { danger: true },
-      ))
-    )
-      return;
-    try {
-      await invoke("delete_skill", { id: skill.id });
-      if (preview?.skill.id === skill.id) setPreview(null);
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    }
+  // 删除确认改走 DeleteSkillModal 弹层（影响面/来源/内置警告/备份说明集中在弹层里）
+  const [deleteTarget, setDeleteTarget] = useState<SkillDto | null>(null);
+
+  async function confirmDelete(skill: SkillDto) {
+    await invoke("delete_skill", { id: skill.id });
+    if (preview?.skill.id === skill.id) setPreview(null);
+    await refresh();
   }
 
   // 一键应用 GitHub 更新：按安装时记录的 repo/ref/subdir 下载并覆盖（自动备份），只动该技能
@@ -2124,6 +2209,13 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           onBound={(msg) => setNotice(msg)}
         />
       )}
+      {deleteTarget && (
+        <DeleteSkillModal
+          skill={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={() => confirmDelete(deleteTarget)}
+        />
+      )}
       {modal?.kind === "import" && (
         <ImportModal
           initialGithub={modal.github}
@@ -2260,7 +2352,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                   },
                 ]
               : []),
-            { label: "删除", onSelect: () => void onDelete(rowMenu.skill) },
+            { label: "删除", onSelect: () => setDeleteTarget(rowMenu.skill) },
           ]}
         />
       )}

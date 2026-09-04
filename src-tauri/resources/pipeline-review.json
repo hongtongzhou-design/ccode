@@ -1,0 +1,216 @@
+{
+  "id": "review",
+  "name": "英文综述",
+  "projectSettings": [
+    "综述角度：（领域全景 / 聚焦某个子问题）",
+    "目标篇幅：（如 6000-8000 词）",
+    "读者与文风：（偏同行专家 / 偏入门科普）",
+    "去向：（投期刊 / 毕业论文一章 / 课程作业）",
+    "综述深度：（标准档 / 严格档·PRISMA-S）"
+  ],
+  "steps": [
+    {
+      "name": "文献检索与筛选",
+      "role": "both",
+      "workspaceName": "lit-search",
+      "brief": "输入：课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源推断一个最可能的主题，写进 papers/screening.md 开头「检索主题假设」一节，并按该假设执行到底，不留「待定」）。全程按 lit-search 技能执行。全局设定若写了「综述深度：严格档」，按技能严格档（引用扩展强制、screening 末尾 PRISMA-S 最小披露）；未写或标准档则按技能默认标准档。本文仍是单人筛选，不是双人系统综述，Methods 里如实声明。\n1. 制定纳入/排除标准（年份、语言、来源级别、相关性口径），写进 papers/screening.md。**先粗检一轮报数再定标准**：用主题词在 OpenAlex 粗查命中量，把「命中约 N 篇」与你建议的标准写进 .ccode/help-wanted.md 问用户一句（附兜底：若未回复则按你建议的标准继续），写完不要停工、按兜底往下做。——标准松紧取决于命中量，开工前问用户等于让他在没有数字的时候猜；\n2. 先解析人工导入的题录（RIS/BibTeX/CSV），三处都要看：① 本文件「项目根」下 papers/imports/；② 工作区内 papers/imports/；③ 「项目资源」段类型为「引文」的条目、以及「上一步产物（提货单）」段中来自「人工交付」的条目——后两类给绝对路径，按路径直读、勿复制。都没有才跳过。解析后按 lit-search 技能口径去重合并进候选池，每条保留来源标注；\n3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式、检索日期与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；末尾写覆盖缺口声明（哪些库没检）；\n4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律纳入并标注「待确认」，不允许自行裁掉；\n5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；\n6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR + TI/DO/UR 尽力而为，缺字段留空不编造），供用户一键导入 Zotero 建成待获取列表。\n完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris 均存在（无付费文献则 to-fetch 两个文件注明为空），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。",
+      "expectedArtifacts": [
+        "papers/screening.md",
+        "papers/included.md",
+        "papers/to-fetch.md",
+        "papers/to-fetch.ris"
+      ],
+      "skills": [
+        "lit-search"
+      ],
+      "asksLitSource": true,
+      "run": [],
+      "humanTasks": [
+        {
+          "title": "（可选）配置学术检索 MCP",
+          "guidance": "到 MCP 页用预设导入 Consensus / Undermind（密钥走环境变量引用，不落明文）。不配也能跑：OpenAlex / Semantic Scholar / arXiv / Crossref 免 key。",
+          "target": "",
+          "timing": "before",
+          "optional": true,
+          "completion": "manual"
+        },
+        {
+          "title": "下载付费墙文献全文",
+          "guidance": "拿到全文后导入文献与数据，或直接拖到这一行——文件会落到**项目根 papers/**，不是当前工作区。\n\nagent 筛完会把拿不到全文的列进 papers/to-fetch.md，并附 papers/to-fetch.ris——拖进 Zotero 会自动建成待获取列表。渠道自选：机构图书馆、作者邮件索取 preprint 等。拿到后：把 PDF 拖到这一行，或拷进项目 papers/ 目录，或放进你的文献库后到「文献与数据」重新导入（进库的导完回来手动勾一下）。文件名随意，下一步 agent 会统一改成 作者年份-短标题.pdf；不补的话 agent 按摘要写笔记并标注「仅摘要」。",
+          "target": "papers/*.pdf",
+          "timing": "after",
+          "optional": true
+        }
+      ],
+      "decisions": [],
+      "acceptanceCriteria": [
+        "所有必需预期产物均已生成且非空；目录/通配条目至少命中一个非空文件。"
+      ],
+      "requiredSkills": [
+        "lit-search"
+      ]
+    },
+    {
+      "name": "文献精读与笔记",
+      "role": "both",
+      "workspaceName": "lit-notes",
+      "brief": "输入：上一步产物 papers/included.md 与 papers/to-fetch.md（已随 main 合并在本工作区内）。全程按 lit-notes 技能执行。\n1. 先整理人工补投：项目根 papers/（见上方「项目根」，含未进本工作区的文件，按绝对路径读）中命名不符「作者年份-短标题.pdf」的 PDF，对照 included.md/to-fetch.md 判定归属后重命名规范，并在 to-fetch.md 勾掉已补行（拿不准归属的不改名、标注「待确认」）；再按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题或自行补清单）；\n2. 精读力度按需问（v3.97）：力度取决于清单规模与全文到位率，开工前问等于让人盲猜。**先粗读 included.md 全部条目的标题与摘要，把「共 N 篇、全文到位 M 篇、我建议核心精读 K 篇（列篇目）其余按摘要记」写进 .ccode/help-wanted.md 问用户一句**（附兜底：若未回复则按你建议的分配继续），写完不要停工、按兜底往下做；\n3. 全文来源优先级（写死）：项目根 papers/ 已有 PDF（含人工补投）→ 开放获取补下到项目根 papers/（arXiv/PMC/作者主页 preprint）→ 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」，不得装作读过全文；\n4. 每篇产出 notes/<序号-短标题>.md，开头先记来源锚点行「> 来源 PDF：<项目内相对路径>.pdf」（沉浸阅读区靠它认回笔记不另建重复），固定结构按 lit-notes 技能八段：一句话总结（≤50字）/ 研究问题 / 方法（附可复现细节）/ 主要结果（区分实验证明与作者推测，注页码+表/图编号）/ 局限（作者自述与本笔记识别分开列）/ 可引用点（原文关键句+页码或段落位置）/ 与本课题的关系 / 疑问与待跟进（待跟进引用同时追加 papers/to-fetch.md）；\n5. 每篇在 references.bib 追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」、未经权威源核对标「待核」，不得编造）；\n6. 收尾前复查：notes/ 中「仅摘要」笔记对应的全文若已出现在项目根 papers/（人工补投），重读全文并更新该笔记、去掉标记；仍未补的保持标注并在报告末尾计数说明。\n完成标准：included.md 每篇都有对应笔记与 bib 条目；notes/ 与 references.bib 均已提交。",
+      "inputs": [
+        "papers/included.md",
+        "papers/to-fetch.md"
+      ],
+      "optionalInputs": [
+        "papers/*.pdf"
+      ],
+      "expectedArtifacts": [
+        "notes/*.md",
+        "references.bib",
+        "papers/to-fetch.md"
+      ],
+      "skills": [
+        "lit-notes"
+      ],
+      "run": [],
+      "humanTasks": [
+        {
+          "title": "继续精读笔记（沉浸阅读区）",
+          "guidance": "验收后想补读或修正哪篇笔记：项目详情的产物清单、或终端页文件树里点开 notes/ 中那份 md →「⛶ 沉浸阅读」进三栏阅读区（笔记｜PDF｜Agent 并排，笔记可直接改，右栏 agent 也能改同一份）。改的是主仓里的笔记本身——改完到「改动」面板提交一下，后面的大纲/初稿步骤读到的就是你的修改版（主仓未提交的改动不进下一步工作区，开工弹层也会提醒）。",
+          "target": "",
+          "timing": "after",
+          "optional": true
+        }
+      ],
+      "decisions": [],
+      "acceptanceCriteria": [
+        "所有必需预期产物均已生成且非空；目录/通配条目至少命中一个非空文件。",
+        "正文引用键均能在 references.bib 解析；未解析键与待补元数据已列出。"
+      ],
+      "requiredSkills": [
+        "lit-notes"
+      ]
+    },
+    {
+      "name": "综述大纲",
+      "role": "you",
+      "workspaceName": "outline",
+      "brief": "输入：notes/ 全部笔记、papers/included.md 与 references.bib（已随 main 合并在本工作区内）。框架构造全程按 review-framework 技能执行（空白清单 → 范式卡片 → 融合）：\n1. 提炼研究空白清单：通读 notes/ 各笔记的「局限」与「可引用点」，最新一批精读文献回到原文前言核对作者自述的 gap（优先级最高）；每条空白标注来源笔记/bib 键，多条指向同一空白时合并；仅凭单篇文献主观抱怨的标「孤证」；\n2. 拆解范式卡片：从 papers/included.md 选 2-3 篇权威综述类文献（期刊级别/被引优先；清单里没有综述类文献时如实说明并跳过本步，不虚构范式），每篇拆「结构逻辑 / 详略配比 / 论证顺序」三项；\n3. **先报候选再融合**：把拆出的范式卡片连同「我建议以哪篇为骨架（按覆盖空白数给理由）+ 建议的综述卖点（想让读者读完记住的一句话）」写进 .ccode/help-wanted.md 问用户一句（附兜底：若未回复则按建议执行），写完不要停工、按兜底往下做。——骨架与卖点是全篇最贵的返工点，但开工前问等于让用户在没看到候选时盲选；\n4. 融合构造框架：以覆盖空白最多的范式做骨架（用户已拍板时从用户选择），每条空白落到具体章节；范式冲突时选覆盖空白更多的，落选范式的局部优点吸收为节内参考；不新造与空白无关的章节；空白无处安放时允许新增章节并在该节标注「空白驱动新增」；\n5. 产出 outline.md：章节结构（引言 / 背景 / 主题各节 / 讨论 / 结论），每节给要点（3-6 条）、拟引用 bib 键、回应空白编号；末尾固定附「## 框架推演」段（空白清单 / 范式卡片 / 融合理由三块）；\n6. 只引用 references.bib 中存在的键，不为大纲新造引用。\n完成标准：outline.md 结构完整，每节要点/引用键/回应空白齐全，「框架推演」段三块内容齐备。",
+      "expectedArtifacts": [
+        "outline.md"
+      ],
+      "inputs": [
+        "notes/",
+        "papers/included.md",
+        "references.bib"
+      ],
+      "skills": [
+        "review-framework"
+      ],
+      "run": [],
+      "humanTasks": [
+        {
+          "title": "审阅 outline.md 再开初稿",
+          "guidance": "重点看末尾「框架推演」段的取舍理由与空白-章节对应；框架不合意时回任务书草稿改，比初稿写完再返工便宜",
+          "target": "",
+          "timing": "after"
+        }
+      ],
+      "acceptanceCriteria": [
+        "所有必需预期产物均已生成且非空；目录/通配条目至少命中一个非空文件。"
+      ],
+      "requiredSkills": [
+        "review-framework"
+      ]
+    },
+    {
+      "name": "综述初稿",
+      "workspaceName": "draft",
+      "brief": "输入：outline.md（含「框架推演」段）、notes/、references.bib（已随 main 合并在本工作区内）。写作规范全程按 review-writing 技能执行。\n1. 按 outline.md 用规范学术英文撰写综述初稿，产出 manuscript/draft.md（目标 6000-8000 词，课题主题段另有约定时从其约定）；全局设定为严格档时，Methods 须写检索策略（库、日期、式、筛选流程），并声明本文为单人筛选、不是双人系统综述；\n2. 引用一律用 [@bib键] 形式，且只能引用 references.bib 中已存在的键——严禁编造文献、严禁新造键；\n3. 对照表用 markdown 真表，不假装已绘图；概念图/流程图可占位「图 N：…（待绘制）」，不虚构数据；\n4. 没有文献支撑的论断不得下；必须保留的判断在句末标 [待核实]；\n5. 用本步骤 run 脚本渲染 PDF/docx（环境检查与产物登记按 quarto-render 技能），产物写入项目根 output/。\n完成标准：manuscript/draft.md 覆盖大纲全部章节，引用键全部可在 references.bib 中解析，run 脚本渲染通过。",
+      "expectedArtifacts": [
+        "manuscript/draft.md",
+        "output/draft.pdf",
+        "output/draft.docx"
+      ],
+      "inputs": [
+        "outline.md",
+        "notes/",
+        "references.bib"
+      ],
+      "skills": [
+        "review-writing",
+        "quarto-render"
+      ],
+      "run": [
+        {
+          "name": "render-draft",
+          "command": "quarto render manuscript/draft.md --to pdf --output-dir output",
+          "default": true
+        },
+        {
+          "name": "export-docx",
+          "command": "quarto render manuscript/draft.md --to docx --output-dir output",
+          "default": true
+        }
+      ],
+      "acceptanceCriteria": [
+        "所有必需预期产物均已生成且非空；目录/通配条目至少命中一个非空文件。",
+        "渲染命令成功且再生产物为非零字节；渲染警告已记录。"
+      ],
+      "requiredSkills": [
+        "review-writing",
+        "quarto-render"
+      ]
+    },
+    {
+      "name": "润色与定稿",
+      "role": "you",
+      "workspaceName": "polish",
+      "brief": "输入：manuscript/draft.md 与 references.bib（已随 main 合并在本工作区内）。\n1. 先按 bib-check 技能对 draft.md 做引用完整性校验，产出 manuscript/citation-check.md（该技能只读不改稿：未解析引用/字段缺失/元数据存疑逐条列出，联网可用时加做 Crossref/arXiv 外部核验）；\n2. 按报告修正（修稿由本步执行，不是 bib-check 的职责）：未解析引用键改为 references.bib 中正确键或补条目（补条目缺字段标「待补」）；「疑似编造」条目不得自行删除对应论断，句末标 [待核实] 并在 changelog 记录；「未引用条目」只在报告列出、不删；\n3. 语言润色按 review-writing 技能阶段三：语法、用词、句式与段落衔接，保持学术语气；只改表达，不改学术观点；图表占位编号连续；发现内容性错误标 [待核实]，不得自行改写事实；\n4. 产出 manuscript/review-final.md 定稿（文末 References 节按 references.bib 生成完整文献列表）与 manuscript/changelog.md（逐条列出主要修改点及对应 citation-check.md 条目；未补的「待绘制」占位列入 changelog，不得假装已绘）；\n5. 收尾再按 bib-check 复核 review-final.md，结论追加进 citation-check.md；\n6. 用本步骤 run 脚本渲染 PDF/docx（按 quarto-render 技能），产物写入项目根 output/。\n完成标准：review-final.md 无语法硬伤、引用键全部可解析；citation-check.md 结论为通过（遗留问题均已标 [待核实] 并列入 changelog）；changelog.md 已提交；run 脚本渲染通过。",
+      "expectedArtifacts": [
+        "manuscript/review-final.md",
+        "manuscript/changelog.md",
+        "manuscript/citation-check.md",
+        "output/review-final.pdf",
+        "output/review-final.docx"
+      ],
+      "inputs": [
+        "manuscript/draft.md",
+        "references.bib"
+      ],
+      "skills": [
+        "review-writing",
+        "bib-check",
+        "quarto-render"
+      ],
+      "run": [
+        {
+          "name": "render-final",
+          "command": "quarto render manuscript/review-final.md --to pdf --output-dir output --output review-final.pdf",
+          "default": true
+        },
+        {
+          "name": "export-docx",
+          "command": "quarto render manuscript/review-final.md --to docx --output-dir output --output review-final.docx",
+          "default": true
+        }
+      ],
+      "humanTasks": [
+        {
+          "title": "核对定稿中的 [待核实] 与存疑条目",
+          "guidance": "review-final.md 的 [待核实] 与 citation-check.md 的「疑似编造/元数据存疑」只有你能对照原始文献拍板；逐条确认或改正后再算定稿",
+          "target": "",
+          "timing": "after"
+        }
+      ],
+      "acceptanceCriteria": [
+        "所有必需预期产物均已生成且非空；目录/通配条目至少命中一个非空文件。",
+        "正文引用键均能在 references.bib 解析；未解析键与待补元数据已列出。",
+        "渲染命令成功且再生产物为非零字节；渲染警告已记录。"
+      ],
+      "requiredSkills": [
+        "review-writing",
+        "bib-check",
+        "quarto-render"
+      ]
+    }
+  ]
+}

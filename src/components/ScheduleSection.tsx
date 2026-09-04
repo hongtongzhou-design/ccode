@@ -1,9 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
-import { FoldMark, inlineActionClass, Toggle, fieldClass } from "./PageFrame";
+import {
+  FoldMark,
+  inlineActionClass,
+  projectWellClass,
+  Toggle,
+  fieldClass,
+} from "./PageFrame";
 import { useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
 import {
@@ -12,40 +19,55 @@ import {
   summaryPreview,
 } from "../schedule-tasks";
 import {
+  LIT_WATCH_SKILL,
+  buildWatchSkillSeedPrompt,
+  defaultScheduleName,
   followSkillName,
+  isLitWatchSkill,
   scheduleSkillOptions,
+  scheduleSkillOptionsForEdit,
 } from "../schedule-skill";
+import { beginAskAi } from "./AskAiModal";
 import { AGENTS } from "../types";
 import type {
   RunRecordDto,
   ScheduleDto,
   SchedulerRunDonePayload,
   SkillDto,
+  WatchSkillDraftDto,
 } from "../types";
+
+const NEW_WATCH = "__new__";
+
+/** 弹层挂到 body：页头 sticky z-20 在 overflow 滚动容器里会盖住同树里的 fixed 遮罩，浅色下像顶部一条白。 */
+function FloatLayer({ children }: { children: ReactNode }) {
+  return createPortal(children, document.body);
+}
 
 const actionBtn = inlineActionClass;
 
 /** 历史条目最多展开显示条数（DTO 保留最近 20 条，行内只看最近几条） */
 const HISTORY_PREVIEW = 5;
 
-/** 「＋ 定时巡检」弹层：技能可选（默认 lit-watch 文献监控），任务名默认值跟随技能（手改过不覆盖）；
- *  「关联步骤」可选：雷达新命中晚于该步骤推进时，文献雷达卡片给漂移提醒 */
+/** 「＋ 定时巡检」弹层：文献雷达 / 已有巡检技能 / 新建巡检技能（跟 AI 写 SKILL.md，确认才落盘） */
 function CreateScheduleModal({
   projectRoot,
   steps,
   onClose,
   onCreated,
+  onDraftStarted,
 }: {
   projectRoot: string;
-  /** 项目步骤表（关联步骤下拉选项；空表 = 无研究流程，不渲染该下拉） */
   steps: { name: string }[];
   onClose: () => void;
   onCreated: () => void;
+  onDraftStarted: () => void;
 }) {
   const profiles = useAppStore((s) => s.profiles);
   const [name, setName] = useState("文献雷达");
-  const [skill, setSkill] = useState("lit-watch");
+  const [skill, setSkill] = useState(LIT_WATCH_SKILL);
   const [skills, setSkills] = useState<SkillDto[]>([]);
+  const [intent, setIntent] = useState("");
   const [frequency, setFrequency] = useState<"daily" | "weekly">("daily");
   const [weekday, setWeekday] = useState(1);
   const [time, setTime] = useState("09:00");
@@ -54,7 +76,12 @@ function CreateScheduleModal({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // 技能库供「技能」下拉（读取失败保持空表，scheduleSkillOptions 兜底 lit-watch）
+  const isNew = skill === NEW_WATCH;
+  const kindOptions = [
+    ...scheduleSkillOptions(skills),
+    { id: NEW_WATCH, name: "＋ 新建巡检技能" },
+  ];
+
   useEffect(() => {
     let stale = false;
     invoke<SkillDto[]>("list_skills")
@@ -68,7 +95,22 @@ function CreateScheduleModal({
   }, []);
 
   function onSkillChange(next: string) {
-    setName((cur) => followSkillName(cur, skill, next, skills));
+    if (next === NEW_WATCH) {
+      setName((cur) =>
+        cur.trim() === "" || cur === defaultScheduleName(skill, skills)
+          ? "自定义巡检"
+          : cur,
+      );
+    } else {
+      setName((cur) =>
+        followSkillName(
+          cur === "自定义巡检" ? "" : cur,
+          skill === NEW_WATCH ? LIT_WATCH_SKILL : skill,
+          next,
+          skills,
+        ),
+      );
+    }
     setSkill(next);
   }
 
@@ -82,6 +124,37 @@ function CreateScheduleModal({
     setBusy(true);
     setError(null);
     try {
+      if (isNew) {
+        const draft = await invoke<WatchSkillDraftDto>("start_watch_skill_draft", {
+          input: {
+            name: name.trim() || "自定义巡检",
+            projectRoot,
+            intent: intent.trim(),
+            frequency,
+            weekday: frequency === "weekly" ? weekday : null,
+            hour,
+            minute,
+            profileId: profileId || null,
+            linkedStep: linkedStep || null,
+          },
+        });
+        beginAskAi({
+          path: "",
+          name: `巡检技能：${draft.name}`,
+          cwd: projectRoot,
+          root: projectRoot,
+          reuseKey: `watch-skill:${projectRoot}:${draft.id}`,
+          prompt: buildWatchSkillSeedPrompt({
+            intent: draft.intent,
+            draftRelPath: draft.draftRelPath,
+            skillName: draft.skillName,
+            scheduleName: draft.name,
+          }),
+          preview: false,
+        });
+        onDraftStarted();
+        return;
+      }
       await invoke<ScheduleDto>("create_schedule", {
         input: {
           name: name.trim() || undefined,
@@ -95,6 +168,12 @@ function CreateScheduleModal({
           linkedStep: linkedStep || null,
         },
       });
+      if (!isLitWatchSkill(skill)) {
+        await invoke("ensure_schedule_skill_distributed", {
+          skill,
+          profileId: profileId || null,
+        }).catch(() => {});
+      }
       onCreated();
     } catch (reason) {
       setError(String(reason));
@@ -104,6 +183,7 @@ function CreateScheduleModal({
   }
 
   return (
+    <FloatLayer>
     <div
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
       onClick={onClose}
@@ -111,18 +191,24 @@ function CreateScheduleModal({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
+        className="w-[28rem] rounded-md border border-field ccode-float-surface p-5"
       >
         <h2 className="mb-4 text-base font-semibold text-l1">定时巡检</h2>
-        <p className="mb-3 text-xs text-l3">按周期自动跑一次所选技能，结果追加到 notes/inbox.md。</p>
+        <p className="mb-3 text-xs text-l3">
+          {isNew
+            ? "跟 AI 把巡检技能写出来，你确认后才保存并启用定时。"
+            : isLitWatchSkill(skill)
+              ? "按周期跑文献雷达，新命中追加到 notes/inbox.md。"
+              : "按周期跑所选巡检技能，规范以该技能的 SKILL.md 为准。"}
+        </p>
         <label className="mb-3 block text-sm">
-          <span className="mb-1 block text-xs text-l3">技能</span>
+          <span className="mb-1 block text-xs text-l3">种类</span>
           <select
             className={fieldClass}
             value={skill}
             onChange={(e) => onSkillChange(e.target.value)}
           >
-            {scheduleSkillOptions(skills).map((o) => (
+            {kindOptions.map((o) => (
               <option key={o.id} value={o.id}>
                 {o.name}
               </option>
@@ -138,6 +224,18 @@ function CreateScheduleModal({
             placeholder="文献雷达"
           />
         </label>
+        {isNew && (
+          <label className="mb-3 block text-sm">
+            <span className="mb-1 block text-xs text-l3">要做什么</span>
+            <textarea
+              className={`${fieldClass} min-h-24 resize-y py-2`}
+              value={intent}
+              onChange={(e) => setIntent(e.target.value)}
+              required
+              placeholder="例如：每天查各家服务商有没有上新模型、参数有没有变，对照项目里的表格列出差异。先写进待审核清单，不要直接改表。"
+            />
+          </label>
+        )}
         <div className="mb-3 flex gap-2">
           <label className="block flex-1 text-sm">
             <span className="mb-1 block text-xs text-l3">周期</span>
@@ -223,14 +321,21 @@ function CreateScheduleModal({
           </button>
           <button
             type="submit"
-            disabled={busy || !time}
+            disabled={busy || !time || (isNew && !intent.trim())}
             className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
           >
-            {busy ? "创建中…" : "创建"}
+            {busy
+              ? isNew
+                ? "正在开对话…"
+                : "创建中…"
+              : isNew
+                ? "跟 AI 写技能"
+                : "创建"}
           </button>
         </div>
       </form>
     </div>
+    </FloatLayer>
   );
 }
 
@@ -317,6 +422,12 @@ function EditScheduleModal({
           linkedStep: linkedStep || null,
         },
       });
+      if (!isLitWatchSkill(skill)) {
+        await invoke("ensure_schedule_skill_distributed", {
+          skill,
+          profileId: profileId || null,
+        }).catch(() => {});
+      }
       onSaved();
     } catch (reason) {
       setError(String(reason));
@@ -326,10 +437,11 @@ function EditScheduleModal({
   }
 
   return (
+    <FloatLayer>
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade" onClick={onClose}>
       <form onClick={(e) => e.stopPropagation()} onSubmit={submit} className="w-[26rem] rounded-md border border-field ccode-float-surface p-5">
         <h2 className="mb-4 text-base font-semibold text-l1">编辑定时任务</h2>
-        <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">技能</span><select className={fieldClass} value={skill} onChange={(e) => setSkill(e.target.value)}>{scheduleSkillOptions(skills).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></label>
+        <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">技能</span><select className={fieldClass} value={skill} onChange={(e) => setSkill(e.target.value)}>{scheduleSkillOptionsForEdit(skills, skill).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></label>
         <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">任务名</span><input className={fieldClass} required value={name} onChange={(e) => setName(e.target.value)} /></label>
         <div className="mb-3 flex gap-2">
           <label className="block flex-1 text-sm"><span className="mb-1 block text-xs text-l3">周期</span><select className={fieldClass} value={frequency} onChange={(e) => setFrequency(e.target.value as "daily" | "weekly")}><option value="daily">每天</option><option value="weekly">每周</option></select></label>
@@ -342,6 +454,169 @@ function EditScheduleModal({
         <div className="flex justify-end gap-2"><button type="button" onClick={onClose} className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover">取消</button><button type="submit" disabled={busy} className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text">{busy ? "保存中…" : "保存"}</button></div>
       </form>
     </div>
+    </FloatLayer>
+  );
+}
+
+function CommitWatchDraftModal({
+  projectRoot,
+  draft,
+  onClose,
+  onCommitted,
+}: {
+  projectRoot: string;
+  draft: WatchSkillDraftDto;
+  onClose: () => void;
+  onCommitted: () => void;
+}) {
+  const [text, setText] = useState(draft.draftText ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let stale = false;
+    invoke<WatchSkillDraftDto>("read_watch_skill_draft", {
+      projectRoot,
+      id: draft.id,
+    })
+      .then((d) => {
+        if (!stale && d.draftText) setText(d.draftText);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [projectRoot, draft.id, draft.draftText]);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!text.trim()) {
+      setError("SKILL.md 还是空的");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("write_watch_skill_draft", {
+        projectRoot,
+        id: draft.id,
+        text,
+      });
+      await invoke("commit_watch_skill_draft", {
+        projectRoot,
+        id: draft.id,
+        draftText: text,
+      });
+      onCommitted();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <FloatLayer>
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
+      onClick={onClose}
+    >
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="flex max-h-[85vh] w-[36rem] flex-col rounded-md border border-field ccode-float-surface p-5"
+      >
+        <h2 className="mb-1 text-base font-semibold text-l1">确认落盘并启用定时</h2>
+        <p className="mb-3 text-xs text-l3">
+          预览技能「{draft.skillName}」。确认后写入技能库、分发到将要跑的 Agent，并创建定时任务「{draft.name}」。
+        </p>
+        <textarea
+          className={`${fieldClass} min-h-64 flex-1 resize-y py-2 font-mono text-xs`}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        {error && <p className="mt-2 text-sm text-err-text">{error}</p>}
+        <div className="mt-3 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover">
+            取消
+          </button>
+          <button
+            type="submit"
+            disabled={busy || !text.trim()}
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+          >
+            {busy ? "保存中…" : "确认落盘"}
+          </button>
+        </div>
+      </form>
+    </div>
+    </FloatLayer>
+  );
+}
+
+function EditWatchSkillModal({
+  skillId,
+  skillName,
+  onClose,
+}: {
+  skillId: string;
+  skillName: string;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    invoke<string>("read_skill_md", { id: skillId })
+      .then(setText)
+      .catch((e) => setError(String(e)));
+  }, [skillId]);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("write_skill_md", { name: skillName, fullText: text });
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <FloatLayer>
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={save}
+        className="flex max-h-[85vh] w-[36rem] flex-col rounded-md border border-field ccode-float-surface p-5"
+      >
+        <h2 className="mb-3 text-base font-semibold text-l1">编辑技能：{skillName}</h2>
+        <textarea
+          className={`${fieldClass} min-h-64 flex-1 resize-y py-2 font-mono text-xs`}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        {error && <p className="mt-2 text-sm text-err-text">{error}</p>}
+        <div className="mt-3 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover">
+            取消
+          </button>
+          <button
+            type="submit"
+            disabled={busy || !text.trim()}
+            className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text disabled:opacity-50"
+          >
+            {busy ? "保存中…" : "保存"}
+          </button>
+        </div>
+      </form>
+    </div>
+    </FloatLayer>
   );
 }
 
@@ -352,13 +627,18 @@ function EditScheduleModal({
 export default function ScheduleSection({
   projectRoot,
   steps = [],
+  layout = "fold",
 }: {
   projectRoot: string;
   /** 项目步骤表：新建弹层「关联步骤」下拉的选项（空表 = 不渲染该下拉） */
   steps?: { name: string }[];
+  /** card = 办公侧栏常驻卡片，不折叠 */
+  layout?: "fold" | "card";
 }) {
-  const [open, setOpen] = useState(false);
+  const isCard = layout === "card";
+  const [open, setOpen] = useState(isCard);
   const [schedules, setSchedules] = useState<ScheduleDto[] | null>(null);
+  const [drafts, setDrafts] = useState<WatchSkillDraftDto[]>([]);
   const [error, setError] = useState<string | null>(null);
   /** 运行配置下拉（行内可改）：profile 列表从 store 取 */
   const profiles = useAppStore((s) => s.profiles);
@@ -370,15 +650,24 @@ export default function ScheduleSection({
   const [historyOpen, setHistoryOpen] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editSchedule, setEditSchedule] = useState<ScheduleDto | null>(null);
+  const [commitDraft, setCommitDraft] = useState<WatchSkillDraftDto | null>(null);
+  const [editSkill, setEditSkill] = useState<{ id: string; name: string } | null>(
+    null,
+  );
+  const [skills, setSkills] = useState<SkillDto[]>([]);
 
   async function load() {
     try {
-      setSchedules(
-        schedulesForProject(
-          await invoke<ScheduleDto[]>("list_schedules"),
-          projectRoot,
+      const [list, pending, skillList] = await Promise.all([
+        invoke<ScheduleDto[]>("list_schedules"),
+        invoke<WatchSkillDraftDto[]>("list_watch_skill_drafts", { projectRoot }).catch(
+          () => [] as WatchSkillDraftDto[],
         ),
-      );
+        invoke<SkillDto[]>("list_skills").catch(() => [] as SkillDto[]),
+      ]);
+      setSchedules(schedulesForProject(list, projectRoot));
+      setDrafts(pending);
+      setSkills(skillList);
       setError(null);
     } catch (reason) {
       setError(String(reason));
@@ -410,6 +699,14 @@ export default function ScheduleSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectRoot]);
 
+  const waitingDraft = drafts.some((d) => !d.hasDraft);
+  useEffect(() => {
+    if (!waitingDraft) return;
+    const t = window.setInterval(() => void load(), 4000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waitingDraft, projectRoot]);
+
   async function toggleEnabled(s: ScheduleDto) {
     try {
       await invoke("update_schedule", {
@@ -429,6 +726,12 @@ export default function ScheduleSection({
         id: s.id,
         patch: { profileId },
       });
+      if (!isLitWatchSkill(s.skill)) {
+        await invoke("ensure_schedule_skill_distributed", {
+          skill: s.skill,
+          profileId: profileId || null,
+        }).catch(() => {});
+      }
       await load();
     } catch (reason) {
       setError(String(reason));
@@ -451,6 +754,25 @@ export default function ScheduleSection({
     }
   }
 
+  async function discardDraft(d: WatchSkillDraftDto) {
+    if (
+      !(await confirmDialog(`放弃巡检技能草稿「${d.name}」？`, {
+        danger: true,
+        confirmText: "放弃",
+      }))
+    )
+      return;
+    try {
+      await invoke("discard_watch_skill_draft", {
+        projectRoot,
+        id: d.id,
+      });
+      await load();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function removeSchedule(s: ScheduleDto) {
     if (
       !(await confirmDialog(`删除定时任务「${s.name}」？历史记录一并删除。`, {
@@ -467,34 +789,109 @@ export default function ScheduleSection({
     }
   }
 
-  const count = schedules?.length ?? 0;
+  const count = (schedules?.length ?? 0) + drafts.length;
+  const addBtn = (
+    <button
+      type="button"
+      className={actionBtn}
+      title="新建定时巡检（默认文献监控，可选其他技能）"
+      onClick={() => setCreateOpen(true)}
+    >
+      ＋ 定时巡检
+    </button>
+  );
 
   return (
-    <div className="mb-2">
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          className="flex items-center gap-1 text-xs text-l3 hover:text-l1"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-        >
-          <FoldMark open={open} boxed />
-          ◔ 定时任务{count > 0 ? `（${count}）` : ""}
-        </button>
-        <button
-          type="button"
-          className={actionBtn}
-          title="新建定时巡检（默认文献监控，可选其他技能）"
-          onClick={() => setCreateOpen(true)}
-        >
-          ＋ 定时巡检
-        </button>
-      </div>
-      {open && (
-        <div className="mt-1 rounded-md bg-strip p-2">
+    <div className={isCard ? projectWellClass : "mb-2"}>
+      {isCard ? (
+        <div className="mb-2 flex items-center gap-2">
+          <h2 className="text-xs font-medium text-l2">
+            定时任务{count > 0 ? `（${count}）` : ""}
+          </h2>
+          {addBtn}
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="flex items-center gap-1 text-xs text-l3 hover:text-l1"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+          >
+            <FoldMark open={open} boxed />
+            ◔ 定时任务{count > 0 ? `（${count}）` : ""}
+          </button>
+          {addBtn}
+        </div>
+      )}
+      {(isCard || open) && (
+        <div className={isCard ? "" : "mt-1 rounded-md bg-strip p-2"}>
           {error && <p className="py-1 text-xs text-err-text">{error}</p>}
-          {schedules !== null && schedules.length === 0 && (
-            <p className="text-xs text-l4">还没有定时任务。点「＋ 定时巡检」建一个。</p>
+          {schedules !== null && schedules.length === 0 && drafts.length === 0 && (
+            <p className="text-xs text-l4">
+              {isCard
+                ? "还没有定时任务。"
+                : "还没有定时任务。点「＋ 定时巡检」建一个。"}
+            </p>
+          )}
+          {drafts.length > 0 && (
+            <ul className="mb-1 space-y-0.5">
+              {drafts.map((d) => (
+                <li key={d.id} className="rounded-sm py-1.5">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="min-w-0 truncate text-xs text-l2" title={d.name}>
+                      {d.name}
+                    </span>
+                    <span className="shrink-0 text-micro text-l4">
+                      {d.hasDraft ? "草稿待确认" : "正在写技能…"}
+                    </span>
+                    <span className="min-w-0 flex-1" />
+                    {d.hasDraft ? (
+                      <button
+                        type="button"
+                        className={actionBtn}
+                        onClick={() => setCommitDraft(d)}
+                      >
+                        确认落盘
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className={actionBtn}
+                        onClick={() =>
+                          beginAskAi({
+                            path: "",
+                            name: `巡检技能：${d.name}`,
+                            cwd: projectRoot,
+                            root: projectRoot,
+                            reuseKey: `watch-skill:${projectRoot}:${d.id}`,
+                            prompt: buildWatchSkillSeedPrompt({
+                              intent: d.intent,
+                              draftRelPath: d.draftRelPath,
+                              skillName: d.skillName,
+                              scheduleName: d.name,
+                            }),
+                            preview: false,
+                          })
+                        }
+                      >
+                        打开对话
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className={actionBtn}
+                      onClick={() => void discardDraft(d)}
+                    >
+                      放弃
+                    </button>
+                  </div>
+                  <p className="mt-0.5 truncate text-micro text-l4" title={d.intent}>
+                    {d.intent}
+                  </p>
+                </li>
+              ))}
+            </ul>
           )}
           {schedules !== null && schedules.length > 0 && (
             <ul className="space-y-0.5">
@@ -624,18 +1021,30 @@ export default function ScheduleSection({
           onClose={() => setMenu(null)}
           items={[
             {
-                    label: "删除任务",
-              danger: true,
-              onSelect: () => {
-                const s = schedules.find((t) => t.id === menu.id);
-                if (s) void removeSchedule(s);
-              },
-            },
-            {
               label: "编辑任务",
               onSelect: () => {
                 const s = schedules.find((t) => t.id === menu.id);
                 if (s) setEditSchedule(s);
+              },
+            },
+            ...(() => {
+              const s = schedules.find((t) => t.id === menu.id);
+              if (!s || isLitWatchSkill(s.skill)) return [];
+              const sk = skills.find((x) => x.name === s.skill);
+              if (!sk) return [];
+              return [
+                {
+                  label: "编辑技能",
+                  onSelect: () => setEditSkill({ id: sk.id, name: sk.name }),
+                },
+              ];
+            })(),
+            {
+              label: "删除任务",
+              danger: true,
+              onSelect: () => {
+                const s = schedules.find((t) => t.id === menu.id);
+                if (s) void removeSchedule(s);
               },
             },
           ]}
@@ -647,6 +1056,11 @@ export default function ScheduleSection({
           steps={steps}
           onClose={() => setCreateOpen(false)}
           onCreated={() => {
+            setCreateOpen(false);
+            setOpen(true);
+            void load();
+          }}
+          onDraftStarted={() => {
             setCreateOpen(false);
             setOpen(true);
             void load();
@@ -663,6 +1077,24 @@ export default function ScheduleSection({
             setEditSchedule(null);
             void load();
           }}
+        />
+      )}
+      {commitDraft && (
+        <CommitWatchDraftModal
+          projectRoot={projectRoot}
+          draft={commitDraft}
+          onClose={() => setCommitDraft(null)}
+          onCommitted={() => {
+            setCommitDraft(null);
+            void load();
+          }}
+        />
+      )}
+      {editSkill && (
+        <EditWatchSkillModal
+          skillId={editSkill.id}
+          skillName={editSkill.name}
+          onClose={() => setEditSkill(null)}
         />
       )}
     </div>

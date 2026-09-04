@@ -9,6 +9,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { IS_MAC, IS_WINDOWS, eventMatchesCombo, READER_MODE_HOTKEY } from "../hotkeys";
+import { macOverlayPadClass, useMacFullscreen } from "../mac-titlebar";
 import { HoverTip, useHoverTip } from "./HoverTip";
 import { LoadingRows } from "./PageFrame";
 import { AGENTS } from "../types";
@@ -115,6 +116,7 @@ export default function ReaderOverlay({
   statusBarSlot: (el: HTMLDivElement | null) => void;
 }) {
   const stem = stemOf(pdfPath);
+  const macFullscreen = useMacFullscreen(IS_MAC);
 
   // Esc 退出（阅读区优先于专注模式等退出：TerminalPage 的专注 Esc 在阅读区打开时不拦）；
   // isComposing 守卫：中文输入法组词中按 Esc 是取消候选，不关阅读区。
@@ -542,7 +544,7 @@ export default function ReaderOverlay({
     <div className="fixed inset-0 z-40 flex flex-col bg-canvas">
       {/* 40px 顶栏：← 返回（Esc 同效）/ 《文献标题》/ 收起左右栏。
           覆盖层会盖住 App 的自绘标题栏，此条必须自己承担两件事（口径同 App.tsx 顶栏）：
-          可拖动 + macOS Overlay 模式红绿灯让位（pl-[78px]）。
+          可拖动 + macOS Overlay 红绿灯让位（窗口态 pl-[78px]，全屏收起按钮后取消让位）。
           拖拽用手动 startDragging 而非 data-tauri-drag-region：属性版只认 mousedown 落点的
           元素本尊，这条栏几乎全被按钮/标题子元素占满，实测拖不动；手动版拦交互元素即可 */}
       <div
@@ -554,9 +556,11 @@ export default function ReaderOverlay({
             .startDragging()
             .catch(() => {});
         }}
-        className={`flex h-10 shrink-0 items-center gap-1 border-b border-hairline pr-2 ${
-          IS_MAC ? "pl-[78px]" : "pl-2"
-        }`}
+        className={`flex h-10 shrink-0 items-center gap-1 border-b border-hairline pr-2 ${macOverlayPadClass(
+          IS_MAC,
+          macFullscreen,
+          "pl-2",
+        )}`}
       >
         <button
           ref={backRef}

@@ -62,7 +62,9 @@ function paywallPdfTask(timing: "after" | "during" = "after"): HumanTaskDto {
   };
 }
 
-/** 英文综述（review）：文献检索 → 精读笔记 → 大纲 → 初稿 → 润色定稿 */
+/** 英文综述（review）：文献检索 → 精读笔记 → 大纲 → 初稿 → 润色定稿。
+ *  示例课题直接用这份模板（src-tauri/resources/pipeline-review.json）。
+ *  改这里之后跑：node --experimental-strip-types scripts/export-review-template.ts */
 const REVIEW_STEPS: ProjectStepDto[] = [
   {
     name: "文献检索与筛选",

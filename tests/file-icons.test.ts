@@ -26,6 +26,14 @@ test("扩展名大小写不敏感，qmd 归入口记 markdown 图标", () => {
   assert.equal(fileTypeIcon("manuscript/main.qmd")?.label, "M↓");
 });
 
+test("表格与幻灯扩展名走固定识别色", () => {
+  assert.equal(fileTypeIcon("a.xlsx")?.label, "X");
+  assert.equal(fileTypeIcon("a.xlsx")?.color, "#217346");
+  assert.equal(fileTypeIcon("data.csv")?.label, "CSV");
+  assert.equal(fileTypeIcon("deck.pptx")?.label, "P");
+  assert.equal(fileTypeIcon("papers/to-fetch.ris")?.label, "RIS");
+});
+
 test("Windows 反斜杠路径与无扩展名/未知类型的兜底", () => {
   assert.equal(fileTypeIcon("src\\components\\GitPanel.tsx")?.label, "⚛");
   assert.equal(fileTypeIcon("Makefile"), null);

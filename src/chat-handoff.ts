@@ -156,6 +156,30 @@ export function chatWaitText(
   }
 }
 
+/**
+ * 聊天头状态微字。未发过、也没在跑时不要写「等待会话文件」——
+ * 同步通道默认 waiting，那是还没开始，不是丢了文件。
+ */
+export function chatHeaderStatus(input: {
+  state: "idle" | "detecting" | "linked" | "timeout";
+  syncState: SessionSyncState;
+  running: boolean;
+  canResume: boolean;
+  messageCount: number;
+}): string {
+  const { state, syncState, running, canResume, messageCount } = input;
+  const started = running || messageCount > 0;
+  if (state === "detecting" || syncState === "detecting") return "识别会话";
+  if (!started) return state === "timeout" && canResume ? "可恢复" : "";
+  if (state === "timeout" && canResume) return "可恢复";
+  if (state === "timeout") return "等待会话文件";
+  if (syncState === "waiting") return "等待会话文件";
+  if (syncState === "polling") return running ? "同步中" : "已结束 · 可继续";
+  if (syncState === "watching") return running ? "实时同步" : "已结束 · 可继续";
+  if (state === "linked") return running ? "实时同步" : "已结束 · 可继续";
+  return running ? "Agent 运行中" : "准备开始";
+}
+
 /** 斜杠发出后要不要露出 TUI：无参 /model、/models、/login 会唤选择器或登录页 */
 export function slashHandoff(
   text: string,

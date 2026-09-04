@@ -8,6 +8,7 @@
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -572,6 +573,11 @@ fn execute_one(id: &str) -> RunDonePayload {
                 fallback_note = Some(format!("原绑定配置已删除，本次回落用「{}」", profile.name));
             }
         }
+        // 自定义巡检靠技能目录里的 SKILL.md；未分发则无头跑找不到规范。
+        // lit-watch 的 prompt 自带完整口径，不拦存量任务。
+        if task.skill != "lit-watch" {
+            crate::skills::require_skill_distributed(&task.skill, &profile.agent)?;
+        }
         crate::ai::run_agent_task(&profile, &build_task_prompt(&task.skill), root, RUN_TIMEOUT)
     })();
     // 超时/失败不记新增数：只有成功跑完才数第二次取差值（saturating_sub 防文件被外部截断）
@@ -763,6 +769,356 @@ pub fn run_schedule_now(app: tauri::AppHandle, id: String) -> Result<(), String>
         }
     });
     Ok(())
+}
+
+// ===== 新建巡检技能草稿（确认落盘前只写 .ccode/drafts/，不进技能库） =====
+
+const WATCH_SKILL_CATEGORY: &str = "巡检";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WatchSkillPending {
+    id: String,
+    name: String,
+    skill_name: String,
+    intent: String,
+    frequency: String,
+    weekday: Option<u8>,
+    hour: u8,
+    minute: u8,
+    profile_id: Option<String>,
+    linked_step: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchSkillDraftDto {
+    pub id: String,
+    pub name: String,
+    pub skill_name: String,
+    pub intent: String,
+    pub frequency: String,
+    pub weekday: Option<u8>,
+    pub hour: u8,
+    pub minute: u8,
+    pub profile_id: Option<String>,
+    pub linked_step: Option<String>,
+    pub draft_rel_path: String,
+    pub has_draft: bool,
+    pub draft_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartWatchSkillInput {
+    pub project_root: String,
+    pub name: String,
+    pub intent: String,
+    pub frequency: String,
+    pub weekday: Option<u8>,
+    pub hour: u8,
+    pub minute: u8,
+    pub profile_id: Option<String>,
+    pub linked_step: Option<String>,
+}
+
+fn watch_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 40
+        && id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+fn watch_draft_rel(id: &str) -> String {
+    format!(".ccode/drafts/watch-{id}.md")
+}
+
+fn watch_meta_rel(id: &str) -> String {
+    format!(".ccode/drafts/watch-{id}.meta.json")
+}
+
+fn gated_project_root(project_root: &str) -> Result<PathBuf, String> {
+    crate::projects::ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
+        project_root,
+    )))
+}
+
+fn drafts_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    if rel.contains("..") || Path::new(rel).is_absolute() {
+        return Err("非法草稿路径".into());
+    }
+    let p = root.join(rel);
+    if let Ok(c) = crate::paths::canonicalize_plain(&p) {
+        if !crate::paths::path_within_path(&c, root) {
+            return Err("草稿指向项目目录之外".into());
+        }
+        return Ok(c);
+    }
+    Ok(p)
+}
+
+fn sanitize_watch_skill_name(raw: &str) -> String {
+    let mut narrowed = String::new();
+    let mut dash = false;
+    for c in raw.trim().chars() {
+        if c.is_alphanumeric() || c == '_' {
+            narrowed.push(c);
+            dash = false;
+        } else if !dash {
+            narrowed.push('-');
+            dash = true;
+        }
+    }
+    let narrowed = narrowed.trim_matches('-');
+    crate::paths::sanitize_fs_name(narrowed).unwrap_or_else(|_| "watch-skill".into())
+}
+
+fn schedule_run_profile(pinned: Option<String>) -> Result<crate::profiles::Profile, String> {
+    let profiles = crate::profiles::ProfileStore::new()?.list()?;
+    let cur_settings = crate::settings::read_current();
+    let dedicated = cur_settings.ai_profile_id;
+    let hidden: HashSet<String> = cur_settings
+        .hidden_profiles
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    crate::ai::resolve_profile_from(
+        profiles.clone(),
+        None,
+        pinned.clone(),
+        dedicated,
+        &hidden,
+    )
+    .or_else(|_| crate::ai::resolve_profile_from(profiles, None, pinned, None, &hidden))
+}
+
+fn pending_to_dto(root: &Path, p: WatchSkillPending) -> WatchSkillDraftDto {
+    let rel = watch_draft_rel(&p.id);
+    let text = drafts_path(root, &rel)
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .filter(|t| !t.trim().is_empty());
+    WatchSkillDraftDto {
+        id: p.id,
+        name: p.name,
+        skill_name: p.skill_name,
+        intent: p.intent,
+        frequency: p.frequency,
+        weekday: p.weekday,
+        hour: p.hour,
+        minute: p.minute,
+        profile_id: p.profile_id,
+        linked_step: p.linked_step,
+        draft_rel_path: rel,
+        has_draft: text.is_some(),
+        draft_text: text,
+    }
+}
+
+#[tauri::command]
+pub fn start_watch_skill_draft(input: StartWatchSkillInput) -> Result<WatchSkillDraftDto, String> {
+    let root = gated_project_root(&input.project_root)?;
+    validate_fields(
+        &root.to_string_lossy(),
+        &input.frequency,
+        input.weekday,
+        input.hour,
+        input.minute,
+    )?;
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err("请填写任务名".into());
+    }
+    let intent = input.intent.trim();
+    if intent.is_empty() {
+        return Err("请写一句这份巡检要做什么".into());
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let pending = WatchSkillPending {
+        id: id.clone(),
+        name: name.to_string(),
+        skill_name: sanitize_watch_skill_name(name),
+        intent: intent.to_string(),
+        frequency: input.frequency,
+        weekday: input.weekday,
+        hour: input.hour,
+        minute: input.minute,
+        profile_id: input.profile_id.filter(|v| !v.trim().is_empty()),
+        linked_step: input
+            .linked_step
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+    };
+    let meta_rel = watch_meta_rel(&id);
+    let meta_path = drafts_path(&root, &meta_rel)?;
+    if let Some(parent) = meta_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建草稿目录失败: {e}"))?;
+    }
+    let text = serde_json::to_string_pretty(&pending).map_err(|e| e.to_string())?;
+    crate::profiles::atomic_write(&meta_path, &text)?;
+    Ok(pending_to_dto(&root, pending))
+}
+
+#[tauri::command]
+pub fn list_watch_skill_drafts(project_root: String) -> Result<Vec<WatchSkillDraftDto>, String> {
+    let root = gated_project_root(&project_root)?;
+    let dir = root.join(".ccode").join("drafts");
+    let rd = match fs::read_dir(&dir) {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("读取草稿目录失败: {e}")),
+    };
+    let mut out = Vec::new();
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        let Some(stem) = name
+            .strip_prefix("watch-")
+            .and_then(|s| s.strip_suffix(".meta.json"))
+        else {
+            continue;
+        };
+        if !watch_id_ok(stem) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(ent.path()) else {
+            continue;
+        };
+        let Ok(pending) = serde_json::from_str::<WatchSkillPending>(&text) else {
+            continue;
+        };
+        out.push(pending_to_dto(&root, pending));
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn read_watch_skill_draft(
+    project_root: String,
+    id: String,
+) -> Result<WatchSkillDraftDto, String> {
+    let root = gated_project_root(&project_root)?;
+    if !watch_id_ok(&id) {
+        return Err("无效草稿 id".into());
+    }
+    let meta_path = drafts_path(&root, &watch_meta_rel(&id))?;
+    let text = fs::read_to_string(&meta_path).map_err(|e| format!("没有这份草稿: {e}"))?;
+    let pending: WatchSkillPending =
+        serde_json::from_str(&text).map_err(|e| format!("草稿元数据损坏: {e}"))?;
+    Ok(pending_to_dto(&root, pending))
+}
+
+#[tauri::command]
+pub fn write_watch_skill_draft(
+    project_root: String,
+    id: String,
+    text: String,
+) -> Result<(), String> {
+    let root = gated_project_root(&project_root)?;
+    if !watch_id_ok(&id) {
+        return Err("无效草稿 id".into());
+    }
+    let _ = drafts_path(&root, &watch_meta_rel(&id))?;
+    if !root.join(".ccode").join("drafts").join(format!("watch-{id}.meta.json")).is_file() {
+        return Err("没有这份草稿".into());
+    }
+    let md_path = drafts_path(&root, &watch_draft_rel(&id))?;
+    if let Some(parent) = md_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建草稿目录失败: {e}"))?;
+    }
+    crate::profiles::atomic_write(&md_path, &text)
+}
+
+#[tauri::command]
+pub fn discard_watch_skill_draft(project_root: String, id: String) -> Result<(), String> {
+    let root = gated_project_root(&project_root)?;
+    if !watch_id_ok(&id) {
+        return Err("无效草稿 id".into());
+    }
+    let meta = drafts_path(&root, &watch_meta_rel(&id))?;
+    let md = drafts_path(&root, &watch_draft_rel(&id))?;
+    let _ = fs::remove_file(md);
+    fs::remove_file(&meta).map_err(|e| format!("删除草稿失败: {e}"))
+}
+
+#[tauri::command]
+pub fn commit_watch_skill_draft(
+    project_root: String,
+    id: String,
+    draft_text: Option<String>,
+) -> Result<ScheduleDto, String> {
+    let root = gated_project_root(&project_root)?;
+    if !watch_id_ok(&id) {
+        return Err("无效草稿 id".into());
+    }
+    let meta_path = drafts_path(&root, &watch_meta_rel(&id))?;
+    let meta_text = fs::read_to_string(&meta_path).map_err(|e| format!("没有这份草稿: {e}"))?;
+    let pending: WatchSkillPending =
+        serde_json::from_str(&meta_text).map_err(|e| format!("草稿元数据损坏: {e}"))?;
+    let md = match draft_text.filter(|t| !t.trim().is_empty()) {
+        Some(t) => t,
+        None => {
+            let p = drafts_path(&root, &watch_draft_rel(&id))?;
+            fs::read_to_string(&p).map_err(|_| "还没有 SKILL.md 草稿，先跟 AI 写完再落盘".to_string())?
+        }
+    };
+    if md.trim().is_empty() {
+        return Err("SKILL.md 草稿是空的".into());
+    }
+    let skill = crate::skills::create_skill_from_full_md(
+        &md,
+        &pending.skill_name,
+        Some(WATCH_SKILL_CATEGORY),
+    )?;
+    let profile = schedule_run_profile(pending.profile_id.clone())?;
+    if let Err(e) = crate::skills::apply_skill_by_id(&skill.id, &profile.agent, true) {
+        crate::logbuf::record(
+            "warn",
+            "scheduler",
+            &format!("巡检技能已入库，分发到 {} 失败: {e}", profile.agent),
+        );
+        return Err(format!(
+            "技能已保存，但没能分发到 {}：{e}。去技能页打开开关后再挂定时任务。",
+            profile.agent
+        ));
+    }
+    let created = create_schedule_at(
+        &schedules_path()?,
+        CreateScheduleInput {
+            name: Some(pending.name.clone()),
+            project_root: crate::sessions::expand_tilde(&project_root),
+            skill: Some(skill.name.clone()),
+            profile_id: pending.profile_id.clone(),
+            linked_step: pending.linked_step.clone(),
+            frequency: pending.frequency.clone(),
+            weekday: pending.weekday,
+            hour: pending.hour,
+            minute: pending.minute,
+        },
+    )?;
+    if let Ok(p) = drafts_path(&root, &watch_draft_rel(&id)) {
+        let _ = fs::remove_file(p);
+    }
+    let _ = fs::remove_file(meta_path);
+    Ok(ScheduleDto::from(created))
+}
+
+/// 给已有巡检技能补分发（创建任务或改连接时）。lit-watch 不处理。
+#[tauri::command]
+pub fn ensure_schedule_skill_distributed(
+    skill: String,
+    profile_id: Option<String>,
+) -> Result<String, String> {
+    let skill = skill.trim();
+    if skill.is_empty() || skill == "lit-watch" {
+        return Ok(String::new());
+    }
+    let profile = schedule_run_profile(profile_id.filter(|v| !v.trim().is_empty()))?;
+    let id = crate::skills::skill_id_by_name(skill)?;
+    crate::skills::apply_skill_by_id(&id, &profile.agent, true)?;
+    Ok(profile.agent)
 }
 
 #[cfg(test)]
@@ -1029,5 +1385,36 @@ mod tests {
         assert!(p.contains("定时雷达自动触发"));
         assert!(!p.contains("watchlist.md"));
         assert!(!p.contains("{skill}"));
+    }
+
+    #[test]
+    fn watch_skill_name_and_draft_paths() {
+        assert_eq!(sanitize_watch_skill_name("查模型更新"), "查模型更新");
+        assert_eq!(
+            sanitize_watch_skill_name("OpenAI / Anthropic"),
+            "OpenAI-Anthropic"
+        );
+        assert!(watch_id_ok("aabbccddeeff00112233445566778899"));
+        assert!(!watch_id_ok("../evil"));
+        assert_eq!(
+            watch_draft_rel("abc"),
+            ".ccode/drafts/watch-abc.md"
+        );
+        let json = serde_json::to_string(&WatchSkillPending {
+            id: "abc".into(),
+            name: "查模型".into(),
+            skill_name: "查模型".into(),
+            intent: "每天查".into(),
+            frequency: "daily".into(),
+            weekday: None,
+            hour: 9,
+            minute: 0,
+            profile_id: None,
+            linked_step: None,
+        })
+        .unwrap();
+        assert!(json.contains("skillName"));
+        let back: WatchSkillPending = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.intent, "每天查");
     }
 }

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import * as pdfjs from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -6,10 +6,14 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import "pdfjs-dist/web/pdf_viewer.css";
 import SelectionFloatBar, { DistillSkillButton } from "./SelectionFloatBar";
 import { HoverTip, useHoverTip } from "./HoverTip";
-import { IS_WINDOWS } from "../hotkeys";
+import { IS_MAC, IS_WINDOWS } from "../hotkeys";
+import { usePdfGestureZoom } from "./use-pdf-zoom";
 import {
+  PDF_ZOOM_STEP,
+  clampPdfScale,
   findGlossaryMatches,
   nextFitScale,
+  pdfCanvasOutputScale,
   type GlossaryEntry,
 } from "../reader";
 
@@ -52,20 +56,31 @@ function basename(p: string): string {
 }
 
 /** 单页视图：canvas 渲染 + textLayer 选区层；display:none 时保持已渲染内容不销毁。
- *  export：阅读区的连续滚动视图（PdfContinuousView）按页复用（active 恒 true） */
-export function PdfPageView({
+ *  export：阅读区的连续滚动视图（PdfContinuousView）按页复用（active 恒 true）。
+ *  fillParent：宿主 100% 填页盒（页盒尺寸由父级按布局倍率给）。
+ *  renderScale：渲染倍率（缺省 = scale）。缩放期间布局倍率 scale 先行、渲染倍率
+ *  停稳才跟上——旧位图 CSS 拉伸兜底，定格时布局零变化只换清晰位图（官方 viewer
+ *  drawingDelay 同款，见 use-pdf-zoom.ts）。 */
+export const PdfPageView = memo(function PdfPageView({
   doc,
   pageNum,
   scale,
+  renderScale,
   active,
   glossTerms,
+  fillParent,
 }: {
   doc: pdfjs.PDFDocumentProxy;
   pageNum: number;
+  /** 布局倍率：页盒尺寸立即跟随 */
   scale: number;
+  /** 渲染倍率：canvas/textLayer 重建按它；缺省 = scale */
+  renderScale?: number;
   active: boolean;
   /** 生词高亮术语表（阅读区 B3；空/缺省不高亮） */
   glossTerms?: readonly GlossaryEntry[];
+  /** 连续滚动页盒已定尺寸时填满父级，backing store 仍按渲染倍率渲染 */
+  fillParent?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -73,6 +88,32 @@ export function PdfPageView({
   const [error, setError] = useState<string | null>(null);
   /** textLayer 渲染完成信号（计数器）：术语高亮等它落地后再跑 */
   const [textRendered, setTextRendered] = useState(0);
+  /** scale=1 的页尺寸缓存：布局倍率变化时同步换算页盒，不等渲染链路 */
+  const baseSizeRef = useRef<{ w: number; h: number } | null>(null);
+  const rs = renderScale ?? scale;
+
+  // 页盒尺寸立即跟随布局倍率（不等 canvas 重绘，缩放手感的跟手性来自这里）
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    if (fillParent) {
+      host.style.width = "100%";
+      host.style.height = "100%";
+      return;
+    }
+    const base = baseSizeRef.current;
+    if (!base) return; // 首页尚未量到，等渲染链路补尺寸
+    host.style.width = `${Math.floor(base.w * scale)}px`;
+    host.style.height = `${Math.floor(base.h * scale)}px`;
+  }, [scale, fillParent]);
+
+  // 缩放进行中（渲染倍率未跟上布局倍率）藏起 textLayer：旧文本片坐标已不匹配
+  // 新页盒，错位叠在拉伸位图上比暂时不显示更脏；选段/高亮等重渲落地即恢复
+  useEffect(() => {
+    const layer = textRef.current;
+    if (!layer) return;
+    layer.style.visibility = rs === scale ? "" : "hidden";
+  }, [scale, rs, textRendered]);
 
   // 拖选时给 textLayer 挂 selecting 类（官方 viewer 的 TextLayerBuilder 同款）：
   // pdf_viewer.css 里 .selecting 的 endOfContent 会撑满整层接住指针，
@@ -101,35 +142,58 @@ export function PdfPageView({
       try {
         const page = await doc.getPage(pageNum);
         if (cancelled) return;
-        const viewport = page.getViewport({ scale });
+        const viewport = page.getViewport({ scale: rs });
+        const baseVp = page.getViewport({ scale: 1 });
+        baseSizeRef.current = { w: baseVp.width, h: baseVp.height };
         const dpr = window.devicePixelRatio || 1;
-        const canvas = canvasRef.current!;
-        canvas.width = Math.floor(viewport.width * dpr);
-        canvas.height = Math.floor(viewport.height * dpr);
-        canvas.style.width = `${Math.floor(viewport.width)}px`;
-        canvas.style.height = `${Math.floor(viewport.height)}px`;
-        const host = hostRef.current!;
-        host.style.width = `${Math.floor(viewport.width)}px`;
-        host.style.height = `${Math.floor(viewport.height)}px`;
+        const cssW = Math.floor(viewport.width);
+        const cssH = Math.floor(viewport.height);
+        const out = pdfCanvasOutputScale(cssW, cssH, dpr);
+        // 离屏画完再换上：一改可见 canvas.width 会立刻清空当前帧，缩放提交时闪/抖
+        const off = document.createElement("canvas");
+        off.width = Math.max(1, Math.floor(cssW * out.sx));
+        off.height = Math.max(1, Math.floor(cssH * out.sy));
+        const offCtx = off.getContext("2d", {
+          alpha: true,
+          willReadFrequently: true,
+        });
+        if (!offCtx) throw new Error("无法创建画布");
+        const needScale =
+          Math.abs(out.sx - 1) > 1e-6 || Math.abs(out.sy - 1) > 1e-6;
+        renderTask = page.render({
+          canvas: off,
+          viewport,
+          transform: needScale ? [out.sx, 0, 0, out.sy, 0, 0] : undefined,
+        });
+        await renderTask.promise;
+        if (cancelled) return;
+        const canvas = canvasRef.current;
+        const host = hostRef.current;
+        if (!canvas || !host) return;
+        const visCtx = canvas.getContext("2d", {
+          alpha: true,
+          willReadFrequently: true,
+        });
+        if (!visCtx) throw new Error("无法创建画布");
+        canvas.width = off.width;
+        canvas.height = off.height;
+        canvas.style.width = "100%";
+        canvas.style.height = "100%";
+        visCtx.drawImage(off, 0, 0);
+        // 页盒尺寸由 layout effect 按布局倍率即时维护；这里只兜底首量前的情况
+        if (fillParent) {
+          host.style.width = "100%";
+          host.style.height = "100%";
+        } else if (!host.style.width) {
+          host.style.width = `${Math.floor(baseVp.width * scale)}px`;
+          host.style.height = `${Math.floor(baseVp.height * scale)}px`;
+        }
         // textLayer 字号按 --total-scale-factor 换算（pdf_viewer.css 变量约定 =
         // 名义倍率 × userUnit，即 viewport.scale × viewport.userUnit）
         host.style.setProperty(
           "--total-scale-factor",
           String(viewport.scale * viewport.userUnit),
         );
-        // pdf.js 默认 getContext("2d", { alpha: false })。Chromium/WebView2 在
-        // 全局 color-scheme:dark 下会把不透明 canvas 合成白块（整页白屏）。
-        // 先以 alpha:true 绑定，后续 getContext 只能拿到已有上下文、忽略新属性。
-        const ctx = canvas.getContext("2d", {
-          alpha: true,
-          willReadFrequently: true,
-        });
-        if (!ctx) throw new Error("无法创建画布");
-        renderTask = page.render({
-          canvas,
-          viewport,
-          transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
-        });
         // pdf.js 的 TextLayer 只往容器 append 不清空：重渲染前先清，
         // 否则缩放/重排后选段与高亮都会叠出重复文本片
         textRef.current!.replaceChildren();
@@ -147,7 +211,7 @@ export function PdfPageView({
           textLayer: textRef.current!,
         });
         drawLayer.setParent(host);
-        await Promise.all([renderTask.promise, text.render()]);
+        await text.render();
         if (!cancelled) {
           // 页尾捕手（官方 viewer 的 endOfContent，配合上面 selecting 类生效）；
           // DrawLayer 的 MutationObserver 也靠它感知重渲染后重算选区高亮
@@ -169,7 +233,7 @@ export function PdfPageView({
       textLayer?.cancel();
       drawLayer?.destroy();
     };
-  }, [doc, pageNum, scale]);
+  }, [doc, pageNum, rs, fillParent]);
 
   // 术语高亮：textLayer 落地后（或术语表增删后）对文本节点跑整词匹配，命中处包
   // <span class="ccode-gloss">（点状下划线，悬停释义由 PdfContinuousView 事件代理出 HoverTip）；
@@ -218,9 +282,9 @@ export function PdfPageView({
     <div
       ref={hostRef}
       data-page-num={pageNum}
-      className={`relative bg-white ${active ? "" : "hidden"}`}
+      className={`relative bg-white ${fillParent ? "h-full w-full" : ""} ${active ? "" : "hidden"}`}
     >
-      <canvas ref={canvasRef} className="block bg-transparent" />
+      <canvas ref={canvasRef} className="block h-full w-full bg-white" />
       {/* selectionRendering：关掉原生 ::selection（透明化），高亮由 DrawLayer 自绘 */}
       <div ref={textRef} className="textLayer selectionRendering" />
       {error && (
@@ -230,9 +294,9 @@ export function PdfPageView({
       )}
     </div>
   );
-}
+});
 
-/** 「整理为笔记」结果：ok 决定是否清空选区；action 为可选快捷入口（如未登记时跳工作区页） */
+/** 「整理为笔记」结果：ok 决定是否清空选区；action 为可选快捷入口 */
 export interface PdfActionResult {
   ok: boolean;
   msg: string;
@@ -250,7 +314,7 @@ interface Hint {
  * 只渲染当前页与相邻页（大 PDF 不做整本渲染）。
  * 字节经 read_pdf_bytes 加载（后端四类白名单约束）；选中文字出现浮动按钮：
  * 「◈ 问 AI」把选段 + 出处交给调用方写入活跃终端输入（「↵ 直接发送」立即回车发送）；
- * 「整理为笔记」把选段追加到归属项目的笔记工作区（P2b，由调用方实现）。
+ * 「整理为笔记」把选段追加到归属项目 notes/inbox.md（P2b，由调用方实现）。
  */
 function PdfPreview({
   path,
@@ -296,6 +360,16 @@ function PdfPreview({
   const readerBtnRef = useRef<HTMLButtonElement>(null);
   const readerTip = useHoverTip(readerBtnRef);
   const scale = fixedScale ?? fitScale;
+
+  // 手势缩放（⌘/Ctrl+滚轮 + 触控板 pinch）：与阅读区连续滚动同一套共享绑定；
+  // 布局倍率立即跟随，renderScale 停稳才追上（canvas/textLayer 重建按它）
+  const { renderScale, liveZoomingRef } = usePdfGestureZoom({
+    scrollRef,
+    scale,
+    enabled: Boolean(doc),
+    onCommit: (next) => setFixedScale(next),
+    anchorSelector: "[data-page-num]",
+  });
 
   const fileName = basename(path);
 
@@ -343,6 +417,8 @@ function PdfPreview({
       try {
         const page = await doc.getPage(pageNum);
         if (cancelled) return;
+        // 手势缩放进行中不重算适配（会改掉布局基准，锚点漂移）
+        if (liveZoomingRef.current) return;
         const w = page.getViewport({ scale: 1 }).width;
         const avail = el.clientWidth - 24; // 左右留白
         const next = nextFitScale(w, avail, fitScaleRef.current);
@@ -362,10 +438,11 @@ function PdfPreview({
     };
   }, [doc, pageNum, fixedScale]);
 
-  // 翻页后回到内容顶部
+  // 翻页后回到内容顶部（仅翻页；缩放提交由手势锚点接管，不回顶）
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
-  }, [pageNum, scale]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageNum]);
 
   const showHint = useCallback((h: Hint) => {
     setHint(h);
@@ -441,6 +518,9 @@ function PdfPreview({
 
   const zoomBtn =
     "flex h-6 min-w-6 items-center justify-center rounded-sm px-1 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-40";
+  const zoomGestureHint = IS_MAC
+    ? "⌘/Ctrl+滚轮或双指捏合缩放，中键拖动平移"
+    : "Ctrl+滚轮或触控板捏合缩放，中键拖动平移";
 
   // 只挂载当前页 ±1（相邻页预渲染在隐藏状态，翻页即时可见），不整本渲染
   const pages = doc
@@ -501,9 +581,11 @@ function PdfPreview({
             <button
               className={zoomBtn}
               onClick={() =>
-                setFixedScale((s) => Math.max(0.25, (s ?? fitScale) / 1.2))
+                setFixedScale((s) =>
+                  clampPdfScale((s ?? fitScale) / PDF_ZOOM_STEP),
+                )
               }
-              title="缩小"
+              title={`缩小（${zoomGestureHint}）`}
             >
               −
             </button>
@@ -517,9 +599,11 @@ function PdfPreview({
             <button
               className={zoomBtn}
               onClick={() =>
-                setFixedScale((s) => Math.min(4, (s ?? fitScale) * 1.2))
+                setFixedScale((s) =>
+                  clampPdfScale((s ?? fitScale) * PDF_ZOOM_STEP),
+                )
               }
-              title="放大"
+              title={`放大（${zoomGestureHint}）`}
             >
               +
             </button>
@@ -556,7 +640,7 @@ function PdfPreview({
       ) : (
         <div
           ref={scrollRef}
-          className="ccode-pdf-scroll relative min-h-0 flex-1 overflow-auto"
+          className="ccode-pdf-scroll relative min-h-0 flex-1 overflow-auto [overflow-anchor:none]"
         >
           <div className="flex min-w-max flex-col items-center p-3">
             {pages.map((n) => (
@@ -565,6 +649,7 @@ function PdfPreview({
                 doc={doc}
                 pageNum={n}
                 scale={scale}
+                renderScale={renderScale}
                 active={n === pageNum}
               />
             ))}

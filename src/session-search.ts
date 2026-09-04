@@ -88,7 +88,20 @@ function messageText(m: ChatMessageDto): string {
 
 function snippetCore(snippet: string | null | undefined): string {
   if (!snippet) return "";
-  return snippet.replace(/^…/, "").replace(/…$/, "").trim();
+  return snippet.replace(/^[.…\s]+/, "").replace(/[.…\s]+$/, "").trim();
+}
+
+function foldWs(s: string): string {
+  return s.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function indexBySnippet(
+  messages: readonly ChatMessageDto[],
+  core: string,
+): number {
+  const needle = foldWs(core);
+  if (needle.length < 2) return -1;
+  return messages.findIndex((m) => foldWs(messageText(m)).includes(needle));
 }
 
 /** 在已加载的一页消息里找出搜索命中的那一条（时间戳优先，其次摘录/关键词）。 */
@@ -99,19 +112,22 @@ export function findFocusMessageIndex(
   if (!focus) return -1;
   const role = focus.matchRole;
   const ts = focus.matchTimestamp;
+  const core = snippetCore(focus.snippet);
   if (ts) {
-    const i = messages.findIndex(
-      (m) => m.timestamp === ts && (!role || m.role === role),
-    );
-    if (i >= 0) return i;
+    const idxs: number[] = [];
+    messages.forEach((m, i) => {
+      if (m.timestamp === ts && (!role || m.role === role)) idxs.push(i);
+    });
+    if (idxs.length === 1) return idxs[0];
+    if (idxs.length > 1) {
+      const among = idxs.map((i) => messages[i]);
+      const j = indexBySnippet(among, core);
+      if (j >= 0) return idxs[j];
+      return idxs[0];
+    }
   }
-  const core = snippetCore(focus.snippet).toLowerCase();
-  if (core.length >= 2) {
-    const i = messages.findIndex((m) =>
-      messageText(m).toLowerCase().includes(core),
-    );
-    if (i >= 0) return i;
-  }
+  const bySnip = indexBySnippet(messages, core);
+  if (bySnip >= 0) return bySnip;
   const kws = (focus.matchedKeywords ?? [])
     .map((k) => k.toLowerCase())
     .filter(Boolean);

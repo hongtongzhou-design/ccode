@@ -168,3 +168,40 @@ test("findFocusMessageIndex 无时间戳时用关键词", () => {
     1,
   );
 });
+
+test("findFocusMessageIndex 摘录空白折叠后仍能对上", () => {
+  const messages = [
+    msg({ text: "天气不错" }),
+    msg({
+      text: "32' 的 `codex_relay_compat_args`)\n: '``` -c web_search",
+      role: "assistant",
+    }),
+  ];
+  assert.equal(
+    findFocusMessageIndex(messages, {
+      around: null,
+      matchTimestamp: null,
+      matchRole: "assistant",
+      snippet: "…32' 的 `codex_relay_compat_args`) : '``` -c web_searc…",
+      matchedKeywords: ["web"],
+    }),
+    1,
+  );
+});
+
+test("findFocusMessageIndex 同一秒多条时用摘录区分", () => {
+  const messages = [
+    msg({ text: "我来跑", role: "assistant", timestamp: "t" }),
+    msg({ text: "全绿 web_search", role: "assistant", timestamp: "t" }),
+  ];
+  assert.equal(
+    findFocusMessageIndex(messages, {
+      around: 1,
+      matchTimestamp: "t",
+      matchRole: "assistant",
+      snippet: "…全绿 web_search…",
+      matchedKeywords: ["web"],
+    }),
+    1,
+  );
+});

@@ -15,12 +15,14 @@ import { IS_WINDOWS } from "../hotkeys";
 import { dropHitsRect, joinDroppedChatPaths } from "../terminal-input";
 import {
   approvalExtraHint,
+  chatHeaderStatus,
   chatWaitKind,
   chatWaitText,
   latestToolName,
   modelSwitchCommand,
   slashHandoff,
 } from "../chat-handoff";
+import { welcomeCwdLine, welcomeCwdShown } from "../terminal-welcome";
 
 export default function ChatSurface({
   messages,
@@ -65,6 +67,7 @@ export default function ChatSurface({
   hasOlder = false,
   loadingOlder = false,
   onLoadOlder,
+  onChooseCwd,
 }: {
   messages: ChatMessageDto[];
   state: "idle" | "detecting" | "linked" | "timeout";
@@ -109,6 +112,8 @@ export default function ChatSurface({
   hasOlder?: boolean;
   loadingOlder?: boolean;
   onLoadOlder?: () => void;
+  /** 空态目录行：点选工作目录（未启动时走终端标签 chooseCwd） */
+  onChooseCwd?: () => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -121,8 +126,15 @@ export default function ChatSurface({
   const [modelOverride, setModelOverride] = useState<string | null>(null);
   const [combo, setCombo] = useState<ComboSurfaceDto | null>(null);
   const [comboReady, setComboReady] = useState(false);
+  const [homeDir, setHomeDir] = useState("");
   const prevScrollHeightRef = useRef(0);
   const loadingOlderRef = useRef(false);
+
+  useEffect(() => {
+    void invoke<string>("home_dir")
+      .then(setHomeDir)
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!(running && syncState === "waiting" && messages.length === 0)) {
@@ -226,17 +238,13 @@ export default function ChatSurface({
     comboReady && combo?.showNativeEffort === true ? effort : null;
   const effortLevels = effortLive?.levels ?? [];
 
-  function statusText() {
-    if (state === "detecting" || syncState === "detecting") return "识别会话";
-    if (state === "timeout" && canResume) return "可恢复";
-    if (state === "timeout") return "等待会话文件";
-    if (syncState === "waiting") return "等待会话文件";
-    if (syncState === "polling") return running ? "同步中" : "已结束 · 可继续";
-    if (syncState === "watching") return running ? "实时同步" : "已结束 · 可继续";
-    if (state === "linked") return running ? "实时同步" : "已结束 · 可继续";
-    return running ? "Agent 运行中" : "准备开始";
-  }
-
+  const headerStatus = chatHeaderStatus({
+    state,
+    syncState,
+    running,
+    canResume,
+    messageCount: messages.length,
+  });
   const canSend = state !== "timeout" || running || canResume;
   const statusClass =
     attention === "confirm"
@@ -244,7 +252,7 @@ export default function ChatSurface({
       : running
         ? "bg-ok-text animate-pulse-brief"
         : "bg-l4";
-  const shortCwd = cwd ? cwd.replace(/^.*[\\/]/, "") : null;
+  const cwdShown = cwd ? welcomeCwdShown(cwd, homeDir, IS_WINDOWS) : null;
   const toolName = latestToolName(messages);
   const waitKind = chatWaitKind({
     pendingReply: loading,
@@ -294,11 +302,13 @@ export default function ChatSurface({
               <h1 className="truncate text-sm font-medium text-l1">
                 {title || "当前聊天"}
               </h1>
-              <span className="shrink-0 text-micro text-l4">{statusText()}</span>
+              {headerStatus ? (
+                <span className="shrink-0 text-micro text-l4">{headerStatus}</span>
+              ) : null}
             </div>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 truncate text-micro text-l4">
               {agentName && <span>{agentName}</span>}
-              {shownModel && modelSwitch && profileModels.length > 0 ? (
+              {shownModel && ptyAlive && modelSwitch && profileModels.length > 0 ? (
                 <>
                   <span>·</span>
                   <span className="relative inline-flex">
@@ -387,10 +397,12 @@ export default function ChatSurface({
                   )}
                 </span>
               )}
-              {shortCwd && (
+              {cwdShown && messages.length > 0 && (
                 <>
                   <span>·</span>
-                  <span className="truncate">{shortCwd}</span>
+                  <span className="truncate" title={cwd ?? undefined}>
+                    {cwdShown}
+                  </span>
                 </>
               )}
             </div>
@@ -410,12 +422,16 @@ export default function ChatSurface({
               <button
                 type="button"
                 onClick={onTogglePeek}
-                title="在聊天下方露出同一会话的终端画面，不改变终端行列数"
+                title={
+                  peek
+                    ? "收起聊天下方的终端画面"
+                    : "在聊天下方拉起同一会话的终端画面"
+                }
                 className={`rounded-md px-2 py-1 text-micro hover:bg-hover ${
                   peek ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
                 }`}
               >
-                {peek ? "收起终端" : "窥视终端"}
+                {peek ? "收起终端" : "拉起终端"}
               </button>
             )}
             {readOnly && (
@@ -439,26 +455,23 @@ export default function ChatSurface({
                 允许修改
               </button>
             )}
-            <button
-              type="button"
-              disabled={!forkAvailable || busy}
-              onClick={onFork}
-              title={
-                forkAvailable
-                  ? "从当前对话摘要新建一个分叉聊天"
-                  : "会话建立后才能分叉"
-              }
-              className="rounded-md px-2 py-1 text-micro text-l3 hover:bg-hover hover:text-l1 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              ＋ 新建
-            </button>
-            {onOpenHistory && (
+            {forkAvailable && (
               <button
                 type="button"
-                disabled={!forkAvailable}
+                disabled={busy}
+                onClick={onFork}
+                title="从当前对话摘要新建一个分叉聊天"
+                className="rounded-md px-2 py-1 text-micro text-l3 hover:bg-hover hover:text-l1 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                ＋ 新建
+              </button>
+            )}
+            {onOpenHistory && forkAvailable && (
+              <button
+                type="button"
                 onClick={onOpenHistory}
                 title="打开完整历史回放"
-                className="rounded-md px-2 py-1 text-micro text-l3 hover:bg-hover hover:text-l1 disabled:cursor-not-allowed disabled:opacity-40"
+                className="rounded-md px-2 py-1 text-micro text-l3 hover:bg-hover hover:text-l1"
               >
                 历史
               </button>
@@ -559,36 +572,34 @@ export default function ChatSurface({
             </div>
           )}
           {state === "idle" && messages.length === 0 ? (
-            <div className="flex flex-1 flex-col items-center justify-center pb-20 text-center">
-              {stuckWaiting ? (
-                <>
-                  <p className="max-w-md text-sm text-warn-text">
-                    {chatWaitText("no_session")}
-                    ——信任此目录 / 登录 / 菜单选择通常在终端里
-                  </p>
-                  <div className="mt-3 flex items-center gap-2">
-                    {onTogglePeek && (
-                      <button
-                        type="button"
-                        onClick={onTogglePeek}
-                        className="rounded-md border border-field bg-raised px-3 py-1.5 text-xs text-l2 hover:bg-inset hover:text-l1"
-                      >
-                        {peek ? "终端已露出" : "露出终端"}
-                      </button>
-                    )}
+            stuckWaiting ? (
+              <div className="flex flex-1 flex-col items-center justify-center pb-20 text-center">
+                <p className="max-w-md text-sm text-warn-text">
+                  {chatWaitText("no_session")}
+                  ——信任此目录 / 登录 / 菜单选择通常在终端里
+                </p>
+                <div className="mt-3 flex items-center gap-2">
+                  {onTogglePeek && (
                     <button
                       type="button"
-                      onClick={onOpenTerminal}
+                      onClick={onTogglePeek}
                       className="rounded-md border border-field bg-raised px-3 py-1.5 text-xs text-l2 hover:bg-inset hover:text-l1"
                     >
-                      打开终端处理
+                      {peek ? "终端已露出" : "露出终端"}
                     </button>
-                  </div>
-                </>
-              ) : (
-                <p className="text-sm text-l2">从一个问题开始</p>
-              )}
-            </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={onOpenTerminal}
+                    className="rounded-md border border-field bg-raised px-3 py-1.5 text-xs text-l2 hover:bg-inset hover:text-l1"
+                  >
+                    打开终端处理
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-1" />
+            )
           ) : state === "detecting" && messages.length === 0 ? (
             <div className="flex flex-1 items-center justify-center pb-20 text-sm text-l4">
               正在连接当前会话…
@@ -635,8 +646,23 @@ export default function ChatSurface({
         seedInsert={seedInsert}
         onSeedConsumed={() => setSeedInsert(null)}
         placeholder={
-          readOnly ? "这是只读分叉；可以提问、分析和规划…" : undefined
+          readOnly
+            ? "这是只读分叉；可以提问、分析和规划…"
+            : messages.length === 0
+              ? "问一个问题…"
+              : undefined
         }
+        cwdHint={
+          messages.length === 0 && !stuckWaiting && cwd
+            ? welcomeCwdLine(cwd, homeDir, "开始", IS_WINDOWS)
+            : null
+        }
+        cwdTitle={
+          cwd
+            ? `${cwd === "~" && homeDir ? homeDir : cwd}\n点击选择工作目录`
+            : undefined
+        }
+        onChooseCwd={onChooseCwd}
       />
       {peek && (
         <button

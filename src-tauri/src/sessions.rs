@@ -3654,6 +3654,7 @@ pub(crate) fn migrate_session_meta(conn: &Connection) {
         "step_name TEXT",
         "profile_id TEXT",
         "project_path TEXT",
+        "internal INTEGER NOT NULL DEFAULT 0",
     ] {
         let _ = conn.execute_batch(&format!("ALTER TABLE session_meta ADD COLUMN {col}"));
     }
@@ -3674,12 +3675,14 @@ struct MetaRow {
     profile_id: Option<String>,
     /// pin 时固化的项目归属（gemini 快照脱离 slug 目录后靠这一列回填）
     project_path: Option<String>,
+    /// 无头 AI（雷达解读 / 定时巡检）按会话 id 标记，避免把整个项目路径标成 internal
+    internal: bool,
 }
 
 fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
     let mut map = HashMap::new();
     let Ok(mut stmt) = conn
-        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session, task_id, step_name, profile_id, project_path FROM session_meta")
+        .prepare("SELECT agent, session_id, pinned, archived, custom_title, tags, summary, handoff_from_agent, handoff_from_session, task_id, step_name, profile_id, project_path, internal FROM session_meta")
     else {
         return map;
     };
@@ -3698,10 +3701,11 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
             r.get::<_, Option<String>>(10)?,
             r.get::<_, Option<String>>(11)?,
             r.get::<_, Option<String>>(12)?,
+            r.get::<_, i64>(13).unwrap_or(0),
         ))
     });
     if let Ok(rows) = rows {
-        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session, task_id, step_name, profile_id, project_path) in rows.flatten() {
+        for (agent, sid, pinned, archived, custom_title, tags, summary, hf_agent, hf_session, task_id, step_name, profile_id, project_path, internal) in rows.flatten() {
             map.insert(
                 (agent, sid),
                 MetaRow {
@@ -3715,6 +3719,7 @@ fn read_all_meta(conn: &Connection) -> HashMap<(String, String), MetaRow> {
                     step_name,
                     profile_id,
                     project_path,
+                    internal: internal != 0,
                 },
             );
         }
@@ -3731,6 +3736,23 @@ pub(crate) fn set_session_summary(agent: &str, session_id: &str, summary: &str) 
         params![agent, session_id, summary, now_iso()],
     )
     .map_err(|e| format!("写入摘要失败: {e}"))?;
+    Ok(())
+}
+
+/// 无头 AI（雷达解读 / 定时巡检）按会话 id 标 internal。
+/// 不能把整个项目路径写入 usage_provenance.internal——那会把该 Agent 在此项目的交互会话一并藏掉。
+pub(crate) fn mark_session_internal(agent: &str, session_id: &str) -> Result<(), String> {
+    let id = session_id.trim();
+    if agent.trim().is_empty() || id.is_empty() {
+        return Ok(());
+    }
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO session_meta(agent, session_id, internal) VALUES(?1, ?2, 1)
+         ON CONFLICT(agent, session_id) DO UPDATE SET internal=1",
+        params![agent, id],
+    )
+    .map_err(|e| format!("标记内部会话失败: {e}"))?;
     Ok(())
 }
 
@@ -4117,6 +4139,7 @@ fn apply_meta(
                 s.step_name = row.step_name.clone();
             }
             s.profile_id = row.profile_id.clone();
+            s.internal = s.internal || row.internal;
             // 快照脱离原目录后归属可能丢失：用 pin 时写入的 project_path 回填
             if !s.alive {
                 if let Some(p) = row.project_path.as_ref().filter(|p| !p.is_empty()) {
@@ -4173,7 +4196,7 @@ fn apply_provenance(
             .unwrap_or_else(|| crate::usage::normalize_provenance_path(&session.project_path));
         if let Some((source, internal)) = map.get(&(session.agent.clone(), path)) {
             session.source.clone_from(source);
-            session.internal = *internal;
+            session.internal = session.internal || *internal;
         } else if crate::usage::is_ccode_ai_temp_cwd(&session.project_path) {
             session.source = "ccode-ai".into();
             session.internal = true;
@@ -6320,6 +6343,7 @@ mod tests {
                 step_name: None,
                 profile_id: None,
                 project_path: None,
+                internal: false,
             },
         );
         apply_meta(&mut merged, &members, &meta);

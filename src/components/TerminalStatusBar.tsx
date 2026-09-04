@@ -3,14 +3,17 @@ import { FolderOpen } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { AGENTS } from "../types";
 import { KIMI_CSI_U_ENTER } from "../terminal-input";
+import { isTerminalIdle } from "../terminal-welcome";
 import type { ComboSurfaceDto, DetectResult, GitCommitResultDto, SessionUsageDto } from "../types";
 import type { GitSummary } from "./GitPanel";
 import type { TabStatus } from "../pages/TerminalPage";
 
 /**
  * 终端底部状态栏（胶囊化）：32px 固置于终端 pane 内部下缘，与终端同底同色。
+ * 未启动（无 PTY）只留状态点 + 目录胶囊——agent/配置/模型与启动栏去重，切模型芯片
+ * 启动后才出现（未启动点了也无效）。进程存活后：
  * 左区 = 状态圆点 + agent · 配置 · 模型（可点切）+ 思考强度 step 滑块；
- * 中区 = git 连体胶囊（分支/变更 + Commit & Push（云上传图标）：AI 生成提交信息→提交并推送→Toast 预览）；
+ * 中区 = git 连体胶囊（分支/变更 + Commit & Push：AI 生成提交信息→提交并推送→Toast 预览）；
  * 右区 = 运行时长 · 本会话 token（等宽小字）。
  * 切换类控件只写 TUI 命令、不回读 CLI 内部状态——模型名按用户切的选择显示（内存态）。
  */
@@ -404,6 +407,7 @@ export default function TerminalStatusBar({
     cwdRaw.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? cwdRaw;
   // 目录浮层改路径：仅未启动可编辑；进程存活期间 cwd 由 pty_get_cwd 回写跟随（shell 里 cd 即可）
   const cwdLocked = !!status?.ptyId;
+  const idle = isTerminalIdle(status);
   const [cwdMenuOpen, setCwdMenuOpen] = useState(false);
   const [cwdDraft, setCwdDraft] = useState("");
 
@@ -430,9 +434,11 @@ export default function TerminalStatusBar({
           }}
           title={dotTitle}
         />
-        {agentLabel && <span style={{ color: fg }}>{agentLabel}</span>}
-        {profileName && <span className="truncate">· {profileName}</span>}
-        {shownModel &&
+        {!idle && agentLabel && <span style={{ color: fg }}>{agentLabel}</span>}
+        {!idle && profileName && (
+          <span className="truncate">· {profileName}</span>
+        )}
+        {!idle && shownModel &&
           (modelSwitch && profileModels.length > 0 ? (
             <span className="relative">
               <button
@@ -499,7 +505,7 @@ export default function TerminalStatusBar({
             <span className="truncate">· {shownModel}</span>
           ))}
         {/* 思考强度：档位表 ≥2 = step 滑块直切（claude）；空档位表 = chip 唤 TUI 选择器（kimi） */}
-        {combo?.mixedModelsNote && (
+        {!idle && combo?.mixedModelsNote && (
           <span className="ml-1 truncate" style={{ color: faint }} title={combo.mixedModelsNote}>
             换模请重开
           </span>
@@ -638,7 +644,7 @@ export default function TerminalStatusBar({
           </>
         )}
       </span>
-      {hasGit && (
+      {!idle && hasGit && (
         /* 外包一层 relative 给浮层做锚（菜单右对齐 ▾、气泡左对齐胶囊左缘）；
            内层胶囊保持 overflow-hidden 裁圆角；min-w-0 允许窄窗时收缩防溢出右栏 */
         <span className="relative min-w-0">
@@ -961,7 +967,7 @@ export default function TerminalStatusBar({
       )}
         </span>
       )}
-      {mergeReady.length > 0 && (
+      {!idle && mergeReady.length > 0 && (
         <span
           style={{ color: colors.green }}
           title={`可合并的工作区：${mergeReady.join("、")}（从「改动」页签进入评审合并）`}

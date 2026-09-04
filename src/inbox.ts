@@ -1,8 +1,9 @@
 /**
  * 「待你处理」收件箱的分类纯逻辑 + 人工请求（help:）的屏蔽/通知判定。
  * 与 DOM/Tauri 解耦（localStorage 薄层除外），供 node --test 直接测。
- * 触发链路：WorkspacesPage 构造条目（key 前缀即类别）→ App 标题栏 / 页内 strip
- * 按 groupInbox 分组渲染类别胶囊，点开下拉只看该类条目。
+ * 触发链路：WorkspacesPage 构造条目（key 前缀即类别）；应用更新由
+ * visibleInboxItems 现算合并（项目页未挂载时标题栏/工作台仍能看到）。
+ * App 标题栏 / 页内 strip 按 groupInbox 分组渲染类别胶囊。
  */
 import { NOTIFY_DEBOUNCE_MS } from "./notify.ts";
 
@@ -10,6 +11,7 @@ export type InboxCategory =
   | "conflict"
   | "confirm"
   | "dep"
+  | "update"
   | "lit"
   | "ready"
   | "artifacts"
@@ -24,11 +26,13 @@ export interface InboxCategoryMeta {
 
 /** 固定展示顺序（与原 strip 摘要口径一致，confirm: 与 live: 合并为「待确认」；
  *  dep: 依赖缺失紧随「待确认」（git 不在 = 工作区/评审停工，与待确认同级紧迫）；
- *  lit: 文献雷达新命中随后；help 追加在末尾） */
+ *  update: 应用可更新（不阻断干活，但必须能看见）；lit: 文献雷达新命中随后；
+ *  help 追加在末尾） */
 export const INBOX_CATEGORIES: readonly InboxCategoryMeta[] = [
   { id: "conflict", label: "冲突" },
   { id: "confirm", label: "待确认" },
   { id: "dep", label: "依赖" },
+  { id: "update", label: "更新" },
   { id: "lit", label: "文献" },
   { id: "ready", label: "可合并" },
   { id: "artifacts", label: "待核验" },
@@ -42,6 +46,7 @@ export function inboxCategoryOf(key: string): InboxCategory {
   if (key.startsWith("conflict:")) return "conflict";
   if (key.startsWith("confirm:") || key.startsWith("live:")) return "confirm";
   if (key.startsWith("dep:")) return "dep";
+  if (key.startsWith("update:")) return "update";
   if (key.startsWith("lit:")) return "lit";
   if (key.startsWith("ready:")) return "ready";
   if (key.startsWith("artifacts:")) return "artifacts";

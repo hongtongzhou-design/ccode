@@ -5,6 +5,7 @@ import {
   agentHasHooks,
   approvalExtraHint,
   chatMessageKey,
+  chatHeaderStatus,
   chatWaitKind,
   chatWaitText,
   confirmHandoffEvent,
@@ -113,6 +114,49 @@ test("等待态三句人话 + 工具名", () => {
       toolName: null,
     }),
     "no_session",
+  );
+});
+
+test("聊天头：没开始时不写等待会话文件", () => {
+  assert.equal(
+    chatHeaderStatus({
+      state: "idle",
+      syncState: "waiting",
+      running: false,
+      canResume: false,
+      messageCount: 0,
+    }),
+    "",
+  );
+  assert.equal(
+    chatHeaderStatus({
+      state: "timeout",
+      syncState: "waiting",
+      running: false,
+      canResume: true,
+      messageCount: 0,
+    }),
+    "可恢复",
+  );
+  assert.equal(
+    chatHeaderStatus({
+      state: "idle",
+      syncState: "waiting",
+      running: true,
+      canResume: false,
+      messageCount: 0,
+    }),
+    "等待会话文件",
+  );
+  assert.equal(
+    chatHeaderStatus({
+      state: "linked",
+      syncState: "watching",
+      running: true,
+      canResume: false,
+      messageCount: 3,
+    }),
+    "实时同步",
   );
 });
 

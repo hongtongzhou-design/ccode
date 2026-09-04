@@ -22,6 +22,7 @@ export default function StepSkillsChips({
   onRequiredChange,
   chainSupply,
   expectedArtifacts,
+  hint,
 }: {
   /** 步骤当前挂载的技能名（project.toml steps[].skills） */
   skills: string[];
@@ -43,6 +44,8 @@ export default function StepSkillsChips({
   chainSupply?: string[];
   /** 本步骤预期产物（链路校验：技能 outputs 未进清单时提示；空数组 = 不检 output 侧） */
   expectedArtifacts?: string[];
+  /** 标题旁小字；false = 不写（开工弹层用 tooltip 承担） */
+  hint?: string | false;
 }) {
   // 只读模式下点击 chip 展开描述（按技能名记忆展开态）
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -61,12 +64,24 @@ export default function StepSkillsChips({
   return (
     <div className="mb-3 shrink-0">
       <div className="mb-1 flex items-center gap-2">
-        <span className="text-xs text-l3">推荐技能</span>
-        <span className="text-micro text-l4">
-          {editable
-            ? "增删写回步骤定义（project.toml），影响以后所有开工"
-            : "点击技能名看一句话说明"}
+        <span
+          className="text-xs text-l3"
+          title={
+            editable
+              ? "增删会写回这一步的技能，以后开工都用这份"
+              : "点击技能名看一句话说明"
+          }
+        >
+          技能
         </span>
+        {hint !== false && (
+          <span className="text-micro text-l4">
+            {hint ??
+              (editable
+                ? "增删写回这一步，以后开工都用"
+                : "点击看说明")}
+          </span>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-1">
         {skills.map((name) => {

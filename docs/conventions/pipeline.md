@@ -3,6 +3,16 @@
 > 术语映射（v3.69 起）：**界面与用户手册一律叫「研究流程」**（科研人员视角，「流水线」工程味太重被否）；
 > 代码标识符（pipeline-start.ts、PipelineEditor、PIPELINE_TEMPLATES）与本开发文档沿用 pipeline/流水线，两者同一物。
 
+> **工作方式（v3.179 / v3.180）**：`project.toml` `work_mode` = `research` / `coding` / `office`，缺省 research。
+> 一个项目终身一张主界面，不做转换。重复添加已登记或档案卡已落盘的目录必须预填并锁定，禁止改选、禁止再弹模板。
+> 项目页左侧列表按工作方式分段（科研 → 编程 → 办公；未添加仓库沉底），组内保持最近打开序；行上不再重复写类型。
+> 科研才走本文件的工作区 / 流水线 / 雷达合同；
+> 编程走 `coding.rs` git 原语工作树（`~/ccode/worktrees`），界面是左工作树右会话（v3.190）；Git + GitHub 环（从基准开工、origin、Desktop CLI、开 PR）见 `docs/conventions/coding-git.md`（v3.202）。办公走文档库。仓库里论文和代码可以并存。
+> 编程 `git init` 写编程用 `.gitignore`（不含科研 `*.pdf`）；macOS CLT stub 禁跑 git。
+> **无流程科研（v3.181 / v3.183）**：`pipelineOptOut` 的主区是文献 / 笔记 / 数据 / 雷达（有内容默认折叠）；不渲染科研工作区列表——工作区是流程步骤的隔离工作树，无流程时没有步骤可挂。
+> 文献行「已读」= `notes/` 已有配对笔记（来源行优先，其次文件名规范化），「精读」= 在 `papers/included.md` 且还没有笔记；点「笔记」打开对应 md。
+> 列表列对齐、隐后缀、胶囊状态、搜索/筛选、笔记序号列；默认展开先露 10 条见 `lit-list.ts`（v3.187）。
+
 > 适用范围：工作区（worktree）生命周期、流水线开步/模板/编辑器、任务卡、接力/提炼接力、示例课题。从 AGENTS.md 迁入（原文照录，未做语义改动）。
 
 ## 工作区生命周期（无损口径）
@@ -76,17 +86,22 @@
   topic 与 `pipeline_opt_out` 一次写入，已有真实设定按问题名保留。
   模板自检还必须满足：步骤声明 Quarto `run` 时挂载 `quarto-render`；`lit-search` 步骤声明 screening/included/to-fetch/to-fetch.ris 四项固定产物；返修步骤的回复信、修订稿、对照表、引用报告和再投稿清单全部带 `rN` 轮次后缀。
   **文献雷达消费契约**：`notes/inbox.md` 的二级标题只有在块内出现至少一个文献字段（来源/作者/摘要/链接/相关性等）时才算命中；巡检摘要不得使用会被消费层识别为文献的 `##` 块。scheduler 的 `newEntries` 必须复用同一有效条目解析口径。
-  **注册后模板选择层（TemplatePickModal）**：`register_project` 成功后弹出，选项 = 六套内置模板
+  **注册后模板选择层（TemplatePickModal）**：仅 **科研** 项目在 `register_project` 成功后弹出，选项 = 六套内置模板
   （名称 + 一句话说明 + 步骤数，数据直接用 PIPELINE_TEMPLATES，不另造表），选中即调用统一的 `apply_pipeline_template`
   追加进 project.toml 后关闭并刷新。**两个出口语义不同**：「不使用研究流程」调 `set_pipeline_opt_out`
-  把 `pipeline_opt_out = true` 显式写进 project.toml（记住选择）；「稍后再选」只关闭不留痕。
+  把 `pipeline_opt_out = true` 显式写进 project.toml（记住选择）——**只读文献、写笔记走这条**；
+  「稍后再选」只关闭不留痕。沉浸阅读在 `pdf_owner_project` 未命中时把所在文件夹加成项目并默认写该标记。
   **`pipeline_opt_out` 口径**：serde/toml 缺省 false；render_config 里 false 移除该行（同 topic 清除口径，
   档案卡简洁）；`append_pipeline_steps_at` 追加成功自动清回 false（选模板 = 启用流程，编辑器「＋ 从模板追加」
-  同路径同语义）。**渲染规则（ProjectGroup）**：模板引导横幅只在 `steps 为空 && !pipelineOptOut` 时显示；
-  ScheduleSection 不再受 opt-out 影响（定时任务技能可选后为通用能力，非科研项目照常显示）；
-  资源面板不受影响。空步骤项目的 ⋯ 菜单项文案为「选择研究流程模板」（非空 = 「更换模板」），从这里应用模板
+  同路径同语义）。**渲染规则（ProjectGroup）**：模板引导横幅只在 `steps 为空 && !pipelineOptOut` 时显示，
+  文案标明只读文献走「不使用研究流程」，横幅上即有该出口；
+  ScheduleSection 不再受 opt-out 影响（定时任务是通用能力）：无流程科研挂主区雷达下方（没有 ⋯ / 项目设置）；
+  有流程科研仍在项目设置抽屉（雷达「◔ 定时」开抽屉）；编程 / 办公挂右侧会话栏下；
+  资源面板不受影响。空步骤项目的设置抽屉「选择模板」（非空 = 「更换模板」），从这里应用模板
   走 `apply_pipeline_template`（后端清标记）+ 前端重读 `read_project_config`；横幅里的可选课题主题 append
   不碰，值变了才单独 write_project_config 写回。
+  **课题主题只在选模板时填**（v3.200）：添加项目弹窗不再问；注册成功后的 `TemplatePickModal` 顶部可选填，随 `apply_pipeline_template` 写入；「稍后再选 / 不使用」若已填也会落盘。编程 / 办公不经过此层。
+  **添加后打开该项目**（v3.203）：注册回调先把该项写入 `projects` 再选中分组；不能先 `setSelectedGroupKey` 再等 refresh——分组表还没有这项会被空表 effect 重置成原来的第一项。
   **v3.78 起五套模板内容重设计并互相对齐（接壤）**：准绳 =「讨论种子 → 草稿 → TASK.md → 执行」全链相辅相成——
   种子逐条对准 TASK.md/执行中的真实拍板点（删空洞种子、补缺口种子；纯执行步骤不给种子，沿用 v3.69 口径）；
   expectedArtifacts 精确化；技能挂载按 15 个内置技能核对（research-paper 检索步 +lit-search、精读步 +lit-notes、结果分析/毕业论文
@@ -546,11 +561,9 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 
 - **职责切分**：调度器只管「什么时候跑」；任务内容永远以技能自身规范与项目内文件为准（lit-watch 的检索策略/关键词/来源
   以 `papers/watchlist.md` 为唯一口径，改流程 = 改文件，不在任务定义里复制关键词）。
-- **技能可选**：创建弹层有「技能」下拉（list_skills 供给，lit-watch 固定最前、库里没有也兜底；默认任务名跟随技能——
-  lit-watch =「文献雷达」、其他 = 技能名，用户手改过的名称不被覆盖；纯逻辑 `src/schedule-tasks.ts` 旁的
-  `src/schedule-skill.ts`，tests/schedule-skill.test.ts）。**prompt 模板按技能分派**（`build_task_prompt`）：
+- **技能可选（v3.218）**：创建弹层种类 = 文献雷达 + 分类「巡检」的技能 +「＋ 新建巡检技能」。一次性内置技能（data-clean 等）不进下拉。下拉 value = 技能目录名（`Schedule.skill` / Agent 查找用），不是库 UUID。默认任务名跟随：lit-watch =「文献雷达」、巡检技能 = 技能名；手改过的名称不被覆盖（`src/schedule-skill.ts`）。**新建巡检技能两段**：弹层只收任务名/周期/意图 →「跟 AI 写技能」把 SKILL.md 写到 `.ccode/drafts/watch-<id>.md`（不进技能库）→ 人预览确认才 `create_skill`（分类「巡检」）+ 分发到将跑的 Agent + `create_schedule`。取消则日程也不建。跑非 lit-watch 前检查已分发，未分发本轮失败并写明原因（lit-watch prompt 自带口径不拦存量）。**prompt 模板按技能分派**（`build_task_prompt`）：
   lit-watch 用文献巡检专用文案（一字不动）；其他技能用通用模板（「请使用 {skill} 技能…按该技能的既定规范产出结果…
-  三行以内简报…定时雷达自动触发」），调度器不替其他技能发明任务内容。
+  三行以内简报…定时雷达自动触发」），调度器不替其他技能发明任务内容、不在 schedules.json 存长 prompt。
 - **存储**：app 级 `schedules.json`（config_dir/ccode/，原子写 + 进程内锁，同 profiles/skills 口径）；历史留最近
   20 条（简报脱敏 + 截 2000 字符）；周期只支持「每日/每周 + 时分」（本地时区），**不引入 cron 表达式**。
   **项目移除/清除痕迹/删除目录必须同步删该根上的定时任务**（`delete_schedules_for_project`，路径走 `same_path`）；
@@ -607,6 +620,8 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
     随之只算符合筛选的）。**指标未知（表未装/期刊未收录/IF 不可解析）一律放行不误伤**（lit_watch.rs
     metrics_pass_filter ⇔ lit-watch.ts entryPassesFilter 双端镜像，改动需同步）；表未装时筛选不生效，
     弹层与列表区均有明说提示。精读清单是用户自选的不过滤；被筛掉的条目不落任何状态，「查看全部」为纯前端临时态。
+  - **快筛解读（v3.192）**：雷达「◈ 解读」按标题+摘要写五节（问题与动机 / 做法与对象 / 摘要声称的结果 / 局限与未写明 / 对本课题的用处或适用研究方向），禁止三行口号和编造；结果落 `.ccode/watch-explains.json`（规范化标题去重，上限 500），`list_watch_entries` 出口挂 `WatchEntryDto.explain`，下次点解读直接展开不重跑。不写 `notes/inbox.md`。加载中禁止再用与底板同色的 `LoadingRows`（inset 上套 inset 是白板），改为「解读进行中…」。
+  - **无头 AI 不进本项目会话（v3.193 / v3.194）**：解读与定时巡检归对话页「内部 AI」。问 AI（「看这份文件」）、沉浸阅读注入、接力简报也不进项目页会话列表，但仍在对话页。`sessionExcludedFromProjectList` 是项目列表口径；不要把项目路径写入 `usage_provenance.internal`。
   - **下载白名单与资源登记**：download_paper_pdf 仅 http/https、60MB 上限流式中止、%PDF- 魔数校验、文件名
     sanitize、落 papers/ 重名 -2/-3、自动登记 project.toml `[[resources]]` type="paper"；非直链（出版商页）前端
     禁用并提示手动下载，付费墙文献仍走 watch-followup.md「待人工下载」。
@@ -637,11 +652,10 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 
 - **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不在逻辑里写死「文献/数据/
   论文」概念。
-- **示例课题（首启引导最小版）**：`projects::create_demo_project` 在「文档/Ccode 示例课题」幂等生成演示项目（英文综述五步
-  档案卡 + `build_demo_pdf` 手工拼 xref 的单页示例 PDF + references.bib + README；v3.77 起播示范任务书草稿替代原
-  示范简报）；已注册直接返回现有 project，目录已存在
-  但未注册时**只注册、不补建不覆盖**；git 初始化失败报错、bootstrap 提交 best-effort。前端入口 = 工作区空态「添加项目」旁
-  次级按钮；侧栏底部「设置」上方另有常驻「⌘K 命令面板」发现入口（键位标签随自定义绑定）。
+- **示例课题（15 分钟精读环）**：`projects::create_demo_project` 在「文档/Ccode 示例课题」幂等生成演示项目。步骤**就是**内置「英文综述」模板（`PIPELINE_TEMPLATES` id=review → `src-tauri/resources/pipeline-review.json`，改 `REVIEW_STEPS` 后跑 `scripts/export-review-template.ts`；`tests/pipeline-review-sync.test.ts` 守同步）。演示只叠加：课题主题、示例 PDF/清单、检索步 `seed_complete = true`。打开后当前步是「文献精读与笔记」，主按钮「开读这一篇」。已注册直接返回现有 project，目录已存在但未注册时**只注册、不补建不覆盖**。
+- **开步确认后自动拉起 Agent**：`startPipelineStep` 经 `buildWorkspaceTerminalRequest(..., { autoStart, launch })` 带 `autoStart`。确认弹层三行（本步要交 / 接到的输入芯片 / 将用哪个 Agent）+ 连接选择；无连接时主按钮「先加连接」跳连接页。TASK.md 默认折叠。
+- **合并后自动提货**：`merge_workspace` 在拷回 `papers/` 等 gitignored 产物之后，按本步 `expected_artifacts` 扫项目根，未跟踪文件自动 `register_artifact`；已 git 跟踪的跳过。开步弹层芯片来自 `inspect_step_inputs`（扫磁盘，不依赖人填 yaml）。
+- **雷达收件箱按篇开读**：`lit:` 条目主文案是论文标题；点了先加入精读清单，有已下载 PDF 则 `setReaderReq` 进沉浸阅读，否则落雷达并展开那一条。
 - **界面白话双层呈现（双语义）**：UI 主文案一律白话（保存到历史 / 相对主分支 / 多出 N 个保存点 / 改动说明），git 技术信息
   不删除、降为二级呈现（小字 mono、悬浮 title、详情 popover、⋯ 菜单），**不加任何模式开关**；状态分组等纯逻辑集中放
   `src/git-status-groups.ts`，新增 git 相关 UI 必须遵守同一双层规则。

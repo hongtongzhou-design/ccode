@@ -3,15 +3,20 @@ import { invoke } from "@tauri-apps/api/core";
 import * as pdfjs from "pdfjs-dist";
 import SelectionFloatBar from "./SelectionFloatBar";
 import { HoverTip } from "./HoverTip";
+import { IS_MAC } from "../hotkeys";
 import {
   PdfPageView,
   base64ToBytes,
   openPdfDocument,
+  type PdfActionResult,
   type PdfBytesDto,
 } from "./PdfPreview";
+import { usePdfGestureZoom } from "./use-pdf-zoom";
 import {
+  PDF_ZOOM_STEP,
   captureRectToCanvasPixels,
   captureRectUsable,
+  clampPdfScale,
   groupTextLines,
   hitTestCapture,
   joinParagraphLines,
@@ -20,6 +25,7 @@ import {
   nextFitScale,
   normCaptureRect,
   paragraphBounds,
+  pdfZoomCap,
   saveReaderProgress,
   type CaptureRect,
   type GlossaryEntry,
@@ -101,6 +107,7 @@ const RENDER_MARGIN = 2;
  * PDF 连续滚动视图（阅读区中栏）：全部页按自然高度纵向排布，
  * IntersectionObserver 只渲染可视窗口 ±2 页（canvas + textLayer 可选段），
  * 离窗页按已测页比例给骨架占位；加载链路与 PdfPreview 同一条 read_pdf_bytes 白名单。
+ * 缩放：顶栏 −/＋ 之外，⌘/Ctrl+滚轮与触控板双指捏合对准指针位置改倍率。
  */
 function PdfContinuousView({
   path,
@@ -114,6 +121,9 @@ function PdfContinuousView({
   onTranslate,
   onRequestTranslate,
   onAddGlossary,
+  onOrganize,
+  onOpenReader,
+  maxFitMultiplier,
 }: {
   path: string;
   /** 项目根：后端白名单的来源之一（同 PdfPreview 的 cwdHint） */
@@ -157,6 +167,15 @@ function PdfContinuousView({
     meaning: string,
     source: string,
   ) => Promise<string | null>;
+  onOrganize?: (
+    text: string,
+    page: number,
+    fileName: string,
+  ) => Promise<PdfActionResult>;
+  /** 预览顶栏「⛶ 沉浸阅读」 */
+  onOpenReader?: () => void;
+  /** 缩放上限 = 适配倍率 × 该倍数（窄宿主如弹层限深用；缺省不限到全局 4×） */
+  maxFitMultiplier?: number;
 }) {
   const [doc, setDoc] = useState<pdfjs.PDFDocumentProxy | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -171,11 +190,15 @@ function PdfContinuousView({
   /** 当前处于可视带内的页号（IntersectionObserver 汇报） */
   const [seenPages, setSeenPages] = useState<ReadonlySet<number>>(new Set([1]));
   const [hint, setHint] = useState<string | null>(null);
+  const [organizing, setOrganizing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fitScaleRef = useRef(fitScale);
   fitScaleRef.current = fitScale;
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scale = fixedScale ?? fitScale;
+  // 宿主缩放上限（弹层限深：页宽 ≈ 倍数 × 栏宽）；手势与按钮同一钳制
+  const zoomCap = pdfZoomCap(fitScale, maxFitMultiplier);
+  const clampZoom = (v: number) => Math.min(zoomCap, clampPdfScale(v));
 
   const fileName = basename(path);
 
@@ -192,6 +215,18 @@ function PdfContinuousView({
   } | null>(null);
   const [captureBusy, setCaptureBusy] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
+
+  // 手势缩放（⌘/Ctrl+滚轮 + 触控板 pinch）：共享绑定在 use-pdf-zoom；
+  // 页盒按布局倍率即时重排，renderScale 停稳才追上（PdfPageView 渲染倍率）。
+  // liveZoomingRef 供适配宽度重算 / IntersectionObserver / 滚动副作用在缩放期让路
+  const { renderScale, liveZoomingRef } = usePdfGestureZoom({
+    scrollRef,
+    scale,
+    enabled: Boolean(doc),
+    onCommit: (next) => setFixedScale(next),
+    anchorSelector: "[data-page-box]",
+    maxScale: zoomCap,
+  });
 
   function exitCapture() {
     setCaptureOn(false);
@@ -394,6 +429,7 @@ function PdfContinuousView({
       try {
         const page = await doc.getPage(1);
         if (cancelled) return;
+        if (liveZoomingRef.current) return;
         const w = page.getViewport({ scale: 1 }).width;
         const avail = el.clientWidth - 24; // 左右留白
         const next = nextFitScale(w, avail, fitScaleRef.current);
@@ -480,6 +516,7 @@ function PdfContinuousView({
     if (!rootEl || !doc) return;
     const io = new IntersectionObserver(
       (entries) => {
+        if (liveZoomingRef.current) return;
         setSeenPages((prev) => {
           const next = new Set(prev);
           for (const e of entries) {
@@ -574,6 +611,22 @@ function PdfContinuousView({
       err ?? (send ? "已发送给阅读会话" : "已写入终端输入行，检查后回车发送"),
     );
     if (!err) clearSelection();
+  }
+
+  async function organize() {
+    if (organizing || !onOrganize) return;
+    const excerpt = selectedExcerpt();
+    if (!excerpt) return;
+    setOrganizing(true);
+    try {
+      const r = await onOrganize(excerpt.text, excerpt.page, fileName);
+      showHint(r.msg);
+      if (r.ok) clearSelection();
+    } catch (e) {
+      showHint(`整理为笔记失败：${String(e)}`);
+    } finally {
+      setOrganizing(false);
+    }
   }
 
   // 换文档时退出圈选模式（矩形/定格都只对当前文档有意义）
@@ -691,6 +744,9 @@ function PdfContinuousView({
   /** 图标钮规格同阅读区顶栏 topBtn：28px 热区（设计系统下限），层级靠文字色 */
   const zoomBtn =
     "flex h-7 min-w-7 items-center justify-center rounded-sm px-0.5 text-xs text-l3 hover:bg-hover hover:text-l1 disabled:opacity-40";
+  const zoomGestureHint = IS_MAC
+    ? "⌘/Ctrl+滚轮或双指捏合缩放，中键拖动平移"
+    : "Ctrl+滚轮或触控板捏合缩放，中键拖动平移";
   const firstSize = pageSizes[1] ?? FALLBACK_PAGE;
 
   return (
@@ -725,8 +781,11 @@ function PdfContinuousView({
               <button
                 type="button"
                 className={zoomBtn}
+                title={`缩小（${zoomGestureHint}）`}
                 onClick={() =>
-                  setFixedScale((s) => Math.max(0.25, (s ?? fitScale) / 1.2))
+                  setFixedScale((s) =>
+                    clampZoom((s ?? fitScale) / PDF_ZOOM_STEP),
+                  )
                 }
               >
                 −
@@ -734,8 +793,11 @@ function PdfContinuousView({
               <button
                 type="button"
                 className={zoomBtn}
+                title={`放大（${zoomGestureHint}）`}
                 onClick={() =>
-                  setFixedScale((s) => Math.min(4, (s ?? fitScale) * 1.2))
+                  setFixedScale((s) =>
+                    clampZoom((s ?? fitScale) * PDF_ZOOM_STEP),
+                  )
                 }
               >
                 ＋
@@ -743,15 +805,27 @@ function PdfContinuousView({
               <button
                 type="button"
                 className={`${zoomBtn} px-1.5 text-micro tabular-nums`}
+                title="适配宽度"
                 onClick={() => setFixedScale(null)}
               >
-                {fixedScale === null ? "适配宽度" : `${Math.round(scale * 100)}%`}
+                {fixedScale === null
+                  ? "适配宽度"
+                  : `${Math.round(scale * 100)}%`}
               </button>
             </div>
             <span className="text-center text-micro text-l4 tabular-nums">
               {currentPage} / {pageCount}
             </span>
-            <div className="flex items-center justify-end">
+            <div className="flex items-center justify-end gap-0.5">
+              {onOpenReader && (
+                <button
+                  type="button"
+                  className={`${zoomBtn} px-1.5 text-micro`}
+                  onClick={onOpenReader}
+                >
+                  ⛶ 沉浸阅读
+                </button>
+              )}
               {captureSupported && (
                 <button
                   type="button"
@@ -778,9 +852,12 @@ function PdfContinuousView({
           </div>
           <div
             ref={scrollRef}
-            onScroll={() => setGlossTip(null)}
+            onScroll={() => {
+              if (liveZoomingRef.current) return;
+              setGlossTip(null);
+            }}
             onMouseOver={onContentMouseOver}
-            className="ccode-pdf-scroll relative min-h-0 flex-1 overflow-auto"
+            className="ccode-pdf-scroll relative min-h-0 flex-1 overflow-auto [overflow-anchor:none]"
           >
           <div
             ref={contentRef}
@@ -790,6 +867,8 @@ function PdfContinuousView({
             {Array.from({ length: pageCount }, (_, i) => i + 1).map((n) => {
               const natural = pageSizes[n] ?? firstSize;
               const shouldRender = n >= renderRange.lo && n <= renderRange.hi;
+              const boxW = Math.floor(natural.w * scale);
+              const boxH = Math.floor(natural.h * scale);
               return (
                 <div
                   key={n}
@@ -804,24 +883,28 @@ function PdfContinuousView({
                       <span className="h-px flex-1 bg-hairline" />
                     </div>
                   )}
-                  {shouldRender ? (
-                    <PdfPageView
-                      doc={doc}
-                      pageNum={n}
-                      scale={scale}
-                      active
-                      glossTerms={glossTerms}
-                    />
-                  ) : (
-                    // 离窗页骨架：按已测页比例估算高度，实测后缓存修正
-                    <div
-                      className="animate-pulse rounded-sm bg-inset"
-                      style={{
-                        width: Math.round(natural.w * scale),
-                        height: Math.round(natural.h * scale),
-                      }}
-                    />
-                  )}
+                  {/* 页盒按布局倍率即时重排；canvas/textLayer 按 renderScale 停稳才重绘（use-pdf-zoom） */}
+                  <div
+                    data-page-box={n}
+                    className={
+                      shouldRender
+                        ? "overflow-hidden bg-white"
+                        : "animate-pulse rounded-sm bg-inset"
+                    }
+                    style={{ width: boxW, height: boxH }}
+                  >
+                    {shouldRender ? (
+                      <PdfPageView
+                        doc={doc}
+                        pageNum={n}
+                        scale={scale}
+                        renderScale={renderScale}
+                        fillParent
+                        active
+                        glossTerms={glossTerms}
+                      />
+                    ) : null}
+                  </div>
                 </div>
               );
             })}
@@ -937,7 +1020,7 @@ function PdfContinuousView({
               </>
             </div>
           )}
-          {(onAskAi || onTranslate || onAddGlossary) && (
+          {(onAskAi || onTranslate || onAddGlossary || onOrganize) && (
             // 四个主钮（译 / ◈ 问 AI / ＋生词 / ⋯）并排的宽度预留约 260px，避免右缘溢出
             <SelectionFloatBar
               containerRef={scrollRef}
@@ -978,6 +1061,17 @@ function PdfContinuousView({
                 </SelectionGate>
               )}
               {onAskAi && <FloatBarOverflow onSend={() => askAi(true)} />}
+              {onOrganize && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => void organize()}
+                  disabled={organizing}
+                  className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110 disabled:opacity-60"
+                >
+                  {organizing ? "整理中…" : "整理为笔记"}
+                </button>
+              )}
             </SelectionFloatBar>
           )}
           {/* 术语悬停释义（HoverTip 应用内 tooltip，禁原生 title） */}

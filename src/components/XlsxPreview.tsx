@@ -1,11 +1,19 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { cellRef, colLetter, sheetTruncationLabel } from "../sheet-preview";
+import {
+  cellRef,
+  colLetter,
+  sheetCellHidden,
+  sheetMergeAt,
+  sheetTruncationLabel,
+  type SheetMerge,
+} from "../sheet-preview";
 
 interface SheetPreviewDto {
   sheet: string;
   sheets: string[];
   rows: string[][];
+  merges?: SheetMerge[];
   truncated: boolean;
   size: number;
   totalRows?: number;
@@ -20,13 +28,16 @@ function basename(p: string): string {
 /**
  * Excel / ODS 只读预览：指定工作表、最多 200 行 × 256 列。
  * 列字母/行号冻结，宽表横滑；点格子在顶栏看全文（WKWebView 没有 title 悬浮）。
+ * compact：外层已有文件名（办公弹层），本组件不再重复。
  */
 function XlsxPreview({
   path,
   cwdHint,
+  compact,
 }: {
   path: string;
   cwdHint: string | null;
+  compact?: boolean;
 }) {
   const [requestedSheet, setRequestedSheet] = useState<string | null>(null);
   const [dto, setDto] = useState<SheetPreviewDto | null>(null);
@@ -64,6 +75,7 @@ function XlsxPreview({
   }, [path, cwdHint, requestedSheet]);
 
   const colCount = dto?.rows.reduce((m, r) => Math.max(m, r.length), 0) ?? 0;
+  const merges = dto?.merges ?? [];
   const truncLabel = useMemo(() => {
     if (!dto) return null;
     return sheetTruncationLabel({
@@ -78,14 +90,17 @@ function XlsxPreview({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-2 bg-strip px-3 py-1.5 text-xs">
-        <span className="truncate text-l3" title={path}>
-          {basename(path)}
-        </span>
-        {truncLabel && (
-          <span className="shrink-0 text-l4">{truncLabel}</span>
-        )}
-      </div>
+      {!compact && (
+        <div className="flex shrink-0 items-center gap-2 bg-strip px-3 py-1.5 text-xs">
+          <span className="truncate text-l3" title={path}>
+            {basename(path)}
+          </span>
+          {truncLabel && <span className="shrink-0 text-l4">{truncLabel}</span>}
+        </div>
+      )}
+      {compact && truncLabel && (
+        <div className="shrink-0 px-3 py-1 text-micro text-l4">{truncLabel}</div>
+      )}
       {sel && selectedText !== null && (
         <div className="flex shrink-0 items-start gap-2 border-b border-hairline bg-inset px-3 py-1 text-xs">
           <span className="shrink-0 font-mono text-l4">{cellRef(sel.r, sel.c)}</span>
@@ -108,14 +123,14 @@ function XlsxPreview({
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto">
-          <table className="w-max min-w-full border-separate border-spacing-0 text-micro text-l2">
+          <table className="w-max border-separate border-spacing-0 text-micro text-l2">
             <thead>
               <tr>
                 <th className="sticky left-0 top-0 z-30 w-10 min-w-10 border-b border-r border-hairline bg-strip px-1 py-0.5" />
                 {Array.from({ length: colCount }, (_, ci) => (
                   <th
                     key={ci}
-                    className="sticky top-0 z-20 min-w-16 border-b border-r border-hairline bg-strip px-1.5 py-0.5 text-center font-mono font-normal text-l4"
+                    className="sticky top-0 z-20 min-w-20 border-b border-r border-hairline bg-strip px-1.5 py-0.5 text-center font-mono font-normal text-l4"
                   >
                     {colLetter(ci)}
                   </th>
@@ -129,13 +144,27 @@ function XlsxPreview({
                     {ri + 1}
                   </th>
                   {Array.from({ length: colCount }, (_, ci) => {
+                    if (sheetCellHidden(merges, ri, ci)) return null;
+                    const merge = sheetMergeAt(merges, ri, ci);
                     const active = sel?.r === ri && sel?.c === ci;
+                    const headerish = ri === 0 || merge?.r === 0;
+                    const spanned = (merge?.rowspan ?? 1) > 1 || (merge?.colspan ?? 1) > 1;
                     return (
                       <td
                         key={ci}
+                        rowSpan={merge?.rowspan}
+                        colSpan={merge?.colspan}
                         onClick={() => setSel({ r: ri, c: ci })}
-                        className={`max-w-48 min-w-16 cursor-default truncate border-b border-r border-hairline px-1.5 py-0.5 tabular-nums ${
-                          active ? "bg-seg-sel text-l1" : ri === 0 ? "bg-inset" : "bg-canvas"
+                        className={`min-w-20 max-w-[22rem] cursor-default border-b border-r border-hairline px-1.5 py-0.5 ${
+                          spanned
+                            ? "whitespace-normal text-center align-middle"
+                            : "truncate whitespace-nowrap tabular-nums"
+                        } ${
+                          active
+                            ? "bg-seg-sel text-l1"
+                            : headerish
+                              ? "bg-inset"
+                              : "bg-canvas"
                         }`}
                       >
                         {row[ci] ?? ""}

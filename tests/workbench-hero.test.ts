@@ -7,6 +7,10 @@ import {
   heroStatusLine,
   namedSessionTitle,
   pickWorkbenchHero,
+  pickWorkbenchNow,
+  workbenchRecentRows,
+  workbenchRecentSessions,
+  WORKBENCH_RECENT_LIMIT,
   type WorkbenchHero,
   type WorkbenchProject,
   type WorkbenchRepo,
@@ -48,6 +52,22 @@ const demoWs: WorkbenchWorkspaceRef = {
   status: "active",
   mergedAt: null,
 };
+
+test("前缀路径不会把 /repo/ccode2 归到 /repo/ccode", () => {
+  const hero = pickWorkbenchHero({
+    projects: [
+      { path: "/repo/ccode", name: "Ccode" },
+      { path: "/repo/ccode2", name: "Ccode2", workMode: "coding" },
+    ],
+    recentRepos: [],
+    workspaces: [],
+    runs: [run({ running: true, cwd: "/repo/ccode2/src" })],
+    contextName: null,
+  });
+  assert.equal(hero?.path, "/repo/ccode2");
+  assert.equal(hero?.name, "Ccode2");
+  assert.equal(hero?.workMode, "coding");
+});
 
 test("运行中的标签赢过上次选中的项目，名称用注册名", () => {
   const hero = pickWorkbenchHero({
@@ -116,7 +136,7 @@ test("运行计数只算这张卡所属项目，不算别的仓库", () => {
 
 test("没有运行时用上次选中的已添加项目，目录名回落到注册名", () => {
   const hero = pickWorkbenchHero({
-    projects: [demo, ccode],
+    projects: [{ ...demo, workMode: "office" }, ccode],
     recentRepos: repos,
     workspaces: [],
     runs: [run({ cwd: "/Users/me/Documents/Ccode", running: false })],
@@ -127,6 +147,7 @@ test("没有运行时用上次选中的已添加项目，目录名回落到注�
   assert.equal(hero?.source, "context");
   assert.equal(hero?.tabId, null);
   assert.equal(hero?.runningCount, 0);
+  assert.equal(hero?.workMode, "office");
 });
 
 test("没有上下文时取时间序里最近的已添加项目，不把旧注册项抬到最前", () => {
@@ -237,6 +258,20 @@ test("firstOpenStepName 取第一个未合并步骤，全完成回末步", () =>
     "精读与研究空白",
   );
   assert.equal(firstOpenStepName([], []), null);
+  assert.equal(
+    firstOpenStepName(
+      [
+        {
+          name: "文献检索与筛选",
+          workspaceName: "lit-search",
+          seedComplete: true,
+        },
+        { name: "文献精读与笔记", workspaceName: "lit-notes" },
+      ],
+      [],
+    ),
+    "文献精读与笔记",
+  );
 });
 
 test("heroStatusLine 只描述这张卡上的 Agent", () => {
@@ -282,4 +317,133 @@ test("namedSessionTitle 丢掉未命名对话", () => {
   assert.equal(namedSessionTitle({ customTitle: "方向", title: "hi" }), "方向");
   assert.equal(namedSessionTitle({ customTitle: null, title: "  " }), null);
   assert.equal(namedSessionTitle({ customTitle: null, title: null }), null);
+});
+
+test("最近项目：已添加用注册名，外部仓库标未添加", () => {
+  const rows = workbenchRecentRows({
+    recentRepos: [
+      { path: "/Users/me/Documents/Ccode", name: "Ccode", lastActive: "2026-09-03" },
+      { path: "/Users/me/codex-playground", name: "codex-playground", lastActive: "2026-09-02" },
+      { path: "/Users/me/Documents/Ccode 示例课题", name: "Ccode 示例课题" },
+    ],
+    projects: [ccode, { ...demo, name: "示例课题（演示）" }],
+    excludePaths: [ccode.path],
+  });
+  assert.deepEqual(
+    rows.map((r) => ({ name: r.name, registered: r.registered, path: r.path })),
+    [
+      {
+        name: "codex-playground",
+        registered: false,
+        path: "/Users/me/codex-playground",
+      },
+      {
+        name: "示例课题（演示）",
+        registered: true,
+        path: "/Users/me/Documents/Ccode 示例课题",
+      },
+    ],
+  );
+});
+
+test("最近项目 Windows 路径按同一仓库认已添加", () => {
+  const rows = workbenchRecentRows({
+    recentRepos: [{ path: "C:\\Users\\me\\Demo", name: "Demo" }],
+    projects: [{ path: "c:/Users/me/Demo", name: "演示项目" }],
+    isWindows: true,
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.name, "演示项目");
+  assert.equal(rows[0]?.registered, true);
+});
+
+test("最近项目包含没有会话的已添加项目，新建排在前面", () => {
+  const rows = workbenchRecentRows({
+    recentRepos: [
+      { path: "/old-session", name: "old-session", lastActive: "2026-01-01T00:00:00Z" },
+    ],
+    projects: [
+      {
+        path: "/Users/me/Desktop/AI应用教程",
+        name: "AI应用教程",
+        lastOpenedAt: "2026-09-03T10:00:00Z",
+      },
+    ],
+  });
+  assert.deepEqual(
+    rows.map((r) => ({ name: r.name, registered: r.registered })),
+    [
+      { name: "AI应用教程", registered: true },
+      { name: "old-session", registered: false },
+    ],
+  );
+});
+
+test("最近项目和最近对话默认最多 10 条", () => {
+  assert.equal(WORKBENCH_RECENT_LIMIT, 10);
+  const projects = Array.from({ length: 12 }, (_, i) => ({
+    path: `/p/${String(i).padStart(2, "0")}`,
+    name: `项目${i}`,
+    lastOpenedAt: `2026-09-03T00:00:${String(i).padStart(2, "0")}Z`,
+  }));
+  const rows = workbenchRecentRows({ recentRepos: [], projects });
+  assert.equal(rows.length, 10);
+  assert.equal(rows[0]?.name, "项目11");
+  assert.equal(rows[9]?.name, "项目2");
+
+  const sessions = Array.from({ length: 12 }, (_, i) => ({
+    customTitle: i === 0 ? null : `对话${i}`,
+    title: i === 0 ? "  " : `对话${i}`,
+  }));
+  const listed = workbenchRecentSessions(sessions);
+  assert.equal(listed.length, 10);
+  assert.equal(listed[0]?.customTitle, "对话1");
+});
+
+test("正在进行：确认优先，并行项目都在，安静项目不进", () => {
+  const items = pickWorkbenchNow({
+    seeds: [
+      {
+        path: demo.path,
+        name: demo.name,
+        registered: true,
+        workMode: "research",
+        subtitle: "文献检索",
+        needsYou: true,
+      },
+      {
+        path: ccode.path,
+        name: ccode.name,
+        registered: true,
+        workMode: "coding",
+        subtitle: "payment 需同步",
+        needsYou: true,
+        extraRoots: ["/Users/me/ccode/worktrees/Ccode/payment"],
+      },
+      {
+        path: "/Users/me/docs",
+        name: "材料",
+        registered: true,
+        workMode: "office",
+        subtitle: null,
+        needsYou: false,
+      },
+    ],
+    runs: [
+      run({
+        tabId: "pay",
+        running: true,
+        attention: "confirm",
+        cwd: "/Users/me/ccode/worktrees/Ccode/payment",
+      }),
+    ],
+  });
+  assert.equal(items.length, 2);
+  assert.equal(items[0]?.path, ccode.path);
+  assert.equal(items[0]?.tabId, "pay");
+  assert.equal(items[0]?.workMode, "coding");
+  assert.equal(items[1]?.path, demo.path);
+  assert.equal(items[1]?.subtitle, "文献检索");
+  assert.equal(items[0]?.runningCount, 1);
+  assert.equal(items[0]?.attention, "confirm");
 });

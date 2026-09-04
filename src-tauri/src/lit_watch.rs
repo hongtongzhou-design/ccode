@@ -6,6 +6,7 @@
 //! - `papers/watch-followup.md`：付费墙/无摘要待办（`- ` 开头一行一条，字段「 — 」分隔）
 //! - `papers/watchlist.md`：订阅清单（`关键词 — 来源 — 备注`，来源逗号分隔多选）
 //! - `papers/included.md`：精读清单（`标题 — 作者, 年份 — 来源 — 链接/DOI`，一行一篇）
+//! - `.ccode/watch-explains.json`：雷达快筛解读缓存（按规范化标题去重，不进 inbox.md）
 //!
 //! 防护口径：一切文件操作限定在已注册项目根内（projects::ensure_task_project_root，
 //! 同任务卡写入门檻）；目标文件已存在时先 canonicalize 双校验仍在根内，堵符号链接逃逸
@@ -15,6 +16,7 @@
 //! 会话出站才必须脱敏，项目文件不在此列）。
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +28,10 @@ const DOWNLOAD_CAP: usize = 60 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// 文件名 sanitize 后主干（不含扩展名）的字符上限
 const FILE_STEM_CAP: usize = 110;
+/// 快筛解读落盘：项目内 Ccode 痕迹，不进 inbox.md（巡检只增不改那份）
+const EXPLAINS_REL: &str = ".ccode/watch-explains.json";
+const EXPLAIN_TEXT_CAP: usize = 8 * 1024;
+const EXPLAIN_ITEMS_CAP: usize = 500;
 
 // ===== DTO（camelCase，风格同 models.rs） =====
 
@@ -55,6 +61,9 @@ pub struct WatchEntryDto {
     pub raw_line_range: [u32; 2],
     /// 期刊指标徽章（IF/中科院分区/Top）；期刊指标表未下载或查不到为 None
     pub metrics: Option<crate::journal_metrics::JournalMetricsDto>,
+    /// 已落盘的快筛解读（`.ccode/watch-explains.json`）；未解读为 None
+    #[serde(default)]
+    pub explain: Option<String>,
 }
 
 /// watch-followup.md 中的一条待办（付费墙/无摘要，待人工获取全文）
@@ -280,6 +289,7 @@ impl EntryBuilder {
             raw_line_range: [self.start_line, self.last_line],
             // 期刊指标在 list_watch_entries 列表出口统一 enrichment，解析器不管
             metrics: None,
+            explain: None,
         }
     }
 
@@ -849,6 +859,92 @@ fn attach_pdf_at(root: &Path, source_path: &str, title: &str) -> Result<Download
     register_pdf(root, &target)
 }
 
+// ===== 快筛解读缓存（.ccode/watch-explains.json） =====
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WatchExplainItem {
+    title: String,
+    text: String,
+    saved_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WatchExplainsFile {
+    #[serde(default)]
+    items: BTreeMap<String, WatchExplainItem>,
+}
+
+fn read_explains_file(root: &Path) -> Result<WatchExplainsFile, String> {
+    match read_text_inside(root, EXPLAINS_REL)? {
+        None => Ok(WatchExplainsFile::default()),
+        Some(text) if text.trim().is_empty() => Ok(WatchExplainsFile::default()),
+        Some(text) => serde_json::from_str(&text)
+            .map_err(|e| format!("解读缓存损坏（{EXPLAINS_REL}）: {e}")),
+    }
+}
+
+fn attach_explains(root: &Path, entries: &mut [WatchEntryDto]) {
+    let Ok(file) = read_explains_file(root) else {
+        return;
+    };
+    for e in entries {
+        if let Some(item) = file.items.get(&normalize_title(&e.title)) {
+            let t = item.text.trim();
+            if !t.is_empty() {
+                e.explain = Some(item.text.clone());
+            }
+        }
+    }
+}
+
+fn clip_explain_text(text: &str) -> String {
+    let t = text.trim();
+    let chars: Vec<char> = t.chars().collect();
+    if chars.len() <= EXPLAIN_TEXT_CAP {
+        t.to_string()
+    } else {
+        chars[..EXPLAIN_TEXT_CAP].iter().collect()
+    }
+}
+
+fn save_explain_at(root: &Path, title: &str, text: &str) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("标题不能为空".into());
+    }
+    let text = clip_explain_text(text);
+    if text.is_empty() {
+        return Err("解读内容为空".into());
+    }
+    let mut file = read_explains_file(root)?;
+    let key = normalize_title(title);
+    file.items.insert(
+        key,
+        WatchExplainItem {
+            title: title.to_string(),
+            text,
+            saved_at: chrono::Utc::now().to_rfc3339(),
+        },
+    );
+    if file.items.len() > EXPLAIN_ITEMS_CAP {
+        let mut keys: Vec<(String, String)> = file
+            .items
+            .iter()
+            .map(|(k, v)| (k.clone(), v.saved_at.clone()))
+            .collect();
+        keys.sort_by(|a, b| a.1.cmp(&b.1));
+        let drop_n = file.items.len() - EXPLAIN_ITEMS_CAP;
+        for (k, _) in keys.into_iter().take(drop_n) {
+            file.items.remove(&k);
+        }
+    }
+    let body = serde_json::to_string_pretty(&file)
+        .map_err(|e| format!("序列化解读缓存失败: {e}"))?;
+    write_text_inside(root, EXPLAINS_REL, &body)
+}
+
 // ===== Tauri commands =====
 
 #[tauri::command]
@@ -868,6 +964,7 @@ pub async fn list_watch_entries(project_root: String) -> Result<WatchInboxDto, S
             };
             e.metrics = crate::journal_metrics::lookup(name);
         }
+        attach_explains(&root, &mut entries);
         let followups = match read_text_inside(&root, "papers/watch-followup.md")? {
             Some(text) => parse_followups(&text),
             None => Vec::new(),
@@ -876,6 +973,20 @@ pub async fn list_watch_entries(project_root: String) -> Result<WatchInboxDto, S
     })
     .await
     .map_err(|e| format!("读取文献收件箱失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn save_watch_explain(
+    project_root: String,
+    title: String,
+    text: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = gated_root(&project_root)?;
+        save_explain_at(&root, &title, &text)
+    })
+    .await
+    .map_err(|e| format!("保存解读失败: {e}"))?
 }
 
 #[tauri::command]
@@ -1415,5 +1526,23 @@ lone keyword
         assert!(err.contains("项目目录之外"), "{err}");
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn explain_cache_roundtrip_by_normalized_title() {
+        let dir = tmpdir("explain");
+        save_explain_at(&dir, "Perovskite Solar Cells: A Review", "问题与动机\n正文").unwrap();
+        assert!(save_explain_at(&dir, "", "x").is_err());
+        assert!(save_explain_at(&dir, "x", "  ").is_err());
+        let mut entries = parse_inbox_entries(
+            "## Perovskite Solar Cells: A Review\n- 摘要首句：We present.\n",
+        );
+        attach_explains(&dir, &mut entries);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].explain.as_deref(), Some("问题与动机\n正文"));
+        save_explain_at(&dir, "perovskite solar cells a review", "新稿").unwrap();
+        attach_explains(&dir, &mut entries);
+        assert_eq!(entries[0].explain.as_deref(), Some("新稿"));
+        fs::remove_dir_all(&dir).ok();
     }
 }

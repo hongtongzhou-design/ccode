@@ -21,17 +21,21 @@ test("inboxCategoryOf：key 前缀推导类别，confirm: 与 live: 合并为待
   assert.equal(inboxCategoryOf("profile:p-1"), "profile");
   assert.equal(inboxCategoryOf("help:/repo/root"), "help");
   assert.equal(inboxCategoryOf("lit:s-1:2026-08-18"), "lit");
+  assert.equal(inboxCategoryOf("dep:git"), "dep");
+  assert.equal(inboxCategoryOf("update:0.1.1"), "update");
 });
 
 test("inboxCategoryOf：未知前缀回落待确认（不静默丢失）", () => {
   assert.equal(inboxCategoryOf("whatever"), "confirm");
 });
 
-test("inboxCategoryLabel：八类中文标签齐备（文献在待确认之后）", () => {
+test("inboxCategoryLabel：类别中文标签齐备（更新在依赖之后、文献之前）", () => {
   assert.deepEqual(
     [
       "conflict",
       "confirm",
+      "dep",
+      "update",
       "lit",
       "ready",
       "artifacts",
@@ -39,7 +43,18 @@ test("inboxCategoryLabel：八类中文标签齐备（文献在待确认之后�
       "profile",
       "help",
     ].map((c) => inboxCategoryLabel(c as Parameters<typeof inboxCategoryLabel>[0])),
-    ["冲突", "待确认", "文献", "可合并", "待核验", "待发送", "配置失效", "人工请求"],
+    [
+      "冲突",
+      "待确认",
+      "依赖",
+      "更新",
+      "文献",
+      "可合并",
+      "待核验",
+      "待发送",
+      "配置失效",
+      "人工请求",
+    ],
   );
 });
 
@@ -51,6 +66,7 @@ test("groupInbox：固定顺序、空类不返回、类内保持原顺序", () =
     { key: "help:/r1" },
     { key: "lit:s-1:t1" },
     { key: "live:claude:s-1" },
+    { key: "update:0.1.1" },
     { key: "ready:ws-3" },
   ];
   const groups = groupInbox(items);
@@ -59,6 +75,7 @@ test("groupInbox：固定顺序、空类不返回、类内保持原顺序", () =
     [
       ["conflict", "冲突", ["conflict:ws-1"]],
       ["confirm", "待确认", ["confirm:tab-1", "live:claude:s-1"]],
+      ["update", "更新", ["update:0.1.1"]],
       ["lit", "文献", ["lit:s-1:t1"]],
       ["ready", "可合并", ["ready:ws-2", "ready:ws-3"]],
       ["help", "人工请求", ["help:/r1"]],

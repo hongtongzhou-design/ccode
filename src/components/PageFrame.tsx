@@ -5,7 +5,7 @@ import { HoverTip, useHoverTip } from "./HoverTip";
 const WIDTHS = {
   narrow: "max-w-2xl",
   standard: "max-w-4xl",
-  /** 设置页：给分区导航 + 设置内容留出稳定的中宽工作面。 */
+  /** 可选中宽外壳（约 1080px）。设置/MCP 已改 fluid，保留给以后要限宽的阅读页。 */
   settings: "max-w-[1080px]",
   wide: "max-w-[1440px]",
   /** 连续工作区页面：使用主区全部可用宽度，内容自身维持固定密度。 */
@@ -63,6 +63,9 @@ export const primaryActionClass =
 
 export const secondaryActionClass =
   "ccode-action-secondary inline-flex h-8 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1 disabled:cursor-not-allowed disabled:opacity-50";
+
+/** 项目页文档/笔记/工作树等内容井：canvas/strip 混色，浅色不另垫白纸 */
+export const projectWellClass = "ccode-well rounded-lg p-3";
 
 /** 行内 28px 描边次按钮：列表行/工具栏次级操作统一口径（原各页 secBtn 逐字复制的收敛点） */
 export const rowActionClass =

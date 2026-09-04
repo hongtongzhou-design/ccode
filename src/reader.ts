@@ -1,7 +1,10 @@
 /** 沉浸式阅读区的纯逻辑：分栏百分比钳制/像素换算、阅读会话复用键、
  *  PDF 选段注入格式（B1）；圈选矩形映射/命中判定、md 图片与相对链接判定、截图注入格式（B2）；
  *  划词翻译 prompt、生词本表格契约、段落边界提取、术语匹配、进度/护眼存储键（B3）；
- *  PDF 适配宽度 nextFitScale（预览与连续滚动共用，防滚动条槽振荡）。
+ *  PDF 适配宽度 nextFitScale（预览与连续滚动共用，防滚动条槽振荡）；
+ *  手势缩放（⌘/Ctrl+滚轮、触控板 pinch）连续倍率/钳制/锚点实测修正
+ *  （组件绑定共享在 components/use-pdf-zoom.ts：布局倍率即时、渲染倍率延迟）；
+ *  画布 backing store 上限 pdfCanvasOutputScale（防高倍缩放黑屏）。
  *  布局常量与换算全部集中这里，组件（ReaderOverlay/PdfContinuousView/FilePreviewEditor）只做绑定。 */
 
 import { escapeShellPath } from "./terminal-input.ts";
@@ -38,6 +41,101 @@ export function nextFitScale(
   const next = availWidth / pageWidth;
   if (Math.abs(next - current) * pageWidth < 0.5) return null;
   return next;
+}
+
+/** PDF 手势/按钮缩放范围：与顶栏 −/＋ 同一钳制 */
+export const PDF_SCALE_MIN = 0.25;
+export const PDF_SCALE_MAX = 4;
+/** 顶栏 −/＋ 每档倍率（手势走连续倍率，不对齐这一档） */
+export const PDF_ZOOM_STEP = 1.2;
+/** 滚轮/pinch 像素：这么多 deltaY ≈ 缩小到一半（连续指数，不按档跳） */
+export const PDF_WHEEL_ZOOM_HALVE_PX = 400;
+/** pdf.js 画布像素上限（与官方 viewer 同 4096²）。超限 WKWebView/GPU 会整页涂黑 */
+export const PDF_MAX_CANVAS_PIXELS = 4096 * 4096;
+/** 单边上限：Safari/WKWebView 大画布会合成失败 */
+export const PDF_MAX_CANVAS_SIDE = 8192;
+
+/** ⌘/Ctrl + 滚轮才缩放（触控板 pinch 在 Chromium/WebKit 也带 ctrlKey）；未按修饰键仍翻页 */
+export function pdfWheelShouldZoom(mods: {
+  ctrlKey: boolean;
+  metaKey: boolean;
+}): boolean {
+  return Boolean(mods.ctrlKey || mods.metaKey);
+}
+
+/**
+ * 滚轮/pinch 增量 → 连续倍率。deltaY>0 缩小。
+ * line/page 模式先折成像素；单次夹到 ±HALVE_PX（最多一倍/一半），避免一格跳到极限。
+ */
+export function pdfWheelZoomFactor(
+  deltaY: number,
+  deltaMode = 0,
+): number | null {
+  if (!Number.isFinite(deltaY) || deltaY === 0) return null;
+  let dy = deltaY;
+  if (deltaMode === 1) dy *= 16;
+  else if (deltaMode === 2) dy *= 400;
+  dy = Math.max(
+    -PDF_WHEEL_ZOOM_HALVE_PX,
+    Math.min(PDF_WHEEL_ZOOM_HALVE_PX, dy),
+  );
+  return 2 ** -(dy / PDF_WHEEL_ZOOM_HALVE_PX);
+}
+
+export function clampPdfScale(scale: number): number {
+  if (!Number.isFinite(scale) || scale <= 0) return 1;
+  return Math.min(PDF_SCALE_MAX, Math.max(PDF_SCALE_MIN, scale));
+}
+
+/** 宿主缩放上限：fit 倍率的倍数（弹层限制深缩放用，页宽 ≈ 倍数 × 栏宽），仍夹全局范围 */
+export function pdfZoomCap(
+  fitScale: number,
+  maxFitMultiplier?: number,
+): number {
+  if (!maxFitMultiplier || !(fitScale > 0)) return PDF_SCALE_MAX;
+  return clampPdfScale(fitScale * maxFitMultiplier);
+}
+
+/** WebKit `gesturechange.scale` 相对手势起点（1 = 没变） */
+export function pdfPinchScale(
+  startScale: number,
+  gestureScale: number,
+): number {
+  const start =
+    Number.isFinite(startScale) && startScale > 0 ? startScale : 1;
+  if (!Number.isFinite(gestureScale) || gestureScale <= 0) {
+    return clampPdfScale(start);
+  }
+  return clampPdfScale(start * gestureScale);
+}
+
+/**
+ * 画布 backing store 相对 CSS 尺寸的输出倍率。
+ * 先按 devicePixelRatio，再按总像素/单边上限缩小——高倍缩放时 CSS 拉大、像素不涨，避免黑屏。
+ */
+export function pdfCanvasOutputScale(
+  cssWidth: number,
+  cssHeight: number,
+  dpr: number,
+  maxPixels = PDF_MAX_CANVAS_PIXELS,
+  maxSide = PDF_MAX_CANVAS_SIDE,
+): { sx: number; sy: number } {
+  if (!(cssWidth > 0) || !(cssHeight > 0)) return { sx: 1, sy: 1 };
+  const px = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  let sx = px;
+  let sy = px;
+  const w = cssWidth * sx;
+  const h = cssHeight * sy;
+  let shrink = 1;
+  const pixels = w * h;
+  if (Number.isFinite(maxPixels) && maxPixels > 0 && pixels > maxPixels) {
+    shrink = Math.min(shrink, Math.sqrt(maxPixels / pixels));
+  }
+  if (Number.isFinite(maxSide) && maxSide > 0) {
+    if (w * shrink > maxSide) shrink = Math.min(shrink, maxSide / w);
+    if (h * shrink > maxSide) shrink = Math.min(shrink, maxSide / h);
+  }
+  return { sx: sx * shrink, sy: sy * shrink };
 }
 
 /** 栏宽百分比钳制：非有限数/非正数回落 fallback，其余夹到 [min, max] */

@@ -3,10 +3,11 @@
  * 纯逻辑，供改动面板分组渲染与徽标悬浮 title 复用。
  */
 
-export type StatusGroupKey = "modified" | "added" | "deleted";
+export type StatusGroupKey = "unmerged" | "modified" | "added" | "deleted";
 
 /** 中文组名（改动面板文件列表的分组标题） */
 export const STATUS_GROUP_LABEL: Record<StatusGroupKey, string> = {
+  unmerged: "冲突的",
   modified: "修改的",
   added: "新增的",
   deleted: "删除的",
@@ -19,6 +20,10 @@ export const STATUS_WORD: Record<string, string> = {
   "??": "新文件",
   D: "已删除",
   R: "已重命名",
+  U: "未合并（冲突）",
+  UU: "未合并（冲突）",
+  AA: "双方都新增（冲突）",
+  DD: "双方都删除（冲突）",
 };
 
 /** 徽标悬浮 title：保留字母供程序员扫读，附白话说明 */
@@ -26,8 +31,11 @@ export function statusBadgeTitle(status: string): string {
   return `${status} · ${STATUS_WORD[status] ?? status}`;
 }
 
-/** 状态字母归入三组之一；M/R 及未知状态兜底进「修改的」 */
+const UNMERGED_STATUS = new Set(["U", "UU", "AA", "DD", "AU", "UA", "DU", "UD"]);
+
+/** 状态字母归入四组之一；冲突优先，M/R 及未知状态兜底进「修改的」 */
 export function statusGroupKey(status: string): StatusGroupKey {
+  if (UNMERGED_STATUS.has(status)) return "unmerged";
   if (status === "A" || status === "??") return "added";
   if (status === "D") return "deleted";
   return "modified";
@@ -50,7 +58,7 @@ export function groupFilesByStatus<T extends { status: string }>(
     if (bucket) bucket.push(file);
     else buckets.set(key, [file]);
   }
-  const order: StatusGroupKey[] = ["modified", "added", "deleted"];
+  const order: StatusGroupKey[] = ["unmerged", "modified", "added", "deleted"];
   return order
     .filter((key) => buckets.has(key))
     .map((key) => ({

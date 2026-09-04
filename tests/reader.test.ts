@@ -23,6 +23,17 @@ import {
   joinParagraphLines,
   nearestLineIndex,
   nextFitScale,
+  PDF_MAX_CANVAS_PIXELS,
+  PDF_MAX_CANVAS_SIDE,
+  PDF_SCALE_MAX,
+  PDF_SCALE_MIN,
+  PDF_WHEEL_ZOOM_HALVE_PX,
+  clampPdfScale,
+  pdfCanvasOutputScale,
+  pdfZoomCap,
+  pdfPinchScale,
+  pdfWheelShouldZoom,
+  pdfWheelZoomFactor,
   normCaptureRect,
   paragraphBounds,
   parseGlossaryTable,
@@ -58,6 +69,71 @@ test("nextFitScale：无效宽返回 null，亚像素变化保持原值", () => 
   const jumped = nextFitScale(595, 800 - 17, current);
   assert.ok(jumped !== null);
   assert.ok(Math.abs((jumped as number) - (783 / 595)) < 1e-9);
+});
+
+test("pdfWheelShouldZoom：仅 ⌘/Ctrl 才缩放，未按修饰键留给翻页", () => {
+  assert.equal(pdfWheelShouldZoom({ ctrlKey: false, metaKey: false }), false);
+  assert.equal(pdfWheelShouldZoom({ ctrlKey: true, metaKey: false }), true);
+  assert.equal(pdfWheelShouldZoom({ ctrlKey: false, metaKey: true }), true);
+  assert.equal(pdfWheelShouldZoom({ ctrlKey: true, metaKey: true }), true);
+});
+
+test("pdfWheelZoomFactor：连续指数，HALVE_PX 缩到一半，0/非数返回 null", () => {
+  assert.equal(pdfWheelZoomFactor(0), null);
+  assert.equal(pdfWheelZoomFactor(Number.NaN), null);
+  assert.equal(pdfWheelZoomFactor(PDF_WHEEL_ZOOM_HALVE_PX), 0.5);
+  assert.equal(pdfWheelZoomFactor(-PDF_WHEEL_ZOOM_HALVE_PX), 2);
+  // 小增量接近 1（pinch 单帧），不是跳档
+  const fine = pdfWheelZoomFactor(4);
+  assert.ok(fine !== null);
+  assert.ok((fine as number) > 0.99 && (fine as number) < 1);
+  const line = pdfWheelZoomFactor(1, 1);
+  assert.ok(line !== null);
+  assert.ok(
+    Math.abs((line as number) - 2 ** -(16 / PDF_WHEEL_ZOOM_HALVE_PX)) < 1e-12,
+  );
+  // 单次夹到 ±HALVE_PX，10000px 最多一倍/一半
+  assert.equal(pdfWheelZoomFactor(10000), 0.5);
+  assert.equal(pdfWheelZoomFactor(-10000), 2);
+});
+
+test("clampPdfScale：夹到 0.25–4，坏值回落 1", () => {
+  assert.equal(clampPdfScale(1), 1);
+  assert.equal(clampPdfScale(0.1), PDF_SCALE_MIN);
+  assert.equal(clampPdfScale(8), PDF_SCALE_MAX);
+  assert.equal(clampPdfScale(Number.NaN), 1);
+  assert.equal(clampPdfScale(0), 1);
+  assert.equal(clampPdfScale(-2), 1);
+});
+
+test("pdfZoomCap：fit 倍率 × 倍数，夹全局范围；缺省不限", () => {
+  assert.ok(Math.abs(pdfZoomCap(1.4, 1.5) - 2.1) < 1e-9);
+  assert.equal(pdfZoomCap(1.4), PDF_SCALE_MAX);
+  assert.equal(pdfZoomCap(3, 1.5), PDF_SCALE_MAX);
+  assert.equal(pdfZoomCap(0, 1.5), PDF_SCALE_MAX);
+  assert.equal(pdfZoomCap(0.1, 1.5), PDF_SCALE_MIN);
+});
+
+test("pdfPinchScale：相对手势起点，坏倍率保持起点", () => {
+  assert.equal(pdfPinchScale(1, 2), 2);
+  assert.equal(pdfPinchScale(1.5, 0.5), 0.75);
+  assert.equal(pdfPinchScale(1, 10), PDF_SCALE_MAX);
+  assert.equal(pdfPinchScale(1, 0), 1);
+  assert.equal(pdfPinchScale(1, Number.NaN), 1);
+  assert.equal(pdfPinchScale(Number.NaN, 2), 2);
+});
+
+
+test("pdfCanvasOutputScale：普通页按 dpr，超限按像素/单边收缩", () => {
+  assert.deepEqual(pdfCanvasOutputScale(100, 80, 2), { sx: 2, sy: 2 });
+  assert.deepEqual(pdfCanvasOutputScale(0, 80, 2), { sx: 1, sy: 1 });
+  // 总像素超 4096²：边长 5000×5000 @dpr1 = 25M > 16M
+  const tight = pdfCanvasOutputScale(5000, 5000, 1);
+  assert.ok(tight.sx < 1 && tight.sy < 1);
+  assert.ok(5000 * tight.sx * 5000 * tight.sy <= PDF_MAX_CANVAS_PIXELS + 1e-6);
+  // 单边超 8192
+  const side = pdfCanvasOutputScale(20000, 100, 1, 1e12, PDF_MAX_CANVAS_SIDE);
+  assert.ok(20000 * side.sx <= PDF_MAX_CANVAS_SIDE + 1e-6);
 });
 
 test("clampReaderPct 坏值/非正数回落缺省", () => {

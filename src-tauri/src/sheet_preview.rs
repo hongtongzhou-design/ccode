@@ -2,9 +2,10 @@
 //! 只读、截断，不当电子表格编辑器。
 
 use crate::pdf::read_whitelisted_sync;
-use calamine::{Data, Reader};
+use calamine::{Data, Dimensions, Reader};
 use serde::Serialize;
 use std::io::{Cursor, Read, Seek};
+use zip::ZipArchive;
 
 const XLSX_CAP: u64 = 20 * 1024 * 1024;
 const MAX_ROWS: usize = 200;
@@ -12,14 +13,159 @@ const MAX_COLS: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SheetMergeDto {
+    pub r: usize,
+    pub c: usize,
+    pub rowspan: usize,
+    pub colspan: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SheetPreviewDto {
     pub sheet: String,
     pub sheets: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    pub merges: Vec<SheetMergeDto>,
     pub truncated: bool,
     pub size: u64,
     pub total_rows: usize,
     pub total_cols: usize,
+}
+
+/// 把工作表绝对合并区裁进预览窗口（相对 range 起点、已截断的行×列）。
+fn clip_merge(
+    d: &Dimensions,
+    origin: (u32, u32),
+    max_rows: usize,
+    max_cols: usize,
+) -> Option<SheetMergeDto> {
+    if max_rows == 0 || max_cols == 0 {
+        return None;
+    }
+    let (or, oc) = origin;
+    if d.end.0 < or || d.end.1 < oc {
+        return None;
+    }
+    let r0 = d.start.0.saturating_sub(or) as usize;
+    let c0 = d.start.1.saturating_sub(oc) as usize;
+    if r0 >= max_rows || c0 >= max_cols {
+        return None;
+    }
+    let r1 = (d.end.0.saturating_sub(or) as usize).min(max_rows - 1);
+    let c1 = (d.end.1.saturating_sub(oc) as usize).min(max_cols - 1);
+    if r1 < r0 || c1 < c0 {
+        return None;
+    }
+    let rowspan = r1 + 1 - r0;
+    let colspan = c1 + 1 - c0;
+    if rowspan <= 1 && colspan <= 1 {
+        return None;
+    }
+    Some(SheetMergeDto {
+        r: r0,
+        c: c0,
+        rowspan,
+        colspan,
+    })
+}
+
+/// A1 或 A1:B2 → 0 起算行列。给 xlsx mergeCell ref 用（Excel 常写自闭合标签，calamine 只认 Start）。
+fn parse_a1_cell(s: &str) -> Option<(u32, u32)> {
+    let s = s.trim();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut col = 0u32;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+        col = col * 26 + u32::from(bytes[i].to_ascii_uppercase() - b'A' + 1);
+        i += 1;
+    }
+    if i == 0 || col == 0 {
+        return None;
+    }
+    let row: u32 = s[i..].parse().ok()?;
+    if row == 0 {
+        return None;
+    }
+    Some((row - 1, col - 1))
+}
+
+fn parse_a1_range(s: &str) -> Option<Dimensions> {
+    let s = s.trim();
+    if let Some((a, b)) = s.split_once(':') {
+        Some(Dimensions::new(parse_a1_cell(a)?, parse_a1_cell(b)?))
+    } else {
+        let p = parse_a1_cell(s)?;
+        Some(Dimensions::new(p, p))
+    }
+}
+
+fn parse_merge_refs(xml: &str) -> Vec<Dimensions> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(i) = rest.find("mergeCell") {
+        rest = &rest[i + 9..];
+        let Some(j) = rest.find("ref=\"") else { continue };
+        if j > 64 {
+            continue;
+        }
+        rest = &rest[j + 5..];
+        let Some(e) = rest.find('"') else { break };
+        if let Some(d) = parse_a1_range(&rest[..e]) {
+            out.push(d);
+        }
+        rest = &rest[e + 1..];
+    }
+    out
+}
+
+fn zip_file_string(zip: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> Option<String> {
+    let mut f = zip.by_name(name).ok()?;
+    let mut s = String::new();
+    f.read_to_string(&mut s).ok()?;
+    Some(s)
+}
+
+fn attr_near(xml: &str, needle: &str, key: &str, window: usize) -> Option<String> {
+    let i = xml.find(needle)?;
+    let lo = i.saturating_sub(window);
+    let hi = (i + needle.len() + window).min(xml.len());
+    let slice = &xml[lo..hi];
+    let pat = format!("{key}=\"");
+    let k = slice.find(&pat)?;
+    let rest = &slice[k + pat.len()..];
+    let e = rest.find('"')?;
+    Some(rest[..e].to_string())
+}
+
+fn xlsx_merges_from_bytes(bytes: &[u8], sheet: &str) -> Vec<Dimensions> {
+    let Ok(mut zip) = ZipArchive::new(Cursor::new(bytes)) else {
+        return Vec::new();
+    };
+    let Some(wb) = zip_file_string(&mut zip, "xl/workbook.xml") else {
+        return Vec::new();
+    };
+    let needle = format!("name=\"{}\"", sheet);
+    let Some(rid) = attr_near(&wb, &needle, "r:id", 120) else {
+        return Vec::new();
+    };
+    let Some(rels) = zip_file_string(&mut zip, "xl/_rels/workbook.xml.rels") else {
+        return Vec::new();
+    };
+    let Some(target) = attr_near(&rels, &format!("Id=\"{rid}\""), "Target", 160) else {
+        return Vec::new();
+    };
+    let path = if target.starts_with('/') {
+        target.trim_start_matches('/').to_string()
+    } else if target.starts_with("xl/") {
+        target
+    } else {
+        format!("xl/{target}")
+    };
+    let Some(ws) = zip_file_string(&mut zip, &path) else {
+        return Vec::new();
+    };
+    parse_merge_refs(&ws)
 }
 
 fn cell_text(d: &Data) -> String {
@@ -55,7 +201,7 @@ fn read_sheet_preview_sync(
     let (bytes, size) = read_whitelisted_sync(path, cwd_hint, XLSX_CAP, |mb| {
         format!("表格超过 20 MB（{mb:.1} MB），暂不支持内嵌预览")
     })?;
-    let cursor = Cursor::new(bytes);
+    let cursor = Cursor::new(bytes.as_slice());
     let mut workbook = open_auto(cursor, path)?;
     let sheets = workbook.sheet_names();
     if sheets.is_empty() {
@@ -78,6 +224,7 @@ fn read_sheet_preview_sync(
     let truncated = total_rows > MAX_ROWS || total_cols > MAX_COLS;
     let width = total_cols.min(MAX_COLS);
     let take_rows = total_rows.min(MAX_ROWS);
+    let origin = range.start().unwrap_or((0, 0));
     let mut rows = Vec::with_capacity(take_rows);
     for r in 0..take_rows {
         let mut row = Vec::with_capacity(width);
@@ -86,10 +233,24 @@ fn read_sheet_preview_sync(
         }
         rows.push(row);
     }
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let merges = if ext == "xlsx" || ext == "xlsm" {
+        xlsx_merges_from_bytes(&bytes, &sheet)
+            .iter()
+            .filter_map(|d| clip_merge(d, origin, take_rows, width))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(SheetPreviewDto {
         sheet,
         sheets,
         rows,
+        merges,
         truncated,
         size,
         total_rows,
@@ -157,11 +318,56 @@ mod tests {
     }
 
     #[test]
+    fn parse_a1_and_merge_refs() {
+        assert_eq!(parse_a1_cell("A1"), Some((0, 0)));
+        assert_eq!(parse_a1_cell("B12"), Some((11, 1)));
+        assert_eq!(parse_a1_cell("AA1"), Some((0, 26)));
+        let d = parse_a1_range("C1:F2").unwrap();
+        assert_eq!(d.start, (0, 2));
+        assert_eq!(d.end, (1, 5));
+        let xml = r#"<mergeCells count="2"><mergeCell ref="A1:B1"/><mergeCell ref="C2:C3"></mergeCell></mergeCells>"#;
+        let ms = parse_merge_refs(xml);
+        assert_eq!(ms.len(), 2);
+        assert_eq!(ms[0].start, (0, 0));
+        assert_eq!(ms[0].end, (0, 1));
+        assert_eq!(ms[1].start, (1, 2));
+        assert_eq!(ms[1].end, (2, 2));
+    }
+
+    #[test]
+    fn clip_merge_crops_to_window() {
+        let d = Dimensions::new((0, 0), (1, 2));
+        let m = clip_merge(&d, (0, 0), 10, 10).unwrap();
+        assert_eq!((m.r, m.c, m.rowspan, m.colspan), (0, 0, 2, 3));
+        assert!(clip_merge(&d, (0, 0), 1, 1).is_none()); // 裁成 1×1
+        let edge = clip_merge(&Dimensions::new((8, 8), (20, 20)), (0, 0), 10, 10).unwrap();
+        assert_eq!((edge.r, edge.c, edge.rowspan, edge.colspan), (8, 8, 2, 2));
+        assert!(clip_merge(&Dimensions::new((10, 0), (12, 1)), (0, 0), 10, 10).is_none());
+    }
+
+    #[test]
+    fn sheet_preview_reads_merged_cells() {
+        let dir = std::env::temp_dir().join(format!("ccode-xlsx-merge-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("t.xlsx");
+        write_minimal_xlsx(&f, "hello", true);
+        let dto = read_sheet_preview_sync(f.to_str().unwrap(), Some(dir.to_str().unwrap()), None)
+            .expect("parse");
+        assert!(
+            dto.merges
+                .iter()
+                .any(|m| m.r == 0 && m.c == 0 && m.rowspan >= 1 && m.colspan >= 2),
+            "{dto:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sheet_preview_reads_minimal_xlsx() {
         let dir = std::env::temp_dir().join(format!("ccode-xlsx-ok-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let f = dir.join("t.xlsx");
-        write_minimal_xlsx(&f, "hello");
+        write_minimal_xlsx(&f, "hello", false);
         let dto = read_sheet_preview_sync(f.to_str().unwrap(), Some(dir.to_str().unwrap()), None)
             .expect("parse");
         assert!(!dto.rows.is_empty());
@@ -176,7 +382,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    fn write_minimal_xlsx(path: &std::path::Path, cell: &str) {
+    fn write_minimal_xlsx(path: &std::path::Path, cell: &str, merge_ab: bool) {
         // 手写一份 calamine 能读的最小 worksheet；共享字符串走 inlineStr 免 sst。
         let file = fs::File::create(path).unwrap();
         let mut zip = ZipWriter::new(file);
@@ -217,10 +423,22 @@ mod tests {
         )
         .unwrap();
         zip.start_file("xl/worksheets/sheet1.xml", opt).unwrap();
+        let merge = if merge_ab {
+            // calamine 只认 Start，不用自闭合
+            "<mergeCells count=\"1\"><mergeCell ref=\"A1:B1\"></mergeCell></mergeCells>"
+        } else {
+            ""
+        };
+        let b1 = if merge_ab {
+            r#"<c r="B1" t="inlineStr"><is><t></t></is></c>"#
+        } else {
+            ""
+        };
         let sheet = format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{}</t></is></c></row></sheetData>
+<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{}</t></is></c>{b1}</row></sheetData>
+{merge}
 </worksheet>"#,
             cell
         );

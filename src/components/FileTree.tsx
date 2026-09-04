@@ -49,6 +49,7 @@ const STATUS_WORD: Record<string, string> = {
   "??": "新文件",
   D: "已删除",
   R: "已重命名",
+  U: "未合并（冲突）",
 };
 
 function basenameOf(p: string): string {
@@ -111,34 +112,26 @@ const FileTreeNode = memo(function FileTreeNode({
         onClick={() =>
           entry.isDir ? toggle(entry.path) : ctx.onOpenFile(entry.path, entry.name, root)
         }
-        onDoubleClick={() => {
-          if (entry.isDir) void nav(entry.path);
-        }}
         onContextMenu={(e) => {
           e.preventDefault();
           ctx.onMenu({ x: e.clientX, y: e.clientY, path: entry.path, isDir: entry.isDir });
         }}
-        title={`${entry.isDir ? `${entry.path}\n双击进入，右键在此打开终端` : entry.path}${entry.isSystem ? "\n系统目录" : ""}`}
+        title={`${entry.isDir ? `${entry.path}\n单击展开或收起，右键在此打开终端` : entry.path}${entry.isSystem ? "\n系统目录" : ""}`}
         className={`group flex cursor-pointer items-center gap-1 py-0.5 pr-2 text-xs hover:bg-hover ${
           highlight === entry.path ? "bg-white/10" : ""
         } ${entry.isSystem ? "opacity-50" : ""}`}
         style={{ paddingLeft: 6 + depth * 12 }}
       >
-        <span className="inline-flex w-5 shrink-0 justify-center">
+        <span className="inline-flex w-7 shrink-0 justify-center">
           {entry.isDir ? (
             <button
               type="button"
               aria-label={isOpen ? `收起 ${entry.name}` : `展开 ${entry.name}`}
               onClick={(e) => {
                 e.stopPropagation();
-                if (e.detail > 1) return;
                 toggle(entry.path);
               }}
-              onDoubleClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-              }}
-              className="inline-flex h-5 w-5 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1"
             >
               <FoldMark open={isOpen} />
             </button>
@@ -169,16 +162,30 @@ const FileTreeNode = memo(function FileTreeNode({
             </span>
           )}
           {entry.isDir && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                ctx.onOpenTerminal(entry.path);
-              }}
-              title="在此打开新终端"
-              className="hidden shrink-0 text-l4 hover:text-l1 group-hover:block"
-            >
-              ↗
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void nav(entry.path);
+                }}
+                title="进入此文件夹（只改浏览，不改终端目录）"
+                className="hidden shrink-0 text-micro text-l4 hover:text-l1 group-hover:block"
+              >
+                进入
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  ctx.onOpenTerminal(entry.path);
+                }}
+                title="在此打开新终端"
+                className="hidden shrink-0 text-l4 hover:text-l1 group-hover:block"
+              >
+                ↗
+              </button>
+            </>
           )}
         </span>
       </div>
@@ -212,8 +219,8 @@ interface PathContext {
 
 /**
  * 文件树（借鉴 VS Code Explorer 的懒加载）：外部锚点是活动终端标签的 cwd，
- * 用户可双击目录钻取重定根（manual root），切换标签时重置回该标签 cwd。
- * 单击目录 = 展开/收起；双击目录 = 进入（重定根）；右键 / 悬停按钮 = 在此打开新终端。
+ * 用户可悬停「进入」钻取重定根（manual root），切换标签时重置回该标签 cwd。
+ * 单击目录（含折叠箭头）= 原地展开/收起；悬停「进入」才重定根；右键 / ↗ = 在此打开新终端。
  */
 function FileTree({
   cwd,

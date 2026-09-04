@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Plus } from "lucide-react";
 import type { McpServerDto, SkillDto } from "../types";
 import { firstImageItem, imageExtFromMime } from "../terminal-input";
 import {
@@ -31,11 +32,13 @@ function InsertMenu({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((value) => !value)}
-        className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-micro text-l3 transition-colors hover:bg-hover hover:text-l1 disabled:cursor-not-allowed disabled:opacity-40"
+        className={`inline-flex size-7 items-center justify-center rounded-md transition-colors hover:bg-hover hover:text-l1 disabled:cursor-not-allowed disabled:opacity-40 ${
+          open ? "bg-hover text-l1" : "text-l3"
+        }`}
         title="插入技能或 MCP 提示"
+        aria-label="插入技能或 MCP 提示"
       >
-        插入
-        <span className="text-micro text-l4">⌄</span>
+        <Plus size={14} strokeWidth={1.8} aria-hidden="true" />
       </button>
       {open && (
         <>
@@ -129,6 +132,9 @@ export default function ChatComposer({
   agentId,
   seedInsert,
   onSeedConsumed,
+  cwdHint,
+  cwdTitle,
+  onChooseCwd,
 }: {
   disabled?: boolean;
   busy?: boolean;
@@ -144,6 +150,10 @@ export default function ChatComposer({
   /** 拖入文件等外部插入：追加到输入框并消费 */
   seedInsert?: string | null;
   onSeedConsumed?: () => void;
+  /** 空态目录短句，画在 + 右侧，不另占一行 */
+  cwdHint?: string | null;
+  cwdTitle?: string;
+  onChooseCwd?: () => void;
 }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -421,6 +431,25 @@ export default function ChatComposer({
                 onInsert={insertResourceText}
                 onOpenMcp={onOpenMcp}
               />
+              {cwdHint && !error && !busy ? (
+                onChooseCwd ? (
+                  <button
+                    type="button"
+                    onClick={onChooseCwd}
+                    title={cwdTitle}
+                    className="ml-1 max-w-[14rem] truncate font-mono text-micro text-l4 hover:text-l2"
+                  >
+                    {cwdHint}
+                  </button>
+                ) : (
+                  <span
+                    className="ml-1 max-w-[14rem] truncate font-mono text-micro text-l4"
+                    title={cwdTitle}
+                  >
+                    {cwdHint}
+                  </span>
+                )
+              ) : null}
               {(error || busy) && (
                 <span className="ml-2 truncate text-micro text-l4">
                   {error ?? "正在发送…"}

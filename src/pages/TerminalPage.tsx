@@ -49,14 +49,15 @@ import {
   shouldAutoPeek,
 } from "../chat-handoff";
 import { AGENTS } from "../types";
+import { cwdIsCodingWorktree } from "../coding-git";
+import { loadCodingOverview } from "../components/CodingProjectView";
+import { normalizeWorkMode } from "../work-mode";
 import ChatSurface from "../components/ChatSurface";
 import { confirmDialog, alertDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
 import FileTree from "../components/FileTree";
 import GitPanel, { type GitSummary } from "../components/GitPanel";
 import TerminalStatusBar from "../components/TerminalStatusBar";
-import HandoffPicker, { type HandoffSource } from "../components/HandoffPicker";
-import DigestPicker from "../components/DigestPicker";
 import { LoadingRows, hoverRevealClass } from "../components/PageFrame";
 import ProjectRail from "../components/ProjectRail";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
@@ -66,24 +67,37 @@ import { formatPdfExcerptPrompt, readerReuseKey } from "../reader";
 import { defaultCommitMessage } from "../git-commit-message";
 import { pickResumeProfile } from "../resume-profile";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
+import {
+  isUnsafeLitProjectDir,
+  notesInboxTarget,
+  suggestLitProjectDir,
+} from "../lit-project";
 import { isPreviewableImagePath } from "../file-icons";
 import { XTERM_PALETTES, resolvePaletteId } from "../terminal-palettes";
-import { isLightTheme } from "../themes";
+import { isCustomThemeId, isLightTheme } from "../themes";
+import {
+  customXtermBgFg,
+  DEFAULT_CUSTOM_THEME,
+  deriveThemeTokens,
+  normalizeCustomTheme,
+} from "../custom-theme";
 import {
   looksLikeModelId,
   modelOnProfileSwitch,
+  officialModelAllowed,
 } from "../model-switch";
 import { isSoftwareWebGL } from "../diagnostics";
 import {
+  Columns2,
   Eye,
   EyeOff,
-  LayoutPanelTop,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   RefreshCw,
+  Search,
   SquareTerminal,
 } from "lucide-react";
 import {
@@ -99,9 +113,12 @@ import {
 } from "../terminal-tab-persistence";
 import { clampTabDragDx, tabDragTarget } from "../tab-drag";
 import { directoryUnavailableMessage } from "../terminal-cwd";
+import { welcomeCwdActionLabel } from "../terminal-welcome";
 import type { RunOverviewInput } from "../run-overview";
 import type {
   ChatMessageDto,
+  CodingOpDto,
+  CodingOverviewDto,
   ConversationPageDto,
   GitCommitResultDto,
   HandoffTargetDto,
@@ -121,7 +138,55 @@ import type { PdfActionResult } from "../components/PdfPreview";
 // Monaco 体积大，首次打开文件预览时才加载
 const FilePreviewEditor = lazy(() => import("../components/FilePreviewEditor"));
 // pdf.js 同样拆懒加载 chunk，首次打开 PDF 预览时才加载
-const PdfPreview = lazy(() => import("../components/PdfPreview"));
+const PdfContinuousView = lazy(() => import("../components/PdfContinuousView"));
+
+/** 沉浸阅读/写笔记时把 PDF 所在文件夹加成项目（默认不挂研究流程）。取消或失败返回 null。 */
+async function offerAddLitProject(
+  pdfPath: string,
+  cwdHint: string | null | undefined,
+): Promise<string | null> {
+  const dir = suggestLitProjectDir(pdfPath, cwdHint, IS_WINDOWS);
+  let home = "";
+  try {
+    home = await invoke<string>("home_dir");
+  } catch {
+    /* 家目录读不到时仍拦盘符根，拦不住家目录本身 */
+  }
+  if (isUnsafeLitProjectDir(dir, home, IS_WINDOWS)) {
+    await alertDialog(
+      "这份 PDF 还不在任何已添加的项目里。它在家目录或系统盘根下，不能把整个家目录加成项目。\n请先把文献放到一个专门的文件夹，再用项目页「添加项目」，或在那个文件夹里打开终端后再试。",
+    );
+    return null;
+  }
+  const name = dir.split(/[\\/]/).pop() || dir;
+  if (
+    !(await confirmDialog(
+      `这份 PDF 还不在任何已添加的项目里。\n沉浸阅读会把笔记写进项目文件夹，需要先添加项目。\n\n将添加：${dir}\n添加后不挂研究流程，只用来读文献、写笔记。`,
+      { confirmText: "添加并继续" },
+    ))
+  ) {
+    return null;
+  }
+  try {
+    const project = await invoke<ProjectDto>("register_project", {
+      path: dir,
+      name,
+    });
+    try {
+      await invoke("set_pipeline_opt_out", {
+        projectRoot: project.path,
+        optOut: true,
+      });
+    } catch {
+      /* 已添加成功：不挂流程失败不挡阅读 */
+    }
+    void useAppStore.getState().loadProjects();
+    return project.path;
+  } catch (e) {
+    await alertDialog(`添加项目失败：${String(e)}`);
+    return null;
+  }
+}
 // mammoth 拆懒加载 chunk，首次打开 docx 预览时才加载
 const DocxPreview = lazy(() => import("../components/DocxPreview"));
 const XlsxPreview = lazy(() => import("../components/XlsxPreview"));
@@ -167,7 +232,7 @@ export interface TabStatus {
   ptyId: string | null;
   /** 会话尾部状态（P3c 注意力标记）；无联动/shell/已退出/未知时为 null */
   attention: "done" | "working" | "confirm" | null;
-  /** shell 模式下存在可恢复的会话（标签条 ⋯ 菜单「⟳ 恢复会话」可用性） */
+  /** shell 模式下存在可恢复的会话（空态「恢复任务」可用性） */
   canResume: boolean;
   /** 当前或最近一次关联的会话 id；只用于标签恢复元数据，不含会话文件内容。 */
   sessionId: string | null;
@@ -175,7 +240,7 @@ export interface TabStatus {
   startedAt: number | null;
 }
 
-/** TerminalView 暴露给标签条 ⋯ 菜单的动作表（回调经 ref 转发，始终最新） */
+/** TerminalView 暴露给父级的动作表（查找图标 / 聊天发送 / 改目录等；回调经 ref 转发，始终最新） */
 export interface FocusTabActions {
   stop: () => void;
   resume: () => void;
@@ -285,11 +350,18 @@ const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
 function buildXtermTheme(
   themeId: string,
   paletteId?: string,
+  customTheme?: { rail: string; canvas: string; accent: string } | null,
 ): { background: string; foreground: string } & Record<string, string> {
   const palette =
     XTERM_PALETTES[resolvePaletteId(paletteId, isLightTheme(themeId))];
+  const bgfg = isCustomThemeId(themeId)
+    ? customXtermBgFg(
+        deriveThemeTokens(normalizeCustomTheme(customTheme) ?? DEFAULT_CUSTOM_THEME)
+          .tokens,
+      )
+    : (XTERM_BG_FG[themeId] ?? XTERM_BG_FG.midnight);
   return {
-    ...(XTERM_BG_FG[themeId] ?? XTERM_BG_FG.midnight),
+    ...bgfg,
     ...palette,
   };
 }
@@ -324,7 +396,6 @@ const TerminalView = memo(function TerminalView({
   onConsumeExternalCwd,
   onStatus,
   onSessionUpdate,
-  focusMode,
   embedInPeek = false,
   onActions,
   onRestoreComplete,
@@ -335,7 +406,7 @@ const TerminalView = memo(function TerminalView({
   primaryFocus?: boolean;
   /** 右侧面板开关影响 xterm 可用宽度，变化时需要重新 fit */
   rightOpen: boolean;
-  /** 布局版本号（左栏显隐/专注终端等宽度变化时递增，触发 xterm 重新 fit） */
+  /** 布局版本号（左栏显隐/分屏/窥视等宽度变化时递增，触发 xterm 重新 fit） */
   layoutKey?: string;
   /** 该标签 cwd 的 git 变更统计（Codex 风：状态行常驻 +N -N） */
   gitTotals?: { add: number; del: number } | null;
@@ -379,11 +450,9 @@ const TerminalView = memo(function TerminalView({
   /** 上报回调带 tabId（父级共享 useCallback，memo 稳定） */
   onStatus: (id: string, s: TabStatus) => void;
   onSessionUpdate: (id: string, s: SessionLinkState) => void;
-  /** 专注终端：隐藏标签内状态条（动作移到标签条 ⋯ 菜单） */
-  focusMode?: boolean;
   /** 聊天窥视底栏：只留 xterm，收起启动栏，让这一栏高度都给 TUI */
   embedInPeek?: boolean;
-  /** 向父级注册本标签的动作表（标签条 ⋯ 菜单调用） */
+  /** 向父级注册本标签的动作表（查找图标 / 聊天发送 / 改目录等） */
   onActions?: (id: string, a: FocusTabActions) => void;
   onRestoreComplete?: (id: string) => void;
   /** launch 成功接管会话后通知父级清掉标签级 resumeSessionId（之后「启动」不再接旧会话） */
@@ -404,6 +473,7 @@ const TerminalView = memo(function TerminalView({
     term.options.theme = buildXtermTheme(
       settings.theme,
       settings.terminalPalette,
+      settings.customTheme,
     );
     // 字号/字体变了但容器像素尺寸没变，ResizeObserver 不触发——手动补 fit 让 PTY 行列跟随
     try {
@@ -462,7 +532,10 @@ const TerminalView = memo(function TerminalView({
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, profiles, settings?.defaultProfiles, settings?.hiddenProfiles]);
-  const [model, setModel] = useState(initialModel ?? saved.model ?? "");
+  // 指定了配置时不要沿用上次启动留下的模型（官方账号会被 DeepSeek 顶掉）
+  const [model, setModel] = useState(
+    initialModel ?? (initialProfileId ? "" : saved.model) ?? "",
+  );
   /** 本次启动实际注入的模型（状态栏求交用它，不跟 CLI 内 /model 或启动栏事后改选） */
   const [launchModel, setLaunchModel] = useState<string | null>(null);
   const selectedProfile = profiles.find(
@@ -472,6 +545,21 @@ const TerminalView = memo(function TerminalView({
   const [modelOpen, setModelOpen] = useState(false);
   // 换 profile 时保留了手填模型：说明行据此提示「仍按原样注入」（选中预设即消）
   const [modelKept, setModelKept] = useState(false);
+  // 官方账号：丢掉上次中转留下的 DeepSeek 等模型，避免 -m 进 ChatGPT 通道
+  useEffect(() => {
+    if (running || !selectedProfile || selectedProfile.accountType !== "official")
+      return;
+    const cur = model.trim();
+    if (!cur) return;
+    if (
+      !officialModelAllowed(agentId, cur) ||
+      (selectedProfile.models.length > 0 && !selectedProfile.models.includes(cur))
+    ) {
+      setModel(selectedProfile.models[0] ?? "");
+      setModelKept(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId, selectedProfile?.accountType]);
   const modelOptions = useMemo(() => {
     let history: string[] = [];
     try {
@@ -490,6 +578,12 @@ const TerminalView = memo(function TerminalView({
   const [cwdIssue, setCwdIssue] = useState<string | null>(null);
   const [cwdChecking, setCwdChecking] = useState(false);
   const cwdCheckSeqRef = useRef(0);
+  const [homeDir, setHomeDir] = useState("");
+  useEffect(() => {
+    void invoke<string>("home_dir")
+      .then(setHomeDir)
+      .catch(() => {});
+  }, []);
 
   async function checkWorkingDirectory(path = cwd): Promise<boolean> {
     const seq = ++cwdCheckSeqRef.current;
@@ -956,7 +1050,7 @@ const TerminalView = memo(function TerminalView({
   const [activePtyId, setActivePtyId] = useState<string | null>(null);
   // 真实 cwd 跟随：进程存活期间每 4s 问一次后端 PTY 进程的真实 cwd——shell 内 cd 后
   // 文件树/git 面板也能跟上（此前只认启动栏路径，切标签「不跟随」的根源之一）。
-  // 未启动时的目录编辑入口在底部状态栏目录浮层（启动前生效，与轮询不冲突）
+  // 未启动时的目录编辑：空态卡「将在 … 启动」点选文件夹；底栏胶囊可键入路径（启动前生效，与轮询不冲突）
   useEffect(() => {
     if (!visible || !activePtyId || (!running && !shellActive)) return;
     let cancelled = false;
@@ -1154,6 +1248,7 @@ const TerminalView = memo(function TerminalView({
       theme: buildXtermTheme(
         settingsRef.current?.theme ?? "midnight",
         settingsRef.current?.terminalPalette,
+        settingsRef.current?.customTheme,
       ),
     });
     const fit = new FitAddon();
@@ -1529,6 +1624,7 @@ const TerminalView = memo(function TerminalView({
       const themeColors = buildXtermTheme(
         settingsRef.current?.theme ?? "midnight-light",
         settingsRef.current?.terminalPalette,
+        settingsRef.current?.customTheme,
       );
       const reports = [
         xtermOscColorReport(10, themeColors.foreground),
@@ -1964,7 +2060,17 @@ const TerminalView = memo(function TerminalView({
         agentId,
         profileId,
         cwd,
-        model: model || null,
+        model: (() => {
+          const m = model.trim();
+          if (!m) return null;
+          if (
+            selectedProfile?.accountType === "official" &&
+            !officialModelAllowed(agentId, m)
+          ) {
+            return null;
+          }
+          return m;
+        })(),
         // 工作区交接的附加 env（端口段），与 profile env 叠加
         extraEnv: initialExtraEnv ?? null,
         // 会话恢复（无则全新会话）
@@ -2211,8 +2317,8 @@ const TerminalView = memo(function TerminalView({
     setPage("sessions");
   }
 
-  // 标签条 ⋯ 菜单动作表：actionsRef 每次渲染更新为最新闭包；挂载时只注册一次稳定转发对象，
-  // 父级 ⋯ 菜单调用时穿透 ref，不会拿到首次渲染的陈旧 agent/profile/model/cwd
+  // 动作表：actionsRef 每次渲染更新为最新闭包；挂载时只注册一次稳定转发对象，
+  // 父级查找/聊天发送等调用时穿透 ref，不会拿到首次渲染的陈旧 agent/profile/model/cwd
   const actionsRef = useRef<FocusTabActions>({
     stop: () => {},
     resume: () => {},
@@ -2314,7 +2420,7 @@ const TerminalView = memo(function TerminalView({
           if (!dir) return;
           if (
             !(await confirmDialog(
-              `把「${dir}」登记为 Ccode 项目？\n只登记这个目录，不会建工作区、不改动任何文件；登记后可在项目页选研究流程模板。`,
+              `把「${dir}」登记为 Ccode 项目？\n只登记这个目录，不会建工作区、不改动任何文件。写论文可在项目页选研究流程；只读文献写笔记可以不选。`,
               { confirmText: "登记" },
             ))
           )
@@ -2428,7 +2534,7 @@ const TerminalView = memo(function TerminalView({
               // 自由输入的模型启动成功后记入历史（ccode.modelHistory.<agent>），下次直接可选
               <>
               <span aria-hidden="true" className="h-4 w-px shrink-0 bg-field" />
-              <span className="relative w-[clamp(8rem,14vw,11rem)] min-w-[7rem] max-w-[11rem] shrink">
+              <span className="relative w-[clamp(10rem,22vw,18rem)] min-w-[9rem] max-w-[18rem] shrink">
                 <input
                   className={`${seg} w-full`}
                   value={model}
@@ -2610,7 +2716,7 @@ const TerminalView = memo(function TerminalView({
               <p className="mb-2 text-sm text-l3">请先为该 agent 创建配置</p>
             )}
         </>
-      ) : focusMode ? null : (
+      ) : (
         /* 收缩态只保留启动配置入口；聊天统一从主工作区进入。 */
         <div className="mt-1 mb-1 flex h-7 items-center gap-2 text-xs text-l4">
           <span className="truncate">
@@ -2719,20 +2825,16 @@ const TerminalView = memo(function TerminalView({
             {inputNote}
           </div>
         )}
-        {/* 未启动空态引导（v3.91）：画布中央一张极简卡片，说清「现在该干嘛」。
+        {/* 未启动空态引导（v3.91 / v3.213）：画布中央一张卡，只回答「在这个目录运行」。
+            身份（agent / 配置 / 模型）只活在启动栏，不在卡上再说一遍。
             xterm 保持挂载在底层（移树会杀 PTY 语义）；浮层壳 pointer-events-none 不挡画布 */}
         {welcomeVisible && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-            {/* 玻璃拟态卡：raised 85% + backdrop-blur（画布内容隐约透出）。
-                勾边（v3.93 微调）：l1 的 12% 混合——field 档在浅色主题偏蓝显脏，
-                hairline 档又太弱，取两者之间的极浅中性边。
-                元素收敛（v3.93 用户拍板）：不要顶部图标盒、不要说明小字（「上次任务还在」
-                这类——按钮文案「恢复任务/启动/去配置页创建」本身已说清现在该干嘛），
-                卡片 w-80（v3.93 二调：w-72 太挤，主按钮被按比例压缩到快溢出——
-                按钮宽改 min-w-40 自适应内容，不再随卡片宽比例缩放）；
-                agent 名与配置胶囊是这张卡的主体信息，字号放大 */}
+          <div className="terminal-welcome-dots pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+            {/* 内容井 + 极浅勾边（v3.213：去掉玻璃拟态和大投影——浅色空画布上
+                blur 无物可透，shadow-lg 像登录卡）。勾边仍用 l1 12% 混合。
+                无顶部图标盒、无说明小字；卡片 w-80，主按钮 min-w-40 自适应。 */}
             <div
-              className="pointer-events-auto relative flex w-80 flex-col items-center gap-3 rounded-lg border bg-raised/85 px-5 py-5 text-center shadow-lg backdrop-blur-xl"
+              className="ccode-well pointer-events-auto relative flex w-80 flex-col items-center gap-3 rounded-lg border px-5 py-5 text-center"
               style={{
                 borderColor:
                   "color-mix(in srgb, var(--color-l1) 12%, transparent)",
@@ -2772,14 +2874,15 @@ const TerminalView = memo(function TerminalView({
                   </div>
                 </div>
               )}
-              <div className="flex items-center gap-2 text-base font-medium text-l1">
-                {agentLabel(agentId)}
-                {selectedProfile && (
-                  <span className="rounded-sm bg-inset px-1.5 py-0.5 text-xs font-normal text-l2">
-                    {selectedProfile.name}
-                  </span>
-                )}
-              </div>
+              <button
+                type="button"
+                onClick={() => void chooseWorkingDirectory()}
+                disabled={cwdChecking}
+                title={`${cwd === "~" && homeDir ? homeDir : cwd}\n点击选择工作目录`}
+                className="max-w-full cursor-pointer truncate font-mono text-xs text-l3 hover:text-l1 hover:underline disabled:cursor-default disabled:opacity-50"
+              >
+                {welcomeCwdActionLabel(cwd, homeDir, !!restored, IS_WINDOWS)}
+              </button>
               {agentProfiles.length === 0 ? (
                 /* 无配置时主按钮换成有效引导（禁用的「启动」是死按钮，v3.92 修） */
                 <button
@@ -2790,23 +2893,21 @@ const TerminalView = memo(function TerminalView({
                   去配置页创建
                 </button>
               ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      restored ? void restoreTask() : void launch()
-                    }
-                    disabled={!profileId || cwdChecking || !!profiles.find((p) => p.id === profileId)?.slotMissing}
-                    className="inline-flex h-9 min-w-40 cursor-pointer items-center justify-center gap-2 rounded-md border border-cta-bd bg-cta px-5 text-sm text-cta-text hover:brightness-110 disabled:cursor-default disabled:opacity-50"
-                  >
-                    {restored ? "恢复任务" : "运行"}
-                    {/* 快捷键说明：括号小字随按钮文字整体居中，不加胶囊底色
-                        （18% 混合底在纯色按钮上是块显眼补丁，用户否为「色差」）；勿绝对定位钉右缘 */}
-                    <span className="text-micro opacity-80">
-                      （{IS_MAC ? "⌘ + Enter" : "Ctrl + Enter"}）
-                    </span>
-                  </button>
-                </>
+                <button
+                  type="button"
+                  onClick={() =>
+                    restored ? void restoreTask() : void launch()
+                  }
+                  disabled={!profileId || cwdChecking || !!profiles.find((p) => p.id === profileId)?.slotMissing}
+                  className="inline-flex h-9 min-w-40 cursor-pointer items-center justify-center gap-2 rounded-md border border-cta-bd bg-cta px-5 text-sm text-cta-text hover:brightness-110 disabled:cursor-default disabled:opacity-50"
+                >
+                  {restored ? "恢复任务" : "运行"}
+                  {/* 快捷键说明：括号小字随按钮文字整体居中，不加胶囊底色
+                      （18% 混合底在纯色按钮上是块显眼补丁，用户否为「色差」）；勿绝对定位钉右缘 */}
+                  <span className="text-micro opacity-80">
+                    （{IS_MAC ? "⌘ + Enter" : "Ctrl + Enter"}）
+                  </span>
+                </button>
               )}
               <button
                 type="button"
@@ -3031,7 +3132,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [sessionByTab, setSessionByTab] = useState<
     Record<string, SessionLinkState>
   >({});
-  // 左栏（工作树）：只有显示 /（被专注终端或专注内容）隐藏两种状态
+  // 左栏（工作树）：显示 / 被专注内容隐藏
   const [showHidden, setShowHidden] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   /** 最近项目「真进入」：待注入活动标签启动栏的目录 */
@@ -3061,84 +3162,18 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const [rightExpanded, setRightExpanded] = useState(false);
   const terminalRootRef = useRef<HTMLDivElement>(null);
   const normalRightWidthRef = useRef(rightWidth);
-  // 专注终端：隐藏左栏与右面板，中带只剩全宽终端 + 顶部标签条（页级开关，默认关，Esc 退出）
-  const [focusMode, setFocusMode] = useState(false);
-  // 标签条 ⋯ 菜单：各标签动作表（TerminalView 挂载时注册）与菜单坐标
+  // 各标签动作表（TerminalView 挂载时注册）：查找图标、聊天发送、改目录等
   const tabActionsRef = useRef(new Map<string, FocusTabActions>());
+  const pendingChatInjectRef = useRef<{ tabId: string; prompt: string } | null>(
+    null,
+  );
+  const [injectTick, setInjectTick] = useState(0);
   const registerActions = useCallback((id: string, a: FocusTabActions) => {
     tabActionsRef.current.set(id, a);
+    if (pendingChatInjectRef.current?.tabId === id) {
+      setInjectTick((n) => n + 1);
+    }
   }, []);
-  const [focusMenu, setFocusMenu] = useState<{ x: number; y: number } | null>(
-    null,
-  );
-  const [layoutMenu, setLayoutMenu] = useState<{ x: number; y: number } | null>(null);
-  // 「◈ 接力到…」目标选择器：从当前标签的会话生成简报并预填新终端
-  const [handoffSource, setHandoffSource] = useState<HandoffSource | null>(
-    null,
-  );
-  // 「◈ 提炼接力…」目标选择器：AI 蒸馏全会话简报，三路径续作
-  const [digestSource, setDigestSource] = useState<HandoffSource | null>(null);
-
-  /** 标签条 ⋯ 菜单项（专注终端时替代标签内状态条）：按活动标签状态裁剪（不可用的动作不出现） */
-  function focusMenuItems() {
-    const s = statuses[focusedId];
-    const acts = tabActionsRef.current.get(focusedId);
-    const sessFile = sessionByTab[focusedId]?.file;
-    const sessId = sessionByTab[focusedId]?.sessionId;
-    const sessAgent = sessionByTab[focusedId]?.agentId;
-    return [
-      ...(s?.running
-        ? [{ label: "停止（回落 shell）", onSelect: () => acts?.stop() }]
-        : []),
-      ...(s?.canResume
-        ? [{ label: "⟳ 恢复会话", onSelect: () => acts?.resume() }]
-        : []),
-      ...(sessFile && sessId && sessAgent
-        ? [
-            {
-              label: "◈ 接力到…",
-              onSelect: () =>
-                setHandoffSource({
-                  agent: sessAgent,
-                  sessionId: sessId,
-                  filePath: sessFile,
-                  cwd: statuses[focusedId]?.cwd ?? "~",
-                  title: sessionByTab[focusedId]?.title ?? null,
-                }),
-            },
-            {
-              label: "◈ 提炼接力…",
-              onSelect: () =>
-                setDigestSource({
-                  agent: sessAgent,
-                  sessionId: sessId,
-                  filePath: sessFile,
-                  cwd: statuses[focusedId]?.cwd ?? "~",
-                  title: sessionByTab[focusedId]?.title ?? null,
-                }),
-            },
-          ]
-        : []),
-      ...(sessFile || s?.canResume
-        ? [
-            {
-              label: "⤴ 在对话页打开",
-              onSelect: () => acts?.openConversationPage(),
-            },
-          ]
-        : []),
-      { label: "◎ 查找终端输出", onSelect: () => acts?.search() },
-      { label: "修改启动配置", onSelect: () => acts?.modify() },
-      ...(focusMode
-        ? [{ label: "⤢ 退出专注终端", onSelect: () => setFocusMode(false) }]
-        : []),
-    ];
-  }
-
-  // 快速开聊会自动进入专注终端；退出后关闭旧菜单，避免菜单仍保留「退出专注终端」语义。
-  useEffect(() => {
-    if (!focusMode) setFocusMenu(null);
-  }, [focusMode]);
 
   function persistTreeOpen(next: boolean) {
     setTreeOpen(next);
@@ -3157,31 +3192,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     }
   }
 
-  function layoutMenuItems() {
-    return [
-      {
-        label: splitActive ? "✓ 退出分屏" : tabs.length < 2 ? "分屏对照（需要两个标签）" : "分屏对照",
-        disabled: !splitActive && tabs.length < 2,
-        onSelect: () => {
-          if (focusedSurfaceMode === "chat") switchSurface("terminal");
-          toggleSplit();
-        },
-      },
-      {
-        label: focusMode ? "✓ 退出专注终端" : "专注终端",
-        onSelect: () => setFocusMode((v) => !v),
-      },
-      ...(focusedSurfaceMode === "chat"
-        ? [
-            {
-              label: peekByTab[focusedId] ? "✓ 窥视终端" : "窥视终端（同一会话）",
-              onSelect: () =>
-                setPeek(focusedId, !peekByTab[focusedId], true),
-            },
-          ]
-        : []),
-    ];
-  }
   const [rightTab, setRightTab] = useState<RightTab>("preview");
   // 主工作区模式按标签隔离；切换只改变显示层，不改变标签/PTY/会话。
   const [surfaceModeByTab, setSurfaceModeByTab] = useState<Record<string, SurfaceMode>>({});
@@ -3232,7 +3242,46 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       未分叉时为 null 回落 activeCwd（v3.82 口径：「我在看哪个目录，改动就显示哪个」） */
   const [treeRoot, setTreeRoot] = useState<string | null>(null);
   const gitPanelCwd = treeRoot ?? activeCwd;
-  // 切标签/分屏焦点变化时回到新标签 cwd：树若未挂载（专注终端）就没人发 onRootNavigated，
+  const [codingOverviews, setCodingOverviews] = useState<CodingOverviewDto[]>(
+    [],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    invoke<ProjectDto[]>("list_projects")
+      .then((list) =>
+        Promise.all(
+          list
+            .filter((p) => normalizeWorkMode(p.workMode) === "coding")
+            .map((p) => loadCodingOverview(p.path).catch(() => null)),
+        ),
+      )
+      .then((rows) => {
+        if (cancelled) return;
+        setCodingOverviews(rows.filter((r): r is CodingOverviewDto => !!r));
+      })
+      .catch(() => {
+        if (!cancelled) setCodingOverviews([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, gitPanelCwd]);
+  const gitPanelOpenPr = cwdIsCodingWorktree(
+    gitPanelCwd,
+    codingOverviews,
+    IS_WINDOWS,
+  )
+    ? (cwd: string) =>
+        invoke<CodingOpDto>("coding_open_pr", { repoPath: cwd, cwd }).then(
+          (r) => {
+            if (r.method === "compare-url" && r.url) {
+              return openUrl(r.url);
+            }
+            if (!r.ok) return alertDialog(r.message);
+          },
+        ).catch((e) => alertDialog(String(e)))
+    : undefined;
+  // 切标签/分屏焦点变化时回到新标签 cwd：树若未挂载（收起或专注内容）就没人发 onRootNavigated，
   // 必须在这里清掉分叉，否则改动面板会停在旧标签的目录上
   useEffect(() => {
     setTreeRoot(null);
@@ -3436,21 +3485,20 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rightExpanded]);
 
-  // Esc 退出专注：仅在专注终端/专注内容激活时才挂监听并拦截，
+  // Esc 退出专注内容：仅在右栏铺满时才挂监听并拦截，
   // 平时完全不碰 Esc，避免与终端内的 Esc 输入（如 vim）冲突
   useEffect(() => {
-    if (!focusMode && !rightExpanded) return;
+    if (!rightExpanded) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       // 沉浸阅读区在更外层：打开期间 Esc 先退阅读区（它自己的监听处理）
       if (reader) return;
-      if (focusMode) setFocusMode(false);
-      if (rightExpanded) toggleRightExpanded();
+      toggleRightExpanded();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusMode, rightExpanded, reader]);
+  }, [rightExpanded, reader]);
 
   /** TerminalView 上报状态；内容没变就返回原对象，避免无谓重渲染 */
   const reportStatus = useCallback((id: string, s: TabStatus) => {
@@ -3671,6 +3719,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const consumeExternalCwd = useCallback(() => setEnterCwd(null), []);
 
   const activeSession = sessionByTab[focusedId];
+
+  useEffect(() => {
+    const pending = pendingChatInjectRef.current;
+    if (!pending) return;
+    const action = tabActionsRef.current.get(pending.tabId);
+    if (!action) return;
+    pendingChatInjectRef.current = null;
+    void action.sendMessage(pending.prompt);
+  }, [injectTick]);
 
   async function sendChatToActive(text: string): Promise<string | null> {
     const action = tabActionsRef.current.get(focusedId);
@@ -3914,6 +3971,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     const t = buildXtermTheme(
       appSettings?.theme ?? "midnight",
       appSettings?.terminalPalette,
+      appSettings?.customTheme,
     );
     return {
       background: t.background,
@@ -3960,6 +4018,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         if (existing) {
           tabId = existing.id;
           setActiveId(existing.id);
+          const prompt = pt.initialPrompt?.trim();
+          if (prompt) {
+            pendingChatInjectRef.current = { tabId: existing.id, prompt };
+            setInjectTick((n) => n + 1);
+          }
         }
       }
       // resume 兜底：reuseKey 没命中（restored/手动开的标签不带 key）时，若某活标签的 cwd
@@ -4000,14 +4063,20 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       if (tabId && (pt.shellOnly || pt.prefillCommand)) {
         setSurfaceModeByTab((prev) => ({ ...prev, [tabId]: "terminal" }));
       }
+      if (tabId && pt.surface === "chat") {
+        setSurfaceModeByTab((prev) => ({ ...prev, [tabId]: "chat" }));
+      }
+      if (tabId && pt.surface === "terminal") {
+        setSurfaceModeByTab((prev) => ({ ...prev, [tabId]: "terminal" }));
+      }
       // run 脚本标签：登记 nonconcurrent 互斥追踪
       if (pt.wsId && tabId) setRunningScript(pt.wsId, tabId);
       // 「快速开聊」：落到最干净的终端——收起工作树与右栏，只剩标签条 + 终端。
-      // 复用既有的「专注终端」语义（Esc 或 ⤢ 退出），不另造一套显隐状态。
+      // 走既有文件树/成果面板开关，不再另开「专注终端」。
       // 理由：随手聊没有项目上下文——文件树是空目录、改动面板是「不是 git 仓库」、
       // 对话面板要等会话关联，三个面板都没东西可给，摆着只是噪音
       if (pt.clean) {
-        setFocusMode(true);
+        persistTreeOpen(false);
         setRightOpen(false);
       }
       // 指定右栏页签（如「主仓改动」提醒 → 改动面板）
@@ -4020,6 +4089,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       if (pt.previewPath) {
         setRightOpen(true);
         setRightTab("preview");
+        if (pt.previewPath.toLowerCase().endsWith(".pdf")) {
+          setRightExpanded(true);
+        }
         setPreview({
           path: pt.previewPath,
           name: basename(pt.previewPath),
@@ -4037,7 +4109,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setReviewPath(workspaceReviewRequest.worktreePath);
     setReviewAction(workspaceReviewRequest.action ?? null);
     setReviewRequestId(workspaceReviewRequest.requestId);
-    setFocusMode(false);
     setWorkspaceReviewRequest(null);
   }, [visible, workspaceReviewRequest, setWorkspaceReviewRequest]);
 
@@ -4061,7 +4132,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     // 评审覆盖层会挡住预览，先关掉（同 pendingTerminal 消费语义）
     setReviewPath(null);
     setReviewAction(null);
-    setFocusMode(false);
     setRightOpen(true);
     setRightTab("preview");
     // PDF 是阅读动作：打开时自动进入专注内容（隐藏工作树），用户可随时 ⇲/Esc 还原
@@ -4256,13 +4326,16 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   /** 「⛶ 沉浸阅读」入口（PDF 预览工具条 / 文件树右键共用）：反查归属项目后开覆盖层 */
   async function openReaderForPdf(pdfPath: string) {
     try {
-      const owner = await invoke<ProjectDto | null>("pdf_owner_project", {
+      let owner = await invoke<ProjectDto | null>("pdf_owner_project", {
         pdfPath,
       });
       if (!owner) {
-        void alertDialog(
-          "该 PDF 不在任何项目里，先在项目资源里登记再沉浸阅读",
-        );
+        const cwdHint = statuses[focusedId]?.cwd ?? preview?.root ?? null;
+        const root = await offerAddLitProject(pdfPath, cwdHint);
+        if (!root) return;
+        setReviewPath(null);
+        setReviewAction(null);
+        setReader({ pdfPath, projectRoot: root });
         return;
       }
       setReviewPath(null);
@@ -4301,16 +4374,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (!visible || !enterCwdReq) return;
     setEnterCwdReq(null);
-    // 评审覆盖层/专注终端会挡住文件树，先退出（同 previewReq 消费语义）
+    // 评审覆盖层会挡住文件树，先退出（同 previewReq 消费语义）
     setReviewPath(null);
     setReviewAction(null);
-    setFocusMode(false);
     setEnterCwd(enterCwdReq);
   }, [visible, enterCwdReq, setEnterCwdReq]);
 
-  /** PDF 选段「整理为笔记」（§11.4 P2b）：反查归属项目 → 选段追加到笔记工作区
-      notes/inbox.md（无活跃工作区则走一键开步链路创建）→ 终端预填启动。
-      返回预览区展示的提示；任何失败都以提示形式返回，不静默。 */
+  /** PDF 选段「整理为笔记」（§11.4 P2b）：有精读步骤则写入对应工作区 inbox 并预填终端；
+      无研究流程时写入项目根 notes/inbox.md。 */
   const organizePdfExcerpt = useCallback(
     async (
       text: string,
@@ -4319,30 +4390,36 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     ): Promise<PdfActionResult> => {
       const pdfPath = preview?.path;
       if (!pdfPath) return { ok: false, msg: "预览已关闭，请重新打开 PDF" };
-      const owner = await invoke<ProjectDto | null>("pdf_owner_project", {
+      let owner = await invoke<ProjectDto | null>("pdf_owner_project", {
         pdfPath,
       });
       if (!owner) {
-        return {
-          ok: false,
-          msg: "该 PDF 未登记为任何项目资源",
-          action: { label: "去项目页登记", run: () => setPage("workspaces") },
-        };
+        const root = await offerAddLitProject(
+          pdfPath,
+          statuses[focusedId]?.cwd ?? preview?.root,
+        );
+        if (!root) return { ok: false, msg: "未添加项目，笔记没有写入" };
+        owner = { path: root, name: "", createdAt: null, lastOpenedAt: null };
       }
       const read = await invoke<ProjectConfigReadDto>("read_project_config", {
         path: owner.path,
       });
       const cfg = read.config;
-      // 笔记步骤定位规则（简单可靠）：优先 workspaceName === "lit-notes"（默认模板第二步）；
-      // 用户改过工作区名时回落研究流程第二步（文献精读通常排在检索之后）
-      const step =
-        cfg.steps.find((s) => s.workspaceName === "lit-notes") ?? cfg.steps[1];
-      if (!step?.workspaceName) {
+      const date = new Date().toLocaleDateString("sv-SE");
+      const chunk = `\n## ${fileName} · 第 ${page} 页 · ${date}\n\n${text}\n`;
+      const target = notesInboxTarget(cfg);
+      if (target.kind === "project-root") {
+        await invoke("append_workspace_inbox", {
+          worktreePath: owner.path,
+          content: chunk,
+        });
         return {
-          ok: false,
-          msg: "该项目研究流程中没有笔记步骤：请把工作区名设为 lit-notes 的步骤，或保留研究流程前两步",
+          ok: true,
+          msg: "已写入项目 notes/inbox.md。可在文件树打开这份笔记继续写。",
         };
       }
+      const step =
+        cfg.steps.find((s) => s.workspaceName === target.name) ?? cfg.steps[1];
       // 已有活跃工作区直接追加；没有则走一键开步链路（同 ProjectGroup.startStep）
       const all = await invoke<WorkspaceDto[]>("list_workspaces");
       const samePath = (a: string, b: string) =>
@@ -4350,19 +4427,17 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       let ws = all.find(
         (w) =>
           samePath(w.repoPath, owner.path) &&
-          w.name === step.workspaceName &&
+          w.name === target.name &&
           w.status === "active",
       );
       if (!ws) {
         await invoke("ensure_git_repo", { path: owner.path });
         ws = await invoke<WorkspaceDto>("create_workspace", {
           repoPath: owner.path,
-          name: step.workspaceName,
+          name: target.name,
         });
-        // TASK.md 为 best-effort（同一键开步语义）：失败不阻断选段写入
-        // 步骤挂载技能（RX3b）：skills 非空时读库元数据渲染推荐技能段，失败只列技能名
         let skillMeta: Record<string, string> | undefined;
-        if (step.skills.length > 0) {
+        if (step?.skills.length) {
           try {
             const lib = await invoke<SkillDto[]>("list_skills");
             skillMeta = Object.fromEntries(
@@ -4372,23 +4447,21 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             /* 技能库不可读时只列技能名 */
           }
         }
-        try {
-          await invoke("write_workspace_task_md", {
-            worktreePath: ws.worktreePath,
-            content: renderTaskMd(step, cfg, owner.path, undefined, skillMeta),
-          });
-        } catch {
-          /* 简报仍可在 project.toml 与步骤「编辑简报」中查看 */
+        if (step) {
+          try {
+            await invoke("write_workspace_task_md", {
+              worktreePath: ws.worktreePath,
+              content: renderTaskMd(step, cfg, owner.path, undefined, skillMeta),
+            });
+          } catch {
+            /* 简报仍可在 project.toml 与步骤「编辑简报」中查看 */
+          }
         }
       }
-      // 出处：文件名 + 页码 + 本机日期（sv-SE 输出本地时区的 YYYY-MM-DD）
-      const date = new Date().toLocaleDateString("sv-SE");
-      const chunk = `\n## ${fileName} · 第 ${page} 页 · ${date}\n\n${text}\n`;
       await invoke("append_workspace_inbox", {
         worktreePath: ws.worktreePath,
         content: chunk,
       });
-      // 跳终端预填启动（同 useOpenInTerminal：端口段 env + 上次配置 + 一次性 initialPrompt）
       const pairs = await invoke<[string, string][]>("workspace_env_for", {
         worktreePath: ws.worktreePath,
       });
@@ -4415,7 +4488,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         msg: `已写入工作区「${ws.name}」的 notes/inbox.md，并预填了终端启动（确认配置后点「启动」）`,
       };
     },
-    [preview, setPage, setPendingTerminal],
+    [preview, focusedId, statuses, setPendingTerminal],
   );
 
   // 会话页「进行中」反向跳转：聚焦指定标签
@@ -4645,6 +4718,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           running: s?.running ?? false,
           shell: s?.shell ?? false,
           attention: s?.attention ?? null,
+          reuseKey: t.reuseKey,
         };
       }),
     [tabs, statuses],
@@ -4735,8 +4809,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       ref={terminalRootRef}
       className="terminal-workbench relative flex h-full bg-canvas"
     >
-      {/* 左栏：工作树（专注终端/专注内容下整体隐藏；默认完全收起，标签栏左侧钮打开） */}
-      {!focusMode && !rightExpanded && treeOpen && (
+      {/* 左栏：工作树（专注内容下整体隐藏；默认完全收起，标签栏左侧钮打开） */}
+      {!rightExpanded && treeOpen && (
         <div className="flex w-56 shrink-0 flex-col border-r border-hairline bg-rail2">
           <div className="flex h-8 shrink-0 items-center gap-2 px-2">
             <span className="mr-auto text-xs font-medium text-l3">
@@ -4789,7 +4863,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   : openReaderForNote(path))
               }
               belowRecent={
-                /* 项目区：当前标签 cwd 所属项目的主文件夹 + 活跃工作区，点击切根复用 enterCwd 链路 */
+                /* 项目区：进行中的已添加项目 + 科研活跃工作区；当前标签置顶 */
                 <ProjectRail
                   cwd={activeCwd}
                   pageVisible={visible}
@@ -4811,9 +4885,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
       {/* 中带：终端标签区 */}
       <div className="relative flex min-w-0 flex-1 flex-col">
-        {/* 顶部标签条：常驻中带顶部，专注终端下也保留在原位 */}
+        {/* 顶部标签条：常驻中带顶部 */}
         <div className="flex h-9 items-center gap-1 overflow-hidden bg-strip px-2">
-          {!focusMode && !rightExpanded && !treeOpen && (
+          {!rightExpanded && !treeOpen && (
             <button
               type="button"
               title="显示文件树"
@@ -4960,51 +5034,67 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             </button>
           </span>
           <span className="ml-auto flex shrink-0 items-center gap-1">
-            {!focusMode && (
-              <button
-                type="button"
-                onClick={toggleRightPanel}
-                aria-pressed={rightOpen}
-                title={rightOpen ? "隐藏成果面板" : "显示成果面板"}
-                aria-label={rightOpen ? "隐藏成果面板" : "显示成果面板"}
-                className={`flex size-7 items-center justify-center rounded-md transition-colors ${
-                  rightOpen
-                    ? "bg-seg-sel text-l1"
-                    : "text-l4 hover:bg-hover hover:text-l2"
-                }`}
-              >
-                {rightOpen ? (
-                  <PanelRightClose size={14} strokeWidth={1.8} aria-hidden="true" />
-                ) : (
-                  <PanelRightOpen size={14} strokeWidth={1.8} aria-hidden="true" />
-                )}
-              </button>
-            )}
             <button
               type="button"
-              onClick={(e) => {
-                const r = e.currentTarget.getBoundingClientRect();
-                setLayoutMenu({ x: r.right, y: r.bottom + 4 });
+              onClick={toggleRightPanel}
+              aria-pressed={rightOpen}
+              title={rightOpen ? "隐藏成果面板" : "显示成果面板"}
+              aria-label={rightOpen ? "隐藏成果面板" : "显示成果面板"}
+              className={`flex size-7 items-center justify-center rounded-md transition-colors ${
+                rightOpen
+                  ? "bg-seg-sel text-l1"
+                  : "text-l4 hover:bg-hover hover:text-l2"
+              }`}
+            >
+              {rightOpen ? (
+                <PanelRightClose size={14} strokeWidth={1.8} aria-hidden="true" />
+              ) : (
+                <PanelRightOpen size={14} strokeWidth={1.8} aria-hidden="true" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (focusedSurfaceMode === "chat") switchSurface("terminal");
+                toggleSplit();
               }}
-              title="布局"
-              aria-label="布局"
+              disabled={!splitActive && tabs.length < 2}
+              aria-pressed={splitActive}
+              title={
+                splitActive
+                  ? "退出分屏"
+                  : tabs.length < 2
+                    ? "分屏对照（需要两个标签）"
+                    : "分屏对照"
+              }
+              aria-label={
+                splitActive
+                  ? "退出分屏"
+                  : tabs.length < 2
+                    ? "分屏对照（需要两个标签）"
+                    : "分屏对照"
+              }
+              className={`flex size-7 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                splitActive
+                  ? "bg-seg-sel text-l1"
+                  : "text-l4 hover:bg-hover hover:text-l2"
+              }`}
+            >
+              <Columns2 size={14} strokeWidth={1.8} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (focusedSurfaceMode === "chat" && !peekByTab[focusedId]) {
+                  switchSurface("terminal");
+                }
+                tabActionsRef.current.get(focusedId)?.search();
+              }}
+              title="查找终端输出"
+              aria-label="查找终端输出"
               className="flex size-7 items-center justify-center rounded-md text-l4 hover:bg-hover hover:text-l2"
             >
-              <LayoutPanelTop size={14} aria-hidden="true" />
-            </button>
-            {/* ⋯ 改为常驻（v3.88）：原先只在专注模式渲染，非专注时同一批动作散在标签内
-                启动栏的 ⋯ 里，两套菜单内容高度重叠。现在合为一处、位置固定 */}
-            <button
-              type="button"
-              onClick={(e) => {
-                const r = e.currentTarget.getBoundingClientRect();
-                setFocusMenu({ x: r.right, y: r.bottom + 4 });
-              }}
-              title="终端操作（停止/恢复/接力/聊天/查找/修改）"
-              aria-label="终端操作"
-              className="rounded-sm px-1.5 py-0.5 text-micro text-l4 hover:text-l2"
-            >
-              ⋯
+              <Search size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
           </span>
         </div>
@@ -5039,7 +5129,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 visible={tabVisible}
                 primaryFocus={t.id === focusedId}
                 rightOpen={rightOpen}
-                layoutKey={`${focusMode}-${rightOpen}-${Math.round(rightWidth)}-${rightExpanded}-${splitActive ? `split${Math.round(splitPct)}` : "single"}-${(surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) === "chat" && peekByTab[t.id] ? "peek" : "full"}`}
+                layoutKey={`${rightOpen}-${Math.round(rightWidth)}-${rightExpanded}-${splitActive ? `split${Math.round(splitPct)}` : "single"}-${(surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) === "chat" && peekByTab[t.id] ? "peek" : "full"}`}
                 embedInPeek={
                   (surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) === "chat" &&
                   Boolean(peekByTab[t.id])
@@ -5071,7 +5161,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 onConsumeExternalCwd={consumeExternalCwd}
                 onStatus={reportStatus}
                 onSessionUpdate={reportSession}
-                focusMode={focusMode}
                 onActions={registerActions}
                 onRestoreComplete={finishRestore}
                 onConsumeResume={clearResumeSession}
@@ -5255,6 +5344,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                             .get(t.id)
                             ?.loadOlderConversation()
                         }
+                        onChooseCwd={() =>
+                          tabActionsRef.current.get(t.id)?.chooseCwd()
+                        }
                       />
                     </div>
                   </div>
@@ -5348,21 +5440,22 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         {/* 专注内容：右栏铺满即表达主次，中带不加压暗遮罩（v3.44 用户否决压黑） */}
       </div>
 
-      {/* 右栏关闭（或专注终端）时改动面板随右栏卸载、轮询停止，标签条变更芯片与页签徽标需要数据：
+      {/* 右栏关闭时改动面板随右栏卸载、轮询停止，标签条变更芯片与页签徽标需要数据：
           挂一个 display:none 的实例在同一 cwd 上持续轮询（与右栏内的面板实例互斥，永不同存） */}
-      {(!rightOpen || focusMode) && (
+      {!rightOpen && (
         <div className="hidden">
           <GitPanel
             cwd={gitPanelCwd}
             visible={visible}
             refreshKey={fsChangeTick}
             onTotals={reportGitTotals}
+            onOpenPr={gitPanelOpenPr}
           />
         </div>
       )}
 
-      {/* 右侧面板：文件预览 / 改动（聊天在主工作区，专注终端下隐藏） */}
-      {rightOpen && !focusMode && (
+      {/* 右侧面板：文件预览 / 改动（聊天在主工作区） */}
+      {rightOpen && (
         <>
           <div
             role="separator"
@@ -5462,7 +5555,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   }
                 >
                   {/\.pdf$/i.test(preview.path) ? (
-                    <PdfPreview
+                    <PdfContinuousView
                       path={preview.path}
                       cwdHint={preview.root ?? activeCwd}
                       onAskAi={askAiFromPdf}
@@ -5525,6 +5618,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 visible={visible && rightOpen}
                 refreshKey={fsChangeTick}
                 onTotals={reportGitTotals}
+                onOpenPr={gitPanelOpenPr}
                 onOpenReview={(path) => {
                   setReviewAction(null);
                   setReviewPath(path);
@@ -5567,37 +5661,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           onClose={closeReader}
           termSlot={bindReaderTermSlot}
           statusBarSlot={bindReaderStatusSlot}
-        />
-      )}
-
-      {focusMenu && (
-        <ContextMenu
-          x={focusMenu.x}
-          y={focusMenu.y}
-          alignRight
-          onClose={() => setFocusMenu(null)}
-          items={focusMenuItems()}
-        />
-      )}
-      {layoutMenu && (
-        <ContextMenu
-          x={layoutMenu.x}
-          y={layoutMenu.y}
-          alignRight
-          onClose={() => setLayoutMenu(null)}
-          items={layoutMenuItems()}
-        />
-      )}
-      {handoffSource && (
-        <HandoffPicker
-          source={handoffSource}
-          onClose={() => setHandoffSource(null)}
-        />
-      )}
-      {digestSource && (
-        <DigestPicker
-          source={digestSource}
-          onClose={() => setDigestSource(null)}
         />
       )}
     </div>

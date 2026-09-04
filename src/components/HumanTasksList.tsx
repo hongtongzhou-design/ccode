@@ -350,6 +350,7 @@ export default function HumanTasksList({
   stepName,
   onChanged,
   onStates,
+  compact = false,
 }: {
   projectPath: string;
   stepName: string;
@@ -357,6 +358,8 @@ export default function HumanTasksList({
   onChanged?: () => void;
   /** 每次状态（重）载后回传本步骤的状态切片（开工弹层的开工前提醒等需要读状态） */
   onStates?: (states: HumanTaskStateDto[]) => void;
+  /** 开工弹层：可选事项不算「待做」，单组时不写「开始前」 */
+  compact?: boolean;
 }) {
   // 拖拽落点容器：必须包住全部三个时机分组的行——挂在分组内的 <ul> 上会被后一组覆盖，
   // 只剩最后一组能命中（useHumanTasks 的 containerRef.contains 判定）
@@ -386,13 +389,25 @@ export default function HumanTasksList({
   const visible = states?.filter((s) => s.timing !== "after") ?? null;
   if (visible !== null && visible.length === 0) return null;
 
+  const pendingRequired =
+    visible?.filter((s) => !s.done && !s.optional).length ?? 0;
+  const timingGroups = (["before", "during"] as const).filter((timing) =>
+    (visible ?? []).some((s) =>
+      timing === "during"
+        ? s.timing !== "before" && s.timing !== "after"
+        : s.timing === timing,
+    ),
+  );
+
   return (
     <div>
       <div className="mb-1 flex items-center gap-2">
-        <span className="text-micro text-l4">人工事项</span>
-        {visible && visible.some((s) => !s.done) && (
+        <span className="text-micro text-l4">
+          {compact && pendingRequired === 0 ? "可选准备" : "人工事项"}
+        </span>
+        {pendingRequired > 0 && (
           <span className="text-micro text-warn-text">
-            {visible.filter((s) => !s.done).length} 件待做
+            {pendingRequired} 件待做
           </span>
         )}
       </div>
@@ -414,11 +429,13 @@ export default function HumanTasksList({
             .filter((g) => g.items.length > 0)
             .map((g) => (
               <div key={g.timing}>
+                {!(compact && timingGroups.length <= 1) && (
                 <div className="mb-0.5 text-micro text-l4">
                   {g.timing === "before"
                     ? "开始前"
                     : "进行中"}
                 </div>
+                )}
                 <ul className="space-y-1">
                   {g.items.map((task) => (
             <li

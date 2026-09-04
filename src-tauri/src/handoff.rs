@@ -676,6 +676,7 @@ mod tests {
             }],
             total_add: 10,
             total_del: 3,
+            merging: false,
         }
     }
 

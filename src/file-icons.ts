@@ -49,6 +49,7 @@ const EXT_ICONS: Record<string, FileTypeIcon> = {
   txt: { label: "≡", color: "#9c9c9c" },
   log: { label: "≡", color: "#9c9c9c" },
   bib: { label: "B", color: "#d4a017" },
+  ris: { label: "RIS", color: "#d4a017" },
   png: { label: "▨", color: "#a074c4" },
   jpg: { label: "▨", color: "#a074c4" },
   jpeg: { label: "▨", color: "#a074c4" },
@@ -62,6 +63,11 @@ const EXT_ICONS: Record<string, FileTypeIcon> = {
   xlsm: { label: "X", color: "#217346" },
   xls: { label: "X", color: "#217346" },
   ods: { label: "X", color: "#217346" },
+  csv: { label: "CSV", color: "#217346" },
+  tsv: { label: "CSV", color: "#217346" },
+  pptx: { label: "P", color: "#c43e1c" },
+  ppt: { label: "P", color: "#c43e1c" },
+  odp: { label: "P", color: "#c43e1c" },
 };
 
 function extOf(path: string): string | null {

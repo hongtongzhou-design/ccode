@@ -211,6 +211,8 @@ export interface OfficialAccountStatusDto {
   /** 配置文件冲突告警（只含文件名与变量名，不含密钥值） */
   conflicts: string[];
   cleanupSupported: boolean;
+  /** 组头登录标签要注入的环境（出网代理；连接 extraEnv 再覆盖） */
+  loginEnv: Record<string, string>;
 }
 
 export interface ValidationCheckDto {
@@ -721,7 +723,7 @@ export interface SkillDto {
   id: string;
   name: string;
   description: string;
-  /** local | zip | github | discovered */
+  /** builtin | ccode（Ccode 新建）| local（本地导入；旧数据含早期自建）| zip | github | discovered */
   source: string;
   repo: string | null;
   repoRef: string | null;
@@ -941,6 +943,8 @@ export interface ProjectDto {
   name: string;
   createdAt: string | null;
   lastOpenedAt: string | null;
+  /** research / coding / office；缺省 research */
+  workMode?: string;
 }
 
 /** 档案卡 .ccode/project.toml 的资源条目 */
@@ -1002,6 +1006,8 @@ export interface ProjectStepDto {
    *  文献来源选择器 + 就地导入入口，答案写 config.litSource。
    *  与 decisions 分属两类——decisions 写草稿只做记录，这条写项目配置且带动作 */
   asksLitSource?: boolean;
+  /** 预置完成：产物已在主仓（示例课题检索步），步进器视为已完成。真建了工作区后以工作区为准 */
+  seedComplete?: boolean;
 }
 
 export interface ProjectConfigDto {
@@ -1025,6 +1031,8 @@ export interface ProjectConfigDto {
   submissionRound?: number;
   /** 文献雷达筛选：新命中展示与推送计数按期刊指标过滤；null/全空 = 不筛选 */
   litWatchFilter?: LitWatchFilterDto | null;
+  /** 工作方式：research / coding / office；缺省 research */
+  workMode?: string;
 }
 
 /** 文献雷达筛选（存 project.toml；指标未知的条目放行不误伤，口径见 lit-watch.ts entryPassesFilter） */
@@ -1101,6 +1109,107 @@ export interface BootstrapCommitDto {
   paths: string[];
 }
 
+export interface CodingWorktreeDto {
+  path: string;
+  branch: string;
+  isPrimary: boolean;
+  isBase: boolean;
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+  unpushed: number;
+  hasUpstream: boolean;
+  detached: boolean;
+  lastCommitAt?: string | null;
+  dirtyCount?: number;
+  upstreamBehind?: number;
+}
+
+export interface CodingBranchDto {
+  name: string;
+  worktreePath: string | null;
+  isPrimary: boolean;
+  isBase: boolean;
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+  unpushed: number;
+  hasUpstream: boolean;
+  upstreamBehind?: number;
+}
+
+export type CodingOpCode =
+  | "ok"
+  | "branch_exists"
+  | "worktree_busy"
+  | "invalid_url"
+  | "no_origin"
+  | "not_github"
+  | "no_upstream"
+  | "not_worktree"
+  | "ff_only"
+  | "desktop_missing"
+  | "gh_unauth"
+  | "git_failed";
+
+export type CodingOpPhase = "add" | "fetch" | "push" | "pr" | "open" | null;
+
+export interface CodingOpDto {
+  ok: boolean;
+  code: CodingOpCode;
+  failedPhase: CodingOpPhase;
+  message: string;
+  setUpstream?: boolean;
+  createdInitialCommit?: boolean;
+  method?: "github-cli" | "macos-open" | "gh-view" | "gh-create-web" | "compare-url";
+  url?: string | null;
+  tried?: string[];
+  worktree?: CodingWorktreeDto | null;
+}
+
+export interface CodingRemoteDto {
+  name: string;
+  url: string;
+  display: string;
+  hostKind: "github" | "other";
+}
+
+export interface CodingRemoteBranchDto {
+  remote: string;
+  name: string;
+  hasLocal: boolean;
+  occupiedPath: string | null;
+}
+
+export interface CodingOverviewDto {
+  repoPath: string;
+  baseBranch: string;
+  isRepo: boolean;
+  worktrees: CodingWorktreeDto[];
+  branches: CodingBranchDto[];
+  createdInitialCommit?: boolean;
+  merging?: boolean;
+  mergingCwd?: string | null;
+  origin?: CodingRemoteDto | null;
+  remoteBranches?: CodingRemoteBranchDto[];
+}
+
+export interface CodingMergeDto {
+  merged: boolean;
+  conflict: boolean;
+  cwd: string;
+  message: string;
+  code?: "ok" | "base_not_checked_out";
+}
+
+export interface OfficeDocDto {
+  path: string;
+  name: string;
+  rel: string;
+  size: number;
+  modified: string | null;
+}
+
 /** MCP server 清单项（src-tauri/src/mcp.rs；分发规格 = docs/agent-integration-matrix.md §10） */
 export interface McpEnvPair {
   key: string;
@@ -1123,6 +1232,31 @@ export interface McpServerDto {
   apps: Record<string, boolean>;
   /** 全局启用开关（v3.93）：false = 已从所有 agent 移除条目但保留分发映射，重开按原样重投 */
   enabled: boolean;
+  /** 来源标记：ccode = 本应用新建；imported:<agent> = 收编；imported:json = 粘贴导入；
+   *  空串 = 旧数据来源未知，删除分流按收编条目对待（mcp.rs） */
+  origin: string;
+  /** 慢启动 server 的启动超时声明（毫秒，可空）：收编 codex/grok 的 startup_timeout_sec
+   *  自动带入，也可在编辑表单手调；只被体检消费（按 8–30s clamp 生效） */
+  startupTimeoutMs?: number | null;
+  /** 最近一次体检沉淀（单条/批量检测都会更新，随清单落盘） */
+  lastCheck?: McpLastCheckDto | null;
+}
+
+/** 相对路径命令的修复候选（resolve_mcp_command_fix）：
+ *  解析出的绝对路径命令 + 规范化后的工作目录（相对 cwd 已改成命中基准目录） */
+export interface McpCommandFixCandidate {
+  command: string;
+  cwd: string;
+}
+
+/** 最近一次连通性体检的沉淀（随 mcp-servers.json 落盘） */
+export interface McpLastCheckDto {
+  /** ISO 时间戳（UTC） */
+  at: string;
+  ok: boolean;
+  latencyMs: number;
+  /** 失败原因；成功为 null */
+  error: string | null;
 }
 
 /** check_mcp_server 返回：连通性健康检测（v3.93） */
@@ -1221,6 +1355,23 @@ export interface UpdateSchedulePatch {
   minute?: number;
   enabled?: boolean;
   linkedStep?: string | null;
+}
+
+/** 新建巡检技能：确认落盘前的草稿（.ccode/drafts/watch-*.meta.json） */
+export interface WatchSkillDraftDto {
+  id: string;
+  name: string;
+  skillName: string;
+  intent: string;
+  frequency: string;
+  weekday: number | null;
+  hour: number;
+  minute: number;
+  profileId: string | null;
+  linkedStep?: string | null;
+  draftRelPath: string;
+  hasDraft: boolean;
+  draftText?: string | null;
 }
 
 /** scheduler-run-done 事件载荷（summary 已脱敏） */

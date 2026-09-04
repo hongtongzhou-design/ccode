@@ -160,9 +160,60 @@ export function isCcodeAiTempCwd(path: string): boolean {
   return CCODE_AI_TEMP_RE.test(baseName(path));
 }
 
-/** 对话列表是否按内部 AI 归并：后端标记，或 Ccode 自建临时 cwd（登记被清后会话还在）。 */
-export function sessionLooksInternal(s: { internal: boolean; projectPath: string }): boolean {
-  return s.internal || isCcodeAiTempCwd(s.projectPath);
+/**
+ * 无头调用写进 CLI 会话文件后，标题就是那段 prompt 的前 60 字。
+ * 雷达解读 / 定时巡检跑在项目目录时，靠这些句子从「本项目会话」拿开。
+ */
+export const HEADLESS_TITLE_HINTS = [
+  "你是科研文献快筛助手",
+  "请用中文解读下面这篇文献",
+  "技能执行一次文献巡检",
+  "技能在项目内执行一次定时巡检",
+  "本任务由 Ccode 定时雷达自动触发",
+] as const;
+
+function titleLooksHeadless(
+  title: string | null | undefined,
+  customTitle: string | null | undefined,
+): boolean {
+  const hay = `${customTitle ?? ""} ${title ?? ""}`;
+  return HEADLESS_TITLE_HINTS.some((h) => hay.includes(h));
+}
+
+/** 对话列表是否按内部 AI 归并：后端标记、临时 cwd、无头来源、或雷达/解读 prompt 标题。 */
+export function sessionLooksInternal(s: {
+  internal?: boolean;
+  source?: string;
+  projectPath: string;
+  title?: string | null;
+  customTitle?: string | null;
+}): boolean {
+  if (s.internal) return true;
+  if (s.source === "ccode-ai") return true;
+  if (isCcodeAiTempCwd(s.projectPath)) return true;
+  return titleLooksHeadless(s.title, s.customTitle);
+}
+
+/**
+ * 本项目会话再排除 Ccode 按钮拉起的交互会话（问 AI / 沉浸阅读注入 / 接力简报）。
+ * 这些仍是普通项目对话，对话页照常列出，不进「内部 AI」。
+ */
+export const PROJECT_SESSION_EXCLUDE_HINTS = [
+  "看这份文件",
+  "【阅读上下文】",
+  ".ccode/handoff-",
+] as const;
+
+export function sessionExcludedFromProjectList(s: {
+  internal?: boolean;
+  source?: string;
+  projectPath: string;
+  title?: string | null;
+  customTitle?: string | null;
+}): boolean {
+  if (sessionLooksInternal(s)) return true;
+  const hay = `${s.customTitle ?? ""} ${s.title ?? ""}`;
+  return PROJECT_SESSION_EXCLUDE_HINTS.some((h) => hay.includes(h));
 }
 
 export interface ProjectGroup {
@@ -191,7 +242,7 @@ export function groupSessionsByProjectPath(
   const byKey = new Map<string, ProjectGroup>();
   for (const s of sessions) {
     const p = s.projectPath?.trim();
-    if (!p || isCcodeAiTempCwd(p)) continue;
+    if (!p || sessionLooksInternal(s)) continue;
     const key = pathKey(p, isWindows);
     const g = byKey.get(key);
     if (g) g.list.push(s);

@@ -74,6 +74,8 @@ export default function StepFlow({
   onSeed,
   openSeeds,
   onStart,
+  onReadPaper,
+  readPaperPrimary = false,
   onChanged,
   draft,
   agentContent,
@@ -103,6 +105,9 @@ export default function StepFlow({
   openSeeds?: string[];
   /** agent 节点「开始」= 打开开工确认弹层 */
   onStart: () => void;
+  /** 示例课题精读：主按钮「开读这一篇」进沉浸阅读，开始仍在旁边 */
+  onReadPaper?: () => void;
+  readPaperPrimary?: boolean;
   /** 人工事项勾选/交付后通知父级（流程线橙点等外部计数重取） */
   onChanged?: () => void;
   /** 任务书草稿（v3.72）：relPath 恒有（后端单一出处），exists = 草稿已起草，
@@ -508,15 +513,35 @@ export default function StepFlow({
         }
         return runStatus === "pending" ? (
           // 唯一主路径（v3.89）：上面那些题都不拦着开工，所以「开始」必须比它们显眼一档。
-          // 新用户直接点它就完事——AI 自己会在对话里问缺的信息
-          <button
-            type="button"
-            onClick={onStart}
-            title="直接开工也行，AI 会在对话里问你缺的信息"
-            className="shrink-0 rounded-sm border border-cta-bd bg-cta px-3 py-1 text-sm text-cta-text hover:brightness-110"
-          >
-            开始
-          </button>
+          // 示例课题精读：主按钮改成「开读这一篇」，开始仍可用。
+          <span className="flex shrink-0 items-center gap-1.5">
+            {onReadPaper && (
+              <button
+                type="button"
+                onClick={onReadPaper}
+                title="打开沉浸阅读：笔记｜PDF｜终端"
+                className={
+                  readPaperPrimary
+                    ? "shrink-0 rounded-sm border border-cta-bd bg-cta px-3 py-1 text-sm text-cta-text hover:brightness-110"
+                    : "shrink-0 rounded-sm border border-field px-2 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1"
+                }
+              >
+                开读这一篇
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onStart}
+              title="直接开工也行，AI 会在对话里问你缺的信息"
+              className={
+                onReadPaper && readPaperPrimary
+                  ? "shrink-0 rounded-sm border border-field px-2 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1"
+                  : "shrink-0 rounded-sm border border-cta-bd bg-cta px-3 py-1 text-sm text-cta-text hover:brightness-110"
+              }
+            >
+              开始
+            </button>
+          </span>
         ) : runStatus === "active" ? (
           // agent 已跑完（会话尾部判定 done，大圆角标同一口径）：按钮旁给完成提示，
           // 行为不变——点进去看产出/提交情况；状态翻转仍走 git 派生（提交→待评审）

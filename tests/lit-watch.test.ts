@@ -10,10 +10,13 @@ import {
   isRead,
   litInboxCandidates,
   litInboxForRegisteredProjects,
+  papersForLitCandidate,
   litWatchFilterActive,
   litWatchFilterLabel,
   metricsTooltip,
   normalizeTitle,
+  noteLinkForPaper,
+  paperIsIncluded,
   paperResourceFor,
   pdfUrlFor,
   relevanceRank,
@@ -21,6 +24,8 @@ import {
   staleLitHint,
   UNCATEGORIZED_KEYWORD,
   weeklyBuckets,
+  parseWatchExplain,
+  watchExplainPrompt,
 } from "../src/lit-watch.ts";
 import type { WatchEntryDto } from "../src/lit-watch.ts";
 import type { ScheduleDto } from "../src/types.ts";
@@ -42,6 +47,7 @@ function entry(patch: Partial<WatchEntryDto>): WatchEntryDto {
     date: null,
     rawLineRange: [1, 1],
     metrics: null,
+    explain: null,
     ...patch,
   };
 }
@@ -277,6 +283,43 @@ test("paperResourceFor：paper 类资源按文件名规范化匹配；非 paper 
   );
 });
 
+test("noteLinkForPaper：来源行优先，其次文件名", () => {
+  const links = [
+    {
+      notePath: "/p/notes/a.md",
+      noteName: "a.md",
+      pdfRel: "papers/foo.pdf",
+    },
+    {
+      notePath: "/p/notes/attention-is-all-you-need.md",
+      noteName: "attention-is-all-you-need.md",
+      pdfRel: null,
+    },
+  ];
+  assert.equal(
+    noteLinkForPaper("papers/foo.pdf", links)?.notePath,
+    "/p/notes/a.md",
+  );
+  assert.equal(
+    noteLinkForPaper("papers/attention-is-all-you-need.pdf", links)?.noteName,
+    "attention-is-all-you-need.md",
+  );
+  assert.equal(noteLinkForPaper("papers/other.pdf", links), null);
+  assert.equal(
+    noteLinkForPaper("papers\\foo.pdf", links)?.notePath,
+    "/p/notes/a.md",
+  );
+});
+
+test("paperIsIncluded：文件名与精读标题规范化匹配", () => {
+  const included = [{ title: "Attention Is All You Need" }];
+  assert.equal(
+    paperIsIncluded("papers/attention-is-all-you-need.pdf", included),
+    true,
+  );
+  assert.equal(paperIsIncluded("papers/unrelated.pdf", included), false);
+});
+
 test("staleLitHint：有关联步骤 + 新命中 + 巡检晚于步骤推进才提醒", () => {
   assert.equal(
     staleLitHint("文献检索", "2026-08-18T09:00:00Z", 3, "2026-08-10T10:00:00Z"),
@@ -387,6 +430,29 @@ test("litInboxForRegisteredProjects：已删项目不进收件箱", () => {
     ["s-1"],
   );
   assert.deepEqual(litInboxForRegisteredProjects(candidates, []), []);
+});
+
+test("papersForLitCandidate：取末尾 count 条、新的在前", () => {
+  const entries = [
+    entry({ id: "old", title: "Old" }),
+    entry({ id: "mid", title: "Mid" }),
+    entry({ id: "new", title: "New" }),
+  ];
+  const papers = papersForLitCandidate(
+    { scheduleId: "s", projectRoot: "/p", count: 2, at: "t" },
+    entries,
+  );
+  assert.deepEqual(
+    papers.map((p) => p.id),
+    ["new", "mid"],
+  );
+  assert.deepEqual(
+    papersForLitCandidate(
+      { scheduleId: "s", projectRoot: "/p", count: 0, at: "t" },
+      entries,
+    ),
+    [],
+  );
 });
 
 test("filterLitDismissed：忽略表内的条目被过滤", () => {
@@ -529,4 +595,52 @@ test("雷达筛选：active 判定 / 条目过滤 / 摘要文案（与 Rust 同�
     litWatchFilterLabel({ minIf: 10, maxCasQuartile: 2, topOnly: true }),
     "IF≥10 · 2 区及以上 · 仅 TOP",
   );
+});
+
+test("watchExplainPrompt：五节快筛、有课题对准课题、禁止三行口号", () => {
+  const e = entry({
+    title: "Integrating complexing agents into organic anion electrolytes",
+    authors: "Li et al.",
+    source: "Journal of Materials Chemistry A",
+    journal: "J. Mater. Chem. A",
+    abstractFirst:
+      "Mg-air batteries represent highly promising primary power sources due to their high energy density.",
+  });
+  const withTopic = watchExplainPrompt(e, "水系镁空气电池电解液");
+  assert.ok(withTopic.includes("问题与动机"));
+  assert.ok(withTopic.includes("做法与对象"));
+  assert.ok(withTopic.includes("摘要声称的结果"));
+  assert.ok(withTopic.includes("局限与未写明"));
+  assert.ok(withTopic.includes("对本课题的用处"));
+  assert.ok(withTopic.includes("本课题：水系镁空气电池电解液"));
+  assert.ok(!withTopic.includes("适用研究方向"));
+  assert.ok(!withTopic.includes("每行不超过 40 字"));
+  const noTopic = watchExplainPrompt(e, "  ");
+  assert.ok(noTopic.includes("适用研究方向"));
+  assert.ok(!noTopic.includes("本课题："));
+});
+
+test("parseWatchExplain：按小标题拆节，前言丢掉，对不上回落 null", () => {
+  const ok = parseWatchExplain(`开场白应丢掉
+问题与动机
+针对水系镁空气电池电解液中的络合问题。
+
+做法与对象
+把络合剂引入有机阴离子电解液。
+
+摘要声称的结果
+摘要声称可提升放电性能。摘要未写明具体容量。
+
+局限与未写明
+循环寿命与全电池数据摘要未写明。
+
+适用研究方向
+海洋电化学储能。
+`);
+  assert.ok(ok);
+  assert.equal(ok.length, 5);
+  assert.equal(ok[0].heading, "问题与动机");
+  assert.ok(ok[0].body.includes("络合问题"));
+  assert.equal(ok[4].heading, "适用研究方向");
+  assert.equal(parseWatchExplain("1. 做了什么\n2. 为什么重要"), null);
 });

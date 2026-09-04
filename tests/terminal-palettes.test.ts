@@ -83,6 +83,8 @@ test("isLightTheme 覆盖七套浅色、不误判深色", () => {
   assert.equal(THEMES.filter((t) => isLightTheme(t.id)).length, 7);
   assert.equal(isLightTheme("midnight"), false);
   assert.equal(isLightTheme("midnight-light"), true);
+  assert.equal(isLightTheme("custom"), false);
+  assert.equal(isLightTheme("custom-light"), true);
   assert.equal(isLightTheme(undefined), false);
   assert.equal(isLightTheme("不存在的主题"), false);
 });

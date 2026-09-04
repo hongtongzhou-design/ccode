@@ -2,7 +2,16 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { isLightTheme } from "./themes";
+import { isCustomThemeId, isLightTheme } from "./themes";
+import {
+  applyCustomThemeVars,
+  clearCustomThemeVars,
+  DEFAULT_CUSTOM_THEME,
+  deriveThemeTokens,
+  normalizeCustomTheme,
+  type CustomThemeCard,
+  type CustomThemeSeeds,
+} from "./custom-theme";
 import {
   cycleBrandState,
   enterChromeHidden,
@@ -13,11 +22,22 @@ import { createSessionRefreshCoordinator } from "./session-refresh";
 import {
   dismissHelp,
   dismissInboxItem,
+  filterDismissed,
   loadHelpDismissed,
   loadInboxDismissed,
 } from "./inbox";
+import {
+  APP_UPDATE_CHECK_TIMEOUT_MS,
+  appUpdateInboxFields,
+  mergeAppUpdateInbox,
+  summarizeUpdateCheckError,
+  updaterProxyUrl,
+  type AppUpdateStatus,
+} from "./app-update";
 import type { RunOverviewInput } from "./run-overview";
 import type { DepCheckDto } from "./dep-check";
+import type { AskAiFile } from "./ask-ai";
+import { paperResourceFor } from "./lit-watch";
 import type {
   BindingInput,
   DetectResult,
@@ -32,6 +52,8 @@ import type {
 } from "./types";
 
 const RECENT_REPOS_CACHE_KEY = "ccode.recentRepos";
+/** 应用更新检查代数：后一次检查作废前一次的结果，避免慢请求盖住新结果 */
+let appUpdateCheckGen = 0;
 
 function cachedRecentRepos(): RepoDto[] {
   try {
@@ -60,6 +82,12 @@ export interface AppSettings {
   /** 长任务 OS 通知：注意力跃迁且窗口未聚焦时发系统通知（默认开） */
   notificationsEnabled: boolean;
   theme: string;
+  /** 自定义主题三色（左栏/画布/强调）；theme 为 custom / custom-light 时生效 */
+  customTheme?: CustomThemeSeeds | null;
+  /** 另存的可点色卡 */
+  customThemes?: CustomThemeCard[];
+  /** 当前选中的另存色卡；改取色器后清空（回到正在调的自定义） */
+  customThemeCardId?: string | null;
   /** ◈ AI 功能固定使用的 profile id；null/undefined = 自动（最近使用） */
   aiProfileId?: string | null;
   /** ◈ AI 功能按功能独立配置：键 = 功能 key（commit/summarize/pr/distill/conflict/translate，
@@ -104,14 +132,34 @@ export interface AppSettings {
   /** 向 agent 主动告知终端底色（Windows 专用，默认开）：ConPTY 吞掉 OSC 10/11
       底色查询，浅色主题下 agent 会回落深色；开 = attach 后主动推当前主题前景/底色 */
   terminalColorReport?: boolean;
+  /** 出网代理（官方账号启动与登录注入 HTTPS_PROXY 等）；空 = 不注入。网关启动不走 */
+  outboundProxy?: string | null;
+  /** NO_PROXY；出网代理有值且此项空时默认 localhost,127.0.0.1,::1 */
+  outboundNoProxy?: string | null;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效；
  *  同时同步原生窗口外观——原生 <select> 下拉/滚动条按 NSWindow appearance 渲染，
  *  只改 CSS 变量时深色主题下弹出的仍是系统浅色列表 */
-export function applyTheme(id: string) {
+export function applyTheme(
+  id: string,
+  customTheme?: CustomThemeSeeds | null,
+) {
+  const root = document.documentElement;
+  clearCustomThemeVars(root);
+  if (isCustomThemeId(id)) {
+    const derived = deriveThemeTokens(
+      normalizeCustomTheme(customTheme) ?? DEFAULT_CUSTOM_THEME,
+    );
+    root.dataset.theme = derived.themeId;
+    applyCustomThemeVars(root, derived.tokens);
+    void getCurrentWindow()
+      .setTheme(derived.light ? "light" : "dark")
+      .catch(() => {});
+    return;
+  }
   const theme = id || "midnight";
-  document.documentElement.dataset.theme = theme;
+  root.dataset.theme = theme;
   const light = isLightTheme(theme);
   void getCurrentWindow()
     .setTheme(light ? "light" : "dark")
@@ -151,7 +199,7 @@ export interface PendingTerminal {
   initialPrompt?: string;
   /** 打开后右栏直接落到指定页签（如卡片区「主仓改动」提醒跳到改动面板） */
   rightTab?: "git";
-  /** 「最干净的终端」：落地即收起工作树与右栏（走既有专注终端语义，Esc 可退）。
+  /** 「最干净的终端」：落地即收起工作树与右栏（走既有文件树/成果面板开关，不再进专注终端）。
    *  给「快速开聊」用——没有项目上下文时三个面板都没东西可给，摆着只是噪音 */
   clean?: boolean;
   /** 开聊自动带开文件预览（路径 + 预览根）：一次性交接不落盘
@@ -160,6 +208,8 @@ export interface PendingTerminal {
   previewRoot?: string;
   /** 「聊想法」只读模式：pty_spawn 注入只读/计划模式参数（硬保护，支持的 CLI 才生效） */
   readonly?: boolean;
+  /** 打开后切到聊天层（办公「问 AI」）；缺省沿用标签上次选择 / 默认终端 */
+  surface?: "chat" | "terminal";
   /** 复用键：已有同 key 标签时切换到它而不是新开（「快速开聊」「跟 AI 商量一下」等
       重复入口防标签堆积）。仅内存匹配，不进重启持久化白名单（恢复占位不参与复用） */
   reuseKey?: string;
@@ -204,10 +254,43 @@ export interface InboxItem {
     | { type: "digest" }
     | { type: "artifacts"; workspaceId: string }
     | { type: "project"; projectRoot: string }
-    | { type: "litWatch"; projectRoot: string }
+    | {
+        type: "litWatch";
+        projectRoot: string;
+        entryId?: string;
+        title?: string;
+        url?: string;
+      }
     | { type: "help"; projectRoot: string }
     | { type: "settings"; section: string }
     | { type: "profiles" };
+}
+
+/** 应用更新收件箱条目（去设置页「更新」分区） */
+export function appUpdateInboxEntry(
+  info: { version: string; currentVersion: string } | null,
+): InboxItem | null {
+  const fields = appUpdateInboxFields(info);
+  if (!fields) return null;
+  return {
+    key: fields.key,
+    dot: "bg-ok-text",
+    text: fields.text,
+    actionLabel: "去安装",
+    action: { type: "settings", section: "update" },
+  };
+}
+
+/** 标题栏 / 工作台可见收件箱：业务条目 + 现算的应用更新（项目页未挂载也能看到） */
+export function visibleInboxItems(
+  items: InboxItem[],
+  update: { version: string; currentVersion: string } | null,
+  dismissed: Record<string, string>,
+): InboxItem[] {
+  return filterDismissed(
+    mergeAppUpdateInbox(items, appUpdateInboxEntry(update)),
+    dismissed,
+  );
 }
 
 /** 「◈ 提炼接力」后台任务（v3.60）：AI 蒸馏与 DigestPicker 解耦——picker 可关可开，
@@ -223,6 +306,36 @@ export interface DigestJob {
   error?: string;
   /** 已选定发送目标/用户丢弃：从收件箱摘除（简报文件仍在磁盘，重开 picker 复用） */
   consumed: boolean;
+}
+
+async function openLitInboxPaper(act: {
+  projectRoot: string;
+  title?: string;
+  url?: string;
+}) {
+  const title = act.title?.trim();
+  if (!title) return;
+  try {
+    await invoke("add_included_entry", {
+      projectRoot: act.projectRoot,
+      title,
+      authorsYear: "待补",
+      source: "",
+      link: act.url ?? "",
+    });
+    const read = await invoke<{
+      config: { resources: { path: string; type: string }[] };
+    }>("read_project_config", { path: act.projectRoot });
+    const rel = paperResourceFor({ title }, read.config.resources ?? []);
+    if (!rel) return;
+    const root = act.projectRoot.replace(/[\\/]+$/, "");
+    const abs = /^([a-zA-Z]:[\\/]|\/)/.test(rel) ? rel : `${root}/${rel}`;
+    const s = useAppStore.getState();
+    s.setReaderReq({ pdfPath: abs, projectRoot: act.projectRoot });
+    s.setPage("terminal");
+  } catch {
+    /* 没有 PDF 就停在雷达那一条 */
+  }
 }
 
 /** 收件箱条目动作统一派发（工作区页 strip 与 App 标题栏收件箱共用） */
@@ -254,13 +367,18 @@ export function runInboxAction(item: InboxItem) {
     s.setSelectProjectReq(item.action.projectRoot);
     s.setPage("workspaces");
   } else if (item.action.type === "litWatch") {
-    s.setSelectProjectReq(item.action.projectRoot);
+    const act = item.action;
+    s.setSelectProjectReq(act.projectRoot);
     s.setProjectFocusReq({
-      projectRoot: item.action.projectRoot,
+      projectRoot: act.projectRoot,
       focus: "lit",
       token: Date.now(),
+      entryId: act.entryId,
     });
     s.setPage("workspaces");
+    if (act.title) {
+      void openLitInboxPaper(act);
+    }
   } else if (item.action.type === "help") {
     // 人工请求「去查看」：选中项目之外还要弹出完整内容层——请求全文在 strip 行里只有 40 字截断预览
     s.setSelectProjectReq(item.action.projectRoot);
@@ -307,6 +425,9 @@ interface AppState {
   /** 待消费的终端启动请求；终端页可见时消费并清空 */
   pendingTerminal: PendingTerminal | null;
   setPendingTerminal: (p: PendingTerminal | null) => void;
+  /** 项目区「问 AI」选 Agent/配置弹层；确认后写成 pendingTerminal */
+  askAiReq: AskAiFile | null;
+  setAskAiReq: (r: AskAiFile | null) => void;
   workspaceReviewRequest: WorkspaceReviewRequest | null;
   setWorkspaceReviewRequest: (request: WorkspaceReviewRequest | null) => void;
   /** 终端标签运行状态镜像（TerminalPage 写入；工作区首页「待你处理」跨页只读） */
@@ -402,6 +523,7 @@ interface AppState {
     projectRoot: string;
     focus: "lit" | "schedule";
     token: number;
+    entryId?: string;
   } | null;
   setProjectFocusReq: (req: AppState["projectFocusReq"]) => void;
   /** 收件箱人工请求「去查看」的一次性请求（项目根路径）：工作区页弹出该来源的完整请求内容层 */
@@ -448,9 +570,11 @@ interface AppState {
   settings: AppSettings | null;
   loadSettings: () => Promise<void>;
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>;
-  /** 应用自更新：check() 命中的可用更新（null=已是最新/未检查完/检查失败） */
+  /** 应用自更新：check() 命中的可用更新（null=已是最新/未检查完/检查失败/开发模式） */
   appUpdate: Update | null;
-  /** 启动时静默检查应用更新；失败（无网络/dev 模式）吞掉不打扰 */
+  appUpdateStatus: AppUpdateStatus;
+  appUpdateError: string | null;
+  /** 启动时检查应用更新；开发模式跳过；失败写入 status 而不伪装成「已是最新」 */
   checkAppUpdate: () => Promise<void>;
   loadAll: () => Promise<void>;
   /** 拉取全部 agent 的会话元数据，返回最新列表供轮询比对 */
@@ -538,6 +662,8 @@ export const useAppStore = create<AppState>((set, get) => {
     }),
   pendingTerminal: null,
   setPendingTerminal: (p) => set({ pendingTerminal: p }),
+  askAiReq: null,
+  setAskAiReq: (r) => set({ askAiReq: r }),
   workspaceReviewRequest: null,
   setWorkspaceReviewRequest: (request) =>
     set({ workspaceReviewRequest: request }),
@@ -687,20 +813,54 @@ export const useAppStore = create<AppState>((set, get) => {
   loadSettings: async () => {
     const s = await invoke<AppSettings>("get_settings");
     set({ settings: s });
-    applyTheme(s.theme);
+    applyTheme(s.theme, s.customTheme);
   },
   updateSettings: async (patch) => {
     const s = await invoke<AppSettings>("update_settings", { patch });
     set({ settings: s });
-    applyTheme(s.theme);
+    applyTheme(s.theme, s.customTheme);
   },
 
   appUpdate: null,
+  appUpdateStatus: "idle",
+  appUpdateError: null,
   checkAppUpdate: async () => {
+    if (import.meta.env.DEV) {
+      const prev = get().appUpdate;
+      if (prev) prev.close().catch(() => {});
+      set({
+        appUpdate: null,
+        appUpdateStatus: "dev",
+        appUpdateError: null,
+      });
+      return;
+    }
+    const gen = ++appUpdateCheckGen;
+    set({ appUpdateStatus: "checking", appUpdateError: null });
     try {
-      set({ appUpdate: await check() });
-    } catch {
-      // 静默：dev 模式/无网络/未发布 latest.json 时检查失败不打扰
+      const next = await check({
+        timeout: APP_UPDATE_CHECK_TIMEOUT_MS,
+        proxy: updaterProxyUrl(get().settings?.outboundProxy),
+      });
+      if (gen !== appUpdateCheckGen) {
+        next?.close().catch(() => {});
+        return;
+      }
+      const prev = get().appUpdate;
+      if (prev && prev !== next) prev.close().catch(() => {});
+      set({
+        appUpdate: next,
+        appUpdateStatus: next ? "available" : "none",
+        appUpdateError: null,
+      });
+    } catch (e) {
+      if (gen !== appUpdateCheckGen) return;
+      const message = summarizeUpdateCheckError(String(e));
+      if (get().appUpdate) {
+        set({ appUpdateStatus: "available", appUpdateError: message });
+        return;
+      }
+      set({ appUpdateStatus: "error", appUpdateError: message });
     }
   },
 
