@@ -86,4 +86,8 @@ test("官方账号不接受中转 DeepSeek 等模型名", () => {
   assert.equal(officialModelAllowed("claude-code", "deepseek-chat"), false);
   assert.equal(officialModelAllowed("claude-code", "claude-sonnet-4"), true);
   assert.equal(officialModelAllowed("codex", ""), false);
+  assert.equal(officialModelAllowed("claude-code", "kimi-code/k3"), false);
+  assert.equal(officialModelAllowed("kimi", "kimi-code/k3"), true);
+  assert.equal(officialModelAllowed("kimi", "kimi-k3"), true);
+  assert.equal(officialModelAllowed("kimi", "deepseek-chat"), false);
 });

@@ -2512,7 +2512,9 @@ mod tests {
         assert_eq!(report.imported, 1, "{:?}", report.items);
         let index = fs::read_to_string(home.join(".kimi-code").join("session_index.jsonl")).unwrap();
         assert!(index.contains(id));
-        assert!(index.contains(&t.replace('\\', "/")) || index.contains(&t));
+        let row: serde_json::Value = serde_json::from_str(index.lines().next().unwrap()).unwrap();
+        assert_eq!(row["workDir"].as_str(), Some(t.as_str()), "{index}");
+        assert_ne!(row["workDir"].as_str(), Some("/old/k"));
         let state_got = fs::read_to_string(
             home.join(".kimi-code")
                 .join("sessions")

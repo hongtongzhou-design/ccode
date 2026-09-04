@@ -874,7 +874,14 @@ fn official_model_allowed(agent: &str, model: &str) -> bool {
         "deepseek", "qwen", "glm-", "glm/", "moonshot", "kimi-", "doubao",
         "hunyuan", "yi-", "ernie", "baichuan", "minimax", "spark-",
     ];
-    if FOREIGN.iter().any(|p| m.contains(p)) {
+    // kimi 官方账号下 kimi- / moonshot 是自家模型（kimi-code/k3）；
+    // 这两项只用来拦 Claude/Codex 等订阅误带中转名。
+    if FOREIGN.iter().any(|p| {
+        if agent == "kimi" && (*p == "kimi-" || *p == "moonshot") {
+            return false;
+        }
+        m.contains(p)
+    }) {
         return false;
     }
     if agent == "codex" {
@@ -3301,6 +3308,8 @@ mod tests {
         // 模型走 -m flag（与认证方式无关），密钥绝不出现
         assert_eq!(plan.args, vec!["-m", "kimi-code/k3"]);
         assert!(!plan.args.iter().any(|a| a.contains("sk-secret")));
+        let blocked = launch_plan(&p, None, Some("deepseek-chat"));
+        assert!(blocked.args.is_empty());
     }
 
     #[test]

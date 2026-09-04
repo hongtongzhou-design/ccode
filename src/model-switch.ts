@@ -100,7 +100,14 @@ export function officialModelAllowed(agent: string, model: string): boolean {
     "minimax",
     "spark-",
   ];
-  if (foreign.some((p) => m.includes(p))) return false;
+  if (
+    foreign.some((p) => {
+      if (agent === "kimi" && (p === "kimi-" || p === "moonshot")) return false;
+      return m.includes(p);
+    })
+  ) {
+    return false;
+  }
   if (agent === "codex") {
     return (
       m.startsWith("gpt-") ||
