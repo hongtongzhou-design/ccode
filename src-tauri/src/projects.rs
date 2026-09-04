@@ -597,6 +597,23 @@ fn config_path(project: &Path) -> PathBuf {
     project.join(".ccode").join("project.toml")
 }
 
+/// 档案卡文件头。Git 客户端把未跟踪的 `.ccode/` 当普通改动，丢弃后
+/// `work_mode` 丢失，已添加项目按科研重分类。写入时缺则补、已有不重复。
+const PROJECT_TOML_HEADER: &str = "\
+# Ccode 项目档案卡（工作方式 / 研究流程 / 资源清单）。\n\
+# 删掉此文件后，已添加的项目会按「科研」重新分类。请勿在 Git 客户端里丢弃未跟踪的 .ccode/。\n";
+
+fn with_project_toml_header(text: String) -> String {
+    if text.contains("Ccode 项目档案卡") {
+        return text;
+    }
+    if text.is_empty() {
+        return PROJECT_TOML_HEADER.to_string();
+    }
+    let rest = text.trim_start_matches('\n');
+    format!("{PROJECT_TOML_HEADER}\n{rest}")
+}
+
 // 解析模型：未知键忽略（前向兼容），风格同 ws_settings.rs
 // 坏字段不整体失败：先解析成 toml::Value，再逐条 try_into，坏条目跳过并记 warning。
 
@@ -1388,7 +1405,7 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
         }
         doc["steps"] = Item::ArrayOfTables(arr);
     }
-    Ok(doc.to_string())
+    Ok(with_project_toml_header(doc.to_string()))
 }
 
 pub(crate) fn write_config_at(project: &Path, config: &ProjectConfigDto) -> Result<(), String> {
@@ -1648,7 +1665,7 @@ fn render_tasks(existing: Option<&str>, tasks: &[TaskCardDto]) -> Result<String,
         }
         doc["tasks"] = Item::ArrayOfTables(arr);
     }
-    Ok(doc.to_string())
+    Ok(with_project_toml_header(doc.to_string()))
 }
 
 fn write_tasks_at(root: &Path, tasks: &[TaskCardDto]) -> Result<(), String> {
@@ -4693,6 +4710,10 @@ resources = ["ghost.pdf"]
         set_work_mode_at(&root, "coding").unwrap();
         let raw = fs::read_to_string(config_path(&root)).unwrap();
         assert!(raw.contains("work_mode = \"coding\""), "{raw}");
+        assert!(
+            raw.contains("Ccode 项目档案卡"),
+            "新建档案卡必须带勿删文件头: {raw}"
+        );
         assert_eq!(read_config_at(&root).config.work_mode, "coding");
         set_work_mode_at(&root, "research").unwrap();
         let raw = fs::read_to_string(config_path(&root)).unwrap();
@@ -4701,6 +4722,33 @@ resources = ["ghost.pdf"]
         set_work_mode_at(&root, "nope").unwrap();
         assert_eq!(read_config_at(&root).config.work_mode, "research");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn project_toml_header_injected_once_and_keeps_user_comments() {
+        let config = ProjectConfigDto {
+            work_mode: "coding".into(),
+            ..ProjectConfigDto::default()
+        };
+        let first = render_config(None, &config).unwrap();
+        assert!(first.contains("Ccode 项目档案卡"), "{first}");
+        assert!(first.contains("按「科研」重新分类"), "{first}");
+        assert!(first.contains("work_mode = \"coding\""), "{first}");
+        assert_eq!(first.matches("Ccode 项目档案卡").count(), 1);
+        let second = render_config(Some(&first), &config).unwrap();
+        assert_eq!(
+            second.matches("Ccode 项目档案卡").count(),
+            1,
+            "已有文件头不得重复: {second}"
+        );
+        let custom = "# 用户手写注释\nartifact_dir = \"out\"\n";
+        let mixed = render_config(Some(custom), &config).unwrap();
+        assert!(mixed.contains("Ccode 项目档案卡"), "{mixed}");
+        assert!(mixed.contains("# 用户手写注释"), "{mixed}");
+        assert_eq!(mixed.matches("Ccode 项目档案卡").count(), 1);
+        let tasks = render_tasks(Some(custom), &[]).unwrap();
+        assert!(tasks.contains("Ccode 项目档案卡"), "{tasks}");
+        assert!(tasks.contains("# 用户手写注释"), "{tasks}");
     }
 
     // ===== pipeline_opt_out（「不使用研究流程」显式标记） =====

@@ -4,6 +4,7 @@
 > 代码标识符（pipeline-start.ts、PipelineEditor、PIPELINE_TEMPLATES）与本开发文档沿用 pipeline/流水线，两者同一物。
 
 > **工作方式（v3.179 / v3.180）**：`project.toml` `work_mode` = `research` / `coding` / `office`，缺省 research。
+> 档案卡文件头固定两行勿删注释（`with_project_toml_header`：缺则写入时补、已有不重复）。删掉 `project.toml` 后缺省 research——Git 客户端把未跟踪的 `.ccode/` 当普通改动，丢弃即掉回科研。
 > 一个项目终身一张主界面，不做转换。重复添加已登记或档案卡已落盘的目录必须预填并锁定，禁止改选、禁止再弹模板。
 > 项目页左侧列表按工作方式分段（科研 → 编程 → 办公；未添加仓库沉底），组内保持最近打开序；行上不再重复写类型。
 > 科研才走本文件的工作区 / 流水线 / 雷达合同；
