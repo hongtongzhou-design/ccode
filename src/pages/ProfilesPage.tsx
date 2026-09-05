@@ -2551,6 +2551,30 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
 
+  /** 连接行的就地修复：先刷新网关目录，再让后端重新计算绑定同步状态。
+   * 不自动改写绑定模型——目录刷新可能新增大量模型，替换绑定仍由用户在编辑弹层确认。
+   */
+  async function refreshGatewayCatalog(profile: Profile) {
+    if (!profile.gatewayId) return;
+    setRowMenu(null);
+    setError(null);
+    try {
+      const gateway = await invoke<{
+        catalogFromSlot?: string | null;
+        models: { id: string }[];
+      }>("fetch_gateway_catalog", { gatewayId: profile.gatewayId });
+      await loadAll();
+      setNotice(
+        `已刷新「${profile.name}」的模型目录 · ${gateway.models.length} 个模型${
+          gateway.catalogFromSlot ? ` · ${gateway.catalogFromSlot} 槽` : ""
+        }`,
+      );
+      setTimeout(() => setNotice(null), 5000);
+    } catch (e) {
+      setError(`模型目录刷新失败：${String(e)}`);
+    }
+  }
+
   /** 停用/取消停用（settings.hiddenProfiles 整表覆盖；字段名沿用旧称不改存储）：
       软停用 = 不被自动路径挑中（启动栏预选/兜底、恢复会话、AI 功能回落），
       手动指定仍可用——启动栏下拉里沉到「已停用」分组可手选 */
@@ -3368,6 +3392,21 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
               danger: true,
               onSelect: () => void onDelete(rowMenu.profile),
             },
+            ...(rowMenu.profile.accountType !== "official" &&
+            rowMenu.profile.gatewayId &&
+            (rowMenu.profile.connectionStatus === "catalog_stale" ||
+              rowMenu.profile.connectionStatus === "model_unsynced" ||
+              rowMenu.profile.modelSyncStatus === "stale" ||
+              rowMenu.profile.modelSyncStatus === "missing")
+              ? [
+                  {
+                    label: "刷新网关模型目录",
+                    title:
+                      "重新获取该网关的模型目录并重新计算绑定状态；不会自动修改当前绑定的模型名单",
+                    onSelect: () => void refreshGatewayCatalog(rowMenu.profile),
+                  },
+                ]
+              : []),
             { separator: true },
             { label: "验证", onSelect: () => void onValidate(rowMenu.profile) },
             { label: "启动计划预览", onSelect: () => void onPreviewLaunchPlan(rowMenu.profile) },
