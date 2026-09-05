@@ -675,10 +675,17 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   }, []);
   // 精确注意力标记支持清单（九家全列出，支持与否与备注以后端注册表为准）
   const [hookSupport, setHookSupport] = useState<HookSupport[]>([]);
+  const [hookSupportError, setHookSupportError] = useState<string | null>(null);
+  async function loadHookSupport() {
+    try {
+      setHookSupport(await invoke<HookSupport[]>("hooks_attention_support"));
+      setHookSupportError(null);
+    } catch (e) {
+      setHookSupportError(`注意力标记支持清单加载失败：${String(e)}`);
+    }
+  }
   useEffect(() => {
-    invoke<HookSupport[]>("hooks_attention_support")
-      .then(setHookSupport)
-      .catch(() => {});
+    void loadHookSupport();
   }, []);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
     try {
@@ -2061,6 +2068,18 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         open={!collapsed.integration}
         onToggle={() => toggleSection("integration")}
       >
+        {hookSupportError && (
+          <div className="mb-2 flex items-center gap-2 text-xs text-err-text">
+            <span>{hookSupportError}</span>
+            <button
+              type="button"
+              className={ghostActionClass}
+              onClick={() => void loadHookSupport()}
+            >
+              重试
+            </button>
+          </div>
+        )}
         <Row label="brew 镜像" hint="安装/更新走清华 TUNA 镜像">
           <Toggle
             label="brew 镜像"
