@@ -716,6 +716,15 @@ const TerminalView = memo(function TerminalView({
     inputNoteTimer.current = setTimeout(() => setInputNote(null), 3000);
   }
 
+  /** 用户主动写入 PTY 的统一反馈：写入失败不能静默丢掉输入。 */
+  function writeInteractivePty(ptyId: string, data: string, success?: string) {
+    void invoke("pty_write", { ptyId, data })
+      .then(() => {
+        if (success) flashInputNote(success);
+      })
+      .catch((reason) => flashInputNote(`终端输入失败：${String(reason)}`));
+  }
+
   /** 剪贴板图片 → 落盘（save_clipboard_image）→ 绝对路径转义写进 PTY
       （「路径文本」是九家 CLI 通吃的图片输入方式，各家升级行为见 matrix §11） */
   async function pasteImageFile(file: File) {
@@ -761,11 +770,7 @@ const TerminalView = memo(function TerminalView({
       if (!text) return;
       const id = ptyIdRef.current;
       if (id) {
-        try {
-          await invoke("pty_write", { ptyId: id, data: text });
-        } catch (reason) {
-          flashInputNote(`粘贴失败：${String(reason)}`);
-        }
+        writeInteractivePty(id, text);
       }
     } catch {
       flashInputNote("无法读取剪贴板");
@@ -955,7 +960,7 @@ const TerminalView = memo(function TerminalView({
   function useSkill(name: string) {
     const text = `使用 ${name} 技能：`;
     if (running && activePtyId) {
-      invoke("pty_write", { ptyId: activePtyId, data: text }).catch(() => {});
+      writeInteractivePty(activePtyId, text);
     } else {
       setShowPrompt(true);
       setAdvancedLaunchOpen(true);
@@ -968,7 +973,7 @@ const TerminalView = memo(function TerminalView({
   function useMcp(name: string) {
     const text = `使用 ${name} 这个 MCP server 提供的工具：`;
     if (running && activePtyId) {
-      invoke("pty_write", { ptyId: activePtyId, data: text }).catch(() => {});
+      writeInteractivePty(activePtyId, text);
     } else {
       setShowPrompt(true);
       setAdvancedLaunchOpen(true);
@@ -1450,9 +1455,9 @@ const TerminalView = memo(function TerminalView({
       if (!text) return;
       const id = ptyIdRef.current;
       if (id) {
-        invoke("pty_write", { ptyId: id, data: text })
-          .then(() => flashInputNote(`已写入 ${paths.length} 个路径`))
-          .catch(() => {});
+        writeInteractivePty(id, text, `已写入 ${paths.length} 个路径`);
+      } else {
+        flashInputNote("终端未启动，无法写入路径");
       }
     });
 
@@ -2439,13 +2444,13 @@ const TerminalView = memo(function TerminalView({
     // 聊天层审批按键（y/n/Esc）与打断（\x03）的写入通道
     writePty: (data) => {
       const id = ptyIdRef.current;
-      if (id) invoke("pty_write", { ptyId: id, data }).catch(() => {});
+      if (id) writeInteractivePty(id, data);
     },
     writeCommand: (cmd) => {
       const id = ptyIdRef.current;
       if (!id) return;
       const enter = submitCsiU ? KIMI_CSI_U_ENTER : "\r";
-      invoke("pty_write", { ptyId: id, data: `${cmd}${enter}` }).catch(() => {});
+      writeInteractivePty(id, `${cmd}${enter}`);
     },
     loadOlderConversation: () => loadOlderConversation(),
   };
