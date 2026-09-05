@@ -1026,9 +1026,14 @@ function BindToStepModal({
   useEffect(() => {
     if (!projectPath) return;
     setSteps(null);
+    setError(null);
     invoke<ProjectConfigReadDto>("read_project_config", { path: projectPath })
       .then((read) => setSteps(read.config.steps))
-      .catch(() => setSteps([])); // 档案卡缺失/读取失败：按无步骤处理
+      .catch((reason) => {
+        // 读取失败不能伪装成“没有步骤”，否则用户会误以为可以安全跳过配置。
+        setSteps(null);
+        setError(`读取项目研究流程失败：${String(reason)}`);
+      });
   }, [projectPath]);
 
   async function bind(step: ProjectStepDto) {
@@ -1362,9 +1367,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
       await invoke("set_skill_category", {
         id,
         category: value.trim() || null,
-      }).catch((e) => setError(String(e)));
+      });
       setCatEdit(null);
       await refresh();
+    } catch (e) {
+      setError(String(e));
     } finally {
       catSubmitting.current = false;
     }
@@ -1388,11 +1395,11 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
             .filter(Boolean),
         ),
       ].slice(0, 4);
-      await invoke("set_skill_tags", { id, tags }).catch((e) =>
-        setError(String(e)),
-      );
+      await invoke("set_skill_tags", { id, tags });
       setTagEdit(null);
       await refresh();
+    } catch (e) {
+      setError(String(e));
     } finally {
       tagSubmitting.current = false;
     }
@@ -1421,14 +1428,20 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
 
   /** ◈ 优化：以技能库目录为 cwd 开终端，预填「阅读 + 按意见优化」指令（Agent 直接改写库文件） */
   async function confirmOptimize(skill: SkillDto, opinion: string) {
-    const target = await invoke<SkillPathDto>("skill_md_path", { id: skill.id });
-    setPendingTerminal({
-      cwd: target.dir,
-      extraEnv: {},
-      title: `优化技能 ${skill.name}`,
-      initialPrompt: `阅读 ${target.mdPath}，按以下意见优化它：\n${opinion}`,
-    });
-    setPage("terminal");
+    try {
+      const target = await invoke<SkillPathDto>("skill_md_path", {
+        id: skill.id,
+      });
+      setPendingTerminal({
+        cwd: target.dir,
+        extraEnv: {},
+        title: `优化技能 ${skill.name}`,
+        initialPrompt: `阅读 ${target.mdPath}，按以下意见优化它：\n${opinion}`,
+      });
+      setPage("terminal");
+    } catch (e) {
+      setError(`打开技能优化终端失败：${String(e)}`);
+    }
   }
 
   /** 副本过期：把库里的最新版本重新分发到漂移的 agent 副本 */
