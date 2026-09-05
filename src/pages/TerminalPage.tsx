@@ -730,9 +730,10 @@ const TerminalView = memo(function TerminalView({
         bytes: Array.from(new Uint8Array(buf)),
         ext: imageExtFromMime(file.type),
       });
-      await invoke("pty_write", { ptyId: id, data: escapeShellPath(path, IS_WINDOWS) }).catch(
-        () => {},
-      );
+      await invoke("pty_write", {
+        ptyId: id,
+        data: escapeShellPath(path, IS_WINDOWS),
+      });
       flashInputNote(pasteImageFeedback(path));
     } catch (reason) {
       flashInputNote(`粘贴图片失败：${String(reason)}`);
@@ -759,8 +760,13 @@ const TerminalView = memo(function TerminalView({
       const text = await navigator.clipboard.readText();
       if (!text) return;
       const id = ptyIdRef.current;
-      if (id)
-        await invoke("pty_write", { ptyId: id, data: text }).catch(() => {});
+      if (id) {
+        try {
+          await invoke("pty_write", { ptyId: id, data: text });
+        } catch (reason) {
+          flashInputNote(`粘贴失败：${String(reason)}`);
+        }
+      }
     } catch {
       flashInputNote("无法读取剪贴板");
     }
@@ -2283,7 +2289,12 @@ const TerminalView = memo(function TerminalView({
   /** 停止 agent：杀掉 PTY 后由退出事件自动回落到 shell */
   async function stop() {
     const id = ptyIdRef.current;
-    if (id) await invoke("pty_kill", { ptyId: id }).catch(() => {});
+    if (!id) return;
+    try {
+      await invoke("pty_kill", { ptyId: id });
+    } catch (reason) {
+      setError(`停止终端失败：${String(reason)}`);
+    }
   }
 
   async function writeChatMessage(ptyId: string, text: string): Promise<ChatSendResult> {
