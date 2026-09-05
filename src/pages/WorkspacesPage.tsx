@@ -83,6 +83,7 @@ import {
   type WorkMode,
 } from "../work-mode";
 import { sortWorkspacesByAttention } from "../project-status";
+import { samePath as samePathKey } from "../path-utils";
 
 /** 保留工作区的合并已完成，且分支尚未产生新的待合并提交。 */
 function isMerged(
@@ -97,9 +98,9 @@ function sanitizeBranch(name: string): string {
   return name.replace(/[^A-Za-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
 }
 
-/** 项目注册路径为 canonical 绝对路径；与工作区 repoPath 比较前统一去尾部斜杠 */
+/** 项目注册路径与工作区路径来自不同后端来源；按平台统一分隔符、大小写和 verbatim 前缀。 */
 function samePath(a: string, b: string): boolean {
-  return a.replace(/[\\/]+$/, "") === b.replace(/[\\/]+$/, "");
+  return samePathKey(a, b, IS_WINDOWS);
 }
 
 function pathBaseName(path: string): string {
@@ -1062,6 +1063,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           list.filter((w) => w.status === "active").map((w) => w.repoPath),
         ),
       ];
+      const settingsFailures: string[] = [];
       const entries = await Promise.all(
         repos.map(async (r) => {
           try {
@@ -1072,7 +1074,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
               }),
             ] as const;
           } catch {
-            return null; // 无 settings.toml / 读取失败的仓库静默跳过
+            settingsFailures.push(r);
+            return null; // 无 settings.toml 仍允许工作区列表继续展示
           }
         }),
       );
@@ -1120,7 +1123,13 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         .catch(() => {});
       // 文献雷达新命中（收件箱「文献」胶囊）：同频次拉取，失败静默（下轮重试）
       void loadLitInbox();
-      setError(null);
+      setError(
+        settingsFailures.length > 0
+          ? `部分工作区设置加载失败：${settingsFailures
+              .map(pathBaseName)
+              .join("、")}。请刷新后重试。`
+          : null,
+      );
     } catch (e) {
       setError(String(e));
     }
@@ -1128,18 +1137,22 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
 
   /** run 脚本：开 shell 标签并立即执行命令；wsId 用于 nonconcurrent 互斥 */
   async function runScript(ws: WorkspaceDto, script: RunScriptDto) {
-    const pairs = await invoke<[string, string][]>("workspace_env_for", {
-      worktreePath: ws.worktreePath,
-    });
-    setPendingTerminal({
-      cwd: ws.worktreePath,
-      extraEnv: Object.fromEntries(pairs),
-      title: `run: ${script.name}`,
-      prefillCommand: script.command,
-      shellOnly: true,
-      wsId: ws.id,
-    });
-    setPage("terminal");
+    try {
+      const pairs = await invoke<[string, string][]>("workspace_env_for", {
+        worktreePath: ws.worktreePath,
+      });
+      setPendingTerminal({
+        cwd: ws.worktreePath,
+        extraEnv: Object.fromEntries(pairs),
+        title: `run: ${script.name}`,
+        prefillCommand: script.command,
+        shellOnly: true,
+        wsId: ws.id,
+      });
+      setPage("terminal");
+    } catch (e) {
+      setError(`无法启动脚本「${script.name}」：${String(e)}`);
+    }
   }
 
   useEffect(() => {
