@@ -244,7 +244,9 @@ export default function McpPage({ visible }: { visible: boolean }) {
       .then((list) =>
         setCaps(Object.fromEntries(list.map((c) => [c.agent, c]))),
       )
-      .catch(() => {});
+      .catch((reason) =>
+        setError(`读取 MCP 分发能力失败：${String(reason)}`),
+      );
   }, [visible]);
   // 收编现有配置 / 粘贴导入 / 内置预设（低频，收进顶部 ⋯ 菜单）
   const [topMenu, setTopMenu] = useState<{ x: number; y: number } | null>(null);
@@ -428,6 +430,9 @@ export default function McpPage({ visible }: { visible: boolean }) {
 
   /** 全局启用/停用：停用从各 agent 移除条目但保留分发映射（重开按原样重投） */
   async function setEnabled(s: McpServerDto, enabled: boolean, force = false) {
+    const key = `${s.id}:__global__`;
+    if (applying[key]) return;
+    setApplying((prev) => ({ ...prev, [key]: true }));
     setError(null);
     try {
       setServers(
@@ -462,6 +467,8 @@ export default function McpPage({ visible }: { visible: boolean }) {
       } else {
         setError(msg);
       }
+    } finally {
+      setApplying((prev) => ({ ...prev, [key]: false }));
     }
   }
 
@@ -989,7 +996,10 @@ export default function McpPage({ visible }: { visible: boolean }) {
                       <Toggle
                         label={`${s.name} 启用开关`}
                         checked={s.enabled}
-                        onChange={(v) => void setEnabled(s, v)}
+                        onChange={(v) =>
+                          !applying[`${s.id}:__global__`] &&
+                          void setEnabled(s, v)
+                        }
                       />
                     </span>
                   </span>
