@@ -252,6 +252,9 @@ export default function StatsPage({ visible }: { visible: boolean }) {
   const [topSessions, setTopSessions] = useState<UsageTopSessionDto[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [partialError, setPartialError] = useState<string | null>(null);
+  const [sessionsLoadError, setSessionsLoadError] = useState<string | null>(
+    null,
+  );
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
@@ -307,7 +310,10 @@ export default function StatsPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (visible) {
       void load(range);
-      void loadSessions();
+      setSessionsLoadError(null);
+      void loadSessions().catch((reason) => {
+        setSessionsLoadError(`会话明细加载失败：${String(reason)}`);
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, range]);
@@ -498,6 +504,9 @@ export default function StatsPage({ visible }: { visible: boolean }) {
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
       {partialError && (
         <p className="mb-3 text-xs text-warn-text">{partialError}</p>
+      )}
+      {sessionsLoadError && (
+        <p className="mb-3 text-xs text-warn-text">{sessionsLoadError}</p>
       )}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 
