@@ -592,7 +592,10 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   // 项目筛选激活时预取该项目任务卡（「移到卡片…」菜单候选；非项目目录后端返回空表）
   const projectFilterPath = projectScopePath(filter);
   useEffect(() => {
-    if (projectFilterPath) void loadTaskCards(projectFilterPath).catch(() => {});
+    if (!projectFilterPath) return;
+    void loadTaskCards(projectFilterPath).catch((reason) => {
+      setError(`任务卡加载失败：${String(reason)}`);
+    });
   }, [projectFilterPath, loadTaskCards]);
 
   const [summary, setSummary] = useState<string | null>(null);
