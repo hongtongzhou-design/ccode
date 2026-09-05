@@ -1251,12 +1251,15 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     if (visible) void refresh();
   }, [visible]);
 
-  // 内置技能新版检测：best-effort，失败静默
+  // 内置技能新版检测：失败必须可见，避免把“检查失败”误认为“没有更新”
   useEffect(() => {
     if (!visible) return;
     invoke<string[]>("check_builtin_skill_updates")
       .then(setBuiltinUpdates)
-      .catch(() => {});
+      .catch((reason) => {
+        setBuiltinUpdates([]);
+        setError(`检查内置技能更新失败：${String(reason)}`);
+      });
   }, [visible]);
 
   /** 一键更新内置技能为官方最新版（覆盖前自动备份）；成功移出提示条并刷新列表 */
