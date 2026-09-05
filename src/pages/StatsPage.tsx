@@ -251,6 +251,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
   const [trend, setTrend] = useState<UsageTrendDto | null>(null);
   const [topSessions, setTopSessions] = useState<UsageTopSessionDto[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [partialError, setPartialError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
@@ -267,22 +268,37 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     try {
       const [res, gw, tr, top] = await Promise.all([
         invoke<UsageStatsDto>("get_usage_stats", { range: r }),
-        invoke<GatewayUsageRow[]>("usage_by_gateway", { range: r }).catch(
-          () => [] as GatewayUsageRow[],
-        ),
-        invoke<UsageTrendDto>("usage_trend", { range: r }).catch(() => null),
-        invoke<UsageTopSessionDto[]>("top_sessions", { range: r }).catch(
-          () => [] as UsageTopSessionDto[],
-        ),
+        invoke<GatewayUsageRow[]>("usage_by_gateway", { range: r })
+          .then((value) => ({ value, failed: false }))
+          .catch(() => ({ value: [] as GatewayUsageRow[], failed: true })),
+        invoke<UsageTrendDto>("usage_trend", { range: r })
+          .then((value) => ({ value, failed: false }))
+          .catch(() => ({ value: null, failed: true })),
+        invoke<UsageTopSessionDto[]>("top_sessions", { range: r })
+          .then((value) => ({ value, failed: false }))
+          .catch(() => ({ value: [] as UsageTopSessionDto[], failed: true })),
       ]);
       if (seq !== loadSeq.current) return;
       setStats(res);
-      setGatewayRows(gw);
-      setTrend(tr);
-      setTopSessions(top);
+      setGatewayRows(gw.value);
+      setTrend(tr.value);
+      setTopSessions(top.value);
       setError(null);
+      const failed = [
+        gw.failed && "网关",
+        tr.failed && "趋势",
+        top.failed && "高费用会话",
+      ].filter(Boolean) as string[];
+      setPartialError(
+        failed.length > 0
+          ? `部分统计加载失败（${failed.join("、")}），当前数据可能不完整。`
+          : null,
+      );
     } catch (e) {
-      if (seq === loadSeq.current) setError(String(e));
+      if (seq === loadSeq.current) {
+        setError(String(e));
+        setPartialError(null);
+      }
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
@@ -480,6 +496,9 @@ export default function StatsPage({ visible }: { visible: boolean }) {
         </div>
       </PageToolbar>
       {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
+      {partialError && (
+        <p className="mb-3 text-xs text-warn-text">{partialError}</p>
+      )}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
 
       {!stats ? (
