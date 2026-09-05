@@ -92,7 +92,9 @@ export default function GatewayLibrary({
   const [monthUsage, setMonthUsage] = useState<GatewayUsageRow[]>([]);
 
   useEffect(() => {
-    void loadGateways();
+    void loadGateways().catch((e) => {
+      setError(`网关列表加载失败：${String(e)}`);
+    });
     invoke<GatewayUsageRow[]>("usage_by_gateway", { range: "month" })
       .then(setMonthUsage)
       .catch(() => setMonthUsage([]));
@@ -162,31 +164,46 @@ export default function GatewayLibrary({
     });
   }
 
+  const modelIdsKey = models.map((m) => m.id).join("\u0001");
+  async function loadModelSurface(ids: string[]) {
+    if (editing === null || editing === "new" || ids.length === 0) return;
+    const [combo, capability] = await Promise.allSettled([
+      invoke<ComboSurfaceDto[]>("combo_surface_for_gateway_batch", {
+        gatewayId: editing.id,
+        models: ids,
+      }),
+      invoke<ModelCapabilityDto[]>("model_capabilities", {
+        models: ids,
+        gatewayId: editing.id,
+      }),
+    ]);
+    if (combo.status === "fulfilled") {
+      setComboByModel((current) => ({
+        ...current,
+        ...combo.value.reduce<Record<string, ComboSurfaceDto>>((all, item) => {
+          all[item.model] = item;
+          return all;
+        }, {}),
+      }));
+    }
+    if (capability.status === "fulfilled") {
+      setCaps((current) => ({
+        ...current,
+        ...capability.value.reduce<Record<string, ModelCapabilityDto>>((all, item) => {
+          all[item.model] = item;
+          return all;
+        }, {}),
+      }));
+    }
+  }
+
   useEffect(() => {
     if (editing === null || editing === "new") return;
-    let cancelled = false;
-    for (const m of models) {
-      void invoke<ComboSurfaceDto>("combo_surface_for_gateway", {
-        gatewayId: editing.id,
-        model: m.id,
-      })
-        .then((c) => {
-          if (!cancelled) setComboByModel((cur) => ({ ...cur, [m.id]: c }));
-        })
-        .catch(() => {});
-      void invoke<ModelCapabilityDto>("model_capability_brief", {
-        gatewayId: editing.id,
-        modelId: m.id,
-      })
-        .then((c) => {
-          if (!cancelled) setCaps((cur) => ({ ...cur, [m.id]: c }));
-        })
-        .catch(() => {});
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [editing, models]);
+    // 首屏只批量预取前 24 个模型；其余模型在展开行时懒加载，避免大目录打开即打满 IPC。
+    void loadModelSurface(models.slice(0, 24).map((m) => m.id));
+    // modelIdsKey 只在目录增删模型时变化，编辑策略字段不会重复触发 IPC。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, modelIdsKey]);
 
   function patchModel(id: string, patch: Partial<GatewayModel>) {
     setModels((cur) => cur.map((m) => (m.id === id ? { ...m, ...patch } : m)));
@@ -347,48 +364,36 @@ export default function GatewayLibrary({
     const gatewayId = editing.id;
     setProbingAll(true);
     setError(null);
-    const filled = SLOT_LABELS.map((s) => s.key).filter(
-      (k) => slots[k]?.trim() && k !== "cursor" && k !== "gemini",
-    );
-    // 按 URL 去重：同址槽只探一次（体检结果只取决于地址+密钥），探完把摘要镜像给同址槽
-    const byUrl = new Map<string, (keyof ProtocolSlots)[]>();
-    for (const k of filled) {
-      const u = slots[k]!.trim();
-      const group = byUrl.get(u) ?? [];
-      group.push(k);
-      byUrl.set(u, group);
-    }
-    for (const group of byUrl.values()) {
-      try {
-        await invoke<GatewayProbeDto>("probe_gateway_slot", {
-          gatewayId,
-          slot: group[0],
-          model: null,
-          basicOnly: true,
-        });
-      } catch (e) {
-        setError(String(e));
-      }
-    }
-    const list = await invoke<Gateway[]>("list_gateways");
-    const fresh = list.find((g) => g.id === gatewayId);
-    if (fresh) {
-      // 同址槽的后端摘要在保存前不会逐槽刷新——同址同结果，前端镜像一份展示
-      const probes = (fresh.slotProbes ??= []);
-      for (const group of byUrl.values()) {
-        if (group.length < 2) continue;
-        const src = probes.find((s) => s.slot === group[0]);
-        if (!src) continue;
-        for (const k of group.slice(1)) {
-          const i = probes.findIndex((s) => s.slot === k);
-          if (i >= 0) probes[i] = { ...src, slot: k };
-          else probes.push({ ...src, slot: k });
+    try {
+      const filled = SLOT_LABELS.map((s) => s.key).filter(
+        (k) => slots[k]?.trim() && k !== "cursor" && k !== "gemini",
+      );
+      // 同一 URL 也不能跨协议槽复用完整体检结果：OpenAI/Responses/Anthropic
+      // 的请求体、鉴权头和默认模型可能不同。只保留「每个支持体检的槽各测一次」，
+      // 避免把一个协议成功错误镜像成另一个协议成功。
+      for (const slot of filled) {
+        try {
+          await invoke<GatewayProbeDto>("probe_gateway_slot", {
+            gatewayId,
+            slot,
+            model: null,
+            basicOnly: true,
+          });
+        } catch (e) {
+          setError(String(e));
         }
       }
-      setEditing(fresh);
+      const list = await invoke<Gateway[]>("list_gateways");
+      const fresh = list.find((g) => g.id === gatewayId);
+      if (fresh) {
+        setEditing(fresh);
+      }
+      await loadGateways();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setProbingAll(false);
     }
-    await loadGateways();
-    setProbingAll(false);
   }
 
   async function bindToAgent() {
@@ -478,7 +483,7 @@ export default function GatewayLibrary({
                   disabled={probingAll}
                   onClick={() => void probeAll()}
                 >
-                  {probingAll ? "测速中…" : "全部测速"}
+                  {probingAll ? "测速中…" : "测速支持槽位"}
                 </button>
                 {catalogAge(editing.catalogFetchedAt) && (
                   <span className="self-center text-micro text-l4">
@@ -645,10 +650,18 @@ export default function GatewayLibrary({
                         <button
                           type="button"
                           className="flex w-full items-center gap-2 text-left font-mono text-xs"
-                          onClick={() => setExpanded(open ? null : m.id)}
+                          onClick={() => {
+                            setExpanded(open ? null : m.id);
+                            if (!open && !combo && !cap) void loadModelSurface([m.id]);
+                          }}
                         >
                           <FoldMark open={open} />
-                          <span className="min-w-0 flex-1 truncate">{m.id}</span>
+                          <span className="min-w-0 flex-1 truncate">
+                            {m.id}
+                            {m.status === "stale" && (
+                              <span className="ml-2 text-micro text-warn-text">历史失效</span>
+                            )}
+                          </span>
                           <span className="text-micro text-l4">
                             {(cap ?? combo)?.thinking ? "思考" : ""}
                             {(cap ?? combo)?.vision ? " 视觉" : ""}

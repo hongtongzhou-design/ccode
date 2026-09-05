@@ -97,6 +97,9 @@ pub struct StepDto {
     pub expected_artifacts: Vec<String>,
     /// 内容级验收条件；不改变旧档案卡的路径验收兼容性。
     pub acceptance_criteria: Vec<String>,
+    /// 决策暂停策略：auto_continue（默认）| soft_pause（提醒）| hard_pause（未答不可开工）。
+    #[serde(default = "default_decision_mode")]
+    pub decision_mode: String,
     /// 结构化输入依赖；缺省兼容旧档案卡。
     pub inputs: Vec<String>,
     /// 可选输入：存在则读取，不存在不阻断步骤。
@@ -127,6 +130,10 @@ pub struct StepDto {
     /// 预置完成：本步产物已在主仓（示例课题的检索步），步进器视为已完成。
     /// 一旦用户真的建了该步工作区，以工作区状态为准。缺省 false。
     pub seed_complete: bool,
+}
+
+fn default_decision_mode() -> String {
+    "auto_continue".into()
 }
 
 /// 文献雷达筛选（可选，存 project.toml）：新命中的展示与推送计数按期刊指标过滤。
@@ -691,6 +698,8 @@ struct TomlStep {
     #[serde(default)]
     acceptance_criteria: Vec<String>,
     #[serde(default)]
+    decision_mode: String,
+    #[serde(default)]
     inputs: Vec<String>,
     #[serde(default)]
     optional_inputs: Vec<String>,
@@ -938,6 +947,10 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                             .map(|x| x.trim().to_string())
                             .filter(|x| !x.is_empty())
                             .collect(),
+                        decision_mode: match s.decision_mode.trim() {
+                            "soft_pause" | "hard_pause" => s.decision_mode.trim().to_string(),
+                            _ => "auto_continue".into(),
+                        },
                         inputs: s
                             .inputs
                             .into_iter()
@@ -1296,6 +1309,9 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                     criteria.push(criterion.as_str());
                 }
                 t["acceptance_criteria"] = value(criteria);
+            }
+            if s.decision_mode != "auto_continue" {
+                t["decision_mode"] = value(&s.decision_mode);
             }
             if !s.inputs.is_empty() {
                 let mut inputs = toml_edit::Array::new();
@@ -3588,6 +3604,7 @@ mod tests {
                 brief: "读文献写笔记".into(),
                 expected_artifacts: vec!["notes/".into()],
                 acceptance_criteria: Vec::new(),
+                decision_mode: "auto_continue".into(),
                 inputs: Vec::new(),
                 optional_inputs: Vec::new(),
                 any_of_inputs: Vec::new(),
@@ -4588,6 +4605,7 @@ resources = ["ghost.pdf"]
                 brief: "整理笔记".into(),
                 expected_artifacts: vec!["notes/".into()],
                 acceptance_criteria: Vec::new(),
+                decision_mode: "auto_continue".into(),
                 inputs: Vec::new(),
                 optional_inputs: Vec::new(),
                 any_of_inputs: Vec::new(),
@@ -5093,7 +5111,11 @@ resources = ["ghost.pdf"]
         );
         assert_eq!(config.steps.len(), canon.steps.len());
         assert_eq!(config.steps[0].workspace_name, "lit-search");
-        assert_eq!(config.steps[0].skills, vec!["lit-search".to_string()]);
+        assert_eq!(
+            config.steps[0].skills,
+            canon.steps[0].skills,
+            "检索步技能应与英文综述模板一致"
+        );
         assert!(config.steps[0].seed_complete);
         assert_eq!(config.steps[0].brief, canon.steps[0].brief);
         assert_eq!(
