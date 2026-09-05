@@ -550,7 +550,10 @@ function CustomRuntimeBlock({
                 className={`${ghostActionClass} shrink-0 text-micro`}
                 onClick={() => {
                   void invoke("delete_custom_runtime", { id: r.id })
-                    .then(() => reload())
+                    .then(async () => {
+                      await reload();
+                      onNotice(`已删除自定义运行时「${r.name}」`);
+                    })
                     .catch((e) => onError(String(e)));
                 }}
               >
