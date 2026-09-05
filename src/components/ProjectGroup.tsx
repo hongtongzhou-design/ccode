@@ -403,6 +403,7 @@ export default function ProjectGroup({
   // ===== 档案卡（仅注册项目） =====
   const [cfg, setCfg] = useState<ProjectConfigDto | null>(null);
   const [cfgWarnings, setCfgWarnings] = useState<string[]>([]);
+  const [cfgLoadError, setCfgLoadError] = useState<string | null>(null);
   /** 从磁盘重读档案卡并同步本地状态：档案卡的唯一读入口。
    *  原先四处各写一遍「read → setCfg + setCfgWarnings」，漏掉 warnings 的那处会让
    *  ⚠ 徽标停在上一次的结果；收成一个函数后本地与磁盘只有这一条同步路径。
@@ -414,8 +415,10 @@ export default function ProjectGroup({
       });
       setCfg(read.config);
       setCfgWarnings(read.warnings);
+      setCfgLoadError(null);
       return read.config;
     } catch {
+      setCfgLoadError("项目配置读取失败");
       return null;
     }
   }
@@ -423,6 +426,7 @@ export default function ProjectGroup({
   useEffect(() => {
     if (!project) {
       setCfg(null);
+      setCfgLoadError(null);
       return;
     }
     let stale = false;
@@ -431,8 +435,11 @@ export default function ProjectGroup({
         if (stale) return;
         setCfg(read.config);
         setCfgWarnings(read.warnings);
+        setCfgLoadError(null);
       })
-      .catch(() => {});
+      .catch((reason) => {
+        if (!stale) setCfgLoadError(`项目配置读取失败：${String(reason)}`);
+      });
     return () => {
       stale = true;
     };
@@ -1746,6 +1753,19 @@ export default function ProjectGroup({
             知道了
           </button>
         </div>
+      )}
+
+      {registered && cfgLoadError && (
+        <NoticeBar tone="warn" className="mb-3">
+          <span className="mr-2">{cfgLoadError}，研究流程与资源面板暂不可用。</span>
+          <button
+            type="button"
+            className="underline decoration-dotted underline-offset-2 hover:text-l1"
+            onClick={() => void reloadCfg(projectPath)}
+          >
+            重试
+          </button>
+        </NoticeBar>
       )}
 
       {/* 首启引导（轻量版）：注册项目且 steps 为空 → 从模板库选择写入研究流程；
