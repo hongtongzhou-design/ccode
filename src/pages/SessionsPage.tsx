@@ -256,8 +256,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       .then((projects) => {
         if (!cancelled) setRegisteredProjectPaths(new Set(projects.map((p) => p.path)));
       })
-      .catch(() => {
-        if (!cancelled) setRegisteredProjectPaths(new Set());
+      .catch((reason) => {
+        if (!cancelled) {
+          setRegisteredProjectPaths(new Set());
+          setError(`项目范围加载失败：${String(reason)}`);
+        }
       });
     return () => {
       cancelled = true;
@@ -289,11 +292,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
           if (searchGenRef.current !== gen) return;
           setContentHits(hits);
           setSearchingBody(false);
+          setError(null);
         })
         .catch(() => {
           if (searchGenRef.current !== gen) return;
           setContentHits(null);
           setSearchingBody(false);
+          setError("会话内容搜索失败，请稍后重试");
         });
     }, 280);
     return () => window.clearTimeout(timer);
