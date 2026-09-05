@@ -210,12 +210,19 @@ function CreateScheduleModal({
         },
       });
       if (!isLitWatchSkill(skill)) {
-        await invoke("ensure_schedule_skill_distributed", {
-          skill,
-          profileId: profileId || null,
-        }).catch(() => {});
+        try {
+          await invoke("ensure_schedule_skill_distributed", {
+            skill,
+            profileId: profileId || null,
+          });
+        } catch (reason) {
+          await onCreated(
+            `定时任务已创建，但技能分发失败：${String(reason)}。请修复分发后再运行。`,
+          );
+          return;
+        }
       }
-      onCreated();
+      await onCreated();
     } catch (reason) {
       setError(String(reason));
     } finally {

@@ -42,6 +42,13 @@ pub struct RunRecord {
     /// 本次运行新增的收件箱条目数（仅 lit-watch 类任务、仅成功时记；超时/失败为 None）
     #[serde(default, rename = "newEntries")]
     pub new_entries: Option<u32>,
+    /// 本次运行的时间窗与直接产物，供历史追踪；老记录缺省兼容。
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
 }
 
 /// 存储形态（schedules.json，snake_case）
@@ -157,6 +164,7 @@ struct RunDonePayload {
     new_entries: Option<u32>,
     status: String,
     summary: String,
+    artifacts: Vec<String>,
 }
 
 // ===== 存储 =====
@@ -466,7 +474,15 @@ fn update_schedule_at(path: &Path, id: &str, patch: UpdateSchedulePatch) -> Resu
 
 /// 跑一次后回填 last_run_at/last_status/history（新的在前，只留 20 条）并原子写。
 /// new_entries 仅 lit-watch 类任务成功时才有值（超时/失败由调用方传 None）
-fn record_run(id: &str, status: &str, summary: &str, new_entries: Option<u32>) -> Result<(), String> {
+fn record_run(
+    id: &str,
+    status: &str,
+    summary: &str,
+    new_entries: Option<u32>,
+    started_at: String,
+    finished_at: String,
+    artifacts: Vec<String>,
+) -> Result<(), String> {
     let _g = sched_lock();
     let path = schedules_path()?;
     let mut list = read_schedules_at(&path)?;
@@ -480,14 +496,46 @@ fn record_run(id: &str, status: &str, summary: &str, new_entries: Option<u32>) -
     task.history.insert(
         0,
         RunRecord {
-            at,
+            at: at.clone(),
             status: status.to_string(),
             summary: summary.to_string(),
             new_entries,
+            started_at: Some(started_at),
+            finished_at: Some(finished_at),
+            artifacts,
         },
     );
     task.history.truncate(HISTORY_CAP);
     write_schedules_at(&path, &list)
+}
+
+/// 追踪任务时间窗内写入的项目产物。只返回项目根内的文件，避免把密钥/绝对路径
+/// 写进历史；数量上限防止一次任务生成大量缓存拖垮 schedules.json。
+fn changed_artifacts(root: &Path, started: std::time::SystemTime) -> Vec<String> {
+    fn visit(root: &Path, dir: &Path, started: std::time::SystemTime, out: &mut Vec<String>) {
+        if out.len() >= 50 { return; }
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            if out.len() >= 50 { return; }
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                if entry.file_name() != ".git" && entry.file_name() != "node_modules" {
+                    visit(root, &path, started, out);
+                }
+            } else if meta.is_file()
+                && meta.modified().map(|t| t >= started).unwrap_or(false)
+            {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    visit(root, root, started, &mut out);
+    out.sort();
+    out
 }
 
 // ===== 执行 =====
@@ -496,6 +544,8 @@ fn record_run(id: &str, status: &str, summary: &str, new_entries: Option<u32>) -
 /// 找不到二进制/项目目录不存在）同样记 history（status="error"）。
 /// 绝不真的在测试里调用（会拉起 CLI）。
 fn execute_one(id: &str) -> RunDonePayload {
+    let started = std::time::SystemTime::now();
+    let started_at = crate::sessions::now_iso();
     let path = match schedules_path() {
         Ok(p) => p,
         Err(e) => {
@@ -507,6 +557,7 @@ fn execute_one(id: &str) -> RunDonePayload {
                 new_entries: None,
                 status: "error".into(),
                 summary: e,
+                artifacts: Vec::new(),
             }
         }
     };
@@ -529,6 +580,7 @@ fn execute_one(id: &str) -> RunDonePayload {
             new_entries: None,
             status: "error".into(),
             summary: format!("定时任务不存在: {id}"),
+            artifacts: Vec::new(),
         };
     };
     // 新增条目计数仅对 lit-watch 类任务有意义（只有它往 notes/inbox.md 追加条目）
@@ -604,6 +656,12 @@ fn execute_one(id: &str) -> RunDonePayload {
         Ok(out) => ("ok", cap_summary(&crate::sessions::redact_sensitive_text(&out))),
         Err(e) => ("error", cap_summary(&crate::sessions::redact_sensitive_text(&e))),
     };
+    let finished_at = crate::sessions::now_iso();
+    let artifacts = if status == "ok" {
+        changed_artifacts(Path::new(&task.project_root), started)
+    } else {
+        Vec::new()
+    };
     let summary = if status == "ok" && is_lit_watch {
         match crate::lit_watch::output_note(Path::new(&task.project_root)) {
             Some(note) => format!("{summary}；产物检查：{note}"),
@@ -616,7 +674,15 @@ fn execute_one(id: &str) -> RunDonePayload {
         Some(note) => format!("{note}；{summary}"),
         None => summary,
     };
-    if let Err(e) = record_run(id, status, &summary, new_entries) {
+    if let Err(e) = record_run(
+        id,
+        status,
+        &summary,
+        new_entries,
+        started_at,
+        finished_at,
+        artifacts.clone(),
+    ) {
         crate::logbuf::record("error", "scheduler", &format!("回填运行历史失败: {e}"));
     }
     RunDonePayload {
@@ -627,6 +693,7 @@ fn execute_one(id: &str) -> RunDonePayload {
         new_entries,
         status: status.to_string(),
         summary,
+        artifacts,
     }
 }
 
@@ -1279,6 +1346,9 @@ mod tests {
                 status: "ok".into(),
                 summary: "新命中 2 篇".into(),
                 new_entries: Some(2),
+                started_at: None,
+                finished_at: None,
+                artifacts: Vec::new(),
             }],
         };
         write_schedules_at(&path, &[task.clone()]).unwrap();

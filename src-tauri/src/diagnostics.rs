@@ -494,6 +494,17 @@ fn write_bundle(
     add_json(&mut writer, "system.json", platform)?;
     add_json(&mut writer, "frontend.json", frontend)?;
     add_json(&mut writer, "feature-flags.json", &feature_flags())?;
+    add_json(
+        &mut writer,
+        "audit-evidence.json",
+        &json!({
+            "auditReport": "docs/audits/ccode-product-audit-2026-09-05.md",
+            "evidencePolicy": "仅记录审查报告位置、可复核命令与本次导出时间；不打包原始会话、密钥或全文项目文件。",
+            "verificationCommands": ["npm test", "npm run build", "cargo test", "git diff --check"],
+            "crossPlatformMatrix": "docs/qa/ui-matrix.md",
+            "generatedAt": now_iso()
+        }),
+    )?;
     add_json(&mut writer, "process-lifecycle.json", &processes)?;
     add_json(&mut writer, "process-active.json", &active)?;
 

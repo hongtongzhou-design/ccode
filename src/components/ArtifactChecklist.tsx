@@ -172,6 +172,7 @@ export default function ArtifactChecklist({
   const setPage = useAppStore((s) => s.setPage);
   const [rows, setRows] = useState<ArtifactRow[] | null>(null);
   const [stepName, setStepName] = useState<string | null>(null);
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState<string[]>([]);
   // 步骤反查失败（未注册项目/未绑定步骤/读取失败）时给明确提示而非空清单
   const [stepFound, setStepFound] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -328,6 +329,7 @@ export default function ArtifactChecklist({
           if (!stale) {
             setStepFound(false);
             setStepName(null);
+            setAcceptanceCriteria([]);
             setRows([]);
           }
           return;
@@ -336,11 +338,13 @@ export default function ArtifactChecklist({
         if (!stale) {
           setStepFound(true);
           setStepName(step.name);
+          setAcceptanceCriteria(step.acceptanceCriteria ?? []);
           setRows(loaded);
         }
       } catch {
         if (!stale) {
           setStepFound(false);
+          setAcceptanceCriteria([]);
           setRows([]);
         }
       } finally {
@@ -384,6 +388,27 @@ export default function ArtifactChecklist({
           该步骤未登记预期产物，可在「编辑研究流程」中补充。
         </p>
       ) : (
+        <>
+        {acceptanceCriteria.length > 0 && (
+          <div className="mb-2 rounded-sm border border-white/5 bg-inset px-2 py-1.5">
+            <div className="mb-1 text-micro text-l4">内容级验收证据</div>
+            <ul className="space-y-0.5">
+              {acceptanceCriteria.map((criterion) => (
+                <li key={criterion} className="flex gap-2 text-xs">
+                  <span className="shrink-0 text-l4">
+                    {criterion.startsWith("machine:") ? "⚙" : "○"}
+                  </span>
+                  <span className="min-w-0 flex-1 break-words font-mono text-l3">
+                    {criterion}
+                  </span>
+                  <span className="shrink-0 text-micro text-l4">
+                    {criterion.startsWith("machine:") ? "自动规则" : "人工核对"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <ul className="space-y-0.5">
           {rows.map((row) => {
             const produced = row.files.length > 0;
@@ -474,6 +499,7 @@ export default function ArtifactChecklist({
             );
           })}
         </ul>
+        </>
       )}
       {/* 文本类产物就地预览弹层（v3.97）：与 TASK.md 预览/编辑同款——标题栏 +
           预览/编辑切换 + 底部「在终端页打开 / 取消 / 保存」。背景点击/Esc 关闭，

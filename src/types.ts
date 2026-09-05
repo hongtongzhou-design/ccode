@@ -1348,6 +1348,10 @@ export interface RunRecordDto {
   summary: string;
   /** 本次巡检的新命中数（仅 lit-watch 类任务成功时有值；老记录缺省） */
   newEntries?: number | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  /** 本次运行时间窗内写入的项目相对路径（最多 50 条） */
+  artifacts?: string[];
 }
 
   /** 定时任务（serde camelCase）；默认 lit-watch，也可运行技能库中的其它技能 */

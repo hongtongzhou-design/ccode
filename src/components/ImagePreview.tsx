@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import PreviewErrorState from "./PreviewErrorState";
 
 function basename(p: string): string {
   const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
@@ -18,6 +19,7 @@ function ImagePreview({
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -37,7 +39,7 @@ function ImagePreview({
     return () => {
       cancelled = true;
     };
-  }, [path, cwdHint]);
+  }, [path, cwdHint, retry]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -47,9 +49,9 @@ function ImagePreview({
         </span>
       </div>
       {error ? (
-        <div className="p-3">
-          <p className="text-sm text-err-text">{error}</p>
-        </div>
+        <PreviewErrorState error={error} kind="图片" onRetry={() => {
+          setRetry((v) => v + 1);
+        }} />
       ) : url === null ? (
         <div className="p-3">
           <p className="text-sm text-l4">正在加载图片…</p>

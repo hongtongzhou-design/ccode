@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import PreviewErrorState from "./PreviewErrorState";
 import {
   cellRef,
   colLetter,
@@ -42,6 +43,7 @@ function XlsxPreview({
   const [requestedSheet, setRequestedSheet] = useState<string | null>(null);
   const [dto, setDto] = useState<SheetPreviewDto | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   const [sel, setSel] = useState<{ r: number; c: number } | null>(null);
 
   useEffect(() => {
@@ -72,7 +74,7 @@ function XlsxPreview({
     return () => {
       cancelled = true;
     };
-  }, [path, cwdHint, requestedSheet]);
+  }, [path, cwdHint, requestedSheet, retry]);
 
   const colCount = dto?.rows.reduce((m, r) => Math.max(m, r.length), 0) ?? 0;
   const merges = dto?.merges ?? [];
@@ -110,9 +112,7 @@ function XlsxPreview({
         </div>
       )}
       {error ? (
-        <div className="p-3">
-          <p className="text-sm text-err-text">{error}</p>
-        </div>
+        <PreviewErrorState error={error} kind="表格" onRetry={() => setRetry((v) => v + 1)} />
       ) : dto === null ? (
         <div className="p-3">
           <p className="text-sm text-l4">正在加载表格…</p>

@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import PreviewErrorState from "./PreviewErrorState";
 import * as pdfjs from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 // textLayer 的官方样式（选区/定位规则）；随本组件进懒加载 chunk
@@ -344,6 +345,7 @@ function PdfPreview({
 }) {
   const [doc, setDoc] = useState<pdfjs.PDFDocumentProxy | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   const [pageNum, setPageNum] = useState(1);
   const [pageCount, setPageCount] = useState(0);
   const [pageInput, setPageInput] = useState("1");
@@ -405,7 +407,7 @@ function PdfPreview({
       cancelled = true;
       void task?.destroy();
     };
-  }, [path, cwdHint]);
+  }, [path, cwdHint, retry]);
 
   // 适配宽度：量首页原始宽度换算 scale；容器尺寸变化（分栏拖拽）时重算
   useEffect(() => {
@@ -630,9 +632,7 @@ function PdfPreview({
         </p>
       )}
       {error ? (
-        <div className="p-3">
-          <p className="text-sm text-err-text">{error}</p>
-        </div>
+        <PreviewErrorState error={error} kind="PDF" onRetry={() => setRetry((v) => v + 1)} />
       ) : !doc ? (
         <div className="p-3">
           <p className="text-sm text-l4">正在加载 PDF…</p>

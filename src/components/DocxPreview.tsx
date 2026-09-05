@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import PreviewErrorState from "./PreviewErrorState";
 // mammoth 无 ESM 默认导出（export =），本项目 tsconfig 未开 esModuleInterop，用命名空间导入
 import * as mammoth from "mammoth";
 
@@ -42,6 +43,7 @@ function DocxPreview({
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState(0);
+  const [retry, setRetry] = useState(0);
 
   // 加载并转换（路径切换整体重来）
   useEffect(() => {
@@ -70,7 +72,7 @@ function DocxPreview({
     return () => {
       cancelled = true;
     };
-  }, [path, cwdHint]);
+  }, [path, cwdHint, retry]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -89,9 +91,7 @@ function DocxPreview({
         )}
       </div>
       {error ? (
-        <div className="p-3">
-          <p className="text-sm text-err-text">{error}</p>
-        </div>
+        <PreviewErrorState error={error} kind="DOCX" onRetry={() => setRetry((v) => v + 1)} />
       ) : html === null ? (
         <div className="p-3">
           <p className="text-sm text-l4">正在加载 docx…</p>
