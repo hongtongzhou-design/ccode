@@ -1039,7 +1039,11 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       const res = await invoke<FontInstallResult>("install_font", { fontId });
       if (!doneArrived) setFontInstallResult(res);
       // emit_done 推送与 invoke 返回的是同一份结果，ok 以 res 为准即可
-      if (res.ok) await refreshFontStatus();
+      if (res.ok) {
+        await refreshFontStatus();
+        setNotice("字体已安装，重新打开终端后生效");
+        setTimeout(() => setNotice(null), 4000);
+      }
     } catch (e) {
       if (!doneArrived)
         setFontInstallResult({ ok: false, output: String(e) });
@@ -1089,6 +1093,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     try {
       await invoke("clear_app_log");
       setLogs([]);
+      setNotice("应用日志已清理");
+      setTimeout(() => setNotice(null), 3000);
     } catch (e) {
       setError(String(e));
     }
