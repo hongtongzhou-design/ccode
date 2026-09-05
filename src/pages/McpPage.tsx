@@ -283,10 +283,13 @@ export default function McpPage({ visible }: { visible: boolean }) {
     } finally {
       setLoading(false);
     }
-    // 命令路径健康探测（只读）：告警徽标数据源；探测失败静默（少标比误标好）
+    // 命令路径健康探测（只读）：失败必须可见，避免把“检查失败”误认为路径正常
     invoke<Record<string, string>>("mcp_command_path_status")
       .then(setCmdPathStatus)
-      .catch(() => {});
+      .catch((reason) => {
+        setCmdPathStatus({});
+        setError(`MCP 命令路径检查失败：${String(reason)}`);
+      });
   }, []);
 
   useEffect(() => {
