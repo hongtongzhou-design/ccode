@@ -208,10 +208,7 @@ pub(crate) fn to_dto(m: MergedSettings, fallback_files: &[&str]) -> WsSettingsDt
 pub async fn workspace_settings(repo_path: String) -> WsSettingsDto {
     tauri::async_runtime::spawn_blocking(move || {
         let repo = PathBuf::from(crate::sessions::expand_tilde(&repo_path));
-        to_dto(
-            merged_settings(&repo),
-            &crate::workspaces::FILES_TO_COPY,
-        )
+        to_dto(merged_settings(&repo), &crate::workspaces::FILES_TO_COPY)
     })
     .await
     .unwrap_or_else(|_| to_dto(MergedSettings::default(), &crate::workspaces::FILES_TO_COPY))
@@ -374,7 +371,10 @@ test = { command = "local test" }
     fn empty_layers_yield_defaults() {
         let dir = std::env::temp_dir().join(format!("ccode-wss-{}", uuid::Uuid::new_v4()));
         let (m, _) = merged_settings_traced_with_user(&dir, None);
-        assert!(m.files_to_copy.is_none(), "三层都没定义时由调用方回落固定清单");
+        assert!(
+            m.files_to_copy.is_none(),
+            "三层都没定义时由调用方回落固定清单"
+        );
         let dto = to_dto(m, &[".env", ".envrc"]);
         assert_eq!(dto.files_to_copy, vec![".env", ".envrc"]);
         assert_eq!(dto.run_mode, "concurrent");
@@ -390,9 +390,16 @@ test = { command = "local test" }
             &repo.join(".ccode").join("settings.toml"),
             "future_key = 42\n[scripts]\nsetup = \"ok\"\n",
         );
-        write(&repo.join(".ccode").join("settings.local.toml"), "not [valid toml");
+        write(
+            &repo.join(".ccode").join("settings.local.toml"),
+            "not [valid toml",
+        );
         let (m, _) = merged_settings_traced_with_user(&repo, None);
-        assert_eq!(m.setup.as_deref(), Some("ok"), "坏掉的 local 层不影响有效层");
+        assert_eq!(
+            m.setup.as_deref(),
+            Some("ok"),
+            "坏掉的 local 层不影响有效层"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -421,18 +428,27 @@ test = { command = "local test" }
         )
         .unwrap();
         let text = fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap();
-        assert!(text.starts_with("# Ccode 项目层设置"), "新建文件必须带头注释: {text}");
+        assert!(
+            text.starts_with("# Ccode 项目层设置"),
+            "新建文件必须带头注释: {text}"
+        );
         // 合并链路确实吃项目层：merged_settings 能读到刚写入的脚本
         let (m, _) = merged_settings_traced_with_user(&repo, None);
         assert_eq!(m.run.len(), 1);
         assert_eq!(m.run[0].name, "render-draft");
-        assert_eq!(m.run[0].command, "quarto render manuscript/draft.md --to pdf");
+        assert_eq!(
+            m.run[0].command,
+            "quarto render manuscript/draft.md --to pdf"
+        );
         assert!(m.run[0].is_default);
         // 二次 upsert：头注释附着于首个表前饰，往返后仍在顶部
         upsert_run_scripts_at(&repo, &[input("render-final", "quarto render x.md", false)])
             .unwrap();
         let text2 = fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap();
-        assert!(text2.starts_with("# Ccode 项目层设置"), "往返后头注释不得丢失: {text2}");
+        assert!(
+            text2.starts_with("# Ccode 项目层设置"),
+            "往返后头注释不得丢失: {text2}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -453,8 +469,16 @@ web = { command = "npm run dev" }
         upsert_run_scripts_at(
             &repo,
             &[
-                input("render-draft", "quarto render manuscript/draft.md --to pdf", false),
-                input("render-final", "quarto render manuscript/paper-final.md --to pdf", true),
+                input(
+                    "render-draft",
+                    "quarto render manuscript/draft.md --to pdf",
+                    false,
+                ),
+                input(
+                    "render-final",
+                    "quarto render manuscript/paper-final.md --to pdf",
+                    true,
+                ),
             ],
         )
         .unwrap();
@@ -468,7 +492,13 @@ web = { command = "npm run dev" }
         let draft = m.run.iter().find(|r| r.name == "render-draft").unwrap();
         assert_eq!(draft.command, "quarto render manuscript/draft.md --to pdf");
         assert!(!draft.is_default, "覆盖条目整体替换（default 也随之替换）");
-        assert!(m.run.iter().find(|r| r.name == "render-final").unwrap().is_default);
+        assert!(
+            m.run
+                .iter()
+                .find(|r| r.name == "render-final")
+                .unwrap()
+                .is_default
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -483,7 +513,10 @@ web = { command = "npm run dev" }
         assert!(upsert_run_scripts_at(&repo, &[input("a\nb", "cmd", false)]).is_err());
         assert!(!repo.join(".ccode").join("settings.toml").exists());
         // 坏掉的既有文件：报错且不改写
-        write(&repo.join(".ccode").join("settings.toml"), "not [valid toml");
+        write(
+            &repo.join(".ccode").join("settings.toml"),
+            "not [valid toml",
+        );
         assert!(upsert_run_scripts_at(&repo, &[input("render", "cmd", false)]).is_err());
         assert_eq!(
             fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap(),
@@ -562,7 +595,10 @@ test = { command = "local test" }
         let dir = std::env::temp_dir().join(format!("ccode-wss-{}", uuid::Uuid::new_v4()));
         let (_, trace) = merged_settings_traced_with_user(&dir, None);
         assert!(trace.files_to_copy.is_empty());
-        assert_eq!(trace.run_mode, None, "三层都没定义 = None（调用方回落缺省）");
+        assert_eq!(
+            trace.run_mode, None,
+            "三层都没定义 = None（调用方回落缺省）"
+        );
         assert_eq!(trace.setup, None);
         assert_eq!(trace.archive, None);
         assert!(trace.run.is_empty());

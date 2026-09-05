@@ -70,7 +70,9 @@ pub(crate) fn dry_run_matches(store: &ProfileStore, profile: &Profile) -> Option
         return None;
     }
     let profile = profile_for_global_write(store, &profile.id).ok()?;
-    let key = crate::profiles::get_key_for_profile(&profile).ok().flatten();
+    let key = crate::profiles::get_key_for_profile(&profile)
+        .ok()
+        .flatten();
     let home = dirs::home_dir()?;
     let plans = plan_writes(&home, &profile, key.as_deref(), &profile.models).ok()?;
     Some(disk_matches_plans(&plans))
@@ -193,7 +195,10 @@ fn patch_claude_settings(
         .map(|m| crate::model_registry::model_context_size_for(m, gateway_id));
     match max_ctx {
         Some(ctx) if ctx > 200_000 => {
-            env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), json!(ctx.to_string()));
+            env.insert(
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(),
+                json!(ctx.to_string()),
+            );
         }
         _ => {
             env.remove("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
@@ -204,14 +209,11 @@ fn patch_claude_settings(
     } else {
         env.remove("CLAUDE_CODE_EFFORT_LEVEL");
     }
-    // 子 agent（Task 工具）模型：2.1.226 二进制实证解析链 env > Task 参数 > frontmatter >
-    // inherit 主模型；缺省继承主模型 = 第三方网关上子 agent 与主循环同档同价。
-    // 绑定名单 ≥3 个时把 HAIKU 槽（models[2]，「便宜/快」角色槽）复用为子 agent 模型
-    //（DeepSeek 官方推荐同口径，matrix §25；cc-switch 有独立 Subagent 行）。
-    // 注意 env 优先级最高：会压过 frontmatter 的 model 声明（含内置 Explore 类小模型声明）
-    if let Some(haiku) = models.get(2) {
-        env.insert("CLAUDE_CODE_SUBAGENT_MODEL".into(), json!(haiku));
-    }
+    // Remove the legacy Ccode subagent override when updating a global profile.
+    env.remove("CLAUDE_CODE_SUBAGENT_MODEL");
+    // 不写 CLAUDE_CODE_SUBAGENT_MODEL：Claude Code 默认让 Task 子 agent 继承主模型，
+    // 同时保留 Task 参数/frontmatter 的原生覆盖能力。写入该环境变量会压过这些选择，
+    // 使子 agent 被错误固定到绑定列表中的某个模型。
     to_pretty(&v)
 }
 
@@ -276,7 +278,10 @@ fn patch_qwen_settings(
                     e["baseUrl"] = json!(u);
                 }
                 let mut tmp = profile.clone();
-                if let Some(gm) = gw.as_ref().and_then(|g| g.models.iter().find(|x| x.id == *m)) {
+                if let Some(gm) = gw
+                    .as_ref()
+                    .and_then(|g| g.models.iter().find(|x| x.id == *m))
+                {
                     tmp.request_policy.temperature = gm.temperature;
                     tmp.request_policy.top_p = gm.top_p;
                     tmp.request_policy.max_output_tokens = gm.max_output_tokens;
@@ -399,7 +404,10 @@ fn overlay_opencode_per_model(provider: &mut Value, profile: &Profile) {
         .and_then(crate::gateway_store::find_gateway);
     for m in &profile.models {
         let mut tmp = profile.clone();
-        if let Some(gm) = gw.as_ref().and_then(|g| g.models.iter().find(|x| x.id == *m)) {
+        if let Some(gm) = gw
+            .as_ref()
+            .and_then(|g| g.models.iter().find(|x| x.id == *m))
+        {
             tmp.request_policy.temperature = gm.temperature;
             tmp.request_policy.top_p = gm.top_p;
             tmp.request_policy.max_output_tokens = gm.max_output_tokens;
@@ -611,7 +619,8 @@ fn patch_kimi_config(
             // display_name/capabilities 同理只写新版（alias.display_name 与 capabilities
             // 数组均为新版字段，2026-08-17 二进制实证）
             if require_context_size {
-                t["max_context_size"] = value(crate::model_registry::model_context_size_for(m, gateway_id));
+                t["max_context_size"] =
+                    value(crate::model_registry::model_context_size_for(m, gateway_id));
                 // 选择器 label 优先 display_name：用 profile 名避免显示成 provider id "ccode"
                 t["display_name"] = value(format!("{profile_name} · {m}"));
                 // 思考/视觉模型显式声明 capabilities；否则留空走 CLI registry 默认兜底，
@@ -626,9 +635,8 @@ fn patch_kimi_config(
                     if vision {
                         caps.push("image_in");
                     }
-                    t["capabilities"] = toml_edit::value(
-                        caps.into_iter().collect::<toml_edit::Array>(),
-                    );
+                    t["capabilities"] =
+                        toml_edit::value(caps.into_iter().collect::<toml_edit::Array>());
                 }
             }
         }
@@ -694,7 +702,7 @@ fn patch_grok_config(
     }
     let api_backend = profile.api_backend.as_deref().filter(|s| !s.is_empty());
     for m in &profile.models {
-        let ctx = crate::model_registry::model_context_size_authoritative_for(
+        let ctx = crate::model_registry::model_context_size_for_config(
             m,
             profile.gateway_id.as_deref(),
         );
@@ -704,6 +712,9 @@ fn patch_grok_config(
         let model_tbl = sub_table(doc.as_item_mut(), "model")?;
         let entry = sub_table(model_tbl, m)?;
         entry["name"] = value(format!("{} · {m}", profile.name));
+        if let Some(u) = base_url {
+            entry["base_url"] = value(u);
+        }
         if let Some(b) = api_backend {
             entry["api_backend"] = value(b);
         }
@@ -713,7 +724,6 @@ fn patch_grok_config(
     }
     Ok(doc.to_string())
 }
-
 
 /// CodeBuddy：settings.json 的 env 块写 CODEBUDDY_* 三件套（无模型槽位机制，结构最简单）
 fn patch_codebuddy_settings(
@@ -770,7 +780,9 @@ fn plan_writes(
     models: &[String],
 ) -> Result<Vec<PlannedWrite>, String> {
     if profile.account_type == crate::profiles::AccountType::Official {
-        return Err("官方账号不支持「设为全局」；请在 CLI 内登录，Ccode 只在启动时复现账号状态".into());
+        return Err(
+            "官方账号不支持「设为全局」；请在 CLI 内登录，Ccode 只在启动时复现账号状态".into(),
+        );
     }
     if profile.no_auth {
         return Err("无密钥连接不支持「设为全局」；请使用启动注入，避免污染 CLI 全局配置".into());
@@ -782,7 +794,10 @@ fn plan_writes(
     match crate::agent_specs::agent_spec(&profile.agent).map(|s| s.set_global) {
         Some(crate::agent_specs::SetGlobalCap::Supported) => {}
         Some(crate::agent_specs::SetGlobalCap::Unsupported(reason)) => {
-            return Err(format!("「设为全局默认」暂不支持 {}：{reason}", profile.agent))
+            return Err(format!(
+                "「设为全局默认」暂不支持 {}：{reason}",
+                profile.agent
+            ))
         }
         None => {
             return Err(format!(
@@ -869,8 +884,7 @@ fn plan_writes(
         }
         "qwen" => {
             let path = home.join(".qwen/settings.json");
-            let content =
-                patch_qwen_settings(read_existing(&path).as_deref(), key, profile)?;
+            let content = patch_qwen_settings(read_existing(&path).as_deref(), key, profile)?;
             push("settings.json", path, content);
         }
         "opencode" => {
@@ -887,12 +901,8 @@ fn plan_writes(
         }
         "codebuddy" => {
             let path = home.join(".codebuddy/settings.json");
-            let content = patch_codebuddy_settings(
-                read_existing(&path).as_deref(),
-                base_url,
-                key,
-                model,
-            )?;
+            let content =
+                patch_codebuddy_settings(read_existing(&path).as_deref(), base_url, key, model)?;
             push("settings.json", path, content);
         }
         "kimi" => {
@@ -932,9 +942,11 @@ fn plan_writes(
             push("config.toml", path, content);
         }
         // 防御兜底：能力表标 Supported 但这里漏了 arm（两表漂移），属内部错误
-        other => return Err(format!(
-            "内部错误：{other} 的能力表标为支持「设为全局默认」但写计划缺失"
-        )),
+        other => {
+            return Err(format!(
+                "内部错误：{other} 的能力表标为支持「设为全局默认」但写计划缺失"
+            ))
+        }
     }
     Ok(plans)
 }
@@ -1176,8 +1188,7 @@ fn restore_original(path: &Path, original: &Option<Vec<u8>>, id: &str) -> Result
                 path.file_name().unwrap_or_default().to_string_lossy()
             ));
             write_private_file(&tmp, bytes)?;
-            replace_staged(&tmp, path)
-                .map_err(|e| format!("回滚 {} 失败: {e}", path.display()))
+            replace_staged(&tmp, path).map_err(|e| format!("回滚 {} 失败: {e}", path.display()))
         }
         None => match fs::remove_file(path) {
             Ok(_) => Ok(()),
@@ -1389,9 +1400,9 @@ fn restore_from_original(backups_dir: &Path, home: &Path) -> Result<Vec<String>,
     let mut actions = Vec::new();
     for entry in manifest.entries {
         let content = match &entry.backup_file {
-            Some(name) => Some(
-                fs::read(dir.join(name)).map_err(|e| format!("读取原始快照失败: {e}"))?,
-            ),
+            Some(name) => {
+                Some(fs::read(dir.join(name)).map_err(|e| format!("读取原始快照失败: {e}"))?)
+            }
             None => None,
         };
         actions.push(TxAction {
@@ -1486,7 +1497,9 @@ pub(crate) fn drift_status(store: &ProfileStore, agent: &str) -> crate::drift::G
     if profile.account_type == crate::profiles::AccountType::Official {
         return crate::drift::classify(true, None, Vec::new());
     }
-    let key = crate::profiles::get_key_for_profile(&profile).ok().flatten();
+    let key = crate::profiles::get_key_for_profile(&profile)
+        .ok()
+        .flatten();
     let Some(home) = dirs::home_dir() else {
         return crate::drift::classify(false, Some("无法确定用户主目录".into()), Vec::new());
     };
@@ -1725,7 +1738,12 @@ pub async fn restore_global_backup(
 pub async fn has_original_backup(agent: String) -> bool {
     tauri::async_runtime::spawn_blocking(move || {
         backups_root()
-            .map(|r| r.join(&agent).join("original").join("manifest.json").is_file())
+            .map(|r| {
+                r.join(&agent)
+                    .join("original")
+                    .join("manifest.json")
+                    .is_file()
+            })
             .unwrap_or(false)
     })
     .await
@@ -1802,6 +1820,9 @@ mod tests {
             has_key: false,
             gateway_id: None,
             slot_missing: false,
+            connection_status: String::new(),
+            model_sync_status: String::new(),
+            model_sync_note: None,
             provider_override: None,
         }
     }
@@ -1843,7 +1864,8 @@ mod tests {
     #[test]
     fn claude_patch_writes_max_context_only_when_beyond_default_assumption() {
         // 注册表确知 >200K 的模型（kimi-k3 = 1M）：必须显式声明，否则 claude 按 200K 假设提前 compact
-        let out = patch_claude_settings(None, None, None, &["kimi-k3".to_string()], None, None).unwrap();
+        let out =
+            patch_claude_settings(None, None, None, &["kimi-k3".to_string()], None, None).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1048576");
         // ≤200K 的模型：不写；已有旧值时清掉（防上一个 profile 的 1M 残留误导）
@@ -1908,7 +1930,11 @@ mod tests {
         )
         .unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
-        assert_eq!(doc["model_provider"].as_str(), Some("custom"), "默认渠道不动");
+        assert_eq!(
+            doc["model_provider"].as_str(),
+            Some("custom"),
+            "默认渠道不动"
+        );
         assert_eq!(doc["model"].as_str(), Some("gpt-5.6-luna"), "默认模型不动");
         assert_eq!(
             doc["model_providers"]["custom"]["base_url"].as_str(),
@@ -1916,7 +1942,10 @@ mod tests {
             "既有 provider 块不动"
         );
         let blk = &doc["model_providers"]["ccode-a1b2c3d4"];
-        assert_eq!(blk["base_url"].as_str(), Some("https://relay.example.com/v1"));
+        assert_eq!(
+            blk["base_url"].as_str(),
+            Some("https://relay.example.com/v1")
+        );
         // 认证 = 块内静态 Authorization 头；旧路线的 requires_openai_auth/env_key 被清掉
         assert_eq!(
             blk["http_headers"]["Authorization"].as_str(),
@@ -1926,7 +1955,9 @@ mod tests {
         assert!(blk.get("env_key").is_none());
         assert_eq!(blk["wire_api"].as_str(), Some("responses"));
         // 空文档也能建块；无 model_provider 的文档不会被补出开关行
-        let out2 = patch_codex_config_register(None, Some("https://r.example.com/v1"), "ccode-x", "sk-k").unwrap();
+        let out2 =
+            patch_codex_config_register(None, Some("https://r.example.com/v1"), "ccode-x", "sk-k")
+                .unwrap();
         let doc2: toml_edit::DocumentMut = out2.parse().unwrap();
         assert!(doc2.get("model_provider").is_none());
         assert_eq!(
@@ -1939,10 +1970,15 @@ mod tests {
     fn codex_unregister_patch_removes_only_target_block() {
         // 移除注册：只删目标 provider 块，顶层默认与其余块原样保留
         let existing = "model_provider = \"custom\"\nmodel = \"gpt-5.6-luna\"\n\n[model_providers.custom]\nbase_url = \"https://a.example.com/v1\"\n\n[model_providers.ccode-a1b2c3d4]\nbase_url = \"https://b.example.com/v1\"\nrequires_openai_auth = true\n";
-        let (out, removed) = patch_codex_config_unregister(Some(existing), "ccode-a1b2c3d4").unwrap();
+        let (out, removed) =
+            patch_codex_config_unregister(Some(existing), "ccode-a1b2c3d4").unwrap();
         assert!(removed);
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
-        assert_eq!(doc["model_provider"].as_str(), Some("custom"), "默认渠道不动");
+        assert_eq!(
+            doc["model_provider"].as_str(),
+            Some("custom"),
+            "默认渠道不动"
+        );
         assert!(
             doc["model_providers"].get("custom").is_some(),
             "其余 provider 块不动"
@@ -1973,16 +2009,16 @@ mod tests {
     fn gemini_settings_patch_adds_selected_type_and_tolerates_jsonc() {
         // 从无到有
         let v: Value =
-            serde_json::from_str(&patch_gemini_settings(None, "测试", &[], None).unwrap())
-                .unwrap();
+            serde_json::from_str(&patch_gemini_settings(None, "测试", &[], None).unwrap()).unwrap();
         assert_eq!(v["security"]["auth"]["selectedType"], "gemini-api-key");
         // 无模型名单时不写 experimental 段
         assert!(v.get("experimental").is_none());
         // JSONC 容错（注释 + 尾逗号），既有字段保留
         let existing = "{\n  // 主题\n  \"theme\": \"dark\",\n}\n";
-        let v: Value =
-            serde_json::from_str(&patch_gemini_settings(Some(existing), "测试", &[], None).unwrap())
-                .unwrap();
+        let v: Value = serde_json::from_str(
+            &patch_gemini_settings(Some(existing), "测试", &[], None).unwrap(),
+        )
+        .unwrap();
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["security"]["auth"]["selectedType"], "gemini-api-key");
         // 损坏文件拒写（fail-loud），不静默覆盖
@@ -2006,7 +2042,10 @@ mod tests {
         let defs = &v["modelConfigs"]["modelDefinitions"];
         assert_eq!(defs["gemini-3-pro"]["tier"], "custom");
         assert_eq!(defs["gemini-3-pro"]["isVisible"], true);
-        assert_eq!(defs["gemini-3-pro"]["displayName"], "我的网关 · gemini-3-pro");
+        assert_eq!(
+            defs["gemini-3-pro"]["displayName"],
+            "我的网关 · gemini-3-pro"
+        );
         // 用户手维护的条目不动
         assert_eq!(defs["user-one"]["isVisible"], true);
         // kimi-k3 注册链确知思考+视觉 → features 声明；gemini-3-pro 视觉确知
@@ -2148,7 +2187,10 @@ mod tests {
         )
         .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["env"]["CODEBUDDY_BASE_URL"], "https://api.deepseek.com/anthropic");
+        assert_eq!(
+            v["env"]["CODEBUDDY_BASE_URL"],
+            "https://api.deepseek.com/anthropic"
+        );
         assert_eq!(v["env"]["CODEBUDDY_API_KEY"], "sk-secret");
         assert_eq!(v["env"]["CODEBUDDY_MODEL"], "deepseek-v3-2-volc");
         assert_eq!(v["env"]["OTHER"], "1", "无关 env 必须保留");
@@ -2169,7 +2211,11 @@ mod tests {
             "Zetatechs",
             Some("https://api.moonshot.cn/v1"),
             Some("sk-secret"),
-            &["kimi-k3".into(), "kimi.k2.5 turbo".into(), "deepseek-chat".into()],
+            &[
+                "kimi-k3".into(),
+                "kimi.k2.5 turbo".into(),
+                "deepseek-chat".into(),
+            ],
             true,
             "ccode",
             None,
@@ -2227,7 +2273,8 @@ mod tests {
 
     #[test]
     fn kimi_patch_without_models_keeps_single_ccode_alias() {
-        let out = patch_kimi_config(None, "openai", "P", None, None, &[], true, "ccode", None).unwrap();
+        let out =
+            patch_kimi_config(None, "openai", "P", None, None, &[], true, "ccode", None).unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
         assert_eq!(doc["providers"]["ccode"]["type"].as_str(), Some("openai"));
         assert_eq!(doc["models"]["ccode"]["provider"].as_str(), Some("ccode"));
@@ -2242,8 +2289,18 @@ mod tests {
     fn kimi_patch_legacy_variant_omits_context_size() {
         // 旧版 kimi-cli（~/.kimi）：不写 max_context_size/display_name/capabilities，
         // 防止老版本解析未知字段报错
-        let out =
-            patch_kimi_config(None, "kimi", "P", None, None, &["kimi-k3".into()], false, "ccode", None).unwrap();
+        let out = patch_kimi_config(
+            None,
+            "kimi",
+            "P",
+            None,
+            None,
+            &["kimi-k3".into()],
+            false,
+            "ccode",
+            None,
+        )
+        .unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
         assert!(doc["models"]["kimi-k3"].get("max_context_size").is_none());
         assert!(doc["models"]["kimi-k3"].get("display_name").is_none());
@@ -2487,7 +2544,10 @@ mod tests {
         );
         // 恢复初始状态 = 回到首次写入前
         restore_from_original(&backups, &home).unwrap();
-        assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"env": {"OTHER": "1"}}"#);
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            r#"{"env": {"OTHER": "1"}}"#
+        );
         // 原始快照不被恢复动作消耗，可再次恢复
         assert!(original_dir(&backups).join("manifest.json").is_file());
         fs::remove_dir_all(&home).ok();
@@ -2504,7 +2564,10 @@ mod tests {
         apply_plans(&backups, &home, &plans).unwrap();
         assert!(target.exists());
         restore_from_original(&backups, &home).unwrap();
-        assert!(!target.exists(), "首次写入前不存在的文件，恢复初始状态时应删除");
+        assert!(
+            !target.exists(),
+            "首次写入前不存在的文件，恢复初始状态时应删除"
+        );
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&backups).ok();
     }
@@ -2536,7 +2599,11 @@ mod tests {
     fn disk_matches_plans_uses_json_subset_not_full_trim() {
         let dir = tmpdir("dry-subset");
         let path = dir.join("settings.json");
-        fs::write(&path, "{\n  \"env\": {\"A\": \"1\"},\n  \"theme\": \"dark\"\n}\n").unwrap();
+        fs::write(
+            &path,
+            "{\n  \"env\": {\"A\": \"1\"},\n  \"theme\": \"dark\"\n}\n",
+        )
+        .unwrap();
         let planned = PlannedWrite {
             tag: "settings.json",
             path: path.clone(),

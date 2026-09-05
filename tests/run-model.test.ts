@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { inferTaskKind, isWorkbenchSurfaceRun } from "../src/run-model.ts";
+import {
+  canonicalizeReuseKey,
+  inferTaskKind,
+  isDiscussPermission,
+  isWorkbenchSurfaceRun,
+  pickRecoverableRun,
+} from "../src/run-model.ts";
+
+test("canonicalizeReuseKey：wt: 升格为 lane:", () => {
+  assert.equal(canonicalizeReuseKey("wt:/t"), "lane:/t");
+  assert.equal(canonicalizeReuseKey("lane:/t"), "lane:/t");
+});
 
 test("inferTaskKind 按 reuseKey 前缀", () => {
   assert.equal(inferTaskKind("login:codex", "/x"), "login");
@@ -63,5 +74,39 @@ test("isWorkbenchSurfaceRun：登录与空闲 shell 不算正在进行", () => {
   assert.equal(
     isWorkbenchSurfaceRun({ running: true, attention: "working" }),
     true,
+  );
+});
+
+test("isDiscussPermission：permission 优先于 readonly", () => {
+  assert.equal(isDiscussPermission("discuss", false), true);
+  assert.equal(isDiscussPermission("write_tree", true), false);
+  assert.equal(isDiscussPermission(undefined, true), true);
+});
+
+test("pickRecoverableRun：关标签后按项目找回可恢复 Run", () => {
+  const caps = {
+    canResume: true,
+    canStop: true,
+    streamsOutput: true,
+    canReview: true,
+    resumeReason: null,
+  };
+  const run = {
+    id: "run-1",
+    internal: false,
+    closedAt: "2026-09-05T12:00:00+08:00",
+    taskKind: "coding_lane",
+    sessionId: "s1",
+    runtime: "local_cli",
+    capabilities: caps,
+    projectRoot: "/repo",
+    isolationPath: "/Users/me/ccode/worktrees/repo/feat",
+  };
+  assert.equal(pickRecoverableRun([run], "/repo")?.sessionId, "s1");
+  assert.equal(pickRecoverableRun([{ ...run, internal: true }], "/repo"), null);
+  assert.equal(pickRecoverableRun([{ ...run, taskKind: "watch" }], "/repo"), null);
+  assert.equal(
+    pickRecoverableRun([{ ...run, runtime: "custom", capabilities: { ...caps, canResume: false } }], "/repo"),
+    null,
   );
 });

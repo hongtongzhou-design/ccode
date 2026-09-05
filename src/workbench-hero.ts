@@ -43,6 +43,8 @@ export interface WorkbenchWorkspaceRef {
 
 /** 一张工作台卡上的一次活着的干活（终端标签视图）。 */
 export interface WorkbenchRunChip {
+  /** 跨页面稳定身份；tabId 仅用于聚焦当前终端视图。 */
+  runId?: string;
   tabId: string;
   agentId: string;
   attention: "confirm" | "working" | "done" | null;
@@ -69,7 +71,7 @@ export interface WorkbenchHero {
 }
 
 export type WorkbenchContinue =
-  | { kind: "terminal"; tabId: string }
+  | { kind: "terminal"; tabId: string; runId?: string }
   | { kind: "project"; path: string }
   | { kind: "enter-cwd"; path: string };
 
@@ -111,6 +113,7 @@ export function taskLabelForRun(run: {
 
 function toRunChip(run: RunOverviewInput): WorkbenchRunChip {
   return {
+    runId: run.runId,
     tabId: run.tabId,
     agentId: run.agentId,
     attention: run.attention,
@@ -509,7 +512,17 @@ export function pickWorkbenchNow(input: {
 }
 
 export function continueWorkbenchTarget(hero: WorkbenchHero): WorkbenchContinue {
-  if (hero.tabId) return { kind: "terminal", tabId: hero.tabId };
+  const top = hero.runs[0];
+  if (top?.runId) {
+    return {
+      kind: "terminal",
+      tabId: top.tabId,
+      runId: top.runId,
+    };
+  }
+  if (hero.tabId) {
+    return { kind: "terminal", tabId: hero.tabId };
+  }
   if (hero.registered) return { kind: "project", path: hero.path };
   return { kind: "enter-cwd", path: hero.path };
 }

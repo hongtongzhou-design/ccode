@@ -49,7 +49,10 @@ pub fn get_app_log(limit: usize) -> Vec<LogEntryDto> {
         Err(_) => return Vec::new(),
     };
     let limit = limit.min(CAP);
-    q.iter().skip(q.len().saturating_sub(limit)).cloned().collect()
+    q.iter()
+        .skip(q.len().saturating_sub(limit))
+        .cloned()
+        .collect()
 }
 
 #[tauri::command]

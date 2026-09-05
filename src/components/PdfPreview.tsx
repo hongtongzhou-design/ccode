@@ -541,6 +541,7 @@ function PdfPreview({
             <button
               ref={readerBtnRef}
               type="button"
+              aria-label="打开沉浸阅读"
               onMouseEnter={readerTip.show}
               onMouseLeave={readerTip.hide}
               onClick={onOpenReader}
@@ -555,6 +556,7 @@ function PdfPreview({
           <span className="ml-auto flex shrink-0 items-center gap-1">
             <button
               className={zoomBtn}
+              aria-label="上一页"
               disabled={pageNum <= 1}
               onClick={() => goPage(pageNum - 1)}
               title="上一页"
@@ -573,6 +575,7 @@ function PdfPreview({
             <span className="text-l4">/ {pageCount}</span>
             <button
               className={zoomBtn}
+              aria-label="下一页"
               disabled={pageNum >= pageCount}
               onClick={() => goPage(pageNum + 1)}
               title="下一页"
@@ -582,6 +585,7 @@ function PdfPreview({
             <span className="mx-1 h-3 w-px bg-hairline" />
             <button
               className={zoomBtn}
+              aria-label="缩小"
               onClick={() =>
                 setFixedScale((s) =>
                   clampPdfScale((s ?? fitScale) / PDF_ZOOM_STEP),
@@ -593,6 +597,7 @@ function PdfPreview({
             </button>
             <button
               className={`${zoomBtn} px-1.5 tabular-nums`}
+              aria-label="适配宽度"
               onClick={() => setFixedScale(null)}
               title="适配宽度"
             >
@@ -600,6 +605,7 @@ function PdfPreview({
             </button>
             <button
               className={zoomBtn}
+              aria-label="放大"
               onClick={() =>
                 setFixedScale((s) =>
                   clampPdfScale((s ?? fitScale) * PDF_ZOOM_STEP),

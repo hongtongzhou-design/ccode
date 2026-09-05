@@ -1,12 +1,12 @@
 ---
 name: origin-plot
-description: 用 Origin（OriginLab）驱动出图的规范。当用户在 Windows 上要求用 Origin 处理数据、绘制图表，或流水线出图步骤指定用 Origin 出图时使用。外部 Python 经 originpro 包（COM 自动化）为主路、LabTalk 命令行隐藏批处理为备路；图型选择与期刊规格决策归 figure-forge 技能，本技能只管 Origin 驱动机制与产物落盘。仅适用 Windows + 已安装 Origin 2021 及以上。
+description: 用 Origin（OriginLab）驱动出图的规范。当用户在 Windows 上要求用 Origin 处理数据、绘制图表，或流水线出图步骤指定用 Origin 出图时使用。外部 Python 经 originpro 包（COM 自动化）为主路、LabTalk 命令行隐藏批处理为备路；图型选择与期刊规格决策归 figure-forge 技能，本技能只管 Origin 驱动机制与产物落盘。两者同挂时由本技能驱动出图，figure-forge 只定规格，不再跑 matplotlib；`figures/` 冲突警告是分工提醒，不是停工条件。仅适用 Windows + 已安装 Origin 2021 及以上。
 outputs: [analysis/, figures/]
 ---
 
 # Origin 驱动出图（origin-plot）
 
-本技能规定「项目数据 → Origin → 图表产物」的驱动机制：agent 在终端里用脚本驱动 Origin 完成出图，全程无人值守、可复现。图型选择、论点契约、期刊规格（尺寸/分辨率/字体）**不在本技能射程**，一律按 figure-forge 技能定好后再用本技能落地。
+本技能规定「项目数据 → Origin → 图表产物」的驱动机制：agent 在终端里用脚本驱动 Origin 完成出图，全程无人值守、可复现。图型选择、论点契约、期刊规格（尺寸/分辨率/字体）**不在本技能射程**，一律按 figure-forge 技能定好后再用本技能落地。两者同挂时由本技能驱动出图，figure-forge 只定规格，不再跑 matplotlib；`figures/` 冲突警告是分工提醒，不是停工条件。
 
 ## 何时使用
 
@@ -17,7 +17,7 @@ outputs: [analysis/, figures/]
 ## 前置检测（开工先做，不过则停）
 
 - 平台必须是 Windows 且本机安装 Origin 2021+：按 `C:\Program Files\OriginLab\Origin *\Origin*_64.exe`  glob 找到可执行文件（exe 名随版本变），找不到即停止
-- 主路检测：`python -c "import originpro"`；缺包则 `pip install originpro`（该包 Windows only 且要求本机 Origin 2021+），装不上转备路
+- 主路检测按顺序尝试 `py -3`、`python`、Origin 自带 Python 执行 `import originpro`；都找不到时才转备路。缺包时只报告安装指引，不未经确认修改 Python 环境
 - 检测不过时在报告中写明缺什么、怎么补，然后停止；**不得静默改用 matplotlib 充数**（用户指定 Origin 通常因为有 Origin 工程/格式要求，偷换工具等于没做）
 
 ## 操作规范
@@ -28,13 +28,15 @@ outputs: [analysis/, figures/]
 
   ```python
   import originpro as op        # 首次调用即拉起 Origin 实例（COM）
-  op.set_show(False)            # 隐藏窗口，批处理不打扰用户
-  wks = op.new_sheet('w')       # 新建 workbook
-  wks.from_file(DATA_CSV)       # 只读导入项目数据
-  gp = op.new_graph(template='scatter')   # 或实机已有模板/主题
-  gp[0].add_plot(wks, coly=1, colx=0)     # 图层加曲线
-  gp.save_fig(str(OUT_PNG))     # 导出位图；分辨率/宽度参数按实机签名设置
-  op.exit()                     # 收尾必须退出实例
+  try:
+      op.set_show(False)
+      wks = op.new_sheet('w')
+      wks.from_file(DATA_CSV)
+      gp = op.new_graph(template='scatter')
+      gp[0].add_plot(wks, coly=1, colx=0)
+      gp.save_fig(str(OUT_PNG))
+  finally:
+      op.exit()                  # 无论中途如何失败都退出，避免隐藏残留实例
   ```
 
 - 需要 Origin 专精能力（拟合/分析 X-Function）时，Python 里用 `op.lt_exec('LabTalk 命令')` 直送 LabTalk
@@ -42,10 +44,10 @@ outputs: [analysis/, figures/]
 
 ### 2. 备路：LabTalk 命令行隐藏批处理
 
-- 无 Python 环境时用：写 `<脚本>.ogs`（含 `[main]` 段，段尾必须 `exit`），命令行拉起：
+- 无 Python 环境时用：写 `<脚本>.ogs`（含 `[main]` 段，段尾必须 `exit`），命令行拉起；exe 使用前置 glob 找到的实际路径，不写死版本目录：
 
   ```
-  "C:\Program Files\OriginLab\Origin 2025\Origin96_64.exe" -hs -rs run.section("C:\abs\plot.ogs", main)
+  "<前置 glob 找到的 Origin*_64.exe>" -hs -rs run.section("C:\abs\plot.ogs", main)
   ```
 
 - `-hs` 连脚本窗也不弹（官方注明供计划任务可靠运行）；脚本内用 `impASC` 导数据、`expGraph` 导出图（X-Function 参数以实机 `expGraph -d` 对话框口径为准）

@@ -82,9 +82,7 @@ fn default_worktree_path(repo: &Path, branch: &str) -> Result<PathBuf, String> {
 }
 
 fn strip_heads(name: &str) -> String {
-    name.trim()
-        .trim_start_matches("refs/heads/")
-        .to_string()
+    name.trim().trim_start_matches("refs/heads/").to_string()
 }
 
 struct ParsedRemote {
@@ -123,7 +121,10 @@ fn host_ok(host: &str) -> bool {
 }
 
 fn normalize_repo_path(path: &str) -> Option<String> {
-    let mut p = path.trim_start_matches('/').trim_end_matches('/').to_string();
+    let mut p = path
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .to_string();
     if p.to_ascii_lowercase().ends_with(".git") {
         p.truncate(p.len() - 4);
     }
@@ -134,7 +135,10 @@ fn normalize_repo_path(path: &str) -> Option<String> {
     if segs.len() < 2 {
         return None;
     }
-    if segs.iter().any(|s| *s == "." || *s == ".." || s.contains('\\')) {
+    if segs
+        .iter()
+        .any(|s| *s == "." || *s == ".." || s.contains('\\'))
+    {
         return None;
     }
     Some(segs.join("/"))
@@ -190,7 +194,11 @@ fn parse_git_remote_url(raw: &str) -> Option<ParsedRemote> {
     let has_userinfo = userinfo.is_some();
     let host_kind = git_host_kind(host);
     let url_stripped = if scheme == "ssh" {
-        match userinfo.and_then(|u| u.split_once(':').map(|(n, _)| n).or(Some(userinfo.unwrap()))) {
+        match userinfo.and_then(|u| {
+            u.split_once(':')
+                .map(|(n, _)| n)
+                .or(Some(userinfo.unwrap()))
+        }) {
             Some(user) if !user.is_empty() => format!("ssh://{user}@{host}/{owner_repo}.git"),
             _ => format!("ssh://{host}/{owner_repo}.git"),
         }
@@ -479,7 +487,10 @@ fn upstream_unpushed(path: &Path) -> (bool, u32, u32) {
     if git(path, &["rev-parse", "--abbrev-ref", "@{u}"]).is_err() {
         return (false, 0, 0);
     }
-    let Ok(s) = git(path, &["rev-list", "--left-right", "--count", "@{u}...HEAD"]) else {
+    let Ok(s) = git(
+        path,
+        &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+    ) else {
         return (true, 0, 0);
     };
     let mut parts = s.trim().split_whitespace();
@@ -855,6 +866,19 @@ pub(crate) fn touch_lane_current_run(worktree: &str, run_id: &str) {
     }
 }
 
+pub(crate) fn clear_lane_current_run(run_id: &str) {
+    let Ok(conn) = crate::sessions::open_db() else {
+        return;
+    };
+    if ensure_lanes_schema(&conn).is_err() {
+        return;
+    }
+    let _ = conn.execute(
+        "UPDATE coding_lanes SET current_run_id=NULL WHERE current_run_id=?1",
+        params![run_id],
+    );
+}
+
 #[tauri::command]
 pub async fn coding_upsert_lane(
     repo_path: String,
@@ -1062,14 +1086,7 @@ fn create_with_source(
             git_long(
                 &repo,
                 &[
-                    "worktree",
-                    "add",
-                    "--track",
-                    "-b",
-                    &branch,
-                    "--",
-                    &dest_s,
-                    &tracked,
+                    "worktree", "add", "--track", "-b", &branch, "--", &dest_s, &tracked,
                 ],
             )
         }
@@ -1090,7 +1107,8 @@ fn create_at(repo: &Path, branch: &str) -> Result<CodingWorktreeDto, String> {
     if !op.ok {
         return Err(op.message);
     }
-    op.worktree.ok_or_else(|| "工作树已创建，但列表里还看不到".into())
+    op.worktree
+        .ok_or_else(|| "工作树已创建，但列表里还看不到".into())
 }
 
 fn remove_at(repo: &Path, worktree_path: &str, delete_branch: bool) -> Result<(), String> {
@@ -1173,13 +1191,7 @@ fn merge_at(repo: &Path, branch: &str) -> Result<CodingMergeDto, String> {
     let cwd = PathBuf::from(&target.path);
     match git_long(
         &cwd,
-        &[
-            "-c",
-            "commit.gpgsign=false",
-            "merge",
-            "--no-edit",
-            &branch,
-        ],
+        &["-c", "commit.gpgsign=false", "merge", "--no-edit", &branch],
     ) {
         Ok(text) => Ok(CodingMergeDto {
             merged: true,
@@ -1226,9 +1238,8 @@ fn delete_branch_at(repo: &Path, branch: &str, force: bool) -> Result<(), String
         git(&repo, &["branch", "-D", &branch])?;
         return Ok(());
     }
-    git(&repo, &["branch", "-d", &branch]).map_err(|e| {
-        format!("分支还有未合入基准的提交，强删会丢掉这些提交。{e}")
-    })?;
+    git(&repo, &["branch", "-d", &branch])
+        .map_err(|e| format!("分支还有未合入基准的提交，强删会丢掉这些提交。{e}"))?;
     Ok(())
 }
 
@@ -1250,9 +1261,7 @@ fn run_tool(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    cmd.args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("无法启动进程: {e}"))?;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -1276,9 +1285,11 @@ fn run_tool(
             Ok(Some(st)) => {
                 let out = String::from_utf8_lossy(&out_h.join().unwrap_or_default()).into_owned();
                 let err = String::from_utf8_lossy(&err_h.join().unwrap_or_default()).into_owned();
-                let msg = crate::sessions::redact_sensitive_text(
-                    &if err.trim().is_empty() { out } else { err },
-                );
+                let msg = crate::sessions::redact_sensitive_text(&if err.trim().is_empty() {
+                    out
+                } else {
+                    err
+                });
                 return Ok((st.success(), msg));
             }
             Ok(None) => {
@@ -1367,8 +1378,7 @@ fn macos_desktop_app() -> Option<PathBuf> {
 
 fn open_desktop_at(repo_path: &Path, path: &Path) -> Result<CodingOpDto, String> {
     let repo = PathBuf::from(crate::projects::canonical_key(repo_path));
-    let path_c = crate::paths::canonicalize_plain(path)
-        .map_err(|e| format!("路径无效: {e}"))?;
+    let path_c = crate::paths::canonicalize_plain(path).map_err(|e| format!("路径无效: {e}"))?;
     let path_s = crate::paths::strip_verbatim(path_c)
         .to_string_lossy()
         .into_owned();
@@ -1410,17 +1420,12 @@ fn open_desktop_at(repo_path: &Path, path: &Path) -> Result<CodingOpDto, String>
             dto.tried = Some(tried);
             return Ok(dto);
         };
-        let open = crate::agents::resolve_binary("open")
-            .unwrap_or_else(|| PathBuf::from("/usr/bin/open"));
+        let open =
+            crate::agents::resolve_binary("open").unwrap_or_else(|| PathBuf::from("/usr/bin/open"));
         tried.push("macos-open".into());
         let app_s = app.to_string_lossy().into_owned();
         let flag = format!("--cli-open={path_s}");
-        match run_tool(
-            &open,
-            &["-n", &app_s, "--args", &flag],
-            None,
-            T_SHORT,
-        ) {
+        match run_tool(&open, &["-n", &app_s, "--args", &flag], None, T_SHORT) {
             Ok((true, _)) => {
                 let mut dto = op_ok("已用 GitHub Desktop 打开这一目录");
                 dto.method = Some("macos-open".into());
@@ -1459,19 +1464,14 @@ fn open_desktop_at(repo_path: &Path, path: &Path) -> Result<CodingOpDto, String>
 
 fn open_pr_at(repo_path: &str, cwd: &str) -> Result<CodingOpDto, String> {
     let cwd_p = expand(cwd);
-    let cwd_c = crate::paths::canonicalize_plain(&cwd_p)
-        .map_err(|e| format!("路径无效: {e}"))?;
+    let cwd_c = crate::paths::canonicalize_plain(&cwd_p).map_err(|e| format!("路径无效: {e}"))?;
     let cwd_s = crate::paths::strip_verbatim(cwd_c)
         .to_string_lossy()
         .into_owned();
     if !is_git_repo(&expand(&cwd_s)) {
         return Ok(op_err("not_worktree", "不是 git 工作树"));
     }
-    let list = git(
-        &expand(&cwd_s),
-        &["worktree", "list", "--porcelain"],
-    )
-    .unwrap_or_default();
+    let list = git(&expand(&cwd_s), &["worktree", "list", "--porcelain"]).unwrap_or_default();
     let rows = parse_worktree_list(&list);
     if !rows
         .iter()
@@ -1484,7 +1484,10 @@ fn open_pr_at(repo_path: &str, cwd: &str) -> Result<CodingOpDto, String> {
         return Ok(op_err("no_origin", "还没连上远程"));
     };
     if origin.host_kind != "github" {
-        return Ok(op_err("not_github", "只有 github.com 能在这里开 Pull Request"));
+        return Ok(op_err(
+            "not_github",
+            "只有 github.com 能在这里开 Pull Request",
+        ));
     }
     let (has_up, _, _) = upstream_unpushed(&expand(&cwd_s));
     if !has_up {
@@ -1524,7 +1527,11 @@ fn open_pr_at(repo_path: &str, cwd: &str) -> Result<CodingOpDto, String> {
 
 fn pull_at(cwd: &str) -> Result<CodingOpDto, String> {
     match remote_op(cwd, &["pull", "--ff-only"]) {
-        Ok(msg) => Ok(op_ok(if msg.trim().is_empty() { "已拉取".into() } else { msg })),
+        Ok(msg) => Ok(op_ok(if msg.trim().is_empty() {
+            "已拉取".into()
+        } else {
+            msg
+        })),
         Err(e) => {
             let low = e.to_lowercase();
             if low.contains("not possible to fast-forward")
@@ -1661,10 +1668,7 @@ pub async fn coding_add_origin(repo_path: String, url: String) -> Result<CodingO
 }
 
 #[tauri::command]
-pub async fn coding_open_desktop(
-    repo_path: String,
-    path: String,
-) -> Result<CodingOpDto, String> {
+pub async fn coding_open_desktop(repo_path: String, path: String) -> Result<CodingOpDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         open_desktop_at(&expand(&repo_path), &expand(&path))
     })
@@ -1816,30 +1820,18 @@ mod tests {
         assert!(ov2.worktrees.iter().any(|w| w.branch == "feature/login"));
         assert!(ov2.branches.iter().any(|b| b.name == "feature/login"));
 
-        let again = create_with_source(
-            &repo,
-            "feature/login",
-            CreateWorktreeSource::FromBase,
-        )
-        .unwrap();
+        let again =
+            create_with_source(&repo, "feature/login", CreateWorktreeSource::FromBase).unwrap();
         assert!(!again.ok, "{}", again.message);
         assert_eq!(again.code, "branch_exists");
 
         remove_at(&repo, &wt.path, false).unwrap();
-        let again2 = create_with_source(
-            &repo,
-            "feature/login",
-            CreateWorktreeSource::FromBase,
-        )
-        .unwrap();
+        let again2 =
+            create_with_source(&repo, "feature/login", CreateWorktreeSource::FromBase).unwrap();
         assert_eq!(again2.code, "branch_exists");
 
-        let attached = create_with_source(
-            &repo,
-            "feature/login",
-            CreateWorktreeSource::Local,
-        )
-        .unwrap();
+        let attached =
+            create_with_source(&repo, "feature/login", CreateWorktreeSource::Local).unwrap();
         assert!(attached.ok, "{}", attached.message);
         let path = attached.worktree.as_ref().unwrap().path.clone();
 

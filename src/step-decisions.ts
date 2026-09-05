@@ -158,6 +158,32 @@ export function unansweredDecisions(
   return decisions.filter((d) => !answered.has(d.q.trim()));
 }
 
+/** 开工门禁只认结构化答案，不从讨论种子或推荐选项推断用户授权。 */
+export function decisionGate(
+  step: { decisionMode?: string; decisions?: StepDecisionDto[] },
+  draft: string,
+) {
+  const mode = step.decisionMode === "hard_pause" || step.decisionMode === "soft_pause"
+    ? step.decisionMode : "auto_continue";
+  const missing = unansweredDecisions(step.decisions ?? [], parseDecisions(draft)).map((d) => d.q.trim());
+  return {
+    mode,
+    missing,
+    blocked: mode === "hard_pause" && missing.length > 0,
+    needsAck: mode === "soft_pause" && missing.length > 0,
+  };
+}
+
+export function decisionPolicyText(mode: string | undefined): string {
+  if (mode === "hard_pause") {
+    return "hard_pause：遇到新的待拍板问题，写入 .ccode/help-wanted.md 并暂停本步骤，等待人明确答复后继续；不得自行采用推荐值或「未回复即继续」。";
+  }
+  if (mode === "soft_pause") {
+    return "soft_pause：遇到待拍板问题，写入 .ccode/help-wanted.md 并暂停受影响的操作；只可推进无依赖、可逆的部分，等待人明确答复后恢复受影响的操作。";
+  }
+  return "auto_continue：一般问题写入 .ccode/help-wanted.md 并附可逆兜底方案，可按兜底继续；涉及隐私、伦理、合规、主指标或不可逆操作时必须等待人明确授权，不得默认同意。";
+}
+
 /** 「全部用推荐值」要写入的答案：未答项取首个选项（模板里首项即推荐值）；
  *  已答的一律不动——用户显式选过的不该被一键覆盖 */
 export function recommendedAnswers(

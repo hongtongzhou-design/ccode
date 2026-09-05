@@ -27,7 +27,7 @@ const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct UsageEvent {
-    pub day: String, // 本机时区日期
+    pub day: String,   // 本机时区日期
     pub model: String, // 未知为 ""
     pub input: u64,
     pub output: u64,
@@ -227,7 +227,11 @@ where
         };
         let num = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
         out.push(UsageEvent {
-            day: v.get("time").and_then(|t| t.as_i64()).map(day_of_ms).unwrap_or_default(),
+            day: v
+                .get("time")
+                .and_then(|t| t.as_i64())
+                .map(day_of_ms)
+                .unwrap_or_default(),
             model: get_str(&v, "model").unwrap_or("").to_string(),
             input: num("inputOther"),
             output: num("output"),
@@ -398,8 +402,8 @@ fn opencode_events(db_path: &Path, session_id: &str) -> Vec<UsageEvent> {
     };
     // 逐行流式消费：message.data 可能很大，整会话一次性入内存在长会话下峰值过高。
     // 列级防御沿用 SELECT * + 按列名取索引（drizzle 迁移频繁，缺列给默认而不是报错）
-    let Ok(mut stmt) = conn
-        .prepare("SELECT * FROM message WHERE session_id=? ORDER BY time_created ASC")
+    let Ok(mut stmt) =
+        conn.prepare("SELECT * FROM message WHERE session_id=? ORDER BY time_created ASC")
     else {
         return Vec::new();
     };
@@ -416,11 +420,13 @@ fn opencode_events(db_path: &Path, session_id: &str) -> Vec<UsageEvent> {
         let data = row.get::<_, String>(data_idx).unwrap_or_default();
         // 与旧 DbRow::as_i64 同口径：Integer 直取，Real 截断，其余视为缺失
         let time_created = time_idx.and_then(|i| {
-            row.get::<_, rusqlite::types::Value>(i).ok().and_then(|v| match v {
-                rusqlite::types::Value::Integer(n) => Some(n),
-                rusqlite::types::Value::Real(f) => Some(f as i64),
-                _ => None,
-            })
+            row.get::<_, rusqlite::types::Value>(i)
+                .ok()
+                .and_then(|v| match v {
+                    rusqlite::types::Value::Integer(n) => Some(n),
+                    rusqlite::types::Value::Real(f) => Some(f as i64),
+                    _ => None,
+                })
         });
         let Ok(v) = serde_json::from_str::<Value>(&data) else {
             continue;
@@ -433,11 +439,20 @@ fn opencode_events(db_path: &Path, session_id: &str) -> Vec<UsageEvent> {
         };
         let num = |k: &str| t.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
         let cache = t.get("cache");
-        let cnum = |k: &str| cache.and_then(|c| c.get(k)).and_then(|x| x.as_i64()).unwrap_or(0);
+        let cnum = |k: &str| {
+            cache
+                .and_then(|c| c.get(k))
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0)
+        };
         // modelID 为主；model 也可能是 {providerID,modelID} 对象
         let model = get_str(&v, "modelID")
             .map(String::from)
-            .or_else(|| v.get("model").and_then(|m| get_str(m, "modelID")).map(String::from))
+            .or_else(|| {
+                v.get("model")
+                    .and_then(|m| get_str(m, "modelID"))
+                    .map(String::from)
+            })
             .unwrap_or_default();
         out.push(UsageEvent {
             day: time_created.map(day_of_ms).unwrap_or_default(),
@@ -533,8 +548,20 @@ pub(crate) struct DailyRow {
 /// 按 (day, agent, model, project, session, workspace, source, internal, official) 聚合；无 usage 事件的会话不产生行
 pub(crate) fn aggregate(contribs: &[SessionContrib]) -> Vec<DailyRow> {
     #[allow(clippy::type_complexity)]
-    let mut map: HashMap<(String, String, String, String, String, String, String, bool, bool), DailyRow> =
-        HashMap::new();
+    let mut map: HashMap<
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            bool,
+        ),
+        DailyRow,
+    > = HashMap::new();
     for c in contribs {
         for e in &c.events {
             if e.day.is_empty() {
@@ -726,8 +753,8 @@ pub(crate) fn is_ccode_ai_temp_cwd(path: &str) -> bool {
 
 pub(crate) fn normalize_provenance_path(path: &str) -> String {
     let expanded = crate::sessions::expand_tilde(path);
-    let resolved = std::fs::canonicalize(&expanded)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&expanded));
+    let resolved =
+        std::fs::canonicalize(&expanded).unwrap_or_else(|_| std::path::PathBuf::from(&expanded));
     let mut normalized = resolved.to_string_lossy().replace('\\', "/");
     // canonicalize 在 Windows 返回 \\?\ 前缀的 verbatim 形式（替换分隔符后为 //?/），
     // 登记/查询两侧统一剥离再归一化；非 Windows 平台该前缀不会出现，剥离是恒等操作
@@ -799,8 +826,12 @@ fn session_provenance(conn: &Connection, agent: &str, project_path: &str) -> (St
 }
 
 fn meta_get(conn: &Connection, key: &str) -> Option<String> {
-    conn.query_row("SELECT value FROM usage_meta WHERE key=?1", params![key], |r| r.get(0))
-        .ok()
+    conn.query_row(
+        "SELECT value FROM usage_meta WHERE key=?1",
+        params![key],
+        |r| r.get(0),
+    )
+    .ok()
 }
 
 fn meta_set(conn: &Connection, key: &str, value: &str) {
@@ -946,7 +977,9 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
         let mut stmt = conn
             .prepare("SELECT key FROM usage_meta WHERE key LIKE 'seen:%'")
             .map_err(|e| e.to_string())?;
-        let keys = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        let keys = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
         for k in keys.flatten() {
             if !seen.contains(&k) {
                 stale.push(k);
@@ -964,7 +997,9 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
     }
     meta_set(&conn, "initialized", &crate::sessions::now_iso());
     let rows: usize = conn
-        .query_row("SELECT COUNT(*) FROM usage_daily", [], |r| r.get::<_, i64>(0))
+        .query_row("SELECT COUNT(*) FROM usage_daily", [], |r| {
+            r.get::<_, i64>(0)
+        })
         .unwrap_or(0) as usize;
     Ok(UsageBuildResult {
         sessions_indexed: indexed,
@@ -1142,7 +1177,9 @@ struct TokenAcc {
 /// cache_read 按输入价 1 折算；cache_write 按输入全价（spec 未定义，取保守全价）
 fn cost_of(acc: &TokenAcc, price: (f64, f64)) -> f64 {
     let (ir, or_) = price;
-    (acc.input as f64 * ir + acc.output as f64 * or_ + acc.cache_read as f64 * ir * 0.1
+    (acc.input as f64 * ir
+        + acc.output as f64 * or_
+        + acc.cache_read as f64 * ir * 0.1
         + acc.cache_write as f64 * ir)
         / 1_000_000.0
 }
@@ -1249,11 +1286,7 @@ type StoredUsageRow = (
     bool,   // official：官方账号（订阅制）用量，不按量计费
 );
 
-fn build_stats(
-    rows: Vec<StoredUsageRow>,
-    table: &PriceChain,
-    rate_usd_cny: f64,
-) -> UsageStatsDto {
+fn build_stats(rows: Vec<StoredUsageRow>, table: &PriceChain, rate_usd_cny: f64) -> UsageStatsDto {
     let mut cards = Bucket::default();
     let mut cache_savings = 0.0;
     let mut cache_savings_any = false;
@@ -1266,7 +1299,9 @@ fn build_stats(
     // 按天成桶（v3.88 趋势线）：区间总数看不出「这周比上周多花多少」，
     // 而数据本来就是按天存的，聚合一层即可，不引图表库
     let mut by_day: std::collections::BTreeMap<String, Bucket> = Default::default();
-    for (_day, agent, model, project, sid, i, o, cr, cw, source, internal, workspace, official) in rows {
+    for (_day, agent, model, project, sid, i, o, cr, cw, source, internal, workspace, official) in
+        rows
+    {
         let acc = TokenAcc {
             input: i as u64,
             output: o as u64,
@@ -1342,7 +1377,11 @@ fn build_stats(
         .map(|((model, source, internal), b)| {
             let (cost_usd, cost_partial) = b.cost(table);
             UsageModelRowDto {
-                model: if model.is_empty() { "(未知)".into() } else { model },
+                model: if model.is_empty() {
+                    "(未知)".into()
+                } else {
+                    model
+                },
                 input: b.tokens.input,
                 output: b.tokens.output,
                 cost_usd,
@@ -1374,9 +1413,7 @@ fn build_stats(
             }
         })
         .collect();
-    workspace_rows.sort_by(|a, b| {
-        (b.tokens_in + b.tokens_out).cmp(&(a.tokens_in + a.tokens_out))
-    });
+    workspace_rows.sort_by(|a, b| (b.tokens_in + b.tokens_out).cmp(&(a.tokens_in + a.tokens_out)));
     workspace_rows.truncate(LIST_CAP);
     // 趋势序列：按日期升序，日期字符串定宽（YYYY-MM-DD）故 BTreeMap 顺序即时间序
     let daily: Vec<UsageDayRowDto> = by_day
@@ -1437,14 +1474,30 @@ fn query_stats(range: &str) -> Result<UsageStatsDto, String> {
     let rows: Vec<StoredUsageRow> = {
         let map_row = |r: &rusqlite::Row| {
             Ok((
-                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
-                r.get::<_, i64>(10)? != 0, r.get(11)?, r.get::<_, i64>(12)? != 0,
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get::<_, i64>(10)? != 0,
+                r.get(11)?,
+                r.get::<_, i64>(12)? != 0,
             ))
         };
         let collected: rusqlite::Result<Vec<_>> = match &cutoff {
-            Some(c) => stmt.query_map(params![c], map_row).map_err(|e| e.to_string())?.collect(),
-            None => stmt.query_map([], map_row).map_err(|e| e.to_string())?.collect(),
+            Some(c) => stmt
+                .query_map(params![c], map_row)
+                .map_err(|e| e.to_string())?
+                .collect(),
+            None => stmt
+                .query_map([], map_row)
+                .map_err(|e| e.to_string())?
+                .collect(),
         };
         collected.map_err(|e| e.to_string())?
     };
@@ -1699,7 +1752,10 @@ type TrendQueryRow = (
     bool, // internal
 );
 
-fn select_daily_rows(conn: &Connection, cutoff: Option<&str>) -> Result<Vec<TrendQueryRow>, String> {
+fn select_daily_rows(
+    conn: &Connection,
+    cutoff: Option<&str>,
+) -> Result<Vec<TrendQueryRow>, String> {
     let sql = if cutoff.is_some() {
         "SELECT day, agent, model, project_path, session_id, input, output, cache_read, cache_write, official, internal
          FROM usage_daily WHERE day >= ?1"
@@ -1913,13 +1969,7 @@ pub async fn usage_trend(range: String) -> Result<UsageTrendDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = usage_db()?;
         let (table, rate) = pricing_table_and_rate();
-        usage_trend_from(
-            &conn,
-            &range,
-            Local::now().date_naive(),
-            &table,
-            rate,
-        )
+        usage_trend_from(&conn, &range, Local::now().date_naive(), &table, rate)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1962,7 +2012,11 @@ mod tests {
                 session_id: "s1".into(),
                 project_path: "/p".into(),
                 workspace: String::new(),
-                events: vec![ev("2026-07-01", "gpt-5", 10, 5), ev("2026-07-01", "gpt-5", 20, 5), ev("2026-07-02", "gpt-5", 1, 1)],
+                events: vec![
+                    ev("2026-07-01", "gpt-5", 10, 5),
+                    ev("2026-07-01", "gpt-5", 20, 5),
+                    ev("2026-07-02", "gpt-5", 1, 1),
+                ],
             },
             SessionContrib {
                 agent: "codex".into(),
@@ -1981,7 +2035,10 @@ mod tests {
         ];
         let rows = aggregate(&contribs);
         assert_eq!(rows.len(), 3, "(d1,s1)+(d1,s2)+(d2,s1) 三行");
-        let d1s1 = rows.iter().find(|r| r.day == "2026-07-01" && r.session_id == "s1").unwrap();
+        let d1s1 = rows
+            .iter()
+            .find(|r| r.day == "2026-07-01" && r.session_id == "s1")
+            .unwrap();
         assert_eq!((d1s1.input, d1s1.output), (30, 10));
         let d2 = rows.iter().find(|r| r.day == "2026-07-02").unwrap();
         assert_eq!((d2.input, d2.session_id.as_str()), (1, "s1"));
@@ -2031,19 +2088,37 @@ mod tests {
             .unwrap();
             let rows = [
                 ("m1", "s1", 1785307071000i64, r#"{"role":"user"}"#),
-                ("m2", "s1", 1785307072000, r#"{"role":"assistant","modelID":"grok-4","tokens":{"input":10,"output":5,"reasoning":2,"cache":{"read":3,"write":1}}}"#),
-                ("m3", "s2", 1785307073000, r#"{"role":"assistant","tokens":{"input":99,"output":9}}"#),
+                (
+                    "m2",
+                    "s1",
+                    1785307072000,
+                    r#"{"role":"assistant","modelID":"grok-4","tokens":{"input":10,"output":5,"reasoning":2,"cache":{"read":3,"write":1}}}"#,
+                ),
+                (
+                    "m3",
+                    "s2",
+                    1785307073000,
+                    r#"{"role":"assistant","tokens":{"input":99,"output":9}}"#,
+                ),
             ];
             for (id, sid, t, data) in rows {
-                conn.execute("INSERT INTO message VALUES(?1,?2,?3,?4)", params![id, sid, t, data])
-                    .unwrap();
+                conn.execute(
+                    "INSERT INTO message VALUES(?1,?2,?3,?4)",
+                    params![id, sid, t, data],
+                )
+                .unwrap();
             }
         }
         let events = opencode_events(&db, "s1");
         assert_eq!(events.len(), 1, "只取本会话的 assistant 行");
         assert_eq!(events[0].day, day_of_ms(1785307072000));
         assert_eq!(
-            (events[0].input, events[0].output, events[0].cache_read, events[0].cache_write),
+            (
+                events[0].input,
+                events[0].output,
+                events[0].cache_read,
+                events[0].cache_write
+            ),
             (10, 7, 3, 1),
             "reasoning 计入输出侧"
         );
@@ -2058,7 +2133,11 @@ mod tests {
         let p = dir.join("pricing.json");
         std::fs::write(&p, r#"{"": [9.0, 9.0], "relay-y": [0.5, 0.5]}"#).unwrap();
         let table = load_pricing(Some(&p));
-        assert_eq!(price_of("totally-unknown-model", &table), None, "空前缀不得匹配一切模型");
+        assert_eq!(
+            price_of("totally-unknown-model", &table),
+            None,
+            "空前缀不得匹配一切模型"
+        );
         assert_eq!(price_of("relay-y-x", &table), Some((0.5, 0.5)));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2083,12 +2162,16 @@ mod tests {
         assert!(columns.contains("workspace"), "v5 起补工作区归因列");
         assert!(columns.contains("official"), "v6 起补官方账号标记列");
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM usage_daily", [], |row| row.get::<_, i64>(0))
+            conn.query_row("SELECT COUNT(*) FROM usage_daily", [], |row| row
+                .get::<_, i64>(0))
                 .unwrap(),
             0,
             "没有来源证据的旧索引必须重建"
         );
-        assert_eq!(meta_get(&conn, "schema_version").as_deref(), Some(USAGE_SCHEMA_VERSION));
+        assert_eq!(
+            meta_get(&conn, "schema_version").as_deref(),
+            Some(USAGE_SCHEMA_VERSION)
+        );
         assert!(meta_get(&conn, "initialized").is_none());
     }
 
@@ -2320,9 +2403,18 @@ mod tests {
         assert!(stats
             .by_project
             .iter()
-            .any(|row| row.project_path == "/tmp/user-task" && !row.internal && row.source == SOURCE_CLI));
-        assert!(stats.by_project.iter().any(|row| row.internal && row.source == SOURCE_CCODE_AI));
-        assert_eq!(stats.by_model.len(), 2, "相同模型的普通与内部用量不得混成一行");
+            .any(|row| row.project_path == "/tmp/user-task"
+                && !row.internal
+                && row.source == SOURCE_CLI));
+        assert!(stats
+            .by_project
+            .iter()
+            .any(|row| row.internal && row.source == SOURCE_CCODE_AI));
+        assert_eq!(
+            stats.by_model.len(),
+            2,
+            "相同模型的普通与内部用量不得混成一行"
+        );
         assert!(stats.by_model.iter().any(|row| !row.internal));
         assert!(stats.by_model.iter().any(|row| row.internal));
     }
@@ -2358,7 +2450,15 @@ mod tests {
     fn workspace_attribution_groups_and_keeps_project_dimension() {
         let rows: Vec<StoredUsageRow> = vec![
             // 工作区会话（扫描已把项目路径改写为真实仓库，workspace 列记工作区名）
-            ws_row("/home/u/code/myrepo", "s1", "gpt-5", 100, 10, false, "feat-x"),
+            ws_row(
+                "/home/u/code/myrepo",
+                "s1",
+                "gpt-5",
+                100,
+                10,
+                false,
+                "feat-x",
+            ),
             ws_row("/home/u/code/myrepo", "s2", "gpt-5", 50, 5, false, "feat-x"),
             // 同名工作区在另一个仓库下：各自成行
             ws_row("/home/u/code/other", "s3", "gpt-5", 30, 3, false, "feat-x"),
@@ -2428,30 +2528,73 @@ mod tests {
     fn pricing_longest_prefix_and_unknown() {
         let table = load_pricing(None);
         assert_eq!(price_of("gpt-5-codex-mini", &table), Some((1.25, 10.0)));
-        assert_eq!(price_of("claude-sonnet-4-5", &table), Some((3.0, 15.0)), "旧代 Sonnet 4.x 价");
-        assert_eq!(price_of("claude-sonnet-5", &table), Some((2.0, 10.0)), "Sonnet 5 起降价");
-        assert_eq!(price_of("claude-opus-4-1-20250805", &table), Some((15.0, 75.0)), "仅 Opus 4.1 为旧高价");
+        assert_eq!(
+            price_of("claude-sonnet-4-5", &table),
+            Some((3.0, 15.0)),
+            "旧代 Sonnet 4.x 价"
+        );
+        assert_eq!(
+            price_of("claude-sonnet-5", &table),
+            Some((2.0, 10.0)),
+            "Sonnet 5 起降价"
+        );
+        assert_eq!(
+            price_of("claude-opus-4-1-20250805", &table),
+            Some((15.0, 75.0)),
+            "仅 Opus 4.1 为旧高价"
+        );
         assert_eq!(price_of("claude-opus-5", &table), Some((5.0, 25.0)));
         assert_eq!(price_of("some-relay-model", &table), None);
         assert_eq!(price_of("", &table), None, "未知模型无价格");
         // 扩充的中转/聚合模型走官方价
-        assert_eq!(price_of("grok-4.5", &table), Some((2.0, 6.0)), "grok-4.5 新代价，不再落 grok-4 旧价");
-        assert_eq!(price_of("grok-4-0709", &table), Some((3.0, 15.0)), "初代 grok-4 保留旧价");
-        assert_eq!(price_of("grok-4.1-fast-mini", &table), Some((0.2, 0.5)), "更长前缀优先于 grok-4");
+        assert_eq!(
+            price_of("grok-4.5", &table),
+            Some((2.0, 6.0)),
+            "grok-4.5 新代价，不再落 grok-4 旧价"
+        );
+        assert_eq!(
+            price_of("grok-4-0709", &table),
+            Some((3.0, 15.0)),
+            "初代 grok-4 保留旧价"
+        );
+        assert_eq!(
+            price_of("grok-4.1-fast-mini", &table),
+            Some((0.2, 0.5)),
+            "更长前缀优先于 grok-4"
+        );
         assert_eq!(price_of("grok-3-mini-128k", &table), Some((0.3, 0.5)));
         assert_eq!(price_of("grok-code-fast-1", &table), Some((0.2, 1.5)));
         assert_eq!(price_of("glm-4.6-air", &table), Some((0.6, 2.2)));
-        assert_eq!(price_of("glm-5.2", &table), Some((1.4, 4.4)), "glm-5 新代官方价已出");
-        assert_eq!(price_of("qwen3-coder-plus", &table), Some((1.0, 5.0)), "qwen3-coder 优先于 qwen3");
+        assert_eq!(
+            price_of("glm-5.2", &table),
+            Some((1.4, 4.4)),
+            "glm-5 新代官方价已出"
+        );
+        assert_eq!(
+            price_of("qwen3-coder-plus", &table),
+            Some((1.0, 5.0)),
+            "qwen3-coder 优先于 qwen3"
+        );
         assert_eq!(price_of("qwen3-max", &table), Some((1.2, 6.0)));
         assert_eq!(price_of("moonshot-v1-8k", &table), Some((0.6, 3.0)));
         assert_eq!(price_of("gemini-3-pro-preview", &table), Some((2.0, 12.0)));
-        assert_eq!(price_of("gemini-3.6-flash-lite", &table), Some((0.75, 3.75)), "3.6-flash 推广价");
-        assert_eq!(price_of("gemini-2.5-pro", &table), Some((1.25, 10.0)), "旧条目保留");
+        assert_eq!(
+            price_of("gemini-3.6-flash-lite", &table),
+            Some((0.75, 3.75)),
+            "3.6-flash 推广价"
+        );
+        assert_eq!(
+            price_of("gemini-2.5-pro", &table),
+            Some((1.25, 10.0)),
+            "旧条目保留"
+        );
         // 新代条目
         assert_eq!(price_of("claude-fable-2", &table), Some((10.0, 50.0)));
         assert_eq!(price_of("gemini-3.5-flash-tts", &table), Some((1.5, 9.0)));
-        assert_eq!(price_of("gemini-3.1-pro-preview", &table), Some((2.0, 12.0)));
+        assert_eq!(
+            price_of("gemini-3.1-pro-preview", &table),
+            Some((2.0, 12.0))
+        );
         assert_eq!(price_of("kimi-k2.6", &table), Some((0.95, 4.0)));
         assert_eq!(price_of("deepseek-v4-pro-0813", &table), Some((1.32, 3.96)));
     }
@@ -2462,27 +2605,50 @@ mod tests {
         // 同层内最长前缀优先
         let chain: PriceChain = [
             vec![("m-x".into(), (1.0, 1.0)), ("m-y-pro".into(), (1.0, 1.0))], // 内置
-            vec![("m-x".into(), (2.0, 2.0))], // 公共能力库
-            vec![("m-x".into(), (3.0, 3.0)), ("m-y".into(), (9.0, 9.0))], // 用户覆盖
+            vec![("m-x".into(), (2.0, 2.0))],                                 // 公共能力库
+            vec![("m-x".into(), (3.0, 3.0)), ("m-y".into(), (9.0, 9.0))],     // 用户覆盖
         ];
-        assert_eq!(price_of("m-x-pro", &chain), Some((3.0, 3.0)), "用户覆盖 > 公共库 > 内置");
-        assert_eq!(price_of("m-y-pro", &chain), Some((9.0, 9.0)), "高层短前缀覆盖低层长前缀");
+        assert_eq!(
+            price_of("m-x-pro", &chain),
+            Some((3.0, 3.0)),
+            "用户覆盖 > 公共库 > 内置"
+        );
+        assert_eq!(
+            price_of("m-y-pro", &chain),
+            Some((9.0, 9.0)),
+            "高层短前缀覆盖低层长前缀"
+        );
         let chain2: PriceChain = [
             vec![("m-z".into(), (1.0, 1.0)), ("m-z-pro".into(), (2.0, 2.0))],
             vec![],
             vec![],
         ];
-        assert_eq!(price_of("m-z-pro", &chain2), Some((2.0, 2.0)), "同层最长前缀优先");
+        assert_eq!(
+            price_of("m-z-pro", &chain2),
+            Some((2.0, 2.0)),
+            "同层最长前缀优先"
+        );
     }
 
     #[test]
     fn pricing_strips_provider_prefix() {
         let table = load_pricing(None);
         // 中转/聚合的 provider 前缀：按最后一个 / 之后的末段匹配
-        assert_eq!(price_of("accounts/fireworks/models/glm-5p2", &table), Some((1.4, 4.4)), "glm 前缀命中");
+        assert_eq!(
+            price_of("accounts/fireworks/models/glm-5p2", &table),
+            Some((1.4, 4.4)),
+            "glm 前缀命中"
+        );
         assert_eq!(price_of("zetatechs/kimi-k3", &table), Some((3.0, 15.0)));
-        assert_eq!(price_of("openrouter/claude-sonnet-4", &table), Some((3.0, 15.0)));
-        assert_eq!(price_of("relay/mystery-x", &table), None, "末段不明依然不明价");
+        assert_eq!(
+            price_of("openrouter/claude-sonnet-4", &table),
+            Some((3.0, 15.0))
+        );
+        assert_eq!(
+            price_of("relay/mystery-x", &table),
+            None,
+            "末段不明依然不明价"
+        );
     }
 
     #[test]
@@ -2493,11 +2659,19 @@ mod tests {
         let p = dir.join("pricing.json");
         std::fs::write(&p, r#"{"_rate": 7.05, "claude-sonnet": [1.0, 5.0]}"#).unwrap();
         assert_eq!(load_rate_with(None, Some(&p)), 7.05, "_rate 键覆盖默认汇率");
-        assert_eq!(load_rate_with(Some(7.3), Some(&p)), 7.3, "settings.json 优先于 pricing.json _rate");
+        assert_eq!(
+            load_rate_with(Some(7.3), Some(&p)),
+            7.3,
+            "settings.json 优先于 pricing.json _rate"
+        );
         assert_eq!(load_rate_with(Some(7.3), None), 7.3);
         std::fs::write(&p, r#"{"_rate": -1}"#).unwrap();
         assert_eq!(load_rate_with(None, Some(&p)), 7.2, "非法 _rate 回落默认");
-        assert_eq!(load_rate_with(Some(-2.0), None), 7.2, "非法 settings 汇率同样回落");
+        assert_eq!(
+            load_rate_with(Some(-2.0), None),
+            7.2,
+            "非法 settings 汇率同样回落"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2506,21 +2680,50 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ccode-usage-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("pricing.json");
-        std::fs::write(&p, r#"{"claude-sonnet": [1.0, 5.0], "relay-x": [0.1, 0.2]}"#).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"claude-sonnet": [1.0, 5.0], "relay-x": [0.1, 0.2]}"#,
+        )
+        .unwrap();
         let table = load_pricing(Some(&p));
-        assert_eq!(price_of("claude-sonnet-4", &table), Some((1.0, 5.0)), "覆盖内置（含低层更长前缀的旧代价）");
-        assert_eq!(price_of("relay-x-pro", &table), Some((0.1, 0.2)), "新增自定义前缀");
-        assert_eq!(price_of("claude-opus-4-1", &table), Some((15.0, 75.0)), "内置旧代价保留");
-        assert_eq!(price_of("claude-opus-4-5", &table), Some((5.0, 25.0)), "内置新代价保留");
+        assert_eq!(
+            price_of("claude-sonnet-4", &table),
+            Some((1.0, 5.0)),
+            "覆盖内置（含低层更长前缀的旧代价）"
+        );
+        assert_eq!(
+            price_of("relay-x-pro", &table),
+            Some((0.1, 0.2)),
+            "新增自定义前缀"
+        );
+        assert_eq!(
+            price_of("claude-opus-4-1", &table),
+            Some((15.0, 75.0)),
+            "内置旧代价保留"
+        );
+        assert_eq!(
+            price_of("claude-opus-4-5", &table),
+            Some((5.0, 25.0)),
+            "内置新代价保留"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn range_cutoff_days() {
         let today = NaiveDate::from_ymd_opt(2026, 7, 30).unwrap();
-        assert_eq!(cutoff_day_from("today", today).as_deref(), Some("2026-07-30"));
-        assert_eq!(cutoff_day_from("week", today).as_deref(), Some("2026-07-24"));
-        assert_eq!(cutoff_day_from("month", today).as_deref(), Some("2026-07-01"));
+        assert_eq!(
+            cutoff_day_from("today", today).as_deref(),
+            Some("2026-07-30")
+        );
+        assert_eq!(
+            cutoff_day_from("week", today).as_deref(),
+            Some("2026-07-24")
+        );
+        assert_eq!(
+            cutoff_day_from("month", today).as_deref(),
+            Some("2026-07-01")
+        );
         assert_eq!(cutoff_day_from("all", today), None);
     }
 
@@ -2541,7 +2744,15 @@ mod tests {
              input, output, cache_read, cache_write, official)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0,?9)",
             rusqlite::params![
-                day, agent, model, project, sid, input, output, cache_read, i64::from(official)
+                day,
+                agent,
+                model,
+                project,
+                sid,
+                input,
+                output,
+                cache_read,
+                i64::from(official)
             ],
         )
         .unwrap();
@@ -2556,7 +2767,10 @@ mod tests {
         assert_eq!(dto.days.len(), 30, "近 30 天含 today");
         assert_eq!(dto.days[0].day, "2026-02-14");
         assert_eq!(dto.days[29].day, "2026-03-15");
-        assert!(dto.days.iter().all(|d| !d.has_usage && d.cost_usd == Some(0.0)));
+        assert!(dto
+            .days
+            .iter()
+            .all(|d| !d.has_usage && d.cost_usd == Some(0.0)));
     }
 
     #[test]
@@ -2580,19 +2794,49 @@ mod tests {
         ensure_usage_schema(&conn).unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 3, 5).unwrap();
         insert_daily(
-            &conn, "2026-02-28", "codex", "gpt-5", "/p", "s-api", 1_000_000, 0, 0, false,
+            &conn,
+            "2026-02-28",
+            "codex",
+            "gpt-5",
+            "/p",
+            "s-api",
+            1_000_000,
+            0,
+            0,
+            false,
         );
         insert_daily(
-            &conn, "2026-02-28", "gemini", "gemini-3-pro", "/p", "s-off", 9_000_000, 0, 0, true,
+            &conn,
+            "2026-02-28",
+            "gemini",
+            "gemini-3-pro",
+            "/p",
+            "s-off",
+            9_000_000,
+            0,
+            0,
+            true,
         );
         insert_daily(
-            &conn, "2026-03-05", "codex", "mystery-x", "/p", "s-unk", 100, 10, 0, false,
+            &conn,
+            "2026-03-05",
+            "codex",
+            "mystery-x",
+            "/p",
+            "s-unk",
+            100,
+            10,
+            0,
+            false,
         );
         let dto = usage_trend_from(&conn, "month", today, &load_pricing(None), 7.2).unwrap();
         assert_eq!(dto.days.first().map(|d| d.day.as_str()), Some("2026-02-04"));
         let feb = dto.days.iter().find(|d| d.day == "2026-02-28").unwrap();
         assert!(feb.has_usage);
-        assert!(feb.cost_usd.unwrap() > 0.0, "官方账号那行不计费，API 行仍计价");
+        assert!(
+            feb.cost_usd.unwrap() > 0.0,
+            "官方账号那行不计费，API 行仍计价"
+        );
         let mar = dto.days.iter().find(|d| d.day == "2026-03-05").unwrap();
         assert!(mar.has_usage);
         assert_eq!(mar.cost_usd, None, "当天只有未计价模型 → ~ 而不是 0");
@@ -2617,11 +2861,66 @@ mod tests {
         )
         .unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 8, 30).unwrap();
-        insert_daily(&conn, "2026-08-20", "codex", "gpt-5", "/proj/a", "s-big", 2_000_000, 0, 0, false);
-        insert_daily(&conn, "2026-08-21", "codex", "gpt-5", "/proj/a", "s-small", 100_000, 0, 0, false);
-        insert_daily(&conn, "2026-08-22", "gemini", "gemini-3-pro", "/proj/b", "s-off", 9_000_000, 0, 0, true);
-        insert_daily(&conn, "2026-08-23", "codex", "mystery-x", "/proj/c", "s-unk", 9_000_000, 0, 0, false);
-        insert_daily(&conn, "2026-07-01", "codex", "gpt-5", "/proj/a", "s-old", 9_000_000, 0, 0, false);
+        insert_daily(
+            &conn,
+            "2026-08-20",
+            "codex",
+            "gpt-5",
+            "/proj/a",
+            "s-big",
+            2_000_000,
+            0,
+            0,
+            false,
+        );
+        insert_daily(
+            &conn,
+            "2026-08-21",
+            "codex",
+            "gpt-5",
+            "/proj/a",
+            "s-small",
+            100_000,
+            0,
+            0,
+            false,
+        );
+        insert_daily(
+            &conn,
+            "2026-08-22",
+            "gemini",
+            "gemini-3-pro",
+            "/proj/b",
+            "s-off",
+            9_000_000,
+            0,
+            0,
+            true,
+        );
+        insert_daily(
+            &conn,
+            "2026-08-23",
+            "codex",
+            "mystery-x",
+            "/proj/c",
+            "s-unk",
+            9_000_000,
+            0,
+            0,
+            false,
+        );
+        insert_daily(
+            &conn,
+            "2026-07-01",
+            "codex",
+            "gpt-5",
+            "/proj/a",
+            "s-old",
+            9_000_000,
+            0,
+            0,
+            false,
+        );
         let top = top_sessions_from(&conn, "month", today, &load_pricing(None)).unwrap();
         assert_eq!(top.len(), 2, "官方与未计价不进榜，区间外的旧会话也不进");
         assert_eq!(top[0].session_id, "s-big");
@@ -2636,7 +2935,16 @@ mod tests {
         ensure_usage_schema(&conn).unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 8, 30).unwrap();
         insert_daily(
-            &conn, "2026-08-20", "codex", "gpt-5", "/p", "s-user", 100_000, 0, 0, false,
+            &conn,
+            "2026-08-20",
+            "codex",
+            "gpt-5",
+            "/p",
+            "s-user",
+            100_000,
+            0,
+            0,
+            false,
         );
         conn.execute(
             "INSERT INTO usage_daily(day, agent, model, project_path, session_id,
@@ -2674,7 +2982,16 @@ mod tests {
         .unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 8, 30).unwrap();
         insert_daily(
-            &conn, "2026-08-20", "codex", "gpt-5", "/p", "s-leak", 1_000_000, 0, 0, false,
+            &conn,
+            "2026-08-20",
+            "codex",
+            "gpt-5",
+            "/p",
+            "s-leak",
+            1_000_000,
+            0,
+            0,
+            false,
         );
         let top = top_sessions_from(&conn, "month", today, &load_pricing(None)).unwrap();
         let title = top[0].title.as_deref().unwrap();
@@ -2688,10 +3005,28 @@ mod tests {
         ensure_usage_schema(&conn).unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 8, 30).unwrap();
         insert_daily(
-            &conn, "2026-08-20", "codex", "gpt-5", "/p", "s-b", 1_000_000, 0, 0, false,
+            &conn,
+            "2026-08-20",
+            "codex",
+            "gpt-5",
+            "/p",
+            "s-b",
+            1_000_000,
+            0,
+            0,
+            false,
         );
         insert_daily(
-            &conn, "2026-08-21", "codex", "gpt-5", "/p", "s-a", 1_000_000, 0, 0, false,
+            &conn,
+            "2026-08-21",
+            "codex",
+            "gpt-5",
+            "/p",
+            "s-a",
+            1_000_000,
+            0,
+            0,
+            false,
         );
         let top = top_sessions_from(&conn, "month", today, &load_pricing(None)).unwrap();
         assert_eq!(top.len(), 2);
@@ -2760,16 +3095,43 @@ mod tests {
         let table = load_pricing(None);
         // 全计价 → 精确费用，非 partial
         let mut b = Bucket::default();
-        b.add("gpt-5", "s1", TokenAcc { input: 1_000_000, output: 1_000_000, cache_read: 0, cache_write: 0 });
+        b.add(
+            "gpt-5",
+            "s1",
+            TokenAcc {
+                input: 1_000_000,
+                output: 1_000_000,
+                cache_read: 0,
+                cache_write: 0,
+            },
+        );
         assert_eq!(b.cost(&table), (Some(1.25 + 10.0), false));
         // 混有不明价 → 只算已计价份额，partial=true
-        b.add("mystery", "s2", TokenAcc { input: 5, output: 5, cache_read: 0, cache_write: 0 });
+        b.add(
+            "mystery",
+            "s2",
+            TokenAcc {
+                input: 5,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+            },
+        );
         let (cost, partial) = b.cost(&table);
         assert_eq!(cost, Some(11.25), "不明价模型不再毒化整桶");
         assert!(partial);
         // 全不明价 → None（partial 也置位，前端显示 ~）
         let mut c = Bucket::default();
-        c.add("mystery", "s1", TokenAcc { input: 5, output: 5, cache_read: 0, cache_write: 0 });
+        c.add(
+            "mystery",
+            "s1",
+            TokenAcc {
+                input: 5,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+            },
+        );
         assert_eq!(c.cost(&table), (None, true));
     }
 
@@ -2784,9 +3146,20 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(
             (evs[0].day.as_str(), evs[0].model.as_str()),
-            (day_of_iso("2026-07-29T01:00:00Z").as_str(), "claude-sonnet-4-5")
+            (
+                day_of_iso("2026-07-29T01:00:00Z").as_str(),
+                "claude-sonnet-4-5"
+            )
         );
-        assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read, evs[0].cache_write), (10, 5, 3, 2));
+        assert_eq!(
+            (
+                evs[0].input,
+                evs[0].output,
+                evs[0].cache_read,
+                evs[0].cache_write
+            ),
+            (10, 5, 3, 2)
+        );
         // codex：turn_context 定 model，token_count 的 last_token_usage 是本轮增量
         let lines = vec![
             r#"{"timestamp":"2026-07-29T02:00:00Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}"#.to_string(),
@@ -2794,7 +3167,11 @@ mod tests {
         ];
         let evs = codex_events(&lines);
         assert_eq!(evs.len(), 1);
-        assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read), (100, 25, 10), "用增量而非累计");
+        assert_eq!(
+            (evs[0].input, evs[0].output, evs[0].cache_read),
+            (100, 25, 10),
+            "用增量而非累计"
+        );
         assert_eq!(evs[0].model, "gpt-5-codex");
         // kimi：usage.record
         let lines = vec![
@@ -2803,13 +3180,24 @@ mod tests {
         let evs = kimi_events(&lines);
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].day, day_of_ms(1785307071000));
-        assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read, evs[0].cache_write), (50, 9, 4, 1));
+        assert_eq!(
+            (
+                evs[0].input,
+                evs[0].output,
+                evs[0].cache_read,
+                evs[0].cache_write
+            ),
+            (50, 9, 4, 1)
+        );
         // codebuddy：毫秒 epoch 时间戳；无 usage 字段的行（401 实测样本）不产生事件
         let lines = vec![
             r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"say hi"}],"timestamp":1786005441386}"#.to_string(),
             r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"401 Unauthorized"}],"timestamp":1786005443775}"#.to_string(),
         ];
-        assert!(codebuddy_events(&lines).is_empty(), "无 usage 字段必须零事件不报错");
+        assert!(
+            codebuddy_events(&lines).is_empty(),
+            "无 usage 字段必须零事件不报错"
+        );
         let lines = vec![
             r#"{"type":"message","role":"assistant","model":"glm-5.0","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":2},"timestamp":1786005443775}"#.to_string(),
         ];
@@ -2817,13 +3205,24 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].day, day_of_ms(1786005443775));
         assert_eq!(evs[0].model, "glm-5.0");
-        assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read, evs[0].cache_write), (10, 5, 3, 2));
+        assert_eq!(
+            (
+                evs[0].input,
+                evs[0].output,
+                evs[0].cache_read,
+                evs[0].cache_write
+            ),
+            (10, 5, 3, 2)
+        );
         // cursor：usage 字段未实证，按字段名候选尽力而为；无 usage 字段的行必须零事件不报错
         let lines = vec![
             r#"{"type":"user_message","message":{"content":[{"text":"hi"}]},"timestamp":1786005441386}"#.to_string(),
             r#"{"type":"turn_ended","timestamp":1786005441500}"#.to_string(),
         ];
-        assert!(cursor_events(&lines).is_empty(), "无 usage 字段必须零事件不报错");
+        assert!(
+            cursor_events(&lines).is_empty(),
+            "无 usage 字段必须零事件不报错"
+        );
         let lines = vec![
             r#"{"type":"turn_ended","model":"claude-opus-4-8","usage":{"inputTokens":20,"outputTokens":7},"timestamp":1786005443775}"#.to_string(),
         ];
@@ -2831,14 +3230,21 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].day, day_of_ms(1786005443775));
         assert_eq!(evs[0].model, "claude-opus-4-8");
-        assert_eq!((evs[0].input, evs[0].output), (20, 7), "camelCase 候选字段名也要能取到");
+        assert_eq!(
+            (evs[0].input, evs[0].output),
+            (20, 7),
+            "camelCase 候选字段名也要能取到"
+        );
         // grok：_meta.usage 在 turn 结束通知里（params._meta 与 params.update._meta 两层都探）；
         // 无 usage 的行必须零事件不报错
         let lines = vec![
             r#"{"timestamp":1786005441,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"}}}}"#.to_string(),
             r#"{"timestamp":1786005442,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"你好"}}}}"#.to_string(),
         ];
-        assert!(grok_events(&lines).is_empty(), "无 _meta.usage 的行必须零事件不报错");
+        assert!(
+            grok_events(&lines).is_empty(),
+            "无 _meta.usage 的行必须零事件不报错"
+        );
         // params.update._meta 位置
         let lines = vec![
             r#"{"timestamp":1786005445,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"完成"},"_meta":{"usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150,"cached_read_tokens":40,"modelUsage":{"grok-code-fast-1":{"input_tokens":120,"output_tokens":30}},"numTurns":1,"usageIsIncomplete":false}}}}}"#.to_string(),
@@ -2846,8 +3252,19 @@ mod tests {
         let evs = grok_events(&lines);
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].day, day_of_ms(1786005445 * 1000), "unix 秒转日期");
-        assert_eq!(evs[0].model, "grok-code-fast-1", "modelUsage 第一个键作模型名");
-        assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read, evs[0].cache_write), (120, 30, 40, 0));
+        assert_eq!(
+            evs[0].model, "grok-code-fast-1",
+            "modelUsage 第一个键作模型名"
+        );
+        assert_eq!(
+            (
+                evs[0].input,
+                evs[0].output,
+                evs[0].cache_read,
+                evs[0].cache_write
+            ),
+            (120, 30, 40, 0)
+        );
         // params._meta 位置（兼容另一层）
         let lines = vec![
             r#"{"timestamp":1786005500,"method":"session/update","params":{"_meta":{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"cached_read_tokens":2,"modelUsage":{"grok-4":{}},"numTurns":1}},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x"}}}}"#.to_string(),
@@ -2876,18 +3293,22 @@ mod tests {
         assert!(std::fs::metadata(&plain).unwrap().len() > 10 * 1024 * 1024);
         let events = extract_file_events("codex", &plain);
         assert_eq!(events.len(), 1, "大于旧 10 MB 上限的会话不得整份跳过");
-        assert_eq!((events[0].input, events[0].output, events[0].cache_read), (100, 25, 10));
+        assert_eq!(
+            (events[0].input, events[0].output, events[0].cache_read),
+            (100, 25, 10)
+        );
 
         let compressed = dir.join("small.jsonl.zst");
         let raw = std::fs::read(&plain).unwrap();
         std::fs::write(&compressed, zstd::stream::encode_all(&raw[..], 1).unwrap()).unwrap();
         let compressed_events = extract_file_events("codex", &compressed);
-        assert_eq!(compressed_events, events, "zstd 会话必须同样流式解码并提取用量");
+        assert_eq!(
+            compressed_events, events,
+            "zstd 会话必须同样流式解码并提取用量"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
-
-
 
 // ===== 按网关归因：usage_daily ⋈ session_meta.profile_id ⋈ binding.gateway_id =====
 
@@ -2924,7 +3345,17 @@ fn usage_by_gateway_impl(
     };
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let cutoff = cutoff_day(range);
-    let map_row = |r: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, i64, i64, i64, i64, Option<String>)> {
+    let map_row = |r: &rusqlite::Row| -> rusqlite::Result<(
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<String>,
+    )> {
         Ok((
             r.get(0)?,
             r.get(1)?,
@@ -3005,7 +3436,11 @@ fn usage_by_gateway_impl(
                             (id.to_string(), n, "gateway".into(), id.to_string())
                         }
                         Some(id) => {
-                            let short: String = id.chars().filter(|c| c.is_ascii_hexdigit()).take(8).collect();
+                            let short: String = id
+                                .chars()
+                                .filter(|c| c.is_ascii_hexdigit())
+                                .take(8)
+                                .collect();
                             (
                                 format!("deleted:{id}"),
                                 format!("已删除网关 · {short}"),
@@ -3099,7 +3534,10 @@ pub struct ProfileUsageDto {
 }
 
 /// 近似归属规则：usage_daily.model == m 或以 "/m" 结尾（剥离供应商前缀后与 profile 模型匹配）
-fn profile_usage_impl(conn: &rusqlite::Connection, models: &[String]) -> Result<ProfileUsageDto, String> {
+fn profile_usage_impl(
+    conn: &rusqlite::Connection,
+    models: &[String],
+) -> Result<ProfileUsageDto, String> {
     if models.is_empty() {
         return Ok(ProfileUsageDto {
             input: 0,
@@ -3109,7 +3547,9 @@ fn profile_usage_impl(conn: &rusqlite::Connection, models: &[String]) -> Result<
         });
     }
     let mut stmt = conn
-        .prepare("SELECT model, session_id, input, output, cache_read, cache_write FROM usage_daily")
+        .prepare(
+            "SELECT model, session_id, input, output, cache_read, cache_write FROM usage_daily",
+        )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {

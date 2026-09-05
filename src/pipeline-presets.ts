@@ -30,6 +30,7 @@ const LIT_SEARCH_ARTIFACTS = [
   "papers/included.md",
   "papers/to-fetch.md",
   "papers/to-fetch.ris",
+  "papers/zotero-sync.md",
 ];
 
 const MANUSCRIPT_FINALS = [
@@ -79,11 +80,21 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "2. 先解析人工导入的题录（RIS/BibTeX/CSV），三处都要看：① 本文件「项目根」下 papers/imports/；② 工作区内 papers/imports/；③ 「项目资源」段类型为「引文」的条目、以及「上一步产物（提货单）」段中来自「人工交付」的条目——后两类给绝对路径，按路径直读、勿复制。都没有才跳过。解析后按 lit-search 技能口径去重合并进候选池，每条保留来源标注；\n" +
       "3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式、检索日期与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；末尾写覆盖缺口声明（哪些库没检）；\n" +
       "4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律纳入并标注「待确认」，不允许自行裁掉；\n" +
-      "5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；\n" +
-      "6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR + TI/DO/UR 尽力而为，缺字段留空不编造），供用户一键导入 Zotero 建成待获取列表。\n" +
-      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris 均存在（无付费文献则 to-fetch 两个文件注明为空），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。",
+      "5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI），并同步写入 papers/included.json（每篇一条，至少含唯一 id、title、decision、reason）；\n" +
+      "6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR + TI/DO/UR 尽力而为，缺字段留空不编造），供用户一键导入 Zotero 建成待获取列表。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 不得覆盖。\n" +
+      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris、papers/zotero-sync.md 均存在且非空（未启用或回落时报告原因；无付费文献则 to-fetch 两个文件注明为空），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。",
     expectedArtifacts: [...LIT_SEARCH_ARTIFACTS],
-    skills: ["lit-search"],
+    acceptanceCriteria: [
+      "machine:file:papers/screening.md",
+      "machine:file:papers/included.md",
+      "machine:file:papers/to-fetch.md",
+      "machine:file:papers/to-fetch.ris",
+      "machine:file:papers/zotero-sync.md",
+      "machine:contains:papers/screening.md::检索日期",
+      "machine:records:papers/included.json::id,title,decision,reason",
+    ],
+    skills: ["lit-search", "zotero-sync"],
+    requiredSkills: ["lit-search"],
     asksLitSource: true,
     run: [],
     humanTasks: [mcpLitSearchTask(), paywallPdfTask("after")],
@@ -104,7 +115,13 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "完成标准：included.md 每篇都有对应笔记与 bib 条目；notes/ 与 references.bib 均已提交。",
     inputs: ["papers/included.md", "papers/to-fetch.md"],
     optionalInputs: ["papers/*.pdf"],
-    expectedArtifacts: ["notes/*.md", "references.bib", "papers/to-fetch.md"],
+    expectedArtifacts: ["notes/*.md", "notes/index.json", "references.bib", "papers/to-fetch.md"],
+    acceptanceCriteria: [
+      "machine:count:notes/*.md>=1",
+      "machine:file:references.bib",
+      "machine:contains:papers/included.md::—",
+      "machine:records:notes/index.json::id,notePath,bibKey",
+    ],
     skills: ["lit-notes"],
     run: [],
     humanTasks: [
@@ -223,11 +240,20 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "若项目根已有 notes/ 或 papers/included.md：**查漏补缺，不覆盖已有笔记**——盘点已有清单与笔记，按本课题的实证问题补检索、补纳入；旧笔记只追加不改写。没有上游产物时按下面流程全量检索。\n" +
       "围绕课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源自行判断，并把假设写进 papers/screening.md 开头）执行：\n" +
       "1. 检索与筛选按 lit-search 技能：**先粗检一轮报数再定标准**（OpenAlex 命中约 N 篇与建议标准写入 .ccode/help-wanted.md，附兜底不停工）；产出 papers/screening.md（标准 + 各库检索式、检索日期与命中数 + 每篇判定理由；拿不准相关性的一律纳入并标注「待确认」）与 papers/included.md；用户导入的检索结果先解析去重——看项目根 papers/imports/、工作区 papers/imports/、以及「项目资源」「提货单」里的绝对路径；\n" +
-      "2. 全文获取：开放获取直接下载到**项目根 papers/**（文件名：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得绕过，汇总写入 papers/to-fetch.md 并转 papers/to-fetch.ris。\n" +
-      "完成标准：四件套均已提交（无付费文献则 to-fetch 注明为空），筛选记录含检索日期与覆盖缺口、可复现。",
+      "2. 全文获取：开放获取直接下载到**项目根 papers/**（文件名：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得绕过，汇总写入 papers/to-fetch.md 并转 papers/to-fetch.ris。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 时不得覆盖。\n" +
+      "完成标准：六件套均已提交（无付费文献则 to-fetch 两个文件注明为空；未启用或回落时 zotero-sync.md 写明原因），筛选记录含检索日期与覆盖缺口、可复现。",
     optionalInputs: ["notes/", "references.bib", "papers/included.md"],
     expectedArtifacts: [...LIT_SEARCH_ARTIFACTS],
-    skills: ["lit-search"],
+    acceptanceCriteria: [
+      "machine:file:papers/screening.md",
+      "machine:file:papers/included.md",
+      "machine:file:papers/to-fetch.md",
+      "machine:file:papers/to-fetch.ris",
+      "machine:file:papers/zotero-sync.md",
+      "machine:contains:papers/screening.md::检索日期",
+    ],
+    skills: ["lit-search", "zotero-sync"],
+    requiredSkills: ["lit-search"],
     asksLitSource: true,
     run: [],
     humanTasks: [mcpLitSearchTask(), paywallPdfTask("after")],
@@ -276,8 +302,14 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "3. 估算每项实验的计算开销，超出本机条件的组合在矩阵中标注「裁剪」并说明裁剪规则；\n" +
       "4. design.md 末尾附风险清单：最可能失败的环节与备选方案；伦理批件/数据许可若需要，列入人工事项，不编造已获批；\n" +
       "5. 统计设计自查（按 stats-check 技能的实验设计口径）：主要结局指标唯一明确、样本量有功效估算依据、剔除标准事先定义；涉及统计检验的实验在 design.md 中写明检验方法与多重比较校正口径；问题清单写入 analysis/stats-check-design.md。\n" +
-      "完成标准：design.md 覆盖假设/方法/数据/基线/指标/实验矩阵/停止规则，无「待定」项；analysis/stats-check-design.md 各节齐全；实验矩阵可逐项直接执行。",
-    expectedArtifacts: ["design.md", "analysis/stats-check-design.md"],
+      "完成标准：design.md 覆盖假设/方法/数据/基线/指标/实验矩阵/停止规则，无「待定」项；同步写 experiments/matrix.json，每个组合一条唯一 id、configuration、status 记录；analysis/stats-check-design.md 各节齐全；实验矩阵可逐项直接执行。",
+    expectedArtifacts: ["design.md", "analysis/stats-check-design.md", "experiments/matrix.json"],
+    acceptanceCriteria: [
+      "machine:file:design.md",
+      "machine:file:analysis/stats-check-design.md",
+      "machine:records:experiments/matrix.json::id,configuration,status",
+    ],
+    decisionMode: "soft_pause",
     inputs: ["survey/gap-analysis.md", "notes/", "references.bib"],
     optionalInputs: ["analysis-report.md", "artifacts/"],
     skills: ["stats-check"],
@@ -311,8 +343,14 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "2. 逐项跑实验矩阵；标「裁剪」的组合跳过并在结果记录中说明；\n" +
       "3. 原始结果与日志写入项目根产物目录（见上方「产物目录」绝对路径），不要写本工作区、不要提交进 git；工作区内只提交代码与 results/summary.md（每行一项实验：配置、主指标数值、产物目录中的绝对路径）；\n" +
       "4. 失败的实验不删除日志：在 results/summary.md 标注「失败」与原因，按 design.md 风险清单的备选方案重跑一次，仍失败则记录后继续下一项。遵守 design.md 的停止规则，不得看到结果后改主指标。\n" +
-      "完成标准：矩阵中每项都有明确结果或失败记录，experiments/ 与 results/summary.md 已提交，原始数据全部落在项目根产物目录。",
-    expectedArtifacts: ["experiments/*", "results/summary.md"],
+      "完成标准：矩阵中每项都有明确结果或失败记录；同步写 results/matrix.json，每个组合一条唯一 id、configuration、status 记录；experiments/ 与 results/summary.md 已提交，原始数据全部落在项目根产物目录。",
+    // experiments/ 是实现目录，不作为完成证明；summary.md 才是矩阵逐项结果的唯一入口。
+    expectedArtifacts: ["results/summary.md", "results/matrix.json"],
+    acceptanceCriteria: [
+      "machine:file:results/summary.md",
+      "machine:contains:results/summary.md::配置",
+      "machine:records:results/matrix.json::id,configuration,status",
+    ],
     inputs: ["design.md"],
     optionalInputs: ["analysis-report.md", "artifacts/"],
     skills: [],
@@ -474,18 +512,17 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
       "3. 质量问题单列一节：缺失、重复、异常取值、口径不一致，逐项给出样例行号或计数；\n" +
       "4. 敏感字段单列清单：疑似个人标识/隐私的字段只列字段名与判断依据，不复制内容样例；脱敏口径不写死，留人拍板（开工前的讨论种子已就此提问）；\n" +
       "5. 数据不可读或格式损坏时在报告中说明并停止，不自行修复原始数据。\n" +
-      "完成标准：data-dictionary.md 覆盖全部数据集与字段，质量问题逐项有证据（行号/计数），敏感字段清单无内容样例。",
-    expectedArtifacts: ["data-dictionary.md"],
+      "完成标准：data-dictionary.md 覆盖全部数据集与字段；同步写 data/fields.json，每个字段一条唯一 id、name、type、status 记录；质量问题逐项有证据（行号/计数），敏感字段清单无内容样例。",
+    expectedArtifacts: ["data-dictionary.md", "data/fields.json"],
+    decisionMode: "hard_pause",
+    acceptanceCriteria: [
+      "machine:file:data-dictionary.md",
+      "machine:contains:data-dictionary.md::字段",
+      "machine:records:data/fields.json::id,name,type,status",
+    ],
     skills: [],
     run: [],
     humanTasks: [
-      {
-        title: "采集/导出原始数据",
-        guidance:
-          "渠道自选：业务系统导出/问卷平台下载/公开数据集；放入项目目录即可，agent 会扫描并逐数据集登记",
-        target: "",
-        timing: "before",
-      },
       {
         title: "解答「待确认」字段的业务含义",
         guidance:
@@ -514,12 +551,18 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
       "3. 清洗脚本放入 cleaning/（可重复执行；输入只读原始数据，不原地修改）；\n" +
       "4. 处理后的数据写入项目根产物目录（见上方「产物目录」绝对路径），不进 git、不要写本工作区；同时产出 cleaning/cleaned-data-manifest.md，记录源文件、字节数/hash、输出文件绝对路径、行列数与生成命令；\n" +
       "5. 清洗报告 cleaning/cleaning-report.md：每条规则影响的行数、丢弃数据的清单与原因、清洗前后规模对比，[待确认] 规则单列一节。\n" +
-      "完成标准：rules.md 无「视情况而定」项，脚本可重复跑通，manifest 与报告数字和产物目录结果一致，原始数据字节级未被改动。",
+      "完成标准：rules.md 无「视情况而定」项；同步写 cleaning/fields.json，每个字段一条唯一 id、name、rule、status 记录；脚本可重复跑通，manifest 与报告数字和产物目录结果一致，原始数据字节级未被改动。",
     expectedArtifacts: [
       "cleaning/rules.md",
       "cleaning/cleaning-report.md",
       "cleaning/cleaned-data-manifest.md",
-      "cleaning/*",
+    ],
+    acceptanceCriteria: [
+      "machine:file:cleaning/rules.md",
+      "machine:file:cleaning/cleaning-report.md",
+      "machine:file:cleaning/cleaned-data-manifest.md",
+      "machine:contains:cleaning/rules.md::依据",
+      "machine:records:cleaning/fields.json::id,name,rule,status",
     ],
     inputs: ["data-dictionary.md"],
     skills: ["data-clean"],
@@ -549,7 +592,7 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
       "4. 异常分析：按 rules.md 的口径复查残留异常，新发现的异常标 [待确认] 并给出样例行号；\n" +
       "5. 结论写入 eda-report.md：3-5 条可用于后续决策的发现，每条附对应图表或统计量；含统计检验/显著性表述的结论先按 stats-check 技能口径自查（检验方法与数据匹配、p 值给具体值、附效应量与置信区间）；问题清单写入 analysis/stats-check-eda.md。\n" +
       "完成标准：analysis/ 脚本、analysis/stats-check-eda.md、figures/ 与 eda-report.md 均存在，每条发现可回溯到具体图表/数字，无主观臆断。",
-    expectedArtifacts: ["analysis/*", "analysis/stats-check-eda.md", "figures/*", "eda-report.md"],
+    expectedArtifacts: ["analysis/stats-check-eda.md", "figures/*", "eda-report.md"],
     inputs: ["cleaning/rules.md", "cleaning/cleaned-data-manifest.md"],
     optionalInputs: ["artifacts/"],
     skills: ["data-eda", "stats-check"],
@@ -584,11 +627,20 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "1. **先粗检一轮报数再定标准**：OpenAlex 命中约 N 篇与建议标准写入 .ccode/help-wanted.md（附兜底不停工）；纳入/排除标准（年份、语言、来源级别、相关性）写入 papers/screening.md；\n" +
       "2. 解析人工导入题录（项目根 papers/imports/、工作区 papers/imports/、项目资源与提货单绝对路径），去重进候选池；\n" +
       "3. 检索候选并逐条判定，产出 papers/screening.md 与 papers/included.md；拿不准一律纳入并标「待确认」；检索日期与覆盖缺口写入 screening.md；\n" +
-      "4. 开放获取全文下载到**项目根 papers/**；付费墙写入 papers/to-fetch.md 与 papers/to-fetch.ris。\n" +
-      "完成标准：四件套存在（无付费文献则 to-fetch 注明为空），每条记录无空缺字段，筛选可复现。",
+      "4. 开放获取全文下载到**项目根 papers/**；付费墙写入 papers/to-fetch.md 与 papers/to-fetch.ris。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 时不得覆盖。\n" +
+      "完成标准：六件套存在（无付费文献则 to-fetch 两个文件注明为空；未启用或回落时 zotero-sync.md 写明原因），每条记录无空缺字段，筛选可复现。",
     optionalInputs: ["notes/", "references.bib", "papers/included.md"],
     expectedArtifacts: [...LIT_SEARCH_ARTIFACTS],
-    skills: ["lit-search"],
+    acceptanceCriteria: [
+      "machine:file:papers/screening.md",
+      "machine:file:papers/included.md",
+      "machine:file:papers/to-fetch.md",
+      "machine:file:papers/to-fetch.ris",
+      "machine:file:papers/zotero-sync.md",
+      "machine:contains:papers/screening.md::检索日期",
+    ],
+    skills: ["lit-search", "zotero-sync"],
+    requiredSkills: ["lit-search"],
     asksLitSource: true,
     run: [],
     humanTasks: [mcpLitSearchTask(), paywallPdfTask("after")],
@@ -702,7 +754,12 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "2. 原始结果与日志写入项目根产物目录（见上方「产物目录」绝对路径），不进 git、不要写本工作区；results/summary.md 逐项记录：配置、指标数值、产物目录绝对路径；\n" +
       "3. 失败实验在 summary.md 标注原因并按 design.md 的备选方案重跑一次，仍失败则记录后继续；\n" +
       "完成标准：矩阵每项都有结果或失败记录，experiments/ 与 results/summary.md 已提交，原始结果全部落在项目根产物目录。",
-    expectedArtifacts: ["experiments/*", "results/summary.md"],
+    expectedArtifacts: ["results/summary.md", "results/matrix.json"],
+    acceptanceCriteria: [
+      "machine:file:results/summary.md",
+      "machine:contains:results/summary.md::配置",
+      "machine:records:results/matrix.json::id,configuration,status",
+    ],
     inputs: ["design.md", "chapters/methodology.md"],
     skills: [],
     run: [],

@@ -97,8 +97,8 @@ pub(crate) fn validate_fs_name(name: &str) -> Result<(), String> {
     // 必须是单个路径分量：顺带挡掉 `..`、`a/b`、以及 Windows 的 `C:evil`
     //（Path::push 遇到带盘符前缀的名字会整体替换，能逃出根目录）
     let mut comps = std::path::Path::new(name).components();
-    let single = matches!(comps.next(), Some(std::path::Component::Normal(_)))
-        && comps.next().is_none();
+    let single =
+        matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none();
     if !single {
         return Err("名称只能是单层名字，不能含路径分隔符、`..` 或盘符".into());
     }
@@ -248,7 +248,10 @@ mod tests {
         for bad in ["CON", "con", "AUX", "com1", "LPT9", "NUL.md", "con.txt"] {
             assert!(validate_fs_name(bad).is_err(), "{bad} 是保留名");
         }
-        assert!(validate_fs_name("console").is_ok(), "只有整段相等才算保留名");
+        assert!(
+            validate_fs_name("console").is_ok(),
+            "只有整段相等才算保留名"
+        );
         assert!(validate_fs_name("com10").is_ok());
     }
 

@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { AGENTS } from "../types";
 import { useAppStore } from "../store";
 import ContextMenu from "../components/ContextMenu";
+import { Modal } from "../components/Modal";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { confirmDialog } from "../components/ConfirmDialog";
 import {
@@ -24,6 +25,7 @@ import {
   RowAction,
   secondaryActionClass,
   searchFieldClass,
+  hoverRevealClass,
 } from "../components/PageFrame";
 import type {
   DiscoveredSkillDto,
@@ -293,15 +295,7 @@ function ImportModal({
   );
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-3 text-base font-semibold text-l1">导入技能</h2>
+    <Modal open title="导入技能" onClose={onClose} size="md">
         <div className="mb-4 flex gap-1">
           {tabBtn("dir", "本地目录")}
           {tabBtn("zip", "ZIP 文件")}
@@ -496,8 +490,7 @@ function ImportModal({
             关闭
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -536,15 +529,7 @@ function DiscoverModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-3 text-base font-semibold text-l1">发现未纳管技能</h2>
+    <Modal open title="发现未纳管技能" onClose={onClose} size="md">
         {items.length === 0 ? (
           <p className="mb-4 text-sm text-l4">
             各 agent 目录里没有发现未纳管的技能
@@ -601,8 +586,7 @@ function DiscoverModal({
             </button>
           )}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -638,17 +622,7 @@ function DeleteSkillModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-2 text-base font-semibold text-l1">
-          删除技能「{skill.name}」？
-        </h2>
+    <Modal open title={`删除技能「${skill.name}」？`} onClose={onClose} size="md">
         {isBuiltinSkill(skill.source) && (
           <p className="mb-1 text-xs leading-5 text-warn-text">
             这是内置技能：删除后不会随启动恢复（内置技能只在种子升级时补播缺失的，
@@ -684,8 +658,7 @@ function DeleteSkillModal({
             {busy ? "删除中…" : "删除"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -750,17 +723,12 @@ function SkillEditorModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
+    <Modal
+      open
+      title={mode === "create" ? "新建技能" : `编辑技能：${skill?.name}`}
+      onClose={onClose}
+      size="lg"
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[85vh] w-[36rem] flex-col rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-3 text-base font-semibold text-l1">
-          {mode === "create" ? "新建技能" : `编辑技能：${skill?.name}`}
-        </h2>
         <label className="mb-2 block text-sm">
           <span className="mb-1 block text-xs text-l3">
             名称（即目录名，单个安全名称）
@@ -816,8 +784,7 @@ function SkillEditorModal({
             {busy ? "保存中…" : mode === "create" ? "创建" : "保存"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -849,17 +816,7 @@ function OptimizeModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-1 text-base font-semibold text-l1">
-          ◈ 优化技能：{skill.name}
-        </h2>
+    <Modal open title={`◈ 优化技能：${skill.name}`} onClose={onClose} size="md">
         <p className="mb-3 text-xs text-l3">开终端让 Agent 按你的意见改写这个技能；改完记得审查。</p>
         <textarea
           autoFocus
@@ -884,8 +841,7 @@ function OptimizeModal({
             {busy ? "打开中…" : "开终端优化"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -943,17 +899,12 @@ function AdaptModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
+    <Modal
+      open
+      title={`◈ 适配到流水线：${skill.name}`}
+      onClose={onClose}
+      size="lg"
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[85vh] w-[34rem] flex-col rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-1 text-base font-semibold text-l1">
-          ◈ 适配到流水线：{skill.name}
-        </h2>
         <p className="mb-3 text-xs text-l3">
           AI 按流水线路径约定（papers/、notes/、references.bib
           等）改写技能，并补写 inputs/outputs 接口声明；可再手动改，确认后才写回技能库。
@@ -992,8 +943,7 @@ function AdaptModal({
             {busy ? "处理中…" : "确认写回技能库"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -1056,17 +1006,7 @@ function BindToStepModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-1 text-base font-semibold text-l1">
-          挂载到步骤：{skill.name}
-        </h2>
+    <Modal open title={`挂载到步骤：${skill.name}`} onClose={onClose} size="md">
         <p className="mb-3 text-xs text-l3">
           把技能挂到项目研究流程的某一步；下次开工 TASK.md 的「本步骤技能」段会列出它。
         </p>
@@ -1132,8 +1072,7 @@ function BindToStepModal({
             关闭
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -1916,7 +1855,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                 {/* 行内高频操作（2026-08-24 起与 MCP 页同口径）：裸图标钮 hover 淡入，
                                     不套胶囊容器——实体栏压在列表行上层级脱节；tooltip 挂按钮上方（RowAction） */}
                                 <div className="flex items-center justify-end">
-                                  <div className="flex items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                                  <div className={`flex items-center ${hoverRevealClass} focus-within:opacity-100`}>
                                     <RowAction
                                       icon="✎"
                                       tip="编辑内容"
@@ -1969,7 +1908,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
 
       {/* SKILL.md 预览面板 */}
       {preview && (
-        <div className="flex w-[clamp(360px,34vw,460px)] shrink-0 flex-col border-l border-hairline bg-canvas">
+        <div className="ccode-skill-preview flex w-[clamp(360px,34vw,460px)] shrink-0 flex-col border-l border-hairline bg-canvas">
           <div className="flex h-11 shrink-0 items-center gap-2 bg-strip px-3">
             <span className="truncate text-sm font-semibold text-l1">
               {preview.skill.name}

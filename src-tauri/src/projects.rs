@@ -1727,8 +1727,8 @@ pub(crate) fn ensure_task_project_root(project_root: &Path) -> Result<PathBuf, S
     // 剥 verbatim：Windows canonicalize 带 `\\?\`，与 strip 过的项目根 / 前端路径
     // 按分量永不相等，reader/lit_watch/citation 的前缀判定会误报「不在项目内」。
     // macOS/Linux 上 strip_verbatim 是恒等变换。
-    let root = crate::paths::canonicalize_plain(project_root)
-        .map_err(|e| format!("项目目录无效: {e}"))?;
+    let root =
+        crate::paths::canonicalize_plain(project_root).map_err(|e| format!("项目目录无效: {e}"))?;
     if !root.is_dir() {
         return Err("项目路径不是目录".into());
     }
@@ -2099,7 +2099,10 @@ fn commit_demo_seed_at(repo: &Path) -> Result<(), String> {
         "references.bib",
         "README.md",
     ];
-    let existing: Vec<&str> = PATHS.into_iter().filter(|p| repo.join(p).exists()).collect();
+    let existing: Vec<&str> = PATHS
+        .into_iter()
+        .filter(|p| repo.join(p).exists())
+        .collect();
     if existing.is_empty() {
         return Ok(());
     }
@@ -2246,9 +2249,8 @@ pub async fn update_lit_watch_filter(
     filter: Option<LitWatchFilterDto>,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
-            &project_root,
-        )))?;
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
         // 读-改-原子写；全空筛选归一为 None（toml 不留空段）
         let mut cfg = read_config_at(&root).config;
         cfg.lit_watch_filter = filter.filter(|f| !f.is_inert());
@@ -2279,7 +2281,8 @@ pub(crate) fn update_step_skills_at(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && seen.insert(s.clone()))
         .collect();
-    step.required_skills.retain(|skill| step.skills.contains(skill));
+    step.required_skills
+        .retain(|skill| step.skills.contains(skill));
     for skill in &step.skills {
         if !previous.contains(skill) && !step.required_skills.contains(skill) {
             step.required_skills.push(skill.clone());
@@ -2841,11 +2844,7 @@ fn count_list_lines(path: &Path) -> u32 {
         .unwrap_or(0)
 }
 
-fn chips_for_patterns(
-    root: &Path,
-    patterns: &[String],
-    role: &str,
-) -> Vec<StepInputChipDto> {
+fn chips_for_patterns(root: &Path, patterns: &[String], role: &str) -> Vec<StepInputChipDto> {
     let mut out = Vec::new();
     for pattern in patterns {
         let p = pattern.trim();
@@ -2862,9 +2861,7 @@ fn chips_for_patterns(
                 }
             }
         }
-        let preview_path = files
-            .first()
-            .map(|f| f.to_string_lossy().into_owned());
+        let preview_path = files.first().map(|f| f.to_string_lossy().into_owned());
         out.push(StepInputChipDto {
             pattern: p.to_string(),
             role: role.into(),
@@ -2898,9 +2895,8 @@ pub async fn inspect_step_inputs(
     step_name: String,
 ) -> Result<Vec<StepInputChipDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
-            &project_root,
-        )))?;
+        let root =
+            ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
         inspect_step_inputs_at(&root, &step_name)
     })
     .await
@@ -3384,7 +3380,9 @@ pub(crate) fn apply_pipeline_template_at(
         .as_deref()
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
-    let has_settings = project_settings.iter().any(|value| !value.trim().is_empty());
+    let has_settings = project_settings
+        .iter()
+        .any(|value| !value.trim().is_empty());
     if let Some(topic) = topic.map(|x| x.trim().to_string()) {
         if !topic.is_empty() {
             cfg.topic = Some(topic);
@@ -3730,7 +3728,10 @@ required_skills = []
         assert!(config.steps[2].required_skills.is_empty());
         let rendered = render_config(Some(text), &config).unwrap();
         let (back, back_warnings) = parse_config(&rendered);
-        assert!(back_warnings.is_empty(), "回读不应有警告: {back_warnings:?}");
+        assert!(
+            back_warnings.is_empty(),
+            "回读不应有警告: {back_warnings:?}"
+        );
         assert_eq!(back.steps[2].required_skills, Vec::<String>::new());
     }
 
@@ -5112,15 +5113,13 @@ resources = ["ghost.pdf"]
         assert_eq!(config.steps.len(), canon.steps.len());
         assert_eq!(config.steps[0].workspace_name, "lit-search");
         assert_eq!(
-            config.steps[0].skills,
-            canon.steps[0].skills,
+            config.steps[0].skills, canon.steps[0].skills,
             "检索步技能应与英文综述模板一致"
         );
         assert!(config.steps[0].seed_complete);
         assert_eq!(config.steps[0].brief, canon.steps[0].brief);
         assert_eq!(
-            config.steps[1].skills,
-            canon.steps[1].skills,
+            config.steps[1].skills, canon.steps[1].skills,
             "精读步技能应与英文综述模板一致"
         );
         assert_eq!(config.steps[1].brief, canon.steps[1].brief);
@@ -5666,7 +5665,10 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
         };
         write_config_at(&root, &cfg).unwrap();
         let chips = inspect_step_inputs_at(&root, "精读").unwrap();
-        let included = chips.iter().find(|c| c.pattern.ends_with("included.md")).unwrap();
+        let included = chips
+            .iter()
+            .find(|c| c.pattern.ends_with("included.md"))
+            .unwrap();
         assert_eq!(included.count, 2);
         assert!(included.present);
         let notes = chips.iter().find(|c| c.pattern.contains("notes")).unwrap();
@@ -5760,17 +5762,18 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
             draft_rel_path("步骤", "draft:v2"),
             ".ccode/drafts/draft-v2.md"
         );
-        assert_eq!(
-            draft_rel_path("步骤", "方案?"),
-            ".ccode/drafts/方案-.md"
-        );
+        assert_eq!(draft_rel_path("步骤", "方案?"), ".ccode/drafts/方案-.md");
         // 路径逃逸（这条 macOS 同样中招）：不锚定 - 的个数，只断言逃不出 drafts 目录
         let escaped = draft_rel_path("步骤", "../../../evil");
         assert!(
             escaped.starts_with(".ccode/drafts/") && !escaped.contains(".."),
             "{escaped}"
         );
-        assert_eq!(escaped.matches('/').count(), 2, "不得多出目录层级: {escaped}");
+        assert_eq!(
+            escaped.matches('/').count(),
+            2,
+            "不得多出目录层级: {escaped}"
+        );
         // 保留设备名：拼出的 .ccode/drafts/CON.md 在 Windows 上是设备而非文件
         assert_eq!(draft_rel_path("步骤", "CON"), ".ccode/drafts/CON-.md");
     }

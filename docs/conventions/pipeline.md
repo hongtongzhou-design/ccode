@@ -85,9 +85,17 @@
   `any_of_inputs`（每组至少满足一项）。TASK.md 明确标为「必需 / 可选 / 任一」，校验只对必需项和任一组发缺失提示，
   不再把合法的「paper-final 或 review-final」误报成阻塞。人工事项空落点统一按 `manual` 处理；`all` 必须有显式
   `expected_count`、`manifest_path` 或可推导的 `papers/to-fetch.md`，无法得知总数时不判完成；`no_placeholders` 只允许文本文件。
+  **关键产物优先（2026-09-05）**：`expected_artifacts` 应优先声明能证明步骤完成的入口文件/清单，
+  不得把 `experiments/*`、`cleaning/*`、`analysis/*` 等实现目录本身当作完成证明；目录型通配符只适合
+  表达“至少有一份辅助产物”，不能代表逐项覆盖。文献逐篇、实验矩阵逐项、字段逐项等数量性要求必须由
+  领域技能生成清单并在报告中给出覆盖证据，不能仅依赖路径存在检查。数据登记允许扫描项目中已有数据，
+  不再固定要求重复采集；涉及隐私、伦理、合规或主指标的决策不得使用“未回复即自动继续”的兜底。
   模板应用三处入口（注册后选择、项目页模板选择、编辑器追加）统一调用后端原子事务：步骤、缺失的项目级设定、投稿分支/轮次、
   topic 与 `pipeline_opt_out` 一次写入，已有真实设定按问题名保留。
-  模板自检还必须满足：步骤声明 Quarto `run` 时挂载 `quarto-render`；`lit-search` 步骤声明 screening/included/to-fetch/to-fetch.ris 四项固定产物；返修步骤的回复信、修订稿、对照表、引用报告和再投稿清单全部带 `rN` 轮次后缀。
+  模板自检还必须满足：步骤声明 Quarto `run` 时挂载 `quarto-render`；`lit-search` 步骤声明
+  screening/included/to-fetch/to-fetch.ris/zotero-sync.md 五项固定产物，且无论 Zotero
+  是否启用或回落，都必须留下非空的同步报告（记录未启用、未授权、不可用或已同步原因）；
+  返修步骤的回复信、修订稿、对照表、引用报告和再投稿清单全部带 `rN` 轮次后缀。
   **文献雷达消费契约**：`notes/inbox.md` 的二级标题只有在块内出现至少一个文献字段（来源/作者/摘要/链接/相关性等）时才算命中；巡检摘要不得使用会被消费层识别为文献的 `##` 块。scheduler 的 `newEntries` 必须复用同一有效条目解析口径。
   **注册后模板选择层（TemplatePickModal）**：仅 **科研** 项目在 `register_project` 成功后弹出，选项 = 六套内置模板
   （名称 + 一句话说明 + 步骤数，数据直接用 PIPELINE_TEMPLATES，不另造表），选中即调用统一的 `apply_pipeline_template`
@@ -105,14 +113,14 @@
   不碰，值变了才单独 write_project_config 写回。
   **课题主题只在选模板时填**（v3.200）：添加项目弹窗不再问；注册成功后的 `TemplatePickModal` 顶部可选填，随 `apply_pipeline_template` 写入；「稍后再选 / 不使用」若已填也会落盘。编程 / 办公不经过此层。
   **添加后打开该项目**（v3.203）：注册回调先把该项写入 `projects` 再选中分组；不能先 `setSelectedGroupKey` 再等 refresh——分组表还没有这项会被空表 effect 重置成原来的第一项。
-  **v3.78 起五套模板内容重设计并互相对齐（接壤）**：准绳 =「讨论种子 → 草稿 → TASK.md → 执行」全链相辅相成——
+  **v3.78 起六套模板内容重设计并互相对齐（接壤）**：准绳 =「讨论种子 → 草稿 → TASK.md → 执行」全链相辅相成——
   种子逐条对准 TASK.md/执行中的真实拍板点（删空洞种子、补缺口种子；纯执行步骤不给种子，沿用 v3.69 口径）；
-  expectedArtifacts 精确化；技能挂载按 15 个内置技能核对（research-paper 检索步 +lit-search、精读步 +lit-notes、结果分析/毕业论文
+  expectedArtifacts 精确化；技能挂载按 18 个内置技能核对（research-paper 检索步 +lit-search、精读步 +lit-notes、结果分析/毕业论文
   实验步 +stats-check、毕业论文初稿/定稿 +quarto-render、data-eda 步 +stats-check；submission-rebuttal 摘除
   不存在的假技能 pre-submission-reviewer，投稿前自查口径内联进简报）；lit-search 链路步骤新增 before 人工事项
   「（可选）配置学术检索 MCP」（MCP 页预设导入 Consensus/Undermind，key 走环境变量引用；不配也能跑——
   OpenAlex/Semantic Scholar 免 key 兜底），付费墙文献全程有人工事项接应（落点 `papers/*.pdf`）。
-  **接壤路径约定**：五套是同一条科研流水线的相邻段，产物路径固定对齐——综述末步产 `manuscript/review-final.md`、
+  **接壤路径约定**：六套模板共享同一条科研流水线的产物约定，能衔接的相邻段，产物路径固定对齐——综述末步产 `manuscript/review-final.md`、
   科研论文末步产 `manuscript/paper-final.md`、毕业论文末步产 `manuscript/thesis-final.md`，投稿与返修首步
   `any_of_inputs` 指向这三者 + `references.bib`；返修第 1 轮优先读 `submission/formatted.md`。综述的
   `notes/`+`references.bib` 可被科研论文/毕业论文复用（有则查漏补缺、不覆盖旧笔记），数据处理的
@@ -197,7 +205,7 @@
 - 流程带中的角色点必须配可见图例（蓝点 = 你主要负责，灰点 = 你和 AI 一起定）；步进器内容确实超出可视宽度时才提示可左右滚动（按溢出检测，不按步骤数常驻），避免长流程被截断后看起来像缺步骤，也避免宽屏空挂一句。
 - 模板预览同时展示友好描述与实际步骤名时，实际步骤行必须标注「完整步骤」，不得让用户把两行误解为两套流程。
 
-**五套模板一体适用（v3.89 全量复盘）**：三处错配不是综述独有的，四套模板逐一按同一把尺子改过——
+**六套模板一体适用（v3.89 全量复盘）**：三处错配不是综述独有的，各套模板逐一按同一把尺子改过——
 
 | 模板 | 层级错配（→ 项目层） | 时间错配（→ 按需问） |
 |---|---|---|
@@ -279,6 +287,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   动因：用户声明「文献在我自己的库里」后，按提示导入了却永远打不上勾——提示与检测互相矛盾。
   只对 `papers/` 前缀的落点放宽（非文献类落点不受影响），且只认 PDF（只有 bib/csv 不算全文到位）。
   测试 `lit_library_hit_only_for_declared_library` 钉住整个矩阵。
+- **Zotero 双通道边界**：内核 `zotero_import` 仍只读 sqlite 快照并写项目；内核不直写用户库。写库只能走可选 `zotero-sync`，且必须有用户明确意图和实机授权；“Zotero 在运行”不等于获得写库意图或权限。
 - **Zotero 是只读适配器，不搬文件**：`zotero_import` 写 `references.bib` 到项目根，
   PDF **按绝对路径登记为资源**（`readonly`），**不复制进 `papers/`**。
   因此落点为 `papers/` 的人工事项**不会被 Zotero 导入自动打勾**——这是既有设计
@@ -439,7 +448,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 - **to-fetch.ris 是 Zotero 闭环的导出物（v3.97）**：检索步产出 to-fetch.md 时同步产出 to-fetch.ris
   （RIS 2004，TY/TI/DO/UR 尽力而为、缺字段留空不编造），用户拖进 Zotero 自动建成待获取列表；
   PDF 补进 Zotero 后回「文献与数据」重新导入即登记（只读引用不复制），再手动勾事项。
-  **Zotero 只读边界不动**——不在用户库里直写建列表（锁库/同步冲突风险）。
+  **内核仍不直写用户 Zotero 库**——内核 `zotero_import` 只读快照并写项目；可选技能写库必须有用户明确意图和实机授权（锁库/同步冲突风险）。
 - **提交交付**：`import_human_deliverable`（卡片 checklist 行「提交产物」按钮 / 拖文件到该行）= 复制进落点
   （目录/通配用源文件 basename，精确文件允许改名交付；已存在同名拒绝）+ best-effort 登记该根 artifacts.yaml
   （produced_by = 人工交付；登记失败只回告不否决复制——文件落位检测口径已算完成）。落点根 = 绑定工作区活跃时工作树优先，否则项目根；**例外**：落点在 `papers/` 或源文件是 PDF 时强制项目根（不进 git）。**v3.74 扩展**：新增可选 `target_override`（检索结果导入固定落 `papers/imports/`，
@@ -573,10 +582,10 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   `list_schedules` 出口再丢掉注册表里已经没有的孤儿。收件箱文献条目只对还在的项目生成，禁止用文件夹名给已删项目续命。
 - **due 判定即补跑**：「最近应跑时刻 > last_run_at」即 due——应用没开错过的时间点在启动后首个 tick 自动补跑，
   多次漏跑 coalesce 只补一次；防重入用进程内 Mutex<HashSet>，tick 与「立即跑」共用。
-- **执行复用 ai.rs 无头链路**（`run_agent_task`）：与 ai_prompt_impl 唯二差异 = cwd 用项目根（不建/删临时目录、
-  不登记 internal_ai_run——token 归因给项目是对的）与 `headless_task_args`（codex 用 `-s workspace-write`，
-  巡检要写 notes/inbox.md 与 watch-seen.md，read-only 跑不了）；10 分钟超时；安全口径照旧（密钥拉起瞬间注入、
-  background_command、出站脱敏）。**codex 参数顺序坑（v3.98 实测踩坑）**：`exec` 是子命令，plan 注入的
+- **执行复用 ai.rs 无头链路**（`run_agent_task`）：cwd 用隔离 worktree（`~/ccode/watch-worktrees/<仓>/<日程id>`，
+  项目根只用于归属与播种；非 Git 项目 fail-closed），`headless_task_args`（codex 用 `-s workspace-write`，
+  巡检要写 notes/inbox.md 与 watch-seen.md，read-only 跑不了）；10 分钟超时记 `timeout` 与真失败 `error` 分列；安全口径照旧（密钥拉起瞬间注入、
+  background_command、出站脱敏）。建树后从主仓播种订阅/台账，跑完只读评审，人点「采纳进主仓」才拷产出回项目根。**codex 参数顺序坑（v3.98 实测踩坑）**：`exec` 是子命令，plan 注入的
   `-c`/`-m` 必须跟在子命令头之后，且 plan 默认带的 `-s workspace-write` 要剥离、由 headless 尾部的档位定夺
   （`-s` 单值参数，重复直接报「cannot be used multiple times」）；统一由 `compose_headless_args` 拼装
   （ai_prompt / 定时任务两路共用，有测试钉住）——`-c` 放在 exec 前会被顶层解析
@@ -587,9 +596,15 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   交互场景）。**删除 profile 时同步清设置引用**（profiles.delete → settings::clear_profile_refs：
   ai_profile_id / ai_profiles 指到已删 id 的一并清掉，持锁内联、失败只记日志），从源头减少悬空指针。
 - **投递**：跑完发 `scheduler-run-done` 事件（summary 已脱敏）→ App.tsx 全局监听弹 OS 通知（复用
-  notificationsEnabled 开关，不新增设置项）；命中正文仍由技能本身写 `notes/inbox.md`，调度器不二次搬运。
-- **已知风险**：各家 CLI 无头模式的工具放行/写权限行为 matrix 无记录、未经全量实测（qwen 无头为位置参数兜底），
-  首批用户验证后按实测校准并回写 matrix。
+  notificationsEnabled 开关，不新增设置项）；命中正文写在隔离树 `notes/inbox.md`，调度器不自动搬进主仓。
+  收件箱「去评审」打开该 Run 的只读 diff；「采纳进主仓」才拷 `notes/inbox.md`、`papers/watch-seen.md`、
+  `papers/watch-followup.md`、`notes/references.bib`（不回写 watchlist）。采纳后发 `watch-run-adopted`。
+- **分发失败必须可见**：创建或编辑非 `lit-watch` 定时任务时，若技能无法分发到所选 Agent，
+  日程本身可以保留，但弹层不得静默关闭；必须明确提示“任务已保存/创建，但技能分发失败”，
+  并让用户先修复分发再运行。行内修改运行配置同口径。
+- **机器验收的路径安全**：`machine:` 验收规则只读项目根内的真实路径；即使规则写成相对路径，
+  也必须 canonicalize 后再次通过 `path_within`，不得跟随符号链接读取项目根外文件。
+- **运行边界**：各家 CLI 无头模式的工具放行/写权限以能力表和实机验证为准（qwen 无头仍为位置参数兜底）；能力不明时在选 Agent 时给出警告，不得假装已沙箱。定时 Run 的失败原因必须留在 Run 历史，超时与真失败分列；成功产物从隔离路径进入只读评审，人采纳后才进主仓。
 - **应用层消费（v3.95，lit_watch.rs + LitWatchCard）**：雷达卡片与收件箱负责「消费」巡检产物，调度器职责切分不变。
   - **条目格式与批次标记**：inbox.md 条目新增「期刊」「中文一句话」两行（中文一句话每条必写）；精选排序 =
     相关度 × 期刊档次双因子（内置主流高刊名单，名单外不降级只作加分；期刊档次只影响排序不影响收录）；
@@ -649,6 +664,9 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 
 - 步骤可声明 `acceptance_criteria`（内容级验收条件）与 `required_skills`（必需技能子集）。`TASK.md` 同时输出预期产物、验收条件、人工事项完成判定与技能必需/可选属性；路径存在只是最低门槛。
 - 提货单只按当前步骤的 `inputs`、`optional_inputs`、`any_of_inputs` 过滤，避免无关上游产物污染任务书。
+- `acceptance_criteria` 支持显式机器规则：`machine:file:`、`machine:glob:`、`machine:count:path>=N`、`machine:contains:path::文本`；未加 `machine:` 的自然语言条件只作为人工验收提示。
+- `machine:records:path::field1,field2` 用于逐条/逐字段验收 JSON 记录；文件必须是本轮新生成的非空 JSON 数组（或 `items`/`records`/`rows` 数组），每条记录必须具备非空字段，存在 `id` 时必须唯一。路径、文件大小、记录数均受限，禁止借此读取项目根外内容。
+- 步骤 `decision_mode` 取 `auto_continue`、`soft_pause`、`hard_pause`；硬暂停仅阻止未回答的结构化 decisions，不把开放讨论种子误判为已拍板。
 - 输入/产物通配统一按 `*` 匹配，末段通配代表目录下直接文件；空文件不算已产出。Quarto PDF/DOCX 与 LaTeX PDF 统一写入 `output/`，源稿保留在 `manuscript/`。
 - **技能报告也是步骤产物**：步骤挂载 `bib-check`、`stats-check` 等只读审查技能时，必须在 `expected_artifacts` 声明报告路径，并在简报中写明报告落点；跨轮次或同一项目内可能重复执行的报告使用步骤/轮次专属文件名，避免后一次运行覆盖前一轮证据。技能允许调用方覆写默认 `outputs` 路径，但 TASK.md 与验收清单必须采用覆写后的真实路径。
 - **工作区提交与项目历史分层**：工作区改动面板的提交写入 `ccode/<name>` 任务分支；项目「历史」只读主仓库当前分支的 first-parent 主线，工作区过程提交要到合并后才以「验收合并」进入项目时间线。UI 不得把任务分支提交写成已经进入项目主线历史。

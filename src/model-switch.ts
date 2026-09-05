@@ -39,8 +39,8 @@ export const MODEL_SWITCH: Record<string, ModelSwitchInfo> = {
     hint: "模型经 --model 参数注入，启动后不能在会话内换模型",
   },
   grok: {
-    max: 1,
-    hint: "多模型注入方式未实机验证；如需切换，在 TUI 内用 Grok Build 自带的模型切换命令",
+    max: null,
+    hint: "启动时注入全部已配置模型，运行中可用 /model 或模型选择器切换",
   },
 };
 

@@ -16,8 +16,13 @@ test("能力表只收录真实 agent id", () => {
 });
 
 test("单模型 CLI 一律给「只认一个模型」提示", () => {
-  for (const id of ["gemini", "qwen", "kimi", "grok"])
+  for (const id of ["gemini", "qwen", "kimi"])
     assert.match(launchModelNote(id, 1) ?? "", /只认一个模型/, id);
+});
+
+test("Grok 支持启动时列出并运行中切换多个模型", () => {
+  assert.equal(launchModelNote("grok", 3), null);
+  assert.match(MODEL_SWITCH.grok.hint, /\/model|切换/);
 });
 
 test("codex 与 cursor 给各自的重启/参数提示", () => {

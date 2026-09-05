@@ -20,7 +20,7 @@ pub const FN_PR: &str = "pr"; // ai_draft_pr（PR 描述起草）
 pub const FN_DISTILL: &str = "distill"; // ai_distill_skill（✦ 沉淀为技能）
 pub const FN_CONFLICT: &str = "conflict"; // ai_conflict_advice（冲突选侧建议）
 pub const FN_DIGEST: &str = "digest"; // build_session_digest（◈ 提炼接力）+ ai_distill_review（评审沉淀起草）
-// 「translate」由 JS 侧（技能页翻译）作为 ai_prompt 的 fnKey 显式传入，Rust 无字面引用
+                                      // 「translate」由 JS 侧（技能页翻译）作为 ai_prompt 的 fnKey 显式传入，Rust 无字面引用
 #[allow(dead_code)]
 pub const FN_TRANSLATE: &str = "translate";
 
@@ -53,7 +53,9 @@ pub(crate) fn resolve_profile_from(
             .iter()
             .find(|p| p.id == id)
             .cloned()
-            .ok_or_else(|| format!("profile 不存在: {id}（如来自设置页的 AI 专用配置，请到设置页重选）"));
+            .ok_or_else(|| {
+                format!("profile 不存在: {id}（如来自设置页的 AI 专用配置，请到设置页重选）")
+            });
     }
     // 最近使用：先跳过官方账号（无头调用吃 OAuth，过期会甩一大段 401 日志）；
     // 显式/专属/专用槽仍尊重官方账号。没有 API 配置才回落官方。
@@ -84,17 +86,38 @@ pub(crate) fn resolve_profile_from(
 /// 各 agent 的非交互调用参数（matrix「关键启动参数」列；codex 的 provider -c 参数在 plan.args 里）
 fn headless_args(agent: &str, prompt: &str) -> Vec<String> {
     match agent {
-        "claude-code" => vec!["-p".into(), prompt.into(), "--output-format".into(), "text".into()],
+        "claude-code" => vec![
+            "-p".into(),
+            prompt.into(),
+            "--output-format".into(),
+            "text".into(),
+        ],
         // AI 无头调用只读沙箱（只生成文本，不需要写权限）
-        "codex" => vec!["exec".into(), "--skip-git-repo-check".into(), "-s".into(), "read-only".into(), prompt.into()],
+        "codex" => vec![
+            "exec".into(),
+            "--skip-git-repo-check".into(),
+            "-s".into(),
+            "read-only".into(),
+            prompt.into(),
+        ],
         "gemini" => vec!["-p".into(), prompt.into()],
         "kimi" => vec!["-p".into(), prompt.into()],
         // codebuddy 位置参数是交互模式；无头必须 -p/--print
         "codebuddy" => vec!["-p".into(), prompt.into()],
         // cursor 无头：-p/--print + --output-format text（与 claude 同形）
-        "cursor" => vec!["-p".into(), prompt.into(), "--output-format".into(), "text".into()],
+        "cursor" => vec![
+            "-p".into(),
+            prompt.into(),
+            "--output-format".into(),
+            "text".into(),
+        ],
         // grok 无头：-p/--print + --output-format json（**不读 stdin**，prompt 必须走参数）
-        "grok" => vec!["-p".into(), prompt.into(), "--output-format".into(), "json".into()],
+        "grok" => vec![
+            "-p".into(),
+            prompt.into(),
+            "--output-format".into(),
+            "json".into(),
+        ],
         "opencode" => vec!["run".into(), prompt.into()],
         // qwen 与未知 agent 按位置参数兜底
         _ => vec![prompt.into()],
@@ -109,8 +132,22 @@ fn headless_args(agent: &str, prompt: &str) -> Vec<String> {
 pub(crate) fn headless_task_args(agent: &str, prompt: &str) -> Vec<String> {
     match agent {
         // workspace-write 默认拦网，lit-watch 巡检必须联网；headless 无人可批，不开网必失败
-        "codex" => vec!["exec".into(), "--skip-git-repo-check".into(), "-s".into(), "workspace-write".into(), "-c".into(), "sandbox_workspace_write.network_access=true".into(), prompt.into()],
-        "grok" => vec!["-p".into(), prompt.into(), "--output-format".into(), "json".into(), "--yolo".into()],
+        "codex" => vec![
+            "exec".into(),
+            "--skip-git-repo-check".into(),
+            "-s".into(),
+            "workspace-write".into(),
+            "-c".into(),
+            "sandbox_workspace_write.network_access=true".into(),
+            prompt.into(),
+        ],
+        "grok" => vec![
+            "-p".into(),
+            prompt.into(),
+            "--output-format".into(),
+            "json".into(),
+            "--yolo".into(),
+        ],
         other => headless_args(other, prompt),
     }
 }
@@ -137,7 +174,8 @@ pub(crate) fn summarize_headless_error(detail: &str, expected_host: Option<&str>
                 || low.contains("oauth")
                 || low.contains("unauthorized")))
     {
-        return "官方账号登录已失效，请到连接页重新登录。后台调用请在设置里指定一套 API 配置。".into();
+        return "官方账号登录已失效，请到连接页重新登录。后台调用请在设置里指定一套 API 配置。"
+            .into();
     }
     // 密钥被 401 拒绝：按报错 URL 与期望端点的关系区分「发错端点」和「密钥本身被拒」
     if low.contains("invalid_api_key") || low.contains("incorrect api key") {
@@ -238,9 +276,16 @@ fn lock_headless_session(agent: &str) -> (Option<String>, Vec<String>) {
     (Some(id.clone()), vec!["--session-id".into(), id])
 }
 
-fn run_capture_for(agent: Option<&str>, expected_host: Option<&str>, cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -> Result<String, String> {
+fn run_capture_for(
+    agent: Option<&str>,
+    expected_host: Option<&str>,
+    cmd: &mut crate::process::BackgroundCommand,
+    timeout: Duration,
+) -> Result<String, String> {
     // stdin 置空：GUI 环境无控制终端，子进程若读 stdin 会永久挂起
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("启动 agent 失败: {e}"))?;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -262,8 +307,10 @@ fn run_capture_for(agent: Option<&str>, expected_host: Option<&str>, cmd: &mut c
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
-                let err = String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
+                let out =
+                    String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
+                let err =
+                    String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
                 if let Some(agent) = agent {
                     remember_headless_session(agent, &out, &err);
                 }
@@ -299,7 +346,10 @@ fn run_capture_for(agent: Option<&str>, expected_host: Option<&str>, cmd: &mut c
                     }
                     let summarized =
                         summarize_headless_error(format!("{out}\n{err}").trim(), expected_host);
-                    return Err(format!("AI 调用超时（{}s）。{summarized}", timeout.as_secs()));
+                    return Err(format!(
+                        "AI 调用超时（{}s）。{summarized}",
+                        timeout.as_secs()
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -349,13 +399,18 @@ pub(crate) fn ai_prompt_impl(
     let mut profile = profile;
     let selected = profile.models.first().cloned();
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
+    agents::validate_launch_compatibility(&profile, selected.as_deref())?;
     let plan = agents::launch_plan(&profile, key, selected.as_deref());
     let mut cmd = crate::process::background_command(&binary_path);
     let (lock_id, lock_args) = lock_headless_session(&profile.agent);
     if let Some(id) = &lock_id {
         let _ = crate::sessions::mark_session_internal(&profile.agent, id);
     }
-    for a in compose_headless_args(&profile.agent, &plan.args, &headless_args(&profile.agent, &prompt)) {
+    for a in compose_headless_args(
+        &profile.agent,
+        &plan.args,
+        &headless_args(&profile.agent, &prompt),
+    ) {
         cmd.arg(a);
     }
     for a in lock_args {
@@ -387,9 +442,35 @@ pub(crate) fn ai_prompt_impl(
         false,
         "discuss",
     );
+    if let Ok(r) = &run {
+        if let Err(error) = crate::runs::claim_start(&r.id)
+            .and_then(|_| crate::runs::mark_started(&r.id))
+        {
+            let _ = crate::runs::close_run_with_result(
+                &r.id,
+                None,
+                "failed",
+                None,
+                Some("无头 Run 状态登记失败"),
+            );
+            let _ = fs::remove_dir_all(&cwd);
+            return Err(error);
+        }
+    }
     let result = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, AI_TIMEOUT);
     if let Ok(r) = run {
-        let _ = crate::runs::close_run_impl(&r.id, None);
+        let status = if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        };
+        let _ = crate::runs::close_run_with_result(
+            &r.id,
+            None,
+            status,
+            None,
+            (result.is_err()).then_some("无头 Agent 执行失败"),
+        );
     }
     let _ = fs::remove_dir_all(&cwd);
     result
@@ -424,7 +505,11 @@ fn strip_sandbox_args(args: &[String]) -> Vec<String> {
 /// `-c` 放在 exec 前会被顶层解析静默吞掉（provider 回落到 ~/.codex/config.toml 的默认
 /// provider，自定义端点配置整个失效，报错的 401 极具迷惑性）；plan 的默认沙箱档剥离，
 /// 由 headless 尾部的档位决定（-s 单值参数，重复即报错）。其余 agent 无子命令，顺序照旧
-pub(crate) fn compose_headless_args(agent: &str, plan_args: &[String], headless: &[String]) -> Vec<String> {
+pub(crate) fn compose_headless_args(
+    agent: &str,
+    plan_args: &[String],
+    headless: &[String],
+) -> Vec<String> {
     // headless_task_args/headless_args 的 codex 形状固定为 ["exec", "--skip-git-repo-check", …]（有测试钉住）
     const CODEX_HEAD: usize = 2;
     if agent == "codex" && headless.len() >= CODEX_HEAD {
@@ -446,7 +531,9 @@ pub(crate) fn run_agent_task(
     timeout: Duration,
     reuse_key: Option<&str>,
     sentinel: bool,
-) -> Result<String, String> {
+    project_root: Option<&std::path::Path>,
+    existing_run_id: Option<&str>,
+) -> Result<(String, String), String> {
     let binary = agents::binary_for(&profile.agent)
         .ok_or_else(|| format!("profile 所属 agent 不支持无头调用: {}", profile.agent))?;
     let binary_path = agents::resolve_binary(binary)
@@ -455,13 +542,18 @@ pub(crate) fn run_agent_task(
     let mut profile = profile.clone();
     let selected = profile.models.first().cloned();
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
+    agents::validate_launch_compatibility(&profile, selected.as_deref())?;
     let plan = agents::launch_plan(&profile, key, selected.as_deref());
     let mut cmd = crate::process::background_command(&binary_path);
     let (lock_id, lock_args) = lock_headless_session(&profile.agent);
     if let Some(id) = &lock_id {
         let _ = crate::sessions::mark_session_internal(&profile.agent, id);
     }
-    for a in compose_headless_args(&profile.agent, &plan.args, &headless_task_args(&profile.agent, prompt)) {
+    for a in compose_headless_args(
+        &profile.agent,
+        &plan.args,
+        &headless_task_args(&profile.agent, prompt),
+    ) {
         cmd.arg(a);
     }
     for a in lock_args {
@@ -477,19 +569,32 @@ pub(crate) fn run_agent_task(
     let host = endpoint_host(profile.base_url.as_deref());
     let default_reuse = format!("headless:ai:{}", cwd.display());
     let reuse = reuse_key.unwrap_or(&default_reuse);
-    let run = crate::runs::open_headless(
-        &profile.agent,
-        &profile.id,
-        &cwd.to_string_lossy(),
-        reuse,
-        sentinel,
-        if sentinel { "write_tree" } else { "discuss" },
-    );
+    let project_root_owned = project_root.map(|p| p.to_string_lossy().into_owned());
+    let run = if let Some(id) = existing_run_id {
+        crate::runs::run_get(id.to_string())?.ok_or("预登记的 Run 不存在")?
+    } else {
+        crate::runs::open_headless_with_root(
+            project_root_owned.as_deref(),
+            &profile.agent,
+            &profile.id,
+            &cwd.to_string_lossy(),
+            reuse,
+            sentinel,
+            if sentinel { "write_tree" } else { "discuss" },
+        )?
+    };
+    crate::runs::claim_start(&run.id)?;
+    crate::runs::mark_started(&run.id)?;
     let out = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, timeout);
-    if let Ok(r) = run {
-        let _ = crate::runs::close_run_impl(&r.id, None);
-    }
-    out
+    let status = if out.is_ok() { "completed" } else { "failed" };
+    let _ = crate::runs::close_run_with_result(
+        &run.id,
+        None,
+        status,
+        None,
+        (out.is_err()).then_some("定时/无头 Agent 执行失败"),
+    );
+    out.map(|text| (text, run.id))
 }
 
 // ===== prompt 构造（纯函数，可测） =====
@@ -522,7 +627,11 @@ pub(crate) fn cap_text_middle(text: &str, max: usize) -> String {
     while !text.is_char_boundary(tail_start) {
         tail_start += 1;
     }
-    format!("{}\n...（中间省略）...\n{}", &text[..head_end], &text[tail_start..])
+    format!(
+        "{}\n...（中间省略）...\n{}",
+        &text[..head_end],
+        &text[tail_start..]
+    )
 }
 
 fn build_commit_prompt(status: &str, numstat: &str, diff: &str, style: Option<&str>) -> String {
@@ -578,7 +687,12 @@ fn build_pr_prompt(log: &str, numstat: &str) -> String {
 
 /// 评审「沉淀到下一步」的 AI 起草 prompt（功能键复用 FN_DIGEST）：
 /// 本步的提交清单 + diff 统计 + TASK.md 简报 → 给下一步的任务书草稿小节初稿（人改完才落盘）。
-fn build_review_distill_prompt(step_name: &str, task_brief: &str, log: &str, numstat: &str) -> String {
+fn build_review_distill_prompt(
+    step_name: &str,
+    task_brief: &str,
+    log: &str,
+    numstat: &str,
+) -> String {
     let brief_section = if task_brief.trim().is_empty() {
         "（本步 TASK.md 未读到，按提交材料起草）".to_string()
     } else {
@@ -618,15 +732,18 @@ fn parse_skill_draft(raw: &str) -> Result<SkillDraftDto, String> {
         (Some(s), Some(e)) if s < e => (s, e),
         _ => return Err(parse_err()),
     };
-    let draft: SkillDraftDto =
-        serde_json::from_str(&raw[s..=e]).map_err(|_| parse_err())?;
+    let draft: SkillDraftDto = serde_json::from_str(&raw[s..=e]).map_err(|_| parse_err())?;
     let name = draft.name.trim().to_lowercase();
     let description = draft.description.trim().to_string();
     let content = draft.content.trim().to_string();
     if name.is_empty() || content.is_empty() {
         return Err(parse_err());
     }
-    Ok(SkillDraftDto { name, description, content })
+    Ok(SkillDraftDto {
+        name,
+        description,
+        content,
+    })
 }
 
 fn build_conflict_prompt(branch: &str, base: &str, files: &[(String, String)]) -> String {
@@ -658,7 +775,10 @@ fn parse_conflict_advice(raw: &str, files: &[String]) -> Vec<ConflictAdviceDto> 
         .map(|f| ConflictAdviceDto {
             path: f.clone(),
             choice: "manual".into(),
-            reason: format!("AI 输出无法解析：{}", raw.chars().take(80).collect::<String>()),
+            reason: format!(
+                "AI 输出无法解析：{}",
+                raw.chars().take(80).collect::<String>()
+            ),
         })
         .collect()
 }
@@ -699,7 +819,7 @@ fn collect_commit_material(
         .transpose()?;
     let status = match &selected {
         Some(paths) => git_text_selected(cwd, &["status", "--porcelain"], paths)?,
-        None => git_text(cwd, &["status", "--porcelain"])?
+        None => git_text(cwd, &["status", "--porcelain"])?,
     };
     if status.trim().is_empty() {
         return Err("工作区干净，没有可提交的变更".into());
@@ -822,7 +942,10 @@ pub async fn ai_summarize_session(
 }
 
 #[tauri::command]
-pub async fn ai_draft_pr(store: tauri::State<'_, ProfileStore>, id: String) -> Result<String, String> {
+pub async fn ai_draft_pr(
+    store: tauri::State<'_, ProfileStore>,
+    id: String,
+) -> Result<String, String> {
     let profiles = store.list()?;
     tauri::async_runtime::spawn_blocking(move || {
         let conn = crate::workspaces::db()?;
@@ -837,7 +960,11 @@ pub async fn ai_draft_pr(store: tauri::State<'_, ProfileStore>, id: String) -> R
         if log.trim().is_empty() {
             return Err("分支上还没有提交，先提交再起草 PR".into());
         }
-        let mb = crate::workspaces::run_git(&wt, &["merge-base", &base, "HEAD"], Duration::from_secs(30))?;
+        let mb = crate::workspaces::run_git(
+            &wt,
+            &["merge-base", &base, "HEAD"],
+            Duration::from_secs(30),
+        )?;
         let numstat = crate::workspaces::run_git(
             &wt,
             &["diff", "--numstat", &format!("{mb}..HEAD")],
@@ -873,7 +1000,11 @@ pub async fn ai_distill_review(
         if log.trim().is_empty() {
             return Err("分支上还没有提交，无法起草沉淀".into());
         }
-        let mb = crate::workspaces::run_git(&wt, &["merge-base", &base, "HEAD"], Duration::from_secs(30))?;
+        let mb = crate::workspaces::run_git(
+            &wt,
+            &["merge-base", &base, "HEAD"],
+            Duration::from_secs(30),
+        )?;
         let numstat = crate::workspaces::run_git(
             &wt,
             &["diff", "--numstat", &format!("{mb}..HEAD")],
@@ -978,7 +1109,12 @@ pub async fn ai_conflict_advice(
             };
             contents.push((f.clone(), text));
         }
-        let raw = ai_prompt_impl(profiles, None, Some(FN_CONFLICT), build_conflict_prompt(&w.branch, &w.base_branch, &contents))?;
+        let raw = ai_prompt_impl(
+            profiles,
+            None,
+            Some(FN_CONFLICT),
+            build_conflict_prompt(&w.branch, &w.base_branch, &contents),
+        )?;
         Ok(parse_conflict_advice(&raw, &files))
     })
     .await
@@ -1009,6 +1145,9 @@ mod tests {
             last_used_at: last_used_at.map(String::from),
             gateway_id: None,
             slot_missing: false,
+            connection_status: String::new(),
+            model_sync_status: String::new(),
+            model_sync_note: None,
             provider_override: None,
         }
     }
@@ -1022,7 +1161,8 @@ mod tests {
         ];
         let no_hidden = &Default::default();
         // 显式 id 优先
-        let p = resolve_profile_from(profiles.clone(), Some("a".into()), None, None, no_hidden).unwrap();
+        let p = resolve_profile_from(profiles.clone(), Some("a".into()), None, None, no_hidden)
+            .unwrap();
         assert_eq!(p.id, "a");
         // 否则 last_used_at 最新者；None 排最后
         let p = resolve_profile_from(profiles.clone(), None, None, None, no_hidden).unwrap();
@@ -1045,13 +1185,22 @@ mod tests {
         ];
         let no_hidden = &Default::default();
         // 设置页专用 profile 盖过最近使用
-        let p = resolve_profile_from(profiles.clone(), None, None, Some("a".into()), no_hidden).unwrap();
+        let p = resolve_profile_from(profiles.clone(), None, None, Some("a".into()), no_hidden)
+            .unwrap();
         assert_eq!(p.id, "a");
         // 显式 id 仍最优先
-        let p = resolve_profile_from(profiles.clone(), Some("b".into()), None, Some("a".into()), no_hidden).unwrap();
+        let p = resolve_profile_from(
+            profiles.clone(),
+            Some("b".into()),
+            None,
+            Some("a".into()),
+            no_hidden,
+        )
+        .unwrap();
         assert_eq!(p.id, "b");
         // 专用 id 已被删除：明确报错（提示去设置页重选），不静默回落
-        let err = resolve_profile_from(profiles, None, None, Some("gone".into()), no_hidden).unwrap_err();
+        let err =
+            resolve_profile_from(profiles, None, None, Some("gone".into()), no_hidden).unwrap_err();
         assert!(err.contains("profile 不存在"), "{err}");
     }
 
@@ -1063,13 +1212,34 @@ mod tests {
         ];
         let no_hidden = &Default::default();
         // 功能专属盖过全局专用
-        let p = resolve_profile_from(profiles.clone(), None, Some("b".into()), Some("a".into()), no_hidden).unwrap();
+        let p = resolve_profile_from(
+            profiles.clone(),
+            None,
+            Some("b".into()),
+            Some("a".into()),
+            no_hidden,
+        )
+        .unwrap();
         assert_eq!(p.id, "b");
         // 显式 id 仍最优先
-        let p = resolve_profile_from(profiles.clone(), Some("a".into()), Some("b".into()), None, no_hidden).unwrap();
+        let p = resolve_profile_from(
+            profiles.clone(),
+            Some("a".into()),
+            Some("b".into()),
+            None,
+            no_hidden,
+        )
+        .unwrap();
         assert_eq!(p.id, "a");
         // 功能专属 id 已失效（被删）：视为不存在，回落全局专用
-        let p = resolve_profile_from(profiles.clone(), None, Some("gone".into()), Some("a".into()), no_hidden).unwrap();
+        let p = resolve_profile_from(
+            profiles.clone(),
+            None,
+            Some("gone".into()),
+            Some("a".into()),
+            no_hidden,
+        )
+        .unwrap();
         assert_eq!(p.id, "a");
         // 功能专属与全局都失效：继续回落最近使用（不报错）
         let p = resolve_profile_from(profiles, None, Some("gone".into()), None, no_hidden).unwrap();
@@ -1087,9 +1257,11 @@ mod tests {
         let p = resolve_profile_from(profiles.clone(), None, None, None, &hidden).unwrap();
         assert_eq!(p.id, "a");
         // 显式/专属槽是用户显式绑定，停用项照常尊重
-        let p = resolve_profile_from(profiles.clone(), Some("b".into()), None, None, &hidden).unwrap();
+        let p =
+            resolve_profile_from(profiles.clone(), Some("b".into()), None, None, &hidden).unwrap();
         assert_eq!(p.id, "b");
-        let p = resolve_profile_from(profiles.clone(), None, Some("b".into()), None, &hidden).unwrap();
+        let p =
+            resolve_profile_from(profiles.clone(), None, Some("b".into()), None, &hidden).unwrap();
         assert_eq!(p.id, "b");
         // 全部被停用：回落含停用项，不报错哑掉
         let all_hidden: std::collections::HashSet<String> =
@@ -1138,7 +1310,8 @@ ERROR: Your access token could not be refreshed because your refresh token was r
     #[test]
     fn summarize_headless_error_distinguishes_401_routing_from_bad_key() {
         // 用户真实报错：网关 key 被发到 api.openai.com（model_provider 未指向自定义渠道）
-        let routed_wrong = "unexpected status 401 Unauthorized: Incorrect API key provided: sk-ab***. \
+        let routed_wrong =
+            "unexpected status 401 Unauthorized: Incorrect API key provided: sk-ab***. \
             url: https://api.openai.com/v1/responses, auth error code: invalid_api_key";
         let msg = summarize_headless_error(routed_wrong, Some("ent.zetatechs.com"));
         assert!(msg.contains("OpenAI 官方端点"), "{msg}");
@@ -1160,7 +1333,8 @@ ERROR: Your access token could not be refreshed because your refresh token was r
         assert!(msg.contains("OpenAI 官方端点拒绝了密钥"), "{msg}");
         // token_revoked 优先级不变
         let revoked = "401 Unauthorized token_revoked";
-        assert!(summarize_headless_error(revoked, Some("ent.zetatechs.com")).contains("官方账号登录已失效"));
+        assert!(summarize_headless_error(revoked, Some("ent.zetatechs.com"))
+            .contains("官方账号登录已失效"));
     }
 
     #[test]
@@ -1169,7 +1343,10 @@ ERROR: Your access token could not be refreshed because your refresh token was r
             endpoint_host(Some("https://ent.zetatechs.com/v1")).as_deref(),
             Some("ent.zetatechs.com")
         );
-        assert_eq!(endpoint_host(Some("http://127.0.0.1:8317")).as_deref(), Some("127.0.0.1:8317"));
+        assert_eq!(
+            endpoint_host(Some("http://127.0.0.1:8317")).as_deref(),
+            Some("127.0.0.1:8317")
+        );
         assert_eq!(endpoint_host(Some("  ")), None);
         assert_eq!(endpoint_host(None), None);
     }
@@ -1183,7 +1360,8 @@ ERROR: Your access token could not be refreshed because your refresh token was r
         );
         assert_eq!(extract_headless_session_id("no session here"), None);
         assert_eq!(
-            extract_headless_session_id("Session ID: abcdef12-3456-7890-abcd-ef1234567890 extra").as_deref(),
+            extract_headless_session_id("Session ID: abcdef12-3456-7890-abcd-ef1234567890 extra")
+                .as_deref(),
             Some("abcdef12-3456-7890-abcd-ef1234567890")
         );
     }
@@ -1194,13 +1372,19 @@ ERROR: Your access token could not be refreshed because your refresh token was r
             headless_args("claude-code", "你好"),
             vec!["-p", "你好", "--output-format", "text"]
         );
-        assert_eq!(headless_args("codex", "你好"), vec!["exec", "--skip-git-repo-check", "-s", "read-only", "你好"]);
+        assert_eq!(
+            headless_args("codex", "你好"),
+            vec!["exec", "--skip-git-repo-check", "-s", "read-only", "你好"]
+        );
         assert_eq!(headless_args("gemini", "你好"), vec!["-p", "你好"]);
         assert_eq!(headless_args("qwen", "你好"), vec!["你好"]);
         assert_eq!(headless_args("kimi", "你好"), vec!["-p", "你好"]);
         assert_eq!(headless_args("opencode", "你好"), vec!["run", "你好"]);
         assert_eq!(headless_args("codebuddy", "你好"), vec!["-p", "你好"]);
-        assert_eq!(headless_args("cursor", "你好"), vec!["-p", "你好", "--output-format", "text"]);
+        assert_eq!(
+            headless_args("cursor", "你好"),
+            vec!["-p", "你好", "--output-format", "text"]
+        );
     }
 
     #[test]
@@ -1208,12 +1392,29 @@ ERROR: Your access token could not be refreshed because your refresh token was r
         // 定时任务要写项目文件（notes/inbox.md 等），codex 必须 workspace-write + 开网（巡检要联网）
         assert_eq!(
             headless_task_args("codex", "你好"),
-            vec!["exec", "--skip-git-repo-check", "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "你好"]
+            vec![
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+                "你好"
+            ]
         );
         // 其余 agent 与 headless_args 同形
-        assert_eq!(headless_task_args("claude-code", "你好"), headless_args("claude-code", "你好"));
-        assert_eq!(headless_task_args("kimi", "你好"), headless_args("kimi", "你好"));
-        assert_eq!(headless_task_args("opencode", "你好"), headless_args("opencode", "你好"));
+        assert_eq!(
+            headless_task_args("claude-code", "你好"),
+            headless_args("claude-code", "你好")
+        );
+        assert_eq!(
+            headless_task_args("kimi", "你好"),
+            headless_args("kimi", "你好")
+        );
+        assert_eq!(
+            headless_task_args("opencode", "你好"),
+            headless_args("opencode", "你好")
+        );
     }
 
     #[test]
@@ -1233,9 +1434,17 @@ ERROR: Your access token could not be refreshed because your refresh token was r
         assert_eq!(
             out,
             vec![
-                "exec", "--skip-git-repo-check",
-                "-c", r#"model_provider="ccode""#, "-m", "m1",
-                "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "你好"
+                "exec",
+                "--skip-git-repo-check",
+                "-c",
+                r#"model_provider="ccode""#,
+                "-m",
+                "m1",
+                "-s",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+                "你好"
             ]
         );
         // 一次性 prompt 路径：沙箱档 = read-only（plan 的 workspace-write 不重复出现）
@@ -1243,14 +1452,32 @@ ERROR: Your access token could not be refreshed because your refresh token was r
         assert_eq!(
             out_ro,
             vec![
-                "exec", "--skip-git-repo-check",
-                "-c", r#"model_provider="ccode""#, "-m", "m1",
-                "-s", "read-only", "你好"
+                "exec",
+                "--skip-git-repo-check",
+                "-c",
+                r#"model_provider="ccode""#,
+                "-m",
+                "m1",
+                "-s",
+                "read-only",
+                "你好"
             ]
         );
         // 其余 agent：plan 在前、无头参数在后（无子命令，旧顺序不变）
         let out2 = compose_headless_args("kimi", &plan, &headless_task_args("kimi", "你好"));
-        assert_eq!(out2, vec!["-c", r#"model_provider="ccode""#, "-m", "m1", "-s", "workspace-write", "-p", "你好"]);
+        assert_eq!(
+            out2,
+            vec![
+                "-c",
+                r#"model_provider="ccode""#,
+                "-m",
+                "m1",
+                "-s",
+                "workspace-write",
+                "-p",
+                "你好"
+            ]
+        );
     }
 
     #[test]
@@ -1284,7 +1511,9 @@ ERROR: Your access token could not be refreshed because your refresh token was r
         assert!(d.content.starts_with("# 规则"));
         // 无 JSON / 缺字段都要报错（前端行内提示，不落半成品）
         assert!(parse_skill_draft("我不知道").is_err());
-        assert!(parse_skill_draft("{\"name\":\"x\",\"description\":\"\",\"content\":\"\"}").is_err());
+        assert!(
+            parse_skill_draft("{\"name\":\"x\",\"description\":\"\",\"content\":\"\"}").is_err()
+        );
     }
 
     #[test]
@@ -1330,7 +1559,12 @@ ERROR: Your access token could not be refreshed because your refresh token was r
             "abc123 feat: 分析",
             "5\t1\tdata/out.csv",
         );
-        for section in ["本步验收结论", "关键决策与理由", "给下一步的要点", "风险与待办"] {
+        for section in [
+            "本步验收结论",
+            "关键决策与理由",
+            "给下一步的要点",
+            "风险与待办",
+        ] {
             assert!(p.contains(section), "缺小节 {section}");
         }
         assert!(p.contains("下一步「写论文」"));
@@ -1345,7 +1579,8 @@ ERROR: Your access token could not be refreshed because your refresh token was r
     }
 
     #[test]
-    fn prompt_builders_contain_material_and_caps() {        let diff = "line\n".repeat(3000); // ~15KB > 8KB 上限
+    fn prompt_builders_contain_material_and_caps() {
+        let diff = "line\n".repeat(3000); // ~15KB > 8KB 上限
         let p = build_commit_prompt(" M a.rs", "1\t0\ta.rs", &diff, None);
         assert!(p.contains("conventional commits"));
         assert!(p.contains(" M a.rs"));

@@ -91,6 +91,7 @@ export default function StepFlow({
   litBusy = false,
   bare = false,
   agentAttention = null,
+  runId = null,
 }: {
   projectPath: string;
   step: ProjectStepDto;
@@ -143,6 +144,8 @@ export default function StepFlow({
   /** 本步骤工作区内终端的注意力（ProjectGroup stepAttention 同一口径）：
    *  done = agent 跑完在等你——active 态的「去终端看看」旁给出完成提示 */
   agentAttention?: "confirm" | "done" | null;
+  /** Explicit Run identity for the review handoff. */
+  runId?: string | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const {
@@ -416,6 +419,7 @@ export default function StepFlow({
     if (!ws) return;
     setWorkspaceReviewRequest({
       worktreePath: ws.worktreePath,
+      runId,
       action: reviewConflict ? "resolve-conflict" : undefined,
       requestId: crypto.randomUUID(),
     });

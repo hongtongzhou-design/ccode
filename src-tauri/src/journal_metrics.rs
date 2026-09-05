@@ -109,7 +109,11 @@ fn load_from_disk() -> HashMap<String, JournalMetricsDto> {
 // ===== 解析（注入文本，便于单测） =====
 
 /// 在表头里找列位置；IF 列名随年份变化（`IF(2025)`），按前缀匹配
-fn col_index(headers: &csv::StringRecord, exact: &str, prefix_fallback: Option<&str>) -> Option<usize> {
+fn col_index(
+    headers: &csv::StringRecord,
+    exact: &str,
+    prefix_fallback: Option<&str>,
+) -> Option<usize> {
     headers
         .iter()
         .position(|h| h == exact)
@@ -139,8 +143,12 @@ fn parse_jcr(text: &str, map: &mut HashMap<String, JournalMetricsDto>) {
         .flexible(true)
         .from_reader(text.as_bytes());
     let Ok(headers) = rdr.headers() else { return };
-    let Some(i_journal) = col_index(headers, "Journal", None) else { return };
-    let Some(i_if) = col_index(headers, "IF(2025)", Some("IF(")) else { return };
+    let Some(i_journal) = col_index(headers, "Journal", None) else {
+        return;
+    };
+    let Some(i_if) = col_index(headers, "IF(2025)", Some("IF(")) else {
+        return;
+    };
     for rec in rdr.records().flatten() {
         let (Some(journal), Some(impact)) = (rec.get(i_journal), rec.get(i_if)) else {
             continue;
@@ -179,7 +187,9 @@ fn parse_fqb(text: &str, map: &mut HashMap<String, JournalMetricsDto>) {
         return;
     };
     for rec in rdr.records().flatten() {
-        let Some(journal) = rec.get(i_journal) else { continue };
+        let Some(journal) = rec.get(i_journal) else {
+            continue;
+        };
         let quartile = rec.get(i_quartile).and_then(parse_cas_quartile);
         let top = rec.get(i_top).is_some_and(|t| t.trim() == "是");
         // 两列都空（分区表尾部空行等）就不建条目
@@ -197,7 +207,10 @@ fn parse_fqb(text: &str, map: &mut HashMap<String, JournalMetricsDto>) {
 
 /// 规范化后的精确匹配（注入表，便于单测）；miss 时逐级剥掉末尾的出版商括号尾巴
 /// （巡检来源常写成「Advanced Functional Materials (Wiley)」「…（ACS）」，表里没有这截）再重试
-fn lookup_in(table: &HashMap<String, JournalMetricsDto>, journal_name: &str) -> Option<JournalMetricsDto> {
+fn lookup_in(
+    table: &HashMap<String, JournalMetricsDto>,
+    journal_name: &str,
+) -> Option<JournalMetricsDto> {
     let mut name = journal_name.trim().to_string();
     loop {
         let key = crate::lit_watch::normalize_title(&name);
@@ -249,7 +262,8 @@ fn local_downloaded_at() -> Option<String> {
 }
 
 fn compute_status() -> JournalMetricsStatusDto {
-    let any_file = metrics_dir().is_some_and(|d| d.join(JCR_FILE).exists() || d.join(FQB_FILE).exists());
+    let any_file =
+        metrics_dir().is_some_and(|d| d.join(JCR_FILE).exists() || d.join(FQB_FILE).exists());
     let t = table();
     JournalMetricsStatusDto {
         available: any_file && !t.is_empty(),
@@ -286,7 +300,9 @@ async fn fetch_csv(file_name: &str) -> Result<Vec<u8>, String> {
             Err(e) => last_err = format!("{e}"),
         }
     }
-    Err(format!("下载 {file_name} 失败（CDN 与 GitHub 均不可达）: {last_err}"))
+    Err(format!(
+        "下载 {file_name} 失败（CDN 与 GitHub 均不可达）: {last_err}"
+    ))
 }
 
 /// 落盘：先写 .tmp 再原子改名（同 lit_watch 下载口径）
@@ -445,7 +461,13 @@ Advanced Materials,2025,0935-9648/1521-4095,否,否,否,SCIE,,材料科学,1 [8/
         // 带引号逗号的 Category 字段不得错位：IF 仍取到 29.1
         let m = map.get("advancedmaterials").unwrap();
         assert_eq!(m.impact_factor.as_deref(), Some("29.1"));
-        assert_eq!(map.get("caacancerjournalforclinicians").unwrap().impact_factor.as_deref(), Some("685.2"));
+        assert_eq!(
+            map.get("caacancerjournalforclinicians")
+                .unwrap()
+                .impact_factor
+                .as_deref(),
+            Some("685.2")
+        );
         // IF 为空的刊不建条目
         assert!(map.get("noimpactjournal").is_none());
     }
@@ -480,7 +502,12 @@ Advanced Materials,2025,0935-9648/1521-4095,否,否,否,SCIE,,材料科学,1 [8/
         assert!(m.top);
         // 只在单表的刊也各有半边
         assert_eq!(map.get("2dmaterials").unwrap().impact_factor, None);
-        assert_eq!(map.get("caacancerjournalforclinicians").unwrap().cas_quartile, None);
+        assert_eq!(
+            map.get("caacancerjournalforclinicians")
+                .unwrap()
+                .cas_quartile,
+            None
+        );
     }
 
     #[test]

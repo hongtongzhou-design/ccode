@@ -436,11 +436,15 @@ export default function GatewayLibrary({
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-6" onClick={onClose}>
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="gateway-library-title"
+        tabIndex={-1}
         className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-lg border border-hairline bg-canvas p-4 shadow-lg"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-base font-medium text-l1">网关库</h2>
+          <h2 id="gateway-library-title" className="text-base font-medium text-l1">网关库</h2>
           <div className="flex gap-2">
             <button type="button" className={secondaryActionClass} onClick={() => void undoMerge()}>
               拆开自动合并
@@ -691,7 +695,7 @@ export default function GatewayLibrary({
                                 <input
                                   className={`${fieldClass} mt-0.5 w-full`}
                                   disabled={effortMode === "readonly"}
-                                  placeholder="low / medium / high"
+                                  placeholder="none / minimal / low / medium / high / xhigh / max"
                                   value={m.reasoningEffort ?? ""}
                                   onChange={(e) =>
                                     patchModel(m.id, { reasoningEffort: e.target.value || null })

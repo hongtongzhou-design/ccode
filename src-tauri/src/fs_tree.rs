@@ -709,7 +709,10 @@ fn office_walk(
         };
         if md.is_dir() {
             if name.starts_with('.')
-                || matches!(name.as_str(), "node_modules" | "target" | "dist" | "Library")
+                || matches!(
+                    name.as_str(),
+                    "node_modules" | "target" | "dist" | "Library"
+                )
             {
                 continue;
             }
@@ -874,7 +877,10 @@ mod search_tests {
         let f = dir.join("表.XLSX");
         fs::write(&f, b"PK").unwrap();
         let got = prepare_open_in_system(f.to_str().unwrap(), dir.to_str().unwrap()).unwrap();
-        assert!(got.ends_with("表.XLSX") || got.ends_with("表.xlsx"), "{got:?}");
+        assert!(
+            got.ends_with("表.XLSX") || got.ends_with("表.xlsx"),
+            "{got:?}"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -886,8 +892,8 @@ mod search_tests {
         fs::create_dir_all(&outside).unwrap();
         let secret = outside.join("a.xlsx");
         fs::write(&secret, b"PK").unwrap();
-        let err = prepare_open_in_system(secret.to_str().unwrap(), root.to_str().unwrap())
-            .unwrap_err();
+        let err =
+            prepare_open_in_system(secret.to_str().unwrap(), root.to_str().unwrap()).unwrap_err();
         assert!(err.contains("超出项目根目录"), "{err}");
 
         let sh = root.join("run.sh");
@@ -895,8 +901,8 @@ mod search_tests {
         let err = prepare_open_in_system(sh.to_str().unwrap(), root.to_str().unwrap()).unwrap_err();
         assert!(err.contains("这种文件"), "{err}");
 
-        let err = prepare_open_in_system(root.to_str().unwrap(), root.to_str().unwrap())
-            .unwrap_err();
+        let err =
+            prepare_open_in_system(root.to_str().unwrap(), root.to_str().unwrap()).unwrap_err();
         assert!(err.contains("目录"), "{err}");
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&outside).ok();

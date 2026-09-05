@@ -17,12 +17,12 @@
 | 会话存储 | `~/.claude/projects/<sanitize(cwd)>/<session-uuid>.jsonl`；目录名 = 路径中所有非字母数字字符替换为 `-` |
 | 会话格式 | JSONL。envelope：`uuid/parentUuid/timestamp/sessionId/cwd/gitBranch/version/isSidechain/type`；`type=user/assistant`，assistant 的 `message` 是原始 API 响应（content blocks + usage）；另有 `ai-title`（会话标题）、`summary`、`file-history-snapshot` 等类型，未知 type 必须跳过。**易漂移** |
 | 关键启动参数 | `--model`、`-p`（非交互）、`-c/-r`（续会话）、`--session-id`（固定会话 ID=文件名）、`--settings` |
-| 坑 | 非官方 base URL 会禁用 Remote Control 与部分 MCP 行为；CLI 自己会给配置文件做时间戳备份（我们不是唯一写者）；`CLAUDE_CONFIG_DIR` 可整体搬迁配置目录（完全隔离方案，但会话也随之隔离）；`/model` 选择器默认只显示内置别名，Ccode 用 `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL`(+`_NAME`) 注册前 4 个模型、第 5 个走 `ANTHROPIC_CUSTOM_MODEL_OPTION`，更多模型需 `/model <id>` 手输；`_NAME` 是选择器显示名（Ccode 填「配置名 · 模型」）。运行中切换（2026-08-17 v2.1.212 strings 实证，终端状态栏用）：`/model <name>` 带参直切（session 级）、`/effort <low\|medium\|high\|xhigh\|max>` 带参直切。**子 agent 模型**（2.1.226 二进制实证）：`CLAUDE_CODE_SUBAGENT_MODEL` 解析链 = env > Task 工具参数 > agent frontmatter `model:` > inherit 主模型；缺省继承主模型（第三方网关上子 agent 与主循环同档同价）。Ccode 绑定名单 ≥3 时把 HAIKU 槽（「便宜/快」角色槽）复用注入该键（DeepSeek 官方推荐同口径，见下；设为全局写入同键）。注意 env 优先级最高，会压过 frontmatter 的 model 声明（含内置 Explore 类小模型声明）。**长上下文声明**（2026-09-01 起启动注入与设为全局同键同条件）：claude 对不认识的第三方模型按 200K 上下文假设，`CLAUDE_CODE_MAX_CONTEXT_TOKENS` 在注册链确知 >200K 时注入，防长会话提前 compact |
+| 坑 | 非官方 base URL 会禁用 Remote Control 与部分 MCP 行为；CLI 自己会给配置文件做时间戳备份（我们不是唯一写者）；`CLAUDE_CONFIG_DIR` 可整体搬迁配置目录（完全隔离方案，但会话也随之隔离）；`/model` 选择器默认只显示内置别名，Ccode 用 `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL`(+`_NAME`) 注册前 4 个模型、第 5 个走 `ANTHROPIC_CUSTOM_MODEL_OPTION`，更多模型需 `/model <id>` 手输；`_NAME` 是选择器显示名（Ccode 填「配置名 · 模型」）。运行中切换（2026-08-17 v2.1.212 strings 实证，终端状态栏用）：`/model <name>` 带参直切（session 级）、`/effort <low\|medium\|high\|xhigh\|max>` 带参直切。**子 agent 模型**（2.1.226 二进制实证）：Ccode 不写 `CLAUDE_CODE_SUBAGENT_MODEL`，保留 Task/frontmatter/继承链；`--settings` 只用于屏蔽全局 env 对本次模型选择的覆盖。**长上下文声明**（2026-09-01 起启动注入与设为全局同键同条件）：claude 对不认识的第三方模型按 200K 上下文假设，`CLAUDE_CODE_MAX_CONTEXT_TOKENS` 在注册链确知 >200K 时注入，防长会话提前 compact |
 
 **Anthropic 兼容端点（2026-08-05 核实，来源均为官方文档）**：
 
 - **智谱 GLM**：`ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic` + `ANTHROPIC_AUTH_TOKEN`（国内站；国际站为 `https://api.z.ai/api/anthropic`，两站账号不通用）。官方推荐模型映射 `glm-4.7`（haiku）/ `glm-5.2[1m]`（sonnet/opus）。来源：docs.bigmodel.cn/cn/guide/develop/claude、docs.z.ai/devpack/tool/claude；实测 `POST /api/anthropic/v1/messages` 无 key 返回 401，端点存活。
-- **DeepSeek**：`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic` + `ANTHROPIC_AUTH_TOKEN`。官方推荐 `deepseek-v4-pro[1m]`（opus/sonnet）+ `deepseek-v4-flash`（haiku/subagent，`CLAUDE_CODE_SUBAGENT_MODEL`）；传入 claude 模型名会自动映射。来源：api-docs.deepseek.com/guides/anthropic_api、/quick_start/agent_integrations/claude_code。
+- **DeepSeek**：`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic` + `ANTHROPIC_AUTH_TOKEN`。官方推荐 `deepseek-v4-pro[1m]`（opus/sonnet）+ `deepseek-v4-flash`（haiku/轻量任务）；传入 claude 模型名会自动映射。来源：api-docs.deepseek.com/guides/anthropic_api、/quick_start/agent_integrations/claude_code。
 - 两家兼容端点注入方式与官方一致（同一组 env），适配器无需特殊分支；注意「坑」行所述非官方 base URL 的副作用同样适用。
 
 ## 2. Codex CLI
@@ -92,7 +92,7 @@
 
 **兼容端点（2026-08-05 核实）**：`KIMI_MODEL_PROVIDER_TYPE=openai` 可接任意 OpenAI 兼容端点（如智谱 `https://open.bigmodel.cn/api/paas/v4`、DeepSeek `https://api.deepseek.com/v1`）；`=anthropic` 理论上可接 §1 附注的 Anthropic 兼容端点，未实测。
 
-## 7. CodeBuddy Code（v2.132.0 实机验证）
+## 7. CodeBuddy Code（本机 2.137.1 实测）
 
 | 项 | 值 |
 |---|---|
@@ -120,11 +120,11 @@
 | 技能 | `~/.cursor/skills-cursor/`（**未验证 CLI 是否真读，分发走 copy 模式**）；`~/.cursor` 与 IDE 共享——**会话删除白名单必须限定 `projects/*/agent-transcripts/**/*.jsonl`** |
 | 安装 / 更新 | 官方安装脚本（`curl -fsSL https://cursor.com/install | bash`）；自更新 `cursor-agent update`（非交互）；无 brew/npm 官方包。**Windows 安装/数据路径未验证** |
 
-## 9. Grok Build（xai-org/grok-build 源码调研，2026-08；标注「待实机验证」处未经实机核对）
+## 9. Grok Build（本机 1.0.13 实测，2026-09-05）
 
 | 项 | 值 |
 |---|---|
-| 二进制 / 检测 | **`grok`**（xAI 官方终端编码 agent，二进制也叫 grok）；`grok --version` 单行输出 `grok 0.2.180 (abc1234)`（非 stable 频道追加 ` [alpha]`）；`grok version --json` 给 `{"currentVersion":"X.Y.Z (commit)","channel":"stable"}`。官方安装落 `~/.grok/bin/grok`（另尝试 `~/.local/bin`、`/usr/local/bin` symlink；resolve_binary 已把 `~/.grok/bin` 收进三平台候选目录） |
+| 二进制 / 检测 | **`grok`**（xAI 官方终端编码 agent，二进制也叫 grok）；`grok --version`；本机为 `grok 1.0.13`；`grok version --json` 给 `{"currentVersion":"X.Y.Z (commit)","channel":"stable"}`。官方安装落 `~/.grok/bin/grok`（另尝试 `~/.local/bin`、`/usr/local/bin` symlink；resolve_binary 已把 `~/.grok/bin` 收进三平台候选目录） |
 | 注入 env | **`XAI_API_KEY`**（别名 `GROK_CODE_XAI_API_KEY`）、模型 **`GROK_DEFAULT_MODEL`**、base url 覆盖 **`GROK_MODELS_BASE_URL`**（1.0.5 实机核实，自带 user-guide 11-custom-models.md：模型目录从 `{base_url}/models` 拉取、推理同走该 base，`XAI_API_KEY` 作 Bearer；另可用 `GROK_MODELS_LIST_URL` 单独覆盖列表地址）。**`GROK_DEFAULT_MODEL` 只是「偏好」**：与可用模型目录比对，不在目录里走 `preferred model not in available models, falling back` 静默回退默认——第三方模型必须配 `GROK_MODELS_BASE_URL` 让目录来自网关自身。勿用 `GROK_CLI_CHAT_PROXY_BASE_URL`（xAI 内部 CLI chat API 代理覆盖口，非推理端点，第三方端点注进去模型流量不走它）。**模型列表收敛（1.0.5 实机核实）**：`GROK_CONFIG` env 是 JSON overlay 深合并进 config.toml（白名单含 `models` 表），注入 `{"models":{"allowed_models":[...]}}` 可把选择器/`-m` 可选范围收敛到绑定模型列表（不注则网关全量目录进选择器；空列表勿注——fail-closed 全不匹配），选中模型兜底并入。**白名单边界（2026-08-31 main 源码实证，`OVERLAY_ALLOW_PATHS` fail-closed）**：只放行 `[models]` 全局块/`[features]`/少量 toolset 叶子，逐模型 `[model.<id>]` 明确除外——`api_backend`/`context_window` overlay 注不进，由中转 `/models` 目录条目字段 `apiBackend`（responses/chat_completions/messages）/`contextWindow`（缺省 256_000）或 config.toml 提供；Ccode 另经 overlay 注入请求策略的 `[models]` 全局默认（五项，见第 8 条）。凭证优先级：config.toml `api_key` > `env_key` > 登录 session token > `XAI_API_KEY` |
 | 官方端点 | xAI 官方 API 是 OpenAI chat_completions 兼容：`https://api.x.ai/v1`；config.toml `[model.<name>]` 的 `api_backend` 支持 chat_completions/responses/messages 三种 |
 | 全局配置 | `$GROK_HOME`（缺省 `~/.grok`，三平台同）下 `config.toml`（主配置 TOML：`[model.<name>]` 段 + `[mcp_servers.<name>]` 段）；项目级 `<cwd>/.grok/config.toml` 只贡献 `[mcp_servers]` 等少数段。**「设为全局默认」2026-09-01 起支持**（`global_config.rs patch_grok_config`）：写顶层 `api_key` + `[endpoints].models_base_url` + `[models].default`（首个绑定模型）与请求策略 `[models]` 全局默认（temperature/top_p/max_completion_tokens/default_reasoning_effort/extra_headers=`$VAR` 引用，`load_toml_file` 读盘时展开，密文不落盘）；`[models]` 通用键**只设不删**（防误清用户手写值）。绑定设了「API 后端」或权威层确知上下文窗口时逐模型写 `[model.<id>]` 段（api_backend / context_window / name=配置名·模型；段键 = 目录模型 id，含 `/` 的 id 自动加引号）——这是 api_backend 在 Ccode 侧的唯一通道（overlay 白名单不放行 [model.*]），中转目录声明仍优先推荐。首版不支持的旧决策作废——`[models].default` 字段与 `[endpoints]` 段已从官方 user-guide 实证 |
@@ -136,13 +136,13 @@
 | 技能 | `~/.grok/skills/<name>/SKILL.md`（目录+SKILL.md，与 Ccode SSOT 同构；另兼容读 `~/.claude/skills`、`~/.cursor/skills`）。首版未经实机验证，分发**强制 copy**（同 cursor 口径） |
 | MCP | `~/.grok/config.toml` 的 **`[mcp_servers.<name>]` 段（TOML，不是 JSON）**——stdio = `command`+`args[]`+`env{}`+`cwd`；远程 = `url`+`type`("http"/"sse"，省略时 url 以 /sse 结尾即 sse)+`headers{}`+`bearer_token_env_var`（env 读 token 注入 Authorization: Bearer，密钥不落盘）；通用 `enabled`/`startup_timeout_sec`/`tool_timeout_sec`；headers/env 值支持 `${VAR}` 引用。grok 另兼容读 `~/.claude.json`/`.mcp.json`/`~/.cursor/mcp.json`（可在 config 关）。**Ccode 首版：MCP 页只读清单（解析 TOML 段）+ 分发/写入不支持**（grok 自带 `grok mcp add` CLI；不为首版硬造 TOML 原子写管线） |
 | 安装 / 更新 | 官方脚本 `curl -fsSL https://x.ai/cli/install.sh \| bash`（mac/Linux/Git Bash）→ `~/.grok/bin/grok`；Windows `irm https://x.ai/cli/install.ps1 \| iex` → `%USERPROFILE%\.grok\bin\grok.exe`；**npm 官方包 `@xai-official/grok`**（postinstall 解压到 `~/.grok/bin/`）。自更新 `grok update`（非交互；`grok update --check --json` 机器可读）。Windows 支持官方称 best-effort |
-| 坑 | `auth.json` grok 自己原子重写（0600），我们只读；`session_search.sqlite` 不是会话本体；headless 不读 stdin；`--permission-mode plan` 门控链路未确认别用；base url 注入必须走 `GROK_MODELS_BASE_URL`（见「注入 env」行），`GROK_CLI_CHAT_PROXY_BASE_URL` 是 xAI 内部代理口勿用；`GROK_DEFAULT_MODEL` 不在目录即静默回退 |
+| 坑 | `auth.json` grok 自己原子重写（0600），我们只读；`session_search.sqlite` 不是会话本体；headless 不读 stdin；`--permission-mode plan` 门控链路未确认别用；base url 注入必须走 `GROK_MODELS_BASE_URL`（见「注入 env」行），`GROK_CLI_CHAT_PROXY_BASE_URL` 是 xAI 内部代理口勿用；`GROK_DEFAULT_MODEL` 不在目录即静默回退；当前版本支持 `-m/--model`、`--reasoning-effort`，Ccode 启动时优先使用 flag；`api_backend`/`context_window` 仍必须来自 `[model.<id>]` 或网关目录，声明非 `chat_completions` 但未登记时 Ccode 会阻止启动
 
 ## 跨 agent 共性结论
 
 1. **会话格式全是内部格式**——解析层统一防御式策略，并准备「原始 JSON 视图」作为降级。
 2. **项目归属推导各家各样**——在各自 adapter 的 `list_sessions` 里解决，对上层统一暴露 `project_path`。
-3. **注入模式没有统一三件套**——Claude/Gemini/Qwen(openai 协议）/旧 Kimi/CodeBuddy 有标准 env；Codex 靠 `-c` 参数；OpenCode 靠 `OPENCODE_CONFIG_CONTENT`；新 Kimi 靠 `KIMI_MODEL_*` 合成通道；Cursor 是 env（key/端点）+ flag（模型）混合；Grok 是 `XAI_API_KEY`+`GROK_*` env 三件套（base url 注入待实机验证）。`launch_plan { env, args }` 抽象覆盖了全部九种情况。
+3. **注入模式没有统一三件套**——Claude/Gemini/Qwen(openai 协议）/旧 Kimi/CodeBuddy 有标准 env；Codex 靠 `-c` 参数；OpenCode 靠 `OPENCODE_CONFIG_CONTENT`；新 Kimi 靠 `KIMI_MODEL_*` 合成通道；Cursor 是 env（key/端点）+ flag（模型）混合；Grok 是 `XAI_API_KEY`+`GROK_*` env 三件套，当前版本另用 `-m`/`--reasoning-effort` 直传模型与思考档。`launch_plan { env, args }` 抽象覆盖了全部九种情况。
 4. **前六家都有整体搬迁环境变量**（`CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`GEMINI_CLI_HOME`/`QWEN_HOME`/`KIMI_CODE_HOME`/`KIMI_SHARE_DIR`；CodeBuddy 未核实；Grok 有 `GROK_HOME`）——可做「完全隔离 profile」的进阶功能，但会连会话历史一起隔离，MVP 不用。
 5. **都支持非交互模式**——为「绕过终端直接驱动 agent」留了路。
 6. **只读/计划模式参数（2026-08-12 本机 `--help` 实测，「聊想法」想法期只读保护用）**：claude `--permission-mode plan`、

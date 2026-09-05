@@ -386,7 +386,11 @@ export default function CodingProjectView({
     setPage("terminal");
   }
 
-  async function startCustomRuntime(cwd: string, runtime?: CustomRuntimeDto) {
+  async function startCustomRuntime(
+    cwd: string,
+    runtime?: CustomRuntimeDto,
+    title?: string,
+  ) {
     try {
       let r = runtime;
       if (!r) {
@@ -402,20 +406,18 @@ export default function CodingProjectView({
         }
         r = list[0]!;
       }
-      const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-      const line = [r.command, ...r.args].map(q).join(" ");
       const reuseKey = `custom:${r.id}:${cwd}`;
       const run = await invoke<{ id: string }>("run_open_custom", {
         cwd,
         reuseKey,
         runId: null,
+        customRuntimeId: r.id,
       });
       setPendingTerminal({
         cwd,
-        extraEnv: {},
-        title: r.name,
-        shellOnly: true,
-        prefillCommand: line,
+        extraEnv: r.env ?? {},
+        title: title?.trim() || r.name,
+        customRuntimeId: r.id,
         reuseKey,
         runId: run.id,
         surface: "terminal",
@@ -756,15 +758,17 @@ export default function CodingProjectView({
             <p className="min-w-0 flex-1 text-base font-semibold tracking-tight text-l1">
               {name}
             </p>
-            {!sessionsOpen && ov?.isRepo && (
-              <ProjectSessionsSection
-                projectPath={repoPath}
-                extraRoots={extraRoots}
-                variant="sidebar"
-                collapsed
-                onToggle={() => setSessionsOpen(true)}
-                onError={onError}
-              />
+            {ov?.isRepo && (
+              <div className="ccode-mobile-sessions-trigger">
+                <ProjectSessionsSection
+                  projectPath={repoPath}
+                  extraRoots={extraRoots}
+                  variant="sidebar"
+                  collapsed
+                  onToggle={() => setSessionsOpen(true)}
+                  onError={onError}
+                />
+              </div>
             )}
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-1">
@@ -1040,13 +1044,23 @@ export default function CodingProjectView({
                   if (customRuntimes.length === 0) {
                     moreItems.push({
                       label: "用自定义运行时…",
-                      onSelect: () => void startCustomRuntime(w.path),
+                      onSelect: () =>
+                        void startCustomRuntime(
+                          w.path,
+                          undefined,
+                          w.lane.name || label,
+                        ),
                     });
                   } else {
                     for (const r of customRuntimes) {
                       moreItems.push({
                         label: `运行「${r.name}」`,
-                        onSelect: () => void startCustomRuntime(w.path, r),
+                        onSelect: () =>
+                          void startCustomRuntime(
+                            w.path,
+                            r,
+                            w.lane.name || label,
+                          ),
                       });
                     }
                   }
@@ -1351,7 +1365,11 @@ export default function CodingProjectView({
       </div>
 
       {ov?.isRepo && sessionsOpen && (
-        <aside className={sessionsAsideOpenClass}>
+        <aside
+          className={`${sessionsAsideOpenClass} ccode-project-sessions-rail ${
+            sessionsOpen ? "ccode-project-sessions-rail-open" : ""
+          }`}
+        >
           <div className="flex min-w-0 flex-col gap-4">
             <ProjectSessionsSection
               projectPath={repoPath}

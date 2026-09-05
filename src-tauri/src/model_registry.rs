@@ -8,8 +8,8 @@
 //! 内置表宁缺毋滥：只收官方文档明确支持思考的模型，不确定的不收（落关键词推断），
 //! 收错的能力声明（思考开了报错）比漏报更有害。
 
-use std::path::{Path, PathBuf};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,7 +39,13 @@ pub struct ModelCaps {
 }
 
 const fn caps(thinking: bool, context: Option<i64>) -> ModelCaps {
-    ModelCaps { thinking: Some(thinking), context, output: None, vision: None, api_backend: None }
+    ModelCaps {
+        thinking: Some(thinking),
+        context,
+        output: None,
+        vision: None,
+        api_backend: None,
+    }
 }
 
 /// 内置前缀表（最长前缀匹配：kimi-k2-thinking 优先于 kimi-k2）。
@@ -58,8 +64,9 @@ const BUILTIN_CAPS: &[(&str, ModelCaps)] = &[
     ("deepseek-reasoner", caps(true, None)),
     ("deepseek-r1", caps(true, None)),
     ("deepseek-chat", caps(false, None)),
-    // OpenAI（gpt-5 全系 + o 系为 reasoning 模型；4o/4.1 不是）
+    // OpenAI（gpt-5/gpt-6 全系 + o 系为 reasoning 模型；4o/4.1 不是）
     ("gpt-5", caps(true, None)),
+    ("gpt-6", caps(true, None)),
     ("o1", caps(true, None)),
     ("o3", caps(true, None)),
     ("o4-mini", caps(true, None)),
@@ -111,7 +118,9 @@ fn parse_caps_map(text: &str) -> Vec<(String, ModelCaps)> {
             if prefix.trim().is_empty() {
                 continue;
             }
-            let Some(c) = caps_v.as_object() else { continue };
+            let Some(c) = caps_v.as_object() else {
+                continue;
+            };
             let thinking = c.get("thinking").and_then(|b| b.as_bool());
             let context = c.get("context").and_then(|n| n.as_i64()).filter(|n| *n > 0);
             let output = c.get("output").and_then(|n| n.as_i64()).filter(|n| *n > 0);
@@ -124,7 +133,13 @@ fn parse_caps_map(text: &str) -> Vec<(String, ModelCaps)> {
             // 至少一个字段有效才算条目；缺省字段 = None（这层不知道，查询链继续向下）
             out.push((
                 prefix.to_lowercase(),
-                ModelCaps { thinking, context, output, vision, api_backend },
+                ModelCaps {
+                    thinking,
+                    context,
+                    output,
+                    vision,
+                    api_backend,
+                },
             ));
         }
     }
@@ -137,7 +152,9 @@ fn load_override() -> Vec<(String, ModelCaps)> {
         return Vec::new();
     }
     let out = Vec::new();
-    let Some(path) = override_path() else { return out };
+    let Some(path) = override_path() else {
+        return out;
+    };
     let Ok(text) = std::fs::read_to_string(path) else {
         return out;
     };
@@ -178,7 +195,9 @@ fn load_relay_for(gateway_id: Option<&str>) -> Vec<(String, ModelCaps)> {
     let Some(gid) = gateway_id.filter(|s| !s.is_empty()) else {
         return Vec::new(); // 无网关维度不读 relay（含无前缀旧键）
     };
-    let Some(path) = relay_cache_path() else { return Vec::new() };
+    let Some(path) = relay_cache_path() else {
+        return Vec::new();
+    };
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
@@ -190,9 +209,15 @@ fn load_relay_for(gateway_id: Option<&str>) -> Vec<(String, ModelCaps)> {
 }
 
 pub(crate) fn purge_relay_for_gateway(gateway_id: &str) {
-    let Some(path) = relay_cache_path() else { return };
-    let Ok(text) = std::fs::read_to_string(&path) else { return };
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let Some(path) = relay_cache_path() else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
     let Some(obj) = v.as_object_mut() else { return };
     let prefix = format!("{gateway_id}|");
     obj.retain(|k, _| !k.starts_with(&prefix));
@@ -203,9 +228,8 @@ pub(crate) fn purge_relay_for_gateway(gateway_id: &str) {
 
 static DB_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<Vec<(String, ModelCaps)>>>> =
     std::sync::OnceLock::new();
-static DB_PRICE_CACHE: std::sync::OnceLock<
-    std::sync::RwLock<Option<Vec<(String, (f64, f64))>>>,
-> = std::sync::OnceLock::new();
+static DB_PRICE_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<Vec<(String, (f64, f64))>>>> =
+    std::sync::OnceLock::new();
 
 fn load_db() -> Vec<(String, ModelCaps)> {
     if cfg!(test) {
@@ -278,11 +302,7 @@ pub(crate) fn parse_openrouter_models(v: &serde_json::Value) -> Vec<(String, Mod
         let context = item
             .get("context_length")
             .and_then(|n| n.as_i64())
-            .or_else(|| {
-                item.get("top_provider")?
-                    .get("context_length")?
-                    .as_i64()
-            })
+            .or_else(|| item.get("top_provider")?.get("context_length")?.as_i64())
             // grok 目录别名（parse_remote_model_value 同口径链）
             .or_else(|| item.get("contextWindow")?.as_i64())
             .or_else(|| item.get("context_window")?.as_i64())
@@ -469,8 +489,12 @@ fn parse_price_map(text: &str) -> Vec<(String, (f64, f64))> {
 /// fetch_models 顺带调用：把网关 /models 响应里的元数据合并进实测缓存。
 /// 键为 `{gatewayId}|{model}`；无网关 id 不写（禁止再写无前缀键互踩）。
 pub(crate) fn record_relay_models(v: &serde_json::Value, gateway_id: Option<&str>) {
-    let Some(gid) = gateway_id.filter(|s| !s.is_empty()) else { return };
-    let Some(path) = relay_cache_path() else { return };
+    let Some(gid) = gateway_id.filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let Some(path) = relay_cache_path() else {
+        return;
+    };
     record_relay_models_to(&path, v, gid);
 }
 
@@ -540,16 +564,10 @@ pub fn model_db_status() -> ModelDbStatusDto {
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let models = parse_caps_map(&text).len();
     let priced_models = parse_price_map(&text).len();
-    let downloaded_at = meta
-        .modified()
-        .ok()
-        .and_then(|t| {
-            let secs = t
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_secs() as i64;
-            chrono::DateTime::from_timestamp(secs, 0).map(|d| d.to_rfc3339())
-        });
+    let downloaded_at = meta.modified().ok().and_then(|t| {
+        let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+        chrono::DateTime::from_timestamp(secs, 0).map(|d| d.to_rfc3339())
+    });
     ModelDbStatusDto {
         downloaded: true,
         models,
@@ -584,29 +602,30 @@ pub async fn download_model_db() -> Result<ModelDbStatusDto, String> {
             .build()
             .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
         match client.get(url).send().await {
-            Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await
-            {
-                Ok(v) => {
-                    let entries = if is_models_dev {
-                        parse_models_dev(&v)
-                    } else {
-                        parse_openrouter_models(&v)
-                    };
-                    if entries.is_empty() {
-                        last_err = format!("{url} 响应解析为空");
-                        continue;
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(v) => {
+                        let entries = if is_models_dev {
+                            parse_models_dev(&v)
+                        } else {
+                            parse_openrouter_models(&v)
+                        };
+                        if entries.is_empty() {
+                            last_err = format!("{url} 响应解析为空");
+                            continue;
+                        }
+                        // 定价提取失败不判死：能力库仍是主用途，cost 缺失 = 那层不知道
+                        let prices = if is_models_dev {
+                            parse_models_dev_prices(&v)
+                        } else {
+                            parse_openrouter_prices(&v)
+                        };
+                        parsed = Some((entries, prices));
+                        break;
                     }
-                    // 定价提取失败不判死：能力库仍是主用途，cost 缺失 = 那层不知道
-                    let prices = if is_models_dev {
-                        parse_models_dev_prices(&v)
-                    } else {
-                        parse_openrouter_prices(&v)
-                    };
-                    parsed = Some((entries, prices));
-                    break;
+                    Err(e) => last_err = format!("{url} 解析失败: {e}"),
                 }
-                Err(e) => last_err = format!("{url} 解析失败: {e}"),
-            },
+            }
             Ok(resp) => last_err = format!("{url} 返回 HTTP {}", resp.status()),
             Err(e) => last_err = format!("{url} 请求失败: {e}"),
         }
@@ -711,6 +730,17 @@ pub(crate) fn model_context_size_authoritative_for(
     chain_field(&tables, model, |c| c.context)
 }
 
+/// Best available persisted context declaration for a CLI config file.
+/// User overrides and gateway metadata win; the public database is used only
+/// when it has an explicit value, never the generic fallback estimate.
+pub(crate) fn model_context_size_for_config(
+    model: &str,
+    gateway_id: Option<&str>,
+) -> Option<i64> {
+    let tables = [load_override(), load_relay_for(gateway_id), load_db()];
+    chain_field(&tables, model, |c| c.context)
+}
+
 /// Grok 目录声明的 apiBackend（仅权威层：用户覆盖/网关实测缓存）。
 /// 供预览说实话（「目录已声明 responses」）与设为全局参考
 pub(crate) fn model_api_backend_for(model: &str, gateway_id: Option<&str>) -> Option<String> {
@@ -761,7 +791,8 @@ pub fn model_context_size(model: &str) -> i64 {
 }
 
 pub fn model_context_size_for(model: &str, gateway_id: Option<&str>) -> i64 {
-    lookup_field_for(model, gateway_id, |c| c.context).unwrap_or_else(|| fallback_context_size(model))
+    lookup_field_for(model, gateway_id, |c| c.context)
+        .unwrap_or_else(|| fallback_context_size(model))
 }
 
 /// 输出上限兜底：models.dev 上多数 chat 模型的常见值，保守不越界
@@ -809,7 +840,11 @@ pub fn model_capability_for(model: &str, gateway_id: Option<&str>) -> ModelCapab
     } else {
         None
     };
-    let video = if normalized.contains("kimi-k3") { Some(true) } else { None };
+    let video = if normalized.contains("kimi-k3") {
+        Some(true)
+    } else {
+        None
+    };
     let tools = if normalized.contains("coder")
         || normalized.contains("gpt")
         || normalized.contains("claude")
@@ -863,6 +898,7 @@ mod tests {
         assert!(model_thinking("deepseek-reasoner"));
         assert!(!model_thinking("deepseek-chat"));
         assert!(model_thinking("gpt-5.1"));
+        assert!(model_thinking("gpt-6-astra"));
         assert!(!model_thinking("gpt-4o"));
         assert!(model_thinking("claude-sonnet-4-5"));
         assert!(!model_thinking("claude-3-5-sonnet-20241022"));
@@ -925,7 +961,11 @@ mod tests {
         let map: std::collections::HashMap<String, ModelCaps> =
             parse_openrouter_models(&v).into_iter().collect();
         let d = &map["deepseek-v3.2"];
-        assert_eq!(d.thinking, Some(true), "supported_parameters 含 reasoning → 思考");
+        assert_eq!(
+            d.thinking,
+            Some(true),
+            "supported_parameters 含 reasoning → 思考"
+        );
         assert_eq!(d.context, Some(163840));
         assert_eq!(d.output, Some(147456));
         assert_eq!(d.vision, Some(false));
@@ -990,11 +1030,23 @@ mod tests {
         // 逐字段向下补：context 用网关实测，thinking 用公共库
         let relay = vec![(
             "model-x".to_string(),
-            ModelCaps { thinking: None, context: Some(99999), output: None, vision: None, api_backend: None },
+            ModelCaps {
+                thinking: None,
+                context: Some(99999),
+                output: None,
+                vision: None,
+                api_backend: None,
+            },
         )];
         let db = vec![(
             "model-x".to_string(),
-            ModelCaps { thinking: Some(true), context: Some(11111), output: Some(4096), vision: None, api_backend: None },
+            ModelCaps {
+                thinking: Some(true),
+                context: Some(11111),
+                output: Some(4096),
+                vision: None,
+                api_backend: None,
+            },
         )];
         let tables = [relay, db];
         assert_eq!(chain_field(&tables, "model-x", |c| c.context), Some(99999));
@@ -1097,7 +1149,11 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         // 纯 id 列表不动缓存
         let before = std::fs::read_to_string(&path).unwrap();
-        record_relay_models_to(&path, &serde_json::json!({"data": [{"id": "no-meta"}]}), "gw1");
+        record_relay_models_to(
+            &path,
+            &serde_json::json!({"data": [{"id": "no-meta"}]}),
+            "gw1",
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         std::fs::remove_dir_all(&dir).ok();
     }

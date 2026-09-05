@@ -32,7 +32,8 @@ impl Default for TaskCardDto {
     }
 }
 
-/// 模型列表缓存：按「agent|protocol|base_url」落盘（config_dir/ccode/model-list-cache.json）。
+/// 模型列表缓存：按「gateway/profile identity + slot + normalized base_url + key fingerprint」落盘
+/// （config_dir/ccode/model-list-cache.json）。
 /// 大网关的全量列表是现算+传输（400+ 条动辄 10s），拉一次后复用；force=true（↻ 刷新/连通测试）才走网络。
 /// 是缓存不是用户配置：读取损坏容忍为空表，写入 tmp+rename 原子落盘，失败静默（下次拉取自然重试）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -44,11 +45,14 @@ struct ModelListCacheEntry {
 
 type ModelListCache = std::collections::HashMap<String, ModelListCacheEntry>;
 
-static MODEL_LIST_CACHE: std::sync::RwLock<Option<ModelListCache>> =
-    std::sync::RwLock::new(None);
+static MODEL_LIST_CACHE: std::sync::RwLock<Option<ModelListCache>> = std::sync::RwLock::new(None);
 
 fn model_list_cache_path() -> Option<std::path::PathBuf> {
-    Some(dirs::config_dir()?.join("ccode").join("model-list-cache.json"))
+    Some(
+        dirs::config_dir()?
+            .join("ccode")
+            .join("model-list-cache.json"),
+    )
 }
 
 fn model_list_cache_get(key: &str) -> Option<ModelListCacheEntry> {
@@ -88,6 +92,27 @@ fn model_list_cache_put(key: &str, entry: ModelListCacheEntry) {
             let _ = std::fs::rename(&tmp, &path);
         }
     }
+}
+
+fn model_list_cache_key(
+    gateway_id: Option<&str>,
+    agent: &str,
+    protocol: Option<&str>,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> String {
+    // URL 及密钥指纹必须参与缓存身份：同一个网关槽位改端点或换 key 后，
+    // 普通「获取模型」（force=false）不能继续复用旧结果。密钥本体不落盘。
+    let key_fp = api_key
+        .filter(|k| !k.trim().is_empty())
+        .map(|k| format!("{:x}", md5::compute(k.as_bytes())))
+        .unwrap_or_else(|| "no-key".into());
+    let scope = gateway_id.unwrap_or("-");
+    let normalized_base = base_url.trim().trim_end_matches('/');
+    format!(
+        "{scope}|{agent}|{}|{normalized_base}|{key_fp}",
+        protocol.unwrap_or("")
+    )
 }
 
 /// fetch_models 的返回：模型列表 + 是否命中缓存 + 拉取时间（前端展示「缓存 · HH:MM」）
@@ -149,10 +174,13 @@ pub async fn fetch_models(
         return Err("请先填写 Base URL".into());
     }
     let slot = crate::gateway_store::slot_for_agent(agent, protocol.as_deref());
-    let cache_key = match resolved_gateway.as_deref() {
-        Some(gid) => format!("{gid}|{}", slot.as_str()),
-        None => format!("{agent}|{}|{base}", protocol.as_deref().unwrap_or("")),
-    };
+    let cache_key = model_list_cache_key(
+        resolved_gateway.as_deref(),
+        agent,
+        protocol.as_deref().or(Some(slot.as_str())),
+        base,
+        key.as_deref(),
+    );
     if !force.unwrap_or(false) {
         if let Some(hit) = model_list_cache_get(&cache_key) {
             return Ok(FetchModelsResult {
@@ -196,7 +224,9 @@ pub async fn fetch_models(
                 req = req.header("Authorization", format!("Bearer {k}"));
             }
             if anthropic {
-                req = req.header("x-api-key", k).header("anthropic-version", "2023-06-01");
+                req = req
+                    .header("x-api-key", k)
+                    .header("anthropic-version", "2023-06-01");
             }
         }
         match req.send().await {
@@ -207,9 +237,8 @@ pub async fn fetch_models(
                     .text()
                     .await
                     .map_err(|e| format!("读取响应失败: {e}"))?;
-                let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-                    format!("解析响应失败: {e}；响应开头: {}", body_preview(&text))
-                })?;
+                let body: serde_json::Value = serde_json::from_str(&text)
+                    .map_err(|e| format!("解析响应失败: {e}；响应开头: {}", body_preview(&text)))?;
                 // 顺带沉淀能力元数据（OpenRouter 风格响应带 context_length/modality 等；
                 // 纯 id 列表的网关此调用为 no-op）——能力注册表的最准数据源
                 crate::model_registry::record_relay_models(&body, resolved_gateway.as_deref());
@@ -235,10 +264,7 @@ pub async fn fetch_models(
                 );
             }
             Err(e) => {
-                last_err = redact_fetch_error(
-                    &format!("{url} 请求失败: {e}"),
-                    key.as_deref(),
-                );
+                last_err = redact_fetch_error(&format!("{url} 请求失败: {e}"), key.as_deref());
             }
         }
     }
@@ -372,18 +398,65 @@ mod tests {
     #[test]
     fn parses_gemini_models_format_and_strips_prefix() {
         let v = json!({"models": [{"name": "models/gemini-3.6-flash"}, {"name": "models/gemini-3-pro"}]});
-        assert_eq!(parse_model_ids(&v), vec!["gemini-3.6-flash", "gemini-3-pro"]);
+        assert_eq!(
+            parse_model_ids(&v),
+            vec!["gemini-3.6-flash", "gemini-3-pro"]
+        );
     }
 
     #[test]
     fn parses_bare_string_array_and_tolerates_junk() {
         let v = json!(["claude-sonnet-4", " ", {"id": "claude-opus-4"}]);
-        assert_eq!(parse_model_ids(&v), vec!["claude-sonnet-4", "claude-opus-4"]);
+        assert_eq!(
+            parse_model_ids(&v),
+            vec!["claude-sonnet-4", "claude-opus-4"]
+        );
     }
 
     #[test]
     fn body_preview_flattens_whitespace() {
-        assert_eq!(body_preview("<html>\n  <body>oops</body>\n</html>"), "<html> <body>oops</body> </html>");
+        assert_eq!(
+            body_preview("<html>\n  <body>oops</body>\n</html>"),
+            "<html> <body>oops</body> </html>"
+        );
+    }
+
+    #[test]
+    fn model_cache_identity_changes_with_url_and_key() {
+        let a = model_list_cache_key(
+            Some("gw"),
+            "opencode",
+            Some("openai"),
+            "https://example.test/v1",
+            Some("key-a"),
+        );
+        let b = model_list_cache_key(
+            Some("gw"),
+            "opencode",
+            Some("openai"),
+            "https://other.test/v1",
+            Some("key-a"),
+        );
+        let c = model_list_cache_key(
+            Some("gw"),
+            "opencode",
+            Some("openai"),
+            "https://example.test/v1",
+            Some("key-b"),
+        );
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert!(!a.contains("key-a"));
+        assert_eq!(
+            a,
+            model_list_cache_key(
+                Some("gw"),
+                "opencode",
+                Some("openai"),
+                " https://example.test/v1/ ",
+                Some("key-a"),
+            )
+        );
     }
 
     #[test]
@@ -404,5 +477,4 @@ mod tests {
         assert!(out.ends_with('…'));
         assert_eq!(out.chars().count(), 201);
     }
-
 }

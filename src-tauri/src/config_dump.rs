@@ -78,19 +78,17 @@ fn collect_dump(project_root: Option<String>) -> Result<EffectiveConfigDumpDto, 
         Some(store) => store.list()?.iter().map(ProfileDumpDto::from).collect(),
         None => Vec::new(),
     };
-    let workspace_settings = project_root
-        .filter(|r| !r.trim().is_empty())
-        .map(|root| {
-            let repo = PathBuf::from(crate::sessions::expand_tilde(&root));
-            let (merged, sources) = crate::ws_settings::merged_settings_traced(&repo);
-            let files_to_copy_fallback = merged.files_to_copy.is_none();
-            WorkspaceSettingsDumpDto {
-                project_root: repo.to_string_lossy().into_owned(),
-                merged: crate::ws_settings::to_dto(merged, &crate::workspaces::FILES_TO_COPY),
-                sources,
-                files_to_copy_fallback,
-            }
-        });
+    let workspace_settings = project_root.filter(|r| !r.trim().is_empty()).map(|root| {
+        let repo = PathBuf::from(crate::sessions::expand_tilde(&root));
+        let (merged, sources) = crate::ws_settings::merged_settings_traced(&repo);
+        let files_to_copy_fallback = merged.files_to_copy.is_none();
+        WorkspaceSettingsDumpDto {
+            project_root: repo.to_string_lossy().into_owned(),
+            merged: crate::ws_settings::to_dto(merged, &crate::workspaces::FILES_TO_COPY),
+            sources,
+            files_to_copy_fallback,
+        }
+    });
     Ok(EffectiveConfigDumpDto {
         generated_at: crate::sessions::now_iso(),
         app_version: env!("CARGO_PKG_VERSION"),
@@ -170,6 +168,9 @@ mod tests {
             has_key: true,
             gateway_id: None,
             slot_missing: false,
+            connection_status: String::new(),
+            model_sync_status: String::new(),
+            model_sync_note: None,
             provider_override: None,
         }
     }
@@ -214,7 +215,10 @@ mod tests {
         assert_eq!(p["keyHint"], "···3456", "只留尾号提示");
         assert_eq!(p["accountType"], "api");
         assert!(p.get("apiKey").is_none(), "绝不包含密钥本体字段");
-        assert!(p.get("extraEnv").is_none(), "不含 extra_env（可能夹带密钥）");
+        assert!(
+            p.get("extraEnv").is_none(),
+            "不含 extra_env（可能夹带密钥）"
+        );
         assert!(p.get("model").is_none(), "旧版单模型字段不写出");
     }
 
@@ -237,7 +241,10 @@ mod tests {
             !v["capabilities"].as_array().unwrap().is_empty(),
             "能力表来自 agent_specs 注册表，不应为空"
         );
-        assert!(v["workspaceSettings"].is_null(), "无 project_root 时为 null");
+        assert!(
+            v["workspaceSettings"].is_null(),
+            "无 project_root 时为 null"
+        );
         // appSettings 是合并缺省后的完整对象
         assert!(v["appSettings"]["terminalFontSize"].is_number());
     }

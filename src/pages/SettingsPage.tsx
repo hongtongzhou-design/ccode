@@ -74,6 +74,7 @@ import {
   type CustomThemeSeeds,
 } from "../custom-theme";
 import { NAV_GROUPS, NAV_BOTTOM } from "../navigation";
+import { toast } from "../toast";
 
 // 调色板清单单一出处在 ../terminal-palettes（PALETTE_LIST，含亮暗标记）
 
@@ -247,17 +248,17 @@ const DEFAULT_COLLAPSED: Record<string, boolean> = {
   diag: true,
 };
 
-const SETTING_NAV: { id: string; label: string }[] = [
-  { id: "appearance", label: "外观" },
-  { id: "startup", label: "启动行为" },
-  { id: "hotkeys", label: "快捷键" },
-  { id: "stats", label: "统计" },
-  { id: "integration", label: "集成" },
-  { id: "network", label: "网络" },
-  { id: "update", label: "更新" },
-  { id: "diag", label: "诊断" },
-  { id: "storage", label: "数据与存储" },
-  { id: "about", label: "关于" },
+const SETTING_NAV: { id: string; label: string; group: "basic" | "advanced" }[] = [
+  { id: "appearance", label: "外观", group: "basic" },
+  { id: "startup", label: "启动行为", group: "basic" },
+  { id: "hotkeys", label: "快捷键", group: "basic" },
+  { id: "stats", label: "统计", group: "basic" },
+  { id: "integration", label: "集成", group: "advanced" },
+  { id: "network", label: "网络", group: "advanced" },
+  { id: "update", label: "更新", group: "advanced" },
+  { id: "diag", label: "诊断", group: "advanced" },
+  { id: "storage", label: "数据与存储", group: "advanced" },
+  { id: "about", label: "关于", group: "advanced" },
 ];
 
 /** 依赖体检指引文案的平台参数（installGuidance 显式传参，纯逻辑不读平台） */
@@ -486,6 +487,9 @@ function CustomRuntimeBlock({
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
+  const [cwd, setCwd] = useState("");
+  const [envText, setEnvText] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function reload() {
@@ -508,15 +512,37 @@ function CustomRuntimeBlock({
         .split(/\s+/)
         .map((s) => s.trim())
         .filter(Boolean);
+      const lines = envText
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line && !line.startsWith("#"));
+      const invalid = lines.find((line) => {
+        const i = line.indexOf("=");
+        return i <= 0 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(line.slice(0, i).trim());
+      });
+      if (invalid) throw new Error(`环境变量格式无效：${invalid}`);
+      const env = Object.fromEntries(
+        lines
+          .filter((line) => line.includes("="))
+          .map((line) => {
+            const i = line.indexOf("=");
+            return [line.slice(0, i).trim(), line.slice(i + 1)];
+          }),
+      );
       await invoke("save_custom_runtime", {
-        id: null,
+        id: editingId,
         name,
         command,
         args: argList,
+        env,
+        cwd: cwd.trim() || null,
       });
       setName("");
       setCommand("");
       setArgs("");
+      setCwd("");
+      setEnvText("");
+      setEditingId(null);
       onNotice("已保存自定义运行时");
       await reload();
     } catch (e) {
@@ -559,6 +585,20 @@ function CustomRuntimeBlock({
               >
                 删除
               </button>
+              <button
+                type="button"
+                className={`${ghostActionClass} shrink-0 text-micro`}
+                onClick={() => {
+                  setEditingId(r.id);
+                  setName(r.name);
+                  setCommand(r.command);
+                  setArgs(r.args.join(" "));
+                  setCwd(r.cwd ?? "");
+                  setEnvText(Object.entries(r.env ?? {}).map(([k, v]) => `${k}=${v}`).join("\n"));
+                }}
+              >
+                编辑
+              </button>
             </li>
           ))}
         </ul>
@@ -570,11 +610,24 @@ function CustomRuntimeBlock({
           value={name}
           onChange={(e) => setName(e.target.value)}
         />
+        <textarea
+          className={`${fieldClass} h-8 min-w-40 flex-1 py-1 font-mono text-micro`}
+          placeholder={"环境变量（可选，每行 KEY=VALUE）"}
+          value={envText}
+          onChange={(e) => setEnvText(e.target.value)}
+          rows={1}
+        />
         <input
           className={`${fieldClass} h-8 min-w-36 flex-1 py-0`}
           placeholder="命令（绝对路径或 PATH 名）"
           value={command}
           onChange={(e) => setCommand(e.target.value)}
+        />
+        <input
+          className={`${fieldClass} h-8 min-w-40 flex-1 py-0`}
+          placeholder="默认工作目录（可选）"
+          value={cwd}
+          onChange={(e) => setCwd(e.target.value)}
         />
         <input
           className={`${fieldClass} h-8 min-w-24 flex-1 py-0`}
@@ -588,7 +641,7 @@ function CustomRuntimeBlock({
           disabled={busy || !name.trim() || !command.trim()}
           onClick={() => void save()}
         >
-          添加
+          {editingId ? "保存修改" : "添加"}
         </button>
       </div>
     </div>
@@ -624,6 +677,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const autoOpenedUpdate = useRef(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState("appearance");
+  const [advancedNavOpen, setAdvancedNavOpen] = useState(false);
   // 数值输入的本地草稿（失焦/回车才提交，避免每击键一次 IPC）
   const [fontSize, setFontSize] = useState("");
   const [fontFamily, setFontFamily] = useState("JetBrains Mono");
@@ -674,7 +728,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     getVersion()
       .then(setAppVersion)
-      .catch(() => {});
+      .catch(() => toast("应用版本读取失败", "warning"));
   }, []);
   // 精确注意力标记支持清单（九家全列出，支持与否与备注以后端注册表为准）
   const [hookSupport, setHookSupport] = useState<HookSupport[]>([]);
@@ -707,18 +761,29 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       return next;
     });
   }
+  useEffect(() => {
+    if (SETTING_NAV.find((item) => item.id === activeSection)?.group === "advanced") {
+      setAdvancedNavOpen(true);
+    }
+  }, [activeSection]);
 
   // 应用数据占用：展开「数据与存储」时读一次（递归求目录大小，不适合常驻轮询）
   const [storage, setStorage] = useState<StorageEntryDto[] | null>(null);
+  const [storageError, setStorageError] = useState<string | null>(null);
   useEffect(() => {
     if (
       visible &&
       (activeSection === "storage" || !collapsed.storage) &&
       storage === null
-    )
+    ) {
+      setStorageError(null);
       invoke<StorageEntryDto[]>("app_storage_usage")
         .then(setStorage)
-        .catch(() => setStorage([]));
+        .catch(() => {
+          setStorage(null);
+          setStorageError("存储占用统计失败，请稍后重试。");
+        });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, activeSection, collapsed.storage]);
 
@@ -726,7 +791,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     if (visible) {
       loadSettings().catch((e) => setError(String(e)));
       // AI 专用配置下拉需要 profile 列表
-      if (profiles.length === 0) loadAll().catch(() => {});
+      if (profiles.length === 0)
+        loadAll().catch((e) => setError(`连接配置加载失败：${String(e)}`));
       refreshFontStatus();
       // 有未保存草稿时保留，不用文件内容覆盖
       if (!pricingDirtyRef.current) {
@@ -930,7 +996,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     try {
       await updateSettings(p);
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      setError(message);
+      toast(`设置保存失败：${message}`, "error");
     }
   }
 
@@ -963,7 +1031,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       );
       setTimeout(() => setNotice(null), 3000);
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      setError(message);
+      toast(`hooks 配置失败：${message}`, "error");
     } finally {
       setHooksBusy(null);
     }
@@ -1000,7 +1070,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setNotice("已保存，下一次统计查询生效");
       setTimeout(() => setNotice(null), 3000);
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      setError(message);
+      toast(`定价保存失败：${message}`, "error");
     } finally {
       setSavingPricing(false);
     }
@@ -1010,7 +1082,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     try {
       setLogs(await invoke<LogEntry[]>("get_app_log", { limit: 100 }));
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      setError(message);
+      toast(`日志读取失败：${message}`, "warning");
     }
   }
 
@@ -1018,8 +1092,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     try {
       const list = await invoke<FontStatus[]>("font_status");
       setFontStatus(Object.fromEntries(list.map((f) => [f.id, f.installed])));
-    } catch {
-      /* 字体检测失败不阻断设置页 */
+    } catch (e) {
+      toast(`字体状态读取失败：${String(e)}`, "warning");
     }
   }
 
@@ -1048,8 +1122,11 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         setTimeout(() => setNotice(null), 4000);
       }
     } catch (e) {
+      const message = String(e);
+      setError(message);
+      toast(`字体安装失败：${message}`, "error");
       if (!doneArrived)
-        setFontInstallResult({ ok: false, output: String(e) });
+        setFontInstallResult({ ok: false, output: message });
     } finally {
       unOut();
       unDone();
@@ -1099,7 +1176,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setNotice("应用日志已清理");
       setTimeout(() => setNotice(null), 3000);
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      setError(message);
+      toast(`清理日志失败：${message}`, "error");
     }
   }
 
@@ -1130,7 +1209,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       });
       await relaunch();
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      setError(message);
+      toast(`更新安装失败：${message}`, "error");
       setInstalling(false);
     }
   }
@@ -1144,7 +1225,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setNotice("已复制到剪贴板");
       setTimeout(() => setNotice(null), 3000);
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      setError(message);
+      toast(`复制日志失败：${message}`, "warning");
     }
   }
 
@@ -1160,7 +1243,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setTimeout(() => setNotice(null), 5000);
       await loadLogs();
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      setError(message);
+      toast(`诊断包导出失败：${message}`, "error");
     } finally {
       setDiagnosticsExporting(false);
     }
@@ -1179,7 +1264,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setNotice(`配置快照已导出：${path}`);
       setTimeout(() => setNotice(null), 5000);
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      setError(message);
+      toast(`配置快照导出失败：${message}`, "error");
     } finally {
       setConfigDumpExporting(false);
     }
@@ -1192,24 +1279,28 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       // 避免把目录交给默认应用后看起来像按钮无效。
       await revealItemInDir(path);
     } catch (e) {
-      setError(`无法打开此位置：${String(e)}`);
+      const message = `无法打开此位置：${String(e)}`;
+      setError(message);
+      toast(message, "warning");
     }
   }
 
   return (
     <PageFrame width="fluid">
       <PageHeader title="设置" meta="外观、终端与应用集成" />
-      {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
-      {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
+      {error && <p role="alert" className="mb-3 text-sm text-err-text">{error}</p>}
+      {notice && <p role="status" className="mb-3 text-xs text-ok-text">{notice}</p>}
 
       <div className="min-w-0">
         <nav
           aria-label="设置分区"
           className="mb-6 flex flex-wrap gap-1.5"
         >
-          {SETTING_NAV.map(({ id, label }) => (
+          {SETTING_NAV.map(({ id, label, group }, index) => (
+            group === "advanced" && !advancedNavOpen ? null : (
+            <div key={id} className="contents">
+              {index === 0 && <span className="basis-full text-micro font-medium uppercase tracking-wider text-l4">基础设置</span>}
             <button
-              key={id}
               type="button"
               onClick={() => {
                 setActiveSection(id);
@@ -1236,7 +1327,21 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 </span>
               )}
             </button>
+            </div>
+            )
           ))}
+          <button
+            type="button"
+            aria-expanded={advancedNavOpen}
+            onClick={() => setAdvancedNavOpen((open) => !open)}
+            className="basis-full mt-2 flex items-center gap-1 text-left text-micro font-medium uppercase tracking-wider text-l4 hover:text-l1"
+          >
+            <span aria-hidden="true">{advancedNavOpen ? "⌄" : "›"}</span>
+            高级设置
+            {!advancedNavOpen && (
+              <span className="normal-case tracking-normal text-l4">（网络、诊断、数据与存储等）</span>
+            )}
+          </button>
         </nav>
         <div className="min-w-0">
 
@@ -2488,7 +2593,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         onToggle={() => toggleSection("storage")}
       >
         {/* 用户此前完全不知道 Ccode 在硬盘上占了多少、存在哪（v3.88 补） */}
-        {storage === null ? (
+        {storageError ? (
+          <p className="py-2 text-xs text-err-text">{storageError}</p>
+        ) : storage === null ? (
           <p className="py-2 text-xs text-l4">统计中…</p>
         ) : (
           <ul>

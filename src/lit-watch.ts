@@ -547,6 +547,9 @@ export interface LitInboxCandidate {
   count: number;
   /** 最近运行时间（ISO） */
   at: string;
+  runId?: string | null;
+  isolationPath?: string | null;
+  adopted?: boolean;
 }
 
 /** 收件箱候选：最近一次成功 run 有新命中，且最近运行时间在 24h 内（逾期不再打扰） */
@@ -570,6 +573,9 @@ export function litInboxCandidates(
       projectRoot: s.projectRoot,
       count,
       at: lastOk.at,
+      runId: lastOk.runId ?? null,
+      isolationPath: lastOk.isolationPath ?? null,
+      adopted: Boolean(lastOk.adopted),
     });
   }
   return out;

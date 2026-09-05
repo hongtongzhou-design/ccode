@@ -178,9 +178,8 @@ fn emit_done(app: &AppHandle, result: FontInstallDto) -> FontInstallDto {
 
 #[tauri::command]
 pub async fn install_font(app: AppHandle, font_id: String) -> Result<FontInstallDto, String> {
-    let spec = spec_for(&font_id).ok_or_else(|| {
-        format!("不支持安装的字体：{font_id}（仅 maple / sarasa / iosevka）")
-    })?;
+    let spec = spec_for(&font_id)
+        .ok_or_else(|| format!("不支持安装的字体：{font_id}（仅 maple / sarasa / iosevka）"))?;
     let app2 = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || install_font_sync(&app2, spec))
         .await
@@ -223,8 +222,7 @@ mod tests {
 
     #[test]
     fn dir_scan_matches_top_level_and_subdirectory() {
-        let base =
-            std::env::temp_dir().join(format!("ccode-fonts-test-{}", uuid::Uuid::new_v4()));
+        let base = std::env::temp_dir().join(format!("ccode-fonts-test-{}", uuid::Uuid::new_v4()));
         let sub = base.join("nested").join("deep");
         std::fs::create_dir_all(&sub).unwrap();
         let sarasa = spec_for("sarasa").unwrap().keywords;

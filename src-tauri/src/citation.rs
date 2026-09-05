@@ -49,9 +49,7 @@ pub(crate) fn extract_cite_keys(text: &str) -> BTreeSet<String> {
                 };
                 let key: String = rest_key
                     .chars()
-                    .take_while(|c| {
-                        c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')
-                    })
+                    .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
                     .collect();
                 if !key.is_empty() {
                     keys.insert(key);
@@ -73,10 +71,7 @@ pub(crate) fn extract_bib_keys(text: &str) -> BTreeSet<String> {
             continue;
         }
         let Some(open) = t.find('{') else { continue };
-        let key: String = t[open + 1..]
-            .chars()
-            .take_while(|c| *c != ',')
-            .collect();
+        let key: String = t[open + 1..].chars().take_while(|c| *c != ',').collect();
         let key = key.trim();
         if !key.is_empty() {
             keys.insert(key.to_string());
@@ -90,7 +85,9 @@ fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
     if out.len() >= MAX_MD_FILES {
         return;
     }
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         if out.len() >= MAX_MD_FILES {
             return;
@@ -112,7 +109,10 @@ fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// references.bib 定位：根目录优先，其次 manuscript/ 下
 fn find_bib(root: &Path) -> Option<PathBuf> {
-    for candidate in [root.join("references.bib"), root.join("manuscript").join("references.bib")] {
+    for candidate in [
+        root.join("references.bib"),
+        root.join("manuscript").join("references.bib"),
+    ] {
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -259,7 +259,9 @@ mod tests {
         assert!(find_bib(&dir).is_none());
         fs::create_dir_all(dir.join("manuscript")).unwrap();
         fs::write(dir.join("manuscript").join("references.bib"), "").unwrap();
-        assert!(find_bib(&dir).unwrap().ends_with("manuscript/references.bib"));
+        assert!(find_bib(&dir)
+            .unwrap()
+            .ends_with("manuscript/references.bib"));
         fs::write(dir.join("references.bib"), "").unwrap();
         assert_eq!(find_bib(&dir).unwrap(), dir.join("references.bib"));
         let _ = fs::remove_dir_all(&dir);

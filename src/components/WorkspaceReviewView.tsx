@@ -18,6 +18,7 @@ import ImagePairView, { isImagePath } from "./ImagePairView";
 import { loadArtifactRows } from "./ArtifactChecklist";
 import { Checkbox, LoadingRows, secondaryActionClass } from "./PageFrame";
 import { defaultCommitMessage } from "../git-commit-message";
+import { toast } from "../toast";
 import { useAppStore } from "../store";
 import type {
   CitationHealthDto,
@@ -27,6 +28,8 @@ import type {
   ProjectConfigDto,
   ProjectConfigReadDto,
   ProjectStepDto,
+  RunArtifactDto,
+  RunDto,
   WorkspaceDiffDto,
   WorkspaceDto,
   WorkspaceHealthDto,
@@ -920,11 +923,14 @@ function MainRepoCommitPanel({
 
 export default function WorkspaceReviewView({
   worktreePath,
+  runId = null,
   initialAction = null,
   initialActionKey = null,
   onClose,
 }: {
   worktreePath: string;
+  /** 运行身份；存在时评审证据以该 Run 的隔离树和状态为准。 */
+  runId?: string | null;
   /** pr/archive 定位对应弹层；resolve-conflict 表示「解决冲突」入口，允许自动准备冲突两侧。 */
   initialAction?: "pr" | "archive" | "resolve-conflict" | null;
   /** 同一工作区的重复“更多操作”请求也必须重新打开相应弹层。 */
@@ -997,6 +1003,7 @@ export default function WorkspaceReviewView({
   const [prPushed, setPrPushed] = useState(false);
   const [prUrl, setPrUrl] = useState<string | null>(null);
   const [prCopied, setPrCopied] = useState(false);
+  const [reviewRailOpen, setReviewRailOpen] = useState(false);
   const initialActionRef = useRef<string | null>(null);
   const [unmerged, setUnmerged] = useState<UnmergedDto | null>(null);
   const [conflictFiles, setConflictFiles] = useState<string[]>([]);
@@ -1016,6 +1023,10 @@ export default function WorkspaceReviewView({
   const [adviceBusy, setAdviceBusy] = useState(false);
   const [fileQuery, setFileQuery] = useState("");
   const [activePath, setActivePath] = useState<string | null>(null);
+  const readOnlyRunReview = diff?.reviewOnly === true;
+  const [watchRun, setWatchRun] = useState<RunDto | null>(null);
+  const [adopting, setAdopting] = useState(false);
+  const [watchAdopted, setWatchAdopted] = useState(false);
 
   const refresh = useCallback(
     async (quiet = false) => {
@@ -1025,15 +1036,17 @@ export default function WorkspaceReviewView({
           invoke<WorkspaceDiffDto>("workspace_diff", { worktreePath }),
           invoke<GitStatusDto>("git_status", { cwd: worktreePath }),
         ]);
-        if (!nextDiff.inWorkspace) throw new Error("该目录不属于活动工作区");
-        const [nextHealth, nextUnmerged] = await Promise.all([
-          invoke<WorkspaceHealthDto>("workspace_health", {
-            id: nextDiff.workspaceId,
-          }),
-          invoke<UnmergedDto>("workspace_unmerged_files", {
-            id: nextDiff.workspaceId,
-          }),
-        ]);
+        if (!nextDiff.inWorkspace) throw new Error("该目录不属于活动工作区或 Run 隔离树");
+        const [nextHealth, nextUnmerged] = nextDiff.reviewOnly
+          ? [null, { merging: false, files: [], staleBase: false } as UnmergedDto]
+          : await Promise.all([
+              invoke<WorkspaceHealthDto>("workspace_health", {
+                id: nextDiff.workspaceId,
+              }),
+              invoke<UnmergedDto>("workspace_unmerged_files", {
+                id: nextDiff.workspaceId,
+              }),
+            ]);
         const signature = JSON.stringify({
           files: nextDiff.files,
           status: nextStatus.files,
@@ -1097,13 +1110,33 @@ export default function WorkspaceReviewView({
     setRepoPath(null);
     setMainCommitOpen(false);
     initialActionRef.current = null;
+    setWatchRun(null);
+    setWatchAdopted(false);
   }, [worktreePath]);
+
+  useEffect(() => {
+    if (!runId || !readOnlyRunReview) {
+      setWatchRun(null);
+      return;
+    }
+    let stale = false;
+    invoke<RunDto | null>("run_get", { id: runId })
+      .then((run) => {
+        if (!stale) setWatchRun(run?.taskKind === "watch" ? run : null);
+      })
+      .catch(() => {
+        if (!stale) setWatchRun(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [runId, readOnlyRunReview]);
 
   // merged_at 不在 diff/health DTO 上，按工作区单独取一次，用于「已合并」按钮态；
   // 顺带取所属主仓库路径（主仓脏拦截的内联快速提交）与上游漂移提醒（staleUpstream）
   useEffect(() => {
     const workspaceId = diff?.workspaceId;
-    if (!workspaceId) return;
+    if (!workspaceId || diff?.reviewOnly) return;
     invoke<WorkspaceDto[]>("list_workspaces")
       .then((list) => {
         const workspace = list.find((entry) => entry.id === workspaceId);
@@ -1112,7 +1145,7 @@ export default function WorkspaceReviewView({
         setStaleUpstream(workspace?.staleUpstream ?? null);
       })
       .catch(() => {});
-  }, [diff?.workspaceId]);
+  }, [diff?.workspaceId, diff?.reviewOnly]);
 
   // 可信度证据：进评审一次性读取（不轮询）。引用健康扫工作树；产物按绑定步骤的
   // 预期清单在工作树定位（同 ArtifactChecklist 机制）。任一路失败静默降级（行不显示）。
@@ -1127,6 +1160,17 @@ export default function WorkspaceReviewView({
       .catch(() => {});
     void (async () => {
       try {
+        if (runId) {
+          const rows = await invoke<RunArtifactDto[]>("run_artifacts", { runId });
+          if (!stale) {
+            const expectedRows = rows.filter((row) => row.expected);
+            setArtifacts({
+              produced: expectedRows.filter((row) => row.reviewStatus !== "not_started").length,
+              total: expectedRows.length,
+            });
+          }
+        }
+        if (diff?.reviewOnly) return;
         const list = await invoke<WorkspaceDto[]>("list_workspaces");
         const workspace = list.find((entry) => entry.id === workspaceId);
         if (!workspace) return;
@@ -1154,13 +1198,14 @@ export default function WorkspaceReviewView({
             })
             .catch(() => {});
         }
-        if (!step || step.expectedArtifacts.length === 0) return;
-        const rows = await loadArtifactRows(step.expectedArtifacts, worktreePath);
-        if (!stale) {
-          setArtifacts({
-            produced: rows.filter((row) => row.files.length > 0).length,
-            total: rows.length,
-          });
+        if (!runId && step && step.expectedArtifacts.length > 0) {
+          const rows = await loadArtifactRows(step.expectedArtifacts, worktreePath);
+          if (!stale) {
+            setArtifacts({
+              produced: rows.filter((row) => row.files.length > 0).length,
+              total: rows.length,
+            });
+          }
         }
       } catch {
         /* 静默降级 */
@@ -1169,7 +1214,7 @@ export default function WorkspaceReviewView({
     return () => {
       stale = true;
     };
-  }, [diff?.workspaceId, worktreePath]);
+  }, [diff?.workspaceId, diff?.reviewOnly, runId, worktreePath]);
 
   // 合并成功后定位流水线下一步：当前步 = 与本工作区同名的步骤；
   // 下一步 = 其后第一个尚未开步的步骤（同仓库存在同名工作区 = 已开过，含已归档）。
@@ -1812,6 +1857,10 @@ export default function WorkspaceReviewView({
   }
 
   async function finish(mode: FinishMode) {
+    if (readOnlyRunReview) {
+      setError("定时 Run 只能只读评审，不能在此提交、合并或归档");
+      return;
+    }
     if (!diff || !status || !health) return;
     const shouldCommit = status.files.length > 0;
     const shouldMerge = mode === "merge" || mode === "merge-archive";
@@ -1928,6 +1977,15 @@ export default function WorkspaceReviewView({
           </div>
 
           <div className="ml-auto flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setReviewRailOpen(true)}
+              aria-label="打开文件列表"
+              className="ccode-review-rail-trigger flex h-8 items-center gap-1.5 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+            >
+              <File aria-hidden="true" className="h-3.5 w-3.5" />
+              文件列表
+            </button>
             <button
               type="button"
               onClick={() => void refresh()}
@@ -2302,6 +2360,49 @@ export default function WorkspaceReviewView({
           </span>
         </div>
       )}
+      {readOnlyRunReview && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-hairline bg-inset px-3 py-2 text-xs text-l3">
+          <span className="min-w-0 flex-1">
+            这是定时 Run 的只读评审视图：可查看改动和产物证据；不自动写入主仓。
+          </span>
+          {watchRun && !watchAdopted && (
+            <button
+              type="button"
+              disabled={adopting}
+              className="inline-flex h-7 shrink-0 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+              onClick={() => {
+                void (async () => {
+                  const ok = await confirmDialog(
+                    "把隔离树里的 notes/inbox.md、papers/watch-seen.md 等拷进主仓？不会跑 git merge。",
+                    { confirmText: "采纳进主仓" },
+                  );
+                  if (!ok) return;
+                  setAdopting(true);
+                  try {
+                    const copied = await invoke<string[]>("adopt_watch_run", {
+                      runId: watchRun.id,
+                    });
+                    toast(
+                      copied.length > 0
+                        ? `已采纳 ${copied.length} 个文件进主仓`
+                        : "没有可采纳的文件",
+                      "success",
+                    );
+                    setWatchAdopted(true);
+                    void refresh(true);
+                  } catch (reason) {
+                    setError(String(reason));
+                  } finally {
+                    setAdopting(false);
+                  }
+                })();
+              }}
+            >
+              {adopting ? "采纳中…" : "采纳进主仓"}
+            </button>
+          )}
+        </div>
+      )}
       {result && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-ok-text">
           {/* 合并成功用白话固定文案，后端消息（含分支名）降为悬浮二级信息 */}
@@ -2413,6 +2514,14 @@ export default function WorkspaceReviewView({
         </div>
       ) : (
         <div className="flex min-h-0 flex-1">
+          {reviewRailOpen && (
+            <button
+              type="button"
+              aria-label="关闭文件列表"
+              onClick={() => setReviewRailOpen(false)}
+              className="ccode-review-rail-backdrop"
+            />
+          )}
           <main
             ref={reviewMainRef}
             onScroll={trackActiveFile}
@@ -2502,7 +2611,12 @@ export default function WorkspaceReviewView({
             )}
           </main>
 
-          <aside className="flex w-[292px] shrink-0 flex-col border-l border-hairline bg-rail2">
+          <aside
+            className={[
+              "ccode-review-rail flex w-[292px] shrink-0 flex-col border-l border-hairline bg-rail2",
+              reviewRailOpen ? "ccode-review-rail-open" : "",
+            ].join(" ")}
+          >
             <div className="shrink-0 border-b border-hairline p-3">
               <div className="flex h-8 items-center gap-2 rounded-sm border border-field bg-canvas px-2">
                 <Search
@@ -2626,6 +2740,13 @@ export default function WorkspaceReviewView({
                 </div>
               )}
             </div>
+            <button
+              type="button"
+              onClick={() => setReviewRailOpen(false)}
+              className="ccode-review-rail-close"
+            >
+              关闭文件列表
+            </button>
           </aside>
         </div>
       )}

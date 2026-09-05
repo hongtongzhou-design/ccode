@@ -15,10 +15,12 @@ import { MODEL_SWITCH } from "../model-switch";
 import { groupModelsByVendor, vendorOf } from "../model-vendors";
 import { interactiveUpdatePrefill } from "../update-routing";
 import { absTime, relTime } from "../rel-time";
+import { toast } from "../toast";
 import ContextMenu from "../components/ContextMenu";
 import GatewayLibrary from "../components/GatewayLibrary";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
+import { Modal } from "../components/Modal";
 import {
   PageFrame,
   NoticeBar,
@@ -217,7 +219,10 @@ function ProfileModal({
       setCapabilities([]);
       return;
     }
-    void invoke<ModelCapabilityDto[]>("model_capabilities", { models: form.models })
+    void invoke<ModelCapabilityDto[]>("model_capabilities", {
+      models: form.models,
+      gatewayId: catalogGatewayId,
+    })
       .then((items) => {
         if (!cancelled) setCapabilities(items);
       })
@@ -227,7 +232,7 @@ function ProfileModal({
     return () => {
       cancelled = true;
     };
-  }, [form.models]);
+  }, [form.models, catalogGatewayId]);
 
   /** 解析「每行 KEY=VALUE」文本为环境变量表，# 开头视为注释 */
   function parseEnvLines(text: string): Record<string, string> {
@@ -391,25 +396,20 @@ function ProfileModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px] ccode-fade"
-      onClick={onClose}
+    <Modal
+      open
+      title={initial ? "编辑连接" : "添加连接"}
+      description={
+        initial
+          ? "改这份绑定用的模型名单和附加环境变量。"
+          : "配置一个可在运行页启动的 Agent 连接。"
+      }
+      onClose={onClose}
+      size="md"
     >
-      <form
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        className="max-h-[min(680px,calc(100vh-32px))] w-full max-w-[500px] overflow-y-auto rounded-lg border border-field ccode-float-surface p-4 sm:p-5"
-      >
+      <form onSubmit={submit}>
         <div className="mb-4">
           <div>
-            <h2 className="text-lg font-semibold tracking-tight text-l1">
-              {initial ? "编辑连接" : "添加连接"}
-            </h2>
-            <p className="mt-1 text-xs text-l4">
-              {initial
-                ? "改这份绑定用的模型名单和附加环境变量。"
-                : "配置一个可在运行页启动的 Agent 连接。"}
-            </p>
             {!initial && (
               <div className="mt-2 flex gap-3 text-xs">
                 <label className="flex items-center gap-1 text-l2">
@@ -854,7 +854,9 @@ function ProfileModal({
                 const groups = groupModelsByVendor(pickerModels, pickerFilter);
                 if (groups.length === 0) {
                   return (
-                    <p className="px-2 py-1 text-xs text-l4">没有匹配的模型</p>
+                    <p className="px-2 py-1 text-xs text-l4">
+                      没有匹配的模型。请先同步模型目录，或清除筛选词。
+                    </p>
                   );
                 }
                 return groups.map((g) => {
@@ -988,7 +990,7 @@ function ProfileModal({
                       type="button"
                       aria-label={m.trim() ? `移除 ${m}` : "清空此行"}
                       onClick={() => removeModelSlot(i)}
-                      className="flex h-7 w-7 shrink-0 items-center justify-center text-l4 opacity-0 hover:text-err-text focus-visible:opacity-100 group-hover:opacity-100"
+                      className={`flex h-7 w-7 shrink-0 items-center justify-center text-l4 hover:text-err-text ${hoverRevealClass}`}
                     >
                       ×
                     </button>
@@ -1147,7 +1149,7 @@ function ProfileModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -1406,31 +1408,25 @@ function ValidationDialog({
     ["API / 模型", result?.api ?? null],
   ];
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 ccode-fade"
-      onClick={onClose}
-    >
-      <section
-        className="w-full max-w-xl rounded-lg border border-field ccode-float-surface"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
-          <div className="min-w-0">
-            <h2 className="truncate text-sm font-medium text-l1">
-              验证连接 · {profile.name}
-            </h2>
-            <p className="mt-0.5 text-xs text-l4">
-              密钥只在后端用于预检，不会返回界面
-            </p>
-          </div>
+    <Modal
+      open
+      title={`验证连接 · ${profile.name}`}
+      description="密钥只在后端用于预检，不会返回界面"
+      onClose={onClose}
+      size="lg"
+      dismissOnBackdrop={!running}
+      footer={
+        !running ? (
           <button
             type="button"
             onClick={onClose}
-            className="ml-auto h-8 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+            className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1"
           >
             关闭
           </button>
-        </header>
+        ) : undefined
+      }
+    >
         <div className="divide-y divide-hairline">
           {rows.map(([label, item], index) => (
             <div
@@ -1472,8 +1468,7 @@ function ValidationDialog({
             </span>
           ) : null}
         </footer>
-      </section>
-    </div>
+    </Modal>
   );
 }
 
@@ -1489,31 +1484,22 @@ function PreviewDialog({
   onClose: () => void;
 }) {
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 ccode-fade"
-      onClick={onClose}
+    <Modal
+      open
+      title={`启动计划预览 · ${profile.name}`}
+      description="启动时实际注入的完整参数与环境变量"
+      onClose={onClose}
+      size="lg"
+      footer={
+        <button
+          type="button"
+          onClick={onClose}
+          className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1"
+        >
+          关闭
+        </button>
+      }
     >
-      <section
-        className="w-full max-w-xl rounded-lg border border-field ccode-float-surface"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
-          <div className="min-w-0">
-            <h2 className="truncate text-sm font-medium text-l1">
-              启动计划预览 · {profile.name}
-            </h2>
-            <p className="mt-0.5 text-xs text-l4">
-              启动时实际注入的完整参数与环境变量
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="ml-auto h-8 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
-          >
-            关闭
-          </button>
-        </header>
         <div className="max-h-[60vh] space-y-4 overflow-y-auto px-4 py-3 text-xs">
           <div>
             <p className="mb-1 font-medium text-l2">二进制</p>
@@ -1609,8 +1595,7 @@ function PreviewDialog({
         <footer className="border-t border-hairline px-4 py-3 text-xs text-l4">
           密钥值永不显示；同名变量后者覆盖前者（附加环境变量优先级最高）
         </footer>
-      </section>
-    </div>
+    </Modal>
   );
 }
 
@@ -1634,35 +1619,37 @@ function GlobalApplyDialog({
 }) {
   const cli = applied?.validation.cli ?? null;
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 ccode-fade"
-      onClick={running ? undefined : onClose}
-    >
-      <section
-        role="alertdialog"
-        aria-modal="true"
-        className="w-full max-w-xl rounded-lg border border-field ccode-float-surface"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <header className="flex items-center gap-3 border-b border-hairline px-4 py-3">
-          <div className="min-w-0">
-            <h2 className="truncate text-sm font-medium text-l1">
-              设为全局 · {profile.name}
-            </h2>
-            <p className="mt-0.5 text-xs text-l4">
-              写入该 CLI 的全局配置文件，任何终端生效；失败自动回滚
-            </p>
-          </div>
-          {!running && (
+    <Modal
+      open
+      title={`设为全局 · ${profile.name}`}
+      description="写入该 CLI 的全局配置文件，任何终端生效；失败自动回滚"
+      onClose={onClose}
+      size="lg"
+      dismissOnBackdrop={!running}
+      footer={
+        !running ? (
+          <>
+            {applied && !applied.validation.ok && (
+              <button
+                type="button"
+                onClick={onShowValidation}
+                className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1"
+              >
+                查看验证详情
+              </button>
+            )}
             <button
               type="button"
+              autoFocus
               onClick={onClose}
-              className="ml-auto h-8 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+              className="inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-3 text-xs font-medium text-cta-text transition-[filter] hover:brightness-110"
             >
-              关闭
+              知道了
             </button>
-          )}
-        </header>
+          </>
+        ) : undefined
+      }
+    >
         <div className="px-4 py-3 text-xs leading-5">
           {running ? (
             <p className="text-l3">
@@ -1695,29 +1682,7 @@ function GlobalApplyDialog({
             </div>
           ) : null}
         </div>
-        {!running && (
-          <footer className="flex justify-end gap-2 border-t border-hairline px-4 py-3">
-            {applied && !applied.validation.ok && (
-              <button
-                type="button"
-                onClick={onShowValidation}
-                className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1"
-              >
-                查看验证详情
-              </button>
-            )}
-            <button
-              type="button"
-              autoFocus
-              onClick={onClose}
-              className="inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-3 text-xs font-medium text-cta-text transition-[filter] hover:brightness-110"
-            >
-              知道了
-            </button>
-          </footer>
-        )}
-      </section>
-    </div>
+    </Modal>
   );
 }
 
@@ -1819,7 +1784,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       );
       setOfficialStatus((prev) => ({ ...prev, [agentId]: st }));
     } catch {
-      /* 检测失败不影响页面 */
+      toast(`无法读取 ${labelOf(agentId)} 官方账号状态`, "warning");
     }
   }
 
@@ -1957,7 +1922,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       downloadedAt?: string | null;
     }>("model_db_status")
       .then(setModelDb)
-      .catch(() => {});
+      .catch(() => toast("模型能力库状态读取失败", "warning"));
   }, []);
 
   /** 下载/更新公共模型能力库：下载后接入的模型自动带上正确的上下文/输出/视觉/推理声明与定价 */
@@ -2179,7 +2144,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
   }
 
   useEffect(() => {
-    refreshGlobalBackups().catch(() => {});
+    refreshGlobalBackups().catch(() => toast("全局配置备份状态读取失败", "warning"));
   }, [profiles]);
 
   /** 已注册到 Codex 客户端的 profile id 集（config.toml 里有其 provider 定义块）：
@@ -2196,7 +2161,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
   useEffect(() => {
-    refreshClientRegistrations().catch(() => {});
+    refreshClientRegistrations().catch(() => toast("Codex 客户端注册状态读取失败", "warning"));
   }, [profiles]);
 
   /** 能力表（agent_capabilities）：「设为全局」按 setGlobal 置灰 + 原因提示，与后端报错同源 */
@@ -2206,7 +2171,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       .then((list) =>
         setCaps(Object.fromEntries(list.map((c) => [c.agent, c]))),
       )
-      .catch(() => {});
+      .catch(() => toast("Agent 能力读取失败，部分操作可能暂时不可用", "warning"));
   }, []);
 
   /** 三层验证结果镜像进 store（收件箱「配置失效」条目）；通过则摘除。原因取第一个未通过层 */
@@ -2467,7 +2432,9 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
         targetAgent,
       });
       await loadAll();
-      invoke("rebuild_tray").catch(() => {});
+      invoke("rebuild_tray").catch(() =>
+        toast("连接已复制，但托盘菜单刷新失败", "warning"),
+      );
       setNotice(`已复制连接到 ${labelOf(targetAgent)}：「${created.name}」`);
       setTimeout(() => setNotice(null), 4000);
       setError(null);
@@ -2684,7 +2651,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
           />
         </PageToolbar>
 
-        {error && <p className="mt-4 text-sm text-err-text">{error}</p>}
+        {error && <p role="alert" className="mt-4 text-sm text-err-text">{error}</p>}
         {/* npm 渠道不可用（无 Node.js）时的一键安装出口：渠道由依赖体检判定，
             渠道不允许（无 brew/winget）时保持纯文案不画按钮 */}
         {nodeInstallOffer && (
@@ -2703,7 +2670,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
             <DepInstallLog entry={depInstall.entries.node} />
           </div>
         )}
-        {notice && <p className="mt-4 text-xs text-ok-text">{notice}</p>}
+        {notice && <p role="status" className="mt-4 text-xs text-ok-text">{notice}</p>}
 
         {/* agent 分组（可折叠） */}
         <div>
@@ -2972,7 +2939,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
 
                     {list.length === 0 ? (
                       <p className="px-4 py-3 text-xs text-l4">
-                        还没有连接。用页头「+ 添加连接」绑定网关。
+                        还没有连接。点页头「+ 添加连接」绑定网关。
                       </p>
                     ) : (
                       // 行间极细分割线（hairline）替代卡片间距：整列垂直严格对齐，视觉节奏与官方账号行一致
@@ -3022,6 +2989,30 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                               tip: "这个网关还没配该协议的端点，启动栏不能选；请先在网关库补槽",
                               cls: "text-warn-text",
                             });
+                          const connectionLabels: Record<string, [string, string, string]> = {
+                            gateway_missing: ["网关缺失", "绑定的网关已不存在", "text-err-text"],
+                            slot_missing: ["缺槽", "这个网关还没配该协议的端点", "text-warn-text"],
+                            credential_missing: ["缺密钥", "网关未配置密钥且不是无密钥端点", "text-warn-text"],
+                            untested: ["未测试", "尚未完成该协议槽的连接测试", "text-l4"],
+                            probe_failed: ["测试失败", "最近一次连接测试失败，请重新测试", "text-err-text"],
+                            catalog_stale: ["目录过期", "模型目录超过 7 天未刷新", "text-warn-text"],
+                            model_unsynced: ["模型未同步", profile.modelSyncNote ?? "绑定模型与网关目录不同步", "text-warn-text"],
+                            ready: ["已连接", "最近一次连接测试通过", "text-ok-text"],
+                            official: ["官方账号", "由 CLI 官方登录态提供", "text-ok-text"],
+                          };
+                          const connection = profile.connectionStatus
+                            ? connectionLabels[profile.connectionStatus]
+                            : null;
+                          if (connection && profile.connectionStatus !== "ready" && profile.connectionStatus !== "official") {
+                            caption.push({ text: connection[0], tip: connection[1], cls: connection[2] });
+                          }
+                          if (profile.modelSyncStatus === "stale" || profile.modelSyncStatus === "missing") {
+                            caption.push({
+                              text: profile.modelSyncStatus === "missing" ? "绑定模型失效" : "目录模型失效",
+                              tip: profile.modelSyncNote ?? "绑定模型与网关目录未同步",
+                              cls: "text-warn-text",
+                            });
+                          }
                           return (
                           <li
                             key={profile.id}
@@ -3149,6 +3140,21 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                               >
                                 <SquareArrowOutUpRight size={14} strokeWidth={1.8} aria-hidden="true" />
                               </button>
+                              {profile.accountType !== "official" &&
+                                profile.gatewayId &&
+                                (profile.connectionStatus === "catalog_stale" ||
+                                  profile.connectionStatus === "model_unsynced" ||
+                                  profile.modelSyncStatus === "stale" ||
+                                  profile.modelSyncStatus === "missing") && (
+                                  <button
+                                    type="button"
+                                    className={`${rowActionClass} text-warn-text`}
+                                    title="刷新网关模型目录，不会自动改写当前绑定"
+                                    onClick={() => void refreshGatewayCatalog(profile)}
+                                  >
+                                    同步目录
+                                  </button>
+                                )}
                               <button
                                 type="button"
                                 onClick={() => setModal({ initial: profile })}

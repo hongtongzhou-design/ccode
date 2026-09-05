@@ -684,6 +684,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
             api_key_fields: &[],
         }),
         model_switch: ModelSwitch::None,
+        // CodeBuddy exposes --effort at launch; no runtime /effort command is assumed.
         effort_levels: None,
         submit_csi_u: false,
         set_global: SetGlobalCap::Supported,
@@ -800,8 +801,12 @@ static AGENT_SPECS: &[AgentSpec] = &[
             detection_note: Some("凭证在 ~/.grok/auth.json（scope→GrokAuth 顶层 map，grok 自己原子重写）；「已连接」仅代表已登录——auth.json 不含订阅/会员字段，无会员的免费账号登录后同样显示已连接，能否用官方额度以实际使用为准"),
             api_key_fields: &[],
         }),
-        model_switch: ModelSwitch::None,
-        effort_levels: None,
+        // Grok 1.0.x supports /model and /effort in the running TUI.
+        model_switch: ModelSwitch::Direct("/model {model}"),
+        effort_levels: Some((
+            &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+            "/effort {level}",
+        )),
         submit_csi_u: false,
         // 「设为全局默认」（2026-09-01 落地）：~/.grok/config.toml 写顶层 api_key +
         // [endpoints].models_base_url + [models].default/请求策略全局默认；
@@ -877,7 +882,10 @@ pub(crate) fn policy_channel_note(agent: &str) -> Option<&'static str> {
 pub(crate) fn effort_options(agent: &str) -> Vec<&'static str> {
     match agent {
         "claude-code" => vec!["low", "medium", "high", "xhigh", "max"],
-        "codex" => vec!["low", "medium", "high"],
+        "codebuddy" => vec!["minimal", "low", "medium", "high", "xhigh", "max"],
+        // Codex 新版模型（包括第三方兼容端点上的 gpt-6 系列）可声明更高推理档。
+        // 端点不支持时仍由其自身协议返回错误或忽略。
+        "codex" => vec!["low", "medium", "high", "xhigh", "ultra", "max"],
         "opencode" => vec!["none", "minimal", "low", "medium", "high"],
         "grok" => vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"],
         // kimi 合法值随模型 catalog 漂移（low/medium/high/xhigh/max/on/off），env 通道无闭集
@@ -904,23 +912,42 @@ pub struct RequestPolicySupportDto {
 /// - "unsupported" = 协议支持但 CLI 无用户入口；"unknown" = 未实证
 pub(crate) fn request_policy_support(agent: &str) -> RequestPolicySupportDto {
     let row = |temperature, top_p, max_output_tokens, reasoning_effort, custom_headers| {
-        RequestPolicySupportDto { temperature, top_p, max_output_tokens, reasoning_effort, custom_headers }
+        RequestPolicySupportDto {
+            temperature,
+            top_p,
+            max_output_tokens,
+            reasoning_effort,
+            custom_headers,
+        }
     };
     match agent {
         // claude-code v2.x 二进制实证：temperature/top_p 经 CLAUDE_CODE_EXTRA_BODY（JSON 对象
         // 展开进请求体）；max_output_tokens=CLAUDE_CODE_MAX_OUTPUT_TOKENS；
         // effort=CLAUDE_CODE_EFFORT_LEVEL（同 /effort）；headers=ANTHROPIC_CUSTOM_HEADERS
         "claude-code" => row("inject", "inject", "inject", "inject", "inject"),
-        // codebuddy 是 claude-code fork 但 env 前缀独立且无 EXTRA_BODY/EFFORT 入口：
-        // CODEBUDDY_CODE_MAX_OUTPUT_TOKENS / CODEBUDDY_CUSTOM_HEADERS 实证，其余无通道
-        "codebuddy" => row("unsupported", "unsupported", "inject", "unknown", "inject"),
+        // codebuddy 是 claude-code fork 但 env 前缀独立：
+        // CODEBUDDY_CODE_MAX_OUTPUT_TOKENS / CODEBUDDY_CUSTOM_HEADERS 实证；
+        // --effort 是当前版本的启动参数通道，temperature/top_p 仍无入口。
+        "codebuddy" => row("unsupported", "unsupported", "inject", "inject", "inject"),
         // gemini settings schema 无 temperature/topP/maxOutputTokens 键（bundle 实证），
         // generationConfig 仅出现在 API 请求构造路径，非用户配置通道
-        "gemini" => row("unsupported", "unsupported", "unsupported", "unknown", "unknown"),
+        "gemini" => row(
+            "unsupported",
+            "unsupported",
+            "unsupported",
+            "unknown",
+            "unknown",
+        ),
         // codex：temperature/top_p 仅存在于 wire schema（ModelPreferences），config 无键；
         // max_output_tokens 字符串全部是 exec pragma（工具输出截断）非模型请求；
         // reasoning_effort = config model_reasoning_effort；headers = provider http_headers/env_http_headers
-        "codex" => row("unsupported", "unsupported", "unsupported", "inject", "inject"),
+        "codex" => row(
+            "unsupported",
+            "unsupported",
+            "unsupported",
+            "inject",
+            "inject",
+        ),
         // opencode config schema 实证：agent/model options 含 temperature/topP/maxOutputTokens/
         // reasoningEffort（枚举），provider options 支持 headers
         "opencode" => row("inject", "inject", "inject", "inject", "inject"),
@@ -955,10 +982,7 @@ fn flag(supported: bool, reason: Option<&'static str>) -> CapabilityFlagDto {
 
 fn readonly_cap(spec: &AgentSpec) -> CapabilityFlagDto {
     if spec.readonly_args.is_empty() {
-        flag(
-            false,
-            Some("没有只读/计划模式参数，只有对话里的软约束"),
-        )
+        flag(false, Some("没有只读/计划模式参数，只有对话里的软约束"))
     } else {
         flag(true, None)
     }
@@ -990,8 +1014,14 @@ pub fn agent_capabilities() -> Vec<AgentCapabilitiesDto> {
                 McpWriteCap::ReadOnly(r) => flag(false, Some(r)),
             },
             skill_dist: match s.skill_dist {
-                SkillDist::SymlinkOrCopy => SkillDistDto { mode: "symlinkOrCopy", reason: None },
-                SkillDist::CopyOnly(r) => SkillDistDto { mode: "copyOnly", reason: Some(r) },
+                SkillDist::SymlinkOrCopy => SkillDistDto {
+                    mode: "symlinkOrCopy",
+                    reason: None,
+                },
+                SkillDist::CopyOnly(r) => SkillDistDto {
+                    mode: "copyOnly",
+                    reason: Some(r),
+                },
             },
             request_policy: request_policy_support(s.id),
             effort_options: effort_options(s.id),
@@ -1190,8 +1220,14 @@ mod tests {
             }
             // 官方账号规格（若填）：auth 文件与 env 净化清单不能为空（login_cmd 允许为空 = 裸启动 TUI 登录）
             if let Some(oa) = &spec.official_account {
-                assert!(!oa.auth_file_paths.is_empty(), "{id} 官方账号缺 auth 文件路径");
-                assert!(!oa.env_purge_list.is_empty(), "{id} 官方账号缺 env 净化清单");
+                assert!(
+                    !oa.auth_file_paths.is_empty(),
+                    "{id} 官方账号缺 auth 文件路径"
+                );
+                assert!(
+                    !oa.env_purge_list.is_empty(),
+                    "{id} 官方账号缺 env 净化清单"
+                );
             }
         }
     }
@@ -1222,7 +1258,8 @@ mod tests {
             );
         }
         assert!(
-            dirs.iter().any(|d| d.ends_with(std::path::Path::new("Git").join("bin"))),
+            dirs.iter()
+                .any(|d| d.ends_with(std::path::Path::new("Git").join("bin"))),
             "缺 Git\\bin: {dirs:?}"
         );
     }
@@ -1232,7 +1269,11 @@ mod tests {
     fn spec_lookup_round_trips_and_ids_are_unique() {
         for spec in all_agent_specs() {
             let found = agent_spec(spec.id).expect("按 id 应能查回规格");
-            assert!(std::ptr::eq(spec, found), "{} 查回的不是同一张规格", spec.id);
+            assert!(
+                std::ptr::eq(spec, found),
+                "{} 查回的不是同一张规格",
+                spec.id
+            );
         }
         let mut ids: Vec<&str> = all_agent_specs().iter().map(|s| s.id).collect();
         let before = ids.len();
@@ -1289,7 +1330,11 @@ mod tests {
     fn second_batch_official_account_specs_match_verified_research() {
         // kimi：login 子命令（设备码）；凭证目录扫描（文件名随 provider 名变化）；
         // purge 覆盖 KIMI_MODEL_* 合成通道 + 旧版 KIMI_API_KEY/KIMI_BASE_URL
-        let kimi = agent_spec("kimi").unwrap().official_account.as_ref().unwrap();
+        let kimi = agent_spec("kimi")
+            .unwrap()
+            .official_account
+            .as_ref()
+            .unwrap();
         assert_eq!(kimi.login_cmd, &["login"]);
         assert_eq!(kimi.auth_file_paths, &[".kimi-code/credentials/*"]);
         for var in [
@@ -1303,7 +1348,11 @@ mod tests {
             assert!(kimi.env_purge_list.contains(&var), "kimi purge 缺 {var}");
         }
         // qwen：auth 子命令已移除 → login_cmd 空（裸拉起 TUI /auth）；凭证 oauth_creds.json
-        let qwen = agent_spec("qwen").unwrap().official_account.as_ref().unwrap();
+        let qwen = agent_spec("qwen")
+            .unwrap()
+            .official_account
+            .as_ref()
+            .unwrap();
         assert!(qwen.login_cmd.is_empty());
         assert_eq!(qwen.auth_file_paths, &[".qwen/oauth_creds.json"]);
         assert!(qwen.env_purge_list.contains(&"OPENAI_API_KEY"));
@@ -1354,7 +1403,15 @@ mod tests {
         assert!(agent_spec("kimi").unwrap().packaging.interactive_tui);
         assert!(agent_spec("opencode").unwrap().packaging.interactive_tui);
         // claude/codebuddy/cursor/grok 的自更新是普通非交互命令，其余 agent 无自更新渠道，均不得误标
-        for id in ["claude-code", "codex", "gemini", "qwen", "codebuddy", "cursor", "grok"] {
+        for id in [
+            "claude-code",
+            "codex",
+            "gemini",
+            "qwen",
+            "codebuddy",
+            "cursor",
+            "grok",
+        ] {
             assert!(
                 !agent_spec(id).unwrap().packaging.interactive_tui,
                 "{id} 不应标 interactive_tui"
@@ -1395,7 +1452,16 @@ mod tests {
                 "Grok 的 MCP 分发暂不支持（TOML [mcp_servers] 段与 model 同文件）；请用 `grok mcp add` 或编辑 ~/.grok/config.toml"
             )
         );
-        for id in ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi", "codebuddy", "cursor"] {
+        for id in [
+            "claude-code",
+            "codex",
+            "gemini",
+            "qwen",
+            "opencode",
+            "kimi",
+            "codebuddy",
+            "cursor",
+        ] {
             assert_eq!(
                 agent_spec(id).unwrap().mcp_write,
                 McpWriteCap::Full,
@@ -1409,7 +1475,15 @@ mod tests {
             };
             assert!(!reason.is_empty(), "{id} 缺原因文案");
         }
-        for id in ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi", "codebuddy"] {
+        for id in [
+            "claude-code",
+            "codex",
+            "gemini",
+            "qwen",
+            "opencode",
+            "kimi",
+            "codebuddy",
+        ] {
             assert_eq!(
                 agent_spec(id).unwrap().skill_dist,
                 SkillDist::SymlinkOrCopy,
@@ -1457,10 +1531,22 @@ mod tests {
             .unwrap();
         assert!(grok_caps.headless_write.supported);
         assert!(grok_caps.headless_write.reason.unwrap().contains("无沙箱"));
-        assert_eq!(agent_spec("qwen").unwrap().effort_levels.map(|(l, _)| l.len()), Some(5));
+        assert_eq!(
+            agent_spec("qwen")
+                .unwrap()
+                .effort_levels
+                .map(|(l, _)| l.len()),
+            Some(5)
+        );
         assert_eq!(agent_spec("gemini").unwrap().effort_levels, None);
         assert_eq!(agent_spec("codex").unwrap().effort_levels, None);
-        assert_eq!(agent_spec("grok").unwrap().effort_levels, None);
+        assert_eq!(
+            agent_spec("grok")
+                .unwrap()
+                .effort_levels
+                .map(|(levels, _)| levels.len()),
+            Some(7)
+        );
         let kimi_dto = agent_capabilities()
             .into_iter()
             .find(|c| c.agent == "kimi")
@@ -1479,7 +1565,7 @@ mod tests {
             .unwrap();
         assert_eq!(codebuddy_dto.request_policy.temperature, "unsupported");
         assert_eq!(codebuddy_dto.request_policy.custom_headers, "inject");
-        assert_eq!(codebuddy_dto.request_policy.reasoning_effort, "unknown");
+        assert_eq!(codebuddy_dto.request_policy.reasoning_effort, "inject");
         assert_eq!(codebuddy_dto.request_policy.max_output_tokens, "inject");
         assert_eq!(codebuddy_dto.request_policy.top_p, "unsupported");
         let gemini_dto = agent_capabilities()

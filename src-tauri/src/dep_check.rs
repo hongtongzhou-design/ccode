@@ -293,9 +293,10 @@ pub async fn install_dependency(app: AppHandle, tool: String) -> Result<UpdateRe
     validate_tool(&tool)?;
     let app2 = app.clone();
     let tool2 = tool.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || install_dependency_sync(&app2, &tool2))
-        .await
-        .map_err(|e| format!("安装失败: {e}"))??;
+    let result =
+        tauri::async_runtime::spawn_blocking(move || install_dependency_sync(&app2, &tool2))
+            .await
+            .map_err(|e| format!("安装失败: {e}"))??;
     Ok(updater::emit_done(&app, &dep_key(&tool), result))
 }
 
@@ -319,24 +320,51 @@ mod tests {
 
     #[test]
     fn clt_stub_candidate_is_macos_usr_bin_git_only() {
-        assert!(is_clt_stub_candidate(HostOs::Macos, Path::new("/usr/bin/git")));
+        assert!(is_clt_stub_candidate(
+            HostOs::Macos,
+            Path::new("/usr/bin/git")
+        ));
         // brew/自装的 git 不是 stub
-        assert!(!is_clt_stub_candidate(HostOs::Macos, Path::new("/opt/homebrew/bin/git")));
-        assert!(!is_clt_stub_candidate(HostOs::Macos, Path::new("/usr/local/bin/git")));
+        assert!(!is_clt_stub_candidate(
+            HostOs::Macos,
+            Path::new("/opt/homebrew/bin/git")
+        ));
+        assert!(!is_clt_stub_candidate(
+            HostOs::Macos,
+            Path::new("/usr/local/bin/git")
+        ));
         // 其他平台无 stub 概念（同名字面路径也不算）
-        assert!(!is_clt_stub_candidate(HostOs::Linux, Path::new("/usr/bin/git")));
-        assert!(!is_clt_stub_candidate(HostOs::Windows, Path::new("/usr/bin/git")));
+        assert!(!is_clt_stub_candidate(
+            HostOs::Linux,
+            Path::new("/usr/bin/git")
+        ));
+        assert!(!is_clt_stub_candidate(
+            HostOs::Windows,
+            Path::new("/usr/bin/git")
+        ));
     }
 
     #[test]
     fn git_status_tri_state() {
         // stub 候选 + CLT 缺失 = clt_stub
-        assert_eq!(git_status(HostOs::Macos, Path::new("/usr/bin/git"), true), "clt_stub");
+        assert_eq!(
+            git_status(HostOs::Macos, Path::new("/usr/bin/git"), true),
+            "clt_stub"
+        );
         // CLT 已装 = 正常 git
-        assert_eq!(git_status(HostOs::Macos, Path::new("/usr/bin/git"), false), "ok");
+        assert_eq!(
+            git_status(HostOs::Macos, Path::new("/usr/bin/git"), false),
+            "ok"
+        );
         // 非候选路径不看 CLT
-        assert_eq!(git_status(HostOs::Macos, Path::new("/opt/homebrew/bin/git"), true), "ok");
-        assert_eq!(git_status(HostOs::Linux, Path::new("/usr/bin/git"), true), "ok");
+        assert_eq!(
+            git_status(HostOs::Macos, Path::new("/opt/homebrew/bin/git"), true),
+            "ok"
+        );
+        assert_eq!(
+            git_status(HostOs::Linux, Path::new("/usr/bin/git"), true),
+            "ok"
+        );
     }
 
     #[test]

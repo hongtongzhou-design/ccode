@@ -79,7 +79,8 @@ interface TreeNodeCtx {
   load: (path: string) => Promise<void>;
   toggle: (path: string) => void;
   nav: (path: string) => Promise<boolean>;
-  onOpenFile: (path: string, name: string, root: string) => void;
+  visibleFiles: DirEntryDto[];
+  onOpenFile: (path: string, name: string, root: string, files: DirEntryDto[]) => void;
   onOpenTerminal: (path: string) => void;
   onMenu: (menu: { x: number; y: number; path: string; isDir: boolean }) => void;
 }
@@ -110,7 +111,9 @@ const FileTreeNode = memo(function FileTreeNode({
     <>
       <div
         onClick={() =>
-          entry.isDir ? toggle(entry.path) : ctx.onOpenFile(entry.path, entry.name, root)
+          entry.isDir
+            ? toggle(entry.path)
+            : ctx.onOpenFile(entry.path, entry.name, root, ctx.visibleFiles)
         }
         onContextMenu={(e) => {
           e.preventDefault();
@@ -242,7 +245,7 @@ function FileTree({
   /** 定位到隐藏路径时自动打开「显示隐藏文件」 */
   onShowHidden?: (show: boolean) => void;
   refreshKey: number;
-  onOpenFile: (path: string, name: string, root: string) => void;
+  onOpenFile: (path: string, name: string, root: string, files: DirEntryDto[]) => void;
   onOpenTerminal: (path: string) => void;
   /** PDF/md 右键「⛶ 沉浸阅读」（批次 B1 阅读区入口；v3.98 起 md 笔记走 reader_for_note 配对 PDF）；
       不给则不显示该菜单项 */
@@ -506,6 +509,19 @@ function FileTree({
     }, 300);
     return () => clearTimeout(t);
   }, [query, root, showHidden]);
+  const children = cache[root];
+  const visibleFiles = useMemo(() => {
+    const result: DirEntryDto[] = [];
+    const walk = (entries: DirEntryDto[] | undefined) => {
+      for (const entry of entries ?? []) {
+        if (entry.isDir) {
+          if (expanded.has(entry.path)) walk(cache[entry.path]);
+        } else result.push(entry);
+      }
+    };
+    walk(children);
+    return result;
+  }, [cache, children, expanded]);
   // 树节点上下文：useMemo 保持身份稳定，搜索输入等无关状态变化时令 memo 节点跳过重渲染
   const nodeCtx = useMemo<TreeNodeCtx>(
     () => ({
@@ -517,14 +533,14 @@ function FileTree({
       load,
       toggle,
       nav,
+      visibleFiles,
       onOpenFile,
       onOpenTerminal,
       onMenu: setMenu,
     }),
-    [root, expanded, cache, gitMap, highlight, load, toggle, nav, onOpenFile, onOpenTerminal],
+    [root, expanded, cache, gitMap, highlight, load, toggle, nav, visibleFiles, onOpenFile, onOpenTerminal],
   );
 
-  const children = cache[root];
   // 当前项目已在下方文件树中，不在“最近”里重复；最多保留四个真正可切换的目标。
   const recent = recentRepos
     .filter((repo) => !pathWithin(root, repo.path))

@@ -208,10 +208,10 @@ fn parse_numstat(text: &str) -> HashMap<String, (u64, u64)> {
 
 /// 已知二进制扩展名：内容可能是纯 ASCII 开头（部分 PDF 无 NUL 字节），按扩展名直接排除
 const BINARY_EXTS: &[&str] = &[
-    "pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svgz", "zip", "gz", "tar",
-    "zst", "xz", "bz2", "7z", "rar", "parquet", "xlsx", "xls", "docx", "doc", "pptx", "ppt",
-    "mp4", "mov", "avi", "mp3", "wav", "flac", "ttf", "otf", "woff", "woff2", "eot", "sqlite",
-    "db", "pyc", "so", "dylib", "dll", "exe", "bin", "dat", "sav", "dta", "rds",
+    "pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svgz", "zip", "gz", "tar", "zst",
+    "xz", "bz2", "7z", "rar", "parquet", "xlsx", "xls", "docx", "doc", "pptx", "ppt", "mp4", "mov",
+    "avi", "mp3", "wav", "flac", "ttf", "otf", "woff", "woff2", "eot", "sqlite", "db", "pyc", "so",
+    "dylib", "dll", "exe", "bin", "dat", "sav", "dta", "rds",
 ];
 
 /// 未跟踪文件的行数作为 additions（best effort：二进制/超大/目录/不可读 → None。
@@ -381,7 +381,11 @@ pub(crate) fn validate_selected_paths(cwd: &str, paths: &[String]) -> Result<Vec
     if paths.is_empty() {
         return Err("请至少选择一个要提交的文件".into());
     }
-    let changed: HashSet<String> = git_status_sync(cwd)?.files.into_iter().map(|f| f.path).collect();
+    let changed: HashSet<String> = git_status_sync(cwd)?
+        .files
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
     let mut seen = HashSet::new();
     let mut validated = Vec::new();
     for path in paths {
@@ -389,7 +393,10 @@ pub(crate) fn validate_selected_paths(cwd: &str, paths: &[String]) -> Result<Vec
         if path.trim().is_empty()
             || candidate.is_absolute()
             || candidate.components().any(|part| {
-                matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+                matches!(
+                    part,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
             })
         {
             return Err(format!("提交路径必须是仓库内相对路径: {path:?}"));
@@ -440,8 +447,12 @@ fn git_commit_sync(
         if !partial.is_empty() {
             commit_selected_with_index(&cwd, message, selected, &partial)?
         } else {
-            let mut args =
-                vec!["--literal-pathspecs".into(), "add".into(), "-A".into(), "--".into()];
+            let mut args = vec![
+                "--literal-pathspecs".into(),
+                "add".into(),
+                "-A".into(),
+                "--".into(),
+            ];
             args.extend(selected.iter().cloned());
             let add = run_git_owned(&cwd, &args)?;
             if !add.status.success() {
@@ -577,8 +588,12 @@ fn commit_selected_with_index(
             .filter(|p| !partial_set.contains(p.as_str()))
             .collect();
         if !fresh.is_empty() {
-            let mut args =
-                vec!["--literal-pathspecs".into(), "add".into(), "-A".into(), "--".into()];
+            let mut args = vec![
+                "--literal-pathspecs".into(),
+                "add".into(),
+                "-A".into(),
+                "--".into(),
+            ];
             args.extend(fresh.iter().map(|p| (*p).clone()));
             let add = crate::process::background_command(&git)
                 .arg("-C")
@@ -624,7 +639,15 @@ fn commit_selected_with_index(
                 input.push(0);
             }
             if input.is_empty() {
-                let rm = run(&["--literal-pathspecs", "rm", "--cached", "--ignore-unmatch", "-q", "--", p])?;
+                let rm = run(&[
+                    "--literal-pathspecs",
+                    "rm",
+                    "--cached",
+                    "--ignore-unmatch",
+                    "-q",
+                    "--",
+                    p,
+                ])?;
                 if !rm.status.success() {
                     return Err(output_tail(&rm));
                 }
@@ -674,8 +697,11 @@ fn commit_selected_with_index(
             if !sync.status.success() {
                 // 提交已成功的事实必须保留；同步失败只追加提示
                 commit.stderr.extend_from_slice(
-                    format!("\n（提交已成功，但同步暂存区状态失败，请刷新检查）\n{}", output_tail(&sync))
-                        .as_bytes(),
+                    format!(
+                        "\n（提交已成功，但同步暂存区状态失败，请刷新检查）\n{}",
+                        output_tail(&sync)
+                    )
+                    .as_bytes(),
                 );
             }
         }
@@ -714,8 +740,8 @@ pub async fn git_commit(
     tauri::async_runtime::spawn_blocking(move || {
         git_commit_sync(&cwd, &message, push, paths.as_deref())
     })
-        .await
-        .map_err(|e| format!("提交失败: {e}"))?
+    .await
+    .map_err(|e| format!("提交失败: {e}"))?
 }
 
 #[tauri::command]
@@ -791,7 +817,9 @@ fn git_file_diff_sync(cwd: &str, path: &str) -> Result<GitFileDiffDto, String> {
     let cwd = expand_tilde(cwd);
     let validated = validate_selected_paths(&cwd, &[path.to_string()])?;
     let path = validated.first().ok_or("文件已不在当前改动清单中")?;
-    let status = git_status_sync(&cwd)?.files.into_iter()
+    let status = git_status_sync(&cwd)?
+        .files
+        .into_iter()
         .find(|file| file.path == *path)
         .ok_or_else(|| format!("文件已不在当前改动清单中，请刷新后重试: {path}"))?;
 
@@ -799,7 +827,8 @@ fn git_file_diff_sync(cwd: &str, path: &str) -> Result<GitFileDiffDto, String> {
         let full = Path::new(&cwd).join(path);
         let file = std::fs::File::open(&full).map_err(|e| format!("读取 {path} 失败: {e}"))?;
         let mut bytes = Vec::with_capacity(FILE_DIFF_CAP + 1);
-        file.take((FILE_DIFF_CAP + 1) as u64).read_to_end(&mut bytes)
+        file.take((FILE_DIFF_CAP + 1) as u64)
+            .read_to_end(&mut bytes)
             .map_err(|e| format!("读取 {path} 失败: {e}"))?;
         let source_truncated = bytes.len() > FILE_DIFF_CAP;
         if source_truncated {
@@ -817,13 +846,17 @@ fn git_file_diff_sync(cwd: &str, path: &str) -> Result<GitFileDiffDto, String> {
     if !out.status.success() || text.trim().is_empty() {
         let staged = run_git(&cwd, &["diff", "--cached", "--", path])?;
         if !staged.status.success() {
-            return Err(if out.status.success() { output_tail(&staged) } else { output_tail(&out) });
+            return Err(if out.status.success() {
+                output_tail(&staged)
+            } else {
+                output_tail(&out)
+            });
         }
         text = String::from_utf8_lossy(&staged.stdout).into_owned();
     }
-    let binary = text.lines().any(|line| {
-        line.starts_with("Binary files ") || line.starts_with("GIT binary patch")
-    });
+    let binary = text
+        .lines()
+        .any(|line| line.starts_with("Binary files ") || line.starts_with("GIT binary patch"));
     if text.trim().is_empty() {
         return Ok(GitFileDiffDto {
             text: "该文件没有可显示的文本 diff".into(),
@@ -832,7 +865,11 @@ fn git_file_diff_sync(cwd: &str, path: &str) -> Result<GitFileDiffDto, String> {
         });
     }
     let (text, truncated) = truncate_utf8(text, FILE_DIFF_CAP);
-    Ok(GitFileDiffDto { text, binary, truncated })
+    Ok(GitFileDiffDto {
+        text,
+        binary,
+        truncated,
+    })
 }
 
 /// 普通仓库单文件 diff：仅允许读取当前 git status 中的安全相对路径。
@@ -1159,6 +1196,66 @@ pub struct WorkspaceDiffDto {
     pub files: Vec<GitFileDto>,
     pub total_add: u64,
     pub total_del: u64,
+    /// 定时/无头 Run 的隔离树没有科研 workspaces 行；仍允许只读进入评审。
+    pub review_only: bool,
+}
+
+fn review_diff_for_run(wt: &str, run: &crate::runs::RunDto) -> Result<WorkspaceDiffDto, String> {
+    let branch = run_git(wt, &["branch", "--show-current"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "(detached)".into());
+    let mut files = Vec::new();
+    let mut total_add = 0;
+    let mut total_del = 0;
+    if let Ok(out) = run_git(wt, &["diff", "--numstat", "HEAD"]) {
+        if out.status.success() {
+            for (path, (a, d)) in parse_numstat(&String::from_utf8_lossy(&out.stdout)) {
+                total_add += a;
+                total_del += d;
+                files.push(GitFileDto {
+                    path,
+                    status: "M".into(),
+                    additions: Some(a),
+                    deletions: Some(d),
+                });
+            }
+        }
+    }
+    if let Ok(out) = run_git(wt, &["status", "--porcelain=v1", "--untracked-files=all"]) {
+        if out.status.success() {
+            let (_, _, _, raw) = parse_porcelain(&String::from_utf8_lossy(&out.stdout));
+            for (status, path) in raw {
+                if status != "??" {
+                    continue;
+                }
+                let additions = count_lines(wt, &path);
+                total_add += additions.unwrap_or(0);
+                files.push(GitFileDto {
+                    path,
+                    status,
+                    additions,
+                    deletions: Some(0),
+                });
+            }
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(WorkspaceDiffDto {
+        in_workspace: true,
+        workspace_id: format!("run:{}", run.id),
+        workspace_name: run.task_ref.clone().unwrap_or_else(|| "定时 Run".into()),
+        branch,
+        worktree_path: run.isolation_path.clone(),
+        base_branch: "HEAD".into(),
+        merge_base: "HEAD".into(),
+        files,
+        total_add,
+        total_del,
+        review_only: true,
+    })
 }
 
 /// 累计任务改动 = diff merge-base（已提交 + 未提交的已跟踪部分）+ 未跟踪文件行数。
@@ -1256,13 +1353,25 @@ fn workspace_diff_with_rows(
         files,
         total_add,
         total_del,
+        review_only: false,
     })
 }
 
 #[tauri::command]
 pub async fn workspace_diff(worktree_path: String) -> Result<WorkspaceDiffDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        workspace_diff_with_rows(&worktree_path, &crate::workspaces::worktree_rows())
+        let rows = crate::workspaces::worktree_rows();
+        let diff = workspace_diff_with_rows(&worktree_path, &rows)?;
+        if diff.in_workspace {
+            return Ok(diff);
+        }
+        let wt = expand_tilde(&worktree_path);
+        let runs = crate::runs::run_list(None)?;
+        let run = runs
+            .into_iter()
+            .find(|run| crate::paths::same_path(&run.isolation_path, &wt));
+        run.map(|run| review_diff_for_run(&wt, &run))
+            .unwrap_or(Ok(diff))
     })
     .await
     .map_err(|e| format!("计算工作区 diff 失败: {e}"))?
@@ -1282,7 +1391,8 @@ fn file_diff_impl(wt: &str, base_branch: &str, path: &str) -> Result<String, Str
         let full = std::path::Path::new(wt).join(path);
         let file = std::fs::File::open(&full).map_err(|e| format!("读取 {path} 失败: {e}"))?;
         let mut bytes = Vec::with_capacity(FILE_DIFF_CAP + 1);
-        file.take((FILE_DIFF_CAP + 1) as u64).read_to_end(&mut bytes)
+        file.take((FILE_DIFF_CAP + 1) as u64)
+            .read_to_end(&mut bytes)
             .map_err(|e| format!("读取 {path} 失败: {e}"))?;
         let source_truncated = bytes.len() > FILE_DIFF_CAP;
         if source_truncated {
@@ -1314,10 +1424,26 @@ pub async fn workspace_file_diff(worktree_path: String, path: String) -> Result<
     tauri::async_runtime::spawn_blocking(move || {
         let wt = expand_tilde(&worktree_path);
         let rows = crate::workspaces::worktree_rows();
-        let row = find_worktree_row(&wt, &rows).ok_or("该目录不在任何工作区内")?;
         let current = workspace_diff_with_rows(&wt, &rows)?;
+        let row = find_worktree_row(&wt, &rows);
+        if row.is_none() {
+            let run = crate::runs::run_list(None)?
+                .into_iter()
+                .find(|run| crate::paths::same_path(&run.isolation_path, &wt))
+                .ok_or("该目录不在任何工作区或 Run 隔离树内")?;
+            let review = review_diff_for_run(&wt, &run)?;
+            if !review.files.iter().any(|file| file.path == path) {
+                return Err(format!(
+                    "文件已不在当前任务改动清单中，请刷新后重试: {path}"
+                ));
+            }
+            return file_diff_impl(&wt, "HEAD", &path);
+        }
+        let row = row.unwrap();
         if !current.files.iter().any(|file| file.path == path) {
-            return Err(format!("文件已不在当前任务改动清单中，请刷新后重试: {path}"));
+            return Err(format!(
+                "文件已不在当前任务改动清单中，请刷新后重试: {path}"
+            ));
         }
         file_diff_impl(&wt, &row.base_branch, &path)
     })
@@ -1343,7 +1469,9 @@ pub struct GitImagePairDto {
 
 /// 图片扩展名判定（与前端 ImagePairView 的 isImagePath 保持同一清单）
 fn is_image_path(path: &str) -> bool {
-    let ext = Path::new(path).extension().map(|e| e.to_string_lossy().to_lowercase());
+    let ext = Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase());
     matches!(
         ext.as_deref(),
         Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp")
@@ -1409,7 +1537,9 @@ fn image_pair_sync(cwd: &str, path: &str) -> Result<GitImagePairDto, String> {
     let (root, base_spec, base_label) = if let Some(row) = find_worktree_row(&cwd, &rows) {
         let diff = workspace_diff_with_rows(&cwd, &rows)?;
         if !diff.files.iter().any(|file| file.path == path) {
-            return Err(format!("文件已不在当前任务改动清单中，请刷新后重试: {path}"));
+            return Err(format!(
+                "文件已不在当前任务改动清单中，请刷新后重试: {path}"
+            ));
         }
         (
             row.worktree_path.clone(),
@@ -1497,8 +1627,7 @@ fn parse_history_log(text: &str) -> Vec<HistoryEntryDto> {
         let (mut files, mut additions, mut deletions) = (0u64, 0u64, 0u64);
         for line in lines {
             let mut parts = line.splitn(3, '\t');
-            let (Some(a), Some(d), Some(p)) = (parts.next(), parts.next(), parts.next())
-            else {
+            let (Some(a), Some(d), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
                 continue;
             };
             if p.trim().is_empty() {
@@ -1661,7 +1790,17 @@ mod tests {
             return;
         }
         let dir = init_repo("status-binary");
-        git(&dir, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
         // 含 NUL 的伪 PDF 二进制：换行字节极多，但不得计入增删统计
         let mut blob = b"%PDF-1.7 fake".to_vec();
         blob.extend_from_slice(&[0u8; 16]);
@@ -1684,7 +1823,17 @@ mod tests {
             return;
         }
         let dir = init_repo("status-ascii-pdf");
-        git(&dir, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
         // 纯 ASCII 开头、无 NUL 的 PDF（真实世界存在）：靠扩展名拦截，内容探测会漏
         let mut blob = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
         for _ in 0..1000 {
@@ -1753,13 +1902,8 @@ mod tests {
         fs::write(dir.join("b.txt"), "changed-b\n").unwrap();
 
         let selected = vec!["a.txt".to_string()];
-        let result = git_commit_sync(
-            dir.to_str().unwrap(),
-            "只提交 a",
-            false,
-            Some(&selected),
-        )
-        .unwrap();
+        let result =
+            git_commit_sync(dir.to_str().unwrap(), "只提交 a", false, Some(&selected)).unwrap();
         assert!(result.committed);
         let status = git_status_sync(dir.to_str().unwrap()).unwrap();
         assert_eq!(status.files.len(), 1);
@@ -1779,13 +1923,17 @@ mod tests {
         let dir = init_repo("selective-invalid");
         fs::write(dir.join("a.txt"), "a\n").unwrap();
         let escape = vec!["../outside".to_string()];
-        assert!(git_commit_sync(dir.to_str().unwrap(), "bad", false, Some(&escape))
-            .unwrap_err()
-            .contains("相对路径"));
+        assert!(
+            git_commit_sync(dir.to_str().unwrap(), "bad", false, Some(&escape))
+                .unwrap_err()
+                .contains("相对路径")
+        );
         let stale = vec!["missing.txt".to_string()];
-        assert!(git_commit_sync(dir.to_str().unwrap(), "bad", false, Some(&stale))
-            .unwrap_err()
-            .contains("不在当前改动清单"));
+        assert!(
+            git_commit_sync(dir.to_str().unwrap(), "bad", false, Some(&stale))
+                .unwrap_err()
+                .contains("不在当前改动清单")
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1996,7 +2144,10 @@ mod tests {
         let repo = init_repo("generic-file-diff");
         fs::write(repo.join("a.txt"), "before\n").unwrap();
         git(&repo, &["add", "."]);
-        git(&repo, &["-c", "commit.gpgsign=false", "commit", "-m", "init"]);
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
         fs::write(repo.join("a.txt"), "after\n").unwrap();
         fs::write(repo.join("image.bin"), [0, 1, 2, 3]).unwrap();
 
@@ -2157,9 +2308,9 @@ mod tests {
             &repo,
             &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
         );
-        let changed = base
-            .replacen("l02\n", "top-changed\n", 1)
-            .replacen("l28\n", "bottom-changed\n", 1);
+        let changed =
+            base.replacen("l02\n", "top-changed\n", 1)
+                .replacen("l28\n", "bottom-changed\n", 1);
         fs::write(repo.join("a.txt"), &changed).unwrap();
         fs::write(repo.join("b.txt"), "changed-b\n").unwrap();
         repo
@@ -2187,7 +2338,11 @@ mod tests {
         assert_eq!(dto.hunks.len(), 2, "相距较远的两处修改应拆成两个 hunk");
         assert!(!dto.staged);
         for h in &dto.hunks {
-            assert!(h.header.starts_with("@@ "), "header 应是 @@ 行: {}", h.header);
+            assert!(
+                h.header.starts_with("@@ "),
+                "header 应是 @@ 行: {}",
+                h.header
+            );
             assert!(h.patch.starts_with("diff --git "), "patch 必须带完整文件头");
             assert!(h.patch.contains("--- a/a.txt"));
             assert!(h.patch.contains("+++ b/a.txt"));
@@ -2222,7 +2377,14 @@ mod tests {
         let repo = init_repo("hunks-edge");
         git(
             &repo,
-            &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"],
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
         );
         // 空文件：一个 hunk（无 @@ 头的新文件补丁），暂存后应进索引
         fs::write(repo.join("empty.txt"), "").unwrap();
@@ -2263,7 +2425,10 @@ mod tests {
         .unwrap();
         assert!(status.files.iter().any(|f| f.path == "a.txt"));
         let staged = diff_cached(&repo, "a.txt");
-        assert!(staged.contains("+top-changed"), "暂存区应含第一块: {staged}");
+        assert!(
+            staged.contains("+top-changed"),
+            "暂存区应含第一块: {staged}"
+        );
         assert!(!staged.contains("+bottom-changed"), "第二块不应进暂存区");
         let unstaged = diff_unstaged(&repo, "a.txt");
         assert!(unstaged.contains("+bottom-changed"));
@@ -2314,12 +2479,21 @@ mod tests {
         assert!(
             apply_hunk_sync(repo.to_str().unwrap(), "../x", &dto.hunks[0].patch, "stage").is_err()
         );
-        assert!(
-            apply_hunk_sync(repo.to_str().unwrap(), "a.txt", &dto.hunks[0].patch, "bogus").is_err()
-        );
+        assert!(apply_hunk_sync(
+            repo.to_str().unwrap(),
+            "a.txt",
+            &dto.hunks[0].patch,
+            "bogus"
+        )
+        .is_err());
         // 补丁指向其他文件：b.txt 在改动清单内，但补丁是 a.txt 的
-        let err = apply_hunk_sync(repo.to_str().unwrap(), "b.txt", &dto.hunks[0].patch, "stage")
-            .unwrap_err();
+        let err = apply_hunk_sync(
+            repo.to_str().unwrap(),
+            "b.txt",
+            &dto.hunks[0].patch,
+            "stage",
+        )
+        .unwrap_err();
         assert!(err.contains("不一致"), "{err}");
         // 过期补丁：丢弃成功后再次丢弃同一块 → 失败且文件不被破坏
         apply_hunk_sync(
@@ -2351,7 +2525,14 @@ mod tests {
         let repo = init_repo("hunk-untracked");
         git(
             &repo,
-            &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"],
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
         );
         fs::write(repo.join("keep.txt"), "x\ny\n").unwrap();
         fs::write(repo.join("drop.txt"), "gone\n").unwrap();
@@ -2378,7 +2559,10 @@ mod tests {
             "discard",
         )
         .unwrap();
-        assert!(!repo.join("drop.txt").exists(), "丢弃新文件 = 删除工作树文件");
+        assert!(
+            !repo.join("drop.txt").exists(),
+            "丢弃新文件 = 删除工作树文件"
+        );
         fs::remove_dir_all(&repo).ok();
     }
 
@@ -2398,8 +2582,13 @@ mod tests {
         .unwrap();
         // 勾选 a.txt + b.txt 提交：a.txt 只能带走已暂存的第一块
         let selected = vec!["a.txt".to_string(), "b.txt".to_string()];
-        let result = git_commit_sync(repo.to_str().unwrap(), "部分暂存提交", false, Some(&selected))
-            .unwrap();
+        let result = git_commit_sync(
+            repo.to_str().unwrap(),
+            "部分暂存提交",
+            false,
+            Some(&selected),
+        )
+        .unwrap();
         assert!(result.committed);
         let head_a = run_git(repo.to_str().unwrap(), &["show", "HEAD:a.txt"]).unwrap();
         let head_a = String::from_utf8_lossy(&head_a.stdout).into_owned();
@@ -2457,13 +2646,22 @@ mod tests {
         let dir = init_repo("history");
         fs::write(dir.join("a.txt"), "l1\n").unwrap();
         git(&dir, &["add", "."]);
-        git(&dir, &["-c", "commit.gpgsign=false", "commit", "-m", "init"]);
+        git(
+            &dir,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
         fs::write(dir.join("a.txt"), "l1\nl2\n").unwrap();
         fs::write(dir.join("b.txt"), "x\ny\nz\n").unwrap();
         git(&dir, &["add", "."]);
         git(
             &dir,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "Ccode: 项目档案卡与 gitignore 自动提交"],
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "Ccode: 项目档案卡与 gitignore 自动提交",
+            ],
         );
 
         let entries = project_history_sync(dir.to_str().unwrap(), 100).unwrap();
@@ -2472,8 +2670,15 @@ mod tests {
         assert_eq!(latest.message, "Ccode: 项目档案卡与 gitignore 自动提交");
         assert!(!latest.merge);
         assert!(latest.merged_branch.is_empty());
-        assert!(!latest.hash.is_empty() && latest.hash.len() < 40, "应为短 hash");
-        assert!(latest.time.contains('T'), "时间应为 ISO 格式: {}", latest.time);
+        assert!(
+            !latest.hash.is_empty() && latest.hash.len() < 40,
+            "应为短 hash"
+        );
+        assert!(
+            latest.time.contains('T'),
+            "时间应为 ISO 格式: {}",
+            latest.time
+        );
         // numstat 汇总：a.txt +1、b.txt +3 → 2 个文件 +4 −0
         assert_eq!(latest.files, 2);
         assert_eq!(latest.additions, 4);
@@ -2481,7 +2686,12 @@ mod tests {
         assert_eq!(entries[1].message, "init");
         assert_eq!(entries[1].files, 1);
         // limit 生效
-        assert_eq!(project_history_sync(dir.to_str().unwrap(), 1).unwrap().len(), 1);
+        assert_eq!(
+            project_history_sync(dir.to_str().unwrap(), 1)
+                .unwrap()
+                .len(),
+            1
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -2493,16 +2703,34 @@ mod tests {
         let dir = init_repo("history-merge");
         fs::write(dir.join("a.txt"), "base\n").unwrap();
         git(&dir, &["add", "."]);
-        git(&dir, &["-c", "commit.gpgsign=false", "commit", "-m", "base"]);
+        git(
+            &dir,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+        );
         // 工作区分支上的过程提交：不进 first-parent 主时间线
         git(&dir, &["checkout", "-b", "ccode/lit-notes"]);
         fs::write(dir.join("notes.md"), "n1\n").unwrap();
         git(&dir, &["add", "."]);
-        git(&dir, &["-c", "commit.gpgsign=false", "commit", "-m", "工作区过程提交"]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "工作区过程提交",
+            ],
+        );
         git(&dir, &["checkout", "main"]);
         git(
             &dir,
-            &["-c", "commit.gpgsign=false", "merge", "--no-ff", "ccode/lit-notes"],
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "merge",
+                "--no-ff",
+                "ccode/lit-notes",
+            ],
         );
 
         let entries = project_history_sync(dir.to_str().unwrap(), 100).unwrap();
@@ -2579,7 +2807,10 @@ mod tests {
         let rows = vec![wt_row(root)];
         assert!(find_worktree_row(root, &rows).is_some(), "工作树根必须命中");
         assert!(find_worktree_row(sub, &rows).is_some(), "子目录必须命中");
-        assert!(find_worktree_row(other, &rows).is_none(), "同级目录不得命中");
+        assert!(
+            find_worktree_row(other, &rows).is_none(),
+            "同级目录不得命中"
+        );
     }
 
     #[test]

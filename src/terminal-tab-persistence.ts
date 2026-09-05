@@ -7,6 +7,7 @@ export interface RecoverableTerminalTab {
   label: string;
   cwd: string;
   agentId: string;
+  customRuntimeId?: string | null;
   profileId: string;
   model: string;
   sessionId: string | null;
@@ -31,11 +32,13 @@ function parseTab(value: unknown): RecoverableTerminalTab | null {
   const label = textField(tab.label, 256);
   const cwd = textField(tab.cwd, 4096, false);
   const agentId = textField(tab.agentId, 128);
-  if (!label || !cwd || !agentId || !AGENT_IDS.has(agentId)) return null;
+  const customRuntimeId = textField(tab.customRuntimeId, 128);
+  if (!label || !cwd || !agentId || (!AGENT_IDS.has(agentId) && !customRuntimeId)) return null;
   return {
     label,
     cwd,
     agentId,
+    ...(customRuntimeId ? { customRuntimeId } : {}),
     profileId: textField(tab.profileId, 256) ?? "",
     model: textField(tab.model, 512) ?? "",
     sessionId: textField(tab.sessionId, 256),
@@ -70,6 +73,9 @@ export function serializeRecoverableTerminalState(
     label: tab.label.slice(0, 256),
     cwd: tab.cwd.slice(0, 4096),
     agentId: tab.agentId.slice(0, 128),
+    ...(tab.customRuntimeId
+      ? { customRuntimeId: tab.customRuntimeId.slice(0, 128) }
+      : {}),
     profileId: tab.profileId.slice(0, 256),
     model: tab.model.slice(0, 512),
     sessionId: tab.sessionId?.slice(0, 256) ?? null,

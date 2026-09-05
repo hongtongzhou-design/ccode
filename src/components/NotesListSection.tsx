@@ -108,6 +108,13 @@ export default function NotesListSection({
     }
   }
 
+  function movePreview(offset: number) {
+    if (!preview) return;
+    const index = rows.findIndex((row) => row.path === preview.path);
+    const next = rows[index + offset];
+    if (next) setPreview(next);
+  }
+
   return (
     <section>
       <div className="mb-2.5 flex flex-wrap items-center gap-2">
@@ -239,6 +246,13 @@ export default function NotesListSection({
             label: busy ? "打开中…" : "⛶ 沉浸阅读",
             onClick: () => void immerse(preview.path),
           }}
+          onPrevious={() => movePreview(-1)}
+          onNext={() => movePreview(1)}
+          hasPrevious={rows.findIndex((row) => row.path === preview.path) > 0}
+          hasNext={
+            rows.findIndex((row) => row.path === preview.path) >= 0 &&
+            rows.findIndex((row) => row.path === preview.path) < rows.length - 1
+          }
         />
       )}
     </section>

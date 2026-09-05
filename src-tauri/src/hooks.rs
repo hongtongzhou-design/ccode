@@ -66,11 +66,7 @@ static BRIDGE_SPECS: &[BridgeSpec] = &[
         config_rel: ".claude/settings.json",
         log_tag: "claude",
         family: DocFamily::SettingsJson { tolerant: false },
-        events: [
-            ("UserPromptSubmit", ""),
-            ("Stop", ""),
-            ("Notification", ""),
-        ],
+        events: [("UserPromptSubmit", ""), ("Stop", ""), ("Notification", "")],
         handler_async: false,
     },
     BridgeSpec {
@@ -253,7 +249,9 @@ fn to_pretty(v: &Value) -> Result<String, String> {
 fn handler_json(spec: &BridgeSpec, command: &str) -> Value {
     let mut h = json!({ "type": "command", "command": command });
     if spec.handler_async {
-        h.as_object_mut().unwrap().insert("async".into(), json!(true));
+        h.as_object_mut()
+            .unwrap()
+            .insert("async".into(), json!(true));
     }
     h
 }
@@ -276,11 +274,18 @@ fn strip_marker_entries(arr: &mut Vec<Value>, marker: &str) {
 }
 
 /// 合并：保留其他配置键与用户已有 hooks，三个事件各追加一条我们的命令；重复调用幂等
-fn merge_json_doc(spec: &BridgeSpec, existing: Option<&str>, command: &str) -> Result<String, String> {
+fn merge_json_doc(
+    spec: &BridgeSpec,
+    existing: Option<&str>,
+    command: &str,
+) -> Result<String, String> {
     let mut v = parse_json_doc(existing, spec)?;
     if let Some(h) = v.get("hooks") {
         if !h.is_object() {
-            return Err(format!("{} 的 hooks 字段不是对象，已停止写入", spec.display()));
+            return Err(format!(
+                "{} 的 hooks 字段不是对象，已停止写入",
+                spec.display()
+            ));
         }
     }
     let hooks = v
@@ -317,7 +322,10 @@ fn remove_json_doc(spec: &BridgeSpec, existing: Option<&str>) -> Result<String, 
         return to_pretty(&v); // 本来就没有 hooks 段
     };
     if !hooks.is_object() {
-        return Err(format!("{} 的 hooks 字段不是对象，已停止写入", spec.display()));
+        return Err(format!(
+            "{} 的 hooks 字段不是对象，已停止写入",
+            spec.display()
+        ));
     }
     let hooks = hooks.as_object_mut().unwrap();
     let marker = spec.marker();
@@ -363,7 +371,11 @@ fn strip_toml_marker_entries(arr: &mut toml_edit::ArrayOfTables, marker: &str) {
 }
 
 /// kimi 合并：[[hooks]] 每事件一条 strict 四字段；其余键（providers/models 等）原样保留；幂等
-fn merge_kimi_toml(spec: &BridgeSpec, existing: Option<&str>, command: &str) -> Result<String, String> {
+fn merge_kimi_toml(
+    spec: &BridgeSpec,
+    existing: Option<&str>,
+    command: &str,
+) -> Result<String, String> {
     use toml_edit::value;
     let mut doc = parse_toml_doc(existing, &spec.display())?;
     if let Some(item) = doc.get("hooks") {
@@ -426,13 +438,17 @@ fn whole_file_doc(spec: &BridgeSpec, command: &str) -> Result<String, String> {
 fn has_marker(text: &str, marker: &str) -> bool {
     // JSON 文本里 Windows 路径分隔符被转义成两个字符 \\：必须先按对归一，
     // 否则单字符替换会得到双斜杠（C://..//hooks-state//...）匹配不上 marker
-    text.replace("\\\\", "/").replace('\\', "/").contains(marker)
+    text.replace("\\\\", "/")
+        .replace('\\', "/")
+        .contains(marker)
 }
 
 // ===== 备份与事务写入 =====
 
 fn read_existing(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok().filter(|t| !t.trim().is_empty())
+    fs::read_to_string(path)
+        .ok()
+        .filter(|t| !t.trim().is_empty())
 }
 
 /// 写前备份到 <config>/ccode/backups/<tag>-hooks-settings-<纳秒>.<ext>，按前缀保留最近 N 份
@@ -499,7 +515,10 @@ fn apply_hooks_at(
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
             }
-            crate::profiles::atomic_write(&config_path, &whole_file_doc(spec, &hook_command(log_path))?)?;
+            crate::profiles::atomic_write(
+                &config_path,
+                &whole_file_doc(spec, &hook_command(log_path))?,
+            )?;
             return Ok(());
         }
         return match existing {
@@ -583,9 +602,13 @@ fn event_state(normalized: &str) -> Option<&'static str> {
 /// 信封兼容：claude/qwen/codebuddy/gemini/codex/kimi 用 snake_case 键，grok 用 camelCase 键。
 fn parse_log_records(text: &str) -> Vec<HookRecord> {
     fn push(out: &mut Vec<HookRecord>, buf: &str) {
-        let Some((ts_s, body)) = buf.split_once(' ') else { return };
+        let Some((ts_s, body)) = buf.split_once(' ') else {
+            return;
+        };
         let Ok(ts) = ts_s.parse::<i64>() else { return };
-        let Ok(v) = serde_json::from_str::<Value>(body) else { return };
+        let Ok(v) = serde_json::from_str::<Value>(body) else {
+            return;
+        };
         let get = |snake: &str, camel: &str| {
             v.get(snake)
                 .or_else(|| v.get(camel))
@@ -602,10 +625,7 @@ fn parse_log_records(text: &str) -> Vec<HookRecord> {
             session_id: sid.to_string(),
             transcript_path: get("transcript_path", "transcriptPath").map(String::from),
             event: normalize_event(ev),
-            reason: v
-                .get("reason")
-                .and_then(|x| x.as_str())
-                .map(String::from),
+            reason: v.get("reason").and_then(|x| x.as_str()).map(String::from),
             // 「在等什么」详情：各家 payload 字段未文档化，按已知形态尽力提取——
             // claude/qwen/codebuddy/gemini Notification 有 message；kimi/codex PermissionRequest
             // 可能带 tool_name/title；都取不到就 None（横幅退回通用文案）
@@ -660,7 +680,9 @@ fn latest_from_text(
         if rec.event == "stop" && rec.reason.as_deref().is_some_and(|r| r != "end_turn") {
             continue;
         }
-        let Some(state) = event_state(&rec.event) else { continue };
+        let Some(state) = event_state(&rec.event) else {
+            continue;
+        };
         if best.as_ref().is_none_or(|(ts, _, _)| rec.ts >= *ts) {
             best = Some((rec.ts, state, rec.detail));
         }
@@ -699,7 +721,10 @@ pub(crate) fn state_for_session_file(agent: &str, file_path: &str) -> Option<Str
     if !crate::settings::hooks_attention_enabled(&crate::settings::read_current(), agent) {
         return None;
     }
-    let session_id = Path::new(file_path).file_stem()?.to_string_lossy().into_owned();
+    let session_id = Path::new(file_path)
+        .file_stem()?
+        .to_string_lossy()
+        .into_owned();
     if session_id.is_empty() {
         return None;
     }
@@ -833,13 +858,20 @@ mod tests {
         for (event, _) in spec.events {
             let arr = v["hooks"][event].as_array().unwrap();
             assert_eq!(arr.len(), 1, "{event} 一条我们的条目");
-            assert_eq!(arr[0]["hooks"][0]["command"], "CMD hooks-state/claude-hooks.jsonl");
+            assert_eq!(
+                arr[0]["hooks"][0]["command"],
+                "CMD hooks-state/claude-hooks.jsonl"
+            );
         }
         // 重复合并不叠加
         let out2 = merge_json_doc(spec, Some(&out), "CMD hooks-state/claude-hooks.jsonl").unwrap();
         let v2: Value = serde_json::from_str(&out2).unwrap();
         for (event, _) in spec.events {
-            assert_eq!(v2["hooks"][event].as_array().unwrap().len(), 1, "{event} 幂等");
+            assert_eq!(
+                v2["hooks"][event].as_array().unwrap().len(),
+                1,
+                "{event} 幂等"
+            );
         }
     }
 
@@ -853,7 +885,12 @@ mod tests {
                 ]
             }
         }"#;
-        let out = merge_json_doc(claude(), Some(existing), "CMD hooks-state/claude-hooks.jsonl").unwrap();
+        let out = merge_json_doc(
+            claude(),
+            Some(existing),
+            "CMD hooks-state/claude-hooks.jsonl",
+        )
+        .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["env"]["FOO"], "bar", "其他配置键保留");
         let notif = v["hooks"]["Notification"].as_array().unwrap();
@@ -865,8 +902,14 @@ mod tests {
     fn merge_and_remove_reject_broken_json() {
         assert!(merge_json_doc(claude(), Some("{broken"), "CMD").is_err());
         assert!(remove_json_doc(claude(), Some("{broken")).is_err());
-        assert!(merge_json_doc(claude(), Some(r#"{"hooks": 42}"#), "CMD").is_err(), "hooks 非对象拒绝");
-        assert!(merge_json_doc(claude(), Some(r#"{"hooks": {"Stop": {"x": 1}}}"#), "CMD").is_err(), "事件非数组拒绝");
+        assert!(
+            merge_json_doc(claude(), Some(r#"{"hooks": 42}"#), "CMD").is_err(),
+            "hooks 非对象拒绝"
+        );
+        assert!(
+            merge_json_doc(claude(), Some(r#"{"hooks": {"Stop": {"x": 1}}}"#), "CMD").is_err(),
+            "事件非数组拒绝"
+        );
     }
 
     #[test]
@@ -910,14 +953,22 @@ mod tests {
         assert!(v.get("hooks").is_none(), "hooks 清空后回收键");
         // 本来就没有 hooks 段：原样（不报错）
         let out = remove_json_doc(claude(), Some(r#"{"env": {}}"#)).unwrap();
-        assert!(serde_json::from_str::<Value>(&out).unwrap().get("hooks").is_none());
+        assert!(serde_json::from_str::<Value>(&out)
+            .unwrap()
+            .get("hooks")
+            .is_none());
     }
 
     /// qwen/gemini 容错读：带注释与尾逗号的 JSONC 可合并，其余键保留
     #[test]
     fn jsonc_tolerant_family_merges_comments_and_trailing_commas() {
         let existing = "{\n  // 用户注释\n  \"theme\": \"dark\",\n}\n";
-        let out = merge_json_doc(spec_for("qwen").unwrap(), Some(existing), "CMD hooks-state/qwen-hooks.jsonl").unwrap();
+        let out = merge_json_doc(
+            spec_for("qwen").unwrap(),
+            Some(existing),
+            "CMD hooks-state/qwen-hooks.jsonl",
+        )
+        .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "dark", "JSONC 容错读且其他键保留");
         // qwen 的 Notification 带 matcher；其余事件空 matcher
@@ -931,13 +982,24 @@ mod tests {
     /// codex：handler 带 async:true，confirm 槽是 PermissionRequest
     #[test]
     fn codex_handlers_carry_async_and_permission_request() {
-        let out = merge_json_doc(spec_for("codex").unwrap(), None, "CMD hooks-state/codex-hooks.jsonl").unwrap();
+        let out = merge_json_doc(
+            spec_for("codex").unwrap(),
+            None,
+            "CMD hooks-state/codex-hooks.jsonl",
+        )
+        .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         for event in ["UserPromptSubmit", "Stop", "PermissionRequest"] {
             let arr = v["hooks"][event].as_array().unwrap();
-            assert_eq!(arr[0]["hooks"][0]["async"], true, "{event} handler 带 async");
+            assert_eq!(
+                arr[0]["hooks"][0]["async"], true,
+                "{event} handler 带 async"
+            );
         }
-        assert!(v["hooks"].get("Notification").is_none(), "codex 不写 Notification");
+        assert!(
+            v["hooks"].get("Notification").is_none(),
+            "codex 不写 Notification"
+        );
     }
 
     // ===== kimi TOML 文档族 =====
@@ -945,9 +1007,18 @@ mod tests {
     #[test]
     fn kimi_toml_merge_strict_four_fields_preserves_other_keys() {
         let existing = "default_model = \"ccode\"\n\n[providers.ccode]\ntype = \"kimi\"\n";
-        let out = merge_kimi_toml(spec_for("kimi").unwrap(), Some(existing), "sh hooks-state/kimi-hooks.jsonl").unwrap();
+        let out = merge_kimi_toml(
+            spec_for("kimi").unwrap(),
+            Some(existing),
+            "sh hooks-state/kimi-hooks.jsonl",
+        )
+        .unwrap();
         let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
-        assert_eq!(doc["default_model"].as_str(), Some("ccode"), "其余键原样保留");
+        assert_eq!(
+            doc["default_model"].as_str(),
+            Some("ccode"),
+            "其余键原样保留"
+        );
         assert_eq!(doc["providers"]["ccode"]["type"].as_str(), Some("kimi"));
         let arr = doc["hooks"].as_array_of_tables().unwrap();
         assert_eq!(arr.len(), 3);
@@ -960,7 +1031,12 @@ mod tests {
             assert_eq!(t["timeout"].as_integer(), Some(30));
         }
         // 幂等：重复合并不叠加
-        let out2 = merge_kimi_toml(spec_for("kimi").unwrap(), Some(&out), "sh hooks-state/kimi-hooks.jsonl").unwrap();
+        let out2 = merge_kimi_toml(
+            spec_for("kimi").unwrap(),
+            Some(&out),
+            "sh hooks-state/kimi-hooks.jsonl",
+        )
+        .unwrap();
         let doc2 = out2.parse::<toml_edit::DocumentMut>().unwrap();
         assert_eq!(doc2["hooks"].as_array_of_tables().unwrap().len(), 3);
     }
@@ -977,9 +1053,15 @@ mod tests {
         // 只剩我们的条目 → hooks 键整体回收
         let ours_only = "[[hooks]]\nevent = \"Stop\"\nmatcher = \"\"\ncommand = \"sh hooks-state/kimi-hooks.jsonl\"\ntimeout = 30\n";
         let out = remove_kimi_toml(spec_for("kimi").unwrap(), Some(ours_only)).unwrap();
-        assert!(out.parse::<toml_edit::DocumentMut>().unwrap().get("hooks").is_none());
+        assert!(out
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap()
+            .get("hooks")
+            .is_none());
         // hooks 不是数组表 → 拒绝
-        assert!(merge_kimi_toml(spec_for("kimi").unwrap(), Some("[hooks]\nx = 1\n"), "CMD").is_err());
+        assert!(
+            merge_kimi_toml(spec_for("kimi").unwrap(), Some("[hooks]\nx = 1\n"), "CMD").is_err()
+        );
         // 坏 TOML → 拒绝
         assert!(merge_kimi_toml(spec_for("kimi").unwrap(), Some("= broken"), "CMD").is_err());
     }
@@ -1001,11 +1083,18 @@ mod tests {
         for (event, _) in spec.events {
             assert!(v["hooks"][event].is_array(), "{event} 已写入");
         }
-        assert_eq!(v["hooks"]["Notification"][0]["matcher"], "permission_prompt|idle_prompt");
+        assert_eq!(
+            v["hooks"]["Notification"][0]["matcher"],
+            "permission_prompt|idle_prompt"
+        );
 
         // 重复开启：含 marker → 幂等重写 + 备份
         apply_hooks_at(spec, &home, &log, &backups, true).unwrap();
-        assert_eq!(fs::read_dir(&backups).unwrap().count(), 1, "覆盖我们的文件前备份");
+        assert_eq!(
+            fs::read_dir(&backups).unwrap().count(),
+            1,
+            "覆盖我们的文件前备份"
+        );
 
         // 外来文件（无 marker）：开启拒绝覆盖
         let foreign_home = dir.join("home2");
@@ -1039,7 +1128,10 @@ mod tests {
         let recs = parse_log_records(text);
         assert_eq!(recs.len(), 2, "坏行与缺字段行跳过");
         assert_eq!(recs[0].ts, 100);
-        assert_eq!(recs[1].event, "stop", "pretty JSON 续行拼回解析 + 事件名归一化");
+        assert_eq!(
+            recs[1].event, "stop",
+            "pretty JSON 续行拼回解析 + 事件名归一化"
+        );
     }
 
     /// snake_case（claude 等）与 camelCase（grok）双信封都可解析
@@ -1080,16 +1172,30 @@ mod tests {
         let text = "100 {\"session_id\": \"s1\", \"hook_event_name\": \"UserPromptSubmit\"}\n\
                     200 {\"session_id\": \"s2\", \"hook_event_name\": \"Notification\"}\n\
                     300 {\"session_id\": \"s1\", \"hook_event_name\": \"Stop\"}\n";
-        assert_eq!(state_from_text(text, "s1", "/x/s1.jsonl", 310).as_deref(), Some("done"), "取最新事件");
-        assert_eq!(state_from_text(text, "s2", "/x/s2.jsonl", 310).as_deref(), Some("confirm"));
-        assert_eq!(state_from_text(text, "s3", "/x/s3.jsonl", 310), None, "无记录 → None");
+        assert_eq!(
+            state_from_text(text, "s1", "/x/s1.jsonl", 310).as_deref(),
+            Some("done"),
+            "取最新事件"
+        );
+        assert_eq!(
+            state_from_text(text, "s2", "/x/s2.jsonl", 310).as_deref(),
+            Some("confirm")
+        );
+        assert_eq!(
+            state_from_text(text, "s3", "/x/s3.jsonl", 310),
+            None,
+            "无记录 → None"
+        );
         assert_eq!(
             state_from_text(text, "s1", "/x/s1.jsonl", 300 + HOOKS_TTL_SECS + 1),
             None,
             "过期 → None 回落尾部推断"
         );
         let working = "100 {\"session_id\": \"s1\", \"hook_event_name\": \"UserPromptSubmit\"}";
-        assert_eq!(state_from_text(working, "s1", "/x/s1.jsonl", 120).as_deref(), Some("working"));
+        assert_eq!(
+            state_from_text(working, "s1", "/x/s1.jsonl", 120).as_deref(),
+            Some("working")
+        );
     }
 
     /// grok：Stop 只认 reason=end_turn（或无 reason）；shutdown/channel_closed 的 teardown 记录不更新状态
@@ -1106,10 +1212,16 @@ mod tests {
         // 只有 teardown 记录 → 最近有效事件仍是 working
         let torn = "100 {\"sessionId\": \"s1\", \"hookEventName\": \"user_prompt_submit\"}\n\
                     300 {\"sessionId\": \"s1\", \"hookEventName\": \"stop\", \"reason\": \"channel_closed\"}\n";
-        assert_eq!(state_from_text(torn, "s1", "/x/updates.jsonl", 310).as_deref(), Some("working"));
+        assert_eq!(
+            state_from_text(torn, "s1", "/x/updates.jsonl", 310).as_deref(),
+            Some("working")
+        );
         // 无 reason 的 stop（claude 等）照常认
         let plain = "100 {\"session_id\": \"s1\", \"hook_event_name\": \"Stop\"}";
-        assert_eq!(state_from_text(plain, "s1", "/x/s1.jsonl", 110).as_deref(), Some("done"));
+        assert_eq!(
+            state_from_text(plain, "s1", "/x/s1.jsonl", 110).as_deref(),
+            Some("done")
+        );
     }
 
     /// 双键匹配：session_id 命中文件主名，或 transcript_path 命中完整路径
@@ -1120,18 +1232,33 @@ mod tests {
                     200 {\"session_id\": \"kimi-1\", \"hook_event_name\": \"PermissionRequest\"}\n";
         // grok：session_id 与主名 updates 不符，transcriptPath 完整路径命中
         assert_eq!(
-            state_from_text(text, "updates", "/home/u/.grok/sessions/-proj/grok-abc/updates.jsonl", 210).as_deref(),
+            state_from_text(
+                text,
+                "updates",
+                "/home/u/.grok/sessions/-proj/grok-abc/updates.jsonl",
+                210
+            )
+            .as_deref(),
             Some("confirm"),
             "updates.jsonl 靠 transcriptPath 命中"
         );
         // 主名命中但 transcript 不符也算（其他会话的主名恰好叫 updates 时按前者口径）
         assert_eq!(
-            state_from_text(text, "kimi-1", "/home/u/.kimi-code/sessions/kimi-1.jsonl", 210).as_deref(),
+            state_from_text(
+                text,
+                "kimi-1",
+                "/home/u/.kimi-code/sessions/kimi-1.jsonl",
+                210
+            )
+            .as_deref(),
             Some("confirm"),
             "kimi 无 transcript_path，靠 session_id == 主名"
         );
         // 双键都不中 → None
-        assert_eq!(state_from_text(text, "other", "/elsewhere/x.jsonl", 210), None);
+        assert_eq!(
+            state_from_text(text, "other", "/elsewhere/x.jsonl", 210),
+            None
+        );
         #[cfg(windows)]
         {
             let win = "100 {\"sessionId\": \"grok-abc\", \"hookEventName\": \"notification\", \"transcriptPath\": \"C:\\\\Users\\\\u\\\\.grok\\\\sessions\\\\proj\\\\updates.jsonl\"}\n";
@@ -1172,7 +1299,10 @@ mod tests {
         let baks: Vec<_> = fs::read_dir(&backups).unwrap().flatten().collect();
         assert_eq!(baks.len(), 1, "写前备份");
         assert!(
-            baks[0].file_name().to_string_lossy().starts_with("claude-hooks-settings-"),
+            baks[0]
+                .file_name()
+                .to_string_lossy()
+                .starts_with("claude-hooks-settings-"),
             "备份前缀按 agent 区分（claude 沿用既有前缀）"
         );
 
@@ -1210,13 +1340,18 @@ mod tests {
         assert_eq!(doc["hooks"].as_array_of_tables().unwrap().len(), 3);
         let bak = fs::read_dir(&backups).unwrap().flatten().next().unwrap();
         assert!(
-            bak.file_name().to_string_lossy().starts_with("kimi-hooks-settings-"),
+            bak.file_name()
+                .to_string_lossy()
+                .starts_with("kimi-hooks-settings-"),
             "备份前缀按 agent 区分"
         );
         assert!(bak.path().extension().is_some_and(|e| e == "toml"));
 
         apply_hooks_at(spec, &home, &log, &backups, false).unwrap();
-        let doc = fs::read_to_string(&config).unwrap().parse::<toml_edit::DocumentMut>().unwrap();
+        let doc = fs::read_to_string(&config)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
         assert!(doc.get("hooks").is_none(), "关闭后 hooks 键回收");
         assert_eq!(doc["default_model"].as_str(), Some("ccode"));
         fs::remove_dir_all(&dir).ok();
@@ -1234,7 +1369,15 @@ mod tests {
             .collect();
         assert_eq!(
             supported,
-            ["claude-code", "codex", "gemini", "qwen", "kimi", "codebuddy", "grok"]
+            [
+                "claude-code",
+                "codex",
+                "gemini",
+                "qwen",
+                "kimi",
+                "codebuddy",
+                "grok"
+            ]
         );
         for id in ["cursor", "opencode"] {
             assert!(spec_for(id).is_none());

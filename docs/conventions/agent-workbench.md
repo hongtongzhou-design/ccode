@@ -3,8 +3,8 @@
 | 字段 | 值 |
 |---|---|
 | 作者 | Ccode |
-| 日期 | 2026-09-04 |
-| 状态 | Accepted（v3.221 设计定稿；v3.223 第 0–3 期已落地，见文内「落地状态」） |
+| 日期 | 2026-09-05 |
+| 状态 | Accepted（v3.221 设计定稿；第 0–3 期核心行为已落地，后续只按本文件的验收标准维护，不按对象标签另起路线） |
 | 范围 | 产品对象 Project → Task → Run；编程并行车道；Agent Runtime 抽象 |
 | 前置决策 | 架构 v3.4 人负责拍板；v3.5 否决自动拆任务；v3.7 否决智能路由；v3.10 验收层是护城河；v3.179 科研/编程/办公三档；v3.202 编程 Git 环 |
 
@@ -72,7 +72,29 @@ Run
   closedAt        进程结束或用户关掉；Run 行仍在，可恢复
 ```
 
-`tabId` 只活在前端内存，**不进 SQLite**。重开标签用 `reuseKey` + `sessionId` 反查。
+`tabId` 只活在前端内存，**不进 SQLite**，只是 Run 的终端视图指针。跨页面必须传 `runId`；`reuseKey` 仅在入口做幂等找回，不承担身份。
+
+### 1.2 设计不变量（实现不可绕过）
+
+1. **Run 是身份，标签是视图**：同一 Run 可以没有活标签；关标签、进程退出都不能删除 Run。
+2. **Task 是意图，Run 是执行**：重试/恢复不得复制 Task；同一 Task 可以先后产生多个 Run，但同一 `reuseKey` 同时最多一个活跃交互 Run。
+3. **隔离先于启动**：除明确标记 `sentinel` 的定时任务外，`isolationPath` 必须在启动前解析并通过 canonicalize 校验；失败就不启动。
+4. **人选权限，Runtime 负责翻译**：`discuss` / `write_tree` 是唯一对外政策名；CLI 旗标只存在 Adapter 内，能力不足必须置灰并说明原因。
+5. **事实只有一个来源**：工作台、收件箱、对话页都按 `runId` join；`reuseKey` 只用于找回，不再承担身份、状态和标题三种职责。
+
+### 1.3 Run 生命周期与幂等
+
+状态由事件记录并由当前快照派生，不另建可编辑状态机：
+
+```text
+created → starting → running → {completed | failed | stopped}
+```
+
+- `created` 写入成功后才允许 `pty_spawn` / `run_agent_task`；启动失败保留 `failed` Run 和原因。
+- 恢复是同一 Run 的新执行句柄；若原 Run 已 `completed`，用户明确点「再次运行」才新建 Run。
+- 创建请求带 `reuseKey` 幂等检查：发现同一隔离单元已有活跃交互 Run 时复用它，不重复起进程；Custom/Headless 的新执行不得伪装成会话恢复。
+- `sessionId`、`tabId`、进程句柄都可空；展示层不得以任一字段存在与否推断 Run 是否存在。
+- 收件箱动作首选 `{ type: "run", runId }`；旧 `tab` / `review` 仅作为数据迁移输入；新页面和新动作不得再产生或依赖它们，映射失败必须显示原动作而不是静默丢弃。
 
 ### 1.2 Isolation 两套库不合并
 
@@ -92,15 +114,16 @@ Run 只引用 `isolationPath`。禁止把编程树并进 `workspaces` 表（`cod
 | `reader:<projectRoot>` | 沉浸阅读注入 | TerminalPage |
 | `login:<agentId>` | 官方账号登录 | ProfilesPage |
 | `office:…` | 办公问 AI（按文件/项目） | `officeFileReuseKey` / `projectChatReuseKey` |
-| 编程第 2 期 | `lane:<worktreePath>` | 新；未实现前用 cwd 匹配 |
-| 定时第 1 期 | `watch:<scheduleId>:<isolation>` | 新 |
+| 编程车道 | `lane:<worktreePath>` | 当前使用；旧 `wt:` 入口升格为 `lane:` |
+| Custom Runtime | `custom:<runtimeId>:<cwd>` | 隔离目录决定 Task 种类，不当成固定编程车道 |
+| 定时任务 | `watch:<scheduleId>:<isolation>` | 当前使用；每次执行绑定隔离路径 |
 | scratch | 现有快速开聊键 | `quick-chat.ts` |
 
 同一 `reuseKey` 同时只允许一个活标签（现有 `PendingTerminal.reuseKey` 语义，不得退回堆标签）。
 
 ### 1.4 Permission 政策 → Adapter 翻译
 
-用户选政策，不选 CLI 旗标。翻译表已有 `AgentSpec.readonly_args`：
+用户选政策，不选 CLI 旗标。启动入口字段是 `PendingTerminal.permission`（`discuss` / `write_tree`）；旧 `readonly` 布尔只作回落。翻译表已有 `AgentSpec.readonly_args`：
 
 | 政策 | 用户可见 | 翻译 |
 |---|---|---|
@@ -125,17 +148,17 @@ Run 只引用 `isolationPath`。禁止把编程树并进 `workspaces` 表（`cod
 |---|---|---|
 | Project | `project.toml` + 三档 `work_mode` | 无 |
 | Task（科研） | 步骤 + 任务卡 + 开工弹层 | 够用；不要编程式并行车道 |
-| Task（编程） | 一棵工作树 = 一条分支 | 没有「主题分组 / 再开一条」一等动作 |
-| Run | 终端标签 + `reuseKey` + 无头旁路 | 无头/定时/阅读不是同一类对象 |
-| Permission | `PendingTerminal.readonly` + 各家旗标 | 政策没挂到 Run |
-| Event | 收件箱 + hooks 注意力 | 文案指向「去终端」，不是去哪条活 |
-| Runtime | `AgentSpec` 假定二进制 + PTY | 无头是 `ai.rs` 旁路；无 Custom |
-| 工作台 | `pickWorkbenchNow` **已按项目收卡**，`runningCount` 累加 | 卡上只挂一个 `tabId/agentId`，看不出多次 Run |
-| 开步选 Agent | `KickoffConfirmDialog` + `KickoffLaunch` **已落地** | 编程从基准开工没有同等选择 |
+| Task（编程） | Lane 覆盖层：名称 + 主题分组 +「再开一条」 | 无；合并 / PR 仍按树 |
+| Run | `runs` 持久化记录 + `runId` + 终端标签视图；无头 Run 标记 `internal` | 无；`tabId` 仅用于终端视图聚焦 |
+| Permission | `Run.permission` + `PendingTerminal.permission`（`discuss` / `write_tree`）；旧 `readonly` 仅回落 | 无 |
+| Event | 收件箱文案「去「任务」做什么」；新写入 `{ type: "run", runId }`，活标签无 runId 时带 `tabId` 不丢条 | 无 |
+| Runtime | `LocalCli`、`Headless`、`Custom` 三种执行形态已登记 | Cloud 仍只预留；Custom 不提供会话恢复 |
+| 工作台 | `pickWorkbenchNow` 按项目收卡并展示多次 Run；「继续」优先 `runId`，无活标签时按可恢复 Run 找回 | 无 |
+| 开步选 Agent | 科研弹层 + 编程 `codingTerminalLaunch` 同款记忆键 | 无 |
 
 ---
 
-## 3. 第 0 期 — 表面优化（可立即实现，不建表）
+## 3. 当前基线 — 表面收口（不作为未来一期）
 
 目标：用户感到「我在管几条活」，不是「我开了几个 CLI」。禁止新表、禁止改 AgentSpec 形状。
 
@@ -199,7 +222,7 @@ Agent / 模型只出现在状态栏（进程起来之后，v3.213 口径）。�
 
 `InboxItem.text` 模板：`去「{taskLabel}」{动作}`。
 
-`taskLabel` 推导：科研 worktree → 工作区名；编程树 → 分支；否则项目名。动作用现有「看待确认 / 解决冲突 / 看新文献」。不改 `action` 联合类型（第 1 期再加 `run`）。
+`taskLabel` 推导：科研 worktree → 工作区名；编程树 → 分支；否则项目名。动作用现有「看待确认 / 解决冲突 / 看新文献」。新写入动作使用 `{ type: "run", runId }`；旧 `tab` / `review` 只在迁移入口读取。
 
 ### 3.6 编程树最短 TASK.md
 
@@ -230,9 +253,9 @@ headlessWrite: CapabilityFlagDto;     // 定时/无头写盘：未实证则 supp
 
 前端：想法期开关、定时任务选 Agent 时置灰 + 原因。qwen 无头未验证则禁选；grok 标「无沙箱」。不默默降级。
 
-### 3.8 第 0 期明确不做
+### 3.8 当前基线明确不做
 
-- 不建 `runs` / `lanes` 表
+- 不为 Run/Lane 再造第二套对象或 UI；当前已分别有持久化 Run 记录与编程车道记录
 - 不改侧栏八页
 - 不开步弹层里加「拆成三个 Agent」
 - 不把科研工作区改成编程车道 UI
@@ -277,7 +300,7 @@ SQLite `runs` 表（`app.db`），字段见 §1.1。不把 PTY id、密钥、env
 
 - `PendingTerminal.runId?: string`；spawn 后标签持有它
 - 重启恢复白名单增加 `runId`（仍不含 PTY/密钥）
-- 收件箱 `action` 增加 `{ type: "run"; runId: string }`；旧 `tab` / `review` 保留一版兼容，能映射就映射
+- 收件箱 `action` 新写 `{ type: "run"; runId: string }`；旧 `tab` / `review` 只读兼容，不能映射时保留原动作并显示原因
 - 工作台 `runs[]` 只 join **非 internal** 的交互 Run + 活标签；无头 Run 不得出现在工作台主卡/紧凑行
 - 无头失败走收件箱（现有 `lit:` / 定时历史），不新造「无头对话」卡
 
@@ -288,6 +311,8 @@ SQLite `runs` 表（`app.db`），字段见 §1.1。不把 PTY id、密钥、env
 - 无头巡检失败：收件箱一条失败，不是一次可恢复对话
 - 阅读区问 AI：仅当对应标签还活着才进「正在进行」；结束后不进本项目会话
 - 会话解析仍只读；Run 行不得回写 CLI 会话文件
+
+**用户行为验收（一期完成线）**：从工作台「继续」、收件箱动作、对话页「本步骤的对话」进入时，三处都定位到同一个 `runId`；关掉标签后仍可找回；无头成功/失败只更新结果入口，不生成可聊天任务。
 
 ---
 
@@ -328,16 +353,14 @@ Lane
 - 合并 / PR / Desktop / 逐 hunk **全部仍按树、按分支**，不引入「三条合成一个 PR」
 - 以后若「这几条一起评审」：人勾选多棵树，再进现有评审覆盖层——仍不是 Review Agent。本期不做
 
-### 5.3 与第 0 期关系
-
-第 0 期「再开一条」只是预填分支名。第 2 期才有 `theme` / `name`。实现第 2 期时把第 0 期按钮接到建 Lane。
-
 ### 5.4 明确不做
 
 - 自然语言 → 自动开三条车道
 - Lane 之间自动接力或自动选 Agent
 - 并入科研 `workspaces` 表
 - 任意 git 命令框（v3.179）
+
+**用户行为验收（二期完成线）**：用户能从 `main` 建两条命名车道，分别看到分支、当前 Run 和推送/PR 状态；删除或合并一条车道不会改动另一条；系统不会因同一主题自动启动、接力或合并车道。
 
 ---
 
@@ -350,7 +373,7 @@ Lane
 ```text
 local_cli   现有 PTY + launch_plan     交互 Agent 的 100%
 headless    现有 ai.rs / scheduler     升格为正式 Runtime，不再像内部杂务
-custom      用户登记的命令 + args      用来证明「不是 CLI 也能进工作台」
+  custom      用户登记的命令 + cwd + env 用来证明「不是 CLI 也能进工作台」
 cloud       预留；有稳定官方 API 再加一张规格，不预研、不自建
 ```
 
@@ -366,11 +389,12 @@ resume(session) -> handle    // 无会话格式则 Unsupported + 原因
 
 ### 6.2 Custom Runtime（本期最小验收）
 
-用户登记：`name` + `command`（经 `resolve_binary`）+ `args`。无 Ccode 密钥注入、无 session 解析、无 MCP/技能分发。
+用户登记：`name` + `command`（经 `resolve_binary`）+ `args` + 可选 `cwd` / `env`。无 Ccode 密钥注入、无 session 解析、无 MCP/技能分发。`cwd` 只能落在 Run 的隔离树内，环境变量值不得写入 Run 记录。
 
-- 在 `isolationPath` 里起 PTY（当 shell 命令跑）
+- 直接在 `isolationPath` 内启动用户登记的可执行命令，不默认包裹 shell；只有用户登记的 shell 命令才由该命令解释脚本
 - 能停、能看输出
 - 若改了文件，走现有改动面板 / 评审
+- 退出码、停止原因和输出尾部进入 Run 事件；非零退出不自动判定文件成果可合并
 - 命令相对路径拒写（与 MCP stdio 同一红线）
 - 不进九家清单，不当第九+一家 CLI
 
@@ -380,22 +404,23 @@ resume(session) -> handle    // 无会话格式则 Unsupported + 原因
 
 只定边界：鉴权走现有网关/官方账号双轨之一；事件映射进 Run events；隔离仍是本机 worktree（云端沙箱 = 对方的事，Ccode 不自建 Docker/VM，v3.8）。**没有稳定、可本机鉴权的官方 API 之前不写实现、不占 UI。**
 
+**用户行为验收（三期完成线）**：用户登记一个命令后，可在隔离树中启动、停止、查看输出；退出后若有改动仍进入现有评审入口。Custom 不出现在九家 CLI、技能或 MCP 清单中；没有可恢复会话时明确显示「该 Runtime 不支持恢复」，不伪造会话。
+
 ---
 
-## 7. 定时写入隔离（设计完成，实施待拍板）
+## 7. 定时写入隔离（随第 3 期权限/Runtime 一并收口）
 
-现状：scheduler cwd = 项目根，绕过验收层。架构 §11.4 已记为定位决策。
+当前基线：scheduler 先创建/复用隔离 worktree，再启动 Run；产物保留供人工评审，不自动合并。
 
-**推荐方案（拍板后按此做，不要另开第三套）：**
+**当前实现规则（不要另开第三套）：**
 
-- 每个日程一次 Run，`taskKind=watch`，`isolationPath` = 科研工作区 `ccode/watch-<YYYYMMDD>`（当天复用，不每天狂建）
+- 每个日程一次 Run，`taskKind=watch`，`isolationPath` = `~/ccode/watch-worktrees/<repo>/<schedule-id>`（同一日程复用；保留供评审，不自动合并）
+- 建树后从主仓播种：每次刷新 `papers/watchlist.md`；隔离树没有才拷 `papers/watch-seen.md`、`papers/watch-followup.md`、`notes/inbox.md`、`notes/references.bib`
 - 技能简报继续约束只写 `notes/inbox.md`、`papers/watch-*.md`
-- 跑完收件箱「新命中可评审」；合并走现有工作区评审，禁止静默合进主仓
-- 失败 / 超时分列状态（§11.4 已列）
+- 跑完收件箱「去评审 N 条新命中」打开隔离树只读评审；人点「采纳进主仓」才拷产出回项目根，禁止静默合进主仓
+- 失败 / 超时分列状态（`error` / `timeout`）
 
-**若拍板维持写主仓：** UI 必须写明「这是直接写主仓的哨兵」，且能力表 §3.7 仍要做。不得 silently 两种都做。
-
-未拍板前：第 0 期只做能力标注；第 1 期 watch Run 的 `isolationPath` 先记项目根并打标 `sentinel: true`，方便以后改路径不改对象。
+默认任务必须使用上面的隔离 worktree，无法创建或校验失败时失败并保留原因；当前没有面向用户的主仓 `sentinel` 配置入口，因此定时任务不得直接写主仓。
 
 ---
 
@@ -420,7 +445,7 @@ resume(session) -> handle    // 无会话格式则 Unsupported + 原因
 | 具体哪家 Cloud API 的字段表 | 没有稳定官方 API；到时候加一张规格 |
 | 自动拆工 DAG / Review Agent | 已否决（v3.5 / v3.10） |
 | 科研/编程 worktree 并库 | 已否决 |
-| 定时是否改隔离树 | 推荐方案在 §7，**实施等拍板** |
+| 定时是否改隔离树 | 已落地：默认创建并校验独立 worktree；当前没有主仓 sentinel UI，不能把定时任务写主仓 |
 | 多 Lane 一起开一个 PR | 第 2 期明确不做；真要做再单独立项 |
 | 编排语言 / 自研 MCP host / Docker 沙箱 | 已否决 |
 
@@ -430,10 +455,10 @@ resume(session) -> handle    // 无会话格式则 Unsupported + 原因
 
 | 期 | 内容 | 主要文件 | 状态 |
 |---|---|---|---|
-| 0 | 工作台 `runs[]`；编程再开一条；编程开工带 Agent；标签标题；收件箱文案；编程 TASK.md；能力表只读/无头 | `workbench-hero.ts` `WorkbenchPage.tsx` `CodingProjectView.tsx` `coding.rs` `kickoff-launch.ts` `inbox.ts` `agent_specs.rs` `types.ts` | **已落地（v3.221；v3.224：阅读标签还开着算正在进行）** |
-| 1 | `runs` 表；spawn/无头/定时登记；收件箱 `action.run` | `pty.rs` `ai.rs` `scheduler.rs` `store.ts` `sessions.rs` | **已落地（v3.222：无头不进工作台）** |
-| 2 | `lanes` 表；编程页分组 UI | `coding.rs` `CodingProjectView.tsx` | **已落地** |
-| 3 | `RuntimeKind` + Custom | `agent_specs.rs` `pty.rs` | **已落地（Custom 最小；Cloud 不实现）** |
-| 7 | 定时进 watch 工作区 | `scheduler.rs` `workspaces.rs` | 设计完成，**实施待拍板** |
+| 0 | 工作台 `runs[]`；编程再开一条；编程开工带 Agent；标签标题；收件箱文案；编程 TASK.md；能力表只读/无头 | `workbench-hero.ts` `WorkbenchPage.tsx` `CodingProjectView.tsx` `coding.rs` `kickoff-launch.ts` `inbox.ts` `agent_specs.rs` `types.ts` | **已实现** |
+| 1 | `runs` 表；spawn/无头/定时登记；收件箱 `action.run` | `pty.rs` `ai.rs` `scheduler.rs` `store.ts` `sessions.rs` | **已实现；旧数据仅在迁移入口兼容** |
+| 2 | `lanes` 表；编程页分组 UI | `coding.rs` `CodingProjectView.tsx` | **已实现** |
+| 3 | `RuntimeKind` + Custom | `agent_specs.rs` `custom_runtime.rs` `runtime.rs` | **Custom 最小闭环已实现；Cloud 不实现** |
+| 7 | 定时进 watch 工作区 | `scheduler.rs` `lit_watch.rs` | **隔离路径 + 播种 + 只读评审 + 采纳进主仓已实现；无主仓 sentinel UI** |
 
 实现某一期时同步 `docs/user-guide.md` 对应操作；未实现不得写进手册当已有功能。发版才写 `CHANGELOG.md`。

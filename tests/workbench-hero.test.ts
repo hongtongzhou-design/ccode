@@ -228,6 +228,13 @@ test("继续工作：有标签去终端，已添加去项目详情，否则真�
     tabId: "t9",
   });
   assert.deepEqual(
+    continueWorkbenchTarget({
+      ...running,
+      runs: [{ ...running.runs[0]!, runId: "run-1" }],
+    }),
+    { kind: "terminal", tabId: "t9", runId: "run-1" },
+  );
+  assert.deepEqual(
     continueWorkbenchTarget({ ...running, tabId: null, source: "context" }),
     { kind: "project", path: ccode.path },
   );

@@ -227,6 +227,13 @@ export default function OfficeProjectView({
     setPreview(d);
   }
 
+  function movePreview(offset: number) {
+    if (!preview) return;
+    const index = rows.findIndex((row) => row.d.path === preview.path);
+    const next = rows[index + offset]?.d;
+    if (next) setPreview(next);
+  }
+
   function askAi(
     d: OfficeDocDto,
     e?: { metaKey: boolean; ctrlKey: boolean },
@@ -303,7 +310,7 @@ export default function OfficeProjectView({
               <span className="text-micro text-l4">{statusLine}</span>
             </p>
           </div>
-          {!sessionsOpen && (
+          <div className="ccode-mobile-sessions-trigger">
             <ProjectSessionsSection
               projectPath={repoPath}
               variant="sidebar"
@@ -311,7 +318,7 @@ export default function OfficeProjectView({
               onToggle={() => setSessionsOpen(true)}
               title="项目对话"
             />
-          )}
+          </div>
         </div>
       </section>
 
@@ -468,7 +475,11 @@ export default function OfficeProjectView({
       </div>
 
         {sessionsOpen && (
-        <aside className={sessionsAsideOpenClass}>
+        <aside
+          className={`${sessionsAsideOpenClass} ccode-project-sessions-rail ${
+            sessionsOpen ? "ccode-project-sessions-rail-open" : ""
+          }`}
+        >
           <div className="flex min-w-0 flex-col gap-4">
             <ProjectSessionsSection
               projectPath={repoPath}
@@ -514,6 +525,13 @@ export default function OfficeProjectView({
           root={repoPath}
           onClose={() => setPreview(null)}
           onAskAi={() => askAi(preview)}
+          onPrevious={() => movePreview(-1)}
+          onNext={() => movePreview(1)}
+          hasPrevious={rows.findIndex((row) => row.d.path === preview.path) > 0}
+          hasNext={
+            rows.findIndex((row) => row.d.path === preview.path) >= 0 &&
+            rows.findIndex((row) => row.d.path === preview.path) < rows.length - 1
+          }
         />
       )}
     </div>

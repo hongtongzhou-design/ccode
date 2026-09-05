@@ -27,8 +27,10 @@ import type {
   ProjectDto,
   ProjectStepDto,
   RepoDto,
+  RunDto,
   WorkspaceDto,
 } from "../types";
+import { pickRecoverableRun } from "../run-model";
 import {
   continueWorkbenchTarget,
   firstOpenStepName,
@@ -57,6 +59,7 @@ import {
   rowActionClass,
   secondaryActionClass,
 } from "../components/PageFrame";
+import { toast } from "../toast";
 
 const iconClass = "shrink-0 text-l4";
 
@@ -111,6 +114,23 @@ function WorkbenchPage({
   const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
   const setFocusTabReq = useAppStore((s) => s.setFocusTabReq);
 
+  function openRun(runId: string, tabId?: string) {
+    if (tabId && terminalRunInputs.some((run) => run.tabId === tabId)) {
+      setFocusTabReq(tabId);
+      setPage("terminal");
+      return;
+    }
+    // 统一走收件箱的 Run 入口：活标签直接聚焦，失效标签回查 run_get；
+    // Custom Runtime 由该入口明确分流为「新 Run」，不误触发普通 CLI 恢复。
+    runInboxAction({
+      key: `run:${runId}`,
+      dot: "bg-warn-text",
+      text: "运行",
+      actionLabel: "打开",
+      action: { type: "run", runId },
+    });
+  }
+
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceDto[]>([]);
   const [steps, setSteps] = useState<ProjectStepDto[]>([]);
@@ -121,15 +141,21 @@ function WorkbenchPage({
   const [researchSteps, setResearchSteps] = useState<
     Record<string, ProjectStepDto[]>
   >({});
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [recoverableRuns, setRecoverableRuns] = useState<RunDto[]>([]);
 
   useEffect(() => {
-    if (visible) void loadRecentRepos();
+    if (!visible) return;
+    void loadRecentRepos().catch(() => {
+      toast("最近项目加载失败，可稍后重试", "warning");
+    });
   }, [loadRecentRepos, visible]);
 
   useEffect(() => {
     void invoke<string>("home_dir")
       .then(setHomeDir)
-      .catch(() => {});
+      .catch(() => toast("无法读取主目录，部分路径提示可能不完整", "warning"));
   }, []);
 
   const runCwdSig = terminalRunInputs
@@ -139,6 +165,7 @@ function WorkbenchPage({
 
   useEffect(() => {
     if (!visible) return;
+    setLoadError(null);
     invoke<ProjectDto[]>("list_projects")
       .then((list) => {
         setProjects(list);
@@ -152,7 +179,10 @@ function WorkbenchPage({
           coding.map((p) =>
             invoke<CodingOverviewDto>("coding_overview", { repoPath: p.path })
               .then((ov) => [p.path, ov] as const)
-              .catch(() => null),
+              .catch(() => {
+                toast(`项目「${p.name}」的编程状态未检测到`, "warning");
+                return null;
+              }),
           ),
         ).then((rows) => {
           const next: Record<string, CodingOverviewDto> = {};
@@ -165,7 +195,10 @@ function WorkbenchPage({
           research.map((p) =>
             invoke<ProjectConfigReadDto>("read_project_config", { path: p.path })
               .then((read) => [p.path, read.config.steps ?? []] as const)
-              .catch(() => null),
+              .catch(() => {
+                toast(`项目「${p.name}」的流程配置未检测到`, "warning");
+                return null;
+              }),
           ),
         ).then((rows) => {
           const next: Record<string, ProjectStepDto[]> = {};
@@ -175,11 +208,19 @@ function WorkbenchPage({
           setResearchSteps(next);
         });
       })
-      .catch(() => {});
+      .catch(() => {
+        setProjects([]);
+        setLoadError("项目数据加载失败，可重试；其他工作台内容仍可继续使用。");
+      });
     invoke<WorkspaceDto[]>("list_workspaces")
       .then(setWorkspaces)
-      .catch(() => setWorkspaces([]));
-  }, [visible, runCwdSig]);
+      .catch(() => {
+        setWorkspaces([]);
+        setLoadError((current) =>
+          current ?? "工作区状态加载失败，可重试；其他工作台内容仍可继续使用。",
+        );
+      });
+  }, [visible, runCwdSig, reloadToken]);
 
   const nowSeeds = useMemo((): WorkbenchNowSeed[] => {
     const live = terminalRunInputs.filter(
@@ -318,6 +359,24 @@ function WorkbenchPage({
     });
   }, [nowItems, wbProjects, recentRepos, workspaces, terminalRunInputs, contextLabel]);
 
+  useEffect(() => {
+    if (!visible || !hero?.path) {
+      setRecoverableRuns([]);
+      return;
+    }
+    let cancelled = false;
+    invoke<RunDto[]>("run_list", { projectRoot: hero.path })
+      .then((list) => {
+        if (!cancelled) setRecoverableRuns(list);
+      })
+      .catch(() => {
+        if (!cancelled) setRecoverableRuns([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, hero?.path]);
+
   const recentRows = useMemo(
     () =>
       workbenchRecentRows({
@@ -340,6 +399,7 @@ function WorkbenchPage({
       })
       .catch(() => {
         if (!cancelled) setSteps([]);
+        if (!cancelled) toast("当前项目流程读取失败，可重试", "warning");
       });
     return () => {
       cancelled = true;
@@ -379,11 +439,23 @@ function WorkbenchPage({
     if (!hero) return;
     const target = continueWorkbenchTarget(hero);
     if (target.kind === "terminal") {
-      setFocusTabReq(target.tabId);
-      setPage("terminal");
+      if (target.runId) openRun(target.runId, target.tabId);
+      else {
+        setFocusTabReq(target.tabId);
+        setPage("terminal");
+      }
       return;
     }
     if (target.kind === "project") {
+      const recovered = pickRecoverableRun(
+        recoverableRuns,
+        target.path,
+        IS_WINDOWS,
+      );
+      if (recovered) {
+        openRun(recovered.id);
+        return;
+      }
       setSelectProjectReq(target.path);
       setPage("workspaces");
       return;
@@ -460,6 +532,18 @@ function WorkbenchPage({
           </button>
         }
       />
+      {loadError && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn-text">
+          <span>{loadError}</span>
+          <button
+            type="button"
+            className={secondaryActionClass}
+            onClick={() => setReloadToken((n) => n + 1)}
+          >
+            重试
+          </button>
+        </div>
+      )}
 
       <div
         className={
@@ -531,13 +615,16 @@ function WorkbenchPage({
               {hero.runs.length > 1 && (
                 <ul className="mt-2 space-y-0.5">
                   {hero.runs.map((r) => (
-                    <li key={r.tabId}>
+                    <li key={r.runId ?? r.tabId}>
                       <button
                         type="button"
                         className="flex h-7 w-full items-center gap-2 rounded-md px-1 text-left text-xs text-l3 hover:bg-hover hover:text-l2"
                         onClick={() => {
-                          setFocusTabReq(r.tabId);
-                          setPage("terminal");
+                          if (r.runId) openRun(r.runId, r.tabId);
+                          else {
+                            setFocusTabReq(r.tabId);
+                            setPage("terminal");
+                          }
                         }}
                       >
                         <span
@@ -577,8 +664,11 @@ function WorkbenchPage({
                   onClick={() => {
                     const target = continueWorkbenchTarget(item);
                     if (target.kind === "terminal") {
-                      setFocusTabReq(target.tabId);
-                      setPage("terminal");
+                      if (target.runId) openRun(target.runId, target.tabId);
+                      else {
+                        setFocusTabReq(target.tabId);
+                        setPage("terminal");
+                      }
                       return;
                     }
                     if (target.kind === "project") {
@@ -680,7 +770,7 @@ function WorkbenchPage({
                 </span>
                 <button
                   type="button"
-                  className={`${rowActionClass} opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100`}
+                  className={`${rowActionClass} ${hoverRevealClass}`}
                   onClick={() => runInboxAction(item)}
                 >
                   {item.actionLabel}
@@ -803,7 +893,7 @@ function WorkbenchPage({
                   <ChevronRight
                     size={14}
                     strokeWidth={1.8}
-                    className="text-l4 opacity-0 transition-opacity group-hover:opacity-100"
+                    className={`text-l4 ${hoverRevealClass}`}
                     aria-hidden="true"
                   />
                 </button>

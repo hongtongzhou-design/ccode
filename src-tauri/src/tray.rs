@@ -79,8 +79,8 @@ fn build_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
 
     let show = MenuItem::with_id(app, "show", "打开 Ccode", true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
+    let quit =
+        MenuItem::with_id(app, "quit", "退出", true, None::<&str>).map_err(|e| e.to_string())?;
     let sep = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
 
     let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = vec![Box::new(show)];
@@ -89,14 +89,15 @@ fn build_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
 
     for spec in agent_specs::all_agent_specs() {
         let agent = spec.id;
-        let list: Vec<_> = profiles.iter().filter(|p| p.agent == agent).cloned().collect();
+        let list: Vec<_> = profiles
+            .iter()
+            .filter(|p| p.agent == agent)
+            .cloned()
+            .collect();
         if list.is_empty() {
             continue;
         }
-        let set_global_ok = matches!(
-            spec.set_global,
-            crate::agent_specs::SetGlobalCap::Supported
-        );
+        let set_global_ok = matches!(spec.set_global, crate::agent_specs::SetGlobalCap::Supported);
         let recorded = active.get(agent).cloned();
         let drift = global_config::drift_status(&store, agent);
         let drifted = drift.status == "drifted";
@@ -158,14 +159,9 @@ fn build_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         }
         if !set_global_ok {
             if let crate::agent_specs::SetGlobalCap::Unsupported(reason) = spec.set_global {
-                let hint = MenuItem::with_id(
-                    app,
-                    format!("hint:{agent}"),
-                    reason,
-                    false,
-                    None::<&str>,
-                )
-                .map_err(|e| e.to_string())?;
+                let hint =
+                    MenuItem::with_id(app, format!("hint:{agent}"), reason, false, None::<&str>)
+                        .map_err(|e| e.to_string())?;
                 sub_items.push(Box::new(hint));
             }
         } else if !dry_any_ok && dry_failed {
@@ -184,8 +180,9 @@ fn build_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         }
         let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
             sub_items.iter().map(|b| b.as_ref()).collect();
-        let sub = Submenu::with_id_and_items(app, format!("ag:{agent}"), spec.display_name, true, &refs)
-            .map_err(|e| e.to_string())?;
+        let sub =
+            Submenu::with_id_and_items(app, format!("ag:{agent}"), spec.display_name, true, &refs)
+                .map_err(|e| e.to_string())?;
         items.push(Box::new(sub));
     }
 

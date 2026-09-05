@@ -153,7 +153,12 @@ fn agent_dirs() -> HashMap<String, PathBuf> {
     m
 }
 
-fn new_skill(name: String, description: Option<String>, source: &str, repo: Option<String>) -> SkillDto {
+fn new_skill(
+    name: String,
+    description: Option<String>,
+    source: &str,
+    repo: Option<String>,
+) -> SkillDto {
     let mut apps = HashMap::new();
     for spec in crate::agent_specs::all_agent_specs() {
         apps.insert(spec.id.to_string(), false);
@@ -185,27 +190,84 @@ fn new_skill(name: String, description: Option<String>, source: &str, repo: Opti
 /// 种子版本：内置技能集合有新增/修订时 +1；启动时 marker 低于此版本才补播缺失项。
 /// marker 是库目录下的 . 开头文件（发现逻辑跳过），记录已播种到的版本；
 /// 用户删掉某个内置技能后不会被复活——只有版本升级才补播「库里没有」的项。
-const BUILTIN_SEED_VERSION: u32 = 3;
+const BUILTIN_SEED_VERSION: u32 = 4;
 const BUILTIN_SEED_MARKER: &str = ".builtin-seed-version";
 
 /// 内置技能表：(技能名, SKILL.md 全文)。内容单一出处在 resources/skills/<name>/SKILL.md，
 /// 经 include_str! 编进二进制，dev 与打包行为一致，无需配置 bundle resources。
 static BUILTIN_SKILLS: &[(&str, &str)] = &[
-    ("lit-search", include_str!("../resources/skills/lit-search/SKILL.md")),
-    ("lit-notes", include_str!("../resources/skills/lit-notes/SKILL.md")),
-    ("lit-watch", include_str!("../resources/skills/lit-watch/SKILL.md")),
-    ("review-framework", include_str!("../resources/skills/review-framework/SKILL.md")),
-    ("review-writing", include_str!("../resources/skills/review-writing/SKILL.md")),
-    ("research-writing", include_str!("../resources/skills/research-writing/SKILL.md")),
-    ("data-clean", include_str!("../resources/skills/data-clean/SKILL.md")),
-    ("data-eda", include_str!("../resources/skills/data-eda/SKILL.md")),
-    ("quarto-render", include_str!("../resources/skills/quarto-render/SKILL.md")),
-    ("bib-check", include_str!("../resources/skills/bib-check/SKILL.md")),
-    ("rebuttal-crafter", include_str!("../resources/skills/rebuttal-crafter/SKILL.md")),
-    ("stats-check", include_str!("../resources/skills/stats-check/SKILL.md")),
-    ("figure-forge", include_str!("../resources/skills/figure-forge/SKILL.md")),
-    ("slides-deck", include_str!("../resources/skills/slides-deck/SKILL.md")),
-    ("proposal-writer", include_str!("../resources/skills/proposal-writer/SKILL.md")),
+    (
+        "lit-search",
+        include_str!("../resources/skills/lit-search/SKILL.md"),
+    ),
+    (
+        "zotero-sync",
+        include_str!("../resources/skills/zotero-sync/SKILL.md"),
+    ),
+    (
+        "lit-notes",
+        include_str!("../resources/skills/lit-notes/SKILL.md"),
+    ),
+    (
+        "lit-watch",
+        include_str!("../resources/skills/lit-watch/SKILL.md"),
+    ),
+    (
+        "review-framework",
+        include_str!("../resources/skills/review-framework/SKILL.md"),
+    ),
+    (
+        "review-writing",
+        include_str!("../resources/skills/review-writing/SKILL.md"),
+    ),
+    (
+        "research-writing",
+        include_str!("../resources/skills/research-writing/SKILL.md"),
+    ),
+    (
+        "data-clean",
+        include_str!("../resources/skills/data-clean/SKILL.md"),
+    ),
+    (
+        "data-eda",
+        include_str!("../resources/skills/data-eda/SKILL.md"),
+    ),
+    (
+        "origin-plot",
+        include_str!("../resources/skills/origin-plot/SKILL.md"),
+    ),
+    (
+        "quarto-render",
+        include_str!("../resources/skills/quarto-render/SKILL.md"),
+    ),
+    (
+        "bib-check",
+        include_str!("../resources/skills/bib-check/SKILL.md"),
+    ),
+    (
+        "rebuttal-crafter",
+        include_str!("../resources/skills/rebuttal-crafter/SKILL.md"),
+    ),
+    (
+        "stats-check",
+        include_str!("../resources/skills/stats-check/SKILL.md"),
+    ),
+    (
+        "figure-forge",
+        include_str!("../resources/skills/figure-forge/SKILL.md"),
+    ),
+    (
+        "endnote-bridge",
+        include_str!("../resources/skills/endnote-bridge/SKILL.md"),
+    ),
+    (
+        "slides-deck",
+        include_str!("../resources/skills/slides-deck/SKILL.md"),
+    ),
+    (
+        "proposal-writer",
+        include_str!("../resources/skills/proposal-writer/SKILL.md"),
+    ),
 ];
 
 /// 启动时播种内置技能（幂等）：只补库里没有的，同名技能（含用户自建/改过的）一律跳过，
@@ -248,7 +310,11 @@ fn seed_builtin_skills_impl(store: &SkillStore) -> Result<Vec<String>, String> {
         crate::logbuf::record(
             "info",
             "skills",
-            &format!("内置技能播种：新增 {} 个（{}）", added.len(), added.join("、")),
+            &format!(
+                "内置技能播种：新增 {} 个（{}）",
+                added.len(),
+                added.join("、")
+            ),
         );
     }
     Ok(added)
@@ -264,7 +330,10 @@ fn check_builtin_skill_updates_impl(store: &SkillStore) -> Vec<String> {
     let skills = store.read();
     let mut outdated = Vec::new();
     for (name, seed) in BUILTIN_SKILLS {
-        if !skills.iter().any(|s| s.name == *name && s.source == "builtin") {
+        if !skills
+            .iter()
+            .any(|s| s.name == *name && s.source == "builtin")
+        {
             continue;
         }
         let Ok(current) = fs::read(store.skill_dir(name).join("SKILL.md")) else {
@@ -398,9 +467,7 @@ fn parse_skill_md_text(text: &str) -> SkillFrontmatter {
         };
         match key.trim() {
             "name" if !value.is_empty() => parsed.name = Some(value.to_string()),
-            "description" if !value.is_empty() => {
-                parsed.description = Some(value.to_string())
-            }
+            "description" if !value.is_empty() => parsed.description = Some(value.to_string()),
             "outputs" => {
                 if value.is_empty() {
                     collecting = Some(ListKey::Outputs);
@@ -448,16 +515,31 @@ fn skill_md_body(text: &str) -> &str {
 /// 推断结果只进 DTO（interface_inferred = true），不回写 SKILL.md。
 fn infer_interface_from_body(body: &str) -> (Vec<String>, Vec<String>) {
     const OUTPUT_HINTS: &[&str] = &[
-        "写入", "写到", "写出", "产出", "生成", "保存", "追加到", "输出到", "落盘", "落在",
-        "write", "save", "creat", "produc", "generat", "append", "output",
+        "写入",
+        "写到",
+        "写出",
+        "产出",
+        "生成",
+        "保存",
+        "追加到",
+        "输出到",
+        "落盘",
+        "落在",
+        "write",
+        "save",
+        "creat",
+        "produc",
+        "generat",
+        "append",
+        "output",
     ];
     const INPUT_HINTS: &[&str] = &[
-        "读取", "读入", "基于", "对照", "输入", "参考", "检查", "read", "load", "review",
-        "check", "based on",
+        "读取", "读入", "基于", "对照", "输入", "参考", "检查", "read", "load", "review", "check",
+        "based on",
     ];
     const KNOWN_EXTS: &[&str] = &[
-        ".md", ".bib", ".csv", ".pdf", ".tex", ".yaml", ".yml", ".json", ".toml", ".ris",
-        ".docx", ".qmd",
+        ".md", ".bib", ".csv", ".pdf", ".tex", ".yaml", ".yml", ".json", ".toml", ".ris", ".docx",
+        ".qmd",
     ];
     /// 路径 token 判定：含 / 或已知扩展名；剔除 URL、过短、含中文（「数据/图片」类误伤）
     fn looks_like_path(t: &str) -> bool {
@@ -591,7 +673,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 
 fn copy_dir_recursive_at(src: &Path, dst: &Path, depth: usize) -> Result<(), String> {
     if depth > MAX_WALK_DEPTH {
-        return Err(format!("目录嵌套超过 {MAX_WALK_DEPTH} 层（疑似符号链接环）: {}", src.display()));
+        return Err(format!(
+            "目录嵌套超过 {MAX_WALK_DEPTH} 层（疑似符号链接环）: {}",
+            src.display()
+        ));
     }
     fs::create_dir_all(dst).map_err(|e| format!("创建目录 {} 失败: {e}", dst.display()))?;
     let entries = fs::read_dir(src).map_err(|e| format!("读取目录 {} 失败: {e}", src.display()))?;
@@ -668,7 +753,10 @@ fn import_decision(
     if !exists {
         return Ok(ImportDecision::Add(name.to_string()));
     }
-    match resolutions.and_then(|items| items.get(name)).map(String::as_str) {
+    match resolutions
+        .and_then(|items| items.get(name))
+        .map(String::as_str)
+    {
         Some("overwrite") => Ok(ImportDecision::Overwrite),
         Some("skip") => Ok(ImportDecision::Skip),
         Some(value) if value.starts_with("rename:") => {
@@ -695,7 +783,12 @@ fn add_skill_from_dir(
     let dst = store.skill_dir(install_name);
     copy_dir_recursive(src_dir, &dst)?;
     let description = parse_skill_md(&dst.join("SKILL.md")).description;
-    skills.push(new_skill(install_name.to_string(), description, source, repo));
+    skills.push(new_skill(
+        install_name.to_string(),
+        description,
+        source,
+        repo,
+    ));
     if let Err(e) = store.write(skills) {
         skills.pop();
         let _ = fs::remove_dir_all(&dst);
@@ -762,7 +855,11 @@ fn import_one_dir(
 ) -> Result<(), String> {
     let name = requested_name
         .map(ToOwned::to_owned)
-        .or_else(|| src_dir.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .or_else(|| {
+            src_dir
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
         .ok_or("无法确定技能名称")?;
     match import_decision(store, skills, &name, resolutions)? {
         ImportDecision::Add(target) => {
@@ -932,7 +1029,12 @@ fn bytes_eq_ignore_crlf(a: &[u8], b: &[u8]) -> bool {
         .eq(b.iter().copied().filter(|&c| c != b'\r'))
 }
 
-fn delete_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>, backups: &Path, id: &str) -> Result<(), String> {
+fn delete_impl(
+    store: &SkillStore,
+    dirs: &HashMap<String, PathBuf>,
+    backups: &Path,
+    id: &str,
+) -> Result<(), String> {
     let mut skills = store.read();
     let pos = skills
         .iter()
@@ -968,7 +1070,17 @@ fn import_zip_impl(
     resolutions: Option<&HashMap<String, String>>,
     only: Option<&str>,
 ) -> Result<SkillImportResultDto, String> {
-    import_zip_limited(store, skills, zip_path, subdir, source, repo, resolutions, only, ZIP_MAX_UNCOMPRESSED)
+    import_zip_limited(
+        store,
+        skills,
+        zip_path,
+        subdir,
+        source,
+        repo,
+        resolutions,
+        only,
+        ZIP_MAX_UNCOMPRESSED,
+    )
 }
 
 /// 按实际解压出的字节数累计计费，超过预算即中止（中央目录声明值不可信，防 zip 炸弹）
@@ -998,18 +1110,30 @@ fn import_zip_limited(
     let file = fs::File::open(zip_path).map_err(|e| format!("打开 ZIP 失败: {e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解析 ZIP 失败: {e}"))?;
     if archive.len() > ZIP_MAX_ENTRIES {
-        return Err(format!("ZIP 条目过多（{} > {ZIP_MAX_ENTRIES}），拒绝解压", archive.len()));
+        return Err(format!(
+            "ZIP 条目过多（{} > {ZIP_MAX_ENTRIES}），拒绝解压",
+            archive.len()
+        ));
     }
     // 中央目录声明值只做快速预检；真实预算靠解压时逐字节累计（声明可能撒谎）
-    let total: u64 = (0..archive.len()).map(|i| archive.by_index(i).map(|e| e.size()).unwrap_or(0)).sum();
+    let total: u64 = (0..archive.len())
+        .map(|i| archive.by_index(i).map(|e| e.size()).unwrap_or(0))
+        .sum();
     if total > max_uncompressed {
-        return Err(format!("ZIP 解压后体积超过 {}MB，拒绝解压", max_uncompressed / 1024 / 1024));
+        return Err(format!(
+            "ZIP 解压后体积超过 {}MB，拒绝解压",
+            max_uncompressed / 1024 / 1024
+        ));
     }
     // 找技能根：含 SKILL.md 的目录；嵌套命中的只保留最外层；子目录过滤（github subdir 参数）
     let mut roots: Vec<PathBuf> = Vec::new();
     for i in 0..archive.len() {
-        let Ok(entry) = archive.by_index(i) else { continue };
-        let Some(name) = entry.enclosed_name() else { continue }; // 路径穿越条目直接丢弃
+        let Ok(entry) = archive.by_index(i) else {
+            continue;
+        };
+        let Some(name) = entry.enclosed_name() else {
+            continue;
+        }; // 路径穿越条目直接丢弃
         if name.file_name().map(|n| n == "SKILL.md").unwrap_or(false) {
             let root = name.parent().map(|p| p.to_path_buf()).unwrap_or_default();
             // zipball 有一层 <owner-repo-sha>/ 前缀；subdir 在其下匹配
@@ -1049,8 +1173,12 @@ fn import_zip_limited(
                 });
             let extracted = temp.join(index.to_string());
             for i in 0..archive.len() {
-                let Ok(mut entry) = archive.by_index(i) else { continue };
-                let Some(name) = entry.enclosed_name() else { continue };
+                let Ok(mut entry) = archive.by_index(i) else {
+                    continue;
+                };
+                let Some(name) = entry.enclosed_name() else {
+                    continue;
+                };
                 if name != root && !name.starts_with(&root) {
                     continue;
                 }
@@ -1060,8 +1188,7 @@ fn import_zip_limited(
                 };
                 let out_path = extracted.join(&rel);
                 if entry.is_dir() {
-                    fs::create_dir_all(&out_path)
-                        .map_err(|e| format!("创建 ZIP 目录失败: {e}"))?;
+                    fs::create_dir_all(&out_path).map_err(|e| format!("创建 ZIP 目录失败: {e}"))?;
                     continue;
                 }
                 if let Some(parent) = out_path.parent() {
@@ -1118,7 +1245,11 @@ fn export_impl(store: &SkillStore, ids: &[String], dest_path: &str) -> Result<St
             for e in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
                 let p = e.path();
                 let rel = p.strip_prefix(&src).map_err(|e| e.to_string())?;
-                let zip_name = format!("{}/{}", skill.name, rel.to_string_lossy().replace('\\', "/"));
+                let zip_name = format!(
+                    "{}/{}",
+                    skill.name,
+                    rel.to_string_lossy().replace('\\', "/")
+                );
                 if p.is_dir() {
                     stack.push(p);
                 } else if p.is_file() {
@@ -1155,7 +1286,9 @@ fn dir_manifest_hash(root: &Path) -> Option<String> {
         }
         for e in fs::read_dir(&dir).ok()?.flatten() {
             let p = e.path();
-            let Ok(rel) = p.strip_prefix(root) else { continue };
+            let Ok(rel) = p.strip_prefix(root) else {
+                continue;
+            };
             let rel = rel.to_string_lossy().replace('\\', "/");
             if p.is_dir() {
                 stack.push((p, depth + 1));
@@ -1164,7 +1297,11 @@ fn dir_manifest_hash(root: &Path) -> Option<String> {
                     continue;
                 }
                 let bytes = fs::read(&p).ok()?;
-                entries.push((rel, bytes.len() as u64, format!("{:x}", md5::compute(&bytes))));
+                entries.push((
+                    rel,
+                    bytes.len() as u64,
+                    format!("{:x}", md5::compute(&bytes)),
+                ));
             }
         }
     }
@@ -1181,7 +1318,11 @@ fn dir_manifest_hash(root: &Path) -> Option<String> {
     Some(format!("{:x}", ctx.compute()))
 }
 
-fn stale_agents(store: &SkillStore, dirs: &HashMap<String, PathBuf>, skill: &SkillDto) -> Vec<String> {
+fn stale_agents(
+    store: &SkillStore,
+    dirs: &HashMap<String, PathBuf>,
+    skill: &SkillDto,
+) -> Vec<String> {
     let Some(lib_hash) = dir_manifest_hash(&store.skill_dir(&skill.name)) else {
         return Vec::new();
     };
@@ -1206,7 +1347,11 @@ fn stale_agents(store: &SkillStore, dirs: &HashMap<String, PathBuf>, skill: &Ski
 }
 
 /// 把 stale 的 copy 全部重新分发（保持 copy 形态），返回修复的 agent 列表
-fn resync_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>, id: &str) -> Result<Vec<String>, String> {
+fn resync_impl(
+    store: &SkillStore,
+    dirs: &HashMap<String, PathBuf>,
+    id: &str,
+) -> Result<Vec<String>, String> {
     let skills = store.read();
     let skill = skills
         .iter()
@@ -1337,7 +1482,11 @@ fn app_modes(dirs: &HashMap<String, PathBuf>, skill: &SkillDto) -> HashMap<Strin
         }
         out.insert(
             agent.clone(),
-            if target.join(MARKER_FILE).exists() { "copy".into() } else { "symlink".into() },
+            if target.join(MARKER_FILE).exists() {
+                "copy".into()
+            } else {
+                "symlink".into()
+            },
         );
     }
     out
@@ -1411,7 +1560,14 @@ fn allow_symlink_for(agent: &str) -> bool {
 #[tauri::command]
 pub async fn apply_skill(id: String, agent: String, enabled: bool) -> Result<(), String> {
     let store = SkillStore::default_paths()?;
-    apply_impl(&store, &agent_dirs(), &id, &agent, enabled, allow_symlink_for(&agent))
+    apply_impl(
+        &store,
+        &agent_dirs(),
+        &id,
+        &agent,
+        enabled,
+        allow_symlink_for(&agent),
+    )
 }
 
 /// 定时任务跑前：技能必须在库里且已分发到该 agent。
@@ -1426,9 +1582,10 @@ fn require_skill_distributed_at(
     agent: &str,
 ) -> Result<(), String> {
     let skills = store.read();
-    let skill = skills.iter().find(|s| s.name == skill_name).ok_or_else(|| {
-        format!("技能库没有「{skill_name}」，定时任务找不到规范")
-    })?;
+    let skill = skills
+        .iter()
+        .find(|s| s.name == skill_name)
+        .ok_or_else(|| format!("技能库没有「{skill_name}」，定时任务找不到规范"))?;
     if skill.apps.get(agent).copied().unwrap_or(false) {
         Ok(())
     } else {
@@ -1938,8 +2095,11 @@ pub async fn read_skill_md(id: String) -> Result<String, String> {
     let path = store.skill_dir(&skill.name).join("SKILL.md");
     let mut file = fs::File::open(&path).map_err(|e| format!("读取 SKILL.md 失败: {e}"))?;
     let mut buf = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, MAX_READ_PREVIEW), &mut buf)
-        .map_err(|e| e.to_string())?;
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(&mut file, MAX_READ_PREVIEW),
+        &mut buf,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -2014,7 +2174,14 @@ fn update_content_impl(
         )
         .map_err(|e| format!("写入 SKILL.md 失败: {e}"))?;
         // source/repo 保持原值：编辑不改写来源信息
-        overwrite_skill_from_dir(store, skills, &temp, name, &existing.source, existing.repo.clone())
+        overwrite_skill_from_dir(
+            store,
+            skills,
+            &temp,
+            name,
+            &existing.source,
+            existing.repo.clone(),
+        )
     })();
     let _ = fs::remove_dir_all(&temp);
     result
@@ -2048,7 +2215,14 @@ pub async fn update_skill_content(
 ) -> Result<(), String> {
     let store = SkillStore::default_paths()?;
     let mut skills = store.read();
-    update_content_impl(&store, &mut skills, name.trim(), &content, description, None)
+    update_content_impl(
+        &store,
+        &mut skills,
+        name.trim(),
+        &content,
+        description,
+        None,
+    )
 }
 
 // ===== 「◈ 适配到流水线」（外部技能 → 流水线接口口径；两阶段：AI 出稿 → 人预览确认才落盘） =====
@@ -2127,8 +2301,7 @@ fn adapt_skill_to_pipeline_impl(
         .find(|s| s.id == id)
         .ok_or_else(|| format!("技能不存在: {id}"))?;
     let md_path = store.skill_dir(&skill.name).join("SKILL.md");
-    let current =
-        fs::read_to_string(&md_path).map_err(|e| format!("读取 SKILL.md 失败: {e}"))?;
+    let current = fs::read_to_string(&md_path).map_err(|e| format!("读取 SKILL.md 失败: {e}"))?;
     // 与「◈ 融合进任务书」同口径：超长中段挖空截 24KB，profile 走设置页 distill 功能键
     let prompt = build_adapt_prompt(
         &skill.name,
@@ -2234,8 +2407,17 @@ mod tests {
         fn add_lib_skill(&self, name: &str, description: &str) -> SkillDto {
             let dir = self.store.skill_dir(name);
             fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\ndescription: {description}\n---\nbody\n")).unwrap();
-            let skill = new_skill(name.to_string(), Some(description.to_string()), "local", None);
+            fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {description}\n---\nbody\n"),
+            )
+            .unwrap();
+            let skill = new_skill(
+                name.to_string(),
+                Some(description.to_string()),
+                "local",
+                None,
+            );
             let mut skills = self.store.read();
             skills.push(skill.clone());
             self.store.write(&skills).unwrap();
@@ -2295,7 +2477,9 @@ mod tests {
             "---\nname: with-mcp\n---\n## 推荐 MCP\n配一个 arxiv 检索 server。\n",
         )
         .unwrap();
-        assert!(mentions_mcp(&fx.store.skill_dir("with-mcp").join("SKILL.md")));
+        assert!(mentions_mcp(
+            &fx.store.skill_dir("with-mcp").join("SKILL.md")
+        ));
         // 正文任意处出现 MCP 子串也命中；SKILL.md 缺失/不可读 → false 不报错
         assert!(!mentions_mcp(&fx.dir.join("missing").join("SKILL.md")));
     }
@@ -2354,7 +2538,10 @@ mod tests {
         assert!(!added.contains(&first.to_string()));
         assert_eq!(fs::read_to_string(&md).unwrap(), before);
         let skills = fx.store.read();
-        assert_eq!(skills.iter().find(|s| s.name == first).unwrap().source, "local");
+        assert_eq!(
+            skills.iter().find(|s| s.name == first).unwrap().source,
+            "local"
+        );
     }
 
     #[test]
@@ -2419,7 +2606,11 @@ mod tests {
         let saved = fx.store.read();
         let s = saved.iter().find(|s| s.name == first).unwrap();
         let seed_desc = parse_skill_md(&md).description;
-        assert_eq!(s.description, seed_desc.unwrap_or_default(), "描述同步为新版");
+        assert_eq!(
+            s.description,
+            seed_desc.unwrap_or_default(),
+            "描述同步为新版"
+        );
         assert_ne!(s.description, "旧描述");
         // 追平后检测归零
         assert!(check_builtin_skill_updates_impl(&fx.store).is_empty());
@@ -2471,16 +2662,31 @@ mod tests {
         assert_eq!(filled, 1);
         let after = fx.store.read();
         assert_eq!(
-            after.iter().find(|s| s.id == gh.id).unwrap().category.as_deref(),
+            after
+                .iter()
+                .find(|s| s.id == gh.id)
+                .unwrap()
+                .category
+                .as_deref(),
             Some("khazix-skills")
         );
         assert_eq!(
-            after.iter().find(|s| s.id == gh_named.id).unwrap().category.as_deref(),
+            after
+                .iter()
+                .find(|s| s.id == gh_named.id)
+                .unwrap()
+                .category
+                .as_deref(),
             Some("项目整理"),
             "已有分类不得被覆盖"
         );
         assert!(
-            after.iter().find(|s| s.id == local.id).unwrap().category.is_none(),
+            after
+                .iter()
+                .find(|s| s.id == local.id)
+                .unwrap()
+                .category
+                .is_none(),
             "非 GitHub 来源不动"
         );
         // 幂等：再跑一遍没有可回填的
@@ -2505,7 +2711,10 @@ mod tests {
         let five: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
         assert!(validate_skill_tags(&five).is_err());
         // 重复折叠后 ≤4 仍放行
-        let dup: Vec<String> = ["a", "b", "c", "d", "a"].iter().map(|s| s.to_string()).collect();
+        let dup: Vec<String> = ["a", "b", "c", "d", "a"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(validate_skill_tags(&dup).unwrap().len(), 4);
         // 单标签超 20 字符拒绝（按字符数，不按字节）
         assert!(validate_skill_tags(&["字".repeat(20)]).is_ok());
@@ -2580,7 +2789,11 @@ mod tests {
             parsed.outputs,
             vec!["notes/".to_string(), "notes/inbox.md".to_string()]
         );
-        assert_eq!(parsed.description.as_deref(), Some("d"), "列表结束后其他字段照常解析");
+        assert_eq!(
+            parsed.description.as_deref(),
+            Some("d"),
+            "列表结束后其他字段照常解析"
+        );
         // inputs 同样支持多行列表写法
         fs::write(
             &f,
@@ -2589,7 +2802,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             parse_skill_md(&f).inputs,
-            vec!["papers/included.md".to_string(), "references.bib".to_string()]
+            vec![
+                "papers/included.md".to_string(),
+                "references.bib".to_string()
+            ]
         );
         // 裸标量写法容忍为单条
         fs::write(&f, "---\nname: s\noutputs: outline.md\n---\n").unwrap();
@@ -2607,10 +2823,16 @@ mod tests {
     fn skill_md_body_splits_frontmatter_exactly() {
         assert_eq!(skill_md_body("---\nname: s\n---\n正文\n"), "正文\n");
         // CRLF 不错位
-        assert_eq!(skill_md_body("---\r\nname: s\r\n---\r\n正文\r\n"), "正文\r\n");
+        assert_eq!(
+            skill_md_body("---\r\nname: s\r\n---\r\n正文\r\n"),
+            "正文\r\n"
+        );
         // 无 frontmatter / 未闭合：按全文对待
         assert_eq!(skill_md_body("# 直接正文\n"), "# 直接正文\n");
-        assert_eq!(skill_md_body("---\nname: s\n没闭合"), "---\nname: s\n没闭合");
+        assert_eq!(
+            skill_md_body("---\nname: s\n没闭合"),
+            "---\nname: s\n没闭合"
+        );
     }
 
     #[test]
@@ -2632,11 +2854,20 @@ mod tests {
         );
         assert_eq!(
             outputs,
-            vec!["papers/screening.md".to_string(), "papers/included.md".to_string()]
+            vec![
+                "papers/screening.md".to_string(),
+                "papers/included.md".to_string()
+            ]
         );
         // URL、双侧动词行、无路径行都不进结果
-        assert!(!inputs.iter().chain(outputs.iter()).any(|p| p.contains("http")));
-        assert!(!inputs.iter().chain(outputs.iter()).any(|p| p.contains("a.md")));
+        assert!(!inputs
+            .iter()
+            .chain(outputs.iter())
+            .any(|p| p.contains("http")));
+        assert!(!inputs
+            .iter()
+            .chain(outputs.iter())
+            .any(|p| p.contains("a.md")));
     }
 
     #[test]
@@ -2648,7 +2879,10 @@ mod tests {
         assert!(inputs.is_empty());
         assert_eq!(
             outputs,
-            vec!["papers/screening.md".to_string(), "notes/inbox.md".to_string()]
+            vec![
+                "papers/screening.md".to_string(),
+                "notes/inbox.md".to_string()
+            ]
         );
     }
 
@@ -2706,7 +2940,10 @@ mod tests {
             strip_code_fence("```markdown\n---\nname: s\n---\n正文\n```"),
             "---\nname: s\n---\n正文"
         );
-        assert_eq!(strip_code_fence("---\nname: s\n---\n正文"), "---\nname: s\n---\n正文");
+        assert_eq!(
+            strip_code_fence("---\nname: s\n---\n正文"),
+            "---\nname: s\n---\n正文"
+        );
     }
 
     #[test]
@@ -2736,8 +2973,7 @@ mod tests {
             Some((parsed.inputs, parsed.outputs)),
         )
         .unwrap();
-        let written =
-            fs::read_to_string(fx.store.skill_dir("ext").join("SKILL.md")).unwrap();
+        let written = fs::read_to_string(fx.store.skill_dir("ext").join("SKILL.md")).unwrap();
         let parsed = parse_skill_md_text(&written);
         assert!(written.contains("name: ext"), "name 强制沿用库中条目");
         assert!(!written.contains("hacked"));
@@ -2759,8 +2995,7 @@ mod tests {
         let mut skills = fx.store.read();
         // 普通编辑（interface = None）：frontmatter 接口声明必须保留，不被静默丢弃
         update_content_impl(&fx.store, &mut skills, "ext", "新正文", None, None).unwrap();
-        let written =
-            fs::read_to_string(fx.store.skill_dir("ext").join("SKILL.md")).unwrap();
+        let written = fs::read_to_string(fx.store.skill_dir("ext").join("SKILL.md")).unwrap();
         let parsed = parse_skill_md_text(&written);
         assert_eq!(parsed.inputs, vec!["papers/".to_string()]);
         assert_eq!(parsed.outputs, vec!["notes/".to_string()]);
@@ -2772,9 +3007,17 @@ mod tests {
         let fx = Fx::new();
         // 嵌套技能（找到不下钻）+ dot-dir 里的技能被跳过
         fs::create_dir_all(fx.dir.join("src/skills/doc/docx")).unwrap();
-        fs::write(fx.dir.join("src/skills/doc/docx/SKILL.md"), "---\nname: docx\n---\n").unwrap();
+        fs::write(
+            fx.dir.join("src/skills/doc/docx/SKILL.md"),
+            "---\nname: docx\n---\n",
+        )
+        .unwrap();
         fs::create_dir_all(fx.dir.join("src/.hidden/secret")).unwrap();
-        fs::write(fx.dir.join("src/.hidden/secret/SKILL.md"), "---\nname: secret\n---\n").unwrap();
+        fs::write(
+            fx.dir.join("src/.hidden/secret/SKILL.md"),
+            "---\nname: secret\n---\n",
+        )
+        .unwrap();
         let mut found = Vec::new();
         find_skill_dirs(&fx.dir.join("src"), &mut found);
         assert_eq!(found.len(), 1);
@@ -2839,15 +3082,22 @@ mod tests {
         .unwrap();
         assert_eq!(result.updated, vec!["pdf"]);
         assert_eq!(fx.store.read()[0].description, "新版本");
-        assert!(fs::read_to_string(fx.store.skill_dir("pdf").join("SKILL.md"))
-            .unwrap()
-            .contains("new body"));
+        assert!(
+            fs::read_to_string(fx.store.skill_dir("pdf").join("SKILL.md"))
+                .unwrap()
+                .contains("new body")
+        );
         let backup_root = fx.dir.join("skill-backups");
         let backup = fs::read_dir(&backup_root)
             .unwrap()
             .flatten()
             .map(|entry| entry.path())
-            .find(|path| path.file_name().unwrap().to_string_lossy().starts_with("pdf."))
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("pdf.")
+            })
             .expect("覆盖前必须留下备份");
         assert!(fs::read_to_string(backup.join("SKILL.md"))
             .unwrap()
@@ -2866,10 +3116,8 @@ mod tests {
         )
         .unwrap();
         let mut skills = fx.store.read();
-        let resolutions = HashMap::from([(
-            "pdf".to_string(),
-            "rename:pdf-alternative".to_string(),
-        )]);
+        let resolutions =
+            HashMap::from([("pdf".to_string(), "rename:pdf-alternative".to_string())]);
         let mut result = SkillImportResultDto::default();
         import_one_dir(
             &fx.store,
@@ -2892,7 +3140,14 @@ mod tests {
     fn create_registers_skill_and_rejects_duplicate() {
         let fx = Fx::new();
         let mut skills = fx.store.read();
-        create_impl(&fx.store, &mut skills, "my-method", "我的方法", "第一步……\n第二步……").unwrap();
+        create_impl(
+            &fx.store,
+            &mut skills,
+            "my-method",
+            "我的方法",
+            "第一步……\n第二步……",
+        )
+        .unwrap();
         let text = fs::read_to_string(fx.store.skill_dir("my-method").join("SKILL.md")).unwrap();
         assert!(text.contains("name: my-method"), "{text}");
         assert!(text.contains("description: 我的方法"), "{text}");
@@ -2900,8 +3155,14 @@ mod tests {
         let saved = fx.store.read();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].name, "my-method");
-        assert_eq!(saved[0].description, "我的方法", "元数据描述从落盘 SKILL.md 解析");
-        assert_eq!(saved[0].source, "ccode", "新建技能标记为 Ccode 自建（删除保护来源分类）");
+        assert_eq!(
+            saved[0].description, "我的方法",
+            "元数据描述从落盘 SKILL.md 解析"
+        );
+        assert_eq!(
+            saved[0].source, "ccode",
+            "新建技能标记为 Ccode 自建（删除保护来源分类）"
+        );
         // 重名拒绝并提示改用编辑（不覆盖、不静默跳过）
         let mut again = fx.store.read();
         let err = create_impl(&fx.store, &mut again, "my-method", "x", "y").unwrap_err();
@@ -2919,9 +3180,19 @@ mod tests {
         // SKILL.md 之外的辅助文件（模板等）编辑后必须保留
         fs::write(fx.store.skill_dir("pdf").join("template.txt"), "模板内容").unwrap();
         let mut skills = fx.store.read();
-        update_content_impl(&fx.store, &mut skills, "pdf", "新正文", Some("新描述".into()), None).unwrap();
+        update_content_impl(
+            &fx.store,
+            &mut skills,
+            "pdf",
+            "新正文",
+            Some("新描述".into()),
+            None,
+        )
+        .unwrap();
         let dir = fx.store.skill_dir("pdf");
-        assert!(fs::read_to_string(dir.join("SKILL.md")).unwrap().contains("新正文"));
+        assert!(fs::read_to_string(dir.join("SKILL.md"))
+            .unwrap()
+            .contains("新正文"));
         assert_eq!(
             fs::read_to_string(dir.join("template.txt")).unwrap(),
             "模板内容",
@@ -2936,15 +3207,23 @@ mod tests {
             .unwrap()
             .flatten()
             .map(|entry| entry.path())
-            .find(|path| path.file_name().unwrap().to_string_lossy().starts_with("pdf."))
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("pdf.")
+            })
             .expect("覆盖前必须留下备份");
-        assert!(fs::read_to_string(backup.join("SKILL.md")).unwrap().contains("旧描述"));
+        assert!(fs::read_to_string(backup.join("SKILL.md"))
+            .unwrap()
+            .contains("旧描述"));
         assert!(backup.join("template.txt").exists());
         // description 缺省 = 保留原描述；不存在的技能报错
         let mut skills = fx.store.read();
         update_content_impl(&fx.store, &mut skills, "pdf", "第三版", None, None).unwrap();
         assert_eq!(fx.store.read()[0].description, "新描述");
-        let err = update_content_impl(&fx.store, &mut skills, "ghost", "x", None, None).unwrap_err();
+        let err =
+            update_content_impl(&fx.store, &mut skills, "ghost", "x", None, None).unwrap_err();
         assert!(err.contains("不存在"), "{err}");
     }
 
@@ -2960,7 +3239,15 @@ mod tests {
             );
             assert!(!allow_symlink_for(a), "{a} 应强制 copy");
         }
-        for a in ["claude-code", "codex", "gemini", "qwen", "opencode", "kimi", "codebuddy"] {
+        for a in [
+            "claude-code",
+            "codex",
+            "gemini",
+            "qwen",
+            "opencode",
+            "kimi",
+            "codebuddy",
+        ] {
             assert_eq!(
                 agent_spec(a).unwrap().skill_dist,
                 SkillDist::SymlinkOrCopy,
@@ -2991,7 +3278,10 @@ mod tests {
         // 同名冲突：开启时报错且不覆盖
         let err = apply_impl(&fx.store, &fx.agents, &skill.id, "codex", true, false).unwrap_err();
         assert!(err.contains("不是由 Ccode 管理"), "{err}");
-        assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "user's own");
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "user's own"
+        );
     }
 
     #[test]
@@ -3023,7 +3313,10 @@ mod tests {
         assert!(!fx.store.skill_dir("pdf").exists());
         let remaining: Vec<_> = fs::read_dir(&backups).unwrap().flatten().collect();
         assert_eq!(remaining.len(), 5, "只保留最近 5 份");
-        assert!(!backups.join("pdf.20260700-000000").exists(), "最旧的被剪掉");
+        assert!(
+            !backups.join("pdf.20260700-000000").exists(),
+            "最旧的被剪掉"
+        );
     }
 
     fn build_zip(path: &Path, entries: &[(&str, &[u8])]) {
@@ -3044,19 +3337,41 @@ mod tests {
         build_zip(
             &zip_path,
             &[
-                ("repo-sha/skills/doc/docx/SKILL.md", b"---\ndescription: word\n---\n"),
+                (
+                    "repo-sha/skills/doc/docx/SKILL.md",
+                    b"---\ndescription: word\n---\n",
+                ),
                 ("repo-sha/skills/doc/docx/template.bin", b"\x00\x01"),
-                ("repo-sha/skills/pdf/SKILL.md", b"---\ndescription: pdf\n---\n"),
+                (
+                    "repo-sha/skills/pdf/SKILL.md",
+                    b"---\ndescription: pdf\n---\n",
+                ),
                 ("../evil/SKILL.md", b"evil"),
                 ("/abs/evil.md", b"evil"),
             ],
         );
         let mut skills = Vec::new();
-        let result =
-            import_zip_impl(&fx.store, &mut skills, &zip_path, None, "zip", None, None, None).unwrap();
+        let result = import_zip_impl(
+            &fx.store,
+            &mut skills,
+            &zip_path,
+            None,
+            "zip",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(result.added.len(), 2);
         assert!(fx.store.skill_dir("docx").join("template.bin").exists());
-        assert_eq!(skills.iter().find(|s| s.name == "docx").unwrap().description, "word");
+        assert_eq!(
+            skills
+                .iter()
+                .find(|s| s.name == "docx")
+                .unwrap()
+                .description,
+            "word"
+        );
         assert!(!fx.dir.join("evil").exists(), "路径穿越条目不得落盘");
         // subdir 过滤
         let fx2 = Fx::new();
@@ -3085,8 +3400,14 @@ mod tests {
         build_zip(
             &zip_path,
             &[
-                ("repo-sha/skills/pdf/SKILL.md", b"---\ndescription: new\n---\n"),
-                ("repo-sha/skills/docx/SKILL.md", b"---\ndescription: nope\n---\n"),
+                (
+                    "repo-sha/skills/pdf/SKILL.md",
+                    b"---\ndescription: new\n---\n",
+                ),
+                (
+                    "repo-sha/skills/docx/SKILL.md",
+                    b"---\ndescription: nope\n---\n",
+                ),
             ],
         );
         let mut skills = fx.store.read();
@@ -3104,7 +3425,10 @@ mod tests {
         .unwrap();
         assert_eq!(result.updated, vec!["pdf".to_string()]);
         assert!(result.added.is_empty());
-        assert!(!fx.store.skill_dir("docx").exists(), "only 过滤下 zip 其余技能不得进入");
+        assert!(
+            !fx.store.skill_dir("docx").exists(),
+            "only 过滤下 zip 其余技能不得进入"
+        );
         assert_eq!(fx.store.read()[0].description, "new");
         // 目标不在 zip 中：空结果由调用方（apply_skill_update）转成「未找到」错误
         let result = import_zip_impl(
@@ -3156,8 +3480,17 @@ mod tests {
         export_impl(&fx.store, &ids, dest.to_str().unwrap()).unwrap();
         // 再按 ZIP 导入流程进另一个库，验证往返一致
         let fx2 = Fx::new();
-        let result =
-            import_zip_impl(&fx2.store, &mut Vec::new(), &dest, None, "zip", None, None, None).unwrap();
+        let result = import_zip_impl(
+            &fx2.store,
+            &mut Vec::new(),
+            &dest,
+            None,
+            "zip",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(result.added.len(), 2);
         assert!(fx2.store.skill_dir("pdf").join("SKILL.md").exists());
         assert!(fx2.store.skill_dir("docx").join("SKILL.md").exists());
@@ -3173,8 +3506,16 @@ mod tests {
         // codex 走 copy（强制），gemini 走 symlink
         apply_impl(&fx.store, &fx.agents, &skill.id, "codex", true, false).unwrap();
         apply_impl(&fx.store, &fx.agents, &skill.id, "gemini", true, true).unwrap();
-        let skill = fx.store.read().into_iter().find(|s| s.id == skill.id).unwrap();
-        assert!(stale_agents(&fx.store, &fx.agents, &skill).is_empty(), "刚分发完不应有漂移");
+        let skill = fx
+            .store
+            .read()
+            .into_iter()
+            .find(|s| s.id == skill.id)
+            .unwrap();
+        assert!(
+            stale_agents(&fx.store, &fx.agents, &skill).is_empty(),
+            "刚分发完不应有漂移"
+        );
         // 库更新 → copy 副本漂移，symlink 不受影响
         fs::write(
             fx.store.skill_dir("pdf").join("SKILL.md"),
@@ -3182,13 +3523,23 @@ mod tests {
         )
         .unwrap();
         let stale = stale_agents(&fx.store, &fx.agents, &skill);
-        assert_eq!(stale, vec!["codex".to_string()], "symlink 的 gemini 不算漂移");
+        assert_eq!(
+            stale,
+            vec!["codex".to_string()],
+            "symlink 的 gemini 不算漂移"
+        );
         let fixed = resync_impl(&fx.store, &fx.agents, &skill.id).unwrap();
         assert_eq!(fixed, vec!["codex".to_string()]);
-        assert!(stale_agents(&fx.store, &fx.agents, &skill).is_empty(), "resync 后漂移清零");
+        assert!(
+            stale_agents(&fx.store, &fx.agents, &skill).is_empty(),
+            "resync 后漂移清零"
+        );
         let copied = fs::read_to_string(fx.agents["codex"].join("pdf").join("SKILL.md")).unwrap();
         assert!(copied.contains("新版"), "副本内容已追平库");
-        assert!(fx.agents["codex"].join("pdf").join(MARKER_FILE).exists(), "仍保持 copy 形态");
+        assert!(
+            fx.agents["codex"].join("pdf").join(MARKER_FILE).exists(),
+            "仍保持 copy 形态"
+        );
     }
 
     #[test]
@@ -3197,14 +3548,22 @@ mod tests {
         let skill = fx.add_lib_skill("pdf", "处理 PDF");
         fs::write(fx.store.skill_dir("pdf").join("template.txt"), "v1").unwrap();
         apply_impl(&fx.store, &fx.agents, &skill.id, "codex", true, false).unwrap();
-        let skill = fx.store.read().into_iter().find(|s| s.id == skill.id).unwrap();
+        let skill = fx
+            .store
+            .read()
+            .into_iter()
+            .find(|s| s.id == skill.id)
+            .unwrap();
         assert!(
             stale_agents(&fx.store, &fx.agents, &skill).is_empty(),
             "副本与库一致时不漂移（.ccode-copy 标记不参与比较）"
         );
         // 只改 SKILL.md 之外的辅助文件也必须检出漂移
         fs::write(fx.store.skill_dir("pdf").join("template.txt"), "v2").unwrap();
-        assert_eq!(stale_agents(&fx.store, &fx.agents, &skill), vec!["codex".to_string()]);
+        assert_eq!(
+            stale_agents(&fx.store, &fx.agents, &skill),
+            vec!["codex".to_string()]
+        );
         // 库新增文件同样检出
         resync_impl(&fx.store, &fx.agents, &skill.id).unwrap();
         fs::write(fx.store.skill_dir("pdf").join("extra.txt"), "new").unwrap();
@@ -3267,11 +3626,24 @@ mod tests {
         let zip_path = fx.dir.join("big.zip");
         build_zip(
             &zip_path,
-            &[("skill-a/SKILL.md", b"---\nname: a\n---\n"), ("skill-a/blob.bin", &[0u8; 200])],
+            &[
+                ("skill-a/SKILL.md", b"---\nname: a\n---\n"),
+                ("skill-a/blob.bin", &[0u8; 200]),
+            ],
         );
         // 声明总量 ~215 超过注入预算 100：预检拒绝
-        let err = import_zip_limited(&fx.store, &mut Vec::new(), &zip_path, None, "zip", None, None, None, 100)
-            .unwrap_err();
+        let err = import_zip_limited(
+            &fx.store,
+            &mut Vec::new(),
+            &zip_path,
+            None,
+            "zip",
+            None,
+            None,
+            None,
+            100,
+        )
+        .unwrap_err();
         assert!(err.contains("拒绝解压"), "{err}");
     }
 

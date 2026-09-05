@@ -1,5 +1,6 @@
-//! 定时雷达：按「每日/每周 + 时分」周期，无头拉起 agent CLI 在项目目录里跑一次技能
+//! 定时雷达：按「每日/每周 + 时分」周期，无头拉起 agent CLI 在隔离 worktree 跑一次技能
 //! （默认文献监控 lit-watch，可选技能库里的其他技能），跑完记录历史并发 `scheduler-run-done` 事件给前端。
+//! 隔离树先从主仓播种订阅/台账，产物经只读评审后由用户「采纳进主仓」，不自动合并。
 //!
 //! 存储：应用配置目录 ccode/schedules.json（snake_case）；给前端的 DTO 用 camelCase。
 //! due 判定按本地时间算「最近一次应跑时刻」，last_run_at 早于它即 due——应用关闭错过
@@ -49,6 +50,14 @@ pub struct RunRecord {
     pub finished_at: Option<String>,
     #[serde(default)]
     pub artifacts: Vec<String>,
+    /// 本次运行的 Run 身份与实际隔离目录；旧记录缺省兼容。
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub isolation_path: Option<String>,
+    /// 隔离树产物是否已采纳进主仓；旧记录缺省 false。
+    #[serde(default)]
+    pub adopted: bool,
 }
 
 /// 存储形态（schedules.json，snake_case）
@@ -179,7 +188,9 @@ fn schedules_path() -> Result<PathBuf, String> {
 
 fn read_schedules_at(path: &Path) -> Result<Vec<Schedule>, String> {
     match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("解析 schedules.json 失败: {e}")),
+        Ok(text) => {
+            serde_json::from_str(&text).map_err(|e| format!("解析 schedules.json 失败: {e}"))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("读取 schedules.json 失败: {e}")),
     }
@@ -227,7 +238,9 @@ fn prune_unregistered(list: Vec<Schedule>, registered: &[String]) -> (Vec<Schedu
 pub(crate) fn rewrite_profile_ids(rewrites: &[(String, String)]) {
     let Ok(path) = schedules_path() else { return };
     let _g = sched_lock();
-    let Ok(mut list) = read_schedules_at(&path) else { return };
+    let Ok(mut list) = read_schedules_at(&path) else {
+        return;
+    };
     let mut touched = false;
     for s in &mut list {
         if let Some(id) = &mut s.profile_id {
@@ -414,7 +427,11 @@ fn create_schedule_at(path: &Path, input: CreateScheduleInput) -> Result<Schedul
     Ok(task)
 }
 
-fn update_schedule_at(path: &Path, id: &str, patch: UpdateSchedulePatch) -> Result<Schedule, String> {
+fn update_schedule_at(
+    path: &Path,
+    id: &str,
+    patch: UpdateSchedulePatch,
+) -> Result<Schedule, String> {
     let _g = sched_lock();
     let mut list = read_schedules_at(path)?;
     let task = list
@@ -482,6 +499,8 @@ fn record_run(
     started_at: String,
     finished_at: String,
     artifacts: Vec<String>,
+    run_id: Option<String>,
+    isolation_path: Option<String>,
 ) -> Result<(), String> {
     let _g = sched_lock();
     let path = schedules_path()?;
@@ -503,6 +522,9 @@ fn record_run(
             started_at: Some(started_at),
             finished_at: Some(finished_at),
             artifacts,
+            run_id,
+            isolation_path,
+            adopted: false,
         },
     );
     task.history.truncate(HISTORY_CAP);
@@ -513,19 +535,28 @@ fn record_run(
 /// 写进历史；数量上限防止一次任务生成大量缓存拖垮 schedules.json。
 fn changed_artifacts(root: &Path, started: std::time::SystemTime) -> Vec<String> {
     fn visit(root: &Path, dir: &Path, started: std::time::SystemTime, out: &mut Vec<String>) {
-        if out.len() >= 50 { return; }
-        let Ok(entries) = fs::read_dir(dir) else { return };
+        if out.len() >= 50 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
-            if out.len() >= 50 { return; }
+            if out.len() >= 50 {
+                return;
+            }
             let path = entry.path();
-            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
             if meta.is_dir() {
                 if entry.file_name() != ".git" && entry.file_name() != "node_modules" {
                     visit(root, &path, started, out);
                 }
-            } else if meta.is_file()
-                && meta.modified().map(|t| t >= started).unwrap_or(false)
-            {
+            } else if meta.is_file() && meta.modified().map(|t| t >= started).unwrap_or(false) {
                 if let Ok(rel) = path.strip_prefix(root) {
                     out.push(rel.to_string_lossy().replace('\\', "/"));
                 }
@@ -536,6 +567,226 @@ fn changed_artifacts(root: &Path, started: std::time::SystemTime) -> Vec<String>
     visit(root, root, started, &mut out);
     out.sort();
     out
+}
+
+// 定时任务默认只能在独立 worktree 执行；非 Git 项目不静默回落主仓。
+fn schedule_isolation(task: &Schedule) -> Result<PathBuf, String> {
+    let root = PathBuf::from(crate::projects::canonical_key(Path::new(
+        &task.project_root,
+    )));
+    if !root.is_dir() {
+        return Err(format!("项目目录不存在: {}", root.display()));
+    }
+    crate::workspaces::run_git(&root, &["rev-parse", "--git-dir"], Duration::from_secs(10))
+        .map_err(|e| format!("定时任务必须在 Git 项目中运行，无法创建隔离 worktree：{e}"))?;
+    let repo_name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+    let path = dirs::home_dir()
+        .ok_or("无法确定用户主目录")?
+        .join("ccode/watch-worktrees")
+        .join(repo_name)
+        .join(&task.id);
+    if path.exists() {
+        let canonical = crate::paths::canonicalize_plain(&path)
+            .map_err(|e| format!("定时隔离目录无法解析：{e}"))?;
+        if !canonical.is_dir() || canonical == root {
+            return Err("定时隔离路径不是独立目录".into());
+        }
+        let wt_root = crate::workspaces::run_git(
+            &canonical,
+            &["rev-parse", "--show-toplevel"],
+            Duration::from_secs(10),
+        )
+        .map_err(|e| format!("定时隔离目录不是有效 worktree：{e}"))?;
+        if crate::projects::canonical_key(Path::new(wt_root.trim()))
+            != crate::projects::canonical_key(&canonical)
+        {
+            return Err("定时隔离目录未登记为该 worktree，拒绝使用".into());
+        }
+        let common = crate::workspaces::run_git(
+            &canonical,
+            &["rev-parse", "--git-common-dir"],
+            Duration::from_secs(10),
+        )
+        .map_err(|e| format!("无法校验定时 worktree 所属仓库：{e}"))?;
+        let root_common = crate::workspaces::run_git(
+            &root,
+            &["rev-parse", "--git-common-dir"],
+            Duration::from_secs(10),
+        )
+        .map_err(|e| format!("无法校验项目仓库：{e}"))?;
+        if crate::projects::canonical_key(Path::new(common.trim()))
+            != crate::projects::canonical_key(Path::new(root_common.trim()))
+        {
+            return Err("定时隔离目录属于其他仓库，拒绝使用".into());
+        }
+        return Ok(canonical);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建定时隔离目录失败：{e}"))?;
+    }
+    crate::workspaces::run_git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &path.to_string_lossy(),
+            "HEAD",
+        ],
+        Duration::from_secs(60),
+    )
+    .map_err(|e| format!("创建定时隔离 worktree 失败：{e}"))?;
+    crate::paths::canonicalize_plain(&path).map_err(|e| format!("定时隔离目录无法解析：{e}"))
+}
+
+/// 每次运行从主仓刷新的只读输入（订阅清单以项目根为真源）。
+pub(crate) const WATCH_SEED_REFRESH: &[&str] = &["papers/watchlist.md"];
+/// 隔离树没有才拷：台账/收件箱/跟进/引文，避免冲掉本日程已处理记录。
+pub(crate) const WATCH_SEED_IF_ABSENT: &[&str] = &[
+    "papers/watch-seen.md",
+    "papers/watch-followup.md",
+    "notes/inbox.md",
+    "notes/references.bib",
+];
+/// 采纳进主仓的产出文件（不回写 watchlist，订阅仍以主仓为准）。
+pub(crate) const WATCH_ADOPT_FILES: &[&str] = &[
+    "notes/inbox.md",
+    "papers/watch-seen.md",
+    "papers/watch-followup.md",
+    "notes/references.bib",
+];
+
+fn watch_rel_ok(rel: &str) -> bool {
+    let t = rel.trim();
+    !t.is_empty()
+        && !t.starts_with('/')
+        && !t.starts_with('\\')
+        && !t.split(['/', '\\'])
+            .any(|p| p.is_empty() || p == "." || p == "..")
+}
+
+/// 在两个已存在的目录之间拷贝白名单相对路径。源缺失返回 Ok(false)；符号链接拒绝。
+pub(crate) fn copy_watch_rel(
+    from: &Path,
+    to: &Path,
+    rel: &str,
+    overwrite: bool,
+) -> Result<bool, String> {
+    if !watch_rel_ok(rel) {
+        return Err(format!("不允许的相对路径: {rel}"));
+    }
+    let src = from.join(rel);
+    let dest = to.join(rel);
+    let src_meta = match std::fs::symlink_metadata(&src) {
+        Ok(m) => m,
+        Err(_) => return Ok(false),
+    };
+    if src_meta.file_type().is_symlink() || !src_meta.is_file() {
+        return Ok(false);
+    }
+    if dest
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!("拒绝写入符号链接: {rel}"));
+    }
+    if dest.exists() && !overwrite {
+        return Ok(false);
+    }
+    let from_c = crate::paths::canonicalize_plain(from)
+        .map_err(|e| format!("源目录无法解析: {e}"))?;
+    let to_c =
+        crate::paths::canonicalize_plain(to).map_err(|e| format!("目标目录无法解析: {e}"))?;
+    let src_c = crate::paths::canonicalize_plain(&src)
+        .map_err(|e| format!("源文件无法解析: {e}"))?;
+    if !crate::paths::path_within_path(&src_c, &from_c) {
+        return Err(format!("源文件不在允许目录内: {rel}"));
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目标目录失败: {e}"))?;
+        let parent_c = crate::paths::canonicalize_plain(parent)
+            .map_err(|e| format!("目标目录无法解析: {e}"))?;
+        if !crate::paths::path_within_path(&parent_c, &to_c) {
+            return Err(format!("目标路径逃出允许目录: {rel}"));
+        }
+    }
+    fs::copy(&src, &dest).map_err(|e| format!("复制 {rel} 失败: {e}"))?;
+    Ok(true)
+}
+
+pub(crate) fn seed_watch_isolation(project_root: &Path, isolation: &Path) -> Result<(), String> {
+    for rel in WATCH_SEED_REFRESH {
+        copy_watch_rel(project_root, isolation, rel, true)?;
+    }
+    for rel in WATCH_SEED_IF_ABSENT {
+        copy_watch_rel(project_root, isolation, rel, false)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn adopt_watch_outputs(
+    isolation: &Path,
+    project_root: &Path,
+) -> Result<Vec<String>, String> {
+    let mut copied = Vec::new();
+    for rel in WATCH_ADOPT_FILES {
+        if copy_watch_rel(isolation, project_root, rel, true)? {
+            copied.push((*rel).to_string());
+        }
+    }
+    Ok(copied)
+}
+
+fn mark_run_adopted(run_id: &str) -> Result<(), String> {
+    let _g = sched_lock();
+    let path = schedules_path()?;
+    let mut list = read_schedules_at(&path)?;
+    let mut found = false;
+    for task in &mut list {
+        for rec in &mut task.history {
+            if rec.run_id.as_deref() == Some(run_id) {
+                rec.adopted = true;
+                found = true;
+            }
+        }
+    }
+    if !found {
+        return Err("找不到对应的定时运行记录".into());
+    }
+    write_schedules_at(&path, &list)
+}
+
+/// 把隔离树里的巡检产物拷进主仓。不走 git merge，不自动发生。
+#[tauri::command]
+pub fn adopt_watch_run(app: tauri::AppHandle, run_id: String) -> Result<Vec<String>, String> {
+    let run = crate::runs::run_get(run_id.clone())?.ok_or("Run 不存在")?;
+    if run.task_kind != "watch" {
+        return Err("只有定时巡检 Run 可以采纳进主仓".into());
+    }
+    let project = run
+        .project_root
+        .as_deref()
+        .ok_or("Run 没有所属项目")?;
+    let project = gated_project_root(project)?;
+    let isolation = PathBuf::from(crate::sessions::expand_tilde(&run.isolation_path));
+    if !isolation.is_dir() {
+        return Err("隔离目录不存在".into());
+    }
+    if crate::paths::path_within_path(&isolation, &project) {
+        return Err("隔离路径落在主仓内，拒绝采纳".into());
+    }
+    let copied = adopt_watch_outputs(&isolation, &project)?;
+    mark_run_adopted(&run_id)?;
+    let _ = app.emit("watch-run-adopted", &run_id);
+    Ok(copied)
+}
+
+fn is_timeout_error(err: &str) -> bool {
+    err.contains("AI 调用超时")
 }
 
 // ===== 执行 =====
@@ -566,7 +817,11 @@ fn execute_one(id: &str) -> RunDonePayload {
         match read_schedules_at(&path) {
             Ok(list) => list.into_iter().find(|t| t.id == id),
             Err(e) => {
-                crate::logbuf::record("error", "scheduler", &format!("读取 schedules.json 失败: {e}"));
+                crate::logbuf::record(
+                    "error",
+                    "scheduler",
+                    &format!("读取 schedules.json 失败: {e}"),
+                );
                 None
             }
         }
@@ -585,6 +840,10 @@ fn execute_one(id: &str) -> RunDonePayload {
     };
     // 新增条目计数仅对 lit-watch 类任务有意义（只有它往 notes/inbox.md 追加条目）
     let is_lit_watch = task.skill == "lit-watch";
+    let scheduled_isolation = schedule_isolation(&task).and_then(|path| {
+        seed_watch_isolation(Path::new(&task.project_root), &path)?;
+        Ok(path)
+    });
     // 项目配了雷达筛选时，新增计数只算通过筛选的条目（推送口径 = 用户要看的口径）
     let lit_filter = if is_lit_watch {
         crate::projects::lit_watch_filter_for(Path::new(&task.project_root))
@@ -593,7 +852,10 @@ fn execute_one(id: &str) -> RunDonePayload {
     };
     let before_entries = if is_lit_watch {
         Some(crate::lit_watch::count_inbox_entries_matching(
-            Path::new(&task.project_root),
+            scheduled_isolation
+                .as_ref()
+                .map(|p| p.as_path())
+                .unwrap_or(Path::new(&task.project_root)),
             lit_filter.as_ref(),
         ))
     } else {
@@ -601,11 +863,12 @@ fn execute_one(id: &str) -> RunDonePayload {
     };
     // 绑定 profile 被删导致回落时，在运行历史里留一句说明（成功/失败都带）
     let mut fallback_note: Option<String> = None;
+    let mut actual_isolation: Option<String> = None;
+    let mut run_id: Option<String> = None;
     let result: Result<String, String> = (|| {
-        let root = Path::new(&task.project_root);
-        if !root.is_dir() {
-            return Err(format!("项目目录不存在: {}", task.project_root));
-        }
+        let root = scheduled_isolation.as_ref().map_err(Clone::clone)?;
+        actual_isolation = Some(root.to_string_lossy().into_owned());
+        let root = root.as_path();
         let profiles = crate::profiles::ProfileStore::new()?.list()?;
         // 任务绑定的 profile 走「功能专属 id」槽：被删时按失效回落（AI 专用 → 最近使用）而非硬报错——
         // 定时任务是长期住户，配置被删不该让任务永久哑跑；AI 专用配置也可能指着已删 id
@@ -613,38 +876,101 @@ fn execute_one(id: &str) -> RunDonePayload {
         // 显式槽的硬报错口径只留给交互场景
         let cur_settings = crate::settings::read_current();
         let dedicated = cur_settings.ai_profile_id;
-        let hidden: std::collections::HashSet<String> =
-            cur_settings.hidden_profiles.unwrap_or_default().into_iter().collect();
+        let hidden: std::collections::HashSet<String> = cur_settings
+            .hidden_profiles
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let pinned = task.profile_id.clone().filter(|v| !v.trim().is_empty());
-        let profile =
-            crate::ai::resolve_profile_from(profiles.clone(), None, pinned.clone(), dedicated, &hidden)
-                .or_else(|_| crate::ai::resolve_profile_from(profiles, None, pinned.clone(), None, &hidden))?;
+        let profile = match crate::ai::resolve_profile_from(
+            profiles.clone(),
+            None,
+            pinned.clone(),
+            dedicated,
+            &hidden,
+        )
+        .or_else(|_| crate::ai::resolve_profile_from(profiles, None, pinned.clone(), None, &hidden))
+        {
+            Ok(profile) => profile,
+            Err(error) => {
+                // Profile resolution is part of the Run lifecycle too: keep a durable
+                // failed Run even though no agent process can be started.
+                let failed = crate::runs::open_headless_with_root(
+                    Some(&task.project_root),
+                    "scheduler",
+                    "",
+                    &root.to_string_lossy(),
+                    &format!("watch:{}:{}", task.id, task.project_root),
+                    false,
+                    "write_tree",
+                )?;
+                run_id = Some(failed.id.clone());
+                return Err(error);
+            }
+        };
         // 回落发生时在运行历史里留一句话，用户看得到「为什么换了配置」
         if let Some(p) = pinned {
             if p != profile.id {
                 fallback_note = Some(format!("原绑定配置已删除，本次回落用「{}」", profile.name));
             }
         }
+        // 先登记这次定时执行的 Run，再做技能分发和 CLI 启动检查。
+        // 这样“技能未分发/启动前失败”也能和定时历史通过同一个 runId 对上。
+        let reuse = format!("watch:{}:{}", task.id, task.project_root);
+        let run = crate::runs::open_headless_with_root(
+            Some(&task.project_root),
+            &profile.agent,
+            &profile.id,
+            &root.to_string_lossy(),
+            &reuse,
+            false,
+            "write_tree",
+        )?;
+        run_id = Some(run.id.clone());
         // 自定义巡检靠技能目录里的 SKILL.md；未分发则无头跑找不到规范。
         // lit-watch 的 prompt 自带完整口径，不拦存量任务。
         if task.skill != "lit-watch" {
             crate::skills::require_skill_distributed(&task.skill, &profile.agent)?;
         }
-        let reuse = format!("watch:{}:{}", task.id, task.project_root);
         crate::ai::run_agent_task(
             &profile,
             &build_task_prompt(&task.skill),
             root,
             RUN_TIMEOUT,
             Some(&reuse),
-            true,
+            false,
+            Some(Path::new(&task.project_root)),
+            run_id.as_deref(),
         )
+        .map(|(output, id)| {
+            run_id = Some(id);
+            output
+        })
     })();
+    // Run 已创建但在 CLI 进入 ai.rs 前失败（例如技能未分发）时，补齐失败终态。
+    if result.is_err() {
+        if let Some(id) = run_id.as_deref() {
+            if let Ok(Some(run)) = crate::runs::run_get(id.to_string()) {
+                if run.closed_at.is_none() {
+                    let _ = crate::runs::close_run_with_result(
+                        id,
+                        None,
+                        "failed",
+                        None,
+                        Some("定时任务在启动前失败"),
+                    );
+                }
+            }
+        }
+    }
     // 超时/失败不记新增数：只有成功跑完才数第二次取差值（saturating_sub 防文件被外部截断）
     let new_entries = match (&result, before_entries) {
         (Ok(_), Some(before)) => Some(
             crate::lit_watch::count_inbox_entries_matching(
-                Path::new(&task.project_root),
+                scheduled_isolation
+                    .as_ref()
+                    .map(|p| p.as_path())
+                    .unwrap_or(Path::new(&task.project_root)),
                 lit_filter.as_ref(),
             )
             .saturating_sub(before),
@@ -653,17 +979,38 @@ fn execute_one(id: &str) -> RunDonePayload {
     };
     let (status, summary) = match result {
         // 简报/错误文本落存储与发事件前必须脱敏
-        Ok(out) => ("ok", cap_summary(&crate::sessions::redact_sensitive_text(&out))),
-        Err(e) => ("error", cap_summary(&crate::sessions::redact_sensitive_text(&e))),
+        Ok(out) => (
+            "ok",
+            cap_summary(&crate::sessions::redact_sensitive_text(&out)),
+        ),
+        Err(e) if is_timeout_error(&e) => (
+            "timeout",
+            cap_summary(&crate::sessions::redact_sensitive_text(&e)),
+        ),
+        Err(e) => (
+            "error",
+            cap_summary(&crate::sessions::redact_sensitive_text(&e)),
+        ),
     };
     let finished_at = crate::sessions::now_iso();
     let artifacts = if status == "ok" {
-        changed_artifacts(Path::new(&task.project_root), started)
+        changed_artifacts(
+            actual_isolation
+                .as_deref()
+                .map(Path::new)
+                .unwrap_or_else(|| Path::new(&task.project_root)),
+            started,
+        )
     } else {
         Vec::new()
     };
     let summary = if status == "ok" && is_lit_watch {
-        match crate::lit_watch::output_note(Path::new(&task.project_root)) {
+        match crate::lit_watch::output_note(
+            actual_isolation
+                .as_deref()
+                .map(Path::new)
+                .unwrap_or_else(|| Path::new(&task.project_root)),
+        ) {
             Some(note) => format!("{summary}；产物检查：{note}"),
             None => summary,
         }
@@ -682,6 +1029,8 @@ fn execute_one(id: &str) -> RunDonePayload {
         started_at,
         finished_at,
         artifacts.clone(),
+        run_id,
+        actual_isolation,
     ) {
         crate::logbuf::record("error", "scheduler", &format!("回填运行历史失败: {e}"));
     }
@@ -699,7 +1048,11 @@ fn execute_one(id: &str) -> RunDonePayload {
 
 fn emit_done(app: &tauri::AppHandle, payload: RunDonePayload) {
     if let Err(e) = app.emit("scheduler-run-done", &payload) {
-        crate::logbuf::record("warn", "scheduler", &format!("发送 scheduler-run-done 事件失败: {e}"));
+        crate::logbuf::record(
+            "warn",
+            "scheduler",
+            &format!("发送 scheduler-run-done 事件失败: {e}"),
+        );
     }
 }
 
@@ -840,7 +1193,9 @@ pub fn run_schedule_now(app: tauri::AppHandle, id: String) -> Result<(), String>
         unmark_running(&id);
         match outcome {
             Ok(payload) => emit_done(&app, payload),
-            Err(e) => crate::logbuf::record("error", "scheduler", &format!("任务执行线程异常: {e}")),
+            Err(e) => {
+                crate::logbuf::record("error", "scheduler", &format!("任务执行线程异常: {e}"))
+            }
         }
     });
     Ok(())
@@ -898,11 +1253,7 @@ pub struct StartWatchSkillInput {
 }
 
 fn watch_id_ok(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 40
-        && id
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() || c == '-')
+    !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
 fn watch_draft_rel(id: &str) -> String {
@@ -958,14 +1309,8 @@ fn schedule_run_profile(pinned: Option<String>) -> Result<crate::profiles::Profi
         .unwrap_or_default()
         .into_iter()
         .collect();
-    crate::ai::resolve_profile_from(
-        profiles.clone(),
-        None,
-        pinned.clone(),
-        dedicated,
-        &hidden,
-    )
-    .or_else(|_| crate::ai::resolve_profile_from(profiles, None, pinned, None, &hidden))
+    crate::ai::resolve_profile_from(profiles.clone(), None, pinned.clone(), dedicated, &hidden)
+        .or_else(|_| crate::ai::resolve_profile_from(profiles, None, pinned, None, &hidden))
 }
 
 fn pending_to_dto(root: &Path, p: WatchSkillPending) -> WatchSkillDraftDto {
@@ -1096,7 +1441,12 @@ pub fn write_watch_skill_draft(
         return Err("无效草稿 id".into());
     }
     let _ = drafts_path(&root, &watch_meta_rel(&id))?;
-    if !root.join(".ccode").join("drafts").join(format!("watch-{id}.meta.json")).is_file() {
+    if !root
+        .join(".ccode")
+        .join("drafts")
+        .join(format!("watch-{id}.meta.json"))
+        .is_file()
+    {
         return Err("没有这份草稿".into());
     }
     let md_path = drafts_path(&root, &watch_draft_rel(&id))?;
@@ -1136,7 +1486,8 @@ pub fn commit_watch_skill_draft(
         Some(t) => t,
         None => {
             let p = drafts_path(&root, &watch_draft_rel(&id))?;
-            fs::read_to_string(&p).map_err(|_| "还没有 SKILL.md 草稿，先跟 AI 写完再落盘".to_string())?
+            fs::read_to_string(&p)
+                .map_err(|_| "还没有 SKILL.md 草稿，先跟 AI 写完再落盘".to_string())?
         }
     };
     if md.trim().is_empty() {
@@ -1209,7 +1560,11 @@ mod tests {
     }
 
     fn tmp_schedules_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("ccode-scheduler-test-{}-{}", tag, uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!(
+            "ccode-scheduler-test-{}-{}",
+            tag,
+            uuid::Uuid::new_v4()
+        ))
     }
 
     fn sample_task(id: &str, root: &str) -> Schedule {
@@ -1242,11 +1597,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let n = delete_schedules_for_project_at(
-            &path,
-            Path::new("/Users/me/综述文献/"),
-        )
-        .unwrap();
+        let n = delete_schedules_for_project_at(&path, Path::new("/Users/me/综述文献/")).unwrap();
         assert_eq!(n, 1);
         let left = read_schedules_at(&path).unwrap();
         assert_eq!(left.len(), 1);
@@ -1296,16 +1647,58 @@ mod tests {
         let now = dt(now_date, 9, 0);
         // 定在今天 08:00：应跑时刻是今天 08:00
         let wd = today_idx + 1;
-        assert!(is_due("weekly", Some(wd), 8, 0, Some(dt(now_date - ChronoDuration::days(6), 8, 0)), now));
-        assert!(!is_due("weekly", Some(wd), 8, 0, Some(dt(now_date, 8, 30)), now));
+        assert!(is_due(
+            "weekly",
+            Some(wd),
+            8,
+            0,
+            Some(dt(now_date - ChronoDuration::days(6), 8, 0)),
+            now
+        ));
+        assert!(!is_due(
+            "weekly",
+            Some(wd),
+            8,
+            0,
+            Some(dt(now_date, 8, 30)),
+            now
+        ));
         // 定在今天 10:00（还没到）：应跑时刻是上周今天 10:00
-        assert!(is_due("weekly", Some(wd), 10, 0, Some(dt(now_date - ChronoDuration::days(8), 10, 0)), now));
-        assert!(!is_due("weekly", Some(wd), 10, 0, Some(dt(now_date - ChronoDuration::days(6), 10, 0)), now));
+        assert!(is_due(
+            "weekly",
+            Some(wd),
+            10,
+            0,
+            Some(dt(now_date - ChronoDuration::days(8), 10, 0)),
+            now
+        ));
+        assert!(!is_due(
+            "weekly",
+            Some(wd),
+            10,
+            0,
+            Some(dt(now_date - ChronoDuration::days(6), 10, 0)),
+            now
+        ));
         // 定在昨天 08:00：应跑时刻是昨天 08:00，6 天前跑过 → due；昨天跑过 → 不 due
         let yesterday_idx = (today_idx + 6) % 7;
         let wd = yesterday_idx + 1;
-        assert!(is_due("weekly", Some(wd), 8, 0, Some(dt(now_date - ChronoDuration::days(6), 8, 0)), now));
-        assert!(!is_due("weekly", Some(wd), 8, 0, Some(dt(now_date - ChronoDuration::days(1), 8, 30)), now));
+        assert!(is_due(
+            "weekly",
+            Some(wd),
+            8,
+            0,
+            Some(dt(now_date - ChronoDuration::days(6), 8, 0)),
+            now
+        ));
+        assert!(!is_due(
+            "weekly",
+            Some(wd),
+            8,
+            0,
+            Some(dt(now_date - ChronoDuration::days(1), 8, 30)),
+            now
+        ));
     }
 
     #[test]
@@ -1349,6 +1742,9 @@ mod tests {
                 started_at: None,
                 finished_at: None,
                 artifacts: Vec::new(),
+                run_id: None,
+                isolation_path: None,
+                adopted: false,
             }],
         };
         write_schedules_at(&path, &[task.clone()]).unwrap();
@@ -1391,25 +1787,29 @@ mod tests {
         // 清除关联由 update 时空白字符串归一为 None 承担
         let patch: UpdateSchedulePatch = serde_json::from_str(r#"{"linkedStep": null}"#).unwrap();
         assert_eq!(patch.linked_step, None);
-        let patch: UpdateSchedulePatch = serde_json::from_str(r#"{"linkedStep": " 检索筛选 "}"#).unwrap();
+        let patch: UpdateSchedulePatch =
+            serde_json::from_str(r#"{"linkedStep": " 检索筛选 "}"#).unwrap();
         assert_eq!(patch.linked_step, Some(Some(" 检索筛选 ".into())));
     }
 
     #[test]
     fn create_validation_rejects_bad_fields() {
-        let dir = std::env::temp_dir().join(format!("ccode-scheduler-test-dir-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("ccode-scheduler-test-dir-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let root = dir.to_string_lossy().into_owned();
-        let input = |frequency: &str, weekday: Option<u8>, hour: u8, minute: u8, root: &str| CreateScheduleInput {
-            name: None,
-            project_root: root.to_string(),
-            skill: None,
-            profile_id: None,
-            linked_step: None,
-            frequency: frequency.into(),
-            weekday,
-            hour,
-            minute,
+        let input = |frequency: &str, weekday: Option<u8>, hour: u8, minute: u8, root: &str| {
+            CreateScheduleInput {
+                name: None,
+                project_root: root.to_string(),
+                skill: None,
+                profile_id: None,
+                linked_step: None,
+                frequency: frequency.into(),
+                weekday,
+                hour,
+                minute,
+            }
         };
         // 不存在的目录
         assert!(validate_fields("/definitely/not/exist-cccode", "daily", None, 8, 0).is_err());
@@ -1424,7 +1824,11 @@ mod tests {
         // create 走同一校验（落到独立临时文件，不碰真实配置目录）
         let path = tmp_schedules_path("create");
         assert!(create_schedule_at(&path, input("daily", None, 25, 0, &root)).is_err());
-        assert!(create_schedule_at(&path, input("daily", None, 8, 0, "/definitely/not/exist-cccode")).is_err());
+        assert!(create_schedule_at(
+            &path,
+            input("daily", None, 8, 0, "/definitely/not/exist-cccode")
+        )
+        .is_err());
         let t = create_schedule_at(&path, input("weekly", Some(2), 8, 30, &root)).unwrap();
         // 默认值：名称/技能/enabled/空历史/uuid
         assert_eq!(t.name, "文献雷达");
@@ -1474,10 +1878,7 @@ mod tests {
         );
         assert!(watch_id_ok("aabbccddeeff00112233445566778899"));
         assert!(!watch_id_ok("../evil"));
-        assert_eq!(
-            watch_draft_rel("abc"),
-            ".ccode/drafts/watch-abc.md"
-        );
+        assert_eq!(watch_draft_rel("abc"), ".ccode/drafts/watch-abc.md");
         let json = serde_json::to_string(&WatchSkillPending {
             id: "abc".into(),
             name: "查模型".into(),
@@ -1494,5 +1895,64 @@ mod tests {
         assert!(json.contains("skillName"));
         let back: WatchSkillPending = serde_json::from_str(&json).unwrap();
         assert_eq!(back.intent, "每天查");
+    }
+
+    #[test]
+    fn copy_watch_rel_seeds_and_skips_existing() {
+        let root = std::env::temp_dir().join(format!("ccode-watch-copy-{}", uuid::Uuid::new_v4()));
+        let from = root.join("from");
+        let to = root.join("to");
+        std::fs::create_dir_all(from.join("papers")).unwrap();
+        std::fs::create_dir_all(to.join("papers")).unwrap();
+        std::fs::write(from.join("papers/watchlist.md"), "kw — arxiv\n").unwrap();
+        std::fs::write(from.join("papers/watch-seen.md"), "seen\n").unwrap();
+        std::fs::write(to.join("papers/watch-seen.md"), "old\n").unwrap();
+        assert!(copy_watch_rel(&from, &to, "papers/watchlist.md", true).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(to.join("papers/watchlist.md")).unwrap(),
+            "kw — arxiv\n"
+        );
+        assert!(!copy_watch_rel(&from, &to, "papers/watch-seen.md", false).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(to.join("papers/watch-seen.md")).unwrap(),
+            "old\n"
+        );
+        assert!(copy_watch_rel(&from, &to, "papers/watch-seen.md", true).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(to.join("papers/watch-seen.md")).unwrap(),
+            "seen\n"
+        );
+        assert!(!copy_watch_rel(&from, &to, "notes/inbox.md", true).unwrap());
+        assert!(copy_watch_rel(&from, &to, "../escape.md", true).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn seed_then_adopt_roundtrip() {
+        let root = std::env::temp_dir().join(format!("ccode-watch-seed-{}", uuid::Uuid::new_v4()));
+        let project = root.join("project");
+        let isolation = root.join("iso");
+        std::fs::create_dir_all(project.join("papers")).unwrap();
+        std::fs::create_dir_all(project.join("notes")).unwrap();
+        std::fs::create_dir_all(&isolation).unwrap();
+        std::fs::write(project.join("papers/watchlist.md"), "kw\n").unwrap();
+        std::fs::write(project.join("notes/inbox.md"), "## old\n").unwrap();
+        seed_watch_isolation(&project, &isolation).unwrap();
+        assert!(isolation.join("papers/watchlist.md").is_file());
+        assert!(isolation.join("notes/inbox.md").is_file());
+        std::fs::write(isolation.join("notes/inbox.md"), "## old\n## new\n").unwrap();
+        let copied = adopt_watch_outputs(&isolation, &project).unwrap();
+        assert!(copied.iter().any(|p| p == "notes/inbox.md"));
+        assert_eq!(
+            std::fs::read_to_string(project.join("notes/inbox.md")).unwrap(),
+            "## old\n## new\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn timeout_error_is_classified() {
+        assert!(is_timeout_error("AI 调用超时（600s）。无输出"));
+        assert!(!is_timeout_error("技能未分发"));
     }
 }

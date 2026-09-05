@@ -113,9 +113,6 @@ fn env_preview_source(name: &str, profile: &Profile) -> &'static str {
     if name.starts_with("ANTHROPIC_DEFAULT_") || name.starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION") {
         return "模型选择器";
     }
-    if name == "CLAUDE_CODE_SUBAGENT_MODEL" {
-        return "模型选择器（haiku 槽复用）";
-    }
     if name == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" {
         return "能力声明（注册链 >200K 才注入）";
     }
@@ -184,18 +181,20 @@ pub fn preview_launch_plan(
             if let Some(b) =
                 crate::model_registry::model_api_backend_for(m, profile.gateway_id.as_deref())
             {
-                notes.push(format!("中转目录声明 apiBackend={b}（grok 自读，无需设置绑定字段）"));
+                notes.push(format!(
+                    "中转目录声明 apiBackend={b}（grok 自读，无需设置绑定字段）"
+                ));
             }
         }
     }
     if profile.agent == "codex" && profile.account_type != crate::profiles::AccountType::Official {
         notes.push("协议：Responses（wire_api=responses，中转必须实现 /v1/responses）".into());
         if let Some(m) = selected.as_deref() {
-            let ctx = crate::model_registry::model_context_size_for(
-                m,
-                profile.gateway_id.as_deref(),
-            );
-            notes.push(format!("上下文窗口：{ctx}（catalog 声明，有效窗口按 95% 计）"));
+            let ctx =
+                crate::model_registry::model_context_size_for(m, profile.gateway_id.as_deref());
+            notes.push(format!(
+                "上下文窗口：{ctx}（catalog 声明，有效窗口按 95% 计）"
+            ));
         }
     }
     if profile.agent == "codex" && profile.account_type == crate::profiles::AccountType::Official {
@@ -378,7 +377,9 @@ fn apply_request_policy_env(
             .header_env
             .iter()
             .filter_map(|(h, var)| {
-                getenv(var).filter(|v| !v.is_empty()).map(|v| format!("{h}: {v}"))
+                getenv(var)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| format!("{h}: {v}"))
             })
             .collect();
         if !lines.is_empty() {
@@ -403,18 +404,22 @@ fn apply_request_policy_env(
                 ));
             }
             if let Some(v) = policy.max_output_tokens {
-                plan.env.push(("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), v.to_string()));
+                plan.env
+                    .push(("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), v.to_string()));
             }
             if let Some(v) = &policy.reasoning_effort {
-                plan.env.push(("CLAUDE_CODE_EFFORT_LEVEL".into(), v.clone()));
+                plan.env
+                    .push(("CLAUDE_CODE_EFFORT_LEVEL".into(), v.clone()));
             }
             inject_headers(plan, "ANTHROPIC_CUSTOM_HEADERS");
         }
         "codebuddy" => {
             // claude-code fork 但 env 前缀独立（v2.132.0 实测 ANTHROPIC_* 无效）；
-            // 无 EXTRA_BODY/EFFORT 入口，只接两条实证通道
+            // 当前版本的通用策略入口是 max-output 环境变量；Header 仍使用独立
+            // CODEBUDDY_CUSTOM_HEADERS 环境变量，避免把敏感值放进命令行。
             if let Some(v) = policy.max_output_tokens {
-                plan.env.push(("CODEBUDDY_CODE_MAX_OUTPUT_TOKENS".into(), v.to_string()));
+                plan.env
+                    .push(("CODEBUDDY_CODE_MAX_OUTPUT_TOKENS".into(), v.to_string()));
             }
             inject_headers(plan, "CODEBUDDY_CUSTOM_HEADERS");
         }
@@ -424,7 +429,8 @@ fn apply_request_policy_env(
             // env 唯一实证的策略通道是 QWEN_CODE_MAX_OUTPUT_TOKENS——注意若全局配置
             // 条目已带 samplingParams，qwen 会跳过该 env（条目优先）
             if let Some(v) = policy.max_output_tokens {
-                plan.env.push(("QWEN_CODE_MAX_OUTPUT_TOKENS".into(), v.to_string()));
+                plan.env
+                    .push(("QWEN_CODE_MAX_OUTPUT_TOKENS".into(), v.to_string()));
             }
         }
         _ => {}
@@ -490,6 +496,43 @@ fn grok_overlay_note() -> String {
     "api_backend / context_window 不在 grok overlay 白名单内（[model.*] 表会被静默丢弃）；渠道有二：中转 /models 目录条目带 apiBackend / contextWindow 字段，或绑定设「API 后端」后经「设为全局默认」写入 ~/.grok/config.toml 的 [model.*] 段；目录缺 contextWindow 时 grok 按 256000 计".into()
 }
 
+/// Claude Code 的 settings.json env 会覆盖父进程 shell env。
+/// 用 --settings 传入一个不含密钥的高优先级覆盖层，避免用户全局配置把 Ccode
+/// 当前连接静默改回另一家模型；认证密钥仍只存在子进程环境中。
+fn claude_settings_override(profile: &Profile, model: Option<&str>) -> String {
+    let mut env = serde_json::Map::new();
+    if profile.account_type == crate::profiles::AccountType::Api {
+        if let Some(url) = profile.base_url.as_deref().filter(|u| !u.trim().is_empty()) {
+            env.insert("ANTHROPIC_BASE_URL".into(), serde_json::json!(url));
+        }
+    }
+    const SLOTS: [&str; 4] = ["SONNET", "OPUS", "HAIKU", "FABLE"];
+    for (model, slot) in profile.models.iter().take(4).zip(SLOTS) {
+        env.insert(
+            format!("ANTHROPIC_DEFAULT_{slot}_MODEL"),
+            serde_json::json!(model),
+        );
+        env.insert(
+            format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"),
+            serde_json::json!(format!("{} · {model}", profile.name)),
+        );
+    }
+    if let Some(fifth) = profile.models.get(4) {
+        env.insert(
+            "ANTHROPIC_CUSTOM_MODEL_OPTION".into(),
+            serde_json::json!(fifth),
+        );
+        env.insert(
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(),
+            serde_json::json!(format!("{} · {fifth}", profile.name)),
+        );
+    }
+    if let Some(selected) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        env.insert("ANTHROPIC_MODEL".into(), serde_json::json!(selected));
+    }
+    serde_json::json!({ "env": env }).to_string()
+}
+
 pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) -> LaunchPlan {
     let mut plan = LaunchPlan::default();
     // 官方账号模式：不注入 base_url/密钥（用 CLI 自己的账号登录），仅按需注入选中模型；
@@ -538,34 +581,47 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
             LaunchSpec::Special(special) => match special {
                 SpecialLaunch::ClaudeModelSlots(env) => {
                     apply_env_inject(&mut plan, env, profile, key.as_deref(), model);
+                    // settings.json 的 env 优先于 shell env；把本次连接的非敏感模型
+                    // 选择通过 --settings 提升到 CLI 配置层，防止全局 settings 覆盖。
+                    plan.args.push("--settings".into());
+                    plan.args.push(claude_settings_override(profile, model));
+                    if let Some(selected) = model.filter(|m| !m.trim().is_empty()) {
+                        plan.args.push("--model".into());
+                        plan.args.push(selected.into());
+                    }
+                    if let Some(effort) = profile
+                        .request_policy
+                        .reasoning_effort
+                        .as_deref()
+                        .filter(|e| !e.trim().is_empty())
+                    {
+                        plan.args.push("--effort".into());
+                        plan.args.push(effort.into());
+                    }
                     // 把模型列表注册进 /model 选择器（否则选择器里只有内置别名可用）：
                     // 前 4 个占用 opus/sonnet/haiku/fable 别名槽，_NAME 让选择器显示友好名
                     // （profile 名 · 模型，与 kimi/codex/opencode 同口径）；
                     // 第 5 个走唯一的 CUSTOM_MODEL_OPTION；更多模型只能靠 /model <id> 手输
                     const SLOTS: [&str; 4] = ["SONNET", "OPUS", "HAIKU", "FABLE"];
                     for (m, slot) in profile.models.iter().take(4).zip(SLOTS) {
-                        plan.env.push((format!("ANTHROPIC_DEFAULT_{slot}_MODEL"), m.clone()));
+                        plan.env
+                            .push((format!("ANTHROPIC_DEFAULT_{slot}_MODEL"), m.clone()));
                         plan.env.push((
                             format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"),
                             format!("{} · {m}", profile.name),
                         ));
                     }
                     if let Some(fifth) = profile.models.get(4) {
-                        plan.env.push(("ANTHROPIC_CUSTOM_MODEL_OPTION".into(), fifth.clone()));
+                        plan.env
+                            .push(("ANTHROPIC_CUSTOM_MODEL_OPTION".into(), fifth.clone()));
                         plan.env.push((
                             "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(),
                             format!("{} · {fifth}", profile.name),
                         ));
                     }
-                    // 子 agent（Task 工具）模型：2.1.226 二进制实证解析链 env > Task 参数 >
-                    // frontmatter > inherit 主模型；不设 = 子 agent 继承主模型，第三方网关上
-                    // 与主循环同档同价。名单 ≥3 时把 HAIKU 槽（「便宜/快」角色）复用为子 agent
-                    // 模型（DeepSeek 官方推荐同口径；与设为全局写入同键）。
-                    // 注意 env 优先级最高：会压过 frontmatter 的 model 声明
-                    if let Some(haiku) = profile.models.get(2) {
-                        plan.env
-                            .push(("CLAUDE_CODE_SUBAGENT_MODEL".into(), haiku.clone()));
-                    }
+                    // 不强行设置 CLAUDE_CODE_SUBAGENT_MODEL：Claude Code 默认让 Task
+                    // 子 agent 继承主模型，且 frontmatter/Task 参数仍可按任务显式选择。
+                    // 把绑定列表的第三个模型写入全局环境会压过这些原生选择，可能造成能力丢失。
                     // 长上下文声明（与设为全局同条件同键）：claude 对不认识的第三方模型按
                     // 200K 上下文假设，注册链确知更大时必须显式声明，否则长会话提前 compact
                     if let Some(m) = model {
@@ -574,14 +630,15 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                             profile.gateway_id.as_deref(),
                         );
                         if ctx > 200_000 {
-                            plan.env.push((
-                                "CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(),
-                                ctx.to_string(),
-                            ));
+                            plan.env
+                                .push(("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), ctx.to_string()));
                         }
                     }
                 }
-                SpecialLaunch::CodexInlineProvider { key_env, sandbox_args } => {
+                SpecialLaunch::CodexInlineProvider {
+                    key_env,
+                    sandbox_args,
+                } => {
                     if let Some(key) = key {
                         plan.env.push(((*key_env).into(), key));
                     }
@@ -589,13 +646,28 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     // 用 -c 内联定义 provider（名从网关派生；旧 rollout 回落 ccode）
                     let pid = profile.provider_name();
                     if let Some(url) = &profile.base_url {
-                        plan.args.extend(codex_inline_provider_args(url, key_env, &pid));
+                        plan.args
+                            .extend(codex_inline_provider_args(url, key_env, &pid));
                         // 中转不支持 ChatGPT 订阅档和官方 hosted 网页搜索；-c 只盖本进程
                         plan.args.extend(codex_relay_compat_args());
                     }
                     if let Some(model) = model {
                         plan.args.push("-m".into());
                         plan.args.push(model.into());
+                        // Override stale user-level Codex context limits for this session.
+                        // The catalog and auto-compact threshold must follow the selected
+                        // model, not whichever model was last used globally.
+                        let context = crate::model_registry::model_context_size_for(
+                            model,
+                            profile.gateway_id.as_deref(),
+                        );
+                        plan.args.push("-c".into());
+                        plan.args.push(format!("model_context_window={context}"));
+                        plan.args.push("-c".into());
+                        plan.args.push(format!(
+                            "model_auto_compact_token_limit={}",
+                            context.saturating_mul(95) / 100
+                        ));
                         // 会话内自省入口：codex 没有模型/base URL 环境变量（matrix §2），配置又走
                         // 内联 -c 不落盘，agent 被问「你是什么模型」时 config.json/$CODEX_MODEL 全空。
                         // 注入 Ccode 命名空间的显示名（配置名 · 模型，与选择器口径一致），
@@ -612,13 +684,15 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     // workspace-write 默认拦网：文献检索/查资料一联网就弹提权确认，
                     // 这里放开沙箱内联网（只影响 workspace-write 档，read-only 下该键被忽略）
                     plan.args.push("-c".into());
-                    plan.args.push("sandbox_workspace_write.network_access=true".into());
+                    plan.args
+                        .push("sandbox_workspace_write.network_access=true".into());
                     // 请求策略（实证通道）：effort = config 键 model_reasoning_effort；
                     // Header = provider env_http_headers（值是环境变量名引用，不落密文）。
                     // 后者依赖内联 provider 定义存在，无 base_url 时没有 ccode provider 可挂
                     if let Some(effort) = profile.request_policy.reasoning_effort.as_deref() {
                         plan.args.push("-c".into());
-                        plan.args.push(format!(r#"model_reasoning_effort="{effort}""#));
+                        plan.args
+                            .push(format!(r#"model_reasoning_effort="{effort}""#));
                     }
                     if profile.base_url.is_some() {
                         for (header, env_name) in &profile.request_policy.header_env {
@@ -629,7 +703,10 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         }
                     }
                 }
-                SpecialLaunch::OpenCodeInlineConfig { config_env, no_autoupdate_env } => {
+                SpecialLaunch::OpenCodeInlineConfig {
+                    config_env,
+                    no_autoupdate_env,
+                } => {
                     // OpenCode 没有通用 key/baseURL 环境变量：用 OPENCODE_CONFIG_CONTENT 内联配置注入，
                     // 该层优先级高于 auth.json 和 env（matrix §5），行为确定
                     let pid = profile.provider_name();
@@ -661,8 +738,7 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     if !model_opts.is_empty() {
                         if let Some(m) = model {
                             if let Some(entry) = config["provider"][&pid]["models"].get_mut(m) {
-                                entry["options"] =
-                                    serde_json::Value::Object(model_opts.clone());
+                                entry["options"] = serde_json::Value::Object(model_opts.clone());
                             }
                         }
                     }
@@ -692,11 +768,11 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     // env 名留在代码里：双通道的条件结构无法纯数据化
                     if let Some(model) = model {
                         plan.env.push(("KIMI_MODEL_NAME".into(), model.into()));
-                        let provider_type = profile
-                            .protocol
-                            .clone()
-                            .unwrap_or_else(|| spec.protocols.first().copied().unwrap_or("kimi").into());
-                        plan.env.push(("KIMI_MODEL_PROVIDER_TYPE".into(), provider_type.clone()));
+                        let provider_type = profile.protocol.clone().unwrap_or_else(|| {
+                            spec.protocols.first().copied().unwrap_or("kimi").into()
+                        });
+                        plan.env
+                            .push(("KIMI_MODEL_PROVIDER_TYPE".into(), provider_type.clone()));
                         if let Some(key) = &key {
                             plan.env.push(("KIMI_MODEL_API_KEY".into(), key.clone()));
                         }
@@ -746,10 +822,8 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                             // KIMI_MODEL_THINKING_EFFORT（2026-08-28 二进制实证：原样透传 +
                             // 小写归一，env 路径无闭集校验；仅 kimi 协议通道读取，
                             // 兼容协议通道会被静默忽略所以干脆不注）
-                            plan.env.push((
-                                "KIMI_MODEL_THINKING_EFFORT".into(),
-                                effort.to_lowercase(),
-                            ));
+                            plan.env
+                                .push(("KIMI_MODEL_THINKING_EFFORT".into(), effort.to_lowercase()));
                         }
                     }
                     if let Some(key) = &key {
@@ -759,7 +833,11 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         plan.env.push(("KIMI_BASE_URL".into(), url.clone()));
                     }
                 }
-                SpecialLaunch::CursorFlags { key_env, endpoint_env, model_flag } => {
+                SpecialLaunch::CursorFlags {
+                    key_env,
+                    endpoint_env,
+                    model_flag,
+                } => {
                     // key/端点走 env（CURSOR_API_KEY / CURSOR_API_ENDPOINT，仅非空时注入）；
                     // 模型没有 env，只能追加 --model <name> flag（bracket 参数化原样透传）
                     if let Some(key) = key {
@@ -776,7 +854,40 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
             },
         }
     }
-    // 请求策略注入：按能力表实证通道落地（当前 claude-code/codebuddy），extra_env 仍可最后覆盖
+    if profile.agent == "grok" {
+        // Grok 1.0.x 的 CLI flag 优先级高于全局 config，确保启动栏选中的模型/思考档
+        // 真正作用于本次会话。api_backend 仍只能由逐模型 config 或网关目录声明提供。
+        if let Some(selected) = model.filter(|m| !m.trim().is_empty()) {
+            plan.args.push("-m".into());
+            plan.args.push(selected.into());
+        }
+        if let Some(effort) = profile
+            .request_policy
+            .reasoning_effort
+            .as_deref()
+            .filter(|e| !e.trim().is_empty())
+        {
+            plan.args.push("--reasoning-effort".into());
+            plan.args.push(effort.into());
+        }
+    }
+    // CodeBuddy 的 effort 是 CLI flag，不是环境变量；只在启动时携带，避免伪造配置文件字段。
+    if profile.agent == "codebuddy" {
+        if let Some(selected) = model.filter(|m| !m.trim().is_empty()) {
+            plan.args.push("--model".into());
+            plan.args.push(selected.into());
+        }
+        if let Some(effort) = profile
+            .request_policy
+            .reasoning_effort
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            plan.args.push("--effort".into());
+            plan.args.push(effort.into());
+        }
+    }
+    // 请求策略注入：按能力表实证通道落地，extra_env 仍可最后覆盖
     apply_request_policy_env(&mut plan, &profile.agent, &profile.request_policy, &|k| {
         std::env::var(k).ok()
     });
@@ -786,9 +897,18 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
     }
     if profile.no_auth {
         for key in [
-            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
-            "GEMINI_API_KEY", "GOOGLE_API_KEY", "CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN",
-            "CURSOR_API_KEY", "XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "KIMI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "CODEBUDDY_API_KEY",
+            "CODEBUDDY_AUTH_TOKEN",
+            "CURSOR_API_KEY",
+            "XAI_API_KEY",
+            "GROK_CODE_XAI_API_KEY",
+            "KIMI_API_KEY",
             "KIMI_MODEL_API_KEY",
         ] {
             if !plan.env_remove.iter().any(|existing| existing == key) {
@@ -826,6 +946,77 @@ pub fn launch_plan_with_prompt(
         }
     }
     plan
+}
+
+/// Check whether the selected profile can be represented by a CLI launch plan.
+/// Grok's inline overlay can carry global model defaults, but cannot carry a
+/// per-model `api_backend`; refusing non-default backends is safer than
+/// silently sending a Responses/Messages profile as Chat Completions.
+pub fn validate_launch_compatibility(
+    profile: &Profile,
+    selected_model: Option<&str>,
+) -> Result<(), String> {
+    if profile.agent == "grok" && profile.account_type == crate::profiles::AccountType::Api {
+        let backend = profile.api_backend.as_deref().unwrap_or("chat_completions");
+        if backend != "chat_completions" {
+            let model = selected_model
+                .or_else(|| profile.models.first().map(String::as_str))
+                .unwrap_or("");
+            let home = profile
+                .extra_env
+                .get("GROK_HOME")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("GROK_HOME").filter(|s| !s.is_empty()).map(PathBuf::from))
+                .or_else(|| dirs::home_dir().map(|home| home.join(".grok")))
+                .ok_or("无法确定 Grok 配置目录")?;
+            let path = home.join("config.toml");
+            let text = std::fs::read_to_string(&path).map_err(|_| {
+                format!(
+                    "Grok 模型 {model} 使用 {backend}，但未找到 {}；请先「设为全局默认」",
+                    path.display()
+                )
+            })?;
+            if !grok_model_config_matches(&text, model, backend, profile.base_url.as_deref()) {
+                return Err(format!(
+                    "Grok 模型 {model} 的 apiBackend={backend} 尚未写入 {}；请先「设为全局默认」后再启动",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn grok_model_config_matches(
+    text: &str,
+    model: &str,
+    backend: &str,
+    base_url: Option<&str>,
+) -> bool {
+    let Ok(doc) = text.parse::<toml::Value>() else {
+        return false;
+    };
+    let Some(entry) = doc
+        .get("model")
+        .and_then(|v| v.get(model))
+        .and_then(|v| v.as_table())
+    else {
+        return false;
+    };
+    if entry.get("api_backend").and_then(|v| v.as_str()) != Some(backend) {
+        return false;
+    }
+    base_url
+        .map(|url| {
+            entry
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .is_some_and(|configured| {
+                    configured.trim_end_matches('/') == url.trim_end_matches('/')
+                })
+        })
+        .unwrap_or(true)
 }
 
 /// 「聊想法」只读模式（硬保护，想法期防 agent 擅自改主仓文件）：在启动计划 args 上应用
@@ -871,8 +1062,8 @@ fn official_model_allowed(agent: &str, model: &str) -> bool {
         return false;
     }
     const FOREIGN: &[&str] = &[
-        "deepseek", "qwen", "glm-", "glm/", "moonshot", "kimi-", "doubao",
-        "hunyuan", "yi-", "ernie", "baichuan", "minimax", "spark-",
+        "deepseek", "qwen", "glm-", "glm/", "moonshot", "kimi-", "doubao", "hunyuan", "yi-",
+        "ernie", "baichuan", "minimax", "spark-",
     ];
     // kimi 官方账号下 kimi- / moonshot 是自家模型（kimi-code/k3）；
     // 这两项只用来拦 Claude/Codex 等订阅误带中转名。
@@ -957,7 +1148,8 @@ fn apply_official_inject(
                     plan.args.push((*arg).into());
                 }
                 plan.args.push("-c".into());
-                plan.args.push("sandbox_workspace_write.network_access=true".into());
+                plan.args
+                    .push("sandbox_workspace_write.network_access=true".into());
                 // 磁盘 config.toml 的 model_provider 指向自定义网关时会盖过 ChatGPT
                 // 登录（选官方账号仍走网关计费）。-c 优先级最高，本进程切到内置
                 // openai 渠道（读 ChatGPT 凭证），不改用户文件、不写 model_providers 块。
@@ -1057,7 +1249,8 @@ pub(crate) fn opencode_provider_json(
         // 视觉模型补 modalities（input 加 image）；缺省 = 纯文本，中继视觉模型
         // 不声明会在 opencode 里丢掉图像输入
         if crate::model_registry::model_supports_vision_for(m, profile.gateway_id.as_deref()) {
-            entry["modalities"] = serde_json::json!({ "input": ["text", "image"], "output": ["text"] });
+            entry["modalities"] =
+                serde_json::json!({ "input": ["text", "image"], "output": ["text"] });
         }
         models_map.insert(m.into(), entry);
     }
@@ -1082,7 +1275,7 @@ pub fn codex_catalog_path(profile_id: &str) -> Option<std::path::PathBuf> {
 }
 
 /// 单个 catalog 条目：字段拼写与标量值照抄 codex-rs/models-manager/models.json 的打包条目
-/// （reasoning levels 取其 low/medium/high 子集全量给——cc-switch 的 catalog 同样全量模板
+/// （reasoning levels 使用 Codex 当前完整档位集——cc-switch 的 catalog 同样全量模板
 /// （自家资源 codex_native_responses_template.json），模型不支持时端点忽略 effort，口径稳妥；
 /// display_name 带 profile 名，选择器里不再是裸模型 id）
 fn codex_catalog_entry_for(
@@ -1116,6 +1309,9 @@ fn codex_catalog_entry_for(
             { "effort": "low", "description": "Fast responses with lighter reasoning" },
             { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
             { "effort": "high", "description": "Greater reasoning depth for complex problems" },
+            { "effort": "xhigh", "description": "Very deep reasoning for difficult problems" },
+            { "effort": "ultra", "description": "Maximum reasoning depth for supported models" },
+            { "effort": "max", "description": "Maximum reasoning depth" },
         ],
         "shell_type": "shell_command",
         "visibility": "list",
@@ -1162,12 +1358,9 @@ fn write_codex_catalog_to(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建 catalog 目录失败: {e}"))?;
     }
-    let text = serde_json::to_string_pretty(&codex_catalog_json_for(
-        profile_name,
-        models,
-        gateway_id,
-    ))
-    .map_err(|e| e.to_string())?;
+    let text =
+        serde_json::to_string_pretty(&codex_catalog_json_for(profile_name, models, gateway_id))
+            .map_err(|e| e.to_string())?;
     crate::profiles::atomic_write(path, &text)
 }
 
@@ -1191,10 +1384,7 @@ pub fn write_codex_catalog(profile: &Profile) -> Result<Option<std::path::PathBu
 /// `C:\Users\…` 会解析失败，codex 起不来。正斜杠 Windows API 与 TOML 都接受。
 fn catalog_args(path: &std::path::Path) -> Vec<String> {
     let p = path.to_string_lossy().replace('\\', "/");
-    vec![
-        "-c".into(),
-        format!(r#"model_catalog_json="{p}""#),
-    ]
+    vec!["-c".into(), format!(r#"model_catalog_json="{p}""#)]
 }
 
 /// 启动前的每-agent 文件准备，返回需追加到 CLI 的参数。
@@ -1202,7 +1392,9 @@ fn catalog_args(path: &std::path::Path) -> Vec<String> {
 pub fn prepare_launch(profile: &Profile) -> Result<Vec<String>, String> {
     let is_codex = matches!(
         agent_spec(&profile.agent).map(|s| &s.launch),
-        Some(LaunchSpec::Special(SpecialLaunch::CodexInlineProvider { .. }))
+        Some(LaunchSpec::Special(
+            SpecialLaunch::CodexInlineProvider { .. }
+        ))
     );
     if is_codex {
         if let Some(path) = write_codex_catalog(profile)? {
@@ -1339,7 +1531,13 @@ fn external_profile(
     }
     profile.apply_session_provider(provider);
     // 兼容旧版调用方传入的 baseUrl；新路径优先使用 profile 自身配置。
-    if profile.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+    if profile
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
         if let Some(url) = base_url.map(str::trim).filter(|s| !s.is_empty()) {
             profile.base_url = Some(url.to_string());
         }
@@ -1355,7 +1553,10 @@ fn require_external_profile_id(profile_id: Option<&str>) -> Result<&str, String>
         .ok_or_else(|| "外部启动必须指定 Ccode profile，请重新选择配置".to_string())
 }
 
-pub(crate) fn ensure_launch_credentials(profile: &Profile, key: Option<&str>) -> Result<(), String> {
+pub(crate) fn ensure_launch_credentials(
+    profile: &Profile,
+    key: Option<&str>,
+) -> Result<(), String> {
     if profile.account_type == crate::profiles::AccountType::Api
         && !profile.no_auth
         && key.is_none_or(|value| value.trim().is_empty())
@@ -1417,7 +1618,9 @@ fn write_external_wrapper(
     }
     let dir = external_wrapper_dir()?;
     let path = dir.join(format!("launch-{}.sh", uuid::Uuid::new_v4()));
-    let mut text = String::from("#!/bin/sh\n\n# Ccode one-shot external launch; remove credentials before exec.\n\n");
+    let mut text = String::from(
+        "#!/bin/sh\n\n# Ccode one-shot external launch; remove credentials before exec.\n\n",
+    );
     text.push_str("self=\"$0\"\nrm -f -- \"$self\" 2>/dev/null || :\n");
     for name in env_remove {
         if valid_env_name(name) {
@@ -1542,12 +1745,15 @@ fn external_launch_args(
     resume_session_id: Option<&str>,
     prompt: Option<&str>,
 ) -> Result<(Vec<String>, Vec<(String, String)>, Vec<String>), String> {
+    validate_launch_compatibility(profile, model)?;
     let plan = match prompt {
         Some(prompt) => launch_plan_with_prompt(profile, key, model, Some(prompt)),
         None => launch_plan(profile, key, model),
     };
     if prompt.is_some() && plan.prompt_dropped {
-        return Err(format!("{agent_id} 不支持启动注入参数，简报指令需启动后手动发送"));
+        return Err(format!(
+            "{agent_id} 不支持启动注入参数，简报指令需启动后手动发送"
+        ));
     }
     let extra = prepare_launch(profile)?;
     let mut args = Vec::new();
@@ -1604,8 +1810,9 @@ fn open_external_profiled(
         resume_session_id,
         prompt,
     )?;
-    let binary = resolve_binary(binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?)
-        .ok_or_else(|| format!("未找到 {agent_id} 的 CLI 二进制"))?;
+    let binary =
+        resolve_binary(binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?)
+            .ok_or_else(|| format!("未找到 {agent_id} 的 CLI 二进制"))?;
     let pref = crate::settings::read_current()
         .external_terminal
         .unwrap_or_else(|| "auto".into());
@@ -1684,7 +1891,11 @@ fn ps_quote(s: &str) -> String {
 
 #[cfg(any(windows, test))]
 fn ps_arg(a: &str) -> String {
-    if a.starts_with('-') && !a.chars().any(|c| c.is_whitespace() || c == '\'' || c == '"') {
+    if a.starts_with('-')
+        && !a
+            .chars()
+            .any(|c| c.is_whitespace() || c == '\'' || c == '"')
+    {
         a.to_string()
     } else {
         ps_quote(a)
@@ -1834,7 +2045,12 @@ pub fn new_external_terminal(
 /// 与 resume 命令同一口径：不带 profile env，外部用的是用户全局配置。
 // 运行路径仅 unix（sh 引号口径）；Windows 仅测试调用
 #[cfg_attr(not(any(unix, test)), allow(dead_code))]
-fn digest_command_line_with(agent_id: &str, cwd: &str, prompt: &str, binary: &str) -> Result<String, String> {
+fn digest_command_line_with(
+    agent_id: &str,
+    cwd: &str,
+    prompt: &str,
+    binary: &str,
+) -> Result<String, String> {
     let mut cmd = format!(
         "cd {} && {}",
         sh_quote_if_needed(cwd),
@@ -1852,7 +2068,9 @@ fn digest_command_line_with(agent_id: &str, cwd: &str, prompt: &str, binary: &st
             cmd.push_str(&sh_quote_if_needed(prompt));
         }
         Some(crate::agent_specs::PromptInject::Unsupported) => {
-            return Err(format!("{agent_id} 无启动注入参数，简报指令需启动后手动发送"));
+            return Err(format!(
+                "{agent_id} 无启动注入参数，简报指令需启动后手动发送"
+            ));
         }
         None => return Err(format!("未知 agent: {agent_id}")),
     }
@@ -1861,14 +2079,21 @@ fn digest_command_line_with(agent_id: &str, cwd: &str, prompt: &str, binary: &st
 
 /// PowerShell 方言的提炼接力命令行（镜像 windows_resume_command_line）
 #[cfg(any(windows, test))]
-fn windows_digest_command_line(agent_id: &str, cwd: &str, prompt: &str, binary: &str) -> Result<String, String> {
+fn windows_digest_command_line(
+    agent_id: &str,
+    cwd: &str,
+    prompt: &str,
+    binary: &str,
+) -> Result<String, String> {
     let extra: Vec<String> = match agent_spec(agent_id).map(|s| s.prompt_inject) {
         Some(crate::agent_specs::PromptInject::Positional) => vec![prompt.to_string()],
         Some(crate::agent_specs::PromptInject::Flag(flag)) => {
             vec![flag.to_string(), prompt.to_string()]
         }
         Some(crate::agent_specs::PromptInject::Unsupported) => {
-            return Err(format!("{agent_id} 无启动注入参数，简报指令需启动后手动发送"));
+            return Err(format!(
+                "{agent_id} 无启动注入参数，简报指令需启动后手动发送"
+            ));
         }
         None => return Err(format!("未知 agent: {agent_id}")),
     };
@@ -1938,8 +2163,9 @@ fn open_ghostty(cmd: &str, cwd: &str, wrapper: &Path) -> Result<(), String> {
         // 未运行：open -na 拉起（仅此一次产生实例）；Ghostty -e 之后的参数整体作为命令
         // 执行；-l -i 交互登录 shell（非交互模式 zsh 不加载 .zshrc / bash 不加载 .bashrc）
         return spawn_status(
-            Command::new("open")
-                .args(["-na", "Ghostty", "--args", "-e", &shell, "-l", "-i", "-c", cmd]),
+            Command::new("open").args([
+                "-na", "Ghostty", "--args", "-e", &shell, "-l", "-i", "-c", cmd,
+            ]),
             "Ghostty",
         );
     }
@@ -2155,12 +2381,8 @@ fn spawn_windows_start(
     }
     c.arg("/C");
     c.raw_arg(line);
-    let mut child = c
-        .spawn()
-        .map_err(|e| format!("启动外部终端失败: {e}"))?;
-    let status = child
-        .wait()
-        .map_err(|e| format!("启动外部终端失败: {e}"))?;
+    let mut child = c.spawn().map_err(|e| format!("启动外部终端失败: {e}"))?;
+    let status = child.wait().map_err(|e| format!("启动外部终端失败: {e}"))?;
     if !status.success() {
         return Err(format!("启动外部终端失败: {status}"));
     }
@@ -2198,11 +2420,22 @@ fn open_windows_external(
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn open_external_terminal(cmd: &str, pref: &str, _cwd: &str, _wrapper: &Path) -> Result<(), String> {
+fn open_external_terminal(
+    cmd: &str,
+    pref: &str,
+    _cwd: &str,
+    _wrapper: &Path,
+) -> Result<(), String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     // auto 按优先级探测；显式选择只试指定终端，未装则报错（设置页可改选）
     let candidates: Vec<&str> = match pref {
-        "auto" | "" => vec!["gnome-terminal", "konsole", "xfce4-terminal", "x-terminal-emulator", "xterm"],
+        "auto" | "" => vec![
+            "gnome-terminal",
+            "konsole",
+            "xfce4-terminal",
+            "x-terminal-emulator",
+            "xterm",
+        ],
         other => vec![other],
     };
     for term in candidates {
@@ -2416,7 +2649,9 @@ fn settings_env_conflict_keys(text: &str, keys: &[&str]) -> Vec<String> {
 }
 
 fn toml_conflict_keys(text: &str, keys: &[&str]) -> Vec<String> {
-    let Ok(value) = text.parse::<toml::Value>() else { return Vec::new() };
+    let Ok(value) = text.parse::<toml::Value>() else {
+        return Vec::new();
+    };
     let mut out = value
         .as_table()
         .into_iter()
@@ -2430,7 +2665,10 @@ fn toml_conflict_keys(text: &str, keys: &[&str]) -> Vec<String> {
 }
 
 /// 逐条执行注册表的冲突探测；文件缺失/不可读静默跳过（不算冲突）
-fn probe_conflicts(home: &std::path::Path, oa: &crate::agent_specs::OfficialAccountSpec) -> Vec<String> {
+fn probe_conflicts(
+    home: &std::path::Path,
+    oa: &crate::agent_specs::OfficialAccountSpec,
+) -> Vec<String> {
     let mut out = Vec::new();
     for probe in oa.conflict_probes {
         let Ok(text) = std::fs::read_to_string(home.join(probe.file)) else {
@@ -2450,8 +2688,12 @@ fn probe_conflicts(home: &std::path::Path, oa: &crate::agent_specs::OfficialAcco
     out
 }
 
-fn clear_conflict_keys_in_file(path: &std::path::Path, probe: &crate::agent_specs::ConflictProbe) -> Result<bool, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+fn clear_conflict_keys_in_file(
+    path: &std::path::Path,
+    probe: &crate::agent_specs::ConflictProbe,
+) -> Result<bool, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
     if probe.file.ends_with(".json") {
         let mut value: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| format!("{} 不是合法 JSON，已停止清理: {e}", path.display()))?;
@@ -2471,7 +2713,8 @@ fn clear_conflict_keys_in_file(path: &std::path::Path, probe: &crate::agent_spec
         return Ok(changed);
     }
     if probe.file.ends_with(".toml") {
-        let mut doc = text.parse::<toml_edit::DocumentMut>()
+        let mut doc = text
+            .parse::<toml_edit::DocumentMut>()
             .map_err(|e| format!("{} 不是合法 TOML，已停止清理: {e}", path.display()))?;
         let mut changed = false;
         for key in probe.keys {
@@ -2535,7 +2778,10 @@ pub fn clear_account_conflicts(agent_id: &str) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建冲突备份目录失败: {e}"))?;
     let mut changed = Vec::new();
     for probe in oa.conflict_probes {
-        if !probe.file.ends_with(".json") && !probe.file.ends_with(".env") && !probe.file.ends_with(".toml") {
+        if !probe.file.ends_with(".json")
+            && !probe.file.ends_with(".env")
+            && !probe.file.ends_with(".toml")
+        {
             continue;
         }
         let path = home.join(probe.file);
@@ -2583,7 +2829,9 @@ fn auth_probe_candidates(
                 .map(|p| {
                     let display = format!(
                         "{dir_rel}/{}",
-                        p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
                     );
                     (display, p)
                 })
@@ -2659,7 +2907,11 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
                     detail: Some(format!("已检测到登录凭证（~/{rel}）")),
                     login_command,
                     conflicts,
-                    cleanup_supported: oa.conflict_probes.iter().all(|probe| probe.file.ends_with(".json") || probe.file.ends_with(".env") || probe.file.ends_with(".toml")),
+                    cleanup_supported: oa.conflict_probes.iter().all(|probe| {
+                        probe.file.ends_with(".json")
+                            || probe.file.ends_with(".env")
+                            || probe.file.ends_with(".toml")
+                    }),
                     login_env: login_env.clone(),
                 };
             }
@@ -2701,7 +2953,11 @@ pub fn official_account_status(agent_id: &str) -> OfficialAccountStatusDto {
         detail: Some(detail),
         login_command,
         conflicts,
-        cleanup_supported: oa.conflict_probes.iter().all(|probe| probe.file.ends_with(".json") || probe.file.ends_with(".env") || probe.file.ends_with(".toml")),
+        cleanup_supported: oa.conflict_probes.iter().all(|probe| {
+            probe.file.ends_with(".json")
+                || probe.file.ends_with(".env")
+                || probe.file.ends_with(".toml")
+        }),
         login_env,
     }
 }
@@ -2738,6 +2994,9 @@ mod tests {
             has_key: false,
             gateway_id: None,
             slot_missing: false,
+            connection_status: String::new(),
+            model_sync_status: String::new(),
+            model_sync_note: None,
             provider_override: None,
         }
     }
@@ -2745,7 +3004,13 @@ mod tests {
     #[test]
     fn claude_plan_registers_models_into_picker() {
         let mut p = profile("claude-code", None);
-        p.models = vec!["m1".into(), "m2".into(), "m3".into(), "m4".into(), "m5".into()];
+        p.models = vec![
+            "m1".into(),
+            "m2".into(),
+            "m3".into(),
+            "m4".into(),
+            "m5".into(),
+        ];
         let plan = launch_plan(&p, None, Some("m1"));
         assert!(plan
             .env
@@ -2768,10 +3033,19 @@ mod tests {
             "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(),
             "测试 · m5".into()
         )));
-        // 名单 ≥3：HAIKU 槽（m3）复用为子 agent 模型
-        assert!(plan
+        // 子 agent 不被 Ccode 固定到绑定列表中的任意模型，保留 Claude 原生选择链
+        assert!(!plan
             .env
-            .contains(&("CLAUDE_CODE_SUBAGENT_MODEL".into(), "m3".into())));
+            .iter()
+            .any(|(k, _)| k == "CLAUDE_CODE_SUBAGENT_MODEL"));
+        let settings = plan
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--settings")
+            .map(|pair| serde_json::from_str::<serde_json::Value>(&pair[1]).unwrap())
+            .unwrap();
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "m1");
+        assert_eq!(settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "m3");
     }
 
     #[test]
@@ -2791,7 +3065,7 @@ mod tests {
             .env
             .iter()
             .any(|(k, _)| k == "CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
-        // 名单 <3 不注子 agent 模型
+        // 不再注入子 agent 覆盖
         assert!(!plan2
             .env
             .iter()
@@ -2801,8 +3075,12 @@ mod tests {
     #[test]
     fn extra_env_appended_last_for_override() {
         let mut p = profile("claude-code", Some("https://relay.example.com"));
-        p.extra_env.insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
-        p.extra_env.insert("ANTHROPIC_BASE_URL".into(), "https://override.example.com".into());
+        p.extra_env
+            .insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
+        p.extra_env.insert(
+            "ANTHROPIC_BASE_URL".into(),
+            "https://override.example.com".into(),
+        );
         let plan = launch_plan(&p, None, None);
         assert!(plan
             .env
@@ -2820,10 +3098,11 @@ mod tests {
     fn claude_plan_sets_only_present_fields() {
         let p = profile("claude-code", Some("https://relay.example.com"));
         let plan = launch_plan(&p, Some("sk-secret".into()), None);
-        assert!(plan.args.is_empty());
-        assert!(plan
-            .env
-            .contains(&("ANTHROPIC_BASE_URL".into(), "https://relay.example.com".into())));
+        assert!(plan.args.windows(2).any(|pair| pair[0] == "--settings"));
+        assert!(plan.env.contains(&(
+            "ANTHROPIC_BASE_URL".into(),
+            "https://relay.example.com".into()
+        )));
         assert!(plan
             .env
             .contains(&("ANTHROPIC_AUTH_TOKEN".into(), "sk-secret".into())));
@@ -2835,6 +3114,7 @@ mod tests {
         let p = profile("claude-code", None);
         let plan = launch_plan(&p, None, Some("claude-sonnet-4"));
         assert_eq!(plan.env.len(), 1);
+        assert!(plan.args.windows(2).any(|pair| pair[0] == "--model"));
         assert!(plan
             .env
             .contains(&("ANTHROPIC_MODEL".into(), "claude-sonnet-4".into())));
@@ -2902,6 +3182,21 @@ mod tests {
     }
 
     #[test]
+    fn codebuddy_launch_uses_current_effort_and_model_flags() {
+        let mut p = profile("codebuddy", Some("https://relay.example.com/anthropic"));
+        p.request_policy.reasoning_effort = Some("high".into());
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("m1"));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--model" && pair[1] == "m1"));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--effort" && pair[1] == "high"));
+    }
+
+    #[test]
     fn request_policy_not_injected_for_unverified_agents_or_official() {
         // 未实证 agent（codex）：任何策略字段都不产生 env
         let mut p = profile("codex", None);
@@ -2929,8 +3224,10 @@ mod tests {
         // 用户 extra_env 与策略注入同键时排在最后（CommandBuilder 后者生效）
         let mut p = profile("claude-code", None);
         p.request_policy.temperature = Some(0.7);
-        p.extra_env
-            .insert("CLAUDE_CODE_EXTRA_BODY".into(), "{\"temperature\":0.1}".into());
+        p.extra_env.insert(
+            "CLAUDE_CODE_EXTRA_BODY".into(),
+            "{\"temperature\":0.1}".into(),
+        );
         let plan = launch_plan(&p, None, None);
         let last = plan
             .env
@@ -3011,9 +3308,10 @@ mod tests {
     fn codebuddy_plan_injects_codebuddy_env() {
         let p = profile("codebuddy", Some("https://api.deepseek.com/anthropic"));
         let plan = launch_plan(&p, Some("sk-secret".into()), Some("deepseek-v3-2-volc"));
-        assert!(plan
-            .env
-            .contains(&("CODEBUDDY_BASE_URL".into(), "https://api.deepseek.com/anthropic".into())));
+        assert!(plan.env.contains(&(
+            "CODEBUDDY_BASE_URL".into(),
+            "https://api.deepseek.com/anthropic".into()
+        )));
         assert!(plan
             .env
             .contains(&("CODEBUDDY_API_KEY".into(), "sk-secret".into())));
@@ -3032,7 +3330,9 @@ mod tests {
         let plan = launch_plan(&p, None, None);
         assert!(!plan.env.iter().any(|(k, _)| k.starts_with("CODEBUDDY_")));
         assert!(plan.env_remove.contains(&"CODEBUDDY_API_KEY".to_string()));
-        assert!(plan.env_remove.contains(&"CODEBUDDY_AUTH_TOKEN".to_string()));
+        assert!(plan
+            .env_remove
+            .contains(&"CODEBUDDY_AUTH_TOKEN".to_string()));
     }
 
     #[test]
@@ -3040,15 +3340,20 @@ mod tests {
         let mut p = profile("grok", Some("https://relay.example.com/v1"));
         p.models = vec!["grok-code-fast-1".into(), "grok-4.5".into()];
         let plan = launch_plan(&p, Some("xai-secret".into()), Some("grok-code-fast-1"));
-        assert!(plan
-            .env
-            .contains(&("GROK_MODELS_BASE_URL".into(), "https://relay.example.com/v1".into())));
+        assert!(plan.env.contains(&(
+            "GROK_MODELS_BASE_URL".into(),
+            "https://relay.example.com/v1".into()
+        )));
         assert!(plan
             .env
             .contains(&("XAI_API_KEY".into(), "xai-secret".into())));
         assert!(plan
             .env
             .contains(&("GROK_DEFAULT_MODEL".into(), "grok-code-fast-1".into())));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-m" && pair[1] == "grok-code-fast-1"));
         // 模型列表经 GROK_CONFIG overlay 收敛进选择器（allowed_models）
         let grok_config = plan
             .env
@@ -3068,6 +3373,35 @@ mod tests {
         let empty = profile("grok", Some("https://relay.example.com/v1"));
         let plan = launch_plan(&empty, Some("xai-secret".into()), None);
         assert!(!plan.env.iter().any(|(k, _)| k == "GROK_CONFIG"));
+    }
+
+    #[test]
+    fn grok_non_default_backend_fails_closed_before_spawn() {
+        let mut p = profile("grok", Some("https://relay.example.com/v1"));
+        p.api_backend = Some("responses".into());
+        assert!(validate_launch_compatibility(&p, None).is_err());
+    }
+
+    #[test]
+    fn grok_model_config_match_requires_backend_and_endpoint() {
+        let text = r#"
+[model."kimi-k3"]
+model = "kimi-k3"
+base_url = "https://relay.example.com/v1"
+api_backend = "responses"
+"#;
+        assert!(grok_model_config_matches(
+            text,
+            "kimi-k3",
+            "responses",
+            Some("https://relay.example.com/v1/")
+        ));
+        assert!(!grok_model_config_matches(
+            text,
+            "kimi-k3",
+            "chat_completions",
+            Some("https://relay.example.com/v1")
+        ));
     }
 
     #[test]
@@ -3095,7 +3429,10 @@ mod tests {
         assert!(v["models"].get("allowed_models").is_none());
         assert_eq!(v["models"]["temperature"], serde_json::json!(0.7));
         assert_eq!(v["models"]["top_p"], serde_json::json!(0.95));
-        assert_eq!(v["models"]["max_completion_tokens"], serde_json::json!(8192));
+        assert_eq!(
+            v["models"]["max_completion_tokens"],
+            serde_json::json!(8192)
+        );
         assert_eq!(
             v["models"]["default_reasoning_effort"],
             serde_json::json!("high")
@@ -3116,21 +3453,31 @@ mod tests {
         // 官方账号拉起：不注入 API env，且必须 env_remove 残留密钥变量（凭证优先级 api_key > env_key > 登录 token）
         let p = official_profile("grok");
         let plan = launch_plan(&p, None, None);
-        assert!(!plan.env.iter().any(|(k, _)| k.starts_with("XAI_") || k.starts_with("GROK_")));
+        assert!(!plan
+            .env
+            .iter()
+            .any(|(k, _)| k.starts_with("XAI_") || k.starts_with("GROK_")));
         assert!(plan.env_remove.contains(&"XAI_API_KEY".to_string()));
-        assert!(plan.env_remove.contains(&"GROK_CODE_XAI_API_KEY".to_string()));
+        assert!(plan
+            .env_remove
+            .contains(&"GROK_CODE_XAI_API_KEY".to_string()));
     }
 
     #[test]
     fn cursor_plan_injects_key_endpoint_env_and_model_flag() {
         let p = profile("cursor", Some("https://cursor.example.com"));
-        let plan = launch_plan(&p, Some("key-secret".into()), Some("claude-opus-4-8[context=1m,effort=high]"));
+        let plan = launch_plan(
+            &p,
+            Some("key-secret".into()),
+            Some("claude-opus-4-8[context=1m,effort=high]"),
+        );
         assert!(plan
             .env
             .contains(&("CURSOR_API_KEY".into(), "key-secret".into())));
-        assert!(plan
-            .env
-            .contains(&("CURSOR_API_ENDPOINT".into(), "https://cursor.example.com".into())));
+        assert!(plan.env.contains(&(
+            "CURSOR_API_ENDPOINT".into(),
+            "https://cursor.example.com".into()
+        )));
         // 模型走 --model flag（bracket 参数化原样透传），不是 env
         assert_eq!(
             plan.args,
@@ -3184,7 +3531,12 @@ mod tests {
             vec!["--permission-mode", "dontAsk", "--sandbox", "read-only"]
         );
         // codex：只读替换默认的 -s workspace-write（先剔除原沙箱参数对再追加）
-        let base: Vec<String> = vec!["-c".into(), "x=1".into(), "-s".into(), "workspace-write".into()];
+        let base: Vec<String> = vec![
+            "-c".into(),
+            "x=1".into(),
+            "-s".into(),
+            "workspace-write".into(),
+        ];
         assert_eq!(
             readonly_launch_args("codex", &base).unwrap(),
             vec!["-c", "x=1", "-s", "read-only"]
@@ -3210,6 +3562,8 @@ mod tests {
         assert!(joined.contains(r#"web_search="disabled""#));
         assert!(joined.contains(r#"service_tier="auto""#));
         assert!(joined.contains("features.apps=false"));
+        assert!(joined.contains("model_context_window=131072"));
+        assert!(joined.contains("model_auto_compact_token_limit=124518"));
         // 会话内自省：模型显示名随启动注入（配置名 · 模型），agent 可查
         assert!(plan.env.contains(&(
             "CCODE_MODEL_DISPLAY_NAME".into(),
@@ -3221,7 +3575,10 @@ mod tests {
     fn codex_plan_without_model_has_no_display_name_env() {
         let p = profile("codex", Some("https://relay.example.com/v1"));
         let plan = launch_plan(&p, Some("sk-secret".into()), None);
-        assert!(!plan.env.iter().any(|(k, _)| k == "CCODE_MODEL_DISPLAY_NAME"));
+        assert!(!plan
+            .env
+            .iter()
+            .any(|(k, _)| k == "CCODE_MODEL_DISPLAY_NAME"));
     }
 
     #[test]
@@ -3258,9 +3615,10 @@ mod tests {
             .contains(&("GEMINI_MODEL".into(), "gemini-3-pro".into())));
 
         let bare = launch_plan(&p, None, None);
-        assert!(bare
-            .env
-            .contains(&("GOOGLE_GEMINI_BASE_URL".into(), "https://relay.example.com".into())));
+        assert!(bare.env.contains(&(
+            "GOOGLE_GEMINI_BASE_URL".into(),
+            "https://relay.example.com".into()
+        )));
         assert!(!bare.env.iter().any(|(k, _)| k == "GEMINI_API_KEY"));
         assert!(!bare.env.iter().any(|(k, _)| k == "GEMINI_MODEL"));
     }
@@ -3321,7 +3679,10 @@ mod tests {
             vec![("ANTHROPIC_MODEL".to_string(), "claude-sonnet-4".to_string())]
         );
         // 模型槽位注册（ANTHROPIC_DEFAULT_*）只在 api 模式做
-        assert!(!plan.env.iter().any(|(k, _)| k.starts_with("ANTHROPIC_DEFAULT_")));
+        assert!(!plan
+            .env
+            .iter()
+            .any(|(k, _)| k.starts_with("ANTHROPIC_DEFAULT_")));
         // purge 列表照常
         assert!(!plan.env_remove.is_empty());
     }
@@ -3329,11 +3690,15 @@ mod tests {
     #[test]
     fn official_plan_keeps_extra_env_as_escape_hatch() {
         let mut p = official_profile("claude-code");
-        p.extra_env.insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
+        p.extra_env
+            .insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
         let plan = launch_plan(&p, None, None);
         assert_eq!(
             plan.env,
-            vec![("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string())]
+            vec![(
+                "HTTPS_PROXY".to_string(),
+                "http://127.0.0.1:7890".to_string()
+            )]
         );
     }
 
@@ -3416,7 +3781,8 @@ mod tests {
     fn prompt_inject_positional_and_flag_shapes() {
         // claude/codex：位置参数（单元素，pty_spawn 追加在命令行最后）
         let p = profile("claude-code", None);
-        let plan = launch_plan_with_prompt(&p, None, Some("m1"), Some("读 TASK.md，按简报开始执行"));
+        let plan =
+            launch_plan_with_prompt(&p, None, Some("m1"), Some("读 TASK.md，按简报开始执行"));
         assert_eq!(plan.prompt_args, vec!["读 TASK.md，按简报开始执行"]);
         assert!(!plan.prompt_dropped);
         // 位置参数不在 plan.args 里（保证 codex 沙箱/-c、claude --session-id 都在它前面）
@@ -3425,7 +3791,11 @@ mod tests {
         for agent in ["gemini", "qwen"] {
             let p = profile(agent, None);
             let plan = launch_plan_with_prompt(&p, None, None, Some("开始干活"));
-            assert_eq!(plan.prompt_args, vec!["-i", "开始干活"], "{agent} 应为 -i 形态");
+            assert_eq!(
+                plan.prompt_args,
+                vec!["-i", "开始干活"],
+                "{agent} 应为 -i 形态"
+            );
             assert!(!plan.prompt_dropped);
         }
     }
@@ -3434,8 +3804,12 @@ mod tests {
     fn prompt_inject_coexists_with_codex_sandbox_args() {
         // codex 特殊变体：既有 -c/-m/沙箱参数保持原顺序，prompt 单列在 prompt_args 末尾追加
         let p = profile("codex", Some("https://relay.example.com/v1"));
-        let plan =
-            launch_plan_with_prompt(&p, Some("sk-secret".into()), Some("gpt-5-codex"), Some("开工"));
+        let plan = launch_plan_with_prompt(
+            &p,
+            Some("sk-secret".into()),
+            Some("gpt-5-codex"),
+            Some("开工"),
+        );
         assert_eq!(plan.prompt_args, vec!["开工"]);
         let joined = plan.args.join(" ");
         assert!(joined.contains("-s workspace-write"));
@@ -3621,7 +3995,10 @@ mod tests {
         // env 对象内命中；env 之外的同名键（如 mcpServers 里）不命中
         let text = r#"{"env":{"ANTHROPIC_API_KEY":"sk-ant-secret"},"mcpServers":{"x":{"env":{"ANTHROPIC_API_KEY":"y"}}}}"#;
         let keys = &["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"];
-        assert_eq!(settings_env_conflict_keys(text, keys), vec!["ANTHROPIC_API_KEY"]);
+        assert_eq!(
+            settings_env_conflict_keys(text, keys),
+            vec!["ANTHROPIC_API_KEY"]
+        );
     }
 
     #[test]
@@ -3684,7 +4061,10 @@ mod tests {
 
     #[test]
     fn qwen_plan_defaults_to_openai_protocol() {
-        let p = profile("qwen", Some("https://dashscope.aliyuncs.com/compatible-mode/v1"));
+        let p = profile(
+            "qwen",
+            Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        );
         let plan = launch_plan(&p, Some("sk-secret".into()), Some("qwen3-coder"));
         assert!(plan
             .env
@@ -3708,9 +4088,10 @@ mod tests {
         assert!(plan
             .env
             .contains(&("ANTHROPIC_API_KEY".into(), "sk-secret".into())));
-        assert!(plan
-            .env
-            .contains(&("ANTHROPIC_BASE_URL".into(), "https://relay.example.com".into())));
+        assert!(plan.env.contains(&(
+            "ANTHROPIC_BASE_URL".into(),
+            "https://relay.example.com".into()
+        )));
         assert!(plan
             .env
             .contains(&("ANTHROPIC_MODEL".into(), "claude-sonnet-4".into())));
@@ -3754,8 +4135,12 @@ mod tests {
         let config: serde_json::Value = serde_json::from_str(v).unwrap();
         assert!(config.get("model").is_none());
         // 没有 key/base_url 时 options 里不放这两个字段
-        assert!(config["provider"]["ccode"]["options"].get("apiKey").is_none());
-        assert!(config["provider"]["ccode"]["options"].get("baseURL").is_none());
+        assert!(config["provider"]["ccode"]["options"]
+            .get("apiKey")
+            .is_none());
+        assert!(config["provider"]["ccode"]["options"]
+            .get("baseURL")
+            .is_none());
     }
 
     #[test]
@@ -3784,14 +4169,12 @@ mod tests {
             .env
             .contains(&("KIMI_BASE_URL".into(), "https://api.moonshot.cn/v1".into())));
         // 合成模型元数据：显示名 = profile 名 · 模型；上下文按模型映射（k2 = 128K）
-        assert!(plan.env.contains(&(
-            "KIMI_MODEL_DISPLAY_NAME".into(),
-            "测试 · kimi-k2".into()
-        )));
-        assert!(plan.env.contains(&(
-            "KIMI_MODEL_MAX_CONTEXT_SIZE".into(),
-            "131072".into()
-        )));
+        assert!(plan
+            .env
+            .contains(&("KIMI_MODEL_DISPLAY_NAME".into(), "测试 · kimi-k2".into())));
+        assert!(plan
+            .env
+            .contains(&("KIMI_MODEL_MAX_CONTEXT_SIZE".into(), "131072".into())));
         // kimi 官方协议不注入 CAPABILITIES（CLI 默认 ["image_in","thinking"] 已合理）
         assert!(!plan.env.iter().any(|(k, _)| k == "KIMI_MODEL_CAPABILITIES"));
         assert!(plan.args.is_empty());
@@ -3803,10 +4186,9 @@ mod tests {
         p.protocol = Some("openai".into());
         let plan = launch_plan(&p, None, Some("kimi-k2-thinking"));
         // 兼容协议通道 capabilities 缺省只有 ["tool_use"]：思考模型要显式声明
-        assert!(plan.env.contains(&(
-            "KIMI_MODEL_CAPABILITIES".into(),
-            "tool_use,thinking".into()
-        )));
+        assert!(plan
+            .env
+            .contains(&("KIMI_MODEL_CAPABILITIES".into(), "tool_use,thinking".into())));
         assert!(plan.env.contains(&(
             "KIMI_MODEL_DISPLAY_NAME".into(),
             "测试 · kimi-k2-thinking".into()
@@ -3825,10 +4207,9 @@ mod tests {
             "KIMI_MODEL_DISPLAY_NAME".into(),
             "测试 · deepseek-chat".into()
         )));
-        assert!(plan.env.contains(&(
-            "KIMI_MODEL_MAX_CONTEXT_SIZE".into(),
-            "131072".into()
-        )));
+        assert!(plan
+            .env
+            .contains(&("KIMI_MODEL_MAX_CONTEXT_SIZE".into(), "131072".into())));
     }
 
     #[test]
@@ -3845,10 +4226,9 @@ mod tests {
         let mut p = profile("kimi", Some("https://relay.example.com/v1"));
         p.protocol = Some("openai".into());
         let plan = launch_plan(&p, None, Some("gpt-4o"));
-        assert!(plan.env.contains(&(
-            "KIMI_MODEL_CAPABILITIES".into(),
-            "tool_use,image_in".into()
-        )));
+        assert!(plan
+            .env
+            .contains(&("KIMI_MODEL_CAPABILITIES".into(), "tool_use,image_in".into())));
         // kimi 官方协议通道：CLI 缺省 ["image_in","thinking"] 已合理，不注入
         let p = profile("kimi", None);
         let plan = launch_plan(&p, None, Some("kimi-k3"));
@@ -3895,7 +4275,10 @@ mod tests {
             assert!(models.contains_key(m), "provider.ccode.models 缺 {m}");
             // 每个条目带显示名（配置名 · 模型）与 limit.context（注册表保守默认 128K）
             // + limit.output（opencode 1.18 起 schema 必填，缺省 8192）
-            assert_eq!(models[m]["name"].as_str(), Some(format!("测试 · {m}").as_str()));
+            assert_eq!(
+                models[m]["name"].as_str(),
+                Some(format!("测试 · {m}").as_str())
+            );
             assert_eq!(models[m]["limit"]["context"].as_i64(), Some(131_072));
             assert_eq!(models[m]["limit"]["output"].as_i64(), Some(8192));
         }
@@ -3904,11 +4287,15 @@ mod tests {
         // 表外未知模型不声明 reasoning
         assert!(models["m1"].get("reasoning").is_none());
         // 视觉模型补 modalities（input 含 image）；非视觉模型不声明
-        let v2 = opencode_provider_json(&{
-            let mut p2 = profile("opencode", Some("https://openrouter.ai/api/v1"));
-            p2.models = vec!["kimi-k3".into(), "deepseek-chat".into()];
-            p2
-        }, None, None);
+        let v2 = opencode_provider_json(
+            &{
+                let mut p2 = profile("opencode", Some("https://openrouter.ai/api/v1"));
+                p2.models = vec!["kimi-k3".into(), "deepseek-chat".into()];
+                p2
+            },
+            None,
+            None,
+        );
         let models2 = v2["models"].as_object().unwrap();
         assert_eq!(
             models2["kimi-k3"]["modalities"]["input"],
@@ -3958,7 +4345,7 @@ mod tests {
             .iter()
             .filter_map(|l| l["effort"].as_str())
             .collect();
-        assert_eq!(efforts, ["low", "medium", "high"]);
+        assert_eq!(efforts, ["low", "medium", "high", "xhigh", "ultra", "max"]);
         // 能力字段：有效上下文 95%（自动压缩阈值）、如实声明无 search tool
         assert_eq!(e["effective_context_window_percent"], 95);
         assert_eq!(e["supports_search_tool"], false);
@@ -4106,12 +4493,14 @@ mod tests {
         assert!(resume_command_line("no-such", "abc", "/tmp").is_err());
         // 外部拉起变体：给定绝对路径直接用
         assert_eq!(
-            resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/.kimi-code/bin/kimi", &[]).unwrap(),
+            resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/.kimi-code/bin/kimi", &[])
+                .unwrap(),
             "cd /tmp && /Users/x/.kimi-code/bin/kimi -S abc"
         );
         // 绝对路径含空格 → binary 也必须 shell 转义（否则命令行在空格处断裂）
         assert_eq!(
-            resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/My Apps/bin/kimi", &[]).unwrap(),
+            resume_command_line_with("kimi", "abc", "/tmp", "/Users/x/My Apps/bin/kimi", &[])
+                .unwrap(),
             "cd /tmp && '/Users/x/My Apps/bin/kimi' -S abc"
         );
     }
@@ -4121,10 +4510,11 @@ mod tests {
         // codex 内联 provider 会话（rollout 记 model_provider="ccode"）外部恢复必须带 -c 定义，
         // 否则报 "Model provider `ccode` not found"；定义只含 base_url/env_key 引用，不含密钥
         let extra = resume_extra_args("codex", Some("https://relay.example.com/v1"), None);
-        let cmd =
-            resume_command_line_with("codex", "abc", "/tmp/proj", "codex", &extra).unwrap();
+        let cmd = resume_command_line_with("codex", "abc", "/tmp/proj", "codex", &extra).unwrap();
         // kv 值含双引号 → 单引号包裹（sh_quote_if_needed），语义无损
-        assert!(cmd.contains(r#"-c 'model_providers.ccode.base_url="https://relay.example.com/v1"'"#));
+        assert!(
+            cmd.contains(r#"-c 'model_providers.ccode.base_url="https://relay.example.com/v1"'"#)
+        );
         assert!(cmd.contains(r#"-c 'model_provider="ccode"'"#));
         assert!(cmd.contains(r#"-c 'web_search="disabled"'"#));
         assert!(cmd.contains(r#"-c 'service_tier="auto"'"#));
@@ -4150,7 +4540,9 @@ mod tests {
         );
         let derived_cmd =
             resume_command_line_with("codex", "abc", "/tmp/proj", "codex", &derived).unwrap();
-        assert!(derived_cmd.contains(r#"-c 'model_providers.ccode-a1b2c3d4.base_url="https://relay.example.com/v1"'"#));
+        assert!(derived_cmd.contains(
+            r#"-c 'model_providers.ccode-a1b2c3d4.base_url="https://relay.example.com/v1"'"#
+        ));
         assert!(derived_cmd.contains(r#"-c 'model_provider="ccode-a1b2c3d4"'"#));
         assert!(!derived_cmd.contains(r#"model_provider="ccode""#));
     }
@@ -4159,18 +4551,33 @@ mod tests {
     fn windows_resume_line_uses_powershell_dialect() {
         // PowerShell：Set-Location + & 调用操作符；单引号包裹路径
         assert_eq!(
-            windows_resume_command_line("claude-code", "abc", r"C:\work\my proj", r"C:\tools\claude.cmd", &[]).unwrap(),
+            windows_resume_command_line(
+                "claude-code",
+                "abc",
+                r"C:\work\my proj",
+                r"C:\tools\claude.cmd",
+                &[]
+            )
+            .unwrap(),
             r#"Set-Location 'C:\work\my proj'; & 'C:\tools\claude.cmd' -r 'abc'"#
         );
-        let line = windows_resume_command_line("kimi", "abc", r"C:\it's\proj", "kimi", &[]).unwrap();
+        let line =
+            windows_resume_command_line("kimi", "abc", r"C:\it's\proj", "kimi", &[]).unwrap();
         assert_eq!(line, r#"Set-Location 'C:\it''s\proj'; & 'kimi' -S 'abc'"#);
         assert!(windows_resume_command_line("no-such", "abc", r"C:\x", "x", &[]).is_err());
         let with_provider = windows_resume_command_line(
-            "codex", "abc", r"C:\p", "codex",
+            "codex",
+            "abc",
+            r"C:\p",
+            "codex",
             &resume_extra_args("codex", Some("https://relay.example.com/v1"), None),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(with_provider.contains("-c"));
-        assert!(with_provider.contains(r#"model_provider="ccode""#) || with_provider.contains("'model_provider="));
+        assert!(
+            with_provider.contains(r#"model_provider="ccode""#)
+                || with_provider.contains("'model_provider=")
+        );
     }
 
     #[test]
@@ -4199,11 +4606,18 @@ mod tests {
         assert!(digest_command_line_with("no-such", "/tmp", prompt, "x").is_err());
         // cwd 与绝对路径二进制的转义（同 resume 口径）
         assert_eq!(
-            digest_command_line_with("qwen", "/tmp/我的 项目", prompt, "/Users/x/My Apps/bin/qwen").unwrap(),
+            digest_command_line_with(
+                "qwen",
+                "/tmp/我的 项目",
+                prompt,
+                "/Users/x/My Apps/bin/qwen"
+            )
+            .unwrap(),
             format!("cd '/tmp/我的 项目' && '/Users/x/My Apps/bin/qwen' -i '{prompt}'")
         );
         // prompt 内嵌单引号 → POSIX 转义
-        let quoted = digest_command_line_with("claude-code", "/tmp", "读 it's 简报", "claude").unwrap();
+        let quoted =
+            digest_command_line_with("claude-code", "/tmp", "读 it's 简报", "claude").unwrap();
         assert_eq!(quoted, "cd /tmp && claude '读 it'\\''s 简报'");
     }
 
@@ -4222,7 +4636,9 @@ mod tests {
         .unwrap();
         assert!(args.iter().any(|a| a == "model_provider=\"ccode\""));
         assert!(args.iter().any(|a| a == "deepseek-v4"));
-        assert!(env.iter().any(|(k, v)| k == "CODEX_API_KEY" && v == "sk-secret"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "CODEX_API_KEY" && v == "sk-secret"));
         assert!(!args.iter().any(|a| a.contains("sk-secret")));
     }
 
@@ -4283,13 +4699,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn external_wrapper_executes_and_removes_itself_before_agent_start() {
-        let wrapper = write_external_wrapper(
-            "/usr/bin/printf",
-            &["%s".into(), "ok".into()],
-            &[],
-            &[],
-        )
-        .unwrap();
+        let wrapper =
+            write_external_wrapper("/usr/bin/printf", &["%s".into(), "ok".into()], &[], &[])
+                .unwrap();
         let out = std::process::Command::new("/bin/sh")
             .arg(&wrapper)
             .output()
@@ -4301,8 +4713,17 @@ mod tests {
 
     #[test]
     fn windows_digest_line_uses_powershell_dialect() {
-        let line = windows_digest_command_line("claude-code", r"C:\work\my proj", "读简报", r"C:\tools\claude.cmd").unwrap();
-        assert_eq!(line, r#"Set-Location 'C:\work\my proj'; & 'C:\tools\claude.cmd' '读简报'"#);
+        let line = windows_digest_command_line(
+            "claude-code",
+            r"C:\work\my proj",
+            "读简报",
+            r"C:\tools\claude.cmd",
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            r#"Set-Location 'C:\work\my proj'; & 'C:\tools\claude.cmd' '读简报'"#
+        );
         let line = windows_digest_command_line("gemini", r"C:\x", "读简报", "gemini").unwrap();
         assert_eq!(line, r#"Set-Location 'C:\x'; & 'gemini' -i '读简报'"#);
         assert!(windows_digest_command_line("kimi", r"C:\x", "读简报", "kimi").is_err());
@@ -4420,10 +4841,16 @@ mod tests {
     #[test]
     fn candidate_dirs_cover_homebrew_prefixes() {
         let dirs = crate::agent_specs::binary_candidate_dirs();
-        assert!(dirs.iter().any(|d| d == std::path::Path::new("/opt/homebrew/bin")));
-        assert!(dirs.iter().any(|d| d == std::path::Path::new("/usr/local/bin")));
+        assert!(dirs
+            .iter()
+            .any(|d| d == std::path::Path::new("/opt/homebrew/bin")));
+        assert!(dirs
+            .iter()
+            .any(|d| d == std::path::Path::new("/usr/local/bin")));
         // MacTeX/TeXLive（latexmk）：GUI 短 PATH 兜底，批次 E LaTeX 编译链
-        assert!(dirs.iter().any(|d| d == std::path::Path::new("/Library/TeX/texbin")));
+        assert!(dirs
+            .iter()
+            .any(|d| d == std::path::Path::new("/Library/TeX/texbin")));
         // node 版本管理器（volta/mise）固定 shim 目录：GUI 短 PATH 兜底
         assert!(dirs.iter().any(|d| d.ends_with(".volta/bin")));
         assert!(dirs.iter().any(|d| d.ends_with(".local/share/mise/shims")));
@@ -4443,6 +4870,8 @@ mod tests {
     fn candidate_dirs_cover_git_for_windows() {
         let dirs = crate::agent_specs::binary_candidate_dirs();
         // winget Git.Git / 官方安装器默认落点 %ProgramFiles%\Git\cmd
-        assert!(dirs.iter().any(|d| d.ends_with(std::path::Path::new("Git").join("cmd"))));
+        assert!(dirs
+            .iter()
+            .any(|d| d.ends_with(std::path::Path::new("Git").join("cmd"))));
     }
 }

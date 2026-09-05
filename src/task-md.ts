@@ -1,4 +1,5 @@
 import { litSourceSectionLines } from "./task-md-sections.ts";
+import { decisionPolicyText } from "./step-decisions.ts";
 import { RESOURCE_TYPE_LABELS } from "./pipeline-presets.ts";
 import type {
   ArtifactEntryDto,
@@ -38,6 +39,7 @@ export function renderTaskMd(
       "",
     );
   }
+  lines.push("## 决策暂停策略", decisionPolicyText(step.decisionMode), "");
   const inputs = (step.inputs ?? []).map((x) => x.trim()).filter(Boolean);
   const optionalInputs = (step.optionalInputs ?? [])
     .map((x) => x.trim())
@@ -103,8 +105,7 @@ export function renderTaskMd(
     }
     lines.push(
       "上述事项由人完成，交付物会出现在对应落点路径；落点为空前请按既有内容推进可推进的部分。",
-      "执行中若另需人协助（如补检索词、缺权限全文），把请求逐条写进 .ccode/help-wanted.md" +
-        "（每条一行「- 」开头，附「若未回复则按 ×× 继续」的兜底方案），写完按兜底继续，不要停工等待。",
+      "执行中若另需人协助，把请求逐条写进 .ccode/help-wanted.md（每条一行「- 」开头）；是否继续严格遵守本任务书的「决策暂停策略」。",
     );
   }
   if (step.skills.length > 0) {

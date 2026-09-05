@@ -565,6 +565,7 @@ export default function ReaderOverlay({
         <button
           ref={backRef}
           type="button"
+          aria-label="返回文档"
           onMouseEnter={backTip.show}
           onMouseLeave={backTip.hide}
           onClick={onClose}
@@ -578,6 +579,7 @@ export default function ReaderOverlay({
         <button
           ref={darkRef}
           type="button"
+          aria-label={readerDark ? "关闭护眼反色" : "开启护眼反色"}
           onMouseEnter={darkTip.show}
           onMouseLeave={darkTip.hide}
           onClick={toggleDark}
@@ -596,6 +598,7 @@ export default function ReaderOverlay({
         <button
           ref={leftRef}
           type="button"
+          aria-label={leftOpen ? "收起左侧笔记栏" : "展开左侧笔记栏"}
           onMouseEnter={leftTip.show}
           onMouseLeave={leftTip.hide}
           onClick={() => setLeftOpen((v) => !v)}
@@ -606,6 +609,7 @@ export default function ReaderOverlay({
         <button
           ref={rightRef}
           type="button"
+          aria-label={rightOpen ? "收起右侧对话栏" : "展开右侧对话栏"}
           onMouseEnter={rightTip.show}
           onMouseLeave={rightTip.hide}
           onClick={() => setRightOpen((v) => !v)}

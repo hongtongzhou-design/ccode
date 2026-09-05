@@ -15,6 +15,8 @@
 
 为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI、Grok Build 九个终端 agent 管理多套 API 配置（端点/密钥/模型）与官方账号登录，内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览；在此之上提供项目研究流程（模板 + 一键开步）、任务工作区评审、PDF/笔记阅读写作与用量成本统计。
 
+产品对象按 **Project → Task → Run** 管理：Task 是人声明的工作单元，Run 是一次执行，终端标签只是 Run 的视图。Run 可使用本地 CLI、无头任务或用户登记的 Custom Runtime；需要写盘的任务默认在隔离工作树中运行，完成后由人查看改动并决定是否合并。
+
 ## 功能
 
 - **配置中心（⇄）**：agent × profile 多配置管理（API 配置 + 官方账号双轨），多模型切换，密钥 0600 本地存储绝不回显；默认启动注入环境变量（零污染），可选「设为全局默认」（写前备份）；CLI 安装/更新一键完成

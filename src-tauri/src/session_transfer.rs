@@ -161,13 +161,7 @@ pub struct ImportReportDto {
 /// Claude / Qwen：路径中所有非字母数字换成 `-`（含开头的 `/` → 前导 `-`）。
 fn path_slug_non_alnum(path: &str) -> String {
     path.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '-'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
 
@@ -493,9 +487,7 @@ fn read_zip_map(zip_path: &Path) -> Result<(Manifest, HashMap<String, Vec<u8>>),
         }
         files.insert(name, buf);
     }
-    let manifest_bytes = files
-        .get("manifest.json")
-        .ok_or("ZIP 缺少 manifest.json")?;
+    let manifest_bytes = files.get("manifest.json").ok_or("ZIP 缺少 manifest.json")?;
     let manifest: Manifest = serde_json::from_slice(manifest_bytes)
         .map_err(|e| format!("manifest.json 无法解析: {e}"))?;
     if manifest.version != MANIFEST_VERSION {
@@ -721,7 +713,10 @@ pub fn export_impl(specs: &[ExportKeyDto], dest: &Path) -> Result<String, String
 }
 
 #[tauri::command]
-pub async fn export_sessions(entries: Vec<ExportKeyDto>, dest_path: String) -> Result<String, String> {
+pub async fn export_sessions(
+    entries: Vec<ExportKeyDto>,
+    dest_path: String,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || export_impl(&entries, Path::new(&dest_path)))
         .await
         .map_err(|e| e.to_string())?
@@ -849,7 +844,12 @@ fn extract_cwd_from_files(
 
 /// 改写用的旧 cwd：文件内路径优先，缺了才回落列表侧 projectPath。
 fn rewrite_old(entry: &ManifestEntry, files: &[(&ManifestFile, &[u8])]) -> String {
-    if let Some(c) = entry.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(c) = entry
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return c.to_string();
     }
     for (_, b) in files {
@@ -908,7 +908,9 @@ fn validate_entry_files(
         return Err("条目没有文件".into());
     }
     for f in files {
-        let bytes = blobs.get(&f.path).ok_or_else(|| format!("缺文件 {}", f.path))?;
+        let bytes = blobs
+            .get(&f.path)
+            .ok_or_else(|| format!("缺文件 {}", f.path))?;
         if md5_hex(bytes) != f.md5 {
             return Err(format!("{} 校验和不符", f.path));
         }
@@ -966,9 +968,9 @@ fn pick_main_file<'a>(agent: &str, files: &'a [ManifestFile]) -> Option<&'a Mani
             .iter()
             .find(|f| f.path.ends_with("wire.jsonl"))
             .or_else(|| files.iter().find(|f| f.path.ends_with("context.jsonl"))),
-        "codex" => files.iter().find(|f| {
-            f.path.ends_with(".jsonl") || f.path.ends_with(".jsonl.zst")
-        }),
+        "codex" => files
+            .iter()
+            .find(|f| f.path.ends_with(".jsonl") || f.path.ends_with(".jsonl.zst")),
         _ => files
             .iter()
             .find(|f| f.path.ends_with(".jsonl") || f.path.ends_with(".jsonl.zst")),
@@ -987,7 +989,10 @@ fn walk_jsonl(dir: &Path, max_depth: usize, out: &mut Vec<PathBuf>) {
         if p.is_dir() {
             walk_jsonl(&p, max_depth - 1, out);
         } else {
-            let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let n = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if n.ends_with(".jsonl") || n.ends_with(".jsonl.zst") {
                 out.push(p);
             }
@@ -1014,7 +1019,11 @@ fn index_existing_at(home: &Path) -> HashSet<(String, String)> {
         push("claude-code", &f);
     }
     walk_jsonl(&home.join(".codex").join("sessions"), 5, &mut files);
-    walk_jsonl(&home.join(".codex").join("archived_sessions"), 5, &mut files);
+    walk_jsonl(
+        &home.join(".codex").join("archived_sessions"),
+        5,
+        &mut files,
+    );
     for f in files.drain(..) {
         push("codex", &f);
     }
@@ -1118,9 +1127,7 @@ fn inspect_at(
         }
         if status != "unsupported"
             && e.agent == "codex"
-            && e.provider
-                .as_deref()
-                .is_some_and(is_ccode_provider)
+            && e.provider.as_deref().is_some_and(is_ccode_provider)
         {
             needs_client_register = true;
         }
@@ -1258,7 +1265,10 @@ fn entry_blobs<'a>(
 
 fn zip_rel(entry_index: usize, zip_path: &str) -> String {
     let prefix = format!("sessions/{entry_index}/");
-    zip_path.strip_prefix(&prefix).unwrap_or(zip_path).to_string()
+    zip_path
+        .strip_prefix(&prefix)
+        .unwrap_or(zip_path)
+        .to_string()
 }
 
 fn rewrite_needed(old: &str, target: &str) -> bool {
@@ -1383,13 +1393,7 @@ fn land_cursor(
     }
     let _ = index;
     let body = if rewrite_needed(old, target) {
-        rewrite_json_bytes(
-            bytes,
-            old,
-            target,
-            rewrite_keys_for("cursor"),
-            None,
-        )
+        rewrite_json_bytes(bytes, old, target, rewrite_keys_for("cursor"), None)
     } else {
         bytes.to_vec()
     };
@@ -1421,13 +1425,7 @@ fn land_gemini(
         return Err("目标文件已存在".into());
     }
     let body = if rewrite_needed(old, target) {
-        rewrite_json_bytes(
-            bytes,
-            old,
-            target,
-            rewrite_keys_for("gemini"),
-            None,
-        )
+        rewrite_json_bytes(bytes, old, target, rewrite_keys_for("gemini"), None)
     } else {
         bytes.to_vec()
     };
@@ -1452,11 +1450,7 @@ fn land_codex(
         .ok_or("缺 codex rollout")?;
     let rel = zip_rel(index, &f.path);
     let date = codex_date_from_path(Path::new(&rel)).unwrap_or_else(|| {
-        let stamp = entry
-            .files
-            .first()
-            .map(|x| x.mtime_ms / 1000)
-            .unwrap_or(0);
+        let stamp = entry.files.first().map(|x| x.mtime_ms / 1000).unwrap_or(0);
         let t = UNIX_EPOCH + Duration::from_secs(stamp);
         let d = chrono::DateTime::<chrono::Utc>::from(t);
         d.format("%Y/%m/%d").to_string()
@@ -1470,13 +1464,7 @@ fn land_codex(
         if name.ends_with(".zst") {
             name = name.trim_end_matches(".zst").to_string();
         }
-        rewrite_json_bytes(
-            bytes,
-            old,
-            target,
-            rewrite_keys_for("codex"),
-            None,
-        )
+        rewrite_json_bytes(bytes, old, target, rewrite_keys_for("codex"), None)
     } else {
         bytes.to_vec()
     };
@@ -1496,9 +1484,7 @@ fn land_kimi(
     target: &str,
     old: &str,
 ) -> Result<String, String> {
-    let is_new = files
-        .iter()
-        .any(|(f, _)| f.path.ends_with("wire.jsonl"));
+    let is_new = files.iter().any(|(f, _)| f.path.ends_with("wire.jsonl"));
     if is_new {
         let dest_dir = home
             .join(".kimi-code")
@@ -1514,21 +1500,9 @@ fn land_kimi(
             let dest = dest_dir.join(rel);
             let mut body = if rewrite_needed(old, target) {
                 if f.path.ends_with(".json") {
-                    rewrite_json_object(
-                        bytes,
-                        old,
-                        target,
-                        rewrite_keys_for("kimi"),
-                        None,
-                    )
+                    rewrite_json_object(bytes, old, target, rewrite_keys_for("kimi"), None)
                 } else {
-                    rewrite_json_bytes(
-                        bytes,
-                        old,
-                        target,
-                        rewrite_keys_for("kimi"),
-                        None,
-                    )
+                    rewrite_json_bytes(bytes, old, target, rewrite_keys_for("kimi"), None)
                 }
             } else {
                 bytes.to_vec()
@@ -1554,21 +1528,9 @@ fn land_kimi(
             let dest = dest_dir.join(Path::new(&rel).file_name().unwrap_or(rel.as_ref()));
             let body = if rewrite_needed(old, target) {
                 if f.path.ends_with(".json") {
-                    rewrite_json_object(
-                        bytes,
-                        old,
-                        target,
-                        rewrite_keys_for("kimi"),
-                        None,
-                    )
+                    rewrite_json_object(bytes, old, target, rewrite_keys_for("kimi"), None)
                 } else {
-                    rewrite_json_bytes(
-                        bytes,
-                        old,
-                        target,
-                        rewrite_keys_for("kimi"),
-                        None,
-                    )
+                    rewrite_json_bytes(bytes, old, target, rewrite_keys_for("kimi"), None)
                 }
             } else {
                 bytes.to_vec()
@@ -1614,7 +1576,11 @@ fn append_kimi_index(
     lines.retain(|l| {
         serde_json::from_str::<Value>(l)
             .ok()
-            .and_then(|v| v.get("sessionId").and_then(|x| x.as_str()).map(|s| s != session_id))
+            .and_then(|v| {
+                v.get("sessionId")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s != session_id)
+            })
             .unwrap_or(true)
     });
     let row = serde_json::json!({
@@ -1679,18 +1645,17 @@ fn land_grok(
         let dest = dest_dir.join(rel);
         let mut body = bytes.to_vec();
         if f.path.ends_with("summary.json") && rewrite_needed(old, target) {
-            body = rewrite_json_object(
-                bytes,
-                old,
-                target,
-                rewrite_keys_for("grok"),
-                None,
-            );
+            body = rewrite_json_object(bytes, old, target, rewrite_keys_for("grok"), None);
         }
         atomic_write_checked(&dest, &body, home, f.mtime_ms)?;
     }
     if need_cwd_file {
-        atomic_write_checked(&dest_dir.parent().unwrap().join(".cwd"), target.as_bytes(), home, 0)?;
+        atomic_write_checked(
+            &dest_dir.parent().unwrap().join(".cwd"),
+            target.as_bytes(),
+            home,
+            0,
+        )?;
     }
     Ok("imported".into())
 }
@@ -1762,7 +1727,8 @@ fn apply_at(
             });
             continue;
         }
-        if let Err(err) = validate_entry_files(&entry.agent, &entry.session_id, &entry.files, &blobs)
+        if let Err(err) =
+            validate_entry_files(&entry.agent, &entry.session_id, &entry.files, &blobs)
         {
             failed += 1;
             items.push(ImportItemReportDto {
@@ -1792,7 +1758,9 @@ fn apply_at(
         }
         match apply_entry(home, entry, index, &blobs, &target, &existing) {
             Ok(_) => {
-                let _ = write_ccode_meta(entry);
+                let meta_warning = write_ccode_meta(entry)
+                    .err()
+                    .map(|err| format!("会话文件已导入，但 Ccode 整理信息写入失败：{err}"));
                 existing.insert((entry.agent.clone(), entry.session_id.clone()));
                 imported += 1;
                 if entry.agent == "codex" {
@@ -1806,8 +1774,13 @@ fn apply_at(
                     index,
                     agent: entry.agent.clone(),
                     session_id: entry.session_id.clone(),
-                    status: "imported".into(),
-                    reason: None,
+                    status: if meta_warning.is_some() {
+                        "imported-with-warning"
+                    } else {
+                        "imported"
+                    }
+                    .into(),
+                    reason: meta_warning,
                 });
             }
             Err(err) if err == "conflict" => {
@@ -2074,10 +2047,7 @@ mod tests {
         );
         let preview = inspect_at(&zip, &home, &[]).unwrap();
         assert_eq!(preview.entries[0].status, "needs-path");
-        assert_eq!(
-            preview.entries[0].cwd.as_deref(),
-            Some("/Users/alice/proj")
-        );
+        assert_eq!(preview.entries[0].cwd.as_deref(), Some("/Users/alice/proj"));
 
         // 冲突：先落一份
         let dest_dir = home
@@ -2113,11 +2083,7 @@ mod tests {
         let body = sample_claude("/Users/alice/proj", id);
         let zip_file = format!("sessions/0/{id}.jsonl");
         let man = claude_manifest(id, "/Users/alice/proj", &zip_file, body.as_bytes());
-        let zip = write_zip_test(
-            &dir,
-            &man,
-            vec![(zip_file, body.as_bytes().to_vec())],
-        );
+        let zip = write_zip_test(&dir, &man, vec![(zip_file, body.as_bytes().to_vec())]);
         let dec = vec![ImportDecisionDto {
             index: 0,
             skip: false,
@@ -2131,7 +2097,13 @@ mod tests {
             .join(path_slug_non_alnum(target.to_str().unwrap()))
             .join(format!("{id}.jsonl"));
         let got = fs::read_to_string(&dest).unwrap();
-        assert!(got.contains(&format!("\"cwd\":\"{}\"", target.to_string_lossy().replace('\\', "\\\\")) ) || got.contains(&target.to_string_lossy().replace('\\', "/")), "got={got}");
+        assert!(
+            got.contains(&format!(
+                "\"cwd\":\"{}\"",
+                target.to_string_lossy().replace('\\', "\\\\")
+            )) || got.contains(&target.to_string_lossy().replace('\\', "/")),
+            "got={got}"
+        );
         assert!(!got.contains("/Users/alice/proj"));
 
         let (report2, _) = apply_at(&zip, &home, &dec).unwrap();
@@ -2220,10 +2192,7 @@ mod tests {
                 || got.contains(&format!("\"cwd\":\"{}\"", t.replace('\\', "/"))),
             "应改写成 B 机目录, got={got}"
         );
-        assert!(
-            !got.contains(worktree),
-            "工作树路径必须被改掉, got={got}"
-        );
+        assert!(!got.contains(worktree), "工作树路径必须被改掉, got={got}");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -2462,7 +2431,10 @@ mod tests {
                 "sessions/0/agents/main/wire.jsonl".to_string(),
                 wire.as_bytes().to_vec(),
             ),
-            ("sessions/0/state.json".to_string(), state.as_bytes().to_vec()),
+            (
+                "sessions/0/state.json".to_string(),
+                state.as_bytes().to_vec(),
+            ),
         ];
         let man = Manifest {
             version: 1,
@@ -2510,7 +2482,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.imported, 1, "{:?}", report.items);
-        let index = fs::read_to_string(home.join(".kimi-code").join("session_index.jsonl")).unwrap();
+        let index =
+            fs::read_to_string(home.join(".kimi-code").join("session_index.jsonl")).unwrap();
         assert!(index.contains(id));
         let row: serde_json::Value = serde_json::from_str(index.lines().next().unwrap()).unwrap();
         assert_eq!(row["workDir"].as_str(), Some(t.as_str()), "{index}");

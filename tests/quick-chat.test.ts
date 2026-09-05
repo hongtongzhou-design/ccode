@@ -4,6 +4,7 @@ import {
   isScratchCwd,
   pickQuickChatHistory,
   pickQuickChatSessions,
+  profileCanAutoStart,
   sessionHomeLabel,
   sessionDisplayTitle,
   sidebarLaunchesDirect,
@@ -146,6 +147,14 @@ test("sidebarLaunchesDirect：记住过且没勾每次都问才直达", () => {
     sidebarLaunchesDirect({ hasRemembered: false, alwaysAsk: false }),
     false,
   );
+});
+
+test("快速开聊自动路径：排除停用和已知失效配置，未知状态放行", () => {
+  assert.equal(profileCanAutoStart({ connectionStatus: "ready" }), true);
+  assert.equal(profileCanAutoStart({ connectionStatus: "catalog_stale" }), true);
+  assert.equal(profileCanAutoStart({ connectionStatus: "probe_failed" }), false);
+  assert.equal(profileCanAutoStart({ modelSyncStatus: "missing" }), false);
+  assert.equal(profileCanAutoStart({ connectionStatus: "ready" }, true), false);
 });
 
 test("withLiveSessionFlags：终端页正在跑的会话补标 live", () => {

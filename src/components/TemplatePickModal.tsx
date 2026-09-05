@@ -8,6 +8,7 @@ import {
 } from "../pipeline-presets";
 import type { AppendStepsResultDto, ProjectConfigReadDto } from "../types";
 import { fieldClass, primaryActionClass, secondaryActionClass } from "./PageFrame";
+import { Modal } from "./Modal";
 
 /**
  * 添加项目注册成功后的研究流程模板选择层（v3.79）：
@@ -173,19 +174,20 @@ export default function TemplatePickModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={() => void closeLater()}
+    <Modal
+      open
+      title={
+        submissionTpl
+          ? "选择「投稿与返修」分支"
+          : settingsTpl
+            ? `「${settingsTpl.name}」的项目全局设定`
+            : "选择研究流程模板"
+      }
+      onClose={() => void closeLater()}
+      size="lg"
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-[36rem] rounded-md border border-field ccode-float-surface p-5"
-      >
         {submissionTpl ? (
           <>
-            <h2 className="mb-1 text-base font-semibold text-l1">
-              选择「投稿与返修」分支
-            </h2>
             <p className="mb-4 text-xs text-l3">
               首投与返修不是同一条流水线；返修会按轮次生成独立的意见、回复信、修订稿和再投稿清单。
             </p>
@@ -274,11 +276,8 @@ export default function TemplatePickModal({
           /* 第二屏「全局设定」：贯穿全程的决定，注册当下就填（留空跳过，
              之后仍可在项目设置抽屉里补——抽屉是长期编辑处，这里是引导） */
           <>
-            <h2 className="mb-1 text-base font-semibold text-l1">
-              「{settingsTpl.name}」的几件全局设定
-            </h2>
             <p className="mb-4 text-xs text-l3">
-              这几件事决定后面每一步，开工时会随 TASK.md 带给 AI。现在能定就填，拿不准留空跳过。
+              这些设定会贯穿后续研究流程，并在每次开工时写入 TASK.md。暂时不确定的项目可以留空，之后仍可在项目设置中补充。
             </p>
             <div className="space-y-2.5">
               {settingsTpl.projectSettings!.map((line, i) => {
@@ -318,10 +317,10 @@ export default function TemplatePickModal({
                   type="button"
                   disabled={busy !== null}
                   onClick={() => void apply(settingsTpl)}
-                  title="按模板原样预填（答案留空），之后可在项目设置抽屉补"
+                  title="按模板原样预填，之后可在项目设置中补充"
                   className={`${secondaryActionClass} disabled:opacity-50`}
                 >
-                  跳过，以后再填
+                  暂不填写，稍后补充
                 </button>
                 <button
                   type="button"
@@ -329,7 +328,7 @@ export default function TemplatePickModal({
                   onClick={() => void apply(settingsTpl, answers)}
                   className={`${primaryActionClass} disabled:opacity-50`}
                 >
-                  {busy === settingsTpl.id ? "写入中…" : "保存并应用模板"}
+                  {busy === settingsTpl.id ? "写入中…" : "保存设定并应用模板"}
                 </button>
               </div>
             </div>
@@ -404,7 +403,6 @@ export default function TemplatePickModal({
             </div>
           </>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }

@@ -97,6 +97,7 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
         if !url.username().is_empty() || url.password().is_some() {
             return Err("API 地址不得内嵌用户名或密码".into());
         }
+        validate_anthropic_base_url(profile, &url)?;
     }
     // 协议取值校验：合法值与缺省（第一个）都来自 AgentSpec.protocols；空表 = 无协议概念
     if let Some(spec) = crate::agent_specs::agent_spec(&profile.agent) {
@@ -138,7 +139,11 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
     if matches!(policy.max_output_tokens, Some(0)) {
         return Err("maxOutputTokens 必须大于 0".into());
     }
-    if policy.reasoning_effort.as_deref().is_some_and(|v| v.trim().is_empty()) {
+    if policy
+        .reasoning_effort
+        .as_deref()
+        .is_some_and(|v| v.trim().is_empty())
+    {
         return Err("reasoningEffort 不能为空".into());
     }
     // claude-code 的 effort 档位有实证闭集（/effort 与 CLAUDE_CODE_EFFORT_LEVEL 同口径，
@@ -165,19 +170,35 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && env_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            && env_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
         if !valid_env_name {
             return Err(format!("模型 Header 环境变量名不合法: {env_name:?}"));
         }
     }
     if profile.no_auth {
         const AUTH_KEYS: &[&str] = &[
-            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
-            "GEMINI_API_KEY", "GOOGLE_API_KEY", "CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN",
-            "CURSOR_API_KEY", "XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "KIMI_API_KEY",
-            "KIMI_MODEL_API_KEY", "OPENCODE_CONFIG_CONTENT",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "CODEBUDDY_API_KEY",
+            "CODEBUDDY_AUTH_TOKEN",
+            "CURSOR_API_KEY",
+            "XAI_API_KEY",
+            "GROK_CODE_XAI_API_KEY",
+            "KIMI_API_KEY",
+            "KIMI_MODEL_API_KEY",
+            "OPENCODE_CONFIG_CONTENT",
         ];
-        if let Some(key) = profile.extra_env.keys().find(|key| AUTH_KEYS.contains(&key.as_str())) {
+        if let Some(key) = profile
+            .extra_env
+            .keys()
+            .find(|key| AUTH_KEYS.contains(&key.as_str()))
+        {
             return Err(format!("无密钥模式不能附加认证变量 {key}"));
         }
     }
@@ -272,6 +293,39 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
     Ok(notes)
 }
 
+/// Anthropic-compatible CLIs append `/v1/messages` themselves. A full resource
+/// URL here would become `/v1/messages/v1/messages` and fail at runtime.
+fn validate_anthropic_base_url(profile: &Profile, url: &reqwest::Url) -> Result<(), String> {
+    let anthropic = matches!(profile.agent.as_str(), "claude-code" | "codebuddy")
+        || profile.protocol.as_deref() == Some("anthropic");
+    if !anthropic {
+        return Ok(());
+    }
+    let path = url.path().trim_end_matches('/');
+    if path.ends_with("/messages") {
+        return Err(
+            "Anthropic 兼容端点不能填写完整 /messages 地址；请填写基础 URL（CLI 会自动追加 /v1/messages）"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_anthropic_slot_url(url: Option<&str>) -> Result<(), String> {
+    let Some(url) = url.filter(|s| !s.trim().is_empty()) else {
+        return Ok(());
+    };
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("API 地址格式错误: {e}"))?;
+    let path = parsed.path().trim_end_matches('/');
+    if path.ends_with("/messages") {
+        return Err(
+            "Anthropic 槽不能填写完整 /messages 地址；请填写基础 URL（CLI 会自动追加 /v1/messages）"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn local_check_at(home: &Path, profile: &Profile) -> ValidationCheckDto {
     let started = Instant::now();
     let outcome = (|| -> Result<String, String> {
@@ -361,7 +415,10 @@ fn tail_chars(text: &str, max: usize) -> String {
     }
 }
 
-fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -> Result<String, String> {
+fn run_capture(
+    cmd: &mut crate::process::BackgroundCommand,
+    timeout: Duration,
+) -> Result<String, String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("启动 CLI 失败: {e}"))?;
     let mut stdout = child.stdout.take();
@@ -384,9 +441,15 @@ fn run_capture(cmd: &mut crate::process::BackgroundCommand, timeout: Duration) -
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
-                let stderr = String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
-                let detail = if stderr.trim().is_empty() { stdout } else { stderr };
+                let stdout =
+                    String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
+                let stderr =
+                    String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
+                let detail = if stderr.trim().is_empty() {
+                    stdout
+                } else {
+                    stderr
+                };
                 if status.success() {
                     return Ok(tail_chars(detail.trim(), 1200));
                 }
@@ -431,7 +494,8 @@ fn cli_check(profile: &Profile, key: Option<&str>, injected: bool) -> Validation
     let started = Instant::now();
     let outcome = (|| -> Result<String, String> {
         let binary = agents::binary_for(&profile.agent).ok_or("该 agent 不支持 CLI 预检")?;
-        let binary = agents::resolve_binary(binary).ok_or_else(|| format!("未找到 {binary} CLI"))?;
+        let binary =
+            agents::resolve_binary(binary).ok_or_else(|| format!("未找到 {binary} CLI"))?;
         let plan = agents::launch_plan(
             profile,
             key.map(ToOwned::to_owned),
@@ -496,7 +560,10 @@ fn cli_check(profile: &Profile, key: Option<&str>, injected: bool) -> Validation
         let output = run_capture(&mut cmd, CLI_TIMEOUT);
         let _ = fs::remove_dir_all(&cwd);
         let output = output?;
-        let suffix = output.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+        let suffix = output
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("");
         Ok(if suffix.is_empty() {
             format!("{description} 通过")
         } else {
@@ -521,9 +588,7 @@ fn api_kind(profile: &Profile) -> ApiKind {
         // codebuddy 协议 Anthropic 兼容（docs 有 DeepSeek Anthropic 端点对接示例）
         "claude-code" | "codebuddy" => ApiKind::Anthropic,
         "gemini" => ApiKind::Gemini,
-        "qwen" | "kimi" if profile.protocol.as_deref() == Some("anthropic") => {
-            ApiKind::Anthropic
-        }
+        "qwen" | "kimi" if profile.protocol.as_deref() == Some("anthropic") => ApiKind::Anthropic,
         // grok 绑定声明了 messages 后端（仅设为全局写入生效）→ 探针走 Anthropic 形状
         "grok" if profile.api_backend.as_deref() == Some("messages") => ApiKind::Anthropic,
         _ => ApiKind::OpenAi,
@@ -699,6 +764,12 @@ pub struct GatewayProbeDto {
 fn chat_url(base: &str, kind: ApiKind) -> Result<reqwest::Url, String> {
     let mut url = reqwest::Url::parse(base).map_err(|e| format!("API 地址格式错误: {e}"))?;
     let path = url.path().trim_end_matches('/');
+    if matches!(kind, ApiKind::Anthropic) && path.ends_with("/messages") {
+        return Err(
+            "Anthropic 兼容端点不能填写完整 /messages 地址；请填写基础 URL（CLI 会自动追加 /v1/messages）"
+                .into(),
+        );
+    }
     let (version, resource) = match kind {
         ApiKind::Anthropic => ("v1", "messages"),
         ApiKind::OpenAi => ("v1", "chat/completions"),
@@ -779,10 +850,7 @@ struct ProbeOutcome {
 }
 
 async fn send_probe(request: reqwest::RequestBuilder) -> Result<ProbeOutcome, String> {
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
+    let response = request.send().await.map_err(|e| format!("请求失败: {e}"))?;
     let status = response.status();
     let content_type = response
         .headers()
@@ -795,16 +863,14 @@ async fn send_probe(request: reqwest::RequestBuilder) -> Result<ProbeOutcome, St
     let error_tail = if status.is_success() {
         String::new()
     } else {
-        tail_chars(
-            response
-                .text()
-                .await
-                .unwrap_or_default()
-                .trim(),
-            300,
-        )
+        tail_chars(response.text().await.unwrap_or_default().trim(), 300)
     };
-    Ok(ProbeOutcome { status, sse, content_type, error_tail })
+    Ok(ProbeOutcome {
+        status,
+        sse,
+        content_type,
+        error_tail,
+    })
 }
 
 #[tauri::command]
@@ -825,7 +891,8 @@ pub async fn probe_gateway_slot(
     model: Option<String>,
     basic_only: Option<bool>,
 ) -> Result<GatewayProbeDto, String> {
-    let slot = crate::gateway_store::Slot::from_str(&slot).ok_or_else(|| format!("未知协议槽: {slot}"))?;
+    let slot =
+        crate::gateway_store::Slot::from_str(&slot).ok_or_else(|| format!("未知协议槽: {slot}"))?;
     let gateways = store.list_gateways()?;
     let gw = gateways
         .iter()
@@ -854,7 +921,10 @@ fn default_probe_model(
     slot: crate::gateway_store::Slot,
     explicit: Option<String>,
 ) -> String {
-    if let Some(m) = explicit.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+    if let Some(m) = explicit
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
         return m;
     }
     if let Ok(bindings) = crate::gateway_store::load_bindings() {
@@ -912,9 +982,7 @@ async fn probe_loaded_profile(
         let mut req = client.post(url.clone()).json(&body);
         if let Some(k) = key.as_deref().filter(|k| !k.trim().is_empty()) {
             req = match kind {
-                ApiKind::Anthropic => req
-                    .bearer_auth(k)
-                    .header("anthropic-version", "2023-06-01"),
+                ApiKind::Anthropic => req.bearer_auth(k).header("anthropic-version", "2023-06-01"),
                 _ => req.bearer_auth(k),
             };
         }
@@ -943,33 +1011,62 @@ async fn probe_loaded_profile(
     let basic = send_probe(build(probe_body(kind, &model, policy, false, false), false)).await;
     let basic_ok = matches!(&basic, Ok(o) if o.status.is_success());
     checks.push(match &basic {
-        Ok(o) if o.status.is_success() => check(
-            "passed",
-            "基础请求",
-            Some(started.elapsed().as_millis()),
-        ),
+        Ok(o) if o.status.is_success() => {
+            check("passed", "基础请求", Some(started.elapsed().as_millis()))
+        }
         Ok(o) => check(
             "failed",
             format!("基础请求 HTTP {}：{}", o.status, o.error_tail),
             Some(started.elapsed().as_millis()),
         ),
-        Err(e) => check("failed", format!("基础请求：{e}"), Some(started.elapsed().as_millis())),
+        Err(e) => check(
+            "failed",
+            format!("基础请求：{e}"),
+            Some(started.elapsed().as_millis()),
+        ),
     });
-    let basic_latency = checks
-        .last()
-        .and_then(|c| c.latency_ms)
-        .map(|n| n as u64);
+    let basic_latency = checks.last().and_then(|c| c.latency_ms).map(|n| n as u64);
     if !basic_ok {
         // 基础请求挂了，流式/参数探测无意义
         for label in ["流式响应", "请求策略参数", "自定义 Header"] {
-            checks.push(check("skipped", format!("{label}：基础请求未通过，跳过"), None));
+            checks.push(check(
+                "skipped",
+                format!("{label}：基础请求未通过，跳过"),
+                None,
+            ));
         }
-        persist_slot_probe(store, &profile, &model, &base, key.as_deref(), &checks, basic_latency, basic_only);
-        return Ok(GatewayProbeDto { ok: false, model, checks });
+        persist_slot_probe(
+            store,
+            &profile,
+            &model,
+            &base,
+            key.as_deref(),
+            &checks,
+            basic_latency,
+            basic_only,
+        );
+        return Ok(GatewayProbeDto {
+            ok: false,
+            model,
+            checks,
+        });
     }
     if basic_only {
-        persist_slot_probe(store, &profile, &model, &base, key.as_deref(), &checks, basic_latency, true);
-        return Ok(GatewayProbeDto { ok: true, model, checks });
+        persist_slot_probe(
+            store,
+            &profile,
+            &model,
+            &base,
+            key.as_deref(),
+            &checks,
+            basic_latency,
+            true,
+        );
+        return Ok(GatewayProbeDto {
+            ok: true,
+            model,
+            checks,
+        });
     }
 
     // ② 流式：裸 stream:true，看网关回不回 SSE
@@ -977,9 +1074,11 @@ async fn probe_loaded_profile(
     let bare_stream = send_probe(build(probe_body(kind, &model, policy, false, true), false)).await;
     let bare_sse = matches!(&bare_stream, Ok(o) if o.status.is_success() && o.sse);
     checks.push(match &bare_stream {
-        Ok(o) if o.status.is_success() && o.sse => {
-            check("passed", "流式响应：网关返回 SSE", Some(started.elapsed().as_millis()))
-        }
+        Ok(o) if o.status.is_success() && o.sse => check(
+            "passed",
+            "流式响应：网关返回 SSE",
+            Some(started.elapsed().as_millis()),
+        ),
         Ok(o) if o.status.is_success() => check(
             "failed",
             format!(
@@ -993,7 +1092,11 @@ async fn probe_loaded_profile(
             format!("流式响应 HTTP {}：{}", o.status, o.error_tail),
             Some(started.elapsed().as_millis()),
         ),
-        Err(e) => check("failed", format!("流式响应：{e}"), Some(started.elapsed().as_millis())),
+        Err(e) => check(
+            "failed",
+            format!("流式响应：{e}"),
+            Some(started.elapsed().as_millis()),
+        ),
     });
 
     // ③ 请求策略参数：带上策略再发流式，对比 ② 定位「加参数就不流式」
@@ -1043,7 +1146,10 @@ async fn probe_loaded_profile(
         let suffix = if unresolved.is_empty() {
             String::new()
         } else {
-            format!("；环境变量 {} 未设置，对应 Header 未发送", unresolved.join("、"))
+            format!(
+                "；环境变量 {} 未设置，对应 Header 未发送",
+                unresolved.join("、")
+            )
         };
         checks.push(match &with_headers {
             Ok(o) if o.status.is_success() => check(
@@ -1053,7 +1159,10 @@ async fn probe_loaded_profile(
             ),
             Ok(o) => check(
                 "failed",
-                format!("自定义 Header：HTTP {}：{}{}", o.status, o.error_tail, suffix),
+                format!(
+                    "自定义 Header：HTTP {}：{}{}",
+                    o.status, o.error_tail, suffix
+                ),
                 Some(started.elapsed().as_millis()),
             ),
             Err(e) => check(
@@ -1066,7 +1175,8 @@ async fn probe_loaded_profile(
 
     let ok = checks.iter().all(|c| c.status != "failed");
     if let Some(gid) = profile.gateway_id.clone() {
-        let slot = crate::gateway_store::slot_for_agent(&profile.agent, profile.protocol.as_deref());
+        let slot =
+            crate::gateway_store::slot_for_agent(&profile.agent, profile.protocol.as_deref());
         let st = |prefix: &str| -> crate::profiles::ProbeStatus {
             match checks.iter().find(|c| c.message.starts_with(prefix)) {
                 Some(c) if c.status == "passed" => crate::profiles::ProbeStatus::Passed,
@@ -1138,16 +1248,12 @@ fn persist_slot_probe(
     };
     if basic_only {
         if let Ok(gws) = crate::gateway_store::load_gateways() {
-            if let Some(prev) = gws
-                .iter()
-                .find(|g| g.id == gid)
-                .and_then(|g| {
-                    g.last_probe
-                        .iter()
-                        .filter(|p| p.slot == rec.slot)
-                        .max_by_key(|p| p.probed_at.as_str())
-                })
-            {
+            if let Some(prev) = gws.iter().find(|g| g.id == gid).and_then(|g| {
+                g.last_probe
+                    .iter()
+                    .filter(|p| p.slot == rec.slot)
+                    .max_by_key(|p| p.probed_at.as_str())
+            }) {
                 rec.streaming = prev.streaming;
                 rec.effort = prev.effort;
                 rec.headers = prev.headers;
@@ -1166,7 +1272,11 @@ pub(crate) fn validate_after_global_write(
         None => check("failed", "无法确定用户主目录", None),
     };
     let cli = cli_check(profile, key, false);
-    let api = check("skipped", "全局写入后仅自动检查本地配置与 CLI；可点击“验证”执行 API 请求", None);
+    let api = check(
+        "skipped",
+        "全局写入后仅自动检查本地配置与 CLI；可点击“验证”执行 API 请求",
+        None,
+    );
     result(local, cli, api)
 }
 
@@ -1222,6 +1332,9 @@ mod tests {
             has_key: true,
             gateway_id: None,
             slot_missing: false,
+            connection_status: String::new(),
+            model_sync_status: String::new(),
+            model_sync_note: None,
             provider_override: None,
         }
     }
@@ -1251,9 +1364,13 @@ mod tests {
         p.request_policy.top_p = Some(1.1);
         assert!(validate_profile_fields(&p).is_err());
         p.request_policy.top_p = Some(0.9);
-        p.request_policy.header_env.insert("X-Relay-Key".into(), "RELAY_KEY".into());
+        p.request_policy
+            .header_env
+            .insert("X-Relay-Key".into(), "RELAY_KEY".into());
         assert!(validate_profile_fields(&p).is_ok());
-        p.request_policy.header_env.insert("Bad:Header".into(), "RELAY_KEY".into());
+        p.request_policy
+            .header_env
+            .insert("Bad:Header".into(), "RELAY_KEY".into());
         assert!(validate_profile_fields(&p).is_err());
     }
 
@@ -1274,10 +1391,29 @@ mod tests {
         assert!(notes.iter().any(|n| n.contains("/v1/v1/messages")));
         // 不带 /v1 不提醒；非 Anthropic 通道（如 codex 的 OpenAI 系 /v1 惯例）不提醒
         p.base_url = Some("https://relay.example.com".into());
-        assert!(!validate_profile_fields(&p).unwrap().iter().any(|n| n.contains("/v1/v1")));
+        assert!(!validate_profile_fields(&p)
+            .unwrap()
+            .iter()
+            .any(|n| n.contains("/v1/v1")));
         let mut c = profile("codex");
         c.base_url = Some("https://relay.example.com/v1".into());
-        assert!(!validate_profile_fields(&c).unwrap().iter().any(|n| n.contains("/v1/v1")));
+        assert!(!validate_profile_fields(&c)
+            .unwrap()
+            .iter()
+            .any(|n| n.contains("/v1/v1")));
+    }
+
+    #[test]
+    fn anthropic_full_messages_url_is_rejected() {
+        let mut p = profile("claude-code");
+        p.base_url = Some("https://relay.example.com/v1/messages".into());
+        assert!(validate_profile_fields(&p)
+            .unwrap_err()
+            .contains("不能填写完整 /messages"));
+        assert!(validate_anthropic_slot_url(Some(
+            "https://relay.example.com/messages"
+        ))
+        .is_err());
     }
 
     #[test]
@@ -1295,7 +1431,8 @@ mod tests {
 
     #[test]
     fn local_check_reports_invalid_cli_config() {
-        let home = std::env::temp_dir().join(format!("ccode-profile-check-{}", uuid::Uuid::new_v4()));
+        let home =
+            std::env::temp_dir().join(format!("ccode-profile-check-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(home.join(".kimi-code")).unwrap();
         fs::write(home.join(".kimi-code/config.toml"), "[providers.bad\n").unwrap();
         let result = local_check_at(&home, &profile("kimi"));
@@ -1308,7 +1445,9 @@ mod tests {
     fn profile_fields_reject_protocol_and_embedded_credentials() {
         let mut qwen = profile("qwen");
         qwen.protocol = Some("gemini".into());
-        assert!(validate_profile_fields(&qwen).unwrap_err().contains("不支持协议"));
+        assert!(validate_profile_fields(&qwen)
+            .unwrap_err()
+            .contains("不支持协议"));
         qwen.protocol = Some("openai".into());
         qwen.base_url = Some("https://user:pass@example.com/v1".into());
         assert!(validate_profile_fields(&qwen)

@@ -34,9 +34,9 @@ impl DriftKind {
 
 pub fn json_subset_equal(planned: &Value, live: &Value) -> bool {
     match (planned, live) {
-        (Value::Object(p), Value::Object(l)) => p.iter().all(|(k, v)| {
-            l.get(k).is_some_and(|lv| json_subset_equal(v, lv))
-        }),
+        (Value::Object(p), Value::Object(l)) => p
+            .iter()
+            .all(|(k, v)| l.get(k).is_some_and(|lv| json_subset_equal(v, lv))),
         (Value::Array(p), Value::Array(l)) => p == l,
         _ => planned == live,
     }
@@ -74,9 +74,9 @@ fn toml_subset_equal(planned: &str, live: &str) -> bool {
 
 fn toml_value_subset(planned: &toml::Value, live: &toml::Value) -> bool {
     match (planned, live) {
-        (toml::Value::Table(p), toml::Value::Table(l)) => p.iter().all(|(k, v)| {
-            l.get(k).is_some_and(|lv| toml_value_subset(v, lv))
-        }),
+        (toml::Value::Table(p), toml::Value::Table(l)) => p
+            .iter()
+            .all(|(k, v)| l.get(k).is_some_and(|lv| toml_value_subset(v, lv))),
         (toml::Value::Array(p), toml::Value::Array(l)) => p == l,
         _ => planned == live,
     }
@@ -88,10 +88,7 @@ pub fn planned_matches_live(path: &Path, planned: &str) -> bool {
         Ok(t) => t,
         Err(_) => return false,
     };
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if name.ends_with(".json") {
         let planned_v = serde_json::from_str::<Value>(planned);
         let live_v = serde_json::from_str::<Value>(&crate::mcp::strip_jsonc(&live))
@@ -168,10 +165,7 @@ mod tests {
     #[test]
     fn classify_four_states() {
         assert_eq!(classify(true, None, vec![]).status, "neverWritten");
-        assert_eq!(
-            classify(false, Some("x".into()), vec![]).status,
-            "error"
-        );
+        assert_eq!(classify(false, Some("x".into()), vec![]).status, "error");
         assert_eq!(classify(false, None, vec![]).status, "matches");
         let d = classify(false, None, vec!["config.toml".into()]);
         assert_eq!(d.status, "drifted");
@@ -184,10 +178,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         std::fs::write(&path, "{\n  // c\n  \"env\": {\"A\": \"1\"},\n}\n").unwrap();
-        assert!(planned_matches_live(
-            &path,
-            "{\"env\":{\"A\":\"1\"}}"
-        ));
+        assert!(planned_matches_live(&path, "{\"env\":{\"A\":\"1\"}}"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

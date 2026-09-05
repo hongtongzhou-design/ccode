@@ -147,8 +147,8 @@ fn gated_root(project_root: &str) -> Result<PathBuf, String> {
 fn resolve_inside(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let p = root.join(rel);
     if p.exists() || p.is_symlink() {
-        let c = crate::paths::canonicalize_plain(&p)
-            .map_err(|e| format!("路径无效（{rel}）: {e}"))?;
+        let c =
+            crate::paths::canonicalize_plain(&p).map_err(|e| format!("路径无效（{rel}）: {e}"))?;
         if !crate::paths::path_within_path(&c, root) {
             return Err(format!("{rel} 指向项目目录之外，拒绝访问"));
         }
@@ -178,7 +178,10 @@ fn write_text_inside(root: &Path, rel: &str, text: &str) -> Result<(), String> {
 
 /// 批次标记行：`<!-- watch-run: YYYY-MM-DD -->`（宽松校验：10 位、只含数字与连字符）
 fn parse_batch_marker(line: &str) -> Option<String> {
-    let inner = line.trim().strip_prefix("<!-- watch-run:")?.strip_suffix("-->")?;
+    let inner = line
+        .trim()
+        .strip_prefix("<!-- watch-run:")?
+        .strip_suffix("-->")?;
     let d = inner.trim();
     if d.len() == 10 && d.chars().all(|c| c.is_ascii_digit() || c == '-') {
         Some(d.to_string())
@@ -325,7 +328,11 @@ fn parse_inbox_entries_with_cap(text: &str, cap: bool) -> Vec<WatchEntryDto> {
                     out.push(b.build());
                 }
             }
-            cur = Some(EntryBuilder::new(title.trim().to_string(), ln, cur_batch.clone()));
+            cur = Some(EntryBuilder::new(
+                title.trim().to_string(),
+                ln,
+                cur_batch.clone(),
+            ));
             continue;
         }
         if let Some(b) = cur.as_mut() {
@@ -391,7 +398,11 @@ pub(crate) fn metrics_pass_filter(
     }
     let Some(m) = metrics else { return true };
     if let Some(min) = filter.min_if {
-        if let Some(v) = m.impact_factor.as_deref().and_then(|s| s.parse::<f64>().ok()) {
+        if let Some(v) = m
+            .impact_factor
+            .as_deref()
+            .and_then(|s| s.parse::<f64>().ok())
+        {
             if v < min {
                 return false;
             }
@@ -469,7 +480,11 @@ fn parse_followups(text: &str) -> Vec<WatchFollowupDto> {
         let Some(body) = line.trim_start().strip_prefix("- ") else {
             continue; // 标题/注释/空行跳过
         };
-        let segs: Vec<&str> = body.split(" — ").map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let segs: Vec<&str> = body
+            .split(" — ")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         let Some(title) = segs.first() else { continue };
         let url = segs[1..]
             .iter()
@@ -517,7 +532,10 @@ fn parse_subscriptions(text: &str) -> Vec<WatchSubscriptionDto> {
                     .collect()
             })
             .unwrap_or_default();
-        let note = parts.next().map(|s| s.trim().to_string()).unwrap_or_default();
+        let note = parts
+            .next()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
         out.push(WatchSubscriptionDto {
             keyword,
             sources,
@@ -613,7 +631,13 @@ pub(crate) fn normalize_title(t: &str) -> String {
         .collect()
 }
 
-fn add_included_at(root: &Path, title: &str, authors_year: &str, source: &str, link: &str) -> Result<AddIncludedResultDto, String> {
+fn add_included_at(
+    root: &Path,
+    title: &str,
+    authors_year: &str,
+    source: &str,
+    link: &str,
+) -> Result<AddIncludedResultDto, String> {
     let title = title.trim();
     if title.is_empty() {
         return Err("标题不能为空".into());
@@ -632,7 +656,11 @@ fn add_included_at(root: &Path, title: &str, authors_year: &str, source: &str, l
     // 字段空缺按 lit-search 口径标「待补」，不留空段
     fn fill_or_tbd(s: &str) -> &str {
         let s = s.trim();
-        if s.is_empty() { "待补" } else { s }
+        if s.is_empty() {
+            "待补"
+        } else {
+            s
+        }
     }
     let new_line = format!(
         "{} — {} — {} — {}",
@@ -776,8 +804,8 @@ async fn fetch_pdf_bytes(url: &str) -> Result<Vec<u8>, String> {
 fn papers_dir(root: &Path) -> Result<PathBuf, String> {
     let papers = root.join("papers");
     fs::create_dir_all(&papers).map_err(|e| format!("创建 papers 目录失败: {e}"))?;
-    let canon = crate::paths::canonicalize_plain(&papers)
-        .map_err(|e| format!("papers 目录无效: {e}"))?;
+    let canon =
+        crate::paths::canonicalize_plain(&papers).map_err(|e| format!("papers 目录无效: {e}"))?;
     if !crate::paths::path_within_path(&canon, root) {
         return Err("papers 指向项目目录之外，拒绝写入".into());
     }
@@ -815,7 +843,11 @@ fn register_pdf(root: &Path, target: &Path) -> Result<DownloadedPaperDto, String
 }
 
 /// 落盘 + 资源登记（sync）：文件名清理 + 重名避让，写盘后登记
-fn save_and_register_pdf(root: &Path, file_name_hint: &str, bytes: &[u8]) -> Result<DownloadedPaperDto, String> {
+fn save_and_register_pdf(
+    root: &Path,
+    file_name_hint: &str,
+    bytes: &[u8],
+) -> Result<DownloadedPaperDto, String> {
     let papers = papers_dir(root)?;
     let name = sanitize_pdf_name(file_name_hint);
     let target = unique_pdf_path(&papers, &name);
@@ -825,7 +857,11 @@ fn save_and_register_pdf(root: &Path, file_name_hint: &str, bytes: &[u8]) -> Res
 
 /// 关联本地 PDF（sync）：用户手动下载的 PDF 复制进 papers/ 并按标题登记。
 /// 源文件校验同下载口径（.pdf 扩展名 + %PDF- 魔数 + 60MB 上限），复制而非移动。
-fn attach_pdf_at(root: &Path, source_path: &str, title: &str) -> Result<DownloadedPaperDto, String> {
+fn attach_pdf_at(
+    root: &Path,
+    source_path: &str,
+    title: &str,
+) -> Result<DownloadedPaperDto, String> {
     let src = PathBuf::from(crate::sessions::expand_tilde(source_path));
     let meta = fs::metadata(&src).map_err(|e| format!("源文件不可读: {e}"))?;
     if !meta.is_file() {
@@ -880,8 +916,9 @@ fn read_explains_file(root: &Path) -> Result<WatchExplainsFile, String> {
     match read_text_inside(root, EXPLAINS_REL)? {
         None => Ok(WatchExplainsFile::default()),
         Some(text) if text.trim().is_empty() => Ok(WatchExplainsFile::default()),
-        Some(text) => serde_json::from_str(&text)
-            .map_err(|e| format!("解读缓存损坏（{EXPLAINS_REL}）: {e}")),
+        Some(text) => {
+            serde_json::from_str(&text).map_err(|e| format!("解读缓存损坏（{EXPLAINS_REL}）: {e}"))
+        }
     }
 }
 
@@ -940,8 +977,8 @@ fn save_explain_at(root: &Path, title: &str, text: &str) -> Result<(), String> {
             file.items.remove(&k);
         }
     }
-    let body = serde_json::to_string_pretty(&file)
-        .map_err(|e| format!("序列化解读缓存失败: {e}"))?;
+    let body =
+        serde_json::to_string_pretty(&file).map_err(|e| format!("序列化解读缓存失败: {e}"))?;
     write_text_inside(root, EXPLAINS_REL, &body)
 }
 
@@ -1021,9 +1058,7 @@ pub async fn save_watch_subscriptions(
 }
 
 #[tauri::command]
-pub async fn list_included_entries(
-    project_root: String,
-) -> Result<Vec<IncludedEntryDto>, String> {
+pub async fn list_included_entries(project_root: String) -> Result<Vec<IncludedEntryDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = gated_root(&project_root)?;
         match read_text_inside(&root, "papers/included.md")? {
@@ -1075,9 +1110,11 @@ pub async fn download_paper_pdf(
             .map_err(|e| format!("校验项目目录失败: {e}"))??
     };
     let bytes = fetch_pdf_bytes(&url).await?;
-    tauri::async_runtime::spawn_blocking(move || save_and_register_pdf(&root, &file_name_hint, &bytes))
-        .await
-        .map_err(|e| format!("保存 PDF 失败: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        save_and_register_pdf(&root, &file_name_hint, &bytes)
+    })
+    .await
+    .map_err(|e| format!("保存 PDF 失败: {e}"))?
 }
 
 /// 关联本地 PDF（精读清单/新命中的「关联本地 PDF…」）：付费墙等自动下载失败的场景，
@@ -1101,7 +1138,8 @@ mod tests {
     use super::*;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ccode-litwatch-{name}-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("ccode-litwatch-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         // 生产路径下 root 恒为剥过 verbatim 的 canonical（ensure_task_project_root），测试同口径
         crate::paths::canonicalize_plain(&dir).unwrap()
@@ -1237,7 +1275,11 @@ mod tests {
 
     // ===== 雷达筛选（metrics_pass_filter 纯判定；指标未知放行不误伤） =====
 
-    fn metrics(if_: Option<&str>, quartile: Option<u8>, top: bool) -> crate::journal_metrics::JournalMetricsDto {
+    fn metrics(
+        if_: Option<&str>,
+        quartile: Option<u8>,
+        top: bool,
+    ) -> crate::journal_metrics::JournalMetricsDto {
         crate::journal_metrics::JournalMetricsDto {
             impact_factor: if_.map(|s| s.to_string()),
             cas_quartile: quartile,
@@ -1250,7 +1292,10 @@ mod tests {
         let f = crate::projects::LitWatchFilterDto::default();
         assert!(f.is_inert());
         assert!(metrics_pass_filter(None, &f));
-        assert!(metrics_pass_filter(Some(&metrics(Some("1.0"), Some(4), false)), &f));
+        assert!(metrics_pass_filter(
+            Some(&metrics(Some("1.0"), Some(4), false)),
+            &f
+        ));
     }
 
     #[test]
@@ -1259,12 +1304,27 @@ mod tests {
             min_if: Some(10.0),
             ..Default::default()
         };
-        assert!(metrics_pass_filter(Some(&metrics(Some("29.1"), None, false)), &f));
-        assert!(!metrics_pass_filter(Some(&metrics(Some("3.9"), None, false)), &f));
+        assert!(metrics_pass_filter(
+            Some(&metrics(Some("29.1"), None, false)),
+            &f
+        ));
+        assert!(!metrics_pass_filter(
+            Some(&metrics(Some("3.9"), None, false)),
+            &f
+        ));
         // 恰好等于阈值通过；IF 缺失/不可解析 = 未知 → 放行
-        assert!(metrics_pass_filter(Some(&metrics(Some("10"), None, false)), &f));
-        assert!(metrics_pass_filter(Some(&metrics(None, Some(4), false)), &f));
-        assert!(metrics_pass_filter(Some(&metrics(Some("N/A"), None, false)), &f));
+        assert!(metrics_pass_filter(
+            Some(&metrics(Some("10"), None, false)),
+            &f
+        ));
+        assert!(metrics_pass_filter(
+            Some(&metrics(None, Some(4), false)),
+            &f
+        ));
+        assert!(metrics_pass_filter(
+            Some(&metrics(Some("N/A"), None, false)),
+            &f
+        ));
         assert!(metrics_pass_filter(None, &f));
     }
 
@@ -1274,9 +1334,18 @@ mod tests {
             max_cas_quartile: Some(2),
             ..Default::default()
         };
-        assert!(metrics_pass_filter(Some(&metrics(None, Some(1), false)), &q2));
-        assert!(metrics_pass_filter(Some(&metrics(None, Some(2), false)), &q2));
-        assert!(!metrics_pass_filter(Some(&metrics(None, Some(3), false)), &q2));
+        assert!(metrics_pass_filter(
+            Some(&metrics(None, Some(1), false)),
+            &q2
+        ));
+        assert!(metrics_pass_filter(
+            Some(&metrics(None, Some(2), false)),
+            &q2
+        ));
+        assert!(!metrics_pass_filter(
+            Some(&metrics(None, Some(3), false)),
+            &q2
+        ));
         // 分区未知放行
         assert!(metrics_pass_filter(Some(&metrics(None, None, false)), &q2));
 
@@ -1285,7 +1354,10 @@ mod tests {
             ..Default::default()
         };
         assert!(metrics_pass_filter(Some(&metrics(None, None, true)), &top));
-        assert!(!metrics_pass_filter(Some(&metrics(None, None, false)), &top));
+        assert!(!metrics_pass_filter(
+            Some(&metrics(None, None, false)),
+            &top
+        ));
         // 指标完全未知放行不误伤
         assert!(metrics_pass_filter(None, &top));
     }
@@ -1297,11 +1369,23 @@ mod tests {
             max_cas_quartile: Some(2),
             top_only: true,
         };
-        assert!(metrics_pass_filter(Some(&metrics(Some("19.9"), Some(1), true)), &f));
+        assert!(metrics_pass_filter(
+            Some(&metrics(Some("19.9"), Some(1), true)),
+            &f
+        ));
         // 任一条件不达标即排除
-        assert!(!metrics_pass_filter(Some(&metrics(Some("5.0"), Some(1), true)), &f));
-        assert!(!metrics_pass_filter(Some(&metrics(Some("19.9"), Some(3), true)), &f));
-        assert!(!metrics_pass_filter(Some(&metrics(Some("19.9"), Some(1), false)), &f));
+        assert!(!metrics_pass_filter(
+            Some(&metrics(Some("5.0"), Some(1), true)),
+            &f
+        ));
+        assert!(!metrics_pass_filter(
+            Some(&metrics(Some("19.9"), Some(3), true)),
+            &f
+        ));
+        assert!(!metrics_pass_filter(
+            Some(&metrics(Some("19.9"), Some(1), false)),
+            &f
+        ));
     }
 
     #[test]
@@ -1387,11 +1471,25 @@ lone keyword
     fn included_add_list_remove_round_trip_and_dedup() {
         let dir = tmpdir("included");
         // add：文件/父目录不存在则建
-        let r = add_included_at(&dir, "Perovskite Solar Cells: A Review", "Zhang S, 2025", "Adv. Mater.", "10.1000/x1").unwrap();
+        let r = add_included_at(
+            &dir,
+            "Perovskite Solar Cells: A Review",
+            "Zhang S, 2025",
+            "Adv. Mater.",
+            "10.1000/x1",
+        )
+        .unwrap();
         assert!(r.added);
         assert!(dir.join("papers/included.md").exists());
         // 同标题第二次（大小写/标点差异）→ 去重 added:false
-        let r2 = add_included_at(&dir, "perovskite solar cells a review", "Li M, 2026", "JACS", "10.1000/x2").unwrap();
+        let r2 = add_included_at(
+            &dir,
+            "perovskite solar cells a review",
+            "Li M, 2026",
+            "JACS",
+            "10.1000/x2",
+        )
+        .unwrap();
         assert!(!r2.added);
         // 不同标题正常追加；空字段标「待补」
         let r3 = add_included_at(&dir, "另一篇论文", "", "", "").unwrap();
@@ -1406,7 +1504,10 @@ lone keyword
         assert_eq!(list[0].source, "Adv. Mater.");
         assert_eq!(list[0].link, "10.1000/x1");
         assert!(list[0].line_id.starts_with("i-"));
-        assert_eq!(list[0].raw_line, "Perovskite Solar Cells: A Review — Zhang S, 2025 — Adv. Mater. — 10.1000/x1");
+        assert_eq!(
+            list[0].raw_line,
+            "Perovskite Solar Cells: A Review — Zhang S, 2025 — Adv. Mater. — 10.1000/x1"
+        );
         // remove：按 line_id 精确匹配
         remove_included_at(&dir, &list[0].line_id).unwrap();
         let text2 = fs::read_to_string(dir.join("papers/included.md")).unwrap();
@@ -1440,7 +1541,11 @@ lone keyword
         // 限长：总长度不超过 主干上限 + .pdf
         let long = "字".repeat(300);
         let name = sanitize_pdf_name(&long);
-        assert!(name.chars().count() <= FILE_STEM_CAP + 4, "{}", name.chars().count());
+        assert!(
+            name.chars().count() <= FILE_STEM_CAP + 4,
+            "{}",
+            name.chars().count()
+        );
         assert!(name.ends_with(".pdf"));
         // 重名避让 -2/-3
         let dir = tmpdir("dup");
@@ -1458,7 +1563,11 @@ lone keyword
     fn save_pdf_registers_resource_in_project_toml() {
         let dir = tmpdir("save");
         let dto = save_and_register_pdf(&dir, "my paper", b"%PDF-1.7 fake").unwrap();
-        assert!(std::path::Path::new(&dto.path).ends_with("papers/my paper.pdf"), "{}", dto.path);
+        assert!(
+            std::path::Path::new(&dto.path).ends_with("papers/my paper.pdf"),
+            "{}",
+            dto.path
+        );
         assert_eq!(dto.name, "my paper");
         let cfg = crate::projects::read_config_at(&dir).config;
         assert_eq!(cfg.resources.len(), 1);
@@ -1467,7 +1576,11 @@ lone keyword
         assert_eq!(cfg.resources[0].path, "papers/my paper.pdf");
         // 同 hint 再下载：文件避让 -2，资源另登记一条
         let dto2 = save_and_register_pdf(&dir, "my paper", b"%PDF-1.7 fake2").unwrap();
-        assert!(std::path::Path::new(&dto2.path).ends_with("papers/my paper-2.pdf"), "{}", dto2.path);
+        assert!(
+            std::path::Path::new(&dto2.path).ends_with("papers/my paper-2.pdf"),
+            "{}",
+            dto2.path
+        );
         let cfg2 = crate::projects::read_config_at(&dir).config;
         assert_eq!(cfg2.resources.len(), 2);
         fs::remove_dir_all(&dir).ok();
@@ -1480,7 +1593,11 @@ lone keyword
         let src = src_dir.join("手动下载.pdf");
         fs::write(&src, b"%PDF-1.7 body").unwrap();
         let dto = attach_pdf_at(&dir, src.to_str().unwrap(), "My Paper Title").unwrap();
-        assert!(std::path::Path::new(&dto.path).ends_with("papers/My Paper Title.pdf"), "{}", dto.path);
+        assert!(
+            std::path::Path::new(&dto.path).ends_with("papers/My Paper Title.pdf"),
+            "{}",
+            dto.path
+        );
         assert_eq!(dto.name, "My Paper Title");
         // 复制而非移动：源文件还在
         assert!(src.exists());
@@ -1534,9 +1651,8 @@ lone keyword
         save_explain_at(&dir, "Perovskite Solar Cells: A Review", "问题与动机\n正文").unwrap();
         assert!(save_explain_at(&dir, "", "x").is_err());
         assert!(save_explain_at(&dir, "x", "  ").is_err());
-        let mut entries = parse_inbox_entries(
-            "## Perovskite Solar Cells: A Review\n- 摘要首句：We present.\n",
-        );
+        let mut entries =
+            parse_inbox_entries("## Perovskite Solar Cells: A Review\n- 摘要首句：We present.\n");
         attach_explains(&dir, &mut entries);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].explain.as_deref(), Some("问题与动机\n正文"));

@@ -13,14 +13,29 @@
       "name": "文献检索与筛选",
       "role": "both",
       "workspaceName": "lit-search",
-      "brief": "输入：课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源推断一个最可能的主题，写进 papers/screening.md 开头「检索主题假设」一节，并按该假设执行到底，不留「待定」）。全程按 lit-search 技能执行。全局设定若写了「综述深度：严格档」，按技能严格档（引用扩展强制、screening 末尾 PRISMA-S 最小披露）；未写或标准档则按技能默认标准档。本文仍是单人筛选，不是双人系统综述，Methods 里如实声明。\n1. 制定纳入/排除标准（年份、语言、来源级别、相关性口径），写进 papers/screening.md。**先粗检一轮报数再定标准**：用主题词在 OpenAlex 粗查命中量，把「命中约 N 篇」与你建议的标准写进 .ccode/help-wanted.md 问用户一句（附兜底：若未回复则按你建议的标准继续），写完不要停工、按兜底往下做。——标准松紧取决于命中量，开工前问用户等于让他在没有数字的时候猜；\n2. 先解析人工导入的题录（RIS/BibTeX/CSV），三处都要看：① 本文件「项目根」下 papers/imports/；② 工作区内 papers/imports/；③ 「项目资源」段类型为「引文」的条目、以及「上一步产物（提货单）」段中来自「人工交付」的条目——后两类给绝对路径，按路径直读、勿复制。都没有才跳过。解析后按 lit-search 技能口径去重合并进候选池，每条保留来源标注；\n3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式、检索日期与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；末尾写覆盖缺口声明（哪些库没检）；\n4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律纳入并标注「待确认」，不允许自行裁掉；\n5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI）；\n6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR + TI/DO/UR 尽力而为，缺字段留空不编造），供用户一键导入 Zotero 建成待获取列表。\n完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris 均存在（无付费文献则 to-fetch 两个文件注明为空），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。",
+      "brief": "输入：课题主题（见上方「课题主题」段；未填写时按项目目录与已有资源推断一个最可能的主题，写进 papers/screening.md 开头「检索主题假设」一节，并按该假设执行到底，不留「待定」）。全程按 lit-search 技能执行。全局设定若写了「综述深度：严格档」，按技能严格档（引用扩展强制、screening 末尾 PRISMA-S 最小披露）；未写或标准档则按技能默认标准档。本文仍是单人筛选，不是双人系统综述，Methods 里如实声明。\n1. 制定纳入/排除标准（年份、语言、来源级别、相关性口径），写进 papers/screening.md。**先粗检一轮报数再定标准**：用主题词在 OpenAlex 粗查命中量，把「命中约 N 篇」与你建议的标准写进 .ccode/help-wanted.md 问用户一句（附兜底：若未回复则按你建议的标准继续），写完不要停工、按兜底往下做。——标准松紧取决于命中量，开工前问用户等于让他在没有数字的时候猜；\n2. 先解析人工导入的题录（RIS/BibTeX/CSV），三处都要看：① 本文件「项目根」下 papers/imports/；② 工作区内 papers/imports/；③ 「项目资源」段类型为「引文」的条目、以及「上一步产物（提货单）」段中来自「人工交付」的条目——后两类给绝对路径，按路径直读、勿复制。都没有才跳过。解析后按 lit-search 技能口径去重合并进候选池，每条保留来源标注；\n3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式、检索日期与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；末尾写覆盖缺口声明（哪些库没检）；\n4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律纳入并标注「待确认」，不允许自行裁掉；\n5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI），并同步写入 papers/included.json（每篇一条，至少含唯一 id、title、decision、reason）；\n6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR + TI/DO/UR 尽力而为，缺字段留空不编造），供用户一键导入 Zotero 建成待获取列表。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 不得覆盖。\n完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris、papers/zotero-sync.md 均存在且非空（未启用或回落时报告原因；无付费文献则 to-fetch 两个文件注明为空），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。",
       "expectedArtifacts": [
         "papers/screening.md",
         "papers/included.md",
         "papers/to-fetch.md",
-        "papers/to-fetch.ris"
+        "papers/to-fetch.ris",
+        "papers/zotero-sync.md"
+      ],
+      "acceptanceCriteria": [
+        "所有必需预期产物均已生成且非空；目录/通配条目至少命中一个非空文件。",
+        "machine:file:papers/screening.md",
+        "machine:file:papers/included.md",
+        "machine:file:papers/to-fetch.md",
+        "machine:file:papers/to-fetch.ris",
+        "machine:file:papers/zotero-sync.md",
+        "machine:contains:papers/screening.md::检索日期",
+        "machine:records:papers/included.json::id,title,decision,reason"
       ],
       "skills": [
+        "lit-search",
+        "zotero-sync"
+      ],
+      "requiredSkills": [
         "lit-search"
       ],
       "asksLitSource": true,
@@ -42,13 +57,7 @@
           "optional": true
         }
       ],
-      "decisions": [],
-      "acceptanceCriteria": [
-        "所有必需预期产物均已生成且非空；目录/通配条目至少命中一个非空文件。"
-      ],
-      "requiredSkills": [
-        "lit-search"
-      ]
+      "decisions": []
     },
     {
       "name": "文献精读与笔记",
@@ -64,8 +73,17 @@
       ],
       "expectedArtifacts": [
         "notes/*.md",
+        "notes/index.json",
         "references.bib",
         "papers/to-fetch.md"
+      ],
+      "acceptanceCriteria": [
+        "所有必需预期产物均已生成且非空；目录/通配条目至少命中一个非空文件。",
+        "machine:count:notes/*.md>=1",
+        "machine:file:references.bib",
+        "machine:contains:papers/included.md::—",
+        "machine:records:notes/index.json::id,notePath,bibKey",
+        "正文引用键均能在 references.bib 解析；未解析键与待补元数据已列出。"
       ],
       "skills": [
         "lit-notes"
@@ -81,10 +99,6 @@
         }
       ],
       "decisions": [],
-      "acceptanceCriteria": [
-        "所有必需预期产物均已生成且非空；目录/通配条目至少命中一个非空文件。",
-        "正文引用键均能在 references.bib 解析；未解析键与待补元数据已列出。"
-      ],
       "requiredSkills": [
         "lit-notes"
       ]

@@ -24,6 +24,11 @@ export interface Profile {
   gatewayId?: string | null;
   /** 该 Agent 所需协议槽未填 */
   slotMissing?: boolean;
+  /** 连接状态机细分状态，由后端统一判定 */
+  connectionStatus?: string;
+  /** 绑定模型相对网关目录的同步状态 */
+  modelSyncStatus?: "synced" | "stale" | "missing" | "unknown" | string;
+  modelSyncNote?: string | null;
 }
 
 export type ProbeStatus = "never" | "passed" | "failed";
@@ -75,6 +80,8 @@ export interface ProtocolSlots {
 export interface GatewayModel {
   id: string;
   source: string;
+  status?: "available" | "stale" | string;
+  lastSeenAt?: string | null;
   temperature: number | null;
   topP: number | null;
   maxOutputTokens: number | null;
@@ -309,6 +316,8 @@ export interface SessionMetaDto {
   agent: string;
   sessionId: string;
   projectPath: string;
+  /** 原始会话工作目录；项目路径可能因 worktree 归并为主仓库 */
+  cwd?: string | null;
   title: string | null;
   createdAt: string | null;
   updatedAt: string | null;
@@ -562,6 +571,8 @@ export interface WorkspaceDiffDto {
   files: GitFileDto[];
   totalAdd: number;
   totalDel: number;
+  /** 无头/定时 Run 的只读评审视图，不对应科研 workspaces 记录。 */
+  reviewOnly?: boolean;
 }
 
 /** 人工事项（步骤的人机分工清单，声明在 project.toml steps[].human_tasks）：
@@ -981,6 +992,8 @@ export interface ProjectStepDto {
   expectedArtifacts: string[];
   /** 人可核对的内容级验收条件；路径存在只是最低门槛。 */
   acceptanceCriteria?: string[];
+  /** 决策暂停：auto_continue | soft_pause | hard_pause */
+  decisionMode?: "auto_continue" | "soft_pause" | "hard_pause" | string;
   /** 结构化输入依赖；相对项目根路径或上游提货单路径。缺省兼容旧配置。 */
   inputs?: string[];
   /** 可选输入：存在则读取，不存在不阻断步骤。 */
@@ -1318,6 +1331,30 @@ export interface RunDto {
   sentinel: boolean;
   createdAt: string;
   closedAt: string | null;
+  status: "running" | "completed" | "failed" | "stopped";
+  exitCode: number | null;
+  closeReason: string | null;
+  /** 归属的 Task；旧记录可能为空字符串。 */
+  taskId: string;
+  /** Custom Runtime 的稳定配置 id；普通 Runtime 为 null。 */
+  customRuntimeId: string | null;
+  capabilities: RuntimeCapabilitiesDto;
+}
+
+export interface RuntimeCapabilitiesDto {
+  canResume: boolean;
+  canStop: boolean;
+  streamsOutput: boolean;
+  canReview: boolean;
+  resumeReason: string | null;
+}
+
+export interface RunArtifactDto {
+  path: string;
+  kind: string;
+  producerRunId: string;
+  expected: boolean;
+  reviewStatus: string;
 }
 
 export interface CustomRuntimeDto {
@@ -1325,6 +1362,8 @@ export interface CustomRuntimeDto {
   name: string;
   command: string;
   args: string[];
+  env: Record<string, string>;
+  cwd: string | null;
   createdAt: string;
 }
 
@@ -1350,8 +1389,12 @@ export interface RunRecordDto {
   newEntries?: number | null;
   startedAt?: string | null;
   finishedAt?: string | null;
-  /** 本次运行时间窗内写入的项目相对路径（最多 50 条） */
+  /** 本次运行时间窗内写入的隔离树相对路径（最多 50 条） */
   artifacts?: string[];
+  runId?: string | null;
+  isolationPath?: string | null;
+  /** 隔离树产物是否已采纳进主仓 */
+  adopted?: boolean;
 }
 
   /** 定时任务（serde camelCase）；默认 lit-watch，也可运行技能库中的其它技能 */

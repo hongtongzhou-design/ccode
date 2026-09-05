@@ -97,7 +97,7 @@ export const searchFieldClass =
 
 /** hover 才现的低频操作：行挂 group，按钮用此类；键盘 Tab 聚焦（focus-visible）同样显示 */
 export const hoverRevealClass =
-  "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
+  "opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100 focus-visible:opacity-100";
 
 /** 行内悬浮操作钮（v3.93）：自带「锚点上方」应用内 tooltip——原生 title 渲染在光标下方，
  *  与胶囊动作栏视觉脱节；点击先收 tooltip 再透传事件（⋯ 要取按钮锚点定位菜单）。
@@ -146,15 +146,36 @@ export function SegTabs<T extends string>({
   onChange: (id: T) => void;
   className?: string;
 }) {
+  const selectedIndex = items.findIndex((item) => item.id === value);
   return (
-    <div className={`flex items-center gap-1 ${className}`} role="tablist">
+    <div
+      className={`flex items-center gap-1 ${className}`}
+      role="tablist"
+      onKeyDown={(event) => {
+        if (!items.length) return;
+        const current = selectedIndex < 0 ? 0 : selectedIndex;
+        const delta =
+          event.key === "ArrowRight" || event.key === "ArrowDown"
+            ? 1
+            : event.key === "ArrowLeft" || event.key === "ArrowUp"
+              ? -1
+              : 0;
+        if (!delta) return;
+        event.preventDefault();
+        onChange(items[(current + delta + items.length) % items.length].id);
+      }}
+    >
       {items.map((item) => (
         <button
           key={item.id}
           type="button"
           role="tab"
           aria-selected={value === item.id}
+          tabIndex={value === item.id ? 0 : -1}
           onClick={() => onChange(item.id)}
+          onFocus={() => {
+            if (value !== item.id) onChange(item.id);
+          }}
           className={`flex h-7 items-center rounded-full px-3 text-xs transition-colors ${
             value === item.id ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
           }`}

@@ -18,34 +18,75 @@ pub const DEFAULT_HOTKEY_HIDE_CHROME: &str = "mod+\\";
 pub const DEFAULT_HOTKEY_PAGE_SWITCH: bool = true;
 pub const DEFAULT_NAV_CAPSULE_HIDE_DELAY_MS: u32 = 1000;
 const KNOWN_THEMES: [&str; 16] = [
-    "midnight", "terracotta", "ayu", "mocha", "neutral", "dracula", "shadcn",
-    "midnight-light", "terracotta-light", "ayu-light", "mocha-light",
-    "neutral-light", "dracula-light", "shadcn-light",
-    "custom", "custom-light",
+    "midnight",
+    "terracotta",
+    "ayu",
+    "mocha",
+    "neutral",
+    "dracula",
+    "shadcn",
+    "midnight-light",
+    "terracotta-light",
+    "ayu-light",
+    "mocha-light",
+    "neutral-light",
+    "dracula-light",
+    "shadcn-light",
+    "custom",
+    "custom-light",
 ];
 /// 终端 ANSI 调色板：四套深色 + 四套配对浅色。
 /// 单一出处在前端 `src/terminal-palettes.ts` 的 PALETTE_LIST，此处是持久化白名单，两边须同步
 /// （不在名单里的值会被静默丢弃，表现为「设置页选了调色板但没生效」）。
 /// 启动页白名单（与前端 hotkeys.ts PAGE_HOTKEY_DEFS 同步）
 const KNOWN_PAGES: [&str; 9] = [
-    "workbench", "workspaces", "terminal", "sessions", "profiles",
-    "skills", "mcp", "stats", "settings",
+    "workbench",
+    "workspaces",
+    "terminal",
+    "sessions",
+    "profiles",
+    "skills",
+    "mcp",
+    "stats",
+    "settings",
 ];
 const KNOWN_PALETTES: [&str; 8] = [
-    "dark-plus", "solarized", "one-dark", "catppuccin",
-    "light-plus", "solarized-light", "one-light", "latte",
+    "dark-plus",
+    "solarized",
+    "one-dark",
+    "catppuccin",
+    "light-plus",
+    "solarized-light",
+    "one-light",
+    "latte",
 ];
 /// 会话页「⇗ 外部恢复」可选的终端应用；auto = 按平台优先级探测
 const KNOWN_EXTERNAL_TERMINALS: [&str; 10] = [
-    "auto", "ghostty", "iterm", "terminal", "powershell", "cmd",
-    "gnome-terminal", "konsole", "xfce4-terminal", "xterm",
+    "auto",
+    "ghostty",
+    "iterm",
+    "terminal",
+    "powershell",
+    "cmd",
+    "gnome-terminal",
+    "konsole",
+    "xfce4-terminal",
+    "xterm",
 ];
 const KNOWN_STARTUP_NAV_MODES: [&str; 3] = ["expanded", "collapsed", "hidden"];
 const KNOWN_NAV_CAPSULE_DELAYS_MS: [u32; 4] = [500, 1000, 2000, 5000];
 const KNOWN_NAV_CAPSULE_DISPLAY_MODES: [&str; 3] = ["both", "icons", "labels"];
 const KNOWN_NAV_CAPSULE_ITEMS: [&str; 10] = [
-    "quick-chat", "workbench", "workspaces", "terminal", "sessions",
-    "profiles", "skills", "mcp", "stats", "settings",
+    "quick-chat",
+    "workbench",
+    "workspaces",
+    "terminal",
+    "sessions",
+    "profiles",
+    "skills",
+    "mcp",
+    "stats",
+    "settings",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -260,9 +301,7 @@ pub fn validate_outbound_proxy(raw: &str) -> Result<(), String> {
     .iter()
     .any(|s| lower.starts_with(s));
     if !ok_scheme {
-        return Err(
-            "出网代理须是 http(s):// 或 socks5:// 地址，例如 http://127.0.0.1:7890".into(),
-        );
+        return Err("出网代理须是 http(s):// 或 socks5:// 地址，例如 http://127.0.0.1:7890".into());
     }
     let after = t.splitn(2, "://").nth(1).unwrap_or("");
     let hostport = after.split('/').next().unwrap_or("");
@@ -333,16 +372,14 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
     let custom_theme = sanitize_custom_theme(s.custom_theme);
     let custom_themes = sanitize_custom_theme_cards(s.custom_themes);
     let custom_theme_card_id = s.custom_theme_card_id.filter(|id| {
-        custom_themes.as_ref().is_some_and(|cs| {
-            cs.iter().any(|c| c.id.as_deref() == Some(id.as_str()))
-        })
+        custom_themes
+            .as_ref()
+            .is_some_and(|cs| cs.iter().any(|c| c.id.as_deref() == Some(id.as_str())))
     });
     let theme = {
         let t = s.theme.filter(|t| KNOWN_THEMES.contains(&t.as_str()));
         match t.as_deref() {
-            Some("custom" | "custom-light") if custom_theme.is_none() => {
-                DEFAULT_THEME.to_string()
-            }
+            Some("custom" | "custom-light") if custom_theme.is_none() => DEFAULT_THEME.to_string(),
             Some(v) => v.to_string(),
             None => DEFAULT_THEME.to_string(),
         }
@@ -369,9 +406,7 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         // 按功能配置不做默认值填充：键缺失即「跟随默认」
         ai_profiles: s.ai_profiles,
         default_profiles: s.default_profiles,
-        start_page: s
-            .start_page
-            .filter(|p| KNOWN_PAGES.contains(&p.as_str())),
+        start_page: s.start_page.filter(|p| KNOWN_PAGES.contains(&p.as_str())),
         startup_nav_mode: s
             .startup_nav_mode
             .filter(|m| KNOWN_STARTUP_NAV_MODES.contains(&m.as_str())),
@@ -616,11 +651,7 @@ pub(crate) fn rewrite_profile_refs(rewrites: &[(String, String)]) {
 // ===== 「设为全局」追踪（active_global_profiles；见字段注释的口径说明） =====
 
 /// 记录/清除的共用内核（测试可注入路径）：Some(id) 记录或覆盖，None 清除；空 map 归一 None
-fn set_active_global_at(
-    path: &Path,
-    agent: &str,
-    profile_id: Option<&str>,
-) -> Result<(), String> {
+fn set_active_global_at(path: &Path, agent: &str, profile_id: Option<&str>) -> Result<(), String> {
     let mut cur = read_from(path);
     let mut map = cur.active_global_profiles.unwrap_or_default();
     match profile_id {
@@ -652,19 +683,13 @@ pub(crate) fn record_active_global(agent: &str, profile_id: &str) {
 pub(crate) fn clear_active_global(agent: &str) {
     if let Ok(path) = settings_path() {
         if let Err(e) = set_active_global_at(&path, agent, None) {
-            crate::logbuf::record(
-                "error",
-                "settings",
-                &format!("清除全局生效标记失败: {e}"),
-            );
+            crate::logbuf::record("error", "settings", &format!("清除全局生效标记失败: {e}"));
         }
     }
 }
 
 pub(crate) fn read_current() -> AppSettingsDto {
-    settings_path()
-        .map(|p| read_from(&p))
-        .unwrap_or_default()
+    settings_path().map(|p| read_from(&p)).unwrap_or_default()
 }
 
 pub(crate) fn current_with_defaults() -> AppSettingsDto {
@@ -690,7 +715,10 @@ pub(crate) fn hooks_attention_enabled(s: &AppSettingsDto, agent: &str) -> bool {
 
 /// hooks::set_hooks_attention 专用：逐键读-改-写（持 profiles 锁防并发 patch 互相覆盖，
 /// 与 update_settings 同一把锁），顺带把旧字段迁移进新 map
-pub(crate) fn set_hooks_attention_entry(agent: &str, enabled: bool) -> Result<AppSettingsDto, String> {
+pub(crate) fn set_hooks_attention_entry(
+    agent: &str,
+    enabled: bool,
+) -> Result<AppSettingsDto, String> {
     let _g = crate::profiles::store_lock();
     set_hooks_attention_entry_at(&settings_path()?, agent, enabled)
 }
@@ -767,7 +795,11 @@ mod tests {
         set_active_global_at(&p, "kimi", Some("prof-2")).unwrap();
         let cur = read_from(&p);
         assert_eq!(
-            cur.active_global_profiles.as_ref().unwrap().get("codex").map(String::as_str),
+            cur.active_global_profiles
+                .as_ref()
+                .unwrap()
+                .get("codex")
+                .map(String::as_str),
             Some("prof-1")
         );
         // 同 agent 再记录 = 覆盖（切换「设为全局」的对象）
@@ -803,7 +835,10 @@ mod tests {
         assert_eq!(full.startup_nav_mode.as_deref(), Some("hidden"));
         assert_eq!(full.nav_capsule_hide_delay_ms, Some(2000));
         assert_eq!(full.nav_capsule_display_mode.as_deref(), Some("icons"));
-        assert_eq!(full.nav_capsule_visible_items, Some(vec!["workbench".into(), "settings".into()]));
+        assert_eq!(
+            full.nav_capsule_visible_items,
+            Some(vec!["workbench".into(), "settings".into()])
+        );
 
         let mut invalid = read_from(&p);
         merge(
@@ -820,7 +855,10 @@ mod tests {
         assert_eq!(invalid_full.startup_nav_mode, None);
         assert_eq!(invalid_full.nav_capsule_hide_delay_ms, Some(1000));
         assert_eq!(invalid_full.nav_capsule_display_mode, None);
-        assert_eq!(invalid_full.nav_capsule_visible_items, Some(vec!["workbench".into()]));
+        assert_eq!(
+            invalid_full.nav_capsule_visible_items,
+            Some(vec!["workbench".into()])
+        );
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 
@@ -847,7 +885,11 @@ mod tests {
         );
         write_to(&p, &cur).unwrap();
         let full = with_defaults(read_from(&p));
-        assert_eq!(full.terminal_font_size, Some(15), "前次写入的字段不被后续 patch 覆盖");
+        assert_eq!(
+            full.terminal_font_size,
+            Some(15),
+            "前次写入的字段不被后续 patch 覆盖"
+        );
         assert_eq!(full.theme.as_deref(), Some("dracula"));
         assert_eq!(full.brew_mirror, Some(true));
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
@@ -1034,7 +1076,13 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("claude-code".to_string(), true);
         m.insert("kimi".to_string(), false);
-        merge(&mut cur, AppSettingsDto { hooks_attention: Some(m), ..Default::default() });
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                hooks_attention: Some(m),
+                ..Default::default()
+            },
+        );
         write_to(&p, &cur).unwrap();
         let full = with_defaults(read_from(&p));
         let map = full.hooks_attention.unwrap();
@@ -1061,15 +1109,28 @@ mod tests {
         assert!(hooks_attention_enabled(&read_from(&p), "claude-code"));
         assert!(!hooks_attention_enabled(&read_from(&p), "kimi"));
         // 新 map 已有 claude-code 键时以新 map 为准（旧 true 不覆盖显式 false）
-        std::fs::write(&p, r#"{"claudeHooksAttention": true, "hooksAttention": {"claude-code": false}}"#).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"claudeHooksAttention": true, "hooksAttention": {"claude-code": false}}"#,
+        )
+        .unwrap();
         assert!(!hooks_attention_enabled(&read_from(&p), "claude-code"));
         // 专用写入：逐键读写 + 顺带迁移旧字段，写出后旧字段消失
         let full = set_hooks_attention_entry_at(&p, "qwen", true).unwrap();
-        assert_eq!(full.hooks_attention.as_ref().unwrap().get("qwen"), Some(&true));
+        assert_eq!(
+            full.hooks_attention.as_ref().unwrap().get("qwen"),
+            Some(&true)
+        );
         let disk = std::fs::read_to_string(&p).unwrap();
-        assert!(!disk.contains("claudeHooksAttention"), "旧字段随迁移从磁盘消失");
+        assert!(
+            !disk.contains("claudeHooksAttention"),
+            "旧字段随迁移从磁盘消失"
+        );
         let v: serde_json::Value = serde_json::from_str(&disk).unwrap();
-        assert_eq!(v["hooksAttention"]["claude-code"], false, "迁移以新 map 为准");
+        assert_eq!(
+            v["hooksAttention"]["claude-code"], false,
+            "迁移以新 map 为准"
+        );
         assert_eq!(v["hooksAttention"]["qwen"], true);
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
@@ -1082,10 +1143,17 @@ mod tests {
         let mut cur = read_from(&p);
         merge(
             &mut cur,
-            AppSettingsDto { discuss_readonly: Some(false), ..Default::default() },
+            AppSettingsDto {
+                discuss_readonly: Some(false),
+                ..Default::default()
+            },
         );
         write_to(&p, &cur).unwrap();
-        assert_eq!(with_defaults(read_from(&p)).discuss_readonly, Some(false), "写读往返");
+        assert_eq!(
+            with_defaults(read_from(&p)).discuss_readonly,
+            Some(false),
+            "写读往返"
+        );
         // 无关 patch 不动该字段
         let mut cur2 = read_from(&p);
         merge(&mut cur2, AppSettingsDto::default());
@@ -1126,7 +1194,9 @@ mod tests {
             outbound_no_proxy: Some("localhost,example.com".into()),
             ..Default::default()
         });
-        assert!(custom.iter().any(|(k, v)| k == "NO_PROXY" && v == "localhost,example.com"));
+        assert!(custom
+            .iter()
+            .any(|(k, v)| k == "NO_PROXY" && v == "localhost,example.com"));
 
         let bad = official_outbound_env_from(&AppSettingsDto {
             outbound_proxy: Some("not-a-url".into()),

@@ -180,7 +180,9 @@ pub fn merge_journal_path() -> Result<PathBuf, String> {
 
 pub fn read_json_vec<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>, String> {
     match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("解析 {} 失败: {e}", path.display())),
+        Ok(text) => {
+            serde_json::from_str(&text).map_err(|e| format!("解析 {} 失败: {e}", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("读取 {} 失败: {e}", path.display())),
     }
@@ -242,9 +244,9 @@ pub fn restore_merged_bindings(
         if bindings.iter().any(|b| b.id == e.discarded_id) {
             continue;
         }
-        let collision = bindings.iter().any(|b| {
-            b.agent == e.agent && b.gateway_id.as_deref() == Some(e.gateway_id.as_str())
-        });
+        let collision = bindings
+            .iter()
+            .any(|b| b.agent == e.agent && b.gateway_id.as_deref() == Some(e.gateway_id.as_str()));
         let gid = if collision {
             let Some(src) = gateways.iter().find(|g| g.id == e.gateway_id).cloned() else {
                 continue;
@@ -283,7 +285,11 @@ pub fn restore_merged_bindings(
 
 // ===== 物化 =====
 
-pub fn materialize(binding: &Binding, gateway: Option<&Gateway>, selected_model: Option<&str>) -> Profile {
+pub fn materialize(
+    binding: &Binding,
+    gateway: Option<&Gateway>,
+    selected_model: Option<&str>,
+) -> Profile {
     let official = binding.kind == BindingKind::Official;
     let (name, no_auth, key_hint, has_key, header_env, slot_url, slot_missing, models_policy) =
         if official {
@@ -339,6 +345,9 @@ pub fn materialize(binding: &Binding, gateway: Option<&Gateway>, selected_model:
         request_policy.reasoning_effort = m.reasoning_effort.clone();
     }
 
+    let (connection_status, model_sync_status, model_sync_note) =
+        connection_state(binding, gateway, slot_missing, has_key, official);
+
     Profile {
         id: binding.id.clone(),
         agent: binding.agent.clone(),
@@ -361,8 +370,115 @@ pub fn materialize(binding: &Binding, gateway: Option<&Gateway>, selected_model:
         has_key,
         gateway_id: binding.gateway_id.clone(),
         slot_missing,
+        connection_status,
+        model_sync_status,
+        model_sync_note,
         provider_override: None,
     }
+}
+
+fn connection_state(
+    binding: &Binding,
+    gateway: Option<&Gateway>,
+    slot_missing: bool,
+    has_key: bool,
+    official: bool,
+) -> (String, String, Option<String>) {
+    if official {
+        return ("official".into(), "unknown".into(), None);
+    }
+    let Some(gateway) = gateway else {
+        return (
+            "gateway_missing".into(),
+            "missing".into(),
+            Some("绑定的网关已不存在".into()),
+        );
+    };
+    let model_ids: std::collections::HashSet<&str> =
+        gateway.models.iter().map(|m| m.id.as_str()).collect();
+    let missing: Vec<&str> = binding
+        .models
+        .iter()
+        .filter(|m| !model_ids.contains(m.as_str()))
+        .map(String::as_str)
+        .collect();
+    let stale: Vec<&str> = binding
+        .models
+        .iter()
+        .filter(|m| {
+            gateway
+                .models
+                .iter()
+                .any(|g| g.id == **m && g.status == "stale")
+        })
+        .map(String::as_str)
+        .collect();
+    let model_sync = if binding.models.is_empty() || gateway.models.is_empty() {
+        ("unknown".into(), None)
+    } else if !missing.is_empty() {
+        (
+            "missing".into(),
+            Some(format!("绑定模型不在网关目录：{}", missing.join("、"))),
+        )
+    } else if !stale.is_empty() {
+        (
+            "stale".into(),
+            Some(format!("网关目录已标记历史失效：{}", stale.join("、"))),
+        )
+    } else {
+        ("synced".into(), None)
+    };
+    let status = if slot_missing {
+        "slot_missing"
+    } else if !gateway.no_auth && !has_key {
+        "credential_missing"
+    } else {
+        let slot = slot_for_agent(&binding.agent, binding.protocol.as_deref());
+        let probe = gateway
+            .last_probe
+            .iter()
+            .filter(|p| p.slot == slot.as_str())
+            .max_by_key(|p| p.probed_at.as_str());
+        match probe.map(|p| p.basic) {
+            Some(crate::profiles::ProbeStatus::Failed) => "probe_failed",
+            Some(crate::profiles::ProbeStatus::Passed) => {
+                if model_sync.0 == "missing" || model_sync.0 == "stale" {
+                    "model_unsynced"
+                } else if gateway
+                    .catalog_fetched_at
+                    .as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .is_some_and(|t| {
+                        chrono::Utc::now() - t.with_timezone(&chrono::Utc)
+                            > chrono::Duration::days(7)
+                    })
+                {
+                    "catalog_stale"
+                } else {
+                    "ready"
+                }
+            }
+            _ => "untested",
+        }
+    };
+    (status.into(), model_sync.0, model_sync.1)
+}
+
+pub fn refresh_profile_connection_state(
+    profile: &mut Profile,
+    binding: &Binding,
+    gateway: Option<&Gateway>,
+) {
+    let (connection_status, model_sync_status, model_sync_note) = connection_state(
+        binding,
+        gateway,
+        profile.slot_missing,
+        profile.has_key,
+        profile.account_type == crate::profiles::AccountType::Official,
+    );
+    profile.connection_status = connection_status;
+    profile.model_sync_status = model_sync_status;
+    profile.model_sync_note = model_sync_note;
 }
 
 // ===== 迁移 =====
@@ -396,6 +512,8 @@ fn apply_policy_to_models(
             models.push(GatewayModel {
                 id: id.clone(),
                 source: "user".into(),
+                status: "available".into(),
+                last_seen_at: None,
                 temperature: None,
                 top_p: None,
                 max_output_tokens: None,
@@ -406,7 +524,11 @@ fn apply_policy_to_models(
             merge_opt(&mut m.temperature, policy.temperature, newer);
             merge_opt(&mut m.top_p, policy.top_p, newer);
             merge_opt(&mut m.max_output_tokens, policy.max_output_tokens, newer);
-            merge_opt_s(&mut m.reasoning_effort, policy.reasoning_effort.clone(), newer);
+            merge_opt_s(
+                &mut m.reasoning_effort,
+                policy.reasoning_effort.clone(),
+                newer,
+            );
         }
     }
 }
@@ -423,7 +545,11 @@ fn merge_opt_s(slot: &mut Option<String>, incoming: Option<String>, newer: bool)
     merge_opt(slot, incoming, newer);
 }
 
-fn merge_headers(into: &mut BTreeMap<String, String>, from: &BTreeMap<String, String>, newer: bool) {
+fn merge_headers(
+    into: &mut BTreeMap<String, String>,
+    from: &BTreeMap<String, String>,
+    newer: bool,
+) {
     for (k, v) in from {
         if newer || !into.contains_key(k) {
             into.insert(k.clone(), v.clone());
@@ -483,7 +609,8 @@ pub fn migrate_from_profiles(
     let mut new_keys: HashMap<String, String> = HashMap::new();
 
     for (_gk, mut members) in groups {
-        members.sort_by(|a, b| last_used_rank(&b.last_used_at).cmp(last_used_rank(&a.last_used_at)));
+        members
+            .sort_by(|a, b| last_used_rank(&b.last_used_at).cmp(last_used_rank(&a.last_used_at)));
         // 同一密钥下按槽拆网关：同槽不同 URL 不能合
         let mut buckets: Vec<Vec<Profile>> = Vec::new();
         'place: for p in members {
@@ -545,7 +672,9 @@ pub fn migrate_from_profiles(
                 by_agent.entry(p.agent.clone()).or_default().push(p);
             }
             for (agent, mut list) in by_agent {
-                list.sort_by(|a, b| last_used_rank(&b.last_used_at).cmp(last_used_rank(&a.last_used_at)));
+                list.sort_by(|a, b| {
+                    last_used_rank(&b.last_used_at).cmp(last_used_rank(&a.last_used_at))
+                });
                 let kept = list[0];
                 let mut models_list = kept.models.clone();
                 let mut seen: HashSet<String> = models_list.iter().cloned().collect();
@@ -625,7 +754,14 @@ pub fn split_migrated() -> bool {
 mod tests {
     use super::*;
 
-    fn p(id: &str, agent: &str, name: &str, url: &str, models: &[&str], last: Option<&str>) -> Profile {
+    fn p(
+        id: &str,
+        agent: &str,
+        name: &str,
+        url: &str,
+        models: &[&str],
+        last: Option<&str>,
+    ) -> Profile {
         Profile {
             id: id.into(),
             agent: agent.into(),
@@ -647,6 +783,9 @@ mod tests {
             has_key: true,
             gateway_id: None,
             slot_missing: false,
+            connection_status: String::new(),
+            model_sync_status: String::new(),
+            model_sync_note: None,
             provider_override: None,
         }
     }
@@ -671,9 +810,23 @@ mod tests {
         keys.insert("p-claude".into(), "sk-same".into());
         keys.insert("p-codex".into(), "sk-same".into());
         let old = vec![
-            p("p-claude", "claude-code", "NewAPI", "https://api.example.com", &["claude-sonnet"], Some("2026-01-02")),
+            p(
+                "p-claude",
+                "claude-code",
+                "NewAPI",
+                "https://api.example.com",
+                &["claude-sonnet"],
+                Some("2026-01-02"),
+            ),
             {
-                let mut x = p("p-codex", "codex", "NewAPI", "https://api.example.com/v1", &["gpt-5"], Some("2026-01-01"));
+                let mut x = p(
+                    "p-codex",
+                    "codex",
+                    "NewAPI",
+                    "https://api.example.com/v1",
+                    &["gpt-5"],
+                    Some("2026-01-01"),
+                );
                 x.request_policy.reasoning_effort = Some("low".into());
                 x
             },
@@ -681,19 +834,37 @@ mod tests {
         let r = migrate_from_profiles(old, keys);
         assert_eq!(r.gateways.len(), 1);
         assert_eq!(r.bindings.len(), 2);
-        assert!(r.bindings.iter().all(|b| b.id == "p-claude" || b.id == "p-codex"));
+        assert!(r
+            .bindings
+            .iter()
+            .all(|b| b.id == "p-claude" || b.id == "p-codex"));
         let gw = &r.gateways[0];
-        assert!(gw.slots.anthropic.as_deref().unwrap().contains("example.com"));
+        assert!(gw
+            .slots
+            .anthropic
+            .as_deref()
+            .unwrap()
+            .contains("example.com"));
         assert!(gw.slots.responses.as_deref().unwrap().contains("/v1"));
         assert_eq!(r.keys.len(), 1);
         assert!(r.keys.contains_key(&gw.id));
         // 策略摊到各自模型
         assert_eq!(
-            gw.models.iter().find(|m| m.id == "claude-sonnet").unwrap().reasoning_effort.as_deref(),
+            gw.models
+                .iter()
+                .find(|m| m.id == "claude-sonnet")
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
             Some("high")
         );
         assert_eq!(
-            gw.models.iter().find(|m| m.id == "gpt-5").unwrap().reasoning_effort.as_deref(),
+            gw.models
+                .iter()
+                .find(|m| m.id == "gpt-5")
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
             Some("low")
         );
     }
@@ -704,8 +875,22 @@ mod tests {
         keys.insert("a".into(), "sk-same".into());
         keys.insert("b".into(), "sk-same".into());
         let old = vec![
-            p("a", "claude-code", "A", "https://one.example.com", &["m1"], None),
-            p("b", "claude-code", "B", "https://two.example.com", &["m2"], None),
+            p(
+                "a",
+                "claude-code",
+                "A",
+                "https://one.example.com",
+                &["m1"],
+                None,
+            ),
+            p(
+                "b",
+                "claude-code",
+                "B",
+                "https://two.example.com",
+                &["m2"],
+                None,
+            ),
         ];
         let r = migrate_from_profiles(old, keys);
         assert_eq!(r.gateways.len(), 2);
@@ -718,8 +903,22 @@ mod tests {
         keys.insert("work".into(), "sk-same".into());
         keys.insert("cheap".into(), "sk-same".into());
         let old = vec![
-            p("work", "claude-code", "工作", "https://api.example.com", &["opus", "sonnet"], Some("2026-08-02")),
-            p("cheap", "claude-code", "省钱", "https://api.example.com", &["sonnet", "haiku"], Some("2026-08-01")),
+            p(
+                "work",
+                "claude-code",
+                "工作",
+                "https://api.example.com",
+                &["opus", "sonnet"],
+                Some("2026-08-02"),
+            ),
+            p(
+                "cheap",
+                "claude-code",
+                "省钱",
+                "https://api.example.com",
+                &["sonnet", "haiku"],
+                Some("2026-08-01"),
+            ),
         ];
         let r = migrate_from_profiles(old, keys);
         assert_eq!(r.gateways.len(), 1);
@@ -758,12 +957,28 @@ mod tests {
         let mut keys = HashMap::new();
         keys.insert("new".into(), "sk".into());
         keys.insert("old".into(), "sk".into());
-        let mut newer = p("new", "claude-code", "A", "https://api.example.com", &["m1"], Some("2026-08-02"));
+        let mut newer = p(
+            "new",
+            "claude-code",
+            "A",
+            "https://api.example.com",
+            &["m1"],
+            Some("2026-08-02"),
+        );
         newer.request_policy.reasoning_effort = Some("high".into());
-        let mut older = p("old", "claude-code", "B", "https://api.example.com", &["m1"], Some("2026-08-01"));
+        let mut older = p(
+            "old",
+            "claude-code",
+            "B",
+            "https://api.example.com",
+            &["m1"],
+            Some("2026-08-01"),
+        );
         older.request_policy.reasoning_effort = Some("low".into());
         older.protocol = Some("anthropic".into());
-        older.extra_env.insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
+        older
+            .extra_env
+            .insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
         let r = migrate_from_profiles(vec![older, newer], keys);
         assert_eq!(
             r.gateways[0]
@@ -777,7 +992,10 @@ mod tests {
         );
         assert_eq!(r.journal.entries[0].protocol.as_deref(), Some("anthropic"));
         assert_eq!(
-            r.journal.entries[0].extra_env.get("HTTPS_PROXY").map(String::as_str),
+            r.journal.entries[0]
+                .extra_env
+                .get("HTTPS_PROXY")
+                .map(String::as_str),
             Some("http://127.0.0.1:7890")
         );
     }
@@ -907,6 +1125,8 @@ mod tests {
                 GatewayModel {
                     id: "first".into(),
                     source: "user".into(),
+                    status: "available".into(),
+                    last_seen_at: None,
                     temperature: Some(0.1),
                     top_p: None,
                     max_output_tokens: None,
@@ -915,6 +1135,8 @@ mod tests {
                 GatewayModel {
                     id: "second".into(),
                     source: "user".into(),
+                    status: "available".into(),
+                    last_seen_at: None,
                     temperature: Some(0.9),
                     top_p: None,
                     max_output_tokens: None,
@@ -938,9 +1160,15 @@ mod tests {
             last_used_at: None,
         };
         let first = materialize(&b, Some(&gw), None);
-        assert_eq!(first.request_policy.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(
+            first.request_policy.reasoning_effort.as_deref(),
+            Some("low")
+        );
         let second = materialize(&b, Some(&gw), Some("second"));
-        assert_eq!(second.request_policy.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            second.request_policy.reasoning_effort.as_deref(),
+            Some("high")
+        );
         assert_eq!(second.request_policy.temperature, Some(0.9));
     }
 

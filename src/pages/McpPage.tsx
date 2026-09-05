@@ -10,6 +10,7 @@ import type {
 } from "../types";
 import { confirmDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
+import { Modal } from "../components/Modal";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { mcpKindBadgeStyle, shortenCommand } from "../mcp-display";
 import {
@@ -34,6 +35,7 @@ import {
   fieldClass,
   RowAction,
   Toggle,
+  hoverRevealClass,
 } from "../components/PageFrame";
 import { MCP_PRESETS, type McpPreset } from "../mcp-presets";
 
@@ -227,7 +229,9 @@ export default function McpPage({ visible }: { visible: boolean }) {
       .then((m) => {
         if (!stale) setDistStatus((prev) => ({ ...prev, [expanded]: m }));
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!stale) toast("MCP 分发状态读取失败，可重新展开重试");
+      });
     return () => {
       stale = true;
     };
@@ -825,14 +829,23 @@ export default function McpPage({ visible }: { visible: boolean }) {
           </>
         }
       />
-      {error && <p className="text-sm text-err-text">{error}</p>}
-      {notice && <p className="text-sm text-ok-text">{notice}</p>}
+      {error && <p role="alert" className="text-sm text-err-text">{error}</p>}
+      {notice && <p role="status" className="text-sm text-ok-text">{notice}</p>}
       {loading ? (
         <p className="py-8 text-center text-sm text-l4">加载中…</p>
       ) : servers.length === 0 ? (
         <EmptyState
           title="还没有 MCP"
-          detail="点右上「+ 添加 MCP」创建。"
+          detail="这里会显示可供 Agent 使用的工具服务；点右上「+ 添加 MCP」创建。"
+          action={
+            <button
+              type="button"
+              className={primaryActionClass}
+              onClick={() => setModal({ id: null, form: { ...EMPTY_FORM } })}
+            >
+              添加 MCP
+            </button>
+          }
         />
       ) : (
         // 整表收进单张卡片容器（field 细边 + strip 底）+ 轻量表头：数据再少也有闭合边界，
@@ -967,7 +980,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     {/* 行内悬浮操作（v3.93）：↯ 测试连通 / ✎ 编辑 / ✕ 删除。
                         裸图标钮 hover 淡入，不套胶囊容器——实体栏压在列表行上层级脱节 */}
                     <span
-                      className="flex items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+                      className={`flex items-center ${hoverRevealClass} focus-within:opacity-100`}
                     >
                       <RowAction
                         icon="↯"
@@ -1149,17 +1162,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
       )}
 
       {modal && (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-          onClick={() => setModal(null)}
+        <Modal
+          open
+          title={modal.id ? "编辑 MCP" : "添加 MCP"}
+          onClose={() => setModal(null)}
+          size="md"
         >
-          <div
-            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline ccode-float-surface p-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="mb-3 text-base font-semibold text-l1">
-              {modal.id ? "编辑 MCP" : "添加 MCP"}
-            </h2>
             {modal.note && (
               <p className="-mt-2 mb-3 text-xs leading-5 text-l4">
                 {modal.note}
@@ -1302,24 +1310,13 @@ export default function McpPage({ visible }: { visible: boolean }) {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
       {/* 收编条目删除双选弹层：主选「仅从清单移除」不动 agent 侧原有配置（收编条目本是
           从 agent 配置读进来的，默认动作绝不能反向删用户原有配置）；影响面列表说明
           「连同删除」会碰哪些 agent（apps 全为 false 时不列） */}
       {deleteTarget && (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-          onClick={() => setDeleteTarget(null)}
-        >
-          <div
-            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline ccode-float-surface p-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="mb-1 text-base font-semibold text-l1">
-              删除 MCP「{deleteTarget.name}」？
-            </h2>
+        <Modal open title={`删除 MCP「${deleteTarget.name}」？`} onClose={() => setDeleteTarget(null)} size="md">
             <p className="text-xs leading-5 text-l4">
               该条目来自{mcpOriginLabel(deleteTarget.origin, AGENTS)}
               ，原本就在 agent 的配置里。
@@ -1356,23 +1353,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
             <p className="mt-1.5 text-right text-micro text-l4">
               仅从清单移除（推荐）：保留各 agent 配置中的该条目
             </p>
-          </div>
-        </div>
+        </Modal>
       )}
       {/* 「修复为绝对路径」多候选弹层：同一相对路径在多个基准目录下都命中时交给用户选
           （唯一命中走确认弹层不进这里；确认后走现有保存链路，origin/apps/last_check 保留） */}
       {fixTarget && (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-          onClick={() => setFixTarget(null)}
-        >
-          <div
-            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline ccode-float-surface p-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="mb-1 text-base font-semibold text-l1">
-              修复「{fixTarget.server.name}」为绝对路径
-            </h2>
+        <Modal open title={`修复「${fixTarget.server.name}」为绝对路径`} onClose={() => setFixTarget(null)} size="md">
             <p className="mb-3 text-xs leading-5 text-l4">
               该相对路径在多个目录下都找到了同名文件，请选择要使用的那个：
             </p>
@@ -1410,8 +1396,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                 取消
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
       {/* 顶部 ⋯ 更多菜单（低频入口）：收编现有配置 / 粘贴导入 */}
       {topMenu && (
@@ -1448,17 +1433,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
       )}
       {/* 收编现有配置：八家用户级配置里不在清单的 server */}
       {discoverOpen && (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-          onClick={() => setDiscoverOpen(false)}
-        >
-          <div
-            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline ccode-float-surface p-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="mb-1 text-base font-semibold text-l1">
-              收编现有配置
-            </h2>
+        <Modal open title="收编现有配置" onClose={() => setDiscoverOpen(false)} size="md">
             <p className="mb-3 text-xs leading-5 text-l4">
               这些 MCP 在 CLI 里已有、但不在 Ccode 清单中。收编后统一管理。
             </p>
@@ -1517,21 +1492,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
                 关闭
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* 粘贴导入：README/市场页的标准 mcpServers JSON 片段 */}
       {pasteOpen && (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-          onClick={() => setPasteOpen(false)}
-        >
-          <div
-            className="w-[480px] max-w-[90vw] rounded-lg border border-hairline ccode-float-surface p-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="mb-1 text-base font-semibold text-l1">粘贴导入</h2>
+        <Modal open title="粘贴导入" onClose={() => setPasteOpen(false)} size="md">
             <p className="mb-3 text-xs leading-5 text-l4">
               粘贴 MCP 文档里的标准 JSON 片段（形如{" "}
               <span className="font-mono">{'{"mcpServers": {"名称": {...}}}'}</span>
@@ -1605,8 +1571,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                 </button>
               )}
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </PageFrame>
   );

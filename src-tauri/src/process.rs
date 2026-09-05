@@ -8,12 +8,12 @@
 //! 诊断包离线分析。环境变量不会进入记录。
 
 use std::ffi::OsStr;
-use std::path::Path;
-use std::process::Command;
 #[cfg(windows)]
 use std::io;
 #[cfg(windows)]
 use std::ops::{Deref, DerefMut};
+use std::path::Path;
+use std::process::Command;
 #[cfg(windows)]
 use std::process::{Child, ExitStatus, Output, Stdio};
 
@@ -137,7 +137,9 @@ fn js_entry_from_shim(content: &str) -> Option<String> {
 /// MCP 分发也走这里：各 CLI 的 stdio server 必须落成 `node + js`，不能把 `.cmd`
 /// 绝对路径写进 claude/codex 配置（CreateProcess 对 .cmd 是 os error 193）。
 #[cfg(windows)]
-pub(crate) fn node_entry_from_cmd_shim(program: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+pub(crate) fn node_entry_from_cmd_shim(
+    program: &Path,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     if !is_cmd_batch_shim(program) {
         return None;
     }
@@ -147,7 +149,10 @@ pub(crate) fn node_entry_from_cmd_shim(program: &Path) -> Option<(std::path::Pat
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.eq_ignore_ascii_case("npm.cmd"))
     {
-        dir.join("node_modules").join("npm").join("bin").join("npm-cli.js")
+        dir.join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js")
     } else {
         let content = std::fs::read_to_string(program).ok()?;
         dir.join(js_entry_from_shim(&content)?)
@@ -379,7 +384,8 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_
     fn installer_style_npm_cmd_is_not_text_parseable() {
         // Node 官方安装器的 npm.cmd 用变量间接引用入口（实机采样）：
         // 文本解析应返回 None，由 node_entry_from_cmd_shim 的固定布局 special case 接管
-        let installer_style = "SET \"NPM_PREFIX_JS=%~dp0\\node_modules\\npm\\bin\\npm-prefix.js\"\n\
+        let installer_style =
+            "SET \"NPM_PREFIX_JS=%~dp0\\node_modules\\npm\\bin\\npm-prefix.js\"\n\
              SET \"NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js\"\n\
              \"%NODE_EXE%\" \"%NPM_CLI_JS%\" %*\n";
         assert_eq!(js_entry_from_shim(installer_style), None);

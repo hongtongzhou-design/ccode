@@ -181,6 +181,7 @@ export default function CommandPalette({
     >
       <div
         role="dialog"
+        aria-modal="true"
         aria-label="命令面板"
         className="ccode-command-palette mt-[10vh] h-fit w-[min(520px,calc(100vw-32px))] overflow-hidden rounded-xl border border-field ccode-float-surface"
         onClick={(e) => e.stopPropagation()}

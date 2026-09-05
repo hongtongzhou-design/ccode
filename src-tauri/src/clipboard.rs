@@ -32,7 +32,9 @@ fn is_expired_paste(name: &str, mtime_secs: i64, now_secs: i64, ttl_secs: i64) -
 /// 清理 dir 下的过期粘贴图片（失败静默：清理是顺带动作，不挡主流程）
 fn cleanup_old(dir: &std::path::Path, ttl_secs: i64) {
     let now = chrono::Utc::now().timestamp();
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let name = entry.file_name();
         let mtime = entry
@@ -93,8 +95,18 @@ mod tests {
     #[test]
     fn expired_paste_judgement() {
         let now = 1_800_000_000;
-        assert!(is_expired_paste("paste-a.png", now - PASTE_TTL_SECS - 1, now, PASTE_TTL_SECS));
-        assert!(!is_expired_paste("paste-a.png", now - PASTE_TTL_SECS + 1, now, PASTE_TTL_SECS));
+        assert!(is_expired_paste(
+            "paste-a.png",
+            now - PASTE_TTL_SECS - 1,
+            now,
+            PASTE_TTL_SECS
+        ));
+        assert!(!is_expired_paste(
+            "paste-a.png",
+            now - PASTE_TTL_SECS + 1,
+            now,
+            PASTE_TTL_SECS
+        ));
         assert!(!is_expired_paste("keep.txt", 1, now, PASTE_TTL_SECS));
     }
 

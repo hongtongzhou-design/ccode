@@ -209,8 +209,7 @@ pub fn surface_for_agents(
         thinking && channel_ok(channel_effort) && !probe_blocks(probe_effort);
     let show_native_effort = thinking && has_native_effort && !probe_blocks(probe_effort);
     // 不会思考 → 隐藏思考档；persist/tui 的已存值仍可改/可见，不算「通道不通」
-    let effort_readonly =
-        stored_effort && thinking && !channel_carries(channel_effort);
+    let effort_readonly = stored_effort && thinking && !channel_carries(channel_effort);
 
     let mixed = if binding_models.len() > 1 {
         let flags: Vec<bool> = binding_models
@@ -332,8 +331,8 @@ pub fn surface_for_profile(profile: &Profile, model: Option<&str>) -> ComboSurfa
         .and_then(|g| g.models.iter().find(|m| m.id == model));
     let stored_effort = profile.request_policy.reasoning_effort.is_some()
         || gm.and_then(|m| m.reasoning_effort.as_ref()).is_some();
-    let stored_temp = profile.request_policy.temperature.is_some()
-        || gm.and_then(|m| m.temperature).is_some();
+    let stored_temp =
+        profile.request_policy.temperature.is_some() || gm.and_then(|m| m.temperature).is_some();
     let stored_top_p = profile.request_policy.top_p.is_some() || gm.and_then(|m| m.top_p).is_some();
     let stored_max = profile.request_policy.max_output_tokens.is_some()
         || gm.and_then(|m| m.max_output_tokens).is_some();
@@ -402,6 +401,18 @@ pub fn combo_surface_for_gateway(
     ))
 }
 
+#[tauri::command]
+pub fn combo_surface_for_gateway_batch(
+    store: tauri::State<'_, crate::profiles::ProfileStore>,
+    gateway_id: String,
+    models: Vec<String>,
+) -> Result<Vec<ComboSurfaceDto>, String> {
+    models
+        .into_iter()
+        .map(|model| combo_surface_for_gateway(store.clone(), gateway_id.clone(), model))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +432,8 @@ mod tests {
             models: vec![GatewayModel {
                 id: "grok-4".into(),
                 source: "user".into(),
+                status: "available".into(),
+                last_seen_at: None,
                 temperature: None,
                 top_p: None,
                 max_output_tokens: None,

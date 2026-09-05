@@ -372,6 +372,9 @@ test("litInboxCandidates：最近一次成功 run 有新命中且 24h 内才入�
       projectRoot: "/repo",
       count: 3,
       at: "2026-08-18T09:00:00Z",
+      runId: null,
+      isolationPath: null,
+      adopted: false,
     },
   ]);
   // 超过 24h 不再打扰
@@ -418,6 +421,22 @@ test("litInboxCandidates：最近一次成功 run 有新命中且 24h 内才入�
     ],
   });
   assert.deepEqual(litInboxCandidates([okThenFail], now).map((c) => [c.scheduleId, c.count]), [["s-6", 2]]);
+  const pending = schedule({
+    id: "s-7",
+    lastRunAt: "2026-08-18T09:00:00Z",
+    lastStatus: "ok",
+    history: [{
+      at: "2026-08-18T09:00:00Z",
+      status: "ok",
+      summary: "",
+      newEntries: 2,
+      runId: "run-1",
+      isolationPath: "/Users/me/ccode/watch-worktrees/repo/s-7",
+      adopted: false,
+    }],
+  });
+  assert.deepEqual(litInboxCandidates([pending], now)[0]?.isolationPath, "/Users/me/ccode/watch-worktrees/repo/s-7");
+  assert.equal(litInboxCandidates([pending], now)[0]?.adopted, false);
 });
 
 test("litInboxForRegisteredProjects：已删项目不进收件箱", () => {

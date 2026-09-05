@@ -6,6 +6,7 @@ import {
   litWatchSchedules,
   runDoneNotifyBody,
   runDoneNotifyTitle,
+  scheduleStatusMark,
   schedulesForProject,
   summaryPreview,
   truncateText,
@@ -91,9 +92,15 @@ test("runDoneNotifyTitle：任务名、成功与失败", () => {
   assert.equal(runDoneNotifyTitle("我的课题", "ok", "文献雷达"), "文献雷达 · 我的课题");
   assert.equal(runDoneNotifyTitle("我的课题", "ok", "数据检查"), "数据检查 · 我的课题");
   assert.equal(
+    runDoneNotifyTitle("我的课题", "timeout", "文献雷达"),
+    "文献雷达 · 我的课题（超时）",
+  );
+  assert.equal(
     runDoneNotifyTitle("我的课题", "error", "文献雷达"),
     "文献雷达 · 我的课题（失败）",
   );
+  assert.equal(scheduleStatusMark("timeout").label, "超时");
+  assert.equal(scheduleStatusMark("ok").glyph, "✓");
 });
 
 test("runDoneNotifyBody：取首个非空行并截断", () => {

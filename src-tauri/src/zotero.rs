@@ -369,9 +369,7 @@ fn bib_key(item: &ZoteroItemDto) -> String {
         .split_whitespace()
         .find(|w| w.chars().any(|c| c.is_ascii_alphanumeric()))
         .unwrap_or("");
-    let keep = |s: &str| -> String {
-        s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
-    };
+    let keep = |s: &str| -> String { s.chars().filter(|c| c.is_ascii_alphanumeric()).collect() };
     let raw = format!(
         "{}{}{}",
         keep(&last).to_lowercase(),
@@ -398,10 +396,7 @@ pub fn render_bibtex(items: &[ZoteroItemDto]) -> String {
         } else {
             format!("{base}{}", (b'a' + (*n as u8 - 2)) as char)
         };
-        out.push_str(&format!(
-            "@{}{{{key},\n",
-            bib_entry_type(&item.item_type)
-        ));
+        out.push_str(&format!("@{}{{{key},\n", bib_entry_type(&item.item_type)));
         out.push_str(&format!("  title = {{{}}},\n", item.title));
         let authors = if item.creators.is_empty() {
             "待补".to_string()
@@ -456,7 +451,10 @@ mod tests {
         // Zotero 的 date 是自由文本 + 多段格式，不能当 ISO 解析
         assert_eq!(extract_year("2025-12-00 12/2025").as_deref(), Some("2025"));
         assert_eq!(extract_year("2024-00-00 2024").as_deref(), Some("2024"));
-        assert_eq!(extract_year("2026-05-05 2026-05-05").as_deref(), Some("2026"));
+        assert_eq!(
+            extract_year("2026-05-05 2026-05-05").as_deref(),
+            Some("2026")
+        );
         assert_eq!(extract_year("in press").as_deref(), None);
         // 不该把卷号/页码当年份
         assert_eq!(extract_year("vol. 12, pp. 3345").as_deref(), None);
@@ -464,7 +462,11 @@ mod tests {
 
     #[test]
     fn bib_key_is_stable_and_ascii() {
-        let i = item("Transition Metal Borides for HER", &["Hong, Tongzhou"], Some("2025"));
+        let i = item(
+            "Transition Metal Borides for HER",
+            &["Hong, Tongzhou"],
+            Some("2025"),
+        );
         assert_eq!(bib_key(&i), "hong2025transition");
         // 无作者/无年份也要出得来键，不 panic
         let bare = item("某中文标题", &[], None);
@@ -550,7 +552,10 @@ mod tests {
             );
         }
         let bib = render_bibtex(&items);
-        eprintln!("--- bib 前 400 字 ---\n{}", bib.chars().take(400).collect::<String>());
+        eprintln!(
+            "--- bib 前 400 字 ---\n{}",
+            bib.chars().take(400).collect::<String>()
+        );
         // 硬断言：键唯一（重复键会让 bib-check 全线误报）
         let keys: Vec<&str> = bib
             .lines()

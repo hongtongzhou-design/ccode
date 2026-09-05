@@ -53,7 +53,9 @@ export function runDoneNotifyTitle(
   status: string,
   scheduleName = "定时任务",
 ): string {
-  return `${scheduleName} · ${projectName}${status === "ok" ? "" : "（失败）"}`;
+  if (status === "ok") return `${scheduleName} · ${projectName}`;
+  if (status === "timeout") return `${scheduleName} · ${projectName}（超时）`;
+  return `${scheduleName} · ${projectName}（失败）`;
 }
 
 /** 通知正文：summary 首行，空白折叠后截断 */
@@ -72,4 +74,14 @@ export function truncateText(text: string, max: number): string {
 /** 历史条目简报预览：前两行折叠为一行、限长（行内展示用，全文留给 title） */
 export function summaryPreview(record: RunRecordDto): string {
   return truncateText(record.summary, 120);
+}
+
+export function scheduleStatusMark(status: string | null | undefined): {
+  glyph: string;
+  label: string;
+  className: string;
+} {
+  if (status === "ok") return { glyph: "✓", label: "成功", className: "text-ok-text" };
+  if (status === "timeout") return { glyph: "⏱", label: "超时", className: "text-warn-text" };
+  return { glyph: "✗", label: "失败", className: "text-err-text" };
 }

@@ -310,7 +310,7 @@ fn spawn_tracked(
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM_PROGRAM", "Ccode");
     cmd.env_remove("TERM_PROGRAM_VERSION"); // 避免继承到宿主终端的版本号
-    // NO_COLOR 只要存在就会强制 CLI 关闭彩色，优先级高于 TERM/COLORTERM，必须剔除
+                                            // NO_COLOR 只要存在就会强制 CLI 关闭彩色，优先级高于 TERM/COLORTERM，必须剔除
     cmd.env_remove("NO_COLOR");
     cmd.cwd(cwd);
 
@@ -400,6 +400,11 @@ fn spawn_tracked(
                     {
                         bracketed_paste.store(true, Ordering::Relaxed);
                     }
+                    if let Some(id) = run_id.as_deref() {
+                        // 事件只保留脱敏后的最近输出；PTY 仍按帧推送，SQLite 写入不影响终端显示。
+                        let text = String::from_utf8_lossy(&buf[..n]);
+                        let _ = crate::runs::record_output(id, &text);
+                    }
                     coalescer.append(&buf[..n]);
                 }
                 Err(_) => break,
@@ -412,9 +417,20 @@ fn spawn_tracked(
         let entry = entries.lock().unwrap().remove(&id);
         if let Some(mut entry) = entry {
             // wait 失败按异常退出（-1）上报，不误报正常退出
-            let code = entry.child.wait().map(|s| s.exit_code() as i64).unwrap_or(-1);
+            let code = entry
+                .child
+                .wait()
+                .map(|s| s.exit_code() as i64)
+                .unwrap_or(-1);
             if let Some(run_id) = entry.run_id {
-                let _ = crate::runs::close_run_impl(&run_id, None);
+                let status = if code == 0 { "completed" } else { "failed" };
+                let _ = crate::runs::close_run_with_result(
+                    &run_id,
+                    None,
+                    status,
+                    i32::try_from(code).ok(),
+                    (code != 0).then_some("进程以非零退出码结束"),
+                );
             }
             let _ = app.emit(&exit_event, code);
         }
@@ -447,6 +463,8 @@ pub fn pty_spawn(
     resume_provider: Option<String>,
     reuse_key: Option<String>,
     run_id: Option<String>,
+    // 对外政策名；缺省时回落 readonly 布尔（旧启动入口）。
+    permission: Option<String>,
 ) -> Result<SpawnResult, String> {
     let selected = model.filter(|m| !m.trim().is_empty());
     let mut profile = store.get_with_model(&profile_id, selected.as_deref())?;
@@ -465,6 +483,7 @@ pub fn pty_spawn(
     agents::ensure_launch_credentials(&profile, key.as_deref())?;
     let model = selected.or_else(|| profile.models.first().cloned());
     crate::combo::apply_to_profile(&mut profile, model.as_deref());
+    agents::validate_launch_compatibility(&profile, model.as_deref())?;
     // 恢复会话不注入初始 prompt（那是既有会话的延续，不是开步）
     let prompt = match &resume_session_id {
         Some(_) => None,
@@ -478,8 +497,16 @@ pub fn pty_spawn(
     };
     // 每-agent 启动前文件准备（codex：写模型 catalog，让 /model 选择器列出全部模型）
     let extra_args = agents::prepare_launch(&profile)?;
+    let discuss = match permission.as_deref() {
+        Some("discuss") => true,
+        Some("write_tree") => false,
+        Some(other) if !other.trim().is_empty() => {
+            return Err(format!("不支持的权限政策: {other}"));
+        }
+        _ => readonly.unwrap_or(false),
+    };
     // 聊想法只读模式（仅全新会话）：支持的 CLI 替换/追加只读参数；不支持的原样（软约束兜底）
-    let plan_args = if readonly.unwrap_or(false) && resume_session_id.is_none() {
+    let plan_args = if discuss && resume_session_id.is_none() {
         agents::readonly_launch_args(&agent_id, &plan.args).unwrap_or_else(|| plan.args.clone())
     } else {
         plan.args.clone()
@@ -536,7 +563,7 @@ pub fn pty_spawn(
         &expand_tilde(&cwd),
         reuse_key.as_deref(),
         resume_session_id.as_deref().or(session_hint.as_deref()),
-        readonly.unwrap_or(false),
+        discuss,
         run_id.as_deref(),
     )?;
     if opened.is_none() {
@@ -546,6 +573,9 @@ pub fn pty_spawn(
         }
     }
     let opened_id = opened.as_ref().map(|r| r.id.clone());
+    if let Some(id) = opened_id.as_deref() {
+        crate::runs::claim_start(id)?;
+    }
     if let (Some(id), Some(sid)) = (opened_id.as_deref(), session_hint.as_deref()) {
         let _ = crate::runs::attach_session_impl(id, sid);
     }
@@ -563,11 +593,29 @@ pub fn pty_spawn(
                 crate::sessions::release_session_claim_impl(&claim_id);
             }
             if let Some(id) = opened_id {
-                let _ = crate::runs::close_run_impl(&id, None);
+                let _ = crate::runs::close_run_with_result(
+                    &id,
+                    None,
+                    "failed",
+                    None,
+                    Some("PTY 启动失败"),
+                );
             }
             return Err(error);
         }
     };
+    if let Some(id) = opened_id.as_deref() {
+        if let Err(error) = crate::runs::mark_started(id) {
+            let _ = crate::runs::close_run_with_result(
+                id,
+                None,
+                "failed",
+                None,
+                Some("Run 状态登记失败"),
+            );
+            return Err(error);
+        }
+    }
     // 官方账号（订阅制）启动：登记 usage provenance，统计页费用栏据此显示「订阅」。
     // 尽力而为：登记失败不阻断启动（与 touch_last_used 同语义）
     if profile.account_type == profiles::AccountType::Official {
@@ -616,14 +664,115 @@ pub fn shell_spawn(
     } else {
         PtyPurpose::Shell
     };
-    spawn_tracked(
+    let run_id = run_id.filter(|s| !s.trim().is_empty());
+    if let Some(id) = run_id.as_deref() {
+        crate::runs::claim_start(id)?;
+    }
+    match spawn_tracked(
         &app,
         manager.inner(),
         cmd,
         &expand_tilde(&cwd),
         purpose,
-        run_id.filter(|s| !s.trim().is_empty()),
-    )
+        run_id.clone(),
+    ) {
+        Ok(id) => {
+            if let Some(run_id) = run_id.as_deref() {
+                if let Err(error) = crate::runs::mark_started(run_id) {
+                    let _ = crate::runs::close_run_with_result(
+                        run_id,
+                        None,
+                        "failed",
+                        None,
+                        Some("Run 状态登记失败"),
+                    );
+                    return Err(error);
+                }
+            }
+            Ok(id)
+        }
+        Err(e) => {
+            if let Some(run_id) = run_id.as_deref() {
+                let _ = crate::runs::close_run_with_result(
+                    run_id,
+                    None,
+                    "failed",
+                    None,
+                    Some("Runtime 启动失败"),
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
+/// 直接启动登记的 Custom Runtime。刻意不经过 shell，避免引号拼接、
+/// shell 注入以及 Windows/POSIX 参数语义差异。
+#[tauri::command]
+pub fn pty_spawn_custom(
+    app: AppHandle,
+    manager: tauri::State<'_, PtyManager>,
+    runtime_id: String,
+    cwd: String,
+    run_id: String,
+) -> Result<SpawnResult, String> {
+    let runtime = crate::custom_runtime::get_custom_runtime(&runtime_id)?;
+    let cwd = expand_tilde(&cwd);
+    let run = crate::runs::run_get(run_id.clone())?
+        .ok_or_else(|| "Custom Runtime 对应的 Run 不存在".to_string())?;
+    let isolation = expand_tilde(&run.isolation_path);
+    let cwd_path = std::fs::canonicalize(&cwd).map_err(|e| format!("工作目录不可用：{e}"))?;
+    let isolation_path =
+        std::fs::canonicalize(&isolation).map_err(|e| format!("隔离目录不可用：{e}"))?;
+    if !cwd_path.starts_with(&isolation_path) {
+        return Err("Custom Runtime 的工作目录必须位于 Run 隔离目录内".into());
+    }
+    if run.runtime != "custom" {
+        return Err("Run 不是 Custom Runtime".into());
+    }
+    crate::runs::claim_start(&run_id)?;
+    let mut cmd =
+        crate::process::pty_command(std::path::Path::new(&runtime.command), &runtime.args);
+    for (key, value) in runtime.env {
+        cmd.env(key, value);
+    }
+    let pty_id = match spawn_tracked(
+        &app,
+        manager.inner(),
+        cmd,
+        &cwd_path.to_string_lossy(),
+        PtyPurpose::Agent,
+        Some(run_id.clone()),
+    ) {
+        Ok(id) => id,
+        Err(error) => {
+            let _ = crate::runs::close_run_with_result(
+                &run_id,
+                None,
+                "failed",
+                None,
+                Some("Custom Runtime 启动失败"),
+            );
+            return Err(error);
+        }
+    };
+    if let Err(error) = crate::runs::mark_started(&run_id) {
+        let _ = crate::runs::close_run_with_result(
+            &run_id,
+            None,
+            "failed",
+            None,
+            Some("Custom Runtime 状态登记失败"),
+        );
+        return Err(error);
+    }
+    Ok(SpawnResult {
+        pty_id,
+        session_hint: None,
+        prompt_dropped: false,
+        model: None,
+        run_id: Some(run_id),
+    })
 }
 
 /// 登录 shell 的程序与参数（纯函数，便于单测）。
@@ -664,10 +813,7 @@ fn script_shell_argv() -> Result<(String, Vec<String>), String> {
     let bash = crate::agents::resolve_git_bash().ok_or(
         "找不到 Git Bash，无法运行流水线脚本（setup/archive 钩子与 render-pdf）。请安装 Git for Windows 后重启 Ccode。",
     )?;
-    Ok((
-        bash.to_string_lossy().into_owned(),
-        vec!["-l".to_string()],
-    ))
+    Ok((bash.to_string_lossy().into_owned(), vec!["-l".to_string()]))
 }
 
 #[cfg(not(windows))]
@@ -767,10 +913,7 @@ pub async fn pty_write_submit(
 /// 已退出时会顺带回收并缓存退出状态，不影响清理路径再 wait 取真实退出码；
 /// 探测本身出错按「未在运行」处理（entry 缺失/进程已回收等边界都归到 false）
 #[tauri::command]
-pub fn pty_has_running_process(
-    manager: tauri::State<'_, PtyManager>,
-    pty_id: String,
-) -> bool {
+pub fn pty_has_running_process(manager: tauri::State<'_, PtyManager>, pty_id: String) -> bool {
     has_running_process(manager.inner(), &pty_id)
 }
 
@@ -912,6 +1055,15 @@ pub fn pty_kill(
         }
         let _ = entry.child.kill();
         let _ = entry.child.wait();
+        if let Some(run_id) = entry.run_id {
+            let _ = crate::runs::close_run_with_result(
+                &run_id,
+                None,
+                "stopped",
+                None,
+                Some("用户主动停止"),
+            );
+        }
         let _ = app.emit(&format!("pty-exit-{pty_id}"), -1);
     }
     Ok(())
@@ -1128,8 +1280,7 @@ mod tests {
                 "-l 是 POSIX 登录 shell 专属参数，Windows shell 不认"
             );
             assert!(
-                std::path::Path::new(&shell).exists()
-                    || shell.eq_ignore_ascii_case("cmd.exe"),
+                std::path::Path::new(&shell).exists() || shell.eq_ignore_ascii_case("cmd.exe"),
                 "选出的 shell 必须真实存在: {shell}"
             );
         }
@@ -1154,7 +1305,10 @@ mod tests {
                     lower.contains("bash"),
                     "Windows run 脚本必须走 Git Bash，实际: {shell}"
                 );
-                assert!(args.iter().any(|a| a == "-l"), "Git Bash 用登录 shell 加载 PATH");
+                assert!(
+                    args.iter().any(|a| a == "-l"),
+                    "Git Bash 用登录 shell 加载 PATH"
+                );
             }
             Err(e) => assert!(e.contains("Git Bash"), "{e}"),
         }
@@ -1178,11 +1332,17 @@ mod tests {
         assert_eq!(recs[0], "\x1b[0;0;27;1;0;1_");
         assert_eq!(recs[1], "\x1b[0;0;93;1;0;1_"); // ']'
         assert_eq!(recs[recs.len() - 1], "\x1b[0;0;92;1;0;1_"); // ST 的 '\'
-        // 把码点解回去应当还原成原文——ConPTY 输入侧做的就是这一步
+                                                                // 把码点解回去应当还原成原文——ConPTY 输入侧做的就是这一步
         let decoded: String = recs
             .iter()
             .map(|r| {
-                let uc: u32 = r.trim_start_matches("\x1b[0;0;").split(';').next().unwrap().parse().unwrap();
+                let uc: u32 = r
+                    .trim_start_matches("\x1b[0;0;")
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
                 char::from_u32(uc).unwrap()
             })
             .collect();
@@ -1210,9 +1370,7 @@ mod tests {
         c.append(b"chunk-1;");
         c.append(b"chunk-2;");
         c.append(b"chunk-3");
-        let (text, _) = c
-            .take_frame(Instant::now(), FRAME)
-            .expect("帧内应合并发出");
+        let (text, _) = c.take_frame(Instant::now(), FRAME).expect("帧内应合并发出");
         assert_eq!(text, "chunk-1;chunk-2;chunk-3");
     }
 

@@ -5,6 +5,7 @@ import { AGENTS } from "../types";
 import type { HandoffBriefDto, HandoffTargetDto } from "../types";
 import type { HandoffSource } from "./HandoffPicker";
 import { IS_WINDOWS } from "../hotkeys";
+import { hoverRevealClass } from "./PageFrame";
 
 function agentLabel(id: string): string {
   return AGENTS.find((a) => a.id === id)?.label ?? id;
@@ -420,7 +421,7 @@ export default function DigestPicker({
                   <span className="shrink-0 text-xs text-l4">需手动发送</span>
                 )}
                 {t.installed && (
-                  <span className="flex shrink-0 items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
+                  <span className={`flex shrink-0 items-center gap-1 ${hoverRevealClass} focus-within:opacity-100`}>
                     <button
                       className="rounded-sm px-1 py-0.5 text-xs text-l4 hover:bg-white/10 hover:text-l1"
                       title={

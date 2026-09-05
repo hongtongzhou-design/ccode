@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ContextMenu from "./ContextMenu";
+import { Modal } from "./Modal";
 import { confirmDialog } from "./ConfirmDialog";
 import {
   FoldMark,
@@ -15,6 +16,7 @@ import { useAppStore } from "../store";
 import { absTime, relTime } from "../rel-time";
 import {
   frequencyLabel,
+  scheduleStatusMark,
   schedulesForProject,
   summaryPreview,
 } from "../schedule-tasks";
@@ -36,7 +38,8 @@ import type {
   SkillDto,
   WatchSkillDraftDto,
 } from "../types";
-import { headlessWriteBlocked, headlessWriteNote } from "../agent-caps";
+import { headlessWriteBlocked, headlessWriteCaution, headlessWriteNote } from "../agent-caps";
+import { toast } from "../toast";
 
 const NEW_WATCH = "__new__";
 
@@ -49,7 +52,7 @@ function useAgentCaps(): Record<string, AgentCapabilitiesDto> {
         if (stale) return;
         setCaps(Object.fromEntries(list.map((c) => [c.agent, c])));
       })
-      .catch(() => {});
+      .catch(() => toast("Agent 能力读取失败，定时任务配置可能不完整", "warning"));
     return () => {
       stale = true;
     };
@@ -92,7 +95,7 @@ function CreateScheduleModal({
   projectRoot: string;
   steps: { name: string }[];
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (warning?: string) => Promise<void>;
   onDraftStarted: () => void;
 }) {
   const profiles = useAppStore((s) => s.profiles);
@@ -121,7 +124,7 @@ function CreateScheduleModal({
       .then((list) => {
         if (!stale) setSkills(list);
       })
-      .catch(() => {});
+      .catch(() => toast("巡检技能列表读取失败，可重新打开此弹层重试", "warning"));
     return () => {
       stale = true;
     };
@@ -232,16 +235,8 @@ function CreateScheduleModal({
 
   return (
     <FloatLayer>
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <form
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        className="w-[28rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-4 text-base font-semibold text-l1">定时巡检</h2>
+    <Modal open title="定时巡检" onClose={onClose} size="md">
+      <form onSubmit={submit}>
         <p className="mb-3 text-xs text-l3">
           {isNew
             ? "跟 AI 把巡检技能写出来，你确认后才保存并启用定时。"
@@ -343,6 +338,16 @@ function CreateScheduleModal({
             })}
           </select>
         </label>
+        {profileId &&
+          (() => {
+            const p = profiles.find((x) => x.id === profileId);
+            const caution = p
+              ? headlessWriteCaution(caps[p.agent]?.headlessWrite)
+              : null;
+            return caution ? (
+              <p className="mb-3 text-xs text-warn-text">⚠ {caution}</p>
+            ) : null;
+          })()}
         {steps.length > 0 && (
           <label className="mb-4 block text-sm">
             <span className="mb-1 block text-xs text-l3">关联步骤（可选）</span>
@@ -384,20 +389,25 @@ function CreateScheduleModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
     </FloatLayer>
   );
 }
 
-function RunHistoryItem({ record }: { record: RunRecordDto }) {
+function RunHistoryItem({
+  record,
+  onReview,
+}: {
+  record: RunRecordDto;
+  onReview?: (record: RunRecordDto) => void;
+}) {
   // 行内单行截断只给预览（hover title 有全文但不易发现）；点击切换全文展开
   const [open, setOpen] = useState(false);
+  const mark = scheduleStatusMark(record.status);
   return (
     <li className="flex min-w-0 items-start gap-2 py-1">
-      <span
-        className={`shrink-0 ${record.status === "ok" ? "text-ok-text" : "text-err-text"}`}
-      >
-        {record.status === "ok" ? "✓" : "✗"}
+      <span className={`shrink-0 ${mark.className}`} title={mark.label}>
+        {mark.glyph}
       </span>
       <span
         className="shrink-0 text-xs text-l4"
@@ -413,8 +423,29 @@ function RunHistoryItem({ record }: { record: RunRecordDto }) {
         }`}
         title={open ? "收起" : "展开全文"}
       >
-        {open ? record.summary : summaryPreview(record) || "（无简报）"}
+        {open ? (
+          <span className="block">
+            <span>{record.summary || "（无简报）"}</span>
+            {!!record.artifacts?.length && (
+              <span className="mt-1 block text-l4">
+                产物 {record.artifacts.length} 项：{record.artifacts.slice(0, 5).join("、")}
+                {record.artifacts.length > 5 ? " …" : ""}
+              </span>
+            )}
+          </span>
+        ) : (
+          summaryPreview(record) || "（无简报）"
+        )}
       </button>
+      {record.isolationPath && onReview && (
+        <button
+          type="button"
+          className={`${actionBtn} shrink-0`}
+          onClick={() => onReview(record)}
+        >
+          {record.adopted ? "再看评审" : "去评审"}
+        </button>
+      )}
     </li>
   );
 }
@@ -430,7 +461,7 @@ function EditScheduleModal({
   steps: { name: string }[];
   profiles: { id: string; name: string; agent: string }[];
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (warning?: string) => Promise<void>;
 }) {
   const [name, setName] = useState(schedule.name);
   const [skill, setSkill] = useState(schedule.skill);
@@ -447,7 +478,9 @@ function EditScheduleModal({
   const caps = useAgentCaps();
 
   useEffect(() => {
-    invoke<SkillDto[]>("list_skills").then(setSkills).catch(() => {});
+    invoke<SkillDto[]>("list_skills")
+      .then(setSkills)
+      .catch(() => toast("巡检技能列表读取失败，可重新打开此弹层重试", "warning"));
   }, []);
 
   async function submit(e: React.FormEvent) {
@@ -482,12 +515,19 @@ function EditScheduleModal({
         },
       });
       if (!isLitWatchSkill(skill)) {
-        await invoke("ensure_schedule_skill_distributed", {
-          skill,
-          profileId: profileId || null,
-        }).catch(() => {});
+        try {
+          await invoke("ensure_schedule_skill_distributed", {
+            skill,
+            profileId: profileId || null,
+          });
+        } catch (reason) {
+          await onSaved(
+            `定时任务已保存，但技能分发失败：${String(reason)}。请修复分发后再运行。`,
+          );
+          return;
+        }
       }
-      onSaved();
+      await onSaved();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -497,9 +537,8 @@ function EditScheduleModal({
 
   return (
     <FloatLayer>
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade" onClick={onClose}>
-      <form onClick={(e) => e.stopPropagation()} onSubmit={submit} className="w-[26rem] rounded-md border border-field ccode-float-surface p-5">
-        <h2 className="mb-4 text-base font-semibold text-l1">编辑定时任务</h2>
+    <Modal open title="编辑定时任务" onClose={onClose} size="md">
+      <form onSubmit={submit}>
         <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">技能</span><select className={fieldClass} value={skill} onChange={(e) => setSkill(e.target.value)}>{scheduleSkillOptionsForEdit(skills, skill).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></label>
         <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">任务名</span><input className={fieldClass} required value={name} onChange={(e) => setName(e.target.value)} /></label>
         <div className="mb-3 flex gap-2">
@@ -508,11 +547,12 @@ function EditScheduleModal({
           <label className="block flex-1 text-sm"><span className="mb-1 block text-xs text-l3">时间</span><input className={fieldClass} type="time" required value={time} onChange={(e) => setTime(e.target.value)} /></label>
         </div>
         <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">运行配置</span><select className={fieldClass} value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">自动</option>{profiles.map((p) => { const meta = profileScheduleMeta(p, caps); return <option key={p.id} value={p.id} disabled={meta.disabled}>{meta.label}</option>; })}</select></label>
+        {profileId && (() => { const p = profiles.find((x) => x.id === profileId); const caution = p ? headlessWriteCaution(caps[p.agent]?.headlessWrite) : null; return caution ? <p className="mb-3 text-xs text-warn-text">⚠ {caution}</p> : null; })()}
         {steps.length > 0 && <label className="mb-4 block text-sm"><span className="mb-1 block text-xs text-l3">关联步骤</span><select className={fieldClass} value={linkedStep} onChange={(e) => setLinkedStep(e.target.value)}><option value="">不关联</option>{steps.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}</select></label>}
         {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
         <div className="flex justify-end gap-2"><button type="button" onClick={onClose} className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover">取消</button><button type="submit" disabled={busy} className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text">{busy ? "保存中…" : "保存"}</button></div>
       </form>
-    </div>
+    </Modal>
     </FloatLayer>
   );
 }
@@ -541,7 +581,9 @@ function CommitWatchDraftModal({
       .then((d) => {
         if (!stale && d.draftText) setText(d.draftText);
       })
-      .catch(() => {});
+      .catch((reason) => {
+        if (!stale) setError(`巡检草稿读取失败：${String(reason)}`);
+      });
     return () => {
       stale = true;
     };
@@ -576,16 +618,8 @@ function CommitWatchDraftModal({
 
   return (
     <FloatLayer>
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <form
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        className="flex max-h-[85vh] w-[36rem] flex-col rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-1 text-base font-semibold text-l1">确认落盘并启用定时</h2>
+    <Modal open title="确认落盘并启用定时" onClose={onClose} size="lg">
+      <form onSubmit={submit}>
         <p className="mb-3 text-xs text-l3">
           预览技能「{draft.skillName}」。确认后写入技能库、分发到将要跑的 Agent，并创建定时任务「{draft.name}」。
         </p>
@@ -608,7 +642,7 @@ function CommitWatchDraftModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
     </FloatLayer>
   );
 }
@@ -648,13 +682,8 @@ function EditWatchSkillModal({
 
   return (
     <FloatLayer>
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade" onClick={onClose}>
-      <form
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={save}
-        className="flex max-h-[85vh] w-[36rem] flex-col rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-3 text-base font-semibold text-l1">编辑技能：{skillName}</h2>
+    <Modal open title={`编辑技能：${skillName}`} onClose={onClose} size="lg">
+      <form onSubmit={save}>
         <textarea
           className={`${fieldClass} min-h-64 flex-1 resize-y py-2 font-mono text-xs`}
           value={text}
@@ -674,7 +703,7 @@ function EditWatchSkillModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
     </FloatLayer>
   );
 }
@@ -701,6 +730,10 @@ export default function ScheduleSection({
   const [error, setError] = useState<string | null>(null);
   /** 运行配置下拉（行内可改）：profile 列表从 store 取 */
   const profiles = useAppStore((s) => s.profiles);
+  const setPage = useAppStore((s) => s.setPage);
+  const setWorkspaceReviewRequest = useAppStore(
+    (s) => s.setWorkspaceReviewRequest,
+  );
   const caps = useAgentCaps();
   /** 手动「立即跑」中的任务 id：靠 scheduler-run-done 事件清除并触发重拉 */
   const [running, setRunning] = useState<Set<string>>(new Set());
@@ -741,6 +774,7 @@ export default function ScheduleSection({
     };
     reload();
     let unlisten: (() => void) | undefined;
+    const onDone = () => reload();
     listen<SchedulerRunDonePayload>("scheduler-run-done", (e) => {
       setRunning((cur) => {
         if (!cur.has(e.payload.scheduleId)) return cur;
@@ -748,13 +782,18 @@ export default function ScheduleSection({
         next.delete(e.payload.scheduleId);
         return next;
       });
-      reload();
+      onDone();
     })
       .then((u) => (unlisten = u))
+      .catch(() => toast("定时任务完成事件监听失败，列表可能不会自动刷新", "warning"));
+    let unlistenAdopt: (() => void) | undefined;
+    listen("watch-run-adopted", onDone)
+      .then((u) => (unlistenAdopt = u))
       .catch(() => {});
     return () => {
       stale = true;
       unlisten?.();
+      unlistenAdopt?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectRoot]);
@@ -795,10 +834,18 @@ export default function ScheduleSection({
         patch: { profileId },
       });
       if (!isLitWatchSkill(s.skill)) {
-        await invoke("ensure_schedule_skill_distributed", {
-          skill: s.skill,
-          profileId: profileId || null,
-        }).catch(() => {});
+        try {
+          await invoke("ensure_schedule_skill_distributed", {
+            skill: s.skill,
+            profileId: profileId || null,
+          });
+        } catch (reason) {
+          await load();
+          setError(
+            `运行配置已保存，但技能分发失败：${String(reason)}。请修复分发后再运行。`,
+          );
+          return;
+        }
       }
       await load();
     } catch (reason) {
@@ -986,12 +1033,10 @@ export default function ScheduleSection({
                         上次{" "}
                         <span
                           className={
-                            s.lastStatus === "ok"
-                              ? "text-ok-text"
-                              : "text-err-text"
+                            scheduleStatusMark(s.lastStatus).className
                           }
                         >
-                          {s.lastStatus === "ok" ? "✓" : "✗"}
+                          {scheduleStatusMark(s.lastStatus).glyph}
                         </span>{" "}
                         {relTime(s.lastRunAt)}
                       </span>
@@ -1078,7 +1123,19 @@ export default function ScheduleSection({
                   {historyOpen === s.id && (
                     <ul className="ml-9 mt-1 divide-y divide-hairline border-l border-white/5 pl-2">
                       {s.history.slice(0, HISTORY_PREVIEW).map((r, i) => (
-                        <RunHistoryItem key={`${r.at}-${i}`} record={r} />
+                        <RunHistoryItem
+                          key={`${r.at}-${i}`}
+                          record={r}
+                          onReview={(rec) => {
+                            if (!rec.isolationPath) return;
+                            setWorkspaceReviewRequest({
+                              worktreePath: rec.isolationPath,
+                              runId: rec.runId ?? null,
+                              requestId: crypto.randomUUID(),
+                            });
+                            setPage("terminal");
+                          }}
+                        />
                       ))}
                     </ul>
                   )}
@@ -1130,10 +1187,11 @@ export default function ScheduleSection({
           projectRoot={projectRoot}
           steps={steps}
           onClose={() => setCreateOpen(false)}
-          onCreated={() => {
+          onCreated={async (warning) => {
             setCreateOpen(false);
             setOpen(true);
-            void load();
+            await load();
+            if (warning) setError(warning);
           }}
           onDraftStarted={() => {
             setCreateOpen(false);
@@ -1148,9 +1206,10 @@ export default function ScheduleSection({
           steps={steps}
           profiles={profiles}
           onClose={() => setEditSchedule(null)}
-          onSaved={() => {
+          onSaved={async (warning) => {
             setEditSchedule(null);
-            void load();
+            await load();
+            if (warning) setError(warning);
           }}
         />
       )}

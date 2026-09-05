@@ -31,7 +31,7 @@ import {
   type TaskMdEditorState,
 } from "../task-cards";
 import { gatherTaskMdExtras, renderTaskMd } from "../pipeline-start";
-import { isDecisionsOnly } from "../step-decisions";
+import { decisionGate, isDecisionsOnly } from "../step-decisions";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import type {
   ArtifactEntryDto,
@@ -79,7 +79,7 @@ export default function KickoffConfirmDialog({
   busy: boolean;
   onCancel: () => void;
   /** 确认开工：taskMd = 编辑区最终内容；launch = 将自动拉起的连接 */
-  onConfirm: (taskMd: string, launch: KickoffLaunch | null) => void;
+  onConfirm: (taskMd: string, launch: KickoffLaunch | null, decisionPauseAcknowledged: boolean) => void;
   /** 技能区增删写回 project.toml 后同步父级 cfg（保持步进器/下次打开一致） */
   onCfgChange?: (cfg: ProjectConfigDto) => void;
 }) {
@@ -167,6 +167,11 @@ export default function KickoffConfirmDialog({
     { text: "", dirty: false } satisfies TaskMdEditorState,
   );
   const [editorReady, setEditorReady] = useState(false);
+  const gate = decisionGate(stepNow, editor.text);
+  const [decisionAck, setDecisionAck] = useState<string | null>(null);
+  // 合同或未答问题变了，旧确认自动失效。
+  const decisionSignature = JSON.stringify([stepNow.workspaceName, gate.missing, editor.text]);
+  const needsDecisionAck = gate.needsAck && decisionAck !== decisionSignature;
   // TASK.md 编辑区默认折叠：它是自动拼装的合同，绝大多数开工不需要看，
   // 更不该摆在正中暗示「你得先改这个」。想看/想改一点即展开
   const [taskMdOpen, setTaskMdOpen] = useState(false);
@@ -834,6 +839,12 @@ export default function KickoffConfirmDialog({
               : "建议先回去过完再来；确认跳过就点「确认开始」，按钮会再问你一次。"}
           </p>
         )}
+        {(gate.blocked || gate.needsAck) && (
+          <p className="mb-3 shrink-0 rounded-md bg-inset px-3 py-2 text-xs leading-5 text-warn-text">
+            待拍板：{gate.missing.join("、")}。
+            {gate.blocked ? "硬暂停：完成决策项后才能开工。" : "软暂停：建议先回答；再次确认只允许先做不依赖这些答案的工作。"}
+          </p>
+        )}
 
         </div>
 
@@ -848,8 +859,12 @@ export default function KickoffConfirmDialog({
           </button>
           <button
             type="button"
-            disabled={busy || !editorReady || !launch}
+            disabled={busy || !editorReady || !launch || gate.blocked}
             onClick={() => {
+              if (needsDecisionAck) {
+                setDecisionAck(decisionSignature);
+                return;
+              }
               if (prevClosing.length > 0 && !closingAcked) {
                 setClosingAcked(true);
                 return;
@@ -859,7 +874,7 @@ export default function KickoffConfirmDialog({
               } else if (launch) {
                 saveAskAiRemembered({ ...launch, useDefault });
               }
-              onConfirm(editor.text, launch);
+              onConfirm(editor.text, launch, gate.needsAck && !needsDecisionAck);
             }}
             className={primaryActionClass}
           >
@@ -867,7 +882,9 @@ export default function KickoffConfirmDialog({
               ? "开始中…"
               : !launch
                 ? "先加连接"
-                : prevClosing.length > 0 && closingAcked
+                : gate.needsAck && !needsDecisionAck
+                  ? "先做无依赖工作"
+                  : prevClosing.length > 0 && closingAcked
                   ? "仍要开工"
                   : "确认开始"}
           </button>

@@ -6,6 +6,7 @@ import { renderMathInto } from "../md-math";
 import { rewriteMdImageHtml } from "../reader";
 import { officePreviewMode } from "../work-mode";
 import { rowActionClass } from "./PageFrame";
+import { Modal } from "./Modal";
 import PdfContinuousView from "./PdfContinuousView";
 import DocxPreview from "./DocxPreview";
 import XlsxPreview from "./XlsxPreview";
@@ -17,12 +18,20 @@ export default function OfficePreviewModal({
   onClose,
   onAskAi,
   extraAction,
+  onPrevious,
+  onNext,
+  hasPrevious = false,
+  hasNext = false,
 }: {
   path: string;
   root: string;
   onClose: () => void;
   onAskAi?: () => void;
   extraAction?: { label: string; onClick: () => void };
+  onPrevious?: () => void;
+  onNext?: () => void;
+  hasPrevious?: boolean;
+  hasNext?: boolean;
 }) {
   const name = path.split(/[\\/]/).pop() ?? path;
   const mode = officePreviewMode(path);
@@ -75,11 +84,21 @@ export default function OfficePreviewModal({
       if (e.key === "Escape") {
         e.preventDefault();
         onClose();
+        return;
       }
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable='true']")) return;
+      const canMove = e.key === "ArrowUp" ? hasPrevious : hasNext;
+      if (!canMove) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "ArrowUp") onPrevious?.();
+      else onNext?.();
     }
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  }, [onClose, onPrevious, onNext, hasPrevious, hasNext]);
 
   let body: ReactNode;
   if (error) {
@@ -119,17 +138,33 @@ export default function OfficePreviewModal({
   }
 
   return (
-    <div
-      className="ccode-fade fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      onClick={onClose}
+    <Modal
+      open
+      title={name}
+      onClose={onClose}
+      size={mode === "xlsx" ? "xl" : "lg"}
+      panelClassName={`z-50 ${
+        mode === "xlsx"
+          ? "h-[min(88vh,920px)] max-w-[min(96vw,1280px)] p-0"
+          : "h-[80vh] max-w-4xl"
+      }`}
+      contentClassName={`min-h-0 flex-1 ${
+        mode === "xlsx" ? "mt-0 flex flex-col" : "flex flex-col"
+      }`}
     >
       <div
-        className={`ccode-float-surface flex w-full flex-col rounded-md border border-field ${
-          mode === "xlsx"
-            ? "h-[min(88vh,920px)] max-w-[min(96vw,1280px)] p-0"
-            : "h-[80vh] max-w-4xl p-5"
-        }`}
-        onClick={(e) => e.stopPropagation()}
+        className="flex min-h-0 flex-1 flex-col"
+        onKeyDownCapture={(e) => {
+        if (e.key === "ArrowUp" && hasPrevious) {
+          e.preventDefault();
+          e.stopPropagation();
+          onPrevious?.();
+        } else if (e.key === "ArrowDown" && hasNext) {
+          e.preventDefault();
+          e.stopPropagation();
+          onNext?.();
+        }
+      }}
       >
         <div
           className={`flex shrink-0 items-baseline gap-2 ${
@@ -147,6 +182,12 @@ export default function OfficePreviewModal({
           >
             {path}
           </span>
+          {(onPrevious || onNext) && (
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              <button type="button" className={rowActionClass} onClick={onPrevious} disabled={!hasPrevious} title="上一个文件（↑）">↑</button>
+              <button type="button" className={rowActionClass} onClick={onNext} disabled={!hasNext} title="下一个文件（↓）">↓</button>
+            </span>
+          )}
         </div>
         <div
           className={
@@ -185,6 +226,6 @@ export default function OfficePreviewModal({
           </button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

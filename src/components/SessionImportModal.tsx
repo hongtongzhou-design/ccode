@@ -13,6 +13,7 @@ import {
 import { AGENTS } from "../types";
 import type { ImportPreviewDto, ImportReportDto } from "../types";
 import { Checkbox, fieldClass, primaryActionClass, rowActionClass } from "./PageFrame";
+import { Modal } from "./Modal";
 
 function agentLabel(id: string): string {
   return AGENTS.find((a) => a.id === id)?.label ?? id;
@@ -111,21 +112,34 @@ export default function SessionImportModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4 ccode-fade"
-      onClick={onClose}
+    <Modal
+      open
+      title="导入会话"
+      onClose={onClose}
+      size="md"
+      panelClassName="z-[60] max-h-[min(640px,90vh)]"
+      contentClassName="min-h-0 flex-1 overflow-y-auto text-sm"
+      footer={
+        <>
+          {preview && !report && (
+            <button
+              type="button"
+              className={primaryActionClass}
+              disabled={busy || !ready.ok}
+              onClick={() => void apply()}
+            >
+              {busy ? "导入中…" : "开始导入"}
+            </button>
+          )}
+          {report && (
+            <button type="button" className={primaryActionClass} onClick={onClose}>
+              完成
+            </button>
+          )}
+        </>
+      }
     >
-      <div
-        className="flex max-h-[min(640px,90vh)] w-full max-w-xl flex-col rounded-md border border-field bg-canvas shadow-lg"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-hairline px-4 py-3">
-          <h2 className="text-sm font-medium text-l1">导入会话</h2>
-          <button type="button" className={rowActionClass} onClick={onClose}>
-            关闭
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
+        <div className="text-sm">
           {error && <p className="mb-2 text-xs text-err-text">{error}</p>}
           {!preview && !report && (
             <div className="space-y-2">
@@ -276,24 +290,6 @@ export default function SessionImportModal({
             </div>
           )}
         </div>
-        <div className="flex justify-end gap-2 border-t border-hairline px-4 py-3">
-          {preview && !report && (
-            <button
-              type="button"
-              className={primaryActionClass}
-              disabled={busy || !ready.ok}
-              onClick={() => void apply()}
-            >
-              {busy ? "导入中…" : "开始导入"}
-            </button>
-          )}
-          {report && (
-            <button type="button" className={primaryActionClass} onClick={onClose}>
-              完成
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

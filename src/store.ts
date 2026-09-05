@@ -47,6 +47,7 @@ import type {
   Profile,
   ProfileInput,
   RepoDto,
+  RunDto,
   SessionMetaDto,
   TaskCardDto,
 } from "./types";
@@ -175,6 +176,8 @@ export interface PendingTerminal {
   prefillCommand?: string;
   /** run 脚本标签：只开 shell，不走 agent 启动流程 */
   shellOnly?: boolean;
+  /** 直接启动 Custom Runtime，不经过 shell */
+  customRuntimeId?: string;
   /** run 脚本来源的工作区 id（nonconcurrent 互斥追踪用） */
   wsId?: string;
   /** 会话恢复：以 --resume/--continue 语义重启该会话（SessionLink 确定性锁定） */
@@ -206,7 +209,9 @@ export interface PendingTerminal {
       （terminal-tab-persistence 白名单本就不含它） */
   previewPath?: string;
   previewRoot?: string;
-  /** 「聊想法」只读模式：pty_spawn 注入只读/计划模式参数（硬保护，支持的 CLI 才生效） */
+  /** 对外权限政策：只讨论 / 可改这棵树。缺省 write_tree。 */
+  permission?: "discuss" | "write_tree";
+  /** @deprecated 用 permission；true 等同 discuss */
   readonly?: boolean;
   /** 打开后切到聊天层（办公「问 AI」）；缺省沿用标签上次选择 / 默认终端 */
   surface?: "chat" | "terminal";
@@ -224,6 +229,8 @@ export interface PendingTerminal {
 /** 工作区页 / 改动面板 → 终端全宽审阅视图的一次性交接。 */
 export interface WorkspaceReviewRequest {
   worktreePath: string;
+  /** 产生改动的 Run；评审页不从 cwd 反推身份。 */
+  runId?: string | null;
   /** 工作区列表的更多操作可直接定位到评审中的对应完成动作；
       resolve-conflict 表示「解决冲突」入口，允许评审层自动准备冲突两侧。 */
   action?: "pr" | "archive" | "resolve-conflict";
@@ -247,11 +254,11 @@ export interface InboxItem {
   dismissSignature?: string;
   action:
     | {
-        type: "review";
-        worktreePath: string;
-        intent?: "pr" | "archive" | "resolve-conflict";
+      type: "review";
+      worktreePath: string;
+      runId?: string | null;
+      intent?: "pr" | "archive" | "resolve-conflict";
       }
-    | { type: "tab"; tabId: string }
     | { type: "session"; agent: string; sessionId: string }
     | { type: "digest" }
     | { type: "artifacts"; workspaceId: string }
@@ -264,7 +271,7 @@ export interface InboxItem {
         url?: string;
       }
     | { type: "help"; projectRoot: string }
-    | { type: "run"; runId: string }
+    | { type: "run"; runId?: string; tabId?: string }
     | { type: "settings"; section: string }
     | { type: "profiles" };
 }
@@ -347,45 +354,51 @@ export function runInboxAction(item: InboxItem) {
   if (item.action.type === "review") {
     s.setWorkspaceReviewRequest({
       worktreePath: item.action.worktreePath,
+      runId: item.action.runId ?? null,
       action: item.action.intent,
       requestId: crypto.randomUUID(),
     });
     s.setPage("terminal");
   } else if (item.action.type === "run") {
     const runId = item.action.runId;
-    const live = s.terminalRunInputs.find((r) => r.runId === runId);
+    const tabId = item.action.tabId;
+    const live = runId
+      ? s.terminalRunInputs.find((r) => r.runId === runId)
+      : tabId
+        ? s.terminalRunInputs.find((r) => r.tabId === tabId)
+        : undefined;
     if (live) {
       s.setFocusTabReq(live.tabId);
       s.setPage("terminal");
-    } else {
+    } else if (tabId) {
+      s.setFocusTabReq(tabId);
+      s.setPage("terminal");
+    } else if (runId) {
       void import("@tauri-apps/api/core").then(({ invoke }) =>
-        invoke<{
-          isolationPath: string;
-          agent: string;
-          profileId: string | null;
-          sessionId: string | null;
-          reuseKey: string | null;
-        } | null>("run_get", { id: runId }).then((run) => {
+        invoke<RunDto | null>("run_get", { id: runId }).then((run) => {
           if (!run) return;
+          const custom = run.runtime === "custom" || run.agent === "custom";
           s.setPendingTerminal({
             cwd: run.isolationPath,
             extraEnv: {},
-            agentId: run.agent,
-            profileId: run.profileId ?? undefined,
+            agentId: custom ? "custom" : run.agent,
+            profileId: custom ? undefined : run.profileId ?? undefined,
+            customRuntimeId: custom
+              ? run.customRuntimeId ??
+                run.reuseKey?.match(/^custom:([^:]+):/)?.[1]
+              : undefined,
             reuseKey: run.reuseKey ?? undefined,
             runId,
-            resume: run.sessionId
+            permission: run.permission === "discuss" ? "discuss" : "write_tree",
+            resume: !custom && run.sessionId
               ? { agentId: run.agent, sessionId: run.sessionId }
               : undefined,
-            autoStart: Boolean(run.sessionId),
+            autoStart: !custom && Boolean(run.sessionId),
           });
           s.setPage("terminal");
         }),
       );
     }
-  } else if (item.action.type === "tab") {
-    s.setFocusTabReq(item.action.tabId);
-    s.setPage("terminal");
   } else if (item.action.type === "session") {
     s.setOpenSessionReq({
       agent: item.action.agent,

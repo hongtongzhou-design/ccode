@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import ContextMenu from "./ContextMenu";
+import { Modal } from "./Modal";
 
 // monaco 体积大，与终端页同款懒加载，避免拖慢工作区页首屏
 const FilePreviewEditor = lazy(() => import("./FilePreviewEditor"));
@@ -666,19 +667,14 @@ function SubscriptionsModal({
 
   return (
     <>
-      <div
-        className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-        onClick={onClose}
+      <Modal
+        open
+        title="追踪关键词"
+        onClose={onClose}
+        size="lg"
+        description="雷达按这些关键词定期检索，新命中进「新命中」列表。"
       >
-      <form
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={(e) => void submit(e)}
-        className="w-[36rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-1 text-base font-semibold text-l1">追踪关键词</h2>
-        <p className="mb-4 text-xs text-l3">
-          雷达按这些关键词定期检索，新命中进「新命中」列表。
-        </p>
+      <form onSubmit={(e) => void submit(e)}>
         <div className="max-h-72 space-y-2 overflow-auto">
           {rows.map((row, i) => (
             <div key={i} className="flex min-w-0 items-center gap-2">
@@ -782,7 +778,7 @@ function SubscriptionsModal({
           </button>
         </div>
       </form>
-      </div>
+      </Modal>
       {/* 源文件原地编辑层：monaco 懒加载；关闭后重读清单同步表格 */}
       {sourceOpen && (
         <div
@@ -885,19 +881,14 @@ function FilterModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
+    <Modal
+      open
+      title="筛选新命中"
+      onClose={onClose}
+      size="md"
+      description="按期刊指标过滤「新命中」列表与定时巡检的推送计数；查不到指标的条目照常显示（不误伤），精读清单不受影响。"
     >
-      <form
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-1 text-base font-semibold text-l1">筛选新命中</h2>
-        <p className="mb-4 text-xs text-l3">
-          按期刊指标过滤「新命中」列表与定时巡检的推送计数；查不到指标的条目照常显示（不误伤），精读清单不受影响。
-        </p>
+      <form onSubmit={submit}>
         {!metricsAvailable && (
           <p className="mb-3 text-xs text-warn-text">
             期刊指标表还没装：筛选保存后暂不生效，点卡头「↓ 期刊指标表」装表即生效。
@@ -973,7 +964,7 @@ function FilterModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -1043,6 +1034,9 @@ export default function LitWatchCard({
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setReaderReq = useAppStore((s) => s.setReaderReq);
   const setPage = useAppStore((s) => s.setPage);
+  const setWorkspaceReviewRequest = useAppStore(
+    (s) => s.setWorkspaceReviewRequest,
+  );
   const [runMenu, setRunMenu] = useState<{ x: number; y: number } | null>(null);
   const [bodyOpen, setBodyOpen] = useState(true);
   const [hitQuery, setHitQuery] = useState("");
@@ -1145,9 +1139,16 @@ export default function LitWatchCard({
     })
       .then((u) => (unlisten = u))
       .catch(() => {});
+    let unlistenAdopt: (() => void) | undefined;
+    listen("watch-run-adopted", () => {
+      reload();
+    })
+      .then((u) => (unlistenAdopt = u))
+      .catch(() => {});
     return () => {
       stale = true;
       unlisten?.();
+      unlistenAdopt?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectRoot]);
@@ -1518,6 +1519,30 @@ export default function LitWatchCard({
           </>
         )}
       </div>
+      {bodyOpen &&
+        latestRadarRun?.isolationPath &&
+        !latestRadarRun.adopted &&
+        (latestRadarRun.newEntries ?? 0) > 0 && (
+        <p className="mb-2 flex flex-wrap items-center gap-2 text-xs text-warn-text">
+          <span>
+            隔离树有 {latestRadarRun.newEntries} 条新命中，尚未采纳进主仓
+          </span>
+          <button
+            type="button"
+            className={ghostActionClass}
+            onClick={() => {
+              setWorkspaceReviewRequest({
+                worktreePath: latestRadarRun.isolationPath!,
+                runId: latestRadarRun.runId ?? null,
+                requestId: crypto.randomUUID(),
+              });
+              setPage("terminal");
+            }}
+          >
+            去评审
+          </button>
+        </p>
+      )}
       {bodyOpen && staleStep && (
         <p className="mb-2 text-xs text-warn-text">
           雷达有新命中，「{staleStep}」步的产物可能过期

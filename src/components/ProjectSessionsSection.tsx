@@ -239,7 +239,8 @@ export default function ProjectSessionsSection({
             type="button"
             className="flex min-w-0 flex-1 items-center gap-2 text-left"
             onClick={onToggle}
-            aria-expanded
+            aria-expanded={true}
+            aria-label={`收起${title}`}
           >
             <MessageSquare size={14} strokeWidth={1.8} className="shrink-0 text-l4" />
             <h2 className="min-w-0 truncate text-xs font-medium text-l2">

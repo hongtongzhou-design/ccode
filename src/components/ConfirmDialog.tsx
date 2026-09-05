@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 interface ConfirmRequest {
   message: string;
@@ -70,10 +70,16 @@ export function alertDialog(message: string): Promise<void> {
 /** 宿主组件：在 App 根部挂载一次；z-[70] 压过评审覆盖层内的 z-[60] 弹层 */
 export function ConfirmDialogHost() {
   const req = useSyncExternalStore(subscribe, () => current);
+  const dialogRef = useRef<HTMLElement>(null);
 
   // Esc = 取消、Enter = 确认；捕获阶段拦截，避免触发遮罩下层的 Esc 快捷键
   useEffect(() => {
     if (!req) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const focusFirst = () =>
+      dialogRef.current?.querySelector<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
@@ -81,10 +87,30 @@ export function ConfirmDialogHost() {
       } else if (e.key === "Enter") {
         e.stopPropagation();
         settle(true);
+      } else if (e.key === "Tab" && dialogRef.current) {
+        const focusable = Array.from(
+          dialogRef.current.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        );
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    requestAnimationFrame(focusFirst);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      previous?.focus();
+    };
   }, [req]);
 
   if (!req) return null;
@@ -94,12 +120,19 @@ export function ConfirmDialogHost() {
       onClick={() => settle(false)}
     >
       <section
+        ref={dialogRef}
         role="alertdialog"
         aria-modal="true"
+        aria-labelledby="ccode-confirm-dialog-title"
+        aria-describedby="ccode-confirm-dialog-message"
         className="w-full max-w-[26rem] rounded-lg border border-hairline ccode-float-surface p-4"
         onClick={(e) => e.stopPropagation()}
+        tabIndex={-1}
       >
-        <p className="whitespace-pre-wrap text-sm leading-6 text-l1">
+        <h2 id="ccode-confirm-dialog-title" className="sr-only">
+          {req.alert ? "提示" : req.danger ? "危险操作确认" : "确认操作"}
+        </h2>
+        <p id="ccode-confirm-dialog-message" className="whitespace-pre-wrap text-sm leading-6 text-l1">
           {req.message}
         </p>
         <div className="mt-4 flex justify-end gap-2">

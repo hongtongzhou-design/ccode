@@ -176,6 +176,13 @@ export default function ResourceListSection({
     setPreview(r);
   }
 
+  function movePreview(offset: number) {
+    if (!preview) return;
+    const index = rows.findIndex((row) => row.r.path === preview.path);
+    const next = rows[index + offset]?.r;
+    if (next) setPreview(next);
+  }
+
   return (
     <section>
       {heading && (
@@ -362,6 +369,15 @@ export default function ResourceListSection({
           root={projectPath}
           onClose={() => setPreview(null)}
           onAskAi={onAskAi ? () => onAskAi(preview) : undefined}
+          onPrevious={() => movePreview(-1)}
+          onNext={() => movePreview(1)}
+          hasPrevious={
+            rows.findIndex((row) => row.r.path === preview.path) > 0
+          }
+          hasNext={
+            rows.findIndex((row) => row.r.path === preview.path) >= 0 &&
+            rows.findIndex((row) => row.r.path === preview.path) < rows.length - 1
+          }
           extraAction={
             isPdf(preview.path) && onImmerse
               ? {

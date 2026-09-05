@@ -16,6 +16,7 @@ import {
   type AskAiFile,
 } from "../ask-ai";
 import { projectChatReuseKey } from "../work-mode";
+import { Modal } from "./Modal";
 
 export function beginAskAi(
   file: AskAiFile,
@@ -142,20 +143,9 @@ export default function AskAiModal() {
   }
 
   return (
-    <div
-      className="ccode-fade fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4"
-      onClick={close}
-    >
-      <div
-        className="w-[26rem] rounded-lg border border-field p-4 ccode-float-surface"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="mb-1 text-sm font-medium text-l1">问 AI</h2>
-        <p className="mb-3 text-micro text-l4">
-          {file.path.trim()
-            ? "选 Agent 和配置再开。默认落在终端，右边打开这份文件。"
-            : "选 Agent 和配置再开。默认落在终端。"}
-        </p>
+    <Modal open title="问 AI" onClose={close} size="sm" description={file.path.trim()
+      ? "选 Agent 和配置再开。默认落在终端，右边打开这份文件。"
+      : "选 Agent 和配置再开。默认落在终端。"}>
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -245,7 +235,6 @@ export default function AskAiModal() {
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </Modal>
   );
 }

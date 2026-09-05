@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { headlessWriteBlocked, headlessWriteNote } from "../src/agent-caps.ts";
+import { headlessWriteBlocked, headlessWriteCaution, headlessWriteNote } from "../src/agent-caps.ts";
 
 test("headlessWriteBlocked：不支持才禁选", () => {
   assert.equal(headlessWriteBlocked(undefined), null);
@@ -21,5 +21,9 @@ test("headlessWriteNote：支持时仍可附注无沙箱", () => {
   assert.equal(
     headlessWriteNote({ supported: false, reason: "无头写盘未验证" }),
     null,
+  );
+  assert.equal(
+    headlessWriteCaution({ supported: true, reason: "权限未实测" }),
+    "权限未实测",
   );
 });

@@ -173,6 +173,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const [quick, setQuick] = useState<Set<QuickFilterId>>(() => new Set());
   // 「更多 ▾」收纳的次常用快筛（v3.92 控制区瘦身）：近 7 天 / 内部 AI / 已归档
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
+  const [mobileRailOpen, setMobileRailOpen] = useState(false);
   /** 快筛开关统一入口：archived chip 与 showArchived 是同一件事，必须同步两边
       （此前只有页头按钮同步，单独点 chip 会被 archiveVisible 兜底过滤掉——等于无效） */
   function toggleQuick(id: QuickFilterId) {
@@ -408,7 +409,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       const cmd = await invoke<string>("session_resume_command", {
         agentId: s.agent,
         sessionId: s.sessionId,
-        cwd: s.projectPath,
+        cwd: s.cwd ?? s.projectPath,
         baseUrl: resumeBaseUrl(s),
         provider: s.provider ?? null,
       });
@@ -426,7 +427,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       await invoke("resume_external_terminal", {
         agentId: s.agent,
         sessionId: s.sessionId,
-        cwd: s.projectPath,
+        cwd: s.cwd ?? s.projectPath,
         profileId: resumeProfile(s)?.id ?? null,
         model: resumeModel(s),
         provider: s.provider ?? null,
@@ -1266,10 +1267,17 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             : null;
 
   return (
-    <div className="flex h-full bg-canvas">
+    <div className="relative flex h-full bg-canvas">
       {/* 会话列表栏（P1a：375px 固定宽，rail2 底）：标题/计数 + 次按钮 + 搜索 + 折叠分类树 + 会话行 */}
-      <div className="flex w-[375px] shrink-0 flex-col border-r border-hairline bg-rail2">
+      <div className={`ccode-sessions-rail flex w-[375px] shrink-0 flex-col border-r border-hairline bg-rail2 ${mobileRailOpen ? "ccode-mobile-rail-open" : ""}`}>
         <div className="shrink-0 px-3 pb-2.5 pt-3">
+          <button
+            type="button"
+            className="mb-2 ml-auto flex h-7 items-center rounded-md px-2 text-xs text-l3 hover:bg-hover hover:text-l1 md:hidden"
+            onClick={() => setMobileRailOpen(false)}
+          >
+            关闭列表
+          </button>
           {selecting ? (
             <div className="flex min-h-7 flex-wrap items-center justify-between gap-2">
               <span className="text-xs text-l3">已选 {checkedInView} 项</span>
@@ -2109,7 +2117,15 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     >
                       清除筛选
                     </button>
-                  ) : undefined
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setPage("terminal")}
+                      className={rowActionClass}
+                    >
+                      去终端快速开聊
+                    </button>
+                  )
                 }
               />
             )}
@@ -2122,6 +2138,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
         {selected ? (
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-strip px-4 py-2">
+              <button
+                type="button"
+                className="flex h-7 items-center rounded-md px-2 text-xs text-l3 hover:bg-hover hover:text-l1 md:hidden"
+                onClick={() => setMobileRailOpen(true)}
+                aria-label="打开会话列表"
+              >
+                ☰ 列表
+              </button>
               <span className="truncate text-sm font-medium text-l1">
                 {sessionTitle(selected)}
               </span>

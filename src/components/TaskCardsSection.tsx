@@ -55,6 +55,7 @@ export default function TaskCardsSection({
   focusStatusText,
   focusRunStatus,
   focusAgentAttention,
+  focusRunId,
   reviewConflict,
   onRestoreWorkspace,
   onFocusIndex,
@@ -86,6 +87,7 @@ export default function TaskCardsSection({
   focusRunStatus?: "pending" | "active" | "review" | "done";
   /** 聚焦步骤工作区内终端的注意力（stepAttention 口径）：done 时流程线 agent 节点给「已跑完」提示 */
   focusAgentAttention?: "confirm" | "done" | null;
+  focusRunId?: string | null;
   /** 聚焦步骤处于合并冲突阻塞：流程线评审节点入口改为「去处理冲突」 */
   reviewConflict?: boolean;
   /** 聚焦步骤的工作区已归档：流程线 agent 节点主入口改为「恢复工作区」 */
@@ -276,6 +278,7 @@ export default function TaskCardsSection({
       extraEnv: {},
       title: card.name,
       readonly: protect || undefined,
+      permission: protect ? "discuss" : "write_tree",
       initialPrompt: protect
         ? `${opening}。注意：现在只讨论方案，不要修改/新建/删除任何文件，也不要在这里产出任何步骤产物（哪怕我点头）——聊到该动手的程度时，提醒我回项目页点「开工」或「跟 AI 商量一下」，那边会在独立工作区里执行。`
         : opening,
@@ -628,6 +631,7 @@ export default function TaskCardsSection({
               两块并排会把「一步 = 一条线」的时序感冲掉） */}
           <StepFlow
             bare
+            runId={focusRunId}
             discussContent={
               // 零态且非人主导步骤：整个想法区不渲染（没有入口也没有约束对象）
               !showIdeaEntry && !ideaFormOpen ? null : (

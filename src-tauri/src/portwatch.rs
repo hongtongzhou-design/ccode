@@ -37,7 +37,10 @@ struct Listener {
 // ===== 子进程执行（同 workspaces.rs run_cmd_full 模式：双流读空防管道死锁 + 超时 kill） =====
 
 /// 返回 (是否退出码 0, stdout, stderr)；超时 kill 后报错
-fn run_capture(mut cmd: crate::process::BackgroundCommand, timeout: Duration) -> Result<(bool, String, String), String> {
+fn run_capture(
+    mut cmd: crate::process::BackgroundCommand,
+    timeout: Duration,
+) -> Result<(bool, String, String), String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("无法启动进程: {e}"))?;
     let mut stdout = child.stdout.take();
@@ -421,7 +424,14 @@ fn terminate(pid: u32) -> Result<(), String> {
     if ok {
         Ok(())
     } else {
-        Err(format!("终止进程失败: {}", if err.trim().is_empty() { out.trim() } else { err.trim() }))
+        Err(format!(
+            "终止进程失败: {}",
+            if err.trim().is_empty() {
+                out.trim()
+            } else {
+                err.trim()
+            }
+        ))
     }
 }
 
@@ -435,12 +445,7 @@ fn list_impl() -> Result<Vec<PortInfoDto>, String> {
         .into_iter()
         .map(|l| {
             let cwd = cwds.get(&l.pid);
-            let (kind, label) = attribute(
-                l.port,
-                cwd.map(|p| p.as_path()),
-                &workspaces,
-                &projects,
-            );
+            let (kind, label) = attribute(l.port, cwd.map(|p| p.as_path()), &workspaces, &projects);
             PortInfoDto {
                 port: l.port,
                 protocol: l.protocol,
@@ -507,9 +512,24 @@ bad line here
         assert_eq!(
             got,
             vec![
-                Listener { pid: 81234, process: "node".into(), port: 4000, protocol: "TCP".into() },
-                Listener { pid: 81299, process: "python3".into(), port: 8888, protocol: "TCP".into() },
-                Listener { pid: 81300, process: "jupyter".into(), port: 8889, protocol: "TCP".into() },
+                Listener {
+                    pid: 81234,
+                    process: "node".into(),
+                    port: 4000,
+                    protocol: "TCP".into()
+                },
+                Listener {
+                    pid: 81299,
+                    process: "python3".into(),
+                    port: 8888,
+                    protocol: "TCP".into()
+                },
+                Listener {
+                    pid: 81300,
+                    process: "jupyter".into(),
+                    port: 8889,
+                    protocol: "TCP".into()
+                },
             ]
         );
     }
@@ -528,7 +548,10 @@ n/Users/tz/work/myrepo
         assert_eq!(
             got,
             vec![
-                (81234, PathBuf::from("/Users/tz/ccode/workspaces/myrepo/lit-notes")),
+                (
+                    81234,
+                    PathBuf::from("/Users/tz/ccode/workspaces/myrepo/lit-notes")
+                ),
                 (81299, PathBuf::from("/Users/tz/work/myrepo")),
             ]
         );
@@ -588,12 +611,22 @@ n/Users/tz/work/myrepo
         let (ws, projects) = owners();
         // cwd 落在工作区 worktree 内
         assert_eq!(
-            attribute(9999, Some(Path::new("/ws/myrepo/lit-notes/src")), &ws, &projects),
+            attribute(
+                9999,
+                Some(Path::new("/ws/myrepo/lit-notes/src")),
+                &ws,
+                &projects
+            ),
             ("workspace", "工作区 · lit-notes".to_string())
         );
         // cwd 落在注册项目内（嵌套项目取最长前缀归内层）
         assert_eq!(
-            attribute(9999, Some(Path::new("/work/myrepo/sub/data")), &ws, &projects),
+            attribute(
+                9999,
+                Some(Path::new("/work/myrepo/sub/data")),
+                &ws,
+                &projects
+            ),
             ("project", "项目 · nested".to_string())
         );
         // 组件级前缀：myrepo2 不算 myrepo 的子路径
@@ -612,10 +645,7 @@ n/Users/tz/work/myrepo
             ("range", "端口段 4000–4009 · lit-notes".to_string())
         );
         // 非活跃工作区的段不标注（端口 env 只对 active 下发）
-        assert_eq!(
-            attribute(4015, None, &ws, &projects).0,
-            "other"
-        );
+        assert_eq!(attribute(4015, None, &ws, &projects).0, "other");
         // 段外且 cwd 无命中 → 系统/其他
         assert_eq!(
             attribute(9999, None, &ws, &projects),

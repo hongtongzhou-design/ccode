@@ -56,6 +56,7 @@ type StepDraft = {
   brief: string;
   artifactsText: string;
   acceptanceText: string;
+  decisionMode: string;
   inputsText: string;
   optionalInputsText: string;
   /** 每行一组，组内用 | 分隔，表示任一项满足即可 */
@@ -83,6 +84,7 @@ function toDraft(s: ProjectStepDto): StepDraft {
     brief: s.brief,
     artifactsText: s.expectedArtifacts.join(", "),
     acceptanceText: (s.acceptanceCriteria ?? []).join("\n"),
+    decisionMode: s.decisionMode ?? "auto_continue",
     inputsText: (s.inputs ?? []).join(", "),
     optionalInputsText: (s.optionalInputs ?? []).join(", "),
     anyOfInputsText: (s.anyOfInputs ?? []).map((group) => group.join(" | ")).join("; "),
@@ -111,6 +113,7 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
     workspaceName:
       d.workspaceName.trim() || sanitizeWsName(name) || `step-${index + 1}`,
     brief: d.brief,
+    decisionMode: d.decisionMode,
     expectedArtifacts: d.artifactsText
       .split(/[,，]/)
       .map((x) => x.trim())
@@ -561,6 +564,14 @@ export default function PipelineEditor({
           </div>
         </div>
 
+        <label className="mb-2 block">
+          <span className="mb-1 block text-xs text-l3">决策暂停策略</span>
+          <select className={field} value={d.decisionMode} onChange={(e) => patch(i, { decisionMode: e.target.value })}>
+            <option value="auto_continue">一般问题可按可逆兜底继续</option>
+            <option value="soft_pause">软暂停：未答需二次确认，只推进无依赖工作</option>
+            <option value="hard_pause">硬暂停：结构化决策全部回答后开工</option>
+          </select>
+        </label>
         <label className="mb-2 block">
           <span className="mb-1 block text-xs text-l3">
             简报（一键开步时落成工作区 TASK.md）
@@ -1209,6 +1220,7 @@ export default function PipelineEditor({
                     brief: "",
                     artifactsText: "",
                     acceptanceText: "",
+                    decisionMode: "auto_continue",
                     inputsText: "",
                     optionalInputsText: "",
                     anyOfInputsText: "",

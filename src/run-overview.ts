@@ -23,6 +23,23 @@ export interface RunOverviewInput {
   runId?: string;
 }
 
+/** Resolve a Run only from the already-mirrored terminal identity, never by
+ * letting the review surface infer it from an arbitrary cwd. */
+export function runIdForPath(
+  inputs: readonly RunOverviewInput[],
+  path: string,
+): string | null {
+  const key = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!key) return null;
+  const matches = inputs.filter((input) => {
+    const cwd = input.cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+    return input.runId != null && cwd === key;
+  });
+  // A path is not a Run identity. Only use this legacy bridge when it is
+  // unambiguous; otherwise the review entry must remain explicitly unbound.
+  return matches.length === 1 ? matches[0]!.runId ?? null : null;
+}
+
 export interface RunOverviewItem extends RunOverviewInput {
   /** cwd 尾段（项目名 / 工作区名），缩短显示用 */
   cwdLabel: string;

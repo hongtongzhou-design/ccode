@@ -91,7 +91,11 @@ fn render_git_status(out: &mut String, git: Option<&GitStatusDto>) {
         Some(g) if g.is_repo => {
             out.push_str(&format!(
                 "- 分支：{}（领先 {} / 落后 {}）\n",
-                if g.branch.is_empty() { "（未命名）" } else { &g.branch },
+                if g.branch.is_empty() {
+                    "（未命名）"
+                } else {
+                    &g.branch
+                },
                 g.ahead,
                 g.behind
             ));
@@ -120,7 +124,9 @@ fn render_git_status(out: &mut String, git: Option<&GitStatusDto>) {
 /// 共用段：接力说明（「非完整记忆」声明，接力家族统一措辞）
 fn render_handoff_note(out: &mut String, agent: &str) {
     out.push_str("\n## 接力说明\n\n");
-    out.push_str(&format!("- 本简报由 Ccode 从 {agent} 会话生成，非完整记忆。\n"));
+    out.push_str(&format!(
+        "- 本简报由 Ccode 从 {agent} 会话生成，非完整记忆。\n"
+    ));
     out.push_str("- 源会话的完整上下文仍保留在原 Agent 中；请结合项目文件与 git 历史补全背景。\n");
     out.push_str("- 不要假设你知道简报之外的对话细节；不确定时先读代码与相关文件。\n");
 }
@@ -139,7 +145,12 @@ pub(crate) fn render_handoff_brief(
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(|t| t.to_string())
-        .unwrap_or_else(|| format!("未命名对话 · {}", session_id.chars().take(8).collect::<String>()));
+        .unwrap_or_else(|| {
+            format!(
+                "未命名对话 · {}",
+                session_id.chars().take(8).collect::<String>()
+            )
+        });
     let mut out = String::new();
     out.push_str(&format!("# 接力简报：{title}\n\n"));
     out.push_str(&format!(
@@ -156,7 +167,14 @@ pub(crate) fn render_handoff_brief(
     if users.is_empty() {
         out.push_str("- （尾窗内没有可摘要的用户消息）\n");
     } else {
-        for m in users.iter().rev().take(RECENT_USER_MESSAGES).collect::<Vec<_>>().into_iter().rev() {
+        for m in users
+            .iter()
+            .rev()
+            .take(RECENT_USER_MESSAGES)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
             out.push_str(&format!("- 用户：{}\n", snip(&message_text(m), USER_SNIP)));
         }
     }
@@ -191,7 +209,12 @@ pub(crate) fn render_digest_brief(
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(|t| t.to_string())
-        .unwrap_or_else(|| format!("未命名对话 · {}", session_id.chars().take(8).collect::<String>()));
+        .unwrap_or_else(|| {
+            format!(
+                "未命名对话 · {}",
+                session_id.chars().take(8).collect::<String>()
+            )
+        });
     let mut out = String::new();
     out.push_str(&format!("# 接力简报（AI 提炼）：{title}\n\n"));
     out.push_str(&format!(
@@ -237,7 +260,8 @@ fn ensure_handoff_ignored(project_root: &Path) {
     {
         return;
     }
-    let Some(content) = with_handoff_rule(&fs::read_to_string(project_root.join(".gitignore")).unwrap_or_default())
+    let Some(content) =
+        with_handoff_rule(&fs::read_to_string(project_root.join(".gitignore")).unwrap_or_default())
     else {
         return;
     };
@@ -260,7 +284,9 @@ fn with_handoff_rule(existing: &str) -> Option<String> {
 
 /// 解析简报写入路径：默认 <cwd>/.ccode/handoff-<时间>.md；
 /// 自定义路径（相对则基于 cwd）的父目录必须 canonicalize 后仍在项目根内，防符号链接逃逸。
-fn handoff_target_path(cwd: &str, target_path: Option<&str>) -> Result<PathBuf, String> {    let root = fs::canonicalize(sessions::expand_tilde(cwd)).map_err(|e| format!("项目目录无效: {e}"))?;
+fn handoff_target_path(cwd: &str, target_path: Option<&str>) -> Result<PathBuf, String> {
+    let root =
+        fs::canonicalize(sessions::expand_tilde(cwd)).map_err(|e| format!("项目目录无效: {e}"))?;
     if !root.is_dir() {
         return Err("项目路径不是目录".into());
     }
@@ -277,7 +303,11 @@ fn handoff_target_path(cwd: &str, target_path: Option<&str>) -> Result<PathBuf, 
             let expanded = sessions::expand_tilde(p);
             let candidate = {
                 let c = PathBuf::from(&expanded);
-                if c.is_absolute() { c } else { root.join(c) }
+                if c.is_absolute() {
+                    c
+                } else {
+                    root.join(c)
+                }
             };
             // 父目录可能尚不存在：向上找最近的已存在祖先 canonicalize 校验（防符号链接逃逸）
             let mut ancestor = candidate.parent().map(Path::to_path_buf);
@@ -324,7 +354,11 @@ fn build_handoff_brief_impl(
         .filter(|m| m.role == "user" && !message_text(m).trim().is_empty())
         .count()
         .min(RECENT_USER_MESSAGES);
-    let file_count = git.as_ref().filter(|g| g.is_repo).map(|g| g.files.len()).unwrap_or(0);
+    let file_count = git
+        .as_ref()
+        .filter(|g| g.is_repo)
+        .map(|g| g.files.len())
+        .unwrap_or(0);
     Ok(HandoffBriefDto {
         file_path: path.to_string_lossy().into_owned(),
         summary: format!("{user_count} 条对话要点 · {file_count} 个改动文件（已脱敏）"),
@@ -531,7 +565,13 @@ pub fn mark_handoff(
     from_session_id: String,
 ) -> Result<(), String> {
     let conn = sessions::open_db()?;
-    mark_handoff_at(&conn, &target_agent, &target_cwd, &from_agent, &from_session_id)
+    mark_handoff_at(
+        &conn,
+        &target_agent,
+        &target_cwd,
+        &from_agent,
+        &from_session_id,
+    )
 }
 
 struct HandoffLink {
@@ -616,11 +656,17 @@ pub(crate) fn apply_handoff(conn: &Connection, sessions: &mut [SessionMetaDto]) 
 
 /// 供测试与调用方共用的会话 DTO 构造（字段随 sessions.rs 演进，集中一处）
 #[cfg(test)]
-fn test_session(agent: &str, session_id: &str, project_path: &str, updated_at: &str) -> SessionMetaDto {
+fn test_session(
+    agent: &str,
+    session_id: &str,
+    project_path: &str,
+    updated_at: &str,
+) -> SessionMetaDto {
     SessionMetaDto {
         agent: agent.into(),
         session_id: session_id.into(),
         project_path: project_path.into(),
+        cwd: Some(project_path.into()),
         title: None,
         created_at: None,
         updated_at: Some(updated_at.into()),
@@ -656,7 +702,11 @@ mod tests {
     fn msg(role: &str, text: &str) -> ChatMessageDto {
         ChatMessageDto {
             role: role.into(),
-            blocks: vec![BlockDto { kind: "text".into(), text: text.into(), tool_name: None }],
+            blocks: vec![BlockDto {
+                kind: "text".into(),
+                text: text.into(),
+                tool_name: None,
+            }],
             timestamp: None,
             usage: None,
         }
@@ -689,7 +739,14 @@ mod tests {
             msg("user", "重点关注召回率指标"),
             msg("assistant", "已完成初稿，结论如下……"),
         ];
-        let brief = render_handoff_brief("codex", "sess-12345678", "/tmp/proj", Some("RAG 调研"), &messages, Some(&git_dto()));
+        let brief = render_handoff_brief(
+            "codex",
+            "sess-12345678",
+            "/tmp/proj",
+            Some("RAG 调研"),
+            &messages,
+            Some(&git_dto()),
+        );
         assert!(brief.contains("# 接力简报：RAG 调研"));
         assert!(brief.contains("- 来源 Agent：codex"));
         assert!(brief.contains("- 项目目录：/tmp/proj"));
@@ -718,7 +775,14 @@ mod tests {
     #[test]
     fn digest_brief_structure_sections() {
         let ai_body = "## 任务目标\n做提炼接力\n\n## 下一步建议\n先写后端";
-        let brief = render_digest_brief("claude-code", "sess-12345678", "/tmp/proj", Some("提炼接力"), ai_body, Some(&git_dto()));
+        let brief = render_digest_brief(
+            "claude-code",
+            "sess-12345678",
+            "/tmp/proj",
+            Some("提炼接力"),
+            ai_body,
+            Some(&git_dto()),
+        );
         assert!(brief.contains("# 接力简报（AI 提炼）：提炼接力"));
         assert!(brief.contains("- 来源 Agent：claude-code"));
         assert!(brief.contains("- 项目目录：/tmp/proj"));
@@ -735,7 +799,14 @@ mod tests {
     #[test]
     fn digest_brief_redacts_ai_output() {
         let secret = "sk-ant-api03-abcdef123456";
-        let brief = render_digest_brief("codex", "s1", "/tmp/p", None, &format!("密钥是 {secret}"), None);
+        let brief = render_digest_brief(
+            "codex",
+            "s1",
+            "/tmp/p",
+            None,
+            &format!("密钥是 {secret}"),
+            None,
+        );
         let text = redact_and_cap(&brief);
         assert!(!text.contains(secret), "AI 输出必须脱敏: {text}");
         assert!(text.contains("已隐藏密钥"));
@@ -773,7 +844,9 @@ mod tests {
         // 已有规则 → None（幂等）
         assert!(with_handoff_rule(&added).is_none());
         // 空文件也能写
-        assert!(with_handoff_rule("").unwrap().contains(".ccode/handoff-*.md"));
+        assert!(with_handoff_rule("")
+            .unwrap()
+            .contains(".ccode/handoff-*.md"));
         // 无尾换行的存量文件：先换行再追加，不粘连
         let noeol = with_handoff_rule("*.pdf").unwrap();
         assert!(noeol.contains("*.pdf\n\n# Ccode 接力简报"), "{noeol}");
@@ -781,7 +854,8 @@ mod tests {
 
     /// 目标路径：默认落 .ccode/ 下；自定义路径逃出项目根必须拒绝
     #[test]
-    fn target_path_default_and_escape_rejected() {        let root = std::env::temp_dir().join(format!("ccode-handoff-{}", uuid::Uuid::new_v4()));
+    fn target_path_default_and_escape_rejected() {
+        let root = std::env::temp_dir().join(format!("ccode-handoff-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let cwd = root.to_string_lossy().into_owned();
         let default = handoff_target_path(&cwd, None).unwrap();
@@ -880,7 +954,9 @@ mod tests {
         // 无 .ccode 目录 → 空表
         let bare = std::env::temp_dir().join(format!("ccode-legacy-bare-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&bare).unwrap();
-        assert!(list_legacy_briefs_at(bare.to_str().unwrap()).unwrap().is_empty());
+        assert!(list_legacy_briefs_at(bare.to_str().unwrap())
+            .unwrap()
+            .is_empty());
         // 不存在的项目根 → 报错
         assert!(list_legacy_briefs_at(bare.join("missing").to_str().unwrap()).is_err());
         std::fs::remove_dir_all(&root).ok();
@@ -900,10 +976,22 @@ mod tests {
         let mut sessions = vec![old, new, other_agent];
         apply_handoff(&conn, &mut sessions);
 
-        assert!(sessions[0].handoff_from_agent.is_none(), "登记前的旧会话不得标注");
-        assert_eq!(sessions[1].handoff_from_agent.as_deref(), Some("claude-code"));
-        assert_eq!(sessions[1].handoff_from_session.as_deref(), Some("src-sess-1"));
-        assert!(sessions[2].handoff_from_agent.is_none(), "agent 不匹配不得标注");
+        assert!(
+            sessions[0].handoff_from_agent.is_none(),
+            "登记前的旧会话不得标注"
+        );
+        assert_eq!(
+            sessions[1].handoff_from_agent.as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(
+            sessions[1].handoff_from_session.as_deref(),
+            Some("src-sess-1")
+        );
+        assert!(
+            sessions[2].handoff_from_agent.is_none(),
+            "agent 不匹配不得标注"
+        );
 
         // 已固化进 session_meta：换一批 DTO 走 meta 合并口径也能读到（模拟下次列表）
         let persisted: Option<(String, String)> = conn
@@ -927,8 +1015,14 @@ mod tests {
         marked.handoff_from_session = Some("src-sess-1".into());
         let mut sessions = vec![marked, newer];
         apply_handoff(&conn, &mut sessions);
-        assert_eq!(sessions[0].handoff_from_agent.as_deref(), Some("claude-code"));
-        assert!(sessions[1].handoff_from_agent.is_none(), "已固化后不得转移标注");
+        assert_eq!(
+            sessions[0].handoff_from_agent.as_deref(),
+            Some("claude-code")
+        );
+        assert!(
+            sessions[1].handoff_from_agent.is_none(),
+            "已固化后不得转移标注"
+        );
     }
 
     /// 同 agent+cwd 重复登记：后一次覆盖前一次（重新接力语义）

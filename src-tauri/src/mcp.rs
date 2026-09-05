@@ -235,8 +235,8 @@ pub(crate) fn strip_jsonc(text: &str) -> String {
 }
 
 fn jsonc_read(path: &Path) -> Result<serde_json::Value, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
     serde_json::from_str(&strip_jsonc(&text))
         .map_err(|e| format!("{} 解析失败: {e}（已拒写，请先手工修复）", path.display()))
 }
@@ -368,9 +368,8 @@ fn is_relative_command(command: &str) -> bool {
     if c.is_empty() {
         return false;
     }
-    let looks_like_path = c.contains('/')
-        || c.contains('\\')
-        || (c.len() >= 2 && c.as_bytes()[1] == b':');
+    let looks_like_path =
+        c.contains('/') || c.contains('\\') || (c.len() >= 2 && c.as_bytes()[1] == b':');
     // Unix 形态 `/abs/...` 在 Windows 上 Path::is_absolute 为 false（缺盘符前缀），
     // 但仍不是「随 cwd 漂移」的相对路径，不当成相对路径处理。
     let absolute = Path::new(c).is_absolute() || c.starts_with('/');
@@ -492,13 +491,34 @@ fn entry_json(server: &McpServerDto, agent: &str) -> Result<serde_json::Value, S
     let mut m = Map::new();
     match agent {
         "claude-code" => {
-            m.insert("type".into(), json!(if server.kind == "stdio" { "stdio" } else { "http" }));
+            m.insert(
+                "type".into(),
+                json!(if server.kind == "stdio" {
+                    "stdio"
+                } else {
+                    "http"
+                }),
+            );
         }
         "codebuddy" => {
-            m.insert("type".into(), json!(if server.kind == "stdio" { "stdio" } else { "http" }));
+            m.insert(
+                "type".into(),
+                json!(if server.kind == "stdio" {
+                    "stdio"
+                } else {
+                    "http"
+                }),
+            );
         }
         "opencode" => {
-            m.insert("type".into(), json!(if server.kind == "stdio" { "local" } else { "remote" }));
+            m.insert(
+                "type".into(),
+                json!(if server.kind == "stdio" {
+                    "local"
+                } else {
+                    "remote"
+                }),
+            );
         }
         _ => {}
     }
@@ -538,7 +558,8 @@ fn entry_json(server: &McpServerDto, agent: &str) -> Result<serde_json::Value, S
             }
         }
         // cwd 只写给核实支持的家（claude/codebuddy/cursor 不写，matrix §10.2）
-        if !server.cwd.trim().is_empty() && matches!(agent, "gemini" | "qwen" | "opencode" | "kimi") {
+        if !server.cwd.trim().is_empty() && matches!(agent, "gemini" | "qwen" | "opencode" | "kimi")
+        {
             m.insert("cwd".into(), json!(server.cwd.trim()));
         }
     } else {
@@ -642,7 +663,9 @@ fn entry_toml(server: &McpServerDto) -> Result<toml_edit::Table, String> {
                 continue;
             }
             let v = p.value.trim();
-            let bearer = v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "));
+            let bearer = v
+                .strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "));
             if key.eq_ignore_ascii_case("authorization") {
                 if let Some(b) = bearer {
                     if let Some(name) = env_ref(b) {
@@ -780,7 +803,9 @@ fn check_managed_guard(agent: &str) -> Result<(), String> {
         }
         for p in paths {
             if Path::new(&p).exists() {
-                return Err("检测到企业托管 MCP 配置（managed-mcp.json），用户级分发被独占，已跳过".into());
+                return Err(
+                    "检测到企业托管 MCP 配置（managed-mcp.json），用户级分发被独占，已跳过".into(),
+                );
             }
         }
     }
@@ -799,12 +824,16 @@ fn check_managed_guard(agent: &str) -> Result<(), String> {
             paths.push(PathBuf::from(pd).join("opencode").join("managed"));
         }
         #[cfg(target_os = "macos")]
-        paths.push(PathBuf::from("/Library/Application Support/opencode/managed"));
+        paths.push(PathBuf::from(
+            "/Library/Application Support/opencode/managed",
+        ));
         #[cfg(target_os = "linux")]
         paths.push(PathBuf::from("/etc/opencode/managed"));
         for p in paths {
             if p.exists() {
-                return Err("检测到 OpenCode 企业托管配置目录（managed），用户级分发被独占，已跳过".into());
+                return Err(
+                    "检测到 OpenCode 企业托管配置目录（managed），用户级分发被独占，已跳过".into(),
+                );
             }
         }
     }
@@ -814,7 +843,11 @@ fn check_managed_guard(agent: &str) -> Result<(), String> {
 // ===== 读-改-写分发 =====
 
 /// JSON 系七家：写/删 obj[top_key][name]，保留其余一切键；备份 + 原子写 + 读回校验
-fn write_json_entry(agent: &str, name: &str, entry: Option<serde_json::Value>) -> Result<(), String> {
+fn write_json_entry(
+    agent: &str,
+    name: &str,
+    entry: Option<serde_json::Value>,
+) -> Result<(), String> {
     check_managed_guard(agent)?;
     let (path, _) = agent_paths(agent)?;
     let mut root = if path.exists() {
@@ -860,10 +893,7 @@ fn write_json_entry(agent: &str, name: &str, entry: Option<serde_json::Value>) -
     crate::profiles::atomic_write(&path, &text)?;
     // 读回校验：条目按预期存在/消失
     let back = jsonc_read(&path)?;
-    let present = back
-        .get(top_key(agent))
-        .and_then(|v| v.get(name))
-        .is_some();
+    let present = back.get(top_key(agent)).and_then(|v| v.get(name)).is_some();
     if present != expect_present {
         return Err(format!("写入 {} 后读回校验失败", path.display()));
     }
@@ -899,14 +929,12 @@ fn write_codex_entry(name: &str, entry: Option<toml_edit::Table>) -> Result<(), 
     backup_once(&path)?;
     crate::profiles::atomic_write(&path, &doc.to_string())?;
     // 读回校验
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("读回 {} 失败: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("读回 {} 失败: {e}", path.display()))?;
     let back = text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| format!("写入后 {} 无法解析: {e}", path.display()))?;
-    let present = back
-        .get("mcp_servers")
-        .and_then(|t| t.get(name))
-        .is_some();
+    let present = back.get("mcp_servers").and_then(|t| t.get(name)).is_some();
     if present != expect_present {
         return Err(format!("写入 {} 后读回校验失败", path.display()));
     }
@@ -955,13 +983,17 @@ fn toml_to_json(item: &toml_edit::Item) -> serde_json::Value {
                 .map(Value::Number)
                 .unwrap_or(Value::Null),
             toml_edit::Value::Boolean(b) => Value::Bool(*b.value()),
-            toml_edit::Value::Array(a) => {
-                Value::Array(a.iter().map(|x| toml_to_json(&toml_edit::Item::Value(x.clone()))).collect())
-            }
+            toml_edit::Value::Array(a) => Value::Array(
+                a.iter()
+                    .map(|x| toml_to_json(&toml_edit::Item::Value(x.clone())))
+                    .collect(),
+            ),
             _ => Value::Null,
         },
         toml_edit::Item::Table(t) => Value::Object(
-            t.iter().map(|(k, v)| (k.to_string(), toml_to_json(v))).collect::<Map<_, _>>(),
+            t.iter()
+                .map(|(k, v)| (k.to_string(), toml_to_json(v)))
+                .collect::<Map<_, _>>(),
         ),
         _ => Value::Null,
     }
@@ -1030,7 +1062,11 @@ fn reverse_entry(agent: &str, name: &str, v: &serde_json::Value) -> McpServerDto
     let arr = |k: &str| {
         v.get(k)
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     };
     let pairs = |k: &str| {
@@ -1038,10 +1074,12 @@ fn reverse_entry(agent: &str, name: &str, v: &serde_json::Value) -> McpServerDto
             .and_then(|x| x.as_object())
             .map(|o| {
                 o.iter()
-                    .filter_map(|(k, x)| x.as_str().map(|val| McpEnvPair {
-                        key: k.clone(),
-                        value: val.to_string(),
-                    }))
+                    .filter_map(|(k, x)| {
+                        x.as_str().map(|val| McpEnvPair {
+                            key: k.clone(),
+                            value: val.to_string(),
+                        })
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
@@ -1310,7 +1348,10 @@ fn save_impl(mut server: McpServerDto, allow_plaintext: bool) -> Result<Vec<McpS
         let Some(pos) = list.iter().position(|s| s.id == server.id) else {
             return Err("该 server 不存在（可能已删除）".into());
         };
-        if list.iter().any(|s| s.name == server.name && s.id != server.id) {
+        if list
+            .iter()
+            .any(|s| s.name == server.name && s.id != server.id)
+        {
             return Err(format!("已存在同名 server: {}", server.name));
         }
         server.apps = list[pos].apps.clone(); // 分发开关以开关命令为准，编辑不夹带
@@ -1693,8 +1734,14 @@ mod tests {
             args: vec!["-y".into(), "some-mcp".into()],
             cwd: "/tmp".into(),
             env: vec![
-                McpEnvPair { key: "DEBUG".into(), value: "1".into() },
-                McpEnvPair { key: "TOKEN".into(), value: "${MY_TOKEN}".into() },
+                McpEnvPair {
+                    key: "DEBUG".into(),
+                    value: "1".into(),
+                },
+                McpEnvPair {
+                    key: "TOKEN".into(),
+                    value: "${MY_TOKEN}".into(),
+                },
             ],
             url: String::new(),
             headers: vec![],
@@ -1796,7 +1843,10 @@ mod tests {
     fn mapping_opencode_local_array_and_env_rename() {
         let v = entry_json(&stdio_server(), "opencode").unwrap();
         assert_eq!(v["type"], "local");
-        assert_eq!(v["command"], serde_json::json!(["ccode-test-nonexistent-bin", "-y", "some-mcp"]));
+        assert_eq!(
+            v["command"],
+            serde_json::json!(["ccode-test-nonexistent-bin", "-y", "some-mcp"])
+        );
         assert_eq!(v["environment"]["DEBUG"], "1");
         // ${VAR} → {env:VAR}
         assert_eq!(v["environment"]["TOKEN"], "{env:MY_TOKEN}");
@@ -1855,7 +1905,10 @@ mod tests {
     fn name_validation_intersection() {
         assert!(validate_server_name("fs-tools2").is_ok());
         assert!(validate_server_name("has space").is_err());
-        assert!(validate_server_name("with_under").is_err(), "下划线禁（gemini policy）");
+        assert!(
+            validate_server_name("with_under").is_err(),
+            "下划线禁（gemini policy）"
+        );
         assert!(validate_server_name("").is_err());
     }
 
@@ -1870,8 +1923,14 @@ mod tests {
         let s = reverse_entry("codex", "r", &v);
         assert_eq!(s.kind, "remote");
         assert_eq!(s.url, "https://x/mcp");
-        assert!(s.headers.iter().any(|p| p.key == "X-Region" && p.value == "us"));
-        assert!(s.headers.iter().any(|p| p.key == "X-Key" && p.value == "${MY_KEY}"));
+        assert!(s
+            .headers
+            .iter()
+            .any(|p| p.key == "X-Region" && p.value == "us"));
+        assert!(s
+            .headers
+            .iter()
+            .any(|p| p.key == "X-Key" && p.value == "${MY_KEY}"));
         assert!(s
             .headers
             .iter()
@@ -1895,7 +1954,10 @@ mod tests {
         assert_eq!(s.kind, "stdio");
         assert_eq!(s.command, "npx");
         assert_eq!(s.args, vec!["-y", "pkg"]);
-        assert!(s.env.iter().any(|p| p.key == "TOKEN" && p.value == "${MY_TOKEN}"));
+        assert!(s
+            .env
+            .iter()
+            .any(|p| p.key == "TOKEN" && p.value == "${MY_TOKEN}"));
         assert!(s.env.iter().any(|p| p.key == "DEBUG" && p.value == "1"));
     }
 
@@ -1917,9 +1979,18 @@ mod tests {
     fn plaintext_secret_detection() {
         let mut s = stdio_server();
         s.env = vec![
-            McpEnvPair { key: "OK".into(), value: "1".into() },
-            McpEnvPair { key: "REF".into(), value: "${MY_TOKEN}".into() },
-            McpEnvPair { key: "KEY".into(), value: "sk-abcdef1234567890".into() },
+            McpEnvPair {
+                key: "OK".into(),
+                value: "1".into(),
+            },
+            McpEnvPair {
+                key: "REF".into(),
+                value: "${MY_TOKEN}".into(),
+            },
+            McpEnvPair {
+                key: "KEY".into(),
+                value: "sk-abcdef1234567890".into(),
+            },
         ];
         s.headers = vec![McpEnvPair {
             key: "Authorization".into(),
@@ -1939,7 +2010,10 @@ mod tests {
         let p = PathBuf::from(r"\\?\C:\Users\x\AppData\Roaming\npm\npx.cmd");
         let text = mcp_path_text(p);
         assert!(!text.starts_with(r"\\?\"), "{text}");
-        assert!(text.ends_with(r"\npx.cmd") || text.ends_with("/npx.cmd"), "{text}");
+        assert!(
+            text.ends_with(r"\npx.cmd") || text.ends_with("/npx.cmd"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1978,12 +2052,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ccode-mcp-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
-        std::fs::write(&path, "{\n  // 用户注释\n  \"other\": {\"keep\": true},\n}\n").unwrap();
+        std::fs::write(
+            &path,
+            "{\n  // 用户注释\n  \"other\": {\"keep\": true},\n}\n",
+        )
+        .unwrap();
         // 直接调底层：构造一个假的 agent 路径不可行（agent_paths 写死），
         // 这里验证 jsonc_read + 写回保留其他键的核心语义
         let mut root = jsonc_read(&path).unwrap();
         root["mcpServers"] = serde_json::json!({"fs-tools": {"command": "npx"}});
-        crate::profiles::atomic_write(&path, &serde_json::to_string_pretty(&root).unwrap()).unwrap();
+        crate::profiles::atomic_write(&path, &serde_json::to_string_pretty(&root).unwrap())
+            .unwrap();
         let back = jsonc_read(&path).unwrap();
         assert_eq!(back["other"]["keep"], true, "无关键必须保留");
         assert_eq!(back["mcpServers"]["fs-tools"]["command"], "npx");
@@ -2052,7 +2131,11 @@ mod tests {
         // 路径二：收编 agent 既有条目
         fx.seed_cursor_config();
         let outcome = import_from_agent_impl("cursor", "adopted").unwrap();
-        let adopted = outcome.servers.iter().find(|s| s.name == "adopted").unwrap();
+        let adopted = outcome
+            .servers
+            .iter()
+            .find(|s| s.name == "adopted")
+            .unwrap();
         assert_eq!(adopted.origin, "imported:cursor");
         assert_eq!(adopted.apps.get("cursor"), Some(&true));
         // 路径三：粘贴 JSON 导入（parse 阶段就标好，确认落库不另设）
@@ -2091,7 +2174,10 @@ mod tests {
         let list = delete_impl(&id, false, true).unwrap();
         assert!(list.is_empty());
         assert_eq!(std::fs::read_to_string(&agent_file).unwrap(), before);
-        assert!(!fx.dir.join("backups").exists(), "不动 agent 文件就不该产生备份");
+        assert!(
+            !fx.dir.join("backups").exists(),
+            "不动 agent 文件就不该产生备份"
+        );
         // 对照组：连同配置删除（force 跳过预检）确实会把条目从 agent 配置里移除
         let outcome = import_from_agent_impl("cursor", "adopted").unwrap();
         let list = delete_impl(&outcome.servers[0].id, true, false).unwrap();
@@ -2188,9 +2274,15 @@ done
         assert!(!h.ok);
         let err = h.error.unwrap();
         assert!(err.contains("两种帧格式均无响应"), "{err}");
-        assert!(err.contains("NDJSON") && err.contains("Content-Length"), "{err}");
+        assert!(
+            err.contains("NDJSON") && err.contains("Content-Length"),
+            "{err}"
+        );
         assert!(err.contains("进程未响应就退出了"), "{err}");
-        assert!(err.contains("环境变量 CCODE_TEST_DEFINITELY_MISSING_VAR 未设置"), "{err}");
+        assert!(
+            err.contains("环境变量 CCODE_TEST_DEFINITELY_MISSING_VAR 未设置"),
+            "{err}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2214,7 +2306,10 @@ done
         assert!(agent_has_enabled_semantics("codex"));
         assert!(agent_has_enabled_semantics("grok"));
         assert!(agent_has_enabled_semantics("codebuddy"));
-        assert!(!agent_has_enabled_semantics("claude-code"), "未实证的家不产出该态");
+        assert!(
+            !agent_has_enabled_semantics("claude-code"),
+            "未实证的家不产出该态"
+        );
     }
 
     #[test]
@@ -2277,7 +2372,9 @@ done
     fn distribution_status_disabled_externally_codex_and_codebuddy() {
         // 这两家的路径有环境变量搬迁口（CODEX_HOME / CODEBUDDY_CONFIG_DIR），
         // 设了就跳过——Fixture 的 thread_local HOME 压不住它们
-        if std::env::var_os("CODEX_HOME").is_some() || std::env::var_os("CODEBUDDY_CONFIG_DIR").is_some() {
+        if std::env::var_os("CODEX_HOME").is_some()
+            || std::env::var_os("CODEBUDDY_CONFIG_DIR").is_some()
+        {
             return;
         }
         let fx = Fixture::new();
@@ -2289,7 +2386,11 @@ done
         apply_to_agent("codebuddy", &s, true).unwrap();
         let st = distribution_status_impl("t1").unwrap();
         assert_eq!(st.get("codex").map(String::as_str), Some("ok"), "{st:?}");
-        assert_eq!(st.get("codebuddy").map(String::as_str), Some("ok"), "{st:?}");
+        assert_eq!(
+            st.get("codebuddy").map(String::as_str),
+            Some("ok"),
+            "{st:?}"
+        );
         // codex：外部加 enabled = false → disabled_externally（而不是 modified）
         let codex_path = fx.dir.join(".codex").join("config.toml");
         let mut doc = std::fs::read_to_string(&codex_path)
@@ -2326,7 +2427,11 @@ done
         );
         let st = distribution_status_impl("t1").unwrap();
         assert_eq!(st.get("codex").map(String::as_str), Some("ok"), "{st:?}");
-        assert_eq!(st.get("codebuddy").map(String::as_str), Some("ok"), "{st:?}");
+        assert_eq!(
+            st.get("codebuddy").map(String::as_str),
+            Some("ok"),
+            "{st:?}"
+        );
     }
 
     // ===== 体检沉淀 / 启动超时 / env 引用预检 =====
@@ -2363,7 +2468,10 @@ done
     fn startup_timeout_reverse_parsed_from_toml_fields() {
         // codex/grok 的 startup_timeout_sec（秒）→ 毫秒；缺键/非正数不落字段
         let v = serde_json::json!({"command": "npx", "startup_timeout_sec": 15});
-        assert_eq!(reverse_entry("codex", "s", &v).startup_timeout_ms, Some(15_000));
+        assert_eq!(
+            reverse_entry("codex", "s", &v).startup_timeout_ms,
+            Some(15_000)
+        );
         let v = serde_json::json!({"command": "npx", "startup_timeout_sec": 0.5});
         assert_eq!(reverse_entry("grok", "s", &v).startup_timeout_ms, Some(500));
         let v = serde_json::json!({"command": "npx"});
@@ -2422,14 +2530,33 @@ done
     fn missing_env_refs_collects_unset_only() {
         // 必定未设置的变量名；PATH 全平台必设；字面值与内嵌引用（Bearer $X 非整值）不算
         let pairs = vec![
-            McpEnvPair { key: "A".into(), value: "${CCODE_TEST_DEFINITELY_MISSING_VAR}".into() },
-            McpEnvPair { key: "B".into(), value: "$CCODE_TEST_DEFINITELY_MISSING_VAR".into() }, // 去重
-            McpEnvPair { key: "C".into(), value: "$PATH".into() },
-            McpEnvPair { key: "D".into(), value: "plain-literal".into() },
-            McpEnvPair { key: "E".into(), value: "Bearer ${CCODE_TEST_DEFINITELY_MISSING_VAR}".into() },
+            McpEnvPair {
+                key: "A".into(),
+                value: "${CCODE_TEST_DEFINITELY_MISSING_VAR}".into(),
+            },
+            McpEnvPair {
+                key: "B".into(),
+                value: "$CCODE_TEST_DEFINITELY_MISSING_VAR".into(),
+            }, // 去重
+            McpEnvPair {
+                key: "C".into(),
+                value: "$PATH".into(),
+            },
+            McpEnvPair {
+                key: "D".into(),
+                value: "plain-literal".into(),
+            },
+            McpEnvPair {
+                key: "E".into(),
+                value: "Bearer ${CCODE_TEST_DEFINITELY_MISSING_VAR}".into(),
+            },
         ];
         let missing = missing_env_refs_impl(&pairs);
-        assert_eq!(missing, vec!["CCODE_TEST_DEFINITELY_MISSING_VAR"], "{missing:?}");
+        assert_eq!(
+            missing,
+            vec!["CCODE_TEST_DEFINITELY_MISSING_VAR"],
+            "{missing:?}"
+        );
         // 空值算未设置（edition 2021，set_var 安全；用独立变量名不与并行测试互踩）
         std::env::set_var("CCODE_TEST_EMPTY_VAR", "");
         let missing = missing_env_refs_impl(&[McpEnvPair {
@@ -2458,12 +2585,13 @@ done
         let cwd_dir = fx.dir.join("plugin-a");
         let hit_a = touch_file(&cwd_dir.join("bin").join("serve"));
         let _hit_b = touch_file(&fx.dir.join(".cursor").join("bin").join("serve"));
-        let hits = resolve_relative_candidates(
-            "./bin/serve",
-            &cwd_dir.to_string_lossy(),
-            Some("cursor"),
+        let hits =
+            resolve_relative_candidates("./bin/serve", &cwd_dir.to_string_lossy(), Some("cursor"));
+        assert_eq!(
+            hits.len(),
+            2,
+            "两个基准各命中一次（路径不同不去重）: {hits:?}"
         );
-        assert_eq!(hits.len(), 2, "两个基准各命中一次（路径不同不去重）: {hits:?}");
         assert_eq!(hits[0].command, hit_a, "序位最前 = 条目自己的 cwd 基准");
         // 原 cwd 已是绝对路径：规范化保留原值
         assert_eq!(hits[0].cwd, cwd_dir.to_string_lossy().as_ref());
@@ -2538,10 +2666,16 @@ done
         let outcome = import_from_agent_impl("cursor", "rel-srv").unwrap();
         assert_eq!(outcome.resolved, 0);
         assert_eq!(outcome.unresolved, 1);
-        assert_eq!(outcome.servers[0].command, "./bin/serve", "原样收进来不拒收");
+        assert_eq!(
+            outcome.servers[0].command, "./bin/serve",
+            "原样收进来不拒收"
+        );
         assert_eq!(outcome.servers[0].cwd, ".");
         // 清单页探测能把这条标出来
-        assert_eq!(command_path_status(&outcome.servers[0].command), Some("relative"));
+        assert_eq!(
+            command_path_status(&outcome.servers[0].command),
+            Some("relative")
+        );
     }
 
     #[test]
@@ -2570,10 +2704,18 @@ done
         let hit = touch_file(&fx.dir.join("exists").join("serve"));
         assert_eq!(command_path_status(&hit), Some("ok"));
         // missing：绝对路径不存在（版本升级路径失效）
-        let gone = fx.dir.join("gone").join("serve").to_string_lossy().into_owned();
+        let gone = fx
+            .dir
+            .join("gone")
+            .join("serve")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(command_path_status(&gone), Some("missing"));
         // missing：裸命令名解析不到（必定不存在的名字，同 stdio_server 夹具口径）
-        assert_eq!(command_path_status("ccode-test-nonexistent-bin"), Some("missing"));
+        assert_eq!(
+            command_path_status("ccode-test-nonexistent-bin"),
+            Some("missing")
+        );
         // 不判：$VAR 引用式与空命令
         assert_eq!(command_path_status("$MCP_BIN"), None);
         assert_eq!(command_path_status("${MCP_BIN}"), None);
@@ -2607,7 +2749,9 @@ pub async fn mcp_distribution_status(
         .map_err(|e| format!("查询 MCP 分发状态失败: {e}"))?
 }
 
-fn distribution_status_impl(id: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
+fn distribution_status_impl(
+    id: &str,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
     let server = read_store()?
         .into_iter()
         .find(|s| s.id == id)
@@ -2839,7 +2983,10 @@ fn check_stdio_attempt(
         let _ = child.wait();
         return StdioAttempt::Done(health_fail(
             started,
-            append_missing_hint(format!("写入 initialize 失败（进程可能已退出）：{e}"), &missing),
+            append_missing_hint(
+                format!("写入 initialize 失败（进程可能已退出）：{e}"),
+                &missing,
+            ),
         ));
     }
     // 响应读取搬进线程，主线程 recv_timeout 实现等待上限（CI 不挂死兜底）；
@@ -2970,7 +3117,10 @@ async fn check_remote(server: &McpServerDto) -> McpHealthDto {
     };
     let mut req = client
         .post(server.url.trim())
-        .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
         .json(&initialize_body());
     let mut missing: Vec<String> = Vec::new();
     let mut pairs: Vec<(String, String)> = Vec::new();
@@ -3135,11 +3285,14 @@ fn command_path_status(command: &str) -> Option<&'static str> {
     if is_relative_command(c) {
         return Some("relative");
     }
-    let looks_like_path = c.contains('/')
-        || c.contains('\\')
-        || (c.len() >= 2 && c.as_bytes()[1] == b':');
+    let looks_like_path =
+        c.contains('/') || c.contains('\\') || (c.len() >= 2 && c.as_bytes()[1] == b':');
     if looks_like_path {
-        return Some(if Path::new(c).exists() { "ok" } else { "missing" });
+        return Some(if Path::new(c).exists() {
+            "ok"
+        } else {
+            "missing"
+        });
     }
     Some(if crate::agents::resolve_binary(c).is_some() {
         "ok"
@@ -3157,7 +3310,9 @@ pub async fn mcp_command_path_status() -> Result<HashMap<String, String>, String
         Ok(list
             .iter()
             .filter(|s| s.kind == "stdio")
-            .filter_map(|s| command_path_status(&s.command).map(|st| (s.id.clone(), st.to_string())))
+            .filter_map(|s| {
+                command_path_status(&s.command).map(|st| (s.id.clone(), st.to_string()))
+            })
             .collect())
     })
     .await
@@ -3181,7 +3336,11 @@ pub async fn resolve_mcp_command_fix(id: String) -> Result<Vec<McpCommandFix>, S
             .origin
             .strip_prefix("imported:")
             .filter(|a| *a != "json" && crate::agent_specs::agent_spec(a).is_some());
-        Ok(resolve_relative_candidates(&server.command, &server.cwd, agent))
+        Ok(resolve_relative_candidates(
+            &server.command,
+            &server.cwd,
+            agent,
+        ))
     })
     .await
     .map_err(|e| e.to_string())?

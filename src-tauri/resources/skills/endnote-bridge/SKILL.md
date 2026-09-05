@@ -1,6 +1,6 @@
 ---
 name: endnote-bridge
-description: EndNote 格式桥接规范。当用户必须把项目文献导入 EndNote 库、收尾存量「Word + EndNote」稿件、或组内流程绑定 EndNote 时使用。EndNote 桌面端没有官方自动化 API，本技能只做格式桥接（references.bib → EndNote XML/RIS 供一键导入；EndNote 导出 → 解析回流 references.bib）与人工步骤指引；禁止 CWYW 无人值守 hack（Word COM/域代码触发，脆弱易卡）。新稿写作建议走 Zotero 线（zotero-sync），两者互补不互斥。
+description: EndNote 格式桥接规范。当用户必须把项目文献导入 EndNote 库、收尾存量「Word + EndNote」稿件、或组内流程绑定 EndNote 时使用。EndNote 桌面端没有官方自动化 API，本技能只做格式桥接（references.bib → EndNote XML/RIS 供一键导入；EndNote 导出 → 解析回流 references.bib）与人工步骤指引；禁止 CWYW 无人值守 hack（Word COM/域代码触发，脆弱易卡）。新稿写作可按需选择 Zotero 线（zotero-sync），两者互补不互斥。
 inputs: [references.bib]
 outputs: [papers/endnote-import.xml]
 ---
@@ -16,7 +16,7 @@ outputs: [papers/endnote-import.xml]
 - 存量稿件用「Word + EndNote（CWYW）」写到一半，需要收尾或继续
 - 组内/合作方流程绑定 EndNote，文献库必须交付到 EndNote
 - 用户明确要求把 references.bib 导入 EndNote
-- 不存在上述约束时优先 Zotero 线（zotero-sync 全自动）；本技能是兼容桥，不是默认主路
+- 不存在上述约束时可按需选择 Zotero 线（zotero-sync 仍须遵守用户意图与授权门槛）；本技能是兼容桥，不是默认主路
 
 ## 红线（不可逾越）
 
@@ -29,11 +29,22 @@ outputs: [papers/endnote-import.xml]
 
 ### 1. 出库桥接（references.bib → EndNote）
 
-- 产出 `papers/endnote-import.xml`（EndNote XML 格式，EndNote 首选导入格式，字段保真最好）：
+- 产出 `papers/endnote-import.xml`（EndNote XML 格式，EndNote 首选导入格式，字段保真最好；这是本技能主产物）：
   - 最小字段集：ref-type（Journal Article=17，其余类型按 EndNote XML 对照表）、authors（`姓, 名` 逐作者一个 author 元素）、
     title、secondary-title（期刊名）、year、volume/number/pages、electronic-resource-num（DOI）、urls
   - 附件：项目 `papers/` 下已配对的 PDF 写进 `pdf-urls`（用 absolute file URL），EndNote 导入时自动挂附件
   - 生成脚本放 `analysis/`（可复现、`main()` 入口）；bib 解析用现成库（如 Python bibtexparser），缺字段留空不编造
+- 最小骨架（字段名和层级不可省略；每条记录按此结构生成）：
+  ```xml
+  <xml><records><record>
+    <ref-type name="Journal Article">17</ref-type>
+    <contributors><authors><author><style>Doe, Jane</style></author></authors></contributors>
+    <titles><title>Example title</title><secondary-title>Example Journal</secondary-title></titles>
+    <dates><year>2026</year></dates>
+    <electronic-resource-num>10.0000/example</electronic-resource-num>
+    <urls><pdf-urls><url>file:///C:/project/papers/example.pdf</url></pdf-urls></urls>
+  </record></records></xml>
+  ```
 - 备选：用户环境导不进 XML 时改产 `papers/endnote-import.ris`（TY/AU/TI/JO/PY/DO/UR，RIS 2004 口径）
 - 导入动作本身是人工：报告里写清指引——双击文件或 EndNote「File → Import」，Import Option 选「EndNote Import / Reference Manager (RIS)」
 

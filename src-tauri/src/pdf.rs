@@ -151,8 +151,7 @@ mod tests {
     use super::*;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("ccode-pdf-{name}-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("ccode-pdf-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -166,9 +165,17 @@ mod tests {
         assert!(path_allowed(Path::new("/proj/a/docs/x.pdf"), &roots, &res));
         assert!(path_allowed(Path::new("/proj/a"), &roots, &res));
         // 资源精确路径放行（项目根外单文件）
-        assert!(path_allowed(Path::new("/elsewhere/paper.pdf"), &roots, &res));
+        assert!(path_allowed(
+            Path::new("/elsewhere/paper.pdf"),
+            &roots,
+            &res
+        ));
         // 资源同目录的兄弟文件不放行（资源是精确匹配，不是前缀）
-        assert!(!path_allowed(Path::new("/elsewhere/other.pdf"), &roots, &res));
+        assert!(!path_allowed(
+            Path::new("/elsewhere/other.pdf"),
+            &roots,
+            &res
+        ));
         // 前缀混淆（/proj/ab 不是 /proj/a 内）
         assert!(!path_allowed(Path::new("/proj/ab/x.pdf"), &roots, &res));
         // 完全根外拒绝
@@ -239,8 +246,7 @@ mod tests {
         // 同目录未登记的兄弟文件仍拒绝（条目是精确匹配，不是前缀）
         let other = outside.join("other.pdf");
         fs::write(&other, b"%PDF-1.7 fake").unwrap();
-        let err = read_pdf_sync(other.to_str().unwrap(), Some(root.to_str().unwrap()))
-            .unwrap_err();
+        let err = read_pdf_sync(other.to_str().unwrap(), Some(root.to_str().unwrap())).unwrap_err();
         assert!(err.contains("拒绝读取"), "{err}");
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&outside).ok();
@@ -268,9 +274,11 @@ mod tests {
         fs::write(&real, b"%PDF-1.7 fake").unwrap();
         std::os::unix::fs::symlink(&real, root.join("link.pdf")).unwrap();
         // 链接在 hint 根内但 canonicalize 后指向根外：拒绝
-        let err =
-            read_pdf_sync(root.join("link.pdf").to_str().unwrap(), Some(root.to_str().unwrap()))
-                .unwrap_err();
+        let err = read_pdf_sync(
+            root.join("link.pdf").to_str().unwrap(),
+            Some(root.to_str().unwrap()),
+        )
+        .unwrap_err();
         assert!(err.contains("拒绝读取"), "{err}");
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&outside).ok();

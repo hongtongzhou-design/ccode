@@ -141,7 +141,12 @@ fn update_commands(agent_id: &str, method: &str, binary_path: &str) -> Vec<Updat
     };
     let expand = |channel: UpdateChannel| -> Vec<UpdateCmd> {
         match channel {
-            UpdateChannel::Brew => p.brew_upgrade.as_ref().map(brew_upgrade).into_iter().collect(),
+            UpdateChannel::Brew => p
+                .brew_upgrade
+                .as_ref()
+                .map(brew_upgrade)
+                .into_iter()
+                .collect(),
             UpdateChannel::Npm => p.npm_update.map(|pkg| npm_cmd(pkg)).into_iter().collect(),
             // winget 是 Windows 原生渠道：其他平台展开为空候选，不产生噪音报错
             UpdateChannel::Winget => {
@@ -151,11 +156,11 @@ fn update_commands(agent_id: &str, method: &str, binary_path: &str) -> Vec<Updat
                     vec![]
                 }
             }
-            UpdateChannel::Uv => p
-                .uv
-                .map(|pkg| cmd("uv", "uv".into(), &["tool", "upgrade", pkg]))
-                .into_iter()
-                .collect(),
+            UpdateChannel::Uv => {
+                p.uv.map(|pkg| cmd("uv", "uv".into(), &["tool", "upgrade", pkg]))
+                    .into_iter()
+                    .collect()
+            }
             UpdateChannel::SelfUpdate => p
                 .self_update
                 .map(|args| cmd("self", bin(), args))
@@ -341,10 +346,7 @@ pub(crate) fn strip_ansi(input: &str) -> String {
 /// API 与 bottle 走清华 TUNA 镜像（用户显式设置过的变量不动）。
 /// 抽成纯函数便于测试镜像开关。
 pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String)> {
-    let mut env = vec![(
-        "HOMEBREW_NO_AUTO_UPDATE".to_string(),
-        "1".to_string(),
-    )];
+    let mut env = vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string())];
     if program == "brew" && mirror {
         // formulae.brew.sh 托管在 GitHub Pages，国内拉几十 MB 元数据要几分钟
         if std::env::var_os("HOMEBREW_API_DOMAIN").is_none() {
@@ -372,7 +374,12 @@ pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String
 /// ESC[24;120R（与下方 PtySize 一致）。展示前 strip_ansi 会把查询序列剥掉。
 /// 同一 key 同时只允许一个 run：入口抢占，并发请求直接拒绝。
 /// updater（key=agent_id）与 fonts（key="fonts"）共用本函数。
-pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program: &str, args: &[String], emit: F) -> (bool, String) {
+pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
+    key: &str,
+    program: &str,
+    args: &[String],
+    emit: F,
+) -> (bool, String) {
     {
         let mut set = running_keys().lock().unwrap();
         if !set.insert(key.to_string()) {
@@ -425,7 +432,10 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program
     // slave 必须立刻 drop：子进程退出后 reader 才能看到 EOF
     drop(pair.slave);
     let writer = Arc::new(Mutex::new(writer));
-    writers().lock().unwrap().insert(key.to_string(), writer.clone());
+    writers()
+        .lock()
+        .unwrap()
+        .insert(key.to_string(), writer.clone());
     let _writer_guard = WriterGuard(key.to_string());
 
     let collected = Arc::new(Mutex::new(String::new()));
@@ -510,7 +520,12 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(key: &str, program
 /// Tauri 事件封装：输出块经 `agent-update-output-<agent_id>` 实时推给前端，
 /// writer 以 agent_id 为 key 入 UPDATER_WRITERS 供 updater_write 交互
 /// （dep_check 的安装也复用本函数，key 形如 "dep-git"）
-pub(crate) fn run_streaming(app: &AppHandle, agent_id: &str, program: &str, args: &[String]) -> (bool, String) {
+pub(crate) fn run_streaming(
+    app: &AppHandle,
+    agent_id: &str,
+    program: &str,
+    args: &[String],
+) -> (bool, String) {
     let event = format!("agent-update-output-{agent_id}");
     let app = app.clone();
     // PTY 子进程（尤其是 Windows 下的 npm.cmd）可能在建立网络连接前暂时没有任何
@@ -582,7 +597,11 @@ fn update_agent_sync(app: &AppHandle, agent_id: &str) -> Result<UpdateResultDto,
 }
 
 /// 构建结果并经 `agent-update-done-<agent_id>` 推送（前端以事件为准，invoke 返回值兜底）
-pub(crate) fn emit_done(app: &AppHandle, agent_id: &str, result: UpdateResultDto) -> UpdateResultDto {
+pub(crate) fn emit_done(
+    app: &AppHandle,
+    agent_id: &str,
+    result: UpdateResultDto,
+) -> UpdateResultDto {
     let _ = app.emit(&format!("agent-update-done-{agent_id}"), &result);
     result
 }
@@ -591,11 +610,9 @@ pub(crate) fn emit_done(app: &AppHandle, agent_id: &str, result: UpdateResultDto
 pub async fn update_agent(app: AppHandle, agent_id: String) -> Result<UpdateResultDto, String> {
     let app2 = app.clone();
     let agent_id2 = agent_id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        update_agent_sync(&app2, &agent_id2)
-    })
-    .await
-    .map_err(|e| format!("更新失败: {e}"))??;
+    let result = tauri::async_runtime::spawn_blocking(move || update_agent_sync(&app2, &agent_id2))
+        .await
+        .map_err(|e| format!("更新失败: {e}"))??;
     Ok(emit_done(&app, &agent_id, result))
 }
 
@@ -634,7 +651,10 @@ fn install_specs(agent_id: &str) -> Vec<InstallSpec> {
         }
     }
     if let Some(pkg) = p.npm_install {
-        let mut args: Vec<String> = ["install", "-g", pkg].iter().map(|s| s.to_string()).collect();
+        let mut args: Vec<String> = ["install", "-g", pkg]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         args.extend(NPM_FETCH_ARGS.iter().map(|s| s.to_string()));
         out.push(InstallSpec {
             tool: "npm",
@@ -747,11 +767,10 @@ fn install_agent_sync(app: &AppHandle, agent_id: &str) -> Result<UpdateResultDto
 pub async fn install_agent(app: AppHandle, agent_id: String) -> Result<UpdateResultDto, String> {
     let app2 = app.clone();
     let agent_id2 = agent_id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        install_agent_sync(&app2, &agent_id2)
-    })
-    .await
-    .map_err(|e| format!("安装失败: {e}"))??;
+    let result =
+        tauri::async_runtime::spawn_blocking(move || install_agent_sync(&app2, &agent_id2))
+            .await
+            .map_err(|e| format!("安装失败: {e}"))??;
     Ok(emit_done(&app, &agent_id, result))
 }
 
@@ -814,7 +833,13 @@ fn semver_newer(a: &str, b: &str) -> bool {
 fn npm_latest(pkg: &str) -> Option<String> {
     let npm = agents::resolve_binary("npm")?;
     let out = crate::process::background_command(npm)
-        .args(["view", pkg, "version", "--fetch-retries=0", "--fetch-timeout=8000"])
+        .args([
+            "view",
+            pkg,
+            "version",
+            "--fetch-retries=0",
+            "--fetch-timeout=8000",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -921,8 +946,7 @@ fn check_one(agent_id: &str) -> AgentUpdateInfoDto {
             // npm view 失败 → None → 静默不带提示
             if method == "brew" {
                 if let Some(brew_v) = latest.as_deref() {
-                    if let Some(pkg) = agent_spec(agent_id).and_then(|s| s.packaging.npm_update)
-                    {
+                    if let Some(pkg) = agent_spec(agent_id).and_then(|s| s.packaging.npm_update) {
                         if let Some(npm_v) = npm_latest(pkg) {
                             if semver_newer(&npm_v, brew_v) {
                                 upstream_note = Some(npm_v);
@@ -1011,7 +1035,10 @@ pub async fn check_agent_updates(force: Option<bool>) -> Vec<AgentUpdateInfoDto>
                 std::thread::spawn(move || check_one(id))
             })
             .collect();
-        handles.into_iter().filter_map(|h| h.join().ok()).collect::<Vec<_>>()
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect::<Vec<_>>()
     })
     .await
     .unwrap_or_default();
@@ -1025,7 +1052,10 @@ mod tests {
 
     #[test]
     fn semver_token_extracts_first_version_like_token() {
-        assert_eq!(semver_token("2.1.212 (Claude Code)"), Some("2.1.212".into()));
+        assert_eq!(
+            semver_token("2.1.212 (Claude Code)"),
+            Some("2.1.212".into())
+        );
         assert_eq!(semver_token("0.31.1"), Some("0.31.1".into()));
         assert_eq!(semver_token("v0.46.0-beta"), Some("0.46.0".into()));
         // 没有 x.y 形式 → None
@@ -1075,10 +1105,14 @@ mod tests {
     #[test]
     #[ignore]
     fn npm_via_pty_smoke() {
-        let (ok, out) = run_streaming_pty("test-npm-smoke", "npm", &["--version".to_string()], |_| {});
+        let (ok, out) =
+            run_streaming_pty("test-npm-smoke", "npm", &["--version".to_string()], |_| {});
         assert!(ok, "npm --version 经 PTY 失败：{out}");
         assert!(
-            out.trim().chars().next().is_some_and(|c| c.is_ascii_digit()),
+            out.trim()
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit()),
             "输出不像版本号：{out}"
         );
     }
@@ -1175,11 +1209,16 @@ mod tests {
         assert!(on.iter().any(|(k, _)| k == "HOMEBREW_API_DOMAIN"));
         assert!(on.iter().any(|(k, _)| k == "HOMEBREW_BOTTLE_DOMAIN"));
         let off = brew_env_pairs("brew", false);
-        assert!(!off.iter().any(|(k, _)| k == "HOMEBREW_API_DOMAIN"), "镜像关闭时不注入镜像域名");
+        assert!(
+            !off.iter().any(|(k, _)| k == "HOMEBREW_API_DOMAIN"),
+            "镜像关闭时不注入镜像域名"
+        );
         assert!(!off.iter().any(|(k, _)| k == "HOMEBREW_BOTTLE_DOMAIN"));
         // NO_AUTO_UPDATE 无论开关都保留；非 brew 命令不注入镜像
         assert!(off.iter().any(|(k, _)| k == "HOMEBREW_NO_AUTO_UPDATE"));
-        assert!(!brew_env_pairs("npm", true).iter().any(|(k, _)| k == "HOMEBREW_API_DOMAIN"));
+        assert!(!brew_env_pairs("npm", true)
+            .iter()
+            .any(|(k, _)| k == "HOMEBREW_API_DOMAIN"));
     }
 
     #[test]
@@ -1198,10 +1237,22 @@ mod tests {
             "npm"
         );
         // homebrew prefix 的 npm 全局包仍是 npm
-        assert_eq!(detect_method("/opt/homebrew/lib/node_modules/qwen-code/bin/qwen"), "npm");
-        assert_eq!(detect_method("/opt/homebrew/Caskroom/codex/0.1.0/codex"), "brew");
-        assert_eq!(detect_method("/Users/x/.local/share/uv/tools/kimi-cli/bin/kimi"), "uv");
-        assert_eq!(detect_method("/Users/x/.local/uv/tools/kimi/bin/kimi"), "uv");
+        assert_eq!(
+            detect_method("/opt/homebrew/lib/node_modules/qwen-code/bin/qwen"),
+            "npm"
+        );
+        assert_eq!(
+            detect_method("/opt/homebrew/Caskroom/codex/0.1.0/codex"),
+            "brew"
+        );
+        assert_eq!(
+            detect_method("/Users/x/.local/share/uv/tools/kimi-cli/bin/kimi"),
+            "uv"
+        );
+        assert_eq!(
+            detect_method("/Users/x/.local/uv/tools/kimi/bin/kimi"),
+            "uv"
+        );
         assert_eq!(detect_method("/Users/x/.kimi-code/bin/kimi"), "self");
         assert_eq!(detect_method("/usr/local/bin/opencode"), "self");
         // winget portable：Links shim 与 canonicalize 后的 Packages 实体路径
@@ -1210,7 +1261,9 @@ mod tests {
             "winget"
         );
         assert_eq!(
-            detect_method(r"C:\Users\x\AppData\Local\Microsoft\WinGet\Packages\OpenAI.Codex_x\codex.exe"),
+            detect_method(
+                r"C:\Users\x\AppData\Local\Microsoft\WinGet\Packages\OpenAI.Codex_x\codex.exe"
+            ),
             "winget"
         );
         // Windows npm 全局 prefix 下的 .cmd shim（路径不含 node_modules）
@@ -1238,7 +1291,10 @@ mod tests {
         assert_eq!(pick_install("kimi", &all).unwrap().method, "npm");
         let only_uv = |t: &str| t == "uv";
         let u = pick_install("kimi", &only_uv).unwrap();
-        assert_eq!((u.method, u.args.join(" ")), ("uv", "tool install kimi-cli".to_string()));
+        assert_eq!(
+            (u.method, u.args.join(" ")),
+            ("uv", "tool install kimi-cli".to_string())
+        );
         assert_eq!(pick_install("kimi", &only_script).unwrap().method, "script");
         // 未知 agent → None
         assert!(pick_install("nope", &all).is_none());
@@ -1246,7 +1302,10 @@ mod tests {
         #[cfg(windows)]
         {
             let no_brew_npm = |t: &str| !matches!(t, "brew" | "npm");
-            assert_eq!(pick_install("codex", &no_brew_npm).unwrap().method, "winget");
+            assert_eq!(
+                pick_install("codex", &no_brew_npm).unwrap().method,
+                "winget"
+            );
         }
         #[cfg(not(windows))]
         {
@@ -1272,7 +1331,10 @@ mod tests {
         let en = "Found Codex CLI [OpenAI.Codex]\nVersion: 0.146.1\nPublisher: OpenAI, Inc.\n";
         assert_eq!(winget_show_version(en).as_deref(), Some("0.146.1"));
         // 无版本标签行 → None（不拿别的数字瞎猜）
-        assert_eq!(winget_show_version("Found Codex CLI [OpenAI.Codex]\nPublisher: OpenAI"), None);
+        assert_eq!(
+            winget_show_version("Found Codex CLI [OpenAI.Codex]\nPublisher: OpenAI"),
+            None
+        );
     }
 
     /// winget 渠道的安装/更新/fallback 全链路（仅 Windows 有这些候选）
@@ -1326,7 +1388,10 @@ mod tests {
         }
         // gemini/qwen/codebuddy/cursor 无官方 winget 包，不出现废渠道
         for id in ["gemini", "qwen", "codebuddy", "cursor"] {
-            assert!(install_specs(id).iter().all(|s| s.method != "winget"), "{id} 不应有 winget 渠道");
+            assert!(
+                install_specs(id).iter().all(|s| s.method != "winget"),
+                "{id} 不应有 winget 渠道"
+            );
         }
     }
 
@@ -1368,7 +1433,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pty_streaming_delivers_lines_incrementally() {
-        let chunks: Arc<Mutex<Vec<(std::time::Instant, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let chunks: Arc<Mutex<Vec<(std::time::Instant, String)>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let c = chunks.clone();
         let (ok, _tail) = run_streaming_pty(
             "test-streaming",
@@ -1378,7 +1444,9 @@ mod tests {
                 "for i in 1 2 3; do echo line$i; sleep 1; done".into(),
             ],
             move |t| {
-                c.lock().unwrap().push((std::time::Instant::now(), t.to_string()));
+                c.lock()
+                    .unwrap()
+                    .push((std::time::Instant::now(), t.to_string()));
             },
         );
         assert!(ok);
@@ -1474,8 +1542,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         // 同 key 并发：立即拒绝
-        let (ok, msg) =
-            run_streaming_pty(&key, "bash", &["-c".into(), "echo should-not-run".into()], |_| {});
+        let (ok, msg) = run_streaming_pty(
+            &key,
+            "bash",
+            &["-c".into(), "echo should-not-run".into()],
+            |_| {},
+        );
         assert!(!ok);
         assert!(msg.contains("正在运行"), "应提示已有运行中的任务: {msg}");
         // 放行第一个 run

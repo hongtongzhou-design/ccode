@@ -41,7 +41,7 @@ import { isDecisionsOnly } from "../step-decisions";
 import { abbrevHome, normSep } from "../path-utils";
 import { partitionResources } from "../project-status";
 import { beginAskAi, beginProjectChat } from "./AskAiModal";
-import type { RunOverviewInput } from "../run-overview";import type {
+import { runIdForPath, type RunOverviewInput } from "../run-overview";import type {
   DiscoveredResourceDto,
   ZoteroLibraryDto,
   EnsureGitDto,
@@ -633,6 +633,7 @@ export default function ProjectGroup({
     index: number,
     taskMdOverride?: string,
     launch?: KickoffLaunch | null,
+    decisionPauseAcknowledged = false,
   ) {
     if (!project || !cfg) return;
     const step = cfg.steps[index];
@@ -643,6 +644,7 @@ export default function ProjectGroup({
         step,
         cfg,
         taskMdOverride,
+        decisionPauseAcknowledged,
         launch,
         onError,
         // 刷新先于跳终端：run 脚本写入在工作区行刷新之前，「运行脚本」菜单当次即可见
@@ -1318,6 +1320,7 @@ export default function ProjectGroup({
       if (!st.ws) return;
       setWorkspaceReviewRequest({
         worktreePath: st.ws.worktreePath,
+        runId: runIdForPath(terminalRunInputs, st.ws.worktreePath),
         action: intent,
         requestId: crypto.randomUUID(),
       });
@@ -2140,6 +2143,10 @@ export default function ProjectGroup({
           focusStatusText={focusDesc?.statusText ?? null}
           focusRunStatus={focusRunStatus}
           focusAgentAttention={focusAttention}
+          focusRunId={runIdForPath(
+            terminalRunInputs,
+            focusAttention ? (focusDesc?.st.ws?.worktreePath ?? "") : "",
+          )}
           focusDraft={
             focusDraft && focusDraft.stepName === focusStepName
               ? focusDraft
@@ -2808,10 +2815,10 @@ export default function ProjectGroup({
           originCardId={kickoff.originCardId}
           busy={starting !== null}
           onCancel={() => setKickoff(null)}
-          onConfirm={(taskMd, launch) => {
+          onConfirm={(taskMd, launch, decisionPauseAcknowledged) => {
             const index = kickoff.index;
             setKickoff(null);
-            void runStartStep(index, taskMd, launch);
+            void runStartStep(index, taskMd, launch, decisionPauseAcknowledged);
           }}
           onCfgChange={(next) => setCfg(next)}
         />

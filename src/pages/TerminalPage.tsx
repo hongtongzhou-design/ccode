@@ -55,7 +55,7 @@ import { normalizeWorkMode } from "../work-mode";
 import ChatSurface from "../components/ChatSurface";
 import { confirmDialog, alertDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
-import FileTree from "../components/FileTree";
+import FileTree, { type DirEntryDto } from "../components/FileTree";
 import GitPanel, { type GitSummary } from "../components/GitPanel";
 import TerminalStatusBar from "../components/TerminalStatusBar";
 import { LoadingRows, hoverRevealClass } from "../components/PageFrame";
@@ -391,8 +391,10 @@ const TerminalView = memo(function TerminalView({
   autoStart,
   prefillCommand,
   shellOnly,
+  customRuntimeId,
   initialPrompt: presetPrompt,
   readonly,
+  permission,
   submitCsiU = false,
   restored,
   stepClaimName,
@@ -440,10 +442,13 @@ const TerminalView = memo(function TerminalView({
   prefillCommand?: string;
   /** run 脚本标签：挂载后自动开 shell 并执行 prefillCommand（不走 agent 启动流程） */
   shellOnly?: boolean;
+  /** 直接启动 Custom Runtime，不经过 shell */
+  customRuntimeId?: string;
   /** 一键开步预填的首条指令：启动时注入 CLI，成功后清除（一次性）；留空 = 不注入 */
   initialPrompt?: string;
   /** 「聊想法」只读模式：pty_spawn 透传（支持的 CLI 注入只读/计划模式参数） */
   readonly?: boolean;
+  permission?: "discuss" | "write_tree";
   /** 当前 Agent 的提交键是否使用 kitty CSI-u（目前 Kimi） */
   submitCsiU?: boolean;
   /** 应用重启后恢复出的占位标签；用户明确操作前不启动 PTY。 */
@@ -1144,8 +1149,8 @@ const TerminalView = memo(function TerminalView({
   // ⌘↵ 直启动作经 ref 转发（xterm 键盘层 handler 是挂载期闭包，只能经 ref 拿最新状态）
   const launchNowRef = useRef<() => void>(() => {});
   launchNowRef.current = () => {
-    if (!profileId) return;
-    if (restored) void restoreTask();
+    if (!profileId && !customRuntimeId) return;
+    if (restored && !customRuntimeId) void restoreTask();
     else void launch();
   };
   const welcomeVisibleRef = useRef(welcomeVisible);
@@ -1596,24 +1601,36 @@ const TerminalView = memo(function TerminalView({
   // 声明在终端创建 effect 之后，保证 attach 时 termRef 已就位
   const autoStartedRef = useRef(false);
   useEffect(() => {
-    if (!shellOnly || !visible || !everVisible || autoStartedRef.current)
+    if (
+      (!shellOnly && !customRuntimeId) ||
+      (customRuntimeId && restored) ||
+      !visible ||
+      !everVisible ||
+      autoStartedRef.current
+    )
       return;
     void (async () => {
       try {
         if (!(await checkWorkingDirectory(cwd))) return;
         autoStartedRef.current = true;
-        const ptyId = await invoke<string>("shell_spawn", {
-          cwd,
-          extraEnv: initialExtraEnv ?? null,
-          purpose: "script",
-          runId: runId ?? initialRunId ?? null,
-        });
-        await attach(ptyId, "shell", { reset: true });
+        const ptyId = customRuntimeId
+          ? (await invoke<{ ptyId: string }>("pty_spawn_custom", {
+              runtimeId: customRuntimeId,
+              cwd,
+              runId: runId ?? initialRunId,
+            })).ptyId
+          : await invoke<string>("shell_spawn", {
+              cwd,
+              extraEnv: initialExtraEnv ?? null,
+              purpose: "script",
+              runId: runId ?? initialRunId ?? null,
+            });
+        await attach(ptyId, customRuntimeId ? "agent" : "shell", { reset: true });
         setExited(false);
-        setShellActive(true);
+        setShellActive(!customRuntimeId);
         // 与「启动后自动收缩」一致：脚本已接管终端，启动栏收成一行
         setBarExpanded(false);
-        if (prefillCommand) {
+        if (!customRuntimeId && prefillCommand) {
           await invoke("pty_write", { ptyId, data: `${prefillCommand}\n` });
         }
       } catch (e) {
@@ -1623,7 +1640,7 @@ const TerminalView = memo(function TerminalView({
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, everVisible, shellOnly]);
+  }, [visible, everVisible, shellOnly, customRuntimeId]);
 
   // 会话恢复标签：首次可见且找得到配置时自动启动一次（找不到则只预填，由用户处理）
   const autoLaunchedRef = useRef(false);
@@ -1631,8 +1648,8 @@ const TerminalView = memo(function TerminalView({
     if (!autoStart || !visible || !everVisible || autoLaunchedRef.current)
       return;
     autoLaunchedRef.current = true;
-    if (profiles.some((p) => p.id === profileId)) {
-      void (restored ? restoreTask() : launch());
+    if (customRuntimeId || profiles.some((p) => p.id === profileId)) {
+      void (restored && !customRuntimeId ? restoreTask() : launch());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, everVisible, autoStart, profileId, profiles, restored]);
@@ -2096,6 +2113,37 @@ const TerminalView = memo(function TerminalView({
     options?: { prompt?: string; readonly?: boolean },
   ): Promise<{ ptyId: string; promptDropped: boolean } | null> {
     setError(null);
+    if (customRuntimeId) {
+      if (restored) {
+        setError("自定义 Runtime 不支持恢复；点击“运行”会创建新的 Run");
+      }
+      if (!(await checkWorkingDirectory(cwd))) {
+        setBarExpanded(true);
+        return null;
+      }
+      await cleanupPty();
+      try {
+        const fresh = await invoke<{ id: string }>("run_open_custom", {
+          cwd,
+          reuseKey: reuseKey ?? `custom:${customRuntimeId}:${cwd}`,
+          runId: null,
+          customRuntimeId,
+        });
+        const res = await invoke<{ ptyId: string; runId: string | null }>(
+          "pty_spawn_custom",
+          { runtimeId: customRuntimeId, cwd, runId: fresh.id },
+        );
+        setRunId(res.runId ?? fresh.id);
+        await attach(res.ptyId, "agent", { reset: true });
+        setExited(false);
+        setShellActive(false);
+        setBarExpanded(false);
+        return { ptyId: res.ptyId, promptDropped: false };
+      } catch (e) {
+        setError(String(e));
+        return null;
+      }
+    }
     if (
       selectedProfile?.accountType === "official" &&
       officialSt &&
@@ -2162,6 +2210,9 @@ const TerminalView = memo(function TerminalView({
         linkClaimId: tabId,
         // 「聊想法」只读模式：后端按注册表注入只读/计划模式参数（不支持的 CLI 只有 prompt 软约束）
         readonly: options?.readonly ?? readonly ?? null,
+        permission:
+          permission ??
+          (options?.readonly ?? readonly ? "discuss" : "write_tree"),
         reuseKey: reuseKey ?? null,
         runId: runId ?? initialRunId ?? null,
       });
@@ -2688,7 +2739,7 @@ const TerminalView = memo(function TerminalView({
                   </button>
                 ) : (
                   <button
-                    onClick={() => (restored ? void restoreTask() : void launch())}
+                    onClick={() => (restored && !customRuntimeId ? void restoreTask() : void launch())}
                     disabled={!profileId || !!profiles.find((p) => p.id === profileId)?.slotMissing}
                     className={`inline-flex h-8 shrink-0 items-center justify-center rounded-md border px-3 text-sm disabled:opacity-50 ${
                       welcomeVisible
@@ -2696,7 +2747,7 @@ const TerminalView = memo(function TerminalView({
                         : "border-cta-bd bg-cta text-cta-text hover:brightness-110"
                     }`}
                   >
-                    {restored ? "恢复任务" : "运行"}
+                    {restored && !customRuntimeId ? "恢复任务" : "运行"}
                   </button>
                 ))}
               <button
@@ -2828,7 +2879,8 @@ const TerminalView = memo(function TerminalView({
             )}
             {shellActive && !running ? " · shell 模式" : ""}
             {exited && !running && !shellActive ? " · 已退出" : ""}
-            {restored && !running && !shellActive ? " · 上次任务，可恢复" : ""}
+            {restored && !customRuntimeId && !running && !shellActive ? " · 上次任务，可恢复" : ""}
+            {restored && customRuntimeId && !running && !shellActive ? " · 自定义 Runtime 不支持恢复" : ""}
           </span>
           {error && <span className="truncate text-err-text">{error}</span>}
           <span className="ml-auto flex shrink-0 items-center gap-1">
@@ -2989,12 +3041,12 @@ const TerminalView = memo(function TerminalView({
                 <button
                   type="button"
                   onClick={() =>
-                    restored ? void restoreTask() : void launch()
+                    restored && !customRuntimeId ? void restoreTask() : void launch()
                   }
                   disabled={!profileId || cwdChecking || !!profiles.find((p) => p.id === profileId)?.slotMissing}
                   className="inline-flex h-9 min-w-40 cursor-pointer items-center justify-center gap-2 rounded-md border border-cta-bd bg-cta px-5 text-sm text-cta-text hover:brightness-110 disabled:cursor-default disabled:opacity-50"
                 >
-                  {restored ? "恢复任务" : "运行"}
+                  {restored && !customRuntimeId ? "恢复任务" : "运行"}
                   {/* 快捷键说明：括号小字随按钮文字整体居中，不加胶囊底色
                       （18% 混合底在纯色按钮上是块显眼补丁，用户否为「色差」）；勿绝对定位钉右缘 */}
                   <span className="text-micro opacity-80">
@@ -3060,10 +3112,13 @@ interface Tab {
   prefillCommand?: string;
   /** run 脚本标签：自动开 shell 执行 prefillCommand */
   shellOnly?: boolean;
+  /** 直接启动 Custom Runtime，不经过 shell */
+  customRuntimeId?: string;
   /** 一键开步预填的首条指令（启动时注入，一次性；不进重启持久化白名单） */
   initialPrompt?: string;
   /** 「聊想法」只读模式标签：pty_spawn 注入只读/计划模式参数（不进持久化白名单） */
   readonly?: boolean;
+  permission?: "discuss" | "write_tree";
   /** 分叉来源，仅用于解除只读时提示原会话是否仍在运行。 */
   forkSource?: { agent: string; sessionId: string };
   /** 应用重启后恢复出的元数据占位标签。 */
@@ -3093,10 +3148,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       id: crypto.randomUUID(),
       initialCwd: tab.cwd,
       initialTitle: tab.label,
-      initialAgentId: tab.agentId,
       initialProfileId: tab.profileId,
       initialModel: tab.model,
-      resumeSessionId: tab.sessionId ?? undefined,
+      initialAgentId: tab.customRuntimeId ? "custom" : tab.agentId,
+      customRuntimeId: tab.customRuntimeId ?? undefined,
+      resumeSessionId: tab.customRuntimeId ? undefined : tab.sessionId ?? undefined,
       runId: tab.runId ?? undefined,
       restored: true,
     }));
@@ -3304,6 +3360,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     name: string;
     root: string | null;
   } | null>(null);
+  const [previewFiles, setPreviewFiles] = useState<DirEntryDto[]>([]);
   /** 预览编辑器脏状态（预览页签的脏点） */
   const [previewDirty, setPreviewDirty] = useState(false);
   /** 文件系统变化信号：FileTree 的 fs-changed 事件触发 GitPanel 一并刷新 */
@@ -3314,6 +3371,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     "pr" | "archive" | "resolve-conflict" | null
   >(null);
   const [reviewRequestId, setReviewRequestId] = useState<string | null>(null);
+  // 评审身份由入口显式携带；不能从 cwd 猜测是哪次 Run。
+  const [reviewRunId, setReviewRunId] = useState<string | null>(null);
   /** 沉浸式阅读区（批次 B1）：非空即全屏覆盖（z-40 页面模态档），底下终端/右栏保持挂载；
       notePath 指定后笔记栏直接编辑该 md（精读笔记产物入口），不按 PDF slug 另建档 */
   const [reader, setReader] = useState<{
@@ -3658,7 +3717,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       const profileId = status?.profileId ?? tab.initialProfileId ?? "";
       const sessionId = status?.sessionId ?? tab.resumeSessionId ?? null;
       const representsTask = tab.restored || status?.alive || !!sessionId;
-      if (!representsTask || (!profileId && !sessionId)) return [];
+      const isCustom = Boolean(tab.customRuntimeId);
+      if (!representsTask || (!profileId && !sessionId && !isCustom)) return [];
       return [
         {
           tabId: tab.id,
@@ -3670,6 +3730,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               "终端",
             cwd: status?.cwd ?? tab.initialCwd ?? "~",
             agentId: status?.agentId ?? tab.initialAgentId ?? "claude-code",
+            customRuntimeId: tab.customRuntimeId ?? null,
             profileId,
             model: status?.model ?? tab.initialModel ?? "",
             sessionId,
@@ -3736,14 +3797,40 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   /** 工作树单击文件 → 右侧「预览」页签（编辑器自行加载内容；路径限制在后端校验） */
   const openPreview = useCallback(
-    (path: string, name: string, root?: string) => {
+    (path: string, name: string, root?: string, files?: DirEntryDto[]) => {
       setRightOpen(true);
       setRightTab("preview");
       setPreview({ path, name, root: root ?? null });
+      setPreviewFiles(files ?? []);
       setPreviewDirty(false);
     },
     [],
   );
+
+  const switchPreview = useCallback(
+    (offset: number) => {
+      if (!preview || previewFiles.length < 2) return;
+      const index = previewFiles.findIndex((file) => file.path === preview.path);
+      const next = previewFiles[index + offset];
+      if (!next) return;
+      setPreview({ path: next.path, name: next.name, root: preview.root });
+      setPreviewDirty(false);
+    },
+    [preview, previewFiles],
+  );
+
+  useEffect(() => {
+    if (!preview || previewFiles.length < 2) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable='true']")) return;
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      switchPreview(event.key === "ArrowUp" ? -1 : 1);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [preview, previewFiles, switchPreview]);
 
   /** 写入指定终端标签 agent 输入的核心链路（pty_write；send=true 时末尾补 \r 直接发送，
       缺省不自动回车、用户检查后发送）。右栏选段（活跃标签）与阅读区（阅读会话标签）共用；
@@ -3806,6 +3893,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       return false;
     }
     setPreview(null);
+    setPreviewFiles([]);
     setPreviewDirty(false);
     return true;
   }, [preview, previewDirty]);
@@ -3857,7 +3945,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   async function allowWritableFork() {
     const tab = tabs.find((t) => t.id === focusedId);
-    if (!tab?.readonly) return;
+    if (!tab?.readonly && tab?.permission !== "discuss") return;
     const sourceStillRunning = tab.forkSource
       ? Boolean(
           liveSessions[sessionRuntimeKey(tab.forkSource.agent, tab.forkSource.sessionId)],
@@ -3906,9 +3994,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       autoStart?: boolean;
       prefillCommand?: string;
       shellOnly?: boolean;
+      customRuntimeId?: string;
       initialPrompt?: string;
       /** 「聊想法」只读模式：pty_spawn 透传，支持的 CLI 注入只读/计划模式参数 */
       readonly?: boolean;
+      permission?: "discuss" | "write_tree";
       forkSource?: { agent: string; sessionId: string };
       /** 复用键（pendingTerminal.reuseKey 透传）：重复入口切标签而不是新开 */
       reuseKey?: string;
@@ -3929,8 +4019,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         autoStart: init?.autoStart,
         prefillCommand: init?.prefillCommand,
         shellOnly: init?.shellOnly,
+        customRuntimeId: init?.customRuntimeId,
         initialPrompt: init?.initialPrompt,
         readonly: init?.readonly,
+        permission: init?.permission,
         forkSource: init?.forkSource,
         reuseKey: init?.reuseKey,
         stepName: init?.stepName,
@@ -3996,6 +4088,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         model: status.model,
         initialPrompt: prompt,
         readonly: true,
+        permission: "discuss",
         forkSource: { agent: source.agentId, sessionId: source.sessionId },
         autoStart: true,
       });
@@ -4147,8 +4240,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         autoStart: !!pt.resume || !!pt.autoStart,
         prefillCommand: pt.prefillCommand,
         shellOnly: pt.shellOnly,
+        customRuntimeId: pt.customRuntimeId,
         initialPrompt: pt.initialPrompt,
-        readonly: pt.readonly,
+        readonly: pt.readonly ?? pt.permission === "discuss",
+        permission: pt.permission ?? (pt.readonly ? "discuss" : "write_tree"),
         reuseKey: pt.reuseKey,
         stepName: pt.stepName,
         runId: pt.runId,
@@ -4203,6 +4298,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (!visible || !workspaceReviewRequest) return;
     setReviewPath(workspaceReviewRequest.worktreePath);
+    setReviewRunId(workspaceReviewRequest.runId ?? null);
     setReviewAction(workspaceReviewRequest.action ?? null);
     setReviewRequestId(workspaceReviewRequest.requestId);
     setWorkspaceReviewRequest(null);
@@ -4227,6 +4323,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setPreviewReq(null);
     // 评审覆盖层会挡住预览，先关掉（同 pendingTerminal 消费语义）
     setReviewPath(null);
+    setReviewRunId(null);
     setReviewAction(null);
     setRightOpen(true);
     setRightTab("preview");
@@ -4237,6 +4334,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       name: previewReq.name,
       root: previewReq.root ?? null,
     });
+    setPreviewFiles([]);
     setPreviewDirty(false);
   }, [visible, previewReq, setPreviewReq]);
 
@@ -4250,6 +4348,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     // 评审覆盖层会挡住阅读区，先关掉（同 previewReq 消费语义）；
     // 右栏若正在预览同一 PDF 保持原样不动它
     setReviewPath(null);
+    setReviewRunId(null);
     setReviewAction(null);
     setReader({
       pdfPath: readerReq.pdfPath,
@@ -4480,6 +4579,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setEnterCwdReq(null);
     // 评审覆盖层会挡住文件树，先退出（同 previewReq 消费语义）
     setReviewPath(null);
+    setReviewRunId(null);
     setReviewAction(null);
     setEnterCwd(enterCwdReq);
   }, [visible, enterCwdReq, setEnterCwdReq]);
@@ -5253,8 +5353,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 autoStart={t.autoStart}
                 prefillCommand={t.prefillCommand}
                 shellOnly={t.shellOnly}
+                customRuntimeId={t.customRuntimeId}
                 initialPrompt={t.initialPrompt}
                 readonly={t.readonly && !writableForks[t.id]}
+                permission={
+                  writableForks[t.id]
+                    ? "write_tree"
+                    : t.permission ?? (t.readonly ? "discuss" : "write_tree")
+                }
                 submitCsiU={
                   agents.find(
                     (a) => a.id === (statuses[t.id]?.agentId ?? t.initialAgentId),
@@ -5623,6 +5729,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   </button>
                 );
               })}
+              {rightTab === "preview" && preview && previewFiles.length > 1 && (
+                <span className="ml-1 flex items-center gap-0.5 text-micro text-l4">
+                  <button type="button" onClick={() => switchPreview(-1)} disabled={previewFiles[0]?.path === preview.path} className="rounded px-1 hover:bg-hover disabled:opacity-30" title="上一个文件（↑）">↑</button>
+                  <button type="button" onClick={() => switchPreview(1)} disabled={previewFiles[previewFiles.length - 1]?.path === preview.path} className="rounded px-1 hover:bg-hover disabled:opacity-30" title="下一个文件（↓）">↓</button>
+                </span>
+              )}
               {/* 右侧动作区：专注内容 + 收起。 */}
               <span className="ml-auto flex min-w-0 items-center gap-1 pl-1">
                 <button
@@ -5726,9 +5838,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 refreshKey={fsChangeTick}
                 onTotals={reportGitTotals}
                 onOpenPr={gitPanelOpenPr}
-                onOpenReview={(path) => {
+                onOpenReview={(path, runId) => {
                   setReviewAction(null);
                   setReviewPath(path);
+                  setReviewRunId(runId ?? null);
                 }}
               />
             </div>
@@ -5739,10 +5852,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       {reviewPath && (
         <WorkspaceReviewView
           worktreePath={reviewPath}
+          runId={reviewRunId}
           initialAction={reviewAction}
           initialActionKey={reviewRequestId}
           onClose={() => {
             setReviewPath(null);
+            setReviewRunId(null);
             setReviewAction(null);
             setReviewRequestId(null);
           }}

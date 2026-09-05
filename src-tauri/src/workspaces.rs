@@ -1,10 +1,11 @@
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 #[cfg(test)]
 use std::process::Command;
+use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -165,8 +166,7 @@ pub(crate) fn stale_upstream_for(
         .unwrap_or(&target_ws.created_at);
     let mut best: Option<(&str, &str)> = None; // (merged_at, 步骤名)
     for step in &steps[..step_index] {
-        let Some(upstream_ws) = workspaces.iter().find(|w| w.name == step.workspace_name)
-        else {
+        let Some(upstream_ws) = workspaces.iter().find(|w| w.name == step.workspace_name) else {
             continue;
         };
         let Some(merged_at) = upstream_ws.merged_at.as_deref() else {
@@ -267,7 +267,10 @@ struct CmdOutput {
 }
 
 /// 子进程的 stdout/stderr 各放线程读空（管道容量有限，不读会死锁），主线程轮询退出，超时则 kill
-fn run_cmd_full(mut cmd: crate::process::BackgroundCommand, timeout: Duration) -> Result<CmdOutput, String> {
+fn run_cmd_full(
+    mut cmd: crate::process::BackgroundCommand,
+    timeout: Duration,
+) -> Result<CmdOutput, String> {
     let mut child = cmd.spawn().map_err(|e| format!("无法启动进程: {e}"))?;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -302,7 +305,8 @@ fn run_cmd_full(mut cmd: crate::process::BackgroundCommand, timeout: Duration) -
                     // 先杀整棵进程树再 kill 自己：Windows 上 `cmd /C <script>` 的真正
                     // 干活进程是孙进程，只杀 cmd.exe 会留孤儿，而孤儿持有 stdout/stderr
                     // 管道写端 ⇒ 下面两个读线程永远等不到 EOF。
-                    crate::pty::kill_process_tree(child.id());                    let _ = child.kill();
+                    crate::pty::kill_process_tree(child.id());
+                    let _ = child.kill();
                     let _ = child.wait();
                     // 即便如此也不无限等：任何漏网的子孙都不该把这个工作线程钉死。
                     // 放弃的读线程会在管道最终关闭时自行退出。
@@ -359,8 +363,7 @@ fn sanitize_name(name: &str) -> Result<String, String> {
     //（CON/AUX/NUL/COM1-9/LPT1-9 全是 ASCII 字母数字）。实测 git worktree add 建
     // `refs/heads/ccode/CON.lock` 会 `Invalid argument` 失败，用户只看到
     // 「创建 worktree 失败；已回滚」完全无法自解释；macOS 上 CON 是合法名字。
-    crate::paths::validate_fs_name(&cleaned)
-        .map_err(|e| format!("任务名不可用：{e}"))?;
+    crate::paths::validate_fs_name(&cleaned).map_err(|e| format!("任务名不可用：{e}"))?;
     Ok(cleaned)
 }
 
@@ -409,7 +412,12 @@ pub(crate) fn ensure_initial_commit(repo: &Path) -> Result<bool, String> {
     if !configured("user.email") {
         args.extend(["-c", "user.email=ccode@localhost"]);
     }
-    args.extend(["commit", "--allow-empty", "-m", "初始化空仓库（Ccode 自动创建）"]);
+    args.extend([
+        "commit",
+        "--allow-empty",
+        "-m",
+        "初始化空仓库（Ccode 自动创建）",
+    ]);
     run_git(repo, &args, T).map_err(|e| format!("空仓库初始化提交失败: {e}"))?;
     Ok(true)
 }
@@ -638,7 +646,7 @@ where
         &["rev-parse", "--verify", "--quiet", &branch],
         Duration::from_secs(10),
     )
-        .is_ok()
+    .is_ok()
     {
         return Err(format!("分支 {branch} 已存在，请换一个任务名"));
     }
@@ -1130,8 +1138,8 @@ fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
         &["rev-parse", "--abbrev-ref", "HEAD"],
         Duration::from_secs(10),
     )
-        .map(|cur| cur != w.base_branch)
-        .unwrap_or(false);
+    .map(|cur| cur != w.base_branch)
+    .unwrap_or(false);
     let main_dirty = run_git(&repo, &["status", "--porcelain"], Duration::from_secs(30))
         .map(|s| !s.is_empty())
         .unwrap_or(false);
@@ -1442,7 +1450,9 @@ pub async fn list_workspaces() -> Result<Vec<WorkspaceDto>, String> {
         repos.sort_unstable();
         repos.dedup();
         for repo in repos {
-            let steps = crate::projects::read_config_at(Path::new(&repo)).config.steps;
+            let steps = crate::projects::read_config_at(Path::new(&repo))
+                .config
+                .steps;
             if steps.is_empty() {
                 continue;
             }
@@ -1487,25 +1497,25 @@ pub async fn archive_workspace(
     let manager = manager.inner().clone();
     let paths =
         tauri::async_runtime::spawn_blocking(move || -> Result<(String, String), String> {
-        let conn = db()?;
-        let w = get_workspace(&conn, &id)?;
-        let ensure_idle = |worktree_path: &str| {
-            let active = manager.active_workspace_tasks(worktree_path);
-            if active.is_empty() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "工作区仍有 {} 个 agent/run 脚本在运行，请先停止或关闭对应终端标签",
-                    active.len()
-                ))
-            }
-        };
-        ensure_idle(&w.worktree_path)?; // 快速预检；归档内部在移除 worktree 前还会复查
-        archive_impl_with_guard(&conn, &id, &ensure_idle)?;
-        Ok((w.worktree_path, w.repo_path))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+            let conn = db()?;
+            let w = get_workspace(&conn, &id)?;
+            let ensure_idle = |worktree_path: &str| {
+                let active = manager.active_workspace_tasks(worktree_path);
+                if active.is_empty() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "工作区仍有 {} 个 agent/run 脚本在运行，请先停止或关闭对应终端标签",
+                        active.len()
+                    ))
+                }
+            };
+            ensure_idle(&w.worktree_path)?; // 快速预检；归档内部在移除 worktree 前还会复查
+            archive_impl_with_guard(&conn, &id, &ensure_idle)?;
+            Ok((w.worktree_path, w.repo_path))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
     emit_ws_archived(&app, &paths.0, &paths.1);
     Ok(())
 }
@@ -1521,13 +1531,13 @@ pub async fn restore_workspace(id: String) -> Result<(), String> {
 pub async fn delete_workspace(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let paths =
         tauri::async_runtime::spawn_blocking(move || -> Result<(String, String), String> {
-        let conn = db()?;
-        let w = get_workspace(&conn, &id)?;
-        delete_impl(&conn, &id)?;
-        Ok((w.worktree_path, w.repo_path))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+            let conn = db()?;
+            let w = get_workspace(&conn, &id)?;
+            delete_impl(&conn, &id)?;
+            Ok((w.worktree_path, w.repo_path))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
     emit_ws_archived(&app, &paths.0, &paths.1);
     Ok(())
 }
@@ -1569,7 +1579,6 @@ fn artifact_produced_since(root: &Path, entry: &str, since: SystemTime) -> bool 
     if rel.is_empty() || rel.contains("..") || Path::new(rel).is_absolute() {
         return false;
     }
-    let path = root.join(rel);
     let fresh = |m: &fs::Metadata| m.modified().map(|t| t >= since).unwrap_or(false);
     if rel.contains('*') {
         let Some(idx) = rel.rfind('/').or_else(|| rel.rfind('\\')) else {
@@ -1580,7 +1589,10 @@ fn artifact_produced_since(root: &Path, entry: &str, since: SystemTime) -> bool 
         if pattern.is_empty() || dir.contains('*') {
             return false;
         }
-        let Ok(rd) = fs::read_dir(root.join(dir)) else {
+        let Some(dir_path) = rooted_existing_path(root, dir) else {
+            return false;
+        };
+        let Ok(rd) = fs::read_dir(dir_path) else {
             return false;
         };
         return rd.flatten().any(|e| {
@@ -1591,6 +1603,9 @@ fn artifact_produced_since(root: &Path, entry: &str, since: SystemTime) -> bool 
                 && fresh(&m)
         });
     }
+    let Some(path) = rooted_existing_path(root, rel) else {
+        return false;
+    };
     if is_dir_entry {
         let mut any_file = false;
         let mut any_fresh = fs::metadata(&path).map(|m| fresh(&m)).unwrap_or(false);
@@ -1612,6 +1627,136 @@ fn artifact_produced_since(root: &Path, entry: &str, since: SystemTime) -> bool 
             .map(|m| m.is_file() && m.len() > 0 && fresh(&m))
             .unwrap_or(false)
     }
+}
+
+/// 返回根目录内、且解析后没有穿过符号链接逃逸的已有路径。
+/// 机器验收只读项目产物，但不能因为“相对路径”就读取项目根外的文件。
+fn rooted_existing_path(root: &Path, rel: &str) -> Option<PathBuf> {
+    if rel.is_empty() || rel.contains("..") || Path::new(rel).is_absolute() || rel.contains('\0') {
+        return None;
+    }
+    let root = fs::canonicalize(root).ok()?;
+    let candidate = fs::canonicalize(root.join(rel)).ok()?;
+    crate::paths::path_within_path(&candidate, &root).then_some(candidate)
+}
+
+/// 机器验收语法（仅处理显式 `machine:` 条目，普通自然语言条件仍展示给人）：
+/// `machine:file:path`、`machine:glob:path/*.md`、`machine:contains:path::文本`、
+/// `machine:count:path/*.pdf>=N`。路径始终限制在项目根内。
+fn machine_acceptance_satisfied(root: &Path, criteria: &[String], since: SystemTime) -> bool {
+    criteria
+        .iter()
+        .filter_map(|raw| raw.strip_prefix("machine:"))
+        .all(|rule| {
+            if let Some(path) = rule.strip_prefix("file:") {
+                return artifact_produced_since(root, path, since);
+            }
+            if let Some(path) = rule.strip_prefix("glob:") {
+                return artifact_produced_since(root, path, since);
+            }
+            if let Some(rest) = rule.strip_prefix("contains:") {
+                let Some((path, needle)) = rest.split_once("::") else {
+                    return false;
+                };
+                let Some(path) = rooted_existing_path(root, path) else {
+                    return false;
+                };
+                return fs::read_to_string(path)
+                    .map(|text| text.contains(needle))
+                    .unwrap_or(false);
+            }
+            if let Some(rest) = rule.strip_prefix("count:") {
+                let Some((pattern, n)) = rest.rsplit_once(">=") else {
+                    return false;
+                };
+                let Ok(expected) = n.trim().parse::<usize>() else {
+                    return false;
+                };
+                let Some(idx) = pattern.rfind('/').or_else(|| pattern.rfind('\\')) else {
+                    return false;
+                };
+                let dir = &pattern[..idx];
+                let file_pattern = &pattern[idx + 1..];
+                let Some(dir) = rooted_existing_path(root, dir) else {
+                    return false;
+                };
+                let Ok(rd) = fs::read_dir(dir) else {
+                    return false;
+                };
+                let actual = rd
+                    .flatten()
+                    .filter_map(|entry| {
+                        let meta = entry.metadata().ok()?;
+                        (meta.is_file()
+                            && meta.len() > 0
+                            && wildcard_match(file_pattern, &entry.file_name().to_string_lossy())
+                            && meta.modified().ok().map(|t| t >= since).unwrap_or(false))
+                        .then_some(())
+                    })
+                    .count();
+                return actual >= expected;
+            }
+            if let Some(rest) = rule.strip_prefix("records:") {
+                let Some((path, fields)) = rest.split_once("::") else {
+                    return false;
+                };
+                let Some(path) = rooted_existing_path(root, path) else {
+                    return false;
+                };
+                let Ok(meta) = fs::metadata(&path) else {
+                    return false;
+                };
+                if !meta.is_file()
+                    || meta.len() == 0
+                    || meta.len() > 4 * 1024 * 1024
+                    || meta.modified().ok().map(|t| t < since).unwrap_or(true)
+                {
+                    return false;
+                }
+                let Ok(file) = fs::File::open(path) else {
+                    return false;
+                };
+                let Ok(value) = serde_json::from_reader::<_, Value>(file) else {
+                    return false;
+                };
+                let rows = value
+                    .as_array()
+                    .or_else(|| value.get("items").and_then(Value::as_array))
+                    .or_else(|| value.get("records").and_then(Value::as_array))
+                    .or_else(|| value.get("rows").and_then(Value::as_array));
+                let Some(rows) = rows else { return false };
+                if rows.is_empty() || rows.len() > 5000 {
+                    return false;
+                }
+                let required: Vec<&str> = fields
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|f| !f.is_empty())
+                    .collect();
+                if required.is_empty() {
+                    return false;
+                }
+                let mut ids = std::collections::HashSet::new();
+                return rows.iter().all(|row| {
+                    let Some(obj) = row.as_object() else {
+                        return false;
+                    };
+                    required.iter().all(|field| {
+                        obj.get(*field).is_some_and(|v| match v {
+                            Value::Null => false,
+                            Value::String(s) => !s.trim().is_empty(),
+                            Value::Array(a) => !a.is_empty(),
+                            Value::Object(o) => !o.is_empty(),
+                            _ => true,
+                        })
+                    }) && obj
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .is_none_or(|id| !id.trim().is_empty() && ids.insert(id.to_string()))
+                });
+            }
+            false
+        })
 }
 
 pub(crate) fn pending_artifact_checks_impl(conn: &Connection) -> Vec<PendingArtifactDto> {
@@ -1645,6 +1790,7 @@ pub(crate) fn pending_artifact_checks_impl(conn: &Connection) -> Vec<PendingArti
             .expected_artifacts
             .iter()
             .all(|a| artifact_produced_since(&root, a, since))
+            && machine_acceptance_satisfied(&root, &step.acceptance_criteria, since)
         {
             out.push(PendingArtifactDto {
                 workspace_id: w.id,
@@ -1722,8 +1868,8 @@ fn manual_checks_at(
     if ensure_human_task_checks_table(conn).is_err() {
         return out;
     }
-    if let Ok(mut stmt) = conn
-        .prepare("SELECT step, title, checked FROM human_task_checks WHERE project_path = ?1")
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT step, title, checked FROM human_task_checks WHERE project_path = ?1")
     {
         if let Ok(rows) = stmt.query_map(params![project_path], |r| {
             Ok((
@@ -1935,7 +2081,11 @@ pub(crate) fn human_target_count(root: &Path, target: &str) -> Option<usize> {
         if pattern.is_empty() || dir.contains('*') {
             return None;
         }
-        let dir_path = if dir.is_empty() { root.to_path_buf() } else { root.join(dir) };
+        let dir_path = if dir.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(dir)
+        };
         let Ok(rd) = fs::read_dir(dir_path) else {
             return None;
         };
@@ -1992,8 +2142,20 @@ fn is_text_target(target: &str) -> bool {
     };
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "md" | "qmd" | "txt" | "tex" | "sty" | "cls" | "bib" | "json" | "jsonl"
-            | "yaml" | "yml" | "toml" | "csv" | "tsv" | "rst"
+        "md" | "qmd"
+            | "txt"
+            | "tex"
+            | "sty"
+            | "cls"
+            | "bib"
+            | "json"
+            | "jsonl"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "csv"
+            | "tsv"
+            | "rst"
     )
 }
 
@@ -2009,7 +2171,9 @@ fn no_placeholders_hit(root: &Path, target: &str) -> bool {
     let Ok(text) = fs::read_to_string(root.join(rel)) else {
         return false;
     };
-    !["待填", "待确认", "[待补", "TODO"].iter().any(|mark| text.contains(mark))
+    !["待填", "待确认", "[待补", "TODO"]
+        .iter()
+        .any(|mark| text.contains(mark))
 }
 
 fn human_target_satisfied(
@@ -2059,7 +2223,6 @@ fn human_detection_roots(
     roots
 }
 
-
 pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
     let cfg = crate::projects::read_config_at(root).config;
     if cfg.steps.iter().all(|s| s.human_tasks.is_empty()) {
@@ -2085,10 +2248,12 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
                 .max();
             let expected_count = roots
                 .iter()
-                .filter_map(|r| h.expected_count.or_else(|| {
-                    to_fetch_entry_count(r, &h.target)
-                        .or_else(|| manifest_entry_count(r, &h.manifest_path))
-                }))
+                .filter_map(|r| {
+                    h.expected_count.or_else(|| {
+                        to_fetch_entry_count(r, &h.target)
+                            .or_else(|| manifest_entry_count(r, &h.manifest_path))
+                    })
+                })
                 .max();
             let completion = crate::projects::normalize_human_completion(&h.completion);
             let detected = roots.iter().any(|r| {
@@ -2097,7 +2262,8 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
                     &h.target,
                     &completion,
                     human_target_count(r, &h.target),
-                    h.expected_count.or_else(|| to_fetch_entry_count(r, &h.target)),
+                    h.expected_count
+                        .or_else(|| to_fetch_entry_count(r, &h.target)),
                     &h.manifest_path,
                 )
             });
@@ -2127,7 +2293,9 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
 }
 
 #[tauri::command]
-pub async fn list_human_task_states(project_root: String) -> Result<Vec<HumanTaskStateDto>, String> {
+pub async fn list_human_task_states(
+    project_root: String,
+) -> Result<Vec<HumanTaskStateDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = PathBuf::from(crate::sessions::expand_tilde(&project_root));
         let root = fs::canonicalize(&root).map_err(|e| format!("项目目录无效: {e}"))?;
@@ -2213,10 +2381,7 @@ const DELIVERABLE_COPY_CAP: usize = 2000;
 /// 合并后把工作区里未进 git 的 papers/、产物目录、output/ 拷到主仓同相对路径。
 /// 已存在不覆盖；失败不阻断合并。返回空串表示无事可做。
 fn copy_untracked_deliverables(worktree: &Path, repo: &Path) -> String {
-    if crate::paths::same_path(
-        &worktree.to_string_lossy(),
-        &repo.to_string_lossy(),
-    ) {
+    if crate::paths::same_path(&worktree.to_string_lossy(), &repo.to_string_lossy()) {
         return String::new();
     }
     if !worktree.is_dir() || !repo.is_dir() {
@@ -2231,11 +2396,7 @@ fn copy_untracked_deliverables(worktree: &Path, repo: &Path) -> String {
             trimmed
         }
     };
-    let prefixes = [
-        "papers".to_string(),
-        artifact_dir,
-        "output".to_string(),
-    ];
+    let prefixes = ["papers".to_string(), artifact_dir, "output".to_string()];
     let mut copied = 0usize;
     let mut skipped = 0usize;
     let mut walked = 0usize;
@@ -2280,10 +2441,7 @@ fn copy_untracked_deliverables(worktree: &Path, repo: &Path) -> String {
                     continue;
                 }
                 let dest = repo.join(rel);
-                if !crate::paths::path_within(
-                    &dest.to_string_lossy(),
-                    &repo.to_string_lossy(),
-                ) {
+                if !crate::paths::path_within(&dest.to_string_lossy(), &repo.to_string_lossy()) {
                     continue;
                 }
                 if dest.exists() {
@@ -2324,9 +2482,7 @@ fn dest_for_target(root: &Path, target: &str, source: &Path) -> Result<PathBuf, 
     if rel.is_empty() || rel.contains("..") || Path::new(rel).is_absolute() {
         return Err(format!("落点路径不安全: {target}"));
     }
-    let base = source
-        .file_name()
-        .ok_or("源文件没有文件名")?;
+    let base = source.file_name().ok_or("源文件没有文件名")?;
     if is_dir_entry {
         return Ok(root.join(rel).join(base));
     }
@@ -2354,10 +2510,9 @@ pub async fn import_human_deliverable(
     target_override: Option<String>,
 ) -> Result<ImportDeliverableDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root =
-            crate::projects::ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(
-                &project_root,
-            )))?;
+        let root = crate::projects::ensure_task_project_root(Path::new(
+            &crate::sessions::expand_tilde(&project_root),
+        ))?;
         let cfg = crate::projects::read_config_at(&root).config;
         let step_cfg = match &step {
             Some(name) => Some(
@@ -2382,8 +2537,7 @@ pub async fn import_human_deliverable(
             }
         };
         let source = PathBuf::from(crate::sessions::expand_tilde(&source_path));
-        let source =
-            fs::canonicalize(&source).map_err(|e| format!("源文件不存在或不可读: {e}"))?;
+        let source = fs::canonicalize(&source).map_err(|e| format!("源文件不存在或不可读: {e}"))?;
         if !source.is_file() {
             return Err("源路径不是文件".into());
         }
@@ -2487,7 +2641,11 @@ pub async fn list_help_requests() -> Vec<HelpRequestDto> {
         for w in rows.into_iter().filter(|w| w.status == "active") {
             // 工作树 + 主仓根各算一个来源（主仓可能覆盖多个工作区，去重）
             for (root, ws_id, ws_name) in [
-                (w.worktree_path.clone(), Some(w.id.clone()), Some(w.name.clone())),
+                (
+                    w.worktree_path.clone(),
+                    Some(w.id.clone()),
+                    Some(w.name.clone()),
+                ),
                 (w.repo_path.clone(), None, None),
             ] {
                 if !seen_roots.insert(root.clone()) {
@@ -2527,8 +2685,8 @@ pub async fn merge_workspace(
 ) -> Result<WorkspaceMergeResultDto, String> {
     let manager = manager.inner().clone();
     let (out, paths) = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
-            let conn = db()?;
-            let w = get_workspace(&conn, &id)?;
+        let conn = db()?;
+        let w = get_workspace(&conn, &id)?;
         let ensure_idle = |worktree_path: &str| {
             let active = manager.active_workspace_tasks(worktree_path);
             if active.is_empty() {
@@ -2543,11 +2701,11 @@ pub async fn merge_workspace(
         if archive {
             ensure_idle(&w.worktree_path)?; // 快速预检；归档内部在移除 worktree 前还会复查
         }
-            let out = merge_impl_with_guard(&conn, &id, archive, &ensure_idle)?;
-            Ok((out, (w.worktree_path, w.repo_path)))
-        })
-        .await
-        .map_err(|e| e.to_string())??;
+        let out = merge_impl_with_guard(&conn, &id, archive, &ensure_idle)?;
+        Ok((out, (w.worktree_path, w.repo_path)))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     // 只有归档了才广播（前端把留在被移除工作树里的终端标签切回主仓库）
     if out.archived {
         emit_ws_archived(&app, &paths.0, &paths.1);
@@ -2725,9 +2883,7 @@ fn workspace_drift_impl(conn: &Connection, id: &str) -> Result<WorkspaceDriftDto
     } else {
         Vec::new()
     };
-    let registered = registrations
-        .iter()
-        .find(|(path, _)| same_path(path, &wt));
+    let registered = registrations.iter().find(|(path, _)| same_path(path, &wt));
     let mut issues = Vec::new();
     if w.status == "creating" {
         issues.push(drift_issue(
@@ -2966,11 +3122,9 @@ pub async fn workspace_relocate_repo(
     id: String,
     new_repo_path: String,
 ) -> Result<WorkspaceDto, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        relocate_repo_impl(&db()?, &id, &new_repo_path)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || relocate_repo_impl(&db()?, &id, &new_repo_path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -3022,7 +3176,11 @@ fn sync_base_impl(wt: &Path, base_branch: &str, restart: bool) -> Result<String,
         Ok(out) => Ok(format!(
             "已把 {} 并入当前任务分支：\n{}",
             base_branch,
-            if out.trim().is_empty() { "已是最新" } else { out.trim() }
+            if out.trim().is_empty() {
+                "已是最新"
+            } else {
+                out.trim()
+            }
         )),
         Err(e) => {
             // 只有真的进入 MERGING 才是冲突；其余失败（引用不存在、钩子失败等）如实透出，
@@ -3130,7 +3288,7 @@ fn unmerged_impl(wt: &Path) -> Result<UnmergedDto, String> {
         &["rev-parse", "--verify", "-q", "MERGE_HEAD"],
         Duration::from_secs(10),
     )
-        .is_ok();
+    .is_ok();
     let out = run_git(
         wt,
         &["diff", "--name-only", "--diff-filter=U"],
@@ -3273,9 +3431,8 @@ fn resolve_file_impl(wt: &Path, path: &str, side: &str) -> Result<UnmergedDto, S
             .filter_map(|line| line.split('\t').next())
             .filter_map(|meta| meta.split_whitespace().nth(2))
             .collect();
-        let is_delete_side = !stages.is_empty()
-            && !stages.contains(&chosen_stage)
-            && stages.contains(&other_stage);
+        let is_delete_side =
+            !stages.is_empty() && !stages.contains(&chosen_stage) && stages.contains(&other_stage);
         if !is_delete_side {
             return Err(format!(
                 "无法解决 {path}：该文件的冲突形态不是「选定侧已删除」，请检查冲突状态"
@@ -3357,8 +3514,8 @@ pub async fn create_pr(
     tauri::async_runtime::spawn_blocking(move || {
         pr_impl(&db()?, &id, &title, body, skip_push.unwrap_or(false))
     })
-        .await
-        .map_err(|e| e.to_string())?
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -3429,8 +3586,8 @@ pub async fn list_repos() -> Vec<RepoDto> {
                 continue;
             };
             let path_key = crate::paths::path_key(&path.to_string_lossy());
-            let in_ws_root = path_key == ws_root_key
-                || path_key.starts_with(&format!("{ws_root_key}/"));
+            let in_ws_root =
+                path_key == ws_root_key || path_key.starts_with(&format!("{ws_root_key}/"));
             if !path.is_dir() || Some(&path_key) == home.as_ref() || in_ws_root {
                 continue;
             }
@@ -3559,7 +3716,9 @@ fn parse_manifest(text: &str) -> (Vec<String>, Vec<ArtifactEntryDto>) {
                 created_at: String::new(),
             });
         }
-        let Some(entry) = entries.last_mut() else { continue };
+        let Some(entry) = entries.last_mut() else {
+            continue;
+        };
         let Some((key, value)) = content.split_once(':') else {
             continue;
         };
@@ -3882,7 +4041,11 @@ mod tests {
 
     #[test]
     fn stale_upstream_rules() {
-        let steps = vec![step("查文献", "lit"), step("做分析", "ana"), step("写论文", "write")];
+        let steps = vec![
+            step("查文献", "lit"),
+            step("做分析", "ana"),
+            step("写论文", "write"),
+        ];
         // 无上游：第一步永不标
         let ws = vec![
             ws_named("lit", "2026-08-01T00:00:00Z", Some("2026-08-02T00:00:00Z")),
@@ -3896,7 +4059,10 @@ mod tests {
             ws_named("lit", "2026-08-01T00:00:00Z", Some("2026-08-05T00:00:00Z")),
             ws_named("ana", "2026-08-03T00:00:00Z", None),
         ];
-        assert_eq!(stale_upstream_for(&steps, &ws, 1).as_deref(), Some("查文献"));
+        assert_eq!(
+            stale_upstream_for(&steps, &ws, 1).as_deref(),
+            Some("查文献")
+        );
         // 本步之后重新合并（merged_at 晚于上游合并）→ 恢复新鲜
         let ws = vec![
             ws_named("lit", "2026-08-01T00:00:00Z", Some("2026-08-05T00:00:00Z")),
@@ -3909,7 +4075,10 @@ mod tests {
             ws_named("ana", "2026-08-01T00:00:00Z", Some("2026-08-05T00:00:00Z")),
             ws_named("write", "2026-08-03T00:00:00Z", None),
         ];
-        assert_eq!(stale_upstream_for(&steps, &ws, 2).as_deref(), Some("做分析"));
+        assert_eq!(
+            stale_upstream_for(&steps, &ws, 2).as_deref(),
+            Some("做分析")
+        );
         // 本步尚未创建工作区 / 步骤未绑定工作区名 → 不标
         assert_eq!(stale_upstream_for(&steps, &ws[..2], 2), None);
     }
@@ -3962,7 +4131,10 @@ mod tests {
         ];
         sort_recent_repos(&mut repos);
         assert_eq!(
-            repos.iter().map(|repo| repo.path.as_str()).collect::<Vec<_>>(),
+            repos
+                .iter()
+                .map(|repo| repo.path.as_str())
+                .collect::<Vec<_>>(),
             vec!["/newer-a", "/newer-b", "/older"]
         );
     }
@@ -4150,13 +4322,8 @@ mod tests {
                  BEGIN SELECT RAISE(FAIL, 'forced activation failure'); END;",
             )
             .unwrap();
-        let err = create_impl(
-            &fx.conn,
-            &fx.ws_root,
-            fx.repo.to_str().unwrap(),
-            "db-fail",
-        )
-        .unwrap_err();
+        let err =
+            create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "db-fail").unwrap_err();
         assert!(err.contains("激活工作区记录失败"), "{err}");
         assert!(err.contains("已回滚"), "{err}");
         assert!(query_workspaces(&fx.conn).unwrap().is_empty());
@@ -4181,13 +4348,8 @@ mod tests {
             "files_to_copy = [\"../outside\"]\n",
         )
         .unwrap();
-        let err = create_impl(
-            &fx.conn,
-            &fx.ws_root,
-            fx.repo.to_str().unwrap(),
-            "escape",
-        )
-        .unwrap_err();
+        let err =
+            create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "escape").unwrap_err();
         assert!(err.contains("仓库内相对路径"), "{err}");
         assert!(query_workspaces(&fx.conn).unwrap().is_empty());
         assert!(!fx.ws_root.join("myrepo/escape").exists());
@@ -4214,7 +4376,8 @@ mod tests {
             "files_to_copy = [\"linked/payload.env\"]\n",
         )
         .unwrap();
-        let err = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "symlnk").unwrap_err();
+        let err =
+            create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "symlnk").unwrap_err();
         assert!(err.contains("符号链接"), "{err}");
         assert!(err.contains("已回滚"), "{err}");
         // 树外文件未被覆写，创建已整体回滚
@@ -4239,9 +4402,16 @@ mod tests {
         sh(&fx.repo, &["add", ".env"]);
         sh(
             &fx.repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "env as symlink"],
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "env as symlink",
+            ],
         );
-        let err = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "dstsym").unwrap_err();
+        let err =
+            create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "dstsym").unwrap_err();
         assert!(err.contains("符号链接"), "{err}");
         assert_eq!(
             fs::read_to_string(outside.join("target.env")).unwrap(),
@@ -4656,7 +4826,10 @@ mod tests {
             &["-c", "commit.gpgsign=false", "commit", "-m", "主线 v2"],
         );
         let h = health_impl(&fx.conn, &w.id).unwrap();
-        assert!(h.stale_base, "基准已前进：MERGE_HEAD ≠ tip 应标记 stale_base");
+        assert!(
+            h.stale_base,
+            "基准已前进：MERGE_HEAD ≠ tip 应标记 stale_base"
+        );
     }
 
     #[test]
@@ -5169,7 +5342,10 @@ mod tests {
         );
         // 配置共享给所有 worktree：不带 -c commit.gpgsign=false 的提交必失败
         sh(&fx.repo, &["config", "commit.gpgsign", "true"]);
-        sh(&fx.repo, &["config", "gpg.program", "definitely-missing-gpg"]);
+        sh(
+            &fx.repo,
+            &["config", "gpg.program", "definitely-missing-gpg"],
+        );
         let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "gpg").unwrap();
         let wt = PathBuf::from(&w.worktree_path);
         fs::write(wt.join("feature.txt"), "v1\n").unwrap();
@@ -5251,8 +5427,12 @@ mod tests {
         assert!(!wt.join("feature.txt").exists());
         finish_merge_impl(&wt).unwrap();
         assert!(
-            run_git(&wt, &["cat-file", "-e", "HEAD:feature.txt"], Duration::from_secs(10))
-                .is_err(),
+            run_git(
+                &wt,
+                &["cat-file", "-e", "HEAD:feature.txt"],
+                Duration::from_secs(10)
+            )
+            .is_err(),
             "选定删除侧后文件不得留在提交里"
         );
     }
@@ -5309,8 +5489,8 @@ mod tests {
         assert_eq!(entries[0].name, "图一（修订）");
         assert_eq!(entries[0].hash, second.hash);
         // 已跟踪文件随分支走，登记提货单会误导下一步
-        let err = register_artifact_impl(&fx.repo, "自述", &fx.repo.join("README.md"), "ws")
-            .unwrap_err();
+        let err =
+            register_artifact_impl(&fx.repo, "自述", &fx.repo.join("README.md"), "ws").unwrap_err();
         assert!(err.contains("跟踪"), "{err}");
         // 不存在的文件拒绝
         assert!(register_artifact_impl(&fx.repo, "缺失", &fx.repo.join("nope.bin"), "ws").is_err());
@@ -5361,7 +5541,11 @@ mod tests {
         fs::write(dir.join("notes/a.md"), b"note").unwrap();
         fs::write(dir.join("notes/b.md"), b"note2").unwrap();
         fs::write(dir.join("notes/skip.txt"), b"x").unwrap();
-        fs::write(dir.join("papers/included.md"), "# x\nPaper A -- a, 2020 -- j -- doi\n").unwrap();
+        fs::write(
+            dir.join("papers/included.md"),
+            "# x\nPaper A -- a, 2020 -- j -- doi\n",
+        )
+        .unwrap();
         fs::write(dir.join("papers/empty.md"), b"").unwrap();
         let notes = glob_files_at(&dir, "notes/*.md");
         assert_eq!(notes.len(), 2, "{notes:?}");
@@ -5371,6 +5555,83 @@ mod tests {
         assert!(glob_files_at(&dir, "papers/empty.md").is_empty());
         assert!(glob_files_at(&dir, "../escape").is_empty());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn machine_acceptance_checks_files_counts_and_content() {
+        let dir = std::env::temp_dir().join(format!("ccode-accept-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("notes")).unwrap();
+        fs::create_dir_all(dir.join("papers")).unwrap();
+        fs::write(dir.join("notes/a.md"), b"Paper A\n").unwrap();
+        fs::write(dir.join("notes/b.md"), b"Paper B\n").unwrap();
+        fs::write(dir.join("papers/included.md"), b"Paper A\nPaper B\n").unwrap();
+        let since = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap();
+        let criteria = vec![
+            "machine:glob:notes/*.md".into(),
+            "machine:count:notes/*.md>=2".into(),
+            "machine:contains:papers/included.md::Paper B".into(),
+        ];
+        assert!(machine_acceptance_satisfied(&dir, &criteria, since));
+        assert!(!machine_acceptance_satisfied(
+            &dir,
+            &["machine:count:notes/*.md>=3".into()],
+            since
+        ));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn machine_acceptance_checks_json_records_and_rejects_duplicate_ids() {
+        let dir = std::env::temp_dir().join(format!("ccode-records-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("matrix.json"),
+            r#"[{"id":"a","status":"ok","metric":1},{"id":"b","status":"failed","metric":"—"}]"#,
+        )
+        .unwrap();
+        let since = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(machine_acceptance_satisfied(
+            &dir,
+            &["machine:records:matrix.json::id,status,metric".into()],
+            since
+        ));
+        fs::write(
+            dir.join("matrix.json"),
+            r#"[{"id":"a","status":"ok","metric":1},{"id":"a","status":"failed","metric":0}]"#,
+        )
+        .unwrap();
+        assert!(!machine_acceptance_satisfied(
+            &dir,
+            &["machine:records:matrix.json::id,status,metric".into()],
+            since
+        ));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_acceptance_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!("ccode-accept-link-{}", uuid::Uuid::new_v4()));
+        let outside =
+            std::env::temp_dir().join(format!("ccode-accept-out-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&outside, b"secret").unwrap();
+        symlink(&outside, dir.join("escaped.txt")).unwrap();
+        let since = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(!machine_acceptance_satisfied(
+            &dir,
+            &["machine:contains:escaped.txt::secret".into()],
+            since
+        ));
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_file(&outside).ok();
     }
 
     #[test]
@@ -5399,7 +5660,8 @@ mod tests {
 
     #[test]
     fn artifact_produced_since_supports_file_globs_without_accepting_empty_dirs() {
-        let dir = std::env::temp_dir().join(format!("ccode-artifact-glob-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("ccode-artifact-glob-{}", uuid::Uuid::new_v4()));
         let root = dir.join("proj");
         fs::create_dir_all(root.join("figures")).unwrap();
         let since = SystemTime::now() - Duration::from_secs(1);
@@ -5408,7 +5670,10 @@ mod tests {
         assert!(!artifact_produced_since(&root, "figures/*.png", since));
         fs::write(root.join("figures/result.png"), b"png").unwrap();
         assert!(artifact_produced_since(&root, "figures/*.png", since));
-        assert!(artifact_produced_since(&root, "figures/", since), "旧配置目录条目仍保持向后兼容");
+        assert!(
+            artifact_produced_since(&root, "figures/", since),
+            "旧配置目录条目仍保持向后兼容"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -5702,11 +5967,7 @@ mod tests {
         fs::write(wt.join("papers/paper.pdf"), b"%PDF-fake").unwrap();
         let out = merge_impl(&fx.conn, &w.id, false).unwrap();
         assert!(out.merged);
-        assert!(
-            out.output.contains("拷到主文件夹"),
-            "{}",
-            out.output
-        );
+        assert!(out.output.contains("拷到主文件夹"), "{}", out.output);
         assert_eq!(
             fs::read(fx.repo.join("papers/paper.pdf")).unwrap(),
             b"%PDF-fake"

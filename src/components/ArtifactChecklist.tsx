@@ -3,6 +3,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { marked } from "marked";
 import { renderMathInto } from "../md-math";
 import { rowActionClass } from "./PageFrame";
+import { Modal } from "./Modal";
 import { confirmDialog } from "./ConfirmDialog";
 import type { DirEntryDto } from "./FileTree";
 import { absTime, relTime } from "../rel-time";
@@ -505,14 +506,15 @@ export default function ArtifactChecklist({
           预览/编辑切换 + 底部「在终端页打开 / 取消 / 保存」。背景点击/Esc 关闭，
           有未保存改动先确认。截断文件（>256KB）只读，不给编辑 */}
       {inlinePreview && (
-        <div
-          className="ccode-fade fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => void closeInlinePreview()}
+        <Modal
+          open
+          title={inlinePreview.name}
+          onClose={() => void closeInlinePreview()}
+          size="lg"
+          panelClassName="z-50 h-[70vh]"
+          contentClassName="flex min-h-0 flex-1 flex-col"
         >
-          <div
-            className="ccode-float-surface flex h-[70vh] w-full max-w-2xl flex-col rounded-md border border-field p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="flex min-h-0 flex-1 flex-col">
             <div className="mb-3 flex shrink-0 items-baseline gap-2">
               <h2 className="min-w-0 truncate text-base font-semibold text-l1">
                 {inlinePreview.name}
@@ -626,7 +628,7 @@ export default function ArtifactChecklist({
               </div>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

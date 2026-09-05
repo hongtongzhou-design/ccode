@@ -7,8 +7,10 @@ import { agentBrandBadgeStyle } from "../agent-colors";
 import { relTime } from "../rel-time";
 import { IS_WINDOWS } from "../hotkeys";
 import { abbrevHome } from "../path-utils";
+import { Modal } from "./Modal";
 import {
   pickQuickChatHistory,
+  profileCanAutoStart,
   sessionDisplayTitle,
 } from "../quick-chat";
 
@@ -53,12 +55,19 @@ export function quickChatSkipEnabled(): boolean {
 export async function launchQuickChatDirect(): Promise<boolean> {
   const r = loadRemembered();
   if (!r.agentId) return false;
-  const { profiles, setPendingTerminal, setPage } = useAppStore.getState();
+  const { profiles, settings, setPendingTerminal, setPage } =
+    useAppStore.getState();
   const agentProfiles = profiles.filter((p) => p.agent === r.agentId);
-  // 记住的配置可能已删除：落到该 agent 的第一个可用配置，没有就只预填不启动
-  const profileId = agentProfiles.some((p) => p.id === r.profileId)
+  const hidden = new Set(settings?.hiddenProfiles ?? []);
+  const usable = agentProfiles.filter((p) =>
+    profileCanAutoStart(p, hidden.has(p.id)),
+  );
+  // 记住的配置可能已删除/停用/失效：只在有明确可启动配置时直达，
+  // 否则退回弹层，让用户看见并修正连接，而不是静默启动失败。
+  const profileId = usable.some((p) => p.id === r.profileId)
     ? r.profileId!
-    : (agentProfiles[0]?.id ?? "");
+    : (usable[0]?.id ?? "");
+  if (!profileId) return false;
   let cwd = r.cwd?.trim() ?? "";
   if (!cwd) {
     try {
@@ -97,8 +106,8 @@ export function resumeSessionInTerminal(s: SessionMetaDto): void {
     focusTab(liveTab);
     return;
   }
-  setPendingTerminal({
-    cwd: s.projectPath,
+  const pending = {
+    cwd: s.cwd ?? s.projectPath,
     extraEnv: {},
     title: sessionDisplayTitle(s),
     resume: {
@@ -107,8 +116,22 @@ export function resumeSessionInTerminal(s: SessionMetaDto): void {
       provider: s.provider,
     },
     reuseKey: `resume:${s.agent}:${s.sessionId}`,
-  });
+  };
+  setPendingTerminal(pending);
   setPage("terminal");
+  void import("@tauri-apps/api/core").then(({ invoke }) =>
+    invoke<{ id: string } | null>("run_find", {
+      reuseKey: null,
+      agent: s.agent,
+      sessionId: s.sessionId,
+    }).then((run) => {
+      if (!run) return;
+      const cur = useAppStore.getState().pendingTerminal;
+      if (cur?.resume?.sessionId === s.sessionId && !cur.runId) {
+        useAppStore.getState().setPendingTerminal({ ...cur, runId: run.id });
+      }
+    }),
+  );
 }
 
 /**
@@ -263,18 +286,7 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4 ccode-fade"
-      onClick={onClose}
-    >
-      <div
-        className="w-[26rem] rounded-lg border border-field p-4 ccode-float-surface"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="mb-1 text-sm font-medium text-l1">快速开聊</h2>
-        <p className="mb-3 text-micro text-l4">
-          不建项目，直接开个终端聊。
-        </p>
+    <Modal open title="快速开聊" description="不建项目，直接开个终端聊。" onClose={onClose} size="sm">
 
         <form
           onSubmit={(e) => {
@@ -421,7 +433,6 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
             )}
           </div>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }

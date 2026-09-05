@@ -161,8 +161,22 @@ fn is_trim_punct(c: char) -> bool {
     c.is_ascii_punctuation()
         || matches!(
             c,
-            '，' | '。' | '；' | '：' | '！' | '？' | '、' | '“' | '”' | '‘' | '’' | '（'
-                | '）' | '【' | '】' | '《' | '》'
+            '，' | '。'
+                | '；'
+                | '：'
+                | '！'
+                | '？'
+                | '、'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
         )
 }
 
@@ -376,11 +390,13 @@ fn refresh_index(conn: &mut Connection, sessions: &[SessionMetaDto]) {
     }
 }
 
-fn load_stamps(conn: &Connection) -> std::collections::HashMap<(String, String), (String, i64, u64)> {
+fn load_stamps(
+    conn: &Connection,
+) -> std::collections::HashMap<(String, String), (String, i64, u64)> {
     let mut out = std::collections::HashMap::new();
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT agent, session_id, file_path, mtime_ms, size FROM session_search_text",
-    ) else {
+    let Ok(mut stmt) = conn
+        .prepare("SELECT agent, session_id, file_path, mtime_ms, size FROM session_search_text")
+    else {
         return out;
     };
     let Ok(rows) = stmt.query_map([], |row| {
@@ -424,11 +440,7 @@ fn load_indexed_text(
 
 fn source_stamp(s: &SessionMetaDto) -> (i64, u64) {
     if s.agent == "opencode" {
-        let ms = s
-            .updated_at
-            .as_deref()
-            .and_then(iso_to_ms)
-            .unwrap_or(0);
+        let ms = s.updated_at.as_deref().and_then(iso_to_ms).unwrap_or(0);
         return (ms, 0);
     }
     let path = Path::new(&s.file_path);
@@ -472,7 +484,11 @@ struct MatchLoc {
     role: String,
 }
 
-fn locate_match(agent: &str, file_path: &str, tokens: &[String]) -> Option<(u64, Option<String>, String)> {
+fn locate_match(
+    agent: &str,
+    file_path: &str,
+    tokens: &[String],
+) -> Option<(u64, Option<String>, String)> {
     if tokens.is_empty() {
         return None;
     }
@@ -714,6 +730,7 @@ mod tests {
             agent: "claude-code".into(),
             session_id: "s1".into(),
             project_path: path.into(),
+            cwd: Some(path.into()),
             title: Some(title.into()),
             created_at: None,
             updated_at: Some("2026-09-01T00:00:00Z".into()),
@@ -756,7 +773,12 @@ mod tests {
         let a = meta("消融", "", "/p/alpha");
         let b = meta("别的", "", "/p/beta");
         let tokens = tokenize("消融 方差");
-        let (sa, _, ma) = score_session(&a, "我们做了消融实验，看方差变化", &tokens, Some("消融 方差"));
+        let (sa, _, ma) = score_session(
+            &a,
+            "我们做了消融实验，看方差变化",
+            &tokens,
+            Some("消融 方差"),
+        );
         let (sb, _, mb) = score_session(&b, "随便聊聊天气", &tokens, Some("消融 方差"));
         assert!(sa > sb, "{sa} vs {sb}");
         assert!(ma.contains(&"消融".to_string()));

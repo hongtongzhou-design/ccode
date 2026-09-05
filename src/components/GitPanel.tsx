@@ -144,7 +144,7 @@ function GitPanel({
   refreshKey?: number;
   onTotals: (t: GitSummary) => void;
   /** 工作区任务进入全宽审阅；普通仓库不显示入口。 */
-  onOpenReview?: (cwd: string) => void;
+  onOpenReview?: (cwd: string, runId?: string | null) => void;
   /** 编程工作树推送成功后打开 PR；缺省不渲染。GitPanel 不识别 GitHub。 */
   onOpenPr?: (cwd: string) => void | Promise<void>;
   /** 会话页只展示当前项目状态，不允许从历史上下文提交或推送。 */

@@ -91,6 +91,7 @@ export async function startPipelineStep({
   onError,
   onOpenTerminal,
   launch,
+  decisionPauseAcknowledged = false,
 }: {
   projectPath: string;
   step: ProjectStepDto;
@@ -107,7 +108,23 @@ export async function startPipelineStep({
   ) => void | Promise<void>;
   /** 弹层已选定的 Agent/连接：有 profile 时自动启动，不再让人去运行页点「启动」 */
   launch?: KickoffLaunch | null;
+  /** soft_pause 的二次确认只允许推进不依赖未答决策的工作。 */
+  decisionPauseAcknowledged?: boolean;
 }): Promise<void> {
+  const mode =
+    step.decisionMode === "soft_pause" || step.decisionMode === "hard_pause"
+      ? step.decisionMode
+      : "auto_continue";
+  const answered = parseDecisions(taskMdOverride ?? "");
+  const missing = (step.decisions ?? [])
+    .filter((d) => !answered.get(d.q.trim())?.trim())
+    .map((d) => d.q.trim());
+  if (mode === "hard_pause" && missing.length > 0) {
+    throw new Error(`本步骤处于硬暂停，尚有未回答决策：${missing.join("、")}`);
+  }
+  if (mode === "soft_pause" && missing.length > 0 && !decisionPauseAcknowledged) {
+    throw new Error(`本步骤处于软暂停，请先确认仅推进无依赖工作：${missing.join("、")}`);
+  }
   try {
     await invoke<EnsureGitDto>("ensure_git_repo", { path: projectPath });
   } catch (reason) {

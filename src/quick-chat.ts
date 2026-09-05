@@ -4,6 +4,28 @@
 import type { SessionMetaDto } from "./types";
 import { pathKey } from "./path-utils.ts";
 
+/** 快速开聊的自动路径只使用明确可启动的配置；未知状态放行，避免旧数据被误拦。 */
+export function profileCanAutoStart(
+  profile: {
+    slotMissing?: boolean;
+    connectionStatus?: string;
+    modelSyncStatus?: string;
+  },
+  hidden = false,
+): boolean {
+  if (hidden || profile.slotMissing) return false;
+  return (
+    ![
+      "gateway_missing",
+      "slot_missing",
+      "credential_missing",
+      "probe_failed",
+      "model_unsynced",
+    ].includes(profile.connectionStatus ?? "") &&
+    profile.modelSyncStatus !== "missing"
+  );
+}
+
 /** 「没法恢复」的会话统一排除口径 */
 function recoverable(s: SessionMetaDto): boolean {
   return !s.archived && !s.internal && !s.live && s.alive;

@@ -110,10 +110,10 @@ test("内置模板的后续步骤输入都能接到上游产物", () => {
 
 test("空落点人工事项必须使用 manual，且推荐技能存在于内置技能集合", () => {
   const builtin = new Set([
-    "bib-check", "data-clean", "data-eda", "figure-forge", "lit-notes",
+    "bib-check", "data-clean", "data-eda", "endnote-bridge", "figure-forge", "lit-notes",
     "lit-search", "lit-watch", "proposal-writer", "quarto-render",
     "rebuttal-crafter", "research-writing", "review-framework", "review-writing",
-    "slides-deck", "stats-check",
+    "slides-deck", "stats-check", "origin-plot", "zotero-sync",
   ]);
   for (const template of PIPELINE_TEMPLATES) {
     for (const step of template.steps) {
@@ -121,6 +121,28 @@ test("空落点人工事项必须使用 manual，且推荐技能存在于内置�
         if (!task.target.trim()) assert.equal(task.completion ?? "manual", "manual", `${template.id}/${step.name}/${task.title}`);
       }
       for (const skill of step.skills) assert.ok(builtin.has(skill), `${template.id}/${step.name} 使用未播种技能：${skill}`);
+    }
+  }
+});
+
+test("Zotero 只默认挂到三套科研文献检索步骤，Origin/EndNote 保持可选", () => {
+  for (const id of ["review", "research-paper", "thesis"]) {
+    const template = PIPELINE_TEMPLATES.find((t) => t.id === id);
+    assert.ok(template, `缺少模板：${id}`);
+    const searchStep = template.steps.find((step) => step.skills.includes("lit-search"));
+    assert.ok(searchStep, `${id} 缺少文献检索步骤`);
+    assert.ok(searchStep.skills.includes("zotero-sync"), `${id} 文献检索步骤未挂载 zotero-sync`);
+    assert.deepEqual(searchStep.requiredSkills, ["lit-search"], `${id} 的 zotero-sync 应为可选技能`);
+    assert.ok(!searchStep.skills.includes("origin-plot"));
+    assert.ok(!searchStep.skills.includes("endnote-bridge"));
+  }
+  for (const template of PIPELINE_TEMPLATES) {
+    for (const step of template.steps) {
+      if (!step.skills.includes("lit-search")) {
+        assert.ok(!step.skills.includes("zotero-sync"), `${template.id}/${step.name} 错误挂载 zotero-sync`);
+      }
+      assert.ok(!step.skills.includes("origin-plot"), `${template.id}/${step.name} 不应默认挂载 origin-plot`);
+      assert.ok(!step.skills.includes("endnote-bridge"), `${template.id}/${step.name} 不应默认挂载 endnote-bridge`);
     }
   }
 });

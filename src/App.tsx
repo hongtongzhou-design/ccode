@@ -39,6 +39,8 @@ import { NAV_ICONS } from "./navigation-icons";
 import { NAV_GROUPS, NAV_BOTTOM } from "./navigation";
 import { normalizeNavCapsuleDelay, resolveStartupNavMode } from "./nav-capsule";
 import { macOverlayPadClass, useMacFullscreen } from "./mac-titlebar";
+import ToastHost from "./components/ToastHost";
+import { toast } from "./toast";
 
 // 页面懒加载：首屏只拉当前页 chunk，其余页首次访问时才加载
 const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
@@ -346,14 +348,14 @@ function App() {
   useEffect(() => {
     loadAll().catch((e) => console.error(e));
     loadSessions().catch((e) => console.error(e));
-    loadProjects().catch(() => {});
-    loadRecentRepos().catch(() => {});
+    loadProjects().catch(() => toast("项目列表加载失败，可稍后重试", "warning"));
+    loadRecentRepos().catch(() => toast("最近目录加载失败，可稍后重试", "warning"));
     // 设置（含主题）在启动时加载并应用
     loadSettings()
       .catch((e) => console.error(e))
       .finally(() => {
         // 等设置读完再检查：出网代理若配了会带上。开发模式内部直接标 dev，不打 GitHub。
-        checkAppUpdate().catch(() => {});
+        checkAppUpdate().catch(() => toast("应用更新检查失败，可稍后重试", "warning"));
       });
     // 依赖体检（git/node/安装渠道）：缺 git 时收件箱常驻「依赖」条目；失败静默不阻塞首屏
     useAppStore.getState().refreshDepCheck();
@@ -398,11 +400,11 @@ function App() {
       const now = Date.now();
       if (now - last < 2000) return;
       last = now;
-      loadAll().catch(() => {});
-      loadSettings().catch(() => {});
-      loadSessions().catch(() => {});
-      loadProjects().catch(() => {});
-      loadRecentRepos().catch(() => {});
+      loadAll().catch(() => toast("配置同步失败，可稍后重试", "warning"));
+      loadSettings().catch(() => toast("设置同步失败，可稍后重试", "warning"));
+      loadSessions().catch(() => toast("会话同步失败，可稍后重试", "warning"));
+      loadProjects().catch(() => toast("项目同步失败，可稍后重试", "warning"));
+      loadRecentRepos().catch(() => toast("最近目录同步失败，可稍后重试", "warning"));
     };
     const onVis = () => {
       if (document.visibilityState === "visible") sync();
@@ -821,6 +823,7 @@ function App() {
         )}
         {/* 全局确认框宿主（confirmDialog）：z-[70]，压过一切覆盖层 */}
         <ConfirmDialogHost />
+        <ToastHost />
       </div>
     </ErrorBoundary>
   );

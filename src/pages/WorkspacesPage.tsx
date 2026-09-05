@@ -30,6 +30,7 @@ import { confirmDialog } from "../components/ConfirmDialog";
 import ProjectGroup from "../components/ProjectGroup";
 import ArtifactChecklist from "../components/ArtifactChecklist";
 import TemplatePickModal from "../components/TemplatePickModal";
+import { Modal } from "../components/Modal";
 import { filterWorkspacesByFocus } from "../workspace-visibility";
 import { buildWorkspaceTerminalRequest } from "../pipeline-start";
 import {
@@ -41,9 +42,10 @@ import {
   PageHeader,
   primaryActionClass,
   rowActionClass,
+  hoverRevealClass,
   secondaryActionClass,
 } from "../components/PageFrame";
-import { attributeToProject, buildRunOverview } from "../run-overview";
+import { attributeToProject, buildRunOverview, runIdForPath } from "../run-overview";
 import { depInboxItem, type DepCheckDto } from "../dep-check";
 import {
   litInboxCandidates,
@@ -84,6 +86,7 @@ import {
 } from "../work-mode";
 import { sortWorkspacesByAttention } from "../project-status";
 import { samePath as samePathKey } from "../path-utils";
+import { toast } from "../toast";
 
 /** 保留工作区的合并已完成，且分支尚未产生新的待合并提交。 */
 function isMerged(
@@ -163,7 +166,11 @@ function AddProjectModal({
           setModeLocked(true);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) {
+          toast("项目配置未检测到，将使用默认工作方式", "warning");
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -290,16 +297,9 @@ function AddProjectModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <form
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-4 text-base font-semibold text-l1">添加项目</h2>
+    <Modal open title="添加项目" onClose={onClose} size="md">
+      <form onSubmit={submit}>
+        <h2 className="sr-only">添加项目</h2>
         <p
           className="mb-3 truncate font-mono text-xs text-l3"
           title={path}
@@ -364,7 +364,7 @@ function AddProjectModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -399,16 +399,9 @@ function RenameProjectModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <form
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-4 text-base font-semibold text-l1">重命名项目</h2>
+    <Modal open title="重命名项目" onClose={onClose} size="md">
+      <form onSubmit={submit}>
+        <h2 className="sr-only">重命名项目</h2>
         <p className="mb-3 truncate font-mono text-xs text-l3" title={path}>
           {path}
         </p>
@@ -440,7 +433,7 @@ function RenameProjectModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -498,16 +491,9 @@ function NewWorkspaceModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <form
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        className="w-[26rem] rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-4 text-base font-semibold text-l1">新建工作区</h2>
+    <Modal open title="新建工作区" onClose={onClose} size="md">
+      <form onSubmit={submit}>
+        <h2 className="sr-only">新建工作区</h2>
         <p className="mb-3 truncate font-mono text-xs text-l3" title={repoPath}>
           {repoPath}
         </p>
@@ -545,7 +531,7 @@ function NewWorkspaceModal({
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -855,7 +841,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     invoke<string>("home_dir")
       .then(setHomeDir)
-      .catch(() => {});
+      .catch(() => toast("无法读取主目录，部分路径提示可能不完整", "warning"));
   }, []);
   const [addProjectPath, setAddProjectPath] = useState<string | null>(null);
   // 刚注册的项目路径：对应分组显示一次性 git 初始化引导
@@ -1035,7 +1021,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             }
           }
         })
-        .catch(() => {});
+        .catch(() => toast("项目注册表读取失败，已按工作区列表继续显示", "warning"));
       setRefreshToken((t) => t + 1);
       const driftFailures: Record<string, boolean> = {};
       const driftEntries = await Promise.all(
@@ -1116,11 +1102,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       // 产物待核验：与健康度同频次（页可见刷新/事件驱动），失败静默（下轮重试）
       invoke<PendingArtifactDto[]>("pending_artifact_checks")
         .then(setArtifactReady)
-        .catch(() => {});
+        .catch(() => toast("产物核验状态未检测到，刷新后可重试", "warning"));
       // agent 人工请求（.ccode/help-wanted.md）：同频次拉取，失败静默（下轮重试）
       invoke<HelpRequestDto[]>("list_help_requests")
         .then(setHelpRequests)
-        .catch(() => {});
+        .catch(() => toast("人工请求未检测到，刷新后可重试", "warning"));
       // 文献雷达新命中（收件箱「文献」胶囊）：同频次拉取，失败静默（下轮重试）
       void loadLitInbox();
       setError(
@@ -1181,13 +1167,19 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   // 全局 OS 通知在 App.tsx 另行监听，这里只管收件箱条目）
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listen<SchedulerRunDonePayload>("scheduler-run-done", () => {
+    const reloadLit = () => {
       void loadLitInbox();
-    })
+    };
+    listen<SchedulerRunDonePayload>("scheduler-run-done", reloadLit)
       .then((u) => (unlisten = u))
+      .catch(() => toast("定时任务完成事件监听失败，收件箱可能不会自动刷新", "warning"));
+    let unlistenAdopt: (() => void) | undefined;
+    listen("watch-run-adopted", reloadLit)
+      .then((u) => (unlistenAdopt = u))
       .catch(() => {});
     return () => {
       unlisten?.();
+      unlistenAdopt?.();
     };
   }, []);
 
@@ -1355,8 +1347,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
   const actionBtn = inlineActionClass;
   // hover 才现的低频操作：键盘 Tab 聚焦（focus-visible）同样显示，保持可达
-  const hoverReveal =
-    "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
+  const hoverReveal = hoverRevealClass;
   // 行内唯一实心主动作：普通评审 cta 实心；冲突场景 warn 色实心
   const reviewCta =
     "inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110";
@@ -1369,6 +1360,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   ) {
     setWorkspaceReviewRequest({
       worktreePath: workspace.worktreePath,
+      runId: runIdForPath(terminalRunInputs, workspace.worktreePath),
       action,
       requestId: crypto.randomUUID(),
     });
@@ -1389,7 +1381,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       ? { version: appUpdate.version, currentVersion: appUpdate.currentVersion }
       : null,
   );
-  const inboxItems: InboxItem[] = [
+  const inboxItems = [
     ...active
       .filter((w) => health[w.id]?.conflict)
       .map((w) => ({
@@ -1403,22 +1395,23 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         action: {
           type: "review" as const,
           worktreePath: w.worktreePath,
+          runId: runIdForPath(terminalRunInputs, w.worktreePath),
           intent: "resolve-conflict" as const,
         },
       })),
     ...runItems
       .filter((it) => it.attention === "confirm")
       .map((it) => ({
-        key: `confirm:${it.tabId}`,
+        key: `confirm:${it.runId ?? it.tabId}`,
         dot: "bg-warn-text",
         text: inboxTaskLine(
           inboxTaskLabel({ title: it.title, cwdLabel: it.cwdLabel }),
-          "看待确认",
+          it.runId ? "看待确认" : "看待确认（尚未登记任务）",
         ),
         actionLabel: "去处理",
         action: it.runId
           ? { type: "run" as const, runId: it.runId }
-          : { type: "tab" as const, tabId: it.tabId },
+          : { type: "run" as const, tabId: it.tabId },
       })),
     // 外部运行（无终端标签）的会话：后端直查尾部状态，待确认时进收件箱
     ...sessions
@@ -1452,7 +1445,25 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       litCandidates,
       projects.map((p) => p.path),
       IS_WINDOWS,
-    ).flatMap((c) => {
+    ).flatMap((c): InboxItem[] => {
+      const projectName =
+        projects.find((p) => samePath(p.path, c.projectRoot))?.name ??
+        pathBaseName(c.projectRoot);
+      if (c.isolationPath && !c.adopted) {
+        return [
+          {
+            key: `lit:${c.scheduleId}:${c.at}`,
+            dot: "bg-ok-text",
+            text: inboxTaskLine(projectName, `评审 ${c.count} 条新命中`),
+            actionLabel: "去评审",
+            action: {
+              type: "review" as const,
+              worktreePath: c.isolationPath,
+              runId: c.runId ?? null,
+            },
+          },
+        ];
+      }
       const papers = papersForLitCandidate(
         c,
         litEntriesByRoot[c.projectRoot] ?? [],
@@ -1462,7 +1473,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           {
             key: `lit:${c.scheduleId}:${c.at}`,
             dot: "bg-ok-text",
-            text: `文献雷达 · ${projects.find((p) => samePath(p.path, c.projectRoot))?.name ?? pathBaseName(c.projectRoot)}：${c.count} 条新命中`,
+            text: `文献雷达 · ${projectName}：${c.count} 条新命中`,
             actionLabel: "去看看",
             action: { type: "litWatch" as const, projectRoot: c.projectRoot },
           },
@@ -1489,7 +1500,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         dot: "bg-ok-text",
         text: inboxTaskLine(w.name, "评审"),
         actionLabel: "去评审",
-        action: { type: "review" as const, worktreePath: w.worktreePath },
+        action: {
+          type: "review" as const,
+          worktreePath: w.worktreePath,
+          runId: runIdForPath(terminalRunInputs, w.worktreePath),
+        },
       })),
     // 产物待核验：预期产物已全部产出但尚无提交（可合并/冲突已覆盖的情形不重复报）——
     // 产物多为 gitignore 的文件（*.pdf 等），git 状态永远看不见，不提醒就是黑洞
@@ -1559,7 +1574,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         ]
       : []),
     ...(updateItem ? [updateItem] : []),
-  ];
+  ] as InboxItem[];
 
   // 项目导航行的「待处理」分布（收件箱同款口径按项目摊开）：终端待确认 +
   // 外部 live 待确认，cwd 经最长前缀归属项目根/工作树（attributeToProject 纯逻辑）
@@ -2033,7 +2048,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         className={`flex shrink-0 flex-col transition-[width,background-color,border-color] duration-150 ${
           projectRailCollapsed
             ? "w-0 overflow-hidden border-r-0 bg-transparent"
-            : "w-[230px] border-r border-hairline bg-rail2"
+            : "ccode-workspaces-rail ccode-project-rail-open w-[230px] border-r border-hairline bg-rail2"
         }`}
       >
         {!projectRailCollapsed && (
@@ -2180,7 +2195,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           )
         }
       />
-      {error && <p className="mb-4 text-sm text-err-text">{error}</p>}
+      {error && <p role="alert" className="mb-4 text-sm text-err-text">{error}</p>}
       {notice && (
         <NoticeBar className="mb-4" onDismiss={() => setNotice(null)}>
           {notice}

@@ -46,7 +46,11 @@ fn slugify_note_stem(stem: &str) -> String {
         out.push(c);
         len += 1;
     }
-    if out.is_empty() { "paper".into() } else { out }
+    if out.is_empty() {
+        "paper".into()
+    } else {
+        out
+    }
 }
 
 /// 新笔记模板：标题 + 来源行 + 固定小节（精读八小节对齐 lit-notes 技能口径，尾部两节「译段」「我的想法」为阅读区机管小节）
@@ -78,8 +82,8 @@ fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNot
     let notes = root.join("notes");
     fs::create_dir_all(&notes).map_err(|e| format!("创建 notes 目录失败: {e}"))?;
     // notes 若是指向根外的 symlink 要拦下（同 lit_watch 落盘的双校验口径）
-    let canon_notes = crate::paths::canonicalize_plain(&notes)
-        .map_err(|e| format!("notes 目录无效: {e}"))?;
+    let canon_notes =
+        crate::paths::canonicalize_plain(&notes).map_err(|e| format!("notes 目录无效: {e}"))?;
     if !inside(&canon_notes, &root) {
         return Err("notes 指向项目目录之外，拒绝写入".into());
     }
@@ -249,8 +253,8 @@ fn pdf_for_note_sync(project_root: &str, note_path: &str) -> Result<Option<Strin
     if !is_md {
         return Err("只支持 Markdown 笔记（.md）".into());
     }
-    let note_c = crate::paths::canonicalize_plain(&note)
-        .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
+    let note_c =
+        crate::paths::canonicalize_plain(&note).map_err(|e| format!("笔记不存在或不可读: {e}"))?;
     if !inside(&note_c, &root) {
         return Err("笔记在项目目录之外，拒绝访问".into());
     }
@@ -300,9 +304,7 @@ fn list_paper_notes_sync(project_root: &str) -> Result<Vec<PaperNoteLinkDto>, St
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if name.eq_ignore_ascii_case("glossary.md")
-            || name.eq_ignore_ascii_case("inbox.md")
-        {
+        if name.eq_ignore_ascii_case("glossary.md") || name.eq_ignore_ascii_case("inbox.md") {
             continue;
         }
         let pdf_rel = fs::read_to_string(&path)
@@ -346,8 +348,8 @@ fn reader_for_note_sync(note_path: &str) -> Result<ReaderForNoteDto, String> {
     if !is_md {
         return Err("只支持 Markdown 笔记（.md）".into());
     }
-    let note_c = crate::paths::canonicalize_plain(&note)
-        .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
+    let note_c =
+        crate::paths::canonicalize_plain(&note).map_err(|e| format!("笔记不存在或不可读: {e}"))?;
     let conn = crate::workspaces::db()?;
     // 1. 注册项目根直含（剥 verbatim 后的分量判定，与 register_project 的 canonical_key 同口径）
     let mut root: Option<PathBuf> = None;
@@ -366,7 +368,9 @@ fn reader_for_note_sync(note_path: &str) -> Result<ReaderForNoteDto, String> {
         for w in crate::workspaces::query_workspaces(&conn)? {
             let wt = PathBuf::from(&w.worktree_path);
             let wt = crate::paths::canonicalize_plain(&wt).unwrap_or(wt);
-            let Ok(rel) = note_c.strip_prefix(&wt) else { continue };
+            let Ok(rel) = note_c.strip_prefix(&wt) else {
+                continue;
+            };
             let repo = PathBuf::from(crate::sessions::expand_tilde(&w.repo_path));
             let main_note = repo.join(rel);
             if !main_note.exists() {
@@ -415,12 +419,7 @@ pub struct ImageBytesDto {
 
 /// 扩展名白名单 → mime；不在名单内返回 None（读取前就拒绝）
 fn image_mime_for(path: &Path) -> Option<&'static str> {
-    match path
-        .extension()?
-        .to_string_lossy()
-        .to_lowercase()
-        .as_str()
-    {
+    match path.extension()?.to_string_lossy().to_lowercase().as_str() {
         "png" => Some("image/png"),
         "jpg" | "jpeg" => Some("image/jpeg"),
         "gif" => Some("image/gif"),
@@ -434,10 +433,10 @@ fn image_magic_ok(mime: &str, bytes: &[u8]) -> bool {
     match mime {
         "image/png" => bytes.starts_with(b"\x89PNG"),
         "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-        "image/jpeg" => bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF,
-        "image/webp" => {
-            bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+        "image/jpeg" => {
+            bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
         }
+        "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
         "image/svg+xml" => {
             let head = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]);
             head.to_ascii_lowercase().contains("<svg")
@@ -448,8 +447,8 @@ fn image_magic_ok(mime: &str, bytes: &[u8]) -> bool {
 
 fn read_image_sync(path: &str, cwd_hint: Option<&str>) -> Result<ImageBytesDto, String> {
     let expanded = crate::sessions::expand_tilde(path);
-    let mime = image_mime_for(Path::new(&expanded))
-        .ok_or("只支持 png/jpg/jpeg/gif/webp/svg 图片")?;
+    let mime =
+        image_mime_for(Path::new(&expanded)).ok_or("只支持 png/jpg/jpeg/gif/webp/svg 图片")?;
     // 白名单口径完全复用 pdf.rs 的四类来源判定（canonicalize 防逃逸在内核里做）
     let (bytes, _size) = crate::pdf::read_whitelisted_sync(path, cwd_hint, IMAGE_CAP, |mb| {
         format!("图片超过 20 MB（{mb:.1} MB），暂不支持内嵌显示")
@@ -605,8 +604,9 @@ fn append_note_image_sync(
     rel_image_path: &str,
 ) -> Result<(), String> {
     let root = gated_root(project_root)?;
-    let note = crate::paths::canonicalize_plain(Path::new(&crate::sessions::expand_tilde(note_path)))
-        .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
+    let note =
+        crate::paths::canonicalize_plain(Path::new(&crate::sessions::expand_tilde(note_path)))
+            .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
     let canon_notes = crate::paths::canonicalize_plain(&root.join("notes"))
         .map_err(|e| format!("notes 目录无效: {e}"))?;
     if !inside(&note, &canon_notes) {
@@ -692,9 +692,9 @@ fn split_glossary_row(line: &str) -> Vec<String> {
 /// 分隔行判定：所有单元格只由 - : 空格组成且至少含一个 -
 fn is_glossary_sep_row(cells: &[String]) -> bool {
     !cells.is_empty()
-        && cells
-            .iter()
-            .all(|c| !c.is_empty() && c.contains('-') && c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')))
+        && cells.iter().all(|c| {
+            !c.is_empty() && c.contains('-') && c.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
+        })
 }
 
 /// 解析 glossary.md 的表格行（容错：非表行/表头/分隔行/不足 3 列/空术语一律跳过）
@@ -752,8 +752,8 @@ fn splice_glossary(text: &str, entries: &[GlossaryEntryDto]) -> String {
 fn glossary_path(root: &Path) -> Result<PathBuf, String> {
     let notes = root.join("notes");
     fs::create_dir_all(&notes).map_err(|e| format!("创建 notes 目录失败: {e}"))?;
-    let canon_notes = crate::paths::canonicalize_plain(&notes)
-        .map_err(|e| format!("notes 目录无效: {e}"))?;
+    let canon_notes =
+        crate::paths::canonicalize_plain(&notes).map_err(|e| format!("notes 目录无效: {e}"))?;
     if !inside(&canon_notes, root) {
         return Err("notes 指向项目目录之外，拒绝写入".into());
     }
@@ -875,8 +875,9 @@ fn append_note_translation_sync(
     page: u32,
 ) -> Result<(), String> {
     let root = gated_root(project_root)?;
-    let note = crate::paths::canonicalize_plain(Path::new(&crate::sessions::expand_tilde(note_path)))
-        .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
+    let note =
+        crate::paths::canonicalize_plain(Path::new(&crate::sessions::expand_tilde(note_path)))
+            .map_err(|e| format!("笔记不存在或不可读: {e}"))?;
     let canon_notes = crate::paths::canonicalize_plain(&root.join("notes"))
         .map_err(|e| format!("notes 目录无效: {e}"))?;
     if !inside(&note, &canon_notes) {
@@ -888,8 +889,11 @@ fn append_note_translation_sync(
         return Err("译段内容为空，未写入笔记".into());
     }
     let text = fs::read_to_string(&note).map_err(|e| format!("读取笔记失败: {e}"))?;
-    let new_text =
-        append_block_to_section(&text, "译段", &translation_block(original, translated, page));
+    let new_text = append_block_to_section(
+        &text,
+        "译段",
+        &translation_block(original, translated, page),
+    );
     crate::profiles::atomic_write(&note, &new_text)
 }
 
@@ -941,11 +945,7 @@ mod tests {
     fn find_note_by_source_uses_path_same_on_windows() {
         let notes = tmpdir("src-case").join("notes");
         fs::create_dir_all(&notes).unwrap();
-        fs::write(
-            notes.join("a.md"),
-            "> 来源 PDF：Papers\\Foo.PDF\n",
-        )
-        .unwrap();
+        fs::write(notes.join("a.md"), "> 来源 PDF：Papers\\Foo.PDF\n").unwrap();
         let hit = find_note_by_source(&notes, "papers/foo.pdf");
         #[cfg(windows)]
         assert_eq!(hit, Some(notes.join("a.md")));
@@ -973,7 +973,9 @@ mod tests {
     fn untouched_template_detection() {
         let tpl = note_template("T", "papers/a.pdf", "2026-08-20");
         assert!(note_is_untouched(&tpl));
-        assert!(!note_is_untouched(&tpl.replace("## 研究问题", "## 研究问题\n\n写了内容")));
+        assert!(!note_is_untouched(
+            &tpl.replace("## 研究问题", "## 研究问题\n\n写了内容")
+        ));
     }
 
     #[test]
@@ -983,7 +985,11 @@ mod tests {
         fs::create_dir_all(&notes).unwrap();
         // 精读步骤产物：序号-短标题命名 + 来源行锚点
         let numbered = notes.join("01-某某主题精读.md");
-        fs::write(&numbered, "# 某某主题\n\n> 来源 PDF：papers/Some Paper.pdf\n\n## 研究问题\n").unwrap();
+        fs::write(
+            &numbered,
+            "# 某某主题\n\n> 来源 PDF：papers/Some Paper.pdf\n\n## 研究问题\n",
+        )
+        .unwrap();
         let dto = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
         assert!(!dto.created);
         assert_eq!(PathBuf::from(&dto.path), numbered);
@@ -995,11 +1001,16 @@ mod tests {
     fn ensure_prefers_sourced_note_and_cleans_untouched_slug() {
         let (root, pdf) = project_with_pdf("merge", "Some Paper.pdf");
         // 先建出 slug 模板笔记（模拟此前「开读」误建）
-        let first = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        let first =
+            ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
         assert!(first.created);
         // 之后精读步骤产出了带来源行的正式笔记
         let numbered = root.join("notes/01-正式精读.md");
-        fs::write(&numbered, "# 正式\n\n> 来源 PDF：papers/Some Paper.pdf\n\n## 研究问题\n").unwrap();
+        fs::write(
+            &numbered,
+            "# 正式\n\n> 来源 PDF：papers/Some Paper.pdf\n\n## 研究问题\n",
+        )
+        .unwrap();
         let dto = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
         assert!(!dto.created);
         assert_eq!(PathBuf::from(&dto.path), numbered);
@@ -1013,7 +1024,8 @@ mod tests {
 
     #[test]
     fn pair_pdf_prefers_source_line_over_title_guess() {
-        let (root, pdf) = project_with_pdf("anchor", "English Title That Chinese Note Cannot Match.pdf");
+        let (root, pdf) =
+            project_with_pdf("anchor", "English Title That Chinese Note Cannot Match.pdf");
         let notes = root.join("notes");
         fs::create_dir_all(&notes).unwrap();
         let note = notes.join("02-中文短标题.md");
@@ -1064,7 +1076,8 @@ mod tests {
     #[test]
     fn second_call_never_overwrites() {
         let (root, pdf) = project_with_pdf("keep", "a.pdf");
-        let first = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        let first =
+            ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
         fs::write(&first.path, "人手改过的内容").unwrap();
         let second =
             ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
@@ -1103,8 +1116,9 @@ mod tests {
         fs::write(notes.join("inbox.md"), "# 雷达收件箱").unwrap();
         let links = list_paper_notes_sync(&root.to_string_lossy()).unwrap();
         assert!(
-            links.iter().any(|l| l.pdf_rel.as_deref()
-                == Some("papers/转化型正极Mg电池透视.pdf")),
+            links
+                .iter()
+                .any(|l| l.pdf_rel.as_deref() == Some("papers/转化型正极Mg电池透视.pdf")),
             "{links:?}"
         );
         assert!(
@@ -1134,8 +1148,8 @@ mod tests {
         let (root, _pdf) = project_with_pdf("pair-out", "a.pdf");
         let outside = tmpdir("pair-out-note").join("x.md");
         fs::write(&outside, "# t").unwrap();
-        let err = pdf_for_note_sync(&root.to_string_lossy(), &outside.to_string_lossy())
-            .unwrap_err();
+        let err =
+            pdf_for_note_sync(&root.to_string_lossy(), &outside.to_string_lossy()).unwrap_err();
         assert!(err.contains("项目目录之外"), "{err}");
     }
 
@@ -1176,7 +1190,11 @@ mod tests {
 
     fn project_with_note(name: &str) -> (PathBuf, PathBuf) {
         let (root, _pdf) = project_with_pdf(name, "a.pdf");
-        let dto = ensure_paper_note_sync(&root.to_string_lossy(), &root.join("papers/a.pdf").to_string_lossy()).unwrap();
+        let dto = ensure_paper_note_sync(
+            &root.to_string_lossy(),
+            &root.join("papers/a.pdf").to_string_lossy(),
+        )
+        .unwrap();
         (root, PathBuf::from(dto.path))
     }
 
@@ -1241,7 +1259,11 @@ mod tests {
         let (root, _note) = project_with_note("capture");
         let b64 = base64::engine::general_purpose::STANDARD.encode(FAKE_PNG);
         let dto = save_reader_capture_sync(&root.to_string_lossy(), &b64).unwrap();
-        assert!(dto.rel_path.starts_with("notes/assets/capture-"), "{}", dto.rel_path);
+        assert!(
+            dto.rel_path.starts_with("notes/assets/capture-"),
+            "{}",
+            dto.rel_path
+        );
         assert!(dto.rel_path.ends_with(".png"));
         assert_eq!(fs::read(&dto.abs_path).unwrap(), FAKE_PNG);
         // 非 PNG 内容（魔数不符）拒绝
@@ -1270,7 +1292,12 @@ mod tests {
         fs::write(&note, &text).unwrap();
         fs::create_dir_all(root.join("notes/assets")).unwrap();
         fs::write(root.join("notes/assets/capture-x.png"), FAKE_PNG).unwrap();
-        append_note_image_sync(&root.to_string_lossy(), &note.to_string_lossy(), "notes/assets/capture-x.png").unwrap();
+        append_note_image_sync(
+            &root.to_string_lossy(),
+            &note.to_string_lossy(),
+            "notes/assets/capture-x.png",
+        )
+        .unwrap();
         let out = fs::read_to_string(&note).unwrap();
         let expected = "已有一条想法\n\n![截图](assets/capture-x.png)\n\n## 后续小节";
         assert!(out.contains(expected), "实际内容：\n{out}");
@@ -1282,9 +1309,17 @@ mod tests {
         fs::write(&note, "# 标题\n\n只有正文\n").unwrap();
         fs::create_dir_all(root.join("notes/assets")).unwrap();
         fs::write(root.join("notes/assets/c.png"), FAKE_PNG).unwrap();
-        append_note_image_sync(&root.to_string_lossy(), &note.to_string_lossy(), "notes/assets/c.png").unwrap();
+        append_note_image_sync(
+            &root.to_string_lossy(),
+            &note.to_string_lossy(),
+            "notes/assets/c.png",
+        )
+        .unwrap();
         let out = fs::read_to_string(&note).unwrap();
-        assert_eq!(out, "# 标题\n\n只有正文\n\n## 我的想法\n\n![截图](assets/c.png)\n");
+        assert_eq!(
+            out,
+            "# 标题\n\n只有正文\n\n## 我的想法\n\n![截图](assets/c.png)\n"
+        );
     }
 
     #[test]
@@ -1294,11 +1329,18 @@ mod tests {
         let outside = tmpdir("note-outside");
         let foreign = outside.join("x.md");
         fs::write(&foreign, "# x\n").unwrap();
-        let err = append_note_image_sync(&root.to_string_lossy(), &foreign.to_string_lossy(), "notes/assets/c.png").unwrap_err();
+        let err = append_note_image_sync(
+            &root.to_string_lossy(),
+            &foreign.to_string_lossy(),
+            "notes/assets/c.png",
+        )
+        .unwrap_err();
         assert!(err.contains("notes"), "{err}");
         // 图片不在 notes/ 内（项目根下的兄弟文件）拒绝
         fs::write(root.join("c.png"), FAKE_PNG).unwrap();
-        let err2 = append_note_image_sync(&root.to_string_lossy(), &note.to_string_lossy(), "c.png").unwrap_err();
+        let err2 =
+            append_note_image_sync(&root.to_string_lossy(), &note.to_string_lossy(), "c.png")
+                .unwrap_err();
         assert!(err2.contains("notes"), "{err2}");
         fs::remove_dir_all(&outside).ok();
     }
@@ -1325,19 +1367,35 @@ mod tests {
     fn glossary_append_creates_table_and_dedups_by_lower() {
         let (root, _pdf) = project_with_pdf("gloss", "a.pdf");
         let root_s = root.to_string_lossy().into_owned();
-        let list = append_glossary_sync(&root_s, "Solid Electrolyte", "固态电解质", "《a》第 1 页").unwrap();
+        let list = append_glossary_sync(&root_s, "Solid Electrolyte", "固态电解质", "《a》第 1 页")
+            .unwrap();
         assert_eq!(list.len(), 1);
         let text = fs::read_to_string(root.join("notes/glossary.md")).unwrap();
-        assert!(text.starts_with("| 术语 | 释义 | 出处 |\n| --- | --- | --- |\n"), "{text}");
+        assert!(
+            text.starts_with("| 术语 | 释义 | 出处 |\n| --- | --- | --- |\n"),
+            "{text}"
+        );
         assert!(text.contains("| Solid Electrolyte | 固态电解质 | 《a》第 1 页 |"));
         // 大小写不同视为同一术语：原位更新释义/出处，不新增行
-        let list2 = append_glossary_sync(&root_s, "solid electrolyte", "固态电解质（更新）", "《a》第 2 页").unwrap();
+        let list2 = append_glossary_sync(
+            &root_s,
+            "solid electrolyte",
+            "固态电解质（更新）",
+            "《a》第 2 页",
+        )
+        .unwrap();
         assert_eq!(list2.len(), 1);
         assert_eq!(list2[0].term, "Solid Electrolyte"); // 原写法与位置保留
         assert_eq!(list2[0].meaning, "固态电解质（更新）");
         assert_eq!(list2[0].source, "《a》第 2 页");
         // 再追加一条不同术语
-        let list3 = append_glossary_sync(&root_s, "界面阻抗", "interfacial resistance", "《a》第 3 页").unwrap();
+        let list3 = append_glossary_sync(
+            &root_s,
+            "界面阻抗",
+            "interfacial resistance",
+            "《a》第 3 页",
+        )
+        .unwrap();
         assert_eq!(list3.len(), 2);
         assert_eq!(list_glossary_sync(&root_s).unwrap(), list3);
     }
@@ -1352,7 +1410,10 @@ mod tests {
         assert_eq!(list[0].term, "C|D 键");
         // 渲染 → 再解析往返稳定（转义互逆）
         let rendered = render_glossary(&list);
-        assert!(rendered.contains("| C\\|D 键 | 某个释义 | 《p》第 1 页 |"), "{rendered}");
+        assert!(
+            rendered.contains("| C\\|D 键 | 某个释义 | 《p》第 1 页 |"),
+            "{rendered}"
+        );
         assert_eq!(parse_glossary(&rendered), list);
         // 单元格里的换行折成空格
         assert_eq!(escape_glossary_cell("a\nb|c"), "a b\\|c");
@@ -1377,7 +1438,10 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].term, "Beta");
         let text = fs::read_to_string(root.join("notes/glossary.md")).unwrap();
-        assert!(text.starts_with("# 我的生词本\n\n"), "表外内容要保留：\n{text}");
+        assert!(
+            text.starts_with("# 我的生词本\n\n"),
+            "表外内容要保留：\n{text}"
+        );
         assert!(!text.contains("Alpha"));
         // 大小写不同不算精确匹配，不删
         let list2 = remove_glossary_entry_sync(&root_s, "beta").unwrap();
@@ -1387,7 +1451,9 @@ mod tests {
         assert_eq!(list3.len(), 1);
         // 文件不存在时删除返回空表（不报错）
         let (root2, _p2) = project_with_pdf("gloss-rm-empty", "a.pdf");
-        assert!(remove_glossary_entry_sync(&root2.to_string_lossy(), "X").unwrap().is_empty());
+        assert!(remove_glossary_entry_sync(&root2.to_string_lossy(), "X")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1415,7 +1481,14 @@ mod tests {
         let expected = "## 译段\n\n> The solid electrolyte interface（第 2 页）\n\n固态电解质界面\n\n## 我的想法";
         assert!(out.contains(expected), "实际内容：\n{out}");
         // 再追加一条落在同小节末尾（仍在上一条之后、## 我的想法之前）
-        append_note_translation_sync(&root.to_string_lossy(), &note.to_string_lossy(), "second", "第二段", 5).unwrap();
+        append_note_translation_sync(
+            &root.to_string_lossy(),
+            &note.to_string_lossy(),
+            "second",
+            "第二段",
+            5,
+        )
+        .unwrap();
         let out2 = fs::read_to_string(&note).unwrap();
         let expected2 = "固态电解质界面\n\n> second（第 5 页）\n\n第二段\n\n## 我的想法";
         assert!(out2.contains(expected2), "实际内容：\n{out2}");
@@ -1431,9 +1504,19 @@ mod tests {
     fn translation_creates_section_when_missing() {
         let (root, note) = project_with_note("trans-new");
         fs::write(&note, "# 标题\n\n只有正文\n").unwrap();
-        append_note_translation_sync(&root.to_string_lossy(), &note.to_string_lossy(), "orig", "译文", 1).unwrap();
+        append_note_translation_sync(
+            &root.to_string_lossy(),
+            &note.to_string_lossy(),
+            "orig",
+            "译文",
+            1,
+        )
+        .unwrap();
         let out = fs::read_to_string(&note).unwrap();
-        assert_eq!(out, "# 标题\n\n只有正文\n\n## 译段\n\n> orig（第 1 页）\n\n译文\n");
+        assert_eq!(
+            out,
+            "# 标题\n\n只有正文\n\n## 译段\n\n> orig（第 1 页）\n\n译文\n"
+        );
     }
 
     #[test]
@@ -1443,11 +1526,32 @@ mod tests {
         let outside = tmpdir("trans-note-outside");
         let foreign = outside.join("x.md");
         fs::write(&foreign, "# x\n").unwrap();
-        let err = append_note_translation_sync(&root.to_string_lossy(), &foreign.to_string_lossy(), "o", "t", 1).unwrap_err();
+        let err = append_note_translation_sync(
+            &root.to_string_lossy(),
+            &foreign.to_string_lossy(),
+            "o",
+            "t",
+            1,
+        )
+        .unwrap_err();
         assert!(err.contains("notes"), "{err}");
         // 空内容拒绝
-        assert!(append_note_translation_sync(&root.to_string_lossy(), &note.to_string_lossy(), "  ", "t", 1).is_err());
-        assert!(append_note_translation_sync(&root.to_string_lossy(), &note.to_string_lossy(), "o", "", 1).is_err());
+        assert!(append_note_translation_sync(
+            &root.to_string_lossy(),
+            &note.to_string_lossy(),
+            "  ",
+            "t",
+            1
+        )
+        .is_err());
+        assert!(append_note_translation_sync(
+            &root.to_string_lossy(),
+            &note.to_string_lossy(),
+            "o",
+            "",
+            1
+        )
+        .is_err());
         fs::remove_dir_all(&outside).ok();
     }
 }

@@ -35,7 +35,7 @@ Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）—�
 - 项目列表**从各 agent 历史会话自动聚合并分类**，辅以手动添加
 - token/费用统计随 P3 顺带做，不提前
 - **三平台（macOS/Windows/Linux）同步**支持，功能不得以平台为由裁剪
-- **多 Agent 工作台（v3.221 / v3.222）**：产品一等对象是 Project → Task → Run，终端标签是 Run 的视图；并行只来自人声明或模板，禁止自动拆任务 / 智能路由；Agent 是 Runtime，CLI 是第一种实现。科研/编程两套 worktree 库不合并。工作台「正在进行」只列交互活，无头（定时雷达等）不进主卡、不进本项目会话。改工作台主卡、标签生命周期、编程并行、无头入口、AgentSpec 执行形态前必读 `docs/conventions/agent-workbench.md`
+- **多 Agent 工作台（v3.221 / v3.222 / v3.225）**：产品一等对象是 Project → Task → Run，终端标签是 Run 的视图；并行只来自人声明或模板，禁止自动拆任务 / 智能路由；Agent 是 Runtime，CLI 是第一种实现。科研/编程两套 worktree 库不合并。工作台「正在进行」只列交互活，无头（定时雷达等）不进主卡、不进本项目会话；关标签后按 `runId` 找回。定时隔离产物经评审才进主仓。改工作台主卡、标签生命周期、编程并行、无头入口、AgentSpec 执行形态前必读 `docs/conventions/agent-workbench.md`
 
 ## 构建与运行
 
@@ -291,8 +291,8 @@ src-tauri/src/
                              #   条目 apiBackend/contextWindow 或 config.toml 提供（调研录 matrix §9 第 8 条）；
                              # 选择器显示名统一「配置名 · 模型」（claude _NAME 槽 / codex catalog display_name /
                              #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）；
-                             # claude 名单 ≥3 时 HAIKU 槽复用注入 CLAUDE_CODE_SUBAGENT_MODEL（Task 子 agent 模型，
-                             #   解析链 env>Task 参数>frontmatter>inherit 主模型，设为全局写入同键）；
+                             # claude 不写 CLAUDE_CODE_SUBAGENT_MODEL（保留 Task 参数/frontmatter/inherit 原生选择链），
+                             #   用 --settings 只覆盖本次连接的非敏感模型选择；
                              # claude 长上下文声明 CLAUDE_CODE_MAX_CONTEXT_TOKENS 启动注入与设为全局同键同条件
                              #   （注册链确知 >200K 才注，防第三方模型被按 200K 提前 compact）
   model_registry.rs          # 模型能力注册表：逐字段查询链 = 用户覆盖 > 网关实测缓存（fetch_models 顺带沉淀
@@ -389,7 +389,7 @@ src-tauri/src/
   skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor/grok 固定 copy）、四路导入、ZIP 导出、卸载备份、
                              # 漂移检测 resync、create_skill/update_skill_content；apps 表是创建时快照，
                              #   list 时现算补齐注册表新 agent 的缺键（否则一键应用永远漏新 agent，不写盘）；内置技能种子（seed_builtin_skills：
-                             # include_str! 内嵌 src-tauri/resources/skills/ 14 个技能，启动幂等播种，不覆盖/不复活用户改动）、
+                             # include_str! 内嵌 src-tauri/resources/skills/ 18 个技能，启动幂等播种，不覆盖/不复活用户改动）、
                              # 内置技能更新（check_builtin_skill_updates 种子逐字节比对 + apply_builtin_skill_update
                              # 覆盖前备份 SKILL.md.bak-<yyyymmdd> 后原子写入）、技能接口契约（frontmatter inputs/outputs
                              # 解析进 SkillDto，list 时现算；外部技能未声明时 infer_interface_from_body 正文推断兜底、
@@ -466,7 +466,7 @@ src-tauri/src/
                              # headless_task_args/run_agent_task 供 scheduler 复用（定时任务要写项目文件，codex 用 -s workspace-write）
   scheduler.rs               # 定时雷达（v3.75；v3.79 起技能可选；v3.218 新建巡检技能：草稿 .ccode/drafts/watch-*，确认才入库分发）：
                              # schedules.json（每日/每周+时分，本地时区）、60s tick + 启动补跑
-                             # （漏跑 coalesce 只补一次）、无头拉起 agent 在项目根跑技能（默认 lit-watch，prompt 按技能分派：
+                             # （漏跑 coalesce 只补一次）、无头拉起 agent 在任务隔离 worktree 跑技能（先从主仓播种订阅/台账；项目根只用于归属与采纳；非 Git 项目明确失败；显式 sentinel 才允许主仓写入；人点「采纳进主仓」才拷产出；默认 lit-watch，prompt 按技能分派：
                              # lit-watch 专用文案不动、其他技能通用模板，非 lit-watch 跑前检查已分发，10 分钟超时）、
                              # 历史留 20 条、跑完发 scheduler-run-done 事件（App.tsx 全局监听弹 OS 通知，复用长任务通知开关）；
                              # v3.95 起 Schedule.linkedStep 关联步骤（可空，update 空串归 None）+ RunRecord.newEntries 新命中计数
@@ -503,7 +503,7 @@ src-tauri/src/
                              # finalize_digest_brief 初稿写回）、handoff_links 接力链登记/固化
   runs.rs                    # 一次干活身份（app.db runs 表）：交互 pty_spawn 必有 id，无头 internal；
                              # 关标签不删行；收件箱 action.run 可恢复；登录标签不建行
-  custom_runtime.rs          # 自定义 Runtime：用户登记命令，隔离目录里当 shell 跑；相对路径拒写；无密钥/会话/MCP
+  custom_runtime.rs          # 自定义 Runtime：用户登记命令，直接在已校验的隔离目录中运行；相对路径拒写；无密钥/会话/MCP；不支持恢复
   coding.rs                  # 编程项目 git 原语：worktree list / 从基准或已有本地·远程分支建树（~/ccode/worktrees）、
                              # origin 身份 + 相对上游 behind、fetch / pull --ff-only / push、合并进基准、
                              # Desktop CLI 打开该树 / gh --web 开 PR（CodingOpDto；不走科研工作区库）；overview 按树/分支并行 git
@@ -581,7 +581,7 @@ src-tauri/src/
 | 终端与工作台 | `docs/conventions/terminal.md` | PTY 回落 shell、标签持久化白名单、评审/冲突覆盖层、改动面板、收件箱与注意力规则、键盘流、分屏、关窗守卫、WebGL 探针、输入侧（图片粘贴/文件拖入/右键菜单/链接点击）、沉浸阅读区 |
 | 流水线与项目域 | `docs/conventions/pipeline.md` | 工作区创建/漂移/归档/删除、流水线开步/模板/编辑器、接力与提炼接力、任务卡、人工事项与讨论种子、agent 人工请求（help-wanted）、收件箱分类胶囊、示例课题、白话双层 |
 | 编程 Git / GitHub | `docs/conventions/coding-git.md` | **改编程页 git 前必读**：工作树 vs 主仓 vs GitHub Desktop、从基准开工、远程身份、PR 环、不做任意 git 命令框 |
-| 多 Agent 工作台对象 | `docs/conventions/agent-workbench.md` | **改工作台/并行/无头/Runtime 前必读（v3.221 定稿，v3.223 第 0–3 期已落地）**：Project→Task→Run、编程车道、RuntimeKind、禁止自动拆工；定时隔离树待拍板 |
+| 多 Agent 工作台对象 | `docs/conventions/agent-workbench.md` | **改工作台/并行/无头/Runtime 前必读（v3.221 定稿；第 0–3 期核心路径已落地）**：Project→Task→Run、编程车道、RuntimeKind、禁止自动拆工；定时任务默认隔离 worktree；非 Git 项目失败 |
 | 步骤工作面板 | `docs/conventions/step-panel.md` | **新增步骤/模板前必读**：七条硬规则（顺序即语义、空节点不出现、同一事实只说一次、孤立按钮、主路径唯一不设门控、角色标注）、问题该在什么时刻与层级出现（项目层/决策项/按需问/种子/人工事项五选一）、文案与术语、新增模板检查清单 |
 | 主题与设计系统 | `docs/conventions/design-system.md` | 主题令牌、字体栈、线条语言、控件密度、页面框架、对话页三栏、步进器规格、已否决设计 |
 | 网关与绑定（配置模型层） | `docs/conventions/profiles.md` | **改配置/注入/设为全局/模型能力/托盘前必读（已落地）**：网关×绑定拆层、binding id 复用、provider 派生名、relay 缓存键、求交器、体检与通道表不对称、迁移合并 |
@@ -608,9 +608,9 @@ src-tauri/src/
   批改（选段「◈ 讨论/改写此段」）；界面白话双层 + 工作区页/列表精简
 - **P5 通用层打磨（部分 ✅）**：逐 hunk 验收 ✅、跨标签聚合视图 ✅、成本按工作区归因 ✅、历史时间线视图 ✅（first-parent
   主线 + 白话翻译：✓ 验收合并/⚙ 自动保存/◔ 保存）、**hooks 精确注意力标记 ✅**（设置页按 agent 显式开关，
-  hooks.rs 七家桥接；v3.32 Claude 首发，v3.99 推广到七家，见架构 v3.32/v3.99）、**内置技能种子 ✅**（v3.64：14 个内置技能 = 9 个原有补强 + 5 个外部仓库内化，include_str! 播种、不覆盖不复活，
-  五套流水线模板按步骤挂载）、**定时雷达 ✅**（v3.75：scheduler.rs 每日/每周无头巡检 + lit-watch 多源精选升级，
-  约定见 conventions/pipeline.md「定时雷达」）、**模板重设计与接壤 ✅**（v3.78：五套模板内容重设计（种子对准拍板点/技能挂载核对/
+  hooks.rs 七家桥接；v3.32 Claude 首发，v3.99 推广到七家，见架构 v3.32/v3.99）、**内置技能种子 ✅**（当前 18 个内置技能，include_str! 播种、不覆盖不复活，
+  六套流水线模板按步骤挂载）、**定时雷达 ✅**（v3.75：scheduler.rs 每日/每周无头巡检 + lit-watch 多源精选升级，
+  约定见 conventions/pipeline.md「定时雷达」）、**模板重设计与接壤 ✅**（v3.78：六套模板内容重设计（种子对准拍板点/技能挂载核对/
   学术 MCP 人工事项）+ 产物路径接壤（投稿与返修接综述/科研论文成稿）+ 编辑器「＋ 从模板追加」）；批量验收、云端会话双源调研留 backlog
 - **Backlog（记录不动手）**：SSH 远程执行、团队协作 2.0、PDF 批注系统（永远不做）、深度阅读器（✅ 已落地为
   沉浸阅读区，v3.96）、批量验收、云端会话双源调研、首启引导完整版（示例课题最小版已落地：工作区空态「✦ 创建示例课题（演示）」→
@@ -619,22 +619,26 @@ src-tauri/src/
 **当前待办**：
 
 - P0 收尾当前批次：批次 A（文献雷达应用层，v3.95）、批次 B（沉浸阅读区，v3.96）与批次 E（LaTeX 支持，v3.97）
-  均已落地待走查；全量文档同步 → 走查 → [skip ci] 提交 → 可选发版。
-  批次顺序为用户拍板：E 先行，批次 C（实验数据分析）/D（表征分析）转待办；场景 4（agent 辅助做图）整批不做、
-  已移出路线（「只做场景必需、不做扩展性功能」原则，见架构 v3.97）
-- **科研外部工具三线（技能已备档、未融入，2026-09-01 用户拍板）**：origin-plot / zotero-sync / endnote-bridge
-  三个技能文件已在 `src-tauri/resources/skills/` 下落盘，但**未注册 BUILTIN_SKILLS、不挂模板、不进第一版发布**；
-  Origin 只做 Windows 实机（Mac 虚拟机方案否决）、EndNote 只走格式桥接（CWYW 无人值守否决）、Zotero 本地 API 全自动。
-  实机适配跑通后第二版再融入（注册 → 挂载 → 手册，清单见架构 §10 末行）；场景 4 就此以技能形态重新纳入。
-- **定时任务与研究流程结合（部分落地 v3.95，细目见架构 §11.4 Backlog 细目）**：边界已定——不给每步配定时任务，
+  均已落地；后续只保留文档/回归走查与发布动作，不把历史批次重复列为功能未完成。
+  批次顺序为用户拍板：E 先行，批次 C（实验数据分析）/D（表征分析）转待办；场景 4（agent 辅助做图）不做独立产品能力，改由按需挂载的 origin-plot 技能承接、
+  已移出独立路线（「只做场景必需、不做扩展性功能」原则，见架构 v3.97）
+- **科研外部工具三线（2026-09-05 已融入）**：`origin-plot` / `zotero-sync` / `endnote-bridge` 已注册为内置技能并随种子版本 4 播种；仅 `zotero-sync` 默认挂到英文综述、科研论文、毕业论文的文献检索步骤。Origin 仍只作 Windows + Origin 2021+ 的可选外部工具驱动，EndNote 仍只作 XML/RIS 格式桥接，二者不默认进入模板，也不做 CWYW 无人值守自动化。Zotero 通道需按实机版本/授权探测，失败时回落 RIS/BibTeX 文件流程，不阻塞检索。
+  Origin 只做 Windows 实机（Mac 虚拟机方案否决）、EndNote 只走格式桥接（CWYW 无人值守否决）、Zotero 写库只走技能且必须有用户意图；场景 4 以 origin-plot 技能形态重新纳入。
+- **定时任务与研究流程结合（核心路径已落地，细目见架构 §11.4 历史记录）**：边界已定——不给每步配定时任务，
   结合点是「产出回流」而非「配置下沉」。产出回流三件套已上线（v3.95：lit_watch.rs 解析巡检产物 + LitWatchCard
   雷达卡片 + 收件箱 lit: 文献胶囊 / Schedule.linkedStep 关联步骤 + RunRecord.newEntries / staleLitHint 复用
   staleUpstream 口径只提醒不阻断）。
-  三条已确认风险不变：写权限九家不齐（仅 codex 有沙箱、grok 用 --yolo、qwen 未验证）、
-  产出绕过验收层（cwd 是项目根不是 worktree）、10 分钟超时与真失败不可分。
-  落点收敛 + 能力标注仍未做，跑进工作区属定位决策待拍板
+  当前规则：默认定时任务进入隔离 worktree，无法创建或校验失败则 fail-closed；启动前登记 Run，启动失败也保留 failed Run 记录；超时与真失败分列。成功产物经只读评审，人点「采纳进主仓」才拷回项目根，不自动合并。当前没有主仓 sentinel 配置入口，不能把定时成功理解为已写入主仓。不同 Agent 的无头权限差异仍以能力表和实机验证为准。关标签后交互 Run 按 `runId` 从工作台「继续」或收件箱找回。
 - macOS 签名公证（暂缓，需 Apple Developer 会员 + CI 配 6 个 APPLE_* secrets，见架构 v1.3）
 - Intel macOS 安装包（暂缓：CI macos-latest 只出 aarch64；加 `x86_64-apple-darwin` target 构建时间翻倍，真有 Intel 用户再加，
   见架构 v1.3 / README 安装节）
 - OpenCode Windows 数据路径 ✅：`sessions.rs` 依次探测 `OPENCODE_DB` / `%LOCALAPPDATA%\opencode` / `%APPDATA%\opencode` / `~/.local/share/opencode`（2026-08-31）
 - Skills 一键更新 ✅：更新检测（check_skill_updates）+ 检测后一键应用更新（apply_skill_update，v3.53）均已落地
+
+## 模型配置约定（2026-09-05）
+
+- Claude Code 启动必须用 `--settings` 覆盖本次连接的模型选择，避免用户级 `settings.json.env` 覆盖 Ccode；不得写 `CLAUDE_CODE_SUBAGENT_MODEL`，以保留 Task 参数、frontmatter 和主模型继承链。
+- Anthropic 兼容槽只接受基础 URL；保存时拒绝以 `/messages` 结尾的完整资源地址。
+- CodeBuddy 的 `reasoning_effort` 通过当前 CLI 的 `--effort` 启动参数注入；Grok 的模型/思考档通过 `-m`/`--reasoning-effort` 注入。
+- Grok 的 `api_backend`、`context_window` 不得通过受限 `GROK_CONFIG` 猜测注入；若绑定声明非 `chat_completions`，必须先在 Grok `[model.<id>]` 配置中登记，否则启动和无头调用均 fail-closed。
+- 配置页查询模型能力必须带 `gatewayId`，网关级能力声明优先于公共/内置能力库；写 Grok 逐模型上下文时只使用显式声明值，不使用通用估值。

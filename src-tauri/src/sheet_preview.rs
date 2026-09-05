@@ -105,7 +105,9 @@ fn parse_merge_refs(xml: &str) -> Vec<Dimensions> {
     let mut rest = xml;
     while let Some(i) = rest.find("mergeCell") {
         rest = &rest[i + 9..];
-        let Some(j) = rest.find("ref=\"") else { continue };
+        let Some(j) = rest.find("ref=\"") else {
+            continue;
+        };
         if j > 64 {
             continue;
         }

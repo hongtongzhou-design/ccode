@@ -23,3 +23,10 @@ export function headlessWriteNote(
   if (!cap?.supported) return null;
   return cap.reason?.trim() || null;
 }
+
+/** 可选但仍须明示风险（权限未实测 / 无沙箱）。 */
+export function headlessWriteCaution(
+  cap: HeadlessWriteFlag | undefined,
+): string | null {
+  return headlessWriteNote(cap);
+}

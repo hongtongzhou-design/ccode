@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { LoadingRows } from "./PageFrame";
 import type { TaskCardDto } from "../types";
+import { Modal } from "./Modal";
 
 /** fuse_card_into_draft 返回：AI 提炼的结论片段（后端已脱敏截断）+ 草稿相对路径 */
 interface FuseDraftDto {
@@ -79,18 +80,8 @@ export default function FuseDraftModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 ccode-fade"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[80vh] w-[36rem] flex-col rounded-md border border-field ccode-float-surface p-5"
-      >
-        <h2 className="mb-1 shrink-0 text-base font-semibold text-l1">
-          ◈ 沉淀进任务书
-        </h2>
-        <p className="mb-3 shrink-0 text-xs text-l3">
+    <Modal open title="◈ 沉淀进任务书" onClose={onClose} size="lg">
+        <p className="mb-3 text-xs text-l3">
           把「{card.name}」的讨论结论追加到「{stepName}」的 TASK.md
           {draft ? `（${draft.relPath}）` : ""}末尾；可改后再写入，已有内容不会被动。
         </p>
@@ -120,7 +111,7 @@ export default function FuseDraftModal({
             </button>
           </div>
         )}
-        <div className="mt-4 flex shrink-0 justify-end gap-2">
+        <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
@@ -138,7 +129,6 @@ export default function FuseDraftModal({
             {writing ? "写入中…" : "追加到 TASK.md"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

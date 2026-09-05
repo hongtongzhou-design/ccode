@@ -1,13 +1,19 @@
 mod agent_specs;
 mod agents;
 mod ai;
+mod artifacts;
 mod citation;
-mod coding;
 mod clipboard;
+mod coding;
+mod combo;
 mod config_dump;
+mod custom_runtime;
 mod dep_check;
 mod diagnostics;
-mod fonts;mod fs_tree;
+mod drift;
+mod fonts;
+mod fs_tree;
+mod gateway_store;
 mod git_info;
 mod global_config;
 mod handoff;
@@ -20,28 +26,25 @@ mod model_registry;
 mod models;
 mod paths;
 mod pdf;
-mod sheet_preview;
 mod portwatch;
-mod process;
 mod pricing;
-mod combo;
-mod drift;
-mod gateway_store;
-mod tray;
-mod profiles;
+mod process;
 mod profile_validation;
-mod provider_id;
+mod profiles;
 mod projects;
+mod provider_id;
 mod pty;
 mod reader;
 mod runs;
-mod custom_runtime;
+mod runtime;
 mod scheduler;
-mod sessions;
 mod session_search;
 mod session_transfer;
+mod sessions;
 mod settings;
+mod sheet_preview;
 mod skills;
+mod tray;
 mod updater;
 mod usage;
 mod workspaces;
@@ -66,6 +69,9 @@ pub fn run() {
         .manage(pty::PtyManager::default())
         // 内置技能种子：启动时把库里没有的内置技能补进去（幂等，不覆盖用户已有同名技能）
         .setup(|app| {
+            if let Err(e) = runs::reconcile_stale_runs() {
+                logbuf::record("warn", "runs", &format!("收口上次未完成 Run 失败: {e}"));
+            }
             if let Err(e) = skills::seed_builtin_skills() {
                 logbuf::record("warn", "skills", &format!("内置技能播种失败: {e}"));
             }
@@ -97,6 +103,7 @@ pub fn run() {
             profiles::clear_gateway_key,
             combo::combo_surface,
             combo::combo_surface_for_gateway,
+            combo::combo_surface_for_gateway_batch,
             tray::rebuild_tray,
             profile_validation::validate_profile,
             profile_validation::probe_gateway,
@@ -126,11 +133,18 @@ pub fn run() {
             global_config::has_original_backup,
             global_config::restore_original_backup,
             pty::pty_spawn,
+            pty::pty_spawn_custom,
             runs::run_open,
             runs::run_open_custom,
             runs::run_close,
             runs::run_attach_session,
+            artifacts::run_artifacts,
             runs::run_get,
+            runs::run_list,
+            runs::run_find,
+            runs::run_events,
+            runs::task_get,
+            runs::task_list,
             custom_runtime::list_custom_runtimes,
             custom_runtime::save_custom_runtime,
             custom_runtime::delete_custom_runtime,
@@ -365,6 +379,7 @@ pub fn run() {
             scheduler::update_schedule,
             scheduler::delete_schedule,
             scheduler::run_schedule_now,
+            scheduler::adopt_watch_run,
             scheduler::start_watch_skill_draft,
             scheduler::list_watch_skill_drafts,
             scheduler::read_watch_skill_draft,
